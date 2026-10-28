@@ -28,7 +28,7 @@ The repository is a Cargo workspace. Each browser part is one crate in `crates/`
 | -------------- | ----------------- | --------------------------- | ---------------------- |
 | `bare-unicode` | `crates/unicode/` | NFC, generated Unicode data | -                      |
 | `bare-url`     | `crates/url/`     | URL parser, IDNA            | `bare-unicode`         |
-| `bare-net`     | `crates/net/`     | DNS, HTTP                   | `bare-url`             |
+| `bare-net`     | `crates/net/`     | DNS, TCP, HTTP              | `bare-url`             |
 | `bare`         | `crates/bare/`    | the app (`main.rs`)         | `bare-net`, `bare-url` |
 
 Why crates, not folders in one crate:
@@ -103,7 +103,7 @@ Tabs and the event loop come before JavaScript, because JavaScript needs the eve
 
 | #   | Module                                                 | State   |
 | --- | ------------------------------------------------------ | ------- |
-| 1   | URL, DNS and HTTP (`url.rs`, `dns.rs`, `http.rs`)      | now     |
+| 1   | URL, DNS, TCP and HTTP (`url.rs`, `dns.rs`, `tcp.rs`, `http.rs`) | now     |
 | 2   | HTML tokenizer and DOM tree                            | next    |
 | 3   | CSS parser and style cascade                           | planned |
 | 4   | Layout (box model, text flow)                          | planned |
