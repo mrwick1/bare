@@ -45,8 +45,15 @@ impl Url {
         // JS: like `if (err) return err;`. If it is good, take the value out.
         // `rest` is the text after "http://".
 
-        let (host_port, path) = match rest.find('/') {
-            // JS: like `rest.indexOf("/")`. Rust gives `Some(position)` or `None`, not -1.
+        let rest = before(rest, '#');
+        // Drop the fragment ("#top"). It points to a spot in the page. The server never sees it.
+        // Rust lets you reuse a name with a new `let`. This is called shadowing.
+        // JS would say "already declared". The old `rest` is simply hidden.
+
+        let (host_port, path) = match rest.find(['/', '?']) {
+            // JS: like `rest.search(/[\/?]/)`: the position of the first "/" or "?".
+            // Rust gives `Some(position)` or `None`, not -1.
+            // We stop at "?" too, so "http://a.com?x=1" has host "a.com".
             Some(i) => (&rest[..i], &rest[i..]), // keep the leading "/" in the path
             // Found at position `i`. JS: `[rest.slice(0, i), rest.slice(i)]`.
             // The `&` means we borrow pieces of `rest`. We do not copy.
@@ -54,6 +61,10 @@ impl Url {
             // No "/" found. All of it is host. The path is "/".
         };
         // Both arms give a pair of values. JS: `const [hostPort, path] = ...`.
+
+        let path = if path.starts_with('?') { format!("/{path}") } else { path.to_string() };
+        // "?x=1" becomes "/?x=1". The request line needs a path that starts with "/".
+        // In Rust, `if` gives back a value, like the JS ternary `a ? b : c`.
 
         let (host, port) = match host_port.split_once(':') {
             // JS: like `host_port.split(":")`, but it cuts only at the first ":".
@@ -81,16 +92,114 @@ impl Url {
 
         Ok(Url {
             // `Ok(..)` is the good side of `Result`. We put a new `Url` in it.
-            host: host.to_string(),
-            // `host` only borrows part of `input`. `.to_string()` copies it, so `Url`
-            // does not depend on `input`. JS does this for you with garbage collection.
+            host: host.to_ascii_lowercase(),
+            // Host names ignore case, so we store them in lowercase. JS: `host.toLowerCase()`.
+            // It makes a new `String` we own, so `Url` does not depend on `input`.
+            // JS does this for you with garbage collection.
             port,
             // Short for `port: port`. JS has the same shorthand.
-            path: path.to_string(),
-            // Copy the path too.
+            path,
+            // `path` is already a `String` we own, so we move it in. No copy.
         })
         // No `;`, so this is the return value. Rust returns the last expression.
     }
+
+    /// Resolve a link found on this page, like `<a href="../about">`.
+    /// JS: like `new URL(link, base)`.
+    #[allow(dead_code)] // links are followed in module 6; tests use it now
+    pub fn join(&self, link: &str) -> Result<Url, String> {
+        // `&self` is like `this` in JS. We read the page's URL. We do not change it.
+
+        let link = before(link, '#');
+        // The fragment never matters for loading. "#top" alone becomes "".
+
+        if link.starts_with("//") {
+            // "//cdn.com/x.js": a new host, same scheme as the page.
+            return Url::parse(&format!("http:{link}"));
+        }
+
+        if let Some((scheme, _)) = link.split_once(':') {
+            // `if let` is a `match` with one arm. It runs only if the pattern fits.
+            // JS: `const parts = ...; if (parts) { const [scheme] = parts; ... }`.
+            if !scheme.is_empty() && scheme.chars().all(|c| c.is_ascii_alphanumeric() || "+-.".contains(c)) {
+                // Text like "http:" or "mailto:" is a scheme. Then the link is a full URL.
+                // `chars().all(..)` is JS `[...scheme].every(..)`.
+                // "a/b:c" is not a scheme, because "/" is not allowed in a scheme.
+                return Url::parse(link);
+                // `parse` gives an error for anything but http://.
+            }
+        }
+
+        let page = before(&self.path, '?');
+        // The page path without its query: "/blog/post.html".
+        let path = if link.is_empty() {
+            self.path.clone()
+            // Only a fragment: stay on the same page. `.clone()` copies the `String`.
+        } else if link.starts_with('/') {
+            link.to_string()
+            // From the root of the site.
+        } else if link.starts_with('?') {
+            format!("{page}{link}")
+            // Same page, new query.
+        } else {
+            let folder = &page[..=page.rfind('/').unwrap_or(0)];
+            // The page's folder, with the last "/": "/blog/". JS: `page.slice(0, page.lastIndexOf("/") + 1)`.
+            // `..=` includes the end position. Our paths always start with "/", so `rfind` finds one.
+            format!("{folder}{link}")
+            // Relative to that folder: "/blog/" + "cat.png".
+        };
+
+        Ok(Url { host: self.host.clone(), port: self.port, path: remove_dots(&path) })
+        // Same server as the page. `self.port` is a number, so it is copied for free.
+        // Numbers are `Copy` in Rust. Strings are not, so they need `.clone()`.
+    }
+}
+
+/// The text before the first `ch`, or all of `text` if there is no `ch`.
+fn before(text: &str, ch: char) -> &str {
+    // The returned `&str` is a piece of `text`. Rust knows this, because `text` is the
+    // only borrowed input. So the piece cannot outlive `text`.
+    match text.split_once(ch) {
+        Some((head, _)) => head,
+        None => text,
+    }
+}
+
+/// Remove "." and ".." parts: "/a/./b/../c" becomes "/a/c".
+fn remove_dots(path: &str) -> String {
+    let (path, query) = match path.split_once('?') {
+        Some((p, q)) => (p, format!("?{q}")),
+        None => (path, String::new()),
+    };
+    // Dots only matter in the path. Keep the query aside and add it back at the end.
+
+    let parts: Vec<&str> = path.split('/').skip(1).collect();
+    // "/a/./b" gives ["a", ".", "b"]. `skip(1)` drops the empty text before the first "/".
+    // `collect()` turns the parts into a `Vec`. JS: `path.split("/").slice(1)`.
+
+    let mut out: Vec<&str> = Vec::new();
+    // Works like a stack. JS: `const out = []`.
+    for part in &parts {
+        match *part {
+            // `*part` reads the value that `part` points to.
+            "." => {}
+            // "." means "this folder". Skip it.
+            ".." => {
+                out.pop();
+                // ".." means "one folder up". Remove the last part. On an empty stack it does nothing.
+            }
+            other => out.push(other),
+            // Any other part: keep it.
+        }
+    }
+    if matches!(parts.last(), Some(&".") | Some(&"..")) {
+        out.push("");
+        // A path that ends in "." or ".." means a folder, so it keeps its last "/".
+        // `matches!` is a `match` that gives true or false.
+    }
+
+    format!("/{}{query}", out.join("/"))
+    // JS: `"/" + out.join("/") + query`.
 }
 
 #[cfg(test)]
@@ -133,5 +242,60 @@ mod tests {
     fn rejects_empty_host() {
         assert!(Url::parse("http:///x").is_err());
         // Nothing stands between "http://" and "/x", so there is no host.
+    }
+
+    #[test]
+    fn drops_fragment() {
+        let u = Url::parse("http://a.com/page#top").unwrap();
+        assert_eq!(u.path, "/page");
+        // The "#top" part is for the browser only. It must not reach the server.
+    }
+
+    #[test]
+    fn lowercases_host() {
+        assert_eq!(Url::parse("http://EXAMPLE.com/").unwrap().host, "example.com");
+        // Host names ignore case. "EXAMPLE.com" and "example.com" are the same server.
+    }
+
+    #[test]
+    fn query_without_path() {
+        let u = Url::parse("http://a.com?x=1").unwrap();
+        assert_eq!(u.host, "a.com");
+        assert_eq!(u.path, "/?x=1");
+        // The "?" ends the host, even with no "/" before it.
+    }
+
+    #[test]
+    fn joins_relative_links() {
+        let base = Url::parse("http://a.com/blog/post.html?p=1").unwrap();
+        // A page at this address. Its links are resolved against it.
+        let cases = [
+            // JS: an array of [link, expected] pairs.
+            ("/s.js", "/s.js"),                     // from the root of the site
+            ("cat.png", "/blog/cat.png"),           // same folder as the page
+            ("../about", "/about"),                 // one folder up
+            ("./a/./b/../c", "/blog/a/c"),          // "." means here, ".." means up
+            ("?p=2", "/blog/post.html?p=2"),        // same page, new query
+            ("#top", "/blog/post.html?p=1"),        // same page, fragment dropped
+            ("..", "/"),                            // up from /blog/ gives the root
+        ];
+        for (link, path) in cases {
+            // JS: `for (const [link, path] of cases)`.
+            let u = base.join(link).unwrap();
+            assert_eq!(u.host, "a.com", "link {link}");
+            assert_eq!(u.path, path, "link {link}");
+            // The text after the values is printed if the check fails.
+        }
+    }
+
+    #[test]
+    fn joins_absolute_links() {
+        let base = Url::parse("http://a.com/x").unwrap();
+        assert_eq!(base.join("http://b.com/y").unwrap().host, "b.com");
+        // A full URL ignores the base.
+        assert_eq!(base.join("//cdn.com/z.js").unwrap().host, "cdn.com");
+        // "//host/path" keeps the base scheme (http) and replaces the rest.
+        assert!(base.join("mailto:me@a.com").is_err());
+        // Other schemes are not supported yet.
     }
 }
