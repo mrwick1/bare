@@ -56,8 +56,8 @@ impl Url {
         // JS would say "already declared". The old `rest` is simply hidden.
 
         let (host_port, path) = match rest.find(['/', '?']) {
-            // JS: like `rest.search(/[\/?]/)`: the position of the first "/" or "?".
-            // Rust gives `Some(position)` or `None`, not -1.
+            // Find the position of the first "/" or "?".
+            // Rust gives `Some(position)`, or `None` if there is none.
             // We stop at "?" too, so "http://a.com?x=1" has host "a.com".
             Some(i) => (&rest[..i], &rest[i..]), // keep the leading "/" in the path
             // Found at position `i`. JS: `[rest.slice(0, i), rest.slice(i)]`.
@@ -94,8 +94,7 @@ impl Url {
                 Some((h, p)) => (ascii_host(h)?, parse_port(p)?),
                 // There is a ":". `h` is the host text and `p` is the port text.
                 // `ascii_host` makes the host ASCII-only, for DNS. See below.
-                // It makes a new `String` we own, so `Url` does not depend on `input`.
-                // JS does this for you with garbage collection.
+                // It makes a new `String` that the `Url` keeps for itself.
                 None => (ascii_host(host_port)?, 80), // default HTTP port
                 // No ":". The whole text is the host. HTTP uses port 80 by default.
             }
@@ -195,7 +194,7 @@ fn ascii_host(host: &str) -> Result<String, String> {
     Ok(ascii)
 }
 
-/// True if the last label is a number: "1.2.3.4", "a.0x1f". (WHATWG "ends in a number")
+/// True if the last label is a number: "1.2.3.4", "a.0x1f".
 fn ends_in_number(host: &str) -> bool {
     let host = host.strip_suffix('.').unwrap_or(host);
     // One trailing dot is ignored: "1.2.3.4." ends in "4".
@@ -207,8 +206,8 @@ fn ends_in_number(host: &str) -> bool {
     // even when the number is too big. The IPv4 parser rejects those later.
 }
 
-/// Parse a browser-style IPv4 address into one 32-bit number (WHATWG "IPv4 parser").
-/// Browsers accept old forms from the C function `inet_aton`: "127.1", "0x7f.1", "0300.0250.0.1".
+/// Read an IPv4 address the way browsers do, and give it as one number.
+/// Browsers accept some old short forms too: "127.1", "0x7f.1", "0300.0250.0.1".
 fn parse_ipv4(host: &str) -> Option<u32> {
     let host = host.strip_suffix('.').unwrap_or(host);
     let mut numbers = Vec::new();
@@ -222,13 +221,13 @@ fn parse_ipv4(host: &str) -> Option<u32> {
     // `pop` takes the last number off the list. JS: `numbers.pop()`.
     if numbers.iter().any(|&n| n > 255) || last >= 1 << (8 * (4 - numbers.len())) {
         return None;
-        // Each number before the last is one byte. The last number fills all the bytes that
-        // are left: with "127.1", the "1" may be up to 2^24 - 1. `1 << x` is 2 to the power x.
+        // Each number before the last must fit in one part (0 to 255).
+        // The last number may fill all the parts that are left, so it may be bigger.
     }
     let mut ip = last;
     for (i, n) in numbers.iter().enumerate() {
         ip += n << (8 * (3 - i));
-        // Put each number in its byte: the first number is the top byte.
+        // Put each number in its place: the first number goes first.
     }
     u32::try_from(ip).ok()
     // `try_from` converts to a smaller number type. It fails if the number does not fit.
@@ -254,7 +253,7 @@ fn ipv4_number(part: &str) -> Option<u64> {
         let d = c.to_digit(radix)?;
         // `to_digit(16)` turns "f" into 15. It gives `None` for a character that is not a digit.
         value = value.checked_mul(radix as u64)?.checked_add(d as u64)?;
-        // A number too big for 64 bits is far too big for IPv4 anyway, so `None` is right.
+        // Add the digit. If the number gets far too big, stop with `None`.
     }
     Some(value)
 }
@@ -284,14 +283,13 @@ fn percent_decode(text: &str) -> Vec<u8> {
 }
 
 /// Replace unsafe bytes with "%XX" codes: "my file" becomes "my%20file".
-/// The byte sets follow the WHATWG URL Standard for paths and queries.
+/// The list of unsafe characters comes from the URL standard that browsers follow.
 fn encode(path: &str) -> String {
     let mut out = String::new();
     let mut in_query = false;
     // The path and the query encode slightly different characters.
     for byte in path.bytes() {
-        // `.bytes()` gives the UTF-8 bytes. "é" is two bytes: 0xC3 0xA9.
-        // JS: like looping over `new TextEncoder().encode(path)`.
+        // Look at the text one byte at a time. Plain letters are one byte. "é" is two bytes.
         let escape = byte <= b' ' || byte > b'~' || b"\"<>".contains(&byte)
             // Control bytes, space, non-ASCII bytes, and `"`, `<`, `>`, everywhere.
             // `b' '` is the byte value of a character. `b"..."` is a list of bytes.
@@ -299,7 +297,7 @@ fn encode(path: &str) -> String {
             // `'` only in the query. The backtick, `{` and `}` only in the path.
         if escape {
             out.push_str(&format!("%{byte:02X}"));
-            // `:02X` writes two uppercase hex digits. JS: `byte.toString(16).toUpperCase().padStart(2, "0")`.
+            // Write the byte as "%" and two hex digits: a space becomes "%20".
         } else {
             out.push(byte as char);
             // `as char` turns the byte into a character. Safe here, because it is plain ASCII.
@@ -314,8 +312,7 @@ fn encode(path: &str) -> String {
 
 /// The text before the first `ch`, or all of `text` if there is no `ch`.
 fn before(text: &str, ch: char) -> &str {
-    // The returned `&str` is a piece of `text`. Rust knows this, because `text` is the
-    // only borrowed input. So the piece cannot outlive `text`.
+    // The answer is a piece of `text`, not a copy.
     match text.split_once(ch) {
         Some((head, _)) => head,
         None => text,
@@ -338,7 +335,7 @@ fn remove_dots(path: &str) -> String {
     // Works like a stack. JS: `const out = []`.
     for part in &parts {
         match *part {
-            // `*part` reads the value that `part` points to.
+            // `*part` reads the text itself.
             "." => {}
             // "." means "this folder". Skip it.
             ".." => {

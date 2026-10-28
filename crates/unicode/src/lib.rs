@@ -1,10 +1,9 @@
 //! Unicode helpers: table lookups and NFC normalization.
 //!
-//! The same text can be stored in more than one way. "é" can be one code point (U+00E9),
-//! or "e" plus a combining accent (U+0065 U+0301). Both look the same on screen.
-//! NFC ("Normalization Form C") picks one form: the composed one, where possible.
-//! After NFC, two strings that look the same also compare equal.
-//! JS has this built in: `str.normalize("NFC")`. We write it by hand (UAX #15).
+//! The same text can be stored in more than one way. "é" can be one character,
+//! or "e" plus a separate accent "´". Both look the same on screen.
+//! NFC picks one way: it joins the letter and the accent into one character, where possible.
+//! After NFC, two texts that look the same are also equal in code.
 
 pub mod tables;
 // The generated data in `tables.rs`. `pub` lets other crates use it.
@@ -15,8 +14,8 @@ use std::cmp::Ordering;
 
 /// Find the value for `cp` in a sorted table of `(first, last, value)` ranges.
 pub fn find<T: Copy>(table: &[(u32, u32, T)], cp: u32) -> Option<T> {
-    // `<T: Copy>` makes the function generic: it works for any value type that can be copied.
-    // TypeScript: `function find<T>(table: [number, number, T][], cp: number): T | undefined`.
+    // `<T: Copy>`: the tables hold different kinds of values. `T` stands for any of them.
+    // `cp` is the character's Unicode number.
     table
         .binary_search_by(|&(first, last, _)| {
             // Binary search: look at the middle range, then throw away the half that cannot match.
@@ -32,17 +31,17 @@ pub fn find<T: Copy>(table: &[(u32, u32, T)], cp: u32) -> Option<T> {
         .ok()
         // `Ok(index)` if found. `.ok()` turns it into `Some(index)` or `None`.
         .map(|i| table[i].2)
-    // `.2` is the third item of the tuple. JS: `table[i][2]`.
+    // `.2` is the third item. JS: `table[i][2]`.
 }
 
-/// The canonical combining class of `c`. 0 means a "starter", like a base letter.
+/// A number for each character. 0 means a normal letter.
 /// Accents have other numbers. They decide the order of accents on one letter.
 pub fn combining_class(c: char) -> u8 {
     find(COMBINING_CLASS, c as u32).unwrap_or(0)
 }
 
-// Korean Hangul syllables are composed by a formula, not by a table (Unicode, section 3.12).
-// Each syllable is a leading consonant (L), a vowel (V) and an optional trailing consonant (T).
+// Korean syllables are joined by a formula, not by a table.
+// Each syllable is a first consonant (L), a vowel (V), and sometimes a last consonant (T).
 const S_BASE: u32 = 0xAC00; // first syllable
 const L_BASE: u32 = 0x1100;
 const V_BASE: u32 = 0x1161;
@@ -51,19 +50,19 @@ const L_COUNT: u32 = 19;
 const V_COUNT: u32 = 21;
 const T_COUNT: u32 = 28;
 const S_COUNT: u32 = L_COUNT * V_COUNT * T_COUNT;
-// `const` is a value fixed at compile time. JS: a top-level `const` that holds a literal.
+// `const` is a fixed value. JS: a `const` at the top of a file.
 
 /// Normalize `text` to NFC.
 pub fn nfc(text: &str) -> String {
-    // Step 1: decompose. Split every character into its base and accents: "é" becomes "e" + "´".
+    // Step 1: split every character into its letter and accents: "é" becomes "e" + "´".
     let mut chars: Vec<char> = Vec::new();
     for c in text.chars() {
         decompose(c, &mut chars);
     }
 
-    // Step 2: sort the accents after each base by combining class.
-    // "a" + dot below (220) + hat (230) and "a" + hat + dot below then become the same.
-    // This is an insertion sort. It never moves a starter (class 0), and it keeps equal classes in order.
+    // Step 2: put the accents after each letter in a fixed order, by their number.
+    // Then "a" + dot below + hat and "a" + hat + dot below become the same.
+    // Letters (number 0) never move.
     for i in 1..chars.len() {
         // JS: `for (let i = 1; i < chars.length; i++)`.
         let mut j = i;
@@ -73,21 +72,20 @@ pub fn nfc(text: &str) -> String {
         }
     }
 
-    // Step 3: compose. Join a base with a following accent when a composed character exists.
+    // Step 3: join a letter with an accent after it, when one character exists for both.
     let mut out: Vec<char> = Vec::new();
     let mut starter: Option<usize> = None;
-    // Position in `out` of the last base character. `None` until we see one.
+    // Position in `out` of the last letter. `None` until we see one.
     for c in chars {
         let class = combining_class(c);
         if let Some(s) = starter {
             let last = out.len() - 1;
             let blocked = last != s && combining_class(out[last]) >= class;
-            // An accent cannot join the base if another accent of the same or higher class
-            // stands between them. ("Blocked" in UAX #15.)
+            // An accent cannot join the letter if a similar accent stands between them.
             if !blocked {
                 if let Some(both) = compose(out[s], c) {
                     out[s] = both;
-                    // Replace the base with the composed character, and drop `c`.
+                    // Replace the letter with the joined character, and drop `c`.
                     continue;
                 }
             }
@@ -101,11 +99,11 @@ pub fn nfc(text: &str) -> String {
     // Turn the `Vec<char>` back into a `String`. JS: `chars.join("")`.
 }
 
-/// Add the full canonical decomposition of `c` to `out`.
+/// Split `c` into its letter and accents, and add them to `out`.
 fn decompose(c: char, out: &mut Vec<char>) {
     let cp = c as u32;
     if (S_BASE..S_BASE + S_COUNT).contains(&cp) {
-        // A Hangul syllable: compute its parts.
+        // A Korean syllable: compute its parts.
         let s = cp - S_BASE;
         let parts = [L_BASE + s / (V_COUNT * T_COUNT), V_BASE + (s % (V_COUNT * T_COUNT)) / T_COUNT, T_BASE + s % T_COUNT];
         for (i, part) in parts.into_iter().enumerate() {
@@ -119,19 +117,19 @@ fn decompose(c: char, out: &mut Vec<char>) {
         out.extend(DECOMPOSE[i].1.chars());
     } else {
         out.push(c);
-        // No decomposition: keep the character.
+        // Nothing to split: keep the character.
     }
 }
 
-/// The composed character for `a` followed by `b`, if one exists.
+/// The one character for `a` followed by `b`, if one exists.
 fn compose(a: char, b: char) -> Option<char> {
     let (a, b) = (a as u32, b as u32);
     if (L_BASE..L_BASE + L_COUNT).contains(&a) && (V_BASE..V_BASE + V_COUNT).contains(&b) {
-        // Hangul L + V gives an LV syllable.
+        // Korean L + V gives an LV syllable.
         return char::from_u32(S_BASE + ((a - L_BASE) * V_COUNT + (b - V_BASE)) * T_COUNT);
     }
     if (S_BASE..S_BASE + S_COUNT).contains(&a) && (a - S_BASE) % T_COUNT == 0 && (T_BASE + 1..T_BASE + T_COUNT).contains(&b) {
-        // Hangul LV + T gives an LVT syllable.
+        // Korean LV + T gives an LVT syllable.
         return char::from_u32(a + (b - T_BASE));
     }
     let i = COMPOSE.binary_search_by_key(&(a, b), |&(first, second, _)| (first, second)).ok()?;
@@ -146,29 +144,29 @@ mod tests {
     #[test]
     fn composes_accents() {
         assert_eq!(nfc("e\u{301}"), "é");
-        // "e" + combining acute accent becomes one character.
+        // "e" + a separate accent becomes one character.
         assert_eq!(nfc("é"), "é");
-        // Already NFC: no change.
+        // Already joined: no change.
     }
 
     #[test]
     fn orders_accents() {
         assert_eq!(nfc("\u{1E0B}\u{323}"), "\u{1E0D}\u{307}");
         // "ḋ" + dot below becomes "ḍ" + dot above. The dot below sorts first, so it joins
-        // the "d". This example is from UAX #15.
+        // the "d". This example is from the Unicode standard.
     }
 
     #[test]
     fn composes_hangul() {
         assert_eq!(nfc("\u{1100}\u{1161}\u{11A8}"), "각");
-        // L + V + T jamo become one syllable.
+        // Three Korean parts become one syllable.
         assert_eq!(nfc("각"), "각");
     }
 
     #[test]
     fn keeps_excluded_characters_apart() {
         assert_eq!(nfc("\u{958}"), "\u{915}\u{93C}");
-        // DEVANAGARI LETTER QA is on Unicode's composition exclusion list.
-        // NFC decomposes it and never composes it again.
+        // This Hindi letter is on Unicode's "never join" list.
+        // NFC splits it and never joins it again.
     }
 }

@@ -1,23 +1,23 @@
 //! Internationalized domain names: turn a host like "Bücher.de" into "xn--bcher-kva.de".
 //!
-//! DNS only accepts ASCII. Browsers follow the WHATWG URL Standard, which runs Unicode's
-//! UTS #46 algorithm on the host:
+//! DNS only understands plain English letters, digits and "-". So browsers rewrite the host:
 //!
-//! 1. Map: lowercase, and replace variant forms. Fullwidth "Ｂ" becomes "b".
-//! 2. Normalize to NFC (see `unicode.rs`).
+//! 1. Clean up each character: lowercase it, and turn look-alike forms into the normal one.
+//!    The wide "Ｂ" becomes "b".
+//! 2. Join letters and accents that belong together ("u" + "¨" becomes "ü").
 //! 3. Split into labels at ".". A label is one part: "bücher" and "de".
-//! 4. Check each label: allowed characters, joiner rules, right-to-left rules.
-//! 5. Write each non-ASCII label in Punycode with an "xn--" prefix.
+//! 4. Check each label for characters that are not allowed or that could trick the user.
+//! 5. Write each non-English label in a code called Punycode, with "xn--" in front.
 
 use bare_unicode::tables::{BIDI, Bidi, IDNA, Idna, JOINING, Joining, MARKS};
 use bare_unicode::{combining_class, find, nfc};
 // From the `bare-unicode` crate. In code, "-" in a crate name becomes "_".
 
-/// The WHATWG "domain parser" (not strict): give an ASCII host, or an error.
+/// Turn a host into plain ASCII, or give an error. This is the function other files call.
 pub fn domain_to_ascii(domain: &str) -> Result<String, String> {
     let ascii = if domain.is_ascii() {
         domain.to_ascii_lowercase()
-        // An ASCII host is only lowercased, even if UTS #46 would reject it.
+        // A plain ASCII host is only lowercased. It skips the checks below.
         // Browsers do this so that old sites keep working.
     } else {
         to_ascii(domain).ok_or_else(|| format!("invalid domain: {domain}"))?
@@ -26,18 +26,17 @@ pub fn domain_to_ascii(domain: &str) -> Result<String, String> {
         return Err("empty host".to_string());
     }
     if let Some(c) = ascii.chars().find(|&c| c <= '\u{1f}' || c == '\u{7f}' || " #%/:<>?@[\\]^|".contains(c)) {
-        // The "forbidden domain code points": control characters, and characters that
-        // have a meaning in URLs. `{c:?}` prints the character with quotes and escapes.
+        // Some characters are never allowed in a host: invisible control characters,
+        // and characters that mean something else in a URL, like "/" or "?".
         return Err(format!("forbidden character in host: {c:?}"));
     }
     Ok(ascii)
 }
 
-/// UTS #46 ToASCII, with the settings that browsers use:
-/// CheckHyphens, UseSTD3ASCIIRules and VerifyDnsLength off; CheckBidi and CheckJoiners on;
-/// nontransitional. Gives `None` on any error.
+/// Do the 5 steps from the top of this file, the way browsers do them.
+/// Gives `None` on any error.
 fn to_ascii(domain: &str) -> Option<String> {
-    // Step 1: map each character with the IDNA table.
+    // Step 1: clean up each character. A big table from Unicode says what to do with each one.
     let mut mapped = String::new();
     for c in domain.chars() {
         match find(IDNA, c as u32) {
@@ -45,12 +44,12 @@ fn to_ascii(domain: &str) -> Option<String> {
             Some((Idna::Ignored, _)) => {}
             // Ignored characters, like the soft hyphen, are removed.
             _ => mapped.push(c),
-            // Valid and deviation characters stay. Disallowed ones also stay for now.
-            // Step 4 finds them and gives an error.
+            // All other characters stay as they are for now.
+            // Step 4 finds the ones that are not allowed and gives an error.
         }
     }
 
-    // Steps 2 and 3: normalize, then split into labels.
+    // Steps 2 and 3: join letters and accents, then split into labels.
     let mut labels: Vec<String> = Vec::new();
     for label in nfc(&mapped).split('.') {
         // Step 4: convert and check each label.
@@ -73,7 +72,8 @@ fn to_ascii(domain: &str) -> Option<String> {
         }
     }
 
-    // The right-to-left rules apply only to a domain with right-to-left text in it.
+    // Languages like Arabic and Hebrew are written right to left. Extra rules apply
+    // only when the domain has such text in it.
     let rtl_domain = labels.iter().any(|l| l.chars().any(|c| matches!(bidi(c), Bidi::R | Bidi::AL | Bidi::AN)));
     if rtl_domain && !labels.iter().all(|l| l.is_empty() || bidi_ok(l)) {
         return None;
@@ -91,8 +91,8 @@ fn to_ascii(domain: &str) -> Option<String> {
     Some(out.join("."))
 }
 
-/// The UTS #46 validity criteria (section 4.1) for one label, with the browser settings.
-/// `decoded` is true when the label came from Punycode, so it was not mapped or normalized.
+/// Check one label. True means it is allowed.
+/// `decoded` is true when the label came from "xn--" text, so steps 1 and 2 did not clean it up.
 fn valid_label(label: &str, decoded: bool) -> bool {
     let chars: Vec<char> = label.chars().collect();
     let Some(&first) = chars.first() else {
@@ -101,7 +101,7 @@ fn valid_label(label: &str, decoded: bool) -> bool {
         // Here: an empty label has nothing to check.
     };
     if decoded && nfc(label) != label {
-        return false; // must be NFC
+        return false; // letters and accents must already be joined
     }
     if label.starts_with("xn--") || label.contains('.') {
         return false; // no "xn--" inside "xn--", and no dot inside a label
@@ -110,28 +110,28 @@ fn valid_label(label: &str, decoded: bool) -> bool {
         return false; // must not start with an accent or other combining mark
     }
     if !chars.iter().all(|&c| matches!(find(IDNA, c as u32), Some((Idna::Valid | Idna::Deviation, _)))) {
-        return false; // only valid characters (deviation ones count as valid here)
+        return false; // every character must be one the table allows
     }
     joiners_ok(&chars)
 }
 
-/// The ContextJ rules (RFC 5892, appendix A) for the invisible joiners U+200C and U+200D.
-/// They are allowed only where they change how the text is drawn, so they cannot hide
-/// inside a domain name that looks like another one.
+/// Rules for two invisible characters, called joiners.
+/// They are allowed only where they change how the text looks, for example in Hindi or Arabic.
+/// Anywhere else they are invisible, so a fake "google.com" could hide one.
 fn joiners_ok(chars: &[char]) -> bool {
-    // `&[char]` is a borrowed slice: a view into a `Vec` or array. JS: a read-only array.
+    // `&[char]` is a list of characters that we only read.
     for (i, &c) in chars.iter().enumerate() {
         if c != '\u{200C}' && c != '\u{200D}' {
             continue;
         }
         if i > 0 && combining_class(chars[i - 1]) == 9 {
-            continue; // after a virama (class 9), for example in Hindi, both joiners are fine
+            continue; // after a special Hindi-style mark, both joiners are fine
         }
         if c == '\u{200D}' {
-            return false; // the zero width joiner needs a virama before it
+            return false; // this joiner is only fine after that mark
         }
-        // The zero width non-joiner must stand between two letters that would join:
-        // (L or D) T* ZWNJ T* (R or D), where T letters are skipped. This is Arabic-style joining.
+        // The other joiner must stand between two Arabic-style letters that would
+        // connect to each other. Small marks between them are skipped.
         let before = chars[..i].iter().rev().map(|&c| joining(c)).find(|&j| j != Some(Joining::T));
         let after = chars[i + 1..].iter().map(|&c| joining(c)).find(|&j| j != Some(Joining::T));
         if !matches!(before, Some(Some(Joining::L | Joining::D))) || !matches!(after, Some(Some(Joining::R | Joining::D))) {
@@ -141,27 +141,27 @@ fn joiners_ok(chars: &[char]) -> bool {
     true
 }
 
-/// The six bidi rules (RFC 5893, section 2) for one non-empty label.
-/// They stop a mix of left-to-right and right-to-left text that could display in a misleading order.
+/// Rules for labels with right-to-left text (Arabic, Hebrew).
+/// They stop a mix of directions that could show the name in a misleading order.
 fn bidi_ok(label: &str) -> bool {
     use Bidi::*;
     // Lets us write `R` instead of `Bidi::R` inside this function.
     let classes: Vec<Bidi> = label.chars().map(bidi).collect();
     let last = classes.iter().copied().rev().find(|&b| b != NSM);
-    // The last class that is not a combining mark (NSM).
+    // The last character's direction, skipping accents.
     match classes[0] {
         R | AL => {
-            // A right-to-left label (rules 2, 3 and 4).
+            // A right-to-left label: only right-to-left letters, digits and some symbols.
             classes.iter().all(|b| matches!(b, R | AL | AN | EN | ES | CS | ET | ON | BN | NSM))
                 && matches!(last, Some(R | AL | EN | AN))
                 && !(classes.contains(&EN) && classes.contains(&AN))
-            // European digits (EN) and Arabic digits (AN) must not mix.
+            // Western digits and Arabic digits must not mix.
         }
         L => {
-            // A left-to-right label (rules 5 and 6).
+            // A left-to-right label: no right-to-left letters.
             classes.iter().all(|b| matches!(b, L | EN | ES | CS | ET | ON | BN | NSM)) && matches!(last, Some(L | EN))
         }
-        _ => false, // rule 1: the first character must be L, R or AL
+        _ => false, // the first character must be a letter
     }
 }
 
@@ -171,20 +171,21 @@ fn bidi(c: char) -> Bidi {
 
 fn joining(c: char) -> Option<Joining> {
     find(JOINING, c as u32)
-    // `None` means "Non_Joining".
+    // `None` means the letter never connects to its neighbors.
 }
 
-// Punycode (RFC 3492): write any Unicode label with only a-z, 0-9 and "-".
+// Punycode: write any label with only a-z, 0-9 and "-".
 //
-// The idea: first copy the ASCII letters ("bücher" gives "bcher"), then add "-". After that, each
-// non-ASCII character is stored as one number that says which character it is and where it goes.
-// The numbers are written with the digits a-z (0-25) and 0-9 (26-35), in a variable-length form.
+// The idea: first copy the plain letters ("bücher" gives "bcher"), then add "-". After that,
+// each other character becomes a number that says which character it is and where it goes.
+// The numbers are written with a-z and 0-9 as digits: "bcher-kva".
+// You do not need to follow the math below. It is a fixed recipe from the Punycode standard.
 const BASE: u32 = 36;
 
 /// Encode one label: "bücher" becomes "bcher-kva". `None` if a number overflows.
 fn punycode_encode(label: &str) -> Option<String> {
     let chars: Vec<u32> = label.chars().map(|c| c as u32).collect();
-    // Each character as its Unicode number. "ü" is 252. JS: `[...label].map(c => c.codePointAt(0))`.
+    // Each character as its Unicode number. "ü" is 252.
     let mut out: String = label.chars().filter(|c| c.is_ascii()).collect();
     let ascii_count = out.len() as u32;
     // `as u32` converts the number type. Rust never converts number types on its own.
@@ -201,8 +202,7 @@ fn punycode_encode(label: &str) -> Option<String> {
         let next = *chars.iter().filter(|&&c| c >= n).min()?;
         // The smallest character not yet placed. `&&c` unpacks two layers of borrowing.
         delta = delta.checked_add((next - n).checked_mul(done + 1)?)?;
-        // `checked_add` gives `None` on overflow instead of a wrong number. JS numbers never
-        // overflow like this. They lose precision instead.
+        // `checked_add` adds, but gives `None` if the number gets too big to store.
         n = next;
         for &c in &chars {
             if c < n {
@@ -221,7 +221,7 @@ fn punycode_encode(label: &str) -> Option<String> {
                     k += BASE;
                 }
                 out.push(digit(q));
-                // The last digit is below the threshold, so a reader knows the number ends here.
+                // The last digit is small, so the reader knows the number ends here.
                 bias = adapt(delta, done + 1, done == ascii_count);
                 delta = 0;
                 done += 1;
@@ -278,7 +278,7 @@ fn punycode_decode(code: &str) -> Option<String> {
     Some(out.into_iter().collect())
 }
 
-/// The digit threshold for position `k` (RFC 3492, section 6.2).
+/// Part of the Punycode recipe: how small a digit must be to end a number.
 fn threshold(k: u32, bias: u32) -> u32 {
     if k <= bias {
         1
@@ -289,13 +289,13 @@ fn threshold(k: u32, bias: u32) -> u32 {
     }
 }
 
-/// Tune `bias` after each number, so the next numbers use few digits (RFC 3492, section 6.1).
+/// Part of the Punycode recipe: tune `bias` so the next numbers use few digits.
 fn adapt(delta: u32, count: u32, first: bool) -> u32 {
     let mut delta = if first { delta / 700 } else { delta / 2 };
     delta += delta / count;
     let mut k = 0;
     while delta > 455 {
-        // 455 is ((36 - 1) * 26) / 2 from the RFC.
+        // 455 is a fixed value from the Punycode standard.
         delta /= BASE - 1;
         k += BASE;
     }
@@ -313,7 +313,7 @@ mod tests {
 
     #[test]
     fn punycode_labels() {
-        // Expected values come from Python's built-in "punycode" codec.
+        // The expected values come from Python, to check against another tool.
         let cases = [("bücher", "bcher-kva"), ("münchen", "mnchen-3ya"), ("中文", "fiq228c"), ("faß", "fa-hia"), ("ñ", "ida")];
         for (label, code) in cases {
             assert_eq!(punycode_encode(label).as_deref(), Some(code), "encode {label}");
@@ -326,23 +326,23 @@ mod tests {
     fn domains() {
         assert_eq!(domain_to_ascii("BÜCHER.de").unwrap(), "xn--bcher-kva.de");
         assert_eq!(domain_to_ascii("日本語。ＪＰ").unwrap(), "xn--wgv71a119e.jp");
-        // The ideographic full stop "。" is a dot, and fullwidth "ＪＰ" becomes "jp".
+        // The Japanese full stop "。" counts as a dot, and the wide "ＪＰ" becomes "jp".
         assert_eq!(domain_to_ascii("u\u{308}.com").unwrap(), "xn--tda.com");
-        // "u" + combining umlaut becomes "ü" (NFC) before encoding.
+        // "u" + a separate "¨" becomes "ü" before encoding.
         assert_eq!(domain_to_ascii("☕.us").unwrap(), "xn--53h.us");
         assert!(domain_to_ascii("a⒈com").is_err());
         // "⒈" would turn into "1." and change the domain's structure, so it is disallowed.
         assert_eq!(to_ascii("xn--u-ccb.com"), None);
-        // UTS #46 rejects it: it decodes to "u" + combining umlaut, which is not NFC.
+        // The full checks reject it: it decodes to "u" + a separate "¨", which is not joined.
         assert_eq!(domain_to_ascii("xn--u-ccb.com").unwrap(), "xn--u-ccb.com");
-        // But browsers only lowercase an ASCII host. They skip UTS #46 for old sites.
+        // But browsers only lowercase a plain ASCII host. They skip the checks for old sites.
         assert!(domain_to_ascii("a\u{200D}b.com").is_err());
-        // A zero width joiner with no virama before it: invisible, so it could fake a domain.
+        // An invisible joiner in the wrong place could fake a domain.
         assert!(domain_to_ascii("exa mple.com").is_err());
-        // A space is a forbidden domain code point.
+        // A space is never allowed in a host.
     }
 
-    /// Unicode's official UTS #46 conformance tests, with the browser settings.
+    /// Run the official test file from Unicode: thousands of hosts with the right answers.
     #[test]
     fn idna_conformance() {
         let mut tested = 0;
@@ -363,9 +363,8 @@ mod tests {
                 .trim_matches(['[', ']'])
                 .split(", ")
                 .any(|code| !matches!(code, "" | "V2" | "V3" | "U1" | "A4_1" | "A4_2" | "X4_2"));
-            // Browsers turn off CheckHyphens (V2, V3), UseSTD3ASCIIRules (U1) and
-            // VerifyDnsLength (A4_1, A4_2; X4_2 is the same check in ToUnicode). The test file
-            // header says to ignore those codes for these settings.
+            // These error codes are for checks that browsers turn off. The test file says
+            // to ignore them for browser settings.
             let expected = if has_error { None } else { Some(to_ascii_n) };
             assert_eq!(to_ascii(&source), expected, "source {:?}", f[0]);
             tested += 1;
