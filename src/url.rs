@@ -6,6 +6,7 @@
 //!
 //! Comments compare Rust with JavaScript, because you know JS.
 
+use crate::idna;
 use std::net::Ipv6Addr;
 // The standard library's IPv6 address type. It can check and print addresses.
 
@@ -81,6 +82,7 @@ impl Url {
                 None if after.is_empty() => 80,
                 // `if` in a match arm is a guard. This arm runs only when nothing follows "]".
                 None => return Err(format!("bad text after IPv6 address: {after}")),
+                // `Err(..)` is the error side of `Result`. JS: like `return { err: "..." }`.
             };
             (ip.to_string(), port)
             // `to_string()` writes the short form: "0:0::1" becomes "::1".
@@ -90,20 +92,14 @@ impl Url {
                 // It gives `Some((left, right))` or `None`.
                 Some((h, p)) => (ascii_host(h)?, parse_port(p)?),
                 // There is a ":". `h` is the host text and `p` is the port text.
-                // `ascii_host` makes the host lowercase and ASCII-only. See below.
+                // `ascii_host` makes the host ASCII-only, for DNS. See below.
                 // It makes a new `String` we own, so `Url` does not depend on `input`.
                 // JS does this for you with garbage collection.
                 None => (ascii_host(host_port)?, 80), // default HTTP port
                 // No ":". The whole text is the host. HTTP uses port 80 by default.
             }
         };
-
-        if host.is_empty() {
-            // JS: `host.length === 0`. This catches "http:///x".
-            return Err("empty host".to_string());
-            // `Err(..)` is the error side of `Result`. JS: like `return { err: "empty host" }`.
-            // `.to_string()` makes a `String` we own from the text.
-        }
+        // An empty host, like in "http:///x", is an error from `ascii_host`.
 
         Ok(Url {
             // `Ok(..)` is the good side of `Result`. We put a new `Url` in it.
@@ -175,110 +171,38 @@ fn parse_port(text: &str) -> Result<u16, String> {
     // `|_| ...` is `_ => ...`: an arrow function that ignores its argument.
 }
 
-/// Make a host lowercase and ASCII-only: "BÜCHER.de" becomes "xn--bcher-kva.de".
-/// DNS only accepts ASCII, so each non-ASCII label is written in Punycode with an "xn--" prefix.
-/// Real browsers also normalize Unicode first (UTS #46). We only lowercase.
+/// Turn the host text from a URL into the ASCII host that DNS needs.
+/// "BÜCHER.de" becomes "xn--bcher-kva.de" (see `idna.rs`).
 fn ascii_host(host: &str) -> Result<String, String> {
-    let mut labels = Vec::new();
-    for label in host.to_lowercase().split('.') {
-        // `to_lowercase` works on all of Unicode: "Ü" becomes "ü".
-        // A label is one part between dots: "bücher" and "de".
-        if label.is_ascii() {
-            labels.push(label.to_string());
-            // Plain ASCII labels stay as they are.
-        } else if label.chars().count() > 63 {
-            return Err(format!("host label too long: {label}"));
-            // DNS allows at most 63 characters per label. This also keeps the numbers
-            // in `punycode` small, so they cannot overflow.
-        } else {
-            labels.push(format!("xn--{}", punycode(label)));
-        }
-    }
-    Ok(labels.join("."))
+    let bytes = percent_decode(host);
+    // Browsers decode "%XX" in the host first: "exam%70le.com" is "example.com".
+    let host = String::from_utf8_lossy(&bytes);
+    // Bytes that are not valid UTF-8 become "\u{FFFD}". IDNA then rejects the host.
+    idna::domain_to_ascii(&host)
 }
 
-/// Encode one label in Punycode (RFC 3492): "bücher" becomes "bcher-kva".
-///
-/// The idea: first copy the ASCII letters ("bcher"), then add "-". After that, each
-/// non-ASCII character is stored as a number: which character it is, and where it goes.
-/// These numbers are written with the digits a-z and 0-9.
-fn punycode(label: &str) -> String {
-    let chars: Vec<u32> = label.chars().map(|c| c as u32).collect();
-    // Each character as its Unicode number. "ü" is 252. JS: `[...label].map(c => c.codePointAt(0))`.
-    let mut out: String = label.chars().filter(|c| c.is_ascii()).collect();
-    // Start with the ASCII characters, in order: "bcher".
-    let ascii_count = out.len() as u32;
-    // `as u32` converts the number type. Rust never converts number types on its own.
-    if ascii_count > 0 {
-        out.push('-');
-        // The "-" separates the ASCII part from the encoded part.
-    }
-
-    let mut done = ascii_count;
-    // How many characters are already placed.
-    let mut n = 128;
-    // The character we look for next. We go from small Unicode numbers to big ones.
-    let mut delta: u32 = 0;
-    // One running number that holds both "which character" and "where it goes".
-    let mut bias = 72;
-    // Tunes how many digits each number needs. It adapts as we go.
-
-    while (done as usize) < chars.len() {
-        let next = *chars.iter().filter(|&&c| c >= n).min().unwrap();
-        // The smallest character not yet placed. There is one, because `done` < all.
-        // `&&c` unpacks two layers of borrowing. JS just has `c`.
-        delta += (next - n) * (done + 1);
-        // Skipping from `n` to `next` costs one step for each slot at each skipped value.
-        n = next;
-        for &c in &chars {
-            if c < n {
-                delta += 1;
-                // A character placed earlier: one more slot to skip.
+/// Replace each "%XX" with the byte it stands for. A "%" without two hex digits stays.
+fn percent_decode(text: &str) -> Vec<u8> {
+    let bytes = text.as_bytes();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < bytes.len() {
+        let hex = bytes.get(i + 1..i + 3).filter(|h| h.iter().all(u8::is_ascii_hexdigit));
+        // `.get(range)` gives `None` instead of crashing when the range is past the end.
+        match (bytes[i], hex) {
+            (b'%', Some(h)) => {
+                let value = |b: u8| (b as char).to_digit(16).unwrap_or(0) as u8;
+                // One hex digit as a number: "a" gives 10. Both digits were checked above.
+                out.push(value(h[0]) * 16 + value(h[1]));
+                i += 3;
             }
-            if c == n {
-                // Write `delta` as a variable-length number.
-                let mut q = delta;
-                let mut k = 36;
-                loop {
-                    // JS: `while (true)`.
-                    let t = if k <= bias { 1 } else if k >= bias + 26 { 26 } else { k - bias };
-                    // The threshold for this digit. A digit below it ends the number.
-                    if q < t {
-                        break;
-                    }
-                    out.push(digit(t + (q - t) % (36 - t)));
-                    q = (q - t) / (36 - t);
-                    k += 36;
-                }
-                out.push(digit(q));
-                // The last digit. It is below the threshold, so the reader knows the number ends.
-                bias = adapt(delta, done + 1, done == ascii_count);
-                delta = 0;
-                done += 1;
+            (b, _) => {
+                out.push(b);
+                i += 1;
             }
         }
-        delta += 1;
-        n += 1;
     }
     out
-}
-
-/// Tune `bias` after each number, so the next numbers use few digits (RFC 3492, section 6.1).
-fn adapt(delta: u32, count: u32, first: bool) -> u32 {
-    let mut delta = if first { delta / 700 } else { delta / 2 };
-    delta += delta / count;
-    let mut k = 0;
-    while delta > 455 {
-        // 455 is ((36 - 1) * 26) / 2 from the RFC.
-        delta /= 35;
-        k += 36;
-    }
-    k + (36 * delta) / (delta + 38)
-}
-
-/// One Punycode digit: 0-25 are "a"-"z", 26-35 are "0"-"9".
-fn digit(d: u32) -> char {
-    if d < 26 { (b'a' + d as u8) as char } else { (b'0' + (d - 26) as u8) as char }
 }
 
 /// Replace unsafe bytes with "%XX" codes: "my file" becomes "my%20file".
@@ -455,21 +379,24 @@ mod tests {
     }
 
     #[test]
-    fn punycode_labels() {
-        // Expected values come from Python's built-in "punycode" codec.
-        let cases = [("bücher", "bcher-kva"), ("münchen", "mnchen-3ya"), ("中文", "fiq228c"), ("faß", "fa-hia"), ("ñ", "ida")];
-        for (label, expected) in cases {
-            assert_eq!(punycode(label), expected, "label {label}");
-        }
-    }
-
-    #[test]
     fn non_ascii_host() {
         assert_eq!(Url::parse("http://BÜCHER.de/").unwrap().host, "xn--bcher-kva.de");
         // Lowercase first, then Punycode. Only the non-ASCII label changes.
         assert_eq!(Url::parse("http://例え.jp:8080/").unwrap().port, 8080);
-        assert!(Url::parse(&format!("http://{}.com/", "é".repeat(64))).is_err());
-        // DNS allows at most 63 characters in one label.
+        assert!(Url::parse("http://a\u{200D}b.com/").is_err());
+        // An invisible joiner in the wrong place. More cases are in `idna.rs`.
+    }
+
+    #[test]
+    fn percent_encoded_host() {
+        assert_eq!(Url::parse("http://exam%70le.COM/").unwrap().host, "example.com");
+        // "%70" is "p". Decode first, then lowercase.
+        assert_eq!(Url::parse("http://b%C3%BCcher.de/").unwrap().host, "xn--bcher-kva.de");
+        // "%C3%BC" is the UTF-8 bytes of "ü".
+        assert!(Url::parse("http://a%20b.com/").is_err());
+        // "%20" is a space, which is not allowed in a host.
+        assert!(Url::parse("http://a%zz.com/").is_err());
+        // Not a valid escape, so "%" stays, and "%" is not allowed in a host.
     }
 
     #[test]
