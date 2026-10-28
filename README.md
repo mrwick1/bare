@@ -8,13 +8,7 @@
 
 Early work. Today `bare` fetches a page over `http://` and prints its source.
 
-Done:
-
-- URL parsing as in the WHATWG URL Standard: relative links, IPv4 and IPv6 hosts, percent-encoding, and Unicode host names (UTS #46 with NFC, bidi and joiner rules, Punycode).
-- A DNS client: `/etc/hosts`, a TTL cache, queries over UDP with a TCP fallback.
-- A minimal HTTP/1.1 client.
-
-Next: the rest of HTTP, then the HTML parser and the DOM. The full plan is in [docs/decisions.md](docs/decisions.md#module-plan).
+What is done, what comes next and what is missing: [docs/progress.md](docs/progress.md).
 
 `bare` is a learning project. It is not safe for real browsing.
 
@@ -34,12 +28,13 @@ Linux is the first target. Windows and macOS come later.
 | Folder              | Contents                                            |
 | ------------------- | --------------------------------------------------- |
 | `crates/bare/`      | The app                                             |
-| `crates/net/`       | DNS and HTTP                                        |
+| `crates/net/`       | DNS, TCP and HTTP                                   |
 | `crates/url/`       | URL parser and IDNA                                 |
 | `crates/unicode/`   | NFC and Unicode data tables                         |
 | `data/unicode/`     | Unicode data files and their license                |
 | `tools/`            | Scripts that generate code from data files          |
-| `docs/decisions.md` | Design decisions, the module plan and their reasons |
+| `docs/decisions.md` | Design decisions and their reasons                  |
+| `docs/progress.md`  | The module plan, what is done, and known gaps       |
 
 ## License
 
