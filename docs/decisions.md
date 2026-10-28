@@ -80,7 +80,7 @@ Tabs and the event loop come before JavaScript, because JavaScript needs the eve
 
 | #   | Module                                                 | State   |
 | --- | ------------------------------------------------------ | ------- |
-| 1   | URL parser and HTTP client (`url.rs`, `http.rs`)       | done    |
+| 1   | URL, DNS and HTTP (`url.rs`, `dns.rs`, `http.rs`)      | now     |
 | 2   | HTML tokenizer and DOM tree                            | next    |
 | 3   | CSS parser and style cascade                           | planned |
 | 4   | Layout (box model, text flow)                          | planned |
