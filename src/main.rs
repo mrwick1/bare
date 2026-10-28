@@ -4,6 +4,8 @@
 //!
 //! Comments compare Rust with JavaScript, because you know JS.
 
+mod dns;
+// Our own DNS client: "example.com" to IP addresses.
 mod http;
 // JS: like `import "./http.js"`. Rust only compiles files you list with `mod`.
 mod idna;

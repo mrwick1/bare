@@ -11,13 +11,14 @@
 //!
 //! Comments compare Rust with JavaScript, because you know JS.
 
+use crate::dns;
 use crate::url::Url;
 // JS: like `import { Url } from "./url"`. `crate` means the root of our program.
 use std::io::{Read, Write};
 // JS: `import { Read, Write } from "std/io"`.
 // `Read` and `Write` are traits. A trait is like a TypeScript interface: a set of methods.
 // In Rust you must import a trait before you can call its methods.
-use std::net::TcpStream;
+use std::net::{SocketAddr, TcpStream};
 // JS: like `net.Socket` in Node. It is a network connection we can read and write.
 
 /// Fetch a URL and return the response body as text.
@@ -28,9 +29,12 @@ pub fn get(url: &Url) -> Result<String, Box<dyn std::error::Error>> {
     // We need it because this function can fail in two ways: our own text errors and
     // network errors from the standard library. `?` converts both into this one type.
 
-    let mut stream = TcpStream::connect((url.host.as_str(), url.port))?;
-    // JS: like `net.connect(port, host)`. It also looks up the host name (DNS).
-    // `(a, b)` is a pair of values. `.as_str()` lets us pass the `String` as read-only text.
+    let addrs: Vec<SocketAddr> = dns::resolve(&url.host)?.into_iter().map(|ip| SocketAddr::new(ip, url.port)).collect();
+    // Our own DNS lookup (see `dns.rs`) gives IP addresses. Add the port to each one.
+    // JS: `ips.map(ip => ({ ip, port }))`.
+    let mut stream = TcpStream::connect(&addrs[..])?;
+    // JS: like `net.connect(port, ip)`. Given a list, it tries each address in order
+    // until one connects.
     // `?` returns the error to the caller if the connection fails.
     // `mut`: in Rust, `let` is like JS `const`. `let mut` is like JS `let`. We need it
     // because reading and writing change the socket's state.
