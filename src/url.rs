@@ -6,6 +6,9 @@
 //!
 //! Comments compare Rust with JavaScript, because you know JS.
 
+use std::net::Ipv6Addr;
+// The standard library's IPv6 address type. It can check and print addresses.
+
 /// A parsed URL.
 #[derive(Debug, PartialEq)]
 // `#[derive(...)]` makes the compiler write code for you.
@@ -66,21 +69,33 @@ impl Url {
         // "?x=1" becomes "/?x=1". The request line needs a path that starts with "/".
         // In Rust, `if` gives back a value, like the JS ternary `a ? b : c`.
 
-        let (host, port) = match host_port.split_once(':') {
-            // JS: like `host_port.split(":")`, but it cuts only at the first ":".
-            // It gives `Some((left, right))` or `None`.
-            Some((h, p)) => {
+        let (host, port) = if let Some(inside) = host_port.strip_prefix('[') {
+            // An IPv6 host, like "[::1]:8080". The address itself contains ":",
+            // so "[ ]" mark where it ends. Only then can we find the port.
+            let (ip, after) = inside.split_once(']').ok_or_else(|| "missing ] in IPv6 host".to_string())?;
+            let ip: Ipv6Addr = ip.parse().map_err(|_| format!("bad IPv6 address: {ip}"))?;
+            // The standard library checks the address for us. JS has no built-in for this.
+            // `ip: Ipv6Addr` tells `parse` which type to make. Like a TypeScript type annotation.
+            let port = match after.strip_prefix(':') {
+                Some(p) => parse_port(p)?,
+                None if after.is_empty() => 80,
+                // `if` in a match arm is a guard. This arm runs only when nothing follows "]".
+                None => return Err(format!("bad text after IPv6 address: {after}")),
+            };
+            (ip.to_string(), port)
+            // `to_string()` writes the short form: "0:0::1" becomes "::1".
+        } else {
+            match host_port.split_once(':') {
+                // JS: like `host_port.split(":")`, but it cuts only at the first ":".
+                // It gives `Some((left, right))` or `None`.
+                Some((h, p)) => (h.to_ascii_lowercase(), parse_port(p)?),
                 // There is a ":". `h` is the host text and `p` is the port text.
-                let port = p.parse::<u16>().map_err(|_| format!("bad port: {p}"))?;
-                // JS: like `Number(p)`, but it fails for "abc" and for numbers above 65535.
-                // JS would give `NaN`. Rust gives an error that we must handle.
-                // `|_| ...` is `_ => ...`: an arrow function that ignores its argument.
-                // `?` returns the error if the parse failed.
-                (h, port)
-                // No `;` here, so this is the value of the arm. JS: like `return [h, port]`.
+                // Host names ignore case, so we store them in lowercase. JS: `h.toLowerCase()`.
+                // It makes a new `String` we own, so `Url` does not depend on `input`.
+                // JS does this for you with garbage collection.
+                None => (host_port.to_ascii_lowercase(), 80), // default HTTP port
+                // No ":". The whole text is the host. HTTP uses port 80 by default.
             }
-            None => (host_port, 80), // default HTTP port
-            // No ":". The whole text is the host. HTTP uses port 80 by default.
         };
 
         if host.is_empty() {
@@ -92,14 +107,11 @@ impl Url {
 
         Ok(Url {
             // `Ok(..)` is the good side of `Result`. We put a new `Url` in it.
-            host: host.to_ascii_lowercase(),
-            // Host names ignore case, so we store them in lowercase. JS: `host.toLowerCase()`.
-            // It makes a new `String` we own, so `Url` does not depend on `input`.
-            // JS does this for you with garbage collection.
+            host,
+            // Short for `host: host`. JS has the same shorthand.
             port,
-            // Short for `port: port`. JS has the same shorthand.
-            path,
-            // `path` is already a `String` we own, so we move it in. No copy.
+            path: encode(&path),
+            // Turn spaces and non-ASCII characters into "%XX" codes.
         })
         // No `;`, so this is the return value. Rust returns the last expression.
     }
@@ -149,10 +161,47 @@ impl Url {
             // Relative to that folder: "/blog/" + "cat.png".
         };
 
-        Ok(Url { host: self.host.clone(), port: self.port, path: remove_dots(&path) })
+        Ok(Url { host: self.host.clone(), port: self.port, path: encode(&remove_dots(&path)) })
         // Same server as the page. `self.port` is a number, so it is copied for free.
         // Numbers are `Copy` in Rust. Strings are not, so they need `.clone()`.
     }
+}
+
+/// Read a port number, like "8080".
+fn parse_port(text: &str) -> Result<u16, String> {
+    text.parse::<u16>().map_err(|_| format!("bad port: {text}"))
+    // JS: like `Number(text)`, but it fails for "abc" and for numbers above 65535.
+    // JS would give `NaN`. Rust gives an error that we must handle.
+    // `|_| ...` is `_ => ...`: an arrow function that ignores its argument.
+}
+
+/// Replace unsafe bytes with "%XX" codes: "my file" becomes "my%20file".
+/// The byte sets follow the WHATWG URL Standard for paths and queries.
+fn encode(path: &str) -> String {
+    let mut out = String::new();
+    let mut in_query = false;
+    // The path and the query encode slightly different characters.
+    for byte in path.bytes() {
+        // `.bytes()` gives the UTF-8 bytes. "é" is two bytes: 0xC3 0xA9.
+        // JS: like looping over `new TextEncoder().encode(path)`.
+        let escape = byte <= b' ' || byte > b'~' || b"\"<>".contains(&byte)
+            // Control bytes, space, non-ASCII bytes, and `"`, `<`, `>`, everywhere.
+            // `b' '` is the byte value of a character. `b"..."` is a list of bytes.
+            || if in_query { byte == b'\'' } else { b"`{}".contains(&byte) };
+            // `'` only in the query. The backtick, `{` and `}` only in the path.
+        if escape {
+            out.push_str(&format!("%{byte:02X}"));
+            // `:02X` writes two uppercase hex digits. JS: `byte.toString(16).toUpperCase().padStart(2, "0")`.
+        } else {
+            out.push(byte as char);
+            // `as char` turns the byte into a character. Safe here, because it is plain ASCII.
+        }
+        if byte == b'?' {
+            in_query = true;
+            // The first "?" ends the path. Everything after it is the query.
+        }
+    }
+    out
 }
 
 /// The text before the first `ch`, or all of `text` if there is no `ch`.
@@ -286,6 +335,29 @@ mod tests {
             assert_eq!(u.path, path, "link {link}");
             // The text after the values is printed if the check fails.
         }
+    }
+
+    #[test]
+    fn ipv6_host() {
+        let u = Url::parse("http://[::1]:8080/x").unwrap();
+        assert_eq!(u, Url { host: "::1".into(), port: 8080, path: "/x".into() });
+        // The "[ ]" only separate the address from the port. We store the address without them.
+        assert_eq!(Url::parse("http://[0:0::1]/").unwrap().host, "::1");
+        // One address can be written in many ways. We store the short form.
+        assert!(Url::parse("http://[::1/").is_err()); // no closing "]"
+        assert!(Url::parse("http://[zz]/").is_err()); // not an IPv6 address
+    }
+
+    #[test]
+    fn encodes_unsafe_characters() {
+        let u = Url::parse("http://a.com/my file.html?q=héllo").unwrap();
+        assert_eq!(u.path, "/my%20file.html?q=h%C3%A9llo");
+        // A space becomes "%20". "é" is two bytes in UTF-8, so it becomes two codes.
+        assert_eq!(Url::parse("http://a.com/a%20b").unwrap().path, "/a%20b");
+        // Text that is already encoded stays the same. "%" is never encoded again.
+        let base = Url::parse("http://a.com/").unwrap();
+        assert_eq!(base.join("my page.html").unwrap().path, "/my%20page.html");
+        // Links from a page are encoded too.
     }
 
     #[test]
