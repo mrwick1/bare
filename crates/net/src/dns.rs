@@ -4,14 +4,12 @@
 //!
 //! 1. "localhost" is always this machine. It never goes to the network.
 //! 2. Look in `/etc/hosts`, a local list of names and addresses.
-//! 3. Look in our cache. Each answer may be kept for its TTL ("time to live").
-//! 4. Ask the DNS server from `/etc/resolv.conf`. The question is a small binary packet
-//!    sent over UDP to port 53. We ask twice: once for IPv4 (an "A" record) and once for
-//!    IPv6 (an "AAAA" record).
-//! 5. If the answer does not fit in one UDP packet, the server says "truncated".
-//!    Then we ask again over TCP.
-//!
-//! Packet format: RFC 1035, section 4.
+//! 3. Look in our cache of earlier answers. Each answer says how long we may keep it.
+//! 4. Ask the DNS server listed in `/etc/resolv.conf`. The question is a small message
+//!    sent over UDP (quick, no connection). We ask twice: once for an IPv4 address
+//!    (an "A" record) and once for an IPv6 address (an "AAAA" record).
+//! 5. If the answer is too big for one UDP message, the server says "truncated".
+//!    Then we ask again over TCP, which has no size limit.
 
 use std::collections::HashMap;
 use std::collections::hash_map::RandomState;
@@ -40,11 +38,12 @@ struct Answer {
 }
 
 static CACHE: LazyLock<Mutex<HashMap<String, (Vec<IpAddr>, Instant)>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
-// One cache for the whole program: name -> (addresses, expiry time).
-// `static` is a global. JS: a variable at the top of a module.
-// `LazyLock` creates it the first time it is used. A `HashMap` cannot be built at compile time.
-// `Mutex` is a lock. Only one thread can use the map at a time. JS has one thread, so it
-// never needs this. Rust forces it on globals, so two threads can never change the map at once.
+// One cache for the whole program: name -> (addresses, time it runs out).
+// `static` is a global. JS: a variable at the top of a file.
+// `HashMap` is like a JS object used as a lookup table.
+// `LazyLock` creates the map the first time it is used.
+// `Mutex` is a lock: only one piece of code can use the map at a time. Rust requires it for
+// a global that can change, so two parts of the program never change it at once.
 
 /// Find the IP addresses for `host`. IPv4 addresses come first.
 pub fn resolve(host: &str) -> Result<Vec<IpAddr>, String> {
@@ -58,8 +57,8 @@ pub fn resolve(host: &str) -> Result<Vec<IpAddr>, String> {
 
     if name == "localhost" || name.ends_with(".localhost") {
         return Ok(vec![IpAddr::V4(Ipv4Addr::LOCALHOST), IpAddr::V6(Ipv6Addr::LOCALHOST)]);
-        // RFC 6761: these names are always this machine. Browsers never ask a DNS server
-        // about them, so a server cannot point "localhost" somewhere else.
+        // These names always mean this machine. Browsers never ask a DNS server about them,
+        // so no server can point "localhost" somewhere else.
     }
 
     let hosts = std::fs::read_to_string("/etc/hosts").unwrap_or_default();
@@ -70,8 +69,8 @@ pub fn resolve(host: &str) -> Result<Vec<IpAddr>, String> {
     }
 
     if let Some((addrs, expiry)) = CACHE.lock().unwrap().get(&name) {
-        // `.lock()` waits for the lock and returns the map. The lock opens again when the
-        // returned value is dropped, at the end of this `if let`.
+        // `.lock()` waits until no one else uses the map, then gives it to us.
+        // Rust opens the lock again by itself after this `if let`.
         if Instant::now() < *expiry {
             return Ok(addrs.clone());
         }
@@ -81,7 +80,7 @@ pub fn resolve(host: &str) -> Result<Vec<IpAddr>, String> {
     let mut servers = nameservers(&conf);
     if servers.is_empty() {
         servers.push(IpAddr::V4(Ipv4Addr::LOCALHOST));
-        // No "nameserver" line: use this machine, like the C library does.
+        // No "nameserver" line: ask this machine, like other Linux programs do.
     }
 
     let (addrs, ttl) = lookup(&servers, &name)?;
@@ -116,7 +115,7 @@ fn lookup(servers: &[IpAddr], name: &str) -> Result<(Vec<IpAddr>, u32), String> 
 }
 
 /// Ask each server in turn, two tries each, until one answers.
-/// `Ok(None)` means the name does not exist (NXDOMAIN).
+/// `Ok(None)` means the name does not exist.
 fn ask(servers: &[IpAddr], name: &str, qtype: u16) -> Result<Option<Answer>, String> {
     let mut error = String::from("no DNS servers");
     for &server in servers {
@@ -135,19 +134,19 @@ fn ask(servers: &[IpAddr], name: &str, qtype: u16) -> Result<Option<Answer>, Str
 fn query(server: SocketAddr, name: &str, qtype: u16) -> Result<Option<Answer>, String> {
     let id = RandomState::new().hash_one(0u8) as u16;
     // A random ID for this question. The answer must carry the same ID.
-    // An attacker who wants to send a fake answer must guess it, and the random port below.
-    // The standard library has no random numbers, but its hash maps use random keys:
-    // each `RandomState` has new secret keys, so its hash of 0 is unpredictable.
+    // Someone who wants to send us a fake answer must guess it.
+    // Rust's standard library has no simple random function, so we borrow the randomness
+    // that `HashMap` uses inside. You can read this line as `Math.random()`.
     let packet = build_query(id, name, qtype)?;
     let err = |e: std::io::Error| format!("DNS query to {server} failed: {e}");
-    // A small closure that turns an I/O error into our error text.
+    // A small arrow function that turns a network error into our error text.
 
     let local = if server.is_ipv4() { "0.0.0.0:0" } else { "[::]:0" };
     let udp = UdpSocket::bind(local).map_err(err)?;
     // Port 0 means "any free port". The OS picks a random one.
     udp.connect(server).map_err(err)?;
-    // For UDP, `connect` only sets the default address. It also makes the OS drop packets
-    // that come from any other address.
+    // UDP has no real connection. Here `connect` only means "talk to this server",
+    // and ignore messages from anyone else.
     udp.set_read_timeout(Some(TIMEOUT)).map_err(err)?;
     udp.send(&packet).map_err(err)?;
     let mut buf = vec![0; 4096];
@@ -155,20 +154,20 @@ fn query(server: SocketAddr, name: &str, qtype: u16) -> Result<Option<Answer>, S
     let reply = &buf[..n];
 
     if reply.len() > 2 && reply[2] & 0x02 != 0 {
-        // The TC ("truncated") flag: the answer did not fit in a UDP packet. Ask over TCP.
+        // The "truncated" flag is on: the answer did not fit. Ask again over TCP.
         return query_tcp(server, &packet, id, name, qtype).map_err(err)?;
     }
     parse_response(reply, id, name, qtype)
 }
 
-/// Ask over TCP. Each message starts with its length in 2 bytes, because TCP is a stream
-/// with no packet boundaries.
+/// Ask over TCP. TCP is one long stream of bytes, so each message starts with its length.
+/// Then the reader knows where the message ends.
 fn query_tcp(server: SocketAddr, packet: &[u8], id: u16, name: &str, qtype: u16) -> std::io::Result<Result<Option<Answer>, String>> {
     let mut tcp = TcpStream::connect_timeout(&server, TIMEOUT)?;
     tcp.set_read_timeout(Some(TIMEOUT))?;
     tcp.write_all(&(packet.len() as u16).to_be_bytes())?;
-    // `to_be_bytes` writes the number "big-endian": the high byte first. All network
-    // protocols use this order. JS: `new DataView(buf).setUint16(0, n)` does the same.
+    // `to_be_bytes` turns a number into bytes, biggest part first.
+    // Networks always use this order.
     tcp.write_all(packet)?;
     let mut len = [0u8; 2];
     tcp.read_exact(&mut len)?;
@@ -182,21 +181,21 @@ fn build_query(id: u16, name: &str, qtype: u16) -> Result<Vec<u8>, String> {
     let mut p = Vec::new();
     p.extend(id.to_be_bytes());
     p.extend([0x01, 0x00]);
-    // Flags. Only RD ("recursion desired"): "please find the answer for me".
+    // Settings. Only one is on: "please find the full answer for me".
     p.extend([0, 1, 0, 0, 0, 0, 0, 0]);
-    // Counts, 2 bytes each: 1 question, 0 answers, 0 authority records, 0 additional records.
+    // How many items follow: 1 question, and no answers or other records.
     for label in name.split('.') {
         // A name is sent as labels, each with its length first:
         // "example.com" becomes [7]example[3]com[0].
         if label.is_empty() || label.len() > 63 {
             return Err(format!("name cannot be sent to DNS: {name}"));
-            // A length byte has room for 63. Browsers allow longer labels in URLs,
-            // but DNS cannot carry them.
+            // DNS allows at most 63 characters per label. Browsers allow longer labels in
+            // URLs, but DNS cannot send them.
         }
         p.push(label.len() as u8);
         p.extend(label.as_bytes());
     }
-    p.push(0); // the empty root label ends the name
+    p.push(0); // a length of 0 ends the name
     if p.len() - 12 > 255 {
         return Err(format!("name too long for DNS: {name}"));
     }
@@ -213,12 +212,12 @@ fn parse_response(p: &[u8], id: u16, name: &str, qtype: u16) -> Result<Option<An
     let flags = read_u16(p, 2)?;
     if flags & 0x8000 == 0 {
         return Err("DNS packet is not an answer".to_string());
-        // The QR flag (top bit) is 1 for answers and 0 for questions.
+        // One flag says if this is a question or an answer.
     }
     match flags & 0x000F {
-        // The last 4 bits are the result code (RCODE).
+        // The result code: 0 is OK, 3 is "no such name", anything else is an error.
         0 => {}
-        3 => return Ok(None), // NXDOMAIN: the name does not exist
+        3 => return Ok(None), // the name does not exist
         code => return Err(format!("DNS server error, code {code}")),
     }
     if read_u16(p, 4)? != 1 {
@@ -238,7 +237,7 @@ fn parse_response(p: &[u8], id: u16, name: &str, qtype: u16) -> Result<Option<An
     // The name whose records we want. An alias record changes it:
     // "www.example.com is example.com" means we now want records for "example.com".
     for _ in 0..answer_count {
-        // Each record: name, type (2 bytes), class (2), TTL (4), data length (2), data.
+        // Each record: name, type, class, how long to keep it, data length, data.
         let (record_name, next) = read_name(p, pos)?;
         let rtype = read_u16(p, next)?;
         let class = read_u16(p, next + 2)?;
@@ -257,7 +256,7 @@ fn parse_response(p: &[u8], id: u16, name: &str, qtype: u16) -> Result<Option<An
             }
             TYPE_AAAA if qtype == TYPE_AAAA && len == 16 => {
                 let bytes: [u8; 16] = data.try_into().map_err(|_| "bad AAAA record")?;
-                // `try_into` turns a slice into a fixed-size array, if the length is right.
+                // `try_into` turns the bytes into a list of exactly 16, if the length is right.
                 answer.addrs.push(IpAddr::V6(Ipv6Addr::from(bytes)));
             }
             TYPE_CNAME => {
@@ -274,9 +273,8 @@ fn parse_response(p: &[u8], id: u16, name: &str, qtype: u16) -> Result<Option<An
 
 /// Read a name at `start`. Give the name and the position just after it.
 ///
-/// Names can be compressed: two bytes that start with the bits 11 are a "pointer" to an
-/// earlier copy of the rest of the name. This saves space, because the same name often
-/// appears many times in one packet.
+/// Names can be shortened: instead of repeating a name, the packet can say "the rest of
+/// the name is at position N". This saves space, because one name often appears many times.
 fn read_name(p: &[u8], start: usize) -> Result<(String, usize), String> {
     let mut labels = Vec::new();
     let mut pos = start;
@@ -285,7 +283,7 @@ fn read_name(p: &[u8], start: usize) -> Result<(String, usize), String> {
     loop {
         let len = *p.get(pos).ok_or("DNS packet too short")? as usize;
         // `.get(i)` gives `None` past the end, instead of crashing. Every read in this file
-        // is checked, because the packet comes from the network and can contain anything.
+        // is checked, because the packet comes from the network and may contain anything.
         if len == 0 {
             return Ok((labels.join("."), end.unwrap_or(pos + 1)));
         } else if len & 0xC0 == 0xC0 {
@@ -296,7 +294,7 @@ fn read_name(p: &[u8], start: usize) -> Result<(String, usize), String> {
                 // A fake packet can point a name at itself. Without this limit we would loop forever.
             }
             pos = (read_u16(p, pos)? & 0x3FFF) as usize;
-            // The other 14 bits are the position to jump to.
+            // Read the position to jump to.
         } else if len <= 63 {
             let label = p.get(pos + 1..pos + 1 + len).ok_or("DNS packet too short")?;
             labels.push(String::from_utf8_lossy(label).into_owned());
@@ -352,13 +350,13 @@ mod tests {
     /// Build an answer to `question` with the given records, like a server would.
     fn reply(question: &[u8], flags: u8, records: &[u8], count: u16) -> Vec<u8> {
         let mut r = question.to_vec();
-        r[2] |= 0x80 | flags; // QR (this is an answer), plus any extra flags
+        r[2] |= 0x80 | flags; // mark it as an answer, plus any extra flags
         r[6..8].copy_from_slice(&count.to_be_bytes()); // the answer count
         r.extend(records);
         r
     }
 
-    /// One record. `0xC0, 0x0C` is a pointer to the name in the question, at position 12.
+    /// One record. A name of `0xC0, 12` means "the name at position 12": the question's name.
     fn record(name: &[u8], rtype: u16, ttl: u32, data: &[u8]) -> Vec<u8> {
         let mut r = name.to_vec();
         r.extend(rtype.to_be_bytes());
@@ -403,7 +401,7 @@ mod tests {
         assert_eq!(parse_response(&r, 9, "a.com", TYPE_AAAA).unwrap().unwrap().addrs, vec![IpAddr::V6(ip)]);
 
         let mut nx = reply(&q, 0, &[], 0);
-        nx[3] |= 3; // RCODE 3: NXDOMAIN
+        nx[3] |= 3; // result code 3: no such name
         assert_eq!(parse_response(&nx, 9, "a.com", TYPE_AAAA), Ok(None));
     }
 
@@ -448,11 +446,11 @@ mod tests {
         let addr = udp.local_addr().unwrap();
         let tcp = TcpListener::bind(addr).unwrap();
         let server = std::thread::spawn(move || {
-            // `thread::spawn` runs the closure at the same time as the test.
-            // JS: like a Worker. `move` gives the closure its own `udp` and `tcp`.
+            // `thread::spawn` runs this function at the same time as the rest of the test.
+            // `move` gives the function its own `udp` and `tcp`.
             let mut buf = [0u8; 512];
             let (n, from) = udp.recv_from(&mut buf).unwrap();
-            udp.send_to(&reply(&buf[..n], 0x02, &[], 0), from).unwrap(); // 0x02: TC flag
+            udp.send_to(&reply(&buf[..n], 0x02, &[], 0), from).unwrap(); // 0x02: the "truncated" flag
 
             let (mut s, _) = tcp.accept().unwrap();
             let mut len = [0u8; 2];
@@ -469,6 +467,6 @@ mod tests {
         // Check first. If the client never used TCP, the server still waits for it,
         // and waiting for the server would hang the test instead of failing it.
         server.join().unwrap();
-        // Wait for the server thread to finish. JS: `await` the worker.
+        // Wait for the fake server to finish.
     }
 }

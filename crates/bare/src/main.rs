@@ -5,54 +5,47 @@
 //! Comments compare Rust with JavaScript, because you know JS.
 
 use bare_net::http;
-// JS: like `import * as http from "bare-net/http"`. The other crates are listed in this
-// crate's `Cargo.toml`, like dependencies in `package.json`.
+// JS: like `import`. `bare_net` is another crate (package) in this project.
+// It is listed in this crate's `Cargo.toml`, like a dependency in `package.json`.
 use bare_url::Url;
-// JS: like `import { Url } from "bare-url"`. Now we can write `Url`.
+// Now we can write `Url` instead of `bare_url::Url`.
 
 fn main() {
-    // JS: like the top of your script. Rust runs `main` first.
+    // The program starts here.
 
     let arg = match std::env::args().nth(1) {
-        // JS: like `process.argv[2]`. In Rust, item 0 is the program and item 1 is your first argument.
-        // `.nth(1)` returns an `Option`. JS would give `string | undefined`.
-        // The difference: Rust forces you to handle the "missing" case. You cannot forget it.
-        // `match` is like `switch`, but it must cover every case, and it gives back a value.
+        // Get the first word typed after the program name: the URL.
+        // It may be missing. Rust makes us handle that case.
+        // `match` is like `switch`, but it must handle every case.
         Some(a) => a,
-        // The argument exists. Call it `a` and use it as the value of the `match`.
+        // The URL is there. Call it `a` and keep it.
         None => {
-            // The argument is missing.
+            // The URL is missing.
             eprintln!("usage: bare <http://url>");
-            // JS: `console.error(...)`. The `!` means it is a macro. Treat it like a function.
+            // Print a help message. JS: `console.error(...)`.
             std::process::exit(2);
-            // JS: `process.exit(2)`. Code 0 means OK. Anything else means failure.
+            // Stop the program. A number other than 0 means "something went wrong".
         }
     };
-    // `arg` is now a plain string. `let` is like `const`: you cannot change it.
+    // `let` is like `const`: `arg` cannot change.
 
     let result = Url::parse(&arg)
-        // JS: like a static method call, `Url.parse(arg)`.
-        // `&arg` means "lend the value, do not give it away". We still own `arg`.
-        // The result is a `Result`: it holds either a good value or an error.
-        // JS has no direct match. It is like a function that returns `{ ok }` or `{ err }` instead of `throw`.
+        // Split the URL into its parts. The `&` means "read it, but do not take it".
+        // The answer is a `Result`: either a good value (`Ok`) or an error (`Err`).
         .map_err(|e| e.into())
         // `|e| e.into()` is an arrow function: `e => e.into()`.
-        // `map_err` runs it on the error only. A good value passes through.
-        // It converts our error text to the error type that `http::get` uses.
+        // It changes the error into the kind of error that `http::get` uses.
         .and_then(|u| http::get(&u));
-    // JS: like `.then(u => get(u))`. It runs only if the earlier step succeeded.
-    // If `parse` failed, the error skips this step, like a rejected Promise skips `.then`.
+    // If the URL was good, fetch the page. If not, skip this step and keep the error.
 
     match result {
-        // Check what happened.
         Ok(body) => println!("{body}"),
-        // Success: print the page. JS: `console.log(body)`. `{body}` is like `${body}` in a template string.
+        // It worked: print the page. JS: `console.log(body)`.
         Err(e) => {
-            // Failure.
             eprintln!("error: {e}");
-            // Print the error to stderr.
+            // It failed: print the error.
             std::process::exit(1);
-            // Exit with code 1, so scripts can see that it failed.
+            // Stop with an error number.
         }
     }
 }
