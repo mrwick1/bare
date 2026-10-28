@@ -7,8 +7,8 @@
 //! Comments compare Rust with JavaScript, because you know JS.
 
 use crate::idna;
-use std::net::Ipv6Addr;
-// The standard library's IPv6 address type. It can check and print addresses.
+use std::net::{Ipv4Addr, Ipv6Addr};
+// The standard library's IP address types. They can check and print addresses.
 
 /// A parsed URL.
 #[derive(Debug, PartialEq)]
@@ -163,8 +163,15 @@ impl Url {
     }
 }
 
-/// Read a port number, like "8080".
+/// Read a port number, like "8080". Empty text means the default port, 80.
 fn parse_port(text: &str) -> Result<u16, String> {
+    if text.is_empty() {
+        return Ok(80);
+    }
+    if !text.bytes().all(|b| b.is_ascii_digit()) {
+        return Err(format!("bad port: {text}"));
+        // Only digits. Rust's `parse` would also accept "+80".
+    }
     text.parse::<u16>().map_err(|_| format!("bad port: {text}"))
     // JS: like `Number(text)`, but it fails for "abc" and for numbers above 65535.
     // JS would give `NaN`. Rust gives an error that we must handle.
@@ -178,7 +185,78 @@ fn ascii_host(host: &str) -> Result<String, String> {
     // Browsers decode "%XX" in the host first: "exam%70le.com" is "example.com".
     let host = String::from_utf8_lossy(&bytes);
     // Bytes that are not valid UTF-8 become "\u{FFFD}". IDNA then rejects the host.
-    idna::domain_to_ascii(&host)
+    let ascii = idna::domain_to_ascii(&host)?;
+    if ends_in_number(&ascii) {
+        // A host that ends in a number must be an IPv4 address. "example.255" is an error.
+        let ip = parse_ipv4(&ascii).ok_or_else(|| format!("bad IPv4 address: {ascii}"))?;
+        return Ok(Ipv4Addr::from(ip).to_string());
+        // Write it the normal way: "0x7f.1" becomes "127.0.0.1".
+    }
+    Ok(ascii)
+}
+
+/// True if the last label is a number: "1.2.3.4", "a.0x1f". (WHATWG "ends in a number")
+fn ends_in_number(host: &str) -> bool {
+    let host = host.strip_suffix('.').unwrap_or(host);
+    // One trailing dot is ignored: "1.2.3.4." ends in "4".
+    let last = host.rsplit('.').next().unwrap_or("");
+    // `rsplit` splits from the end, so `.next()` gives the last label.
+    let hex = last.strip_prefix("0x").or_else(|| last.strip_prefix("0X"));
+    (!last.is_empty() && last.bytes().all(|b| b.is_ascii_digit())) || hex.is_some_and(|h| h.bytes().all(|b| b.is_ascii_hexdigit()))
+    // All digits counts, even "09", which is not a valid number. "0x" plus hex digits counts too,
+    // even when the number is too big. The IPv4 parser rejects those later.
+}
+
+/// Parse a browser-style IPv4 address into one 32-bit number (WHATWG "IPv4 parser").
+/// Browsers accept old forms from the C function `inet_aton`: "127.1", "0x7f.1", "0300.0250.0.1".
+fn parse_ipv4(host: &str) -> Option<u32> {
+    let host = host.strip_suffix('.').unwrap_or(host);
+    let mut numbers = Vec::new();
+    for part in host.split('.') {
+        numbers.push(ipv4_number(part)?);
+    }
+    if numbers.len() > 4 {
+        return None;
+    }
+    let last = numbers.pop()?;
+    // `pop` takes the last number off the list. JS: `numbers.pop()`.
+    if numbers.iter().any(|&n| n > 255) || last >= 1 << (8 * (4 - numbers.len())) {
+        return None;
+        // Each number before the last is one byte. The last number fills all the bytes that
+        // are left: with "127.1", the "1" may be up to 2^24 - 1. `1 << x` is 2 to the power x.
+    }
+    let mut ip = last;
+    for (i, n) in numbers.iter().enumerate() {
+        ip += n << (8 * (3 - i));
+        // Put each number in its byte: the first number is the top byte.
+    }
+    u32::try_from(ip).ok()
+    // `try_from` converts to a smaller number type. It fails if the number does not fit.
+}
+
+/// Parse one IPv4 part: decimal ("10"), hex ("0xa") or octal ("012"). `None` if it is not a number.
+fn ipv4_number(part: &str) -> Option<u64> {
+    if part.is_empty() {
+        return None;
+    }
+    let (digits, radix) = if let Some(hex) = part.strip_prefix("0x").or_else(|| part.strip_prefix("0X")) {
+        (hex, 16)
+    } else if part.len() > 1 && part.starts_with('0') {
+        (&part[1..], 8)
+    } else {
+        (part, 10)
+    };
+    if digits.is_empty() {
+        return Some(0); // "0x" alone is 0
+    }
+    let mut value: u64 = 0;
+    for c in digits.chars() {
+        let d = c.to_digit(radix)?;
+        // `to_digit(16)` turns "f" into 15. It gives `None` for a character that is not a digit.
+        value = value.checked_mul(radix as u64)?.checked_add(d as u64)?;
+        // A number too big for 64 bits is far too big for IPv4 anyway, so `None` is right.
+    }
+    Some(value)
 }
 
 /// Replace each "%XX" with the byte it stands for. A "%" without two hex digits stays.
@@ -312,9 +390,18 @@ mod tests {
     }
 
     #[test]
+    fn empty_port() {
+        assert_eq!(Url::parse("http://f:/c").unwrap().port, 80);
+        assert_eq!(Url::parse("http://[::1]:/").unwrap().port, 80);
+        // A ":" with no number after it means the default port.
+    }
+
+    #[test]
     fn rejects_bad_port() {
         assert!(Url::parse("http://a.com:abc/").is_err());
         // "abc" is not a number, so this must fail.
+        assert!(Url::parse("http://a.com:+80/").is_err());
+        // A port has digits only. No sign.
     }
 
     #[test]
@@ -385,6 +472,31 @@ mod tests {
         assert_eq!(Url::parse("http://例え.jp:8080/").unwrap().port, 8080);
         assert!(Url::parse("http://a\u{200D}b.com/").is_err());
         // An invisible joiner in the wrong place. More cases are in `idna.rs`.
+    }
+
+    #[test]
+    fn ipv4_hosts() {
+        let host = |h: &str| Url::parse(&format!("http://{h}/")).map(|u| u.host);
+        // Returns the parsed host, or the error.
+        let cases = [
+            ("127.0.0.1", "127.0.0.1"),
+            ("127.1", "127.0.0.1"),             // the last number fills the remaining bytes
+            ("0x7f.1", "127.0.0.1"),            // "0x" means hexadecimal
+            ("0300.0250.0.1", "192.168.0.1"),   // a leading "0" means octal
+            ("4294967295", "255.255.255.255"),  // one number for all four bytes
+            ("0x", "0.0.0.0"),                  // "0x" with no digits is 0
+            ("1.2.3.4.", "1.2.3.4"),            // one trailing dot is allowed
+            ("１２７.0.0.1", "127.0.0.1"),      // fullwidth digits are mapped first (IDNA)
+            ("1.2.3.4x", "1.2.3.4x"),           // does not end in a number, so it is a domain
+            ("1.2.3.0x1g", "1.2.3.0x1g"),       // "0x1g" is not a hex number, so this is a domain too
+        ];
+        for (input, expected) in cases {
+            assert_eq!(host(input).as_deref(), Ok(expected), "host {input}");
+        }
+        for bad in ["4294967296", "256.0.0.1", "1.2.3.4.5", "1.2.3.09", "example.255", "foo.0xffffffffffffffffface123"] {
+            assert!(host(bad).is_err(), "host {bad} should fail");
+            // Each one ends in a number, so it must be a valid IPv4 address. It is not.
+        }
     }
 
     #[test]
