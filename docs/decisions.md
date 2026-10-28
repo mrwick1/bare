@@ -101,19 +101,7 @@ Text starts with a built-in bitmap font. A TrueType parser and rasterizer come l
 
 Tabs and the event loop come before JavaScript, because JavaScript needs the event loop.
 
-| #   | Module                                                 | State   |
-| --- | ------------------------------------------------------ | ------- |
-| 1   | URL, DNS, TCP and HTTP (`url.rs`, `dns.rs`, `tcp.rs`, `http.rs`) | now     |
-| 2   | HTML tokenizer and DOM tree                            | next    |
-| 3   | CSS parser and style cascade                           | planned |
-| 4   | Layout (box model, text flow)                          | planned |
-| 5   | Window (Wayland) and paint, bitmap font                | planned |
-| 6   | Input and navigation (links, scroll)                   | planned |
-| 7   | HTTPS (TLS 1.3 and crypto, by hand)                    | planned |
-| 8   | Tabs and event loop (one engine, a task queue per tab) | planned |
-| 9   | JavaScript (interpreter, no JIT)                       | planned |
-| 10  | Tab isolation and memory accounting (heap per tab)     | planned |
-| 11  | Resource guard (watchdog, freeze, discard, reload)     | planned |
+The modules, their order and their state are in [progress.md](progress.md).
 
 ## Open questions
 
