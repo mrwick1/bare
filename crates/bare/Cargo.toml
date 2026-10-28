@@ -3,6 +3,7 @@
 name = "bare"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
 
 [dependencies]
 bare-net = { path = "../net" }
