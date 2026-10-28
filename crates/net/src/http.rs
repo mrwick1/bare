@@ -11,15 +11,14 @@
 //!
 //! Comments compare Rust with JavaScript, because you know JS.
 
-use crate::dns;
-// JS: like `import * as dns from "./dns"`: another file in this crate.
+use crate::{dns, tcp};
+// JS: like `import * as dns from "./dns"`: other files in this crate.
 use bare_url::Url;
 // JS: like `import { Url } from "bare-url"`: from another package.
-use std::io::{Read, Write};
+use std::io::{ErrorKind, Read, Write};
 // These give us the `read` and `write` functions on a connection.
 // Rust needs this import before you can call them.
-use std::net::{SocketAddr, TcpStream};
-// `TcpStream` is a connection to a server. We can send bytes and read bytes.
+use std::net::SocketAddr;
 // `SocketAddr` is an IP address plus a port.
 
 /// Fetch a URL and return the response body as text.
@@ -33,8 +32,8 @@ pub fn get(url: &Url) -> Result<String, Box<dyn std::error::Error>> {
     let addrs: Vec<SocketAddr> = dns::resolve(&url.host)?.into_iter().map(|ip| SocketAddr::new(ip, url.port)).collect();
     // Our own DNS lookup (see `dns.rs`) gives IP addresses. Add the port to each one.
     // JS: `ips.map(ip => ({ ip, port }))`.
-    let mut stream = TcpStream::connect(&addrs[..])?;
-    // Open a connection to the server. It tries each address in order until one works.
+    let mut stream = tcp::connect(&addrs)?;
+    // Open a connection to the server, with time limits (see `tcp.rs`).
     // `?` returns the error to the caller if the connection fails.
     // `mut`: in Rust, `let` is like JS `const`. `let mut` is like JS `let`. We need it
     // because sending and reading change the connection.
@@ -58,8 +57,13 @@ pub fn get(url: &Url) -> Result<String, Box<dyn std::error::Error>> {
     let mut raw = Vec::new();
     // JS: like `const raw = []`. A `Vec` is a growable list. This one holds bytes.
     // `mut` because we add data to it.
-    stream.read_to_end(&mut raw)?;
+    stream.read_to_end(&mut raw).map_err(|e| match e.kind() {
+        ErrorKind::WouldBlock | ErrorKind::TimedOut => std::io::Error::new(e.kind(), "the server stopped answering"),
+        _ => e,
+    })?;
     // Read everything the server sends, until it closes the connection.
+    // If the server sends nothing for 30 seconds, the read stops with a "would block" error.
+    // We replace that confusing name with a clear message.
     // `&mut raw` means "lend it, and you may change it".
 
     let text = String::from_utf8_lossy(&raw);
