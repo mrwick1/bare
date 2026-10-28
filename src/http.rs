@@ -37,7 +37,8 @@ pub fn get(url: &Url) -> Result<String, Box<dyn std::error::Error>> {
 
     let request = format!(
         "GET {} HTTP/1.1\r\nHost: {}\r\nConnection: close\r\nUser-Agent: bare/0.1\r\n\r\n",
-        url.path, url.host
+        url.path,
+        host_header(url)
     );
     // JS: a template string. Each `{}` is replaced by the next value. Like `${url.path}`.
     // `\r\n` is the line ending that HTTP requires.
@@ -81,6 +82,14 @@ pub fn get(url: &Url) -> Result<String, Box<dyn std::error::Error>> {
     // JS does this for you with garbage collection. Rust does not have one.
 }
 
+/// The value of the `Host:` header, like "a.com" or "[::1]:8080".
+fn host_header(url: &Url) -> String {
+    let host = if url.host.contains(':') { format!("[{}]", url.host) } else { url.host.clone() };
+    // Only IPv6 addresses contain ":". They need their "[ ]" back.
+    if url.port == 80 { host } else { format!("{host}:{}", url.port) }
+    // The port is sent only when it is not the default.
+}
+
 /// Split a raw response into headers and body at the first blank line.
 fn split_response(text: &str) -> Result<(&str, &str), String> {
     // No `pub`, so only this file can use it. JS: a function that is not exported.
@@ -107,6 +116,18 @@ mod tests {
         // JS: `expect(head).toBe(...)`. The head is everything before the blank line.
         assert_eq!(body, "hello");
         // The body is everything after it.
+    }
+
+    #[test]
+    fn sends_host_header() {
+        let header = |input| host_header(&Url::parse(input).unwrap());
+        // A small arrow function, so each check below is one line.
+        assert_eq!(header("http://a.com/"), "a.com");
+        // Port 80 is the default, so it is left out.
+        assert_eq!(header("http://a.com:8080/"), "a.com:8080");
+        // Any other port must be sent. One server can run different sites on different ports.
+        assert_eq!(header("http://[::1]:8080/"), "[::1]:8080");
+        // An IPv6 address gets its "[ ]" back, so its ":" do not mix with the port's ":".
     }
 
     #[test]

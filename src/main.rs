@@ -6,6 +6,11 @@
 
 mod http;
 // JS: like `import "./http.js"`. Rust only compiles files you list with `mod`.
+mod idna;
+// Internationalized domain names: "bücher.de" to "xn--bcher-kva.de".
+mod unicode;
+mod unicode_tables;
+// Unicode data and normalization, used by `idna`.
 mod url;
 // Same for `src/url.rs`.
 

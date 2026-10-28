@@ -18,6 +18,13 @@ Allowed:
 
 - The Rust standard library (`std`).
 - Direct calls to OS functions (for example `mmap`, `memfd_create`), declared by hand with `extern "C"`. This is `unsafe` code. Keep it small and in per-OS modules.
+- Data files from standards bodies, for example the Unicode Character Database. These are data, not code.
+
+## Unicode data
+
+`data/unicode/` holds the Unicode data files and their license. `tools/gen_unicode_tables.py` turns them into `src/unicode_tables.rs`. The generated file is committed, so a build needs no network and no Python.
+
+To update Unicode: download the new files over the old ones, run the script, and run `cargo test`.
 
 ## Code style
 

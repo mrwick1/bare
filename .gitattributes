@@ -1,0 +1,2 @@
+src/unicode_tables.rs linguist-generated=true
+data/unicode/** linguist-vendored=true
