@@ -1,0 +1,9 @@
+# The browser app. It connects the other crates.
+[package]
+name = "bare"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+bare-net = { path = "../net" }
+bare-url = { path = "../url" }

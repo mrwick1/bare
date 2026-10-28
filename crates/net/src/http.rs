@@ -12,8 +12,9 @@
 //! Comments compare Rust with JavaScript, because you know JS.
 
 use crate::dns;
-use crate::url::Url;
-// JS: like `import { Url } from "./url"`. `crate` means the root of our program.
+// JS: like `import * as dns from "./dns"`. `crate` means the root of this crate.
+use bare_url::Url;
+// JS: like `import { Url } from "bare-url"`: from another package.
 use std::io::{Read, Write};
 // JS: `import { Read, Write } from "std/io"`.
 // `Read` and `Write` are traits. A trait is like a TypeScript interface: a set of methods.

@@ -6,7 +6,11 @@
 //! After NFC, two strings that look the same also compare equal.
 //! JS has this built in: `str.normalize("NFC")`. We write it by hand (UAX #15).
 
-use crate::unicode_tables::{COMBINING_CLASS, COMPOSE, DECOMPOSE};
+pub mod tables;
+// The generated data in `tables.rs`. `pub` lets other crates use it.
+
+use crate::tables::{COMBINING_CLASS, COMPOSE, DECOMPOSE};
+// `crate` means the root of this crate.
 use std::cmp::Ordering;
 
 /// Find the value for `cp` in a sorted table of `(first, last, value)` ranges.

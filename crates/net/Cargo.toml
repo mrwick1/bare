@@ -1,0 +1,8 @@
+# Networking: DNS and HTTP. Later TCP details and TLS.
+[package]
+name = "bare-net"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+bare-url = { path = "../url" }
