@@ -1,0 +1,8 @@
+# The URL parser, with IDNA for Unicode host names (WHATWG URL Standard).
+[package]
+name = "bare-url"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+bare-unicode = { path = "../unicode" }

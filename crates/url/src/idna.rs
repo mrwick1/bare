@@ -9,8 +9,9 @@
 //! 4. Check each label: allowed characters, joiner rules, right-to-left rules.
 //! 5. Write each non-ASCII label in Punycode with an "xn--" prefix.
 
-use crate::unicode::{combining_class, find, nfc};
-use crate::unicode_tables::{BIDI, Bidi, IDNA, Idna, JOINING, Joining, MARKS};
+use bare_unicode::tables::{BIDI, Bidi, IDNA, Idna, JOINING, Joining, MARKS};
+use bare_unicode::{combining_class, find, nfc};
+// From the `bare-unicode` crate. In code, "-" in a crate name becomes "_".
 
 /// The WHATWG "domain parser" (not strict): give an ASCII host, or an error.
 pub fn domain_to_ascii(domain: &str) -> Result<String, String> {
@@ -345,7 +346,7 @@ mod tests {
     #[test]
     fn idna_conformance() {
         let mut tested = 0;
-        for line in include_str!("../data/unicode/IdnaTestV2.txt").lines() {
+        for line in include_str!("../../../data/unicode/IdnaTestV2.txt").lines() {
             // `include_str!` puts the file's text into the program at compile time.
             let line = line.split('#').next().unwrap_or("").trim();
             if line.is_empty() {

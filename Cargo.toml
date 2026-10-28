@@ -1,6 +1,12 @@
-[package]
-name = "bare"
+# The workspace: one repository, several crates. Each crate is one part of the browser.
+# A crate can only use another crate that it lists under [dependencies], and only that
+# crate's `pub` items. Cargo builds each crate on its own, so a change in `net` does not
+# rebuild `unicode`.
+
+[workspace]
+members = ["crates/*"]
+resolver = "3"
+
+[workspace.package]
 version = "0.1.0"
 edition = "2024"
-
-[dependencies]

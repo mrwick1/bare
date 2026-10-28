@@ -20,9 +20,32 @@ Allowed:
 - Direct calls to OS functions (for example `mmap`, `memfd_create`), declared by hand with `extern "C"`. This is `unsafe` code. Keep it small and in per-OS modules.
 - Data files from standards bodies, for example the Unicode Character Database. These are data, not code.
 
+## Code layout
+
+The repository is a Cargo workspace. Each browser part is one crate in `crates/`:
+
+| Crate          | Folder            | Contents                    | Uses                   |
+| -------------- | ----------------- | --------------------------- | ---------------------- |
+| `bare-unicode` | `crates/unicode/` | NFC, generated Unicode data | -                      |
+| `bare-url`     | `crates/url/`     | URL parser, IDNA            | `bare-unicode`         |
+| `bare-net`     | `crates/net/`     | DNS, HTTP                   | `bare-url`             |
+| `bare`         | `crates/bare/`    | the app (`main.rs`)         | `bare-net`, `bare-url` |
+
+Why crates, not folders in one crate:
+
+- A crate uses another crate only through its `pub` items. Each part has a clear interface, and no part can reach into another part's internals.
+- Cargo rebuilds only the crates that changed and the crates that use them. The large Unicode table builds once.
+- Each crate is tested on its own.
+
+Rules:
+
+- A new module from the module plan becomes a new crate (for example `crates/html/`, named `bare-html`).
+- Dependencies point one way: from the app down to the basic crates. No cycles.
+- Unit tests stay in the same file as the code, in a `tests` module.
+
 ## Unicode data
 
-`data/unicode/` holds the Unicode data files and their license. `tools/gen_unicode_tables.py` turns them into `src/unicode_tables.rs`. The generated file is committed, so a build needs no network and no Python.
+`data/unicode/` holds the Unicode data files and their license. `tools/gen_unicode_tables.py` turns them into `crates/unicode/src/tables.rs`. The generated file is committed, so a build needs no network and no Python.
 
 To update Unicode: download the new files over the old ones, run the script, and run `cargo test`.
 

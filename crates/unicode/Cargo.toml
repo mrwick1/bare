@@ -1,0 +1,5 @@
+# Unicode data and normalization (NFC).
+[package]
+name = "bare-unicode"
+version.workspace = true
+edition.workspace = true

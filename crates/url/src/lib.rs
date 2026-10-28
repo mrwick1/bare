@@ -6,7 +6,8 @@
 //!
 //! Comments compare Rust with JavaScript, because you know JS.
 
-use crate::idna;
+mod idna;
+// IDNA for Unicode host names, in `idna.rs`. No `pub`: only this crate uses it.
 use std::net::{Ipv4Addr, Ipv6Addr};
 // The standard library's IP address types. They can check and print addresses.
 
@@ -114,7 +115,6 @@ impl Url {
 
     /// Resolve a link found on this page, like `<a href="../about">`.
     /// JS: like `new URL(link, base)`.
-    #[allow(dead_code)] // links are followed in module 6; tests use it now
     pub fn join(&self, link: &str) -> Result<Url, String> {
         // `&self` is like `this` in JS. We read the page's URL. We do not change it.
 

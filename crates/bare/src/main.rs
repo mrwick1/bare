@@ -4,20 +4,11 @@
 //!
 //! Comments compare Rust with JavaScript, because you know JS.
 
-mod dns;
-// Our own DNS client: "example.com" to IP addresses.
-mod http;
-// JS: like `import "./http.js"`. Rust only compiles files you list with `mod`.
-mod idna;
-// Internationalized domain names: "bücher.de" to "xn--bcher-kva.de".
-mod unicode;
-mod unicode_tables;
-// Unicode data and normalization, used by `idna`.
-mod url;
-// Same for `src/url.rs`.
-
-use url::Url;
-// JS: like `import { Url } from "./url"`. Now we can write `Url`.
+use bare_net::http;
+// JS: like `import * as http from "bare-net/http"`. The other crates are listed in this
+// crate's `Cargo.toml`, like dependencies in `package.json`.
+use bare_url::Url;
+// JS: like `import { Url } from "bare-url"`. Now we can write `Url`.
 
 fn main() {
     // JS: like the top of your script. Rust runs `main` first.

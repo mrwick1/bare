@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate src/unicode_tables.rs from the Unicode data files in data/unicode/.
+"""Generate crates/unicode/src/tables.rs from the Unicode data files in data/unicode/.
 
 Run from the repo root: python3 tools/gen_unicode_tables.py
 
@@ -18,7 +18,7 @@ import os
 import re
 
 DATA = "data/unicode"
-OUT = "src/unicode_tables.rs"
+OUT = "crates/unicode/src/tables.rs"
 
 
 def rows(name):
