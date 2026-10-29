@@ -153,6 +153,7 @@ Run on 2026-10-29, archMachine. 450,000 fuzz inputs (3 targets, 3 seeds) found o
 | Where | Input | Before | After |
 | --- | --- | --- | --- |
 | CSS selector | `:nth-child(2n` + a wide character | panic (a slice inside a character) | no panic |
+| CSS selector | 50,000 classes on one element, and 50,000 rules on them | 13 s (the class list was read for each test) | 70 ms, 500,000 take 0.9 s. `Document::has_class` makes a set of the classes of an element when its `class` attribute is 128 bytes or more. Memory: the names of that list, only for such an element |
 | CSS selector | `:nth-child` and `:nth-of-type` on 50,000 siblings | 5 s (the siblings were counted for each element), 5,000 took 50 ms | 4.7 ms, 500,000 take 46 ms. `Document::sibling_place` makes all the places of a parent in one pass, the first time. Memory: 8 bytes for each node, only for a page that uses `:nth-*` (10 MB at 500,000 siblings) |
 | HTML tokenizer | one tag with 20,000 attributes | 311 ms (a scan for each name), 200,000 took over 20 s | 5 ms, 200,000 take 84 ms |
 | HTML tree builder | 20,000 nested `<i class=cN>` (all different) | 1.2 s, 20 s at 80,000 | 39 ms, 200,000 take 375 ms |
@@ -166,7 +167,6 @@ Run on 2026-10-29, archMachine. 450,000 fuzz inputs (3 targets, 3 seeds) found o
 
 Not fixed:
 
-- Many classes on one element and many rules on them (5,000 and 5,000: 126 ms, 50,000 and 50,000: 13 s). The class list is scanned for each test.
 - The cap of 256 on the Noah's Ark scan changes the tree only for a page with more than 256 formatting elements open between two identical ones.
 - The three timeouts of `net-silent-server`, `net-drip-server` and `net-huge-content-length` are the wait of the client (30 s for each read, 120 s for the whole reply), not a bug. They are longer than the 20 s of the test.
 - The 100x runs of `css-rules`, `css-selector-list` and `html-decode-bytes` stop at 2 GB because the input has 130 MB to 500 MB. Memory grows in line with the input.
