@@ -86,7 +86,7 @@ What each done topic covers:
 
 ## Streaming HTML
 
-`encoding::Decoder` and `tree::Parser` read a page in pieces and give the same tree as the whole page. Details and checks: [resources.md](resources.md#html-in-pieces). `bare` does not use them yet.
+`encoding::Decoder` and `tree::Parser` read a page in pieces and give the same tree as the whole page. Details and checks: [resources.md](resources.md#html-in-pieces). `bare` uses them with `Client::get_stream`: the page is parsed while its bytes arrive.
 
 ## Known gaps
 

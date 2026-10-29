@@ -14,6 +14,7 @@ use bare_net::http;
 // JS: like `import`. `bare_net` is another crate (package) in this project.
 // It is listed in this crate's `Cargo.toml`, like a dependency in `package.json`.
 use bare_url::Url;
+use std::io::{Read, Write};
 // Now we can write `Url` instead of `bare_url::Url`.
 
 fn main() {
@@ -48,37 +49,62 @@ fn main() {
         .map_err(|e| e.clone().into())
         // `|e| e.into()` is an arrow function: `e => e.into()`.
         // It changes the error into the kind of error that `http::get` uses.
-        .and_then(|u| http::Client::new().get(u));
-    // If the URL was good, fetch the page. If not, skip this step and keep the error.
+        .and_then(|u| http::Client::new().get_stream(u));
+    // If the URL was good, send the request and read the headers. The body is still on the connection.
 
-    match result {
-        Ok(response) => {
-            if response.status != 200 {
-                eprintln!("status: {}", response.status);
-                // A 404 page still has a body, so we print it. We also tell you the status.
-            }
-            let text = encoding::decode(&response.body, response.header("content-type"));
-            // Find the encoding of the page and turn the bytes into text.
-            if source {
-                println!("{text}");
-                // `--source`: print the page as it is. JS: `console.log(text)`.
-            } else {
-                let mut doc = tree::parse(&text);
-                // Build the DOM tree.
-                if styles {
-                    print!("{}", computed_styles(&mut doc, url.as_ref().ok()));
-                    // `--styles`: the style of each element.
-                } else {
-                    print!("{}", doc.dump());
-                    // Print the tree, one line for each node.
-                }
-            }
-        }
+    let mut streamed = match result {
+        Ok(streamed) => streamed,
         Err(e) => {
             eprintln!("error: {e}");
             // It failed: print the error.
             std::process::exit(1);
             // Stop with an error number.
+        }
+    };
+    if streamed.response.status != 200 {
+        eprintln!("status: {}", streamed.response.status);
+        // A 404 page still has a body, so we print it. We also tell you the status.
+    }
+    let mut decoder = encoding::Decoder::new(streamed.response.header("content-type"));
+    // Find the encoding of the page, and turn the bytes into text, piece by piece.
+    let mut parser = tree::Parser::new();
+    let mut out = std::io::stdout().lock();
+    let mut piece = vec![0u8; 64 * 1024];
+    // We read the body in pieces of 64 KB. Each piece goes on at once: to the screen (`--source`)
+    // or to the parser. The whole page is never in memory as bytes, and never as text.
+    // JS: like `for await (const chunk of response.body)`.
+    loop {
+        let n = match streamed.body.read(&mut piece) {
+            Ok(0) => break,
+            Ok(n) => n,
+            Err(e) => {
+                eprintln!("error: {e}");
+                std::process::exit(1);
+            }
+        };
+        let text = decoder.feed(&piece[..n]);
+        if source {
+            out.write_all(text.as_bytes()).ok();
+        } else {
+            parser.feed(&text);
+        }
+    }
+    let text = decoder.finish();
+    if source {
+        out.write_all(text.as_bytes()).ok();
+        out.write_all(b"\n").ok();
+        // `--source`: print the page as it is. JS: `console.log(text)`.
+    } else {
+        parser.feed(&text);
+        let mut doc = parser.finish();
+        // Build the DOM tree.
+        drop(out);
+        if styles {
+            print!("{}", computed_styles(&mut doc, url.as_ref().ok()));
+            // `--styles`: the style of each element.
+        } else {
+            print!("{}", doc.dump());
+            // Print the tree, one line for each node.
         }
     }
 }
