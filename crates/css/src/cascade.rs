@@ -56,9 +56,10 @@ use std::hash::BuildHasherDefault;
 
 use bare_html::dom::{Atom, Document, Fnv, NodeData, NodeId};
 
+use crate::at_rules;
 use crate::color::Color;
 use crate::matching::matches;
-use crate::parser::{Rule, parse_declarations, parse_stylesheet};
+use crate::parser::{AtBody, Rule, parse_declarations, parse_stylesheet};
 use crate::selector::{Combinator, Selector, Simple, parse_selector_list};
 use crate::values::{Declared, Keyword, Length, Property, Value, parse_declaration};
 
@@ -88,8 +89,9 @@ type Buckets<K> = HashMap<K, Vec<u32>, BuildHasherDefault<Fnv>>;
 // A map from the name of an id, a class or a tag to the rules for it. The hasher is the fast one of the DOM.
 
 /// All the rules of all the style sheets, and the index to find them.
-#[derive(Default)]
 pub struct RuleSet {
+    /// The width and height of the window in pixels. `@media` reads it when a rule is added, `vw` and `vh` read it in `compute`.
+    viewport: (f32, f32),
     entries: Vec<Entry>,
     /// The declarations of all rules, one after the other.
     decls: Vec<Declared>,
@@ -101,8 +103,8 @@ pub struct RuleSet {
 }
 
 impl RuleSet {
-    pub fn new() -> RuleSet {
-        RuleSet::default()
+    pub fn new(viewport: (f32, f32)) -> RuleSet {
+        RuleSet { viewport, entries: Vec::new(), decls: Vec::new(), by_id: Buckets::default(), by_class: Buckets::default(), by_tag: Buckets::default(), other: Vec::new() }
     }
 
     /// The number of selectors in the set.
@@ -117,8 +119,30 @@ impl RuleSet {
     /// Read a style sheet and add its rules. Add the style sheets in the order of the page: a later rule wins a tie.
     /// The names of the selectors go in the name table of `doc`, so call this before `compute`.
     pub fn add(&mut self, doc: &mut Document, text: &str, origin: Origin) {
-        for rule in parse_stylesheet(text) {
-            let Rule::Style(rule) = rule else { continue };
+        self.add_rules(doc, parse_stylesheet(text), origin, 0);
+    }
+
+    /// Add the rules. A `@media`, `@supports` or `@layer` block that says yes adds the rules inside it. Other at-rules add nothing:
+    /// `@import` is for the app (see `imports`), and `@container` waits for layout.
+    fn add_rules(&mut self, doc: &mut Document, rules: Vec<Rule<'_>>, origin: Origin, depth: usize) {
+        for rule in rules {
+            let rule = match rule {
+                Rule::Style(rule) => rule,
+                Rule::At(at) => {
+                    let AtBody::Rules(inner) = at.body else { continue };
+                    let yes = match &*at.name {
+                        "media" => at_rules::media_matches(at.prelude, self.viewport),
+                        "supports" => at_rules::supports_matches(doc, at.prelude),
+                        "layer" => true,
+                        _ => false,
+                    };
+                    // The parser stops at depth 32, so this is a safety net for the stack.
+                    if yes && depth < 32 {
+                        self.add_rules(doc, inner, origin, depth + 1);
+                    }
+                    continue;
+                }
+            };
             // A rule with a selector that is not valid is dropped, with all its selectors (the standard says so).
             let Some(selectors) = parse_selector_list(rule.prelude, doc) else { continue };
             let start = self.decls.len();
@@ -156,12 +180,11 @@ impl RuleSet {
         self.entries.push(Entry { selector, decls, origin, ancestors });
     }
 
-    /// Find the style of every element that is shown. `viewport` is the width and height of the window in pixels,
-    /// for `vw` and `vh`. The selectors must come from `add` with this same `doc`.
-    pub fn compute(&self, doc: &Document, viewport: (f32, f32)) -> Styles {
+    /// Find the style of every element that is shown. The selectors must come from `add` with this same `doc`.
+    pub fn compute(&self, doc: &Document) -> Styles {
         let mut styles = Styles { styles: vec![ComputedStyle::initial()], of_node: vec![NONE; doc.len()] };
         // Style 0 is the starting style. It is the parent style of the `html` element.
-        let mut cx = Cx { viewport, root_font_size: 16.0 };
+        let mut cx = Cx { viewport: self.viewport, root_font_size: 16.0 };
         let style_atom = doc.find_atom("style");
         let mut filter = AncestorFilter::new();
         let mut memo = Memo::default();
@@ -698,6 +721,11 @@ fn ancestor_hashes(selector: &Selector) -> [u32; 4] {
     out
 }
 
+/// The addresses of the `@import` rules at the start of a style sheet that match the window (see `at_rules::imports`).
+pub fn imports(doc: &mut Document, text: &str, viewport: (f32, f32)) -> Vec<String> {
+    at_rules::imports(doc, &parse_stylesheet(text), viewport)
+}
+
 /// What a page asks us to read for style, in the order of the page.
 #[derive(Debug, PartialEq)]
 pub enum Source {
@@ -707,10 +735,10 @@ pub enum Source {
     Link(String),
 }
 
-/// The `<style>` and `<link rel=stylesheet>` elements, in order. One with a `media` that does not say `all` or `screen` is left out,
-/// and so is an alternate style sheet (`rel="alternate stylesheet"`): a browser does not use it unless the user asks.
-/// An empty `media` is good. (The standard has a full language for media queries. We only read the type.)
-pub fn sources(doc: &Document) -> Vec<Source> {
+/// The `<style>` and `<link rel=stylesheet>` elements, in order. One with a `media` that does not match a window of `viewport` pixels
+/// is left out, and so is an alternate style sheet (`rel="alternate stylesheet"`): a browser does not use it unless the user asks.
+/// An empty `media` is good.
+pub fn sources(doc: &Document, viewport: (f32, f32)) -> Vec<Source> {
     // A name that no node in the page has cannot be on any element, so `None` is a good answer for a name that is not in the table.
     let (style, link, media, rel, href) = (doc.find_atom("style"), doc.find_atom("link"), doc.find_atom("media"), doc.find_atom("rel"), doc.find_atom("href"));
     let attr = |el, name: Option<Atom>| name.and_then(|n| doc.attr(el, n));
@@ -718,7 +746,7 @@ pub fn sources(doc: &Document) -> Vec<Source> {
     walk(doc, &mut |el| {
         let NodeData::Element { name, .. } = *doc.data(el) else { return };
         let (is_style, is_link) = (Some(name) == style, Some(name) == link);
-        if !(is_style || is_link) || !media_ok(attr(el, media)) {
+        if !(is_style || is_link) || !attr(el, media).is_none_or(|m| at_rules::media_matches(m, viewport)) {
             return;
         }
         if is_style {
@@ -739,13 +767,6 @@ pub fn sources(doc: &Document) -> Vec<Source> {
     out
 }
 
-fn media_ok(media: Option<&str>) -> bool {
-    media.is_none_or(|m| {
-        let m = m.trim();
-        m.is_empty() || m.split(',').any(|q| matches!(q.split_whitespace().next().map(str::to_ascii_lowercase).as_deref(), Some("all" | "screen")))
-    })
-}
-
 /// Call `f` for each node of the tree, in the order of the page. A loop with a stack.
 fn walk(doc: &Document, f: &mut dyn FnMut(NodeId)) {
     let mut stack = vec![doc.root()];
@@ -764,15 +785,17 @@ mod tests {
     use super::*;
     use bare_html::tree::parse;
 
+    const VIEW: (f32, f32) = (1000.0, 500.0);
+
     /// The styles of a page with the UA sheet and the author sheets.
     fn styles(html: &str, sheets: &[&str]) -> (Document, Styles) {
         let mut doc = parse(html);
-        let mut rules = RuleSet::new();
+        let mut rules = RuleSet::new(VIEW);
         rules.add(&mut doc, UA_CSS, Origin::UserAgent);
         for s in sheets {
             rules.add(&mut doc, s, Origin::Author);
         }
-        let styles = rules.compute(&doc, (1000.0, 500.0));
+        let styles = rules.compute(&doc);
         (doc, styles)
     }
 
@@ -875,10 +898,10 @@ mod tests {
     fn important_of_the_browser_beats_the_page() {
         let sheet = "p { display: inline !important }";
         let mut doc = parse("<p id=p>x</p>");
-        let mut rules = RuleSet::new();
+        let mut rules = RuleSet::new(VIEW);
         rules.add(&mut doc, "p { display: block !important }", Origin::UserAgent);
         rules.add(&mut doc, sheet, Origin::Author);
-        let styles = rules.compute(&doc, (1.0, 1.0));
+        let styles = rules.compute(&doc);
         assert_eq!(styles.style(by_id(&doc, "p")).unwrap().get(Property::Display), Value::Keyword(Keyword::Block));
     }
 
@@ -1051,9 +1074,9 @@ mod tests {
         for _ in 0..50_000 {
             el = doc.insert_element(el, None, "div", &[] as &[(&str, &str)]);
         }
-        let mut rules = RuleSet::new();
+        let mut rules = RuleSet::new(VIEW);
         rules.add(&mut doc, "div div div { color: red }", Origin::Author);
-        let styles = rules.compute(&doc, (1.0, 1.0));
+        let styles = rules.compute(&doc);
         assert_eq!(styles.style(el).unwrap().get(Property::TextColor), rgb(255, 0, 0));
         assert_eq!(styles.unique(), 2, "all the divs share one style, and `html`... no `html` here: the first `div` is the root");
     }
@@ -1064,7 +1087,7 @@ mod tests {
                     <link rel=stylesheet href=print.css media=print><style media='screen and (min-width: 1px)'>q{}</style>\
                     <style media=print>r{}</style><link rel=stylesheet href=c.css media=''><p>x</p>";
         assert_eq!(
-            sources(&parse(html)),
+            sources(&parse(html), VIEW),
             [
                 Source::Link("a.css".into()),
                 Source::Inline("p{}".into()),
@@ -1072,8 +1095,8 @@ mod tests {
                 Source::Link("c.css".into()),
             ]
         );
-        assert_eq!(sources(&parse("<p>x</p>")), []);
-        assert_eq!(sources(&parse("<link rel=stylesheet href=a.css>")), [Source::Link("a.css".into())]);
+        assert_eq!(sources(&parse("<p>x</p>"), VIEW), []);
+        assert_eq!(sources(&parse("<link rel=stylesheet href=a.css>"), VIEW), [Source::Link("a.css".into())]);
     }
 
     #[test]
@@ -1102,5 +1125,75 @@ mod tests {
             let (doc, s) = styles(&html, &[&sheet]);
             let _ = s.dump(&doc);
         }
+    }
+
+    #[test]
+    fn at_rules_apply_when_they_match() {
+        let color = |sheet: &str| get("<p id=p>x</p>", &[sheet], "p", Property::TextColor);
+        let red = Value::Color(Color {
+            r: 255,
+            g: 0,
+            b: 0,
+            a: 255,
+        });
+        let black = color("");
+        for (sheet, want) in [
+            (
+                "@media screen and (min-width: 600px) { p { color: red } }",
+                true,
+            ),
+            ("@media (min-width: 2000px) { p { color: red } }", false),
+            ("@media print { p { color: red } }", false),
+            ("@media not print { p { color: red } }", true),
+            ("@supports (display: grid) { p { color: red } }", true),
+            ("@supports (display: nonsense) { p { color: red } }", false),
+            (
+                "@supports not (display: nonsense) { p { color: red } }",
+                true,
+            ),
+            ("@layer base { p { color: red } }", true),
+            ("@layer a, b;", false),
+            (
+                "@media screen { @supports (color: red) { @media (min-width: 1px) { p { color: red } } } }",
+                true,
+            ),
+            (
+                "@media screen { @supports (color: nonsense) { p { color: red } } }",
+                false,
+            ),
+            ("@container (min-width: 1px) { p { color: red } }", false),
+            (
+                "@font-face { color: red } @keyframes k { from { color: red } }",
+                false,
+            ),
+        ] {
+            assert_eq!(color(sheet) == red, want, "{sheet}");
+            assert!(want || color(sheet) == black, "{sheet}");
+        }
+    }
+
+    #[test]
+    fn rules_in_media_keep_the_order_of_the_page() {
+        let sheet =
+            "p { color: blue } @media (min-width: 1px) { p { color: red } } p { color: lime }";
+        assert_eq!(
+            get("<p id=p>x</p>", &[sheet], "p", Property::TextColor),
+            Value::Color(Color {
+                r: 0,
+                g: 255,
+                b: 0,
+                a: 255
+            })
+        );
+        let sheet = "@media (min-width: 1px) { p { color: red } } p { color: blue }";
+        assert_eq!(
+            get("<p id=p>x</p>", &[sheet], "p", Property::TextColor),
+            Value::Color(Color {
+                r: 0,
+                g: 0,
+                b: 255,
+                a: 255
+            })
+        );
     }
 }
