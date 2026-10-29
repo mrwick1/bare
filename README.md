@@ -2,11 +2,11 @@
 
 `bare` is a web browser written from scratch in Rust. Its purpose is to learn how the core parts of a browser work.
 
-`bare` uses no crates. Every part is written by hand: URL parsing, DNS, HTTP, and later TLS, HTML, CSS, layout, paint and JavaScript. Only the Rust standard library and direct OS calls are allowed.
+`bare` uses no crates. Every part is written by hand: URL parsing, DNS, HTTP, HTML, and later TLS, CSS, layout, paint and JavaScript. Only the Rust standard library and direct OS calls are allowed.
 
 ## Status
 
-Early work. Today `bare` fetches a page over `http://` and prints its source.
+Early work. Today `bare` fetches a page over `http://`, builds its DOM tree and prints the tree.
 
 What is done, what comes next and what is missing: [docs/progress.md](docs/progress.md).
 
@@ -17,7 +17,8 @@ What is done, what comes next and what is missing: [docs/progress.md](docs/progr
 You need Rust (edition 2024).
 
 ```sh
-cargo run -- http://example.com
+cargo run -- http://example.com            # print the DOM tree
+cargo run -- http://example.com --source   # print the page source
 cargo test
 ```
 
@@ -30,7 +31,7 @@ Linux is the first target. Windows and macOS come later.
 | `crates/bare/`      | The app                                             |
 | `crates/net/`       | DNS, TCP and HTTP                                   |
 | `crates/url/`       | URL parser and IDNA                                 |
-| `crates/html/`      | HTML: encoding, tokenizer and DOM tree              |
+| `crates/html/`      | HTML: encoding, tokenizer, DOM tree, tree builder   |
 | `crates/unicode/`   | NFC and Unicode data tables                         |
 | `data/unicode/`     | Unicode data files and their license                |
 | `data/html/`        | The WHATWG entity list and its license              |
