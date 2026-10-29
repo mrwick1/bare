@@ -197,6 +197,11 @@ fn main() {
     // A deep tree: 20,000 nested divs. The time must grow with the depth, not with its square.
     let deep = format!("{}x{}", "<div>".repeat(20_000), "</div>".repeat(20_000));
     step("html: tree, 20,000 nested divs", || bare_html::tree::parse(&deep));
+    // Formatting tags in the wrong place: the adoption agency algorithm and the list of active formatting elements.
+    let misnested = format!("{}x{}", "<b><div>".repeat(20_000), "</b>".repeat(20_000));
+    step("html: tree, 20,000 misnested <b><div>", || bare_html::tree::parse(&misnested));
+    let reopened = "<p><b><i>x</p>y".repeat(20_000);
+    step("html: tree, 20,000 reopened <b><i>", || bare_html::tree::parse(&reopened));
 
     let mut nodes = 0;
     let mut stack = vec![doc.root()];
