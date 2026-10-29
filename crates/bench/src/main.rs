@@ -194,6 +194,10 @@ fn main() {
     let styles = step("css: styles of 200,000 elements", || rules.compute(&doc, (1280.0, 800.0)));
     println!("{} rules, {} different styles", rules.len(), styles.unique());
 
+    // A deep tree: 20,000 nested divs. The time must grow with the depth, not with its square.
+    let deep = format!("{}x{}", "<div>".repeat(20_000), "</div>".repeat(20_000));
+    step("html: tree, 20,000 nested divs", || bare_html::tree::parse(&deep));
+
     let mut nodes = 0;
     let mut stack = vec![doc.root()];
     while let Some(id) = stack.pop() {

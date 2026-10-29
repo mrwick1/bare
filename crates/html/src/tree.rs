@@ -34,7 +34,7 @@ use crate::tokenizer::{Attr, Token, tokenize};
 pub fn parse(input: &str) -> Document {
     let mut builder = Builder {
         doc: Document::new(),
-        open: Vec::new(),
+        open: OpenStack::default(),
         mode: Mode::Initial,
         text_return: Mode::InBody,
         head: None,
@@ -95,9 +95,58 @@ const HEADINGS: &[&str] = &["h1", "h2", "h3", "h4", "h5", "h6"];
 /// Parts of a table. Content that is not a table part cannot be a child of these.
 const TABLE_PARTS: &[&str] = &["table", "tbody", "tfoot", "thead", "tr"];
 
+/// The stack of open elements. It is a `Vec` of nodes, and it also counts the open `<p>` elements.
+///
+/// Why: every block start tag (`<div>`, `<ul>`, ...) must close an open `<p>`, and to know if there is one we
+/// look down the whole stack. On a page with 10,000 nested `<div>` that is 10,000 steps for each `<div>`,
+/// 50 million in all (the time grows with the square of the depth). With the count, a stack with no `<p>`
+/// in it answers at once. Reading is the same as for a `Vec` (`Deref` gives the slice of nodes), but a change must go
+/// through these methods, so that the count stays right.
+#[derive(Default)]
+struct OpenStack {
+    nodes: Vec<NodeId>,
+    is_p: Vec<bool>,
+    // For each node: is it a `<p>`? We need this when the node leaves, and we have no `Document` here.
+    p_count: usize,
+}
+
+impl std::ops::Deref for OpenStack {
+    type Target = [NodeId];
+    // JS: like a class that is an array: `stack.length`, `stack[i]` and `for...of` all work.
+
+    fn deref(&self) -> &[NodeId] {
+        &self.nodes
+    }
+}
+
+impl OpenStack {
+    fn push(&mut self, id: NodeId, is_p: bool) {
+        self.nodes.push(id);
+        self.is_p.push(is_p);
+        self.p_count += usize::from(is_p);
+    }
+
+    fn pop(&mut self) -> Option<NodeId> {
+        self.p_count -= usize::from(self.is_p.pop()?);
+        self.nodes.pop()
+    }
+
+    /// Keep the first `len` nodes.
+    fn truncate(&mut self, len: usize) {
+        while self.nodes.len() > len {
+            self.pop();
+        }
+    }
+
+    fn remove(&mut self, i: usize) {
+        self.p_count -= usize::from(self.is_p.remove(i));
+        self.nodes.remove(i);
+    }
+}
+
 struct Builder {
     doc: Document,
-    open: Vec<NodeId>,
+    open: OpenStack,
     // The stack of open elements. The last one is the current node. JS: an array with `push` and `pop`.
     mode: Mode,
     text_return: Mode,
@@ -158,7 +207,8 @@ impl Builder {
         let (parent, before) = self.place();
         let id = self.doc.insert_element(parent, before, name, attrs);
         if push {
-            self.open.push(id);
+            let is_p = self.is(id, &["p"]);
+            self.open.push(id, is_p);
         }
         id
     }
@@ -218,7 +268,7 @@ impl Builder {
 
     /// Close an open `<p>`, if one is in button scope.
     fn close_p(&mut self) {
-        if self.in_scope(&["p"], &["button"]) {
+        if self.open.p_count > 0 && self.in_scope(&["p"], &["button"]) {
             self.close_implied("p");
             self.pop_until(&["p"]);
         }
@@ -406,7 +456,7 @@ impl Builder {
                 if matches!(&*name, "base" | "basefont" | "bgsound" | "link" | "meta" | "title" | "style" | "script" | "noframes") {
                     // A head element after the head has ended. It still goes into the head.
                     let head = self.head.expect("the head exists in this mode");
-                    self.open.push(head);
+                    self.open.push(head, false);
                     self.head_tag(&name, &attrs);
                     // Put the head on the stack for a moment, so the element goes into it.
                     if let Some(i) = self.open.iter().rposition(|&n| n == head) {
@@ -645,7 +695,7 @@ impl Builder {
                 }
             }
             "p" => {
-                if !self.in_scope(&["p"], &["button"]) {
+                if self.open.p_count == 0 || !self.in_scope(&["p"], &["button"]) {
                     self.insert_element("p", &[], true);
                     // `</p>` with no open `<p>` makes an empty one. Browsers do this.
                 }
@@ -1141,5 +1191,28 @@ mod tests {
             assert_eq!(doc.parent(child), Some(id));
             check_links(doc, child);
         }
+    }
+
+    #[test]
+    fn open_p_count_stays_right() {
+        // A `p` that is far down the stack still closes when a `div` starts, after other elements were closed with it.
+        let dump = parse("<p><b><i>x<div>y</div>z").dump();
+        assert_eq!(dump, parse("<p><b><i>x</i></b></p><div>y</div>z").dump());
+        // `</p>` with no open `p` makes an empty one, also after the count went up and down.
+        let dump = parse("<p>a</p></p><div>b</div></p>").dump();
+        assert_eq!(dump.matches("<p>").count(), 3, "{dump}");
+        // The count goes down when a table closes the `p` inside it, and when `truncate` drops many elements.
+        let dump = parse("<div><p><span><p>x</span></div></p>y").dump();
+        assert_eq!(dump.matches("<p>").count(), 3, "{dump}");
+    }
+
+    #[test]
+    fn deep_nesting_is_linear() {
+        // 50,000 nested divs, then a stray `</p>` for each. With the old stack walk this took about 4 seconds.
+        let html = format!("{}x{}", "<div>".repeat(50_000), "</p></div>".repeat(50_000));
+        let start = std::time::Instant::now();
+        let doc = parse(&html);
+        assert!(start.elapsed().as_secs() < 2, "{:?}", start.elapsed());
+        assert!(doc.len() > 100_000);
     }
 }
