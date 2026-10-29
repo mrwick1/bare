@@ -31,9 +31,16 @@ Machine: archMachine, release build, 2026-10-29.
 | 3      | Cascade: add 10,000 rules    | 11   | 7.1     | 5.9     | 10,000 rules, with `ua.css` (about 500 bytes for each rule: `Selector` has 2 `Vec`s) |
 | 3      | Cascade: styles of 200,000 elements | 117 | 7.6 | 4.4 | 5,003 different styles: 22 bytes kept for each element. 0.6 µs for each element |
 
+DNS (2026-10-29, real network, so the numbers move with the resolver):
+
+| Step | Before | After | Why |
+| --- | --- | --- | --- |
+| Cold lookup (cache of the OS resolver flushed) | about 113 ms (2 round trips of 56 ms) | about 56 ms | The A and AAAA questions go out at the same time. The noise of the upstream resolver is large (55 ms to 2 s), so only a run with a steady network shows the gain |
+| Lookup that hits our cache | 47 µs | 0.4 µs | The cache comes before the read of `/etc/hosts` |
+
 Not measured:
 
-- DNS, TCP and HTTP. They wait for the network, so a CPU benchmark says little. `parse_response` is private.
+- TCP and HTTP. They wait for the network, so a CPU benchmark says little. `parse_response` is private.
 - The `bare` binary is 2.1 MB (release build).
 
 History:
