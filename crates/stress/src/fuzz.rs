@@ -220,7 +220,23 @@ pub fn run(args: &[String]) {
 fn fuzz_html(input: &[u8]) -> Result<(), String> {
     let text = bare_html::encoding::decode(input, None);
     let doc = tree::parse(&text);
-    check_tree(&doc)
+    check_tree(&doc)?;
+    // The same page in random pieces, bytes and text: it must give the same tree.
+    let mut rng = Rng(input.len() as u64 ^ 0x9e37_79b9 | 1);
+    let mut decoder = bare_html::encoding::Decoder::new(None);
+    let mut parser = tree::Parser::new();
+    let mut from = 0;
+    while from < input.len() {
+        let size = if rng.below(2) == 0 { 8 } else { 3000 };
+        let to = (from + 1 + rng.below(size)).min(input.len());
+        parser.feed(&decoder.feed(&input[from..to]));
+        from = to;
+    }
+    parser.feed(&decoder.finish());
+    if parser.finish().dump() != doc.dump() {
+        return Err("a page in pieces gives another tree than the whole page".into());
+    }
+    Ok(())
 }
 
 fn check_tree(doc: &Document) -> Result<(), String> {

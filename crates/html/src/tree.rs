@@ -29,7 +29,7 @@
 use crate::dom::{Document, NodeData, NodeId};
 use std::borrow::Cow;
 
-use crate::tokenizer::{Attr, Token, tokenize};
+use crate::tokenizer::{Attr, Mark, Token, Tokens, tokenize};
 
 /// How many entries of the list of active formatting elements the "Noah's Ark" check reads. The standard has no limit,
 /// but then 20,000 nested `<i class=a1><i class=a2>...` cost 200 million comparisons. With a limit, an identical element
@@ -38,24 +38,63 @@ const NOAH_SCAN: usize = 256;
 
 /// Parse a page (already decoded to text) into a DOM tree.
 pub fn parse(input: &str) -> Document {
-    let mut builder = Builder {
-        doc: Document::new(),
-        open: OpenStack::default(),
-        afe: Vec::new(),
-        mode: Mode::Initial,
-        text_return: Mode::InBody,
-        head: None,
-        form: None,
-        skip_newline: false,
-        foster: false,
-    };
+    let mut builder = Builder::new();
     for token in tokenize(input) {
         builder.process(token);
     }
-    builder.finish();
-    builder.doc.shrink_to_fit();
-    // A `Vec` that grows keeps spare room (up to twice as much). The page is read, so give the room back.
-    builder.doc
+    builder.done()
+}
+
+/// A parser for a page that arrives in pieces. Call `feed` for each piece of text, then `finish`.
+/// The tree is the same as `parse` gives for the whole text, wherever the pieces are cut.
+/// JS: like `TextDecoderStream` feeding a parser. You push chunks, and you close the stream.
+/// It keeps only the part of the page that is not read yet: a tag that is cut in the middle, or a
+/// long text or script that waits for its end.
+pub struct Parser {
+    builder: Builder,
+    buf: String,
+    // The text that the tokenizer did not use yet.
+    mark: Mark,
+    retry_at: usize,
+    // A cut token that is very long (a 10 MB script) would be read again with each piece: slow.
+    // So we wait until `buf` is twice as big as when we last stopped. The work is then linear.
+}
+
+impl Parser {
+    pub fn new() -> Parser {
+        Parser { builder: Builder::new(), buf: String::new(), mark: Mark::default(), retry_at: 0 }
+    }
+
+    /// Add the next piece of the page. Each token that is complete goes to the tree at once.
+    pub fn feed(&mut self, text: &str) {
+        self.buf.push_str(text);
+        if self.buf.len() < self.retry_at {
+            return;
+        }
+        let mut tokens = Tokens::new(&self.buf, self.mark, true);
+        for token in &mut tokens {
+            self.builder.process(token);
+        }
+        let mark = tokens.mark();
+        self.buf.drain(..mark.done());
+        // Drop the text that we used. What is left is small, unless a token is very long.
+        self.mark = mark.rebased();
+        self.retry_at = self.buf.len() * 2;
+    }
+
+    /// The page is over. Read what is left, and give the tree.
+    pub fn finish(mut self) -> Document {
+        for token in Tokens::new(&self.buf, self.mark, false) {
+            self.builder.process(token);
+        }
+        self.builder.done()
+    }
+}
+
+impl Default for Parser {
+    fn default() -> Parser {
+        Parser::new()
+    }
 }
 
 /// The insertion modes that we use. The names are the ones in the standard.
@@ -248,6 +287,28 @@ struct Builder {
 }
 
 impl Builder {
+    fn new() -> Builder {
+        Builder {
+            doc: Document::new(),
+            open: OpenStack::default(),
+            afe: Vec::new(),
+            mode: Mode::Initial,
+            text_return: Mode::InBody,
+            head: None,
+            form: None,
+            skip_newline: false,
+            foster: false,
+        }
+    }
+
+    /// The input is over: close the tree and give it.
+    fn done(mut self) -> Document {
+        self.finish();
+        self.doc.shrink_to_fit();
+        // A `Vec` that grows keeps spare room (up to twice as much). The page is read, so give the room back.
+        self.doc
+    }
+
     // ---- Small helpers ----
 
     /// The current node: the top of the stack. Before the first element it is the document.
@@ -1678,5 +1739,63 @@ mod tests {
             assert!(start.elapsed().as_secs() < 3, "{:?}", start.elapsed());
             assert!(doc.len() > 1);
         }
+    }
+
+    /// The tree of a page that arrives in the given pieces.
+    fn streamed(pieces: &[&str]) -> String {
+        let mut parser = Parser::new();
+        for piece in pieces {
+            parser.feed(piece);
+        }
+        parser.finish().dump()
+    }
+
+    const PAGES: &[&str] = &[
+        "<!doctype html><html><head><title>t &amp; u</title><style>p>b{}</style></head><body><p class=a id='b' c=\"d\">x<b>y<i>z</b>w</i></p></body></html>",
+        "<script>if (a < b && c) { x = '</scr' + 'ipt>'; }</script><p>after</SCRIPT ><textarea>&lt;<b></textarea>",
+        "&amp;&lt;&#65;&#x41;&notin;&nbsp&copy;&notit;&#0;&#x110000;&amp<p a='&amp;&lt' b=&copy=1 c=&copyx>",
+        "<!-- c --><!--> <!---> <!-- a --!> <!x y><?php ?><![CDATA[x]]><!DOCTYPE html PUBLIC 'x'>t",
+        "<table><tr><td>a<td>b<tr><th>c</table><b>x<table><td><i>y</table><br/><p/>a < b <3 </> </ x>",
+        "<p>caf\u{e9} \u{1F600} \u{4e2d}\u{6587}<pre>\n\nx</pre><plaintext></plaintext><b>",
+        "<div a=1 a=2 b",
+        "text only, no tags & no end &#12",
+        "<p>a</p></ti",
+    ];
+
+    #[test]
+    fn a_page_in_pieces_gives_the_same_tree() {
+        for page in PAGES {
+            let whole = parse(page).dump();
+            let cuts: Vec<usize> = (0..=page.len()).filter(|&i| page.is_char_boundary(i)).collect();
+            for &i in &cuts {
+                assert_eq!(streamed(&[&page[..i], &page[i..]]), whole, "cut at {i} in {page:?}");
+            }
+            // Cut it in three, at every pair of places. The pages are short, so this is fast.
+            for (n, &i) in cuts.iter().enumerate() {
+                for &j in &cuts[n..] {
+                    assert_eq!(streamed(&[&page[..i], &page[i..j], &page[j..]]), whole, "cuts at {i} and {j} in {page:?}");
+                }
+            }
+            // One letter at a time.
+            let letters: Vec<String> = page.chars().map(String::from).collect();
+            let letters: Vec<&str> = letters.iter().map(String::as_str).collect();
+            assert_eq!(streamed(&letters), whole, "one letter at a time: {page:?}");
+        }
+    }
+
+    #[test]
+    fn a_long_cut_token_is_not_read_again_for_each_piece() {
+        // 20,000 pieces inside one script. A parser that reads again from the start of the script
+        // each time does 20,000 x 100 KB of work. Ours waits, so it is linear.
+        let mut parser = Parser::new();
+        parser.feed("<script>");
+        let start = std::time::Instant::now();
+        for _ in 0..20_000 {
+            parser.feed("xxxxx");
+        }
+        parser.feed("</script><p>done");
+        let doc = parser.finish();
+        assert!(doc.dump().contains("done"));
+        assert!(start.elapsed().as_secs() < 2);
     }
 }

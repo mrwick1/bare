@@ -64,11 +64,49 @@ pub enum Token<'a> {
 /// Tests that want the whole list call `.collect::<Vec<_>>()`.
 pub fn tokenize(input: &str) -> Tokens<'_> {
     // `'_` says: the iterator borrows `input`, so `input` must stay alive while we use it.
-    Tokens {
+    Tokens::new(input, Mark::default(), false)
+}
+
+/// Where a tokenizer can start again: just after a token, with nothing half read.
+/// The parser keeps one between two chunks of a page that arrives in pieces.
+#[derive(Clone, Copy)]
+pub struct Mark {
+    pos: usize,
+    state: State,
+    raw_name: &'static str,
+}
+
+impl Default for Mark {
+    fn default() -> Mark {
+        Mark { pos: 0, state: State::Data, raw_name: "" }
+    }
+}
+
+impl Mark {
+    /// How many bytes of the input are done. The parser can drop them.
+    pub fn done(&self) -> usize {
+        self.pos
+    }
+
+    /// The same mark, after the parser dropped `done()` bytes from the front.
+    pub fn rebased(self) -> Mark {
+        Mark { pos: 0, ..self }
+    }
+}
+
+impl<'a> Tokens<'a> {
+    /// Start at `mark`. With `more` set, the page is not over: the input may be only the first part.
+    /// Then the tokenizer stops, and gives no token, where the next bytes could change the answer
+    /// (a tag that is not closed, an `&am` that may become `&amp;`). `mark()` says where to start again.
+    pub fn new(input: &'a str, mark: Mark, more: bool) -> Tokens<'a> {
+        Tokens {
         input,
-        pos: 0,
+        pos: mark.pos,
+        more,
+        stalled: false,
+        mark,
         last_len: 0,
-        state: State::Data,
+        state: mark.state,
         tokens: VecDeque::new(),
         finished: false,
         text: Pending::default(),
@@ -79,7 +117,13 @@ pub fn tokenize(input: &str) -> Tokens<'_> {
         skip_value: false,
         value: Pending::default(),
         self_closing: false,
-        raw_name: "",
+        raw_name: mark.raw_name,
+        }
+    }
+
+    /// The place after the last token that we gave out (or the place we started).
+    pub fn mark(&self) -> Mark {
+        self.mark
     }
 }
 
@@ -186,6 +230,11 @@ pub struct Tokens<'a> {
     // Tokens that are ready and not yet given out. Never more than two or three:
     // the text before a tag, and the tag.
     finished: bool,
+    more: bool,
+    // True when the page may go on after `input`.
+    stalled: bool,
+    // True when we stopped because we need the next part of the page.
+    mark: Mark,
     text: Pending,
     // Text that we collect before we make a `Text` token. One token for a whole run of text.
 
@@ -218,7 +267,14 @@ impl<'a> Iterator for Tokens<'a> {
                 return None;
             }
             self.run();
-            if self.tokens.is_empty() {
+            if !self.tokens.is_empty() {
+                // Nothing is half read here: the text is in a token, and the tag is complete.
+                self.mark = Mark { pos: self.pos, state: self.state, raw_name: self.raw_name };
+            } else if self.more {
+                // The input ended, but the page did not. Stop, and keep the old mark.
+                self.stalled = true;
+                return None;
+            } else {
                 // `run` stopped and has no token: this is the end of the input.
                 self.finished = true;
                 self.flush_text();
@@ -228,6 +284,15 @@ impl<'a> Iterator for Tokens<'a> {
 }
 
 impl<'a> Tokens<'a> {
+    /// The input ended, but the page did not, when `stop` is true. Then ask for the next part.
+    /// Use it where the end of the input would make a token (a comment that is not closed).
+    /// Every other place that reaches the end of the input stops by itself: `run` gives no token.
+    /// Gives true when the caller must give up this turn.
+    fn need_more(&mut self, stop: bool) -> bool {
+        self.stalled |= self.more && stop;
+        self.stalled
+    }
+
     /// Look at the next character, and do not move.
     fn peek(&self) -> Option<char> {
         self.input[self.pos..].chars().next()
@@ -366,7 +431,7 @@ impl<'a> Tokens<'a> {
             // Each turn does what the current state says.
             // At the end of the input (`None`), most states stop. A tag that is not complete
             // is thrown away. The standard says so: a page cut in the middle of a tag has no tag.
-            if !self.tokens.is_empty() {
+            if !self.tokens.is_empty() || self.stalled {
                 return;
             }
             match self.state {
@@ -541,6 +606,7 @@ impl<'a> Tokens<'a> {
                     let rest = &input[self.pos..];
                     let (data, used) = match rest.find('>') {
                         Some(i) => (&rest[..i], i + 1),
+                        None if self.need_more(true) => return,
                         None => (rest, rest.len()),
                     };
                     self.pos += used;
@@ -572,7 +638,11 @@ impl<'a> Tokens<'a> {
                     let (a, b) = self.scan(b" \t\n\x0C>");
                     let name = lower(&input[a..b]);
                     // After the name there may be a public and a system name. We skip them for now.
-                    self.pos += input[self.pos..].find('>').map_or(input.len() - self.pos, |i| i + 1);
+                    let close = input[self.pos..].find('>');
+                    if self.need_more(close.is_none()) {
+                        return;
+                    }
+                    self.pos += close.map_or(input.len() - self.pos, |i| i + 1);
                     self.flush_text();
                     self.tokens.push_back(Token::Doctype(name));
                     self.state = State::Data;
@@ -644,6 +714,7 @@ impl<'a> Tokens<'a> {
             }
             match end {
                 Some((at, len)) => (&rest[..at], at + len),
+                None if self.need_more(true) => return,
                 None => (rest, rest.len()),
                 // If the input ended inside the comment, the comment ends there.
             }
