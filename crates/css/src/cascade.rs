@@ -63,7 +63,8 @@ use crate::color::Color;
 use crate::matching::matches;
 use crate::parser::{AtBody, Rule, parse_declarations, parse_stylesheet};
 use crate::selector::{Combinator, Selector, Simple, parse_selector_list};
-use crate::values::{Declared, Keyword, Length, Property, Value, parse_declaration};
+use crate::values::{Declared, Keyword, Length, Property, Side, Value, parse_declaration};
+use crate::var::{self, CustomDecl, VarDecl};
 
 /// The style sheet of the browser itself.
 pub const UA_CSS: &str = include_str!("ua.css");
@@ -82,6 +83,8 @@ struct Entry {
     selector: Selector,
     /// The declarations of the rule: a range of `RuleSet::decls`.
     decls: (u32, u32),
+    /// The custom properties of the rule: a range of `RuleSet::customs`.
+    customs: (u32, u32),
     origin: Origin,
     /// The hashes of up to 4 tags, ids or classes that the ancestors must have. 0 means no hash.
     ancestors: [u32; 4],
@@ -97,8 +100,10 @@ pub struct RuleSet {
     entries: Vec<Entry>,
     /// The declarations of all rules, one after the other.
     decls: Vec<Declared>,
-    /// The `calc()` values that mix units. A `Length::Calc` in `decls` points here.
-    calcs: Vec<Linear>,
+    /// What a value in `decls` points to: the `calc()` that mix units, and the declarations with `var()`.
+    side: Side,
+    /// The custom properties of all rules (`--gap: 8px`), one after the other.
+    customs: Vec<CustomDecl>,
     by_id: Buckets<Box<str>>,
     by_class: Buckets<Box<str>>,
     by_tag: Buckets<Atom>,
@@ -108,7 +113,7 @@ pub struct RuleSet {
 
 impl RuleSet {
     pub fn new(viewport: (f32, f32)) -> RuleSet {
-        RuleSet { viewport, entries: Vec::new(), decls: Vec::new(), calcs: Vec::new(), by_id: Buckets::default(), by_class: Buckets::default(), by_tag: Buckets::default(), other: Vec::new() }
+        RuleSet { viewport, entries: Vec::new(), decls: Vec::new(), side: Side::default(), customs: Vec::new(), by_id: Buckets::default(), by_class: Buckets::default(), by_tag: Buckets::default(), other: Vec::new() }
     }
 
     /// The number of selectors in the set.
@@ -149,21 +154,26 @@ impl RuleSet {
             };
             // A rule with a selector that is not valid is dropped, with all its selectors (the standard says so).
             let Some(selectors) = parse_selector_list(rule.prelude, doc) else { continue };
-            let start = self.decls.len();
+            let (start, custom_start) = (self.decls.len(), self.customs.len());
             for d in &rule.declarations {
-                parse_declaration(&d.name, d.value, d.important, &mut self.calcs, &mut self.decls);
+                if d.name.starts_with("--") {
+                    self.customs.push(CustomDecl { name: (*d.name).into(), text: d.value.into(), important: d.important });
+                } else {
+                    parse_declaration(&d.name, d.value, d.important, &mut self.side, &mut self.decls);
+                }
             }
-            if self.decls.len() == start {
+            if self.decls.len() == start && self.customs.len() == custom_start {
                 continue;
             }
             let decls = (start as u32, self.decls.len() as u32);
+            let customs = (custom_start as u32, self.customs.len() as u32);
             for selector in selectors {
-                self.push(selector, decls, origin);
+                self.push(selector, decls, customs, origin);
             }
         }
     }
 
-    fn push(&mut self, selector: Selector, decls: (u32, u32), origin: Origin) {
+    fn push(&mut self, selector: Selector, decls: (u32, u32), customs: (u32, u32), origin: Origin) {
         if selector.compounds.iter().any(|c| c.simples.contains(&Simple::Never)) {
             return;
             // `a:hover` never matches. Keep it out of the index: it only costs time.
@@ -181,14 +191,14 @@ impl RuleSet {
             self.other.push(index);
         }
         let ancestors = ancestor_hashes(&selector);
-        self.entries.push(Entry { selector, decls, origin, ancestors });
+        self.entries.push(Entry { selector, decls, customs, origin, ancestors });
     }
 
     /// Find the style of every element that is shown. The selectors must come from `add` with this same `doc`.
     pub fn compute(&self, doc: &Document) -> Styles {
-        let mut styles = Styles { styles: vec![ComputedStyle::initial()], of_node: vec![NONE; doc.len()], calcs: Vec::new() };
+        let mut styles = Styles { styles: vec![ComputedStyle::initial()], of_node: vec![NONE; doc.len()], calcs: Vec::new(), customs: Vec::new() };
         // Style 0 is the starting style. It is the parent style of the `html` element.
-        let mut cx = Cx { viewport: self.viewport, root_font_size: 16.0, declared: &self.calcs, inline: RefCell::default(), computed: RefCell::default() };
+        let mut cx = Cx { viewport: self.viewport, root_font_size: 16.0, declared: &self.side, inline: RefCell::default(), computed: RefCell::default(), customs: RefCell::default() };
         let style_atom = doc.find_atom("style");
         let mut filter = AncestorFilter::new();
         let mut memo = Memo::default();
@@ -241,6 +251,7 @@ impl RuleSet {
             }
         }
         styles.calcs = cx.computed.take().list;
+        styles.customs = cx.customs.take().list;
         styles
     }
 
@@ -297,45 +308,121 @@ impl RuleSet {
     fn cascade(&self, matched: &[u32], inline: Option<&str>, parent: &ComputedStyle, cx: &Cx<'_>) -> ComputedStyle {
         let mut winners = [None::<Value>; Property::COUNT];
         let mut keys = [0u64; Property::COUNT];
+        let rank = |important: bool, origin: Origin| match (important, origin) {
+            (false, Origin::UserAgent) => 0u64,
+            (false, Origin::Author) => 1,
+            (true, Origin::Author) => 2,
+            (true, Origin::UserAgent) => 3,
+        };
         let mut apply = |d: &Declared, origin: Origin, specificity: u32, order: u32| {
-            let rank = match (d.important, origin) {
-                (false, Origin::UserAgent) => 0u64,
-                (false, Origin::Author) => 1,
-                (true, Origin::Author) => 2,
-                (true, Origin::UserAgent) => 3,
-            };
-            let key = rank << 62 | u64::from(specificity) << 31 | u64::from(order);
+            let key = rank(d.important, origin) << 62 | u64::from(specificity) << 31 | u64::from(order);
             let p = d.property as usize;
             if winners[p].is_none() || key >= keys[p] {
                 winners[p] = Some(d.value);
                 keys[p] = key;
             }
         };
+        // The custom properties of the `style=""` attribute. They live until the end of the function, because `own` points into them.
+        let mut inline_customs = Vec::new();
+        // The custom properties that win: name, key, text. There are few, so a list is fast.
+        let mut own: Vec<(&str, u64, &str)> = Vec::new();
+        fn apply_custom<'a>(own: &mut Vec<(&'a str, u64, &'a str)>, d: &'a CustomDecl, key: u64) {
+            match own.iter_mut().find(|o| o.0 == &*d.name) {
+                Some(o) if key >= o.1 => *o = (&d.name, key, &d.text),
+                Some(_) => {}
+                None => own.push((&d.name, key, &d.text)),
+            }
+        }
         for &i in matched {
             let e = &self.entries[i as usize];
             for d in &self.decls[e.decls.0 as usize..e.decls.1 as usize] {
                 apply(d, e.origin, e.selector.specificity, i);
             }
+            for d in &self.customs[e.customs.0 as usize..e.customs.1 as usize] {
+                apply_custom(&mut own, d, rank(d.important, e.origin) << 62 | u64::from(e.selector.specificity) << 31 | u64::from(i));
+            }
+        }
+        // What the `style=""` attribute gives.
+        let mut inline_side = Side::default();
+        let mut inline_decls = Vec::new();
+        {
+            let mut shared = cx.inline.borrow_mut();
+            shared.calcs.clear();
+            shared.vars.clear();
         }
         if let Some(text) = inline {
-            let (mut decls, mut calcs) = (Vec::new(), Vec::new());
             for d in parse_declarations(text) {
-                parse_declaration(&d.name, d.value, d.important, &mut calcs, &mut decls);
-            }
-            // The `calc()` of this element come after the ones of the style sheets in `Cx::linear`.
-            let base = cx.declared.len() as u32;
-            for d in &mut decls {
-                if let Value::Length(Length::Calc(i)) = &mut d.value {
-                    *i += base;
+                if d.name.starts_with("--") {
+                    inline_customs.push(CustomDecl { name: (*d.name).into(), text: d.value.into(), important: d.important });
+                } else {
+                    parse_declaration(&d.name, d.value, d.important, &mut inline_side, &mut inline_decls);
                 }
             }
-            *cx.inline.borrow_mut() = calcs;
+            // What these values point to comes after the ones of the style sheets (see `Cx::linear` and `Cx::var`).
+            let (calc_base, var_base) = (cx.declared.calcs.len() as u32, cx.declared.vars.len() as u32);
+            for d in &mut inline_decls {
+                match &mut d.value {
+                    Value::Length(Length::Calc(i)) => *i += calc_base,
+                    Value::Var(i) => *i += var_base,
+                    _ => {}
+                }
+            }
+            *cx.inline.borrow_mut() = inline_side;
             // The specificity of a `style=""` attribute is more than the most that a selector can have (1 << 30, and the most is one less).
-            for d in &decls {
+            for d in &inline_decls {
                 apply(d, Origin::Author, 1 << 30, u32::MAX >> 1);
             }
+            for d in &inline_customs {
+                apply_custom(&mut own, d, rank(d.important, Origin::Author) << 62 | 1 << 61 | u64::from(u32::MAX >> 1));
+            }
         }
-        compute(&winners, parent, cx)
+        // The custom properties: the ones of the parent, and the ones of this element. Most elements set none, and share the set of the parent.
+        let custom = if own.is_empty() {
+            parent.1
+        } else {
+            let merged = {
+                let sets = cx.customs.borrow();
+                let own: Vec<(&str, &str)> = own.iter().map(|o| (o.0, o.2)).collect();
+                var::merge(&sets.list[parent.1 as usize], &own)
+            };
+            cx.customs.borrow_mut().keep(merged)
+        };
+        // A value with `var()` is read now, with the custom properties of this element.
+        for p in 0..Property::COUNT {
+            if let Some(Value::Var(i)) = winners[p] {
+                winners[p] = Some(self.read_var(i, Property::ALL[p], custom, cx));
+            }
+        }
+        let mut style = compute(&winners, parent, cx);
+        style.1 = custom;
+        style
+    }
+
+    /// The value of `property` for the declaration `i` that has `var()`. `unset` when it does not work: a custom property that is not set,
+    /// or a text that is not good for the property (the standard calls it "invalid at computed-value time").
+    fn read_var(&self, i: u32, property: Property, custom: u32, cx: &Cx<'_>) -> Value {
+        let decl = cx.var(i);
+        let sets = cx.customs.borrow();
+        let set = &sets.list[custom as usize];
+        let text = var::substitute(&decl.text, &mut |name| set.binary_search_by(|(n, _)| (**n).cmp(name)).ok().map(|i| set[i].1.to_string()));
+        drop(sets);
+        let (mut side, mut out) = (Side::default(), Vec::new());
+        let Some(text) = text else { return Value::Unset };
+        if !parse_declaration(&decl.name, &text, false, &mut side, &mut out) {
+            return Value::Unset;
+        }
+        let Some(found) = out.iter().find(|d| d.property == property) else { return Value::Unset };
+        let mut value = found.value;
+        if let Value::Length(Length::Calc(c)) = &mut value {
+            // A mix of units: keep it with the others of this element, after the ones that are there.
+            let mut shared = cx.inline.borrow_mut();
+            *c += (cx.declared.calcs.len() + shared.calcs.len()) as u32;
+            shared.calcs.extend(side.calcs);
+        }
+        match value {
+            Value::Var(_) => Value::Unset,
+            v => v,
+        }
     }
 }
 
@@ -361,7 +448,7 @@ struct Memo {
 
 /// A hash of the values of a style.
 fn style_hash(style: &ComputedStyle) -> u64 {
-    let mut h = 0xcbf2_9ce4_8422_2325_u64;
+    let mut h = 0xcbf2_9ce4_8422_2325_u64 ^ u64::from(style.1);
     for &v in &style.0 {
         let x = match v {
             Value::Color(c) => 1 << 40 | u64::from(u32::from_be_bytes([c.r, c.g, c.b, c.a])),
@@ -384,11 +471,39 @@ struct Cx<'a> {
     /// The font size of the `html` element, for `rem`. 16 until we know it.
     root_font_size: f32,
     /// The `calc()` of the style sheets (`RuleSet::calcs`).
-    declared: &'a [Linear],
-    /// The `calc()` of the `style=""` of the element that we compute now. Their numbers start after `declared`.
-    inline: RefCell<Vec<Linear>>,
+    declared: &'a Side,
+    /// What the `style=""` of the element that we compute now points to, and the `calc()` that come from a `var()`.
+    /// Their numbers start after the ones of `declared`.
+    inline: RefCell<Side>,
     /// The `calc()` values that are done, and are kept in `Styles::calcs`.
     computed: RefCell<Computed>,
+    /// The sets of custom properties, each one once.
+    customs: RefCell<Customs>,
+}
+
+/// The sets of custom properties. Set 0 is the empty one. Elements with the same set have the same number, so that their styles can be shared.
+struct Customs {
+    list: Vec<var::Set>,
+    index: HashMap<var::Set, u32, BuildHasherDefault<Fnv>>,
+}
+
+impl Default for Customs {
+    fn default() -> Customs {
+        let mut index = HashMap::default();
+        index.insert(Vec::new(), 0);
+        Customs { list: vec![Vec::new()], index }
+    }
+}
+
+impl Customs {
+    fn keep(&mut self, set: var::Set) -> u32 {
+        if let Some(&i) = self.index.get(&set) {
+            return i;
+        }
+        self.list.push(set.clone());
+        self.index.insert(set, self.list.len() as u32 - 1);
+        self.list.len() as u32 - 1
+    }
 }
 
 /// The computed `calc()` values, each one once. Two elements with the same value get the same number, so that their styles can be shared.
@@ -400,9 +515,16 @@ struct Computed {
 
 impl Cx<'_> {
     fn linear(&self, i: u32) -> Linear {
-        match self.declared.get(i as usize) {
+        match self.declared.calcs.get(i as usize) {
             Some(&l) => l,
-            None => self.inline.borrow()[i as usize - self.declared.len()],
+            None => self.inline.borrow().calcs[i as usize - self.declared.calcs.len()],
+        }
+    }
+
+    fn var(&self, i: u32) -> VarDecl {
+        match self.declared.vars.get(i as usize) {
+            Some(v) => v.clone(),
+            None => self.inline.borrow().vars[i as usize - self.declared.vars.len()].clone(),
         }
     }
 
@@ -427,9 +549,16 @@ pub struct Styles {
     of_node: Vec<u32>,
     /// The `calc()` values that mix units, after the cascade: pixels and percent. A `Length::Calc` in a style points here.
     calcs: Vec<[f32; 2]>,
+    /// The sets of custom properties. `ComputedStyle::1` is a place in this list. Set 0 is empty.
+    customs: Vec<var::Set>,
 }
 
 impl Styles {
+    /// The custom properties of a style, sorted by name, with their text: `--gap`, `8px`.
+    pub fn custom_properties(&self, style: &ComputedStyle) -> &[(Box<str>, Box<str>)] {
+        &self.customs[style.1 as usize]
+    }
+
     /// The pixels and the percent of a `Length::Calc` of a computed style: `calc(px + percent of something)`.
     pub fn calc(&self, i: u32) -> (f32, f32) {
         let [px, pct] = self.calcs[i as usize];
@@ -507,7 +636,7 @@ fn show(v: Value, calcs: &[[f32; 2]]) -> String {
 
 /// The style of one element: one value for each property, in the order of `Property::ALL`.
 #[derive(Debug, Clone, PartialEq)]
-pub struct ComputedStyle([Value; Property::COUNT]);
+pub struct ComputedStyle([Value; Property::COUNT], u32);
 
 impl ComputedStyle {
     /// The style of an element that has no rule at all, and whose parent has none.
@@ -523,7 +652,7 @@ impl ComputedStyle {
         for side in 0..4 {
             values[Property::BorderTopWidth as usize + side] = Value::Length(Length::Px(0.0));
         }
-        ComputedStyle(values)
+        ComputedStyle(values, 0)
     }
 
     pub fn get(&self, property: Property) -> Value {
@@ -648,7 +777,7 @@ fn compute(winners: &[Option<Value>; Property::COUNT], parent: &ComputedStyle, c
             out[BorderTopWidth as usize + side] = Value::Length(Length::Px(0.0));
         }
     }
-    ComputedStyle(out)
+    ComputedStyle(out, 0)
 }
 
 /// Turn a value into its computed form. It does nothing to a value that is computed already (one from the parent).
@@ -1301,5 +1430,71 @@ mod tests {
         };
         assert_eq!(width("a"), (-1.0, 100.0));
         assert_eq!(width("b"), (-2.0, 10.0));
+    }
+
+    #[test]
+    fn var_reads_custom_properties() {
+        let page = "<div id=a><p id=b>x</p><p id=c class=other>y</p></div>";
+        let sheet = ":root { --main: red; --gap: 4px } div { color: var(--main); margin: var(--gap) calc(var(--gap) * 2) }\
+            p { padding-left: var(--gap); border-top: var(--w, 3px) solid var(--main) } .other { --main: blue; --gap: 10px }";
+        let (doc, styles) = styles(page, &[sheet]);
+        let get = |id: &str, p: Property| styles.style(by_id(&doc, id)).unwrap().get(p);
+        let px = |x| Value::Length(Length::Px(x));
+        assert_eq!(get("a", Property::TextColor), rgb(255, 0, 0));
+        // `margin` with `var()` gives the four sides, and `calc()` can be in it.
+        assert_eq!(get("a", Property::MarginTop), px(4.0));
+        assert_eq!(get("a", Property::MarginLeft), px(8.0));
+        // Custom properties are inherited, and a child may set its own.
+        assert_eq!(get("b", Property::PaddingLeft), px(4.0));
+        assert_eq!(get("c", Property::PaddingLeft), px(10.0));
+        // The fallback, and `var()` in a shorthand.
+        assert_eq!(get("b", Property::BorderTopWidth), px(3.0));
+        assert_eq!(get("b", Property::BorderTopColor), rgb(255, 0, 0));
+        assert_eq!(get("c", Property::BorderTopColor), rgb(0, 0, 255));
+        // `color` is inherited: the child has the color of `div`, which used the custom property of `div`.
+        assert_eq!(get("c", Property::TextColor), rgb(255, 0, 0));
+        // The sets are shared: `b` has the set of `div`, and `div` has the set of the root.
+        let set = |id: &str| styles.custom_properties(styles.style(by_id(&doc, id)).unwrap()).to_vec();
+        assert_eq!(set("a"), set("b"));
+        assert_eq!(set("c").iter().map(|(n, v)| (&**n, &**v)).collect::<Vec<_>>(), [("--gap", "10px"), ("--main", "blue")]);
+    }
+
+    #[test]
+    fn var_that_does_not_work_is_unset() {
+        let page = "<div id=a><p id=b>x</p></div>";
+        let sheet = "div { color: red; width: 5px; --loop1: var(--loop2); --loop2: var(--loop1); --bad: 12 } \
+            p { color: var(--nope); width: var(--loop1); height: var(--bad); line-height: var(--bad); margin-top: var(--bad, 7px) }";
+        let (doc, styles) = styles(page, &[sheet]);
+        let get = |p: Property| styles.style(by_id(&doc, "b")).unwrap().get(p);
+        // `color` is inherited: `unset` gives the color of the parent.
+        assert_eq!(get(Property::TextColor), rgb(255, 0, 0));
+        // `width` is not inherited: `unset` gives the starting value.
+        assert_eq!(get(Property::Width), ComputedStyle::initial().get(Property::Width));
+        // A circle is not set, `12` is not a good height, and `12` is a good line height.
+        assert_eq!(get(Property::Height), ComputedStyle::initial().get(Property::Height));
+        assert_eq!(get(Property::LineHeight), Value::Number(12.0));
+        // The fallback is used only when the property is not set. `--bad` is set.
+        assert_eq!(get(Property::MarginTop), ComputedStyle::initial().get(Property::MarginTop));
+    }
+
+    #[test]
+    fn var_follows_the_cascade() {
+        let page = "<p id=a class=x style='--c: lime'>x</p><p id=b class=x>y</p>";
+        let sheet = ".x { --c: red; color: var(--c) } p#a { --c: blue !important } p { --c: black }\
+            #b { color: var(--c) !important; color: green }";
+        let (doc, styles) = styles(page, &[sheet]);
+        let color = |id: &str| styles.style(by_id(&doc, id)).unwrap().get(Property::TextColor);
+        // `!important` beats the `style` attribute. The specificity decides between `.x` and `p`.
+        assert_eq!(color("a"), rgb(0, 0, 255));
+        assert_eq!(color("b"), rgb(255, 0, 0));
+    }
+
+    #[test]
+    fn var_in_the_style_attribute() {
+        let (doc, styles) = styles("<p id=a style='--w: 7px; width: var(--w); height: calc(100% - var(--w))'>x</p>", &[]);
+        let get = |p: Property| styles.style(by_id(&doc, "a")).unwrap().get(p);
+        assert_eq!(get(Property::Width), Value::Length(Length::Px(7.0)));
+        let Value::Length(Length::Calc(i)) = get(Property::Height) else { panic!() };
+        assert_eq!(styles.calc(i), (-7.0, 100.0));
     }
 }

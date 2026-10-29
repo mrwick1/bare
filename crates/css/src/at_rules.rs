@@ -17,7 +17,7 @@
 use bare_html::dom::Document;
 
 use crate::selector::parse_selector_list;
-use crate::values::parse_declaration;
+use crate::values::{Side, parse_declaration};
 
 /// Blocks in parentheses go this deep. Deeper ones are no. This keeps `((((((...` from filling the stack.
 const MAX_DEPTH: usize = 32;
@@ -236,7 +236,7 @@ fn supports(doc: &mut Document, text: &str, depth: usize) -> bool {
                 &name.trim().to_ascii_lowercase(),
                 value,
                 important,
-                &mut Vec::new(),
+                &mut Side::default(),
                 &mut Vec::new(),
             )
     })
