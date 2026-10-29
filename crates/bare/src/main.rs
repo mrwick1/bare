@@ -83,36 +83,68 @@ fn main() {
     }
 }
 
+/// The window is 1280 by 800 until module 5 has a window. `@media`, `vw` and `vh` use it.
+const VIEWPORT: (f32, f32) = (1280.0, 800.0);
+
+/// `@import` goes this deep. A sheet that imports itself stops here.
+const MAX_IMPORT_DEPTH: usize = 8;
+
+/// Fetch a style sheet. One that fails gives `None`: the page still shows, like in a browser.
+fn fetch_sheet(client: &mut http::Client, base: Option<&Url>, href: &str) -> Option<(Url, String)> {
+    let fetched = base
+        .ok_or_else(|| "no address for the page".to_string())
+        .and_then(|p| p.join(href))
+        .and_then(|u| client.get(&u).map(|r| (u, r)).map_err(|e| e.to_string()));
+    match fetched {
+        Ok((u, r)) if r.status == 200 => {
+            Some((u, encoding::decode(&r.body, r.header("content-type"))))
+        }
+        Ok((_, r)) => {
+            eprintln!("style sheet {href}: status {}", r.status);
+            None
+        }
+        Err(e) => {
+            eprintln!("style sheet {href}: {e}");
+            None
+        }
+    }
+}
+
+/// Add a style sheet. The sheets that it imports go first, because an `@import` comes before the rules of the sheet.
+fn add_sheet(
+    rules: &mut RuleSet,
+    doc: &mut bare_html::dom::Document,
+    client: &mut http::Client,
+    base: Option<&Url>,
+    text: &str,
+    depth: usize,
+) {
+    if depth < MAX_IMPORT_DEPTH {
+        let imports = cascade::imports(doc, text, VIEWPORT);
+        for href in imports {
+            if let Some((url, text)) = fetch_sheet(client, base, &href) {
+                add_sheet(rules, doc, client, Some(&url), &text, depth + 1);
+            }
+        }
+    }
+    rules.add(doc, text, Origin::Author);
+}
+
 /// Read the style sheets of the page (the `<style>` elements and the `<link rel=stylesheet>` that we can fetch),
 /// find the style of every element, and give it as text.
 fn computed_styles(doc: &mut bare_html::dom::Document, page: Option<&Url>) -> String {
-    let mut rules = RuleSet::new();
+    let mut rules = RuleSet::new(VIEWPORT);
     rules.add(doc, cascade::UA_CSS, Origin::UserAgent);
     let mut client = http::Client::new();
-    for source in cascade::sources(doc) {
-        let text = match source {
-            Source::Inline(text) => text,
+    for source in cascade::sources(doc, VIEWPORT) {
+        match source {
+            Source::Inline(text) => add_sheet(&mut rules, doc, &mut client, page, &text, 0),
             Source::Link(href) => {
-                // Fetch it. A style sheet that fails is skipped: the page still shows, like in a browser.
-                let fetched = page
-                    .ok_or_else(|| "no address for the page".to_string())
-                    .and_then(|p| p.join(&href))
-                    .and_then(|u| client.get(&u).map_err(|e| e.to_string()));
-                match fetched {
-                    Ok(r) if r.status == 200 => encoding::decode(&r.body, r.header("content-type")),
-                    Ok(r) => {
-                        eprintln!("style sheet {href}: status {}", r.status);
-                        continue;
-                    }
-                    Err(e) => {
-                        eprintln!("style sheet {href}: {e}");
-                        continue;
-                    }
+                if let Some((url, text)) = fetch_sheet(&mut client, page, &href) {
+                    add_sheet(&mut rules, doc, &mut client, Some(&url), &text, 0);
                 }
             }
-        };
-        rules.add(doc, &text, Origin::Author);
+        }
     }
-    rules.compute(doc, (1280.0, 800.0)).dump(doc)
-    // The window is 1280 by 800 until module 5 has a window. `vw` and `vh` use it.
+    rules.compute(doc).dump(doc)
 }

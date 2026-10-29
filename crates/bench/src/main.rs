@@ -186,12 +186,12 @@ fn main() {
         })
         .collect();
     let rules = step("css: add 10,000 rules", || {
-        let mut rules = bare_css::cascade::RuleSet::new();
+        let mut rules = bare_css::cascade::RuleSet::new((1280.0, 800.0));
         rules.add(&mut doc, bare_css::cascade::UA_CSS, bare_css::cascade::Origin::UserAgent);
         rules.add(&mut doc, &author, bare_css::cascade::Origin::Author);
         rules
     });
-    let styles = step("css: styles of 200,000 elements", || rules.compute(&doc, (1280.0, 800.0)));
+    let styles = step("css: styles of 200,000 elements", || rules.compute(&doc));
     println!("{} rules, {} different styles", rules.len(), styles.unique());
 
     // A deep tree: 20,000 nested divs. The time must grow with the depth, not with its square.
