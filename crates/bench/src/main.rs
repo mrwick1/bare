@@ -90,6 +90,14 @@ fn page(n: usize) -> String {
 
 fn main() {
     let text = page(100_000);
+    if std::env::args().nth(1).as_deref() == Some("parse") {
+        // Only the tree build, 40 times: a long run for `perf record`.
+        let text = text.replace('\r', "");
+        for _ in 0..40 {
+            std::hint::black_box(bare_html::tree::parse(&text));
+        }
+        return;
+    }
     if std::env::args().nth(1).as_deref() == Some("rss") {
         // A fresh process, so that memory freed by earlier steps does not hide the cost.
         // The kernel's view of the DOM: how much the process grows when we build one tree.
