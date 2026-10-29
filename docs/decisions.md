@@ -56,7 +56,7 @@ To update Unicode: download the new files over the old ones, run the script, and
 
 ## DOM storage
 
-The DOM is an arena: one `Vec` of nodes in a `Document`. A node refers to another by its place in the `Vec` (`NodeId`). The reasons and the other options are at the top of `crates/html/src/dom.rs`.
+The DOM is an arena: one `Vec` of nodes in a `Document`. A node refers to another by its place in the `Vec` (`NodeId`). Children are a linked list inside the arena, and names are interned (an `Atom` for each name), so a node is 56 bytes with no allocation of its own. The reasons and the other options are at the top of `crates/html/src/dom.rs`.
 
 ## Code style
 

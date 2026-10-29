@@ -21,7 +21,7 @@ Machine: archMachine, release build, 2026-10-29.
 | 1      | URL join, 100,000 links      | 27   | 0.0     | 0.0     |                                        |
 | 2      | Bytes to text                | 6    | 15.6    | 5.2     | one copy of the page                   |
 | 2      | Tokenizer (streaming)        | 46   | 0.0     | 0.0     | counts 600,003 tokens, keeps none      |
-| 2      | Tree builder (with tokenizer) | 84  | 66.9    | 66.9    | 400,006 nodes, 167 bytes each          |
+| 2      | Tree builder (with tokenizer) | 78  | 36.8    | 29.8    | 400,006 nodes, 74 bytes each           |
 
 Not measured:
 
@@ -32,12 +32,14 @@ History:
 
 - 2026-10-29, first run: the tokenizer returned a `Vec` of all tokens (126 MB peak, 105 MB kept) and copied the page into a `Vec<char>`. The tree builder peaked at 135 MB for 67 MB kept.
 - 2026-10-29, streaming tokenizer: the tokenizer reads the page text in place and gives one token at a time. The tree builder peak fell from 135 MB to 67 MB, and the tokenizer alone from 59 ms to 46 ms.
+- 2026-10-29, small DOM: a `u32` `NodeId`, children as a linked list (no `Vec` for each node), and interned names. The tree builder peak fell from 67 MB to 37 MB, and the DOM kept from 67 MB to 30 MB (167 bytes to 74 bytes for each node). The spare room of the node list is given back at the end of `parse`.
 
 What the numbers say:
 
-- The tree builder peak is now the DOM itself. The next saving is in the DOM.
-- Each DOM node costs 167 bytes. Chrome's number (below) suggests that this can be much lower. To verify: shrink `NodeData`.
+- The arena is 56 bytes for each node (22 MB for 400,006 nodes). The rest is the attribute lists and the text.
+- Chrome's DOM is about 22 MB for 200,005 elements (rough, see below). Ours is 30 MB for about 200,000 elements and 200,000 text nodes. The two are close.
 - Each token still owns its `String`s. They live for one token only, so they cost time and not peak memory. A token that points into the page text would remove the allocations. To verify: measure first.
+- The attribute values are copied from the token into the DOM. Moving them would save one copy for each attribute.
 
 ## Chrome (Blink), the same page shape
 
