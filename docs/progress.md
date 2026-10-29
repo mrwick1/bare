@@ -45,14 +45,15 @@ What each done topic covers:
 | #   | Topic                                                | State   | Code                            |
 | --- | ---------------------------------------------------- | ------- | ------------------------------- |
 | 1   | Bytes to text: encoding, newlines                    | done    | `crates/html/src/encoding.rs`   |
-| 2   | Character references (the entity table)              | next    |                                 |
-| 3   | Tokenizer (state machine, raw text)                  | planned |                                 |
+| 2   | Character references (the entity table)              | done    | `crates/html/src/charref.rs`    |
+| 3   | Tokenizer (state machine, raw text)                  | next    |                                 |
 | 4   | DOM tree (arena)                                     | planned |                                 |
 | 5   | Tree builder (implied tags, void elements), app      | planned |                                 |
 
 What each done topic covers:
 
 - Bytes to text: BOM, then the `Content-Type` charset, then a `<meta charset>` in the first 1024 bytes, then a guess (UTF-8 if valid, else windows-1252). UTF-8 and windows-1252 (also for latin1 and iso-8859-1). `\r\n` and `\r` become `\n`.
+- Character references: all 2231 names from the WHATWG list (generated into `crates/html/src/entities.rs`), decimal and hex numbers, the old names without `;`, the stricter rule in attribute values, and the fixes for 0, surrogates, numbers that are too big, and `&#128;` to `&#159;` (windows-1252).
 
 ## Known gaps
 

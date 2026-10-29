@@ -115,7 +115,7 @@ fn label(name: &str) -> Option<Encoding> {
 }
 
 /// The letter for one byte in windows-1252.
-fn windows_1252(byte: u8) -> char {
+pub(crate) fn windows_1252(byte: u8) -> char {
     // Bytes 0x80 to 0x9F are the odd ones. Latin-1 puts control codes there.
     // windows-1252 puts letters and punctuation there, like "€" and the curly quotes.
     // Every other byte has the same number as its Unicode letter.

@@ -33,6 +33,7 @@ Linux is the first target. Windows and macOS come later.
 | `crates/html/`      | HTML: encoding, tokenizer and DOM tree              |
 | `crates/unicode/`   | NFC and Unicode data tables                         |
 | `data/unicode/`     | Unicode data files and their license                |
+| `data/html/`        | The WHATWG entity list and its license              |
 | `tools/`            | Scripts that generate code from data files          |
 | `docs/decisions.md` | Design decisions and their reasons                  |
 | `docs/progress.md`  | The module plan, what is done, and known gaps       |
@@ -44,4 +45,4 @@ Licensed under either of these, at your option:
 - Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE))
 - MIT License ([LICENSE-MIT](LICENSE-MIT))
 
-The files in `data/unicode/` are under the Unicode License v3 ([data/unicode/LICENSE.txt](data/unicode/LICENSE.txt)).
+The files in `data/unicode/` are under the Unicode License v3 ([data/unicode/LICENSE.txt](data/unicode/LICENSE.txt)). The file in `data/html/` is under CC BY 4.0 ([data/html/LICENSE.txt](data/html/LICENSE.txt)).

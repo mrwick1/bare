@@ -1,0 +1,7 @@
+entities.json comes from the WHATWG HTML Standard:
+https://html.spec.whatwg.org/entities.json
+
+Copyright © WHATWG (Apple, Google, Mozilla, Microsoft).
+This work is licensed under a Creative Commons Attribution 4.0 International License.
+https://creativecommons.org/licenses/by/4.0/
+We did not change the data. tools/gen_html_entities.py turns it into Rust code.
