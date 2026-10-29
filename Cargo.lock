@@ -23,6 +23,9 @@ dependencies = [
 [[package]]
 name = "bare-css"
 version = "0.1.0"
+dependencies = [
+ "bare-html",
+]
 
 [[package]]
 name = "bare-html"

@@ -170,7 +170,7 @@ impl<'a> Tokens<'a> {
     }
 
     /// The text that is not read yet.
-    fn rest(&self) -> &'a str {
+    pub fn rest(&self) -> &'a str {
         &self.input[self.pos..]
     }
 

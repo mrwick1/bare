@@ -4,3 +4,6 @@ name = "bare-css"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+
+[dependencies]
+bare-html = { path = "../html" }

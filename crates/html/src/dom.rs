@@ -70,6 +70,14 @@ impl NodeId {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Atom(u32);
 
+impl Atom {
+    /// The atom of `id`. Every document has it from the start, so the style code can find an `id`
+    /// attribute with one number compare and no table lookup.
+    pub const ID: Atom = Atom(0);
+    /// The atom of `class`. Same reason as `ID`.
+    pub const CLASS: Atom = Atom(1);
+}
+
 /// A piece of text in the text buffer of a `Document`: where it starts, and how long it is, in bytes.
 /// Use `Document::text` to read it. A span of one document means nothing in another document.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -185,13 +193,17 @@ impl Iterator for Children<'_> {
 impl Document {
     /// A new tree with only the top node.
     pub fn new() -> Document {
-        Document {
+        let mut doc = Document {
             nodes: vec![Node { parent: None, first_child: None, last_child: None, prev: None, next: None, data: NodeData::Document }],
             names: Vec::new(),
             atoms: HashMap::default(),
             attrs: Vec::new(),
             text: String::new(),
-        }
+        };
+        // The order matters: it must match `Atom::ID` and `Atom::CLASS`.
+        doc.intern("id");
+        doc.intern("class");
+        doc
     }
 
     /// The top node.
@@ -213,6 +225,23 @@ impl Document {
     /// The children of this node, in order.
     pub fn children(&self, id: NodeId) -> Children<'_> {
         Children { doc: self, next: self.nodes[id.index()].first_child }
+    }
+
+    /// The sibling before this node. JS: `previousSibling`.
+    pub fn prev_sibling(&self, id: NodeId) -> Option<NodeId> {
+        self.nodes[id.index()].prev
+    }
+
+    /// The sibling after this node. JS: `nextSibling`.
+    pub fn next_sibling(&self, id: NodeId) -> Option<NodeId> {
+        self.nodes[id.index()].next
+    }
+
+    /// The value of an attribute of an element. `None` if there is none, or if this is not an element.
+    /// With a repeated name, the first one wins (the tree builder never stores a repeat).
+    pub fn attr(&self, id: NodeId, name: Atom) -> Option<&str> {
+        let NodeData::Element { attrs, .. } = self.nodes[id.index()].data else { return None };
+        self.attrs(attrs).iter().find(|a| a.name == name).map(|a| self.text(a.value))
     }
 
     /// The text of a `Span`.
@@ -461,8 +490,12 @@ mod tests {
         assert_eq!(doc.atom_str(na), "div");
         assert_eq!(doc.atom_str(aa[0].name), "class");
         assert_eq!((doc.text(aa[0].value), doc.text(ab[0].value)), ("x", "y"));
-        assert_eq!(doc.names.len(), 2);
-        // Only "div" and "class", although we made two elements.
+        assert_eq!(doc.names.len(), 3);
+        // "id" and "class" from the start, and "div". Not 4, although we made two elements.
+        assert_eq!(doc.atom_str(Atom::ID), "id");
+        assert_eq!(aa[0].name, Atom::CLASS);
+        assert_eq!(doc.attr(a, Atom::CLASS), Some("x"));
+        assert_eq!(doc.attr(a, Atom::ID), None);
     }
 
     #[test]
