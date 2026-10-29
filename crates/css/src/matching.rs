@@ -122,6 +122,7 @@ fn simple_matches(doc: &Document, el: NodeId, simple: &Simple) -> bool {
         }),
         Simple::Link => matches!(doc.atom_str(name), "a" | "area") && doc.attrs(attrs).iter().any(|a| doc.atom_str(a.name) == "href"),
         Simple::Never => false,
+        Simple::Is(args) => args.iter().any(|simples| compound_matches(doc, el, simples)),
         Simple::Not(args) => !args.iter().any(|simples| compound_matches(doc, el, simples)),
     }
 }
@@ -360,6 +361,15 @@ mod tests {
         assert_eq!(find(PAGE, "li:not(:not(.on))"), ["l2"]);
         assert_eq!(find(PAGE, "p:not(*)"), Vec::<String>::new());
         assert_eq!(find(PAGE, "li:not(a)"), ["l1", "l2", "l3"]);
+    }
+
+    #[test]
+    fn is_and_where() {
+        assert_eq!(find(PAGE, "li:is(.on, :last-child)"), ["l2", "l3"]);
+        assert_eq!(find(PAGE, "li:where(.on, :last-child)"), ["l2", "l3"]);
+        assert_eq!(find(PAGE, ":is(p, li).on"), ["l2"]);
+        assert_eq!(find(PAGE, "li:is(:not(.on))"), ["l1", "l3"]);
+        assert_eq!(find(PAGE, "li:is(:hover)"), Vec::<String>::new());
     }
 
     #[test]
