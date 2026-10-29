@@ -54,6 +54,10 @@ To update Unicode: download the new files over the old ones, run the script, and
 
 `data/html/entities.json` is the WHATWG list of named character references. `tools/gen_html_entities.py` turns it into `crates/html/src/entities.rs`. The generated file is committed. To update it: download the new file over the old one and run the script.
 
+## DOM storage
+
+The DOM is an arena: one `Vec` of nodes in a `Document`. A node refers to another by its place in the `Vec` (`NodeId`). The reasons and the other options are at the top of `crates/html/src/dom.rs`.
+
 ## Code style
 
 - Plain code. No clever tricks.

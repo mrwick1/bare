@@ -47,14 +47,15 @@ What each done topic covers:
 | 1   | Bytes to text: encoding, newlines                    | done    | `crates/html/src/encoding.rs`   |
 | 2   | Character references (the entity table)              | done    | `crates/html/src/charref.rs`    |
 | 3   | Tokenizer (state machine, raw text)                  | done    | `crates/html/src/tokenizer.rs`  |
-| 4   | DOM tree (arena)                                     | next    |                                 |
-| 5   | Tree builder (implied tags, void elements), app      | planned |                                 |
+| 4   | DOM tree (arena)                                     | done    | `crates/html/src/dom.rs`        |
+| 5   | Tree builder (implied tags, void elements), app      | next    |                                 |
 
 What each done topic covers:
 
 - Bytes to text: BOM, then the `Content-Type` charset, then a `<meta charset>` in the first 1024 bytes, then a guess (UTF-8 if valid, else windows-1252). UTF-8 and windows-1252 (also for latin1 and iso-8859-1). `\r\n` and `\r` become `\n`.
 - Character references: all 2231 names from the WHATWG list (generated into `crates/html/src/entities.rs`), decimal and hex numbers, the old names without `;`, the stricter rule in attribute values, and the fixes for 0, surrogates, numbers that are too big, and `&#128;` to `&#159;` (windows-1252).
 - Tokenizer: the state machine of the standard for tags, attributes (quoted, unquoted, repeats), comments (including `<!-->` and `--!>`), bogus comments, the doctype name, and raw text for `script`, `style`, `title`, `textarea`, `xmp`, `iframe`, `noembed`, `noframes` and `plaintext`. A tag cut by the end of the page is dropped. A test feeds it 3000 random pages to check that it never crashes or loops.
+- DOM tree: an arena (one `Vec` of nodes, a `NodeId` is the place in it). Nodes know their parent and children. Text next to text joins into one node. `dump` prints the tree in the html5lib test format.
 
 ## Known gaps
 
@@ -71,3 +72,4 @@ What each done topic covers:
 - Tokenizer: the doctype's public and system names are skipped. Quirks mode needs them (modules 3 and 4).
 - Tokenizer: no script data escapes (`<!--<script>` inside a script). `<noscript>` is read as a normal element. NUL characters in text are dropped.
 - Tokenizer: it switches to raw text by itself. In a real browser the tree builder does it.
+- DOM: the tree can only grow. No way yet to move or delete a node (the adoption agency algorithm and JavaScript need that). A `NodeId` from another document is not detected.
