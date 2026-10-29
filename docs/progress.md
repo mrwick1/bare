@@ -9,8 +9,8 @@ The reasons for the design are in [decisions.md](decisions.md).
 | #   | Module                                                 | State       |
 | --- | ------------------------------------------------------ | ----------- |
 | 1   | URL, DNS, TCP and HTTP                                 | done        |
-| 2   | HTML tokenizer and DOM tree                            | next        |
-| 3   | CSS parser and style cascade                           | planned     |
+| 2   | HTML tokenizer and DOM tree                            | done        |
+| 3   | CSS parser and style cascade                           | next        |
 | 4   | Layout (box model, text flow)                          | planned     |
 | 5   | Window (Wayland) and paint, bitmap font                | planned     |
 | 6   | Input and navigation (links, scroll)                   | planned     |
@@ -48,7 +48,7 @@ What each done topic covers:
 | 2   | Character references (the entity table)              | done    | `crates/html/src/charref.rs`    |
 | 3   | Tokenizer (state machine, raw text)                  | done    | `crates/html/src/tokenizer.rs`  |
 | 4   | DOM tree (arena)                                     | done    | `crates/html/src/dom.rs`        |
-| 5   | Tree builder (implied tags, void elements), app      | next    |                                 |
+| 5   | Tree builder (implied tags, void elements), app      | done    | `crates/html/src/tree.rs`       |
 
 What each done topic covers:
 
@@ -56,6 +56,7 @@ What each done topic covers:
 - Character references: all 2231 names from the WHATWG list (generated into `crates/html/src/entities.rs`), decimal and hex numbers, the old names without `;`, the stricter rule in attribute values, and the fixes for 0, surrogates, numbers that are too big, and `&#128;` to `&#159;` (windows-1252).
 - Tokenizer: the state machine of the standard for tags, attributes (quoted, unquoted, repeats), comments (including `<!-->` and `--!>`), bogus comments, the doctype name, and raw text for `script`, `style`, `title`, `textarea`, `xmp`, `iframe`, `noembed`, `noframes` and `plaintext`. A tag cut by the end of the page is dropped. A test feeds it 3000 random pages to check that it never crashes or loops.
 - DOM tree: an arena (one `Vec` of nodes, a `NodeId` is the place in it). Nodes know their parent and children. Text next to text joins into one node. `dump` prints the tree in the html5lib test format.
+- Tree builder: the modes before the body (initial, before html, before head, in head, after head), in body, text, after body. Missing `html`, `head` and `body` are added. Void elements. A new `p`, `li`, `dd`, `dt`, `option`, heading or `button` closes the open one. A stray end tag is ignored and never closes past a special element. Tables: missing `tbody`, `tr` and `colgroup` are added, a new cell closes the old one, a table in a cell nests, and text or tags that cannot be in a table move in front of it (foster parenting). The app prints the DOM tree (`--source` prints the page source). A test feeds it 4000 random pages and checks the links of every tree.
 
 ## Known gaps
 
@@ -73,3 +74,6 @@ What each done topic covers:
 - Tokenizer: no script data escapes (`<!--<script>` inside a script). `<noscript>` is read as a normal element. NUL characters in text are dropped.
 - Tokenizer: it switches to raw text by itself. In a real browser the tree builder does it.
 - DOM: the tree can only grow. No way yet to move or delete a node (the adoption agency algorithm and JavaScript need that). A `NodeId` from another document is not detected.
+- Tree builder: no adoption agency algorithm and no list of active formatting elements. `<b><p>x</b>y</p>` and `<p><b>x<p>y` differ from browsers. This is a good topic for later, and a favourite interview question.
+- Tree builder: no foreign content (SVG and MathML), `<template>`, `<select>` modes, framesets, `<noscript>`, quirks mode, and no merge of the attributes of a second `<html>` or `<body>` tag.
+- Tree builder: no parser pause for scripts (`document.write`), and no preload scanner. Both need module 9 and the network in the loop.

@@ -2,8 +2,12 @@
 //!
 //! Usage: `cargo run -- http://example.com`
 //!
+//! It prints the DOM tree of the page. Add `--source` to print the source of the page instead.
+//!
 //! Comments compare Rust with JavaScript, because you know JS.
 
+use bare_html::{encoding, tree};
+// The HTML crate: `encoding` turns bytes into text, and `tree` turns text into a DOM tree.
 use bare_net::http;
 // JS: like `import`. `bare_net` is another crate (package) in this project.
 // It is listed in this crate's `Cargo.toml`, like a dependency in `package.json`.
@@ -13,8 +17,12 @@ use bare_url::Url;
 fn main() {
     // The program starts here.
 
-    let arg = match std::env::args().nth(1) {
-        // Get the first word typed after the program name: the URL.
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    // All the words after the program name. JS: `process.argv.slice(2)`.
+    let source = args.iter().any(|a| a == "--source");
+    // Did the user type `--source`?
+    let arg = match args.iter().find(|a| !a.starts_with("--")) {
+        // Get the first word that is not a flag: the URL.
         // It may be missing. Rust makes us handle that case.
         // `match` is like `switch`, but it must handle every case.
         Some(a) => a,
@@ -44,8 +52,15 @@ fn main() {
                 eprintln!("status: {}", response.status);
                 // A 404 page still has a body, so we print it. We also tell you the status.
             }
-            println!("{}", String::from_utf8_lossy(&response.body));
-            // It worked: print the page. Bad bytes become "�". JS: `console.log(text)`.
+            let text = encoding::decode(&response.body, response.header("content-type"));
+            // Find the encoding of the page and turn the bytes into text.
+            if source {
+                println!("{text}");
+                // `--source`: print the page as it is. JS: `console.log(text)`.
+            } else {
+                print!("{}", tree::parse(&text).dump());
+                // Build the DOM tree and print it, one line for each node.
+            }
         }
         Err(e) => {
             eprintln!("error: {e}");

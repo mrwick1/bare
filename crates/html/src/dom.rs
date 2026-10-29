@@ -87,23 +87,47 @@ impl Document {
 
     /// Add a new node as the last child of `parent`. Gives the new node.
     pub fn append(&mut self, parent: NodeId, data: NodeData) -> NodeId {
+        self.insert(parent, None, data)
+    }
+
+    /// Add a new node as a child of `parent`, just before `before`. With `None`, add it at the end.
+    /// Gives the new node. The tree builder needs this to put text before a table.
+    pub fn insert(&mut self, parent: NodeId, before: Option<NodeId>, data: NodeData) -> NodeId {
         let id = NodeId(self.nodes.len());
         // The new node goes at the end of the `Vec`, so its number is the length now.
         self.nodes.push(Node { parent: Some(parent), children: Vec::new(), data });
-        self.nodes[parent.0].children.push(id);
+        let children = &mut self.nodes[parent.0].children;
+        let at = before.and_then(|b| children.iter().position(|&c| c == b)).unwrap_or(children.len());
+        // The place of `before` in the list of children, or the end. JS: `indexOf`, then `splice`.
+        children.insert(at, id);
         id
+    }
+
+    /// Add a comment at the end of the top node. Comments before and after the `html` element go there.
+    pub fn append_comment(&mut self, text: String) {
+        self.append(self.root(), NodeData::Comment(text));
     }
 
     /// Add text as the last child of `parent`. If the last child is text already, add to it.
     /// The DOM never has two text nodes side by side: `"a"` then `"b"` is one node `"ab"`.
     pub fn append_text(&mut self, parent: NodeId, text: &str) {
-        if let Some(&last) = self.nodes[parent.0].children.last()
-            && let NodeData::Text(existing) = &mut self.nodes[last.0].data
+        self.insert_text(parent, None, text);
+    }
+
+    /// Like `append_text`, but just before `before`. The text joins the child in front of that place,
+    /// if it is text.
+    pub fn insert_text(&mut self, parent: NodeId, before: Option<NodeId>, text: &str) {
+        let children = &self.nodes[parent.0].children;
+        let at = before.and_then(|b| children.iter().position(|&c| c == b)).unwrap_or(children.len());
+        let previous = at.checked_sub(1).map(|i| children[i]);
+        // The child in front of that place, if there is one. Copying the `NodeId` ends the borrow of `children`.
+        if let Some(previous) = previous
+            && let NodeData::Text(existing) = &mut self.nodes[previous.0].data
         {
             existing.push_str(text);
             return;
         }
-        self.append(parent, NodeData::Text(text.to_string()));
+        self.insert(parent, before, NodeData::Text(text.to_string()));
     }
 
     /// The tree as text, one line per node, in the format of the html5lib tests.
@@ -211,5 +235,21 @@ mod tests {
 ";
         assert_eq!(doc.dump(), expected);
         // The attributes are sorted: "class" comes before "id", although we added "id" first.
+    }
+
+    #[test]
+    fn inserts_before_a_node() {
+        let mut doc = Document::new();
+        let body = doc.append(doc.root(), element("body", &[]));
+        let table = doc.append(body, element("table", &[]));
+        let div = doc.insert(body, Some(table), element("div", &[]));
+        assert_eq!(doc.children(body), [div, table]);
+        // The new node is before the table, not after it.
+        assert_eq!(doc.parent(div), Some(body));
+        doc.insert_text(body, Some(table), "a");
+        doc.insert_text(body, Some(table), "b");
+        assert_eq!(doc.children(body).len(), 3);
+        assert_eq!(doc.data(doc.children(body)[1]), &NodeData::Text("ab".to_string()));
+        // The two pieces of text joined, and sit between the div and the table.
     }
 }
