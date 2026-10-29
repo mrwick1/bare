@@ -170,9 +170,29 @@ fn main() {
     let tokens = step("html: tokenize", || {
         bare_html::tokenizer::tokenize(&decoded).count()
     });
-    let doc = step("html: tree (with tokens)", || {
+    let mut doc = step("html: tree (with tokens)", || {
         bare_html::tree::parse(&decoded)
     });
+
+    // The cascade. A sheet of 10,000 rules: 5,000 that use the classes of the page (a rule with 3 parts, so the
+    // ancestor filter and the matcher have work to do. Each of them matches some of the spans), and 5,000 for classes that the page does not have.
+    let author: String = (0..10_000)
+        .map(|i| {
+            if i % 2 == 0 {
+                format!("body .c{}.d{} > .e{} {{ color: #{:06x}; margin-left: {}px }}\n", i / 2 % 100, i / 2 % 7, i / 2 % 13, i * 37 % 0xffffff, i % 9)
+            } else {
+                format!(".f{i} p {{ margin-top: 1px }}\n")
+            }
+        })
+        .collect();
+    let rules = step("css: add 10,000 rules", || {
+        let mut rules = bare_css::cascade::RuleSet::new();
+        rules.add(&mut doc, bare_css::cascade::UA_CSS, bare_css::cascade::Origin::UserAgent);
+        rules.add(&mut doc, &author, bare_css::cascade::Origin::Author);
+        rules
+    });
+    let styles = step("css: styles of 200,000 elements", || rules.compute(&doc, (1280.0, 800.0)));
+    println!("{} rules, {} different styles", rules.len(), styles.unique());
 
     let mut nodes = 0;
     let mut stack = vec![doc.root()];

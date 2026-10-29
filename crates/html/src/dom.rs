@@ -55,8 +55,8 @@ pub struct NodeId(NonZeroU32);
 // make a `NodeId` of their own.
 
 impl NodeId {
-    /// The place in the `Vec`.
-    fn index(self) -> usize {
+    /// The place in the `Vec` of the document, from 0. A `Vec` with one item for each node, like the style table, uses it.
+    pub fn index(self) -> usize {
         self.0.get() as usize - 1
     }
 
@@ -67,10 +67,15 @@ impl NodeId {
 
 /// The number of a name in the name table of a `Document`. Two atoms of one document are equal
 /// when the names are equal. Atoms of different documents mean nothing together.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Atom(u32);
 
 impl Atom {
+    /// The place of the name in the name table. Style code uses it to make hashes.
+    pub fn index(self) -> u32 {
+        self.0
+    }
+
     /// The atom of `id`. Every document has it from the start, so the style code can find an `id`
     /// attribute with one number compare and no table lookup.
     pub const ID: Atom = Atom(0);
@@ -154,7 +159,7 @@ pub struct Document {
 /// A fast hash for short names (FNV-1a). The standard one (SipHash) is slower, and it protects against
 /// a server that picks keys to make the table slow. Here the "server" is the page, and it can only
 /// slow down its own tab.
-struct Fnv(u64);
+pub struct Fnv(u64);
 
 impl Default for Fnv {
     fn default() -> Fnv {
@@ -225,6 +230,26 @@ impl Document {
     /// The children of this node, in order.
     pub fn children(&self, id: NodeId) -> Children<'_> {
         Children { doc: self, next: self.nodes[id.index()].first_child }
+    }
+
+    /// The number of nodes, with the top node.
+    pub fn len(&self) -> usize {
+        self.nodes.len()
+    }
+
+    /// Always false: a document has its top node.
+    pub fn is_empty(&self) -> bool {
+        false
+    }
+
+    /// The last child of this node. JS: `lastChild`.
+    pub fn last_child(&self, id: NodeId) -> Option<NodeId> {
+        self.nodes[id.index()].last_child
+    }
+
+    /// The atom for a name, if the document has it. It does not add the name.
+    pub fn find_atom(&self, name: &str) -> Option<Atom> {
+        self.atoms.get(name).copied()
     }
 
     /// The sibling before this node. JS: `previousSibling`.

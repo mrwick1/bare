@@ -139,28 +139,53 @@ pub enum Length {
     Vmax(f32),
 }
 
-/// Every word that a value can be, for all the properties.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Keyword {
-    Auto, None, Normal, CurrentColor,
-    // display
-    Block, Inline, InlineBlock, ListItem, Table, TableRow, TableCell, TableRowGroup, TableHeaderGroup,
-    TableFooterGroup, TableColumn, TableColumnGroup, TableCaption, Flex, InlineFlex, Grid, InlineGrid,
-    // float, clear, text-align
-    Left, Right, Both, Center, Justify, Start, End,
-    // visibility, border-style
-    Visible, Hidden, Collapse, Solid, Dashed, Dotted, Double, Groove, Ridge, Inset, Outset,
-    // white-space
-    Pre, Nowrap, PreWrap, PreLine, BreakSpaces,
-    // text-decoration, text-transform
-    Underline, Overline, LineThrough, Uppercase, Lowercase, Capitalize,
-    // font
-    Italic, Oblique, Bold, Bolder, Lighter, Larger, Smaller,
-    XxSmall, XSmall, Small, Medium, Large, XLarge, XxLarge, XxxLarge,
-    // border-width
-    Thin, Thick,
-    // list-style-type, box-sizing
-    Disc, Circle, Square, Decimal, ContentBox, BorderBox,
+/// Every word that a value can be, for all the properties. One list makes the enum, the name of each word, and the way back.
+macro_rules! keywords {
+    ($($variant:ident => $name:literal,)*) => {
+        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+        pub enum Keyword {
+            $($variant,)*
+        }
+
+        impl Keyword {
+            /// The word in CSS, like `inline-block`.
+            pub fn name(self) -> &'static str {
+                match self {
+                    $(Keyword::$variant => $name,)*
+                }
+            }
+
+            /// The keyword for a word in lowercase.
+            pub fn from_name(word: &str) -> Option<Keyword> {
+                match word {
+                    $($name => Some(Keyword::$variant),)*
+                    _ => None,
+                }
+            }
+        }
+    };
+}
+
+keywords! {
+    Auto => "auto", None => "none", Normal => "normal", CurrentColor => "currentcolor",
+    Block => "block", Inline => "inline", InlineBlock => "inline-block", ListItem => "list-item",
+    Table => "table", TableRow => "table-row", TableCell => "table-cell", TableRowGroup => "table-row-group",
+    TableHeaderGroup => "table-header-group", TableFooterGroup => "table-footer-group", TableColumn => "table-column", TableColumnGroup => "table-column-group",
+    TableCaption => "table-caption", Flex => "flex", InlineFlex => "inline-flex", Grid => "grid",
+    InlineGrid => "inline-grid", Left => "left", Right => "right", Both => "both",
+    Center => "center", Justify => "justify", Start => "start", End => "end",
+    Visible => "visible", Hidden => "hidden", Collapse => "collapse", Solid => "solid",
+    Dashed => "dashed", Dotted => "dotted", Double => "double", Groove => "groove",
+    Ridge => "ridge", Inset => "inset", Outset => "outset", Pre => "pre",
+    Nowrap => "nowrap", PreWrap => "pre-wrap", PreLine => "pre-line", BreakSpaces => "break-spaces",
+    Underline => "underline", Overline => "overline", LineThrough => "line-through", Uppercase => "uppercase",
+    Lowercase => "lowercase", Capitalize => "capitalize", Italic => "italic", Oblique => "oblique",
+    Bold => "bold", Bolder => "bolder", Lighter => "lighter", Larger => "larger",
+    Smaller => "smaller", XxSmall => "xx-small", XSmall => "x-small", Small => "small",
+    Medium => "medium", Large => "large", XLarge => "x-large", XxLarge => "xx-large",
+    XxxLarge => "xxx-large", Thin => "thin", Thick => "thick", Disc => "disc",
+    Circle => "circle", Square => "square", Decimal => "decimal", ContentBox => "content-box",
+    BorderBox => "border-box",
 }
 
 /// The value of one property. It does not say which property: a `Declared` has that.
@@ -291,35 +316,10 @@ fn ident(name: &str) -> Part {
         "unset" => return Part::Wide(Value::Unset),
         _ => {}
     }
-    if let Some(keyword) = keyword(lower) {
+    if let Some(keyword) = Keyword::from_name(lower) {
         return Part::Keyword(keyword);
     }
     Color::named(lower).map_or(Part::Other, Part::Color)
-}
-
-fn keyword(word: &str) -> Option<Keyword> {
-    use Keyword::*;
-    Some(match word {
-        "auto" => Auto, "none" => None, "normal" => Normal, "currentcolor" => CurrentColor,
-        "block" => Block, "inline" => Inline, "inline-block" => InlineBlock, "list-item" => ListItem,
-        "table" => Table, "table-row" => TableRow, "table-cell" => TableCell, "table-row-group" => TableRowGroup,
-        "table-header-group" => TableHeaderGroup, "table-footer-group" => TableFooterGroup,
-        "table-column" => TableColumn, "table-column-group" => TableColumnGroup, "table-caption" => TableCaption,
-        "flex" => Flex, "inline-flex" => InlineFlex, "grid" => Grid, "inline-grid" => InlineGrid,
-        "left" => Left, "right" => Right, "both" => Both, "center" => Center, "justify" => Justify, "start" => Start, "end" => End,
-        "visible" => Visible, "hidden" => Hidden, "collapse" => Collapse, "solid" => Solid, "dashed" => Dashed,
-        "dotted" => Dotted, "double" => Double, "groove" => Groove, "ridge" => Ridge, "inset" => Inset, "outset" => Outset,
-        "pre" => Pre, "nowrap" => Nowrap, "pre-wrap" => PreWrap, "pre-line" => PreLine, "break-spaces" => BreakSpaces,
-        "underline" => Underline, "overline" => Overline, "line-through" => LineThrough,
-        "uppercase" => Uppercase, "lowercase" => Lowercase, "capitalize" => Capitalize,
-        "italic" => Italic, "oblique" => Oblique, "bold" => Bold, "bolder" => Bolder, "lighter" => Lighter,
-        "larger" => Larger, "smaller" => Smaller,
-        "xx-small" => XxSmall, "x-small" => XSmall, "small" => Small, "medium" => Medium, "large" => Large,
-        "x-large" => XLarge, "xx-large" => XxLarge, "xxx-large" => XxxLarge, "thin" => Thin, "thick" => Thick,
-        "disc" => Disc, "circle" => Circle, "square" => Square, "decimal" => Decimal,
-        "content-box" => ContentBox, "border-box" => BorderBox,
-        _ => return Option::None,
-    })
 }
 
 /// A number with a unit. `None` for a unit that we do not know.
@@ -713,6 +713,14 @@ mod tests {
         assert_eq!(std::mem::size_of::<Value>(), 8);
         assert_eq!(std::mem::size_of::<Declared>(), 12);
         assert_eq!(std::mem::size_of::<Property>(), 1);
+    }
+
+    #[test]
+    fn keyword_names_round_trip() {
+        for word in ["auto", "none", "inline-block", "xxx-large", "currentcolor", "thick"] {
+            assert_eq!(Keyword::from_name(word).map(Keyword::name), Some(word));
+        }
+        assert_eq!(Keyword::from_name("Auto"), None);
     }
 
     #[test]
