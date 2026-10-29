@@ -1,0 +1,54 @@
+/* The default style sheet of the browser: what a page looks like with no style sheet of its own.
+   It follows the rendering section of the HTML standard, and the numbers of Chrome.
+   Only the properties that `values.rs` knows are here. */
+
+html, body, div, p, h1, h2, h3, h4, h5, h6, ul, ol, dl, dt, dd, blockquote, pre, hr, form, fieldset, legend,
+address, article, aside, section, nav, header, footer, main, figure, figcaption, details, summary,
+center, menu, dir, listing, xmp, hgroup, search { display: block }
+
+head, link, meta, script, style, title, base, template, area, datalist, param, source, track, [hidden] { display: none }
+
+li { display: list-item }
+table { display: table }
+caption { display: table-caption }
+colgroup { display: table-column-group }
+col { display: table-column }
+thead { display: table-header-group }
+tbody { display: table-row-group }
+tfoot { display: table-footer-group }
+tr { display: table-row }
+td, th { display: table-cell; padding: 1px }
+button, input, select, textarea, img, video, canvas, iframe { display: inline-block }
+
+body { margin: 8px }
+p, dl, pre, xmp, listing, fieldset { margin: 1em 0 }
+blockquote { margin: 1em 40px }
+figure { margin: 1em 40px }
+dd { margin-left: 40px }
+ul, ol, menu, dir { margin: 1em 0; padding-left: 40px }
+ul ul, ul ol, ol ul, ol ol { margin: 0 }
+ul, menu, dir { list-style-type: disc }
+ol { list-style-type: decimal }
+ul ul { list-style-type: circle }
+ul ul ul { list-style-type: square }
+fieldset { padding: .35em .75em .625em; border: 2px groove }
+hr { margin: 8px auto; border: 1px inset }
+
+h1 { margin: .67em 0; font-size: 2em; font-weight: bold }
+h2 { margin: .83em 0; font-size: 1.5em; font-weight: bold }
+h3 { margin: 1em 0; font-size: 1.17em; font-weight: bold }
+h4 { margin: 1.33em 0; font-size: 1em; font-weight: bold }
+h5 { margin: 1.67em 0; font-size: .83em; font-weight: bold }
+h6 { margin: 2.33em 0; font-size: .67em; font-weight: bold }
+
+pre, xmp, listing { white-space: pre }
+b, strong, th { font-weight: bold }
+i, em, cite, var, dfn, address { font-style: italic }
+th { text-align: center }
+center { text-align: center }
+u, ins { text-decoration-line: underline }
+s, strike, del { text-decoration-line: line-through }
+a:link { color: #0000ee; text-decoration-line: underline }
+small { font-size: smaller }
+big { font-size: larger }
+mark { background-color: yellow; color: black }

@@ -19,6 +19,7 @@ You need Rust (edition 2024).
 ```sh
 cargo run -- http://example.com            # print the DOM tree
 cargo run -- http://example.com --source   # print the page source
+cargo run -- http://example.com --styles   # print the computed style of each element
 cargo test
 ```
 
