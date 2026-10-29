@@ -11,10 +11,12 @@
 //! Each declaration gets a key, and the biggest key wins:
 //! 1. Importance and origin: the browser's own style sheet (UA), then the page's (author), then `!important` of the author,
 //!    then `!important` of the UA. (`!important` turns the order around, so a page cannot take away what the browser needs.)
-//! 2. Specificity (`#a` beats `.a` beats `a`). The `style=""` attribute beats every selector.
-//! 3. Order: the later rule wins.
+//! 2. The layer (`@layer`): a later layer wins, and no layer beats every layer. `!important` turns this order around too.
+//!    The `style=""` attribute beats every layer.
+//! 3. Specificity (`#a` beats `.a` beats `a`). The `style=""` attribute beats every selector.
+//! 4. Order: the later rule wins.
 //!
-//! The three go in one `u64`: 2 bits, 31 bits and 31 bits. We compare one number for each declaration, and we never sort.
+//! The four go in one `u128`: 2 bits, 32 bits, 31 bits and 31 bits (with some bits not used). We compare one number for each declaration, and we never sort.
 //!
 //! ## Speed and memory
 //!
