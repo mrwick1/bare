@@ -32,7 +32,9 @@
 //! `parse_selector_list` gives `None` for that.
 //!
 //! Left out for now:
-//! - `:is()`, `:where()`, `:has()`, the `of S` part of `:nth-child()`, and `:only-of-type`. A rule that
+//! - `:is()` and `:where()` take compounds only, like `:not()`: `:is(h1, .a)` is good, `:is(.a .b)` is not. One bad argument
+//!   throws the whole rule away (Chrome drops only that argument).
+//! - `:has()`, the `of S` part of `:nth-child()`, and `:only-of-type`. A rule that
 //!   uses them is thrown away, like an unknown pseudo-class. (Chrome also throws away `:-moz-placeholder` and
 //!   the other prefixed ones that it does not know. So do we.)
 //! - Pseudo-elements (`::before`, and the old `:before` and `:after`). They style a part that is not in the DOM,
@@ -107,6 +109,8 @@ pub enum Simple {
     Never,
     /// `:not(.a, b)`: true when none of the compounds match. Each one is a list of simple selectors.
     Not(Vec<Vec<Simple>>),
+    /// `:is(.a, b)` and `:where(.a, b)`: true when one of the compounds matches. They match the same. Only the specificity differs.
+    Is(Vec<Vec<Simple>>),
 }
 
 /// `:nth-child(an+b)`: the place of the element among its siblings (the first is 1) must be `a*n + b` for some `n >= 0`.
@@ -359,7 +363,8 @@ impl Parser<'_, '_> {
                     _ => return None,
                 })
             }
-            Token::Function(name) if name.eq_ignore_ascii_case("not") => {
+            Token::Function(name) if matches!(&*name.to_ascii_lowercase(), "not" | "is" | "where" | "matches" | "-webkit-any" | "-moz-any") => {
+                let kind = name.to_ascii_lowercase();
                 if depth >= MAX_DEPTH {
                     return None;
                 }
@@ -378,10 +383,13 @@ impl Parser<'_, '_> {
                         _ => return None,
                     }
                 }
-                for (total, add) in counts.iter_mut().zip(best) {
-                    *total += add;
+                // `:where` has no specificity at all.
+                if kind != "where" {
+                    for (total, add) in counts.iter_mut().zip(best) {
+                        *total += add;
+                    }
                 }
-                Some(Simple::Not(args))
+                Some(if kind == "not" { Simple::Not(args) } else { Simple::Is(args) })
             }
             Token::Function(name) => {
                 let (from_end, of_type) = match &*name.to_ascii_lowercase() {
@@ -523,6 +531,11 @@ mod tests {
         assert_eq!(spec(":not(.a)"), (0, 1, 0));
         assert_eq!(spec(":not(#a, .b, c)"), (1, 0, 0));
         assert_eq!(spec("p:not(.a):not(.b)"), (0, 2, 1));
+        assert_eq!(spec(":is(#a, .b, c)"), (1, 0, 0));
+        assert_eq!(spec("p:is(.a, .b)"), (0, 1, 1));
+        assert_eq!(spec(":where(#a, .b, c)"), (0, 0, 0));
+        assert_eq!(spec("p:where(#a)"), (0, 0, 1));
+        assert_eq!(spec(":is(:where(#a), .b)"), (0, 1, 0));
     }
 
     #[test]
@@ -589,6 +602,7 @@ mod tests {
         assert_eq!(simple(":empty"), Simple::Empty);
         assert_eq!(simple(":link"), Simple::Link);
         assert_eq!(simple(":hover"), Simple::Never);
+        assert_eq!(simple(":is(.a, #b)"), Simple::Is(vec![vec![Simple::Class("a".into())], vec![Simple::Id("b".into())]]));
         assert_eq!(simple(":not(.a, #b)"), Simple::Not(vec![vec![Simple::Class("a".into())], vec![Simple::Id("b".into())]]));
     }
 
@@ -628,7 +642,7 @@ mod tests {
         for text in [
             "", " ", ",", "a,", ",a", "a,,b", ">", "a >", "a > > b", ".", ". a", "#", "#1", "a#1",
             "[", "[a", "[a=", "[a=]", "[=a]", "[a=b c]", "[a=b i j]", "[a=b x]", "[a!=b]", "[a ~ = b]", "[1]",
-            ":", "a:", ":unknown", "::before", "a::after", "::x", ":nth-child()", ":nth-child(2 n)", ":nth-child(n 1)", ":nth-child(1.5)", ":nth-child(a)", ":nth-child(2n+)", ":nth-child(2n+1", ":is(a)", ":not()", ":not(a b)", ":not(a > b)",
+            ":", "a:", ":unknown", "::before", "a::after", "::x", ":nth-child()", ":nth-child(2 n)", ":nth-child(n 1)", ":nth-child(1.5)", ":nth-child(a)", ":nth-child(2n+)", ":nth-child(2n+1", ":is()", ":is(a b)", ":where(a > b)", ":not()", ":not(a b)", ":not(a > b)",
             ":not(a", ":not(a,)", "a)", "a b)", "a(", "a\"b\"", "svg|a", "|a", "a{", "a;b", "!", "a!b",
         ] {
             assert!(parse(text).is_none(), "{text:?} should not parse");
