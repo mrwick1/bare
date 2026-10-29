@@ -38,9 +38,18 @@ DNS (2026-10-29, real network, so the numbers move with the resolver):
 | Cold lookup (cache of the OS resolver flushed) | about 113 ms (2 round trips of 56 ms) | about 56 ms | The A and AAAA questions go out at the same time. The noise of the upstream resolver is large (55 ms to 2 s), so only a run with a steady network shows the gain |
 | Lookup that hits our cache | 47 µs | 0.4 µs | The cache comes before the read of `/etc/hosts` |
 
+HTTP body (2026-10-29, `bare-stress scale net-body`, a server on 127.0.0.1, so only our own time and memory count):
+
+| Reply | Peak before | Peak after | Why |
+| --- | --- | --- | --- |
+| 100 MB, `Content-Length` | 235 MB, 83 ms | 100 MB, 49 ms | The body is not copied out of the read buffer. The buffer gets its full size at once, so it does not grow by doubling. The headers are read once, not after each read |
+| 10 MB, chunked | 33.6 MB | 17.2 MB | The chunks join inside the read buffer |
+| 10 MB, `Content-Length`, sent in 1 KB writes | 27 MB | 10 MB | The same two changes |
+| Cache hit of a big body | one copy of the body | no copy | The cache gives out a shared `Arc<Response>` |
+
 Not measured:
 
-- TCP and HTTP. They wait for the network, so a CPU benchmark says little. `parse_response` is private.
+- TCP, and HTTP on a real network. They wait for the network, so a CPU benchmark says little.
 - The `bare` binary is 2.1 MB (release build).
 
 History:
