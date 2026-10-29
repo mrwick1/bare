@@ -5,3 +5,4 @@ pub mod charref;
 pub mod encoding;
 mod entities;
 // No `pub`: only this crate uses the table. Other crates use `charref`.
+pub mod tokenizer;

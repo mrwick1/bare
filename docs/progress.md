@@ -46,14 +46,15 @@ What each done topic covers:
 | --- | ---------------------------------------------------- | ------- | ------------------------------- |
 | 1   | Bytes to text: encoding, newlines                    | done    | `crates/html/src/encoding.rs`   |
 | 2   | Character references (the entity table)              | done    | `crates/html/src/charref.rs`    |
-| 3   | Tokenizer (state machine, raw text)                  | next    |                                 |
-| 4   | DOM tree (arena)                                     | planned |                                 |
+| 3   | Tokenizer (state machine, raw text)                  | done    | `crates/html/src/tokenizer.rs`  |
+| 4   | DOM tree (arena)                                     | next    |                                 |
 | 5   | Tree builder (implied tags, void elements), app      | planned |                                 |
 
 What each done topic covers:
 
 - Bytes to text: BOM, then the `Content-Type` charset, then a `<meta charset>` in the first 1024 bytes, then a guess (UTF-8 if valid, else windows-1252). UTF-8 and windows-1252 (also for latin1 and iso-8859-1). `\r\n` and `\r` become `\n`.
 - Character references: all 2231 names from the WHATWG list (generated into `crates/html/src/entities.rs`), decimal and hex numbers, the old names without `;`, the stricter rule in attribute values, and the fixes for 0, surrogates, numbers that are too big, and `&#128;` to `&#159;` (windows-1252).
+- Tokenizer: the state machine of the standard for tags, attributes (quoted, unquoted, repeats), comments (including `<!-->` and `--!>`), bogus comments, the doctype name, and raw text for `script`, `style`, `title`, `textarea`, `xmp`, `iframe`, `noembed`, `noframes` and `plaintext`. A tag cut by the end of the page is dropped. A test feeds it 3000 random pages to check that it never crashes or loops.
 
 ## Known gaps
 
@@ -67,3 +68,6 @@ What each done topic covers:
 - DNS: no short names from the `search` line of `/etc/resolv.conf`.
 - DNS: no DNS-over-HTTPS. It needs module 7.
 - Encoding: no UTF-16 and no other encodings. The meta scan is simple: it does not skip comments. The guess is not a real detector.
+- Tokenizer: the doctype's public and system names are skipped. Quirks mode needs them (modules 3 and 4).
+- Tokenizer: no script data escapes (`<!--<script>` inside a script). `<noscript>` is read as a normal element. NUL characters in text are dropped.
+- Tokenizer: it switches to raw text by itself. In a real browser the tree builder does it.
