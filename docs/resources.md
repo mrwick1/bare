@@ -4,7 +4,7 @@ This file records how much time and memory each part of the browser uses. Our pr
 
 ## How to measure
 
-Run `cargo run --release -p bare-bench`. It builds one page of 100,000 `<div>` and 100,000 `<span>` elements (5.2 MB) and runs each step five times.
+Run `cargo run --release -p bare-bench`. It builds one page of 100,000 `<div>` and 100,000 `<span>` elements (5.2 MB), and one style sheet of 100,000 rules (6.9 MB), and runs each step five times.
 
 - `ms` is the median time of the five runs.
 - `peak MB` is the most heap memory alive at once during the step.
@@ -24,6 +24,7 @@ Machine: archMachine, release build, 2026-10-29.
 | 2      | Bytes to text                | 6    | 15.6    | 5.2     | one copy of the page                   |
 | 2      | Tokenizer (streaming)        | 20   | 0.0     | 0.0     | counts 600,003 tokens, keeps none      |
 | 2      | Tree builder (with tokenizer) | 45  | 23.1    | 17.8    | 400,006 nodes, 44 bytes each           |
+| 3      | CSS tokenizer                | 36   | 0.0     | 0.0     | 6.9 MB, 2,500,000 tokens, 190 MB/s     |
 
 Not measured:
 

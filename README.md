@@ -32,6 +32,7 @@ Linux is the first target. Windows and macOS come later.
 | `crates/net/`       | DNS, TCP and HTTP                                   |
 | `crates/url/`       | URL parser and IDNA                                 |
 | `crates/html/`      | HTML: encoding, tokenizer, DOM tree, tree builder   |
+| `crates/css/`       | CSS: tokenizer, parser, selectors, style cascade    |
 | `crates/unicode/`   | NFC and Unicode data tables                         |
 | `crates/bench/`     | Time and memory benchmarks for each module          |
 | `data/unicode/`     | Unicode data files and their license                |

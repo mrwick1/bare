@@ -1,0 +1,6 @@
+# CSS: tokenizer, parser, selectors and the style cascade.
+[package]
+name = "bare-css"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
