@@ -66,28 +66,163 @@ pub fn get(url: &Url) -> Result<String, Box<dyn std::error::Error>> {
     // We replace that confusing name with a clear message.
     // `&mut raw` means "lend it, and you may change it".
 
-    let text = String::from_utf8_lossy(&raw);
-    // Turn the bytes into text. Bad bytes become "�" instead of failing.
+    let response = parse_response(&raw)?;
+    // Cut the reply into status, headers and body. This is our own function, below.
+    // `?` returns the error if the reply is malformed.
 
-    let (head, body) = split_response(&text)?;
-    // Cut the reply into headers and body. This is our own function, below.
-    // JS: like `const [head, body] = ...`. `?` returns the error if the reply is malformed.
-
-    let status_line = head.lines().next().unwrap_or("");
-    // `head.lines()` goes through the headers line by line.
-    // `.next()` takes the first line, like "HTTP/1.1 200 OK". It may not exist, so it is an `Option`.
-    // `unwrap_or("")` means: use the line, or "" if it is missing.
-    if !status_line.contains(" 200 ") {
-        // JS: `!status_line.includes(" 200 ")`. 200 means success.
-        // For now, any other code (301, 404...) is an error.
-        return Err(format!("unsupported status: {status_line}").into());
+    if response.status != 200 {
+        // 200 means success. For now, any other code (301, 404...) is an error.
+        return Err(format!("unsupported status: {}", response.status).into());
         // `.into()` converts our text into the `Box<dyn Error>` type that this function returns.
     }
 
-    Ok(body.to_string())
-    // Return the body as success. `.to_string()` copies it.
-    // We must copy, because `body` is a piece of `text`, and Rust deletes `text` when
-    // the function ends. JS cleans up for you. Rust needs us to keep what we return.
+    Ok(String::from_utf8_lossy(&response.body).into_owned())
+    // Turn the body bytes into text. Bad bytes become "�" instead of failing.
+    // `into_owned` makes a copy that we can return.
+}
+
+/// A parsed HTTP response.
+pub struct Response {
+    // JS: like an object `{ status, headers, body }`. `pub` lets other crates read the fields.
+    pub status: u16,
+    // The number in the first line, like 200 or 404.
+    pub headers: Vec<(String, String)>,
+    // JS: like `[["content-type", "text/html"], ...]`. Names are lowercase.
+    // A list, not an object, because a server may send the same name twice.
+    pub body: Vec<u8>,
+    // The body as bytes. An image is not text, so we only make text at the end.
+}
+
+impl Response {
+    // JS: like adding methods to a class.
+    /// The first header with this name. Names are not case sensitive.
+    pub fn header(&self, name: &str) -> Option<&str> {
+        self.headers.iter().find(|(n, _)| n == name).map(|(_, v)| v.as_str())
+        // JS: `headers.find(([n]) => n === name)?.[1]`. `Option` is like a value that may be `undefined`.
+    }
+}
+
+/// Turn the raw bytes from the server into a `Response`.
+fn parse_response(raw: &[u8]) -> Result<Response, String> {
+    let head_end = find(raw, b"\r\n\r\n").ok_or("malformed response: no blank line after headers")?;
+    // The blank line ends the headers. Everything after it is the body.
+    // `ok_or` turns a missing value (`None`) into an error. `?` returns that error.
+    let head = String::from_utf8_lossy(&raw[..head_end]);
+    // Headers are text, so we make text from them. `raw[..head_end]` is JS `raw.slice(0, headEnd)`.
+    let mut lines = head.split("\r\n");
+    // JS: `head.split("\r\n")`. We read it one line at a time.
+
+    let status_line = lines.next().unwrap_or("");
+    // The first line, like "HTTP/1.1 200 OK".
+    let mut parts = status_line.splitn(3, ' ');
+    // Split at the first two spaces only. The reason text ("Not Found") has a space inside.
+    let version = parts.next().unwrap_or("");
+    if !version.starts_with("HTTP/1.") {
+        return Err(format!("malformed status line: {status_line}"));
+    }
+    let status = parts.next().and_then(|code| code.parse::<u16>().ok()).ok_or_else(|| format!("malformed status line: {status_line}"))?;
+    // `parse` turns "200" into the number 200. It can fail, so we get a `Result`.
+    // `.ok()` turns that into an `Option`, and `and_then` runs it only if the code exists.
+
+    let mut headers = Vec::new();
+    for line in lines {
+        let (name, value) = line.split_once(':').ok_or_else(|| format!("malformed header: {line}"))?;
+        // "Content-Length: 5" becomes "Content-Length" and " 5".
+        headers.push((name.to_ascii_lowercase(), value.trim().to_string()));
+        // Names are not case sensitive, so we keep them lowercase. Spaces around the value are not part of it.
+    }
+
+    let mut response = Response { status, headers, body: Vec::new() };
+    let rest = &raw[head_end + 4..];
+    // The bytes after the blank line (4 bytes: `\r\n\r\n`). They may hold the body, but maybe not all of it.
+    response.body = read_body(&response, rest)?;
+    Ok(response)
+}
+
+/// Find where the body ends. HTTP has three rules. The first one that fits wins.
+fn read_body(response: &Response, rest: &[u8]) -> Result<Vec<u8>, String> {
+    if response.status < 200 || response.status == 204 || response.status == 304 {
+        return Ok(Vec::new());
+        // Rule 0: these codes never have a body, whatever the headers say.
+    }
+
+    if let Some(coding) = response.header("transfer-encoding") {
+        // Rule 1: the body comes in chunks. Each chunk says its own size.
+        if coding.to_ascii_lowercase().split(',').next_back().map(str::trim) != Some("chunked") {
+            return Err(format!("unsupported transfer-encoding: {coding}"));
+        }
+        return decode_chunked(rest);
+        // This rule comes before Content-Length. If both are present, a proxy and a server
+        // may read them differently. That is "request smuggling". The standard says chunked wins.
+    }
+
+    if let Some(length) = response.header("content-length") {
+        // Rule 2: the server says the exact size of the body.
+        let n = parse_number(length, 10).ok_or_else(|| format!("bad content-length: {length}"))?;
+        if response.headers.iter().any(|(name, value)| name == "content-length" && value != length) {
+            return Err("two different content-length headers".to_string());
+            // Two different sizes: we cannot know which one is true. We refuse.
+        }
+        if rest.len() < n {
+            return Err(format!("the connection closed early: got {} of {n} bytes", rest.len()));
+            // The server closed the connection before the end. The page is cut short.
+            // Without this check we would show half a page as if it were complete.
+        }
+        return Ok(rest[..n].to_vec());
+    }
+
+    Ok(rest.to_vec())
+    // Rule 3: nothing says the size, so the body ends when the connection closes.
+    // This is the oldest rule. It cannot tell a complete body from a cut one.
+}
+
+/// Join the chunks of a chunked body. A chunk is: size in hex, `\r\n`, data, `\r\n`.
+/// A chunk of size 0 ends the body.
+fn decode_chunked(mut rest: &[u8]) -> Result<Vec<u8>, String> {
+    // `mut rest` lets us move `rest` forward, past each chunk we have read.
+    let mut body = Vec::new();
+    loop {
+        let line_end = find(rest, b"\r\n").ok_or("chunked body ended early")?;
+        let line = String::from_utf8_lossy(&rest[..line_end]);
+        // The size line, like "241" or "1a;name=value".
+        let size_text = line.split(';').next().unwrap_or("");
+        // After ";" a server may add "extensions". We ignore them.
+        let size = parse_number(size_text.trim(), 16).ok_or_else(|| format!("bad chunk size: {line}"))?;
+        // The size is in hex: "241" means 577 bytes, not 241. This is why example.com
+        // showed "241" and "0" in our output before.
+        rest = &rest[line_end + 2..];
+        // Move past the size line.
+
+        if size == 0 {
+            return Ok(body);
+            // The last chunk. After it a server may send "trailers" (extra headers). We ignore them.
+        }
+        if rest.len() < size + 2 {
+            return Err("chunked body ended early".to_string());
+        }
+        body.extend_from_slice(&rest[..size]);
+        // Keep the chunk data.
+        if &rest[size..size + 2] != b"\r\n" {
+            return Err("chunk is not followed by a line break".to_string());
+        }
+        rest = &rest[size + 2..];
+        // Move past the data and its line break. The loop reads the next chunk.
+    }
+}
+
+/// Read a number made only of digits. `from_str_radix` also accepts "+5", which HTTP does not.
+fn parse_number(text: &str, radix: u32) -> Option<usize> {
+    // `radix` is the base: 10 for normal numbers, 16 for hex.
+    if text.is_empty() || !text.chars().all(|c| c.is_digit(radix)) {
+        return None;
+    }
+    usize::from_str_radix(text, radix).ok()
+}
+
+/// The position of the first `needle` inside `haystack`.
+fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    haystack.windows(needle.len()).position(|w| w == needle)
+    // `windows(n)` looks at every piece of n bytes in a row. JS: a loop with `slice(i, i + n)`.
 }
 
 /// The value of the `Host:` header, like "a.com" or "[::1]:8080".
@@ -98,33 +233,11 @@ fn host_header(url: &Url) -> String {
     // The port is sent only when it is not the default.
 }
 
-/// Split a raw response into headers and body at the first blank line.
-fn split_response(text: &str) -> Result<(&str, &str), String> {
-    // No `pub`, so only this file can use it. JS: a function that is not exported.
-    // The two `&str` we return are pieces of `text`. They are not copies.
-    // JS: like `slice`.
-    text.split_once("\r\n\r\n")
-        // JS: like splitting at the first "\r\n\r\n" only. It gives `Some((head, body))` or `None`.
-        .ok_or_else(|| "malformed response: no blank line after headers".to_string())
-    // `None` becomes an error with this message. No `;`, so this is the returned value.
-}
-
 #[cfg(test)]
 // Only compiled for `cargo test`.
 mod tests {
     use super::*;
-    // Import everything from this file, including the private `split_response`.
-
-    #[test]
-    // JS: like `test(...)` in Jest.
-    fn splits_head_and_body() {
-        let (head, body) = split_response("HTTP/1.1 200 OK\r\nA: b\r\n\r\nhello").unwrap();
-        // A fake reply. `unwrap()` means "expect success, or crash". Fine in tests.
-        assert_eq!(head, "HTTP/1.1 200 OK\r\nA: b");
-        // JS: `expect(head).toBe(...)`. The head is everything before the blank line.
-        assert_eq!(body, "hello");
-        // The body is everything after it.
-    }
+    // Import everything from this file, including the private `parse_response`.
 
     #[test]
     fn sends_host_header() {
@@ -138,9 +251,81 @@ mod tests {
         // An IPv6 address gets its "[ ]" back, so its ":" do not mix with the port's ":".
     }
 
+    fn parse(raw: &str) -> Result<Response, String> {
+        parse_response(raw.as_bytes())
+        // A shortcut: tests write the reply as text.
+    }
+
+    #[test]
+    fn reads_status_and_headers() {
+        let r = parse("HTTP/1.1 404 Not Found\r\nContent-Type: text/html\r\nContent-Length: 2\r\n\r\nhi").unwrap();
+        assert_eq!(r.status, 404);
+        // The reason text "Not Found" has a space. It must not break the status.
+        assert_eq!(r.header("content-type"), Some("text/html"));
+        assert_eq!(r.header("CONTENT-TYPE"), None);
+        // `header` expects a lowercase name. Names are stored in lowercase.
+        assert_eq!(r.body, b"hi");
+    }
+
+    #[test]
+    fn body_ends_at_content_length() {
+        let r = parse("HTTP/1.1 200 OK\r\nContent-Length: 3\r\n\r\nabcdef").unwrap();
+        assert_eq!(r.body, b"abc");
+        // Bytes after the size are not part of this body.
+    }
+
+    #[test]
+    fn short_body_is_an_error() {
+        let r = parse("HTTP/1.1 200 OK\r\nContent-Length: 10\r\n\r\nabc");
+        assert!(r.is_err());
+        // The server promised 10 bytes and sent 3. We must not show it as a full page.
+    }
+
+    #[test]
+    fn body_ends_when_connection_closes() {
+        let r = parse("HTTP/1.1 200 OK\r\n\r\nall of it").unwrap();
+        assert_eq!(r.body, b"all of it");
+        // No size header: we take everything.
+    }
+
+    #[test]
+    fn joins_chunks() {
+        let r = parse("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n19;ext=1\r\n, and the rest of it here\r\n0\r\n\r\n").unwrap();
+        assert_eq!(r.body, b"hello, and the rest of it here");
+        // "19" is hex for 25. The ";ext=1" part is ignored.
+    }
+
+    #[test]
+    fn chunked_wins_over_content_length() {
+        let r = parse("HTTP/1.1 200 OK\r\nContent-Length: 1\r\nTransfer-Encoding: chunked\r\n\r\n2\r\nok\r\n0\r\n\r\n").unwrap();
+        assert_eq!(r.body, b"ok");
+    }
+
+    #[test]
+    fn cut_chunked_body_is_an_error() {
+        assert!(parse("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhel").is_err());
+        // The connection closed in the middle of a chunk.
+        assert!(parse("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n2\r\nokXX0\r\n\r\n").is_err());
+        // The chunk is not followed by a line break.
+        assert!(parse("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n+5\r\nhello\r\n0\r\n\r\n").is_err());
+        // "+5" is not a valid size, even though Rust's number parser accepts it.
+    }
+
+    #[test]
+    fn some_codes_have_no_body() {
+        let r = parse("HTTP/1.1 304 Not Modified\r\nContent-Length: 50\r\n\r\n").unwrap();
+        assert!(r.body.is_empty());
+        // A 304 has no body, even when it names a size. We must not wait for 50 bytes.
+    }
+
     #[test]
     fn rejects_garbage() {
-        assert!(split_response("not http").is_err());
-        // There is no blank line, so this must be an error.
+        assert!(parse("not http").is_err());
+        // There is no blank line.
+        assert!(parse("FTP/1.0 200 OK\r\n\r\n").is_err());
+        assert!(parse("HTTP/1.1 abc OK\r\n\r\n").is_err());
+        assert!(parse("HTTP/1.1 200 OK\r\nno colon here\r\n\r\n").is_err());
+        assert!(parse("HTTP/1.1 200 OK\r\nContent-Length: 1\r\nContent-Length: 2\r\n\r\nab").is_err());
+        // Each of these is broken in its own way. Each must be an error, not a crash.
     }
 }
