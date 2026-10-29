@@ -63,14 +63,16 @@ What each done topic covers:
 | #   | Topic                                                | State   | Code                          |
 | --- | ---------------------------------------------------- | ------- | ----------------------------- |
 | 1   | CSS tokenizer                                        | done    | `crates/css/src/tokenizer.rs` |
-| 2   | CSS parser (rules, declarations, error recovery)     | next    |                               |
-| 3   | Selectors (matching, specificity)                    | planned |                               |
+| 2   | CSS parser (rules, declarations, error recovery)     | done    | `crates/css/src/parser.rs`    |
+| 3   | Selectors (matching, specificity)                    | next    |                               |
 | 4   | Values (colors, lengths, shorthands)                 | planned |                               |
 | 5   | Cascade and computed style, app prints the styles    | planned |                               |
 
 What each done topic covers:
 
 - CSS tokenizer: CSS Syntax Level 3, section 4. Idents, functions, at-keywords, hashes (with the id flag), strings, urls (quoted and unquoted), numbers (integer flag, exponents), percentages, dimensions, comments, `<!--` and `-->`. Escapes (`\41 `), NUL, bad strings and bad urls follow the standard. It is an iterator, and names and strings are slices of the style sheet (`Cow::Borrowed`) unless an escape changes them. On three real style sheets (bootstrap and two GTK themes) it gives no bad token, at about 170 MB/s.
+
+- CSS parser: CSS Syntax Level 3, section 5. Style rules and at-rules, declarations with `!important`, and the error recovery of the standard: a broken declaration is skipped to the next `;`, a block that is not closed keeps its content, a rule with no `{` at the end is dropped, and `;` `}` inside strings, urls and `(...)` `[...]` `{...}` do not end anything. `@media`, `@supports`, `@layer`, `@container` and `@keyframes` hold rules, `@font-face` and `@page` hold declarations, and other blocks are skipped. The prelude and the values stay as slices of the style sheet for the next topics. Blocks inside blocks stop at 32 levels, and a run of 100,000 `(` does not overflow the stack. On bootstrap.min.css the at-rule count matches Chrome's (71 against 69: Chrome drops `@-o-keyframes` and `@-ms-viewport`).
 
 ## Known gaps
 
@@ -90,5 +92,6 @@ What each done topic covers:
 - DOM: the tree can only grow. No way yet to move or delete a node (the adoption agency algorithm and JavaScript need that). A `NodeId` from another document is not detected.
 - Tree builder: no adoption agency algorithm and no list of active formatting elements. `<b><p>x</b>y</p>` and `<p><b>x<p>y` differ from browsers. This is a good topic for later, and a favourite interview question.
 - Tree builder: no foreign content (SVG and MathML), `<template>`, `<select>` modes, framesets, `<noscript>`, quirks mode, and no merge of the attributes of a second `<html>` or `<body>` tag.
+- CSS parser: no CSS nesting (a rule inside a style rule is skipped). At-rules inside a style rule are skipped. Nothing checks that a property or an at-rule name is known: that is for the later topics. The style rule count is a little higher than Chrome's (1335 against 1326 on bootstrap) because Chrome also drops rules with a selector that it does not know. Topic 3 should close this gap.
 - CSS tokenizer: the caller gives text. A style sheet that is not UTF-8 needs the encoding rules of the CSS standard (`@charset`, BOM, the `Content-Type` header). The tokenizer does not preprocess the input: it reads `\r`, `\r\n` and `\x0C` as newlines where the standard needs it.
 - Tree builder: no parser pause for scripts (`document.write`), and no preload scanner. Both need module 9 and the network in the loop.

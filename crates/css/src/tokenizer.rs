@@ -92,6 +92,16 @@ impl<'a> Iterator for Tokens<'a> {
     /// Read the next token. Gives `None` at the end of the style sheet.
     fn next(&mut self) -> Option<Token<'a>> {
         self.skip_comments();
+        self.read_token()
+    }
+}
+
+impl<'a> Tokens<'a> {
+    /// Read the next token. The comments in front of it are already skipped.
+    /// The iterator and `next_spanned` both use this.
+    #[inline(always)]
+    // We ask the compiler to paste this code into both places. A call for each token would cost time.
+    fn read_token(&mut self) -> Option<Token<'a>> {
         let c = self.peek()?;
         // `?` returns `None` from the whole function when there is no next character.
         // JS: `if (c === undefined) return null`.
@@ -149,9 +159,16 @@ impl<'a> Iterator for Tokens<'a> {
             }
         })
     }
-}
 
-impl<'a> Tokens<'a> {
+    /// Read the next token, and tell where it is: the byte where it starts and the byte where it ends.
+    /// The parser uses this to cut a slice out of the style sheet. The places are always at the edge of a character.
+    pub fn next_spanned(&mut self) -> Option<(Token<'a>, usize, usize)> {
+        self.skip_comments();
+        let start = self.pos;
+        let token = self.read_token()?;
+        Some((token, start, self.pos))
+    }
+
     /// The text that is not read yet.
     fn rest(&self) -> &'a str {
         &self.input[self.pos..]

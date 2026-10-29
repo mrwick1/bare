@@ -148,6 +148,9 @@ fn main() {
         bare_css::tokenizer::tokenize(&sheet).count()
     });
     println!("css: {tokens} tokens");
+    step("css: parse", || {
+        bare_css::parser::parse_stylesheet(&sheet).len()
+    });
 
     let decoded = step("html: decode bytes", || {
         bare_html::encoding::decode(&bytes, Some("text/html; charset=utf-8"))
