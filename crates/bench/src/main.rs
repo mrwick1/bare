@@ -107,9 +107,8 @@ fn main() {
         bare_html::encoding::decode(&bytes, Some("text/html; charset=utf-8"))
     });
     let tokens = step("html: tokenize", || {
-        bare_html::tokenizer::tokenize(&decoded)
+        bare_html::tokenizer::tokenize(&decoded).count()
     });
-    let tokens = tokens.len();
     let doc = step("html: tree (with tokens)", || {
         bare_html::tree::parse(&decoded)
     });

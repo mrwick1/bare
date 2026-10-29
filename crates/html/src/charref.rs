@@ -20,14 +20,14 @@ use crate::entities::ENTITIES;
 const MAX_NAME: usize = 32;
 
 /// Read a character reference. `input` is the text right after the "&".
-/// Gives the text that replaces it, and how many characters of `input` it used.
+/// Gives the text that replaces it, and how many bytes of `input` it used.
 /// `None` means "this is not a reference": the "&" stays as it is.
 /// `in_attribute` is true inside an attribute value, where the stricter rule applies.
-pub fn decode(input: &[char], in_attribute: bool) -> Option<(String, usize)> {
-    // `&[char]` is a view on a list of letters. We read it. We do not change it.
-    // JS: like an array of single-letter strings.
-    if input.first() == Some(&'#') {
-        number(&input[1..]).map(|(c, used)| (c.to_string(), used + 1))
+pub fn decode(input: &str, in_attribute: bool) -> Option<(String, usize)> {
+    // `&str` is a view on the page text. We read it. We do not change it.
+    // Every character that a reference uses is ASCII, so a count of bytes is a count of characters.
+    if let Some(digits) = input.strip_prefix('#') {
+        number(digits).map(|(c, used)| (c.to_string(), used + 1))
         // `+ 1` counts the "#".
     } else {
         named(input, in_attribute)
@@ -35,13 +35,14 @@ pub fn decode(input: &[char], in_attribute: bool) -> Option<(String, usize)> {
 }
 
 /// `&#169;` or `&#xA9;`. `input` is the text after the "#".
-fn number(input: &[char]) -> Option<(char, usize)> {
-    let hex = matches!(input.first(), Some('x' | 'X'));
+fn number(input: &str) -> Option<(char, usize)> {
+    let input = input.as_bytes();
+    let hex = matches!(input.first(), Some(b'x' | b'X'));
     // `matches!` is a short `match` that gives true or false.
     let radix = if hex { 16 } else { 10 };
     let start = usize::from(hex);
     // Hex has one more letter ("x") before the digits. JS: `hex ? 1 : 0`.
-    let digits = input[start..].iter().take_while(|c| c.is_digit(radix)).count();
+    let digits = input[start..].iter().take_while(|c| (**c as char).is_digit(radix)).count();
     // How many digits in a row. JS: loop while `isDigit(c)`.
     if digits == 0 {
         return None;
@@ -49,12 +50,12 @@ fn number(input: &[char]) -> Option<(char, usize)> {
     }
     let mut value: u32 = 0;
     for c in &input[start..start + digits] {
-        value = value.saturating_mul(radix).saturating_add(c.to_digit(radix)?);
+        value = value.saturating_mul(radix).saturating_add((*c as char).to_digit(radix)?);
         // `saturating_*` stops at the biggest number instead of wrapping around.
         // A page can write a number with 100 digits. This keeps it from overflowing.
     }
     let mut used = start + digits;
-    if input.get(used) == Some(&';') {
+    if input.get(used) == Some(&b';') {
         used += 1;
         // The ";" is optional for numbers. We take it when it is there.
     }
@@ -74,16 +75,17 @@ fn fix_number(value: u32) -> char {
 }
 
 /// `&amp;` or `&copy`. `input` is the text after the "&".
-fn named(input: &[char], in_attribute: bool) -> Option<(String, usize)> {
-    let run = input.iter().take(MAX_NAME).take_while(|c| c.is_ascii_alphanumeric()).count();
+fn named(input: &str, in_attribute: bool) -> Option<(String, usize)> {
+    let bytes = input.as_bytes();
+    let run = bytes.iter().take(MAX_NAME).take_while(|c| c.is_ascii_alphanumeric()).count();
     // The letters and digits in a row: "copy" in "copy 2024", or "amp" in "amp;".
     if run == 0 {
         return None;
     }
-    let word: String = input[..run].iter().collect();
-    // JS: `input.slice(0, run).join("")`.
+    let word = &input[..run];
+    // These bytes are all ASCII, so `run` is always a safe place to cut the text.
 
-    if input.get(run) == Some(&';')
+    if bytes.get(run) == Some(&b';')
         && let Some(text) = lookup(&format!("{word};"))
     {
         return Some((text.to_string(), run + 1));
@@ -95,7 +97,7 @@ fn named(input: &[char], in_attribute: bool) -> Option<(String, usize)> {
         // `(1..=run).rev()` counts down. JS: `for (let len = run; len >= 1; len--)`.
         if let Some(text) = lookup(&word[..len]) {
             // Without a ";" only the old names are in the table, like "not" or "copy".
-            if in_attribute && matches!(input.get(len), Some(c) if *c == '=' || c.is_ascii_alphanumeric()) {
+            if in_attribute && matches!(bytes.get(len), Some(c) if *c == b'=' || c.is_ascii_alphanumeric()) {
                 return None;
                 // The attribute rule from the top of this file.
             }
@@ -118,18 +120,13 @@ fn lookup(name: &str) -> Option<&'static str> {
 mod tests {
     use super::*;
 
-    fn chars(text: &str) -> Vec<char> {
-        text.chars().collect()
-        // A helper: tests write text, the code reads a list of letters.
-    }
-
-    /// Decode the text after an "&". Gives the replacement and the number of characters used.
+    /// Decode the text after an "&". Gives the replacement and the number of bytes used.
     fn data(text: &str) -> Option<(String, usize)> {
-        decode(&chars(text), false)
+        decode(text, false)
     }
 
     fn attribute(text: &str) -> Option<(String, usize)> {
-        decode(&chars(text), true)
+        decode(text, true)
     }
 
     fn some(text: &str, used: usize) -> Option<(String, usize)> {

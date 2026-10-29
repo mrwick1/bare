@@ -15,24 +15,29 @@ Machine: archMachine, release build, 2026-10-29.
 
 ## bare, by module
 
-| Module | Step                         | ms   | peak MB | kept MB | Note                           |
-| ------ | ---------------------------- | ---- | ------- | ------- | ------------------------------ |
-| 1      | URL parse, 100,000 URLs      | 17   | 0.0     | 0.0     | about 170 ns for each URL      |
-| 1      | URL join, 100,000 links      | 29   | 0.0     | 0.0     |                                |
-| 2      | Bytes to text                | 8    | 15.6    | 5.2     | one copy of the page           |
-| 2      | Tokenizer                    | 59   | 126.0   | 105.1   | 600,006 tokens, 175 bytes each |
-| 2      | Tree builder (with tokens)   | 87   | 135.2   | 66.9    | 400,006 nodes, 167 bytes each  |
+| Module | Step                         | ms   | peak MB | kept MB | Note                                   |
+| ------ | ---------------------------- | ---- | ------- | ------- | -------------------------------------- |
+| 1      | URL parse, 100,000 URLs      | 17   | 0.0     | 0.0     | about 170 ns for each URL              |
+| 1      | URL join, 100,000 links      | 27   | 0.0     | 0.0     |                                        |
+| 2      | Bytes to text                | 6    | 15.6    | 5.2     | one copy of the page                   |
+| 2      | Tokenizer (streaming)        | 46   | 0.0     | 0.0     | counts 600,003 tokens, keeps none      |
+| 2      | Tree builder (with tokenizer) | 84  | 66.9    | 66.9    | 400,006 nodes, 167 bytes each          |
 
 Not measured:
 
 - DNS, TCP and HTTP. They wait for the network, so a CPU benchmark says little. `parse_response` is private.
 - The `bare` binary is 2.1 MB (release build).
 
+History:
+
+- 2026-10-29, first run: the tokenizer returned a `Vec` of all tokens (126 MB peak, 105 MB kept) and copied the page into a `Vec<char>`. The tree builder peaked at 135 MB for 67 MB kept.
+- 2026-10-29, streaming tokenizer: the tokenizer reads the page text in place and gives one token at a time. The tree builder peak fell from 135 MB to 67 MB, and the tokenizer alone from 59 ms to 46 ms.
+
 What the numbers say:
 
-- The tokenizer returns a `Vec` of all tokens. For the tree builder this is the peak: 135 MB peak against 67 MB kept. A tokenizer that gives one token at a time would remove about 100 MB of peak memory. This is the first fix to make.
-- Each token owns its `String`s. A token that points into the page text would avoid most of the 175 bytes.
+- The tree builder peak is now the DOM itself. The next saving is in the DOM.
 - Each DOM node costs 167 bytes. Chrome's number (below) suggests that this can be much lower. To verify: shrink `NodeData`.
+- Each token still owns its `String`s. They live for one token only, so they cost time and not peak memory. A token that points into the page text would remove the allocations. To verify: measure first.
 
 ## Chrome (Blink), the same page shape
 
