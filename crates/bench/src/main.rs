@@ -65,6 +65,16 @@ fn step<T>(name: &str, mut f: impl FnMut() -> T) -> T {
     out.unwrap()
 }
 
+/// The real memory of this process in MB, from the kernel (`VmRSS`). Linux only.
+fn rss_mb() -> f64 {
+    let status = std::fs::read_to_string("/proc/self/status").unwrap_or_default();
+    let kb = status
+        .lines()
+        .find_map(|l| l.strip_prefix("VmRSS:"))
+        .and_then(|v| v.trim().trim_end_matches(" kB").parse::<f64>().ok());
+    kb.unwrap_or(0.0) / 1024.0
+}
+
 fn page(n: usize) -> String {
     let mut s = String::from("<!doctype html><meta charset=utf-8><body>");
     for i in 0..n {
@@ -80,6 +90,22 @@ fn page(n: usize) -> String {
 
 fn main() {
     let text = page(100_000);
+    if std::env::args().nth(1).as_deref() == Some("rss") {
+        // A fresh process, so that memory freed by earlier steps does not hide the cost.
+        // The kernel's view of the DOM: how much the process grows when we build one tree.
+        let bytes = text.into_bytes();
+        let decoded = bare_html::encoding::decode(&bytes, Some("text/html; charset=utf-8"));
+        let before = rss_mb();
+        let doc = bare_html::tree::parse(&decoded);
+        println!(
+            "RSS grew by {:.1} MB for the DOM ({:.0} bytes for each of {} nodes)",
+            rss_mb() - before,
+            (rss_mb() - before) * 1048576.0 / 400_006.0,
+            400_006
+        );
+        drop(doc);
+        return;
+    }
     let bytes = text.clone().into_bytes();
     println!(
         "page: {} bytes, 100000 divs and 100000 spans\n",

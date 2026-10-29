@@ -11,6 +11,8 @@ Run `cargo run --release -p bare-bench`. It builds one page of 100,000 `<div>` a
 - `kept MB` is the heap memory that the result still holds, for example the DOM.
 - A counting allocator measures the memory. It counts bytes that the program asks for, so it is lower than the RSS that `top` shows.
 
+`cargo run --release -p bare-bench -- rss` runs a fresh process that only builds one DOM, and prints how much the real memory (RSS) of the process grew. The counting allocator does not see the overhead of `malloc` for each small allocation, so RSS is the higher and more honest number. Use RSS to compare with Chrome.
+
 Machine: archMachine, release build, 2026-10-29.
 
 ## bare, by module
@@ -21,7 +23,7 @@ Machine: archMachine, release build, 2026-10-29.
 | 1      | URL join, 100,000 links      | 27   | 0.0     | 0.0     |                                        |
 | 2      | Bytes to text                | 6    | 15.6    | 5.2     | one copy of the page                   |
 | 2      | Tokenizer (streaming)        | 20   | 0.0     | 0.0     | counts 600,003 tokens, keeps none      |
-| 2      | Tree builder (with tokenizer) | 57  | 36.8    | 29.8    | 400,006 nodes, 74 bytes each           |
+| 2      | Tree builder (with tokenizer) | 45  | 23.1    | 17.8    | 400,006 nodes, 44 bytes each           |
 
 Not measured:
 
@@ -35,11 +37,13 @@ History:
 - 2026-10-29, small DOM: a `u32` `NodeId`, children as a linked list (no `Vec` for each node), and interned names. The tree builder peak fell from 67 MB to 37 MB, and the DOM kept from 67 MB to 30 MB (167 bytes to 74 bytes for each node). The spare room of the node list is given back at the end of `parse`.
 - 2026-10-29, borrowed tokens: names, texts and attribute values are slices of the page, and the tokenizer scans runs of plain text without looking at each letter. The tokenizer went from 46 ms to 20 ms and the tree builder from 78 ms to 57 ms. Memory did not change: the strings were freed at once before.
 
+- 2026-10-29, text buffer: all texts, attribute values, comments and doctypes live in one `String` of the `Document`, and all attributes in one `Vec`. A node holds a `Span` (8 bytes) and no `String`. A node is 36 bytes. The DOM kept fell from 30 MB to 18 MB, and the RSS of the DOM from 43 MB to 21 MB (112 bytes to 55 bytes for each node). The tree builder went from 57 ms to 45 ms.
+
 What the numbers say:
 
-- The arena is 56 bytes for each node (22 MB for 400,006 nodes). The rest is the attribute lists and the text.
-- Chrome's DOM is about 22 MB for 200,005 elements (rough, see below). Ours is 30 MB for about 200,000 elements and 200,000 text nodes. The two are close.
-- The attribute values are copied from the token into the DOM. Moving them would save one copy for each attribute.
+- The arena is 36 bytes for each node (14 MB for 400,006 nodes). The rest is the attribute list (12 bytes for each attribute) and the text buffer.
+- Real memory (RSS) for the DOM of this page: 21 MB, which is 55 bytes for each node. Chrome's DOM is about 22 MB for 200,005 elements (rough, see below), and that page has no text nodes between the tags. The two are close.
+- The text buffer and the attribute list never shrink while the page lives. When JavaScript changes the DOM (module 9), we may need to clean them up.
 
 ## Chrome (Blink), the same page shape
 
