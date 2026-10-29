@@ -84,6 +84,10 @@ What each done topic covers:
 
 `crates/stress` has the scaling cases, the fuzzer and a bad HTTP server. Results and fixes are in [resources.md](resources.md#load-tests). Run it again after a big change to a parser.
 
+## Streaming HTML
+
+`encoding::Decoder` and `tree::Parser` read a page in pieces and give the same tree as the whole page. Details and checks: [resources.md](resources.md#html-in-pieces). `bare` does not use them yet.
+
 ## Known gaps
 
 - HTTP: `Transfer-Encoding` codes other than `chunked` (for example `gzip`) are not supported. No `Accept-Encoding`, so no compression.
