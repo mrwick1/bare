@@ -46,6 +46,9 @@ HTTP body (2026-10-29, `bare-stress scale net-body`, a server on 127.0.0.1, so o
 | 10 MB, chunked | 33.6 MB | 17.2 MB | The chunks join inside the read buffer |
 | 10 MB, `Content-Length`, sent in 1 KB writes | 27 MB | 10 MB | The same two changes |
 | Cache hit of a big body | one copy of the body | no copy | The cache gives out a shared `Arc<Response>` |
+| 100 MB, read as a stream (`Client::get_stream`, 64 KB pieces) | 100 MB | 0.1 MB, 13.6 ms | The caller reads from the connection into its own buffer. Nothing keeps the body. A chunked body of 100 MB also takes 0.1 MB (760 ms: 1,000-byte chunks) |
+
+The peak of an endless body (a server that never stops) is 268 MB in the counting allocator and about 128 MB of real memory: the list for the body doubles from 128 MB to 256 MB, and only the pages that are written count for the system. A stream (`get_stream`) of an endless body stops at the limit of 128 MB with 0.1 MB of memory.
 
 Not measured:
 

@@ -66,6 +66,23 @@ fn fetch(handler: impl Fn(&mut TcpStream, usize) + Send + Sync + 'static) -> Box
     })
 }
 
+/// Like `fetch`, but the client reads the body in pieces of 64 KB and throws each away: the body is never in memory.
+fn stream(handler: impl Fn(&mut TcpStream, usize) + Send + Sync + 'static) -> Box<dyn FnOnce()> {
+    let port = serve(Arc::new(handler));
+    let url = Url::parse(&format!("http://127.0.0.1:{port}/")).unwrap();
+    Box::new(move || {
+        let Ok(mut streamed) = Client::new().get_stream(&url) else { return };
+        let (mut piece, mut total) = (vec![0u8; 65536], 0usize);
+        while let Ok(n) = streamed.body.read(&mut piece) {
+            if n == 0 {
+                break;
+            }
+            total += n;
+        }
+        black_box(total);
+    })
+}
+
 fn case(name: &'static str, base: usize, build: fn(usize) -> Box<dyn FnOnce()>) -> Case {
     Case { name, base, build, single: false }
 }
@@ -83,6 +100,23 @@ pub fn all() -> Vec<Case> {
             fetch(move |s, _| {
                 s.write_all(format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n", n * 1000).as_bytes()).ok();
                 pour(s, n * 1000, 1000, b'x');
+            })
+        }),
+        case("net-stream-length", 1_000, |n| {
+            stream(move |s, _| {
+                s.write_all(format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n", n * 1000).as_bytes()).ok();
+                pour(s, n * 1000, 65536, b'x');
+            })
+        }),
+        case("net-stream-chunked", 100, |n| {
+            stream(move |s, _| {
+                s.write_all(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n").ok();
+                for _ in 0..n * 10 {
+                    s.write_all(b"3e8\r\n").ok();
+                    pour(s, 1000, 1000, b'x');
+                    s.write_all(b"\r\n").ok();
+                }
+                s.write_all(b"0\r\n\r\n").ok();
             })
         }),
         case("net-body-chunked-big", 100, |n| {
@@ -172,6 +206,15 @@ pub fn all() -> Vec<Case> {
                     if s.write_all(&b"X-A: bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\r\n".repeat(1000)).is_err() {
                         return;
                     }
+                }
+            })
+        }),
+        single("net-stream-endless", |_| {
+            // The client reads and throws away. It must stop at the size limit, with almost no memory.
+            stream(|s, _| {
+                s.write_all(b"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n").ok();
+                loop {
+                    pour(s, 65536, 65536, b'x');
                 }
             })
         }),
