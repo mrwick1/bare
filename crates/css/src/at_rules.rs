@@ -10,7 +10,7 @@
 //! - `@supports`: `(property: value)`, `selector(...)`, `not`, `and`, `or`, and groups in `( )`.
 //! - `@import`: the address, `layer`, `supports(...)` and a media query.
 //!
-//! Left out: `@container` (it needs the size of a box, so it waits for layout), and the order of `@layer`s.
+//! Left out: `@container` (it needs the size of a box, so it waits for layout), and a `@layer` statement before an `@import` (it comes after the layers of the imports).
 //!
 //! The window is the one the caller gives. The page is a screen, 1 pixel per CSS pixel, with a mouse. `em` is 16 pixels.
 
@@ -271,13 +271,21 @@ fn condition(text: &str, test: &mut dyn FnMut(&str) -> bool) -> bool {
     }
 }
 
-/// The addresses of the `@import` rules at the start of a style sheet, for the media of `viewport`. The caller fetches them,
+/// An `@import` that applies: the address, and the layer that the sheet goes in.
+#[derive(Debug, PartialEq)]
+pub struct Import {
+    pub href: String,
+    /// `layer(x)` gives `Some("x")`, `layer` with no name gives `Some("")`, and no `layer` gives `None`.
+    pub layer: Option<String>,
+}
+
+/// The `@import` rules at the start of a style sheet, for the media of `viewport`. The caller fetches them,
 /// reads them first, and then reads this sheet: an import is before the rules of the sheet.
 pub fn imports(
     doc: &mut Document,
     rules: &[crate::parser::Rule<'_>],
     viewport: (f32, f32),
-) -> Vec<String> {
+) -> Vec<Import> {
     use crate::parser::{AtBody, Rule};
     let mut out = Vec::new();
     for rule in rules {
@@ -287,9 +295,9 @@ pub fn imports(
             // The standard: an `@import` after any other rule is not valid.
             ("import", AtBody::None) => {
                 if let Some((href, rest)) = import_target(at.prelude)
-                    && import_ok(doc, rest, viewport)
+                    && let Some(layer) = import_ok(doc, rest, viewport)
                 {
-                    out.push(href.to_string());
+                    out.push(Import { href: href.to_string(), layer });
                 }
             }
             _ => break,
@@ -313,17 +321,22 @@ fn import_target(prelude: &str) -> Option<(&str, &str)> {
     (!href.is_empty()).then_some((href, rest))
 }
 
-/// The part after the address: `layer(x) supports(...) media`.
-fn import_ok(doc: &mut Document, rest: &str, viewport: (f32, f32)) -> bool {
+/// The part after the address: `layer(x) supports(...) media`. `None` when the import does not apply.
+/// Otherwise the layer of the sheet (see `Import::layer`).
+fn import_ok(doc: &mut Document, rest: &str, viewport: (f32, f32)) -> Option<Option<String>> {
     let mut rest = rest.trim();
+    let mut layer = None;
     if let Some(r) = strip_word(rest, "layer(") {
+        layer = Some(r[..paren_end(r)].trim().to_string());
         rest = after_paren(r).trim_start();
     } else if rest.len() >= 5
         && rest[..5].eq_ignore_ascii_case("layer")
         && rest[5..].starts_with(char::is_whitespace)
     {
+        layer = Some(String::new());
         rest = rest[5..].trim_start();
     } else if rest.eq_ignore_ascii_case("layer") {
+        layer = Some(String::new());
         rest = "";
     }
     if let Some(r) = strip_word(rest, "supports(") {
@@ -339,11 +352,11 @@ fn import_ok(doc: &mut Document, rest: &str, viewport: (f32, f32)) -> bool {
             supports(doc, cond, 0)
         };
         if !ok {
-            return false;
+            return None;
         }
         rest = r.get(end + 1..).unwrap_or("").trim_start();
     }
-    media_matches(rest, viewport)
+    media_matches(rest, viewport).then_some(layer)
 }
 
 fn strip_word<'a>(text: &'a str, word: &str) -> Option<&'a str> {
@@ -507,9 +520,8 @@ mod tests {
             @import url(f.css) layer;\
             a { color: red } @import url(late.css);";
         let rules = crate::parser::parse_stylesheet(sheet);
-        assert_eq!(
-            imports(&mut doc, &rules, VIEW),
-            ["a.css", "c.css", "d.css", "f.css"]
-        );
+        let list = imports(&mut doc, &rules, VIEW);
+        let seen: Vec<_> = list.iter().map(|i| (i.href.as_str(), i.layer.as_deref())).collect();
+        assert_eq!(seen, [("a.css", None), ("c.css", None), ("d.css", Some("x")), ("f.css", Some(""))]);
     }
 }
