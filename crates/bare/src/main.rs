@@ -35,7 +35,7 @@ fn main() {
         .map_err(|e| e.into())
         // `|e| e.into()` is an arrow function: `e => e.into()`.
         // It changes the error into the kind of error that `http::get` uses.
-        .and_then(|u| http::get(&u));
+        .and_then(|u| http::Client::new().get(&u));
     // If the URL was good, fetch the page. If not, skip this step and keep the error.
 
     match result {
