@@ -50,6 +50,10 @@ Rules:
 
 To update Unicode: download the new files over the old ones, run the script, and run `cargo test`.
 
+## HTML data
+
+`data/html/entities.json` is the WHATWG list of named character references. `tools/gen_html_entities.py` turns it into `crates/html/src/entities.rs`. The generated file is committed. To update it: download the new file over the old one and run the script.
+
 ## Code style
 
 - Plain code. No clever tricks.
