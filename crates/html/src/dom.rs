@@ -299,20 +299,70 @@ impl Document {
     /// `before` must be a child of `parent`. If it is not, the node goes at the end.
     /// Gives the new node. The tree builder needs this to put text before a table.
     fn insert(&mut self, parent: NodeId, before: Option<NodeId>, data: NodeData) -> NodeId {
-        let before = before.filter(|&b| self.parent(b) == Some(parent));
-        let prev = self.child_before(parent, before);
         let id = NodeId::from_index(self.nodes.len());
         // The new node goes at the end of the `Vec`, so its number is the length now.
-        self.nodes.push(Node { parent: Some(parent), first_child: None, last_child: None, prev, next: before, data });
+        self.nodes.push(Node { parent: None, first_child: None, last_child: None, prev: None, next: None, data });
+        self.link(id, parent, before);
+        id
+    }
+
+    /// Put `node`, which has no parent, in the list of children of `parent`, just before `before` (or at the end).
+    fn link(&mut self, node: NodeId, parent: NodeId, before: Option<NodeId>) {
+        let before = before.filter(|&b| b != node && self.parent(b) == Some(parent));
+        let prev = self.child_before(parent, before);
+        let n = &mut self.nodes[node.index()];
+        (n.parent, n.prev, n.next) = (Some(parent), prev, before);
         // Fix the links of the neighbours. JS: like inserting into a doubly linked list.
         match prev {
-            Some(p) => self.nodes[p.index()].next = Some(id),
-            None => self.nodes[parent.index()].first_child = Some(id),
+            Some(p) => self.nodes[p.index()].next = Some(node),
+            None => self.nodes[parent.index()].first_child = Some(node),
         }
         match before {
-            Some(b) => self.nodes[b.index()].prev = Some(id),
-            None => self.nodes[parent.index()].last_child = Some(id),
+            Some(b) => self.nodes[b.index()].prev = Some(node),
+            None => self.nodes[parent.index()].last_child = Some(node),
         }
+    }
+
+    /// Take `node` out of its parent. Its children go with it. Does nothing for a node that has no parent.
+    /// JS: like `node.remove()`.
+    pub fn detach(&mut self, node: NodeId) {
+        let Node { parent, prev, next, .. } = self.nodes[node.index()];
+        let Some(parent) = parent else { return };
+        match prev {
+            Some(p) => self.nodes[p.index()].next = next,
+            None => self.nodes[parent.index()].first_child = next,
+        }
+        match next {
+            Some(n) => self.nodes[n.index()].prev = prev,
+            None => self.nodes[parent.index()].last_child = prev,
+        }
+        let n = &mut self.nodes[node.index()];
+        (n.parent, n.prev, n.next) = (None, None, None);
+    }
+
+    /// Move `node` (with its children) to be a child of `parent`, just before `before`, or at the end for `None`.
+    /// `parent` must not be `node` or inside it. The tree builder never does that. JS: like `parent.insertBefore(node, before)`.
+    pub fn move_to(&mut self, node: NodeId, parent: NodeId, before: Option<NodeId>) {
+        self.detach(node);
+        self.link(node, parent, before);
+    }
+
+    /// Move all the children of `from` to the end of `to`, in the same order. JS: `to.append(...from.childNodes)`.
+    pub fn move_children(&mut self, from: NodeId, to: NodeId) {
+        while let Some(child) = self.nodes[from.index()].first_child {
+            self.move_to(child, to, None);
+        }
+    }
+
+    /// A new element with the same name and attributes as `node`, with no parent and no children. JS: `node.cloneNode(false)`.
+    /// The values of the attributes are shared with `node`, not copied.
+    pub fn clone_element(&mut self, node: NodeId) -> NodeId {
+        let NodeData::Element { name, attrs } = self.nodes[node.index()].data else { panic!("clone_element: not an element") };
+        let start = self.attrs.len();
+        self.attrs.extend_from_within(attrs.start as usize..(attrs.start + attrs.len) as usize);
+        let id = NodeId::from_index(self.nodes.len());
+        let data = NodeData::Element { name, attrs: AttrList { start: to_u32(start), len: attrs.len } };
+        self.nodes.push(Node { parent: None, first_child: None, last_child: None, prev: None, next: None, data });
         id
     }
 
@@ -631,5 +681,98 @@ mod tests {
         // `inner` is a child of `a`, not of the root. We do not link into the wrong list.
         assert_eq!(kids(&doc, root), [a, b]);
         assert_eq!(kids(&doc, a), [inner]);
+    }
+
+    /// The names of the children of a node, as text: `["a", "b"]`.
+    fn names(doc: &Document, id: NodeId) -> Vec<String> {
+        doc.children(id)
+            .map(|c| match doc.data(c) {
+                NodeData::Element { name, .. } => doc.atom_str(*name).to_string(),
+                _ => "#".to_string(),
+            })
+            .collect()
+    }
+
+    /// Check that every link of the tree agrees: the parent of each child, and both directions of the sibling links.
+    fn check(doc: &Document, id: NodeId) {
+        let list = kids(doc, id);
+        assert_eq!(doc.last_child(id), list.last().copied());
+        for (i, &c) in list.iter().enumerate() {
+            assert_eq!(doc.parent(c), Some(id));
+            assert_eq!(doc.prev_sibling(c), i.checked_sub(1).map(|j| list[j]));
+            assert_eq!(doc.next_sibling(c), list.get(i + 1).copied());
+            check(doc, c);
+        }
+    }
+
+    #[test]
+    fn move_and_detach() {
+        let mut doc = Document::new();
+        let root = doc.root();
+        let (a, b, c) = (element(&mut doc, root, "a", &[]), element(&mut doc, root, "b", &[]), element(&mut doc, root, "c", &[]));
+        let inner = element(&mut doc, a, "inner", &[]);
+        // Move to the end, to the front, to the middle, and into another node.
+        doc.move_to(a, root, None);
+        assert_eq!(names(&doc, root), ["b", "c", "a"]);
+        doc.move_to(a, root, Some(b));
+        assert_eq!(names(&doc, root), ["a", "b", "c"]);
+        doc.move_to(c, root, Some(b));
+        assert_eq!(names(&doc, root), ["a", "c", "b"]);
+        doc.move_to(b, a, None);
+        assert_eq!(names(&doc, root), ["a", "c"]);
+        assert_eq!(names(&doc, a), ["inner", "b"]);
+        // A `before` that is not a child of the parent, or is the node itself, puts it at the end.
+        doc.move_to(c, a, Some(root));
+        assert_eq!(names(&doc, a), ["inner", "b", "c"]);
+        doc.move_to(c, a, Some(c));
+        assert_eq!(names(&doc, a), ["inner", "b", "c"]);
+        check(&doc, root);
+        // `detach` takes a node and its children out. Doing it twice, or for a node with no parent, is fine.
+        doc.detach(a);
+        doc.detach(a);
+        assert_eq!(names(&doc, root), Vec::<String>::new());
+        assert_eq!(doc.parent(a), None);
+        assert_eq!(names(&doc, a), ["inner", "b", "c"]);
+        let _ = inner;
+        check(&doc, a);
+    }
+
+    #[test]
+    fn move_children_keeps_the_order() {
+        let mut doc = Document::new();
+        let root = doc.root();
+        let (from, to) = (element(&mut doc, root, "from", &[]), element(&mut doc, root, "to", &[]));
+        for name in ["x", "y", "z"] {
+            element(&mut doc, from, name, &[]);
+        }
+        element(&mut doc, to, "first", &[]);
+        doc.append_text(from, "t");
+        doc.move_children(from, to);
+        assert_eq!(names(&doc, from), Vec::<String>::new());
+        assert_eq!(names(&doc, to), ["first", "x", "y", "z", "#"]);
+        check(&doc, root);
+        // Nothing to move is fine.
+        doc.move_children(from, to);
+        check(&doc, root);
+    }
+
+    #[test]
+    fn clone_has_the_attributes_and_no_children() {
+        let mut doc = Document::new();
+        let root = doc.root();
+        let a = element(&mut doc, root, "a", &[("href", "x"), ("class", "y z")]);
+        element(&mut doc, a, "child", &[]);
+        let copy = doc.clone_element(a);
+        assert_eq!(doc.parent(copy), None);
+        assert_eq!(names(&doc, copy), Vec::<String>::new());
+        let (NodeData::Element { name: n1, attrs: a1 }, NodeData::Element { name: n2, attrs: a2 }) = (*doc.data(a), *doc.data(copy)) else { panic!() };
+        assert_eq!(n1, n2);
+        let read = |list| doc.attrs(list).iter().map(|x| (doc.atom_str(x.name).to_string(), doc.text(x.value).to_string())).collect::<Vec<_>>();
+        assert_eq!(read(a1), read(a2));
+        assert_eq!(read(a2), [("href".to_string(), "x".to_string()), ("class".to_string(), "y z".to_string())]);
+        // The copy can be put in the tree.
+        doc.move_to(copy, root, None);
+        assert_eq!(names(&doc, root), ["a", "a"]);
+        check(&doc, root);
     }
 }
