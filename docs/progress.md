@@ -27,8 +27,8 @@ The reasons for the design are in [decisions.md](decisions.md).
 | 1   | URLs                                                      | done    | `crates/url/`            |
 | 2   | DNS                                                       | done    | `crates/net/src/dns.rs`  |
 | 3   | TCP: time limits, Happy Eyeballs                          | done    | `crates/net/src/tcp.rs`  |
-| 4   | HTTP/1.1 messages: requests, responses, where a body ends | next    | `crates/net/src/http.rs` |
-| 5   | Connections: keep-alive, HTTP/2, HTTP/3                   | planned |                          |
+| 4   | HTTP/1.1 messages: requests, responses, where a body ends | done    | `crates/net/src/http.rs` |
+| 5   | Connections: keep-alive, HTTP/2, HTTP/3                   | next    |                          |
 | 6   | Redirects, status codes, caching                          | planned |                          |
 
 What each done topic covers:
@@ -36,10 +36,11 @@ What each done topic covers:
 - URLs: the WHATWG URL Standard for `http://`. Relative links, IPv4 and IPv6 hosts, percent-encoding, and Unicode host names (UTS #46 with NFC, bidi and joiner rules, Punycode).
 - DNS: `localhost`, `/etc/hosts`, a TTL cache, A and AAAA queries over UDP with a TCP fallback, alias (CNAME) chains, and checks against fake answers.
 - TCP: Happy Eyeballs (IPv6 first, a new try every 250 ms, the first connection wins). Time limits: 10 seconds for one connection try, 30 seconds for a read or write.
+- HTTP/1.1 messages: a status line and headers parser. Three rules for where a body ends: chunked, `Content-Length`, or connection close. Chunked wins over `Content-Length`. A short body is an error. 1xx, 204 and 304 have no body.
 
 ## Known gaps
 
-- HTTP: no chunked bodies. The example.com body shows the chunk sizes (`241`, `0`). Topic 4.
+- HTTP: chunked trailers and `Transfer-Encoding` codes other than `chunked` (for example `gzip`) are not supported. No `Accept-Encoding`, so no compression.
 - HTTP: only status 200 is accepted. A redirect (301, 302) gives an error. Topic 6.
 - URL: only `http://`. `https://` needs module 7.
 - DNS: no short names from the `search` line of `/etc/resolv.conf`.
