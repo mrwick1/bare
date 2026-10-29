@@ -80,6 +80,10 @@ What each done topic covers:
 
 - Cascade: `RuleSet::add` reads a style sheet (the browser's `ua.css`, then the page's sheets in order), and `compute` gives the style of every element. The winner for each property is the biggest key of (importance and origin, specificity, order), kept in one `u64`, so nothing is sorted. The `style=""` attribute beats all selectors. Rules are in lists by the id, class or tag at the right end of the selector, so an element tests only a few rules. A counting Bloom filter of the ancestors skips most walks up the tree. Elements with the same parent style and the same matching rules share one `ComputedStyle` (an array of one 8-byte `Value` for each property), and styles with equal values are merged, so an element costs 4 bytes. Computed values: `em`, `rem`, `vw`, `vh`, `vmin`, `vmax` are pixels, `currentcolor` is the color, `bolder` and `lighter` are numbers, `line-height: 150%` is pixels, a border with no style has no width. Inheritance for ten properties, and `inherit`, `initial`, `unset` for all. Elements with `display: none` and what is inside get no style. `sources` lists the `<style>` and `<link rel=stylesheet>` of a page (it skips `media` that is not `all` or `screen`, and alternate sheets). The app has `--styles`: it fetches the linked sheets and prints the tree with the computed style of each element. On a small page, the styles that we print are the same as `getComputedStyle` in Chrome for display, color, font, margin, padding, border and text-decoration.
 
+## Load tests (modules 1 to 3)
+
+`crates/stress` has the scaling cases, the fuzzer and a bad HTTP server. Results and fixes are in [resources.md](resources.md#load-tests). Run it again after a big change to a parser.
+
 ## Known gaps
 
 - HTTP: `Transfer-Encoding` codes other than `chunked` (for example `gzip`) are not supported. No `Accept-Encoding`, so no compression.
@@ -107,3 +111,4 @@ What each done topic covers:
 - App: `--styles` fetches `<link>` sheets one after the other, with no cache and no time limit other than the TCP ones, and it reads them with the encoding rules of HTML (a `@charset` rule is not read).
 - CSS tokenizer: the caller gives text. A style sheet that is not UTF-8 needs the encoding rules of the CSS standard (`@charset`, BOM, the `Content-Type` header). The tokenizer does not preprocess the input: it reads `\r`, `\r\n` and `\x0C` as newlines where the standard needs it.
 - Tree builder: no parser pause for scripts (`document.write`), and no preload scanner. Both need module 9 and the network in the loop.
+- Load limits: a reply head may be 256 KB, a reply 128 MB and 120 seconds, and the HTTP cache 64 MB (it empties when full). `:nth-child` and a long class list on one element are quadratic: see resources.md. The Noah's Ark check reads 256 entries only.

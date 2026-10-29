@@ -469,4 +469,34 @@ mod tests {
         server.join().unwrap();
         // Wait for the fake server to finish.
     }
+
+    #[test]
+    fn random_packets_never_crash() {
+        // Break a good packet in random ways. Any result is fine, but not a panic or a hang.
+        let q = build_query(5, "a.com", TYPE_A).unwrap();
+        let good = reply(&q, 0, &record(&[0xC0, 12], TYPE_A, 60, &[1, 2, 3, 4]), 1);
+        let mut state = 0x2545F4914F6CDD1Du64;
+        let mut next = move || {
+            state ^= state >> 12;
+            state ^= state << 25;
+            state ^= state >> 27;
+            state.wrapping_mul(0x2545F4914F6CDD1D)
+        };
+        for _ in 0..50_000 {
+            let mut p = good.clone();
+            for _ in 0..1 + next() % 6 {
+                let at = (next() % p.len() as u64) as usize;
+                match next() % 4 {
+                    0 => p[at] = next() as u8,
+                    1 => p[at] = 0xC0,
+                    2 => p.truncate(at),
+                    _ => p.insert(at, next() as u8),
+                }
+                if p.is_empty() {
+                    break;
+                }
+            }
+            let _ = parse_response(&p, 5, "a.com", TYPE_A);
+        }
+    }
 }

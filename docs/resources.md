@@ -71,3 +71,30 @@ What the numbers say (hypothesis: the split cannot be separated more finely with
 - The DOM alone adds about 22 MB (174 minus 152). It is a rough figure, because the baseline varies between runs.
 - The first reading of the no-style page was 1.06 GB. A repeat gave 504 MB. We do not know why the first one was high. We use the repeat.
 - Chrome counts RSS here. The `bare` table counts heap bytes. Do not compare them as equal.
+
+## Load tests
+
+Run `cargo run --release -p bare-stress -- scale [filter]`. It runs about 130 cases with bad input, each at 1x, 10x and 100x the size, each in its own process. It flags time or memory that grows faster than the input (exponent over 1.5), a crash, a run over 20 seconds, and more than 2 GB of memory. `-- fuzz <html|css|url> [iterations] [seed]` breaks good seeds at random and looks for panics, hangs (5 seconds), memory blowups, a broken DOM tree, and a URL that is not stable. A failing input goes to `crash-*.txt`. The parsers of DNS and HTTP are private, so their fuzz tests are in the `net` crate (`random_packets_never_crash`, `random_replies_never_crash`).
+
+Run on 2026-10-29, archMachine. 450,000 fuzz inputs (3 targets, 3 seeds) found one panic. The scaling run found these problems, and all are fixed unless the list says otherwise:
+
+| Where | Input | Before | After |
+| --- | --- | --- | --- |
+| CSS selector | `:nth-child(2n` + a wide character | panic (a slice inside a character) | no panic |
+| HTML tokenizer | one tag with 20,000 attributes | 311 ms (a scan for each name), 200,000 took over 20 s | 5 ms, 200,000 take 84 ms |
+| HTML tree builder | 20,000 nested `<i class=cN>` (all different) | 1.2 s, 20 s at 80,000 | 39 ms, 200,000 take 375 ms |
+| CSS custom properties | 20,000 on one element | 613 ms, 200,000 over 20 s | 14 ms, 200,000 take 133 ms |
+| CSS `var()` chain of 5,000 | | 73 ms, 50,000 took 7.4 s | 3 ms, 50,000 take 32 ms |
+| CSS `@layer` | 20,000 different names | 369 ms, 200,000 over 20 s | 27 ms, 200,000 take 286 ms |
+| HTTP | chunked body of 10 MB | 412 ms (it read the whole reply again after each read) | 82 ms |
+| HTTP | a server that sends headers for ever | ran until killed | error after 256 KB |
+| HTTP | a body that never ends | 2 GB, then killed | error after 128 MB |
+| HTTP | cache of 5,000 replies of 1 MB | 2 GB, then killed | 69 MB (the cache empties at 64 MB) |
+
+Not fixed:
+
+- `:nth-child` and `:nth-of-type` count the siblings for each element. 5,000 siblings take 50 ms, 50,000 take 5 s.
+- Many classes on one element and many rules on them (5,000 and 5,000: 126 ms, 50,000 and 50,000: 13 s). The class list is scanned for each test.
+- The cap of 256 on the Noah's Ark scan changes the tree only for a page with more than 256 formatting elements open between two identical ones.
+- The three timeouts of `net-silent-server`, `net-drip-server` and `net-huge-content-length` are the wait of the client (30 s for each read, 120 s for the whole reply), not a bug. They are longer than the 20 s of the test.
+- The 100x runs of `css-rules`, `css-selector-list` and `html-decode-bytes` stop at 2 GB because the input has 130 MB to 500 MB. Memory grows in line with the input.
