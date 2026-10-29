@@ -83,11 +83,11 @@ fn named(input: &[char], in_attribute: bool) -> Option<(String, usize)> {
     let word: String = input[..run].iter().collect();
     // JS: `input.slice(0, run).join("")`.
 
-    if input.get(run) == Some(&';') {
-        if let Some(text) = lookup(&format!("{word};")) {
-            return Some((text.to_string(), run + 1));
-            // The full name with ";" is in the table. This is the normal case: `&amp;`.
-        }
+    if input.get(run) == Some(&';')
+        && let Some(text) = lookup(&format!("{word};"))
+    {
+        return Some((text.to_string(), run + 1));
+        // The full name with ";" is in the table. This is the normal case: `&amp;`.
     }
 
     for len in (1..=run).rev() {
