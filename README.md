@@ -33,6 +33,7 @@ Linux is the first target. Windows and macOS come later.
 | `crates/url/`       | URL parser and IDNA                                 |
 | `crates/html/`      | HTML: encoding, tokenizer, DOM tree, tree builder   |
 | `crates/unicode/`   | NFC and Unicode data tables                         |
+| `crates/bench/`     | Time and memory benchmarks for each module          |
 | `data/unicode/`     | Unicode data files and their license                |
 | `data/html/`        | The WHATWG entity list and its license              |
 | `tools/`            | Scripts that generate code from data files          |

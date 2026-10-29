@@ -2,7 +2,7 @@
 
 This file records what is built, what comes next and what is missing. Update it after each merged PR.
 
-The reasons for the design are in [decisions.md](decisions.md).
+The reasons for the design are in [decisions.md](decisions.md). Time and memory numbers for each module are in [resources.md](resources.md).
 
 ## Modules
 
