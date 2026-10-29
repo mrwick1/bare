@@ -117,7 +117,7 @@ fn main() {
     let mut stack = vec![doc.root()];
     while let Some(id) = stack.pop() {
         nodes += 1;
-        stack.extend_from_slice(doc.children(id));
+        stack.extend(doc.children(id));
     }
     println!("\n{tokens} tokens, {nodes} DOM nodes");
 }

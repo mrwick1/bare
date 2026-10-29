@@ -44,6 +44,8 @@ pub fn parse(input: &str) -> Document {
         builder.process(token);
     }
     builder.finish();
+    builder.doc.shrink_to_fit();
+    // A `Vec` that grows keeps spare room (up to twice as much). The page is read, so give the room back.
     builder.doc
 }
 
@@ -118,14 +120,14 @@ impl Builder {
 
     /// Is this node an element with one of these names?
     fn is(&self, id: NodeId, names: &[&str]) -> bool {
-        matches!(self.doc.data(id), NodeData::Element { name, .. } if names.contains(&name.as_str()))
+        matches!(self.doc.data(id), NodeData::Element { name, .. } if names.contains(&self.doc.atom_str(*name)))
         // `matches!` with an `if` checks the pattern and then the condition. It gives true or false.
     }
 
     /// The name of an element, or an empty text for other nodes.
     fn name(&self, id: NodeId) -> String {
         match self.doc.data(id) {
-            NodeData::Element { name, .. } => name.clone(),
+            NodeData::Element { name, .. } => self.doc.atom_str(*name).to_string(),
             _ => String::new(),
         }
     }
@@ -152,7 +154,7 @@ impl Builder {
     /// Add an element. `push` says if it also goes on the stack. Void elements (`br`, `img`) do not.
     fn insert_element(&mut self, name: &str, attrs: &[(String, String)], push: bool) -> NodeId {
         let (parent, before) = self.place();
-        let id = self.doc.insert(parent, before, NodeData::Element { name: name.to_string(), attrs: attrs.to_vec() });
+        let id = self.doc.insert_element(parent, before, name, attrs);
         if push {
             self.open.push(id);
         }
@@ -1130,7 +1132,7 @@ mod tests {
     }
 
     fn check_links(doc: &Document, id: NodeId) {
-        for &child in doc.children(id) {
+        for child in doc.children(id) {
             assert_eq!(doc.parent(child), Some(id));
             check_links(doc, child);
         }
