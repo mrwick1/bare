@@ -28,8 +28,8 @@ The reasons for the design are in [decisions.md](decisions.md).
 | 2   | DNS                                                       | done    | `crates/net/src/dns.rs`  |
 | 3   | TCP: time limits, Happy Eyeballs                          | done    | `crates/net/src/tcp.rs`  |
 | 4   | HTTP/1.1 messages: requests, responses, where a body ends | done    | `crates/net/src/http.rs` |
-| 5   | Connections: keep-alive, HTTP/2, HTTP/3                   | next    |                          |
-| 6   | Redirects, status codes, caching                          | planned |                          |
+| 5   | Connections: keep-alive                                   | done    | `crates/net/src/http.rs` |
+| 6   | Redirects, status codes, caching                          | next    |                          |
 
 What each done topic covers:
 
@@ -37,10 +37,13 @@ What each done topic covers:
 - DNS: `localhost`, `/etc/hosts`, a TTL cache, A and AAAA queries over UDP with a TCP fallback, alias (CNAME) chains, and checks against fake answers.
 - TCP: Happy Eyeballs (IPv6 first, a new try every 250 ms, the first connection wins). Time limits: 10 seconds for one connection try, 30 seconds for a read or write.
 - HTTP/1.1 messages: a status line and headers parser. Three rules for where a body ends: chunked, `Content-Length`, or connection close. Chunked wins over `Content-Length`. A short body is an error. 1xx, 204 and 304 have no body.
+- Connections: keep-alive. The `Client` keeps one idle connection for each server and reuses it. It drops a connection that is idle for more than 15 seconds, that the server closed, or that has extra bytes after a reply. A reused connection that fails is retried once on a new one (safe for GET only).
 
 ## Known gaps
 
-- HTTP: chunked trailers and `Transfer-Encoding` codes other than `chunked` (for example `gzip`) are not supported. No `Accept-Encoding`, so no compression.
+- HTTP: `Transfer-Encoding` codes other than `chunked` (for example `gzip`) are not supported. No `Accept-Encoding`, so no compression.
+- HTTP: HTTP/2 and HTTP/3 are not built. They move to after module 7, because browsers use them only over TLS. HTTP/3 also needs QUIC.
+- HTTP: one idle connection for each server. No pool of several at once, no parallel requests.
 - HTTP: only status 200 is accepted. A redirect (301, 302) gives an error. Topic 6.
 - URL: only `http://`. `https://` needs module 7.
 - DNS: no short names from the `search` line of `/etc/resolv.conf`.
