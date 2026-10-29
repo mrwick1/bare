@@ -10,4 +10,5 @@ pub mod parser;
 pub mod selector;
 pub mod tokenizer;
 pub mod values;
+pub mod var;
 // `pub mod` makes the module visible to other crates: `bare_css::tokenizer`.
