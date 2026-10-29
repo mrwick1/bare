@@ -3,7 +3,7 @@
 //! A token is one piece of HTML: a start tag (`<p class="a">`), an end tag (`</p>`),
 //! a comment, a doctype, or a run of text.
 //!
-//! The tokenizer is a state machine. It reads one character at a time. It is always in one state,
+//! The tokenizer is a state machine. It reads the page and is always in one state,
 //! like "inside a tag name" or "inside a quoted attribute value". Each state says what to do
 //! with the next character, and which state comes next. The HTML standard lists every state and
 //! every rule. This is how all browsers read HTML the same way, even broken HTML.
@@ -20,32 +20,42 @@
 //! for us the result is the same.
 //!
 //! The tokenizer gives one token at a time, like a JS generator. The tree builder uses each token
-//! and drops it. The page text is read in place, so nothing is copied and the list of all tokens
-//! never exists. That keeps the memory use low on a big page.
+//! and drops it. The page text is read in place, so the list of all tokens never exists.
+//!
+//! A token does not copy the page either. Its names and texts are a `Cow<str>`: either a slice of
+//! the page (`Borrowed`, no allocation) or a new `String` (`Owned`). A slice is enough when the
+//! text is the same as in the page. A new `String` is only made when the tokenizer changes the
+//! text: a tag name with capital letters (`<DIV>` becomes `div`), a character reference
+//! (`&amp;` becomes `&`), or a NUL character. Most of a page has none of these.
+//! JS: like `str.slice(a, b)`, which in the engine can point into the big string.
 //!
 //! Left out: the states for the doctype's public and system names, and the script data
 //! escapes (`<!--<script>` inside a script).
 //!
 //! Comments compare Rust with JavaScript, because you know JS.
 
+use std::borrow::Cow;
 use std::collections::VecDeque;
 
 use crate::charref;
 
-/// One piece of HTML.
+/// One attribute: its name and its value.
+pub type Attr<'a> = (Cow<'a, str>, Cow<'a, str>);
+
+/// One piece of HTML. `'a` is the life of the page text: a token can point into it.
 #[derive(Debug, PartialEq, Clone)]
-pub enum Token {
+pub enum Token<'a> {
     // JS: like a TypeScript union of objects, each with its own fields.
     /// `<!DOCTYPE html>`. The name is in lowercase, and it is empty when the page gives none.
-    Doctype(String),
+    Doctype(Cow<'a, str>),
     /// `<p class="a">`. Names are in lowercase. `self_closing` is true for `<br/>`.
-    StartTag { name: String, attrs: Vec<(String, String)>, self_closing: bool },
+    StartTag { name: Cow<'a, str>, attrs: Vec<Attr<'a>>, self_closing: bool },
     /// `</p>`.
-    EndTag { name: String },
+    EndTag { name: Cow<'a, str> },
     /// `<!-- text -->`.
-    Comment(String),
+    Comment(Cow<'a, str>),
     /// A run of text. Character references like `&amp;` are already decoded.
-    Text(String),
+    Text(Cow<'a, str>),
 }
 
 /// Cut a page into tokens. Gives an iterator: it reads the page only as far as the caller asks.
@@ -61,14 +71,14 @@ pub fn tokenize(input: &str) -> Tokens<'_> {
         state: State::Data,
         tokens: VecDeque::new(),
         finished: false,
-        text: String::new(),
-        name: String::new(),
+        text: Pending::default(),
+        name: Cow::Borrowed(""),
         is_end: false,
         attrs: Vec::new(),
-        attr_name: String::new(),
         skip_value: false,
+        value: Pending::default(),
         self_closing: false,
-        raw_name: String::new(),
+        raw_name: "",
     }
 }
 
@@ -80,7 +90,6 @@ enum State {
     EndTagOpen,
     TagName,
     BeforeAttrName,
-    AttrName,
     AfterAttrName,
     BeforeAttrValue,
     AttrValueQuoted(char),
@@ -96,6 +105,73 @@ enum State {
     // true for `<title>` and `<textarea>`, false for `<script>` and `<style>`.
 }
 
+/// A text that we are collecting. It is a slice of the page, as long as we can: each time we add
+/// the next part of the page, the slice grows. Only when we add something that is not in the page
+/// (a decoded `&amp;`), or a part that is not next to the slice, the text becomes a `String`.
+#[derive(Default)]
+struct Pending {
+    range: Option<(usize, usize)>,
+    // The slice of the page: from byte `.0` to byte `.1`.
+    owned: Option<String>,
+    // The text as a `String`, when a slice is not enough.
+}
+
+impl Pending {
+    /// Add `input[a..b]` to the text.
+    fn slice(&mut self, input: &str, a: usize, b: usize) {
+        if a == b {
+            return;
+        }
+        if let Some(owned) = &mut self.owned {
+            owned.push_str(&input[a..b]);
+            return;
+        }
+        match self.range {
+            None => self.range = Some((a, b)),
+            Some((start, end)) if end == a => self.range = Some((start, b)),
+            // The new part is next to the slice: the slice grows.
+            Some((start, end)) => {
+                self.owned = Some(format!("{}{}", &input[start..end], &input[a..b]));
+                self.range = None;
+            }
+        }
+    }
+
+    /// Add a text that is not from the page.
+    fn text(&mut self, input: &str, text: &str) {
+        let owned = self.owned.get_or_insert_with(|| {
+            let (start, end) = self.range.take().unwrap_or((0, 0));
+            input[start..end].to_string()
+        });
+        owned.push_str(text);
+    }
+
+    /// Give the text, and start again with an empty one. `None` when it is empty.
+    fn take<'a>(&mut self, input: &'a str) -> Option<Cow<'a, str>> {
+        if let Some(owned) = self.owned.take() {
+            self.range = None;
+            return (!owned.is_empty()).then_some(Cow::Owned(owned));
+        }
+        let (a, b) = self.range.take()?;
+        Some(Cow::Borrowed(&input[a..b]))
+    }
+}
+
+/// A tag or attribute name in lowercase. A NUL becomes "�". We only make a new `String` when
+/// something changes.
+fn lower(name: &str) -> Cow<'_, str> {
+    if name.bytes().any(|b| b.is_ascii_uppercase() || b == 0) {
+        Cow::Owned(name.chars().map(|c| if c == '\0' { '\u{FFFD}' } else { c.to_ascii_lowercase() }).collect())
+    } else {
+        Cow::Borrowed(name)
+    }
+}
+
+/// The text of a comment, with each NUL changed to "�".
+fn no_nul(text: &str) -> Cow<'_, str> {
+    if text.contains('\0') { Cow::Owned(text.replace('\0', "\u{FFFD}")) } else { Cow::Borrowed(text) }
+}
+
 /// The tokenizer. It is an iterator of tokens.
 pub struct Tokens<'a> {
     input: &'a str,
@@ -105,32 +181,32 @@ pub struct Tokens<'a> {
     last_len: usize,
     // The size in bytes of the character that we read last, so `back` knows how far to go.
     state: State,
-    tokens: VecDeque<Token>,
+    tokens: VecDeque<Token<'a>>,
     // Tokens that are ready and not yet given out. Never more than two or three:
     // the text before a tag, and the tag.
     finished: bool,
-    text: String,
+    text: Pending,
     // Text that we collect before we make a `Text` token. One token for a whole run of text.
 
     // The tag that we are reading now:
-    name: String,
+    name: Cow<'a, str>,
     is_end: bool,
-    attrs: Vec<(String, String)>,
-    attr_name: String,
-    // The name of the attribute that we are reading now. We add it to `attrs` when it is complete.
+    attrs: Vec<Attr<'a>>,
     skip_value: bool,
-    // True when this attribute is a repeat. We read its value, but we throw it away.
+    // True when the attribute that we are reading is a repeat. We read its value, but we throw it away.
+    value: Pending,
+    // The value of the attribute that we are reading now.
     self_closing: bool,
 
-    raw_name: String,
+    raw_name: &'static str,
     // The tag that started the raw text, like "script". Its end tag ends the raw text.
 }
 
-impl Iterator for Tokens<'_> {
-    type Item = Token;
+impl<'a> Iterator for Tokens<'a> {
+    type Item = Token<'a>;
 
     /// Give the next token. Run the state machine only until one is ready.
-    fn next(&mut self) -> Option<Token> {
+    fn next(&mut self) -> Option<Token<'a>> {
         loop {
             if let Some(token) = self.tokens.pop_front() {
                 return Some(token);
@@ -148,7 +224,7 @@ impl Iterator for Tokens<'_> {
     }
 }
 
-impl Tokens<'_> {
+impl<'a> Tokens<'a> {
     /// Look at the next character, and do not move.
     fn peek(&self) -> Option<char> {
         self.input[self.pos..].chars().next()
@@ -170,6 +246,15 @@ impl Tokens<'_> {
         self.pos -= self.last_len;
     }
 
+    /// Move forward to the next byte in `stops` (or to the end). Gives the part that we passed over,
+    /// as the places `(from, to)`. The `stops` are ASCII, so we always stop at the start of a character.
+    fn scan(&mut self, stops: &[u8]) -> (usize, usize) {
+        let from = self.pos;
+        let rest = &self.input.as_bytes()[from..];
+        self.pos += rest.iter().position(|b| stops.contains(b)).unwrap_or(rest.len());
+        (from, self.pos)
+    }
+
     /// Does the input at the current place start with `text`? Letter case does not matter.
     /// `text` must be ASCII. All the texts that we look for are.
     fn looking_at(&self, text: &str) -> bool {
@@ -179,98 +264,112 @@ impl Tokens<'_> {
 
     /// Turn the collected text into a `Text` token.
     fn flush_text(&mut self) {
-        if !self.text.is_empty() {
-            self.tokens.push_back(Token::Text(std::mem::take(&mut self.text)));
-            // `take` gives us the text and leaves an empty one in its place.
-            // JS: `const t = text; text = ""`.
+        if let Some(text) = self.text.take(self.input) {
+            self.tokens.push_back(Token::Text(text));
         }
     }
 
     /// Start a new tag. The name starts empty, and the next state fills it.
     fn start_tag(&mut self, is_end: bool) {
-        self.name.clear();
+        self.name = Cow::Borrowed("");
         self.is_end = is_end;
         self.attrs.clear();
-        self.attr_name.clear();
         self.skip_value = false;
         self.self_closing = false;
     }
 
-    /// The name of an attribute is complete. Add it, unless an attribute with this name came before.
-    fn finish_attr_name(&mut self) {
-        let name = std::mem::take(&mut self.attr_name);
+    /// Read the name of an attribute. The first character is part of the name, whatever it is
+    /// (`<p =x>` has an attribute named "=x"). Then we read up to a space, "/", ">" or "=".
+    /// Gives false when the input ends in the name: the tag is dropped.
+    fn attr_name(&mut self) -> bool {
+        let start = self.pos;
+        let Some(first) = self.peek() else { return false };
+        self.pos += first.len_utf8();
+        let (_, end) = self.scan(b" \t\n\x0C/>=");
+        let input = self.input;
+        let name = lower(&input[start..end]);
+        // The attribute is complete. Add it, unless an attribute with this name came before.
+        // The first attribute wins: `<p id=a id=b>` has `id=a`.
         self.skip_value = self.attrs.iter().any(|(n, _)| *n == name);
-        // The first attribute wins. `<p id=a id=b>` has `id=a`.
         if !self.skip_value {
-            self.attrs.push((name, String::new()));
+            self.attrs.push((name, Cow::Borrowed("")));
         }
-    }
-
-    /// Add a character to the value of the attribute that we are reading.
-    fn push_value(&mut self, text: &str) {
-        if !self.skip_value
-            && let Some((_, value)) = self.attrs.last_mut()
-        {
-            value.push_str(text);
-        }
-    }
-
-    /// Read a character reference after an "&". Give the text for it: the decoded text, or just "&".
-    fn char_ref(&mut self, in_attribute: bool) -> String {
-        match charref::decode(&self.input[self.pos..], in_attribute) {
-            Some((text, used)) => {
-                self.pos += used;
-                text
+        match self.read() {
+            None => return false,
+            Some('=') => self.state = State::BeforeAttrValue,
+            Some(_) => {
+                self.back();
+                self.state = State::AfterAttrName;
             }
-            None => "&".to_string(),
-            // Not a reference: the "&" is plain text.
+        }
+        true
+    }
+
+    /// The value of the attribute is complete. Put it in the attribute, unless it is a repeat.
+    fn finish_value(&mut self) {
+        let value = self.value.take(self.input);
+        if !self.skip_value
+            && let (Some(value), Some(last)) = (value, self.attrs.last_mut())
+        {
+            last.1 = value;
+        }
+    }
+
+    /// We just read an "&". Decode the reference, and add it to the text (or to the value of the
+    /// attribute, when `in_value` is true). If it is not a reference, the "&" is plain text.
+    fn char_ref(&mut self, in_value: bool) {
+        let input = self.input;
+        let decoded = charref::decode(&input[self.pos..], in_value);
+        let pending = if in_value { &mut self.value } else { &mut self.text };
+        match decoded {
+            Some((text, used)) => {
+                pending.text(input, &text);
+                self.pos += used;
+            }
+            None => pending.slice(input, self.pos - 1, self.pos),
+            // Not a reference: the "&" stays as it is. It is just before us in the page.
         }
     }
 
     /// The tag is complete. Make a token, and pick the next state.
     fn emit_tag(&mut self) {
         self.flush_text();
-        let name = std::mem::take(&mut self.name);
+        let name = std::mem::replace(&mut self.name, Cow::Borrowed(""));
         self.state = State::Data;
         if self.is_end {
             self.tokens.push_back(Token::EndTag { name });
             // An end tag may have attributes, like `</p class=x>`. The standard says to ignore them.
             return;
         }
-        let raw = match name.as_str() {
-            "title" | "textarea" => Some(true),
-            // RCDATA: raw text, but `&amp;` still works.
-            "style" | "xmp" | "iframe" | "noembed" | "noframes" | "script" | "plaintext" => Some(false),
-            // RAWTEXT and script data: no references at all.
-            _ => None,
-        };
-        if let Some(refs) = raw {
+        if let Some((refs, raw_name)) = raw_text_kind(&name) {
             self.state = State::RawText(refs);
-            self.raw_name = name.clone();
+            self.raw_name = raw_name;
         }
         self.tokens.push_back(Token::StartTag { name, attrs: std::mem::take(&mut self.attrs), self_closing: self.self_closing });
     }
 
     /// Run the state machine until a token is ready, or until the input ends.
     fn run(&mut self) {
+        let input = self.input;
         loop {
+            // Each turn does what the current state says.
+            // At the end of the input (`None`), most states stop. A tag that is not complete
+            // is thrown away. The standard says so: a page cut in the middle of a tag has no tag.
             if !self.tokens.is_empty() {
                 return;
             }
-            // Each turn reads one character and does what the current state says.
-            // At the end of the input (`None`), most states stop. A tag that is not complete
-            // is thrown away. The standard says so: a page cut in the middle of a tag has no tag.
             match self.state {
-                State::Data => match self.read() {
-                    Some('<') => self.state = State::TagOpen,
-                    Some('&') => {
-                        let text = self.char_ref(false);
-                        self.text.push_str(&text);
+                State::Data => {
+                    let (a, b) = self.scan(b"<&\0");
+                    // A run of plain text is one slice of the page. We do not look at each letter.
+                    self.text.slice(input, a, b);
+                    match self.read() {
+                        Some('<') => self.state = State::TagOpen,
+                        Some('&') => self.char_ref(false),
+                        Some(_) => {} // A NUL character in text is dropped, like the tree builder does.
+                        None => return,
                     }
-                    Some('\0') => {} // A NUL character in text is dropped, like the tree builder does.
-                    Some(c) => self.text.push(c),
-                    None => return,
-                },
+                }
 
                 State::TagOpen => match self.read() {
                     Some('!') => self.state = State::MarkupDeclaration,
@@ -287,12 +386,12 @@ impl Tokens<'_> {
                     }
                     Some(_) => {
                         // "<" followed by something else, like "a < b" or "<3". It is plain text.
-                        self.text.push('<');
                         self.back();
+                        self.text.slice(input, self.pos - 1, self.pos);
                         self.state = State::Data;
                     }
                     None => {
-                        self.text.push('<');
+                        self.text.slice(input, self.pos - 1, self.pos);
                         return;
                     }
                 },
@@ -309,22 +408,24 @@ impl Tokens<'_> {
                         self.state = State::BogusComment;
                     }
                     None => {
-                        self.text.push_str("</");
+                        self.text.slice(input, self.pos - 2, self.pos);
                         return;
                     }
                 },
 
-                State::TagName => match self.read() {
-                    Some(' ' | '\t' | '\n' | '\x0C') => self.state = State::BeforeAttrName,
-                    // JS: `case " ": case "\t": ...`. These are the four spaces of HTML.
-                    Some('/') => self.state = State::SelfClosing,
-                    Some('>') => self.emit_tag(),
-                    Some('\0') => self.name.push('\u{FFFD}'),
+                State::TagName => {
+                    let (a, b) = self.scan(b" \t\n\x0C/>");
+                    // Tag names are not case sensitive. `lower` keeps them in lowercase.
                     // A NUL in a name becomes "�".
-                    Some(c) => self.name.push(c.to_ascii_lowercase()),
-                    // Tag names are not case sensitive. We keep them in lowercase.
-                    None => return,
-                },
+                    let Some(end) = self.read() else { return };
+                    self.name = lower(&input[a..b]);
+                    match end {
+                        '/' => self.state = State::SelfClosing,
+                        '>' => self.emit_tag(),
+                        _ => self.state = State::BeforeAttrName,
+                        // JS: the `_` is `default:`. The other four are the spaces of HTML.
+                    }
+                }
 
                 State::BeforeAttrName => match self.read() {
                     Some(' ' | '\t' | '\n' | '\x0C') => {}
@@ -332,30 +433,12 @@ impl Tokens<'_> {
                         self.back();
                         self.state = State::AfterAttrName;
                     }
-                    Some('=') => {
-                        // `<p =x>`: the name of the attribute starts with "=". An error, but the standard allows it.
-                        self.attr_name.push('=');
-                        self.state = State::AttrName;
-                    }
                     Some(_) => {
                         self.back();
-                        self.state = State::AttrName;
+                        if !self.attr_name() {
+                            return;
+                        }
                     }
-                    None => return,
-                },
-
-                State::AttrName => match self.read() {
-                    Some(' ' | '\t' | '\n' | '\x0C' | '/' | '>') => {
-                        self.finish_attr_name();
-                        self.back();
-                        self.state = State::AfterAttrName;
-                    }
-                    Some('=') => {
-                        self.finish_attr_name();
-                        self.state = State::BeforeAttrValue;
-                    }
-                    Some('\0') => self.attr_name.push('\u{FFFD}'),
-                    Some(c) => self.attr_name.push(c.to_ascii_lowercase()),
                     None => return,
                 },
 
@@ -366,7 +449,9 @@ impl Tokens<'_> {
                     Some('>') => self.emit_tag(),
                     Some(_) => {
                         self.back();
-                        self.state = State::AttrName;
+                        if !self.attr_name() {
+                            return;
+                        }
                     }
                     None => return,
                 },
@@ -383,29 +468,38 @@ impl Tokens<'_> {
                     None => return,
                 },
 
-                State::AttrValueQuoted(quote) => match self.read() {
-                    Some(c) if c == quote => self.state = State::AfterAttrValueQuoted,
-                    Some('&') => {
-                        let text = self.char_ref(true);
-                        self.push_value(&text);
+                State::AttrValueQuoted(quote) => {
+                    let (a, b) = self.scan(if quote == '"' { b"\"&\0" } else { b"'&\0" });
+                    self.value.slice(input, a, b);
+                    match self.read() {
+                        Some('&') => self.char_ref(true),
+                        Some('\0') => self.value.text(input, "\u{FFFD}"),
+                        Some(_) => {
+                            // The closing quote.
+                            self.finish_value();
+                            self.state = State::AfterAttrValueQuoted;
+                        }
+                        None => return,
                     }
-                    Some('\0') => self.push_value("\u{FFFD}"),
-                    Some(c) => self.push_value(c.encode_utf8(&mut [0; 4])),
-                    // `encode_utf8` turns one letter into a piece of text.
-                    None => return,
-                },
+                }
 
-                State::AttrValueUnquoted => match self.read() {
-                    Some(' ' | '\t' | '\n' | '\x0C') => self.state = State::BeforeAttrName,
-                    Some('&') => {
-                        let text = self.char_ref(true);
-                        self.push_value(&text);
+                State::AttrValueUnquoted => {
+                    let (a, b) = self.scan(b" \t\n\x0C>&\0");
+                    self.value.slice(input, a, b);
+                    match self.read() {
+                        Some(' ' | '\t' | '\n' | '\x0C') => {
+                            self.finish_value();
+                            self.state = State::BeforeAttrName;
+                        }
+                        Some('&') => self.char_ref(true),
+                        Some('>') => {
+                            self.finish_value();
+                            self.emit_tag();
+                        }
+                        Some(_) => self.value.text(input, "\u{FFFD}"),
+                        None => return,
                     }
-                    Some('>') => self.emit_tag(),
-                    Some('\0') => self.push_value("\u{FFFD}"),
-                    Some(c) => self.push_value(c.encode_utf8(&mut [0; 4])),
-                    None => return,
-                },
+                }
 
                 State::AfterAttrValueQuoted => match self.read() {
                     Some(' ' | '\t' | '\n' | '\x0C') => self.state = State::BeforeAttrName,
@@ -433,15 +527,14 @@ impl Tokens<'_> {
 
                 State::BogusComment => {
                     // Everything up to the next ">" is a comment.
-                    let mut data = String::new();
-                    while let Some(c) = self.read() {
-                        if c == '>' {
-                            break;
-                        }
-                        data.push(if c == '\0' { '\u{FFFD}' } else { c });
-                    }
+                    let rest = &input[self.pos..];
+                    let (data, used) = match rest.find('>') {
+                        Some(i) => (&rest[..i], i + 1),
+                        None => (rest, rest.len()),
+                    };
+                    self.pos += used;
                     self.flush_text();
-                    self.tokens.push_back(Token::Comment(data));
+                    self.tokens.push_back(Token::Comment(no_nul(data)));
                     self.state = State::Data;
                     // If the input ended, the next turn of the loop stops.
                 }
@@ -465,82 +558,109 @@ impl Tokens<'_> {
                         self.pos += 1;
                     }
                     // Skip the spaces before the name.
-                    let mut name = String::new();
-                    while let Some(c) = self.peek() {
-                        if matches!(c, ' ' | '\t' | '\n' | '\x0C' | '>') {
-                            break;
-                        }
-                        name.push(if c == '\0' { '\u{FFFD}' } else { c.to_ascii_lowercase() });
-                        self.pos += c.len_utf8();
-                    }
-                    while let Some(c) = self.read() {
-                        if c == '>' {
-                            break;
-                        }
-                        // After the name there may be a public and a system name. We skip them for now.
-                    }
+                    let (a, b) = self.scan(b" \t\n\x0C>");
+                    let name = lower(&input[a..b]);
+                    // After the name there may be a public and a system name. We skip them for now.
+                    self.pos += input[self.pos..].find('>').map_or(input.len() - self.pos, |i| i + 1);
                     self.flush_text();
                     self.tokens.push_back(Token::Doctype(name));
                     self.state = State::Data;
                 }
 
-                State::RawText(refs) => match self.read() {
-                    Some('<') if self.at_raw_end_tag() => {
-                        // This is `</script` followed by a space, "/" or ">". The raw text is over.
-                        self.pos += 1 + self.raw_name.len();
-                        // Skip "/" and the name. The next character is a space, "/" or ">", and `BeforeAttrName` reads it.
-                        self.start_tag(true);
-                        self.name = self.raw_name.clone();
-                        self.state = State::BeforeAttrName;
+                State::RawText(refs) => {
+                    let (a, b) = self.scan(if refs { b"<&\0" } else { b"<\0" });
+                    self.text.slice(input, a, b);
+                    match self.read() {
+                        Some('<') if self.at_raw_end_tag() => {
+                            // This is `</script` followed by a space, "/" or ">". The raw text is over.
+                            self.pos += 1 + self.raw_name.len();
+                            // Skip "/" and the name. The next character is a space, "/" or ">", and `BeforeAttrName` reads it.
+                            self.start_tag(true);
+                            self.name = Cow::Borrowed(self.raw_name);
+                            self.state = State::BeforeAttrName;
+                        }
+                        Some('<') => self.text.slice(input, self.pos - 1, self.pos),
+                        // A "<" that does not end the raw text is plain text.
+                        Some('&') => self.char_ref(false),
+                        Some(_) => self.text.text(input, "\u{FFFD}"),
+                        None => return,
                     }
-                    Some('&') if refs => {
-                        let text = self.char_ref(false);
-                        self.text.push_str(&text);
-                    }
-                    Some('\0') => self.text.push('\u{FFFD}'),
-                    Some(c) => self.text.push(c),
-                    None => return,
-                },
+                }
             }
         }
     }
 
     /// We just read "<" in raw text. Is this the end tag that closes the raw text?
     /// It is `</` plus the name, in any letter case, and then a space, "/" or ">".
-    fn at_raw_end_tag(&mut self) -> bool {
+    fn at_raw_end_tag(&self) -> bool {
         if self.raw_name == "plaintext" {
             return false;
             // `<plaintext>` is the one raw text element that has no end.
         }
-        self.back();
-        let name = self.raw_name.clone();
-        let found = self.looking_at(&format!("</{name}"))
-            && matches!(self.input.as_bytes().get(self.pos + 2 + name.len()), Some(b' ' | b'\t' | b'\n' | b'\x0C' | b'/' | b'>'));
-        self.pos += 1;
-        // Go back to where we were: just after the "<".
-        found
+        let name = self.raw_name.as_bytes();
+        let rest = &self.input.as_bytes()[self.pos - 1..];
+        // `rest` starts at the "<" that we just read.
+        rest.len() > name.len() + 2
+            && rest.starts_with(b"</")
+            && rest[2..2 + name.len()].eq_ignore_ascii_case(name)
+            && matches!(rest[2 + name.len()], b' ' | b'\t' | b'\n' | b'\x0C' | b'/' | b'>')
         // So `</scripts>` does not end a script, and neither does `</script` at the end of the input.
     }
 
     /// Read a comment. We just read "<!--".
     fn comment(&mut self) {
-        let mut data = String::new();
-        if self.looking_at(">") {
-            self.pos += 1; // `<!-->` is an empty comment.
-        } else if self.looking_at("->") {
-            self.pos += 2; // `<!--->` too.
+        let rest = &self.input[self.pos..];
+        let (data, used) = if rest.starts_with('>') {
+            ("", 1) // `<!-->` is an empty comment.
+        } else if rest.starts_with("->") {
+            ("", 2) // `<!--->` too.
         } else {
-            while !self.looking_at("-->") && !self.looking_at("--!>") && let Some(c) = self.read() {
-                // A comment ends with "-->" or with "--!>". The second one is an old mistake that browsers allow.
-                data.push(if c == '\0' { '\u{FFFD}' } else { c });
+            // A comment ends with "-->" or with "--!>". The second one is an old mistake that browsers allow.
+            // We look for "--" and check what follows it.
+            let mut from = 0;
+            let mut end = None;
+            while let Some(i) = rest[from..].find("--") {
+                let at = from + i;
+                if rest[at..].starts_with("-->") {
+                    end = Some((at, 3));
+                    break;
+                }
+                if rest[at..].starts_with("--!>") {
+                    end = Some((at, 4));
+                    break;
+                }
+                from = at + 1;
             }
-            self.pos += if self.looking_at("-->") { 3 } else if self.looking_at("--!>") { 4 } else { 0 };
-            // If the input ended inside the comment, the comment ends there.
-        }
+            match end {
+                Some((at, len)) => (&rest[..at], at + len),
+                None => (rest, rest.len()),
+                // If the input ended inside the comment, the comment ends there.
+            }
+        };
+        self.pos += used;
         self.flush_text();
-        self.tokens.push_back(Token::Comment(data));
+        self.tokens.push_back(Token::Comment(no_nul(data)));
         self.state = State::Data;
     }
+}
+
+/// Does a start tag with this name switch to raw text? Gives whether character references work in it,
+/// and the name as a `'static` text.
+fn raw_text_kind(name: &str) -> Option<(bool, &'static str)> {
+    Some(match name {
+        "title" => (true, "title"),
+        "textarea" => (true, "textarea"),
+        // RCDATA: raw text, but `&amp;` still works.
+        "style" => (false, "style"),
+        "xmp" => (false, "xmp"),
+        "iframe" => (false, "iframe"),
+        "noembed" => (false, "noembed"),
+        "noframes" => (false, "noframes"),
+        "script" => (false, "script"),
+        "plaintext" => (false, "plaintext"),
+        // RAWTEXT and script data: no references at all.
+        _ => return None,
+    })
 }
 
 #[cfg(test)]
@@ -548,20 +668,20 @@ impl Tokens<'_> {
 mod tests {
     use super::*;
 
-    fn all(input: &str) -> Vec<Token> {
+    fn all(input: &str) -> Vec<Token<'_>> {
         tokenize(input).collect()
     }
 
-    fn text(s: &str) -> Token {
-        Token::Text(s.to_string())
+    fn text(s: &str) -> Token<'_> {
+        Token::Text(s.into())
     }
 
-    fn start(name: &str, attrs: &[(&str, &str)]) -> Token {
-        Token::StartTag { name: name.to_string(), attrs: attrs.iter().map(|(a, b)| (a.to_string(), b.to_string())).collect(), self_closing: false }
+    fn start<'a>(name: &'a str, attrs: &[(&'a str, &'a str)]) -> Token<'a> {
+        Token::StartTag { name: name.into(), attrs: attrs.iter().map(|&(a, b)| (a.into(), b.into())).collect(), self_closing: false }
     }
 
-    fn end(name: &str) -> Token {
-        Token::EndTag { name: name.to_string() }
+    fn end(name: &str) -> Token<'_> {
+        Token::EndTag { name: name.into() }
     }
 
     #[test]
@@ -717,6 +837,22 @@ mod tests {
         assert_eq!(all("<pé>"), [start("pé", &[])]);
         assert_eq!(all("a<€"), [text("a<€")]);
         assert_eq!(all("<!--é-->"), [Token::Comment("é".into())]);
+    }
+
+    #[test]
+    fn borrows_from_the_page_when_it_can() {
+        // A `Cow::Borrowed` is a slice of the page: no new `String`. We only make one when the text changes.
+        let tokens = all("<p class=a id=\"b&amp;c\">text</p><P>x &amp; y</P>");
+        let Token::StartTag { name, attrs, .. } = &tokens[0] else { panic!("not a start tag") };
+        assert!(matches!(name, Cow::Borrowed("p")));
+        assert!(matches!(attrs[0].0, Cow::Borrowed("class")));
+        assert!(matches!(attrs[0].1, Cow::Borrowed("a")));
+        assert!(matches!(attrs[1].1, Cow::Owned(_))); // `&amp;` was decoded.
+        assert!(matches!(&tokens[1], Token::Text(Cow::Borrowed("text"))));
+        assert!(matches!(&tokens[2], Token::EndTag { name: Cow::Borrowed("p") }));
+        assert!(matches!(&tokens[3], Token::StartTag { name: Cow::Owned(_), .. })); // `P` became `p`.
+        assert!(matches!(&tokens[4], Token::Text(Cow::Owned(_)))); // `&amp;` was decoded.
+        assert_eq!(tokens[4], text("x & y"));
     }
 
     #[test]
