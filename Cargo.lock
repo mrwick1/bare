@@ -40,6 +40,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "bare-stress"
+version = "0.1.0"
+dependencies = [
+ "bare-css",
+ "bare-html",
+ "bare-net",
+ "bare-url",
+]
+
+[[package]]
 name = "bare-unicode"
 version = "0.1.0"
 

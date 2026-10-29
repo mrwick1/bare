@@ -40,6 +40,20 @@ type Error = Box<dyn std::error::Error>;
 // We need it because our functions can fail in two ways: our own error text, and
 // network errors. Both fit into this one type.
 
+const MAX_HEAD: usize = 256 * 1024;
+// The status line and headers of a reply may be 256 KB at most. Chrome allows 256 KB too. Without a limit, a server
+// that sends headers for ever fills our memory.
+
+const MAX_REPLY: usize = 128 * 1024 * 1024;
+// A reply (head and body) may be 128 MB at most. Without a limit, a server that never stops fills our memory.
+
+const MAX_TIME: Duration = Duration::from_secs(120);
+// A reply must be complete after 120 seconds. The read limit of `tcp.rs` is for each read, so a server that sends
+// one byte every 10 seconds would keep us for ever.
+
+const MAX_CACHE: usize = 64 * 1024 * 1024;
+// The cache holds 64 MB at most. When it is full, we empty it.
+
 const MAX_REDIRECTS: usize = 20;
 // We follow at most 20 redirects. Chrome and Firefox use 20 too. Without a limit,
 // two pages that point at each other would send us around forever.
@@ -68,7 +82,15 @@ pub struct Client {
     // Chrome allows 6 for each server.
     cache: HashMap<(String, u16, String), Cached>,
     // Replies we may use again. The key is the host, the port and the path.
-    // It lives in memory only, and it has no size limit yet.
+    // It lives in memory only. `MAX_CACHE` is the size limit.
+    cache_bytes: usize,
+    // How many bytes the cache holds, counted with `cache_size`.
+}
+
+/// How many bytes of memory a stored reply takes, about.
+fn cache_size(response: &Response) -> usize {
+    response.body.len() + 512
+    // The 512 is for the headers and the key. It stops a million tiny replies from costing nothing.
 }
 
 impl Client {
@@ -98,6 +120,13 @@ impl Client {
         }
         Err(format!("too many redirects (more than {MAX_REDIRECTS})").into())
         // `.into()` converts our text into the `Error` type that this function returns.
+    }
+
+    /// Remove a stored reply, and take its size off the count.
+    fn forget(&mut self, key: &(String, u16, String)) {
+        if let Some(old) = self.cache.remove(key) {
+            self.cache_bytes -= cache_size(&old.response);
+        }
     }
 
     /// Get one URL from the cache, or from the server. Do not follow redirects.
@@ -145,10 +174,18 @@ impl Client {
                 // - It has no `Vary` header. `Vary` says the reply depends on a request header.
                 //   We do not handle that yet.
                 // - It is useful: it is fresh for a while, or we can ask the server about it later.
-                self.cache.insert(key, Cached { response: response.clone(), stored: Instant::now(), fresh_for });
+                self.forget(&key);
+                if self.cache_bytes + cache_size(&response) > MAX_CACHE {
+                    self.cache.clear();
+                    self.cache_bytes = 0;
+                }
+                if cache_size(&response) <= MAX_CACHE {
+                    self.cache_bytes += cache_size(&response);
+                    self.cache.insert(key, Cached { response: response.clone(), stored: Instant::now(), fresh_for });
+                }
             }
             _ => {
-                self.cache.remove(&key);
+                self.forget(&key);
                 // Do not keep this reply. Throw away any older copy too: it is out of date.
             }
         }
@@ -217,9 +254,20 @@ fn exchange(stream: &mut TcpStream, url: &Url, conditions: &str) -> Result<(Resp
     // A box for 8192 bytes. Each read fills some of it.
     let mut closed = false;
     // Becomes true when the server closes the connection.
+    let start = Instant::now();
+    let mut chunked = None;
+    // Is the body chunked? We find out when the headers are complete.
 
     loop {
-        if let Some((response, used)) = parse_response(&raw, closed)? {
+        // A chunked body that is long: it is only complete when the bytes end with a blank line. Until then, do not
+        // read the whole reply again after each read (that costs time for the square of the size).
+        if chunked.is_none() && let Some(head_end) = find(&raw, b"\r\n\r\n") {
+            chunked = Some(String::from_utf8_lossy(&raw[..head_end]).to_ascii_lowercase().contains("transfer-encoding: chunked"));
+        }
+        let waiting = !closed && chunked == Some(true) && raw.len() > 64 * 1024 && !raw.ends_with(b"\r\n\r\n");
+        if waiting {
+            // Not complete yet.
+        } else if let Some((response, used)) = parse_response(&raw, closed)? {
             // Is the reply complete? If yes, we get the response and how many bytes it used.
             // If not, we get `None` and read more bytes below.
             let reusable = !closed && used == raw.len() && !response.close;
@@ -229,6 +277,15 @@ fn exchange(stream: &mut TcpStream, url: &Url, conditions: &str) -> Result<(Resp
             //   a reply we never asked for, and we could not trust the next reply.
             // - The server did not say `Connection: close`.
             return Ok((response, reusable));
+        }
+        if chunked.is_none() && raw.len() > MAX_HEAD {
+            return Err("the headers of the reply are too long".into());
+        }
+        if raw.len() > MAX_REPLY {
+            return Err("the reply is too big".into());
+        }
+        if start.elapsed() > MAX_TIME {
+            return Err("the server is too slow".into());
         }
 
         let n = stream.read(&mut piece).map_err(|e| match e.kind() {
@@ -828,5 +885,71 @@ mod tests {
         assert_eq!(client.get(&url(port)).unwrap().body, b"a");
         assert_eq!(client.get(&url(port)).unwrap().body, b"b");
         // We cannot handle `Vary` yet, so we ask again every time.
+    }
+
+    #[test]
+    fn stops_a_reply_with_endless_headers() {
+        let long: &'static str = Box::leak(format!("HTTP/1.1 200 OK\r\n{}", "X-A: bbbbbbbbbbbbbbbb\r\n".repeat(20_000)).into_boxed_str());
+        let (port, _requests) = serve(vec![(vec![long], false)]);
+        let error = Client::new().get(&url(port)).err().unwrap().to_string();
+        assert!(error.contains("too long"), "{error}");
+        // The server sent 480 KB of headers and no blank line. We gave up after 256 KB.
+    }
+
+    #[test]
+    fn reads_a_long_chunked_body() {
+        // More than 64 KB, in 1000 chunks of 100 bytes: the path that waits for the blank line at the end.
+        let mut reply = String::from("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n");
+        for _ in 0..1000 {
+            reply += &format!("64\r\n{}\r\n", "x".repeat(100));
+        }
+        reply += "0\r\n\r\n";
+        let (port, _requests) = serve(vec![(vec![Box::leak(reply.into_boxed_str())], false)]);
+        assert_eq!(Client::new().get(&url(port)).unwrap().body.len(), 100_000);
+    }
+
+    #[test]
+    fn empties_the_cache_when_it_is_full() {
+        let mut client = Client::new();
+        client.cache_bytes = MAX_CACHE - 100;
+        // The cache says it is nearly full. The next reply does not fit.
+        let (port, _requests) = serve(vec![(vec![page("Cache-Control: max-age=60\r\n", "a")], false)]);
+        client.get(&url(port)).unwrap();
+        assert_eq!(client.cache.len(), 1);
+        assert_eq!(client.cache_bytes, 1 + 512);
+    }
+
+    #[test]
+    fn random_replies_never_crash() {
+        // Break good replies in random ways. Any result is fine, but not a panic or a hang.
+        let goods: [&[u8]; 3] = [
+            b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\nX-A: b\r\n\r\nhello",
+            b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n3;x=y\r\nabc\r\n0\r\nT: v\r\n\r\n",
+            b"HTTP/1.0 404 Not Found\r\nConnection: close\r\n\r\nbody",
+        ];
+        let words: [&[u8]; 8] = [b"\r\n", b"\r\n\r\n", b":", b"ffffffffffffffff", b"-1", b"0", b" ", b"chunked"];
+        let mut state = 0x2545F4914F6CDD1Du64;
+        let mut next = move || {
+            state ^= state >> 12;
+            state ^= state << 25;
+            state ^= state >> 27;
+            state.wrapping_mul(0x2545F4914F6CDD1D)
+        };
+        for _ in 0..50_000 {
+            let mut p = goods[(next() % 3) as usize].to_vec();
+            for _ in 0..1 + next() % 6 {
+                let at = (next() % (p.len() as u64 + 1)) as usize;
+                match next() % 4 {
+                    0 if at < p.len() => p[at] = next() as u8,
+                    1 => {
+                        let w = words[(next() % 8) as usize];
+                        p.splice(at..at, w.iter().copied());
+                    }
+                    2 => p.truncate(at),
+                    _ => p.insert(at, next() as u8),
+                }
+            }
+            let _ = parse_response(&p, next() % 2 == 0);
+        }
     }
 }

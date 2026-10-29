@@ -75,6 +75,7 @@ pub fn tokenize(input: &str) -> Tokens<'_> {
         name: Cow::Borrowed(""),
         is_end: false,
         attrs: Vec::new(),
+        seen: Default::default(),
         skip_value: false,
         value: Pending::default(),
         self_closing: false,
@@ -192,6 +193,8 @@ pub struct Tokens<'a> {
     name: Cow<'a, str>,
     is_end: bool,
     attrs: Vec<Attr<'a>>,
+    seen: std::collections::HashSet<String>,
+    // The names in `attrs`, once a tag has 16 attributes or more. A scan of the list for each new name is slow for a tag with 100,000 attributes.
     skip_value: bool,
     // True when the attribute that we are reading is a repeat. We read its value, but we throw it away.
     value: Pending,
@@ -274,6 +277,7 @@ impl<'a> Tokens<'a> {
         self.name = Cow::Borrowed("");
         self.is_end = is_end;
         self.attrs.clear();
+        self.seen.clear();
         self.skip_value = false;
         self.self_closing = false;
     }
@@ -290,7 +294,14 @@ impl<'a> Tokens<'a> {
         let name = lower(&input[start..end]);
         // The attribute is complete. Add it, unless an attribute with this name came before.
         // The first attribute wins: `<p id=a id=b>` has `id=a`.
-        self.skip_value = self.attrs.iter().any(|(n, _)| *n == name);
+        self.skip_value = if self.attrs.len() < 16 {
+            self.attrs.iter().any(|(n, _)| *n == name)
+        } else {
+            if self.seen.is_empty() {
+                self.seen.extend(self.attrs.iter().map(|(n, _)| n.to_string()));
+            }
+            !self.seen.insert(name.to_string())
+        };
         if !self.skip_value {
             self.attrs.push((name, Cow::Borrowed("")));
         }
@@ -706,6 +717,20 @@ mod tests {
     #[test]
     fn first_duplicate_attribute_wins() {
         assert_eq!(all("<p id=a id=b class=c>"), [start("p", &[("id", "a"), ("class", "c")])]);
+    }
+
+    #[test]
+    fn first_duplicate_wins_in_a_tag_with_many_attributes() {
+        // 20 attributes: past the 16 where the tokenizer switches from a list scan to a set.
+        let mut page = String::from("<p");
+        for i in 0..20 {
+            page += &format!(" a{i}=1");
+        }
+        page += " a3=2 a19=2 a20=3 a20=4>";
+        let tokens = all(&page);
+        let Token::StartTag { attrs, .. } = &tokens[0] else { panic!() };
+        assert_eq!(attrs.len(), 21);
+        assert_eq!((&*attrs[3].1, &*attrs[19].1, &*attrs[20].1), ("1", "1", "3"));
     }
 
     #[test]

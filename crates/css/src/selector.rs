@@ -434,7 +434,8 @@ fn an_plus_b(text: &str) -> Option<(i32, i32)> {
     if b.is_empty() {
         return Some((a, 0));
     }
-    let (sign, digits) = b.split_at(1);
+    let (sign, digits) = b.split_at_checked(1)?;
+    // A sign is one byte. `split_at(1)` panics inside a longer character.
     let digits = digits.trim_start_matches(|c: char| c.is_ascii_whitespace());
     if !digits.bytes().all(|c| c.is_ascii_digit()) || digits.is_empty() {
         return None;
@@ -450,6 +451,11 @@ fn an_plus_b(text: &str) -> Option<(i32, i32)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn nth_with_a_wide_character_after_n_is_not_a_panic() {
+        assert_eq!(an_plus_b("2n\u{fffd}1"), None);
+    }
 
     fn parse(text: &str) -> Option<Vec<Selector>> {
         parse_selector_list(text, &mut Document::new())

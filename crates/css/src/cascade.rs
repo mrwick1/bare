@@ -83,8 +83,6 @@ pub enum Origin {
 /// A layer: a name inside a parent layer. `@layer a.b` is the layer `b` with the parent `a`.
 struct Layer {
     parent: u32,
-    /// Empty for a layer with no name (`@layer { ... }`): each one is a new layer.
-    name: Box<str>,
 }
 
 /// One selector of one rule. `a, b { ... }` makes two of them, and they share the declarations.
@@ -115,6 +113,8 @@ pub struct RuleSet {
     side: Side,
     /// The layers (`@layer`), in the order that we first saw them. Layer 0 is "no layer", the parent of the top layers.
     layers: Vec<Layer>,
+    /// The layer for a parent and a name, to find a layer without a scan of all of them.
+    layer_by_name: HashMap<(u32, Box<str>), u32>,
     /// The custom properties of all rules (`--gap: 8px`), one after the other.
     customs: Vec<CustomDecl>,
     by_id: Buckets<Box<str>>,
@@ -126,7 +126,7 @@ pub struct RuleSet {
 
 impl RuleSet {
     pub fn new(viewport: (f32, f32)) -> RuleSet {
-        RuleSet { viewport, entries: Vec::new(), decls: Vec::new(), side: Side::default(), layers: vec![Layer { parent: 0, name: "".into() }], customs: Vec::new(), by_id: Buckets::default(), by_class: Buckets::default(), by_tag: Buckets::default(), other: Vec::new() }
+        RuleSet { viewport, entries: Vec::new(), decls: Vec::new(), side: Side::default(), layers: vec![Layer { parent: 0 }], layer_by_name: HashMap::new(), customs: Vec::new(), by_id: Buckets::default(), by_class: Buckets::default(), by_tag: Buckets::default(), other: Vec::new() }
     }
 
     /// The number of selectors in the set.
@@ -156,23 +156,28 @@ impl RuleSet {
     /// The layer `path` (`a` or `a.b.c`) inside the layer `parent`. It is made when it is new. `None` when a name is not good.
     fn layer_path(&mut self, mut parent: u32, path: &str) -> Option<u32> {
         if path.trim().is_empty() {
-            return Some(self.new_layer(parent, ""));
+            // A layer with no name (`@layer { ... }`): each one is a new layer.
+            return Some(self.new_layer(parent));
         }
-        // Each name looks through the layers, so a name with thousands of parts would be slow. Deeper than 32 is not good.
+        // Deeper than 32 parts is not good: it makes a path that is slow to handle.
         for (depth, name) in path.trim().split('.').enumerate() {
             if depth >= 32 || name.is_empty() || name.contains(|c: char| c.is_whitespace() || c == ',') {
                 return None;
             }
-            parent = match self.layers.iter().position(|l| l.parent == parent && *l.name == *name) {
-                Some(i) => i as u32,
-                None => self.new_layer(parent, name),
+            parent = match self.layer_by_name.get(&(parent, Box::from(name))) {
+                Some(&i) => i,
+                None => {
+                    let i = self.new_layer(parent);
+                    self.layer_by_name.insert((parent, name.into()), i);
+                    i
+                }
             };
         }
         Some(parent)
     }
 
-    fn new_layer(&mut self, parent: u32, name: &str) -> u32 {
-        self.layers.push(Layer { parent, name: name.into() });
+    fn new_layer(&mut self, parent: u32) -> u32 {
+        self.layers.push(Layer { parent });
         self.layers.len() as u32 - 1
     }
 
@@ -421,13 +426,17 @@ impl RuleSet {
         };
         // The custom properties of the `style=""` attribute. They live until the end of the function, because `own` points into them.
         let mut inline_customs = Vec::new();
-        // The custom properties that win: name, key, text. There are few, so a list is fast.
+        // The custom properties that win: name, key, text. `own_at` says where a name is in the list: a scan is slow for 20,000 names.
         let mut own: Vec<(&str, u128, &str)> = Vec::new();
-        fn apply_custom<'a>(own: &mut Vec<(&'a str, u128, &'a str)>, d: &'a CustomDecl, key: u128) {
-            match own.iter_mut().find(|o| o.0 == &*d.name) {
-                Some(o) if key >= o.1 => *o = (&d.name, key, &d.text),
+        let mut own_at: HashMap<&str, usize, BuildHasherDefault<Fnv>> = HashMap::default();
+        fn apply_custom<'a>(own: &mut Vec<(&'a str, u128, &'a str)>, own_at: &mut HashMap<&'a str, usize, BuildHasherDefault<Fnv>>, d: &'a CustomDecl, key: u128) {
+            match own_at.get(&*d.name) {
+                Some(&i) if key >= own[i].1 => own[i] = (&d.name, key, &d.text),
                 Some(_) => {}
-                None => own.push((&d.name, key, &d.text)),
+                None => {
+                    own_at.insert(&d.name, own.len());
+                    own.push((&d.name, key, &d.text));
+                }
             }
         }
         for &i in matched {
@@ -436,7 +445,7 @@ impl RuleSet {
                 apply(d, e.origin, Some(e.layer), e.selector.specificity, i);
             }
             for d in &self.customs[e.customs.0 as usize..e.customs.1 as usize] {
-                apply_custom(&mut own, d, key(d.important, e.origin, Some(e.layer), e.selector.specificity, i));
+                apply_custom(&mut own, &mut own_at, d, key(d.important, e.origin, Some(e.layer), e.selector.specificity, i));
             }
         }
         // What the `style=""` attribute gives.
@@ -470,7 +479,7 @@ impl RuleSet {
                 apply(d, Origin::Author, None, 1 << 30, u32::MAX >> 1);
             }
             for d in &inline_customs {
-                apply_custom(&mut own, d, key(d.important, Origin::Author, None, 1 << 30, u32::MAX >> 1));
+                apply_custom(&mut own, &mut own_at, d, key(d.important, Origin::Author, None, 1 << 30, u32::MAX >> 1));
             }
         }
         // The custom properties: the ones of the parent, and the ones of this element. Most elements set none, and share the set of the parent.

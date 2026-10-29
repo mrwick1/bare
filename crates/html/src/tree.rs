@@ -31,6 +31,11 @@ use std::borrow::Cow;
 
 use crate::tokenizer::{Attr, Token, tokenize};
 
+/// How many entries of the list of active formatting elements the "Noah's Ark" check reads. The standard has no limit,
+/// but then 20,000 nested `<i class=a1><i class=a2>...` cost 200 million comparisons. With a limit, an identical element
+/// that is more than 256 entries back is not found, so the list can keep a 4th copy. Only a page like that sees a difference.
+const NOAH_SCAN: usize = 256;
+
 /// Parse a page (already decoded to text) into a DOM tree.
 pub fn parse(input: &str) -> Document {
     let mut builder = Builder {
@@ -388,7 +393,7 @@ impl Builder {
     fn push_afe(&mut self, id: NodeId) {
         self.sync_afe();
         let mut same = Vec::new();
-        for (i, item) in self.afe.iter().enumerate().rev() {
+        for (i, item) in self.afe.iter().enumerate().rev().take(NOAH_SCAN) {
             match *item {
                 Afe::Marker => break,
                 Afe::El(other) if self.same_element(id, other) => same.push(i),

@@ -165,9 +165,14 @@ pub fn merge(parent: &[(Box<str>, Box<str>)], own: &[(&str, &str)]) -> Set {
         Done(Option<String>),
     }
     let mut slots: Vec<(&str, Slot)> = own.iter().map(|&(n, t)| (n, Slot::Raw(t))).collect();
+    // Where each name is in `slots`: the first one, if a name is there twice. A scan of `slots` for each lookup is slow for 20,000 properties.
+    let mut index = std::collections::HashMap::new();
+    for (i, (n, _)) in slots.iter().enumerate() {
+        index.entry(*n).or_insert(i);
+    }
 
-    fn get(name: &str, slots: &mut Vec<(&str, Slot)>, parent: &[(Box<str>, Box<str>)], depth: usize) -> Option<String> {
-        let Some(i) = slots.iter().position(|(n, _)| *n == name) else {
+    fn get(name: &str, slots: &mut Vec<(&str, Slot)>, index: &std::collections::HashMap<&str, usize>, parent: &[(Box<str>, Box<str>)], depth: usize) -> Option<String> {
+        let Some(&i) = index.get(name) else {
             return parent.binary_search_by(|(n, _)| (**n).cmp(name)).ok().map(|i| parent[i].1.to_string());
         };
         match slots[i].1.clone() {
@@ -186,7 +191,7 @@ pub fn merge(parent: &[(Box<str>, Box<str>)], own: &[(&str, &str)]) -> Set {
                     return None;
                 }
                 slots[i].1 = Slot::Visiting;
-                let value = if has_var(text) { substitute(text, &mut |n| get(n, slots, parent, depth + 1)) } else { Some(text.to_string()) };
+                let value = if has_var(text) { substitute(text, &mut |n| get(n, slots, index, parent, depth + 1)) } else { Some(text.to_string()) };
                 slots[i].1 = Slot::Done(value.clone());
                 value
             }
@@ -195,9 +200,9 @@ pub fn merge(parent: &[(Box<str>, Box<str>)], own: &[(&str, &str)]) -> Set {
 
     for i in 0..slots.len() {
         let name = slots[i].0;
-        get(name, &mut slots, parent, 0);
+        get(name, &mut slots, &index, parent, 0);
     }
-    let mut out: Set = parent.iter().filter(|(n, _)| !slots.iter().any(|(m, _)| **m == **n)).cloned().collect();
+    let mut out: Set = parent.iter().filter(|(n, _)| !index.contains_key(&**n)).cloned().collect();
     for (name, slot) in slots {
         if let Slot::Done(Some(v)) = slot {
             out.push((name.into(), v.into()));
