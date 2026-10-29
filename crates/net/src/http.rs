@@ -26,6 +26,8 @@ use std::io::{ErrorKind, Read, Write};
 // These give us the `read` and `write` functions on a connection.
 // Rust needs this import before you can call them.
 use std::net::{SocketAddr, TcpStream};
+use std::sync::Arc;
+// JS: like a shared reference. `Arc` lets two owners hold one value, and a copy of the `Arc` costs nothing.
 // `SocketAddr` is an IP address plus a port. `TcpStream` is an open connection.
 use std::time::{Duration, Instant};
 // `Instant` is a point in time. We use it to know how long a connection has been idle.
@@ -63,7 +65,8 @@ type IdleConnection = (TcpStream, Instant);
 
 /// A stored reply: when we stored it, and for how long it stays fresh.
 struct Cached {
-    response: Response,
+    response: Arc<Response>,
+    // Shared with the caller: a cache hit gives out the same reply, and does not copy the body.
     stored: Instant,
     fresh_for: Duration,
     // Until this time has passed, we use the copy without asking the server.
@@ -99,7 +102,7 @@ impl Client {
     }
 
     /// Fetch a URL. Follow redirects, and use the cache. Any status can come back: a 404 is still a page.
-    pub fn get(&mut self, url: &Url) -> Result<Response, Error> {
+    pub fn get(&mut self, url: &Url) -> Result<Arc<Response>, Error> {
         // `&mut self` means this method may change the client: it adds and removes connections.
         // `&Url` means we borrow the URL. The caller keeps it.
         let mut current = url;
@@ -130,7 +133,7 @@ impl Client {
     }
 
     /// Get one URL from the cache, or from the server. Do not follow redirects.
-    fn load(&mut self, url: &Url) -> Result<Response, Error> {
+    fn load(&mut self, url: &Url) -> Result<Arc<Response>, Error> {
         let key = (url.host.clone(), url.port, url.path.clone());
         let mut conditions = String::new();
         // Extra request headers. They stay empty unless we have an old copy to check.
@@ -151,7 +154,7 @@ impl Client {
             }
         }
 
-        let response = self.fetch(url, &conditions)?;
+        let response = Arc::new(self.fetch(url, &conditions)?);
 
         if response.status == 304 {
             // "Not Modified": our copy is still right. The reply has no body.
@@ -255,30 +258,39 @@ fn exchange(stream: &mut TcpStream, url: &Url, conditions: &str) -> Result<(Resp
     let mut closed = false;
     // Becomes true when the server closes the connection.
     let start = Instant::now();
-    let mut chunked = None;
-    // Is the body chunked? We find out when the headers are complete.
+    let mut head: Option<Head> = None;
+    // The status and headers. We read them once, when the blank line comes. Then we only wait for the body.
 
     loop {
-        // A chunked body that is long: it is only complete when the bytes end with a blank line. Until then, do not
-        // read the whole reply again after each read (that costs time for the square of the size).
-        if chunked.is_none() && let Some(head_end) = find(&raw, b"\r\n\r\n") {
-            chunked = Some(String::from_utf8_lossy(&raw[..head_end]).to_ascii_lowercase().contains("transfer-encoding: chunked"));
+        if head.is_none() {
+            head = parse_head(&raw, closed)?;
+            if let Some(Head { framing: Framing::Length(n), head_len, .. }) = &head {
+                // The server says how long the body is. Say it early, and make room once: a list that grows by
+                // doubling holds up to twice the body for a moment, and keeps spare room at the end.
+                if head_len + n > MAX_REPLY {
+                    return Err("the reply is too big".into());
+                }
+                raw.reserve_exact((head_len + n).saturating_sub(raw.len()));
+            }
         }
-        let waiting = !closed && chunked == Some(true) && raw.len() > 64 * 1024 && !raw.ends_with(b"\r\n\r\n");
-        if waiting {
-            // Not complete yet.
-        } else if let Some((response, used)) = parse_response(&raw, closed)? {
-            // Is the reply complete? If yes, we get the response and how many bytes it used.
-            // If not, we get `None` and read more bytes below.
-            let reusable = !closed && used == raw.len() && !response.close;
-            // We can use this connection again only if all of these are true:
-            // - The server did not close it.
-            // - There are no bytes left after the reply. Extra bytes would be the start of
-            //   a reply we never asked for, and we could not trust the next reply.
-            // - The server did not say `Connection: close`.
-            return Ok((response, reusable));
-        }
-        if chunked.is_none() && raw.len() > MAX_HEAD {
+        if let Some(head) = &mut head {
+            let rest = &raw[head.head_len..];
+            // A chunked body that is long is only complete when the bytes end with a blank line. Until then, do not
+            // read all the chunks again after each read (that costs time for the square of the size).
+            let waiting = !closed && head.framing == Framing::Chunked && raw.len() > 64 * 1024 && !raw.ends_with(b"\r\n\r\n");
+            if !waiting && let Some(used) = body_end(&head.framing, rest, closed)? {
+                // The reply is complete. It used the head, the blank line and `used` bytes of the body.
+                let reusable = !closed && head.head_len + used == raw.len() && !head.response.close;
+                // We can use this connection again only if all of these are true:
+                // - The server did not close it.
+                // - There are no bytes left after the reply. Extra bytes would be the start of
+                //   a reply we never asked for, and we could not trust the next reply.
+                // - The server did not say `Connection: close`.
+                let mut response = std::mem::take(&mut head.response);
+                response.body = take_body(raw, head.head_len, &head.framing, used);
+                return Ok((response, reusable));
+            }
+        } else if raw.len() > MAX_HEAD {
             return Err("the headers of the reply are too long".into());
         }
         if raw.len() > MAX_REPLY {
@@ -298,7 +310,7 @@ fn exchange(stream: &mut TcpStream, url: &Url, conditions: &str) -> Result<(Resp
         // `&mut piece` means "lend it, and you may change it".
         if n == 0 {
             closed = true;
-            // 0 bytes means the server closed the connection. The loop parses one more time.
+            // 0 bytes means the server closed the connection. The loop checks one more time.
         } else {
             raw.extend_from_slice(&piece[..n]);
             // Add the new bytes to the end of the list. `piece[..n]` is JS `piece.slice(0, n)`.
@@ -371,11 +383,30 @@ fn freshness(response: &Response) -> Option<Duration> {
     // `saturating_sub` stops at 0 instead of going below it.
 }
 
-/// Try to read one reply from the bytes we have. `closed` says that no more bytes will come.
-/// - `Ok(Some((response, used)))`: the reply is complete. It used `used` bytes.
-/// - `Ok(None)`: the reply is not complete yet. Read more bytes.
-/// - `Err(..)`: the reply is broken, or the connection closed in the middle of it.
-fn parse_response(raw: &[u8], closed: bool) -> Result<Option<(Response, usize)>, String> {
+/// How a reply says where its body ends. HTTP has three rules, and the first one that fits wins.
+#[derive(Debug, PartialEq)]
+enum Framing {
+    /// These codes never have a body, whatever the headers say.
+    None,
+    /// The body comes in chunks. Each chunk says its own size.
+    Chunked,
+    /// The server says the exact size of the body.
+    Length(usize),
+    /// Nothing says the size, so the body ends when the connection closes.
+    UntilClose,
+}
+
+/// The status and headers of a reply, and the way to find the end of its body.
+struct Head {
+    /// The reply, with an empty body.
+    response: Response,
+    /// The bytes of the status line, the headers and the blank line.
+    head_len: usize,
+    framing: Framing,
+}
+
+/// Read the status line and the headers. `None` when the blank line has not come yet.
+fn parse_head(raw: &[u8], closed: bool) -> Result<Option<Head>, String> {
     // `Option` inside `Result` gives three outcomes: good, "not yet", and bad.
     let Some(head_end) = find(raw, b"\r\n\r\n") else {
         // The blank line ends the headers. Everything after it is the body.
@@ -414,32 +445,31 @@ fn parse_response(raw: &[u8], closed: bool) -> Result<Option<(Response, usize)>,
     // HTTP/1.1 keeps the connection unless the server says "close".
     // HTTP/1.0 is the other way around: it closes unless the server says "keep-alive".
 
-    let mut response = Response { status, headers, body: Vec::new(), close };
-    let rest = &raw[head_end + 4..];
-    // The bytes after the blank line (4 bytes: `\r\n\r\n`). They may hold the body, but maybe not all of it.
-    let Some((body, used)) = read_body(&response, rest, closed)? else {
-        return Ok(None);
-        // The body is not complete yet.
-    };
-    response.body = body;
-    Ok(Some((response, head_end + 4 + used)))
-    // The reply used the head, the blank line and `used` bytes of the body.
+    let response = Response { status, headers, body: Vec::new(), close };
+    let framing = framing(&response)?;
+    Ok(Some(Head { response, head_len: head_end + 4, framing }))
+    // The blank line is 4 bytes: `\r\n\r\n`.
 }
 
-/// Find where the body ends. HTTP has three rules. The first one that fits wins.
-/// Gives the body and the number of bytes it used, or `None` when more bytes must come.
-fn read_body(response: &Response, rest: &[u8], closed: bool) -> Result<Option<(Vec<u8>, usize)>, String> {
+impl Default for Response {
+    fn default() -> Response {
+        Response { status: 0, headers: Vec::new(), body: Vec::new(), close: false }
+    }
+}
+
+/// Choose the rule that finds the end of the body.
+fn framing(response: &Response) -> Result<Framing, String> {
     if response.status < 200 || response.status == 204 || response.status == 304 {
-        return Ok(Some((Vec::new(), 0)));
+        return Ok(Framing::None);
         // Rule 0: these codes never have a body, whatever the headers say.
     }
 
     if let Some(coding) = response.header("transfer-encoding") {
-        // Rule 1: the body comes in chunks. Each chunk says its own size.
+        // Rule 1: the body comes in chunks.
         if coding.to_ascii_lowercase().split(',').next_back().map(str::trim) != Some("chunked") {
             return Err(format!("unsupported transfer-encoding: {coding}"));
         }
-        return decode_chunked(rest, closed);
+        return Ok(Framing::Chunked);
         // This rule comes before Content-Length. If both are present, a proxy and a server
         // may read them differently. That is "request smuggling". The standard says chunked wins.
     }
@@ -451,39 +481,77 @@ fn read_body(response: &Response, rest: &[u8], closed: bool) -> Result<Option<(V
             return Err("two different content-length headers".to_string());
             // Two different sizes: we cannot know which one is true. We refuse.
         }
-        if rest.len() < n {
-            if closed {
-                return Err(format!("the connection closed early: got {} of {n} bytes", rest.len()));
-                // The server closed the connection before the end. The page is cut short.
-                // Without this check we would show half a page as if it were complete.
-            }
-            return Ok(None);
-            // The rest of the body is still on its way.
-        }
-        return Ok(Some((rest[..n].to_vec(), n)));
-        // Take exactly `n` bytes. Anything after them belongs to the next reply.
+        return Ok(Framing::Length(n));
     }
 
-    if !closed {
-        return Ok(None);
-        // We cannot know where the body ends. We must wait for the server to close the connection.
-    }
-    Ok(Some((rest.to_vec(), rest.len())))
-    // Rule 3: nothing says the size, so the body ends when the connection closes.
-    // This is the oldest rule. It cannot tell a complete body from a cut one.
+    Ok(Framing::UntilClose)
+    // Rule 3: this is the oldest rule. It cannot tell a complete body from a cut one.
     // It also means the connection is gone, so it cannot be reused.
 }
 
-/// Join the chunks of a chunked body. A chunk is: size in hex, `\r\n`, data, `\r\n`.
-/// A chunk of size 0 ends the body. After it come optional "trailers" and a blank line.
-fn decode_chunked(mut rest: &[u8], closed: bool) -> Result<Option<(Vec<u8>, usize)>, String> {
+/// Is the body complete? Gives the number of bytes it used (`rest` starts after the blank line), or `None` when more bytes must come.
+/// This does not copy the body.
+fn body_end(framing: &Framing, rest: &[u8], closed: bool) -> Result<Option<usize>, String> {
+    match *framing {
+        Framing::None => Ok(Some(0)),
+        Framing::Chunked => chunked_end(rest, closed),
+        Framing::Length(n) if rest.len() >= n => Ok(Some(n)),
+        // Take exactly `n` bytes. Anything after them belongs to the next reply.
+        Framing::Length(n) if closed => Err(format!("the connection closed early: got {} of {n} bytes", rest.len())),
+        // The server closed the connection before the end. The page is cut short.
+        // Without this check we would show half a page as if it were complete.
+        Framing::Length(_) => Ok(None),
+        // The rest of the body is still on its way.
+        Framing::UntilClose => Ok(closed.then_some(rest.len())),
+        // We cannot know where the body ends. We must wait for the server to close the connection.
+    }
+}
+
+/// Make the body out of the bytes we read, without a second copy. The bytes of the head go from the front, and the bytes of a
+/// next reply (if any) go from the back. For a chunked body, the chunks are moved together inside the same list.
+fn take_body(raw: Vec<u8>, head_len: usize, framing: &Framing, used: usize) -> Vec<u8> {
+    let mut body = raw;
+    body.drain(..head_len);
+    // `drain` moves the bytes down. This is a memory move, not a new copy: the list is the same one.
+    body.truncate(used);
+    if *framing == Framing::Chunked {
+        let n = unchunk(&mut body);
+        body.truncate(n);
+    }
+    if body.capacity() - body.len() > body.len() / 8 {
+        body.shrink_to_fit();
+        // Give the spare room back. For a big list, the system does this without a copy.
+    }
+    body
+}
+
+/// Join the chunks inside `buf`, and say how many bytes the body has. The chunks were checked by `chunked_end`.
+fn unchunk(buf: &mut [u8]) -> usize {
+    let (mut read, mut write) = (0, 0);
+    // `read` is where we are in the chunks. `write` is the end of the body so far. It never passes `read`.
+    loop {
+        let Some(line_end) = find(&buf[read..], b"\r\n") else { return write };
+        let line = String::from_utf8_lossy(&buf[read..read + line_end]).into_owned();
+        let Some(size) = parse_number(line.split(';').next().unwrap_or("").trim(), 16) else { return write };
+        read += line_end + 2;
+        if size == 0 || read + size > buf.len() {
+            return write;
+        }
+        buf.copy_within(read..read + size, write);
+        write += size;
+        read += size + 2;
+    }
+}
+
+/// Check a chunked body. A chunk is: size in hex, `\r\n`, data, `\r\n`. A chunk of size 0 ends the body.
+/// After it come optional "trailers" and a blank line. Gives the bytes used, or `None` when more must come.
+fn chunked_end(mut rest: &[u8], closed: bool) -> Result<Option<usize>, String> {
     // `mut rest` lets us move `rest` forward, past each chunk we have read.
     let total = rest.len();
     // We remember the start, so we can say at the end how many bytes we used.
     let more = || if closed { Err("chunked body ended early".to_string()) } else { Ok(None) };
     // What to do when the bytes stop in the middle of the body: wait for more, or give an error.
     // JS: an arrow function that we call as `more()`.
-    let mut body = Vec::new();
     loop {
         let Some(line_end) = find(rest, b"\r\n") else { return more() };
         let line = String::from_utf8_lossy(&rest[..line_end]);
@@ -505,8 +573,6 @@ fn decode_chunked(mut rest: &[u8], closed: bool) -> Result<Option<(Vec<u8>, usiz
             // `saturating_add` stops at the biggest number instead of wrapping around.
             // A server could send a size like "ffffffffffffffff" to make `size + 2` overflow.
         }
-        body.extend_from_slice(&rest[..size]);
-        // Keep the chunk data.
         if &rest[size..size + 2] != b"\r\n" {
             return Err("chunk is not followed by a line break".to_string());
         }
@@ -521,10 +587,19 @@ fn decode_chunked(mut rest: &[u8], closed: bool) -> Result<Option<(Vec<u8>, usiz
         let Some(line_end) = find(rest, b"\r\n") else { return more() };
         rest = &rest[line_end + 2..];
         if line_end == 0 {
-            return Ok(Some((body, total - rest.len())));
+            return Ok(Some(total - rest.len()));
             // An empty line ends the reply.
         }
     }
+}
+
+/// Parse a whole reply from bytes, and copy the body out. The tests use this. `exchange` does the same steps, without the copy.
+#[cfg(test)]
+fn parse_response(raw: &[u8], closed: bool) -> Result<Option<(Response, usize)>, String> {
+    let Some(mut head) = parse_head(raw, closed)? else { return Ok(None) };
+    let Some(used) = body_end(&head.framing, &raw[head.head_len..], closed)? else { return Ok(None) };
+    head.response.body = take_body(raw.to_vec(), head.head_len, &head.framing, used);
+    Ok(Some((head.response, head.head_len + used)))
 }
 
 /// Read a number made only of digits. `from_str_radix` also accepts "+5", which HTTP does not.
@@ -951,5 +1026,36 @@ mod tests {
             }
             let _ = parse_response(&p, next() % 2 == 0);
         }
+    }
+
+    #[test]
+    fn a_cache_hit_shares_the_body() {
+        let (port, _requests) = serve(vec![(vec![page("Cache-Control: max-age=60\r\n", "a body")], false)]);
+        let mut client = Client::new();
+        let (first, second) = (client.get(&url(port)).unwrap(), client.get(&url(port)).unwrap());
+        assert!(Arc::ptr_eq(&first, &second));
+        // The same reply, not a copy of it. The server has one reply, so a second request would hang.
+    }
+
+    #[test]
+    fn joins_chunks_inside_the_same_list() {
+        let mut buf = b"5\r\nhello\r\n1;ext=1\r\n,\r\nB\r\n 0123456789\r\n0\r\nT: v\r\n\r\n".to_vec();
+        let n = unchunk(&mut buf);
+        assert_eq!(&buf[..n], b"hello, 0123456789");
+        // Each chunk moves down over the size lines that came before it.
+        assert_eq!(unchunk(&mut b"0\r\n\r\n".to_vec()), 0);
+    }
+
+    #[test]
+    fn takes_the_body_out_of_the_bytes_without_a_copy() {
+        let mut raw = Vec::with_capacity(1000);
+        raw.extend_from_slice(b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\n\r\nbodyNEXT");
+        let pointer = raw.as_ptr();
+        let head = parse_head(&raw, false).unwrap().unwrap();
+        let used = body_end(&head.framing, &raw[head.head_len..], false).unwrap().unwrap();
+        let body = take_body(raw, head.head_len, &head.framing, used);
+        assert_eq!(body, b"body");
+        assert_eq!(body.as_ptr(), pointer);
+        // The body lives in the same memory as the bytes that we read.
     }
 }
