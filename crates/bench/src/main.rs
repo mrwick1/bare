@@ -151,6 +151,18 @@ fn main() {
     step("css: parse", || {
         bare_css::parser::parse_stylesheet(&sheet).len()
     });
+    // The values of all declarations. `margin` has 4 longhands, so this makes 700,000 items of 12 bytes.
+    step("css: parse + values", || {
+        let mut out = Vec::new();
+        for rule in bare_css::parser::parse_stylesheet(&sheet) {
+            if let bare_css::parser::Rule::Style(rule) = rule {
+                for d in &rule.declarations {
+                    bare_css::values::parse_declaration(&d.name, d.value, d.important, &mut out);
+                }
+            }
+        }
+        out.len()
+    });
 
     let decoded = step("html: decode bytes", || {
         bare_html::encoding::decode(&bytes, Some("text/html; charset=utf-8"))
