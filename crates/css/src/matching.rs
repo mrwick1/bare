@@ -112,7 +112,7 @@ fn simple_matches(doc: &Document, el: NodeId, simple: &Simple) -> bool {
         Simple::FirstChild => prev_element(doc, el).is_none(),
         Simple::LastChild => next_element(doc, el).is_none(),
         Simple::OnlyChild => prev_element(doc, el).is_none() && next_element(doc, el).is_none(),
-        Simple::Nth(nth) => nth_matches(doc, el, name, *nth),
+        Simple::Nth(nth) => nth_matches(doc, el, *nth),
         Simple::Root => doc.parent(el) == Some(doc.root()),
         Simple::Empty => doc.children(el).all(|c| match *doc.data(c) {
             NodeData::Element { .. } => false,
@@ -127,20 +127,10 @@ fn simple_matches(doc: &Document, el: NodeId, simple: &Simple) -> bool {
     }
 }
 
-/// The place of `el` among its sibling elements (the first is 1), counted from the start or the end.
-/// The cost is the number of siblings on the way. A parent with 10,000 children and a `:nth-child` rule makes this slow.
-/// To verify: if it shows in a profile, the cascade can count the places once for each parent.
-fn nth_matches(doc: &Document, el: NodeId, name: Atom, nth: Nth) -> bool {
-    let step = if nth.from_end { next_element } else { prev_element };
-    let mut place = 1i64;
-    let mut sibling = step(doc, el);
-    while let Some(s) = sibling {
-        if !nth.of_type || matches!(doc.data(s), NodeData::Element { name: n, .. } if *n == name) {
-            place += 1;
-        }
-        sibling = step(doc, s);
-    }
-    // Is there an `n >= 0` with `a*n + b == place`?
+/// Is the place of `el` among its sibling elements `a*n + b` for some `n >= 0`?
+/// The places come from the document: it counts them for all the elements of a parent in one pass.
+fn nth_matches(doc: &Document, el: NodeId, nth: Nth) -> bool {
+    let place = i64::from(doc.sibling_place(el, nth.of_type, nth.from_end));
     let (a, b) = (i64::from(nth.a), i64::from(nth.b));
     if a == 0 { place == b } else { (place - b) % a == 0 && (place - b) / a >= 0 }
 }

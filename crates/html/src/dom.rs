@@ -41,6 +41,7 @@
 //!
 //! Comments compare Rust with JavaScript, because you know JS.
 
+use std::cell::OnceCell;
 use std::collections::HashMap;
 use std::hash::{BuildHasherDefault, Hasher};
 use std::num::NonZeroU32;
@@ -154,6 +155,10 @@ pub struct Document {
     // The attributes of all elements. Each element has a run of them, one after the other.
     text: String,
     // All the text of the page: texts, attribute values, comments and doctypes. See `Span`.
+    places: [OnceCell<Vec<(u32, u32)>>; 2],
+    // The place of each element among its sibling elements, from the start and from the end. Made the
+    // first time that `sibling_place` asks, and dropped when the tree changes. `[0]` counts all
+    // elements, `[1]` counts the elements with the same name. See `sibling_place`.
 }
 
 /// A fast hash for short names (FNV-1a). The standard one (SipHash) is slower, and it protects against
@@ -204,6 +209,7 @@ impl Document {
             atoms: HashMap::default(),
             attrs: Vec::new(),
             text: String::new(),
+            places: Default::default(),
         };
         // The order matters: it must match `Atom::ID` and `Atom::CLASS`.
         doc.intern("id");
@@ -230,6 +236,44 @@ impl Document {
     /// The children of this node, in order.
     pub fn children(&self, id: NodeId) -> Children<'_> {
         Children { doc: self, next: self.nodes[id.index()].first_child }
+    }
+
+    /// The place of the element `el` among its sibling elements: 1 for the first. It counts from the end with
+    /// `from_end`, and counts only the elements with the same name with `of_type`. This is what `:nth-child`
+    /// and `:nth-of-type` ask. All the places are made in one pass the first time, so each answer is a look-up.
+    /// (Counting the siblings for each element is slow for a parent with 50,000 children.)
+    pub fn sibling_place(&self, el: NodeId, of_type: bool, from_end: bool) -> u32 {
+        let places = self.places[of_type as usize].get_or_init(|| self.make_places(of_type));
+        let (start, end) = places[el.index()];
+        if from_end { end } else { start }
+    }
+
+    fn make_places(&self, of_type: bool) -> Vec<(u32, u32)> {
+        let mut places = vec![(0, 0); self.nodes.len()];
+        let mut seen: HashMap<Atom, u32, BuildHasherDefault<Fnv>> = HashMap::default();
+        for parent in 0..self.nodes.len() {
+            if self.nodes[parent].first_child.is_none() {
+                continue;
+            }
+            let parent = NodeId::from_index(parent);
+            seen.clear();
+            let mut total = 0;
+            for child in self.children(parent) {
+                if let NodeData::Element { name, .. } = self.nodes[child.index()].data {
+                    let count = if of_type { seen.entry(name).or_insert(0) } else { &mut total };
+                    *count += 1;
+                    places[child.index()].0 = *count;
+                }
+            }
+            // The place from the end is the count of the group, less the place from the start, plus one.
+            for child in self.children(parent) {
+                if let NodeData::Element { name, .. } = self.nodes[child.index()].data {
+                    let count = if of_type { seen[&name] } else { total };
+                    places[child.index()].1 = count - places[child.index()].0 + 1;
+                }
+            }
+        }
+        places
     }
 
     /// The number of nodes, with the top node.
@@ -308,6 +352,7 @@ impl Document {
 
     /// Put `node`, which has no parent, in the list of children of `parent`, just before `before` (or at the end).
     fn link(&mut self, node: NodeId, parent: NodeId, before: Option<NodeId>) {
+        self.places = Default::default();
         let before = before.filter(|&b| b != node && self.parent(b) == Some(parent));
         let prev = self.child_before(parent, before);
         let n = &mut self.nodes[node.index()];
@@ -328,6 +373,7 @@ impl Document {
     pub fn detach(&mut self, node: NodeId) {
         let Node { parent, prev, next, .. } = self.nodes[node.index()];
         let Some(parent) = parent else { return };
+        self.places = Default::default();
         match prev {
             Some(p) => self.nodes[p.index()].next = next,
             None => self.nodes[parent.index()].first_child = next,
@@ -774,5 +820,22 @@ mod tests {
         doc.move_to(copy, root, None);
         assert_eq!(names(&doc, root), ["a", "a"]);
         check(&doc, root);
+    }
+
+    #[test]
+    fn sibling_places_follow_the_tree() {
+        let mut doc = crate::tree::parse("<ul><i></i><li></li><i></i><li></li></ul>");
+        let (html, ul) = (doc.children(doc.root()).last().unwrap(), |doc: &Document, n| doc.children(n).last().unwrap());
+        let ul = ul(&doc, ul(&doc, html));
+        let kids: Vec<NodeId> = doc.children(ul).collect();
+        let places = |doc: &Document, of_type, from_end| doc.children(ul).map(|c| doc.sibling_place(c, of_type, from_end)).collect::<Vec<_>>();
+        assert_eq!(places(&doc, false, false), [1, 2, 3, 4]);
+        assert_eq!(places(&doc, false, true), [4, 3, 2, 1]);
+        assert_eq!(places(&doc, true, false), [1, 1, 2, 2]);
+        assert_eq!(places(&doc, true, true), [2, 2, 1, 1]);
+        // A change in the tree must drop the places that we made.
+        doc.detach(kids[1]);
+        assert_eq!(places(&doc, false, false), [1, 2, 3]);
+        assert_eq!(places(&doc, true, true), [2, 1, 1]);
     }
 }

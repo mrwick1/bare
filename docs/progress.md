@@ -115,4 +115,4 @@ What each done topic covers:
 - App: `--styles` fetches `<link>` sheets one after the other, with no cache and no time limit other than the TCP ones, and it reads them with the encoding rules of HTML (a `@charset` rule is not read).
 - CSS tokenizer: the caller gives text. A style sheet that is not UTF-8 needs the encoding rules of the CSS standard (`@charset`, BOM, the `Content-Type` header). The tokenizer does not preprocess the input: it reads `\r`, `\r\n` and `\x0C` as newlines where the standard needs it.
 - Tree builder: no parser pause for scripts (`document.write`), and no preload scanner. Both need module 9 and the network in the loop.
-- Load limits: a reply head may be 256 KB, a reply 128 MB and 120 seconds, and the HTTP cache 64 MB (it empties when full). `:nth-child` and a long class list on one element are quadratic: see resources.md. The Noah's Ark check reads 256 entries only.
+- Load limits: a reply head may be 256 KB, a reply 128 MB and 120 seconds, and the HTTP cache 64 MB (it empties when full). A long class list on one element is quadratic: see resources.md. The Noah's Ark check reads 256 entries only.

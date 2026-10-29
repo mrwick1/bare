@@ -152,6 +152,19 @@ fn main() {
         })
         .collect();
     println!("css: {} bytes", sheet.len());
+    if std::env::args().nth(1).as_deref() == Some("css") {
+        // Only the sheet parser, with the values, 20 times: a long run for `perf record`.
+        for _ in 0..20 {
+            for rule in bare_css::parser::parse_stylesheet(&sheet) {
+                if let bare_css::parser::Rule::Style(rule) = rule {
+                    for d in &rule.declarations {
+                        bare_css::values::parse_declaration(&d.name, d.value, d.important, &mut Default::default(), &mut Vec::new());
+                    }
+                }
+            }
+        }
+        return;
+    }
     let tokens = step("css: tokenize", || {
         bare_css::tokenizer::tokenize(&sheet).count()
     });
@@ -199,6 +212,13 @@ fn main() {
         rules.add(&mut doc, &author, bare_css::cascade::Origin::Author);
         rules
     });
+    if std::env::args().nth(1).as_deref() == Some("style") {
+        // Only the styles of all the elements, 20 times: a long run for `perf record`.
+        for _ in 0..20 {
+            std::hint::black_box(rules.compute(&doc));
+        }
+        return;
+    }
     let styles = step("css: styles of 200,000 elements", || rules.compute(&doc));
     println!("{} rules, {} different styles", rules.len(), styles.unique());
 
