@@ -30,6 +30,7 @@ Linux is the first target. Windows and macOS come later.
 | `crates/bare/`      | The app                                             |
 | `crates/net/`       | DNS, TCP and HTTP                                   |
 | `crates/url/`       | URL parser and IDNA                                 |
+| `crates/html/`      | HTML: encoding, tokenizer and DOM tree              |
 | `crates/unicode/`   | NFC and Unicode data tables                         |
 | `data/unicode/`     | Unicode data files and their license                |
 | `tools/`            | Scripts that generate code from data files          |

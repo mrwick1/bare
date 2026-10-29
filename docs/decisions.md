@@ -29,7 +29,8 @@ The repository is a Cargo workspace. Each browser part is one crate in `crates/`
 | `bare-unicode` | `crates/unicode/` | NFC, generated Unicode data | -                      |
 | `bare-url`     | `crates/url/`     | URL parser, IDNA            | `bare-unicode`         |
 | `bare-net`     | `crates/net/`     | DNS, TCP, HTTP              | `bare-url`             |
-| `bare`         | `crates/bare/`    | the app (`main.rs`)         | `bare-net`, `bare-url` |
+| `bare-html`    | `crates/html/`    | encoding, tokenizer, DOM    | -                      |
+| `bare`         | `crates/bare/`    | the app (`main.rs`)         | `bare-net`, `bare-url`, `bare-html` |
 
 Why crates, not folders in one crate:
 

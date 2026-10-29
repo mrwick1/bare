@@ -11,6 +11,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "bare-html"
+version = "0.1.0"
+
+[[package]]
 name = "bare-net"
 version = "0.1.0"
 dependencies = [
