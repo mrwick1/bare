@@ -39,8 +39,14 @@ fn main() {
     // If the URL was good, fetch the page. If not, skip this step and keep the error.
 
     match result {
-        Ok(body) => println!("{body}"),
-        // It worked: print the page. JS: `console.log(body)`.
+        Ok(response) => {
+            if response.status != 200 {
+                eprintln!("status: {}", response.status);
+                // A 404 page still has a body, so we print it. We also tell you the status.
+            }
+            println!("{}", String::from_utf8_lossy(&response.body));
+            // It worked: print the page. Bad bytes become "�". JS: `console.log(text)`.
+        }
         Err(e) => {
             eprintln!("error: {e}");
             // It failed: print the error.

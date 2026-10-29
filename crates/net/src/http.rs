@@ -12,6 +12,8 @@
 //! So the `Client` keeps the connection open after a reply, and sends the next request
 //! to the same server over it. This is called "keep-alive". HTTP/1.1 does it by default.
 //!
+//! The `Client` also follows redirects ("this page moved") and keeps a cache of replies.
+//!
 //! Comments compare Rust with JavaScript, because you know JS.
 
 use crate::{dns, tcp};
@@ -38,8 +40,20 @@ type Error = Box<dyn std::error::Error>;
 // We need it because our functions can fail in two ways: our own error text, and
 // network errors. Both fit into this one type.
 
+const MAX_REDIRECTS: usize = 20;
+// We follow at most 20 redirects. Chrome and Firefox use 20 too. Without a limit,
+// two pages that point at each other would send us around forever.
+
 /// An open connection that waits for a next request, and the time it became idle.
 type IdleConnection = (TcpStream, Instant);
+
+/// A stored reply: when we stored it, and for how long it stays fresh.
+struct Cached {
+    response: Response,
+    stored: Instant,
+    fresh_for: Duration,
+    // Until this time has passed, we use the copy without asking the server.
+}
 
 /// Fetches pages. It keeps idle connections so that the next request can reuse one.
 #[derive(Default)]
@@ -52,6 +66,9 @@ pub struct Client {
     // it was opened to. The value is the connection and the time it became idle.
     // Only one connection per server. When a browser needs more at once, it opens more.
     // Chrome allows 6 for each server.
+    cache: HashMap<(String, u16, String), Cached>,
+    // Replies we may use again. The key is the host, the port and the path.
+    // It lives in memory only, and it has no size limit yet.
 }
 
 impl Client {
@@ -59,26 +76,87 @@ impl Client {
         Client::default()
     }
 
-    /// Fetch a URL and return the response body as text.
-    pub fn get(&mut self, url: &Url) -> Result<String, Error> {
+    /// Fetch a URL. Follow redirects, and use the cache. Any status can come back: a 404 is still a page.
+    pub fn get(&mut self, url: &Url) -> Result<Response, Error> {
         // `&mut self` means this method may change the client: it adds and removes connections.
         // `&Url` means we borrow the URL. The caller keeps it.
-        let response = self.fetch(url)?;
-        // Send the request and read the reply. `?` returns the error to the caller.
+        let mut current = url;
+        // The URL we ask for now. It starts as the one we were given.
+        let mut next;
+        // Where a redirect sends us. We own this `Url`, so it must live outside the loop.
+        for _ in 0..=MAX_REDIRECTS {
+            // `0..=20` is 21 turns: the first request plus 20 redirects.
+            let response = self.load(current)?;
+            let Some(location) = redirect_target(&response) else {
+                return Ok(response);
+                // Not a redirect: this is the page.
+            };
+            next = current.join(location)?;
+            // `Location` may be relative, like "/new". `join` makes it a full URL.
+            // A link to `https://` fails here, because we do not support HTTPS yet.
+            current = &next;
+        }
+        Err(format!("too many redirects (more than {MAX_REDIRECTS})").into())
+        // `.into()` converts our text into the `Error` type that this function returns.
+    }
 
-        if response.status != 200 {
-            // 200 means success. For now, any other code (301, 404...) is an error.
-            return Err(format!("unsupported status: {}", response.status).into());
-            // `.into()` converts our text into the `Error` type that this function returns.
+    /// Get one URL from the cache, or from the server. Do not follow redirects.
+    fn load(&mut self, url: &Url) -> Result<Response, Error> {
+        let key = (url.host.clone(), url.port, url.path.clone());
+        let mut conditions = String::new();
+        // Extra request headers. They stay empty unless we have an old copy to check.
+
+        if let Some(cached) = self.cache.get(&key) {
+            if cached.stored.elapsed() < cached.fresh_for {
+                return Ok(cached.response.clone());
+                // Still fresh: use the copy. No request at all.
+            }
+            // Stale. The copy may still be right, so we ask the server: "has it changed?"
+            if let Some(etag) = cached.response.header("etag") {
+                conditions += &format!("If-None-Match: {etag}\r\n");
+                // An ETag is a label for one version of the page, like a version number.
+            }
+            if let Some(date) = cached.response.header("last-modified") {
+                conditions += &format!("If-Modified-Since: {date}\r\n");
+                // The same question with a date: "changed since then?"
+            }
         }
 
-        Ok(String::from_utf8_lossy(&response.body).into_owned())
-        // Turn the body bytes into text. Bad bytes become "�" instead of failing.
-        // `into_owned` makes a copy that we can return.
+        let response = self.fetch(url, &conditions)?;
+
+        if response.status == 304 {
+            // "Not Modified": our copy is still right. The reply has no body.
+            if let Some(cached) = self.cache.get_mut(&key) {
+                cached.stored = Instant::now();
+                cached.fresh_for = freshness(&response).unwrap_or(Duration::ZERO);
+                // The copy is fresh again. The 304 may give a new `max-age`.
+                return Ok(cached.response.clone());
+            }
+        }
+
+        match freshness(&response) {
+            Some(fresh_for)
+                if response.status == 200
+                    && response.header("vary").is_none()
+                    && (!fresh_for.is_zero() || response.header("etag").is_some() || response.header("last-modified").is_some()) =>
+            {
+                // We keep a reply only if all of these are true:
+                // - It is a 200 and the server did not say `no-store`.
+                // - It has no `Vary` header. `Vary` says the reply depends on a request header.
+                //   We do not handle that yet.
+                // - It is useful: it is fresh for a while, or we can ask the server about it later.
+                self.cache.insert(key, Cached { response: response.clone(), stored: Instant::now(), fresh_for });
+            }
+            _ => {
+                self.cache.remove(&key);
+                // Do not keep this reply. Throw away any older copy too: it is out of date.
+            }
+        }
+        Ok(response)
     }
 
     /// Send a GET request and read the reply. Reuse an idle connection when there is one.
-    pub fn fetch(&mut self, url: &Url) -> Result<Response, Error> {
+    fn fetch(&mut self, url: &Url, conditions: &str) -> Result<Response, Error> {
         let server = (url.host.clone(), url.port);
         let (mut stream, reused) = match self.idle.remove(&server) {
             // `remove` takes the connection out of the list. While we use it, nobody else can.
@@ -89,14 +167,14 @@ impl Client {
             // An old connection is dropped here, and Rust closes it for us.
         };
 
-        let mut result = exchange(&mut stream, url);
+        let mut result = exchange(&mut stream, url, conditions);
         if result.is_err() && reused {
             // A reused connection can fail when the server closed it while it was idle.
             // We cannot know that before we try. The error is not the page's fault, so we
             // try once more on a new connection. This is safe because GET only reads.
             // We must never do this for a request that changes something, like POST.
             stream = open(url)?;
-            result = exchange(&mut stream, url);
+            result = exchange(&mut stream, url, conditions);
         }
         let (response, reusable) = result?;
 
@@ -119,13 +197,14 @@ fn open(url: &Url) -> Result<TcpStream, Error> {
 }
 
 /// Send one request and read one reply. Also say if the connection can be used again.
-fn exchange(stream: &mut TcpStream, url: &Url) -> Result<(Response, bool), Error> {
+fn exchange(stream: &mut TcpStream, url: &Url, conditions: &str) -> Result<(Response, bool), Error> {
     // `&mut TcpStream` means we borrow the connection and may change it. The caller keeps it.
-    let request = format!("GET {} HTTP/1.1\r\nHost: {}\r\nUser-Agent: bare/0.1\r\n\r\n", url.path, host_header(url));
+    let request = format!("GET {} HTTP/1.1\r\nHost: {}\r\nUser-Agent: bare/0.1\r\n{conditions}\r\n", url.path, host_header(url));
     // JS: a template string. Each `{}` is replaced by the next value. Like `${url.path}`.
     // `\r\n` is the line ending that HTTP requires.
     // `Host:` says which site we want. One server can host many sites.
     // There is no `Connection:` header. For HTTP/1.1 "keep the connection" is the default.
+    // `conditions` are extra headers, or nothing. Each one ends with `\r\n`.
     // The empty line at the end (`\r\n\r\n`) tells the server that the request is complete.
 
     stream.write_all(request.as_bytes())?;
@@ -171,6 +250,8 @@ fn exchange(stream: &mut TcpStream, url: &Url) -> Result<(Response, bool), Error
 }
 
 /// A parsed HTTP response.
+#[derive(Clone)]
+// `Clone` lets us make a copy with `.clone()`. The cache keeps one copy and gives out another.
 pub struct Response {
     // JS: like an object `{ status, headers, body }`. `pub` lets other crates read the fields.
     pub status: u16,
@@ -191,6 +272,46 @@ impl Response {
         self.headers.iter().find(|(n, _)| n == name).map(|(_, v)| v.as_str())
         // JS: `headers.find(([n]) => n === name)?.[1]`. `Option` is like a value that may be `undefined`.
     }
+}
+
+/// Where a redirect sends us, or `None` when the reply is not a redirect.
+fn redirect_target(response: &Response) -> Option<&str> {
+    match response.status {
+        // 301, 308: moved for good. 302, 307: moved for now. 303: "now use GET".
+        // We only send GET, so we treat all five the same.
+        301 | 302 | 303 | 307 | 308 => response.header("location"),
+        // A redirect without `Location` has nowhere to go. We show it as a normal page.
+        _ => None,
+    }
+}
+
+/// For how long a reply stays fresh. `None` means "never keep it" (`no-store`).
+fn freshness(response: &Response) -> Option<Duration> {
+    let control = response.header("cache-control").unwrap_or("").to_ascii_lowercase();
+    // Like "max-age=60, public". The words are not case sensitive.
+    let mut fresh_for = Duration::ZERO;
+    let mut no_cache = false;
+    for directive in control.split(',').map(str::trim) {
+        if directive == "no-store" {
+            return None;
+            // The page is private, like a bank page. Never keep it.
+        }
+        if directive.starts_with("no-cache") {
+            no_cache = true;
+            // "no-cache" does not mean "do not keep it". It means "ask the server before every use".
+        }
+        if let Some(seconds) = directive.strip_prefix("max-age=").and_then(|n| parse_number(n.trim_matches('"'), 10)) {
+            fresh_for = Duration::from_secs(seconds as u64);
+            // "Use this for N seconds without asking."
+        }
+    }
+    if no_cache {
+        return Some(Duration::ZERO);
+    }
+    let age = response.header("age").and_then(|n| parse_number(n, 10)).unwrap_or(0);
+    // `Age` is how many seconds the reply already sat in a proxy. That time counts.
+    Some(fresh_for.saturating_sub(Duration::from_secs(age as u64)))
+    // `saturating_sub` stops at 0 instead of going below it.
 }
 
 /// Try to read one reply from the bytes we have. `closed` says that no more bytes will come.
@@ -516,11 +637,12 @@ mod tests {
 
     /// Start a fake server on this machine. It answers each connection with its replies, one for
     /// each request. When the flag is `true`, it closes the connection afterwards. If not, it
-    /// keeps it open. Gives the port.
-    fn serve(connections: Vec<(Vec<&'static str>, bool)>) -> u16 {
+    /// keeps it open. Gives the port, and a channel with the head of each request it got.
+    fn serve(connections: Vec<(Vec<&'static str>, bool)>) -> (u16, std::sync::mpsc::Receiver<String>) {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         // Port 0 means "any free port".
         let port = listener.local_addr().unwrap().port();
+        let (requests, received) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
             let mut held = Vec::new();
             // Connections we keep open, so that Rust does not close them.
@@ -534,6 +656,8 @@ mod tests {
                         seen.push(byte[0]);
                     }
                     // Read one request, up to its blank line.
+                    let _ = requests.send(String::from_utf8_lossy(&seen).into_owned());
+                    // A test that does not read the requests has dropped the receiver. Then `send` fails. We do not care.
                     stream.write_all(reply.as_bytes()).unwrap();
                 }
                 if !close {
@@ -541,7 +665,7 @@ mod tests {
                 }
             }
         });
-        port
+        (port, received)
     }
 
     const OK: &str = "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok";
@@ -552,31 +676,157 @@ mod tests {
 
     #[test]
     fn reuses_the_connection() {
-        let port = serve(vec![(vec![OK, OK], false)]);
+        let (port, _) = serve(vec![(vec![OK, OK], false)]);
         // The server accepts only one connection. A second connection would never be answered.
         let mut client = Client::new();
-        assert_eq!(client.get(&url(port)).unwrap(), "ok");
-        assert_eq!(client.get(&url(port)).unwrap(), "ok");
+        assert_eq!(client.get(&url(port)).unwrap().body, b"ok");
+        assert_eq!(client.get(&url(port)).unwrap().body, b"ok");
         // The second request goes over the same connection, and it works.
     }
 
     #[test]
     fn opens_a_new_connection_after_close() {
-        let port = serve(vec![(vec!["HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok"], false), (vec![OK], false)]);
+        let (port, _) = serve(vec![(vec!["HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok"], false), (vec![OK], false)]);
         // The first reply says "close", but this server keeps the connection open.
         // If we tried to reuse it, nobody would answer, and the test would fail.
         let mut client = Client::new();
-        assert_eq!(client.get(&url(port)).unwrap(), "ok");
-        assert_eq!(client.get(&url(port)).unwrap(), "ok");
+        assert_eq!(client.get(&url(port)).unwrap().body, b"ok");
+        assert_eq!(client.get(&url(port)).unwrap().body, b"ok");
     }
 
     #[test]
     fn retries_when_the_server_closed_an_idle_connection() {
-        let port = serve(vec![(vec![OK], true), (vec![OK], false)]);
+        let (port, _) = serve(vec![(vec![OK], true), (vec![OK], false)]);
         // The server closes the first connection right after its reply.
         let mut client = Client::new();
-        assert_eq!(client.get(&url(port)).unwrap(), "ok");
-        assert_eq!(client.get(&url(port)).unwrap(), "ok");
+        assert_eq!(client.get(&url(port)).unwrap().body, b"ok");
+        assert_eq!(client.get(&url(port)).unwrap().body, b"ok");
         // The second request fails on the dead connection. We retry on a new one.
+    }
+
+    fn page(headers: &str, body: &str) -> &'static str {
+        Box::leak(format!("HTTP/1.1 200 OK\r\n{headers}Content-Length: {}\r\n\r\n{body}", body.len()).into_boxed_str())
+        // Makes a reply for the fake server. `Box::leak` keeps the text for the whole run,
+        // because `serve` wants text that never goes away. Fine in a test.
+    }
+
+    const MOVED: &str = "HTTP/1.1 301 Moved Permanently\r\nLocation: /next\r\nContent-Length: 0\r\n\r\n";
+
+    #[test]
+    fn knows_which_replies_are_redirects() {
+        for code in [301, 302, 303, 307, 308] {
+            let r = parse(&format!("HTTP/1.1 {code} X\r\nLocation: /x\r\nContent-Length: 0\r\n\r\n")).unwrap();
+            assert_eq!(redirect_target(&r), Some("/x"));
+        }
+        let r = parse("HTTP/1.1 300 X\r\nLocation: /x\r\nContent-Length: 0\r\n\r\n").unwrap();
+        assert_eq!(redirect_target(&r), None);
+        // 300 is not a redirect we follow.
+        let r = parse("HTTP/1.1 301 X\r\nContent-Length: 0\r\n\r\n").unwrap();
+        assert_eq!(redirect_target(&r), None);
+        // A redirect without a place to go.
+    }
+
+    #[test]
+    fn follows_a_redirect() {
+        let (port, requests) = serve(vec![(vec![MOVED, OK], false)]);
+        let mut client = Client::new();
+        assert_eq!(client.get(&url(port)).unwrap().body, b"ok");
+        let seen: Vec<String> = requests.try_iter().collect();
+        assert!(seen[1].starts_with("GET /next HTTP/1.1"));
+        // The second request went to the new place. "/next" was relative to the first URL.
+    }
+
+    #[test]
+    fn stops_a_redirect_loop() {
+        let looping = "HTTP/1.1 302 Found\r\nLocation: /\r\nContent-Length: 0\r\n\r\n";
+        let (port, _) = serve(vec![(vec![looping; 21], false)]);
+        // 21 replies: the first request plus 20 redirects.
+        let error = Client::new().get(&url(port)).err().unwrap();
+        assert!(error.to_string().contains("too many redirects"));
+    }
+
+    #[test]
+    fn does_not_follow_a_redirect_to_https() {
+        let (port, _) = serve(vec![(vec!["HTTP/1.1 302 Found\r\nLocation: https://a.com/\r\nContent-Length: 0\r\n\r\n"], false)]);
+        let error = Client::new().get(&url(port)).err().unwrap();
+        assert!(error.to_string().contains("only http://"));
+    }
+
+    #[test]
+    fn gives_back_error_pages() {
+        let (port, _) = serve(vec![(vec!["HTTP/1.1 404 Not Found\r\nContent-Length: 4\r\n\r\ngone"], false)]);
+        let response = Client::new().get(&url(port)).unwrap();
+        assert_eq!(response.status, 404);
+        assert_eq!(response.body, b"gone");
+        // A browser shows the body of a 404 page. It is not an error for the user.
+    }
+
+    #[test]
+    fn counts_freshness() {
+        let fresh = |headers: &str| freshness(&parse(&format!("HTTP/1.1 200 OK\r\n{headers}Content-Length: 0\r\n\r\n")).unwrap());
+        assert_eq!(fresh("Cache-Control: max-age=60\r\n"), Some(Duration::from_secs(60)));
+        assert_eq!(fresh("Cache-Control: public, MAX-AGE=60\r\n"), Some(Duration::from_secs(60)));
+        assert_eq!(fresh("Cache-Control: max-age=60\r\nAge: 20\r\n"), Some(Duration::from_secs(40)));
+        // The reply already spent 20 seconds in a proxy.
+        assert_eq!(fresh("Cache-Control: max-age=60\r\nAge: 100\r\n"), Some(Duration::ZERO));
+        // Too old. It stops at 0.
+        assert_eq!(fresh("Cache-Control: max-age=60, no-cache\r\n"), Some(Duration::ZERO));
+        assert_eq!(fresh("Cache-Control: no-store\r\n"), None);
+        assert_eq!(fresh(""), Some(Duration::ZERO));
+        // No information: never fresh.
+    }
+
+    #[test]
+    fn uses_a_fresh_copy_without_asking() {
+        let (port, requests) = serve(vec![(vec![page("Cache-Control: max-age=60\r\n", "a")], false)]);
+        let mut client = Client::new();
+        assert_eq!(client.get(&url(port)).unwrap().body, b"a");
+        assert_eq!(client.get(&url(port)).unwrap().body, b"a");
+        assert_eq!(requests.try_iter().count(), 1);
+        // The server got one request. The server has only one reply, so a second request would hang.
+    }
+
+    #[test]
+    fn does_not_keep_no_store() {
+        let (port, _) = serve(vec![(vec![page("Cache-Control: no-store, max-age=60\r\n", "a"), page("", "b")], false)]);
+        let mut client = Client::new();
+        assert_eq!(client.get(&url(port)).unwrap().body, b"a");
+        assert_eq!(client.get(&url(port)).unwrap().body, b"b");
+        // The second answer is new, so the first one was not kept.
+    }
+
+    #[test]
+    fn asks_if_a_stale_copy_changed() {
+        let first = page("ETag: \"x\"\r\nLast-Modified: Mon, 01 Jan 2024 00:00:00 GMT\r\n", "a");
+        let (port, requests) = serve(vec![(vec![first, "HTTP/1.1 304 Not Modified\r\nETag: \"x\"\r\n\r\n"], false)]);
+        let mut client = Client::new();
+        client.get(&url(port)).unwrap();
+        let response = client.get(&url(port)).unwrap();
+        assert_eq!((response.status, response.body.as_slice()), (200, b"a".as_slice()));
+        // The server said "not modified" and sent no body. We still give the old page, with status 200.
+        let seen: Vec<String> = requests.try_iter().collect();
+        assert!(seen[1].contains("If-None-Match: \"x\"\r\n"));
+        assert!(seen[1].contains("If-Modified-Since: Mon, 01 Jan 2024 00:00:00 GMT\r\n"));
+        assert!(!seen[0].contains("If-None-Match"));
+        // The first request had no old copy, so it asked no question.
+    }
+
+    #[test]
+    fn replaces_a_changed_copy() {
+        let (port, _) = serve(vec![(vec![page("ETag: \"x\"\r\n", "a"), page("ETag: \"y\"\r\n", "b"), "HTTP/1.1 304 Not Modified\r\n\r\n"], false)]);
+        let mut client = Client::new();
+        assert_eq!(client.get(&url(port)).unwrap().body, b"a");
+        assert_eq!(client.get(&url(port)).unwrap().body, b"b");
+        // The page changed, so we got a full new reply, and we keep that one now.
+        assert_eq!(client.get(&url(port)).unwrap().body, b"b");
+    }
+
+    #[test]
+    fn does_not_keep_pages_that_vary() {
+        let (port, _) = serve(vec![(vec![page("Cache-Control: max-age=60\r\nVary: Accept-Language\r\n", "a"), page("", "b")], false)]);
+        let mut client = Client::new();
+        assert_eq!(client.get(&url(port)).unwrap().body, b"a");
+        assert_eq!(client.get(&url(port)).unwrap().body, b"b");
+        // We cannot handle `Vary` yet, so we ask again every time.
     }
 }
