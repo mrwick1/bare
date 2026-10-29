@@ -129,6 +129,26 @@ fn main() {
             .count()
     });
 
+    // A style sheet of 100,000 rules, 4 properties each.
+    let sheet: String = (0..100_000)
+        .map(|i| {
+            format!(
+                ".c{} .d{}{{color:#{:06x};margin:{}px 2em;padding:{}.5%;font-size:1.{}rem}}\n",
+                i % 100,
+                i % 7,
+                i * 37 % 0xffffff,
+                i % 5,
+                i % 3,
+                i % 9
+            )
+        })
+        .collect();
+    println!("css: {} bytes", sheet.len());
+    let tokens = step("css: tokenize", || {
+        bare_css::tokenizer::tokenize(&sheet).count()
+    });
+    println!("css: {tokens} tokens");
+
     let decoded = step("html: decode bytes", || {
         bare_html::encoding::decode(&bytes, Some("text/html; charset=utf-8"))
     });

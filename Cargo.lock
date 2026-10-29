@@ -15,9 +15,14 @@ dependencies = [
 name = "bare-bench"
 version = "0.1.0"
 dependencies = [
+ "bare-css",
  "bare-html",
  "bare-url",
 ]
+
+[[package]]
+name = "bare-css"
+version = "0.1.0"
 
 [[package]]
 name = "bare-html"
