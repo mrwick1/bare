@@ -40,6 +40,20 @@ What each done topic covers:
 - Connections: keep-alive. The `Client` keeps one idle connection for each server and reuses it. It drops a connection that is idle for more than 15 seconds, that the server closed, or that has extra bytes after a reply. A reused connection that fails is retried once on a new one (safe for GET only).
 - Redirects, status codes, caching: `Client::get` follows 301, 302, 303, 307 and 308 (at most 20) and returns any status, so a 404 page is shown. A redirect to `https://` gives an error. The in-memory cache uses `max-age` and `Age`, honours `no-store` and `no-cache`, and revalidates a stale copy with `If-None-Match` and `If-Modified-Since` (a 304 reuses the copy).
 
+## Module 2: HTML tokenizer and DOM tree
+
+| #   | Topic                                                | State   | Code                            |
+| --- | ---------------------------------------------------- | ------- | ------------------------------- |
+| 1   | Bytes to text: encoding, newlines                    | done    | `crates/html/src/encoding.rs`   |
+| 2   | Character references (the entity table)              | next    |                                 |
+| 3   | Tokenizer (state machine, raw text)                  | planned |                                 |
+| 4   | DOM tree (arena)                                     | planned |                                 |
+| 5   | Tree builder (implied tags, void elements), app      | planned |                                 |
+
+What each done topic covers:
+
+- Bytes to text: BOM, then the `Content-Type` charset, then a `<meta charset>` in the first 1024 bytes, then a guess (UTF-8 if valid, else windows-1252). UTF-8 and windows-1252 (also for latin1 and iso-8859-1). `\r\n` and `\r` become `\n`.
+
 ## Known gaps
 
 - HTTP: `Transfer-Encoding` codes other than `chunked` (for example `gzip`) are not supported. No `Accept-Encoding`, so no compression.
@@ -51,3 +65,4 @@ What each done topic covers:
 - URL: only `http://`. `https://` needs module 7.
 - DNS: no short names from the `search` line of `/etc/resolv.conf`.
 - DNS: no DNS-over-HTTPS. It needs module 7.
+- Encoding: no UTF-16 and no other encodings. The meta scan is simple: it does not skip comments. The guess is not a real detector.
