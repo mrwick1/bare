@@ -117,17 +117,25 @@ fn add_sheet(
     client: &mut http::Client,
     base: Option<&Url>,
     text: &str,
+    layer: Option<&str>,
     depth: usize,
 ) {
     if depth < MAX_IMPORT_DEPTH {
         let imports = cascade::imports(doc, text, VIEWPORT);
-        for href in imports {
-            if let Some((url, text)) = fetch_sheet(client, base, &href) {
-                add_sheet(rules, doc, client, Some(&url), &text, depth + 1);
+        for import in imports {
+            if let Some((url, text)) = fetch_sheet(client, base, &import.href) {
+                // A sheet that is imported in a layer, and imports another one in a layer, is in `outer.inner`.
+                // (A layer with no name inside a layer is not kept apart: it is in the outer one.)
+                let inner = match (layer, import.layer.as_deref()) {
+                    (Some(outer), Some(name)) if !name.is_empty() => Some(format!("{outer}.{name}")),
+                    (outer, None | Some("")) if outer.is_some() => outer.map(str::to_string),
+                    (_, name) => name.map(str::to_string),
+                };
+                add_sheet(rules, doc, client, Some(&url), &text, inner.as_deref(), depth + 1);
             }
         }
     }
-    rules.add(doc, text, Origin::Author);
+    rules.add_in_layer(doc, text, Origin::Author, layer);
 }
 
 /// Read the style sheets of the page (the `<style>` elements and the `<link rel=stylesheet>` that we can fetch),
@@ -138,10 +146,10 @@ fn computed_styles(doc: &mut bare_html::dom::Document, page: Option<&Url>) -> St
     let mut client = http::Client::new();
     for source in cascade::sources(doc, VIEWPORT) {
         match source {
-            Source::Inline(text) => add_sheet(&mut rules, doc, &mut client, page, &text, 0),
+            Source::Inline(text) => add_sheet(&mut rules, doc, &mut client, page, &text, None, 0),
             Source::Link(href) => {
                 if let Some((url, text)) = fetch_sheet(&mut client, page, &href) {
-                    add_sheet(&mut rules, doc, &mut client, Some(&url), &text, 0);
+                    add_sheet(&mut rules, doc, &mut client, Some(&url), &text, None, 0);
                 }
             }
         }

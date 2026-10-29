@@ -78,6 +78,13 @@ pub enum Origin {
     Author,
 }
 
+/// A layer: a name inside a parent layer. `@layer a.b` is the layer `b` with the parent `a`.
+struct Layer {
+    parent: u32,
+    /// Empty for a layer with no name (`@layer { ... }`): each one is a new layer.
+    name: Box<str>,
+}
+
 /// One selector of one rule. `a, b { ... }` makes two of them, and they share the declarations.
 struct Entry {
     selector: Selector,
@@ -85,6 +92,8 @@ struct Entry {
     decls: (u32, u32),
     /// The custom properties of the rule: a range of `RuleSet::customs`.
     customs: (u32, u32),
+    /// The layer of the rule: a place in `RuleSet::layers`. 0 is no layer.
+    layer: u32,
     origin: Origin,
     /// The hashes of up to 4 tags, ids or classes that the ancestors must have. 0 means no hash.
     ancestors: [u32; 4],
@@ -102,6 +111,8 @@ pub struct RuleSet {
     decls: Vec<Declared>,
     /// What a value in `decls` points to: the `calc()` that mix units, and the declarations with `var()`.
     side: Side,
+    /// The layers (`@layer`), in the order that we first saw them. Layer 0 is "no layer", the parent of the top layers.
+    layers: Vec<Layer>,
     /// The custom properties of all rules (`--gap: 8px`), one after the other.
     customs: Vec<CustomDecl>,
     by_id: Buckets<Box<str>>,
@@ -113,7 +124,7 @@ pub struct RuleSet {
 
 impl RuleSet {
     pub fn new(viewport: (f32, f32)) -> RuleSet {
-        RuleSet { viewport, entries: Vec::new(), decls: Vec::new(), side: Side::default(), customs: Vec::new(), by_id: Buckets::default(), by_class: Buckets::default(), by_tag: Buckets::default(), other: Vec::new() }
+        RuleSet { viewport, entries: Vec::new(), decls: Vec::new(), side: Side::default(), layers: vec![Layer { parent: 0, name: "".into() }], customs: Vec::new(), by_id: Buckets::default(), by_class: Buckets::default(), by_tag: Buckets::default(), other: Vec::new() }
     }
 
     /// The number of selectors in the set.
@@ -128,26 +139,99 @@ impl RuleSet {
     /// Read a style sheet and add its rules. Add the style sheets in the order of the page: a later rule wins a tie.
     /// The names of the selectors go in the name table of `doc`, so call this before `compute`.
     pub fn add(&mut self, doc: &mut Document, text: &str, origin: Origin) {
-        self.add_rules(doc, parse_stylesheet(text), origin, 0);
+        self.add_in_layer(doc, text, origin, None);
     }
 
-    /// Add the rules. A `@media`, `@supports` or `@layer` block that says yes adds the rules inside it. Other at-rules add nothing:
+    /// The same, for a style sheet that is in a layer: `@import url(a.css) layer(x)`. `layer` is the name (`x`, or `x.y`).
+    /// An empty name is a layer with no name.
+    pub fn add_in_layer(&mut self, doc: &mut Document, text: &str, origin: Origin, layer: Option<&str>) {
+        let layer = layer.map_or(Some(0), |path| self.layer_path(0, path));
+        if let Some(layer) = layer {
+            self.add_rules(doc, parse_stylesheet(text), origin, layer, 0);
+        }
+    }
+
+    /// The layer `path` (`a` or `a.b.c`) inside the layer `parent`. It is made when it is new. `None` when a name is not good.
+    fn layer_path(&mut self, mut parent: u32, path: &str) -> Option<u32> {
+        if path.trim().is_empty() {
+            return Some(self.new_layer(parent, ""));
+        }
+        // Each name looks through the layers, so a name with thousands of parts would be slow. Deeper than 32 is not good.
+        for (depth, name) in path.trim().split('.').enumerate() {
+            if depth >= 32 || name.is_empty() || name.contains(|c: char| c.is_whitespace() || c == ',') {
+                return None;
+            }
+            parent = match self.layers.iter().position(|l| l.parent == parent && *l.name == *name) {
+                Some(i) => i as u32,
+                None => self.new_layer(parent, name),
+            };
+        }
+        Some(parent)
+    }
+
+    fn new_layer(&mut self, parent: u32, name: &str) -> u32 {
+        self.layers.push(Layer { parent, name: name.into() });
+        self.layers.len() as u32 - 1
+    }
+
+    /// The place of each layer in the order of the cascade: the later one wins. Inside a layer, the sub-layers come first,
+    /// and then the rules of the layer itself, so they win. Layer 0 (no layer) comes last of all, so it wins.
+    fn layer_order(&self) -> Vec<u32> {
+        let mut children = vec![Vec::new(); self.layers.len()];
+        for (i, l) in self.layers.iter().enumerate().skip(1) {
+            children[l.parent as usize].push(i);
+        }
+        let mut order = vec![0; self.layers.len()];
+        let (mut next, mut stack) = (0, vec![(0usize, 0usize)]);
+        // A loop with a stack, not calls that call themselves: `@layer a.a.a.a...` can be very deep.
+        while let Some((node, child)) = stack.pop() {
+            match children[node].get(child) {
+                Some(&c) => {
+                    stack.push((node, child + 1));
+                    stack.push((c, 0));
+                }
+                None => {
+                    order[node] = next;
+                    next += 1;
+                }
+            }
+        }
+        order
+    }
+
+    /// Add the rules. A `@media` or `@supports` block that says yes adds the rules inside it, and so does a `@layer` block (in its layer). Other at-rules add nothing:
     /// `@import` is for the app (see `imports`), and `@container` waits for layout.
-    fn add_rules(&mut self, doc: &mut Document, rules: Vec<Rule<'_>>, origin: Origin, depth: usize) {
+    fn add_rules(&mut self, doc: &mut Document, rules: Vec<Rule<'_>>, origin: Origin, layer: u32, depth: usize) {
         for rule in rules {
             let rule = match rule {
                 Rule::Style(rule) => rule,
+                Rule::At(at) if &*at.name == "layer" => {
+                    match at.body {
+                        // `@layer a, b;` only says the order of the layers.
+                        AtBody::None => {
+                            for name in at.prelude.split(',') {
+                                self.layer_path(layer, name);
+                            }
+                        }
+                        AtBody::Rules(inner) if depth < 32 => {
+                            if let Some(inner_layer) = self.layer_path(layer, at.prelude) {
+                                self.add_rules(doc, inner, origin, inner_layer, depth + 1);
+                            }
+                        }
+                        _ => {}
+                    }
+                    continue;
+                }
                 Rule::At(at) => {
                     let AtBody::Rules(inner) = at.body else { continue };
                     let yes = match &*at.name {
                         "media" => at_rules::media_matches(at.prelude, self.viewport),
                         "supports" => at_rules::supports_matches(doc, at.prelude),
-                        "layer" => true,
                         _ => false,
                     };
                     // The parser stops at depth 32, so this is a safety net for the stack.
                     if yes && depth < 32 {
-                        self.add_rules(doc, inner, origin, depth + 1);
+                        self.add_rules(doc, inner, origin, layer, depth + 1);
                     }
                     continue;
                 }
@@ -168,12 +252,12 @@ impl RuleSet {
             let decls = (start as u32, self.decls.len() as u32);
             let customs = (custom_start as u32, self.customs.len() as u32);
             for selector in selectors {
-                self.push(selector, decls, customs, origin);
+                self.push(selector, decls, customs, layer, origin);
             }
         }
     }
 
-    fn push(&mut self, selector: Selector, decls: (u32, u32), customs: (u32, u32), origin: Origin) {
+    fn push(&mut self, selector: Selector, decls: (u32, u32), customs: (u32, u32), layer: u32, origin: Origin) {
         if selector.compounds.iter().any(|c| c.simples.contains(&Simple::Never)) {
             return;
             // `a:hover` never matches. Keep it out of the index: it only costs time.
@@ -191,14 +275,14 @@ impl RuleSet {
             self.other.push(index);
         }
         let ancestors = ancestor_hashes(&selector);
-        self.entries.push(Entry { selector, decls, customs, origin, ancestors });
+        self.entries.push(Entry { selector, decls, customs, layer, origin, ancestors });
     }
 
     /// Find the style of every element that is shown. The selectors must come from `add` with this same `doc`.
     pub fn compute(&self, doc: &Document) -> Styles {
         let mut styles = Styles { styles: vec![ComputedStyle::initial()], of_node: vec![NONE; doc.len()], calcs: Vec::new(), customs: Vec::new() };
         // Style 0 is the starting style. It is the parent style of the `html` element.
-        let mut cx = Cx { viewport: self.viewport, root_font_size: 16.0, declared: &self.side, inline: RefCell::default(), computed: RefCell::default(), customs: RefCell::default() };
+        let mut cx = Cx { viewport: self.viewport, root_font_size: 16.0, layer_order: self.layer_order(), declared: &self.side, inline: RefCell::default(), computed: RefCell::default(), customs: RefCell::default() };
         let style_atom = doc.find_atom("style");
         let mut filter = AncestorFilter::new();
         let mut memo = Memo::default();
@@ -307,15 +391,26 @@ impl RuleSet {
     /// Pick the winning declaration for each property, then compute the values.
     fn cascade(&self, matched: &[u32], inline: Option<&str>, parent: &ComputedStyle, cx: &Cx<'_>) -> ComputedStyle {
         let mut winners = [None::<Value>; Property::COUNT];
-        let mut keys = [0u64; Property::COUNT];
-        let rank = |important: bool, origin: Origin| match (important, origin) {
-            (false, Origin::UserAgent) => 0u64,
-            (false, Origin::Author) => 1,
-            (true, Origin::Author) => 2,
-            (true, Origin::UserAgent) => 3,
+        let mut keys = [0u128; Property::COUNT];
+        // The key of a declaration: the one with the bigger key wins. The parts, from the most important: the origin and `!important`,
+        // the layer, the specificity, and the place in the page. A `style=""` attribute has no layer (`None`): it beats every layer.
+        let key = |important: bool, origin: Origin, layer: Option<u32>, specificity: u32, order: u32| {
+            let rank = match (important, origin) {
+                (false, Origin::UserAgent) => 0u128,
+                (false, Origin::Author) => 1,
+                (true, Origin::Author) => 2,
+                (true, Origin::UserAgent) => 3,
+            };
+            // `!important` turns the order of the layers around: the earlier layer wins, and no layer is the last.
+            let layer = match layer {
+                None => u32::MAX,
+                Some(l) if important => u32::MAX - 1 - cx.layer_order[l as usize],
+                Some(l) => cx.layer_order[l as usize],
+            };
+            rank << 96 | u128::from(layer) << 64 | u128::from(specificity) << 32 | u128::from(order)
         };
-        let mut apply = |d: &Declared, origin: Origin, specificity: u32, order: u32| {
-            let key = rank(d.important, origin) << 62 | u64::from(specificity) << 31 | u64::from(order);
+        let mut apply = |d: &Declared, origin: Origin, layer: Option<u32>, specificity: u32, order: u32| {
+            let key = key(d.important, origin, layer, specificity, order);
             let p = d.property as usize;
             if winners[p].is_none() || key >= keys[p] {
                 winners[p] = Some(d.value);
@@ -325,8 +420,8 @@ impl RuleSet {
         // The custom properties of the `style=""` attribute. They live until the end of the function, because `own` points into them.
         let mut inline_customs = Vec::new();
         // The custom properties that win: name, key, text. There are few, so a list is fast.
-        let mut own: Vec<(&str, u64, &str)> = Vec::new();
-        fn apply_custom<'a>(own: &mut Vec<(&'a str, u64, &'a str)>, d: &'a CustomDecl, key: u64) {
+        let mut own: Vec<(&str, u128, &str)> = Vec::new();
+        fn apply_custom<'a>(own: &mut Vec<(&'a str, u128, &'a str)>, d: &'a CustomDecl, key: u128) {
             match own.iter_mut().find(|o| o.0 == &*d.name) {
                 Some(o) if key >= o.1 => *o = (&d.name, key, &d.text),
                 Some(_) => {}
@@ -336,10 +431,10 @@ impl RuleSet {
         for &i in matched {
             let e = &self.entries[i as usize];
             for d in &self.decls[e.decls.0 as usize..e.decls.1 as usize] {
-                apply(d, e.origin, e.selector.specificity, i);
+                apply(d, e.origin, Some(e.layer), e.selector.specificity, i);
             }
             for d in &self.customs[e.customs.0 as usize..e.customs.1 as usize] {
-                apply_custom(&mut own, d, rank(d.important, e.origin) << 62 | u64::from(e.selector.specificity) << 31 | u64::from(i));
+                apply_custom(&mut own, d, key(d.important, e.origin, Some(e.layer), e.selector.specificity, i));
             }
         }
         // What the `style=""` attribute gives.
@@ -370,10 +465,10 @@ impl RuleSet {
             *cx.inline.borrow_mut() = inline_side;
             // The specificity of a `style=""` attribute is more than the most that a selector can have (1 << 30, and the most is one less).
             for d in &inline_decls {
-                apply(d, Origin::Author, 1 << 30, u32::MAX >> 1);
+                apply(d, Origin::Author, None, 1 << 30, u32::MAX >> 1);
             }
             for d in &inline_customs {
-                apply_custom(&mut own, d, rank(d.important, Origin::Author) << 62 | 1 << 61 | u64::from(u32::MAX >> 1));
+                apply_custom(&mut own, d, key(d.important, Origin::Author, None, 1 << 30, u32::MAX >> 1));
             }
         }
         // The custom properties: the ones of the parent, and the ones of this element. Most elements set none, and share the set of the parent.
@@ -471,6 +566,8 @@ struct Cx<'a> {
     /// The font size of the `html` element, for `rem`. 16 until we know it.
     root_font_size: f32,
     /// The `calc()` of the style sheets (`RuleSet::calcs`).
+    /// The place of each layer in the order of the cascade (`RuleSet::layer_order`).
+    layer_order: Vec<u32>,
     declared: &'a Side,
     /// What the `style=""` of the element that we compute now points to, and the `calc()` that come from a `var()`.
     /// Their numbers start after the ones of `declared`.
@@ -924,7 +1021,7 @@ fn ancestor_hashes(selector: &Selector) -> [u32; 4] {
 }
 
 /// The addresses of the `@import` rules at the start of a style sheet that match the window (see `at_rules::imports`).
-pub fn imports(doc: &mut Document, text: &str, viewport: (f32, f32)) -> Vec<String> {
+pub fn imports(doc: &mut Document, text: &str, viewport: (f32, f32)) -> Vec<at_rules::Import> {
     at_rules::imports(doc, &parse_stylesheet(text), viewport)
 }
 
@@ -1496,5 +1593,84 @@ mod tests {
         assert_eq!(get(Property::Width), Value::Length(Length::Px(7.0)));
         let Value::Length(Length::Calc(i)) = get(Property::Height) else { panic!() };
         assert_eq!(styles.calc(i), (-7.0, 100.0));
+    }
+
+    /// The color of `<p id=p class=c>` with these style sheets.
+    fn layered(sheet: &str) -> Value {
+        get("<p id=p class=c style='--x: 1'>x</p>", &[sheet], "p", Property::TextColor)
+    }
+
+    #[test]
+    fn layers_beat_specificity_and_the_last_layer_wins() {
+        let red = rgb(255, 0, 0);
+        let blue = rgb(0, 0, 255);
+        let black = Value::Color(Color::BLACK);
+        // A later layer wins, also against a more specific selector.
+        assert_eq!(layered("@layer a, b; @layer a { #p { color: red } } @layer b { p { color: blue } }"), blue);
+        assert_eq!(layered("@layer a { p { color: red } } @layer b { p { color: blue } }"), blue);
+        // The order of the statement wins over the order of the blocks.
+        assert_eq!(layered("@layer b, a; @layer a { p { color: red } } @layer b { p { color: blue } }"), red);
+        // A layer that is opened again keeps its place.
+        assert_eq!(layered("@layer a { p { color: red } } @layer b { p { color: blue } } @layer a { p { color: lime } }"), blue);
+        // No layer beats every layer, also with less specificity.
+        assert_eq!(layered("p { color: red } @layer a { #p { color: blue } }"), red);
+        assert_eq!(layered("@layer a { #p { color: blue } } p { color: red }"), red);
+        // Inside a layer, specificity and order work as always.
+        assert_eq!(layered("@layer a { #p { color: red } p { color: blue } }"), red);
+        // `@layer` in `@media`, and a layer with no name.
+        assert_eq!(layered("@layer a { p { color: red } } @media screen { @layer b { p { color: blue } } }"), blue);
+        assert_eq!(layered("@layer { p { color: red } } @layer { p { color: blue } }"), blue);
+        assert_eq!(layered("@layer a { p { color: red } } @layer a, b; "), red);
+        // Not a good name: the block is dropped, and a list in a block too.
+        assert_eq!(layered("@layer a b { p { color: red } }"), black);
+        assert_eq!(layered("@layer a, b { p { color: red } }"), black);
+        assert_eq!(layered("@layer a..b { p { color: red } }"), black);
+    }
+
+    #[test]
+    fn nested_layers() {
+        let (red, blue, lime) = (rgb(255, 0, 0), rgb(0, 0, 255), rgb(0, 255, 0));
+        // The rules of a layer win over its own sub-layers. A sub-layer is in the order of its parent.
+        assert_eq!(layered("@layer a { @layer x { p { color: red } } p { color: blue } }"), blue);
+        assert_eq!(layered("@layer a { p { color: blue } @layer x { p { color: red } } }"), blue);
+        assert_eq!(layered("@layer a.x { p { color: red } } @layer b { p { color: blue } }"), blue);
+        assert_eq!(layered("@layer b { p { color: blue } } @layer a.x { p { color: red } }"), red);
+        assert_eq!(layered("@layer a { @layer x, y; @layer y { p { color: lime } } @layer x { p { color: red } } }"), lime);
+        // A name with more than 32 parts is not good. It is not slow, and it does not overflow the stack.
+        let deep = |n| format!("@layer {} {{ p {{ color: red }} }}", vec!["a"; n].join("."));
+        assert_eq!(layered(&deep(32)), red);
+        assert_eq!(layered(&deep(100_000)), Value::Color(Color::BLACK));
+    }
+
+    #[test]
+    fn important_turns_the_layers_around() {
+        let (red, blue, lime) = (rgb(255, 0, 0), rgb(0, 0, 255), rgb(0, 255, 0));
+        // `!important`: the earlier layer wins, and it beats a later one and no layer.
+        assert_eq!(layered("@layer a { p { color: red !important } } @layer b { p { color: blue !important } }"), red);
+        assert_eq!(layered("@layer a { p { color: red !important } } p { color: blue !important }"), red);
+        // Important beats normal, in any layer.
+        assert_eq!(layered("@layer a { p { color: red !important } } @layer b { p { color: blue } } p { color: lime }"), red);
+        // An attribute `style=""` beats the layers, for normal and for important.
+        let page = "<p id=p style='color: lime'>x</p>";
+        assert_eq!(get(page, &["@layer a { p { color: red } }"], "p", Property::TextColor), lime);
+        assert_eq!(get(page, &["p { color: red }"], "p", Property::TextColor), lime);
+        let page = "<p id=p style='color: lime !important'>x</p>";
+        assert_eq!(get(page, &["@layer a { p { color: red !important } }"], "p", Property::TextColor), lime);
+        let _ = blue;
+    }
+
+    #[test]
+    fn layers_work_for_custom_properties_and_imports() {
+        let (red, blue) = (rgb(255, 0, 0), rgb(0, 0, 255));
+        assert_eq!(layered("@layer a { p { --c: red } } @layer b { p { --c: blue } } p { color: var(--c) }"), blue);
+        assert_eq!(layered("@layer b, a; @layer a { p { --c: red } } @layer b { p { --c: blue } } p { color: var(--c) }"), red);
+        let mut doc = parse("<p id=p>x</p>");
+        let mut rules = RuleSet::new(VIEW);
+        rules.add_in_layer(&mut doc, "p { color: red }", Origin::Author, Some("lib"));
+        rules.add(&mut doc, "@layer lib { p { color: lime } } p { color: blue }", Origin::Author);
+        let styles = rules.compute(&doc);
+        // The layer `lib` is the one of the first sheet, and the rule with no layer wins.
+        assert_eq!(styles.style(by_id(&doc, "p")).unwrap().get(Property::TextColor), blue);
+        let _ = red;
     }
 }
