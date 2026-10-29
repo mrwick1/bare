@@ -218,9 +218,9 @@ impl Document {
     }
 
     /// Add an element, with its name and attributes as text. The names go in the name table.
-    pub fn insert_element(&mut self, parent: NodeId, before: Option<NodeId>, name: &str, attrs: &[(String, String)]) -> NodeId {
+    pub fn insert_element<K: AsRef<str>, V: AsRef<str>>(&mut self, parent: NodeId, before: Option<NodeId>, name: &str, attrs: &[(K, V)]) -> NodeId {
         let name = self.intern(name);
-        let attrs = attrs.iter().map(|(key, value)| Attr { name: self.intern(key), value: value.clone() }).collect();
+        let attrs = attrs.iter().map(|(key, value)| Attr { name: self.intern(key.as_ref()), value: value.as_ref().to_string() }).collect();
         self.insert(parent, before, NodeData::Element { name, attrs })
     }
 
@@ -411,7 +411,7 @@ mod tests {
         let root = doc.root();
         let body = element(&mut doc, root, "body", &[]);
         let table = element(&mut doc, body, "table", &[]);
-        let div = doc.insert_element(body, Some(table), "div", &[]);
+        let div = doc.insert_element(body, Some(table), "div", &[] as &[(&str, &str)]);
         assert_eq!(kids(&doc, body), [div, table]);
         // The new node is before the table, not after it.
         assert_eq!(doc.parent(div), Some(body));
@@ -429,8 +429,8 @@ mod tests {
         let mut doc = Document::new();
         let root = doc.root();
         let a = element(&mut doc, root, "a", &[]);
-        let b = doc.insert_element(root, Some(a), "b", &[]);
-        let c = doc.insert_element(root, Some(a), "c", &[]);
+        let b = doc.insert_element(root, Some(a), "b", &[] as &[(&str, &str)]);
+        let c = doc.insert_element(root, Some(a), "c", &[] as &[(&str, &str)]);
         assert_eq!(kids(&doc, root), [b, c, a]);
         // `b` was the first child, and `c` goes after `b` and before `a`.
         assert_eq!(doc.children(root).count(), 3);
@@ -442,7 +442,7 @@ mod tests {
         let root = doc.root();
         let a = element(&mut doc, root, "a", &[]);
         let inner = element(&mut doc, a, "i", &[]);
-        let b = doc.insert_element(root, Some(inner), "b", &[]);
+        let b = doc.insert_element(root, Some(inner), "b", &[] as &[(&str, &str)]);
         // `inner` is a child of `a`, not of the root. We do not link into the wrong list.
         assert_eq!(kids(&doc, root), [a, b]);
         assert_eq!(kids(&doc, a), [inner]);

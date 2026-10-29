@@ -26,7 +26,9 @@
 //! Comments compare Rust with JavaScript, because you know JS.
 
 use crate::dom::{Document, NodeData, NodeId};
-use crate::tokenizer::{Token, tokenize};
+use std::borrow::Cow;
+
+use crate::tokenizer::{Attr, Token, tokenize};
 
 /// Parse a page (already decoded to text) into a DOM tree.
 pub fn parse(input: &str) -> Document {
@@ -152,7 +154,7 @@ impl Builder {
     }
 
     /// Add an element. `push` says if it also goes on the stack. Void elements (`br`, `img`) do not.
-    fn insert_element(&mut self, name: &str, attrs: &[(String, String)], push: bool) -> NodeId {
+    fn insert_element(&mut self, name: &str, attrs: &[Attr<'_>], push: bool) -> NodeId {
         let (parent, before) = self.place();
         let id = self.doc.insert_element(parent, before, name, attrs);
         if push {
@@ -232,7 +234,10 @@ impl Builder {
                     if text.len() == 1 {
                         return;
                     }
-                    Token::Text(text[1..].to_string())
+                    Token::Text(match text {
+                        Cow::Borrowed(text) => Cow::Borrowed(&text[1..]),
+                        Cow::Owned(text) => Cow::Owned(text[1..].to_string()),
+                    })
                     // The browser drops the first newline after `<pre>`, so that you can start the text on the next line.
                 }
                 other => other,
@@ -261,7 +266,7 @@ impl Builder {
             self.mode = self.text_return;
         }
         if !matches!(self.mode, Mode::InBody | Mode::AfterBody | Mode::AfterAfterBody) {
-            self.process(Token::StartTag { name: "body".to_string(), attrs: vec![], self_closing: false });
+            self.process(Token::StartTag { name: "body".into(), attrs: vec![], self_closing: false });
             // A `<body>` start tag makes every missing part, in order.
         }
     }
@@ -271,10 +276,10 @@ impl Builder {
     fn initial(&mut self, token: Token) {
         match token {
             Token::Doctype(name) => {
-                self.doc.append(self.doc.root(), NodeData::Doctype(name));
+                self.doc.append(self.doc.root(), NodeData::Doctype(name.into_owned()));
                 self.mode = Mode::BeforeHtml;
             }
-            Token::Comment(text) => self.doc.append_comment(text),
+            Token::Comment(text) => self.doc.append_comment(text.into_owned()),
             Token::Text(text) if blank(&text) => {}
             // Spaces before the doctype do not count.
             token => {
@@ -288,13 +293,13 @@ impl Builder {
     fn before_html(&mut self, token: Token) {
         match token {
             Token::Doctype(_) => {}
-            Token::Comment(text) => self.doc.append_comment(text),
+            Token::Comment(text) => self.doc.append_comment(text.into_owned()),
             Token::Text(text) if blank(&text) => {}
             Token::StartTag { name, attrs, .. } if name == "html" => {
                 self.insert_element("html", &attrs, true);
                 self.mode = Mode::BeforeHead;
             }
-            Token::EndTag { name } if !matches!(name.as_str(), "head" | "body" | "html" | "br") => {}
+            Token::EndTag { name } if !matches!(&*name, "head" | "body" | "html" | "br") => {}
             // Most end tags are ignored here.
             token => {
                 self.insert_element("html", &[], true);
@@ -308,14 +313,14 @@ impl Builder {
     fn before_head(&mut self, token: Token) {
         match token {
             Token::Doctype(_) => {}
-            Token::Comment(text) => self.insert_comment(text),
+            Token::Comment(text) => self.insert_comment(text.into_owned()),
             Token::Text(text) if blank(&text) => {}
             Token::StartTag { name, .. } if name == "html" => {}
             Token::StartTag { name, attrs, .. } if name == "head" => {
                 self.head = Some(self.insert_element("head", &attrs, true));
                 self.mode = Mode::InHead;
             }
-            Token::EndTag { name } if !matches!(name.as_str(), "head" | "body" | "html" | "br") => {}
+            Token::EndTag { name } if !matches!(&*name, "head" | "body" | "html" | "br") => {}
             token => {
                 self.head = Some(self.insert_element("head", &[], true));
                 self.mode = Mode::InHead;
@@ -326,7 +331,7 @@ impl Builder {
 
     /// Start tags that belong in the head: `title`, `meta`, `script`... Gives true if this was one.
     /// Void elements are added. Raw text elements are added, and we go to `Text` mode.
-    fn head_tag(&mut self, name: &str, attrs: &[(String, String)]) -> bool {
+    fn head_tag(&mut self, name: &str, attrs: &[Attr<'_>]) -> bool {
         match name {
             "base" | "basefont" | "bgsound" | "link" | "meta" => {
                 self.insert_element(name, attrs, false);
@@ -338,7 +343,7 @@ impl Builder {
     }
 
     /// Add an element whose content is raw text. Go to `Text` mode until its end tag.
-    fn raw_text_element(&mut self, name: &str, attrs: &[(String, String)]) {
+    fn raw_text_element(&mut self, name: &str, attrs: &[Attr<'_>]) {
         self.insert_element(name, attrs, true);
         self.text_return = self.mode;
         self.mode = Mode::Text;
@@ -352,10 +357,10 @@ impl Builder {
                     self.insert_text(spaces);
                 }
                 if !rest.is_empty() {
-                    self.leave_head(Token::Text(rest.to_string()));
+                    self.leave_head(Token::Text(Cow::Borrowed(rest)));
                 }
             }
-            Token::Comment(text) => self.insert_comment(text),
+            Token::Comment(text) => self.insert_comment(text.into_owned()),
             Token::Doctype(_) => {}
             Token::StartTag { name, .. } if name == "html" || name == "head" => {}
             Token::StartTag { name, attrs, self_closing } => {
@@ -367,7 +372,7 @@ impl Builder {
                 self.open.pop();
                 self.mode = Mode::AfterHead;
             }
-            Token::EndTag { name } if !matches!(name.as_str(), "body" | "html" | "br") => {}
+            Token::EndTag { name } if !matches!(&*name, "body" | "html" | "br") => {}
             token => self.leave_head(token),
         }
     }
@@ -387,10 +392,10 @@ impl Builder {
                     self.insert_text(spaces);
                 }
                 if !rest.is_empty() {
-                    self.start_body(Token::Text(rest.to_string()));
+                    self.start_body(Token::Text(Cow::Borrowed(rest)));
                 }
             }
-            Token::Comment(text) => self.insert_comment(text),
+            Token::Comment(text) => self.insert_comment(text.into_owned()),
             Token::Doctype(_) => {}
             Token::StartTag { name, .. } if name == "html" || name == "head" => {}
             Token::StartTag { name, attrs, .. } if name == "body" => {
@@ -398,7 +403,7 @@ impl Builder {
                 self.mode = Mode::InBody;
             }
             Token::StartTag { name, attrs, self_closing } => {
-                if matches!(name.as_str(), "base" | "basefont" | "bgsound" | "link" | "meta" | "title" | "style" | "script" | "noframes") {
+                if matches!(&*name, "base" | "basefont" | "bgsound" | "link" | "meta" | "title" | "style" | "script" | "noframes") {
                     // A head element after the head has ended. It still goes into the head.
                     let head = self.head.expect("the head exists in this mode");
                     self.open.push(head);
@@ -411,7 +416,7 @@ impl Builder {
                     self.start_body(Token::StartTag { name, attrs, self_closing });
                 }
             }
-            Token::EndTag { name } if !matches!(name.as_str(), "body" | "html" | "br") => {}
+            Token::EndTag { name } if !matches!(&*name, "body" | "html" | "br") => {}
             token => self.start_body(token),
         }
     }
@@ -472,7 +477,7 @@ impl Builder {
                     && match &token {
                         Token::Text(text) => !blank(text),
                         // Spaces between table parts are fine. Other text moves out of the table.
-                        Token::StartTag { name, .. } => !matches!(name.as_str(), "style" | "script" | "template"),
+                        Token::StartTag { name, .. } => !matches!(&**name, "style" | "script" | "template"),
                         _ => false,
                     };
                 self.foster = fosters;
@@ -486,14 +491,14 @@ impl Builder {
     fn body_rules(&mut self, token: Token) {
         match token {
             Token::Text(text) => self.insert_text(&text),
-            Token::Comment(text) => self.insert_comment(text),
+            Token::Comment(text) => self.insert_comment(text.into_owned()),
             Token::Doctype(_) => {}
             Token::StartTag { name, attrs, .. } => self.body_start(&name, attrs),
             Token::EndTag { name } => self.body_end(&name),
         }
     }
 
-    fn body_start(&mut self, name: &str, attrs: Vec<(String, String)>) {
+    fn body_start(&mut self, name: &str, attrs: Vec<Attr<'_>>) {
         match name {
             "html" | "body" | "head" => {}
             // A second `<html>` or `<body>` is ignored. The standard merges their attributes. We do not yet.
@@ -629,7 +634,7 @@ impl Builder {
             "html" => {
                 if self.in_scope(&["body"], &[]) {
                     self.mode = Mode::AfterBody;
-                    self.process(Token::EndTag { name: "html".to_string() });
+                    self.process(Token::EndTag { name: "html".into() });
                 }
             }
             "form" => {
@@ -695,7 +700,7 @@ impl Builder {
     /// A start tag of a table part: `caption`, `col`, `colgroup`, `tbody`, `thead`, `tfoot`, `tr`, `td`, `th`.
     /// First we close what is open inside the table, down to the part that can hold the new one.
     /// Then we add the parts that the page left out: a `tr` in a `table` gets a `tbody`.
-    fn table_start(&mut self, name: &str, attrs: &[(String, String)]) {
+    fn table_start(&mut self, name: &str, attrs: &[Attr<'_>]) {
         loop {
             let current = self.name(self.current());
             match (current.as_str(), name) {
@@ -752,17 +757,17 @@ impl Builder {
             Token::Text(text) => {
                 let (spaces, rest) = split_spaces(&text);
                 if !spaces.is_empty() {
-                    self.in_body(Token::Text(spaces.to_string()));
+                    self.in_body(Token::Text(Cow::Borrowed(spaces)));
                     // Spaces after `</body>` are still added to the body.
                 }
                 if !rest.is_empty() {
                     self.mode = Mode::InBody;
-                    self.process(Token::Text(rest.to_string()));
+                    self.process(Token::Text(Cow::Borrowed(rest)));
                 }
             }
             Token::Comment(text) => {
                 let html = self.open[0];
-                self.doc.append(html, NodeData::Comment(text));
+                self.doc.append(html, NodeData::Comment(text.into_owned()));
                 // A comment after `</body>` goes in the `html` element, after the body.
             }
             Token::Doctype(_) => {}
@@ -780,14 +785,14 @@ impl Builder {
             Token::Text(text) => {
                 let (spaces, rest) = split_spaces(&text);
                 if !spaces.is_empty() {
-                    self.in_body(Token::Text(spaces.to_string()));
+                    self.in_body(Token::Text(Cow::Borrowed(spaces)));
                 }
                 if !rest.is_empty() {
                     self.mode = Mode::InBody;
-                    self.process(Token::Text(rest.to_string()));
+                    self.process(Token::Text(Cow::Borrowed(rest)));
                 }
             }
-            Token::Comment(text) => self.doc.append_comment(text),
+            Token::Comment(text) => self.doc.append_comment(text.into_owned()),
             Token::Doctype(_) => {}
             Token::StartTag { name, .. } if name == "html" => {}
             token => {
@@ -804,7 +809,7 @@ fn is_table_structure(name: &str) -> bool {
 }
 
 /// `<input type=hidden>`. The type is not case sensitive.
-fn is_hidden(attrs: &[(String, String)]) -> bool {
+fn is_hidden(attrs: &[Attr<'_>]) -> bool {
     attrs.iter().any(|(k, v)| k == "type" && v.eq_ignore_ascii_case("hidden"))
 }
 
