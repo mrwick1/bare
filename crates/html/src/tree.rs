@@ -169,9 +169,9 @@ impl Builder {
     }
 
     /// Add a comment to the current node.
-    fn insert_comment(&mut self, text: String) {
+    fn insert_comment(&mut self, text: &str) {
         let current = self.current();
-        self.doc.append(current, NodeData::Comment(text));
+        self.doc.append_comment_to(current, text);
     }
 
     /// Is an element with one of `names` on the stack, with no scope border in between?
@@ -276,10 +276,10 @@ impl Builder {
     fn initial(&mut self, token: Token) {
         match token {
             Token::Doctype(name) => {
-                self.doc.append(self.doc.root(), NodeData::Doctype(name.into_owned()));
+                self.doc.append_doctype(&name);
                 self.mode = Mode::BeforeHtml;
             }
-            Token::Comment(text) => self.doc.append_comment(text.into_owned()),
+            Token::Comment(text) => self.doc.append_comment(&text),
             Token::Text(text) if blank(&text) => {}
             // Spaces before the doctype do not count.
             token => {
@@ -293,7 +293,7 @@ impl Builder {
     fn before_html(&mut self, token: Token) {
         match token {
             Token::Doctype(_) => {}
-            Token::Comment(text) => self.doc.append_comment(text.into_owned()),
+            Token::Comment(text) => self.doc.append_comment(&text),
             Token::Text(text) if blank(&text) => {}
             Token::StartTag { name, attrs, .. } if name == "html" => {
                 self.insert_element("html", &attrs, true);
@@ -313,7 +313,7 @@ impl Builder {
     fn before_head(&mut self, token: Token) {
         match token {
             Token::Doctype(_) => {}
-            Token::Comment(text) => self.insert_comment(text.into_owned()),
+            Token::Comment(text) => self.insert_comment(&text),
             Token::Text(text) if blank(&text) => {}
             Token::StartTag { name, .. } if name == "html" => {}
             Token::StartTag { name, attrs, .. } if name == "head" => {
@@ -360,7 +360,7 @@ impl Builder {
                     self.leave_head(Token::Text(Cow::Borrowed(rest)));
                 }
             }
-            Token::Comment(text) => self.insert_comment(text.into_owned()),
+            Token::Comment(text) => self.insert_comment(&text),
             Token::Doctype(_) => {}
             Token::StartTag { name, .. } if name == "html" || name == "head" => {}
             Token::StartTag { name, attrs, self_closing } => {
@@ -395,7 +395,7 @@ impl Builder {
                     self.start_body(Token::Text(Cow::Borrowed(rest)));
                 }
             }
-            Token::Comment(text) => self.insert_comment(text.into_owned()),
+            Token::Comment(text) => self.insert_comment(&text),
             Token::Doctype(_) => {}
             Token::StartTag { name, .. } if name == "html" || name == "head" => {}
             Token::StartTag { name, attrs, .. } if name == "body" => {
@@ -491,7 +491,7 @@ impl Builder {
     fn body_rules(&mut self, token: Token) {
         match token {
             Token::Text(text) => self.insert_text(&text),
-            Token::Comment(text) => self.insert_comment(text.into_owned()),
+            Token::Comment(text) => self.insert_comment(&text),
             Token::Doctype(_) => {}
             Token::StartTag { name, attrs, .. } => self.body_start(&name, attrs),
             Token::EndTag { name } => self.body_end(&name),
@@ -767,7 +767,7 @@ impl Builder {
             }
             Token::Comment(text) => {
                 let html = self.open[0];
-                self.doc.append(html, NodeData::Comment(text.into_owned()));
+                self.doc.append_comment_to(html, &text);
                 // A comment after `</body>` goes in the `html` element, after the body.
             }
             Token::Doctype(_) => {}
@@ -792,7 +792,7 @@ impl Builder {
                     self.process(Token::Text(Cow::Borrowed(rest)));
                 }
             }
-            Token::Comment(text) => self.doc.append_comment(text.into_owned()),
+            Token::Comment(text) => self.doc.append_comment(&text),
             Token::Doctype(_) => {}
             Token::StartTag { name, .. } if name == "html" => {}
             token => {

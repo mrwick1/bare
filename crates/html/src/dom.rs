@@ -29,6 +29,15 @@
 //! - Names of elements and attributes (`div`, `class`) are stored once, in a table of the
 //!   `Document`. A node holds an `Atom`: the number of its name in the table. A page has
 //!   100,000 `div` and the word is in memory once. Comparing two names is comparing two numbers.
+//! - Texts, attribute values, comments and doctypes are not `String`s. They all live in one big
+//!   `String` of the `Document`, and a node holds a `Span`: where its text starts, and how long it is.
+//!   A `String` for each small text costs 24 bytes for the header, and a heap allocation of at least
+//!   32 bytes for a text of one letter. A `Span` is 8 bytes. All the attributes of all the elements
+//!   also live in one `Vec`, and an element holds the range of its own. So a node needs no
+//!   allocation of its own at all. The cost: a text cannot be changed in the middle. When we add
+//!   to a text node that is not the last text in the buffer, we copy it to the end, and the old
+//!   bytes are wasted. For a page that is read once, this almost never happens. JavaScript will
+//!   change the DOM later, and then we may need to clean up the buffer.
 //!
 //! Comments compare Rust with JavaScript, because you know JS.
 
@@ -61,26 +70,51 @@ impl NodeId {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Atom(u32);
 
-/// One attribute of an element: `class="a b"`.
-#[derive(Debug, Clone, PartialEq)]
+/// A piece of text in the text buffer of a `Document`: where it starts, and how long it is, in bytes.
+/// Use `Document::text` to read it. A span of one document means nothing in another document.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Span {
+    start: u32,
+    len: u32,
+    // 32 bits are enough for 4 GB of text in one page.
+}
+
+impl Span {
+    fn end(self) -> usize {
+        self.start as usize + self.len as usize
+    }
+}
+
+/// One attribute of an element: `class="a b"`. Use `Document::text` to read the value.
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Attr {
     pub name: Atom,
-    pub value: String,
+    pub value: Span,
+}
+
+/// The attributes of one element: a range in the attribute list of the `Document`.
+/// Use `Document::attrs` to read them.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct AttrList {
+    start: u32,
+    len: u32,
 }
 
 /// What a node is.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum NodeData {
+    // `Copy`: every variant is small, and holds no `String`. Copying a `NodeData` copies 16 bytes.
     /// The top of the tree. It has no parent. It holds the doctype and the `html` element.
     Document,
-    /// `<!DOCTYPE html>`. The name is in lowercase.
-    Doctype(String),
-    /// An element like `<p class="a">`. The name is in lowercase. Use `Document::atom_str` to read a name.
-    Element { name: Atom, attrs: Vec<Attr> },
-    /// A piece of text.
-    Text(String),
-    /// `<!-- text -->`.
-    Comment(String),
+    /// `<!DOCTYPE html>`. The name is in lowercase. Use `Document::text` to read it.
+    Doctype(Span),
+    /// An element like `<p class="a">`. The name is in lowercase. Use `Document::atom_str` to read the
+    /// name and `Document::attrs` to read the attributes.
+    Element { name: Atom, attrs: AttrList },
+    /// A piece of text. Use `Document::text` to read it.
+    Text(Span),
+    /// `<!-- text -->`. Use `Document::text` to read it.
+    Comment(Span),
 }
 
 struct Node {
@@ -103,6 +137,10 @@ pub struct Document {
     // The name table: the text for each atom.
     atoms: HashMap<Box<str>, Atom, BuildHasherDefault<Fnv>>,
     // The way back: from a name to its atom. A page has few different names, so the second copy is small.
+    attrs: Vec<Attr>,
+    // The attributes of all elements. Each element has a run of them, one after the other.
+    text: String,
+    // All the text of the page: texts, attribute values, comments and doctypes. See `Span`.
 }
 
 /// A fast hash for short names (FNV-1a). The standard one (SipHash) is slower, and it protects against
@@ -151,6 +189,8 @@ impl Document {
             nodes: vec![Node { parent: None, first_child: None, last_child: None, prev: None, next: None, data: NodeData::Document }],
             names: Vec::new(),
             atoms: HashMap::default(),
+            attrs: Vec::new(),
+            text: String::new(),
         }
     }
 
@@ -175,6 +215,16 @@ impl Document {
         Children { doc: self, next: self.nodes[id.index()].first_child }
     }
 
+    /// The text of a `Span`.
+    pub fn text(&self, span: Span) -> &str {
+        &self.text[span.start as usize..span.end()]
+    }
+
+    /// The attributes of an element, in the order of the page.
+    pub fn attrs(&self, list: AttrList) -> &[Attr] {
+        &self.attrs[list.start as usize..(list.start + list.len) as usize]
+    }
+
     /// The atom for a name. A name that is new goes in the table.
     pub fn intern(&mut self, name: &str) -> Atom {
         if let Some(&atom) = self.atoms.get(name) {
@@ -191,15 +241,10 @@ impl Document {
         &self.names[atom.0 as usize]
     }
 
-    /// Add a new node as the last child of `parent`. Gives the new node.
-    pub fn append(&mut self, parent: NodeId, data: NodeData) -> NodeId {
-        self.insert(parent, None, data)
-    }
-
     /// Add a new node as a child of `parent`, just before `before`. With `None`, add it at the end.
     /// `before` must be a child of `parent`. If it is not, the node goes at the end.
     /// Gives the new node. The tree builder needs this to put text before a table.
-    pub fn insert(&mut self, parent: NodeId, before: Option<NodeId>, data: NodeData) -> NodeId {
+    fn insert(&mut self, parent: NodeId, before: Option<NodeId>, data: NodeData) -> NodeId {
         let before = before.filter(|&b| self.parent(b) == Some(parent));
         let prev = self.child_before(parent, before);
         let id = NodeId::from_index(self.nodes.len());
@@ -217,11 +262,24 @@ impl Document {
         id
     }
 
-    /// Add an element, with its name and attributes as text. The names go in the name table.
+    /// Add an element, with its name and attributes as text. The names go in the name table, and
+    /// the values in the text buffer. `before` works as in `insert`; `None` adds it at the end.
     pub fn insert_element<K: AsRef<str>, V: AsRef<str>>(&mut self, parent: NodeId, before: Option<NodeId>, name: &str, attrs: &[(K, V)]) -> NodeId {
         let name = self.intern(name);
-        let attrs = attrs.iter().map(|(key, value)| Attr { name: self.intern(key.as_ref()), value: value.as_ref().to_string() }).collect();
+        let start = self.attrs.len();
+        for (key, value) in attrs {
+            let attr = Attr { name: self.intern(key.as_ref()), value: self.push_text(value.as_ref()) };
+            self.attrs.push(attr);
+        }
+        let attrs = AttrList { start: to_u32(start), len: to_u32(attrs.len()) };
         self.insert(parent, before, NodeData::Element { name, attrs })
+    }
+
+    /// Put a text at the end of the text buffer. Gives its `Span`.
+    fn push_text(&mut self, text: &str) -> Span {
+        let start = self.text.len();
+        self.text.push_str(text);
+        Span { start: to_u32(start), len: to_u32(text.len()) }
     }
 
     /// The child of `parent` in front of `before`, or the last child when `before` is `None`.
@@ -232,9 +290,21 @@ impl Document {
         }
     }
 
+    /// Add a comment as the last child of `parent`.
+    pub fn append_comment_to(&mut self, parent: NodeId, text: &str) {
+        let span = self.push_text(text);
+        self.insert(parent, None, NodeData::Comment(span));
+    }
+
     /// Add a comment at the end of the top node. Comments before and after the `html` element go there.
-    pub fn append_comment(&mut self, text: String) {
-        self.append(self.root(), NodeData::Comment(text));
+    pub fn append_comment(&mut self, text: &str) {
+        self.append_comment_to(self.root(), text);
+    }
+
+    /// Add the doctype at the end of the top node.
+    pub fn append_doctype(&mut self, name: &str) {
+        let span = self.push_text(name);
+        self.insert(self.root(), None, NodeData::Doctype(span));
     }
 
     /// Add text as the last child of `parent`. If the last child is text already, add to it.
@@ -248,12 +318,24 @@ impl Document {
     pub fn insert_text(&mut self, parent: NodeId, before: Option<NodeId>, text: &str) {
         let before = before.filter(|&b| self.parent(b) == Some(parent));
         if let Some(previous) = self.child_before(parent, before)
-            && let NodeData::Text(existing) = &mut self.nodes[previous.index()].data
+            && let NodeData::Text(old) = self.nodes[previous.index()].data
         {
-            existing.push_str(text);
+            // Join the two texts. If the old text is the last one in the buffer, the new text just follows
+            // it. If not, we copy the old text to the end first. The old bytes are wasted.
+            let start = if old.end() == self.text.len() {
+                old.start as usize
+            } else {
+                let start = self.text.len();
+                self.text.extend_from_within(old.start as usize..old.end());
+                start
+            };
+            self.text.push_str(text);
+            let joined = Span { start: to_u32(start), len: to_u32(self.text.len() - start) };
+            self.nodes[previous.index()].data = NodeData::Text(joined);
             return;
         }
-        self.insert(parent, before, NodeData::Text(text.to_string()));
+        let span = self.push_text(text);
+        self.insert(parent, before, NodeData::Text(span));
     }
 
     /// Give back the spare room of the lists. Call it when the tree is complete.
@@ -261,6 +343,8 @@ impl Document {
     pub fn shrink_to_fit(&mut self) {
         self.nodes.shrink_to_fit();
         self.names.shrink_to_fit();
+        self.attrs.shrink_to_fit();
+        self.text.shrink_to_fit();
     }
 
     /// The tree as text, one line per node, in the format of the html5lib tests.
@@ -278,12 +362,12 @@ impl Document {
         let indent = "  ".repeat(depth);
         match self.data(id) {
             NodeData::Document => {}
-            NodeData::Doctype(name) => out.push_str(&format!("| {indent}<!DOCTYPE {name}>\n")),
-            NodeData::Comment(text) => out.push_str(&format!("| {indent}<!-- {text} -->\n")),
-            NodeData::Text(text) => out.push_str(&format!("| {indent}\"{text}\"\n")),
+            NodeData::Doctype(name) => out.push_str(&format!("| {indent}<!DOCTYPE {}>\n", self.text(*name))),
+            NodeData::Comment(text) => out.push_str(&format!("| {indent}<!-- {} -->\n", self.text(*text))),
+            NodeData::Text(text) => out.push_str(&format!("| {indent}\"{}\"\n", self.text(*text))),
             NodeData::Element { name, attrs } => {
                 out.push_str(&format!("| {indent}<{}>\n", self.atom_str(*name)));
-                let mut sorted: Vec<_> = attrs.iter().map(|a| (self.atom_str(a.name), &a.value)).collect();
+                let mut sorted: Vec<_> = self.attrs(*attrs).iter().map(|a| (self.atom_str(a.name), self.text(a.value))).collect();
                 sorted.sort();
                 // Sorted, so that two trees with the same attributes in another order look the same.
                 for (key, value) in sorted {
@@ -296,6 +380,11 @@ impl Document {
             // A function that calls itself. It walks down the tree: one call for each level.
         }
     }
+}
+
+/// A position in the lists of a `Document`, as a `u32`.
+fn to_u32(n: usize) -> u32 {
+    u32::try_from(n).expect("more than 4 GB of text, or 4 billion attributes")
 }
 
 impl Default for Document {
@@ -319,12 +408,19 @@ mod tests {
         doc.children(id).collect()
     }
 
+    /// The text of a text node.
+    fn text_of(doc: &Document, id: NodeId) -> &str {
+        let NodeData::Text(span) = doc.data(id) else { panic!("not text") };
+        doc.text(*span)
+    }
+
     #[test]
     fn nodes_are_small() {
         // A big page has hundreds of thousands of nodes. Each byte here is multiplied by that.
         assert_eq!(std::mem::size_of::<NodeId>(), 4);
         assert_eq!(std::mem::size_of::<Option<NodeId>>(), 4);
-        assert!(std::mem::size_of::<Node>() <= 56, "a node is {} bytes", std::mem::size_of::<Node>());
+        assert!(std::mem::size_of::<NodeData>() <= 16, "node data is {} bytes", std::mem::size_of::<NodeData>());
+        assert!(std::mem::size_of::<Node>() <= 36, "a node is {} bytes", std::mem::size_of::<Node>());
     }
 
     #[test]
@@ -356,13 +452,15 @@ mod tests {
         let root = doc.root();
         let a = element(&mut doc, root, "div", &[("class", "x")]);
         let b = element(&mut doc, root, "div", &[("class", "y")]);
-        let (NodeData::Element { name: na, attrs: aa }, NodeData::Element { name: nb, attrs: ab }) = (doc.data(a), doc.data(b)) else {
+        let (&NodeData::Element { name: na, attrs: la }, &NodeData::Element { name: nb, attrs: lb }) = (doc.data(a), doc.data(b)) else {
             panic!("not elements");
         };
+        let (aa, ab) = (doc.attrs(la), doc.attrs(lb));
         assert_eq!(na, nb);
         assert_eq!(aa[0].name, ab[0].name);
-        assert_eq!(doc.atom_str(*na), "div");
+        assert_eq!(doc.atom_str(na), "div");
         assert_eq!(doc.atom_str(aa[0].name), "class");
+        assert_eq!((doc.text(aa[0].value), doc.text(ab[0].value)), ("x", "y"));
         assert_eq!(doc.names.len(), 2);
         // Only "div" and "class", although we made two elements.
     }
@@ -375,9 +473,8 @@ mod tests {
         doc.append_text(p, "a");
         doc.append_text(p, "b");
         assert_eq!(doc.children(p).count(), 1);
-        let first = doc.children(p).next().unwrap();
-        assert_eq!(doc.data(first), &NodeData::Text("ab".to_string()));
-        doc.append(p, NodeData::Comment("c".to_string()));
+        assert_eq!(text_of(&doc, doc.children(p).next().unwrap()), "ab");
+        doc.append_comment_to(p, "c");
         doc.append_text(p, "d");
         assert_eq!(doc.children(p).count(), 3);
         // A comment sits between "ab" and "d", so "d" is a new text node.
@@ -387,11 +484,11 @@ mod tests {
     fn dumps_a_tree() {
         let mut doc = Document::new();
         let root = doc.root();
-        doc.append(root, NodeData::Doctype("html".to_string()));
+        doc.append_doctype("html");
         let html = element(&mut doc, root, "html", &[]);
         let body = element(&mut doc, html, "body", &[("id", "x"), ("class", "a b")]);
         doc.append_text(body, "Hi");
-        doc.append(body, NodeData::Comment(" c ".to_string()));
+        doc.append_comment_to(body, " c ");
         let expected = "\
 | <!DOCTYPE html>
 | <html>
@@ -419,9 +516,39 @@ mod tests {
         doc.insert_text(body, Some(table), "b");
         let list = kids(&doc, body);
         assert_eq!(list.len(), 3);
-        assert_eq!(doc.data(list[1]), &NodeData::Text("ab".to_string()));
+        assert_eq!(text_of(&doc, list[1]), "ab");
         // The two pieces of text joined, and sit between the div and the table.
         assert_eq!((list[0], list[2]), (div, table));
+    }
+
+    #[test]
+    fn joins_text_that_is_not_the_last_in_the_buffer() {
+        // "ab" and "cd" are two texts. Joining "x" to "ab" must copy it, because "cd" comes after it in the buffer.
+        let mut doc = Document::new();
+        let root = doc.root();
+        let p = element(&mut doc, root, "p", &[]);
+        let q = element(&mut doc, root, "q", &[]);
+        doc.append_text(p, "ab");
+        doc.append_text(q, "cd");
+        doc.append_text(p, "x");
+        assert_eq!(text_of(&doc, doc.children(p).next().unwrap()), "abx");
+        assert_eq!(text_of(&doc, doc.children(q).next().unwrap()), "cd");
+        // The other text did not change.
+    }
+
+    #[test]
+    fn reads_attributes_comments_and_doctype() {
+        let mut doc = Document::new();
+        let root = doc.root();
+        doc.append_doctype("html");
+        let a = element(&mut doc, root, "a", &[("href", "/x"), ("id", ""), ("title", "é€")]);
+        doc.append_comment_to(a, "hi");
+        let NodeData::Element { attrs, .. } = *doc.data(a) else { panic!("not an element") };
+        let list: Vec<_> = doc.attrs(attrs).iter().map(|x| (doc.atom_str(x.name), doc.text(x.value))).collect();
+        assert_eq!(list, [("href", "/x"), ("id", ""), ("title", "é€")]);
+        let kinds: Vec<_> = doc.children(root).map(|c| doc.data(c)).collect();
+        assert!(matches!(kinds[0], NodeData::Doctype(span) if doc.text(*span) == "html"));
+        assert!(matches!(doc.data(doc.children(a).next().unwrap()), NodeData::Comment(span) if doc.text(*span) == "hi"));
     }
 
     #[test]
