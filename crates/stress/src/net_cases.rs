@@ -83,6 +83,42 @@ fn stream(handler: impl Fn(&mut TcpStream, usize) + Send + Sync + 'static) -> Bo
     })
 }
 
+/// A page of `n` KB of small divs. A case fetches it and builds the DOM: all in memory (`get`, `decode`, `parse`),
+/// or in pieces (`get_stream`, `Decoder`, `Parser`).
+fn page(n: usize, in_pieces: bool) -> Box<dyn FnOnce()> {
+    let port = serve(Arc::new(move |s: &mut TcpStream, _| {
+        let div = b"<div class=a>text &amp; more</div>\n";
+        let total = n * 1000 / div.len() * div.len();
+        s.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {total}\r\n\r\n").as_bytes()).ok();
+        for _ in 0..total / div.len() {
+            if s.write_all(div).is_err() {
+                return;
+            }
+        }
+    }));
+    let url = Url::parse(&format!("http://127.0.0.1:{port}/")).unwrap();
+    Box::new(move || {
+        if !in_pieces {
+            let Ok(r) = Client::new().get(&url) else { return };
+            let text = bare_html::encoding::decode(&r.body, r.header("content-type"));
+            black_box(bare_html::tree::parse(&text).len());
+            return;
+        }
+        let Ok(mut streamed) = Client::new().get_stream(&url) else { return };
+        let mut decoder = bare_html::encoding::Decoder::new(streamed.response.header("content-type"));
+        let mut parser = bare_html::tree::Parser::new();
+        let mut piece = vec![0u8; 65536];
+        while let Ok(n) = streamed.body.read(&mut piece) {
+            if n == 0 {
+                break;
+            }
+            parser.feed(&decoder.feed(&piece[..n]));
+        }
+        parser.feed(&decoder.finish());
+        black_box(parser.finish().len());
+    })
+}
+
 fn case(name: &'static str, base: usize, build: fn(usize) -> Box<dyn FnOnce()>) -> Case {
     Case { name, base, build, single: false }
 }
@@ -102,6 +138,9 @@ pub fn all() -> Vec<Case> {
                 pour(s, n * 1000, 1000, b'x');
             })
         }),
+        // `n` is in KB: 5,000 is a page of 5 MB.
+        case("net-page-whole", 5_000, |n| page(n, false)),
+        case("net-page-stream", 5_000, |n| page(n, true)),
         case("net-stream-length", 1_000, |n| {
             stream(move |s, _| {
                 s.write_all(format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n", n * 1000).as_bytes()).ok();
