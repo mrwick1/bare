@@ -41,8 +41,8 @@
 //!
 //! Comments compare Rust with JavaScript, because you know JS.
 
-use std::cell::OnceCell;
-use std::collections::HashMap;
+use std::cell::{OnceCell, RefCell};
+use std::collections::{HashMap, HashSet};
 use std::hash::{BuildHasherDefault, Hasher};
 use std::num::NonZeroU32;
 
@@ -155,6 +155,9 @@ pub struct Document {
     // The attributes of all elements. Each element has a run of them, one after the other.
     text: String,
     // All the text of the page: texts, attribute values, comments and doctypes. See `Span`.
+    class_sets: RefCell<HashMap<usize, HashSet<Box<str>, BuildHasherDefault<Fnv>>, BuildHasherDefault<Fnv>>>,
+    // The classes of the elements that have a long `class` attribute, as a set. See `has_class`.
+    // The attributes of an element never change, so this needs no clean-up.
     places: [OnceCell<Vec<(u32, u32)>>; 2],
     // The place of each element among its sibling elements, from the start and from the end. Made the
     // first time that `sibling_place` asks, and dropped when the tree changes. `[0]` counts all
@@ -210,6 +213,7 @@ impl Document {
             attrs: Vec::new(),
             text: String::new(),
             places: Default::default(),
+            class_sets: Default::default(),
         };
         // The order matters: it must match `Atom::ID` and `Atom::CLASS`.
         doc.intern("id");
@@ -236,6 +240,18 @@ impl Document {
     /// The children of this node, in order.
     pub fn children(&self, id: NodeId) -> Children<'_> {
         Children { doc: self, next: self.nodes[id.index()].first_child }
+    }
+
+    /// Does the element `el` have `class` in its `class` attribute? A short attribute is read word by word.
+    /// A long one (128 bytes or more) becomes a set the first time,
+    /// so that 5,000 rules on one element do not read the 5,000 words 5,000 times.
+    #[inline]
+    pub fn has_class(&self, el: NodeId, class: &str) -> bool {
+        let Some(value) = self.attr(el, Atom::CLASS) else { return false };
+        if value.len() < 128 {
+            return value.split_ascii_whitespace().any(|c| c == class);
+        }
+        self.class_sets.borrow_mut().entry(el.index()).or_insert_with(|| value.split_ascii_whitespace().map(Box::from).collect()).contains(class)
     }
 
     /// The place of the element `el` among its sibling elements: 1 for the first. It counts from the end with
@@ -837,5 +853,24 @@ mod tests {
         doc.detach(kids[1]);
         assert_eq!(places(&doc, false, false), [1, 2, 3]);
         assert_eq!(places(&doc, true, true), [2, 1, 1]);
+    }
+
+    #[test]
+    fn has_class_reads_short_and_long_lists() {
+        let long: String = (0..100).map(|i| format!("c{i}")).collect::<Vec<_>>().join("  ");
+        let doc = crate::tree::parse(&format!("<i class='a  b\tc'></i><i class='{long}'></i><i></i>"));
+        let html = doc.children(doc.root()).last().unwrap();
+        let body = doc.children(html).last().unwrap();
+        let (short, big, none): (Vec<NodeId>, Vec<NodeId>, Vec<NodeId>) = {
+            let kids: Vec<NodeId> = doc.children(body).collect();
+            (vec![kids[0]], vec![kids[1]], vec![kids[2]])
+        };
+        assert!(doc.has_class(short[0], "b") && doc.has_class(short[0], "c") && !doc.has_class(short[0], "d"));
+        // The long list is a set. Ask twice: the second time it comes from the set.
+        for _ in 0..2 {
+            assert!(doc.has_class(big[0], "c0") && doc.has_class(big[0], "c99"));
+            assert!(!doc.has_class(big[0], "c100") && !doc.has_class(big[0], "c"));
+        }
+        assert!(!doc.has_class(none[0], "a"));
     }
 }
