@@ -237,6 +237,7 @@ fn supports(doc: &mut Document, text: &str, depth: usize) -> bool {
                 value,
                 important,
                 &mut Vec::new(),
+                &mut Vec::new(),
             )
     })
 }

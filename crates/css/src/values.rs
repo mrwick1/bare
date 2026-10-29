@@ -25,7 +25,7 @@
 //! - Names and keywords are not case sensitive.
 //!
 //! Left out:
-//! - `calc()`, `var()`, `env()`, `min()`, `max()`, `clamp()`. A declaration with one is dropped.
+//! - `var()`, `env()`, `min()`, `max()`, `clamp()`. A declaration with one is dropped. (`calc()` is in `calc.rs`.)
 //! - `!important` is kept as a flag. The cascade uses it.
 //! - Properties that we do not know. They are dropped. The list is what layout and paint will need in module 4 and 5.
 //!   To add one, add a line in `properties!` and a case in `longhand`.
@@ -37,6 +37,7 @@
 //!
 //! Comments compare Rust with JavaScript, because you know JS.
 
+use crate::calc::{self, Calc, Linear};
 use crate::color::{self, Color};
 use crate::tokenizer::{Token, Tokens, tokenize};
 
@@ -137,6 +138,9 @@ pub enum Length {
     /// 1% of the smaller side of the window, and of the larger side.
     Vmin(f32),
     Vmax(f32),
+    /// A `calc()` that mixes units, like `100% - 20px`. The number is the place of its `Linear` in a list. In a declared value
+    /// that is the list that `parse_declaration` fills. In a computed value it is the list of the `Styles`: a pair of pixels and percent.
+    Calc(u32),
 }
 
 /// Every word that a value can be, for all the properties. One list makes the enum, the name of each word, and the way back.
@@ -214,9 +218,10 @@ pub struct Declared {
 
 /// Read one declaration, and add what it means to `out`: one item for a longhand, more for a shorthand.
 /// Gives `false`, and adds nothing, when the name is not known or the value is not good.
+/// A `calc()` that mixes units goes in `calcs`, and the value points to it.
 /// `name` must be in lowercase (the parser does it).
-pub fn parse_declaration(name: &str, value: &str, important: bool, out: &mut Vec<Declared>) -> bool {
-    let Some(parts) = Parts::read(value) else { return false };
+pub fn parse_declaration(name: &str, value: &str, important: bool, calcs: &mut Vec<Linear>, out: &mut Vec<Declared>) -> bool {
+    let Some(parts) = Parts::read(value, calcs) else { return false };
     let start = out.len();
     let ok = expand(name, &parts, &mut |property, value| out.push(Declared { property, value, important }));
     if !ok {
@@ -253,7 +258,7 @@ struct Parts {
 
 impl Parts {
     /// `None` when the value has no part, or a part that is a mistake in every property (a `{` block, for example).
-    fn read(value: &str) -> Option<Parts> {
+    fn read(value: &str, calcs: &mut Vec<Linear>) -> Option<Parts> {
         let mut parts = Parts { items: [Part::Other; 8], len: 0, more: false };
         let mut tokens = tokenize(value);
         while let Some(token) = tokens.next() {
@@ -266,6 +271,7 @@ impl Parts {
                 Token::Dimension { value, unit, .. } => length(value, &unit).map_or(Part::Bad, Part::Length),
                 Token::Delim('/') => Part::Slash,
                 Token::Function(name) if color::is_function(&name) => color::parse_function(&name, &mut tokens).map_or(Part::Bad, Part::Color),
+                Token::Function(name) if calc::is_calc(&name) => read_calc(&mut tokens, calcs),
                 Token::Function(_) | Token::OpenParen | Token::OpenSquare | Token::OpenCurly => {
                     skip_block(&mut tokens);
                     Part::Other
@@ -286,6 +292,38 @@ impl Parts {
 
     fn as_slice(&self) -> &[Part] {
         &self.items[..self.len]
+    }
+}
+
+/// After `calc(`: read to the matching `)` and compute. A number is a number. One unit is a plain length. A mix goes in `calcs`.
+fn read_calc(tokens: &mut Tokens<'_>, calcs: &mut Vec<Linear>) -> Part {
+    let mut inner = Vec::new();
+    let mut depth = 1u32;
+    while let Some(token) = tokens.next() {
+        match token {
+            Token::Function(_) | Token::OpenParen | Token::OpenSquare | Token::OpenCurly => depth += 1,
+            Token::CloseParen | Token::CloseSquare | Token::CloseCurly => {
+                depth -= 1;
+                if depth == 0 {
+                    break;
+                }
+            }
+            _ => {}
+        }
+        inner.push(token);
+    }
+    // A `calc(` that is not closed ends with the value: the standard closes it there.
+    match calc::parse(&inner, length) {
+        Some(Calc::Number(value)) => Part::Number { value, int: value.fract() == 0.0 },
+        Some(Calc::Length(lin)) => match lin.single() {
+            Some(Length::Percent(p)) => Part::Percent(p),
+            Some(l) => Part::Length(l),
+            None => {
+                calcs.push(lin);
+                Part::Length(Length::Calc(calcs.len() as u32 - 1))
+            }
+        },
+        None => Part::Bad,
     }
 }
 
@@ -599,6 +637,7 @@ fn longhand(property: Property, part: Part) -> Option<Value> {
     let positive = |part: Part| {
         length(part).filter(|l| match *l {
             Length::Px(v) | Length::Em(v) | Length::Rem(v) | Length::Percent(v) | Length::Vw(v) | Length::Vh(v) | Length::Vmin(v) | Length::Vmax(v) => v >= 0.0,
+            Length::Calc(_) => true,
         })
     };
     let px = |v: f32| Some(Value::Length(Length::Px(v)));
@@ -690,7 +729,7 @@ mod tests {
 
     fn parse(name: &str, value: &str) -> Vec<(Property, Value)> {
         let mut out = Vec::new();
-        if parse_declaration(name, value, false, &mut out) {
+        if parse_declaration(name, value, false, &mut Vec::new(), &mut out) {
             out.into_iter().map(|d| (d.property, d.value)).collect()
         } else {
             assert!(out.is_empty(), "{name}: {value} added items and still failed");
@@ -760,7 +799,7 @@ mod tests {
 
     #[test]
     fn bad_lengths() {
-        for bad in ["10", "10 px", "px", "10xx", "1.5", "-5px", "-1%", "calc(1px + 2px)", "var(--x)", "auto auto", "#fff", "red", "10px 20px", "\"10px\"", "url(a)", "10px;", "10px)", "{10px}"] {
+        for bad in ["10", "10 px", "px", "10xx", "1.5", "-5px", "-1%", "var(--x)", "auto auto", "#fff", "red", "10px 20px", "\"10px\"", "url(a)", "10px;", "10px)", "{10px}"] {
             assert_eq!(parse("width", bad), vec![], "{bad}");
         }
     }
@@ -994,21 +1033,21 @@ mod tests {
     #[test]
     fn important_is_kept() {
         let mut out = Vec::new();
-        assert!(parse_declaration("margin", "0", true, &mut out));
+        assert!(parse_declaration("margin", "0", true, &mut Vec::new(), &mut out));
         assert_eq!(out.len(), 4);
         assert!(out.iter().all(|d| d.important));
         let mut out = Vec::new();
-        assert!(parse_declaration("margin", "0", false, &mut out));
+        assert!(parse_declaration("margin", "0", false, &mut Vec::new(), &mut out));
         assert!(out.iter().all(|d| !d.important));
     }
 
     #[test]
     fn a_wrong_value_leaves_the_list_as_it_was() {
         let mut out = Vec::new();
-        parse_declaration("width", "1px", false, &mut out);
-        assert!(!parse_declaration("border", "1px solid red red", false, &mut out));
-        assert!(!parse_declaration("margin", "1px 2px 3px 4px 5px", false, &mut out));
-        assert!(!parse_declaration("padding", "1px -1px", false, &mut out));
+        parse_declaration("width", "1px", false, &mut Vec::new(), &mut out);
+        assert!(!parse_declaration("border", "1px solid red red", false, &mut Vec::new(), &mut out));
+        assert!(!parse_declaration("margin", "1px 2px 3px 4px 5px", false, &mut Vec::new(), &mut out));
+        assert!(!parse_declaration("padding", "1px -1px", false, &mut Vec::new(), &mut out));
         assert_eq!(out.len(), 1);
     }
 
@@ -1041,7 +1080,40 @@ mod tests {
             let len = next() % 20;
             let text: String = (0..len).map(|_| alphabet[(next() % alphabet.len() as u64) as usize]).collect();
             let mut out = Vec::new();
-            let _ = parse_declaration(names[(next() % names.len() as u64) as usize], &text, false, &mut out);
+            let _ = parse_declaration(names[(next() % names.len() as u64) as usize], &text, false, &mut Vec::new(), &mut out);
         }
+    }
+
+    #[test]
+    fn calc_values() {
+        let w = |v: &str| one("width", v);
+        assert_eq!(w("calc(10px + 5px)"), Some(Value::Length(Length::Px(15.0))));
+        assert_eq!(w("calc(2 * 1em)"), Some(Value::Length(Length::Em(2.0))));
+        assert_eq!(w("calc(50% / 2)"), Some(Value::Length(Length::Percent(25.0))));
+        assert_eq!(w("CALC( 1in - 4px )"), Some(Value::Length(Length::Px(92.0))));
+        assert_eq!(w("-webkit-calc(1px + 1px)"), Some(Value::Length(Length::Px(2.0))));
+        assert_eq!(w("calc(1px + calc(1px + 1px))"), Some(Value::Length(Length::Px(3.0))));
+        assert_eq!(w("calc(100% - 20px)"), Some(Value::Length(Length::Calc(0))));
+        assert_eq!(one("line-height", "calc(1 + 0.5)"), Some(Value::Number(1.5)));
+        assert_eq!(one("font-weight", "calc(300 + 400)"), Some(Value::Number(700.0)));
+        // Not good: the whole declaration goes.
+        for bad in ["calc(1 + 2px)", "calc(1px + )", "calc(1px*2px)", "calc(1px/0)", "calc()", "calc(1px 2px)", "calc(1px+2px)"] {
+            assert_eq!(parse("width", bad), vec![], "{bad}");
+        }
+        // A `calc()` that is not closed ends with the value.
+        assert_eq!(w("calc(1px + 1px"), Some(Value::Length(Length::Px(2.0))));
+    }
+
+    #[test]
+    fn mixed_calc_goes_to_the_list() {
+        let mut calcs = Vec::new();
+        let mut out = Vec::new();
+        assert!(parse_declaration("margin", "calc(100% - 1px) calc(50% + 2em)", false, &mut calcs, &mut out));
+        assert_eq!(calcs.len(), 2);
+        assert_eq!(out[0].value, Value::Length(Length::Calc(0)));
+        assert_eq!(out[1].value, Value::Length(Length::Calc(1)));
+        assert_eq!(out[2].value, Value::Length(Length::Calc(0)));
+        assert!(!parse_declaration("width", "calc(1px +)", false, &mut calcs, &mut out));
+        assert_eq!(calcs.len(), 2);
     }
 }
