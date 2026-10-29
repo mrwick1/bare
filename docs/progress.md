@@ -8,8 +8,8 @@ The reasons for the design are in [decisions.md](decisions.md).
 
 | #   | Module                                                 | State       |
 | --- | ------------------------------------------------------ | ----------- |
-| 1   | URL, DNS, TCP and HTTP                                 | in progress |
-| 2   | HTML tokenizer and DOM tree                            | planned     |
+| 1   | URL, DNS, TCP and HTTP                                 | done        |
+| 2   | HTML tokenizer and DOM tree                            | next        |
 | 3   | CSS parser and style cascade                           | planned     |
 | 4   | Layout (box model, text flow)                          | planned     |
 | 5   | Window (Wayland) and paint, bitmap font                | planned     |
@@ -29,7 +29,7 @@ The reasons for the design are in [decisions.md](decisions.md).
 | 3   | TCP: time limits, Happy Eyeballs                          | done    | `crates/net/src/tcp.rs`  |
 | 4   | HTTP/1.1 messages: requests, responses, where a body ends | done    | `crates/net/src/http.rs` |
 | 5   | Connections: keep-alive                                   | done    | `crates/net/src/http.rs` |
-| 6   | Redirects, status codes, caching                          | next    |                          |
+| 6   | Redirects, status codes, caching                          | done    | `crates/net/src/http.rs` |
 
 What each done topic covers:
 
@@ -38,13 +38,16 @@ What each done topic covers:
 - TCP: Happy Eyeballs (IPv6 first, a new try every 250 ms, the first connection wins). Time limits: 10 seconds for one connection try, 30 seconds for a read or write.
 - HTTP/1.1 messages: a status line and headers parser. Three rules for where a body ends: chunked, `Content-Length`, or connection close. Chunked wins over `Content-Length`. A short body is an error. 1xx, 204 and 304 have no body.
 - Connections: keep-alive. The `Client` keeps one idle connection for each server and reuses it. It drops a connection that is idle for more than 15 seconds, that the server closed, or that has extra bytes after a reply. A reused connection that fails is retried once on a new one (safe for GET only).
+- Redirects, status codes, caching: `Client::get` follows 301, 302, 303, 307 and 308 (at most 20) and returns any status, so a 404 page is shown. A redirect to `https://` gives an error. The in-memory cache uses `max-age` and `Age`, honours `no-store` and `no-cache`, and revalidates a stale copy with `If-None-Match` and `If-Modified-Since` (a 304 reuses the copy).
 
 ## Known gaps
 
 - HTTP: `Transfer-Encoding` codes other than `chunked` (for example `gzip`) are not supported. No `Accept-Encoding`, so no compression.
 - HTTP: HTTP/2 and HTTP/3 are not built. They move to after module 7, because browsers use them only over TLS. HTTP/3 also needs QUIC.
 - HTTP: one idle connection for each server. No pool of several at once, no parallel requests.
-- HTTP: only status 200 is accepted. A redirect (301, 302) gives an error. Topic 6.
+- HTTP cache: no `Expires`, no heuristic freshness (both need HTTP date parsing), and no 301 caching.
+- HTTP cache: a reply with a `Vary` header is not stored. No disk cache. No size limit. Module 10 needs a limit for memory accounting.
+- HTTP: redirects only for GET. The cache is not split by top-level site, as Chrome does.
 - URL: only `http://`. `https://` needs module 7.
 - DNS: no short names from the `search` line of `/etc/resolv.conf`.
 - DNS: no DNS-over-HTTPS. It needs module 7.
