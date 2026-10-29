@@ -1,6 +1,7 @@
 //! CSS: turn style sheets into rules, and rules into the style of each element.
 
 pub mod at_rules;
+pub mod calc;
 pub mod cascade;
 pub mod color;
 mod colors;

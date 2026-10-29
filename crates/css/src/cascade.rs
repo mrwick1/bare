@@ -51,12 +51,14 @@
 //!
 //! Comments compare Rust with JavaScript, because you know JS.
 
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::hash::BuildHasherDefault;
 
 use bare_html::dom::{Atom, Document, Fnv, NodeData, NodeId};
 
 use crate::at_rules;
+use crate::calc::Linear;
 use crate::color::Color;
 use crate::matching::matches;
 use crate::parser::{AtBody, Rule, parse_declarations, parse_stylesheet};
@@ -95,6 +97,8 @@ pub struct RuleSet {
     entries: Vec<Entry>,
     /// The declarations of all rules, one after the other.
     decls: Vec<Declared>,
+    /// The `calc()` values that mix units. A `Length::Calc` in `decls` points here.
+    calcs: Vec<Linear>,
     by_id: Buckets<Box<str>>,
     by_class: Buckets<Box<str>>,
     by_tag: Buckets<Atom>,
@@ -104,7 +108,7 @@ pub struct RuleSet {
 
 impl RuleSet {
     pub fn new(viewport: (f32, f32)) -> RuleSet {
-        RuleSet { viewport, entries: Vec::new(), decls: Vec::new(), by_id: Buckets::default(), by_class: Buckets::default(), by_tag: Buckets::default(), other: Vec::new() }
+        RuleSet { viewport, entries: Vec::new(), decls: Vec::new(), calcs: Vec::new(), by_id: Buckets::default(), by_class: Buckets::default(), by_tag: Buckets::default(), other: Vec::new() }
     }
 
     /// The number of selectors in the set.
@@ -147,7 +151,7 @@ impl RuleSet {
             let Some(selectors) = parse_selector_list(rule.prelude, doc) else { continue };
             let start = self.decls.len();
             for d in &rule.declarations {
-                parse_declaration(&d.name, d.value, d.important, &mut self.decls);
+                parse_declaration(&d.name, d.value, d.important, &mut self.calcs, &mut self.decls);
             }
             if self.decls.len() == start {
                 continue;
@@ -182,9 +186,9 @@ impl RuleSet {
 
     /// Find the style of every element that is shown. The selectors must come from `add` with this same `doc`.
     pub fn compute(&self, doc: &Document) -> Styles {
-        let mut styles = Styles { styles: vec![ComputedStyle::initial()], of_node: vec![NONE; doc.len()] };
+        let mut styles = Styles { styles: vec![ComputedStyle::initial()], of_node: vec![NONE; doc.len()], calcs: Vec::new() };
         // Style 0 is the starting style. It is the parent style of the `html` element.
-        let mut cx = Cx { viewport: self.viewport, root_font_size: 16.0 };
+        let mut cx = Cx { viewport: self.viewport, root_font_size: 16.0, declared: &self.calcs, inline: RefCell::default(), computed: RefCell::default() };
         let style_atom = doc.find_atom("style");
         let mut filter = AncestorFilter::new();
         let mut memo = Memo::default();
@@ -236,6 +240,7 @@ impl RuleSet {
                 child = doc.prev_sibling(c);
             }
         }
+        styles.calcs = cx.computed.take().list;
         styles
     }
 
@@ -263,7 +268,7 @@ impl RuleSet {
     }
 
     /// The number of the style of an element. It is found in the cache, or it is made.
-    fn style_of(&self, styles: &mut Styles, memo: &mut Memo, parent: u32, matched: &[u32], inline: Option<&str>, cx: &Cx) -> u32 {
+    fn style_of(&self, styles: &mut Styles, memo: &mut Memo, parent: u32, matched: &[u32], inline: Option<&str>, cx: &Cx<'_>) -> u32 {
         let key = matched.iter().fold(u64::from(parent), |h, &i| (h ^ u64::from(i)).wrapping_mul(0x0100_0000_01b3));
         if inline.is_none() {
             let found = memo.cache.get(&key).and_then(|list| list.iter().find(|c| c.parent == parent && *c.rules == *matched));
@@ -289,7 +294,7 @@ impl RuleSet {
     }
 
     /// Pick the winning declaration for each property, then compute the values.
-    fn cascade(&self, matched: &[u32], inline: Option<&str>, parent: &ComputedStyle, cx: &Cx) -> ComputedStyle {
+    fn cascade(&self, matched: &[u32], inline: Option<&str>, parent: &ComputedStyle, cx: &Cx<'_>) -> ComputedStyle {
         let mut winners = [None::<Value>; Property::COUNT];
         let mut keys = [0u64; Property::COUNT];
         let mut apply = |d: &Declared, origin: Origin, specificity: u32, order: u32| {
@@ -313,10 +318,18 @@ impl RuleSet {
             }
         }
         if let Some(text) = inline {
-            let mut decls = Vec::new();
+            let (mut decls, mut calcs) = (Vec::new(), Vec::new());
             for d in parse_declarations(text) {
-                parse_declaration(&d.name, d.value, d.important, &mut decls);
+                parse_declaration(&d.name, d.value, d.important, &mut calcs, &mut decls);
             }
+            // The `calc()` of this element come after the ones of the style sheets in `Cx::linear`.
+            let base = cx.declared.len() as u32;
+            for d in &mut decls {
+                if let Value::Length(Length::Calc(i)) = &mut d.value {
+                    *i += base;
+                }
+            }
+            *cx.inline.borrow_mut() = calcs;
             // The specificity of a `style=""` attribute is more than the most that a selector can have (1 << 30, and the most is one less).
             for d in &decls {
                 apply(d, Origin::Author, 1 << 30, u32::MAX >> 1);
@@ -354,6 +367,7 @@ fn style_hash(style: &ComputedStyle) -> u64 {
             Value::Color(c) => 1 << 40 | u64::from(u32::from_be_bytes([c.r, c.g, c.b, c.a])),
             Value::Length(Length::Px(x)) => 2 << 40 | u64::from(x.to_bits()),
             Value::Length(Length::Percent(x)) => 3 << 40 | u64::from(x.to_bits()),
+            Value::Length(Length::Calc(i)) => 7 << 40 | u64::from(i),
             Value::Number(x) => 4 << 40 | u64::from(x.to_bits()),
             Value::Keyword(k) => 5 << 40 | k as u64,
             _ => 6 << 40,
@@ -365,10 +379,42 @@ fn style_hash(style: &ComputedStyle) -> u64 {
 }
 
 /// What the computation of the values needs to know about the page.
-struct Cx {
+struct Cx<'a> {
     viewport: (f32, f32),
     /// The font size of the `html` element, for `rem`. 16 until we know it.
     root_font_size: f32,
+    /// The `calc()` of the style sheets (`RuleSet::calcs`).
+    declared: &'a [Linear],
+    /// The `calc()` of the `style=""` of the element that we compute now. Their numbers start after `declared`.
+    inline: RefCell<Vec<Linear>>,
+    /// The `calc()` values that are done, and are kept in `Styles::calcs`.
+    computed: RefCell<Computed>,
+}
+
+/// The computed `calc()` values, each one once. Two elements with the same value get the same number, so that their styles can be shared.
+#[derive(Default)]
+struct Computed {
+    list: Vec<[f32; 2]>,
+    index: HashMap<[u32; 2], u32, BuildHasherDefault<Fnv>>,
+}
+
+impl Cx<'_> {
+    fn linear(&self, i: u32) -> Linear {
+        match self.declared.get(i as usize) {
+            Some(&l) => l,
+            None => self.inline.borrow()[i as usize - self.declared.len()],
+        }
+    }
+
+    /// Keep the value `calc(px + pct%)` and give its number.
+    fn keep(&self, px: f32, pct: f32) -> u32 {
+        let mut c = self.computed.borrow_mut();
+        let c = &mut *c;
+        *c.index.entry([px.to_bits(), pct.to_bits()]).or_insert_with(|| {
+            c.list.push([px, pct]);
+            c.list.len() as u32 - 1
+        })
+    }
 }
 
 const NONE: u32 = u32::MAX;
@@ -379,9 +425,17 @@ pub struct Styles {
     styles: Vec<ComputedStyle>,
     /// For each node (by `NodeId::index`): the number of its style in `styles`, or `NONE`.
     of_node: Vec<u32>,
+    /// The `calc()` values that mix units, after the cascade: pixels and percent. A `Length::Calc` in a style points here.
+    calcs: Vec<[f32; 2]>,
 }
 
 impl Styles {
+    /// The pixels and the percent of a `Length::Calc` of a computed style: `calc(px + percent of something)`.
+    pub fn calc(&self, i: u32) -> (f32, f32) {
+        let [px, pct] = self.calcs[i as usize];
+        (px, pct)
+    }
+
     /// The style of an element. `None` for a node that is not an element, and for an element that is not shown
     /// (`display: none`, or inside one).
     pub fn style(&self, node: NodeId) -> Option<&ComputedStyle> {
@@ -417,7 +471,7 @@ impl Styles {
                             let border_color = (p as usize).checked_sub(Property::BorderTopColor as usize).filter(|&side| side < 4);
                             let hidden = border_color.is_some_and(|side| matches!(style.0[Property::BorderTopStyle as usize + side], Value::Keyword(Keyword::None | Keyword::Hidden)));
                             if !hidden && style.get(p) != initial.get(p) {
-                                out.push_str(&format!("{sep}{}: {}", p.name(), show(style.get(p))));
+                                out.push_str(&format!("{sep}{}: {}", p.name(), show(style.get(p), &self.calcs)));
                                 sep = "; ";
                             }
                         }
@@ -437,12 +491,13 @@ impl Styles {
 }
 
 /// A computed value as text.
-fn show(v: Value) -> String {
+fn show(v: Value, calcs: &[[f32; 2]]) -> String {
     match v {
         Value::Color(c) if c.a == 255 => format!("#{:02x}{:02x}{:02x}", c.r, c.g, c.b),
         Value::Color(c) => format!("#{:02x}{:02x}{:02x}{:02x}", c.r, c.g, c.b, c.a),
         Value::Length(Length::Px(x)) => format!("{x}px"),
         Value::Length(Length::Percent(x)) => format!("{x}%"),
+        Value::Length(Length::Calc(i)) => format!("calc({}px + {}%)", calcs[i as usize][0], calcs[i as usize][1]),
         Value::Number(x) => format!("{x}"),
         Value::Keyword(k) => k.name().to_string(),
         other => format!("{other:?}"),
@@ -532,7 +587,7 @@ fn inherited(p: Property) -> bool {
 }
 
 /// The font size of the element, in pixels. It is first, because `em` in the other properties needs it.
-fn font_size(winner: Option<Value>, parent_size: f32, cx: &Cx) -> f32 {
+fn font_size(winner: Option<Value>, parent_size: f32, cx: &Cx<'_>) -> f32 {
     match winner {
         None | Some(Value::Inherit | Value::Unset) => parent_size,
         Some(Value::Initial) => 16.0,
@@ -541,13 +596,17 @@ fn font_size(winner: Option<Value>, parent_size: f32, cx: &Cx) -> f32 {
         // `em` and `%` in `font-size` mean the font size of the parent. Not of this element: it would go in a circle.
         Some(Value::Length(Length::Em(x))) => x * parent_size,
         Some(Value::Length(Length::Percent(x))) => x * parent_size / 100.0,
+        Some(Value::Length(Length::Calc(i))) => {
+            let lin = cx.linear(i);
+            lin.to_px(parent_size, cx.root_font_size, cx.viewport) + lin.pct() * parent_size / 100.0
+        }
         Some(Value::Length(l)) => length_to_px(l, parent_size, cx),
         _ => parent_size,
     }
 }
 
 /// A length in pixels, for a length that is not a percent. `em` is a multiple of `font_size`.
-fn length_to_px(l: Length, font_size: f32, cx: &Cx) -> f32 {
+fn length_to_px(l: Length, font_size: f32, cx: &Cx<'_>) -> f32 {
     let (w, h) = cx.viewport;
     match l {
         Length::Px(x) => x,
@@ -558,12 +617,13 @@ fn length_to_px(l: Length, font_size: f32, cx: &Cx) -> f32 {
         Length::Vmin(x) => x * w.min(h) / 100.0,
         Length::Vmax(x) => x * w.max(h) / 100.0,
         Length::Percent(x) => x,
-        // Callers keep a percent as a percent. This is not reached for them.
+        // Callers keep a percent as a percent, and they do the `calc()` themselves. This is not reached for them.
+        Length::Calc(_) => 0.0,
     }
 }
 
 /// Make the computed style from the winning declarations and the style of the parent.
-fn compute(winners: &[Option<Value>; Property::COUNT], parent: &ComputedStyle, cx: &Cx) -> ComputedStyle {
+fn compute(winners: &[Option<Value>; Property::COUNT], parent: &ComputedStyle, cx: &Cx<'_>) -> ComputedStyle {
     use Property::*;
     let fs = font_size(winners[FontSize as usize], parent.px(FontSize), cx);
     let mut out = [Value::Initial; Property::COUNT];
@@ -592,13 +652,26 @@ fn compute(winners: &[Option<Value>; Property::COUNT], parent: &ComputedStyle, c
 }
 
 /// Turn a value into its computed form. It does nothing to a value that is computed already (one from the parent).
-fn resolve(p: Property, v: Value, out: &[Value; Property::COUNT], parent: &ComputedStyle, fs: f32, cx: &Cx) -> Value {
+fn resolve(p: Property, v: Value, out: &[Value; Property::COUNT], parent: &ComputedStyle, fs: f32, cx: &Cx<'_>) -> Value {
     let px = |x| Value::Length(Length::Px(x));
     match v {
         // The color of the element. `color: currentcolor` means the color of the parent (the element has no color yet).
         Value::Keyword(Keyword::CurrentColor) if p == Property::TextColor => Value::Color(parent.color(p)),
         Value::Keyword(Keyword::CurrentColor) => Value::Color(as_color(out[Property::TextColor as usize])),
         Value::Length(Length::Percent(x)) if p == Property::LineHeight => px(x * fs / 100.0),
+        Value::Length(Length::Calc(i)) => {
+            let lin = cx.linear(i);
+            let (x, pct) = (lin.to_px(fs, cx.root_font_size, cx.viewport), lin.pct());
+            if p == Property::LineHeight {
+                px(x + pct * fs / 100.0)
+            } else if pct == 0.0 {
+                px(x)
+            } else if x == 0.0 {
+                Value::Length(Length::Percent(pct))
+            } else {
+                Value::Length(Length::Calc(cx.keep(x, pct)))
+            }
+        }
         Value::Length(l @ Length::Percent(_)) => Value::Length(l),
         Value::Length(l) => px(length_to_px(l, fs, cx)),
         Value::Keyword(Keyword::Bolder) => Value::Number(match parent.number_or_400(p) {
@@ -1195,5 +1268,38 @@ mod tests {
                 a: 255
             })
         );
+    }
+
+    #[test]
+    fn calc_in_the_cascade() {
+        let page = "<div id=a><p id=b>x</p></div>";
+        let sheet = "html { font-size: 20px } div { font-size: calc(1em + 2px); width: calc(100% - 10px); height: calc(2em + 10vw); margin-left: calc(1rem * 2) }\
+            p { font-size: calc(50% + 1px); line-height: calc(100% + 2px); padding-left: calc(1em + 1em); width: calc(100% - 10px) }";
+        let (doc, styles) = styles(page, &[sheet]);
+        let get = |id: &str, p: Property| styles.style(by_id(&doc, id)).unwrap().get(p);
+        let px = |x| Value::Length(Length::Px(x));
+        // font-size: `em` and `%` are about the parent.
+        assert_eq!(get("a", Property::FontSize), px(22.0));
+        assert_eq!(get("b", Property::FontSize), px(12.0));
+        // A mix of percent and pixels waits for layout. Everything else is pixels.
+        let Value::Length(Length::Calc(i)) = get("a", Property::Width) else { panic!("{:?}", get("a", Property::Width)) };
+        assert_eq!(styles.calc(i), (-10.0, 100.0));
+        assert_eq!(get("a", Property::Height), px(44.0 + 100.0));
+        assert_eq!(get("a", Property::MarginLeft), px(40.0));
+        assert_eq!(get("b", Property::LineHeight), px(14.0));
+        assert_eq!(get("b", Property::PaddingLeft), px(24.0));
+        // Two elements with the same value share the same number.
+        assert_eq!(get("a", Property::Width), get("b", Property::Width));
+    }
+
+    #[test]
+    fn calc_in_the_style_attribute() {
+        let (doc, styles) = styles("<p id=a style='width: calc(100% - 1px)'>x</p><p id=b style='width: calc(10% - 2px)'>y</p>", &["p { width: calc(1% + 1px) }"]);
+        let width = |id: &str| match styles.style(by_id(&doc, id)).unwrap().get(Property::Width) {
+            Value::Length(Length::Calc(i)) => styles.calc(i),
+            v => panic!("{v:?}"),
+        };
+        assert_eq!(width("a"), (-1.0, 100.0));
+        assert_eq!(width("b"), (-2.0, 10.0));
     }
 }
