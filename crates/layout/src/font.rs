@@ -25,6 +25,9 @@ pub const LETTER: Units = 6;
 /// The width of a wide letter. Noto Sans Mono has none: the browser takes it from another font, and those are 1 em wide.
 pub const WIDE: Units = 10;
 
+/// The biggest font size, in pixels. Chrome has the same limit (`kMaximumAllowedFontSize`).
+pub const MAX_SIZE: f32 = 10_000.0;
+
 /// The font numbers for one font size, in pixels.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Metrics {
@@ -39,6 +42,7 @@ impl Metrics {
     /// The metrics for a font size in pixels. Noto Sans Mono: ascent 1069 and descent 293 for 1000 units.
     /// Chrome rounds the ascent and the descent to whole pixels (`SimpleFontData`), so we do too.
     pub fn new(size: f32) -> Metrics {
+        let size = size.clamp(0.0, MAX_SIZE);
         Metrics { size, ascent: (size * 1.069).round(), descent: (size * 0.293).round() }
     }
 
@@ -58,12 +62,13 @@ impl Metrics {
 
     /// The computed `line-height` in pixels: `normal`, a number (times the font size), or a length.
     pub fn line_height(&self, style: &ComputedStyle) -> f32 {
-        match style.get(Property::LineHeight) {
+        let px = match style.get(Property::LineHeight) {
             Value::Number(n) => n * self.size,
             Value::Keyword(Keyword::Normal) => self.normal_line_height(),
             _ => style.px(Property::LineHeight),
             // The cascade turns `em` and `%` into pixels.
-        }
+        };
+        px.clamp(0.0, crate::block::MAX_PX)
     }
 }
 

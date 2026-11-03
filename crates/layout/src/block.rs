@@ -45,6 +45,11 @@ use bare_html::dom::NodeId;
 /// How deep layout goes. Each level uses some call stack (about 1 KB in a debug build), and the main thread has 8 MB.
 pub const MAX_DEPTH: usize = 400;
 
+/// The biggest length that layout uses, in pixels: a bigger one is cut down to it. `f32` turns a length like
+/// `2e45px` into infinity, and infinity minus infinity is NaN, which breaks every place after it. Chrome keeps lengths
+/// in a `LayoutUnit` (a whole number of 1/64 pixels in 32 bits), so its biggest length is this same number.
+pub const MAX_PX: f32 = 33_554_431.0;
+
 /// Margins that touch and collapse into one: the biggest positive one and the most negative one.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct Strut {
@@ -80,7 +85,7 @@ pub struct Space {
 
 /// A length in pixels. A percent is of `base`. `None` for `auto` and `none`, and for a percent of an unknown base.
 pub fn resolve(cx: &Cx, v: Value, base: Option<f32>) -> Option<f32> {
-    match v {
+    let px = match v {
         Value::Length(Length::Px(x)) => Some(x),
         Value::Length(Length::Percent(p)) => base.map(|b| b * p / 100.0),
         Value::Length(Length::Calc(i)) => {
@@ -92,7 +97,8 @@ pub fn resolve(cx: &Cx, v: Value, base: Option<f32>) -> Option<f32> {
             }
         }
         _ => None,
-    }
+    };
+    px.map(|px| px.clamp(-MAX_PX, MAX_PX))
 }
 
 /// The four sides of something: margins, borders or padding.
@@ -115,7 +121,7 @@ impl Sides {
 
 /// The borders and the padding of a box. Percent padding is of the width of the containing block, on all four sides.
 pub fn border_padding(cx: &Cx, style: &ComputedStyle, cb_width: f32) -> (Sides, Sides) {
-    let b = |p| style.px(p);
+    let b = |p| style.px(p).min(MAX_PX);
     let border = Sides { top: b(Property::BorderTopWidth), right: b(Property::BorderRightWidth), bottom: b(Property::BorderBottomWidth), left: b(Property::BorderLeftWidth) };
     let p = |p| resolve(cx, style.get(p), Some(cb_width)).unwrap_or(0.0).max(0.0);
     let padding = Sides { top: p(Property::PaddingTop), right: p(Property::PaddingRight), bottom: p(Property::PaddingBottom), left: p(Property::PaddingLeft) };
@@ -149,10 +155,21 @@ pub struct Done {
     pub bottom: Strut,
     /// The block is empty, and its top and bottom margins collapse together (and with the margins around it).
     pub through: bool,
+    /// The left and right margins.
+    pub margin_left: f32,
+    pub margin_right: f32,
+    /// The baseline of the last line inside, from the top of the border box. An inline-block sits on it.
+    pub baseline: Option<f32>,
 }
 
 /// Lay out a block-level box in `space`. Its fragment is at x = its left margin, y = 0: the parent moves it down.
 pub fn block(cx: &mut Cx, node: NodeId, space: Space) -> Done {
+    sized(cx, node, space, None)
+}
+
+/// Lay out a block. `forced`: the width of the content box and the two margins, when the caller already knows them
+/// (an inline-block that shrinks to fit its content, `inline.rs`).
+pub fn sized(cx: &mut Cx, node: NodeId, space: Space, forced: Option<(f32, f32, f32)>) -> Done {
     let style = cx.tree.style(node);
     let (border, padding) = border_padding(cx, style, space.width);
     let bp = Sides {
@@ -161,7 +178,7 @@ pub fn block(cx: &mut Cx, node: NodeId, space: Space) -> Done {
         bottom: border.bottom + padding.bottom,
         left: border.left + padding.left,
     };
-    let (width, margin_left, _) = widths(cx, style, space.width, bp.horizontal());
+    let (width, margin_left, margin_right) = forced.unwrap_or_else(|| widths(cx, style, space.width, bp.horizontal()));
     let margin = |p| resolve(cx, style.get(p), Some(space.width)).unwrap_or(0.0);
     let (margin_top, margin_bottom) = (margin(Property::MarginTop), margin(Property::MarginBottom));
 
@@ -190,14 +207,15 @@ pub fn block(cx: &mut Cx, node: NodeId, space: Space) -> Done {
         cx.depth -= 1;
         kids
     } else {
-        Kids { y: 0.0, top: Strut::default(), bottom: Strut::default(), open: top_open }
+        Kids { y: 0.0, top: Strut::default(), bottom: Strut::default(), open: top_open, baseline: None }
     };
     if cx.marker == Some(node) {
         cx.marker = None;
         inline::lone_marker(cx, node, bp.left, bp.top);
     }
 
-    let mut done = Done { fragment, margin_top, margin_bottom, ..Done::default() };
+    let mut done = Done { fragment, margin_top, margin_bottom, margin_left, margin_right, ..Done::default() };
+    done.baseline = kids.baseline.map(|b| b + bp.top);
     let content_height = if kids.open {
         // Nothing inside stopped the margins: all of them reach the top of this block.
         done.top = kids.bottom;
@@ -275,13 +293,15 @@ struct Kids {
     bottom: Strut,
     /// Nothing stopped the margins at the top: no child with a border, padding, a line or a height.
     open: bool,
+    /// The baseline of the last line, from the top of the content box.
+    baseline: Option<f32>,
 }
 
 /// Lay out the children of a block, one under the other. `top_open`: the margins of the first child may go out through the
 /// top. The fragments of the children are placed relative to the parent's border box: `dx`, `dy` are the parent's
 /// border and padding.
 fn children(cx: &mut Cx, node: NodeId, space: Space, top_open: bool, dy: f32, dx: f32) -> Kids {
-    let mut kids = Kids { y: 0.0, top: Strut::default(), bottom: Strut::default(), open: top_open };
+    let mut kids = Kids { y: 0.0, top: Strut::default(), bottom: Strut::default(), open: top_open, baseline: None };
     // `bottom` is the strut that is open now: the margins since the last child that has content.
     let tree = cx.tree;
     // A copy of the `Tree`, so that the loop over the children does not hold `cx`, and the loop body can change it.
@@ -306,13 +326,16 @@ fn children(cx: &mut Cx, node: NodeId, space: Space, top_open: bool, dy: f32, dx
                 cx.out[done.fragment].rect.y = y + dy;
                 cx.out[done.fragment].rect.x += dx;
                 kids.y = y + done.height;
+                if let Some(b) = done.baseline {
+                    kids.baseline = Some(y + b);
+                }
                 kids.bottom = Strut::default();
                 kids.bottom.add(done.margin_bottom);
                 kids.bottom.merge(done.bottom);
             }
             Child::Lines(first, last) => {
                 let from = cx.out.len();
-                let lines = inline::lines(cx, node, first, last, space);
+                let lines = inline::lines(cx, node, first, last, space.width);
                 if !lines.any {
                     continue;
                     // Only empty inline boxes: no line, and the margins go on through.
@@ -320,6 +343,9 @@ fn children(cx: &mut Cx, node: NodeId, space: Space, top_open: bool, dy: f32, dx
                 let y = place(&mut kids);
                 fragment::shift(&mut cx.out, from, dx, y + dy);
                 kids.y = y + lines.height;
+                if let Some(b) = lines.baseline {
+                    kids.baseline = Some(y + b);
+                }
             }
         }
     }
@@ -341,19 +367,19 @@ fn place(kids: &mut Kids) -> f32 {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use crate::fragment::Rect;
     use bare_css::cascade::{Origin, RuleSet, UA_CSS};
     use bare_html::dom::{Atom, Document, NodeId};
     use bare_html::tree::parse;
 
     /// The layout of a page in a window of 800 by 600, as text.
-    fn dump(html: &str, css: &str) -> String {
+    pub fn dump(html: &str, css: &str) -> String {
         let (doc, layout) = run(html, css);
         crate::dump(&doc, &layout)
     }
 
-    fn run(html: &str, css: &str) -> (Document, crate::fragment::Layout) {
+    pub fn run(html: &str, css: &str) -> (Document, crate::fragment::Layout) {
         let mut doc = parse(html);
         let mut rules = RuleSet::new((800.0, 600.0));
         rules.add(&mut doc, UA_CSS, Origin::UserAgent);
@@ -364,7 +390,7 @@ mod tests {
     }
 
     /// The border box of the element with this `id`.
-    fn rect(html: &str, css: &str, id: &str) -> Rect {
+    pub fn rect(html: &str, css: &str, id: &str) -> Rect {
         let (doc, layout) = run(html, css);
         let node = find(&doc, id);
         layout.fragments.iter().find(|f| f.node == node).unwrap_or_else(|| panic!("no fragment for {id}")).rect
@@ -395,7 +421,7 @@ mod tests {
         // The first `p` margin (16) and the `body` margin (8) collapse into 16 above the body. 16 between the two `p`.
         assert_eq!(
             dump("<p>a</p><p>b</p>", ""),
-            "html 0,0 800x92\n  body 8,16 784x60\n    p 8,16 784x22\n    p 8,54 784x22\n"
+            "html 0,0 800x92\n  body 8,16 784x60\n    p 8,16 784x22\n      \"a\" 8,16 9.6x22\n    p 8,54 784x22\n      \"b\" 8,54 9.6x22\n"
         );
     }
 

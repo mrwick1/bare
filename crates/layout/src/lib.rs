@@ -9,10 +9,12 @@ pub mod boxes;
 pub mod font;
 pub mod fragment;
 pub mod inline;
+pub mod intrinsic;
 pub mod text;
 
 use bare_css::cascade::Styles;
 use bare_html::dom::{Document, NodeData, NodeId};
+use std::collections::HashMap;
 use block::Space;
 use fragment::{Fragment, Layout};
 
@@ -27,11 +29,17 @@ pub struct Cx<'a> {
     pub marker: Option<NodeId>,
     /// The number of the last list item, for its marker.
     pub number: i32,
+    /// The intrinsic widths of the boxes measured so far, by `NodeId::index` (`intrinsic.rs`).
+    pub sizes: HashMap<u32, (f32, f32)>,
+    /// How many intrinsic measures are running, one inside the other.
+    pub measuring: u32,
+    /// Empty lists of fragments, to use again for the next inline-block (`inline.rs`): no new allocation for each one.
+    pub spare: Vec<Vec<Fragment>>,
 }
 
 /// Lay out a page in a window of `viewport` (width, height) CSS pixels.
 pub fn layout(doc: &Document, styles: &Styles, viewport: (f32, f32)) -> Layout {
-    let mut cx = Cx { tree: boxes::Tree::new(doc, styles), out: Vec::with_capacity(doc.len()), depth: 0, marker: None, number: 0 };
+    let mut cx = Cx { tree: boxes::Tree::new(doc, styles), out: Vec::with_capacity(doc.len()), depth: 0, marker: None, number: 0, sizes: HashMap::new(), measuring: 0, spare: Vec::new() };
     // Most pages make about one fragment for each DOM node: one for each element and each text on one line, none for
     // the `head` and for the spaces between blocks. Room for that many at once saves the copies of a `Vec` that grows.
     let mut height = 0.0;

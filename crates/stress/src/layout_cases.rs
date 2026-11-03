@@ -112,6 +112,20 @@ pub fn all() -> Vec<Case> {
         case("block-nested-collapse", 20, |n| lay(format!("{}x{}", "<div>".repeat(n), "</div>".repeat(n)), "div { margin: 2px 0 }")),
         case("block-percent-calc", 20_000, |n| lay("<div></div>".repeat(n), "div { width: calc(50% - 3px); padding: 1%; margin: 0 auto; max-width: 70%; height: 2px }")),
         case("block-list-items", 20_000, |n| lay(format!("<ol>{}</ol>", "<li><div></div>".repeat(n)), "")),
+        // Topic 4: inline layout
+        case("inline-paragraph", 20_000, |n| lay(format!("<p>{}</p>", "word ".repeat(n)), "p { width: 300px }")),
+        case("inline-one-line-nowrap", 20_000, |n| lay(format!("<p>{}</p>", "word ".repeat(n)), "p { white-space: nowrap }")),
+        case("inline-long-word", 200_000, |n| lay(format!("<p>{}</p>", "x".repeat(n)), "p { width: 100px }")),
+        case("inline-many-spans", 20_000, |n| lay(format!("<p>{}</p>", "<b>a</b> <i>b</i> ".repeat(n)), "")),
+        case("inline-span-unit", 20_000, |n| lay(format!("<p>{}</p>", "<b>a</b>".repeat(n)), "p { width: 100px }")),
+        case("inline-deep-spans", 2_000, |n| lay(format!("{}x", "<span>".repeat(n)), "")),
+        case("inline-deep-spans-many-lines", 100, |n| lay(format!("{}{}", "<span>".repeat(n), "x ".repeat(n)), "body { width: 20px }")),
+        case("inline-breaks", 20_000, |n| lay(format!("<p>{}</p>", "a<br>".repeat(n)), "")),
+        case("inline-pre-lines", 20_000, |n| lay(format!("<pre>{}</pre>", "a\tb\n".repeat(n)), "")),
+        case("inline-blocks-many", 20_000, |n| lay(format!("<p>{}</p>", "<i>ab cd</i> ".repeat(n)), "i { display: inline-block }")),
+        case("inline-blocks-nested", 40, |n| lay(format!("{}x", "<i>a ".repeat(n)), "i { display: inline-block }")),
+        case("inline-block-in-inline", 20_000, |n| lay(format!("<span>{}</span>", "a<div>b</div>".repeat(n)), "")),
+        case("inline-list", 20_000, |n| lay(format!("<ul>{}</ul>", "<li>item".repeat(n)), "")),
         case("text-uppercase", 100_000, |n| pieces("stra\u{df}e ".repeat(n), NORMAL, Transform::Upper)),
     ]
 }
