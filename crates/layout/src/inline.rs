@@ -446,7 +446,10 @@ impl Breaker<'_, '_> {
             self.y = next - self.bfc.1;
             self.band();
         }
-        self.trail = None;
+        // Only content ends the hanging space: the ends and starts of inline boxes after it do not.
+        if self.pending.iter().any(|i| matches!(i, Item::Text { .. } | Item::Atomic(_))) {
+            self.trail = None;
+        }
         let dx = self.x;
         let mut pending = std::mem::take(&mut self.pending);
         // `take` leaves an empty list in its place, so the loop can change `self`. The list goes back after, to keep its room.
@@ -496,10 +499,18 @@ impl Breaker<'_, '_> {
     fn finish(&mut self) {
         // The space at the end hangs: it is not shown, and `text-align` does not count it.
         if let Some((i, start, w)) = self.trail.take()
-            && let Some(Item::Text { end, w: tw, .. }) = self.line.get_mut(i)
+            && let Some(Item::Text { end, w: tw, x, .. }) = self.line.get_mut(i)
         {
             *end = start;
             *tw -= w;
+            let x0 = *x + *tw;
+            // The boxes that end after the space end before it: with the space at `x0..x0 + w`, an end at `x0 + w` or
+            // later moves back by `w`.
+            for seg in &mut self.segments {
+                if seg.3 >= x0 + w - 0.01 {
+                    seg.3 -= w;
+                }
+            }
             self.x -= w;
         }
         if self.content {
@@ -865,5 +876,17 @@ mod tests {
         assert_eq!(out.fragments.len(), 3, "html, body and the text: the spans are culled");
         let out = run(&format!("{}x", "<span style='background:red'>".repeat(20_000)), "").1;
         assert_eq!(out.fragments.len(), 20_000 + 3);
+    }
+
+    #[test]
+    fn a_space_at_the_end_of_a_line_hangs_inside_a_box_too() {
+        // As in Chrome: "in span" is 67.2 wide, and the space after it does not count, before or after the padding.
+        let html = "<div style='width:300px'>text <span id=s style='padding-left:20px;background:red'>in span </span></div>";
+        assert!((rect(html, "", "s").w - (20.0 + 67.2)).abs() < 0.01);
+        let html = "<div style='width:300px'>text <span id=s style='padding-right:20px;background:red'>in span </span></div>";
+        assert!((rect(html, "", "s").w - (67.2 + 20.0)).abs() < 0.01);
+        // Not at the end of the line: the space counts.
+        let html = "<div style='width:300px'>text <span id=s style='background:red'>in span </span>after</div>";
+        assert!((rect(html, "", "s").w - 76.8).abs() < 0.01);
     }
 }
