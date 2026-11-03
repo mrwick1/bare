@@ -651,8 +651,10 @@ fn atomic(cx: &mut Cx, node: NodeId, cb: f32) -> Atomic {
     cx.marker = marker;
     let fragments = std::mem::replace(&mut cx.out, saved);
     let h = done.margin_top + done.height + done.margin_bottom;
-    // The baseline is the last line inside. With no line, the bottom of the margin box.
-    let baseline = done.baseline.map_or(h, |b| done.margin_top + b);
+    // The baseline is the last line inside. With no line, or in a scroll container, the bottom of the margin box (CSS 2.1, 10.8.1).
+    let baseline = done.baseline.filter(|_| !cx.tree.scrolls(node)).map_or(h, |b| done.margin_top + b);
+    // The width can grow by a scrollbar in layout: the fragment has the final one.
+    let width = fragments[done.fragment].rect.w - bp;
     Atomic { fragments, x: 0.0, w: ml + width + bp + mr, h, baseline, margin_left: ml, margin_top: done.margin_top }
 }
 

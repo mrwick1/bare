@@ -155,7 +155,8 @@ pub fn own_context(cx: &Cx, node: NodeId) -> bool {
     if matches!(cx.tree.kind(node), Kind::Atomic | Kind::Float) || Some(node) == cx.tree.root() {
         return true;
     }
-    matches!(
+    cx.tree.scrolls(node)
+        || matches!(
         cx.tree.style(node).get(Property::Display),
         Value::Keyword(Keyword::Table | Keyword::TableCell | Keyword::TableCaption | Keyword::Flex | Keyword::Grid | Keyword::FlowRoot)
     )
@@ -229,37 +230,88 @@ pub fn sized(cx: &mut Cx, node: NodeId, space: Space, forced: Option<(f32, f32, 
     let own = own_context(cx, node);
     let top_open = !own && bp.top == 0.0;
     let bottom_open = !own && bp.bottom == 0.0 && height.is_none();
-    if cx.tree.kind(node) == Kind::ListItem {
-        cx.marker = Some(node);
-        // The marker goes on the first line inside the item (`inline.rs`). If no line takes it, it goes at the top.
+    let (ox, oy) = cx.tree.overflow(node);
+    // The scrollbars: (right, bottom). They take room inside the content box. `scroll` always has one. `auto` has one
+    // only if the content does not fit, so the layout below runs again when it does not. In a layout that runs again,
+    // the boxes inside keep what they found the first time: else each level of `auto` boxes would double the work.
+    let auto = (oy == Keyword::Auto, ox == Keyword::Auto);
+    let mut bars = (oy == Keyword::Scroll, ox == Keyword::Scroll);
+    let mut retry = auto.0 || auto.1;
+    if retry && cx.again > 0 && let Some(&known) = cx.bars.get(&(node.index() as u32)) {
+        bars = known;
+        retry = false;
     }
-    let inner = Space { width, height: height.map(clamp) };
-    // Where the content box starts in the BFC. A new BFC has its own coordinates and its own floats: the floats of the
-    // BFC around it wait in `outer` until it is done.
-    let strut = pos.strut.with(Strut { positive: margin_top.max(0.0), negative: margin_top.min(0.0) });
-    let x = pos.x + margin_left + bp.left;
-    let here = if own {
-        Pos { x: bp.left, y: bp.top, strut: Strut::default() }
-    } else if top_open {
-        Pos { x, y: pos.y, strut }
-    } else {
-        Pos { x, y: pos.y + strut.sum() + bp.top, strut: Strut::default() }
+    let (number, mut again) = (cx.number, false);
+    let mut width = width;
+    let (kids, floats_bottom) = loop {
+        let (gx, gy) = (if bars.0 { SCROLLBAR } else { 0.0 }, if bars.1 { SCROLLBAR } else { 0.0 });
+        if cx.tree.kind(node) == Kind::ListItem {
+            cx.marker = Some(node);
+            // The marker goes on the first line inside the item (`inline.rs`). If no line takes it, it goes at the top.
+        }
+        let inner = Space { width: (width - gx).max(0.0), height: height.map(|h| (clamp(h) - gy).max(0.0)) };
+        // Where the content box starts in the BFC. A new BFC has its own coordinates and its own floats: the floats of the
+        // BFC around it wait in `outer` until it is done.
+        let strut = pos.strut.with(Strut { positive: margin_top.max(0.0), negative: margin_top.min(0.0) });
+        let x = pos.x + margin_left + bp.left;
+        let here = if own {
+            Pos { x: bp.left, y: bp.top, strut: Strut::default() }
+        } else if top_open {
+            Pos { x, y: pos.y, strut }
+        } else {
+            Pos { x, y: pos.y + strut.sum() + bp.top, strut: Strut::default() }
+        };
+        let outer = own.then(|| std::mem::take(&mut cx.floats));
+        // An `auto` box with no scrollbar on the right yet: once the content goes below the room, it needs one, and the
+        // rest of the content is laid out in the next pass. A log of 20,000 lines in a box of 400px is laid out once, not twice.
+        let room = clamp(height.unwrap_or(f32::INFINITY)) - gy;
+        let stop = if retry && auto.0 && !bars.0 { room } else { f32::INFINITY };
+        let kids = if cx.depth < MAX_DEPTH {
+            cx.depth += 1;
+            let kids = children(cx, node, inner, top_open, bp.top, bp.left, here, stop);
+            cx.depth -= 1;
+            kids
+        } else {
+            Kids { y: 0.0, top: Strut::default(), bottom: Strut::default(), open: top_open, baseline: None, top_y: here.y }
+        };
+        // A BFC root grows to contain its floats (CSS 2.1, 10.6.7). Other blocks do not: a float sticks out of them.
+        let floats_bottom = outer.and_then(|outer| std::mem::replace(&mut cx.floats, outer).bottom()).map(|b| b - bp.top);
+        if retry {
+            // A scroll container is its own BFC, so the content ends at the last margin.
+            let used = floats_bottom.map_or(0.0f32, |b| b).max(kids.y + kids.bottom.sum());
+            let stopped = kids.y > stop;
+            // After a stop, the content on the right is not all there: the next pass looks at it.
+            let wide = !stopped && auto.1 && right_edge(cx, fragment) > bp.left + inner.width + 0.01;
+            let need = (bars.0 || (auto.0 && used > room + 0.01), bars.1 || wide);
+            if !stopped {
+                cx.bars.insert(node.index() as u32, need);
+            }
+            if need != bars {
+                // A box that shrinks to fit its content gets wider by the scrollbar, so the content keeps its room.
+                if need.0 && !bars.0 && forced.is_some() && matches!(cx.tree.kind(node), Kind::Atomic | Kind::Float) && style.get(Property::Width) == Value::Keyword(Keyword::Auto) {
+                    width += SCROLLBAR;
+                }
+                bars = need;
+                cx.out.truncate(fragment + 1);
+                cx.number = number;
+                if !again {
+                    again = true;
+                    cx.again += 1;
+                }
+                continue;
+            }
+        }
+        break (kids, floats_bottom);
     };
-    let outer = own.then(|| std::mem::take(&mut cx.floats));
-    let kids = if cx.depth < MAX_DEPTH {
-        cx.depth += 1;
-        let kids = children(cx, node, inner, top_open, bp.top, bp.left, here);
-        cx.depth -= 1;
-        kids
-    } else {
-        Kids { y: 0.0, top: Strut::default(), bottom: Strut::default(), open: top_open, baseline: None, top_y: here.y }
-    };
-    // A BFC root grows to contain its floats (CSS 2.1, 10.6.7). Other blocks do not: a float sticks out of them.
-    let floats_bottom = outer.and_then(|outer| std::mem::replace(&mut cx.floats, outer).bottom()).map(|b| b - bp.top);
+    if again {
+        cx.again -= 1;
+    }
+    cx.out[fragment].rect.w = width + bp.horizontal();
     if cx.marker == Some(node) {
         cx.marker = None;
         inline::lone_marker(cx, node, bp.left, bp.top);
     }
+    let gy = if bars.1 { SCROLLBAR } else { 0.0 };
 
     let mut done = Done { fragment, margin_top, margin_bottom, margin_left, margin_right, ..Done::default() };
     done.baseline = kids.baseline.map(|b| b + bp.top);
@@ -277,7 +329,8 @@ pub fn sized(cx: &mut Cx, node: NodeId, space: Space, forced: Option<(f32, f32, 
         }
     };
     let content_height = floats_bottom.map_or(content_height, |b| content_height.max(b));
-    let content_height = clamp(height.unwrap_or(content_height));
+    // A scrollbar at the bottom is inside the height, if the box has one. Else the box grows by it.
+    let content_height = clamp(height.unwrap_or(content_height + gy));
     done.through = kids.open && bottom_open && content_height == 0.0 && bp.vertical() == 0.0;
     if kids.open && !done.through {
         // The margins inside reached the top, but the block has a height: they stay at the top, and the bottom is closed.
@@ -289,6 +342,34 @@ pub fn sized(cx: &mut Cx, node: NodeId, space: Space, forced: Option<(f32, f32, 
     f.rect.h = done.height;
     f.end = end;
     done
+}
+
+/// The width of a scrollbar: the classic ones of Chrome on Linux and Windows. The overlay scrollbars of macOS and phones take no room.
+pub const SCROLLBAR: f32 = 15.0;
+
+/// The right edge of the content inside the fragment `at`, from its left border edge. `at` is the last fragment that is
+/// still open, so its content is all of `cx.out` after it. A box that hides or scrolls its content counts only for its own border box.
+fn right_edge(cx: &Cx, at: usize) -> f32 {
+    let mut right = 0.0f32;
+    let mut open: Vec<(u32, f32)> = Vec::new();
+    let mut i = at + 1;
+    while i < cx.out.len() {
+        while open.last().is_some_and(|&(end, _)| end as usize <= i) {
+            open.pop();
+        }
+        let f = &cx.out[i];
+        let x = open.last().map_or(0.0, |&(_, x)| x) + f.rect.x;
+        right = right.max(x + f.rect.w);
+        if f.kind == crate::fragment::Kind::Box && cx.tree.kind(f.node) != Kind::Inline && cx.tree.scrolls(f.node) {
+            i = f.end as usize;
+            continue;
+        }
+        if f.end as usize > i + 1 {
+            open.push((f.end, x));
+        }
+        i += 1;
+    }
+    right
 }
 
 /// The content width and the left and right margins of a block (CSS 2.1, 10.3.3, with `box-sizing`, `min-width` and
@@ -350,13 +431,18 @@ struct Kids {
 /// Lay out the children of a block, one under the other. `top_open`: the margins of the first child may go out through the
 /// top. The fragments of the children are placed relative to the parent's border box: `dx`, `dy` are the parent's
 /// border and padding. `here`: where the content box starts in the BFC (see `Pos`).
-fn children(cx: &mut Cx, node: NodeId, space: Space, top_open: bool, dy: f32, dx: f32, here: Pos) -> Kids {
+/// `stop`: stop after the child that ends below this, from the top of the content box (see `sized`).
+#[allow(clippy::too_many_arguments)]
+fn children(cx: &mut Cx, node: NodeId, space: Space, top_open: bool, dy: f32, dx: f32, here: Pos, stop: f32) -> Kids {
     let mut kids = Kids { y: 0.0, top: Strut::default(), bottom: Strut::default(), open: top_open, baseline: None, top_y: here.y };
     // `bottom` is the strut that is open now: the margins since the last child that has content.
     let tree = cx.tree;
     // A copy of the `Tree`, so that the loop over the children does not hold `cx`, and the loop body can change it.
     let mut counter = tree.counter(node);
     for child in tree.children(node) {
+        if kids.y > stop {
+            break;
+        }
         match child {
             Child::Block(b) => {
                 if cx.tree.kind(b) == Kind::ListItem {
@@ -638,6 +724,96 @@ pub(crate) mod tests {
         // The float takes 100 of 300. A block of 150 that makes its own context fits in the 200 next to it.
         let html = "<div style='width:300px'><div style='float:left;width:100px;height:30px'></div><div id=b style='display:flow-root;width:150px;height:5px'></div></div>";
         assert_eq!(rect(html, "", "b"), r(108.0, 8.0, 150.0, 5.0));
+    }
+
+    #[test]
+    fn overflow_hidden_makes_a_new_context_and_clip_does_not() {
+        // The margin of the child stays inside a scroll container. Through `clip` it collapses with the margin of the body.
+        let html = "<div id=d style='overflow:hidden'><p style='margin:30px 0;height:5px'></p></div>";
+        assert_eq!(rect(html, "", "d"), r(8.0, 8.0, 784.0, 65.0));
+        let html = "<div id=d style='overflow:clip'><p style='margin:30px 0;height:5px'></p></div>";
+        assert_eq!(rect(html, "", "d"), r(8.0, 30.0, 784.0, 5.0));
+        // Beside a float, like `display: flow-root`.
+        let html = "<div style='float:left;width:100px;height:30px'></div><div id=d style='overflow:auto;height:5px'></div>";
+        assert_eq!(rect(html, "", "d"), r(108.0, 8.0, 684.0, 5.0));
+    }
+
+    #[test]
+    fn overflow_of_the_body_goes_to_the_window() {
+        // So the body is not a scroll container: the margin inside collapses with its own 8px.
+        let html = "<body style='overflow:hidden'><div id=d><p style='margin:30px 0;height:5px'></p></div>";
+        assert_eq!(rect(html, "", "d"), r(8.0, 30.0, 784.0, 5.0));
+        // Not if the root has its own overflow.
+        let html = "<html style='overflow:auto'><body style='overflow:hidden'><div id=d><p style='margin:30px 0;height:5px'></p></div>";
+        assert_eq!(rect(html, "", "d"), r(8.0, 38.0, 784.0, 5.0));
+    }
+
+    #[test]
+    fn scrollbars_take_room_in_the_content_box() {
+        let css = "body { line-height: 20px }";
+        // `scroll`: both, always. The child is 15 narrower; the box keeps its size.
+        let html = "<div style='overflow:scroll;width:200px;height:100px'><div id=c>x</div></div>";
+        assert_eq!(rect(html, css, "c"), r(8.0, 8.0, 185.0, 20.0));
+        // A scrollbar at the bottom makes a box with `height: auto` taller.
+        let html = "<div id=d style='overflow-x:scroll;width:200px'>x</div>";
+        assert_eq!(rect(html, css, "d"), r(8.0, 8.0, 200.0, 35.0));
+        // `auto`: only on the side where the content does not fit.
+        let html = "<div id=d style='overflow:auto;width:200px'><div id=c>x</div></div>";
+        assert_eq!(rect(html, css, "d"), r(8.0, 8.0, 200.0, 20.0));
+        let html = "<div style='overflow:auto;width:100px;max-height:30px'><div id=c>a<br>b<br>c</div></div>";
+        assert_eq!(rect(html, css, "c"), r(8.0, 8.0, 85.0, 60.0));
+        let html = "<div id=d style='overflow:auto;width:100px;white-space:nowrap'>xxxxxxxxxxxxxxxxxxxxxxxxxxxxxx</div>";
+        assert_eq!(rect(html, css, "d"), r(8.0, 8.0, 100.0, 35.0));
+        // The padding at the end counts: 105 + 10 does not fit in 100 + 10.
+        let html = "<div id=d style='overflow:auto;width:100px;padding-right:10px'><div style='width:105px;height:5px'></div></div>";
+        assert_eq!(rect(html, css, "d"), r(8.0, 8.0, 110.0, 20.0));
+        // A scroll container inside hides its own content.
+        let html = "<div id=d style='overflow:auto;width:100px'><div style='overflow:hidden;height:5px'><div style='width:500px'></div></div></div>";
+        assert_eq!(rect(html, css, "d"), r(8.0, 8.0, 100.0, 5.0));
+    }
+
+    #[test]
+    fn a_box_that_shrinks_to_fit_gets_wider_by_its_scrollbar() {
+        let css = "body { line-height: 20px }";
+        let a = rect("<div id=d style='float:left'>abc</div>", css, "d").w;
+        let b = rect("<div id=d style='float:left;overflow-y:scroll'>abc</div>", css, "d").w;
+        assert_eq!(b, a + 15.0);
+        let c = rect("<div id=d style='float:left;overflow-y:auto;height:20px'>abc<br>def</div>", css, "d").w;
+        assert_eq!(c, a + 15.0);
+        let c = rect("<span id=d style='display:inline-block;overflow-y:auto;height:20px'>abc<br>def</span>", css, "d").w;
+        assert_eq!(c, a + 15.0);
+    }
+
+    #[test]
+    fn nested_auto_boxes_that_overflow() {
+        // Each needs a scrollbar. The inner one keeps its width of 185 in the second layout of the outer one.
+        let html = "<div style='overflow:auto;height:50px;width:200px'><div id=c style='overflow:auto;height:100px'><div style='height:300px'></div></div></div>";
+        assert_eq!(rect(html, "", "c"), r(8.0, 8.0, 185.0, 100.0));
+        // 40 levels: each runs again once, and the ones inside keep what they found.
+        let html = "<div style='overflow:auto;height:50px'>".repeat(40) + "<div style='height:300px'></div>";
+        assert!(run(&html, "").1.fragments.len() == 43);
+    }
+
+    #[test]
+    fn an_inline_block_that_scrolls_sits_on_its_bottom_edge() {
+        let css = "body { line-height: 20px }";
+        let html = "<div>a<span id=i style='display:inline-block;overflow:hidden;height:40px'>b</span></div>";
+        let i = rect(html, css, "i");
+        assert_eq!((i.y, i.h), (8.0, 40.0));
+        let html = "<div id=d>a<span style='display:inline-block;overflow:hidden;height:40px'>b</span></div>";
+        // The line is taller than 40: the descent of the strut goes below the inline-block.
+        assert!(rect(html, css, "d").h > 40.0);
+    }
+
+    #[test]
+    fn a_long_log_in_an_auto_box() {
+        // The first pass stops at the first line below the room. The second pass lays out all of it, 15 narrower.
+        let html = format!("<div style='overflow:auto;height:50px'>{}<p id=last>end</p></div>", "<p>line</p>".repeat(20));
+        assert_eq!(rect(&html, "", "last").w, 784.0 - 15.0);
+        // The list numbers start again with the second pass.
+        let html = "<ol style='overflow:auto;height:20px'><li>a<li>b<li>c</ol>";
+        let out = dump(html, "");
+        assert!(out.contains("marker 3") && !out.contains("marker 4"), "{out}");
     }
 
     #[test]

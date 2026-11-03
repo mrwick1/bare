@@ -133,6 +133,12 @@ pub fn all() -> Vec<Case> {
         case("floats-alternate-clear", 2_000, |n| lay("<div></div><p>x</p>".repeat(n), "div { float: right; width: 50px; height: 30px } p { clear: both }")),
         case("floats-in-a-line", 2_000, |n| lay(format!("<p>{}</p>", "aa <i>f</i> bb ".repeat(n)), "i { float: left } p { width: 300px }")),
         case("floats-new-contexts", 2_000, |n| lay("<div></div><section>x</section>".repeat(n), "div { float: left; width: 50px; height: 30px } section { display: flow-root }")),
+        // Overflow
+        case("overflow-many-auto", 2_000, |n| lay("<div><p>aaa bbb ccc</p></div>".repeat(n), "div { overflow: auto; height: 10px; width: 100px }")),
+        case("overflow-nested-auto", 20, |n| lay(format!("{}<p>x</p>", "<div>".repeat(n)), "div { overflow: auto; max-height: 50px; padding-left: 1px } p { height: 300px }")),
+        case("overflow-auto-fits", 2_000, |n| lay("<div><p>aaa bbb ccc</p></div>".repeat(n), "div { overflow: auto; width: 100px }")),
+        case("overflow-long-log", 20_000, |n| lay(format!("<div>{}</div>", "<p>a line of the log</p>".repeat(n)), "div { overflow: auto; height: 400px }")),
+        case("overflow-wide-content", 2_000, |n| lay(format!("<div><p>{}</p></div>", "word ".repeat(n)), "div { overflow-x: auto; width: 100px } p { white-space: nowrap }")),
         case("text-uppercase", 100_000, |n| pieces("stra\u{df}e ".repeat(n), NORMAL, Transform::Upper)),
     ]
 }

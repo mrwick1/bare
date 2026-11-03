@@ -38,11 +38,15 @@ pub struct Cx<'a> {
     pub spare: Vec<Vec<Fragment>>,
     /// The floats of the block formatting context that is laid out now (`floats.rs`).
     pub floats: floats::Floats,
+    /// The `overflow: auto` boxes that layout found to need scrollbars: (right, bottom), by `NodeId::index`.
+    pub bars: HashMap<u32, (bool, bool)>,
+    /// How many layouts run again inside one another because a box found that it needs a scrollbar (`block::sized`).
+    pub again: u32,
 }
 
 /// Lay out a page in a window of `viewport` (width, height) CSS pixels.
 pub fn layout(doc: &Document, styles: &Styles, viewport: (f32, f32)) -> Layout {
-    let mut cx = Cx { tree: boxes::Tree::new(doc, styles), out: Vec::with_capacity(doc.len()), depth: 0, marker: None, number: 0, sizes: HashMap::new(), measuring: 0, spare: Vec::new(), floats: Default::default() };
+    let mut cx = Cx { tree: boxes::Tree::new(doc, styles), out: Vec::with_capacity(doc.len()), depth: 0, marker: None, number: 0, sizes: HashMap::new(), measuring: 0, spare: Vec::new(), floats: Default::default(), bars: HashMap::new(), again: 0 };
     // Most pages make about one fragment for each DOM node: one for each element and each text on one line, none for
     // the `head` and for the spaces between blocks. Room for that many at once saves the copies of a `Vec` that grows.
     let mut height = 0.0;
