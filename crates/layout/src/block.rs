@@ -42,10 +42,11 @@
 
 use crate::boxes::{Child, Kind};
 use crate::fragment::{self, Fragment, Rect};
-use crate::{Cx, inline};
+use crate::{Cx, inline, intrinsic};
 use bare_css::cascade::ComputedStyle;
 use bare_css::values::{Keyword, Length, Property, Value};
 use bare_html::dom::NodeId;
+use std::collections::HashMap;
 
 /// How deep layout goes. Each level uses some call stack (about 1 KB in a debug build), and the main thread has 8 MB.
 pub const MAX_DEPTH: usize = 400;
@@ -152,7 +153,7 @@ pub fn border_padding(cx: &Cx, style: &ComputedStyle, cb_width: f32) -> (Sides, 
 
 /// Does this block make its own block formatting context? Then the margins of its children do not collapse with its own.
 pub fn own_context(cx: &Cx, node: NodeId) -> bool {
-    if matches!(cx.tree.kind(node), Kind::Atomic | Kind::Float) || Some(node) == cx.tree.root() {
+    if matches!(cx.tree.kind(node), Kind::Atomic | Kind::Float | Kind::OutOfFlow) || Some(node) == cx.tree.root() {
         return true;
     }
     cx.tree.scrolls(node)
@@ -188,7 +189,7 @@ pub struct Done {
 /// Lay out a block-level box in `space`, at `pos` in its BFC. Its fragment is at x = its left margin, y = 0: the parent
 /// moves it down.
 pub fn block(cx: &mut Cx, node: NodeId, space: Space, pos: Pos) -> Done {
-    sized(cx, node, space, None, pos)
+    sized(cx, node, space, None, None, pos)
 }
 
 /// The sides that a box with `clear` must go below: (left, right).
@@ -202,8 +203,9 @@ pub fn clear_sides(style: &ComputedStyle) -> (bool, bool) {
 }
 
 /// Lay out a block. `forced`: the width of the content box and the two margins, when the caller already knows them
-/// (an inline-block that shrinks to fit its content, `inline.rs`).
-pub fn sized(cx: &mut Cx, node: NodeId, space: Space, forced: Option<(f32, f32, f32)>, pos: Pos) -> Done {
+/// (an inline-block that shrinks to fit its content, `inline.rs`). `tall`: the height of the content box, when the caller
+/// knows it (an absolutely positioned box with `top` and `bottom`).
+pub fn sized(cx: &mut Cx, node: NodeId, space: Space, forced: Option<(f32, f32, f32)>, tall: Option<f32>, pos: Pos) -> Done {
     let style = cx.tree.style(node);
     let (border, padding) = border_padding(cx, style, space.width);
     let bp = Sides {
@@ -222,7 +224,7 @@ pub fn sized(cx: &mut Cx, node: NodeId, space: Space, forced: Option<(f32, f32, 
 
     let border_box = style.get(Property::BoxSizing) == Value::Keyword(Keyword::BorderBox);
     let content = |v: f32| if border_box { (v - bp.vertical()).max(0.0) } else { v };
-    let height = resolve(cx, style.get(Property::Height), space.height).map(content);
+    let height = tall.or_else(|| resolve(cx, style.get(Property::Height), space.height).map(content));
     let min = resolve(cx, style.get(Property::MinHeight), space.height).map_or(0.0, content);
     let max = resolve(cx, style.get(Property::MaxHeight), space.height).map(content);
     let clamp = |h: f32| max.map_or(h, |m| h.min(m)).max(min);
@@ -241,7 +243,7 @@ pub fn sized(cx: &mut Cx, node: NodeId, space: Space, forced: Option<(f32, f32, 
         bars = known;
         retry = false;
     }
-    let (number, mut again) = (cx.number, false);
+    let (number, waiting, mut again) = (cx.number, cx.waiting, false);
     let mut width = width;
     let (kids, floats_bottom) = loop {
         let (gx, gy) = (if bars.0 { SCROLLBAR } else { 0.0 }, if bars.1 { SCROLLBAR } else { 0.0 });
@@ -294,6 +296,7 @@ pub fn sized(cx: &mut Cx, node: NodeId, space: Space, forced: Option<(f32, f32, 
                 bars = need;
                 cx.out.truncate(fragment + 1);
                 cx.number = number;
+                cx.waiting = waiting;
                 if !again {
                     again = true;
                     cx.again += 1;
@@ -337,11 +340,168 @@ pub fn sized(cx: &mut Cx, node: NodeId, space: Space, forced: Option<(f32, f32, 
         done.bottom = Strut::default();
     }
     done.height = content_height + bp.vertical();
+    let position = cx.tree.position(node);
+    if position == Keyword::Relative {
+        let offset = relative_offset(cx, style, space);
+        if offset != (0.0, 0.0) {
+            cx.rel.insert(node.index() as u32, offset);
+        }
+    }
+    if position != Keyword::Static && cx.waiting > 0 {
+        // The containing block of the absolute boxes inside: this padding box.
+        let pad = Rect { x: border.left, y: border.top, w: width + padding.horizontal(), h: done.height - border.vertical() };
+        out_of_flow(cx, fragment, pad, false, true);
+    }
     let end = cx.out.len() as u32;
     let f = &mut cx.out[fragment];
     f.rect.h = done.height;
     f.end = end;
     done
+}
+
+/// How far `position: relative` moves a box from its place (CSS 2.1, 9.4.3). `left` wins over `right`, and `top` over
+/// `bottom`. A percent is of the containing block, and `top: 50%` in a block with no fixed height is `auto`.
+pub fn relative_offset(cx: &Cx, style: &ComputedStyle, cb: Space) -> (f32, f32) {
+    let get = |p, base| resolve(cx, style.get(p), base);
+    let pick = |a: Option<f32>, b: Option<f32>| a.or(b.map(|b| -b)).unwrap_or(0.0);
+    (pick(get(Property::Left, Some(cb.width)), get(Property::Right, Some(cb.width))), pick(get(Property::Top, cb.height), get(Property::Bottom, cb.height)))
+}
+
+/// Lay out the boxes with `position: absolute` whose containing block is the fragment `at`, and add them inside it.
+/// `pad`: the containing block, from the border box of `at` (its padding box, or the window for the root). `fixed`:
+/// this is the window, which takes the `fixed` boxes. `abs`: take the absolute boxes with no other positioned block above them.
+///
+/// Chrome (LayoutNG) passes the out-of-flow boxes up the fragment tree as "candidates" until they reach their
+/// containing block. Here the static positions are fragments in the flat list, and the containing block finds them
+/// with one walk over its own fragments. A positioned block inside takes its own, so the walk skips it: each fragment
+/// is walked once, for the nearest positioned block above it (the root walks into them when the page has `fixed` boxes).
+pub fn out_of_flow(cx: &mut Cx, at: usize, pad: Rect, fixed: bool, abs: bool) {
+    let mut found = Vec::new();
+    // The first and the last fragment of each positioned inline box: an inline box can be a containing block too.
+    let mut inlines: HashMap<u32, (Rect, Rect)> = HashMap::new();
+    // The open fragments: (their end, their corner from the border box of `at`, a positioned block is open).
+    let mut open: Vec<(u32, f32, f32, bool)> = Vec::new();
+    let mut i = at + 1;
+    while i < cx.out.len() {
+        while open.last().is_some_and(|o| o.0 as usize <= i) {
+            open.pop();
+        }
+        let f = cx.out[i];
+        let (px, py, inside) = open.last().map_or((0.0, 0.0, false), |o| (o.1, o.2, o.3));
+        let (x, y) = (px + f.rect.x, py + f.rect.y);
+        match f.kind {
+            crate::fragment::Kind::Static => {
+                let is_fixed = cx.tree.position(f.node) == Keyword::Fixed;
+                if if is_fixed { fixed } else { abs && !inside } {
+                    found.push((f.node, x - pad.x, y - pad.y));
+                }
+            }
+            crate::fragment::Kind::Box if cx.tree.kind(f.node) == Kind::Inline && cx.tree.position(f.node) != Keyword::Static => {
+                let r = Rect { x, y, ..f.rect };
+                inlines.entry(f.node.index() as u32).and_modify(|e| e.1 = r).or_insert((r, r));
+            }
+            crate::fragment::Kind::Box if f.end as usize > i + 1 => {
+                let positioned = cx.tree.kind(f.node) != Kind::Inline && cx.tree.position(f.node) != Keyword::Static;
+                if positioned && !(fixed && cx.fixed) {
+                    i = f.end as usize;
+                    continue;
+                }
+                open.push((f.end, x, y, inside || positioned));
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    let top = cx.out[at].node;
+    for (node, sx, sy) in found {
+        // The nearest positioned inline box above it, inside `at`. Its containing block goes from the top-left of the
+        // padding box of its first fragment to the bottom-right of the padding box of its last one (CSS 2.1, 10.1).
+        let mut cb = pad;
+        let mut up = cx.tree.doc.parent(node);
+        while !inlines.is_empty()
+            && let Some(n) = up
+            && n != top
+        {
+            if let Some(&(first, last)) = inlines.get(&(n.index() as u32)) {
+                let (border, _) = border_padding(cx, cx.tree.style(n), pad.w);
+                let (x0, y0) = (first.x + border.left, first.y + border.top);
+                cb = Rect { x: x0, y: y0, w: (last.x + last.w - border.right - x0).max(0.0), h: (last.y + last.h - border.bottom - y0).max(0.0) };
+                break;
+            }
+            up = cx.tree.doc.parent(n);
+        }
+        absolute(cx, node, sx + pad.x - cb.x, sy + pad.y - cb.y, cb);
+    }
+}
+
+/// Lay out one absolutely positioned box in the containing block `cb`, with its static position `sx`, `sy` (both from
+/// the corner of `cb`). Its fragment goes at the end of the list, placed from the border box around `cb`.
+fn absolute(cx: &mut Cx, node: NodeId, sx: f32, sy: f32, cb: Rect) {
+    cx.waiting = cx.waiting.saturating_sub(1);
+    let style = cx.tree.style(node);
+    let (border, padding) = border_padding(cx, style, cb.w);
+    let (bp_x, bp_y) = (border.horizontal() + padding.horizontal(), border.vertical() + padding.vertical());
+    let border_box = style.get(Property::BoxSizing) == Value::Keyword(Keyword::BorderBox);
+    let get = |p, base: f32| resolve(cx, style.get(p), Some(base));
+    let size = |p, base: f32, bp: f32| get(p, base).map(|v| if border_box { (v - bp).max(0.0) } else { v });
+    let (lo, hi) = (size(Property::MinWidth, cb.w, bp_x).unwrap_or(0.0), size(Property::MaxWidth, cb.w, bp_x).unwrap_or(f32::INFINITY));
+    // Percent margins are of the width of the containing block, on all four sides.
+    let (mx, my) = ((get(Property::MarginLeft, cb.w), get(Property::MarginRight, cb.w)), (get(Property::MarginTop, cb.w), get(Property::MarginBottom, cb.w)));
+    let (left, right) = (get(Property::Left, cb.w), get(Property::Right, cb.w));
+    let (top, bottom) = (get(Property::Top, cb.h), get(Property::Bottom, cb.h));
+    let width = size(Property::Width, cb.w, bp_x).map(|w| w.min(hi).max(lo));
+    let height = size(Property::Height, cb.h, bp_y);
+    let shrink = |cx: &mut Cx, room: f32| {
+        let (min, max) = intrinsic::sizes(cx, node);
+        max.min(min.max(room)).min(hi).max(lo)
+    };
+    let (x, w, ml, mr) = axis(cx, cb.w, left, right, width, mx, bp_x, sx, shrink);
+    let w = w.min(hi).max(lo);
+
+    // The height: known before the layout if it is fixed, or if `top` and `bottom` fix it. Else from the content.
+    // `min-height` and `max-height` apply in `sized`.
+    let fill = match (top, bottom, height) {
+        (Some(t), Some(b), None) => Some((cb.h - t - b - my.0.unwrap_or(0.0) - my.1.unwrap_or(0.0) - bp_y).max(0.0)),
+        _ => None,
+    };
+    let marker = cx.marker.take();
+    let done = sized(cx, node, Space { width: cb.w, height: Some(cb.h) }, Some((w, ml, mr)), fill, Pos::default());
+    cx.marker = marker;
+    let content = done.height - bp_y;
+    let (y, _, mt, _) = axis(cx, cb.h, top, bottom, Some(content), my, bp_y, sy, |_, h| h);
+    let f = &mut cx.out[done.fragment];
+    f.rect.x = cb.x + x + ml;
+    f.rect.y = cb.y + y + mt;
+}
+
+/// One axis of an absolutely positioned box (CSS 2.1, 10.3.7 for the width, 10.6.4 for the height). `cb`: the size of
+/// the containing block. `start`, `end`: `left` and `right` (or `top` and `bottom`), `None` for `auto`. `size`: the
+/// content size, if it is not `auto`. `m`: the margins. `bp`: the borders and padding. `stat`: the static position.
+/// `fit`: the size for `auto`, given the room. Gives the start of the margin box, the content size, and the margins.
+#[allow(clippy::too_many_arguments)]
+fn axis(cx: &mut Cx, cb: f32, start: Option<f32>, end: Option<f32>, size: Option<f32>, m: (Option<f32>, Option<f32>), bp: f32, stat: f32, fit: impl FnOnce(&mut Cx, f32) -> f32) -> (f32, f32, f32, f32) {
+    let (m1, m2) = (m.0.unwrap_or(0.0), m.1.unwrap_or(0.0));
+    match (start, end, size) {
+        (Some(s), Some(e), Some(z)) => {
+            // Nothing is `auto`: `auto` margins share what is left, else the end is ignored (left to right).
+            let rest = cb - s - e - z - bp;
+            match m {
+                (None, None) if rest >= 0.0 => (s, z, rest / 2.0, rest / 2.0),
+                (None, None) => (s, z, 0.0, rest),
+                (None, Some(b)) => (s, z, rest - b, b),
+                (Some(a), None) => (s, z, a, rest - a),
+                (Some(a), Some(b)) => (s, z, a, b),
+            }
+        }
+        // Both sides are fixed: the box fills the room between them.
+        (Some(s), Some(e), None) => (s, (cb - s - e - m1 - m2 - bp).max(0.0), m1, m2),
+        (None, None, z) => (stat, z.unwrap_or_else(|| fit(cx, cb - stat - m1 - m2 - bp)), m1, m2),
+        (Some(s), None, z) => (s, z.unwrap_or_else(|| fit(cx, cb - s - m1 - m2 - bp)), m1, m2),
+        (None, Some(e), z) => {
+            let z = z.unwrap_or_else(|| fit(cx, cb - e - m1 - m2 - bp));
+            (cb - e - m2 - z - bp - m1, z, m1, m2)
+        }
+    }
 }
 
 /// The width of a scrollbar: the classic ones of Chrome on Linux and Windows. The overlay scrollbars of macOS and phones take no room.
@@ -460,7 +620,7 @@ fn children(cx: &mut Cx, node: NodeId, space: Space, top_open: bool, dy: f32, dx
                     }
                     kids.bottom = Strut::default();
                     let mt = resolve(cx, cx.tree.style(b).get(Property::MarginTop), Some(space.width)).unwrap_or(0.0);
-                    let done = sized(cx, b, space, forced, Pos { x: here.x, y: y - mt, strut: Strut::default() });
+                    let done = sized(cx, b, space, forced, None, Pos { x: here.x, y: y - mt, strut: Strut::default() });
                     let top = Strut { positive: mt.max(0.0), negative: mt.min(0.0) }.with(done.top);
                     let y = y - mt - kids.top_y + top.sum();
                     cx.out[done.fragment].rect.y = y + dy;
@@ -473,7 +633,7 @@ fn children(cx: &mut Cx, node: NodeId, space: Space, top_open: bool, dy: f32, dx
                     kids.bottom.merge(done.bottom);
                     continue;
                 }
-                let done = sized(cx, b, space, forced, pos);
+                let done = sized(cx, b, space, forced, None, pos);
                 kids.bottom.add(done.margin_top);
                 kids.bottom.merge(done.top);
                 if done.through {
@@ -814,6 +974,98 @@ pub(crate) mod tests {
         let html = "<ol style='overflow:auto;height:20px'><li>a<li>b<li>c</ol>";
         let out = dump(html, "");
         assert!(out.contains("marker 3") && !out.contains("marker 4"), "{out}");
+    }
+
+    // A containing block at (8, 8) with a border of 2 and a padding of 5: its padding box is at (10, 10), 310 by 90.
+    const CB: &str = "#c { position: relative; width: 300px; height: 80px; border: 2px solid; padding: 5px } .a { position: absolute }";
+
+    fn in_cb(inner: &str) -> Rect {
+        rect(&format!("<div id=c>{inner}</div>"), CB, "a")
+    }
+
+    #[test]
+    fn relative_moves_a_block_and_what_is_inside() {
+        let html = "<div id=d style='position:relative;top:5px;left:10px;width:200px'><p id=p style='margin:0'>x</p></div>";
+        assert_eq!(rect(html, "", "d"), r(18.0, 13.0, 200.0, 22.0));
+        assert_eq!(rect(html, "", "p"), r(18.0, 13.0, 200.0, 22.0));
+        // `right` and `bottom` move the other way. `left` wins over `right`.
+        let html = "<div id=d style='position:relative;bottom:5px;right:10px;left:1px'>x</div>";
+        assert_eq!(rect(html, "", "d"), r(9.0, 3.0, 784.0, 22.0));
+    }
+
+    #[test]
+    fn relative_moves_an_inline_box_and_its_text() {
+        let html = "<p>ab <span id=s style='position:relative;top:-4px;left:3px'>cd</span></p>";
+        let (_, layout) = run(html, "");
+        let text = layout.fragments.iter().rev().find(|f| matches!(f.kind, crate::fragment::Kind::Text { .. })).unwrap().rect;
+        // "ab " is 28.8 wide: the span and its text start at 8 + 28.8 + 3, and 4 higher than the line.
+        let span = rect(html, "", "s");
+        assert!((span.x - 39.8).abs() < 0.01 && span.y == 12.0, "{span:?}");
+        assert_eq!((text.x, text.y), (span.x, span.y));
+    }
+
+    #[test]
+    fn absolute_boxes_in_their_containing_block() {
+        assert_eq!(in_cb("<div id=a class=a style='top:10px;left:20px;width:50px;height:20px'></div>"), r(30.0, 20.0, 50.0, 20.0));
+        // `right` and `bottom`, and the width of the content ("corner", 6 letters).
+        assert_eq!(in_cb("<div id=a class=a style='right:0;bottom:0'>corner</div>"), r(10.0 + 310.0 - 57.6, 78.0, 57.6, 22.0));
+        // `left` and `right` fix the width, `top` and `bottom` the height.
+        assert_eq!(in_cb("<div id=a class=a style='left:10px;right:30px;top:5px;bottom:10px'>x</div>"), r(20.0, 15.0, 270.0, 75.0));
+        // All fixed, with `auto` margins: in the middle.
+        assert_eq!(in_cb("<div id=a class=a style='left:0;right:0;top:0;bottom:0;width:100px;height:30px;margin:auto'></div>"), r(115.0, 40.0, 100.0, 30.0));
+        // Percent of the padding box, and `box-sizing`.
+        assert_eq!(in_cb("<div id=a class=a style='left:10%;top:50%;width:50%;height:50%;padding:4px;box-sizing:border-box'></div>"), r(41.0, 55.0, 155.0, 45.0));
+        // `float` does nothing on it.
+        assert_eq!(in_cb("<div id=a class=a style='right:10px;top:0;float:left'>corner</div>"), r(10.0 + 300.0 - 57.6, 10.0, 57.6, 22.0));
+    }
+
+    #[test]
+    fn with_no_offsets_an_absolute_box_stays_at_its_static_position() {
+        // A block: under the line before it, at the left of the content box (15, 15).
+        assert_eq!(in_cb("before<div id=a class=a>x</div>"), r(15.0, 37.0, 9.6, 22.0));
+        // An inline: where the line is, after "ab " (28.8).
+        let a = in_cb("ab <span id=a class=a>x</span> cd");
+        assert!((a.x - 43.8).abs() < 0.01 && (a.y, a.w, a.h) == (15.0, 9.6, 22.0), "{a:?}");
+        // It takes no room: the text after it is where it would be without it.
+        let html = "<div id=c><div class=a>x</div><p id=a style='margin:0'>y</p></div>";
+        assert_eq!(rect(html, CB, "a"), r(15.0, 15.0, 300.0, 22.0));
+    }
+
+    #[test]
+    fn the_window_is_the_containing_block_without_a_positioned_box() {
+        let html = "<div style='margin:50px'><div id=a style='position:absolute;left:600px;top:20px;width:100px'></div></div>";
+        assert_eq!(rect(html, "", "a"), r(600.0, 20.0, 100.0, 0.0));
+        // `fixed` also inside a positioned box. The test window is 800 by 600.
+        let html = "<div style='position:relative;margin:50px'><div id=a style='position:fixed;right:0;bottom:0;width:80px;height:30px'></div></div>";
+        assert_eq!(rect(html, "", "a"), r(720.0, 570.0, 80.0, 30.0));
+    }
+
+    #[test]
+    fn absolute_inside_absolute() {
+        let html = "<div id=c><div class=a style='top:10px;left:10px;width:150px;height:60px'><div id=a class=a style='right:5px;bottom:5px;width:20px;height:20px'></div></div></div>";
+        assert_eq!(rect(html, CB, "a"), r(145.0, 55.0, 20.0, 20.0));
+    }
+
+    #[test]
+    fn bottom_zero_in_a_block_with_auto_height() {
+        let html = "<div id=c style='height:auto'><div id=a class=a style='bottom:0;left:0'>x</div>a<br>b<br>c</div>";
+        // The padding box is 66 + 10 tall.
+        assert_eq!(rect(html, CB, "a"), r(10.0, 10.0 + 76.0 - 22.0, 9.6, 22.0));
+    }
+
+    #[test]
+    fn a_static_position_follows_text_align() {
+        // "mid line" is 8 letters, 76.8 wide: the line starts at 8 + (300 - 76.8) / 2, and the box after "mid ".
+        let html = "<div style='text-align:center;width:300px'>mid <span id=a style='position:absolute'>abs</span> line</div>";
+        assert_eq!(rect(html, "", "a").x, 8.0 + 111.6 + 38.4);
+    }
+
+    #[test]
+    fn a_relative_inline_box_is_a_containing_block() {
+        // The span starts after "text " (48 px) at y = 8. `left: 0; top: 0` is the corner of its padding box.
+        let html = "<div style='width:300px'>text <span style='position:relative;padding-left:20px'>in <span id=a style='position:absolute;left:0;top:0'>x</span></span></div>";
+        let a = rect(html, "", "a");
+        assert_eq!((a.x, a.y), (8.0 + 48.0, 8.0));
     }
 
     #[test]

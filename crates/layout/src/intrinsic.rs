@@ -128,6 +128,8 @@ fn lines(cx: &mut Cx, first: NodeId, last: NodeId) -> (f32, f32) {
                 unit += edge;
                 line += edge;
             }
+            // Out of the flow: it adds nothing to the widths around it.
+            Event::OutOfFlow(_) => {}
             Event::Float(node) => {
                 // A float is not a break opportunity. On one line it adds its width; it never fits in less than its own min.
                 let (a, b) = outer(cx, node);

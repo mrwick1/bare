@@ -54,6 +54,10 @@ pub enum Kind {
     /// `float: left` or `right`: out of the normal flow, at the side of the block (`floats.rs`). Inside it is a block
     /// with its own block formatting context, like an inline-block.
     Float,
+    /// `position: absolute` or `fixed`: out of the flow, placed in its containing block (`block::out_of_flow`). It
+    /// leaves a "static position" in the flow, where it would be with `position: static`. Inside it is a block with its
+    /// own block formatting context.
+    OutOfFlow,
     /// A text node.
     Text,
     /// `<br>`: the line ends here.
@@ -63,7 +67,7 @@ pub enum Kind {
 impl Kind {
     /// Does it sit in a line (an inline-level box), and not in a stack of blocks?
     pub fn is_inline(self) -> bool {
-        matches!(self, Kind::Inline | Kind::Atomic | Kind::Text | Kind::Break | Kind::Float)
+        matches!(self, Kind::Inline | Kind::Atomic | Kind::Text | Kind::Break | Kind::Float | Kind::OutOfFlow)
         // A float counts here: it goes with the inline content next to it, so text around it stays in one run of lines.
     }
 
@@ -122,6 +126,8 @@ impl<'a> Tree<'a> {
                     Keyword::None => Kind::None,
                     _ if self.doc.parent(node) == Some(self.doc.root()) => Kind::Block,
                     // The root element is always a block, whatever its `display` (CSS Display 3: "blockify").
+                    _ if matches!(style.get(Property::Position), Value::Keyword(Keyword::Absolute | Keyword::Fixed)) => Kind::OutOfFlow,
+                    // `float` does nothing on a box that is out of the flow (CSS 2.1, 9.7).
                     _ if matches!(style.get(Property::Float), Value::Keyword(Keyword::Left | Keyword::Right)) => Kind::Float,
                     // A float is a block, whatever its `display`: a floated `<span>` too.
                     Keyword::Inline if Some(name) == self.br => Kind::Break,
@@ -174,6 +180,14 @@ impl<'a> Tree<'a> {
             return visible;
         }
         get(node)
+    }
+
+    /// The `position` of a box.
+    pub fn position(&self, node: NodeId) -> Keyword {
+        match self.style(node).get(Property::Position) {
+            Value::Keyword(k) => k,
+            _ => Keyword::Static,
+        }
     }
 
     /// Is this block a scroll container: does it hide or scroll what does not fit? `clip` hides it too, but it is not one.
@@ -317,8 +331,12 @@ pub fn dump(tree: &Tree) -> String {
                     let kids: Vec<_> = tree.doc.children(node).collect();
                     stack.extend(kids.into_iter().rev().map(|c| (Item::Inline(c), depth + 1)));
                 }
-                Kind::Atomic | Kind::Float => {
-                    let label = if tree.kind(node) == Kind::Float { "float" } else { "atomic" };
+                Kind::Atomic | Kind::Float | Kind::OutOfFlow => {
+                    let label = match tree.kind(node) {
+                        Kind::Float => "float",
+                        Kind::OutOfFlow => "out of flow",
+                        _ => "atomic",
+                    };
                     out += &format!("{indent}{label} {}\n", name(tree, node));
                     blocks(node, depth, &mut stack);
                 }

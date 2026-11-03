@@ -93,12 +93,13 @@ const LAYOUT_SEEDS: &[&str] = &[
     "<div style='box-sizing:border-box;width:10px;padding:20px;border:9px solid'>wordwordword</div><div style='white-space:nowrap;text-transform:uppercase'>stra\u{df}e a b c</div>",
     "<style>.l{float:left;width:30px;height:20px}.r{float:right;margin:-3px}</style><div style='width:100px;margin-top:9px'><div class=l></div>aa <b class=r>bb</b> cc<p style='clear:both'>d</p><div style='display:flow-root'>e<i class=l>f</i></div></div>",
     "<div style='overflow:auto;max-height:20px;width:60px'><div style='overflow-x:scroll'>aa bb<br>cc</div><span style='display:inline-block;overflow:hidden'>dd</span><p style='white-space:nowrap'>eeeeeeeeeeeeeeeeeeee</p></div>",
+    "<div style='position:relative;width:80px'>a <span style='position:relative;top:2px'>b <i style='position:absolute;right:0;bottom:-5px'>c</i></span><div style='position:absolute;left:5px;right:5px;top:0;bottom:0;margin:auto;height:9px'><b style='position:fixed;bottom:0'>d</b></div><p style='position:sticky;top:0'>e</p></div>",
 ];
 
 const LAYOUT_WORDS: &[&str] = &[
     "<div>", "</div>", "<span>", "</span>", "<br>", "<p>", "<li>", "<pre>", "<i style='display:inline-block'>", "</i>", "<b style='font-size:0'>", "</b>", " ", "  ", "\n", "\t", "word", "\u{4e2d}",
     "e\u{301}", "display:", "inline-block", "block", "none", "width:", "0", "-1px", "1e30px", "100%", "auto", "margin:", "padding:", "line-height:", "font-size:", "white-space:", "pre", "nowrap", ";", "'", "\"", "<style>", "</style>",
-    "float:", "left", "right", "clear:", "both", "flow-root", "height:", "-50px", "overflow:", "auto", "scroll", "hidden", "clip", "max-height:", "nowrap",
+    "float:", "left", "right", "clear:", "both", "flow-root", "height:", "-50px", "overflow:", "auto", "scroll", "hidden", "clip", "max-height:", "nowrap", "position:", "relative", "absolute", "fixed", "sticky", "top:", "left:", "right:", "bottom:", "10%",
 ];
 
 const URL_SEEDS: &[&str] = &[

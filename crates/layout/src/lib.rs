@@ -42,11 +42,17 @@ pub struct Cx<'a> {
     pub bars: HashMap<u32, (bool, bool)>,
     /// How many layouts run again inside one another because a box found that it needs a scrollbar (`block::sized`).
     pub again: u32,
+    /// The offsets of the boxes with `position: relative`, by `NodeId::index`. They move at the end of layout.
+    pub rel: HashMap<u32, (f32, f32)>,
+    /// The page has a box with `position: fixed`.
+    pub fixed: bool,
+    /// The static positions that wait for their containing block. With none, no walk is needed.
+    pub waiting: u32,
 }
 
 /// Lay out a page in a window of `viewport` (width, height) CSS pixels.
 pub fn layout(doc: &Document, styles: &Styles, viewport: (f32, f32)) -> Layout {
-    let mut cx = Cx { tree: boxes::Tree::new(doc, styles), out: Vec::with_capacity(doc.len()), depth: 0, marker: None, number: 0, sizes: HashMap::new(), measuring: 0, spare: Vec::new(), floats: Default::default(), bars: HashMap::new(), again: 0 };
+    let mut cx = Cx { tree: boxes::Tree::new(doc, styles), out: Vec::with_capacity(doc.len()), depth: 0, marker: None, number: 0, sizes: HashMap::new(), measuring: 0, spare: Vec::new(), floats: Default::default(), bars: HashMap::new(), again: 0, rel: HashMap::new(), fixed: false, waiting: 0 };
     // Most pages make about one fragment for each DOM node: one for each element and each text on one line, none for
     // the `head` and for the spaces between blocks. Room for that many at once saves the copies of a `Vec` that grows.
     let mut height = 0.0;
@@ -54,8 +60,30 @@ pub fn layout(doc: &Document, styles: &Styles, viewport: (f32, f32)) -> Layout {
         // The root element sits in the window (the "initial containing block"). It makes its own block formatting
         // context, so its margins stay apart from the margins inside it.
         let done = block::block(&mut cx, root, Space { width: viewport.0, height: Some(viewport.1) }, Pos::default());
+        let root_box = cx.out[done.fragment].rect;
         cx.out[done.fragment].rect.y = done.margin_top;
         height = done.margin_top + done.height + done.margin_bottom;
+        // The window is the containing block of the absolute boxes with no positioned block above them, and of the
+        // `fixed` ones (the page is not scrolled). A positioned root took its own absolute boxes already.
+        let window = fragment::Rect { x: -root_box.x, y: -done.margin_top, w: viewport.0, h: viewport.1 };
+        let abs = cx.tree.position(root) == bare_css::values::Keyword::Static;
+        if (abs || cx.fixed) && cx.waiting > 0 {
+            block::out_of_flow(&mut cx, done.fragment, window, true, abs);
+        }
+        cx.out[done.fragment].end = cx.out.len() as u32;
+    }
+    fragment::drop_statics(&mut cx.out);
+    // `position: relative` moves a block with all that is inside it. Inline boxes moved when their line was written.
+    if !cx.rel.is_empty() {
+        for f in &mut cx.out {
+            if f.kind == fragment::Kind::Box
+                && !matches!(cx.tree.kind(f.node), boxes::Kind::Inline)
+                && let Some(&(dx, dy)) = cx.rel.get(&(f.node.index() as u32))
+            {
+                f.rect.x += dx;
+                f.rect.y += dy;
+            }
+        }
     }
     fragment::absolute(&mut cx.out);
     Layout { fragments: cx.out, width: viewport.0, height }
