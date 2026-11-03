@@ -51,6 +51,9 @@ pub enum Kind {
     /// An inline box that is one unit on the line, with a block inside: `inline-block`, `button`, `img`.
     /// It is never cut across two lines. CSS calls it an "atomic inline".
     Atomic,
+    /// `float: left` or `right`: out of the normal flow, at the side of the block (`floats.rs`). Inside it is a block
+    /// with its own block formatting context, like an inline-block.
+    Float,
     /// A text node.
     Text,
     /// `<br>`: the line ends here.
@@ -60,7 +63,8 @@ pub enum Kind {
 impl Kind {
     /// Does it sit in a line (an inline-level box), and not in a stack of blocks?
     pub fn is_inline(self) -> bool {
-        matches!(self, Kind::Inline | Kind::Atomic | Kind::Text | Kind::Break)
+        matches!(self, Kind::Inline | Kind::Atomic | Kind::Text | Kind::Break | Kind::Float)
+        // A float counts here: it goes with the inline content next to it, so text around it stays in one run of lines.
     }
 
     /// Is it a block in a stack of blocks (a block-level box)?
@@ -117,6 +121,8 @@ impl<'a> Tree<'a> {
                     Keyword::None => Kind::None,
                     _ if self.doc.parent(node) == Some(self.doc.root()) => Kind::Block,
                     // The root element is always a block, whatever its `display` (CSS Display 3: "blockify").
+                    _ if matches!(style.get(Property::Float), Value::Keyword(Keyword::Left | Keyword::Right)) => Kind::Float,
+                    // A float is a block, whatever its `display`: a floated `<span>` too.
                     Keyword::Inline if Some(name) == self.br => Kind::Break,
                     Keyword::Inline => Kind::Inline,
                     Keyword::ListItem => Kind::ListItem,
@@ -281,8 +287,9 @@ pub fn dump(tree: &Tree) -> String {
                     let kids: Vec<_> = tree.doc.children(node).collect();
                     stack.extend(kids.into_iter().rev().map(|c| (Item::Inline(c), depth + 1)));
                 }
-                Kind::Atomic => {
-                    out += &format!("{indent}atomic {}\n", name(tree, node));
+                Kind::Atomic | Kind::Float => {
+                    let label = if tree.kind(node) == Kind::Float { "float" } else { "atomic" };
+                    out += &format!("{indent}{label} {}\n", name(tree, node));
                     blocks(node, depth, &mut stack);
                 }
                 Kind::Block | Kind::ListItem => {

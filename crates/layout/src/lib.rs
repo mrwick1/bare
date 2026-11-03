@@ -5,6 +5,7 @@
 
 pub mod block;
 pub mod boxes;
+pub mod floats;
 // `pub mod` makes the module visible to other crates: `bare_layout::boxes`.
 pub mod font;
 pub mod fragment;
@@ -15,7 +16,7 @@ pub mod text;
 use bare_css::cascade::Styles;
 use bare_html::dom::{Atom, Document, NodeData, NodeId};
 use std::collections::HashMap;
-use block::Space;
+use block::{Pos, Space};
 use fragment::{Fragment, Layout};
 
 /// What all of layout shares while it runs.
@@ -35,18 +36,20 @@ pub struct Cx<'a> {
     pub measuring: u32,
     /// Empty lists of fragments, to use again for the next inline-block (`inline.rs`): no new allocation for each one.
     pub spare: Vec<Vec<Fragment>>,
+    /// The floats of the block formatting context that is laid out now (`floats.rs`).
+    pub floats: floats::Floats,
 }
 
 /// Lay out a page in a window of `viewport` (width, height) CSS pixels.
 pub fn layout(doc: &Document, styles: &Styles, viewport: (f32, f32)) -> Layout {
-    let mut cx = Cx { tree: boxes::Tree::new(doc, styles), out: Vec::with_capacity(doc.len()), depth: 0, marker: None, number: 0, sizes: HashMap::new(), measuring: 0, spare: Vec::new() };
+    let mut cx = Cx { tree: boxes::Tree::new(doc, styles), out: Vec::with_capacity(doc.len()), depth: 0, marker: None, number: 0, sizes: HashMap::new(), measuring: 0, spare: Vec::new(), floats: Default::default() };
     // Most pages make about one fragment for each DOM node: one for each element and each text on one line, none for
     // the `head` and for the spaces between blocks. Room for that many at once saves the copies of a `Vec` that grows.
     let mut height = 0.0;
     if let Some(root) = cx.tree.root() {
         // The root element sits in the window (the "initial containing block"). It makes its own block formatting
         // context, so its margins stay apart from the margins inside it.
-        let done = block::block(&mut cx, root, Space { width: viewport.0, height: Some(viewport.1) });
+        let done = block::block(&mut cx, root, Space { width: viewport.0, height: Some(viewport.1) }, Pos::default());
         cx.out[done.fragment].rect.y = done.margin_top;
         height = done.margin_top + done.height + done.margin_bottom;
     }

@@ -190,7 +190,7 @@ keywords! {
     Medium => "medium", Large => "large", XLarge => "x-large", XxLarge => "xx-large",
     XxxLarge => "xxx-large", Thin => "thin", Thick => "thick", Disc => "disc",
     Circle => "circle", Square => "square", Decimal => "decimal", ContentBox => "content-box",
-    BorderBox => "border-box",
+    BorderBox => "border-box", FlowRoot => "flow-root",
 }
 
 /// The value of one property. It does not say which property: a `Declared` has that.
@@ -674,7 +674,7 @@ fn longhand(property: Property, part: Part) -> Option<Value> {
         Display => one_of(part, &[
             K::None, K::Block, K::Inline, K::InlineBlock, K::ListItem, K::Table, K::TableRow, K::TableCell, K::TableRowGroup,
             K::TableHeaderGroup, K::TableFooterGroup, K::TableColumn, K::TableColumnGroup, K::TableCaption, K::Flex, K::InlineFlex,
-            K::Grid, K::InlineGrid,
+            K::Grid, K::InlineGrid, K::FlowRoot,
         ]),
         Float => one_of(part, &[K::None, K::Left, K::Right]),
         Clear => one_of(part, &[K::None, K::Left, K::Right, K::Both]),
@@ -928,6 +928,7 @@ mod tests {
     fn keyword_properties() {
         assert_eq!(one("display", "block"), Some(Value::Keyword(K::Block)));
         assert_eq!(one("display", "Inline-Block"), Some(Value::Keyword(K::InlineBlock)));
+        assert_eq!(one("display", "flow-root"), Some(Value::Keyword(K::FlowRoot)));
         assert_eq!(one("display", "none"), Some(Value::Keyword(K::None)));
         assert_eq!(parse("display", "bold"), vec![]);
         assert_eq!(parse("display", "block inline"), vec![]);
