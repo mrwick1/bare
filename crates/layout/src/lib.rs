@@ -13,7 +13,7 @@ pub mod intrinsic;
 pub mod text;
 
 use bare_css::cascade::Styles;
-use bare_html::dom::{Document, NodeData, NodeId};
+use bare_html::dom::{Atom, Document, NodeData, NodeId};
 use std::collections::HashMap;
 use block::Space;
 use fragment::{Fragment, Layout};
@@ -54,8 +54,8 @@ pub fn layout(doc: &Document, styles: &Styles, viewport: (f32, f32)) -> Layout {
     Layout { fragments: cx.out, width: viewport.0, height }
 }
 
-/// The fragments as text, one on each line, for tests and for `bare --layout`: the name, then `x,y wxh`. Text fragments
-/// show their text.
+/// The fragments as text, one on each line, for tests and for `bare --layout`: the name (with `#id` if the element has
+/// one), then `x,y wxh`. Text fragments show their text.
 pub fn dump(doc: &Document, layout: &Layout) -> String {
     let mut out = String::new();
     let mut ends: Vec<u32> = Vec::new();
@@ -66,7 +66,10 @@ pub fn dump(doc: &Document, layout: &Layout) -> String {
         out += &"  ".repeat(ends.len());
         let r = f.rect;
         let what = match (f.kind, doc.data(f.node)) {
-            (fragment::Kind::Box, &NodeData::Element { name, .. }) => doc.atom_str(name).to_string(),
+            (fragment::Kind::Box, &NodeData::Element { name, .. }) => match doc.attr(f.node, Atom::ID) {
+                Some(id) => format!("{}#{id}", doc.atom_str(name)),
+                None => doc.atom_str(name).to_string(),
+            },
             (fragment::Kind::Text { start, end }, &NodeData::Text(span)) => format!("{:?}", &doc.text(span)[start as usize..end as usize]),
             (fragment::Kind::Marker { number }, _) => format!("marker {number}"),
             _ => String::from("?"),

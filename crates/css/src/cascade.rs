@@ -125,6 +125,11 @@ pub struct RuleSet {
 }
 
 impl RuleSet {
+    /// The width and height of the window that the rules were made for.
+    pub fn viewport(&self) -> (f32, f32) {
+        self.viewport
+    }
+
     pub fn new(viewport: (f32, f32)) -> RuleSet {
         RuleSet { viewport, entries: Vec::new(), decls: Vec::new(), side: Side::default(), layers: vec![Layer { parent: 0 }], layer_by_name: HashMap::new(), customs: Vec::new(), by_id: Buckets::default(), by_class: Buckets::default(), by_tag: Buckets::default(), other: Vec::new() }
     }

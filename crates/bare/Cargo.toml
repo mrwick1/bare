@@ -8,5 +8,6 @@ license.workspace = true
 [dependencies]
 bare-css = { path = "../css" }
 bare-html = { path = "../html" }
+bare-layout = { path = "../layout" }
 bare-net = { path = "../net" }
 bare-url = { path = "../url" }
