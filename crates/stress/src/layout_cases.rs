@@ -75,6 +75,14 @@ fn pieces(text: String, ws: WhiteSpace, transform: Transform) -> Work {
 const NORMAL: WhiteSpace = WhiteSpace { collapse: true, newlines: false, wrap: true };
 const PRE: WhiteSpace = WhiteSpace { collapse: false, newlines: true, wrap: false };
 
+/// Time the whole layout of a page.
+fn lay(page: String, sheet: &str) -> Work {
+    let (doc, styles) = styled(&page, sheet);
+    Box::new(move || {
+        black_box(bare_layout::layout(&doc, &styles, (1280.0, 800.0)));
+    })
+}
+
 pub fn all() -> Vec<Case> {
     vec![
         // Topic 1: the box tree
@@ -96,6 +104,14 @@ pub fn all() -> Vec<Case> {
         case("text-one-letter-words", 1_000_000, |n| pieces("a ".repeat(n), NORMAL, Transform::None)),
         case("text-accents", 100_000, |n| pieces("caf\u{e9} e\u{301}t\u{e9} ".repeat(n), NORMAL, Transform::None)),
         case("text-chinese", 100_000, |n| pieces("\u{4e2d}\u{6587}\u{5b57} ".repeat(n), NORMAL, Transform::None)),
+        // Topic 3: block layout
+        case("block-wide", 20_000, |n| lay("<div></div>".repeat(n), "div { height: 1px; margin: 3px }")),
+        case("block-deep", 40, |n| lay("<div>".repeat(n), "div { padding: 1px; margin: 1px }")),
+        case("block-deep-over-limit", 2_000, |n| lay("<div>".repeat(n), "")),
+        case("block-collapse-through", 20_000, |n| lay("<div></div>".repeat(n), "div { margin: 5px 0 }")),
+        case("block-nested-collapse", 20, |n| lay(format!("{}x{}", "<div>".repeat(n), "</div>".repeat(n)), "div { margin: 2px 0 }")),
+        case("block-percent-calc", 20_000, |n| lay("<div></div>".repeat(n), "div { width: calc(50% - 3px); padding: 1%; margin: 0 auto; max-width: 70%; height: 2px }")),
+        case("block-list-items", 20_000, |n| lay(format!("<ol>{}</ol>", "<li><div></div>".repeat(n)), "")),
         case("text-uppercase", 100_000, |n| pieces("stra\u{df}e ".repeat(n), NORMAL, Transform::Upper)),
     ]
 }
