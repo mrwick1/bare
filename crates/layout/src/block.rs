@@ -153,7 +153,7 @@ pub fn border_padding(cx: &Cx, style: &ComputedStyle, cb_width: f32) -> (Sides, 
 
 /// Does this block make its own block formatting context? Then the margins of its children do not collapse with its own.
 pub fn own_context(cx: &Cx, node: NodeId) -> bool {
-    if matches!(cx.tree.kind(node), Kind::Atomic | Kind::Float | Kind::OutOfFlow) || Some(node) == cx.tree.root() {
+    if matches!(cx.tree.kind(node), Kind::Atomic | Kind::Float | Kind::OutOfFlow) || Some(node) == cx.tree.root() || cx.tree.is_flex_or_grid(cx.tree.doc.parent(node)) {
         return true;
     }
     cx.tree.scrolls(node)
@@ -161,6 +161,34 @@ pub fn own_context(cx: &Cx, node: NodeId) -> bool {
         cx.tree.style(node).get(Property::Display),
         Value::Keyword(Keyword::Table | Keyword::TableCell | Keyword::TableCaption | Keyword::Flex | Keyword::Grid | Keyword::FlowRoot)
     )
+}
+
+/// What lays out the content of a block container: its formatting context.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Context {
+    /// Blocks and lines: `children` here, and `inline.rs`.
+    Flow,
+    /// `display: flex` and `inline-flex` (`flex.rs`).
+    Flex,
+    /// `display: grid` and `inline-grid` (`grid.rs`).
+    Grid,
+    /// `display: table` (`table.rs`).
+    Table,
+}
+
+pub fn context(cx: &Cx, node: NodeId) -> Context {
+    match cx.tree.style(node).get(Property::Display) {
+        Value::Keyword(Keyword::Flex | Keyword::InlineFlex) => Context::Flex,
+        Value::Keyword(Keyword::Grid | Keyword::InlineGrid) => Context::Grid,
+        Value::Keyword(Keyword::Table) => Context::Table,
+        _ => Context::Flow,
+    }
+}
+
+/// Lay out the content of a flex, grid or table container as blocks and lines, for the contexts that are not built yet.
+/// The container is its own BFC: the content box starts at `bp.left`, `bp.top`.
+pub(crate) fn flow(cx: &mut Cx, node: NodeId, space: Space, bp: Sides) -> Kids {
+    children(cx, node, space, false, bp.top, bp.left, Pos { x: bp.left, y: bp.top, strut: Strut::default() }, f32::INFINITY)
 }
 
 /// What the parent needs from a child block.
@@ -270,7 +298,13 @@ pub fn sized(cx: &mut Cx, node: NodeId, space: Space, forced: Option<(f32, f32, 
         let stop = if retry && auto.0 && !bars.0 { room } else { f32::INFINITY };
         let kids = if cx.depth < MAX_DEPTH {
             cx.depth += 1;
-            let kids = children(cx, node, inner, top_open, bp.top, bp.left, here, stop);
+            // Flex, grid and table containers are their own BFC, so `top_open` is false for them.
+            let kids = match context(cx, node) {
+                Context::Flow => children(cx, node, inner, top_open, bp.top, bp.left, here, stop),
+                Context::Flex => crate::flex::layout(cx, node, inner, bp),
+                Context::Grid => crate::grid::layout(cx, node, inner, bp),
+                Context::Table => crate::table::layout(cx, node, inner, bp),
+            };
             cx.depth -= 1;
             kids
         } else {
@@ -572,8 +606,9 @@ pub fn widths(cx: &Cx, style: &ComputedStyle, cb: f32, bp: f32) -> (f32, f32, f3
     (w, l, r)
 }
 
-/// The result of the children of a block.
-struct Kids {
+/// The result of the children of a block. A flex, grid or table layout gives one too: `y` is the height of its content,
+/// `baseline` its first baseline, and the rest is empty (no margin goes out of a BFC).
+pub(crate) struct Kids {
     /// The bottom of the last child (its border box), from the top of the content box.
     y: f32,
     /// The margins that came out through the top. Only if `top_open`.
@@ -586,6 +621,14 @@ struct Kids {
     baseline: Option<f32>,
     /// Where the content box starts in the BFC, once the margins at the top are resolved (when `open` is false).
     top_y: f32,
+}
+
+impl Kids {
+    /// The result of a layout that is its own BFC: the height of the content box, and its first baseline from its top.
+    #[allow(dead_code)] // For flex.rs, grid.rs and table.rs.
+    pub(crate) fn of(height: f32, baseline: Option<f32>) -> Kids {
+        Kids { y: height, top: Strut::default(), bottom: Strut::default(), open: false, baseline, top_y: 0.0 }
+    }
 }
 
 /// Lay out the children of a block, one under the other. `top_open`: the margins of the first child may go out through the

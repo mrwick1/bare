@@ -816,6 +816,13 @@ fn initial(p: Property) -> Value {
         FontWeight => Value::Number(400.0),
         Width | Height | Top | Right | Bottom | Left => Value::Keyword(K::Auto),
         Position => Value::Keyword(K::Static),
+        FlexDirection => Value::Keyword(K::Row),
+        FlexWrap => Value::Keyword(K::Nowrap),
+        FlexGrow | Order => Value::Number(0.0),
+        FlexShrink => Value::Number(1.0),
+        FlexBasis => Value::Keyword(K::Auto),
+        JustifyContent | AlignContent | AlignItems | RowGap | ColumnGap => Value::Keyword(K::Normal),
+        AlignSelf => Value::Keyword(K::Auto),
         MinWidth | MinHeight | MarginTop | MarginRight | MarginBottom | MarginLeft | PaddingTop | PaddingRight | PaddingBottom | PaddingLeft => px(0.0),
         BorderTopWidth | BorderRightWidth | BorderBottomWidth | BorderLeftWidth => px(3.0),
         // `medium`. With the style `none` it is 0: `compute` does that.

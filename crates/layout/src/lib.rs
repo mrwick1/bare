@@ -5,12 +5,15 @@
 
 pub mod block;
 pub mod boxes;
+pub mod flex;
 pub mod floats;
 // `pub mod` makes the module visible to other crates: `bare_layout::boxes`.
 pub mod font;
 pub mod fragment;
+pub mod grid;
 pub mod inline;
 pub mod intrinsic;
+pub mod table;
 pub mod text;
 
 use bare_css::cascade::Styles;

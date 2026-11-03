@@ -10,7 +10,7 @@
 //! kept, and 806 ms without (and 298 MB against 216 MB at the peak).
 
 use crate::Cx;
-use crate::block::{MAX_DEPTH, border_padding, resolve};
+use crate::block::{Context, MAX_DEPTH, border_padding, resolve};
 use crate::boxes::Child;
 use crate::font::{LETTER, Metrics};
 use crate::inline::{Event, Events};
@@ -29,15 +29,12 @@ pub fn sizes(cx: &mut Cx, node: NodeId) -> (f32, f32) {
     cx.depth += 1;
     cx.measuring += 1;
     let tree = cx.tree;
-    let (mut min, mut max) = (0.0f32, 0.0f32);
-    for child in tree.children(node) {
-        let (a, b) = match child {
-            Child::Block(b) => outer(cx, b),
-            Child::Lines(first, last) => lines(cx, first, last),
-        };
-        min = min.max(a);
-        max = max.max(b);
-    }
+    let (mut min, mut max) = match crate::block::context(cx, node) {
+        Context::Flow => flow(cx, node),
+        Context::Flex => crate::flex::sizes(cx, node),
+        Context::Grid => crate::grid::sizes(cx, node),
+        Context::Table => crate::table::sizes(cx, node),
+    };
     cx.depth -= 1;
     cx.measuring -= 1;
     // A scrollbar that is always there takes room in the content box. An `auto` one is not known yet: layout adds it.
@@ -51,9 +48,25 @@ pub fn sizes(cx: &mut Cx, node: NodeId) -> (f32, f32) {
     (min, max)
 }
 
+/// The min-content and max-content widths of the content of a block container laid out as blocks and lines: the widest
+/// of its children.
+pub(crate) fn flow(cx: &mut Cx, node: NodeId) -> (f32, f32) {
+    let tree = cx.tree;
+    let (mut min, mut max) = (0.0f32, 0.0f32);
+    for child in tree.children(node) {
+        let (a, b) = match child {
+            Child::Block(b) => outer(cx, b),
+            Child::Lines(first, last) => lines(cx, first, last),
+        };
+        min = min.max(a);
+        max = max.max(b);
+    }
+    (min, max)
+}
+
 /// The min-content and max-content widths of the margin box of a block or an inline-block. A percent counts as 0: it
 /// depends on the width that we are trying to find.
-fn outer(cx: &mut Cx, node: NodeId) -> (f32, f32) {
+pub(crate) fn outer(cx: &mut Cx, node: NodeId) -> (f32, f32) {
     let style = cx.tree.style(node);
     let (border, padding) = border_padding(cx, style, 0.0);
     let bp = border.horizontal() + padding.horizontal();
@@ -76,7 +89,7 @@ fn outer(cx: &mut Cx, node: NodeId) -> (f32, f32) {
 
 /// The min-content and max-content widths of a run of inline content: its longest unit that cannot break, and its
 /// longest line if it only breaks where it must (`<br>`, a kept newline).
-fn lines(cx: &mut Cx, first: NodeId, last: NodeId) -> (f32, f32) {
+pub(crate) fn lines(cx: &mut Cx, first: NodeId, last: NodeId) -> (f32, f32) {
     let tree = cx.tree;
     let (mut min, mut max) = (0.0f32, 0.0f32);
     let (mut unit, mut line, mut hang) = (0.0f32, 0.0f32, 0.0f32);
