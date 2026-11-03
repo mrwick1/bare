@@ -110,13 +110,21 @@ pub struct Pos {
 pub fn resolve(cx: &Cx, v: Value, base: Option<f32>) -> Option<f32> {
     let px = match v {
         Value::Length(Length::Px(x)) => Some(x),
-        Value::Length(Length::Percent(p)) => base.map(|b| b * p / 100.0),
+        Value::Length(Length::Percent(p)) => {
+            if base.is_none() {
+                cx.unknown.set(cx.unknown.get() + 1);
+            }
+            base.map(|b| b * p / 100.0)
+        }
         Value::Length(Length::Calc(i)) => {
             let (px, pct) = cx.tree.styles.calc(i);
             match base {
                 Some(b) => Some(px + b * pct / 100.0),
                 None if pct == 0.0 => Some(px),
-                None => None,
+                None => {
+                    cx.unknown.set(cx.unknown.get() + 1);
+                    None
+                }
             }
         }
         _ => None,
@@ -212,6 +220,9 @@ pub struct Done {
     pub margin_right: f32,
     /// The baseline of the last line inside, from the top of the border box. An inline-block sits on it.
     pub baseline: Option<f32>,
+    /// The height of the content box from the content alone, before `height`, `min-height` and `max-height`. A flex
+    /// item needs it for its automatic minimum size.
+    pub content: f32,
 }
 
 /// Lay out a block-level box in `space`, at `pos` in its BFC. Its fragment is at x = its left margin, y = 0: the parent
@@ -366,6 +377,7 @@ pub fn sized(cx: &mut Cx, node: NodeId, space: Space, forced: Option<(f32, f32, 
         }
     };
     let content_height = floats_bottom.map_or(content_height, |b| content_height.max(b));
+    done.content = content_height;
     // A scrollbar at the bottom is inside the height, if the box has one. Else the box grows by it.
     let content_height = clamp(height.unwrap_or(content_height + gy));
     done.through = kids.open && bottom_open && content_height == 0.0 && bp.vertical() == 0.0;
@@ -625,7 +637,6 @@ pub(crate) struct Kids {
 
 impl Kids {
     /// The result of a layout that is its own BFC: the height of the content box, and its first baseline from its top.
-    #[allow(dead_code)] // For flex.rs, grid.rs and table.rs.
     pub(crate) fn of(height: f32, baseline: Option<f32>) -> Kids {
         Kids { y: height, top: Strut::default(), bottom: Strut::default(), open: false, baseline, top_y: 0.0 }
     }

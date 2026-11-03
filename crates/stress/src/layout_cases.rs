@@ -146,6 +146,17 @@ pub fn all() -> Vec<Case> {
         case("position-fixed-deep", 300, |n| lay(format!("{}<i></i>", "<div>".repeat(n)), "div { position: relative } i { position: fixed; bottom: 0 }")),
         case("position-relative-spans", 2_000, |n| lay(format!("<p>{}</p>", "<span>a</span> b ".repeat(n)), "span { position: relative; top: 1px }")),
         case("position-shrink-to-fit", 2_000, |n| lay("<div><i>some words here</i></div>".repeat(n), "div { position: relative } i { position: absolute; left: 0 }")),
+        case("flex-row-many-items", 2_000, |n| lay(format!("<div>{}</div>", "<p>aaa bbb</p>".repeat(n)), "div { display: flex } p { margin: 0 }")),
+        case("flex-wrap-many-items", 2_000, |n| lay(format!("<div>{}</div>", "<p>aaa bbb</p>".repeat(n)), "div { display: flex; flex-wrap: wrap; gap: 4px } p { margin: 0; width: 90px }")),
+        case("flex-cards-stretch", 2_000, |n| lay("<div><p>a</p><p>b<br>b</p><p>c c c</p></div>".repeat(n), "div { display: flex } p { flex: 1; margin: 0 }")),
+        case("flex-cards-percent-height", 2_000, |n| lay("<div><p><i>a</i></p><p>b<br>b</p></div>".repeat(n), "div { display: flex } p { flex: 1; margin: 0 } i { display: block; height: 50% }")),
+        case("flex-column-many-items", 2_000, |n| lay(format!("<div>{}</div>", "<p>aaa bbb</p>".repeat(n)), "div { display: flex; flex-direction: column; height: 5000px } p { flex: 1; margin: 0 }")),
+        case("flex-nested-rows", 200, |n| lay(format!("{}x", "<div>".repeat(n)), "div { display: flex; padding-left: 1px }")),
+        case("flex-nested-columns", 200, |n| lay(format!("{}x", "<div>".repeat(n)), "div { display: flex; flex-direction: column; padding-left: 1px }")),
+        case("flex-nested-rows-text", 2_000, |n| lay(format!("{}{}", "<div>".repeat(30), "word ".repeat(n)), "div { display: flex; padding-left: 1px }")),
+        case("flex-ref-block-nested-text", 2_000, |n| lay(format!("{}{}", "<div>".repeat(30), "word ".repeat(n)), "div { padding-left: 1px }")),
+        case("flex-ref-block-items", 2_000, |n| lay(format!("<div>{}</div>", "<p>aaa bbb</p>".repeat(n)), "p { margin: 0 }")),
+        case("flex-freeze-many", 2_000, |n| lay(format!("<div>{}</div>", (0..n).map(|i| format!("<p style='max-width:{}px'></p>", i % 500)).collect::<String>()), "div { display: flex; width: 100000px } p { flex: 1; margin: 0 }")),
         case("text-uppercase", 100_000, |n| pieces("stra\u{df}e ".repeat(n), NORMAL, Transform::Upper)),
     ]
 }

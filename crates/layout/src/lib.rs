@@ -51,11 +51,14 @@ pub struct Cx<'a> {
     pub fixed: bool,
     /// The static positions that wait for their containing block. With none, no walk is needed.
     pub waiting: u32,
+    /// How many percents met a base that is not known (`block::resolve`). A flex item whose layout met none does not
+    /// depend on its height: to stretch it, layout changes only its height (`flex.rs`).
+    pub unknown: std::cell::Cell<u32>,
 }
 
 /// Lay out a page in a window of `viewport` (width, height) CSS pixels.
 pub fn layout(doc: &Document, styles: &Styles, viewport: (f32, f32)) -> Layout {
-    let mut cx = Cx { tree: boxes::Tree::new(doc, styles), out: Vec::with_capacity(doc.len()), depth: 0, marker: None, number: 0, sizes: HashMap::new(), measuring: 0, spare: Vec::new(), floats: Default::default(), bars: HashMap::new(), again: 0, rel: HashMap::new(), fixed: false, waiting: 0 };
+    let mut cx = Cx { tree: boxes::Tree::new(doc, styles), out: Vec::with_capacity(doc.len()), depth: 0, marker: None, number: 0, sizes: HashMap::new(), measuring: 0, spare: Vec::new(), floats: Default::default(), bars: HashMap::new(), again: 0, rel: HashMap::new(), fixed: false, waiting: 0, unknown: Default::default() };
     // Most pages make about one fragment for each DOM node: one for each element and each text on one line, none for
     // the `head` and for the spaces between blocks. Room for that many at once saves the copies of a `Vec` that grows.
     let mut height = 0.0;

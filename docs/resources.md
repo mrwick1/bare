@@ -270,6 +270,21 @@ Fixes from these numbers:
 
 `bare-stress fuzz layout` with the position words and a seed with relative, absolute, fixed and sticky boxes: 21,000 inputs (seeds 1 to 7) in release, 1,500 in debug (which checks for overflow of integers), no failure.
 
+`bare-stress scale flex-` (2026-11-03). All linear. The `flex-ref-` cases are the same pages with blocks, to compare:
+
+| Page | n | ms | peak MB | Note |
+| --- | ---: | ---: | ---: | --- |
+| One row with many items | 200,000 | 127 | 60.8 | blocks: 63 ms, 16 MB. The intrinsic widths are one more walk over the content |
+| One row that wraps, with `gap` | 200,000 | 107 | 48.5 | |
+| Rows of three stretched cards | 200,000 rows | 386 | 71.2 | 488 ms with a second layout for each card (`docs/decisions.md`, "Flex") |
+| The same with a percent height inside each card | 200,000 rows | 400 | 63.2 | these cards need the second layout |
+| One column with `flex: 1` items and a fixed height | 200,000 | 106 | 48.5 | |
+| `flex: 1` items with 500 different `max-width`s (the freeze loop) | 200,000 | 75 | 41.3 | |
+| 30 nested rows around one long text | 200,000 words | 9.3 | 0.4 | blocks: 5 ms. 79 ms and 9 MB before the cache and the list change |
+| Nested rows or columns | 400 levels (the depth limit) | 0.4 | 0.8 | |
+
+`bare-stress fuzz layout` with the flex words and a seed with wrapped rows, `order`, `auto` margins and nested columns: 21,000 inputs (seeds 1 to 7) in release, 9,000 in debug. The debug run found one panic: an item that is laid out again counted the static positions of its first layout as still waiting, but a positioned box inside it had taken them. Fixed: each item counts how many its layout left waiting. After the fix, no failure.
+
 ### Layout against Chrome (module 4)
 
 Method: a test page with 33 boxes and `font-family: 'Noto Sans Mono'` on all elements, served on 127.0.0.1. Chrome on a hyprcage screen, window 800 px wide. Chrome shows a 15 px scrollbar, so its page is 785 px wide; `bare --layout --width=785` gives the same width. A script reads `getBoundingClientRect` and `getClientRects` of each element with an `id`.
@@ -283,6 +298,8 @@ Floats (2026-11-03): a second test page has 18 cases: text around left and right
 Overflow (2026-11-03): a third test page has 16 cases: `hidden` and `clip` with margins inside, `scroll`, `overflow-x: scroll`, `auto` with `max-height`, a `nowrap` line, end padding, nested `auto` boxes, a scroll container beside a float, an inline-block that scrolls, shrink-to-fit floats with `scroll` and `auto`, lists and floats inside `auto` boxes, `box-sizing: border-box`. All 31 boxes are the same as in Chrome, to 0.5 px. Chrome's scrollbars are 15 px on this screen, also under device emulation.
 
 Position (2026-11-03): a fourth test page has 15 cases: relative blocks and inline boxes, absolute boxes with each mix of offsets, `auto` margins that center, percents with `box-sizing: border-box`, `float` on an absolute box, absolute inside absolute, a relative inline-block as containing block, the window as containing block, `fixed`, `sticky`, and `bottom: 0` in a block with `height: auto`. All 32 boxes are the same as in Chrome, to 0.5 px. A fifth page found two bugs, both fixed: an absolute box in a centered line did not follow `text-align`, and a relative inline box was not a containing block. It also found an older inline bug, fixed after: a space at the end of a line inside a span with padding or a background still counted in the width of the span. The start or end of an inline box after the space no longer stops the space from hanging. Now all 14 boxes of that page are the same as in Chrome.
+
+Flex (2026-11-03): two test pages have 65 cases: grow, shrink, `flex: 1 1 0` with and without `min-width: 0`, all `justify-content` values (also with negative free space), auto margins, `align-items` and `align-self`, `baseline` with padding, `wrap` and `wrap-reverse`, `align-content` with a height, `row-reverse` and `column-reverse`, columns that grow, shrink and wrap, `gap` in px and %, `order`, anonymous items, min and max sizes in the freeze loop, `flex-basis` in px and %, `box-sizing`, `inline-flex` and a floated flex container that shrink to fit, a percent height in a stretched item, a nested column, an absolute child, a list. All 217 boxes are the same as in Chrome, to 0.5 px. The second page found two bugs, both fixed: a column that wraps stretched its items to the container and not to their line, and a column item with a `height` took that height as its automatic minimum, not its content. The real pages of the next section do not change: Wikipedia uses flex, but its flex boxes are not "clean".
 
 ### Layout of real pages against Chrome (module 4)
 

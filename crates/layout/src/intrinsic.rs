@@ -42,7 +42,9 @@ pub fn sizes(cx: &mut Cx, node: NodeId) -> (f32, f32) {
         min += crate::block::SCROLLBAR;
         max += crate::block::SCROLLBAR;
     }
-    if cx.measuring > 0 && matches!(tree.kind(node), crate::boxes::Kind::Atomic | crate::boxes::Kind::Float) {
+    // A flex item too: each flex container measures its items, so nested rows would measure the same content once for
+    // each level above it.
+    if cx.measuring > 0 && (matches!(tree.kind(node), crate::boxes::Kind::Atomic | crate::boxes::Kind::Float) || tree.is_flex_or_grid(tree.doc.parent(node))) {
         cx.sizes.insert(node.index() as u32, (min, max));
     }
     (min, max)

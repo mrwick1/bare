@@ -91,6 +91,14 @@ Chrome, Firefox, WebKit, Servo and Ladybird all store a box tree (Chrome: `Layou
 - With no static position that waits, no walk runs: a page with no absolute box pays nothing.
 - `position: relative` changes no layout: the offsets wait in a map, and the last pass moves the blocks. Inline boxes and their text move when their line is written, because their fragments are flat (text is not inside the box fragment).
 
+## Flex
+
+- To stretch an item to the height of its line, LayoutNG and Firefox lay it out a second time with the new height, unless a cache says that the result stays the same. Here the second layout runs only if the content can depend on the height: a percent met an unknown base in the first layout (`Cx::unknown`, a counter in `block::resolve`), or the item is a scroll container, a positioned box, a flex, grid or table container, or has a `height`. Else only the height of its box changes. 200,000 rows of three stretched cards: 386 ms, and 488 ms with the second layout each time.
+- The items are laid out straight into the one list of fragments, and each item keeps its range. Only an item that is laid out again gets a list of its own, and then (or when `order` sorts the items) one pass writes the fragments again in order. A list for each item cost 385 bytes for each item: 200,000 items took 93 MB and 139 ms with lists, 61 MB and 127 ms without. An `Item` is 160 bytes while its container is laid out.
+- The intrinsic widths of a flex item are kept for the layout that runs (`Cx::sizes`), like those of an inline-block. Each flex container measures its items, so 30 rows one inside the other measured the same text 30 times: 79 ms for 200,000 words, and 12 ms with the cache (9 ms with the change above; blocks take 5 ms).
+- A list that a nested container fills is not kept to use again when it is big: 30 levels each kept a list as big as all the content (9 MB for a page of 0.4 MB).
+- `min-width` and `min-height` now start as `auto`. It is 0 for all other boxes, so only flex reads it.
+
 ## Code style
 
 - Plain code. No clever tricks.
