@@ -1151,6 +1151,9 @@ mod tests {
         assert_eq!(get(html, &[], "b", Property::FontWeight), Value::Number(700.0));
         assert_eq!(get(html, &[], "l", Property::Display), Value::Keyword(Keyword::ListItem));
         assert_eq!(get(html, &[], "u", Property::PaddingLeft), px(40.0));
+        let form = "<input id=h type=HIDDEN><input id=t type=text>";
+        assert_eq!(get(form, &[], "h", Property::Display), Value::Keyword(Keyword::None));
+        assert_eq!(get(form, &[], "t", Property::Display), Value::Keyword(Keyword::InlineBlock));
     }
 
     #[test]
@@ -1314,9 +1317,12 @@ mod tests {
         assert_eq!(color("#a p, #a li { color: red }", "l1"), rgb(255, 0, 0));
         assert_eq!(color("p:not(.x) { color: red }", "p"), rgb(255, 0, 0));
         assert_eq!(color("li:hover { color: red }", "l1"), rgb(0, 0, 0));
-        // A broken selector drops the rule, and the rules after it work.
-        assert_eq!(color("li::before, p { color: red } li { color: blue }", "p"), rgb(0, 0, 0));
+        // A pseudo-element never matches, but the other selectors of the list work, as in Chrome.
+        assert_eq!(color("li::before, p { color: red } li { color: blue }", "p"), rgb(255, 0, 0));
         assert_eq!(color("li::before, p { color: red } li { color: blue }", "l1"), rgb(0, 0, 255));
+        // A broken selector drops the rule, and the rules after it work.
+        assert_eq!(color("li::x, p { color: red } li { color: blue }", "p"), rgb(0, 0, 0));
+        assert_eq!(color("li::x, p { color: red } li { color: blue }", "l1"), rgb(0, 0, 255));
     }
 
     #[test]

@@ -19,6 +19,7 @@ tfoot { display: table-footer-group }
 tr { display: table-row }
 td, th { display: table-cell; padding: 1px }
 button, input, select, textarea, img, video, canvas, iframe { display: inline-block }
+input[type=hidden i] { display: none }
 
 body { margin: 8px }
 p, dl, pre, xmp, listing, fieldset { margin: 1em 0 }

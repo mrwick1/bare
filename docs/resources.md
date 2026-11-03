@@ -242,3 +242,22 @@ Result: all 33 boxes and the 6 line pieces of the two spans over three lines hav
 
 One difference of shape, not of place: Chrome gives a span that holds a block three client rects (the line before, the block, the line after). `bare` gives two span fragments and the block fragment.
 
+### Layout of real pages against Chrome (module 4)
+
+Method: a script downloads each page and its style sheets, takes out `<script>`, `<noscript>`, `<iframe>` and `<template>`, gives each element an `id`, and adds `* { font-family: 'Noto Sans Mono' !important }`. The pages are served on 127.0.0.1. Chrome on a hyprcage screen, 800 px window, reads the box of each element with an `id` over the DevTools port. bare runs with `--layout --width=` the page width that Chrome had (785 with a scrollbar). The union of the fragments of an element is its box. A "clean" element has no flex, grid, table, float, `position`, `overflow`, form control or image in it or above it, and no float or positioned box beside it. For clean elements only the size is compared, because a box above them can move them.
+
+| Page | Elements in both | Same box (0.5 px) | Clean elements | Same size (0.5 px) | Why the rest differ |
+| --- | --- | --- | --- | --- | --- |
+| example.com | 2 | 2 | 2 | 2 | |
+| info.cern.ch (no doctype) | 22 | 0 | 22 | 22 | Quirks mode: Chrome drops the top margin of the first child of `body`. With a doctype added: 22 of 22 |
+| danluu.com (doctype added) | 211 | 54 | 0 | | Flex (`li { display: flex }`) |
+| news.ycombinator.com (doctype added) | 329 | 0 | 0 | | Tables |
+| gnu.org, free software page | 248 | 1 | 0 | | Floats, form controls |
+| en.wikipedia.org, "Web browser" | 1,199 | 1 | 99 | 95 | Flex header, floats (the infobox), `::before` text in the reference list |
+
+Bugs that this check found, both fixed with a test first:
+- `x-a::before, span.mw-linkback-text { display: none }` was thrown away, because bare dropped every list with a pseudo-element. Chrome keeps it: a known pseudo-element is valid and matches nothing. The hidden back-link numbers made Wikipedia reference items one line taller.
+- `<input type=hidden>` was shown. Chrome's UA style sheet has `input[type=hidden i] { display: none }`.
+
+"No box in bare" counts are high (2,426 on Wikipedia). Most are culled inline boxes (a link with no edges and no background makes no fragment, by design), and the children of flex items.
+
