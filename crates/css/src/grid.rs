@@ -319,10 +319,10 @@ fn line_value(line: Line, keep: &mut dyn FnMut(Grid) -> Value) -> Value {
 
 /// `none`, or a track list. `Some(None)` is `none`.
 fn template(tokens: &[Token]) -> Option<Option<Grid>> {
-    if let [Token::Ident(w)] = tokens {
-        if w.eq_ignore_ascii_case("none") {
-            return Some(None);
-        }
+    if let [Token::Ident(w)] = tokens
+        && w.eq_ignore_ascii_case("none")
+    {
+        return Some(None);
     }
     let mut at = 0;
     let (parts, auto) = track_list(tokens, &mut at, false)?;
@@ -411,11 +411,12 @@ fn track_list(tokens: &[Token], at: &mut usize, inner: bool) -> Option<(Vec<Part
     Some((parts, auto))
 }
 
-/// Is every track fixed (a length or a percent on at least one side, and no `fr`)? A `repeat(<int>)` inside counts by its tracks.
+/// Is every track fixed (standard 7.2.3.2: a length or a percent on one side, and no `fr` or `fit-content()` alone)? A `repeat(<int>)` inside counts by its tracks.
 fn fixed_only(parts: &[Part]) -> bool {
     parts.iter().all(|p| match p {
         Part::Names(_) => true,
-        Part::Track(t) => !matches!(t.min, Bound::Fr(_) | Bound::Fit(_)) && !matches!(t.max, Bound::Fr(_) | Bound::Fit(_)) && (matches!(t.min, Bound::Len(_)) || matches!(t.max, Bound::Len(_))),
+        // A length at the start (`minmax(100px, 1fr)` is fixed), or at the end with no flexible start.
+        Part::Track(t) => matches!(t.min, Bound::Len(_)) || (matches!(t.max, Bound::Len(_)) && !matches!(t.min, Bound::Fr(_) | Bound::Fit(_))),
         Part::Repeat(_, inner) => fixed_only(inner),
     })
 }
@@ -505,7 +506,7 @@ fn line(tokens: &[Token]) -> Option<Line> {
     if span {
         // A span is at least 1, and takes no sign.
         let n = int.unwrap_or(1);
-        return (n >= 1 && (int.is_some() || name.is_some())).then(|| Line::Span(name, n as u32));
+        return (n >= 1 && (int.is_some() || name.is_some())).then_some(Line::Span(name, n as u32));
     }
     match (int, name) {
         (Some(n), None) => Some(Line::Num(n)),

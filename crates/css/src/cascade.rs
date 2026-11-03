@@ -853,7 +853,9 @@ fn initial(p: Property) -> Value {
         AlignSelf | JustifySelf | GridAutoColumns | GridAutoRows | GridRowStart | GridRowEnd | GridColumnStart | GridColumnEnd => Value::Keyword(K::Auto),
         GridTemplateColumns | GridTemplateRows | GridTemplateAreas => Value::Keyword(K::None),
         GridAutoFlow => Value::Number(0.0),
-        MinWidth | MinHeight | MarginTop | MarginRight | MarginBottom | MarginLeft | PaddingTop | PaddingRight | PaddingBottom | PaddingLeft => px(0.0),
+        // `min-width: auto` is the starting value. A grid item uses it for its automatic minimum size.
+        MinWidth | MinHeight => Value::Keyword(K::Auto),
+        MarginTop | MarginRight | MarginBottom | MarginLeft | PaddingTop | PaddingRight | PaddingBottom | PaddingLeft => px(0.0),
         BorderTopWidth | BorderRightWidth | BorderBottomWidth | BorderLeftWidth => px(3.0),
         // `medium`. With the style `none` it is 0: `compute` does that.
         BorderTopColor | BorderRightColor | BorderBottomColor | BorderLeftColor => Value::Keyword(K::CurrentColor),
