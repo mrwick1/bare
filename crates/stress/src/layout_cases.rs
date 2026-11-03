@@ -5,6 +5,7 @@ use bare_css::cascade::{Origin, RuleSet, Styles, UA_CSS};
 use bare_html::dom::{Document, NodeId};
 use bare_html::tree;
 use bare_layout::boxes::{Child, Kind, Tree};
+use bare_layout::text::{self, Flow, Transform, WhiteSpace};
 use std::hint::black_box;
 
 type Work = Box<dyn FnOnce()>;
@@ -63,6 +64,17 @@ fn boxes(page: String, sheet: &str) -> Work {
     })
 }
 
+/// Time the cut of one text into pieces, with their widths.
+fn pieces(text: String, ws: WhiteSpace, transform: Transform) -> Work {
+    Box::new(move || {
+        let mut flow = Flow::new();
+        black_box(text::pieces(&text, ws, transform, &mut flow).count());
+    })
+}
+
+const NORMAL: WhiteSpace = WhiteSpace { collapse: true, newlines: false, wrap: true };
+const PRE: WhiteSpace = WhiteSpace { collapse: false, newlines: true, wrap: false };
+
 pub fn all() -> Vec<Case> {
     vec![
         // Topic 1: the box tree
@@ -75,5 +87,15 @@ pub fn all() -> Vec<Case> {
         case("boxes-display-none", 20_000, |n| boxes("<div style=display:none><p>x</p></div>".repeat(n), "")),
         case("boxes-list-items", 20_000, |n| boxes(format!("<ol>{}</ol>", "<li>x".repeat(n)), "")),
         case("boxes-inline-blocks", 20_000, |n| boxes("<i>x</i>".repeat(n), "i { display: inline-block }")),
+        // Topic 2: text
+        case("text-words", 100_000, |n| pieces("hello world ".repeat(n), NORMAL, Transform::None)),
+        case("text-one-long-word", 1_000_000, |n| pieces("x".repeat(n), NORMAL, Transform::None)),
+        case("text-only-spaces", 1_000_000, |n| pieces(" \n\t".repeat(n), NORMAL, Transform::None)),
+        case("text-pre-spaces", 1_000_000, |n| pieces(" ".repeat(n), PRE, Transform::None)),
+        case("text-pre-tabs", 1_000_000, |n| pieces("\t\n".repeat(n), PRE, Transform::None)),
+        case("text-one-letter-words", 1_000_000, |n| pieces("a ".repeat(n), NORMAL, Transform::None)),
+        case("text-accents", 100_000, |n| pieces("caf\u{e9} e\u{301}t\u{e9} ".repeat(n), NORMAL, Transform::None)),
+        case("text-chinese", 100_000, |n| pieces("\u{4e2d}\u{6587}\u{5b57} ".repeat(n), NORMAL, Transform::None)),
+        case("text-uppercase", 100_000, |n| pieces("stra\u{df}e ".repeat(n), NORMAL, Transform::Upper)),
     ]
 }

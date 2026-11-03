@@ -186,3 +186,17 @@ Not fixed:
 
 About 40 ns for each box. The cascade costs about 600 ns for each element, so the box rules add little. They keep no memory.
 
+`bare-stress scale text-` cuts one text into pieces and measures them (2026-11-03). Linear, and no memory at all:
+
+| Text | Size | ms | Speed |
+| --- | ---: | ---: | --- |
+| `hello world ` repeated | 120 MB | 189 | 635 MB/s, was 363 ms before the two changes below |
+| `a ` repeated (one piece for each byte) | 200 MB | 855 | 4.3 ns for each piece, was 1,139 ms |
+| Chinese words | 100 MB | 232 | was 541 ms |
+| Words with accents (`e` + U+0301) | 130 MB | 506 | the accent table is a binary search |
+| `ß` in uppercase | 70 MB | 562 | a case change for each letter |
+
+Two changes from the measurement:
+- A word is scanned once. The first version scanned it to find its end, then again to check that it is ASCII.
+- `width_of` tests the wide letters before the table of accents, so Chinese text skips the binary search.
+
