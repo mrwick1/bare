@@ -127,6 +127,18 @@ properties! {
     Right => "right",
     Bottom => "bottom",
     Left => "left",
+    FlexDirection => "flex-direction",
+    FlexWrap => "flex-wrap",
+    FlexGrow => "flex-grow",
+    FlexShrink => "flex-shrink",
+    FlexBasis => "flex-basis",
+    Order => "order",
+    JustifyContent => "justify-content",
+    AlignContent => "align-content",
+    AlignItems => "align-items",
+    AlignSelf => "align-self",
+    RowGap => "row-gap",
+    ColumnGap => "column-gap",
 }
 
 /// A length or a percent. The fixed units are already `Px`.
@@ -199,7 +211,12 @@ keywords! {
     Circle => "circle", Square => "square", Decimal => "decimal", ContentBox => "content-box",
     BorderBox => "border-box", FlowRoot => "flow-root", Clip => "clip", Scroll => "scroll",
     Static => "static", Relative => "relative", Absolute => "absolute", Fixed => "fixed",
-    Sticky => "sticky",
+    Sticky => "sticky", Row => "row", RowReverse => "row-reverse", Column => "column",
+    ColumnReverse => "column-reverse", Wrap => "wrap", WrapReverse => "wrap-reverse", Content => "content",
+    FlexStart => "flex-start", FlexEnd => "flex-end", SpaceBetween => "space-between", SpaceAround => "space-around",
+    SpaceEvenly => "space-evenly", Stretch => "stretch", Baseline => "baseline", SelfStart => "self-start",
+    SelfEnd => "self-end", First => "first", Last => "last", LastBaseline => "last baseline",
+    Safe => "safe", Unsafe => "unsafe",
 }
 
 /// The value of one property. It does not say which property: a `Declared` has that.
@@ -451,6 +468,44 @@ fn expand(name: &str, parts: &Parts, emit: &mut dyn FnMut(Property, Value)) -> b
     match name {
         "margin" => sides(slice, [MarginTop, MarginRight, MarginBottom, MarginLeft], emit),
         "inset" => sides(slice, [Top, Right, Bottom, Left], emit),
+        "flex" => flex(slice, emit),
+        "flex-flow" => {
+            let (mut dir, mut wrap) = (Option::None, Option::None);
+            for &part in slice {
+                match (longhand(FlexDirection, part), longhand(FlexWrap, part)) {
+                    (Some(v), _) if dir.is_none() => dir = Some(v),
+                    (_, Some(v)) if wrap.is_none() => wrap = Some(v),
+                    _ => return false,
+                }
+            }
+            if slice.is_empty() || slice.len() > 2 {
+                return false;
+            }
+            emit(FlexDirection, dir.unwrap_or(Value::Keyword(Keyword::Row)));
+            emit(FlexWrap, wrap.unwrap_or(Value::Keyword(Keyword::Nowrap)));
+            true
+        }
+        "gap" => match *slice {
+            [r] | [r, _] => {
+                let c = slice[slice.len() - 1];
+                let (Some(r), Some(c)) = (longhand(RowGap, r), longhand(ColumnGap, c)) else { return false };
+                emit(RowGap, r);
+                emit(ColumnGap, c);
+                true
+            }
+            _ => false,
+        },
+        // `first baseline`, `last baseline`, `safe center`: two words for one value.
+        "align-items" | "align-self" | "align-content" | "justify-content" if slice.len() == 2 => {
+            let Some(property) = Property::from_name(name) else { return false };
+            let value = match *slice {
+                [Part::Keyword(Keyword::First), Part::Keyword(Keyword::Baseline)] => Part::Keyword(Keyword::Baseline),
+                [Part::Keyword(Keyword::Last), Part::Keyword(Keyword::Baseline)] => Part::Keyword(Keyword::LastBaseline),
+                [Part::Keyword(Keyword::Safe | Keyword::Unsafe), p @ Part::Keyword(Keyword::Center | Keyword::Start | Keyword::End | Keyword::FlexStart | Keyword::FlexEnd | Keyword::SelfStart | Keyword::SelfEnd | Keyword::Left | Keyword::Right)] => p,
+                _ => return false,
+            };
+            longhand(property, value).map(|v| emit(property, v)).is_some()
+        }
         "padding" => sides(slice, [PaddingTop, PaddingRight, PaddingBottom, PaddingLeft], emit),
         "border-width" => sides(slice, [BorderTopWidth, BorderRightWidth, BorderBottomWidth, BorderLeftWidth], emit),
         "border-style" => sides(slice, [BorderTopStyle, BorderRightStyle, BorderBottomStyle, BorderLeftStyle], emit),
@@ -493,6 +548,9 @@ fn shorthand_longhands(name: &str) -> Option<&'static [Property]> {
         "margin" => &[MarginTop, MarginRight, MarginBottom, MarginLeft],
         "padding" => &[PaddingTop, PaddingRight, PaddingBottom, PaddingLeft],
         "inset" => &[Top, Right, Bottom, Left],
+        "flex" => &[FlexGrow, FlexShrink, FlexBasis],
+        "flex-flow" => &[FlexDirection, FlexWrap],
+        "gap" => &[RowGap, ColumnGap],
         "border-width" => &[BorderTopWidth, BorderRightWidth, BorderBottomWidth, BorderLeftWidth],
         "border-style" => &[BorderTopStyle, BorderRightStyle, BorderBottomStyle, BorderLeftStyle],
         "border-color" => &[BorderTopColor, BorderRightColor, BorderBottomColor, BorderLeftColor],
@@ -619,6 +677,48 @@ fn text_decoration(slice: &[Part], emit: &mut dyn FnMut(Property, Value)) -> boo
     true
 }
 
+/// `flex: none | auto | <grow> [<shrink>] || <basis>`. A number alone sets the basis to 0, not `auto` (CSS Flexbox 1, 7.1).
+fn flex(slice: &[Part], emit: &mut dyn FnMut(Property, Value)) -> bool {
+    use Keyword as K;
+    use Property::{FlexBasis, FlexGrow, FlexShrink};
+    let n = Value::Number;
+    let (grow, shrink, basis) = match *slice {
+        [Part::Keyword(K::None)] => (n(0.0), n(0.0), Value::Keyword(K::Auto)),
+        [Part::Keyword(K::Auto)] => (n(1.0), n(1.0), Value::Keyword(K::Auto)),
+        _ => {
+            let (mut numbers, mut basis) = (Vec::new(), Option::None);
+            let mut last_number = false;
+            for &part in slice {
+                match part {
+                    // The two numbers go together: `flex: 1 10px 2` is not valid. A 0 is a number here, unless both
+                    // numbers are there already: then it is the basis.
+                    Part::Number { value, .. } if value >= 0.0 && numbers.len() < 2 && (numbers.is_empty() || last_number) => {
+                        numbers.push(value);
+                        last_number = true;
+                        continue;
+                    }
+                    _ if basis.is_none() => {
+                        let Some(v) = longhand(FlexBasis, part) else { return false };
+                        basis = Some(v);
+                    }
+                    _ => return false,
+                }
+                last_number = false;
+            }
+            if numbers.is_empty() && basis.is_none() {
+                return false;
+            }
+            let grow = numbers.first().copied().unwrap_or(1.0);
+            let shrink = numbers.get(1).copied().unwrap_or(1.0);
+            (n(grow), n(shrink), basis.unwrap_or(Value::Length(Length::Percent(0.0))))
+        }
+    };
+    emit(FlexGrow, grow);
+    emit(FlexShrink, shrink);
+    emit(FlexBasis, basis);
+    true
+}
+
 /// `font: [style] [weight] size[/line-height] family`. The family is checked a little, and thrown away (module 5 has one font).
 fn font(slice: &[Part], emit: &mut dyn FnMut(Property, Value)) -> bool {
     use Property::*;
@@ -709,6 +809,28 @@ fn longhand(property: Property, part: Part) -> Option<Value> {
         ListStyleType => one_of(part, &[K::None, K::Disc, K::Circle, K::Square, K::Decimal]),
         BoxSizing => one_of(part, &[K::ContentBox, K::BorderBox]),
         FontStyle => one_of(part, &[K::Normal, K::Italic, K::Oblique]),
+        FlexDirection => one_of(part, &[K::Row, K::RowReverse, K::Column, K::ColumnReverse]),
+        FlexWrap => one_of(part, &[K::Nowrap, K::Wrap, K::WrapReverse]),
+        FlexGrow | FlexShrink => match part {
+            Part::Number { value, .. } if value >= 0.0 => Some(Value::Number(value)),
+            _ => Option::None,
+        },
+        FlexBasis => match part {
+            Part::Keyword(k @ (K::Auto | K::Content)) => Some(Value::Keyword(k)),
+            _ => positive(part).map(Value::Length),
+        },
+        Order => match part {
+            Part::Number { value, int: true } => Some(Value::Number(value)),
+            _ => Option::None,
+        },
+        JustifyContent => one_of(part, &[K::Normal, K::FlexStart, K::FlexEnd, K::Center, K::SpaceBetween, K::SpaceAround, K::SpaceEvenly, K::Start, K::End, K::Left, K::Right, K::Stretch]),
+        AlignContent => one_of(part, &[K::Normal, K::FlexStart, K::FlexEnd, K::Center, K::SpaceBetween, K::SpaceAround, K::SpaceEvenly, K::Start, K::End, K::Stretch, K::Baseline, K::LastBaseline]),
+        AlignItems => one_of(part, &[K::Normal, K::Stretch, K::FlexStart, K::FlexEnd, K::Center, K::Baseline, K::LastBaseline, K::Start, K::End, K::SelfStart, K::SelfEnd]),
+        AlignSelf => one_of(part, &[K::Auto, K::Normal, K::Stretch, K::FlexStart, K::FlexEnd, K::Center, K::Baseline, K::LastBaseline, K::Start, K::End, K::SelfStart, K::SelfEnd]),
+        RowGap | ColumnGap => match part {
+            Part::Keyword(K::Normal) => Some(Value::Keyword(K::Normal)),
+            _ => positive(part).map(Value::Length),
+        },
         Position => one_of(part, &[K::Static, K::Relative, K::Absolute, K::Fixed, K::Sticky]),
         Top | Right | Bottom | Left => match part {
             Part::Keyword(K::Auto) => Some(Value::Keyword(K::Auto)),
@@ -891,6 +1013,33 @@ mod tests {
         assert_eq!(parse("margin", "1px red"), vec![]);
         assert_eq!(parse("padding", "1px auto"), vec![]);
         assert_eq!(parse("padding", "1px -2px"), vec![]);
+    }
+
+    #[test]
+    fn flex_shorthands() {
+        let k = |w| Value::Keyword(w);
+        let n = Value::Number;
+        let pct = |v| Value::Length(Length::Percent(v));
+        let px = |v| Value::Length(Length::Px(v));
+        let f = |v: &str| parse("flex", v).into_iter().map(|(_, v)| v).collect::<Vec<_>>();
+        assert_eq!(f("1"), [n(1.0), n(1.0), pct(0.0)]);
+        assert_eq!(f("none"), [n(0.0), n(0.0), k(K::Auto)]);
+        assert_eq!(f("auto"), [n(1.0), n(1.0), k(K::Auto)]);
+        assert_eq!(f("2 3"), [n(2.0), n(3.0), pct(0.0)]);
+        assert_eq!(f("10px"), [n(1.0), n(1.0), px(10.0)]);
+        assert_eq!(f("0 0 auto"), [n(0.0), n(0.0), k(K::Auto)]);
+        assert_eq!(f("1 1 0"), [n(1.0), n(1.0), px(0.0)]);
+        assert_eq!(f("30px 2 3"), [n(2.0), n(3.0), px(30.0)]);
+        assert_eq!(f("1 10px 2"), vec![]);
+        assert_eq!(f("-1"), vec![]);
+        assert_eq!(parse("flex-flow", "wrap column"), vec![(FlexDirection, k(K::Column)), (FlexWrap, k(K::Wrap))]);
+        assert_eq!(parse("flex-flow", "wrap wrap"), vec![]);
+        assert_eq!(parse("gap", "10px 5%"), vec![(RowGap, px(10.0)), (ColumnGap, pct(5.0))]);
+        assert_eq!(parse("align-items", "first baseline"), vec![(AlignItems, k(K::Baseline))]);
+        assert_eq!(parse("justify-content", "safe center"), vec![(JustifyContent, k(K::Center))]);
+        assert_eq!(parse("order", "-2"), vec![(Order, n(-2.0))]);
+        assert_eq!(parse("order", "1.5"), vec![]);
+        assert_eq!(parse("align-self", "space-between"), vec![]);
     }
 
     #[test]

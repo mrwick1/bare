@@ -125,8 +125,12 @@ impl<'a> Tree<'a> {
                 match display {
                     Keyword::None => Kind::None,
                     _ if self.doc.parent(node) == Some(self.doc.root()) => Kind::Block,
-                    // The root element is always a block, whatever its `display` (CSS Display 3: "blockify").
                     _ if matches!(style.get(Property::Position), Value::Keyword(Keyword::Absolute | Keyword::Fixed)) => Kind::OutOfFlow,
+                    // A child of a flex or grid container is an item: a block, whatever its `display` and `float`
+                    // ("blockified", CSS Display 3).
+                    Keyword::ListItem if self.is_flex_or_grid(self.doc.parent(node)) => Kind::ListItem,
+                    _ if self.is_flex_or_grid(self.doc.parent(node)) => Kind::Block,
+                    // The root element is always a block, whatever its `display` (CSS Display 3: "blockify").
                     // `float` does nothing on a box that is out of the flow (CSS 2.1, 9.7).
                     _ if matches!(style.get(Property::Float), Value::Keyword(Keyword::Left | Keyword::Right)) => Kind::Float,
                     // A float is a block, whatever its `display`: a floated `<span>` too.
@@ -180,6 +184,13 @@ impl<'a> Tree<'a> {
             return visible;
         }
         get(node)
+    }
+
+    /// Is this element a flex or a grid container? Its children are then items, not blocks or inlines.
+    pub fn is_flex_or_grid(&self, node: Option<NodeId>) -> bool {
+        let Some(node) = node else { return false };
+        let Some(style) = self.styles.style(node) else { return false };
+        matches!(style.get(Property::Display), Value::Keyword(Keyword::Flex | Keyword::InlineFlex | Keyword::Grid | Keyword::InlineGrid))
     }
 
     /// The `position` of a box.
@@ -386,6 +397,17 @@ mod tests {
     fn head_and_display_none_make_no_box() {
         let out = boxes("<title>t</title><p>a</p><div style='display:none'><p>b</p></div>", "");
         assert_eq!(out, "block html\n  block body\n    block p\n      (lines)\n        text \"a\"\n");
+    }
+
+    #[test]
+    fn the_children_of_a_flex_or_grid_container_are_blocks() {
+        // A span, an inline-block and a float become items. The text between them is an anonymous item. An absolute
+        // box stays out of the flow, and a list item stays a list item.
+        let out = boxes("<div style='display:flex'><span>a</span>b<i style='display:inline-block'>c</i><b style='float:left'>d</b><u style='position:absolute'>e</u><li>f</li></div>", "");
+        let inside: Vec<_> = out.lines().skip(3).filter(|l| l.starts_with("      ") && !l.starts_with("        ")).collect();
+        assert_eq!(inside, ["      block span", "      (lines)", "      block i", "      block b", "      (lines)", "      list-item li"], "{out}");
+        let out = boxes("<div style='display:grid'><span>a</span></div>", "");
+        assert!(out.contains("block span"), "{out}");
     }
 
     #[test]
