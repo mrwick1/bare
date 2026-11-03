@@ -91,6 +91,25 @@ Chrome, Firefox, WebKit, Servo and Ladybird all store a box tree (Chrome: `Layou
 - With no static position that waits, no walk runs: a page with no absolute box pays nothing.
 - `position: relative` changes no layout: the offsets wait in a map, and the last pass moves the blocks. Inline boxes and their text move when their line is written, because their fragments are flat (text is not inside the box fragment).
 
+## Flex
+
+- To stretch an item to the height of its line, LayoutNG and Firefox lay it out a second time with the new height, unless a cache says that the result stays the same. Here the second layout runs only if the content can depend on the height: a percent met an unknown base in the first layout (`Cx::unknown`, a counter in `block::resolve`), or the item is a scroll container, a positioned box, a flex, grid or table container, or has a `height`. Else only the height of its box changes. 200,000 rows of three stretched cards: 386 ms, and 488 ms with the second layout each time.
+- The items are laid out straight into the one list of fragments, and each item keeps its range. Only an item that is laid out again gets a list of its own, and then (or when `order` sorts the items) one pass writes the fragments again in order. A list for each item cost 385 bytes for each item: 200,000 items took 93 MB and 139 ms with lists, 61 MB and 127 ms without. An `Item` is 160 bytes while its container is laid out.
+- The intrinsic widths of a flex item are kept for the layout that runs (`Cx::sizes`), like those of an inline-block. Each flex container measures its items, so 30 rows one inside the other measured the same text 30 times: 79 ms for 200,000 words, and 12 ms with the cache (9 ms with the change above; blocks take 5 ms).
+- A list that a nested container fills is not kept to use again when it is big: 30 levels each kept a list as big as all the content (9 MB for a page of 0.4 MB).
+- `min-width` and `min-height` now start as `auto`. It is 0 for all other boxes, so only flex reads it.
+
+## Tables
+
+- No stored table state. A table is laid out in one function (`crates/layout/src/table.rs`) from the children of the box and the styles. It builds the grid in `Vec`s that live for this layout and drops them. The same idea as the box tree above: Chrome (`LayoutNGTable`) and Firefox (`nsTableFrame` with a cell map) store a grid. We read the DOM again when we need it.
+- Anonymous rows, groups and cells make no fragment. They are only a place in the grid. Paint has nothing to draw for them, and a fragment would cost memory.
+- One layout for each cell. The cell is laid out at its column width, its height is read, and the cell is stretched and its content moved for `vertical-align` after that. Chrome lays a cell out again when `vertical-align` or the row height changes the result in some cases. We do not: a percent height in a cell is the cost (a known gap).
+- Column widths: the algorithm of `BasicTableLayoutStrategy` (Firefox) and `NGTableAlgorithmUtils` (Chrome). Four widths for the table (least, percent, fixed, most), with the width between two of them in proportion, so a table is the same width in Chrome. The cost is linear in the number of cells and columns. A cell that spans columns is spread after the cells of one column, with the same function, so the work is the sum of the spans. A span over 1,000 columns is cut, so a page cannot make a quadratic spread.
+- Collapsed borders: two dense arrays, one for the horizontal and one for the vertical edges, and the widest border wins at each edge. Memory is linear in the grid. A table over 2,000,000 edges falls back to the cell borders. Each cell and the table get half of the edge, as a half pixel for an odd width (Chrome gives the same positions: 8.5 and not 9 for a 1 px border).
+- Presentational hints are a layer of the cascade, not a rewrite of the DOM. The attributes of the HTML standard (`width`, `cellpadding`, ...) act as declarations with the lowest priority of the author origin (the key `1 << 96`), as the standard says. The text of the hint is part of the key of the style cache, so two cells with the same hint share one style. The hints are read only in a page that has a `<table>` element (`Hints::new` gives `None` otherwise), so other pages pay nothing.
+- The table decides its own width inside `sized_with` (`block.rs`): a table is a block level box with a shrink-to-fit width that is never less than the least width of its columns. `solve_margins` is the one place that finds the margins for a given width.
+- An `inline-table` is an atomic inline with the table context. The table fragment includes its captions, as the box of the table in Chrome.
+
 ## Code style
 
 - Plain code. No clever tricks.

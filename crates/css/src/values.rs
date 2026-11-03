@@ -151,6 +151,12 @@ properties! {
     GridColumnEnd => "grid-column-end",
     JustifyItems => "justify-items",
     JustifySelf => "justify-self",
+    BorderCollapse => "border-collapse",
+    BorderSpacingH => "-webkit-border-horizontal-spacing",
+    BorderSpacingV => "-webkit-border-vertical-spacing",
+    TableLayout => "table-layout",
+    CaptionSide => "caption-side",
+    VerticalAlign => "vertical-align",
 }
 
 /// A length or a percent. The fixed units are already `Px`.
@@ -228,7 +234,9 @@ keywords! {
     FlexStart => "flex-start", FlexEnd => "flex-end", SpaceBetween => "space-between", SpaceAround => "space-around",
     SpaceEvenly => "space-evenly", Stretch => "stretch", Baseline => "baseline", SelfStart => "self-start",
     SelfEnd => "self-end", First => "first", Last => "last", LastBaseline => "last baseline",
-    Safe => "safe", Unsafe => "unsafe",
+    Safe => "safe", Unsafe => "unsafe", InlineTable => "inline-table", Separate => "separate",
+    Top => "top", Bottom => "bottom", Middle => "middle", Sub => "sub",
+    Super => "super", TextTop => "text-top", TextBottom => "text-bottom",
 }
 
 /// The value of one property. It does not say which property: a `Declared` has that.
@@ -513,6 +521,17 @@ fn expand(name: &str, parts: &Parts, emit: &mut dyn FnMut(Property, Value)) -> b
             }
             _ => false,
         },
+        // `border-spacing: h v`. With one value, both are the same.
+        "border-spacing" => match *slice {
+            [h] | [h, _] => {
+                let v = slice[slice.len() - 1];
+                let (Some(h), Some(v)) = (longhand(BorderSpacingH, h), longhand(BorderSpacingV, v)) else { return false };
+                emit(BorderSpacingH, h);
+                emit(BorderSpacingV, v);
+                true
+            }
+            _ => false,
+        },
         // `first baseline`, `last baseline`, `safe center`: two words for one value.
         "align-items" | "align-self" | "align-content" | "justify-content" if slice.len() == 2 => {
             let Some(property) = Property::from_name(name) else { return false };
@@ -581,6 +600,7 @@ fn shorthand_longhands(name: &str) -> Option<&'static [Property]> {
         "flex" => &[FlexGrow, FlexShrink, FlexBasis],
         "flex-flow" => &[FlexDirection, FlexWrap],
         "gap" => &[RowGap, ColumnGap],
+        "border-spacing" => &[BorderSpacingH, BorderSpacingV],
         "border-width" => &[BorderTopWidth, BorderRightWidth, BorderBottomWidth, BorderLeftWidth],
         "border-style" => &[BorderTopStyle, BorderRightStyle, BorderBottomStyle, BorderLeftStyle],
         "border-color" => &[BorderTopColor, BorderRightColor, BorderBottomColor, BorderLeftColor],
@@ -827,7 +847,7 @@ fn longhand(property: Property, part: Part) -> Option<Value> {
         Display => one_of(part, &[
             K::None, K::Block, K::Inline, K::InlineBlock, K::ListItem, K::Table, K::TableRow, K::TableCell, K::TableRowGroup,
             K::TableHeaderGroup, K::TableFooterGroup, K::TableColumn, K::TableColumnGroup, K::TableCaption, K::Flex, K::InlineFlex,
-            K::Grid, K::InlineGrid, K::FlowRoot,
+            K::Grid, K::InlineGrid, K::FlowRoot, K::InlineTable,
         ]),
         Float => one_of(part, &[K::None, K::Left, K::Right]),
         Clear => one_of(part, &[K::None, K::Left, K::Right, K::Both]),
@@ -864,6 +884,18 @@ fn longhand(property: Property, part: Part) -> Option<Value> {
         RowGap | ColumnGap => match part {
             Part::Keyword(K::Normal) => Some(Value::Keyword(K::Normal)),
             _ => positive(part).map(Value::Length),
+        },
+        BorderCollapse => one_of(part, &[K::Separate, K::Collapse]),
+        BorderSpacingH | BorderSpacingV => match part {
+            Part::Percent(_) => Option::None,
+            _ => positive(part).map(Value::Length),
+        },
+        TableLayout => one_of(part, &[K::Auto, K::Fixed]),
+        CaptionSide => one_of(part, &[K::Top, K::Bottom]),
+        // Only `baseline`, `top`, `middle` and `bottom` do something (in table cells). The others are read and act as `baseline`.
+        VerticalAlign => match part {
+            Part::Keyword(k @ (K::Baseline | K::Top | K::Middle | K::Bottom | K::Sub | K::Super | K::TextTop | K::TextBottom)) => Some(Value::Keyword(k)),
+            _ => length(part).map(Value::Length),
         },
         Position => one_of(part, &[K::Static, K::Relative, K::Absolute, K::Fixed, K::Sticky]),
         Top | Right | Bottom | Left => match part {
@@ -1047,6 +1079,28 @@ mod tests {
         assert_eq!(parse("margin", "1px red"), vec![]);
         assert_eq!(parse("padding", "1px auto"), vec![]);
         assert_eq!(parse("padding", "1px -2px"), vec![]);
+    }
+
+    #[test]
+    fn table_properties() {
+        let k = |w| Value::Keyword(w);
+        let px = |v| Value::Length(Length::Px(v));
+        assert_eq!(parse("border-spacing", "2px"), vec![(BorderSpacingH, px(2.0)), (BorderSpacingV, px(2.0))]);
+        assert_eq!(parse("border-spacing", "1px 4px"), vec![(BorderSpacingH, px(1.0)), (BorderSpacingV, px(4.0))]);
+        assert_eq!(parse("border-spacing", "0"), vec![(BorderSpacingH, px(0.0)), (BorderSpacingV, px(0.0))]);
+        assert_eq!(parse("border-spacing", "1px 2px 3px"), vec![]);
+        assert_eq!(parse("border-spacing", "-1px"), vec![]);
+        assert_eq!(parse("border-spacing", "5%"), vec![]);
+        assert_eq!(parse("border-spacing", "inherit").len(), 2);
+        assert_eq!(parse("border-collapse", "collapse"), vec![(BorderCollapse, k(K::Collapse))]);
+        assert_eq!(parse("border-collapse", "auto"), vec![]);
+        assert_eq!(parse("table-layout", "fixed"), vec![(TableLayout, k(K::Fixed))]);
+        assert_eq!(parse("table-layout", "collapse"), vec![]);
+        assert_eq!(parse("caption-side", "bottom"), vec![(CaptionSide, k(K::Bottom))]);
+        assert_eq!(parse("vertical-align", "middle"), vec![(VerticalAlign, k(K::Middle))]);
+        assert_eq!(parse("vertical-align", "2px"), vec![(VerticalAlign, px(2.0))]);
+        assert_eq!(parse("vertical-align", "bogus"), vec![]);
+        assert_eq!(parse("display", "inline-table"), vec![(Display, k(K::InlineTable))]);
     }
 
     #[test]

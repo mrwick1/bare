@@ -41,8 +41,8 @@ use bare_html::dom::{Atom, Document, NodeData, NodeId};
 pub enum Kind {
     /// No box: `display: none`, a comment, a doctype.
     None,
-    /// A block: it holds blocks, or lines. `display: block`, and for now also `table`, `flex`, `grid` and the parts of
-    /// a table (their own layout is not built, see `docs/progress.md`).
+    /// A block: it holds blocks, or lines. `display: block`, `table`, `flex`, `grid` and the parts of a table (`table.rs`
+    /// lays out the parts that sit in a table).
     Block,
     /// A block with a marker in front: `display: list-item` (`li`).
     ListItem,
@@ -123,7 +123,8 @@ impl<'a> Tree<'a> {
                 let Some(style) = self.styles.style(node) else { return Kind::None };
                 let Value::Keyword(display) = style.get(Property::Display) else { return Kind::Block };
                 match display {
-                    Keyword::None => Kind::None,
+                    // A column and a column group make no box: they only give widths to the table (`table.rs`).
+                    Keyword::None | Keyword::TableColumn | Keyword::TableColumnGroup => Kind::None,
                     _ if self.doc.parent(node) == Some(self.doc.root()) => Kind::Block,
                     _ if matches!(style.get(Property::Position), Value::Keyword(Keyword::Absolute | Keyword::Fixed)) => Kind::OutOfFlow,
                     // A child of a flex or grid container is an item: a block, whatever its `display` and `float`
@@ -137,9 +138,9 @@ impl<'a> Tree<'a> {
                     Keyword::Inline if Some(name) == self.br => Kind::Break,
                     Keyword::Inline => Kind::Inline,
                     Keyword::ListItem => Kind::ListItem,
-                    Keyword::InlineBlock | Keyword::InlineFlex | Keyword::InlineGrid => Kind::Atomic,
+                    Keyword::InlineBlock | Keyword::InlineFlex | Keyword::InlineGrid | Keyword::InlineTable => Kind::Atomic,
                     _ => Kind::Block,
-                    // `block`, `table`, `flex`, `grid` and the table parts. Their layout is a block for now.
+                    // `block`, `table`, `flex`, `grid` and the table parts. The layout of the content depends on the display (`block::context`).
                 }
             }
             _ => Kind::None,
