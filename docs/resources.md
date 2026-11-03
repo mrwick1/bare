@@ -234,6 +234,19 @@ Fixes from these numbers:
 
 `bare-stress fuzz layout` lays out broken pages with random CSS and checks that the fragments make a tree and that no place is NaN. It found two bugs: a tab in `font-size: 0` (a division by 0) and lengths like `2e45px` (infinity in `f32`). Lengths now stop at 33,554,431 px and font sizes at 10,000 px, as in Chrome. After the fix: 900,000 inputs (seeds 1 to 3), no failure.
 
+`bare-stress scale floats-` (2026-11-03). Linear after the change to steps (`docs/decisions.md`, "Floats"):
+
+| Page | n | ms | peak MB | Before the change |
+| --- | ---: | ---: | ---: | --- |
+| Floats of 10 by 10 that stack in rows | 200,000 | 43 | 7.3 | 20,000 took 243 ms, 200,000 timed out (20 s) |
+| One tall float and a long paragraph | 2,000,000 words | 67 | 16.5 | 64 ms |
+| A float and a paragraph, repeated | 200,000 | 213 | 49.5 | 20,000 took 839 ms, 200,000 timed out |
+| A float and a block with `clear: both`, repeated | 200,000 | 163 | 27.9 | 20,000 took 842 ms |
+| Floats in the middle of one paragraph | 200,000 | 116 | 44.0 | 20,000 took 311 ms |
+| A float and a `flow-root` block, repeated | 200,000 | 171 | 27.9 | 20,000 took 771 ms |
+
+`bare-stress fuzz layout` with floats, `clear` and `flow-root` in its words found one panic at once: a float with a negative margin box height (negative margins) made an empty range with its end before its start. Such a float now takes no room. After the fix: 900,000 inputs (seeds 1 to 3), no failure.
+
 ### Layout against Chrome (module 4)
 
 Method: a test page with 33 boxes and `font-family: 'Noto Sans Mono'` on all elements, served on 127.0.0.1. Chrome on a hyprcage screen, window 800 px wide. Chrome shows a 15 px scrollbar, so its page is 785 px wide; `bare --layout --width=785` gives the same width. A script reads `getBoundingClientRect` and `getClientRects` of each element with an `id`.
@@ -241,6 +254,8 @@ Method: a test page with 33 boxes and `font-family: 'Noto Sans Mono'` on all ele
 Result: all 33 boxes and the 6 line pieces of the two spans over three lines have the same place and size, to 0.01 px. The only difference is the letter width: 9.6 px here and 9.6016 px in Chrome (the font gives 1229/2048 em). A span that starts after 6 letters is at 65.6 px here and 65.61 px in Chrome.
 
 One difference of shape, not of place: Chrome gives a span that holds a block three client rects (the line before, the block, the line after). `bare` gives two span fragments and the block fragment.
+
+Floats (2026-11-03): a second test page has 18 cases: text around left and right floats, floats in the middle of a line that fit and that do not, floats that stack and go down, `clear`, `flow-root` beside a float (auto and fixed width), a BFC that contains its floats, a float in a block with margins, a shrink-to-fit float, `text-align: center` next to a float, a right float wider than its block, percent widths. All 51 boxes and all 39 text lines are the same as in Chrome, to 0.01 px. The check found two bugs, both fixed: a right float wider than its block kept its left edge (Chrome keeps its right edge), and a `flow-root` with a fixed width used its over-constrained right margin in the fit check, so it went below the float.
 
 ### Layout of real pages against Chrome (module 4)
 
@@ -254,6 +269,8 @@ Method: a script downloads each page and its style sheets, takes out `<script>`,
 | news.ycombinator.com (doctype added) | 329 | 0 | 0 | | Tables |
 | gnu.org, free software page | 248 | 1 | 0 | | Floats, form controls |
 | en.wikipedia.org, "Web browser" | 1,199 | 1 | 99 | 95 | Flex header, floats (the infobox), `::before` text in the reference list |
+
+With floats built (topic 6), floats and `flow-root` count as clean: Wikipedia then has 133 clean elements, and 121 have the same size as in Chrome. The rest are next to floats whose own size is wrong: the infobox is a floated `<table>` (tables are not built), and a floated `<figure>` holds an `<img>` with no size (images are not built), so it shrinks to fit its long caption and takes the whole line.
 
 Bugs that this check found, both fixed with a test first:
 - `x-a::before, span.mw-linkback-text { display: none }` was thrown away, because bare dropped every list with a pseudo-element. Chrome keeps it: a known pseudo-element is valid and matches nothing. The hidden back-link numbers made Wikipedia reference items one line taller.

@@ -126,6 +126,13 @@ pub fn all() -> Vec<Case> {
         case("inline-blocks-nested", 40, |n| lay(format!("{}x", "<i>a ".repeat(n)), "i { display: inline-block }")),
         case("inline-block-in-inline", 20_000, |n| lay(format!("<span>{}</span>", "a<div>b</div>".repeat(n)), "")),
         case("inline-list", 20_000, |n| lay(format!("<ul>{}</ul>", "<li>item".repeat(n)), "")),
+        // Floats
+        case("floats-stack", 2_000, |n| lay("<div></div>".repeat(n), "div { float: left; width: 10px; height: 10px } body { width: 300px }")),
+        case("floats-one-tall", 20_000, |n| lay(format!("<div></div><p>{}</p>", "word ".repeat(n)), "div { float: left; width: 50px; height: 100000000px } p { width: 300px }")),
+        case("floats-with-paragraphs", 2_000, |n| lay("<div></div><p>aaa bbb ccc ddd eee fff ggg</p>".repeat(n), "div { float: left; width: 50px; height: 30px } body { width: 300px }")),
+        case("floats-alternate-clear", 2_000, |n| lay("<div></div><p>x</p>".repeat(n), "div { float: right; width: 50px; height: 30px } p { clear: both }")),
+        case("floats-in-a-line", 2_000, |n| lay(format!("<p>{}</p>", "aa <i>f</i> bb ".repeat(n)), "i { float: left } p { width: 300px }")),
+        case("floats-new-contexts", 2_000, |n| lay("<div></div><section>x</section>".repeat(n), "div { float: left; width: 50px; height: 30px } section { display: flow-root }")),
         case("text-uppercase", 100_000, |n| pieces("stra\u{df}e ".repeat(n), NORMAL, Transform::Upper)),
     ]
 }

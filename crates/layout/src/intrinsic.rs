@@ -40,7 +40,7 @@ pub fn sizes(cx: &mut Cx, node: NodeId) -> (f32, f32) {
     }
     cx.depth -= 1;
     cx.measuring -= 1;
-    if cx.measuring > 0 && tree.kind(node) == crate::boxes::Kind::Atomic {
+    if cx.measuring > 0 && matches!(tree.kind(node), crate::boxes::Kind::Atomic | crate::boxes::Kind::Float) {
         cx.sizes.insert(node.index() as u32, (min, max));
     }
     (min, max)
@@ -122,6 +122,12 @@ fn lines(cx: &mut Cx, first: NodeId, last: NodeId) -> (f32, f32) {
                 let edge = resolve(cx, style.get(m), Some(0.0)).unwrap_or(0.0) + b + p;
                 unit += edge;
                 line += edge;
+            }
+            Event::Float(node) => {
+                // A float is not a break opportunity. On one line it adds its width; it never fits in less than its own min.
+                let (a, b) = outer(cx, node);
+                min = min.max(a);
+                line += b;
             }
             Event::Atomic(node) => {
                 min = min.max(unit);

@@ -30,6 +30,11 @@
 //! passes an `nsCollapsingMargin` the same way. We pass a `Strut` too. To avoid the wait, all places are relative to the
 //! parent until the end (`fragment.rs`), so a child is placed at 0 and its parent moves later.
 //!
+//! Floats (`floats.rs`) need more: the place of a line in its block formatting context (BFC) while it is laid out, to
+//! know which floats are next to it. So each block also gets a `Pos`: where it starts in the BFC, and the margins above
+//! it that are still open. LayoutNG passes the same two things ("BFC offset" and "margin strut"). A place in the BFC
+//! is final once a border, padding or a line resolves the margins above it.
+//!
 //! The walk calls itself for each level of the tree. A tree deeper than `MAX_DEPTH` stops there: what is deeper is not
 //! laid out. Firefox does the same (`MAX_REFLOW_DEPTH`). Chrome has no limit, and a very deep tree crashes its tab.
 //!
@@ -68,6 +73,12 @@ impl Strut {
         self.add(other.negative);
     }
 
+    /// This strut with the margins of `other` added.
+    pub fn with(mut self, other: Strut) -> Strut {
+        self.merge(other);
+        self
+    }
+
     /// The one margin that they make.
     pub fn sum(self) -> f32 {
         self.positive + self.negative
@@ -81,6 +92,17 @@ pub struct Space {
     /// The height, if it is known before the children are laid out (`height: 300px`). `None` for `height: auto`:
     /// then `height: 50%` on a child means `auto` too.
     pub height: Option<f32>,
+}
+
+/// Where a block starts in its block formatting context (BFC), for the floats. `x` is the left edge of the content box
+/// of its containing block. `y` is where its margin box starts if no margin is above it, and `strut` holds the margins
+/// above it that are not resolved yet: its border box starts at `y + strut.sum()`, with its own top margin in the strut.
+/// The coordinates are from the top-left of the border box of the BFC root.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Pos {
+    pub x: f32,
+    pub y: f32,
+    pub strut: Strut,
 }
 
 /// A length in pixels. A percent is of `base`. `None` for `auto` and `none`, and for a percent of an unknown base.
@@ -130,12 +152,12 @@ pub fn border_padding(cx: &Cx, style: &ComputedStyle, cb_width: f32) -> (Sides, 
 
 /// Does this block make its own block formatting context? Then the margins of its children do not collapse with its own.
 pub fn own_context(cx: &Cx, node: NodeId) -> bool {
-    if cx.tree.kind(node) == Kind::Atomic || Some(node) == cx.tree.root() {
+    if matches!(cx.tree.kind(node), Kind::Atomic | Kind::Float) || Some(node) == cx.tree.root() {
         return true;
     }
     matches!(
         cx.tree.style(node).get(Property::Display),
-        Value::Keyword(Keyword::Table | Keyword::TableCell | Keyword::TableCaption | Keyword::Flex | Keyword::Grid)
+        Value::Keyword(Keyword::Table | Keyword::TableCell | Keyword::TableCaption | Keyword::Flex | Keyword::Grid | Keyword::FlowRoot)
     )
 }
 
@@ -162,14 +184,25 @@ pub struct Done {
     pub baseline: Option<f32>,
 }
 
-/// Lay out a block-level box in `space`. Its fragment is at x = its left margin, y = 0: the parent moves it down.
-pub fn block(cx: &mut Cx, node: NodeId, space: Space) -> Done {
-    sized(cx, node, space, None)
+/// Lay out a block-level box in `space`, at `pos` in its BFC. Its fragment is at x = its left margin, y = 0: the parent
+/// moves it down.
+pub fn block(cx: &mut Cx, node: NodeId, space: Space, pos: Pos) -> Done {
+    sized(cx, node, space, None, pos)
+}
+
+/// The sides that a box with `clear` must go below: (left, right).
+pub fn clear_sides(style: &ComputedStyle) -> (bool, bool) {
+    match style.get(Property::Clear) {
+        Value::Keyword(Keyword::Left) => (true, false),
+        Value::Keyword(Keyword::Right) => (false, true),
+        Value::Keyword(Keyword::Both) => (true, true),
+        _ => (false, false),
+    }
 }
 
 /// Lay out a block. `forced`: the width of the content box and the two margins, when the caller already knows them
 /// (an inline-block that shrinks to fit its content, `inline.rs`).
-pub fn sized(cx: &mut Cx, node: NodeId, space: Space, forced: Option<(f32, f32, f32)>) -> Done {
+pub fn sized(cx: &mut Cx, node: NodeId, space: Space, forced: Option<(f32, f32, f32)>, pos: Pos) -> Done {
     let style = cx.tree.style(node);
     let (border, padding) = border_padding(cx, style, space.width);
     let bp = Sides {
@@ -201,14 +234,28 @@ pub fn sized(cx: &mut Cx, node: NodeId, space: Space, forced: Option<(f32, f32, 
         // The marker goes on the first line inside the item (`inline.rs`). If no line takes it, it goes at the top.
     }
     let inner = Space { width, height: height.map(clamp) };
+    // Where the content box starts in the BFC. A new BFC has its own coordinates and its own floats: the floats of the
+    // BFC around it wait in `outer` until it is done.
+    let strut = pos.strut.with(Strut { positive: margin_top.max(0.0), negative: margin_top.min(0.0) });
+    let x = pos.x + margin_left + bp.left;
+    let here = if own {
+        Pos { x: bp.left, y: bp.top, strut: Strut::default() }
+    } else if top_open {
+        Pos { x, y: pos.y, strut }
+    } else {
+        Pos { x, y: pos.y + strut.sum() + bp.top, strut: Strut::default() }
+    };
+    let outer = own.then(|| std::mem::take(&mut cx.floats));
     let kids = if cx.depth < MAX_DEPTH {
         cx.depth += 1;
-        let kids = children(cx, node, inner, top_open, bp.top, bp.left);
+        let kids = children(cx, node, inner, top_open, bp.top, bp.left, here);
         cx.depth -= 1;
         kids
     } else {
-        Kids { y: 0.0, top: Strut::default(), bottom: Strut::default(), open: top_open, baseline: None }
+        Kids { y: 0.0, top: Strut::default(), bottom: Strut::default(), open: top_open, baseline: None, top_y: here.y }
     };
+    // A BFC root grows to contain its floats (CSS 2.1, 10.6.7). Other blocks do not: a float sticks out of them.
+    let floats_bottom = outer.and_then(|outer| std::mem::replace(&mut cx.floats, outer).bottom()).map(|b| b - bp.top);
     if cx.marker == Some(node) {
         cx.marker = None;
         inline::lone_marker(cx, node, bp.left, bp.top);
@@ -229,6 +276,7 @@ pub fn sized(cx: &mut Cx, node: NodeId, space: Space, forced: Option<(f32, f32, 
             kids.y + kids.bottom.sum()
         }
     };
+    let content_height = floats_bottom.map_or(content_height, |b| content_height.max(b));
     let content_height = clamp(height.unwrap_or(content_height));
     done.through = kids.open && bottom_open && content_height == 0.0 && bp.vertical() == 0.0;
     if kids.open && !done.through {
@@ -295,13 +343,15 @@ struct Kids {
     open: bool,
     /// The baseline of the last line, from the top of the content box.
     baseline: Option<f32>,
+    /// Where the content box starts in the BFC, once the margins at the top are resolved (when `open` is false).
+    top_y: f32,
 }
 
 /// Lay out the children of a block, one under the other. `top_open`: the margins of the first child may go out through the
 /// top. The fragments of the children are placed relative to the parent's border box: `dx`, `dy` are the parent's
-/// border and padding.
-fn children(cx: &mut Cx, node: NodeId, space: Space, top_open: bool, dy: f32, dx: f32) -> Kids {
-    let mut kids = Kids { y: 0.0, top: Strut::default(), bottom: Strut::default(), open: top_open, baseline: None };
+/// border and padding. `here`: where the content box starts in the BFC (see `Pos`).
+fn children(cx: &mut Cx, node: NodeId, space: Space, top_open: bool, dy: f32, dx: f32, here: Pos) -> Kids {
+    let mut kids = Kids { y: 0.0, top: Strut::default(), bottom: Strut::default(), open: top_open, baseline: None, top_y: here.y };
     // `bottom` is the strut that is open now: the margins since the last child that has content.
     let tree = cx.tree;
     // A copy of the `Tree`, so that the loop over the children does not hold `cx`, and the loop body can change it.
@@ -312,7 +362,32 @@ fn children(cx: &mut Cx, node: NodeId, space: Space, top_open: bool, dy: f32, dx
                 if cx.tree.kind(b) == Kind::ListItem {
                     cx.number = cx.tree.list_number(&mut counter, b);
                 }
-                let done = block(cx, b, space);
+                let pos = next(&kids, here);
+                let (forced, moved) = if cx.floats.is_empty() { (None, None) } else { avoid_floats(cx, b, space, pos) };
+                if let Some(y) = moved {
+                    // Clearance: the block goes down to `y`, below the floats. Its top margin no longer collapses with
+                    // the margins above it: they are resolved here.
+                    if kids.open {
+                        kids.top_y = here.y + here.strut.with(kids.bottom).sum();
+                        kids.open = false;
+                        kids.top = kids.bottom;
+                    }
+                    kids.bottom = Strut::default();
+                    let mt = resolve(cx, cx.tree.style(b).get(Property::MarginTop), Some(space.width)).unwrap_or(0.0);
+                    let done = sized(cx, b, space, forced, Pos { x: here.x, y: y - mt, strut: Strut::default() });
+                    let top = Strut { positive: mt.max(0.0), negative: mt.min(0.0) }.with(done.top);
+                    let y = y - mt - kids.top_y + top.sum();
+                    cx.out[done.fragment].rect.y = y + dy;
+                    cx.out[done.fragment].rect.x += dx;
+                    kids.y = y + done.height;
+                    if let Some(b) = done.baseline {
+                        kids.baseline = Some(y + b);
+                    }
+                    kids.bottom.add(done.margin_bottom);
+                    kids.bottom.merge(done.bottom);
+                    continue;
+                }
+                let done = sized(cx, b, space, forced, pos);
                 kids.bottom.add(done.margin_top);
                 kids.bottom.merge(done.top);
                 if done.through {
@@ -322,7 +397,7 @@ fn children(cx: &mut Cx, node: NodeId, space: Space, top_open: bool, dy: f32, dx
                     cx.out[done.fragment].rect.x += dx;
                     continue;
                 }
-                let y = place(&mut kids);
+                let y = place(&mut kids, here);
                 cx.out[done.fragment].rect.y = y + dy;
                 cx.out[done.fragment].rect.x += dx;
                 kids.y = y + done.height;
@@ -335,12 +410,16 @@ fn children(cx: &mut Cx, node: NodeId, space: Space, top_open: bool, dy: f32, dx
             }
             Child::Lines(first, last) => {
                 let from = cx.out.len();
-                let lines = inline::lines(cx, node, first, last, space.width);
+                let pos = next(&kids, here);
+                let lines = inline::lines(cx, node, first, last, space.width, (here.x, pos.y + pos.strut.sum()));
                 if !lines.any {
+                    // Only empty inline boxes or floats: no line, and the margins go on through. The floats go where
+                    // the first line would be.
+                    let y = if kids.open { kids.y } else { kids.y + kids.bottom.sum() };
+                    fragment::shift(&mut cx.out, from, dx, y + dy);
                     continue;
-                    // Only empty inline boxes: no line, and the margins go on through.
                 }
-                let y = place(&mut kids);
+                let y = place(&mut kids, here);
                 fragment::shift(&mut cx.out, from, dx, y + dy);
                 kids.y = y + lines.height;
                 if let Some(b) = lines.baseline {
@@ -352,10 +431,60 @@ fn children(cx: &mut Cx, node: NodeId, space: Space, top_open: bool, dy: f32, dx
     kids
 }
 
+/// Where the next child starts in the BFC: see `Pos`.
+fn next(kids: &Kids, here: Pos) -> Pos {
+    if kids.open {
+        // Nothing resolved the margins yet: the parent's open margins and the children's ones are one strut.
+        Pos { x: here.x, y: here.y, strut: here.strut.with(kids.bottom) }
+    } else {
+        Pos { x: here.x, y: kids.top_y + kids.y, strut: kids.bottom }
+    }
+}
+
+/// A block next to floats, before it is laid out. `clear` moves it below them. A block that makes its own BFC (an
+/// inline-block, a table, a flex container) may not overlap them (CSS 2.1, 9.5): it gets narrower to fit beside them,
+/// or it goes down until it fits. Gives the width and margins to use (if they change), and the new top of its border
+/// box in the BFC (if it moves down).
+fn avoid_floats(cx: &mut Cx, node: NodeId, space: Space, pos: Pos) -> (Option<(f32, f32, f32)>, Option<f32>) {
+    let style = cx.tree.style(node);
+    let mt = resolve(cx, style.get(Property::MarginTop), Some(space.width)).unwrap_or(0.0);
+    let top = pos.y + pos.strut.with(Strut { positive: mt.max(0.0), negative: mt.min(0.0) }).sum();
+    let (left, right) = clear_sides(style);
+    let mut y = cx.floats.clear(left, right).map_or(top, |c| top.max(c));
+    let mut forced = None;
+    if own_context(cx, node) {
+        let (border, padding) = border_padding(cx, style, space.width);
+        let bp = border.horizontal() + padding.horizontal();
+        let (w, _, _) = widths(cx, style, space.width, bp);
+        // The margins as they are written: `widths` gives a fixed width an over-constrained right margin that fills the line.
+        let margin = |p| resolve(cx, style.get(p), Some(space.width)).unwrap_or(0.0);
+        let (ml, mr) = (margin(Property::MarginLeft), margin(Property::MarginRight));
+        let auto = style.get(Property::Width) == Value::Keyword(Keyword::Auto);
+        let min = if auto { crate::intrinsic::sizes(cx, node).0 } else { w };
+        loop {
+            let (l, r) = cx.floats.band(y, 0.0, pos.x, pos.x + space.width);
+            if (l, r) == (pos.x, pos.x + space.width) {
+                break;
+            }
+            // The border box goes between the floats. Its margins may overlap them.
+            let (l, r) = ((l - pos.x).max(ml), (r - pos.x).min(space.width - mr));
+            let next = cx.floats.next_bottom(y, 0.0);
+            if r - l - bp >= min - 0.01 || next.is_none() {
+                let w = if auto { (r - l - bp).max(0.0) } else { w };
+                forced = Some((w, l, space.width - l - w - bp));
+                break;
+            }
+            y = next.unwrap_or(y);
+        }
+    }
+    (forced, (y > top + 0.01).then_some(y))
+}
+
 /// A child with content comes: the open margins are resolved, and the child goes under them. The new top of the child.
-fn place(kids: &mut Kids) -> f32 {
+fn place(kids: &mut Kids, here: Pos) -> f32 {
     if kids.open {
         // The first content: the margins before it go out through the top of the parent.
+        kids.top_y = here.y + here.strut.with(kids.bottom).sum();
         kids.open = false;
         kids.top = kids.bottom;
         kids.bottom = Strut::default();
@@ -502,6 +631,13 @@ pub(crate) mod tests {
         let out = dump("<ol start=3><li><div style='height:5px'></div></li></ol>", "");
         // The marker `3. ` is 3 letters of 9.6px, to the left of the content box of the `li`.
         assert!(out.contains("marker 3 19.2,16 28.8x22\n"), "{out}");
+    }
+
+    #[test]
+    fn a_new_context_with_a_width_fits_beside_a_float() {
+        // The float takes 100 of 300. A block of 150 that makes its own context fits in the 200 next to it.
+        let html = "<div style='width:300px'><div style='float:left;width:100px;height:30px'></div><div id=b style='display:flow-root;width:150px;height:5px'></div></div>";
+        assert_eq!(rect(html, "", "b"), r(108.0, 8.0, 150.0, 5.0));
     }
 
     #[test]

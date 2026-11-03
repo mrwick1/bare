@@ -21,9 +21,15 @@
 //! for `text-align` are known only at the end. An inline box that goes over two lines makes one fragment on each line.
 //! Its left border and padding are on the first one, its right border and padding on the last one (like
 //! `box-decoration-break: slice`).
+//!
+//! Floats (`floats.rs`) make lines shorter: each line asks the floats for the room at its height (`Breaker::band`),
+//! with the height of the strut, as the line is not done yet. Chrome asks again when a line turns out taller and
+//! meets a float lower down; we do not. If a unit does not fit next to the floats on an empty line, the line goes down
+//! below the next float that ends (CSS 2.1, 9.5). A float in the middle of a line goes on that line if it fits next to
+//! what is already there, and the text on the line moves aside. If it does not fit, it waits for the next line.
 
 use crate::Cx;
-use crate::block::{self, MAX_DEPTH, Space, border_padding, resolve};
+use crate::block::{self, MAX_DEPTH, Pos, Space, border_padding, clear_sides, resolve};
 use crate::boxes::Kind;
 use crate::font::{self, LETTER, Metrics};
 use crate::fragment::{Fragment, Kind as FragmentKind, Rect};
@@ -43,6 +49,8 @@ pub enum Event {
     Close(NodeId),
     /// An atomic inline: one unit on the line.
     Atomic(NodeId),
+    /// A float: out of the line, at the side.
+    Float(NodeId),
     /// `<br>`.
     Break(NodeId),
     /// A block inside an inline box: it takes a line of its own.
@@ -89,6 +97,7 @@ impl Iterator for Events<'_, '_> {
             return Some(match kind {
                 Kind::Text => Event::Text(node),
                 Kind::Atomic => Event::Atomic(node),
+                Kind::Float => Event::Float(node),
                 Kind::Break => Event::Break(node),
                 Kind::Block | Kind::ListItem => Event::Block(node),
                 Kind::None | Kind::Inline => continue,
@@ -204,6 +213,13 @@ struct Breaker<'c, 'a> {
     y: f32,
     any: bool,
     baseline: Option<f32>,
+    /// Where the first line starts in the BFC, for the floats.
+    bfc: (f32, f32),
+    /// The room for this line next to the floats: where it starts (from the left of the block), and how wide it is.
+    left: f32,
+    avail: f32,
+    /// Floats that did not fit on the line where they are in the source. They go at the top of the next line.
+    deferred: Vec<(NodeId, bool, Atomic)>,
 }
 
 /// How far the font and the `line-height` of a box reach above and below the baseline. The extra space of the line
@@ -231,8 +247,8 @@ fn inline_box(cx: &Cx, node: NodeId, width: f32) -> Inline {
 }
 
 /// Lay out the run `first..=last` of the children of `block` in lines `width` pixels wide. The fragments are relative to
-/// the top-left of the first line: the caller moves them.
-pub fn lines(cx: &mut Cx, block: NodeId, first: NodeId, last: NodeId, width: f32) -> Lines {
+/// the top-left of the first line: the caller moves them. `bfc`: where that top-left is in the BFC, for the floats.
+pub fn lines(cx: &mut Cx, block: NodeId, first: NodeId, last: NodeId, width: f32, bfc: (f32, f32)) -> Lines {
     let tree = cx.tree;
     let strut = reach(cx, block);
     let mut b = Breaker {
@@ -255,7 +271,12 @@ pub fn lines(cx: &mut Cx, block: NodeId, first: NodeId, last: NodeId, width: f32
         y: 0.0,
         any: false,
         baseline: None,
+        bfc,
+        left: 0.0,
+        avail: width,
+        deferred: Vec::new(),
     };
+    b.band();
     let mut flow = Flow::new();
     for event in Events::new(&tree, first, last) {
         match event {
@@ -314,6 +335,17 @@ pub fn lines(cx: &mut Cx, block: NodeId, first: NodeId, last: NodeId, width: f32
                 b.commit();
                 flow.after_space = false;
             }
+            Event::Float(node) => {
+                // Not a break opportunity: the unit that waits stays as it is.
+                let item = atomic(b.cx, node, b.width);
+                let left = tree.style(node).get(Property::Float) == Value::Keyword(Keyword::Left);
+                let used = b.x + b.pending_w;
+                if used == 0.0 || item.w <= b.avail - used + 0.01 {
+                    b.float(node, left, item);
+                } else {
+                    b.deferred.push((node, left, item));
+                }
+            }
             Event::Break(_) => {
                 b.commit();
                 b.content = true;
@@ -371,10 +403,16 @@ impl Breaker<'_, '_> {
         if self.pending.is_empty() {
             return;
         }
-        if self.content && self.x + self.pending_w > self.width + 0.01 {
+        if self.content && self.x + self.pending_w > self.avail + 0.01 {
             // Too wide, and the line has something on it: this line is done. (A unit that is too wide for an empty line
             // stays, and sticks out: `overflow-wrap: normal`.) The 0.01 is for rounding: sums of `f32` are not exact.
             self.finish();
+        }
+        // An empty line next to floats, and the unit does not fit: the line goes down below the floats until it fits.
+        while !self.content && self.x + self.pending_w > self.avail + 0.01 && self.avail < self.width {
+            let Some(next) = self.cx.floats.next_bottom(self.bfc.1 + self.y, self.strut.0 + self.strut.1) else { break };
+            self.y = next - self.bfc.1;
+            self.band();
         }
         self.trail = None;
         let dx = self.x;
@@ -447,6 +485,36 @@ impl Breaker<'_, '_> {
         let (a, b) = self.open.last().map_or((0.0, 0.0), |o| (o.above, o.below));
         self.above = self.strut.0.max(a);
         self.below = self.strut.1.max(b);
+        for (node, left, item) in std::mem::take(&mut self.deferred) {
+            self.float(node, left, item);
+        }
+        self.band();
+    }
+
+    /// The room for the line at `y`, next to the floats.
+    fn band(&mut self) {
+        let h = self.strut.0 + self.strut.1;
+        let (l, r) = self.cx.floats.band(self.bfc.1 + self.y, h, self.bfc.0, self.bfc.0 + self.width);
+        self.left = l - self.bfc.0;
+        self.avail = r - l;
+    }
+
+    /// Place a float, not higher than the top of this line, and write its fragments.
+    fn float(&mut self, node: NodeId, left: bool, item: Atomic) {
+        let (cl, cr) = clear_sides(self.cx.tree.style(node));
+        let top = self.bfc.1 + self.y;
+        let top = self.cx.floats.clear(cl, cr).map_or(top, |c| top.max(c));
+        let (x, y) = self.cx.floats.place(left, item.w, item.h, top, self.bfc.0, self.bfc.0 + self.width);
+        let Atomic { mut fragments, margin_left, margin_top, .. } = item;
+        let base = self.cx.out.len() as u32;
+        for f in &mut fragments {
+            f.end += base;
+        }
+        fragments[0].rect.x = x - self.bfc.0 + margin_left;
+        fragments[0].rect.y = y - self.bfc.1 + margin_top;
+        self.cx.out.append(&mut fragments);
+        self.cx.spare.push(fragments);
+        self.band();
     }
 
     /// Write the fragments of a line that has content.
@@ -468,13 +536,14 @@ impl Breaker<'_, '_> {
         let baseline = above;
 
         // `text-align`: move the whole line.
-        let free = (self.width - self.x).max(0.0);
-        let dx = match tree.style(self.block).get(Property::TextAlign) {
-            Value::Keyword(Keyword::Right | Keyword::End) => free,
-            Value::Keyword(Keyword::Center) => free / 2.0,
-            _ => 0.0,
-            // `left`, `start`, and `justify` (not built: see `docs/progress.md`).
-        };
+        let free = (self.avail - self.x).max(0.0);
+        let dx = self.left
+            + match tree.style(self.block).get(Property::TextAlign) {
+                Value::Keyword(Keyword::Right | Keyword::End) => free,
+                Value::Keyword(Keyword::Center) => free / 2.0,
+                _ => 0.0,
+                // `left`, `start`, and `justify` (not built: see `docs/progress.md`).
+            };
 
         // The fragments: the inline boxes first (paint draws their background under the text), then the content.
         let y = self.y;
@@ -529,7 +598,8 @@ impl Breaker<'_, '_> {
         }
         let from = self.cx.out.len();
         self.cx.depth += 1;
-        let done = block::block(self.cx, node, Space { width: self.width, height: None });
+        let pos = Pos { x: self.bfc.0, y: self.bfc.1 + self.y, strut: Default::default() };
+        let done = block::block(self.cx, node, Space { width: self.width, height: None }, pos);
         self.cx.depth -= 1;
         let f = &mut self.cx.out[from];
         f.rect.y = self.y + done.margin_top;
@@ -540,6 +610,7 @@ impl Breaker<'_, '_> {
         if let Some(b) = done.baseline {
             self.baseline = Some(self.y - done.margin_bottom - done.height + b);
         }
+        self.band();
     }
 }
 
@@ -571,11 +642,11 @@ fn atomic(cx: &mut Cx, node: NodeId, cb: f32) -> Atomic {
     // A marker of a list item around this inline-block goes on the line, not inside the inline-block.
     let done = if cx.depth < MAX_DEPTH {
         cx.depth += 1;
-        let done = block::sized(cx, node, Space { width: cb, height: None }, Some((width, ml, mr)));
+        let done = block::sized(cx, node, Space { width: cb, height: None }, Some((width, ml, mr)), Pos::default());
         cx.depth -= 1;
         done
     } else {
-        block::sized(cx, node, Space { width: 0.0, height: Some(0.0) }, Some((0.0, 0.0, 0.0)))
+        block::sized(cx, node, Space { width: 0.0, height: Some(0.0) }, Some((0.0, 0.0, 0.0)), Pos::default())
     };
     cx.marker = marker;
     let fragments = std::mem::replace(&mut cx.out, saved);
