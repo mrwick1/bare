@@ -110,6 +110,7 @@ Chrome, Firefox, WebKit, Servo and Ladybird all store a box tree (Chrome: `Layou
 - An `auto-fit` track that holds no item has size 0 and no gutter. A gutter shows only between two tracks that show. The free space of `justify-content` and `align-content` goes to the tracks that show.
 - A child that is out of the flow is no item. If a run of text holds one, the lines place its static position. If the run is only spaces and out-of-flow boxes, the box gets a static position at the corner of the content box.
 - Baseline alignment is `start`, and `last baseline` is `end`. The first baseline of the container is the one of the first item in the first row. Subgrid and masonry are not built.
+- A grid has at most 10,000 tracks on each side (`MAX_TRACKS`). An item past the last track goes in the last track, and a span stops at the last line (standard 9). Without it, items past the limit took one new column each, and the bit set grew with rows times columns.
 - `block::flow` is gone: grid was the last container that used it.
 
 ## Tables

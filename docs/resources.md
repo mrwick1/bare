@@ -285,7 +285,7 @@ Fixes from these numbers:
 
 `bare-stress fuzz layout` with the flex words and a seed with wrapped rows, `order`, `auto` margins and nested columns: 21,000 inputs (seeds 1 to 7) in release, 9,000 in debug. The debug run found one panic: an item that is laid out again counted the static positions of its first layout as still waiting, but a positioned box inside it had taken them. Fixed: each item counts how many its layout left waiting. After the fix, no failure.
 
-`bare-stress scale table-` (2026-11-03). All linear (time exponent 1.0 at 10x and 100x). Each case is a whole page: parse, cascade and layout.
+`bare-stress scale table-` (2026-11-03). All linear (time exponent 1.0 at 10x and 100x). Each case times the layout only. The page is parsed and styled before the clock starts.
 
 | Page | n | ms | peak MB |
 | --- | ---: | ---: | ---: |
@@ -335,13 +335,15 @@ Flex (2026-11-03): two test pages have 65 cases: grow, shrink, `flex: 1 1 0` wit
 | `dense` with items that span 3 of 5 columns | 500,000 | 483 | 373 |
 | The same, sparse | 500,000 | 453 | 373 |
 | `grid-auto-flow: column` with 4 rows | 500,000 | 316 | 216 |
-| One item in each explicit row (500,000 rows) | 500,000 | 752 | 1,059 |
+| One item in each explicit row (`grid-row: n`, up to the limit of 10,000 tracks) | 500,000 | 326 | 142 |
 | Items that span 2 of 4 `auto` columns | 500,000 | 908 | 503 |
 | Many grids of 4 items | 200,000 grids | 648 | 72 |
 | Grids in grids, 3 levels | 200,000 | 1,718 | 165 |
 | Rows of 3 stretched cards, with a percent height inside | 500,000 | 605 | 309 |
 | `inline-grid` in a line of text | 200,000 | 617 | 48 |
 | Absolute children | 200,000 | 147 | 73 |
+
+The explicit rows first took 752 ms and 1,059 MB. The cause: rows past 10,000 go in the last row, and there each item took the next column with no limit. The columns went past 10,000, and the bit set of used cells grew to about 490,000 columns for each of the 10,000 rows. Now an item past the last track goes in the last track (standard 9), and the same page takes 326 ms and 142 MB.
 
 `bare-stress fuzz layout` with the grid words and a seed with areas, `repeat(auto-fit, minmax())`, `fit-content()`, `order`, `dense`, an absolute child and an inline grid: 18,000 inputs (seeds 1 to 6) after the merge with flex and tables, and 90,000 more (seeds 11 to 13). 0 failures.
 

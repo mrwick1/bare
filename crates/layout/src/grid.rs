@@ -406,6 +406,9 @@ fn place(items: &mut [Item], explicit: [usize; 2], major: usize, dense: bool) ->
     let mut rows_used = 0usize;
     let at = |a: usize, line: i32| (line - lo[a]) as usize;
     let set = |it: &mut Item, occ: &mut Occ, rows_used: &mut usize, m: (usize, usize), n: (usize, usize)| {
+        // Past the limit, an item goes in the last track, and a span stops at the last line (standard 9).
+        let clamp = |(s, e): (usize, usize)| (s.min(MAX_TRACKS - 1), e.min(MAX_TRACKS).max(s.min(MAX_TRACKS - 1) + 1));
+        let (m, n) = (clamp(m), clamp(n));
         occ.mark(m.0, m.1, n.0, n.1);
         *rows_used = (*rows_used).max(m.1);
         it.area[major] = (m.0 as u32, m.1 as u32);
@@ -1377,6 +1380,13 @@ mod tests {
         assert_eq!(grid(sparse, html, "c"), r(28.0, 18.0, 10.0, 10.0));
         let dense = "grid-template-columns: repeat(3, 10px); grid-auto-rows: 10px; grid-auto-flow: dense";
         assert_eq!(grid(dense, html, "c"), r(28.0, 8.0, 10.0, 10.0));
+    }
+
+    #[test]
+    fn an_item_past_the_last_track_goes_in_the_last_track() {
+        let html = format!("{}<div id=z style='grid-row: 1'></div>", "<div style='grid-row: 1'></div>".repeat(super::MAX_TRACKS + 1));
+        let css = "grid-auto-columns: 1px; grid-auto-rows: 1px";
+        assert_eq!(grid(css, &html, "z"), r(8.0 + (super::MAX_TRACKS - 1) as f32, 8.0, 1.0, 1.0));
     }
 
     #[test]
