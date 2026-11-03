@@ -85,6 +85,19 @@ const CSS_WORDS: &[&str] = &[
     "@supports", "@layer", "@import", "@container", "screen", "and", "not", "or", "!important", "px", "em", "%", "vw", "1e999", "-1", "0", " ", "\n", "p", "a", "color", "width", "red", "inherit", "initial", "unset", "\0", "\u{10ffff}",
 ];
 
+const LAYOUT_SEEDS: &[&str] = &[
+    "<style>i{display:inline-block;width:auto;padding:2px}b{font-size:30px;line-height:2}</style><div style='width:80px'>aa <i>bb cc<i>dd</i></i> <b>ee</b> ff<br>gg</div>",
+    "<style>p{margin:-5px 10% auto;white-space:pre-wrap;text-align:center}</style><p>a  b\n\tc<span style='background:red;padding:3px'>d e f</span></p><pre>x\ny</pre>",
+    "<style>li{display:list-item}ol{padding:0}</style><ol start=-3><li>a<li value=9><div>b</div><li><i style='display:inline-block'>c</i></ol>",
+    "<span style='border:2px solid'>a<div style='margin:7px;height:50%'>b</div>c</span><div style='width:calc(100% - 9999px);min-width:5px;max-width:2px'>x</div>",
+    "<div style='box-sizing:border-box;width:10px;padding:20px;border:9px solid'>wordwordword</div><div style='white-space:nowrap;text-transform:uppercase'>stra\u{df}e a b c</div>",
+];
+
+const LAYOUT_WORDS: &[&str] = &[
+    "<div>", "</div>", "<span>", "</span>", "<br>", "<p>", "<li>", "<pre>", "<i style='display:inline-block'>", "</i>", "<b style='font-size:0'>", "</b>", " ", "  ", "\n", "\t", "word", "\u{4e2d}",
+    "e\u{301}", "display:", "inline-block", "block", "none", "width:", "0", "-1px", "1e30px", "100%", "auto", "margin:", "padding:", "line-height:", "font-size:", "white-space:", "pre", "nowrap", ";", "'", "\"", "<style>", "</style>",
+];
+
 const URL_SEEDS: &[&str] = &[
     "http://example.com/a/b?c=d#e",
     "http://user:pw@example.com:8080/%41/../x",
@@ -163,7 +176,8 @@ pub fn run(args: &[String]) {
         "html" => (HTML_SEEDS, HTML_WORDS, fuzz_html),
         "css" => (CSS_SEEDS, CSS_WORDS, fuzz_css),
         "url" => (URL_SEEDS, URL_WORDS, fuzz_url),
-        _ => return eprintln!("targets: html css url"),
+        "layout" => (LAYOUT_SEEDS, LAYOUT_WORDS, fuzz_layout),
+        _ => return eprintln!("targets: html css url layout"),
     };
 
     // The watchdog: a thread that stops the program when one input takes more than 5 seconds.
@@ -282,6 +296,43 @@ fn fuzz_css(input: &[u8]) -> Result<(), String> {
     let styles = rules.compute(&doc);
     std::hint::black_box(styles.dump(&doc));
     std::hint::black_box(cascade::imports(&mut doc, &sheet, (1280.0, 800.0)));
+    Ok(())
+}
+
+/// Lay out a page with its `<style>` sheets. The fragments must make a tree (each one inside its parent), and every
+/// place and size must be a number (no NaN).
+fn fuzz_layout(input: &[u8]) -> Result<(), String> {
+    let page = String::from_utf8_lossy(input);
+    let mut doc = tree::parse(&page);
+    let mut rules = RuleSet::new((800.0, 600.0));
+    rules.add(&mut doc, UA_CSS, Origin::UserAgent);
+    for source in cascade::sources(&doc, (800.0, 600.0)) {
+        if let cascade::Source::Inline(text) = source {
+            rules.add(&mut doc, &text, Origin::Author);
+        }
+    }
+    let styles = rules.compute(&doc);
+    let layout = bare_layout::layout(&doc, &styles, (800.0, 600.0));
+    let mut open: Vec<u32> = Vec::new();
+    for (i, f) in layout.fragments.iter().enumerate() {
+        while open.last().is_some_and(|&e| e as usize <= i) {
+            open.pop();
+        }
+        if f.end as usize <= i || f.end as usize > layout.fragments.len() || open.last().is_some_and(|&e| f.end > e) {
+            return Err(format!("fragment {i} ends at {}, outside its parent", f.end));
+        }
+        let r = f.rect;
+        if [r.x, r.y, r.w, r.h].iter().any(|v| v.is_nan()) {
+            return Err(format!("fragment {i} has NaN: {r:?}"));
+        }
+        if f.end as usize > i + 1 {
+            open.push(f.end);
+        }
+    }
+    if layout.height.is_nan() {
+        return Err("page height is NaN".into());
+    }
+    std::hint::black_box(bare_layout::dump(&doc, &layout));
     Ok(())
 }
 

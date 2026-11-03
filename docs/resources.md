@@ -212,3 +212,24 @@ Two changes from the measurement:
 
 About 75 ns for each block. A fragment is 36 bytes: the peak is the fragment list. It started at 160 ms and 75.5 MB: the list now gets room for one fragment for each DOM node at the start, so it does not grow by copies.
 
+`bare-stress scale inline-` lays out inline content (2026-11-03). Linear:
+
+| Page | n | ms | peak MB | Before the fixes |
+| --- | ---: | ---: | ---: | --- |
+| One paragraph of 2,000,000 words, 300px wide | 2,000,000 | 61 | 14 | |
+| `<b>a</b> <i>b</i>` repeated | 2,000,000 | 756 | 432 | |
+| `<b>a</b>` repeated: one unit with no break | 2,000,000 | 308 | 245 | 480 ms, 983 MB |
+| 200,000 nested `<span>`, one line | 200,000 | 14 | 8 | 5,431 ms: quadratic |
+| 10,000 nested `<span>` over 10,000 lines | 10,000 | 1.3 | 0.4 | over the 2 GB limit |
+| `a<br>` repeated | 2,000,000 | 181 | 144 | |
+| Inline-blocks with two words | 2,000,000 | 843 | 216 | 1,105 ms, 298 MB |
+| Block inside an inline, repeated | 2,000,000 | 539 | 216 | 645 ms, 432 MB |
+
+Fixes from these numbers:
+- Culled inline boxes: a box with nothing to paint, no edges and the font of its parent makes no fragment and no line item.
+- The open boxes are a stack. The first version searched the list of boxes on the line for each end tag (quadratic).
+- A line item is 20 bytes: an inline-block's fragments are in a `Box`.
+- Intrinsic widths are kept only for an inline-block inside another one, and the fragment lists of inline-blocks are used again.
+
+`bare-stress fuzz layout` lays out broken pages with random CSS and checks that the fragments make a tree and that no place is NaN. It found two bugs: a tab in `font-size: 0` (a division by 0) and lengths like `2e45px` (infinity in `f32`). Lengths now stop at 33,554,431 px and font sizes at 10,000 px, as in Chrome. After the fix: 900,000 inputs (seeds 1 to 3), no failure.
+
