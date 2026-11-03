@@ -200,3 +200,15 @@ Two changes from the measurement:
 - A word is scanned once. The first version scanned it to find its end, then again to check that it is ASCII.
 - `width_of` tests the wide letters before the table of accents, so Chinese text skips the binary search.
 
+`bare-stress scale block-` lays out pages of blocks (2026-11-03). Linear:
+
+| Page | n | ms | peak MB |
+| --- | ---: | ---: | ---: |
+| `<div>` with a height and margins | 2,000,000 | 153 | 72 |
+| Empty `<div>` with margins (all collapse through) | 2,000,000 | 149 | 72 |
+| `<div>` with `calc()`, `%`, `auto` margins, `max-width` | 2,000,000 | 150 | 72 |
+| `<li><div>` (a marker for each) | 2,000,000 | 444 | 288 |
+| 200,000 nested `<div>` (layout stops at 400 levels) | 200,000 | 0.3 | 0 |
+
+About 75 ns for each block. A fragment is 36 bytes: the peak is the fragment list. It started at 160 ms and 75.5 MB: the list now gets room for one fragment for each DOM node at the start, so it does not grow by copies.
+

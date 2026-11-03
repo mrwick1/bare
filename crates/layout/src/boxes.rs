@@ -16,6 +16,7 @@
 //!   (LayoutNG) reads it and writes a second tree, the immutable "fragment tree", with the sizes and places.
 //! - Firefox: an `nsIFrame` for each box, with the sizes and places in the same object. Text runs are cached on it.
 //! - Servo (layout 2020) and Ladybird: a box tree built in a first pass, then a fragment tree.
+//!
 //! All of them store the box tree. It costs memory: Chrome uses about 1.6 KB for each element for style and layout
 //! (`docs/resources.md`), and the layout objects are most of it.
 //!
@@ -69,6 +70,8 @@ impl Kind {
 }
 
 /// What layout needs to make boxes: the DOM, the styles, and the names that it tests. Make it once for each layout.
+/// `Copy`: it holds only references and numbers, so a copy is cheap.
+#[derive(Clone, Copy)]
 pub struct Tree<'a> {
     pub doc: &'a Document,
     pub styles: &'a Styles,
