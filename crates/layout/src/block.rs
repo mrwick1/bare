@@ -180,7 +180,7 @@ pub fn context(cx: &Cx, node: NodeId) -> Context {
     match cx.tree.style(node).get(Property::Display) {
         Value::Keyword(Keyword::Flex | Keyword::InlineFlex) => Context::Flex,
         Value::Keyword(Keyword::Grid | Keyword::InlineGrid) => Context::Grid,
-        Value::Keyword(Keyword::Table) => Context::Table,
+        Value::Keyword(Keyword::Table | Keyword::InlineTable) => Context::Table,
         _ => Context::Flow,
     }
 }
@@ -234,15 +234,30 @@ pub fn clear_sides(style: &ComputedStyle) -> (bool, bool) {
 /// (an inline-block that shrinks to fit its content, `inline.rs`). `tall`: the height of the content box, when the caller
 /// knows it (an absolutely positioned box with `top` and `bottom`).
 pub fn sized(cx: &mut Cx, node: NodeId, space: Space, forced: Option<(f32, f32, f32)>, tall: Option<f32>, pos: Pos) -> Done {
+    sized_with(cx, node, space, forced, tall, pos, None)
+}
+
+/// `sized` for a table and its cells. `sides`: the borders and the padding of a table cell, if the table sets them (a
+/// collapsed border is half of an edge). A table finds its own in its `Plan`. For both, `height` is a minimum that
+/// `table.rs` takes care of, so here it is `auto`.
+pub(crate) fn sized_with(cx: &mut Cx, node: NodeId, space: Space, forced: Option<(f32, f32, f32)>, tall: Option<f32>, pos: Pos, sides: Option<(Sides, Sides)>) -> Done {
     let style = cx.tree.style(node);
-    let (border, padding) = border_padding(cx, style, space.width);
+    let plan = (context(cx, node) == Context::Table).then(|| crate::table::Plan::new(cx, node, space.width));
+    let (border, padding) = match (&plan, sides) {
+        (Some(p), _) => p.sides(),
+        (None, Some(s)) => s,
+        (None, None) => border_padding(cx, style, space.width),
+    };
     let bp = Sides {
         top: border.top + padding.top,
         right: border.right + padding.right,
         bottom: border.bottom + padding.bottom,
         left: border.left + padding.left,
     };
-    let (width, margin_left, margin_right) = forced.unwrap_or_else(|| widths(cx, style, space.width, bp.horizontal()));
+    let (width, margin_left, margin_right) = match &plan {
+        Some(p) => p.widths(cx, forced, space.width, bp.horizontal()),
+        None => forced.unwrap_or_else(|| widths(cx, style, space.width, bp.horizontal())),
+    };
     let margin = |p| resolve(cx, style.get(p), Some(space.width)).unwrap_or(0.0);
     let (margin_top, margin_bottom) = (margin(Property::MarginTop), margin(Property::MarginBottom));
 
@@ -252,7 +267,7 @@ pub fn sized(cx: &mut Cx, node: NodeId, space: Space, forced: Option<(f32, f32, 
 
     let border_box = style.get(Property::BoxSizing) == Value::Keyword(Keyword::BorderBox);
     let content = |v: f32| if border_box { (v - bp.vertical()).max(0.0) } else { v };
-    let height = tall.or_else(|| resolve(cx, style.get(Property::Height), space.height).map(content));
+    let height = tall.or_else(|| if plan.is_some() || sides.is_some() { None } else { resolve(cx, style.get(Property::Height), space.height).map(content) });
     let min = resolve(cx, style.get(Property::MinHeight), space.height).map_or(0.0, content);
     let max = resolve(cx, style.get(Property::MaxHeight), space.height).map(content);
     let clamp = |h: f32| max.map_or(h, |m| h.min(m)).max(min);
@@ -303,7 +318,7 @@ pub fn sized(cx: &mut Cx, node: NodeId, space: Space, forced: Option<(f32, f32, 
                 Context::Flow => children(cx, node, inner, top_open, bp.top, bp.left, here, stop),
                 Context::Flex => crate::flex::layout(cx, node, inner, bp),
                 Context::Grid => crate::grid::layout(cx, node, inner, bp),
-                Context::Table => crate::table::layout(cx, node, inner, bp),
+                Context::Table => crate::table::layout(cx, node, inner, bp, plan.as_ref().expect("a table has a plan")),
             };
             cx.depth -= 1;
             kids
@@ -566,6 +581,28 @@ fn right_edge(cx: &Cx, at: usize) -> f32 {
     right
 }
 
+/// The content width and the margins of a block, from its margins (`None` for `auto`) and its width (`None` for `auto`).
+/// `cb`: the width of the containing block. `bp`: the borders and padding of both sides.
+pub(crate) fn solve_margins(ml: Option<f32>, mr: Option<f32>, cb: f32, bp: f32, width: Option<f32>) -> (f32, f32, f32) {
+    match width {
+        None => {
+            let (l, r) = (ml.unwrap_or(0.0), mr.unwrap_or(0.0));
+            ((cb - l - r - bp).max(0.0), l, r)
+        }
+        Some(w) => {
+            let rest = cb - bp - w;
+            match (ml, mr) {
+                (None, None) if rest >= 0.0 => (w, rest / 2.0, rest / 2.0),
+                (None, None) => (w, 0.0, rest),
+                (None, Some(r)) if rest - r >= 0.0 => (w, rest - r, r),
+                (None, Some(_)) => (w, 0.0, rest),
+                (Some(l), _) => (w, l, rest - l),
+                // Too many numbers: `margin-right` takes what is left (left to right text).
+            }
+        }
+    }
+}
+
 /// The content width and the left and right margins of a block (CSS 2.1, 10.3.3, with `box-sizing`, `min-width` and
 /// `max-width`). `bp`: the borders and padding of both sides.
 pub fn widths(cx: &Cx, style: &ComputedStyle, cb: f32, bp: f32) -> (f32, f32, f32) {
@@ -573,25 +610,7 @@ pub fn widths(cx: &Cx, style: &ComputedStyle, cb: f32, bp: f32) -> (f32, f32, f3
     let content = |v: f32| if border_box { (v - bp).max(0.0) } else { v };
     let ml = resolve(cx, style.get(Property::MarginLeft), Some(cb));
     let mr = resolve(cx, style.get(Property::MarginRight), Some(cb));
-    let solve = |width: Option<f32>| -> (f32, f32, f32) {
-        match width {
-            None => {
-                let (l, r) = (ml.unwrap_or(0.0), mr.unwrap_or(0.0));
-                ((cb - l - r - bp).max(0.0), l, r)
-            }
-            Some(w) => {
-                let rest = cb - bp - w;
-                match (ml, mr) {
-                    (None, None) if rest >= 0.0 => (w, rest / 2.0, rest / 2.0),
-                    (None, None) => (w, 0.0, rest),
-                    (None, Some(r)) if rest - r >= 0.0 => (w, rest - r, r),
-                    (None, Some(_)) => (w, 0.0, rest),
-                    (Some(l), _) => (w, l, rest - l),
-                    // Too many numbers: `margin-right` takes what is left (left to right text).
-                }
-            }
-        }
-    };
+    let solve = |width: Option<f32>| solve_margins(ml, mr, cb, bp, width);
     let (mut w, mut l, mut r) = solve(resolve(cx, style.get(Property::Width), Some(cb)).map(content));
     if let Some(max) = resolve(cx, style.get(Property::MaxWidth), Some(cb)).map(content)
         && w > max

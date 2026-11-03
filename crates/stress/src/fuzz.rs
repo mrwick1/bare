@@ -94,12 +94,13 @@ const LAYOUT_SEEDS: &[&str] = &[
     "<style>.l{float:left;width:30px;height:20px}.r{float:right;margin:-3px}</style><div style='width:100px;margin-top:9px'><div class=l></div>aa <b class=r>bb</b> cc<p style='clear:both'>d</p><div style='display:flow-root'>e<i class=l>f</i></div></div>",
     "<div style='overflow:auto;max-height:20px;width:60px'><div style='overflow-x:scroll'>aa bb<br>cc</div><span style='display:inline-block;overflow:hidden'>dd</span><p style='white-space:nowrap'>eeeeeeeeeeeeeeeeeeee</p></div>",
     "<div style='position:relative;width:80px'>a <span style='position:relative;top:2px'>b <i style='position:absolute;right:0;bottom:-5px'>c</i></span><div style='position:absolute;left:5px;right:5px;top:0;bottom:0;margin:auto;height:9px'><b style='position:fixed;bottom:0'>d</b></div><p style='position:sticky;top:0'>e</p></div>",
+    "<table border=1 cellspacing=3 width=50%><caption>cap</caption><colgroup><col width=20><col></colgroup><thead><tr><th colspan=2>h</thead><tr><td rowspan=2>a b<td style='vertical-align:bottom;width:30%'>c<tr><td colspan=3>dd<td height=40>e<tfoot><tr><td>f</table><table style='border-collapse:collapse;table-layout:fixed;width:90px'><tr><td style='border:3px solid'>x<td style='border:hidden'>y</table>",
 ];
 
 const LAYOUT_WORDS: &[&str] = &[
-    "<div>", "</div>", "<span>", "</span>", "<br>", "<p>", "<li>", "<pre>", "<i style='display:inline-block'>", "</i>", "<b style='font-size:0'>", "</b>", " ", "  ", "\n", "\t", "word", "\u{4e2d}",
+    "<div>", "</div>", "<span>", "</span>", "<br>", "<table>", "</table>", "<tr>", "<td>", "<td colspan=3>", "<td rowspan=2>", "<th>", "<caption>", "<col>", "<colgroup>", "<tbody>", "<thead>", "<tfoot>", "<p>", "<li>", "<pre>", "<i style='display:inline-block'>", "</i>", "<b style='font-size:0'>", "</b>", " ", "  ", "\n", "\t", "word", "\u{4e2d}",
     "e\u{301}", "display:", "inline-block", "block", "none", "width:", "0", "-1px", "1e30px", "100%", "auto", "margin:", "padding:", "line-height:", "font-size:", "white-space:", "pre", "nowrap", ";", "'", "\"", "<style>", "</style>",
-    "float:", "left", "right", "clear:", "both", "flow-root", "height:", "-50px", "overflow:", "auto", "scroll", "hidden", "clip", "max-height:", "nowrap", "position:", "relative", "absolute", "fixed", "sticky", "top:", "left:", "right:", "bottom:", "10%",
+    "float:", "left", "right", "clear:", "both", "flow-root", "height:", "-50px", "overflow:", "auto", "scroll", "hidden", "clip", "max-height:", "nowrap", "table", "inline-table", "table-cell", "table-row", "table-caption", "border-collapse:", "collapse", "border-spacing:", "table-layout:", "fixed", "vertical-align:", "middle", "caption-side:", "bottom", "colspan=999999", "position:", "relative", "absolute", "fixed", "sticky", "top:", "left:", "right:", "bottom:", "10%",
 ];
 
 const URL_SEEDS: &[&str] = &[

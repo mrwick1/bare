@@ -42,7 +42,8 @@ pub fn sizes(cx: &mut Cx, node: NodeId) -> (f32, f32) {
         min += crate::block::SCROLLBAR;
         max += crate::block::SCROLLBAR;
     }
-    if cx.measuring > 0 && matches!(tree.kind(node), crate::boxes::Kind::Atomic | crate::boxes::Kind::Float) {
+    if (cx.measuring > 0 && matches!(tree.kind(node), crate::boxes::Kind::Atomic | crate::boxes::Kind::Float)) || crate::block::context(cx, node) == Context::Table {
+        // A table is kept always: its own layout asks for the sizes again, and so do the cells that hold it.
         cx.sizes.insert(node.index() as u32, (min, max));
     }
     (min, max)

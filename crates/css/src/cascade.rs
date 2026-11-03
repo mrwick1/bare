@@ -296,6 +296,7 @@ impl RuleSet {
         // Style 0 is the starting style. It is the parent style of the `html` element.
         let mut cx = Cx { viewport: self.viewport, root_font_size: 16.0, layer_order: self.layer_order(), declared: &self.side, inline: RefCell::default(), computed: RefCell::default(), customs: RefCell::default() };
         let style_atom = doc.find_atom("style");
+        let hints = crate::hints::Hints::new(doc);
         let mut filter = AncestorFilter::new();
         let mut memo = Memo::default();
         let (mut candidates, mut matched): (Vec<u32>, Vec<u32>) = (Vec::new(), Vec::new());
@@ -323,7 +324,8 @@ impl RuleSet {
                     matched.sort_unstable();
                     // The order of the rules is their place in the list, so the key of the cache and the result do not depend on the buckets.
                     let inline = style_atom.and_then(|a| doc.attr(node, a));
-                    let id = self.style_of(&mut styles, &mut memo, parent, &matched, inline, &cx);
+                    let hint = hints.as_ref().and_then(|h| h.of(doc, node));
+                    let id = self.style_of(&mut styles, &mut memo, parent, &matched, (inline, hint.as_deref()), &cx);
                     styles.of_node[node.index()] = id;
                     if styles.styles[id as usize].get(Property::Display) == Value::Keyword(Keyword::None) {
                         continue;
@@ -375,15 +377,19 @@ impl RuleSet {
     }
 
     /// The number of the style of an element. It is found in the cache, or it is made.
-    fn style_of(&self, styles: &mut Styles, memo: &mut Memo, parent: u32, matched: &[u32], inline: Option<&str>, cx: &Cx<'_>) -> u32 {
-        let key = matched.iter().fold(u64::from(parent), |h, &i| (h ^ u64::from(i)).wrapping_mul(0x0100_0000_01b3));
+    fn style_of(&self, styles: &mut Styles, memo: &mut Memo, parent: u32, matched: &[u32], (inline, hint): (Option<&str>, Option<&str>), cx: &Cx<'_>) -> u32 {
+        let mut key = matched.iter().fold(u64::from(parent), |h, &i| (h ^ u64::from(i)).wrapping_mul(0x0100_0000_01b3));
+        // The hint is part of the key: the cells of one table share their hint, and so their style.
+        if let Some(h) = hint {
+            key = h.bytes().fold(key, |h, b| (h ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3));
+        }
         if inline.is_none() {
-            let found = memo.cache.get(&key).and_then(|list| list.iter().find(|c| c.parent == parent && *c.rules == *matched));
+            let found = memo.cache.get(&key).and_then(|list| list.iter().find(|c| c.parent == parent && *c.rules == *matched && c.hint.as_deref() == hint));
             if let Some(found) = found {
                 return found.style;
             }
         }
-        let style = self.cascade(matched, inline, &styles.styles[parent as usize], cx);
+        let style = self.cascade(matched, inline, hint, &styles.styles[parent as usize], cx);
         // Two different rule lists may give the same style (`div div` inside `div`). Then they share it, and the children of both
         // have the same parent style, so they find each other in the cache.
         let hash = style_hash(&style);
@@ -395,13 +401,13 @@ impl RuleSet {
             id
         });
         if inline.is_none() {
-            memo.cache.entry(key).or_default().push(CacheEntry { parent, rules: matched.into(), style: id });
+            memo.cache.entry(key).or_default().push(CacheEntry { parent, rules: matched.into(), hint: hint.map(Into::into), style: id });
         }
         id
     }
 
     /// Pick the winning declaration for each property, then compute the values.
-    fn cascade(&self, matched: &[u32], inline: Option<&str>, parent: &ComputedStyle, cx: &Cx<'_>) -> ComputedStyle {
+    fn cascade(&self, matched: &[u32], inline: Option<&str>, hint: Option<&str>, parent: &ComputedStyle, cx: &Cx<'_>) -> ComputedStyle {
         let mut winners = [None::<Value>; Property::COUNT];
         let mut keys = [0u128; Property::COUNT];
         // The key of a declaration: the one with the bigger key wins. The parts, from the most important: the origin and `!important`,
@@ -421,6 +427,18 @@ impl RuleSet {
             };
             rank << 96 | u128::from(layer) << 64 | u128::from(specificity) << 32 | u128::from(order)
         };
+        // The presentational hints (`hints.rs`): author declarations that any rule beats. Their key is the least of the author origin.
+        if let Some(text) = hint {
+            let mut out = Vec::new();
+            for d in parse_declarations(text) {
+                parse_declaration(&d.name, d.value, false, &mut Side::default(), &mut out);
+            }
+            for d in &out {
+                let p = d.property as usize;
+                winners[p] = Some(d.value);
+                keys[p] = 1 << 96;
+            }
+        }
         let mut apply = |d: &Declared, origin: Origin, layer: Option<u32>, specificity: u32, order: u32| {
             let key = key(d.important, origin, layer, specificity, order);
             let p = d.property as usize;
@@ -541,6 +559,7 @@ impl RuleSet {
 struct CacheEntry {
     parent: u32,
     rules: Box<[u32]>,
+    hint: Option<Box<str>>,
     style: u32,
 }
 
@@ -822,7 +841,11 @@ fn initial(p: Property) -> Value {
         FlexShrink => Value::Number(1.0),
         FlexBasis => Value::Keyword(K::Auto),
         JustifyContent | AlignContent | AlignItems | RowGap | ColumnGap => Value::Keyword(K::Normal),
-        AlignSelf => Value::Keyword(K::Auto),
+        AlignSelf | TableLayout => Value::Keyword(K::Auto),
+        BorderCollapse => Value::Keyword(K::Separate),
+        CaptionSide => Value::Keyword(K::Top),
+        VerticalAlign => Value::Keyword(K::Baseline),
+        BorderSpacingH | BorderSpacingV => px(0.0),
         MinWidth | MinHeight | MarginTop | MarginRight | MarginBottom | MarginLeft | PaddingTop | PaddingRight | PaddingBottom | PaddingLeft => px(0.0),
         BorderTopWidth | BorderRightWidth | BorderBottomWidth | BorderLeftWidth => px(3.0),
         // `medium`. With the style `none` it is 0: `compute` does that.
@@ -833,7 +856,7 @@ fn initial(p: Property) -> Value {
 /// Does a child take the value of the parent when it has no value of its own?
 fn inherited(p: Property) -> bool {
     use Property::*;
-    matches!(p, TextColor | FontSize | FontWeight | FontStyle | LineHeight | TextAlign | TextTransform | WhiteSpace | ListStyleType | Visibility)
+    matches!(p, TextColor | FontSize | FontWeight | FontStyle | LineHeight | TextAlign | TextTransform | WhiteSpace | ListStyleType | Visibility | BorderCollapse | BorderSpacingH | BorderSpacingV | CaptionSide)
 }
 
 /// The font size of the element, in pixels. It is first, because `em` in the other properties needs it.
@@ -1153,6 +1176,41 @@ mod tests {
 
     fn px(v: f32) -> Value {
         Value::Length(Length::Px(v))
+    }
+
+    #[test]
+    fn presentational_hints_lose_to_rules_and_beat_the_browser() {
+        let html = "<table id=t cellspacing=7 width=300><tr><td id=a>x<td id=b>y</table><table><tr><td id=c>z</table>";
+        // The browser's `border-spacing: 2px` loses to the hint. A rule of the page beats the hint, even with no specificity.
+        assert_eq!(get(html, &[], "t", Property::BorderSpacingH), px(7.0));
+        assert_eq!(get(html, &["table { border-spacing: 1px }"], "t", Property::BorderSpacingH), px(1.0));
+        assert_eq!(get(html, &[], "t", Property::Width), px(300.0));
+        // The cell gets its padding from the table: the same style for the two cells, and the 1px of the browser for the other table.
+        let html = "<table cellpadding=5><tr><td id=a>x<td id=b>y</table><table><tr><td id=c>z</table>";
+        assert_eq!(get(html, &[], "a", Property::PaddingLeft), px(5.0));
+        assert_eq!(get(html, &[], "b", Property::PaddingTop), px(5.0));
+        assert_eq!(get(html, &[], "c", Property::PaddingLeft), px(1.0));
+        assert_eq!(get(html, &["td { padding: 0 }"], "a", Property::PaddingLeft), px(0.0));
+    }
+
+    #[test]
+    fn table_properties_inherit_or_not() {
+        let html = "<table id=t><tr id=r><td id=c><table id=n></table></td></tr></table>";
+        let css = "#t { border-collapse: collapse; border-spacing: 5px 7px; caption-side: bottom; table-layout: fixed; vertical-align: top }";
+        let g = |id, p| get(html, &[css], id, p);
+        // A cell inherits them. (The UA sheet gives each table `border-spacing: 2px`, so the table inside does not.)
+        assert_eq!(g("c", Property::BorderCollapse), Value::Keyword(Keyword::Collapse));
+        assert_eq!(g("n", Property::BorderCollapse), Value::Keyword(Keyword::Collapse));
+        assert_eq!(g("c", Property::BorderSpacingH), px(5.0));
+        assert_eq!(g("c", Property::BorderSpacingV), px(7.0));
+        assert_eq!(g("n", Property::BorderSpacingH), px(2.0));
+        assert_eq!(g("c", Property::CaptionSide), Value::Keyword(Keyword::Bottom));
+        // `table-layout` is not inherited. `vertical-align` is not either, but a cell inherits it by the UA sheet.
+        assert_eq!(g("n", Property::TableLayout), Value::Keyword(Keyword::Auto));
+        assert_eq!(g("t", Property::VerticalAlign), Value::Keyword(Keyword::Top));
+        assert_eq!(g("r", Property::VerticalAlign), Value::Keyword(Keyword::Middle));
+        assert_eq!(get("<table><tbody><tr><td id=c>", &[], "c", Property::VerticalAlign), Value::Keyword(Keyword::Middle));
+        assert_eq!(get("<table id=t>", &[], "t", Property::BorderSpacingH), px(2.0));
     }
 
     fn rgb(r: u8, g: u8, b: u8) -> Value {
