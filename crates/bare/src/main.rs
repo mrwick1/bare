@@ -3,7 +3,8 @@
 //! Usage: `cargo run -- http://example.com`
 //!
 //! It prints the DOM tree of the page. Add `--source` to print the source of the page instead,
-//! or `--styles` to print the computed style of each element.
+//! `--styles` to print the computed style of each element, or `--layout` to print the place and size of each box.
+//! `--width=900` sets the width of the window (1280 if not given).
 //!
 //! Comments compare Rust with JavaScript, because you know JS.
 
@@ -25,6 +26,14 @@ fn main() {
     let source = args.iter().any(|a| a == "--source");
     // Did the user type `--source`?
     let styles = args.iter().any(|a| a == "--styles");
+    let layout = args.iter().any(|a| a == "--layout");
+    let width = args
+        .iter()
+        .find_map(|a| a.strip_prefix("--width="))
+        .and_then(|w| w.parse::<f32>().ok())
+        .filter(|w| *w > 0.0);
+    // `find_map`: the first flag that starts with `--width=`, without that start. JS: `args.find(...)?.slice(8)`.
+    let viewport = (width.unwrap_or(VIEWPORT.0), VIEWPORT.1);
     let arg = match args.iter().find(|a| !a.starts_with("--")) {
         // Get the first word that is not a flag: the URL.
         // It may be missing. Rust makes us handle that case.
@@ -100,8 +109,14 @@ fn main() {
         // Build the DOM tree.
         drop(out);
         if styles {
-            print!("{}", computed_styles(&mut doc, url.as_ref().ok()));
+            let computed = computed_styles(&mut doc, url.as_ref().ok(), viewport);
+            print!("{}", computed.dump(&doc));
             // `--styles`: the style of each element.
+        } else if layout {
+            let computed = computed_styles(&mut doc, url.as_ref().ok(), viewport);
+            let result = bare_layout::layout(&doc, &computed, viewport);
+            print!("{}", bare_layout::dump(&doc, &result));
+            // `--layout`: each box, with its place and size.
         } else {
             print!("{}", doc.dump());
             // Print the tree, one line for each node.
@@ -109,7 +124,7 @@ fn main() {
     }
 }
 
-/// The window is 1280 by 800 until module 5 has a window. `@media`, `vw` and `vh` use it.
+/// The window is 1280 by 800 until module 5 has a window. `@media`, `vw`, `vh` and layout use it.
 const VIEWPORT: (f32, f32) = (1280.0, 800.0);
 
 /// `@import` goes this deep. A sheet that imports itself stops here.
@@ -147,7 +162,7 @@ fn add_sheet(
     depth: usize,
 ) {
     if depth < MAX_IMPORT_DEPTH {
-        let imports = cascade::imports(doc, text, VIEWPORT);
+        let imports = cascade::imports(doc, text, rules.viewport());
         for import in imports {
             if let Some((url, text)) = fetch_sheet(client, base, &import.href) {
                 // A sheet that is imported in a layer, and imports another one in a layer, is in `outer.inner`.
@@ -165,12 +180,12 @@ fn add_sheet(
 }
 
 /// Read the style sheets of the page (the `<style>` elements and the `<link rel=stylesheet>` that we can fetch),
-/// find the style of every element, and give it as text.
-fn computed_styles(doc: &mut bare_html::dom::Document, page: Option<&Url>) -> String {
-    let mut rules = RuleSet::new(VIEWPORT);
+/// and find the style of every element.
+fn computed_styles(doc: &mut bare_html::dom::Document, page: Option<&Url>, viewport: (f32, f32)) -> cascade::Styles {
+    let mut rules = RuleSet::new(viewport);
     rules.add(doc, cascade::UA_CSS, Origin::UserAgent);
     let mut client = http::Client::new();
-    for source in cascade::sources(doc, VIEWPORT) {
+    for source in cascade::sources(doc, viewport) {
         match source {
             Source::Inline(text) => add_sheet(&mut rules, doc, &mut client, page, &text, None, 0),
             Source::Link(href) => {
@@ -180,5 +195,5 @@ fn computed_styles(doc: &mut bare_html::dom::Document, page: Option<&Url>) -> St
             }
         }
     }
-    rules.compute(doc).dump(doc)
+    rules.compute(doc)
 }

@@ -221,6 +221,8 @@ fn main() {
     }
     let styles = step("css: styles of 200,000 elements", || rules.compute(&doc));
     println!("{} rules, {} different styles", rules.len(), styles.unique());
+    let layout = step("layout: 200,000 elements", || bare_layout::layout(&doc, &styles, (1280.0, 800.0)));
+    println!("{} fragments, page height {}", layout.fragments.len(), layout.height);
 
     // A deep tree: 20,000 nested divs. The time must grow with the depth, not with its square.
     let deep = format!("{}x{}", "<div>".repeat(20_000), "</div>".repeat(20_000));
