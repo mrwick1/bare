@@ -805,7 +805,7 @@ fn initial(p: Property) -> Value {
     match p {
         Display => Value::Keyword(K::Inline),
         Float | Clear | MaxWidth | MaxHeight | BorderTopStyle | BorderRightStyle | BorderBottomStyle | BorderLeftStyle | TextDecoration | TextTransform => Value::Keyword(K::None),
-        Visibility => Value::Keyword(K::Visible),
+        Visibility | OverflowX | OverflowY => Value::Keyword(K::Visible),
         WhiteSpace | FontStyle | LineHeight => Value::Keyword(K::Normal),
         TextAlign => Value::Keyword(K::Start),
         ListStyleType => Value::Keyword(K::Disc),
@@ -888,6 +888,19 @@ fn compute(winners: &[Option<Value>; Property::COUNT], parent: &ComputedStyle, c
     for side in 0..4 {
         if matches!(out[BorderTopStyle as usize + side], Value::Keyword(Keyword::None | Keyword::Hidden)) {
             out[BorderTopWidth as usize + side] = Value::Length(Length::Px(0.0));
+        }
+    }
+    // `visible` and `clip` do not scroll. With the other side a scroll container, they become `auto` and `hidden` (CSS
+    // Overflow 3, 3.1): a box scrolls on both sides or on none.
+    let (x, y) = (out[OverflowX as usize], out[OverflowY as usize]);
+    let stays = |v| matches!(v, Value::Keyword(Keyword::Visible | Keyword::Clip));
+    if stays(x) != stays(y) {
+        for i in [OverflowX as usize, OverflowY as usize] {
+            out[i] = match out[i] {
+                Value::Keyword(Keyword::Visible) => Value::Keyword(Keyword::Auto),
+                Value::Keyword(Keyword::Clip) => Value::Keyword(Keyword::Hidden),
+                v => v,
+            };
         }
     }
     ComputedStyle(out, 0)
@@ -1166,6 +1179,17 @@ mod tests {
         assert_eq!(styles.style(kids[1]).unwrap().get(Property::MarginTop), px(8.0));
         let title = doc.children(kids[0]).next().unwrap();
         assert_eq!(styles.style(title), None, "an element inside `display: none` has no style");
+    }
+
+    #[test]
+    fn overflow_scrolls_on_both_sides_or_on_none() {
+        let k = Value::Keyword;
+        let html = "<div id=d>x</div>";
+        assert_eq!(get(html, &[], "d", Property::OverflowX), k(Keyword::Visible));
+        assert_eq!(get(html, &["div { overflow-x: hidden }"], "d", Property::OverflowY), k(Keyword::Auto));
+        assert_eq!(get(html, &["div { overflow: clip scroll }"], "d", Property::OverflowX), k(Keyword::Hidden));
+        assert_eq!(get(html, &["div { overflow: clip visible }"], "d", Property::OverflowX), k(Keyword::Clip));
+        assert_eq!(get(html, &["div { overflow: clip visible }"], "d", Property::OverflowY), k(Keyword::Visible));
     }
 
     #[test]

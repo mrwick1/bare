@@ -120,6 +120,8 @@ properties! {
     BorderRightColor => "border-right-color",
     BorderBottomColor => "border-bottom-color",
     BorderLeftColor => "border-left-color",
+    OverflowX => "overflow-x",
+    OverflowY => "overflow-y",
 }
 
 /// A length or a percent. The fixed units are already `Px`.
@@ -190,7 +192,7 @@ keywords! {
     Medium => "medium", Large => "large", XLarge => "x-large", XxLarge => "xx-large",
     XxxLarge => "xxx-large", Thin => "thin", Thick => "thick", Disc => "disc",
     Circle => "circle", Square => "square", Decimal => "decimal", ContentBox => "content-box",
-    BorderBox => "border-box", FlowRoot => "flow-root",
+    BorderBox => "border-box", FlowRoot => "flow-root", Clip => "clip", Scroll => "scroll",
 }
 
 /// The value of one property. It does not say which property: a `Declared` has that.
@@ -457,6 +459,17 @@ fn expand(name: &str, parts: &Parts, emit: &mut dyn FnMut(Property, Value)) -> b
             _ => false,
         },
         "text-decoration" => text_decoration(slice, emit),
+        // `overflow: x y`. With one value, both are the same.
+        "overflow" => match *slice {
+            [x] | [x, _] => {
+                let y = slice[slice.len() - 1];
+                let (Some(x), Some(y)) = (longhand(OverflowX, x), longhand(OverflowY, y)) else { return false };
+                emit(OverflowX, x);
+                emit(OverflowY, y);
+                true
+            }
+            _ => false,
+        },
         _ => {
             let Some(property) = Property::from_name(name) else { return false };
             let [one] = slice else { return false };
@@ -486,6 +499,7 @@ fn shorthand_longhands(name: &str) -> Option<&'static [Property]> {
         "font" => &[FontStyle, FontWeight, FontSize, LineHeight],
         "list-style" => &[ListStyleType],
         "text-decoration" => &[TextDecoration],
+        "overflow" => &[OverflowX, OverflowY],
         _ => return Option::None,
     };
     Some(list)
@@ -686,6 +700,7 @@ fn longhand(property: Property, part: Part) -> Option<Value> {
         ListStyleType => one_of(part, &[K::None, K::Disc, K::Circle, K::Square, K::Decimal]),
         BoxSizing => one_of(part, &[K::ContentBox, K::BorderBox]),
         FontStyle => one_of(part, &[K::Normal, K::Italic, K::Oblique]),
+        OverflowX | OverflowY => one_of(part, &[K::Visible, K::Hidden, K::Clip, K::Scroll, K::Auto]),
         TextColor | BackgroundColor | BorderTopColor | BorderRightColor | BorderBottomColor | BorderLeftColor => match part {
             Part::Color(c) => Some(Value::Color(c)),
             Part::Keyword(K::CurrentColor) => Some(Value::Keyword(K::CurrentColor)),
@@ -862,6 +877,17 @@ mod tests {
         assert_eq!(parse("margin", "1px red"), vec![]);
         assert_eq!(parse("padding", "1px auto"), vec![]);
         assert_eq!(parse("padding", "1px -2px"), vec![]);
+    }
+
+    #[test]
+    fn overflow() {
+        let k = |w| Value::Keyword(w);
+        assert_eq!(parse("overflow", "hidden"), vec![(OverflowX, k(K::Hidden)), (OverflowY, k(K::Hidden))]);
+        assert_eq!(parse("overflow", "clip scroll"), vec![(OverflowX, k(K::Clip)), (OverflowY, k(K::Scroll))]);
+        assert_eq!(parse("overflow-y", "auto"), vec![(OverflowY, k(K::Auto))]);
+        assert_eq!(parse("overflow", "hidden auto visible"), vec![]);
+        assert_eq!(parse("overflow", "none"), vec![]);
+        assert_eq!(parse("overflow-x", "clip"), vec![(OverflowX, k(K::Clip))]);
     }
 
     #[test]

@@ -85,12 +85,13 @@ pub struct Tree<'a> {
     ol: Option<Atom>,
     start: Option<Atom>,
     value: Option<Atom>,
+    body: Option<Atom>,
     // The atoms of these names, if the page has them. A page with no `<br>` has no atom for `br`.
 }
 
 impl<'a> Tree<'a> {
     pub fn new(doc: &'a Document, styles: &'a Styles) -> Tree<'a> {
-        Tree { doc, styles, br: doc.find_atom("br"), ol: doc.find_atom("ol"), start: doc.find_atom("start"), value: doc.find_atom("value") }
+        Tree { doc, styles, br: doc.find_atom("br"), ol: doc.find_atom("ol"), start: doc.find_atom("start"), value: doc.find_atom("value"), body: doc.find_atom("body") }
     }
 
     /// The `html` element: the root of the boxes. `None` if it is not shown.
@@ -149,6 +150,35 @@ impl<'a> Tree<'a> {
         // the runs of inline content between them become anonymous blocks. This needs one look at all the children first.
         let has_blocks = self.doc.children(block).any(|c| self.kind(c).is_block());
         Children { tree: self, next: self.doc.children(block).next(), has_blocks }
+    }
+
+    /// The `overflow-x` and `overflow-y` of a block, as layout uses them. The root element gives its values to the window,
+    /// and so does the first `body` if the root has `visible` (CSS Overflow 3, 3.3). Those two are then `visible`
+    /// themselves: `body { overflow: hidden }` stops the page from scrolling, and the body is not a scroll container.
+    pub fn overflow(&self, node: NodeId) -> (Keyword, Keyword) {
+        let get = |n| {
+            let s = self.style(n);
+            let k = |p| match s.get(p) {
+                Value::Keyword(k) => k,
+                _ => Keyword::Visible,
+            };
+            (k(Property::OverflowX), k(Property::OverflowY))
+        };
+        let visible = (Keyword::Visible, Keyword::Visible);
+        let Some(parent) = self.doc.parent(node) else { return visible };
+        if parent == self.doc.root() {
+            return visible;
+        }
+        let is_body = |n| matches!(*self.doc.data(n), NodeData::Element { name, .. } if Some(name) == self.body);
+        if is_body(node) && self.doc.parent(parent) == Some(self.doc.root()) && get(parent) == visible && self.doc.children(parent).find(|&c| is_body(c)) == Some(node) {
+            return visible;
+        }
+        get(node)
+    }
+
+    /// Is this block a scroll container: does it hide or scroll what does not fit? `clip` hides it too, but it is not one.
+    pub fn scrolls(&self, node: NodeId) -> bool {
+        matches!(self.overflow(node).0, Keyword::Hidden | Keyword::Scroll | Keyword::Auto)
     }
 
     /// The number of a list item in its list, for its marker. Call it for the list items of one parent in order, with one
