@@ -11,7 +11,7 @@ The reasons for the design are in [decisions.md](decisions.md). Time and memory 
 | 1   | URL, DNS, TCP and HTTP                                 | done        |
 | 2   | HTML tokenizer and DOM tree                            | done        |
 | 3   | CSS parser and style cascade                           | done        |
-| 4   | Layout (box model, text flow)                          | planned     |
+| 4   | Layout (box model, text flow)                          | in progress |
 | 5   | Window (Wayland) and paint, bitmap font                | planned     |
 | 6   | Input and navigation (links, scroll)                   | planned     |
 | 7   | HTTPS (TLS 1.3 and crypto, by hand)                    | planned     |
@@ -79,6 +79,22 @@ What each done topic covers:
 - Values: a declaration (name and value text) becomes typed items: a `Property` (1 byte), a `Value` (8 bytes: color, length, number, keyword, or `inherit`/`initial`/`unset`) and the `!important` flag, 12 bytes in all, with no `String` and no allocation while reading. 41 properties: display, float, clear, visibility, white-space, text-align, text-decoration-line, text-transform, list-style-type, box-sizing, color, background-color, font-size, font-weight, font-style, line-height, width, height, min/max sizes, margin, padding and border (width, style, color for each side). Shorthands are split at once: `margin`, `padding`, `border`, `border-{width,style,color}`, `border-{top,right,bottom,left}`, `background` (color only), `font`, `list-style`, `text-decoration`. Colors: hex (3, 4, 6, 8 digits), 148 names (a table generated from `data/css/color-name.js`), `transparent`, `rgb()`/`rgba()` and `hsl()`/`hsla()` in the old and the new syntax. Fixed units (`pt`, `in`, `cm`, ...) become `px` at once. `em`, `rem`, `%`, `vw`, `vh`, `vmin` and `vmax` stay for the cascade. A bad value drops the whole declaration. Checked against Chrome (`CSS.supports`) on 2,350 pairs of property and value: 6 differences, all in the loose parts of `background` and `text-decoration` (see the gaps).
 
 - Cascade: `RuleSet::add` reads a style sheet (the browser's `ua.css`, then the page's sheets in order), and `compute` gives the style of every element. The winner for each property is the biggest key of (importance and origin, specificity, order), kept in one `u64`, so nothing is sorted. The `style=""` attribute beats all selectors. Rules are in lists by the id, class or tag at the right end of the selector, so an element tests only a few rules. A counting Bloom filter of the ancestors skips most walks up the tree. Elements with the same parent style and the same matching rules share one `ComputedStyle` (an array of one 8-byte `Value` for each property), and styles with equal values are merged, so an element costs 4 bytes. Computed values: `em`, `rem`, `vw`, `vh`, `vmin`, `vmax` are pixels, `currentcolor` is the color, `bolder` and `lighter` are numbers, `line-height: 150%` is pixels, a border with no style has no width. Inheritance for ten properties, and `inherit`, `initial`, `unset` for all. Elements with `display: none` and what is inside get no style. `sources` lists the `<style>` and `<link rel=stylesheet>` of a page (it skips `media` that is not `all` or `screen`, and alternate sheets). The app has `--styles`: it fetches the linked sheets and prints the tree with the computed style of each element. On a small page, the styles that we print are the same as `getComputedStyle` in Chrome for display, color, font, margin, padding, border and text-decoration.
+
+## Module 4: Layout
+
+| #   | Topic                                                | State   | Code                          |
+| --- | ---------------------------------------------------- | ------- | ----------------------------- |
+| 1   | Box tree (which box each node makes)                 | done    | `crates/layout/src/boxes.rs`  |
+| 2   | Text measurement (font metrics, spaces, words)       | planned |                               |
+| 3   | Block layout (widths, heights, margin collapsing)    | planned |                               |
+| 4   | Inline layout (line boxes, line breaks, baselines)   | planned |                               |
+| 5   | App (`--layout`), checks against Chrome, load tests  | planned |                               |
+
+Floats and `clear` come after these five topics.
+
+What each done topic covers:
+
+- Box tree: `Tree::kind` says what box a node makes: none (`display: none`, comments), block, list item, inline, atomic inline (`inline-block`, `img`, `button`), text, or line break (`<br>`). The root element is always a block. Tables, flex and grid are blocks for now. `Tree::children` gives the child boxes of a block: block children, and runs of inline content between them (the anonymous blocks). A run that is only collapsible spaces between blocks makes no box. A block inside an inline (`<span><div>`) stays in the run: inline layout handles it. List numbers follow `<ol start>` and `<li value>`, with one counter for each list. The box tree is not stored: layout calls these functions while it walks the DOM (see `docs/decisions.md`).
 
 ## Load tests (modules 1 to 3)
 

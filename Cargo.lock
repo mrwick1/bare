@@ -33,6 +33,14 @@ name = "bare-html"
 version = "0.1.0"
 
 [[package]]
+name = "bare-layout"
+version = "0.1.0"
+dependencies = [
+ "bare-css",
+ "bare-html",
+]
+
+[[package]]
 name = "bare-net"
 version = "0.1.0"
 dependencies = [
@@ -45,6 +53,7 @@ version = "0.1.0"
 dependencies = [
  "bare-css",
  "bare-html",
+ "bare-layout",
  "bare-net",
  "bare-url",
 ]

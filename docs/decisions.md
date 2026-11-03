@@ -31,6 +31,7 @@ The repository is a Cargo workspace. Each browser part is one crate in `crates/`
 | `bare-net`     | `crates/net/`     | DNS, TCP, HTTP              | `bare-url`             |
 | `bare-html`    | `crates/html/`    | encoding, tokenizer, DOM, tree builder | -           |
 | `bare-css`     | `crates/css/`     | tokenizer, parser, selectors, cascade | `bare-html` (from topic 3) |
+| `bare-layout`  | `crates/layout/`  | box tree, text, block and inline layout | `bare-html`, `bare-css` |
 | `bare`         | `crates/bare/`    | the app (`main.rs`)         | `bare-net`, `bare-url`, `bare-html` |
 
 Why crates, not folders in one crate:
@@ -58,6 +59,13 @@ To update Unicode: download the new files over the old ones, run the script, and
 ## DOM storage
 
 The DOM is an arena: one `Vec` of nodes in a `Document`. A node refers to another by its place in the `Vec` (`NodeId`). Children are a linked list inside the arena, and names are interned (an `Atom` for each name), and texts and attribute values live in one text buffer, so a node is 36 bytes with no allocation of its own. The reasons and the other options are at the top of `crates/html/src/dom.rs`.
+
+## Box tree
+
+Chrome, Firefox, WebKit, Servo and Ladybird all store a box tree (Chrome: `LayoutObject`, Firefox: `nsIFrame`). `bare` does not. The rules that make boxes are functions in `crates/layout/src/boxes.rs`, and layout calls them while it walks the DOM. Only the result of layout is stored.
+
+- Gain: no memory and no build pass for a second tree. The walk costs about 40 ns for each box (`bare-stress scale boxes-`).
+- Cost: the rules run again on each layout. When JavaScript changes the page (module 9), browsers use the stored tree to redo only a part of the layout. `bare` can keep the layout results for each node in a side table instead, as `Styles` does for styles.
 
 ## Code style
 
