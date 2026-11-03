@@ -325,6 +325,28 @@ Position (2026-11-03): a fourth test page has 15 cases: relative blocks and inli
 
 Flex (2026-11-03): two test pages have 65 cases: grow, shrink, `flex: 1 1 0` with and without `min-width: 0`, all `justify-content` values (also with negative free space), auto margins, `align-items` and `align-self`, `baseline` with padding, `wrap` and `wrap-reverse`, `align-content` with a height, `row-reverse` and `column-reverse`, columns that grow, shrink and wrap, `gap` in px and %, `order`, anonymous items, min and max sizes in the freeze loop, `flex-basis` in px and %, `box-sizing`, `inline-flex` and a floated flex container that shrink to fit, a percent height in a stretched item, a nested column, an absolute child, a list. All 217 boxes are the same as in Chrome, to 0.5 px. The second page found two bugs, both fixed: a column that wraps stretched its items to the container and not to their line, and a column item with a `height` took that height as its automatic minimum, not its content. The real pages of the next section do not change: Wikipedia uses flex, but its flex boxes are not "clean".
 
+`bare-stress scale grid-` (2026-11-03). All linear (time exponent 1.0 at 10x and 100x). Each case is a whole page: parse, cascade and layout.
+
+| Page | n | ms | peak MB |
+| --- | ---: | ---: | ---: |
+| `repeat(4, 1fr)`, a gap, 3 words in each item | 500,000 items | 330 | 142 |
+| `repeat(auto-fill, minmax(80px, 1fr))` | 500,000 | 270 | 216 |
+| `repeat(6, auto)` (all items measured) | 500,000 | 286 | 142 |
+| `dense` with items that span 3 of 5 columns | 500,000 | 483 | 373 |
+| The same, sparse | 500,000 | 453 | 373 |
+| `grid-auto-flow: column` with 4 rows | 500,000 | 316 | 216 |
+| One item in each explicit row (500,000 rows) | 500,000 | 752 | 1,059 |
+| Items that span 2 of 4 `auto` columns | 500,000 | 908 | 503 |
+| Many grids of 4 items | 200,000 grids | 648 | 72 |
+| Grids in grids, 3 levels | 200,000 | 1,718 | 165 |
+| Rows of 3 stretched cards, with a percent height inside | 500,000 | 605 | 309 |
+| `inline-grid` in a line of text | 200,000 | 617 | 48 |
+| Absolute children | 200,000 | 147 | 73 |
+
+`bare-stress fuzz layout` with the grid words and a seed with areas, `repeat(auto-fit, minmax())`, `fit-content()`, `order`, `dense`, an absolute child and an inline grid: 18,000 inputs (seeds 1 to 6) after the merge with flex and tables, and 90,000 more (seeds 11 to 13). 0 failures.
+
+Grid against Chrome (2026-11-03, window 800 by 800, Noto Sans Mono on both): two pages with 21 grids and 109 boxes. Page 1: fixed, `fr`, `auto` and `minmax()` tracks, `auto-fill`, `auto-fit`, `dense`, areas, `fit-content()`, `min-content`, `max-content`, `space-evenly`, `space-between`, an `inline-grid`, `grid-auto-flow: column` with `center`: 58 of 58 boxes within 0.5 px. Page 2: `auto-fit` with `justify-content: center`, percent gaps, `auto` margins, a `min-height`, `grid-auto-rows: minmax()`, a stretched child with a percent height, negative lines and implicit tracks before the grid, `order`, spans over `auto` tracks, `overflow: hidden` items, `minmax(0, 1fr)`, `place-content`, borders, a run of text and an absolute child: 49 of 51 within 0.5 px. The 2 others are a percent `row-gap` in a grid with no height (known gap, 2.2 px).
+
 ### Layout of real pages against Chrome (module 4)
 
 Method: a script downloads each page and its style sheets, takes out `<script>`, `<noscript>`, `<iframe>` and `<template>`, gives each element an `id`, and adds `* { font-family: 'Noto Sans Mono' !important }`. The pages are served on 127.0.0.1. Chrome on a hyprcage screen, 800 px window, reads the box of each element with an `id` over the DevTools port. bare runs with `--layout --width=` the page width that Chrome had (785 with a scrollbar). The union of the fragments of an element is its box. A "clean" element has no flex, grid, table, float, `position`, `overflow`, form control or image in it or above it, and no float or positioned box beside it. For clean elements only the size is compared, because a box above them can move them.
