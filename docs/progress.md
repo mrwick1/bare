@@ -85,7 +85,7 @@ What each done topic covers:
 | #   | Topic                                                | State   | Code                          |
 | --- | ---------------------------------------------------- | ------- | ----------------------------- |
 | 1   | Box tree (which box each node makes)                 | done    | `crates/layout/src/boxes.rs`  |
-| 2   | Text measurement (font metrics, spaces, words)       | planned |                               |
+| 2   | Text measurement (font metrics, spaces, words)       | done    | `crates/layout/src/font.rs`, `crates/layout/src/text.rs` |
 | 3   | Block layout (widths, heights, margin collapsing)    | planned |                               |
 | 4   | Inline layout (line boxes, line breaks, baselines)   | planned |                               |
 | 5   | App (`--layout`), checks against Chrome, load tests  | planned |                               |
@@ -95,6 +95,11 @@ Floats and `clear` come after these five topics.
 What each done topic covers:
 
 - Box tree: `Tree::kind` says what box a node makes: none (`display: none`, comments), block, list item, inline, atomic inline (`inline-block`, `img`, `button`), text, or line break (`<br>`). The root element is always a block. Tables, flex and grid are blocks for now. `Tree::children` gives the child boxes of a block: block children, and runs of inline content between them (the anonymous blocks). A run that is only collapsible spaces between blocks makes no box. A block inside an inline (`<span><div>`) stays in the run: inline layout handles it. List numbers follow `<ol start>` and `<li value>`, with one counter for each list. The box tree is not stored: layout calls these functions while it walks the DOM (see `docs/decisions.md`).
+- Text measurement: the metrics of Noto Sans Mono (a letter is 0.6 em, ascent 1.069 em and descent 0.293 em, rounded to whole pixels as Chrome does, so `line-height: normal` is 22px at 16px). Widths are whole numbers in tenths of an em: a letter is 6, a wide letter (Chinese, Japanese, Korean, emoji) is 10, an accent and a zero-width space are 0. `text::pieces` cuts the text of a node into words, spaces, newlines and tabs, with the six `white-space` values and `text-transform` (`ß` in uppercase is two letters wide). A run of spaces is one piece, also across text nodes (`Flow`). The text is not copied: a piece is a byte range in the DOM text.
+
+Known gaps of module 4 so far:
+
+- Text: one monospace font for all text. No `font-family`, no shaping, no kerning. Bold and italic have the same width. The wide letters are a short list of Unicode blocks, not the full East Asian Width table. Spacing marks (Unicode category Mc) are 0 wide, and they should not be. No `word-spacing`, `letter-spacing` or `tab-size` (a tab is 8 spaces). No break after a zero-width space, and no breaks between Chinese letters (Unicode line breaking, UAX #14).
 
 ## Load tests (modules 1 to 3)
 
