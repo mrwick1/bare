@@ -37,8 +37,9 @@
 //! - `:has()`, the `of S` part of `:nth-child()`, and `:only-of-type`. A rule that
 //!   uses them is thrown away, like an unknown pseudo-class. (Chrome also throws away `:-moz-placeholder` and
 //!   the other prefixed ones that it does not know. So do we.)
-//! - Pseudo-elements (`::before`, and the old `:before` and `:after`). They style a part that is not in the DOM,
-//!   so such a rule is thrown away. Module 4 may bring back `::before` and `::after`, which make boxes.
+//! - Pseudo-elements (`::before`, and the old `:before` and `:after`) style a part that is not in the DOM. They are valid at
+//!   the end of a selector, but they never match, so `li::before, p` styles only `p` (as in Chrome). Module 4 may bring back
+//!   `::before` and `::after`, which make boxes.
 //! - Namespaces (`svg|a`).
 //! - Dynamic pseudo-classes (`:hover`, `:focus`, `:active`, `:visited`) are valid, but they never match,
 //!   because a page that is only shown has no pointer and no focus.
@@ -284,14 +285,36 @@ impl Parser<'_, '_> {
                 }
                 Some(Token::Colon) => {
                     self.tokens.next();
-                    let simple = self.pseudo(depth, counts)?;
-                    simples.push(simple);
+                    if self.pseudo_element(depth)? {
+                        simples.push(Simple::Never);
+                    } else {
+                        let simple = self.pseudo(depth, counts)?;
+                        simples.push(simple);
+                    }
                 }
                 _ => break,
             }
             any = true;
         }
         any.then_some(simples)
+    }
+
+    /// After the first `:`. Reads `::before` (or the old `:before`) and gives `Some(true)`, or reads nothing and gives
+    /// `Some(false)`. A pseudo-element styles a part that is not in the DOM, so it never matches an element. It must end
+    /// the selector, and it cannot be inside `:not()`. Unknown names drop the rule, except `::-webkit-` ones (as in Chrome).
+    fn pseudo_element(&mut self, depth: u32) -> Option<bool> {
+        const OLD: [&str; 4] = ["before", "after", "first-line", "first-letter"];
+        const KNOWN: [&str; 9] = ["before", "after", "first-line", "first-letter", "marker", "placeholder", "selection", "backdrop", "file-selector-button"];
+        let double = self.tokens.next_if(|t| *t == Token::Colon).is_some();
+        let old = |t: &Token| matches!(t, Token::Ident(n) if OLD.iter().any(|o| n.eq_ignore_ascii_case(o)));
+        if !double && !self.tokens.peek().is_some_and(old) {
+            return Some(false);
+        }
+        let Some(Token::Ident(name)) = self.tokens.next() else { return None };
+        let known = KNOWN.iter().any(|k| name.eq_ignore_ascii_case(k)) || name.starts_with("-webkit-");
+        self.skip_space();
+        let end = matches!(self.tokens.peek(), None | Some(Token::Comma));
+        (known && end && depth == 0).then_some(true)
     }
 
     /// After `[`. Reads up to and with the `]`.
@@ -648,11 +671,21 @@ mod tests {
         for text in [
             "", " ", ",", "a,", ",a", "a,,b", ">", "a >", "a > > b", ".", ". a", "#", "#1", "a#1",
             "[", "[a", "[a=", "[a=]", "[=a]", "[a=b c]", "[a=b i j]", "[a=b x]", "[a!=b]", "[a ~ = b]", "[1]",
-            ":", "a:", ":unknown", "::before", "a::after", "::x", ":nth-child()", ":nth-child(2 n)", ":nth-child(n 1)", ":nth-child(1.5)", ":nth-child(a)", ":nth-child(2n+)", ":nth-child(2n+1", ":is()", ":is(a b)", ":where(a > b)", ":not()", ":not(a b)", ":not(a > b)",
+            ":", "a:", ":unknown", "::x", ":x::before", "a::before b", "a::before.c", "a::before > b", ":not(::before)", ":is(a::after)", "::", "::before(", ":nth-child()", ":nth-child(2 n)", ":nth-child(n 1)", ":nth-child(1.5)", ":nth-child(a)", ":nth-child(2n+)", ":nth-child(2n+1", ":is()", ":is(a b)", ":where(a > b)", ":not()", ":not(a b)", ":not(a > b)",
             ":not(a", ":not(a,)", "a)", "a b)", "a(", "a\"b\"", "svg|a", "|a", "a{", "a;b", "!", "a!b",
         ] {
             assert!(parse(text).is_none(), "{text:?} should not parse");
         }
+    }
+
+    #[test]
+    fn a_pseudo_element_is_valid_and_never_matches() {
+        // As in Chrome: `::before` and the old `:before` end a selector. They match no element, but they do not throw away the list.
+        for text in ["::before", "a::after", "li:before", "p:first-line", "p::FIRST-LETTER", "li::marker", "input::placeholder", "::-webkit-scrollbar", "a::before , b"] {
+            assert!(parse(text).is_some(), "{text:?} should parse");
+        }
+        assert_eq!(parse("li::before, p").unwrap().len(), 2);
+        assert_eq!(parse("a::after").unwrap()[0].compounds[0].simples.last(), Some(&Simple::Never));
     }
 
     #[test]
