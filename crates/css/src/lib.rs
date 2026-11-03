@@ -5,6 +5,7 @@ pub mod calc;
 pub mod cascade;
 pub mod color;
 mod colors;
+pub mod grid;
 pub mod matching;
 pub mod parser;
 pub mod selector;
