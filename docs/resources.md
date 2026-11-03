@@ -170,3 +170,19 @@ Not fixed:
 - The cap of 256 on the Noah's Ark scan changes the tree only for a page with more than 256 formatting elements open between two identical ones.
 - The three timeouts of `net-silent-server`, `net-drip-server` and `net-huge-content-length` are the wait of the client (30 s for each read, 120 s for the whole reply), not a bug. They are longer than the 20 s of the test.
 - The 100x runs of `css-rules`, `css-selector-list` and `html-decode-bytes` stop at 2 GB because the input has 130 MB to 500 MB. Memory grows in line with the input.
+
+### Layout (module 4)
+
+`bare-stress scale boxes-` walks the box tree of pages of 20,000 to 2,000,000 items (2026-11-03). All cases are linear (time exponent 0.9 to 1.2):
+
+| Case | n | ms |
+| --- | ---: | ---: |
+| `<div>x</div>` repeated | 2,000,000 | 75 |
+| 200,000 nested `<div>` | 200,000 | 4 |
+| `<p>x</p>` with spaces between | 2,000,000 | 101 |
+| One run of 2,000,000 inline elements | 2,000,000 | 80 |
+| `display: none` blocks | 2,000,000 | 106 |
+| List items | 2,000,000 | 137 |
+
+About 40 ns for each box. The cascade costs about 600 ns for each element, so the box rules add little. They keep no memory.
+

@@ -12,6 +12,7 @@
 //! Comments compare Rust with JavaScript, because you know JS.
 
 mod cases;
+mod layout_cases;
 mod fuzz;
 mod net_cases;
 
@@ -85,6 +86,7 @@ fn main() {
 fn all_cases() -> Vec<Case> {
     let mut all = cases::all();
     all.extend(net_cases::all());
+    all.extend(layout_cases::all());
     all
 }
 
