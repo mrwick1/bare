@@ -193,12 +193,6 @@ pub fn context(cx: &Cx, node: NodeId) -> Context {
     }
 }
 
-/// Lay out the content of a flex, grid or table container as blocks and lines, for the contexts that are not built yet.
-/// The container is its own BFC: the content box starts at `bp.left`, `bp.top`.
-pub(crate) fn flow(cx: &mut Cx, node: NodeId, space: Space, bp: Sides) -> Kids {
-    children(cx, node, space, false, bp.top, bp.left, Pos { x: bp.left, y: bp.top, strut: Strut::default() }, f32::INFINITY)
-}
-
 /// What the parent needs from a child block.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Done {

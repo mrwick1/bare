@@ -139,6 +139,18 @@ properties! {
     AlignSelf => "align-self",
     RowGap => "row-gap",
     ColumnGap => "column-gap",
+    GridTemplateColumns => "grid-template-columns",
+    GridTemplateRows => "grid-template-rows",
+    GridTemplateAreas => "grid-template-areas",
+    GridAutoColumns => "grid-auto-columns",
+    GridAutoRows => "grid-auto-rows",
+    GridAutoFlow => "grid-auto-flow",
+    GridRowStart => "grid-row-start",
+    GridRowEnd => "grid-row-end",
+    GridColumnStart => "grid-column-start",
+    GridColumnEnd => "grid-column-end",
+    JustifyItems => "justify-items",
+    JustifySelf => "justify-self",
     BorderCollapse => "border-collapse",
     BorderSpacingH => "-webkit-border-horizontal-spacing",
     BorderSpacingV => "-webkit-border-vertical-spacing",
@@ -244,6 +256,8 @@ pub enum Value {
     /// The value has `var()` in it. The number is the place of its `VarDecl` in `Side::vars`. The cascade reads the text when it knows
     /// the custom properties of the element.
     Var(u32),
+    /// A track list, a line or area names: the place of a `grid::Grid` in `Side::grids` (declared) or `Styles::grids` (computed).
+    Grid(u32),
 }
 
 /// One property with its value, after the shorthands are split.
@@ -272,6 +286,9 @@ pub fn parse_declaration(name: &str, value: &str, important: bool, side: &mut Si
         out.extend(list.iter().map(|&property| Declared { property, value: Value::Var(index), important }));
         return true;
     }
+    if let Some(ok) = crate::grid::declaration(name, value, important, side, out) {
+        return ok;
+    }
     let Some(parts) = Parts::read(value, &mut side.calcs) else { return false };
     let start = out.len();
     let ok = expand(name, &parts, &mut |property, value| out.push(Declared { property, value, important }));
@@ -282,11 +299,12 @@ pub fn parse_declaration(name: &str, value: &str, important: bool, side: &mut Si
     ok
 }
 
-/// What a value can point to: the `calc()` that mix units, and the declarations that have `var()`.
+/// What a value can point to: the `calc()` that mix units, the declarations that have `var()`, and the grid lists.
 #[derive(Debug, Default, Clone, PartialEq)]
 pub struct Side {
     pub calcs: Vec<Linear>,
     pub vars: Vec<VarDecl>,
+    pub grids: Vec<crate::grid::Grid>,
 }
 
 /// One piece of a value, after the tokens are read. A function like `rgb(...)` is one piece.
@@ -419,7 +437,7 @@ fn ident(name: &str) -> Part {
 }
 
 /// A number with a unit. `None` for a unit that we do not know.
-fn length(value: f32, unit: &str) -> Option<Length> {
+pub(crate) fn length(value: f32, unit: &str) -> Option<Length> {
     // 96 px in an inch: this is fixed by the CSS standard, for every screen.
     let px = |per_unit: f32| Some(Length::Px(value * per_unit));
     let is = |name: &str| unit.eq_ignore_ascii_case(name);
@@ -525,6 +543,18 @@ fn expand(name: &str, parts: &Parts, emit: &mut dyn FnMut(Property, Value)) -> b
             };
             longhand(property, value).map(|v| emit(property, v)).is_some()
         }
+        "place-items" | "place-self" | "place-content" => {
+            let list = crate::grid::longhands(name).unwrap();
+            let (first, second) = match *slice {
+                [a] => (a, a),
+                [a, b] => (a, b),
+                _ => return false,
+            };
+            let (Some(a), Some(b)) = (longhand(list[0], first), longhand(list[1], second)) else { return false };
+            emit(list[0], a);
+            emit(list[1], b);
+            true
+        }
         "padding" => sides(slice, [PaddingTop, PaddingRight, PaddingBottom, PaddingLeft], emit),
         "border-width" => sides(slice, [BorderTopWidth, BorderRightWidth, BorderBottomWidth, BorderLeftWidth], emit),
         "border-style" => sides(slice, [BorderTopStyle, BorderRightStyle, BorderBottomStyle, BorderLeftStyle], emit),
@@ -587,7 +617,7 @@ fn shorthand_longhands(name: &str) -> Option<&'static [Property]> {
         "list-style" => &[ListStyleType],
         "text-decoration" => &[TextDecoration],
         "overflow" => &[OverflowX, OverflowY],
-        _ => return Option::None,
+        _ => return crate::grid::longhands(name),
     };
     Some(list)
 }
@@ -847,6 +877,10 @@ fn longhand(property: Property, part: Part) -> Option<Value> {
         AlignContent => one_of(part, &[K::Normal, K::FlexStart, K::FlexEnd, K::Center, K::SpaceBetween, K::SpaceAround, K::SpaceEvenly, K::Start, K::End, K::Stretch, K::Baseline, K::LastBaseline]),
         AlignItems => one_of(part, &[K::Normal, K::Stretch, K::FlexStart, K::FlexEnd, K::Center, K::Baseline, K::LastBaseline, K::Start, K::End, K::SelfStart, K::SelfEnd]),
         AlignSelf => one_of(part, &[K::Auto, K::Normal, K::Stretch, K::FlexStart, K::FlexEnd, K::Center, K::Baseline, K::LastBaseline, K::Start, K::End, K::SelfStart, K::SelfEnd]),
+        JustifyItems => one_of(part, &[K::Normal, K::Stretch, K::FlexStart, K::FlexEnd, K::Center, K::Baseline, K::LastBaseline, K::Start, K::End, K::SelfStart, K::SelfEnd, K::Left, K::Right]),
+        JustifySelf => one_of(part, &[K::Auto, K::Normal, K::Stretch, K::FlexStart, K::FlexEnd, K::Center, K::Baseline, K::LastBaseline, K::Start, K::End, K::SelfStart, K::SelfEnd, K::Left, K::Right]),
+        // These are read as text (`grid.rs`), and never come here.
+        GridTemplateColumns | GridTemplateRows | GridTemplateAreas | GridAutoColumns | GridAutoRows | GridAutoFlow | GridRowStart | GridRowEnd | GridColumnStart | GridColumnEnd => Option::None,
         RowGap | ColumnGap => match part {
             Part::Keyword(K::Normal) => Some(Value::Keyword(K::Normal)),
             _ => positive(part).map(Value::Length),

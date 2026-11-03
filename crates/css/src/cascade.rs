@@ -62,6 +62,7 @@ use bare_html::dom::{Atom, Document, Fnv, NodeData, NodeId};
 use crate::at_rules;
 use crate::calc::Linear;
 use crate::color::Color;
+use crate::grid::{self, Grid};
 use crate::matching::matches;
 use crate::parser::{AtBody, Rule, parse_declarations, parse_stylesheet};
 use crate::selector::{Combinator, Selector, Simple, parse_selector_list};
@@ -292,9 +293,9 @@ impl RuleSet {
 
     /// Find the style of every element that is shown. The selectors must come from `add` with this same `doc`.
     pub fn compute(&self, doc: &Document) -> Styles {
-        let mut styles = Styles { styles: vec![ComputedStyle::initial()], of_node: vec![NONE; doc.len()], calcs: Vec::new(), customs: Vec::new() };
+        let mut styles = Styles { styles: vec![ComputedStyle::initial()], of_node: vec![NONE; doc.len()], calcs: Vec::new(), grids: Vec::new(), customs: Vec::new() };
         // Style 0 is the starting style. It is the parent style of the `html` element.
-        let mut cx = Cx { viewport: self.viewport, root_font_size: 16.0, layer_order: self.layer_order(), declared: &self.side, inline: RefCell::default(), computed: RefCell::default(), customs: RefCell::default() };
+        let mut cx = Cx { viewport: self.viewport, root_font_size: 16.0, layer_order: self.layer_order(), declared: &self.side, inline: RefCell::default(), computed: RefCell::default(), grids: RefCell::default(), customs: RefCell::default() };
         let style_atom = doc.find_atom("style");
         let hints = crate::hints::Hints::new(doc);
         let mut filter = AncestorFilter::new();
@@ -349,6 +350,7 @@ impl RuleSet {
             }
         }
         styles.calcs = cx.computed.take().list;
+        styles.grids = cx.grids.take().list;
         styles.customs = cx.customs.take().list;
         styles
     }
@@ -478,6 +480,7 @@ impl RuleSet {
             let mut shared = cx.inline.borrow_mut();
             shared.calcs.clear();
             shared.vars.clear();
+            shared.grids.clear();
         }
         if let Some(text) = inline {
             for d in parse_declarations(text) {
@@ -488,11 +491,12 @@ impl RuleSet {
                 }
             }
             // What these values point to comes after the ones of the style sheets (see `Cx::linear` and `Cx::var`).
-            let (calc_base, var_base) = (cx.declared.calcs.len() as u32, cx.declared.vars.len() as u32);
+            let (calc_base, var_base, grid_base) = (cx.declared.calcs.len() as u32, cx.declared.vars.len() as u32, cx.declared.grids.len() as u32);
             for d in &mut inline_decls {
                 match &mut d.value {
                     Value::Length(Length::Calc(i)) => *i += calc_base,
                     Value::Var(i) => *i += var_base,
+                    Value::Grid(i) => *i += grid_base,
                     _ => {}
                 }
             }
@@ -548,6 +552,11 @@ impl RuleSet {
             *c += (cx.declared.calcs.len() + shared.calcs.len()) as u32;
             shared.calcs.extend(side.calcs);
         }
+        if let Value::Grid(g) = &mut value {
+            let mut shared = cx.inline.borrow_mut();
+            *g += (cx.declared.grids.len() + shared.grids.len()) as u32;
+            shared.grids.extend(side.grids);
+        }
         match value {
             Value::Var(_) => Value::Unset,
             v => v,
@@ -585,6 +594,7 @@ fn style_hash(style: &ComputedStyle) -> u64 {
             Value::Length(Length::Px(x)) => 2 << 40 | u64::from(x.to_bits()),
             Value::Length(Length::Percent(x)) => 3 << 40 | u64::from(x.to_bits()),
             Value::Length(Length::Calc(i)) => 7 << 40 | u64::from(i),
+            Value::Grid(i) => 8 << 40 | u64::from(i),
             Value::Number(x) => 4 << 40 | u64::from(x.to_bits()),
             Value::Keyword(k) => 5 << 40 | k as u64,
             _ => 6 << 40,
@@ -609,6 +619,8 @@ struct Cx<'a> {
     inline: RefCell<Side>,
     /// The `calc()` values that are done, and are kept in `Styles::calcs`.
     computed: RefCell<Computed>,
+    /// The grid lists that are done, and are kept in `Styles::grids`.
+    grids: RefCell<grid::Kept>,
     /// The sets of custom properties, each one once.
     customs: RefCell<Customs>,
 }
@@ -653,6 +665,14 @@ impl Cx<'_> {
         }
     }
 
+    /// The grid list `i` of the style sheets or of the `style=""` attribute.
+    fn declared_grid(&self, i: u32) -> Grid {
+        match self.declared.grids.get(i as usize) {
+            Some(g) => g.clone(),
+            None => self.inline.borrow().grids[i as usize - self.declared.grids.len()].clone(),
+        }
+    }
+
     fn var(&self, i: u32) -> VarDecl {
         match self.declared.vars.get(i as usize) {
             Some(v) => v.clone(),
@@ -681,6 +701,8 @@ pub struct Styles {
     of_node: Vec<u32>,
     /// The `calc()` values that mix units, after the cascade: pixels and percent. A `Length::Calc` in a style points here.
     calcs: Vec<[f32; 2]>,
+    /// The grid lists (`grid.rs`), after the cascade. A `Value::Grid` in a style points here.
+    grids: Vec<Grid>,
     /// The sets of custom properties. `ComputedStyle::1` is a place in this list. Set 0 is empty.
     customs: Vec<var::Set>,
 }
@@ -695,6 +717,11 @@ impl Styles {
     pub fn calc(&self, i: u32) -> (f32, f32) {
         let [px, pct] = self.calcs[i as usize];
         (px, pct)
+    }
+
+    /// The grid list that a `Value::Grid` of a computed style points to.
+    pub fn grid(&self, i: u32) -> &Grid {
+        &self.grids[i as usize]
     }
 
     /// The style of an element. `None` for a node that is not an element, and for an element that is not shown
@@ -732,7 +759,7 @@ impl Styles {
                             let border_color = (p as usize).checked_sub(Property::BorderTopColor as usize).filter(|&side| side < 4);
                             let hidden = border_color.is_some_and(|side| matches!(style.0[Property::BorderTopStyle as usize + side], Value::Keyword(Keyword::None | Keyword::Hidden)));
                             if !hidden && style.get(p) != initial.get(p) {
-                                out.push_str(&format!("{sep}{}: {}", p.name(), show(style.get(p), &self.calcs)));
+                                out.push_str(&format!("{sep}{}: {}", p.name(), show(style.get(p), &self.calcs, &self.grids)));
                                 sep = "; ";
                             }
                         }
@@ -752,7 +779,7 @@ impl Styles {
 }
 
 /// A computed value as text.
-fn show(v: Value, calcs: &[[f32; 2]]) -> String {
+fn show(v: Value, calcs: &[[f32; 2]], grids: &[Grid]) -> String {
     match v {
         Value::Color(c) if c.a == 255 => format!("#{:02x}{:02x}{:02x}", c.r, c.g, c.b),
         Value::Color(c) => format!("#{:02x}{:02x}{:02x}{:02x}", c.r, c.g, c.b, c.a),
@@ -761,6 +788,7 @@ fn show(v: Value, calcs: &[[f32; 2]]) -> String {
         Value::Length(Length::Calc(i)) => format!("calc({}px + {}%)", calcs[i as usize][0], calcs[i as usize][1]),
         Value::Number(x) => format!("{x}"),
         Value::Keyword(k) => k.name().to_string(),
+        Value::Grid(i) => format!("{:?}", grids[i as usize]),
         other => format!("{other:?}"),
         // Not reached for a computed value.
     }
@@ -841,8 +869,10 @@ fn initial(p: Property) -> Value {
         FlexGrow | Order => Value::Number(0.0),
         FlexShrink => Value::Number(1.0),
         FlexBasis => Value::Keyword(K::Auto),
-        JustifyContent | AlignContent | AlignItems | RowGap | ColumnGap => Value::Keyword(K::Normal),
-        AlignSelf | TableLayout => Value::Keyword(K::Auto),
+        JustifyContent | AlignContent | AlignItems | JustifyItems | RowGap | ColumnGap => Value::Keyword(K::Normal),
+        AlignSelf | JustifySelf | TableLayout | GridAutoColumns | GridAutoRows | GridRowStart | GridRowEnd | GridColumnStart | GridColumnEnd => Value::Keyword(K::Auto),
+        GridTemplateColumns | GridTemplateRows | GridTemplateAreas => Value::Keyword(K::None),
+        GridAutoFlow => Value::Number(0.0),
         BorderCollapse => Value::Keyword(K::Separate),
         CaptionSide => Value::Keyword(K::Top),
         VerticalAlign => Value::Keyword(K::Baseline),
@@ -908,6 +938,11 @@ fn compute(winners: &[Option<Value>; Property::COUNT], parent: &ComputedStyle, c
         }
         let i = p as usize;
         let raw = match winners[i] {
+            // A grid list of the parent is computed already: its number is from `Styles::grids`, not from the style sheet.
+            Some(Value::Inherit) if matches!(parent.0[i], Value::Grid(_)) => {
+                out[i] = parent.0[i];
+                continue;
+            }
             Some(Value::Inherit) => parent.0[i],
             Some(Value::Initial) => initial(p),
             None | Some(Value::Unset) if inherited(p) => parent.0[i],
@@ -958,6 +993,14 @@ fn resolve(p: Property, v: Value, out: &[Value; Property::COUNT], parent: &Compu
             } else {
                 Value::Length(Length::Calc(cx.keep(x, pct)))
             }
+        }
+        Value::Grid(i) => {
+            let mut grid = cx.declared_grid(i);
+            grid.map_lengths(&mut |l| match l {
+                Length::Percent(_) => l,
+                l => Length::Px(length_to_px(l, fs, cx)),
+            });
+            Value::Grid(cx.grids.borrow_mut().keep(grid))
         }
         Value::Length(l @ Length::Percent(_)) => Value::Length(l),
         Value::Length(l) => px(length_to_px(l, fs, cx)),
@@ -1640,6 +1683,39 @@ mod tests {
         };
         assert_eq!(width("a"), (-1.0, 100.0));
         assert_eq!(width("b"), (-2.0, 10.0));
+    }
+
+    #[test]
+    fn grid_lists_in_the_cascade() {
+        use crate::grid::{Bound, Grid, Part};
+        let page = "<div id=a><p id=b>x</p></div><div id=c style='grid-template-columns: 2em 1fr'></div><div id=d></div>";
+        let sheet = "html { font-size: 20px } div { grid-template-columns: 10em 50% minmax(1rem, 2rem) } p { grid-template-columns: inherit } #d { --w: 3em; grid-template-rows: var(--w) auto }";
+        let (doc, styles) = styles(page, &[sheet]);
+        let list = |id: &str, p: Property| match styles.style(by_id(&doc, id)).unwrap().get(p) {
+            Value::Grid(i) => match styles.grid(i) {
+                Grid::Tracks(t) => t
+                    .iter()
+                    .map(|part| match part {
+                        Part::Track(t) => (t.min, t.max),
+                        _ => panic!(),
+                    })
+                    .collect::<Vec<_>>(),
+                g => panic!("{g:?}"),
+            },
+            v => panic!("{v:?}"),
+        };
+        let px = |x| Bound::Len(Length::Px(x));
+        // `em` is the font size of the element: 10em of 20px. `rem` is the font size of `html`.
+        assert_eq!(list("a", Property::GridTemplateColumns), [(px(200.0), px(200.0)), (Bound::Len(Length::Percent(50.0)), Bound::Len(Length::Percent(50.0))), (px(20.0), px(40.0))]);
+        // `inherit` takes the computed list of the parent.
+        assert_eq!(list("b", Property::GridTemplateColumns), list("a", Property::GridTemplateColumns));
+        // The `style=""` attribute, and a `var()`.
+        assert_eq!(list("c", Property::GridTemplateColumns), [(px(40.0), px(40.0)), (Bound::Auto, Bound::Fr(1.0))]);
+        assert_eq!(list("d", Property::GridTemplateRows), [(px(60.0), px(60.0)), (Bound::Auto, Bound::Auto)]);
+        // Elements with the same list share its number.
+        let number = |id: &str| styles.style(by_id(&doc, id)).unwrap().get(Property::GridTemplateColumns);
+        assert_eq!(number("a"), number("b"));
+        assert_eq!(styles.style(by_id(&doc, "a")).unwrap().get(Property::GridAutoFlow), Value::Number(0.0));
     }
 
     #[test]
