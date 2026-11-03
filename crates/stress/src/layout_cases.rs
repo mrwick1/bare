@@ -139,6 +139,13 @@ pub fn all() -> Vec<Case> {
         case("overflow-auto-fits", 2_000, |n| lay("<div><p>aaa bbb ccc</p></div>".repeat(n), "div { overflow: auto; width: 100px }")),
         case("overflow-long-log", 20_000, |n| lay(format!("<div>{}</div>", "<p>a line of the log</p>".repeat(n)), "div { overflow: auto; height: 400px }")),
         case("overflow-wide-content", 2_000, |n| lay(format!("<div><p>{}</p></div>", "word ".repeat(n)), "div { overflow-x: auto; width: 100px } p { white-space: nowrap }")),
+        // Position
+        case("position-many-absolute", 2_000, |n| lay(format!("<div>{}</div>", "<p>x</p><i></i>".repeat(n)), "div { position: relative } i { position: absolute; top: 0; left: 5px; width: 3px; height: 3px }")),
+        case("position-absolute-in-each-relative", 2_000, |n| lay("<div><i>a</i>b</div>".repeat(n), "div { position: relative } i { position: absolute; right: 0; bottom: 0 }")),
+        case("position-nested-relative", 300, |n| lay(format!("{}<i></i>", "<div>".repeat(n)), "div { position: relative; padding-left: 1px } i { position: absolute }")),
+        case("position-fixed-deep", 300, |n| lay(format!("{}<i></i>", "<div>".repeat(n)), "div { position: relative } i { position: fixed; bottom: 0 }")),
+        case("position-relative-spans", 2_000, |n| lay(format!("<p>{}</p>", "<span>a</span> b ".repeat(n)), "span { position: relative; top: 1px }")),
+        case("position-shrink-to-fit", 2_000, |n| lay("<div><i>some words here</i></div>".repeat(n), "div { position: relative } i { position: absolute; left: 0 }")),
         case("text-uppercase", 100_000, |n| pieces("stra\u{df}e ".repeat(n), NORMAL, Transform::Upper)),
     ]
 }

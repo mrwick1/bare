@@ -814,7 +814,8 @@ fn initial(p: Property) -> Value {
         BackgroundColor => Value::Color(Color::TRANSPARENT),
         FontSize => px(16.0),
         FontWeight => Value::Number(400.0),
-        Width | Height => Value::Keyword(K::Auto),
+        Width | Height | Top | Right | Bottom | Left => Value::Keyword(K::Auto),
+        Position => Value::Keyword(K::Static),
         MinWidth | MinHeight | MarginTop | MarginRight | MarginBottom | MarginLeft | PaddingTop | PaddingRight | PaddingBottom | PaddingLeft => px(0.0),
         BorderTopWidth | BorderRightWidth | BorderBottomWidth | BorderLeftWidth => px(3.0),
         // `medium`. With the style `none` it is 0: `compute` does that.

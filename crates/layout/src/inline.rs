@@ -51,6 +51,8 @@ pub enum Event {
     Atomic(NodeId),
     /// A float: out of the line, at the side.
     Float(NodeId),
+    /// A box with `position: absolute` or `fixed`: out of the line. It leaves its static position.
+    OutOfFlow(NodeId),
     /// `<br>`.
     Break(NodeId),
     /// A block inside an inline box: it takes a line of its own.
@@ -98,6 +100,7 @@ impl Iterator for Events<'_, '_> {
                 Kind::Text => Event::Text(node),
                 Kind::Atomic => Event::Atomic(node),
                 Kind::Float => Event::Float(node),
+                Kind::OutOfFlow => Event::OutOfFlow(node),
                 Kind::Break => Event::Break(node),
                 Kind::Block | Kind::ListItem => Event::Block(node),
                 Kind::None | Kind::Inline => continue,
@@ -161,6 +164,8 @@ struct Inline {
     below: f32,
     /// It has a background or a border: it needs a fragment.
     paint: bool,
+    /// It has a `position`: it needs a fragment too, to be a place that `top` and `left` move.
+    positioned: bool,
     /// Culled: no fragment, no item, nothing. Most `<b>`, `<i>` and `<a>` are culled: they have nothing to paint, no
     /// margin, border or padding, and the same font as their parent, so they change nothing on the line. Chrome does
     /// the same ("culled inlines", `LayoutInline::ShouldCreateBoxFragment`). It saves a fragment for each line that
@@ -220,6 +225,10 @@ struct Breaker<'c, 'a> {
     avail: f32,
     /// Floats that did not fit on the line where they are in the source. They go at the top of the next line.
     deferred: Vec<(NodeId, bool, Atomic)>,
+    /// Out-of-flow boxes that were blocks before: their static position is at the start of the next line.
+    statics: Vec<NodeId>,
+    /// The static positions on this line of out-of-flow boxes that were inline: `text-align` moves them with the line.
+    line_statics: Vec<usize>,
 }
 
 /// How far the font and the `line-height` of a box reach above and below the baseline. The extra space of the line
@@ -243,7 +252,8 @@ fn inline_box(cx: &Cx, node: NodeId, width: f32) -> Inline {
     let parent = cx.tree.doc.parent(node).expect("an inline box has a parent");
     let same_font = reach(cx, parent) == (above, below);
     let flat = margins == (0.0, 0.0) && edges == (0.0, 0.0) && padding.vertical() == 0.0;
-    Inline { margins, edges, above, below, paint, culled: !paint && flat && same_font }
+    let positioned = cx.tree.position(node) != Keyword::Static;
+    Inline { margins, edges, above, below, paint, positioned, culled: !paint && flat && same_font && !positioned }
 }
 
 /// Lay out the run `first..=last` of the children of `block` in lines `width` pixels wide. The fragments are relative to
@@ -275,6 +285,8 @@ pub fn lines(cx: &mut Cx, block: NodeId, first: NodeId, last: NodeId, width: f32
         left: 0.0,
         avail: width,
         deferred: Vec::new(),
+        statics: Vec::new(),
+        line_statics: Vec::new(),
     };
     b.band();
     let mut flow = Flow::new();
@@ -315,6 +327,12 @@ pub fn lines(cx: &mut Cx, block: NodeId, first: NodeId, last: NodeId, width: f32
                 if info.culled {
                     continue;
                 }
+                if matches!(event, Event::Open(_)) && b.cx.tree.position(node) == Keyword::Relative {
+                    let offset = block::relative_offset(b.cx, tree.style(node), Space { width: b.width, height: None });
+                    if offset != (0.0, 0.0) {
+                        b.cx.rel.insert(node.index() as u32, offset);
+                    }
+                }
                 if info.paint || info.edges != (0.0, 0.0) || info.margins != (0.0, 0.0) {
                     b.pending_content = true;
                 }
@@ -344,6 +362,20 @@ pub fn lines(cx: &mut Cx, block: NodeId, first: NodeId, last: NodeId, width: f32
                     b.float(node, left, item);
                 } else {
                     b.deferred.push((node, left, item));
+                }
+            }
+            Event::OutOfFlow(node) => {
+                // Its static position (CSS 2.1, 10.3.7). A box that was inline before `position` made it a block sits
+                // where the line is now. One that was a block starts a line of its own: this one if it is still empty.
+                let was_inline = matches!(tree.style(node).get(Property::Display), Value::Keyword(Keyword::Inline | Keyword::InlineBlock | Keyword::InlineFlex | Keyword::InlineGrid));
+                let used = b.x + b.pending_w;
+                if was_inline || (!b.content && used == 0.0) {
+                    if was_inline {
+                        b.line_statics.push(b.cx.out.len());
+                    }
+                    b.place_static(node, b.left + used);
+                } else {
+                    b.statics.push(node);
                 }
             }
             Event::Break(_) => {
@@ -435,7 +467,7 @@ impl Breaker<'_, '_> {
                 Item::Open { node, x } => {
                     let info = inline_box(self.cx, node, self.width);
                     let (above, below) = self.open.last().map_or((info.above, info.below), |o| (o.above.max(info.above), o.below.max(info.below)));
-                    self.open.push(Open { node, x0: x, paint: info.paint, order: self.opened, above, below });
+                    self.open.push(Open { node, x0: x, paint: info.paint || info.positioned, order: self.opened, above, below });
                     self.opened += 1;
                     self.above = self.above.max(info.above);
                     self.below = self.below.max(info.below);
@@ -473,6 +505,7 @@ impl Breaker<'_, '_> {
         if self.content {
             self.write();
         }
+        self.line_statics.clear();
         // The next line. The boxes that are still open go on to it: they start at its left edge, and they reach as far
         // above and below as they did.
         self.line.clear();
@@ -489,6 +522,17 @@ impl Breaker<'_, '_> {
             self.float(node, left, item);
         }
         self.band();
+        for node in std::mem::take(&mut self.statics) {
+            self.place_static(node, self.left);
+        }
+    }
+
+    /// The static position of an out-of-flow box, `x` from the left of the line, at the top of the line.
+    fn place_static(&mut self, node: NodeId, x: f32) {
+        self.cx.fixed |= self.cx.tree.position(node) == Keyword::Fixed;
+        self.cx.waiting += 1;
+        let at = self.cx.out.len() as u32;
+        self.cx.out.push(Fragment { rect: Rect { x, y: self.y, w: 0.0, h: 0.0 }, node, kind: FragmentKind::Static, end: at + 1 });
     }
 
     /// The room for the line at `y`, next to the floats.
@@ -545,6 +589,9 @@ impl Breaker<'_, '_> {
                 // `left`, `start`, and `justify` (not built: see `docs/progress.md`).
             };
 
+        for &i in &self.line_statics {
+            self.cx.out[i].rect.x += dx - self.left;
+        }
         // The fragments: the inline boxes first (paint draws their background under the text), then the content.
         let y = self.y;
         for &(_, node, x0, x1) in &self.segments {
@@ -554,7 +601,8 @@ impl Breaker<'_, '_> {
             let top = baseline - m.ascent - border.top - padding.top;
             let h = m.ascent + m.descent + border.vertical() + padding.vertical();
             let at = self.cx.out.len() as u32;
-            self.cx.out.push(Fragment { rect: Rect { x: dx + x0, y: y + top, w: (x1 - x0).max(0.0), h }, node, kind: FragmentKind::Box, end: at + 1 });
+            let (rx, ry) = moved(self.cx, self.block, node);
+            self.cx.out.push(Fragment { rect: Rect { x: dx + x0 + rx, y: y + top + ry, w: (x1 - x0).max(0.0), h }, node, kind: FragmentKind::Box, end: at + 1 });
         }
         if let Some(item) = self.cx.marker.take() {
             marker(self.cx, item, dx, y + baseline);
@@ -564,8 +612,9 @@ impl Breaker<'_, '_> {
                 Item::Text { node, start, end, x, w } if end > start => {
                     let m = Metrics::of(tree.style(node));
                     let at = self.cx.out.len() as u32;
+                    let (rx, ry) = moved(self.cx, self.block, tree.doc.parent(node).expect("a text node has a parent"));
                     self.cx.out.push(Fragment {
-                        rect: Rect { x: dx + x, y: y + baseline - m.ascent, w, h: m.ascent + m.descent },
+                        rect: Rect { x: dx + x + rx, y: y + baseline - m.ascent + ry, w, h: m.ascent + m.descent },
                         node,
                         kind: FragmentKind::Text { start, end },
                         end: at + 1,
@@ -577,8 +626,9 @@ impl Breaker<'_, '_> {
                     for f in &mut fragments {
                         f.end += base;
                     }
-                    fragments[0].rect.x = dx + x + margin_left;
-                    fragments[0].rect.y = y + baseline - b + margin_top;
+                    let (rx, ry) = moved(self.cx, self.block, tree.doc.parent(fragments[0].node).expect("an inline-block has a parent"));
+                    fragments[0].rect.x = dx + x + margin_left + rx;
+                    fragments[0].rect.y = y + baseline - b + margin_top + ry;
                     self.cx.out.append(&mut fragments);
                     self.cx.spare.push(fragments);
                 }
@@ -642,11 +692,11 @@ fn atomic(cx: &mut Cx, node: NodeId, cb: f32) -> Atomic {
     // A marker of a list item around this inline-block goes on the line, not inside the inline-block.
     let done = if cx.depth < MAX_DEPTH {
         cx.depth += 1;
-        let done = block::sized(cx, node, Space { width: cb, height: None }, Some((width, ml, mr)), Pos::default());
+        let done = block::sized(cx, node, Space { width: cb, height: None }, Some((width, ml, mr)), None, Pos::default());
         cx.depth -= 1;
         done
     } else {
-        block::sized(cx, node, Space { width: 0.0, height: Some(0.0) }, Some((0.0, 0.0, 0.0)), Pos::default())
+        block::sized(cx, node, Space { width: 0.0, height: Some(0.0) }, Some((0.0, 0.0, 0.0)), None, Pos::default())
     };
     cx.marker = marker;
     let fragments = std::mem::replace(&mut cx.out, saved);
@@ -656,6 +706,23 @@ fn atomic(cx: &mut Cx, node: NodeId, cb: f32) -> Atomic {
     // The width can grow by a scrollbar in layout: the fragment has the final one.
     let width = fragments[done.fragment].rect.w - bp;
     Atomic { fragments, x: 0.0, w: ml + width + bp + mr, h, baseline, margin_left: ml, margin_top: done.margin_top }
+}
+
+/// How far the inline boxes with `position: relative` around `node` (and `node` itself) move it, up to `block`.
+fn moved(cx: &Cx, block: NodeId, mut node: NodeId) -> (f32, f32) {
+    let (mut x, mut y) = (0.0, 0.0);
+    if cx.rel.is_empty() {
+        return (x, y);
+    }
+    while node != block {
+        if let Some(&(dx, dy)) = cx.rel.get(&(node.index() as u32)) {
+            x += dx;
+            y += dy;
+        }
+        let Some(parent) = cx.tree.doc.parent(node) else { break };
+        node = parent;
+    }
+    (x, y)
 }
 
 /// The marker of a list item, on the first line inside it: outside the line, to its left, on the baseline.

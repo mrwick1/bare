@@ -32,6 +32,9 @@ pub enum Kind {
     /// The marker of a list item (`•`, `3.`). `number` is the place of the item in its list. `boxes::marker_text`
     /// gives the text.
     Marker { number: i32 },
+    /// The static position of a box with `position: absolute` or `fixed`: where its margin box would start with
+    /// `position: static`. Zero size. Layout uses it to place the box, and takes it out at the end.
+    Static,
 }
 
 /// One rectangle of the result.
@@ -69,6 +72,25 @@ pub fn absolute(fragments: &mut [Fragment]) {
         if f.end as usize > i + 1 {
             open.push((f.end, f.rect.x, f.rect.y));
         }
+    }
+}
+
+/// Take out the `Static` fragments. They have nothing inside, so each `end` goes down by the number of them before it.
+pub fn drop_statics(fragments: &mut Vec<Fragment>) {
+    // `before[i]`: how many `Static` fragments come before the place `i`.
+    let mut before = Vec::with_capacity(fragments.len() + 1);
+    let mut n = 0u32;
+    for f in fragments.iter() {
+        before.push(n);
+        n += (f.kind == Kind::Static) as u32;
+    }
+    before.push(n);
+    if n == 0 {
+        return;
+    }
+    fragments.retain(|f| f.kind != Kind::Static);
+    for f in fragments.iter_mut() {
+        f.end -= before[f.end as usize];
     }
 }
 

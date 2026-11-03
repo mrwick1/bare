@@ -122,6 +122,11 @@ properties! {
     BorderLeftColor => "border-left-color",
     OverflowX => "overflow-x",
     OverflowY => "overflow-y",
+    Position => "position",
+    Top => "top",
+    Right => "right",
+    Bottom => "bottom",
+    Left => "left",
 }
 
 /// A length or a percent. The fixed units are already `Px`.
@@ -193,6 +198,8 @@ keywords! {
     XxxLarge => "xxx-large", Thin => "thin", Thick => "thick", Disc => "disc",
     Circle => "circle", Square => "square", Decimal => "decimal", ContentBox => "content-box",
     BorderBox => "border-box", FlowRoot => "flow-root", Clip => "clip", Scroll => "scroll",
+    Static => "static", Relative => "relative", Absolute => "absolute", Fixed => "fixed",
+    Sticky => "sticky",
 }
 
 /// The value of one property. It does not say which property: a `Declared` has that.
@@ -443,6 +450,7 @@ fn expand(name: &str, parts: &Parts, emit: &mut dyn FnMut(Property, Value)) -> b
     }
     match name {
         "margin" => sides(slice, [MarginTop, MarginRight, MarginBottom, MarginLeft], emit),
+        "inset" => sides(slice, [Top, Right, Bottom, Left], emit),
         "padding" => sides(slice, [PaddingTop, PaddingRight, PaddingBottom, PaddingLeft], emit),
         "border-width" => sides(slice, [BorderTopWidth, BorderRightWidth, BorderBottomWidth, BorderLeftWidth], emit),
         "border-style" => sides(slice, [BorderTopStyle, BorderRightStyle, BorderBottomStyle, BorderLeftStyle], emit),
@@ -484,6 +492,7 @@ fn shorthand_longhands(name: &str) -> Option<&'static [Property]> {
     let list: &'static [Property] = match name {
         "margin" => &[MarginTop, MarginRight, MarginBottom, MarginLeft],
         "padding" => &[PaddingTop, PaddingRight, PaddingBottom, PaddingLeft],
+        "inset" => &[Top, Right, Bottom, Left],
         "border-width" => &[BorderTopWidth, BorderRightWidth, BorderBottomWidth, BorderLeftWidth],
         "border-style" => &[BorderTopStyle, BorderRightStyle, BorderBottomStyle, BorderLeftStyle],
         "border-color" => &[BorderTopColor, BorderRightColor, BorderBottomColor, BorderLeftColor],
@@ -700,6 +709,11 @@ fn longhand(property: Property, part: Part) -> Option<Value> {
         ListStyleType => one_of(part, &[K::None, K::Disc, K::Circle, K::Square, K::Decimal]),
         BoxSizing => one_of(part, &[K::ContentBox, K::BorderBox]),
         FontStyle => one_of(part, &[K::Normal, K::Italic, K::Oblique]),
+        Position => one_of(part, &[K::Static, K::Relative, K::Absolute, K::Fixed, K::Sticky]),
+        Top | Right | Bottom | Left => match part {
+            Part::Keyword(K::Auto) => Some(Value::Keyword(K::Auto)),
+            _ => length(part).map(Value::Length),
+        },
         OverflowX | OverflowY => one_of(part, &[K::Visible, K::Hidden, K::Clip, K::Scroll, K::Auto]),
         TextColor | BackgroundColor | BorderTopColor | BorderRightColor | BorderBottomColor | BorderLeftColor => match part {
             Part::Color(c) => Some(Value::Color(c)),
@@ -877,6 +891,19 @@ mod tests {
         assert_eq!(parse("margin", "1px red"), vec![]);
         assert_eq!(parse("padding", "1px auto"), vec![]);
         assert_eq!(parse("padding", "1px -2px"), vec![]);
+    }
+
+    #[test]
+    fn position() {
+        let k = |w| Value::Keyword(w);
+        assert_eq!(parse("position", "sticky"), vec![(Position, k(K::Sticky))]);
+        assert_eq!(parse("position", "auto"), vec![]);
+        assert_eq!(parse("top", "-10px"), vec![(Top, Value::Length(Length::Px(-10.0)))]);
+        assert_eq!(parse("left", "50%"), vec![(Left, Value::Length(Length::Percent(50.0)))]);
+        assert_eq!(parse("bottom", "auto"), vec![(Bottom, k(K::Auto))]);
+        assert_eq!(parse("right", "3"), vec![]);
+        let px = |v| Value::Length(Length::Px(v));
+        assert_eq!(parse("inset", "0 auto"), vec![(Top, px(0.0)), (Right, k(K::Auto)), (Bottom, px(0.0)), (Left, k(K::Auto))]);
     }
 
     #[test]

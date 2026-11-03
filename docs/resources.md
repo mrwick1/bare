@@ -258,6 +258,18 @@ Fixes from these numbers:
 
 `bare-stress fuzz layout` with the overflow words and a seed with nested `auto` and `scroll` boxes: 18,000 inputs (seeds 1 to 6), no failure.
 
+`bare-stress scale position-` (2026-11-03). All linear:
+
+| Page | n | ms | peak MB |
+| --- | ---: | ---: | ---: |
+| One relative block with an absolute box after each paragraph | 200,000 | 106 | 46.4 |
+| A relative block with an absolute box inside, repeated | 200,000 | 150 | 61.6 |
+| Relative spans in one paragraph | 200,000 | 94 | 39.6 |
+| Absolute boxes that shrink to fit, each in a relative block | 200,000 | 143 | 46.4 |
+| Nested relative blocks with an absolute or a `fixed` box at the bottom | 400 levels (the depth limit) | 0.2 | 1.1 |
+
+`bare-stress fuzz layout` with the position words and a seed with relative, absolute, fixed and sticky boxes: 21,000 inputs (seeds 1 to 7) in release, 1,500 in debug (which checks for overflow of integers), no failure.
+
 ### Layout against Chrome (module 4)
 
 Method: a test page with 33 boxes and `font-family: 'Noto Sans Mono'` on all elements, served on 127.0.0.1. Chrome on a hyprcage screen, window 800 px wide. Chrome shows a 15 px scrollbar, so its page is 785 px wide; `bare --layout --width=785` gives the same width. A script reads `getBoundingClientRect` and `getClientRects` of each element with an `id`.
@@ -269,6 +281,8 @@ One difference of shape, not of place: Chrome gives a span that holds a block th
 Floats (2026-11-03): a second test page has 18 cases: text around left and right floats, floats in the middle of a line that fit and that do not, floats that stack and go down, `clear`, `flow-root` beside a float (auto and fixed width), a BFC that contains its floats, a float in a block with margins, a shrink-to-fit float, `text-align: center` next to a float, a right float wider than its block, percent widths. All 51 boxes and all 39 text lines are the same as in Chrome, to 0.01 px. The check found two bugs, both fixed: a right float wider than its block kept its left edge (Chrome keeps its right edge), and a `flow-root` with a fixed width used its over-constrained right margin in the fit check, so it went below the float.
 
 Overflow (2026-11-03): a third test page has 16 cases: `hidden` and `clip` with margins inside, `scroll`, `overflow-x: scroll`, `auto` with `max-height`, a `nowrap` line, end padding, nested `auto` boxes, a scroll container beside a float, an inline-block that scrolls, shrink-to-fit floats with `scroll` and `auto`, lists and floats inside `auto` boxes, `box-sizing: border-box`. All 31 boxes are the same as in Chrome, to 0.5 px. Chrome's scrollbars are 15 px on this screen, also under device emulation.
+
+Position (2026-11-03): a fourth test page has 15 cases: relative blocks and inline boxes, absolute boxes with each mix of offsets, `auto` margins that center, percents with `box-sizing: border-box`, `float` on an absolute box, absolute inside absolute, a relative inline-block as containing block, the window as containing block, `fixed`, `sticky`, and `bottom: 0` in a block with `height: auto`. All 32 boxes are the same as in Chrome, to 0.5 px. A fifth page found two bugs, both fixed: an absolute box in a centered line did not follow `text-align`, and a relative inline box was not a containing block. It also found an inline bug that is older: a space at the end of a line inside a span with padding still counts in the width of the span.
 
 ### Layout of real pages against Chrome (module 4)
 
