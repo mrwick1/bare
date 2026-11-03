@@ -534,10 +534,11 @@ impl Plan {
                 match style.get(Property::Width) {
                     Value::Length(Length::Percent(p)) => (min, max, p, None),
                     v => match block::resolve(cx, v, None) {
-                        // A cell with a width is as wide as it asks for, or as its content needs.
+                        // A cell with a width is as wide as it asks for, or as its longest word needs. Its text on
+                        // one line does not count (as in Chrome and Firefox).
                         Some(w) => {
                             let w = if border_box { w.max(bp) } else { w + bp };
-                            (min, max.max(w).max(min), 0.0, Some(w))
+                            (min, w.max(min), 0.0, Some(w))
                         }
                         None => (min, max, 0.0, None),
                     },
@@ -660,7 +661,7 @@ impl Plan {
             }
             for col in &mut self.cols {
                 if let Some(f) = col.fixed {
-                    col.max = col.max.max(f).max(col.min);
+                    col.max = f.max(col.min);
                 }
             }
         }
@@ -1178,6 +1179,16 @@ mod tests {
 
     /// A box of a fixed size: the tests do not depend on the width of letters.
     const CSS: &str = "td { padding: 0 } .a { width: 30px; height: 10px } .b { width: 50px; height: 20px }";
+
+    #[test]
+    fn a_cell_width_caps_its_column_below_the_content() {
+        // "wraps in sixty px" is 163.2 on one line. The cell asks for 60, and its longest word ("sixty", 48) fits:
+        // the column is 60, also next to a column without a width.
+        let html = "<table><tr><td id=c style='width:60px'>wraps in sixty px</td></tr></table>";
+        assert_eq!(rect(html, "td { padding: 0 }", "c").w, 60.0);
+        let html = "<table><tr><td>x</td><td id=c style='width:60px'>wraps in sixty px</td></tr></table>";
+        assert_eq!(rect(html, "td { padding: 0 }", "c").w, 60.0);
+    }
 
     #[test]
     fn auto_table_shrinks_to_its_cells_with_spacing() {
