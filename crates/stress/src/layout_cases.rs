@@ -157,6 +157,15 @@ pub fn all() -> Vec<Case> {
         case("flex-ref-block-nested-text", 2_000, |n| lay(format!("{}{}", "<div>".repeat(30), "word ".repeat(n)), "div { padding-left: 1px }")),
         case("flex-ref-block-items", 2_000, |n| lay(format!("<div>{}</div>", "<p>aaa bbb</p>".repeat(n)), "p { margin: 0 }")),
         case("flex-freeze-many", 2_000, |n| lay(format!("<div>{}</div>", (0..n).map(|i| format!("<p style='max-width:{}px'></p>", i % 500)).collect::<String>()), "div { display: flex; width: 100000px } p { flex: 1; margin: 0 }")),
+        case("table-many-rows", 20_000, |n| lay(format!("<table>{}</table>", "<tr><td>a cell<td>another cell<td>last".repeat(n)), "")),
+        case("table-many-columns", 5_000, |n| lay(format!("<table><tr>{}</table>", "<td>cell text".repeat(n)), "")),
+        case("table-many-tables", 2_000, |n| lay("<table><tr><td>a<td>b c<tr><td>d<td>e</table>".repeat(n), "")),
+        case("table-fixed-layout", 20_000, |n| lay(format!("<table>{}</table>", "<tr><td>a cell<td>another cell<td>last".repeat(n)), "table { table-layout: fixed; width: 600px }")),
+        case("table-colspan-chain", 1_000, |n| lay(format!("<table>{}</table>", (1..=n).map(|i| format!("<tr><td colspan={i}>span of {i}<td>x")).collect::<String>()), "")),
+        case("table-rowspan-grid", 5_000, |n| lay(format!("<table>{}</table>", "<tr><td rowspan=3>tall<td>a<td>b<tr><td>c<td>d<tr><td>e<td>f".repeat(n)), "")),
+        case("table-nested", 150, |n| lay(format!("{}x{}", "<table><tr><td>".repeat(n), "</table>".repeat(n)), "")),
+        case("table-collapse", 10_000, |n| lay(format!("<table>{}</table>", "<tr><td>a cell<td>another cell<td>last".repeat(n)), "table { border-collapse: collapse } td { border: 1px solid }")),
+        case("table-percent-columns", 10_000, |n| lay(format!("<table style='width:90%'>{}</table>", "<tr><td style='width:20%'>a<td style='width:30%'>b<td>c".repeat(n)), "")),
         case("text-uppercase", 100_000, |n| pieces("stra\u{df}e ".repeat(n), NORMAL, Transform::Upper)),
     ]
 }

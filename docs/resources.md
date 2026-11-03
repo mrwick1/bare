@@ -285,6 +285,30 @@ Fixes from these numbers:
 
 `bare-stress fuzz layout` with the flex words and a seed with wrapped rows, `order`, `auto` margins and nested columns: 21,000 inputs (seeds 1 to 7) in release, 9,000 in debug. The debug run found one panic: an item that is laid out again counted the static positions of its first layout as still waiting, but a positioned box inside it had taken them. Fixed: each item counts how many its layout left waiting. After the fix, no failure.
 
+`bare-stress scale table-` (2026-11-03). All linear (time exponent 1.0 at 10x and 100x). Each case is a whole page: parse, cascade and layout.
+
+| Page | n | ms | peak MB |
+| --- | ---: | ---: | ---: |
+| One table, rows of 3 cells (auto layout) | 2,000,000 rows (6,000,000 cells) | 2,971 | 1,285 |
+| The same with `table-layout: fixed; width: 600px` | 2,000,000 rows | 2,484 | 1,285 |
+| The same with `border-collapse: collapse` and a 1 px border on each cell | 1,000,000 rows | 1,580 | 642 |
+| Rows with `rowspan=3` cells | 500,000 groups of 3 rows | 1,712 | 753 |
+| Rows with percent widths | 1,000,000 rows | 1,433 | 642 |
+| Rows with `colspan=1..n` (a chain of spans) | 100,000 rows | 231 | 63 |
+| Many small tables of 4 cells | 200,000 tables | 490 | 96 |
+| One row with many cells | 500,000 cells (the table keeps 16,384 columns) | 19 | 38 |
+| Tables inside tables | 400 levels (the depth limit) | 0.6 | 2.3 |
+
+That is about 0.5 µs for a cell in auto layout, and about 210 bytes for a cell, with the DOM and the styles. A profile of the 400,000-row page (`perf`) is flat: `table::layout` is 3.5% of the time. The rest is the tokenizer, the tree builder, the cascade and the generic block layout of the cells. So no change was made for speed: the first version was linear and each cell is laid out once.
+
+`bare-stress fuzz layout` with the table words and a seed with captions, groups, `col`, spans, hint attributes and collapsed borders: 18,000 inputs (seeds 1 to 6) and 30,000 (seed 7) in release, no failure.
+
+Tables against Chrome (2026-11-03): test pages of 8 to 10 tables each, `font-family: 'Noto Sans Mono'` on all elements, the window 800 px wide, `grab2.mjs` for the rectangles of Chrome. Page 1: auto, fixed and percent widths, `colspan` and `rowspan`, `table-layout: fixed`, `vertical-align`, `border-spacing`, table `height`, a floated table: 34 boxes, 34 within 0.5 px. Page 2: `thead` and `tfoot` out of order, a caption below, `colgroup` widths, `margin: auto`, hint attributes (`border`, `cellpadding`, `cellspacing`, `width`, `align`), nested tables, `inline-table`, an empty cell, loose `display: table-cell` boxes with text: 39 boxes, 39 within 0.5 px (`col` elements and a culled span are not boxes here). Page 3, collapsed borders (1 px, 2 px, 4 px, 7 px, `hidden`, spans): 22 boxes, 22 within 0.5 px. A page with a caption: within 0.03 px (the letter width, see above). An odd collapsed border is a half pixel in Chrome, so the first cell starts at 8.5; the first version of bare used a whole pixel and was 0.5 px off in 5 boxes.
+
+A review page of 12 more tables (hint attributes, collapsed borders, `rowspan`, fixed layout, captions and groups, `vertical-align`, `inline-table`, `border-spacing`, a table in a flex row, `col width`, `nowrap`) found one bug, fixed: a cell with a `width` kept its text on one line as the most width of its column, so the column was too wide. Chrome and Firefox use the larger of the width and the longest word. After the fix, all 59 boxes of the two review pages are the same as in Chrome, to 0.5 px.
+
+Real pages with tables built: Hacker News (doctype added, the table gets `margin: auto` because `<center>` is not built): 329 boxes, 290 within 0.5 px (88%). The other 39 are the vote arrows: `<center><a><div></div></a></center>` is a block in an inline, and bare gives it a line that is 9 px too short (not a table problem). Wikipedia, "Web browser": 362 boxes of table type (the infobox, the figures that use `display: table`, the references), 241 with the same size. The rest wait for images (a figure has the size of its image) and for flex and grid, which are not built.
+
 ### Layout against Chrome (module 4)
 
 Method: a test page with 33 boxes and `font-family: 'Noto Sans Mono'` on all elements, served on 127.0.0.1. Chrome on a hyprcage screen, window 800 px wide. Chrome shows a 15 px scrollbar, so its page is 785 px wide; `bare --layout --width=785` gives the same width. A script reads `getBoundingClientRect` and `getClientRects` of each element with an `id`.
@@ -310,7 +334,7 @@ Method: a script downloads each page and its style sheets, takes out `<script>`,
 | example.com | 2 | 2 | 2 | 2 | |
 | info.cern.ch (no doctype) | 22 | 0 | 22 | 22 | Quirks mode: Chrome drops the top margin of the first child of `body`. With a doctype added: 22 of 22 |
 | danluu.com (doctype added) | 211 | 54 | 0 | | Flex (`li { display: flex }`) |
-| news.ycombinator.com (doctype added) | 329 | 0 | 0 | | Tables |
+| news.ycombinator.com (doctype added) | 329 | 0 | 0 | | Tables (see below for the result with tables built) |
 | gnu.org, free software page | 248 | 1 | 0 | | Floats, form controls |
 | en.wikipedia.org, "Web browser" | 1,199 | 1 | 99 | 95 | Flex header, floats (the infobox), `::before` text in the reference list |
 
