@@ -88,11 +88,11 @@ fn outcome_node_format(src: &str) -> String {
 #[test]
 fn gates_are_explicit_not_silent() {
     let gate = |src: &str, what: &str| assert_eq!(run(src), format!("unsupported:{what}"), "{src}");
-    gate("var a=[1]; a.constructor=function F(){}; a.map(function(x){return x})", "Array species constructor (subclass or custom constructor)");
-    gate("var a=[1]; a.constructor=function F(){}; a.filter(function(x){return x})", "Array species constructor (subclass or custom constructor)");
-    gate("var a=[1]; a.constructor=function F(){}; a.slice()", "Array species constructor (subclass or custom constructor)");
-    gate("var a=[1]; a.constructor=function F(){}; a.splice(0)", "Array species constructor (subclass or custom constructor)");
-    gate("var a=[1]; a.constructor=function F(){}; a.concat()", "Array species constructor (subclass or custom constructor)");
+    gate("var a=[1]; a.constructor={[Symbol.species]: function F(){}}; a.map(function(x){return x})", "Array species constructor (subclass or custom constructor)");
+    gate("var a=[1]; a.constructor={[Symbol.species]: function F(){}}; a.filter(function(x){return x})", "Array species constructor (subclass or custom constructor)");
+    gate("var a=[1]; a.constructor={[Symbol.species]: function F(){}}; a.slice()", "Array species constructor (subclass or custom constructor)");
+    gate("var a=[1]; a.constructor={[Symbol.species]: function F(){}}; a.splice(0)", "Array species constructor (subclass or custom constructor)");
+    gate("var a=[1]; a.constructor={[Symbol.species]: function F(){}}; a.concat()", "Array species constructor (subclass or custom constructor)");
     gate("Array.prototype.concat.call('abc')", "Array.prototype.concat on a primitive receiver (wrapper object)");
     gate("Object.assign(1, {a:1})", "Object.assign with a primitive target (wrapper object)");
     gate("Object.assign('s', {a:1})", "Object.assign with a primitive target (wrapper object)");

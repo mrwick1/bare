@@ -10,15 +10,17 @@
 //   (`Object.prototype.toString`), `@@hasInstance` (`instanceof`, `Function.prototype[@@hasInstance]`), `@@iterator`
 //   (for-of, spread, array patterns, Map/Set constructors) with `IteratorClose` on break, continue to an outer
 //   label, return, and a thrown body error. Array iterators, `%IteratorPrototype%`.
-// - Identity only (no builtin reads them yet): asyncIterator, species (Map and Set have the getter only), isConcatSpreadable,
-//   match, matchAll, replace, search, split, unscopables.
+// - Read by other modules: species (Array, Promise; Map and Set have the getter only), isConcatSpreadable (`concat`),
+//   match, replace, split (String methods, see `eval_builtins.rs`). Identity only: asyncIterator, matchAll, search, unscopables.
 //
 // Gates and deviations (never silent)
-// - `String.prototype[@@iterator]` does not exist (no `String.prototype` yet). A string without an own or inherited
-//   `@@iterator` is iterated by code point, exactly as that builtin would.
-// - `Array.prototype.values/keys/entries` are the array worker's. `f_array_values` is the shared `values` function; its `@@iterator` slot is set here.
-// - A fast path skips the iterator object for an array, Map or Set whose `@@iterator` and iterator-prototype `next` are the
-//   intrinsics and whose iterator prototype chain has no `return`. A later change of those prototypes inside the loop is not seen.
+// - `String.prototype[@@iterator]` and the string iterator are here (by code point). `Array.prototype.values`,
+//   `keys`, `entries` and `[@@iterator]` share one array iterator prototype; `values` is `[@@iterator]`.
+// - A fast path skips the iterator object for an array, string, Map or Set whose `@@iterator` and iterator-prototype
+//   `next` are the intrinsics and whose iterator prototype chain has no `return` when the loop starts. `next` is read
+//   once per loop, as in the spec, so a later change of `next` is not observable. `return` is read when the loop is
+//   closed early: the chain is looked at again then, and a `return` that appeared during the loop gets a real
+//   iterator object at the loop's current position.
 // - IteratorClose is skipped when the loop ends with a limit, Unsupported or a heap fault (JS must not run after a limit).
 // - `Object(symbol)` wrapper objects, `Symbol.prototype` on a boxed receiver, and `new.target` are not supported.
 
@@ -61,6 +63,13 @@ const WK_NAMES: [&str; 13] = [
     "iterator", "asyncIterator", "hasInstance", "toPrimitive", "toStringTag", "species", "isConcatSpreadable", "match", "matchAll", "replace", "search", "split", "unscopables",
 ];
 
+// Indexes into `WK_NAMES`.
+const WK_SPECIES: usize = 5;
+const WK_CONCAT_SPREADABLE: usize = 6;
+const WK_MATCH: usize = 7;
+const WK_REPLACE: usize = 9;
+const WK_SPLIT: usize = 11;
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum IterWhat {
     Keys,
@@ -83,6 +92,7 @@ struct Cursor {
 enum IterState {
     Coll { owner: ObjId, what: IterWhat, cur: Cursor, done: bool },
     Array { src: Value, i: u64, what: IterWhat, done: bool },
+    Str { s: StrId, i: usize, done: bool },
 }
 
 /// How a started iteration steps. `Plain` is an array-like (by index) or a string (by code point).
@@ -104,7 +114,11 @@ enum ScFn {
     Species,
     IterSelf,
     ArrayValues,
+    ArrayKeys,
+    ArrayEntries,
     ArrayIterNext,
+    StrIter,
+    StrIterNext,
     MapCtor,
     MapGet,
     MapSet,
@@ -150,6 +164,9 @@ struct ScState {
     symbol_ctor: ObjId,
     f_array_values: ObjId,
     f_array_next: ObjId,
+    string_iter_proto: ObjId,
+    f_string_iter: ObjId,
+    f_string_next: ObjId,
     f_map_entries: ObjId,
     f_map_values: ObjId,
     f_map_keys: ObjId,
@@ -191,6 +208,9 @@ impl ScState {
             symbol_ctor: o,
             f_array_values: o,
             f_array_next: o,
+            string_iter_proto: o,
+            f_string_iter: o,
+            f_string_next: o,
             f_map_entries: o,
             f_map_values: o,
             f_map_keys: o,
@@ -217,10 +237,10 @@ impl ScState {
         }
     }
 
-    fn objects(&self) -> [ObjId; 20] {
+    fn objects(&self) -> [ObjId; 23] {
         [
             self.symbol_proto, self.iter_proto, self.array_iter_proto, self.map_proto, self.set_proto, self.map_iter_proto, self.set_iter_proto, self.symbol_ctor,
-            self.f_array_values, self.f_array_next, self.f_map_entries, self.f_map_values, self.f_map_keys, self.f_map_next, self.f_map_set, self.f_set_values,
+            self.f_array_values, self.f_array_next, self.string_iter_proto, self.f_string_iter, self.f_string_next, self.f_map_entries, self.f_map_values, self.f_map_keys, self.f_map_next, self.f_map_set, self.f_set_values,
             self.f_set_entries, self.f_set_next, self.f_set_add, self.f_has_instance,
         ]
     }
@@ -228,6 +248,11 @@ impl ScState {
 
 impl<'p> Interp<'p> {
     // ------------------------------------------------------------ host API
+
+    /// A well-known symbol (an index of `WK_NAMES`) as a property key.
+    fn wk_key(&self, i: usize) -> PropertyKey {
+        PropertyKey::Symbol(self.sc.wk[i])
+    }
 
     pub fn set_sc_limits(&mut self, l: ScLimits) {
         self.sc.limits = l;
@@ -276,6 +301,7 @@ impl<'p> Interp<'p> {
         match self.sc.iters.get(&o) {
             Some(IterState::Coll { owner, .. }) => work.push(Value::Object(*owner)),
             Some(IterState::Array { src, .. }) => work.push(*src),
+            Some(IterState::Str { s, .. }) => work.push(Value::String(*s)),
             None => {}
         }
     }
@@ -396,6 +422,17 @@ impl<'p> Interp<'p> {
         let av = self.sc_native(ScFn::ArrayValues, "values", 0)?;
         self.sc.f_array_values = av;
         self.def(ap, self.sc.k_iterator, Value::Object(av), true, false, true)?;
+        // `values` is the same function object as `[Symbol.iterator]`, as in the spec.
+        let kv = h!(self, self.heap.key_from_str("values"));
+        self.def(ap, kv, Value::Object(av), true, false, true)?;
+        self.sc_method(ap, "keys", ScFn::ArrayKeys, 0)?;
+        self.sc_method(ap, "entries", ScFn::ArrayEntries, 0)?;
+        // String.prototype[@@iterator] and the string iterator
+        let sip = h!(self, self.heap.new_object(Some(ip)));
+        self.sc.string_iter_proto = sip;
+        self.sc.f_string_next = self.sc_method(sip, "next", ScFn::StrIterNext, 0)?;
+        self.sc_tag(sip, "String Iterator")?;
+        self.sc.f_string_iter = self.sc_sym_method(self.ext.string_proto, self.sc.k_iterator, "[Symbol.iterator]", ScFn::StrIter, 0, true)?;
         // Map
         let mproto = h!(self, self.heap.new_object(Some(op)));
         let mctor = self.sc_native(ScFn::MapCtor, "Map", 0)?;
@@ -491,13 +528,26 @@ impl<'p> Interp<'p> {
             ScFn::FnHasInstance => Ok(Value::Bool(self.ordinary_has_instance(this, a0)?)),
             ScFn::Species => Ok(this),
             ScFn::IterSelf => Ok(this),
-            ScFn::ArrayValues => {
+            ScFn::ArrayValues | ScFn::ArrayKeys | ScFn::ArrayEntries => {
                 if is_nullish(this) {
-                    return Err(self.type_err("Array.prototype[Symbol.iterator] called on null or undefined"));
+                    return Err(self.type_err("Array.prototype.values called on null or undefined"));
                 }
-                self.sc_array_iter(this, IterWhat::Values)
+                let what = match f {
+                    ScFn::ArrayKeys => IterWhat::Keys,
+                    ScFn::ArrayEntries => IterWhat::Entries,
+                    _ => IterWhat::Values,
+                };
+                self.sc_array_iter(this, what)
             }
             ScFn::ArrayIterNext => self.array_iter_next(this),
+            ScFn::StrIter => {
+                if is_nullish(this) {
+                    return Err(self.type_err("String.prototype[Symbol.iterator] called on null or undefined"));
+                }
+                let s = self.coerce_string(this)?;
+                self.sc_track_iter(self.sc.string_iter_proto, IterState::Str { s, i: 0, done: false })
+            }
+            ScFn::StrIterNext => self.str_iter_next(this),
             _ => self.call_coll(f, this, args, is_new),
         }
     }
@@ -666,6 +716,30 @@ impl<'p> Interp<'p> {
         self.sc_iter_result(v, false)
     }
 
+    fn str_iter_next(&mut self, this: Value) -> Res<Value> {
+        let bad = |it: &mut Self| it.type_err("next method called on incompatible receiver");
+        let Value::Object(o) = this else { return Err(bad(self)) };
+        let Some(&IterState::Str { s, i, done }) = self.sc.iters.get(&o) else { return Err(bad(self)) };
+        let step = if done { None } else { self.str_step(s, i)? };
+        let Some((v, n)) = step else {
+            if let Some(IterState::Str { done, .. }) = self.sc.iters.get_mut(&o) {
+                *done = true;
+            }
+            return self.sc_iter_result(Value::Undefined, true);
+        };
+        if let Some(IterState::Str { i: si, .. }) = self.sc.iters.get_mut(&o) {
+            *si = i + n;
+        }
+        self.sc_iter_result(v, false)
+    }
+
+    /// The code point of `s` at `i` as a string, and its length in code units.
+    fn str_step(&mut self, s: StrId, i: usize) -> Res<Option<(Value, usize)>> {
+        let Some((_, n)) = h!(self, self.heap.code_point_at(s, i)) else { return Ok(None) };
+        let r = h!(self, self.heap.substring(s, i, i + n as usize));
+        Ok(Some((Value::String(r), n as usize)))
+    }
+
     // ------------------------------------------------------------ the generic iteration used by for-of, spread and patterns
 
     /// Is `proto.next` the intrinsic and is there no `return` on the chain? Then no iterator object is needed.
@@ -682,12 +756,15 @@ impl<'p> Interp<'p> {
         }
         let m = self.get_prop(v, self.sc.k_iterator)?;
         let plain = |kind| Some(It { src: v, i: 0, kind, done: false });
-        if let (Value::String(_), Value::Undefined) = (v, m) {
-            return Ok(plain(ItKind::Plain));
-        }
-        let Value::Object(mo) = m else { return Ok(None) };
-        if !self.funcs.contains_key(&mo) {
+        if is_nullish(m) {
             return Ok(None);
+        }
+        let Value::Object(mo) = m else { return Err(self.type_err("Symbol.iterator is not a function")) };
+        if !self.is_callable(m) {
+            return Err(self.type_err("Symbol.iterator is not a function"));
+        }
+        if matches!(v, Value::String(_)) && mo == self.sc.f_string_iter && self.sc_proto_intact(self.sc.string_iter_proto, self.sc.f_string_next)? {
+            return Ok(plain(ItKind::Plain));
         }
         if let Value::Object(o) = v {
             if mo == self.sc.f_array_values && self.sc_proto_intact(self.sc.array_iter_proto, self.sc.f_array_next)? {
@@ -758,10 +835,9 @@ impl<'p> Interp<'p> {
         match &mut it.kind {
             ItKind::Plain => match it.src {
                 Value::String(s) => {
-                    let Some((_, n)) = h!(self, self.heap.code_point_at(s, it.i)) else { return Ok(None) };
-                    let r = h!(self, self.heap.substring(s, it.i, it.i + n as usize));
-                    it.i += n as usize;
-                    Ok(Some(Value::String(r)))
+                    let Some((v, n)) = self.str_step(s, it.i)? else { return Ok(None) };
+                    it.i += n;
+                    Ok(Some(v))
                 }
                 src => {
                     let len = self.get_prop(src, self.k_length)?;
@@ -803,7 +879,30 @@ impl<'p> Interp<'p> {
             return Ok(());
         }
         it.done = true;
-        let ItKind::Generic { iter, .. } = it.kind else { return Ok(()) };
+        // A fast path has no iterator object, and `return` is looked up when the loop closes it. Look at the
+        // prototype chain again. Only if a `return` appeared since the loop began, make the iterator the loop
+        // would have had, at its current position, and close that one.
+        let iter = match it.kind {
+            ItKind::Generic { iter, .. } => iter,
+            ItKind::Plain => {
+                let (proto, st) = match it.src {
+                    Value::String(s) => (self.sc.string_iter_proto, IterState::Str { s, i: it.i, done: false }),
+                    src => (self.sc.array_iter_proto, IterState::Array { src, i: it.i as u64, what: IterWhat::Values, done: false }),
+                };
+                if !h!(self, self.heap.has_property(proto, self.sc.k_return)) {
+                    return Ok(());
+                }
+                self.sc_track_iter(proto, st)?
+            }
+            ItKind::Coll { owner, what, cur } => {
+                let is_map = self.sc.colls.get(&owner).is_some_and(|c| c.is_map);
+                let proto = if is_map { self.sc.map_iter_proto } else { self.sc.set_iter_proto };
+                if !h!(self, self.heap.has_property(proto, self.sc.k_return)) {
+                    return Ok(());
+                }
+                self.sc_track_iter(proto, IterState::Coll { owner, what, cur, done: false })?
+            }
+        };
         // A pending `return` value must survive the JS call that closes the iterator.
         let saved = self.ret;
         let r = (|| {

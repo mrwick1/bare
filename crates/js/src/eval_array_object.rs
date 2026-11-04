@@ -11,12 +11,15 @@
 // - `sort` is stable (merge sort), puts `undefined` last, skips holes, and stops at the first error: no comparator
 //   runs after a throw, and the receiver is untouched until the sort has finished.
 //
+// Symbols (see `eval_symbols.rs`)
+// - `map`, `filter`, `slice`, `splice` and `concat` read `constructor` and then `constructor[@@species]`, as ArraySpeciesCreate
+//   does. `concat` reads `@@isConcatSpreadable` of every item. `Array.from` and `Object.fromEntries` use the shared
+//   iterator machinery (`iter_open`, `iter_next`, `iter_close_throw`): the iterator is closed when the map function
+//   or the element creation throws. `Object.assign` copies enumerable symbol keys; `values` and `entries` skip them.
+//
 // Gates (explicit `Unsupported`, never silent)
-// - Species: `map`, `filter`, `slice`, `splice` read `constructor` of an array receiver. The intrinsic `Array`,
-//   `undefined` or a non-callable object give a plain array. Any other callable is a gate. There is no `Symbol`, so
-//   `@@species` cannot be observed yet; when Symbols arrive, `ao_species` is the one place to read it.
-// - `concat` and `Array.from` hook points: `ao_spreadable` (`@@isConcatSpreadable`) and the iterator lookup of
-//   `Array.from` / `Object.fromEntries` (`iter_start_val`) also need `Symbol` before they can see user hooks.
+// - Species: the intrinsic `Array`, `undefined` and `null` give a plain array. Any other callable is a gate (a subclass
+//   or a custom `constructor`, or a custom `@@species`). A non-callable object or primitive is a `TypeError`.
 // - `concat` on a primitive receiver, `Object.assign` with a primitive target: they need wrapper objects, which
 //   the evaluator does not have. `Array.from` / `Array.of` with a `this` that is a callable other than `Array`.
 // Known differences: a string receiver is passed to callbacks as the primitive string (no String wrapper object).
@@ -83,6 +86,7 @@ impl<'p> Interp<'p> {
         for (name, f, len) in [("assign", ObjAssign, 2), ("entries", ObjEntries, 1), ("values", ObjValues, 1), ("fromEntries", ObjFromEntries, 1)] {
             self.method(oc, name, Nat::Ao(f), len)?;
         }
+        self.sc_getter(ac, self.wk_key(WK_SPECIES), "get [Symbol.species]", ScFn::Species)?;
         self.method(ac, "from", Nat::Ao(ArrFrom), 1)?;
         self.method(ac, "of", Nat::Ao(ArrOf), 0)?;
         let math = h!(self, self.heap.new_object(Some(op)));
@@ -249,17 +253,24 @@ impl<'p> Interp<'p> {
         Ok(a)
     }
 
-    /// ArraySpeciesCreate. See the module note for what is a gate.
+    /// ArraySpeciesCreate. `constructor` and then `constructor[@@species]` are read, so getters run in order.
+    /// The intrinsic `Array` and an `undefined` or `null` species give a plain array. Any other callable is a gate.
     fn ao_species(&mut self, this: Value, len: u64) -> Res<ObjId> {
         if let Value::Object(o) = this
             && h!(self, self.heap.is_array(o))
         {
-            let c = self.get_prop(this, self.k_constructor)?;
+            let mut c = self.get_prop(this, self.k_constructor)?;
+            if matches!(c, Value::Object(_)) {
+                c = self.get_prop(c, self.wk_key(WK_SPECIES))?;
+                if matches!(c, Value::Null) {
+                    c = Value::Undefined;
+                }
+            }
             match c {
                 Value::Object(co) if Some(co) == self.ao.array_ctor => {}
                 Value::Object(_) if self.is_callable(c) => return Err(unsupported("Array species constructor (subclass or custom constructor)", Span::default())),
-                Value::Object(_) | Value::Undefined => {}
-                _ => return Err(self.type_err("object.constructor is not a constructor")),
+                Value::Undefined => {}
+                _ => return Err(self.type_err("object.constructor[Symbol.species] is not a constructor")),
             }
         }
         self.ao_new_array(len)
@@ -273,9 +284,14 @@ impl<'p> Interp<'p> {
         }
     }
 
-    /// `@@isConcatSpreadable`. No `Symbol` exists, so only arrays spread.
+    /// IsConcatSpreadable: a defined `@@isConcatSpreadable` decides, otherwise an array spreads.
     fn ao_spreadable(&mut self, v: Value) -> Res<bool> {
-        Ok(matches!(v, Value::Object(o) if h!(self, self.heap.is_array(o))))
+        let Value::Object(o) = v else { return Ok(false) };
+        let s = self.get_prop(v, self.wk_key(WK_CONCAT_SPREADABLE))?;
+        if !matches!(s, Value::Undefined) {
+            return self.truthy(s);
+        }
+        Ok(h!(self, self.heap.is_array(o)))
     }
 
     // ------------------------------------------------------------ callback methods
@@ -763,19 +779,35 @@ impl<'p> Interp<'p> {
         let obj = h!(self, self.heap.new_object(Some(self.object_proto)));
         let mut it = self.iter_start_val(iterable)?;
         while let Some(item) = self.iter_next(&mut it)? {
-            if !matches!(item, Value::Object(_)) {
-                let t = self.display(item);
-                return Err(self.type_err(&format!("Iterator value {t} is not an entry object")));
+            if let Err(e) = self.ao_entry(obj, item) {
+                return Err(self.iter_close_throw(&mut it, e));
             }
-            let k = self.get_prop(item, PropertyKey::Index(0))?;
-            let v = self.get_prop(item, PropertyKey::Index(1))?;
-            let key = self.coerce_key(k)?;
-            self.ao_create(obj, key, v)?;
         }
         Ok(Value::Object(obj))
     }
 
+    /// One entry of `Object.fromEntries`.
+    fn ao_entry(&mut self, obj: ObjId, item: Value) -> Res<()> {
+        if !matches!(item, Value::Object(_)) {
+            let t = self.display(item);
+            return Err(self.type_err(&format!("Iterator value {t} is not an entry object")));
+        }
+        let k = self.get_prop(item, PropertyKey::Index(0))?;
+        let v = self.get_prop(item, PropertyKey::Index(1))?;
+        let key = self.coerce_key(k)?;
+        self.ao_create(obj, key, v)
+    }
+
     // ------------------------------------------------------------ Array.from
+
+    fn ao_from_item(&mut self, a: ObjId, k: u64, mapfn: Option<Value>, this_arg: Value, v: Value) -> Res<()> {
+        let v = match mapfn {
+            Some(f) => self.call_fn(f, this_arg, &[v, Value::Number(k as f64)])?,
+            None => v,
+        };
+        let key = self.index_key(k)?;
+        self.ao_create(a, key, v)
+    }
 
     fn ao_array_from(&mut self, this: Value, items: Value, mapfn: Value, this_arg: Value) -> Res<Value> {
         self.ao_plain_ctor(this, "Array.from with a non-Array this")?;
@@ -787,16 +819,15 @@ impl<'p> Interp<'p> {
             let t = self.display(items);
             return Err(self.type_err(&format!("{t} is not iterable")));
         }
-        // Built-in iterables: strings (by code point) and arrays (live length). A user `@@iterator` needs Symbol.
-        let iterable = matches!(items, Value::String(_)) || matches!(items, Value::Object(o) if h!(self, self.heap.is_array(o)));
-        if iterable {
+        // An iterable goes through the shared iterator machinery (`iter_open`: `@@iterator` is read once). A throw
+        // from the map function or from creating the element closes the iterator.
+        if let Some(mut it) = self.iter_open(items)? {
             let a = self.ao_new_array(0)?;
-            let mut it = self.iter_start_val(items)?;
             let mut k = 0u64;
             while let Some(v) = self.iter_next(&mut it)? {
-                let v = if mapping { self.call_fn(mapfn, this_arg, &[v, Value::Number(k as f64)])? } else { v };
-                let key = self.index_key(k)?;
-                self.ao_create(a, key, v)?;
+                if let Err(e) = self.ao_from_item(a, k, mapping.then_some(mapfn), this_arg, v) {
+                    return Err(self.iter_close_throw(&mut it, e));
+                }
                 k += 1;
             }
             return Ok(Value::Object(a));

@@ -1,0 +1,316 @@
+# bare-js seam cases: Array/Object methods and String/RegExp/Promise meeting Symbol, Map, Set and the iterator protocol.
+# Same format as sc-cases.txt (`=== name`, a log, the last expression is a reader function). Node (vm, empty context) is the oracle.
+# Only our own tiny programs run here. Messages are not compared: cases log error names.
+=== seam_species_reads
+var log = []; function L(x) { log.push(String(x)); }
+function T(f) { try { return 'ok:' + String(f()); } catch (e) { return 'throw:' + e.name; } }
+L(Array[Symbol.species] === Array);
+L(Object.getOwnPropertyDescriptor(Array, Symbol.species).get.name);
+var trace = [];
+function mk(sp) { var a = [1, 2, 3]; var C = {}; Object.defineProperty(C, Symbol.species, { get: function () { trace.push('species'); return sp; } }); Object.defineProperty(a, 'constructor', { get: function () { trace.push('ctor'); return C; } }); return a; }
+['map', 'filter', 'slice', 'splice', 'concat'].forEach(function (m) { trace = []; var r = mk(undefined)[m](function (x) { return x; }); L(m + ':' + trace.join('+') + ':' + Array.isArray(r)); });
+L(T(function () { return mk(null).map(function (x) { return x * 2; }).join(); }));
+L(T(function () { return mk(Array).map(function (x) { return x * 2; }).join(); }));
+L(T(function () { return mk(5).map(function (x) { return x; }); }));
+L(T(function () { var a = [1]; a.constructor = null; return a.slice(); }));
+L(T(function () { var a = [1]; a.constructor = 5; return a.slice(); }));
+L(T(function () { var a = [1]; a.constructor = {}; return a.slice().length; }));
+L(T(function () { var a = [1]; a.constructor = function F() {}; return a.concat([2]).length; }));
+L(T(function () { var a = [1]; a.constructor = undefined; return a.map(function (x) { return x; }).length; }));
+(function () { return log.join("|"); })
+=== seam_concat_spreadable
+var log = []; function L(x) { log.push(String(x)); }
+function T(f) { try { return 'ok:' + String(f()); } catch (e) { return 'throw:' + e.name; } }
+var o = { length: 2, 0: 'a', 1: 'b' };
+L([0].concat(o).length);
+o[Symbol.isConcatSpreadable] = true;
+L([0].concat(o).join());
+var a = [1, 2]; a[Symbol.isConcatSpreadable] = false;
+L([0].concat(a).length + ':' + [0].concat(a)[1][0]);
+L(T(function () { return [].concat(a, a).length; }));
+var trace = [];
+var g = { length: 1, 0: 'x' }; Object.defineProperty(g, Symbol.isConcatSpreadable, { get: function () { trace.push('flag'); return 1; } });
+L([].concat(g, 7, g).join() + ':' + trace.join());
+var h = { length: 3, 1: 'm' }; h[Symbol.isConcatSpreadable] = true;
+var r = [].concat(h); L(r.length + ':' + (0 in r) + ':' + (1 in r) + ':' + r[1]);
+var s = [9]; s[Symbol.isConcatSpreadable] = 0; L([].concat(s).length + ':' + [].concat(s)[0].length);
+L(T(function () { var u = {}; u[Symbol.isConcatSpreadable] = true; return [1].concat(u).length; }));
+L([1].concat('str', 5, true, null, undefined).length);
+Array.prototype[Symbol.isConcatSpreadable] = false;
+L([1, 2].concat([3]).length);
+delete Array.prototype[Symbol.isConcatSpreadable];
+L([1, 2].concat([3]).length);
+(function () { return log.join("|"); })
+=== seam_array_from_iterables
+var log = []; function L(x) { log.push(String(x)); }
+function T(f) { try { return 'ok:' + String(f()); } catch (e) { return 'throw:' + e.name; } }
+L(Array.from(new Map([[1, 'a'], [2, 'b']])).join(';'));
+L(Array.from(new Set([3, 3, 4])).join());
+L(Array.from('a😀b').length);
+L(Array.from({ length: 2, 0: 'p', 1: 'q' }).join());
+L(Array.from([1, , 3]).length + ':' + (1 in Array.from([1, , 3])));
+L(Array.from(new Set([1, 2]), function (x, i) { return x * 10 + i; }).join());
+L(Array.from([1, 2, 3].keys()).join());
+L(Array.from([7, 8].entries()).join(';'));
+var closed = 0;
+function mk(n, thrower) { var i = 0; return { [Symbol.iterator]() { return this; }, next() { i++; if (thrower && i === 2) throw new RangeError('n'); return { value: i, done: i > n }; }, return() { closed++; return {}; } }; }
+L(T(function () { return Array.from(mk(5), function (x) { if (x === 3) throw new TypeError('m'); return x; }); }) + ':' + closed);
+closed = 0;
+L(T(function () { return Array.from(mk(5, true)); }) + ':' + closed);
+closed = 0;
+L(T(function () { return Array.from(mk(2)).join(); }) + ':' + closed);
+L(T(function () { var ob = {}; ob[Symbol.iterator] = null; ob.length = 1; ob[0] = 'z'; return Array.from(ob).join(); }));
+L(T(function () { var ob = {}; ob[Symbol.iterator] = 5; return Array.from(ob); }));
+L(T(function () { return Array.from(5).length; }));
+L(T(function () { return Array.from(null); }));
+L(T(function () { return Array.from([1], 5); }));
+var reads = 0; var cnt = { }; Object.defineProperty(cnt, Symbol.iterator, { get: function () { reads++; return function () { return [1, 2][Symbol.iterator](); }; } });
+L(Array.from(cnt).join() + ':' + reads);
+closed = 0;
+var bad = { [Symbol.iterator]() { return this; }, next() { return { value: 1, done: false }; }, return() { closed++; throw new Error('ignored'); } };
+L(T(function () { return Array.from(bad, function () { throw new TypeError('x'); }); }) + ':' + closed);
+(function () { return log.join("|"); })
+=== seam_from_entries_close
+var log = []; function L(x) { log.push(String(x)); }
+function T(f) { try { return 'ok:' + String(f()); } catch (e) { return 'throw:' + e.name; } }
+var closed = 0;
+function mk(items) { var i = 0; return { [Symbol.iterator]() { return this; }, next() { return i < items.length ? { value: items[i++], done: false } : { done: true }; }, return() { closed++; return {}; } }; }
+var o = Object.fromEntries(new Map([['a', 1], ['b', 2]]));
+L(Object.keys(o).join() + ':' + o.a + o.b);
+L(JSON.stringify(Object.fromEntries([['x', 1], ['x', 2], [3, 'n']])));
+L(T(function () { return Object.fromEntries(mk([['a', 1], 5, ['b', 2]])); }) + ':' + closed);
+closed = 0;
+L(T(function () { return Object.fromEntries(mk([[{ toString() { throw new RangeError('k'); } }, 1]])); }) + ':' + closed);
+closed = 0;
+L(T(function () { var e = []; Object.defineProperty(e, 0, { get: function () { throw new SyntaxError('g'); } }); return Object.fromEntries(mk([e])); }) + ':' + closed);
+closed = 0;
+L(T(function () { return JSON.stringify(Object.fromEntries(mk([['a', 1]]))); }) + ':' + closed);
+L(T(function () { return Object.fromEntries(null); }));
+L(T(function () { return Object.fromEntries({}); }));
+var s = Symbol('k');
+L(T(function () { var r = Object.fromEntries([[s, 1]]); return r[s]; }));
+(function () { return log.join("|"); })
+=== seam_array_iterator_methods
+var log = []; function L(x) { log.push(String(x)); }
+var AP = Array.prototype;
+L(AP.values === AP[Symbol.iterator]);
+L(AP.keys.name + AP.entries.name + AP.values.name);
+L([5, 6].keys().next().value + ':' + [5, 6].entries().next().value.join());
+L(Object.prototype.toString.call([].keys()) + Object.prototype.toString.call([].values()) + Object.prototype.toString.call([].entries()));
+L(Object.getPrototypeOf([].keys()) === Object.getPrototypeOf([][Symbol.iterator]()));
+var it = [1, 2].values(); L(it[Symbol.iterator]() === it);
+var a = [1]; var ai = a.values(); ai.next(); a.push(2); L(ai.next().value + ':' + ai.next().done + ':' + ai.next().done);
+var res = []; for (var e of ['x', 'y'].entries()) res.push(e[0] + e[1]); L(res.join());
+L([...[7, , 9].keys()].join());
+L([...[7, , 9].values()].length);
+var sp = []; for (var [i, v] of ['p', 'q'].entries()) sp.push(i + v); L(sp.join());
+L(Array.prototype.values.call({ length: 2, 0: 'a', 1: 'b' }).next().value);
+L(Array.prototype.keys.call('abc').next().value);
+L(typeof AP.values.call('ab').next);
+L(JSON.stringify([].values().next()));
+try { AP.values.call(null); } catch (e) { L(e.name); }
+try { [].values().next.call({}); } catch (e) { L(e.name); }
+var fin = [1, 2].values(); fin.next(); fin.next(); L(fin.next().done + ':' + fin.next().done);
+(function () { return log.join("|"); })
+=== seam_string_iterator
+var log = []; function L(x) { log.push(String(x)); }
+function T(f) { try { return 'ok:' + String(f()); } catch (e) { return 'throw:' + e.name; } }
+L(typeof String.prototype[Symbol.iterator] + ':' + String.prototype[Symbol.iterator].name);
+var si = 'a😀b'[Symbol.iterator]();
+L(Object.prototype.toString.call(si));
+var r = [], n; while (!(n = si.next()).done) r.push(n.value.length); L(r.join());
+L(si.next().done);
+L([...'xyz'].join('-'));
+L(Array.from('ab\ud83d').length);
+var cnt = 0; for (var ch of 'hello') cnt++; L(cnt);
+L('abc'[Symbol.iterator]()[Symbol.iterator] !== undefined);
+L(T(function () { return String.prototype[Symbol.iterator].call(null); }));
+L(T(function () { return String.prototype[Symbol.iterator].call(12).next().value; }));
+L(Object.getPrototypeOf('a'[Symbol.iterator]()) === Object.getPrototypeOf('b'[Symbol.iterator]()));
+String.prototype[Symbol.iterator] = function () { return [1, 2][Symbol.iterator](); };
+var over = []; for (var q of 'zz') over.push(q); L(over.join());
+L([...'k'].join());
+L(Array.from('k').join());
+delete String.prototype[Symbol.iterator];
+L(T(function () { var z = []; for (var q of 'zz') z.push(q); return z; }));
+L(T(function () { return [...'a']; }));
+(function () { return log.join("|"); })
+=== seam_close_after_fast_path
+var log = []; function L(x) { log.push(String(x)); }
+var AIP = Object.getPrototypeOf([][Symbol.iterator]());
+var calls = [];
+var i = 0;
+for (var x of [10, 20, 30, 40]) {
+  i++;
+  if (i === 2) AIP.return = function () { calls.push('ret:' + Object.prototype.toString.call(this) + ':' + this.next().value); return {}; };
+  if (i === 3) break;
+}
+L(calls.join() + ':' + i);
+delete AIP.return;
+calls = [];
+for (var y of [1, 2]) { break; }
+L(calls.length);
+var MIP = Object.getPrototypeOf(new Map()[Symbol.iterator]());
+var m = new Map([[1, 'a'], [2, 'b'], [3, 'c']]); var seen = [];
+for (var [k, v] of m) { seen.push(k); if (k === 1) MIP.return = function () { seen.push('ret:' + this.next().value[0]); return {}; }; if (k === 2) break; }
+L(seen.join());
+delete MIP.return;
+var SIP = Object.getPrototypeOf(new Set()[Symbol.iterator]());
+var st = new Set([5, 6, 7]); var ss = [];
+for (var z of st) { ss.push(z); SIP.return = function () { ss.push('ret'); return {}; }; break; }
+delete SIP.return;
+L(ss.join());
+var STIP = Object.getPrototypeOf(''[Symbol.iterator]());
+var sc = [];
+for (var c of 'abc') { sc.push(c); STIP.return = function () { sc.push('ret:' + this.next().value); return {}; }; break; }
+delete STIP.return;
+L(sc.join());
+var ex = [];
+try { for (var w of [1, 2, 3]) { AIP.return = function () { ex.push('ret'); throw new RangeError('r'); }; throw new TypeError('body'); } } catch (e) { ex.push(e.name); }
+delete AIP.return;
+L(ex.join());
+var d = [];
+var [first] = [1, 2, 3]; L(first);
+AIP.return = function () { d.push('ret'); return {}; };
+var [f2] = [1, 2, 3]; var [g1, g2, g3, g4] = [1, 2, 3];
+delete AIP.return;
+L(d.join());
+(function () { return log.join("|"); })
+=== seam_assign_json_symbols
+var log = []; function L(x) { log.push(String(x)); }
+var s1 = Symbol('a'), s2 = Symbol('b');
+var src = { x: 1, [s1]: 2, y: 3 }; Object.defineProperty(src, s2, { value: 9, enumerable: false });
+var t = Object.assign({}, src);
+L(Object.keys(t).join() + ':' + t[s1] + ':' + t[s2]);
+L(Object.entries(src).join(';') + ':' + Object.values(src).join());
+L(JSON.stringify({ a: Symbol('q'), [s1]: 1, b: 2 }));
+L(JSON.stringify([Symbol('q'), 1, function () {}, undefined]));
+L(JSON.stringify(Symbol('top')) === undefined);
+L(JSON.stringify({ a: 1, b: 2 }, function (k, v) { return k === 'a' ? Symbol('r') : v; }));
+L(JSON.stringify([1, 2], function (k, v) { return k === '0' ? Symbol('r') : v; }));
+L(JSON.stringify({ a: { toJSON() { return Symbol('j'); } } }));
+L(JSON.stringify({ a: 1, b: 2, [s1]: 3 }, ['a', 'b']));
+L(JSON.stringify({ k: new Map([[1, 2]]), v: new Set([1]) }));
+L(Object.assign({}, 'ab', null, undefined, 3).hasOwnProperty('1'));
+var order = []; var p = { get [s1]() { order.push('s'); return 1; }, get z() { order.push('z'); return 2; }, get 5() { order.push('5'); return 3; } };
+Object.assign({}, p); L(order.join());
+try { Object.assign({}, { [s1]: 1 }, Object.defineProperty({}, s1, { get: function () { throw new RangeError('x'); }, enumerable: true })); } catch (e) { L(e.name); }
+(function () { return log.join("|"); })
+=== seam_promise_species_tag
+var log = []; function L(x) { log.push(String(x)); }
+function T(f) { try { return 'ok:' + String(f()); } catch (e) { return 'throw:' + e.name; } }
+L(Promise[Symbol.species] === Promise);
+L(Object.prototype.toString.call(Promise.resolve(1)));
+L(Promise.prototype[Symbol.toStringTag]);
+var trace = [];
+var p = Promise.resolve(1);
+var C = {}; Object.defineProperty(C, Symbol.species, { get: function () { trace.push('species'); return undefined; } });
+Object.defineProperty(p, 'constructor', { get: function () { trace.push('ctor'); return C; } });
+var q = p.then(function (v) { log.push('then:' + v); return v + 1; });
+L(trace.join('+') + ':' + (q instanceof Promise));
+trace = [];
+p.catch(function () {}); p.finally(function () { log.push('fin'); });
+L(trace.join('+'));
+var n = Promise.resolve(2); Object.defineProperty(n, 'constructor', { value: { [Symbol.species]: null } });
+n.then(function (v) { log.push('null-species:' + v); });
+var bad = Promise.resolve(3); bad.constructor = 7;
+L(T(function () { return bad.then(function () {}); }));
+var bs = Promise.resolve(4); bs.constructor = { [Symbol.species]: 5 };
+L(T(function () { return bs.then(function () {}); }));
+var plain = Promise.resolve(5); plain.constructor = {};
+plain.then(function (v) { log.push('plain:' + v); });
+Promise.resolve(6).then(function (v) { log.push('after:' + v); });
+(function () { return log.join("|"); })
+=== seam_regexp_string_hooks
+var log = []; function L(x) { log.push(String(x)); }
+function T(f) { try { return 'ok:' + String(f()); } catch (e) { return 'throw:' + e.name; } }
+L('a-b-c'.split('-').join() + ':' + 'a1b2'.replace(/\d/g, '#') + ':' + 'xyz'.match(/y/).index + ':' + 'abab'.match(/b/g).length);
+L('a1b2c'.split(/\d/).join());
+L('aXb'.replace('X', '$&$&'));
+var hook = { [Symbol.match](s) { return 'M:' + s; }, [Symbol.replace](s, r) { return 'R:' + s + ':' + r; }, [Symbol.split](s, lim) { return 'S:' + s + ':' + lim; } };
+L('str'.match(hook) + '|' + 'str'.replace(hook, 'rep') + '|' + 'str'.split(hook, 3));
+L('str'.split(hook));
+var seen = []; var h2 = { [Symbol.match]() { seen.push(typeof this + ':' + (this === h2)); return null; } };
+L('q'.match(h2) + ':' + seen.join());
+L(T(function () { return 'x'.match({ [Symbol.match]: 5 }); }));
+L(T(function () { return 'x'.replace({ [Symbol.replace]: {} }, 'y'); }));
+L(T(function () { return 'x'.split({ [Symbol.split]: 'no' }); }));
+L(T(function () { return 'a.b'.split({ [Symbol.split]: null, toString() { return '.'; } }).join(); }));
+L(T(function () { return 'a.b'.replace({ [Symbol.replace]: undefined, toString() { return '.'; } }, '!'); }));
+L(T(function () { return 'abc'.match({ [Symbol.match]: null, toString() { return 'b'; } }).index; }));
+L(T(function () { return String.prototype.match.call(null, /a/); }));
+L(T(function () { return 'abc'.includes(/b/); }));
+L(T(function () { return 'abc'.startsWith(/a/); }));
+L(T(function () { return 'abc'.endsWith(/c/); }));
+var re = /b/; re[Symbol.match] = false;
+L(T(function () { return 'a/b/c'.includes(re); }));
+L(T(function () { return 'abc'.includes({ [Symbol.match]: true }); }));
+L(T(function () { return 'abc'.includes({ [Symbol.match]: 0, toString() { return 'bc'; } }); }));
+L(T(function () { return new RegExp(/a/g).flags + RegExp(/b/i).flags; }));
+var reg = /a/; L(RegExp(reg) === reg);
+var nr = /a/g; nr[Symbol.match] = false; L(T(function () { return new RegExp(nr).source; }));
+RegExp.prototype[Symbol.replace] = function (s, r) { return 'patched:' + s + r; };
+L('abc'.replace(/b/, 'x'));
+delete RegExp.prototype[Symbol.replace];
+L('abc'.replace(/b/, 'x'));
+String.prototype[Symbol.split] = function () { return 'strsplit'; };
+L('a,b'.split(','));
+delete String.prototype[Symbol.split];
+L('a,b'.split(','));
+L(T(function () { return 'abc'.replace(/(b)/, function (m, g, off) { return '[' + m + g + off + ']'; }); }));
+(function () { return log.join("|"); })
+=== seam_protocols_with_builtins
+var log = []; function L(x) { log.push(String(x)); }
+function T(f) { try { return 'ok:' + String(f()); } catch (e) { return 'throw:' + e.name; } }
+var tp = { [Symbol.toPrimitive](h) { return h === 'number' ? 5 : h === 'string' ? 'S' : 'D'; } };
+L([tp, 1].join() + ':' + [tp].concat([tp]).length + ':' + (tp + 1) + ':' + `${tp}` + ':' + (+tp));
+L([2, 10, 1].sort().join() + ':' + [tp, 'A'].sort().join());
+L(Object.getPrototypeOf(Symbol('d')) === Symbol.prototype);
+L(T(function () { return [Symbol('x')].join(); }));
+L(T(function () { return [Symbol('x')].sort(); }));
+L(T(function () { return [Symbol('x'), Symbol('y')].sort().length; }));
+L(T(function () { return 'a'.concat(Symbol('x')); }));
+L(T(function () { return 'abc'.indexOf(Symbol('x')); }));
+L(T(function () { return Symbol('x') + ''; }));
+L(T(function () { return `${Symbol('x')}`; }));
+L(T(function () { return [Symbol.iterator].includes(Symbol.iterator) + ':' + [Symbol.iterator].indexOf(Symbol.iterator); }));
+var cls = { [Symbol.hasInstance](v) { return v === 1; } };
+L((1 instanceof cls) + ':' + (2 instanceof cls) + ':' + ([] instanceof Array));
+var tagged = { [Symbol.toStringTag]: 'Zed' };
+L(Object.prototype.toString.call(tagged) + Object.prototype.toString.call([]) + Object.prototype.toString.call(null) + Object.prototype.toString.call(new Map()) + Object.prototype.toString.call(new Set()));
+L(Object.prototype.toString.call(Symbol()) + Object.prototype.toString.call(Promise.resolve()) + Object.prototype.toString.call('s'));
+L([1, 2, 3].map(function (x) { return x * 2; }).filter(function (x) { return x > 2; }).join());
+L(Array.from(new Map([[1, 2]]).keys()).concat(Array.from(new Set([3]).values())).join());
+L(Object.entries({ a: 1, [Symbol('s')]: 2 }).length);
+L(Array.of(1, 2).concat(Array.from('ab')).join());
+(function () { return log.join("|"); })
+=== seam_dense_splice_conditions
+var log = []; function L(x) { log.push(String(x)); }
+function T(f) { try { return 'ok:' + String(f()); } catch (e) { return 'throw:' + e.name; } }
+Array.prototype[1] = 'P';
+var a = [1, , 3]; a.shift(); L(a.join() + ':' + a.length);
+var a2 = [1, , 3]; a2.splice(0, 1, 'x', 'y'); L(a2.join() + ':' + a2.length);
+var a3 = [1, , 3]; a3.unshift('u'); L(a3.join() + ':' + a3.length + ':' + a3.hasOwnProperty(2));
+delete Array.prototype[1];
+Object.prototype[0] = 'Q';
+var b = [, 1]; b.shift(); L(b.join() + ':' + b.length);
+var b2 = [, 1]; b2.splice(0, 0, 'z'); L(b2.join() + ':' + b2.length + ':' + b2.hasOwnProperty(0));
+delete Object.prototype[0];
+var c = [1, 2, 3]; Object.defineProperty(c, 'length', { writable: false });
+L(T(function () { return c.shift(); }) + ':' + c.join() + ':' + c.length);
+var c2 = [1, 2, 3]; Object.defineProperty(c2, 'length', { writable: false });
+L(T(function () { return c2.unshift(0); }) + ':' + c2.join() + ':' + c2.length);
+var c3 = [1, 2, 3]; Object.defineProperty(c3, 'length', { writable: false });
+L(T(function () { return c3.splice(0, 1); }) + ':' + c3.join() + ':' + c3.length);
+var d = [1, 2, 3]; Object.defineProperty(d, 2, { value: 3, configurable: false, writable: true, enumerable: true });
+L(T(function () { return d.shift(); }) + ':' + d.join() + ':' + d.length);
+var e = [1, 2, 3]; Object.defineProperty(e, 0, { value: 1, writable: false, configurable: true, enumerable: true });
+L(T(function () { return e.shift(); }) + ':' + e.join() + ':' + e.length);
+var cnt = 0; var f = [1, 2, 3]; Object.defineProperty(f, 1, { get: function () { cnt++; return 'g'; }, set: function (v) { cnt += 10; }, configurable: true, enumerable: true });
+f.shift(); L(f.join() + ':' + cnt);
+var g = [1]; g.length = 5; g.unshift(0); L(g.length + ':' + g.join() + ':' + (3 in g));
+var h = [1, 2, 3, 4]; var r = h.splice(1, 2, 'a'); L(h.join() + ':' + r.join());
+var i = []; L(T(function () { return i.shift(); }) + ':' + i.length);
+var j = [1, 2, 3]; j.shift(); j.unshift(9, 8); L(j.join() + ':' + j.length);
+var k = [5, , 7]; var rem = k.splice(0, 3); L(rem.length + ':' + (1 in rem) + ':' + k.length);
+(function () { return log.join("|"); })

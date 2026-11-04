@@ -92,6 +92,7 @@ impl<'p> Interp<'p> {
                 Value::Object(o) => Ok(h!(self, self.heap.get_prototype_of(o)).map_or(Value::Null, Value::Object)),
                 Value::Undefined | Value::Null => Err(self.type_err("Cannot convert undefined or null to object")),
                 Value::String(_) => Ok(Value::Object(self.ext.string_proto)),
+                Value::Symbol(_) => Ok(Value::Object(self.sc.symbol_proto)),
                 _ => Ok(Value::Object(self.object_proto)),
             },
             Nat::ObjHasOwn => {

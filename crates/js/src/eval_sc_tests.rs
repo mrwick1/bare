@@ -463,10 +463,10 @@ fn host_can_call_symbol_and_collection_functions_and_read_symbol_text() {
 
 #[test]
 fn the_symbol_protocols_that_are_only_identities_are_reported_not_faked() {
-    // asyncIterator, isConcatSpreadable, match... exist as identities. `for await` and async iteration are not supported.
+    // asyncIterator, matchAll and search exist as identities only. `for await` and async iteration are not supported.
     assert_eq!(run("typeof Symbol.asyncIterator + typeof Symbol.isConcatSpreadable + typeof Symbol.match"), "ok:symbolsymbolsymbol");
     assert_eq!(run("typeof WeakMap + typeof WeakSet + typeof Reflect + typeof Proxy"), "ok:undefinedundefinedundefinedundefined");
-    assert_eq!(run("''[Symbol.iterator]"), "ok:undefined");
+    assert_eq!(run("typeof ''[Symbol.iterator]"), "ok:function");
     assert_eq!(run("[...'ab'].length"), "ok:2");
 }
 

@@ -63,8 +63,8 @@ impl<'p> Interp<'p> {
         let empty = crate::parse::parse_script("", Default::default()).map_err(|_| unsupported("empty script", Span::default()))?;
         let mut it = Self::with_code(Rc::new(empty.into_owned()), heap, limits)?;
         it.install_builtins()?;
-        it.install_ext()?;
         it.install_sc()?;
+        it.install_ext()?;
         it.install_array_object()?;
         it.install_promise()?;
         it.install_binary()?;

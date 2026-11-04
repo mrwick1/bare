@@ -396,8 +396,8 @@ impl<'p> Interp<'p> {
         let mut it = Self::with_code(Rc::new(prog.clone().into_owned()), heap, limits)?;
         it.walk_program()?;
         it.install_builtins()?;
-        it.install_ext()?;
         it.install_sc()?;
+        it.install_ext()?;
         it.install_array_object()?;
         it.install_promise()?;
         it.install_binary()?;
@@ -2931,3 +2931,7 @@ mod array_object_tests;
 #[cfg(test)]
 #[path = "eval_sc_tests.rs"]
 mod sc_tests;
+
+#[cfg(test)]
+#[path = "eval_interop_tests.rs"]
+mod interop_tests;

@@ -1257,8 +1257,8 @@ impl Heap {
     /// It replaces `del` elements at `start` with `items` and returns the removed ones (`None` is a hole).
     /// It answers `Ok(None)` and changes nothing unless the result is exactly what the generic algorithm gives:
     /// `o` is an array of length `len` with all elements in dense storage (no accessor, no sparse or special
-    /// index), a writable `length`, no indexed property on the prototype chain, and room to grow if it is
-    /// extensible. Errors: a stale handle or a size limit.
+    /// index), a writable `length`, no indexed property on the prototype chain, and an extensible array (moving a
+    /// value into a hole adds a property, which a non-extensible array refuses). Errors: a stale handle or a size limit.
     pub fn splice_dense(&mut self, o: ObjId, len: u32, start: usize, del: usize, items: &[Value]) -> R<Option<Vec<Option<Value>>>> {
         for &v in items {
             self.check_value(v)?;
@@ -1269,7 +1269,7 @@ impl Heap {
         }
         let (alen, writable) = self.array_len(obj);
         let new_len = (len as u64 - del as u64) + items.len() as u64;
-        if alen != len || !writable || new_len > MAX_INDEX as u64 + 1 || (items.len() > del && !obj.extensible) {
+        if alen != len || !writable || new_len > MAX_INDEX as u64 + 1 || !obj.extensible {
             return Ok(None);
         }
         let mut p = obj.proto;
