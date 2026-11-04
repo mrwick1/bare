@@ -63,6 +63,7 @@ impl<'p> Interp<'p> {
         let empty = crate::parse::parse_script("", Default::default()).map_err(|_| unsupported("empty script", Span::default()))?;
         let mut it = Self::with_code(Rc::new(empty.into_owned()), heap, limits)?;
         it.install_builtins()?;
+        it.install_ext()?;
         it.install_promise()?;
         Ok(it)
     }
@@ -120,6 +121,7 @@ impl<'p> Interp<'p> {
         self.select(old);
         if let Err(e) = r {
             self.scripts.pop();
+            self.ext.lits.retain(|k, _| k.0 as usize != id);
             for n in self.names.drain(names_mark..) {
                 self.name_map.remove(&n);
             }

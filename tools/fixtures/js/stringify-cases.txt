@@ -1,0 +1,114 @@
+=== primitives and root
+[JSON.stringify(1), JSON.stringify("a"), JSON.stringify(true), JSON.stringify(null), JSON.stringify(undefined), JSON.stringify(function () {}), typeof JSON.stringify(undefined), JSON.stringify(), JSON.stringify(NaN), JSON.stringify(-Infinity), JSON.stringify(-0), JSON.stringify(1e21), JSON.stringify(0.1 + 0.2)].join("|");
+=== object and array basics
+JSON.stringify({ a: 1, b: [1, "x", null, true], c: { d: {} , e: [] } });
+=== omit undefined function and symbol in objects, null in arrays
+JSON.stringify({ a: undefined, b: function () {}, c: 1, d: () => 1 }) + JSON.stringify([undefined, function () {}, 1, NaN, -0, Infinity]);
+=== own enumerable string keys and order
+var o = { b: 1, 2: "two", a: 2, 1: "one" }; Object.defineProperty(o, "hid", { value: 1, enumerable: false }); o.c = 3; JSON.stringify(o);
+=== inherited properties are skipped
+var p = { inh: 1 }; var o = Object.create(p); o.own = 2; JSON.stringify(o);
+=== getters run in key order and see mutation
+var log = []; var o = { get a() { log.push("a"); delete this.b; return 1; }, b: 2, get c() { log.push("c"); this.d = 9; return 3; } }; JSON.stringify(o) + log.join();
+=== throwing getter propagates
+try { JSON.stringify({ get a() { throw new RangeError("boom"); } }); "no" } catch (e) { e.name + e.message }
+=== array holes and inherited elements
+var a = [1, , 3]; var s = JSON.stringify(a); Array.prototype[1] = "inh"; var t = JSON.stringify(a); delete Array.prototype[1]; var b = []; b.length = 2; s + t + JSON.stringify(b);
+=== array getter and length mutation
+var a = [1, 2, 3]; Object.defineProperty(a, 0, { get: function () { a.length = 1; return "x"; }, enumerable: true }); JSON.stringify(a);
+=== toJSON receiver and key
+var seen = []; var o = { a: { toJSON: function (k) { seen.push(k + ":" + (this === o.a)); return 5; } }, b: [{ toJSON: function (k) { seen.push(typeof k + k); return "z"; } }] }; JSON.stringify(o) + seen.join();
+=== toJSON on root and non-callable toJSON
+JSON.stringify({ toJSON: function (k) { return "root[" + k + "]"; } }) + JSON.stringify({ toJSON: 1, a: 2 });
+=== toJSON returns undefined and object
+JSON.stringify({ a: { toJSON: function () {} }, b: { toJSON: function () { return { x: 1 }; } } }) + JSON.stringify([{ toJSON: function () {} }]);
+=== toJSON inherited and getter toJSON
+var p = { toJSON: function () { return "P"; } }; var o = Object.create(p); JSON.stringify([o]) + JSON.stringify({ get toJSON() { return function () { return "G"; }; } });
+=== replacer function receiver key order
+var log = []; var root = { a: 1, b: [2] }; JSON.stringify(root, function (k, v) { log.push("[" + k + "]" + (Array.isArray(this) ? "A" : Object.keys(this).join("+"))); return v; }) + "\n" + log.join();
+=== replacer function root holder
+var h; JSON.stringify(5, function (k, v) { h = this; return v; }); Object.keys(h).join("|") + "/" + h[""] + "/" + (Object.getPrototypeOf(h) === Object.prototype);
+=== replacer replaces values and omits
+JSON.stringify({ a: 1, b: "x", c: [1, 2] }, function (k, v) { return typeof v === "number" ? v * 2 : k === "b" ? undefined : v; });
+=== replacer after toJSON
+JSON.stringify({ a: { toJSON: function () { return 1; } } }, function (k, v) { return k === "a" ? v + 1 : v; });
+=== replacer returns new object
+JSON.stringify({ a: 1 }, function (k, v) { return k === "" ? { z: [1, { y: 2 }] } : v; });
+=== replacer mutates holder
+var o = { a: 1, b: 2, c: 3 }; JSON.stringify(o, function (k, v) { if (k === "a") { this.c = "changed"; delete this.b; } return v; });
+=== replacer throws
+try { JSON.stringify({ a: 1 }, function (k, v) { if (k === "a") throw new TypeError("rep"); return v; }); "no" } catch (e) { e.name + e.message }
+=== replacer array list
+JSON.stringify({ a: 1, b: 2, c: { a: 3, d: 4 }, 1: "n" }, ["c", "a", 1, "a", "zz", {}, null]);
+=== replacer array numeric and arrays inside
+JSON.stringify({ 0: "z", 1: "o", a: [{ a: 1, b: 2 }] }, [1, 0, "a"]);
+=== replacer array with holes and getter mutation
+var r = ["a", , "b"]; JSON.stringify({ a: 1, b: 2, c: 3 }, r) + JSON.stringify({ a: 1, b: 2 }, []);
+=== replacer array does not filter array elements
+JSON.stringify([{ a: 1, b: 2 }, 3], ["a"]);
+=== replacer array ignores non-enumerable and symbol-like absent
+var o = { a: 1 }; Object.defineProperty(o, "h", { value: 2, enumerable: false }); JSON.stringify(o, ["h", "a"]);
+=== replacer other types ignored
+JSON.stringify({ a: 1 }, 5) + JSON.stringify({ a: 1 }, "a") + JSON.stringify({ a: 1 }, {}) + JSON.stringify({ a: 1 }, null);
+=== pretty printing
+JSON.stringify({ a: [1, { b: 2 }, []], c: {}, d: [[]] }, null, 2);
+=== pretty printing arrays of undefined
+JSON.stringify([undefined, { a: undefined }, [function () {}]], null, "--");
+=== space clamps and forms
+[JSON.stringify([1], null, 20), JSON.stringify([1], null, "abcdefghijklmnop"), JSON.stringify([1], null, 0), JSON.stringify([1], null, -3), JSON.stringify([1], null, 1.9), JSON.stringify([1], null, NaN), JSON.stringify([1], null, Infinity), JSON.stringify([1], null, ""), JSON.stringify([1], null, true), JSON.stringify([1], null, {})].join("|");
+=== space with replacer array
+JSON.stringify({ a: 1, b: [1, 2] }, ["a", "b"], "\t");
+=== string escapes
+JSON.stringify("a\"b\\c\n\r\t\b\f\u0000\u001f\u007f  /");
+=== string unicode and surrogates
+JSON.stringify("😀 \ud83d x \ude00 \ud83d😀 \ude00\ud83d é ퟿ ");
+=== keys are escaped
+JSON.stringify({ "a\"b": 1, "\n": 2, "\ud800": 3, "": 4, "é": 5 });
+=== cycle detection
+var a = {}; a.self = a; try { JSON.stringify(a); "no" } catch (e) { e.name }
+=== cycle through array and nested
+var a = { l: [] }; a.l.push({ back: a }); try { JSON.stringify(a); "no" } catch (e) { e.name }
+=== cycle through toJSON result
+var a = { b: {} }; a.b.toJSON = function () { return a; }; try { JSON.stringify(a); "no" } catch (e) { e.name }
+=== shared acyclic subgraphs are legal
+var s = { x: 1 }; var o = { a: s, b: s, c: [s, s, [s]] }; JSON.stringify(o);
+=== same object after close is legal
+var s = []; JSON.stringify([s, s, { s: s }]);
+=== cycle detection resets after throw
+var a = {}; a.a = a; try { JSON.stringify(a); } catch (e) {} JSON.stringify({ ok: [1] });
+=== reentrant stringify in toJSON
+var o = { a: { toJSON: function () { return JSON.stringify({ in: [1, { z: 2 }] }); } }, b: [1] }; JSON.stringify(o);
+=== reentrant in replacer with its own replacer
+JSON.stringify({ a: 1, b: 2 }, function (k, v) { return k === "a" ? JSON.stringify({ q: 1, r: 2 }, ["q"]) : v; });
+=== reentrant cycle inside is separate
+var a = {}; a.a = a; JSON.stringify({ x: 1, y: { toJSON: function () { try { JSON.stringify(a); } catch (e) { return e.name; } } } });
+=== callback recursion depth
+var depth = 0; function mk() { return { toJSON: function () { depth++; return depth < 8 ? JSON.stringify(mk()) : "end"; } }; } JSON.stringify(mk()) + depth;
+=== class and prototype objects serialize own props only
+function F() { this.a = 1; } F.prototype.b = 2; JSON.stringify([new F(), F.prototype]);
+=== function with properties is omitted
+var f = function () {}; f.a = 1; JSON.stringify({ f: f, g: [f] });
+=== number keys order and large index
+var o = {}; o[4294967294] = 1; o[4294967295] = 2; o[2] = 3; o.x = 4; o[0] = 5; JSON.stringify(o);
+=== deep arrays
+var a = []; for (var i = 0; i < 100; i++) a = [a]; JSON.stringify(a).length;
+=== deep objects pretty
+var a = { v: 1 }; for (var i = 0; i < 20; i++) a = { n: a }; JSON.stringify(a, null, 1).length;
+=== JSON.parse round trip
+var o = { a: [1, 2, { b: "x\ny", c: null }], d: -0.5, e: " " }; JSON.stringify(JSON.parse(JSON.stringify(o))) === JSON.stringify(o);
+=== login-shaped body
+JSON.stringify({ email: "a@b.c", password: "p\"w", remember: true, device: { id: 1, tags: ["a", "b"] }, extra: undefined });
+=== regexp ordinary properties
+JSON.stringify([/a/g, { r: /b/ }]);
+=== reading lengths is by value
+var a = [1, 2]; JSON.stringify(a, function (k, v) { if (k === "0") a.push(9); return v; });
+=== stringify is a function with length 3
+[typeof JSON.stringify, JSON.stringify.length, JSON.stringify.name].join();
+=== undefined root via replacer and toJSON
+[JSON.stringify(1, function () {}), JSON.stringify({ toJSON: function () {} }), JSON.stringify(1, function () { return function () {}; })].join();
+=== key argument types
+var t = []; JSON.stringify({ 5: { toJSON: function (k) { t.push(typeof k + k); } } }); JSON.stringify([{ toJSON: function (k) { t.push(typeof k + k); } }]); t.join();
+=== proto key is own and serialized
+var o = JSON.parse('{"__proto__":1,"a":2}'); JSON.stringify(o);
+=== property list dedupe order with numbers
+JSON.stringify({ a: 1, b: 2, 1: 3 }, [1, "1", "b", "a", "b"]);
