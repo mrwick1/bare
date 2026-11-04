@@ -510,3 +510,26 @@ Parent generated 10,000 fresh oracle cases with `oracle_gen.py 1000`, then inter
 The driver holds the oracle cases before measurement. Per-curve times count accepted signatures only; invalid keys can fail early. Tables are shared through `OnceLock`. Parent added a concurrent first-initialization check using fresh tables and four threads for each curve. It verifies a single shared result and compares table contents with the curve's existing table.
 
 Checks: 573 workspace tests pass, including 656 public signature vectors and 24 public-key vectors inside the ECDSA tests. All 89 normal crypto tests pass in release with default and forced-portable builds. Clippy passes with all features. The long X25519 check remains separate. No non-x86 target or independent exact stack-peak measurement was tested. ECDSA is not a certificate-path validator.
+
+## TLS protocol foundations
+
+2026-11-04, archMachine, release. The record layer owns fixed read-ahead and write buffers. Read and write keys have separate sequences. Authentication precedes plaintext access. Errors fail the affected direction. The layer enforces record and per-key usage limits. The handshake caller must enforce message order, an overall deadline and the compatibility-CCS window.
+
+The key schedule uses typed traffic secrets and stack buffers. Transcript snapshots clone the fixed hash state. Hello encoding writes into the caller's buffer. Parent review added a failing test for invalid DNS labels in SNI, then tightened label validation. This preserves the existing hello vectors.
+
+Parent ran each load scale in a fresh process with a 512 MiB address-space cap and a 60 s timeout. Hello work includes two X25519 operations, hello parsing, transcript hashing and key derivation. It excludes sockets and certificate validation. Record memory runs seal and open 16 KiB records. Socket runs use local Unix sockets and two threads.
+
+| Case | 1x | 10x | 100x | Peak RSS KiB | Loop allocations |
+| --- | --- | --- | --- | --- | --- |
+| Hello/schedule, 1k / 10k / 100k iterations | 79.2 us/iteration | 80.8 us/iteration | 78.7 us/iteration | 2,484–2,500 | 0 |
+| Record memory, 64 / 640 / 6,400 MiB | 3.97 GB/s seal, 3.91 GB/s open | 3.95 / 3.90 GB/s | 3.99 / 3.94 GB/s | 2,764–2,772 | 0 |
+| Record socket, same sizes | 2.91 GB/s | 2.92 GB/s | 2.87 GB/s | 2,948–3,004 | 19 total setup allocations |
+| PEM, 200 / 2k / 20k bundle decodes | 928 MB/s | 901 MB/s | 874 MB/s | 2,740–2,784 | 7 per decode |
+
+The 100x record memory run took 3.39 s wall and 3.38 s CPU. The socket run took 2.34 s wall and 4.48 s CPU across two threads. The 100x PEM run processed 3.7 GB in 4.24 s wall and 4.21 s CPU. These final measurements do not establish a before/after gain. The delegated PEM implementation replaced a per-character state machine with a quartet decode fast path. Parent reproduced the final output, not the discarded implementation.
+
+Trust loading caps the input file at 4 MiB, the certificate count at 1,024 and each decoded certificate at 16 KiB. The decoder reserves storage from the file size; this is an overall file bound, not a 16 KiB allocation bound. Limit cases reject excess input. Parent checked all 121 OS roots and the independently loaded ISRG Root X2 fixture. Their hashes match. Hostname matching makes no heap allocations; a parent 1M-call run measured 37 ns/call for four SANs and 449 ns/call for a 1,000-SAN miss.
+
+Reproduce with the standalone `hello_load.rs`, `record_load.rs` and `trust_load.rs` drivers under `tools/crypto`. Parent's record oracle passed 3,000 Rust-to-OpenSSL records and 2,999 OpenSSL-to-Rust records before close_notify. All 636 workspace tests pass. All 152 normal crypto tests pass in release with default and forced-portable builds. The ignored OS-store check passes separately. Clippy passes with all features. The long X25519 vector was checked in the earlier primitive integration.
+
+No connected TLS client, certificate-path validation, staging HTTPS, HRR, resumption, KeyUpdate message handling, wildcard hostname or non-Linux trust source was tested in this batch. Unknown critical certificate extensions remain the validator's responsibility. This code remains unaudited.
