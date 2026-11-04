@@ -567,12 +567,18 @@ impl Dom {
         }
     }
 
+    fn fetch_base(&self) -> Option<Url> {
+        let configured = self.fetch.st.borrow().base.as_ref().map(dup)?;
+        let nav = self.nav.s.borrow();
+        Some(nav.entries.get(nav.cur).map(|e| dup(&e.url.u)).unwrap_or(configured))
+    }
+
     fn resolve_url(&self, it: &mut Interp<'_>, s: &str) -> R<Url> {
         if s.len() > self.fl().max_url_bytes {
             return Err(self.lim("fetch-url"));
         }
         let s = s.trim_matches(|c: char| c <= ' ');
-        let r = match &self.fetch.st.borrow().base {
+        let r = match &self.fetch_base() {
             Some(b) => b.join(s),
             None => Url::parse(s),
         };
@@ -1314,8 +1320,9 @@ fn prepare(d: &Dom, it: &mut Interp<'_>, promise: Value, a: &[Value]) -> R<()> {
     // Policy: no DNS and no socket before this passes.
     let method = wire_method(&core.method)?;
     {
+        let base = d.fetch_base();
         let mut st = d.fetch.st.borrow_mut();
-        let Some(base) = &st.base else {
+        let Some(base) = base else {
             st.diag(&lim, "blocked: no document origin is configured".into());
             return Err(Error::Unsupported(unsupported("fetch without a configured document origin (Browser::configure_fetch)")));
         };
