@@ -952,3 +952,40 @@ The final load matrices ran 42 fresh release processes: eight binding workloads 
 Stringify collection leaves 90 live objects before and after all three scales. Binding collection reclaims 750,000 objects at 100x and leaves 88 live objects. Large no-collection cases retain dead objects and interned strings until the host collects. Native allocator counts were not measured. The delegate retained source/flags caching after finding no measurable gain; parent does not claim an optimization from it.
 
 Reproduce with tools/js/builtins_check.sh, tools/js/stringify_check.sh, tools/js/builtins_load.sh and tools/js/stringify_load.sh. Pass an output path to each load script. Missing features include wrappers, revivers, custom regexp exec, Symbol protocols, species copies, several String methods and Unicode regexp modes. Invalid literal patterns still report Unsupported during evaluator preflight; the parser itself does not validate patterns. Regexp flag getters do not yet implement generic overridden-flag reads. Rust Unicode tables can differ from the Node version. Not tested: target bundle execution, staging login, other platforms, hard allocator OOM or combined class/async/collection branches.
+
+
+## DOM and event host bridge
+
+The bare library now connects the native Document to a shared JavaScript realm. Host provides call, roots, trace and prune hooks. Host functions use the evaluator call-depth and traversal guards. Host scopes share one execution budget across callbacks and Promise checkpoints. The host is cloned before callbacks so no host borrow must span JavaScript execution. With a host installed, collect through Interp.collect; passing Interp.roots directly to Heap.collect does not trace opaque host edges.
+
+Browser exposes script execution, explicit collection, selectors, wrapper lookup and driver input/event dispatch. Wrappers keep stable identity while reachable. The document wrapper is a root. Parent and child wrappers and listeners form traced edges. Detached wrappers survive when JavaScript holds them and are pruned otherwise. Native input state persists with native nodes. Generation handles prevent a recycled JS slot from inheriting an old wrapper or event.
+
+Document adds detached element/text/comment/doctype creation and attribute/text mutation. New nodes and clones invalidate the sibling cache. Attribute changes invalidate cached class sets. Old text and attribute slots can remain in the native arena. Native nodes never leave that arena. This is a retention limit, not a claim that detached native nodes are collected.
+
+The bridge supports tree mutation, attributes, real CSS queries, input value/checked state and capture/target/bubble events. Listener throws become bounded reports; resource errors stop dispatch. Reports retain at most the configured count and at most 4,096 message bytes each. Zero report capacity stores none and counts drops. Driver events are untrusted and have no default actions. A driver checkpoint runs between its listeners; dispatch called from JavaScript leaves microtasks for the later checkpoint.
+
+Parent review resolved the host and builtin hooks as a union. A stale test assumed String.charCodeAt was absent; it now checks the surrogate code unit. Added regressions reproduced clone attribute-cap bypass, UTF-8 byte-cap bypass, zero report-cap bypass, oversized reports, insufficient sibling-selector work accounting, rejected document-root replacement, initial-document cap bypass and uncharged DOM string copies. The clone preflight also checks copied dirty input bytes. CustomEvent now retains its prototype when detail is explicitly undefined; Node confirms that this dictionary value defaults to null. Combined listeners from two scripts use Promise jobs, JSON and distinct regexp literals correctly after collection.
+
+Default native caps are 1 Mi nodes, 64 Mi text bytes, 2 Mi attribute slots and 65,536 names. Wrapper and listener counts are 65,536, with 1,024 listeners per target. Events cap at 16,384. Result arrays cap at 65,536, inserted tree depth at 512, selectors at 1,024 bytes and crossing strings at 16 Mi UTF-8 bytes. Names, input strings and native text have separate component budgets. Host metadata has count and per-string limits, not one aggregate RSS limit. Initial node/text/attribute/name counts are checked before realm setup. Clone attribute and dirty-input budgets are checked before native node allocation.
+
+Selector matching uses a conservative work charge. Descendant searches use tree depth. Sibling searches include document width, including skipped non-elements. Lists add their charges. More than two descendant/later-sibling combinators remain refused. This can reject a wide query before the unmetered CSS matcher runs. It is not precise instruction accounting. String conversion and copies charge by size; textContent checks capacity before appending each text. Input receiver validation no longer copies its current value just to check the tag.
+
+All 1,009 workspace tests pass. The changed crates pass release tests: 36 browser-library tests, 25 CLI tests, 102 HTML tests and 218 JS tests. JS clippy with warnings denied is clean. The wider clippy run reports existing warnings in HTML, CSS, Unicode, net and main. The new event oracle matches 15 tiny Node cases. Existing binding 90, stringify 57, evaluator 202 and Promise 62 cases still match. Node has no DOM tree in this oracle; tree expectations remain handwritten. Node capture-removal, passive and re-dispatch-name differences remain covered by separate Rust expectations.
+
+Parent ran the three load workloads at 1x, 10x and 100x in fresh release processes under 1 GiB address space and 45 seconds each. All nine checksums pass. The final sample ran with concurrent work and establishes no speed improvement.
+
+| Workload | Scale | Run ms | CPU ms | Peak RSS MiB | Allocations |
+| --- | --- | --- | --- | --- | --- |
+| Mutation | 1x | 6.3 | 0 | 4.7 | 29,264 |
+| Mutation | 10x | 61.0 | 60 | 5.7 | 225,794 |
+| Mutation | 100x | 618.3 | 600 | 14.6 | 2,472,770 |
+| Events | 1x | 4.0 | 0 | 4.3 | 18,192 |
+| Events | 10x | 35.3 | 30 | 4.4 | 179,835 |
+| Events | 100x | 355.6 | 350 | 5.2 | 1,796,238 |
+| Lookup | 1x | 6.7 | 0 | 4.4 | 16,539 |
+| Lookup | 10x | 63.6 | 60 | 4.5 | 159,963 |
+| Lookup | 100x | 619.8 | 610 | 4.9 | 1,594,116 |
+
+CPU uses 10 ms ticks, so zero does not mean no CPU work. Mutation at 100x retains 200,005 native nodes and 1,005 wrappers; collection frees 99,000 JS objects across the run. Event at 100x retains 9 native nodes, 8 wrappers and 3 listeners and frees 150,003 JS objects. Its accounted live bytes rise from 0.2 to 0.9 MiB. Added code counters show 13 to 1,003 retained scripts and 149 to 6,089 syntax/list nodes. This confirms retained code growth while DOM metadata stays flat; it is not an allocation breakdown proving the source of every retained byte. Lookup at 100x retains 405 wrappers and 503 scripts. Collection time is included in run time.
+
+Reproduce with tools/js/browser_check.sh and tools/js/browser_load.sh with an output path. Not tested: a real browser DOM comparison, staging execution, focus, default actions, form validation, live collections, full namespaces, lone-surrogate storage, native arena reclamation, hard allocator OOM or cross-platform allocator behavior. Lists are snapshot arrays. The CLI still does not execute page scripts. The delegate's original commit used a hook override; parent integration used the normal configured git hooks. No hook or identity configuration was changed.

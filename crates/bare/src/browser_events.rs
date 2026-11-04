@@ -49,13 +49,17 @@ impl Dom {
         }
     }
 
-    /// A new event object. `detail` makes it a `CustomEvent` when it is not `undefined`.
-    pub(crate) fn new_event(&self, it: &mut Interp<'_>, ty: &str, bubbles: bool, cancelable: bool, composed: bool, detail: Value) -> R<ObjId> {
+    /// A new event object. `Some(detail)` makes a `CustomEvent`, including an undefined detail.
+    pub(crate) fn new_event(&self, it: &mut Interp<'_>, ty: &str, bubbles: bool, cancelable: bool, composed: bool, detail: Option<Value>) -> R<ObjId> {
+        if ty.len() > self.lim.max_string_bytes {
+            return Err(self.lim("dom-string"));
+        }
+        it.charge((ty.len() / 32) as u64)?;
         if self.st.borrow().events.len() >= self.lim.max_events {
             return Err(self.lim("dom-events"));
         }
         let p = self.p();
-        let o = self.obj(it, if matches!(detail, Value::Undefined) { p.event } else { p.custom })?;
+        let o = self.obj(it, if detail.is_none() { p.event } else { p.custom })?;
         let e = EventState {
             ty: Rc::from(ty),
             bubbles,
@@ -69,7 +73,7 @@ impl Dom {
             phase: 0,
             target: Value::Null,
             current: Value::Null,
-            detail: if matches!(detail, Value::Undefined) { Value::Null } else { detail },
+            detail: detail.unwrap_or(Value::Null),
             path: Vec::new(),
             time: self.start.elapsed().as_secs_f64() * 1000.0,
         };
@@ -213,17 +217,38 @@ impl Dom {
 
     /// Keep the text of a listener exception. It reads data properties only, so no JS runs.
     fn report(&self, it: &mut Interp<'_>, thrown: Value, ty: &str, t: Target) {
-        let text = |it: &mut Interp<'_>, o: ObjId, key: &str| -> String {
-            let Ok(k) = it.heap.key_from_str(key) else { return String::new() };
-            match it.heap.get(o, k) {
-                Ok(Get::Value(Value::String(s))) => it.heap.to_string_lossy(s).unwrap_or_default(),
-                _ => String::new(),
+        if self.lim.max_reports == 0 {
+            let mut st = self.st.borrow_mut();
+            st.dropped_reports = st.dropped_reports.saturating_add(1);
+            return;
+        }
+        let cap = self.lim.max_string_bytes.min(4096);
+        let append = |out: &mut String, units: &[u16]| {
+            for c in char::decode_utf16(units.iter().copied()) {
+                let c = c.unwrap_or(char::REPLACEMENT_CHARACTER);
+                if c.len_utf8() > cap.saturating_sub(out.len()) { break; }
+                out.push(c);
             }
         };
-        let message = match thrown {
-            Value::Object(o) => format!("{}: {}", text(it, o, "name"), text(it, o, "message")),
-            v => it.display(v),
+        let text = |it: &mut Interp<'_>, out: &mut String, o: ObjId, key: &str| {
+            let Ok(k) = it.heap.key_from_str(key) else { return };
+            if let Ok(Get::Value(Value::String(s))) = it.heap.get(o, k)
+                && let Ok(units) = it.heap.str_units(s)
+            {
+                append(out, units);
+            }
         };
+        let mut message = String::new();
+        match thrown {
+            Value::Object(o) => {
+                text(it, &mut message, o, "name");
+                append(&mut message, &[58, 32]);
+                text(it, &mut message, o, "message");
+            }
+            Value::String(s) => if let Ok(units) = it.heap.str_units(s) { append(&mut message, units); },
+            Value::Symbol(_) => append(&mut message, &[83, 121, 109, 98, 111, 108]),
+            v => append(&mut message, &it.display(v).encode_utf16().collect::<Vec<_>>()),
+        }
         let target = match t {
             Target::Window => "window".to_string(),
             Target::Obj(_) => "object".to_string(),
@@ -268,12 +293,13 @@ fn make_event(d: &Dom, it: &mut Interp<'_>, a: &[Value], custom: bool) -> V {
             if custom {
                 let k = d.key(it, "detail")?;
                 detail = it.get_value(init, k)?;
+                if matches!(detail, Value::Undefined) { detail = Value::Null; }
             }
         }
         _ => return Err(it.type_error("The event initializer is not an object.")),
     }
     // A custom event passes its detail (`null` at least); a plain one passes `undefined`.
-    let e = d.new_event(it, &ty, bubbles, cancelable, composed, if custom { detail } else { Value::Undefined })?;
+    let e = d.new_event(it, &ty, bubbles, cancelable, composed, if custom { Some(detail) } else { None })?;
     Ok(Value::Object(e))
 }
 

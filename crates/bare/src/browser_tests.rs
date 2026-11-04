@@ -190,7 +190,7 @@ fn utf16_round_trips_and_lone_surrogates_are_gated() {
     big(|| {
         let mut b = browser();
         // a pair becomes one UTF-8 character and comes back as the same two code units
-        assert_eq!(js(&mut b, "var t = document.createTextNode('a\\ud83d\\ude00b'); [t.length, t.data.length, t.data.charCodeAt === undefined, t.data === 'a\\ud83d\\ude00b'].join()"), "4,4,true,true");
+        assert_eq!(js(&mut b, "var t = document.createTextNode('a\\ud83d\\ude00b'); [t.length, t.data.length, t.data.charCodeAt(1) === 55357, t.data === 'a\\ud83d\\ude00b'].join()"), "4,4,true,true");
         let doc = b.document();
         let text = doc.borrow().dump();
         assert!(!text.contains('\u{fffd}'));
@@ -596,5 +596,120 @@ fn wrappers_survive_between_calls_and_a_second_host_is_refused() {
         assert!(matches!(b.document().borrow().data(a), NodeData::Element { .. }));
         let h = b.it.heap.limits();
         assert!(h.max_objects > 0);
+    });
+}
+
+#[test]
+fn clone_checks_attribute_and_input_capacity_before_allocating() {
+    big(|| {
+        let mut b = browser_with("<body><input id=i></body>", BrowserLimits::default());
+        js(&mut b, "var input = document.getElementById('i'); input.value = 'abcdefgh';");
+        let old = b.stats();
+        // Set limits before creating a new browser with the same source.
+        let mut a = browser_with("<body><input id=i></body>", BrowserLimits { max_attr_slots: old.attr_slots, ..Default::default() });
+        let before = a.stats();
+        assert_eq!(js(&mut a, "document.getElementById('i').cloneNode(true)"), lim("dom-attrs"));
+        assert_eq!(a.stats().nodes, before.nodes);
+        let mut c = browser_with("<body><input id=i></body>", BrowserLimits { max_text_bytes: 12, ..Default::default() });
+        js(&mut c, "var input = document.getElementById('i'); input.value = 'abcdefgh';");
+        let before = c.stats();
+        assert_eq!(js(&mut c, "input.cloneNode(true)"), lim("dom-input-bytes"));
+        assert_eq!(c.stats().nodes, before.nodes);
+    });
+}
+
+#[test]
+fn custom_event_with_undefined_detail_keeps_custom_prototype() {
+    big(|| {
+        let mut b = browser();
+        assert_eq!(js(&mut b, "var e = new CustomEvent('x', {detail: undefined}); [e instanceof CustomEvent, e.detail === null].join()"), "true,true");
+    });
+}
+
+#[test]
+fn dom_string_limit_counts_utf8_bytes() {
+    big(|| {
+        let mut b = browser_with(PAGE, BrowserLimits { max_string_bytes: 100, ..Default::default() });
+        let src = format!("document.createTextNode('{}')", "é".repeat(64));
+        assert_eq!(js(&mut b, &src), lim("dom-string"));
+    });
+}
+
+#[test]
+fn zero_report_capacity_retains_no_report() {
+    big(|| {
+        let mut b = browser_with(PAGE, BrowserLimits { max_reports: 0, ..Default::default() });
+        js(&mut b, "document.addEventListener('x', function(){throw 'message'}); document.dispatchEvent(new Event('x'));");
+        assert_eq!(b.stats().reports, 0);
+        assert_eq!(b.stats().dropped_reports, 1);
+    });
+}
+
+#[test]
+fn wide_sibling_selectors_consume_traversal_budget() {
+    big(|| {
+        let html = format!("<body>{}</body>", "<i></i>".repeat(400));
+        let mut b = Browser::new(tree::parse(&html), BrowserLimits::default(), EvalLimits { max_steps: 100, ..Default::default() }, HeapLimits::default()).unwrap();
+        assert_eq!(js(&mut b, "document.body.lastElementChild.matches('z ~ i')"), "limit:Steps");
+    });
+}
+
+#[test]
+fn replacing_document_element_allows_the_old_root_to_leave() {
+    big(|| {
+        let mut b = browser();
+        assert_eq!(js(&mut b, "var old = document.documentElement; var fresh = document.createElement('html'); document.replaceChild(fresh, old) === old && document.documentElement === fresh"), "true");
+    });
+}
+
+#[test]
+fn reports_truncate_large_thrown_strings_before_copying() {
+    big(|| {
+        let mut b = browser();
+        js(&mut b, "document.addEventListener('x', function(){throw new Array(10001).join('é')}); document.dispatchEvent(new Event('x'));");
+        let r = b.take_reports();
+        assert_eq!(r.len(), 1);
+        assert!(r[0].message.len() <= 4096);
+        assert!(r[0].message.is_char_boundary(r[0].message.len()));
+    });
+}
+
+#[test]
+fn browser_rejects_an_initial_document_over_its_caps() {
+    big(|| {
+        for (limits, name) in [
+            (BrowserLimits { max_nodes: 1, ..Default::default() }, "dom-nodes"),
+            (BrowserLimits { max_text_bytes: 1, ..Default::default() }, "dom-text"),
+            (BrowserLimits { max_attr_slots: 0, ..Default::default() }, "dom-attrs"),
+            (BrowserLimits { max_names: 0, ..Default::default() }, "dom-names"),
+        ] {
+            let r = Browser::new(tree::parse(PAGE), limits, EvalLimits::default(), HeapLimits::default());
+            assert!(matches!(r, Err(Error::Limit(LimitKind::Host(k))) if k == name), "initial cap {name}");
+        }
+    });
+}
+
+#[test]
+fn dom_listeners_keep_script_and_builtin_state_across_checkpoints() {
+    big(|| {
+        let mut b = browser();
+        js(&mut b, "var log = []; var n = document.getElementById('s');");
+        js(&mut b, "function left(){Promise.resolve().then(function(){log.push(JSON.stringify({v:/left/.test('left')}));});} n.addEventListener('go', left);");
+        js(&mut b, "function right(){Promise.resolve().then(function(){log.push(JSON.stringify({v:/right/.test('left')}));});} n.addEventListener('go', right);");
+        b.collect(&[]).unwrap();
+        let node = b.query("#s").unwrap().unwrap();
+        b.dispatch(node, "go", false, false).unwrap();
+        assert_eq!(js(&mut b, "log.join('|')"), "{\"v\":true}|{\"v\":false}");
+    });
+}
+
+#[test]
+fn dom_string_copies_share_the_execution_budget() {
+    big(|| {
+        let html = format!("<body><p>{}</p></body>", "x".repeat(8192));
+        for src in ["document.body.firstChild.firstChild.data".to_string(), format!("document.createTextNode('{}')", "x".repeat(8192))] {
+            let mut b = Browser::new(tree::parse(&html), BrowserLimits::default(), EvalLimits { max_steps: 100, ..Default::default() }, HeapLimits::default()).unwrap();
+            assert!(matches!(b.run_script(&src), Err(Error::Limit(LimitKind::Steps))));
+        }
     });
 }

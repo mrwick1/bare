@@ -339,6 +339,8 @@ impl Dom {
 
     /// A string value (the JS string has the same UTF-16 as `s`).
     pub(crate) fn js_str(&self, it: &mut Interp<'_>, s: &str) -> R<Value> {
+        if s.len() > self.lim.max_string_bytes { return Err(self.lim("dom-string")); }
+        it.charge((s.len() / 32) as u64)?;
         match it.heap.intern_str(s) {
             Ok(s) => Ok(Value::String(s)),
             Err(e) => Err(it.heap_error(e)),
@@ -348,11 +350,20 @@ impl Dom {
     /// `ToString(v)` as UTF-8. A lone surrogate cannot be stored: `Unsupported`, never a lossy copy.
     pub(crate) fn string_arg(&self, it: &mut Interp<'_>, v: Value) -> R<String> {
         let s = it.to_js_string(v)?;
+        let len = it.heap.str_len(s).map_err(Error::Heap)?;
+        if len > self.lim.max_string_bytes { return Err(self.lim("dom-string")); }
+        it.charge((len / 32) as u64)?;
         let units = match it.heap.str_units(s) {
             Ok(u) => u,
             Err(e) => return Err(it.heap_error(e)),
         };
         if units.len() > self.lim.max_string_bytes {
+            return Err(self.lim("dom-string"));
+        }
+        let bytes = char::decode_utf16(units.iter().copied()).try_fold(0usize, |n, c| {
+            c.map(|c| n.saturating_add(c.len_utf8()))
+        }).map_err(|_| Error::Unsupported(unsupported("lone surrogate in a DOM string (the native document is UTF-8)")))?;
+        if bytes > self.lim.max_string_bytes {
             return Err(self.lim("dom-string"));
         }
         String::from_utf16(units).map_err(|_| Error::Unsupported(unsupported("lone surrogate in a DOM string (the native document is UTF-8)")))
@@ -751,6 +762,14 @@ pub struct BrowserStats {
 impl Browser {
     /// A realm over `doc` with `window`, `document` and the DOM interfaces installed.
     pub fn new(doc: Document, limits: BrowserLimits, eval: EvalLimits, heap: HeapLimits) -> R<Browser> {
+        for (used, cap, name) in [
+            (doc.len(), limits.max_nodes, "dom-nodes"),
+            (doc.text_bytes(), limits.max_text_bytes, "dom-text"),
+            (doc.attr_slots(), limits.max_attr_slots, "dom-attrs"),
+            (doc.name_count(), limits.max_names, "dom-names"),
+        ] {
+            if used > cap { return Err(Error::Limit(LimitKind::Host(name))); }
+        }
         let heap = Heap::new(heap).map_err(Error::Heap)?;
         let mut it = Interp::realm(heap, eval)?;
         let dom = Rc::new(Dom {
@@ -839,7 +858,7 @@ impl Browser {
         };
         dom.st.borrow_mut().driver = true;
         let r = self.it.host_scope(|it| {
-            let e = dom.new_event(it, ty, bubbles, cancelable, true, Value::Undefined)?;
+            let e = dom.new_event(it, ty, bubbles, cancelable, true, None)?;
             dom.dispatch(it, Target::Node(node), e)
         });
         dom.st.borrow_mut().driver = false;

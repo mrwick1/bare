@@ -45,6 +45,22 @@ pub(crate) fn backtracking(s: &Selector) -> u32 {
         .count() as u32
 }
 
+/// Conservative bound for each combinator search, including skipped non-element siblings.
+fn match_work(doc: &Document, depth: usize, sels: &[Selector]) -> u64 {
+    sels.iter().fold(0u64, |total, s| {
+        let mut cost = 1u64;
+        for c in s.compounds.iter().take(s.compounds.len().saturating_sub(1)) {
+            let factor = match c.combinator {
+                bare_css::selector::Combinator::Later | bare_css::selector::Combinator::Next => doc.len() as u64 + 1,
+                bare_css::selector::Combinator::Descendant => depth as u64 + 1,
+                _ => 1,
+            };
+            cost = cost.saturating_mul(factor);
+        }
+        total.saturating_add(cost)
+    })
+}
+
 fn needs_places(s: &Selector) -> bool {
     fn simple(x: &Simple) -> bool {
         match x {
@@ -166,7 +182,6 @@ impl Dom {
     pub(crate) fn query(&self, it: &mut Interp<'_>, scope: NodeId, text: &str, all: bool) -> R<Vec<NodeId>> {
         let sels = self.selectors(it, text)?;
         let base = self.depth_of(it, scope)?;
-        let k = sels.iter().map(backtracking).max().unwrap_or(0);
         let doc = self.doc.borrow();
         if sels.iter().any(needs_places) {
             // The first `:nth-child` after a change builds a table of the whole document.
@@ -176,7 +191,7 @@ impl Dom {
         let (mut cur, mut d) = (scope, 0usize);
         while let Some((c, cd)) = next_in(&doc, scope, cur, d) {
             (cur, d) = (c, cd);
-            it.charge(1u64.saturating_add((base + d) as u64).saturating_pow(k).max(1))?;
+            it.charge(match_work(&doc, base + d, &sels))?;
             if matches!(doc.data(c), NodeData::Element { .. }) && sels.iter().any(|s| matches(&doc, c, s)) {
                 if out.len() >= self.lim.max_results {
                     return Err(self.lim("dom-results"));
@@ -191,7 +206,7 @@ impl Dom {
     }
 
     /// Check a node insertion (DOM Standard "ensure pre-insertion validity", the parts that apply to this tree).
-    fn check_insert(&self, it: &mut Interp<'_>, parent: NodeId, node: NodeId, before: Option<NodeId>) -> R<()> {
+    fn check_insert(&self, it: &mut Interp<'_>, parent: NodeId, node: NodeId, before: Option<NodeId>, replacing: Option<NodeId>) -> R<()> {
         #[derive(PartialEq, Clone, Copy)]
         enum K {
             Doc,
@@ -243,7 +258,7 @@ impl Dom {
                 for c in doc.children(parent) {
                     it.charge(1)?;
                     at_or_after |= Some(c) == before;
-                    if c == node {
+                    if c == node || Some(c) == replacing {
                         continue;
                     }
                     let ck = kind(c);
@@ -265,7 +280,7 @@ impl Dom {
     }
 
     fn insert_checked(&self, it: &mut Interp<'_>, parent: NodeId, node: NodeId, before: Option<NodeId>) -> R<()> {
-        self.check_insert(it, parent, node, before)?;
+        self.check_insert(it, parent, node, before, None)?;
         let mut doc = self.doc.borrow_mut();
         let before = if before == Some(node) { doc.next_sibling(node) } else { before };
         doc.move_to(node, parent, before);
@@ -427,7 +442,10 @@ pub(crate) fn data_length(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]
     let n = d.nd(it, this)?;
     let doc = d.doc.borrow();
     match *doc.data(n) {
-        NodeData::Text(sp) | NodeData::Comment(sp) => Ok(Value::Number(doc.text(sp).encode_utf16().count() as f64)),
+        NodeData::Text(sp) | NodeData::Comment(sp) => {
+            it.charge((doc.text(sp).len() / 32) as u64)?;
+            Ok(Value::Number(doc.text(sp).encode_utf16().count() as f64))
+        }
         _ => Err(it.type_error("Illegal invocation")),
     }
 }
@@ -572,10 +590,11 @@ pub(crate) fn text_content(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value
                     it.charge(1)?;
                     (cur, depth) = (c, cd);
                     if let NodeData::Text(sp) = *doc.data(c) {
-                        s.push_str(doc.text(sp));
-                        if s.len() > d.lim.max_string_bytes {
+                        let text = doc.text(sp);
+                        if text.len() > d.lim.max_string_bytes.saturating_sub(s.len()) {
                             return Err(d.lim("dom-string"));
                         }
+                        s.push_str(text);
                     }
                 }
                 s
@@ -647,7 +666,7 @@ pub(crate) fn replace_child(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Valu
     if new == old {
         return Ok(arg(a, 1));
     }
-    d.check_insert(it, parent, new, Some(old))?;
+    d.check_insert(it, parent, new, Some(old), Some(old))?;
     let mut doc = d.doc.borrow_mut();
     let before = if doc.next_sibling(old) == Some(new) { doc.next_sibling(new) } else { doc.next_sibling(old) };
     doc.detach(old);
@@ -694,24 +713,35 @@ pub(crate) fn clone_node(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value])
         return Err(d.dom_err(it, "NotSupportedError", "Cloning a Document is not supported."));
     }
     // Count first, so a clone that does not fit makes no node at all.
-    let (mut count, mut bytes) = (1usize, 0usize);
+    let (mut count, mut bytes, mut attrs, mut input_bytes) = (1usize, 0usize, 0usize, 0usize);
     {
         let doc = d.doc.borrow();
-        let own = |c: NodeId| match *doc.data(c) {
-            NodeData::Text(sp) | NodeData::Comment(sp) | NodeData::Doctype(sp) => doc.text(sp).len(),
-            _ => 0,
+        let st = d.st.borrow();
+        let mut account = |c: NodeId| {
+            bytes += match *doc.data(c) {
+                NodeData::Text(sp) | NodeData::Comment(sp) | NodeData::Doctype(sp) => doc.text(sp).len(),
+                _ => 0,
+            };
+            attrs += doc.attr_count(c);
+            input_bytes += st.inputs.get(&c).and_then(|i| i.value.as_ref()).map_or(0, String::len);
         };
-        bytes += own(n);
+        account(n);
         if deep {
             let (mut cur, mut depth) = (n, 0);
             while let Some((c, cd)) = next_in(&doc, n, cur, depth) {
                 it.charge(1)?;
                 (cur, depth) = (c, cd);
                 count += 1;
-                bytes += own(c);
+                account(c);
             }
         }
         d.room(&doc, count, bytes)?;
+        if attrs > d.lim.max_attr_slots.saturating_sub(doc.attr_slots()) {
+            return Err(d.lim("dom-attrs"));
+        }
+        if input_bytes > d.lim.max_text_bytes.saturating_sub(st.input_bytes) {
+            return Err(d.lim("dom-input-bytes"));
+        }
     }
     let root_clone = {
         let mut doc = d.doc.borrow_mut();
@@ -895,9 +925,8 @@ pub(crate) fn query_selector_all(d: &Dom, it: &mut Interp<'_>, this: Value, a: &
 /// Does the selector match `n`? The cost charged is an upper bound of the matcher's work.
 fn match_here(d: &Dom, it: &mut Interp<'_>, n: NodeId, sels: &[Selector]) -> R<bool> {
     let depth = d.depth_of(it, n)?;
-    let k = sels.iter().map(backtracking).max().unwrap_or(0);
-    it.charge(1u64.saturating_add(depth as u64).saturating_pow(k).max(1))?;
     let doc = d.doc.borrow();
+    it.charge(match_work(&doc, depth, sels))?;
     if sels.iter().any(needs_places) {
         it.charge(doc.len() as u64)?;
     }
@@ -1063,7 +1092,8 @@ pub(crate) fn default_view(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value
 
 fn input_el(d: &Dom, it: &mut Interp<'_>, this: Value) -> R<NodeId> {
     let n = d.el(it, this)?;
-    if d.input_value_of(n).is_some() { Ok(n) } else { Err(it.type_error("Illegal invocation")) }
+    let is_input = is_named(&d.doc.borrow(), n, &["input"]);
+    if is_input { Ok(n) } else { Err(it.type_error("Illegal invocation")) }
 }
 
 pub(crate) fn input_value(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {

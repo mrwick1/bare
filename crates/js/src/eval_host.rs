@@ -17,6 +17,7 @@
 // - `prune(live)`: after marking, the host drops metadata of owners that were not reached. A handle is
 //   generation checked, so a dropped owner can never alias a new object.
 // Nothing is collected during a call, so a host may hold handles in Rust locals while it runs.
+// With a host installed, use Interp::collect. Heap::collect(Interp::roots()) does not follow opaque host edges.
 
 /// What an embedder implements. See the header of this file.
 pub trait Host {

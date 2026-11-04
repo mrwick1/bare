@@ -76,3 +76,6 @@ var t = new EventTarget(), seen;
 t.addEventListener('c', function (e) { seen = e.detail.k; });
 t.dispatchEvent(new CustomEvent('c', { detail: { k: 42 } }));
 (function () { return seen + ',' + (new CustomEvent('z').detail === null) + ',' + (new CustomEvent('z') instanceof Event); })
+=== custom-event-undefined-detail
+var e = new CustomEvent('x', { detail: undefined });
+(function () { return (e instanceof CustomEvent) + ',' + (e.detail === null); })
