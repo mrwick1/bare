@@ -174,6 +174,7 @@ fn small(scale: u64) -> Out {
     assert_eq!(after.live_objects, 0);
     assert_eq!(after.bytes, base.bytes); // accounting returns to the start: no leak
     let rss_freed = rss_now();
+    let (cap_built, cap_freed) = (st, after);
     // Rebuild the same set: slots must be reused, capacity must not grow.
     let slots = after.object_slots;
     let holder = h.new_array(None).unwrap();
@@ -186,9 +187,11 @@ fn small(scale: u64) -> Out {
         ops: (n * 4) as u64,
         checksum: sum,
         extra: format!(
-            "n={n} build_ms={:.0} gc_live_ms={:.1} gc_dead_ms={:.1} accounted_bytes_per_obj={} rss_bytes_per_obj={} object_slots={} rss_kib_built={} rss_kib_after_free={} rss_kib_start={}",
+            "n={n} build_ms={:.0} gc_live_ms={:.1} gc_dead_ms={:.1} accounted_bytes_per_obj={} rss_bytes_per_obj={} object_slots={} rss_kib_built={} rss_kib_after_free={} rss_kib_start={} payload_cap_built={} payload_cap_after_free={} meta_cap_after_free={} slab_cap_kib_built={} slab_cap_kib_after_free={}",
             build_s * 1e3, live_gc_s * 1e3, dead_gc_s * 1e3, (st.bytes - base.bytes) / n,
-            (rss_built - rss0) * 1024 / n as u64, slots, rss_built, rss_freed, rss0
+            (rss_built - rss0) * 1024 / n as u64, slots, rss_built, rss_freed, rss0,
+            cap_built.object_payload_capacity, cap_freed.object_payload_capacity, cap_freed.object_metadata_capacity,
+            cap_built.slab_capacity_bytes / 1024, cap_freed.slab_capacity_bytes / 1024
         ),
     }
 }
@@ -375,14 +378,66 @@ fn churn(scale: u64) -> Out {
         ops: (rounds * temps) as u64,
         checksum: live_sum,
         extra: format!(
-            "rounds={rounds} temps_per_round={temps} alloc_ns_per_obj={:.0} gc_avg_us={:.0} gc_max_us={:.0} live_objects={} object_slots={} live_strings={} string_slots={} accounted_bytes={} rss_kib_after_round1={} rss_growth_kib={}",
+            "rounds={rounds} temps_per_round={temps} alloc_ns_per_obj={:.0} gc_avg_us={:.0} gc_max_us={:.0} live_objects={} object_slots={} live_strings={} string_slots={} accounted_bytes={} payload_cap={} meta_cap={} slab_cap_kib={} rss_kib_after_round1={} rss_growth_kib={}",
             (wall - total_pause) * 1e9 / (rounds * temps) as f64, total_pause * 1e6 / rounds as f64, max_pause * 1e6,
-            end.live_objects, end.object_slots, end.live_strings, end.string_slots, end.bytes, first_rss, rss_now() as i64 - first_rss as i64
+            end.live_objects, end.object_slots, end.live_strings, end.string_slots, end.bytes, end.object_payload_capacity, end.object_metadata_capacity, end.slab_capacity_bytes / 1024, first_rss, rss_now() as i64 - first_rss as i64
         ),
     }
 }
 
-const WORKLOADS: [&str; 5] = ["lookup", "small", "bigprops", "strings", "churn"];
+/// Build many small objects, keep LIVE_PCT percent (env, default 10) scattered through them, and
+/// collect twice. Reports RSS and slab capacity around each collection, and that survivors read right.
+fn frac(scale: u64) -> Out {
+    let pct: usize = std::env::var("LIVE_PCT").ok().map_or(10, |s| s.parse().unwrap());
+    let n = 10_000 * scale as usize;
+    let mut h = Heap::default();
+    let ks: Vec<_> = ["x", "y", "z"].iter().map(|s| h.key_from_str(s).unwrap()).collect();
+    let mut roots: Vec<Value> = ks.iter().map(|k| match k { PropertyKey::String(s) => Value::String(*s), _ => unreachable!() }).collect();
+    let mut kept = Vec::new();
+    for i in 0..n {
+        let o = h.new_object(None).unwrap();
+        for (j, &k) in ks.iter().enumerate() {
+            h.set(o, k, Value::Number((i * (j + 1)) as f64)).unwrap();
+        }
+        if (i * 7919) % 100 < pct {
+            kept.push((o, i));
+            roots.push(Value::Object(o));
+        }
+    }
+    let built = (rss_now(), h.stats());
+    let t = Instant::now();
+    let c1 = h.collect(&roots).unwrap();
+    let gc1 = t.elapsed().as_secs_f64();
+    let first = (rss_now(), h.stats());
+    let t = Instant::now();
+    let c2 = h.collect(&roots).unwrap();
+    let gc2 = t.elapsed().as_secs_f64();
+    let second = (rss_now(), h.stats());
+    assert_eq!(c1.objects, n - kept.len());
+    assert_eq!(c2.objects, 0);
+    let mut sum = 0u64;
+    for &(o, i) in &kept {
+        assert_eq!(num(&h, o, ks[1]) as usize, i * 2);
+        sum += i as u64;
+    }
+    // Reuse: a rebuild of the dead part must not add slots.
+    let slots = second.1.object_slots;
+    for _ in 0..n - kept.len() {
+        h.new_object(None).unwrap();
+    }
+    assert_eq!(h.stats().object_slots, slots);
+    Out {
+        ops: n as u64,
+        checksum: sum,
+        extra: format!(
+            "pct={pct} kept={} gc1_ms={:.1} gc2_ms={:.1} rss_built={} rss_gc1={} rss_gc2={} payload_cap_built={} payload_cap_gc1={} payload_cap_gc2={} slab_cap_kib_gc2={} live_bytes={}",
+            kept.len(), gc1 * 1e3, gc2 * 1e3, built.0, first.0, second.0, built.1.object_payload_capacity, first.1.object_payload_capacity,
+            second.1.object_payload_capacity, second.1.slab_capacity_bytes / 1024, second.1.bytes
+        ),
+    }
+}
+
+const WORKLOADS: [&str; 6] = ["lookup", "small", "bigprops", "strings", "churn", "frac"];
 
 fn run(w: &str, scale: u64) {
     let (allocs0, rss0, cpu0) = (ALLOCS.load(Relaxed), rss_now(), cpu_secs());
@@ -393,6 +448,7 @@ fn run(w: &str, scale: u64) {
         "bigprops" => bigprops(scale),
         "strings" => strings(scale),
         "churn" => churn(scale),
+        "frac" => frac(scale),
         _ => panic!("unknown workload {w}"),
     };
     let wall = t.elapsed().as_secs_f64();

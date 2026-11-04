@@ -18,7 +18,7 @@ The module numbers below remain stable for existing code and benchmark reference
 | 6   | Input and navigation (links, scroll)                   | planned     |
 | 7   | HTTPS (TLS 1.3 and crypto, by hand)                    | staging ready |
 | 8   | Tabs and event loop (one engine, a task queue per tab) | planned     |
-| 9   | JavaScript (interpreter, no JIT)                       | planned     |
+| 9   | JavaScript (interpreter, no JIT)                       | in progress |
 | 10  | Tab isolation and memory accounting (heap per tab)     | planned     |
 | 11  | Resource guard (watchdog, freeze, discard, reload)     | planned     |
 
@@ -111,6 +111,8 @@ The lexer foundation of topic 2 is complete. `bare-js` scans borrowed source wit
 The JSON parsing foundation is complete. `bare_js::json` parses UTF-16 or UTF-8 into managed values with explicit source, depth, value and decoded-text caps. It preserves lone surrogates, negative zero and own-property semantics. Parsing is iterative and never collects caller roots. This is a parsing API; reviver callbacks, stringify and evaluator binding remain unbuilt. Parent checks include 20,759 generated Node comparisons and bounded 1x/10x/100x loads. See [resources.md](resources.md#json-parsing).
 
 The regexp matching foundation is complete. It compiles all 57 observed literals and matches Node on controlled inputs. UTF-16 spans, captures, lookahead and non-Unicode matching are bounded by explicit work, input and stack limits. Parent review added budget accounting for scans, backreferences, capture resets and stack work, entry cancellation and bounded string conversion. `RegExp` objects, lastIndex mutation and String wrappers remain evaluator work. Dynamic constructor patterns remain unverified. See [resources.md](resources.md#regexp-matching).
+
+Managed heap storage now separates stable handle metadata from dense live payloads. Collection preserves generations and remaps survivors, then releases large excess capacity when recent allocation volume no longer needs it. Parent comparison reproduces much lower retained RSS after a dead burst, with higher peak RSS and some CPU cost. Collection can retain burst capacity until a later collection with fewer allocations. See [resources.md](resources.md#heap-payload-capacity).
 
 The parser and arena AST are complete for the inspected script syntax. The parser chooses lexical goals itself. All 15 cached bundles match Acorn's normalized trees with spans. The 2,087-case syntax corpus also matches, with explicit unsupported cases. Source, node, list and hard recursion limits apply. The evaluator follows this AST; scopes, executable functions, built-ins and event-loop behavior remain later gates. Regexp pattern validation at parse time remains explicitly open. See [resources.md](resources.md#javascript-parser).
 

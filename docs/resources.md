@@ -768,3 +768,33 @@ Malformed workloads check two exact errors at each scale. Deep workloads check f
 Checks: all 116 assembled JS tests passed in debug and release, including all cached bundles through BARE_JS_BUNDLES. Crate clippy is clean. The full workspace run passed 867 tests. Reproduce with `ACORN=<acorn.mjs-url> tools/js/parse_check.sh <bundle-dir>` and `tools/js/parse_load.sh <output-file>`. The latter now uses the parent-tested 1 GiB cap.
 
 Remaining gates: no scope-reference resolution, interpreter or browser execution. Generators, modules, import(), static class blocks, non-ASCII identifiers and HTML-like comments are unsupported. Regexp flags are scanned but pattern grammar is not validated by the parser; REGEXP_PATTERN_VALIDATED remains false even though the standalone matcher now exists. No test262 run or near-16-MiB source-boundary load was done. Full language conformance and arbitrary embedding stack sizes are not claimed.
+
+
+## Heap payload capacity
+
+The heap now keeps each handle's generation and dense position in stable 8-byte slot metadata. Live payloads and backlinks occupy separate dense vectors. Sweep drops dead values in allocation order, compacts survivors and updates their metadata. Handles retain their slot and generation; reclaimed slots increment their generation, and exhausted generations stay retired. The string interner is rebuilt from the moved payloads. Stats now reports object payload capacity, metadata capacity and total slab-vector capacity.
+
+After sweep, trimming frees payload, backlink and mark capacity only if at least 1 MiB can be released. It keeps room for twice the live count or the live count plus allocations since the previous sweep, whichever is larger. Steady churn therefore keeps capacity. A first collection after a burst can retain its capacity; a later collection without more allocation releases it. Metadata, free lists and the gray work list remain allocated. Property buffers in live objects are not compacted.
+
+Parent compared baseline 3bbfaf7 with the new representation in 18 interleaved release processes: three repeats of each version at 100x for small objects, lookup and churn. Each process had a 1 GiB address-space cap and 45-second timeout. The original and new harnesses run the same workloads; the new harness adds capacity output. All checksums passed. Total elapsed time was 72.39 seconds. Other work ran concurrently; the first small-object pair was slower in both versions. Ranges below include all three samples.
+
+| 100x measure | Baseline | Dense payloads |
+| --- | --- | --- |
+| Million-object peak RSS, KiB | 311,792–312,212 | 315,900–316,032 |
+| RSS after live then dead collection, KiB | 98,164–98,208 | 19,676–19,720 |
+| Small-object workload, ns/op | 98–156 | 107–173 |
+| Dead collection, ms | 28.7–56.2 | 36.8–60.9 |
+| Lookup/update, ns/op | 28.4–29.8 | 29.1–32.4 |
+| Churn, ns/op | 269–289 | 278–303 |
+| Average churn collection, us | 252–295 | 290–385 |
+| Churn peak RSS, KiB | 6,732–6,804 | 6,912–7,136 |
+
+The retained-memory reduction is about 80% in this burst workload. Peak RSS rises about 1.3%. The quieter small-object pairs cost about 9% more overall; all samples are shown above because the run was not isolated. The change trades CPU and peak memory for lower retained payload capacity. The million-object case keeps 1,000,001 handle slots while payload capacity falls from 1,048,576 to zero. Accounted bytes remain 248 per object in that case. Symbol accounting changes from 16 to 20 bytes per live symbol; byte limits continue to cover live payload estimates, not all allocator capacity.
+
+Churn runs keep 1,001 live objects, 11,001 object slots and 256,094 accounted bytes throughout 20 million allocations. Payload capacity stays 16,384. RSS growth after round one is 128 KiB, against 224 KiB on the baseline. No handle revival or live-count drift occurred. Parent also ran one-million-object workloads at 0%, 1%, 10%, 50%, 90% and 100% scattered survivors; remapping, reads and slot reuse passed in each case. Small survivor fractions still retain property-buffer pages between live objects. Full-survivor workloads gain no memory reduction.
+
+All 122 assembled JS tests pass in debug and release, crate clippy is clean, and 873 workspace tests pass. A separate mutation that omitted survivor remapping failed six tests. The Node oracle with seed 17 matched 20,000 number-to-string cases, 20,000 string-to-number cases, 19 other conversions, 361 equality cases and 84,011 operation-result lines. The six new unit tests cover moved objects and every traced edge kind, slot reuse, retirement, scattered live fractions, burst release and stable churn capacity.
+
+Reproduce with `rustc --edition=2024 -C opt-level=3 tools/js/heap_load.rs -o <out>` and `<out> run small|lookup|churn 100`. `LIVE_PCT=10 <out> run frac 100` checks scattered survivors. Every invocation should use a separate process and the caps above. Earlier foundation tables describe the older slot representation.
+
+Not tested by the parent in this change: other allocators/platforms, hard OOM, multiple heaps, browser/evaluator workloads, a new full big-properties or strings performance matrix, or capacity release from metadata/free/gray vectors. The delegate's wider matrix was partly noisy and is not used to claim a CPU improvement. This change does not add automatic collection or alter the explicit-root contract.
