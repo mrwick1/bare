@@ -14,8 +14,8 @@
 // - `WeakRef` and `FinalizationRegistry` are absent.
 //
 // Storage: one `WeakColl` per object in `weak.colls`, keyed by the object handle. A key is an `ObjId`. Handles carry a
-// generation, so a freed slot that is reused can never match an old key. Nothing here is a root: `Interp::roots` lists
-// entries only because it runs after `collect` has pruned them.
+// generation, so a freed slot that is reused can never match an old key. `Interp::collect` does not initially root keys or values. The public
+// `roots` method conservatively lists every stored value; `collect` calls it only after weak entries are pruned.
 //
 // Collector: ephemerons. `Interp::collect` calls `weak_trace` for every object it marks. If that object is a WeakMap, each
 // entry whose key is already marked gives its value to the work list, and each other entry waits in `pending[key]`. If that
@@ -76,7 +76,7 @@ impl<'p> Interp<'p> {
         out.extend([w.map_proto, w.set_proto, w.map_ctor, w.set_ctor, w.map_set, w.set_add].map(Value::Object));
     }
 
-    /// Everything the weak collections hold, for `roots`. After `collect` has pruned them, every key here is marked.
+    /// Conservative storage roots for direct heap collection. `Interp::collect` calls this after weak pruning.
     fn weak_all_values(&self, out: &mut Vec<Value>) {
         for (&o, c) in &self.weak.colls {
             out.push(Value::Object(o));

@@ -105,26 +105,22 @@ fn native_subclass_is_a_gate_and_reflect_free_construct_works() {
 #[test]
 fn caps_are_uncatchable_limits() {
     big(|| {
-        let mut l = ScLimits::default();
-        l.max_weak_collections = 2;
+        let l = ScLimits { max_weak_collections: 2, ..Default::default() };
         let mut it = realm();
         it.set_sc_limits(l);
         assert_eq!(out(&mut it, "new WeakMap(); new WeakSet(); try { new WeakMap(); } catch (e) { 'caught' }"), "limit:Sc(WeakCollections)");
-        let mut l = ScLimits::default();
-        l.max_weak_entries = 3;
+        let l = ScLimits { max_weak_entries: 3, ..Default::default() };
         let mut it = realm();
         it.set_sc_limits(l);
         assert_eq!(out(&mut it, "var w = new WeakMap(), a = [{}, {}, {}, {}]; w.set(a[0], 1); w.set(a[1], 1); w.set(a[2], 1); w.set(a[2], 2); w.delete(a[0]); w.set(a[3], 1); 'ok'"), "ok");
         assert_eq!(out(&mut it, "try { w.set({}, 1); w.set({}, 1); } catch (e) { 'caught' }"), "limit:Sc(WeakEntries)");
-        let mut l = ScLimits::default();
-        l.max_total_weak_entries = 4;
+        let l = ScLimits { max_total_weak_entries: 4, ..Default::default() };
         let mut it = realm();
         it.set_sc_limits(l);
         assert_eq!(out(&mut it, "var w = new WeakMap(), s = new WeakSet(); w.set({}, 1); w.set({}, 1); s.add({}); s.add({}); try { s.add({}); } catch (e) { 'caught' }"), "limit:Sc(WeakEntries)");
         // dead entries free the budget
         let mut it = realm();
-        let mut l = ScLimits::default();
-        l.max_total_weak_entries = 4;
+        let l = ScLimits { max_total_weak_entries: 4, ..Default::default() };
         it.set_sc_limits(l);
         out(&mut it, "var w = new WeakMap(); for (var i = 0; i < 4; i++) w.set({}, i); 0");
         it.collect(&[]).unwrap();
@@ -352,5 +348,22 @@ fn the_old_failed_checkpoint_and_limit_contract_still_holds() {
         // a step limit inside a weak call is a limit, never a catchable error
         let mut it = Interp::realm(Heap::default(), EvalLimits { max_steps: 300, ..Default::default() }).unwrap();
         assert!(out(&mut it, "var w = new WeakMap(); try { for (var i = 0; i < 100000; i++) w.set({}, i); } catch (e) { 'caught' }").starts_with("limit:"));
+    });
+}
+
+#[test]
+fn weak_values_keep_cross_script_closures_and_view_buffers_without_retaining_cycles() {
+    big(|| {
+        let mut it = realm();
+        assert_eq!(out(&mut it, "var key = {}, wm = new WeakMap(); function sameId() { return 1; } 0"), "0");
+        assert_eq!(out(&mut it, "(function () { var bytes = new Uint8Array([31, 47]); bytes.buffer.back = key; wm.set(key, function sameId() { return bytes; }); })(); 0"), "0");
+        it.collect(&[]).unwrap();
+        let view = it.run_script("wm.get(key)()").unwrap();
+        assert_eq!(it.bytes_of(view), Some(&[31, 47][..]));
+        // The buffer's ordinary property points back to the weak key. It must not turn this cycle into a root.
+        assert_eq!(out(&mut it, "key = null; 0"), "0");
+        it.collect(&[]).unwrap();
+        assert_eq!(it.weak_tracked(), (1, 0));
+        assert!(it.bytes_of(view).is_none());
     });
 }
