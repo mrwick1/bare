@@ -8,7 +8,7 @@
 
 use std::cell::RefCell;
 use std::io::{Read, Write};
-use std::net::{TcpListener, TcpStream};
+use std::net::TcpListener;
 use std::os::unix::fs::DirBuilderExt;
 use std::path::PathBuf;
 use std::process::{Child, ChildStdin, Command, Stdio};
@@ -24,6 +24,7 @@ const STDERR_KEEP: usize = 4096;
 
 /// What the client thread of this test did. `watch_client` makes it; the client thread fills it when it returns.
 pub type ClientNote = Arc<Mutex<Option<String>>>;
+type Spawned = (Child, Option<ChildStdin>, Option<Receiver<Vec<u8>>>, Arc<Mutex<Vec<u8>>>);
 
 thread_local! {
     // A test thread starts the client thread and then calls `expect`, so the note is per test thread.
@@ -35,6 +36,43 @@ pub fn watch_client() -> ClientNote {
     let note = ClientNote::default();
     CLIENT.with(|c| *c.borrow_mut() = Some(note.clone()));
     note
+}
+
+/// Stop the formatter once the diagnostic has 300 characters.
+pub fn client_result(value: &impl std::fmt::Debug) -> String {
+    use std::fmt::Write as _;
+    struct Limited { text: String, left: usize }
+    impl std::fmt::Write for Limited {
+        fn write_str(&mut self, text: &str) -> std::fmt::Result {
+            for ch in text.chars() {
+                if self.left == 0 { return Err(std::fmt::Error); }
+                self.text.push(ch);
+                self.left -= 1;
+            }
+            Ok(())
+        }
+    }
+    let mut out = Limited { text: String::new(), left: 300 };
+    let _ = write!(&mut out, "{value:?}");
+    out.text
+}
+
+/// Linux test harness: match the listening socket inode to the child's open descriptors.
+fn owns_listener(pid: u32, port: u16) -> std::io::Result<bool> {
+    let table = std::fs::read_to_string(format!("/proc/{pid}/net/tcp"))?;
+    let address = format!("{:08X}:{port:04X}", u32::from_ne_bytes([127, 0, 0, 1]));
+    let inodes: Vec<&str> = table.lines().skip(1).filter_map(|line| {
+        let fields: Vec<&str> = line.split_whitespace().collect();
+        (fields.get(1) == Some(&address.as_str()) && fields.get(3) == Some(&"0A"))
+            .then(|| fields.get(9).copied()).flatten()
+    }).collect();
+    for fd in std::fs::read_dir(format!("/proc/{pid}/fd"))? {
+        if let Ok(target) = std::fs::read_link(fd?.path())
+            && inodes.iter().any(|inode| target.as_os_str() == std::ffi::OsStr::new(&format!("socket:[{inode}]"))) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 pub fn openssl_available() -> bool {
@@ -142,7 +180,7 @@ impl Server {
         Ok(Server { child, stdin, out, err, seen: Vec::new(), port, dir: pki.dir.clone(), leaf: leaf.to_string(), extra, scripted })
     }
 
-    fn spawn(dir: &PathBuf, leaf: &str, extra: &[String], scripted: bool, port: u16) -> Result<(Child, Option<ChildStdin>, Option<Receiver<Vec<u8>>>, Arc<Mutex<Vec<u8>>>), String> {
+    fn spawn(dir: &PathBuf, leaf: &str, extra: &[String], scripted: bool, port: u16) -> Result<Spawned, String> {
         let mut child = Command::new("openssl")
             .args(["s_server", "-accept", &format!("127.0.0.1:{port}"), "-cert", &format!("{leaf}.pem"), "-key", &format!("{leaf}.key")])
             .args(["-tls1_3", "-ciphersuites", "TLS_AES_128_GCM_SHA256", "-groups", "X25519", "-sigalgs", "ECDSA+SHA256", "-quiet"])
@@ -167,50 +205,41 @@ impl Server {
             rx
         });
         let err = Arc::new(Mutex::new(Vec::new()));
-        if let Some(mut e) = child.stderr.take() {
+        let stderr_reader = child.stderr.take().map(|mut e| {
             let keep = err.clone();
             std::thread::spawn(move || {
                 let mut buf = [0u8; 1024];
-                while let Ok(n) = e.read(&mut buf) {
-                    if n == 0 {
-                        break;
-                    }
+                loop {
+                    let n = match e.read(&mut buf) {
+                        Ok(0) => break,
+                        Ok(n) => n,
+                        Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                        Err(_) => break,
+                    };
                     let mut kept = keep.lock().unwrap();
                     let room = STDERR_KEEP.saturating_sub(kept.len()).min(n);
                     kept.extend_from_slice(&buf[..room]);
                 }
-            });
-        }
+            })
+        });
+        let mut reason = "did not start within 5 seconds".to_string();
         for _ in 0..100 {
-            let failed = |child: &mut Child| match child.try_wait() {
-                Ok(Some(status)) => Some(format!("s_server on port {port} exited at start: {status}; stderr {:?}", String::from_utf8_lossy(&err.lock().unwrap()))),
-                _ => None,
-            };
-            if let Some(e) = failed(&mut child) {
-                return Err(e);
+            match child.try_wait() {
+                Ok(Some(status)) => { reason = format!("exited at start: {status}"); break; }
+                Err(e) => { reason = format!("status check failed: {e}"); break; }
+                Ok(None) => {}
             }
-            if TcpStream::connect(("127.0.0.1", port)).is_ok() {
-                // Another process that listens on the port answers the probe too. Our `s_server` shows that it is the
-                // one that listens when it logs the probe's failed handshake. If it could not bind, it exits.
-                for _ in 0..400 {
-                    if failed(&mut child).is_some() || !err.lock().unwrap().is_empty() {
-                        break;
-                    }
-                    std::thread::sleep(Duration::from_millis(25));
-                }
-                // The log can come before the exit, so the log counts too.
-                let bind_failed = String::from_utf8_lossy(&err.lock().unwrap()).contains("Address already in use");
-                return match failed(&mut child) {
-                    Some(e) => Err(e),
-                    None if bind_failed => Err(format!("s_server on port {port} could not bind: {:?}", String::from_utf8_lossy(&err.lock().unwrap()))),
-                    None => Ok((child, stdin, out, err)),
-                };
+            match owns_listener(child.id(), port) {
+                Ok(true) => return Ok((child, stdin, out, err)),
+                Ok(false) => {}
+                Err(e) => { reason = format!("listener ownership check failed: {e}"); break; }
             }
             std::thread::sleep(Duration::from_millis(50));
         }
         let _ = child.kill();
         let _ = child.wait();
-        panic!("s_server did not start; stderr {:?}", String::from_utf8_lossy(&err.lock().unwrap()));
+        if let Some(reader) = stderr_reader { let _ = reader.join(); }
+        Err(format!("s_server on port {port} {reason}; stderr {:?}", String::from_utf8_lossy(&err.lock().unwrap())))
     }
 
     /// End the connection the hard way: kill the server and start a new one on the same port.

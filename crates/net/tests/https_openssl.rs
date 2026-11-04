@@ -43,7 +43,7 @@ fn spawn<R: std::fmt::Debug + Send + 'static>(mut client: Client, f: impl FnOnce
     let note = watch_client();
     std::thread::spawn(move || {
         let r = f(&mut client);
-        *note.lock().unwrap() = Some(format!("{r:?}").chars().take(300).collect());
+        *note.lock().unwrap() = Some(harness::client_result(&r));
         (client, r)
     })
 }
@@ -310,15 +310,22 @@ fn a_redirect_from_a_trusted_server_to_an_untrusted_one_sends_nothing_there() {
 }
 
 #[test]
-#[should_panic(expected = "client still running (or panicked)")]
 fn a_timeout_names_the_caller_and_the_state_of_the_server_and_client() {
     need_openssl!();
     let (_pki, mut srv, client) = setup();
     let u = url(&srv, "/quiet");
     // The client asks for a path and the server never replies: the client returns an error after its own time limit,
     // so it is still running when the short wait ends.
-    let _t = spawn(client, move |c| c.get(&u).map(|r| r.status).map_err(|e| e.to_string()));
-    srv.expect_within(b"never in a request", Duration::from_millis(300));
+    let t = spawn(client, move |c| c.get(&u).map(|r| r.status).map_err(|e| e.to_string()));
+    let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        srv.expect_within(b"never in a request", Duration::from_millis(300));
+    })).unwrap_err();
+    let message = panic.downcast_ref::<String>().unwrap();
+    for field in ["https_openssl.rs:", "s_server running", "stderr", "client still running (or panicked)"] {
+        assert!(message.contains(field), "missing {field}: {message}");
+    }
+    drop(srv);
+    assert!(t.join().unwrap().1.is_err());
 }
 
 #[test]
@@ -330,4 +337,22 @@ fn a_port_that_another_process_listens_on_is_not_a_started_server() {
     let port = other.local_addr().unwrap().port();
     let e = Server::try_start(&pki, "good", &[], true, port).err().expect("the probe reached the other listener, not s_server");
     assert!(e.contains("Address already in use"), "{e}");
+}
+
+#[test]
+fn client_diagnostics_stop_formatting_at_the_limit() {
+    struct Long(std::cell::Cell<usize>);
+    impl std::fmt::Debug for Long {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            for _ in 0..100_000 {
+                self.0.set(self.0.get() + 1);
+                f.write_str("x")?;
+            }
+            Ok(())
+        }
+    }
+    let value = Long(std::cell::Cell::new(0));
+    let text: String = harness::client_result(&value);
+    assert_eq!(text.len(), 300);
+    assert!(value.0.get() <= 301, "formatted {} characters", value.0.get());
 }
