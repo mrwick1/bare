@@ -4,6 +4,7 @@
 //!
 //! It prints the DOM tree of the page. Add `--source` to print the source of the page instead,
 //! `--styles` to print the computed style of each element, or `--layout` to print the place and size of each box.
+//! `--resources` downloads the external scripts and style sheets of the page and lists them (see `resources.rs`).
 //! `--width=900` sets the width of the window (1280 if not given).
 //!
 //! Comments compare Rust with JavaScript, because you know JS.
@@ -16,6 +17,8 @@ use bare_net::http;
 // It is listed in this crate's `Cargo.toml`, like a dependency in `package.json`.
 use bare_url::Url;
 use std::io::{Read, Write};
+
+mod resources;
 // Now we can write `Url` instead of `bare_url::Url`.
 
 fn main() {
@@ -27,6 +30,7 @@ fn main() {
     // Did the user type `--source`?
     let styles = args.iter().any(|a| a == "--styles");
     let layout = args.iter().any(|a| a == "--layout");
+    let resources = args.iter().any(|a| a == "--resources");
     let width = args
         .iter()
         .find_map(|a| a.strip_prefix("--width="))
@@ -108,7 +112,17 @@ fn main() {
         let mut doc = parser.finish();
         // Build the DOM tree.
         drop(out);
-        if styles {
+        if resources {
+            let Ok(page) = url.as_ref() else {
+                eprintln!("error: --resources needs a valid URL");
+                std::process::exit(2);
+            };
+            let (text, ok) = resources::report(&doc, page);
+            print!("{text}");
+            if !ok {
+                std::process::exit(1);
+            }
+        } else if styles {
             let computed = computed_styles(&mut doc, url.as_ref().ok(), viewport);
             print!("{}", computed.dump(&doc));
             // `--styles`: the style of each element.
