@@ -1,0 +1,407 @@
+# bare-js evaluator cases. A case starts with `=== name`. The source runs as one sloppy script.
+# The result is the completion value. `// @limit` expects an execution limit (Node: a timeout).
+# Every case is a tiny independent program; Node (vm, empty context) is the oracle.
+=== arith
+1 + 2 * 3 - 4 / 2 % 3
+=== precedence_exp
+2 ** 3 ** 2
+=== exp_corner
+String(1 ** Infinity) + "," + String((-1) ** Infinity) + "," + String(2 ** -1) + "," + String(NaN ** 0)
+=== mod_neg
+String(-7 % 3) + "," + String(7 % -3) + "," + String(1 / (-1 % 1)) + "," + String(5 % 0)
+=== shifts
+[1 << 31, 1 << 32, -1 >>> 0, -1 >> 31, 5 >>> 1, ~5, 7 & 3, 4 | 1, 6 ^ 3].join()
+=== int32_wrap
+(2147483647 + 1) | 0
+=== string_concat
+"a" + 1 + 2 + (1 + 2) + null + undefined + true
+=== add_coerce
+[1 + "1", "3" - 1, "3" * "4", true + 1, null + 1, undefined + 1, [] + [], [1,2] + 3, ({}) + 1].join("|")
+=== numeric_strings
+[Number(""), Number(" 12 "), Number("0x1f"), Number("1e3"), Number("12px"), Number(null), Number(undefined), Number(true), Number("-0")].join()
+=== to_string_numbers
+[String(0.1 + 0.2), String(1e21), String(1e-7), String(123456789012345680000), String(-0), String(100), String(1.5e300), String(5e-324)].join()
+=== loose_equality
+[null == undefined, null == 0, "1" == 1, true == 1, "" == 0, "a" == "a", [] == "", [1] == 1, NaN == NaN, ({}) == "[object Object]"].join()
+=== strict_equality
+[1 === 1, "a" === "a", NaN === NaN, 0 === -0, null === undefined, ({}) === ({})].join()
+=== relational
+[1 < 2, "a" < "b", "10" < "9", 10 < "9", "abc" < "abd", null >= 0, undefined < 1, NaN <= NaN, [2] > 1].join()
+=== typeof_all
+[typeof 1, typeof "s", typeof true, typeof undefined, typeof null, typeof {}, typeof [], typeof function(){}, typeof (() => 1), typeof nothing_here].join()
+=== void_comma
+(void 0) + "," + (1, 2, 3)
+=== short_circuit_and
+var log = []; function t(n){ log.push(n); return n; } t(0) && t(1); t(2) && t(3); log.join()
+=== short_circuit_or_nullish
+var log = []; function t(n){ log.push(n); return n; } t(0) || t(1); t(5) || t(6); t(null) ?? t(7); t(8) ?? t(9); log.join()
+=== logical_values
+[0 || "x", 1 && "y", null ?? "z", 0 ?? "z", "" || null, 1 && 0].join()
+=== logical_assign
+var a = null, b = 0, c = 1; a ??= 5; b ||= 6; c &&= 7; [a, b, c].join()
+=== logical_assign_short
+var n = 0; var o = { get x() { n++; return 1; }, set x(v) { n += 10; } }; o.x ||= 5; o.x &&= 6; n
+=== conditional
+var x = 5; (x > 3 ? "big" : "small") + (x > 9 ? "big" : "small")
+=== var_hoisting
+var r = [typeof f1, typeof v1, v1]; var v1 = 3; function f1() {} r.join()
+=== function_hoisting_call
+f(); function f() { return 1; } f() + 1
+=== var_redeclare
+var a = 1; var a; var a = a + 1; a
+=== tdz_let
+var r; try { x; let x = 1; } catch (e) { r = e.name + ":" + e.message; } r
+=== tdz_typeof
+var r; try { typeof x; let x; } catch (e) { r = e.name; } r
+=== tdz_closure
+var f = function() { return y; }; var r; try { f(); } catch (e) { r = e.name; } let y = 4; r + f()
+=== let_shadow
+let x = 1; { let x = 2; { let x = 3; } } x
+=== block_scope
+var out = []; { let a = 1; var b = 2; } out.push(typeof a, typeof b); out.join()
+=== const_assign
+const c = 1; var r; try { c = 2; } catch (e) { r = e.name + ":" + e.message; } r + c
+=== const_compound
+const c = 1; var r; try { c += 2; } catch (e) { r = e.name; } try { c++; } catch (e) { r += e.name; } r + c
+=== const_object_mutation
+const o = { a: 1 }; o.a = 2; o.b = 3; o.a + o.b
+=== undeclared_ref
+var r; try { zzz; } catch (e) { r = e.name + ":" + e.message; } r
+=== undeclared_assign_sloppy
+zz = 5; zz + globalThis.zz
+=== closure_counter
+function make() { var n = 0; return function() { return ++n; }; } var a = make(), b = make(); a(); a(); b(); [a(), b()].join()
+=== closure_loop_var
+var fs = []; for (var i = 0; i < 3; i++) fs.push(function() { return i; }); fs[0]() + "," + fs[1]() + "," + fs[2]()
+=== closure_loop_let
+var fs = []; for (let i = 0; i < 3; i++) fs.push(function() { return i; }); fs[0]() + "," + fs[1]() + "," + fs[2]()
+=== closure_loop_let_mutate
+var fs = []; for (let i = 0; i < 3; i++) { fs.push(function() { return i; }); i++; } fs.length + ":" + fs[0]() + "," + fs[1]()
+=== closure_forin_let
+var fs = []; for (let k in { a: 1, b: 2 }) fs.push(function() { return k; }); fs[0]() + fs[1]()
+=== closure_forof_const
+var fs = []; for (const k of [10, 20]) fs.push(() => k); fs[0]() + fs[1]()
+=== closure_shared_env
+function m() { var x = 0; return [function() { x++; }, function() { return x; }]; } var p = m(); p[0](); p[0](); p[1]()
+=== iife_module
+var mod = (function() { var priv = 41; return { get: function() { return priv + 1; } }; })(); mod.get()
+=== named_function_expression
+var f = function fact(n) { return n <= 1 ? 1 : n * fact(n - 1); }; f(5) + "," + typeof fact
+=== named_fe_readonly
+var f = function g() { g = 1; return typeof g; }; f()
+=== named_fe_shadow
+var f = function g() { var g = 7; return g; }; f()
+=== fn_name_inference
+var a = function() {}; var b = () => 1; var o = { m: function() {}, n() {}, p: () => 0 }; [a.name, b.name, o.m.name, o.n.name, o.p.name, (function z() {}).name].join()
+=== fn_length
+[function(a, b) {}.length, ((a, b = 1, c) => 0).length, (function(...r) {}).length].join()
+=== arguments_basic
+function f() { return arguments.length + ":" + arguments[1]; } f(1, 2, 3)
+=== arguments_arrow_outer
+function f() { return (() => arguments[0])(); } f(9)
+=== default_params
+function f(a, b = a + 1, c = b * 2) { return [a, b, c].join(); } f(1) + "|" + f(1, 5) + "|" + f(1, undefined, 0)
+=== rest_params
+function f(a, ...r) { return a + ":" + r.length + ":" + r.join("-"); } f(1) + "|" + f(1, 2, 3)
+=== spread_call_array
+function f(a, b, c) { return a + b + c; } f(...[1, 2], 3) + f(...[1], ...[2, 3])
+=== spread_array_string
+[...[1, 2], ..."ab", 3].join()
+=== spread_object
+var a = { x: 1, y: 2 }; var o = { ...a, y: 3, ...{ z: 4 } }; o.x + "," + o.y + "," + o.z
+=== destructure_object
+var { a, b: { c = 5 } = {}, ...rest } = { a: 1, d: 4, e: 5 }; [a, c, Object.keys(rest).join("")].join()
+=== destructure_array
+var [a, , b = 7, ...r] = [1, 2, undefined, 4, 5]; [a, b, r.join("")].join()
+=== destructure_params
+function f({ a, b = 2 }, [c, d]) { return a + b + c + d; } f({ a: 1 }, [3, 4])
+=== destructure_swap
+var a = 1, b = 2; [a, b] = [b, a]; a + "," + b
+=== destructure_null_throws
+var r; try { var { a } = null; } catch (e) { r = e.name; } r
+=== this_method
+var o = { v: 3, m: function() { return this.v; } }; o.m()
+=== this_detached_sloppy
+var v = "global"; var o = { v: "obj", m: function() { return this === globalThis; } }; var f = o.m; f()
+=== this_strict_detached
+"use strict"; var o = { m: function() { return this; } }; var f = o.m; typeof f()
+=== this_arrow_lexical
+var o = { v: 1, m: function() { return (() => this.v)(); } }; o.m()
+=== this_top_level
+this === globalThis
+=== this_call_apply_bind
+function f(a, b) { return this.k + a + b; } var o = { k: 1 }; [f.call(o, 2, 3), f.apply(o, [4, 5]), f.bind(o, 6)(7), f.bind(o).bind({ k: 100 })(1, 1)].join()
+=== this_nested_function_sloppy
+var o = { v: 1, m: function() { return (function() { return this === globalThis; })(); } }; o.m()
+=== constructor_function
+function P(x) { this.x = x; } P.prototype.get = function() { return this.x; }; var p = new P(8); p.get() + "," + (p instanceof P) + "," + (p.constructor === P)
+=== constructor_returns_object
+function P() { this.a = 1; return { b: 2 }; } var p = new P(); typeof p.a + "," + p.b
+=== constructor_returns_primitive
+function P() { this.a = 1; return 5; } new P().a
+=== new_arrow_throws
+var f = () => 1; var r; try { new f(); } catch (e) { r = e.name + ":" + e.message; } r
+=== call_non_function
+var o = {}; var r; try { o.nothing(); } catch (e) { r = e.name + ":" + e.message; } r
+=== call_undefined_var
+var f; var r; try { f(); } catch (e) { r = e.name + ":" + e.message; } r
+=== prop_of_undefined
+var o; var r; try { o.x; } catch (e) { r = e.name + ":" + e.message; } r
+=== prop_of_null_index
+var o = null; var r; try { o[0]; } catch (e) { r = e.name + ":" + e.message; } r
+=== set_prop_of_undefined
+var o; var r; try { o.x = 1; } catch (e) { r = e.name + ":" + e.message; } r
+=== deep_chain_error
+var a = { b: {} }; var r; try { a.b.c.d; } catch (e) { r = e.name + ":" + e.message; } r
+=== optional_chain
+var a = null, o = { f: function() { return this.v; }, v: 4, n: { m: 1 } }; [a?.x, a?.x.y.z, a?.[1], a?.(), o?.f(), o.g?.(), o.n?.m, (a?.x) === undefined].join()
+=== optional_chain_short_circuit
+var n = 0; var a = null; a?.[n++]; a?.x(n++); n
+=== optional_call_this
+var o = { v: 5, f() { return this.v; } }; o?.f() + o.f?.() + (o?.f)()
+=== getter_setter_literal
+var o = { _v: 1, get v() { return this._v * 2; }, set v(x) { this._v = x; } }; o.v = 10; o.v + "," + o._v
+=== getter_this_receiver
+var base = { get who() { return this.name; } }; var d = Object.create(base); d.name = "derived"; d.who
+=== setter_inherited
+var log = []; var base = { set s(v) { log.push("set" + v); } }; var d = Object.create(base); d.s = 1; log.join() + "," + Object.keys(d).length
+=== define_property_readonly
+var o = {}; Object.defineProperty(o, "x", { value: 1 }); o.x = 2; var d = Object.getOwnPropertyDescriptor(o, "x"); o.x + "," + d.writable + d.enumerable + d.configurable
+=== define_property_readonly_strict
+"use strict"; var o = {}; Object.defineProperty(o, "x", { value: 1 }); var r; try { o.x = 2; } catch (e) { r = e.name; } r
+=== define_property_accessor
+var o = {}; var n = 0; Object.defineProperty(o, "x", { get: function() { return ++n; }, enumerable: true }); o.x + o.x + "," + Object.keys(o).join()
+=== define_property_redefine
+var o = {}; Object.defineProperty(o, "x", { value: 1 }); var r; try { Object.defineProperty(o, "x", { value: 2 }); } catch (e) { r = e.name; } r + o.x
+=== define_property_mixed_throws
+var r; try { Object.defineProperty({}, "x", { get: function() {}, value: 1 }); } catch (e) { r = e.name; } r
+=== non_enumerable_keys
+var o = { a: 1 }; Object.defineProperty(o, "h", { value: 2, enumerable: false }); var ks = []; for (var k in o) ks.push(k); Object.keys(o).join() + "|" + ks.join() + "|" + o.h
+=== delete_property
+var o = { a: 1, b: 2 }; var r = delete o.a; var d = {}; Object.defineProperty(d, "x", { value: 1 }); [r, "a" in o, delete d.x, d.x].join()
+=== delete_strict_throws
+"use strict"; var d = {}; Object.defineProperty(d, "x", { value: 1 }); var r; try { delete d.x; } catch (e) { r = e.name; } r
+=== in_operator
+var o = { a: 1 }; ["a" in o, "b" in o, "toString" in o, 0 in [1], 1 in [1], "length" in []].join()
+=== in_non_object_throws
+var r; try { "a" in "abc"; } catch (e) { r = e.name; } r
+=== instanceof_chain
+function A() {} function B() {} B.prototype = Object.create(A.prototype); var b = new B(); [b instanceof B, b instanceof A, b instanceof Object, ({}) instanceof A].join()
+=== prototype_chain_lookup
+var base = { x: 1 }; var mid = Object.create(base); mid.y = 2; var leaf = Object.create(mid); leaf.z = 3; leaf.x + leaf.y + leaf.z + "," + leaf.hasOwnProperty("x") + leaf.hasOwnProperty("z")
+=== proto_literal
+var p = { inherited: 7 }; var o = { __proto__: p, own: 1 }; o.inherited + "," + Object.getPrototypeOf(o) === p
+=== array_basics
+var a = [1, 2, 3]; a.push(4, 5); var p = a.pop(); a.length + "," + p + "," + a.join("-") + "," + a[10]
+=== array_length_grow
+var a = []; a[5] = 1; var n = a.length; a.length = 2; n + "," + a.length + "," + a[5]
+=== array_holes
+var a = [1, , 3]; (1 in a) + "," + a.length + "," + a[1]
+=== array_foreach
+var s = 0; [1, 2, 3].forEach(function(v, i, arr) { s += v * i + arr.length; }); s
+=== array_is_array
+[Array.isArray([]), Array.isArray({}), Array.isArray(arguments_missing = [1])].join()
+=== array_invalid_length
+var r; try { new Array(-1); } catch (e) { r = e.name + ":" + e.message; } r
+=== array_ctor
+[new Array(3).length, new Array(1, 2, 3).length, Array(2).length].join()
+=== string_props
+var s = "héllo"; s.length + "," + s[1] + "," + s[10] + "," + ("abc"[2])
+=== string_compare_sort_key
+["b" > "a", "B" > "a", "" < "a", "a" < "aa"].join()
+=== template_literal
+var n = 3; `a${n}b${n + 1}c${"x"}` + `plain` + `${[1, 2]}`
+=== comma_in_for
+var s = ""; for (var i = 0, j = 3; i < j; i++, j--) s += i + "" + j; s
+=== while_loop
+var i = 0, s = 0; while (i < 5) { s += i; i++; } s
+=== do_while
+var i = 10; do { i++; } while (i < 5); i
+=== for_break_continue
+var s = ""; for (var i = 0; i < 10; i++) { if (i % 2) continue; if (i > 6) break; s += i; } s
+=== labeled_break
+var s = ""; outer: for (var i = 0; i < 3; i++) { for (var j = 0; j < 3; j++) { if (j == 2) continue outer; if (i == 2) break outer; s += i + "" + j + ","; } } s
+=== labeled_block
+var s = "a"; blk: { s += "b"; break blk; s += "c"; } s + "d"
+=== labeled_continue_do
+var n = 0; l: do { n++; continue l; } while (n < 3); n
+=== switch_basic
+function f(x) { switch (x) { case 1: return "one"; case 2: case 3: return "twothree"; default: return "other"; } } [f(1), f(2), f(3), f(4)].join()
+=== switch_fallthrough
+var s = ""; switch (2) { case 1: s += "1"; case 2: s += "2"; case 3: s += "3"; break; case 4: s += "4"; } s
+=== switch_default_middle
+var s = ""; switch (9) { case 1: s += "1"; default: s += "d"; case 2: s += "2"; } s
+=== switch_strict
+var s = "none"; switch ("1") { case 1: s = "num"; break; case "1": s = "str"; } s
+=== switch_lexical
+var r; switch (1) { case 1: let x = 5; r = x; break; case 2: let y = 1; } r
+=== return_in_loop
+function f() { for (var i = 0; i < 10; i++) { if (i == 4) return i; } return -1; } f()
+=== return_nested_try
+function f() { try { return "t"; } finally { } } f()
+=== finally_overrides
+function f() { try { return "t"; } finally { return "f"; } } f()
+=== finally_runs_on_throw
+var log = []; try { try { throw 1; } finally { log.push("f"); } } catch (e) { log.push("c" + e); } log.join()
+=== finally_after_break
+var log = []; for (var i = 0; i < 3; i++) { try { if (i == 1) break; log.push("b" + i); } finally { log.push("f" + i); } } log.join()
+=== finally_continue_override
+var log = []; for (var i = 0; i < 2; i++) { try { throw i; } catch (e) { log.push("c" + e); continue; } finally { log.push("f" + i); } } log.join()
+=== finally_return_value_kept
+var n = 0; function g() { n = 5; return 1; } function f() { try { return "v"; } finally { g(); } } f() + n
+=== catch_scope
+var e = "outer"; try { throw "inner"; } catch (e) { var seen = e; } e + "," + seen
+=== catch_no_param
+var r = 0; try { throw 1; } catch { r = 2; } r
+=== throw_object
+var r; try { throw { code: 7 }; } catch (e) { r = e.code; } r
+=== throw_error_props
+var r; try { throw new TypeError("bad"); } catch (e) { r = [e.name, e.message, e instanceof TypeError, e instanceof Error, String(e)].join("|"); } r
+=== error_default
+var e = new Error(); [e.message === "", e.name, String(e), Error("x").message, new RangeError("r") instanceof RangeError].join()
+=== error_prototype_chain
+[TypeError.prototype instanceof Error, Object.getPrototypeOf(RangeError) === Function.prototype, new TypeError("a").constructor === TypeError].join()
+=== uncaught_throw_value
+throw "plain"
+=== uncaught_error
+throw new RangeError("out")
+=== uncaught_reference
+missing_name_xyz
+=== rethrow
+var r; try { try { throw new Error("a"); } catch (e) { throw new TypeError("b" + e.message); } } catch (e2) { r = e2.name + e2.message; } r
+=== recursion
+function fib(n) { return n < 2 ? n : fib(n - 1) + fib(n - 2); } fib(15)
+=== mutual_recursion
+function even(n) { return n == 0 ? true : odd(n - 1); } function odd(n) { return n == 0 ? false : even(n - 1); } even(20) + "," + odd(7)
+=== higher_order
+function compose(f, g) { return function(x) { return f(g(x)); }; } var inc = x => x + 1, dbl = x => x * 2; compose(inc, dbl)(5) + "," + compose(dbl, inc)(5)
+=== curry
+var add = a => b => c => a + b + c; add(1)(2)(3)
+=== func_in_block_sloppy
+var r = typeof g; { function g() { return 1; } } r + typeof g
+=== func_in_block_strict
+"use strict"; { function g() {} } typeof g
+=== func_decl_in_if
+var r; if (true) { function h() { return "h"; } r = h(); } r + typeof h
+=== update_expressions
+var a = 1; var b = a++ + ++a; var o = { n: 1 }; o.n++; ++o.n; o["n"]--; a + "," + b + "," + o.n
+=== update_string
+var s = "5"; s++; var t = "x"; t++; s + "," + t
+=== compound_assign
+var a = 10; a += 5; a -= 3; a *= 2; a /= 4; a %= 4; a **= 3; a <<= 2; a >>= 1; a |= 1; a &= 7; a ^= 2; a
+=== compound_string
+var s = "a"; s += 1; s += null; s
+=== member_compound
+var o = { a: 1 }; o.a += 2; o["a"] *= 3; var k = "b"; o[k] = 1; o[k] += 4; o.a + "," + o.b
+=== assign_chain
+var a, b, c; a = b = c = 5; a + b + c
+=== assign_value
+var a; (a = 3) + a
+=== evaluation_order
+var log = []; function f(n) { log.push(n); return n; } var o = {}; o[f("k")] = f("v"); f(1) + f(2) * f(3); log.join()
+=== object_keys_order
+var o = { b: 1, 2: 1, a: 1, 1: 1, [0 + 3]: 1 }; Object.keys(o).join()
+=== numeric_keys
+var o = { 1: "a", "2": "b", 0x10: "c", 1.5: "d" }; o[1] + o["2"] + o[16] + o["1.5"]
+=== computed_keys
+var k = "dyn"; var o = { [k]: 1, [k + "2"]: 2, ["a" + "b"]() { return 3; } }; o.dyn + o.dyn2 + o.ab()
+=== shorthand_methods
+var a = 1; var o = { a, f() { return a + 1; } }; o.a + o.f()
+=== object_to_primitive
+var o = { valueOf: function() { return 42; }, toString: function() { return "str"; } }; [o + 1, `${o}`, o * 2, o > 41, o == 42, String(o)].join()
+=== to_primitive_tostring_only
+var o = { toString: function() { return "ts"; } }; o + "|" + (o == "ts") + "|" + [1, [2, 3]]
+=== to_primitive_throws
+var o = { valueOf: function() { return {}; }, toString: function() { return {}; } }; var r; try { o + 1; } catch (e) { r = e.name; } r
+=== to_primitive_error_prop
+var r; try { var o = { valueOf: function() { throw new Error("vo"); } }; o + 1; } catch (e) { r = e.message; } r
+=== object_to_string
+[Object.prototype.toString.call([]), Object.prototype.toString.call(null), Object.prototype.toString.call(function() {}), String({})].join()
+=== has_own_property_call
+var h = Object.prototype.hasOwnProperty; var o = { a: 1 }; [h.call(o, "a"), h.call(o, "b"), h.call(o, "toString")].join()
+=== webpack_require_shape
+var modules = { 1: function(module, exports, require) { exports.v = 10; }, 2: function(module, exports, require) { module.exports = require(1).v + 1; } }; var cache = {}; function __webpack_require__(id) { if (cache[id]) return cache[id].exports; var module = cache[id] = { exports: {} }; modules[id](module, module.exports, __webpack_require__); return module.exports; } __webpack_require__(2) + __webpack_require__(1).v
+=== webpack_define_esmodule
+var exports = {}; Object.defineProperty(exports, "__esModule", { value: true }); var d = function(e, defs) { for (var k in defs) if (!Object.prototype.hasOwnProperty.call(e, k)) Object.defineProperty(e, k, { enumerable: true, get: defs[k] }); }; d(exports, { a: function() { return 1; }, b: function() { return 2; } }); [exports.__esModule, exports.a, exports.b, Object.keys(exports).join("")].join()
+=== webpack_queue_push
+var self = this; var queue = (self.chunk = self.chunk || []); var loaded = []; var cb = function(parent, data) { for (var i = 0; i < data[0].length; i++) loaded.push(data[0][i]); parent && parent(data); }; queue.forEach(cb.bind(null, 0)); queue.push = cb.bind(null, queue.push.bind(queue)); (self.chunk = self.chunk || []).push([[7, 8], {}]); loaded.join() + "," + self.chunk.length
+=== webpack_deferred_queue
+var deferred = []; var O = function(result, ids, fn, priority) { if (ids) { priority = priority || 0; var i; for (i = deferred.length; i > 0 && deferred[i - 1][2] > priority; i--) deferred[i] = deferred[i - 1]; deferred[i] = [ids, fn, priority]; return; } return deferred.length; }; O(null, [1], function() { return "a"; }, 5); O(null, [2], function() { return "b"; }, 1); O(null, [3], function() { return "c"; }, 3); deferred[0][1]() + deferred[1][1]() + deferred[2][1]() + O()
+=== webpack_iife_this_global
+(function(root) { root.fromIife = 1; })(this); fromIife
+=== webpack_chunk_callback
+var installed = { main: 0 }; var mods = {}; function cb(data) { var ids = data[0], more = data[1]; for (var m in more) mods[m] = more[m]; for (var i = 0; i < ids.length; i++) installed[ids[i]] = 0; return Object.keys(installed).join(); } cb([["a", "b"], { x: function() {} }]) + "," + typeof mods.x
+=== getter_on_prototype_chain_call
+var o = { get f() { return function() { return this === o; }; } }; o.f()
+=== call_with_this_undefined_strict
+function f() { "use strict"; return this; } f() === undefined && f.call(null) === null
+=== sloppy_this_null_is_global
+function f() { return this === globalThis; } f.call(null) + "," + f.call(undefined)
+=== strict_function_assign_undeclared
+function f() { "use strict"; undeclared_q = 1; } var r; try { f(); } catch (e) { r = e.name + ":" + e.message; } r
+=== global_var_is_property
+var gv = 1; globalThis.gv + "," + Object.getOwnPropertyDescriptor(globalThis, "gv").enumerable + "," + ("gv" in globalThis)
+=== global_let_not_property
+let gl = 1; globalThis.gl + "," + typeof gl
+=== delete_global_var
+var dv = 1; zq = 2; [delete globalThis.dv, delete globalThis.zq, typeof dv, typeof zq].join()
+=== typeof_function_props
+function f(a) {} [typeof f.prototype, f.prototype.constructor === f, typeof f.call, f.length, f.name].join()
+=== method_not_constructor
+var o = { m() {} }; var r; try { new o.m(); } catch (e) { r = e.name; } r + typeof o.m.prototype
+=== for_in_inherited_shadow
+var p = { a: 1, b: 2 }; var o = Object.create(p); o.b = 3; o.c = 4; var ks = []; for (var k in o) ks.push(k); ks.join()
+=== for_in_array_string
+var ks = []; for (var k in [7, 8]) ks.push(k); for (var j in "ab") ks.push(j); ks.join()
+=== for_in_delete_during
+var o = { a: 1, b: 2, c: 3 }; var ks = []; for (var k in o) { ks.push(k); delete o.b; } ks.join()
+=== for_of_array_grows
+var a = [1, 2]; var s = 0; for (var x of a) { s += x; if (a.length < 4) a.push(x * 10); } s
+=== for_of_string_surrogate
+var n = 0; for (var c of "a😀b") n++; n
+=== for_of_not_iterable
+var r; try { for (var x of {}) ; } catch (e) { r = e.name; } r
+=== for_of_destructure
+var s = ""; for (var [k, v] of [["a", 1], ["b", 2]]) s += k + v; for (const { p } of [{ p: 9 }]) s += p; s
+=== bitwise_not_nan
+[~NaN, ~undefined, ~"7", -"3", +"", +"1e2", +[], +{}, +[5], +null, +true].join()
+=== number_edge
+[0.1 * 3, 1 / 3, 9007199254740993, 2 ** 53 + 2, 1e300 * 1e10, -1e300 * 1e10, 0 / 0, 5e-324 / 2].join()
+=== negative_zero
+[1 / -0, 1 / (0 * -1), Object.is ? 0 : 0, String(-0), -0 + 0, `${-0}`].join()
+=== nan_comparisons
+var n = NaN; [n == n, n === n, n != n, n < 1, n > 1, isNaN(n), isNaN("x"), isNaN("1")].join()
+=== string_number_compare
+["2" > "12", 2 > "12", "a" > 1, "1" == 1.0, "abc" == "abc", "1" === 1].join()
+=== switch_in_function_return
+function f(n) { switch (n) { case 0: return "z"; } return "nz"; } f(0) + f(1)
+=== nested_closures_three_deep
+function a() { var x = 1; return function b() { var y = 2; return function c() { return x + y; }; }; } a()()()
+=== closure_captures_param
+function f(p) { return function() { p++; return p; }; } var g = f(5); g(); g()
+=== closure_after_reassign
+var fn; { let x = 1; fn = function() { return x; }; x = 2; } fn()
+=== closure_in_catch
+var fn; try { throw 5; } catch (e) { fn = function() { return e; }; } fn()
+=== immediate_arrow
+((a, b) => a * b)(6, 7)
+=== arrow_expression_object
+var f = () => ({ a: 1 }); f().a
+=== arrow_no_arguments_own
+function f() { var g = (...a) => a.length + arguments.length; return g(1, 2, 3); } f(1)
+=== getter_defined_by_define_property_this
+var o = { n: 3 }; Object.defineProperty(o, "dbl", { get: function() { return this.n * 2; } }); o.dbl
+=== setter_via_define_property
+var o = {}; var v; Object.defineProperty(o, "x", { set: function(a) { v = a; }, get: undefined }); o.x = 4; v + "," + o.x
+=== object_create_null
+var o = Object.create(null); o.k = 1; typeof o.toString + "," + ("k" in o) + "," + Object.getPrototypeOf(o)
+=== call_depth_error_is_limit
+function f() { return f(); } f() // @limit
+=== infinite_loop_is_limit
+while (true) {} // @limit
+=== infinite_for_is_limit
+for (;;) {} // @limit
+=== infinite_do_is_limit
+var i = 0; do { i++; } while (true); // @limit
+=== infinite_try_is_limit
+var i = 0; for (;;) { try { i++; } catch (e) { } } // @limit

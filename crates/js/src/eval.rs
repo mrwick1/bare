@@ -1,0 +1,2809 @@
+//! The first bounded JavaScript evaluator: a tree walker over the [`crate::parse`] AST and the managed
+//! [`Heap`]. It runs tiny real scripts. It is not a staging runtime and it makes no compatibility claim.
+//!
+//! How to use it
+//! - `let prog = parse_script(src, Limits::default())?;`
+//! - `let mut it = Interp::new(&prog, Heap::default(), EvalLimits::default())?;`  (checks the whole tree first)
+//! - `let v = it.run()?;` runs the script once and gives the completion value. `it.call(f, this, &args)`
+//!   calls a function value (a host callback, for example a webpack queue `push`).
+//! - Errors: [`Error::Throw`] is a JavaScript exception, [`Error::Unsupported`] is a construct or builtin that
+//!   is not implemented, [`Error::Limit`] is an execution limit, [`Error::Heap`] is a heap fault (a bug).
+//!
+//! Unsupported is found BEFORE anything runs. `Interp::new` walks every reachable node. Syntax that is not
+//! implemented gives [`Error::Unsupported`] with its span: classes, async functions and `await`, tagged
+//! templates, regexp literals, BigInt, `super`, `new.target`, private names, `with`, `for await`.
+//! A missing builtin (`Map`, `Promise`, `JSON`, ...) is an ordinary `ReferenceError` at run time, as in a bare engine.
+//!
+//! Heap contract: the heap never collects by itself. [`Interp::roots`] lists every value the evaluator
+//! owns (global object, builtin prototypes, every live environment binding and `this`, every function
+//! object, bound arguments, cached string keys, the pending return and completion values). The heap cannot see
+//! inside an evaluator environment, so a function object and its environment are linked here, not in the
+//! heap: `funcs` maps a function `ObjId` to its code and environment. [`Interp::collect`] first frees the
+//! environments and function entries that nothing reaches (a worklist over the object graph, no Rust
+//! recursion), then calls `Heap::collect(roots)`. It refuses to run while a call is active. A value you keep
+//! outside the evaluator (a `Throw` value, a result) must be passed as `extra` or it is stale after `collect`.
+//! Host code must never inject handles from another heap. Heap ownership does not detect foreign-handle collisions.
+//!
+//! Limits ([`EvalLimits`]): steps (statements, expressions and traversed native elements), call depth (every call, native and bound
+//! too), live environments, function slots. A limit ends the run with [`Error::Limit`], never a JS value, and
+//! cannot be caught by `try`. A heap limit is [`LimitKind::Heap`]. Native stack: one JS call level needs about
+//! 5 to 7 KiB in a release build (measured: depth 99 overflows 512 KiB and fits 768 KiB). A debug build needs several
+//! times more. `max_call_depth` is clamped to 100. Recursive setup and execution walks share a hard
+//! ceiling of 512 frames. Run on a thread with at least 8 MiB (release) or 64 MiB (debug).
+//!
+//! Known deviations, on purpose (each is a gate, not a silent skip):
+//! - One environment per call holds parameters, `arguments`, `var`s and the body's `let`/`const`.
+//!   Default-parameter expressions can see the body `var`s. Parameters have no TDZ.
+//! - `arguments` is an unmapped ordinary object (not iterable); sloppy mode never maps it to the parameters.
+//! - Sloppy `this` that is a primitive is not boxed. There are no wrapper objects.
+//! - Builtins are a tiny set (see `install_builtins`). `String.prototype` is absent, so `"a".charAt` is
+//!   `undefined`. Symbols cannot be created, so `for...of`, spread and array patterns work on arrays and
+//!   strings only (that is exact while no `Symbol.iterator` exists), and `ToPrimitive` skips `@@toPrimitive`.
+//! - The script completion value is the value of the last expression statement that ran (reset to
+//!   `undefined` by `if`, loops, `switch`, `try`). It is not full UpdateEmpty.
+//! - A function's `toString` is absent.
+
+use crate::ast::*;
+use crate::heap::*;
+use crate::value::*;
+use std::collections::{HashMap, HashSet};
+use std::hash::{BuildHasherDefault, Hasher};
+
+// ------------------------------------------------------------------ public types
+
+/// Execution limits. Every one is checked before the thing grows.
+#[derive(Clone, Copy, Debug)]
+pub struct EvalLimits {
+    /// Statements, expressions and traversed native elements, per `run` or top-level `call`.
+    pub max_steps: u64,
+    /// Clamped to 100. Tree/execution recursion also has a shared hard ceiling of 512 frames.
+    pub max_call_depth: u32,
+    /// Live environments (scopes). Environments that no closure captured are freed on scope exit.
+    pub max_envs: usize,
+    /// Function objects the evaluator tracks (closures, natives, bound functions).
+    pub max_functions: usize,
+}
+
+impl Default for EvalLimits {
+    fn default() -> Self {
+        EvalLimits { max_steps: 100_000_000, max_call_depth: 100, max_envs: 1 << 20, max_functions: 1 << 20 }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LimitKind {
+    Steps,
+    CallDepth,
+    TraversalDepth,
+    Envs,
+    Functions,
+    Heap(Limit),
+}
+
+/// Valid syntax or a builtin that is not implemented. `span` is the byte range of the construct
+/// (empty for a builtin).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Unsupported {
+    pub what: &'static str,
+    pub span: Span,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum Error {
+    /// A thrown JavaScript value. Root it (`extra` of [`Interp::collect`]) if you keep it.
+    Throw(Value),
+    Unsupported(Unsupported),
+    Limit(LimitKind),
+    Heap(HeapError),
+}
+
+/// Counters for tools and tests.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct EvalStats {
+    pub steps: u64,
+    pub live_envs: usize,
+    pub env_slots: usize,
+    pub functions: usize,
+}
+
+// ------------------------------------------------------------------ small internals
+
+#[derive(Default)]
+struct Fx(u64);
+impl Hasher for Fx {
+    fn finish(&self) -> u64 {
+        self.0
+    }
+    fn write(&mut self, b: &[u8]) {
+        for &x in b {
+            self.write_u64(x as u64);
+        }
+    }
+    fn write_u32(&mut self, n: u32) {
+        self.write_u64(n as u64);
+    }
+    fn write_u64(&mut self, n: u64) {
+        self.0 = (self.0.rotate_left(5) ^ n).wrapping_mul(0x517c_c1b7_2722_0a95);
+    }
+    fn write_usize(&mut self, n: usize) {
+        self.write_u64(n as u64);
+    }
+}
+type FxMap<K, V> = HashMap<K, V, BuildHasherDefault<Fx>>;
+type FxSet<K> = HashSet<K, BuildHasherDefault<Fx>>;
+
+/// Statement control flow. Errors travel in `Err` too.
+enum Ctl {
+    Break(u32),
+    Continue(u32),
+    Return,
+    Err(Error),
+}
+impl From<Error> for Ctl {
+    fn from(e: Error) -> Ctl {
+        Ctl::Err(e)
+    }
+}
+type Res<T> = Result<T, Error>;
+type Ex = Result<(), Ctl>;
+
+macro_rules! h {
+    ($s:expr, $e:expr) => {
+        match $e {
+            Ok(v) => v,
+            Err(e) => return Err($s.herr(e).into()),
+        }
+    };
+}
+
+const NONE: u32 = u32::MAX;
+const INIT: u8 = 1;
+const MUT: u8 = 2;
+const SELF: u8 = 4;
+
+struct Binding {
+    name: u32,
+    flags: u8,
+    value: Value,
+}
+
+struct Env {
+    parent: u32,
+    bindings: Vec<Binding>,
+    index: Option<Box<FxMap<u32, u32>>>,
+    this: Option<Value>,
+    captured: bool,
+    live: bool,
+    var_scope: bool,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Nat {
+    ObjectCtor,
+    ObjectKeys,
+    ObjectDefineProperty,
+    ObjectGetOwnPropertyDescriptor,
+    ObjectCreate,
+    ObjectGetPrototypeOf,
+    ObjHasOwn,
+    ObjToString,
+    ObjValueOf,
+    FnCall,
+    FnApply,
+    FnBind,
+    FnCtor,
+    ArrayCtor,
+    ArrayIsArray,
+    ArrPush,
+    ArrPop,
+    ArrForEach,
+    ArrJoin,
+    ErrorCtor(u8),
+    ErrToString,
+    StringFn,
+    NumberFn,
+    BooleanFn,
+    IsNaN,
+}
+
+enum Callee {
+    Script { fid: FuncId, env: u32, self_binding: bool },
+    Native(Nat),
+    Bound { target: ObjId, this: Value, args: Vec<Value> },
+}
+
+#[derive(Default)]
+struct FScope {
+    vars: Vec<u32>,
+    uses_args: bool,
+}
+
+const TYPE_ERROR: usize = 1;
+const RANGE_ERROR: usize = 2;
+const REFERENCE_ERROR: usize = 3;
+const ERR_NAMES: [&str; 5] = ["Error", "TypeError", "RangeError", "ReferenceError", "SyntaxError"];
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Hint {
+    Default,
+    Number,
+    String,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Bind {
+    /// Initialize a binding that `declare_scope` made (let, const).
+    Init,
+    /// Assign (assignment expression, `var` initializer).
+    Assign,
+    /// Create the binding in the current environment (parameter, catch parameter).
+    Declare,
+}
+
+/// A lazy iteration over an array or a string (the only iterables while no `Symbol.iterator` exists).
+struct It {
+    src: Value,
+    i: usize,
+}
+
+/// A reference that can be read and written: a name or a property of a value.
+enum Ref {
+    Name(u32),
+    Prop(Value, PropertyKey),
+}
+
+// ------------------------------------------------------------------ the interpreter
+
+pub struct Interp<'p> {
+    prog: &'p Program<'p>,
+    /// The heap. Public so a host can read results. Do not collect it directly: use [`Interp::collect`].
+    pub heap: Heap,
+    limits: EvalLimits,
+    steps: u64,
+    step_limit: u64,
+    depth: u32,
+    frames: u32,
+    ran: bool,
+    // names and caches filled by the first walk
+    name_map: FxMap<String, u32>,
+    names: Vec<String>,
+    name_strs: Vec<Option<StrId>>,
+    expr_name: Vec<u32>,
+    pat_name: Vec<u32>,
+    stmt_label: Vec<u32>,
+    func_name: Vec<u32>,
+    expr_str: Vec<Option<StrId>>,
+    prop_str: Vec<Option<StrId>>,
+    scopes: Vec<FScope>,
+    // environments and functions
+    envs: Vec<Env>,
+    free_envs: Vec<u32>,
+    live_envs: usize,
+    funcs: FxMap<ObjId, Callee>,
+    // run state
+    env: u32,
+    strict: bool,
+    ret: Value,
+    completion: Value,
+    pending_labels: Vec<u32>,
+    arg_pool: Vec<Vec<Value>>,
+    // builtin objects
+    global: ObjId,
+    object_proto: ObjId,
+    function_proto: ObjId,
+    array_proto: ObjId,
+    error_protos: [ObjId; 5],
+    // permanent keys
+    k_length: PropertyKey,
+    k_name: PropertyKey,
+    k_message: PropertyKey,
+    k_prototype: PropertyKey,
+    k_constructor: PropertyKey,
+    k_to_string: PropertyKey,
+    k_value_of: PropertyKey,
+    k_proto: PropertyKey,
+    k_value: PropertyKey,
+    k_writable: PropertyKey,
+    k_enumerable: PropertyKey,
+    k_configurable: PropertyKey,
+    k_get: PropertyKey,
+    k_set: PropertyKey,
+    // Walk context
+    cur_strict: bool,
+    n_arguments: u32,
+}
+
+fn unsupported(what: &'static str, span: Span) -> Error {
+    Error::Unsupported(Unsupported { what, span })
+}
+
+fn is_nullish(v: Value) -> bool {
+    matches!(v, Value::Undefined | Value::Null)
+}
+
+impl<'p> Interp<'p> {
+    /// Check the whole tree (Unsupported is reported here, before anything runs) and build the global
+    /// object and the builtins in `heap`.
+    pub fn new(prog: &'p Program<'p>, mut heap: Heap, mut limits: EvalLimits) -> Result<Interp<'p>, Error> {
+        limits.max_call_depth = limits.max_call_depth.min(100);
+        if limits.max_envs == 0 { return Err(Error::Limit(LimitKind::Envs)); }
+        macro_rules! e {
+            ($x:expr) => {
+                match $x {
+                    Ok(v) => v,
+                    Err(e) => return Err(match e {
+                        HeapError::Limit(l) => Error::Limit(LimitKind::Heap(l)),
+                        e => Error::Heap(e),
+                    }),
+                }
+            };
+        }
+        let object_proto = e!(heap.new_object(None));
+        let function_proto = e!(heap.new_object(Some(object_proto)));
+        let array_proto = e!(heap.new_array(Some(object_proto)));
+        let global = e!(heap.new_object(Some(object_proto)));
+        let mut error_protos = [object_proto; 5];
+        for p in error_protos.iter_mut() {
+            *p = e!(heap.new_object(Some(object_proto)));
+        }
+        let mut key = |s: &str| heap.key_from_str(s);
+        let ks = [
+            e!(key("length")), e!(key("name")), e!(key("message")), e!(key("prototype")), e!(key("constructor")),
+            e!(key("toString")), e!(key("valueOf")), e!(key("__proto__")), e!(key("value")), e!(key("writable")),
+            e!(key("enumerable")), e!(key("configurable")), e!(key("get")), e!(key("set")),
+        ];
+        let p = prog;
+        let mut it = Interp {
+            prog,
+            heap,
+            limits,
+            steps: 0,
+            step_limit: 0,
+            depth: 0,
+            frames: 0,
+            ran: false,
+            name_map: FxMap::default(),
+            names: vec![String::new()],
+            name_strs: vec![None],
+            expr_name: vec![0; p.stats().exprs],
+            pat_name: vec![0; p.stats().pats],
+            stmt_label: vec![0; p.stats().stmts],
+            func_name: vec![0; p.stats().funcs],
+            expr_str: vec![None; p.stats().exprs],
+            prop_str: vec![None; p.stats().props],
+            scopes: (0..=p.stats().funcs).map(|_| FScope::default()).collect(),
+            envs: Vec::new(),
+            free_envs: Vec::new(),
+            live_envs: 0,
+            funcs: FxMap::default(),
+            env: 0,
+            strict: prog.strict,
+            ret: Value::Undefined,
+            completion: Value::Undefined,
+            pending_labels: Vec::new(),
+            arg_pool: Vec::new(),
+            global,
+            object_proto,
+            function_proto,
+            array_proto,
+            error_protos,
+            k_length: ks[0],
+            k_name: ks[1],
+            k_message: ks[2],
+            k_prototype: ks[3],
+            k_constructor: ks[4],
+            k_to_string: ks[5],
+            k_value_of: ks[6],
+            k_proto: ks[7],
+            k_value: ks[8],
+            k_writable: ks[9],
+            k_enumerable: ks[10],
+            k_configurable: ks[11],
+            k_get: ks[12],
+            k_set: ks[13],
+            cur_strict: prog.strict,
+            n_arguments: 0,
+        };
+        it.n_arguments = it.intern_name("arguments");
+        // The global lexical environment: id 0, never freed.
+        it.envs.push(Env { parent: NONE, bindings: Vec::new(), index: None, this: Some(Value::Object(global)), captured: true, live: true, var_scope: true });
+        it.live_envs = 1;
+        it.walk_program()?;
+        it.install_builtins()?;
+        Ok(it)
+    }
+
+    /// Give the heap back (the interpreter and every environment are dropped).
+    pub fn into_heap(self) -> Heap {
+        self.heap
+    }
+
+    pub fn global_object(&self) -> ObjId {
+        self.global
+    }
+
+    pub fn stats(&self) -> EvalStats {
+        EvalStats { steps: self.steps, live_envs: self.live_envs, env_slots: self.envs.len(), functions: self.funcs.len() }
+    }
+
+    /// Run the script once. Returns its completion value (see the module comment). A second call is
+    /// `Unsupported` because top-level `let` would be redeclared.
+    pub fn run(&mut self) -> Result<Value, Error> {
+        if self.ran {
+            return Err(unsupported("run called twice", Span::default()));
+        }
+        self.ran = true;
+        self.begin();
+        self.completion = Value::Undefined;
+        self.env = 0;
+        self.strict = self.prog.strict;
+        let prog = self.prog;
+        let n = self.scopes.len() - 1;
+        for i in 0..self.scopes[n].vars.len() {
+            let name = self.scopes[n].vars[i];
+            let key = self.name_key(name)?;
+            if !h!(self, self.heap.has_own_property(self.global, key)) {
+                let d = PropertyDescriptor { value: Some(Value::Undefined), writable: Some(true), enumerable: Some(true), configurable: Some(false), ..Default::default() };
+                h!(self, self.heap.define_own_property(self.global, key, &d));
+            }
+        }
+        let r = match self.declare_scope(prog.body, true) {
+            Ok(()) => self.exec_list(prog.body),
+            Err(e) => Err(Ctl::Err(e)),
+        };
+        self.env = 0;
+        match r {
+            Ok(()) => Ok(self.completion),
+            Err(Ctl::Err(e)) => Err(e),
+            Err(_) => Err(unsupported("stray break, continue or return", Span::default())),
+        }
+    }
+
+    /// Call a function value (a closure, a native or a bound function) from the host.
+    pub fn call(&mut self, f: Value, this: Value, args: &[Value]) -> Result<Value, Error> {
+        if self.depth == 0 {
+            self.begin();
+        }
+        if !self.is_callable(f) {
+            return Err(self.type_err("value is not a function"));
+        }
+        self.call_fn(f, this, args)
+    }
+
+    fn begin(&mut self) {
+        self.step_limit = self.steps.saturating_add(self.limits.max_steps);
+    }
+
+    /// Every value the evaluator owns, for `Heap::collect`. Complete at any time.
+    pub fn roots(&self) -> Vec<Value> {
+        let mut v = vec![Value::Object(self.global), Value::Object(self.object_proto), Value::Object(self.function_proto), Value::Object(self.array_proto), self.ret, self.completion];
+        v.extend(self.error_protos.iter().map(|&o| Value::Object(o)));
+        for k in [self.k_length, self.k_name, self.k_message, self.k_prototype, self.k_constructor, self.k_to_string, self.k_value_of, self.k_proto, self.k_value, self.k_writable, self.k_enumerable, self.k_configurable, self.k_get, self.k_set] {
+            if let PropertyKey::String(s) = k {
+                v.push(Value::String(s));
+            }
+        }
+        v.extend(self.name_strs.iter().flatten().map(|&s| Value::String(s)));
+        v.extend(self.expr_str.iter().flatten().map(|&s| Value::String(s)));
+        v.extend(self.prop_str.iter().flatten().map(|&s| Value::String(s)));
+        for e in self.envs.iter().filter(|e| e.live) {
+            v.extend(e.bindings.iter().map(|b| b.value));
+            v.extend(e.this);
+        }
+        for (&o, c) in &self.funcs {
+            v.push(Value::Object(o));
+            if let Callee::Bound { target, this, args } = c {
+                v.push(Value::Object(*target));
+                v.push(*this);
+                v.extend(args.iter().copied());
+            }
+        }
+        v
+    }
+
+    /// Free unreachable environments and function entries, then `Heap::collect`. `extra` are the values
+    /// the host still holds (results, thrown values). Refused while a call is active.
+    pub fn collect(&mut self, extra: &[Value]) -> Result<Collected, Error> {
+        if self.depth != 0 {
+            return Err(unsupported("collect during a call", Span::default()));
+        }
+        let mut seen: FxSet<ObjId> = FxSet::default();
+        let mut env_seen = vec![false; self.envs.len()];
+        let mut work: Vec<Value> = vec![Value::Object(self.global), Value::Object(self.object_proto), Value::Object(self.function_proto), Value::Object(self.array_proto), self.ret, self.completion];
+        work.extend(self.error_protos.iter().map(|&o| Value::Object(o)));
+        work.extend_from_slice(extra);
+        let mut env_work: Vec<u32> = vec![0];
+        loop {
+            if let Some(e) = env_work.pop() {
+                if e == NONE || env_seen[e as usize] {
+                    continue;
+                }
+                env_seen[e as usize] = true;
+                let env = &self.envs[e as usize];
+                work.extend(env.bindings.iter().map(|b| b.value));
+                work.extend(env.this);
+                env_work.push(env.parent);
+                continue;
+            }
+            let Some(v) = work.pop() else { break };
+            let Value::Object(o) = v else { continue };
+            if !seen.insert(o) {
+                continue;
+            }
+            match self.funcs.get(&o) {
+                Some(Callee::Script { env, .. }) => env_work.push(*env),
+                Some(Callee::Bound { target, this, args }) => {
+                    work.push(Value::Object(*target));
+                    work.push(*this);
+                    work.extend(args.iter().copied());
+                }
+                _ => {}
+            }
+            let keys = h!(self, self.heap.own_keys(o));
+            for k in keys {
+                match h!(self, self.heap.get_own_property(o, k)) {
+                    Some(Property::Data { value, .. }) => work.push(value),
+                    Some(Property::Accessor { get, set, .. }) => {
+                        work.extend(get.map(Value::Object));
+                        work.extend(set.map(Value::Object));
+                    }
+                    None => {}
+                }
+            }
+            if let Some(p) = h!(self, self.heap.get_prototype_of(o)) {
+                work.push(Value::Object(p));
+            }
+        }
+        for (i, &seen) in env_seen.iter().enumerate() {
+            if self.envs[i].live && !seen {
+                self.free_env(i as u32);
+            }
+        }
+        self.funcs.retain(|o, _| seen.contains(o));
+        let mut roots = self.roots();
+        roots.extend_from_slice(extra);
+        Ok(h!(self, self.heap.collect(&roots)))
+    }
+
+    /// Text of a value for tools and tests: strings raw, numbers as JavaScript prints them.
+    pub fn display(&self, v: Value) -> String {
+        match v {
+            Value::Undefined => "undefined".into(),
+            Value::Null => "null".into(),
+            Value::Bool(b) => b.to_string(),
+            Value::Number(n) if n == 0.0 && n.is_sign_negative() => "-0".into(),
+            Value::Number(n) => number_to_string(n),
+            Value::String(s) => self.heap.to_string_lossy(s).unwrap_or_default(),
+            Value::Symbol(_) => "Symbol()".into(),
+            Value::Object(o) => if self.funcs.contains_key(&o) { "function".into() } else { "object".into() },
+        }
+    }
+
+    /// `String(v[name])` as text, for tools and tests (an error's `name` and `message`). A failure gives "?".
+    pub fn get_str(&mut self, v: Value, name: &str) -> String {
+        let r = (|| {
+            let key = self.heap.key_from_str(name).map_err(Error::Heap)?;
+            let x = self.get_prop(v, key)?;
+            let s = self.coerce_string(x)?;
+            self.heap.to_string_lossy(s).map_err(Error::Heap)
+        })();
+        r.unwrap_or_else(|_| "?".into())
+    }
+
+    // ------------------------------------------------------------ names, keys and errors
+
+    fn intern_name(&mut self, s: &str) -> u32 {
+        if let Some(&i) = self.name_map.get(s) {
+            return i;
+        }
+        let i = self.names.len() as u32;
+        self.names.push(s.to_string());
+        self.name_strs.push(None);
+        self.name_map.insert(s.to_string(), i);
+        i
+    }
+
+    fn name_at(&mut self, span: Span) -> u32 {
+        let n = self.prog.name(span);
+        self.intern_name(&n)
+    }
+
+    fn name_str(&mut self, n: u32) -> Res<StrId> {
+        if let Some(s) = self.name_strs[n as usize] {
+            return Ok(s);
+        }
+        let s = h!(self, self.heap.intern_str(&self.names[n as usize]));
+        self.name_strs[n as usize] = Some(s);
+        Ok(s)
+    }
+
+    fn name_key(&mut self, n: u32) -> Res<PropertyKey> {
+        let s = self.name_str(n)?;
+        Ok(h!(self, self.heap.key_from_string(s)))
+    }
+
+    fn herr(&mut self, e: HeapError) -> Error {
+        match e {
+            HeapError::Limit(l) => Error::Limit(LimitKind::Heap(l)),
+            HeapError::InvalidArrayLength => self.mk_err(RANGE_ERROR, "Invalid array length"),
+            HeapError::SymbolConversion => self.mk_err(TYPE_ERROR, "Cannot convert a Symbol value to a string"),
+            HeapError::NeedsExecution(w) => unsupported(w, Span::default()),
+            e => Error::Heap(e),
+        }
+    }
+
+    fn mk_err(&mut self, kind: usize, msg: &str) -> Error {
+        let r: Result<Value, HeapError> = (|| {
+            let o = self.heap.new_object(Some(self.error_protos[kind]))?;
+            let m = self.heap.intern_str(msg)?;
+            let d = PropertyDescriptor { value: Some(Value::String(m)), writable: Some(true), enumerable: Some(false), configurable: Some(true), ..Default::default() };
+            self.heap.define_own_property(o, self.k_message, &d)?;
+            Ok(Value::Object(o))
+        })();
+        match r {
+            Ok(v) => Error::Throw(v),
+            Err(HeapError::Limit(l)) => Error::Limit(LimitKind::Heap(l)),
+            Err(e) => Error::Heap(e),
+        }
+    }
+
+    fn type_err(&mut self, msg: &str) -> Error {
+        self.mk_err(TYPE_ERROR, msg)
+    }
+
+    fn key_text(&self, k: PropertyKey) -> String {
+        match k {
+            PropertyKey::Index(i) => i.to_string(),
+            PropertyKey::String(s) => self.heap.to_string_lossy(s).unwrap_or_default(),
+            PropertyKey::Symbol(_) => "Symbol()".into(),
+        }
+    }
+
+    /// Bound recursive tree and execution walks, including flat parser trees.
+    fn descend<T, E: From<Error>>(&mut self, f: impl FnOnce(&mut Self) -> Result<T, E>) -> Result<T, E> {
+        if self.frames >= 512 { return Err(Error::Limit(LimitKind::TraversalDepth).into()); }
+        self.frames += 1;
+        let result = f(self);
+        self.frames -= 1;
+        result
+    }
+
+    fn tick(&mut self) -> Res<()> {
+        self.steps += 1;
+        if self.steps > self.step_limit {
+            return Err(Error::Limit(LimitKind::Steps));
+        }
+        Ok(())
+    }
+
+    /// Source text of an expression for an error message, as V8 prints a callee.
+    fn src_text(&self, e: ExprId) -> String {
+        let t = self.prog.text(self.prog.expr(e).span);
+        if t.len() <= 80 && !t.contains('\n') { t.to_string() } else { "expression".to_string() }
+    }
+
+    fn is_callable(&self, v: Value) -> bool {
+        matches!(v, Value::Object(o) if self.funcs.contains_key(&o))
+    }
+
+    // ------------------------------------------------------------ the first walk (Unsupported + hoisting)
+
+    fn walk_program(&mut self) -> Res<()> {
+        let prog = self.prog;
+        let top = self.scopes.len() - 1;
+        self.cur_strict = prog.strict;
+        for s in prog.list(prog.body) {
+            self.w_stmt(s, top, usize::MAX, false)?;
+        }
+        Ok(())
+    }
+
+    fn w_func(&mut self, fid: FuncId, outer_args: usize) -> Res<()> {
+        self.descend(|it| it.w_func_inner(fid, outer_args))
+    }
+
+    fn w_func_inner(&mut self, fid: FuncId, outer_args: usize) -> Res<()> {
+        let prog = self.prog;
+        let f = *prog.func(fid);
+        if f.is_async {
+            return Err(unsupported("async function", f.span));
+        }
+        if !matches!(f.kind, FuncKind::Normal | FuncKind::Arrow | FuncKind::Method | FuncKind::Getter | FuncKind::Setter) {
+            return Err(unsupported("class constructor", f.span));
+        }
+        if let Some(n) = f.name {
+            self.func_name[fid.index()] = self.name_at(n);
+        }
+        let saved = self.cur_strict;
+        self.cur_strict = f.strict;
+        let me = fid.index();
+        let args_scope = if f.kind == FuncKind::Arrow { outer_args } else { me };
+        for p in prog.list(f.params) {
+            self.w_pat(p, me, args_scope)?;
+        }
+        match f.body {
+            Body::Block(l) => {
+                for s in prog.list(l) {
+                    self.w_stmt(s, me, args_scope, false)?;
+                }
+            }
+            Body::Expr(e) => self.w_expr(e, me, args_scope)?,
+        }
+        self.cur_strict = saved;
+        Ok(())
+    }
+
+    fn pat_names(&mut self, p: PatId, out: &mut Vec<u32>) {
+        let prog = self.prog;
+        let pat = *prog.pat(p);
+        match pat.kind {
+            PatKind::Ident => {
+                let n = self.name_at(pat.span);
+                self.pat_name[p.index()] = n;
+                out.push(n);
+            }
+            PatKind::Array(l) => {
+                for q in prog.list(l) {
+                    self.pat_names(q, out);
+                }
+            }
+            PatKind::Object(l) => {
+                for q in prog.list(l) {
+                    let v = prog.pat_prop(q).value;
+                    self.pat_names(v, out);
+                }
+            }
+            PatKind::Assign { target, .. } | PatKind::Rest(target) => self.pat_names(target, out),
+            PatKind::Member(_) | PatKind::Hole => {}
+        }
+    }
+
+    fn w_pat(&mut self, p: PatId, fs: usize, ac: usize) -> Res<()> {
+        self.descend(|it| it.w_pat_inner(p, fs, ac))
+    }
+
+    fn w_pat_inner(&mut self, p: PatId, fs: usize, ac: usize) -> Res<()> {
+        let prog = self.prog;
+        let pat = *prog.pat(p);
+        match pat.kind {
+            PatKind::Ident => {
+                let n = self.name_at(pat.span);
+                self.pat_name[p.index()] = n;
+            }
+            PatKind::Member(e) => self.w_expr(e, fs, ac)?,
+            PatKind::Array(l) => {
+                for q in prog.list(l) {
+                    self.w_pat(q, fs, ac)?;
+                }
+            }
+            PatKind::Object(l) => {
+                for q in prog.list(l) {
+                    let pp = *prog.pat_prop(q);
+                    if let Key::Computed(e) = pp.key {
+                        self.w_expr(e, fs, ac)?;
+                    }
+                    self.w_pat(pp.value, fs, ac)?;
+                }
+            }
+            PatKind::Assign { target, default } => {
+                self.w_pat(target, fs, ac)?;
+                self.w_expr(default, fs, ac)?;
+            }
+            PatKind::Rest(t) => self.w_pat(t, fs, ac)?,
+            PatKind::Hole => {}
+        }
+        Ok(())
+    }
+
+    fn w_stmt(&mut self, s: StmtId, fs: usize, ac: usize, nested: bool) -> Res<()> {
+        self.descend(|it| it.w_stmt_inner(s, fs, ac, nested))
+    }
+
+    fn w_stmt_inner(&mut self, s: StmtId, fs: usize, ac: usize, nested: bool) -> Res<()> {
+        let prog = self.prog;
+        let st = *prog.stmt(s);
+        match st.kind {
+            StmtKind::Expr(e) | StmtKind::Directive(e) | StmtKind::Throw(e) => self.w_expr(e, fs, ac)?,
+            StmtKind::Var { kind, decls } => {
+                for d in prog.list(decls) {
+                    let d = *prog.decl(d);
+                    if kind == VarKind::Var {
+                        let mut names = Vec::new();
+                        self.pat_names(d.target, &mut names);
+                        self.scopes[fs].vars.extend(names);
+                    }
+                    self.w_pat(d.target, fs, ac)?;
+                    if let Some(i) = d.init {
+                        self.w_expr(i, fs, ac)?;
+                    }
+                }
+            }
+            StmtKind::Function(fid) => {
+                self.w_func(fid, ac)?;
+                if nested && !self.cur_strict {
+                    let n = self.func_name[fid.index()];
+                    self.scopes[fs].vars.push(n);
+                }
+            }
+            StmtKind::Class(_) => return Err(unsupported("class", st.span)),
+            StmtKind::Return(e) => {
+                if let Some(e) = e {
+                    self.w_expr(e, fs, ac)?;
+                }
+            }
+            StmtKind::If { test, cons, alt } => {
+                self.w_expr(test, fs, ac)?;
+                self.w_stmt(cons, fs, ac, true)?;
+                if let Some(a) = alt {
+                    self.w_stmt(a, fs, ac, true)?;
+                }
+            }
+            StmtKind::For { init, test, update, body } => {
+                match init {
+                    ForInit::None => {}
+                    ForInit::Var(v) => self.w_stmt(v, fs, ac, true)?,
+                    ForInit::Expr(e) => self.w_expr(e, fs, ac)?,
+                }
+                for e in [test, update].into_iter().flatten() {
+                    self.w_expr(e, fs, ac)?;
+                }
+                self.w_stmt(body, fs, ac, true)?;
+            }
+            StmtKind::ForIn { left, right, body } | StmtKind::ForOf { left, right, body, is_await: false } => {
+                match left {
+                    ForLeft::Var(v) => self.w_stmt(v, fs, ac, true)?,
+                    ForLeft::Pat(p) => self.w_pat(p, fs, ac)?,
+                }
+                self.w_expr(right, fs, ac)?;
+                self.w_stmt(body, fs, ac, true)?;
+            }
+            StmtKind::ForOf { .. } => return Err(unsupported("for await", st.span)),
+            StmtKind::While { test, body } | StmtKind::DoWhile { body, test } => {
+                self.w_expr(test, fs, ac)?;
+                self.w_stmt(body, fs, ac, true)?;
+            }
+            StmtKind::Break(l) | StmtKind::Continue(l) => {
+                if let Some(l) = l {
+                    self.stmt_label[s.index()] = self.name_at(l);
+                }
+            }
+            StmtKind::Try { block, handler, finalizer } => {
+                self.w_stmt(block, fs, ac, true)?;
+                if let Some(c) = handler {
+                    let c = *prog.catch(c);
+                    if let Some(p) = c.param {
+                        self.w_pat(p, fs, ac)?;
+                    }
+                    self.w_stmt(c.body, fs, ac, true)?;
+                }
+                if let Some(f) = finalizer {
+                    self.w_stmt(f, fs, ac, true)?;
+                }
+            }
+            StmtKind::Switch { disc, cases } => {
+                self.w_expr(disc, fs, ac)?;
+                for c in prog.list(cases) {
+                    let c = *prog.case(c);
+                    if let Some(t) = c.test {
+                        self.w_expr(t, fs, ac)?;
+                    }
+                    for s in prog.list(c.body) {
+                        self.w_stmt(s, fs, ac, true)?;
+                    }
+                }
+            }
+            StmtKind::Labeled { label, body } => {
+                self.stmt_label[s.index()] = self.name_at(label);
+                self.w_stmt(body, fs, ac, true)?;
+            }
+            StmtKind::Block(l) => {
+                for s in prog.list(l) {
+                    self.w_stmt(s, fs, ac, true)?;
+                }
+            }
+            StmtKind::Empty | StmtKind::Debugger => {}
+            StmtKind::With { .. } => return Err(unsupported("with statement", st.span)),
+        }
+        Ok(())
+    }
+
+    fn w_expr(&mut self, e: ExprId, fs: usize, ac: usize) -> Res<()> {
+        self.descend(|it| it.w_expr_inner(e, fs, ac))
+    }
+
+    fn w_expr_inner(&mut self, e: ExprId, fs: usize, ac: usize) -> Res<()> {
+        let prog = self.prog;
+        let ex = *prog.expr(e);
+        match ex.kind {
+            ExprKind::Ident => {
+                let n = self.name_at(ex.span);
+                self.expr_name[e.index()] = n;
+                if n == self.n_arguments && ac != usize::MAX {
+                    self.scopes[ac].uses_args = true;
+                }
+            }
+            ExprKind::This | ExprKind::Null | ExprKind::Bool(_) | ExprKind::Number(_) | ExprKind::String | ExprKind::Hole => {}
+            ExprKind::BigInt => return Err(unsupported("BigInt literal", ex.span)),
+            ExprKind::RegExp => return Err(unsupported("regexp literal", ex.span)),
+            ExprKind::Template(t) => {
+                let t = *prog.template(t);
+                for x in prog.template_exprs(&t) {
+                    self.w_expr(x, fs, ac)?;
+                }
+            }
+            ExprKind::Tagged { .. } => return Err(unsupported("tagged template", ex.span)),
+            ExprKind::Array(l) | ExprKind::Seq(l) => {
+                for x in prog.list(l) {
+                    self.w_expr(x, fs, ac)?;
+                }
+            }
+            ExprKind::Object(l) => {
+                for p in prog.list(l) {
+                    let pr = *prog.prop(p);
+                    if let Key::Computed(k) = pr.key {
+                        self.w_expr(k, fs, ac)?;
+                    }
+                    self.w_expr(pr.value, fs, ac)?;
+                }
+            }
+            ExprKind::Function(f) => self.w_func(f, ac)?,
+            ExprKind::Class(_) => return Err(unsupported("class", ex.span)),
+            ExprKind::Unary { arg, .. } | ExprKind::Update { arg, .. } | ExprKind::Spread(arg) | ExprKind::Paren(arg) | ExprKind::Chain(arg) => self.w_expr(arg, fs, ac)?,
+            ExprKind::Binary { left, right, .. } | ExprKind::Logical { left, right, .. } => {
+                self.w_expr(left, fs, ac)?;
+                self.w_expr(right, fs, ac)?;
+            }
+            ExprKind::Assign { target, value, .. } => {
+                self.w_pat(target, fs, ac)?;
+                self.w_expr(value, fs, ac)?;
+            }
+            ExprKind::Cond { test, cons, alt } => {
+                for x in [test, cons, alt] {
+                    self.w_expr(x, fs, ac)?;
+                }
+            }
+            ExprKind::Call { callee, args, .. } | ExprKind::New { callee, args } => {
+                self.w_expr(callee, fs, ac)?;
+                for x in prog.list(args) {
+                    self.w_expr(x, fs, ac)?;
+                }
+            }
+            ExprKind::Member { obj, .. } => self.w_expr(obj, fs, ac)?,
+            ExprKind::Index { obj, index, .. } => {
+                self.w_expr(obj, fs, ac)?;
+                self.w_expr(index, fs, ac)?;
+            }
+            ExprKind::PrivateMember { .. } | ExprKind::PrivateIn { .. } => return Err(unsupported("private name", ex.span)),
+            ExprKind::Super => return Err(unsupported("super", ex.span)),
+            ExprKind::NewTarget => return Err(unsupported("new.target", ex.span)),
+            ExprKind::Await(_) => return Err(unsupported("await", ex.span)),
+        }
+        Ok(())
+    }
+
+    // ------------------------------------------------------------ builtins
+
+    fn def(&mut self, o: ObjId, key: PropertyKey, v: Value, w: bool, e: bool, c: bool) -> Res<()> {
+        let d = PropertyDescriptor { value: Some(v), writable: Some(w), enumerable: Some(e), configurable: Some(c), ..Default::default() };
+        h!(self, self.heap.define_own_property(o, key, &d));
+        Ok(())
+    }
+
+    fn native(&mut self, n: Nat, name: &str, len: u32) -> Res<ObjId> {
+        let o = self.new_func_object(Callee::Native(n))?;
+        let s = h!(self, self.heap.intern_str(name));
+        self.def(o, self.k_length, Value::Number(len as f64), false, false, true)?;
+        self.def(o, self.k_name, Value::String(s), false, false, true)?;
+        Ok(o)
+    }
+
+    fn method(&mut self, on: ObjId, name: &str, n: Nat, len: u32) -> Res<ObjId> {
+        let f = self.native(n, name, len)?;
+        let k = h!(self, self.heap.key_from_str(name));
+        self.def(on, k, Value::Object(f), true, false, true)?;
+        Ok(f)
+    }
+
+    fn install_builtins(&mut self) -> Res<()> {
+        let g = self.global;
+        for (n, v) in [("undefined", Value::Undefined), ("NaN", Value::Number(f64::NAN)), ("Infinity", Value::Number(f64::INFINITY))] {
+            let k = h!(self, self.heap.key_from_str(n));
+            self.def(g, k, v, false, false, false)?;
+        }
+        let k = h!(self, self.heap.key_from_str("globalThis"));
+        self.def(g, k, Value::Object(g), true, false, true)?;
+        let (op, fp, ap) = (self.object_proto, self.function_proto, self.array_proto);
+        // constructors: name, native, length, prototype
+        let ctors: [(&str, Nat, u32, ObjId); 3] = [("Object", Nat::ObjectCtor, 1, op), ("Function", Nat::FnCtor, 1, fp), ("Array", Nat::ArrayCtor, 1, ap)];
+        let mut made = Vec::new();
+        for (name, n, len, proto) in ctors {
+            let c = self.native(n, name, len)?;
+            self.def(c, self.k_prototype, Value::Object(proto), false, false, false)?;
+            self.def(proto, self.k_constructor, Value::Object(c), true, false, true)?;
+            let k = h!(self, self.heap.key_from_str(name));
+            self.def(g, k, Value::Object(c), true, false, true)?;
+            made.push(c);
+        }
+        let (oc, ac) = (made[0], made[2]);
+        self.method(oc, "keys", Nat::ObjectKeys, 1)?;
+        self.method(oc, "defineProperty", Nat::ObjectDefineProperty, 3)?;
+        self.method(oc, "getOwnPropertyDescriptor", Nat::ObjectGetOwnPropertyDescriptor, 2)?;
+        self.method(oc, "create", Nat::ObjectCreate, 2)?;
+        self.method(oc, "getPrototypeOf", Nat::ObjectGetPrototypeOf, 1)?;
+        self.method(op, "hasOwnProperty", Nat::ObjHasOwn, 1)?;
+        self.method(op, "toString", Nat::ObjToString, 0)?;
+        self.method(op, "valueOf", Nat::ObjValueOf, 0)?;
+        self.method(fp, "call", Nat::FnCall, 1)?;
+        self.method(fp, "apply", Nat::FnApply, 2)?;
+        self.method(fp, "bind", Nat::FnBind, 1)?;
+        self.method(ac, "isArray", Nat::ArrayIsArray, 1)?;
+        self.method(ap, "push", Nat::ArrPush, 1)?;
+        self.method(ap, "pop", Nat::ArrPop, 0)?;
+        self.method(ap, "forEach", Nat::ArrForEach, 1)?;
+        self.method(ap, "join", Nat::ArrJoin, 1)?;
+        self.method(ap, "toString", Nat::ArrJoin, 0)?;
+        let mut error_ctor: Option<ObjId> = None;
+        for (i, &error_name) in ERR_NAMES.iter().enumerate() {
+            let proto = self.error_protos[i];
+            let c = self.native(Nat::ErrorCtor(i as u8), error_name, 1)?;
+            self.def(c, self.k_prototype, Value::Object(proto), false, false, false)?;
+            self.def(proto, self.k_constructor, Value::Object(c), true, false, true)?;
+            if let Some(base) = error_ctor {
+                h!(self, self.heap.set_prototype_of(c, Some(base)));
+            } else {
+                error_ctor = Some(c);
+            }
+            let nm = h!(self, self.heap.intern_str(error_name));
+            self.def(proto, self.k_name, Value::String(nm), true, false, true)?;
+            let empty = h!(self, self.heap.intern_str(""));
+            self.def(proto, self.k_message, Value::String(empty), true, false, true)?;
+            if i == 0 {
+                self.method(proto, "toString", Nat::ErrToString, 0)?;
+            } else {
+                let base = self.error_protos[0];
+                h!(self, self.heap.set_prototype_of(proto, Some(base)));
+            }
+            let k = h!(self, self.heap.key_from_str(error_name));
+            self.def(g, k, Value::Object(c), true, false, true)?;
+        }
+        for (name, n) in [("String", Nat::StringFn), ("Number", Nat::NumberFn), ("Boolean", Nat::BooleanFn), ("isNaN", Nat::IsNaN)] {
+            let f = self.native(n, name, 1)?;
+            let k = h!(self, self.heap.key_from_str(name));
+            self.def(g, k, Value::Object(f), true, false, true)?;
+        }
+        Ok(())
+    }
+
+    /// Allocate a function object and register its code. Checks the function-slot limit.
+    fn new_func_object(&mut self, c: Callee) -> Res<ObjId> {
+        if self.funcs.len() >= self.limits.max_functions {
+            return Err(Error::Limit(LimitKind::Functions));
+        }
+        let o = h!(self, self.heap.new_object(Some(self.function_proto)));
+        self.funcs.insert(o, c);
+        Ok(o)
+    }
+
+    // ------------------------------------------------------------ environments
+
+    fn new_env(&mut self, parent: u32, var_scope: bool) -> Res<u32> {
+        if self.live_envs >= self.limits.max_envs {
+            return Err(Error::Limit(LimitKind::Envs));
+        }
+        self.live_envs += 1;
+        if let Some(i) = self.free_envs.pop() {
+            let e = &mut self.envs[i as usize];
+            e.parent = parent;
+            e.live = true;
+            e.captured = false;
+            e.var_scope = var_scope;
+            return Ok(i);
+        }
+        self.envs.push(Env { parent, bindings: Vec::new(), index: None, this: None, captured: false, live: true, var_scope });
+        Ok(self.envs.len() as u32 - 1)
+    }
+
+    fn free_env(&mut self, i: u32) {
+        let e = &mut self.envs[i as usize];
+        if !e.live || i == 0 {
+            return;
+        }
+        e.live = false;
+        e.bindings.clear();
+        e.index = None;
+        e.this = None;
+        self.live_envs -= 1;
+        self.free_envs.push(i);
+    }
+
+    /// Free an environment on scope exit when no closure captured it.
+    fn release(&mut self, i: u32) {
+        if !self.envs[i as usize].captured {
+            self.free_env(i);
+        }
+    }
+
+    /// A closure captures the current environment and all its parents.
+    fn capture(&mut self) {
+        let mut e = self.env;
+        while e != NONE && !self.envs[e as usize].captured {
+            self.envs[e as usize].captured = true;
+            e = self.envs[e as usize].parent;
+        }
+    }
+
+    fn find_in(&self, env: u32, name: u32) -> Option<usize> {
+        let e = &self.envs[env as usize];
+        if let Some(ix) = &e.index {
+            return ix.get(&name).map(|&i| i as usize);
+        }
+        e.bindings.iter().position(|b| b.name == name)
+    }
+
+    fn env_declare(&mut self, env: u32, name: u32, flags: u8, value: Value) {
+        if let Some(i) = self.find_in(env, name) {
+            let b = &mut self.envs[env as usize].bindings[i];
+            b.flags = flags;
+            b.value = value;
+            return;
+        }
+        let e = &mut self.envs[env as usize];
+        e.bindings.push(Binding { name, flags, value });
+        let n = e.bindings.len();
+        if let Some(ix) = &mut e.index {
+            ix.insert(name, n as u32 - 1);
+        } else if n > 12 {
+            e.index = Some(Box::new(e.bindings.iter().enumerate().map(|(i, b)| (b.name, i as u32)).collect()));
+        }
+    }
+
+    /// `var` hoisting: a missing name becomes `undefined`. A function's own-name binding is replaced.
+    fn declare_var(&mut self, env: u32, name: u32) {
+        match self.find_in(env, name) {
+            None => self.env_declare(env, name, INIT | MUT, Value::Undefined),
+            Some(i) => {
+                let b = &mut self.envs[env as usize].bindings[i];
+                if b.flags & SELF != 0 {
+                    b.flags = INIT | MUT;
+                    b.value = Value::Undefined;
+                }
+            }
+        }
+    }
+
+    fn lookup(&self, name: u32) -> Option<(u32, usize)> {
+        let mut e = self.env;
+        while e != NONE {
+            if let Some(i) = self.find_in(e, name) {
+                return Some((e, i));
+            }
+            e = self.envs[e as usize].parent;
+        }
+        None
+    }
+
+    fn lookup_this(&self) -> Value {
+        let mut e = self.env;
+        while e != NONE {
+            if let Some(t) = self.envs[e as usize].this {
+                return t;
+            }
+            e = self.envs[e as usize].parent;
+        }
+        Value::Undefined
+    }
+
+    fn declare_pat_lexical(&mut self, p: PatId, flags: u8) {
+        let mut names = Vec::new();
+        self.pat_names(p, &mut names);
+        for n in names {
+            self.env_declare(self.env, n, flags, Value::Undefined);
+        }
+    }
+
+    fn has_lexical(&self, l: List<Stmt>) -> bool {
+        self.prog.list(l).any(|s| match self.prog.stmt(s).kind {
+            StmtKind::Var { kind, .. } => kind != VarKind::Var,
+            StmtKind::Function(_) => true,
+            _ => false,
+        })
+    }
+
+    /// Hoist the declarations of a statement list into the current environment: `let`/`const` as
+    /// uninitialized (TDZ), function declarations as initialized closures. `func_top`: the list is a
+    /// function or script body, where functions are var-scoped.
+    fn declare_scope(&mut self, l: List<Stmt>, func_top: bool) -> Res<()> {
+        let prog = self.prog;
+        for s in prog.list(l) {
+            match prog.stmt(s).kind {
+                StmtKind::Var { kind, decls } if kind != VarKind::Var => {
+                    for d in prog.list(decls) {
+                        let target = prog.decl(d).target;
+                        self.declare_pat_lexical(target, if kind == VarKind::Let { MUT } else { 0 });
+                    }
+                }
+                StmtKind::Function(fid) => {
+                    let f = self.make_closure(fid, None, false)?;
+                    let n = self.func_name[fid.index()];
+                    if func_top && self.env == 0 {
+                        let key = self.name_key(n)?;
+                        let d = PropertyDescriptor { value: Some(f), writable: Some(true), enumerable: Some(true), configurable: Some(false), ..Default::default() };
+                        h!(self, self.heap.define_own_property(self.global, key, &d));
+                    } else {
+                        self.env_declare(self.env, n, INIT | MUT, f);
+                    }
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+
+    // ------------------------------------------------------------ functions
+
+    fn make_closure(&mut self, fid: FuncId, name: Option<StrId>, is_expr: bool) -> Res<Value> {
+        let prog = self.prog;
+        let f = *prog.func(fid);
+        self.capture();
+        let self_binding = is_expr && f.name.is_some() && f.kind == FuncKind::Normal;
+        let o = self.new_func_object(Callee::Script { fid, env: self.env, self_binding })?;
+        let nstr = match (f.name.is_some(), name) {
+            (true, _) => self.name_str(self.func_name[fid.index()])?,
+            (false, Some(s)) => s,
+            (false, None) => h!(self, self.heap.intern_str("")),
+        };
+        let mut len = 0;
+        for p in prog.list(f.params) {
+            if matches!(prog.pat(p).kind, PatKind::Assign { .. } | PatKind::Rest(_)) {
+                break;
+            }
+            len += 1;
+        }
+        self.def(o, self.k_length, Value::Number(len as f64), false, false, true)?;
+        self.def(o, self.k_name, Value::String(nstr), false, false, true)?;
+        if f.kind == FuncKind::Normal {
+            let proto = h!(self, self.heap.new_object(Some(self.object_proto)));
+            self.def(proto, self.k_constructor, Value::Object(o), true, false, true)?;
+            self.def(o, self.k_prototype, Value::Object(proto), true, false, false)?;
+        }
+        Ok(Value::Object(o))
+    }
+
+    fn call_fn(&mut self, f: Value, this: Value, args: &[Value]) -> Res<Value> {
+        self.descend(|it| it.call_fn_inner(f, this, args))
+    }
+
+    fn call_fn_inner(&mut self, f: Value, this: Value, args: &[Value]) -> Res<Value> {
+        if self.depth >= self.limits.max_call_depth {
+            return Err(Error::Limit(LimitKind::CallDepth));
+        }
+        self.tick()?;
+        let Value::Object(o) = f else { return Err(self.type_err("value is not a function")) };
+        enum D {
+            S(FuncId, u32, bool),
+            N(Nat),
+            B(ObjId, Value, Vec<Value>),
+        }
+        let d = match self.funcs.get(&o) {
+            Some(&Callee::Script { fid, env, self_binding }) => D::S(fid, env, self_binding),
+            Some(&Callee::Native(n)) => D::N(n),
+            Some(Callee::Bound { target, this, args }) => D::B(*target, *this, args.clone()),
+            None => return Err(self.type_err("value is not a function")),
+        };
+        self.depth += 1;
+        let r = match d {
+            D::S(fid, env, sb) => self.call_script(o, fid, env, sb, this, args),
+            D::N(n) => self.call_native(n, this, args, false),
+            D::B(t, bthis, mut bargs) => {
+                bargs.extend_from_slice(args);
+                self.call_fn(Value::Object(t), bthis, &bargs)
+            }
+        };
+        self.depth -= 1;
+        r
+    }
+
+    fn construct(&mut self, f: Value, args: &[Value], callee: ExprId) -> Res<Value> {
+        self.descend(|it| it.construct_inner(f, args, callee))
+    }
+
+    fn construct_inner(&mut self, f: Value, args: &[Value], callee: ExprId) -> Res<Value> {
+        let not_ctor = |s: &mut Self| {
+            let d = s.src_text(callee);
+            Err(s.type_err(&format!("{d} is not a constructor")))
+        };
+        let Value::Object(o) = f else { return not_ctor(self) };
+        if self.depth >= self.limits.max_call_depth {
+            return Err(Error::Limit(LimitKind::CallDepth));
+        }
+        self.tick()?;
+        enum D {
+            S(FuncId, u32, bool),
+            N(Nat),
+            B(ObjId, Vec<Value>),
+        }
+        let d = match self.funcs.get(&o) {
+            Some(&Callee::Script { fid, env, self_binding }) if self.prog.func(fid).kind == FuncKind::Normal => D::S(fid, env, self_binding),
+            Some(&Callee::Native(n)) if matches!(n, Nat::ObjectCtor | Nat::FnCtor | Nat::ArrayCtor | Nat::ErrorCtor(_)) => D::N(n),
+            Some(&Callee::Native(Nat::StringFn | Nat::NumberFn | Nat::BooleanFn)) => return Err(unsupported("wrapper object (new String/Number/Boolean)", Span::default())),
+            Some(Callee::Bound { target, args, .. }) => D::B(*target, args.clone()),
+            _ => return not_ctor(self),
+        };
+        self.depth += 1;
+        let r = match d {
+            D::S(fid, env, sb) => (|| {
+                let pv = self.get_prop(f, self.k_prototype)?;
+                let proto = if let Value::Object(p) = pv { p } else { self.object_proto };
+                let obj = h!(self, self.heap.new_object(Some(proto)));
+                let r = self.call_script(o, fid, env, sb, Value::Object(obj), args)?;
+                Ok(if matches!(r, Value::Object(_)) { r } else { Value::Object(obj) })
+            })(),
+            D::N(n) => self.call_native(n, Value::Undefined, args, true),
+            D::B(t, mut bargs) => {
+                bargs.extend_from_slice(args);
+                self.construct(Value::Object(t), &bargs, callee)
+            }
+        };
+        self.depth -= 1;
+        r
+    }
+
+    fn call_script(&mut self, fobj: ObjId, fid: FuncId, cenv: u32, self_binding: bool, this: Value, args: &[Value]) -> Res<Value> {
+        let (saved_env, saved_strict) = (self.env, self.strict);
+        let env = self.new_env(cenv, true)?;
+        self.env = env;
+        let r = self.call_body(fobj, fid, env, self_binding, this, args);
+        self.env = saved_env;
+        self.strict = saved_strict;
+        self.release(env);
+        r
+    }
+
+    fn call_body(&mut self, fobj: ObjId, fid: FuncId, env: u32, self_binding: bool, this: Value, args: &[Value]) -> Res<Value> {
+        let prog = self.prog;
+        let f = *prog.func(fid);
+        self.strict = f.strict;
+        if f.kind != FuncKind::Arrow {
+            let t = if !f.strict && is_nullish(this) { Value::Object(self.global) } else { this };
+            self.envs[env as usize].this = Some(t);
+        }
+        if self_binding {
+            let n = self.func_name[fid.index()];
+            self.env_declare(env, n, INIT | SELF, Value::Object(fobj));
+        }
+        if f.simple_params {
+            for (i, p) in prog.list(f.params).enumerate() {
+                let n = self.pat_name[p.index()];
+                self.env_declare(env, n, INIT | MUT, args.get(i).copied().unwrap_or(Value::Undefined));
+            }
+        } else {
+            for (i, p) in prog.list(f.params).enumerate() {
+                if let PatKind::Rest(t) = prog.pat(p).kind {
+                    let rest = args.get(i..).unwrap_or(&[]).to_vec();
+                    let arr = self.new_array_from(&rest)?;
+                    self.bind_pattern(t, arr, Bind::Declare)?;
+                } else {
+                    self.bind_pattern(p, args.get(i).copied().unwrap_or(Value::Undefined), Bind::Declare)?;
+                }
+            }
+        }
+        if self.scopes[fid.index()].uses_args && f.kind != FuncKind::Arrow {
+            let o = h!(self, self.heap.new_object(Some(self.object_proto)));
+            for (i, &a) in args.iter().enumerate() {
+                self.def(o, PropertyKey::Index(i as u32), a, true, true, true)?;
+            }
+            self.def(o, self.k_length, Value::Number(args.len() as f64), true, false, true)?;
+            self.env_declare(env, self.n_arguments, INIT | MUT, Value::Object(o));
+        }
+        for i in 0..self.scopes[fid.index()].vars.len() {
+            let n = self.scopes[fid.index()].vars[i];
+            self.declare_var(env, n);
+        }
+        match f.body {
+            Body::Expr(e) => self.eval_expr(e),
+            Body::Block(l) => {
+                self.declare_scope(l, true)?;
+                match self.exec_list(l) {
+                    Ok(()) => Ok(Value::Undefined),
+                    Err(Ctl::Return) => Ok(std::mem::replace(&mut self.ret, Value::Undefined)),
+                    Err(Ctl::Err(e)) => Err(e),
+                    Err(_) => Err(unsupported("stray break or continue", f.span)),
+                }
+            }
+        }
+    }
+
+    fn new_array_from(&mut self, items: &[Value]) -> Res<Value> {
+        let a = h!(self, self.heap.new_array(Some(self.array_proto)));
+        for (i, &v) in items.iter().enumerate() {
+            self.def(a, PropertyKey::Index(i as u32), v, true, true, true)?;
+        }
+        Ok(Value::Object(a))
+    }
+
+    // ------------------------------------------------------------ conversions
+
+    /// Check temporary string growth before allocating the appended units.
+    fn append_string(&self, out: &mut Vec<u16>, units: &[u16]) -> Res<()> {
+        let limits = self.heap.limits();
+        let len = out.len().checked_add(units.len()).ok_or(Error::Limit(LimitKind::Heap(Limit::StringLength)))?;
+        if len > limits.max_string_units { return Err(Error::Limit(LimitKind::Heap(Limit::StringLength))); }
+        if len > limits.max_bytes / 2 { return Err(Error::Limit(LimitKind::Heap(Limit::Bytes))); }
+        out.extend_from_slice(units);
+        Ok(())
+    }
+
+    fn coerce_primitive(&mut self, v: Value, hint: Hint) -> Res<Value> {
+        let Value::Object(_) = v else { return Ok(v) };
+        let order = if hint == Hint::String { [self.k_to_string, self.k_value_of] } else { [self.k_value_of, self.k_to_string] };
+        for k in order {
+            let m = self.get_prop(v, k)?;
+            if self.is_callable(m) {
+                let r = self.call_fn(m, v, &[])?;
+                if !matches!(r, Value::Object(_)) {
+                    return Ok(r);
+                }
+            }
+        }
+        Err(self.type_err("Cannot convert object to primitive value"))
+    }
+
+    fn coerce_number(&mut self, v: Value) -> Res<f64> {
+        let p = self.coerce_primitive(v, Hint::Number)?;
+        if let Value::Symbol(_) = p {
+            return Err(self.type_err("Cannot convert a Symbol value to a number"));
+        }
+        Ok(h!(self, self.heap.to_number(p)))
+    }
+
+    fn coerce_string(&mut self, v: Value) -> Res<StrId> {
+        let p = self.coerce_primitive(v, Hint::String)?;
+        Ok(h!(self, self.heap.to_string(p)))
+    }
+
+    fn coerce_key(&mut self, v: Value) -> Res<PropertyKey> {
+        let p = self.coerce_primitive(v, Hint::String)?;
+        Ok(h!(self, self.heap.to_property_key(p)))
+    }
+
+    fn truthy(&self, v: Value) -> Res<bool> {
+        self.heap.to_boolean(v).map_err(Error::Heap)
+    }
+
+    fn type_of(&self, v: Value) -> &'static str {
+        if self.is_callable(v) {
+            return "function";
+        }
+        self.heap.type_of(v).unwrap_or("undefined")
+    }
+
+    // ------------------------------------------------------------ property access
+
+    fn get_prop(&mut self, base: Value, key: PropertyKey) -> Res<Value> {
+        let o = match base {
+            Value::Object(o) => o,
+            Value::Undefined | Value::Null => {
+                let t = self.display(base);
+                let k = self.key_text(key);
+                return Err(self.type_err(&format!("Cannot read properties of {t} (reading '{k}')")));
+            }
+            Value::String(s) => {
+                if key == self.k_length {
+                    return Ok(Value::Number(h!(self, self.heap.str_len(s)) as f64));
+                }
+                if let PropertyKey::Index(i) = key
+                    && (i as usize) < h!(self, self.heap.str_len(s))
+                {
+                    return Ok(Value::String(h!(self, self.heap.substring(s, i as usize, i as usize + 1))));
+                }
+                self.object_proto
+            }
+            _ => self.object_proto,
+        };
+        match h!(self, self.heap.get(o, key)) {
+            Get::Value(v) => Ok(v),
+            Get::Accessor { getter: Some(g) } => self.call_fn(Value::Object(g), base, &[]),
+            Get::Accessor { getter: None } => Ok(Value::Undefined),
+        }
+    }
+
+    fn put_prop(&mut self, base: Value, key: PropertyKey, v: Value) -> Res<()> {
+        match base {
+            Value::Object(o) => match h!(self, self.heap.set(o, key, v)) {
+                Set::Done => Ok(()),
+                Set::Rejected if self.strict => {
+                    let k = self.key_text(key);
+                    Err(self.type_err(&format!("Cannot assign to read only property '{k}' of object")))
+                }
+                Set::Rejected => Ok(()),
+                Set::Setter(s) => self.call_fn(Value::Object(s), base, &[v]).map(|_| ()),
+            },
+            Value::Undefined | Value::Null => {
+                let t = self.display(base);
+                let k = self.key_text(key);
+                Err(self.type_err(&format!("Cannot set properties of {t} (setting '{k}')")))
+            }
+            _ if self.strict => {
+                let k = self.key_text(key);
+                let t = self.type_of(base);
+                Err(self.type_err(&format!("Cannot create property '{k}' on {t}")))
+            }
+            _ => Ok(()),
+        }
+    }
+
+    fn expr_key(&mut self, e: ExprId, name: Span) -> Res<PropertyKey> {
+        if let Some(s) = self.expr_str[e.index()] {
+            return Ok(h!(self, self.heap.key_from_string(s)));
+        }
+        let n = self.prog.name(name);
+        let s = h!(self, self.heap.intern_str(&n));
+        self.expr_str[e.index()] = Some(s);
+        Ok(h!(self, self.heap.key_from_string(s)))
+    }
+
+    fn prop_key(&mut self, pid: Id<Prop>, key: Key) -> Res<PropertyKey> {
+        let prog = self.prog;
+        match key {
+            Key::Computed(e) => {
+                let v = self.eval_expr(e)?;
+                self.coerce_key(v)
+            }
+            Key::None | Key::Private(_) | Key::BigInt(_) => Err(unsupported("property key", Span::default())),
+            _ => {
+                if let Some(s) = self.prop_str[pid.index()] {
+                    return Ok(h!(self, self.heap.key_from_string(s)));
+                }
+                let s = self.key_string(key, prog)?;
+                self.prop_str[pid.index()] = Some(s);
+                Ok(h!(self, self.heap.key_from_string(s)))
+            }
+        }
+    }
+
+    fn key_string(&mut self, key: Key, prog: &Program<'_>) -> Res<StrId> {
+        match key {
+            Key::Name(sp) => Ok(h!(self, self.heap.intern_str(&prog.name(sp)))),
+            Key::Str(sp) => {
+                let mut u = Vec::new();
+                let _ = prog.string(sp, &mut u);
+                Ok(h!(self, self.heap.intern_vec(u)))
+            }
+            Key::Num(sp) => {
+                let n = self.num_lit(sp, num_base(prog.text(sp)));
+                Ok(h!(self, self.heap.intern_str(&number_to_string(n))))
+            }
+            _ => Err(unsupported("property key", Span::default())),
+        }
+    }
+
+    fn num_lit(&self, sp: Span, base: NumBase) -> f64 {
+        let t = self.prog.text(sp).as_bytes();
+        if t.len() <= 15 && t.iter().all(u8::is_ascii_digit) {
+            return t.iter().fold(0u64, |a, &d| a * 10 + (d - b'0') as u64) as f64;
+        }
+        self.prog.number(sp, base).unwrap_or(f64::NAN)
+    }
+
+    // ------------------------------------------------------------ names (variables)
+
+    fn tdz(&mut self, n: u32) -> Error {
+        let m = format!("Cannot access '{}' before initialization", self.names[n as usize]);
+        self.mk_err(REFERENCE_ERROR, &m)
+    }
+
+    fn get_name(&mut self, n: u32) -> Res<Value> {
+        if let Some((e, i)) = self.lookup(n) {
+            let b = &self.envs[e as usize].bindings[i];
+            return if b.flags & INIT != 0 { Ok(b.value) } else { Err(self.tdz(n)) };
+        }
+        let key = self.name_key(n)?;
+        match h!(self, self.heap.lookup(self.global, key)) {
+            Some((_, Property::Data { value, .. })) => Ok(value),
+            Some((_, Property::Accessor { get, .. })) => match get {
+                Some(g) => self.call_fn(Value::Object(g), Value::Object(self.global), &[]),
+                None => Ok(Value::Undefined),
+            },
+            None => {
+                let m = format!("{} is not defined", self.names[n as usize]);
+                Err(self.mk_err(REFERENCE_ERROR, &m))
+            }
+        }
+    }
+
+    fn assign_name(&mut self, n: u32, v: Value) -> Res<()> {
+        if let Some((e, i)) = self.lookup(n) {
+            let b = &mut self.envs[e as usize].bindings[i];
+            if b.flags & INIT == 0 {
+                return Err(self.tdz(n));
+            }
+            if b.flags & MUT == 0 {
+                if b.flags & SELF != 0 && !self.strict {
+                    return Ok(());
+                }
+                return Err(self.type_err("Assignment to constant variable."));
+            }
+            b.value = v;
+            return Ok(());
+        }
+        let key = self.name_key(n)?;
+        if self.strict && !h!(self, self.heap.has_property(self.global, key)) {
+            let m = format!("{} is not defined", self.names[n as usize]);
+            return Err(self.mk_err(REFERENCE_ERROR, &m));
+        }
+        self.put_prop(Value::Object(self.global), key, v)
+    }
+
+    // ------------------------------------------------------------ expressions
+
+    fn eval_named(&mut self, e: ExprId, name: Option<StrId>) -> Res<Value> {
+        let ex = *self.prog.expr(e);
+        match ex.kind {
+            ExprKind::Function(fid) if self.prog.func(fid).name.is_none() => self.make_closure(fid, name, true),
+            ExprKind::Paren(inner) => self.eval_named(inner, name),
+            _ => self.eval_expr(e),
+        }
+    }
+
+    fn eval_args(&mut self, l: List<Expr>) -> Res<Vec<Value>> {
+        let prog = self.prog;
+        let mut out = self.arg_pool.pop().unwrap_or_default();
+        out.clear();
+        for a in prog.list(l) {
+            if let ExprKind::Spread(inner) = prog.expr(a).kind {
+                let v = self.eval_expr(inner)?;
+                let mut it = self.iter_start(v, inner)?;
+                while let Some(x) = self.iter_next(&mut it)? {
+                    out.push(x);
+                }
+            } else {
+                out.push(self.eval_expr(a)?);
+            }
+        }
+        Ok(out)
+    }
+
+    fn link(&mut self, e: ExprId) -> Res<Option<(Value, Value)>> {
+        self.descend(|it| it.link_inner(e))
+    }
+
+    fn link_inner(&mut self, e: ExprId) -> Res<Option<(Value, Value)>> {
+        let prog = self.prog;
+        let ex = *prog.expr(e);
+        match ex.kind {
+            ExprKind::Member { obj, name, optional } => {
+                let Some((base, _)) = self.link(obj)? else { return Ok(None) };
+                if optional && is_nullish(base) {
+                    return Ok(None);
+                }
+                let key = self.expr_key(e, name)?;
+                Ok(Some((self.get_prop(base, key)?, base)))
+            }
+            ExprKind::Index { obj, index, optional } => {
+                let Some((base, _)) = self.link(obj)? else { return Ok(None) };
+                if optional && is_nullish(base) {
+                    return Ok(None);
+                }
+                let iv = self.eval_expr(index)?;
+                if is_nullish(base) {
+                    let t = self.display(base);
+                    let ks = self.coerce_string(iv).map(|s| self.heap.to_string_lossy(s).unwrap_or_default()).unwrap_or_default();
+                    return Err(self.type_err(&format!("Cannot read properties of {t} (reading '{ks}')")));
+                }
+                let key = self.coerce_key(iv)?;
+                Ok(Some((self.get_prop(base, key)?, base)))
+            }
+            ExprKind::Call { callee, args, optional } => {
+                let Some((f, this)) = self.link(callee)? else { return Ok(None) };
+                if optional && is_nullish(f) {
+                    return Ok(None);
+                }
+                let argv = self.eval_args(args)?;
+                if !self.is_callable(f) {
+                    let m = format!("{} is not a function", self.src_text(callee));
+                    return Err(self.type_err(&m));
+                }
+                let r = self.call_fn(f, this, &argv)?;
+                self.arg_pool.push(argv);
+                Ok(Some((r, Value::Undefined)))
+            }
+            ExprKind::Paren(inner) if matches!(self.unparen(inner), ExprKind::Member { .. } | ExprKind::Index { .. } | ExprKind::Chain(_)) => self.link(inner),
+            ExprKind::Chain(inner) => Ok(Some(self.link(inner)?.unwrap_or((Value::Undefined, Value::Undefined)))),
+            _ => Ok(Some((self.eval_expr(e)?, Value::Undefined))),
+        }
+    }
+
+    fn unparen(&self, mut e: ExprId) -> ExprKind {
+        while let ExprKind::Paren(i) = self.prog.expr(e).kind {
+            e = i;
+        }
+        self.prog.expr(e).kind
+    }
+
+    fn eval_expr(&mut self, e: ExprId) -> Res<Value> {
+        self.descend(|it| it.eval_expr_inner(e))
+    }
+
+    fn eval_expr_inner(&mut self, e: ExprId) -> Res<Value> {
+        self.tick()?;
+        let prog = self.prog;
+        let ex = *prog.expr(e);
+        match ex.kind {
+            ExprKind::Ident => self.get_name(self.expr_name[e.index()]),
+            ExprKind::This => Ok(self.lookup_this()),
+            ExprKind::Null => Ok(Value::Null),
+            ExprKind::Bool(b) => Ok(Value::Bool(b)),
+            ExprKind::Number(base) => Ok(Value::Number(self.num_lit(ex.span, base))),
+            ExprKind::String => {
+                if let Some(s) = self.expr_str[e.index()] {
+                    return Ok(Value::String(s));
+                }
+                let mut u = Vec::new();
+                let _ = prog.string(ex.span, &mut u);
+                let s = h!(self, self.heap.intern_vec(u));
+                self.expr_str[e.index()] = Some(s);
+                Ok(Value::String(s))
+            }
+            ExprKind::Template(t) => {
+                let t = *prog.template(t);
+                let mut out: Vec<u16> = Vec::new();
+                let quasis: Vec<_> = prog.template_quasis(&t).collect();
+                let exprs: Vec<_> = prog.template_exprs(&t).collect();
+                for (i, q) in quasis.iter().enumerate() {
+                    let _ = prog.quasi(prog.quasi_node(*q), false, &mut out);
+                    if let Some(&x) = exprs.get(i) {
+                        let v = self.eval_expr(x)?;
+                        let s = self.coerce_string(v)?;
+                        self.append_string(&mut out, h!(self, self.heap.str_units(s)))?;
+                    }
+                }
+                Ok(Value::String(h!(self, self.heap.intern_vec(out))))
+            }
+            ExprKind::Array(l) => {
+                let a = h!(self, self.heap.new_array(Some(self.array_proto)));
+                let mut n: u32 = 0;
+                for x in prog.list(l) {
+                    match prog.expr(x).kind {
+                        ExprKind::Hole => n += 1,
+                        ExprKind::Spread(inner) => {
+                            let v = self.eval_expr(inner)?;
+                            let mut it = self.iter_start(v, inner)?;
+                            while let Some(item) = self.iter_next(&mut it)? {
+                                self.def(a, PropertyKey::Index(n), item, true, true, true)?;
+                                n += 1;
+                            }
+                        }
+                        _ => {
+                            let v = self.eval_expr(x)?;
+                            self.def(a, PropertyKey::Index(n), v, true, true, true)?;
+                            n += 1;
+                        }
+                    }
+                }
+                h!(self, self.heap.set(a, self.k_length, Value::Number(n as f64)));
+                Ok(Value::Object(a))
+            }
+            ExprKind::Object(l) => self.eval_object(l),
+            ExprKind::Function(fid) => self.make_closure(fid, None, true),
+            ExprKind::Unary { op, arg } => self.eval_unary(op, arg),
+            ExprKind::Update { op, prefix, arg } => {
+                let r = self.expr_ref(arg)?;
+                let old = self.ref_get(&r)?;
+                let n = self.coerce_number(old)?;
+                let new = if op == UpdateOp::Inc { n + 1.0 } else { n - 1.0 };
+                self.ref_put(&r, Value::Number(new))?;
+                Ok(Value::Number(if prefix { new } else { n }))
+            }
+            ExprKind::Binary { op, left, right } => {
+                let a = self.eval_expr(left)?;
+                let b = self.eval_expr(right)?;
+                self.binary(op, a, b)
+            }
+            ExprKind::Logical { op, left, right } => {
+                let a = self.eval_expr(left)?;
+                let short = match op {
+                    LogicalOp::And => !self.truthy(a)?,
+                    LogicalOp::Or => self.truthy(a)?,
+                    LogicalOp::Nullish => !is_nullish(a),
+                };
+                if short { Ok(a) } else { self.eval_expr(right) }
+            }
+            ExprKind::Assign { op, target, value } => self.eval_assign(op, target, value),
+            ExprKind::Cond { test, cons, alt } => {
+                let t = self.eval_expr(test)?;
+                if self.truthy(t)? { self.eval_expr(cons) } else { self.eval_expr(alt) }
+            }
+            ExprKind::Call { .. } | ExprKind::Member { .. } | ExprKind::Index { .. } => Ok(self.link(e)?.map_or(Value::Undefined, |p| p.0)),
+            ExprKind::Chain(inner) => Ok(self.link(inner)?.map_or(Value::Undefined, |p| p.0)),
+            ExprKind::New { callee, args } => {
+                let f = self.eval_expr(callee)?;
+                let argv = self.eval_args(args)?;
+                self.construct(f, &argv, callee)
+            }
+            ExprKind::Seq(l) => {
+                let mut last = Value::Undefined;
+                for x in prog.list(l) {
+                    last = self.eval_expr(x)?;
+                }
+                Ok(last)
+            }
+            ExprKind::Paren(inner) => self.eval_expr(inner),
+            ExprKind::Spread(_) | ExprKind::Hole => Err(unsupported("spread or hole outside a list", ex.span)),
+            // The first walk rejects these before anything runs.
+            _ => Err(unsupported("expression", ex.span)),
+        }
+    }
+
+    fn eval_object(&mut self, l: List<Prop>) -> Res<Value> {
+        let prog = self.prog;
+        let o = h!(self, self.heap.new_object(Some(self.object_proto)));
+        for pid in prog.list(l) {
+            let p = *prog.prop(pid);
+            match p.kind {
+                PropKind::Spread => {
+                    let v = self.eval_expr(p.value)?;
+                    self.copy_props(o, v, &[])?;
+                }
+                PropKind::Init | PropKind::Shorthand | PropKind::Method => {
+                    let key = self.prop_key(pid, p.key)?;
+                    if p.kind == PropKind::Init && !matches!(p.key, Key::Computed(_)) && key == self.k_proto {
+                        let v = self.eval_expr(p.value)?;
+                        match v {
+                            Value::Object(po) => { h!(self, self.heap.set_prototype_of(o, Some(po))); }
+                            Value::Null => { h!(self, self.heap.set_prototype_of(o, None)); }
+                            _ => {}
+                        }
+                        continue;
+                    }
+                    let name = match key {
+                        PropertyKey::Symbol(_) => None,
+                        k => Some(self.key_str(k)?),
+                    };
+                    let v = self.eval_named(p.value, name)?;
+                    self.def(o, key, v, true, true, true)?;
+                }
+                PropKind::Get | PropKind::Set => {
+                    let key = self.prop_key(pid, p.key)?;
+                    let ExprKind::Function(fid) = prog.expr(p.value).kind else { return Err(unsupported("accessor", p.span)) };
+                    let Value::Object(f) = self.make_closure(fid, None, false)? else { return Err(unsupported("accessor", p.span)) };
+                    let d = if p.kind == PropKind::Get {
+                        PropertyDescriptor { get: Some(Some(f)), enumerable: Some(true), configurable: Some(true), ..Default::default() }
+                    } else {
+                        PropertyDescriptor { set: Some(Some(f)), enumerable: Some(true), configurable: Some(true), ..Default::default() }
+                    };
+                    h!(self, self.heap.define_own_property(o, key, &d));
+                }
+            }
+        }
+        Ok(Value::Object(o))
+    }
+
+    fn key_str(&mut self, k: PropertyKey) -> Res<StrId> {
+        match k {
+            PropertyKey::String(s) => Ok(s),
+            PropertyKey::Index(i) => Ok(h!(self, self.heap.intern_str(&i.to_string()))),
+            PropertyKey::Symbol(_) => Err(unsupported("symbol key", Span::default())),
+        }
+    }
+
+    /// CopyDataProperties: own enumerable properties of `src` onto `to`, skipping `skip`.
+    fn copy_props(&mut self, to: ObjId, src: Value, skip: &[PropertyKey]) -> Res<()> {
+        let keys: Vec<PropertyKey> = match src {
+            Value::Object(o) => h!(self, self.heap.own_keys(o)),
+            Value::String(s) => (0..h!(self, self.heap.str_len(s)) as u32).map(PropertyKey::Index).collect(),
+            _ => return Ok(()),
+        };
+        for k in keys {
+            if skip.contains(&k) {
+                continue;
+            }
+            if let Value::Object(o) = src {
+                match h!(self, self.heap.get_own_property(o, k)) {
+                    Some(p) if p.enumerable() => {}
+                    _ => continue,
+                }
+            }
+            let v = self.get_prop(src, k)?;
+            self.def(to, k, v, true, true, true)?;
+        }
+        Ok(())
+    }
+
+    fn eval_unary(&mut self, op: UnaryOp, arg: ExprId) -> Res<Value> {
+        match op {
+            UnaryOp::Typeof => {
+                if let ExprKind::Ident = self.unparen(arg) {
+                    let mut a = arg;
+                    while let ExprKind::Paren(i) = self.prog.expr(a).kind {
+                        a = i;
+                    }
+                    let n = self.expr_name[a.index()];
+                    if self.lookup(n).is_none() {
+                        let key = self.name_key(n)?;
+                        if !h!(self, self.heap.has_property(self.global, key)) {
+                            let s = h!(self, self.heap.intern_str("undefined"));
+                            return Ok(Value::String(s));
+                        }
+                    }
+                }
+                let v = self.eval_expr(arg)?;
+                let t = self.type_of(v);
+                Ok(Value::String(h!(self, self.heap.intern_str(t))))
+            }
+            UnaryOp::Delete => self.eval_delete(arg),
+            UnaryOp::Void => {
+                self.eval_expr(arg)?;
+                Ok(Value::Undefined)
+            }
+            UnaryOp::Not => {
+                let v = self.eval_expr(arg)?;
+                Ok(Value::Bool(!self.truthy(v)?))
+            }
+            UnaryOp::Neg => {
+                let v = self.eval_expr(arg)?;
+                Ok(Value::Number(-self.coerce_number(v)?))
+            }
+            UnaryOp::Plus => {
+                let v = self.eval_expr(arg)?;
+                Ok(Value::Number(self.coerce_number(v)?))
+            }
+            UnaryOp::BitNot => {
+                let v = self.eval_expr(arg)?;
+                Ok(Value::Number(!to_int32(self.coerce_number(v)?) as f64))
+            }
+        }
+    }
+
+    fn eval_delete(&mut self, arg: ExprId) -> Res<Value> {
+        let mut a = arg;
+        while let ExprKind::Paren(i) = self.prog.expr(a).kind {
+            a = i;
+        }
+        match self.prog.expr(a).kind {
+            ExprKind::Member { .. } | ExprKind::Index { .. } => {
+                let (base, key) = self.member_ref(a)?;
+                let o = match base {
+                    Value::Object(o) => o,
+                    Value::Undefined | Value::Null => {
+                        let t = self.display(base);
+                        let k = self.key_text(key);
+                        return Err(self.type_err(&format!("Cannot convert undefined or null to object ({t}, deleting '{k}')")));
+                    }
+                    _ => return Ok(Value::Bool(true)),
+                };
+                let ok = h!(self, self.heap.delete(o, key));
+                if !ok && self.strict {
+                    let k = self.key_text(key);
+                    return Err(self.type_err(&format!("Cannot delete property '{k}' of #<Object>")));
+                }
+                Ok(Value::Bool(ok))
+            }
+            ExprKind::Ident => {
+                let n = self.expr_name[a.index()];
+                if self.lookup(n).is_some() {
+                    return Ok(Value::Bool(false));
+                }
+                let key = self.name_key(n)?;
+                Ok(Value::Bool(h!(self, self.heap.delete(self.global, key))))
+            }
+            _ => {
+                self.eval_expr(arg)?;
+                Ok(Value::Bool(true))
+            }
+        }
+    }
+
+    // ------------------------------------------------------------ references and assignment
+
+    /// Evaluate the base and key of `a.b` or `a[b]`.
+    fn member_ref(&mut self, e: ExprId) -> Res<(Value, PropertyKey)> {
+        let ex = *self.prog.expr(e);
+        match ex.kind {
+            ExprKind::Member { obj, name, .. } => {
+                let base = self.eval_expr(obj)?;
+                Ok((base, self.expr_key(e, name)?))
+            }
+            ExprKind::Index { obj, index, .. } => {
+                let base = self.eval_expr(obj)?;
+                let iv = self.eval_expr(index)?;
+                if is_nullish(base) {
+                    let t = self.display(base);
+                    let ks = self.coerce_string(iv).map(|s| self.heap.to_string_lossy(s).unwrap_or_default()).unwrap_or_default();
+                    return Err(self.type_err(&format!("Cannot read properties of {t} (reading '{ks}')")));
+                }
+                Ok((base, self.coerce_key(iv)?))
+            }
+            ExprKind::Paren(i) => self.member_ref(i),
+            _ => Err(unsupported("assignment target", ex.span)),
+        }
+    }
+
+    fn expr_ref(&mut self, e: ExprId) -> Res<Ref> {
+        let ex = *self.prog.expr(e);
+        match ex.kind {
+            ExprKind::Ident => Ok(Ref::Name(self.expr_name[e.index()])),
+            ExprKind::Paren(i) => self.expr_ref(i),
+            ExprKind::Member { .. } | ExprKind::Index { .. } => {
+                let (b, k) = self.member_ref(e)?;
+                Ok(Ref::Prop(b, k))
+            }
+            _ => Err(unsupported("update target", ex.span)),
+        }
+    }
+
+    fn ref_get(&mut self, r: &Ref) -> Res<Value> {
+        match *r {
+            Ref::Name(n) => self.get_name(n),
+            Ref::Prop(b, k) => self.get_prop(b, k),
+        }
+    }
+
+    fn ref_put(&mut self, r: &Ref, v: Value) -> Res<()> {
+        match *r {
+            Ref::Name(n) => self.assign_name(n, v),
+            Ref::Prop(b, k) => self.put_prop(b, k, v),
+        }
+    }
+
+    fn eval_assign(&mut self, op: AssignOp, target: PatId, value: ExprId) -> Res<Value> {
+        let prog = self.prog;
+        let pat = *prog.pat(target);
+        let r = match pat.kind {
+            PatKind::Ident => Ref::Name(self.pat_name[target.index()]),
+            PatKind::Member(me) => {
+                let (b, k) = self.member_ref(me)?;
+                Ref::Prop(b, k)
+            }
+            PatKind::Array(_) | PatKind::Object(_) if op == AssignOp::Assign => {
+                let v = self.eval_expr(value)?;
+                self.bind_pattern(target, v, Bind::Assign)?;
+                return Ok(v);
+            }
+            _ => return Err(unsupported("assignment target", pat.span)),
+        };
+        let name = match r {
+            Ref::Name(n) => Some(self.name_str(n)?),
+            _ => None,
+        };
+        let v = match op {
+            AssignOp::Assign => self.eval_named(value, name)?,
+            AssignOp::Compound(b) => {
+                let old = self.ref_get(&r)?;
+                let rhs = self.eval_expr(value)?;
+                self.binary(b, old, rhs)?
+            }
+            AssignOp::Logical(l) => {
+                let old = self.ref_get(&r)?;
+                let short = match l {
+                    LogicalOp::And => !self.truthy(old)?,
+                    LogicalOp::Or => self.truthy(old)?,
+                    LogicalOp::Nullish => !is_nullish(old),
+                };
+                if short {
+                    return Ok(old);
+                }
+                self.eval_named(value, name)?
+            }
+        };
+        self.ref_put(&r, v)?;
+        Ok(v)
+    }
+
+    fn bind_pattern(&mut self, p: PatId, v: Value, mode: Bind) -> Res<()> {
+        self.descend(|it| it.bind_pattern_inner(p, v, mode))
+    }
+
+    fn bind_pattern_inner(&mut self, p: PatId, v: Value, mode: Bind) -> Res<()> {
+        let prog = self.prog;
+        let pat = *prog.pat(p);
+        match pat.kind {
+            PatKind::Ident => {
+                let n = self.pat_name[p.index()];
+                match mode {
+                    Bind::Assign => self.assign_name(n, v),
+                    Bind::Declare => {
+                        self.env_declare(self.env, n, INIT | MUT, v);
+                        Ok(())
+                    }
+                    Bind::Init => {
+                        match self.find_in(self.env, n) {
+                            Some(i) => {
+                                let b = &mut self.envs[self.env as usize].bindings[i];
+                                b.flags |= INIT;
+                                b.value = v;
+                            }
+                            None => self.env_declare(self.env, n, INIT | MUT, v),
+                        }
+                        Ok(())
+                    }
+                }
+            }
+            PatKind::Member(me) => {
+                let (b, k) = self.member_ref(me)?;
+                self.put_prop(b, k, v)
+            }
+            PatKind::Assign { target, default } => {
+                let v = if matches!(v, Value::Undefined) {
+                    let name = if let PatKind::Ident = prog.pat(target).kind { Some(self.name_str(self.pat_name[target.index()])?) } else { None };
+                    self.eval_named(default, name)?
+                } else {
+                    v
+                };
+                self.bind_pattern(target, v, mode)
+            }
+            PatKind::Array(l) => {
+                let mut it = self.iter_start_val(v)?;
+                for q in prog.list(l) {
+                    match prog.pat(q).kind {
+                        PatKind::Hole => {
+                            self.iter_next(&mut it)?;
+                        }
+                        PatKind::Rest(t) => {
+                            let mut rest = Vec::new();
+                            while let Some(x) = self.iter_next(&mut it)? {
+                                rest.push(x);
+                            }
+                            let arr = self.new_array_from(&rest)?;
+                            self.bind_pattern(t, arr, mode)?;
+                        }
+                        _ => {
+                            let x = self.iter_next(&mut it)?.unwrap_or(Value::Undefined);
+                            self.bind_pattern(q, x, mode)?;
+                        }
+                    }
+                }
+                Ok(())
+            }
+            PatKind::Object(l) => {
+                if is_nullish(v) {
+                    let t = self.display(v);
+                    return Err(self.type_err(&format!("Cannot destructure '{t}' as it is {t}.")));
+                }
+                let mut used = Vec::new();
+                for q in prog.list(l) {
+                    let pp = *prog.pat_prop(q);
+                    if let PatKind::Rest(t) = prog.pat(pp.value).kind {
+                        let o = h!(self, self.heap.new_object(Some(self.object_proto)));
+                        self.copy_props(o, v, &used)?;
+                        self.bind_pattern(t, Value::Object(o), mode)?;
+                        continue;
+                    }
+                    let key = match pp.key {
+                        Key::Computed(e) => {
+                            let kv = self.eval_expr(e)?;
+                            self.coerce_key(kv)?
+                        }
+                        k => {
+                            let s = self.key_string(k, prog)?;
+                            h!(self, self.heap.key_from_string(s))
+                        }
+                    };
+                    used.push(key);
+                    let x = self.get_prop(v, key)?;
+                    self.bind_pattern(pp.value, x, mode)?;
+                }
+                Ok(())
+            }
+            PatKind::Rest(_) | PatKind::Hole => Err(unsupported("pattern", pat.span)),
+        }
+    }
+
+    // ------------------------------------------------------------ iteration (arrays and strings)
+
+    fn iter_start(&mut self, v: Value, e: ExprId) -> Res<It> {
+        match v {
+            Value::String(_) => Ok(It { src: v, i: 0 }),
+            Value::Object(o) if h!(self, self.heap.is_array(o)) => Ok(It { src: v, i: 0 }),
+            _ => {
+                let m = format!("{} is not iterable", self.src_text(e));
+                Err(self.type_err(&m))
+            }
+        }
+    }
+
+    fn iter_start_val(&mut self, v: Value) -> Res<It> {
+        match v {
+            Value::String(_) => Ok(It { src: v, i: 0 }),
+            Value::Object(o) if h!(self, self.heap.is_array(o)) => Ok(It { src: v, i: 0 }),
+            _ => {
+                let t = self.display(v);
+                Err(self.type_err(&format!("{t} is not iterable")))
+            }
+        }
+    }
+
+    fn iter_next(&mut self, it: &mut It) -> Res<Option<Value>> {
+        self.tick()?;
+        match it.src {
+            Value::String(s) => {
+                let Some((_, n)) = h!(self, self.heap.code_point_at(s, it.i)) else { return Ok(None) };
+                let r = h!(self, self.heap.substring(s, it.i, it.i + n as usize));
+                it.i += n as usize;
+                Ok(Some(Value::String(r)))
+            }
+            src => {
+                let len = self.get_prop(src, self.k_length)?;
+                let len = self.coerce_number(len)?;
+                if (it.i as f64) >= len {
+                    return Ok(None);
+                }
+                let v = self.get_prop(src, PropertyKey::Index(it.i as u32))?;
+                it.i += 1;
+                Ok(Some(v))
+            }
+        }
+    }
+
+    // ------------------------------------------------------------ operators
+
+    fn binary(&mut self, op: BinaryOp, a: Value, b: Value) -> Res<Value> {
+        use BinaryOp::*;
+        if let (Value::Number(x), Value::Number(y)) = (a, b) {
+            match op {
+                Add => return Ok(Value::Number(x + y)),
+                Sub => return Ok(Value::Number(x - y)),
+                Mul => return Ok(Value::Number(x * y)),
+                Lt => return Ok(Value::Bool(x < y)),
+                Gt => return Ok(Value::Bool(x > y)),
+                Le => return Ok(Value::Bool(x <= y)),
+                Ge => return Ok(Value::Bool(x >= y)),
+                StrictEq | Eq => return Ok(Value::Bool(x == y)),
+                StrictNe | Ne => return Ok(Value::Bool(x != y)),
+                _ => {}
+            }
+        }
+        match op {
+            Add => {
+                let (pa, pb) = (self.coerce_primitive(a, Hint::Default)?, self.coerce_primitive(b, Hint::Default)?);
+                if matches!(pa, Value::String(_)) || matches!(pb, Value::String(_)) {
+                    let sa = h!(self, self.heap.to_string(pa));
+                    let sb = h!(self, self.heap.to_string(pb));
+                    return Ok(Value::String(h!(self, self.heap.concat(sa, sb))));
+                }
+                let (x, y) = (h!(self, self.heap.to_number(pa)), h!(self, self.heap.to_number(pb)));
+                Ok(Value::Number(x + y))
+            }
+            Sub | Mul | Div | Mod | Exp | Shl | Shr | UShr | BitAnd | BitOr | BitXor => {
+                let x = self.coerce_number(a)?;
+                let y = self.coerce_number(b)?;
+                Ok(Value::Number(match op {
+                    Sub => x - y,
+                    Mul => x * y,
+                    Div => x / y,
+                    Mod => x % y,
+                    Exp => {
+                        if y.is_nan() || (x.abs() == 1.0 && y.is_infinite()) { f64::NAN } else { x.powf(y) }
+                    }
+                    Shl => to_int32(x).wrapping_shl(to_uint32(y) & 31) as f64,
+                    Shr => (to_int32(x) >> (to_uint32(y) & 31)) as f64,
+                    UShr => (to_uint32(x) >> (to_uint32(y) & 31)) as f64,
+                    BitAnd => (to_int32(x) & to_int32(y)) as f64,
+                    BitOr => (to_int32(x) | to_int32(y)) as f64,
+                    _ => (to_int32(x) ^ to_int32(y)) as f64,
+                }))
+            }
+            StrictEq => Ok(Value::Bool(a.strict_equals(b))),
+            StrictNe => Ok(Value::Bool(!a.strict_equals(b))),
+            Eq => Ok(Value::Bool(self.loose_eq(a, b)?)),
+            Ne => Ok(Value::Bool(!self.loose_eq(a, b)?)),
+            Lt | Gt | Le | Ge => {
+                let (pa, pb) = (self.coerce_primitive(a, Hint::Number)?, self.coerce_primitive(b, Hint::Number)?);
+                let r = match op {
+                    Lt => self.less(pa, pb)? == Some(true),
+                    Gt => self.less(pb, pa)? == Some(true),
+                    Le => self.less(pb, pa)? == Some(false),
+                    _ => self.less(pa, pb)? == Some(false),
+                };
+                Ok(Value::Bool(r))
+            }
+            In => {
+                let Value::Object(o) = b else {
+                    let t = self.display(b);
+                    let k = self.coerce_string(a).map(|s| self.heap.to_string_lossy(s).unwrap_or_default()).unwrap_or_default();
+                    return Err(self.type_err(&format!("Cannot use 'in' operator to search for '{k}' in {t}")));
+                };
+                let key = self.coerce_key(a)?;
+                Ok(Value::Bool(h!(self, self.heap.has_property(o, key))))
+            }
+            Instanceof => {
+                if !self.is_callable(b) {
+                    return Err(self.type_err("Right-hand side of 'instanceof' is not callable"));
+                }
+                let Value::Object(mut o) = a else { return Ok(Value::Bool(false)) };
+                let Value::Object(callee_proto) = self.get_prop(b, self.k_prototype)? else {
+                    return Err(self.type_err("Function has non-object prototype in instanceof check"));
+                };
+                while let Some(p) = h!(self, self.heap.get_prototype_of(o)) {
+                    self.tick()?;
+                    if p == callee_proto {
+                        return Ok(Value::Bool(true));
+                    }
+                    o = p;
+                }
+                Ok(Value::Bool(false))
+            }
+        }
+    }
+
+    /// `a < b` on primitives: `None` is `undefined` (a NaN).
+    fn less(&mut self, a: Value, b: Value) -> Res<Option<bool>> {
+        if let (Value::String(x), Value::String(y)) = (a, b) {
+            let (ux, uy) = (h!(self, self.heap.str_units(x)), h!(self, self.heap.str_units(y)));
+            return Ok(Some(ux < uy));
+        }
+        let (x, y) = (h!(self, self.heap.to_number(a)), h!(self, self.heap.to_number(b)));
+        Ok(if x.is_nan() || y.is_nan() { None } else { Some(x < y) })
+    }
+
+    fn loose_eq(&mut self, a: Value, b: Value) -> Res<bool> {
+        match (a, b) {
+            (Value::Object(_), Value::Object(_)) => Ok(a.strict_equals(b)),
+            (Value::Object(_), x) if !is_nullish(x) => {
+                let p = self.coerce_primitive(a, Hint::Default)?;
+                self.loose_eq(p, b)
+            }
+            (x, Value::Object(_)) if !is_nullish(x) => {
+                let p = self.coerce_primitive(b, Hint::Default)?;
+                self.loose_eq(a, p)
+            }
+            _ => Ok(h!(self, self.heap.loose_equals(a, b))),
+        }
+    }
+
+    // ------------------------------------------------------------ statements
+
+    fn exec_list(&mut self, l: List<Stmt>) -> Ex {
+        let prog = self.prog;
+        for s in prog.list(l) {
+            self.exec(s)?;
+        }
+        Ok(())
+    }
+
+    /// Run `body` in a new environment when `needs` (frees it afterwards, restores the old one).
+    fn exec_block(&mut self, l: List<Stmt>) -> Ex {
+        if !self.has_lexical(l) {
+            return self.exec_list(l);
+        }
+        let saved = self.env;
+        let env = self.new_env(saved, false)?;
+        self.env = env;
+        let r = match self.declare_scope(l, false) {
+            Ok(()) => self.exec_list(l),
+            Err(e) => Err(Ctl::Err(e)),
+        };
+        self.env = saved;
+        self.release(env);
+        r
+    }
+
+    fn loop_step(r: Ex, labels: &[u32]) -> Result<bool, Ctl> {
+        match r {
+            Ok(()) => Ok(true),
+            Err(Ctl::Break(l)) if l == 0 || labels.contains(&l) => Ok(false),
+            Err(Ctl::Continue(l)) if l == 0 || labels.contains(&l) => Ok(true),
+            Err(c) => Err(c),
+        }
+    }
+
+    fn exec(&mut self, s: StmtId) -> Ex {
+        self.descend(|it| it.exec_inner(s))
+    }
+
+    fn exec_inner(&mut self, s: StmtId) -> Ex {
+        self.tick()?;
+        let prog = self.prog;
+        let st = *prog.stmt(s);
+        let top = self.depth == 0;
+        match st.kind {
+            StmtKind::Expr(e) | StmtKind::Directive(e) => {
+                let v = self.eval_expr(e)?;
+                if top {
+                    self.completion = v;
+                }
+            }
+            StmtKind::Var { kind, decls } => {
+                for d in prog.list(decls) {
+                    let d = *prog.decl(d);
+                    let name = if let PatKind::Ident = prog.pat(d.target).kind { Some(self.name_str(self.pat_name[d.target.index()])?) } else { None };
+                    match (kind, d.init) {
+                        (VarKind::Var, None) => {}
+                        (VarKind::Var, Some(i)) => {
+                            let v = self.eval_named(i, name)?;
+                            self.bind_pattern(d.target, v, Bind::Assign)?;
+                        }
+                        (_, init) => {
+                            let v = match init {
+                                Some(i) => self.eval_named(i, name)?,
+                                None => Value::Undefined,
+                            };
+                            self.bind_pattern(d.target, v, Bind::Init)?;
+                        }
+                    }
+                }
+            }
+            StmtKind::Function(fid) => self.annex_b(fid)?,
+            StmtKind::Class(_) => return Err(unsupported("class", st.span).into()),
+            StmtKind::Return(e) => {
+                let v = match e {
+                    Some(e) => self.eval_expr(e)?,
+                    None => Value::Undefined,
+                };
+                self.ret = v;
+                return Err(Ctl::Return);
+            }
+            StmtKind::If { test, cons, alt } => {
+                if top {
+                    self.completion = Value::Undefined;
+                }
+                let t = self.eval_expr(test)?;
+                if self.truthy(t)? {
+                    self.exec(cons)?;
+                } else if let Some(a) = alt {
+                    self.exec(a)?;
+                }
+            }
+            StmtKind::While { test, body } => {
+                let labels = std::mem::take(&mut self.pending_labels);
+                if top {
+                    self.completion = Value::Undefined;
+                }
+                loop {
+                    self.tick()?;
+                    let t = self.eval_expr(test)?;
+                    if !self.truthy(t)? || !Self::loop_step(self.exec(body), &labels)? {
+                        break;
+                    }
+                }
+            }
+            StmtKind::DoWhile { body, test } => {
+                let labels = std::mem::take(&mut self.pending_labels);
+                if top {
+                    self.completion = Value::Undefined;
+                }
+                loop {
+                    self.tick()?;
+                    if !Self::loop_step(self.exec(body), &labels)? {
+                        break;
+                    }
+                    let t = self.eval_expr(test)?;
+                    if !self.truthy(t)? {
+                        break;
+                    }
+                }
+            }
+            StmtKind::For { init, test, update, body } => {
+                let labels = std::mem::take(&mut self.pending_labels);
+                if top {
+                    self.completion = Value::Undefined;
+                }
+                let saved = self.env;
+                let r = self.exec_for(init, test, update, body, &labels);
+                let cur = self.env;
+                self.env = saved;
+                if cur != saved {
+                    self.release(cur);
+                }
+                r?;
+            }
+            StmtKind::ForIn { left, right, body } | StmtKind::ForOf { left, right, body, .. } => {
+                let labels = std::mem::take(&mut self.pending_labels);
+                if top {
+                    self.completion = Value::Undefined;
+                }
+                let is_of = matches!(st.kind, StmtKind::ForOf { .. });
+                let saved = self.env;
+                let r = self.exec_for_each(left, right, body, is_of, &labels);
+                self.env = saved;
+                r?;
+            }
+            StmtKind::Break(l) => return Err(Ctl::Break(if l.is_some() { self.stmt_label[s.index()] } else { 0 })),
+            StmtKind::Continue(l) => return Err(Ctl::Continue(if l.is_some() { self.stmt_label[s.index()] } else { 0 })),
+            StmtKind::Throw(e) => {
+                let v = self.eval_expr(e)?;
+                return Err(Ctl::Err(Error::Throw(v)));
+            }
+            StmtKind::Try { block, handler, finalizer } => {
+                if top {
+                    self.completion = Value::Undefined;
+                }
+                let (env, strict) = (self.env, self.strict);
+                let mut r = self.exec(block);
+                if let (Err(Ctl::Err(Error::Throw(v))), Some(c)) = (&r, handler) {
+                    let v = *v;
+                    self.env = env;
+                    self.strict = strict;
+                    r = self.exec_catch(*prog.catch(c), v);
+                }
+                if let Some(f) = finalizer {
+                    if let Err(Ctl::Err(e)) = &r
+                        && !matches!(e, Error::Throw(_))
+                    {
+                        return r;
+                    }
+                    self.env = env;
+                    self.strict = strict;
+                    let saved_ret = self.ret;
+                    self.exec(f)?;
+                    self.ret = saved_ret;
+                }
+                return r;
+            }
+            StmtKind::Switch { disc, cases } => {
+                let labels = std::mem::take(&mut self.pending_labels);
+                if top {
+                    self.completion = Value::Undefined;
+                }
+                let d = self.eval_expr(disc)?;
+                let saved = self.env;
+                let any_lex = prog.list(cases).any(|c| self.has_lexical(prog.case(c).body));
+                let env = if any_lex { Some(self.new_env(saved, false)?) } else { None };
+                if let Some(e) = env {
+                    self.env = e;
+                }
+                let r = self.exec_switch(d, cases, any_lex, &labels);
+                self.env = saved;
+                if let Some(e) = env {
+                    self.release(e);
+                }
+                r?;
+            }
+            StmtKind::Labeled { body, .. } => {
+                let label = self.stmt_label[s.index()];
+                self.pending_labels.push(label);
+                let r = self.exec(body);
+                self.pending_labels.clear();
+                match r {
+                    Err(Ctl::Break(l)) if l == label => {}
+                    r => return r,
+                }
+            }
+            StmtKind::Block(l) => self.exec_block(l)?,
+            StmtKind::Empty | StmtKind::Debugger => {}
+            StmtKind::With { .. } => return Err(unsupported("with statement", st.span).into()),
+        }
+        Ok(())
+    }
+
+    /// Annex B.3.3: in sloppy code a function declared in a block is also assigned to the var of the
+    /// same name when the declaration is evaluated.
+    fn annex_b(&mut self, fid: FuncId) -> Res<()> {
+        if self.strict || self.envs[self.env as usize].var_scope {
+            return Ok(());
+        }
+        let n = self.func_name[fid.index()];
+        let Some(i) = self.find_in(self.env, n) else { return Ok(()) };
+        let v = self.envs[self.env as usize].bindings[i].value;
+        let mut e = self.envs[self.env as usize].parent;
+        while e != NONE && !self.envs[e as usize].var_scope {
+            e = self.envs[e as usize].parent;
+        }
+        if e == 0 {
+            let key = self.name_key(n)?;
+            return self.put_prop(Value::Object(self.global), key, v);
+        }
+        if e != NONE
+            && let Some(j) = self.find_in(e, n)
+        {
+            self.envs[e as usize].bindings[j].value = v;
+        }
+        Ok(())
+    }
+
+    fn exec_catch(&mut self, c: Catch, v: Value) -> Ex {
+        let saved = self.env;
+        let env = self.new_env(saved, false)?;
+        self.env = env;
+        let r = (|| {
+            if let Some(p) = c.param {
+                self.bind_pattern(p, v, Bind::Declare)?;
+            }
+            self.exec(c.body)
+        })();
+        self.env = saved;
+        self.release(env);
+        r
+    }
+
+    fn exec_switch(&mut self, d: Value, cases: List<Case>, any_lex: bool, labels: &[u32]) -> Ex {
+        let prog = self.prog;
+        if any_lex {
+            for c in prog.list(cases) {
+                self.declare_scope(prog.case(c).body, false)?;
+            }
+        }
+        let mut start = None;
+        for (i, c) in prog.list(cases).enumerate() {
+            if let Some(t) = prog.case(c).test {
+                let v = self.eval_expr(t)?;
+                if d.strict_equals(v) {
+                    start = Some(i);
+                    break;
+                }
+            }
+        }
+        if start.is_none() {
+            start = prog.list(cases).position(|c| prog.case(c).test.is_none());
+        }
+        let Some(start) = start else { return Ok(()) };
+        for c in prog.list(cases).skip(start) {
+            let r = self.exec_list(prog.case(c).body);
+            match r {
+                Err(Ctl::Break(l)) if l == 0 || labels.contains(&l) => return Ok(()),
+                r => r?,
+            }
+        }
+        Ok(())
+    }
+
+    fn exec_for(&mut self, init: ForInit, test: Option<ExprId>, update: Option<ExprId>, body: StmtId, labels: &[u32]) -> Ex {
+        let prog = self.prog;
+        let mut per_iter = false;
+        match init {
+            ForInit::None => {}
+            ForInit::Expr(e) => {
+                self.eval_expr(e)?;
+            }
+            ForInit::Var(v) => {
+                if let StmtKind::Var { kind, decls } = prog.stmt(v).kind
+                    && kind != VarKind::Var
+                {
+                    per_iter = true;
+                    let env = self.new_env(self.env, false)?;
+                    self.env = env;
+                    for d in prog.list(decls) {
+                        self.declare_pat_lexical(prog.decl(d).target, if kind == VarKind::Let { MUT } else { 0 });
+                    }
+                }
+                self.exec(v)?;
+            }
+        }
+        loop {
+            if per_iter && self.envs[self.env as usize].captured {
+                self.copy_env()?;
+            }
+            self.tick()?;
+            if let Some(t) = test {
+                let v = self.eval_expr(t)?;
+                if !self.truthy(v)? {
+                    break;
+                }
+            }
+            if !Self::loop_step(self.exec(body), labels)? {
+                break;
+            }
+            if per_iter && self.envs[self.env as usize].captured {
+                self.copy_env()?;
+            }
+            if let Some(u) = update {
+                self.eval_expr(u)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// CreatePerIterationEnvironment: a fresh copy, so a closure keeps the old iteration's values.
+    fn copy_env(&mut self) -> Res<()> {
+        let old = self.env;
+        let parent = self.envs[old as usize].parent;
+        let new = self.new_env(parent, false)?;
+        let items: Vec<(u32, u8, Value)> = self.envs[old as usize].bindings.iter().map(|b| (b.name, b.flags, b.value)).collect();
+        for (n, f, v) in items {
+            self.env_declare(new, n, f, v);
+        }
+        self.env = new;
+        Ok(())
+    }
+
+    fn exec_for_each(&mut self, left: ForLeft, right: ExprId, body: StmtId, is_of: bool, labels: &[u32]) -> Ex {
+        let prog = self.prog;
+        let rv = self.eval_expr(right)?;
+        let outer = self.env;
+        let mut lexical: Option<(PatId, VarKind)> = None;
+        let target = match left {
+            ForLeft::Pat(p) => p,
+            ForLeft::Var(v) => {
+                let StmtKind::Var { kind, decls } = prog.stmt(v).kind else { return Err(unsupported("for left", Span::default()).into()) };
+                let d = prog.list(decls).next().map(|d| *prog.decl(d));
+                let Some(d) = d else { return Err(unsupported("for left", Span::default()).into()) };
+                if kind != VarKind::Var {
+                    lexical = Some((d.target, kind));
+                }
+                d.target
+            }
+        };
+        let mut cur_env: Option<u32> = None;
+        let mut step = |me: &mut Self, v: Value| -> Result<bool, Ctl> {
+            if let Some((p, kind)) = lexical {
+                if let Some(e) = cur_env.take() {
+                    me.env = outer;
+                    me.release(e);
+                }
+                let e = me.new_env(outer, false)?;
+                cur_env = Some(e);
+                me.env = e;
+                me.declare_pat_lexical(p, if kind == VarKind::Let { MUT } else { 0 });
+                me.bind_pattern(target, v, Bind::Init)?;
+            } else {
+                me.bind_pattern(target, v, Bind::Assign)?;
+            }
+            Self::loop_step(me.exec(body), labels)
+        };
+        let r: Ex = (|| {
+            if is_of {
+                let mut it = self.iter_start(rv, right)?;
+                while let Some(v) = self.iter_next(&mut it)? {
+                    if !step(self, v)? {
+                        break;
+                    }
+                }
+            } else {
+                let keys = self.for_in_keys(rv)?;
+                for k in keys {
+                    if let Value::Object(o) = rv
+                        && !h!(self, self.heap.has_property(o, k))
+                    {
+                        continue;
+                    }
+                    let kv = h!(self, self.heap.key_to_value(k));
+                    if !step(self, kv)? {
+                        break;
+                    }
+                }
+            }
+            Ok(())
+        })();
+        self.env = outer;
+        if let Some(e) = cur_env {
+            self.release(e);
+        }
+        r
+    }
+
+    fn for_in_keys(&mut self, v: Value) -> Res<Vec<PropertyKey>> {
+        let mut o = match v {
+            Value::Object(o) => o,
+            Value::String(s) => return Ok((0..h!(self, self.heap.str_len(s)) as u32).map(PropertyKey::Index).collect()),
+            _ => return Ok(Vec::new()),
+        };
+        let mut seen: FxSet<PropertyKey> = FxSet::default();
+        let mut out = Vec::new();
+        loop {
+            for k in h!(self, self.heap.own_keys(o)) {
+                self.tick()?;
+                if matches!(k, PropertyKey::Symbol(_)) || !seen.insert(k) {
+                    continue;
+                }
+                if matches!(h!(self, self.heap.get_own_property(o, k)), Some(p) if p.enumerable()) {
+                    out.push(k);
+                }
+            }
+            match h!(self, self.heap.get_prototype_of(o)) {
+                Some(p) => o = p,
+                None => break,
+            }
+        }
+        Ok(out)
+    }
+}
+
+type NumBase = crate::lex::NumberBase;
+
+fn num_base(t: &str) -> NumBase {
+    let b = t.as_bytes();
+    if b.len() > 1 && b[0] == b'0' {
+        match b[1] {
+            b'x' | b'X' => return NumBase::Hex,
+            b'o' | b'O' => return NumBase::Octal,
+            b'b' | b'B' => return NumBase::Binary,
+            _ => {}
+        }
+    }
+    NumBase::Decimal
+}
+
+include!("eval_native.rs");
+
+#[cfg(test)]
+#[path = "eval_tests.rs"]
+mod tests;
