@@ -104,6 +104,8 @@ pub enum LimitKind {
     ScriptSource,
     /// The kept scripts have too many syntax nodes together, or one list or nesting is too large.
     ScriptNodes,
+    /// A cap of the embedder's [`Host`] (nodes, listeners, traversal results, ...). The name says which.
+    Host(&'static str),
     Heap(Limit),
     /// A bound of a RegExp binding (see `eval_builtins.rs`).
     Regexp(RegexpLimit),
@@ -251,6 +253,8 @@ enum Callee {
     Native(Nat),
     Bound { target: ObjId, this: Value, args: Vec<Value> },
     Promise(PFn),
+    /// A method of the embedder's [`Host`]. `ctor` allows `new`.
+    Host { id: u32, ctor: bool },
 }
 
 #[derive(Default)]
@@ -343,6 +347,7 @@ pub struct Interp<'p> {
     promise: PromiseState,
     /// JSON, RegExp and String bindings: state of `eval_builtins.rs`.
     ext: Ext,
+    host: Option<Rc<dyn Host>>,
     // permanent keys
     k_length: PropertyKey,
     k_name: PropertyKey,
@@ -467,6 +472,7 @@ impl<'p> Interp<'p> {
             error_protos,
             promise: PromiseState::default(),
             ext,
+            host: None,
             k_length: ks[0],
             k_name: ks[1],
             k_message: ks[2],
@@ -548,6 +554,9 @@ impl<'p> Interp<'p> {
         }
         self.promise_roots(&mut v);
         self.promise_all_values(&mut v);
+        if let Some(h) = &self.host {
+            h.roots(&mut v);
+        }
         for (&o, c) in &self.funcs {
             v.push(Value::Object(o));
             if let Callee::Promise(pf) = c {
@@ -575,6 +584,12 @@ impl<'p> Interp<'p> {
         self.ext_roots(&mut work);
         work.extend_from_slice(extra);
         self.promise_roots(&mut work);
+        let host = self.host.clone();
+        let mut host_vals: Vec<Value> = Vec::new();
+        if let Some(h) = &host {
+            h.roots(&mut host_vals);
+            work.extend_from_slice(&host_vals);
+        }
         let mut env_work: Vec<u32> = vec![0];
         loop {
             if let Some(e) = env_work.pop() {
@@ -604,6 +619,11 @@ impl<'p> Interp<'p> {
                 _ => {}
             }
             self.promise_trace(o, &mut work);
+            if let Some(h) = &host {
+                let from = host_vals.len();
+                h.trace(o, &mut host_vals);
+                work.extend_from_slice(&host_vals[from..]);
+            }
             let keys = h!(self, self.heap.own_keys(o));
             for k in keys {
                 match h!(self, self.heap.get_own_property(o, k)) {
@@ -627,8 +647,12 @@ impl<'p> Interp<'p> {
         self.funcs.retain(|o, _| seen.contains(o));
         self.promise_prune(&seen);
         self.ext_prune(&seen);
+        if let Some(h) = &host {
+            h.prune(&|o| seen.contains(&o));
+        }
         let mut roots = self.roots();
         roots.extend_from_slice(extra);
+        roots.extend_from_slice(&host_vals);
         Ok(h!(self, self.heap.collect(&roots)))
     }
 
@@ -1351,9 +1375,11 @@ impl<'p> Interp<'p> {
             N(Nat),
             B(ObjId, Value, Vec<Value>),
             P(PFn),
+            H(u32),
         }
         let d = match self.funcs.get(&o) {
             Some(&Callee::Script { script, fid, env, self_binding }) => D::S(script, fid, env, self_binding),
+            Some(&Callee::Host { id, .. }) => D::H(id),
             Some(&Callee::Native(n)) => D::N(n),
             Some(Callee::Bound { target, this, args }) => D::B(*target, *this, args.clone()),
             Some(&Callee::Promise(pf)) => D::P(pf),
@@ -1364,6 +1390,7 @@ impl<'p> Interp<'p> {
             D::S(script, fid, env, sb) => self.call_script((script, fid), o, env, sb, this, args),
             D::N(n) => self.call_native(n, this, args, false),
             D::P(pf) => self.call_promise(pf, this, args, false),
+            D::H(id) => self.call_host(id, this, args, false),
             D::B(t, bthis, mut bargs) => {
                 bargs.extend_from_slice(args);
                 self.call_fn(Value::Object(t), bthis, &bargs)
@@ -1392,8 +1419,10 @@ impl<'p> Interp<'p> {
             N(Nat),
             B(ObjId, Vec<Value>),
             P(PFn),
+            H(u32),
         }
         let d = match self.funcs.get(&o) {
+            Some(&Callee::Host { id, ctor: true }) => D::H(id),
             Some(&Callee::Script { script, fid, env, self_binding }) if self.func_of(script, fid).kind == FuncKind::Normal => D::S(script, fid, env, self_binding),
             Some(&Callee::Native(n)) if matches!(n, Nat::ObjectCtor | Nat::FnCtor | Nat::ArrayCtor | Nat::ErrorCtor(_) | Nat::Ext(Bi::RegExpCtor)) => D::N(n),
             Some(&Callee::Native(Nat::StringFn | Nat::NumberFn | Nat::BooleanFn)) => return Err(unsupported("wrapper object (new String/Number/Boolean)", Span::default())),
@@ -1412,6 +1441,7 @@ impl<'p> Interp<'p> {
             })(),
             D::N(n) => self.call_native(n, Value::Undefined, args, true),
             D::P(pf) => self.call_promise(pf, Value::Undefined, args, true),
+            D::H(id) => self.call_host(id, Value::Undefined, args, true),
             D::B(t, mut bargs) => {
                 bargs.extend_from_slice(args);
                 self.construct(Value::Object(t), &bargs, callee)
@@ -2885,6 +2915,7 @@ include!("eval_promise.rs");
 include!("eval_scripts.rs");
 include!("eval_builtins.rs");
 include!("eval_json_stringify.rs");
+include!("eval_host.rs");
 
 #[cfg(test)]
 #[path = "eval_tests.rs"]
@@ -2904,3 +2935,7 @@ mod builtin_tests;
 #[cfg(test)]
 #[path = "eval_json_stringify_tests.rs"]
 mod stringify_tests;
+
+#[cfg(test)]
+#[path = "eval_host_tests.rs"]
+mod host_tests;
