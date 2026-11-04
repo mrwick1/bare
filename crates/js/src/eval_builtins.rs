@@ -2,7 +2,7 @@
 // that module's imports and private items.
 //
 // What is bound (everything else is absent, so a call is an ordinary TypeError or ReferenceError):
-// - `JSON.parse(text)`. A reviver function is `Unsupported`. There is no `JSON.stringify`.
+// - `JSON.parse(text)`. A reviver function is `Unsupported`. `JSON.stringify` is in `eval_json_stringify.rs`.
 // - `RegExp(pattern, flags)`, `new RegExp(...)`, regexp literals, `exec`, `test`, `toString`, the flag getters,
 //   an own `lastIndex` data property. Engine gates (flags u/v/d, lookbehind, named groups, quantified lookahead)
 //   are `Unsupported`, never a different match. There is no `Symbol`, so `String.prototype.match/replace/split`
@@ -57,6 +57,8 @@ pub struct BuiltinLimits {
     pub max_items: usize,
     /// `JSON.parse` limits.
     pub json: json::JsonLimits,
+    /// `JSON.stringify` limits.
+    pub stringify: StringifyLimits,
 }
 
 impl Default for BuiltinLimits {
@@ -68,6 +70,7 @@ impl Default for BuiltinLimits {
             max_matches: 1 << 22,
             max_items: 1 << 20,
             json: json::JsonLimits { max_source_units: 1 << 24, max_depth: 1024, max_nodes: 1 << 22, max_text_units: 1 << 24 },
+            stringify: StringifyLimits::default(),
         }
     }
 }
@@ -75,6 +78,7 @@ impl Default for BuiltinLimits {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Bi {
     JsonParse,
+    JsonStringify,
     RegExpCtor,
     ReExec,
     ReTest,
@@ -378,6 +382,7 @@ impl<'p> Interp<'p> {
         // JSON
         let j = self.ext.json_obj;
         self.method(j, "parse", Nat::Ext(Bi::JsonParse), 2)?;
+        self.method(j, "stringify", Nat::Ext(Bi::JsonStringify), 3)?;
         at(self, g, "JSON", Value::Object(j))?;
         // RegExp
         let rp = self.ext.regexp_proto;
@@ -493,6 +498,7 @@ impl<'p> Interp<'p> {
         let a0 = arg(args, 0);
         match x {
             Bi::JsonParse => self.json_parse(a0, arg(args, 1)),
+            Bi::JsonStringify => self.json_stringify(a0, arg(args, 1), arg(args, 2)),
             Bi::RegExpCtor => self.regexp_ctor(a0, arg(args, 1), is_new),
             Bi::ReExec => {
                 let r = self.this_regexp(this, "exec")?;

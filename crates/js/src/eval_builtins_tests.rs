@@ -121,8 +121,7 @@ fn gates_are_explicit_unsupported() {
     // A non-callable exec is ignored, as in the spec.
     assert_eq!(run("var r = /a/; r.exec = 5; r.test('a')"), "boolean:true");
     // The absent methods stay absent (no silent stand-in).
-    assert_eq!(run("typeof JSON.stringify + typeof 'a'.replaceAll + typeof 'a'.search + typeof 'a'.matchAll + typeof ''.repeat + typeof RegExp.prototype.compile"), "string:undefinedundefinedundefinedundefinedundefinedundefined");
-    assert_eq!(run("try { JSON.stringify({}); } catch (e) { e.name }"), "string:TypeError");
+    assert_eq!(run("typeof 'a'.replaceAll + typeof 'a'.search + typeof 'a'.matchAll + typeof ''.repeat + typeof RegExp.prototype.compile"), "string:undefinedundefinedundefinedundefinedundefined");
 }
 
 #[test]

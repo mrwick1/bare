@@ -109,6 +109,8 @@ pub enum LimitKind {
     Regexp(RegexpLimit),
     /// A bound of the `JSON.parse` text parser.
     Json(crate::json::LimitKind),
+    /// A bound of `JSON.stringify` (see `eval_json_stringify.rs`).
+    Stringify(StringifyLimit),
 }
 
 /// Valid syntax or a builtin that is not implemented. `span` is the byte range of the construct
@@ -2882,6 +2884,7 @@ include!("eval_native.rs");
 include!("eval_promise.rs");
 include!("eval_scripts.rs");
 include!("eval_builtins.rs");
+include!("eval_json_stringify.rs");
 
 #[cfg(test)]
 #[path = "eval_tests.rs"]
@@ -2897,3 +2900,7 @@ mod script_tests;
 #[cfg(test)]
 #[path = "eval_builtins_tests.rs"]
 mod builtin_tests;
+
+#[cfg(test)]
+#[path = "eval_json_stringify_tests.rs"]
+mod stringify_tests;
