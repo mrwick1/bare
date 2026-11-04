@@ -76,7 +76,7 @@ fn constructor_gates() {
         let r = js(&mut b, src);
         assert!(r.starts_with("throw:TypeError"), "{src}: {r}");
     }
-    assert_eq!(js(&mut b, "new CSSStyleDeclaration.prototype.constructor()").starts_with("throw:TypeError"), true);
+    assert!(js(&mut b, "new CSSStyleDeclaration.prototype.constructor()").starts_with("throw:TypeError"));
     assert_eq!(js(&mut b, "Object.getPrototypeOf(CSSStyleDeclaration.prototype) === Object.prototype"), "true");
 }
 
