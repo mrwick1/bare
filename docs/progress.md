@@ -94,6 +94,8 @@ Certificate parsing and ECDSA P-256/P-384 verification in S1 topic 3 are complet
 
 S1 topic 5 request APIs are complete. GET and POST support validated caller headers and borrowed request bodies. POST is never retried. Redirects preserve or rewrite the method and body as required. Cross-origin redirects drop credential headers. Header-bearing requests bypass the cache. Successful POST responses invalidate the cached target. Topic 4 still gates HTTPS transport and staging checks.
 
+S1 topic 6 discovery and download foundations are complete. `bare --resources` lists script/style metadata and download results. The saved login page yields 24 items and 17 fetch targets: 15 async scripts and two stylesheets. Six inline scripts keep their DOM source. The nomodule script is skipped. Runtime-generated chunks still depend on JavaScript. The loader checks response status, MIME and encoding, then enforces byte and elapsed-time caps. Live verified HTTPS and manifest comparison remain open until topic 4 is connected.
+
 ### S2 JavaScript and event loop
 
 Build the JavaScript interpreter from module 9. Bring forward the single-page scheduler from module 8. Tabs remain deferred.

@@ -62,6 +62,8 @@ fn fail(msg: String) -> ! {
     std::process::exit(1)
 }
 
+type Workload = (String, usize, usize, usize, Limits, Box<dyn Fn(&str) -> Reply + Send + Sync>);
+
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let (Some(case), Some(scale)) = (args.first(), args.get(1).and_then(|s| s.parse::<usize>().ok())) else {
@@ -71,7 +73,7 @@ fn main() {
     let runs: usize = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(3);
 
     // The page, the server and the expected counts.
-    let (html, expect_items, expect_targets, expect_bytes, limits, handler): (String, usize, usize, usize, Limits, Box<dyn Fn(&str) -> Reply + Send + Sync>) = match case.as_str() {
+    let (html, expect_items, expect_targets, expect_bytes, limits, handler): Workload = match case.as_str() {
         "small" => {
             let n = 50 * scale;
             let html: String = (0..n).map(|i| format!("<script src=/s/{i}.js async></script>")).collect();

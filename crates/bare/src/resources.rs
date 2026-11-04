@@ -925,8 +925,8 @@ mod tests {
     }
 
     #[test]
-    fn https_stays_refused_and_nothing_is_sent() {
-        // HTTPS transport is not connected yet: every https target fails with an explicit error, and no socket opens.
+    fn https_network_failure_is_reported() {
+        // An unavailable HTTPS endpoint must surface a download error. This does not establish socket behavior.
         let p = Url::parse("https://127.0.0.1:1/login").unwrap();
         let doc = parse("<script src=/a.js></script>");
         let d = discover(&doc, &p, &Limits::default()).unwrap();
