@@ -533,3 +533,26 @@ Trust loading caps the input file at 4 MiB, the certificate count at 1,024 and e
 Reproduce with the standalone `hello_load.rs`, `record_load.rs` and `trust_load.rs` drivers under `tools/crypto`. Parent's record oracle passed 3,000 Rust-to-OpenSSL records and 2,999 OpenSSL-to-Rust records before close_notify. All 636 workspace tests pass. All 152 normal crypto tests pass in release with default and forced-portable builds. The ignored OS-store check passes separately. Clippy passes with all features. The long X25519 vector was checked in the earlier primitive integration.
 
 No connected TLS client, certificate-path validation, staging HTTPS, HRR, resumption, KeyUpdate message handling, wildcard hostname or non-Linux trust source was tested in this batch. Unknown critical certificate extensions remain the validator's responsibility. This code remains unaudited.
+
+## HTTP request methods and origin state
+
+2026-11-04, archMachine, release. Requests borrow header and body slices. Header validation runs before cache access, DNS or socket use. The wire head reserves capacity once. Bodies up to 16 KiB join that buffer; larger bodies write directly from the caller's slice. POST has no automatic retry. Cache and idle-pool identities include the scheme.
+
+Parent review found a stale-cache bug after successful POST. A regression test failed because a later GET returned the old cached body. The fix invalidates the target when the response head has a 2xx or 3xx status. Tests cover buffered and streamed replies, redirects and failed POST. Reference: [RFC 9111 section 4.4](https://www.rfc-editor.org/rfc/rfc9111.html#section-4.4). Existing authenticated-request bypass checks remain separate from successful-POST invalidation.
+
+The load server consumes request bodies. It scans only new head bytes, so a large request head does not cause repeated full-buffer scans. Parent changed the new load cases to require successful replies and expected body bytes. Request errors now fail these cases instead of producing misleading timings.
+
+Parent ran `bare-stress scale net-post`. Each case and scale uses a fresh process. The harness limits each run to 20 s and 2 GiB of counted heap. Peak heap excludes the prebuilt input. It is not RSS.
+
+| Case | Input at 1x / 10x / 100x | Milliseconds at each scale | Extra peak heap MB |
+| --- | --- | --- | --- |
+| POST body | 1 / 10 / 100 MB | 0.5 / 2.7 / 34.1 | 0.1 / 0.1 / 0.1 |
+| Small POST, keep-alive | 1k / 10k / 100k requests | 12.1 / 120.7 / 1190.6 | 0.1 / 0.1 / 0.1 |
+| POST to 303 to GET | 500 / 5k / 50k chains | 11.9 / 115.7 / 1239.1 | 0.1 / 0.1 / 0.1 |
+| Custom headers | 10k / 100k / 1M headers | 1.6 / 14.4 / 135.6 | 1.5 / 13.2 / 125.4 |
+
+All scales pass with zero growth flags. Parent did not reproduce the delegate's before/after GET comparison. Final measurements show linear time and constant extra heap for large bodies. No additional optimization was justified by these runs.
+
+Checks: 661 workspace tests pass, including 81 network tests. Header fuzzing runs inside the network suite. The separate URL fuzz run uses 300,000 inputs and seed 5. Strict clippy reports pre-existing findings in DNS, HTTP response helpers, HTML and Unicode. The net/URL targets pass strict clippy with only the three pre-existing net lint classes allowed. Parent fixed the new test's single-match lint.
+
+No HTTPS or staging requests were tested. Full-duplex early-response handling while a server keeps the connection open and stops reading a large upload is unsupported. The existing write timeout bounds that failure. POST never retries after a write. A cross-origin 307 or 308 preserves the body; credential headers are stripped. The HTTP cache has no header variants, so custom-header requests bypass it.

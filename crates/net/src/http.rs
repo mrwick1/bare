@@ -20,6 +20,7 @@ use crate::{dns, tcp};
 // JS: like `import * as dns from "./dns"`: other files in this crate.
 use bare_url::{Scheme, Url};
 // JS: like `import { Url } from "bare-url"`: from another package.
+use std::borrow::Cow;
 use std::collections::HashMap;
 // JS: like a `Map`.
 use std::io::{self, ErrorKind, Read, Write};
@@ -66,8 +67,15 @@ const MAX_REDIRECTS: usize = 20;
 /// An open connection that waits for a next request, and the time it became idle.
 type IdleConnection = (TcpStream, Instant);
 
+/// A server: the scheme, the host and the port. A connection only works for the server it was opened to, and a
+/// plain connection must never serve an `https` request, so the scheme is part of the key.
+type Server = (Scheme, String, u16);
+
 /// The idle connections of a client, by server. A `Body` that is read to the end gives its connection back to it.
-type Pool = Arc<Mutex<HashMap<(String, u16), IdleConnection>>>;
+type Pool = Arc<Mutex<HashMap<Server, IdleConnection>>>;
+
+/// A cached reply is found by scheme, host, port and path.
+type CacheKey = (Scheme, String, u16, String);
 
 /// A stored reply: when we stored it, and for how long it stays fresh.
 struct Cached {
@@ -78,6 +86,73 @@ struct Cached {
     // Until this time has passed, we use the copy without asking the server.
 }
 
+/// The two methods that the staging login needs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Method {
+    Get,
+    Post,
+}
+
+impl Method {
+    fn as_str(self) -> &'static str {
+        match self {
+            Method::Get => "GET",
+            Method::Post => "POST",
+        }
+    }
+}
+
+/// One request. It borrows everything from the caller: the request stores no owned header or body data. Small bodies are copied into the
+/// wire buffer; large bodies are written directly from this slice. `Host`, `Content-Length` and the other headers that frame a message are made by the
+/// client, so the caller must not set them (`Client::send` gives an error).
+pub struct Request<'a> {
+    pub method: Method,
+    pub url: &'a Url,
+    /// Extra request headers, like `("Authorization", "Bearer ...")`. Values are never put in an error message.
+    pub headers: &'a [(&'a str, &'a str)],
+    /// The body. Only POST has one.
+    pub body: &'a [u8],
+}
+
+impl<'a> Request<'a> {
+    pub fn get(url: &'a Url) -> Request<'a> {
+        Request { method: Method::Get, url, headers: &[], body: &[] }
+    }
+
+    pub fn post(url: &'a Url, headers: &'a [(&'a str, &'a str)], body: &'a [u8]) -> Request<'a> {
+        Request { method: Method::Post, url, headers, body }
+    }
+}
+
+/// What to send for one hop of a redirect chain. A redirect can change the method, the body and the headers.
+struct Plan<'a> {
+    method: Method,
+    headers: Cow<'a, [(&'a str, &'a str)]>,
+    body: &'a [u8],
+}
+
+impl Plan<'_> {
+    /// Only a GET with no body and no header of the caller may use the cache. A cached reply to a request with an
+    /// `Authorization` header must not answer a request without it (after a logout), so such a request bypasses the
+    /// cache until the cache stores variants. A POST changes things on the server: never a cache.
+    fn cacheable(&self) -> bool {
+        self.method == Method::Get && self.headers.is_empty()
+    }
+}
+
+/// Headers that frame the message or belong to one connection. The client writes them, so a caller must not.
+const CLIENT_HEADERS: [&str; 10] =
+    ["host", "content-length", "transfer-encoding", "connection", "keep-alive", "proxy-connection", "te", "trailer", "upgrade", "expect"];
+
+/// Headers that a redirect to another origin must not carry (Fetch standard, "HTTP-redirect fetch", and Cookie).
+const SECRET_HEADERS: [&str; 3] = ["authorization", "cookie", "proxy-authorization"];
+
+/// Headers that describe a request body. A redirect that turns a POST into a GET drops them (Fetch standard).
+const BODY_HEADERS: [&str; 4] = ["content-type", "content-encoding", "content-language", "content-location"];
+
+/// A body up to this size is written together with the head: one write, one packet.
+const INLINE_BODY: usize = 16 * 1024;
+
 /// Fetches pages. It keeps idle connections so that the next request can reuse one.
 #[derive(Default)]
 // Gives `Client::default()`: a client with an empty list. JS: the starting values of a class.
@@ -85,12 +160,12 @@ pub struct Client {
     // JS: like a class with a private field.
     idle: Pool,
     // The open connections that wait for a next request.
-    // The key is the server: its host and port. A connection only works for the server
+    // The key is the server: its scheme, host and port. A connection only works for the server
     // it was opened to. The value is the connection and the time it became idle.
     // Only one connection per server. When a browser needs more at once, it opens more.
     // Chrome allows 6 for each server.
-    cache: HashMap<(String, u16, String), Cached>,
-    // Replies we may use again. The key is the host, the port and the path.
+    cache: HashMap<CacheKey, Cached>,
+    // Replies we may use again. The key is the scheme, the host, the port and the path.
     // It lives in memory only. `MAX_CACHE` is the size limit.
     cache_bytes: usize,
     // How many bytes the cache holds, counted with `cache_size`.
@@ -98,10 +173,32 @@ pub struct Client {
 
 /// Refuse an https URL. We have no TLS yet, so a request sent now would go in plain text.
 /// Callers check this before the cache, DNS and the socket. The `Err` is a plain text message.
+/// The transport that adds TLS replaces this check: `open` and `Stream` are the places (see `docs/progress.md`).
 fn refuse_https(url: &Url) -> Result<(), Error> {
     if url.scheme == Scheme::Https {
         return Err("https is not supported yet, so the request was not sent".into());
         // `return Err(..)` leaves the function early. JS: like `throw new Error(..)`, but as a value.
+    }
+    Ok(())
+}
+
+/// Check a request before any DNS lookup or socket. The messages name no header value and no body byte.
+fn check_request(req: &Request) -> Result<(), Error> {
+    if req.method == Method::Get && !req.body.is_empty() {
+        return Err("a GET request has no body".into());
+    }
+    for (name, value) in req.headers {
+        // A name is a "token": letters, digits and these marks. It cannot hold a space, a colon, CR, LF or NUL.
+        if name.is_empty() || !name.bytes().all(|b| b.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&b)) {
+            return Err("invalid request header name".into());
+        }
+        if CLIENT_HEADERS.iter().any(|h| name.eq_ignore_ascii_case(h)) {
+            return Err(format!("the client sets the {name} header itself").into());
+        }
+        // A value has no control byte (CR, LF and NUL end or split a header), and no space or tab at its ends.
+        if value.bytes().any(|b| (b < b' ' && b != b'\t') || b == 0x7f) || value.starts_with([' ', '\t']) || value.ends_with([' ', '\t']) {
+            return Err("invalid request header value".into());
+        }
     }
     Ok(())
 }
@@ -112,6 +209,17 @@ fn cache_size(response: &Response) -> usize {
     // The 512 is for the headers and the key. It stops a million tiny replies from costing nothing.
 }
 
+/// A reused connection that the server closed is dead, and we can see it before we write: the server's FIN makes a
+/// read return 0. Used before a POST, which we must never send twice.
+fn alive(stream: &TcpStream) -> bool {
+    if stream.set_nonblocking(true).is_err() {
+        return false;
+    }
+    let alive = matches!(stream.peek(&mut [0u8; 1]), Err(e) if e.kind() == ErrorKind::WouldBlock);
+    // No bytes and no close: `WouldBlock`. Bytes that nobody asked for mean that the connection is out of step.
+    stream.set_nonblocking(false).is_ok() && alive
+}
+
 impl Client {
     pub fn new() -> Client {
         Client::default()
@@ -119,22 +227,64 @@ impl Client {
 
     /// Fetch a URL. Follow redirects, and use the cache. Any status can come back: a 404 is still a page.
     pub fn get(&mut self, url: &Url) -> Result<Arc<Response>, Error> {
-        // `&mut self` means this method may change the client: it adds and removes connections.
-        // `&Url` means we borrow the URL. The caller keeps it.
-        let mut current = url;
+        self.send(&Request::get(url))
+    }
+
+    /// Send a POST. Same rules as `send`.
+    pub fn post(&mut self, url: &Url, headers: &[(&str, &str)], body: &[u8]) -> Result<Arc<Response>, Error> {
+        self.send(&Request::post(url, headers, body))
+    }
+
+    /// Send a request, follow redirects, and read the whole reply. Any status can come back.
+    /// The request is checked before any DNS lookup or socket. A POST is never sent twice on its own.
+    pub fn send(&mut self, req: &Request) -> Result<Arc<Response>, Error> {
+        Ok(self.follow(req, false)?.0)
+    }
+
+    /// Like `send`, with a body that reads from the connection. See `get_stream`.
+    pub fn send_stream(&mut self, req: &Request) -> Result<Streamed, Error> {
+        let (response, body) = self.follow(req, true)?;
+        Ok(Streamed { response, body: body.expect("a streamed hop has a body") })
+    }
+
+    /// Send the request, and follow redirects like a browser does (Fetch standard, "HTTP-redirect fetch"):
+    /// - 301 and 302 turn a POST into a GET, and 303 turns anything but GET into a GET. The body goes, and so do the
+    ///   headers that describe it. 307 and 308 keep the method and the body.
+    /// - A redirect to another origin (another scheme, host or port) drops `Authorization`, `Cookie` and
+    ///   `Proxy-Authorization`.
+    fn follow(&mut self, req: &Request, stream: bool) -> Result<(Arc<Response>, Option<Body>), Error> {
+        check_request(req)?;
+        let mut plan = Plan { method: req.method, headers: Cow::Borrowed(req.headers), body: req.body };
+        let mut current = req.url;
         // The URL we ask for now. It starts as the one we were given.
         let mut next;
         // Where a redirect sends us. We own this `Url`, so it must live outside the loop.
         for _ in 0..=MAX_REDIRECTS {
             // `0..=20` is 21 turns: the first request plus 20 redirects.
-            let response = self.load(current)?;
+            refuse_https(current)?;
+            let (response, body) = if stream { self.hop_stream(current, &plan)? } else { (self.load(current, &plan)?, None) };
             let Some(location) = redirect_target(&response) else {
-                return Ok(response);
+                return Ok((response, body));
                 // Not a redirect: this is the page.
             };
-            next = current.join(location)?;
+            let target = current.join(location)?;
             // `Location` may be relative, like "/new". `join` makes it a full URL.
-            // A link to `https://` is a full URL too. `load` refuses it, because we do not support HTTPS yet.
+            // A link to `https://` is a full URL too. The guard above refuses it on the next turn.
+            if !current.same_origin(&target) && plan.headers.iter().any(|(n, _)| SECRET_HEADERS.iter().any(|s| n.eq_ignore_ascii_case(s))) {
+                plan.headers = Cow::Owned(plan.headers.iter().filter(|(n, _)| !SECRET_HEADERS.iter().any(|s| n.eq_ignore_ascii_case(s))).copied().collect());
+            }
+            if plan.method == Method::Post && matches!(response.status, 301..=303) {
+                plan.method = Method::Get;
+                plan.body = &[];
+                if plan.headers.iter().any(|(n, _)| BODY_HEADERS.iter().any(|s| n.eq_ignore_ascii_case(s))) {
+                    plan.headers = Cow::Owned(plan.headers.iter().filter(|(n, _)| !BODY_HEADERS.iter().any(|s| n.eq_ignore_ascii_case(s))).copied().collect());
+                }
+            }
+            // The body of a redirect is not wanted. Read it (a redirect has a small one) so that the connection can be used again.
+            if let Some(mut body) = body {
+                io::copy(&mut (&mut body).take(MAX_REDIRECT_BODY), &mut io::sink())?;
+            }
+            next = target;
             current = &next;
         }
         Err(format!("too many redirects (more than {MAX_REDIRECTS})").into())
@@ -142,17 +292,20 @@ impl Client {
     }
 
     /// Remove a stored reply, and take its size off the count.
-    fn forget(&mut self, key: &(String, u16, String)) {
+    fn forget(&mut self, key: &CacheKey) {
         if let Some(old) = self.cache.remove(key) {
             self.cache_bytes -= cache_size(&old.response);
         }
     }
 
     /// Get one URL from the cache, or from the server. Do not follow redirects.
-    fn load(&mut self, url: &Url) -> Result<Arc<Response>, Error> {
+    fn load(&mut self, url: &Url, plan: &Plan) -> Result<Arc<Response>, Error> {
         refuse_https(url)?;
-        // Before the cache: a plain copy of the same host, port and path must not answer an https URL.
-        let key = (url.host.clone(), url.port, url.path.clone());
+        // Before the cache: a plain copy of the same host, port and path must not answer an https URL. The scheme is in the key too.
+        if !plan.cacheable() {
+            return Ok(Arc::new(self.fetch(url, plan, "")?));
+        }
+        let key = (url.scheme, url.host.clone(), url.port, url.path.clone());
         let mut conditions = String::new();
         // Extra request headers. They stay empty unless we have an old copy to check.
 
@@ -172,7 +325,7 @@ impl Client {
             }
         }
 
-        let response = Arc::new(self.fetch(url, &conditions)?);
+        let response = Arc::new(self.fetch(url, plan, &conditions)?);
 
         if response.status == 304 {
             // "Not Modified": our copy is still right. The reply has no body.
@@ -213,9 +366,9 @@ impl Client {
         Ok(response)
     }
 
-    /// Send a GET request and read the whole reply. Reuse an idle connection when there is one.
-    fn fetch(&mut self, url: &Url, conditions: &str) -> Result<Response, Error> {
-        let (mut response, mut body) = self.start(url, conditions)?;
+    /// Send a request and read the whole reply. Reuse an idle connection when there is one.
+    fn fetch(&mut self, url: &Url, plan: &Plan, conditions: &str) -> Result<Response, Error> {
+        let (mut response, mut body) = self.start(url, plan, conditions)?;
         let mut bytes = Vec::with_capacity(body.size_hint());
         // A reply with a `Content-Length` gets its room at once: a list that grows by doubling holds up to twice the body for a moment.
         body.read_to_end(&mut bytes)?;
@@ -227,32 +380,38 @@ impl Client {
         Ok(response)
     }
 
-    /// Send a GET request and read the status and the headers. The body is not read: the `Body` reads it from the
+    /// Send a request and read the status and the headers. The body is not read: the `Body` reads it from the
     /// connection when the caller asks. Reuse an idle connection when there is one.
-    fn start(&mut self, url: &Url, conditions: &str) -> Result<(Response, Body), Error> {
+    fn start(&mut self, url: &Url, plan: &Plan, conditions: &str) -> Result<(Response, Body), Error> {
         refuse_https(url)?;
-        // The last check before a socket. The idle list is keyed by host and port, not by scheme.
-        let server = (url.host.clone(), url.port);
+        // The last check before a socket. The idle list is keyed by scheme too, so a plain connection never serves https.
+        let server = (url.scheme, url.host.clone(), url.port);
         let idle = self.idle.lock().unwrap().remove(&server);
+        let get = plan.method == Method::Get;
         let (mut stream, reused) = match idle {
             // `remove` takes the connection out of the list. While we use it, nobody else can.
-            Some((stream, since)) if since.elapsed() < MAX_IDLE => (stream, true),
-            // There is a connection, and it has not been idle for too long. Use it.
+            Some((stream, since)) if since.elapsed() < MAX_IDLE && (get || alive(&stream)) => (stream, true),
+            // There is a connection, and it has not been idle for too long. Use it. A POST also needs the
+            // server to have kept it: we cannot retry a POST after a write, so we look first.
             _ => (open(url)?, false),
             // `_` means "anything else": no connection, or an old one. Open a new one.
             // An old connection is dropped here, and Rust closes it for us.
         };
 
-        let mut result = send(&mut stream, url, conditions);
-        if result.is_err() && reused {
+        let mut result = send(&mut stream, url, plan, conditions);
+        if result.is_err() && reused && get {
             // A reused connection can fail when the server closed it while it was idle.
             // We cannot know that before we try. The error is not the page's fault, so we
             // try once more on a new connection. This is safe because GET only reads.
-            // We must never do this for a request that changes something, like POST.
+            // Never for a POST: the server may have got the request and done what it says, and a second one would do it twice.
             stream = open(url)?;
-            result = send(&mut stream, url, conditions);
+            result = send(&mut stream, url, plan, conditions);
         }
         let (head, leftover) = result?;
+        if !get && (200..400).contains(&head.response.status) {
+            // RFC 9111 section 4.4: a successful unsafe request invalidates the cached target.
+            self.forget(&(url.scheme, url.host.clone(), url.port, url.path.clone()));
+        }
         if let Framing::Length(n) = head.framing
             && n > MAX_REPLY
         {
@@ -263,36 +422,25 @@ impl Client {
         Ok((head.response, Body(Source::Live(Box::new(live)))))
     }
 
+    /// One hop of `send_stream`: a fresh copy from the cache, or a reply from the server whose body is still on the connection.
+    fn hop_stream(&mut self, url: &Url, plan: &Plan) -> Result<(Arc<Response>, Option<Body>), Error> {
+        let key = (url.scheme, url.host.clone(), url.port, url.path.clone());
+        let fresh = if plan.cacheable() { self.cache.get(&key).filter(|c| c.stored.elapsed() < c.fresh_for).map(|c| c.response.clone()) } else { None };
+        Ok(match fresh {
+            Some(response) => (response.clone(), Some(Body(Source::Memory(response, 0)))),
+            None => {
+                let (response, body) = self.start(url, plan, "")?;
+                (Arc::new(response), Some(body))
+            }
+        })
+    }
+
     /// Fetch a URL, and give the body as a `Body` that reads from the connection while the caller reads. The caller can
     /// start to use the first bytes of a page before the last ones come, and the page is never all in memory.
     /// Redirects are followed. A fresh copy in the cache is used. A reply that comes from the server is not put in the cache.
     /// The `response` has the status and the headers. Its `body` is empty: read it from `body`.
     pub fn get_stream(&mut self, url: &Url) -> Result<Streamed, Error> {
-        let mut current = url;
-        let mut next;
-        for _ in 0..=MAX_REDIRECTS {
-            refuse_https(current)?;
-            let key = (current.host.clone(), current.port, current.path.clone());
-            let fresh = self.cache.get(&key).filter(|c| c.stored.elapsed() < c.fresh_for).map(|c| c.response.clone());
-            let (response, mut body) = match fresh {
-                Some(response) => {
-                    let body = Body(Source::Memory(response.clone(), 0));
-                    (response, body)
-                }
-                None => {
-                    let (response, body) = self.start(current, "")?;
-                    (Arc::new(response), body)
-                }
-            };
-            let Some(location) = redirect_target(&response) else {
-                return Ok(Streamed { response, body });
-            };
-            next = current.join(location)?;
-            current = &next;
-            // The body of a redirect is not wanted. Read it (a redirect has a small one) so that the connection can be used again.
-            io::copy(&mut (&mut body).take(MAX_REDIRECT_BODY), &mut io::sink())?;
-        }
-        Err(format!("too many redirects (more than {MAX_REDIRECTS})").into())
+        self.send_stream(&Request::get(url))
     }
 }
 
@@ -311,20 +459,53 @@ fn open(url: &Url) -> Result<TcpStream, Error> {
     // Open a connection, with time limits (see `tcp.rs`).
 }
 
-/// Send one request, and read the status line and the headers of the reply. Gives them, and the bytes of the body that came with them.
-fn send(stream: &mut TcpStream, url: &Url, conditions: &str) -> Result<(Head, Vec<u8>), Error> {
-    // `&mut TcpStream` means we borrow the connection and may change it. The caller keeps it.
-    let request = format!("GET {} HTTP/1.1\r\nHost: {}\r\nUser-Agent: bare/0.1\r\n{conditions}\r\n", url.path, host_header(url));
-    // JS: a template string. Each `{}` is replaced by the next value. Like `${url.path}`.
+/// The request line, the headers and the blank line. A small body is added to the end by the caller.
+fn request_head(url: &Url, plan: &Plan, conditions: &str, extra: usize) -> Vec<u8> {
+    let mut out = Vec::with_capacity(256 + extra + conditions.len() + plan.headers.iter().map(|(n, v)| n.len() + v.len() + 4).sum::<usize>());
+    // One list with all the room that it needs: no growing while we write.
+    let _ = write!(out, "{} {} HTTP/1.1\r\nHost: {}\r\n", plan.method.as_str(), url.path, host_header(url));
     // `\r\n` is the line ending that HTTP requires.
     // `Host:` says which site we want. One server can host many sites.
     // There is no `Connection:` header. For HTTP/1.1 "keep the connection" is the default.
+    if !plan.headers.iter().any(|(n, _)| n.eq_ignore_ascii_case("user-agent")) {
+        out.extend_from_slice(b"User-Agent: bare/0.1\r\n");
+    }
+    for (name, value) in plan.headers.iter() {
+        let _ = write!(out, "{name}: {value}\r\n");
+    }
+    if plan.method == Method::Post {
+        let _ = write!(out, "Content-Length: {}\r\n", plan.body.len());
+        // The exact size of the body, made here from the slice, never from the caller.
+    }
     // `conditions` are extra headers, or nothing. Each one ends with `\r\n`.
-    // The empty line at the end (`\r\n\r\n`) tells the server that the request is complete.
+    out.extend_from_slice(conditions.as_bytes());
+    out.extend_from_slice(b"\r\n");
+    // The empty line at the end (`\r\n\r\n`) tells the server that the head is complete.
+    out
+}
 
-    stream.write_all(request.as_bytes())?;
-    // Send the request. A connection sends bytes, not text. `as_bytes` gives the bytes.
-    // `write_all` keeps writing until all bytes are sent, or there is an error.
+/// Send one request, and read the status line and the headers of the reply. Gives them, and the bytes of the body that came with them.
+fn send(stream: &mut TcpStream, url: &Url, plan: &Plan, conditions: &str) -> Result<(Head, Vec<u8>), Error> {
+    // `&mut TcpStream` means we borrow the connection and may change it. The caller keeps it.
+    let inline = plan.body.len() <= INLINE_BODY;
+    let mut out = request_head(url, plan, conditions, if inline { plan.body.len() } else { 0 });
+    if inline {
+        out.extend_from_slice(plan.body);
+        // A small body goes in the same write as the head: one packet, no wait for an acknowledgement between two.
+    }
+    stream.write_all(&out)?;
+    // Send the request. A connection sends bytes, not text. `write_all` keeps writing until all bytes are sent, or there is an error.
+    if !inline && let Err(e) = stream.write_all(plan.body) {
+        // A big body goes from the slice of the caller: no copy. A server may answer early ("413 too big") and close.
+        // Then the write fails, but the answer is on the connection. It is not reusable: the server did not read the body.
+        return match read_head(stream) {
+            Ok((mut head, leftover)) => {
+                head.response.close = true;
+                Ok((head, leftover))
+            }
+            Err(_) => Err(e.into()),
+        };
+    }
     read_head(stream)
 }
 
@@ -578,7 +759,7 @@ struct Live {
     given: usize,
     start: Instant,
     /// Where to put the connection when the body ends well, if it may be used again.
-    pool: Option<(Pool, (String, u16))>,
+    pool: Option<(Pool, Server)>,
     done: bool,
 }
 
@@ -606,7 +787,7 @@ impl Read for Stream {
 }
 
 impl Live {
-    fn new(stream: Stream, leftover: Vec<u8>, framing: Framing, pool: Option<(Pool, (String, u16))>) -> Live {
+    fn new(stream: Stream, leftover: Vec<u8>, framing: Framing, pool: Option<(Pool, Server)>) -> Live {
         let left = if let Framing::Length(n) = framing { n } else { 0 };
         Live { stream, buf: leftover, at: 0, framing, left, chunk: Chunk::Size, line: Vec::new(), given: 0, start: Instant::now(), pool, done: false }
     }
@@ -1007,7 +1188,14 @@ mod tests {
                         stream.read_exact(&mut byte).unwrap();
                         seen.push(byte[0]);
                     }
-                    // Read one request, up to its blank line.
+                    // Read one request, up to its blank line. A request with `Content-Length` has a body: read it too, so that
+                    // the next request on this connection starts in the right place.
+                    let head = String::from_utf8_lossy(&seen).to_ascii_lowercase();
+                    if let Some(n) = head.split("content-length: ").nth(1).and_then(|r| r.split("\r\n").next()).and_then(|n| n.parse::<usize>().ok()) {
+                        let mut body = vec![0u8; n];
+                        stream.read_exact(&mut body).unwrap();
+                        seen.extend_from_slice(&body);
+                    }
                     let _ = requests.send(String::from_utf8_lossy(&seen).into_owned());
                     // A test that does not read the requests has dropped the receiver. Then `send` fails. We do not care.
                     stream.write_all(reply.as_bytes()).unwrap();
@@ -1394,5 +1582,387 @@ mod tests {
             let (response, used) = parse_response(&raw, false).unwrap().unwrap();
             assert_eq!((response.body, used), (want, raw.len()));
         }
+    }
+
+    // ---- Requests with headers and a body: POST, redirects, no retry, cache and pool keys ----
+
+    const JSON: &[(&str, &str)] = &[("Content-Type", "application/json"), ("Authorization", "Bearer secret-token")];
+
+    fn leak(text: String) -> &'static str {
+        Box::leak(text.into_boxed_str())
+    }
+
+    fn redirect(code: u16, location: &str) -> &'static str {
+        leak(format!("HTTP/1.1 {code} Moved\r\nLocation: {location}\r\nContent-Length: 0\r\n\r\n"))
+    }
+
+    fn post_url(port: u16, path: &str) -> Url {
+        Url::parse(&format!("http://127.0.0.1:{port}{path}")).unwrap()
+    }
+
+    /// Wait for the server thread to pass on what it saw, then take it all.
+    fn seen(requests: &std::sync::mpsc::Receiver<String>) -> Vec<String> {
+        std::thread::sleep(Duration::from_millis(100));
+        requests.try_iter().collect()
+    }
+
+    #[test]
+    fn posts_exact_bytes() {
+        let (port, requests) = serve(vec![(vec![OK], false)]);
+        let body = br#"{"email":"a@b.c","password":"p"}"#;
+        let r = Client::new().post(&post_url(port, "/login?x=1"), JSON, body).unwrap();
+        assert_eq!((r.status, r.body.as_slice()), (200, b"ok".as_slice()));
+        let want = format!(
+            "POST /login?x=1 HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nUser-Agent: bare/0.1\r\nContent-Type: application/json\r\nAuthorization: Bearer secret-token\r\nContent-Length: {}\r\n\r\n{}",
+            body.len(),
+            String::from_utf8_lossy(body)
+        );
+        assert_eq!(seen(&requests), vec![want]);
+    }
+
+    #[test]
+    fn a_post_without_a_body_says_content_length_0() {
+        let (port, requests) = serve(vec![(vec![OK], false)]);
+        Client::new().post(&post_url(port, "/"), &[], b"").unwrap();
+        assert!(seen(&requests)[0].ends_with("Content-Length: 0\r\n\r\n"));
+    }
+
+    #[test]
+    fn a_get_with_headers_has_no_content_length() {
+        let (port, requests) = serve(vec![(vec![OK], false)]);
+        let url = post_url(port, "/me");
+        let req = Request { method: Method::Get, url: &url, headers: &[("Authorization", "Bearer t"), ("User-Agent", "other/1")], body: b"" };
+        Client::new().send(&req).unwrap();
+        let want = format!("GET /me HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nAuthorization: Bearer t\r\nUser-Agent: other/1\r\n\r\n");
+        assert_eq!(seen(&requests), vec![want]);
+        // The caller's `User-Agent` replaces ours. It does not come twice.
+    }
+
+    #[test]
+    fn a_body_at_the_inline_limit_and_past_it_arrives_whole() {
+        for size in [INLINE_BODY - 1, INLINE_BODY, INLINE_BODY + 1, 3 * 1024 * 1024] {
+            let (port, requests) = serve(vec![(vec![OK], false)]);
+            let body: Vec<u8> = (0..size).map(|i| b'a' + (i % 26) as u8).collect();
+            Client::new().post(&post_url(port, "/"), &[], &body).unwrap();
+            let got = seen(&requests).remove(0);
+            let (head, sent) = got.split_once("\r\n\r\n").unwrap();
+            assert!(head.ends_with(&format!("Content-Length: {size}")));
+            assert_eq!(sent.as_bytes(), body.as_slice(), "size {size}");
+        }
+    }
+
+    #[test]
+    fn bad_headers_never_reach_a_connection() {
+        let target = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = post_url(target.local_addr().unwrap().port(), "/");
+        let bad_names = ["", "a b", "a:b", "a\r\nX: y", "a\nb", "a\0b", "\u{e9}", "a(b", "a\"b"];
+        let bad_values = ["a\r\nX-Injected: 1", "a\nb", "a\rb", "a\0b", "a\x01", "a\x7f", " lead", "trail ", "\tx"];
+        let managed = ["Host", "content-length", "Transfer-Encoding", "CONNECTION", "Keep-Alive", "Proxy-Connection", "TE", "Trailer", "Upgrade", "Expect"];
+        let mut client = Client::new();
+        for name in bad_names {
+            assert!(client.post(&url, &[(name, "v")], b"x").is_err(), "name {name:?}");
+        }
+        for value in bad_values {
+            let error = client.post(&url, &[("X-A", value)], b"x").err().unwrap().to_string();
+            assert!(!error.contains(value.trim()) || value.trim().is_empty(), "{error}");
+            assert!(client.send_stream(&Request::post(&url, &[("X-A", value)], b"x")).is_err());
+        }
+        for name in managed {
+            assert!(client.post(&url, &[(name, "1")], b"x").is_err(), "{name}");
+        }
+        assert!(client.send(&Request { method: Method::Get, url: &url, headers: &[], body: b"x" }).is_err());
+        assert!(nothing_connects(&target));
+        // Each check failed before DNS and before a socket. Valid names with all the token marks pass:
+        assert!(check_request(&Request::post(&url, &[("X-A_b.c~`|^$%&'*+!#-9", "tab\tinside and \u{e9}")], b"")).is_ok());
+    }
+
+    #[test]
+    fn an_error_does_not_show_a_secret_value() {
+        let url = post_url(1, "/");
+        let error = Client::new().post(&url, &[("Authorization", "Bearer s3cret\r\nX: y")], b"pw=hunter2").err().unwrap().to_string();
+        assert!(!error.contains("s3cret") && !error.contains("hunter2"), "{error}");
+        let (port, _) = serve(vec![(vec!["HTTP/1.1 200 OK\r\nContent-Length: 10\r\n\r\nabc"], true)]);
+        let error = Client::new().post(&post_url(port, "/"), &[("Authorization", "Bearer s3cret")], b"pw=hunter2").err().unwrap().to_string();
+        assert!(!error.contains("s3cret") && !error.contains("hunter2"), "{error}");
+    }
+
+    #[test]
+    fn https_posts_are_refused_before_any_connection() {
+        let target = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = Url::parse(&format!("https://127.0.0.1:{}/login", target.local_addr().unwrap().port())).unwrap();
+        let error = Client::new().post(&url, JSON, b"{}").err().unwrap();
+        assert!(error.to_string().contains("https is not supported"));
+        assert!(Client::new().send_stream(&Request::post(&url, JSON, b"{}")).is_err());
+        assert!(nothing_connects(&target));
+    }
+
+    #[test]
+    fn redirects_turn_a_post_into_a_get_like_fetch() {
+        // 301 and 302 (POST only) and 303: GET, no body, no body headers. The `Authorization` of the same origin stays.
+        for code in [301, 302, 303] {
+            let (port, requests) = serve(vec![(vec![redirect(code, "/next"), OK], false)]);
+            let hdrs = [("Content-Type", "application/json"), ("authorization", "A"), ("X-Keep", "1"), ("content-LANGUAGE", "en")];
+            assert_eq!(Client::new().post(&post_url(port, "/login"), &hdrs, b"{\"p\":1}").unwrap().body, b"ok");
+            let seen = seen(&requests);
+            assert!(seen[0].starts_with("POST /login ") && seen[0].ends_with("{\"p\":1}"), "{code}");
+            let want = format!("GET /next HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nUser-Agent: bare/0.1\r\nauthorization: A\r\nX-Keep: 1\r\n\r\n");
+            assert_eq!(seen[1], want, "status {code}");
+        }
+    }
+
+    #[test]
+    fn redirects_307_and_308_keep_the_method_and_the_body() {
+        for code in [307, 308] {
+            let (port, requests) = serve(vec![(vec![redirect(code, "/next"), OK], false)]);
+            Client::new().post(&post_url(port, "/login"), JSON, b"{\"p\":1}").unwrap();
+            let seen = seen(&requests);
+            let want = format!(
+                "POST /next HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nUser-Agent: bare/0.1\r\nContent-Type: application/json\r\nAuthorization: Bearer secret-token\r\nContent-Length: 7\r\n\r\n{{\"p\":1}}"
+            );
+            assert_eq!(seen[1], want, "status {code}");
+            // The body is sent again from the same slice, and the connection is used again.
+        }
+    }
+
+    #[test]
+    fn a_get_stays_a_get_through_every_redirect_code() {
+        for code in [301, 302, 303, 307, 308] {
+            let (port, requests) = serve(vec![(vec![redirect(code, "/n"), OK], false)]);
+            Client::new().send(&Request { method: Method::Get, url: &post_url(port, "/"), headers: &[("X-A", "1")], body: b"" }).unwrap();
+            let seen = seen(&requests);
+            assert!(seen[1].starts_with("GET /n HTTP/1.1") && seen[1].contains("X-A: 1\r\n"), "{code}");
+        }
+    }
+
+    #[test]
+    fn a_redirect_to_another_origin_drops_secret_headers_only() {
+        // Another port is another origin.
+        for code in [301, 303, 307] {
+            let (other, requests) = serve(vec![(vec![OK], false)]);
+            let to = leak(format!("http://127.0.0.1:{other}/landing"));
+            let (port, first) = serve(vec![(vec![redirect(code, to)], false)]);
+            let hdrs = [("Authorization", "Bearer t"), ("COOKIE", "s=1"), ("Proxy-Authorization", "p"), ("X-Keep", "1")];
+            Client::new().post(&post_url(port, "/login"), &hdrs, b"{}").unwrap();
+            let got = &seen(&requests)[0];
+            for gone in ["Authorization", "authorization", "COOKIE", "Cookie", "Bearer", "s=1"] {
+                assert!(!got.contains(gone), "{code}: {gone} leaked: {got}");
+            }
+            assert!(got.contains("X-Keep: 1\r\n"), "{got}");
+            assert!(seen(&first)[0].contains("Authorization: Bearer t"));
+        }
+    }
+
+    #[test]
+    fn a_redirect_chain_keeps_the_stripping() {
+        // A to B (cross origin: stripped), B to B/x (same origin): the header does not come back.
+        let (b, requests) = serve(vec![(vec![redirect(302, "/x"), OK], false)]);
+        let (a, _) = serve(vec![(vec![redirect(302, leak(format!("http://127.0.0.1:{b}/y")))], false)]);
+        Client::new().send(&Request { method: Method::Get, url: &post_url(a, "/"), headers: &[("Authorization", "t")], body: b"" }).unwrap();
+        assert!(seen(&requests).iter().all(|r| !r.contains("Authorization")));
+    }
+
+    #[test]
+    fn a_post_redirect_loop_stops() {
+        let looping = redirect(307, "/");
+        let (port, requests) = serve(vec![(vec![looping; 21], false)]);
+        let error = Client::new().post(&post_url(port, "/"), &[], b"x").err().unwrap();
+        assert!(error.to_string().contains("too many redirects"));
+        assert_eq!(seen(&requests).len(), 21);
+    }
+
+    #[test]
+    fn a_post_is_never_sent_twice_when_the_reply_fails() {
+        // The server reads the POST on the reused connection and closes without a reply. A GET would try again on a
+        // new connection (and the second server connection would see it). A POST must not.
+        let (port, requests) = serve(vec![(vec![OK, ""], true), (vec![OK], false)]);
+        let mut client = Client::new();
+        client.get(&post_url(port, "/")).unwrap();
+        assert!(client.post(&post_url(port, "/pay"), &[], b"amount=1").is_err());
+        let seen = seen(&requests);
+        assert_eq!(seen.len(), 2, "{seen:?}");
+        assert!(seen[1].starts_with("POST /pay"));
+    }
+
+    #[test]
+    fn a_get_is_still_retried_when_the_reply_fails() {
+        let (port, requests) = serve(vec![(vec![OK, ""], true), (vec![OK], false)]);
+        let mut client = Client::new();
+        client.get(&post_url(port, "/")).unwrap();
+        assert_eq!(client.get(&post_url(port, "/again")).unwrap().body, b"ok");
+        assert_eq!(seen(&requests).len(), 3);
+    }
+
+    #[test]
+    fn a_post_does_not_use_a_connection_that_the_server_closed() {
+        // The server closed the idle connection. We see the close before we write, so the POST goes out once, on a new connection.
+        let (port, requests) = serve(vec![(vec![OK], true), (vec![OK], false)]);
+        let mut client = Client::new();
+        client.get(&post_url(port, "/")).unwrap();
+        std::thread::sleep(Duration::from_millis(100));
+        assert_eq!(client.post(&post_url(port, "/pay"), &[], b"amount=1").unwrap().body, b"ok");
+        let seen = seen(&requests);
+        assert_eq!(seen.iter().filter(|r| r.starts_with("POST")).count(), 1);
+    }
+
+    #[test]
+    fn posts_reuse_the_connection() {
+        let (port, requests) = serve(vec![(vec![OK, OK, OK], false)]);
+        let mut client = Client::new();
+        client.post(&post_url(port, "/a"), &[], b"1").unwrap();
+        client.post(&post_url(port, "/b"), JSON, b"22").unwrap();
+        client.get(&post_url(port, "/c")).unwrap();
+        assert_eq!(seen(&requests).len(), 3);
+        // One connection: the server accepts only one.
+    }
+
+    #[test]
+    fn a_post_reply_can_be_an_error_or_cut_short() {
+        let (port, _) = serve(vec![(vec!["HTTP/1.1 401 Unauthorized\r\nContent-Length: 3\r\n\r\nbad"], false)]);
+        let r = Client::new().post(&post_url(port, "/"), &[], b"x").unwrap();
+        assert_eq!((r.status, r.body.as_slice()), (401, b"bad".as_slice()));
+        let (port, _) = serve(vec![(vec!["HTTP/1.1 200 OK\r\nContent-Length: 10\r\n\r\nabc"], true)]);
+        assert!(Client::new().post(&post_url(port, "/"), &[], b"x").is_err());
+        let (port, _) = serve(vec![(vec!["HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhel"], true)]);
+        assert!(Client::new().post(&post_url(port, "/"), &[], b"x").is_err());
+        let (port, _) = serve(vec![(vec!["garbage\r\n\r\n"], true)]);
+        assert!(Client::new().post(&post_url(port, "/"), &[], b"x").is_err());
+    }
+
+    #[test]
+    fn a_server_that_answers_early_and_closes_gives_an_answer_or_an_error_never_a_reused_connection() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            let (mut s, _) = listener.accept().unwrap();
+            let mut piece = [0u8; 4096];
+            let _ = s.read(&mut piece);
+            let _ = s.write_all(b"HTTP/1.1 413 Too Large\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+        });
+        let body = vec![b'x'; 8 * 1024 * 1024];
+        let mut client = Client::new();
+        if let Ok(r) = client.post(&post_url(port, "/"), &[], &body) {
+            assert_eq!(r.status, 413);
+        }
+        assert!(client.idle.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_post_can_stream_its_reply() {
+        let (port, requests) = serve(vec![(vec![redirect(303, "/done"), page("", "streamed")], false)]);
+        let mut text = String::new();
+        let url = post_url(port, "/go");
+        Client::new().send_stream(&Request::post(&url, JSON, b"{}")).unwrap().body.read_to_string(&mut text).unwrap();
+        assert_eq!(text, "streamed");
+        assert!(seen(&requests)[1].starts_with("GET /done"));
+    }
+
+    #[test]
+    fn the_cache_and_the_pool_are_keyed_by_scheme() {
+        // A reply and a connection stored for https must not serve http, and the other way round.
+        let (port, requests) = serve(vec![(vec![page("Cache-Control: max-age=60\r\n", "plain")], false)]);
+        let mut client = Client::new();
+        let fake = Arc::new(Response { status: 200, body: b"tls".to_vec(), ..Response::default() });
+        let key = |scheme| (scheme, "127.0.0.1".to_string(), port, "/".to_string());
+        client.cache.insert(key(Scheme::Https), Cached { response: fake, stored: Instant::now(), fresh_for: Duration::from_secs(60) });
+        assert_eq!(client.get(&url(port)).unwrap().body, b"plain");
+        let mut text = String::new();
+        client.get_stream(&url(port)).unwrap().body.read_to_string(&mut text).unwrap();
+        assert_eq!(text, "plain");
+        assert!(client.cache.contains_key(&key(Scheme::Http)) && client.cache.contains_key(&key(Scheme::Https)));
+        assert_eq!(client.cache[&key(Scheme::Https)].response.body, b"tls");
+        assert_eq!(seen(&requests).len(), 1);
+        // The plain reply is in the pool under `Http`, and a stream that the https key holds is not touched.
+        assert!(client.idle.lock().unwrap().contains_key(&(Scheme::Http, "127.0.0.1".to_string(), port)));
+        assert!(!client.idle.lock().unwrap().contains_key(&(Scheme::Https, "127.0.0.1".to_string(), port)));
+    }
+
+    #[test]
+    fn a_plain_request_never_takes_an_https_idle_connection() {
+        let dummy = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let (port, requests) = serve(vec![(vec![OK], false)]);
+        let mut client = Client::new();
+        let stale = TcpStream::connect(dummy.local_addr().unwrap()).unwrap();
+        client.idle.lock().unwrap().insert((Scheme::Https, "127.0.0.1".to_string(), port), (stale, Instant::now()));
+        assert_eq!(client.get(&url(port)).unwrap().body, b"ok");
+        assert_eq!(seen(&requests).len(), 1);
+        assert!(client.idle.lock().unwrap().contains_key(&(Scheme::Https, "127.0.0.1".to_string(), port)));
+        // The request opened its own connection. The https entry is still there.
+    }
+
+    #[test]
+    fn requests_with_headers_or_bodies_bypass_the_cache() {
+        let (port, requests) = serve(vec![(vec![page("Cache-Control: max-age=60\r\n", "a"), page("", "b"), "HTTP/1.1 400 Bad Request\r\nContent-Length: 1\r\n\r\nc", page("", "d")], false)]);
+        let mut client = Client::new();
+        let url = url(port);
+        assert_eq!(client.get(&url).unwrap().body, b"a");
+        // An authenticated GET gets neither the cached copy nor a place in the cache, and a POST to the same URL too.
+        let auth = Request { method: Method::Get, url: &url, headers: &[("Authorization", "t")], body: b"" };
+        assert_eq!(client.send(&auth).unwrap().body, b"b");
+        assert_eq!(client.post(&url, &[], b"x").unwrap().body, b"c");
+        assert_eq!(client.send_stream(&auth).unwrap().response.status, 200);
+        // A failed POST leaves the plain cached copy; authenticated replies never replace it.
+        assert_eq!(client.get(&url).unwrap().body, b"a");
+        assert_eq!(seen(&requests).len(), 4);
+        assert_eq!(client.cache.len(), 1);
+    }
+
+    #[test]
+    fn successful_posts_invalidate_the_cached_target() {
+        for stream in [false, true] {
+            for code in [200, 204, 302, 400] {
+                let reply = leak(format!("HTTP/1.1 {code} Reply\r\nContent-Length: 0\r\n\r\n"));
+                let (port, requests) = serve(vec![(vec![page("Cache-Control: max-age=60\r\n", "old"), reply, page("", "new")], false)]);
+                let mut client = Client::new();
+                let url = url(port);
+                assert_eq!(client.get(&url).unwrap().body, b"old");
+                let req = Request::post(&url, &[], b"change");
+                if stream {
+                    let mut reply = client.send_stream(&req).unwrap();
+                    io::copy(&mut reply.body, &mut io::sink()).unwrap();
+                } else {
+                    client.send(&req).unwrap();
+                }
+                let expected = if code < 400 { b"new" } else { b"old" };
+                assert_eq!(client.get(&url).unwrap().body, expected, "stream={stream}, status={code}");
+                assert_eq!(seen(&requests).len(), if code < 400 { 3 } else { 2 });
+            }
+        }
+    }
+
+    #[test]
+    fn random_headers_never_split_the_head() {
+        // Random names and values from an alphabet full of specials. A request that passes the check must give a head
+        // with exactly one line for each header: no value can add a line, and nothing panics.
+        let alphabet: Vec<&str> = vec!["a", "Z", "0", "-", "_", ":", " ", "\t", "\r", "\n", "\0", "\x7f", "\u{e9}", "(", "\"", ",", ";", "\r\n", "Host", "content-length"];
+        let mut state = 0x1234_5678_9abc_def1u64;
+        let mut next = move || {
+            state ^= state >> 12;
+            state ^= state << 25;
+            state ^= state >> 27;
+            state.wrapping_mul(0x2545F4914F6CDD1D)
+        };
+        let url = Url::parse("http://h/p?q").unwrap();
+        let mut accepted = 0;
+        for _ in 0..200_000 {
+            let mut make = |max: u64| (0..next() % max).map(|_| alphabet[(next() % alphabet.len() as u64) as usize]).collect::<String>();
+            let (n1, v1, n2, v2) = (make(5), make(6), make(5), make(6));
+            let headers = [(n1.as_str(), v1.as_str()), (n2.as_str(), v2.as_str())];
+            let method = if next() % 2 == 0 { Method::Get } else { Method::Post };
+            let req = Request { method, url: &url, headers: &headers, body: b"" };
+            if check_request(&req).is_err() {
+                continue;
+            }
+            accepted += 1;
+            let plan = Plan { method, headers: Cow::Borrowed(&headers), body: b"" };
+            let head = request_head(&url, &plan, "", 0);
+            let lines = head.split(|&b| b == b'\n').count() - 1;
+            // Each line ends with "\n": the pieces are the lines and one empty rest. Request line, Host, User-Agent (unless
+            // the caller sets it), the two headers, Content-Length (POST), and the blank line.
+            let ua = headers.iter().any(|(n, _)| n.eq_ignore_ascii_case("user-agent"));
+            assert_eq!(lines, 2 + usize::from(!ua) + 2 + usize::from(method == Method::Post) + 1, "{:?}", String::from_utf8_lossy(&head));
+            assert!(head.ends_with(b"\r\n\r\n") && !head.windows(2).any(|w| w == b"\n\n" || w == b"\r\r"));
+            assert!(head.iter().filter(|&&b| b == b'\r').count() == lines && !head.contains(&0));
+        }
+        assert!(accepted > 100, "the generator is too strict: {accepted}");
     }
 }

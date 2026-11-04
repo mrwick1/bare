@@ -25,20 +25,37 @@ fn serve(handler: Handler) -> u16 {
     port
 }
 
-/// Read requests one by one and answer each. The thread ends when the client closes the connection.
+/// Read requests one by one and answer each. A request with `Content-Length` has a body: read it and throw it away,
+/// so that the next request on the connection starts in the right place. The thread ends when the client closes the connection.
 fn connection(mut stream: TcpStream, handler: Handler) {
     stream.set_nodelay(true).ok();
     let mut seen = Vec::new();
-    let mut piece = [0u8; 4096];
+    let mut piece = vec![0u8; 65536];
     let mut count = 0;
     loop {
-        while !seen.windows(4).any(|w| w == b"\r\n\r\n") {
+        let mut from = 0;
+        // Search only the new bytes (and 3 before them), or a head of many reads costs a scan of everything for each read.
+        let end = loop {
+            if let Some(at) = seen[from..].windows(4).position(|w| w == b"\r\n\r\n") {
+                break from + at + 4;
+            }
+            from = seen.len().saturating_sub(3);
             match stream.read(&mut piece) {
                 Ok(0) | Err(_) => return,
                 Ok(n) => seen.extend_from_slice(&piece[..n]),
             }
+        };
+        let head = String::from_utf8_lossy(&seen[..end]).to_ascii_lowercase();
+        let mut need = head.split("content-length: ").nth(1).and_then(|r| r.split("\r\n").next()).and_then(|n| n.parse::<usize>().ok()).unwrap_or(0);
+        let have = (seen.len() - end).min(need);
+        seen.drain(..end + have);
+        need -= have;
+        while need > 0 {
+            match stream.read(&mut piece[..need.min(65536)]) {
+                Ok(0) | Err(_) => return,
+                Ok(n) => need -= n,
+            }
         }
-        seen.clear();
         handler(&mut stream, count);
         count += 1;
     }
@@ -230,6 +247,62 @@ pub fn all() -> Vec<Case> {
                     black_box(client.get(&url).ok());
                 }
                 black_box(&client);
+            })
+        }),
+        // `n` is in KB: one POST of `n` KB, written from the slice of the caller. The server reads it and answers.
+        case("net-post-body", 1_000, |n| {
+            let port = serve(Arc::new(|s, _| {
+                s.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok").ok();
+            }));
+            let url = Url::parse(&format!("http://127.0.0.1:{port}/")).unwrap();
+            let body = vec![b'x'; n * 1000];
+            Box::new(move || {
+                assert_eq!(black_box(Client::new().post(&url, &[("Content-Type", "application/octet-stream")], &body).unwrap()).body, b"ok");
+            })
+        }),
+        // `n` JSON login-sized POSTs over one keep-alive connection: the cost of one request, many times.
+        case("net-post-small", 1_000, |n| {
+            let port = serve(Arc::new(|s, _| {
+                s.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok").ok();
+            }));
+            let url = Url::parse(&format!("http://127.0.0.1:{port}/login")).unwrap();
+            Box::new(move || {
+                let mut client = Client::new();
+                let headers = [("Content-Type", "application/json"), ("Authorization", "Bearer abcdefghijklmnopqrstuvwxyz")];
+                for _ in 0..n {
+                    assert_eq!(black_box(client.post(&url, &headers, br#"{"email":"user@example.com","password":"correct horse"}"#).unwrap()).body, b"ok");
+                }
+            })
+        }),
+        // `n` chains of POST, 303, GET: the redirect rewrite (method, body, headers, URL join) many times.
+        case("net-post-redirect", 500, |n| {
+            let port = serve(Arc::new(|s, count| {
+                let reply: &[u8] = if count % 2 == 0 {
+                    b"HTTP/1.1 303 See Other\r\nLocation: /home\r\nContent-Length: 0\r\n\r\n"
+                } else {
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok"
+                };
+                s.write_all(reply).ok();
+            }));
+            let url = Url::parse(&format!("http://127.0.0.1:{port}/login")).unwrap();
+            Box::new(move || {
+                let mut client = Client::new();
+                let headers = [("Content-Type", "application/json"), ("Authorization", "Bearer t")];
+                for _ in 0..n {
+                    assert_eq!(black_box(client.post(&url, &headers, b"{}").unwrap()).body, b"ok");
+                }
+            })
+        }),
+        // One request with `n` custom headers: validation and the head. The server sees a head of up to 3.2 MB.
+        case("net-post-many-headers", 100, |n| {
+            let port = serve(Arc::new(|s, _| {
+                s.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok").ok();
+            }));
+            let url = Url::parse(&format!("http://127.0.0.1:{port}/")).unwrap();
+            let names: Vec<String> = (0..n * 100).map(|i| format!("X-Header-{i}")).collect();
+            Box::new(move || {
+                let headers: Vec<(&str, &str)> = names.iter().map(|n| (n.as_str(), "value-value")).collect();
+                assert_eq!(black_box(Client::new().post(&url, &headers, b"{}").unwrap()).body, b"ok");
             })
         }),
         case("net-redirect-loop", 1, |_| {

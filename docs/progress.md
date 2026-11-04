@@ -73,7 +73,7 @@ Build on modules 1 and 7. Keep URL and HTTP work in their existing crates. Put T
 
 The SHA-256, SHA-384, HMAC-SHA256 and HKDF-SHA256 foundations of topic 2 are complete. `bare-tls` has streaming APIs, portable code and a CPU-detected SHA instruction path. The `force-portable` feature runs all crypto vectors through the fallback. AES-128-GCM record protection is also complete. It authenticates ciphertext before decrypting and supports portable and CPU-detected accelerated paths. SHA-384 has a streaming API and fixed memory use for certificate-signature hashes. X25519 key exchange and OS random input are complete. The TLS-facing key-exchange API rejects all-zero shared secrets. Linux uses `getrandom` with flags 0; source errors clear partial output and have no fallback. Topic 2 crypto primitives are implemented; TLS integration is still open. Topic 2 record protection is complete. The bounded record layer enforces record sizes, separate direction sequences and per-key usage limits. It rejects altered ciphertext before returning plaintext. The connected handshake must install keys and enforce message order.
 
-The URL prerequisite of topic 4 is complete: HTTP/HTTPS schemes, default ports, relative links, serialization and origin comparison. Network requests to HTTPS are refused before cache, DNS or socket use. TLS is not connected yet. Cache and connection-pool keys must include the scheme before removing that guard.
+The URL prerequisite of topic 4 is complete: HTTP/HTTPS schemes, default ports, relative links, serialization and origin comparison. Network requests to HTTPS are refused before cache, DNS or socket use. TLS is not connected yet. Cache and connection-pool keys now include the scheme. Keep the guard until the verified TLS transport is connected.
 
 Topic 1 is complete (2026-11-04). See [staging-network.md](staging-network.md) for the observed TLS chain, public resource manifest and repeatable inspection commands. The first HTTPS check fails until the TLS implementation is connected. The observed minimum uses AES-128-GCM, X25519, SHA-256, SHA-384, and ECDSA P-256/P-384 verification. Use an independently trusted root source; do not trust a root only because the server sent it.
 
@@ -91,6 +91,8 @@ Resource checks: handshake cost, throughput, peak memory for large bodies, repea
 Exit: `bare` downloads the real staging login HTML, scripts and CSS over verified HTTPS. Script execution and login are later gates.
 
 Certificate parsing and ECDSA P-256/P-384 verification in S1 topic 3 are complete. `der` and `x509` borrow signed bytes and fields from bounded inputs. Unknown critical extensions are exposed for the validator to reject. Parsing does not verify signatures, trust, a path or a hostname. ECDSA accepts only validated uncompressed public keys and in-range signature scalars. It is variable-time verification code for public data. Hostname checks and OS trust-store loading are complete. Hostname checks use SANs only and support exact DNS names and IP addresses. Wildcard names are unsupported. TLS 1.3 hello encoding, ServerHello parsing, typed key derivation and transcript hashing are complete. The next gate is to connect signature verification, hostname checks and independently loaded OS roots into path validation and the connected handshake. No HTTPS request is enabled by these foundations.
+
+S1 topic 5 request APIs are complete. GET and POST support validated caller headers and borrowed request bodies. POST is never retried. Redirects preserve or rewrite the method and body as required. Cross-origin redirects drop credential headers. Header-bearing requests bypass the cache. Successful POST responses invalidate the cached target. Topic 4 still gates HTTPS transport and staging checks.
 
 ### S2 JavaScript and event loop
 
@@ -292,8 +294,8 @@ Known gaps of module 4:
 - HTTP: one idle connection for each server. No pool of several at once, no parallel requests.
 - HTTP cache: no `Expires`, no heuristic freshness (both need HTTP date parsing), and no 301 caching.
 - HTTP cache: a reply with a `Vary` header is not stored. No disk cache. No size limit. Module 10 needs a limit for memory accounting.
-- HTTP: redirects only for GET. The cache is not split by top-level site, as Chrome does.
-- URL: only `http://`. `https://` needs module 7.
+- HTTP: GET and POST redirects work. The cache is not split by top-level site. Other request methods are unsupported.
+- URL: HTTP and HTTPS parse. HTTPS network access remains refused until the verified TLS transport is connected.
 - DNS: no short names from the `search` line of `/etc/resolv.conf`.
 - DNS: no DNS-over-HTTPS. It needs module 7.
 - Encoding: no UTF-16 and no other encodings. The meta scan is simple: it does not skip comments. The guess is not a real detector.
