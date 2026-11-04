@@ -41,13 +41,13 @@
 //! Headers iteration: `keys`, `values`, `entries` and `[Symbol.iterator]` (the same function as `entries`) make live iterators. Each
 //! `next` sorts and combines the list again and takes the entry at its index, so a header added or deleted during the loop shows. They
 //! inherit from `%IteratorPrototype%`. A `HeadersInit` with `Symbol.iterator` (read once) is a sequence of pairs read with the engine's own
-//! iteration (`Interp::host_iter_*`); each name and value is checked as it is read; a pair has exactly two values (at most three
-//! are read). An ordinary error closes the open iterators, inner first (Node's Headers does not); a limit, `Unsupported` or a heap
-//! fault closes nothing and runs no JS. Any other object is a record (an enumerable symbol key is a `TypeError`). Caps are checked
-//! before growth, and a byte view with more keys than `max_headers` is refused before its keys are listed. A real `Headers` as init is
-//! copied without reading its `Symbol.iterator`. A finished iterator is not sticky: it sees later headers (as in Node).
-//! Deviations: `statusText` of a network response is "" (the client drops the reason phrase). `Headers.forEach` and `get` follow the
-//! standard (sorted, combined with ", "). Bodies are not cached: the client cache is bypassed. Timeouts are the client's (120 s
+//! iteration (`Interp::host_iter_*`); each name and value is converted as it is read; a pair has exactly two values (at most three
+//! are read). Header validation follows conversion. Sequence errors do not close iterators. A limit, `Unsupported` or heap
+//! fault runs no more JS. Any other object is a record (an enumerable symbol key is a `TypeError`). Caps are checked
+//! before growth, and a byte view with more keys than `max_headers` is refused before its keys are listed. Existing Headers inputs
+//! read their iterator too. A finished iterator is not sticky: it sees later headers (as in Node).
+//! Deviations: `statusText` of a network response is "" (the client drops the reason phrase). `Headers.forEach` uses a
+//! snapshot of sorted, combined entries. Bodies are not cached: the client cache is bypassed. Timeouts are the client's (120 s
 //! a reply). A request that already started its blocking I/O cannot be interrupted; [`Browser::abort_fetches`] only rejects
 //! requests that are still queued.
 //!
@@ -209,14 +209,14 @@ impl HeaderList {
         let first = self.list.iter().position(|(k, _)| *k == n);
         match first {
             Some(i) => {
+                let kept: usize = self.list.iter().filter(|(k, _)| k != &n).map(|(k, v)| k.len() + v.len()).sum();
+                if kept.saturating_add(n.len()).saturating_add(v.len()) > lim.max_header_bytes {
+                    return Err(HErr::Limit("fetch-header-bytes"));
+                }
                 self.list[i].1 = v;
                 let mut seen = false;
                 self.list.retain(|(k, _)| *k != n || !std::mem::replace(&mut seen, true));
                 // `retain` keeps the first match (the one we just changed) and drops the rest.
-                let bytes: usize = self.list.iter().map(|(a, b)| a.len() + b.len()).sum();
-                if bytes > lim.max_header_bytes {
-                    return Err(HErr::Limit("fetch-header-bytes"));
-                }
                 Ok(())
             }
             None => self.append(lim, n, v),
@@ -484,6 +484,10 @@ impl Dom {
 
     fn header_name(&self, it: &mut Interp<'_>, v: Value) -> R<String> {
         let s = self.string_arg(it, v)?;
+        self.normalize_header_name(it, s)
+    }
+
+    fn normalize_header_name(&self, it: &mut Interp<'_>, s: String) -> R<String> {
         if s.is_empty() || !s.bytes().all(|b| b.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&b)) {
             return Err(it.type_error("Invalid header name"));
         }
@@ -492,6 +496,10 @@ impl Dom {
 
     fn header_value(&self, it: &mut Interp<'_>, v: Value) -> R<String> {
         let s = self.string_arg(it, v)?;
+        self.normalize_header_value(it, s)
+    }
+
+    fn normalize_header_value(&self, it: &mut Interp<'_>, s: String) -> R<String> {
         let t = s.trim_matches(['\t', '\n', '\r', ' ']);
         if t.chars().any(|c| matches!(c, '\0' | '\r' | '\n') || c as u32 > 0xFF) {
             return Err(it.type_error("Invalid header value"));
@@ -515,13 +523,13 @@ impl Dom {
             let step = match it.host_iter_next(&mut inner) {
                 Ok(Some(_)) if n == 2 => {
                     let e = it.type_error(BAD);
-                    return Err(it.host_iter_fail(&mut inner, e));
+                    return Err(e);
                 }
-                Ok(Some(v)) if n == 0 => self.header_name(it, v).map(|s| {
+                Ok(Some(v)) if n == 0 => self.string_arg(it, v).map(|s| {
                     name = Some(s);
                     true
                 }),
-                Ok(Some(v)) => self.header_value(it, v).map(|s| {
+                Ok(Some(v)) => self.string_arg(it, v).map(|s| {
                     value = Some(s);
                     true
                 }),
@@ -531,7 +539,7 @@ impl Dom {
             match step {
                 Ok(true) => n += 1,
                 Ok(false) => break,
-                Err(e) => return Err(it.host_iter_fail(&mut inner, e)),
+                Err(e) => return Err(e),
             }
         }
         match (name, value) {
@@ -553,12 +561,9 @@ impl Dom {
     }
 
     /// `(name, value)` pairs of a `HeadersInit`: a Headers, a sequence of pairs (anything with `Symbol.iterator`, read once)
-    /// or a record. Nothing is stored yet. A real Headers is copied without reading its `Symbol.iterator`.
+    /// or a record. Nothing is stored yet. Existing Headers use the same iterator path.
     fn init_pairs(&self, it: &mut Interp<'_>, init: Value) -> R<Vec<(String, String)>> {
         let Value::Object(o) = init else { return Err(it.type_error("Headers init is not an object or a sequence")) };
-        if let Some(F::Headers(h)) = self.fetch.st.borrow().objs.get(&o) {
-            return Ok(h.sorted());
-        }
         let (mut out, mut bytes) = (Vec::new(), 0usize);
         if let Some(mut outer) = it.host_iter_open(init)? {
             loop {
@@ -574,7 +579,7 @@ impl Dom {
                 match step {
                     Ok(true) => {}
                     Ok(false) => return Ok(out),
-                    Err(e) => return Err(it.host_iter_fail(&mut outer, e)),
+                    Err(e) => return Err(e),
                 }
             }
         }
@@ -597,7 +602,7 @@ impl Dom {
             }
             let name = it.heap.key_to_value(k).map_err(|e| it.heap_error(e))?;
             let v = it.get_value(init, k)?;
-            let (n, v) = (self.header_name(it, name)?, self.header_value(it, v)?);
+            let (n, v) = (self.header_name(it, name)?, self.string_arg(it, v)?);
             self.init_room(&out, bytes, n.len() + v.len())?;
             bytes += n.len() + v.len();
             out.push((n, v));
@@ -611,6 +616,8 @@ impl Dom {
         }
         let lim = self.fl();
         for (n, v) in self.init_pairs(it, init)? {
+            let n = self.normalize_header_name(it, n)?;
+            let v = self.normalize_header_value(it, v)?;
             list.append(&lim, n, v).map_err(|e| self.herr(it, e))?;
         }
         Ok(())

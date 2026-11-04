@@ -764,9 +764,9 @@ fn headers_iterate_through_the_shared_engine() {
         assert_eq!(js(&mut b, "var o2 = {k: 'v'}; o2[S] = undefined; new Headers(o2)"), "throw:TypeError:Cannot convert a Symbol value to a string");
         assert_eq!(js(&mut b, "new Headers(new Map([['bad name', 'x']]))"), "throw:TypeError:Invalid header name");
         assert!(js(&mut b, "new Headers(new Map([['x', '\\u00e9']]))").starts_with("unsupported:non-ASCII"));
-        // `return` runs for ordinary errors (inner first), never after a limit
-        assert_eq!(js(&mut b, "var closed = 0, inner = 0; var pair = {[S]() { var n = 0; return {next() { return {done: false, value: 'v' + n++}; }, return() { inner++; return {}; }}; }}; try { new Headers({[S]() { return {next() { return {done: false, value: pair}; }, return() { closed++; return {}; }}; }}) } catch (e) { e.name + closed + inner }"), "TypeError11");
-        assert_eq!(js(&mut b, "closed = 0; try { new Headers({[S]() { return {next() { return {done: false, value: 'x'}; }, return() { closed++; return {}; }}; }}) } catch (e) { e.name + closed }"), "TypeError1");
+        // WebIDL sequence conversion does not close iterators on errors.
+        assert_eq!(js(&mut b, "var closed = 0, inner = 0; var pair = {[S]() { var n = 0; return {next() { return {done: false, value: 'v' + n++}; }, return() { inner++; return {}; }}; }}; try { new Headers({[S]() { return {next() { return {done: false, value: pair}; }, return() { closed++; return {}; }}; }}) } catch (e) { e.name + closed + inner }"), "TypeError00");
+        assert_eq!(js(&mut b, "closed = 0; try { new Headers({[S]() { return {next() { return {done: false, value: 'x'}; }, return() { closed++; return {}; }}; }}) } catch (e) { e.name + closed }"), "TypeError0");
         // brand checks
         assert_eq!(js(&mut b, "Headers.prototype.entries.call({})"), "throw:TypeError:Illegal invocation");
         assert_eq!(js(&mut b, "Object.getPrototypeOf(new Headers().keys()).next.call({})"), "throw:TypeError:Illegal invocation");
@@ -836,5 +836,49 @@ fn callbacks_from_other_scripts_with_the_same_ids_do_not_mix_in_headers() {
         b.collect(&[]).unwrap();
         js(&mut b, "var C = {[Symbol.iterator]() { var i = 0; return {next() { return i++ < 1 ? {done: false, value: ['c', '3']} : {done: true}; }}; }};");
         assert_eq!(js(&mut b, "[B, A, C, B].map(function (x) { return JSON.stringify([...new Headers(x)]); }).join('|')"), r#"[["b1","2"],["b2","2"]]|[["a1","1"],["a2","1"]]|[["c","3"]]|[["b1","2"],["b2","2"]]"#);
+    });
+}
+
+#[test]
+fn headers_init_reads_the_iterator_on_existing_headers() {
+    big(|| {
+        let mut b = mk(None, FetchLimits::default());
+        assert_eq!(js(&mut b, "var calls=0; var h=new Headers([['old','v']]); h[Symbol.iterator]=function(){ calls++; return [['new','v']][Symbol.iterator](); }; JSON.stringify([...new Headers(h)]) + ':' + calls"), "[[\"new\",\"v\"]]:1");
+    });
+}
+
+#[test]
+fn headers_init_converts_values_before_header_validation() {
+    big(|| {
+        let mut b = mk(None, FetchLimits::default());
+        assert_eq!(js(&mut b, "var seen=[]; var name={toString(){seen.push('name');return 'bad name'}}, value={toString(){seen.push('value');return 'v'}}; try{new Headers([[name,value],['later',{toString(){seen.push('later');return 'v'}}]])}catch(e){seen.push(e.name)} seen.join()"), "name,value,later,TypeError");
+    });
+}
+
+#[test]
+fn headers_sequence_conversion_does_not_close_on_failure() {
+    big(|| {
+        let mut b = mk(None, FetchLimits::default());
+        assert_eq!(js(&mut b, "var closed=0;try{new Headers({[Symbol.iterator](){return{next(){return{done:false,value:'x'}},return(){closed++;return{}}}}})}catch(e){e.name+':'+closed}"), "TypeError:0");
+    });
+}
+
+#[test]
+fn headers_set_rejects_bytes_before_changing_the_list() {
+    big(|| {
+        let mut b = mk(None, FetchLimits { max_header_bytes: 8, ..Default::default() });
+        assert_eq!(js(&mut b, "var h = new Headers({x:'v'}); h.set('x','0123456789');"), lim("fetch-header-bytes"));
+        assert_eq!(js(&mut b, "h.get('x')"), "v");
+    });
+}
+
+#[test]
+fn an_async_headers_walk_survives_collection_without_the_source_global() {
+    big(|| {
+        let mut b = mk(None, FetchLimits::default());
+        assert_eq!(js(&mut b, "var h = new Headers({a:'1',b:'2',c:'3'}), seen=''; async function walk(){for(var [k,v] of h){await 0; seen+=k+v;}} walk(); h=undefined;"), "undefined");
+        b.collect(&[]).unwrap();
+        b.drain().unwrap();
+        assert_eq!(js(&mut b, "seen"), "a1b2c3");
     });
 }

@@ -148,3 +148,9 @@ var h = new Headers({x: '1', y: '2'});
 (function () { var h = new Response('x', {headers: {B: '2', a: '1'}}).headers; return JSON.stringify([...h]); })
 === headers-iterator-after-exhaustion-is-not-sticky
 (function () { var h = new Headers({a: '1'}); var i = h.entries(); i.next(); i.next(); h.append('b', '2'); return JSON.stringify(i.next()); })
+=== headers-existing-iterator-override
+(function(){var calls=0,h=new Headers([['old','v']]);h[Symbol.iterator]=function(){calls++;return [['new','v']][Symbol.iterator]()};return JSON.stringify([...new Headers(h)])+':'+calls;})
+=== headers-convert-before-validation
+(function(){var seen=[],name={toString(){seen.push('name');return 'bad name'}},value={toString(){seen.push('value');return 'v'}};try{new Headers([[name,value],['later',{toString(){seen.push('later');return 'v'}}]])}catch(e){seen.push(e.name)}return seen.join();})
+=== headers-conversion-no-close
+(function(){var closed=0;try{new Headers({[Symbol.iterator](){return{next(){return{done:false,value:'x'}},return(){closed++;return{}}}}})}catch(e){return e.name+':'+closed;}})
