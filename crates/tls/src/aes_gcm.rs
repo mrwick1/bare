@@ -76,12 +76,14 @@ impl Drop for Aes128Gcm {
 impl Aes128Gcm {
     /// Uses AES-NI and PCLMULQDQ when the CPU has them, else the portable code.
     pub fn new(key: &[u8; KEY_LEN]) -> Self {
-        let mut s = Self::new_portable(key);
-        #[cfg(target_arch = "x86_64")]
+        let s = Self::new_portable(key);
+        #[cfg(all(target_arch = "x86_64", not(feature = "force-portable")))]
         if hw::available() {
+            let mut s = s;
             // SAFETY: `available` checked the CPU features.
             s.hpow = unsafe { hw::powers(&s.h.to_be_bytes()) };
             s.hw = true;
+            return s;
         }
         s
     }
@@ -146,7 +148,7 @@ impl Aes128Gcm {
     /// XOR the CTR keystream, starting at counter value `ctr`, into `buf`.
     /// Callers keep `ctr + blocks <= 2^32` (see `MAX_DATA_LEN`), so it never wraps.
     fn ctr(&self, nonce: &[u8; NONCE_LEN], ctr: u32, buf: &mut [u8]) {
-        #[cfg(target_arch = "x86_64")]
+        #[cfg(all(target_arch = "x86_64", not(feature = "force-portable")))]
         if self.hw {
             // SAFETY: `hw` is only set after `hw::available()` returned true.
             return unsafe { hw::ctr_xor(&self.rk, nonce, ctr, buf) };
@@ -155,7 +157,7 @@ impl Aes128Gcm {
     }
 
     fn ghash(&self, aad: &[u8], ct: &[u8]) -> [u8; 16] {
-        #[cfg(target_arch = "x86_64")]
+        #[cfg(all(target_arch = "x86_64", not(feature = "force-portable")))]
         if self.hw {
             // SAFETY: as in `ctr`.
             return unsafe { hw::ghash(&self.hpow, aad, ct) };
@@ -214,8 +216,8 @@ const SQ: [u8; 8] = {
 /// Lane-wise square: XOR of the squared basis bytes for the set bits.
 fn gsq(a: u128) -> u128 {
     let mut r = 0;
-    for i in 0..8 {
-        r ^= spread((a >> i) & M1) & (SQ[i] as u128 * M1);
+    for (i, square) in SQ.iter().enumerate() {
+        r ^= spread((a >> i) & M1) & (*square as u128 * M1);
     }
     r
 }
@@ -346,7 +348,7 @@ fn ghash_portable(h: u128, aad: &[u8], ct: &[u8]) -> [u8; 16] {
 
 // ------------------------------------------------------------------- x86_64 HW
 
-#[cfg(target_arch = "x86_64")]
+#[cfg(all(target_arch = "x86_64", not(feature = "force-portable")))]
 mod hw {
     use std::arch::x86_64::*;
 
@@ -378,8 +380,8 @@ mod hw {
         let mut chunks = buf.chunks_exact_mut(128);
         for c in &mut chunks {
             let mut s = [_mm_setzero_si128(); 8];
-            for j in 0..8 {
-                s[j] = _mm_xor_si128(counter_block(ctr.wrapping_add(j as u32)), k[0]);
+            for (j, block) in s.iter_mut().enumerate() {
+                *block = _mm_xor_si128(counter_block(ctr.wrapping_add(j as u32)), k[0]);
             }
             for rkey in &k[1..10] {
                 for b in s.iter_mut() {

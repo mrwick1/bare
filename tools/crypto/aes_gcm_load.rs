@@ -53,17 +53,20 @@ fn peak_rss_kib() -> u64 {
 
 fn main() {
     let a: Vec<String> = std::env::args().collect();
-    if a.len() < 3 {
+    if !(3..=4).contains(&a.len()) || !matches!(a[1].as_str(), "portable" | "auto") {
         eprintln!("usage: {} <portable|auto> <scale> [base_mib]", a[0]);
         std::process::exit(2);
     }
     let key = *b"bare-aes-load-k1";
     let iv = *b"load-test-iv";
     let g = if a[1] == "portable" { Aes128Gcm::new_portable(&key) } else { Aes128Gcm::new(&key) };
-    let scale: u64 = a[2].parse().unwrap();
-    let base_mib: u64 = a.get(3).map_or(64, |s| s.parse().unwrap());
+    let scale: u64 = a[2].parse().expect("scale must be 1, 10 or 100");
+    assert!(matches!(scale, 1 | 10 | 100), "scale must be 1, 10 or 100");
+    let base_mib: u64 = a.get(3).map_or(64, |s| s.parse().expect("base_mib must be a positive integer"));
+    assert!(base_mib > 0, "base_mib must be positive");
     const REC: usize = 16384;
-    let records = base_mib * scale * (1 << 20) / REC as u64;
+    let bytes = base_mib.checked_mul(scale).and_then(|n| n.checked_mul(1 << 20)).expect("workload size overflow");
+    let records = bytes / REC as u64;
 
     // Fixed template plaintext; each record is the template XOR the low bytes of seq.
     let mut template = vec![0u8; REC];

@@ -71,7 +71,7 @@ Existing baseline: `cargo test --workspace` passed on 2026-11-04 at `8231fea`. E
 
 Build on modules 1 and 7. Keep URL and HTTP work in their existing crates. Put TLS and crypto behind a separate crate interface.
 
-The SHA-256, HMAC-SHA256 and HKDF-SHA256 foundations of topic 2 are complete. `bare-tls` has streaming APIs, portable code and a CPU-detected SHA instruction path. The `force-portable` feature runs all crypto vectors through the fallback. Topic 2 remains open for SHA-384, record protection, key exchange and secure random input.
+The SHA-256, HMAC-SHA256 and HKDF-SHA256 foundations of topic 2 are complete. `bare-tls` has streaming APIs, portable code and a CPU-detected SHA instruction path. The `force-portable` feature runs all crypto vectors through the fallback. AES-128-GCM record protection is also complete. It authenticates ciphertext before decrypting and supports portable and CPU-detected accelerated paths. Topic 2 remains open for SHA-384, key exchange and secure random input. TLS record framing, record-size limits, per-key usage limits and sequence exhaustion still need integration.
 
 The URL prerequisite of topic 4 is complete: HTTP/HTTPS schemes, default ports, relative links, serialization and origin comparison. Network requests to HTTPS are refused before cache, DNS or socket use. TLS is not connected yet. Cache and connection-pool keys must include the scheme before removing that guard.
 
