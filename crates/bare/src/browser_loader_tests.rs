@@ -361,3 +361,81 @@ fn syntax_errors_throw_and_loading_goes_on() {
         assert!(r.diagnostics.iter().any(|d| d.contains("SyntaxError")), "{r:?}");
     });
 }
+
+#[test]
+fn zero_task_budget_fetches_no_script() {
+    big(|| {
+        let srv = server(vec![js("/blocked.js", "var blocked=1;")]);
+        let mut b = make("<script src='/blocked.js'></script>", &srv, 100_000, true);
+        let r = load(&mut b, &srv, PageLimits { max_tasks: 0, ..quick() });
+        assert_eq!(r.stop, Stop::TaskBudget);
+        assert_eq!(srv.total(), 0);
+    });
+}
+
+#[test]
+fn page_entry_checks_failed_empty_checkpoint_before_scripts() {
+    big(|| {
+        let srv = server(vec![]);
+        let mut b = make("<script>var unwanted=1;</script>", &srv, 10_000, true);
+        b.run_script("Promise.resolve().then(function(){while(true){}});").unwrap();
+        assert!(b.drain().is_err());
+        let r = load(&mut b, &srv, quick());
+        assert!(matches!(r.stop, Stop::Fatal(Fatal::Limit(_))));
+        assert_eq!(r.scripts_run, 0);
+        assert_eq!(eval(&mut b, "typeof unwanted"), "undefined");
+    });
+}
+
+#[test]
+fn idle_timers_do_not_exceed_the_task_budget() {
+    big(|| {
+        let html = "<script>var log=[];for(var i=0;i<4;i++)setTimeout(function(){log.push('t')},10);</script>";
+        let (log, r, _) = page(html, vec![], PageLimits { max_tasks: 2, batch: 8, ..quick() });
+        assert_eq!(r.stop, Stop::TaskBudget);
+        assert!(r.tasks <= 2, "{r:?}");
+        assert_eq!(log, "t");
+    });
+}
+
+#[test]
+fn traversal_tasks_do_not_exceed_the_task_budget() {
+    big(|| {
+        let html = "<script>var log=[];window.addEventListener('popstate',function(){log.push('p')});history.pushState(null,'','/a');history.pushState(null,'','/b');history.pushState(null,'','/c');history.back();history.back();history.back();</script>";
+        let (log, r, _) = page(html, vec![], PageLimits { max_tasks: 2, batch: 8, ..quick() });
+        assert_eq!(r.stop, Stop::TaskBudget);
+        assert!(r.tasks <= 2, "{r:?}");
+        assert_eq!(log, "p");
+    });
+}
+
+#[test]
+fn script_diagnostics_omit_header_values() {
+    big(|| {
+        let routes = vec![("/mime.js",200,Some("application/private-mime-marker"),"".into(),vec![]),("/encoding.js",200,Some("application/javascript"),"".into(),vec![("Content-Encoding","private-encoding-marker")])];
+        let (_, r, _) = page("<script>var log=[];</script><script src='/mime.js'></script><script src='/encoding.js'></script>", routes, quick());
+        assert_eq!(r.load_errors, 2);
+        assert!(!format!("{r:?}").contains("private-"));
+    });
+}
+
+#[test]
+fn custom_exception_names_are_not_copied_into_diagnostics() {
+    big(|| {
+        let (_, r, _) = page("<script>var log=[];throw {name:'PrivateMarker',message:'not for diagnostics'};</script>", vec![], quick());
+        assert_eq!(r.script_throws, 1);
+        assert!(!format!("{r:?}").contains("PrivateMarker"));
+    });
+}
+
+#[test]
+fn an_https_document_does_not_fetch_a_plaintext_script() {
+    big(|| {
+        let srv = server(vec![js("/plain.js", "var compromised=1;")]);
+        let mut b = make(&format!("<script src='{}'></script>",srv.url("/plain.js")), &srv, 100_000, true);
+        let r = b.run_page(PageConfig {url:"https://secure.example.test/page".into(),client:Client::new(),limits:quick(),fetch:None});
+        assert_eq!(srv.total(),0);
+        assert_eq!((r.scripts_run,r.load_errors),(0,1));
+        assert_eq!(eval(&mut b,"typeof compromised"),"undefined");
+    });
+}

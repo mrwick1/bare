@@ -16,7 +16,7 @@
 //!
 //! Document load: GET, redirects followed here one by one (`Client::send_once`: a redirect is checked before any socket
 //! opens): at most `max_redirects`, http or https only, no downgrade from https to http. The status must be 2xx (a
-//! 404 page is not run), `Content-Type` `text/html` or `application/xhtml+xml`, no `Content-Encoding`, at most
+//! 404 page is not run), `Content-Type` `text/html` (XML/XHTML is unsupported), no `Content-Encoding`, at most
 //! `max_document_bytes`. The text is decoded by `bare_html::encoding`. Gates: no request body, so no form POST; no cookies
 //! (the client has none); no `Referer`; no cross-document history (`back` from the first entry of a document stays
 //! in that document); a failed load ends the session (the old page stays gone, as a browser error page would).
@@ -25,7 +25,7 @@
 use crate::browser::{Browser, BrowserLimits};
 use crate::browser_fetch::FetchLimits;
 use crate::browser_loader::{PageConfig, PageLimits, PageResult, Stop, deadline_after, label};
-use crate::browser_navigation::WebStorage;
+use crate::browser_navigation::{NavLimits, WebStorage};
 use bare_html::{encoding, tree};
 use bare_js::eval::EvalLimits;
 use bare_js::heap::HeapLimits;
@@ -67,6 +67,8 @@ pub struct SessionConfig {
     pub browser: BrowserLimits,
     pub eval: EvalLimits,
     pub heap: HeapLimits,
+    /// Override the browser's default media-query viewport, in CSS pixels.
+    pub viewport: Option<(f32, f32)>,
     /// Timers use the virtual clock (a test finishes at once).
     pub virtual_clock: bool,
     /// The storage to start from (a session that goes on). `None`: an empty one.
@@ -82,8 +84,9 @@ impl SessionConfig {
             fetch: FetchLimits::default(),
             limits: SessionLimits::default(),
             browser: BrowserLimits::default(),
-            eval: EvalLimits { max_steps: 2_000_000_000, ..Default::default() },
+            eval: EvalLimits::default(),
             heap: HeapLimits::default(),
+            viewport: None,
             virtual_clock: false,
             storage: None,
         }
@@ -123,7 +126,7 @@ pub struct Session {
 
 fn is_html(content_type: Option<&str>) -> bool {
     let m = content_type.unwrap_or("").split(';').next().unwrap_or("").trim();
-    m.eq_ignore_ascii_case("text/html") || m.eq_ignore_ascii_case("application/xhtml+xml")
+    m.eq_ignore_ascii_case("text/html")
 }
 
 /// May a redirect (or a navigation) go from `from` to `to`? http(s) only, and https never goes down to http.
@@ -134,8 +137,10 @@ pub(crate) fn redirect_allowed(from: &Url, to: &Url) -> bool {
 
 /// Download one document with the caps of `lim`. Gives the final URL (with the fragment) and the decoded text.
 fn load_document(client: &mut Client, url: &str, lim: &SessionLimits, deadline: Instant) -> Result<(String, String), String> {
+    let max_url = NavLimits::default().max_url_bytes;
+    if url.len() > max_url { return Err("the document URL is too big".into()); }
     let (bare, fragment) = match url.split_once('#') {
-        Some((b, f)) => (b, Some(f.chars().take(2048).collect::<String>())),
+        Some((b, f)) => (b, Some(f.to_string())),
         None => (url, None),
     };
     let mut cur = Url::parse(bare).map_err(|_| "the URL is not an http(s) URL".to_string())?;
@@ -155,7 +160,10 @@ fn load_document(client: &mut Client, url: &str, lim: &SessionLimits, deadline: 
                 return Err("a redirect leads from https to http".into());
             }
             if let Some((_, f)) = loc.split_once('#') {
-                fragment = Some(f.chars().take(2048).collect());
+                fragment = Some(f.to_string());
+            }
+            if next.to_string().len().saturating_add(fragment.as_ref().map_or(0, |f| f.len() + 1)) > max_url {
+                return Err("the document URL is too big".into());
             }
             cur = next;
             continue;
@@ -242,16 +250,21 @@ impl Session {
                 }
             };
             drop(html);
+            if let Some((w, h)) = self.cfg.viewport
+                && b.set_viewport(w, h).is_err() {
+                out.stop = SessionStop::LoadFailed("the viewport is invalid".into());
+                return out;
+            }
             if self.cfg.virtual_clock {
                 b.use_virtual_clock();
             }
             b.attach_storage(self.store.clone());
-            if let Err(e) = b.set_document_url(&url) {
-                out.stop = SessionStop::LoadFailed(e);
+            if b.set_document_url(&url).is_err() {
+                out.stop = SessionStop::LoadFailed("the document URL could not be configured".into());
                 return out;
             }
             let mut page = self.cfg.page.clone();
-            page.max_time = deadline.saturating_duration_since(Instant::now());
+            page.max_time = page.max_time.min(deadline.saturating_duration_since(Instant::now()));
             page.max_tasks = page.max_tasks.min(lim.max_tasks - out.tasks);
             page.max_rounds = page.max_rounds.min(lim.max_rounds - out.rounds);
             let client = (self.cfg.client)();

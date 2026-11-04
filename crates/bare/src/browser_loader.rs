@@ -572,18 +572,17 @@ impl Browser {
                 return res;
             }
         };
-        if let Some((client, limits)) = cfg.fetch {
-            if let Err(e) = self.configure_fetch(FetchConfig { base_url: Some(cfg.url.clone()), client, limits }) {
-                setup(&mut res, e);
-                return res;
-            }
+        if let Some((client, limits)) = cfg.fetch
+            && self.configure_fetch(FetchConfig { base_url: Some(cfg.url.clone()), client, limits }).is_err() {
+            setup(&mut res, "the fetch origin could not be configured".into());
+            return res;
         }
         // The realm knows no URL until now (`Browser::new` has none). A URL that the caller set stays, but it must be
         // the origin of the page: the URL of the page and the origin of `fetch` and storage are one thing.
         match self.document_url().map(|u| Url::parse(&u)) {
             None => {
-                if let Err(e) = self.set_document_url(&cfg.url) {
-                    setup(&mut res, e);
+                if self.set_document_url(&cfg.url).is_err() {
+                    setup(&mut res, "the document URL could not be configured".into());
                     return res;
                 }
             }
@@ -619,6 +618,7 @@ impl Browser {
             b: self,
             dom: dom.clone(),
             client: cfg.client,
+            https_only: page.scheme == bare_url::Scheme::Https,
             lim: cfg.limits,
             deadline,
             cache: (0..disc.targets.len()).map(|_| None).collect(),
@@ -655,6 +655,7 @@ struct Run<'a> {
     b: &'a mut Browser,
     dom: Rc<Dom>,
     client: Client,
+    https_only: bool,
     lim: PageLimits,
     deadline: Instant,
     /// The text of an external script target that more parsed elements still wait for, or why it failed.
@@ -693,12 +694,15 @@ fn reason(e: &LoadError) -> String {
     match e {
         // The text of a network error can name a host or an address: a fixed label instead.
         LoadError::Network(_) => "network error".into(),
+        LoadError::Mime(_) => "content type is not JavaScript".into(),
+        LoadError::Encoding(_) => "content encoding is not supported".into(),
         e => e.to_string(),
     }
 }
 
 /// One download, counted. Free function so that the caller can borrow other fields of `Run` at the same time.
-fn download(client: &mut Client, lim: &PageLimits, deadline: Instant, retained: usize, res: &mut PageResult, target: &resources::Target) -> Result<String, String> {
+fn download(client: &mut Client, https_only: bool, lim: &PageLimits, deadline: Instant, retained: usize, res: &mut PageResult, target: &resources::Target) -> Result<String, String> {
+    if https_only && target.url.scheme == bare_url::Scheme::Http { return Err("insecure script URL refused".into()); }
     if res.fetches >= lim.resources.max_fetches {
         return Err("fetch budget used".into());
     }
@@ -759,10 +763,13 @@ impl Run<'_> {
             Err(Error::Throw(v)) => {
                 self.dom.report(&mut self.b.it, v, "error", EvTarget::Window);
                 self.res.script_throws += 1;
-                let name = match v {
-                    Value::Object(_) => self.dom.st.borrow().reports.back().map(|r| r.message.split(':').next().unwrap_or("").chars().filter(|c| c.is_ascii_alphanumeric() || *c == '_').take(40).collect::<String>()).unwrap_or_default(),
-                    _ => "non-error value".into(),
-                };
+                let name = if matches!(v, Value::Object(_)) {
+                    let reports = self.dom.st.borrow();
+                    match reports.reports.back().and_then(|r| r.message.split(':').next()) {
+                        Some(n @ ("Error" | "TypeError" | "ReferenceError" | "SyntaxError" | "RangeError" | "URIError" | "EvalError" | "AggregateError" | "SecurityError" | "QuotaExceededError" | "InvalidStateError")) => n.to_string(),
+                        _ => "Error".into(),
+                    }
+                } else { "non-error value".into() };
                 self.diag(format!("script threw {name}: {what}"));
                 Ok(())
             }
@@ -773,6 +780,7 @@ impl Run<'_> {
     /// After a script or task: dynamic inline scripts that it queued run now, then the microtask checkpoint.
     fn after_js(&mut self) -> Flow {
         loop {
+            if !self.dom.nav.s.borrow().requests.is_empty() { break; }
             let next = self.dom.scripts.inline.borrow_mut().pop_front();
             let Some((node, text)) = next else { break };
             let pending = &self.dom.scripts.pending_bytes;
@@ -809,6 +817,7 @@ impl Run<'_> {
                 self.fire(EvTarget::Node(node), "load", false)?;
             }
             Err(why) => {
+                self.res.tasks += 1;
                 self.res.load_errors += 1;
                 self.diag(format!("script failed: {what}: {why}"));
                 self.fire(EvTarget::Node(node), "error", false)?;
@@ -819,6 +828,7 @@ impl Run<'_> {
 
     /// Run one script element that was in the page when it was parsed.
     fn run_parsed(&mut self, p: Parsed) -> Flow {
+        self.budget()?;
         if p.module {
             self.diag(format!("module script #{}", p.n));
             return Err(Stop::Fatal(Fatal::Unsupported("module script")));
@@ -837,7 +847,7 @@ impl Run<'_> {
                         Ok(text)
                     }
                     Some(Err(why)) => Err(why),
-                    None => download(&mut self.client, &self.lim, self.deadline, self.retained, &mut self.res, &self.disc.targets[t]),
+                    None => download(&mut self.client, self.https_only, &self.lim, self.deadline, self.retained, &mut self.res, &self.disc.targets[t]),
                 };
                 self.refs[t] -= 1;
                 // Keep what a later element still needs: the text, or the reason (a failure is not retried).
@@ -870,7 +880,7 @@ impl Run<'_> {
             Ext::Fetch(node, url) => {
                 let what = label(&url);
                 let target = resources::Target { expect: Expect::Script, url };
-                let text = download(&mut self.client, &self.lim, self.deadline, self.retained, &mut self.res, &target);
+                let text = download(&mut self.client, self.https_only, &self.lim, self.deadline, self.retained, &mut self.res, &target);
                 self.finish_external(node, &what, text)?;
             }
         }
@@ -885,6 +895,8 @@ impl Run<'_> {
     }
 
     fn go_inner(&mut self) -> Flow {
+        self.budget()?;
+        if let Err(e) = self.b.drain() { return Err(self.fatal(e, "initial checkpoint")); }
         let items = self.items.clone();
         for p in items.iter().filter(|p| p.timing == Timing::Blocking) {
             self.run_parsed(*p)?;
@@ -949,14 +961,15 @@ impl Run<'_> {
                 self.after_js()?;
             }
             // `popstate` and `hashchange` of same-document traversals.
-            if self.b.navigation_stats().pending_tasks > 0 {
+            for _ in 0..batch {
+                if self.b.navigation_stats().pending_tasks == 0 { break; }
                 self.budget()?;
-                let n = self.b.run_navigation_tasks().map_err(fatal_of)?;
+                let n = self.b.run_navigation_tasks_up_to(1).map_err(fatal_of)?;
                 self.res.tasks += n;
                 did += n;
                 self.after_js()?;
             }
-            if self.res.rounds % self.lim.collect_every.max(1) == 0 {
+            if self.res.rounds.is_multiple_of(self.lim.collect_every.max(1)) {
                 self.b.collect(&[]).map_err(fatal_of)?;
             }
             if did > 0 {
@@ -969,7 +982,7 @@ impl Run<'_> {
                 return Err(Stop::Settled);
             }
             if self.b.uses_virtual_clock() {
-                let pump = self.b.advance_to(due, batch).map_err(fatal_of)?;
+                let pump = self.b.advance_to(due, 1).map_err(fatal_of)?;
                 self.res.tasks += pump.ran;
                 self.after_js()?;
             } else {

@@ -345,6 +345,8 @@ pub struct Resource {
 pub enum LoadError {
     /// The request failed: DNS, connect, TLS validation, or a bad reply.
     Network(String),
+    /// A redirect is invalid, too deep, or would downgrade HTTPS.
+    Redirect,
     Status(u16),
     /// The `Content-Type` is not allowed. Holds the type (up to 64 chars), or `None` when it is missing.
     Mime(Option<String>),
@@ -365,6 +367,7 @@ impl fmt::Display for LoadError {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
             LoadError::Network(e) => write!(f, "request failed: {e}"),
+            LoadError::Redirect => write!(f, "resource redirect refused"),
             LoadError::Status(s) => write!(f, "status {s}"),
             LoadError::Mime(Some(m)) => write!(f, "content type {m:?} is not allowed here"),
             LoadError::Mime(None) => write!(f, "no content type"),
@@ -420,13 +423,30 @@ pub fn load(targets: &[Target], limits: &Limits) -> Loaded {
     Loaded { results, retained }
 }
 
+fn redirect_target(current: &Url, location: &str) -> Result<Url, LoadError> {
+    let next = current.join(location).map_err(|_| LoadError::Redirect)?;
+    if current.scheme == bare_url::Scheme::Https && next.scheme == bare_url::Scheme::Http { return Err(LoadError::Redirect); }
+    Ok(next)
+}
+
 /// Download one target with the caps of `limits`. `retained` is the text that the caller already keeps (the total cap),
 /// and `deadline` ends the work. The caller counts fetches.
 pub fn fetch(client: &mut http::Client, target: &Target, limits: &Limits, deadline: Instant, retained: usize) -> Result<Resource, LoadError> {
     if Instant::now() >= deadline {
         return Err(LoadError::TimedOut);
     }
-    let mut streamed = client.get_stream(&target.url).map_err(|e| LoadError::Network(e.to_string()))?;
+    let mut current = Url { scheme: target.url.scheme, host: target.url.host.clone(), port: target.url.port, path: target.url.path.clone() };
+    let mut redirects = 0;
+    let mut streamed = loop {
+        if Instant::now() >= deadline { return Err(LoadError::TimedOut); }
+        let streamed = client.send_stream_once(&http::Request::get(&current)).map_err(|e| LoadError::Network(e.to_string()))?;
+        if !matches!(streamed.response.status, 301 | 302 | 303 | 307 | 308) { break streamed; }
+        if redirects == 20 { return Err(LoadError::Redirect); }
+        let Some(location) = streamed.response.header("location") else { break streamed };
+        let next = redirect_target(&current, location)?;
+        current = next;
+        redirects += 1;
+    };
     let response = &streamed.response;
     if !(200..300).contains(&response.status) {
         return Err(LoadError::Status(response.status));
@@ -454,14 +474,14 @@ pub fn fetch(client: &mut http::Client, target: &Target, limits: &Limits, deadli
         return Err(LoadError::TotalTooLarge);
     }
     // One byte more than the declared size, so that the read that sees the end of the body has room.
-    let mut buf = vec![0u8; declared.map_or(16 * 1024, |d| d + 1).min(cap + 1)];
+    let mut buf = vec![0u8; declared.map_or(16 * 1024, |d| d.saturating_add(1)).min(cap.saturating_add(1))];
     let mut filled = 0;
     loop {
         if Instant::now() >= deadline {
             return Err(LoadError::TimedOut);
         }
         if filled == buf.len() {
-            buf.resize((buf.len() * 2).min(cap + 1), 0);
+            buf.resize(buf.len().saturating_mul(2).min(cap.saturating_add(1)), 0);
         }
         let n = match streamed.body.read(&mut buf[filled..]) {
             Ok(0) => break,
@@ -974,4 +994,26 @@ mod tests {
         let (_, _, loaded) = load_html(&server, "<script src=a.js></script>", &Limits::default());
         assert_eq!(loaded.results[0].as_ref().unwrap().text.len(), 3_000_000);
     }
+    #[test]
+    fn maximum_resource_caps_do_not_overflow() {
+        let server = serve(|_| Reply::js("x"));
+        let target = Target { expect: Expect::Script, url: Url::parse(&server.url("/x")).unwrap() };
+        let limits = Limits { max_resource_bytes: usize::MAX, max_total_bytes: usize::MAX, ..Limits::default() };
+        let got = fetch(&mut http::Client::new(), &target, &limits, Instant::now() + Duration::from_secs(2), 0).unwrap();
+        assert_eq!(got.text, "x");
+    }
+
+    #[test]
+    fn resource_redirects_are_checked_before_following() {
+        let from = Url::parse("https://secure.test/start").unwrap();
+        assert!(matches!(redirect_target(&from, "http://plain.test/a"), Err(LoadError::Redirect)));
+        assert!(matches!(redirect_target(&from, "ftp://other.test/a"), Err(LoadError::Redirect)));
+        assert_eq!(redirect_target(&from, "/next").unwrap().scheme, bare_url::Scheme::Https);
+        let server = serve(|p| if p == "/a" { Reply::new(302, None, "").header("Location", "/b") } else { Reply::js("x") });
+        let target = Target { expect: Expect::Script, url: Url::parse(&server.url("/a")).unwrap() };
+        let got = fetch(&mut http::Client::new(), &target, &Limits::default(), Instant::now() + Duration::from_secs(2), 0).unwrap();
+        assert_eq!(got.text, "x");
+        assert_eq!((server.hits("/a"),server.hits("/b")),(1,1));
+    }
+
 }

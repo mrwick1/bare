@@ -63,7 +63,7 @@ fn main() {
             eprintln!("error: --run needs a valid URL");
             std::process::exit(2);
         }
-        std::process::exit(run_page(arg.to_string()));
+        std::process::exit(run_page(arg.to_string(), viewport));
     }
     let url = Url::parse(&arg);
     let result = url
@@ -226,12 +226,14 @@ fn computed_styles(doc: &mut bare_html::dom::Document, page: Option<&Url>, viewp
 /// `--run`: a session over the real URL (document load, scripts, timers, `fetch`, navigations: `browser_session.rs`).
 /// The VM needs a big stack: 8 MiB is the floor in release, a debug build uses more stack per frame.
 /// Exit code: 0 settled or a budget ended it, 1 fatal or a failed load.
-fn run_page(page: String) -> i32 {
+fn run_page(page: String, viewport: (f32, f32)) -> i32 {
     use bare::browser_session::{Session, SessionConfig, SessionStop};
     use bare::Stop;
     let stack = if cfg!(debug_assertions) { 64 << 20 } else { 8 << 20 };
     let worker = std::thread::Builder::new().stack_size(stack).spawn(move || {
-        let mut s = Session::new(SessionConfig::new(&page));
+        let mut cfg = SessionConfig::new(&page);
+        cfg.viewport = Some(viewport);
+        let mut s = Session::new(cfg);
         let r = s.run();
         println!("stop: {:?}", r.stop);
         println!("documents {}, tasks {}, rounds {}", r.pages.len(), r.tasks, r.rounds);

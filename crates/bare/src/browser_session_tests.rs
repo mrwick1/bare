@@ -380,3 +380,61 @@ fn same_document_popstate_are_pumped_by_the_driver() {
         assert_eq!(b.it.display(v), "pop:{\"a\":1}");
     });
 }
+
+#[test]
+fn a_page_time_limit_is_not_replaced_by_the_session_limit() {
+    big(|| {
+        let srv = server(|| vec![("/", html("<script>localStorage.setItem('ran','yes')</script>"))]);
+        let mut c = cfg(srv.url("/"));
+        c.page.max_time = Duration::ZERO;
+        let mut s = Session::new(c);
+        let r = s.run();
+        assert_eq!(r.stop, SessionStop::Page(Stop::TimeBudget));
+        assert_eq!(get(&s, &srv, "ran"), None);
+    });
+}
+
+#[test]
+fn document_fragments_are_not_silently_truncated() {
+    big(|| {
+        let srv = server(|| vec![("/", html("<script>localStorage.setItem('length',String(location.hash.length))</script>"))]);
+        let mut s = Session::new(cfg(format!("{}#{}", srv.url("/"), "x".repeat(3000))));
+        let r = s.run();
+        assert_eq!(r.stop, SessionStop::Page(Stop::Settled));
+        assert_eq!(get(&s, &srv, "length").as_deref(), Some("3001"));
+    });
+}
+
+#[test]
+fn navigation_finishes_its_checkpoint_without_running_pending_scripts() {
+    big(|| {
+        let srv = server(|| vec![("/",html("<script>Promise.resolve().then(function(){localStorage.setItem('checkpoint','yes')});var s=document.createElement('script');s.text='localStorage.setItem(\"pending\",\"bad\")';document.head.appendChild(s);location.assign('/next')</script>")),("/next",html("<body>next</body>"))]);
+        let mut s = Session::new(cfg(srv.url("/")));
+        let r = s.run();
+        assert_eq!(r.stop, SessionStop::Page(Stop::Settled));
+        assert_eq!(get(&s, &srv, "checkpoint").as_deref(), Some("yes"));
+        assert_eq!(get(&s, &srv, "pending"), None);
+    });
+}
+
+#[test]
+fn configured_session_viewport_reaches_media_queries() {
+    big(|| {
+        let srv = server(|| vec![("/",html("<script>localStorage.setItem('narrow',String(matchMedia('(max-width: 500px)').matches))</script>"))]);
+        let mut c = cfg(srv.url("/"));
+        c.viewport = Some((300.0,800.0));
+        let mut s = Session::new(c);
+        assert_eq!(s.run().stop, SessionStop::Page(Stop::Settled));
+        assert_eq!(get(&s, &srv, "narrow").as_deref(), Some("true"));
+    });
+}
+
+#[test]
+fn xhtml_is_not_executed_by_the_html_parser() {
+    big(|| {
+        let srv = server(|| vec![("/",Reply::new(200,Some("application/xhtml+xml"),"<html><body><script>localStorage.setItem('xml','ran')</script></body></html>"))]);
+        let mut s = Session::new(cfg(srv.url("/")));
+        assert!(matches!(s.run().stop, SessionStop::LoadFailed(_)));
+        assert_eq!(get(&s, &srv, "xml"), None);
+    });
+}
