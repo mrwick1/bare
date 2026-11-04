@@ -1,12 +1,15 @@
 //! Load test for the style module (`HTMLElement.style` / `CSSStyleDeclaration`). One case at one scale per process.
 //!
-//!   style_load CASE SCALE      CASE: setget | churn | attrs      SCALE: 1, 10, 100
+//!   style_load CASE SCALE      CASE: setget | churn | attrs | shorthand      SCALE: 1, 10, 100
 //!
 //! setget: SCALE*2000 operations (`setProperty`, named setters, `removeProperty`, `getPropertyValue`, `!important`) on the
 //! style of 50 elements, checked against an ordered-list model in Rust, then the native cascade is run and the used
 //! `width` of every element is checked against the model. churn: SCALE*20 rounds of 20 throw-away detached elements that
 //! get a style and a `cssText`; the declarations must all be collected. attrs: SCALE*500 outside `setAttribute("style")`
 //! calls that the same declaration must see (`length`, `cssText`, `getPropertyValue`), with a checksum. Each case runs in
+//! shorthand: SCALE*2000 writes of `margin`/`padding` shorthands, longhands and removals on 50 elements, checked against a
+//! model written from the standard's rules (box expansion, shortest serialization), and the native cascade must give the same
+//! pixel margins and paddings. Each case runs in
 //! small scripts with a VM collect between them. Prints time, CPU, peak RSS, allocations, and what the realm holds before
 //! and after the last collection. `tools/js/style_load.sh` runs the matrix under caps.
 
@@ -229,8 +232,8 @@ fn exec(name: &str, scale: usize) {
             for s in (0..n).step_by(100) {
                 run(&mut b, &format!("chunk({s}, 100)"));
                 for i in s..s + 100 {
-                    // `color: c<i>red` is not a color, so the declaration is dropped; two are left.
-                    let text = format!("width: {}px; margin-top: {}px;", i % 90 + 1, i % 9);
+                    // `color: c<i>red` is not a color: the CSSOM does not count it, but the attribute keeps it as written.
+                    let text = format!("color: c{i}red; width: {}px; margin-top: {}px;", i % 90 + 1, i % 9);
                     want += 2 * 1000 + format!("{}px", i % 90 + 1).len() + text.len() + format!("{}px", i % 9).len();
                     ops += 1;
                 }
@@ -243,6 +246,105 @@ fn exec(name: &str, scale: usize) {
             collect(&mut b);
             after = b.style_stats().objects;
             expect("attrs one object", after.to_string(), "1".into());
+        }
+        "shorthand" => {
+            let n = 2000 * scale;
+            run(&mut b, "var els=[]; for (var i=0;i<50;i++){ var e=document.createElement('i'); e.id='e'+i; document.body.appendChild(e); els.push(e) } var e=null; var sum=0;
+                var SIDE=['Top','Right','Bottom','Left'];
+                function chunk(s,c){ for (var i=s;i<s+c;i++){ var st=els[i%50].style, k=(i/7)|0, v=function(j){ return ((i*3+j)%9+1)+'px' };
+                  switch (i%7) {
+                    case 0: var n=1+k%4, a=[]; for (var j=0;j<n;j++) a.push(v(j)); st.margin=a.join(' '); break;
+                    case 1: st['margin'+SIDE[k%4]]=v(0); break;
+                    case 2: st.removeProperty('margin-'+SIDE[k%4].toLowerCase()); break;
+                    case 3: if (k%3==0) st.removeProperty('margin'); else st.paddingTop=v(1); break;
+                    case 4: st.padding=v(0); break;
+                    case 5: st['padding'+SIDE[k%4]]=v(2); break;
+                    case 6: sum += st.margin.length + st.marginTop.length + st.length*100 + st.getPropertyValue('padding-top').length + st.padding.length*7; break;
+                  } } }");
+            // The model: the standard's rules, written again here. Four margin sides and four padding sides, each a pixel count or unset.
+            let mut m = vec![[None::<usize>; 8]; 50];
+            let shortest = |x: &[Option<usize>]| -> String {
+                if x.iter().any(Option::is_none) {
+                    return String::new();
+                }
+                let v: Vec<usize> = x.iter().map(|y| y.unwrap()).collect();
+                let list = if v[1] != v[3] { vec![v[0], v[1], v[2], v[3]] } else if v[0] != v[2] { vec![v[0], v[1], v[2]] } else if v[0] != v[1] { vec![v[0], v[1]] } else { vec![v[0]] };
+                list.iter().map(|x| format!("{x}px")).collect::<Vec<_>>().join(" ")
+            };
+            let mut sum = 0usize;
+            for s in (0..n).step_by(100) {
+                run(&mut b, &format!("chunk({s}, 100)"));
+                for i in s..s + 100 {
+                    let st = &mut m[i % 50];
+                    let k = i / 7;
+                    let v = |j: usize| (i * 3 + j) % 9 + 1;
+                    match i % 7 {
+                        0 => {
+                            let c = 1 + k % 4;
+                            let a: Vec<usize> = (0..c).map(v).collect();
+                            let (t, r, bo, l) = match c {
+                                1 => (a[0], a[0], a[0], a[0]),
+                                2 => (a[0], a[1], a[0], a[1]),
+                                3 => (a[0], a[1], a[2], a[1]),
+                                _ => (a[0], a[1], a[2], a[3]),
+                            };
+                            for (j, x) in [t, r, bo, l].into_iter().enumerate() {
+                                st[j] = Some(x);
+                            }
+                        }
+                        1 => st[k % 4] = Some(v(0)),
+                        2 => st[k % 4] = None,
+                        3 => {
+                            if k % 3 == 0 {
+                                st[..4].fill(None);
+                            } else {
+                                st[4] = Some(v(1));
+                            }
+                        }
+                        4 => st[4..].fill(Some(v(0))),
+                        5 => st[4 + k % 4] = Some(v(2)),
+                        _ => {
+                            let top = st[0].map_or(0, |x| format!("{x}px").len());
+                            sum += shortest(&st[..4]).len() + top + (st.iter().flatten().count()) * 100 + st[4].map_or(0, |x| format!("{x}px").len()) + shortest(&st[4..]).len() * 7;
+                        }
+                    }
+                    ops += 1;
+                }
+                if s % 1000 == 900 {
+                    collect(&mut b);
+                }
+            }
+            expect("shorthand sum", run(&mut b, "sum"), sum.to_string());
+            expect("shorthand margin", run(&mut b, "els.map(function(e){return e.style.margin}).join('|')"), m.iter().map(|x| shortest(&x[..4])).collect::<Vec<_>>().join("|"));
+            expect("shorthand padding", run(&mut b, "els.map(function(e){return e.style.padding}).join('|')"), m.iter().map(|x| shortest(&x[4..])).collect::<Vec<_>>().join("|"));
+            expect("shorthand length", run(&mut b, "els.map(function(e){return e.style.length}).join()"), m.iter().map(|x| x.iter().flatten().count().to_string()).collect::<Vec<_>>().join(","));
+            // The native cascade, which reads the attribute text and not the CSSOM, gives the same pixels.
+            let doc = b.document();
+            let ids: Vec<_> = (0..50).map(|i| b.query(&format!("#e{i}")).unwrap_or_else(|e| die(format!("query {e:?}"))).unwrap_or_else(|| die("missing".into()))).collect();
+            let mut d = doc.borrow_mut();
+            let mut rules = bare_css::cascade::RuleSet::new((1000.0, 500.0));
+            rules.add(&mut d, bare_css::cascade::UA_CSS, bare_css::cascade::Origin::UserAgent);
+            let styles = rules.compute(&d);
+            use bare_css::values::Property as Pr;
+            let props = [Pr::MarginTop, Pr::MarginRight, Pr::MarginBottom, Pr::MarginLeft, Pr::PaddingTop, Pr::PaddingRight, Pr::PaddingBottom, Pr::PaddingLeft];
+            for (i, id) in ids.iter().enumerate() {
+                for (j, p) in props.iter().enumerate() {
+                    let want = m[i][j].map_or(0.0, |x| x as f32);
+                    let got = styles.style(*id).map_or(-1.0, |s| s.px(*p));
+                    if got != want {
+                        die(format!("cascade {} of e{i}: {got} != {want}", p.name()));
+                    }
+                }
+            }
+            drop(d);
+            before = b.style_stats().objects;
+            run(&mut b, "els=null");
+            collect(&mut b);
+            expect("shorthand attached", b.style_stats().objects.to_string(), "50".into());
+            run(&mut b, "var all=document.body.children; for (var i=all.length-1;i>=0;i--) all[i].remove(); all=null");
+            collect(&mut b);
+            after = b.style_stats().objects;
+            expect("shorthand released", format!("{after},{}", b.stats().wrappers), format!("0,{wrappers0}"));
         }
         _ => die(format!("unknown case {name}")),
     }
@@ -269,7 +371,7 @@ fn exec(name: &str, scale: usize) {
 fn main() {
     let a: Vec<String> = std::env::args().collect();
     if a.len() != 3 {
-        die("usage: style_load setget|churn|attrs 1|10|100".into());
+        die("usage: style_load setget|churn|attrs|shorthand 1|10|100".into());
     }
     let scale: usize = a[2].parse().unwrap_or_else(|_| die("scale".into()));
     let name = a[1].clone();

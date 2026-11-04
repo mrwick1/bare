@@ -1,10 +1,9 @@
 //! `HTMLElement.style` and `CSSStyleDeclaration` over the native `style` attribute (CSSOM, "CSSStyleDeclaration").
 //!
 //! - The declaration block stores nothing but its element. Every call reads the `style` attribute at that moment, parses
-//!   it with `bare_css::parser::parse_declarations`, keeps each declaration that `bare_css::values::parse_declaration`
-//!   accepts (a custom property `--x` is always kept), and for a change writes the serialized block back with the normal
-//!   attribute path (`attr_set`: caps, charge, native cache invalidation). So `setAttribute("style", ...)`, `cssText`,
-//!   the named properties and the native selector/cascade code always agree.
+//!   it into a declaration block (`browser_style_block.rs`, where the model is described), and for a change writes the
+//!   serialized block back with the normal attribute path (`attr_set`: caps, charge, native cache invalidation). So
+//!   `setAttribute("style", ...)`, `cssText`, the named properties and the native selector/cascade code always agree.
 //! - `el.style` is one object for each element while the element wrapper lives (`SameObject`): the wrapper traces the
 //!   declaration and the declaration traces the wrapper. The setter forwards to `cssText` (`[PutForwards=cssText]`).
 //! - Supported properties are exactly the ones `bare_css` understands: `values::Property::ALL` and `values::SHORTHANDS`.
@@ -14,20 +13,28 @@
 //! - Order of work: arguments are converted with `ToString` first (user code may run, no borrow is held), then the
 //!   block is read, changed in Rust and written once. A value that does not parse, an unsupported property, or a
 //!   priority other than `""`/`important` changes nothing (no write, no exception), as the standard says.
-//! - `setProperty`/`removeProperty` replace every declaration the new one fully covers (`margin` covers `margin-top`).
-//!   The new declaration takes the place of the first one it replaced, unless a later declaration overlaps it (then it
-//!   goes last, so the cascade order stays right). A block that the attribute holds is read as written: only an
-//!   identical name is merged (the later wins, unless the earlier is `!important` and the later is not).
-//! - Caps (`StyleLimits`, `Limit(Host(name))`, never catchable): `style-objects`, `style-bytes` (one block, one value),
-//!   `style-decls`. Scans are charged to the step budget before they run. Text growth is the native document's cap
-//!   (`dom-text`): every write adds the new attribute text to the arena, which never shrinks.
+//! - A shorthand owns its longhands: `style.margin = "1px"` gives `marginTop` `1px`, `length` 4, and
+//!   `removeProperty("margin-top")` leaves three. A later write takes the longhands it sets from the older declarations
+//!   (CSSOM: one value per longhand) and goes where the first of them was. See `browser_style_block.rs`.
+//! - Caps (`StyleLimits`, `Limit(Host(name))`, never catchable): `style-objects`, `style-bytes` (one block, one value,
+//!   the output, checked before each piece is added), `style-decls` (declarations of the block, counted while the parser
+//!   reads, so the parser stops at the cap; the count includes declarations that only the cascade understands, and
+//!   a repeated name counts each time). Scans are charged to the step budget before they run. Text growth is the native
+//!   document's cap (`dom-text`): every write adds the new attribute text to the arena, which never shrinks.
 //!
 //! Gates and deviations (on purpose, none is silently faked)
 //! - A value is kept as written (trimmed). It is not canonicalized (`red` stays `red`, `0` stays `0`, Chrome gives `0px`).
-//! - A shorthand is stored as a shorthand, not expanded: `getPropertyValue("margin-top")` after `margin: 1px` is `""`,
-//!   `length` counts the shorthand as one, and `removeProperty("margin-top")` does not edit `margin`.
-//! - A property the cascade does not know is dropped from the block when the block is written again. An attribute that
-//!   only holds such properties is not changed until something writes it.
+//!   An unchanged shorthand is written as authored (`margin: 1px 1px` stays); one built from longhands is the shortest form.
+//!   A longhand the author did not write (`flex: 2` sets `flex-basis`, `border: solid` sets the width) is written from the
+//!   engine's typed value: `0%`, `3px` (Chrome: `medium`), `400` (Chrome: `normal`).
+//! - Declarations the engine does not read (an unknown property, a value it refuses) are kept in the attribute, in order,
+//!   and are invisible here (`length`, `item`, `getPropertyValue`). A browser would drop a value it refuses; the native
+//!   cascade drops it too. Text that is not a declaration (`oops;`) is not kept.
+//! - `getPropertyValue` of a shorthand the model cannot build from longhands is `""`: `flex-flow`, `background`, `font`,
+//!   `list-style`, `text-decoration`, `grid-row`, `grid-column`, `grid-area` unless one declaration of that name is
+//!   still whole. A shorthand with `var()` has no longhand text (`""`), and writing or removing one of its longhands is
+//!   `Unsupported` before anything changes.
+//! - Lone surrogates are `Unsupported` at every string entry (the document is UTF-8), never ignored.
 //! - No indexed access (`style[0]`), no iterator, no `getPropertyCSSValue`, `parentRule` is `null`. No computed style
 //!   (`getComputedStyle`), no SVG `style`, no `innerHTML`/`outerHTML` parse of `style`, no layout reads.
 //! - `new CSSStyleDeclaration()` and a subclass of it throw `TypeError: Illegal constructor`.
@@ -35,8 +42,11 @@
 use crate::browser::*;
 use crate::browser_dom::attr_set;
 use crate::browser_platform::{V, arg};
-use bare_css::parser::parse_declarations;
-use bare_css::values::{Property, SHORTHANDS, Side, parse_declaration, shorthand_longhands};
+use crate::browser_style_block::{Decl, Fail, Lim, custom, get, parse, priority, remove, serialize, set};
+use crate::browser_style_block as blk;
+use bare_css::values::{Property, SHORTHANDS};
+use bare_js::eval::Error;
+use std::borrow::Cow;
 use bare_html::dom::{NodeData, NodeId};
 use bare_js::eval::Interp;
 use bare_js::value::{ObjId, Value};
@@ -88,45 +98,6 @@ pub(crate) struct Style {
     props: OnceCell<Vec<&'static str>>,
 }
 
-#[derive(Clone)]
-struct Decl {
-    name: String,
-    value: String,
-    important: bool,
-}
-
-fn custom(name: &str) -> bool {
-    name.len() > 2 && name.starts_with("--")
-}
-
-fn supported(name: &str) -> bool {
-    Property::from_name(name).is_some() || SHORTHANDS.contains(&name)
-}
-
-/// The longhands a name sets. Empty for a custom property.
-fn longs(name: &str) -> &'static [Property] {
-    if let Some(l) = shorthand_longhands(name) {
-        return l;
-    }
-    match Property::from_name(name) {
-        Some(p) => &Property::ALL[p as usize..p as usize + 1],
-        None => &[],
-    }
-}
-
-/// Does a declaration of `new` make a declaration of `old` pointless (all its longhands are set again)?
-fn covers(new: &str, old: &str) -> bool {
-    if new == old {
-        return true;
-    }
-    let (n, o) = (longs(new), longs(old));
-    !o.is_empty() && o.iter().all(|p| n.contains(p))
-}
-
-fn overlaps(a: &str, b: &str) -> bool {
-    a == b || longs(a).iter().any(|p| longs(b).contains(p))
-}
-
 /// `-webkit-x-y` -> `WebkitXY`, `margin-top` -> `marginTop` (CSSOM "CSS property to IDL attribute").
 fn camel(css: &str) -> String {
     let mut out = String::with_capacity(css.len());
@@ -164,46 +135,9 @@ fn eq_important(s: &str) -> bool {
     s.eq_ignore_ascii_case("important")
 }
 
-fn valid(name: &str, value: &str, important: bool) -> bool {
-    if custom(name) {
-        return true;
-    }
-    parse_declaration(name, value, important, &mut Side::default(), &mut Vec::new())
-}
-
-/// Add `d` to the block. `parsing`: the block is being read as written, so only an identical name is merged.
-fn put(list: &mut Vec<Decl>, d: Decl, parsing: bool) {
-    if parsing && list.iter().any(|o| o.name == d.name && o.important && !d.important) {
-        return;
-    }
-    let mut slot = None;
-    let mut i = 0;
-    while i < list.len() {
-        if if parsing { list[i].name == d.name } else { covers(&d.name, &list[i].name) } {
-            slot.get_or_insert(i);
-            list.remove(i);
-        } else {
-            i += 1;
-        }
-    }
-    match slot {
-        Some(s) if !list[s..].iter().any(|o| overlaps(&d.name, &o.name)) => list.insert(s, d),
-        _ => list.push(d),
-    }
-}
-
-fn serialize(list: &[Decl]) -> String {
-    let mut out = String::new();
-    for (i, d) in list.iter().enumerate() {
-        if i > 0 {
-            out.push(' ');
-        }
-        out.push_str(&d.name);
-        out.push_str(": ");
-        out.push_str(&d.value);
-        out.push_str(if d.important { " !important;" } else { ";" });
-    }
-    out
+/// The name as the block keeps it: a custom property as written, anything else in lowercase.
+fn key(name: &str) -> Cow<'_, str> {
+    if custom(name) { Cow::Borrowed(name) } else { Cow::Owned(name.to_ascii_lowercase()) }
 }
 
 impl Dom {
@@ -211,24 +145,24 @@ impl Dom {
         self.style.lim.get()
     }
 
-    /// Parse a block of declarations (an attribute value or `cssText`): valid ones only, merged as written.
+    fn blim(&self) -> Lim {
+        let l = self.style_lim();
+        Lim { bytes: l.max_bytes, decls: l.max_decls }
+    }
+
+    /// The error of a block operation. A cap is `Limit(Host(name))`.
+    fn style_fail(&self, f: Fail) -> Error {
+        match f {
+            Fail::Bytes => self.lim("style-bytes"),
+            Fail::Decls => self.lim("style-decls"),
+            Fail::Unsupported(what) => Error::Unsupported(unsupported(what)),
+            Fail::Err(e) => e,
+        }
+    }
+
+    /// Parse a block of declarations (an attribute value or `cssText`).
     fn style_parse(&self, it: &mut Interp<'_>, text: &str) -> R<Vec<Decl>> {
-        let lim = self.style_lim();
-        if text.len() > lim.max_bytes {
-            return Err(self.lim("style-bytes"));
-        }
-        it.charge(1 + (text.len() / 4) as u64)?;
-        let mut list: Vec<Decl> = Vec::new();
-        for p in parse_declarations(text) {
-            it.charge(1 + (p.value.len() / 8 + list.len()) as u64)?;
-            if valid(&p.name, p.value, p.important) {
-                put(&mut list, Decl { name: p.name.into_owned(), value: p.value.to_string(), important: p.important }, true);
-                if list.len() > lim.max_decls {
-                    return Err(self.lim("style-decls"));
-                }
-            }
-        }
-        Ok(list)
+        parse(text, self.blim(), &mut |n| it.charge(n)).map_err(|f| self.style_fail(f))
     }
 
     /// The block of the `style` attribute now.
@@ -238,12 +172,13 @@ impl Dom {
         self.style_parse(it, text)
     }
 
+    fn style_text(&self, it: &mut Interp<'_>, list: &[Decl]) -> R<String> {
+        serialize(list, self.blim(), &mut |n| it.charge(n)).map_err(|f| self.style_fail(f))
+    }
+
     /// The update steps: write the serialized block back (skipped when the attribute already has exactly that text).
     fn style_write(&self, it: &mut Interp<'_>, el: NodeId, list: &[Decl]) -> R<()> {
-        let text = serialize(list);
-        if text.len() > self.style_lim().max_bytes {
-            return Err(self.lim("style-bytes"));
-        }
+        let text = self.style_text(it, list)?;
         {
             let doc = self.doc.borrow();
             if doc.find_atom("style").and_then(|a| doc.attr(el, a)) == Some(text.as_str()) {
@@ -254,18 +189,9 @@ impl Dom {
     }
 
     fn style_set(&self, it: &mut Interp<'_>, el: NodeId, name: &str, value: &str, priority: &str) -> R<()> {
-        let lower;
-        let name = if custom(name) {
-            name
-        } else {
-            lower = name.to_ascii_lowercase();
-            if !supported(&lower) {
-                return Ok(());
-            }
-            &lower
-        };
+        let name = key(name);
         if value.is_empty() {
-            return self.style_remove(it, el, name).map(|_| ());
+            return self.style_remove(it, el, &name).map(|_| ());
         }
         let important = if priority.is_empty() {
             false
@@ -274,58 +200,29 @@ impl Dom {
         } else {
             return Ok(());
         };
-        let max = self.style_lim().max_bytes;
-        if name.len() + value.len() > max {
-            return Err(self.lim("style-bytes"));
-        }
-        it.charge(1 + (value.len() / 4) as u64)?;
-        // The value must be exactly one declaration: no `;`, no `!important`, nothing cut off.
-        let probe = format!("{name}:{value}");
-        let parsed = parse_declarations(&probe);
-        let [one] = &parsed[..] else { return Ok(()) };
-        if one.important || one.name != name || one.value != value.trim() || !valid(name, one.value, false) {
-            return Ok(());
-        }
-        let d = Decl { name: name.to_string(), value: one.value.to_string(), important };
         let mut list = self.style_read(it, el)?;
-        put(&mut list, d, false);
-        if list.len() > self.style_lim().max_decls {
-            return Err(self.lim("style-decls"));
+        if !set(&mut list, &name, value, important, self.blim(), &mut |n| it.charge(n)).map_err(|f| self.style_fail(f))? {
+            return Ok(());
         }
         self.style_write(it, el, &list)
     }
 
-    /// `removeProperty`: the old value of the declaration with exactly this name (`""` if none).
+    /// `removeProperty`: the old value of the property (`""` if none).
     fn style_remove(&self, it: &mut Interp<'_>, el: NodeId, name: &str) -> R<String> {
-        let lower;
-        let name = if custom(name) {
-            name
-        } else {
-            lower = name.to_ascii_lowercase();
-            &lower
-        };
         let mut list = self.style_read(it, el)?;
-        let old = list.iter().find(|d| d.name == name).map(|d| d.value.clone()).unwrap_or_default();
-        let n = list.len();
-        list.retain(|d| !covers(name, &d.name));
-        if list.len() != n {
+        let (old, changed) = remove(&mut list, &key(name), &mut |n| it.charge(n)).map_err(|f| self.style_fail(f))?;
+        if changed {
             self.style_write(it, el, &list)?;
         }
         Ok(old)
     }
 
-    fn style_get(&self, it: &mut Interp<'_>, el: NodeId, name: &str) -> R<Option<Decl>> {
-        let lower;
-        let name = if custom(name) {
-            name
-        } else {
-            lower = name.to_ascii_lowercase();
-            &lower
-        };
-        Ok(self.style_read(it, el)?.into_iter().find(|d| d.name == name))
+    fn style_get(&self, it: &mut Interp<'_>, el: NodeId, name: &str) -> R<Option<String>> {
+        let list = self.style_read(it, el)?;
+        get(&list, &key(name), &mut |n| it.charge(n)).map_err(|f| self.style_fail(f))
     }
 
-    /// The element of a `CSSStyleDeclaration` object.
+/// The element of a `CSSStyleDeclaration` object.
     fn style_el(&self, it: &mut Interp<'_>, this: Value) -> R<NodeId> {
         if let Value::Object(o) = this
             && let Some(&el) = self.style.s.borrow().objs.get(&o)
@@ -397,13 +294,15 @@ impl Dom {
     fn style_set_text(&self, it: &mut Interp<'_>, el: NodeId, v: Value) -> R<()> {
         let text = null_empty(self, it, v)?;
         let list = self.style_parse(it, &text)?;
-        attr_set(self, it, el, "style", &serialize(&list))
+        let text = self.style_text(it, &list)?;
+        attr_set(self, it, el, "style", &text)
     }
 }
 
 fn css_text(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
     let el = d.style_el(it, this)?;
-    let text = serialize(&d.style_read(it, el)?);
+    let list = d.style_read(it, el)?;
+    let text = d.style_text(it, &list)?;
     d.js_str(it, &text)
 }
 
@@ -415,7 +314,7 @@ fn set_css_text(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
 
 fn length(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
     let el = d.style_el(it, this)?;
-    Ok(Value::Number(d.style_read(it, el)?.len() as f64))
+    Ok(Value::Number(blk::length(&d.style_read(it, el)?) as f64))
 }
 
 fn parent_rule(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
@@ -427,17 +326,15 @@ fn item(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
     let el = d.style_el(it, this)?;
     required(it, a, 1, "item")?;
     let i = crate::browser_platform_class::to_u32(it, a[0])? as usize;
-    match d.style_read(it, el)?.get(i) {
-        Some(x) => d.js_str(it, &x.name),
-        None => d.js_str(it, ""),
-    }
+    let name = blk::item(&d.style_read(it, el)?, i).unwrap_or_default();
+    d.js_str(it, &name)
 }
 
 fn get_property_value(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
     let el = d.style_el(it, this)?;
     required(it, a, 1, "getPropertyValue")?;
     let name = d.string_arg(it, a[0])?;
-    let v = d.style_get(it, el, &name)?.map(|x| x.value).unwrap_or_default();
+    let v = d.style_get(it, el, &name)?.unwrap_or_default();
     d.js_str(it, &v)
 }
 
@@ -445,7 +342,7 @@ fn get_property_priority(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value])
     let el = d.style_el(it, this)?;
     required(it, a, 1, "getPropertyPriority")?;
     let name = d.string_arg(it, a[0])?;
-    let imp = d.style_get(it, el, &name)?.is_some_and(|x| x.important);
+    let imp = priority(&d.style_read(it, el)?, &key(&name));
     d.js_str(it, if imp { "important" } else { "" })
 }
 
@@ -482,7 +379,7 @@ fn current(d: &Dom, it: &mut Interp<'_>) -> R<&'static str> {
 fn named_get(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
     let name = current(d, it)?;
     let el = d.style_el(it, this)?;
-    let v = d.style_get(it, el, name)?.map(|x| x.value).unwrap_or_default();
+    let v = d.style_get(it, el, name)?.unwrap_or_default();
     d.js_str(it, &v)
 }
 
