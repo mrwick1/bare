@@ -10,7 +10,7 @@ mod harness;
 use bare_net::http::{Client, Request};
 use bare_tls::trust_store;
 use bare_url::Url;
-use harness::{Pki, Server, openssl_available};
+use harness::{Pki, Server, openssl_available, watch_client};
 use std::io::Read;
 use std::thread::{JoinHandle, sleep};
 use std::time::Duration;
@@ -39,9 +39,11 @@ fn url(srv: &Server, path: &str) -> Url {
 const HEAD_END: &[u8] = b"\r\n\r\n";
 
 /// Run a request on a thread: the test drives the server meanwhile. The client comes back for the next request.
-fn spawn<R: Send + 'static>(mut client: Client, f: impl FnOnce(&mut Client) -> R + Send + 'static) -> JoinHandle<(Client, R)> {
+fn spawn<R: std::fmt::Debug + Send + 'static>(mut client: Client, f: impl FnOnce(&mut Client) -> R + Send + 'static) -> JoinHandle<(Client, R)> {
+    let note = watch_client();
     std::thread::spawn(move || {
         let r = f(&mut client);
+        *note.lock().unwrap() = Some(format!("{r:?}").chars().take(300).collect());
         (client, r)
     })
 }
@@ -305,4 +307,27 @@ fn a_redirect_from_a_trusted_server_to_an_untrusted_one_sends_nothing_there() {
     let r = t.join().unwrap().1;
     assert!(r.unwrap_err().contains("NoIssuer"));
     nothing_sent(&mut evil);
+}
+
+#[test]
+#[should_panic(expected = "client still running (or panicked)")]
+fn a_timeout_names_the_caller_and_the_state_of_the_server_and_client() {
+    need_openssl!();
+    let (_pki, mut srv, client) = setup();
+    let u = url(&srv, "/quiet");
+    // The client asks for a path and the server never replies: the client returns an error after its own time limit,
+    // so it is still running when the short wait ends.
+    let _t = spawn(client, move |c| c.get(&u).map(|r| r.status).map_err(|e| e.to_string()));
+    srv.expect_within(b"never in a request", Duration::from_millis(300));
+}
+
+#[test]
+fn a_port_that_another_process_listens_on_is_not_a_started_server() {
+    need_openssl!();
+    let pki = Pki::new();
+    pki.leaf("good", "localhost", None);
+    let other = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = other.local_addr().unwrap().port();
+    let e = Server::try_start(&pki, "good", &[], true, port).err().expect("the probe reached the other listener, not s_server");
+    assert!(e.contains("Address already in use"), "{e}");
 }
