@@ -719,7 +719,7 @@ impl<'p> Interp<'p> {
         }
         for &src in args.iter().skip(1) {
             let keys: Vec<PropertyKey> = match src {
-                Value::Object(o) => h!(self, self.heap.own_keys(o)),
+                Value::Object(o) => self.property_keys(o)?,
                 Value::String(s) => (0..h!(self, self.heap.str_len(s)) as u32).map(PropertyKey::Index).collect(),
                 _ => continue,
             };
@@ -742,7 +742,7 @@ impl<'p> Interp<'p> {
     /// `Object.values` (`entries` false) and `Object.entries`.
     fn ao_enum_own(&mut self, src: Value, entries: bool) -> Res<Value> {
         let keys: Vec<PropertyKey> = match src {
-            Value::Object(o) => h!(self, self.heap.own_keys(o)),
+            Value::Object(o) => self.property_keys(o)?,
             Value::String(s) => (0..h!(self, self.heap.str_len(s)) as u32).map(PropertyKey::Index).collect(),
             Value::Undefined | Value::Null => return Err(self.type_err("Cannot convert undefined or null to object")),
             _ => Vec::new(),
