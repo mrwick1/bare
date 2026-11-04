@@ -597,3 +597,29 @@ Duplicate discovery took 0.13 / 0.76 / 7.83 ms. The implementation caches repeat
 Reproduce: `cargo run --release -p bare --example resources_load -- small|large|largechunk|dups 1|10|100 3`. All 699 workspace tests pass, including 25 resource tests. App clippy passes with its one pre-existing needless-borrow lint allowed. Parent clarified that the HTTPS failure test only checks error propagation; it does not prove that no socket opens. The delegate reported one earlier failed workspace run whose output was discarded. Its cause is unknown; three later delegated runs and the parent run passed.
 
 The saved staging login fixture gives 24 items and 17 targets. These are 15 async external scripts, six inline scripts, one skipped nomodule script and two stylesheets. Tests reject the known 404 HTML chunk shape before using its body. This does not cover runtime-generated chunks, execute scripts or establish a live staging fetch. Module scripts retain metadata only. Inline styles, preloads, media evaluation, parallel fetches, resource redirects and quoted semicolons in MIME parameters were not tested. HTTPS remains the next integration gate.
+
+## Verified HTTPS transport and staging gate
+
+2026-11-04, archMachine, release. `client::connect` uses the real clock, OS random and the bounded path validator. It checks the peer before client Finished and application access. HTTP holds the whole TLS stream in its pool, so read-ahead and record sequences survive reuse. OS roots load once per client on first HTTPS use. An explicit independent-root constructor supports private-CA tests. No public certificate bypass exists.
+
+Parent review found two client issues. On baseline `b626b35`, a buffered transport could wait for the server before flushing ClientHello. A flood of valid session tickets could keep one read from returning to HTTP's elapsed-time checks. Both regression tests fail on that baseline and pass after the fixes. The handshake now flushes its flights. Flush errors fail the stream. One application read processes at most 64 records before returning data or failing. This conservative limit can reject peers that fragment control messages across many records.
+
+Parent ran all load scales in fresh processes with a 512 MiB address-space cap and a 40 s timeout. Each case uses independent synthetic roots and loopback OpenSSL/Python TLS peers. Private test keys stay in private RAM directories and are deleted. Every body, count and checksum is checked. CPU numbers cover the client process; wall time includes the peer. These are final measurements, not a speed-up comparison.
+
+| Case | 1x / 10x / 100x | Wall seconds | Client CPU seconds | Peak RSS KiB |
+| --- | --- | --- | --- | --- |
+| New TLS connection per GET | 20 / 200 / 2,000 | 0.020 / 0.194 / 1.972 | 0.013 / 0.123 / 1.274 | 3,864–3,900 |
+| Reused GET | 200 / 2k / 20k | 0.027 / 0.237 / 2.256 | 0.005 / 0.036 / 0.356 | 3,836–3,856 |
+| Reused 1 KiB POST | 100 / 1k / 10k | 0.013 / 0.149 / 1.382 | 0.002 / 0.021 / 0.202 | 3,836–3,856 |
+| GET through 302 | 100 / 1k / 10k | 0.020 / 0.219 / 2.100 | 0.002 / 0.032 / 0.296 | 3,836–3,856 |
+| Streamed Content-Length | 16 / 160 / 1,600 MiB | 0.017 / 0.159 / 1.589 | 0.015 / 0.148 / 1.491 | 3,904–3,968 |
+| Streamed chunked | same sizes | 0.017 / 0.171 / 1.809 | 0.016 / 0.161 / 1.690 | 3,964–3,984 |
+| Borrowed 8 MiB POST body | 1 / 10 / 100 requests | 0.043 / 0.387 / 3.835 | 0.006 / 0.051 / 0.458 | 12,008–12,036 |
+
+New-connection GETs make about 46 allocations per request; reused GETs make about 24. The 100x Content-Length run makes 677 allocations across 1,600 MiB. The POST driver's 8 MiB source buffer explains its higher RSS. The delegated Nagle fix belongs to the Python peer harness. Parent did not measure a client optimization gain and made no further throughput changes.
+
+Reproduce: `cargo run --release -p bare-net --example https_load -- hs|ka|big|post 1|10|100`. The 748 workspace tests pass, including 80 net unit tests, 12 HTTP-over-TLS integration tests, 195 normal TLS unit tests and eight real-validator OpenSSL tests. Release net/TLS tests also pass with `bare-tls/force-portable`. Crypto clippy passes with all features. Tests cover independent roots, wrong root/host/time, peer-only roots, split reads, ALPN, credential stripping, POST no-retry, truncation, altered handshake data and Finished. Four long/environment/fixture-print tests stay ignored in the normal TLS suite.
+
+Public staging checks use `bare` itself. `sh tools/staging_https_check.sh` prints `ok /login sha256 0bc6a3d32df8098c47b0de2d683ebcbeb5653d67717c39aa67c2bf2bbc12f773`. `bare --resources` reports 17 successful downloads and 575,754 bytes. Parent separately parsed the fixture's script/stylesheet references, ran `bare --source` for each distinct target and compared SHA-256 after removing only the CLI's final newline. All 17 match `tools/fixtures/staging/manifest-2026-11-04.json`. No live load or authenticated POST was run.
+
+Remaining limits: no HRR, TLS 1.2, resumption, KeyUpdate handling, wildcard SANs or IP-literal HTTPS. Key limits fail closed. Dropping a stream does not send close_notify. Early replies during a failed large TLS upload can surface as an error; POST is still never retried. Blocking application I/O uses socket timeouts. No non-Linux host or long-term leak measurement was tested. Runtime-generated chunks, JavaScript execution and login E2E remain open.

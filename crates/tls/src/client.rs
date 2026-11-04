@@ -391,7 +391,7 @@ fn parse_encrypted_extensions(body: &[u8]) -> Result<bool, Error> {
 /// Certificate (section 4.4.2). Fills `chain` with slices of `body`. Returns the count.
 fn parse_certificate<'a>(body: &'a [u8], chain: &mut [&'a [u8]; MAX_CHAIN]) -> Result<usize, Error> {
     let mut r = R(body);
-    if r.vec8()?.len() != 0 {
+    if !r.vec8()?.is_empty() {
         return Err(Error::Illegal("certificate_request_context is not empty"));
     }
     let n = r.u24()?;
@@ -555,6 +555,7 @@ impl<T: Read + Write> ClientStream<T> {
         self.rl.write_handshake(&ch[..n])?;
         self.rl.allow_compat_ccs(true);
         self.rl.write_compat_ccs()?;
+        self.rl.get_mut().flush().map_err(|e| Error::Io(e.kind()))?;
 
         // ServerHello. Keys change here, so nothing may follow it in its record.
         let n = self.read_message(hello::SERVER_HELLO, MAX_SERVER_HELLO)?;
@@ -620,6 +621,7 @@ impl<T: Read + Write> ClientStream<T> {
         fin[..4].copy_from_slice(&hello::write_header(hello::FINISHED, 32)?);
         fin[4..].copy_from_slice(&c_hs.finished_verify_data(&finished_hash));
         self.rl.write_handshake(&fin)?;
+        self.rl.get_mut().flush().map_err(|e| Error::Io(e.kind()))?;
         let k = master.client_traffic(&finished_hash).traffic_keys();
         self.rl.install_write_key(&k.key, &k.iv)?;
         Ok(())
@@ -647,7 +649,7 @@ impl<T: Read + Write> ClientStream<T> {
             return Err(failed());
         }
         self.rl.send_close_notify().map_err(|e| self.fail(e.into()))?;
-        self.rl.get_mut().flush()
+        self.flush()
     }
 
     /// Handle handshake bytes that arrived after the handshake. Only whole NewSessionTicket
@@ -687,6 +689,7 @@ impl<T: Read + Write> ClientStream<T> {
     }
 
     fn read_inner(&mut self, out: &mut [u8]) -> Result<usize, Error> {
+        let mut records = 0;
         loop {
             if self.pending_pos < self.pending.len() {
                 let n = out.len().min(self.pending.len() - self.pending_pos);
@@ -697,6 +700,12 @@ impl<T: Read + Write> ClientStream<T> {
             if self.state == State::PeerClosed {
                 return Ok(0);
             }
+            // Bound work before returning to the caller's elapsed-time checks. Empty application
+            // records and session tickets must not keep one Read call inside TLS indefinitely.
+            if records == 64 {
+                return Err(Error::Illegal("too many records without application data"));
+            }
+            records += 1;
             match self.rl.read_record()? {
                 Record::ApplicationData(d) => {
                     if self.hs_pos != self.hs.len() {
@@ -760,7 +769,7 @@ impl<T: Read + Write> Write for ClientStream<T> {
         if self.state == State::Failed {
             return Err(failed());
         }
-        self.rl.get_mut().flush()
+        self.rl.get_mut().flush().inspect_err(|_| self.state = State::Failed)
     }
 }
 
@@ -1028,7 +1037,7 @@ mod tests {
         let req = [13, 0, 0, 4, 0, 0, 0, 0];
         assert_eq!(flight_err(|s| { s.push(&ee); s.push(&req) }).1, Error::Unsupported("CertificateRequest (client authentication)"));
         // Application data in the middle of the handshake.
-        assert_eq!(flight_err(|s| { s.push(&ee); s.app_keys(); s.app(b"x") }).1.alert().is_some(), true);
+        assert!(flight_err(|s| { s.push(&ee); s.app_keys(); s.app(b"x") }).1.alert().is_some());
         // Server Finished with extra bytes behind it in its record: it must end the record.
         let (_, e, _) = flight_err(|s| {
             s.push(&ee);
@@ -1083,12 +1092,13 @@ mod tests {
     #[test]
     fn certificate_message_is_strict() {
         let ee = ee_alpn();
-        let mut cases: Vec<(Vec<u8>, Error)> = Vec::new();
-        cases.push((certificate(&[(LEAF, &extension(5, &[1, 0, 0, 0, 0]))]), Error::Extension(5)));
-        cases.push((certificate(&[(LEAF, &extension(18, &[0, 0]))]), Error::Extension(18)));
-        cases.push((certificate(&[]), Error::Illegal("empty certificate list")));
-        cases.push((certificate(&[(&[], &[])]), Error::Illegal("certificate size")));
-        cases.push((certificate(&vec![(LEAF, &[][..]); 9]), Error::Illegal("too many certificates")));
+        let mut cases: Vec<(Vec<u8>, Error)> = vec![
+            (certificate(&[(LEAF, &extension(5, &[1, 0, 0, 0, 0]))]), Error::Extension(5)),
+            (certificate(&[(LEAF, &extension(18, &[0, 0]))]), Error::Extension(18)),
+            (certificate(&[]), Error::Illegal("empty certificate list")),
+            (certificate(&[(&[], &[])]), Error::Illegal("certificate size")),
+            (certificate(&vec![(LEAF, &[][..]); 9]), Error::Illegal("too many certificates")),
+        ];
         let mut m = certificate(&[(LEAF, &[])]);
         m[4] = 1; // non-empty request context
         cases.push((m, Error::Illegal("certificate_request_context is not empty")));
@@ -1265,6 +1275,47 @@ mod tests {
         assert_eq!(&b[..2], b"ef");
         assert_eq!(c.read(&mut []).unwrap(), 0);
         assert_eq!(read_all(&mut c).unwrap(), b"ghijklm");
+    }
+
+    #[test]
+    fn buffered_handshake_and_flush_failure() {
+        struct Buffered { script: Script, held: Vec<u8>, fail: bool }
+        impl Read for Buffered {
+            fn read(&mut self, out: &mut [u8]) -> io::Result<usize> {
+                if !self.held.is_empty() { return Err(ErrorKind::WouldBlock.into()); }
+                self.script.read(out)
+            }
+        }
+        impl Write for Buffered {
+            fn write(&mut self, data: &[u8]) -> io::Result<usize> {
+                self.held.extend_from_slice(data);
+                Ok(data.len())
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                if self.fail { return Err(ErrorKind::BrokenPipe.into()); }
+                self.script.write_all(&std::mem::take(&mut self.held))
+            }
+        }
+        let (_, wire) = happy(|_| {});
+        let io = Buffered { script: Script::new(wire, usize::MAX), held: vec![], fail: false };
+        let mut c = connect_inner(io, HOST, &Pin(HOST), NOW, &client_random()).unwrap();
+        assert!(c.get_ref().held.is_empty(), "client Finished must be flushed");
+        c.rl.get_mut().io.fail = true;
+        assert_eq!(c.flush().unwrap_err().kind(), ErrorKind::BrokenPipe);
+        assert_eq!(c.write(b"later").unwrap_err().kind(), ErrorKind::ConnectionAborted);
+    }
+
+    #[test]
+    fn records_without_application_progress_are_bounded() {
+        let (_, wire) = happy(|s| {
+            for _ in 0..256 { s.post_handshake(&new_session_ticket(&[1], &[])); }
+            s.app(b"late");
+        });
+        let mut c = connect(wire).unwrap();
+        let error = c.read(&mut [0u8; 1]).unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::InvalidData);
+        assert!(error.to_string().contains("records without application data"));
+        assert_eq!(c.read(&mut [0u8; 1]).unwrap_err().kind(), ErrorKind::ConnectionAborted);
     }
 
     #[test]

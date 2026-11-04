@@ -4,7 +4,7 @@
 //! X25519 provides key exchange with OS random input. X.509 path validation uses independent roots. `client::connect` runs a TLS 1.3 client handshake with validated chains.
 //!
 //! WARNING: this code is hand-written. Nobody has audited it. It has known-answer and independent-oracle checks. It does not promise constant-time behavior. Do not use it to protect
-//! real secrets. 
+//! real secrets.
 
 pub mod aes_gcm;
 pub mod client;

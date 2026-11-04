@@ -1,5 +1,5 @@
 #!/bin/sh
-# First HTTPS check for bare. It fails until S1 topic 4 is done. Not part of cargo test.
+# Verified HTTPS fixture check for bare. Not part of cargo test.
 # Contacts staging once. Run from the repo root. Refresh the manifest after a deploy.
 set -eu
 cargo build --release -q -p bare
