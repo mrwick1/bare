@@ -51,6 +51,16 @@ impl Dom {
 
     /// A new event object. `Some(detail)` makes a `CustomEvent`, including an undefined detail.
     pub(crate) fn new_event(&self, it: &mut Interp<'_>, ty: &str, bubbles: bool, cancelable: bool, composed: bool, detail: Option<Value>) -> R<ObjId> {
+        let p = self.p();
+        let o = self.new_event_proto(it, ty, bubbles, cancelable, composed, if detail.is_none() { p.event } else { p.custom })?;
+        if let Some(d) = detail {
+            self.st.borrow_mut().events.get_mut(&o).expect("just made").detail = d;
+        }
+        Ok(o)
+    }
+
+    /// Like `new_event`, with the prototype given (a host event interface such as `MessageEvent`).
+    pub(crate) fn new_event_proto(&self, it: &mut Interp<'_>, ty: &str, bubbles: bool, cancelable: bool, composed: bool, proto: ObjId) -> R<ObjId> {
         if ty.len() > self.lim.max_string_bytes {
             return Err(self.lim("dom-string"));
         }
@@ -58,8 +68,7 @@ impl Dom {
         if self.st.borrow().events.len() >= self.lim.max_events {
             return Err(self.lim("dom-events"));
         }
-        let p = self.p();
-        let o = self.obj(it, if detail.is_none() { p.event } else { p.custom })?;
+        let o = self.obj(it, proto)?;
         let e = EventState {
             ty: Rc::from(ty),
             bubbles,
@@ -73,9 +82,9 @@ impl Dom {
             phase: 0,
             target: Value::Null,
             current: Value::Null,
-            detail: detail.unwrap_or(Value::Null),
+            detail: Value::Null,
             path: Vec::new(),
-            time: self.start.elapsed().as_secs_f64() * 1000.0,
+            time: self.now_ms(),
         };
         self.st.borrow_mut().events.insert(o, e);
         Ok(o)
@@ -216,7 +225,7 @@ impl Dom {
     }
 
     /// Keep the text of a listener exception. It reads data properties only, so no JS runs.
-    fn report(&self, it: &mut Interp<'_>, thrown: Value, ty: &str, t: Target) {
+    pub(crate) fn report(&self, it: &mut Interp<'_>, thrown: Value, ty: &str, t: Target) {
         if self.lim.max_reports == 0 {
             let mut st = self.st.borrow_mut();
             st.dropped_reports = st.dropped_reports.saturating_add(1);

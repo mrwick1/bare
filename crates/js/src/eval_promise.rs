@@ -94,6 +94,9 @@ struct PromiseData {
 enum Job {
     React { handler: Value, arg: Value, derived: ObjId, rejected: bool },
     Thenable { promise: ObjId, thenable: Value, then: Value },
+    /// A host callback from `queueMicrotask`: called with no arguments. An ordinary throw goes to
+    /// [`Host::report_exception`] and the queue goes on.
+    Callback { cb: Value },
 }
 
 #[derive(Default)]
@@ -129,6 +132,17 @@ impl<'p> Interp<'p> {
     /// Jobs waiting in the microtask queue.
     pub fn pending_jobs(&self) -> usize {
         self.promise.queue.len()
+    }
+
+    /// Queue `cb` as a microtask (`queueMicrotask`). It runs FIFO with the promise jobs, in the next checkpoint.
+    /// A callback that is not callable is a `TypeError`. A full queue is `Limit(PromiseQueue)`.
+    /// If `cb` throws, the value goes to [`Host::report_exception`] and later jobs still run. A limit, `Unsupported`
+    /// or a heap fault inside it ends the drain like any job error (later drains repeat it).
+    pub fn queue_microtask(&mut self, cb: Value) -> Result<(), Error> {
+        if !self.is_callable(cb) {
+            return Err(self.type_err("queueMicrotask callback is not a function"));
+        }
+        self.enqueue(Job::Callback { cb })
     }
 
     /// The state of a promise value, or `None` if `v` is not a promise.
@@ -230,6 +244,7 @@ impl<'p> Interp<'p> {
             match *j {
                 Job::React { handler, arg, derived, .. } => out.extend([handler, arg, Value::Object(derived)]),
                 Job::Thenable { promise, thenable, then } => out.extend([Value::Object(promise), thenable, then]),
+                Job::Callback { cb } => out.push(cb),
             }
         }
     }
@@ -503,6 +518,16 @@ impl<'p> Interp<'p> {
                     }
                 }
             }
+            Job::Callback { cb } => match self.call_fn(cb, Value::Undefined, &[]) {
+                Ok(_) => Ok(()),
+                Err(e) => {
+                    let v = thrown(e)?;
+                    if let Some(h) = self.host.clone() {
+                        h.report_exception(self, v);
+                    }
+                    Ok(())
+                }
+            },
             Job::Thenable { promise, thenable, then } => {
                 let (res, rej, pair) = self.resolving_functions(promise)?;
                 if let Err(e) = self.call_fn(then, thenable, &[res, rej]) {

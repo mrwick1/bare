@@ -17,6 +17,7 @@ struct T {
     perm: Cell<Option<Value>>,
     seen_this: RefCell<Vec<String>>,
     pruned: Cell<usize>,
+    reported: RefCell<Vec<String>>,
 }
 
 impl Host for T {
@@ -58,6 +59,8 @@ impl Host for T {
                 Ok(self.owned.borrow().get(&o).copied().unwrap_or(Value::Null))
             }
             8 => Ok(Value::Number(self.owned.borrow().len() as f64)),
+            // queueMicrotask(cb)
+            9 => it.queue_microtask(a(0)).map(|_| Value::Undefined),
             _ => unreachable!(),
         }
     }
@@ -66,6 +69,9 @@ impl Host for T {
     }
     fn trace(&self, owner: ObjId, out: &mut Vec<Value>) {
         out.extend(self.owned.borrow().get(&owner).copied());
+    }
+    fn report_exception(&self, it: &mut Interp<'_>, thrown: Value) {
+        self.reported.borrow_mut().push(it.display(thrown));
     }
     fn prune(&self, live: &dyn Fn(ObjId) -> bool) {
         let mut m = self.owned.borrow_mut();
@@ -80,7 +86,7 @@ fn setup() -> (Interp<'static>, Rc<T>) {
     let t = Rc::new(T::default());
     it.set_host(t.clone()).unwrap();
     let g = it.global_object();
-    for (i, (name, ctor)) in [("echo", false), ("callback", false), ("charge", false), ("attach", false), ("perm", false), ("capped", false), ("Thing", true), ("owned", false), ("count", false)].iter().enumerate() {
+    for (i, (name, ctor)) in [("echo", false), ("callback", false), ("charge", false), ("attach", false), ("perm", false), ("capped", false), ("Thing", true), ("owned", false), ("count", false), ("qm", false)].iter().enumerate() {
         let f = it.host_function(i as u32, name, 0, *ctor).unwrap();
         let k = it.heap.key_from_str(name).unwrap();
         it.define_data(g, k, Value::Object(f), true, false, true).unwrap();
@@ -186,5 +192,44 @@ fn second_host_is_refused() {
     big(|| {
         let (mut it, _t) = setup();
         assert!(matches!(it.set_host(Rc::new(T::default())), Err(Error::Unsupported(_))));
+    });
+}
+
+#[test]
+fn queued_microtask_runs_fifo_with_promise_jobs_and_reports_a_throw() {
+    big(|| {
+        let (mut it, t) = setup();
+        out(&mut it, "var log = []; qm(function () { log.push('a') }); Promise.resolve().then(function () { log.push('p') }); qm(function () { log.push('b') }); 0");
+        assert_eq!(it.pending_jobs(), 3);
+        assert_eq!(it.drain_microtasks().unwrap(), 3);
+        assert_eq!(out(&mut it, "log.join()"), "a,p,b");
+        // a throw is reported and the queue goes on
+        out(&mut it, "qm(function () { throw 7 }); qm(function () { log.push('c') }); 0");
+        assert_eq!(it.drain_microtasks().unwrap(), 2);
+        assert_eq!(out(&mut it, "log.join()"), "a,p,b,c");
+        assert_eq!(*t.reported.borrow(), vec!["7".to_string()]);
+        // not callable: a TypeError at the call, nothing queued
+        assert_eq!(out(&mut it, "try { qm(1) } catch (e) { e.name }"), "TypeError");
+        assert_eq!(it.pending_jobs(), 0);
+    });
+}
+
+#[test]
+fn queued_microtask_keeps_its_callback_alive_and_a_limit_poisons_later_drains() {
+    big(|| {
+        let (mut it, _t) = setup();
+        out(&mut it, "var n = 0; (function () { var big = { v: 41 }; qm(function () { n = big.v + 1 }) })(); 0");
+        it.collect(&[]).unwrap();
+        it.drain_microtasks().unwrap();
+        assert_eq!(out(&mut it, "n"), "42");
+        // a limit inside the callback ends the drain; the next drain repeats it and runs nothing
+        out(&mut it, "qm(function () { charge(1000000) }); qm(function () { n = 0 }); 0");
+        assert!(matches!(it.drain_microtasks(), Err(Error::Limit(LimitKind::Steps))));
+        assert!(matches!(it.drain_microtasks(), Err(Error::Limit(LimitKind::Steps))));
+        assert_eq!(out(&mut it, "n"), "42");
+        // the queue limit
+        let (mut it, _t) = setup();
+        it.set_promise_limits(PromiseLimits { max_queue: 2, ..Default::default() });
+        assert_eq!(out(&mut it, "qm(function () {}); qm(function () {}); qm(function () {})"), "limit:PromiseQueue");
     });
 }

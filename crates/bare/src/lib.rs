@@ -8,3 +8,6 @@ mod browser_dom;
 mod browser_events;
 #[cfg(test)]
 mod browser_tests;
+mod browser_scheduler;
+#[cfg(test)]
+mod browser_scheduler_tests;

@@ -31,6 +31,9 @@ pub trait Host {
     fn trace(&self, _owner: ObjId, _out: &mut Vec<Value>) {}
     /// Drop metadata of every owner for which `live` is false. Called once per collection, before the sweep.
     fn prune(&self, _live: &dyn Fn(ObjId) -> bool) {}
+    /// A `queueMicrotask` callback threw `thrown`. Record it without running JavaScript that can fail
+    /// (read data properties only). The queue goes on. The default drops the value.
+    fn report_exception(&self, _it: &mut Interp<'_>, _thrown: Value) {}
 }
 
 impl<'p> Interp<'p> {

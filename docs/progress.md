@@ -151,6 +151,8 @@ The first DOM/event bridge is integrated as a library. A generic Host hook conne
 
 ArrayBuffer, Uint8Array and UTF-8 TextEncoder/TextDecoder foundations are integrated. Views share checked backing buffers and participate in collection. Streaming decode keeps fixed state. The parent fixed combined object/payload accounting, range validation, virtual-key work charging and exact decoder output caps. The byte APIs also pass a DOM/listener/Promise collection fixture. Fetch consumers and Symbol/class integration remain separate gates. See [resources.md](resources.md#byte-buffers-and-utf-8-codecs).
 
+Timers, queueMicrotask, performance.now and primitive MessageChannel delivery are integrated. Tasks run only when the driver pumps them. A virtual clock supports deterministic tests. Callbacks share the normal VM guards, run checkpoints and participate in collection. The pump checks sticky job failures before taking tasks, including when the microtask queue is empty. Page readiness, animation frames, object message cloning and the central navigation/network/task loop remain open. See [resources.md](resources.md#browser-task-scheduler).
+
 | Topic | Work | Check before closing |
 | --- | --- | --- |
 | 1 | Add DOM creation, attributes, text replacement, insertion, removal and queries required by the target. | DOM invariants, node identity, detached nodes and mutation tests agree with Chrome. |
