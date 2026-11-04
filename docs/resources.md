@@ -832,3 +832,26 @@ The load harness raises the step cap for its workload sizes. The call workload a
 Known semantic deviations: parameter and body bindings share an environment, so default parameters can see body vars and have no TDZ. Arguments is unmapped and not iterable. Primitive sloppy this is not boxed. String.prototype and function toString are absent. Array/string iteration lacks user-defined iterator protocols. Script completion uses a simplified rule rather than full UpdateEmpty. Cyclic Array.join currently ends at an execution limit instead of producing the usual empty cycle element. Global declaration descriptor checks differ from Node vm's host behavior and are not part of that oracle.
 
 Reproduce with `tools/js/eval_check.sh` and `tools/js/eval_load.sh <output-file>`. Not tested: real staging execution, DOM/network integration, async/Promise or class behavior, mapped arguments, full iterator semantics, full UpdateEmpty, automatic collection during execution, hard allocator OOM recovery, Windows or macOS. Internal evaluator vectors and allocator slack are outside the heap payload-byte accounting.
+
+
+## Long decimal conversion
+
+Numeric literals and Number(string) previously returned infinity for a million-digit mantissa with a cancelling exponent. Node returns 1 for the reproduced input. JSON already had a long-number reduction. All three now use the same private number helper: ordinary tokens take Rust's float parser; long tokens retain 800 significant digits, a sticky digit and an adjusted bounded exponent. Caller-specific grammar stays separate. The lexer strips separators; string conversion handles signs and whitespace; JSON remains strict.
+
+Parent review found a malformed long public Token could panic in exponent reduction. The added regression failed on eed7959 and passes after long-input grammar validation. Long conversion now reads UTF-16 units and separator-filtered bytes directly. Parent also caught the submitted JSON path copying the whole token before reduction. Its allocation-counter test failed with 1,002,061 allocated bytes for one million digits. Final literal, string, JSON and separated-literal paths each allocate 2,050 bytes of conversion scratch on that input, excluding source storage. Short paths preserve their existing behavior.
+
+The Node oracle with seed 17 supplies 630 exact-bit comparisons: 201 literals, 328 strings and 101 JSON numbers. All match, including normal/subnormal halfway points, overflow, signs, separators and cancelling exponents. The independent JSON oracle matches 3,759 generated texts at seed 19. The heap oracle matches 20,000 number-to-string, 20,000 string-to-number, 19 other conversion and 361 equality cases plus 84,036 operation-result lines. Malformed-token tests check that panics and junk acceptance do not occur. All 146 assembled JS tests pass in debug/release, 897 workspace tests pass and crate clippy is clean.
+
+Parent ran three long-number shapes (cancellation, halfway tail and leading zeros) through three paths at 1x, 10x and 100x. Each invocation has a 1 GiB address-space cap and 45-second timeout. Sizes are one, ten and one hundred million digits. The three lexer 100x cases correctly stop at its 64 MiB source cap; they are cap checks, not completed conversions. Every other result matches the independently specified float bits. Figures below are one parent sample per scale on archMachine and include input conversion in the harness.
+
+| Cancellation path | Wall seconds at 1x / 10x / 100x | Peak RSS KiB at 100x |
+| --- | --- | --- |
+| Literal | 0.002 / 0.019 / source cap | not converted |
+| Number(string) | 0.003 / 0.032 / 0.276 | 295,036 |
+| JSON | 0.004 / 0.036 / 0.335 | 294,948 |
+
+The final short-token sample was 16.7 ns per literal with no allocation and 41.9 ns per string conversion with one existing short-string allocation. Parent did not repeat a before/after short-token comparison, so these figures establish no speed-up. The delegate measured about 3% extra short-string cost and 5% extra JSON-number cost from sharing the helper; that cost was not eliminated. Large-input scratch is bounded, but source and harness allocations still scale with input size.
+
+Reproduce: build `tools/js/decimal_load.rs` with release rustc, run `preflight`, `all`, `bench` or `check <oracle-dir>`. Generate independent cases with `node tools/js/decimal_oracle.mjs <dir> 17 400`. The standalone JSON and heap harnesses include the shared private module.
+
+Not tested: exhaustive decimal-to-f64 correctness, source-cap removal, non-Linux targets or hard allocator OOM. The lexer source cap is unchanged. This change does not add BigInt, runtime builtin bindings or staging execution.

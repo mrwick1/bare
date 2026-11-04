@@ -33,14 +33,11 @@
 //! units of the decoded text.
 
 use crate::heap::{Heap, HeapError, PropertyDescriptor};
+use crate::number;
 use crate::value::{ObjId, PropertyKey, StrId, Value};
 
 /// Largest depth any call accepts, whatever `JsonLimits::max_depth` says.
 pub const HARD_MAX_DEPTH: usize = 1 << 20;
-
-/// Tokens longer than this go through `normalize` before the float parser.
-const LONG_NUMBER: usize = 1024;
-const KEEP_DIGITS: usize = 800;
 
 #[derive(Clone, Copy, Debug)]
 pub struct JsonLimits {
@@ -468,77 +465,13 @@ impl Parser<'_, '_> {
             let n = src[int_start..int_end].iter().fold(0u64, |n, &c| n * 10 + (c - 0x30) as u64) as f64;
             return Ok(if neg { -n } else { n });
         }
+        if i - start > number::DIRECT_UNITS {
+            return Ok(number::decimal_units_value(&src[start..i], &mut String::new()).expect("a grammar-checked number parses"));
+        }
         self.num.clear();
-        if i - start > LONG_NUMBER {
-            self.normalize(&src[start..i]);
-        } else {
-            self.num.extend(src[start..i].iter().map(|&c| c as u8));
-        }
+        self.num.extend(src[start..i].iter().map(|&c| c as u8));
         let text = std::str::from_utf8(&self.num).expect("the number grammar is ASCII");
-        Ok(text.parse::<f64>().expect("a grammar-checked number parses"))
-    }
-
-    /// Write into `self.num` a short text with the same value after rounding. `f64::from_str`
-    /// gives infinity for a mantissa of about a million digits with a cancelling exponent, so a
-    /// long token is reduced first: the first `KEEP_DIGITS` significant digits, plus one `1` if any
-    /// dropped digit is not zero (a sticky digit: it can only decide a tie), and a clamped
-    /// exponent. 768 digits are enough to decide every f64 rounding, so the result is exact.
-    fn normalize(&mut self, tok: &[u16]) {
-        let neg = tok[0] == 0x2D;
-        let mut digits = 0usize; // significant digits kept
-        let (mut dropped, mut frac, mut sticky, mut seen) = (0i64, 0i64, false, false);
-        let mut exp = 0i64;
-        let mut in_frac = false;
-        let mut k = neg as usize;
-        while k < tok.len() {
-            let c = tok[k];
-            k += 1;
-            match c {
-                0x2E => in_frac = true,
-                0x65 | 0x45 => {
-                    let eneg = tok.get(k) == Some(&0x2D);
-                    k += matches!(tok.get(k), Some(0x2B | 0x2D)) as usize;
-                    for &d in &tok[k..] {
-                        exp = (exp * 10 + (d - 0x30) as i64).min(1 << 40);
-                    }
-                    if eneg {
-                        exp = -exp;
-                    }
-                    break;
-                }
-                _ => {
-                    frac += in_frac as i64;
-                    if c != 0x30 {
-                        seen = true;
-                    }
-                    if !seen {
-                        continue; // leading zero
-                    }
-                    if digits < KEEP_DIGITS {
-                        self.num.push(c as u8);
-                        digits += 1;
-                    } else {
-                        dropped += 1;
-                        sticky |= c != 0x30;
-                    }
-                }
-            }
-        }
-        if !seen {
-            self.num.extend_from_slice(if neg { b"-0" } else { b"0" });
-            return;
-        }
-        let mut e10 = exp - frac + dropped;
-        if sticky {
-            self.num.push(b'1');
-            e10 -= 1;
-        }
-        // At most KEEP_DIGITS + 1 digits: below 1e-20000 is zero, above 1e20000 is infinity.
-        let e10 = e10.clamp(-100_000, 100_000);
-        if neg {
-            self.num.insert(0, b'-');
-        }
-        self.num.extend_from_slice(format!("e{e10}").as_bytes());
+        Ok(number::decimal_value(text, &mut String::new()).expect("a grammar-checked number parses"))
     }
 
     /// One or more digits from `i`. Returns the index after them.
