@@ -18,6 +18,19 @@ mod browser_navigation_url;
 mod browser_navigation_tests;
 #[cfg(test)]
 mod browser_tests;
+pub mod browser_platform;
+mod browser_platform_class;
+mod browser_platform_query;
 mod browser_scheduler;
 #[cfg(test)]
 mod browser_scheduler_tests;
+pub mod resources;
+mod browser_loader;
+pub use browser_loader::{Fatal, NavStop, PageConfig, PageLimits, PageResult, Stop};
+pub mod browser_session;
+#[cfg(test)]
+mod browser_session_tests;
+#[cfg(test)]
+mod browser_loader_tests;
+#[cfg(test)]
+mod browser_platform_tests;

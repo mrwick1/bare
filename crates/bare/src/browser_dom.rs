@@ -13,13 +13,13 @@ use bare_js::value::Value;
 
 type V = R<Value>;
 
-fn arg(a: &[Value], i: usize) -> Value {
+pub(crate) fn arg(a: &[Value], i: usize) -> Value {
     a.get(i).copied().unwrap_or(Value::Undefined)
 }
 
 /// The node after `cur` in tree order, inside the subtree of `root` (`root` itself is never given).
 /// `depth` is the depth of `cur` below `root`; the result has the depth of the node it gives.
-fn next_in(doc: &Document, root: NodeId, cur: NodeId, depth: usize) -> Option<(NodeId, usize)> {
+pub(crate) fn next_in(doc: &Document, root: NodeId, cur: NodeId, depth: usize) -> Option<(NodeId, usize)> {
     if let Some(c) = doc.children(cur).next() {
         return Some((c, depth + 1));
     }
@@ -86,7 +86,7 @@ fn valid_name(s: &str) -> bool {
 }
 
 impl Dom {
-    fn el(&self, it: &mut Interp<'_>, this: Value) -> R<NodeId> {
+    pub(crate) fn el(&self, it: &mut Interp<'_>, this: Value) -> R<NodeId> {
         let n = self.nd(it, this)?;
         if self.is_element(n) { Ok(n) } else { Err(it.type_error("Illegal invocation")) }
     }
@@ -103,7 +103,7 @@ impl Dom {
     }
 
     /// Room for a new attribute (name, slot, value).
-    fn attr_room(&self, doc: &Document, el: NodeId, name: &str, value: &str) -> R<()> {
+    pub(crate) fn attr_room(&self, doc: &Document, el: NodeId, name: &str, value: &str) -> R<()> {
         self.room(doc, 0, value.len())?;
         if doc.attr_slots() + doc.attr_count(el) + 1 > self.lim.max_attr_slots {
             return Err(self.lim("dom-attrs"));
@@ -284,7 +284,8 @@ impl Dom {
         let mut doc = self.doc.borrow_mut();
         let before = if before == Some(node) { doc.next_sibling(node) } else { before };
         doc.move_to(node, parent, before);
-        Ok(())
+        drop(doc);
+        self.script_inserted(it, node)
     }
 
     fn opt_node(&self, it: &mut Interp<'_>, a: &[Value], i: usize) -> R<Option<NodeId>> {
@@ -506,7 +507,7 @@ pub(crate) fn child_nodes(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]
     wrap_all(d, it, &kids)
 }
 
-fn wrap_all(d: &Dom, it: &mut Interp<'_>, ids: &[NodeId]) -> V {
+pub(crate) fn wrap_all(d: &Dom, it: &mut Interp<'_>, ids: &[NodeId]) -> V {
     let mut vals = Vec::with_capacity(ids.len());
     for &k in ids {
         vals.push(d.wrap(it, k)?);
@@ -671,6 +672,8 @@ pub(crate) fn replace_child(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Valu
     let before = if doc.next_sibling(old) == Some(new) { doc.next_sibling(new) } else { doc.next_sibling(old) };
     doc.detach(old);
     doc.move_to(new, parent, before);
+    drop(doc);
+    d.script_inserted(it, new)?;
     Ok(arg(a, 1))
 }
 
@@ -806,7 +809,7 @@ pub(crate) fn local_name(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value])
     d.js_str(it, &s)
 }
 
-fn attr_get(d: &Dom, it: &mut Interp<'_>, n: NodeId, name: &str) -> V {
+pub(crate) fn attr_get(d: &Dom, it: &mut Interp<'_>, n: NodeId, name: &str) -> V {
     let s = {
         let doc = d.doc.borrow();
         doc.find_atom(name).and_then(|a| doc.attr(n, a)).map(str::to_string)
@@ -817,7 +820,7 @@ fn attr_get(d: &Dom, it: &mut Interp<'_>, n: NodeId, name: &str) -> V {
     }
 }
 
-fn attr_set(d: &Dom, it: &mut Interp<'_>, n: NodeId, name: &str, value: &str) -> R<()> {
+pub(crate) fn attr_set(d: &Dom, it: &mut Interp<'_>, n: NodeId, name: &str, value: &str) -> R<()> {
     let mut doc = d.doc.borrow_mut();
     d.attr_room(&doc, n, name, value)?;
     it.charge(doc.attr_count(n) as u64 + 1)?;
@@ -877,6 +880,9 @@ pub(crate) fn set_attribute(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Valu
         return Err(d.dom_err(it, "InvalidCharacterError", &format!("'{name}' is not a valid attribute name.")));
     }
     attr_set(d, it, n, &name, &value)?;
+    if name == "src" {
+        d.script_src_changed(it, n)?;
+    }
     Ok(Value::Undefined)
 }
 

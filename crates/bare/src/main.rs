@@ -5,6 +5,8 @@
 //! It prints the DOM tree of the page. Add `--source` to print the source of the page instead,
 //! `--styles` to print the computed style of each element, or `--layout` to print the place and size of each box.
 //! `--resources` downloads the external scripts and style sheets of the page and lists them (see `resources.rs`).
+//! `--run` loads the page and runs its classic scripts, its timers and `fetch` calls (see `browser_loader.rs`), then prints a short
+//! sanitized status. It prints no source, headers, bodies or query strings.
 //! `--width=900` sets the width of the window (1280 if not given).
 //!
 //! Comments compare Rust with JavaScript, because you know JS.
@@ -18,7 +20,7 @@ use bare_net::http;
 use bare_url::Url;
 use std::io::{Read, Write};
 
-mod resources;
+use bare::resources;
 // Now we can write `Url` instead of `bare_url::Url`.
 
 fn main() {
@@ -31,6 +33,7 @@ fn main() {
     let styles = args.iter().any(|a| a == "--styles");
     let layout = args.iter().any(|a| a == "--layout");
     let resources = args.iter().any(|a| a == "--resources");
+    let run = args.iter().any(|a| a == "--run");
     let width = args
         .iter()
         .find_map(|a| a.strip_prefix("--width="))
@@ -54,6 +57,14 @@ fn main() {
     };
     // `let` is like `const`: `arg` cannot change.
 
+    if run {
+        // The session loads the first document itself (one verified path for every document).
+        if Url::parse(arg).is_err() {
+            eprintln!("error: --run needs a valid URL");
+            std::process::exit(2);
+        }
+        std::process::exit(run_page(arg.to_string(), viewport));
+    }
     let url = Url::parse(&arg);
     let result = url
         .as_ref()
@@ -210,4 +221,38 @@ fn computed_styles(doc: &mut bare_html::dom::Document, page: Option<&Url>, viewp
         }
     }
     rules.compute(doc)
+}
+
+/// `--run`: a session over the real URL (document load, scripts, timers, `fetch`, navigations: `browser_session.rs`).
+/// The VM needs a big stack: 8 MiB is the floor in release, a debug build uses more stack per frame.
+/// Exit code: 0 settled or a budget ended it, 1 fatal or a failed load.
+fn run_page(page: String, viewport: (f32, f32)) -> i32 {
+    use bare::browser_session::{Session, SessionConfig, SessionStop};
+    use bare::Stop;
+    let stack = if cfg!(debug_assertions) { 64 << 20 } else { 8 << 20 };
+    let worker = std::thread::Builder::new().stack_size(stack).spawn(move || {
+        let mut cfg = SessionConfig::new(&page);
+        cfg.viewport = Some(viewport);
+        let mut s = Session::new(cfg);
+        let r = s.run();
+        println!("stop: {:?}", r.stop);
+        println!("documents {}, tasks {}, rounds {}", r.pages.len(), r.tasks, r.rounds);
+        for (u, p) in r.urls.iter().zip(&r.pages) {
+            println!("document {u}: stop {:?}, ready {}", p.stop, p.ready_state);
+            println!("  scripts run {}, threw {}, load errors {}, fetches {}, script bytes {}", p.scripts_run, p.script_throws, p.load_errors, p.fetches, p.bytes);
+            for d in &p.diagnostics {
+                println!("  note: {d}");
+            }
+            if p.dropped_diagnostics > 0 {
+                println!("  note: {} more not shown", p.dropped_diagnostics);
+            }
+        }
+        if let Some(b) = s.browser() {
+            for d in b.take_fetch_diagnostics() {
+                println!("fetch: {d}");
+            }
+        }
+        if matches!(r.stop, SessionStop::Page(Stop::Fatal(_)) | SessionStop::LoadFailed(_)) { 1 } else { 0 }
+    });
+    worker.map_or(1, |w| w.join().unwrap_or(1))
 }

@@ -37,11 +37,12 @@
 //!   heap fault stops the dispatch and is the result of the call.
 //!
 //! Gates and deviations (on purpose, none is silently faked)
-//! - Lists (`childNodes`, `children`, `querySelectorAll`) are plain snapshot arrays, not live `NodeList`/`HTMLCollection`.
+//! - Lists (`childNodes`, `children`, `querySelectorAll`, `getElementsByTagName`, `getElementsByClassName`) are plain
+//!   snapshot arrays, not live `NodeList`/`HTMLCollection`.
 //! - A JS string with a lone surrogate cannot be stored in the UTF-8 document: `Error::Unsupported`. Valid pairs round-trip.
 //! - `createElementNS` accepts only the HTML namespace. Other namespaces, `namespaceURI`, SVG/MathML and shadow DOM
 //!   are `Unsupported` or absent. `new Document()`, `DocumentFragment`, `innerHTML`, `outerHTML`, `attributes`,
-//!   `classList`, `dataset`, `style`, `getElementsBy*`, `before/after/replaceWith`, layout APIs, `location` and
+//!   `dataset`, `style`, `before/after/replaceWith`, layout APIs, `location` and
 //!   network are absent. Timers, `queueMicrotask`, `performance.now` and `MessageChannel` are in `browser_scheduler.rs`.
 //! - `addEventListener` option `signal` is `Unsupported`. `isTrusted` is always false. Events made by the test driver
 //!   are plain `Event`s (no `MouseEvent`/`InputEvent` fields).
@@ -50,6 +51,7 @@
 //! - `<input>` has no value sanitization (newline stripping, number/date parsing). `select` and `textarea` have no
 //!   `value` state.
 //! - Microtasks: the test driver runs a checkpoint after each listener it started from the host. Dispatch from JS does not.
+//! - `matchMedia`, `classList` and `getElementsBy*` are in `browser_platform.rs` (read its header).
 //! - Subclassing host constructors with `class X extends Event` needs `new.target` plumbing in the evaluator (not done).
 //!
 //! Not browser-verified: nothing here was compared with Chrome. DOM behavior follows the DOM Standard by reading, and
@@ -252,6 +254,9 @@ pub struct Dom {
     pub(crate) fetch: crate::browser_fetch::Fetch,
     /// Navigation, history and storage state (`browser_navigation.rs`).
     pub(crate) nav: crate::browser_navigation::Nav,
+    pub(crate) scripts: crate::browser_loader::Scripts,
+    /// `matchMedia`, `classList`, `getElementsBy*` (`browser_platform.rs`).
+    pub(crate) plat: crate::browser_platform::Platform,
 }
 
 impl Host for Dom {
@@ -269,11 +274,14 @@ impl Host for Dom {
         self.sched_roots(out);
         self.fetch.roots(out);
         crate::browser_navigation::roots(self, out);
+        self.scripts_roots(out);
+        crate::browser_platform::roots(self, out);
     }
 
     fn trace(&self, owner: ObjId, out: &mut Vec<Value>) {
         self.sched_trace(owner, out);
         crate::browser_navigation::trace(self, owner, out);
+        crate::browser_platform::trace(self, owner, out);
         let st = self.st.borrow();
         if let Some(&t) = st.by_obj.get(&owner) {
             for l in st.listeners.get(&t).into_iter().flatten() {
@@ -299,6 +307,7 @@ impl Host for Dom {
 
     fn prune(&self, live: &dyn Fn(ObjId) -> bool) {
         crate::browser_navigation::prune(self, live);
+        crate::browser_platform::prune(self, live);
         let mut st = self.st.borrow_mut();
         let st = &mut *st;
         st.by_obj.retain(|&o, t| matches!(t, Target::Window) || live(o));
@@ -437,6 +446,7 @@ impl Dom {
                 match *doc.data(n) {
                     NodeData::Element { name, .. } => match doc.atom_str(name) {
                         "input" => p.input,
+                        "script" => self.scripts.proto.get().copied().unwrap_or(p.html),
                         "svg" | "math" => p.element,
                         _ => p.html,
                     },
@@ -644,7 +654,9 @@ impl Dom {
             it.define_data(g, k, v, true, true, true)?;
         }
         crate::browser_navigation::install(self, it)?;
-        crate::browser_fetch::install(self, it)
+        crate::browser_fetch::install(self, it)?;
+        crate::browser_loader::install(self, it)?;
+        self.install_platform(it)
     }
 
     pub(crate) fn define_accessor(&self, it: &mut Interp<'_>, o: ObjId, key: PropertyKey, get: ObjId, set: Option<ObjId>) -> R<()> {
@@ -660,7 +672,7 @@ pub(crate) fn unsupported(what: &'static str) -> bare_js::eval::Unsupported {
     bare_js::eval::Unsupported { what, span: Default::default() }
 }
 
-fn illegal_constructor(_: &Dom, it: &mut Interp<'_>, _: Value, _: &[Value]) -> R<Value> {
+pub(crate) fn illegal_constructor(_: &Dom, it: &mut Interp<'_>, _: Value, _: &[Value]) -> R<Value> {
     Err(it.type_error("Illegal constructor"))
 }
 
@@ -807,6 +819,8 @@ impl Browser {
             sched: RefCell::default(),
             fetch: Default::default(),
             nav: Default::default(),
+            scripts: Default::default(),
+            plat: Default::default(),
         });
         it.set_host(dom.clone())?;
         it.host_scope(|it| {

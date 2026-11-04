@@ -221,7 +221,7 @@ impl Dom {
     pub(crate) fn is_host_object(&self, o: ObjId) -> bool {
         let n = self.nav.s.borrow();
         let st = self.st.borrow();
-        st.by_obj.contains_key(&o) || st.events.contains_key(&o) || n.urls.contains_key(&o) || n.params.contains_key(&o) || n.iters.contains_key(&o) || self.nav.p.get().is_some_and(|p| [p.location, p.history, p.local, p.session].contains(&o))
+        st.by_obj.contains_key(&o) || self.is_platform_object(o) || st.events.contains_key(&o) || n.urls.contains_key(&o) || n.params.contains_key(&o) || n.iters.contains_key(&o) || self.nav.p.get().is_some_and(|p| [p.location, p.history, p.local, p.session].contains(&o))
     }
 
     fn cur_rec(&self) -> R<Rec> {
@@ -755,18 +755,23 @@ impl Browser {
     /// Each task shares its step budget with a microtask checkpoint. A failed checkpoint, `Limit`, `Unsupported`
     /// or fault halts this pump permanently. The remaining tasks stay queued. Returns the tasks that ran.
     pub fn run_navigation_tasks(&mut self) -> R<usize> {
+        self.run_navigation_tasks_up_to(usize::MAX)
+    }
+
+    /// Run at most `max` of the tasks queued at entry. Preserve the pump's checkpoint and failure rules.
+    pub fn run_navigation_tasks_up_to(&mut self, max: usize) -> R<usize> {
         let dom = self.dom.clone();
         if let Some(e) = dom.nav.s.borrow().halted { return Err(e); }
-        let result = self.run_navigation_tasks_inner();
+        let result = self.run_navigation_tasks_inner(max);
         if let Err(e) = result { dom.nav.s.borrow_mut().halted = Some(e); }
         result
     }
 
-    fn run_navigation_tasks_inner(&mut self) -> R<usize> {
+    fn run_navigation_tasks_inner(&mut self, max: usize) -> R<usize> {
         let dom = self.dom.clone();
         // An empty queue can still hold a sticky failed-job error.
         self.it.host_scope(|it| it.host_checkpoint().map(|_| ()))?;
-        let n = dom.nav.s.borrow().tasks.len();
+        let n = dom.nav.s.borrow().tasks.len().min(max);
         let mut done = 0;
         for _ in 0..n {
             let t = dom.nav.s.borrow_mut().tasks.pop_front();

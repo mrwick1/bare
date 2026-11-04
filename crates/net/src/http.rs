@@ -269,6 +269,14 @@ impl Client {
         Ok(Arc::new(response))
     }
 
+    /// Send one checked request without cache or redirects. The caller reads the body and checks each redirect.
+    pub fn send_stream_once(&mut self, req: &Request) -> Result<Streamed, Error> {
+        check_request(req)?;
+        let plan = Plan { method: req.method, headers: Cow::Borrowed(req.headers), body: req.body };
+        let (response, body) = self.start(req.url, &plan, "")?;
+        Ok(Streamed { response: Arc::new(response), body })
+    }
+
     /// Like `send`, with a body that reads from the connection. See `get_stream`.
     pub fn send_stream(&mut self, req: &Request) -> Result<Streamed, Error> {
         let (response, body) = self.follow(req, true)?;
@@ -2103,4 +2111,16 @@ mod tests {
         }
         assert!(accepted > 100, "the generator is too strict: {accepted}");
     }
+    #[test]
+    fn a_single_streamed_request_does_not_follow_or_cache_a_redirect() {
+        let (port, requests) = serve(vec![(vec![redirect(302, "/next"), OK], false)]);
+        let mut client = Client::new();
+        let mut response = client.send_stream_once(&Request::get(&url(port))).unwrap();
+        assert_eq!(response.response.status, 302);
+        let mut body = Vec::new();
+        response.body.read_to_end(&mut body).unwrap();
+        assert_eq!(requests.try_iter().count(), 1);
+        assert!(client.cache.is_empty());
+    }
+
 }
