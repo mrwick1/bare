@@ -249,7 +249,9 @@ fn other_limits_are_distinct_for_classes() {
     assert_eq!(limit_of("class A { a = (() => { while (true) {} })(); } new A();", small, Heap::default()), LimitKind::Steps);
     assert_eq!(limit_of("class A { static a = (() => { for (;;) {} })(); }", small, Heap::default()), LimitKind::Steps);
     assert_eq!(limit_of("class A { [(() => { for (;;) {} })()]() {} }", small, Heap::default()), LimitKind::Steps);
-    assert_eq!(limit_of("var k = []; for (var i = 0; i < 1000; i++) k.push(class { m() {} });", EvalLimits { max_functions: 100, ..d }, Heap::default()), LimitKind::Functions);
+    // The cap counts the intrinsic functions too: allow 100 more than a fresh realm holds.
+    let intrinsic = big(|| Interp::realm(Heap::default(), EvalLimits::default()).unwrap().stats().functions);
+    assert_eq!(limit_of("var k = []; for (var i = 0; i < 1000; i++) k.push(class { m() {} });", EvalLimits { max_functions: intrinsic + 100, ..d }, Heap::default()), LimitKind::Functions);
     assert_eq!(limit_of("var k = []; for (var i = 0; i < 1000; i++) k.push(class { m() {} });", EvalLimits { max_envs: 50, ..d }, Heap::default()), LimitKind::Envs);
     let heap = Heap::new(HeapLimits { max_objects: 300, ..Default::default() }).unwrap();
     assert!(matches!(limit_of("class A { x = 1; } var k = []; for (;;) k.push(new A());", d, heap), LimitKind::Heap(Limit::Objects)));
