@@ -25,7 +25,7 @@
 // across an `await`. Class code is owned by a script: `ClassData::script` says which. Constructor bodies and field
 // initializers run with that script selected (`in_script`), and the caller's script comes back on every exit.
 // A subclass of Promise, of a host constructor, of a byte class (`ArrayBuffer`, `Uint8Array`, `TextEncoder`,
-// `TextDecoder`) or of Map or Set is refused with `Unsupported` when it is constructed: those constructors do not
+// `TextDecoder`) or of Map, Set, WeakMap or WeakSet is refused with `Unsupported` when it is constructed: those constructors do not
 // take a `new.target` yet. Error, Array, Object, Function and RegExp parents work.
 
 const F_NT: u8 = 1;
