@@ -16,7 +16,7 @@
 //! implemented gives [`Error::Unsupported`] with its span: classes, async functions and `await`, tagged
 //! templates, BigInt, `super`, `new.target`, private names, `with`, `for await`. A regexp literal is compiled by `Interp::new`;
 //! an invalid pattern, lookbehind, named groups or the flags `u`, `v`, `d` are `Unsupported` there (see `eval_builtins.rs`).
-//! A missing builtin (`Map`, `Symbol`, ...) is an ordinary `ReferenceError` at run time, as in a bare engine.
+//! A missing builtin (`WeakMap`, `Reflect`, ...) is an ordinary `ReferenceError` at run time, as in a bare engine.
 //! `JSON.parse`, `RegExp` and a small `String.prototype` are bound in `eval_builtins.rs`, which lists what is and is not there.
 //!
 //! Heap contract: the heap never collects by itself. [`Interp::roots`] lists every value the evaluator
@@ -42,8 +42,9 @@
 //! - `arguments` is an unmapped ordinary object (not iterable); sloppy mode never maps it to the parameters.
 //! - Sloppy `this` that is a primitive is not boxed. There are no wrapper objects.
 //! - Builtins are a small set (see `install_builtins` and `install_ext`). `String.prototype` has only the methods the
-//!   staging bundles call. Symbols cannot be created, so `for...of`, spread and array patterns work on arrays and
-//!   strings only (that is exact while no `Symbol.iterator` exists), and `ToPrimitive` skips `@@toPrimitive`.
+//!   staging bundles call. Symbols, the iterator protocol (with `IteratorClose`), Map and Set are in `eval_symbols.rs`
+//!   and `eval_collections.rs`; their exact support and gates are listed at the top of those files. `ToPrimitive`,
+//!   `Object.prototype.toString` and `instanceof` read `@@toPrimitive`, `@@toStringTag` and `@@hasInstance`.
 //! - The script completion value is the value of the last expression statement that ran (reset to
 //!   `undefined` by `if`, loops, `switch`, `try`). It is not full UpdateEmpty.
 //! - A function's `toString` is absent.
@@ -113,6 +114,8 @@ pub enum LimitKind {
     Json(crate::json::LimitKind),
     /// A bound of `JSON.stringify` (see `eval_json_stringify.rs`).
     Stringify(StringifyLimit),
+    /// Symbol registry, Map/Set, iterator and iteration-buffer caps (see [`ScLimit`]).
+    Sc(ScLimit),
 }
 
 /// Valid syntax or a builtin that is not implemented. `span` is the byte range of the construct
@@ -247,6 +250,7 @@ enum Nat {
     Ext(Bi),
     Bin(BinFn),
     Ao(AoFn),
+    Sc(ScFn),
 }
 
 enum Callee {
@@ -287,10 +291,13 @@ enum Bind {
     Declare,
 }
 
-/// A lazy iteration over an array or a string (the only iterables while no `Symbol.iterator` exists).
+/// A started iteration (see `iter_open` in `eval_symbols.rs`): an array-like or string by index, a Map or Set by
+/// cursor, or any object through the iterator protocol. `done` is set at the end, after an error and after a close.
 struct It {
     src: Value,
     i: usize,
+    kind: ItKind,
+    done: bool,
 }
 
 /// A reference that can be read and written: a name or a property of a value.
@@ -352,6 +359,7 @@ pub struct Interp<'p> {
     host: Option<Rc<dyn Host>>,
     bin: BinaryState,
     ao: AoState,
+    sc: ScState,
     // permanent keys
     k_length: PropertyKey,
     k_name: PropertyKey,
@@ -389,6 +397,7 @@ impl<'p> Interp<'p> {
         it.walk_program()?;
         it.install_builtins()?;
         it.install_ext()?;
+        it.install_sc()?;
         it.install_array_object()?;
         it.install_promise()?;
         it.install_binary()?;
@@ -481,6 +490,7 @@ impl<'p> Interp<'p> {
             host: None,
             bin: BinaryState::default(),
             ao: AoState::default(),
+            sc: ScState::new(object_proto, ks[0]),
             k_length: ks[0],
             k_name: ks[1],
             k_message: ks[2],
@@ -567,6 +577,8 @@ impl<'p> Interp<'p> {
         if let Some(h) = &self.host {
             h.roots(&mut v);
         }
+        self.sc_roots(&mut v);
+        self.sc_all_values(&mut v);
         for (&o, c) in &self.funcs {
             v.push(Value::Object(o));
             if let Callee::Promise(pf) = c {
@@ -602,6 +614,7 @@ impl<'p> Interp<'p> {
             work.extend_from_slice(&host_vals);
         }
         self.binary_roots(&mut work);
+        self.sc_roots(&mut work);
         let mut env_work: Vec<u32> = vec![0];
         loop {
             if let Some(e) = env_work.pop() {
@@ -639,6 +652,7 @@ impl<'p> Interp<'p> {
             if let Some((buf, _, _)) = self.heap.view_parts(o) {
                 work.push(Value::Object(buf));
             }
+            self.sc_trace(o, &mut work);
             let keys = h!(self, self.heap.stored_keys(o));
             for k in keys {
                 match h!(self, self.heap.get_own_property(o, k)) {
@@ -665,6 +679,7 @@ impl<'p> Interp<'p> {
         if let Some(h) = &host {
             h.prune(&|o| seen.contains(&o));
         }
+        self.sc_prune(&seen);
         let mut roots = self.roots();
         roots.extend_from_slice(extra);
         roots.extend_from_slice(&host_vals);
@@ -680,7 +695,7 @@ impl<'p> Interp<'p> {
             Value::Number(n) if n == 0.0 && n.is_sign_negative() => "-0".into(),
             Value::Number(n) => number_to_string(n),
             Value::String(s) => self.heap.to_string_lossy(s).unwrap_or_default(),
-            Value::Symbol(_) => "Symbol()".into(),
+            Value::Symbol(s) => self.sym_text(s),
             Value::Object(o) => if self.funcs.contains_key(&o) { "function".into() } else { "object".into() },
         }
     }
@@ -761,7 +776,7 @@ impl<'p> Interp<'p> {
         match k {
             PropertyKey::Index(i) => i.to_string(),
             PropertyKey::String(s) => self.heap.to_string_lossy(s).unwrap_or_default(),
-            PropertyKey::Symbol(_) => "Symbol()".into(),
+            PropertyKey::Symbol(s) => self.sym_text(s),
         }
     }
 
@@ -1439,7 +1454,7 @@ impl<'p> Interp<'p> {
         let d = match self.funcs.get(&o) {
             Some(&Callee::Host { id, ctor: true }) => D::H(id),
             Some(&Callee::Script { script, fid, env, self_binding }) if self.func_of(script, fid).kind == FuncKind::Normal => D::S(script, fid, env, self_binding),
-            Some(&Callee::Native(n)) if matches!(n, Nat::ObjectCtor | Nat::FnCtor | Nat::ArrayCtor | Nat::ErrorCtor(_) | Nat::Ext(Bi::RegExpCtor)) || matches!(n, Nat::Bin(b) if b.ctor_name().is_some() || b == BinFn::TaCtor) => D::N(n),
+            Some(&Callee::Native(n)) if matches!(n, Nat::ObjectCtor | Nat::FnCtor | Nat::ArrayCtor | Nat::ErrorCtor(_) | Nat::Ext(Bi::RegExpCtor)) || matches!(n, Nat::Bin(b) if b.ctor_name().is_some() || b == BinFn::TaCtor) || matches!(n, Nat::Sc(f) if f.is_ctor()) => D::N(n),
             Some(&Callee::Native(Nat::StringFn | Nat::NumberFn | Nat::BooleanFn)) => return Err(unsupported("wrapper object (new String/Number/Boolean)", Span::default())),
             Some(Callee::Bound { target, args, .. }) => D::B(*target, args.clone()),
             Some(&Callee::Promise(pf @ PFn::Ctor)) => D::P(pf),
@@ -1515,6 +1530,7 @@ impl<'p> Interp<'p> {
                 self.def(o, PropertyKey::Index(i as u32), a, true, true, true)?;
             }
             self.def(o, self.k_length, Value::Number(args.len() as f64), true, false, true)?;
+            self.def(o, self.sc.k_iterator, Value::Object(self.sc.f_array_values), true, false, true)?;
             self.env_declare(env, self.n_arguments, INIT | MUT, Value::Object(o));
         }
         for i in 0..self.scopes[fid.index()].vars.len() {
@@ -1557,6 +1573,9 @@ impl<'p> Interp<'p> {
 
     fn coerce_primitive(&mut self, v: Value, hint: Hint) -> Res<Value> {
         let Value::Object(_) = v else { return Ok(v) };
+        if let Some(p) = self.sc_to_primitive(v, hint)? {
+            return Ok(p);
+        }
         let order = if hint == Hint::String { [self.k_to_string, self.k_value_of] } else { [self.k_value_of, self.k_to_string] };
         for k in order {
             let m = self.get_prop(v, k)?;
@@ -1620,6 +1639,7 @@ impl<'p> Interp<'p> {
                 }
                 self.ext.string_proto
             }
+            Value::Symbol(_) => self.sc.symbol_proto,
             _ => self.object_proto,
         };
         match h!(self, self.heap.get(o, key)) {
@@ -1783,6 +1803,7 @@ impl<'p> Interp<'p> {
                 let v = self.eval_expr(inner)?;
                 let mut it = self.iter_start(v, inner)?;
                 while let Some(x) = self.iter_next(&mut it)? {
+                    self.iter_buffer_room(out.len())?;
                     out.push(x);
                 }
             } else {
@@ -1986,7 +2007,7 @@ impl<'p> Interp<'p> {
                         continue;
                     }
                     let name = match key {
-                        PropertyKey::Symbol(_) => None,
+                        PropertyKey::Symbol(s) => Some(self.symbol_fn_name(s)?),
                         k => Some(self.key_str(k)?),
                     };
                     let v = self.eval_named(p.value, name)?;
@@ -2261,29 +2282,7 @@ impl<'p> Interp<'p> {
                 };
                 self.bind_pattern(target, v, mode)
             }
-            PatKind::Array(l) => {
-                let mut it = self.iter_start_val(v)?;
-                for q in prog.list(l) {
-                    match prog.pat(q).kind {
-                        PatKind::Hole => {
-                            self.iter_next(&mut it)?;
-                        }
-                        PatKind::Rest(t) => {
-                            let mut rest = Vec::new();
-                            while let Some(x) = self.iter_next(&mut it)? {
-                                rest.push(x);
-                            }
-                            let arr = self.new_array_from(&rest)?;
-                            self.bind_pattern(t, arr, mode)?;
-                        }
-                        _ => {
-                            let x = self.iter_next(&mut it)?.unwrap_or(Value::Undefined);
-                            self.bind_pattern(q, x, mode)?;
-                        }
-                    }
-                }
-                Ok(())
-            }
+            PatKind::Array(l) => self.bind_array_pattern(l, v, mode),
             PatKind::Object(l) => {
                 if is_nullish(v) {
                     let t = self.display(v);
@@ -2315,52 +2314,6 @@ impl<'p> Interp<'p> {
                 Ok(())
             }
             PatKind::Rest(_) | PatKind::Hole => Err(unsupported("pattern", pat.span)),
-        }
-    }
-
-    // ------------------------------------------------------------ iteration (arrays and strings)
-
-    fn iter_start(&mut self, v: Value, e: ExprId) -> Res<It> {
-        match v {
-            Value::String(_) => Ok(It { src: v, i: 0 }),
-            Value::Object(o) if h!(self, self.heap.is_array(o)) || self.heap.view_parts(o).is_some() => Ok(It { src: v, i: 0 }),
-            _ => {
-                let m = format!("{} is not iterable", self.src_text(e));
-                Err(self.type_err(&m))
-            }
-        }
-    }
-
-    fn iter_start_val(&mut self, v: Value) -> Res<It> {
-        match v {
-            Value::String(_) => Ok(It { src: v, i: 0 }),
-            Value::Object(o) if h!(self, self.heap.is_array(o)) || self.heap.view_parts(o).is_some() => Ok(It { src: v, i: 0 }),
-            _ => {
-                let t = self.display(v);
-                Err(self.type_err(&format!("{t} is not iterable")))
-            }
-        }
-    }
-
-    fn iter_next(&mut self, it: &mut It) -> Res<Option<Value>> {
-        self.tick()?;
-        match it.src {
-            Value::String(s) => {
-                let Some((_, n)) = h!(self, self.heap.code_point_at(s, it.i)) else { return Ok(None) };
-                let r = h!(self, self.heap.substring(s, it.i, it.i + n as usize));
-                it.i += n as usize;
-                Ok(Some(Value::String(r)))
-            }
-            src => {
-                let len = self.get_prop(src, self.k_length)?;
-                let len = self.coerce_number(len)?;
-                if (it.i as f64) >= len {
-                    return Ok(None);
-                }
-                let v = self.get_prop(src, PropertyKey::Index(it.i as u32))?;
-                it.i += 1;
-                Ok(Some(v))
-            }
         }
     }
 
@@ -2435,23 +2388,7 @@ impl<'p> Interp<'p> {
                 let key = self.coerce_key(a)?;
                 Ok(Value::Bool(h!(self, self.heap.has_property(o, key))))
             }
-            Instanceof => {
-                if !self.is_callable(b) {
-                    return Err(self.type_err("Right-hand side of 'instanceof' is not callable"));
-                }
-                let Value::Object(mut o) = a else { return Ok(Value::Bool(false)) };
-                let Value::Object(callee_proto) = self.get_prop(b, self.k_prototype)? else {
-                    return Err(self.type_err("Function has non-object prototype in instanceof check"));
-                };
-                while let Some(p) = h!(self, self.heap.get_prototype_of(o)) {
-                    self.tick()?;
-                    if p == callee_proto {
-                        return Ok(Value::Bool(true));
-                    }
-                    o = p;
-                }
-                Ok(Value::Bool(false))
-            }
+            Instanceof => self.sc_instanceof(a, b),
         }
     }
 
@@ -2863,8 +2800,17 @@ impl<'p> Interp<'p> {
             if is_of {
                 let mut it = self.iter_start(rv, right)?;
                 while let Some(v) = self.iter_next(&mut it)? {
-                    if !step(self, v)? {
-                        break;
+                    match step(self, v) {
+                        Ok(true) => {}
+                        Ok(false) => {
+                            self.iter_close(&mut it)?;
+                            break;
+                        }
+                        Err(Ctl::Err(e)) => return Err(Ctl::Err(self.iter_close_throw(&mut it, e))),
+                        Err(c) => {
+                            self.iter_close(&mut it)?;
+                            return Err(c);
+                        }
                     }
                 }
             } else {
@@ -2948,6 +2894,8 @@ include!("eval_builtins.rs");
 include!("eval_json_stringify.rs");
 include!("eval_host.rs");
 include!("eval_array_object.rs");
+include!("eval_symbols.rs");
+include!("eval_collections.rs");
 
 #[cfg(test)]
 #[path = "eval_tests.rs"]
@@ -2975,5 +2923,11 @@ mod host_tests;
 #[cfg(test)]
 #[path = "eval_binary_tests.rs"]
 mod binary_tests;
+
+#[cfg(test)]
 #[path = "eval_array_object_tests.rs"]
 mod array_object_tests;
+
+#[cfg(test)]
+#[path = "eval_sc_tests.rs"]
+mod sc_tests;

@@ -118,7 +118,7 @@ impl<'p> Interp<'p> {
                     Value::Object(o) if h!(self, self.heap.is_array(o)) => "Array",
                     Value::Object(_) => "Object",
                 };
-                Ok(Value::String(h!(self, self.heap.intern_str(&format!("[object {tag}]")))))
+                self.sc_object_to_string(this, tag)
             }
             Nat::ObjValueOf => {
                 if is_nullish(this) {
@@ -266,6 +266,9 @@ impl<'p> Interp<'p> {
                 if args.is_empty() {
                     return Ok(Value::String(h!(self, self.heap.intern_str(""))));
                 }
+                if let (Value::Symbol(s), false) = (a0, is_new) {
+                    return Ok(Value::String(self.symbol_descriptive(s)?));
+                }
                 Ok(Value::String(self.coerce_string(a0)?))
             }
             Nat::NumberFn => Ok(Value::Number(if args.is_empty() { 0.0 } else { self.coerce_number(a0)? })),
@@ -273,6 +276,7 @@ impl<'p> Interp<'p> {
             Nat::IsNaN => Ok(Value::Bool(self.coerce_number(a0)?.is_nan())),
             Nat::Ext(x) => self.call_ext(x, this, args, is_new),
             Nat::Ao(f) => self.call_ao(f, this, args),
+            Nat::Sc(f) => self.call_sc(f, this, args, is_new),
         }
     }
 

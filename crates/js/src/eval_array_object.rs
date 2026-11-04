@@ -64,7 +64,7 @@ enum AoFn {
     MathMin,
 }
 
-const MAX_SAFE: u64 = 9007199254740991;
+const MAX_SAFE_LEN: u64 = 9007199254740991;
 
 impl<'p> Interp<'p> {
     fn install_array_object(&mut self) -> Res<()> {
@@ -516,7 +516,7 @@ impl<'p> Interp<'p> {
         let len = self.length_of(this)?;
         let argc = args.len() as u64;
         if argc > 0 {
-            if len + argc > MAX_SAFE {
+            if len + argc > MAX_SAFE_LEN {
                 return Err(self.type_err("Invalid array length"));
             }
             if self.ao_dense(this, len, 0, 0, args)?.is_some() {
@@ -546,7 +546,7 @@ impl<'p> Interp<'p> {
             1 => len - start,
             _ => self.ao_int(args[1])?.max(0.0).min((len - start) as f64) as u64,
         };
-        if len + ic - dc > MAX_SAFE {
+        if len + ic - dc > MAX_SAFE_LEN {
             return Err(self.type_err("Invalid array length"));
         }
         let a = self.ao_species(this, dc)?;
