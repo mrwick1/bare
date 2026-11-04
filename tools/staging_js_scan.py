@@ -4,8 +4,7 @@
   python3 -I tools/staging_js_scan.py FILE.js [FILE.js ...]
 
 Prints per file: parse ok at ecmaVersion 2022 (script), then syntax features and
-watched-name references as `name count first_offset`. Offsets are UTF-16-free byte-ish
-character offsets from acorn (the files are ASCII-heavy; offset = character index).
+watched-name references as `name count first_offset`. Offsets from acorn are UTF-16 code units, not byte offsets or Python character indices.
 A "name ref" is an AST Identifier that is not a property key or member property. It is
 NOT scope-checked: a local variable named `window` would count. It is not proof of execution.
 """
@@ -80,7 +79,7 @@ def scan(path):
                 if "(?<" in pat.replace("(?<=", "").replace("(?<!", ""): hit(feats, "regex-named-group", s)
             if "bigint" in n: hit(feats, "bigint", s)
             if "_" in n.get("raw", "") and isinstance(n.get("value"), (int, float)): hit(feats, "numeric-separator", s)
-        if t == "Directive": hit(feats, "directive:" + n["directive"], s)
+        if t == "ExpressionStatement" and "directive" in n: hit(feats, "directive:" + n["directive"], s)
         if t == "Identifier" and n["name"] in WATCH:
             if p and p["type"] == "MemberExpression" and k == "property" and not p.get("computed"): return
             if p and p["type"] in ("Property", "MethodDefinition", "PropertyDefinition") and k == "key" and not p.get("computed"): return

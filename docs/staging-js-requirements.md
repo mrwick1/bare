@@ -8,7 +8,7 @@ Labels: **observed** = a command or source text showed it. **traced** = I follow
 
 - `python3 -I tools/staging_js_fetch.py SCRATCH_DIR`: 15 GETs of public scripts named by the saved `login.html` (not the `noModule` polyfills). 469,525 decoded bytes, 2.3 s. Every SHA256 equals `manifest-2026-11-04.json`. `webpack-4af263207fca128f.js` is byte-identical to `tools/fixtures/staging/webpack-runtime.js`. Hashes and sizes are in the manifest; bundles are not committed.
 - `python3 -I tools/staging_js_scan.py FILE...`: runs the installed `acorn --ecma2022` (script mode) and prints AST feature counts with first offset. Name references are **not scope-checked**.
-- Offsets below are character offsets in the decoded file.
+- Offsets below are Acorn UTF-16 code-unit offsets in the decoded file. They differ from Python character indices after non-BMP text.
 
 ## Existing JS runtime in the repo
 
@@ -82,4 +82,6 @@ Not reached / server-only: `AsyncLocalStorage` (`2117@102428`, `globalThis` prob
 
 - No bundle was run. Not tested: `bare` parsing speed, Chrome behavior comparison, `polyfills-*.js` (not fetched), the `/api` responses (no login attempted), CSS chunk 3299.
 - Runtime-generated chunks: none proven reachable from login. Ordering hypothesis for `.undefined.js` is untested.
-- Offsets are character indices; the AST scan ignores scoping, so shadowed names (`window`, `Function`) could be over-counted.
+- Offsets use UTF-16 code units; the AST scan ignores scoping, so shadowed names (`window`, `Function`) could be over-counted.
+
+Parent review: the fetch tool now requests identity encoding, rejects redirects and compressed replies, and checks per-file and remaining aggregate bytes before retaining them. Offline exact/over-cap, encoding, length, deadline and redirect regressions pass. The elapsed limit is checked between blocking operations, so one DNS/socket wait can exceed it. Directive scanning now reads the ESTree expression-statement field. No target script was executed during review.
