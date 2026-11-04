@@ -189,7 +189,7 @@ pub enum ErrorKind {
     UnterminatedTemplate,
     UnterminatedRegExp,
     InvalidEscape,
-    /// A malformed number: `0x`, `1e`, `1_`, `1__0`, `0_1`, `3in`, `1n.5`.
+    /// A malformed number: `0x`, `1e`, `1_`, `1__0`, `0_1`, `3in`.
     InvalidNumber,
     InvalidRegExpFlag,
     DuplicateRegExpFlag,
@@ -999,7 +999,10 @@ fn bad_token(tok: &Token) -> Error {
 /// Append the value of a string token to `out` as UTF-16 code units. Appends nothing for a plain
 /// empty string. A lone surrogate escape stays a lone surrogate. On error `out` may hold a partial value.
 pub fn decode_string(src: &str, tok: &Token, out: &mut Vec<u16>) -> Result<(), Error> {
-    if !matches!(tok.kind, Kind::String { .. }) || tok.end < tok.start + 2 || tok.end as usize > src.len() {
+    let text = src.get(tok.start as usize..tok.end as usize).ok_or_else(|| bad_token(tok))?;
+    if !matches!(tok.kind, Kind::String { .. }) || text.len() < 2
+        || !matches!(text.as_bytes()[0], b'\'' | b'"') || text.as_bytes().last() != text.as_bytes().first()
+    {
         return Err(bad_token(tok));
     }
     decode_body(src, tok.start as usize + 1, tok.end as usize - 1, Mode::Str, out)
@@ -1013,7 +1016,10 @@ pub fn decode_template(src: &str, tok: &Token, raw: bool, out: &mut Vec<u16>) ->
         TemplatePart::NoSubstitution | TemplatePart::Tail => 1,
         TemplatePart::Head | TemplatePart::Middle => 2,
     };
-    if tok.end as usize > src.len() || (tok.end as usize) < tok.start as usize + 1 + tail {
+    let text = src.get(tok.start as usize..tok.end as usize).ok_or_else(|| bad_token(tok))?;
+    let first = match part { TemplatePart::NoSubstitution | TemplatePart::Head => b'`', _ => b'}' };
+    let ending = if tail == 1 { "`" } else { "${" };
+    if text.len() < 1 + tail || text.as_bytes()[0] != first || !text.ends_with(ending) {
         return Err(bad_token(tok));
     }
     decode_body(src, tok.start as usize + 1, tok.end as usize - tail, if raw { Mode::Raw } else { Mode::Cooked }, out)
@@ -1027,7 +1033,8 @@ pub fn ident_name<'a>(src: &'a str, tok: &Token) -> Result<Cow<'a, str>, Error> 
         Kind::PrivateName => 1,
         _ => return Err(bad_token(tok)),
     };
-    let Some(text) = src.get(tok.start as usize + skip..tok.end as usize) else { return Err(bad_token(tok)) };
+    let text = src.get(tok.start as usize..tok.end as usize).ok_or_else(|| bad_token(tok))?;
+    let text = if skip == 1 { text.strip_prefix('#').ok_or_else(|| bad_token(tok))? } else { text };
     if !tok.escapes {
         return Ok(Cow::Borrowed(text));
     }
@@ -1062,11 +1069,17 @@ pub fn number_value(src: &str, tok: &Token) -> Option<f64> {
             return if text.contains('_') { text.replace('_', "").parse().ok() } else { text.parse().ok() };
         }
     };
-    let digits = if base == NumberBase::LegacyOctal { text } else { &text[2..] };
+    let digits = match base {
+        NumberBase::Hex => text.strip_prefix("0x").or_else(|| text.strip_prefix("0X"))?,
+        NumberBase::Octal => text.strip_prefix("0o").or_else(|| text.strip_prefix("0O"))?,
+        NumberBase::Binary => text.strip_prefix("0b").or_else(|| text.strip_prefix("0B"))?,
+        _ => text,
+    };
+    if digits.is_empty() { return None; }
     // Keep the top 64 bits. Dropped digits only matter as a "sticky" bit for rounding.
     let (mut m, mut shift, mut sticky) = (0u64, 0i32, false);
     for c in digits.bytes().filter(|&c| c != b'_') {
-        let d = (c as char).to_digit(16)? as u64;
+        let d = (c as char).to_digit(1 << radix_bits)? as u64;
         if m >> (64 - radix_bits) == 0 {
             m = m << radix_bits | d;
         } else {
@@ -1082,7 +1095,7 @@ pub fn regexp_parts<'a>(src: &'a str, tok: &Token) -> Option<(&'a str, &'a str)>
     if tok.kind != Kind::RegExp {
         return None;
     }
-    let t = src.get(tok.start as usize + 1..tok.end as usize)?;
+    let t = src.get(tok.start as usize..tok.end as usize)?.strip_prefix('/')?;
     // Flags have no `/`, so the last `/` ends the pattern.
     let i = t.rfind('/')?;
     Some((&t[..i], &t[i + 1..]))
@@ -1123,6 +1136,19 @@ mod tests {
 
     fn u16s(s: &str) -> Vec<u16> {
         s.encode_utf16().collect()
+    }
+
+    #[test]
+    fn malformed_public_token_spans_do_not_panic() {
+        let string = Token { kind: Kind::String { legacy_octal: false }, start: 0, end: 3, newline_before: false, escapes: false };
+        assert_eq!(decode_string("'é'", &string, &mut vec![]).unwrap_err().kind, ErrorKind::BadToken);
+        let huge = Token { start: u32::MAX, end: u32::MAX, ..string };
+        assert_eq!(decode_string("", &huge, &mut vec![]).unwrap_err().kind, ErrorKind::BadToken);
+        let template = Token { kind: Kind::Template { part: TemplatePart::Tail, bad_escape: false }, ..string };
+        assert_eq!(decode_template("}é`", &template, false, &mut vec![]).unwrap_err().kind, ErrorKind::BadToken);
+        let number = Token { kind: Kind::Number(NumberBase::Hex), end: 1, ..string };
+        assert_eq!(number_value("x", &number), None);
+        assert_eq!(number_value("0b2", &Token { kind: Kind::Number(NumberBase::Binary), end: 3, ..number }), None);
     }
 
     #[test]
