@@ -221,7 +221,7 @@ impl Dom {
     pub(crate) fn is_host_object(&self, o: ObjId) -> bool {
         let n = self.nav.s.borrow();
         let st = self.st.borrow();
-        st.by_obj.contains_key(&o) || st.events.contains_key(&o) || n.urls.contains_key(&o) || n.params.contains_key(&o) || n.iters.contains_key(&o) || self.nav.p.get().is_some_and(|p| [p.location, p.history, p.local, p.session].contains(&o))
+        st.by_obj.contains_key(&o) || self.is_platform_object(o) || st.events.contains_key(&o) || n.urls.contains_key(&o) || n.params.contains_key(&o) || n.iters.contains_key(&o) || self.nav.p.get().is_some_and(|p| [p.location, p.history, p.local, p.session].contains(&o))
     }
 
     fn cur_rec(&self) -> R<Rec> {

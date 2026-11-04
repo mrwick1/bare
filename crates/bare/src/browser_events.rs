@@ -198,7 +198,7 @@ impl Dom {
         Ok(())
     }
 
-    fn remove_listener(&self, t: Target, id: u64) {
+    pub(crate) fn remove_listener(&self, t: Target, id: u64) {
         let mut st = self.st.borrow_mut();
         if let Some(v) = st.listeners.get_mut(&t)
             && let Some(i) = v.iter().position(|l| l.id == id)

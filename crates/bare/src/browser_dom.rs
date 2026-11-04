@@ -13,13 +13,13 @@ use bare_js::value::Value;
 
 type V = R<Value>;
 
-fn arg(a: &[Value], i: usize) -> Value {
+pub(crate) fn arg(a: &[Value], i: usize) -> Value {
     a.get(i).copied().unwrap_or(Value::Undefined)
 }
 
 /// The node after `cur` in tree order, inside the subtree of `root` (`root` itself is never given).
 /// `depth` is the depth of `cur` below `root`; the result has the depth of the node it gives.
-fn next_in(doc: &Document, root: NodeId, cur: NodeId, depth: usize) -> Option<(NodeId, usize)> {
+pub(crate) fn next_in(doc: &Document, root: NodeId, cur: NodeId, depth: usize) -> Option<(NodeId, usize)> {
     if let Some(c) = doc.children(cur).next() {
         return Some((c, depth + 1));
     }
@@ -103,7 +103,7 @@ impl Dom {
     }
 
     /// Room for a new attribute (name, slot, value).
-    fn attr_room(&self, doc: &Document, el: NodeId, name: &str, value: &str) -> R<()> {
+    pub(crate) fn attr_room(&self, doc: &Document, el: NodeId, name: &str, value: &str) -> R<()> {
         self.room(doc, 0, value.len())?;
         if doc.attr_slots() + doc.attr_count(el) + 1 > self.lim.max_attr_slots {
             return Err(self.lim("dom-attrs"));
@@ -507,7 +507,7 @@ pub(crate) fn child_nodes(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]
     wrap_all(d, it, &kids)
 }
 
-fn wrap_all(d: &Dom, it: &mut Interp<'_>, ids: &[NodeId]) -> V {
+pub(crate) fn wrap_all(d: &Dom, it: &mut Interp<'_>, ids: &[NodeId]) -> V {
     let mut vals = Vec::with_capacity(ids.len());
     for &k in ids {
         vals.push(d.wrap(it, k)?);

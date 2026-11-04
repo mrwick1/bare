@@ -214,7 +214,7 @@ fn create_element_ns_is_gated() {
         assert_eq!(js(&mut b, "document.createElementNS('http://www.w3.org/2000/svg', 'svg')"), "unsupported:createElementNS outside the HTML namespace (the native document has no namespaces)");
         assert_eq!(js(&mut b, "document.createElementNS(null, 'x')"), "unsupported:createElementNS outside the HTML namespace (the native document has no namespaces)");
         assert_eq!(js(&mut b, "document.createElementNS('http://www.w3.org/1999/xhtml', 'x:y')"), "unsupported:createElementNS with a prefix or capital letters (names are lowercase in the native document)");
-        assert_eq!(js(&mut b, "[typeof document.createDocumentFragment, typeof document.body.innerHTML, typeof document.body.classList, typeof document.body.namespaceURI, typeof document.getElementsByTagName].join()"), "undefined,undefined,undefined,undefined,undefined");
+        assert_eq!(js(&mut b, "[typeof document.createDocumentFragment, typeof document.body.innerHTML, typeof document.body.classList, typeof document.body.namespaceURI, typeof document.getElementsByTagName].join()"), "undefined,undefined,object,undefined,function");
     });
 }
 
