@@ -434,3 +434,19 @@ Parent built `tools/crypto/aes_gcm_load.rs` with `rustc --edition=2024 -C opt-le
 The delegated implementation measured the GHASH stage as the accelerated bottleneck. Three-product Karatsuba multiplication and eight-block aggregated reduction improved it. Portable measurements identified the S-box as the cost; a shorter inverse chain and linear squaring improved it. Parent verified the final loads above. Parent did not reproduce the earlier implementation's timings. Portable throughput remains much lower; no non-x86 machine was tested.
 
 Parent checks: 510 workspace tests passed. All 26 crypto tests pass in debug and release with default and forced-portable builds. NIST CAVP vectors, bit/byte changes, empty inputs, length boundaries, and backend agreement pass. Clippy passes with default and all features. These tests do not establish constant-time machine code or complete TLS correctness. TLS framing, per-key usage limits and sequence exhaustion remain separate work.
+
+## SHA 384 certificate hashes
+
+2026-11-04, archMachine, release. Streaming SHA-384 uses a 16-word schedule ring and fixed-size state and buffer. It copies partial blocks only. Full blocks are read from the caller's slice. This hash is needed for the observed certificate signatures; the chosen TLS cipher still uses SHA-256 for its key schedule.
+
+Parent built `tools/crypto/sha384_load.rs` with `rustc --edition=2024 -C opt-level=3`. Each scale ran in a separate process with a 512 MiB address-space limit and a 30 s timeout. The input uses 16,421-byte chunks with a changing chunk counter, so partial-block handling runs repeatedly. Parent independently regenerated and hashed each complete stream with Python hashlib. All digests matched, including the stream larger than 4 GiB.
+
+| Scale | Bytes | MB/s | Wall seconds | CPU seconds | Peak RSS KiB | Loop allocations |
+| --- | --- | --- | --- | --- | --- | --- |
+| 1x | 67,108,864 | 547.1 | 0.12 | 0.12 | 2,348 | 0 |
+| 10x | 671,088,640 | 549.5 | 1.22 | 1.21 | 2,404 | 0 |
+| 100x | 6,710,886,400 | 548.3 | 12.24 | 12.19 | 2,400 | 0 |
+
+The delegate tried a separate unroll for rounds 0 to 15. Its measured gain was about 1%, within noise, so the change was removed. The final implementation keeps the simpler loop. Parent did not reproduce that discarded variant. No CPU-specific path was added.
+
+Checks: all 517 workspace tests passed. All 33 crypto tests passed in release with default and forced-portable builds. SHA-384 adds seven tests for standard vectors, padding boundaries, deterministic oracle inputs, incremental splits, cloning and length arithmetic. Clippy passed with all features. No 32-bit, big-endian or non-x86 hardware was tested.
