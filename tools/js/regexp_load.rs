@@ -73,7 +73,8 @@ fn unhex(s: &str) -> Vec<u16> {
     (0..s.len() / 4).map(|i| u16::from_str_radix(&s[4 * i..4 * i + 4], 16).unwrap()).collect()
 }
 
-/// Run one oracle case. Returns Err(description) on a mismatch.
+/// Run one oracle case with a 500M work budget for semantic comparisons.
+/// Production defaults and separate budget-error tests stay unchanged.
 fn check_case(line: &str) -> Result<char, String> {
     let f: Vec<&str> = line.split('\t').collect();
     assert_eq!(f.len(), 6, "bad line: {line}");
@@ -90,7 +91,7 @@ fn check_case(line: &str) -> Result<char, String> {
         (_, Err(e)) => bad(format!("{e:?}")),
         (_, Ok(re)) => {
             let mut sc = Scratch::new();
-            let got = match re.exec(&input, li, &Limits::default(), None, &mut sc) {
+            let got = match re.exec(&input, li, &Limits { max_steps: 500_000_000, ..Limits::default() }, None, &mut sc) {
                 Ok(None) => "N".to_string(),
                 Ok(Some(m)) => m.spans.iter().map(|s| s.map_or("-".to_string(), |(a, b)| format!("{a},{b}"))).collect::<Vec<_>>().join(";"),
                 Err(e) => format!("{e:?}"),
@@ -283,7 +284,18 @@ fn load(mode: &str, scale: u64, expect: Option<u32>) {
     );
 }
 
+fn preflight() {
+    let source = "a".repeat(8 << 20);
+    let before = BYTES.load(Relaxed);
+    let result = Regex::from_str(&source, "");
+    let bytes = BYTES.load(Relaxed) - before;
+    assert!(matches!(result, Err(CompileError::Limit(_))));
+    assert!(bytes < 1 << 20, "rejected oversized pattern allocated {bytes} bytes");
+    println!("oversized pattern: rejected with {bytes} allocated bytes");
+}
+
 fn main() {
+    if std::env::args().nth(1).as_deref() == Some("preflight") { preflight(); return; }
     let a: Vec<String> = std::env::args().collect();
     match a.get(1).map(String::as_str) {
         Some("check") => {

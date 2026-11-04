@@ -119,7 +119,7 @@ pub enum CompileError {
 /// A match failure that is not "no match".
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ExecError {
-    /// The instruction budget ran out.
+    /// The work budget ran out.
     StepLimit,
     /// The backtrack stack reached `max_stack_frames`.
     StackLimit,
@@ -129,7 +129,8 @@ pub enum ExecError {
     Cancelled,
 }
 
-/// Run-time bounds for one [`Regex::exec`] call. The step budget covers the whole search.
+/// Run-time bounds for one [`Regex::exec`] call. Work includes instructions, search scans,
+/// register initialization, capture resets, backreferences and backtrack-stack operations.
 #[derive(Clone, Copy, Debug)]
 pub struct Limits {
     pub max_steps: u64,
@@ -155,7 +156,7 @@ pub struct Match {
 pub struct Scratch {
     regs: Vec<u32>,
     stack: Vec<Frame>,
-    /// Instructions run by the last `exec` (for measurement).
+    /// Work units charged by the last `exec` (instructions, scans and register/stack work).
     pub steps: u64,
     /// Highest backtrack stack depth of the last `exec`.
     pub peak_frames: usize,
@@ -250,7 +251,7 @@ impl Regex {
 
     /// Compile from Rust strings. A Rust `&str` cannot hold a lone surrogate; use [`Regex::new`] then.
     pub fn from_str(pattern: &str, flags: &str) -> Result<Regex, CompileError> {
-        let units: Vec<u16> = pattern.encode_utf16().collect();
+        let units: Vec<u16> = pattern.encode_utf16().take(MAX_PATTERN_UNITS + 1).collect();
         Regex::new(&units, flags)
     }
 
@@ -268,7 +269,7 @@ impl Regex {
 
     /// Find the first match at or after `last_index` (only at `last_index` with the `y` flag).
     /// `Ok(None)` means no match, including `last_index > input.len()`. `cancel` is polled
-    /// every 256 instructions.
+    /// at entry and periodically during execution. Register initialization is charged in bulk.
     pub fn exec(
         &self,
         input: &[u16],
@@ -279,6 +280,7 @@ impl Regex {
     ) -> Result<Option<Match>, ExecError> {
         sc.steps = 0;
         sc.peak_frames = 0;
+        if cancel.is_some_and(|c| c.load(Ordering::Relaxed)) { return Err(ExecError::Cancelled); }
         if input.len() > limits.max_input_units || input.len() >= u32::MAX as usize {
             return Err(ExecError::InputTooLarge);
         }
@@ -293,12 +295,14 @@ impl Regex {
             if let (Some(f), false) = (&self.first, self.flags.sticky) {
                 // A match consumes at least one unit and cannot start with a skipped one.
                 while s < input.len() && input[s] < 128 && !f.0[input[s] as usize] {
+                    charge(&mut sc.steps, 1, limits, cancel)?;
                     s += 1;
                 }
                 if s >= input.len() {
                     return Ok(None);
                 }
             }
+            charge(&mut sc.steps, self.nregs as u64, limits, cancel)?;
             sc.regs.clear();
             sc.regs.resize(self.nregs, UNSET);
             sc.stack.clear();
@@ -356,6 +360,7 @@ impl Regex {
 
         loop {
             if failed {
+                charge(steps, 1, lim, cancel)?;
                 match stack.pop() {
                     None => return Ok(false),
                     Some(Frame::Branch(p, s)) => {
@@ -374,13 +379,7 @@ impl Regex {
                 }
                 continue;
             }
-            *steps += 1;
-            if *steps > lim.max_steps {
-                return Err(ExecError::StepLimit);
-            }
-            if *steps & 0xFF == 0 && cancel.is_some_and(|c| c.load(Ordering::Relaxed)) {
-                return Err(ExecError::Cancelled);
-            }
+            charge(steps, 1, lim, cancel)?;
             match self.prog[pc] {
                 Inst::Char(c) => {
                     if pos < len && input[pos] == c {
@@ -466,11 +465,14 @@ impl Regex {
                     } else {
                         let (s, e) = (s as usize, e as usize);
                         let n = e - s;
-                        let ok = pos + n <= len
-                            && (0..n).all(|k| {
+                        let mut ok = pos + n <= len;
+                        if ok {
+                            for k in 0..n {
+                                charge(steps, 1, lim, cancel)?;
                                 let (x, y) = (input[s + k], input[pos + k]);
-                                x == y || (icase && canon(x) == canon(y))
-                            });
+                                if x != y && !(icase && canon(x) == canon(y)) { ok = false; break; }
+                            }
+                        }
                         if ok {
                             pos += n;
                             pc += 1;
@@ -508,6 +510,7 @@ impl Regex {
                 }
                 Inst::Reset(lo, hi) => {
                     for g in lo as usize..hi as usize {
+                        charge(steps, 1, lim, cancel)?;
                         if regs[2 * g] != UNSET || regs[2 * g + 1] != UNSET {
                             set!(2 * g, UNSET);
                             set!(2 * g + 1, UNSET);
@@ -521,11 +524,17 @@ impl Regex {
                 }
                 Inst::LookEnd => {
                     // The nearest barrier on the stack belongs to this lookahead: inner ones are gone.
-                    let idx = stack.iter().rposition(|f| matches!(f, Frame::Look { .. })).expect("barrier");
+                    let mut idx = stack.len();
+                    loop {
+                        charge(steps, 1, lim, cancel)?;
+                        idx = idx.checked_sub(1).expect("barrier");
+                        if matches!(stack[idx], Frame::Look { .. }) { break; }
+                    }
                     let Frame::Look { neg, pos: s, end } = stack[idx] else { unreachable!() };
                     if neg {
                         // The body matched, so `(?!...)` fails. Undo the body's captures.
                         while let Some(f) = stack.pop() {
+                            charge(steps, 1, lim, cancel)?;
                             match f {
                                 Frame::Restore(r, old) => regs[r as usize] = old,
                                 Frame::Look { .. } => break,
@@ -537,6 +546,7 @@ impl Regex {
                         // Atomic: drop the body's choice points, keep undo records for its captures.
                         let mut w = idx;
                         for r in idx + 1..stack.len() {
+                            charge(steps, 1, lim, cancel)?;
                             if let Frame::Restore(..) = stack[r] {
                                 stack[w] = stack[r];
                                 w += 1;
@@ -559,6 +569,16 @@ impl Regex {
 // ---------------------------------------------------------------------------------------------
 // Character helpers
 // ---------------------------------------------------------------------------------------------
+
+fn charge(steps: &mut u64, work: u64, limits: &Limits, cancel: Option<&AtomicBool>) -> Result<(), ExecError> {
+    let old = *steps;
+    *steps = steps.checked_add(work).ok_or(ExecError::StepLimit)?;
+    if *steps > limits.max_steps { return Err(ExecError::StepLimit); }
+    if old >> 8 != *steps >> 8 && cancel.is_some_and(|c| c.load(Ordering::Relaxed)) {
+        return Err(ExecError::Cancelled);
+    }
+    Ok(())
+}
 
 const UNSET: u32 = u32::MAX;
 
@@ -1513,4 +1533,23 @@ mod tests {
         assert_eq!(canon(0x3C2), 0x3A3); // ς -> Σ
         assert_eq!(canon(0xD800), 0xD800);
     }
+    #[test]
+    fn search_work_and_short_calls_honor_limits() {
+        let re = Regex::from_str("a", "").unwrap();
+        let mut sc = Scratch::new();
+        let zero = Limits { max_steps: 0, ..Limits::default() };
+        assert_eq!(re.exec(&u("bbbb"), 0, &zero, None, &mut sc), Err(ExecError::StepLimit));
+        let stop = AtomicBool::new(true);
+        assert_eq!(re.exec(&u("a"), 0, &Limits::default(), Some(&stop), &mut sc), Err(ExecError::Cancelled));
+    }
+
+    #[test]
+    fn backreference_comparisons_consume_budget() {
+        let re = Regex::from_str(r"(a{1000})\1", "y").unwrap();
+        let input = vec![b'a' as u16; 2000];
+        let lim = Limits { max_steps: 1500, ..Limits::default() };
+        assert_eq!(re.exec(&input, 0, &lim, None, &mut Scratch::new()), Err(ExecError::StepLimit));
+        assert!(re.exec(&input, 0, &Limits::default(), None, &mut Scratch::new()).unwrap().is_some());
+    }
+
 }
