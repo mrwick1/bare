@@ -254,6 +254,8 @@ pub struct Dom {
     pub(crate) fetch: crate::browser_fetch::Fetch,
     /// Script-made `ReadableStream`s (`browser_streams.rs`).
     pub(crate) streams: crate::browser_streams::Streams,
+    /// `console` and its bounded record sink (`browser_console.rs`).
+    pub(crate) console: crate::browser_console::Console,
     /// Navigation, history and storage state (`browser_navigation.rs`).
     pub(crate) nav: crate::browser_navigation::Nav,
     pub(crate) scripts: crate::browser_loader::Scripts,
@@ -276,6 +278,7 @@ impl Host for Dom {
         self.sched_roots(out);
         self.fetch.roots(out);
         self.streams.roots(out);
+        self.console.roots(out);
         crate::browser_navigation::roots(self, out);
         self.scripts_roots(out);
         crate::browser_platform::roots(self, out);
@@ -661,7 +664,8 @@ impl Dom {
         crate::browser_navigation::install(self, it)?;
         crate::browser_fetch::install(self, it)?;
         crate::browser_loader::install(self, it)?;
-        self.install_platform(it)
+        self.install_platform(it)?;
+        crate::browser_console::install(self, it)
     }
 
     pub(crate) fn define_accessor(&self, it: &mut Interp<'_>, o: ObjId, key: PropertyKey, get: ObjId, set: Option<ObjId>) -> R<()> {
@@ -824,6 +828,7 @@ impl Browser {
             sched: RefCell::default(),
             fetch: Default::default(),
             streams: Default::default(),
+            console: Default::default(),
             nav: Default::default(),
             scripts: Default::default(),
             plat: Default::default(),
