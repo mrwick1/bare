@@ -174,9 +174,13 @@ Text starts with a built-in bitmap font. A TrueType parser and rasterizer come l
 
 ## Module plan
 
-Tabs and the event loop come before JavaScript, because JavaScript needs the event loop.
+The next target is the voicebot staging login journey. Implement HTTPS and resource loading, JavaScript and a single-page event loop, browser APIs, window/paint/input, and test automation, in that order. Tabs remain deferred. JavaScript uses the event loop before tabs exist.
 
-The modules, their order and their state are in [progress.md](progress.md).
+The topic order, exit checks and state are in [progress.md](progress.md#voicebot-staging-plan). Existing module numbers remain stable for code and benchmark references.
+
+For each topic: implement, run huge load tests, then optimize CPU time and RAM use. Repeat the load-and-optimize cycle before moving to the next topic. Record results and tradeoffs in [resources.md](resources.md).
+
+Browser conventions do not define the internal architecture. Standards and reference-browser tests check observable behavior. Choose algorithms, data layout and ownership from measurements in `bare`.
 
 ## Open questions
 
