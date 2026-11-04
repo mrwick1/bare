@@ -12,3 +12,6 @@ bare-js = { path = "../js" }
 bare-layout = { path = "../layout" }
 bare-net = { path = "../net" }
 bare-url = { path = "../url" }
+
+[dev-dependencies]
+bare-tls = { path = "../tls" }
