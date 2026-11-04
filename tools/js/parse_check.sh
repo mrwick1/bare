@@ -12,8 +12,10 @@ cargo build --release -q -p bare-js --example parse_check
 bin=target/release/examples/parse_check
 status=0
 cases=$here/../fixtures/js/parse-cases.txt
-node "$here/parse_oracle.mjs" cases "$cases" | sed 's/^\([0-9]*\) err.*/\1 err/' > "$tmp/o"
-$bin cases "$cases" | sed 's/^\([0-9]*\) err.*/\1 err/' > "$tmp/m"
+node "$here/parse_oracle.mjs" cases "$cases" > "$tmp/oracle-raw"
+sed 's/^\([0-9]*\) err.*/\1 err/' "$tmp/oracle-raw" > "$tmp/o"
+$bin cases "$cases" > "$tmp/parser-raw"
+sed 's/^\([0-9]*\) err.*/\1 err/' "$tmp/parser-raw" > "$tmp/m"
 if diff "$tmp/o" "$tmp/m" > "$tmp/d"; then
   echo "cases: $(wc -l < "$tmp/m") match ($(grep -c ' err$' "$tmp/m") rejected by both, $(grep -c ' unsupported$' "$tmp/m") unsupported)"
 else

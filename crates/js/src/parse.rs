@@ -15,12 +15,13 @@
 //!   uses, ECMA-262 sections 8.1.x "Static Semantics: Early Errors"), strict mode, `return`/`break`/
 //!   `continue`/labels, `super`, `new.target`, private names, class element rules.
 //! - Limits are checked before anything grows. Recursion depth is counted, so deep input gives an error
-//!   and never overflows the Rust stack.
+//!   within the caller stack requirement below.
 //!
 //! The parser stops at the first error. It does not recover.
 //!
 //! Not supported, with a precise error ([`ErrorKind::Unsupported`]): generators and `yield`, `import`/
-//! `export`/`import()`/`import.meta`, class static blocks. Everything else in ES2022 script syntax is.
+//! `export`/`import()`/`import.meta`, class static blocks. The tested corpus and observed staging
+//! syntax are covered; this is not a claim of complete ES2022 compatibility.
 //! Not done here: regexp pattern grammar ([`REGEXP_PATTERN_VALIDATED`]), HTML-like comments, non-ASCII
 //! identifiers (the lexer reports them), scope resolution of names.
 //!
@@ -50,7 +51,12 @@ use std::collections::HashMap;
 /// not an early error. This constant is the explicit gate: it is `false`.
 pub const REGEXP_PATTERN_VALIDATED: bool = false;
 
-/// Parser limits. A program that goes past one gets [`ErrorKind::Limit`], never a panic or a stack overflow.
+/// Hard recursion ceiling, even when the caller raises `Limits::max_depth`.
+pub const HARD_MAX_DEPTH: u32 = 256;
+
+/// Parser limits. A program that exceeds one returns [`ErrorKind::Limit`].
+/// The recursive parser requires a caller stack of at least 8 MiB in debug builds or 2 MiB
+/// in release builds at the hard depth cap. Smaller embedding stacks are unsupported.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Limits {
     /// Most source bytes.
@@ -59,7 +65,7 @@ pub struct Limits {
     pub max_nodes: u32,
     /// Most entries in one list (arguments, elements, statements in one block, ...).
     pub max_list: u32,
-    /// Deepest nesting of expressions, statements and patterns. The Rust stack use is about
+    /// Deepest nesting of expressions, statements and patterns. Clamped to `HARD_MAX_DEPTH`. The Rust stack use is about
     /// `max_depth` times 2 KiB at worst in a release build (nested classes), so 256 needs about 0.5 MiB.
     /// A debug build uses about 6 times more. A test parses deep input on a 2 MiB (release) or 8 MiB (debug) thread.
     pub max_depth: u32,
@@ -139,7 +145,8 @@ fn lex_err(e: lex::Error) -> Error {
 }
 
 /// Parse `source` as a script (not a module). Borrows `source`; the [`Program`] owns its nodes.
-pub fn parse_script(source: &str, limits: Limits) -> Result<Program<'_>, Error> {
+pub fn parse_script(source: &str, mut limits: Limits) -> Result<Program<'_>, Error> {
+    limits.max_depth = limits.max_depth.min(HARD_MAX_DEPTH);
     if source.len() > limits.max_source {
         let at = limits.max_source.min(u32::MAX as usize) as u32;
         return Err(Error { kind: ErrorKind::Limit(LimitKind::Source), msg: "source too large", start: at, end: at });

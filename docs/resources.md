@@ -745,3 +745,26 @@ Reproduce with `tools/js/regexp_check.sh <existing-output-dir>` and `tools/js/re
 Not tested: JS RegExp/String wrappers, dynamic patterns constructed by the target, browser execution, Unicode-mode syntax, newer-Unicode folding agreement or non-Linux targets. This component does not establish full ECMA-262 compatibility.
 
 Final checks: 840 workspace tests and all 89 assembled JS tests in debug and release passed. Crate clippy is clean. The full regexp check script passed with zero mismatches in all three generated corpora and the required Node timeout status.
+
+
+## JavaScript parser
+
+`bare_js::parse::parse_script` returns an arena AST that borrows the source. Typed 32-bit IDs refer to nodes and lists. Literal decoding is on demand. The parser chooses division, regexp and template lexical goals. It preserves parentheses, optional chains, directives, strictness, function kinds and binding patterns. Statement parsing is recursive descent; binary expressions use precedence parsing. Early-error checks cover declarations, labels, strict mode, super, private names and function/class rules in the tested corpus.
+
+Limits default to 16 MiB of source, 16 Mi nodes plus list entries, 1 Mi entries per list and depth 256. Parent review found that callers could remove the recursion bound with max_depth=u32::MAX. The new regression accepted 500 nested parentheses on the child baseline; the fixed parser returns a depth-limit error. Depth now has a hard ceiling of 256. At that ceiling the recursive implementation requires an embedding stack of at least 8 MiB in debug or 2 MiB in release. Smaller stacks are unsupported; a depth counter alone cannot protect an arbitrarily small host stack.
+
+Parent compared all 2,087 committed cases against Acorn 8.15: 910 rejected by both, 31 explicitly unsupported and normalized trees with spans equal for accepted cases. The four excluded Acorn divergences also fail Node's independent syntax check. All 15 cached staging bundles match the normalized Acorn trees byte for byte with parser-selected lexical goals. They total 469,525 source bytes and 128,506 nodes. One release pass took 8,264 us and 5,172 KiB peak RSS. This establishes parsing, not execution or browser API coverage. The oracle script saves each producer's output before filtering it, so a producer crash cannot hide in a pipeline.
+
+Parent ran five workloads at 1x, 10x and 100x under 1 GiB of address space and 120 seconds per process. Valid runs assert node counts and iterative tree-walk checksums. Each timing is the median of five parses in that process; other work ran concurrently. The figures are final measurements, not a before/after optimization claim.
+
+| Workload | Source bytes at 1x / 10x / 100x | Median microseconds | Peak RSS KiB |
+| --- | --- | --- | --- |
+| Statements | 41,780 / 457,780 / 4,977,780 | 1,315 / 15,869 / 175,621 | 3,212 / 10,408 / 78,384 |
+| Flat chains | 118,899 / 1,288,899 / 13,888,899 | 2,047 / 20,316 / 144,791 | 3,700 / 13,288 / 111,564 |
+| Function and class bodies | 54,960 / 557,560 / 5,655,560 | 1,792 / 22,324 / 100,292 | 3,284 / 10,600 / 81,980 |
+
+Malformed workloads check two exact errors at each scale. Deep workloads check four shapes up to 500,000 nested input elements, each returning a depth-limit error on a 2 MiB release thread. Their 100x source totals 12,500,002 bytes and peak RSS is 22,208 KiB. The 100x valid cases retain 1.2M statement nodes, 4M chain nodes and 1.52M body nodes. Allocations per parse are 140, 26 and 40,183 respectively. Tree bytes exclude arena capacity and scope scratch space. Cover-grammar conversion can leave unreachable expression nodes in the arenas; Stats includes them.
+
+Checks: all 116 assembled JS tests passed in debug and release, including all cached bundles through BARE_JS_BUNDLES. Crate clippy is clean. The full workspace run passed 867 tests. Reproduce with `ACORN=<acorn.mjs-url> tools/js/parse_check.sh <bundle-dir>` and `tools/js/parse_load.sh <output-file>`. The latter now uses the parent-tested 1 GiB cap.
+
+Remaining gates: no scope-reference resolution, interpreter or browser execution. Generators, modules, import(), static class blocks, non-ASCII identifiers and HTML-like comments are unsupported. Regexp flags are scanned but pattern grammar is not validated by the parser; REGEXP_PATTERN_VALIDATED remains false even though the standalone matcher now exists. No test262 run or near-16-MiB source-boundary load was done. Full language conformance and arbitrary embedding stack sizes are not claimed.

@@ -585,3 +585,12 @@ fn cached_bundles_parse() {
     }
     assert!(n > 0);
 }
+
+#[test]
+fn caller_cannot_remove_the_recursion_cap() {
+    deep_in_thread(|| {
+        let source = format!("{}1{}", "(".repeat(500), ")".repeat(500));
+        let limits = Limits { max_depth: u32::MAX, ..Limits::default() };
+        assert!(matches!(parse_script(&source, limits), Err(Error { kind: ErrorKind::Limit(LimitKind::Depth), .. })));
+    });
+}
