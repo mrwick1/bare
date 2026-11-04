@@ -25,9 +25,12 @@
 //   labeled statements (at most three labels on one loop), and inside these expressions: unary (not `delete`),
 //   binary, logical, conditional, comma, parenthesized, template, array and object literals (the value of a
 //   non-computed key, spread), member and index reads, calls and `new` (callee, member base and arguments, with
-//   spread), simple assignment and compound or logical assignment to a name or a member, and `[a, b] = await x`.
+//   spread), simple assignment and compound or logical assignment to a name, a member, a private member or a
+//   `super` property, `obj.#p` reads and calls, `#p in x`, `super.m(await x)` and `[a, b] = await x`.
+//   Async methods of classes, static ones included, keep `this`, the class scope and `%home` in their environments.
 // - Not supported (Unsupported at preflight): `await` in a parameter, a binding pattern, a computed object key, a
-//   `switch`, a `for-in`, an optional chain, `delete`, `++`/`--`, a tagged template or a class. `for await`,
+//   `switch`, a `for-in`, an optional chain, `delete`, `++`/`--`, a tagged template, the heritage or a computed key
+//   of a class, `super(...)` with an await in its arguments, or `super[await k]`. `for await`,
 //   generators, top-level await and modules stay unsupported as before.
 // - Known deviations (the same as the ordinary evaluator): environments, `arguments` and `this` as in `eval.rs`;
 //   `await` of a thenable whose `then` is read twice is as in `Promise`; there is no `Symbol.asyncIterator`.
@@ -446,6 +449,9 @@ impl<'p> Interp<'p> {
                     while let ExprKind::Paren(i) = prog.expr(x).kind {
                         x = i;
                     }
+                    if matches!(prog.expr(x).kind, ExprKind::Super) {
+                        return no("await in the arguments of super()");
+                    }
                     if matches!(prog.expr(x).kind, ExprKind::Chain(_)) {
                         return no("await in a call of an optional chain");
                     }
@@ -466,11 +472,22 @@ impl<'p> Interp<'p> {
             ExprKind::Index { obj, index, optional } => {
                 let o = self.scan_expr(obj)?;
                 let i = self.scan_expr(index)?;
+                if i && matches!(prog.expr(obj).kind, ExprKind::Super) {
+                    return no("await in a super property key");
+                }
                 if (o || i) && optional {
                     return no("await inside an optional chain");
                 }
                 o | i
             }
+            ExprKind::PrivateMember { obj, optional, .. } => {
+                let o = self.scan_expr(obj)?;
+                if o && optional {
+                    return no("await inside an optional chain");
+                }
+                o
+            }
+            ExprKind::PrivateIn { right, .. } => self.scan_expr(right)?,
             ExprKind::Spread(a) | ExprKind::Paren(a) => self.scan_expr(a)?,
             ExprKind::Chain(a) => {
                 if self.scan_expr(a)? {
@@ -970,19 +987,38 @@ impl<'p> Interp<'p> {
                 self.spush(run, Slot::V(Value::Object(o)))?;
                 self.obj_next(run, e, base, 0)
             }
-            ExprKind::Member { obj, .. } | ExprKind::Index { obj, .. } => self.ask(run, e, 0, base, obj),
+            ExprKind::Member { obj, .. } | ExprKind::Index { obj, .. } | ExprKind::PrivateMember { obj, .. } => self.ask(run, e, 0, base, obj),
+            ExprKind::PrivateIn { right, .. } => self.ask(run, e, 0, base, right),
             ExprKind::Call { callee, .. } => {
                 let first = match self.callee_shape(callee) {
                     CShape::Plain => callee,
-                    CShape::Member(_, obj) | CShape::Index(obj, _) => obj,
+                    CShape::Member(_, obj) | CShape::Index(obj, _) | CShape::Private(_, obj) => obj,
+                    CShape::Super(m) => {
+                        // `super.name(...)`: the function and `this` are known now. Only the arguments wait.
+                        let this = self.this_dyn()?;
+                        let key = self.super_key(m)?;
+                        let f = self.super_get(this, key)?;
+                        self.spush(run, Slot::V(f))?;
+                        self.spush(run, Slot::V(this))?;
+                        return self.args_next(run, e, base, 1, 0);
+                    }
                 };
                 self.ask(run, e, 0, base, first)
             }
             ExprKind::New { callee, .. } => self.ask(run, e, 0, base, callee),
             ExprKind::Assign { target, .. } => match prog.pat(target).kind {
                 PatKind::Member(me) => {
-                    let obj = match prog.expr(self.strip(me)).kind {
-                        ExprKind::Member { obj, .. } | ExprKind::Index { obj, .. } => obj,
+                    let m = self.strip(me);
+                    let obj = match prog.expr(m).kind {
+                        ExprKind::Member { obj, .. } | ExprKind::Index { obj, .. } if matches!(prog.expr(obj).kind, ExprKind::Super) => {
+                            // `super.x = ...`: the receiver and the key are known now. Only the value waits.
+                            let this = self.this_dyn()?;
+                            let key = self.super_key(m)?;
+                            self.spush(run, Slot::V(this))?;
+                            self.spush(run, Slot::K(key))?;
+                            return self.assign_ready(run, e, base);
+                        }
+                        ExprKind::Member { obj, .. } | ExprKind::Index { obj, .. } | ExprKind::PrivateMember { obj, .. } => obj,
                         _ => return Err(unsupported("assignment target", ex.span)),
                     };
                     self.ask(run, e, 0, base, obj)
@@ -996,8 +1032,10 @@ impl<'p> Interp<'p> {
     fn callee_shape(&self, callee: ExprId) -> CShape {
         let c = self.strip(callee);
         match self.prog.expr(c).kind {
+            ExprKind::Member { obj, .. } if matches!(self.prog.expr(obj).kind, ExprKind::Super) => CShape::Super(c),
             ExprKind::Member { obj, .. } => CShape::Member(c, obj),
             ExprKind::Index { obj, index, .. } => CShape::Index(obj, index),
+            ExprKind::PrivateMember { obj, .. } => CShape::Private(c, obj),
             _ => CShape::Plain,
         }
     }
@@ -1086,7 +1124,7 @@ impl<'p> Interp<'p> {
             AssignOp::Compound(_) | AssignOp::Logical(_) => {
                 let r = match self.prog.pat(target).kind {
                     PatKind::Ident => Ref::Name(self.pat_name[target.index()]),
-                    PatKind::Member(_) if member => Ref::Prop(sval(run, b), skey(run, b + 1)),
+                    PatKind::Member(_) if member => self.assign_ref(run, target, b)?,
                     _ => return Err(unsupported("assignment target", self.prog.pat(target).span)),
                 };
                 let old = self.ref_get(&r)?;
@@ -1111,11 +1149,27 @@ impl<'p> Interp<'p> {
     fn assign_parts(&self, target: PatId) -> (u32, bool) {
         match self.prog.pat(target).kind {
             PatKind::Member(me) => match self.prog.expr(self.strip(me)).kind {
+                // a super property keeps the receiver and the key in two slots, like a name
+                ExprKind::Member { obj, .. } | ExprKind::Index { obj, .. } if matches!(self.prog.expr(obj).kind, ExprKind::Super) => (1, true),
                 ExprKind::Index { .. } => (2, true),
                 _ => (1, true),
             },
             _ => (0, false),
         }
+    }
+
+    /// The member reference of an assignment target whose receiver and key are in the slots at `b`.
+    fn assign_ref(&mut self, run: &Run, target: PatId, b: usize) -> Res<Ref> {
+        let PatKind::Member(me) = self.prog.pat(target).kind else { return Err(unsupported("assignment target", self.prog.pat(target).span)) };
+        let m = self.strip(me);
+        Ok(match self.prog.expr(m).kind {
+            ExprKind::PrivateMember { .. } => {
+                let (pn, n, fl) = self.priv_lookup(m)?;
+                Ref::Priv(sval(run, b), pn, n, fl)
+            }
+            ExprKind::Member { obj, .. } | ExprKind::Index { obj, .. } if matches!(self.prog.expr(obj).kind, ExprKind::Super) => Ref::Super(sval(run, b), skey(run, b + 1)),
+            _ => Ref::Prop(sval(run, b), skey(run, b + 1)),
+        })
     }
 
     fn op_value(&mut self, run: &mut Run, e: ExprId, i: u32, base: u32, v: Value) -> Res<Step> {
@@ -1213,6 +1267,19 @@ impl<'p> Interp<'p> {
                 let key = self.expr_key(e, name)?;
                 val(self.get_prop(v, key)?)
             }
+            ExprKind::PrivateMember { .. } => {
+                let (pn, n, fl) = self.priv_lookup(e)?;
+                val(self.priv_get(v, pn, n, fl)?)
+            }
+            ExprKind::PrivateIn { .. } => {
+                let (pn, n, _) = self.priv_lookup(e)?;
+                let Value::Object(o) = v else {
+                    let t = self.display(v);
+                    let name = self.names[n as usize].clone();
+                    return Err(self.type_err(&format!("Cannot use 'in' operator to search for '{name}' in {t}")));
+                };
+                val(Value::Bool(self.priv_slot(o, pn).is_some()))
+            }
             ExprKind::Index { index, .. } => {
                 if i == 0 {
                     self.spush(run, Slot::V(v))?;
@@ -1235,6 +1302,13 @@ impl<'p> Interp<'p> {
                         CShape::Plain => {
                             self.spush(run, Slot::V(v))?;
                             self.spush(run, Slot::V(Value::Undefined))?;
+                        }
+                        CShape::Super(_) => return Err(unsupported("super call state", ex.span)),
+                        CShape::Private(m, _) => {
+                            let (pn, n, fl) = self.priv_lookup(m)?;
+                            let f = self.priv_get(v, pn, n, fl)?;
+                            self.spush(run, Slot::V(f))?;
+                            self.spush(run, Slot::V(v))?;
                         }
                         CShape::Member(m, _) => {
                             let ExprKind::Member { name, .. } = prog.expr(m).kind else { return Err(unsupported("call", ex.span)) };
@@ -1294,6 +1368,10 @@ impl<'p> Interp<'p> {
                             let key = self.coerce_key(v)?;
                             self.spush(run, Slot::K(key))?;
                         }
+                        ExprKind::PrivateMember { .. } => {
+                            self.spush(run, Slot::V(v))?;
+                            self.spush(run, Slot::N(0))?;
+                        }
                         _ => return Err(unsupported("assignment target", ex.span)),
                     }
                     return self.assign_ready(run, e, base);
@@ -1304,7 +1382,7 @@ impl<'p> Interp<'p> {
                     self.strunc(run, b);
                     return val(v);
                 }
-                let r = if member { Ref::Prop(sval(run, b), skey(run, b + 1)) } else { Ref::Name(self.pat_name[target.index()]) };
+                let r = if member { self.assign_ref(run, target, b)? } else { Ref::Name(self.pat_name[target.index()]) };
                 let res = match op {
                     AssignOp::Compound(bop) => {
                         let old = sval(run, b + if member { 2 } else { 0 });
@@ -1811,4 +1889,8 @@ enum CShape {
     Plain,
     Member(ExprId, ExprId),
     Index(ExprId, ExprId),
+    /// `obj.#name(...)`: the member expression and its object.
+    Private(ExprId, ExprId),
+    /// `super.name(...)`: the member expression.
+    Super(ExprId),
 }

@@ -1,0 +1,124 @@
+# bare-js class and async/await interaction cases. Same format as async-cases.txt: `=== name`, a log through L(),
+# the last expression is a reader. The tools read the log before the microtask checkpoint and after it: `pre ## post`.
+# Node (vm, empty context) is the oracle. Only our own tiny programs run here. Never run a fetched bundle under Node.
+=== priv_field_around_await
+var log = []; function L(x) { log.push(String(x)); }
+class A { #x = 1; async m() { L("a" + this.#x); await null; this.#x = this.#x + 1; L("b" + this.#x); return this.#x; } }
+var a = new A(); a.m().then(function (v) { L("v" + v); }); L("sync");
+(function () { return log.join("|"); })
+=== priv_write_with_await_value
+var log = []; function L(x) { log.push(String(x)); }
+class A { #x = 1; async m() { this.#x = await 5; L(this.#x); this.#x += await 2; L(this.#x); this.#x ||= await 9; return this.#x; } }
+new A().m().then(function (v) { L("v" + v); });
+(function () { return log.join("|"); })
+=== priv_read_of_awaited_object
+var log = []; function L(x) { log.push(String(x)); }
+class A { #x = 7; static async get(p) { return (await p).#x; } static async has(p) { return #x in await p; } }
+var a = new A();
+A.get(a).then(function (v) { L("g" + v); }); A.has(a).then(function (v) { L("h" + v); }); A.has({}).then(function (v) { L("n" + v); });
+A.get({}).catch(function (e) { L(e.name + ":" + e.message); });
+(function () { return log.join("|"); })
+=== priv_method_call_with_await_args
+var log = []; function L(x) { log.push(String(x)); }
+class A { #k = 10; #add(a, b) { return this.#k + a + b; } async m() { return this.#add(await 1, await 2); } async n() { return this.#add(await 1, 5) + (await 100); } }
+var a = new A(); a.m().then(function (v) { L("m" + v); }); a.n().then(function (v) { L("n" + v); });
+(function () { return log.join("|"); })
+=== priv_accessor_and_static
+var log = []; function L(x) { log.push(String(x)); }
+class A { static #c = 0; #v = 1; get #g() { return this.#v; } set #g(x) { this.#v = x * 2; } static async inc() { await 0; A.#c++; return A.#c; } async m() { this.#g = await 4; return this.#g; } }
+A.inc().then(function (v) { L("i" + v); }); A.inc().then(function (v) { L("i" + v); }); new A().m().then(function (v) { L("m" + v); });
+(function () { return log.join("|"); })
+=== super_call_with_await_args
+var log = []; function L(x) { log.push(String(x)); }
+class A { m(a, b) { return "A" + a + b + this.t; } }
+class B extends A { constructor() { super(); this.t = "!"; } async m() { var r = super.m(await 1, await 2); L(r); return r + (await 3); } }
+new B().m().then(function (v) { L("v" + v); });
+(function () { return log.join("|"); })
+=== super_property_assign_and_compound
+var log = []; function L(x) { log.push(String(x)); }
+class A { get v() { return 5; } set w(x) { L("set" + x); } }
+class B extends A { async m() { super.w = await 7; super.z = await 8; return this.z + (await super.v); } }
+new B().m().then(function (v) { L("v" + v); });
+(function () { return log.join("|"); })
+=== super_static_and_arrow
+var log = []; function L(x) { log.push(String(x)); }
+class A { static s() { return "S" + this.name; } m() { return "m"; } }
+class B extends A { static async s() { return (await super.s()) + "!"; } async m() { var f = async () => { await 0; return super.m() + this.k; }; this.k = 1; return await f(); } }
+B.s().then(function (v) { L(v); }); new B().m().then(function (v) { L(v); });
+(function () { return log.join("|"); })
+=== derived_ctor_starts_async_work
+var log = []; function L(x) { log.push(String(x)); }
+class A { constructor() { this.a = 1; } }
+class B extends A { #n = 3; constructor() { super(); this.p = this.run(); } async run() { L("run" + this.a + this.#n); await null; L("after"); return this.#n; } }
+var b = new B(); L("made"); b.p.then(function (v) { L("v" + v); });
+(function () { return log.join("|"); })
+=== fifo_between_instances
+var log = []; function L(x) { log.push(String(x)); }
+class W { #n; constructor(n) { this.#n = n; } async go() { L(this.#n + "0"); await 0; L(this.#n + "1"); await 0; L(this.#n + "2"); } }
+new W("a").go(); new W("b").go(); L("end");
+(function () { return log.join("|"); })
+=== async_method_not_constructor
+var log = []; function L(x) { log.push(String(x)); }
+class A { async m() {} static async s() {} }
+var a = new A();
+L(typeof a.m.prototype); L(typeof A.prototype.m); L(A.prototype.hasOwnProperty("m"));
+try { new a.m(); } catch (e) { L(e.name); } try { new A.s(); } catch (e) { L(e.name); }
+(function () { return log.join("|"); })
+=== class_call_still_throws
+var log = []; function L(x) { log.push(String(x)); }
+class A { constructor() { this.x = 1; } }
+async function f() { await 0; return A(); }
+f().catch(function (e) { L(e.name + ":" + e.message); });
+(function () { return log.join("|"); })
+=== brand_check_failure_after_await
+var log = []; function L(x) { log.push(String(x)); }
+class A { #x = 1; async m(o) { await 0; return o.#x; } async w(o) { await 0; o.#x = 1; } }
+var a = new A(); a.m({}).catch(function (e) { L(e.name + ":" + e.message); }); a.w({}).catch(function (e) { L(e.name + ":" + e.message); }); a.m(a).then(function (v) { L("ok" + v); });
+(function () { return log.join("|"); })
+=== field_arrow_async_and_getter_promise
+var log = []; function L(x) { log.push(String(x)); }
+class A { #p = 2; f = async () => { await 0; return this.#p; }; get g() { return Promise.resolve(this.#p + 1); } }
+var a = new A(); a.f().then(function (v) { L("f" + v); }); a.g.then(function (v) { L("g" + v); });
+(function () { return log.join("|"); })
+=== class_made_after_await
+var log = []; function L(x) { log.push(String(x)); }
+async function f() { var v = await 5; class C { static s = v + 1; #p = v; get p() { return this.#p; } } L(C.s); return new C().p; }
+f().then(function (v) { L("v" + v); });
+(function () { return log.join("|"); })
+=== class_expression_in_awaiting_function
+var log = []; function L(x) { log.push(String(x)); }
+async function f() { var C = class { m() { return 1; } }; await 0; return new C().m() + (await 2); }
+f().then(function (v) { L("v" + v); });
+(function () { return log.join("|"); })
+=== json_regexp_string_in_methods
+var log = []; function L(x) { log.push(String(x)); }
+class A { #x = 1; async m() { var s = JSON.stringify({ a: await 1, b: [this.#x] }); return s.replace(/1/g, "one") + "|" + "a-b".split("-").join("+").toUpperCase(); } }
+new A().m().then(function (v) { L(v); });
+(function () { return log.join("|"); })
+=== rethrow_through_private_method
+var log = []; function L(x) { log.push(String(x)); }
+class A { #boom() { throw new RangeError("r"); } async m() { try { await 0; this.#boom(); } catch (e) { L("c" + e.name); await 0; throw e; } } }
+new A().m().catch(function (e) { L("rej" + e.name); });
+(function () { return log.join("|"); })
+=== arguments_and_this_in_async_method
+var log = []; function L(x) { log.push(String(x)); }
+class A { constructor() { this.n = 4; } async m() { await 0; return arguments.length + this.n; } }
+new A().m(1, 2, 3).then(function (v) { L("v" + v); });
+(function () { return log.join("|"); })
+=== extends_regexp
+var log = []; function L(x) { log.push(String(x)); }
+class R extends RegExp { has(s) { return this.test(s); } }
+var r = new R("b+"); L(r instanceof R); L(r instanceof RegExp); L(r.has("abbc")); L(Object.getPrototypeOf(r) === R.prototype);
+(function () { return log.join("|"); })
+=== extends_error_and_array
+var log = []; function L(x) { log.push(String(x)); }
+class E extends Error { constructor(m) { super(m); this.k = 1; } async later() { await 0; throw this; } }
+class Arr extends Array { sum() { var s = 0; for (var i = 0; i < this.length; i++) s += this[i]; return s; } }
+var e = new E("boom"); e.later().catch(function (x) { L(x.message + x.k + (x instanceof E)); });
+var a = new Arr(); a.push(1, 2, 3); L(a.sum()); L(a instanceof Arr); L(a.length);
+(function () { return log.join("|"); })
+=== promise_then_job_vs_await_order
+var log = []; function L(x) { log.push(String(x)); }
+class A { async m() { L("m1"); await 0; L("m2"); } }
+var p = Promise.resolve(); p.then(function () { L("t1"); }); new A().m(); p.then(function () { L("t2"); });
+(function () { return log.join("|"); })

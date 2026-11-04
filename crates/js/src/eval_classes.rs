@@ -4,7 +4,7 @@
 // - The constructor is a function object with `Callee::Class`. Its code and fields live in `ClassData`
 //   (`ClassState::classes`, keyed by the constructor `ObjId`). A call (not `new`) of it is a TypeError.
 // - Methods, getters and setters are ordinary closures made by `make_closure`. They capture the class
-//   environment, so they stay tied to the program and environment that made them.
+//   environment and record the script that made them.
 // - The class scope is one environment: the class-name binding (TDZ until the class is built) and one
 //   binding per `#private` name. A private name is a fresh, unreachable heap object ("name object").
 //   The binding flag says what it is: field, method (PRIV_M) or accessor (PRIV_A). A method or accessor
@@ -20,7 +20,12 @@
 //
 // Not supported, and found before anything runs: `super` outside a class element (object literal
 // methods), `new.target` in a field initializer, BigInt keys. Static blocks and generators are parse
-// errors. Async methods stay "async function".
+// errors. Async methods run on the machine of `eval_async.rs`, which keeps `this`, the class scope (private
+// names, `%home`) and `%nt` in the environments it saves, so private reads and writes and `super.m()` work
+// across an `await`. Class code is owned by a script: `ClassData::script` says which. Constructor bodies and field
+// initializers run with that script selected (`in_script`), and the caller's script comes back on every exit.
+// A subclass of Promise or of a host constructor is refused with `Unsupported` when it is constructed:
+// those constructors do not take a `new.target` yet. Error, Array, Object, Function and RegExp parents work.
 
 const F_NT: u8 = 1;
 const F_DERIVED: u8 = 2;
@@ -428,7 +433,7 @@ impl<'p> Interp<'p> {
             let obj = h!(self, self.heap.new_object(Some(proto)));
             self.init_instance(f, obj)?;
             let Some(fid) = cd.ctor_fid else { return Ok(Value::Object(obj)) };
-            let (r, _) = self.call_ctor(f, &cd, fid, Value::Object(obj), args, nt)?;
+            let (r, _) = self.call_ctor(f, cd, fid, Value::Object(obj), args, nt)?;
             return Ok(if matches!(r, Value::Object(_)) { r } else { Value::Object(obj) });
         }
         let Some(fid) = cd.ctor_fid else {
@@ -441,7 +446,7 @@ impl<'p> Interp<'p> {
             }
             return Ok(r);
         };
-        let (r, bound) = self.call_ctor(f, &cd, fid, Value::Undefined, args, nt)?;
+        let (r, bound) = self.call_ctor(f, cd, fid, Value::Undefined, args, nt)?;
         if matches!(r, Value::Object(_)) {
             return Ok(r);
         }

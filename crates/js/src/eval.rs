@@ -3002,6 +3002,10 @@ include!("eval_async.rs");
 mod class_tests;
 
 #[cfg(test)]
+#[path = "eval_interact_tests.rs"]
+mod interact_tests;
+
+#[cfg(test)]
 #[path = "eval_tests.rs"]
 mod tests;
 
