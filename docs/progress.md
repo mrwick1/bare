@@ -98,6 +98,8 @@ S1 topic 6 discovery and download foundations are complete. `bare --resources` l
 
 S1 exit passed on 2026-11-04. `tools/staging_https_check.sh` prints `ok` for `/login`. `bare --resources https://staging.app.8vox.ai/login` reports 24 items, 17 downloads, zero failures and 575,754 retained bytes. Separate `bare --source` requests match the saved SHA-256 for each of those 17 scripts/stylesheets. No certificate bypass or leaf-pin fallback was used. The network implementation sends no Accept-Encoding and needs no content decoder for these identity responses. This closes S1 for the initial login resources, not for runtime-generated chunks or application execution.
 
+The HTTPS test harness now checks that the OpenSSL child owns the listening socket. It retries port collisions and kills the child before closing stdin during a hard reset. Timeout reports include the caller, child status, bounded stderr and bounded client result. The earlier same-origin redirect timeout remains unresolved; these changes fix two separately observed harness races. See [resources.md](resources.md#https-harness-races).
+
 ### S2 JavaScript and event loop
 
 Build the JavaScript interpreter from module 9. Bring forward the single-page scheduler from module 8. Tabs remain deferred.

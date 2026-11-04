@@ -676,3 +676,14 @@ Reproduce: `rustc --edition=2024 -C opt-level=3 tools/js/heap_load.rs -o <out>`,
 Checks: 810 workspace tests pass on the final rerun. All 62 assembled JS tests pass in debug and release; crate clippy is clean. The first workspace run failed on an existing HTTPS same-origin redirect timeout. That test then passed alone and all 12 HTTPS tests passed in ten consecutive suite runs. The cause remains unknown; these repeats do not prove it is fixed. Parent did not change HTTP behavior in this heap integration.
 
 Remaining limits: no function objects, accessor calls, object ToPrimitive, Proxy, Symbol.for, BigInt, for-in enumeration or automatic GC. Cross-heap handles are forbidden by contract and not detected. All managed handles held in Rust locals must be rooted before collection. Byte accounting excludes allocator slack, and individual string conversion can use temporary storage. No browser execution, closure lifetime, multi-heap isolation, hard allocator-OOM recovery or login E2E was tested.
+
+
+## HTTPS harness races
+
+The original same-origin HTTPS redirect timeout was not reproduced. Its cause remains unknown. The delegate observed two other failures under parallel suite load: another listener could pass a TCP readiness probe, and closing OpenSSL stdin before killing it could send close_notify during a hard-reset test. The harness now matches the listening socket inode to the child file descriptors through Linux /proc, retries failed starts, and kills before closing stdin. Startup failures kill and reap the child and drain its bounded stderr. Timeout diagnostics include the caller, child state, stderr and client result. Client formatting stops after 300 characters; stderr storage stops at 4 KiB while the reader continues draining.
+
+The parent regression formatted 100,000 characters before truncation on the child baseline and failed. It passes with bounded formatting. Tests cover rejection of an occupied port and all four timeout diagnostic fields. The final parent HTTPS suite passed 40 times, with eight suite processes at once: 600 tests, zero failures, 10.97 seconds. Each suite had a 60-second timeout. These repetitions do not establish that the original timeout is fixed.
+
+The delegate reported 368 suite runs, exceeding its 200-run cap. Its total elapsed time was estimated, not measured. The parent used the explicit 40-run cap above. No runtime HTTP or TLS behavior changed. Other OpenSSL versions, non-Linux systems and live staging were not tested in this change.
+
+Final checks: 813 workspace tests passed. The final 15-test HTTPS suite passed after lint-only cleanup. Harness clippy has no findings; the three existing net library warnings remain.
