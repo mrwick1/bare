@@ -261,7 +261,7 @@ impl Client {
             return Err("the reply is too big".into());
         }
         let mut bytes = Vec::with_capacity(body.size_hint());
-        (&mut body).take(max_body as u64 + 1).read_to_end(&mut bytes)?;
+        (&mut body).take((max_body as u64).saturating_add(1)).read_to_end(&mut bytes)?;
         if bytes.len() > max_body {
             return Err("the reply is too big".into());
         }
@@ -1463,6 +1463,12 @@ mod tests {
         assert_eq!(response.status, 404);
         assert_eq!(response.body, b"gone");
         // A browser shows the body of a 404 page. It is not an error for the user.
+    }
+
+    #[test]
+    fn send_once_accepts_the_maximum_body_cap() {
+        let (port, _) = serve(vec![(vec!["HTTP/1.1 200 OK\r\nContent-Length: 1\r\n\r\nx"], false)]);
+        assert_eq!(Client::new().send_once(&Request::get(&url(port)), usize::MAX).unwrap().body, b"x");
     }
 
     #[test]

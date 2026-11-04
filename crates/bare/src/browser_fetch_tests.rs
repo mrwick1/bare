@@ -699,3 +699,35 @@ fn run_network_tasks_runs_at_most_max_and_leaves_the_rest_queued() {
         assert_eq!(b.pending_fetches(), 1);
     });
 }
+
+#[test]
+fn numeric_header_names_are_not_discarded() {
+    big(|| {
+        let mut b = mk(None, FetchLimits::default());
+        assert_eq!(js(&mut b, "new Headers({'123':'value'}).get('123')"), "value");
+    });
+}
+
+#[test]
+fn network_pump_checks_failed_jobs_before_io() {
+    big(|| {
+        let srv = serve(|_| ok("{}"));
+        let mut b = Browser::new(tree::parse("<body></body>"), BrowserLimits::default(), EvalLimits { max_steps: 200, ..Default::default() }, HeapLimits::default()).unwrap();
+        b.configure_fetch(FetchConfig { base_url: Some(format!("http://127.0.0.1:{}/", srv.port)), client: Client::new(), limits: FetchLimits::default() }).unwrap();
+        js(&mut b, "fetch('/x'); queueMicrotask(function(){while(true){}});");
+        assert!(matches!(b.drain(), Err(Error::Limit(LimitKind::Steps))));
+        assert!(matches!(b.run_network_tasks(1), Err(Error::Limit(LimitKind::Steps))));
+        assert_eq!(srv.conns.load(SeqCst), 0);
+        assert_eq!(b.pending_fetches(), 1);
+    });
+}
+
+#[test]
+fn zero_fetch_diagnostic_capacity_retains_nothing() {
+    big(|| {
+        let mut b = mk(None, FetchLimits { max_diag: 0, ..Default::default() });
+        js(&mut b, "fetch('http://example.invalid/')");
+        assert!(b.take_fetch_diagnostics().is_empty());
+        assert_eq!(b.fetch_stats().dropped_diagnostics, 1);
+    });
+}

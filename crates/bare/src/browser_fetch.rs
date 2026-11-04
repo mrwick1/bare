@@ -323,6 +323,7 @@ struct FetchState {
     started: u64,
     diag: VecDeque<String>,
     dropped_diag: u64,
+    halted: Option<Error>,
 }
 
 #[derive(Clone, Copy)]
@@ -389,6 +390,10 @@ impl FetchState {
     }
 
     fn diag(&mut self, lim: &FetchLimits, text: String) {
+        if lim.max_diag == 0 {
+            self.dropped_diag = self.dropped_diag.saturating_add(1);
+            return;
+        }
         if self.diag.len() >= lim.max_diag {
             self.diag.pop_front();
             self.dropped_diag += 1;
@@ -514,12 +519,12 @@ impl Dom {
             }
             for k in keys {
                 it.charge(1)?;
-                let bare_js::value::PropertyKey::String(s) = k else { continue };
+                if matches!(k, bare_js::value::PropertyKey::Symbol(_)) { continue; }
                 let enumerable = it.heap.get_own_property(o, k).map_err(|e| it.heap_error(e))?.is_some_and(|p| p.enumerable());
                 if !enumerable {
                     continue;
                 }
-                let name = Value::String(s);
+                let name = it.heap.key_to_value(k).map_err(|e| it.heap_error(e))?;
                 let v = it.get_value(init, k)?;
                 out.push((self.header_name(it, name)?, self.header_value(it, v)?));
             }
@@ -1467,6 +1472,15 @@ impl Browser {
     /// A `Limit` ends the call (the VM is then unusable, as for any other limit).
     pub fn run_network_tasks(&mut self, max: usize) -> R<usize> {
         let dom = self.dom.clone();
+        if let Some(e) = dom.fetch.st.borrow().halted { return Err(e); }
+        let result = self.run_network_tasks_inner(max);
+        if let Err(e) = result { dom.fetch.st.borrow_mut().halted = Some(e); }
+        result
+    }
+
+    fn run_network_tasks_inner(&mut self, max: usize) -> R<usize> {
+        let dom = self.dom.clone();
+        self.it.host_scope(|it| it.host_checkpoint().map(|_| ()))?;
         let mut n = 0;
         while n < max {
             let lim = dom.fl();
@@ -1508,6 +1522,13 @@ impl Browser {
     /// Reject every queued request with an `AbortError`. A request that already started its I/O cannot be interrupted (it runs
     /// to its end inside `run_network_tasks`), so this only affects requests that have not begun. Returns how many were aborted.
     pub fn abort_fetches(&mut self) -> R<usize> {
+        self.run_network_tasks(0)?;
+        let result = self.abort_fetches_inner();
+        if let Err(e) = result { self.dom.fetch.st.borrow_mut().halted = Some(e); }
+        result
+    }
+
+    fn abort_fetches_inner(&mut self) -> R<usize> {
         let dom = self.dom.clone();
         let tasks: Vec<Pending> = {
             let mut st = dom.fetch.st.borrow_mut();
