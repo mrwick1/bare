@@ -7,6 +7,7 @@ pub mod value;
 pub mod heap;
 pub mod json;
 pub mod regexp;
+pub mod text;
 
 pub mod eval;
 

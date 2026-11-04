@@ -1,0 +1,408 @@
+# bare-js byte buffer, Uint8Array, TextEncoder and TextDecoder cases. A case starts with `=== name`; the last
+# expression is the result. Node (vm, a fresh context that gets only Node's TextEncoder and TextDecoder, 2 s timeout) is the
+# oracle: tools/js/binary_oracle.mjs. Only our own tiny programs run here. Cases use `E(f)` (the error name or the
+# value), `J(array-like)` (comma join) and a log `L`.
+=== ab_length_forms
+function E(f){try{return String(f())}catch(e){return e.name}}
+[new ArrayBuffer(8).byteLength, new ArrayBuffer().byteLength, new ArrayBuffer("3.9").byteLength, new ArrayBuffer(NaN).byteLength, new ArrayBuffer(-0.5).byteLength, new ArrayBuffer(null).byteLength, new ArrayBuffer(true).byteLength, E(function(){return new ArrayBuffer(-1)}), E(function(){return new ArrayBuffer(9007199254740992)}), E(function(){return new ArrayBuffer(Infinity)}), E(function(){return ArrayBuffer(1)})].join("|")
+=== ab_length_coercion_runs
+var L=[]; var n = new ArrayBuffer({valueOf:function(){L.push("v");return 4}}, {get maxByteLength(){L.push("m");return undefined}});
+L.join(",") + ":" + n.byteLength
+=== ab_ctor_shape
+var d = Object.getOwnPropertyDescriptor(ArrayBuffer, "prototype");
+var b = Object.getOwnPropertyDescriptor(ArrayBuffer.prototype, "byteLength");
+[ArrayBuffer.length, ArrayBuffer.name, d.writable, d.enumerable, d.configurable, ArrayBuffer.prototype.constructor === ArrayBuffer, Object.getPrototypeOf(new ArrayBuffer(1)) === ArrayBuffer.prototype, typeof b.get, b.set, b.enumerable, b.configurable, b.get.name, b.get.length, ArrayBuffer.prototype.slice.length, ArrayBuffer.isView.length, new ArrayBuffer(2) instanceof ArrayBuffer].join("|")
+=== ab_byteLength_brand
+function E(f){try{return String(f())}catch(e){return e.name}}
+var g = Object.getOwnPropertyDescriptor(ArrayBuffer.prototype, "byteLength").get;
+[g.call(new ArrayBuffer(3)), E(function(){return g.call({})}), E(function(){return g.call(new Uint8Array(2))}), E(function(){return g.call(5)}), E(function(){return g.call()}), E(function(){return ArrayBuffer.prototype.byteLength})].join("|")
+=== ab_slice_copies
+var a = new ArrayBuffer(6); var u = new Uint8Array(a); u.set([1,2,3,4,5,6]);
+var s = a.slice(1, 4); var v = new Uint8Array(s); v[0] = 99;
+[s.byteLength, J(v), J(u), s === a, a.slice().byteLength, a.slice(-2).byteLength, a.slice(2, -1).byteLength, a.slice(5, 2).byteLength, a.slice(-100, 100).byteLength, a.slice(undefined, undefined).byteLength, a.slice("1", "3").byteLength, a.slice(NaN, Infinity).byteLength].join("|")
+function J(x){return Array.prototype.join.call(x)}
+=== ab_slice_coercion_order
+var L=[]; var a = new ArrayBuffer(4);
+a.slice({valueOf:function(){L.push("s");return 1}}, {valueOf:function(){L.push("e");return 3}});
+a.slice(undefined, {valueOf:function(){L.push("e2");return 3}});
+L.join(",")
+=== ab_slice_brand
+function E(f){try{return String(f())}catch(e){return e.name}}
+[E(function(){return ArrayBuffer.prototype.slice.call({}, 0)}), E(function(){return ArrayBuffer.prototype.slice.call(new Uint8Array(2), 0)}), E(function(){return ArrayBuffer.prototype.slice.call(undefined)})].join("|")
+=== ab_slice_constructor_read
+function E(f){try{return String(f())}catch(e){return e.name}}
+var a = new ArrayBuffer(4); a.constructor = 5;
+var b = new ArrayBuffer(4); b.constructor = undefined;
+var c = new ArrayBuffer(4); c.constructor = {};
+[E(function(){return a.slice(0).byteLength}), E(function(){return b.slice(1).byteLength}), E(function(){return c.slice(1).byteLength})].join("|")
+=== ab_isView
+[ArrayBuffer.isView(new Uint8Array(1)), ArrayBuffer.isView(new ArrayBuffer(1)), ArrayBuffer.isView({}), ArrayBuffer.isView(), ArrayBuffer.isView(null), ArrayBuffer.isView(new Uint8Array(1).subarray(0)), ArrayBuffer.isView([]), ArrayBuffer.isView("x"), ArrayBuffer.isView(1)].join("|")
+=== ab_resizable_option_is_not_silent
+function E(f){try{return String(f())}catch(e){return e.name}}
+E(function(){return new ArrayBuffer(4, {}).byteLength}) + "|" + E(function(){return new ArrayBuffer(4, 5).byteLength}) + "|" + E(function(){return new ArrayBuffer(4, null).byteLength})
+=== u8_shape
+var ta = Object.getPrototypeOf(Uint8Array);
+var bp = Object.getOwnPropertyDescriptor(Uint8Array, "BYTES_PER_ELEMENT");
+[Uint8Array.length, Uint8Array.name, ta.name, ta.length, ta === Function.prototype, Object.getPrototypeOf(Uint8Array.prototype) === ta.prototype, Uint8Array.prototype.constructor === Uint8Array, Uint8Array.BYTES_PER_ELEMENT, Uint8Array.prototype.BYTES_PER_ELEMENT, bp.writable, bp.enumerable, bp.configurable, Uint8Array.prototype.hasOwnProperty("length"), Uint8Array.prototype.hasOwnProperty("set"), ta.prototype.hasOwnProperty("set"), "length" in new Uint8Array(1), new Uint8Array(1) instanceof ta, ta.prototype.set.length, ta.prototype.subarray.length, ta.prototype.slice.length].join("|")
+=== u8_abstract_ctor
+function E(f){try{return String(f())}catch(e){return e.name}}
+var ta = Object.getPrototypeOf(Uint8Array);
+[E(function(){return new ta()}), E(function(){return ta()}), E(function(){return Uint8Array(1)}), E(function(){return new ta.prototype.set()})].join("|")
+=== u8_getter_shape_and_brand
+function E(f){try{return String(f())}catch(e){return e.name}}
+var tp = Object.getPrototypeOf(Uint8Array.prototype); var out = [];
+["buffer", "byteLength", "byteOffset", "length"].forEach(function(n){
+  var d = Object.getOwnPropertyDescriptor(tp, n);
+  out.push(n + ":" + typeof d.get + "," + d.set + "," + d.enumerable + "," + d.configurable + "," + d.get.name + "," + d.get.length + "," + E(function(){return d.get.call({})}) + "," + E(function(){return d.get.call(new ArrayBuffer(1))}) + "," + E(function(){return d.get.call(undefined)}));
+});
+out.join(" ")
+=== u8_length_forms
+function E(f){try{return String(f())}catch(e){return e.name}}
+[new Uint8Array().length, new Uint8Array(3).length, new Uint8Array("4").length, new Uint8Array(2.9).length, new Uint8Array(null).length, new Uint8Array(NaN).length, new Uint8Array(true).length, new Uint8Array(undefined).length, new Uint8Array(3)[2], E(function(){return new Uint8Array(-1)}), E(function(){return new Uint8Array(9007199254740992)}), E(function(){return new Uint8Array(-0.5).length})].join("|")
+=== u8_from_array_and_array_like
+function J(x){return Array.prototype.join.call(x)}
+[J(new Uint8Array([1, 2, 300, -1, 1.9, NaN, "7", null, undefined, true, [], "0x10", 256, 4294967301, -3.9, Infinity])), J(new Uint8Array({length: 3, 0: 5, 2: 9})), new Uint8Array({}).length, J(new Uint8Array({length: "2", 0: "1", 1: 2.5})), J(new Uint8Array({length: -5})), new Uint8Array({length: 1.9}).length].join("|")
+=== u8_from_array_order
+var L=[];
+function mk(){ return {valueOf:function(){L.push("v");return 1}}; }
+var arr = [0, 0]; Object.defineProperty(arr, 0, {get:function(){L.push("g0");return mk()}}); Object.defineProperty(arr, 1, {get:function(){L.push("g1");return mk()}});
+new Uint8Array(arr); L.push("|");
+var like = {length: 2}; Object.defineProperty(like, 0, {get:function(){L.push("g0");return mk()}}); Object.defineProperty(like, 1, {get:function(){L.push("g1");return mk()}});
+new Uint8Array(like);
+L.join(",")
+=== u8_from_array_length_getter
+var L=[]; var like = {get length(){L.push("len");return 2}, 0: 1, 1: 2};
+var u = new Uint8Array(like); L.push(u.length); L.join(",")
+=== u8_from_typed_copies
+function J(x){return Array.prototype.join.call(x)}
+var a = new Uint8Array([1,2,3,4]); var b = new Uint8Array(a); b[0] = 9; var c = new Uint8Array(a.subarray(1,3)); c[1] = 7;
+[J(a), J(b), J(c), b.buffer === a.buffer, c.byteOffset, c.buffer.byteLength, b.byteLength].join("|")
+=== u8_over_buffer
+function E(f){try{return String(f())}catch(e){return e.name}}
+var b = new ArrayBuffer(8); var a = new Uint8Array(b); a.set([1,2,3,4,5,6,7,8]);
+var v = new Uint8Array(b, 2, 3); var w = new Uint8Array(b, 5); var z = new Uint8Array(b, 8); var y = new Uint8Array(b, "1", undefined);
+[v.length, v.byteOffset, v.byteLength, v[0], w.length, w[0], w.byteOffset, z.length, z.byteOffset, y.length, v.buffer === b, E(function(){return new Uint8Array(b, 9)}), E(function(){return new Uint8Array(b, 0, 9)}), E(function(){return new Uint8Array(b, 6, 3)}), E(function(){return new Uint8Array(b, -1)}), E(function(){return new Uint8Array(b, 0, -1)}), E(function(){return new Uint8Array(b, 1.9, 2.9).length}), E(function(){return new Uint8Array(b, NaN, NaN).length}), E(function(){return new Uint8Array(b, 8, 0).length}), E(function(){return new Uint8Array(b, Infinity)})].join("|")
+=== u8_over_buffer_coercion_order
+var L=[]; var b = new ArrayBuffer(8);
+new Uint8Array(b, {valueOf:function(){L.push("off");return 1}}, {valueOf:function(){L.push("len");return 2}});
+try { new Uint8Array(b, {valueOf:function(){L.push("off2");return 99}}, {valueOf:function(){L.push("len2");return 2}}); } catch (e) { L.push(e.name); }
+L.join(",")
+=== u8_aliasing
+function J(x){return Array.prototype.join.call(x)}
+var b = new ArrayBuffer(6); var a = new Uint8Array(b); var m = new Uint8Array(b, 2, 3); var s = m.subarray(1);
+m[0] = 11; s[0] = 22; a[4] = 33;
+[J(a), J(m), J(s), s.byteOffset, s.buffer === b, m.subarray(0, 1).byteOffset].join("|")
+=== u8_index_read_write
+var u = new Uint8Array(3);
+u[0] = 300; u[1] = -1; u[2] = 3.9; u[3] = 7; u[-1] = 8; u[1.5] = 9; u["4"] = 1; u["-0"] = 2; u["NaN"] = 3; u.Infinity = 4; u[4294967295] = 5; u[4294967296] = 6;
+[u[0], u[1], u[2], u[3], u[-1], u[1.5], u["1"], u["01"], u["-0"], u.NaN, u.Infinity, u[4294967295], u.length, Object.keys(u).join(",")].join("|")
+=== u8_named_properties_are_ordinary
+var u = new Uint8Array(2); u.foo = 1; u.bar = "x"; u["01"] = 2; u[" 1"] = 3; u["1e0"] = 4; u["+1"] = 5; u["0x1"] = 6;
+[u.foo, u.bar, u["01"], u[" 1"], u["1e0"], u["+1"], u["0x1"], Object.keys(u).join(","), u.length, u.hasOwnProperty("foo")].join("|")
+=== u8_conversion_table
+var u = new Uint8Array(1); var out = [];
+[0, 1, 255, 256, 257, -1, -255, -256, 1.5, -1.5, 255.9, 256.1, 1e10, 1e20, -1e20, 4294967296, 4294967297, 2147483648, 2147483649, 9007199254740993, NaN, Infinity, -Infinity, -0, "12", "0x1f", "", " 7 ", "abc", true, false, null, undefined, [], [5], [1,2], {}, {valueOf:function(){return 300}}, {toString:function(){return "9"}}, 1e300].forEach(function(x){ u[0] = x; out.push(u[0]); });
+out.join(",")
+=== u8_write_runs_valueOf_even_out_of_range
+var L=[]; var u = new Uint8Array(2); function o(n){return {valueOf:function(){L.push(n);return 5}}}
+u[0] = o("in"); u[5] = o("out"); u[-1] = o("neg"); u["1.5"] = o("frac"); u["-0"] = o("negzero"); u.named = o("named");
+L.join(",") + ":" + u[0] + (u[5] === undefined) + (typeof u.named)
+=== u8_write_throwing_valueOf
+var u = new Uint8Array([1,2]); var r;
+try { u[0] = {valueOf:function(){throw new RangeError("x")}}; } catch (e) { r = e.name; }
+r + u[0]
+=== u8_in_operator
+var u = new Uint8Array(3);
+[0 in u, 2 in u, 3 in u, -1 in u, "1" in u, "1.5" in u, "-0" in u, "NaN" in u, "Infinity" in u, "length" in u, "buffer" in u, "foo" in u, "toString" in u, "4294967295" in u, "set" in u].join("|")
+=== u8_in_ignores_prototype_for_numbers
+Object.prototype[7] = "p"; Object.prototype["1.5"] = "q"; Object.prototype["-0"] = "z";
+var u = new Uint8Array(2); var r = [7 in u, u[7], "1.5" in u, u["1.5"], "-0" in u, u["-0"], u.hasOwnProperty(7)];
+delete Object.prototype[7]; delete Object.prototype["1.5"]; delete Object.prototype["-0"];
+r.join("|")
+=== u8_delete
+function E(f){try{return String(f())}catch(e){return e.name}}
+var u = new Uint8Array(2); u.foo = 1;
+[delete u[5], delete u[0], delete u["-0"], delete u["1.5"], delete u.foo, u.foo, u[0], u.length, E(function(){"use strict"; return delete u[0]}), E(function(){"use strict"; return delete u[9]}), E(function(){"use strict"; return delete u["-0"]})].join("|")
+=== u8_own_keys_and_enumeration
+var u = new Uint8Array(3); u.b = 1; u.a = 2; var f = []; for (var k in u) f.push(k);
+var c = {}; for (var k2 in new Uint8Array(2)) c[k2] = 1;
+[Object.keys(u).join(","), f.join(","), Object.keys(c).join(","), Object.keys(new Uint8Array(0)).length].join("|")
+=== u8_has_own_property
+var u = new Uint8Array(2);
+[u.hasOwnProperty(0), u.hasOwnProperty(1), u.hasOwnProperty(2), u.hasOwnProperty("1"), u.hasOwnProperty("-0"), u.hasOwnProperty("1.5"), u.hasOwnProperty("length"), u.hasOwnProperty("buffer"), Object.prototype.hasOwnProperty.call(u, 0)].join("|")
+=== u8_descriptors
+function show(d){ return d === undefined ? "undefined" : [d.value, d.writable, d.enumerable, d.configurable, "get" in d].join(","); }
+var u = new Uint8Array([5, 6]);
+[show(Object.getOwnPropertyDescriptor(u, 0)), show(Object.getOwnPropertyDescriptor(u, "1")), show(Object.getOwnPropertyDescriptor(u, 2)), show(Object.getOwnPropertyDescriptor(u, -1)), show(Object.getOwnPropertyDescriptor(u, "-0")), show(Object.getOwnPropertyDescriptor(u, "1.5")), show(Object.getOwnPropertyDescriptor(u, "length"))].join("|")
+=== u8_define_property
+function E(f){try{return String(f())}catch(e){return e.name}}
+var u = new Uint8Array([5, 6, 7]);
+[E(function(){Object.defineProperty(u, 0, {value: 300}); return u[0]}), E(function(){Object.defineProperty(u, 1, {value: "9", writable: true, enumerable: true, configurable: true}); return u[1]}), E(function(){return Object.defineProperty(u, 2, {}) === u}), E(function(){Object.defineProperty(u, 0, {configurable: false})}), E(function(){Object.defineProperty(u, 0, {enumerable: false})}), E(function(){Object.defineProperty(u, 0, {writable: false})}), E(function(){Object.defineProperty(u, 0, {get: function(){}})}), E(function(){Object.defineProperty(u, 0, {set: undefined})}), E(function(){Object.defineProperty(u, 5, {value: 1})}), E(function(){Object.defineProperty(u, -1, {value: 1})}), E(function(){Object.defineProperty(u, "-0", {value: 1})}), E(function(){Object.defineProperty(u, "1.5", {value: 1})}), E(function(){Object.defineProperty(u, "foo", {value: 1}); return u.foo}), E(function(){Object.defineProperty(u, 0, {value: 1, writable: true}); return u[0]}), E(function(){Object.defineProperty(u, "length", {value: 9})}), u[0], u[1]].join("|")
+=== u8_set_through_prototype_chain
+var u = new Uint8Array([1, 2]); var o = Object.create(u);
+var r = [o[0], o[1], o[5], 0 in o, 5 in o];
+o[0] = 9; o[5] = 3; o[-1] = 4; o["1.5"] = 5; o.named = 6;
+r.push(u[0], o[0], o.hasOwnProperty(0), o.hasOwnProperty(5), o.hasOwnProperty(-1), o.hasOwnProperty("1.5"), o.hasOwnProperty("named"), Object.keys(o).join(","));
+r.join("|")
+=== u8_set_array_source
+function J(x){return Array.prototype.join.call(x)}
+var u = new Uint8Array(6); u.set([1, 2, 300]); u.set([7, 8], 3); u.set([9], 5);
+var v = new Uint8Array(4); v.set({length: 2, 0: 5, 1: 6}, 1);
+var w = new Uint8Array(3); w.set("12"); var x = new Uint8Array(3); x.set(5); x.set(true); x.set({}); x.set([]);
+[J(u), J(v), J(w), J(x)].join("|")
+=== u8_set_errors
+function E(f){try{return String(f())}catch(e){return e.name}}
+var u = new Uint8Array(3);
+[E(function(){u.set([1,2,3,4])}), E(function(){u.set([1,2], 2)}), E(function(){u.set([1], -1)}), E(function(){u.set([1], Infinity)}), E(function(){u.set(undefined)}), E(function(){u.set(null)}), E(function(){u.set()}), E(function(){u.set(new Uint8Array(4))}), E(function(){u.set(new Uint8Array(2), 2)}), E(function(){u.set([], 3)}), E(function(){u.set([], 4)}), E(function(){u.set({length: 5})}), E(function(){Uint8Array.prototype.set.call({}, [])}), E(function(){Uint8Array.prototype.set.call(new ArrayBuffer(2), [])}), E(function(){u.set([1], "1")}), E(function(){u.set([1], NaN)}), E(function(){u.set([1], 1.9)})].join("|")
+=== u8_set_typed_and_overlap
+function J(x){return Array.prototype.join.call(x)}
+var a = new Uint8Array([1,2,3,4,5,6]); a.set(a.subarray(0, 3), 2);
+var b = new Uint8Array([1,2,3,4,5,6]); b.set(b.subarray(2), 0);
+var c = new Uint8Array([1,2,3,4,5,6]); c.set(c.subarray(1, 5), 0);
+var d = new Uint8Array([1,2,3,4,5,6]); d.set(d.subarray(0, 4), 1);
+var e = new Uint8Array([1,2,3,4,5,6]); e.set(e);
+var buf = new ArrayBuffer(6); var f = new Uint8Array(buf); f.set([1,2,3,4,5,6]); new Uint8Array(buf, 1, 4).set(new Uint8Array(buf, 0, 4), 0);
+var g = new Uint8Array(4); g.set(new Uint8Array([9, 8]), 1); g.set(new Uint8Array([]), 4);
+[J(a), J(b), J(c), J(d), J(e), J(f), J(g)].join("|")
+=== u8_set_coercion_order
+var L=[]; var u = new Uint8Array(4);
+u.set({get length(){L.push("len");return 2}, get 0(){L.push("g0");return {valueOf:function(){L.push("v0");return 1}}}, get 1(){L.push("g1");return {valueOf:function(){L.push("v1");return 2}}}}, {valueOf:function(){L.push("off");return 1}});
+L.join(",") + ":" + Array.prototype.join.call(u)
+=== u8_set_partial_on_throw
+var u = new Uint8Array([9,9,9,9]); var r;
+try { u.set([1, {valueOf:function(){throw new TypeError("boom")}}, 3]); } catch (e) { r = e.name; }
+r + ":" + Array.prototype.join.call(u)
+=== u8_set_offset_checked_before_source_read
+var L=[]; var u = new Uint8Array(2);
+try { u.set({get length(){L.push("len");return 1}}, -1); } catch (e) { L.push(e.name); }
+try { u.set({get length(){L.push("len2");return 5}}, 0); } catch (e) { L.push(e.name); }
+L.join(",")
+=== u8_subarray
+function J(x){return Array.prototype.join.call(x)}
+var a = new Uint8Array([0,1,2,3,4,5]);
+var s = function(b, e){ var r = arguments.length == 0 ? a.subarray() : arguments.length == 1 ? a.subarray(b) : a.subarray(b, e); return J(r) + "@" + r.byteOffset + "/" + r.length; };
+[s(), s(2), s(-2), s(1, 3), s(1, -1), s(-3, -1), s(4, 2), s(100), s(-100, 2), s(0, 100), s(undefined, 2), s(NaN, NaN), s("1", "3"), s(Infinity), s(-Infinity, Infinity), s(2, undefined), s(6), s(1.9, 3.9)].join("|")
+=== u8_subarray_shares_and_nests
+function J(x){return Array.prototype.join.call(x)}
+var a = new Uint8Array([0,1,2,3,4,5]); var s = a.subarray(1, 5); var t = s.subarray(1, 3); t[0] = 77; s[3] = 88;
+var u = new Uint8Array(a.buffer, 2, 2).subarray(1);
+[J(a), J(s), J(t), t.byteOffset, t.buffer === a.buffer, J(u), u.byteOffset, t.subarray(5).length, t.subarray(0).byteOffset].join("|")
+=== u8_subarray_constructor_read
+function E(f){try{return String(f())}catch(e){return e.name}}
+var a = new Uint8Array(4); a.constructor = 5; var b = new Uint8Array(4); b.constructor = undefined; var c = new Uint8Array(4); c.constructor = {}; var d = new Uint8Array(4); d.constructor = null;
+[E(function(){return a.subarray(1).length}), E(function(){return b.subarray(1).length}), E(function(){return c.subarray(1).length}), E(function(){return d.subarray(1).length}), E(function(){return a.slice(1).length}), E(function(){return c.slice(1).length})].join("|")
+=== u8_subarray_slice_coercion_order
+var L=[]; var a = new Uint8Array(6);
+a.subarray({valueOf:function(){L.push("b");return 1}}, {valueOf:function(){L.push("e");return 3}});
+a.slice({valueOf:function(){L.push("b2");return 1}}, {valueOf:function(){L.push("e2");return 3}});
+L.join(",")
+=== u8_slice
+function J(x){return Array.prototype.join.call(x)}
+var a = new Uint8Array([0,1,2,3,4,5]);
+var s = function(b, e){ var r = arguments.length == 0 ? a.slice() : arguments.length == 1 ? a.slice(b) : a.slice(b, e); return J(r) + "@" + r.byteOffset + "/" + r.length + "/" + (r.buffer === a.buffer) + "/" + r.buffer.byteLength; };
+[s(), s(2), s(-2), s(1, 3), s(1, -1), s(4, 2), s(100), s(-100, 2), s(undefined, 2), s("1", "3"), s(Infinity), s(0, 100)].join("|")
+=== u8_slice_copies_and_views
+function J(x){return Array.prototype.join.call(x)}
+var a = new Uint8Array([0,1,2,3,4,5]); var s = a.slice(1, 4); s[0] = 99;
+var v = new Uint8Array(a.buffer, 2, 3); var t = v.slice(1); t[0] = 55;
+[J(a), J(s), J(t), s.buffer === a.buffer, t.buffer.byteLength, J(v), J(a.subarray(2).slice(0, 2))].join("|")
+=== u8_method_brand_errors
+function E(f){try{return String(f())}catch(e){return e.name}}
+[E(function(){return Uint8Array.prototype.subarray.call({}, 0)}), E(function(){return Uint8Array.prototype.slice.call(new ArrayBuffer(2), 0)}), E(function(){return Uint8Array.prototype.slice.call([], 0)}), E(function(){return Uint8Array.prototype.subarray.call(undefined)})].join("|")
+=== u8_iteration
+var u = new Uint8Array([5, 6, 7]); var a = []; for (var x of u) a.push(x);
+var b = [...u]; var [p, q] = u; var c = []; for (var y of new Uint8Array(0)) c.push(y);
+[a.join(","), b.join(","), p, q, c.length, b.length].join("|")
+=== u8_iteration_sees_writes
+var u = new Uint8Array([1, 2, 3]); var out = [];
+for (var x of u) { out.push(x); if (x === 1) u[2] = 9; }
+out.join(",")
+=== u8_equality_and_identity
+var b = new ArrayBuffer(4); var a = new Uint8Array(b); var c = new Uint8Array(b);
+[a === c, a.buffer === c.buffer, a.buffer === a.buffer, a == c, new Uint8Array(1) === new Uint8Array(1), typeof a, typeof b, typeof Uint8Array, typeof ArrayBuffer].join("|")
+=== u8_big_view_scan_and_fill
+var n = 4096; var u = new Uint8Array(n); for (var i = 0; i < n; i++) u[i] = i; var s = 0; for (var j = 0; j < n; j++) s += u[j];
+var v = u.slice(100, 200); var t = 0; for (var k = 0; k < v.length; k++) t += v[k];
+[s, t, u[255], u[256], u[4095], v.length].join("|")
+=== enc_shape_and_brand
+function E(f){try{return String(f())}catch(e){return e.name}}
+var e = new TextEncoder(); var d = Object.getOwnPropertyDescriptor(TextEncoder.prototype, "encoding");
+[TextEncoder.length, TextEncoder.name, e.encoding, typeof d.get, d.set, d.enumerable, d.configurable, d.get.name, TextEncoder.prototype.encode.length, TextEncoder.prototype.encodeInto.length, TextEncoder.prototype.constructor === TextEncoder, e instanceof TextEncoder, E(function(){return TextEncoder()}), E(function(){return TextEncoder.prototype.encoding}), E(function(){return d.get.call({})}), E(function(){return TextEncoder.prototype.encode.call({}, "a")}), E(function(){return TextEncoder.prototype.encodeInto.call({}, "a", new Uint8Array(1))}), E(function(){return d.get.call(new TextDecoder())}), E(function(){return new TextEncoder("ignored", 5).encoding})].join("|")
+=== enc_encode_values
+function J(x){return Array.prototype.join.call(x)}
+var e = new TextEncoder();
+[J(e.encode("")), J(e.encode("abc")), J(e.encode("é€😀")), J(e.encode()), J(e.encode(undefined)), J(e.encode(null)), J(e.encode(12)), J(e.encode({toString:function(){return "hi"}})), J(e.encode("\u0000\u007f\u0080߿ࠀ￿")), e.encode("a\u0000b").length].join("|")
+=== enc_encode_surrogates
+function J(x){return Array.prototype.join.call(x)}
+var e = new TextEncoder();
+[J(e.encode("\ud800")), J(e.encode("\udc00")), J(e.encode("a\ud800b")), J(e.encode("\udc00\ud800")), J(e.encode("\ud83d")), J(e.encode("\ud83d😀")), J(e.encode("\ude00😀")), J(e.encode("퟿")), J(e.encode("􏿿")), J(e.encode("\ud83dx"))].join("|")
+=== enc_encode_result_shape
+var e = new TextEncoder(); var r = e.encode("abc");
+[r.length, r.byteLength, r.byteOffset, r.buffer.byteLength, ArrayBuffer.isView(r), r[2]].join("|")
+=== enc_encode_symbol_free_coercion_errors
+function E(f){try{return String(f())}catch(e){return e.name}}
+var e = new TextEncoder();
+[E(function(){return e.encode({toString:function(){throw new RangeError("x")}})}), E(function(){return e.encode({toString:function(){return {}}, valueOf:function(){return {}}})}), E(function(){return e.encode(Object.create(null))})].join("|")
+=== enc_encodeInto_counts
+function R(s, n){ var d = new Uint8Array(n); var r = new TextEncoder().encodeInto(s, d); return r.read + "/" + r.written + ":" + Array.prototype.join.call(d); }
+var out = [];
+var s = "aé€😀z";
+for (var n = 0; n <= 12; n++) out.push(R(s, n));
+out.join(" ")
+=== enc_encodeInto_surrogates
+function R(s, n){ var d = new Uint8Array(n); var r = new TextEncoder().encodeInto(s, d); return r.read + "/" + r.written + ":" + Array.prototype.join.call(d); }
+[R("a\ud800b", 4), R("a\ud800b", 5), R("a\ud800b", 6), R("\ud83d", 2), R("\ud83d", 3), R("😀", 3), R("😀", 4), R("\ude00\ud83d", 6), R("\ud83d😀", 6), R("\ud83d😀", 7), R("", 0), R("", 3)].join(" ")
+=== enc_encodeInto_offset_view_and_shared_buffer
+var b = new ArrayBuffer(8); var all = new Uint8Array(b); all.set([9,9,9,9,9,9,9,9]);
+var v = new Uint8Array(b, 2, 4); var r = new TextEncoder().encodeInto("€€x", v);
+r.read + "/" + r.written + ":" + Array.prototype.join.call(all)
+=== enc_encodeInto_result_object
+var r = new TextEncoder().encodeInto("ab", new Uint8Array(1));
+[Object.keys(r).join(","), r.read, r.written, Object.getOwnPropertyDescriptor(r, "read").writable].join("|")
+=== enc_encodeInto_bad_dest
+function E(f){try{return String(f())}catch(e){return e.name}}
+var e = new TextEncoder();
+[E(function(){return e.encodeInto("a", [])}), E(function(){return e.encodeInto("a", new ArrayBuffer(4))}), E(function(){return e.encodeInto("a")}), E(function(){return e.encodeInto("a", null)}), E(function(){return e.encodeInto("a", {length: 4})}), E(function(){return e.encodeInto()})].join("|")
+=== dec_ctor_labels
+function E(f){try{return String(f())}catch(e){return e.name}}
+[new TextDecoder().encoding, new TextDecoder(undefined).encoding, new TextDecoder("utf-8").encoding, new TextDecoder("UTF8").encoding, new TextDecoder(" utf-8\n").encoding, new TextDecoder("Unicode-1-1-UTF-8").encoding, new TextDecoder("x-unicode20utf8").encoding, new TextDecoder("\tUTF-8\f").encoding, E(function(){return new TextDecoder("").encoding}), E(function(){return new TextDecoder("foo").encoding}), E(function(){return new TextDecoder("utf 8").encoding}), E(function(){return new TextDecoder("utf-8x").encoding}), E(function(){return new TextDecoder(null).encoding}), E(function(){return new TextDecoder("utf -8").encoding}), E(function(){return new TextDecoder(" utf-8").encoding}), E(function(){return TextDecoder("utf-8")}), E(function(){return new TextDecoder({toString:function(){return "utf-8"}}).encoding}), E(function(){return new TextDecoder({toString:function(){throw new Error("t")}})})].join("|")
+=== dec_ctor_options
+function E(f){try{return String(f())}catch(e){return e.name}}
+function F(o){ var d = new TextDecoder("utf-8", o); return d.fatal + "," + d.ignoreBOM; }
+[F(), F(null), F({}), F({fatal: true}), F({ignoreBOM: 1}), F({fatal: "yes", ignoreBOM: ""}), F({fatal: 0, ignoreBOM: true}), F({fatal: undefined}), E(function(){return F(5)}), E(function(){return F("x")}), E(function(){return F(true)}), E(function(){return new TextDecoder("utf-8", {get fatal(){throw new Error("f")}})})].join("|")
+=== dec_getters_shape_and_brand
+function E(f){try{return String(f())}catch(e){return e.name}}
+var out = [];
+["encoding", "fatal", "ignoreBOM"].forEach(function(n){
+  var d = Object.getOwnPropertyDescriptor(TextDecoder.prototype, n);
+  out.push(n + ":" + typeof d.get + "," + d.set + "," + d.enumerable + "," + d.configurable + "," + d.get.name + "," + d.get.length + "," + E(function(){return d.get.call({})}) + "," + E(function(){return d.get.call(new TextEncoder())}) + "," + E(function(){return TextDecoder.prototype[n]}));
+});
+[out.join(" "), TextDecoder.length, TextDecoder.name, TextDecoder.prototype.decode.length, TextDecoder.prototype.constructor === TextDecoder, new TextDecoder() instanceof TextDecoder, E(function(){return TextDecoder.prototype.decode.call({}, new Uint8Array(1))}), E(function(){return TextDecoder.prototype.decode.call(new TextEncoder())})].join("|")
+=== dec_decode_inputs
+function E(f){try{return String(f())}catch(e){return e.name}}
+var d = new TextDecoder(); var b = new ArrayBuffer(6); var u = new Uint8Array(b); u.set([0x61, 0x62, 0x63, 0x64, 0x65, 0x66]);
+[d.decode(), d.decode(undefined), d.decode(b), d.decode(u), d.decode(u.subarray(1, 3)), d.decode(new Uint8Array(b, 2, 2)), d.decode(new ArrayBuffer(0)), d.decode(new ArrayBuffer(2)).length, E(function(){return d.decode(5)}), E(function(){return d.decode("abc")}), E(function(){return d.decode([97])}), E(function(){return d.decode(null)}), E(function(){return d.decode({})}), E(function(){return d.decode({length: 1, 0: 97})}), d.decode(u, null), d.decode(u, undefined), d.decode(u, {}), d.decode(u, {stream: false})].join("|")
+=== dec_malformed_table
+var seqs = [[0x80], [0xBF], [0xC0, 0x80], [0xC1, 0xBF], [0xC2], [0xC2, 0x41], [0xDF, 0xBF], [0xE0, 0x80, 0x80], [0xE0, 0x9F, 0xBF], [0xE0, 0xA0], [0xED, 0xA0, 0x80], [0xED, 0xBF, 0xBF], [0xED, 0x9F, 0xBF], [0xEF, 0xBF, 0xBD], [0xF0, 0x80, 0x80, 0x80], [0xF0, 0x8F, 0xBF, 0xBF], [0xF0, 0x90, 0x80, 0x80], [0xF4, 0x8F, 0xBF, 0xBF], [0xF4, 0x90, 0x80, 0x80], [0xF5, 0x80, 0x80, 0x80], [0xF8, 0x88, 0x80, 0x80, 0x80], [0xFF], [0xFE, 0xFF], [0xE2, 0x82], [0xE2, 0x82, 0x41], [0xF0, 0x9F, 0x92], [0xF0, 0x9F, 0x92, 0x41], [0xF0, 0x9F], [0xF0], [0xC2, 0xC2, 0xA9], [0xE2, 0xE2, 0x82, 0xAC], [0x41, 0x80, 0x42], [0xC0, 0xAF, 0xE0, 0x80, 0xAF], [0xF4, 0x90], [0xF3, 0x80, 0x80, 0xC0]];
+var out = []; var d = new TextDecoder();
+seqs.forEach(function(s){ var t = d.decode(new Uint8Array(s)); out.push(t.length + ":" + t); });
+out.join("|")
+=== dec_valid_and_bom
+var d = new TextDecoder(); var out = [];
+var U = function(a){ return new Uint8Array(a); };
+out.push(d.decode(U([0x61, 0xC3, 0xA9, 0xE2, 0x82, 0xAC, 0xF0, 0x9F, 0x98, 0x80, 0xF4, 0x8F, 0xBF, 0xBF])));
+out.push(d.decode(U([0xEF, 0xBB, 0xBF, 0x41])).length);
+out.push(d.decode(U([0xEF, 0xBB, 0xBF, 0xEF, 0xBB, 0xBF, 0x41])).length);
+out.push(d.decode(U([0x41, 0xEF, 0xBB, 0xBF])).length);
+out.push(d.decode(U([0xEF, 0xBF, 0xBD, 0xEF, 0xBB, 0xBF])).length);
+out.push(d.decode(U([0xFF, 0xEF, 0xBB, 0xBF])).length);
+out.push(d.decode(U([0xEF, 0xBB, 0xBF])).length);
+out.push(d.decode(U([0xEF, 0xBB])).length);
+var k = new TextDecoder("utf-8", {ignoreBOM: true});
+out.push(k.decode(U([0xEF, 0xBB, 0xBF, 0x41])).length);
+out.push(k.decode(U([0xEF, 0xBB, 0xBF, 0xEF, 0xBB, 0xBF])).length);
+out.join("|")
+=== dec_bom_resets_after_flush
+var d = new TextDecoder(); var B = [0xEF, 0xBB, 0xBF, 0x41]; var out = [];
+out.push(d.decode(new Uint8Array(B)).length, d.decode(new Uint8Array(B)).length);
+out.push(d.decode(new Uint8Array(B), {stream: true}).length, d.decode(new Uint8Array(B), {stream: true}).length, d.decode(new Uint8Array(B)).length, d.decode(new Uint8Array(B)).length);
+out.join(",")
+=== dec_stream_every_split_valid
+var e = new TextEncoder();
+var samples = ["a", "é", "€", "😀", "aé€😀z", "\u{10ffff}߿ࠀ퟿￿", "\u0000\u007f\u0080"];
+var bad = 0, n = 0;
+samples.forEach(function(s){
+  var b = e.encode(s); var want = new TextDecoder().decode(b);
+  for (var i = 0; i <= b.length; i++) {
+    var d = new TextDecoder(); var got = d.decode(b.subarray(0, i), {stream: true}); got += d.decode(b.subarray(i)); n++;
+    if (got !== want) bad++;
+    var d2 = new TextDecoder(); var g2 = d2.decode(b.subarray(0, i), {stream: true}); g2 += d2.decode(b.subarray(i), {stream: true}); g2 += d2.decode(); n++;
+    if (g2 !== want) bad++;
+    for (var j = i; j <= b.length; j++) {
+      var d3 = new TextDecoder(); var g3 = d3.decode(b.subarray(0, i), {stream: true}); g3 += d3.decode(b.subarray(i, j), {stream: true}); g3 += d3.decode(b.subarray(j)); n++;
+      if (g3 !== want) bad++;
+    }
+  }
+});
+bad + "/" + n
+=== dec_stream_every_split_malformed
+var seqs = [[0xE0, 0x80, 0x80], [0xF0, 0x9F, 0x92], [0xF0, 0x9F, 0x92, 0x41], [0xE2, 0x82], [0xE2, 0x82, 0x41], [0xC0, 0xAF], [0xED, 0xA0, 0x80], [0xF4, 0x90, 0x80, 0x80], [0x41, 0xFF, 0x42, 0xC2], [0xEF, 0xBB], [0xEF, 0xBB, 0xBF, 0xEF, 0xBB, 0xBF], [0xF1, 0x80, 0x80, 0xC0, 0xE1, 0x80]];
+var bad = 0, n = 0;
+seqs.forEach(function(s){
+  var b = new Uint8Array(s); var want = new TextDecoder().decode(b);
+  for (var i = 0; i <= b.length; i++) {
+    for (var j = i; j <= b.length; j++) {
+      var d = new TextDecoder(); var got = d.decode(b.subarray(0, i), {stream: true}); got += d.decode(b.subarray(i, j), {stream: true}); got += d.decode(b.subarray(j)); n++;
+      if (got !== want) bad++;
+    }
+  }
+});
+bad + "/" + n
+=== dec_stream_split_text_shapes
+var d = new TextDecoder(); var out = [];
+out.push(d.decode(new Uint8Array([0xE2, 0x82]), {stream: true}).length);
+out.push(d.decode(new Uint8Array([0xAC]), {stream: true}));
+out.push(d.decode(new Uint8Array([0xF0, 0x9F]), {stream: true}).length);
+out.push(d.decode(new Uint8Array([0x98]), {stream: true}).length);
+out.push(d.decode(new Uint8Array([0x80, 0x41])));
+out.push(d.decode(new Uint8Array([0xE2]), {stream: true}).length, d.decode().length, d.decode().length);
+out.push(d.decode(new Uint8Array([0xE2, 0x82]), {stream: true}).length, d.decode(new Uint8Array([0x41]), {stream: true}), d.decode().length);
+out.join("|")
+=== dec_fatal_throws_on_every_malformed_form
+var seqs = [[0x80], [0xC0, 0x80], [0xC2], [0xE0, 0x80, 0x80], [0xED, 0xA0, 0x80], [0xF0, 0x80, 0x80, 0x80], [0xF4, 0x90, 0x80, 0x80], [0xF5], [0xFF], [0xE2, 0x82], [0xF0, 0x9F, 0x92], [0xF0, 0x9F, 0x92, 0x41], [0x41, 0x80], [0xC2, 0xC2, 0xA9]];
+var out = [];
+seqs.forEach(function(s){ var d = new TextDecoder("utf-8", {fatal: true}); try { out.push(d.decode(new Uint8Array(s)).length); } catch (e) { out.push(e.name); } });
+var ok = [[0x41], [0xC2, 0xA9], [0xE2, 0x82, 0xAC], [0xF0, 0x9F, 0x98, 0x80], [0xEF, 0xBB, 0xBF, 0x41], []];
+ok.forEach(function(s){ var d = new TextDecoder("utf-8", {fatal: true}); out.push(d.decode(new Uint8Array(s)).length); });
+out.join(",")
+=== dec_fatal_reset_and_reuse
+var d = new TextDecoder("utf-8", {fatal: true}); var out = [];
+function t(f){ try { out.push(f()); } catch (e) { out.push(e.name); } }
+t(function(){ return d.decode(new Uint8Array([0x61, 0xFF, 0x62])); });
+t(function(){ return d.decode(new Uint8Array([0x63])); });
+t(function(){ return d.decode(new Uint8Array([0xE2, 0x82]), {stream: true}).length; });
+t(function(){ return d.decode(); });
+t(function(){ return d.decode(new Uint8Array([0xE2, 0x82, 0xAC])).length; });
+t(function(){ return d.decode(new Uint8Array([0xE2]), {stream: true}).length; });
+t(function(){ return d.decode(new Uint8Array([0x41]), {stream: true}); });
+t(function(){ return d.decode(new Uint8Array([0x42]), {stream: true}); });
+t(function(){ return d.decode(new Uint8Array([0xEF, 0xBB, 0xBF, 0x43])).length; });
+out.join("|")
+=== dec_fatal_bom_state_after_error
+var out = [];
+function run(first, stream, second){
+  var d = new TextDecoder("utf-8", {fatal: true});
+  try { d.decode(new Uint8Array(first), {stream: stream}); } catch (e) { out.push("E"); }
+  out.push(d.decode(new Uint8Array(second)).length);
+}
+run([0x61], true, [0xEF, 0xBB, 0xBF, 0x62]);
+run([0xFF], true, [0xEF, 0xBB, 0xBF, 0x62]);
+run([0x61, 0xFF], true, [0xEF, 0xBB, 0xBF, 0x62]);
+run([0xEF, 0xBB, 0xBF, 0x61, 0xFF], true, [0xEF, 0xBB, 0xBF, 0x62]);
+run([0x61, 0xFF], false, [0xEF, 0xBB, 0xBF, 0x62]);
+out.join(",")
+=== dec_fatal_error_drops_rest_of_chunk
+var d = new TextDecoder("utf-8", {fatal: true}); var out = [];
+try { d.decode(new Uint8Array([0x61, 0xFF, 0xE2, 0x82]), {stream: true}); } catch (e) { out.push(e.name); }
+try { out.push(d.decode(new Uint8Array([0x41])).length); } catch (e) { out.push(e.name); }
+out.join(",")
+=== dec_ignore_bom_stream
+var d = new TextDecoder("utf-8", {ignoreBOM: true}); var out = [];
+out.push(d.decode(new Uint8Array([0xEF, 0xBB]), {stream: true}).length, d.decode(new Uint8Array([0xBF, 0x41])).length);
+var k = new TextDecoder(); var o2 = [];
+o2.push(k.decode(new Uint8Array([0xEF, 0xBB]), {stream: true}).length, k.decode(new Uint8Array([0xBF, 0x41]), {stream: true}).length, k.decode(new Uint8Array([0xEF, 0xBB, 0xBF]), {stream: true}).length, k.decode().length);
+out.join(",") + "|" + o2.join(",")
+=== dec_decode_view_bytes_not_copied_early
+var b = new Uint8Array([0x61, 0x62]); var d = new TextDecoder();
+var s1 = d.decode(b); b[0] = 0x7a; var s2 = d.decode(b);
+s1 + s2
+=== dec_decode_after_input_mutated_by_option_getter
+var b = new Uint8Array([0x61, 0x62]); var d = new TextDecoder();
+d.decode(b, {get stream(){ b[0] = 0x7a; return false; }})
+=== roundtrip_scalar_classes
+var e = new TextEncoder(); var d = new TextDecoder(); var bad = 0, n = 0;
+var strs = ["", "a", "\u0080", "߿", "ࠀ", "퟿", "", "�", "￿", "𐀀", "😀", "􏿿", "x😀y", "ééé"];
+strs.forEach(function(s){ n++; if (d.decode(e.encode(s)) !== s) bad++; });
+var o = new TextDecoder("utf-8", {ignoreBOM: true}); n++; if (o.decode(e.encode("﻿a")) !== "﻿a") bad++;
+n++; if (d.decode(e.encode("﻿a")) !== "a") bad++;
+bad + "/" + n

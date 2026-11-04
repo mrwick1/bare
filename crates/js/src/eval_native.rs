@@ -9,6 +9,7 @@ impl<'p> Interp<'p> {
     fn call_native(&mut self, n: Nat, this: Value, args: &[Value], is_new: bool) -> Res<Value> {
         let a0 = arg(args, 0);
         match n {
+            Nat::Bin(f) => self.call_binary(f, this, args, is_new),
             Nat::ObjectCtor => match a0 {
                 Value::Undefined | Value::Null => Ok(Value::Object(h!(self, self.heap.new_object(Some(self.object_proto))))),
                 Value::Object(_) => Ok(a0),

@@ -65,6 +65,7 @@ impl<'p> Interp<'p> {
         it.install_builtins()?;
         it.install_ext()?;
         it.install_promise()?;
+        it.install_binary()?;
         Ok(it)
     }
 
