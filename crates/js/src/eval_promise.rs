@@ -108,6 +108,7 @@ struct PromiseState {
     next_seq: u64,
     next_pair: u64,
     done_pairs: FxSet<u64>,
+    failed_job: Option<Error>,
 }
 
 /// A thrown value becomes `Ok(value)`. Anything else (a limit, Unsupported, a heap fault) stays an error.
@@ -151,11 +152,14 @@ impl<'p> Interp<'p> {
     /// empty. Returns the number of jobs run. At most `max_jobs_per_drain` jobs run: if more are queued the
     /// call ends with `Limit(DrainJobs)` and the rest stay queued. A JavaScript exception inside a job rejects
     /// that job's promise. Any `Limit` or other error ends the drain; the job that was running is dropped, so
-    /// treat a `Limit` as fatal for this interpreter. Refused while a call is active.
+    /// treat a job error as fatal for this interpreter. Later drains repeat that error instead of
+    /// reporting an empty successful checkpoint. A DrainJobs cap before starting a job is resumable.
+    /// Refused while a call is active.
     pub fn drain_microtasks(&mut self) -> Result<usize, Error> {
         if self.depth != 0 {
             return Err(unsupported("drain_microtasks during a call", Span::default()));
         }
+        if let Some(error) = self.promise.failed_job { return Err(error); }
         self.begin();
         let mut n = 0usize;
         while let Some(job) = self.promise.queue.pop_front() {
@@ -164,7 +168,10 @@ impl<'p> Interp<'p> {
                 return Err(Error::Limit(LimitKind::DrainJobs));
             }
             n += 1;
-            self.run_job(job)?;
+            if let Err(error) = self.run_job(job) {
+                self.promise.failed_job = Some(error);
+                return Err(error);
+            }
         }
         Ok(n)
     }
@@ -378,9 +385,9 @@ impl<'p> Interp<'p> {
         if self.promise.map.len() >= self.promise.limits.max_promises {
             return Err(Error::Limit(LimitKind::Promises));
         }
-        let o = h!(self, self.heap.new_object(self.promise.proto));
         let seq = self.promise.next_seq;
-        self.promise.next_seq += 1;
+        self.promise.next_seq = seq.checked_add(1).ok_or(Error::Limit(LimitKind::Promises))?;
+        let o = h!(self, self.heap.new_object(self.promise.proto));
         self.promise.map.insert(o, PromiseData { seq, state: PState::Pending, reactions: Vec::new(), handled: false });
         Ok(o)
     }
@@ -388,7 +395,7 @@ impl<'p> Interp<'p> {
     /// Fresh resolve and reject functions that share one "already resolved" flag.
     fn resolving_functions(&mut self, p: ObjId) -> Res<(Value, Value, u64)> {
         let pair = self.promise.next_pair;
-        self.promise.next_pair += 1;
+        self.promise.next_pair = pair.checked_add(1).ok_or(Error::Limit(LimitKind::Functions))?;
         let res = self.pfn(PFn::Settle { promise: p, pair, reject: false }, "", 1)?;
         let rej = self.pfn(PFn::Settle { promise: p, pair, reject: true }, "", 1)?;
         Ok((Value::Object(res), Value::Object(rej), pair))
@@ -440,9 +447,11 @@ impl<'p> Interp<'p> {
             return Ok(());
         }
         let n = d.reactions.len();
-        if self.promise.queue.len() + n > self.promise.limits.max_queue {
+        if self.promise.queue.len().checked_add(n).is_none_or(|total| total > self.promise.limits.max_queue) {
             return Err(Error::Limit(LimitKind::PromiseQueue));
         }
+        self.steps = self.steps.checked_add(n as u64).ok_or(Error::Limit(LimitKind::Steps))?;
+        if self.steps > self.step_limit { return Err(Error::Limit(LimitKind::Steps)); }
         let d = self.promise.map.get_mut(&p).expect("checked");
         d.state = if rejected { PState::Rejected(v) } else { PState::Fulfilled(v) };
         let reactions = std::mem::take(&mut d.reactions);

@@ -855,3 +855,32 @@ The final short-token sample was 16.7 ns per literal with no allocation and 41.9
 Reproduce: build `tools/js/decimal_load.rs` with release rustc, run `preflight`, `all`, `bench` or `check <oracle-dir>`. Generate independent cases with `node tools/js/decimal_oracle.mjs <dir> 17 400`. The standalone JSON and heap harnesses include the shared private module.
 
 Not tested: exhaustive decimal-to-f64 correctness, source-cap removal, non-Linux targets or hard allocator OOM. The lexer source cap is unchanged. This change does not add BigInt, runtime builtin bindings or staging execution.
+
+
+## Promise jobs
+
+The evaluator now provides Promise construction, resolve/reject, then/catch/finally and static resolve/reject. Thenable calls become jobs. Resolver pairs share a once flag, self-resolution rejects with TypeError, and a thrown handler rejects its derived promise. Jobs run FIFO only when the host calls drain_microtasks after a script/task. Run does not drain automatically. The host can inspect pending jobs, promise status and unhandled rejections.
+
+Defaults cap queued jobs at 262,144, tracked promises and pending reactions at 1 Mi each, and jobs per checkpoint at 1 Mi. Drains also share the evaluator step budget across all jobs. Parent review found fanout settlement could queue reactions without charging steps. Its regression failed on d8a3e50 and now consumes work before changing promise state. Queue capacity is also checked before settlement. Identity counters now fail at exhaustion instead of wrapping; the injected-exhaustion regression failed with a debug overflow before the fix.
+
+An ordinary JavaScript throw rejects a promise. A resource limit, Unsupported or heap fault inside a running job ends the checkpoint and drops that job. Parent review found the next empty drain could then report success. A new regression failed on that behavior; later drains now repeat the failed-job error. Treat that interpreter as failed. The jobs-per-drain cap is different: it stops before starting the next job, preserves the queue and is resumable. Running a checkpoint inside an active call remains refused.
+
+Promise state and resolver captures live outside the heap. Roots includes intrinsics, queued arguments/handlers, settled values, reaction handlers, derived promises and resolver targets. Collection traces reachable promise metadata and prunes unreachable entries and completed resolver-pair flags. Tests cover collection before a drain, captured closures, a promise reachable only through its resolver, unreferenced cycles and recycled heap slots. Promises are not collected automatically while scripts run.
+
+All 62 Promise programs match Node vm with explicit pre/post checkpoints; the existing 202 evaluator cases still match. Parent added regressions for fanout work, counter exhaustion and repeated drains after a job failure. All 163 assembled JS tests pass in debug and release; 914 workspace tests pass and crate clippy is clean. Node runs only tiny generated programs, never target bundles.
+
+Parent ran seven workloads at 1x, 10x and 100x: 21 fresh release processes, each capped at 1 GiB address space and 45 seconds. All checksums pass. At 100x each case uses n=100,000; finally schedules 400,001 jobs. Other work ran concurrently. Values below are one sample and establish no speed improvement.
+
+| 100x workload | Run ms | Drain ms | Collect ms | Peak RSS MiB |
+| --- | --- | --- | --- | --- |
+| Chain | 120.0 | 29.5 | 10.6 | 103 |
+| Fanout | 105.9 | 38.5 | 6.3 | 97 |
+| Thenable | 219.0 | 178.2 | 49.8 | 293 |
+| Finally | 253.6 | 514.5 | 69.6 | 355 |
+| Reject | 453.7 | 90.1 | 49.9 | 219 |
+| Constructor | 703.8 | 62.2 | 33.8 | 338 |
+| Captured closures | 441.8 | 143.5 | 52.3 | 222 |
+
+The constructor case allocates 1,000,053 managed objects and leaves 53 after collection. Native allocator counts were not measured; the figures report managed allocations and RSS. The delegate measured a saving from omitting resolver name/length properties but rejected it because those properties are observable. Parent retained them and did not reproduce that discarded variant.
+
+Reproduce with tools/js/promise_check.sh and tools/js/promise_load.sh with an output path. Async/await, Promise combinators, withResolvers, subclass/species construction and toStringTag remain unbuilt. Existing all/allSettled/race/any methods return explicit Unsupported. Static methods on another constructor are unsupported. Without Symbol, then validates constructor but uses the intrinsic default. Unhandled-rejection reporting is poll-only. No timers, network, staging execution, other-platform behavior or hard allocator OOM recovery was tested. A real nested host callback checkpoint was not exercised; the active-call guard is tested through its entry path.

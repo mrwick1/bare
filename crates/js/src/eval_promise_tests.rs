@@ -350,3 +350,38 @@ fn recycled_slots_never_confuse_resolver_metadata() {
         assert_eq!(it.promise.done_pairs.len(), 1, "res and rej are still alive");
     });
 }
+
+#[test]
+fn settling_fanout_consumes_work_before_changing_state() {
+    with("var resolve; var p = new Promise(function(r) { resolve=r; }); for (var i=0; i<100; i++) p.then(function() {});", |it| {
+        it.run().unwrap();
+        it.limits.max_steps = 10;
+        let resolve = global_get(it, "resolve");
+        assert_eq!(limit(it.call(resolve, Value::Undefined, &[Value::Number(1.0)])), LimitKind::Steps);
+        assert_eq!(it.pending_jobs(), 0);
+        let promise = global_get(it, "p");
+        assert!(matches!(it.promise_status(promise), Some(PromiseStatus::Pending)));
+    });
+}
+
+#[test]
+fn promise_identity_counters_do_not_wrap() {
+    with("Promise.resolve(1)", |it| {
+        it.promise.next_seq = u64::MAX;
+        assert_eq!(limit(it.run()), LimitKind::Promises);
+    });
+    with("new Promise(function() {})", |it| {
+        it.promise.next_pair = u64::MAX;
+        assert_eq!(limit(it.run()), LimitKind::Functions);
+    });
+}
+
+#[test]
+fn a_failed_job_cannot_be_hidden_by_a_later_empty_drain() {
+    with("Promise.resolve().then(function() { for (;;) {} });", |it| {
+        it.run().unwrap();
+        it.limits.max_steps = 100;
+        assert_eq!(limit(it.drain_microtasks()), LimitKind::Steps);
+        assert_eq!(limit(it.drain_microtasks()), LimitKind::Steps);
+    });
+}
