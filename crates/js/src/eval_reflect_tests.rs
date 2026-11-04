@@ -309,3 +309,32 @@ fn heap_objects_cap_stops_construction_cleanly() {
         assert!(r.starts_with("limit:Heap"), "{r}");
     });
 }
+
+#[test]
+fn bound_constructor_validation_spends_steps_before_reading_arguments() {
+    big(|| {
+        let mut it = realm();
+        assert_eq!(out(&mut it, "var hits = 0, F = function () {}; for (var i = 0; i < 256; i++) F = F.bind(null); var args = { get length() { hits++; return 0; } }; 0"), "0");
+        it.limits.max_steps = 50;
+        assert_eq!(out(&mut it, "Reflect.construct(F, args)"), "limit:Steps");
+        assert_eq!(out(&mut it, "hits"), "0");
+    });
+}
+
+#[test]
+fn native_construction_uses_intrinsic_fallback_prototypes() {
+    big(|| {
+        let mut it = realm();
+        assert_eq!(out(&mut it, "var N = (function () {}).bind(null); [Object.getPrototypeOf(Reflect.construct(Array, [], N)) === Array.prototype, Object.getPrototypeOf(Reflect.construct(TypeError, [], N)) === TypeError.prototype, Object.getPrototypeOf(Reflect.construct(RegExp, [], N)) === RegExp.prototype].join()"), "true,true,true");
+    });
+}
+
+#[test]
+fn native_prototype_getters_run_at_the_correct_allocation_boundary() {
+    big(|| {
+        let mut it = realm();
+        assert_eq!(out(&mut it, "var log = [], N = (function () {}).bind(null); Object.defineProperty(N, 'prototype', { get() { log.push('proto'); return {}; } }); Reflect.construct(Error, [{ toString() { log.push('message'); return 'm'; } }], N); log.join()"), "proto,message");
+        assert_eq!(out(&mut it, "log = []; Reflect.construct(RegExp, [{ get [Symbol.match]() { log.push('match'); return false; }, toString() { log.push('pattern'); return 'x'; } }, { toString() { log.push('flags'); return ''; } }], N); log.join()"), "match,proto,pattern,flags");
+        assert_eq!(out(&mut it, "var T = (function () {}).bind(null); Object.defineProperty(T, 'prototype', { get() { throw 7; } }); try { Reflect.construct(Array, [NaN], T); } catch (e) { e === 7; }"), "true");
+    });
+}

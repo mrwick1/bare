@@ -304,3 +304,20 @@ var a = []; a[4000000000] = 1; a[3] = 2; L(Object.getOwnPropertyNames(a));
 L(Object.getOwnPropertyNames(new Array(4294967295)));
 var s = []; s[7] = 1; L(Reflect.ownKeys(s));
 (function () { return log.join('|'); })
+=== native_fallback_prototypes
+var N = (function () {}).bind(null);
+var out = [Object.getPrototypeOf(Reflect.construct(Array, [], N)) === Array.prototype,
+Object.getPrototypeOf(Reflect.construct(TypeError, [], N)) === TypeError.prototype,
+Object.getPrototypeOf(Reflect.construct(RegExp, [], N)) === RegExp.prototype];
+(function () { return out.join(); })
+=== native_prototype_allocation_order
+var log = [], N = (function () {}).bind(null);
+Object.defineProperty(N, 'prototype', { get() { log.push('proto'); return {}; } });
+Reflect.construct(Error, [{ toString() { log.push('message'); return 'm'; } }], N);
+Reflect.construct(RegExp, [{ get [Symbol.match]() { log.push('match'); return false; }, toString() { log.push('pattern'); return 'x'; } }, { toString() { log.push('flags'); return ''; } }], N);
+(function () { return log.join(); })
+=== array_prototype_error_before_length_error
+var N = (function () {}).bind(null), out;
+Object.defineProperty(N, 'prototype', { get() { throw 7; } });
+try { Reflect.construct(Array, [NaN], N); } catch (e) { out = e === 7; }
+(function () { return out; })

@@ -18,3 +18,6 @@ construct_nested	9|true|true|true|2|true|true|11|true|true|true|true|6|4|true ##
 construct_react_shape	x|p|true ## x|p|true
 names_webpack_shape	own,hidden,inherited|3|1|2 ## own,hidden,inherited|3|1|2
 names_views_sparse	0,1,2|3|0,1,2,extra|0||3,4000000000,length|length|7,length ## 0,1,2|3|0,1,2,extra|0||3,4000000000,length|length|7,length
+native_fallback_prototypes	true,true,true ## true,true,true
+native_prototype_allocation_order	proto,message,match,proto,pattern,flags ## proto,message,match,proto,pattern,flags
+array_prototype_error_before_length_error	true ## true

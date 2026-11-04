@@ -1642,7 +1642,11 @@ impl<'p> Interp<'p> {
     }
 
     fn new_array_from(&mut self, items: &[Value]) -> Res<Value> {
-        let a = h!(self, self.heap.new_array(Some(self.array_proto)));
+        self.new_array_from_proto(items, self.array_proto)
+    }
+
+    fn new_array_from_proto(&mut self, items: &[Value], proto: ObjId) -> Res<Value> {
+        let a = h!(self, self.heap.new_array(Some(proto)));
         for (i, &v) in items.iter().enumerate() {
             self.def(a, PropertyKey::Index(i as u32), v, true, true, true)?;
         }

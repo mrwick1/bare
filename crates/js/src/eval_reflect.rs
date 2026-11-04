@@ -25,8 +25,6 @@
 // - `String`, `Number` and `Boolean` have no wrapper objects: `Reflect.construct` of one is `Unsupported`. As a `newTarget`
 //   they are valid constructors.
 // - Own keys of a function lack the `arguments` and `caller` that V8 adds to sloppy functions.
-// - A native that makes its object before it reads `newTarget.prototype` (Array, Error, RegExp) reads it after its own
-//   argument conversions, not before.
 //
 // State: none. The natives are function objects reachable from the global `Reflect` and `Object`, like every builtin.
 
@@ -99,12 +97,13 @@ impl<'p> Interp<'p> {
 
     /// A constructor, or one of the three wrapper functions that `construct` gates as `Unsupported` (they are constructors
     /// in the language, so they must not be a TypeError here).
-    fn is_constructor_or_wrapper(&self, mut o: ObjId) -> bool {
+    fn is_constructor_or_wrapper(&mut self, mut o: ObjId) -> Res<bool> {
         loop {
+            self.tick()?;
             match self.funcs.get(&o) {
-                Some(&Callee::Native(Nat::StringFn | Nat::NumberFn | Nat::BooleanFn)) => return true,
+                Some(&Callee::Native(Nat::StringFn | Nat::NumberFn | Nat::BooleanFn)) => return Ok(true),
                 Some(&Callee::Bound { target, .. }) => o = target,
-                _ => return self.is_constructor(o),
+                _ => return Ok(self.is_constructor(o)),
             }
         }
     }
@@ -116,12 +115,12 @@ impl<'p> Interp<'p> {
         };
         let target = arg(args, 0);
         let Value::Object(f) = target else { return not_ctor(self, target) };
-        if !self.is_constructor_or_wrapper(f) {
+        if !self.is_constructor_or_wrapper(f)? {
             return not_ctor(self, target);
         }
         let nt = if args.len() >= 3 {
             match args[2] {
-                Value::Object(n) if self.is_constructor_or_wrapper(n) => n,
+                Value::Object(n) if self.is_constructor_or_wrapper(n)? => n,
                 v => return not_ctor(self, v),
             }
         } else {
