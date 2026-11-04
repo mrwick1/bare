@@ -77,6 +77,14 @@ pub enum LimitKind {
     TraversalDepth,
     Envs,
     Functions,
+    /// Microtask queue length.
+    PromiseQueue,
+    /// Tracked promise objects.
+    Promises,
+    /// Reactions stored on pending promises.
+    PromiseReactions,
+    /// Jobs per microtask drain.
+    DrainJobs,
     Heap(Limit),
 }
 
@@ -210,6 +218,7 @@ enum Callee {
     Script { fid: FuncId, env: u32, self_binding: bool },
     Native(Nat),
     Bound { target: ObjId, this: Value, args: Vec<Value> },
+    Promise(PFn),
 }
 
 #[derive(Default)]
@@ -293,6 +302,7 @@ pub struct Interp<'p> {
     function_proto: ObjId,
     array_proto: ObjId,
     error_protos: [ObjId; 5],
+    promise: PromiseState,
     // permanent keys
     k_length: PropertyKey,
     k_name: PropertyKey,
@@ -387,6 +397,7 @@ impl<'p> Interp<'p> {
             function_proto,
             array_proto,
             error_protos,
+            promise: PromiseState::default(),
             k_length: ks[0],
             k_name: ks[1],
             k_message: ks[2],
@@ -410,6 +421,7 @@ impl<'p> Interp<'p> {
         it.live_envs = 1;
         it.walk_program()?;
         it.install_builtins()?;
+        it.install_promise()?;
         Ok(it)
     }
 
@@ -490,8 +502,13 @@ impl<'p> Interp<'p> {
             v.extend(e.bindings.iter().map(|b| b.value));
             v.extend(e.this);
         }
+        self.promise_roots(&mut v);
+        self.promise_all_values(&mut v);
         for (&o, c) in &self.funcs {
             v.push(Value::Object(o));
+            if let Callee::Promise(pf) = c {
+                pf.trace(&mut v);
+            }
             if let Callee::Bound { target, this, args } = c {
                 v.push(Value::Object(*target));
                 v.push(*this);
@@ -512,6 +529,7 @@ impl<'p> Interp<'p> {
         let mut work: Vec<Value> = vec![Value::Object(self.global), Value::Object(self.object_proto), Value::Object(self.function_proto), Value::Object(self.array_proto), self.ret, self.completion];
         work.extend(self.error_protos.iter().map(|&o| Value::Object(o)));
         work.extend_from_slice(extra);
+        self.promise_roots(&mut work);
         let mut env_work: Vec<u32> = vec![0];
         loop {
             if let Some(e) = env_work.pop() {
@@ -537,8 +555,10 @@ impl<'p> Interp<'p> {
                     work.push(*this);
                     work.extend(args.iter().copied());
                 }
+                Some(Callee::Promise(pf)) => pf.trace(&mut work),
                 _ => {}
             }
+            self.promise_trace(o, &mut work);
             let keys = h!(self, self.heap.own_keys(o));
             for k in keys {
                 match h!(self, self.heap.get_own_property(o, k)) {
@@ -560,6 +580,7 @@ impl<'p> Interp<'p> {
             }
         }
         self.funcs.retain(|o, _| seen.contains(o));
+        self.promise_prune(&seen);
         let mut roots = self.roots();
         roots.extend_from_slice(extra);
         Ok(h!(self, self.heap.collect(&roots)))
@@ -1283,17 +1304,20 @@ impl<'p> Interp<'p> {
             S(FuncId, u32, bool),
             N(Nat),
             B(ObjId, Value, Vec<Value>),
+            P(PFn),
         }
         let d = match self.funcs.get(&o) {
             Some(&Callee::Script { fid, env, self_binding }) => D::S(fid, env, self_binding),
             Some(&Callee::Native(n)) => D::N(n),
             Some(Callee::Bound { target, this, args }) => D::B(*target, *this, args.clone()),
+            Some(&Callee::Promise(pf)) => D::P(pf),
             None => return Err(self.type_err("value is not a function")),
         };
         self.depth += 1;
         let r = match d {
             D::S(fid, env, sb) => self.call_script(o, fid, env, sb, this, args),
             D::N(n) => self.call_native(n, this, args, false),
+            D::P(pf) => self.call_promise(pf, this, args, false),
             D::B(t, bthis, mut bargs) => {
                 bargs.extend_from_slice(args);
                 self.call_fn(Value::Object(t), bthis, &bargs)
@@ -1321,12 +1345,14 @@ impl<'p> Interp<'p> {
             S(FuncId, u32, bool),
             N(Nat),
             B(ObjId, Vec<Value>),
+            P(PFn),
         }
         let d = match self.funcs.get(&o) {
             Some(&Callee::Script { fid, env, self_binding }) if self.prog.func(fid).kind == FuncKind::Normal => D::S(fid, env, self_binding),
             Some(&Callee::Native(n)) if matches!(n, Nat::ObjectCtor | Nat::FnCtor | Nat::ArrayCtor | Nat::ErrorCtor(_)) => D::N(n),
             Some(&Callee::Native(Nat::StringFn | Nat::NumberFn | Nat::BooleanFn)) => return Err(unsupported("wrapper object (new String/Number/Boolean)", Span::default())),
             Some(Callee::Bound { target, args, .. }) => D::B(*target, args.clone()),
+            Some(&Callee::Promise(pf @ PFn::Ctor)) => D::P(pf),
             _ => return not_ctor(self),
         };
         self.depth += 1;
@@ -1339,6 +1365,7 @@ impl<'p> Interp<'p> {
                 Ok(if matches!(r, Value::Object(_)) { r } else { Value::Object(obj) })
             })(),
             D::N(n) => self.call_native(n, Value::Undefined, args, true),
+            D::P(pf) => self.call_promise(pf, Value::Undefined, args, true),
             D::B(t, mut bargs) => {
                 bargs.extend_from_slice(args);
                 self.construct(Value::Object(t), &bargs, callee)
@@ -2803,7 +2830,12 @@ fn num_base(t: &str) -> NumBase {
 }
 
 include!("eval_native.rs");
+include!("eval_promise.rs");
 
 #[cfg(test)]
 #[path = "eval_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "eval_promise_tests.rs"]
+mod promise_tests;

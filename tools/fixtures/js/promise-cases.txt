@@ -1,0 +1,257 @@
+# bare-js Promise and microtask cases. A case starts with `=== name`. Each program logs with L(); the last
+# expression is a reader function. The tools read the log before the microtask checkpoint and after it: `pre ## post`.
+# Node (vm, empty context, 2 s timeout) is the oracle. Only our own tiny programs run here.
+=== sync_then_micro
+var log = []; function L(x) { log.push(String(x)); }
+L(1); Promise.resolve().then(function () { L(3); }); L(2);
+(function () { return log.join("|"); })
+=== fifo_two_chains
+var log = []; function L(x) { log.push(String(x)); }
+Promise.resolve().then(() => L(1)).then(() => L(2)).then(() => L(3));
+Promise.resolve().then(() => L("a")).then(() => L("b")).then(() => L("c"));
+(function () { return log.join("|"); })
+=== fifo_same_promise
+var log = []; function L(x) { log.push(String(x)); }
+var p = Promise.resolve(0); p.then(() => L("x")); p.then(() => L("y")); p.then(() => L("z"));
+(function () { return log.join("|"); })
+=== then_this_args_sloppy
+var log = []; function L(x) { log.push(String(x)); }
+Promise.resolve(7).then(function () { L(this === globalThis); L(arguments.length); L(arguments[0]); });
+(function () { return log.join("|"); })
+=== then_this_args_strict
+var log = []; function L(x) { log.push(String(x)); }
+Promise.resolve(7).then(function (v, w) { "use strict"; L(String(this)); L(arguments.length); L(w); });
+(function () { return log.join("|"); })
+=== reject_propagates
+var log = []; function L(x) { log.push(String(x)); }
+Promise.reject(1).then(function () { L("no"); }).then(function () { L("no2"); }).catch(function (e) { L("caught" + e); return 9; }).then(function (v) { L("after" + v); });
+(function () { return log.join("|"); })
+=== handler_throws
+var log = []; function L(x) { log.push(String(x)); }
+Promise.resolve(1).then(function () { throw 5; }).then(function () { L("no"); }, function (e) { L("r" + e); });
+(function () { return log.join("|"); })
+=== handler_throws_error
+var log = []; function L(x) { log.push(String(x)); }
+Promise.resolve(1).then(function () { throw new RangeError("boom"); }).catch(function (e) { L(e.name + ":" + e.message); });
+(function () { return log.join("|"); })
+=== executor_throws
+var log = []; function L(x) { log.push(String(x)); }
+new Promise(function () { throw 1; }).catch(function (e) { L("c" + e); });
+(function () { return log.join("|"); })
+=== executor_throw_after_resolve
+var log = []; function L(x) { log.push(String(x)); }
+new Promise(function (r) { r(1); throw 2; }).then(function (v) { L("v" + v); }, function (e) { L("e" + e); });
+(function () { return log.join("|"); })
+=== resolver_once
+var log = []; function L(x) { log.push(String(x)); }
+new Promise(function (res, rej) { res(1); res(2); rej(3); }).then(function (v) { L(v); }, function (e) { L("rej" + e); });
+(function () { return log.join("|"); })
+=== reject_then_resolve
+var log = []; function L(x) { log.push(String(x)); }
+new Promise(function (res, rej) { rej(1); res(2); }).then(function (v) { L(v); }, function (e) { L("rej" + e); });
+(function () { return log.join("|"); })
+=== executor_sync
+var log = []; function L(x) { log.push(String(x)); }
+L(1); new Promise(function (r) { L(2); r(); L(3); }); L(4);
+(function () { return log.join("|"); })
+=== executor_this_args
+var log = []; function L(x) { log.push(String(x)); }
+new Promise(function (a, b) { L(this === globalThis); L(arguments.length); L(typeof a + typeof b); });
+(function () { return log.join("|"); })
+=== self_resolution
+var log = []; function L(x) { log.push(String(x)); }
+var res; var p = new Promise(function (r) { res = r; }); res(p); p.then(null, function (e) { L(e instanceof TypeError); L(e.message); });
+(function () { return log.join("|"); })
+=== thenable_basic
+var log = []; function L(x) { log.push(String(x)); }
+var t = { then: function (a, b) { L("then called"); a(5); } }; Promise.resolve(t).then(function (v) { L("v" + v); }); L("sync");
+(function () { return log.join("|"); })
+=== thenable_tick_order
+var log = []; function L(x) { log.push(String(x)); }
+var t = { then: function (a) { a(1); } };
+new Promise(function (r) { r(t); }).then(function () { L("T"); });
+Promise.resolve().then(function () { L(1); }).then(function () { L(2); }).then(function () { L(3); }).then(function () { L(4); });
+(function () { return log.join("|"); })
+=== thenable_throws
+var log = []; function L(x) { log.push(String(x)); }
+var t = { then: function () { throw 3; } }; Promise.resolve(t).catch(function (e) { L("c" + e); });
+(function () { return log.join("|"); })
+=== thenable_throws_after_resolve
+var log = []; function L(x) { log.push(String(x)); }
+var t = { then: function (a) { a(1); throw 3; } }; Promise.resolve(t).then(function (v) { L("v" + v); }, function (e) { L("e" + e); });
+(function () { return log.join("|"); })
+=== thenable_calls_twice
+var log = []; function L(x) { log.push(String(x)); }
+var t = { then: function (a, b) { a(1); a(2); b(3); } }; Promise.resolve(t).then(function (v) { L("v" + v); }, function (e) { L("e" + e); });
+(function () { return log.join("|"); })
+=== thenable_getter_throws
+var log = []; function L(x) { log.push(String(x)); }
+var t = {}; Object.defineProperty(t, "then", { get: function () { throw 4; } }); Promise.resolve(t).catch(function (e) { L("c" + e); });
+(function () { return log.join("|"); })
+=== thenable_nonfunction_then
+var log = []; function L(x) { log.push(String(x)); }
+var t = { then: 1 }; Promise.resolve(t).then(function (v) { L(v === t); });
+(function () { return log.join("|"); })
+=== thenable_this_args
+var log = []; function L(x) { log.push(String(x)); }
+var t = { then: function (a, b) { L(this === t); L(arguments.length); L(typeof a + typeof b); a(); } }; Promise.resolve(t);
+(function () { return log.join("|"); })
+=== thenable_nested
+var log = []; function L(x) { log.push(String(x)); }
+var inner = { then: function (a) { a(7); } }; var outer = { then: function (a) { a(inner); } }; Promise.resolve(outer).then(function (v) { L(v); });
+(function () { return log.join("|"); })
+=== resolve_identity
+var log = []; function L(x) { log.push(String(x)); }
+var p = Promise.resolve(1); L(Promise.resolve(p) === p); L(Promise.resolve(1) === p);
+(function () { return log.join("|"); })
+=== resolve_with_promise_ticks
+var log = []; function L(x) { log.push(String(x)); }
+var p = Promise.resolve(1); new Promise(function (r) { r(p); }).then(function () { L("A"); });
+Promise.resolve().then(function () { L(1); }).then(function () { L(2); }).then(function () { L(3); });
+(function () { return log.join("|"); })
+=== handler_returns_promise_ticks
+var log = []; function L(x) { log.push(String(x)); }
+Promise.resolve().then(function () { return Promise.resolve("p"); }).then(function (v) { L(v); });
+Promise.resolve().then(function () { L(1); }).then(function () { L(2); }).then(function () { L(3); }).then(function () { L(4); });
+(function () { return log.join("|"); })
+=== finally_passthrough
+var log = []; function L(x) { log.push(String(x)); }
+Promise.resolve(1).finally(function () { L("f" + arguments.length); return 99; }).then(function (v) { L("v" + v); });
+(function () { return log.join("|"); })
+=== finally_rejection_passthrough
+var log = []; function L(x) { log.push(String(x)); }
+Promise.reject(2).finally(function () { L("f"); return 99; }).catch(function (e) { L("e" + e); });
+(function () { return log.join("|"); })
+=== finally_throws
+var log = []; function L(x) { log.push(String(x)); }
+Promise.resolve(1).finally(function () { throw 7; }).catch(function (e) { L("e" + e); });
+(function () { return log.join("|"); })
+=== finally_returns_rejected
+var log = []; function L(x) { log.push(String(x)); }
+Promise.resolve(1).finally(function () { return Promise.reject(8); }).catch(function (e) { L("e" + e); });
+(function () { return log.join("|"); })
+=== finally_nonfunction
+var log = []; function L(x) { log.push(String(x)); }
+Promise.resolve(1).finally(5).then(function (v) { L("v" + v); }); Promise.reject(2).finally().catch(function (e) { L("e" + e); });
+(function () { return log.join("|"); })
+=== finally_tick_order
+var log = []; function L(x) { log.push(String(x)); }
+Promise.resolve(1).finally(function () { L("f"); }).then(function () { L("t"); });
+Promise.resolve().then(function () { L(1); }).then(function () { L(2); }).then(function () { L(3); }).then(function () { L(4); }).then(function () { L(5); });
+(function () { return log.join("|"); })
+=== finally_this
+var log = []; function L(x) { log.push(String(x)); }
+Promise.resolve(1).finally(function () { L(this === globalThis); });
+(function () { return log.join("|"); })
+=== catch_thenable_receiver
+var log = []; function L(x) { log.push(String(x)); }
+Promise.prototype.catch.call({ then: function (a, b) { L(arguments.length); L(typeof a); L(typeof b); } }, function () {});
+(function () { return log.join("|"); })
+=== catch_nonthen_receiver
+var log = []; function L(x) { log.push(String(x)); }
+try { Promise.prototype.catch.call({}, 1); } catch (e) { L(e.name); }
+(function () { return log.join("|"); })
+=== catch_recovers
+var log = []; function L(x) { log.push(String(x)); }
+Promise.reject(1).catch(function (e) { return e + 1; }).then(function (v) { L(v); });
+(function () { return log.join("|"); })
+=== then_undefined_passes
+var log = []; function L(x) { log.push(String(x)); }
+Promise.resolve(1).then(undefined, function () {}).then(function (v) { L(v); }); Promise.reject(2).then(function () {}).then(null, function (e) { L("e" + e); });
+(function () { return log.join("|"); })
+=== then_noncallable_args
+var log = []; function L(x) { log.push(String(x)); }
+Promise.resolve(3).then(5, 6).then(function (v) { L(v); }); Promise.reject(4).then(5, 6).catch(function (e) { L("e" + e); });
+(function () { return log.join("|"); })
+=== call_without_new
+var log = []; function L(x) { log.push(String(x)); }
+try { Promise(function () {}); } catch (e) { L(e.name + ":" + e.message); }
+(function () { return log.join("|"); })
+=== noncallable_executor
+var log = []; function L(x) { log.push(String(x)); }
+var m = []; [1, undefined, "s", null].forEach(function (x) { try { new Promise(x); } catch (e) { L(e.name + ":" + e.message); } });
+(function () { return log.join("|"); })
+=== then_incompatible_receiver
+var log = []; function L(x) { log.push(String(x)); }
+try { Promise.prototype.then.call(1); } catch (e) { L(e.name + ":" + e.message); } try { Promise.prototype.then.call(undefined); } catch (e) { L(e.name); }
+(function () { return log.join("|"); })
+=== static_noncallable_this
+var log = []; function L(x) { log.push(String(x)); }
+try { Promise.resolve.call(undefined, 1); } catch (e) { L(e.name + ":" + e.message); } try { Promise.reject.call(1, 1); } catch (e) { L(e.name); }
+(function () { return log.join("|"); })
+=== constructor_nonobject
+var log = []; function L(x) { log.push(String(x)); }
+var p = Promise.resolve(1); p.constructor = 1; try { p.then(); } catch (e) { L(e.name + ":" + e.message); } var q = Promise.resolve(1); q.constructor = undefined; L(q.then() instanceof Promise);
+(function () { return log.join("|"); })
+=== function_props
+var log = []; function L(x) { log.push(String(x)); }
+var r, j; new Promise(function (a, b) { r = a; j = b; }); L([Promise.length, Promise.name, Promise.prototype.then.length, Promise.prototype.catch.length, Promise.prototype.finally.length, Promise.resolve.length, Promise.reject.length, r.length].join(","));
+(function () { return log.join("|"); })
+=== resolver_function_names
+var log = []; function L(x) { log.push(String(x)); }
+var r, j; new Promise(function (a, b) { r = a; j = b; }); L("[" + r.name + "][" + j.name + "]" + (r === j) + typeof r + typeof j);
+(function () { return log.join("|"); })
+=== prototype_shape
+var log = []; function L(x) { log.push(String(x)); }
+L(Promise.prototype.constructor === Promise); L(Object.getPrototypeOf(Promise.resolve()) === Promise.prototype); L(Promise.resolve().then() !== Promise.resolve()); L(Promise.resolve().then().constructor === Promise);
+(function () { return log.join("|"); })
+=== job_adds_job_fifo
+var log = []; function L(x) { log.push(String(x)); }
+Promise.resolve().then(function () { L("a"); Promise.resolve().then(function () { L("c"); }); }); Promise.resolve().then(function () { L("b"); });
+(function () { return log.join("|"); })
+=== closures_in_handlers
+var log = []; function L(x) { log.push(String(x)); }
+var n = 0; function mk(i) { return function () { n += i; L(n); }; } var p = Promise.resolve(); for (var i = 1; i <= 4; i++) p = p.then(mk(i));
+(function () { return log.join("|"); })
+=== long_chain
+var log = []; function L(x) { log.push(String(x)); }
+var p = Promise.resolve(0); for (var i = 0; i < 500; i++) p = p.then(function (v) { return v + 1; }); p.then(L);
+(function () { return log.join("|"); })
+=== fan_out_pending
+var log = []; function L(x) { log.push(String(x)); }
+var res; var p = new Promise(function (r) { res = r; }); for (var i = 0; i < 50; i++) (function (i) { p.then(function (v) { log.push(i + v); }); })(i); res("-"); L("sync");
+(function () { return log.join("|"); })
+=== pending_forever
+var log = []; function L(x) { log.push(String(x)); }
+var p = new Promise(function () {}); p.then(function () { L("never"); }); L("sync");
+(function () { return log.join("|"); })
+=== throw_primitive_values
+var log = []; function L(x) { log.push(String(x)); }
+Promise.reject(undefined).catch(function (e) { L(String(e)); }); Promise.reject(null).catch(function (e) { L(String(e)); }); Promise.reject("s").catch(function (e) { L(e); });
+(function () { return log.join("|"); })
+=== resolve_fulfilled_then_executor_order
+var log = []; function L(x) { log.push(String(x)); }
+var p = new Promise(function (r) { L("e"); r(1); }); L("after"); p.then(function (v) { L("t" + v); });
+(function () { return log.join("|"); })
+=== reject_non_wrapped
+var log = []; function L(x) { log.push(String(x)); }
+var e = new Error("x"); Promise.reject(e).catch(function (v) { L(v === e); }); Promise.reject(Promise.resolve(1)).catch(function (v) { L(v instanceof Promise); });
+(function () { return log.join("|"); })
+=== handler_returns_self
+var log = []; function L(x) { log.push(String(x)); }
+var p = Promise.resolve().then(function () { return p; }); p.catch(function (e) { L(e.name + ":" + e.message); });
+(function () { return log.join("|"); })
+=== deep_thenable_chain
+var log = []; function L(x) { log.push(String(x)); }
+var t = { then: function (a) { a({ then: function (b) { b({ then: function (c) { c("deep"); } }); } }); } }; Promise.resolve(t).then(L);
+(function () { return log.join("|"); })
+=== then_getter_once
+var log = []; function L(x) { log.push(String(x)); }
+var n = 0; var t = {}; Object.defineProperty(t, "then", { get: function () { n++; return function (a) { a(n); }; } }); Promise.resolve(t).then(function (v) { L(v + ":" + n); });
+(function () { return log.join("|"); })
+=== handler_returns_thenable_throwing_getter
+var log = []; function L(x) { log.push(String(x)); }
+var t = {}; Object.defineProperty(t, "then", { get: function () { throw "g"; } }); Promise.resolve().then(function () { return t; }).catch(function (e) { L("e" + e); });
+(function () { return log.join("|"); })
+=== catch_then_chain_value_flow
+var log = []; function L(x) { log.push(String(x)); }
+Promise.resolve(1).then(function (v) { return v + 1; }).then(function (v) { return v * 10; }).then(function (v) { L(v); });
+(function () { return log.join("|"); })
+=== constructor_getter_order
+var log = []; function L(x) { log.push(String(x)); }
+var p = Promise.resolve(1); var n = 0; Object.defineProperty(p, "constructor", { get: function () { n++; return Promise; } }); p.then(); p.finally(); L(n); L(Promise.resolve(p) === p); L(n);
+(function () { return log.join("|"); })
+=== finally_this_nonobject
+var log = []; function L(x) { log.push(String(x)); }
+try { Promise.prototype.finally.call(1); } catch (e) { L(e.name + ":" + e.message); }
+(function () { return log.join("|"); })
