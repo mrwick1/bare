@@ -603,7 +603,7 @@ mod tests {
     use super::*;
 
     fn unhex(s: &str) -> Vec<u8> {
-        assert!(s.len() % 2 == 0);
+        assert!(s.len().is_multiple_of(2));
         (0..s.len() / 2).map(|i| u8::from_str_radix(&s[2 * i..2 * i + 2], 16).unwrap()).collect()
     }
 
@@ -613,6 +613,28 @@ mod tests {
             "p384" => Curve::P384,
             _ => panic!("curve {name}"),
         }
+    }
+
+    #[test]
+    fn concurrent_generator_table_initialization() {
+        fn check<const N: usize>(source: &Params<N>) {
+            let params = Params {
+                p: Field::new(source.p.m), n: Field::new(source.n.m),
+                b: source.b, gx: source.gx, gy: source.gy, gtab: OnceLock::new(),
+            };
+            let gate = std::sync::Barrier::new(4);
+            let pointers = std::thread::scope(|scope| {
+                let handles: Vec<_> = (0..4).map(|_| scope.spawn(|| {
+                    gate.wait();
+                    params.g_table().as_ptr() as usize
+                })).collect();
+                handles.into_iter().map(|h| h.join().unwrap()).collect::<Vec<_>>()
+            });
+            assert!(pointers.iter().all(|p| *p == pointers[0]));
+            assert_eq!(params.g_table(), source.g_table());
+        }
+        check(&P256);
+        check(&P384);
     }
 
     /// Public vectors: NIST CAVS 11.0 (SigVer, PKV), Project Wycheproof, and a few
@@ -775,7 +797,7 @@ mod tests {
                 .map(|_| {
                     let mut k = [0u64; N];
                     k.iter_mut().for_each(|l| *l = xorshift(&mut seed));
-                    if xorshift(&mut seed) % 4 == 0 {
+                    if xorshift(&mut seed).is_multiple_of(4) {
                         k[N - 1] = u64::MAX; // top limb full: the last carry digit
                     }
                     k

@@ -90,7 +90,7 @@ Resource checks: handshake cost, throughput, peak memory for large bodies, repea
 
 Exit: `bare` downloads the real staging login HTML, scripts and CSS over verified HTTPS. Script execution and login are later gates.
 
-Certificate parsing in S1 topic 3 is complete. `der` and `x509` borrow signed bytes and fields from bounded inputs. Unknown critical extensions are exposed for the validator to reject. Parsing does not verify signatures, trust, a path or a hostname. The next gate is to connect ECDSA, hostname checks and independently loaded OS roots before the handshake can trust a peer.
+Certificate parsing and ECDSA P-256/P-384 verification in S1 topic 3 are complete. `der` and `x509` borrow signed bytes and fields from bounded inputs. Unknown critical extensions are exposed for the validator to reject. Parsing does not verify signatures, trust, a path or a hostname. ECDSA accepts only validated uncompressed public keys and in-range signature scalars. It is variable-time verification code for public data. The next gate is to connect signature verification, hostname checks and independently loaded OS roots into path validation before the handshake can trust a peer.
 
 ### S2 JavaScript and event loop
 

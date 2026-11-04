@@ -8,6 +8,7 @@
 //! real secrets. `bare` cannot open an HTTPS page yet.
 
 pub mod aes_gcm;
+pub mod ecc;
 pub mod der;
 pub mod x509;
 pub mod hkdf;

@@ -492,3 +492,21 @@ Parent review added regression tests and fixes for forbidden end-of-contents val
 Reproduce with `rustc --edition=2024 -C opt-level=3 tools/crypto/x509_load.rs -o <out>` and `<out> 1|10|100`. All 563 workspace tests pass. All 79 normal crypto tests pass in release with default and forced-portable builds. Clippy passes with all features. Prefix truncation, malformed lengths/extensions, random mutations, borrow boundaries and fixed-date cases are covered. The long X25519 test remains a separate ignored test.
 
 This measures parsing only. X509 name values and some unused GeneralName forms remain opaque. The caller must enforce critical-extension handling, leaf/issuer policy, hostname, validity, path length and signature verification. RSA verification and compressed EC keys are unsupported. Only the five fixture certificates and their mutations were tested; no other target hardware was tested.
+
+## ECDSA verification
+
+2026-11-04, archMachine, release. P-256 and P-384 share fixed-size Montgomery arithmetic. Verification validates the public key and signature scalar ranges. It rejects an infinite result. High-s signatures remain valid. All arithmetic is variable-time and must only handle public verification inputs.
+
+The delegated implementation replaced a basic joint scalar multiplication with signed-window digits, a shared generator table, mixed affine additions and a projective comparison that avoids a final inversion. The delegate measured lower verification time after these changes and kept the shared field code after several unsuccessful arithmetic optimizations. Parent reviewed the implementation and reproduced the final checks; the discarded variants were not measured again.
+
+Parent generated 10,000 fresh oracle cases with `oracle_gen.py 1000`, then interleaved the two curves so every scale includes both. Cases include valid/high-s signatures and changed digests, signatures and keys. The verifier compared every answer with OpenSSL's answer. Each process had a 512 MiB address-space limit and a 60 s timeout. Parent used base 2,000 rather than the driver's default 20,000. The delegate separately ran 2,000,000 verifications over a 10,000-case input file; that is not two million distinct random inputs.
+
+| Scale | Verifications | P-256 accepted microseconds | P-384 accepted microseconds | Wall seconds | CPU seconds | Peak RSS KiB | Loop allocations |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| 1x | 2,000 | 95.0 | 300.9 | 0.32 | 0.32 | 9,696 | 0 |
+| 10x | 20,000 | 94.1 | 299.0 | 3.15 | 3.14 | 9,736 | 0 |
+| 100x | 200,000 | 94.2 | 298.8 | 31.47 | 31.35 | 9,672 | 0 |
+
+The driver holds the oracle cases before measurement. Per-curve times count accepted signatures only; invalid keys can fail early. Tables are shared through `OnceLock`. Parent added a concurrent first-initialization check using fresh tables and four threads for each curve. It verifies a single shared result and compares table contents with the curve's existing table.
+
+Checks: 573 workspace tests pass, including 656 public signature vectors and 24 public-key vectors inside the ECDSA tests. All 89 normal crypto tests pass in release with default and forced-portable builds. Clippy passes with all features. The long X25519 check remains separate. No non-x86 target or independent exact stack-peak measurement was tested. ECDSA is not a certificate-path validator.
