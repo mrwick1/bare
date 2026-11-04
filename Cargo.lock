@@ -47,6 +47,7 @@ dependencies = [
 name = "bare-net"
 version = "0.1.0"
 dependencies = [
+ "bare-tls",
  "bare-url",
 ]
 

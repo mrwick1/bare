@@ -341,7 +341,7 @@ pub struct Resource {
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum LoadError {
-    /// The request failed: DNS, connect, TLS (not available yet), or a bad reply.
+    /// The request failed: DNS, connect, TLS validation, or a bad reply.
     Network(String),
     Status(u16),
     /// The `Content-Type` is not allowed. Holds the type (up to 64 chars), or `None` when it is missing.

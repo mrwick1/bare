@@ -237,6 +237,12 @@ impl<T: Read + Write> RecordLayer<T> {
         &self.io
     }
 
+    /// The stream, for `flush` and timeouts. Do not read or write it directly: that breaks
+    /// the record framing.
+    pub fn get_mut(&mut self) -> &mut T {
+        &mut self.io
+    }
+
     /// Gives back the stream. Bytes already read ahead are lost.
     pub fn into_inner(self) -> T {
         self.io

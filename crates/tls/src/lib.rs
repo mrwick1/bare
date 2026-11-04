@@ -1,12 +1,13 @@
 //! TLS and its crypto, written by hand.
 //!
 //! Crypto foundations: SHA-256, SHA-384, HMAC-SHA256, HKDF-SHA256 and AES-128-GCM.
-//! X25519 provides key exchange with OS random input. X.509 path validation uses independent roots. A connected handshake is not yet exported.
+//! X25519 provides key exchange with OS random input. X.509 path validation uses independent roots. `client::connect` runs a TLS 1.3 client handshake with validated chains.
 //!
 //! WARNING: this code is hand-written. Nobody has audited it. It has known-answer and independent-oracle checks. It does not promise constant-time behavior. Do not use it to protect
-//! real secrets. `bare` cannot open an HTTPS page yet.
+//! real secrets.
 
 pub mod aes_gcm;
+pub mod client;
 pub mod ecc;
 pub mod der;
 pub mod x509;
