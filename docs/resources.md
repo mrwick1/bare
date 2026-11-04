@@ -384,3 +384,11 @@ Bugs that this check found, both fixed with a test first:
 The parser stores one dictionary per reference. This tool is for inspection only. These numbers do not establish Rust resource-loader performance. Keep the existing Rust streaming approach for the engine.
 
 Parent review added a decoded-body cap and a direct failure check for the browser command. Offline tests cover compressed-body limits, request limits across retries, connection reuse and omission of `Accept-Encoding`. A single verified HTTPS request through the inspection tool returned `/login` with status 200, 8,687 identity bytes and the saved SHA-256. `bare` still rejects HTTPS. The expected failing check is `sh tools/staging_https_check.sh`.
+
+## HTTPS URL prerequisite
+
+2026-11-04, archMachine, release. Scheme-aware URL parsing and HTTPS plaintext guards add no measured heap cost in the delegated before/after runs. The delegate measured the existing 1x/10x/100x URL cases before and after the change. All runs had zero flags. Individual times varied by about 10%; these runs do not establish a speedup.
+
+Parent verification: `cargo test --workspace --quiet` passed (484 tests). `cargo run --release -q -p bare-stress -- scale url-` had zero flags. At the largest join-dots size (2,000,000), time was 71.1 ms and peak counted heap was 110.7 MB. Peak counted heap is not RSS. No optimization was added without a measured cause.
+
+The delegate ran URL fuzzing with 200,000 inputs (seed 1), 1,000,000 (seed 7), and 3,000,000 (seed 42), with zero failures. Parent review checked the guards before cache lookup and socket reuse. Real TLS and HTTPS throughput remain untested.
