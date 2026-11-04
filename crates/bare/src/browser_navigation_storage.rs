@@ -39,9 +39,12 @@ impl Default for StorageLimits {
     }
 }
 
+/// Key and value, UTF-16.
+type Item = (Box<[u16]>, Box<[u16]>);
+
 #[derive(Default)]
 struct Area {
-    items: Vec<(Box<[u16]>, Box<[u16]>)>,
+    items: Vec<Item>,
     units: usize,
 }
 

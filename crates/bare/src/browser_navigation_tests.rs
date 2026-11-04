@@ -335,7 +335,7 @@ fn push_and_replace_state() {
         assert_eq!(js(&mut b, "history.pushState({id: 1, tags: ['a', 'b']}, 'ignored title', '/journeys/1?tab=x#h'); [history.length, location.href, JSON.stringify(history.state)].join(' ')"), r#"2 https://staging.example.test:8443/journeys/1?tab=x#h {"id":1,"tags":["a","b"]}"#);
         assert_eq!(b.url_generation(), g + 1);
         assert_eq!(js(&mut b, "history.replaceState({id: 2}, '', 'rel?z=1'); [history.length, location.pathname + location.search, location.hash, JSON.stringify(history.state)].join(' ')"), r#"2 /journeys/rel?z=1  {"id":2}"#);
-        assert_eq!(js(&mut b, "history.replaceState(history.state, ''); [history.length, location.pathname, JSON.stringify(history.state)].join(' ')"), r#"2 /journeys/rel {"id":2}"#.replace("/journeys/rel", "/journeys/rel"));
+        assert_eq!(js(&mut b, "history.replaceState(history.state, ''); [history.length, location.pathname, JSON.stringify(history.state)].join(' ')"), r#"2 /journeys/rel {"id":2}"#);
         // url omitted or null: the URL stays
         let g = b.url_generation();
         js(&mut b, "history.pushState(5, ''); history.pushState(6, '', null); history.pushState(7, '', undefined)");
@@ -759,5 +759,149 @@ fn login_shaped_flow_with_synthetic_strings() {
         assert_eq!(js(&mut reloaded, "try { history.pushState({t: 'x'}, '', 'https://login.other.test/cb?token=synthetic') } catch (e) { e.name }"), "SecurityError");
         assert_eq!(reloaded.navigation_stats().history_len, n.history_len);
         assert!(drain_requests(&mut reloaded).is_empty());
+    });
+}
+
+// ------------------------------------------------------------------------------------------ URL and URLSearchParams
+
+#[test]
+fn url_components_and_live_search_params() {
+    big(|| {
+        let mut b = at(URL0);
+        assert_eq!(js(&mut b, "var u = new URL('/p q?a=1&b=x+y&a=3#frag', 'https://h.test:8080/base/'); [u.href, u.origin, u.searchParams.get('b'), u.searchParams.getAll('a').join('/')].join(' ')"), "https://h.test:8080/p%20q?a=1&b=x+y&a=3#frag https://h.test:8080 x y 1/3");
+        assert_eq!(js(&mut b, "u.searchParams.append('c', 'd e&f'); u.searchParams.delete('a'); [u.search, u.href].join(' ')"), "?b=x+y&c=d+e%26f https://h.test:8080/p%20q?b=x+y&c=d+e%26f#frag");
+        assert_eq!(js(&mut b, "u.search = '?z=1&z=2'; u.searchParams.get('z') + u.searchParams.getAll('z').length + u.searchParams.size"), "122");
+        assert_eq!(js(&mut b, "u.searchParams.delete('z'); [u.search === '', u.href.indexOf('?'), u.href].join()"), "true,-1,https://h.test:8080/p%20q#frag");
+        assert_eq!(js(&mut b, "var sp = u.searchParams; u.href = 'http://other.test/?k=v'; [sp === u.searchParams, sp.get('k'), u.protocol].join()"), "true,v,http:");
+        assert_eq!(js(&mut b, "u.hash = 'h h'; u.pathname = '/n m'; u.port = '81'; u.hostname = 'NEW.test'; u.protocol = 'https'; u.href"), "https://new.test:81/n%20m?k=v#h%20h");
+        // relative reference against the document URL
+        assert_eq!(js(&mut b, "new URL('../c?d', location.href).href + ' ' + new URL(location.href).hash"), "https://staging.example.test:8443/c?d #top");
+        assert_eq!(js(&mut b, "new URL('x', 'nonsense')"), "throw:TypeError:Failed to construct 'URL': Invalid URL");
+        assert_eq!(js(&mut b, "new URL('mailto:a@b.c')"), "unsupported:URL scheme other than http and https");
+        assert_eq!(js(&mut b, "new URL('http://u:p@a.com')"), "unsupported:user info in a URL");
+        assert_eq!(js(&mut b, "new URL('http://bücher.de')"), "unsupported:non-ASCII, escaped or punycode host (IDNA is gated)");
+        assert_eq!(js(&mut b, "u.username = 'x'"), "unsupported:user info in a URL");
+        assert_eq!(js(&mut b, "u.username = ''; u.password = ''; u.username + u.password + 'ok'"), "ok");
+        assert_eq!(js(&mut b, "u.href = 'bad'"), "throw:TypeError:Failed to set the 'href' property on 'URL': Invalid URL");
+        assert_eq!(js(&mut b, "u.href"), "https://new.test:81/n%20m?k=v#h%20h", "a failed set changes nothing");
+        assert_eq!(js(&mut b, "typeof URL.createObjectURL + typeof URL.parse"), "undefinedundefined");
+    });
+}
+
+#[test]
+fn search_params_semantics() {
+    big(|| {
+        let mut b = at(URL0);
+        assert_eq!(js(&mut b, "var p = new URLSearchParams('?a=1&b=2&a=3'); p.set('a', '9'); p.append('c', 'x y'); p.delete('b'); p.toString()"), "a=9&c=x+y");
+        assert_eq!(js(&mut b, "p = new URLSearchParams([['x', '1'], ['y', '2']]); p.sort(); p.append('a', '0'); p.sort(); p + ''"), "a=0&x=1&y=2");
+        assert_eq!(js(&mut b, "p = new URLSearchParams({q: 'a&b', r: 'é'}); p.toString()"), "q=a%26b&r=%C3%A9");
+        assert_eq!(js(&mut b, "p = new URLSearchParams(new URLSearchParams('m=1')); p.append('n', '2'); p.toString()"), "m=1&n=2");
+        // the entries are live iterator objects with next()
+        assert_eq!(js(&mut b, "var it = p.entries(), r = it.next(), s = r.value.join('=') + r.done; r = it.next(); s += r.value.join('=') + r.done; r = it.next(); s + r.done + r.value"), "m=1falsen=2falsetrueundefined");
+        assert_eq!(js(&mut b, "typeof p.keys().next + typeof p.values().next + typeof Object.getPrototypeOf(p.keys()).next"), "functionfunctionfunction");
+        // the iterator protocol is a gate: no Symbol.iterator yet
+        assert_eq!(js(&mut b, "new URLSearchParams(new (function F() {})())"), "unsupported:URLSearchParams init from this object (it needs the iterator protocol)");
+        assert_eq!(js(&mut b, "new URLSearchParams([{0: 'a', 1: 'b', length: 2}])"), "unsupported:URLSearchParams pair that is not an array (it needs the iterator protocol)");
+        assert_eq!(js(&mut b, "new URLSearchParams('a=1').constructor === URLSearchParams"), "true");
+        assert_eq!(js(&mut b, "new URLSearchParams(null).toString()"), "null=", "WebIDL: null is the string 'null' (Node returns '')");
+        // forEach: a callback that mutates and throws; the list stays consistent
+        assert_eq!(js(&mut b, "p = new URLSearchParams('a=1&b=2'); var seen = []; try { p.forEach(function (v, k, o) { seen.push(k); if (k == 'a') o.append('c', '3'); if (k == 'c') throw new RangeError('stop'); }) } catch (e) { seen.push(e.name) } seen.join() + '|' + p"), "a,b,c,RangeError|a=1&b=2&c=3");
+        // coercion that mutates the list: no borrow is held
+        assert_eq!(js(&mut b, "p = new URLSearchParams('a=1&b=2'); p.append({toString: function () { p.delete('a'); return 'k'; }}, {toString: function () { p.append('inner', '1'); return 'v'; }}); p + ''"), "b=2&inner=1&k=v");
+        assert_eq!(js(&mut b, "p = new URLSearchParams('a=1'); var o = {get x() { p.append('got', '1'); return 'y'; }}; var q = new URLSearchParams(o); p + ',' + q"), "a=1&got=1,x=y");
+        // lone surrogates become U+FFFD (USVString)
+        assert_eq!(js(&mut b, "p = new URLSearchParams(); p.append('k\\ud800', 'v'); p.toString()"), "k%EF%BF%BD=v");
+        // saved method references and `this`
+        assert_eq!(js(&mut b, "p = new URLSearchParams('a=1'); var get = p.get, app = URLSearchParams.prototype.append; app.call(p, 'b', '2'); [get.call(p, 'b'), (function () { try { get('a') } catch (e) { return e.name } })()].join()"), "2,TypeError");
+        assert_eq!(js(&mut b, "try { URLSearchParams.prototype.keys.call({}) } catch (e) { e.name }"), "TypeError");
+    });
+}
+
+#[test]
+fn url_objects_are_collected_as_cycles_and_slots_do_not_alias() {
+    big(|| {
+        let mut b = at(URL0);
+        js(&mut b, "function make(i) { var u = new URL('http://h.test/p?i=' + i); u.searchParams.append('n', '' + i); var it = u.searchParams.entries(); it.next(); return u; }
+            var keep = make(0); var held = keep.searchParams;");
+        assert_eq!(b.navigation_stats().urls, 1);
+        for round in 0..20 {
+            js(&mut b, &format!("for (var i = 1; i <= 50; i++) make({round} * 100 + i); 1"));
+            let c = b.collect(&[]).unwrap();
+            let st = b.navigation_stats();
+            assert_eq!((st.urls, st.params, st.iterators), (1, 1, 0), "round {round}: {c:?}");
+        }
+        assert_eq!(b.navigation_stats().param_bytes, 2 * (32 + 1 + 1), "param bytes follow the live lists");
+        // after many reused slots the survivor is intact and new objects do not alias old ones
+        assert_eq!(js(&mut b, "keep.href + ' ' + (held === keep.searchParams) + ' ' + make(7).href"), "http://h.test/p?i=0&n=0 true http://h.test/p?i=7&n=7");
+        // a held searchParams keeps its URL alive (the cycle is one unit), and releasing both frees both
+        js(&mut b, "var only = make(5).searchParams;");
+        b.collect(&[]).unwrap();
+        assert_eq!(js(&mut b, "only.get('i') + ',' + only.toString()"), "5,i=5&n=5");
+        assert_eq!(b.navigation_stats().urls, 2);
+        js(&mut b, "only = null; keep = null; held = null;");
+        b.collect(&[]).unwrap();
+        let st = b.navigation_stats();
+        assert_eq!((st.urls, st.params, st.iterators, st.param_bytes), (0, 0, 0, 0));
+    });
+}
+
+#[test]
+fn colliding_slots_between_scripts_dom_nodes_and_navigation_objects() {
+    big(|| {
+        let mut b = at(URL0);
+        // script 1 makes URL objects and drops them; script 2 makes DOM wrappers that may reuse their slots
+        js(&mut b, "for (var i = 0; i < 40; i++) { var u = new URL('http://h.test/' + i); u.searchParams.append('k', 'v'); }");
+        js(&mut b, "u = null");
+        b.collect(&[]).unwrap();
+        js(&mut b, "var nodes = []; for (var i = 0; i < 80; i++) nodes.push(document.createElement('div'));");
+        js(&mut b, "var ug = Object.getOwnPropertyDescriptor(URL.prototype, 'href').get, ng = Object.getOwnPropertyDescriptor(Node.prototype, 'nodeType').get;");
+        assert_eq!(js(&mut b, "var bad = 0; for (var i = 0; i < nodes.length; i++) { try { ug.call(nodes[i]); bad++ } catch (e) {} } bad"), "0");
+        assert_eq!(js(&mut b, "var u2 = new URL('http://z.test/'), bad = 0; try { ng.call(u2); bad++ } catch (e) {} try { ng.call(u2.searchParams); bad++ } catch (e) {} try { ug.call(u2.searchParams); bad++ } catch (e) {} bad"), "0");
+        assert_eq!(js(&mut b, "try { history.pushState({n: nodes[3]}, '') } catch (e) { e.name }"), "DataCloneError");
+        assert_eq!(js(&mut b, "try { history.pushState({u: u2}, '') } catch (e) { e.name }"), "DataCloneError");
+        // state graphs and DOM wrappers share the heap: collect between calls keeps both consistent
+        js(&mut b, "history.pushState({a: [1, 2, 3]}, ''); nodes.length = 0; nodes = null;");
+        b.collect(&[]).unwrap();
+        js(&mut b, "var more = []; for (var i = 0; i < 80; i++) more.push({i: i}); history.replaceState(history.state, '');");
+        b.collect(&[]).unwrap();
+        assert_eq!(js(&mut b, "history.state.a.join() + more.length + u2.href"), "1,2,380http://z.test/");
+    });
+}
+
+#[test]
+fn url_limits() {
+    big(|| {
+        let mut b = at(URL0);
+        b.set_navigation_limits(NavLimits { max_objects: 6, max_params: 3, max_param_bytes: 400, max_url_bytes: 64, ..Default::default() });
+        assert_eq!(js(&mut b, "var us = []; for (var i = 0; i < 10; i++) us.push(new URL('http://h.test/' + i)); 1"), lim("url-objects"));
+        assert_eq!(b.navigation_stats().urls, 6);
+        let mut b = at(URL0);
+        b.set_navigation_limits(NavLimits { max_params: 3, max_param_bytes: 250, max_url_bytes: 64, ..Default::default() });
+        assert_eq!(js(&mut b, "var p = new URLSearchParams('a=1&b=2&c=3'); p.append('d', '4')"), lim("url-params"));
+        assert_eq!(js(&mut b, "p.toString()"), "a=1&b=2&c=3", "a refused append changes nothing");
+        assert_eq!(js(&mut b, "new URLSearchParams('a=1&b=2&c=3&d=4')"), lim("url-params"));
+        let mut c = at(URL0);
+        c.set_navigation_limits(NavLimits { max_param_bytes: 250, ..Default::default() });
+        assert_eq!(js(&mut c, "var q = new URLSearchParams('x=1'); q.append('k', new Array(200).join('z')); 1"), lim("url-params"), "bytes cap");
+        assert_eq!(js(&mut c, "q.toString()"), "x=1");
+        assert_eq!(js(&mut b, "new URL('http://h.test/' + new Array(80).join('x'))"), lim("url-string"));
+        assert_eq!(js(&mut b, "var u = new URL('http://h.test/'); u.search = '?' + new Array(70).join('q')"), lim("url-string"));
+        assert_eq!(js(&mut b, "u.href"), "http://h.test/");
+        // the URL a params list writes into is bounded too
+        assert_eq!(js(&mut b, "u.searchParams.append('k', new Array(60).join('w'))"), lim("url-string"));
+        assert_eq!(js(&mut b, "u.search + '|' + u.searchParams"), "|", "the failed write left the URL and its params as they were");
+    });
+}
+
+#[test]
+fn many_wrappers_cost_steps_and_a_step_limit_stops_the_script() {
+    big(|| {
+        let mut b = mk(Some(URL0), EvalLimits { max_steps: 3000, ..Default::default() });
+        let r = js(&mut b, "var p = new URLSearchParams('a=1'); for (var i = 0; i < 100000; i++) p.append('k' + i, 'v'); 1");
+        assert_eq!(r, "limit:Steps");
+        let n = b.navigation_stats().param_bytes;
+        // the script is over, and later scripts run with the state as it was left
+        assert_eq!(js(&mut b, "var q = new URLSearchParams('x=1'); q.get('x')"), "1");
+        assert!(n > 0);
     });
 }

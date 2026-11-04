@@ -1,7 +1,7 @@
 //! JS `URL` and `URLSearchParams` over the native records of `browser_navigation_url.rs`.
 //!
 //! A `URL` object owns a `Rec`. `url.searchParams` is one live `URLSearchParams` for that URL: a change on either side
-//! shows on the other (`sync_from_url`, `commit_params`). The wrappers keep each other alive through `Host::trace`, so
+//! shows on the other (`url_set`, `commit_params`). The wrappers keep each other alive through `Host::trace`, so
 //! an unreachable pair (a cycle) is collected together. Metadata is bounded (`NavLimits`): wrapper count, pairs per
 //! list, bytes of all lists, bytes of a URL string. No native borrow is held while JS runs (coercion, `forEach`).
 //!
@@ -113,20 +113,7 @@ fn set_list(d: &Dom, sp: ObjId, list: Vec<(String, String)>) -> R<()> {
     Ok(())
 }
 
-/// The query of URL `id` changed: reload its `searchParams`.
-fn sync_from_url(d: &Dom, id: ObjId) -> R<()> {
-    let (sp, q) = {
-        let n = d.nav.s.borrow();
-        let u = &n.urls[&id];
-        (u.sp, u.rec.query().unwrap_or("").to_string())
-    };
-    match sp {
-        Some(sp) => set_list(d, sp, form_parse(&q)),
-        None => Ok(()),
-    }
-}
-
-/// The list of `sp` changed: write it into the query of its URL.
+/// The list of `sp` changed: write it into the query of its URL (the whole URL must still fit).
 fn commit_params(d: &Dom, sp: ObjId) -> R<()> {
     let (url, ser) = {
         let n = d.nav.s.borrow();
@@ -136,11 +123,11 @@ fn commit_params(d: &Dom, sp: ObjId) -> R<()> {
             None => return Ok(()),
         }
     };
-    if ser.len() > d.nav.lim.get().max_url_bytes {
-        return Err(d.lim("url-string"));
-    }
+    let Some(mut rec) = d.nav.s.borrow().urls.get(&url).map(|u| u.rec.clone()) else { return Ok(()) };
+    rec.set_query(if ser.is_empty() { None } else { Some(&ser) });
+    fit(d, &rec)?;
     if let Some(u) = d.nav.s.borrow_mut().urls.get_mut(&url) {
-        u.rec.set_query(if ser.is_empty() { None } else { Some(&ser) });
+        u.rec = rec;
     }
     Ok(())
 }
@@ -228,10 +215,12 @@ pub(crate) fn url_set(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value], pa
         part.set(&mut cand, &v).map_err(|e| uerr(d, it, e, "Invalid URL", false))?;
     }
     fit(d, &cand)?;
-    d.nav.s.borrow_mut().urls.get_mut(&id).expect("checked").rec = cand;
-    if matches!(part, Part::Href | Part::Search) {
-        sync_from_url(d, id)?;
+    // The query may have changed: reload the live `searchParams` first (its caps may refuse), then keep the URL.
+    let sp = d.nav.s.borrow().urls[&id].sp;
+    if let (Some(sp), true) = (sp, matches!(part, Part::Href | Part::Search)) {
+        set_list(d, sp, form_parse(cand.query().unwrap_or("")))?;
     }
+    d.nav.s.borrow_mut().urls.get_mut(&id).expect("checked").rec = cand;
     Ok(Value::Undefined)
 }
 
@@ -375,26 +364,44 @@ pub(crate) fn params_ctor(d: &Dom, it: &mut Interp<'_>, _: Value, a: &[Value]) -
     Ok(Value::Object(new_params(d, it, list, None)?))
 }
 
+/// Set the list of `sp` and the byte count that goes with it.
+fn store(d: &Dom, sp: ObjId, list: Vec<(String, String)>, bytes: usize) {
+    let mut n = d.nav.s.borrow_mut();
+    let n = &mut *n;
+    let p = n.params.get_mut(&sp).expect("checked");
+    n.param_bytes = n.param_bytes - p.bytes + bytes;
+    p.bytes = bytes;
+    p.list = list;
+}
+
 /// Change the list with `f` (no JS runs inside), then write it through to the URL. `f` returns the change in
-/// bytes (`None`: count them again). A failed `f` leaves the list as it was.
+/// bytes (`None`: count them again). A failed `f` or a URL that does not fit leaves the list as it was.
 fn edit(d: &Dom, sp: ObjId, f: impl FnOnce(&mut Vec<(String, String)>) -> R<Option<isize>>) -> R<()> {
-    let mut list = std::mem::take(&mut d.nav.s.borrow_mut().params.get_mut(&sp).expect("checked").list);
-    let r = f(&mut list);
-    {
+    let (mut list, old_bytes, attached) = {
         let mut n = d.nav.s.borrow_mut();
-        let n = &mut *n;
         let p = n.params.get_mut(&sp).expect("checked");
-        let bytes = match r {
-            Ok(Some(delta)) => p.bytes.saturating_add_signed(delta),
-            Ok(None) => pair_bytes(&list),
-            Err(_) => p.bytes,
-        };
-        n.param_bytes = n.param_bytes - p.bytes + bytes;
-        p.bytes = bytes;
-        p.list = list;
+        (std::mem::take(&mut p.list), p.bytes, p.url.is_some())
+    };
+    let snap = attached.then(|| list.clone());
+    let r = f(&mut list);
+    match r {
+        Ok(delta) => {
+            let bytes = delta.map_or_else(|| pair_bytes(&list), |x| old_bytes.saturating_add_signed(x));
+            store(d, sp, list, bytes);
+        }
+        Err(e) => {
+            store(d, sp, list, old_bytes);
+            return Err(e);
+        }
     }
-    r?;
-    commit_params(d, sp)
+    if let Err(e) = commit_params(d, sp) {
+        if let Some(snap) = snap {
+            let bytes = pair_bytes(&snap);
+            store(d, sp, snap, bytes);
+        }
+        return Err(e);
+    }
+    Ok(())
 }
 
 /// Room for one more pair of `n` bytes: both caps, before the list grows.
