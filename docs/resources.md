@@ -714,3 +714,34 @@ The first parent 10-million-number run aborted under the 1 GiB address-space cap
 Adversarial checks passed under 1 GiB and 45 seconds: a 100-million-opening-bracket flood stopped at depth 1,024; an override stopped at the hard depth cap; node, decoded-text and heap-byte limits fired; long-number tokens and one million duplicate keys completed. Peak RSS for the whole cap process was 504,628 KiB. Truncation checks did not panic. Reproduce with `rustc --edition=2024 -C opt-level=3 tools/js/json_load.rs -o <out>`, then `<out> preflight`, `<out> caps`, `<out> all` or `<out> oracle <dir> 17 20000`.
 
 Not tested: reviver callbacks, stringify, evaluator integration, target bundle execution, browser behavior, Windows, macOS, hard allocator OOM recovery or exhaustive float rounding. Default caps bound parser work and storage; they do not recover from an allocator abort.
+
+
+## Regexp matching
+
+`bare_js::regexp` compiles UTF-16 patterns into a bounded backtracking instruction list. Matching is iterative and returns UTF-16 spans for the whole match and captures. Supported flags are g, i, m, s and y. The caller supplies lastIndex; sticky matching uses it exactly, other matching searches forward from it. The global flag is metadata only. A later wrapper must coerce and update lastIndex, construct result arrays and advance empty matches in String operations.
+
+Unsupported flags u, v and d, lookbehind, named groups and quantified lookahead return explicit errors. Non-Unicode Annex B escapes, backreferences, positive and negative lookahead are included. Case folding uses Rust Unicode data. The Node comparison checks all 65,536 code units and 1,144 multi-member classes. Three known Unicode-version differences remain at U+A7CF, U+A7D3 and U+A7D5; no other folding differences were found.
+
+Compile caps: 65,536 pattern units, group depth 128, 131,072 instructions, 4,096 captures and about four million class-folding units. Default execution caps: 50 million work units, 16 Mi input units and four million backtrack frames. A limit error is distinct from no match. Cancellation is checked at entry and periodically during work. Register initialization is charged in bulk; scans, comparisons, resets and stack traversal also consume budget. Heap allocator failure is not recovered.
+
+Parent review found two budget bypasses. With a zero budget, searching for a in bbbb returned no match; a 1,000-unit backreference also completed outside the budget. Both regressions fail on child baseline 28911aa and pass after the fixes. Short calls now check an already-set cancellation flag. The Rust-string entry also stops conversion after the pattern cap: rejecting an 8 MiB input allocates 131,074 bytes, against 39,146,856 cumulative allocated bytes on the baseline. This measures conversion allocations, not source storage or RSS.
+
+All 57 public literals compile. Parent compared them with Node on 9,006 controlled inputs; every literal has positive and negative probes. Seeded generated corpora 11, 12 and 13 contain 20,244, 20,245 and 20,244 cases. One case initially reached the new 50-million-work budget; it returned no match like Node with a 500-million-work semantic-check budget. The oracle harness now uses that larger budget; production defaults are unchanged. Generated cases exercise backreferences and lookahead beyond the target inventory. The committed 846-case oracle fixture also passes. No target bundle executes in Node.
+
+Parent ran release loads in separate processes under 1 GiB and 120 seconds per mode and scale. All Node-derived span checksums and expected error counts passed. The figures below are one sample per scale on archMachine; they do not establish a parent-measured speed-up.
+
+| Workload | Passes at 1x / 10x / 100x | Wall milliseconds | Peak RSS KiB at 100x |
+| --- | --- | --- | --- |
+| Short matches | 20k / 200k / 2M | 37.8 / 373.9 / 3,736.8 | 2,460 |
+| Captures | 5k / 50k / 500k | 17.3 / 174.6 / 1,708.6 | 2,516 |
+| Near miss | 1 / 10 / 100 | 12.7 / 128.7 / 1,293.0 | 2,472 |
+| Budget failures | 100 / 1k / 10k | 55.9 / 558.2 / 5,369.1 | 2,796 |
+| Compile | 200 / 2k / 20k | 4.2 / 38.3 / 370.8 | 2,536 |
+
+At 100x the short case returns 34 million matches, with about one allocation per returned span vector. Near misses and budget failures allocate no memory per execution after scratch setup. The largest retained scratch is 196,644 bytes. Near misses still backtrack quadratically within the explicit work budget. The delegate's first-unit and anchor skips remain; parent did not reproduce the discarded pre-optimization version.
+
+Reproduce with `tools/js/regexp_check.sh <existing-output-dir>` and `tools/js/regexp_load.sh <existing-output-dir>`. The check script requires Node's pathological-pattern probe to exit with timeout status 124; another failure is not counted as expected. It saves the canonicalization output before checking it, so a producer failure cannot hide in a shell pipeline.
+
+Not tested: JS RegExp/String wrappers, dynamic patterns constructed by the target, browser execution, Unicode-mode syntax, newer-Unicode folding agreement or non-Linux targets. This component does not establish full ECMA-262 compatibility.
+
+Final checks: 840 workspace tests and all 89 assembled JS tests in debug and release passed. Crate clippy is clean. The full regexp check script passed with zero mismatches in all three generated corpora and the required Node timeout status.
