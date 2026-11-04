@@ -252,6 +252,8 @@ pub struct Dom {
     pub(crate) start: Instant,
     pub(crate) sched: RefCell<crate::browser_scheduler::Sched>,
     pub(crate) fetch: crate::browser_fetch::Fetch,
+    /// Script-made `ReadableStream`s (`browser_streams.rs`).
+    pub(crate) streams: crate::browser_streams::Streams,
     /// Navigation, history and storage state (`browser_navigation.rs`).
     pub(crate) nav: crate::browser_navigation::Nav,
     pub(crate) scripts: crate::browser_loader::Scripts,
@@ -273,6 +275,7 @@ impl Host for Dom {
         out.extend(self.doc_wrapper.get().map(|&o| Value::Object(o)));
         self.sched_roots(out);
         self.fetch.roots(out);
+        self.streams.roots(out);
         crate::browser_navigation::roots(self, out);
         self.scripts_roots(out);
         crate::browser_platform::roots(self, out);
@@ -303,6 +306,7 @@ impl Host for Dom {
             }
         }
         self.fetch.trace(owner, out);
+        self.streams.trace(owner, out);
     }
 
     fn prune(&self, live: &dyn Fn(ObjId) -> bool) {
@@ -322,6 +326,7 @@ impl Host for Dom {
         st.events.retain(|&o, _| live(o));
         self.sched_prune(live);
         self.fetch.prune(live);
+        self.streams.prune(live);
     }
 
     fn report_exception(&self, it: &mut Interp<'_>, thrown: Value) {
@@ -818,6 +823,7 @@ impl Browser {
             start: Instant::now(),
             sched: RefCell::default(),
             fetch: Default::default(),
+            streams: Default::default(),
             nav: Default::default(),
             scripts: Default::default(),
             plat: Default::default(),

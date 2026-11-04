@@ -31,8 +31,9 @@
 //!
 //! Streams: `response.body` is a facade over a response that is fully buffered in memory. `getReader().read()` hands out real
 //! bytes of that response in `Uint8Array` chunks of `chunk_bytes`, then `{done: true}`. There is no live socket streaming and no
-//! backpressure. `cancel`, `releaseLock`, `locked`, `bodyUsed` and the one-consumer rules work. `new ReadableStream(...)` (a
-//! custom underlying source), `tee`, `pipeTo`, `pipeThrough`, BYOB readers, `reader.closed` and transfer are `Unsupported`.
+//! backpressure. `cancel`, `releaseLock`, `locked`, `bodyUsed` and the one-consumer rules work. `tee`, `pipeTo`, `pipeThrough`,
+//! BYOB readers, `reader.closed` and transfer are `Unsupported`. `new ReadableStream(...)` with a script source is in
+//! `browser_streams.rs`; the stream and reader methods there dispatch on which kind of object `this` is.
 //!
 //! Gates (explicit `Unsupported`, nothing is faked): methods other than GET and POST; `Blob`/`FormData`/`URLSearchParams`/stream
 //! bodies and `blob()`/`formData()`; `Request.body`, `signal` (AbortController) and `mode: "no-cors"`; non-empty `integrity`;
@@ -54,6 +55,7 @@
 //! Not browser-verified except against Node for the pure parts (`tools/js/fetch_oracle.mjs`).
 
 use crate::browser::{Browser, Dom, Kind, R, unsupported};
+use crate::browser_streams as streams;
 use bare_js::eval::{Error, Interp};
 use bare_js::value::{ObjId, Value};
 use bare_net::http::{Client, Method, Request as NetRequest};
@@ -1252,10 +1254,6 @@ fn resp_body(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> R<Value>
     Ok(Value::Object(s))
 }
 
-fn stream_ctor(_: &Dom, _: &mut Interp<'_>, _: Value, _: &[Value]) -> R<Value> {
-    Err(Error::Unsupported(unsupported("new ReadableStream (a custom underlying source)")))
-}
-
 fn gate_stream(_: &Dom, _: &mut Interp<'_>, _: Value, _: &[Value]) -> R<Value> {
     Err(Error::Unsupported(unsupported("ReadableStream tee, pipeTo, pipeThrough and async iteration")))
 }
@@ -1272,7 +1270,7 @@ fn stream_owner(d: &Dom, it: &mut Interp<'_>, this: Value) -> R<(ObjId, ObjId)> 
     }
 }
 
-fn stream_locked(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> R<Value> {
+pub(crate) fn stream_locked(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> R<Value> {
     let (_, r) = stream_owner(d, it, this)?;
     let locked = match d.fetch.st.borrow().objs.get(&r) {
         Some(F::Response(r)) => r.c.body.locked,
@@ -1281,7 +1279,7 @@ fn stream_locked(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> R<Va
     Ok(Value::Bool(locked))
 }
 
-fn stream_get_reader(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> R<Value> {
+pub(crate) fn stream_get_reader(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> R<Value> {
     let (s, r) = stream_owner(d, it, this)?;
     if !matches!(arg(a, 0), Value::Undefined) {
         let mode = d.prop(it, arg(a, 0), "mode")?;
@@ -1303,7 +1301,7 @@ fn stream_get_reader(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> 
     Ok(Value::Object(d.add_obj(it, Pr::Reader, F::Reader { stream: s, released: false })?))
 }
 
-fn stream_cancel(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> R<Value> {
+pub(crate) fn stream_cancel(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> R<Value> {
     let p = it.host_new_promise()?;
     let r = (|| -> R<Value> {
         let (_, resp) = stream_owner(d, it, this)?;
@@ -1341,7 +1339,7 @@ fn reader_parts(d: &Dom, it: &mut Interp<'_>, this: Value) -> R<(ObjId, ObjId, b
     Ok((o, resp, released))
 }
 
-fn reader_read(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> R<Value> {
+pub(crate) fn reader_read(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> R<Value> {
     let p = it.host_new_promise()?;
     let r = (|| -> R<Value> {
         let (_, resp, released) = reader_parts(d, it, this)?;
@@ -1399,7 +1397,7 @@ fn reader_read(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> R<Valu
     settle(it, p, r)
 }
 
-fn reader_cancel(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> R<Value> {
+pub(crate) fn reader_cancel(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> R<Value> {
     let p = it.host_new_promise()?;
     let r = (|| -> R<Value> {
         let (_, resp, released) = reader_parts(d, it, this)?;
@@ -1412,7 +1410,7 @@ fn reader_cancel(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> R<Va
     settle(it, p, r)
 }
 
-fn reader_release(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> R<Value> {
+pub(crate) fn reader_release(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> R<Value> {
     let (o, resp, released) = reader_parts(d, it, this)?;
     if !released {
         let mut st = d.fetch.st.borrow_mut();
@@ -1426,7 +1424,7 @@ fn reader_release(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> R<V
     Ok(Value::Undefined)
 }
 
-fn gate_reader_closed(_: &Dom, _: &mut Interp<'_>, _: Value, _: &[Value]) -> R<Value> {
+pub(crate) fn gate_reader_closed(_: &Dom, _: &mut Interp<'_>, _: Value, _: &[Value]) -> R<Value> {
     Err(Error::Unsupported(unsupported("ReadableStreamDefaultReader.closed")))
 }
 
@@ -1755,16 +1753,16 @@ static DEFS: &[Def] = &[
     Def { on: Response, name: "arrayBuffer", len: 0, kind: M(body_array_buffer) },
     Def { on: Response, name: "blob", len: 0, kind: M(gate_blob) },
     Def { on: Response, name: "formData", len: 0, kind: M(gate_blob) },
-    Def { on: Stream, name: "locked", len: 0, kind: G(stream_locked) },
-    Def { on: Stream, name: "getReader", len: 0, kind: M(stream_get_reader) },
-    Def { on: Stream, name: "cancel", len: 1, kind: M(stream_cancel) },
+    Def { on: Stream, name: "locked", len: 0, kind: G(streams::locked) },
+    Def { on: Stream, name: "getReader", len: 0, kind: M(streams::get_reader) },
+    Def { on: Stream, name: "cancel", len: 1, kind: M(streams::cancel) },
     Def { on: Stream, name: "tee", len: 0, kind: M(gate_stream) },
     Def { on: Stream, name: "pipeTo", len: 1, kind: M(gate_stream) },
     Def { on: Stream, name: "pipeThrough", len: 1, kind: M(gate_stream) },
-    Def { on: Reader, name: "read", len: 0, kind: M(reader_read) },
-    Def { on: Reader, name: "cancel", len: 1, kind: M(reader_cancel) },
-    Def { on: Reader, name: "releaseLock", len: 0, kind: M(reader_release) },
-    Def { on: Reader, name: "closed", len: 0, kind: G(gate_reader_closed) },
+    Def { on: Reader, name: "read", len: 0, kind: M(streams::read) },
+    Def { on: Reader, name: "cancel", len: 1, kind: M(streams::reader_cancel) },
+    Def { on: Reader, name: "releaseLock", len: 0, kind: M(streams::release) },
+    Def { on: Reader, name: "closed", len: 0, kind: G(streams::reader_closed) },
 ];
 
 /// Define the globals `fetch`, `Headers`, `Request`, `Response`, `ReadableStream`, `ReadableStreamDefaultReader`.
@@ -1803,7 +1801,7 @@ pub(crate) fn install(d: &Dom, it: &mut Interp<'_>) -> R<()> {
         ("Headers", Headers, headers_ctor, true),
         ("Request", Request, request_ctor, true),
         ("Response", Response, response_ctor, true),
-        ("ReadableStream", Stream, stream_ctor, true),
+        ("ReadableStream", Stream, streams::ctor, true),
         ("ReadableStreamDefaultReader", Reader, illegal, false),
     ];
     for (name, p, h, ctor) in ifaces {
@@ -1819,6 +1817,7 @@ pub(crate) fn install(d: &Dom, it: &mut Interp<'_>) -> R<()> {
     let k = d.key(it, "fetch")?;
     it.define_data(g, k, Value::Object(f), true, false, true)?;
     fixed.push(f);
+    streams::install(d, it, protos[Stream as usize], protos[Reader as usize], &mut fixed)?;
     *d.fetch.fixed.borrow_mut() = fixed;
     // The intrinsic JSON.parse, so a script that replaces it does not change what `json()` runs.
     let json = d.prop(it, Value::Object(g), "JSON")?;

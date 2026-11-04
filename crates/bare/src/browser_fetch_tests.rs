@@ -370,7 +370,6 @@ fn response_constructor_request_and_clone() {
             ("new Request('/x').body", "Request.body (a request body stream)"),
             ("new Response('x').blob()", "Body.blob and Body.formData (no Blob or FormData)"),
             ("new Response('x').formData()", "Body.blob and Body.formData (no Blob or FormData)"),
-            ("new ReadableStream({start(c) {}})", "new ReadableStream (a custom underlying source)"),
             ("new Response('x').body.tee()", "ReadableStream tee, pipeTo, pipeThrough and async iteration"),
             ("new Response('x').body.getReader().closed", "ReadableStreamDefaultReader.closed"),
             ("new Response('x').body.getReader({mode: 'byob'})", "ReadableStream BYOB reader"),

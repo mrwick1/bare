@@ -1,0 +1,293 @@
+=== basic-enqueue-close-read
+var out = [];
+var rs = new ReadableStream({ start(c) { c.enqueue('a'); c.enqueue('b'); c.close(); } });
+var r = rs.getReader();
+function step() { return r.read().then(function (x) { out.push(x.done ? 'done' : x.value); if (!x.done) return step(); }); }
+step();
+(function () { return out.join('|'); })
+=== flight-shaped-text-chunks
+var out = [], enc = new TextEncoder(), dec = new TextDecoder();
+var rows = ['0:["$","div",null,{}]\n', '1:I["chunk",[],"default"]\n', '2:"tail"\n'];
+var rs = new ReadableStream({ start(c) { for (var i = 0; i < rows.length; i++) c.enqueue(enc.encode(rows[i])); c.close(); } });
+var r = rs.getReader();
+function progress(x) {
+  if (x.done) { out.push('end'); return; }
+  out.push(Object.prototype.toString.call(x.value) + ':' + x.value.length + ':' + dec.decode(x.value, { stream: true }).trim());
+  return r.read().then(progress);
+}
+r.read().then(progress);
+(function () { return out.join('|'); })
+=== pending-read-fulfilled-by-later-enqueue
+var out = [], ctl;
+var rs = new ReadableStream({ start(c) { ctl = c; } });
+var r = rs.getReader();
+r.read().then(function (x) { out.push('r1:' + x.value + x.done); });
+r.read().then(function (x) { out.push('r2:' + x.value + x.done); });
+Promise.resolve().then(function () { out.push('tick'); ctl.enqueue(1); ctl.enqueue(2); ctl.enqueue(3); out.push('ds:' + ctl.desiredSize); });
+r.read().then(function (x) { out.push('r3:' + x.value + x.done); return r.read(); }).then(function (x) { out.push('r4:' + x.value); ctl.close(); return r.read(); }).then(function (x) { out.push('r5:' + x.done); });
+(function () { return out.join('|'); })
+=== pull-backpressure-hwm-1
+var out = [], n = 0;
+var rs = new ReadableStream({ pull(c) { n++; out.push('pull' + n + ':ds' + c.desiredSize); c.enqueue(n); } });
+var r;
+Promise.resolve().then(function () { return Promise.resolve(); }).then(function () { out.push('idle:' + n); r = rs.getReader(); return r.read(); }).then(function (x) { out.push('got' + x.value); return Promise.resolve(); }).then(function () { return Promise.resolve(); }).then(function () { out.push('after:' + n); });
+(function () { return out.join('|'); })
+=== pull-hwm-0-only-on-read
+var out = [], n = 0;
+var rs = new ReadableStream({ pull(c) { n++; c.enqueue(n); } }, { highWaterMark: 0 });
+var r = rs.getReader();
+Promise.resolve().then(function () { out.push('before:' + n); return r.read(); }).then(function (x) { out.push('v' + x.value); return r.read(); }).then(function (x) { out.push('v' + x.value + ':' + n); });
+(function () { return out.join('|'); })
+=== pull-hwm-3-fills-queue
+var out = [], n = 0;
+var rs = new ReadableStream({ pull(c) { n++; c.enqueue(n); } }, { highWaterMark: 3 });
+var cc;
+setTimeout(function () {}, 0);
+Promise.resolve().then(function () {}).then(function () {}).then(function () {}).then(function () {}).then(function () {}).then(function () {}).then(function () { out.push('n:' + n); });
+(function () { return out.join('|'); })
+=== desired-size-states
+var out = [], ctl;
+var rs = new ReadableStream({ start(c) { ctl = c; } }, { highWaterMark: 2 });
+out.push(ctl.desiredSize);
+ctl.enqueue('x'); out.push(ctl.desiredSize);
+ctl.enqueue('y'); out.push(ctl.desiredSize);
+ctl.enqueue('z'); out.push(ctl.desiredSize);
+ctl.close(); out.push(ctl.desiredSize);
+var rs2 = new ReadableStream({ start(c) { ctl = c; } });
+ctl.error(new Error('e')); out.push(ctl.desiredSize);
+var rs3 = new ReadableStream({ start(c) { ctl = c; c.close(); } });
+out.push(ctl.desiredSize);
+var rs4 = new ReadableStream({ start(c) { ctl = c; } }, { highWaterMark: Infinity });
+out.push(ctl.desiredSize);
+(function () { return out.join('|'); })
+=== enqueue-and-close-state-errors
+var out = [], ctl;
+function t(label, f) { try { f(); out.push(label + ':ok'); } catch (e) { out.push(label + ':' + e.name); } }
+new ReadableStream({ start(c) { ctl = c; } });
+ctl.close();
+t('enqueue-after-close', function () { ctl.enqueue(1); });
+t('close-twice', function () { ctl.close(); });
+t('error-after-close', function () { ctl.error(new Error('x')); });
+new ReadableStream({ start(c) { ctl = c; } });
+ctl.error(new Error('x'));
+t('enqueue-after-error', function () { ctl.enqueue(1); });
+t('close-after-error', function () { ctl.close(); });
+new ReadableStream({ start(c) { ctl = c; c.enqueue(1); c.close(); } });
+t('enqueue-after-close-requested', function () { ctl.enqueue(1); });
+(function () { return out.join('|'); })
+=== error-rejects-pending-and-later-reads
+var out = [], ctl, boom = { boom: 1 };
+var rs = new ReadableStream({ start(c) { ctl = c; } });
+var r = rs.getReader();
+r.read().then(function () { out.push('no'); }, function (e) { out.push('p1:' + (e === boom)); });
+r.read().then(function () { out.push('no'); }, function (e) { out.push('p2:' + (e === boom)); });
+Promise.resolve().then(function () { ctl.error(boom); return r.read(); }).then(function () { out.push('no'); }, function (e) { out.push('later:' + (e === boom)); });
+(function () { return out.join('|'); })
+=== error-discards-queue
+var out = [], ctl, boom = new Error('b');
+var rs = new ReadableStream({ start(c) { ctl = c; c.enqueue(1); c.enqueue(2); c.error(boom); } });
+var r = rs.getReader();
+r.read().then(function (x) { out.push('v:' + x.value); }, function (e) { out.push('rej:' + (e === boom)); });
+(function () { return out.join('|'); })
+=== start-throws-in-constructor
+var out = [], boom = { b: 1 };
+try { new ReadableStream({ start() { throw boom; } }); out.push('no'); } catch (e) { out.push(e === boom); }
+(function () { return out.join('|'); })
+=== start-rejects-errors-stream
+var out = [], boom = { b: 1 };
+var rs = new ReadableStream({ start() { return Promise.reject(boom); } });
+var r = rs.getReader();
+r.read().then(function () { out.push('no'); }, function (e) { out.push(e === boom); });
+(function () { return out.join('|'); })
+=== pull-throws-errors-stream
+var out = [], boom = { b: 1 }, n = 0;
+var rs = new ReadableStream({ pull() { n++; throw boom; } });
+var r = rs.getReader();
+r.read().then(function () { out.push('no'); }, function (e) { out.push(e === boom); out.push('pulls:' + n); });
+(function () { return out.join('|'); })
+=== pull-returns-rejected-promise
+var out = [], boom = { b: 1 }, n = 0;
+var rs = new ReadableStream({ pull() { n++; return Promise.reject(boom); } });
+var r = rs.getReader();
+r.read().then(function () { out.push('no'); }, function (e) { out.push(e === boom); out.push('pulls:' + n); });
+(function () { return out.join('|'); })
+=== async-start-delays-pull
+var out = [], release;
+var rs = new ReadableStream({
+  start(c) { out.push('start'); return new Promise(function (res) { release = res; }); },
+  pull(c) { out.push('pull'); c.enqueue('x'); }
+});
+var r = rs.getReader();
+r.read().then(function (x) { out.push('read:' + x.value); });
+Promise.resolve().then(function () {}).then(function () { out.push('before-release'); release(); });
+(function () { return out.join('|'); })
+=== async-pull-pulls-again-only-after-settle
+var out = [], n = 0, ctl, done1;
+var rs = new ReadableStream({
+  start(c) { ctl = c; },
+  pull(c) { n++; out.push('pull' + n); if (n === 1) return new Promise(function (res) { done1 = res; }); }
+}, { highWaterMark: 2 });
+Promise.resolve().then(function () {}).then(function () { out.push('enq'); ctl.enqueue('a'); ctl.enqueue('b'); }).then(function () { out.push('release'); done1(); }).then(function () {}).then(function () {}).then(function () { out.push('end:' + n); });
+(function () { return out.join('|'); })
+=== cancel-stream-calls-source-cancel
+var out = [], src = { cancel(reason) { out.push('cancel:' + reason + ':' + (this === src)); } };
+var rs = new ReadableStream(src);
+rs.cancel('why').then(function (v) { out.push('res:' + v); var r = rs.getReader(); return r.read(); }).then(function (x) { out.push('after:' + x.done + ':' + x.value); });
+(function () { return out.join('|'); })
+=== cancel-locked-stream-rejects
+var out = [];
+var rs = new ReadableStream({ start(c) { c.enqueue(1); } });
+var r = rs.getReader();
+rs.cancel().then(function () { out.push('no'); }, function (e) { out.push(e.name); });
+(function () { return out.join('|'); })
+=== reader-cancel-settles-pending-read
+var out = [], src = { cancel(reason) { out.push('src:' + reason); } };
+var rs = new ReadableStream(src);
+var r = rs.getReader();
+r.read().then(function (x) { out.push('read:' + x.done); });
+r.cancel('bye').then(function (v) { out.push('cancel:' + v); out.push(rs.locked); });
+(function () { return out.join('|'); })
+=== cancel-source-rejects
+var out = [], boom = { b: 1 };
+var rs = new ReadableStream({ cancel() { return Promise.reject(boom); } });
+rs.cancel().then(function () { out.push('no'); }, function (e) { out.push(e === boom); });
+(function () { return out.join('|'); })
+=== cancel-source-throws
+var out = [], boom = { b: 1 };
+var rs = new ReadableStream({ cancel() { throw boom; } });
+rs.cancel().then(function () { out.push('no'); }, function (e) { out.push(e === boom); });
+(function () { return out.join('|'); })
+=== cancel-closed-and-errored
+var out = [], ctl, boom = { b: 1 };
+var a = new ReadableStream({ start(c) { c.close(); } });
+var b = new ReadableStream({ start(c) { c.error(boom); } });
+a.cancel().then(function (v) { out.push('closed:' + v); });
+b.cancel().then(function () { out.push('no'); }, function (e) { out.push('errored:' + (e === boom)); });
+(function () { return out.join('|'); })
+=== cancel-drops-queue-and-clears-callbacks
+var out = [], pulls = 0, ctl;
+var rs = new ReadableStream({ start(c) { ctl = c; c.enqueue(1); c.enqueue(2); }, pull() { pulls++; } }, { highWaterMark: 5 });
+rs.cancel().then(function () { var r = rs.getReader(); return r.read(); }).then(function (x) { out.push('done:' + x.done); try { ctl.enqueue(3); out.push('enq-ok'); } catch (e) { out.push('enq:' + e.name); } });
+(function () { return out.join('|'); })
+=== release-lock-rejects-pending-reads
+var out = [];
+var rs = new ReadableStream({ start(c) { } });
+var r = rs.getReader();
+r.read().then(function () { out.push('no'); }, function (e) { out.push('pending:' + e.name); });
+out.push('locked:' + rs.locked);
+r.releaseLock();
+out.push('locked:' + rs.locked);
+r.read().then(function () { out.push('no'); }, function (e) { out.push('after:' + e.name); });
+r.releaseLock();
+var r2 = rs.getReader();
+out.push('again:' + rs.locked);
+(function () { return out.join('|'); })
+=== get-reader-twice-and-released-cancel
+var out = [];
+var rs = new ReadableStream({ start(c) { c.enqueue('k'); } });
+var r = rs.getReader();
+try { rs.getReader(); out.push('no'); } catch (e) { out.push(e.name); }
+r.releaseLock();
+r.cancel().then(function () { out.push('no'); }, function (e) { out.push('cancel:' + e.name); });
+var r2 = rs.getReader();
+r2.read().then(function (x) { out.push('v:' + x.value); });
+(function () { return out.join('|'); })
+=== release-then-new-reader-keeps-queue
+var out = [];
+var rs = new ReadableStream({ start(c) { c.enqueue(1); c.enqueue(2); c.close(); } }, { highWaterMark: 5 });
+var r = rs.getReader();
+r.read().then(function (x) { out.push(x.value); r.releaseLock(); var r2 = rs.getReader(); return r2.read().then(function (y) { out.push(y.value); return r2.read(); }); }).then(function (z) { out.push('done:' + z.done); });
+(function () { return out.join('|'); })
+=== enqueue-arbitrary-values
+var out = [], o = { a: 1 };
+var rs = new ReadableStream({ start(c) { c.enqueue(undefined); c.enqueue(null); c.enqueue(0); c.enqueue(o); c.enqueue([1, 2]); c.close(); } }, { highWaterMark: 10 });
+var r = rs.getReader();
+var got = [];
+function step() { return r.read().then(function (x) { if (x.done) return; got.push(x.value === o ? 'o' : Array.isArray(x.value) ? 'arr' : String(x.value)); return step(); }); }
+step().then(function () { out.push(got.join(',')); });
+(function () { return out.join('|'); })
+=== close-with-queue-drains-then-done
+var out = [], ctl;
+var rs = new ReadableStream({ start(c) { ctl = c; c.enqueue('a'); c.enqueue('b'); c.close(); out.push('ds:' + c.desiredSize); } }, { highWaterMark: 3 });
+var r = rs.getReader();
+r.read().then(function (x) { out.push(x.value); return r.read(); }).then(function (x) { out.push(x.value); return r.read(); }).then(function (x) { out.push('done:' + x.done + ':' + x.value); return r.read(); }).then(function (x) { out.push('done2:' + x.done); });
+(function () { return out.join('|'); })
+=== close-settles-pending-reads
+var out = [], ctl;
+var rs = new ReadableStream({ start(c) { ctl = c; } });
+var r = rs.getReader();
+r.read().then(function (x) { out.push('a:' + x.done); });
+r.read().then(function (x) { out.push('b:' + x.done); });
+ctl.close();
+(function () { return out.join('|'); })
+=== constructor-argument-validation
+var out = [];
+function t(label, f) { try { f(); out.push(label + ':ok'); } catch (e) { out.push(label + ':' + e.name); } }
+t('start-num', function () { new ReadableStream({ start: 1 }); });
+t('pull-obj', function () { new ReadableStream({ pull: {} }); });
+t('cancel-str', function () { new ReadableStream({ cancel: 'x' }); });
+t('hwm-neg', function () { new ReadableStream({}, { highWaterMark: -1 }); });
+t('hwm-nan', function () { new ReadableStream({}, { highWaterMark: NaN }); });
+t('hwm-str', function () { new ReadableStream({}, { highWaterMark: '2' }); });
+t('type-x', function () { new ReadableStream({ type: 'x' }); });
+t('source-num', function () { new ReadableStream(5); });
+t('empty', function () { new ReadableStream(); });
+t('empty-obj', function () { new ReadableStream({}); });
+t('no-new', function () { ReadableStream({}); });
+(function () { return out.join('|'); })
+=== callbacks-this-and-args
+var out = [], src = {
+  start(c) { out.push('start:' + (this === src) + ':' + arguments.length + ':' + (typeof c.enqueue)); },
+  pull(c) { out.push('pull:' + (this === src) + ':' + arguments.length); },
+  cancel(r) { out.push('cancel:' + (this === src) + ':' + arguments.length); }
+};
+var rs = new ReadableStream(src);
+rs.cancel('x');
+(function () { return out.join('|'); })
+=== reentrant-read-inside-pull
+var out = [], r, n = 0;
+var rs = new ReadableStream({ pull(c) { n++; if (n === 1) { r.read().then(function (x) { out.push('inner:' + x.value); }); } c.enqueue('v' + n); } }, { highWaterMark: 0 });
+r = rs.getReader();
+r.read().then(function (x) { out.push('outer:' + x.value); });
+Promise.resolve().then(function () {}).then(function () {}).then(function () { out.push('n:' + n); });
+(function () { return out.join('|'); })
+=== reentrant-close-and-error-inside-pull
+var out = [], n = 0;
+var rs = new ReadableStream({ pull(c) { n++; c.enqueue('a'); c.close(); } });
+var r = rs.getReader();
+r.read().then(function (x) { out.push(x.value); return r.read(); }).then(function (x) { out.push('done:' + x.done + ':n' + n); });
+(function () { return out.join('|'); })
+=== controller-enqueue-from-promise-chain
+var out = [], ctl;
+var rs = new ReadableStream({ start(c) { ctl = c; return Promise.resolve().then(function () { c.enqueue('s1'); }); } }, { highWaterMark: 4 });
+var r = rs.getReader();
+Promise.resolve().then(function () {}).then(function () { ctl.enqueue('s2'); ctl.close(); });
+function step() { return r.read().then(function (x) { if (x.done) { out.push('end'); return; } out.push(x.value); return step(); }); }
+step();
+(function () { return out.join('|'); })
+=== no-source-read-stays-pending
+var out = [];
+var rs = new ReadableStream();
+var r = rs.getReader();
+var p = r.read();
+p.then(function () { out.push('settled'); });
+out.push('locked:' + rs.locked);
+(function () { return out.join('|'); })
+=== locked-getter-and-prototype-shape
+var out = [], rs = new ReadableStream({});
+out.push(rs.locked, typeof rs.getReader, typeof rs.cancel, rs instanceof ReadableStream);
+var r = rs.getReader();
+out.push(rs.locked, typeof r.read, typeof r.releaseLock, typeof r.cancel);
+(function () { return out.join('|'); })
+=== read-result-shape
+var out = [];
+var rs = new ReadableStream({ start(c) { c.enqueue('v'); c.close(); } });
+var r = rs.getReader();
+r.read().then(function (x) { out.push(Object.keys(x).join(','), x.done); return r.read(); }).then(function (x) { out.push(Object.keys(x).join(','), 'value' in x, x.value, x.done); });
+(function () { return out.join('|'); })
+=== many-chunks-order
+var out = [], N = 200, rs = new ReadableStream({ start(c) { for (var i = 0; i < N; i++) c.enqueue(i); c.close(); } }, { highWaterMark: N });
+var r = rs.getReader(), sum = 0, last = -1, ok = true;
+function step() { return r.read().then(function (x) { if (x.done) return; if (x.value !== last + 1) ok = false; last = x.value; sum += x.value; return step(); }); }
+step().then(function () { out.push(sum, last, ok); });
+(function () { return out.join('|'); })
