@@ -43,7 +43,10 @@ fn main() {
         for p in &result.pages { println!("scripts={} throws={} load_errors={} fetches={} bytes={}", p.scripts_run, p.script_throws, p.load_errors, p.fetches, p.bytes); }
         let mut present = false;
         if let Some(b) = session.browser() {
-            present = b.query(&selector).unwrap().is_some();
+            present = match b.query(&selector) {
+                Ok(node) => node.is_some(),
+                Err(_) => { println!("required_selector_check=failed"); false }
+            };
             println!("required_selector_present={present} unhandled_rejections={}", b.it.unhandled_rejections().len());
             for report in b.take_reports() {
                 // Emit only known API names, never arbitrary exception text.

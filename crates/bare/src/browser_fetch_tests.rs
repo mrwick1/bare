@@ -370,12 +370,13 @@ fn response_constructor_request_and_clone() {
             ("new Request('/x').body", "Request.body (a request body stream)"),
             ("new Response('x').blob()", "Body.blob and Body.formData (no Blob or FormData)"),
             ("new Response('x').formData()", "Body.blob and Body.formData (no Blob or FormData)"),
-            ("new ReadableStream({start(c) {}})", "new ReadableStream (a custom underlying source)"),
             ("new Response('x').body.tee()", "ReadableStream tee, pipeTo, pipeThrough and async iteration"),
             ("new Response('x').body.getReader().closed", "ReadableStreamDefaultReader.closed"),
             ("new Response('x').body.getReader({mode: 'byob'})", "ReadableStream BYOB reader"),
         ] {
-            let r = js(&mut b, src);
+            // Stream gates are fatal for that layer. Check each independent gate in its own realm.
+            let mut gate_browser = at(1);
+            let r = js(&mut gate_browser, src);
             assert_eq!(r, format!("unsupported:{what}"), "{src}");
         }
         assert_eq!(js(&mut b, "new Request('/x', {body: {getReader: function () {}}, method: 'POST'})"), "unsupported:a ReadableStream as a body");

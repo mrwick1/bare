@@ -115,6 +115,32 @@ impl<'p> Interp<'p> {
         self.resolve_promise(o, v)
     }
 
+    /// A function that calls function `target` with `this` fixed, as `bind` does but not through the script-visible
+    /// `Function.prototype.bind`. The host uses it to carry one value into a promise reaction. The collector traces
+    /// `target` and `this`. Counts toward `max_functions`. `target` must be a function object.
+    pub fn host_bind(&mut self, target: ObjId, this: Value) -> Result<ObjId, Error> {
+        if !self.funcs.contains_key(&target) {
+            return Err(self.type_err("host_bind target is not a function"));
+        }
+        self.new_func_object(Callee::Bound { target, this, args: Vec::new() })
+    }
+
+    /// `PromiseResolve(%Promise%, x)` then `PerformPromiseThen(promise, on_ok, on_err)` with a fresh derived promise. A
+    /// native promise is used as it is (no extra job); any other value is wrapped, and a thenable is assimilated in a
+    /// job. The reactions are called with `this` undefined and one argument, at the next checkpoint. Does not read the
+    /// script-visible `then`. Reading `x.constructor` (as the standard does) may run a getter.
+    pub fn host_promise_react(&mut self, x: Value, on_ok: Value, on_err: Value) -> Result<(), Error> {
+        let p = self.promise_resolve(x)?;
+        self.host_promise_then(p, on_ok, on_err)
+    }
+
+    /// Attach intrinsic reactions to a known native Promise without reading its constructor or then properties.
+    pub fn host_promise_then(&mut self, p: Value, on_ok: Value, on_err: Value) -> Result<(), Error> {
+        let o = self.host_promise(p)?;
+        let derived = self.new_promise()?;
+        self.perform_then(o, on_ok, on_err, derived)
+    }
+
     /// Reject a promise made by [`Interp::host_new_promise`]. See `host_resolve_promise`.
     pub fn host_reject_promise(&mut self, p: Value, v: Value) -> Result<(), Error> {
         let o = self.host_promise(p)?;

@@ -7,6 +7,9 @@ pub mod browser;
 mod browser_dom;
 mod browser_events;
 pub mod browser_fetch;
+pub mod browser_streams;
+#[cfg(test)]
+mod browser_streams_tests;
 #[cfg(test)]
 mod browser_fetch_tests;
 pub mod browser_navigation;
