@@ -47,7 +47,7 @@ use std::hash::{BuildHasherDefault, Hasher};
 use std::num::NonZeroU32;
 
 /// The number of a node. It is the place of the node in the `Vec` of its `Document`, plus one.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 // `Copy` means that passing a `NodeId` around copies it, like a number.
 pub struct NodeId(NonZeroU32);
 // JS: like a number, but the type stops us from mixing it up with other numbers.
@@ -292,6 +292,11 @@ impl Document {
         places
     }
 
+    /// The number of different names (tags and attributes) in the name table. It only grows.
+    pub fn name_count(&self) -> usize {
+        self.names.len()
+    }
+
     /// The number of nodes, with the top node.
     pub fn len(&self) -> usize {
         self.nodes.len()
@@ -424,6 +429,7 @@ impl Document {
         self.attrs.extend_from_within(attrs.start as usize..(attrs.start + attrs.len) as usize);
         let id = NodeId::from_index(self.nodes.len());
         let data = NodeData::Element { name, attrs: AttrList { start: to_u32(start), len: attrs.len } };
+        self.places = Default::default();
         self.nodes.push(Node { parent: None, first_child: None, last_child: None, prev: None, next: None, data });
         id
     }
@@ -439,6 +445,109 @@ impl Document {
         }
         let attrs = AttrList { start: to_u32(start), len: to_u32(attrs.len()) };
         self.insert(parent, before, NodeData::Element { name, attrs })
+    }
+
+    /// A new element with no parent and no attributes. JS: `document.createElement(name)`. The caller
+    /// lowercases and checks the name. Put it in the tree with `move_to`.
+    pub fn create_element(&mut self, name: &str) -> NodeId {
+        let name = self.intern(name);
+        let attrs = AttrList { start: to_u32(self.attrs.len()), len: 0 };
+        self.new_node(NodeData::Element { name, attrs })
+    }
+
+    /// A new text node with no parent. It does not join a neighbour (only the parser joins texts).
+    pub fn create_text(&mut self, text: &str) -> NodeId {
+        let span = self.push_text(text);
+        self.new_node(NodeData::Text(span))
+    }
+
+    /// A new comment with no parent.
+    pub fn create_comment(&mut self, text: &str) -> NodeId {
+        let span = self.push_text(text);
+        self.new_node(NodeData::Comment(span))
+    }
+
+    /// A new doctype with no parent.
+    pub fn create_doctype(&mut self, name: &str) -> NodeId {
+        let span = self.push_text(name);
+        self.new_node(NodeData::Doctype(span))
+    }
+
+    fn new_node(&mut self, data: NodeData) -> NodeId {
+        self.places = Default::default();
+        // The sibling-place table has one entry for each node, so a new node makes it too short.
+        let id = NodeId::from_index(self.nodes.len());
+        self.nodes.push(Node { parent: None, first_child: None, last_child: None, prev: None, next: None, data });
+        id
+    }
+
+    /// Set an attribute of an element: change the value, or add it at the end of the list. The caller
+    /// lowercases the name. Does nothing for a node that is not an element. The old value stays in the text
+    /// buffer (see `text_bytes`).
+    pub fn set_attr(&mut self, el: NodeId, name: &str, value: &str) {
+        let NodeData::Element { name: tag, attrs } = self.nodes[el.index()].data else { return };
+        let name = self.intern(name);
+        let span = self.push_text(value);
+        self.class_sets.get_mut().remove(&el.index());
+        let (start, len) = (attrs.start as usize, attrs.len as usize);
+        if let Some(a) = self.attrs[start..start + len].iter_mut().find(|a| a.name == name) {
+            a.value = span;
+            return;
+        }
+        let new_start = if start + len == self.attrs.len() {
+            start
+        } else {
+            // Another element's attributes follow: copy ours to the end. The old slots are wasted.
+            self.attrs.extend_from_within(start..start + len);
+            self.attrs.len() - len
+        };
+        self.attrs.push(Attr { name, value: span });
+        self.nodes[el.index()].data = NodeData::Element { name: tag, attrs: AttrList { start: to_u32(new_start), len: to_u32(len + 1) } };
+    }
+
+    /// Remove an attribute. Gives whether it was there.
+    pub fn remove_attr(&mut self, el: NodeId, name: &str) -> bool {
+        let NodeData::Element { name: tag, attrs } = self.nodes[el.index()].data else { return false };
+        let Some(name) = self.find_atom(name) else { return false };
+        let (start, len) = (attrs.start as usize, attrs.len as usize);
+        let Some(at) = self.attrs[start..start + len].iter().position(|a| a.name == name) else { return false };
+        self.class_sets.get_mut().remove(&el.index());
+        self.attrs.copy_within(start + at + 1..start + len, start + at);
+        if start + len == self.attrs.len() {
+            self.attrs.pop();
+        }
+        self.nodes[el.index()].data = NodeData::Element { name: tag, attrs: AttrList { start: attrs.start, len: attrs.len - 1 } };
+        true
+    }
+
+    /// How many attributes the element has. 0 for a node that is not an element.
+    pub fn attr_count(&self, el: NodeId) -> usize {
+        match self.nodes[el.index()].data {
+            NodeData::Element { attrs, .. } => attrs.len as usize,
+            _ => 0,
+        }
+    }
+
+    /// Change the text of a text node, a comment or a doctype. Does nothing for other nodes.
+    /// The old bytes stay in the text buffer (see `text_bytes`).
+    pub fn set_text(&mut self, node: NodeId, text: &str) {
+        match self.nodes[node.index()].data {
+            NodeData::Text(_) => self.nodes[node.index()].data = NodeData::Text(self.push_text(text)),
+            NodeData::Comment(_) => self.nodes[node.index()].data = NodeData::Comment(self.push_text(text)),
+            NodeData::Doctype(_) => self.nodes[node.index()].data = NodeData::Doctype(self.push_text(text)),
+            _ => {}
+        }
+    }
+
+    /// Bytes in the text buffer, with the bytes of old values. The buffer never shrinks, so a host that lets a
+    /// script change text must check this before it grows.
+    pub fn text_bytes(&self) -> usize {
+        self.text.len()
+    }
+
+    /// Slots in the attribute list, with the slots that no element uses any more. Same reason as `text_bytes`.
+    pub fn attr_slots(&self) -> usize {
+        self.attrs.len()
     }
 
     /// Put a text at the end of the text buffer. Gives its `Span`.
@@ -578,6 +687,74 @@ mod tests {
     fn text_of(doc: &Document, id: NodeId) -> &str {
         let NodeData::Text(span) = doc.data(id) else { panic!("not text") };
         doc.text(*span)
+    }
+
+    #[test]
+    fn detached_nodes_do_not_break_the_sibling_cache() {
+        let mut doc = Document::new();
+        let root = doc.root();
+        let a = element(&mut doc, root, "a", &[]);
+        assert_eq!(doc.sibling_place(a, false, false), 1); // the cache is built now
+        let n = doc.create_element("p");
+        assert_eq!(doc.sibling_place(n, false, false), 0); // a detached node is in no sibling list; it must not crash
+        doc.move_to(n, root, None);
+        assert_eq!(doc.sibling_place(n, false, false), 2);
+    }
+
+    #[test]
+    fn set_and_remove_attributes_keep_the_others() {
+        let mut doc = Document::new();
+        let root = doc.root();
+        let a = element(&mut doc, root, "a", &[("x", "1"), ("y", "2")]);
+        let b = element(&mut doc, root, "b", &[("z", "3")]); // `a` is not at the end of the list now
+        doc.set_attr(a, "w", "4");
+        doc.set_attr(a, "x", "10");
+        let list = |doc: &Document, el| match doc.data(el) {
+            NodeData::Element { attrs, .. } => doc.attrs(*attrs).iter().map(|t| format!("{}={}", doc.atom_str(t.name), doc.text(t.value))).collect::<Vec<_>>().join(","),
+            _ => panic!(),
+        };
+        assert_eq!(list(&doc, a), "x=10,y=2,w=4");
+        assert_eq!(list(&doc, b), "z=3");
+        assert!(doc.remove_attr(a, "y"));
+        assert!(!doc.remove_attr(a, "y"));
+        assert_eq!(list(&doc, a), "x=10,w=4");
+        doc.set_attr(b, "q", "5");
+        assert_eq!(list(&doc, b), "z=3,q=5");
+        assert_eq!(list(&doc, a), "x=10,w=4");
+        assert_eq!(doc.attr_count(a), 2);
+    }
+
+    #[test]
+    fn changing_a_long_class_attribute_drops_the_cached_set() {
+        let mut doc = Document::new();
+        let root = doc.root();
+        let long = format!("{} target", "filler ".repeat(30));
+        let a = element(&mut doc, root, "a", &[("class", &long)]);
+        assert!(doc.has_class(a, "target")); // builds the cached set
+        doc.set_attr(a, "class", &"other ".repeat(30));
+        assert!(!doc.has_class(a, "target"));
+        assert!(doc.has_class(a, "other"));
+        doc.remove_attr(a, "class");
+        assert!(!doc.has_class(a, "other"));
+    }
+
+    #[test]
+    fn text_nodes_can_be_made_detached_and_changed() {
+        let mut doc = Document::new();
+        let root = doc.root();
+        let p = element(&mut doc, root, "p", &[]);
+        let t1 = doc.create_text("ab");
+        let t2 = doc.create_text("cd");
+        doc.move_to(t1, p, None);
+        doc.move_to(t2, p, None);
+        assert_eq!(kids(&doc, p), [t1, t2]); // two text nodes stay two (only the parser merges)
+        doc.set_text(t1, "xyz");
+        assert_eq!(text_of(&doc, t1), "xyz");
+        assert_eq!(text_of(&doc, t2), "cd");
+        let c = doc.create_comment("hi");
+        doc.set_text(c, "yo");
+        assert!(matches!(doc.data(c), NodeData::Comment(s) if doc.text(*s) == "yo"));
+        assert!(doc.text_bytes() >= 9);
     }
 
     #[test]

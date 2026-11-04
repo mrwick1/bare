@@ -159,8 +159,13 @@ impl<'p> Interp<'p> {
         if self.depth != 0 {
             return Err(unsupported("drain_microtasks during a call", Span::default()));
         }
-        if let Some(error) = self.promise.failed_job { return Err(error); }
         self.begin();
+        self.drain_jobs()
+    }
+
+    /// The loop of `drain_microtasks`, without the depth check and without a new step budget.
+    fn drain_jobs(&mut self) -> Result<usize, Error> {
+        if let Some(error) = self.promise.failed_job { return Err(error); }
         let mut n = 0usize;
         while let Some(job) = self.promise.queue.pop_front() {
             if n >= self.promise.limits.max_jobs_per_drain {

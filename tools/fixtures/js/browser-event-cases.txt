@@ -1,0 +1,78 @@
+=== order-and-duplicates
+var t = new EventTarget(), log = [];
+function a() { log.push('a'); } function b() { log.push('b'); }
+t.addEventListener('x', a); t.addEventListener('x', b); t.addEventListener('x', a);
+t.dispatchEvent(new Event('x'));
+(function () { return log.join(); })
+=== once
+var t = new EventTarget(), n = 0;
+t.addEventListener('x', function () { n++; }, { once: true });
+t.dispatchEvent(new Event('x')); t.dispatchEvent(new Event('x'));
+(function () { return n; })
+=== remove-needs-same-capture
+var t = new EventTarget(), log = [];
+function f() { log.push('f'); }
+t.addEventListener('x', f, { capture: true }); t.removeEventListener('x', f);
+t.dispatchEvent(new Event('x'));
+t.removeEventListener('x', f, { capture: true });
+t.dispatchEvent(new Event('x'));
+(function () { return log.join(); })
+=== remove-during-dispatch
+var t = new EventTarget(), log = [];
+function r2() { log.push('r2'); }
+t.addEventListener('y', function () { log.push('r1'); t.removeEventListener('y', r2); });
+t.addEventListener('y', r2);
+t.dispatchEvent(new Event('y'));
+(function () { return log.join(); })
+=== add-during-dispatch
+var t = new EventTarget(), log = [];
+function r3() { log.push('r3'); }
+t.addEventListener('y', function () { log.push('r1'); t.addEventListener('y', r3); });
+t.dispatchEvent(new Event('y')); t.dispatchEvent(new Event('y'));
+(function () { return log.join(); })
+=== stop-immediate
+var t = new EventTarget(), log = [];
+t.addEventListener('x', function (e) { log.push(1); e.stopImmediatePropagation(); });
+t.addEventListener('x', function () { log.push(2); });
+t.dispatchEvent(new Event('x'));
+(function () { return log.join(); })
+=== prevent-default-cancelable
+var t = new EventTarget(), r = [];
+t.addEventListener('x', function (e) { e.preventDefault(); });
+var e1 = new Event('x', { cancelable: true }), e2 = new Event('x');
+r.push(t.dispatchEvent(e1), e1.defaultPrevented, t.dispatchEvent(e2), e2.defaultPrevented);
+(function () { return r.join(); })
+=== handle-event-object
+var t = new EventTarget(), log = [];
+t.addEventListener('x', { n: 'o', handleEvent: function (e) { log.push(this.n + e.type); } });
+t.dispatchEvent(new Event('x'));
+(function () { return log.join(); })
+=== event-fields
+var t = new EventTarget(), r = [], ev = new Event('ty', { bubbles: true });
+t.addEventListener('ty', function (e) { r.push(e.target === t, e.currentTarget === t, e.type, e.bubbles, e.cancelable, e.isTrusted); });
+t.dispatchEvent(ev);
+r.push(ev.currentTarget, ev.eventPhase);
+(function () { return r.join(); })
+=== target-after-dispatch
+var t = new EventTarget(), ev = new Event('x');
+t.dispatchEvent(ev);
+(function () { return ev.target === t; })
+=== reentrant-dispatch
+var t = new EventTarget(), log = [], d = 0;
+t.addEventListener('n', function () { log.push('n' + d); if (d < 3) { d++; t.dispatchEvent(new Event('n')); } });
+t.dispatchEvent(new Event('n'));
+(function () { return log.join(); })
+=== redispatch-same-event
+var t = new EventTarget(), log = [];
+t.addEventListener('s', function (e) { try { t.dispatchEvent(e); } catch (x) { log.push(typeof x.name); } });
+t.dispatchEvent(new Event('s'));
+(function () { return log.join(); })
+=== null-listener-ignored
+var t = new EventTarget();
+t.addEventListener('x', null);
+(function () { return t.dispatchEvent(new Event('x')); })
+=== custom-event-detail
+var t = new EventTarget(), seen;
+t.addEventListener('c', function (e) { seen = e.detail.k; });
+t.dispatchEvent(new CustomEvent('c', { detail: { k: 42 } }));
+(function () { return seen + ',' + (new CustomEvent('z').detail === null) + ',' + (new CustomEvent('z') instanceof Event); })
