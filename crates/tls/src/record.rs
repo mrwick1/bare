@@ -171,6 +171,8 @@ impl Drop for Traffic {
     }
 }
 
+// Both directions normally hold a key. Keep it inline to avoid epoch-change allocations.
+#[allow(clippy::large_enum_variant)]
 enum Tx {
     Plain,
     Keyed(Traffic),
@@ -179,6 +181,7 @@ enum Tx {
     Dead,
 }
 
+#[allow(clippy::large_enum_variant)]
 enum Rx {
     Plain,
     Keyed(Traffic),
@@ -510,10 +513,9 @@ impl<T: Read + Write> RecordLayer<T> {
                 continue;
             }
             if ty == APPDATA {
-                if let Rx::Keyed(t) = &self.rx {
-                    if t.seq >= t.limit {
-                        return Err(Error::KeyLimit);
-                    }
+                if let Rx::Keyed(t) = &self.rx
+                    && t.seq >= t.limit {
+                    return Err(Error::KeyLimit);
                 }
                 if len < TAG_LEN {
                     return Err(Error::AuthFailed); // no room for a tag

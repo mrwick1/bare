@@ -225,9 +225,11 @@ pub struct ClientHelloParams<'a> {
 fn valid_server_name(n: &[u8]) -> bool {
     !n.is_empty()
         && n.len() <= MAX_SERVER_NAME_LEN
-        && n.iter().all(|b| b.is_ascii_graphic())
-        && n[0] != b'.'
-        && n[n.len() - 1] != b'.'
+        && n.split(|&b| b == b'.').all(|label| {
+            (1..=63).contains(&label.len())
+                && label.iter().all(|b| b.is_ascii_alphanumeric() || *b == b'-')
+                && !label.starts_with(b"-") && !label.ends_with(b"-")
+        })
         && std::str::from_utf8(n).ok().and_then(|s| s.parse::<IpAddr>().ok()).is_none()
 }
 
@@ -445,11 +447,18 @@ mod tests {
 
     #[test]
     fn client_hello_max_size_is_exact_and_framing_is_valid() {
-        let name = vec![b'a'; MAX_SERVER_NAME_LEN];
+        let name = ["a".repeat(63), "a".repeat(63), "a".repeat(63), "a".repeat(61)].join(".").into_bytes();
         let m = enc(1, &[9; 32], 2, &name).unwrap();
         assert_eq!(m.len(), MAX_CLIENT_HELLO_LEN);
         let (whole, rest) = next_message(&m, MAX_BODY_LEN).unwrap();
         assert_eq!((whole.len(), rest.len()), (m.len(), 0));
+    }
+
+    #[test]
+    fn client_hello_rejects_invalid_dns_labels() {
+        for bad in [&b"a..b"[..], b"-a.example", b"a-.example", b"a/b", b"a@b", b"*.example", b"a_b.example", &[b'a'; 64]] {
+            assert_eq!(enc(1, b"", 2, bad), Err(HelloError::BadInput));
+        }
     }
 
     #[test]
