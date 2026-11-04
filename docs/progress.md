@@ -71,7 +71,7 @@ Existing baseline: `cargo test --workspace` passed on 2026-11-04 at `8231fea`. E
 
 Build on modules 1 and 7. Keep URL and HTTP work in their existing crates. Put TLS and crypto behind a separate crate interface.
 
-The SHA-256, HMAC-SHA256 and HKDF-SHA256 foundations of topic 2 are complete. `bare-tls` has streaming APIs, portable code and a CPU-detected SHA instruction path. The `force-portable` feature runs all crypto vectors through the fallback. AES-128-GCM record protection is also complete. It authenticates ciphertext before decrypting and supports portable and CPU-detected accelerated paths. Topic 2 remains open for SHA-384, key exchange and secure random input. TLS record framing, record-size limits, per-key usage limits and sequence exhaustion still need integration.
+The SHA-256, SHA-384, HMAC-SHA256 and HKDF-SHA256 foundations of topic 2 are complete. `bare-tls` has streaming APIs, portable code and a CPU-detected SHA instruction path. The `force-portable` feature runs all crypto vectors through the fallback. AES-128-GCM record protection is also complete. It authenticates ciphertext before decrypting and supports portable and CPU-detected accelerated paths. SHA-384 has a streaming API and fixed memory use for certificate-signature hashes. X25519 key exchange and OS random input are complete. The TLS-facing key-exchange API rejects all-zero shared secrets. Linux uses `getrandom` with flags 0; source errors clear partial output and have no fallback. Topic 2 crypto primitives are implemented; TLS integration is still open. TLS record framing, record-size limits, per-key usage limits and sequence exhaustion still need integration.
 
 The URL prerequisite of topic 4 is complete: HTTP/HTTPS schemes, default ports, relative links, serialization and origin comparison. Network requests to HTTPS are refused before cache, DNS or socket use. TLS is not connected yet. Cache and connection-pool keys must include the scheme before removing that guard.
 
@@ -89,6 +89,8 @@ Topic 1 is complete (2026-11-04). See [staging-network.md](staging-network.md) f
 Resource checks: handshake cost, throughput, peak memory for large bodies, repeated resources, slow servers and many small resources. Reuse existing streaming and connection code. Avoid a second full copy of each resource. Introduce bounded concurrency when measurements justify it.
 
 Exit: `bare` downloads the real staging login HTML, scripts and CSS over verified HTTPS. Script execution and login are later gates.
+
+Certificate parsing in S1 topic 3 is complete. `der` and `x509` borrow signed bytes and fields from bounded inputs. Unknown critical extensions are exposed for the validator to reject. Parsing does not verify signatures, trust, a path or a hostname. The next gate is to connect ECDSA, hostname checks and independently loaded OS roots before the handshake can trust a peer.
 
 ### S2 JavaScript and event loop
 
