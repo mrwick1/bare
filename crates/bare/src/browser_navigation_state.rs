@@ -102,7 +102,7 @@ fn ser(d: &Dom, it: &mut Interp<'_>, c: &mut Ser, v: Value, depth: usize) -> R<S
             if !plain {
                 return Err(Error::Unsupported(unsupported("structured clone of an object that is not a plain object or array")));
             }
-            if depth >= c.lim.max_state_depth {
+            if depth >= c.lim.max_state_depth.min(128) {
                 return Err(d.lim("history-state-depth"));
             }
             if c.nodes.len() >= c.lim.max_state_nodes {

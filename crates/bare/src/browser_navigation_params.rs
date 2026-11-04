@@ -478,6 +478,16 @@ pub(crate) fn p_set(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> R
     let sp = params_id(d, it, this)?;
     need(it, a, 2, "set' on 'URLSearchParams")?;
     let (n, v) = (usv(d, it, a[0])?, usv(d, it, a[1])?);
+    {
+        let state = d.nav.s.borrow();
+        let p = &state.params[&sp];
+        it.charge((p.bytes / 32 + p.list.len()) as u64)?;
+        let removed: usize = p.list.iter().filter(|(k, _)| *k == n).map(|(k, v)| k.len() + v.len() + 32).sum();
+        let added = n.len() + v.len() + 32;
+        if state.param_bytes.saturating_sub(removed).saturating_add(added) > d.nav.lim.get().max_param_bytes {
+            return Err(d.lim("url-params"));
+        }
+    }
     edit(d, sp, |l| {
         match l.iter().position(|(k, _)| *k == n) {
             Some(i) => {

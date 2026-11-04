@@ -304,8 +304,8 @@ fn a_limit_in_a_listener_stops_the_driver_and_no_more_js_runs() {
         assert!(matches!(e, Error::Limit(LimitKind::Steps)), "{e:?}");
         assert_eq!(js(&mut b, "n"), "1");
         assert_eq!(b.navigation_stats().pending_tasks, 1, "the spent task is gone, the next one waits");
-        assert_eq!(b.run_navigation_tasks().unwrap(), 1);
-        assert_eq!(js(&mut b, "n + ',' + other"), "2,0");
+        assert!(matches!(b.run_navigation_tasks(), Err(Error::Limit(LimitKind::Steps))));
+        assert_eq!(js(&mut b, "n + ',' + other"), "1,0");
     });
 }
 
@@ -903,5 +903,88 @@ fn many_wrappers_cost_steps_and_a_step_limit_stops_the_script() {
         // the script is over, and later scripts run with the state as it was left
         assert_eq!(js(&mut b, "var q = new URLSearchParams('x=1'); q.get('x')"), "1");
         assert!(n > 0);
+    });
+}
+
+
+#[test]
+fn navigation_pump_checks_failed_empty_checkpoint() {
+    big(|| {
+        let mut b = at(URL0);
+        js(&mut b, "var called = 0; window.addEventListener('popstate', function(){ called++; }); history.pushState(null, '', '/new'); history.back(); Promise.resolve().then(function(){ while(true) {} });");
+        assert!(matches!(b.drain(), Err(Error::Limit(_))));
+        assert!(matches!(b.run_navigation_tasks(), Err(Error::Limit(_))));
+        assert_eq!(js(&mut b, "called"), "0");
+        assert_eq!(b.navigation_stats().pending_tasks, 1);
+    });
+}
+
+#[test]
+fn navigation_pump_runs_microtasks_between_tasks() {
+    big(|| {
+        let mut b = at(URL0);
+        js(&mut b, "var order = ''; window.addEventListener('popstate', function(){ order += 'p'; Promise.resolve().then(function(){ order += 'm'; }); }); history.pushState(null, '', '/one'); history.pushState(null, '', '/two'); history.back(); history.back();");
+        assert_eq!(b.run_navigation_tasks().unwrap(), 2);
+        assert_eq!(js(&mut b, "order"), "pmpm");
+    });
+}
+
+#[test]
+fn history_go_uses_webidl_signed_long_conversion() {
+    big(|| {
+        let mut b = at(URL0);
+        js(&mut b, "history.pushState(null, '', '/one'); history.back();");
+        b.run_navigation_tasks().unwrap();
+        js(&mut b, "history.go(4294967297);");
+        b.run_navigation_tasks().unwrap();
+        assert_eq!(js(&mut b, "location.pathname"), "/one");
+    });
+}
+
+#[test]
+fn history_clone_depth_has_a_hard_ceiling() {
+    big(|| {
+        let mut b = at(URL0);
+        b.set_navigation_limits(NavLimits { max_state_depth: usize::MAX, ..Default::default() });
+        assert_eq!(js(&mut b, "var head = {}, tail = head; for(var i=0;i<200;i++){ tail.next = {}; tail = tail.next; } history.pushState(head, '');"), lim("history-state-depth"));
+    });
+}
+
+#[test]
+fn fetch_resolves_against_immediate_history_updates() {
+    big(|| {
+        let mut b = at(URL0);
+        b.configure_fetch(crate::browser_fetch::FetchConfig { base_url: Some(URL0.into()), client: bare_net::http::Client::new(), limits: Default::default() }).unwrap();
+        assert_eq!(js(&mut b, "history.pushState(null, '', '/changed/page'); new Request('child').url"), "https://staging.example.test:8443/changed/child");
+        assert_eq!(b.pending_fetches(), 0);
+    });
+}
+
+#[test]
+fn params_set_checks_total_bytes_before_replacing() {
+    big(|| {
+        let mut b = at(URL0);
+        b.set_navigation_limits(NavLimits { max_param_bytes: 40, ..Default::default() });
+        assert_eq!(js(&mut b, "var params = new URLSearchParams('x=1'); params.set('x', '0123456789');"), lim("url-params"));
+        assert_eq!(js(&mut b, "params.get('x')"), "1");
+        assert_eq!(b.navigation_stats().param_bytes, 34);
+    });
+}
+
+#[test]
+fn fetch_navigation_storage_and_timer_share_one_realm() {
+    big(|| {
+        use crate::browser_fetch_tests::{serve, ok};
+        let srv = serve(|_| ok("{}"));
+        let base = format!("http://127.0.0.1:{}/old/page", srv.port);
+        let mut b = at(&base);
+        b.use_virtual_clock_at(1000.0).unwrap();
+        b.configure_fetch(crate::browser_fetch::FetchConfig { base_url: Some(base), client: bare_net::http::Client::new(), limits: Default::default() }).unwrap();
+        js(&mut b, "sessionStorage.setItem('key', 'test-only'); var result = ''; history.pushState({n:1}, '', '/new/page'); fetch('child').then(function(r){ return r.json(); }).then(function(){ setTimeout(function(){ result = sessionStorage.getItem('key') + history.state.n; }, 0); });");
+        b.collect(&[]).unwrap();
+        assert_eq!(b.run_network_tasks(2).unwrap(), 1);
+        b.advance_time(1.0, 10).unwrap();
+        assert_eq!(js(&mut b, "result"), "test-only1");
+        assert_eq!(srv.recs()[0].path, "/new/child");
     });
 }

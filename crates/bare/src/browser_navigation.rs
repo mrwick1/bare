@@ -8,9 +8,9 @@
 //!   (`location.*`, `history.*`, `document.URL/baseURI`, `localStorage`, `sessionStorage`, `window.origin`) stops the
 //!   script with `Error::Unsupported("document URL is not configured ...")`. Nothing pretends to be a staging origin.
 //!   `new URL(absolute)`, `URL.canParse` and `URLSearchParams` need no document URL.
-//! - `set_document_url` starts a new document: one history entry, empty queues. The integrator calls it after a load
-//!   (and calls the fetch module's `update_fetch_base_url` with `document_url()` when `url_generation()` changed: every
-//!   URL change from script, from traversal or from a fragment navigation raises it).
+//! - `set_document_url` resets navigation state: one history entry, empty queues. It does not replace the realm.
+//!   The loader must create a new Browser for a new document, then configure its URL
+//!   (fetch uses this URL immediately when networking is configured). Every URL change raises `url_generation()`.
 //! - `document_url()`, `base_uri()` and `resolve_url()` give the loader the URL state. `<base href>` is not read:
 //!   `baseURI` is always the document URL (a gate, not a claim).
 //!
@@ -162,6 +162,7 @@ pub(crate) struct NavState {
     pub state_bytes: usize,
     pub store: WebStorage,
     pub manual_scroll: bool,
+    pub halted: Option<Error>,
 }
 
 #[derive(Clone, Copy)]
@@ -259,7 +260,7 @@ impl Dom {
         Ok(v)
     }
 
-    fn run_task(&self, it: &mut Interp<'_>, t: Task) -> R<()> {
+    fn run_navigation_task(&self, it: &mut Interp<'_>, t: Task) -> R<()> {
         match t {
             Task::Fragment { old, new } => {
                 let (o, n) = (self.js_str(it, &old)?, self.js_str(it, &new)?);
@@ -486,7 +487,7 @@ fn push_replace(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value], replace:
 }
 
 fn go(d: &Dom, it: &mut Interp<'_>, delta: f64) -> R<Value> {
-    let delta = if delta.is_finite() { delta.trunc().clamp(-1e9, 1e9) as i32 } else { 0 };
+    let delta = bare_js::value::to_int32(delta);
     if delta == 0 {
         d.reload_request()?;
         return Ok(Value::Undefined);
@@ -695,7 +696,8 @@ impl Browser {
         self.dom.nav.lim.set(l);
     }
 
-    /// Start a new document at `url` (absolute `http` or `https`): one history entry with a null state, empty queues.
+    /// Reset navigation at `url` (absolute `http` or `https`): one history entry with a null state, empty queues.
+    /// This does not replace the realm. Create a new Browser for a new document.
     /// Pending navigation requests and tasks of the old document are dropped.
     pub fn set_document_url(&mut self, url: &str) -> Result<(), String> {
         let rec = nu::parse(url, None).map_err(|e| match e {
@@ -741,10 +743,20 @@ impl Browser {
     }
 
     /// Run the queued traversal and fragment tasks that were queued when this call started: `popstate`, `hashchange`.
-    /// Each task is one host operation with its own step budget. The first `Limit`, `Unsupported` or fault ends the call
-    /// (that task is spent, the rest stay queued, and no JS runs after the error). Returns the tasks that ran.
+    /// Each task shares its step budget with a microtask checkpoint. A failed checkpoint, `Limit`, `Unsupported`
+    /// or fault halts this pump permanently. The remaining tasks stay queued. Returns the tasks that ran.
     pub fn run_navigation_tasks(&mut self) -> R<usize> {
         let dom = self.dom.clone();
+        if let Some(e) = dom.nav.s.borrow().halted { return Err(e); }
+        let result = self.run_navigation_tasks_inner();
+        if let Err(e) = result { dom.nav.s.borrow_mut().halted = Some(e); }
+        result
+    }
+
+    fn run_navigation_tasks_inner(&mut self) -> R<usize> {
+        let dom = self.dom.clone();
+        // An empty queue can still hold a sticky failed-job error.
+        self.it.host_scope(|it| it.host_checkpoint().map(|_| ()))?;
         let n = dom.nav.s.borrow().tasks.len();
         let mut done = 0;
         for _ in 0..n {
@@ -752,7 +764,10 @@ impl Browser {
             let Some(t) = t else { break };
             done += 1;
             dom.st.borrow_mut().driver = true;
-            let r = self.it.host_scope(|it| dom.run_task(it, t));
+            let r = self.it.host_scope(|it| {
+                dom.run_navigation_task(it, t)?;
+                it.host_checkpoint().map(|_| ())
+            });
             dom.st.borrow_mut().driver = false;
             r?;
         }
