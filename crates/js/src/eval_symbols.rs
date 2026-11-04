@@ -31,6 +31,10 @@ pub enum ScLimit {
     Registry,
     /// Tracked Map and Set objects.
     Collections,
+    /// Tracked WeakMap and WeakSet objects.
+    WeakCollections,
+    /// Entries of one WeakMap or WeakSet, or of all of them together (`max_total_weak_entries`).
+    WeakEntries,
     /// Slots (live and deleted, not yet compacted) of one Map or Set.
     Entries,
     /// Slots of all Maps and Sets together.
@@ -51,11 +55,14 @@ pub struct ScLimits {
     pub max_total_entries: usize,
     pub max_iterators: usize,
     pub max_iter_buffer: usize,
+    pub max_weak_collections: usize,
+    pub max_weak_entries: usize,
+    pub max_total_weak_entries: usize,
 }
 
 impl Default for ScLimits {
     fn default() -> Self {
-        ScLimits { max_registry: 1 << 16, max_collections: 1 << 20, max_entries: 1 << 21, max_total_entries: 1 << 22, max_iterators: 1 << 20, max_iter_buffer: 1 << 21 }
+        ScLimits { max_registry: 1 << 16, max_collections: 1 << 20, max_entries: 1 << 21, max_total_entries: 1 << 22, max_iterators: 1 << 20, max_iter_buffer: 1 << 21, max_weak_collections: 1 << 20, max_weak_entries: 1 << 21, max_total_weak_entries: 1 << 22 }
     }
 }
 
@@ -142,11 +149,20 @@ enum ScFn {
     SetValues,
     SetEntries,
     SetIterNext,
+    WeakMapCtor,
+    WeakMapGet,
+    WeakMapSet,
+    WeakMapHas,
+    WeakMapDelete,
+    WeakSetCtor,
+    WeakSetAdd,
+    WeakSetHas,
+    WeakSetDelete,
 }
 
 impl ScFn {
     fn is_ctor(&self) -> bool {
-        matches!(self, ScFn::MapCtor | ScFn::SetCtor)
+        matches!(self, ScFn::MapCtor | ScFn::SetCtor | ScFn::WeakMapCtor | ScFn::WeakSetCtor)
     }
 }
 
@@ -482,7 +498,7 @@ impl<'p> Interp<'p> {
         self.sc.set_iter_proto = sip;
         self.sc.f_set_next = self.sc_method(sip, "next", ScFn::SetIterNext, 0)?;
         self.sc_tag(sip, "Set Iterator")?;
-        Ok(())
+        self.install_weak()
     }
 
     // ------------------------------------------------------------ dispatch
@@ -549,6 +565,7 @@ impl<'p> Interp<'p> {
                 self.sc_track_iter(self.sc.string_iter_proto, IterState::Str { s, i: 0, done: false })
             }
             ScFn::StrIterNext => self.str_iter_next(this),
+            _ if f.is_weak() => self.call_weak(f, this, args, is_new),
             _ => self.call_coll(f, this, args, is_new),
         }
     }

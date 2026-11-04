@@ -1,0 +1,66 @@
+# bare-js WeakMap and WeakSet cases (Node is the oracle; same format as sc-cases.txt). Non-registered Symbol keys differ on purpose
+# (bare gates them as Unsupported) and are tested in eval_weak_tests.rs, not here. Messages are not compared.
+=== weak_basic
+var log = []; function L(x) { log.push(String(x)); }
+var m = new WeakMap(), s = new WeakSet(), k = {}, k2 = function () {};
+L(m.set(k, 1) === m); L(m.get(k)); L(m.has(k)); L(m.has(k2)); L(m.get(k2)); L(m.set(k2, undefined) === m); L(m.has(k2)); L(m.get(k2));
+L(m.delete(k)); L(m.delete(k)); L(m.has(k)); L(m.set(k, 'again').get(k));
+L(s.add(k) === s); L(s.has(k)); L(s.has(k2)); L(s.delete(k)); L(s.delete(k)); L(s.has(k));
+L(typeof WeakMap); L(WeakMap.length); L(WeakMap.name); L(WeakSet.length); L(WeakSet.name);
+L(WeakMap.prototype.constructor === WeakMap); L(Object.prototype.toString.call(m)); L(Object.prototype.toString.call(s));
+L(WeakMap.prototype.set.length); L(WeakMap.prototype.get.length); L(WeakSet.prototype.add.length);
+L('size' in m); L(typeof m.clear); L(typeof m.forEach); L(typeof m[Symbol.iterator]); L(typeof s.clear);
+L(Object.getPrototypeOf(WeakMap.prototype) === Object.prototype); L(Object.keys(m).length);
+(function () { return log.join('|'); })
+=== weak_primitive_keys
+var log = []; function L(x) { log.push(String(x)); }
+function T(f) { try { return 'ok:' + String(f()); } catch (e) { return 'throw:' + e.name; } }
+var m = new WeakMap(), s = new WeakSet();
+var prims = [1, 'a', true, null, undefined, NaN, 0, '', Symbol.for('reg')];
+for (var i = 0; i < prims.length; i++) {
+  var p = prims[i];
+  L(T(() => m.get(p))); L(T(() => m.has(p))); L(T(() => m.delete(p))); L(T(() => s.has(p))); L(T(() => s.delete(p)));
+  L(T(() => m.set(p, 1))); L(T(() => s.add(p)));
+}
+L(T(() => m.set())); L(T(() => s.add())); L(T(() => m.get())); L(T(() => m.has()));
+(function () { return log.join('|'); })
+=== weak_branding
+var log = []; function L(x) { log.push(String(x)); }
+function T(f) { try { return 'ok:' + String(f()); } catch (e) { return 'throw:' + e.name; } }
+var m = new WeakMap(), s = new WeakSet(), mm = new Map(), ss = new Set(), o = {};
+var calls = [[WeakMap.prototype.get, 'get'], [WeakMap.prototype.set, 'set'], [WeakMap.prototype.has, 'has'], [WeakMap.prototype.delete, 'delete']];
+var recv = [undefined, null, 1, 'x', {}, s, mm, ss, WeakMap.prototype];
+for (var i = 0; i < calls.length; i++) for (var j = 0; j < recv.length; j++) L(calls[i][1] + j + T(() => calls[i][0].call(recv[j], o, 1)));
+var scalls = [WeakSet.prototype.add, WeakSet.prototype.has, WeakSet.prototype.delete];
+var srecv = [undefined, {}, m, mm, ss, WeakSet.prototype];
+for (var i = 0; i < scalls.length; i++) for (var j = 0; j < srecv.length; j++) L('s' + i + j + T(() => scalls[i].call(srecv[j], o)));
+L(T(() => WeakMap())); L(T(() => WeakSet())); L(T(() => WeakMap.call({})));
+(function () { return log.join('|'); })
+=== weak_ctor_iterable
+var log = []; function L(x) { log.push(String(x)); }
+function T(f) { try { return 'ok:' + String(f()); } catch (e) { return 'throw:' + e.name; } }
+var a = {}, b = {}, c = {};
+var m = new WeakMap([[a, 1], [b, 2]]); L(m.get(a)); L(m.get(b)); L(m.has(c));
+var s = new WeakSet([a, b]); L(s.has(a)); L(s.has(b)); L(s.has(c));
+L(T(() => new WeakMap([1]))); L(T(() => new WeakMap([[1, 1]]))); L(T(() => new WeakSet([1]))); L(T(() => new WeakMap(5)));
+L(T(() => new WeakMap(null))); L(T(() => new WeakSet(undefined))); L(T(() => new WeakMap({}))); L(T(() => new WeakSet('ab')));
+L(new WeakMap(new Set([[a, 'g']])).get(a));
+var closed = 0; var it = { [Symbol.iterator]() { return { next() { return { value: 5, done: false }; }, return() { closed++; return {}; } }; } };
+L(T(() => new WeakMap(it))); L(closed); L(T(() => new WeakSet(it))); L(closed);
+var added = []; var orig = WeakSet.prototype.add; WeakSet.prototype.add = function (v) { added.push(v === a); return orig.call(this, v); };
+new WeakSet([a]); L(added.join()); WeakSet.prototype.add = orig;
+var origSet = WeakMap.prototype.set; WeakMap.prototype.set = 1; L(T(() => new WeakMap([[a, 1]]))); L(T(() => new WeakMap())); WeakMap.prototype.set = origSet;
+(function () { return log.join('|'); })
+=== weak_props_and_self
+var log = []; function L(x) { log.push(String(x)); }
+var m = new WeakMap(); m.set(m, 'self'); L(m.get(m)); L(m.has(m));
+var s = new WeakSet(); s.add(s); L(s.has(s)); s.add(m); L(s.has(m));
+var d = Object.getOwnPropertyDescriptor(WeakMap.prototype, Symbol.toStringTag); L(d.value); L(d.writable); L(d.enumerable); L(d.configurable);
+var g = Object.getOwnPropertyDescriptor(this, 'WeakMap'); L(g.writable); L(g.enumerable); L(g.configurable);
+['get', 'set', 'has', 'delete', 'clear', 'add'].forEach(function (n) { var d = Object.getOwnPropertyDescriptor(WeakMap.prototype, n); L(n + ':' + (d && [typeof d.value, d.writable, d.enumerable, d.configurable].join())); });
+['add', 'has', 'delete', 'set'].forEach(function (n) { var d = Object.getOwnPropertyDescriptor(WeakSet.prototype, n); L('s' + n + ':' + (d && [typeof d.value, d.writable, d.enumerable, d.configurable].join())); });
+var fr = Object.create(null); m.set(fr, 'fz'); L(m.get(fr)); var arr = []; m.set(arr, 1); L(m.get(arr)); m.set(Math, 2); L(m.get(Math)); m.set(Array.prototype.push, 3); L(m.get(Array.prototype.push));
+class A {} var a1 = new A(); m.set(a1, 'inst'); L(m.get(a1)); m.set(A, 'cls'); L(m.get(A));
+L(WeakMap.prototype.get.name + WeakMap.prototype.set.name + WeakMap.prototype.has.name + WeakMap.prototype.delete.name + WeakSet.prototype.add.name);
+L(Object.getPrototypeOf(WeakMap) === Function.prototype); L(m instanceof WeakMap); L(s instanceof WeakSet); L(m instanceof WeakSet);
+(function () { return log.join('|'); })

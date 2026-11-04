@@ -167,6 +167,8 @@ The classic page loader, session driver and theme platform APIs are integrated. 
 
 On 2026-11-05, the live HTTPS session loaded one login document and all 15 scripts: 21 script executions, 469,525 script bytes, one ReferenceError and no resource errors. The cached bootstrap check identifies `WeakMap` as the next missing API and confirms that no form exists. It exits 1. `Page(Settled)` describes an empty task queue, not successful hydration. No credentials or authentication were tested. S3 remains open.
 
+WeakMap and WeakSet are integrated with ephemeron collection. Values become reachable only when both their collection and object key are reachable. The same mark loop traces closures, async state, class values and host edges. Non-registered Symbol keys and native subclassing remain explicit gates. The cached bootstrap now passes WeakMap and stops in React's vendor-prefix feature check. Its source reads document.createElement("div").style before using the in operator; the style API is not implemented. The form is still absent. See [resources.md](resources.md#weak-collections).
+
 | Topic | Work | Check before closing |
 | --- | --- | --- |
 | 1 | Add DOM creation, attributes, text replacement, insertion, removal and queries required by the target. | DOM invariants, node identity, detached nodes and mutation tests agree with Chrome. |

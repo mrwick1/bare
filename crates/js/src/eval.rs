@@ -17,7 +17,7 @@
 //! templates, BigInt, `super` outside a class element, `new.target` in a field initializer, `with`, `for await`, and `await` in `switch`, `for-in`, optional chains, `delete`, `++`/`--`, computed keys and binding patterns.
 //! Async functions and arrows run in a bounded continuation machine: see `eval_async.rs`. A regexp literal is compiled by `Interp::new`;
 //! an invalid pattern, lookbehind, named groups or the flags `u`, `v`, `d` are `Unsupported` there (see `eval_builtins.rs`).
-//! A missing builtin (`WeakMap`, `Reflect`, ...) is an ordinary `ReferenceError` at run time, as in a bare engine.
+//! A missing builtin (`WeakRef`, `Reflect`, ...) is an ordinary `ReferenceError` at run time, as in a bare engine.
 //! `JSON.parse`, `RegExp` and a small `String.prototype` are bound in `eval_builtins.rs`, which lists what is and is not there.
 //! Classes are supported: see `eval_classes.rs` for what runs and what does not.
 //!
@@ -379,6 +379,7 @@ pub struct Interp<'p> {
     bin: BinaryState,
     ao: AoState,
     sc: ScState,
+    weak: WeakState,
     aw: AsyncState,
     // permanent keys
     k_length: PropertyKey,
@@ -513,6 +514,7 @@ impl<'p> Interp<'p> {
             bin: BinaryState::default(),
             ao: AoState::default(),
             sc: ScState::new(object_proto, ks[0]),
+            weak: WeakState::new(object_proto),
             aw: AsyncState::default(),
             k_length: ks[0],
             k_name: ks[1],
@@ -605,6 +607,8 @@ impl<'p> Interp<'p> {
         }
         self.sc_roots(&mut v);
         self.sc_all_values(&mut v);
+        self.weak_roots(&mut v);
+        self.weak_all_values(&mut v);
         self.async_all_values(&mut v);
         for (&o, c) in &self.funcs {
             v.push(Value::Object(o));
@@ -644,6 +648,8 @@ impl<'p> Interp<'p> {
         }
         self.binary_roots(&mut work);
         self.sc_roots(&mut work);
+        self.weak_roots(&mut work);
+        let mut pending: FxMap<ObjId, Vec<Value>> = FxMap::default();
         let mut env_work: Vec<u32> = vec![0];
         let mut act_seen = vec![false; self.aw.acts.len()];
         self.async_queue_roots(&mut work, &mut env_work, &mut act_seen);
@@ -684,6 +690,7 @@ impl<'p> Interp<'p> {
                 work.push(Value::Object(buf));
             }
             self.sc_trace(o, &mut work);
+            self.weak_trace(o, &seen, &mut pending, &mut work);
             self.cls_trace(o, &mut work, &mut env_work);
             self.async_promise_trace(o, &mut work, &mut env_work, &mut act_seen);
             let keys = h!(self, self.heap.stored_keys(o));
@@ -713,6 +720,7 @@ impl<'p> Interp<'p> {
             h.prune(&|o| seen.contains(&o));
         }
         self.sc_prune(&seen);
+        self.weak_prune(&seen);
         self.cls_prune(&seen);
         self.async_prune(&act_seen);
         let mut roots = self.roots();
@@ -2999,6 +3007,7 @@ include!("eval_array_object.rs");
 include!("eval_numeric.rs");
 include!("eval_symbols.rs");
 include!("eval_collections.rs");
+include!("eval_weak.rs");
 include!("eval_classes.rs");
 include!("eval_async.rs");
 
@@ -3056,3 +3065,7 @@ mod interop_tests;
 #[cfg(test)]
 #[path = "eval_async_tests.rs"]
 mod async_tests;
+
+#[cfg(test)]
+#[path = "eval_weak_tests.rs"]
+mod weak_tests;
