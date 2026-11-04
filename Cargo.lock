@@ -62,6 +62,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "bare-tls"
+version = "0.1.0"
+
+[[package]]
 name = "bare-unicode"
 version = "0.1.0"
 

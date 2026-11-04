@@ -71,6 +71,8 @@ Existing baseline: `cargo test --workspace` passed on 2026-11-04 at `8231fea`. E
 
 Build on modules 1 and 7. Keep URL and HTTP work in their existing crates. Put TLS and crypto behind a separate crate interface.
 
+The SHA-256, HMAC-SHA256 and HKDF-SHA256 foundations of topic 2 are complete. `bare-tls` has streaming APIs, portable code and a CPU-detected SHA instruction path. The `force-portable` feature runs all crypto vectors through the fallback. Topic 2 remains open for SHA-384, record protection, key exchange and secure random input.
+
 The URL prerequisite of topic 4 is complete: HTTP/HTTPS schemes, default ports, relative links, serialization and origin comparison. Network requests to HTTPS are refused before cache, DNS or socket use. TLS is not connected yet. Cache and connection-pool keys must include the scheme before removing that guard.
 
 Topic 1 is complete (2026-11-04). See [staging-network.md](staging-network.md) for the observed TLS chain, public resource manifest and repeatable inspection commands. The first HTTPS check fails until the TLS implementation is connected. The observed minimum uses AES-128-GCM, X25519, SHA-256, SHA-384, and ECDSA P-256/P-384 verification. Use an independently trusted root source; do not trust a root only because the server sent it.
