@@ -6,6 +6,8 @@ The reasons for the design are in [decisions.md](decisions.md). Time and memory 
 
 ## Modules
 
+The module numbers below remain stable for existing code and benchmark references. The next implementation order is S1 to S5 in the staging plan below.
+
 | #   | Module                                                 | State       |
 | --- | ------------------------------------------------------ | ----------- |
 | 1   | URL, DNS, TCP and HTTP                                 | done        |
@@ -19,6 +21,146 @@ The reasons for the design are in [decisions.md](decisions.md). Time and memory 
 | 9   | JavaScript (interpreter, no JIT)                       | planned     |
 | 10  | Tab isolation and memory accounting (heap per tab)     | planned     |
 | 11  | Resource guard (watchdog, freeze, discard, reload)     | planned     |
+
+## Voicebot staging plan
+
+Priority: run the deployed voicebot dashboard in `bare` and test its login journey. Implement S1 to S5 in order. Each topic must pass its checks before the next topic starts. A topic can need several small PRs. All topics below are planned.
+
+Keep the existing rules: Rust, no external crates, small interfaces, and one-way crate dependencies. Chrome is a reference for tests. It is not the runtime of `bare`.
+
+### Acceptance journey
+
+Target: <https://staging.app.8vox.ai>. The old hostname `staging.voicebot.qilinlab.com` did not resolve on 2026-11-04.
+
+Chrome passed this journey on 2026-11-04:
+
+1. Open the site without a session. The site redirects to login.
+2. Enter the staging account credentials and submit the form.
+3. Verify the Overview page and its authenticated data.
+4. Follow the Agents link. Verify that agent data loads.
+5. Search for `Score800` and press Enter. Verify the matching agent and the query in the URL.
+6. Reload the page. Verify that the session remains valid.
+7. Open the account menu and sign out. Verify that the token is removed.
+8. Open Agents without a session. Verify the redirect to login.
+
+The deployed journey uses JavaScript bundles, client-side navigation, authenticated `fetch` requests, and a token in `sessionStorage`. The login offers a remember-me option. Local source uses `localStorage` for that option. Browser restart persistence and remember-me remain untested on staging.
+
+Use a dedicated staging account. Read credentials from the vault at run time. Do not put credentials, tokens or authenticated response bodies in fixtures, traces or reports. The acceptance journey does not edit agents or place calls. Counts and agent names can change. Select a stable test agent when the automated suite is added.
+
+### Work through each topic
+
+Use this cycle for each topic: implement, run huge load tests, then optimize CPU time and RAM use. Complete the cycle before moving to the next topic.
+
+1. Read the current code, tests and commit history. Define the expected behavior. For a bug, add a failing regression test first.
+2. Implement the topic in a worktree. Establish correctness with unit and integration checks. Keep the work in small, reviewable PRs.
+3. Extend `bare-stress` and `bare-bench`. Run the existing 1x, 10x and 100x scale pattern. Add large inputs for the topic: many small resources, large bodies, deep trees, large scripts, repeated mutations or repeated journeys. Run each stress case in a separate process with time and memory limits. Save failing inputs and fuzz seeds.
+4. Measure release CPU time, wall time, throughput, peak heap, retained heap and RSS where relevant. Record exact input sizes, machine, build and seeds. Separate network delay from engine costs. Compare increasing sizes to find work that grows faster than the input.
+5. Optimize the measured causes. Change algorithms, data layout and ownership when needed. Remove repeated scans, unnecessary copies, per-item allocations and retained buffers. Avoid keeping state that can be computed cheaply. Browser architecture is open to change.
+6. Rerun correctness, load, fuzz and resource checks after each change. Repeat the load-and-optimize cycle until large measured costs are resolved or an explicit tradeoff is recorded. Compare the same inputs before and after. Check both CPU and RAM so a gain in one does not hide a regression in the other.
+7. Run `cargo test --workspace`. Record results, decisions and remaining gaps. Merge before starting the next topic.
+
+Chrome and Safari do not define the internal architecture. Use standards, test vectors and Chrome behavior to check the observable behavior that the target application needs. Choose algorithms, storage and scheduling for the measured needs of `bare`. The existing design already uses this freedom: it computes box-tree rules instead of storing a second tree.
+
+Previous changes show the same direction: streaming tokens (`59b058f`), compact DOM nodes (`34d7ca7`), shared DOM buffers (`6e516a8`), load tests and fixes (`6b11b8a`), and streaming HTTP bodies (`2cd8730`). Keep the before-and-after evidence in `resources.md`.
+
+Optimization is part of every module's completion gate. Start with measured behavior, then improve the core design as far as the evidence supports. Never remove validation, certificate checks, origin checks or accessibility to improve a benchmark. Huge load tests must stop at controlled resource limits rather than exhaust the host.
+
+Existing baseline: `cargo test --workspace` passed on 2026-11-04 at `8231fea`. Existing Chrome comparisons and load results are recorded in `resources.md`; those historical runs were not repeated for this plan. Some old gap entries are stale. Check the code before treating them as missing work.
+
+### S1 HTTPS and resource loading
+
+Build on modules 1 and 7. Keep URL and HTTP work in their existing crates. Put TLS and crypto behind a separate crate interface.
+
+| Topic | Work | Check before closing |
+| --- | --- | --- |
+| 1 | Inspect the staging TLS chain, algorithms, content encodings and resource URLs. Record a public resource manifest and expected failures. | Establish the exact TLS and response-decoding requirements. Do not infer them from Chrome success alone. |
+| 2 | Implement the required crypto primitives, secure random input and TLS record protection. | Standard known-answer vectors; altered records fail; malformed and oversized input is bounded. |
+| 3 | Implement TLS 1.3 handshake, SNI, certificate parsing, trust chains, hostname, validity and signature checks. | Trusted and untrusted fixtures; wrong host, expired chain and altered handshake fail. No certificate bypass. |
+| 4 | Add HTTPS URL parsing, default ports, origin identity, redirects and HTTP/1.1 over TLS. | Existing HTTP tests still pass; staging HTML downloads with certificate verification. Advertise only protocols implemented. |
+| 5 | Add request methods, headers and bodies for API calls. Keep cache, redirect, credential and retry rules correct for each method and origin. | POST is not retried as GET. Redirect and cache tests cover authenticated requests and errors. |
+| 6 | Load external scripts and styles in document order where required. Decode the response encodings found in topic 1. Bound resource size, total memory and time. | Download the staging login resources. Compare decoded bytes with the reference manifest. |
+
+Resource checks: handshake cost, throughput, peak memory for large bodies, repeated resources, slow servers and many small resources. Reuse existing streaming and connection code. Avoid a second full copy of each resource. Introduce bounded concurrency when measurements justify it.
+
+Exit: `bare` downloads the real staging login HTML, scripts and CSS over verified HTTPS. Script execution and login are later gates.
+
+### S2 JavaScript and event loop
+
+Build the JavaScript interpreter from module 9. Bring forward the single-page scheduler from module 8. Tabs remain deferred.
+
+| Topic | Work | Check before closing |
+| --- | --- | --- |
+| 1 | Inventory syntax and built-ins in the deployed bundles. Save versioned public inputs for repeatable tests. | Record bundle hashes and explicit unsupported features. A small sample is not proof of complete compatibility. |
+| 2 | Implement tokenizer, parser and executable representation. | Parse all target bundles; test malformed syntax, nesting and source locations. |
+| 3 | Implement values, scopes, closures, calls, objects, prototypes and property descriptors. Add managed heap storage and collection. | Language tests; cyclic objects; reachable objects survive collection; released objects do not accumulate. |
+| 4 | Implement the language features and built-ins required by the target bundles. | Compare language behavior with Chrome. Parsing alone does not close this topic. |
+| 5 | Implement tasks, microtasks, promises, exceptions and timers. Add execution limits and cancellation. | Check task ordering, rejected promises, timer cancellation and termination of an infinite loop. |
+| 6 | Add host bindings and diagnostics for the browser APIs in S3. | Run a fixed integration fixture with a small test host. Report unsupported host APIs with source locations. |
+
+Resource checks: parse time and memory per bundle, property access, closure calls, promise chains, timer queues, collection pauses and retained heap after repeated runs. Check strings and executable code for unnecessary copies. Measure before adding caches or alternate representations.
+
+Exit: the interpreter passes the target language tests and scheduler checks. Full React/Next.js startup also requires S3. Do not mark compatibility complete until the real application boots.
+
+### S3 DOM and browser APIs
+
+Extend the existing HTML arena, CSS selector matcher and URL code. Keep browser host state outside the language core.
+
+| Topic | Work | Check before closing |
+| --- | --- | --- |
+| 1 | Add DOM creation, attributes, text replacement, insertion, removal and queries required by the target. | DOM invariants, node identity, detached nodes and mutation tests agree with Chrome. |
+| 2 | Add event dispatch, capture, bubbling, cancellation, focus and form state. | Test event order, delegated listeners, input/change/submit and default actions. |
+| 3 | Add script scheduling and document readiness. Connect parser, scheduler and DOM. | Check inline/external script order, dynamic chunks, readiness events and React hydration. |
+| 4 | Add `fetch`, request/response objects, JSON and text decoding, cancellation, same-origin policy and required CORS behavior. | Authenticated API fixtures pass. Cross-origin access and redirect tests enforce the intended restrictions. |
+| 5 | Add origin-scoped session/local storage, location, history and URL APIs. Add cookies if the runtime audit requires them. | Navigation, reload, back/forward, logout and storage isolation pass. Session storage has the correct lifetime. |
+| 6 | Run the actual app and implement remaining APIs that block this journey. Audit observers, animation frames, streams, encoders and browser feature checks. | Record each runtime blocker with a reduced regression fixture. Do not replace framework behavior with app-specific shortcuts. |
+
+Resource checks: DOM mutations, repeated queries, event listener growth, fetch cancellation, navigation teardown and detached-node retention. Release obsolete page resources and JS roots. Bound storage and response buffers.
+
+Exit: the real bundles boot, login runs, authenticated Agents data appears in the DOM, and search/navigation update it through the event system. This is a DOM-level gate. Visible mouse and keyboard operation is the S4 gate.
+
+### S4 Window paint and input
+
+Build on layout and the original modules 5 and 6. Paint into an OS-independent pixel buffer. Keep Wayland behind the window interface described in `decisions.md`.
+
+| Topic | Work | Check before closing |
+| --- | --- | --- |
+| 1 | Add a software paint pipeline, pixel capture and built-in bitmap text. | Fixed fixtures give repeatable pixels. Painted text uses the same metrics as layout. |
+| 2 | Add a Wayland window, buffer lifecycle, resize and frame scheduling. | Open, resize, redraw and close without busy loops, stale buffers or leaks. |
+| 3 | Draw backgrounds, borders, text and the clipping and stacking needed by the target. Add required icons and CSS gaps from the staging audit. | Compare reduced fixtures with Chrome. Forms and account menus remain visible and usable. |
+| 4 | Add hit testing, pointer events, keyboard input, focus traversal, caret, selection, text editing and password masking. | Pointer and keyboard operate controls. Tab, Shift+Tab, Enter and editing work through normal events. |
+| 5 | Add document/container scrolling, navigation and default form actions. | Hit tests respect scroll offsets and clipping. Links, search and menu controls work after scrolling. |
+| 6 | Recompute style, layout and paint after DOM, form, viewport and focus changes. | Run the full staging journey by visible input. Repeated changes do not leave stale output. |
+
+Start with correct full-page updates. Measure them before adding invalidation, dirty regions or cached layout. Add real font/image/SVG support when a measured rendering or interaction failure requires it. Record visual differences from the initial bitmap font; exact Chrome pixels are not an initial gate.
+
+Resource checks: frame time, idle CPU, resize allocations, pixel-buffer copies, repeated layout, long-page scrolling and redraw after small changes. Fix large costs while retaining pixel and hit-test correctness.
+
+Exit: a user can complete the staging acceptance journey in the `bare` window with mouse and keyboard. Chrome remains the reference only.
+
+### S5 Test automation
+
+Expose a small local control interface to the same navigation, event, layout and paint paths used by the window. Keep a separate test driver outside the engine.
+
+| Topic | Work | Check before closing |
+| --- | --- | --- |
+| 1 | Add navigation, element queries, clicks, typing, keys and scrolling. | Actions target visible, enabled elements and use normal hit testing and input dispatch. No direct token injection. |
+| 2 | Add labels/roles for the controls used by the journey, condition waits and assertions. | Duplicate, hidden, disabled, covered and detached targets produce useful failures. No fixed sleeps for readiness. |
+| 3 | Add pixel capture, console/network diagnostics and machine-readable results. | A deliberate failure produces useful evidence and a nonzero exit status. Secrets remain redacted. |
+| 4 | Add a deterministic local app fixture and automate its complete login journey. | Pass and fail paths run without staging availability. Include invalid credentials, expiry and logout. |
+| 5 | Run the same journey against voicebot staging using a dedicated account. | Every step in the acceptance journey passes in `bare`, including reload and unauthenticated redirect. |
+| 6 | Repeat the journey and measure resource retention and reliability. Add the suite to the normal checks. | Record run count, failures, build SHA and staging version where available. Investigate sustained heap/RSS growth. |
+
+Resource checks: action latency, test duration, repeated journeys, driver overhead and failure-capture size. Keep local fixtures independent of staging. Run live staging checks only when requested or through an explicitly configured job.
+
+Exit: the complete acceptance journey runs unattended in `bare` and produces a clear result with failure evidence. A Chrome pass or an API-only login is not this gate.
+
+### Scope after the first journey
+
+Defer tabs, cross-platform windows, advanced tab isolation and resource management, voice calls, WebRTC, microphone and audio playback. Keep basic execution, allocation and network limits in the first implementation.
+
+Next candidates after the first pass: remember-me across browser restarts, invalid-login UI, session expiry and one controlled staging edit. Each needs its own acceptance steps. Add browser features when those steps expose a requirement.
+
+Start with S1 topic 1: inspect the staging TLS and resource requirements, define repeatable fixtures, and choose the first failing HTTPS check. Do not start all five modules at once.
 
 ## Module 1: URL, DNS, TCP and HTTP
 
