@@ -25,13 +25,22 @@
 //! P-384 is used as it is (an integer below 2^256). There is no low-s rule: both s and n-s
 //! are valid ECDSA signatures, so both pass.
 //!
-//! Memory is fixed: everything lives on the stack (a few KiB) and `verify` never allocates.
+//! Memory is fixed: one call uses only its stack, and a call (also the first one, which builds
+//! the table below) ran inside a 16 KiB thread stack, the smallest that Linux gives. Per curve
+//! there is one read-only table of odd multiples of G (2 KiB for P-256, 3 KiB for P-384),
+//! built on the first call with about 1000 field multiplications. `verify` never allocates.
 //!
 //! Layout of the code:
 //! - [`Field`]: arithmetic modulo an odd prime in Montgomery form, shared by the field
 //!   prime p and the group order n, and by both curves through a const generic `N`.
+//! - [`wnaf`]: signed digit strings for the scalars, so that few additions are needed.
 //! - [`Params`]: one curve (p, n, b, G) and the point math in Jacobian coordinates.
 //! - [`verify`]: the public function.
+//!
+//! Tried and dropped, because they measured no faster: a separate squaring routine, a fused
+//! multiply-and-reduce loop, `#[inline(always)]` on `mul`, other window widths.
+
+use std::sync::OnceLock;
 
 /// A number as `N` 64-bit limbs, least significant limb first. `const N: usize` is a
 /// const generic: `[u64; N]` is a different type for each N, like a template parameter.
@@ -286,6 +295,48 @@ impl<const N: usize> Field<N> {
 }
 
 // ---------------------------------------------------------------------------------------
+// Signed windowed digits (wNAF).
+//
+// Write k = sum of d[i] * 2^i where each d[i] is 0 or odd with |d[i]| < 2^(w-1), and a
+// nonzero digit is followed by at least w-1 zeros. Then only one digit in w+1 is nonzero
+// on average, and a table of the odd multiples 1P, 3P, ..., (2^(w-1)-1)P is enough.
+// (Bos and Coster 1989; Hankerson, Menezes and Vanstone, "Guide to Elliptic Curve
+// Cryptography", algorithm 3.35.)
+
+/// Window widths: G gets a table of 2^(WG-2) = 32 points, Q a table of 2^(WQ-2) = 8.
+const WG: usize = 7;
+const WQ: usize = 5;
+const GT: usize = 1 << (WG - 2);
+const QT: usize = 1 << (WQ - 2);
+/// One digit for each bit of a 384-bit scalar, plus one for a last carry.
+const MAX_DIGITS: usize = 385;
+
+/// Fill `out` with the digits of `k` (least significant first) and return how many are used.
+/// `out` must start as all zeros. Needs w <= 8 so that a digit fits in an `i8`.
+fn wnaf<const N: usize>(k: &Limbs<N>, w: usize, out: &mut [i8; MAX_DIGITS]) -> usize {
+    let bit_at = |i: usize| i < 64 * N && bit(k, i);
+    // `carry` is a +1 that an earlier negative digit left for the bits above it.
+    let (mut i, mut carry, mut len) = (0, false, 0);
+    while i < 64 * N + 1 {
+        if bit_at(i) == carry {
+            i += 1; // bit + carry is even: the digit is 0
+            continue;
+        }
+        // bit + carry is odd: take the next w bits (plus the carry) as one odd number
+        // below 2^w. If it is 2^(w-1) or more, use it minus 2^w and carry 1 upward.
+        let mut win = carry as i32;
+        for j in 0..w {
+            win += (bit_at(i + j) as i32) << j;
+        }
+        carry = win >= 1 << (w - 1);
+        out[i] = (win - if carry { 1 << w } else { 0 }) as i8;
+        len = i + 1;
+        i += w;
+    }
+    len
+}
+
+// ---------------------------------------------------------------------------------------
 // Curve y^2 = x^3 - 3x + b over GF(p), and points in Jacobian coordinates.
 //
 // A Jacobian point (X, Y, Z) stands for the affine point (X/Z^2, Y/Z^3). Doubling and
@@ -305,6 +356,8 @@ struct Params<const N: usize> {
     b: Limbs<N>,
     gx: Limbs<N>,
     gy: Limbs<N>,
+    /// Odd multiples of G, affine, in Montgomery form. Built on first use (see `g_table`).
+    gtab: OnceLock<[[Limbs<N>; 2]; GT]>,
 }
 
 // FIPS 186-5 / SP 800-186 values (also in SEC 2 as secp256r1 and secp384r1).
@@ -315,6 +368,7 @@ static P256: Params<4> = Params {
     b: hex("5ac635d8aa3a93e7b3ebbd55769886bc651d06b0cc53b0f63bce3c3e27d2604b"),
     gx: hex("6b17d1f2e12c4247f8bce6e563a440f277037d812deb33a0f4a13945d898c296"),
     gy: hex("4fe342e2fe1a7f9b8ee7eb4a7c0f9e162bce33576b315ececbb6406837bf51f5"),
+    gtab: OnceLock::new(),
 };
 
 static P384: Params<6> = Params {
@@ -327,6 +381,7 @@ static P384: Params<6> = Params {
     b: hex("b3312fa7e23ee7e4988e056be3f82d19181d9c6efe8141120314088f5013875ac656398d8a2ed19d2a85c8edd3ec2aef"),
     gx: hex("aa87ca22be8b05378eb1c71ef320ad746e1d3b628ba79b9859f741e082542a385502f25dbf55296c3a545e3872760ab7"),
     gy: hex("3617de4a96262c6f5d9e98bf9292dc29f8f41dbd289a147ce9da3113b5f0b8c00a60b1ce1d7e819d7a431d7c90ea0e5f"),
+    gtab: OnceLock::new(),
 };
 
 impl<const N: usize> Params<N> {
@@ -386,18 +441,90 @@ impl<const N: usize> Params<N> {
         Point { x: x3, y: y3, z: f.mul(&zs, &h) }
     }
 
-    /// u1*G + u2*Q with Shamir's trick: one shared chain of doublings, and at each bit
-    /// one addition of G, Q or G+Q. Cost: about 256 (384) doublings and 3/4 as many additions.
+    /// `add` for a second point that is affine (Z = 1): 7 multiplications and 4 squarings
+    /// instead of 11 and 5. Formulas "madd-2007-bl".
+    fn add_affine(&self, a: &Point<N>, b: &[Limbs<N>; 2]) -> Point<N> {
+        let f = &self.p;
+        if is_zero(&a.z) {
+            return Point { x: b[0], y: b[1], z: f.one };
+        }
+        let z1z1 = f.sqr(&a.z);
+        let u2 = f.mul(&b[0], &z1z1);
+        let s2 = f.mul(&f.mul(&b[1], &a.z), &z1z1);
+        let h = f.sub(&u2, &a.x);
+        let r = f.sub(&s2, &a.y);
+        if is_zero(&h) {
+            return if is_zero(&r) { self.dbl(a) } else { Self::INF };
+        }
+        let hh = f.sqr(&h);
+        let i = f.add(&hh, &hh);
+        let i = f.add(&i, &i);
+        let j = f.mul(&h, &i);
+        let r = f.add(&r, &r);
+        let v = f.mul(&a.x, &i);
+        let x3 = f.sub(&f.sub(&f.sqr(&r), &j), &f.add(&v, &v));
+        let yj = f.mul(&a.y, &j);
+        let y3 = f.sub(&f.mul(&r, &f.sub(&v, &x3)), &f.add(&yj, &yj));
+        let z3 = f.sub(&f.sub(&f.sqr(&f.add(&a.z, &h)), &z1z1), &hh);
+        Point { x: x3, y: y3, z: z3 }
+    }
+
+    /// 1G, 3G, 5G, ... (2*GT-1)G as affine points. All use one shared inversion
+    /// (Montgomery's trick: invert the product of all Z, then peel off one Z at a time).
+    /// The table is built once per process and then only read, so it is fixed memory.
+    fn g_table(&self) -> &[[Limbs<N>; 2]; GT] {
+        self.gtab.get_or_init(|| {
+            let f = &self.p;
+            let g = Point { x: f.to_mont(&self.gx), y: f.to_mont(&self.gy), z: f.one };
+            let g2 = self.dbl(&g);
+            let mut pts = [g; GT];
+            for i in 1..GT {
+                pts[i] = self.add(&pts[i - 1], &g2);
+            }
+            let mut prefix = [f.one; GT]; // prefix[i] = Z_0 * ... * Z_i
+            let mut run = f.one;
+            for i in 0..GT {
+                run = f.mul(&run, &pts[i].z);
+                prefix[i] = run;
+            }
+            let mut inv = f.inv(&run); // 1 / (Z_0 * ... * Z_last)
+            let mut out = [[[0u64; N]; 2]; GT];
+            for i in (0..GT).rev() {
+                let zi = if i > 0 { f.mul(&inv, &prefix[i - 1]) } else { inv }; // 1 / Z_i
+                inv = f.mul(&inv, &pts[i].z);
+                let zi2 = f.sqr(&zi);
+                out[i] = [f.mul(&pts[i].x, &zi2), f.mul(&pts[i].y, &f.mul(&zi2, &zi))];
+            }
+            out
+        })
+    }
+
+    /// u1*G + u2*Q. Both scalars become signed digit strings (wNAF, see `wnaf`) and share
+    /// one chain of doublings (Strauss/Shamir). At a nonzero digit d, add d*G or d*Q from a
+    /// table of odd multiples; a negative digit uses the negated point (same X, Y -> p - Y).
+    /// G has a big table (WG = 7: one digit in 8) and Q a small one made per call (WQ = 5:
+    /// one digit in 6, so 8 table points cost 1 doubling and 7 additions).
     fn mul_add(&self, u1: &Limbs<N>, u2: &Limbs<N>, q: &Point<N>) -> Point<N> {
         let f = &self.p;
-        let g = Point { x: f.to_mont(&self.gx), y: f.to_mont(&self.gy), z: f.one };
-        let table = [Self::INF, g, *q, self.add(&g, q)];
+        let (mut d1, mut d2) = ([0i8; MAX_DIGITS], [0i8; MAX_DIGITS]);
+        let len = wnaf(u1, WG, &mut d1).max(wnaf(u2, WQ, &mut d2));
+        let q2 = self.dbl(q);
+        let mut qt = [*q; QT];
+        for i in 1..QT {
+            qt[i] = self.add(&qt[i - 1], &q2);
+        }
+        let gt = self.g_table();
+        let neg = |y: &Limbs<N>| f.sub(&[0; N], y);
         let mut r = Self::INF;
-        for i in (0..64 * N).rev() {
+        for i in (0..len).rev() {
             r = self.dbl(&r);
-            let sel = bit(u1, i) as usize | (bit(u2, i) as usize) << 1;
-            if sel != 0 {
-                r = self.add(&r, &table[sel]);
+            if d1[i] != 0 {
+                let t = &gt[d1[i].unsigned_abs() as usize / 2]; // |d| = 2k+1 sits at index k
+                r = self.add_affine(&r, &[t[0], if d1[i] < 0 { neg(&t[1]) } else { t[1] }]);
+            }
+            if d2[i] != 0 {
+                let t = &qt[d2[i].unsigned_abs() as usize / 2];
+                r = self.add(&r, &Point { x: t.x, y: if d2[i] < 0 { neg(&t.y) } else { t.y }, z: t.z });
             }
         }
         r
@@ -602,6 +729,127 @@ mod tests {
             assert!(!is_zero(&c.mul_add(&nm1, &zero, &g).z));
             // 2G + 1G + ... : n*G computed as (n-1)G + G agrees with G + (n-1)G.
             assert!(is_zero(&c.mul_add(&zero, &c.n.m, &g).z));
+        }
+        check(&P256);
+        check(&P384);
+    }
+
+    /// The plain double-and-add chain with Shamir's trick: slow but easy to trust. It is the
+    /// reference for the wNAF code in `mul_add`.
+    fn mul_add_ref<const N: usize>(c: &Params<N>, u1: &Limbs<N>, u2: &Limbs<N>, q: &Point<N>) -> Point<N> {
+        let f = &c.p;
+        let g = Point { x: f.to_mont(&c.gx), y: f.to_mont(&c.gy), z: f.one };
+        let table = [Params::<N>::INF, g, *q, c.add(&g, q)];
+        let mut r = Params::<N>::INF;
+        for i in (0..64 * N).rev() {
+            r = c.dbl(&r);
+            let sel = bit(u1, i) as usize | (bit(u2, i) as usize) << 1;
+            if sel != 0 {
+                r = c.add(&r, &table[sel]);
+            }
+        }
+        r
+    }
+
+    /// Affine x and y of a finite point, in Montgomery form.
+    fn affine<const N: usize>(c: &Params<N>, p: &Point<N>) -> [Limbs<N>; 2] {
+        let f = &c.p;
+        let zi = f.inv(&p.z);
+        let zi2 = f.sqr(&zi);
+        [f.mul(&p.x, &zi2), f.mul(&p.y, &f.mul(&zi2, &zi))]
+    }
+
+    fn xorshift(seed: &mut u64) -> u64 {
+        *seed ^= *seed << 13;
+        *seed ^= *seed >> 7;
+        *seed ^= *seed << 17;
+        *seed
+    }
+
+    /// wNAF digits rebuild the scalar and keep the digit rules.
+    #[test]
+    fn wnaf_properties() {
+        fn check<const N: usize>(c: &Params<N>) {
+            let mut seed = 12345u64;
+            let mut ks: Vec<Limbs<N>> = (0..300)
+                .map(|_| {
+                    let mut k = [0u64; N];
+                    k.iter_mut().for_each(|l| *l = xorshift(&mut seed));
+                    if xorshift(&mut seed) % 4 == 0 {
+                        k[N - 1] = u64::MAX; // top limb full: the last carry digit
+                    }
+                    k
+                })
+                .collect();
+            let mut one = [0u64; N];
+            one[0] = 1;
+            ks.extend([[0; N], one, sub_raw(&c.n.m, &one).0, [u64::MAX; N]]);
+            for k in &ks {
+                for w in [WG, WQ, 2, 3, 8] {
+                    let mut d = [0i8; MAX_DIGITS];
+                    let len = wnaf(k, w, &mut d);
+                    let mut last = None;
+                    for (i, &x) in d.iter().enumerate() {
+                        if x != 0 {
+                            assert!(x % 2 != 0 && (x as i32).abs() < 1 << (w - 1), "digit {x} w={w}");
+                            assert!(last.is_none_or(|l| i >= l + w), "gap");
+                            assert!(i < len);
+                            last = Some(i);
+                        }
+                    }
+                    // Horner from the top, modulo n. The value 2^64N - 1 is >= n, so compare mod n.
+                    let n = &c.n;
+                    let mut acc = [0u64; N];
+                    for i in (0..len).rev() {
+                        acc = n.add(&acc, &acc);
+                        let mut v = [0u64; N];
+                        v[0] = (d[i] as i32).unsigned_abs() as u64;
+                        acc = if d[i] < 0 { n.sub(&acc, &v) } else { n.add(&acc, &v) };
+                    }
+                    let mut want = *k;
+                    while geq(&want, &n.m) {
+                        want = sub_raw(&want, &n.m).0;
+                    }
+                    assert_eq!(acc, want, "w={w}");
+                }
+            }
+        }
+        check(&P256);
+        check(&P384);
+    }
+
+    /// `mul_add` (wNAF, tables) equals the plain chain on random and edge scalars, with
+    /// random Q and Q = +-G, 2G.
+    #[test]
+    fn mul_add_matches_reference() {
+        fn check<const N: usize>(c: &Params<N>) {
+            let f = &c.p;
+            let mut seed = 777u64;
+            let g = Point { x: f.to_mont(&c.gx), y: f.to_mont(&c.gy), z: f.one };
+            let mut qs = vec![g, c.dbl(&g), Point { y: f.sub(&[0; N], &g.y), ..g }];
+            let mut one = [0u64; N];
+            one[0] = 1;
+            let mut scalars: Vec<Limbs<N>> = vec![[0; N], one, sub_raw(&c.n.m, &one).0];
+            for _ in 0..24 {
+                let mut k = [0u64; N];
+                k.iter_mut().for_each(|l| *l = xorshift(&mut seed));
+                k[N - 1] >>= 1 + xorshift(&mut seed) % 3; // below n
+                scalars.push(k);
+            }
+            for i in 0..4 {
+                qs.push(c.mul_add(&scalars[3 + i], &[0; N], &g)); // arbitrary points kG
+            }
+            for q in &qs {
+                for u1 in &scalars {
+                    for u2 in scalars.iter().step_by(2) {
+                        let (a, b) = (c.mul_add(u1, u2, q), mul_add_ref(c, u1, u2, q));
+                        assert_eq!(is_zero(&a.z), is_zero(&b.z));
+                        if !is_zero(&a.z) {
+                            assert_eq!(affine(c, &a), affine(c, &b));
+                        }
+                    }
+                }
+            }
         }
         check(&P256);
         check(&P384);
