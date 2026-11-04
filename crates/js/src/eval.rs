@@ -246,6 +246,7 @@ enum Nat {
     /// JSON, RegExp and String.prototype bindings (`eval_builtins.rs`).
     Ext(Bi),
     Bin(BinFn),
+    Ao(AoFn),
 }
 
 enum Callee {
@@ -350,6 +351,7 @@ pub struct Interp<'p> {
     ext: Ext,
     host: Option<Rc<dyn Host>>,
     bin: BinaryState,
+    ao: AoState,
     // permanent keys
     k_length: PropertyKey,
     k_name: PropertyKey,
@@ -387,6 +389,7 @@ impl<'p> Interp<'p> {
         it.walk_program()?;
         it.install_builtins()?;
         it.install_ext()?;
+        it.install_array_object()?;
         it.install_promise()?;
         it.install_binary()?;
         Ok(it)
@@ -477,6 +480,7 @@ impl<'p> Interp<'p> {
             ext,
             host: None,
             bin: BinaryState::default(),
+            ao: AoState::default(),
             k_length: ks[0],
             k_name: ks[1],
             k_message: ks[2],
@@ -556,6 +560,7 @@ impl<'p> Interp<'p> {
             v.extend(e.bindings.iter().map(|b| b.value));
             v.extend(e.this);
         }
+        v.extend(self.ao.array_ctor.map(Value::Object));
         self.promise_roots(&mut v);
         self.binary_roots(&mut v);
         self.promise_all_values(&mut v);
@@ -588,6 +593,7 @@ impl<'p> Interp<'p> {
         work.extend(self.error_protos.iter().map(|&o| Value::Object(o)));
         self.ext_roots(&mut work);
         work.extend_from_slice(extra);
+        work.extend(self.ao.array_ctor.map(Value::Object));
         self.promise_roots(&mut work);
         let host = self.host.clone();
         let mut host_vals: Vec<Value> = Vec::new();
@@ -2941,6 +2947,7 @@ include!("eval_scripts.rs");
 include!("eval_builtins.rs");
 include!("eval_json_stringify.rs");
 include!("eval_host.rs");
+include!("eval_array_object.rs");
 
 #[cfg(test)]
 #[path = "eval_tests.rs"]
@@ -2968,3 +2975,5 @@ mod host_tests;
 #[cfg(test)]
 #[path = "eval_binary_tests.rs"]
 mod binary_tests;
+#[path = "eval_array_object_tests.rs"]
+mod array_object_tests;

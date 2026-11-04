@@ -1,0 +1,390 @@
+# bare-js Array/Object/Math method cases. Same format as eval-cases.txt: `=== name`, then one sloppy script.
+# The result is the completion value. Node (vm, empty context) is the oracle (tools/js/arrobj_check.sh).
+# Error cases print only what Node and bare-js can both give: usually `e.name`.
+=== map_basic
+[1,2,3].map(function(x,i,a){return x*2+i+a.length}).join()
+=== map_holes
+var r=[1,,3].map(function(x){return x}); r.length+":"+Object.keys(r).join()
+=== map_this_arg
+[1].map(function(){return this.k},{k:7})[0]
+=== map_arg_count
+var n=[]; [5].map(function(){n.push(arguments.length)}); n.join()
+=== map_mutation_during
+var a=[1,2,3]; var r=a.map(function(x,i){ if(i==0){a.push(9); a[2]=30;} return x}); r.join()+"|"+a.length
+=== map_delete_during
+var a=[1,2,3]; var s=[]; a.map(function(x,i){ delete a[2]; s.push(x)}); s.join()
+=== map_length_snapshot
+var a=[1,2]; var c=0; a.map(function(){c++; a.push(0)}); c
+=== map_not_function
+try{[1].map(3)}catch(e){e.name}
+=== map_arraylike
+var r=Array.prototype.map.call({length:3,0:"a",2:"c"},function(x){return x+x}); Array.isArray(r)+r.join()
+=== map_string_receiver
+Array.prototype.map.call("abc",function(x){return x+1}).join()
+=== map_inherited_index
+var a=[1,,3]; Array.prototype[1]="inh"; var r=a.map(function(x){return x+"!"}); delete Array.prototype[1]; r.join()
+=== map_null_this
+try{Array.prototype.map.call(null,function(){})}catch(e){e.name+":"+e.message}
+=== map_throw_stops
+var c=0; try{[1,2,3].map(function(x){c++; if(x==2) throw 1;})}catch(e){} c
+=== map_getter_throws
+var a=[1,2]; Object.defineProperty(a,1,{get:function(){throw new RangeError("g")}}); try{a.map(function(x){return x})}catch(e){e.name+e.message}
+=== map_huge_sparse_length
+// @limit
+Array.prototype.map.call({length:4294967295},function(){})
+=== map_define_on_result_not_set
+Object.defineProperty(Array.prototype,"0",{set:function(){throw new Error("set")},configurable:true}); var r=[5].map(function(x){return x}); delete Array.prototype[0]; r[0]
+=== filter_basic
+[1,2,3,4].filter(function(x,i){return x%2==0||i==0}).join()
+=== filter_holes
+[1,,3].filter(function(){return true}).length
+=== filter_mutation
+var a=[1,2,3,4]; a.filter(function(x,i){a.length=2; return true}).join()
+=== filter_arraylike
+Array.prototype.filter.call({length:3,0:1,1:2,2:3},function(x){return x>1}).join()
+=== filter_this_arg
+[1,2].filter(function(){return this.k},{k:true}).length
+=== find_basic
+[1,2,3].find(function(x){return x>1})+","+[1,2,3].findIndex(function(x){return x>1})
+=== find_visits_holes
+var s=[]; [1,,3].find(function(x,i){s.push(i+":"+x)}); s.join()
+=== find_none
+[1,2].find(function(){return false})+","+[1,2].findIndex(function(){return false})
+=== find_arraylike
+Array.prototype.find.call({length:2,1:"b"},function(x){return x})
+=== find_getter_throws
+var a=[1]; Object.defineProperty(a,0,{get:function(){throw new TypeError("x")}}); try{a.find(function(){})}catch(e){e.name}
+=== findindex_mutation
+var a=[1,2,3]; a.findIndex(function(x,i){ if(i==0) a.pop(); return x==3 })
+=== splice_remove
+var a=[1,2,3,4,5]; var r=a.splice(1,2); a.join()+"|"+r.join()
+=== splice_insert
+var a=[1,2,3]; var r=a.splice(1,0,"x","y"); a.join()+"|"+r.length
+=== splice_replace_bigger
+var a=[1,2,3]; var r=a.splice(0,1,"a","b","c"); a.join()+"|"+r.join()
+=== splice_replace_smaller
+var a=[1,2,3,4,5]; var r=a.splice(1,3,"z"); a.join()+"|"+r.join()
+=== splice_no_args
+var a=[1,2]; var r=a.splice(); a.length+"|"+r.length
+=== splice_one_arg
+var a=[1,2,3]; var r=a.splice(1); a.join()+"|"+r.join()
+=== splice_negative
+var a=[1,2,3,4]; var r=a.splice(-2,1); a.join()+"|"+r.join()
+=== splice_undefined_count
+var a=[1,2,3]; var r=a.splice(1,undefined); a.join()+"|"+r.length
+=== splice_clamp
+var a=[1,2,3]; var r=a.splice(1,100); a.join()+"|"+r.join()
+=== splice_holes
+var a=[1,,3,,5]; var r=a.splice(1,3); Object.keys(a).join()+"|"+Object.keys(r).join()+"|"+a.length+r.length
+=== splice_holes_shift_right
+var a=[1,,3]; a.splice(0,0,0,0); Object.keys(a).join()+"|"+a.length
+=== splice_arraylike
+var o={length:3,0:"a",1:"b",2:"c"}; Array.prototype.splice.call(o,1,1); [o.length,o[0],o[1],o[2]].join()
+=== splice_nonwritable_element
+var a=[1,2,3]; Object.defineProperty(a,1,{writable:false}); try{a.splice(0,1)}catch(e){e.name+a.join()}
+=== splice_nonconfigurable_tail
+var a=[1,2,3]; Object.defineProperty(a,2,{configurable:false}); try{a.splice(0,1)}catch(e){e.name+a.join()}
+=== splice_length_nonwritable
+var a=[1,2]; Object.defineProperty(a,"length",{writable:false}); try{a.splice(0,1)}catch(e){e.name+a.join()}
+=== splice_getter_order
+var log=[]; var o={length:3, get 0(){log.push("g0");return 0}, get 1(){log.push("g1");return 1}, get 2(){log.push("g2");return 2}}; try{Array.prototype.splice.call(o,0,1)}catch(e){log.push(e.name)} log.join()
+=== splice_result_is_array
+Array.isArray([1,2,3].splice(1))
+=== reduce_sum
+[1,2,3].reduce(function(a,b){return a+b})+","+[1,2,3].reduce(function(a,b){return a+b},10)
+=== reduce_empty
+try{[].reduce(function(){})}catch(e){e.name+":"+e.message}
+=== reduce_empty_init_undefined
+String([].reduce(function(){},undefined))
+=== reduce_holes
+var s=[]; [,1,,2].reduce(function(a,b,i){s.push(i); return b}); s.join()
+=== reduce_args
+var s=[]; [5,6].reduce(function(a,b,i,arr){s.push(a+"|"+b+"|"+i+"|"+arr.length); return b},0); s.join(";")
+=== reduce_mutation
+var a=[1,2]; var c=0; a.reduce(function(x,y){c++; a.push(0); return y},0); c
+=== reduce_single_no_call
+var c=0; [7].reduce(function(){c++}) +","+c
+=== some_every
+[1,2,3].some(function(x){return x>2})+","+[1,2,3].every(function(x){return x>0})+","+[].every(function(){return false})+","+[].some(function(){return true})
+=== some_every_holes
+var c=0; [,1,,2].every(function(x){c++; return true}); c
+=== some_early_stop
+var c=0; [1,2,3].some(function(x){c++; return x==2}); c
+=== every_early_stop
+var c=0; [1,2,3].every(function(x){c++; return x<2}); c
+=== slice_basic
+[1,2,3,4].slice(1,3).join()+"|"+[1,2,3,4].slice(-2).join()+"|"+[1,2,3].slice().join()
+=== slice_extremes
+[1,2,3].slice(-Infinity,Infinity).join()+"|"+[1,2,3].slice(5).length+"|"+[1,2,3].slice(2,1).length+"|"+[1,2,3].slice(NaN,undefined).length
+=== slice_holes
+var r=[1,,3].slice(0); Object.keys(r).join()+"|"+r.length
+=== slice_arraylike
+var r=Array.prototype.slice.call({length:3,0:"a",1:"b",2:"c"},1); Array.isArray(r)+r.join()
+=== slice_string
+Array.prototype.slice.call("abc",1).join()
+=== slice_arguments
+function f(){return Array.prototype.slice.call(arguments,1)} f(1,2,3).join()
+=== slice_far_sparse
+var a=[]; a[4294967294]=1; var r=a.slice(4294967290); r.length+","+r[4]
+=== slice_coercion_order
+var log=[]; [1,2,3].slice({valueOf:function(){log.push("s");return 0}},{valueOf:function(){log.push("e");return 1}}); log.join()
+=== slice_getter_throws
+var a=[1,2]; Object.defineProperty(a,0,{get:function(){throw new RangeError("g")}}); try{a.slice()}catch(e){e.name}
+=== includes_nan
+[NaN].includes(NaN)+","+[NaN].indexOf(NaN)
+=== includes_holes
+[,].includes(undefined)+","+[,].indexOf(undefined)+","+[,undefined].indexOf(undefined)
+=== includes_zero
+[-0].includes(0)+","+[0].indexOf(-0)
+=== includes_from
+[1,2,3].includes(1,1)+","+[1,2,3].includes(3,-1)+","+[1,2,3].includes(1,-100)+","+[1,2,3].indexOf(1,5)+","+[1,2,3].indexOf(3,-1)
+=== includes_empty_skips_fromindex
+var c=0; [].includes(1,{valueOf:function(){c++;return 0}}); [].indexOf(1,{valueOf:function(){c++;return 0}}); c
+=== includes_strict
+[1,"1"].indexOf("1")+","+["a"].includes("a")+","+[{}].includes({})
+=== includes_arraylike
+Array.prototype.includes.call({length:2,1:"x"},"x")+","+Array.prototype.indexOf.call({length:2,1:"x"},"x")
+=== includes_string_receiver
+Array.prototype.includes.call("abc","b")+","+Array.prototype.indexOf.call("abc","c")
+=== includes_inherited
+Array.prototype[1]="inh"; var r=[1,,3].includes("inh")+","+[1,,3].indexOf("inh"); delete Array.prototype[1]; r
+=== includes_getter_throws
+var a=[1]; Object.defineProperty(a,0,{get:function(){throw new RangeError("x")}}); try{a.includes(1)}catch(e){e.name}
+=== concat_basic
+[1].concat([2,3],4,[[5]]).length+"|"+[1].concat([2,3],4,[[5]]).join()
+=== concat_holes
+var r=[1,,3].concat([,5]); Object.keys(r).join()+"|"+r.length
+=== concat_arraylike_not_spread
+var r=[].concat({length:1,0:"x"}); r.length+","+typeof r[0]
+=== concat_empty
+[].concat().length+","+[1].concat([]).length
+=== concat_receiver_arraylike
+var r=Array.prototype.concat.call({length:1,0:"x"},[2]); r.length+","+typeof r[0]+","+r[1]
+=== concat_null_this
+try{Array.prototype.concat.call(undefined)}catch(e){e.name}
+=== concat_getter_throws
+var a=[1]; Object.defineProperty(a,0,{get:function(){throw new RangeError("x")}}); try{[].concat(a)}catch(e){e.name}
+=== concat_length_snapshot
+var a=[1,2]; var r=[].concat(a,a); r.length
+=== shift_basic
+var a=[1,2,3]; var f=a.shift(); f+"|"+a.join()+"|"+a.length
+=== shift_empty
+var a=[]; String(a.shift())+a.length
+=== shift_holes
+var a=[,1,,2]; var f=a.shift(); String(f)+"|"+Object.keys(a).join()+"|"+a.length
+=== shift_arraylike
+var o={length:3,0:"a",1:"b",2:"c"}; var f=Array.prototype.shift.call(o); f+[o.length,o[0],o[1],o[2]].join()
+=== shift_arraylike_no_length
+var o={}; String(Array.prototype.shift.call(o))+o.length
+=== shift_nonconfigurable
+var a=[1,2]; Object.defineProperty(a,1,{configurable:false}); try{a.shift()}catch(e){e.name+a.join()}
+=== shift_queue
+var q=[]; for(var i=0;i<20;i++) q.push(i); var s=0; while(q.length){ s+=q.shift(); if(s%7==0) q.push(1) } s
+=== unshift_basic
+var a=[3]; var n=a.unshift(1,2); n+"|"+a.join()
+=== unshift_none
+var a=[1]; a.unshift()+"|"+a.join()
+=== unshift_holes
+var a=[,1]; a.unshift("x"); Object.keys(a).join()+"|"+a.length
+=== unshift_arraylike
+var o={length:1,0:"b"}; var n=Array.prototype.unshift.call(o,"a"); n+[o.length,o[0],o[1]].join()
+=== unshift_nonwritable
+var a=[1,2]; Object.defineProperty(a,1,{writable:false}); try{a.unshift(0)}catch(e){e.name+a.join()}
+=== unshift_length_nonwritable
+var a=[1]; Object.defineProperty(a,"length",{writable:false}); try{a.unshift(0)}catch(e){e.name}
+=== sort_default
+[10,9,1,undefined,,3].sort().join()+"|"+Object.keys([10,9,,undefined,1].sort()).join()
+=== sort_strings
+["b","a","C","B","c","A"].sort().join()
+=== sort_numeric
+[10,9,1,100].sort(function(a,b){return a-b}).join()
+=== sort_stable
+var a=[]; for(var i=0;i<40;i++) a.push({k:i%3,v:i}); a.sort(function(x,y){return x.k-y.k}).map(function(o){return o.v}).join()
+=== sort_undefined_not_compared
+var seen=[]; [3,undefined,1].sort(function(a,b){seen.push(typeof a+typeof b); return a-b}); seen.filter(function(t){return t!=="numbernumber"}).length
+=== sort_comparator_throws
+var n=0; var a=[3,2,1,4]; try{a.sort(function(x,y){n++; if(n==2) throw new Error("x"); return x-y})}catch(e){} n+"|"+a.join()
+=== sort_invalid_comparator
+try{[].sort(1)}catch(e){e.name+":"+e.message}
+=== sort_null_comparator
+try{[2,1].sort(null)}catch(e){e.name}
+=== sort_surrogates
+var s=["😀","￿","a","퟿"].sort(); [s[0]=="a",s[1]=="퟿",s[2]=="😀",s[3]=="￿"].join()
+=== sort_tostring_called
+var n=0; var mk=function(v){return {toString:function(){n++;return v}}}; var r=[mk("b"),mk("a")].sort(); var c=n; c+","+r[0]
+=== sort_arraylike
+var o={length:3,0:"c",1:"a",2:"b"}; var r=Array.prototype.sort.call(o); (r===o)+[o[0],o[1],o[2]].join()
+=== sort_arraylike_holes
+var o={length:4,0:"c",2:"a"}; Array.prototype.sort.call(o); Object.keys(o).join()+[o[0],o[1]].join()
+=== sort_comparator_mutates
+var a=[3,2,1]; a.sort(function(x,y){a.length=0; return x-y}); a.join()+"|"+a.length
+=== sort_nonwritable
+var a=[2,1]; Object.defineProperty(a,0,{writable:false}); try{a.sort()}catch(e){e.name+a.join()}
+=== sort_returns_this
+var a=[2,1]; a.sort()===a
+=== sort_nan_result
+[3,1,2].sort(function(a,b){return NaN}).join()
+=== sort_comparator_this
+var t; [2,1].sort(function(a,b){t=this; return a-b}); typeof t
+=== sort_large
+var a=[]; for(var i=0;i<500;i++) a.push((i*7919)%503); a.sort(function(x,y){return x-y}); var ok=true; for(var j=1;j<a.length;j++) if(a[j-1]>a[j]) ok=false; ok+","+a[0]+","+a[499]
+=== assign_basic
+var t={a:1}; var r=Object.assign(t,{b:2},null,undefined,{a:3,c:4}); (r===t)+","+Object.keys(t).join()+","+t.a
+=== assign_getters_setters
+var log=[]; var src={get a(){log.push("get a");return 1}}; var t={set a(v){log.push("set "+v)}}; Object.assign(t,src); log.join()
+=== assign_key_order
+var s={b:1,2:1,a:1,1:1}; Object.keys(Object.assign({},s)).join()
+=== assign_nonenumerable_skipped
+var s={}; Object.defineProperty(s,"h",{value:1,enumerable:false}); s.v=2; Object.keys(Object.assign({},s)).join()
+=== assign_string_source
+var t=Object.assign({},"ab"); Object.keys(t).join()+t[0]+t[1]
+=== assign_primitive_sources
+Object.keys(Object.assign({},1,true,NaN)).length
+=== assign_nullish_target
+try{Object.assign(null,{})}catch(e){e.name+":"+e.message}
+=== assign_no_args
+try{Object.assign()}catch(e){e.name}
+=== assign_nonwritable_target
+var t={}; Object.defineProperty(t,"x",{value:1,writable:false}); try{Object.assign(t,{y:2,x:3,z:4})}catch(e){e.name+Object.keys(t).join()}
+=== assign_getter_throws
+var t={}; try{Object.assign(t,{a:1,get b(){throw new RangeError("x")},c:3})}catch(e){e.name+Object.keys(t).join()}
+=== assign_deleted_during
+var s={get a(){delete this.b;return 1},b:2}; Object.keys(Object.assign({},s)).join()
+=== assign_target_gets_proto_setter
+var log=[]; Object.defineProperty(Object.prototype,"q",{set:function(v){log.push(v)},configurable:true}); var t=Object.assign({},{q:5}); delete Object.prototype.q; log.join()+","+Object.keys(t).length
+=== assign_nonextensible_target
+var t=Object.preventExtensions?1:0; 1
+=== assign_array_target
+var r=Object.assign([1,2],[9]); r.join()+r.length
+=== entries_basic
+Object.entries({a:1,b:2}).map(function(p){return p[0]+"="+p[1]}).join()
+=== entries_order_and_skips
+var o={b:1,1:2,a:3}; Object.defineProperty(o,"h",{value:9,enumerable:false}); Object.entries(o).join(";")
+=== entries_values_array_string
+Object.entries([5,6]).join(";")+"|"+Object.values("ab").join()+"|"+Object.entries("ab").length
+=== values_basic
+Object.values({a:1,b:[2]}).length+","+Object.values({a:1,b:2}).join()
+=== values_getter
+var log=[]; Object.values({get a(){log.push("a");return 1},get b(){log.push("b");return 2}}).join()+log.join()
+=== values_deleted_by_getter
+Object.values({get a(){delete this.b;return 1},b:2}).join()
+=== values_no_proto
+var p={x:1}; var o=Object.create(p); o.y=2; Object.values(o).join()+Object.entries(o).length
+=== entries_nullish
+try{Object.entries(null)}catch(e){e.name}+","+(function(){try{Object.values(undefined)}catch(e){return e.name}})()
+=== entries_primitives
+Object.entries(5).length+","+Object.values(true).length
+=== entries_getter_throws
+try{Object.entries({get a(){throw new RangeError("x")}})}catch(e){e.name}
+=== fromentries_basic
+var o=Object.fromEntries([["a",1],["b",2],["a",3]]); Object.keys(o).join()+o.a+o.b
+=== fromentries_key_coercion
+var o=Object.fromEntries([[1,"x"],[{toString:function(){return "k"}},"y"],[null,"z"]]); Object.keys(o).join()
+=== fromentries_item_not_object
+try{Object.fromEntries(["ab"])}catch(e){e.name+":"+e.message}
+=== fromentries_not_iterable
+try{Object.fromEntries({})}catch(e){e.name}
+=== fromentries_nullish
+try{Object.fromEntries()}catch(e){e.name}
+=== fromentries_holes
+try{Object.fromEntries([[1,2],,[3,4]])}catch(e){e.name}
+=== fromentries_defines_not_sets
+Object.defineProperty(Object.prototype,"zz",{set:function(){throw 1},configurable:true}); var o=Object.fromEntries([["zz",1]]); delete Object.prototype.zz; o.zz
+=== fromentries_entry_arraylike
+var o=Object.fromEntries([{0:"k",1:"v"},{length:0}]); Object.keys(o).join()+String(o.undefined)
+=== fromentries_roundtrip
+var src={a:1,b:2,c:3}; var o=Object.fromEntries(Object.entries(src).filter(function(p){return p[1]>1})); Object.keys(o).join()
+=== fromentries_empty
+Object.keys(Object.fromEntries([])).length
+=== from_array
+var r=Array.from([1,,3]); Object.keys(r).join()+"|"+r.length
+=== from_string_code_points
+Array.from("a😀b").length+","+Array.from("").length
+=== from_arraylike
+Array.from({length:2,0:"x",1:"y"}).join()+","+Array.from({length:2}).length
+=== from_map_fn
+Array.from([1,2,3],function(x,i){return x*10+i+(this.k||0)},{k:100}).join()
+=== from_map_fn_arg_count
+var n=[]; Array.from([5],function(){n.push(arguments.length)}); Array.from({length:1},function(){n.push(arguments.length)}); n.join()
+=== from_map_not_function
+try{Array.from([1],5)}catch(e){e.name}
+=== from_map_checked_before_nullish
+try{Array.from(null,5)}catch(e){e.name}
+=== from_nullish
+try{Array.from(null)}catch(e){e.name}
+=== from_primitives
+Array.from(5).length+","+Array.from(true).length
+=== from_arraylike_map
+Array.from({length:3},function(_,i){return i*2}).join()
+=== from_huge_length
+try{Array.from({length:4294967296})}catch(e){e.name+":"+e.message}
+=== from_getter_throws
+try{Array.from({length:2,get 0(){throw new RangeError("x")}})}catch(e){e.name}
+=== from_live_array
+var a=[1,2]; Array.from(a,function(x){ if(a.length<4) a.push(9); return x}).length
+=== from_standalone
+var f=Array.from; f([1,2]).length+","+Array.from.call({},[1]).length+","+Array.isArray(Array.from.call(undefined,[1]))
+=== from_map_throws_stops
+var c=0; try{Array.from([1,2,3],function(x){c++; if(x==2) throw 1; return x})}catch(e){} c
+=== from_arraylike_negative_length
+Array.from({length:-5}).length+","+Array.from({length:"2"}).length
+=== of_basic
+Array.of(7).length+","+Array.of(1,2,3).join()+","+Array.of().length+","+Array.of(undefined).length
+=== of_standalone
+var f=Array.of; f(1,2).length
+=== math_abs_floor
+[Math.abs(-3),Math.abs("-2"),1/Math.abs(-0),Math.abs(NaN),Math.floor(-1.5),Math.floor(2.9),1/Math.floor(-0),Math.floor(-0.5)].join()
+=== math_round
+[Math.round(2.5),Math.round(-2.5),Math.round(-0.4),1/Math.round(-0.4),Math.round(0.49999999999999994),Math.round(1.5),Math.round(-1.5),Math.round(4503599627370497),Math.round(NaN),Math.round(-Infinity)].join()
+=== math_trunc
+[Math.trunc(4.7),Math.trunc(-4.7),1/Math.trunc(-0.9),Math.trunc("7.9"),Math.trunc(Infinity),Math.trunc(undefined)].join()
+=== math_max_min
+[Math.max(),Math.min(),Math.max(1,3,2),Math.min(1,3,2),Math.max(1,NaN),Math.min(NaN,1),1/Math.max(-0,0),1/Math.max(0,-0),1/Math.min(0,-0),1/Math.min(-0,0),Math.max("5",2),Math.min(null,1)].join()
+=== math_max_coerces_all
+var c=0; Math.max(NaN,{valueOf:function(){c++;return 1}},{valueOf:function(){c++;return 2}}); c
+=== math_shape
+[Math.max.length,Math.min.length,Math.abs.length,Math.floor.name,typeof Math,Object.keys(Math).length].join()
+=== method_attributes
+var d=Object.getOwnPropertyDescriptor(Array.prototype,"splice"); [d.writable,d.enumerable,d.configurable,Array.prototype.splice.length,Array.prototype.splice.name].join()
+=== method_lengths
+[Array.prototype.map.length,Array.prototype.filter.length,Array.prototype.find.length,Array.prototype.findIndex.length,Array.prototype.reduce.length,Array.prototype.some.length,Array.prototype.every.length,Array.prototype.slice.length,Array.prototype.includes.length,Array.prototype.indexOf.length,Array.prototype.concat.length,Array.prototype.shift.length,Array.prototype.unshift.length,Array.prototype.sort.length,Object.assign.length,Object.entries.length,Object.values.length,Object.fromEntries.length,Array.from.length,Array.of.length].join()
+=== not_constructors
+var r=[]; [Array.prototype.map,Object.assign,Array.from,Math.max].forEach(function(f){try{new f();r.push("no")}catch(e){r.push(e.name)}}); r.join()
+=== enumerable_keys_clean
+var n=0; for(var k in []) n++; for(var k in {}) n++; n
+=== bootstrap_shape_deps
+var done={}; var mods={1:function(){return "one"},2:function(){return "two"}}; var chunks=[[[1,2],{1:1,2:1}]];
+chunks.forEach(function(c){ c[0].forEach(function(id){ done[id]=0 }); Object.assign(mods,c[1]) });
+var ready=Object.keys(done).every(function(id){return done[id]===0}); [ready,Object.keys(mods).map(function(k){return mods[k]()}).join("+"),Object.entries(done).length].join()
+=== bootstrap_shape_array_ops
+var q=[1,2,3,4,5]; var rest=q.slice(1).filter(function(x){return x%2}).concat([9]); q.splice(0,2); q.unshift(0); [rest.join(),q.join(),q.indexOf(4),q.includes(5),rest.reduce(function(a,b){return a+b},0)].join("|")
+=== bootstrap_shape_from_entries
+var o=Object.fromEntries(Object.entries({a:1,b:2}).map(function(p){return [p[0].toUpperCase?p[0]:p[0],p[1]*2]})); Object.keys(o).join()+Object.values(o).join()
+=== big_index_keys_indexof
+Array.prototype.indexOf.call({length:4294967299,4294967296:"x"},"x",4294967290)
+=== big_index_keys_includes
+Array.prototype.includes.call({length:4294967299,4294967297:"y"},"y",4294967295)
+=== big_index_keys_slice
+var r=Array.prototype.slice.call({length:4294967298,4294967296:"v"},4294967295); r.length+","+r[1]
+=== big_index_keys_splice_tail
+var o={length:4294967297,4294967295:"a",4294967296:"b"}; Array.prototype.splice.call(o,4294967295,2); [o.length,o[4294967295],o[4294967296]].join()
+=== big_index_keys_unshift_overflow
+var o={length:9007199254740991}; try{Array.prototype.unshift.call(o,1)}catch(e){e.name}
+=== fast_shift_inherited_hole
+Array.prototype[1]="p"; var a=[1,,3]; var f=a.shift(); var r=f+"|"+a.join()+"|"+Object.keys(a).join(); delete Array.prototype[1]; r
+=== fast_splice_inherited_hole
+Array.prototype[2]="p"; var a=[1,,3,4]; var d=a.splice(0,1,"x","y"); var r=d.join()+"|"+a.join()+"|"+Object.keys(a).join(); delete Array.prototype[2]; r
+=== fast_unshift_inherited_hole
+Array.prototype[0]="p"; var a=[,2]; a.unshift("u"); var r=a.join()+"|"+Object.keys(a).join(); delete Array.prototype[0]; r
+=== fast_shift_trailing_holes
+var a=[1,2]; a.length=4; var f=a.shift(); f+"|"+a.length+"|"+Object.keys(a).join()
+=== fast_shift_length_nonwritable
+var a=[1,2]; Object.defineProperty(a,"length",{writable:false}); try{a.shift()}catch(e){e.name+a.join()}
+=== fast_splice_dense_big
+var a=[]; for(var i=0;i<100;i++) a.push(i); var d=a.splice(10,5,"a","b"); d.join()+"|"+a.length+"|"+a[10]+a[11]+a[12]+"|"+a[96]
+=== fast_splice_holes_in_range
+var a=[0,,2,,4,5]; var d=a.splice(1,3,"x"); Object.keys(d).join()+"|"+d.length+"|"+Object.keys(a).join()+"|"+a.length
+=== fast_unshift_big
+var a=[]; for(var i=0;i<50;i++) a.push(i); var n=a.unshift("a","b","c"); n+"|"+a[0]+a[2]+a[3]+"|"+a[52]
+=== fast_shift_holes
+var a=[,1,,2,,]; var f=a.shift(); String(f)+"|"+a.length+"|"+Object.keys(a).join()

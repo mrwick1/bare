@@ -272,6 +272,7 @@ impl<'p> Interp<'p> {
             Nat::BooleanFn => Ok(Value::Bool(self.truthy(a0)?)),
             Nat::IsNaN => Ok(Value::Bool(self.coerce_number(a0)?.is_nan())),
             Nat::Ext(x) => self.call_ext(x, this, args, is_new),
+            Nat::Ao(f) => self.call_ao(f, this, args),
         }
     }
 

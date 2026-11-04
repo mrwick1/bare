@@ -1,0 +1,826 @@
+// Ordinary Array and Object methods and a small Math set. Included by `eval.rs` (`include!`), so it shares that
+// module's imports and private items. Every native here is `Nat::Ao(AoFn)`; `call_ao` is the one dispatch hook.
+//
+// Supported
+// - Array.prototype: map, filter, find, findIndex, splice, reduce, some, every, slice, includes, indexOf, concat,
+//   shift, unshift, sort. Object: assign, entries, values, fromEntries. Array: from, of.
+//   Math: abs, floor, round, trunc, max, min.
+// - Receivers are generic array-likes, as in the spec: `length` is read once (ToLength), holes and inherited indices
+//   follow HasProperty, every write is a strict `Set` or `DeletePropertyOrThrow`, results are made with
+//   CreateDataPropertyOrThrow. Callbacks run through `call_fn` with `(value, index, receiver)`.
+// - `sort` is stable (merge sort), puts `undefined` last, skips holes, and stops at the first error: no comparator
+//   runs after a throw, and the receiver is untouched until the sort has finished.
+//
+// Gates (explicit `Unsupported`, never silent)
+// - Species: `map`, `filter`, `slice`, `splice` read `constructor` of an array receiver. The intrinsic `Array`,
+//   `undefined` or a non-callable object give a plain array. Any other callable is a gate. There is no `Symbol`, so
+//   `@@species` cannot be observed yet; when Symbols arrive, `ao_species` is the one place to read it.
+// - `concat` and `Array.from` hook points: `ao_spreadable` (`@@isConcatSpreadable`) and the iterator lookup of
+//   `Array.from` / `Object.fromEntries` (`iter_start_val`) also need `Symbol` before they can see user hooks.
+// - `concat` on a primitive receiver, `Object.assign` with a primitive target: they need wrapper objects, which
+//   the evaluator does not have. `Array.from` / `Array.of` with a `this` that is a callable other than `Array`.
+// Known differences: a string receiver is passed to callbacks as the primitive string (no String wrapper object).
+// `concat` throws its RangeError (result longer than 2^32-1) before it reads the elements, not after.
+//
+// Limits (`Error::Limit`, never a JavaScript value): every element visit costs a step. A traversal that must
+// visit every index fails with `Steps` before it starts when the range is longer than the remaining steps, so a
+// sparse `length` of 2^32 does no work. Temporary storage (sort, entries, values) is capped at a quarter of the heap
+// byte limit before it grows.
+
+/// State of this module that GC must trace.
+#[derive(Default)]
+struct AoState {
+    array_ctor: Option<ObjId>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum AoFn {
+    ArrMap,
+    ArrFilter,
+    ArrFind,
+    ArrFindIndex,
+    ArrSplice,
+    ArrReduce,
+    ArrSome,
+    ArrEvery,
+    ArrSlice,
+    ArrIncludes,
+    ArrIndexOf,
+    ArrConcat,
+    ArrShift,
+    ArrUnshift,
+    ArrSort,
+    ObjAssign,
+    ObjEntries,
+    ObjValues,
+    ObjFromEntries,
+    ArrFrom,
+    ArrOf,
+    MathAbs,
+    MathFloor,
+    MathRound,
+    MathTrunc,
+    MathMax,
+    MathMin,
+}
+
+const MAX_SAFE: u64 = 9007199254740991;
+
+impl<'p> Interp<'p> {
+    fn install_array_object(&mut self) -> Res<()> {
+        let (op, ap, g) = (self.object_proto, self.array_proto, self.global);
+        let Get::Value(Value::Object(ac)) = h!(self, self.heap.get(ap, self.k_constructor)) else { return Err(unsupported("Array constructor missing", Span::default())) };
+        let Get::Value(Value::Object(oc)) = h!(self, self.heap.get(op, self.k_constructor)) else { return Err(unsupported("Object constructor missing", Span::default())) };
+        self.ao.array_ctor = Some(ac);
+        use AoFn::*;
+        for (name, f, len) in [
+            ("map", ArrMap, 1), ("filter", ArrFilter, 1), ("find", ArrFind, 1), ("findIndex", ArrFindIndex, 1), ("splice", ArrSplice, 2),
+            ("reduce", ArrReduce, 1), ("some", ArrSome, 1), ("every", ArrEvery, 1), ("slice", ArrSlice, 2), ("includes", ArrIncludes, 1),
+            ("indexOf", ArrIndexOf, 1), ("concat", ArrConcat, 1), ("shift", ArrShift, 0), ("unshift", ArrUnshift, 1), ("sort", ArrSort, 1),
+        ] {
+            self.method(ap, name, Nat::Ao(f), len)?;
+        }
+        for (name, f, len) in [("assign", ObjAssign, 2), ("entries", ObjEntries, 1), ("values", ObjValues, 1), ("fromEntries", ObjFromEntries, 1)] {
+            self.method(oc, name, Nat::Ao(f), len)?;
+        }
+        self.method(ac, "from", Nat::Ao(ArrFrom), 1)?;
+        self.method(ac, "of", Nat::Ao(ArrOf), 0)?;
+        let math = h!(self, self.heap.new_object(Some(op)));
+        for (name, f, len) in [("abs", MathAbs, 1), ("floor", MathFloor, 1), ("round", MathRound, 1), ("trunc", MathTrunc, 1), ("max", MathMax, 2), ("min", MathMin, 2)] {
+            self.method(math, name, Nat::Ao(f), len)?;
+        }
+        let k = h!(self, self.heap.key_from_str("Math"));
+        self.def(g, k, Value::Object(math), true, false, true)
+    }
+
+    fn call_ao(&mut self, f: AoFn, this: Value, args: &[Value]) -> Res<Value> {
+        use AoFn::*;
+        let (a0, a1) = (arg(args, 0), arg(args, 1));
+        match f {
+            ArrMap | ArrFilter | ArrSome | ArrEvery | ArrFind | ArrFindIndex => self.ao_iterate(f, this, a0, a1),
+            ArrReduce => self.ao_reduce(this, args),
+            ArrSplice => self.ao_splice(this, args),
+            ArrSlice => self.ao_slice(this, a0, a1),
+            ArrIncludes | ArrIndexOf => self.ao_search(f == ArrIncludes, this, a0, a1),
+            ArrConcat => self.ao_concat(this, args),
+            ArrShift => self.ao_shift(this),
+            ArrUnshift => self.ao_unshift(this, args),
+            ArrSort => self.ao_sort(this, a0),
+            ObjAssign => self.ao_assign(args),
+            ObjEntries => self.ao_enum_own(a0, true),
+            ObjValues => self.ao_enum_own(a0, false),
+            ObjFromEntries => self.ao_from_entries(a0),
+            ArrFrom => self.ao_array_from(this, a0, a1, arg(args, 2)),
+            ArrOf => {
+                self.ao_plain_ctor(this, "Array.of with a non-Array this")?;
+                self.new_array_from(args)
+            }
+            MathAbs | MathFloor | MathRound | MathTrunc => {
+                let x = self.coerce_number(a0)?;
+                Ok(Value::Number(match f {
+                    MathAbs => x.abs(),
+                    MathFloor => x.floor(),
+                    MathTrunc => x.trunc(),
+                    _ => math_round(x),
+                }))
+            }
+            MathMax | MathMin => {
+                let is_max = f == MathMax;
+                let mut r = if is_max { f64::NEG_INFINITY } else { f64::INFINITY };
+                let mut nan = false;
+                for &a in args {
+                    let x = self.coerce_number(a)?; // every argument is converted, even after a NaN
+                    nan |= x.is_nan();
+                    let better = if is_max { x > r || (x == 0.0 && r == 0.0 && !x.is_sign_negative()) } else { x < r || (x == 0.0 && r == 0.0 && x.is_sign_negative()) };
+                    if better {
+                        r = x;
+                    }
+                }
+                Ok(Value::Number(if nan { f64::NAN } else { r }))
+            }
+        }
+    }
+
+    // ------------------------------------------------------------ helpers
+
+    fn ao_this(&mut self, this: Value, name: &str) -> Res<()> {
+        if is_nullish(this) {
+            return Err(self.type_err(&format!("Array.prototype.{name} called on null or undefined")));
+        }
+        Ok(())
+    }
+
+    fn ao_callable(&mut self, f: Value) -> Res<()> {
+        if self.is_callable(f) {
+            return Ok(());
+        }
+        let t = self.display(f);
+        Err(self.type_err(&format!("{t} is not a function")))
+    }
+
+    /// Fail with `Steps` before a traversal of `n` elements that cannot stop early and would not fit the budget.
+    fn ao_reserve(&mut self, n: u64) -> Res<()> {
+        if n > self.step_limit.saturating_sub(self.steps) {
+            return Err(Error::Limit(LimitKind::Steps));
+        }
+        Ok(())
+    }
+
+    /// Check temporary storage of `count` items of `each` bytes against a quarter of the heap byte limit.
+    fn ao_temp(&mut self, count: usize, each: usize) -> Res<()> {
+        if count.saturating_mul(each) > self.heap.limits().max_bytes / 4 {
+            return Err(Error::Limit(LimitKind::Heap(Limit::Bytes)));
+        }
+        Ok(())
+    }
+
+    /// ToIntegerOrInfinity.
+    fn ao_int(&mut self, v: Value) -> Res<f64> {
+        let n = self.coerce_number(v)?;
+        Ok(if n.is_nan() { 0.0 } else { n.trunc() + 0.0 })
+    }
+
+    /// A relative index (`slice`, `splice`) clamped to `0..=len`. `undefined` gives `default`.
+    fn ao_rel(&mut self, v: Value, len: u64, default: u64) -> Res<u64> {
+        if matches!(v, Value::Undefined) {
+            return Ok(default);
+        }
+        let n = self.ao_int(v)?;
+        Ok(if n < 0.0 { (len as f64 + n).max(0.0) as u64 } else { n.min(len as f64) as u64 })
+    }
+
+    /// Start of `includes` / `indexOf`: `None` when there is nothing to search.
+    fn ao_from_index(&mut self, v: Value, len: u64) -> Res<Option<u64>> {
+        let n = self.ao_int(v)?;
+        Ok(if n >= len as f64 { None } else if n >= 0.0 { Some(n as u64) } else { Some((len as f64 + n).max(0.0) as u64) })
+    }
+
+    fn ao_has(&mut self, this: Value, k: PropertyKey) -> Res<bool> {
+        Ok(match this {
+            Value::Object(o) => h!(self, self.heap.has_property(o, k)),
+            Value::String(s) => matches!(k, PropertyKey::Index(i) if (i as usize) < h!(self, self.heap.str_len(s))),
+            _ => false,
+        })
+    }
+
+    /// Strict `Set`.
+    fn ao_set(&mut self, this: Value, k: PropertyKey, v: Value) -> Res<()> {
+        let saved = std::mem::replace(&mut self.strict, true);
+        let r = self.put_prop(this, k, v);
+        self.strict = saved;
+        r
+    }
+
+    fn ao_set_len(&mut self, this: Value, n: u64) -> Res<()> {
+        self.ao_set(this, self.k_length, Value::Number(n as f64))
+    }
+
+    /// `DeletePropertyOrThrow`.
+    fn ao_delete(&mut self, this: Value, k: PropertyKey) -> Res<()> {
+        let ok = match this {
+            Value::Object(o) => h!(self, self.heap.delete(o, k)),
+            Value::String(s) => !matches!(k, PropertyKey::Index(i) if (i as usize) < h!(self, self.heap.str_len(s))),
+            _ => true,
+        };
+        if ok {
+            return Ok(());
+        }
+        let t = self.key_text(k);
+        Err(self.type_err(&format!("Cannot delete property '{t}' of [object Array]")))
+    }
+
+    /// `CreateDataPropertyOrThrow` on an object this module made.
+    fn ao_create(&mut self, a: ObjId, k: PropertyKey, v: Value) -> Res<()> {
+        if h!(self, self.heap.define_own_property(a, k, &PropertyDescriptor::data(v))) {
+            return Ok(());
+        }
+        let t = self.key_text(k);
+        Err(self.type_err(&format!("Cannot add property {t}, object is not extensible")))
+    }
+
+    fn ao_new_array(&mut self, len: u64) -> Res<ObjId> {
+        if len > u32::MAX as u64 {
+            return Err(self.mk_err(RANGE_ERROR, "Invalid array length"));
+        }
+        let a = h!(self, self.heap.new_array(Some(self.array_proto)));
+        if len > 0 {
+            h!(self, self.heap.set(a, self.k_length, Value::Number(len as f64)));
+        }
+        Ok(a)
+    }
+
+    /// ArraySpeciesCreate. See the module note for what is a gate.
+    fn ao_species(&mut self, this: Value, len: u64) -> Res<ObjId> {
+        if let Value::Object(o) = this
+            && h!(self, self.heap.is_array(o))
+        {
+            let c = self.get_prop(this, self.k_constructor)?;
+            match c {
+                Value::Object(co) if Some(co) == self.ao.array_ctor => {}
+                Value::Object(_) if self.is_callable(c) => return Err(unsupported("Array species constructor (subclass or custom constructor)", Span::default())),
+                Value::Object(_) | Value::Undefined => {}
+                _ => return Err(self.type_err("object.constructor is not a constructor")),
+            }
+        }
+        self.ao_new_array(len)
+    }
+
+    /// `Array.from` and `Array.of` make a plain array when `this` is `Array` or not callable.
+    fn ao_plain_ctor(&mut self, this: Value, what: &'static str) -> Res<()> {
+        match this {
+            Value::Object(o) if self.is_callable(this) && Some(o) != self.ao.array_ctor => Err(unsupported(what, Span::default())),
+            _ => Ok(()),
+        }
+    }
+
+    /// `@@isConcatSpreadable`. No `Symbol` exists, so only arrays spread.
+    fn ao_spreadable(&mut self, v: Value) -> Res<bool> {
+        Ok(matches!(v, Value::Object(o) if h!(self, self.heap.is_array(o))))
+    }
+
+    // ------------------------------------------------------------ callback methods
+
+    /// map, filter, some, every, find, findIndex.
+    fn ao_iterate(&mut self, f: AoFn, this: Value, cb: Value, this_arg: Value) -> Res<Value> {
+        let name = match f {
+            AoFn::ArrMap => "map",
+            AoFn::ArrFilter => "filter",
+            AoFn::ArrSome => "some",
+            AoFn::ArrEvery => "every",
+            AoFn::ArrFind => "find",
+            _ => "findIndex",
+        };
+        self.ao_this(this, name)?;
+        let len = self.length_of(this)?;
+        self.ao_callable(cb)?;
+        let out = match f {
+            AoFn::ArrMap => Some(self.ao_species(this, len)?),
+            AoFn::ArrFilter => Some(self.ao_species(this, 0)?),
+            _ => None,
+        };
+        if matches!(f, AoFn::ArrMap | AoFn::ArrFilter) {
+            self.ao_reserve(len)?;
+        }
+        let visit_holes = matches!(f, AoFn::ArrFind | AoFn::ArrFindIndex);
+        let mut to = 0u64;
+        for i in 0..len {
+            self.tick()?;
+            let k = self.index_key(i)?;
+            if !visit_holes && !self.ao_has(this, k)? {
+                continue;
+            }
+            let v = self.get_prop(this, k)?;
+            let r = self.call_fn(cb, this_arg, &[v, Value::Number(i as f64), this])?;
+            match f {
+                AoFn::ArrMap => self.ao_create(out.unwrap(), k, r)?,
+                AoFn::ArrFilter => {
+                    if self.truthy(r)? {
+                        let tk = self.index_key(to)?;
+                        self.ao_create(out.unwrap(), tk, v)?;
+                        to += 1;
+                    }
+                }
+                AoFn::ArrSome if self.truthy(r)? => return Ok(Value::Bool(true)),
+                AoFn::ArrEvery if !self.truthy(r)? => return Ok(Value::Bool(false)),
+                AoFn::ArrFind if self.truthy(r)? => return Ok(v),
+                AoFn::ArrFindIndex if self.truthy(r)? => return Ok(Value::Number(i as f64)),
+                _ => {}
+            }
+        }
+        Ok(match f {
+            AoFn::ArrMap | AoFn::ArrFilter => Value::Object(out.unwrap()),
+            AoFn::ArrSome | AoFn::ArrFind => if f == AoFn::ArrSome { Value::Bool(false) } else { Value::Undefined },
+            AoFn::ArrEvery => Value::Bool(true),
+            _ => Value::Number(-1.0),
+        })
+    }
+
+    fn ao_reduce(&mut self, this: Value, args: &[Value]) -> Res<Value> {
+        self.ao_this(this, "reduce")?;
+        let len = self.length_of(this)?;
+        let cb = arg(args, 0);
+        self.ao_callable(cb)?;
+        let mut k = 0u64;
+        let mut acc = if args.len() >= 2 {
+            args[1]
+        } else {
+            loop {
+                if k >= len {
+                    return Err(self.type_err("Reduce of empty array with no initial value"));
+                }
+                self.tick()?;
+                let key = self.index_key(k)?;
+                k += 1;
+                if self.ao_has(this, key)? {
+                    break self.get_prop(this, key)?;
+                }
+            }
+        };
+        while k < len {
+            self.tick()?;
+            let key = self.index_key(k)?;
+            if self.ao_has(this, key)? {
+                let v = self.get_prop(this, key)?;
+                acc = self.call_fn(cb, Value::Undefined, &[acc, v, Value::Number(k as f64), this])?;
+            }
+            k += 1;
+        }
+        Ok(acc)
+    }
+
+    // ------------------------------------------------------------ copying and searching
+
+    fn ao_slice(&mut self, this: Value, start: Value, end: Value) -> Res<Value> {
+        self.ao_this(this, "slice")?;
+        let len = self.length_of(this)?;
+        let mut k = self.ao_rel(start, len, 0)?;
+        let fin = self.ao_rel(end, len, len)?;
+        let count = fin.saturating_sub(k);
+        let a = self.ao_species(this, count)?;
+        self.ao_reserve(count)?;
+        let mut n = 0u64;
+        while k < fin {
+            self.tick()?;
+            let key = self.index_key(k)?;
+            if self.ao_has(this, key)? {
+                let v = self.get_prop(this, key)?;
+                let nk = self.index_key(n)?;
+                self.ao_create(a, nk, v)?;
+            }
+            k += 1;
+            n += 1;
+        }
+        self.ao_set_len(Value::Object(a), n)?;
+        Ok(Value::Object(a))
+    }
+
+    fn ao_search(&mut self, includes: bool, this: Value, x: Value, from: Value) -> Res<Value> {
+        self.ao_this(this, if includes { "includes" } else { "indexOf" })?;
+        let len = self.length_of(this)?;
+        let none = Value::Number(-1.0);
+        let not_found = if includes { Value::Bool(false) } else { none };
+        if len == 0 {
+            return Ok(not_found);
+        }
+        let Some(mut k) = self.ao_from_index(from, len)? else { return Ok(not_found) };
+        while k < len {
+            self.tick()?;
+            let key = self.index_key(k)?;
+            if includes {
+                let v = self.get_prop(this, key)?;
+                if v.same_value_zero(x) {
+                    return Ok(Value::Bool(true));
+                }
+            } else if self.ao_has(this, key)? {
+                let v = self.get_prop(this, key)?;
+                if v.strict_equals(x) {
+                    return Ok(Value::Number(k as f64));
+                }
+            }
+            k += 1;
+        }
+        Ok(not_found)
+    }
+
+    fn ao_concat(&mut self, this: Value, args: &[Value]) -> Res<Value> {
+        self.ao_this(this, "concat")?;
+        if !matches!(this, Value::Object(_)) {
+            return Err(unsupported("Array.prototype.concat on a primitive receiver (wrapper object)", Span::default()));
+        }
+        let a = self.ao_species(this, 0)?;
+        let mut n = 0u64;
+        for item in std::iter::once(this).chain(args.iter().copied()) {
+            self.tick()?;
+            if !self.ao_spreadable(item)? {
+                if n + 1 > u32::MAX as u64 {
+                    return Err(self.mk_err(RANGE_ERROR, "Invalid array length"));
+                }
+                let k = self.index_key(n)?;
+                self.ao_create(a, k, item)?;
+                n += 1;
+                continue;
+            }
+            let len = self.length_of(item)?;
+            if n + len > u32::MAX as u64 {
+                return Err(self.mk_err(RANGE_ERROR, "Invalid array length"));
+            }
+            self.ao_reserve(len)?;
+            for i in 0..len {
+                self.tick()?;
+                let k = self.index_key(i)?;
+                if self.ao_has(item, k)? {
+                    let v = self.get_prop(item, k)?;
+                    let nk = self.index_key(n + i)?;
+                    self.ao_create(a, nk, v)?;
+                }
+            }
+            n += len;
+        }
+        self.ao_set_len(Value::Object(a), n)?;
+        Ok(Value::Object(a))
+    }
+
+    // ------------------------------------------------------------ mutation
+
+    /// `to = from` for one element: copy it, or delete the target when the source is a hole.
+    fn ao_move(&mut self, this: Value, from: u64, to: u64) -> Res<()> {
+        self.tick()?;
+        let (fk, tk) = (self.index_key(from)?, self.index_key(to)?);
+        if self.ao_has(this, fk)? {
+            let v = self.get_prop(this, fk)?;
+            self.ao_set(this, tk, v)
+        } else {
+            self.ao_delete(this, tk)
+        }
+    }
+
+    /// One-move fast path of `shift`, `unshift` and `splice` for plain dense arrays (see `Heap::splice_dense`; it
+    /// answers `None` whenever the generic algorithm could behave differently). The move is charged after the fact:
+    /// one step per 32 moved elements, a memmove of 16-byte values being about that fast, plus one per item.
+    fn ao_dense(&mut self, this: Value, len: u64, start: u64, del: u64, items: &[Value]) -> Res<Option<Vec<Option<Value>>>> {
+        let Value::Object(o) = this else { return Ok(None) };
+        if len > u32::MAX as u64 {
+            return Ok(None);
+        }
+        let Some(removed) = h!(self, self.heap.splice_dense(o, len as u32, start as usize, del as usize, items)) else { return Ok(None) };
+        self.steps = self.steps.saturating_add(1 + (len - start - del) / 32 + del + items.len() as u64);
+        if self.steps > self.step_limit {
+            return Err(Error::Limit(LimitKind::Steps));
+        }
+        Ok(Some(removed))
+    }
+
+    fn ao_shift(&mut self, this: Value) -> Res<Value> {
+        self.ao_this(this, "shift")?;
+        let len = self.length_of(this)?;
+        if len == 0 {
+            self.ao_set_len(this, 0)?;
+            return Ok(Value::Undefined);
+        }
+        if let Some(removed) = self.ao_dense(this, len, 0, 1, &[])? {
+            return Ok(removed[0].unwrap_or(Value::Undefined));
+        }
+        self.ao_reserve(len)?;
+        let first = self.get_prop(this, PropertyKey::Index(0))?;
+        for k in 1..len {
+            self.ao_move(this, k, k - 1)?;
+        }
+        let last = self.index_key(len - 1)?;
+        self.ao_delete(this, last)?;
+        self.ao_set_len(this, len - 1)?;
+        Ok(first)
+    }
+
+    fn ao_unshift(&mut self, this: Value, args: &[Value]) -> Res<Value> {
+        self.ao_this(this, "unshift")?;
+        let len = self.length_of(this)?;
+        let argc = args.len() as u64;
+        if argc > 0 {
+            if len + argc > MAX_SAFE {
+                return Err(self.type_err("Invalid array length"));
+            }
+            if self.ao_dense(this, len, 0, 0, args)?.is_some() {
+                return Ok(Value::Number((len + argc) as f64));
+            }
+            self.ao_reserve(len)?;
+            for k in (0..len).rev() {
+                self.ao_move(this, k, k + argc)?;
+            }
+            for (j, &v) in args.iter().enumerate() {
+                self.tick()?;
+                let key = self.index_key(j as u64)?;
+                self.ao_set(this, key, v)?;
+            }
+        }
+        self.ao_set_len(this, len + argc)?;
+        Ok(Value::Number((len + argc) as f64))
+    }
+
+    fn ao_splice(&mut self, this: Value, args: &[Value]) -> Res<Value> {
+        self.ao_this(this, "splice")?;
+        let len = self.length_of(this)?;
+        let start = self.ao_rel(arg(args, 0), len, 0)?;
+        let ic = args.len().saturating_sub(2) as u64;
+        let dc = match args.len() {
+            0 => 0,
+            1 => len - start,
+            _ => self.ao_int(args[1])?.max(0.0).min((len - start) as f64) as u64,
+        };
+        if len + ic - dc > MAX_SAFE {
+            return Err(self.type_err("Invalid array length"));
+        }
+        let a = self.ao_species(this, dc)?;
+        if let Some(removed) = self.ao_dense(this, len, start, dc, args.get(2..).unwrap_or(&[]))? {
+            for (k, v) in removed.into_iter().enumerate() {
+                if let Some(v) = v {
+                    let key = self.index_key(k as u64)?;
+                    self.ao_create(a, key, v)?;
+                }
+            }
+            self.ao_set_len(Value::Object(a), dc)?;
+            return Ok(Value::Object(a));
+        }
+        self.ao_reserve((len - start).saturating_add(dc))?;
+        for k in 0..dc {
+            self.tick()?;
+            let fk = self.index_key(start + k)?;
+            if self.ao_has(this, fk)? {
+                let v = self.get_prop(this, fk)?;
+                let tk = self.index_key(k)?;
+                self.ao_create(a, tk, v)?;
+            }
+        }
+        self.ao_set_len(Value::Object(a), dc)?;
+        if ic < dc {
+            for k in start..len - dc {
+                self.ao_move(this, k + dc, k + ic)?;
+            }
+            for k in (len - dc + ic..len).rev() {
+                self.tick()?;
+                let key = self.index_key(k)?;
+                self.ao_delete(this, key)?;
+            }
+        } else if ic > dc {
+            for k in (start..len - dc).rev() {
+                self.ao_move(this, k + dc, k + ic)?;
+            }
+        }
+        for (i, &v) in args.iter().skip(2).enumerate() {
+            self.tick()?;
+            let key = self.index_key(start + i as u64)?;
+            self.ao_set(this, key, v)?;
+        }
+        self.ao_set_len(this, len - dc + ic)?;
+        Ok(Value::Object(a))
+    }
+
+    // ------------------------------------------------------------ sort
+
+    fn ao_sort(&mut self, this: Value, cmp: Value) -> Res<Value> {
+        if !matches!(cmp, Value::Undefined) && !self.is_callable(cmp) {
+            let t = self.display(cmp);
+            return Err(self.type_err(&format!("The comparison function must be either a function or undefined: {t}")));
+        }
+        self.ao_this(this, "sort")?;
+        let len = self.length_of(this)?;
+        self.ao_reserve(len)?;
+        let mut vals: Vec<Value> = Vec::new();
+        let mut undef = 0u64;
+        for i in 0..len {
+            self.tick()?;
+            let k = self.index_key(i)?;
+            if self.ao_has(this, k)? {
+                let v = self.get_prop(this, k)?;
+                if matches!(v, Value::Undefined) {
+                    undef += 1;
+                } else {
+                    self.ao_temp(vals.len() + 1, 16 + 8 + 4 + 4)?;
+                    vals.push(v);
+                }
+            }
+        }
+        let n = vals.len();
+        let mut idx: Vec<u32> = (0..n as u32).collect();
+        let mut tmp = idx.clone();
+        // Strings of primitives are made once: no user code can see them. Objects convert at each comparison.
+        let mut keys: Vec<Option<StrId>> = if matches!(cmp, Value::Undefined) { vec![None; n] } else { Vec::new() };
+        let mut width = 1;
+        while width < n {
+            let mut i = 0;
+            while i < n {
+                let (mid, hi) = ((i + width).min(n), (i + 2 * width).min(n));
+                let (mut l, mut r, mut o) = (i, mid, i);
+                while l < mid && r < hi {
+                    if self.ao_greater(cmp, &vals, &mut keys, idx[l], idx[r])? {
+                        tmp[o] = idx[r];
+                        r += 1;
+                    } else {
+                        tmp[o] = idx[l];
+                        l += 1;
+                    }
+                    o += 1;
+                }
+                tmp[o..o + (mid - l)].copy_from_slice(&idx[l..mid]);
+                o += mid - l;
+                tmp[o..o + (hi - r)].copy_from_slice(&idx[r..hi]);
+                i += 2 * width;
+            }
+            std::mem::swap(&mut idx, &mut tmp);
+            width *= 2;
+        }
+        let count = n as u64 + undef;
+        for (j, &p) in idx.iter().enumerate() {
+            self.tick()?;
+            let key = self.index_key(j as u64)?;
+            self.ao_set(this, key, vals[p as usize])?;
+        }
+        for j in n as u64..count {
+            self.tick()?;
+            let key = self.index_key(j)?;
+            self.ao_set(this, key, Value::Undefined)?;
+        }
+        for j in count..len {
+            self.tick()?;
+            let key = self.index_key(j)?;
+            self.ao_delete(this, key)?;
+        }
+        Ok(this)
+    }
+
+    /// `compare(vals[x], vals[y]) > 0`. A comparator result that is NaN counts as 0.
+    fn ao_greater(&mut self, cmp: Value, vals: &[Value], keys: &mut [Option<StrId>], x: u32, y: u32) -> Res<bool> {
+        let (vx, vy) = (vals[x as usize], vals[y as usize]);
+        if !matches!(cmp, Value::Undefined) {
+            let r = self.call_fn(cmp, Value::Undefined, &[vx, vy])?;
+            return Ok(self.coerce_number(r)? > 0.0);
+        }
+        self.tick()?;
+        let sx = self.ao_sort_key(vals, keys, x)?;
+        let sy = self.ao_sort_key(vals, keys, y)?;
+        Ok(sx != sy && h!(self, self.heap.str_units(sx)) > h!(self, self.heap.str_units(sy)))
+    }
+
+    fn ao_sort_key(&mut self, vals: &[Value], keys: &mut [Option<StrId>], i: u32) -> Res<StrId> {
+        if let Some(s) = keys[i as usize] {
+            return Ok(s);
+        }
+        let v = vals[i as usize];
+        let s = self.coerce_string(v)?;
+        if !matches!(v, Value::Object(_)) {
+            keys[i as usize] = Some(s);
+        }
+        Ok(s)
+    }
+
+    // ------------------------------------------------------------ Object
+
+    fn ao_assign(&mut self, args: &[Value]) -> Res<Value> {
+        let target = arg(args, 0);
+        match target {
+            Value::Undefined | Value::Null => return Err(self.type_err("Cannot convert undefined or null to object")),
+            Value::Object(_) => {}
+            _ => return Err(unsupported("Object.assign with a primitive target (wrapper object)", Span::default())),
+        }
+        for &src in args.iter().skip(1) {
+            let keys: Vec<PropertyKey> = match src {
+                Value::Object(o) => h!(self, self.heap.own_keys(o)),
+                Value::String(s) => (0..h!(self, self.heap.str_len(s)) as u32).map(PropertyKey::Index).collect(),
+                _ => continue,
+            };
+            self.ao_temp(keys.len(), 16)?;
+            for k in keys {
+                self.tick()?;
+                if let Value::Object(o) = src {
+                    match h!(self, self.heap.get_own_property(o, k)) {
+                        Some(p) if p.enumerable() => {}
+                        _ => continue,
+                    }
+                }
+                let v = self.get_prop(src, k)?;
+                self.ao_set(target, k, v)?;
+            }
+        }
+        Ok(target)
+    }
+
+    /// `Object.values` (`entries` false) and `Object.entries`.
+    fn ao_enum_own(&mut self, src: Value, entries: bool) -> Res<Value> {
+        let keys: Vec<PropertyKey> = match src {
+            Value::Object(o) => h!(self, self.heap.own_keys(o)),
+            Value::String(s) => (0..h!(self, self.heap.str_len(s)) as u32).map(PropertyKey::Index).collect(),
+            Value::Undefined | Value::Null => return Err(self.type_err("Cannot convert undefined or null to object")),
+            _ => Vec::new(),
+        };
+        self.ao_temp(keys.len(), 32)?;
+        let mut out: Vec<Value> = Vec::new();
+        for k in keys {
+            self.tick()?;
+            if matches!(k, PropertyKey::Symbol(_)) {
+                continue;
+            }
+            if let Value::Object(o) = src {
+                match h!(self, self.heap.get_own_property(o, k)) {
+                    Some(p) if p.enumerable() => {}
+                    _ => continue,
+                }
+            }
+            let v = self.get_prop(src, k)?;
+            out.push(if entries {
+                let kv = h!(self, self.heap.key_to_value(k));
+                self.new_array_from(&[kv, v])?
+            } else {
+                v
+            });
+        }
+        self.new_array_from(&out)
+    }
+
+    fn ao_from_entries(&mut self, iterable: Value) -> Res<Value> {
+        if is_nullish(iterable) {
+            let t = self.display(iterable);
+            return Err(self.type_err(&format!("{t} is not iterable")));
+        }
+        let obj = h!(self, self.heap.new_object(Some(self.object_proto)));
+        let mut it = self.iter_start_val(iterable)?;
+        while let Some(item) = self.iter_next(&mut it)? {
+            if !matches!(item, Value::Object(_)) {
+                let t = self.display(item);
+                return Err(self.type_err(&format!("Iterator value {t} is not an entry object")));
+            }
+            let k = self.get_prop(item, PropertyKey::Index(0))?;
+            let v = self.get_prop(item, PropertyKey::Index(1))?;
+            let key = self.coerce_key(k)?;
+            self.ao_create(obj, key, v)?;
+        }
+        Ok(Value::Object(obj))
+    }
+
+    // ------------------------------------------------------------ Array.from
+
+    fn ao_array_from(&mut self, this: Value, items: Value, mapfn: Value, this_arg: Value) -> Res<Value> {
+        self.ao_plain_ctor(this, "Array.from with a non-Array this")?;
+        let mapping = !matches!(mapfn, Value::Undefined);
+        if mapping {
+            self.ao_callable(mapfn)?;
+        }
+        if is_nullish(items) {
+            let t = self.display(items);
+            return Err(self.type_err(&format!("{t} is not iterable")));
+        }
+        // Built-in iterables: strings (by code point) and arrays (live length). A user `@@iterator` needs Symbol.
+        let iterable = matches!(items, Value::String(_)) || matches!(items, Value::Object(o) if h!(self, self.heap.is_array(o)));
+        if iterable {
+            let a = self.ao_new_array(0)?;
+            let mut it = self.iter_start_val(items)?;
+            let mut k = 0u64;
+            while let Some(v) = self.iter_next(&mut it)? {
+                let v = if mapping { self.call_fn(mapfn, this_arg, &[v, Value::Number(k as f64)])? } else { v };
+                let key = self.index_key(k)?;
+                self.ao_create(a, key, v)?;
+                k += 1;
+            }
+            return Ok(Value::Object(a));
+        }
+        let len = self.length_of(items)?;
+        let a = self.ao_new_array(len)?;
+        self.ao_reserve(len)?;
+        for i in 0..len {
+            self.tick()?;
+            let key = self.index_key(i)?;
+            let v = self.get_prop(items, key)?;
+            let v = if mapping { self.call_fn(mapfn, this_arg, &[v, Value::Number(i as f64)])? } else { v };
+            self.ao_create(a, key, v)?;
+        }
+        Ok(Value::Object(a))
+    }
+}
+
+/// `Math.round`: halves go toward +Infinity, and `-0` stays `-0`.
+fn math_round(x: f64) -> f64 {
+    if !x.is_finite() || x.fract() == 0.0 {
+        return x;
+    }
+    let f = x.floor();
+    let r = if x - f >= 0.5 { f + 1.0 } else { f };
+    if r == 0.0 && x < 0.0 { -0.0 } else { r }
+}

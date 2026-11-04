@@ -64,6 +64,7 @@ impl<'p> Interp<'p> {
         let mut it = Self::with_code(Rc::new(empty.into_owned()), heap, limits)?;
         it.install_builtins()?;
         it.install_ext()?;
+        it.install_array_object()?;
         it.install_promise()?;
         it.install_binary()?;
         Ok(it)
