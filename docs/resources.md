@@ -576,3 +576,24 @@ Every expected acceptance and rejection matched. Parent tightened the Certificat
 Reproduce: build `tools/crypto/verify_load.rs` with `rustc --edition=2024 -C opt-level=3`, then run `<out> valid|invalid|cv 1|10|100 100 150 last`. Tests cover 34 synthetic chains, impostor roots, peer-only roots, time edges, limits and changed signed/signature bytes. The stored OpenSSL oracle accepts 12 cases this conservative implementation rejects; tests list each difference explicitly. Parent added and ran an ignored environment check against the real OS root bundle and the public staging chain at a fixed fixture time. No live TLS socket is involved.
 
 All 674 workspace tests pass. All 13 normal validator tests pass in release and forced-portable builds. Crypto clippy passes with all features. No revocation, certificate transparency, RSA, Ed25519, wildcard names, DN normalization, leaf-as-anchor path, non-x86 host or concurrent path validation was tested. Anchor validity and CA rules are deliberately strict. These limits can reject otherwise valid sites. HTTPS remains guarded until the connected client and transport are integrated.
+
+## Script and stylesheet resources
+
+2026-11-04, archMachine, release. `resources::discover` retains document order, script type and async/defer metadata. Repeated script occurrences share a fetch target. Inline source borrows the DOM text when it has one text child. The loader uses streamed HTTP replies, so it does not fill the HTTP cache with another body copy. UTF-8 bytes become the retained string without another full copy. Other encodings can allocate during decoding.
+
+Defaults: 4,096 resource references, 128 distinct fetches, 8 MiB per resource, 32 MiB retained decoded text and 60 s across downloads. The byte caps apply to decoded text; temporary buffers and the DOM are additional memory. Tests accept exact caps and reject one extra byte. Blocking DNS, connect and read calls can exceed an elapsed-time checkpoint by one call. The first resolvable base href is used. This is a documented departure from using the first base href regardless of validity. Missing or unsupported MIME types and non-identity encodings fail closed.
+
+Parent reproduced the release harness with a 512 MiB address-space cap and a 30 s timeout per process. Each row uses the median of three loads. The harness raises the default caps for its large cases and asserts request counts, retained bytes and successful results. The server runs in the measured process. Heap is the extra counted live heap during loading; RSS includes parsing and server buffers.
+
+| Case | 1x / 10x / 100x | Load milliseconds | Extra peak heap KiB | RSS HWM KiB |
+| --- | --- | --- | --- | --- |
+| Small resources | 50 / 500 / 5,000 files, 2 KiB each | 1.20 / 8.42 / 89.99 | 111 / 1,078 / 10,707 | 4,024 / 4,868 / 16,644 |
+| Declared length | 1 / 10 / 100 MiB | 0.74 / 6.21 / 59.10 | 1,025 / 10,241 / 102,401 | 4,920 / 14,136 / 105,836 |
+| Chunked | 1 / 10 / 100 MiB | 2.10 / 9.23 / 90.63 | 2,057 / 16,393 / 131,081 | 5,608 / 21,956 / 105,980 |
+| Duplicate references | 1k / 10k / 100k items, ten URLs | 0.51 / 0.69 / 0.57 | 3 / 3 / 3 | 4,084 / 5,364 / 21,812 |
+
+Duplicate discovery took 0.13 / 0.76 / 7.83 ms. The implementation caches repeated raw URL references before resolution. The delegate measured this change as faster than resolving every occurrence. Parent reproduced the final implementation only. Chunked bodies grow geometrically, so counted capacity can exceed retained text. Parent made no further runtime optimization: these final runs show linear discovery and resource-size costs.
+
+Reproduce: `cargo run --release -p bare --example resources_load -- small|large|largechunk|dups 1|10|100 3`. All 699 workspace tests pass, including 25 resource tests. App clippy passes with its one pre-existing needless-borrow lint allowed. Parent clarified that the HTTPS failure test only checks error propagation; it does not prove that no socket opens. The delegate reported one earlier failed workspace run whose output was discarded. Its cause is unknown; three later delegated runs and the parent run passed.
+
+The saved staging login fixture gives 24 items and 17 targets. These are 15 async external scripts, six inline scripts, one skipped nomodule script and two stylesheets. Tests reject the known 404 HTML chunk shape before using its body. This does not cover runtime-generated chunks, execute scripts or establish a live staging fetch. Module scripts retain metadata only. Inline styles, preloads, media evaluation, parallel fetches, resource redirects and quoted semicolons in MIME parameters were not tested. HTTPS remains the next integration gate.
