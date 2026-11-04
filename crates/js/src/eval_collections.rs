@@ -300,14 +300,25 @@ impl Interp<'_> {
     }
 
     fn coll_iter_next(&mut self, this: Value, is_map: bool) -> Res<Value> {
-        let bad = |s: &mut Self| s.type_err(&format!("next method called on incompatible receiver {}", if is_map { "Map Iterator" } else { "Set Iterator" }));
-        let Value::Object(it) = this else { return Err(bad(self)) };
-        let Some(&IterState::Coll { owner, what, mut cur, done }) = self.sc.iters.get(&it) else { return Err(bad(self)) };
+        let Value::Object(it) = this else { return Err(self.coll_bad_next(is_map)) };
+        match self.coll_iter_step(it, is_map)? {
+            None => self.sc_iter_result(Value::Undefined, true),
+            Some(item) => self.sc_iter_result(item, false),
+        }
+    }
+
+    fn coll_bad_next(&mut self, is_map: bool) -> Error {
+        self.type_err(&format!("next method called on incompatible receiver {}", if is_map { "Map Iterator" } else { "Set Iterator" }))
+    }
+
+    /// One step of a Map or Set iterator object: the next item, or `None` when it is done.
+    fn coll_iter_step(&mut self, it: ObjId, is_map: bool) -> Res<Option<Value>> {
+        let Some(&IterState::Coll { owner, what, mut cur, done }) = self.sc.iters.get(&it) else { return Err(self.coll_bad_next(is_map)) };
         if !matches!(self.sc.colls.get(&owner), Some(c) if c.is_map == is_map) {
-            return Err(bad(self));
+            return Err(self.coll_bad_next(is_map));
         }
         if done {
-            return self.sc_iter_result(Value::Undefined, true);
+            return Ok(None);
         }
         let step = self.coll_next(owner, &mut cur)?;
         if let Some(IterState::Coll { cur: c, done: d, .. }) = self.sc.iters.get_mut(&it) {
@@ -315,11 +326,8 @@ impl Interp<'_> {
             *d = step.is_none();
         }
         match step {
-            None => self.sc_iter_result(Value::Undefined, true),
-            Some((k, v)) => {
-                let item = self.coll_item(what, k, if is_map { v } else { k })?;
-                self.sc_iter_result(item, false)
-            }
+            None => Ok(None),
+            Some((k, v)) => Ok(Some(self.coll_item(what, k, if is_map { v } else { k })?)),
         }
     }
 

@@ -314,3 +314,27 @@ var i = []; L(T(function () { return i.shift(); }) + ':' + i.length);
 var j = [1, 2, 3]; j.shift(); j.unshift(9, 8); L(j.join() + ':' + j.length);
 var k = [5, , 7]; var rem = k.splice(0, 3); L(rem.length + ':' + (1 in rem) + ':' + k.length);
 (function () { return log.join("|"); })
+=== seam_native_next_steps
+var log = []; function L(x) { log.push(String(x)); }
+function T(f) { try { return 'ok:' + String(f()); } catch (e) { return 'throw:' + e.name; } }
+var it = [1, 2, 3].values(); it.next = function () { L('user'); return { done: true }; };
+for (var x of it) L(x);
+var m = new Map([[1, 'a'], [2, 'b']]); var mi = m.entries();
+for (var [k, v] of mi) L(k + v);
+var mi2 = m.keys(); mi2.next(); for (var k2 of mi2) L('k' + k2);
+var ai = [1, 2, 3].values(); ai.next(); L([...ai].join());
+var AIP = Object.getPrototypeOf([].values()); var orig = AIP.next;
+AIP.next = function () { L('patched'); return orig.call(this); };
+for (var y of [9].values()) L(y);
+AIP.next = orig;
+var si = new Set([1]).values(); si.next = AIP.next;
+L(T(function () { for (var q of si) {} return 'none'; }));
+var it3 = [1, 2, 3].values();
+for (var z of it3) { it3.next = function () { return { done: true }; }; L('z' + z); }
+var gi = new Set([1, 2]).values(); gi.next();
+L(Array.from(gi).join() + ':' + Array.from(gi).length);
+var sit = 'a\ud83db'[Symbol.iterator](); sit.next(); L([...sit].length);
+var ci = [1, 2, 3].values(); ci.return = function () { L('close'); return {}; };
+for (var c of ci) { L('c' + c); break; }
+var shared = [1, 2, 3, 4].values(); for (var s1 of shared) { L('s' + s1); if (s1 === 2) break; } L([...shared].join());
+(function () { return log.join("|"); })

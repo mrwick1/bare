@@ -687,11 +687,19 @@ impl<'p> Interp<'p> {
 
     fn array_iter_next(&mut self, this: Value) -> Res<Value> {
         let Value::Object(o) = this else { return Err(self.type_err("next method called on incompatible receiver")) };
+        match self.array_iter_step(o)? {
+            None => self.sc_iter_result(Value::Undefined, true),
+            Some(v) => self.sc_iter_result(v, false),
+        }
+    }
+
+    /// One step of an array iterator object: the next value, or `None` when it is done.
+    fn array_iter_step(&mut self, o: ObjId) -> Res<Option<Value>> {
         let Some(&IterState::Array { src, i, what, done }) = self.sc.iters.get(&o) else {
             return Err(self.type_err("next method called on incompatible receiver"));
         };
         if done {
-            return self.sc_iter_result(Value::Undefined, true);
+            return Ok(None);
         }
         let len = self.length_of(src)?;
         let save = |it: &mut Self, i: u64, done: bool| {
@@ -702,7 +710,7 @@ impl<'p> Interp<'p> {
         };
         if i >= len {
             save(self, i, true);
-            return self.sc_iter_result(Value::Undefined, true);
+            return Ok(None);
         }
         let v = match what {
             IterWhat::Keys => Value::Number(i as f64),
@@ -713,24 +721,55 @@ impl<'p> Interp<'p> {
             }
         };
         save(self, i + 1, false);
-        self.sc_iter_result(v, false)
+        Ok(Some(v))
     }
 
     fn str_iter_next(&mut self, this: Value) -> Res<Value> {
-        let bad = |it: &mut Self| it.type_err("next method called on incompatible receiver");
-        let Value::Object(o) = this else { return Err(bad(self)) };
-        let Some(&IterState::Str { s, i, done }) = self.sc.iters.get(&o) else { return Err(bad(self)) };
+        let Value::Object(o) = this else { return Err(self.type_err("next method called on incompatible receiver")) };
+        match self.str_iter_step(o)? {
+            None => self.sc_iter_result(Value::Undefined, true),
+            Some(v) => self.sc_iter_result(v, false),
+        }
+    }
+
+    fn str_iter_step(&mut self, o: ObjId) -> Res<Option<Value>> {
+        let Some(&IterState::Str { s, i, done }) = self.sc.iters.get(&o) else { return Err(self.type_err("next method called on incompatible receiver")) };
         let step = if done { None } else { self.str_step(s, i)? };
         let Some((v, n)) = step else {
             if let Some(IterState::Str { done, .. }) = self.sc.iters.get_mut(&o) {
                 *done = true;
             }
-            return self.sc_iter_result(Value::Undefined, true);
+            return Ok(None);
         };
         if let Some(IterState::Str { i: si, .. }) = self.sc.iters.get_mut(&o) {
             *si = i + n;
         }
-        self.sc_iter_result(v, false)
+        Ok(Some(v))
+    }
+
+    /// `next` of an iterator object that this module made, when `next` is the intrinsic one for that state. The
+    /// result object would be unobservable (a fresh object that the loop reads at once), so it is not made.
+    /// `None` means: call `next` the ordinary way (a user method, or a receiver of the wrong kind, which throws).
+    fn iter_native_step(&mut self, io: ObjId, no: ObjId) -> Res<Option<Option<Value>>> {
+        let s = &self.sc;
+        let coll_is_map = |c: Option<&IterState>| match c {
+            Some(IterState::Coll { owner, .. }) => s.colls.get(owner).map(|c| c.is_map),
+            _ => None,
+        };
+        let st = s.iters.get(&io);
+        if no == s.f_array_next && matches!(st, Some(IterState::Array { .. })) {
+            return self.array_iter_step(io).map(Some);
+        }
+        if no == s.f_string_next && matches!(st, Some(IterState::Str { .. })) {
+            return self.str_iter_step(io).map(Some);
+        }
+        if no == s.f_map_next && coll_is_map(st) == Some(true) {
+            return self.coll_iter_step(io, true).map(Some);
+        }
+        if no == s.f_set_next && coll_is_map(st) == Some(false) {
+            return self.coll_iter_step(io, false).map(Some);
+        }
+        Ok(None)
     }
 
     /// The code point of `s` at `i` as a string, and its length in code units.
@@ -858,6 +897,11 @@ impl<'p> Interp<'p> {
             }
             ItKind::Generic { iter, next } => {
                 let (iter, next) = (*iter, *next);
+                if let (Value::Object(io), Value::Object(no)) = (iter, next)
+                    && let Some(step) = self.iter_native_step(io, no)?
+                {
+                    return Ok(step);
+                }
                 let r = self.call_fn(next, iter, &[])?;
                 if !matches!(r, Value::Object(_)) {
                     let t = self.display(r);
