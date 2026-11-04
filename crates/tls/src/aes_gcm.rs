@@ -172,7 +172,8 @@ const M7F: u128 = 0x7f7f_7f7f_7f7f_7f7f_7f7f_7f7f_7f7f_7f7f;
 
 /// Lane value 0 or 1 -> 0x00 or 0xff, without a multiply.
 fn spread(m: u128) -> u128 {
-    (m << 8) - m
+    // The top lane's 0x100 falls off the u128, so the subtraction must wrap.
+    (m << 8).wrapping_sub(m)
 }
 
 /// Multiply every byte lane by x in GF(2^8) (polynomial x^8+x^4+x^3+x+1).
