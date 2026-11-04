@@ -61,6 +61,34 @@ impl Host for T {
             8 => Ok(Value::Number(self.owned.borrow().len() as f64)),
             // queueMicrotask(cb)
             9 => it.queue_microtask(a(0)).map(|_| Value::Undefined),
+            // drain(iterable): the number of values, `undefined` if not iterable. 99 is a consumer error, 98 a limit.
+            10 => {
+                let Some(mut iter) = it.host_iter_open(a(0))? else { return Ok(Value::Undefined) };
+                let mut n = 0;
+                loop {
+                    let step = match it.host_iter_next(&mut iter) {
+                        Ok(Some(Value::Number(99.0))) => Err(it.type_error("consumer")),
+                        Ok(Some(Value::Number(98.0))) => Err(Error::Limit(LimitKind::Host("test-cap"))),
+                        Ok(Some(_)) => Ok(true),
+                        Ok(None) => Ok(false),
+                        Err(e) => Err(e),
+                    };
+                    match step {
+                        Ok(true) => n += 1,
+                        Ok(false) => return Ok(Value::Number(n as f64)),
+                        Err(e) => return Err(it.host_iter_fail(&mut iter, e)),
+                    }
+                }
+            }
+            // first(iterable): the first value, then a normal close
+            11 => {
+                let Some(mut iter) = it.host_iter_open(a(0))? else { return Ok(Value::Undefined) };
+                let v = it.host_iter_next(&mut iter)?.unwrap_or(Value::Undefined);
+                it.host_iter_close(&mut iter)?;
+                Ok(v)
+            }
+            // the method stored under the realm's Symbol.iterator
+            12 => it.get_value(a(0), it.symbol_iterator()),
             _ => unreachable!(),
         }
     }
@@ -86,7 +114,7 @@ fn setup() -> (Interp<'static>, Rc<T>) {
     let t = Rc::new(T::default());
     it.set_host(t.clone()).unwrap();
     let g = it.global_object();
-    for (i, (name, ctor)) in [("echo", false), ("callback", false), ("charge", false), ("attach", false), ("perm", false), ("capped", false), ("Thing", true), ("owned", false), ("count", false), ("qm", false)].iter().enumerate() {
+    for (i, (name, ctor)) in [("echo", false), ("callback", false), ("charge", false), ("attach", false), ("perm", false), ("capped", false), ("Thing", true), ("owned", false), ("count", false), ("qm", false), ("drain", false), ("first", false), ("symiter", false)].iter().enumerate() {
         let f = it.host_function(i as u32, name, 0, *ctor).unwrap();
         let k = it.heap.key_from_str(name).unwrap();
         it.define_data(g, k, Value::Object(f), true, false, true).unwrap();
@@ -275,5 +303,43 @@ fn host_promises_settle_once_through_the_promise_machinery() {
         // A pending promise that nothing roots is collected with its reactions (the host must root what it queues).
         it.host_scope(|it| it.host_new_promise().map(|_| ())).unwrap();
         it.collect(&[]).unwrap();
+    });
+}
+
+#[test]
+fn host_iteration_uses_the_shared_engine() {
+    big(|| {
+        let (mut it, _) = setup();
+        // arrays, strings, Map and Set, plain objects with a method
+        assert_eq!(out(&mut it, "[drain([1, 2, 3]), drain('a\\ud83d\\ude00b'), drain(new Map([[1, 2], [3, 4]])), drain(new Set([1])), drain({}), drain(5)].join()"), "3,3,2,1,,");
+        assert_eq!(out(&mut it, "first(new Map([['k', 'v']])).join()"), "k,v");
+        // not iterable is `None`; a method that is not callable is a TypeError; `null` is not iterable
+        assert_eq!(out(&mut it, "drain({[Symbol.iterator]: null})"), "undefined");
+        assert_eq!(out(&mut it, "drain({[Symbol.iterator]: 1})"), "throw:TypeError:Symbol.iterator is not a function");
+        assert_eq!(out(&mut it, "drain({[Symbol.iterator]() { return 1; }})"), "throw:TypeError:Result of the Symbol.iterator method is not an object");
+        // the method is read once; `next` once
+        assert_eq!(out(&mut it, "var reads = 0, nx = 0, o = {get [Symbol.iterator]() { reads++; return function () { return {get next() { nx++; return function () { return {done: true}; }; }}; }; }}; drain(o) + ',' + reads + ',' + nx"), "0,1,1");
+        // `return` runs for a normal close and for a consumer error, errors of `return` follow the rules, and a limit runs no JS
+        let src = |v: &str| format!("var r = 0, src = {{[Symbol.iterator]() {{ return {{next() {{ return {{done: false, value: {v}}}; }}, return() {{ r++; return {{}}; }}}}; }}}};");
+        out(&mut it, &src("1"));
+        assert_eq!(out(&mut it, "first(src) + ',' + r"), "1,1");
+        out(&mut it, &src("99"));
+        assert_eq!(out(&mut it, "try { drain(src) } catch (e) { e.message + ',' + r }"), "consumer,1");
+        out(&mut it, &src("98"));
+        assert_eq!(out(&mut it, "drain(src)"), "limit:Host(\"test-cap\")");
+        assert_eq!(out(&mut it, "r"), "0");
+        out(&mut it, "src = {[Symbol.iterator]() { return {next() { return {done: false, value: 99}; }, return() { throw new RangeError('from return'); }}; }};");
+        assert_eq!(out(&mut it, "try { drain(src) } catch (e) { e.message }"), "consumer", "the consumer error wins over the error of return");
+        assert_eq!(out(&mut it, "try { first(src) } catch (e) { e.name }"), "RangeError", "a normal close reports the error of return");
+        // an iterator that throws is not closed
+        assert_eq!(out(&mut it, "r = 0; try { drain({[Symbol.iterator]() { return {next() { throw new RangeError('n'); }, return() { r++; return {}; }}; }}) } catch (e) { e.name + r }"), "RangeError0");
+        // the step budget stops an endless iterable
+        assert_eq!(out(&mut it, "drain({[Symbol.iterator]() { return {next() { return {done: false, value: 1}; }}; }})"), "limit:Steps");
+        // the realm's own symbol: independent of the global Symbol
+        assert_eq!(out(&mut it, "var S = Symbol.iterator, a = []; Symbol = undefined; typeof Symbol"), "undefined");
+        assert_eq!(out(&mut it, "symiter(a) === a.values"), "true");
+        assert_eq!(out(&mut it, "var m = new Map(); symiter(m) === Map.prototype.entries"), "true");
+        it.collect(&[]).unwrap();
+        assert_eq!(out(&mut it, "symiter(a) === a[S] && drain([1, 2])"), "2");
     });
 }

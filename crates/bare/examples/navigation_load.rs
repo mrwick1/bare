@@ -1,8 +1,9 @@
 //! Load test for the navigation module. One case at one scale per process.
 //!
-//!   navigation_load CASE SCALE      CASE: url | history | storage | route      SCALE: 1, 10, 100
+//!   navigation_load CASE SCALE      CASE: url | iterate | history | storage | route      SCALE: 1, 10, 100
 //!
-//! url: SCALE*1000 `URL` objects with live `searchParams` (append, set, sort, get, hash change). history: SCALE*1000
+//! iterate: SCALE*1000 rounds that build `URLSearchParams` from a Map, an iterator and a pair iterable and iterate them (for-of with a
+//! live append, spread, `Array.from`, an early break). url: SCALE*1000 `URL` objects with live `searchParams` (append, set, sort, get, hash change). history: SCALE*1000
 //! `pushState`/`replaceState` of cyclic state graphs, with traversal run by the driver (the history is capped at 50
 //! entries). storage: SCALE*1000 writes, reads and removals over 3 origins, with UTF-16 values. route: SCALE*500 rounds of
 //! fragment, search and reload navigation, with the driver draining requests and tasks. Each case runs in small scripts,
@@ -138,6 +139,33 @@ fn exec(name: &str, scale: usize) {
                 }
             }
             expect("url", got.to_string(), want.to_string());
+        }
+        "iterate" => {
+            // Each round: a Map, an entries iterator and a pair array as init, for-of with a live append, spread, Array.from, an early break.
+            let n = 1000 * scale;
+            run(&mut b, "function chunk(start, count) { var s = 0;
+                  for (var i = start; i < start + count; i++) {
+                    var p = new URLSearchParams(new Map([['a' + i, '' + i], ['b', 'x'], ['c' + (i % 5), 'y']]));
+                    var q = new URLSearchParams(p.entries()), r = new URLSearchParams([['k', '1'], ['k', '2']].values()), k = 0, m = 0;
+                    for (var [name, v] of p) { m += name.length + v.length; if (k++ === 0) p.append('z', '' + (i % 3)); }
+                    for (var e of r) { m += e[1].length; break; }
+                    s += m + [...q.keys()].length + Array.from(q).length + [...p].length;
+                  }
+                  return s; }");
+            let (mut want, mut got) = (0usize, 0usize);
+            for start in (0..n).step_by(CHUNK) {
+                got += run(&mut b, &format!("chunk({start}, {CHUNK})")).parse::<usize>().unwrap_or_else(|_| die("chunk result".into()));
+                for i in start..start + CHUNK {
+                    // pairs of p: a<i>=<i>, b=x, c<i%5>=y, then z=<i%3>
+                    want += 2 * digits(i) + 1 + 2 + 3 + 2 + 1 + 3 + 3 + 4;
+                }
+                collect(&mut b);
+                let st = b.navigation_stats();
+                if st.params + st.iterators != 0 {
+                    die(format!("wrappers survived a collect: {st:?}"));
+                }
+            }
+            expect("iterate", got.to_string(), want.to_string());
         }
         "history" => {
             let n = 1000 * scale;
@@ -311,7 +339,7 @@ fn exec(name: &str, scale: usize) {
 fn main() {
     let a: Vec<String> = std::env::args().collect();
     if a.len() != 3 {
-        die("usage: navigation_load url|history|storage|route 1|10|100".into());
+        die("usage: navigation_load url|iterate|history|storage|route 1|10|100".into());
     }
     let scale: usize = a[2].parse().unwrap_or_else(|_| die("scale".into()));
     // the evaluator recurses: run on a big stack

@@ -547,10 +547,11 @@ fn hist_set_scroll(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> R<
 
 // ------------------------------------------------------------------------------------------ install
 
-fn def_fn(d: &Dom, it: &mut Interp<'_>, o: ObjId, name: &str, len: u32, h: H) -> R<()> {
+fn def_fn(d: &Dom, it: &mut Interp<'_>, o: ObjId, name: &str, len: u32, h: H) -> R<ObjId> {
     let f = d.add_fn(it, h, name, len, false)?;
     let k = d.key(it, name)?;
-    it.define_data(o, k, Value::Object(f), true, false, true)
+    it.define_data(o, k, Value::Object(f), true, false, true)?;
+    Ok(f)
 }
 
 fn def_acc(d: &Dom, it: &mut Interp<'_>, o: ObjId, name: &str, get: H, set: Option<H>) -> R<()> {
@@ -604,7 +605,15 @@ pub(crate) fn install(d: &Dom, it: &mut Interp<'_>) -> R<()> {
         ("has", 1, pr::p_has), ("set", 2, pr::p_set), ("sort", 0, pr::p_sort), ("toString", 0, pr::p_to_string),
         ("forEach", 1, pr::p_for_each), ("keys", 0, pr::p_keys), ("values", 0, pr::p_values), ("entries", 0, pr::p_entries),
     ] {
-        def_fn(d, it, params, name, len, h)?;
+        let f = def_fn(d, it, params, name, len, h)?;
+        // `[Symbol.iterator]` is the same function object as `entries`. The key is the realm's own symbol.
+        if name == "entries" {
+            it.define_data(params, it.symbol_iterator(), Value::Object(f), true, false, true)?;
+        }
+    }
+    // The iterator objects inherit from %IteratorPrototype%, so `iterator[Symbol.iterator]() === iterator`.
+    if let Err(e) = it.heap.set_prototype_of(iter, Some(it.iterator_prototype())) {
+        return Err(it.heap_error(e));
     }
     def_acc(d, it, params, "size", pr::p_size, None)?;
     def_fn(d, it, iter, "next", 0, pr::iter_next)?;

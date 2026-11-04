@@ -159,6 +159,8 @@ The fetch foundation is integrated with the scheduler. Requests queue genuine Pr
 
 URL, location, history and origin-scoped storage foundations are integrated. URL and URLSearchParams reuse bare-url with explicit syntax gates. Session data can survive a new Browser through a shared in-memory WebStorage. History state preserves cycles and sparse arrays within caps. Navigation requests queue for the future document loader. Traversal tasks check failed jobs before dispatch, run checkpoints and preserve fatal pump errors. The network base follows history changes without a driver round trip. Actual page navigation, browser comparison and staging session persistence remain open. See [resources.md](resources.md#navigation-and-origin-storage).
 
+Headers and URLSearchParams now expose iterable keys, values and entries through the realm's Symbol identities. Constructor sequences use the interpreter's shared iterator engine. Host metadata keeps pending iterators and their owners alive across collection. Byte-view record inputs are refused before virtual-key allocation. Headers conversion honors an existing object's iterator and defers header validation until conversion finishes. See [resources.md](resources.md#browser-iterator-protocols).
+
 | Topic | Work | Check before closing |
 | --- | --- | --- |
 | 1 | Add DOM creation, attributes, text replacement, insertion, removal and queries required by the target. | DOM invariants, node identity, detached nodes and mutation tests agree with Chrome. |

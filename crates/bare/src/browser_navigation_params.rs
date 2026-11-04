@@ -7,22 +7,24 @@
 //!
 //! Supported: `new URL(url[, base])`, `URL.canParse`, the components `href origin protocol username password host
 //! hostname port pathname search searchParams hash` (read/write where the standard allows), `toString`, `toJSON`;
-//! `new URLSearchParams(string | URLSearchParams | array of pairs | plain object)`, `append delete get getAll has set
-//! sort toString forEach keys values entries size`.
+//! `new URLSearchParams(string | iterable of pairs | record)`, `append delete get getAll has set sort toString forEach keys
+//! values entries size` and `[Symbol.iterator]` (the same function as `entries`).
+//!
+//! Iteration: `keys()`, `values()` and `entries()` return live iterator objects (they read the list at each `next`, so a change shows).
+//! They inherit from `%IteratorPrototype%`, so they are iterable. A constructor argument with `Symbol.iterator` (read once) is a
+//! sequence of pairs, read with the engine's own iteration (`Interp::host_iter_*`, the one `for-of` uses). A pair is an object
+//! that is iterable with exactly two values; at most three are read. An ordinary error closes the open iterators (inner first);
+//! a limit, `Unsupported` or a heap fault closes nothing and runs no more JS. Any other object is a record: own enumerable keys,
+//! an enumerable symbol key is a `TypeError`. Caps (pairs, bytes) are checked before the list grows. A byte view with more
+//! keys than `max_params` is refused before its keys are listed.
 //!
 //! Gates (never a silent wrong answer):
 //! - Anything `browser_navigation_url.rs` gates (other schemes, user info, IDNA, backslashes...) is `Unsupported`.
-//! - The iterator protocol needs `Symbol.iterator`, which this realm does not have yet. So `URLSearchParams` init from a
-//!   `Map`, a generator or any other iterable is `Unsupported`, and so is a plain object with a symbol key. `keys()`,
-//!   `values()` and `entries()` return live iterator objects with `next()`, but they are NOT iterable
-//!   (`for (x of params)` and spreading need `URLSearchParams.prototype[Symbol.iterator]`: the integrator adds it as
-//!   `entries` when symbols land).
 //! - `URL.createObjectURL`, `URL.parse` and subclassing are absent.
 
 use crate::browser::*;
 use crate::browser_navigation_url::{self as nu, Part, Rec, UErr, form_parse, form_serialize};
-use bare_js::eval::{Error, Interp};
-use bare_js::heap::Property;
+use bare_js::eval::{Error, HostIter, Interp};
 use bare_js::value::{ObjId, PropertyKey, Value};
 
 pub(crate) struct UrlObj {
@@ -284,72 +286,108 @@ fn key_text(it: &mut Interp<'_>, k: PropertyKey) -> R<Option<String>> {
     })
 }
 
-fn push_init(d: &Dom, list: &mut Vec<(String, String)>, n: String, v: String) -> R<()> {
-    if list.len() >= d.nav.lim.get().max_params {
+/// Room for one more pair of init (both caps, before the list grows). `bytes` is what this init holds so far.
+fn init_room(d: &Dom, list: &[(String, String)], bytes: usize, add: usize) -> R<()> {
+    let lim = d.nav.lim.get();
+    if list.len() >= lim.max_params || d.nav.s.borrow().param_bytes.saturating_add(bytes).saturating_add(add) > lim.max_param_bytes {
         return Err(d.lim("url-params"));
     }
-    list.push((n, v));
     Ok(())
 }
 
-fn init_from_object(d: &Dom, it: &mut Interp<'_>, o: ObjId) -> R<Vec<(String, String)>> {
-    if let Some(p) = d.nav.s.borrow().params.get(&o) {
-        return Ok(p.list.clone());
+const SEQ: &str = "Failed to construct 'URLSearchParams': The provided value cannot be converted to a sequence.";
+
+/// One element of a sequence init: an object that is iterable and holds exactly two values. At most three values are
+/// read (a longer or endless iterable is a `TypeError`, and its iterator is closed).
+fn init_pair(d: &Dom, it: &mut Interp<'_>, x: Value) -> R<(String, String)> {
+    if !matches!(x, Value::Object(_)) {
+        return Err(it.type_error(SEQ));
     }
-    let gate = |what: &'static str| Error::Unsupported(unsupported(what));
-    if it.is_callable_value(Value::Object(o)) || d.is_host_object(o) {
-        return Err(gate("URLSearchParams init from this object (it needs the iterator protocol)"));
-    }
-    let is_arr = it.heap.is_array(o).map_err(Error::Heap)?;
-    let proto = it.heap.get_prototype_of(o).map_err(Error::Heap)?;
-    let mut list = Vec::new();
-    if is_arr {
-        let k = d.key(it, "length")?;
-        let n = match it.heap.get_own_property(o, k) {
-            Ok(Some(Property::Data { value: Value::Number(n), .. })) => n as u32,
-            _ => 0,
+    let Some(mut inner) = it.host_iter_open(x)? else { return Err(it.type_error(SEQ)) };
+    let mut got = Vec::with_capacity(2);
+    loop {
+        let step = match it.host_iter_next(&mut inner) {
+            Ok(Some(_)) if got.len() == 2 => {
+                let e = it.type_error("Failed to construct 'URLSearchParams': Each pair must have exactly 2 elements.");
+                return Err(it.host_iter_fail(&mut inner, e));
+            }
+            Ok(Some(v)) => usv(d, it, v).map(Some),
+            Ok(None) => Ok(None),
+            Err(e) => Err(e),
         };
-        for i in 0..n {
-            it.charge(1)?;
-            let item = it.get_value(Value::Object(o), PropertyKey::Index(i))?;
-            let Value::Object(e) = item else { return Err(it.type_error("Failed to construct 'URLSearchParams': The provided value cannot be converted to a sequence.")) };
-            if !it.heap.is_array(e).map_err(Error::Heap)? {
-                return Err(gate("URLSearchParams pair that is not an array (it needs the iterator protocol)"));
-            }
-            let lk = d.key(it, "length")?;
-            if !matches!(it.get_value(item, lk)?, Value::Number(n) if n == 2.0) {
-                return Err(it.type_error("Failed to construct 'URLSearchParams': Each pair must have exactly 2 elements."));
-            }
-            let n = it.get_value(item, PropertyKey::Index(0))?;
-            let n = usv(d, it, n)?;
-            let v = it.get_value(item, PropertyKey::Index(1))?;
-            let v = usv(d, it, v)?;
-            push_init(d, &mut list, n, v)?;
+        match step {
+            Ok(Some(s)) => got.push(s),
+            Ok(None) => break,
+            Err(e) => return Err(it.host_iter_fail(&mut inner, e)),
         }
-    } else if proto.is_none() || proto == Some(it.object_prototype()) {
-        let keys = match it.heap.own_keys(o) {
-            Ok(k) => k,
+    }
+    match <[String; 2]>::try_from(got) {
+        Ok([n, v]) => Ok((n, v)),
+        Err(_) => Err(it.type_error("Failed to construct 'URLSearchParams': Each pair must have exactly 2 elements.")),
+    }
+}
+
+/// One step of a sequence init. `false` at the end.
+fn init_step(d: &Dom, it: &mut Interp<'_>, outer: &mut HostIter, list: &mut Vec<(String, String)>, bytes: &mut usize) -> R<bool> {
+    let Some(x) = it.host_iter_next(outer)? else { return Ok(false) };
+    init_room(d, list, *bytes, 0)?;
+    let (n, v) = init_pair(d, it, x)?;
+    let add = n.len() + v.len() + 32;
+    init_room(d, list, *bytes, add)?;
+    *bytes += add;
+    list.push((n, v));
+    Ok(true)
+}
+
+/// Pairs of a sequence of sequences. An error closes the open iterators (inner first), unless it is a limit.
+fn init_sequence(d: &Dom, it: &mut Interp<'_>, mut outer: HostIter) -> R<Vec<(String, String)>> {
+    let (mut list, mut bytes) = (Vec::new(), 0);
+    loop {
+        match init_step(d, it, &mut outer, &mut list, &mut bytes) {
+            Ok(true) => {}
+            Ok(false) => return Ok(list),
+            Err(e) => return Err(it.host_iter_fail(&mut outer, e)),
+        }
+    }
+}
+
+/// A record: own enumerable keys in order. An enumerable symbol key is a `TypeError`, as `ToString(symbol)` is.
+fn init_record(d: &Dom, it: &mut Interp<'_>, o: ObjId) -> R<Vec<(String, String)>> {
+    let cap = d.nav.lim.get().max_params;
+    // A byte view lists one key for each byte: refuse a long one before the list is made.
+    if it.heap.view_parts(o).is_some_and(|(_, _, len)| len > cap) {
+        return Err(d.lim("url-params"));
+    }
+    let keys = match it.heap.own_keys(o) {
+        Ok(k) => k,
+        Err(e) => return Err(it.heap_error(e)),
+    };
+    let (mut list, mut bytes) = (Vec::new(), 0);
+    for k in keys {
+        it.charge(1)?;
+        match it.heap.get_own_property(o, k) {
+            Ok(Some(p)) if p.enumerable() => {}
+            Ok(_) => continue,
             Err(e) => return Err(it.heap_error(e)),
-        };
-        if keys.iter().any(|k| matches!(k, PropertyKey::Symbol(_))) {
-            return Err(gate("URLSearchParams init from an object with a symbol key (the iterator protocol is not available)"));
         }
-        for k in keys {
-            it.charge(1)?;
-            match it.heap.get_own_property(o, k) {
-                Ok(Some(p)) if p.enumerable() => {}
-                Ok(_) => continue,
-                Err(e) => return Err(it.heap_error(e)),
-            }
-            let Some(name) = key_text(it, k)? else { continue };
-            let v = it.get_value(Value::Object(o), k)?;
-            let v = usv(d, it, v)?;
-            push_init(d, &mut list, name, v)?;
-        }
-    } else {
-        return Err(gate("URLSearchParams init from this object (it needs the iterator protocol)"));
+        let Some(name) = key_text(it, k)? else { return Err(it.type_error("Cannot convert a Symbol value to a string")) };
+        init_room(d, &list, bytes, 0)?;
+        let v = it.get_value(Value::Object(o), k)?;
+        let v = usv(d, it, v)?;
+        let add = name.len() + v.len() + 32;
+        init_room(d, &list, bytes, add)?;
+        bytes += add;
+        list.push((name, v));
     }
     Ok(list)
+}
+
+/// `sequence<sequence<USVString>>` when the object has `Symbol.iterator` (read once), else a record.
+fn init_from_object(d: &Dom, it: &mut Interp<'_>, o: ObjId) -> R<Vec<(String, String)>> {
+    match it.host_iter_open(Value::Object(o))? {
+        Some(iter) => init_sequence(d, it, iter),
+        None => init_record(d, it, o),
+    }
 }
 
 pub(crate) fn params_ctor(d: &Dom, it: &mut Interp<'_>, _: Value, a: &[Value]) -> R<Value> {
