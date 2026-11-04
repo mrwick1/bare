@@ -6,7 +6,7 @@
 //! <out> run <workload> <scale: 1|10|100>   one workload in this process, one result line
 //! <out> caps                               malformed input, resource caps, adversarial nesting
 //! <out> all [workload]                     every scale in its own child process, each with
-//!                                          `ulimit -v` (2 GiB address space) and `timeout 45`
+//!                                          `ulimit -v` (1 GiB address space) and `timeout 45`
 //! <out> oracle <dir> [seed] [cases]        generate small JSON texts, run them through Node's
 //!                                          JSON.parse, compare accept/reject and every value
 //!
@@ -94,33 +94,37 @@ struct Tally {
     keys: u64,
 }
 
-fn walk(h: &Heap, root: Value) -> Tally {
+fn walk(h: &Heap, root: Value, length_key: PropertyKey) -> Tally {
+    enum Visit { Value(Value), Array(ObjId, u32, u32) }
     let mut t = Tally::default();
-    let mut todo = vec![root];
-    while let Some(v) = todo.pop() {
+    let mut todo = vec![Visit::Value(root)];
+    while let Some(task) = todo.pop() {
+        let v = match task {
+            Visit::Value(v) => v,
+            Visit::Array(o, i, n) => {
+                if i == n { continue; }
+                todo.push(Visit::Array(o, i + 1, n));
+                let Some(Property::Data { value, .. }) = h.get_own_property(o, PropertyKey::Index(i)).unwrap() else { panic!("not data") };
+                value
+            }
+        };
         t.nodes += 1;
         match v {
-            Value::Number(n) => {
-                t.numbers += 1;
-                t.num_sum += n;
-            }
-            Value::String(s) => {
-                t.strings += 1;
-                t.text_units += h.str_len(s).unwrap() as u64;
+            Value::Number(n) => { t.numbers += 1; t.num_sum += n; }
+            Value::String(s) => { t.strings += 1; t.text_units += h.str_len(s).unwrap() as u64; }
+            Value::Object(o) if h.is_array(o).unwrap() => {
+                // The generated load arrays are dense. Keep one cursor instead of materializing
+                // every key and pending value in the verification harness.
+                let Some(Property::Data { value: Value::Number(n), .. }) = h.get_own_property(o, length_key).unwrap() else { panic!("no array length") };
+                let n = n as u32;
+                todo.push(Visit::Array(o, 0, n));
             }
             Value::Object(o) => {
                 for k in h.own_keys(o).unwrap() {
-                    if h.is_array(o).unwrap() && matches!(k, PropertyKey::String(_)) {
-                        continue; // `length`
-                    }
-                    if let PropertyKey::String(s) = k {
-                        t.text_units += h.str_len(s).unwrap() as u64;
-                    }
-                    if !h.is_array(o).unwrap() {
-                        t.keys += 1;
-                    }
+                    if let PropertyKey::String(s) = k { t.text_units += h.str_len(s).unwrap() as u64; }
+                    t.keys += 1;
                     let Some(Property::Data { value, .. }) = h.get_own_property(o, k).unwrap() else { panic!("not data") };
-                    todo.push(value);
+                    todo.push(Visit::Value(value));
                 }
             }
             _ => {}
@@ -279,7 +283,8 @@ fn run_case(w: &str, scale: u64) -> Out {
     let wall = t0.elapsed().as_secs_f64();
     let parse_allocs = ALLOCS.load(Relaxed) - a0;
     let parse_cpu = cpu_secs() - c0;
-    let got = walk(&h, v);
+    let length_key = h.key_from_str("length").unwrap();
+    let got = walk(&h, v, length_key);
     assert_eq!(got.nodes, case.want.nodes, "nodes");
     assert_eq!(got.numbers, case.want.numbers, "numbers");
     assert_eq!(got.strings, case.want.strings, "strings");
@@ -318,7 +323,7 @@ fn all(only: Option<&str>) {
     let mut failed = false;
     for w in WORKLOADS.iter().filter(|w| only.is_none_or(|o| o == **w)) {
         for scale in [1, 10, 100] {
-            let cmd = format!("ulimit -v 2097152; exec timeout 45 '{}' run {w} {scale}", me.display());
+            let cmd = format!("ulimit -v 1048576; exec timeout 45 '{}' run {w} {scale}", me.display());
             let o = std::process::Command::new("sh").args(["-c", &cmd]).output().unwrap();
             if o.status.success() {
                 print!("{}", String::from_utf8_lossy(&o.stdout));
@@ -342,7 +347,22 @@ fn timed<T>(name: &str, f: impl FnOnce() -> T) -> T {
     r
 }
 
+fn preflight() {
+    let mut h = Heap::default();
+    let stale = h.new_object(None).unwrap();
+    h.collect(&[]).unwrap();
+    let src = format!("\"{}\"", "x".repeat(1 << 20));
+    let opts = JsonOptions { object_proto: Some(stale), array_proto: None };
+    let before = ALLOCS.load(Relaxed);
+    let error = parse_utf8(&mut h, src.as_bytes(), &opts, &JsonLimits::default()).unwrap_err();
+    let allocations = ALLOCS.load(Relaxed) - before;
+    assert_eq!(error.kind, ErrorKind::Heap(HeapError::Stale));
+    assert_eq!(allocations, 0, "stale UTF-8 options allocated before validation");
+    println!("preflight: rejected stale prototypes with zero allocations");
+}
+
 fn caps() {
+    preflight();
     let o = JsonOptions::default();
     let kind = |r: Result<Value, Error>| r.unwrap_err().kind;
     println!("caps (default limits unless noted):");
@@ -751,9 +771,10 @@ fn main() {
         }
         Some("all") => all(a.get(2).map(String::as_str)),
         Some("caps") => caps(),
+        Some("preflight") => preflight(),
         Some("oracle") if a.len() >= 3 => oracle(&a[2], a.get(3).map_or(12345, |s| s.parse().unwrap()), a.get(4).map_or(3000, |s| s.parse().unwrap())),
         _ => {
-            eprintln!("usage: {} run <workload> <1|10|100> | caps | all [workload] | oracle <dir> [seed] [cases]", a[0]);
+            eprintln!("usage: {} run <workload> <1|10|100> | caps | preflight | all [workload] | oracle <dir> [seed] [cases]", a[0]);
             std::process::exit(2);
         }
     }

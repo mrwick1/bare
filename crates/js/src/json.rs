@@ -2,8 +2,8 @@
 //!
 //! Input is UTF-16 code units (`parse`) or UTF-8 bytes (`parse_utf8`). The grammar is RFC 8259
 //! as ECMAScript uses it: whitespace is only space, tab, LF and CR; no comments, no trailing
-//! commas, no leading zeros, no BOM. Numbers are rounded once to nearest-even (Rust's
-//! `f64::from_str` is correctly rounded), so `-0` stays `-0` and `1e400` is `Infinity`.
+//! commas, no leading zeros, no BOM. Numbers use Rust's float parser after long mantissas
+//! are reduced to a bounded significant prefix and sticky digit. `-0` stays `-0`; `1e400` is `Infinity`.
 //! Strings keep lone surrogates as given. A repeated object key keeps its first position and
 //! takes the last value. `"__proto__"` is an ordinary own property.
 //!
@@ -120,6 +120,7 @@ pub fn parse_utf8(heap: &mut Heap, src: &[u8], opts: &JsonOptions, lim: &JsonLim
         return fail(ErrorKind::Limit(LimitKind::Source), lim.max_source_units);
     }
     let s = std::str::from_utf8(src).map_err(|e| Error { kind: ErrorKind::Syntax(Syntax::InvalidUtf8), offset: e.valid_up_to() })?;
+    validate_options(heap, opts)?;
     let units: Vec<u16> = s.encode_utf16().collect();
     parse(heap, &units, opts, lim)
 }
@@ -130,9 +131,7 @@ pub fn parse(heap: &mut Heap, src: &[u16], opts: &JsonOptions, lim: &JsonLimits)
     if src.len() > lim.max_source_units {
         return fail(ErrorKind::Limit(LimitKind::Source), lim.max_source_units);
     }
-    for p in [opts.object_proto, opts.array_proto].into_iter().flatten() {
-        heap.get_prototype_of(p).map_err(|e| Error { kind: ErrorKind::Heap(e), offset: 0 })?;
-    }
+    validate_options(heap, opts)?;
     let mut p = Parser {
         heap,
         src,
@@ -146,6 +145,13 @@ pub fn parse(heap: &mut Heap, src: &[u16], opts: &JsonOptions, lim: &JsonLimits)
         num: Vec::new(),
     };
     p.run()
+}
+
+fn validate_options(heap: &Heap, opts: &JsonOptions) -> Res<()> {
+    for p in [opts.object_proto, opts.array_proto].into_iter().flatten() {
+        heap.get_prototype_of(p).map_err(|e| Error { kind: ErrorKind::Heap(e), offset: 0 })?;
+    }
+    Ok(())
 }
 
 struct Frame {
