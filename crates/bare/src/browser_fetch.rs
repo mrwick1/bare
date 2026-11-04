@@ -36,8 +36,16 @@
 //!
 //! Gates (explicit `Unsupported`, nothing is faked): methods other than GET and POST; `Blob`/`FormData`/`URLSearchParams`/stream
 //! bodies and `blob()`/`formData()`; `Request.body`, `signal` (AbortController) and `mode: "no-cors"`; non-empty `integrity`;
-//! `cache: "only-if-cached"`; non-ASCII header values; `Headers.entries/keys/values` and iteration (no Symbol yet); compressed
+//! `cache: "only-if-cached"`; non-ASCII header values; compressed
 //! responses (`Content-Encoding` other than identity is a network error); subclassing (`class X extends Response`).
+//! Headers iteration: `keys`, `values`, `entries` and `[Symbol.iterator]` (the same function as `entries`) make live iterators. Each
+//! `next` sorts and combines the list again and takes the entry at its index, so a header added or deleted during the loop shows. They
+//! inherit from `%IteratorPrototype%`. A `HeadersInit` with `Symbol.iterator` (read once) is a sequence of pairs read with the engine's own
+//! iteration (`Interp::host_iter_*`); each name and value is checked as it is read; a pair has exactly two values (at most three
+//! are read). An ordinary error closes the open iterators, inner first (Node's Headers does not); a limit, `Unsupported` or a heap
+//! fault closes nothing and runs no JS. Any other object is a record (an enumerable symbol key is a `TypeError`). Caps are checked
+//! before growth, and a byte view with more keys than `max_headers` is refused before its keys are listed. A real `Headers` as init is
+//! copied without reading its `Symbol.iterator`. A finished iterator is not sticky: it sees later headers (as in Node).
 //! Deviations: `statusText` of a network response is "" (the client drops the reason phrase). `Headers.forEach` and `get` follow the
 //! standard (sorted, combined with ", "). Bodies are not cached: the client cache is bypassed. Timeouts are the client's (120 s
 //! a reply). A request that already started its blocking I/O cannot be interrupted; [`Browser::abort_fetches`] only rejects
@@ -231,6 +239,15 @@ impl HeaderList {
         Some(it.fold(first.to_string(), |a, v| a + ", " + v))
     }
 
+    /// Entry `i` of `sorted()`, without copying the others (a live iterator asks again at each step).
+    fn nth_sorted(&self, i: usize) -> Option<(String, String)> {
+        let mut names: Vec<&String> = self.list.iter().map(|(k, _)| k).collect();
+        names.sort_unstable();
+        names.dedup();
+        let n = names.get(i)?;
+        Some(((*n).clone(), self.get(n).unwrap_or_default()))
+    }
+
     /// Sorted by name, one entry for each name with the values joined by ", " (the iteration order of the standard).
     fn sorted(&self) -> Vec<(String, String)> {
         let mut names: Vec<&String> = self.list.iter().map(|(k, _)| k).collect();
@@ -300,6 +317,8 @@ enum F {
     /// The `body` of a response. Holds the response.
     Stream(ObjId),
     Reader { stream: ObjId, released: bool },
+    /// A live iterator of a Headers: the position in the sorted, combined list, read again at each step.
+    HeadersIter { headers: ObjId, idx: usize, kind: u8 },
 }
 
 /// A request that waits for `run_network_tasks`. Plain Rust data: the only JS value is the promise, and it is a root.
@@ -333,6 +352,7 @@ enum Pr {
     Response,
     Stream,
     Reader,
+    HeadersIter,
 }
 
 /// The fetch state of one `Dom`.
@@ -340,7 +360,7 @@ pub(crate) struct Fetch {
     st: RefCell<FetchState>,
     lim: Cell<FetchLimits>,
     client: RefCell<Client>,
-    protos: OnceCell<[ObjId; 5]>,
+    protos: OnceCell<[ObjId; 6]>,
     fixed: RefCell<Vec<ObjId>>,
     json_parse: Cell<Option<Value>>,
 }
@@ -366,7 +386,7 @@ impl Fetch {
                 out.push(Value::Object(r.c.headers));
                 out.extend(r.stream.map(Value::Object));
             }
-            Some(F::Stream(o)) | Some(F::Reader { stream: o, .. }) => out.push(Value::Object(*o)),
+            Some(F::Stream(o)) | Some(F::Reader { stream: o, .. }) | Some(F::HeadersIter { headers: o, .. }) => out.push(Value::Object(*o)),
             _ => {}
         }
     }
@@ -482,52 +502,105 @@ impl Dom {
         Ok(t.to_string())
     }
 
-    /// `(name, value)` pairs of a `HeadersInit`: a Headers, an array of pairs or a record. Nothing is stored yet.
-    fn init_pairs(&self, it: &mut Interp<'_>, init: Value) -> R<Vec<(String, String)>> {
+    /// One element of a sequence init: an object that is iterable and holds exactly two values, a name and a value. Each is
+    /// checked when it is read. At most three values are read (a longer or endless iterable is a `TypeError`).
+    fn init_pair(&self, it: &mut Interp<'_>, x: Value) -> R<(String, String)> {
+        const BAD: &str = "Invalid header pair: a header is [name, value]";
+        if !matches!(x, Value::Object(_)) {
+            return Err(it.type_error("Invalid header pair"));
+        }
+        let Some(mut inner) = it.host_iter_open(x)? else { return Err(it.type_error(BAD)) };
+        let (mut name, mut value, mut n) = (None, None, 0);
+        loop {
+            let step = match it.host_iter_next(&mut inner) {
+                Ok(Some(_)) if n == 2 => {
+                    let e = it.type_error(BAD);
+                    return Err(it.host_iter_fail(&mut inner, e));
+                }
+                Ok(Some(v)) if n == 0 => self.header_name(it, v).map(|s| {
+                    name = Some(s);
+                    true
+                }),
+                Ok(Some(v)) => self.header_value(it, v).map(|s| {
+                    value = Some(s);
+                    true
+                }),
+                Ok(None) => Ok(false),
+                Err(e) => Err(e),
+            };
+            match step {
+                Ok(true) => n += 1,
+                Ok(false) => break,
+                Err(e) => return Err(it.host_iter_fail(&mut inner, e)),
+            }
+        }
+        match (name, value) {
+            (Some(a), Some(b)) => Ok((a, b)),
+            _ => Err(it.type_error(BAD)),
+        }
+    }
+
+    /// The caps of a `HeadersInit` that is being read, before the next pair is made: entries, then bytes.
+    fn init_room(&self, out: &[(String, String)], bytes: usize, add: usize) -> R<()> {
         let lim = self.fl();
+        if add == 0 && out.len() >= lim.max_headers {
+            return Err(self.lim("fetch-headers"));
+        }
+        if bytes.saturating_add(add) > lim.max_header_bytes {
+            return Err(self.lim("fetch-header-bytes"));
+        }
+        Ok(())
+    }
+
+    /// `(name, value)` pairs of a `HeadersInit`: a Headers, a sequence of pairs (anything with `Symbol.iterator`, read once)
+    /// or a record. Nothing is stored yet. A real Headers is copied without reading its `Symbol.iterator`.
+    fn init_pairs(&self, it: &mut Interp<'_>, init: Value) -> R<Vec<(String, String)>> {
         let Value::Object(o) = init else { return Err(it.type_error("Headers init is not an object or a sequence")) };
         if let Some(F::Headers(h)) = self.fetch.st.borrow().objs.get(&o) {
             return Ok(h.sorted());
         }
-        let mut out = Vec::new();
-        let is_arr = it.heap.is_array(o).map_err(|e| it.heap_error(e))?;
-        if is_arr {
-            let kl = self.key(it, "length")?;
-            let n = it.get_value(init, kl)?;
-            let n = it.to_js_number(n)?;
-            if !(n >= 0.0 && n <= lim.max_headers as f64) {
-                return Err(self.lim("fetch-headers"));
-            }
-            for i in 0..n as usize {
-                it.charge(1)?;
-                let k = self.key(it, &i.to_string())?;
-                let pair = it.get_value(init, k)?;
-                let Value::Object(po) = pair else { return Err(it.type_error("Invalid header pair")) };
-                let pa = it.heap.is_array(po).map_err(|e| it.heap_error(e))?;
-                let (k0, k1, kl) = (self.key(it, "0")?, self.key(it, "1")?, self.key(it, "length")?);
-                let len = it.get_value(pair, kl)?;
-                if !pa || it.to_js_number(len)? != 2.0 {
-                    return Err(it.type_error("Invalid header pair: a header is [name, value]"));
+        let (mut out, mut bytes) = (Vec::new(), 0usize);
+        if let Some(mut outer) = it.host_iter_open(init)? {
+            loop {
+                let step = (|| {
+                    let Some(x) = it.host_iter_next(&mut outer)? else { return Ok(false) };
+                    self.init_room(&out, bytes, 0)?;
+                    let (n, v) = self.init_pair(it, x)?;
+                    self.init_room(&out, bytes, n.len() + v.len())?;
+                    bytes += n.len() + v.len();
+                    out.push((n, v));
+                    Ok(true)
+                })();
+                match step {
+                    Ok(true) => {}
+                    Ok(false) => return Ok(out),
+                    Err(e) => return Err(it.host_iter_fail(&mut outer, e)),
                 }
-                let (a, b) = (it.get_value(pair, k0)?, it.get_value(pair, k1)?);
-                out.push((self.header_name(it, a)?, self.header_value(it, b)?));
             }
-        } else {
-            let keys = it.heap.own_keys(o).map_err(|e| it.heap_error(e))?;
-            if keys.len() > lim.max_headers {
-                return Err(self.lim("fetch-headers"));
+        }
+        // A byte view lists one key for each byte: refuse a long one before the list is made.
+        if it.heap.view_parts(o).is_some_and(|(_, _, len)| len > self.fl().max_headers) {
+            return Err(self.lim("fetch-headers"));
+        }
+        let keys = it.heap.own_keys(o).map_err(|e| it.heap_error(e))?;
+        if keys.len() > self.fl().max_headers {
+            return Err(self.lim("fetch-headers"));
+        }
+        for k in keys {
+            it.charge(1)?;
+            let enumerable = it.heap.get_own_property(o, k).map_err(|e| it.heap_error(e))?.is_some_and(|p| p.enumerable());
+            if !enumerable {
+                continue;
             }
-            for k in keys {
-                it.charge(1)?;
-                if matches!(k, bare_js::value::PropertyKey::Symbol(_)) { continue; }
-                let enumerable = it.heap.get_own_property(o, k).map_err(|e| it.heap_error(e))?.is_some_and(|p| p.enumerable());
-                if !enumerable {
-                    continue;
-                }
-                let name = it.heap.key_to_value(k).map_err(|e| it.heap_error(e))?;
-                let v = it.get_value(init, k)?;
-                out.push((self.header_name(it, name)?, self.header_value(it, v)?));
+            if matches!(k, bare_js::value::PropertyKey::Symbol(_)) {
+                return Err(it.type_error("Cannot convert a Symbol value to a string"));
             }
+            let name = it.heap.key_to_value(k).map_err(|e| it.heap_error(e))?;
+            let v = it.get_value(init, k)?;
+            let (n, v) = (self.header_name(it, name)?, self.header_value(it, v)?);
+            self.init_room(&out, bytes, n.len() + v.len())?;
+            bytes += n.len() + v.len();
+            out.push((n, v));
         }
         Ok(out)
     }
@@ -558,6 +631,13 @@ impl Dom {
             _ => return Err(it.type_error("Illegal invocation")),
         };
         r.map_err(|e| self.herr(it, e))
+    }
+
+    fn list_len(&self, o: ObjId) -> usize {
+        match self.fetch.st.borrow().objs.get(&o) {
+            Some(F::Headers(h)) => h.list.len(),
+            _ => 0,
+        }
     }
 
     fn list_of(&self, o: ObjId) -> HeaderList {
@@ -852,8 +932,57 @@ fn headers_for_each(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> R
     Ok(Value::Undefined)
 }
 
-fn gate_iteration(_: &Dom, _: &mut Interp<'_>, _: Value, _: &[Value]) -> R<Value> {
-    Err(Error::Unsupported(unsupported("Headers iteration: entries, keys, values (no Symbol.iterator yet)")))
+/// `keys()`, `values()` and `entries()` (kind 0, 1, 2): a live iterator. Each `next` reads the sorted, combined list again,
+/// so a header added or deleted during the loop shows (the index goes on, as the standard says).
+fn make_iter(d: &Dom, it: &mut Interp<'_>, this: Value, kind: u8) -> R<Value> {
+    d.on_headers(it, this, |_| Ok(()))?;
+    let Value::Object(headers) = this else { return Err(it.type_error("Illegal invocation")) };
+    d.reserve(it, 1, 0)?;
+    Ok(Value::Object(d.add_obj(it, Pr::HeadersIter, F::HeadersIter { headers, idx: 0, kind })?))
+}
+
+fn headers_keys(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> R<Value> {
+    make_iter(d, it, this, 0)
+}
+fn headers_values(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> R<Value> {
+    make_iter(d, it, this, 1)
+}
+fn headers_entries(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> R<Value> {
+    make_iter(d, it, this, 2)
+}
+
+fn headers_iter_next(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> R<Value> {
+    let o = d.brand(it, this)?;
+    let (headers, idx, kind) = match d.fetch.st.borrow().objs.get(&o) {
+        Some(&F::HeadersIter { headers, idx, kind }) => (headers, idx, kind),
+        _ => return Err(it.type_error("Illegal invocation")),
+    };
+    it.charge(1 + d.list_len(headers) as u64)?;
+    let item = match d.fetch.st.borrow().objs.get(&headers) {
+        Some(F::Headers(h)) => h.nth_sorted(idx),
+        _ => None,
+    };
+    let (value, done) = match item {
+        None => (Value::Undefined, true),
+        Some((n, v)) => {
+            if let Some(F::HeadersIter { idx, .. }) = d.fetch.st.borrow_mut().objs.get_mut(&o) {
+                *idx += 1;
+            }
+            match kind {
+                0 => (d.js_str(it, &n)?, false),
+                1 => (d.js_str(it, &v)?, false),
+                _ => {
+                    let (jn, jv) = (d.js_str(it, &n)?, d.js_str(it, &v)?);
+                    (it.array_from(&[jn, jv])?, false)
+                }
+            }
+        }
+    };
+    let r = d.obj(it, it.object_prototype())?;
+    let (kv, kd) = (d.key(it, "value")?, d.key(it, "done")?);
+    it.define_data(r, kv, value, true, true, true)?;
+    it.define_data(r, kd, Value::Bool(done), true, true, true)?;
+    Ok(Value::Object(r))
 }
 
 // ---------------------------------------------------------------------------------------------- Request and Response
@@ -1586,9 +1715,10 @@ static DEFS: &[Def] = &[
     Def { on: Headers, name: "has", len: 1, kind: M(headers_has) },
     Def { on: Headers, name: "set", len: 2, kind: M(headers_set) },
     Def { on: Headers, name: "forEach", len: 1, kind: M(headers_for_each) },
-    Def { on: Headers, name: "entries", len: 0, kind: M(gate_iteration) },
-    Def { on: Headers, name: "keys", len: 0, kind: M(gate_iteration) },
-    Def { on: Headers, name: "values", len: 0, kind: M(gate_iteration) },
+    Def { on: Headers, name: "entries", len: 0, kind: M(headers_entries) },
+    Def { on: Headers, name: "keys", len: 0, kind: M(headers_keys) },
+    Def { on: Headers, name: "values", len: 0, kind: M(headers_values) },
+    Def { on: HeadersIter, name: "next", len: 0, kind: M(headers_iter_next) },
     Def { on: Request, name: "method", len: 0, kind: G(req_method) },
     Def { on: Request, name: "url", len: 0, kind: G(req_url) },
     Def { on: Request, name: "headers", len: 0, kind: G(req_headers) },
@@ -1634,7 +1764,8 @@ static DEFS: &[Def] = &[
 pub(crate) fn install(d: &Dom, it: &mut Interp<'_>) -> R<()> {
     let g = it.global_object();
     let op = it.object_prototype();
-    let protos: [ObjId; 5] = [d.obj(it, op)?, d.obj(it, op)?, d.obj(it, op)?, d.obj(it, op)?, d.obj(it, op)?];
+    // The iterator prototype inherits from %IteratorPrototype%, so `iterator[Symbol.iterator]() === iterator`.
+    let protos: [ObjId; 6] = [d.obj(it, op)?, d.obj(it, op)?, d.obj(it, op)?, d.obj(it, op)?, d.obj(it, op)?, d.obj(it, it.iterator_prototype())?];
     let _ = d.fetch.protos.set(protos);
     let mut fixed = protos.to_vec();
     for def in DEFS {
@@ -1644,6 +1775,10 @@ pub(crate) fn install(d: &Dom, it: &mut Interp<'_>) -> R<()> {
             Kind::Method(h) => {
                 let f = d.add_fn(it, h, def.name, def.len, false)?;
                 it.define_data(target, key, Value::Object(f), true, false, true)?;
+                // `Headers.prototype[Symbol.iterator]` is the same function object as `entries`.
+                if def.name == "entries" {
+                    it.define_data(target, it.symbol_iterator(), Value::Object(f), true, false, true)?;
+                }
             }
             Kind::Get(h) => {
                 let f = d.add_fn(it, h, &format!("get {}", def.name), 0, false)?;

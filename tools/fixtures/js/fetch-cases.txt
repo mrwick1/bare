@@ -108,3 +108,43 @@ var out = [];
 var r = new Response('abcdef'); r.body.getReader();
 r.text().then(function () { out.push('no'); }, function (e) { out.push(e.name); });
 (function () { return out.join('|'); })
+=== headers-iterate-sorted-combined-and-identity
+var h = new Headers([['B', '2'], ['a', '1'], ['a', '3']]), i = h[Symbol.iterator]();
+(function () { return [JSON.stringify([...h]), JSON.stringify([...h.keys()]), JSON.stringify([...h.values()]), h[Symbol.iterator] === h.entries, i[Symbol.iterator]() === i].join('|'); })
+=== headers-iterate-destructure-and-for-of
+var h = new Headers({x: '1', y: '2'});
+(function () { var s = ''; for (var [k, v] of h) s += k + v; var [[a, b], c] = h; return s + a + b + c.join(''); })
+=== headers-init-map
+(function () { return JSON.stringify([...new Headers(new Map([['A', '1'], ['b', '2']]))]); })
+=== headers-init-map-duplicates-combine
+(function () { var h = new Headers(new Map([['A', '1'], ['a', '2']])); return h.get('a'); })
+=== headers-init-set-of-pairs-and-inner-iterable
+(function () { return JSON.stringify([...new Headers(new Set([new Set(['a', 'b']), ['c', 'd']]))]); })
+=== headers-init-from-headers-iterators
+(function () { var h = new Headers({x: '1', y: '2'}); return [JSON.stringify([...new Headers(h.entries())]), JSON.stringify([...new Headers(h)])].join('|'); })
+=== headers-init-pair-string
+(function () { try { new Headers(['ab']); return 'ok'; } catch (e) { return e.name; } })
+=== headers-init-pair-length-3
+(function () { try { new Headers([['a', 'b', 'c']]); return 'ok'; } catch (e) { return e.name; } })
+=== headers-init-pair-length-1
+(function () { try { new Headers([['a']]); return 'ok'; } catch (e) { return e.name; } })
+=== headers-init-pair-array-like-not-iterable
+(function () { try { new Headers([{0: 'a', 1: 'b', length: 2}]); return 'ok'; } catch (e) { return e.name; } })
+=== headers-init-non-callable-iterator-method
+(function () { try { new Headers({[Symbol.iterator]: 1}); return 'ok'; } catch (e) { return e.name; } })
+=== headers-init-record-with-enumerable-symbol-key
+(function () { try { new Headers({[Symbol('s')]: 'a', b: 'c'}); return 'ok'; } catch (e) { return e.name; } })
+=== headers-init-bad-name-from-iterable
+(function () { try { new Headers(new Map([['bad name', 'x']])); return 'ok'; } catch (e) { return e.name; } })
+=== headers-init-order-of-calls
+(function () { var log = []; var pair = {[Symbol.iterator]() { log.push('pi'); var i = 0; return {next() { i++; log.push('pn' + i); return i > 2 ? {done: true} : {done: false, value: {toString() { log.push('ts' + i); return i == 1 ? 'k' : 'v'; }}}; }}; }};
+  var src = {[Symbol.iterator]() { log.push('oi'); var d = false; return {next() { log.push('on'); if (d) return {done: true}; d = true; return {done: false, value: pair}; }}; }};
+  var h = new Headers(src); return log.join() + '|' + JSON.stringify([...h]); })
+=== headers-iterate-live-append-during
+(function () { var h = new Headers([['b', '2'], ['d', '4']]); var out = []; for (var [k] of h) { out.push(k); if (k === 'b') { h.append('c', '3'); h.append('a', '0'); } } return out.join(); })
+=== headers-iterate-live-delete-during
+(function () { var h = new Headers([['a', '1'], ['b', '2'], ['c', '3']]); var out = []; for (var [k] of h) { out.push(k); if (k === 'a') h.delete('b'); } return out.join(); })
+=== headers-response-headers-iterate
+(function () { var h = new Response('x', {headers: {B: '2', a: '1'}}).headers; return JSON.stringify([...h]); })
+=== headers-iterator-after-exhaustion-is-not-sticky
+(function () { var h = new Headers({a: '1'}); var i = h.entries(); i.next(); i.next(); h.append('b', '2'); return JSON.stringify(i.next()); })

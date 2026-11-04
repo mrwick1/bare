@@ -799,9 +799,9 @@ fn search_params_semantics() {
         // the entries are live iterator objects with next()
         assert_eq!(js(&mut b, "var it = p.entries(), r = it.next(), s = r.value.join('=') + r.done; r = it.next(); s += r.value.join('=') + r.done; r = it.next(); s + r.done + r.value"), "m=1falsen=2falsetrueundefined");
         assert_eq!(js(&mut b, "typeof p.keys().next + typeof p.values().next + typeof Object.getPrototypeOf(p.keys()).next"), "functionfunctionfunction");
-        // the iterator protocol is a gate: no Symbol.iterator yet
-        assert_eq!(js(&mut b, "new URLSearchParams(new (function F() {})())"), "unsupported:URLSearchParams init from this object (it needs the iterator protocol)");
-        assert_eq!(js(&mut b, "new URLSearchParams([{0: 'a', 1: 'b', length: 2}])"), "unsupported:URLSearchParams pair that is not an array (it needs the iterator protocol)");
+        // an object without Symbol.iterator is a record (own enumerable keys); a pair must be iterable
+        assert_eq!(js(&mut b, "new URLSearchParams(new (function F() { this.k = 1; })()) + ''"), "k=1");
+        assert_eq!(js(&mut b, "new URLSearchParams([{0: 'a', 1: 'b', length: 2}])"), "throw:TypeError:Failed to construct 'URLSearchParams': The provided value cannot be converted to a sequence.");
         assert_eq!(js(&mut b, "new URLSearchParams('a=1').constructor === URLSearchParams"), "true");
         assert_eq!(js(&mut b, "new URLSearchParams(null).toString()"), "null=", "WebIDL: null is the string 'null' (Node returns '')");
         // forEach: a callback that mutates and throws; the list stays consistent
@@ -1011,5 +1011,114 @@ fn async_class_login_shaped_flow_crosses_fetch_history_and_collection() {
         b.collect(&[]).unwrap();
         assert_eq!(js(&mut b, "[result, location.pathname, sessionStorage.getItem('state')].join()"), "synthetic:synthetic,/dashboard,synthetic");
         assert_eq!(b.pending_fetches(), 0);
+    });
+}
+
+/// A byte view whose prototype is `Object.prototype` (a script cannot make one yet: there is no `setPrototypeOf`).
+fn plain_view(b: &mut Browser, len: usize) {
+    let buf = b.it.heap.new_buffer(None, len).unwrap();
+    let op = b.it.object_prototype();
+    let v = b.it.heap.new_view(Some(op), buf, 0, len).unwrap();
+    let k = b.it.heap.key_from_str("pv").unwrap();
+    let g = b.it.global_object();
+    b.it.define_data(g, k, Value::Object(v), true, true, true).unwrap();
+}
+
+#[test]
+fn search_params_iterate_through_the_shared_engine() {
+    big(|| {
+        let mut b = at(URL0);
+        // `[Symbol.iterator]` is `entries`, with the realm's own symbol: it survives a script that drops the global
+        assert_eq!(js(&mut b, "var S = Symbol.iterator, P = URLSearchParams.prototype, d = Object.getOwnPropertyDescriptor(P, S); [d.value === P.entries, d.writable, d.enumerable, d.configurable, P.entries.name, P[S].length].join()"), "true,true,false,true,entries,0");
+        assert_eq!(js(&mut b, "Symbol = undefined; var p = new URLSearchParams('a=1&b=2'); [[...p].join('|'), new URLSearchParams(new Map([['x', 'y']])) + '', p[S] === P.entries].join(' ')"), "a,1|b,2 x=y true");
+        b.collect(&[]).unwrap();
+        assert_eq!(js(&mut b, "var it = p[S](); [it[S]() === it, Object.getPrototypeOf(Object.getPrototypeOf(it)) === Object.getPrototypeOf(Object.getPrototypeOf([][S]())), [...it].length].join()"), "true,true,2");
+        // generic iterables, pairs with coercion, live mutation (the same cases run against Node: tools/js/navigation_check.sh)
+        assert_eq!(js(&mut b, "for (var [k, v] of p) { if (k === 'a') { p.delete('a'); p.append('c', '3'); } } p + ''"), "b=2&c=3");
+        assert_eq!(js(&mut b, "new URLSearchParams([new Set(['a', {toString() { return 'b'; }}])]) + ''"), "a=b");
+        assert_eq!(js(&mut b, "new URLSearchParams([['a', 'b', 'c']])"), "throw:TypeError:Failed to construct 'URLSearchParams': Each pair must have exactly 2 elements.");
+        assert_eq!(js(&mut b, "new URLSearchParams(['ab'])"), "throw:TypeError:Failed to construct 'URLSearchParams': The provided value cannot be converted to a sequence.");
+        assert_eq!(js(&mut b, "new URLSearchParams({[S]: 1})"), "throw:TypeError:Symbol.iterator is not a function");
+        assert_eq!(js(&mut b, "new URLSearchParams({[Symbol]: 1}) + ''"), "undefined=1", "a plain string key");
+        // an iterator that ends the sequence early or throws: `return` runs for ordinary errors only
+        assert_eq!(js(&mut b, "var closed = 0, inner = 0; var endless = {[S]() { return {next() { return {done: false, value: new Set(['a', 'b', 'c'])}; }, return() { closed++; return {}; }}; }}; try { new URLSearchParams(endless) } catch (e) { e.name + closed }"), "TypeError1");
+        assert_eq!(js(&mut b, "var pair = {[S]() { var n = 0; return {next() { return {done: false, value: 'v' + n++}; }, return() { inner++; return {}; }}; }}; closed = 0; try { new URLSearchParams({[S]() { return {next() { return {done: false, value: pair}; }, return() { closed++; return {}; }}; }}) } catch (e) { e.name + closed + inner }"), "TypeError11", "a third value is a TypeError, never an endless read");
+        // a resource limit is final: no `return`, no more JS
+        b.set_navigation_limits(NavLimits { max_params: 3, ..Default::default() });
+        assert_eq!(js(&mut b, "closed = 0; var n = 0; new URLSearchParams({[S]() { return {next() { n++; return {done: false, value: ['a', 'b']}; }, return() { closed++; return {}; }}; }})"), lim("url-params"));
+        assert_eq!(js(&mut b, "closed + ',' + n"), "0,4", "the cap is checked before the pair that would pass it is read");
+        assert_eq!(js(&mut b, "new URLSearchParams('a=1&b=2&c=3&d=4')"), lim("url-params"));
+        b.set_navigation_limits(NavLimits { max_param_bytes: 200, ..Default::default() });
+        assert_eq!(js(&mut b, "var big = []; for (var i = 0; i < 5; i++) big.push(['k' + i, 'v'.repeat ? 'v'.repeat(30) : new Array(31).join('v')]); new URLSearchParams(big)"), lim("url-params"));
+    });
+}
+
+#[test]
+fn a_step_limit_ends_an_endless_iterable_without_more_js() {
+    big(|| {
+        let mut b = mk(Some(URL0), EvalLimits { max_steps: 20_000, ..Default::default() });
+        let r = js(&mut b, "var closed = 0; new URLSearchParams({[Symbol.iterator]() { return {next() { return {done: false, value: ['a', 'b']}; }, return() { closed++; return {}; }}; }})");
+        assert!(r == lim("url-params") || r == "limit:Steps", "{r}");
+        assert_eq!(js(&mut b, "closed"), "0");
+    });
+}
+
+#[test]
+fn iterators_survive_collection_and_cycles_are_freed() {
+    big(|| {
+        let mut b = at(URL0);
+        // an iterator that only the script holds keeps its params alive (the params are not otherwise reachable)
+        js(&mut b, "var it = new URLSearchParams('a=1&b=2').entries(); it.next();");
+        b.collect(&[]).unwrap();
+        let st = b.navigation_stats();
+        assert_eq!((st.params, st.iterators), (1, 1));
+        assert_eq!(js(&mut b, "JSON.stringify([it.next(), it.next()])"), r#"[{"value":["b","2"],"done":false},{"done":true}]"#);
+        // iterators in a loop are freed after the loop; so are the params they held
+        js(&mut b, "it = null; for (var i = 0; i < 100; i++) { var q = new URLSearchParams([['k' + i, 'v']]); var i2 = q[Symbol.iterator](); i2.next(); } q = i2 = null;");
+        b.collect(&[]).unwrap();
+        let st = b.navigation_stats();
+        assert_eq!((st.params, st.iterators, st.param_bytes), (0, 0, 0), "{st:?}");
+        // a self cycle: the iterable holds the params, the params' iterator holds them, the object holds itself
+        js(&mut b, "var o = {}; o.me = o; o.p = new URLSearchParams('a=1'); o[Symbol.iterator] = function () { return o.p.entries(); }; var made = new URLSearchParams(o) + '';");
+        assert_eq!(js(&mut b, "made"), "a=1");
+        js(&mut b, "o = null; made = null;");
+        b.collect(&[]).unwrap();
+        let st = b.navigation_stats();
+        assert_eq!((st.params, st.iterators), (0, 0), "{st:?}");
+        // a script-side iterator that is collected in the middle of a read: its state lives in the realm, the host holds nothing
+        js(&mut b, "var steps = 0; var src = {[Symbol.iterator]() { var i = 0; return {next() { steps++; return i++ < 3 ? {done: false, value: ['k' + i, 'v']} : {done: true}; }}; }};");
+        b.collect(&[]).unwrap();
+        assert_eq!(js(&mut b, "new URLSearchParams(src) + '|' + steps"), "k1=v&k2=v&k3=v|4");
+    });
+}
+
+#[test]
+fn callbacks_from_other_scripts_with_the_same_ids_are_not_mixed_up() {
+    big(|| {
+        let mut b = at(URL0);
+        js(&mut b, "var A = {[Symbol.iterator]() { var i = 0; return {next() { return i++ < 2 ? {done: false, value: ['a' + i, '1']} : {done: true}; }}; }};");
+        js(&mut b, "var B = {[Symbol.iterator]() { var i = 0; return {next() { return i++ < 2 ? {done: false, value: ['b' + i, '2']} : {done: true}; }}; }};");
+        b.collect(&[]).unwrap();
+        js(&mut b, "var C = {[Symbol.iterator]() { var i = 0; return {next() { return i++ < 1 ? {done: false, value: ['c', '3']} : {done: true}; }}; }};");
+        assert_eq!(js(&mut b, "new URLSearchParams(B) + '|' + new URLSearchParams(A) + '|' + new URLSearchParams(C) + '|' + new URLSearchParams(B)"), "b1=2&b2=2|a1=1&a2=1|c=3|b1=2&b2=2");
+        // a method from one script used as the iterator of an object made by another
+        js(&mut b, "var m = A[Symbol.iterator]; var D = {}; D[Symbol.iterator] = m;");
+        assert_eq!(js(&mut b, "new URLSearchParams(D) + ''"), "a1=1&a2=1");
+    });
+}
+
+#[test]
+fn byte_views_are_refused_before_their_keys_are_listed() {
+    big(|| {
+        let mut b = at(URL0);
+        b.set_navigation_limits(NavLimits { max_params: 100, ..Default::default() });
+        // `u[Symbol.iterator] = undefined` sends a view down the record path, which lists one key for each byte
+        assert_eq!(js(&mut b, "var u = new Uint8Array(1 << 26); u[Symbol.iterator] = undefined; new URLSearchParams(u)"), lim("url-params"));
+        plain_view(&mut b, 1 << 26);
+        assert_eq!(js(&mut b, "new URLSearchParams(pv)"), lim("url-params"));
+        assert_eq!(js(&mut b, "history.pushState(pv, '')"), "unsupported:structured clone of an object that is not a plain object or array");
+        assert_eq!(js(&mut b, "history.pushState({deep: pv}, '')"), "unsupported:structured clone of an object that is not a plain object or array");
+        // a small view is still data, and an enumerable symbol key is a TypeError, not a resource limit
+        assert_eq!(js(&mut b, "var s = new Uint8Array(2); s[Symbol.iterator] = undefined; new URLSearchParams(s)"), "throw:TypeError:Cannot convert a Symbol value to a string");
     });
 }

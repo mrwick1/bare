@@ -232,6 +232,28 @@ fn exec(name: &str, scale: usize) {
             expect("objects", run(&mut b, "acc"), want.to_string());
             expect("objects pruned", format!("{}", b.fetch_stats().objects), "0".into());
         }
+        "iterate" => {
+            // Headers from a Map and from another Headers' iterator, for-of with a live append, spread, keys/values, an early break.
+            let n = 1000 * scale;
+            run(&mut b, "var acc = 0;
+                function round(i) { var h = new Headers(new Map([['X-A' + (i % 5), '' + i], ['b', 'x'], ['B', 'y']]));
+                  var g = new Headers(h.entries()), k = 0;
+                  for (var [name, v] of h) { acc += name.length + v.length; if (k++ === 0) h.append('z', '' + (i % 3)); }
+                  for (var e of g) { acc += e[0].length; break; }
+                  acc += [...g.keys()].length + [...g.values()].join('').length + [...h].length; }");
+            let mut want = 0usize;
+            for start in (0..n).step_by(100) {
+                run(&mut b, &format!("for (var i = {start}; i < {}; i++) round(i);", start + 100));
+                for i in start..start + 100 {
+                    // h sorted: b="x, y" (5), x-a<k>=<i> (4+d), then the appended z=<i%3> (2); the break (1), g's keys (2), values (4+d), spread of h (3)
+                    want += 21 + 2 * i.to_string().len();
+                }
+                max_retained = max_retained.max(b.fetch_stats().objects);
+                collect(&mut b);
+            }
+            expect("iterate", run(&mut b, "acc"), want.to_string());
+            expect("iterate pruned", format!("{}", b.fetch_stats().objects), "0".into());
+        }
         _ => die(format!("unknown case {name}")),
     }
     let run_ms = t.elapsed().as_secs_f64() * 1e3;
@@ -254,7 +276,7 @@ fn exec(name: &str, scale: usize) {
 fn main() {
     let a: Vec<String> = std::env::args().collect();
     if a.len() != 3 {
-        die("usage: fetch_load post|bytes|objects 1|10|100".into());
+        die("usage: fetch_load post|bytes|objects|iterate 1|10|100".into());
     }
     let scale: usize = a[2].parse().unwrap_or_else(|_| die("scale".into()));
     let name = a[1].clone();

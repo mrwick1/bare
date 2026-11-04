@@ -19,6 +19,10 @@
 // Nothing is collected during a call, so a host may hold handles in Rust locals while it runs.
 // With a host installed, use Interp::collect. Heap::collect(Interp::roots()) does not follow opaque host edges.
 
+/// An open iteration over a JavaScript iterable (see [`Interp::host_iter_open`]). Opaque. It lives in Rust locals for
+/// the length of one host call: nothing is collected during a call, so it needs no rooting. Do not keep it past the call.
+pub struct HostIter(It);
+
 /// What an embedder implements. See the header of this file.
 pub trait Host {
     /// Method `id` (from [`Interp::host_function`]) was called with `this` and `args`. `is_new` is true for
@@ -192,6 +196,41 @@ impl<'p> Interp<'p> {
     /// Define a data property with all the flags given.
     pub fn define_data(&mut self, o: ObjId, key: PropertyKey, v: Value, writable: bool, enumerable: bool, configurable: bool) -> Result<(), Error> {
         self.def(o, key, v, writable, enumerable, configurable)
+    }
+
+    /// The realm's own `Symbol.iterator` as a property key. It does not depend on the global `Symbol`, which a
+    /// script can delete or replace. The realm roots it.
+    pub fn symbol_iterator(&self) -> PropertyKey {
+        self.sc.k_iterator
+    }
+
+    /// `%IteratorPrototype%`: the prototype of a host iterator object, so that it is iterable (`it[Symbol.iterator]() === it`).
+    pub fn iterator_prototype(&self) -> ObjId {
+        self.sc.iter_proto
+    }
+
+    /// `GetIterator(v)` with the engine's own iteration (the one `for-of`, spread and patterns use): `Symbol.iterator` is
+    /// read once. `None` when it is `undefined` or `null`, so the caller can take another path (a record). A method that
+    /// is not callable, or a result that is not an object, is a `TypeError`. The method may run JavaScript.
+    pub fn host_iter_open(&mut self, v: Value) -> Result<Option<HostIter>, Error> {
+        Ok(self.iter_open(v)?.map(HostIter))
+    }
+
+    /// The next value, or `None` at the end. After `None` or an error, the iteration is done for good.
+    /// Charges one step. The value is not rooted: the host reads it before it runs more JavaScript.
+    pub fn host_iter_next(&mut self, it: &mut HostIter) -> Result<Option<Value>, Error> {
+        self.iter_next(&mut it.0)
+    }
+
+    /// Stop early without an error (`IteratorClose`): calls `return`. Does nothing for a finished iteration.
+    pub fn host_iter_close(&mut self, it: &mut HostIter) -> Result<(), Error> {
+        self.iter_close(&mut it.0)
+    }
+
+    /// Stop because of `err`: calls `return` and keeps `err`, unless `err` is a limit, `Unsupported` or a heap
+    /// fault. Then it runs no JavaScript. Returns the error to pass on.
+    pub fn host_iter_fail(&mut self, it: &mut HostIter, err: Error) -> Error {
+        self.iter_close_throw(&mut it.0, err)
     }
 
     /// Map a heap error to the error JavaScript sees (a limit stays a limit).

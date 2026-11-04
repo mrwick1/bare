@@ -1102,3 +1102,70 @@ f
 === url-tostringtag
 var f = function () { return [typeof URL, typeof URLSearchParams, URL.length, URLSearchParams.length, URL.name, new URL("http://a.com") instanceof URL, new URLSearchParams() instanceof URLSearchParams].join(); };
 f
+=== sp-iterate-order-and-identity
+var f = function () { var p = new URLSearchParams('a=1&b=2&a=3'); var i = p[Symbol.iterator]();
+  return [JSON.stringify([...p]), p[Symbol.iterator] === p.entries, i[Symbol.iterator]() === i, JSON.stringify([...p.keys()]), JSON.stringify([...p.values()]), Array.from(p).length].join('|'); };
+f
+=== sp-iterate-destructure-and-for-of
+var f = function () { var p = new URLSearchParams('x=1&y=2'); var s = ''; for (var [k, v] of p) s += k + v; var [[a, b], c] = p; return s + a + b + c.join(''); };
+f
+=== sp-init-map
+var f = function () { return JSON.stringify([...new URLSearchParams(new Map([['a', '1'], ['b', 2]]))]); };
+f
+=== sp-init-set-of-pairs-and-inner-iterable
+var f = function () { return JSON.stringify([...new URLSearchParams(new Set([new Set(['a', 'b']), ['c', 'd']]))]); };
+f
+=== sp-init-from-params-iterators
+var f = function () { var p = new URLSearchParams('x=1&y=2'); return [new URLSearchParams(p.entries()) + '', new URLSearchParams(p) + ''].join('|'); };
+f
+=== sp-init-keys-iterator-pairs-are-strings
+var f = function () { try { new URLSearchParams(new URLSearchParams('x=1').keys()); return 'ok'; } catch (e) { return e.name; } };
+f
+=== sp-init-pair-string
+var f = function () { try { new URLSearchParams(['ab']); return 'ok'; } catch (e) { return e.name; } };
+f
+=== sp-init-pair-length-3
+var f = function () { try { new URLSearchParams([['a', 'b', 'c']]); return 'ok'; } catch (e) { return e.name; } };
+f
+=== sp-init-pair-length-1
+var f = function () { try { new URLSearchParams([['a']]); return 'ok'; } catch (e) { return e.name; } };
+f
+=== sp-init-pair-array-like-not-iterable
+var f = function () { try { new URLSearchParams([{0: 'a', 1: 'b', length: 2}]); return 'ok'; } catch (e) { return e.name; } };
+f
+=== sp-init-non-callable-iterator-method
+var f = function () { try { new URLSearchParams({[Symbol.iterator]: 1}); return 'ok'; } catch (e) { return e.name; } };
+f
+=== sp-init-record-with-enumerable-symbol-key
+var f = function () { try { new URLSearchParams({[Symbol('s')]: 'a', b: 'c'}); return 'ok'; } catch (e) { return e.name; } };
+f
+=== sp-init-record-with-hidden-symbol-key
+var f = function () { var o = {b: 'c', 1: 'z'}; Object.defineProperty(o, Symbol('s'), {value: 1}); return new URLSearchParams(o) + ''; };
+f
+=== sp-init-closes-outer-on-bad-pair
+var f = function () { var n = 0; var src = {[Symbol.iterator]() { return {next() { return {done: false, value: 'x'}; }, return() { n++; return {}; }}; }};
+  try { new URLSearchParams(src); } catch (e) { return n + e.name; } };
+f
+=== sp-init-closes-both-on-coercion-error
+var f = function () { var n = 0, m = 0; var inner = {[Symbol.iterator]() { return {i: 0, next() { return this.i++ ? {done: false, value: {toString() { throw new RangeError('x'); }}} : {done: false, value: 'k'}; }, return() { m++; return {}; }}; }};
+  var src = {[Symbol.iterator]() { return {next() { return {done: false, value: inner}; }, return() { n++; return {}; }}; }};
+  try { new URLSearchParams(src); } catch (e) { return n + ',' + m + ',' + e.name; } };
+f
+=== sp-init-iterator-throws-no-close
+var f = function () { var n = 0; var src = {[Symbol.iterator]() { return {next() { throw new RangeError('x'); }, return() { n++; return {}; }}; }};
+  try { new URLSearchParams(src); } catch (e) { return n + e.name; } };
+f
+=== sp-init-order-of-calls
+var f = function () { var log = []; var pair = {[Symbol.iterator]() { log.push('pi'); var i = 0; return {next() { i++; log.push('pn' + i); return i > 2 ? {done: true} : {done: false, value: {toString() { log.push('ts' + i); return 'v' + i; }}}; }}; }};
+  var src = {[Symbol.iterator]() { log.push('oi'); var d = false; return {next() { log.push('on'); if (d) return {done: true}; d = true; return {done: false, value: pair}; }}; }};
+  var p = new URLSearchParams(src); return log.join() + '|' + p; };
+f
+=== sp-iterate-live-delete-and-append
+var f = function () { var p = new URLSearchParams('a=1&b=2'); var out = []; for (var [k] of p) { out.push(k); if (k === 'a') { p.delete('a'); p.append('c', '3'); } } return out.join() + '|' + p; };
+f
+=== sp-iterate-live-keys-append-during
+var f = function () { var p = new URLSearchParams('a=1'); var out = []; for (var k of p.keys()) { out.push(k); if (out.length < 4) p.append('n' + out.length, '1'); } return out.join(); };
+f
+=== sp-iterator-after-exhaustion-stays-done
+var f = function () { var p = new URLSearchParams('a=1'); var i = p.entries(); i.next(); i.next(); p.append('b', '2'); return JSON.stringify(i.next()); };
+f

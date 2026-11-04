@@ -96,6 +96,10 @@ fn ser(d: &Dom, it: &mut Interp<'_>, c: &mut Ser, v: Value, depth: usize) -> R<S
             if d.is_host_object(o) {
                 return Err(clone_err(d, it, "An object"));
             }
+            // A byte view is never plain data, whatever its prototype. Refuse it before `own_keys` lists one key per byte.
+            if it.heap.view_parts(o).is_some() {
+                return Err(Error::Unsupported(unsupported("structured clone of an object that is not a plain object or array")));
+            }
             let is_arr = it.heap.is_array(o).map_err(Error::Heap)?;
             let proto = it.heap.get_prototype_of(o).map_err(Error::Heap)?;
             let plain = if is_arr { proto == Some(it.array_prototype()) } else { proto.is_none() || proto == Some(it.object_prototype()) };

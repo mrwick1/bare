@@ -277,7 +277,7 @@ fn headers_follow_the_standard() {
         assert_eq!(js(&mut b, "new Headers(null)"), "throw:TypeError:Failed to construct 'Headers': The provided value is not of type 'HeadersInit'");
         assert_eq!(js(&mut b, "Headers()"), "throw:TypeError:Failed to construct: please use the 'new' operator");
         assert_eq!(js(&mut b, "new Headers().getSetCookie().length"), "0");
-        assert!(js(&mut b, "new Headers().entries()").starts_with("unsupported:Headers iteration"));
+        assert_eq!(js(&mut b, "JSON.stringify([...new Headers([['B', '2'], ['a', '1'], ['A', '3']])])"), r#"[["a","1, 3"],["b","2"]]"#);
         assert_eq!(js(&mut b, "Headers.prototype.get.call({}, 'a')"), "throw:TypeError:Illegal invocation");
         assert_eq!(js(&mut b, "var h = new Headers({a:'1'}); h.get('a') === h.get('a') && h instanceof Headers && Object.prototype.toString.call(h)"), "[object Object]");
     });
@@ -729,5 +729,112 @@ fn zero_fetch_diagnostic_capacity_retains_nothing() {
         js(&mut b, "fetch('http://example.invalid/')");
         assert!(b.take_fetch_diagnostics().is_empty());
         assert_eq!(b.fetch_stats().dropped_diagnostics, 1);
+    });
+}
+
+fn plain_view(b: &mut Browser, len: usize) {
+    let buf = b.it.heap.new_buffer(None, len).unwrap();
+    let op = b.it.object_prototype();
+    let v = b.it.heap.new_view(Some(op), buf, 0, len).unwrap();
+    let k = b.it.heap.key_from_str("pv").unwrap();
+    let g = b.it.global_object();
+    b.it.define_data(g, k, Value::Object(v), true, true, true).unwrap();
+}
+
+#[test]
+fn headers_iterate_through_the_shared_engine() {
+    big(|| {
+        let mut b = at(1);
+        // the realm's own symbol, the same function as `entries`, an iterator that is itself iterable
+        assert_eq!(js(&mut b, "var S = Symbol.iterator, P = Headers.prototype, d = Object.getOwnPropertyDescriptor(P, S); [d.value === P.entries, d.writable, d.enumerable, d.configurable, P.entries.name, P.keys.length].join()"), "true,true,false,true,entries,0");
+        assert_eq!(js(&mut b, "Symbol = undefined; var h = new Headers([['b', '2'], ['A', '1'], ['a', '3']]); [JSON.stringify([...h]), JSON.stringify([...new Headers(new Map([['x', 'y']]))]), h[S] === P.entries].join(' ')"), r#"[["a","1, 3"],["b","2"]] [["x","y"]] true"#);
+        b.collect(&[]).unwrap();
+        assert_eq!(js(&mut b, "var it = h.keys(); [it[S]() === it, Object.getPrototypeOf(Object.getPrototypeOf(it)) === Object.getPrototypeOf(Object.getPrototypeOf([][S]())), [...it].join(), JSON.stringify(h.values().next())].join()"), r#"true,true,a,b,{"value":"1, 3","done":false}"#);
+        // live: the index goes on in the list sorted again at each step
+        assert_eq!(js(&mut b, "var out = []; for (var [k] of h) { out.push(k); if (k === 'a') { h.append('aa', '0'); h.delete('b'); } } out.join()"), "a,aa");
+        // forbidden and immutable guards are not bypassed by an iterable
+        assert_eq!(js(&mut b, "JSON.stringify([...new Request('/x', {headers: new Map([['Cookie', 'a'], ['Host', 'h'], ['X-A', 'b'], ['sec-fetch-mode', 'x']])}).headers])"), r#"[["x-a","b"]]"#);
+        assert_eq!(js(&mut b, "var rh = new Response('x', {headers: new Map([['Set-Cookie', 'a'], ['B', '1']])}).headers; JSON.stringify([...rh])"), r#"[["b","1"],["content-type","text/plain;charset=UTF-8"]]"#);
+        // pair rules
+        assert_eq!(js(&mut b, "new Headers([['a', 'b', 'c']])"), "throw:TypeError:Invalid header pair: a header is [name, value]");
+        assert_eq!(js(&mut b, "new Headers([{0: 'a', 1: 'b', length: 2}])"), "throw:TypeError:Invalid header pair: a header is [name, value]");
+        assert_eq!(js(&mut b, "new Headers(['ab'])"), "throw:TypeError:Invalid header pair");
+        assert_eq!(js(&mut b, "new Headers({[S]: 1})"), "throw:TypeError:Symbol.iterator is not a function");
+        assert_eq!(js(&mut b, "var o = {k: 'v'}; Object.defineProperty(o, S, {value: undefined}); JSON.stringify([...new Headers(o)])"), r#"[["k","v"]]"#, "a hidden symbol key is skipped");
+        assert_eq!(js(&mut b, "var o2 = {k: 'v'}; o2[S] = undefined; new Headers(o2)"), "throw:TypeError:Cannot convert a Symbol value to a string");
+        assert_eq!(js(&mut b, "new Headers(new Map([['bad name', 'x']]))"), "throw:TypeError:Invalid header name");
+        assert!(js(&mut b, "new Headers(new Map([['x', '\\u00e9']]))").starts_with("unsupported:non-ASCII"));
+        // `return` runs for ordinary errors (inner first), never after a limit
+        assert_eq!(js(&mut b, "var closed = 0, inner = 0; var pair = {[S]() { var n = 0; return {next() { return {done: false, value: 'v' + n++}; }, return() { inner++; return {}; }}; }}; try { new Headers({[S]() { return {next() { return {done: false, value: pair}; }, return() { closed++; return {}; }}; }}) } catch (e) { e.name + closed + inner }"), "TypeError11");
+        assert_eq!(js(&mut b, "closed = 0; try { new Headers({[S]() { return {next() { return {done: false, value: 'x'}; }, return() { closed++; return {}; }}; }}) } catch (e) { e.name + closed }"), "TypeError1");
+        // brand checks
+        assert_eq!(js(&mut b, "Headers.prototype.entries.call({})"), "throw:TypeError:Illegal invocation");
+        assert_eq!(js(&mut b, "Object.getPrototypeOf(new Headers().keys()).next.call({})"), "throw:TypeError:Illegal invocation");
+        assert_eq!(js(&mut b, "Object.getPrototypeOf(new Headers().keys()).next.call(new Headers())"), "throw:TypeError:Illegal invocation");
+    });
+}
+
+#[test]
+fn headers_init_caps_are_limits_before_growth_and_stop_all_js() {
+    big(|| {
+        let mut b = mk(None, FetchLimits { max_headers: 3, max_header_bytes: 60, ..Default::default() });
+        assert_eq!(js(&mut b, "var closed = 0, n = 0; new Headers({[Symbol.iterator]() { return {next() { n++; return {done: false, value: ['a' + n, 'b']}; }, return() { closed++; return {}; }}; }})"), lim("fetch-headers"));
+        assert_eq!(js(&mut b, "closed + ',' + n"), "0,4", "the cap is checked before the fourth pair is read");
+        assert_eq!(js(&mut b, "new Headers(new Map([['a', 'x'.repeat ? 'x'.repeat(70) : new Array(71).join('x')]]))"), lim("fetch-header-bytes"));
+        assert_eq!(js(&mut b, "new Headers([['a', '1'], ['b', '2'], ['c', '3']]).get('c')"), "3");
+        assert_eq!(js(&mut b, "new Headers([['a', '1'], ['b', '2'], ['c', '3'], ['d', '4']])"), lim("fetch-headers"));
+        // a byte view lists one key for each byte: refused before the list is made
+        assert_eq!(js(&mut b, "var u = new Uint8Array(1 << 26); u[Symbol.iterator] = undefined; new Headers(u)"), lim("fetch-headers"));
+        plain_view(&mut b, 1 << 26);
+        assert_eq!(js(&mut b, "new Headers(pv)"), lim("fetch-headers"));
+        // an endless iterable ends in a limit, not in a hang
+        let mut s = Browser::new(tree::parse("<body></body>"), BrowserLimits::default(), EvalLimits { max_steps: 300, ..Default::default() }, HeapLimits::default()).expect("browser");
+        s.configure_fetch(FetchConfig { base_url: None, client: Client::new(), limits: FetchLimits { max_headers: 1 << 30, ..Default::default() } }).unwrap();
+        let r = js(&mut s, "var closed = 0; new Headers({[Symbol.iterator]() { return {next() { return {done: false, value: ['a', 'b']}; }, return() { closed++; return {}; }}; }})");
+        assert!(r == lim("fetch-header-bytes") || r == "limit:Steps", "{r}");
+        assert_eq!(js(&mut s, "closed"), "0");
+    });
+}
+
+#[test]
+fn headers_iterators_survive_collection_and_cycles_are_freed() {
+    big(|| {
+        let mut b = at(1);
+        // the iterator alone keeps its Headers alive
+        js(&mut b, "var it = new Headers({a: '1', b: '2'}).entries(); it.next();");
+        b.collect(&[]).unwrap();
+        assert_eq!(b.fetch_stats().objects, 2, "headers and iterator");
+        assert_eq!(js(&mut b, "JSON.stringify([it.next(), it.next()])"), r#"[{"value":["b","2"],"done":false},{"done":true}]"#);
+        js(&mut b, "it = null;");
+        b.collect(&[]).unwrap();
+        assert_eq!(b.fetch_stats().objects, 0);
+        // a request's headers iterator keeps the request's headers (and so the request) alive only as far as headers go
+        for round in 0..20 {
+            js(&mut b, "(function () { for (var i = 0; i < 100; i++) { var h = new Headers([['k' + i, 'v']]); var j = h[Symbol.iterator](); j.next(); var r = new Response('x'); r.headers.keys().next(); } })()");
+            b.collect(&[]).unwrap();
+            assert_eq!(b.fetch_stats().objects, 0, "round {round}");
+        }
+        // a self cycle: an iterable that holds the headers its own iterator reads
+        js(&mut b, "var o = {}; o.me = o; o.h = new Headers({a: '1'}); o[Symbol.iterator] = function () { return o.h.entries(); }; var made = JSON.stringify([...new Headers(o)]);");
+        assert_eq!(js(&mut b, "made"), r#"[["a","1"]]"#);
+        js(&mut b, "o = null; made = null;");
+        b.collect(&[]).unwrap();
+        assert_eq!(b.fetch_stats().objects, 0);
+        // the object cap counts iterators
+        let mut c = mk(None, FetchLimits { max_objects: 5, ..Default::default() });
+        assert_eq!(js(&mut c, "var h = new Headers(), its = []; for (var i = 0; i < 10; i++) its.push(h.keys()); 1"), lim("fetch-objects"));
+        assert_eq!(c.fetch_stats().objects, 5);
+    });
+}
+
+#[test]
+fn callbacks_from_other_scripts_with_the_same_ids_do_not_mix_in_headers() {
+    big(|| {
+        let mut b = at(1);
+        js(&mut b, "var A = {[Symbol.iterator]() { var i = 0; return {next() { return i++ < 2 ? {done: false, value: ['a' + i, '1']} : {done: true}; }}; }};");
+        js(&mut b, "var B = {[Symbol.iterator]() { var i = 0; return {next() { return i++ < 2 ? {done: false, value: ['b' + i, '2']} : {done: true}; }}; }};");
+        b.collect(&[]).unwrap();
+        js(&mut b, "var C = {[Symbol.iterator]() { var i = 0; return {next() { return i++ < 1 ? {done: false, value: ['c', '3']} : {done: true}; }}; }};");
+        assert_eq!(js(&mut b, "[B, A, C, B].map(function (x) { return JSON.stringify([...new Headers(x)]); }).join('|')"), r#"[["b1","2"],["b2","2"]]|[["a1","1"],["a2","1"]]|[["c","3"]]|[["b1","2"],["b2","2"]]"#);
     });
 }
