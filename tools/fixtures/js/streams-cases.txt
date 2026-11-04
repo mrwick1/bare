@@ -291,3 +291,25 @@ var r = rs.getReader(), sum = 0, last = -1, ok = true;
 function step() { return r.read().then(function (x) { if (x.done) return; if (x.value !== last + 1) ok = false; last = x.value; sum += x.value; return step(); }); }
 step().then(function () { out.push(sum, last, ok); });
 (function () { return out.join('|'); })
+=== null-dictionary-options
+var out = [], s = new ReadableStream({}, null), r = s.getReader(null);
+out.push(s.locked); r.releaseLock();
+for (var opts of [42, { mode: 'other' }]) { try { s.getReader(opts); } catch (e) { out.push(e.name); } }
+(function () { return out.join('|'); })
+=== escaped-controller-after-start-throw
+var out = [], ctl;
+try { new ReadableStream({ start(c) { ctl = c; throw 1; } }); } catch (e) { out.push(e); }
+ctl.enqueue('kept'); out.push(ctl.desiredSize); ctl.close(); out.push(ctl.desiredSize);
+(function () { return out.join('|'); })
+=== start-result-constructor-timing
+var out = [], ctl, p = Promise.resolve();
+Object.defineProperty(p, 'constructor', { get() { out.push('constructor'); throw 17; } });
+var s = new ReadableStream({ start(c) { ctl = c; return p; } }); out.push('initial:' + ctl.desiredSize);
+s.getReader().read().catch(function (e) { out.push('error:' + e); });
+(function () { return out.join('|'); })
+=== reader-brand-with-byob-options
+var out = [];
+try { ReadableStream.prototype.getReader.call({}, { mode: 'byob' }); } catch (e) { out.push(e.name); }
+var n = 0, s = new ReadableStream();
+try { s.getReader({ get mode() { n++; return { toString() { n++; return 'invalid'; } }; } }); } catch (e) { out.push(e.name); }
+(function () { return out.join('|') + '|' + n; })

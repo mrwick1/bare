@@ -1254,10 +1254,6 @@ fn resp_body(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> R<Value>
     Ok(Value::Object(s))
 }
 
-fn gate_stream(_: &Dom, _: &mut Interp<'_>, _: Value, _: &[Value]) -> R<Value> {
-    Err(Error::Unsupported(unsupported("ReadableStream tee, pipeTo, pipeThrough and async iteration")))
-}
-
 fn illegal(_: &Dom, it: &mut Interp<'_>, _: Value, _: &[Value]) -> R<Value> {
     Err(it.type_error("Illegal constructor"))
 }
@@ -1756,9 +1752,9 @@ static DEFS: &[Def] = &[
     Def { on: Stream, name: "locked", len: 0, kind: G(streams::locked) },
     Def { on: Stream, name: "getReader", len: 0, kind: M(streams::get_reader) },
     Def { on: Stream, name: "cancel", len: 1, kind: M(streams::cancel) },
-    Def { on: Stream, name: "tee", len: 0, kind: M(gate_stream) },
-    Def { on: Stream, name: "pipeTo", len: 1, kind: M(gate_stream) },
-    Def { on: Stream, name: "pipeThrough", len: 1, kind: M(gate_stream) },
+    Def { on: Stream, name: "tee", len: 0, kind: M(streams::gate) },
+    Def { on: Stream, name: "pipeTo", len: 1, kind: M(streams::gate) },
+    Def { on: Stream, name: "pipeThrough", len: 1, kind: M(streams::gate) },
     Def { on: Reader, name: "read", len: 0, kind: M(streams::read) },
     Def { on: Reader, name: "cancel", len: 1, kind: M(streams::reader_cancel) },
     Def { on: Reader, name: "releaseLock", len: 0, kind: M(streams::release) },

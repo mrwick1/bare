@@ -131,6 +131,11 @@ impl<'p> Interp<'p> {
     /// script-visible `then`. Reading `x.constructor` (as the standard does) may run a getter.
     pub fn host_promise_react(&mut self, x: Value, on_ok: Value, on_err: Value) -> Result<(), Error> {
         let p = self.promise_resolve(x)?;
+        self.host_promise_then(p, on_ok, on_err)
+    }
+
+    /// Attach intrinsic reactions to a known native Promise without reading its constructor or then properties.
+    pub fn host_promise_then(&mut self, p: Value, on_ok: Value, on_err: Value) -> Result<(), Error> {
         let o = self.host_promise(p)?;
         let derived = self.new_promise()?;
         self.perform_then(o, on_ok, on_err, derived)

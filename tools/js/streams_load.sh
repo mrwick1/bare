@@ -4,7 +4,13 @@
 # The caps: 45 s wall time and 1 GiB of address space per run. A case that hits a cap, or whose checksum is wrong,
 # fails the run. 12 processes in total.
 set -u
-out=${1:-/dev/stdout}
+out=${1:-}
+tmp=
+if [ -z "$out" ]; then
+  tmp=$(mktemp) || exit 1
+  out=$tmp
+  trap 'rm -f "$tmp"' EXIT
+fi
 CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS:-2} cargo build --release -q -p bare --example streams_load || exit 1
 bin=target/release/examples/streams_load
 status=0
@@ -17,4 +23,8 @@ for scale in 1 10 100; do
     fi
   done
 done
+rows=$(grep -c '^case=.* ok ' "$out")
+[ "$rows" -eq 12 ] || status=1
+[ -z "$tmp" ] || cat "$out"
+echo "streams_load: $rows of 12 rows ok, status=$status"
 exit $status

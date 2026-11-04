@@ -266,7 +266,8 @@ a.getReader().read().then(function () { out.push('no'); }, function (e) { out.pu
 var c = new ReadableStream({ cancel() { throw new SyntaxError('cancel'); } });
 c.cancel().then(function () { out.push('no'); }, function (e) { out.push('cancel:' + e.name); });"#);
         assert_eq!(r, "x49|cancel:SyntaxError|pull:RangeError");
-        // The failed constructors left nothing behind, and their queued bytes were given back.
+        // Unreachable failed constructions are pruned; an escaped controller would keep its state.
+        b.collect(&[]).unwrap();
         let s = b.stream_stats();
         assert_eq!((s.streams, s.queued_bytes), (2, 0), "{s:?}");
     });
@@ -401,5 +402,76 @@ Object.defineProperty(src, 'autoAllocateChunkSize', { get() { out.push('get-auto
 var rs = new ReadableStream(src), r = rs.getReader();
 r.read().then(function (x) { out.push('same:' + (x.value === o)); });"#);
         assert_eq!(r, "get-auto|get-cancel|get-pull|get-start|get-type|same:true");
+    });
+}
+
+#[test]
+fn null_dictionaries_and_invalid_reader_modes_follow_conversion_rules() {
+    big(|| {
+        let mut b = mk();
+        assert_eq!(js(&mut b, "var s = new ReadableStream({}, null); var r = s.getReader(null); s.locked"), "true");
+        assert_eq!(js(&mut b, "try { new ReadableStream().getReader({ mode: 'other' }); } catch (e) { e.name; }"), "TypeError");
+        assert_eq!(js(&mut b, "try { new ReadableStream().getReader(42); } catch (e) { e.name; }"), "TypeError");
+    });
+}
+
+#[test]
+fn an_escaped_controller_keeps_its_state_after_start_throws() {
+    big(|| {
+        let mut b = mk();
+        assert_eq!(js(&mut b, "var ctl; try { new ReadableStream({ start(c) { ctl = c; throw 1; } }); } catch (e) {} ctl.enqueue('kept'); ctl.desiredSize"), "0");
+        b.collect(&[]).unwrap();
+        assert_eq!(js(&mut b, "ctl.close(); ctl.desiredSize"), "0");
+        assert_eq!(b.stream_stats().queued_chunks, 1);
+        assert_eq!(js(&mut b, "ctl = null; 0"), "0");
+        b.collect(&[]).unwrap();
+        assert_eq!(b.stream_stats().streams, 0);
+    });
+}
+
+#[test]
+fn start_result_assimilation_does_not_read_constructor_synchronously() {
+    big(|| {
+        let mut b = mk();
+        let result = go(&mut b, "var out = [], ctl; var p = Promise.resolve(); Object.defineProperty(p, 'constructor', { get() { out.push('constructor'); throw 17; } }); var s = new ReadableStream({ start(c) { ctl = c; return p; } }); out.push('initial:' + ctl.desiredSize); s.getReader().read().catch(function (e) { out.push('error:' + e); });");
+        assert_eq!(result, "initial:1|constructor|error:17");
+    });
+}
+
+#[test]
+fn unsupported_pipe_operations_poison_the_custom_stream_layer() {
+    big(|| {
+        let mut b = mk();
+        assert_eq!(js(&mut b, "var ctl, s = new ReadableStream({ start(c) { ctl = c; } }); 0"), "0");
+        let first = js(&mut b, "s.tee()");
+        assert!(first.starts_with("unsupported:"));
+        assert_eq!(js(&mut b, "ctl.enqueue('must not queue')"), first);
+        assert_eq!(b.stream_stats().queued_chunks, 0);
+    });
+}
+
+#[test]
+fn timer_sources_and_aggregate_reads_keep_weak_controller_edges_through_collection() {
+    big(|| {
+        let mut b = mk();
+        b.use_virtual_clock();
+        assert_eq!(js(&mut b, "var key = {}, w = new WeakMap(), reader; (function () { var s = new ReadableStream({ start(c) { w.set(key, c); } }); reader = s.getReader(); })(); Promise.all([reader.read(), reader.read()]).then(function (items) { document.body.textContent = items[0].value + items[1].value; }); reader = null; setTimeout(function () { var c = w.get(key); c.enqueue(4); c.enqueue(6); c.close(); key = null; }, 0); 0"), "0");
+        b.collect(&[]).unwrap();
+        assert_eq!(b.stream_stats().pending_reads, 2);
+        assert_eq!(b.run_scheduled_tasks(1).unwrap().ran, 1);
+        b.collect(&[]).unwrap();
+        assert_eq!(js(&mut b, "document.body.textContent"), "10");
+        assert_eq!(b.it.weak_tracked(), (1, 0));
+        assert_eq!(b.it.agg_stats(), Default::default());
+        assert_eq!(b.stream_stats().streams, 0);
+    });
+}
+
+#[test]
+fn byob_gate_does_not_replace_receiver_brand_validation() {
+    big(|| {
+        let mut b = mk();
+        assert_eq!(js(&mut b, "try { ReadableStream.prototype.getReader.call({}, { mode: 'byob' }); } catch (e) { e.name; }"), "TypeError");
+        assert_eq!(js(&mut b, "new Response('x').body.getReader(null) instanceof ReadableStreamDefaultReader"), "true");
     });
 }

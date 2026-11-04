@@ -523,7 +523,7 @@ fn construct(d: &Dom, it: &mut Interp<'_>, a: &[Value]) -> R<Value> {
         }
     }
     let mut hwm = 1.0;
-    if !matches!(strategy, Value::Undefined) {
+    if !matches!(strategy, Value::Undefined | Value::Null) {
         if !matches!(strategy, Value::Object(_)) {
             return Err(it.type_error("Failed to construct 'ReadableStream': The queuing strategy is not an object"));
         }
@@ -560,18 +560,15 @@ fn construct(d: &Dom, it: &mut Interp<'_>, a: &[Value]) -> R<Value> {
     }
     let started = if matches!(start, Value::Undefined) { Ok(Value::Undefined) } else { invoke(d, it, start, src, &[Value::Object(c)])? };
     match started {
-        Err(e) => {
-            // The constructor throws, so nothing keeps the stream: drop its entries now (and their queue).
-            let mut st = d.streams.st.borrow_mut();
-            reset_queue(&mut st, c);
-            st.streams.remove(&s);
-            st.ctls.remove(&c);
-            return Err(Error::Throw(e));
+        // A controller can escape through start() even when that callback throws. Its stream state stays valid
+        // until collection proves it unreachable.
+        Err(e) => return Err(Error::Throw(e)),
+        Ok(v) => {
+            // start returns any, not Promise<void>. Resolve a fresh promise with it, so assimilation is a job.
+            let p = it.host_new_promise()?;
+            it.host_resolve_promise(p, v)?;
+            it.host_promise_then(p, Value::Object(ok), Value::Object(err))?;
         }
-        Ok(v) => match react(it, Ok(v), ok, err) {
-            Err(Error::Throw(v)) => controller_error(d, it, c, v)?,
-            r => r?,
-        },
     }
     Ok(Value::Object(s))
 }
@@ -587,19 +584,35 @@ fn is_reader(d: &Dom, this: Value) -> Option<ObjId> {
 }
 
 pub(crate) fn locked(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> R<Value> {
-    let Some(s) = is_stream(d, this) else { return crate::browser_fetch::stream_locked(d, it, this, a) };
-    enter(d, || Ok(Value::Bool(d.streams.st.borrow().streams.get(&s).is_some_and(|s| s.reader.is_some()))))
+    enter(d, || {
+        let Some(s) = is_stream(d, this) else { return crate::browser_fetch::stream_locked(d, it, this, a) };
+        Ok(Value::Bool(d.streams.st.borrow().streams.get(&s).is_some_and(|s| s.reader.is_some())))
+    })
 }
 
 pub(crate) fn get_reader(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> R<Value> {
-    let Some(s) = is_stream(d, this) else { return crate::browser_fetch::stream_get_reader(d, it, this, a) };
     enter(d, || {
-        if !matches!(arg(a, 0), Value::Undefined) {
-            let mode = prop(d, it, arg(a, 0), "mode")?;
+        let options = arg(a, 0);
+        let mut byob = false;
+        if !matches!(options, Value::Undefined | Value::Null) {
+            if !matches!(options, Value::Object(_)) { return Err(it.type_error("Reader options must be a dictionary")); }
+            let mode = prop(d, it, options, "mode")?;
             if !matches!(mode, Value::Undefined) {
-                return Err(Error::Unsupported(unsupported("ReadableStream BYOB reader")));
+                let mode = it.to_js_string(mode)?;
+                if it.heap.to_string_lossy(mode).unwrap_or_default() != "byob" {
+                    return Err(it.type_error("Invalid readable stream reader mode"));
+                }
+                byob = true;
             }
         }
+        let Some(s) = is_stream(d, this) else {
+            if byob {
+                crate::browser_fetch::stream_locked(d, it, this, &[])?;
+                return Err(Error::Unsupported(unsupported("ReadableStream BYOB reader")));
+            }
+            return crate::browser_fetch::stream_get_reader(d, it, this, &[]);
+        };
+        if byob { return Err(Error::Unsupported(unsupported("ReadableStream BYOB reader"))); }
         {
             let st = d.streams.st.borrow();
             if st.streams.get(&s).is_some_and(|s| s.reader.is_some()) {
@@ -622,8 +635,8 @@ pub(crate) fn get_reader(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value])
 }
 
 pub(crate) fn cancel(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> R<Value> {
-    let Some(s) = is_stream(d, this) else { return crate::browser_fetch::stream_cancel(d, it, this, a) };
     enter(d, || {
+        let Some(s) = is_stream(d, this) else { return crate::browser_fetch::stream_cancel(d, it, this, a) };
         if d.streams.st.borrow().streams.get(&s).is_some_and(|s| s.reader.is_some()) {
             let e = type_value(it, "Cannot cancel a stream that already has a reader")?;
             let p = it.host_new_promise()?;
@@ -637,8 +650,8 @@ pub(crate) fn cancel(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> 
 // ---------------------------------------------------------------------------------------------- reader methods
 
 pub(crate) fn read(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> R<Value> {
-    let Some(rdr) = is_reader(d, this) else { return crate::browser_fetch::reader_read(d, it, this, a) };
     enter(d, || {
+        let Some(rdr) = is_reader(d, this) else { return crate::browser_fetch::reader_read(d, it, this, a) };
         enum Out {
             Released,
             Done,
@@ -702,8 +715,8 @@ pub(crate) fn read(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> R<
 }
 
 pub(crate) fn reader_cancel(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> R<Value> {
-    let Some(rdr) = is_reader(d, this) else { return crate::browser_fetch::reader_cancel(d, it, this, a) };
     enter(d, || {
+        let Some(rdr) = is_reader(d, this) else { return crate::browser_fetch::reader_cancel(d, it, this, a) };
         let stream = d.streams.st.borrow().readers.get(&rdr).and_then(|r| r.stream);
         match stream {
             Some(s) => cancel_stream(d, it, s, arg(a, 0)),
@@ -718,8 +731,8 @@ pub(crate) fn reader_cancel(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Valu
 }
 
 pub(crate) fn release(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> R<Value> {
-    let Some(rdr) = is_reader(d, this) else { return crate::browser_fetch::reader_release(d, it, this, a) };
     enter(d, || {
+        let Some(rdr) = is_reader(d, this) else { return crate::browser_fetch::reader_release(d, it, this, a) };
         let reads = {
             let mut st = d.streams.st.borrow_mut();
             let Some(r) = st.readers.get_mut(&rdr) else { return Ok(Value::Undefined) };
@@ -846,10 +859,14 @@ fn gate_closed(_: &Dom, _: &mut Interp<'_>, _: Value, _: &[Value]) -> R<Value> {
 }
 
 pub(crate) fn reader_closed(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> R<Value> {
-    if is_reader(d, this).is_some() {
-        return enter(d, || gate_closed(d, it, this, a));
-    }
-    crate::browser_fetch::gate_reader_closed(d, it, this, a)
+    enter(d, || {
+        if is_reader(d, this).is_some() { return gate_closed(d, it, this, a); }
+        crate::browser_fetch::gate_reader_closed(d, it, this, a)
+    })
+}
+
+pub(crate) fn gate(d: &Dom, _: &mut Interp<'_>, _: Value, _: &[Value]) -> R<Value> {
+    enter(d, || Err(Error::Unsupported(unsupported("ReadableStream tee, pipeTo, pipeThrough and async iteration"))))
 }
 
 // ---------------------------------------------------------------------------------------------- install
