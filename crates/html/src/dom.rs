@@ -114,6 +114,45 @@ pub struct AttrList {
     len: u32,
 }
 
+/// A namespace that the document knows. An element is in `Html`, `Svg` or `MathMl`. An attribute is in no namespace,
+/// or in `Xml`, `Xmlns` or `Xlink`. These are the only ones that the parser makes and that scripts may ask for. A
+/// namespace outside this list is refused by the host with a clear error; it is never stored as a lie.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Ns {
+    Html,
+    Svg,
+    MathMl,
+    Xml,
+    Xmlns,
+    Xlink,
+}
+
+impl Ns {
+    /// The namespace URI, as `namespaceURI` gives it.
+    pub fn uri(self) -> &'static str {
+        match self {
+            Ns::Html => "http://www.w3.org/1999/xhtml",
+            Ns::Svg => "http://www.w3.org/2000/svg",
+            Ns::MathMl => "http://www.w3.org/1998/Math/MathML",
+            Ns::Xml => "http://www.w3.org/XML/1998/namespace",
+            Ns::Xmlns => "http://www.w3.org/2000/xmlns/",
+            Ns::Xlink => "http://www.w3.org/1999/xlink",
+        }
+    }
+
+    /// The namespace of a URI, if it is one of ours.
+    pub fn from_uri(uri: &str) -> Option<Ns> {
+        [Ns::Html, Ns::Svg, Ns::MathMl, Ns::Xml, Ns::Xmlns, Ns::Xlink].into_iter().find(|n| n.uri() == uri)
+    }
+}
+
+/// The namespace identity of an element that is not in the HTML namespace. See `Document::element_ns`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Foreign {
+    ns: Ns,
+    prefix: Option<Atom>,
+}
+
 /// What a node is.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum NodeData {
@@ -122,8 +161,9 @@ pub enum NodeData {
     Document,
     /// `<!DOCTYPE html>`. The name is in lowercase. Use `Document::text` to read it.
     Doctype(Span),
-    /// An element like `<p class="a">`. The name is in lowercase. Use `Document::atom_str` to read the
-    /// name and `Document::attrs` to read the attributes.
+    /// An element like `<p class="a">`. The name is in lowercase for HTML. For an SVG or MathML element it is the local
+    /// name with its own case (`foreignObject`). Use `Document::atom_str` to read the name and `Document::attrs` to read
+    /// the attributes. The namespace is not here: see `Document::element_ns`.
     Element { name: Atom, attrs: AttrList },
     /// A piece of text. Use `Document::text` to read it.
     Text(Span),
@@ -162,6 +202,15 @@ pub struct Document {
     // The place of each element among its sibling elements, from the start and from the end. Made the
     // first time that `sibling_place` asks, and dropped when the tree changes. `[0]` counts all
     // elements, `[1]` counts the elements with the same name. See `sibling_place`.
+    foreign: HashMap<u32, Foreign, BuildHasherDefault<Fnv>>,
+    // The SVG and MathML elements, by `NodeId::index`. An element that is not here is in the HTML namespace, so a page
+    // without SVG pays nothing. The name atom of a foreign element is its local name, shared with the HTML atoms, so a
+    // type selector `rect` matches an SVG `rect`. The namespace stays with the node when it moves, and `clone_element` copies it.
+    ns_atoms: HashMap<(Ns, Box<str>), Atom, BuildHasherDefault<Fnv>>,
+    // The attributes that are in a namespace (`xlink:href`). Their atom is for the pair (namespace, qualified name), and the
+    // name table holds the qualified name. The same qualified name with no namespace is another atom (see `intern`).
+    atom_ns: HashMap<u32, Ns, BuildHasherDefault<Fnv>>,
+    // The way back: from the atom of a namespaced attribute to its namespace.
 }
 
 /// A fast hash for short names (FNV-1a). The standard one (SipHash) is slower, and it protects against
@@ -214,6 +263,9 @@ impl Document {
             text: String::new(),
             places: Default::default(),
             class_sets: Default::default(),
+            foreign: HashMap::default(),
+            ns_atoms: HashMap::default(),
+            atom_ns: HashMap::default(),
         };
         // The order matters: it must match `Atom::ID` and `Atom::CLASS`.
         doc.intern("id");
@@ -431,6 +483,9 @@ impl Document {
         let data = NodeData::Element { name, attrs: AttrList { start: to_u32(start), len: attrs.len } };
         self.places = Default::default();
         self.nodes.push(Node { parent: None, first_child: None, last_child: None, prev: None, next: None, data });
+        if let Some(&f) = self.foreign.get(&(node.index() as u32)) {
+            self.foreign.insert(id.index() as u32, f);
+        }
         id
     }
 
@@ -453,6 +508,137 @@ impl Document {
         let name = self.intern(name);
         let attrs = AttrList { start: to_u32(self.attrs.len()), len: 0 };
         self.new_node(NodeData::Element { name, attrs })
+    }
+
+    /// A new element with no parent and no attributes in the SVG or MathML namespace. JS: `document.createElementNS(ns, prefix + ':' + local)`.
+    /// `local` keeps its case. The caller checked the names and the namespace rules. With `Ns::Html` it is `create_element`,
+    /// and `prefix` must be `None`.
+    pub fn create_element_ns(&mut self, ns: Ns, prefix: Option<&str>, local: &str) -> NodeId {
+        let id = self.create_element(local);
+        self.set_foreign(id, ns, prefix);
+        id
+    }
+
+    fn set_foreign(&mut self, id: NodeId, ns: Ns, prefix: Option<&str>) {
+        debug_assert!(matches!(ns, Ns::Html | Ns::Svg | Ns::MathMl));
+        if ns != Ns::Html {
+            let prefix = prefix.map(|p| self.intern(p));
+            self.foreign.insert(id.index() as u32, Foreign { ns, prefix });
+        }
+    }
+
+    /// Like `insert_element`, for an element in `ns` (the parser makes SVG and MathML this way). Each attribute has
+    /// its namespace, if it has one; its name is the qualified name (`xlink:href`).
+    pub fn insert_element_ns<K: AsRef<str>, V: AsRef<str>>(&mut self, parent: NodeId, before: Option<NodeId>, ns: Ns, name: &str, attrs: &[(Option<Ns>, K, V)]) -> NodeId {
+        let name = self.intern(name);
+        let start = self.attrs.len();
+        for (attr_ns, key, value) in attrs {
+            let attr = Attr { name: self.intern_ns(*attr_ns, key.as_ref()), value: self.push_text(value.as_ref()) };
+            self.attrs.push(attr);
+        }
+        let attrs = AttrList { start: to_u32(start), len: to_u32(attrs.len()) };
+        let id = self.insert(parent, before, NodeData::Element { name, attrs });
+        self.set_foreign(id, ns, None);
+        id
+    }
+
+    /// The namespace of an element. `Ns::Html` for an element made by the HTML rules, and for a node that is not an element.
+    #[inline]
+    pub fn element_ns(&self, el: NodeId) -> Ns {
+        if self.foreign.is_empty() {
+            return Ns::Html;
+        }
+        self.foreign.get(&(el.index() as u32)).map_or(Ns::Html, |f| f.ns)
+    }
+
+    /// Does the document have any SVG or MathML element? The tree builder asks, so that a page with none pays one compare.
+    #[inline]
+    pub fn has_foreign(&self) -> bool {
+        !self.foreign.is_empty()
+    }
+
+    /// The name of an element (the local name, with its case), or an empty text for another node.
+    pub fn element_name(&self, el: NodeId) -> &str {
+        match self.nodes[el.index()].data {
+            NodeData::Element { name, .. } => self.atom_str(name),
+            _ => "",
+        }
+    }
+
+    /// Is this node an element that is not in the HTML namespace?
+    #[inline]
+    pub fn is_foreign(&self, el: NodeId) -> bool {
+        !self.foreign.is_empty() && self.foreign.contains_key(&(el.index() as u32))
+    }
+
+    /// Is this an HTML element with this (lowercase) name? An SVG `script` is not an HTML `script`.
+    pub fn is_html(&self, el: NodeId, name: &str) -> bool {
+        matches!(self.nodes[el.index()].data, NodeData::Element { name: n, .. } if self.atom_str(n) == name) && !self.is_foreign(el)
+    }
+
+    /// The prefix of an element: `svg` for `svg:rect`. `None` if there is none. The local name is `atom_str` of the name.
+    pub fn element_prefix(&self, el: NodeId) -> Option<&str> {
+        self.foreign.get(&(el.index() as u32)).and_then(|f| f.prefix).map(|p| self.atom_str(p))
+    }
+
+    /// The atom for an attribute name in a namespace. With `None` it is `intern`. A namespaced name is a different atom from
+    /// the same name with no namespace.
+    pub fn intern_ns(&mut self, ns: Option<Ns>, qname: &str) -> Atom {
+        let Some(ns) = ns else { return self.intern(qname) };
+        if let Some(&atom) = self.ns_atoms.get(&(ns, Box::from(qname))) {
+            return atom;
+        }
+        let atom = Atom(u32::try_from(self.names.len()).expect("more than 4 billion names"));
+        self.names.push(qname.into());
+        self.ns_atoms.insert((ns, qname.into()), atom);
+        self.atom_ns.insert(atom.0, ns);
+        atom
+    }
+
+    /// The atom for an attribute name in a namespace, if the document has it. It does not add the name.
+    pub fn find_ns_atom(&self, ns: Option<Ns>, qname: &str) -> Option<Atom> {
+        match ns {
+            None => self.find_atom(qname),
+            Some(ns) => self.ns_atoms.get(&(ns, Box::from(qname))).copied(),
+        }
+    }
+
+    /// The namespace of an attribute. `None` for no namespace.
+    pub fn attr_ns(&self, name: Atom) -> Option<Ns> {
+        if self.atom_ns.is_empty() { None } else { self.atom_ns.get(&name.0).copied() }
+    }
+
+    /// The prefix of an attribute: `xlink` for `xlink:href`. Only a namespaced attribute has one. (A plain `setAttribute('a:b')`
+    /// makes an attribute with no namespace, no prefix, and the local name `a:b`.)
+    pub fn attr_prefix(&self, name: Atom) -> Option<&str> {
+        self.attr_ns(name)?;
+        self.atom_str(name).split_once(':').map(|(p, _)| p)
+    }
+
+    /// The local name of an attribute.
+    pub fn attr_local(&self, name: Atom) -> &str {
+        let q = self.atom_str(name);
+        match self.attr_ns(name) {
+            Some(_) => q.split_once(':').map_or(q, |(_, l)| l),
+            None => q,
+        }
+    }
+
+    /// The first attribute of `el` whose qualified name is `qname`, in any namespace. JS: `getAttribute(qname)`.
+    pub fn find_attr_qname(&self, el: NodeId, qname: &str) -> Option<Atom> {
+        let NodeData::Element { attrs, .. } = self.nodes[el.index()].data else { return None };
+        if self.ns_atoms.is_empty() {
+            // No attribute has a namespace: a plain atom compare finds it.
+            let atom = self.find_atom(qname)?;
+            return self.attrs(attrs).iter().any(|a| a.name == atom).then_some(atom);
+        }
+        self.attrs(attrs).iter().map(|a| a.name).find(|&n| self.atom_str(n) == qname)
+    }
+
+    /// The attribute of `el` with this namespace and local name. JS: `getAttributeNS(ns, local)`.
+    pub fn find_attr_ns(&self, el: NodeId, ns: Option<Ns>, local: &str) -> Option<Atom> {
+        let NodeData::Element { attrs, .. } = self.nodes[el.index()].data else { return None };
+        self.attrs(attrs).iter().map(|a| a.name).find(|&n| self.attr_ns(n) == ns && self.attr_local(n) == local)
     }
 
     /// A new text node with no parent. It does not join a neighbour (only the parser joins texts).
@@ -485,8 +671,15 @@ impl Document {
     /// lowercases the name. Does nothing for a node that is not an element. The old value stays in the text
     /// buffer (see `text_bytes`).
     pub fn set_attr(&mut self, el: NodeId, name: &str, value: &str) {
+        if matches!(self.nodes[el.index()].data, NodeData::Element { .. }) {
+            let name = self.intern(name);
+            self.set_attr_atom(el, name, value);
+        }
+    }
+
+    /// Like `set_attr`, for a name that is an atom already (see `intern_ns`).
+    pub fn set_attr_atom(&mut self, el: NodeId, name: Atom, value: &str) {
         let NodeData::Element { name: tag, attrs } = self.nodes[el.index()].data else { return };
-        let name = self.intern(name);
         let span = self.push_text(value);
         self.class_sets.get_mut().remove(&el.index());
         let (start, len) = (attrs.start as usize, attrs.len as usize);
@@ -507,8 +700,13 @@ impl Document {
 
     /// Remove an attribute. Gives whether it was there.
     pub fn remove_attr(&mut self, el: NodeId, name: &str) -> bool {
-        let NodeData::Element { name: tag, attrs } = self.nodes[el.index()].data else { return false };
         let Some(name) = self.find_atom(name) else { return false };
+        self.remove_attr_atom(el, name)
+    }
+
+    /// Like `remove_attr`, for a name that is an atom already (see `intern_ns`).
+    pub fn remove_attr_atom(&mut self, el: NodeId, name: Atom) -> bool {
+        let NodeData::Element { name: tag, attrs } = self.nodes[el.index()].data else { return false };
         let (start, len) = (attrs.start as usize, attrs.len as usize);
         let Some(at) = self.attrs[start..start + len].iter().position(|a| a.name == name) else { return false };
         self.class_sets.get_mut().remove(&el.index());
@@ -641,8 +839,20 @@ impl Document {
             NodeData::Comment(text) => out.push_str(&format!("| {indent}<!-- {} -->\n", self.text(*text))),
             NodeData::Text(text) => out.push_str(&format!("| {indent}\"{}\"\n", self.text(*text))),
             NodeData::Element { name, attrs } => {
-                out.push_str(&format!("| {indent}<{}>\n", self.atom_str(*name)));
-                let mut sorted: Vec<_> = self.attrs(*attrs).iter().map(|a| (self.atom_str(a.name), self.text(a.value))).collect();
+                // The html5lib format: an SVG or MathML element is `<svg path>`, an attribute in a namespace is `xlink href`.
+                match self.element_ns(id) {
+                    Ns::Svg => out.push_str(&format!("| {indent}<svg {}>\n", self.atom_str(*name))),
+                    Ns::MathMl => out.push_str(&format!("| {indent}<math {}>\n", self.atom_str(*name))),
+                    _ => out.push_str(&format!("| {indent}<{}>\n", self.atom_str(*name))),
+                }
+                let mut sorted: Vec<_> = self
+                    .attrs(*attrs)
+                    .iter()
+                    .map(|a| match self.attr_ns(a.name) {
+                        None => (self.atom_str(a.name).to_string(), self.text(a.value)),
+                        Some(ns) => (format!("{} {}", self.attr_prefix(a.name).unwrap_or(if ns == Ns::Xmlns { "xmlns" } else { "" }), self.attr_local(a.name)), self.text(a.value)),
+                    })
+                    .collect();
                 sorted.sort();
                 // Sorted, so that two trees with the same attributes in another order look the same.
                 for (key, value) in sorted {
@@ -722,6 +932,39 @@ mod tests {
         assert_eq!(list(&doc, b), "z=3,q=5");
         assert_eq!(list(&doc, a), "x=10,w=4");
         assert_eq!(doc.attr_count(a), 2);
+    }
+
+    #[test]
+    fn a_namespaced_attribute_is_not_the_plain_attribute_of_the_same_name() {
+        let mut doc = Document::new();
+        let root = doc.root();
+        let el = doc.create_element_ns(Ns::Svg, Some("s"), "use");
+        doc.move_to(el, root, None);
+        doc.set_attr(el, "xlink:href", "plain");
+        let plain = doc.find_atom("xlink:href").unwrap();
+        let ns = doc.intern_ns(Some(Ns::Xlink), "xlink:href");
+        assert_ne!(ns, plain);
+        assert_eq!(doc.find_ns_atom(Some(Ns::Xlink), "xlink:href"), Some(ns));
+        assert_eq!(doc.find_ns_atom(Some(Ns::Xml), "xlink:href"), None);
+        doc.set_attr_atom(el, ns, "ns");
+        assert_eq!(doc.attr_count(el), 2);
+        // by qualified name the first one wins; by namespace and local name each is found
+        assert_eq!(doc.find_attr_qname(el, "xlink:href"), Some(plain));
+        assert_eq!(doc.find_attr_ns(el, Some(Ns::Xlink), "href"), Some(ns));
+        assert_eq!(doc.find_attr_ns(el, None, "xlink:href"), Some(plain));
+        assert_eq!(doc.find_attr_ns(el, None, "href"), None);
+        assert_eq!((doc.attr_ns(ns), doc.attr_prefix(ns), doc.attr_local(ns)), (Some(Ns::Xlink), Some("xlink"), "href"));
+        assert_eq!((doc.attr(el, ns), doc.attr(el, plain)), (Some("ns"), Some("plain")));
+        assert_eq!((doc.attr_ns(plain), doc.attr_prefix(plain), doc.attr_local(plain)), (None, None, "xlink:href"));
+        assert_eq!((doc.element_ns(el), doc.element_prefix(el), doc.element_name(el)), (Ns::Svg, Some("s"), "use"));
+        // a clone keeps the element's identity and the attribute identities
+        let c = doc.clone_element(el);
+        assert_eq!((doc.element_ns(c), doc.element_prefix(c)), (Ns::Svg, Some("s")));
+        assert_eq!(doc.find_attr_ns(c, Some(Ns::Xlink), "href"), Some(ns));
+        assert!(doc.remove_attr_atom(el, ns));
+        assert_eq!(doc.attr_count(el), 1);
+        assert_eq!(doc.find_attr_ns(c, Some(Ns::Xlink), "href"), Some(ns));
+        assert!(!doc.remove_attr_atom(el, ns));
     }
 
     #[test]

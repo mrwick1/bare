@@ -21,12 +21,14 @@
 //! The standard says that every page, however broken, gives a tree. No error stops the builder.
 //!
 //! Left out (known gaps):
-//! - Foreign content (SVG and MathML), `<template>`, `<select>` modes, framesets and `<noscript>`.
+//! - `<template>`, `<select>` modes, framesets and `<noscript>`. Foreign content (SVG and MathML) is cut down: see `foreign.rs`.
 //! - Quirks mode, and merging the attributes of a second `<html>` or `<body>` tag.
 //!
 //! Comments compare Rust with JavaScript, because you know JS.
 
-use crate::dom::{Document, NodeData, NodeId};
+mod foreign;
+
+use crate::dom::{Document, NodeData, NodeId, Ns};
 use std::borrow::Cow;
 
 use crate::tokenizer::{Attr, Mark, Token, Tokens, tokenize};
@@ -317,9 +319,11 @@ impl Builder {
     }
 
     /// Is this node an element with one of these names?
+    #[inline(always)]
     fn is(&self, id: NodeId, names: &[&str]) -> bool {
-        matches!(self.doc.data(id), NodeData::Element { name, .. } if names.contains(&self.doc.atom_str(*name)))
+        matches!(self.doc.data(id), NodeData::Element { name, .. } if names.contains(&self.doc.atom_str(*name))) && !self.doc.is_foreign(id)
         // `matches!` with an `if` checks the pattern and then the condition. It gives true or false.
+        // An SVG or MathML element is never one of the HTML elements that the rules know by name.
     }
 
     /// The name of an element, or an empty text for other nodes.
@@ -378,7 +382,7 @@ impl Builder {
             if self.is(node, names) {
                 return true;
             }
-            if self.is(node, SCOPE) || self.is(node, extra) {
+            if self.is(node, SCOPE) || self.is(node, extra) || (self.doc.has_foreign() && self.foreign_scope_border(node)) {
                 return false;
             }
         }
@@ -659,6 +663,15 @@ impl Builder {
             token
         };
 
+        if self.doc.has_foreign() && self.is_foreign_token(&token) {
+            self.foreign(token);
+        } else {
+            self.process_html(token);
+        }
+    }
+
+    /// Read a token by the rules of the insertion mode (the HTML rules).
+    fn process_html(&mut self, token: Token) {
         match self.mode {
             Mode::Initial => self.initial(token),
             Mode::BeforeHtml => self.before_html(token),
@@ -912,13 +925,17 @@ impl Builder {
             }
             Token::Comment(text) => self.insert_comment(&text),
             Token::Doctype(_) => {}
-            Token::StartTag { name, attrs, .. } => self.body_start(&name, attrs),
+            Token::StartTag { name, attrs, self_closing } => self.body_start(&name, attrs, self_closing),
             Token::EndTag { name } => self.body_end(&name),
         }
     }
 
-    fn body_start(&mut self, name: &str, attrs: Vec<Attr<'_>>) {
+    fn body_start(&mut self, name: &str, attrs: Vec<Attr<'_>>, self_closing: bool) {
         match name {
+            "svg" | "math" => {
+                self.reconstruct_afe();
+                self.insert_foreign(if name == "svg" { Ns::Svg } else { Ns::MathMl }, name, &attrs, self_closing);
+            }
             "html" | "body" | "head" => {}
             // A second `<html>` or `<body>` is ignored. The standard merges their attributes. We do not yet.
             "base" | "basefont" | "bgsound" | "link" | "meta" | "title" | "style" | "script" | "noframes" => {
@@ -1123,7 +1140,7 @@ impl Builder {
                     self.pop_until(HEADINGS);
                 }
             }
-            "br" => self.body_start("br", vec![]),
+            "br" => self.body_start("br", vec![], false),
             // `</br>` is read as `<br>`.
             _ if CLOSES_P.contains(&name) || matches!(name, "button" | "applet" | "marquee" | "object" | "pre" | "listing") => {
                 if self.in_scope(&[name], &[]) {

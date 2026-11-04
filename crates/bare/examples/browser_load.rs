@@ -1,11 +1,13 @@
 //! Load test for the DOM/JS bridge. One case at one scale per process.
 //!
-//!   browser_load CASE SCALE      CASE: mutation | event | lookup      SCALE: 1, 10, 100
+//!   browser_load CASE SCALE      CASE: mutation | event | lookup | svg | svgparse      SCALE: 1, 10, 100
 //!
 //! mutation: SCALE*1000 elements are made, filled, appended to a list, and old ones removed in blocks.
 //! event: SCALE*1000 bubbling events through a 4 level tree with 3 listeners on the path. Half start in JS,
 //! half in the Rust test driver. lookup: SCALE*500 rounds of `querySelectorAll`, `getElementById` and `closest`
-//! on a 200 item page. Each case runs in small scripts, with a VM collect between them, and checks its
+//! on a 200 item page. svg: SCALE*1000 SVG subtrees made with `createElementNS` and namespaced attributes, appended,
+//! cloned (every 10th) and removed in blocks. svgparse: a page of SCALE*500 inline SVG icons that the parser makes, then
+//! namespace and attribute reads on the first SCALE*100 (attached wrappers stay alive, so the wrapper cap bounds the reads). Each case runs in small scripts, with a VM collect between them, and checks its
 //! result against the same computation in Rust. Prints time, CPU, peak RSS, allocations and what the realm holds.
 //! `tools/js/browser_load.sh` runs the matrix under caps.
 
@@ -91,8 +93,12 @@ fn expect(what: &str, got: String, want: String) {
 
 const CHUNK: usize = 100;
 
-fn page(name: &str) -> String {
+fn page(name: &str, scale: usize) -> String {
     match name {
+        "svgparse" => {
+            let icons: String = (0..500 * scale).map(|i| format!("<svg viewBox='0 0 24 24' xmlns='http://www.w3.org/2000/svg'><g><path d='M{i}' xlink:href='#g{i}'/><foreignObject><div>x</div></foreignObject></g></svg>")).collect();
+            format!("<body><p id=l>{icons}</p></body>")
+        }
         "lookup" => {
             let items: String = (0..200).map(|i| format!("<li id=i{i} class='k{}'><b>x</b></li>", i % 10)).collect();
             format!("<body><ul id=l>{items}</ul></body>")
@@ -104,7 +110,9 @@ fn page(name: &str) -> String {
 
 fn exec(name: &str, scale: usize) {
     let eval = EvalLimits { max_steps: u64::MAX / 2, max_scripts: 1 << 14, max_envs: 1 << 22, max_functions: 1 << 22, ..Default::default() };
-    let doc = tree::parse(&page(name));
+    let tp = Instant::now();
+    let doc = tree::parse(&page(name, scale));
+    let parse_ms = tp.elapsed().as_secs_f64() * 1e3;
     let mut b = Browser::new(doc, BrowserLimits::default(), eval, HeapLimits::default()).unwrap_or_else(|e| die(format!("browser: {e:?}")));
     let (a0, b0, cpu0) = (ALLOCS.load(Relaxed), BYTES.load(Relaxed), cpu_ms());
     PEAK.store(LIVE.load(Relaxed), Relaxed);
@@ -185,6 +193,62 @@ fn exec(name: &str, scale: usize) {
             }
             expect("lookup", run(&mut b, "sum"), want.to_string());
         }
+        "svg" => {
+            let n = 1000 * scale;
+            run(&mut b, "var host = document.getElementById('l'), SVG = 'http://www.w3.org/2000/svg', XL = 'http://www.w3.org/1999/xlink', XMLNS = 'http://www.w3.org/2000/xmlns/', H = 'http://www.w3.org/1999/xhtml', score = 0;
+                function make(i) {
+                  var s = document.createElementNS(SVG, 'svg');
+                  s.setAttribute('viewBox', '0 0 24 24'); s.setAttributeNS(XMLNS, 'xmlns:xlink', XL);
+                  var g = document.createElementNS(SVG, 'g'), p = document.createElementNS(SVG, 'path'), fo = document.createElementNS(SVG, 'foreignObject'), d = document.createElement('div');
+                  p.setAttributeNS(null, 'data-i', '' + i); p.setAttributeNS(XL, 'xlink:href', '#g' + i);
+                  fo.appendChild(d); g.appendChild(p); g.appendChild(fo); s.appendChild(g);
+                  return s;
+                }
+                function chunk(start, count) {
+                  for (var i = start; i < start + count; i++) {
+                    var s = make(i);
+                    host.appendChild(s);
+                    var c = i % 10 === 0 ? s.cloneNode(true) : s;
+                    var g = c.firstElementChild, p = g.firstElementChild, fo = g.lastElementChild;
+                    score += Number(p.getAttributeNS(null, 'data-i')) + p.getAttributeNS(XL, 'href').length + (c.namespaceURI === SVG) + (fo.namespaceURI === SVG) + (fo.firstElementChild.namespaceURI === H) + fo.tagName.length;
+                    if (host.childElementCount > 1000) for (var k = 0; k < 500; k++) host.removeChild(host.firstChild);
+                  }
+                }");
+            let mut want = 0;
+            for start in (0..n).step_by(CHUNK) {
+                run(&mut b, &format!("chunk({start}, {CHUNK})"));
+                for i in start..start + CHUNK {
+                    // data-i + length of "#g<i>" + three true checks + the length of "foreignObject"
+                    want += i + (2 + i.to_string().len()) + 3 + 13;
+                }
+                collect(&mut b);
+            }
+            expect("svg", run(&mut b, "score"), want.to_string());
+        }
+        "svgparse" => {
+            // The page holds 500*scale icons. The script reads the first 100*scale: wrappers of attached nodes live until the node
+            // leaves the tree (5 for each icon), so more would end at the wrapper cap (65,536) by design.
+            let n = 100 * scale;
+            run(&mut b, "var SVG = 'http://www.w3.org/2000/svg', XL = 'http://www.w3.org/1999/xlink', H = 'http://www.w3.org/1999/xhtml', score = 0, host = document.getElementById('l'), cur = host.firstElementChild;
+                function chunk(start, count) {
+                  for (var i = 0; i < count; i++) {
+                    var p = cur.firstElementChild.firstElementChild, fo = p.nextElementSibling;
+                    score += Number(p.getAttribute('d').slice(1)) + p.getAttributeNS(XL, 'href').length + (p.namespaceURI === SVG) + (fo.localName === 'foreignObject') + (fo.firstElementChild.namespaceURI === H) + cur.getAttribute('viewBox').length;
+                    cur = cur.nextElementSibling;
+                  }
+                }");
+            expect("svgparse count", run(&mut b, "host.childElementCount"), (500 * scale).to_string());
+            let mut want = 0;
+            for start in (0..n).step_by(CHUNK) {
+                run(&mut b, &format!("chunk({start}, {CHUNK})"));
+                for i in start..start + CHUNK {
+                    // d number + length of "#g<i>" + three true checks + the length of "0 0 24 24" (the svg is `cur`)
+                    want += i + (2 + i.to_string().len()) + 2 + 1 + 9;
+                }
+                collect(&mut b);
+            }
+            expect("svgparse", run(&mut b, "score"), want.to_string());
+        }
         _ => die(format!("unknown case {name}")),
     }
     let run_ms = t.elapsed().as_secs_f64() * 1e3;
@@ -193,7 +257,7 @@ fn exec(name: &str, scale: usize) {
     let st = b.stats();
     let code = b.it.stats();
     println!(
-        "{name:8} x{scale:<3} checksum=ok run={run_ms:9.1}ms cpu={cpu}ms peak_rss={:.1}MiB peak_live={:.1}MiB live_after={:.1}MiB allocs={allocs} alloc={:.1}MiB | wrappers={} listeners={} events={} nodes={} text={:.2}MiB | gc={gc_ms:.1}ms freed_objs={freed_objs} scripts={} source_bytes={} code_nodes={}",
+        "{name:8} x{scale:<3} checksum=ok parse={parse_ms:.1}ms run={run_ms:9.1}ms cpu={cpu}ms peak_rss={:.1}MiB peak_live={:.1}MiB live_after={:.1}MiB allocs={allocs} alloc={:.1}MiB | wrappers={} listeners={} events={} nodes={} text={:.2}MiB | gc={gc_ms:.1}ms freed_objs={freed_objs} scripts={} source_bytes={} code_nodes={}",
         status_kib("VmHWM:") as f64 / 1024.0,
         peak_live as f64 / 1048576.0,
         LIVE.load(Relaxed) as f64 / 1048576.0,
@@ -212,10 +276,12 @@ fn exec(name: &str, scale: usize) {
 fn main() {
     let a: Vec<String> = std::env::args().collect();
     if a.len() != 3 {
-        die("usage: browser_load mutation|event|lookup 1|10|100".into());
+        die("usage: browser_load mutation|event|lookup|svg|svgparse 1|10|100".into());
     }
     let scale: usize = a[2].parse().unwrap_or_else(|_| die("scale".into()));
     // the evaluator recurses: run on a big stack
     let name = a[1].clone();
-    std::thread::Builder::new().stack_size(256 << 20).spawn(move || exec(&name, scale)).unwrap().join().unwrap_or_else(|_| die("panic".into()));
+    // BARE_LOAD_STACK_MIB sets the VM stack (default 256).
+    let stack_mib: usize = std::env::var("BARE_LOAD_STACK_MIB").ok().and_then(|v| v.parse().ok()).unwrap_or(256);
+    std::thread::Builder::new().stack_size(stack_mib << 20).spawn(move || exec(&name, scale)).unwrap().join().unwrap_or_else(|_| die("panic".into()));
 }
