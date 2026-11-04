@@ -8,8 +8,41 @@
 
 mod idna;
 // IDNA for Unicode host names, in `idna.rs`. No `pub`: only this crate uses it.
+use std::fmt;
+// Lets us write a URL as text: `impl fmt::Display`. JS: like a `toString()` method.
 use std::net::{Ipv4Addr, Ipv6Addr};
 // The standard library's IP address types. They can check and print addresses.
+
+/// The scheme of a URL: the part before "://", like "https".
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+// `Copy` means a value is copied on assignment, like a number in JS. No `.clone()` needed.
+pub enum Scheme {
+    // `enum` is a value that is one of a fixed set of choices. JS has no direct match:
+    // a string union `"http" | "https"` is close, but Rust checks every `match` for all cases.
+    Http,
+    Https,
+}
+
+impl Scheme {
+    /// The port that a URL uses when it does not name one: 80 for http, 443 for https.
+    pub fn default_port(self) -> u16 {
+        match self {
+            Scheme::Http => 80,
+            Scheme::Https => 443,
+        }
+    }
+}
+
+impl fmt::Display for Scheme {
+    // `Display` is the trait that makes `format!("{scheme}")` work. JS: like a `toString()` method.
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.write_str(match self {
+            Scheme::Http => "http",
+            Scheme::Https => "https",
+        })
+        // The `match` gives a `&str`. `f.write_str` writes it to the output.
+    }
+}
 
 /// A parsed URL.
 #[derive(Debug, PartialEq)]
@@ -20,6 +53,8 @@ use std::net::{Ipv4Addr, Ipv6Addr};
 pub struct Url {
     // JS: like a TypeScript `interface Url { host: string; port: number; path: string }`.
     // `pub` is like `export`. Other files can use it.
+    pub scheme: Scheme,
+    // "http" or "https". The scheme decides the default port, and whether we may send the request.
     pub host: String,
     // The server name, like "example.com". `String` is text that this struct owns.
     pub port: u16,
@@ -39,16 +74,23 @@ impl Url {
         // The return type is `Result<Url, String>`: a good `Url`, or an error message.
         // Rust has no `throw`. A function that can fail returns a `Result`.
 
-        let rest = input
-            .strip_prefix("http://")
-            // JS: like `startsWith("http://")` and then `slice(7)`, in one step.
-            // It gives `Some(the rest)` or `None`. `None` is like `undefined`.
-            .ok_or_else(|| format!("only http:// is supported, got: {input}"))?;
+        let unsupported = || format!("only http:// and https:// are supported, got: {input}");
+        // A closure: a small function that remembers `input`. JS: like `() => ...`.
+        let (name, rest) = input.split_once("://").ok_or_else(unsupported)?;
+        // `split_once` cuts at the first "://". JS: like `indexOf("://")`, then `slice` before and after it.
+        // It gives `Some((before, after))` or `None`. `None` is like `undefined`.
         // `ok_or_else` turns `None` into an error with this message.
-        // `format!` is a template string: JS `` `only http:// ... ${input}` ``.
         // `?` is the key idea. If the value is an error, return it from this function now.
         // JS: like `if (err) return err;`. If it is good, take the value out.
-        // `rest` is the text after "http://".
+        // `rest` is the text after "://".
+        let scheme = if name.eq_ignore_ascii_case("http") {
+            Scheme::Http
+        } else if name.eq_ignore_ascii_case("https") {
+            Scheme::Https
+        } else {
+            return Err(unsupported());
+        };
+        // Scheme names ignore case, like host names. `eq_ignore_ascii_case` does not copy the text.
 
         let rest = before(rest, '#');
         // Drop the fragment ("#top"). It points to a spot in the page. The server never sees it.
@@ -79,8 +121,8 @@ impl Url {
             // The standard library checks the address for us. JS has no built-in for this.
             // `ip: Ipv6Addr` tells `parse` which type to make. Like a TypeScript type annotation.
             let port = match after.strip_prefix(':') {
-                Some(p) => parse_port(p)?,
-                None if after.is_empty() => 80,
+                Some(p) => parse_port(p, scheme.default_port())?,
+                None if after.is_empty() => scheme.default_port(),
                 // `if` in a match arm is a guard. This arm runs only when nothing follows "]".
                 None => return Err(format!("bad text after IPv6 address: {after}")),
                 // `Err(..)` is the error side of `Result`. JS: like `return { err: "..." }`.
@@ -91,18 +133,19 @@ impl Url {
             match host_port.split_once(':') {
                 // JS: like `host_port.split(":")`, but it cuts only at the first ":".
                 // It gives `Some((left, right))` or `None`.
-                Some((h, p)) => (ascii_host(h)?, parse_port(p)?),
+                Some((h, p)) => (ascii_host(h)?, parse_port(p, scheme.default_port())?),
                 // There is a ":". `h` is the host text and `p` is the port text.
                 // `ascii_host` makes the host ASCII-only, for DNS. See below.
                 // It makes a new `String` that the `Url` keeps for itself.
-                None => (ascii_host(host_port)?, 80), // default HTTP port
-                // No ":". The whole text is the host. HTTP uses port 80 by default.
+                None => (ascii_host(host_port)?, scheme.default_port()), // http uses 80, https uses 443
+                // No ":". The whole text is the host.
             }
         };
         // An empty host, like in "http:///x", is an error from `ascii_host`.
 
         Ok(Url {
             // `Ok(..)` is the good side of `Result`. We put a new `Url` in it.
+            scheme,
             host,
             // Short for `host: host`. JS has the same shorthand.
             port,
@@ -121,8 +164,8 @@ impl Url {
         // The fragment never matters for loading. "#top" alone becomes "".
 
         if link.starts_with("//") {
-            // "//cdn.com/x.js": a new host, same scheme as the page.
-            return Url::parse(&format!("http:{link}"));
+            // "//cdn.com/x.js": a new host, with the scheme of the page: "https:" on an https page.
+            return Url::parse(&format!("{}:{link}", self.scheme));
         }
 
         if let Some((scheme, _)) = link.split_once(':') {
@@ -156,16 +199,43 @@ impl Url {
             // Relative to that folder: "/blog/" + "cat.png".
         };
 
-        Ok(Url { host: self.host.clone(), port: self.port, path: encode(&remove_dots(&path)) })
-        // Same server as the page. `self.port` is a number, so it is copied for free.
-        // Numbers are `Copy` in Rust. Strings are not, so they need `.clone()`.
+        Ok(Url { scheme: self.scheme, host: self.host.clone(), port: self.port, path: encode(&remove_dots(&path)) })
+        // Same server and scheme as the page. `self.port` is a number, so it is copied for free.
+        // Numbers and `Scheme` are `Copy` in Rust. Strings are not, so they need `.clone()`.
+    }
+
+    /// True if both URLs have the same scheme, host and port. Browsers call this the "origin".
+    /// The path does not matter. JS: like comparing `new URL(a).origin === new URL(b).origin`.
+    pub fn same_origin(&self, other: &Url) -> bool {
+        self.scheme == other.scheme && self.host == other.host && self.port == other.port
+        // The ports are already normalized: "https://a.com:443" has port 443, like "https://a.com".
     }
 }
 
-/// Read a port number, like "8080". Empty text means the default port, 80.
-fn parse_port(text: &str) -> Result<u16, String> {
+impl fmt::Display for Url {
+    // Writes the URL as text, the way it would be sent or shown. JS: like `url.toString()`.
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "{}://", self.scheme)?;
+        // `write!` is `format!` that writes into `f`. The `?` passes on any write error.
+        if self.host.contains(':') {
+            write!(f, "[{}]", self.host)?;
+            // An IPv6 host needs its "[ ]", or its ":" would look like a port.
+        } else {
+            f.write_str(&self.host)?;
+        }
+        if self.port != self.scheme.default_port() {
+            write!(f, ":{}", self.port)?;
+            // The default port is left out, as browsers do: "https://a.com:443/" is "https://a.com/".
+        }
+        f.write_str(&self.path)
+        // The path is already encoded, and it has the query.
+    }
+}
+
+/// Read a port number, like "8080". Empty text means the default port of the scheme.
+fn parse_port(text: &str, default: u16) -> Result<u16, String> {
     if text.is_empty() {
-        return Ok(80);
+        return Ok(default);
     }
     if !text.bytes().all(|b| b.is_ascii_digit()) {
         return Err(format!("bad port: {text}"));
@@ -367,7 +437,7 @@ mod tests {
     fn host_only() {
         let u = Url::parse("http://example.com").unwrap();
         // `unwrap()` means "I expect this to work. If not, crash." Fine in tests.
-        assert_eq!(u, Url { host: "example.com".into(), port: 80, path: "/".into() });
+        assert_eq!(u, Url { scheme: Scheme::Http, host: "example.com".into(), port: 80, path: "/".into() });
         // JS: like `expect(u).toEqual({...})`. `.into()` turns `&str` into `String`.
     }
 
@@ -375,15 +445,95 @@ mod tests {
     fn host_port_path() {
         let u = Url::parse("http://localhost:8080/a/b.html").unwrap();
         // A full URL with a port and a path.
-        assert_eq!(u, Url { host: "localhost".into(), port: 8080, path: "/a/b.html".into() });
+        assert_eq!(u, Url { scheme: Scheme::Http, host: "localhost".into(), port: 8080, path: "/a/b.html".into() });
         // Checks that all three parts are split correctly.
     }
 
     #[test]
     fn rejects_other_schemes() {
-        assert!(Url::parse("https://example.com").is_err());
+        assert!(Url::parse("ftp://example.com").is_err());
+        assert!(Url::parse("mailto:me@a.com").is_err());
         // JS: like `expect(...).toBe(true)`. `is_err()` is true for an error.
-        // We do not support HTTPS yet, so this must fail.
+        // Schemes we do not know must fail. A URL with no "://" fails too.
+        assert_eq!(Url::parse("https://example.com").unwrap().scheme, Scheme::Https);
+        // https is a valid URL. The network refuses to send it until TLS exists (see `net`).
+    }
+
+    #[test]
+    fn https_default_port_is_443() {
+        assert_eq!(Url::parse("https://a.com/").unwrap().port, 443);
+        assert_eq!(Url::parse("https://a.com:/").unwrap().port, 443);
+        // An empty port means the default port of the scheme.
+        assert_eq!(Url::parse("https://[::1]/").unwrap().port, 443);
+        assert_eq!(Url::parse("https://[::1]:/").unwrap().port, 443);
+        assert_eq!(Url::parse("http://a.com/").unwrap().port, 80);
+        // An explicit port is kept, even when it is the default of the other scheme.
+        assert_eq!(Url::parse("https://a.com:80/").unwrap().port, 80);
+        assert_eq!(Url::parse("http://a.com:443/").unwrap().port, 443);
+        assert_eq!(Url::parse("https://a.com:8443/").unwrap().port, 8443);
+    }
+
+    #[test]
+    fn scheme_is_case_insensitive() {
+        let u = Url::parse("HTTPS://EXAMPLE.com/").unwrap();
+        assert_eq!(u, Url { scheme: Scheme::Https, host: "example.com".into(), port: 443, path: "/".into() });
+        // Scheme names ignore case, like host names. "Http" is "http".
+        assert_eq!(Url::parse("Http://a.com/").unwrap().scheme, Scheme::Http);
+    }
+
+    #[test]
+    fn writes_the_url_back() {
+        let cases = [
+            // (input, what we write down)
+            ("http://a.com/", "http://a.com/"),
+            ("http://a.com:80/x?y=1", "http://a.com/x?y=1"), // the default port is left out
+            ("https://a.com:443/", "https://a.com/"),
+            ("https://a.com:8443/a b", "https://a.com:8443/a%20b"),
+            ("https://[0:0::1]:8443/", "https://[::1]:8443/"), // IPv6 keeps its "[ ]"
+            ("HTTP://Exam%70le.com", "http://example.com/"),
+        ];
+        for (input, text) in cases {
+            let u = Url::parse(input).unwrap();
+            assert_eq!(u.to_string(), text, "url {input}");
+            assert_eq!(Url::parse(text).unwrap(), u, "url {input}");
+            // Writing a URL down and reading it again gives the same URL.
+        }
+    }
+
+    #[test]
+    fn same_origin_needs_scheme_host_and_port() {
+        let same = |a: &str, b: &str| Url::parse(a).unwrap().same_origin(&Url::parse(b).unwrap());
+        assert!(same("https://a.com/x", "https://a.com/y?z"));
+        // The path does not matter.
+        assert!(same("https://a.com", "https://A.com:443/"));
+        // Host names ignore case, and 443 is the default port of https.
+        assert!(!same("https://a.com/", "http://a.com/"));
+        // The same host and port, but another scheme: another origin.
+        assert!(!same("http://a.com:443/", "https://a.com/"));
+        assert!(!same("https://a.com/", "https://a.com:8443/"));
+        assert!(!same("https://a.com/", "https://b.com/"));
+        assert!(!same("http://a.com/", "http://a.com:8080/"));
+    }
+
+    #[test]
+    fn links_keep_the_scheme_of_the_page() {
+        let base = Url::parse("https://a.com/blog/post.html").unwrap();
+        let cases = [
+            // (link, the URL it means)
+            ("/s.js", "https://a.com/s.js"),
+            ("cat.png", "https://a.com/blog/cat.png"),
+            ("//cdn.com/z.js", "https://cdn.com/z.js"), // "//" keeps the scheme of the page
+            ("//cdn.com:8443/z.js", "https://cdn.com:8443/z.js"),
+            ("http://b.com/y", "http://b.com/y"), // a full link brings its own scheme
+            ("HTTPS://b.com:443/", "https://b.com/"),
+        ];
+        for (link, want) in cases {
+            assert_eq!(base.join(link).unwrap().to_string(), want, "link {link}");
+        }
+        let http = Url::parse("http://a.com/").unwrap();
+        let cdn = http.join("//cdn.com/z.js").unwrap();
+        assert_eq!((cdn.scheme, cdn.port), (Scheme::Http, 80));
+        // A page on http gives http links, with port 80.
     }
 
     #[test]
@@ -454,7 +604,7 @@ mod tests {
     #[test]
     fn ipv6_host() {
         let u = Url::parse("http://[::1]:8080/x").unwrap();
-        assert_eq!(u, Url { host: "::1".into(), port: 8080, path: "/x".into() });
+        assert_eq!(u, Url { scheme: Scheme::Http, host: "::1".into(), port: 8080, path: "/x".into() });
         // The "[ ]" only separate the address from the port. We store the address without them.
         assert_eq!(Url::parse("http://[0:0::1]/").unwrap().host, "::1");
         // One address can be written in many ways. We store the short form.

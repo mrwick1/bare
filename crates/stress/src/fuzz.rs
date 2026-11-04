@@ -123,6 +123,8 @@ const URL_SEEDS: &[&str] = &[
     "http://0x7f.1/",
     "http://a b/",
     "/a\\b",
+    "https://example.com:443/a/b?c=d#e",
+    "HTTPS://[::1]:8443/x",
 ];
 
 const URL_WORDS: &[&str] = &[
@@ -362,11 +364,10 @@ fn fuzz_url(input: &[u8]) -> Result<(), String> {
         if url.host.is_empty() {
             return Err("empty host".into());
         }
-        if !url.host.contains(':') {
-            let again = Url::parse(&format!("http://{}:{}{}", url.host, url.port, url.path));
-            if again.as_ref() != Ok(&url) {
-                return Err(format!("not stable: {url:?} then {again:?}"));
-            }
+        // Writing the URL down and reading it again gives the same URL. This covers both schemes and IPv6 hosts.
+        let again = Url::parse(&url.to_string());
+        if again.as_ref() != Ok(&url) {
+            return Err(format!("not stable: {url:?} then {again:?}"));
         }
         if let Ok(joined) = url.join(link) {
             if !joined.path.starts_with('/') || joined.host.is_empty() {

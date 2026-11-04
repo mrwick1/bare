@@ -24,7 +24,7 @@ The module numbers below remain stable for existing code and benchmark reference
 
 ## Voicebot staging plan
 
-Priority: run the deployed voicebot dashboard in `bare` and test its login journey. Implement S1 to S5 in order. Each topic must pass its checks before the next topic starts. A topic can need several small PRs. All topics below are planned.
+Priority: run the deployed voicebot dashboard in `bare` and test its login journey. Implement S1 to S5 in order. Each topic must pass its checks before the next topic starts. A topic can need several small PRs. All topics without a completion note below are planned.
 
 Keep the existing rules: Rust, no external crates, small interfaces, and one-way crate dependencies. Chrome is a reference for tests. It is not the runtime of `bare`.
 
@@ -71,14 +71,18 @@ Existing baseline: `cargo test --workspace` passed on 2026-11-04 at `8231fea`. E
 
 Build on modules 1 and 7. Keep URL and HTTP work in their existing crates. Put TLS and crypto behind a separate crate interface.
 
+The URL prerequisite of topic 4 is complete: HTTP/HTTPS schemes, default ports, relative links, serialization and origin comparison. Network requests to HTTPS are refused before cache, DNS or socket use. TLS is not connected yet. Cache and connection-pool keys must include the scheme before removing that guard.
+
+Topic 1 is complete (2026-11-04). See [staging-network.md](staging-network.md) for the observed TLS chain, public resource manifest and repeatable inspection commands. The first HTTPS check fails until the TLS implementation is connected. The observed minimum uses AES-128-GCM, X25519, SHA-256, SHA-384, and ECDSA P-256/P-384 verification. Use an independently trusted root source; do not trust a root only because the server sent it.
+
 | Topic | Work | Check before closing |
 | --- | --- | --- |
 | 1 | Inspect the staging TLS chain, algorithms, content encodings and resource URLs. Record a public resource manifest and expected failures. | Establish the exact TLS and response-decoding requirements. Do not infer them from Chrome success alone. |
 | 2 | Implement the required crypto primitives, secure random input and TLS record protection. | Standard known-answer vectors; altered records fail; malformed and oversized input is bounded. |
 | 3 | Implement TLS 1.3 handshake, SNI, certificate parsing, trust chains, hostname, validity and signature checks. | Trusted and untrusted fixtures; wrong host, expired chain and altered handshake fail. No certificate bypass. |
-| 4 | Add HTTPS URL parsing, default ports, origin identity, redirects and HTTP/1.1 over TLS. | Existing HTTP tests still pass; staging HTML downloads with certificate verification. Advertise only protocols implemented. |
+| 4 | Connect the completed HTTPS URL support to HTTP/1.1 over TLS. Include the scheme in cache and connection-pool keys; preserve origin identity across redirects. | Existing HTTP tests still pass; staging HTML downloads with certificate verification. Advertise only protocols implemented. |
 | 5 | Add request methods, headers and bodies for API calls. Keep cache, redirect, credential and retry rules correct for each method and origin. | POST is not retried as GET. Redirect and cache tests cover authenticated requests and errors. |
-| 6 | Load external scripts and styles in document order where required. Decode the response encodings found in topic 1. Bound resource size, total memory and time. | Download the staging login resources. Compare decoded bytes with the reference manifest. |
+| 6 | Load external scripts and styles. Preserve script async/defer metadata for S3 scheduling. Reject failed responses and invalid script MIME types. Decode the response encodings found in topic 1. Bound resource size, total memory and time. | Download the staging login resources. Compare decoded bytes with the reference manifest. |
 
 Resource checks: handshake cost, throughput, peak memory for large bodies, repeated resources, slow servers and many small resources. Reuse existing streaming and connection code. Avoid a second full copy of each resource. Introduce bounded concurrency when measurements justify it.
 
