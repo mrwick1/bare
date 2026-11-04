@@ -6,7 +6,7 @@
 //! the same rounding.
 
 /// Tokens up to this many units go straight to the float parser.
-const DIRECT_UNITS: usize = 1024;
+pub const DIRECT_UNITS: usize = 1024;
 
 /// Significant digits kept. Every halfway point between two f64 has at most 768 significant
 /// digits (checked over all exponents with BigInt), so the kept digits plus a sticky digit decide
@@ -21,36 +21,63 @@ pub fn decimal_value(text: &str, scratch: &mut String) -> Option<f64> {
     if text.len() <= DIRECT_UNITS {
         return text.parse().ok();
     }
-    reduced_value(text, scratch)
+    reduced_value(text.bytes(), scratch)
+}
+
+/// Long UTF-16 decimal input without a whole-token UTF-8 allocation.
+pub fn decimal_units_value(units: &[u16], scratch: &mut String) -> Option<f64> {
+    if units.iter().any(|&u| u > 127) { return None; }
+    reduced_value(units.iter().map(|&u| u as u8), scratch)
+}
+
+/// Long lexer input whose separators were already checked by the lexer.
+pub fn separated_decimal_value(text: &str, scratch: &mut String) -> Option<f64> {
+    reduced_value(text.bytes().filter(|&b| b != b'_'), scratch)
 }
 
 #[cold]
-fn reduced_value(text: &str, scratch: &mut String) -> Option<f64> {
+fn reduced_value(bytes: impl Iterator<Item = u8> + Clone, scratch: &mut String) -> Option<f64> {
+    if !decimal_syntax(bytes.clone()) { return None; }
     scratch.clear();
-    reduce(text.as_bytes(), scratch);
+    reduce(bytes, scratch);
     scratch.parse().ok()
 }
 
-/// Writes into `out` a short text with the same value after rounding: the first `KEEP_DIGITS`
-/// significant digits, then a `1` if any dropped digit is not zero (it only decides a tie), then
-/// an exponent clamped so that values far outside the f64 range stay outside it.
-fn reduce(tok: &[u8], out: &mut String) {
-    let neg = tok[0] == b'-';
-    let mut i = matches!(tok[0], b'-' | b'+') as usize;
-    if neg {
-        out.push('-');
+fn decimal_syntax(bytes: impl Iterator<Item = u8>) -> bool {
+    let mut bytes = bytes.peekable();
+    if matches!(bytes.peek(), Some(b'+' | b'-')) { bytes.next(); }
+    let mut digits = false;
+    while bytes.peek().is_some_and(u8::is_ascii_digit) { bytes.next(); digits = true; }
+    if bytes.peek() == Some(&b'.') {
+        bytes.next();
+        while bytes.peek().is_some_and(u8::is_ascii_digit) { bytes.next(); digits = true; }
     }
+    if !digits { return false; }
+    if matches!(bytes.peek(), Some(b'e' | b'E')) {
+        bytes.next();
+        if matches!(bytes.peek(), Some(b'+' | b'-')) { bytes.next(); }
+        let mut exponent_digits = false;
+        while bytes.peek().is_some_and(u8::is_ascii_digit) { bytes.next(); exponent_digits = true; }
+        if !exponent_digits { return false; }
+    }
+    bytes.next().is_none()
+}
+
+/// Keep a bounded significant prefix plus a sticky digit. Call only after grammar validation.
+fn reduce(bytes: impl Iterator<Item = u8>, out: &mut String) {
+    let mut bytes = bytes.peekable();
+    let neg = bytes.peek() == Some(&b'-');
+    if matches!(bytes.peek(), Some(b'+' | b'-')) { bytes.next(); }
+    if neg { out.push('-'); }
     let (mut kept, mut seen, mut sticky, mut in_frac) = (0usize, false, false, false);
     let (mut frac, mut dropped, mut exp) = (0i64, 0i64, 0i64);
-    while i < tok.len() {
-        let c = tok[i];
-        i += 1;
+    while let Some(c) = bytes.next() {
         match c {
             b'.' => in_frac = true,
             b'e' | b'E' => {
-                let eneg = tok.get(i) == Some(&b'-');
-                i += matches!(tok.get(i), Some(b'+' | b'-')) as usize;
-                for &d in &tok[i..] {
+                let eneg = bytes.peek() == Some(&b'-');
+                if matches!(bytes.peek(), Some(b'+' | b'-')) { bytes.next(); }
+                for d in bytes {
                     exp = (exp * 10 + (d - b'0') as i64).min(1 << 40);
                 }
                 if eneg {
@@ -116,7 +143,7 @@ mod tests {
             let mut scratch = String::new();
             let got = decimal_value(&t, &mut scratch).unwrap();
             let mut short = String::new();
-            reduce(t.as_bytes(), &mut short);
+            reduce(t.bytes(), &mut short);
             assert_eq!(got.to_bits(), short.parse::<f64>().unwrap().to_bits());
             assert_eq!(got.to_bits(), t.parse::<f64>().unwrap().to_bits(), "{t}");
         }

@@ -39,9 +39,11 @@ use std::time::Instant;
 
 struct Counting;
 static ALLOCS: AtomicU64 = AtomicU64::new(0);
+static BYTES: AtomicU64 = AtomicU64::new(0);
 unsafe impl GlobalAlloc for Counting {
     unsafe fn alloc(&self, l: Layout) -> *mut u8 {
         ALLOCS.fetch_add(1, Relaxed);
+        BYTES.fetch_add(l.size() as u64, Relaxed);
         unsafe { System.alloc(l) }
     }
     unsafe fn dealloc(&self, p: *mut u8, l: Layout) {
@@ -49,6 +51,7 @@ unsafe impl GlobalAlloc for Counting {
     }
     unsafe fn realloc(&self, p: *mut u8, l: Layout, n: usize) -> *mut u8 {
         ALLOCS.fetch_add(1, Relaxed);
+        BYTES.fetch_add(n as u64, Relaxed);
         unsafe { System.realloc(p, l, n) }
     }
 }
@@ -224,6 +227,26 @@ fn bench() {
     println!("bench string_to_number: {str_ns:.1} ns/op allocs/op={str_allocs:.3} (checksum {sum:.1})");
 }
 
+fn preflight() {
+    let text = "9".repeat(1_000_000) + ".5e-1000000";
+    let separated = "9_".repeat(1_000_000) + "9.5e-1000001";
+    let units: Vec<u16> = text.encode_utf16().collect();
+    let mut heap = heap::Heap::default();
+    for kind in ["lex", "str", "json", "separated"] {
+        let before = BYTES.load(Relaxed);
+        let value = match kind {
+            "lex" => lex_value(&text).unwrap(),
+            "str" => value::string_to_number(&units),
+            "json" => match json::parse(&mut heap, &units, &json::JsonOptions::default(), &json::JsonLimits::default()).unwrap() { value::Value::Number(n) => n, _ => panic!() },
+            _ => lex_value(&separated).unwrap(),
+        };
+        let bytes = BYTES.load(Relaxed) - before;
+        assert_eq!(value, 1.0);
+        assert!(bytes < 8192, "{kind} copied its long input: {bytes} allocated bytes");
+        println!("{kind}: bounded conversion scratch, {bytes} allocated bytes");
+    }
+}
+
 fn main() {
     let a: Vec<String> = std::env::args().collect();
     match a.get(1).map(String::as_str) {
@@ -231,6 +254,7 @@ fn main() {
         Some("run") if a.len() == 5 => run(&a[2], &a[3], a[4].parse().unwrap()),
         Some("all") => all(),
         Some("bench") => bench(),
+        Some("preflight") => preflight(),
         _ => {
             eprintln!("usage: {} check <dir> | run <lex|str|json> <cancel|halfway|zeros> <1|10|100> | all | bench", a[0]);
             std::process::exit(2);

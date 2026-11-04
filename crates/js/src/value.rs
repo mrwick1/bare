@@ -199,6 +199,9 @@ pub fn string_to_number(units: &[u16]) -> f64 {
             return radix_digits(&t[2..], bits);
         }
     }
+    if t.len() > number::DIRECT_UNITS {
+        return number::decimal_units_value(t, &mut String::new()).unwrap_or(f64::NAN);
+    }
     // Decimal text is pure ASCII, so any other unit is NaN. Then check the grammar by hand;
     // Rust's parser also accepts "inf", "nan" and "infinity", which JS does not.
     if !t.iter().all(|&u| u < 128) {

@@ -1067,6 +1067,9 @@ pub fn number_value(src: &str, tok: &Token) -> Option<f64> {
         NumberBase::Octal | NumberBase::LegacyOctal => 3,
         NumberBase::Binary => 1,
         _ => {
+            if text.len() > number::DIRECT_UNITS && text.contains('_') {
+                return number::separated_decimal_value(text, &mut String::new());
+            }
             let digits: Cow<str> = if text.contains('_') { text.replace('_', "").into() } else { text.into() };
             return number::decimal_value(&digits, &mut String::new());
         }
@@ -1735,4 +1738,13 @@ mod tests {
             }
         }
     }
+    #[test]
+    fn forged_long_decimal_tokens_do_not_panic_or_parse_junk() {
+        for suffix in ["e!", "..1", "x", "e", "e+"] {
+            let source = "1".repeat(2000) + suffix;
+            let token = Token { kind: Kind::Number(NumberBase::Decimal), start: 0, end: source.len() as u32, newline_before: false, escapes: false };
+            assert!(std::panic::catch_unwind(|| number_value(&source, &token)).unwrap().is_none());
+        }
+    }
+
 }

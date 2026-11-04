@@ -465,6 +465,9 @@ impl Parser<'_, '_> {
             let n = src[int_start..int_end].iter().fold(0u64, |n, &c| n * 10 + (c - 0x30) as u64) as f64;
             return Ok(if neg { -n } else { n });
         }
+        if i - start > number::DIRECT_UNITS {
+            return Ok(number::decimal_units_value(&src[start..i], &mut String::new()).expect("a grammar-checked number parses"));
+        }
         self.num.clear();
         self.num.extend(src[start..i].iter().map(|&c| c as u8));
         let text = std::str::from_utf8(&self.num).expect("the number grammar is ASCII");

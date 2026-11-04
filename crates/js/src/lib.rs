@@ -9,3 +9,5 @@ pub mod json;
 pub mod regexp;
 
 pub mod eval;
+
+mod number;
