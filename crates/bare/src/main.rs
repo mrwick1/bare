@@ -5,7 +5,7 @@
 //! It prints the DOM tree of the page. Add `--source` to print the source of the page instead,
 //! `--styles` to print the computed style of each element, or `--layout` to print the place and size of each box.
 //! `--resources` downloads the external scripts and style sheets of the page and lists them (see `resources.rs`).
-//! `--run` runs the classic scripts of the page and its timers and `fetch` calls (see `browser_loader.rs`), then prints a short
+//! `--run` loads the page and runs its classic scripts, its timers and `fetch` calls (see `browser_loader.rs`), then prints a short
 //! sanitized status. It prints no source, headers, bodies or query strings.
 //! `--width=900` sets the width of the window (1280 if not given).
 //!
@@ -57,6 +57,14 @@ fn main() {
     };
     // `let` is like `const`: `arg` cannot change.
 
+    if run {
+        // The session loads the first document itself (one verified path for every document).
+        if Url::parse(arg).is_err() {
+            eprintln!("error: --run needs a valid URL");
+            std::process::exit(2);
+        }
+        std::process::exit(run_page(arg.to_string()));
+    }
     let url = Url::parse(&arg);
     let result = url
         .as_ref()
@@ -115,13 +123,7 @@ fn main() {
         let mut doc = parser.finish();
         // Build the DOM tree.
         drop(out);
-        if run {
-            let Ok(page) = url.as_ref() else {
-                eprintln!("error: --run needs a valid URL");
-                std::process::exit(2);
-            };
-            std::process::exit(run_page(doc, page.to_string()));
-        } else if resources {
+        if resources {
             let Ok(page) = url.as_ref() else {
                 eprintln!("error: --resources needs a valid URL");
                 std::process::exit(2);
@@ -221,42 +223,34 @@ fn computed_styles(doc: &mut bare_html::dom::Document, page: Option<&Url>, viewp
     rules.compute(doc)
 }
 
-/// `--run`: a realm over `doc`, the loader and the driver. The VM needs a big stack: 8 MiB is the floor in release,
-/// a debug build uses more stack per frame. Exit code: 0 settled or a budget ended it, 1 fatal.
-fn run_page(doc: bare_html::dom::Document, page: String) -> i32 {
-    use bare::browser::{Browser, BrowserLimits};
-    use bare::browser_fetch::{FetchConfig, FetchLimits};
-    use bare::{PageConfig, PageLimits, Stop};
+/// `--run`: a session over the real URL (document load, scripts, timers, `fetch`, navigations: `browser_session.rs`).
+/// The VM needs a big stack: 8 MiB is the floor in release, a debug build uses more stack per frame.
+/// Exit code: 0 settled or a budget ended it, 1 fatal or a failed load.
+fn run_page(page: String) -> i32 {
+    use bare::browser_session::{Session, SessionConfig, SessionStop};
+    use bare::Stop;
     let stack = if cfg!(debug_assertions) { 64 << 20 } else { 8 << 20 };
     let worker = std::thread::Builder::new().stack_size(stack).spawn(move || {
-        let eval = bare_js::eval::EvalLimits { max_steps: 2_000_000_000, ..Default::default() };
-        let mut b = match Browser::new(doc, BrowserLimits::default(), eval, bare_js::heap::HeapLimits::default()) {
-            Ok(b) => b,
-            Err(e) => {
-                eprintln!("error: realm: {e:?}");
-                return 1;
-            }
-        };
-        let fetch = FetchConfig { base_url: Some(page.clone()), client: http::Client::new(), limits: FetchLimits::default() };
-        if let Err(e) = b.configure_fetch(fetch) {
-            eprintln!("error: fetch: {e}");
-            return 1;
-        }
-        let r = b.run_page(PageConfig { url: page, client: http::Client::new(), limits: PageLimits::default() });
+        let mut s = Session::new(SessionConfig::new(&page));
+        let r = s.run();
         println!("stop: {:?}", r.stop);
-        println!("ready: {}", r.ready_state);
-        println!("scripts run {}, threw {}, load errors {}", r.scripts_run, r.script_throws, r.load_errors);
-        println!("tasks {}, rounds {}, fetches {}, script bytes {}", r.tasks, r.rounds, r.fetches, r.bytes);
-        for d in &r.diagnostics {
-            println!("note: {d}");
+        println!("documents {}, tasks {}, rounds {}", r.pages.len(), r.tasks, r.rounds);
+        for (u, p) in r.urls.iter().zip(&r.pages) {
+            println!("document {u}: stop {:?}, ready {}", p.stop, p.ready_state);
+            println!("  scripts run {}, threw {}, load errors {}, fetches {}, script bytes {}", p.scripts_run, p.script_throws, p.load_errors, p.fetches, p.bytes);
+            for d in &p.diagnostics {
+                println!("  note: {d}");
+            }
+            if p.dropped_diagnostics > 0 {
+                println!("  note: {} more not shown", p.dropped_diagnostics);
+            }
         }
-        if r.dropped_diagnostics > 0 {
-            println!("note: {} more not shown", r.dropped_diagnostics);
+        if let Some(b) = s.browser() {
+            for d in b.take_fetch_diagnostics() {
+                println!("fetch: {d}");
+            }
         }
-        for d in b.take_fetch_diagnostics() {
-            println!("fetch: {d}");
-        }
-        if matches!(r.stop, Stop::Fatal(_)) { 1 } else { 0 }
+        if matches!(r.stop, SessionStop::Page(Stop::Fatal(_)) | SessionStop::LoadFailed(_)) { 1 } else { 0 }
     });
     worker.map_or(1, |w| w.join().unwrap_or(1))
 }

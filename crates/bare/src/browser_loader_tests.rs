@@ -49,7 +49,7 @@ fn make(html: &str, srv: &Server, steps: u64, virtual_clock: bool) -> Browser {
 }
 
 fn load(b: &mut Browser, srv: &Server, limits: PageLimits) -> PageResult {
-    b.run_page(PageConfig { url: srv.url("/page.html"), client: Client::new(), limits })
+    b.run_page(PageConfig { url: srv.url("/page.html"), client: Client::new(), limits, fetch: None })
 }
 
 fn quick() -> PageLimits {

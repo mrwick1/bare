@@ -1,10 +1,11 @@
 //! The page script loader and task driver: it runs the classic scripts of a document in ONE realm, then drives the
 //! tasks that those scripts queue (script loads, `fetch`, timers) until the page is quiet or a budget ends.
 //!
-//! Use: [`Browser::run_page`] with the real document URL, an HTTP client and [`PageLimits`]. Call
-//! [`Browser::configure_fetch`] first if the page uses `fetch` (the loader does not touch the fetch client or origin).
-//! The parent navigation module owns the URL: it calls `run_page` after it made the `Browser` from the fetched
-//! document, and `update_fetch_base_url` for later URL changes. `run_page` has no other seam and no navigation API.
+//! Use: [`Browser::run_page`] with the real document URL, an HTTP client and [`PageLimits`]. It sets the realm's document
+//! URL (`Browser::set_document_url`) before the first script, unless the caller set one of the same origin. With
+//! `PageConfig::fetch` it also configures `fetch` (the page URL is its origin); with `None` the caller configured it.
+//! A new document is a new `Browser`: [`crate::browser_session::Session`] does that (fresh realm, same `WebStorage`,
+//! verified network load) and consumes [`Stop::Navigate`]. `run_page` alone never loads a second document.
 //!
 //! The document is pre-parsed (the whole DOM exists before the first script runs). So this is NOT the parser-blocking
 //! model of HTML: a script cannot `document.write`, cannot see a half-built DOM, and a script that removes a later
@@ -18,6 +19,17 @@
 //!    round, so a zero-delay timer loop cannot starve the network or scripts. When no script is queued, `readyState`
 //!    becomes `complete` and `load` is dispatched at the window (it does not wait for timers or `fetch`).
 //! 5. The page is settled when nothing is queued and the next timer is more than `quiet` away (or there is none).
+//!
+//! Same-document traversal and fragment tasks (`popstate`, `hashchange`) are a fourth task category of each round.
+//! A navigation request (`location.assign/replace/reload`, `history.go(0)`) ends the run before the next script, event,
+//! task or checkpoint: [`Stop::Navigate`]. The task that asked finishes (its microtask checkpoint too). A fatal error in
+//! that task wins. No old callback runs after it.
+//!
+//!
+//! KNOWN LIMITATION (kept on purpose): scheduling follows a pre-parsed DOM, not the arrival times of a real browser.
+//! Blocking, then defer, then async scripts run in document order. A real browser runs async scripts in the order of
+//! arrival, and may run them before the parser ends. A page that depends on that order (a runtime chunk that must run
+//! before or after others) can behave differently here.
 //!
 //! Scripts
 //! - Classic only. A `type=module` script is `Fatal::Unsupported("module script")`: the engine has no modules. A `nomodule`
@@ -52,6 +64,8 @@
 
 use crate::browser::{Browser, Dom, H, Listener, R, Target as EvTarget, illegal_constructor, unsupported};
 use crate::browser_dom as nd;
+use crate::browser_fetch::{FetchConfig, FetchLimits};
+use crate::browser_navigation::NavigationRequest;
 use crate::resources::{self, Expect, JS_TYPES, Kind, Limits, LoadError, Source, Timing, WS};
 use bare_html::dom::{NodeData, NodeId};
 use bare_js::eval::{Error, Interp};
@@ -118,6 +132,9 @@ pub struct PageConfig {
     /// The client that downloads scripts. `Client::new()` trusts the OS roots; a test passes `Client::with_roots`.
     pub client: Client,
     pub limits: PageLimits,
+    /// The client and limits of `fetch` for this page. `Some` makes `run_page` configure `fetch` with the page URL as its
+    /// origin (so a page URL and a `fetch` origin cannot differ). `None` keeps what the caller configured.
+    pub fetch: Option<(Client, FetchLimits)>,
 }
 
 /// Why a run ended.
@@ -128,7 +145,23 @@ pub enum Stop {
     TaskBudget,
     RoundBudget,
     TimeBudget,
+    /// A script asked for a new document (`location.assign`, `replace`, `reload`, `history.go(0)`, a changed `location.href`
+    /// or `search`). The run ended at once: no old timer, event, script or `fetch` runs after it. Only a driver that loads
+    /// documents ([`crate::browser_session::Session`]) acts on it. A fatal error in the same task wins over it.
+    Navigate(NavStop),
     Fatal(Fatal),
+}
+
+/// The request of [`Stop::Navigate`]. `Debug` prints the kind and `origin + path` only: a query, a fragment or a
+/// credential in the URL never reaches a log.
+#[derive(Clone, PartialEq, Eq)]
+pub struct NavStop(pub NavigationRequest);
+
+impl std::fmt::Debug for NavStop {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let to = Url::parse(&self.0.url).map_or_else(|_| "bad url".into(), |u| label(&u));
+        write!(f, "{:?} {to}", self.0.kind)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -539,6 +572,27 @@ impl Browser {
                 return res;
             }
         };
+        if let Some((client, limits)) = cfg.fetch {
+            if let Err(e) = self.configure_fetch(FetchConfig { base_url: Some(cfg.url.clone()), client, limits }) {
+                setup(&mut res, e);
+                return res;
+            }
+        }
+        // The realm knows no URL until now (`Browser::new` has none). A URL that the caller set stays, but it must be
+        // the origin of the page: the URL of the page and the origin of `fetch` and storage are one thing.
+        match self.document_url().map(|u| Url::parse(&u)) {
+            None => {
+                if let Err(e) = self.set_document_url(&cfg.url) {
+                    setup(&mut res, e);
+                    return res;
+                }
+            }
+            Some(Ok(cur)) if cur.same_origin(&page) => {}
+            Some(_) => {
+                setup(&mut res, "the document URL is not the origin of the page URL".into());
+                return res;
+            }
+        }
         let disc = match resources::discover(&dom.doc.borrow(), &page, &cfg.limits.resources) {
             Ok(d) => d,
             Err(e) => {
@@ -560,7 +614,7 @@ impl Browser {
                 items.push(Parsed { n, node: item.node, module, timing, source });
             }
         }
-        let deadline = Instant::now() + cfg.limits.max_time;
+        let deadline = deadline_after(cfg.limits.max_time);
         let mut run = Run {
             b: self,
             dom: dom.clone(),
@@ -616,6 +670,12 @@ struct Run<'a> {
 
 type Flow = Result<(), Stop>;
 
+/// `now + d` without an overflow panic: a `Duration::MAX` means "about a century".
+pub(crate) fn deadline_after(d: Duration) -> Instant {
+    let now = Instant::now();
+    now.checked_add(d).unwrap_or_else(|| now + Duration::from_secs(100 * 365 * 86_400))
+}
+
 fn fatal_of(e: Error) -> Stop {
     Stop::Fatal(match e {
         Error::Unsupported(u) => Fatal::Unsupported(u.what),
@@ -625,7 +685,7 @@ fn fatal_of(e: Error) -> Stop {
     })
 }
 
-fn label(u: &Url) -> String {
+pub(crate) fn label(u: &Url) -> String {
     format!("{}://{}:{}{}", u.scheme, u.host, u.port, u.path.split('?').next().unwrap_or(""))
 }
 
@@ -661,7 +721,16 @@ impl Run<'_> {
         }
     }
 
+    /// A navigation that a script asked for ends the run. Checked before every task, event and checkpoint.
+    fn nav_stop(&self) -> Flow {
+        match self.dom.nav.s.borrow().requests.front() {
+            Some(r) => Err(Stop::Navigate(NavStop(r.clone()))),
+            None => Ok(()),
+        }
+    }
+
     fn budget(&self) -> Flow {
+        self.nav_stop()?;
         if self.res.tasks >= self.lim.max_tasks {
             return Err(Stop::TaskBudget);
         }
@@ -711,12 +780,13 @@ impl Run<'_> {
             self.run_one(node, &text, "dynamic inline script")?;
         }
         match self.b.drain() {
-            Ok(_) => Ok(()),
+            Ok(_) => self.nav_stop(),
             Err(e) => Err(self.fatal(e, "microtask checkpoint")),
         }
     }
 
     fn fire(&mut self, t: EvTarget, ty: &str, bubbles: bool) -> Flow {
+        self.nav_stop()?;
         match self.b.fire(t, ty, bubbles) {
             Ok(()) => Ok(()),
             Err(e) => Err(self.fatal(e, ty)),
@@ -878,6 +948,14 @@ impl Run<'_> {
                 did += pump.ran;
                 self.after_js()?;
             }
+            // `popstate` and `hashchange` of same-document traversals.
+            if self.b.navigation_stats().pending_tasks > 0 {
+                self.budget()?;
+                let n = self.b.run_navigation_tasks().map_err(fatal_of)?;
+                self.res.tasks += n;
+                did += n;
+                self.after_js()?;
+            }
             if self.res.rounds % self.lim.collect_every.max(1) == 0 {
                 self.b.collect(&[]).map_err(fatal_of)?;
             }
@@ -887,7 +965,7 @@ impl Run<'_> {
             // Idle: wait for the next timer if it is near, else the page is settled.
             let Some(due) = self.b.next_scheduled_due() else { return Err(Stop::Settled) };
             let gap = due - self.b.now();
-            if gap > self.lim.quiet.as_secs_f64() * 1000.0 {
+            if gap.is_nan() || gap > self.lim.quiet.as_secs_f64() * 1000.0 {
                 return Err(Stop::Settled);
             }
             if self.b.uses_virtual_clock() {
@@ -896,6 +974,7 @@ impl Run<'_> {
                 self.after_js()?;
             } else {
                 let wait = Duration::from_secs_f64(gap.max(0.0) / 1000.0);
+                // `gap` is at most `quiet` here, so this cannot overflow.
                 if Instant::now() + wait >= self.deadline {
                     return Err(Stop::TimeBudget);
                 }

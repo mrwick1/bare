@@ -84,7 +84,7 @@ fn exec(name: &str, scale: usize) {
     b.configure_fetch(FetchConfig { base_url: Some(url.clone()), client: Client::new(), limits: FetchLimits::default() }).unwrap_or_else(|e| die(e));
     let (cpu0, t) = (cpu_ms(), Instant::now());
     let limits = PageLimits { max_tasks: 10_000_000, max_rounds: 10_000_000, max_time: Duration::from_secs(40), quiet: Duration::from_millis(50), resources: bare::resources::Limits { max_fetches: 1 << 16, max_references: 1 << 16, ..Default::default() }, ..Default::default() };
-    let r = b.run_page(PageConfig { url, client: Client::new(), limits });
+    let r = b.run_page(PageConfig { url, client: Client::new(), limits, fetch: None });
     if r.stop != Stop::Settled || r.load_errors != 0 || r.script_throws != 0 {
         die(format!("{r:?}"));
     }
