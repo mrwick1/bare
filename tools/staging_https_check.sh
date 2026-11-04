@@ -1,8 +1,20 @@
 #!/bin/sh
-# First HTTPS check for bare. It fails until S1 topic 4 is done. It is not part of `cargo test`.
-# Contacts https://staging.app.8vox.ai with two requests. Run from the repo root.
+# First HTTPS check for bare. It fails until S1 topic 4 is done. Not part of cargo test.
+# Contacts staging once. Run from the repo root. Refresh the manifest after a deploy.
 set -eu
-want=$(python3 -I -c 'import json;print(json.load(open("tools/fixtures/staging/manifest-2026-11-04.json"))["pages"]["/login"]["sha256"])')
 cargo build --release -q -p bare
-got=$(./target/release/bare --source https://staging.app.8vox.ai/login | head -c -1 | sha256sum | cut -d' ' -f1)
-[ "$got" = "$want" ] && echo "ok /login sha256 $got" || { echo "FAIL /login: got $got want $want"; exit 1; }
+body=$(mktemp)
+trap 'rm -f "$body"' EXIT HUP INT TERM
+./target/release/bare --source https://staging.app.8vox.ai/login > "$body"
+python3 -I - "$body" <<'PYTHON'
+import hashlib, json, sys
+from pathlib import Path
+want = json.loads(Path("tools/fixtures/staging/manifest-2026-11-04.json").read_text())["pages"]["/login"]["sha256"]
+body = Path(sys.argv[1]).read_bytes()
+if not body.endswith(b"\n"):
+    sys.exit("FAIL: source output has no final newline")
+got = hashlib.sha256(body[:-1]).hexdigest()
+if got != want:
+    sys.exit(f"FAIL /login: got {got} want {want}; check for a staging deploy")
+print(f"ok /login sha256 {got}")
+PYTHON

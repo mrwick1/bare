@@ -15,7 +15,7 @@ Words: **observed** means a command showed it on this date. **inferred** means i
 | `python3 -I tools/staging_inspect.py fetch --out FILE` | Reads `/` and `/login`, then each file they name, plus the lazy chunks that the webpack runtime names. Each file is read once as identity and once for each Accept-Encoding value. | 315 requests, 1 connection, 10 s |
 | `sh tools/staging_https_check.sh` | The first `bare` HTTPS check (see the end). Fails today. | 1 |
 
-Limits in the tool: one connection at a time, 400 requests, 8 MiB for a body, 300 s in total, and no other origin. It reads no page that the two pages do not name. This is not a load tool. The raw-byte probes below were plain `ssl` sockets in Python (one request each, `Connection: close`).
+Limits in the tool: one connection at a time, 400 requests, 8 MiB for a body, 300 s in total, and no other origin. Decoded bodies also have an 8 MiB cap. Socket operations have a timeout; the total time cap is checked between requests and attempts. It reads no page that the two pages do not name. This is not a load tool. The raw-byte probes below were plain `ssl` sockets in Python (one request each, `Connection: close`).
 
 ## TLS (observed)
 
@@ -46,14 +46,14 @@ The server sends four certificates.
 
 ### Requirements for verification
 
-Observed facts give these needs. The list of algorithms is complete for this site on this date.
+Observed facts give these needs. This is a sufficient algorithm set for the observed chain and the tested minimal handshake. A certificate renewal can change it.
 
-1. ECDSA P-256 with SHA-256 for `CertificateVerify`. **Required** (the server accepts no other sign algorithm from the client list that was tested).
+1. ECDSA P-256 with SHA-256 for `CertificateVerify`. **Required for the tested configuration** (the other individually tested algorithms failed).
 2. ECDSA P-384 with SHA-384 for the certificate signatures of certificates 0, 1 and 2. **Required.** This also needs SHA-384.
 3. RSA is **not required** if the trust store holds `ISRG Root X2` and the verifier ends the path there. Certificate 3 (RSA signed by X1) then is not used. It is only needed if the store holds `ISRG Root X1` alone (inferred; not tested).
 4. The path builder must match by issuer name (and AKI/SKI), and must accept a trust anchor that is not the last certificate sent. The server sends a cross-signed X2 and the store has the self-signed X2. A verifier that insists that the last sent certificate is a root fails here (inferred).
 5. Check: the hostname against SAN DNS names, validity dates, `CA:FALSE` for the leaf, `CA:TRUE` for issuers, `pathlen`, key usage, EKU `serverAuth`. Unknown critical extensions must fail.
-6. Trust store: `bare` needs its own list of roots. This report names `ISRG Root X2` (SPKI SHA-256 above). The source of the store (a PEM file from the OS, or a file in the repo) is a decision for S1 topic 3. **No certificate bypass.**
+6. Trust store: `bare` needs a trusted root source independent of the peer-supplied chain. This report names `ISRG Root X2` (SPKI SHA-256 above). The source of the store (a PEM file from the OS, or a file in the repo) is a decision for S1 topic 3. **No certificate bypass.**
 7. The leaf expires 2027-01-13 (Let's Encrypt, about 90 days). A fixture with this leaf expires. Tests that need a valid chain must use a fixed "now" or a self-made chain.
 
 ### Requirements for the handshake
@@ -88,7 +88,7 @@ Observed facts give these needs. The list of algorithms is complete for this sit
 - The server compresses text only (HTML, JS, CSS) and only above a size threshold. Files of 780 bytes or fewer were plain with every header. Files of 1,325 bytes or more were compressed. The exact threshold is **not measured**.
 - Fonts (`woff2`) and the SVG are never compressed.
 - For all 52 files, gzip and deflate decoded to the identity bytes (SHA-256 equal).
-- Decision: `bare` needs **no decoder** if it sends no `Accept-Encoding`. It then gets identity bytes (observed with `Host` only; `bare` sends `Host` and `User-Agent` only, so the same request shape). A decoder (gzip with deflate) is needed only to cut the 1.86 MB of wire bytes to 0.62 MB. Brotli is not needed. A `Content-Encoding` header that `bare` cannot decode must be an error (not shown as text). This is a design choice, not a server rule.
+- Decision: `bare` needs **no decoder** if it sends no `Accept-Encoding`. It then gets identity bytes (observed with `Host` only; `bare` sends `Host` and `User-Agent` only, so equivalent behavior is expected for its request). A decoder (gzip with deflate) is needed only to cut the 1.86 MB of wire bytes to 0.62 MB. Brotli is not needed. A `Content-Encoding` header that `bare` cannot decode must be an error (not shown as text). This is a design choice, not a server rule.
 
 ## Resources (observed)
 

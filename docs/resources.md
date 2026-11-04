@@ -370,3 +370,17 @@ Bugs that this check found, both fixed with a test first:
 
 "No box in bare" counts are high (2,426 on Wikipedia). Most are culled inline boxes (a link with no edges and no background makes no fragment, by design), and the children of flex items.
 
+
+## Staging network inspection
+
+2026-11-04, archMachine. This measures the Python inspection tool, not the browser engine. Each local parse ran in a fresh process with a 20 s parent timeout. The input is `tools/fixtures/staging/login.html` repeated N times. Parse time excludes input construction. Peak RSS includes the interpreter, input, parsed results and output preparation. Python reports RSS in KiB on Linux.
+
+| Repeated pages | Input bytes | References | Parse seconds | Peak RSS KiB |
+| --- | --- | --- | --- | --- |
+| 100 | 868,700 | 2,400 | 0.0381 | 23,528 |
+| 1,000 | 8,687,000 | 24,000 | 0.3563 | 46,148 |
+| 10,000 | 86,870,000 | 240,000 | 3.4485 | 275,668 |
+
+The parser stores one dictionary per reference. This tool is for inspection only. These numbers do not establish Rust resource-loader performance. Keep the existing Rust streaming approach for the engine.
+
+Parent review added a decoded-body cap and a direct failure check for the browser command. Offline tests cover compressed-body limits, request limits across retries, connection reuse and omission of `Accept-Encoding`. A single verified HTTPS request through the inspection tool returned `/login` with status 200, 8,687 identity bytes and the saved SHA-256. `bare` still rejects HTTPS. The expected failing check is `sh tools/staging_https_check.sh`.

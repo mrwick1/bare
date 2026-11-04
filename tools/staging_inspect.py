@@ -10,7 +10,7 @@ Limits: one connection at a time, no crawling beyond the resources named by the
 pages, a request cap, a body cap and a time cap. This is not a load tool.
 Never send credentials. Never inspect an authenticated page.
 """
-import argparse, gzip, hashlib, http.client, json, re, ssl, subprocess, sys, time, zlib
+import argparse, gzip, hashlib, http.client, io, json, re, ssl, subprocess, sys, time, zlib
 from html.parser import HTMLParser
 from pathlib import Path
 from urllib.parse import urljoin, urlsplit
@@ -66,21 +66,31 @@ def lazy_chunks(js):
     return public.group(1) if public else None, out, css
 
 
-def decode(data, enc):
-    """Decode a Content-Encoding. Returns bytes or None when stdlib cannot."""
+def decode(data, enc, max_bytes=8 << 20):
+    """Decode supported encodings with a cap on the decoded body."""
     if enc in (None, "", "identity"):
-        return data
-    if enc in ("gzip", "x-gzip"):
-        return gzip.decompress(data)
-    if enc == "deflate":  # RFC 9110: zlib wrapper; some servers send raw deflate
+        result = data
+    elif enc in ("gzip", "x-gzip"):
+        with gzip.GzipFile(fileobj=io.BytesIO(data)) as stream:
+            result = stream.read(max_bytes + 1)
+    elif enc == "deflate":
+        def inflate(wbits):
+            decoder = zlib.decompressobj(wbits)
+            result = decoder.decompress(data, max_bytes + 1)
+            if len(result) > max_bytes:
+                raise ValueError("decoded body over cap")
+            if not decoder.eof:
+                raise zlib.error("incomplete deflate body")
+            return result
         try:
-            return zlib.decompress(data)
+            result = inflate(15)
         except zlib.error:
-            return zlib.decompress(data, -15)
-    if enc == "zstd":
-        from compression import zstd
-        return zstd.decompress(data)
-    return None  # br: no stdlib decoder
+            result = inflate(-15)
+    else:
+        return None
+    if len(result) > max_bytes:
+        raise ValueError("decoded body over cap")
+    return result
 
 
 def sha(b):
@@ -92,18 +102,29 @@ class Client:
         self.host, self.left, self.max_bytes, self.deadline = host, max_requests, max_bytes, deadline
         self.conn, self.connects = None, 0
 
-    def get(self, path, enc="identity", method="GET", extra=None):
+    def get(self, path, enc=None, method="GET", extra=None):
         if self.left <= 0 or time.monotonic() > self.deadline:
             raise SystemExit("limit reached: request or time cap")
-        self.left -= 1
-        hdr = {"Host": self.host, "User-Agent": "bare-staging-inspect/1", "Accept": "*/*", "Accept-Encoding": enc}
+        hdr = {"Host": self.host, "User-Agent": "bare-staging-inspect/1", "Accept": "*/*"}
+        if enc is not None:
+            hdr["Accept-Encoding"] = enc
         hdr.update(extra or {})
         for attempt in (0, 1):
+            remaining = self.deadline - time.monotonic()
+            if remaining <= 0 or self.left <= 0:
+                raise SystemExit("limit reached: request or time cap")
+            self.left -= 1
+            timeout = min(20, remaining)
             if self.conn is None:
-                self.conn = http.client.HTTPSConnection(self.host, 443, timeout=20, context=ssl.create_default_context())
+                self.conn = http.client.HTTPSConnection(self.host, 443, timeout=timeout, context=ssl.create_default_context())
                 self.connects += 1
+            elif self.conn.sock is not None:
+                self.conn.sock.settimeout(timeout)
             try:
-                self.conn.request(method, path, headers=hdr)
+                self.conn.putrequest(method, path, skip_host=True, skip_accept_encoding=True)
+                for key, value in hdr.items():
+                    self.conn.putheader(key, value)
+                self.conn.endheaders()
                 r = self.conn.getresponse()
                 body = r.read(self.max_bytes + 1)
                 if len(body) > self.max_bytes:
@@ -112,6 +133,7 @@ class Client:
                     self.conn.close(); self.conn = None
                 return r.status, {k.lower(): v for k, v in r.getheaders()}, body
             except (http.client.RemoteDisconnected, ConnectionError):
+                self.conn.close()
                 self.conn = None
                 if attempt:
                     raise
@@ -149,7 +171,7 @@ def fetch(args):
             st2, h2, wire = c.get(path, enc)
             ce = h2.get("content-encoding")
             try:
-                dec = decode(wire, ce)
+                dec = decode(wire, ce, c.max_bytes)
                 ok = None if dec is None else dec == raw
             except Exception as ex:
                 ok = "decode error: %s" % ex
@@ -214,6 +236,35 @@ def selftest():
     assert decode(zlib.compress(body), "deflate") == body
     co = zlib.compressobj(wbits=-15); raw = co.compress(body) + co.flush()
     assert decode(raw, "deflate") == body and decode(b"x", "br") is None
+    for enc, compressed in (("gzip", gzip.compress(body)), ("deflate", zlib.compress(body))):
+        try:
+            decode(compressed, enc, len(body) - 1)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("decoded size cap was ignored")
+    from unittest.mock import Mock, patch
+    conn = Mock()
+    conn.getresponse.return_value = Mock(status=200, will_close=False)
+    conn.getresponse.return_value.read.return_value = b"ok"
+    conn.getresponse.return_value.getheaders.return_value = []
+    with patch.object(http.client, "HTTPSConnection", return_value=conn):
+        client = Client("example.invalid", 2, 100, time.monotonic() + 10)
+        assert client.get("/")[2] == b"ok"
+        assert client.connects == 1
+        assert not any(call.args[0] == "Accept-Encoding" for call in conn.putheader.call_args_list)
+        assert client.get("/")[2] == b"ok" and client.connects == 1
+    conn.reset_mock()
+    conn.getresponse.side_effect = http.client.RemoteDisconnected()
+    with patch.object(http.client, "HTTPSConnection", return_value=conn):
+        client = Client("example.invalid", 1, 100, time.monotonic() + 10)
+        try:
+            client.get("/")
+        except SystemExit:
+            pass
+        else:
+            raise AssertionError("retry exceeded the request cap")
+        assert conn.putrequest.call_count == 1
     # Scale: the parser must stay linear. 100x the page, time bounded.
     t0 = time.perf_counter(); n = len(parse_manifest(html * 100)[0]); dt = time.perf_counter() - t0
     assert n == 100 * len(items) and dt < 5, (n, dt)
