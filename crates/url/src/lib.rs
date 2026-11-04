@@ -14,7 +14,7 @@ use std::net::{Ipv4Addr, Ipv6Addr};
 // The standard library's IP address types. They can check and print addresses.
 
 /// The scheme of a URL: the part before "://", like "https".
-#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+#[derive(Debug, PartialEq, Eq, Hash, Clone, Copy)]
 // `Copy` means a value is copied on assignment, like a number in JS. No `.clone()` needed.
 pub enum Scheme {
     // `enum` is a value that is one of a fixed set of choices. JS has no direct match:
