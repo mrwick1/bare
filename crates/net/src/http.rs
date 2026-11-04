@@ -102,8 +102,8 @@ impl Method {
     }
 }
 
-/// One request. It borrows everything from the caller: the headers and the body are never copied. The client writes
-/// the body from this slice. `Host`, `Content-Length` and the other headers that frame a message are made by the
+/// One request. It borrows everything from the caller: the request stores no owned header or body data. Small bodies are copied into the
+/// wire buffer; large bodies are written directly from this slice. `Host`, `Content-Length` and the other headers that frame a message are made by the
 /// client, so the caller must not set them (`Client::send` gives an error).
 pub struct Request<'a> {
     pub method: Method,
@@ -408,6 +408,10 @@ impl Client {
             result = send(&mut stream, url, plan, conditions);
         }
         let (head, leftover) = result?;
+        if !get && (200..400).contains(&head.response.status) {
+            // RFC 9111 section 4.4: a successful unsafe request invalidates the cached target.
+            self.forget(&(url.scheme, url.host.clone(), url.port, url.path.clone()));
+        }
         if let Framing::Length(n) = head.framing
             && n > MAX_REPLY
         {
@@ -1836,9 +1840,8 @@ mod tests {
         });
         let body = vec![b'x'; 8 * 1024 * 1024];
         let mut client = Client::new();
-        match client.post(&post_url(port, "/"), &[], &body) {
-            Ok(r) => assert_eq!(r.status, 413),
-            Err(_) => {}
+        if let Ok(r) = client.post(&post_url(port, "/"), &[], &body) {
+            assert_eq!(r.status, 413);
         }
         assert!(client.idle.lock().unwrap().is_empty());
     }
@@ -1888,7 +1891,7 @@ mod tests {
 
     #[test]
     fn requests_with_headers_or_bodies_bypass_the_cache() {
-        let (port, requests) = serve(vec![(vec![page("Cache-Control: max-age=60\r\n", "a"), page("", "b"), page("", "c"), page("", "d")], false)]);
+        let (port, requests) = serve(vec![(vec![page("Cache-Control: max-age=60\r\n", "a"), page("", "b"), "HTTP/1.1 400 Bad Request\r\nContent-Length: 1\r\n\r\nc", page("", "d")], false)]);
         let mut client = Client::new();
         let url = url(port);
         assert_eq!(client.get(&url).unwrap().body, b"a");
@@ -1897,10 +1900,33 @@ mod tests {
         assert_eq!(client.send(&auth).unwrap().body, b"b");
         assert_eq!(client.post(&url, &[], b"x").unwrap().body, b"c");
         assert_eq!(client.send_stream(&auth).unwrap().response.status, 200);
-        // After a "logout" the plain request gets its own copy, not the answer to the authenticated one.
+        // A failed POST leaves the plain cached copy; authenticated replies never replace it.
         assert_eq!(client.get(&url).unwrap().body, b"a");
         assert_eq!(seen(&requests).len(), 4);
         assert_eq!(client.cache.len(), 1);
+    }
+
+    #[test]
+    fn successful_posts_invalidate_the_cached_target() {
+        for stream in [false, true] {
+            for code in [200, 204, 302, 400] {
+                let reply = leak(format!("HTTP/1.1 {code} Reply\r\nContent-Length: 0\r\n\r\n"));
+                let (port, requests) = serve(vec![(vec![page("Cache-Control: max-age=60\r\n", "old"), reply, page("", "new")], false)]);
+                let mut client = Client::new();
+                let url = url(port);
+                assert_eq!(client.get(&url).unwrap().body, b"old");
+                let req = Request::post(&url, &[], b"change");
+                if stream {
+                    let mut reply = client.send_stream(&req).unwrap();
+                    io::copy(&mut reply.body, &mut io::sink()).unwrap();
+                } else {
+                    client.send(&req).unwrap();
+                }
+                let expected = if code < 400 { b"new" } else { b"old" };
+                assert_eq!(client.get(&url).unwrap().body, expected, "stream={stream}, status={code}");
+                assert_eq!(seen(&requests).len(), if code < 400 { 3 } else { 2 });
+            }
+        }
     }
 
     #[test]

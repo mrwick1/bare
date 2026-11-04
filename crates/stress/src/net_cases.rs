@@ -257,7 +257,7 @@ pub fn all() -> Vec<Case> {
             let url = Url::parse(&format!("http://127.0.0.1:{port}/")).unwrap();
             let body = vec![b'x'; n * 1000];
             Box::new(move || {
-                black_box(Client::new().post(&url, &[("Content-Type", "application/octet-stream")], &body).map(|r| r.status).map_err(|e| e.to_string()).ok());
+                assert_eq!(black_box(Client::new().post(&url, &[("Content-Type", "application/octet-stream")], &body).unwrap()).body, b"ok");
             })
         }),
         // `n` JSON login-sized POSTs over one keep-alive connection: the cost of one request, many times.
@@ -270,7 +270,7 @@ pub fn all() -> Vec<Case> {
                 let mut client = Client::new();
                 let headers = [("Content-Type", "application/json"), ("Authorization", "Bearer abcdefghijklmnopqrstuvwxyz")];
                 for _ in 0..n {
-                    black_box(client.post(&url, &headers, br#"{"email":"user@example.com","password":"correct horse"}"#).ok());
+                    assert_eq!(black_box(client.post(&url, &headers, br#"{"email":"user@example.com","password":"correct horse"}"#).unwrap()).body, b"ok");
                 }
             })
         }),
@@ -289,7 +289,7 @@ pub fn all() -> Vec<Case> {
                 let mut client = Client::new();
                 let headers = [("Content-Type", "application/json"), ("Authorization", "Bearer t")];
                 for _ in 0..n {
-                    black_box(client.post(&url, &headers, b"{}").ok());
+                    assert_eq!(black_box(client.post(&url, &headers, b"{}").unwrap()).body, b"ok");
                 }
             })
         }),
@@ -302,7 +302,7 @@ pub fn all() -> Vec<Case> {
             let names: Vec<String> = (0..n * 100).map(|i| format!("X-Header-{i}")).collect();
             Box::new(move || {
                 let headers: Vec<(&str, &str)> = names.iter().map(|n| (n.as_str(), "value-value")).collect();
-                black_box(Client::new().post(&url, &headers, b"{}").ok());
+                assert_eq!(black_box(Client::new().post(&url, &headers, b"{}").unwrap()).body, b"ok");
             })
         }),
         case("net-redirect-loop", 1, |_| {
