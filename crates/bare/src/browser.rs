@@ -261,11 +261,14 @@ pub struct Dom {
     pub(crate) scripts: crate::browser_loader::Scripts,
     /// `matchMedia`, `classList`, `getElementsBy*` (`browser_platform.rs`).
     pub(crate) plat: crate::browser_platform::Platform,
+    /// `HTMLElement.style` / `CSSStyleDeclaration` (`browser_style.rs`).
+    pub(crate) style: crate::browser_style::Style,
 }
 
 impl Host for Dom {
     fn call(&self, it: &mut Interp<'_>, id: u32, this: Value, args: &[Value], is_new: bool) -> R<Value> {
         let (h, needs_new) = self.handlers.borrow()[id as usize];
+        self.style.cur.set(id);
         if needs_new && !is_new {
             return Err(it.type_error("Failed to construct: please use the 'new' operator"));
         }
@@ -282,12 +285,14 @@ impl Host for Dom {
         crate::browser_navigation::roots(self, out);
         self.scripts_roots(out);
         crate::browser_platform::roots(self, out);
+        crate::browser_style::roots(self, out);
     }
 
     fn trace(&self, owner: ObjId, out: &mut Vec<Value>) {
         self.sched_trace(owner, out);
         crate::browser_navigation::trace(self, owner, out);
         crate::browser_platform::trace(self, owner, out);
+        crate::browser_style::trace(self, owner, out);
         let st = self.st.borrow();
         if let Some(&t) = st.by_obj.get(&owner) {
             for l in st.listeners.get(&t).into_iter().flatten() {
@@ -315,6 +320,7 @@ impl Host for Dom {
     fn prune(&self, live: &dyn Fn(ObjId) -> bool) {
         crate::browser_navigation::prune(self, live);
         crate::browser_platform::prune(self, live);
+        crate::browser_style::prune(self, live);
         let mut st = self.st.borrow_mut();
         let st = &mut *st;
         st.by_obj.retain(|&o, t| matches!(t, Target::Window) || live(o));
@@ -665,7 +671,8 @@ impl Dom {
         crate::browser_fetch::install(self, it)?;
         crate::browser_loader::install(self, it)?;
         self.install_platform(it)?;
-        crate::browser_console::install(self, it)
+        crate::browser_console::install(self, it)?;
+        crate::browser_style::install(self, it)
     }
 
     pub(crate) fn define_accessor(&self, it: &mut Interp<'_>, o: ObjId, key: PropertyKey, get: ObjId, set: Option<ObjId>) -> R<()> {
@@ -832,6 +839,7 @@ impl Browser {
             nav: Default::default(),
             scripts: Default::default(),
             plat: Default::default(),
+            style: Default::default(),
         });
         it.set_host(dom.clone())?;
         it.host_scope(|it| {

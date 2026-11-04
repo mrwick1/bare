@@ -178,7 +178,7 @@ impl Dom {
     /// Is `o` one of this module's objects (so not plain data for structured clone)?
     pub(crate) fn is_platform_object(&self, o: ObjId) -> bool {
         let s = self.plat.s.borrow();
-        s.mql.contains_key(&o) || s.lists.contains_key(&o) || s.iters.contains_key(&o)
+        s.mql.contains_key(&o) || s.lists.contains_key(&o) || s.iters.contains_key(&o) || self.is_style_object(o)
     }
 
     pub(crate) fn pl_limits(&self) -> PlatformLimits {

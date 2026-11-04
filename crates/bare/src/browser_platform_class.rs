@@ -162,7 +162,7 @@ fn value_set(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
 }
 
 /// WebIDL `unsigned long`: ToNumber, then modulo 2^32.
-fn to_u32(it: &mut Interp<'_>, v: Value) -> R<u32> {
+pub(crate) fn to_u32(it: &mut Interp<'_>, v: Value) -> R<u32> {
     let n = it.to_js_number(v)?;
     Ok(if n.is_finite() { n.trunc().rem_euclid(4294967296.0) as u32 } else { 0 })
 }
