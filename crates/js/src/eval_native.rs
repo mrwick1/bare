@@ -93,6 +93,7 @@ impl<'p> Interp<'p> {
                 Value::Undefined | Value::Null => Err(self.type_err("Cannot convert undefined or null to object")),
                 Value::String(_) => Ok(Value::Object(self.ext.string_proto)),
                 Value::Symbol(_) => Ok(Value::Object(self.sc.symbol_proto)),
+                Value::Number(_) => Ok(Value::Object(self.ao.number_proto.unwrap_or(self.object_proto))),
                 _ => Ok(Value::Object(self.object_proto)),
             },
             Nat::ObjHasOwn => {

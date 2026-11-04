@@ -34,6 +34,8 @@
 #[derive(Default)]
 struct AoState {
     array_ctor: Option<ObjId>,
+    number_proto: Option<ObjId>,
+    rng: Option<[u64; 2]>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -65,6 +67,10 @@ enum AoFn {
     MathTrunc,
     MathMax,
     MathMin,
+    MathClz32,
+    MathLog,
+    MathRandom,
+    NumToString,
 }
 
 const MAX_SAFE_LEN: u64 = 9007199254740991;
@@ -93,6 +99,7 @@ impl<'p> Interp<'p> {
         for (name, f, len) in [("abs", MathAbs, 1), ("floor", MathFloor, 1), ("round", MathRound, 1), ("trunc", MathTrunc, 1), ("max", MathMax, 2), ("min", MathMin, 2)] {
             self.method(math, name, Nat::Ao(f), len)?;
         }
+        self.install_numeric(math)?;
         let k = h!(self, self.heap.key_from_str("Math"));
         self.def(g, k, Value::Object(math), true, false, true)
     }
@@ -128,6 +135,7 @@ impl<'p> Interp<'p> {
                     _ => math_round(x),
                 }))
             }
+            MathClz32 | MathLog | MathRandom | NumToString => self.call_numeric(f, this, args),
             MathMax | MathMin => {
                 let is_max = f == MathMax;
                 let mut r = if is_max { f64::NEG_INFINITY } else { f64::INFINITY };
