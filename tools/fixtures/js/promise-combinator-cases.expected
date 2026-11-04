@@ -47,3 +47,6 @@ combinators_are_methods_with_shape	alltruefalsetrue1all|allSettledtruefalsetrue1
 many_items_in_order	 ## 50:41650
 nested_combinators	 ## [[1,2],3,5]
 result_promise_unhandled_state	 ## 
+aggregate_error_cause_order	7|message,cause,iter|true|false|true ## 7|message,cause,iter|true|false|true
+aggregate_error_inherited_undefined_cause	true||false ## true||false
+aggregate_error_cause_throw_stops_iteration	19|cause ## 19|cause

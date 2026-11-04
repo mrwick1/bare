@@ -1,7 +1,7 @@
 // `Promise.all`, `allSettled`, `race`, `any` and `AggregateError`. Included by `eval.rs` (`include!`), so it shares that
 // module's imports and private items. The Promise core is in `eval_promise.rs`.
 //
-// Exact on the intrinsic `Promise` only (`intrinsic_this`: another `this` is an explicit `Unsupported`, a primitive is a
+// Supported on the intrinsic `Promise` only (`intrinsic_this`: another `this` is an explicit `Unsupported`, a primitive is a
 // `TypeError`). The steps are the ones of the spec:
 // - `C.resolve` is read once, before the iteration (`GetPromiseResolve`), and called with `this = C` for every item.
 // - The iterable is read with the shared iterator engine (`iter_open`, `iter_next`). An ordinary error of the iterator,
@@ -9,14 +9,14 @@
 //   or of `then`, not for an error of `next`. A limit, `Unsupported` or a heap fault ends the call at once and runs no
 //   more JavaScript (no close, no reject).
 // - Each item gets `then(onFulfilled, onRejected)` through `Invoke`, so a thenable and a promise with its own `then`
-//   both work. Nothing settles synchronously except an empty input of `all`, `allSettled` and `any`, as in the spec:
-//   the result promise is then already settled, and its reactions still run as jobs.
+//   both work. Intrinsic Promise reactions run as jobs. An overridden `resolve` can supply a synchronous `then`.
+//   Empty `all`, `allSettled` and `any` settle before returning; their reactions still run as jobs.
 // - Order is the input order. The element functions have a once flag per item (`allSettled`: one flag for the pair).
 //   The result promise is settled through its own resolving pair, so its "already resolved" flag is shared with the
 //   functions that `race` hands to `then`.
 // - `any` rejects with an `AggregateError` (message "All promises were rejected", own `errors` array). The global
 //   `AggregateError(errors, message)` is installed too: `errors` is read as an iterable (bounded by `max_iter_buffer`),
-//   the `options.cause` argument is ignored (as in the `Error` constructor here), and a class cannot extend it.
+//   `options.cause` is installed before reading the errors iterable, and a class cannot extend it.
 //
 // State and GC. The "remaining" counter, the values and the once flags of one call live in a record in
 // `promise.agg.recs`, keyed by a counter that is never reused. An element function holds only that key and its index.
@@ -76,6 +76,8 @@ struct AggState {
     recs: FxMap<u64, Agg>,
     next: u64,
     items: usize,
+    #[cfg(test)]
+    traced_values: std::cell::Cell<usize>,
     k_resolve: Option<PropertyKey>,
     k_status: Option<PropertyKey>,
     k_reason: Option<PropertyKey>,
@@ -152,11 +154,14 @@ impl<'p> Interp<'p> {
     }
 
     /// The values a native function holds: the Promise family captures, and for an element function its record.
-    fn pfn_trace(&self, pf: PFn, work: &mut Vec<Value>) {
+    fn pfn_trace(&self, pf: PFn, seen: &mut FxSet<u64>, work: &mut Vec<Value>) {
         pf.trace(work);
         if let PFn::AggElem { agg, .. } = pf
+            && seen.insert(agg)
             && let Some(r) = self.promise.agg.recs.get(&agg)
         {
+            #[cfg(test)]
+            self.promise.agg.traced_values.set(self.promise.agg.traced_values.get() + r.values.len() + 1);
             work.push(Value::Object(r.promise));
             work.extend_from_slice(&r.values);
         }
@@ -356,6 +361,13 @@ impl<'p> Interp<'p> {
         if !matches!(msg, Value::Undefined) {
             let m = self.coerce_string(msg)?;
             self.def(o, self.k_message, Value::String(m), true, false, true)?;
+        }
+        if let Value::Object(options) = arg(args, 2) {
+            let cause = h!(self, self.heap.key_from_str("cause"));
+            if h!(self, self.heap.has_property(options, cause)) {
+                let value = self.get_prop(Value::Object(options), cause)?;
+                self.def(o, cause, value, true, false, true)?;
+            }
         }
         let list = self.iter_to_vec(arg(args, 0))?;
         self.charge_steps(list.len() as u64)?;

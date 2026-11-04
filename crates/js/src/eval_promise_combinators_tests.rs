@@ -400,3 +400,23 @@ fn a_thousand_items_keep_order_and_free_everything() {
         assert_eq!(it.agg_stats(), AggStats::default());
     });
 }
+
+
+#[test]
+fn collecting_a_suspended_aggregate_traces_its_values_once() {
+    big(|| {
+        let mut it = realm(lim());
+        assert_eq!(out(&mut it, "var never = new Promise(function () {}), inputs = []; for (var i = 0; i < 256; i++) inputs.push(never); Promise.all(inputs); 0"), "0");
+        it.collect(&[]).unwrap();
+        assert_eq!(it.agg_stats().items, 256);
+        assert!(it.promise.agg.traced_values.get() <= 257, "aggregate references visited {} times", it.promise.agg.traced_values.get());
+    });
+}
+
+#[test]
+fn aggregate_error_reads_cause_before_the_error_iterable() {
+    big(|| {
+        let mut it = realm(lim());
+        assert_eq!(out(&mut it, "var log = [], options = { get cause() { log.push('cause'); return 7; } }; var errors = { [Symbol.iterator]() { log.push('iter'); return [1][Symbol.iterator](); } }; var e = new AggregateError(errors, { toString() { log.push('message'); return 'm'; } }, options); [e.cause, log.join(), Object.getOwnPropertyDescriptor(e, 'cause').enumerable].join('|')"), "7|message,cause,iter|false");
+    });
+}

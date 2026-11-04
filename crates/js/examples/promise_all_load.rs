@@ -64,6 +64,9 @@ fn run_case(case: String, scale: usize) {
     let t_run = t2.elapsed();
     let (queued, tracked) = (it.pending_jobs(), it.stats());
     let agg_before = it.agg_stats();
+    let tg = Instant::now();
+    it.collect(&[reader]).unwrap_or_else(|e| die(format!("suspended collect {e:?}")));
+    let t_suspended = tg.elapsed();
     let t3 = Instant::now();
     let jobs = it.drain_microtasks().unwrap_or_else(|e| die(format!("drain {e:?}")));
     let t_drain = t3.elapsed();
@@ -79,10 +82,12 @@ fn run_case(case: String, scale: usize) {
     let freed = it.collect(&[reader]).unwrap_or_else(|e| die(format!("collect {e:?}")));
     let t_collect = t4.elapsed();
     let after = it.heap.stats();
+    if it.agg_stats() != AggStats::default() { die(format!("aggregate metadata retained: {:?}", it.agg_stats())); }
     let cpu = cpu_ms();
     println!(
-        "{case:9} x{scale:<3} n={n:<7} jobs={jobs:<7} queued_before_drain={queued:<7} run={:>7.1}ms drain={:>7.1}ms collect={:>6.1}ms | cpu(whole process)={cpu:>7.1}ms peakRSS={}MiB | heap objs alloc={} strs alloc={} live_before={} live_after={} freed={} | agg_records={} agg_items={} | steps={} functions_before={} functions_after={} setup={:.1}ms parse={:.1}ms",
+        "{case:9} x{scale:<3} n={n:<7} jobs={jobs:<7} queued_before_drain={queued:<7} run={:>7.1}ms suspended_gc={:>6.1}ms drain={:>7.1}ms collect={:>6.1}ms | cpu(whole process)={cpu:>7.1}ms peakRSS={}MiB | heap objs alloc={} strs alloc={} live_before={} live_after={} freed={} | agg_records={} agg_items={} | steps={} functions_before={} functions_after={} setup={:.1}ms parse={:.1}ms",
         t_run.as_secs_f64() * 1e3,
+        t_suspended.as_secs_f64() * 1e3,
         t_drain.as_secs_f64() * 1e3,
         t_collect.as_secs_f64() * 1e3,
         proc_kib("VmHWM:") / 1024,

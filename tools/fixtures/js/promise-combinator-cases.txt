@@ -256,3 +256,17 @@ var log = []; function L(x) { log.push(String(x)); }
 var p = Promise.all([Promise.reject(1)]); p.catch(function () {});
 var q = Promise.all([]);
 (function () { return log.join("|"); })
+
+=== aggregate_error_cause_order
+var log = [], options = { get cause() { log.push('cause'); return 7; } };
+var errors = { [Symbol.iterator]() { log.push('iter'); return [1][Symbol.iterator](); } };
+var e = new AggregateError(errors, { toString() { log.push('message'); return 'm'; } }, options);
+var d = Object.getOwnPropertyDescriptor(e, 'cause');
+(function () { return [e.cause, log.join(), d.writable, d.enumerable, d.configurable].join('|'); })
+=== aggregate_error_inherited_undefined_cause
+var e = AggregateError([], undefined, Object.create({ cause: undefined }));
+(function () { return [Object.prototype.hasOwnProperty.call(e, 'cause'), e.cause, Object.prototype.hasOwnProperty.call(e, 'message')].join('|'); })
+=== aggregate_error_cause_throw_stops_iteration
+var log = [], reason;
+try { AggregateError({ [Symbol.iterator]() { log.push('iter'); return [][Symbol.iterator](); } }, 'm', { get cause() { log.push('cause'); throw 19; } }); } catch (e) { reason = e; }
+(function () { return reason + '|' + log.join(); })

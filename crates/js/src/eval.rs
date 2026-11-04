@@ -652,6 +652,7 @@ impl<'p> Interp<'p> {
         self.sc_roots(&mut work);
         self.weak_roots(&mut work);
         let mut pending: FxMap<ObjId, Vec<Value>> = FxMap::default();
+        let mut agg_seen: FxSet<u64> = FxSet::default();
         let mut env_work: Vec<u32> = vec![0];
         let mut act_seen = vec![false; self.aw.acts.len()];
         self.async_queue_roots(&mut work, &mut env_work, &mut act_seen);
@@ -679,7 +680,7 @@ impl<'p> Interp<'p> {
                     work.push(*this);
                     work.extend(args.iter().copied());
                 }
-                Some(&Callee::Promise(pf)) => self.pfn_trace(pf, &mut work),
+                Some(&Callee::Promise(pf)) => self.pfn_trace(pf, &mut agg_seen, &mut work),
                 _ => {}
             }
             self.promise_trace(o, &mut work);
