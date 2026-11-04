@@ -245,6 +245,7 @@ enum Nat {
     IsNaN,
     /// JSON, RegExp and String.prototype bindings (`eval_builtins.rs`).
     Ext(Bi),
+    Bin(BinFn),
 }
 
 enum Callee {
@@ -348,6 +349,7 @@ pub struct Interp<'p> {
     /// JSON, RegExp and String bindings: state of `eval_builtins.rs`.
     ext: Ext,
     host: Option<Rc<dyn Host>>,
+    bin: BinaryState,
     // permanent keys
     k_length: PropertyKey,
     k_name: PropertyKey,
@@ -386,6 +388,7 @@ impl<'p> Interp<'p> {
         it.install_builtins()?;
         it.install_ext()?;
         it.install_promise()?;
+        it.install_binary()?;
         Ok(it)
     }
 
@@ -473,6 +476,7 @@ impl<'p> Interp<'p> {
             promise: PromiseState::default(),
             ext,
             host: None,
+            bin: BinaryState::default(),
             k_length: ks[0],
             k_name: ks[1],
             k_message: ks[2],
@@ -553,6 +557,7 @@ impl<'p> Interp<'p> {
             v.extend(e.this);
         }
         self.promise_roots(&mut v);
+        self.binary_roots(&mut v);
         self.promise_all_values(&mut v);
         if let Some(h) = &self.host {
             h.roots(&mut v);
@@ -590,6 +595,7 @@ impl<'p> Interp<'p> {
             h.roots(&mut host_vals);
             work.extend_from_slice(&host_vals);
         }
+        self.binary_roots(&mut work);
         let mut env_work: Vec<u32> = vec![0];
         loop {
             if let Some(e) = env_work.pop() {
@@ -624,7 +630,10 @@ impl<'p> Interp<'p> {
                 h.trace(o, &mut host_vals);
                 work.extend_from_slice(&host_vals[from..]);
             }
-            let keys = h!(self, self.heap.own_keys(o));
+            if let Some((buf, _, _)) = self.heap.view_parts(o) {
+                work.push(Value::Object(buf));
+            }
+            let keys = h!(self, self.heap.stored_keys(o));
             for k in keys {
                 match h!(self, self.heap.get_own_property(o, k)) {
                     Some(Property::Data { value, .. }) => work.push(value),
@@ -1424,7 +1433,7 @@ impl<'p> Interp<'p> {
         let d = match self.funcs.get(&o) {
             Some(&Callee::Host { id, ctor: true }) => D::H(id),
             Some(&Callee::Script { script, fid, env, self_binding }) if self.func_of(script, fid).kind == FuncKind::Normal => D::S(script, fid, env, self_binding),
-            Some(&Callee::Native(n)) if matches!(n, Nat::ObjectCtor | Nat::FnCtor | Nat::ArrayCtor | Nat::ErrorCtor(_) | Nat::Ext(Bi::RegExpCtor)) => D::N(n),
+            Some(&Callee::Native(n)) if matches!(n, Nat::ObjectCtor | Nat::FnCtor | Nat::ArrayCtor | Nat::ErrorCtor(_) | Nat::Ext(Bi::RegExpCtor)) || matches!(n, Nat::Bin(b) if b.ctor_name().is_some() || b == BinFn::TaCtor) => D::N(n),
             Some(&Callee::Native(Nat::StringFn | Nat::NumberFn | Nat::BooleanFn)) => return Err(unsupported("wrapper object (new String/Number/Boolean)", Span::default())),
             Some(Callee::Bound { target, args, .. }) => D::B(*target, args.clone()),
             Some(&Callee::Promise(pf @ PFn::Ctor)) => D::P(pf),
@@ -1614,7 +1623,14 @@ impl<'p> Interp<'p> {
         }
     }
 
-    fn put_prop(&mut self, base: Value, key: PropertyKey, v: Value) -> Res<()> {
+    fn put_prop(&mut self, base: Value, key: PropertyKey, mut v: Value) -> Res<()> {
+        // A write to an integer index of a view runs ToNumber on the value first, even when the index is out of range.
+        if let (Value::Object(o), Value::Object(_)) = (base, v)
+            && self.heap.has_exotics()
+            && self.heap.is_view_index_key(o, key)
+        {
+            v = Value::Number(self.coerce_number(v)?);
+        }
         match base {
             Value::Object(o) => match h!(self, self.heap.set(o, key, v)) {
                 Set::Done => Ok(()),
@@ -1997,7 +2013,7 @@ impl<'p> Interp<'p> {
     /// CopyDataProperties: own enumerable properties of `src` onto `to`, skipping `skip`.
     fn copy_props(&mut self, to: ObjId, src: Value, skip: &[PropertyKey]) -> Res<()> {
         let keys: Vec<PropertyKey> = match src {
-            Value::Object(o) => h!(self, self.heap.own_keys(o)),
+            Value::Object(o) => self.property_keys(o)?,
             Value::String(s) => (0..h!(self, self.heap.str_len(s)) as u32).map(PropertyKey::Index).collect(),
             _ => return Ok(()),
         };
@@ -2301,7 +2317,7 @@ impl<'p> Interp<'p> {
     fn iter_start(&mut self, v: Value, e: ExprId) -> Res<It> {
         match v {
             Value::String(_) => Ok(It { src: v, i: 0 }),
-            Value::Object(o) if h!(self, self.heap.is_array(o)) => Ok(It { src: v, i: 0 }),
+            Value::Object(o) if h!(self, self.heap.is_array(o)) || self.heap.view_parts(o).is_some() => Ok(It { src: v, i: 0 }),
             _ => {
                 let m = format!("{} is not iterable", self.src_text(e));
                 Err(self.type_err(&m))
@@ -2312,7 +2328,7 @@ impl<'p> Interp<'p> {
     fn iter_start_val(&mut self, v: Value) -> Res<It> {
         match v {
             Value::String(_) => Ok(It { src: v, i: 0 }),
-            Value::Object(o) if h!(self, self.heap.is_array(o)) => Ok(It { src: v, i: 0 }),
+            Value::Object(o) if h!(self, self.heap.is_array(o)) || self.heap.view_parts(o).is_some() => Ok(It { src: v, i: 0 }),
             _ => {
                 let t = self.display(v);
                 Err(self.type_err(&format!("{t} is not iterable")))
@@ -2868,6 +2884,14 @@ impl<'p> Interp<'p> {
         r
     }
 
+    /// Charge virtual view indices before materializing their key list.
+    fn property_keys(&mut self, o: ObjId) -> Res<Vec<PropertyKey>> {
+        if let Some((_, _, len)) = self.heap.view_parts(o) {
+            self.spend(len as u64)?;
+        }
+        Ok(h!(self, self.heap.own_keys(o)))
+    }
+
     fn for_in_keys(&mut self, v: Value) -> Res<Vec<PropertyKey>> {
         let mut o = match v {
             Value::Object(o) => o,
@@ -2877,7 +2901,7 @@ impl<'p> Interp<'p> {
         let mut seen: FxSet<PropertyKey> = FxSet::default();
         let mut out = Vec::new();
         loop {
-            for k in h!(self, self.heap.own_keys(o)) {
+            for k in self.property_keys(o)? {
                 self.tick()?;
                 if matches!(k, PropertyKey::Symbol(_)) || !seen.insert(k) {
                     continue;
@@ -2912,6 +2936,7 @@ fn num_base(t: &str) -> NumBase {
 
 include!("eval_native.rs");
 include!("eval_promise.rs");
+include!("eval_binary.rs");
 include!("eval_scripts.rs");
 include!("eval_builtins.rs");
 include!("eval_json_stringify.rs");
@@ -2939,3 +2964,7 @@ mod stringify_tests;
 #[cfg(test)]
 #[path = "eval_host_tests.rs"]
 mod host_tests;
+
+#[cfg(test)]
+#[path = "eval_binary_tests.rs"]
+mod binary_tests;

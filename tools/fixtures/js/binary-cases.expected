@@ -1,0 +1,79 @@
+ab_length_forms	string:8|0|3|0|0|0|1|RangeError|RangeError|RangeError|TypeError
+ab_length_coercion_runs	string:v,m:4
+ab_ctor_shape	string:1|ArrayBuffer|false|false|false|true|true|function||false|true|get byteLength|0|2|1|true
+ab_byteLength_brand	string:3|TypeError|TypeError|TypeError|TypeError|TypeError
+ab_slice_copies	string:3|99,3,4|1,2,3,4,5,6|false|6|2|3|0|6|6|2|6
+ab_slice_coercion_order	string:s,e,e2
+ab_slice_brand	string:TypeError|TypeError|TypeError
+ab_slice_constructor_read	string:TypeError|3|3
+ab_isView	string:true|false|false|false|false|true|false|false|false
+ab_resizable_option_is_not_silent	string:4|4|4
+u8_shape	string:3|Uint8Array|TypedArray|0|false|true|true|1|1|false|false|false|false|false|true|true|true|1|2|2
+u8_abstract_ctor	string:TypeError|TypeError|TypeError|TypeError
+u8_getter_shape_and_brand	string:buffer:function,undefined,false,true,get buffer,0,TypeError,TypeError,TypeError byteLength:function,undefined,false,true,get byteLength,0,TypeError,TypeError,TypeError byteOffset:function,undefined,false,true,get byteOffset,0,TypeError,TypeError,TypeError length:function,undefined,false,true,get length,0,TypeError,TypeError,TypeError
+u8_length_forms	string:0|3|4|2|0|0|1|0|0|RangeError|RangeError|0
+u8_from_array_and_array_like	string:1,2,44,255,1,0,7,0,0,1,0,16,0,5,253,0|5,0,9|0|1,2||1
+u8_from_array_order	string:g0,g1,v,v,|,g0,v,g1,v
+u8_from_array_length_getter	string:len,2
+u8_from_typed_copies	string:1,2,3,4|9,2,3,4|2,7|false|0|2|4
+u8_over_buffer	string:3|2|3|3|3|6|5|0|8|7|true|RangeError|RangeError|RangeError|RangeError|RangeError|2|0|0|RangeError
+u8_over_buffer_coercion_order	string:off,len,off2,len2,RangeError
+u8_aliasing	string:0,0,11,22,33,0|11,22,33|22,33|3|true|2
+u8_index_read_write	string:44|255|3||||255||||||3|0,1,2
+u8_named_properties_are_ordinary	string:1|x|2|3|4|5|6|0,1,foo,bar,01, 1,1e0,+1,0x1|2|true
+u8_conversion_table	string:0,1,255,0,1,255,1,0,1,255,255,0,0,0,0,0,1,0,1,0,0,0,0,0,12,31,0,7,0,1,0,0,0,0,5,0,0,44,9,0
+u8_write_runs_valueOf_even_out_of_range	string:in,out,neg,frac,negzero:5trueobject
+u8_write_throwing_valueOf	string:RangeError1
+u8_in_operator	string:true|true|false|false|true|false|false|false|false|true|true|false|true|false|true
+u8_in_ignores_prototype_for_numbers	string:false||false||false||false
+u8_delete	string:true|false|true|true|true||0|2|TypeError|true|true
+u8_own_keys_and_enumeration	string:0,1,2,b,a|0,1,2,b,a|0,1|0
+u8_has_own_property	string:true|true|false|true|false|false|false|false|true
+u8_descriptors	string:5,true,true,true,false|6,true,true,true,false|undefined|undefined|undefined|undefined|undefined
+u8_define_property	string:44|9|true|TypeError|TypeError|TypeError|TypeError|TypeError|TypeError|TypeError|TypeError|TypeError|1|1|undefined|1|9
+u8_set_through_prototype_chain	string:1|2||true|false|1|9|true|false|false|false|true|0,named
+u8_set_array_source	string:1,2,44,7,8,9|0,5,6,0|1,2,0|0,0,0
+u8_set_errors	string:RangeError|RangeError|RangeError|RangeError|TypeError|TypeError|TypeError|RangeError|RangeError|undefined|RangeError|RangeError|TypeError|TypeError|undefined|undefined|undefined
+u8_set_typed_and_overlap	string:1,2,1,2,3,6|3,4,5,6,5,6|2,3,4,5,5,6|1,1,2,3,4,6|1,2,3,4,5,6|1,1,2,3,4,6|0,9,8,0
+u8_set_coercion_order	string:off,len,g0,v0,g1,v1:0,1,2,0
+u8_set_partial_on_throw	string:TypeError:1,9,9,9
+u8_set_offset_checked_before_source_read	string:RangeError,len2,RangeError
+u8_subarray	string:0,1,2,3,4,5@0/6|2,3,4,5@2/4|4,5@4/2|1,2@1/2|1,2,3,4@1/4|3,4@3/2|@4/0|@6/0|0,1@0/2|0,1,2,3,4,5@0/6|0,1@0/2|@0/0|1,2@1/2|@6/0|0,1,2,3,4,5@0/6|2,3,4,5@2/4|@6/0|1,2@1/2
+u8_subarray_shares_and_nests	string:0,1,77,3,88,5|1,77,3,88|77,3|2|true|3|3|0|2
+u8_subarray_constructor_read	string:TypeError|3|3|TypeError|TypeError|3
+u8_subarray_slice_coercion_order	string:b,e,b2,e2
+u8_slice	string:0,1,2,3,4,5@0/6/false/6|2,3,4,5@0/4/false/4|4,5@0/2/false/2|1,2@0/2/false/2|1,2,3,4@0/4/false/4|@0/0/false/0|@0/0/false/0|0,1@0/2/false/2|0,1@0/2/false/2|1,2@0/2/false/2|@0/0/false/0|0,1,2,3,4,5@0/6/false/6
+u8_slice_copies_and_views	string:0,1,2,3,4,5|99,2,3|55,4|false|2|2,3,4|2,3
+u8_method_brand_errors	string:TypeError|TypeError|TypeError|TypeError
+u8_iteration	string:5,6,7|5,6,7|5|6|0|3
+u8_iteration_sees_writes	string:1,2,9
+u8_equality_and_identity	string:false|true|true|false|false|object|object|function|function
+u8_big_view_scan_and_fill	string:522240|14950|255|0|255|100
+enc_shape_and_brand	string:0|TextEncoder|utf-8|function||true|true|get encoding|0|2|true|true|TypeError|TypeError|TypeError|TypeError|TypeError|TypeError|utf-8
+enc_encode_values	string:|97,98,99|195,169,226,130,172,240,159,152,128|||110,117,108,108|49,50|104,105|0,127,194,128,223,191,224,160,128,239,191,191|3
+enc_encode_surrogates	string:239,191,189|239,191,189|97,239,191,189,98|239,191,189,239,191,189|239,191,189|239,191,189,240,159,152,128|239,191,189,240,159,152,128|237,159,191,238,128,128|244,143,191,191|239,191,189,120
+enc_encode_result_shape	string:3|3|0|3|true|99
+enc_encode_symbol_free_coercion_errors	string:RangeError|TypeError|TypeError
+enc_encodeInto_counts	string:0/0: 1/1:97 1/1:97,0 2/3:97,195,169 2/3:97,195,169,0 2/3:97,195,169,0,0 3/6:97,195,169,226,130,172 3/6:97,195,169,226,130,172,0 3/6:97,195,169,226,130,172,0,0 3/6:97,195,169,226,130,172,0,0,0 5/10:97,195,169,226,130,172,240,159,152,128 6/11:97,195,169,226,130,172,240,159,152,128,122 6/11:97,195,169,226,130,172,240,159,152,128,122,0
+enc_encodeInto_surrogates	string:2/4:97,239,191,189 3/5:97,239,191,189,98 3/5:97,239,191,189,98,0 0/0:0,0 1/3:239,191,189 0/0:0,0,0 2/4:240,159,152,128 2/6:239,191,189,239,191,189 1/3:239,191,189,0,0,0 3/7:239,191,189,240,159,152,128 0/0: 0/0:0,0,0
+enc_encodeInto_offset_view_and_shared_buffer	string:1/3:9,9,226,130,172,9,9,9
+enc_encodeInto_result_object	string:read,written|1|1|true
+enc_encodeInto_bad_dest	string:TypeError|TypeError|TypeError|TypeError|TypeError|TypeError
+dec_ctor_labels	string:utf-8|utf-8|utf-8|utf-8|utf-8|utf-8|utf-8|utf-8|RangeError|RangeError|RangeError|RangeError|RangeError|RangeError|RangeError|TypeError|utf-8|Error
+dec_ctor_options	string:false,false|false,false|false,false|true,false|false,true|true,false|false,true|false,false|TypeError|TypeError|TypeError|Error
+dec_getters_shape_and_brand	string:encoding:function,undefined,true,true,get encoding,0,TypeError,TypeError,TypeError fatal:function,undefined,true,true,get fatal,0,TypeError,TypeError,TypeError ignoreBOM:function,undefined,true,true,get ignoreBOM,0,TypeError,TypeError,TypeError|0|TextDecoder|0|true|true|TypeError|TypeError
+dec_decode_inputs	string:||abcdef|abcdef|bc|cd||2|TypeError|TypeError|TypeError|TypeError|TypeError|TypeError|abcdef|abcdef|abcdef|abcdef
+dec_malformed_table	string:1:�|1:�|2:��|2:��|1:�|2:�A|1:߿|3:���|3:���|1:�|3:���|3:���|1:퟿|1:�|4:����|4:����|2:𐀀|2:􏿿|4:����|4:����|5:�����|1:�|2:��|1:�|2:�A|1:�|2:�A|1:�|1:�|2:�©|2:�€|3:A�B|5:�����|2:��|2:��
+dec_valid_and_bom	string:aé€😀􏿿|1|2|2|2|2|0|1|2|2
+dec_bom_resets_after_flush	string:1,1,1,2,2,1
+dec_stream_every_split_valid	string:0/417
+dec_stream_every_split_malformed	string:0/159
+dec_stream_split_text_shapes	string:0|€|0|0|😀A|0|1|0|0|�A|0
+dec_fatal_throws_on_every_malformed_form	string:TypeError,TypeError,TypeError,TypeError,TypeError,TypeError,TypeError,TypeError,TypeError,TypeError,TypeError,TypeError,TypeError,TypeError,1,1,1,2,1,0
+dec_fatal_reset_and_reuse	string:TypeError|c|0|TypeError|1|0|TypeError|B|2
+dec_fatal_bom_state_after_error	string:2,E,1,E,1,E,1,E,1
+dec_fatal_error_drops_rest_of_chunk	string:TypeError,1
+dec_ignore_bom_stream	string:0,2|0,1,1,0
+dec_decode_view_bytes_not_copied_early	string:abzb
+dec_decode_after_input_mutated_by_option_getter	string:zb
+roundtrip_scalar_classes	string:0/16

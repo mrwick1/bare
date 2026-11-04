@@ -60,6 +60,10 @@ pub enum Limit {
     Symbols,
     StringLength,
     Bytes,
+    /// One byte buffer is longer than `set_buffer_limits` allows.
+    BufferLength,
+    /// All live byte buffers together would pass `set_buffer_limits`.
+    BufferBytes,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -78,6 +82,10 @@ pub enum HeapError {
     /// The operation needs the evaluator (`ToPrimitive` on an object). Nothing was changed.
     NeedsExecution(&'static str),
 }
+
+#[path = "heap_binary.rs"]
+mod binary;
+pub use binary::{Decoder, ExoticKind};
 
 // ---------- property model ----------
 
@@ -306,6 +314,8 @@ struct Object {
     proto: Option<ObjId>,
     extensible: bool,
     is_array: bool,
+    /// The payload is in `Heap::exotics` (a buffer, a view, a text codec). See `heap_binary.rs`.
+    exotic: bool,
     /// Dense index properties that are plain data (writable, enumerable, configurable).
     /// `None` is a hole. An index lives here or in `props`, never in both.
     elems: Vec<Option<Value>>,
@@ -559,6 +569,9 @@ pub struct Stats {
     pub total_string_allocs: u64,
     pub total_symbol_allocs: u64,
     pub collections: u64,
+    /// Live exotic objects (buffers, views, text codecs) and the bytes of the live buffers.
+    pub live_exotics: usize,
+    pub buffer_bytes: usize,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -579,6 +592,11 @@ pub struct Heap {
     gray: Vec<u32>,
     /// The string `"length"`. A permanent root, so arrays can always name their length key.
     length: StrId,
+    exotics: binary::ExMap,
+    /// Bytes of the live buffers, and the caps (one buffer, all buffers).
+    buffer_bytes: usize,
+    max_buffer_bytes: usize,
+    max_buffer_len: usize,
 }
 
 impl Default for Heap {
@@ -602,6 +620,10 @@ impl Heap {
             collections: 0,
             gray: Vec::new(),
             length: StrId { index: 0, gn: 0 },
+            exotics: Default::default(),
+            buffer_bytes: 0,
+            max_buffer_bytes: binary::DEFAULT_BUFFER_CAP,
+            max_buffer_len: binary::DEFAULT_BUFFER_CAP,
         };
         h.length = h.intern_str("length")?;
         Ok(h)
@@ -628,6 +650,8 @@ impl Heap {
             total_string_allocs: self.strings.allocs,
             total_symbol_allocs: self.symbols.allocs,
             collections: self.collections,
+            live_exotics: self.exotics.len(),
+            buffer_bytes: self.buffer_bytes,
         }
     }
 
@@ -911,7 +935,7 @@ impl Heap {
             let len = PropertyKey::String(self.length);
             props.set(len, Property::Data { value: Value::Number(0.0), writable: true, enumerable: false, configurable: false });
         }
-        let o = Object { proto, extensible: true, is_array, elems: Vec::new(), props };
+        let o = Object { proto, extensible: true, is_array, exotic: false, elems: Vec::new(), props };
         let cost = obj_bytes(&o);
         self.charge(cost)?;
         let (index, gn) = self.objects.alloc(o, Limit::Objects)?;
@@ -980,7 +1004,11 @@ impl Heap {
     /// `Object.getOwnPropertyDescriptor`.
     pub fn get_own_property(&self, o: ObjId, key: PropertyKey) -> R<Option<Property>> {
         self.check_key(key)?;
-        Ok(self.own(self.obj(o)?, key))
+        let ob = self.obj(o)?;
+        if ob.exotic && let Some(r) = self.view_own(o, key) {
+            return Ok(r);
+        }
+        Ok(self.own(ob, key))
     }
 
     pub fn has_own_property(&self, o: ObjId, key: PropertyKey) -> R<bool> {
@@ -993,6 +1021,9 @@ impl Heap {
         let mut cur = Some(o);
         while let Some(c) = cur {
             let obj = self.obj(c)?;
+            if obj.exotic && let Some(r) = self.view_own(c, key) {
+                return Ok(r.is_some());
+            }
             if self.own(obj, key).is_some() {
                 return Ok(true);
             }
@@ -1007,6 +1038,9 @@ impl Heap {
         let mut cur = Some(o);
         while let Some(c) = cur {
             let obj = self.obj(c)?;
+            if obj.exotic && let Some(r) = self.view_own(c, key) {
+                return Ok(r.map(|p| (c, p)));
+            }
             if let Some(p) = self.own(obj, key) {
                 return Ok(Some((c, p)));
             }
@@ -1027,6 +1061,9 @@ impl Heap {
     /// `o[key] = value` (OrdinarySet with the receiver `o`). Never calls a setter: it returns it.
     pub fn set(&mut self, o: ObjId, key: PropertyKey, value: Value) -> R<Set> {
         self.check_value(value)?;
+        if self.has_exotics() && let Some(r) = self.exotic_set(o, key, value)? {
+            return Ok(r);
+        }
         match self.lookup(o, key)? {
             Some((_, Property::Accessor { set: Some(s), .. })) => return Ok(Set::Setter(s)),
             Some((_, Property::Accessor { set: None, .. })) => return Ok(Set::Rejected),
@@ -1045,6 +1082,9 @@ impl Heap {
     /// `delete o[key]`. `false` for a non-configurable property.
     pub fn delete(&mut self, o: ObjId, key: PropertyKey) -> R<bool> {
         self.check_key(key)?;
+        if self.obj(o)?.exotic && let Some(r) = self.view_own(o, key) {
+            return Ok(r.is_none()); // a valid index of a view cannot be deleted
+        }
         let Some(p) = self.own(self.obj(o)?, key) else { return Ok(true) };
         if !p.configurable() {
             return Ok(false);
@@ -1056,6 +1096,15 @@ impl Heap {
     /// `Reflect.ownKeys`: array indices ascending, then strings in creation order, then symbols
     /// in creation order. An array's `length` is the first string.
     pub fn own_keys(&self, o: ObjId) -> R<Vec<PropertyKey>> {
+        self.own_keys_with(o, true)
+    }
+
+    /// Like `own_keys`, but without the virtual integer indices of a byte view. For tracing: those hold no references.
+    pub fn stored_keys(&self, o: ObjId) -> R<Vec<PropertyKey>> {
+        self.own_keys_with(o, false)
+    }
+
+    fn own_keys_with(&self, o: ObjId, virt: bool) -> R<Vec<PropertyKey>> {
         let ob = self.obj(o)?;
         let mut idx: Vec<u32> = ob.elems.iter().enumerate().filter(|(_, v)| v.is_some()).map(|(i, _)| i as u32).collect();
         let sparse = ob.props.index_keys > 0;
@@ -1070,7 +1119,8 @@ impl Heap {
         if sparse {
             idx.sort_unstable();
         }
-        let mut out: Vec<PropertyKey> = idx.into_iter().map(PropertyKey::Index).collect();
+        let mut out: Vec<PropertyKey> = if ob.exotic && virt { self.view_keys(o)? } else { Vec::new() };
+        out.extend(idx.into_iter().map(PropertyKey::Index));
         out.extend(strs);
         out.extend(syms);
         Ok(out)
@@ -1100,7 +1150,12 @@ impl Heap {
         if d.is_accessor() && d.is_data() {
             return Err(HeapError::InvalidDescriptor);
         }
-        if !obj.is_array {
+        let (exotic, is_array) = (obj.exotic, obj.is_array);
+        if exotic && let Some(r) = self.view_define(o, key, d)? {
+            return Ok(r);
+        }
+        let obj = self.obj(o)?;
+        if !is_array {
             return self.ordinary_define(o, key, d);
         }
         if key == PropertyKey::String(self.length) {
@@ -1207,7 +1262,7 @@ impl Heap {
             self.check_value(r)?;
         }
         self.collections += 1;
-        let Heap { objects, strings, symbols, gray, length, .. } = self;
+        let Heap { objects, strings, symbols, gray, length, exotics, .. } = self;
         for sl in [&mut strings.marks, &mut symbols.marks] {
             sl.clear();
         }
@@ -1232,6 +1287,9 @@ impl Heap {
             let o = &ol[d as usize];
             if let Some(p) = o.proto {
                 m.obj(p);
+            }
+            if o.exotic && let Some(binary::Exotic::View { buffer, .. }) = exotics.get(&objects.back[d as usize]) {
+                m.obj(*buffer);
             }
             for v in o.elems.iter().flatten() {
                 m.value(*v);
@@ -1259,6 +1317,7 @@ impl Heap {
             symbols: symbols.sweep(|_| freed_bytes += slot_bytes::<Symbol>()),
         };
         self.bytes -= freed_bytes;
+        self.prune_exotics();
         // The interner is weak: rebuild it from the strings that survived.
         self.interner.rebuild(&self.strings);
         Ok(c)

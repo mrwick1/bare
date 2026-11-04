@@ -149,6 +149,8 @@ Extend the existing HTML arena, CSS selector matcher and URL code. Keep browser 
 
 The first DOM/event bridge is integrated as a library. A generic Host hook connects the evaluator to the native Document, stable wrappers, tree and attribute mutation, selectors, input state and capture/target/bubble dispatch. Driver input changes native state and dispatches events. Host metadata participates in explicit collection. Shared-script listeners and Promise checkpoints also use the reviewed JSON/regexp/String bindings. This is a foundation, not completion of topics 1 or 2: Chrome comparison, focus, default actions, form validation and full namespace behavior remain open. The CLI does not yet schedule page scripts. See [resources.md](resources.md#dom-and-event-host-bridge).
 
+ArrayBuffer, Uint8Array and UTF-8 TextEncoder/TextDecoder foundations are integrated. Views share checked backing buffers and participate in collection. Streaming decode keeps fixed state. The parent fixed combined object/payload accounting, range validation, virtual-key work charging and exact decoder output caps. The byte APIs also pass a DOM/listener/Promise collection fixture. Fetch consumers and Symbol/class integration remain separate gates. See [resources.md](resources.md#byte-buffers-and-utf-8-codecs).
+
 | Topic | Work | Check before closing |
 | --- | --- | --- |
 | 1 | Add DOM creation, attributes, text replacement, insertion, removal and queries required by the target. | DOM invariants, node identity, detached nodes and mutation tests agree with Chrome. |
