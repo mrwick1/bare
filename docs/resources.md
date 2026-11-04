@@ -556,3 +556,23 @@ All scales pass with zero growth flags. Parent did not reproduce the delegate's 
 Checks: 661 workspace tests pass, including 81 network tests. Header fuzzing runs inside the network suite. The separate URL fuzz run uses 300,000 inputs and seed 5. Strict clippy reports pre-existing findings in DNS, HTTP response helpers, HTML and Unicode. The net/URL targets pass strict clippy with only the three pre-existing net lint classes allowed. Parent fixed the new test's single-match lint.
 
 No HTTPS or staging requests were tested. Full-duplex early-response handling while a server keeps the connection open and stops reading a large upload is unsupported. The existing write timeout bounds that failure. POST never retries after a write. A cross-origin 307 or 308 preserves the body; credential headers are stripped. The HTTP cache has no header variants, so custom-header requests bypass it.
+
+## Certificate path validation
+
+2026-11-04, archMachine, release. The validator checks SAN hostname, validity, CA and key-use rules, path length and each used certificate signature. A path ends only at an independently loaded store entry. The peer's unused RSA cross-sign does not need verification. Unsupported name and policy constraints fail closed. Search uses at most eight peer certificates, 64 KiB of peer DER, four intermediates and eight signature checks. The search allocates no heap memory.
+
+A subject-only DER prefilter avoids full parsing of unrelated roots. A matching root still needs a full parse, policy checks and signature verification. The delegate measured the discarded full-parse scan as slower on a 1,024-anchor store. Parent reproduced the final code, not that comparison. The remaining measured cost is ECDSA verification.
+
+Parent ran the driver at base 100, with 150 anchors and the real anchor last. Each process had a 512 MiB address-space cap and a 40 s timeout. The delegate separately ran base 2,000 up to 200,000 checks per mode. Those checks reuse a bounded fixture set; they are not distinct random chains.
+
+| Case | Calls 1x / 10x / 100x | Microseconds per call | 100x wall / CPU seconds | Peak RSS KiB | Loop allocations |
+| --- | --- | --- | --- | --- | --- |
+| Valid staging chain | 100 / 1k / 10k | 1422 / 1239 / 1163 | 11.63 / 11.42 | 2,648–2,652 | 0 |
+| Invalid chain, host or time | 100 / 1k / 10k | 291 / 272 / 257 | 2.57 / 2.55 | 2,620–2,652 | 0 |
+| CertificateVerify rejection | 100 / 1k / 10k | 68 / 67 / 67 | 0.67 / 0.67 | 2,608–2,628 | 0 |
+
+Every expected acceptance and rejection matched. Parent tightened the CertificateVerify load driver to fail if its rejection workload ever accepts. This mode measures rejection only. Positive CertificateVerify tests use OpenSSL-signed synthetic keys and exact TLS server context bytes.
+
+Reproduce: build `tools/crypto/verify_load.rs` with `rustc --edition=2024 -C opt-level=3`, then run `<out> valid|invalid|cv 1|10|100 100 150 last`. Tests cover 34 synthetic chains, impostor roots, peer-only roots, time edges, limits and changed signed/signature bytes. The stored OpenSSL oracle accepts 12 cases this conservative implementation rejects; tests list each difference explicitly. Parent added and ran an ignored environment check against the real OS root bundle and the public staging chain at a fixed fixture time. No live TLS socket is involved.
+
+All 674 workspace tests pass. All 13 normal validator tests pass in release and forced-portable builds. Crypto clippy passes with all features. No revocation, certificate transparency, RSA, Ed25519, wildcard names, DN normalization, leaf-as-anchor path, non-x86 host or concurrent path validation was tested. Anchor validity and CA rules are deliberately strict. These limits can reject otherwise valid sites. HTTPS remains guarded until the connected client and transport are integrated.
