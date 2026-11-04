@@ -14,8 +14,8 @@
 // - Names are interned once for the whole realm (`names`), so a binding name means the same in every script.
 // - Retention: a script and its caches stay until the realm is dropped, even if no closure reaches them. The
 //   bounds are `EvalLimits::max_scripts`, `max_script_source` and `max_script_nodes`, checked before the
-//   source is parsed and while it is parsed. A script that fails (syntax, unsupported, limit) is not kept and
-//   its interned names are removed again.
+//   source is parsed and while it is parsed. A script rejected during parse or preflight is not kept and
+//   its interned names are removed again. Runtime failures keep code for already-created closures.
 //
 // GC: `script_roots` gives the parked scripts' cached strings to `roots`. The names are rooted once.
 
@@ -63,6 +63,7 @@ impl<'p> Interp<'p> {
         let empty = crate::parse::parse_script("", Default::default()).map_err(|_| unsupported("empty script", Span::default()))?;
         let mut it = Self::with_code(Rc::new(empty.into_owned()), heap, limits)?;
         it.install_builtins()?;
+        it.install_promise()?;
         Ok(it)
     }
 
@@ -88,11 +89,12 @@ impl<'p> Interp<'p> {
             return Err(Error::Limit(LimitKind::Scripts));
         }
         let src_room = self.limits.max_script_source.saturating_sub(self.script_source);
-        if source.len() > src_room {
+        let per_script_source = src_room.min(crate::lex::MAX_SOURCE_LEN);
+        if source.len() > per_script_source {
             return Err(Error::Limit(LimitKind::ScriptSource));
         }
         let node_room = self.limits.max_script_nodes.saturating_sub(self.script_nodes);
-        let pl = crate::parse::Limits { max_source: src_room, max_nodes: node_room.min(u32::MAX as usize) as u32, ..Default::default() };
+        let pl = crate::parse::Limits { max_source: per_script_source, max_nodes: node_room.min(u32::MAX as usize) as u32, ..Default::default() };
         let parsed = match crate::parse::parse_script(source, pl) {
             Ok(p) => p,
             Err(e) => {

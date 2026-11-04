@@ -77,7 +77,7 @@ pub struct EvalLimits {
 
 impl Default for EvalLimits {
     fn default() -> Self {
-        EvalLimits { max_steps: 100_000_000, max_call_depth: 100, max_envs: 1 << 20, max_functions: 1 << 20, max_scripts: 4096, max_script_source: 64 << 20, max_script_nodes: 16 << 20 }
+        EvalLimits { max_steps: 100_000_000, max_call_depth: 100, max_envs: 1 << 20, max_functions: 1 << 20, max_scripts: 4096, max_script_source: 64 << 20, max_script_nodes: 8 << 20 }
     }
 }
 
@@ -363,6 +363,7 @@ impl<'p> Interp<'p> {
     /// Check the whole tree (Unsupported is reported here, before anything runs) and build the global
     /// object and the builtins in `heap`.
     pub fn new(prog: &'p Program<'p>, heap: Heap, limits: EvalLimits) -> Result<Interp<'p>, Error> {
+        Self::check_code_limits(prog, &limits)?;
         let mut it = Self::with_code(Rc::new(prog.clone().into_owned()), heap, limits)?;
         it.walk_program()?;
         it.install_builtins()?;
@@ -370,11 +371,18 @@ impl<'p> Interp<'p> {
         Ok(it)
     }
 
-    fn with_code(prog: Rc<Program<'static>>, mut heap: Heap, mut limits: EvalLimits) -> Result<Interp<'p>, Error> {
-        let stats = prog.stats();
+    fn check_code_limits(prog: &Program<'_>, limits: &EvalLimits) -> Res<()> {
         if limits.max_scripts == 0 { return Err(Error::Limit(LimitKind::Scripts)); }
         if prog.source.len() > limits.max_script_source { return Err(Error::Limit(LimitKind::ScriptSource)); }
+        let stats = prog.stats();
         if stats.nodes() + stats.list_items > limits.max_script_nodes { return Err(Error::Limit(LimitKind::ScriptNodes)); }
+        if limits.max_envs == 0 { return Err(Error::Limit(LimitKind::Envs)); }
+        Ok(())
+    }
+
+    fn with_code(prog: Rc<Program<'static>>, mut heap: Heap, mut limits: EvalLimits) -> Result<Interp<'p>, Error> {
+        let stats = prog.stats();
+        Self::check_code_limits(&prog, &limits)?;
         limits.max_call_depth = limits.max_call_depth.min(100);
         if limits.max_envs == 0 { return Err(Error::Limit(LimitKind::Envs)); }
         macro_rules! e {

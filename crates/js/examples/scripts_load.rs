@@ -212,7 +212,20 @@ fn exec(name: &str, scale: usize) {
     );
 }
 
+fn preflight() {
+    let source = "0;".repeat(10_000);
+    let program = bare_js::parse::parse_script(&source, Default::default()).unwrap();
+    let heap = Heap::default();
+    let before = BYTES.load(Relaxed);
+    let result = Interp::new(&program, heap, EvalLimits { max_scripts: 0, ..Default::default() });
+    let bytes = BYTES.load(Relaxed) - before;
+    assert!(matches!(result, Err(Error::Limit(LimitKind::Scripts))));
+    assert_eq!(bytes, 0, "rejected code was copied before budget validation");
+    println!("rejected code: zero copied bytes");
+}
+
 fn main() {
+    if std::env::args().nth(1).as_deref() == Some("preflight") { preflight(); return; }
     let a: Vec<String> = std::env::args().collect();
     if a.len() != 3 {
         die("usage: scripts_load CASE SCALE".into());

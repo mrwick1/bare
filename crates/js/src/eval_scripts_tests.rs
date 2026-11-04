@@ -254,3 +254,45 @@ fn construct_checks_the_callee_script_not_the_current_one() {
         assert_eq!(out(&mut it, "try { new arrow() } catch (e) { e.name }"), "TypeError");
     });
 }
+
+#[test]
+fn promise_jobs_keep_their_script_across_realm_checkpoints() {
+    big(|| {
+        let mut it = realm(limits());
+        assert_eq!(out(&mut it, "var out=[]; Promise.resolve(1).then(function(v){ out.push('A'+v); });"), "object");
+        assert_eq!(out(&mut it, "Promise.resolve(2).then(function(v){ out.push('B'+v); });"), "object");
+        it.collect(&[]).unwrap();
+        assert_eq!(it.drain_microtasks().unwrap(), 2);
+        assert_eq!(out(&mut it, "out.join('|')"), "A1|B2");
+    });
+}
+
+#[test]
+fn configurable_global_accessors_become_function_bindings() {
+    big(|| {
+        let mut it = realm(limits());
+        out(&mut it, "var hits=0; Object.defineProperty(globalThis,'f',{get:function(){ return 1; },set:function(){ hits++; },configurable:true});");
+        assert_eq!(out(&mut it, "function f(){ return 9; } f()+':'+hits;"), "9:0");
+        assert_eq!(out(&mut it, "Object.getOwnPropertyDescriptor(globalThis,'f').writable"), "true");
+    });
+}
+
+#[test]
+fn runtime_throws_keep_code_for_already_created_closures() {
+    big(|| {
+        let mut it = realm(limits());
+        assert_eq!(out(&mut it, "var survive=function(){ return 'kept'; }; throw 1;"), "throw-value:1");
+        it.collect(&[]).unwrap();
+        assert_eq!(out(&mut it, "survive()"), "kept");
+    });
+}
+
+#[test]
+fn per_script_lexer_source_cap_is_a_limit() {
+    big(|| {
+        let mut it = realm(EvalLimits { max_script_source: crate::lex::MAX_SOURCE_LEN * 2, ..limits() });
+        let source = " ".repeat(crate::lex::MAX_SOURCE_LEN + 1);
+        assert_eq!(out(&mut it, &source), "limit:ScriptSource");
+        assert_eq!(it.stats().scripts, 1);
+    });
+}

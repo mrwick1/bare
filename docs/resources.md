@@ -884,3 +884,32 @@ Parent ran seven workloads at 1x, 10x and 100x: 21 fresh release processes, each
 The constructor case allocates 1,000,053 managed objects and leaves 53 after collection. Native allocator counts were not measured; the figures report managed allocations and RSS. The delegate measured a saving from omitting resolver name/length properties but rejected it because those properties are observable. Parent retained them and did not reproduce that discarded variant.
 
 Reproduce with tools/js/promise_check.sh and tools/js/promise_load.sh with an output path. Async/await, Promise combinators, withResolvers, subclass/species construction and toStringTag remain unbuilt. Existing all/allSettled/race/any methods return explicit Unsupported. Static methods on another constructor are unsupported. Without Symbol, then validates constructor but uses the intrinsic default. Unhandled-rejection reporting is poll-only. No timers, network, staging execution, other-platform behavior or hard allocator OOM recovery was tested. A real nested host callback checkpoint was not exercised; the active-call guard is tested through its entry path.
+
+
+## Shared-realm scripts
+
+Interp.realm creates a heap/global/lexical realm. Interp.run_script parses, checks and runs another script in it. Existing new/run/call APIs remain. Program can own its source through Cow and into_owned; the evaluator keeps owned programs behind Rc. Each script has separate node caches and scope tables. Closures carry their script id. Calls and construction select the callee's code and restore the caller on success, throw and limit. Host source strings can be dropped after run_script returns.
+
+Defaults retain at most 4,096 script slots (including the empty realm slot), 64 MiB of source and 8 Mi nodes plus list entries. The lexer also caps each individual script at 64 MiB even if the host raises the total budget. Code and caches stay until realm teardown; there is no per-script reclamation. These are component budgets, not a hard total RSS limit. Parent reduced the submitted default node budget from 16 Mi to 8 Mi to lower potential retained code cost.
+
+Parent review found new cloned a rejected program before checking the script budget. The preflight allocation test failed with 620,392 copied bytes, then passed with zero after checking limits first. The per-script lexer cap was also reported as SyntaxError when the total source budget was raised. An isolated c13efd9 baseline fails the new regression; the fixed path reports Limit(ScriptSource) before parse. Empty realms now install Promise. The cross-script checkpoint regression failed with Promise missing before that hook was added.
+
+Global declaration checks run before definitions. Tests cover lexical redeclarations, lexical shadowing of configurable builtins, function declarations over configurable accessors and rejected declarations over restricted properties. A lexical whose initializer throws remains in TDZ. Parse/preflight rejection drops its code and rolls back new name metadata. Runtime and global-declaration errors can retain checked code; runtime failures must retain code for closures created before the throw. Parent added a regression that calls such a closure after collection.
+
+Parked-script literal caches are roots. Promise jobs hold function Values whose code provenance is resolved by call_fn. Parent queues callbacks in two scripts, collects before the checkpoint, then verifies both callbacks and their source literals. Other tests cover colliding ExprId/FuncId values, getters, methods, host callbacks, constructor provenance, dropped host strings, cross-script recursion and state restoration on every exit.
+
+All 180 assembled JS tests pass in debug and release; 931 workspace tests pass and crate clippy is clean. All 202 evaluator and 62 Promise Node cases still match. Parser comparison preserves all 2,087 syntax cases and normalized trees for all 15 cached staging bundles. No target bundle executes in these checks.
+
+Parent ran five release load cases at 1x, 10x and 100x in fresh processes under 1 GiB and 45 seconds each. All 15 checksums pass. The load tool raises script/count budgets for cases above the defaults. These are one-sample final results with concurrent work; no speed-up is claimed.
+
+| 100x workload | Run ms | Peak RSS MiB | Allocations |
+| --- | --- | --- | --- |
+| Many small scripts | 87.0 | 53.3 | 743,461 |
+| Five large scripts | 145.1 | 95.3 | 450,959 |
+| Cross-script calls | 868.7 | 3.5 | 162 |
+| Host calls between scripts | 1,286.6 | 6.2 | 9,985,573 |
+| Rejected scripts | 219.8 | 31.7 | 3,201,910 |
+
+Many-small retains 20,003 script slots, 380,014 nodes and 1.09 MiB source including its post-collection checks. Few-large retains about 1.2M nodes and 3.37 MiB source. The host case retains 2,004 scripts while making two million calls. Count refusals do no parse. Rejected syntax creates error objects until explicit collection; this accounts for much of that case's RSS. The delegate measured arena shrinking during ownership conversion; parent retained it but did not rebuild the discarded pre-shrink version.
+
+Reproduce with tools/js/scripts_load.sh and the scripts_load preflight mode. Not tested: per-script reclamation, actual webpack bootstrap across the deployed resource list, DOM/document loading, modules, classes/async/builtin branch integration or hard allocator OOM recovery. Unsupported spans still lack a script id. Existing evaluator semantic gates remain in force.
