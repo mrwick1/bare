@@ -691,3 +691,29 @@ fn a_typed_array_iterator_takes_no_result_objects_and_follows_the_buffer() {
         assert!(it.heap.stats().live_objects < before + 100, "no result object for each step");
     });
 }
+
+#[test]
+fn object_assign_values_and_entries_charge_view_indices_before_materializing_keys() {
+    for call in ["Object.assign({}, u)", "Object.values(u)", "Object.entries(u)"] {
+        let heap = Heap::new(HeapLimits { max_bytes: 4 << 20, ..Default::default() }).unwrap();
+        assert_eq!(run_with(&format!("var u = new Uint8Array(3000000); {call}"), heap, EvalLimits { max_steps: 100, ..Default::default() }, |_| {}), "limit:Steps", "{call}");
+    }
+}
+
+#[test]
+fn collect_with_a_suspended_view_iteration_does_not_walk_the_view_indices() {
+    // The frame holds the iterator over a 3 MB view; a key list of it would cost 24 MB against a 4 MB budget.
+    big(|| {
+        let prog = parse_script("var u = new Uint8Array(3000000); var gate; var p = new Promise(function (r) { gate = r; }); var n = 0; (async function () { for (var x of u) { await p; n++; if (n == 2) break; } })(); function probe() { return n; }", Limits::default()).unwrap();
+        let heap = Heap::new(HeapLimits { max_bytes: 4 << 20, ..Default::default() }).unwrap();
+        let mut it = Interp::new(&prog, heap, EvalLimits::default()).unwrap();
+        it.run().unwrap();
+        assert_eq!(it.async_stats().activations, 1);
+        let steps = it.stats().steps;
+        it.collect(&[]).unwrap();
+        it.collect(&[]).unwrap();
+        assert_eq!(it.stats().steps, steps, "collect charges nothing");
+        assert_eq!(it.async_stats().activations, 1);
+        assert_eq!(it.heap.stats().buffer_bytes, 3000000);
+    });
+}
