@@ -11,7 +11,7 @@
 //! invalid: each round mutates one random bit of one of the first three staging certificates, or
 //!          changes the host or the time, and verifies. Every round must fail. Exit code 1 if any
 //!          passes.
-//! cv:      CertificateVerify check of a good and a bad signature.
+//! cv:      CertificateVerify rejection path (no staging private key is available).
 //! Prints wall time, CPU time, rate, peak RSS (from /proc) and heap allocations inside the timed
 //! loop. Run each case in a fresh process under `timeout` and `ulimit -v`.
 
@@ -213,7 +213,7 @@ fn main() {
         wall * 1e6 / rounds as f64,
         peak_rss_kib()
     );
-    if mode == "valid" && bad != 0 || mode == "invalid" && ok != 0 {
+    if mode == "valid" && bad != 0 || (mode == "invalid" || mode == "cv") && ok != 0 {
         eprintln!("FAIL: unexpected result counts");
         std::process::exit(1);
     }

@@ -416,6 +416,15 @@ mod tests {
         "rsa-inter",
     ];
 
+    #[test]
+    #[ignore = "requires the host OS root bundle"]
+    fn staging_chain_with_system_roots() {
+        let (roots, _) = crate::trust_store::load_system().unwrap();
+        let peer = verify_server_chain(&STAGING, &roots, HOST, STAGING_NOW).unwrap();
+        assert_eq!(peer.path_certs(), 4);
+        assert!(verify_server_chain(&STAGING, &roots, "wrong.example", STAGING_NOW).is_err());
+    }
+
     fn section(prefix: &str) -> Vec<(&'static str, &'static str)> {
         let (mut out, mut cur, mut pos) = (vec![], None::<(&str, usize)>, 0);
         for line in PACK.split_inclusive('\n') {
@@ -725,7 +734,7 @@ mod tests {
             verify_certificate_verify(&p, 0x0503, &h, &cv("ok-leaf-p384", "sha384")),
             Err(Error::UnsupportedScheme)
         );
-        // A signature made with another key (the staging leaf) over the same content fails.
+        // A signature made with another leaf key over the same content fails.
         let c2 = case("ok");
         let p2 = run(&c2.chain, &store("root"), c2.host, NOW).unwrap();
         assert_eq!(
