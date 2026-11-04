@@ -15,6 +15,9 @@
 //! Node runs only the generated snippets in <dir>; it never sees target bundles.
 
 #[allow(dead_code)]
+#[path = "../../crates/js/src/number.rs"]
+mod number;
+#[allow(dead_code)]
 #[path = "../../crates/js/src/value.rs"]
 mod value;
 #[allow(dead_code)]

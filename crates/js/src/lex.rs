@@ -35,6 +35,7 @@
 //! Comments are JS comments for readers who know JS only: a `Result` is like a function that
 //! returns a value or throws, but the error is part of the return type.
 
+use crate::number;
 use std::borrow::Cow;
 
 /// The most source bytes the lexer accepts (64 MiB). Offsets are `u32`, so they never overflow.
@@ -1066,7 +1067,8 @@ pub fn number_value(src: &str, tok: &Token) -> Option<f64> {
         NumberBase::Octal | NumberBase::LegacyOctal => 3,
         NumberBase::Binary => 1,
         _ => {
-            return if text.contains('_') { text.replace('_', "").parse().ok() } else { text.parse().ok() };
+            let digits: Cow<str> = if text.contains('_') { text.replace('_', "").into() } else { text.into() };
+            return number::decimal_value(&digits, &mut String::new());
         }
     };
     let digits = match base {
@@ -1264,6 +1266,37 @@ mod tests {
         assert_eq!(texts("a.5"), ["a", ".5"]);
         assert_eq!(texts("0.0.1"), ["0.0", ".1"]);
         assert_eq!(texts("07.5"), ["07", ".5"]);
+    }
+
+    /// Long decimal literals (over a million units): Rust's float parser gives infinity for a
+    /// cancelling exponent. Each expected value is the one Node gives for the same text.
+    #[test]
+    fn long_decimal_literals() {
+        let m = 1_000_000;
+        let z = "0".repeat(m);
+        let val = |s: &str| {
+            let t = lex(s).unwrap();
+            assert_eq!(t.len(), 1, "{s:.40}");
+            number_value(s, &t[0]).unwrap()
+        };
+        assert_eq!(val(&format!("{}.5e-{m}", "9".repeat(m))), 1.0);
+        assert_eq!(val(&format!("1{z}e-{m}")), 1.0);
+        assert_eq!(val(&format!("0.{z}1e{m}")), 0.1);
+        assert_eq!(val(&format!("1{z}e-{}", m - 300)), 1e300);
+        assert_eq!(val(&format!("4{z}e-{}", m + 324)), f64::from_bits(1));
+        assert_eq!(val(&format!("2{z}e-{}", m + 324)), 0.0);
+        assert_eq!(val(&format!("1{z}e-{}", m - 309)), f64::INFINITY);
+        assert_eq!(val(&format!("17976931348623157{z}e-{}", m - 292)), f64::MAX);
+        // Separators are stripped before the value is taken.
+        let digits = "9".repeat(m).as_bytes().chunks(1000).map(|c| std::str::from_utf8(c).unwrap()).collect::<Vec<_>>().join("_");
+        assert_eq!(val(&format!("{digits}.5e-{m}")), 1.0);
+        // 1 + 2^-53 is exactly halfway between 1 and 1 + 2^-52: ties to even gives 1. A dropped
+        // tail above the tie rounds up, even when it is far past the kept digits.
+        let half = "1.00000000000000011102230246251565404236316680908203125";
+        assert_eq!(val(&format!("{half}{z}")), 1.0);
+        assert_eq!(val(&format!("{half}{}", "0".repeat(2000))), 1.0);
+        assert_eq!(val(&format!("{half}{z}1")), 1.0 + f64::EPSILON);
+        assert_eq!(val(&format!("{half}{}1", "0".repeat(2000))), 1.0 + f64::EPSILON);
     }
 
     #[test]

@@ -9,6 +9,8 @@
 //! exactly when the two strings have the same UTF-16 code units. That is why `strict_equals`
 //! needs no heap. Handles from two different heaps are not comparable (caller contract).
 
+use crate::number;
+
 /// Largest array index: 2^32 - 2. `2^32 - 1` is not an index; it is the largest length.
 pub const MAX_INDEX: u32 = u32::MAX - 1;
 
@@ -233,7 +235,7 @@ pub fn string_to_number(units: &[u16]) -> f64 {
     if i != b.len() {
         return f64::NAN;
     }
-    s.parse().unwrap_or(f64::NAN)
+    number::decimal_value(&s, &mut String::new()).unwrap_or(f64::NAN)
 }
 
 /// Digits of a `0x`/`0o`/`0b` literal with `bits` bits per digit. Rounds once, to nearest even:
@@ -374,5 +376,32 @@ mod tests {
         assert_eq!(p(&format!("0x1{}", "0".repeat(300))), f64::INFINITY);
         // A lone surrogate is not ASCII.
         assert!(string_to_number(&[0xD800]).is_nan());
+    }
+
+    /// Long decimal strings (over a million units): the float parser gives infinity for a
+    /// cancelling exponent. Each expected value is the one Node gives for the same text.
+    #[test]
+    fn long_string_numbers() {
+        let m = 1_000_000;
+        let z = "0".repeat(m);
+        let p = |s: &str| string_to_number(&u16s(s));
+        assert_eq!(p(&format!("{}.5e-{m}", "9".repeat(m))), 1.0);
+        assert_eq!(p(&format!(" -{}.5e-{m} \n", "9".repeat(m))), -1.0);
+        assert_eq!(p(&format!("+{}.5e-{m}", "9".repeat(m))), 1.0);
+        assert_eq!(p(&format!("0.{z}1e{m}")), 0.1);
+        assert_eq!(p(&format!("1{z}e-{m}")), 1.0);
+        assert!(p(&format!("-0.{z}e{m}")).is_sign_negative() && p(&format!("-0.{z}e{m}")) == 0.0);
+        assert_eq!(p(&format!("1{z}e-{}", m - 300)), 1e300);
+        assert_eq!(p(&format!("4{z}e-{}", m + 324)), f64::from_bits(1));
+        assert_eq!(p(&format!("-4{z}e-{}", m + 324)), -f64::from_bits(1));
+        assert_eq!(p(&format!("2{z}e-{}", m + 324)), 0.0);
+        assert_eq!(p(&format!("1{z}e-{}", m - 309)), f64::INFINITY);
+        assert_eq!(p(&format!("17976931348623157{z}e-{}", m - 292)), f64::MAX);
+        // 2^1024 - 2^970 is exactly halfway between MAX and 2^1024: ties to even overflows.
+        let h = "179769313486231580793728971405303415079934132710037826936173778980444968292764750946649017977587207096330286416692887910946555547851940402630657488671505820681908902000708383676273854845817711531764475730270069855571366959622842914819860834936475292719074168444365510704342711559699508093042880177904174497792";
+        assert_eq!(p(&format!("{z}{h}")), f64::INFINITY);
+        assert_eq!(p(&format!("{h}{}1", "0".repeat(2000))), f64::INFINITY);
+        assert_eq!(p(&format!("{z}{}1", &h[..h.len() - 1])), f64::MAX);
+        assert_eq!(p(&format!("{}1.{}", &h[..h.len() - 1], "9".repeat(100_000))), f64::MAX);
     }
 }
