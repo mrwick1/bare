@@ -415,3 +415,22 @@ Parent ran `sh crates/tls/examples/run_scales.sh`. Each case is a separate proce
 Parent also built the driver with `--features force-portable` and hashed 6,400 MiB. It took 18.211 s, used 2,380 KiB peak RSS and allocated nothing in the loop. Its digest matched the accelerated run. A separate accelerated 6,400 MiB run took 3.284 s in the timed hash loop. Linux child CPU accounting reported 3.3297 s user and 0.0113 s system time, including process startup. The portable path remains available without SHA instructions. These are single runs under concurrent machine load; timings do not establish a precise speedup ratio.
 
 Checks: all 17 crypto tests passed in debug and release, with and without `force-portable`. The tests include standard vectors, padding and key-length edges, incremental updates, and HKDF output limits. The merged workspace passed 501 tests before this PR. `cargo clippy -p bare-tls --all-targets --all-features -- -D warnings` passed. No non-x86 hardware was tested. No TLS handshake or certificate check exists in this crate yet.
+
+## AES record protection
+
+2026-11-04, archMachine, release. AES-128-GCM uses caller-owned buffers. Open authenticates the ciphertext before decrypting. Failed authentication leaves the buffer unchanged. Portable AES computes its S-box without secret-indexed tables. The x86-64 path requires AES, PCLMULQDQ, SSSE3 and SSE4.1, checked at run time. `force-portable` also disables this path.
+
+Parent built `tools/crypto/aes_gcm_load.rs` with `rustc --edition=2024 -C opt-level=3`. Each scale ran in a new process with a 512 MiB address-space limit and a 45 s timeout. Records are 16 KiB with 5-byte AAD. Every record uses a distinct sequence-derived nonce, completes seal/open comparison, and contributes to the output. Every 4,096th record includes a rejected modification. Linux clock ticks were checked as 100 per second for the driver's CPU accounting.
+
+| Backend | Scale | Input MiB | Seal MB/s | Open MB/s | Wall seconds | CPU seconds | Peak RSS KiB | Loop allocations |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| Accelerated | 1x | 256 | 5,004.0 | 4,999.6 | 0.12 | 0.11 | 2,464 | 0 |
+| Accelerated | 10x | 2,560 | 4,989.0 | 4,982.1 | 1.18 | 1.17 | 2,464 | 0 |
+| Accelerated | 100x | 25,600 | 5,023.0 | 5,021.0 | 11.71 | 11.67 | 2,492 | 0 |
+| Portable | 1x | 1 | 12.7 | 12.6 | 0.17 | 0.16 | 2,472 | 0 |
+| Portable | 10x | 10 | 12.6 | 12.6 | 1.66 | 1.65 | 2,464 | 0 |
+| Portable | 100x | 100 | 12.6 | 12.6 | 16.61 | 16.54 | 2,456 | 0 |
+
+The delegated implementation measured the GHASH stage as the accelerated bottleneck. Three-product Karatsuba multiplication and eight-block aggregated reduction improved it. Portable measurements identified the S-box as the cost; a shorter inverse chain and linear squaring improved it. Parent verified the final loads above. Parent did not reproduce the earlier implementation's timings. Portable throughput remains much lower; no non-x86 machine was tested.
+
+Parent checks: 510 workspace tests passed. All 26 crypto tests pass in debug and release with default and forced-portable builds. NIST CAVP vectors, bit/byte changes, empty inputs, length boundaries, and backend agreement pass. Clippy passes with default and all features. These tests do not establish constant-time machine code or complete TLS correctness. TLS framing, per-key usage limits and sequence exhaustion remain separate work.
