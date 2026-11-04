@@ -305,7 +305,7 @@ impl<'p> Interp<'p> {
         loop {
             match self.funcs.get(&o) {
                 Some(Callee::Class) => return true,
-                Some(&Callee::Script { script, fid, .. }) => return self.func_of(script, fid).kind == FuncKind::Normal,
+                Some(&Callee::Script { script, fid, .. }) => return self.func_of(script, fid).kind == FuncKind::Normal && !self.func_of(script, fid).is_async,
                 Some(&Callee::Native(n)) => return matches!(n, Nat::ObjectCtor | Nat::FnCtor | Nat::ArrayCtor | Nat::ErrorCtor(_) | Nat::Ext(Bi::RegExpCtor)) || Self::native_no_nt(n),
                 Some(&Callee::Host { ctor, .. }) => return ctor,
                 Some(&Callee::Promise(pf)) => return matches!(pf, PFn::Ctor | PFn::AggErrCtor),
@@ -326,9 +326,13 @@ impl<'p> Interp<'p> {
 
     /// GetPrototypeFromConstructor.
     fn proto_from_ctor(&mut self, nt: ObjId) -> Res<ObjId> {
+        self.proto_from_ctor_or(nt, self.object_proto)
+    }
+
+    fn proto_from_ctor_or(&mut self, nt: ObjId, default: ObjId) -> Res<ObjId> {
         Ok(match self.get_prop(Value::Object(nt), self.k_prototype)? {
             Value::Object(p) => p,
-            _ => self.object_proto,
+            _ => default,
         })
     }
 
@@ -351,12 +355,13 @@ impl<'p> Interp<'p> {
         }
         let d = match self.funcs.get(&f) {
             Some(Callee::Class) => D::Class,
-            Some(&Callee::Script { script, fid, env, self_binding }) if self.func_of(script, fid).kind == FuncKind::Normal => D::Script(script, fid, env, self_binding),
+            Some(&Callee::Script { script, fid, env, self_binding }) if self.func_of(script, fid).kind == FuncKind::Normal && !self.func_of(script, fid).is_async => D::Script(script, fid, env, self_binding),
             Some(&Callee::Native(n)) if matches!(n, Nat::ObjectCtor | Nat::FnCtor | Nat::ArrayCtor | Nat::ErrorCtor(_) | Nat::Ext(Bi::RegExpCtor)) => D::Native(n),
             Some(&Callee::Native(n)) if Self::native_no_nt(n) => D::NoNt("subclassing a native constructor (new.target is not passed to the constructor)"),
             Some(&Callee::Promise(PFn::Ctor)) => D::NoNt("subclassing Promise (new.target is not passed to the constructor)"),
             Some(&Callee::Promise(PFn::AggErrCtor)) => D::NoNt("subclassing AggregateError (new.target is not passed to the constructor)"),
             Some(&Callee::Host { ctor: true, .. }) => D::NoNt("subclassing a host constructor (new.target is not passed to the constructor)"),
+            Some(&Callee::Native(Nat::StringFn | Nat::NumberFn | Nat::BooleanFn)) => return Err(unsupported("wrapper object (new String/Number/Boolean)", Span::default())),
             Some(Callee::Bound { target, args, .. }) => D::Bound(*target, args.clone()),
             _ => {
                 let d = self.src_text(callee);
@@ -393,18 +398,28 @@ impl<'p> Interp<'p> {
                 self.depth -= 1;
                 r
             }
-            // A builtin makes a fresh object, so the prototype can be fixed afterwards.
-            D::Native(Nat::ObjectCtor) => {
-                let proto = self.proto_from_ctor(nt)?;
-                Ok(Value::Object(h!(self, self.heap.new_object(Some(proto)))))
-            }
-            D::Native(_) => {
-                let r = self.construct_inner(Value::Object(f), args, callee)?;
-                if let Value::Object(ro) = r {
-                    let proto = self.proto_from_ctor(nt)?;
-                    h!(self, self.heap.set_prototype_of(ro, Some(proto)));
-                }
-                Ok(r)
+            D::Native(n) => {
+                if self.depth >= self.limits.max_call_depth { return Err(Error::Limit(LimitKind::CallDepth)); }
+                self.tick()?;
+                self.depth += 1;
+                let r = (|| match n {
+                    Nat::ObjectCtor => {
+                        let proto = self.proto_from_ctor(nt)?;
+                        Ok(Value::Object(h!(self, self.heap.new_object(Some(proto)))))
+                    }
+                    Nat::ArrayCtor => {
+                        let proto = self.proto_from_ctor_or(nt, self.array_proto)?;
+                        self.array_ctor(args, proto)
+                    }
+                    Nat::ErrorCtor(k) => {
+                        let proto = self.proto_from_ctor_or(nt, self.error_protos[k as usize])?;
+                        self.error_ctor(arg(args, 0), proto)
+                    }
+                    Nat::Ext(Bi::RegExpCtor) => self.regexp_ctor_nt(arg(args, 0), arg(args, 1), true, Some(nt)),
+                    _ => self.call_native(n, Value::Undefined, args, true),
+                })();
+                self.depth -= 1;
+                r
             }
             D::Bound(target, mut all) => {
                 all.extend_from_slice(args);

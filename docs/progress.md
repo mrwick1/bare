@@ -147,6 +147,8 @@ Exit: the interpreter passes the target language tests and scheduler checks. Ful
 
 Promise aggregation now uses the existing FIFO queue and iterator protocol. AggregateError carries ordered errors and an optional cause. Aggregate records are traced once per collection and pruned with unreachable callbacks. Pending inputs, weak values and browser-owned DOM nodes survive explicit collection across scripts. Custom Promise constructors and AggregateError subclasses remain gates. See [resources.md](resources.md#promise-combinators). This closes the aggregation gap, not application startup.
 
+The observed reflection subset is integrated: Object.getOwnPropertyNames, Reflect.ownKeys and Reflect.construct. Construction reuses the existing class and script provenance machinery. Argument lists and bound-constructor validation are charged before their guarded work. Native allocation uses the correct fallback prototype and reads prototype getters in the tested order. Other Reflect methods, Proxy and native subclass paths without newTarget support remain absent or gated. See [resources.md](resources.md#reflection-and-construction).
+
 ### S3 DOM and browser APIs
 
 Extend the existing HTML arena, CSS selector matcher and URL code. Keep browser host state outside the language core.

@@ -101,7 +101,7 @@ fn unsupported_is_found_before_anything_runs() {
 
 #[test]
 fn missing_builtins_are_reference_errors_not_silent() {
-    assert_eq!(run_case("typeof WeakRef + typeof FinalizationRegistry + typeof Reflect"), "string:undefinedundefinedundefined");
+    assert_eq!(run_case("typeof WeakRef + typeof FinalizationRegistry + typeof Proxy"), "string:undefinedundefinedundefined");
     assert_eq!(run_case("new WeakRef({})"), "throw:ReferenceError:WeakRef is not defined");
     assert_eq!(run_case("new String('x')"), "other:Unsupported(Unsupported { what: \"wrapper object (new String/Number/Boolean)\", span: Span { start: 0, end: 0 } })");
     assert_eq!(run_case("Function('return 1')"), "other:Unsupported(Unsupported { what: \"Function constructor (dynamic code)\", span: Span { start: 0, end: 0 } })");

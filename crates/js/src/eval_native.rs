@@ -158,17 +158,7 @@ impl<'p> Interp<'p> {
                 Ok(Value::Object(b))
             }
             Nat::FnCtor => Err(unsupported("Function constructor (dynamic code)", Span::default())),
-            Nat::ArrayCtor => {
-                if let ([Value::Number(len)], true) = (args, true) {
-                    let a = h!(self, self.heap.new_array(Some(self.array_proto)));
-                    if *len < 0.0 || len.fract() != 0.0 || *len > u32::MAX as f64 {
-                        return Err(self.mk_err(RANGE_ERROR, "Invalid array length"));
-                    }
-                    h!(self, self.heap.set(a, self.k_length, Value::Number(*len)));
-                    return Ok(Value::Object(a));
-                }
-                self.new_array_from(args)
-            }
+            Nat::ArrayCtor => self.array_ctor(args, self.array_proto),
             Nat::ArrayIsArray => Ok(Value::Bool(matches!(a0, Value::Object(o) if h!(self, self.heap.is_array(o))))),
             Nat::ArrPush => {
                 let len = self.length_of(this)?;
@@ -244,15 +234,7 @@ impl<'p> Interp<'p> {
                 }
                 Ok(Value::String(h!(self, self.heap.intern_vec(out))))
             }
-            Nat::ErrorCtor(k) => {
-                let o = h!(self, self.heap.new_object(Some(self.error_protos[k as usize])));
-                if !matches!(a0, Value::Undefined) {
-                    let m = self.coerce_string(a0)?;
-                    self.def(o, self.k_message, Value::String(m), true, false, true)?;
-                }
-                let _ = is_new;
-                Ok(Value::Object(o))
-            }
+            Nat::ErrorCtor(k) => self.error_ctor(a0, self.error_protos[k as usize]),
             Nat::ErrToString => {
                 if !matches!(this, Value::Object(_)) {
                     return Err(self.type_err("Error.prototype.toString requires that 'this' be an Object"));
@@ -279,7 +261,29 @@ impl<'p> Interp<'p> {
             Nat::Ext(x) => self.call_ext(x, this, args, is_new),
             Nat::Ao(f) => self.call_ao(f, this, args),
             Nat::Sc(f) => self.call_sc(f, this, args, is_new),
+            Nat::Refl(f) => self.call_refl(f, args),
         }
+    }
+
+    fn array_ctor(&mut self, args: &[Value], proto: ObjId) -> Res<Value> {
+        if let [Value::Number(len)] = args {
+            let a = h!(self, self.heap.new_array(Some(proto)));
+            if *len < 0.0 || len.fract() != 0.0 || *len > u32::MAX as f64 {
+                return Err(self.mk_err(RANGE_ERROR, "Invalid array length"));
+            }
+            h!(self, self.heap.set(a, self.k_length, Value::Number(*len)));
+            return Ok(Value::Object(a));
+        }
+        self.new_array_from_proto(args, proto)
+    }
+
+    fn error_ctor(&mut self, message: Value, proto: ObjId) -> Res<Value> {
+        let o = h!(self, self.heap.new_object(Some(proto)));
+        if !matches!(message, Value::Undefined) {
+            let m = self.coerce_string(message)?;
+            self.def(o, self.k_message, Value::String(m), true, false, true)?;
+        }
+        Ok(Value::Object(o))
     }
 
     fn index_key(&mut self, index: u64) -> Res<PropertyKey> {
@@ -303,9 +307,9 @@ impl<'p> Interp<'p> {
                 if len > (1 << 20) {
                     return Err(self.mk_err(RANGE_ERROR, "Too many arguments in function call"));
                 }
+                self.spend(len)?;
                 let mut out = Vec::with_capacity(len as usize);
                 for i in 0..len {
-                    self.tick()?;
                     out.push(self.get_prop(v, PropertyKey::Index(i as u32))?);
                 }
                 Ok(out)

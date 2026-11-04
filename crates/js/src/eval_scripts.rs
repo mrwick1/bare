@@ -73,6 +73,7 @@ impl<'p> Interp<'p> {
         it.install_array_object()?;
         it.install_promise()?;
         it.install_binary()?;
+        it.install_reflect()?;
         Ok(it)
     }
 

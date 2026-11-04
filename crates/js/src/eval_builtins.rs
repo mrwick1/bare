@@ -1130,8 +1130,12 @@ impl<'p> Interp<'p> {
     // ------------------------------------------------------------ RegExp objects
 
     fn make_regexp(&mut self, re: Rc<rx::Regex>, source: StrId, flags: StrId) -> Res<ObjId> {
+        self.make_regexp_proto(re, source, flags, self.ext.regexp_proto)
+    }
+
+    fn make_regexp_proto(&mut self, re: Rc<rx::Regex>, source: StrId, flags: StrId, proto: ObjId) -> Res<ObjId> {
         self.tick()?;
-        let o = h!(self, self.heap.new_object(Some(self.ext.regexp_proto)));
+        let o = h!(self, self.heap.new_object(Some(proto)));
         self.def(o, self.ext.k_last_index, Value::Number(0.0), true, false, false)?;
         self.ext.regexps.insert(o, ReData { re, source, flags });
         Ok(o)
@@ -1153,8 +1157,12 @@ impl<'p> Interp<'p> {
     /// `new RegExp(pattern, flags)` from two strings. The compiled pattern and the `source` and `flags` strings
     /// are cached by the two handles until the next `collect`, so a hot `new RegExp(s)` pays one hash lookup.
     fn regexp_create(&mut self, pat: StrId, flags: StrId) -> Res<ObjId> {
+        self.regexp_create_proto(pat, flags, self.ext.regexp_proto)
+    }
+
+    fn regexp_create_proto(&mut self, pat: StrId, flags: StrId, proto: ObjId) -> Res<ObjId> {
         if let Some((re, src, fl)) = self.ext.cache.get(&(pat, flags)).cloned() {
-            return self.make_regexp(re, src, fl);
+            return self.make_regexp_proto(re, src, fl, proto);
         }
         let units = h!(self, self.heap.str_units(pat)).to_vec();
         let fl = h!(self, self.heap.to_string_lossy(flags));
@@ -1169,33 +1177,38 @@ impl<'p> Interp<'p> {
             self.ext.cache.clear();
         }
         self.ext.cache.insert((pat, flags), (re.clone(), src, fl));
-        self.make_regexp(re, src, fl)
+        self.make_regexp_proto(re, src, fl, proto)
     }
 
     fn regexp_ctor(&mut self, p: Value, f: Value, is_new: bool) -> Res<Value> {
+        self.regexp_ctor_nt(p, f, is_new, None)
+    }
+
+    fn regexp_ctor_nt(&mut self, p: Value, f: Value, is_new: bool, nt: Option<ObjId>) -> Res<Value> {
         let is_re = self.is_regexp(p)?;
-        if is_re && self.regexp_of(p).is_none() {
+        let po = self.regexp_of(p);
+        if is_re && po.is_none() {
             return Err(unsupported("RegExp constructor with a regexp-like object (Symbol.match)", Span::default()));
         }
-        if let Some(po) = self.regexp_of(p) {
+        if po.is_some() && matches!(f, Value::Undefined) && !is_new && is_re {
+            let c = self.get_prop(p, self.k_constructor)?;
+            if matches!((c, self.ext.regexp_ctor), (Value::Object(a), Some(b)) if a == b) { return Ok(p); }
+        }
+        // IsRegExp precedes allocation, but source/flag string conversion follows GetPrototypeFromConstructor.
+        let proto = if let Some(nt) = nt { self.proto_from_ctor_or(nt, self.ext.regexp_proto)? } else { self.ext.regexp_proto };
+        if let Some(po) = po {
             if matches!(f, Value::Undefined) {
-                if !is_new && is_re {
-                    let c = self.get_prop(p, self.k_constructor)?;
-                    if matches!((c, self.ext.regexp_ctor), (Value::Object(a), Some(b)) if a == b) {
-                        return Ok(p);
-                    }
-                }
                 let d = &self.ext.regexps[&po];
                 let (re, src, fl) = (d.re.clone(), d.source, d.flags);
-                return Ok(Value::Object(self.make_regexp(re, src, fl)?));
+                return Ok(Value::Object(self.make_regexp_proto(re, src, fl, proto)?));
             }
             let src = self.ext.regexps[&po].source;
             let fl = self.coerce_string(f)?;
-            return Ok(Value::Object(self.regexp_create(src, fl)?));
+            return Ok(Value::Object(self.regexp_create_proto(src, fl, proto)?));
         }
         let ps = if matches!(p, Value::Undefined) { h!(self, self.heap.intern_str("")) } else { self.coerce_string(p)? };
         let fs = if matches!(f, Value::Undefined) { h!(self, self.heap.intern_str("")) } else { self.coerce_string(f)? };
-        Ok(Value::Object(self.regexp_create(ps, fs)?))
+        Ok(Value::Object(self.regexp_create_proto(ps, fs, proto)?))
     }
 
     fn this_regexp(&mut self, this: Value, m: &str) -> Res<ObjId> {
