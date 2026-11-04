@@ -196,3 +196,8 @@ fn objects_created_during_a_call_are_not_collected_by_the_call() {
 fn replacer_property_list_is_read_once_and_deduplicated() {
     assert_eq!(run("var n = 0; var r = ['a', 'b', 'a']; Object.defineProperty(r, 1, { get: function () { n++; r.length = 1; return 'c'; } }); JSON.stringify({ a: 1, b: 2, c: 3 }, r) + n"), r#"{"a":1,"c":3}1"#);
 }
+
+#[test]
+fn omitted_properties_do_not_consume_output_capacity() {
+    assert_eq!(run_with("JSON.stringify({longPropertyName: undefined})", el(), StringifyLimits { max_output_units: 2, ..Default::default() }), "{}");
+}

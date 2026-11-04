@@ -188,7 +188,8 @@ impl<'p> Interp<'p> {
         let k_empty = h!(self, self.heap.key_from_str(""));
         self.def(wrapper, k_empty, value, true, true, true)?;
         let holder = Value::Object(wrapper);
-        if let SjOut::Undef = self.sj_value(&mut st, k_empty, holder, value)? {
+        let value = self.sj_prepare(&mut st, k_empty, holder, value)?;
+        if let SjOut::Undef = self.sj_value(&mut st, value)? {
             return Ok(Value::Undefined);
         }
         while let Some(fr) = st.stack.last() {
@@ -209,7 +210,13 @@ impl<'p> Interp<'p> {
                 None => PropertyKey::Index(i as u32),
             };
             st.stack[depth - 1].next += 1;
-            let mark = st.out.len();
+            let holder_v = Value::Object(holder);
+            let v = self.get_prop(holder_v, key)?;
+            let v = self.sj_prepare(&mut st, key, holder_v, v)?;
+            let omitted = matches!(v, Value::Undefined | Value::Symbol(_)) || self.is_callable(v);
+            if omitted && !is_arr {
+                continue;
+            }
             if any {
                 st.put1(0x2c)?;
             }
@@ -224,14 +231,12 @@ impl<'p> Interp<'p> {
                     st.put1(0x20)?;
                 }
             }
-            let holder_v = Value::Object(holder);
-            let v = self.get_prop(holder_v, key)?;
-            match self.sj_value(&mut st, key, holder_v, v)? {
+            match self.sj_value(&mut st, v)? {
                 SjOut::Undef if is_arr => {
                     st.put_ascii("null")?;
                     st.stack[depth - 1].any = true;
                 }
-                SjOut::Undef => st.out.truncate(mark),
+                SjOut::Undef => unreachable!("omitted object properties are skipped before writing"),
                 _ => st.stack[depth - 1].any = true,
             }
             let d = st.written - st.charged;
@@ -269,7 +274,7 @@ impl<'p> Interp<'p> {
     }
 
     /// `SerializeJSONProperty` after the `Get`: toJSON, replacer, then primitives are written and an object opens a frame.
-    fn sj_value(&mut self, st: &mut Sj, key: PropertyKey, holder: Value, mut v: Value) -> Res<SjOut> {
+    fn sj_prepare(&mut self, st: &mut Sj, key: PropertyKey, holder: Value, mut v: Value) -> Res<Value> {
         self.tick()?;
         st.nodes += 1;
         if st.nodes > st.lim.max_nodes {
@@ -290,6 +295,10 @@ impl<'p> Interp<'p> {
             };
             v = self.call_fn(r, holder, &[kv, v])?;
         }
+        Ok(v)
+    }
+
+    fn sj_value(&mut self, st: &mut Sj, v: Value) -> Res<SjOut> {
         match v {
             Value::Null => st.put_ascii("null")?,
             Value::Bool(b) => st.put_ascii(if b { "true" } else { "false" })?,

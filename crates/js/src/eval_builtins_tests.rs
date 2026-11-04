@@ -448,3 +448,46 @@ fn builtin_prototypes_are_permanent_roots() {
         assert_eq!(sp, "[object Function]");
     });
 }
+
+#[test]
+fn long_successful_string_search_consumes_comparison_work() {
+    let text = vec![97u16; 4096];
+    let mut budget = 1;
+    assert_eq!(find_units(&text, &text, 0, &mut budget), None);
+    let mut budget = 1024;
+    assert_eq!(find_units(&text, &text, 0, &mut budget), Some(Some(0)));
+    assert!(budget < 1024);
+}
+
+#[test]
+fn regexp_to_string_reads_overridden_properties() {
+    assert_eq!(run("var r = /a/g; Object.defineProperty(r, 'source', {get: function(){return 'b'}}); Object.defineProperty(r, 'flags', {value: 'i'}); r.toString()"), "string:/b/i");
+}
+
+#[test]
+fn case_mapping_checks_the_actual_output_length() {
+    let heap = Heap::new(HeapLimits { max_string_units: 128, ..Default::default() }).unwrap();
+    let src = format!("'{}'.toUpperCase()", "é".repeat(64));
+    assert_eq!(eval_with(&src, EvalLimits::default(), BuiltinLimits::default(), heap).unwrap(), format!("string:{}", "É".repeat(64)));
+}
+
+#[test]
+fn trimming_whitespace_consumes_scan_work() {
+    let src = format!("'{}'.trim()", " ".repeat(8192));
+    assert_eq!(limit(&src, EvalLimits { max_steps: 100, ..Default::default() }, BuiltinLimits::default(), Heap::default()), LimitKind::Steps);
+}
+
+#[test]
+fn regexp_literal_cache_keeps_script_provenance_across_collection() {
+    big(|| {
+        let mut it = Interp::realm(Heap::default(), EvalLimits::default()).unwrap();
+        it.run_script("function left(){return /left/g.test('left')}").unwrap();
+        it.run_script("function right(){return /right/g.test('left')}").unwrap();
+        it.collect(&[]).unwrap();
+        let v = it.run_script("left() + ':' + right()").unwrap();
+        assert_eq!(it.display(v), "true:false");
+        assert!(matches!(it.run_script("/discard/; /(/"), Err(Error::Unsupported(_))));
+        let v = it.run_script("/fresh/.test('fresh')").unwrap();
+        assert!(matches!(v, Value::Bool(true)));
+    });
+}

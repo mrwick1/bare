@@ -913,3 +913,42 @@ Parent ran five release load cases at 1x, 10x and 100x in fresh processes under 
 Many-small retains 20,003 script slots, 380,014 nodes and 1.09 MiB source including its post-collection checks. Few-large retains about 1.2M nodes and 3.37 MiB source. The host case retains 2,004 scripts while making two million calls. Count refusals do no parse. Rejected syntax creates error objects until explicit collection; this accounts for much of that case's RSS. The delegate measured arena shrinking during ownership conversion; parent retained it but did not rebuild the discarded pre-shrink version.
 
 Reproduce with tools/js/scripts_load.sh and the scripts_load preflight mode. Not tested: per-script reclamation, actual webpack bootstrap across the deployed resource list, DOM/document loading, modules, classes/async/builtin branch integration or hard allocator OOM recovery. Unsupported spans still lack a script id. Existing evaluator semantic gates remain in force.
+
+
+## JavaScript JSON, regexp and String bindings
+
+Shared realms now bind JSON.parse, JSON.stringify, RegExp construction and literals, exec/test, and the observed String operations. These include UTF-16 search and slicing, split, match, replace, concatenation, trimming and case conversion. Replacement callbacks run after global matching. Regexp objects carry a real lastIndex descriptor. Compiled literals use both script and node ids. Collection prunes dead regexp metadata and clears the 256-entry constructor cache. Literal code stays under the realm code budgets.
+
+JSON.stringify uses an explicit frame stack. It calls toJSON and replacer functions through the evaluator. Replacer arrays, indentation, getters, inherited array values, holes, cycles, non-finite numbers and lone surrogates are covered by tiny Node comparisons. It detects cycles only along the current path, so repeated acyclic references are valid. JSON.parse keeps the evaluator prototypes. A callable reviver remains unsupported.
+
+Parent review added failing regressions before five fixes. Successful long string searches now charge comparison work, with scans checked in bounded chunks. Whitespace trimming charges its scan even when the result is empty. Regexp.toString reads source and flags through ordinary property access. Unicode case conversion checks the actual output size. Stringify omits undefined object properties before writing their key, so an omitted long key does not falsely exhaust the output cap. A separate test checks regexp literals from two scripts across collection and a rejected script slot.
+
+Default binding caps are 50M regexp work units per attempt, 16 Mi input units, 1 Mi backtrack frames, 4 Mi capture slots per global operation and 1 Mi split items. JSON.parse caps source and decoded text at 16 Mi units, nodes at 4 Mi and nesting at 1,024. Stringify caps output at 16 Mi units, depth at 1,024 and visited nodes and keys at 4 Mi each. Limits are distinct evaluator errors and cannot be caught by JavaScript. The heap does not collect during a call. Object key enumeration allocates its list before the stringify key cap; that list remains bounded by the heap budget. Case mapping uses bounded input but creates a temporary Unicode segment before checking its final encoded size.
+
+Parent ran 90 binding and 57 stringify Node cases. The 202 evaluator and 62 Promise cases still match. Node executes only tiny independent programs. All 213 assembled JS tests pass in debug and release; 964 workspace tests pass and crate clippy is clean. The added collection regression compares function count with the initial intrinsic count instead of increasing a fixed threshold for each new builtin.
+
+The final load matrices ran 42 fresh release processes: eight binding workloads and six stringify workloads at 1x, 10x and 100x. Each process had a 1 GiB address-space cap and a 45-second timeout. All checksums and expected limits passed. The following final samples ran with concurrent work. They establish no speed improvement.
+
+| Binding workload at 100x | Run ms | Peak RSS MiB |
+| --- | --- | --- |
+| Parse 8.48M JSON units | 294.4 | 164.5 |
+| Scan 200k matches | 672.7 | 152.1 |
+| Replace | 530.7 | 64.8 |
+| Split | 223.7 | 127.1 |
+| One million String-operation iterations | 3,767.7 | 294.9 |
+| One million RegExp constructions | 2,687.4 | 501.8 |
+| Global empty matches | 273.1 | 71.4 |
+| Explicit-collection rounds | 965.8 | 4.2 |
+
+| Stringify workload at 100x | Serialize ms | Peak RSS MiB |
+| --- | --- | --- |
+| 100k shallow objects | 154.6 | 171.4 |
+| Depth 1,000, 20 repetitions | 85.8 | 11.3 |
+| 50k callback items | 93.3 | 41.9 |
+| Five million escaped input units | 10.0 | 30.3 |
+| 500 explicit-collection rounds | 9.5 | 3.6 |
+| Expanding acyclic graph, expected Nodes limit | 512.7 | 23.4 |
+
+Stringify collection leaves 90 live objects before and after all three scales. Binding collection reclaims 750,000 objects at 100x and leaves 88 live objects. Large no-collection cases retain dead objects and interned strings until the host collects. Native allocator counts were not measured. The delegate retained source/flags caching after finding no measurable gain; parent does not claim an optimization from it.
+
+Reproduce with tools/js/builtins_check.sh, tools/js/stringify_check.sh, tools/js/builtins_load.sh and tools/js/stringify_load.sh. Pass an output path to each load script. Missing features include wrappers, revivers, custom regexp exec, Symbol protocols, species copies, several String methods and Unicode regexp modes. Invalid literal patterns still report Unsupported during evaluator preflight; the parser itself does not validate patterns. Regexp flag getters do not yet implement generic overridden-flag reads. Rust Unicode tables can differ from the Node version. Not tested: target bundle execution, staging login, other platforms, hard allocator OOM or combined class/async/collection branches.

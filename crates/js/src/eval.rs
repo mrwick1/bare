@@ -16,7 +16,7 @@
 //! implemented gives [`Error::Unsupported`] with its span: classes, async functions and `await`, tagged
 //! templates, BigInt, `super`, `new.target`, private names, `with`, `for await`. A regexp literal is compiled by `Interp::new`;
 //! an invalid pattern, lookbehind, named groups or the flags `u`, `v`, `d` are `Unsupported` there (see `eval_builtins.rs`).
-//! A missing builtin (`Map`, `Promise`, `Symbol`, ...) is an ordinary `ReferenceError` at run time, as in a bare engine.
+//! A missing builtin (`Map`, `Symbol`, ...) is an ordinary `ReferenceError` at run time, as in a bare engine.
 //! `JSON.parse`, `RegExp` and a small `String.prototype` are bound in `eval_builtins.rs`, which lists what is and is not there.
 //!
 //! Heap contract: the heap never collects by itself. [`Interp::roots`] lists every value the evaluator

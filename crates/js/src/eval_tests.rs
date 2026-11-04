@@ -209,6 +209,7 @@ fn collect_keeps_what_roots_reach_and_frees_the_rest() {
             keep(); keep();";
         let prog = parse_script(src, Limits::default()).unwrap();
         let mut it = setup(&prog, EvalLimits::default());
+        let intrinsic_functions = it.stats().functions;
         it.run().unwrap();
         let before = (it.stats(), it.heap.stats());
         assert!(before.0.live_envs > 2000, "{:?}", before.0);
@@ -216,7 +217,7 @@ fn collect_keeps_what_roots_reach_and_frees_the_rest() {
         let after = (it.stats(), it.heap.stats());
         assert!(freed.objects > 1000, "{freed:?}");
         assert!(after.0.live_envs < 10, "{:?}", after.0);
-        assert!(after.0.functions < 120, "{:?}", after.0);
+        assert!(after.0.functions <= intrinsic_functions + 2, "{:?}", after.0);
         assert!(after.1.live_objects < before.1.live_objects / 10);
         // the survivor still has its closure state, its strings and the shared data object
         let keep = global_get(&mut it, "keep");

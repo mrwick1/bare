@@ -209,21 +209,38 @@ fn find_units(hay: &[u16], needle: &[u16], from: usize, budget: &mut u64) -> Opt
         true
     };
     while i <= last {
-        match hay[i..=last].iter().position(|&c| c == first) {
+        // Bound each scan before checking its accumulated work.
+        let end = (i + 256).min(last + 1);
+        match hay[i..end].iter().position(|&c| c == first) {
             None => {
-                work += (last + 1 - i) as u64;
-                return if spend(&mut work, budget) { Some(None) } else { None };
+                work += (end - i) as u64;
+                if !spend(&mut work, budget) {
+                    return None;
+                }
+                i = end;
+                continue;
             }
             Some(k) => {
                 i += k;
                 work += k as u64 + 1;
             }
         }
-        let m = hay[i..i + n].iter().zip(needle).take_while(|(a, b)| a == b).count();
+        let mut m = 0;
+        while m < n {
+            let end = (m + 256).min(n);
+            let matched = hay[i + m..i + end].iter().zip(&needle[m..end]).take_while(|(a, b)| a == b).count();
+            work += matched as u64 + u64::from(matched < end - m);
+            if !spend(&mut work, budget) {
+                return None;
+            }
+            m += matched;
+            if m < end {
+                break;
+            }
+        }
         if m == n {
             return if spend(&mut work, budget) { Some(Some(i)) } else { None };
         }
-        work += m as u64;
         if work >= 8 && !spend(&mut work, budget) {
             return None;
         }
@@ -516,14 +533,12 @@ impl<'p> Interp<'p> {
             }
             Bi::ReToString => {
                 let Value::Object(o) = this else { return Err(self.type_err("RegExp.prototype.toString requires that 'this' be an Object")) };
-                let (src, fl) = match self.ext.regexps.get(&o) {
-                    Some(d) => (Value::String(d.source), Value::String(d.flags)),
-                    None => {
-                        let (ks, kf) = (h!(self, self.heap.key_from_str("source")), h!(self, self.heap.key_from_str("flags")));
-                        (self.get_prop(this, ks)?, self.get_prop(this, kf)?)
-                    }
-                };
-                let (src, fl) = (self.coerce_string(src)?, self.coerce_string(fl)?);
+                let ks = h!(self, self.heap.key_from_str("source"));
+                let kf = h!(self, self.heap.key_from_str("flags"));
+                let src = self.get_prop(Value::Object(o), ks)?;
+                let src = self.coerce_string(src)?;
+                let fl = self.get_prop(Value::Object(o), kf)?;
+                let fl = self.coerce_string(fl)?;
                 let mut out: Vec<u16> = vec![b'/' as u16];
                 self.append_string(&mut out, h!(self, self.heap.str_units(src)))?;
                 out.push(b'/' as u16);
@@ -658,6 +673,7 @@ impl<'p> Interp<'p> {
             }
             Bi::StrTrim => {
                 let s = self.this_str(this, "trim")?;
+                self.spend_units(h!(self, self.heap.str_len(s)))?;
                 let (a, b) = {
                     let u = h!(self, self.heap.str_units(s));
                     let a = u.iter().position(|&c| !is_js_space(c)).unwrap_or(u.len());
@@ -725,32 +741,32 @@ impl<'p> Interp<'p> {
         }
         let cap = self.heap.limits().max_string_units;
         let mut seg = String::new();
-        let flush = |seg: &mut String, out: &mut Vec<u16>, this: &Self| -> Res<()> {
+        let flush = |seg: &mut String, out: &mut Vec<u16>| -> Res<()> {
             if seg.is_empty() {
                 return Ok(());
             }
-            if out.len().saturating_add(seg.len().saturating_mul(3)) > cap {
+            let m = if upper { seg.to_uppercase() } else { seg.to_lowercase() };
+            if m.encode_utf16().count() > cap.saturating_sub(out.len()) {
                 return Err(Error::Limit(LimitKind::Heap(Limit::StringLength)));
             }
-            let m = if upper { seg.to_uppercase() } else { seg.to_lowercase() };
-            let units: Vec<u16> = m.encode_utf16().collect();
+            out.extend(m.encode_utf16());
             seg.clear();
-            this.append_string(out, &units)
+            Ok(())
         };
         for r in char::decode_utf16(src.iter().copied()) {
             match r {
                 Ok(c) if !c.is_ascii_whitespace() => seg.push(c),
                 Ok(c) => {
-                    flush(&mut seg, &mut out, self)?;
+                    flush(&mut seg, &mut out)?;
                     self.append_string(&mut out, &[c as u16])?;
                 }
                 Err(e) => {
-                    flush(&mut seg, &mut out, self)?;
+                    flush(&mut seg, &mut out)?;
                     self.append_string(&mut out, &[e.unpaired_surrogate()])?;
                 }
             }
         }
-        flush(&mut seg, &mut out, self)?;
+        flush(&mut seg, &mut out)?;
         Ok(out)
     }
 
