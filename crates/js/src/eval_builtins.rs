@@ -5,9 +5,12 @@
 // - `JSON.parse(text)`. A reviver function is `Unsupported`. `JSON.stringify` is in `eval_json_stringify.rs`.
 // - `RegExp(pattern, flags)`, `new RegExp(...)`, regexp literals, `exec`, `test`, `toString`, the flag getters,
 //   an own `lastIndex` data property. Engine gates (flags u/v/d, lookbehind, named groups, quantified lookahead)
-//   are `Unsupported`, never a different match. There is no `Symbol`, so `String.prototype.match/replace/split`
-//   recognise a regexp by identity (not by `@@match`), and they do not call a user `exec`: a regexp whose `exec`
-//   was replaced is `Unsupported`.
+//   are `Unsupported`, never a different match. They do not call a user `exec`: a regexp whose `exec` was replaced is
+//   `Unsupported`.
+// - `@@match`, `@@replace` and `@@split` of the argument are read first and called when defined, as the spec says;
+//   `RegExp.prototype` has the intrinsic `[@@match]`, `[@@replace]` and `[@@split]`, so a builtin regexp keeps the builtin path. `includes`, `startsWith`, `endsWith` and the
+//   `RegExp` constructor use IsRegExp (`@@match`). `new RegExp(x)` for a non-builtin regexp-like `x` is `Unsupported`.
+//   `search`, `matchAll` and `replaceAll` are not bound.
 // - `String.fromCharCode` and `String.prototype`: indexOf, includes, startsWith, endsWith, slice, substring,
 //   charAt, charCodeAt, split, match, replace, concat, trim, toLowerCase, toUpperCase, toString, valueOf.
 //   These are exactly the string methods the inspected staging bundles call (see docs/staging-js-requirements.md).
@@ -83,6 +86,10 @@ enum Bi {
     ReExec,
     ReTest,
     ReToString,
+    /// `RegExp.prototype[@@match]`, `[@@replace]`, `[@@split]`: the builtin operations behind the String methods.
+    ReSymMatch,
+    ReSymReplace,
+    ReSymSplit,
     ReGetter(u8),
     StrFromCharCode,
     StrToString,
@@ -104,6 +111,16 @@ enum Bi {
 }
 
 const RE_GETTERS: [&str; 9] = ["source", "flags", "global", "ignoreCase", "multiline", "dotAll", "sticky", "unicode", "hasIndices"];
+
+/// What `str_hook` found for a String method argument.
+enum Hook {
+    /// A user method ran; this is its result.
+    Done(Value),
+    /// The argument is a builtin regexp that still has the intrinsic method: run the builtin operation on it.
+    Builtin(ObjId),
+    /// No method: convert the argument to a string.
+    Absent,
+}
 
 /// A regexp literal, compiled once by the first walk. The object is made fresh on every evaluation.
 struct Lit {
@@ -411,6 +428,10 @@ impl<'p> Interp<'p> {
         self.ext.exec_fn = Some(self.method(rp, "exec", Nat::Ext(Bi::ReExec), 1)?);
         self.method(rp, "test", Nat::Ext(Bi::ReTest), 1)?;
         self.method(rp, "toString", Nat::Ext(Bi::ReToString), 0)?;
+        for (wk, x, name, len) in [(WK_MATCH, Bi::ReSymMatch, "[Symbol.match]", 1), (WK_REPLACE, Bi::ReSymReplace, "[Symbol.replace]", 2), (WK_SPLIT, Bi::ReSymSplit, "[Symbol.split]", 2)] {
+            let f = self.native(Nat::Ext(x), name, len)?;
+            self.def(rp, self.wk_key(wk), Value::Object(f), true, false, true)?;
+        }
         for (i, name) in RE_GETTERS.iter().enumerate() {
             let f = self.native(Nat::Ext(Bi::ReGetter(i as u8)), &format!("get {name}"), 0)?;
             let k = h!(self, self.heap.key_from_str(name));
@@ -485,6 +506,50 @@ impl<'p> Interp<'p> {
 
     fn new_str(&mut self, units: Vec<u16>) -> Res<Value> {
         Ok(Value::String(h!(self, self.heap.intern_vec(units))))
+    }
+
+    /// The String-method hook of a well-known symbol (`@@match`, `@@replace`, `@@split`). The spec reads
+    /// `GetMethod(target, @@sym)` before it converts `this` to a string and calls a defined method with `extra`.
+    /// `RegExp.prototype` holds the intrinsic methods, so a builtin regexp that still finds its own intrinsic takes
+    /// the builtin path. A missing method means the argument is converted to a string, as in the spec.
+    fn str_hook(&mut self, this: Value, name: &str, target: Value, wk: usize, extra: &[Value]) -> Res<Hook> {
+        if is_nullish(this) {
+            return Err(self.type_err(&format!("String.prototype.{name} called on null or undefined")));
+        }
+        if is_nullish(target) {
+            return Ok(Hook::Absent);
+        }
+        let m = self.get_prop(target, self.wk_key(wk))?;
+        if is_nullish(m) {
+            return Ok(Hook::Absent);
+        }
+        if !self.is_callable(m) {
+            let t = self.display(m);
+            return Err(self.type_err(&format!("{t} is not a function")));
+        }
+        if let (Value::Object(mo), Some(r)) = (m, self.regexp_of(target)) {
+            let own = match wk {
+                WK_MATCH => Bi::ReSymMatch,
+                WK_REPLACE => Bi::ReSymReplace,
+                _ => Bi::ReSymSplit,
+            };
+            if matches!(self.funcs.get(&mo), Some(Callee::Native(Nat::Ext(b))) if *b == own) {
+                return Ok(Hook::Builtin(r));
+            }
+        }
+        Ok(Hook::Done(self.call_fn(m, target, extra)?))
+    }
+
+    /// `IsRegExp`: a defined `@@match` decides, otherwise a builtin regexp is one.
+    fn is_regexp(&mut self, v: Value) -> Res<bool> {
+        if !matches!(v, Value::Object(_)) {
+            return Ok(false);
+        }
+        let m = self.get_prop(v, self.wk_key(WK_MATCH))?;
+        if !matches!(m, Value::Undefined) {
+            return self.truthy(m);
+        }
+        Ok(self.regexp_of(v).is_some())
     }
 
     fn regexp_of(&self, v: Value) -> Option<ObjId> {
@@ -605,52 +670,28 @@ impl<'p> Interp<'p> {
             }
             Bi::StrSplit => self.str_split(this, a0, arg(args, 1)),
             Bi::StrMatch => {
+                let hook = self.str_hook(this, "match", a0, WK_MATCH, &[this])?;
                 let s = self.this_str(this, "match")?;
-                let r = match self.regexp_of(a0) {
-                    Some(r) => r,
-                    None => {
+                let r = match hook {
+                    Hook::Done(v) => return Ok(v),
+                    Hook::Builtin(r) => r,
+                    Hook::Absent => {
                         let p = if matches!(a0, Value::Undefined) { h!(self, self.heap.intern_str("")) } else { self.coerce_string(a0)? };
                         let empty = h!(self, self.heap.intern_str(""));
                         self.regexp_create(p, empty)?
                     }
                 };
-                self.gate_exec(r)?;
-                let flags = self.ext.regexps[&r].re.flags();
-                if !flags.global {
-                    return match self.re_exec_raw(r, s)? {
-                        None => Ok(Value::Null),
-                        Some(m) => self.match_result(s, &m.spans),
-                    };
-                }
-                let ml = self.collect_matches(r, s, false)?;
-                if ml.len() == 0 {
-                    return Ok(Value::Null);
-                }
-                let mut items = Vec::with_capacity(ml.len());
-                for i in 0..ml.len() {
-                    self.tick()?;
-                    let (a, b) = ml.row(i)[0];
-                    items.push(Value::String(self.sub(s, a as usize, b as usize)?));
-                }
-                self.new_array_from(&items)
+                self.re_match(r, s)
             }
             Bi::StrReplace => {
-                let s = self.this_str(this, "replace")?;
                 let (sv, rv) = (a0, arg(args, 1));
+                let hook = self.str_hook(this, "replace", sv, WK_REPLACE, &[this, rv])?;
+                let s = self.this_str(this, "replace")?;
                 let func = if self.is_callable(rv) { Some(rv) } else { None };
-                if let Some(r) = self.regexp_of(sv) {
-                    let tpl = if func.is_none() { Some(self.coerce_string(rv)?) } else { None };
-                    self.gate_exec(r)?;
-                    let flags = self.ext.regexps[&r].re.flags();
-                    let ml = if flags.global {
-                        self.collect_matches(r, s, true)?
-                    } else {
-                        match self.re_exec_raw(r, s)? {
-                            None => return Ok(Value::String(s)),
-                            Some(m) => MatchList { n: m.spans.len(), v: m.spans.iter().map(|x| x.map_or(UNSET, |(a, b)| (a as u32, b as u32))).collect() },
-                        }
-                    };
-                    return self.build_replacement(&ml, s, func, tpl);
+                match hook {
+                    Hook::Done(v) => return Ok(v),
+                    Hook::Builtin(r) => return self.re_replace(r, s, func, rv),
+                    Hook::Absent => {}
                 }
                 let search = self.coerce_string(sv)?;
                 let tpl = if func.is_none() { Some(self.coerce_string(rv)?) } else { None };
@@ -658,6 +699,26 @@ impl<'p> Interp<'p> {
                 let m = h!(self, self.heap.str_len(search));
                 let ml = MatchList { n: 1, v: vec![(p as u32, (p + m) as u32)] };
                 self.build_replacement(&ml, s, func, tpl)
+            }
+            Bi::ReSymMatch => {
+                let r = self.this_regexp(this, "[Symbol.match]")?;
+                let s = self.coerce_string(a0)?;
+                self.re_match(r, s)
+            }
+            Bi::ReSymReplace => {
+                let r = self.this_regexp(this, "[Symbol.replace]")?;
+                let s = self.coerce_string(a0)?;
+                let rv = arg(args, 1);
+                let func = if self.is_callable(rv) { Some(rv) } else { None };
+                self.re_replace(r, s, func, rv)
+            }
+            Bi::ReSymSplit => {
+                let r = self.this_regexp(this, "[Symbol.split]")?;
+                let s = self.coerce_string(a0)?;
+                let limv = arg(args, 1);
+                let lim = if matches!(limv, Value::Undefined) { u32::MAX } else { to_uint32(self.coerce_number(limv)?) };
+                self.gate_exec(r)?;
+                self.split_regexp(r, s, lim)
             }
             Bi::StrConcat => {
                 let s = self.this_str(this, "concat")?;
@@ -690,6 +751,45 @@ impl<'p> Interp<'p> {
         }
     }
 
+    /// `String.prototype.match` on a builtin regexp.
+    fn re_match(&mut self, r: ObjId, s: StrId) -> Res<Value> {
+        self.gate_exec(r)?;
+        let flags = self.ext.regexps[&r].re.flags();
+        if !flags.global {
+            return match self.re_exec_raw(r, s)? {
+                None => Ok(Value::Null),
+                Some(m) => self.match_result(s, &m.spans),
+            };
+        }
+        let ml = self.collect_matches(r, s, false)?;
+        if ml.len() == 0 {
+            return Ok(Value::Null);
+        }
+        let mut items = Vec::with_capacity(ml.len());
+        for i in 0..ml.len() {
+            self.tick()?;
+            let (a, b) = ml.row(i)[0];
+            items.push(Value::String(self.sub(s, a as usize, b as usize)?));
+        }
+        self.new_array_from(&items)
+    }
+
+    /// `String.prototype.replace` on a builtin regexp. `rv` is the replacement (`func` when it is callable).
+    fn re_replace(&mut self, r: ObjId, s: StrId, func: Option<Value>, rv: Value) -> Res<Value> {
+        let tpl = if func.is_none() { Some(self.coerce_string(rv)?) } else { None };
+        self.gate_exec(r)?;
+        let flags = self.ext.regexps[&r].re.flags();
+        let ml = if flags.global {
+            self.collect_matches(r, s, true)?
+        } else {
+            match self.re_exec_raw(r, s)? {
+                None => return Ok(Value::String(s)),
+                Some(m) => MatchList { n: m.spans.len(), v: m.spans.iter().map(|x| x.map_or(UNSET, |(a, b)| (a as u32, b as u32))).collect() },
+            }
+        };
+        self.build_replacement(&ml, s, func, tpl)
+    }
+
     /// `includes`, `startsWith`, `endsWith`: the argument must not be a regexp.
     fn str_search_method(&mut self, x: Bi, this: Value, args: &[Value]) -> Res<Value> {
         let name = match x {
@@ -698,7 +798,7 @@ impl<'p> Interp<'p> {
             _ => "endsWith",
         };
         let s = self.this_str(this, name)?;
-        if self.regexp_of(arg(args, 0)).is_some() {
+        if self.is_regexp(arg(args, 0))? {
             return Err(self.type_err(&format!("First argument to String.prototype.{name} must not be a regular expression")));
         }
         let needle = self.coerce_string(arg(args, 0))?;
@@ -773,11 +873,16 @@ impl<'p> Interp<'p> {
     // ------------------------------------------------------------ split
 
     fn str_split(&mut self, this: Value, sepv: Value, limv: Value) -> Res<Value> {
+        let hook = self.str_hook(this, "split", sepv, WK_SPLIT, &[this, limv])?;
         let s = self.this_str(this, "split")?;
         let lim = if matches!(limv, Value::Undefined) { u32::MAX } else { to_uint32(self.coerce_number(limv)?) };
-        if let Some(r) = self.regexp_of(sepv) {
-            self.gate_exec(r)?;
-            return self.split_regexp(r, s, lim);
+        match hook {
+            Hook::Done(v) => return Ok(v),
+            Hook::Builtin(r) => {
+                self.gate_exec(r)?;
+                return self.split_regexp(r, s, lim);
+            }
+            Hook::Absent => {}
         }
         let sep = if matches!(sepv, Value::Undefined) { None } else { Some(self.coerce_string(sepv)?) };
         if lim == 0 {
@@ -1068,9 +1173,13 @@ impl<'p> Interp<'p> {
     }
 
     fn regexp_ctor(&mut self, p: Value, f: Value, is_new: bool) -> Res<Value> {
+        let is_re = self.is_regexp(p)?;
+        if is_re && self.regexp_of(p).is_none() {
+            return Err(unsupported("RegExp constructor with a regexp-like object (Symbol.match)", Span::default()));
+        }
         if let Some(po) = self.regexp_of(p) {
             if matches!(f, Value::Undefined) {
-                if !is_new {
+                if !is_new && is_re {
                     let c = self.get_prop(p, self.k_constructor)?;
                     if matches!((c, self.ext.regexp_ctor), (Value::Object(a), Some(b)) if a == b) {
                         return Ok(p);

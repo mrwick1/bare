@@ -4,8 +4,9 @@
 // Supported: `new Promise(executor)`, `Promise.resolve`, `Promise.reject`, `Promise.prototype.then`, `.catch`,
 // `.finally`. Resolver-once state, thenable assimilation (a job, as in the spec) and self-resolution rejection are exact.
 // Gates (explicit `Unsupported`, never silent): `Promise.all`, `allSettled`, `race`, `any` and any static call
-// whose `this` is not the intrinsic `Promise`. There is no `Symbol`, so there is no `@@species` and no
-// `@@toStringTag`; `then` still reads `constructor` and rejects a non-object. `async`/`await` is NOT supported.
+// whose `this` is not the intrinsic `Promise`. `then`, `catch` and `finally` read `constructor` and its `@@species`:
+// `undefined`, `null` and `Promise` give the default and another callable is a gate. `Promise[@@species]` and
+// `Promise.prototype[@@toStringTag]` exist. `async`/`await` lives in `eval_async.rs`.
 //
 // The queue is separate from timers and the network. Nothing runs by itself: the host calls
 // [`Interp::drain_microtasks`] after a script or a task. Jobs run FIFO.
@@ -82,6 +83,8 @@ struct Reaction {
     on_ok: Value,
     on_err: Value,
     derived: ObjId,
+    /// An `await` of an async function activation (`on_ok`, `on_err` and `derived` are then unused).
+    act: Option<ActRef>,
 }
 
 struct PromiseData {
@@ -97,6 +100,8 @@ enum Job {
     /// A host callback from `queueMicrotask`: called with no arguments. An ordinary throw goes to
     /// [`Host::report_exception`] and the queue goes on.
     Callback { cb: Value },
+    /// Resume the suspended async function activation `act` (see `eval_async.rs`).
+    Resume { act: ActRef, arg: Value, rejected: bool },
 }
 
 #[derive(Default)]
@@ -211,6 +216,8 @@ impl<'p> Interp<'p> {
         self.pmethod(proto, "finally", PFn::Finally, 1)?;
         let k = h!(self, self.heap.key_from_str("Promise"));
         self.def(g, k, Value::Object(ctor), true, false, true)?;
+        self.sc_getter(ctor, self.wk_key(WK_SPECIES), "get [Symbol.species]", ScFn::Species)?;
+        self.sc_tag(proto, "Promise")?;
         self.promise.k_then = Some(h!(self, self.heap.key_from_str("then")));
         self.promise.ctor = Some(ctor);
         self.promise.proto = Some(proto);
@@ -245,6 +252,7 @@ impl<'p> Interp<'p> {
                 Job::React { handler, arg, derived, .. } => out.extend([handler, arg, Value::Object(derived)]),
                 Job::Thenable { promise, thenable, then } => out.extend([Value::Object(promise), thenable, then]),
                 Job::Callback { cb } => out.push(cb),
+                Job::Resume { arg, .. } => out.push(arg),
             }
         }
     }
@@ -374,14 +382,20 @@ impl<'p> Interp<'p> {
         }
     }
 
-    /// `SpeciesConstructor` without `@@species` (no Symbol exists): `constructor` must be undefined or an object,
-    /// and the default constructor is always used.
+    /// `SpeciesConstructor(this, %Promise%)`. `constructor` must be undefined or an object. Its `@@species`
+    /// is read; `undefined`, `null` and the intrinsic `Promise` give the default. Another callable would need
+    /// `NewPromiseCapability`, so it is a gate. A value that is not callable is a `TypeError`.
     fn species_check(&mut self, this: Value) -> Res<()> {
         let c = self.get_prop(this, self.k_constructor)?;
-        if matches!(c, Value::Undefined | Value::Object(_)) {
-            Ok(())
-        } else {
-            Err(self.type_err("The .constructor property is not an object"))
+        match c {
+            Value::Undefined => Ok(()),
+            Value::Object(_) => match self.get_prop(c, self.wk_key(WK_SPECIES))? {
+                Value::Undefined | Value::Null => Ok(()),
+                Value::Object(s) if Some(s) == self.promise.ctor => Ok(()),
+                s @ Value::Object(_) if self.is_callable(s) => Err(unsupported("Promise species constructor other than Promise", Span::default())),
+                _ => Err(self.type_err("object.constructor[Symbol.species] is not a constructor")),
+            },
+            _ => Err(self.type_err("The .constructor property is not an object")),
         }
     }
 
@@ -477,6 +491,10 @@ impl<'p> Interp<'p> {
         let reactions = std::mem::take(&mut d.reactions);
         self.promise.reactions -= n;
         for r in reactions {
+            if let Some(act) = r.act {
+                self.promise.queue.push_back(Job::Resume { act, arg: v, rejected });
+                continue;
+            }
             let handler = if rejected { r.on_err } else { r.on_ok };
             self.promise.queue.push_back(Job::React { handler, arg: v, derived: r.derived, rejected });
         }
@@ -494,7 +512,7 @@ impl<'p> Interp<'p> {
                     return Err(Error::Limit(LimitKind::PromiseReactions));
                 }
                 self.promise.reactions += 1;
-                self.promise.map.get_mut(&p).expect("promise").reactions.push(Reaction { on_ok, on_err, derived });
+                self.promise.map.get_mut(&p).expect("promise").reactions.push(Reaction { on_ok, on_err, derived, act: None });
             }
             PState::Fulfilled(v) => self.enqueue(Job::React { handler: on_ok, arg: v, derived, rejected: false })?,
             PState::Rejected(v) => self.enqueue(Job::React { handler: on_err, arg: v, derived, rejected: true })?,
@@ -528,6 +546,7 @@ impl<'p> Interp<'p> {
                     Ok(())
                 }
             },
+            Job::Resume { act, arg, rejected } => self.async_resume(act, arg, rejected),
             Job::Thenable { promise, thenable, then } => {
                 let (res, rej, pair) = self.resolving_functions(promise)?;
                 if let Err(e) = self.call_fn(then, thenable, &[res, rej]) {

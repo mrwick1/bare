@@ -113,8 +113,8 @@ fn gates_are_explicit_unsupported_not_silent() {
     ] {
         assert_eq!(run_case(src), format!("unsupported:{what}"), "{src}");
     }
-    // async/await is still found before anything runs
-    for src in ["async function f() { await 1; }", "var f = async () => 1;"] {
+    // an async shape that is not supported is found before anything runs
+    for src in ["async function f() { switch (await 1) { default: } }", "var f = async () => { for (var k in await 1) {} };"] {
         let prog = parse_script(src, Limits::default()).unwrap();
         assert!(matches!(Interp::new(&prog, Heap::default(), EvalLimits::default()), Err(Error::Unsupported(_))), "{src}");
     }

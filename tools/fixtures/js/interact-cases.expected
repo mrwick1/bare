@@ -1,0 +1,22 @@
+priv_field_around_await	a1|sync ## a1|sync|b2|v2
+priv_write_with_await_value	 ## 5|7|v7
+priv_read_of_awaited_object	 ## g7|htrue|nfalse|TypeError:Cannot read private member #x from an object whose class did not declare it
+priv_method_call_with_await_args	 ## m13|n116
+priv_accessor_and_static	 ## i1|i2|m8
+super_call_with_await_args	 ## A12!|vA12!3
+super_property_assign_and_compound	 ## set7|v13
+super_static_and_arrow	 ## SB!|m1
+derived_ctor_starts_async_work	run13|made ## run13|made|after|v3
+fifo_between_instances	a0|b0|end ## a0|b0|end|a1|b1|a2|b2
+async_method_not_constructor	undefined|function|true|TypeError|TypeError ## undefined|function|true|TypeError|TypeError
+class_call_still_throws	 ## TypeError:Class constructor A cannot be invoked without 'new'
+brand_check_failure_after_await	 ## TypeError:Cannot read private member #x from an object whose class did not declare it|TypeError:Cannot write private member #x to an object whose class did not declare it|ok1
+field_arrow_async_and_getter_promise	 ## g3|f2
+class_made_after_await	 ## 6|v5
+class_expression_in_awaiting_function	 ## v3
+json_regexp_string_in_methods	 ## {"a":one,"b":[one]}|A+B
+rethrow_through_private_method	 ## cRangeError|rejRangeError
+arguments_and_this_in_async_method	 ## v7
+extends_regexp	true|true|true|true ## true|true|true|true
+extends_error_and_array	6|true|3 ## 6|true|3|boom1true
+promise_then_job_vs_await_order	m1 ## m1|t1|m2|t2

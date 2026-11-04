@@ -1,0 +1,76 @@
+# bare-js cases of generic iterators (Map, Set, custom iterators, strings) across await, in async functions and class
+# methods with private state. Same format as interact-cases.txt: a log through L(), the last expression is a reader.
+# Node (vm, empty context) is the oracle (tools/js/promise_oracle.mjs). Only our own tiny programs run here.
+=== forof_set_across_await_with_private
+var log = []; function L(x) { log.push(String(x)); }
+class A { #sum = 0; #items = new Set([1, 2, 3]); async run() { for (var x of this.#items) { await null; this.#sum += x; L("x" + x); } return this.#sum; } }
+new A().run().then(function (v) { L("done" + v); }); L("sync");
+(function () { return log.join("|"); })
+=== forof_map_destructure_across_await
+var log = []; function L(x) { log.push(String(x)); }
+async function f(m) { var out = []; for (var [k, v] of m) { out.push(k + (await v)); } return out.join(); }
+f(new Map([["a", 1], ["b", Promise.resolve(2)]])).then(L);
+(function () { return log.join("|"); })
+=== forof_custom_iterator_break_closes
+var log = []; function L(x) { log.push(String(x)); }
+var it = { [Symbol.iterator]() { var i = 0; return { next() { L("n" + i); return { value: i++, done: false }; }, return() { L("ret"); return {}; } }; } };
+async function f() { for (var x of it) { await null; L("x" + x); if (x == 1) break; } return "end"; }
+f().then(L);
+(function () { return log.join("|"); })
+=== forof_throw_closes_and_original_wins
+var log = []; function L(x) { log.push(String(x)); }
+var it = { [Symbol.iterator]() { var i = 0; return { next() { return { value: i++, done: false }; }, return() { L("ret"); throw new Error("from-return"); } }; } };
+async function f() { for (var x of it) { await null; throw new Error("body" + x); } }
+f().catch(function (e) { L(e.message); });
+(function () { return log.join("|"); })
+=== forof_break_with_throwing_return_rejects
+var log = []; function L(x) { log.push(String(x)); }
+var it = { [Symbol.iterator]() { return { next() { return { value: 1, done: false }; }, return() { L("ret"); throw new Error("from-return"); } }; } };
+async function f() { for (var x of it) { await null; break; } return "ok"; }
+f().then(L, function (e) { L("rej:" + e.message); });
+(function () { return log.join("|"); })
+=== forof_return_inside_closes
+var log = []; function L(x) { log.push(String(x)); }
+var it = { [Symbol.iterator]() { var i = 0; return { next() { return { value: i++, done: false }; }, return() { L("ret"); return {}; } }; } };
+class A { async f() { for (var x of it) { if (await x == 2) return "r" + x; } } }
+new A().f().then(L);
+(function () { return log.join("|"); })
+=== forof_labels_close_inner_then_outer
+var log = []; function L(x) { log.push(String(x)); }
+function mk(tag) { return { [Symbol.iterator]() { var i = 0; return { next() { return { value: tag + i++, done: false }; }, return() { L("ret" + tag); return {}; } }; } }; }
+async function f() { outer: for (var a of mk("o")) { for (var b of mk("i")) { await null; L(a + b); if (b == "i1") continue outer; if (a == "o1") break outer; } } return "end"; }
+f().then(L);
+(function () { return log.join("|"); })
+=== forof_string_and_array_across_await
+var log = []; function L(x) { log.push(String(x)); }
+async function f() { var o = []; for (var c of "a😀b") { o.push(await c); } for (var d of [1, 2]) { o.push(await d); } return o.join(); }
+f().then(function (v) { L(v.length + ":" + v); });
+(function () { return log.join("|"); })
+=== forof_set_mutated_while_suspended
+var log = []; function L(x) { log.push(String(x)); }
+var s = new Set([1, 2]);
+async function f() { var o = []; for (var x of s) { await null; o.push(x); } return o.join(); }
+f().then(L); s.add(3); Promise.resolve().then(function () { s.delete(2); s.add(4); });
+(function () { return log.join("|"); })
+=== forof_two_activations_share_a_set
+var log = []; function L(x) { log.push(String(x)); }
+var s = new Set(["p", "q"]);
+async function f(t) { for (var x of s) { await null; L(t + x); } }
+f("1"); f("2");
+(function () { return log.join("|"); })
+=== spread_and_pattern_with_await
+var log = []; function L(x) { log.push(String(x)); }
+async function f() { var a = [...await new Set([1, 2]), ...await "xy"]; var [p, , q] = await new Map([[1, 2], [3, 4], [5, 6]]); var [r, ...rest] = new Set([7, 8, 9]); return a.join() + "/" + p + "|" + q + "/" + r + rest.join(); }
+f().then(L);
+(function () { return log.join("|"); })
+=== class_with_iterator_method_and_private_state
+var log = []; function L(x) { log.push(String(x)); }
+class Bag { #xs = [3, 4, 5]; #closed = 0; [Symbol.iterator]() { var i = 0, self = this; return { next: function () { return { value: self.#xs[i], done: i++ >= self.#xs.length }; }, return: function () { self.#closed++; return {}; } }; } get closed() { return this.#closed; } async total() { var t = 0; for (var x of this) { t += await x; if (t > 6) break; } return t + ":" + this.#closed; } }
+var b = new Bag(); b.total().then(function (v) { L(v + "/" + b.closed); });
+(function () { return log.join("|"); })
+=== rejected_await_in_for_of_closes
+var log = []; function L(x) { log.push(String(x)); }
+var it = { [Symbol.iterator]() { return { next() { return { value: Promise.reject(new Error("rej")), done: false }; }, return() { L("ret"); return {}; } }; } };
+async function f() { for (var x of it) { await x; } }
+f().catch(function (e) { L(e.message); });
+(function () { return log.join("|"); })

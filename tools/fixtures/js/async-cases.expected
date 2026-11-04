@@ -1,0 +1,94 @@
+await_basic_order	1|2 ## 1|2|3
+await_value_returned	 ## v6
+await_rejected_caught	 ## caught bad|ok
+await_rejected_uncaught	 ## c:bad
+await_thenable	sync ## sync|then|v7
+await_thenable_throws	 ## cboom
+await_thenable_reject	 ## cno
+order_with_then_chain	a|s ## a|s|b|x|c|y|z
+order_native_promise_one_tick	 ## f|t1|t2
+order_two_async	a1|b1|s ## a1|b1|s|a2|b2|a3|b3
+nested_async	f1|g1|sync ## f1|g1|sync|g2|f2:5|done10
+nested_async_returns_promise_type	true|function ## true|function
+return_promise_from_async	 ## 1|2|3|r|4|5
+throw_after_await	 ## TypeError:tt
+throw_before_await_sync_reject	body|after call ## body|after call|cearly
+no_await_async	body|sync ## body|sync|v3
+finally_return_override	 ## v2
+finally_keeps_return	 ## fin|v1
+finally_throw_override	 ## cb
+finally_keeps_throw	 ## fin|ca
+finally_return_over_throw	 ## vr
+catch_then_finally_order	t ## t|cx|c2|f|f2|end
+throw_in_catch_runs_finally	 ## inner fin|outer from catch
+break_through_finally	 ## i0|f0|f1|end1
+continue_through_finally	b0 ## b0|f0|f1|b2|f2
+return_in_loop_through_finally	 ## fin|r
+while_await_break_continue	 ## 1|3|4|end5
+do_while_await	 ## 1|3|4|end
+for_let_closures_per_iteration	 ## 0,1,2
+for_await_in_head	 ## 0|1|2
+for_of_await	 ## 1|2|3|a0|b0
+for_of_continue_break_label	 ## 11|21|end
+labeled_block_break	a ## a|b
+labeled_while_continue	 ## 2|4
+compound_assign_old_value	 ## 6
+binary_left_first	 ## 6|10
+member_ref_order	obj|key|v ## obj|key|v|100,100
+member_assign_base_await	 ## 7,2
+index_assign_await	 ## 0,9,3
+logical_assign	 ## 5,6,7|3
+short_circuit	t0 ## t0|t1|tnull|t3|0,1,3
+conditional_await	 ## y|n
+this_after_await	 ## obj|obj
+this_strict_undefined	 ## undefined
+this_sloppy_global	 ## true
+arguments_after_await	 ## 3:2:1
+default_params_sync	default|after ## default|after|9
+default_param_throws_rejects	returned ## returned|cdp
+destructure_param_null_rejects	 ## TypeError
+closures_capture_after_resume	 ## 2
+call_member_await_base_and_args	 ## o123|oxyz
+call_index_base_await	 ## o1|o2|o3
+call_plain_spread	 ## 1+2+3+4+5|0
+call_order_callee_before_args	callee|arg1 ## callee|arg1|arg2|3
+call_not_function_error	 ## TypeError:o.nope is not a function|TypeError
+null_base_error	 ## TypeError:Cannot read properties of null (reading 'x')|TypeError:Cannot read properties of undefined (reading 'k')
+new_await_args	 ## 3:true
+template_await	 ## a1b2cxd|0
+template_to_string_order	ts ## ts|A1
+array_literal_await	 ## 6:1,,3,4,5,6|false
+object_literal_await	 ## a,b,dyn,c,d,e:1456
+destructuring_assign_await	 ## 1,2,5
+sequence_expr	 ## mid|3
+unary_await	 ## -2|true|number|undefined|-6|7
+var_decl_await_many	 ## 6
+tdz_after_await	 ## ReferenceError
+const_assign_error	 ## TypeError|1
+if_await_branches	 ## t|zero|end|f|end|end
+block_scope_closure	 ## 1,2
+return_await_in_try	 ## caught x|g rejected y
+throw_await_value	 ## tv
+async_arrow_forms	 ## 1|3|12
+async_method_and_expression	 ## function|5
+async_not_constructor	undefined|undefined|false|TypeError|TypeError|0,f ## undefined|undefined|false|TypeError|TypeError|0,f
+async_call_apply_bind	 ## c12|a34|b56
+async_recursion	 ## 3628800
+async_in_foreach_callbacks	s1|s2|s3|after ## s1|s2|s3|after|a1|a2|a3
+async_from_then_handler	 ## h1|h2|2
+many_sequential_awaits	 ## 1225
+await_result_thenable_resolve_twice	 ## 1
+await_promise_subclass_constructor_getter	ctor ## ctor|1
+await_constructor_getter_throws	ccg ## ccg
+interleave_with_promise_ctor	f1|sync ## f1|sync|f2:go
+never_resolved	a ## a
+result_promise_state	 ## settled
+self_reference_named_expr	 ## done
+await_in_nested_function_scope	 ## inner5
+exception_from_sync_callee_after_await	 ## RangeErrorrr
+catch_param_scope_await	 ## inner|outer
+nested_loops_awaits_breaks	 ## 00|10|20
+switch_without_await_inside_async	 ## one|i1|other|i1
+optional_chain_without_await	undefined ## undefined|undefined|false
+getter_setter_sync_in_async	 ## set2|get|set4
+completion_not_leaked_to_script	ok ## ok

@@ -158,7 +158,7 @@ fn syntax_error_and_unsupported_run_nothing() {
         let mut it = realm(limits());
         let before = it.stats();
         assert!(out(&mut it, "var q = 1; var = ;").starts_with("throw:SyntaxError:"));
-        assert_eq!(out(&mut it, "var zz = 1; async function f() {}"), "unsupported:async function");
+        assert_eq!(out(&mut it, "var zz = 1; async function f() { switch (await 1) {} }"), "unsupported:await inside switch");
         let after = it.stats();
         assert_eq!(out(&mut it, "typeof zz + typeof q"), "undefinedundefined");
         assert_eq!((before.scripts, before.script_source, before.script_nodes), (after.scripts, after.script_source, after.script_nodes));

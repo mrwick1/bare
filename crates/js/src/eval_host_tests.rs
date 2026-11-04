@@ -175,7 +175,7 @@ fn collector_traces_owned_values_roots_and_prunes_dead_owners() {
         assert!(it.heap.get_prototype_of(p).is_ok());
         // a reused slot of the dead owner cannot alias: new objects have no entry
         out(&mut it, "var fresh = []; for (var i = 0; i < 50; i++) fresh.push({}); 0");
-        assert_eq!(out(&mut it, "fresh.map ? 'x' : String(owned(fresh[0]))"), "null");
+        assert_eq!(out(&mut it, "String(owned(fresh[0]))"), "null");
         // a second collection changes nothing more
         it.collect(&[]).unwrap();
         assert_eq!(t.pruned.get(), 1);

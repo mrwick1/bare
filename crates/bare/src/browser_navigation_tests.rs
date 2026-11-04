@@ -988,3 +988,28 @@ fn fetch_navigation_storage_and_timer_share_one_realm() {
         assert_eq!(srv.recs()[0].path, "/new/child");
     });
 }
+
+#[test]
+fn async_class_login_shaped_flow_crosses_fetch_history_and_collection() {
+    big(|| {
+        use crate::browser_fetch_tests::{serve, ok};
+        let srv = serve(|r| {
+            assert_eq!(r.method, "POST");
+            assert_eq!(r.path, "/api/session");
+            assert_eq!(r.body, br#"{"label":"synthetic"}"#);
+            ok("{\"ok\":true}")
+        });
+        let base = format!("http://127.0.0.1:{}/login", srv.port);
+        let mut b = at(&base);
+        b.use_virtual_clock_at(1000.0).unwrap();
+        b.configure_fetch(crate::browser_fetch::FetchConfig { base_url: Some(base), client: bare_net::http::Client::new(), limits: Default::default() }).unwrap();
+        assert_eq!(js(&mut b, "class SessionFlow { #label = 'synthetic'; async enter(){ var reply = await fetch('/api/session', {method:'POST', headers:{'content-type':'application/json'}, body:JSON.stringify({label:this.#label})}); var data = await reply.json(); if(data.ok){ sessionStorage.setItem('state', this.#label); history.pushState({label:this.#label}, '', '/dashboard'); } return new TextDecoder().decode(new TextEncoder().encode(this.#label)); } }"), "undefined");
+        assert_eq!(js(&mut b, "var flow = new SessionFlow(); var result = ''; flow.enter().then(function(value){ setTimeout(function(){ result = value + ':' + history.state.label; }, 0); });"), "object");
+        b.collect(&[]).unwrap();
+        assert_eq!(b.run_network_tasks(4).unwrap(), 1);
+        b.advance_time(1.0, 10).unwrap();
+        b.collect(&[]).unwrap();
+        assert_eq!(js(&mut b, "[result, location.pathname, sessionStorage.getItem('state')].join()"), "synthetic:synthetic,/dashboard,synthetic");
+        assert_eq!(b.pending_fetches(), 0);
+    });
+}

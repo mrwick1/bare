@@ -1,0 +1,107 @@
+basic	number:8
+default_ctor	string:function,true,true,0,A
+ctor_length_name	string:1,A
+method_descriptors	string:false/true/true,false/true/true,false/true/acc,false/true/true,false/false/false,0,0
+own_keys_of_class	string:true,true,true,true,false
+call_without_new	string:TypeError: Class constructor A cannot be invoked without 'new'|TypeError: Class constructor A cannot be invoked without 'new'|TypeError: Class constructor A cannot be invoked without 'new'|TypeError: Class constructors cannot be invoked without 'new'
+tdz_before_declaration	string:ReferenceError: Cannot access 'A' before initialization|function
+tdz_typeof	string:undefined|after
+tdz_in_heritage	string:ReferenceError: Cannot access 'A' before initialization|undefined|ReferenceError: Cannot access 'A' before initialization
+tdz_survives_failed_class	string:ReferenceError: Cannot access 'D' before initialization
+class_name_scope	string:function,undefined,A
+class_name_inner_const	string:TypeError: Assignment to constant variable.|5
+anonymous_names	string:C,D,false,f,true
+strict_this	string:undefined,false
+static_members	string:1,2,2,11
+static_this_and_order	string:k,a,b,c
+accessors	string:10,S,true,false
+accessor_getter_only	string:1
+accessor_names	string:get g,set g,m,s
+computed_keys	string:1,2,3,4,dyn1,2
+computed_order	string:a,b,c,d,static-init,defined,field-init
+derived_basic	string:1,2,B>A,true,true,true,true
+derived_default_ctor	string:7,0,0,true
+derived_default_spread_args	number:3
+this_before_super	string:ReferenceError: Must call super constructor in derived class before accessing 'this' or returning from derived constructor|ReferenceError: Must call super constructor in derived class before accessing 'this' or returning from derived constructor|ReferenceError: Super constructor may only be called once|ReferenceError: Must call super constructor in derived class before accessing 'this' or returning from derived constructor|1
+derived_return_rules	string:string|TypeError: Derived constructors may only return object or undefined|1|1|TypeError: Derived constructors may only return object or undefined
+base_return_rules	string:number,2,1,1
+super_property	string:B>Am:b,B>Ag:b,B>As:static,Am:b,Am:b
+super_home_object	string:AB,AB,AB
+super_property_set	string:set:5,true:7,NaN
+super_property_missing	string:undefined|TypeError: (intermediate value).nothing is not a function
+super_in_static_field_and_field	string:A,SA,A!
+delete_super	string:ReferenceError: Unsupported reference to 'super'
+static_inheritance	string:sm:B,sm:B!,1,false
+fields_basic	string:1,2,3,true,,5,false,1,f,a+b+c+d+f
+fields_define_not_set	string:1,true
+field_order_base	string:field,ctor-body
+field_order_derived	string:B-before,A-field,A-ctor,B-field,B-after
+field_order_derived_default	string:A-field,A-ctor,B-field
+field_sees_super_fields	string:1,2
+field_throws	string:RangeError: bad|a
+field_function_names	string:f,g,h,s
+field_per_instance	string:false,1,2
+private_fields	string:3,2:12,2,0,undefined
+private_brand_errors	string:TypeError: Cannot read private member #x from an object whose class did not declare it|TypeError: Cannot write private member #x to an object whose class did not declare it|TypeError: Cannot read properties of null (reading '#x')|TypeError: Cannot set properties of undefined (setting '#x')|true|false|TypeError: Cannot use 'in' operator to search for '#x' in 1|TypeError: Cannot use 'in' operator to search for '#x' in null
+private_distinct_per_evaluation	string:true,false,true
+private_not_inherited_by_proto	string:1,TypeError
+private_in_derived	string:A,B
+private_in_derived_before_super	string:true,true
+private_double_init	string:TypeError: Cannot initialize #x twice on the same object
+private_methods	string:m:5,g:5,s
+private_method_errors	string:TypeError: Receiver must be an instance of class A|TypeError: Private method '#m' is not writable|TypeError: '#g' was defined without a setter|TypeError: '#h' was defined without a getter|TypeError: Receiver must be class A|undefined
+private_method_identity	string:true,function,#m
+private_static_fields	string:2,2,TypeError
+private_optional_and_destructure	string:,1,6,,1
+private_compound_ops	string:25,ab,init
+private_name_in_closure	number:7
+private_shadow_nested_class	string:TypeError: Cannot read private member #x from an object whose class did not declare it,inner
+private_accessor_pair_static	string:sv:9
+private_field_function_name	string:#f,#g
+private_methods_before_fields	string:m
+private_not_enumerable_or_reflected	string:y,y,false,false
+new_target_function	string:call,true,call
+new_target_function_value	string:true,undefined
+new_target_class	string:A,B,C,true
+new_target_arrow_and_method	string:A,undefined
+new_target_in_derived_arrow	string:B
+extends_error	string:true,true,boom,E,E: boom
+extends_error_default	string:x,Error,Error: x,true,true,TypeError,true
+extends_error_throw	string:true,oops,7
+extends_object_array	string:1,true,2,true,true
+extends_plain_function	string:hi3,true,true,true
+extends_member_expression	number:1
+extends_call_expression	string:a,mixed,true
+extends_null	string:true,true,TypeError
+extends_invalid	string:TypeError,TypeError,TypeError,TypeError,TypeError
+extends_evaluation_order	string:heritage,key,static
+extends_side_effect_throws	string:TypeError: heritage
+super_spread_args	string:1-2-3
+super_call_in_arrow_after_return	string:ReferenceError
+bound_class	string:3,true,bound A
+class_in_function_and_loop	string:0,2,false,false
+class_in_block_scope	string:function,undefined
+class_decl_hoist_in_function	string:ReferenceErrorZ
+class_recursion_and_self_reference	number:31
+static_name_method	string:function,custom,field
+constructor_string_key	string:1,static
+method_not_constructor	string:TypeError: a.m is not a constructor|TypeError: A.s is not a constructor|false
+getter_this_derived	string:bn
+inherited_accessor_with_field_shadow	number:2
+instanceof_and_prototype_chain	string:true,true,true
+to_string_tags	string:[object Object],[object Function],function,true
+abrupt_in_constructor	string:RangeError: ctor|RangeError: ctor|undefined: undefined
+early_return_in_constructor	string:a|a,b
+getter_setter_static_and_instance_same_name	string:static,inst
+method_overwrites	number:2
+class_expression_in_call_args	string:ok
+field_initializer_closure_captures_scope	string:10,11
+field_this_in_nested_function	string:obj
+class_with_semicolons_and_asi	string:3,3
+computed_key_this_is_outer	string:kk
+derived_ctor_this_in_nested_class	boolean:false
+derived_computed_key_uses_ctor_this	string:function
+getter_in_computed_key_class_static	string:2,2
+instance_count_and_identity	string:1,2,2
+class_value_in_array_and_object	string:1,2
+sloppy_function_vs_class_this	string:g

@@ -533,3 +533,78 @@ fn pump_observes_a_failed_empty_microtask_checkpoint() {
         assert!(matches!(b.it.heap.get(b.it.global_object(), k), Ok(bare_js::heap::Get::Value(Value::Number(0.0)))));
     });
 }
+
+const SVC: &str = "var log = [];
+    class Svc { #n = 0; #enc = new TextEncoder(); #dec = new TextDecoder();
+      async handle(tag, payload) {
+        await null;
+        this.#n++;
+        var bytes = this.#enc.encode(JSON.stringify({ tag: tag, n: this.#n, payload: payload }));
+        await Promise.resolve();
+        var obj = JSON.parse(this.#dec.decode(bytes));
+        var m = /a(b+)/.exec(obj.payload);
+        var sum = 0; for (var x of bytes) sum += x;
+        log.push(obj.tag + obj.n + ':' + m[1].length + ':' + bytes.length + ':' + sum);
+        return obj.n;
+      } }
+    var svc = new Svc();";
+
+#[test]
+fn async_class_callbacks_from_timers_microtasks_and_messages_use_json_regexps_and_bytes() {
+    big(|| {
+        let mut b = browser();
+        js(&mut b, SVC);
+        js(&mut b, "setTimeout(function () { svc.handle('t', 'abbb'); log.push('timer'); }, 5);
+                    queueMicrotask(function () { svc.handle('q', 'ab'); log.push('micro'); });
+                    var ch = new MessageChannel(); ch.port1.onmessage = function (e) { svc.handle('m', e.data); log.push('msg'); };
+                    ch.port2.postMessage('abbbb');
+                    Promise.resolve().then(function () { log.push('p'); });
+                    log.push('sync'); 0");
+        assert_eq!(js(&mut b, "log.join()"), "sync");
+        b.drain().unwrap();
+        // the microtask queue ran: queueMicrotask, then the Promise job, then both continuations of the async method
+        assert_eq!(js(&mut b, "log.join()"), "sync,micro,p,q1:1:32:2379");
+        let p = adv(&mut b, 5.0);
+        assert_eq!(p.ran, 2);
+        // each task is followed by its own checkpoint, which finishes the async continuations of that task
+        assert_eq!(js(&mut b, "log.join()"), "sync,micro,p,q1:1:32:2379,msg,m2:4:35:2670,timer,t3:3:34:2580");
+        assert_eq!(b.it.pending_jobs(), 0);
+        assert_eq!(b.it.async_stats().activations, 0);
+        // collection keeps nothing the page cannot reach, and the class instance stays valid
+        b.collect(&[]).unwrap();
+        assert_eq!(js(&mut b, "svc.handle('z', 'abb'); 0"), "0");
+        b.drain().unwrap();
+        assert_eq!(js(&mut b, "log[log.length - 1]"), "z4:2:33:2489");
+    });
+}
+
+#[test]
+fn a_limit_in_a_resumed_class_method_is_sticky_and_replays_no_effect() {
+    big(|| {
+        let mut b = make(200_000, BrowserLimits::default());
+        js(&mut b, "var log = []; class A { async m() { await null; log.push('m'); for (;;) {} } }
+                    setTimeout(function () { new A().m(); }, 0); setTimeout(function () { log.push('later'); }, 1);
+                    queueMicrotask(function () { log.push('micro'); }); 0");
+        // the script's own checkpoint ran `micro`; the timer task starts the method and its continuation hits the cap
+        b.drain().unwrap();
+        assert!(matches!(b.advance_time(5.0, 10), Err(Error::Limit(LimitKind::Steps))));
+        assert_eq!(js(&mut b, "log.join()"), "micro,m");
+        // every later drain and pump repeats the error and runs nothing, also with an empty queue
+        assert!(matches!(b.drain(), Err(Error::Limit(LimitKind::Steps))));
+        assert!(matches!(b.advance_time(5.0, 10), Err(Error::Limit(LimitKind::Steps))));
+        assert!(matches!(b.run_scheduled_tasks(10), Err(Error::Limit(LimitKind::Steps))));
+        assert_eq!(js(&mut b, "log.join()"), "micro,m");
+        assert_eq!(b.it.pending_jobs(), 0);
+    });
+}
+
+#[test]
+fn an_async_callback_that_hits_a_gate_stops_the_pump_with_unsupported() {
+    big(|| {
+        let mut b = browser();
+        js(&mut b, "var log = []; setTimeout(async function () { await null; log.push('a'); new MessageChannel().port1.postMessage({}); log.push('never'); }, 0); setTimeout(function () { log.push('later'); }, 1); 0");
+        assert!(matches!(b.advance_time(5.0, 10), Err(Error::Unsupported(_))));
+        assert!(matches!(b.advance_time(5.0, 10), Err(Error::Unsupported(_))));
+        assert_eq!(js(&mut b, "log.join()"), "a");
+    });
+}

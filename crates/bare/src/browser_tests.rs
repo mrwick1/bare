@@ -726,3 +726,83 @@ fn host_collection_traces_byte_views_and_their_buffer_callbacks() {
         assert_eq!(js(&mut b, "document.getElementById('s').textContent"), "{\"v\":true}:kept");
     });
 }
+
+// Classes and async methods as listeners. The instances are reachable only through the host's listener edges,
+// two scripts use the same node shapes, and the driver (not JS) dispatches.
+const LISTENER_CLASSES_A: &str = "var log = [];
+    class Counter { #n = 0; #el; static last;
+      constructor(el) { this.#el = el; el.addEventListener('go', (e) => { Counter.last = this.work(e); }); }
+      async work(e) { await null; this.#n += 1; this.#el.textContent = JSON.stringify({ n: this.#n }); log.push(e.type + this.#n); return this.#n; } }";
+const LISTENER_CLASSES_B: &str = "class Handler { #seen = []; static last;
+      async handleEvent(e) { await Promise.resolve(); this.#seen.push(e.type); document.getElementById('i').setAttribute('data-h', this.#seen.join('+').replace(/go/g, 'G')); Handler.last = this.#seen.length; } }
+    (function () { new Counter(document.getElementById('s')); document.getElementById('s').addEventListener('go', new Handler()); })();";
+
+#[test]
+fn class_and_async_listeners_survive_collect_and_settle_in_the_driver() {
+    big(|| {
+        let mut b = browser();
+        assert_eq!(js(&mut b, LISTENER_CLASSES_A), "undefined");
+        assert_eq!(js(&mut b, LISTENER_CLASSES_B), "undefined");
+        // the instances have no JS reference: the listener closures (a host edge) hold them
+        assert_eq!(b.it.private_slots(), 3);
+        b.collect(&[]).unwrap();
+        b.collect(&[]).unwrap();
+        assert_eq!(b.it.private_slots(), 3);
+        assert_eq!(b.stats().listeners, 2);
+        let s = b.query("#s").unwrap().unwrap();
+        for round in 1..=2 {
+            b.dispatch(s, "go", false, false).unwrap();
+            // the driver ran a checkpoint after each listener, so every continuation has finished
+            assert_eq!(js(&mut b, "log.join()"), (1..=round).map(|r| format!("go{r}")).collect::<Vec<_>>().join(","));
+            let want = format!("{{\"n\":{round}}}");
+            assert_eq!(js(&mut b, "document.getElementById('s').textContent"), want);
+            assert_eq!(js(&mut b, "document.getElementById('i').getAttribute('data-h')"), vec!["G"; round].join("+"));
+            assert_eq!(js(&mut b, "Handler.last"), round.to_string());
+            let last = b.run_script("Counter.last").unwrap();
+            assert!(matches!(b.it.promise_status(last), Some(bare_js::eval::PromiseStatus::Fulfilled(Value::Number(n))) if n == round as f64));
+            assert_eq!(b.it.async_stats().activations, 0);
+            assert_eq!(b.it.pending_jobs(), 0);
+            b.collect(&[]).unwrap();
+            assert_eq!(b.it.private_slots(), 3);
+        }
+        // removing the listeners drops every instance, slot and activation
+        assert_eq!(js(&mut b, "var s = document.getElementById('s'); var p = s.parentNode; p.removeChild(s); Counter.last = null; s = null; p = null; 0"), "0");
+        b.collect(&[]).unwrap();
+        assert_eq!(b.it.private_slots(), 0);
+        assert_eq!(b.stats().listeners, 0);
+        assert_eq!(b.it.async_stats().activations, 0);
+    });
+}
+
+#[test]
+fn a_suspended_listener_activation_keeps_its_class_state_through_collect() {
+    big(|| {
+        let mut b = browser();
+        js(&mut b, "var log = [], release; var gate = new Promise(function (r) { release = r; });
+            class Box { #v = { a: [1, 2] }; async on(e) { await gate; log.push(this.#v.a.length + e.type); } }
+            (function () { var x = new Box(); document.getElementById('s').addEventListener('t', function (e) { x.on(e); }); })();");
+        let s = b.query("#s").unwrap().unwrap();
+        b.dispatch(s, "t", false, false).unwrap();
+        // the activation is suspended (gate is pending). Nothing but the pending promise reaches the instance.
+        assert_eq!(b.it.async_stats().activations, 1);
+        b.collect(&[]).unwrap();
+        assert_eq!(b.it.async_stats().activations, 1);
+        assert_eq!(b.it.private_slots(), 1);
+        js(&mut b, "release(0)");
+        b.drain().unwrap();
+        assert_eq!(js(&mut b, "log.join()"), "2t");
+        assert_eq!(b.it.async_stats().activations, 0);
+    });
+}
+
+#[test]
+fn subclassing_a_host_event_is_refused_instead_of_returning_the_wrong_brand() {
+    big(|| {
+        let mut b = browser();
+        assert_eq!(js(&mut b, "class MyEvent extends Event { get kind() { return 'my'; } } var made = 0; typeof MyEvent"), "function");
+        assert_eq!(js(&mut b, "var e = new MyEvent('x'); made = 1; e"), "unsupported:subclassing a host constructor (new.target is not passed to the constructor)");
+        assert_eq!(js(&mut b, "made + ',' + (new Event('x') instanceof Event) + ',' + typeof new CustomEvent('y').type"), "0,true,string");
+        // a class that merely holds an event is fine
+        assert_eq!(js(&mut b, "class H { #e = new Event('z'); get t() { return this.#e.type; } } new H().t"), "z");
+    });
+}

@@ -55,7 +55,16 @@ fn run_with(src: &str, heap: Heap, limits: EvalLimits, setup: impl FnOnce(&mut I
 
 #[test]
 fn corpus_matches_node() {
-    let (cases, expected) = (include_str!("../../../tools/fixtures/js/binary-cases.txt"), include_str!("../../../tools/fixtures/js/binary-cases.expected"));
+    check_corpus(include_str!("../../../tools/fixtures/js/binary-cases.txt"), include_str!("../../../tools/fixtures/js/binary-cases.expected"));
+}
+
+/// Iterator, `toStringTag` and species adapters of the byte classes (`adapter-cases.txt`).
+#[test]
+fn adapter_corpus_matches_node() {
+    check_corpus(include_str!("../../../tools/fixtures/js/adapter-cases.txt"), include_str!("../../../tools/fixtures/js/adapter-cases.expected"));
+}
+
+fn check_corpus(cases: &str, expected: &str) {
     let mut list: Vec<(&str, Vec<&str>)> = Vec::new();
     for line in cases.lines() {
         if let Some(n) = line.strip_prefix("=== ") {
@@ -86,7 +95,7 @@ fn unsupported_subset_is_explicit() {
     assert_eq!(g("new ArrayBuffer(4).transfer()"), "unsupported:ArrayBuffer.prototype.transfer");
     assert_eq!(g("Uint8Array.from([1])"), "unsupported:TypedArray.from");
     assert_eq!(g("Uint8Array.of(1)"), "unsupported:TypedArray.of");
-    for m in ["fill", "copyWithin", "reverse", "sort", "indexOf", "lastIndexOf", "includes", "join", "map", "filter", "forEach", "reduce", "every", "some", "find", "findIndex", "at", "entries", "keys", "values", "toString", "toReversed"] {
+    for m in ["fill", "copyWithin", "reverse", "sort", "indexOf", "lastIndexOf", "includes", "join", "map", "filter", "forEach", "reduce", "every", "some", "find", "findIndex", "at", "toString", "toReversed"] {
         assert_eq!(g(&format!("new Uint8Array(2).{m}()")), format!("unsupported:TypedArray.prototype.{m}"), "{m}");
     }
     // Other encodings: a real label is a gate, a made-up one is a RangeError.
@@ -601,4 +610,110 @@ fn decoder_accepts_output_exactly_at_the_string_cap() {
 fn decoder_label_scans_consume_steps() {
     let src = format!("new TextDecoder('{}utf-8')", " ".repeat(8192));
     assert_eq!(run_with(&src, Heap::default(), EvalLimits { max_steps: 100, ..Default::default() }, |_| {}), "limit:Steps");
+}
+
+// ---------------------------------------------------------------- iterables, species and subclass gates
+
+#[test]
+fn custom_species_is_an_explicit_gate_and_the_default_is_not() {
+    let g = |src: &str| run(src);
+    let ab = "unsupported:ArrayBuffer species constructor other than ArrayBuffer";
+    let ta = "unsupported:typed array species constructor other than Uint8Array";
+    assert_eq!(g("var b = new ArrayBuffer(2); b.constructor = {[Symbol.species]: function(n) { return new ArrayBuffer(n); }}; b.slice(0)"), ab);
+    assert_eq!(g("var u = new Uint8Array(2); u.constructor = {[Symbol.species]: function(n) { return new Uint8Array(n); }}; u.subarray(0)"), ta);
+    assert_eq!(g("var u = new Uint8Array(2); u.constructor = {[Symbol.species]: function(n) { return new Uint8Array(n); }}; u.slice(0)"), ta);
+    // another intrinsic as the species is also not the default: the type would be wrong, so it is a gate
+    assert_eq!(g("var u = new Uint8Array(2); u.constructor = {[Symbol.species]: ArrayBuffer}; u.slice(0)"), ta);
+    assert_eq!(g("var b = new ArrayBuffer(2); b.constructor = {[Symbol.species]: Uint8Array}; b.slice(0)"), ab);
+    // not a constructor at all: the ordinary TypeError, as in a browser
+    assert_eq!(g("var b = new ArrayBuffer(2); b.constructor = {[Symbol.species]: {}}; b.slice(0)"), "throw:TypeError:object.constructor[Symbol.species] is not a constructor");
+    // the default species ends in the right type
+    assert_eq!(g("var u = new Uint8Array(4); u.constructor = {[Symbol.species]: Uint8Array}; var s = u.subarray(1); (s instanceof Uint8Array) + ',' + s.length"), "string:true,3");
+    assert_eq!(g("var b = new ArrayBuffer(4); b.constructor = {[Symbol.species]: ArrayBuffer}; b.slice(1).byteLength"), "number:3");
+    // a getter of the species that throws is not ignored
+    assert_eq!(g("var u = new Uint8Array(1); u.constructor = {get [Symbol.species]() { throw new RangeError('s'); }}; u.slice(0)"), "throw:RangeError:s");
+}
+
+#[test]
+fn subclassing_a_binary_or_collection_native_is_refused_when_constructed() {
+    let g = |src: &str| run(src);
+    for (name, args) in [("Uint8Array", "2"), ("ArrayBuffer", "2"), ("TextEncoder", ""), ("TextDecoder", ""), ("Map", ""), ("Set", "")] {
+        // declaring the class works; constructing it is the explicit gate
+        assert_eq!(g(&format!("class A extends {name} {{}} typeof A")), "string:function", "{name}");
+        assert_eq!(
+            g(&format!("class A extends {name} {{ constructor() {{ super({args}); }} }} new A()")),
+            "unsupported:subclassing a native constructor (new.target is not passed to the constructor)",
+            "{name}"
+        );
+        assert_eq!(g(&format!("class A extends {name} {{}} new A({args})")), "unsupported:subclassing a native constructor (new.target is not passed to the constructor)", "{name}");
+    }
+    // the abstract %TypedArray% is not a usable parent either: it throws when constructed, as in a browser
+    assert_eq!(g("var T = Object.getPrototypeOf(Uint8Array); class A extends T {} new A()"), "unsupported:subclassing a native constructor (new.target is not passed to the constructor)");
+    // no fake brand: the plain constructors are untouched
+    assert_eq!(g("Object.prototype.toString.call(new Uint8Array(1)) + new Map().size"), "string:[object Uint8Array]0");
+}
+
+#[test]
+fn iterable_construction_is_bounded_before_the_values_grow_and_runs_no_more_js() {
+    // 5 values against a 4-byte single-buffer cap: the heap limit, and `return` is not called after a limit
+    let src = "var L = []; var o = {[Symbol.iterator]: function() { var i = 0; return {next: function() { L.push('n'); return i++ < 5 ? {value: 1, done: false} : {done: true}; }, return: function() { L.push('ret'); return {}; }}; }}; new Uint8Array(o)";
+    big(move || {
+        let prog = parse_script(src, Limits::default()).unwrap();
+        let mut it = Interp::new(&prog, Heap::default(), EvalLimits::default()).unwrap();
+        it.set_binary_limits(1 << 20, 4);
+        assert!(matches!(it.run(), Err(Error::Limit(LimitKind::Heap(Limit::BufferLength)))));
+        let l = global(&mut it, "L");
+        assert_eq!(it.get_str(l, "length"), "5", "five next calls and no return");
+    });
+    // the iterator buffer cap of the symbol features also applies
+    big(move || {
+        let prog = parse_script(src, Limits::default()).unwrap();
+        let mut it = Interp::new(&prog, Heap::default(), EvalLimits::default()).unwrap();
+        it.set_sc_limits(ScLimits { max_iter_buffer: 3, ..Default::default() });
+        assert!(matches!(it.run(), Err(Error::Limit(LimitKind::Sc(ScLimit::IterBuffer)))));
+        let l = global(&mut it, "L");
+        assert_eq!(it.get_str(l, "length"), "4");
+    });
+    // an endless iterable ends in a limit, never in memory growth
+    let r = run("new Uint8Array({[Symbol.iterator]: function() { return {next: function() { return {value: 1, done: false}; }}; }})");
+    assert!(r.starts_with("limit:"), "{r}");
+}
+
+#[test]
+fn a_typed_array_iterator_takes_no_result_objects_and_follows_the_buffer() {
+    // 100000 steps through the shared iterator without a result object each: the object count stays flat
+    big(|| {
+        let prog = parse_script("var u = new Uint8Array(100000); var n = 0; for (var x of u) n += x + 1; n", Limits::default()).unwrap();
+        let mut it = Interp::new(&prog, Heap::default(), EvalLimits::default()).unwrap();
+        let before = it.heap.stats().live_objects;
+        let r = it.run().unwrap();
+        assert_eq!(it.display(r), "100000");
+        assert!(it.heap.stats().live_objects < before + 100, "no result object for each step");
+    });
+}
+
+#[test]
+fn object_assign_values_and_entries_charge_view_indices_before_materializing_keys() {
+    for call in ["Object.assign({}, u)", "Object.values(u)", "Object.entries(u)"] {
+        let heap = Heap::new(HeapLimits { max_bytes: 4 << 20, ..Default::default() }).unwrap();
+        assert_eq!(run_with(&format!("var u = new Uint8Array(3000000); {call}"), heap, EvalLimits { max_steps: 100, ..Default::default() }, |_| {}), "limit:Steps", "{call}");
+    }
+}
+
+#[test]
+fn collect_with_a_suspended_view_iteration_does_not_walk_the_view_indices() {
+    // The frame holds the iterator over a 3 MB view; a key list of it would cost 24 MB against a 4 MB budget.
+    big(|| {
+        let prog = parse_script("var u = new Uint8Array(3000000); var gate; var p = new Promise(function (r) { gate = r; }); var n = 0; (async function () { for (var x of u) { await p; n++; if (n == 2) break; } })(); function probe() { return n; }", Limits::default()).unwrap();
+        let heap = Heap::new(HeapLimits { max_bytes: 4 << 20, ..Default::default() }).unwrap();
+        let mut it = Interp::new(&prog, heap, EvalLimits::default()).unwrap();
+        it.run().unwrap();
+        assert_eq!(it.async_stats().activations, 1);
+        let steps = it.stats().steps;
+        it.collect(&[]).unwrap();
+        it.collect(&[]).unwrap();
+        assert_eq!(it.stats().steps, steps, "collect charges nothing");
+        assert_eq!(it.async_stats().activations, 1);
+        assert_eq!(it.heap.stats().buffer_bytes, 3000000);
+    });
 }

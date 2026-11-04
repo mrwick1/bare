@@ -1253,6 +1253,43 @@ impl Heap {
         Ok(!blocked)
     }
 
+    /// `Array.prototype.splice` on dense storage in one move, for `shift`, `unshift` and `splice` (a host fast path).
+    /// It replaces `del` elements at `start` with `items` and returns the removed ones (`None` is a hole).
+    /// It answers `Ok(None)` and changes nothing unless the result is exactly what the generic algorithm gives:
+    /// `o` is an array of length `len` with all elements in dense storage (no accessor, no sparse or special
+    /// index), a writable `length`, no indexed property on the prototype chain (a view has virtual ones), and an extensible array (moving a
+    /// value into a hole adds a property, which a non-extensible array refuses). Errors: a stale handle or a size limit.
+    pub fn splice_dense(&mut self, o: ObjId, len: u32, start: usize, del: usize, items: &[Value]) -> R<Option<Vec<Option<Value>>>> {
+        for &v in items {
+            self.check_value(v)?;
+        }
+        let obj = self.obj(o)?;
+        if !obj.is_array || obj.props.index_keys != 0 || obj.elems.len() != len as usize || start.saturating_add(del) > len as usize {
+            return Ok(None);
+        }
+        let (alen, writable) = self.array_len(obj);
+        let new_len = (len as u64 - del as u64) + items.len() as u64;
+        if alen != len || !writable || new_len > MAX_INDEX as u64 + 1 || !obj.extensible {
+            return Ok(None);
+        }
+        let mut p = obj.proto;
+        while let Some(c) = p {
+            let po = self.obj(c)?;
+            // A view prototype has integer-indexed keys that are not stored in `elems` (any length, even 0).
+            if !po.elems.is_empty() || po.props.index_keys != 0 || (po.exotic && self.view_parts(c).is_some()) {
+                return Ok(None);
+            }
+            p = po.proto;
+        }
+        self.charge(items.len().saturating_sub(del) * ELEM_BYTES)?;
+        Ok(Some(self.edit(o, |ob| {
+            let removed: Vec<Option<Value>> = ob.elems.splice(start..start + del, items.iter().map(|&v| Some(v))).collect();
+            ob.trim_elems();
+            ob.set_length(Some(new_len as u32), None);
+            removed
+        })))
+    }
+
     // ----- collection -----
 
     /// Mark everything reachable from `roots`, free the rest, and return what was freed.

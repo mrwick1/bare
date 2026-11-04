@@ -1,0 +1,459 @@
+# bare-js Symbol, iterator protocol, Map and Set cases. A case starts with `=== name`. Each program logs with L(); the last
+# expression is a reader function (the pre ## post format of the promise tools; these cases are synchronous so both halves match).
+# Node (vm, empty context, 2 s timeout) is the oracle. Only our own tiny programs run here. Messages are not compared: cases log error names.
+=== sym_basic
+var log = []; function L(x) { log.push(String(x)); }
+var a = Symbol('d'), b = Symbol('d'), c = Symbol(), e = Symbol('');
+L(typeof a); L(a === b); L(a === a); L(a.description); L(c.description); L(e.description === ''); L(String(a)); L(String(c)); L(String(e));
+L(a.toString()); L(c.toString()); L(a.valueOf() === a); L(Symbol(undefined).description); L(Symbol(null).description); L(Symbol(12).description);
+L(Symbol('\ud83d').description.length); L(Symbol('😀').toString());
+L(Symbol.length); L(Symbol.name); L(typeof Symbol); L(Symbol.prototype.constructor === Symbol); L(a.constructor === Symbol);
+(function () { return log.join("|"); })
+=== sym_errors
+var log = []; function L(x) { log.push(String(x)); }
+function T(f) { try { return 'ok:' + String(f()); } catch (e) { return 'throw:' + e.name; } }
+var s = Symbol('q');
+L(T(function () { return new Symbol(); })); L(T(function () { return s + ''; })); L(T(function () { return '' + s; })); L(T(function () { return +s; }));
+L(T(function () { return `${s}`; })); L(T(function () { return s * 2; })); L(T(function () { return s < 1; })); L(T(function () { return Number(s); }));
+L(T(function () { return [s].join(); })); L(T(function () { return Symbol(s); })); L(T(function () { return Symbol({ toString: function () { return 'x'; } }).description; }));
+L(T(function () { return Symbol({ toString: function () { throw new RangeError(); } }); }));
+L(T(function () { return Symbol.prototype.toString.call(1); })); L(T(function () { return Symbol.prototype.description; }));
+L(T(function () { return Symbol.prototype.valueOf.call({}); }));
+L(T(function () { return s.x; })); L(T(function () { s.x = 1; return s.x; })); L(T(function () { 'use strict'; s.x = 1; }));
+L(T(function () { return s == s; })); L(T(function () { return s == 'q'; })); L(T(function () { return !s; })); L(T(function () { return s ? 1 : 2; }));
+L(T(function () { return Symbol.keyFor('x'); }));
+(function () { return log.join("|"); })
+=== sym_for
+var log = []; function L(x) { log.push(String(x)); }
+function T(f) { try { return 'ok:' + String(f()); } catch (e) { return 'throw:' + e.name; } }
+var a = Symbol.for('app'), b = Symbol.for('app'), c = Symbol('app');
+L(a === b); L(a === c); L(a.description); L(Symbol.keyFor(a)); L(Symbol.keyFor(c)); L(Symbol.keyFor(Symbol.iterator));
+L(Symbol.for() === Symbol.for('undefined')); L(Symbol.keyFor(Symbol.for()));
+L(Symbol.for(1) === Symbol.for('1')); L(Symbol.for({ toString: function () { return 'k'; } }) === Symbol.for('k'));
+L(T(function () { return Symbol.for(Symbol()); })); L(T(function () { return Symbol.keyFor(); })); L(T(function () { return new Symbol.for('x'); }));
+L(Symbol.for('').description === ''); L(Symbol.keyFor(Symbol.for('')) === '');
+L(Symbol.for('😀') === Symbol.for('😀')); L(Symbol.for('\ud83d') === Symbol.for('\ud83d')); L(Symbol.for('\ud83d') === Symbol.for('\ude00'));
+L(Symbol.for.length); L(Symbol.keyFor.length); L(Symbol.for.name);
+(function () { return log.join("|"); })
+=== sym_wellknown
+var log = []; function L(x) { log.push(String(x)); }
+var names = ['iterator', 'asyncIterator', 'hasInstance', 'toPrimitive', 'toStringTag', 'species', 'isConcatSpreadable', 'match', 'matchAll', 'replace', 'search', 'split', 'unscopables'];
+for (var i = 0; i < names.length; i++) {
+  var n = names[i], v = Symbol[n], d = Object.getOwnPropertyDescriptor(Symbol, n);
+  L(n + ':' + typeof v + ':' + v.description + ':' + d.writable + d.enumerable + d.configurable + ':' + Symbol.keyFor(v) + ':' + (v === Symbol[n]) + ':' + (v === Symbol.for(v.description)));
+}
+var seen = []; for (var i = 0; i < names.length; i++) { for (var j = 0; j < seen.length; j++) if (seen[j] === Symbol[names[i]]) L('dup'); seen.push(Symbol[names[i]]); }
+Symbol.iterator = 1; L(typeof Symbol.iterator);
+(function () { return log.join("|"); })
+=== sym_keys
+var log = []; function L(x) { log.push(String(x)); }
+var s = Symbol('k'), t = Symbol('hidden'), o = { a: 1 };
+o[s] = 2; Object.defineProperty(o, t, { value: 3, enumerable: false, configurable: true, writable: false });
+L(Object.keys(o).join()); L(s in o); L(t in o); L(o.hasOwnProperty(s)); L(o.hasOwnProperty(t)); L(o[s]); L(o[t]);
+var d = Object.getOwnPropertyDescriptor(o, s); L(d.value + ':' + d.writable + d.enumerable + d.configurable);
+d = Object.getOwnPropertyDescriptor(o, t); L(d.value + ':' + d.writable + d.enumerable + d.configurable);
+var c = { ...o }; L(c[s]); L(c[t]); L(Object.keys(c).join());
+var r = ({ ...{ [s]: 5, x: 1 } }); L(r[s] + ':' + Object.keys(r));
+var n = 0; for (var k in o) n++; L(n);
+o[t] = 9; L(o[t]); L(delete o[s]); L(s in o); L(delete o[t]); L(t in o);
+var p = Object.create(o); p[s] = 'own'; L(p[s]); L(Object.keys(p).length);
+var acc = {}; Object.defineProperty(acc, s, { get: function () { return 'g'; }, configurable: true }); L(acc[s]); L(Object.getOwnPropertyDescriptor(acc, s).set);
+var q = { [s]: 1, [Symbol.iterator]: 2 }; L(q[s] + ':' + q[Symbol.iterator]);
+(function () { return log.join("|"); })
+=== sym_method_names
+var log = []; function L(x) { log.push(String(x)); }
+var s = Symbol('desc'), e = Symbol(), o = { [s]() {}, [e]() {} };
+L(o[s].name); L(o[e].name === ''); L(({ [Symbol.iterator]: function () {} })[Symbol.iterator].name); L(({ [s]: () => 1 })[s].name);
+(function () { return log.join("|"); })
+=== toprim_hooks
+var log = []; function L(x) { log.push(String(x)); }
+var o = { [Symbol.toPrimitive](h) { L('h=' + h); return h === 'number' ? 42 : h === 'string' ? 's' : 'd'; }, valueOf() { L('valueOf'); return 1; }, toString() { L('toString'); return 't'; } };
+L(+o); L(`${o}`); L(o + ''); L(o * 2); L(o < 5); L(o == 'd'); L(String(o)); L(o + 1); var k = {}; k[o] = 1; L(Object.keys(k).join());
+L(Number(o)); L(isNaN(o)); L([1][o] === undefined);
+(function () { return log.join("|"); })
+=== toprim_errors
+var log = []; function L(x) { log.push(String(x)); }
+function T(f) { try { return 'ok:' + String(f()); } catch (e) { return 'throw:' + e.name; } }
+function mk(v) { var o = { valueOf() { return 7; }, toString() { return 'ts'; } }; o[Symbol.toPrimitive] = v; return o; }
+L(T(function () { return +mk(undefined); })); L(T(function () { return +mk(null); })); L(T(function () { return +mk(1); })); L(T(function () { return +mk({}); }));
+L(T(function () { return +mk(function () { return {}; }); })); L(T(function () { return +mk(function () { throw new RangeError(); }); }));
+L(T(function () { return +mk(function () { return Symbol(); }); })); L(T(function () { return mk(function () { return Symbol('y'); }) + ''; }));
+L(T(function () { return `${mk(function () { return 5; })}`; })); L(T(function () { return mk(function () { return 'a'; }) + 1; }));
+var g = { get [Symbol.toPrimitive]() { L('get'); return function () { return 3; }; } }; L(+g);
+(function () { return log.join("|"); })
+=== tostringtag
+var log = []; function L(x) { log.push(String(x)); }
+var ts = Object.prototype.toString;
+L(ts.call({ [Symbol.toStringTag]: 'X' })); L(ts.call({ [Symbol.toStringTag]: 1 })); L(ts.call({ get [Symbol.toStringTag]() { return 'G'; } }));
+L(ts.call(Symbol())); L(ts.call(null)); L(ts.call(undefined)); L(ts.call([])); L(ts.call(function () {})); L(ts.call(1)); L(ts.call('s')); L(ts.call(true));
+L(ts.call(Object.create({ [Symbol.toStringTag]: 'Inh' }))); L(ts.call([])); var a = []; a[Symbol.toStringTag] = 'Arr'; L(ts.call(a));
+L(Symbol.prototype[Symbol.toStringTag]); L(String(Object.getOwnPropertyDescriptor(Symbol.prototype, Symbol.toStringTag).writable));
+L(String(Object.getOwnPropertyDescriptor(Symbol.prototype, Symbol.toStringTag).configurable));
+(function () { return log.join("|"); })
+=== hasinstance
+var log = []; function L(x) { log.push(String(x)); }
+function T(f) { try { return 'ok:' + String(f()); } catch (e) { return 'throw:' + e.name; } }
+var Even = { [Symbol.hasInstance](n) { L('hi'); return n % 2 === 0; } };
+L(2 instanceof Even); L(3 instanceof Even); L('2' instanceof Even);
+function F() {} var f = new F(); L(f instanceof F);
+L(T(function () { return 1 instanceof {}; })); L(T(function () { return 1 instanceof 1; }));
+L(T(function () { return f instanceof { [Symbol.hasInstance]: 1 }; }));
+L(T(function () { return f instanceof { [Symbol.hasInstance]: null }; })); L(T(function () { return f instanceof { [Symbol.hasInstance]() { throw new RangeError(); } }; }));
+F[Symbol.hasInstance] = function () { return 'yes'; }; L(f instanceof F); L(1 instanceof F);
+Object.defineProperty(F, Symbol.hasInstance, { value: function () { return 0; } }); L(f instanceof F);
+(function () { return log.join("|"); })
+=== sym_primitive_access
+var log = []; function L(x) { log.push(String(x)); }
+var s = Symbol('x');
+L(Object.getPrototypeOf(Symbol.prototype) === Object.prototype); L(s.hasOwnProperty('x')); L(Object.prototype.hasOwnProperty.call(Symbol.prototype, 'description'));
+var d = Object.getOwnPropertyDescriptor(Symbol.prototype, 'description'); L(typeof d.get + ':' + d.set + ':' + d.enumerable + ':' + d.configurable);
+L(Object.getOwnPropertyDescriptor(Symbol, 'prototype').writable); L(Object.getOwnPropertyDescriptor(Symbol.prototype, 'toString').enumerable);
+L(Symbol.prototype.toString.length + ':' + Symbol.prototype.valueOf.length + ':' + Symbol.prototype.toString.name);
+L(typeof Symbol.prototype[Symbol.toPrimitive]); L(Symbol.prototype[Symbol.toPrimitive].name); L(Symbol.prototype[Symbol.toPrimitive].call(s) === s);
+(function () { 'use strict'; Symbol.prototype.sx = function () { return typeof this; }; L(s.sx()); })();
+(function () { return log.join("|"); })
+=== iter_custom_forof
+var log = []; function L(x) { log.push(String(x)); }
+function mk(n, tag) { var i = 0; return { [Symbol.iterator]() { L(tag + ':iter'); return this; }, next() { i++; L(tag + ':next' + i); return { value: i * 10, done: i > n }; }, return(v) { L(tag + ':return'); return {}; } }; }
+for (var x of mk(2, 'a')) L('got' + x);
+for (var x of mk(3, 'b')) { L('got' + x); break; }
+(function () { for (var x of mk(3, 'c')) { L('got' + x); return 1; } })();
+try { for (var x of mk(3, 'd')) { throw new RangeError('boom'); } } catch (e) { L(e.name); }
+outer: for (var i = 0; i < 2; i++) { for (var x of mk(3, 'e')) { continue outer; } }
+for (var x of mk(3, 'f')) { continue; }
+(function () { return log.join("|"); })
+=== iter_close_errors
+var log = []; function L(x) { log.push(String(x)); }
+function T(f) { try { return 'ok:' + String(f()); } catch (e) { return 'throw:' + e.name; } }
+function mk(ret) { return { [Symbol.iterator]() { return this; }, next() { return { value: 1, done: false }; }, return: ret }; }
+L(T(function () { for (var x of mk(function () { return 1; })) break; }));
+L(T(function () { for (var x of mk(function () { throw new RangeError(); })) break; }));
+L(T(function () { for (var x of mk(function () { throw new RangeError(); })) throw new TypeError(); }));
+L(T(function () { for (var x of mk(function () { return 1; })) throw new TypeError(); }));
+L(T(function () { for (var x of mk(undefined)) break; })); L(T(function () { for (var x of mk(null)) break; }));
+L(T(function () { for (var x of mk(5)) break; })); L(T(function () { for (var x of mk(5)) throw new SyntaxError(); }));
+L(T(function () { for (var x of mk({})) break; }));
+L(T(function () { for (var x of mk(function () { return {}; })) return 'r'; }));
+var gets = 0; var it = { [Symbol.iterator]() { return this; }, next() { return { done: false }; }, get return() { gets++; return function () { return {}; }; } };
+for (var x of it) break; L(gets);
+(function () { return log.join("|"); })
+=== iter_protocol_errors
+var log = []; function L(x) { log.push(String(x)); }
+function T(f) { try { return 'ok:' + String(f()); } catch (e) { return 'throw:' + e.name; } }
+function run(it) { return T(function () { var n = 0; for (var x of it) { if (++n > 3) break; } return n; }); }
+L(run({})); L(run({ [Symbol.iterator]: 1 })); L(run({ [Symbol.iterator]() { return 1; } })); L(run({ [Symbol.iterator]() { return {}; } }));
+L(run({ [Symbol.iterator]() { return { next: 1 }; } })); L(run({ [Symbol.iterator]() { return { next() { return 1; } }; } }));
+L(run({ [Symbol.iterator]() { return { next() { return undefined; } }; } })); L(run({ [Symbol.iterator]() { return { next() { return { done: true }; } }; } }));
+L(run({ [Symbol.iterator]() { return { next() { throw new RangeError(); } }; } })); L(run({ [Symbol.iterator]: null })); L(run({ [Symbol.iterator]: undefined }));
+L(run(1)); L(run(null)); L(run(undefined)); L(run(true)); L(run(Symbol()));
+var order = []; var it = { [Symbol.iterator]() { order.push('iter'); return { get next() { order.push('getnext'); return function () { order.push('next'); return { get done() { order.push('done'); return order.length > 7; }, get value() { order.push('value'); return 1; } }; }; } }; } };
+for (var x of it) {} L(order.join());
+var thr = { [Symbol.iterator]() { return { next() { return { get done() { return false; }, get value() { throw new RangeError(); } }; }, return() { L('NOCLOSE'); return {}; } }; } };
+L(T(function () { for (var x of thr) {} }));
+var thr2 = { [Symbol.iterator]() { return { next() { throw new RangeError(); }, return() { L('NOCLOSE2'); return {}; } }; } };
+L(T(function () { for (var x of thr2) {} }));
+(function () { return log.join("|"); })
+=== iter_spread_destructure
+var log = []; function L(x) { log.push(String(x)); }
+function mk(n, tag) { var i = 0; return { [Symbol.iterator]() { return this; }, next() { i++; L(tag + 'n' + i); return { value: i, done: i > n }; }, return() { L(tag + 'ret'); return {}; } }; }
+L([...mk(3, 'a')].join());
+function f() { return arguments.length; } L(f(...mk(2, 'b'))); L(f(1, ...mk(0, 'c'), 2));
+var [x, y] = mk(5, 'd'); L(x + ':' + y);
+var [p, q, r] = mk(1, 'e'); L(p + ':' + q + ':' + r);
+var [] = mk(2, 'f'); var [, ] = mk(2, 'g'); var [, , ] = mk(1, 'h');
+var [m, ...rest] = mk(3, 'i'); L(m + ':' + rest.join());
+var [...all] = mk(0, 'j'); L(all.length);
+var a1, b1; [a1, b1] = mk(9, 'k'); L(a1 + ':' + b1);
+var [u = 5] = mk(0, 'l'); L(u);
+function g([a, b]) { return a + b; } L(g(mk(7, 'm')));
+(function () { return log.join("|"); })
+=== iter_destructure_throw
+var log = []; function L(x) { log.push(String(x)); }
+function T(f) { try { return 'ok:' + String(f()); } catch (e) { return 'throw:' + e.name; } }
+function mk(tag) { return { [Symbol.iterator]() { return this; }, next() { return { value: undefined, done: false }; }, return() { L(tag + 'ret'); return {}; } }; }
+L(T(function () { var [{ a }] = mk('a'); }));
+L(T(function () { var [x = (function () { throw new RangeError(); })()] = mk('b'); }));
+L(T(function () { var o = { get p() { throw new TypeError(); } }; [o.p] = mk('c'); }));
+L(T(function () { var [x, y] = mk('d'); return 'fine'; }));
+L(T(function () { var [x] = { [Symbol.iterator]() { return { next() { return { done: true }; }, return() { L('NO'); return {}; } }; } }; return 'done'; }));
+L(T(function () { var [x] = {}; })); L(T(function () { var [x] = null; })); L(T(function () { var [x] = undefined; }));
+(function () { return log.join("|"); })
+=== iter_array_override
+var log = []; function L(x) { log.push(String(x)); }
+function T(f) { try { return 'ok:' + String(f()); } catch (e) { return 'throw:' + e.name; } }
+var orig = Array.prototype[Symbol.iterator];
+L(typeof orig); L(orig.length); L(Object.getOwnPropertyDescriptor(Array.prototype, Symbol.iterator).enumerable);
+var out = []; for (var x of [1, 2, 3]) out.push(x); L(out.join());
+Array.prototype[Symbol.iterator] = function () { var i = 0, a = this; return { next() { i++; return { value: 'c' + i, done: i > 2 }; } }; };
+out = []; for (var x of [1, 2, 3]) out.push(x); L(out.join()); L([...[9, 9]].join()); var [z] = [5]; L(z);
+delete Array.prototype[Symbol.iterator]; L(T(function () { for (var x of [1]) {} })); L(T(function () { return [...[1]]; })); L(T(function () { var [a] = [1]; }));
+Array.prototype[Symbol.iterator] = orig; out = []; for (var x of [4, 5]) out.push(x); L(out.join());
+var ArrIterProto = Object.getPrototypeOf([][Symbol.iterator]()); var origNext = ArrIterProto.next;
+ArrIterProto.next = function () { L('patched'); return { done: true }; }; out = []; for (var x of [1, 2]) out.push(x); L(out.length);
+ArrIterProto.next = origNext; out = []; for (var x of [6, 7]) out.push(x); L(out.join());
+var arr = [1, 2]; arr[Symbol.iterator] = function () { return { next() { return { done: true }; } }; }; out = []; for (var x of arr) out.push(x); L(out.length);
+(function () { return log.join("|"); })
+=== array_iterator_object
+var log = []; function L(x) { log.push(String(x)); }
+var a = [1, , 3], it = a[Symbol.iterator]();
+L(it[Symbol.iterator]() === it); L(Object.prototype.toString.call(it)); L(typeof it.next); L(it.hasOwnProperty('next'));
+var r = it.next(); L(r.value + ':' + r.done + ':' + Object.keys(r).join()); r = it.next(); L(r.value + ':' + r.done); r = it.next(); L(r.value + ':' + r.done);
+r = it.next(); L(r.value + ':' + r.done); a.push(4); r = it.next(); L(r.value + ':' + r.done);
+var b = [1]; var it2 = b[Symbol.iterator](); it2.next(); b.push(2); L(it2.next().value); L(it2.next().done); b.push(3); L(it2.next().done);
+var c = [1, 2, 3]; var it3 = c[Symbol.iterator](); it3.next(); c.length = 1; L(it3.next().done);
+var IP = Object.getPrototypeOf(Object.getPrototypeOf(it)); L(IP[Symbol.iterator].call(5)); L(IP === Object.getPrototypeOf(Object.getPrototypeOf(new Map().keys())));
+L(Object.getPrototypeOf(it) !== IP); L(Object.getPrototypeOf(it).hasOwnProperty('next')); L(Object.getPrototypeOf(it).next.length + Object.getPrototypeOf(it).next.name);
+try { Object.getPrototypeOf(it).next.call({}); } catch (e) { L(e.name); }
+try { it.next.call(5); } catch (e) { L(e.name); }
+(function () { return log.join("|"); })
+=== iter_strings
+var log = []; function L(x) { log.push(String(x)); }
+var s = 'a😀b\ud83dc\ude00d'; var out = []; for (var ch of s) out.push(ch.length); L(out.join());
+L([...'😀'].length); var [p, q] = '😀x'; L(p.length + ':' + q); L([...''].length); L([...'\ud83d'].length);
+function f() { return arguments.length; } L(f(...'abc'));
+(function () { return log.join("|"); })
+=== iter_generic_shape
+var log = []; function L(x) { log.push(String(x)); }
+var n = 0, it = { [Symbol.iterator]() { return this; }, next() { n++; return { value: n, done: n > 1000 }; } };
+var a = [...it]; L(a.length + ':' + a[999]); n = 0; var s = 0; for (var x of it) s += x; L(s);
+(function () { return log.join("|"); })
+=== map_basic
+var log = []; function L(x) { log.push(String(x)); }
+var m = new Map();
+L(m.set('a', 1) === m); L(m.size); L(m.get('a')); L(m.has('a')); L(m.has('b')); L(m.get('b')); L(m.delete('a')); L(m.delete('a')); L(m.size);
+m.set(1, 'n').set('1', 's').set(NaN, 'nan').set(0, 'zero').set(undefined, 'u').set(null, 'nul').set(true, 'T').set('true', 'str');
+L(m.get(1) + m.get('1') + m.get(NaN) + m.get(0) + m.get(-0) + m.get(undefined) + m.get(null) + m.get(true) + m.get('true'));
+var o1 = {}, o2 = {}, sy = Symbol('s'); m.set(o1, 'o1').set(o2, 'o2').set(sy, 'sy').set(Symbol('s'), 'other'); L(m.get(o1) + m.get(o2) + m.get({}) + m.get(sy) + m.size);
+var k = []; m.forEach(function (v, key) { k.push(typeof key); }); L(k.join());
+var m2 = new Map(); m2.set(-0, 1); L(1 / m2.keys().next().value); L(1 / [...m2][0][0]);
+m2.set('x', 1); m2.set('y', 2); m2.set('x', 3); L([...m2.keys()].join() + ':' + [...m2.values()].join());
+m2.delete('x'); m2.set('x', 4); L([...m2.keys()].join()); L(m2.clear()); L(m2.size); L([...m2].length);
+L(m.set.length + ':' + m.get.length + ':' + m.has.length + ':' + m.delete.length + ':' + m.clear.length + ':' + m.forEach.length + ':' + Map.length + ':' + Map.name);
+L(m.set() === m); L(m.get()); L(m.has()); L(new Map().set(undefined, 7).get());
+var big = new Map(); for (var i = 0; i < 100; i++) big.set('k' + i, i); for (var i = 0; i < 100; i += 2) big.delete('k' + i); L(big.size + ':' + big.get('k51') + ':' + big.get('k50') + ':' + [...big.keys()].length);
+(function () { return log.join("|"); })
+=== map_shape
+var log = []; function L(x) { log.push(String(x)); }
+function T(f) { try { return 'ok:' + String(f()); } catch (e) { return 'throw:' + e.name; } }
+var m = new Map(); var P = Map.prototype;
+L(Object.getPrototypeOf(m) === P); L(P.constructor === Map); L(Object.prototype.toString.call(m)); L(P[Symbol.toStringTag]); L(typeof Map); L(Object.keys(P).length);
+L(P[Symbol.iterator] === P.entries); L(P[Symbol.iterator].name); L(P.entries.name); L(P.keys.name); L(P.values.name);
+var d = Object.getOwnPropertyDescriptor(P, 'size'); L(typeof d.get + ':' + d.set + ':' + d.enumerable + ':' + d.configurable);
+L(Object.getOwnPropertyDescriptor(P, 'get').enumerable + ':' + Object.getOwnPropertyDescriptor(P, 'get').writable + ':' + Object.getOwnPropertyDescriptor(P, 'get').configurable);
+L(Object.getOwnPropertyDescriptor(Map, 'prototype').writable + ':' + Object.getOwnPropertyDescriptor(Map, 'prototype').configurable);
+L(T(function () { return P.size; })); L(T(function () { return P.get.call({}, 1); })); L(T(function () { return P.get.call(new Set(), 1); })); L(T(function () { return P.set.call(1, 1, 1); }));
+L(T(function () { return P.get.call(undefined, 1); })); L(T(function () { return P.forEach.call({}, function () {}); })); L(T(function () { return P.entries.call([]); }));
+L(T(function () { return Map(); })); L(T(function () { return Map.call(m); }));
+L(T(function () { return new Map(5); })); L(T(function () { return new Map({}); })); L(T(function () { return new Map(true); })); L(T(function () { return new Map(Symbol()); }));
+L(T(function () { return new Map(null).size; })); L(T(function () { return new Map(undefined).size; })); L(T(function () { return new Map([]).size; })); L(T(function () { return new Map('').size; }));
+L(T(function () { return new Map('ab'); }));
+L(T(function () { return new Map([1]); })); L(T(function () { return new Map([null]); })); L(T(function () { return new Map([[1, 2], 3]); })); L(T(function () { return new Map(['ab']); }));
+L(T(function () { return new Map([[1, 2], [3]]).get(3); })); L(T(function () { return new Map([[]]).get(undefined); }));
+L(T(function () { return new Map([{ 0: 'k', 1: 'v' }]).get('k'); }));
+L(T(function () { return new Map(new Map([[1, 2]])).get(1); })); L(T(function () { return new Map(new Set([[1, 2]])).get(1); }));
+L(T(function () { return new Map([[1, 2], [1, 3]]).size; }));
+L(T(function () { return m.forEach(1); })); L(T(function () { return m.forEach(); })); L(T(function () { return m.forEach(null); }));
+L(T(function () { return m.set.call(m, 1, 2) === m; }));
+L(T(function () { return typeof new Map().size; }));
+(function () { return log.join("|"); })
+=== map_ctor_adder
+var log = []; function L(x) { log.push(String(x)); }
+function T(f) { try { return 'ok:' + String(f()); } catch (e) { return 'throw:' + e.name; } }
+var orig = Map.prototype.set; var calls = [];
+Map.prototype.set = function (k, v) { calls.push(k + '=' + v); return orig.call(this, k, v); };
+var m = new Map([[1, 'a'], [2, 'b']]); L(calls.join()); L(m.size);
+Map.prototype.set = 5; L(T(function () { return new Map([]); })); L(T(function () { return new Map(); })); L(T(function () { return new Map(null); })); L(T(function () { return new Map([[1, 2]]); }));
+Map.prototype.set = function () { throw new RangeError(); };
+var closed = 0; var it = { [Symbol.iterator]() { return { next() { return { value: [1, 2], done: false }; }, return() { closed++; return {}; } }; } };
+L(T(function () { return new Map(it); })); L(closed);
+Map.prototype.set = orig; closed = 0;
+var bad = { [Symbol.iterator]() { return { next() { return { value: 1, done: false }; }, return() { closed++; return {}; } }; } };
+L(T(function () { return new Map(bad); })); L(closed);
+var bad2 = { [Symbol.iterator]() { return { next() { return { value: { get 0() { throw new SyntaxError(); } }, done: false }; }, return() { closed++; return {}; } }; } };
+L(T(function () { return new Map(bad2); })); L(closed);
+var bad3 = { [Symbol.iterator]() { return { next() { return { value: 1, done: false }; }, return() { closed++; throw new RangeError(); } }; } };
+L(T(function () { return new Map(bad3); })); L(closed);
+(function () { return log.join("|"); })
+=== set_basic
+var log = []; function L(x) { log.push(String(x)); }
+var s = new Set();
+L(s.add('a') === s); L(s.size); L(s.has('a')); L(s.has('b')); L(s.delete('a')); L(s.delete('a')); L(s.size);
+s.add(1).add('1').add(NaN).add(0).add(undefined).add(null).add(true); L(s.has(1) + ':' + s.has('1') + ':' + s.has(NaN) + ':' + s.has(-0) + ':' + s.has(undefined) + ':' + s.has(null) + ':' + s.has(false));
+var o = {}; s.add(o).add(o).add({}); L(s.size + ':' + s.has(o) + ':' + s.has({}));
+var z = new Set(); z.add(-0); L(1 / [...z][0]); L(1 / z.values().next().value);
+var t = new Set([3, 1, 3, 2, 1]); L([...t].join()); t.delete(3); t.add(3); L([...t].join()); L([...t.keys()].join() + ':' + [...t.values()].join());
+var es = [...t.entries()]; L(es.length + ':' + es[0].length + ':' + (es[0][0] === es[0][1]) + ':' + es[0].join());
+L(t.clear()); L(t.size);
+L(new Set('abc').size); L(new Set('a😀b').size); L([...new Set('a😀b')].join()); L(new Set(new Set([1, 2])).size); L(new Set(new Map([[1, 2]])).has(1));
+L(Set.length + ':' + Set.name + ':' + s.add.length + ':' + s.has.length + ':' + s.forEach.length);
+L(s.add() === s); L(s.has(undefined));
+(function () { return log.join("|"); })
+=== set_shape
+var log = []; function L(x) { log.push(String(x)); }
+function T(f) { try { return 'ok:' + String(f()); } catch (e) { return 'throw:' + e.name; } }
+var P = Set.prototype, s = new Set();
+L(P.keys === P.values); L(P[Symbol.iterator] === P.values); L(P.values.name); L(P.keys.name); L(P.entries.name); L(Object.prototype.toString.call(s)); L(P[Symbol.toStringTag]);
+L(Object.getOwnPropertyDescriptor(P, 'size').get.name); L(Object.getOwnPropertyDescriptor(Map.prototype, 'size').get.name);
+L(T(function () { return P.size; })); L(T(function () { return P.has.call(new Map(), 1); })); L(T(function () { return Set(); })); L(T(function () { return new Set(1); }));
+L(T(function () { return new Set([1, 2]).forEach(1); })); L(T(function () { return P.add.call({}, 1); }));
+var origAdd = P.add; var calls = []; P.add = function (v) { calls.push(v); return origAdd.call(this, v); }; new Set([1, 2]); L(calls.join()); P.add = 3; L(T(function () { return new Set([1]); })); L(T(function () { return new Set(); })); P.add = origAdd;
+(function () { return log.join("|"); })
+=== coll_foreach
+var log = []; function L(x) { log.push(String(x)); }
+var m = new Map([['a', 1], ['b', 2]]), self = {};
+m.forEach(function (v, k, mm) { L(v + k + (mm === m) + (this === self)); }, self);
+m.forEach(function () { L(this === globalThis ? 'g' : typeof this); });
+m.forEach(function () { 'use strict'; L(String(this)); });
+var s = new Set([5, 6]); s.forEach(function (v, k, ss) { L(v + ':' + k + ':' + (ss === s)); });
+try { m.forEach(function () { throw new RangeError(); }); } catch (e) { L(e.name); }
+var r = m.forEach(function () {}); L(r);
+(function () { return log.join("|"); })
+=== map_mutation_foreach
+var log = []; function L(x) { log.push(String(x)); }
+var m = new Map([[1, 'a'], [2, 'b'], [3, 'c']]); var seen = [];
+m.forEach(function (v, k) { seen.push(k); if (k === 1) { m.delete(2); m.set(4, 'd'); } if (k === 3) { m.delete(3); m.set(3, 'again'); } if (seen.length > 10) m.clear(); });
+L(seen.join());
+var m2 = new Map([[1, 1], [2, 2]]); seen = []; m2.forEach(function (v, k) { seen.push(k); if (k === 1) { m2.clear(); m2.set(9, 9); } }); L(seen.join());
+var m3 = new Map([[1, 1], [2, 2], [3, 3]]); seen = []; m3.forEach(function (v, k) { seen.push(k); m3.delete(k); }); L(seen.join() + ':' + m3.size);
+var m4 = new Map([[1, 1]]); seen = []; m4.forEach(function (v, k) { seen.push(k); if (k < 5) m4.set(k + 1, 1); }); L(seen.join());
+var m5 = new Map([[1, 1], [2, 2]]); seen = []; m5.forEach(function (v, k) { seen.push(k); if (k === 1) { m5.delete(1); m5.set(1, 1); } if (seen.length > 5) m5.clear(); }); L(seen.join());
+var s = new Set([1, 2, 3]); seen = []; s.forEach(function (v) { seen.push(v); if (v === 1) { s.delete(1); s.add(1); s.delete(3); } if (seen.length > 6) s.clear(); }); L(seen.join());
+(function () { return log.join("|"); })
+=== map_mutation_iterator
+var log = []; function L(x) { log.push(String(x)); }
+var m = new Map([[1, 'a'], [2, 'b'], [3, 'c']]); var it = m.keys();
+L(it.next().value); m.delete(2); L(it.next().value); m.set(4, 'd'); L(it.next().value); L(it.next().done); m.set(5, 'e'); L(it.next().done);
+var m2 = new Map([[1, 1], [2, 2]]); var it2 = m2.entries(); it2.next(); m2.clear(); m2.set(7, 8); var r = it2.next(); L(r.value.join() + ':' + r.done); L(it2.next().done);
+var m3 = new Map([[1, 1]]); var it3 = m3.values(); L(it3.next().done); L(it3.next().done); m3.set(2, 2); L(it3.next().done);
+var m4 = new Map([[1, 1], [2, 2], [3, 3]]); var it4 = m4.keys(); m4.delete(1); m4.delete(2); m4.delete(3); L(it4.next().done); m4.set(1, 1); L(it4.next().done);
+var m5 = new Map(); for (var i = 0; i < 200; i++) m5.set(i, i); var it5 = m5.keys(); for (var i = 0; i < 50; i++) it5.next(); for (var i = 0; i < 150; i++) m5.delete(i); L(it5.next().value); m5.set(0, 0); var last = []; for (var v = it5.next(); !v.done; v = it5.next()) last.push(v.value); L(last.join());
+var s = new Set([1, 2]); var si = s.values(); L(si.next().value); s.delete(1); s.add(1); L(si.next().value); L(si.next().value); L(si.next().done);
+var ms = new Map([[1, 1], [2, 2]]); var e = ms.entries(); var first = e.next().value; ms.set(1, 'changed'); first[1] = 'mut'; L(ms.get(1)); L(e.next().value.join());
+var m6 = new Map([[1, 1], [2, 2]]); var i6 = m6.keys(); m6.clear(); L(i6.next().done); m6.set(3, 3); L(i6.next().done);
+(function () { return log.join("|"); })
+=== coll_iterator_shape
+var log = []; function L(x) { log.push(String(x)); }
+function T(f) { try { return 'ok:' + String(f()); } catch (e) { return 'throw:' + e.name; } }
+var m = new Map([[1, 2]]), it = m.keys(), s = new Set([1]), si = s.values();
+L(Object.prototype.toString.call(it)); L(Object.prototype.toString.call(si)); L(Object.prototype.toString.call([][Symbol.iterator]()));
+L(it[Symbol.iterator]() === it); L(typeof it.next); L(it.next.length + it.next.name); L(it.hasOwnProperty('next'));
+var MIP = Object.getPrototypeOf(it), SIP = Object.getPrototypeOf(si); L(MIP !== SIP); L(MIP[Symbol.toStringTag]); L(SIP[Symbol.toStringTag]);
+L(Object.getPrototypeOf(MIP) === Object.getPrototypeOf(SIP)); L(MIP.hasOwnProperty(Symbol.iterator));
+L(T(function () { return MIP.next.call(si); })); L(T(function () { return SIP.next.call(it); })); L(T(function () { return MIP.next.call({}); })); L(T(function () { return MIP.next.call(m); }));
+L(T(function () { return MIP.next(); }));
+var e = m.entries().next(); L(Array.isArray(e.value) + ':' + e.value.length + ':' + e.done + ':' + Object.keys(e).join());
+var e2 = m.entries(); var a = e2.next().value, b = new Map([[1, 2]]).entries().next().value; L(a !== b);
+L(it.next().done); L(it.next().value); L(it.next().done); L(Object.keys(it.next()).join());
+(function () { return log.join("|"); })
+=== coll_object_keys_shape
+var log = []; function L(x) { log.push(String(x)); }
+var keys = []; for (var i = 0; i < 50; i++) keys.push({ i: i }); var m = new Map(); for (var i = 0; i < 50; i++) m.set(keys[i], i);
+var sum = 0; for (var i = 0; i < 50; i++) sum += m.get(keys[i]); L(sum); L(m.get({ i: 1 })); L(m.has(keys[10]));
+var s = new Set(keys); L(s.size); for (var i = 0; i < 50; i += 2) s.delete(keys[i]); L(s.size + ':' + s.has(keys[1]) + ':' + s.has(keys[2]));
+var cyc = new Map(); cyc.set('self', cyc); L(cyc.get('self') === cyc); var ms = new Set(); ms.add(ms); L(ms.has(ms));
+var nested = new Map([[new Map(), new Set([new Map()])]]); L(nested.size);
+(function () { return log.join("|"); })
+=== coll_iter_via_forof
+var log = []; function L(x) { log.push(String(x)); }
+var m = new Map([['a', 1], ['b', 2]]); var out = [];
+for (var [k, v] of m) out.push(k + v); L(out.join());
+for (var e of m.entries()) out.push(e[0]); L(out.join());
+for (var k of m.keys()) out.push(k); for (var v of m.values()) out.push(v); L(out.join());
+var s = new Set([1, 2]); out = []; for (var x of s) out.push(x); L(out.join()); L([...s, ...m.keys()].join());
+for (var x of s) { if (x === 1) s.add(3); out.push(x); } L(out.join());
+var [first, second] = new Set(['x', 'y', 'z']); L(first + second); var [[mk, mv]] = m; L(mk + mv);
+function f() { return arguments.length; } L(f(...m));
+for (var x of m) { break; } for (var x of new Set()) { L('never'); }
+(function () { return log.join("|"); })
+=== coll_misc_semantics
+var log = []; function L(x) { log.push(String(x)); }
+function T(f) { try { return 'ok:' + String(f()); } catch (e) { return 'throw:' + e.name; } }
+var m = new Map(); var f = function () {}, g = function () {}; m.set(f, 1).set(g, 2); L(m.get(f) + m.get(g));
+var m2 = new Map([[1, 'one']]); m2[Symbol.iterator] = function () { return [][Symbol.iterator](); }; L([...m2].length);
+var m3 = new Map(); m3.x = 1; L(Object.keys(m3).join());
+var sub = Object.create(Map.prototype); L(T(function () { return sub.get(1); })); L(T(function () { return sub.size; }));
+L(String(new Map())); L(String(new Set())); L(new Map() + '');
+var p = Object.getOwnPropertyDescriptor(Map.prototype, 'size'); L(T(function () { return p.get.call(new Set()); })); L(p.get.call(new Map([[1, 1]])));
+L(typeof Map.prototype.forEach); L(Map.prototype.hasOwnProperty('constructor'));
+L(Object.getPrototypeOf(Map) === Function.prototype);
+(function () { return log.join("|"); })
+=== sym_descriptor_errors
+var log = []; function L(x) { log.push(String(x)); }
+function T(f) { try { return 'ok:' + String(f()); } catch (e) { return 'throw:' + e.name; } }
+var s = Symbol('s'), o = {};
+Object.defineProperty(o, s, { value: 1 });
+L(T(function () { Object.defineProperty(o, s, { value: 2 }); })); L(T(function () { 'use strict'; o[s] = 3; })); L(T(function () { o[s] = 3; return o[s]; }));
+L(T(function () { 'use strict'; return delete o[s]; })); L(T(function () { return delete o[s]; }));
+L(T(function () { Object.defineProperty(Symbol, 'iterator', { value: 1 }); })); L(T(function () { Object.defineProperty(Symbol, 'iterator', { value: Symbol.iterator }); return 'same'; }));
+L(T(function () { Object.defineProperty({}, s, { get: 1 }); })); L(T(function () { Object.defineProperty({}, s, { get: function () {}, value: 1 }); }));
+L(T(function () { return Object.getOwnPropertyDescriptor(o, Symbol('none')); })); L(T(function () { return Object.getOwnPropertyDescriptor(Symbol, 'for').writable; }));
+L(T(function () { Object.defineProperty(Object.defineProperty({}, s, { get: function () { return 1; } }), s, { value: 1 }); }));
+var acc = Object.defineProperty({}, s, { get: function () { return 'g'; }, configurable: true }); Object.defineProperty(acc, s, { value: 'v' }); L(acc[s]);
+L(T(function () { Object.defineProperty(Map.prototype, 'size', { value: 5 }); return new Map().size; }));
+L(T(function () { Object.defineProperty(Map.prototype, Symbol.iterator, { value: function () { return [][Symbol.iterator](); } }); return [...new Map([[1, 1]])].length; }));
+L(T(function () { Object.defineProperty(Map, 'prototype', { value: {} }); }));
+L(T(function () { 'use strict'; Symbol.iterator = 2; })); L(T(function () { 'use strict'; Symbol.prototype = 2; })); L(T(function () { 'use strict'; Map.prototype = 2; }));
+L(T(function () { 'use strict'; Map.prototype[Symbol.toStringTag] = 'X'; })); L(T(function () { Map.prototype[Symbol.toStringTag] = 'X'; return Object.prototype.toString.call(new Map()); }));
+(function () { return log.join("|"); })
+=== map_string_keys_unicode
+var log = []; function L(x) { log.push(String(x)); }
+var m = new Map(); m.set('\ud83d', 1).set('\ude00', 2).set('😀', 3).set('😀', 4).set('', 5);
+L(m.size); L(m.get('😀')); L(m.get('\ud83d')); L(m.get('\ud83d' + '\ude00')); L(m.get(['\ud83d', '\ude00'].join(''))); L(m.get(''));
+var a = '', b = ''; for (var i = 0; i < 100; i++) { a += 'xy'; b = b + 'x' + 'y'; } var s = new Set([a]); L(s.has(b)); L(s.has(b + 'z'));
+var keys = []; m.forEach(function (v, k) { keys.push(k.length); }); L(keys.join());
+var t = new Set(['a', 'b', 'ab']); L(t.has(['a', 'b'].join(''))); L(t.has('a' + 'b'));
+L(new Map([['\u0000', 1]]).get('\0')); L(new Set(['é', 'é']).size);
+(function () { return log.join("|"); })
+=== iter_close_return_value
+var log = []; function L(x) { log.push(String(x)); }
+function mk(tag) { return { [Symbol.iterator]() { return this; }, next() { return { value: 1, done: false }; }, return() { L(tag + ':ret'); (function () { return 'inner'; })(); return {}; } }; }
+function f() { for (var x of mk('a')) { return 5; } } L(f());
+function g() { for (var x of mk('b')) { try { return 6; } finally { L('fin'); } } } L(g());
+function h() { for (var x of mk('c')) { for (var y of mk('d')) { return 7; } } } L(h());
+function k() { try { for (var x of mk('e')) { return 8; } } finally { L('outer-fin'); } } L(k());
+function q() { l: for (var x of mk('f')) { for (var y of mk('g')) { break l; } } return 9; } L(q());
+function r() { for (var x of mk('h')) { try { throw 1; } catch (e) { return 10; } } } L(r());
+(function () { return log.join("|"); })
+=== coll_random_trace
+var log = [];
+function run(seed0, ops) {
+  var seed = seed0, hh = 7, n = 0;
+  function rnd(k) { seed = (seed * 48271) % 2147483647; return seed % k; }
+  function obs(x) { hh = (hh * 31 + (typeof x === 'number' ? (x | 0) + 3 : String(x).length * 7 + 1)) % 1000003; n++; }
+  var objs = []; for (var i = 0; i < 6; i++) objs.push({ id: 'o' + i });
+  function key() { var r = rnd(12); return r < 6 ? r : r === 6 ? NaN : r === 7 ? -0 : r === 8 ? 'k' + rnd(4) : r === 9 ? objs[rnd(6)] : r === 10 ? undefined : 0; }
+  function show(k) { return k !== null && typeof k === 'object' ? k.id : k; }
+  var m = new Map(), s = new Set(), its = [];
+  for (var i = 0; i < ops; i++) {
+    var op = rnd(16), k = key();
+    if (op < 4) { m.set(k, i); obs('s'); }
+    else if (op < 6) { s.add(k); obs('a'); }
+    else if (op < 8) { obs(m.delete(k)); }
+    else if (op < 9) { obs(s.delete(k)); }
+    else if (op < 10) { obs(m.get(k)); obs(m.has(k)); obs(s.has(k)); }
+    else if (op < 11) { if (rnd(8) === 0) { m.clear(); obs('c'); } else if (rnd(4) === 0) { s.clear(); obs('C'); } }
+    else if (op < 12) { if (its.length < 5) { var w = rnd(3), pick = rnd(2); its.push(pick ? (w === 0 ? m.keys() : w === 1 ? m.values() : m.entries()) : (w === 2 ? s.entries() : w === 1 ? s.keys() : s.values())); } }
+    else if (op < 15) { if (its.length) { var j = rnd(its.length), r = its[j].next(); obs(r.done); if (r.done) { its[j] = its[its.length - 1]; its.pop(); } else obs(Array.isArray(r.value) ? show(r.value[0]) + ':' + show(r.value[1]) : show(r.value)); } }
+    else { var cnt = 0; m.forEach(function (v, kk) { obs(show(kk)); if (++cnt < 4) { if (rnd(2)) m.delete(key()); else m.set(key(), cnt); } }); obs(m.size); obs(s.size); }
+  }
+  return hh + ':' + n + ':' + m.size + ':' + s.size + ':' + its.length;
+}
+log.push(run(1, 400)); log.push(run(2, 800)); log.push(run(99, 1500)); log.push(run(31337, 3000));
+(function () { return log.join("|"); })
+=== set_ctor_adder_sees_raw_items
+var log = []; function L(x) { log.push(String(x)); }
+var orig = Set.prototype.add; var seen = [];
+Set.prototype.add = function (v) { seen.push(1 / v); return orig.call(this, v); };
+var s = new Set([-0, 0, NaN]); L(seen.join()); L(s.size); L(1 / [...s][0]);
+Set.prototype.add = orig; var t = new Set([-0]); L(1 / [...t][0]); L(1 / t.values().next().value);
+var m = new Map([[-0, -0]]); L(1 / [...m.keys()][0]); L(1 / [...m.values()][0]);
+(function () { return log.join("|"); })
+=== arguments_iterable
+var log = []; function L(x) { log.push(String(x)); }
+function f() { return [...arguments].join(); } L(f(1, 2, 3));
+function g() { var out = []; for (var x of arguments) out.push(x * 2); return out.join(); } L(g(1, 2));
+function h() { 'use strict'; var [a, b] = arguments; return a + b; } L(h(3, 4));
+function k() { return typeof arguments[Symbol.iterator] + ':' + (arguments[Symbol.iterator] === Array.prototype[Symbol.iterator]) + ':' + Object.keys(arguments).join(); } L(k(5, 6));
+function e() { var n = 0; for (var x of arguments) n++; return n; } L(e());
+function d() { return Object.getOwnPropertyDescriptor(arguments, Symbol.iterator).enumerable; } L(d());
+(function () { return log.join("|"); })
