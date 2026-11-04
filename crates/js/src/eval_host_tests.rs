@@ -233,3 +233,47 @@ fn queued_microtask_keeps_its_callback_alive_and_a_limit_poisons_later_drains() 
         assert_eq!(out(&mut it, "qm(function () {}); qm(function () {}); qm(function () {})"), "limit:PromiseQueue");
     });
 }
+
+#[test]
+fn host_promises_settle_once_through_the_promise_machinery() {
+    big(|| {
+        let (mut it, _t) = setup();
+        out(&mut it, "var log = [];");
+        let (ok, bad, thenable) = it
+            .host_scope(|it| {
+                let (a, b, c) = (it.host_new_promise()?, it.host_new_promise()?, it.host_new_promise()?);
+                let g = it.global_object();
+                for (n, p) in [("pa", a), ("pb", b), ("pc", c)] {
+                    let k = it.heap.key_from_str(n).unwrap();
+                    it.define_data(g, k, p, true, false, true)?;
+                }
+                Ok((a, b, c))
+            })
+            .unwrap();
+        out(&mut it, "pa.then(function (v) { log.push('a:' + v); }); pb.then(null, function (e) { log.push('b:' + e); }); pc.then(function (v) { log.push('c:' + v); }); 0");
+        assert!(matches!(it.promise_status(ok), Some(PromiseStatus::Pending)));
+        it.host_scope(|it| {
+            let (one, two) = (it.heap.intern_str("one").unwrap(), it.heap.intern_str("two").unwrap());
+            it.host_resolve_promise(ok, Value::String(one))?;
+            it.host_reject_promise(bad, Value::String(two))
+        })
+        .unwrap();
+        // Reactions are microtasks: nothing ran in the settle call.
+        assert_eq!(out(&mut it, "log.join()"), "");
+        assert_eq!(it.pending_jobs(), 2);
+        assert!(it.drain_microtasks().is_ok());
+        assert_eq!(out(&mut it, "log.join()"), "a:one,b:two");
+        // Resolving with a thenable assimilates it in a job, like the resolve function of `new Promise`.
+        let th = it.run_script("var th = { then: function (res) { res('from-thenable'); } }; th").unwrap();
+        it.host_scope(|it| it.host_resolve_promise(thenable, th)).unwrap();
+        assert!(matches!(it.promise_status(thenable), Some(PromiseStatus::Pending)));
+        it.drain_microtasks().unwrap();
+        assert_eq!(out(&mut it, "log.join()"), "a:one,b:two,c:from-thenable");
+        // A value that is not a promise is refused, not ignored.
+        let r = it.host_scope(|it| it.host_resolve_promise(Value::Number(1.0), Value::Undefined));
+        assert!(matches!(r, Err(Error::Unsupported(_))));
+        // A pending promise that nothing roots is collected with its reactions (the host must root what it queues).
+        it.host_scope(|it| it.host_new_promise().map(|_| ())).unwrap();
+        it.collect(&[]).unwrap();
+    });
+}

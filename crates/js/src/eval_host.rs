@@ -96,6 +96,34 @@ impl<'p> Interp<'p> {
         r
     }
 
+    /// A new pending promise for the host to settle later (a network request, for example). It has no resolving
+    /// functions: the host calls [`Interp::host_resolve_promise`] or [`Interp::host_reject_promise`] exactly once.
+    /// Root it (in `Host::roots`) while it waits. Counts toward `max_promises`.
+    pub fn host_new_promise(&mut self) -> Result<Value, Error> {
+        Ok(Value::Object(self.new_promise()?))
+    }
+
+    /// Resolve a promise made by [`Interp::host_new_promise`], with the promise resolve function rules (a thenable is
+    /// assimilated in a job). The host calls this or `host_reject_promise` once. Not a promise: `Unsupported`.
+    /// Call it while a host scope is active. Reactions run at the next checkpoint, never here.
+    pub fn host_resolve_promise(&mut self, p: Value, v: Value) -> Result<(), Error> {
+        let o = self.host_promise(p)?;
+        self.resolve_promise(o, v)
+    }
+
+    /// Reject a promise made by [`Interp::host_new_promise`]. See `host_resolve_promise`.
+    pub fn host_reject_promise(&mut self, p: Value, v: Value) -> Result<(), Error> {
+        let o = self.host_promise(p)?;
+        self.reject_promise(o, v)
+    }
+
+    fn host_promise(&self, p: Value) -> Result<ObjId, Error> {
+        match p {
+            Value::Object(o) if self.promise.map.contains_key(&o) => Ok(o),
+            _ => Err(unsupported("host settle of a value that is not a promise", Span::default())),
+        }
+    }
+
     /// A `TypeError` to throw.
     pub fn type_error(&mut self, msg: &str) -> Error {
         self.type_err(msg)
