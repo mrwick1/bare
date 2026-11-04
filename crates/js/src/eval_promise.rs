@@ -3,8 +3,9 @@
 //
 // Supported: `new Promise(executor)`, `Promise.resolve`, `Promise.reject`, `Promise.prototype.then`, `.catch`,
 // `.finally`. Resolver-once state, thenable assimilation (a job, as in the spec) and self-resolution rejection are exact.
-// Gates (explicit `Unsupported`, never silent): `Promise.all`, `allSettled`, `race`, `any` and any static call
-// whose `this` is not the intrinsic `Promise`. `then`, `catch` and `finally` read `constructor` and its `@@species`:
+// `Promise.all`, `allSettled`, `race`, `any` and `AggregateError` are in `eval_promise_combinators.rs`.
+// Gates (explicit `Unsupported`, never silent): any static call whose `this` is not the intrinsic `Promise`.
+// `then`, `catch` and `finally` read `constructor` and its `@@species`:
 // `undefined`, `null` and `Promise` give the default and another callable is a gate. `Promise[@@species]` and
 // `Promise.prototype[@@toStringTag]` exist. `async`/`await` lives in `eval_async.rs`.
 //
@@ -58,7 +59,11 @@ enum PFn {
     Settle { promise: ObjId, pair: u64, reject: bool },
     FinallyStep { on_finally: Value, reject: bool },
     Thunk { value: Value, throw: bool },
-    Gate(&'static str),
+    /// `Promise.all`, `allSettled`, `race` and `any` (see `eval_promise_combinators.rs`).
+    Comb(Comb),
+    /// An element function of one combinator call: the record key (never reused) and the item index.
+    AggElem { agg: u64, index: u32, reject: bool },
+    AggErrCtor,
 }
 
 impl PFn {
@@ -117,6 +122,7 @@ struct PromiseState {
     next_pair: u64,
     done_pairs: FxSet<u64>,
     failed_job: Option<Error>,
+    agg: AggState,
 }
 
 /// A thrown value becomes `Ok(value)`. Anything else (a limit, Unsupported, a heap fault) stays an error.
@@ -208,7 +214,7 @@ impl<'p> Interp<'p> {
         let ctor = self.pfn(PFn::Ctor, "Promise", 1)?;
         self.def(ctor, self.k_prototype, Value::Object(proto), false, false, false)?;
         self.def(proto, self.k_constructor, Value::Object(ctor), true, false, true)?;
-        for (name, f) in [("resolve", PFn::StaticResolve), ("reject", PFn::StaticReject), ("all", PFn::Gate("Promise.all")), ("allSettled", PFn::Gate("Promise.allSettled")), ("race", PFn::Gate("Promise.race")), ("any", PFn::Gate("Promise.any"))] {
+        for (name, f) in [("resolve", PFn::StaticResolve), ("reject", PFn::StaticReject)] {
             self.pmethod(ctor, name, f, 1)?;
         }
         self.pmethod(proto, "then", PFn::Then, 2)?;
@@ -221,7 +227,7 @@ impl<'p> Interp<'p> {
         self.promise.k_then = Some(h!(self, self.heap.key_from_str("then")));
         self.promise.ctor = Some(ctor);
         self.promise.proto = Some(proto);
-        Ok(())
+        self.install_combinators()
     }
 
     fn pfn(&mut self, f: PFn, name: &str, len: u32) -> Res<ObjId> {
@@ -247,6 +253,7 @@ impl<'p> Interp<'p> {
         if let Some(PropertyKey::String(s)) = self.promise.k_then {
             out.push(Value::String(s));
         }
+        self.agg_roots(out);
         for j in &self.promise.queue {
             match *j {
                 Job::React { handler, arg, derived, .. } => out.extend([handler, arg, Value::Object(derived)]),
@@ -274,13 +281,16 @@ impl<'p> Interp<'p> {
             out.push(Value::Object(o));
             self.promise_trace(o, out);
         }
+        self.agg_all_values(out);
     }
 
     /// Drop the metadata of promises that `collect` did not reach, and of finished resolving pairs.
     fn promise_prune(&mut self, seen: &FxSet<ObjId>) {
         self.promise.map.retain(|o, _| seen.contains(o));
         self.promise.reactions = self.promise.map.values().map(|d| d.reactions.len()).sum();
-        let live: FxSet<u64> = self.funcs.values().filter_map(|c| if let Callee::Promise(PFn::Settle { pair, .. }) = c { Some(*pair) } else { None }).collect();
+        let agg_pairs = self.agg_prune();
+        let mut live: FxSet<u64> = self.funcs.values().filter_map(|c| if let Callee::Promise(PFn::Settle { pair, .. }) = c { Some(*pair) } else { None }).collect();
+        live.extend(agg_pairs);
         self.promise.done_pairs.retain(|p| live.contains(p));
     }
 
@@ -358,7 +368,9 @@ impl<'p> Interp<'p> {
                 self.invoke_then(p, &[Value::Object(thunk)])
             }
             PFn::Thunk { value, throw } => if throw { Err(Error::Throw(value)) } else { Ok(value) },
-            PFn::Gate(what) => Err(unsupported(what, Span::default())),
+            PFn::Comb(k) => self.promise_combinator(k, this, args),
+            PFn::AggElem { agg, index, reject } => self.agg_elem(agg, index, reject, a0),
+            PFn::AggErrCtor => self.agg_error_ctor(args),
         }
     }
 

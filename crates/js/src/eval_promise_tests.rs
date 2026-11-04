@@ -105,10 +105,6 @@ fn out_text(it: &mut Interp) -> String {
 #[test]
 fn gates_are_explicit_unsupported_not_silent() {
     for (src, what) in [
-        ("Promise.all([])", "Promise.all"),
-        ("Promise.allSettled([])", "Promise.allSettled"),
-        ("Promise.race([])", "Promise.race"),
-        ("Promise.any([])", "Promise.any"),
         ("Promise.resolve.call(function () {}, 1)", "Promise static method on a constructor other than Promise"),
     ] {
         assert_eq!(run_case(src), format!("unsupported:{what}"), "{src}");

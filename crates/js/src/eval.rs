@@ -126,6 +126,8 @@ pub enum LimitKind {
     Json(crate::json::LimitKind),
     /// A bound of `JSON.stringify` (see `eval_json_stringify.rs`).
     Stringify(StringifyLimit),
+    /// A cap of `Promise.all` and the other combinators (see [`AggLimit`]).
+    Agg(AggLimit),
     /// Symbol registry, Map/Set, iterator and iteration-buffer caps (see [`ScLimit`]).
     Sc(ScLimit),
 }
@@ -677,7 +679,7 @@ impl<'p> Interp<'p> {
                     work.push(*this);
                     work.extend(args.iter().copied());
                 }
-                Some(Callee::Promise(pf)) => pf.trace(&mut work),
+                Some(&Callee::Promise(pf)) => self.pfn_trace(pf, &mut work),
                 _ => {}
             }
             self.promise_trace(o, &mut work);
@@ -1520,7 +1522,7 @@ impl<'p> Interp<'p> {
             Some(&Callee::Native(n)) if matches!(n, Nat::ObjectCtor | Nat::FnCtor | Nat::ArrayCtor | Nat::ErrorCtor(_) | Nat::Ext(Bi::RegExpCtor)) || matches!(n, Nat::Bin(b) if b.ctor_name().is_some() || b == BinFn::TaCtor) || matches!(n, Nat::Sc(f) if f.is_ctor()) => D::N(n),
             Some(&Callee::Native(Nat::StringFn | Nat::NumberFn | Nat::BooleanFn)) => return Err(unsupported("wrapper object (new String/Number/Boolean)", Span::default())),
             Some(Callee::Bound { target, args, .. }) => D::B(*target, args.clone()),
-            Some(&Callee::Promise(pf @ PFn::Ctor)) => D::P(pf),
+            Some(&Callee::Promise(pf @ (PFn::Ctor | PFn::AggErrCtor))) => D::P(pf),
             _ => return not_ctor(self),
         };
         self.depth += 1;
@@ -2998,6 +3000,7 @@ fn num_base(t: &str) -> NumBase {
 
 include!("eval_native.rs");
 include!("eval_promise.rs");
+include!("eval_promise_combinators.rs");
 include!("eval_binary.rs");
 include!("eval_scripts.rs");
 include!("eval_builtins.rs");
@@ -3026,6 +3029,10 @@ mod tests;
 #[cfg(test)]
 #[path = "eval_promise_tests.rs"]
 mod promise_tests;
+
+#[cfg(test)]
+#[path = "eval_promise_combinators_tests.rs"]
+mod promise_combinator_tests;
 
 #[cfg(test)]
 #[path = "eval_scripts_tests.rs"]

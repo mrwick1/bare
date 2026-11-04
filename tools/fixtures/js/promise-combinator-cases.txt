@@ -1,0 +1,258 @@
+# bare-js Promise.all / allSettled / race / any / AggregateError cases. Same format as promise-cases.txt.
+# Node (vm, empty context, 2 s timeout) is the oracle. Only our own tiny programs run here.
+=== all_order_and_async
+var log = []; function L(x) { log.push(String(x)); }
+Promise.all([Promise.resolve(1), 2, new Promise(function (r) { r(3); }), Promise.resolve().then(function () { return 4; })]).then(function (v) { L(v.join()); });
+L('sync');
+(function () { return log.join("|"); })
+=== all_empty_is_settled_but_reactions_async
+var log = []; function L(x) { log.push(String(x)); }
+var p = Promise.all([]); p.then(function (v) { L('v' + v.length + Array.isArray(v)); }); L('sync');
+(function () { return log.join("|"); })
+=== all_reject_first_wins
+var log = []; function L(x) { log.push(String(x)); }
+var res; Promise.all([new Promise(function (r) { res = r; }), Promise.reject('a'), Promise.reject('b')]).then(function () { L('ok'); }, function (e) { L('err' + e); }); res(1);
+(function () { return log.join("|"); })
+=== all_resolve_order_vs_input_order
+var log = []; function L(x) { log.push(String(x)); }
+var ra, rb; var a = new Promise(function (r) { ra = r; }), b = new Promise(function (r) { rb = r; });
+Promise.all([a, b]).then(function (v) { L(v.join()); }); rb('B'); ra('A');
+(function () { return log.join("|"); })
+=== all_tick_count
+var log = []; function L(x) { log.push(String(x)); }
+Promise.all([1, 2]).then(function () { L('all'); });
+Promise.resolve().then(function () { L(1); }).then(function () { L(2); }).then(function () { L(3); }).then(function () { L(4); });
+(function () { return log.join("|"); })
+=== all_reads_resolve_once
+var log = []; function L(x) { log.push(String(x)); }
+var orig = Promise.resolve; var n = 0;
+Object.defineProperty(Promise, 'resolve', { configurable: true, get: function () { n++; return function (x) { L('r' + x); return orig.call(Promise, x); }; } });
+Promise.all([1, 2, 3]).then(function (v) { L(v.join()); L('gets' + n); });
+(function () { return log.join("|"); })
+=== all_resolve_not_callable_rejects
+var log = []; function L(x) { log.push(String(x)); }
+var orig = Promise.resolve; Promise.resolve = 5;
+var p = Promise.all([1]); Promise.resolve = orig;
+p.catch(function (e) { L(e.name); });
+(function () { return log.join("|"); })
+=== all_resolve_getter_throws_rejects
+var log = []; function L(x) { log.push(String(x)); }
+Object.defineProperty(Promise, 'resolve', { configurable: true, get: function () { throw 'g'; } });
+var p = Promise.all([1]); delete Promise.resolve;
+p.catch(function (e) { L('c' + e); });
+(function () { return log.join("|"); })
+=== all_not_iterable_rejects
+var log = []; function L(x) { log.push(String(x)); }
+Promise.all(5).catch(function (e) { L(e.name); }); Promise.all().catch(function (e) { L(e.name); }); Promise.all({}).catch(function (e) { L(e.name); });
+(function () { return log.join("|"); })
+=== all_this_not_object_throws
+var log = [];
+try { Promise.all.call(undefined, []); log.push('no'); } catch (e) { log.push(e.name); }
+try { Promise.race.call(1, []); log.push('no'); } catch (e) { log.push(e.name); }
+(function () { return log.join("|"); })
+=== all_string_iterable
+var log = []; function L(x) { log.push(String(x)); }
+Promise.all('ab').then(function (v) { L(v.join()); });
+(function () { return log.join("|"); })
+=== all_set_and_map_inputs
+var log = []; function L(x) { log.push(String(x)); }
+Promise.all(new Set([1, 2, 2, 3])).then(function (v) { L(v.join()); });
+Promise.all(new Map([[1, 2]]).keys()).then(function (v) { L(v.join()); });
+(function () { return log.join("|"); })
+=== all_custom_iterator_next_throws_no_close
+var log = []; function L(x) { log.push(String(x)); }
+var it = { next: function () { throw 'boom'; }, return: function () { L('closed'); return {}; } };
+Promise.all({ [Symbol.iterator]: function () { return it; } }).catch(function (e) { L('c' + e); });
+(function () { return log.join("|"); })
+=== all_custom_iterator_value_getter_throws_no_close
+var log = []; function L(x) { log.push(String(x)); }
+var it = { next: function () { return { done: false, get value() { throw 'v'; } }; }, return: function () { L('closed'); return {}; } };
+Promise.all({ [Symbol.iterator]: function () { return it; } }).catch(function (e) { L('c' + e); });
+(function () { return log.join("|"); })
+=== all_resolve_throws_closes_iterator
+var log = []; function L(x) { log.push(String(x)); }
+var i = 0; var it = { next: function () { i++; return { done: false, value: i }; }, return: function () { L('closed'); return {}; } };
+var orig = Promise.resolve; Promise.resolve = function () { throw 'rt'; };
+var p = Promise.all({ [Symbol.iterator]: function () { return it; } }); Promise.resolve = orig;
+p.catch(function (e) { L('c' + e + i); });
+(function () { return log.join("|"); })
+=== all_resolve_throws_and_return_throws_original_wins
+var log = []; function L(x) { log.push(String(x)); }
+var it = { next: function () { return { done: false, value: 1 }; }, return: function () { throw 'ret'; } };
+var orig = Promise.resolve; Promise.resolve = function () { throw 'rt'; };
+var p = Promise.all({ [Symbol.iterator]: function () { return it; } }); Promise.resolve = orig;
+p.catch(function (e) { L('c' + e); });
+(function () { return log.join("|"); })
+=== all_then_throws_closes_iterator
+var log = []; function L(x) { log.push(String(x)); }
+var it = { next: function () { return { done: false, value: 1 }; }, return: function () { L('closed'); return {}; } };
+var bad = Promise.resolve(1); bad.then = function () { throw 'th'; };
+var orig = Promise.resolve; Promise.resolve = function () { return bad; };
+var p = Promise.all({ [Symbol.iterator]: function () { return it; } }); Promise.resolve = orig;
+p.catch(function (e) { L('c' + e); });
+(function () { return log.join("|"); })
+=== all_iterator_symbol_throws
+var log = []; function L(x) { log.push(String(x)); }
+Promise.all({ get [Symbol.iterator]() { throw 'si'; } }).catch(function (e) { L('c' + e); });
+(function () { return log.join("|"); })
+=== all_result_object_without_object_is_typeerror
+var log = []; function L(x) { log.push(String(x)); }
+Promise.all({ [Symbol.iterator]: function () { return { next: function () { return 1; } }; } }).catch(function (e) { L(e.name); });
+(function () { return log.join("|"); })
+=== all_thenable_and_hostile_thenable
+var log = []; function L(x) { log.push(String(x)); }
+var th = { then: function (a, b) { a('x'); a('y'); b('z'); throw 'late'; } };
+Promise.all([th, { then: function (a) { a(2); } }]).then(function (v) { L(v.join()); }, function (e) { L('e' + e); });
+(function () { return log.join("|"); })
+=== all_element_function_called_twice_via_own_then
+var log = []; function L(x) { log.push(String(x)); }
+var fake = Promise.resolve(0); fake.then = function (ok, err) { ok('first'); ok('second'); err('late'); return {}; };
+var orig = Promise.resolve; Promise.resolve = function () { return fake; };
+var p = Promise.all([1]); Promise.resolve = orig;
+p.then(function (v) { L(v.join()); }, function (e) { L('e' + e); });
+(function () { return log.join("|"); })
+=== all_element_functions_shape
+var log = []; function L(x) { log.push(String(x)); }
+var fake = Promise.resolve(0); var seen = [];
+fake.then = function (ok, err) { seen.push(typeof ok, ok.length, ok.name === '', typeof err, err.length); return {}; };
+var orig = Promise.resolve; Promise.resolve = function () { return fake; };
+Promise.all([1]); Promise.resolve = orig; L(seen.join());
+(function () { return log.join("|"); })
+=== all_array_prototype_then_makes_result_thenable
+var log = []; function L(x) { log.push(String(x)); }
+Array.prototype.then = function (a) { L('arr-then'); a('replaced'); };
+Promise.all([1]).then(function (v) { L(v); });
+(function () { return log.join("|"); })
+=== all_collect_result_is_plain_array
+var log = []; function L(x) { log.push(String(x)); }
+Promise.all([1, 2]).then(function (v) { L(Object.getPrototypeOf(v) === Array.prototype); L(v.length); v.push(9); L(v.join()); });
+(function () { return log.join("|"); })
+=== allsettled_basic
+var log = []; function L(x) { log.push(String(x)); }
+Promise.allSettled([1, Promise.reject('r'), Promise.resolve('f')]).then(function (v) { L(v.map(function (x) { return x.status + ':' + (x.status === 'fulfilled' ? x.value : x.reason) + ':' + Object.keys(x).join('+'); }).join()); });
+(function () { return log.join("|"); })
+=== allsettled_empty
+var log = []; function L(x) { log.push(String(x)); }
+Promise.allSettled([]).then(function (v) { L(v.length); });
+(function () { return log.join("|"); })
+=== allsettled_never_rejects_on_input_reject_and_order
+var log = []; function L(x) { log.push(String(x)); }
+var ra, rb; var a = new Promise(function (r, j) { ra = j; }), b = new Promise(function (r) { rb = r; });
+Promise.allSettled([a, b]).then(function (v) { L(v.map(function (x) { return x.status; }).join()); }); rb(1); ra(2);
+(function () { return log.join("|"); })
+=== allsettled_shared_flag_between_pair
+var log = []; function L(x) { log.push(String(x)); }
+var fake = Promise.resolve(0); fake.then = function (ok, err) { ok('a'); err('b'); ok('c'); return {}; };
+var orig = Promise.resolve; Promise.resolve = function () { return fake; };
+var p = Promise.allSettled([1]); Promise.resolve = orig;
+p.then(function (v) { L(v.length + v[0].status + v[0].value); });
+(function () { return log.join("|"); })
+=== allsettled_iterator_error_rejects
+var log = []; function L(x) { log.push(String(x)); }
+Promise.allSettled({ [Symbol.iterator]: function () { return { next: function () { throw 'n'; } }; } }).catch(function (e) { L('c' + e); });
+(function () { return log.join("|"); })
+=== race_first_settled_wins
+var log = []; function L(x) { log.push(String(x)); }
+var rj; Promise.race([new Promise(function (r) { rj = r; }), Promise.resolve('b'), Promise.reject('c')]).then(function (v) { L('v' + v); }, function (e) { L('e' + e); }); rj('a');
+(function () { return log.join("|"); })
+=== race_reject_wins
+var log = []; function L(x) { log.push(String(x)); }
+Promise.race([Promise.reject('x'), Promise.resolve('y')]).then(function (v) { L('v' + v); }, function (e) { L('e' + e); });
+(function () { return log.join("|"); })
+=== race_empty_stays_pending
+var log = []; function L(x) { log.push(String(x)); }
+Promise.race([]).then(function () { L('never'); }, function () { L('never'); }); L('end');
+(function () { return log.join("|"); })
+=== race_non_promise_values_and_ticks
+var log = []; function L(x) { log.push(String(x)); }
+Promise.race([1, 2]).then(function (v) { L('r' + v); });
+Promise.resolve().then(function () { L(1); }).then(function () { L(2); }).then(function () { L(3); });
+(function () { return log.join("|"); })
+=== race_hostile_thenable
+var log = []; function L(x) { log.push(String(x)); }
+Promise.race([{ then: function (a, b) { b('first'); a('second'); b('third'); } }]).then(function (v) { L('v' + v); }, function (e) { L('e' + e); });
+(function () { return log.join("|"); })
+=== race_resolve_throws_closes
+var log = []; function L(x) { log.push(String(x)); }
+var it = { next: function () { return { done: false, value: 1 }; }, return: function () { L('closed'); return {}; } };
+var orig = Promise.resolve; Promise.resolve = function () { throw 'rt'; };
+var p = Promise.race({ [Symbol.iterator]: function () { return it; } }); Promise.resolve = orig;
+p.catch(function (e) { L('c' + e); });
+(function () { return log.join("|"); })
+=== race_passes_capability_functions_to_then
+var log = []; function L(x) { log.push(String(x)); }
+var fake = Promise.resolve(0); var seen;
+fake.then = function (ok, err) { seen = [typeof ok, ok.length, err.length].join(); ok('won'); return {}; };
+var orig = Promise.resolve; Promise.resolve = function () { return fake; };
+var p = Promise.race([1]); Promise.resolve = orig;
+p.then(function (v) { L(seen + v); });
+(function () { return log.join("|"); })
+=== any_first_fulfilled
+var log = []; function L(x) { log.push(String(x)); }
+Promise.any([Promise.reject(1), new Promise(function () {}), Promise.resolve('ok'), Promise.resolve('later')]).then(function (v) { L('v' + v); });
+(function () { return log.join("|"); })
+=== any_all_reject_aggregate_error
+var log = []; function L(x) { log.push(String(x)); }
+Promise.any([Promise.reject('a'), Promise.reject('b'), Promise.reject('c')]).catch(function (e) {
+  L(e.name); L(e.message); L(e instanceof AggregateError); L(e instanceof Error); L(Array.isArray(e.errors)); L(e.errors.join());
+  var d = Object.getOwnPropertyDescriptor(e, 'errors'); L([d.writable, d.enumerable, d.configurable].join());
+  L(Object.keys(e).length); L(Object.prototype.hasOwnProperty.call(e, 'message'));
+});
+(function () { return log.join("|"); })
+=== any_empty_rejects
+var log = []; function L(x) { log.push(String(x)); }
+Promise.any([]).catch(function (e) { L(e.name + ':' + e.errors.length + ':' + e.message); });
+(function () { return log.join("|"); })
+=== any_errors_in_input_order
+var log = []; function L(x) { log.push(String(x)); }
+var ra, rb; var a = new Promise(function (r, j) { ra = j; }), b = new Promise(function (r, j) { rb = j; });
+Promise.any([a, b]).catch(function (e) { L(e.errors.join()); }); rb('B'); ra('A');
+(function () { return log.join("|"); })
+=== any_hostile_thenable
+var log = []; function L(x) { log.push(String(x)); }
+Promise.any([{ then: function (a, b) { b('r1'); b('r2'); a('f'); a('g'); } }]).then(function (v) { L('v' + v); }, function (e) { L('e' + e.errors.join()); });
+(function () { return log.join("|"); })
+=== any_iterator_error
+var log = []; function L(x) { log.push(String(x)); }
+Promise.any({ [Symbol.iterator]: function () { return { next: function () { throw 'n'; } }; } }).catch(function (e) { L('c' + e); });
+(function () { return log.join("|"); })
+=== any_reject_element_twice
+var log = []; function L(x) { log.push(String(x)); }
+var fake = Promise.resolve(0); fake.then = function (ok, err) { err('one'); err('two'); return {}; };
+var orig = Promise.resolve; Promise.resolve = function () { return fake; };
+var p = Promise.any([1]); Promise.resolve = orig;
+p.catch(function (e) { L(e.errors.join()); });
+(function () { return log.join("|"); })
+=== aggregate_error_ctor
+var log = []; function L(x) { log.push(String(x)); }
+var e = new AggregateError([1, 2], 'm'); L(e.name + e.message + e.errors.join() + (e instanceof Error) + (Object.getPrototypeOf(AggregateError) === Error));
+var f = AggregateError(new Set([3]));
+L(f.message === '' ? 'nomsg' : 'msg'); L(Object.prototype.hasOwnProperty.call(f, 'message')); L(f.errors.join()); L(AggregateError.length + AggregateError.name); L(String(e));
+L(Object.getOwnPropertyDescriptor(AggregateError.prototype, 'name').value + Object.prototype.hasOwnProperty.call(AggregateError.prototype, 'message'));
+try { new AggregateError(5); } catch (x) { L(x.name); }
+try { new AggregateError(); } catch (x) { L(x.name); }
+(function () { return log.join("|"); })
+=== aggregate_error_order_message_before_errors
+var log = []; function L(x) { log.push(String(x)); }
+var m = { toString: function () { L('msg'); return 'M'; } };
+var it = { [Symbol.iterator]: function () { L('iter'); return { next: function () { return { done: true }; } }; } };
+new AggregateError(it, m);
+(function () { return log.join("|"); })
+=== combinators_are_methods_with_shape
+var log = []; function L(x) { log.push(String(x)); }
+['all', 'allSettled', 'race', 'any'].forEach(function (n) { var d = Object.getOwnPropertyDescriptor(Promise, n); L(n + d.writable + d.enumerable + d.configurable + Promise[n].length + Promise[n].name); });
+(function () { return log.join("|"); })
+=== many_items_in_order
+var log = []; function L(x) { log.push(String(x)); }
+var ps = []; for (var i = 0; i < 50; i++) ps.push(i % 3 ? Promise.resolve(i) : i);
+Promise.all(ps).then(function (v) { var s = 0; for (var i = 0; i < v.length; i++) s += v[i] * (i + 1); L(v.length + ':' + s); });
+(function () { return log.join("|"); })
+=== nested_combinators
+var log = []; function L(x) { log.push(String(x)); }
+Promise.all([Promise.all([1, 2]), Promise.race([3, 4]), Promise.allSettled([5]).then(function (v) { return v[0].value; })]).then(function (v) { L(JSON.stringify(v)); });
+(function () { return log.join("|"); })
+=== result_promise_unhandled_state
+var log = []; function L(x) { log.push(String(x)); }
+var p = Promise.all([Promise.reject(1)]); p.catch(function () {});
+var q = Promise.all([]);
+(function () { return log.join("|"); })

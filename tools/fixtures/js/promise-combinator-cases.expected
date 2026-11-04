@@ -1,0 +1,49 @@
+all_order_and_async	sync ## sync|1,2,3,4
+all_empty_is_settled_but_reactions_async	sync ## sync|v0true
+all_reject_first_wins	 ## erra
+all_resolve_order_vs_input_order	 ## A,B
+all_tick_count	 ## 1|all|2|3|4
+all_reads_resolve_once	r1|r2|r3 ## r1|r2|r3|1,2,3|gets1
+all_resolve_not_callable_rejects	 ## TypeError
+all_resolve_getter_throws_rejects	 ## cg
+all_not_iterable_rejects	 ## TypeError|TypeError|TypeError
+all_this_not_object_throws	TypeError|TypeError ## TypeError|TypeError
+all_string_iterable	 ## a,b
+all_set_and_map_inputs	 ## 1,2,3|1
+all_custom_iterator_next_throws_no_close	 ## cboom
+all_custom_iterator_value_getter_throws_no_close	 ## cv
+all_resolve_throws_closes_iterator	closed ## closed|crt1
+all_resolve_throws_and_return_throws_original_wins	 ## crt
+all_then_throws_closes_iterator	closed ## closed|cth
+all_iterator_symbol_throws	 ## csi
+all_result_object_without_object_is_typeerror	 ## TypeError
+all_thenable_and_hostile_thenable	 ## x,2
+all_element_function_called_twice_via_own_then	 ## elate
+all_element_functions_shape	function,1,true,function,1 ## function,1,true,function,1
+all_array_prototype_then_makes_result_thenable	 ## arr-then|replaced
+all_collect_result_is_plain_array	 ## true|2|1,2,9
+allsettled_basic	 ## fulfilled:1:status+value,rejected:r:status+reason,fulfilled:f:status+value
+allsettled_empty	 ## 0
+allsettled_never_rejects_on_input_reject_and_order	 ## rejected,fulfilled
+allsettled_shared_flag_between_pair	 ## 1fulfilleda
+allsettled_iterator_error_rejects	 ## cn
+race_first_settled_wins	 ## vb
+race_reject_wins	 ## ex
+race_empty_stays_pending	end ## end
+race_non_promise_values_and_ticks	 ## 1|r1|2|3
+race_hostile_thenable	 ## efirst
+race_resolve_throws_closes	closed ## closed|crt
+race_passes_capability_functions_to_then	 ## function,1,1won
+any_first_fulfilled	 ## vok
+any_all_reject_aggregate_error	 ## AggregateError|All promises were rejected|true|true|true|a,b,c|true,false,true|0|true
+any_empty_rejects	 ## AggregateError:0:All promises were rejected
+any_errors_in_input_order	 ## A,B
+any_hostile_thenable	 ## er1
+any_iterator_error	 ## cn
+any_reject_element_twice	 ## one
+aggregate_error_ctor	AggregateErrorm1,2truetrue|nomsg|false|3|2AggregateError|AggregateError: m|AggregateErrortrue|TypeError|TypeError ## AggregateErrorm1,2truetrue|nomsg|false|3|2AggregateError|AggregateError: m|AggregateErrortrue|TypeError|TypeError
+aggregate_error_order_message_before_errors	msg|iter ## msg|iter
+combinators_are_methods_with_shape	alltruefalsetrue1all|allSettledtruefalsetrue1allSettled|racetruefalsetrue1race|anytruefalsetrue1any ## alltruefalsetrue1all|allSettledtruefalsetrue1allSettled|racetruefalsetrue1race|anytruefalsetrue1any
+many_items_in_order	 ## 50:41650
+nested_combinators	 ## [[1,2],3,5]
+result_promise_unhandled_state	 ## 
