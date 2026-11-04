@@ -520,3 +520,16 @@ fn a_throwing_message_listener_is_reported_and_later_messages_still_arrive() {
         assert_eq!(js(&mut b, "o.join()"), "m1,q1,m2,q2");
     });
 }
+
+#[test]
+fn pump_observes_a_failed_empty_microtask_checkpoint() {
+    big(|| {
+        let mut b = make(200, BrowserLimits::default());
+        js(&mut b, "var fired = 0; setTimeout(function(){fired++}, 0); queueMicrotask(function(){while(true){}});");
+        assert!(matches!(b.drain(), Err(Error::Limit(LimitKind::Steps))));
+        assert_eq!(b.it.pending_jobs(), 0);
+        assert!(matches!(b.run_scheduled_tasks(1), Err(Error::Limit(LimitKind::Steps))));
+        let k = b.it.heap.key_from_str("fired").unwrap();
+        assert!(matches!(b.it.heap.get(b.it.global_object(), k), Ok(bare_js::heap::Get::Value(Value::Number(0.0)))));
+    });
+}

@@ -18,9 +18,9 @@
 //!
 //! Timers (spec: HTML "timer initialization steps")
 //! - `setTimeout`/`setInterval(callback, delay, ...args)`. The delay is WebIDL `long`: `ToInt32`, then negative is 0.
-//!   So `2**31` becomes `-2**31`, which becomes 0 (browsers do the same). From the 6th level of nested timers a delay
+//!   So `2**31` becomes `-2**31`, which becomes 0 (the implemented delay conversion). From the 6th level of nested timers a delay
 //!   below 4 ms becomes 4 ms. A timer set from a message task has level 1.
-//! - Ids are numbers from 1, never reused. `clearTimeout` and `clearInterval` are the same function. An interval
+//! - Ids are numbers from 1, never reused. `clearTimeout` and `clearInterval` share the cancellation algorithm. An interval
 //!   that is cleared while its callback runs is not queued again. An interval is queued again after each run, at
 //!   `clock when the run started + interval`, even when its callback throws.
 //! - A string callback (it would be `eval`) and any other non-function is `Unsupported`.
@@ -511,11 +511,11 @@ fn set_timer(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value], repeat: boo
     }
     let n = it.to_js_number(arg(a, 1))?;
     let mut delay = to_int32(n).max(0) as u32;
-    let args: Vec<Value> = a.iter().skip(2).copied().collect();
+    let argc = a.len().saturating_sub(2);
     let now = d.now_ms();
     let (id, level) = {
         let s = d.sched.borrow();
-        if args.len() > s.limits.max_timer_args {
+        if argc > s.limits.max_timer_args {
             return Err(d.lim("timer-args"));
         }
         if s.timers.len() >= s.limits.max_timers {
@@ -530,7 +530,8 @@ fn set_timer(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value], repeat: boo
     if level > 5 && delay < 4 {
         delay = 4;
     }
-    it.charge(1 + args.len() as u64)?;
+    it.charge(1 + argc as u64)?;
+    let args: Vec<Value> = a.iter().skip(2).copied().collect();
     let key = d.schedule(now + delay as f64, Task::Timer(id))?;
     let mut s = d.sched.borrow_mut();
     s.next_timer = id;
@@ -815,9 +816,8 @@ impl Browser {
     }
 
     fn pump_inner(&mut self, dom: &Dom, max: usize, target: Option<f64>) -> R<Pump> {
-        if self.it.pending_jobs() > 0 {
-            self.it.host_scope(|it| it.host_checkpoint().map(|_| ()))?;
-        }
+        // An empty queue can still carry a sticky failed-job error.
+        self.it.host_scope(|it| it.host_checkpoint().map(|_| ()))?;
         let mut ran = 0usize;
         let mut capped = false;
         loop {

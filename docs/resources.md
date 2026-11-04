@@ -1020,3 +1020,30 @@ Parent ran five release workloads at 1x, 10x and 100x, each in a fresh process u
 Copy retains four 50 MiB backing buffers after collection. Streaming retains its input buffer and reclaims 104,858 temporary objects. Decoder registers stay fixed; scripts and input strings still consume ordinary realm memory. Scan timings include evaluator property access. The plain-array case also creates its numeric array in JavaScript, so it is not an isolated comparison of single-read latency. CPU counters cover the process, including setup, at 10 ms resolution. Native allocator counts were not measured.
 
 Reproduce with tools/js/binary_check.sh and tools/js/binary_load.sh with an output path. The public host helpers are set_binary_limits, new_array_buffer, new_uint8_array and bytes_of. Unsupported features include resizing, transfer, non-UTF-8 encodings, many typed-array methods and object-valued defineProperty conversion. SharedArrayBuffer, DataView and other typed families are absent. Symbol iterator/tag/species hooks and native subclassing still need the parallel branch adapters. Not tested: real fetch/Flight streams, staging execution, long-running soak, hard allocator OOM, big-endian or 32-bit targets.
+
+
+## Browser task scheduler
+
+The browser host now provides setTimeout, setInterval, cancellation, queueMicrotask, performance.now and MessageChannel. One queue orders tasks by due time and sequence. No OS timer, thread or server runs these tasks. The driver calls run_scheduled_tasks, advance_to or advance_time. A virtual clock supports deterministic fixtures. Event timestamps and performance.now use the same clock.
+
+Timer ids are non-reused positive integers. Delays use ToInt32 and clamp negative values to zero. The implemented nested-timer policy clamps delays below 4 ms from level six. Clearing an interval in its callback prevents rescheduling. Arguments are capped before copying. String/eval callbacks are unsupported. Each task uses a host scope and checkpoint. Ordinary throws become reports and later tasks run. Other errors halt the pump permanently.
+
+queueMicrotask uses the real Promise FIFO queue. Host.report_exception handles ordinary thrown callback values; its default drops them. Limits, Unsupported and heap faults poison later checkpoints. Parent review reproduced a failure after an externally drained microtask exhausted its budget: with no jobs left, a timer could run before the pump noticed the failed checkpoint. The new regression observes the unwanted timer side effect. The pump now always checks the checkpoint before taking a task, even when the job queue is empty.
+
+Message ports reuse EventTarget dispatch. Primitive data waits until the receiving port starts, then each delivery is a task. Timers, queued arguments, port peers and queued messages are traced through Host collection. Unreachable port cycles and event metadata are pruned. Generation handles prevent slot reuse from reviving an old port. The tested close policy delivers previously queued messages and drops later posts. This has no real-browser comparison. Objects and transfer lists remain explicit gates. MessageEvent.ports is mutable, and channel ports are own properties; these are declared deviations.
+
+Default caps are 65,536 timers, 256 extra arguments per timer, 16,384 ports, 65,536 queued messages and 16 MiB of queued message payload. The driver also caps tasks per pump. Id and sequence exhaustion fail. Events remain under the DOM event cap and need explicit collection between long pumps. A DrainJobs refusal halts this pump, although the VM drain itself remains resumable. A halted realm should be discarded by its owner.
+
+Parent ran the changed-crate debug and release checks, the workspace suite and JS clippy with warnings denied. Node comparisons match 15 scheduler cases, 15 event cases and 62 Promise cases. Node runs only authored programs. Timer-id type, Node's minimum-delay clamp and undefined-message differences are excluded from the common corpus. Native fixtures cover the engine policy. No real-time precision or browser scheduling equivalence is claimed.
+
+All nine release load cases pass with checked results, a virtual clock, 1 GiB address-space cap and 45 seconds per process. The final samples ran with concurrent work and establish no speed improvement.
+
+| Workload at 100x | Tasks | Run ms | CPU ms | Peak RSS MiB | Allocations |
+| --- | --- | --- | --- | --- | --- |
+| Timers | 80,600 | 217.3 | 210 | 5.2 | 770,959 |
+| Messages | 100,000 | 290.1 | 280 | 4.9 | 1,321,794 |
+| Mixed | 200,000 | 680.0 | 670 | 6.1 | 2,514,882 |
+
+After collection, all three cases have zero timers, tasks, queued messages and events. The message case retains two ports for its live channel; the others retain none. CPU uses 10 ms ticks. Reproduce with tools/js/scheduler_check.sh and tools/js/scheduler_load.sh with an output path.
+
+Not tested: actual bundles, staging, browser event-loop comparison, real timer precision, other platforms or hard allocator OOM. requestAnimationFrame, requestIdleCallback, window.postMessage, BroadcastChannel, ErrorEvent/window.onerror, object structured clone and transfers are absent. Native constructor subclassing still needs the language integration. Navigation and network pumps remain separate pending work.
