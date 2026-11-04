@@ -596,6 +596,7 @@ impl<'p> Interp<'p> {
             v.extend(e.this);
         }
         v.extend(self.ao.array_ctor.map(Value::Object));
+        self.numeric_roots(&mut v);
         self.promise_roots(&mut v);
         self.binary_roots(&mut v);
         self.promise_all_values(&mut v);
@@ -633,6 +634,7 @@ impl<'p> Interp<'p> {
         self.ext_roots(&mut work);
         work.extend_from_slice(extra);
         work.extend(self.ao.array_ctor.map(Value::Object));
+        self.numeric_roots(&mut work);
         self.promise_roots(&mut work);
         let host = self.host.clone();
         let mut host_vals: Vec<Value> = Vec::new();
@@ -1715,6 +1717,7 @@ impl<'p> Interp<'p> {
                 self.ext.string_proto
             }
             Value::Symbol(_) => self.sc.symbol_proto,
+            Value::Number(_) => self.ao.number_proto.unwrap_or(self.object_proto),
             _ => self.object_proto,
         };
         match h!(self, self.heap.get(o, key)) {
@@ -2993,6 +2996,7 @@ include!("eval_builtins.rs");
 include!("eval_json_stringify.rs");
 include!("eval_host.rs");
 include!("eval_array_object.rs");
+include!("eval_numeric.rs");
 include!("eval_symbols.rs");
 include!("eval_collections.rs");
 include!("eval_classes.rs");
@@ -3036,6 +3040,10 @@ mod binary_tests;
 #[cfg(test)]
 #[path = "eval_array_object_tests.rs"]
 mod array_object_tests;
+
+#[cfg(test)]
+#[path = "eval_numeric_tests.rs"]
+mod numeric_tests;
 
 #[cfg(test)]
 #[path = "eval_sc_tests.rs"]
