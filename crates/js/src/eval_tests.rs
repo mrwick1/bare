@@ -316,7 +316,7 @@ fn parser_corpus_never_panics_or_faults() {
         let (mut ran, mut unsupported, mut threw, mut limited) = (0, 0, 0, 0);
         for c in cases.split("\n%%\n") {
             let Ok(prog) = parse_script(c, Limits::default()) else { continue };
-            let limits = EvalLimits { max_steps: 20_000, max_call_depth: 50, max_envs: 1000, max_functions: 1000 };
+            let limits = EvalLimits { max_steps: 20_000, max_call_depth: 50, max_envs: 1000, max_functions: 1000, ..Default::default() };
             match Interp::new(&prog, Heap::default(), limits) {
                 Err(Error::Unsupported(_)) => unsupported += 1,
                 Err(e) => panic!("{c:?}: setup {e:?}"),

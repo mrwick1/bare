@@ -580,7 +580,7 @@ impl<'a> Parser<'a> {
     // ------------------------------------------------------------ names and scopes
 
     fn name_of(&self, span: Span) -> Cow<'a, str> {
-        self.p.name(span)
+        name_in(self.src, span)
     }
 
     fn push_scope(&mut self, flags: u8) {
@@ -1617,7 +1617,7 @@ impl<'a> Parser<'a> {
         match key {
             Key::Name(s) => self.name_of(s) == "__proto__",
             Key::Str(s) => {
-                let t = self.p.text(s);
+                let t = self.src.get(s.start as usize..s.end as usize).unwrap_or("");
                 if !t.as_bytes().contains(&b'\\') {
                     &t[1..t.len() - 1] == "__proto__"
                 } else {
@@ -2775,7 +2775,7 @@ impl<'a> Parser<'a> {
         match key {
             Key::Name(s) => Some(self.name_of(s)),
             Key::Str(s) => {
-                let t = self.p.text(s);
+                let t = self.src.get(s.start as usize..s.end as usize).unwrap_or("");
                 if !t.as_bytes().contains(&b'\\') {
                     Some(Cow::Borrowed(&t[1..t.len() - 1]))
                 } else {
