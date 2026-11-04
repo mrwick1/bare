@@ -57,7 +57,7 @@ pub struct Sha384 {
     state: [u64; 8],
     buf: [u8; BLOCK_LEN],
     buf_len: usize,
-    // Total message bytes so far. `u128` is the width of the length field, so it cannot overflow.
+    // Total message bytes so far. Finalization encodes the bit count in 128 bits.
     len: u128,
 }
 
