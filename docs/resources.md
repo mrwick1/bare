@@ -384,3 +384,34 @@ Bugs that this check found, both fixed with a test first:
 The parser stores one dictionary per reference. This tool is for inspection only. These numbers do not establish Rust resource-loader performance. Keep the existing Rust streaming approach for the engine.
 
 Parent review added a decoded-body cap and a direct failure check for the browser command. Offline tests cover compressed-body limits, request limits across retries, connection reuse and omission of `Accept-Encoding`. A single verified HTTPS request through the inspection tool returned `/login` with status 200, 8,687 identity bytes and the saved SHA-256. `bare` still rejects HTTPS. The expected failing check is `sh tools/staging_https_check.sh`.
+
+## HTTPS URL prerequisite
+
+2026-11-04, archMachine, release. Scheme-aware URL parsing and HTTPS plaintext guards add no measured heap cost in the delegated before/after runs. The delegate measured the existing 1x/10x/100x URL cases before and after the change. All runs had zero flags. Individual times varied by about 10%; these runs do not establish a speedup.
+
+Parent verification: `cargo test --workspace --quiet` passed (484 tests). `cargo run --release -q -p bare-stress -- scale url-` had zero flags. At the largest join-dots size (2,000,000), time was 71.1 ms and peak counted heap was 110.7 MB. Peak counted heap is not RSS. No optimization was added without a measured cause.
+
+The delegate ran URL fuzzing with 200,000 inputs (seed 1), 1,000,000 (seed 7), and 3,000,000 (seed 42), with zero failures. Parent review checked the guards before cache lookup and socket reuse. Real TLS and HTTPS throughput remain untested.
+
+## TLS hash foundations
+
+2026-11-04, archMachine, release. `bare-tls` implements streaming SHA-256, HMAC-SHA256 and HKDF-SHA256. The portable compressor keeps a 16-word message schedule and unrolls eight rounds at a time. The x86-64 path uses SHA instructions after a runtime check of every required CPU feature. HMAC keeps keyed hash states so HKDF does not hash its pad blocks again for each output block.
+
+Parent ran `sh crates/tls/examples/run_scales.sh`. Each case is a separate process with a 512 MiB virtual-memory limit and a 300 s timeout. The driver reuses a fixed buffer. Times below are elapsed times, not CPU times.
+
+| Case | Scale | Work | Seconds | Peak RSS KiB | Allocations in timed loop |
+| --- | --- | --- | --- | --- | --- |
+| SHA-256 | 1x | 64 MiB | 0.040 | 2,392 | 0 |
+| SHA-256 | 10x | 640 MiB | 0.400 | 2,376 | 0 |
+| SHA-256 | 100x | 6,400 MiB | 3.874 | 2,392 | 0 |
+| HMAC-SHA256 | 1x | 64 MiB | 0.040 | 2,384 | 0 |
+| HMAC-SHA256 | 10x | 640 MiB | 0.406 | 2,348 | 0 |
+| HMAC-SHA256 | 100x | 6,400 MiB | 3.646 | 2,368 | 0 |
+| HKDF-Expand | 1x | 2,000 expansions of 8,160 bytes | 0.097 | 2,376 | 0 |
+| HKDF-Expand | 10x | 20,000 expansions of 8,160 bytes | 0.885 | 2,380 | 0 |
+| HKDF-Expand | 100x | 200,000 expansions of 8,160 bytes | 7.906 | 2,388 | 0 |
+| Small HMAC | 100x | 10,000,000 messages of 64 bytes | 2.667 | 2,364 | 1 (64-byte driver buffer) |
+
+Parent also built the driver with `--features force-portable` and hashed 6,400 MiB. It took 18.211 s, used 2,380 KiB peak RSS and allocated nothing in the loop. Its digest matched the accelerated run. A separate accelerated 6,400 MiB run took 3.284 s in the timed hash loop. Linux child CPU accounting reported 3.3297 s user and 0.0113 s system time, including process startup. The portable path remains available without SHA instructions. These are single runs under concurrent machine load; timings do not establish a precise speedup ratio.
+
+Checks: all 17 crypto tests passed in debug and release, with and without `force-portable`. The tests include standard vectors, padding and key-length edges, incremental updates, and HKDF output limits. The merged workspace passed 501 tests before this PR. `cargo clippy -p bare-tls --all-targets --all-features -- -D warnings` passed. No non-x86 hardware was tested. No TLS handshake or certificate check exists in this crate yet.

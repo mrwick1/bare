@@ -18,7 +18,7 @@
 
 use crate::{dns, tcp};
 // JS: like `import * as dns from "./dns"`: other files in this crate.
-use bare_url::Url;
+use bare_url::{Scheme, Url};
 // JS: like `import { Url } from "bare-url"`: from another package.
 use std::collections::HashMap;
 // JS: like a `Map`.
@@ -96,6 +96,16 @@ pub struct Client {
     // How many bytes the cache holds, counted with `cache_size`.
 }
 
+/// Refuse an https URL. We have no TLS yet, so a request sent now would go in plain text.
+/// Callers check this before the cache, DNS and the socket. The `Err` is a plain text message.
+fn refuse_https(url: &Url) -> Result<(), Error> {
+    if url.scheme == Scheme::Https {
+        return Err("https is not supported yet, so the request was not sent".into());
+        // `return Err(..)` leaves the function early. JS: like `throw new Error(..)`, but as a value.
+    }
+    Ok(())
+}
+
 /// How many bytes of memory a stored reply takes, about.
 fn cache_size(response: &Response) -> usize {
     response.body.len() + 512
@@ -124,7 +134,7 @@ impl Client {
             };
             next = current.join(location)?;
             // `Location` may be relative, like "/new". `join` makes it a full URL.
-            // A link to `https://` fails here, because we do not support HTTPS yet.
+            // A link to `https://` is a full URL too. `load` refuses it, because we do not support HTTPS yet.
             current = &next;
         }
         Err(format!("too many redirects (more than {MAX_REDIRECTS})").into())
@@ -140,6 +150,8 @@ impl Client {
 
     /// Get one URL from the cache, or from the server. Do not follow redirects.
     fn load(&mut self, url: &Url) -> Result<Arc<Response>, Error> {
+        refuse_https(url)?;
+        // Before the cache: a plain copy of the same host, port and path must not answer an https URL.
         let key = (url.host.clone(), url.port, url.path.clone());
         let mut conditions = String::new();
         // Extra request headers. They stay empty unless we have an old copy to check.
@@ -218,6 +230,8 @@ impl Client {
     /// Send a GET request and read the status and the headers. The body is not read: the `Body` reads it from the
     /// connection when the caller asks. Reuse an idle connection when there is one.
     fn start(&mut self, url: &Url, conditions: &str) -> Result<(Response, Body), Error> {
+        refuse_https(url)?;
+        // The last check before a socket. The idle list is keyed by host and port, not by scheme.
         let server = (url.host.clone(), url.port);
         let idle = self.idle.lock().unwrap().remove(&server);
         let (mut stream, reused) = match idle {
@@ -257,6 +271,7 @@ impl Client {
         let mut current = url;
         let mut next;
         for _ in 0..=MAX_REDIRECTS {
+            refuse_https(current)?;
             let key = (current.host.clone(), current.port, current.path.clone());
             let fresh = self.cache.get(&key).filter(|c| c.stored.elapsed() < c.fresh_for).map(|c| c.response.clone());
             let (response, mut body) = match fresh {
@@ -796,8 +811,8 @@ fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
 fn host_header(url: &Url) -> String {
     let host = if url.host.contains(':') { format!("[{}]", url.host) } else { url.host.clone() };
     // Only IPv6 addresses contain ":". They need their "[ ]" back.
-    if url.port == 80 { host } else { format!("{host}:{}", url.port) }
-    // The port is sent only when it is not the default.
+    if url.port == url.scheme.default_port() { host } else { format!("{host}:{}", url.port) }
+    // The port is sent only when it is not the default for the scheme: 80 for http, 443 for https.
 }
 
 #[cfg(test)]
@@ -840,6 +855,12 @@ mod tests {
         // Any other port must be sent. One server can run different sites on different ports.
         assert_eq!(header("http://[::1]:8080/"), "[::1]:8080");
         // An IPv6 address gets its "[ ]" back, so its ":" do not mix with the port's ":".
+        assert_eq!(header("https://a.com/"), "a.com");
+        assert_eq!(header("https://a.com:443/"), "a.com");
+        // The default port of https is 443, so it is left out. Port 80 is sent for https.
+        assert_eq!(header("https://a.com:8443/"), "a.com:8443");
+        assert_eq!(header("http://a.com:443/"), "a.com:443");
+        assert_eq!(header("https://a.com:80/"), "a.com:80");
     }
 
     fn parse(raw: &str) -> Result<Response, String> {
@@ -1076,11 +1097,64 @@ mod tests {
         assert!(error.to_string().contains("too many redirects"));
     }
 
+    /// True if nothing connected to this listener. A client connects before it sends anything, and
+    /// the connection waits in the listener's queue, so a check right after the call is enough.
+    fn nothing_connects(listener: &std::net::TcpListener) -> bool {
+        listener.set_nonblocking(true).unwrap();
+        listener.accept().is_err()
+    }
+
     #[test]
-    fn does_not_follow_a_redirect_to_https() {
-        let (port, _) = serve(vec![(vec!["HTTP/1.1 302 Found\r\nLocation: https://a.com/\r\nContent-Length: 0\r\n\r\n"], false)]);
-        let error = Client::new().get(&url(port)).err().unwrap();
-        assert!(error.to_string().contains("only http://"));
+    fn https_is_refused_before_any_connection() {
+        let target = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        // A real listener on this machine. If the client connects to it, the test sees it.
+        let port = target.local_addr().unwrap().port();
+        let url = Url::parse(&format!("https://127.0.0.1:{port}/")).unwrap();
+        let error = Client::new().get(&url).err().unwrap();
+        assert!(error.to_string().contains("https is not supported"));
+        assert!(nothing_connects(&target));
+        let error = Client::new().get_stream(&url).err().unwrap();
+        assert!(error.to_string().contains("https is not supported"));
+        assert!(nothing_connects(&target));
+        // The plain text request never leaves the machine, and no DNS lookup runs first.
+    }
+
+    #[test]
+    fn https_redirect_is_refused_before_any_connection() {
+        let target = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = target.local_addr().unwrap().port();
+        let moved = format!("HTTP/1.1 302 Found\r\nLocation: https://127.0.0.1:{port}/\r\nContent-Length: 0\r\n\r\n");
+        let (server, _) = serve(vec![(vec![Box::leak(moved.into_boxed_str())], false)]);
+        let error = Client::new().get(&url(server)).err().unwrap();
+        assert!(error.to_string().contains("https is not supported"));
+        assert!(nothing_connects(&target));
+        // The redirect comes from a plain server. The client must not follow it to https.
+    }
+
+    #[test]
+    fn https_never_reuses_a_plain_connection() {
+        // A plain connection to this server stays idle after the first reply. The idle list is keyed by
+        // host and port, so an https request to the same host and port would find it if the guard ran later.
+        let (port, requests) = serve(vec![(vec![OK, OK], false)]);
+        // The server would answer a second request on the same connection. If the guard were late, it would.
+        let mut client = Client::new();
+        assert_eq!(client.get(&url(port)).unwrap().body, b"ok");
+        let https = Url::parse(&format!("https://127.0.0.1:{port}/")).unwrap();
+        assert!(client.get(&https).is_err());
+        assert_eq!(requests.try_iter().count(), 1);
+        // Only the first, plain request reached the server.
+    }
+
+    #[test]
+    fn https_never_gets_a_cached_plain_reply() {
+        // The cache is keyed by host, port and path, not by scheme. A fresh plain copy must not answer an https request.
+        let (port, requests) = serve(vec![(vec![page("Cache-Control: max-age=60\r\n", "a")], false)]);
+        let mut client = Client::new();
+        assert_eq!(client.get(&url(port)).unwrap().body, b"a");
+        let https = Url::parse(&format!("https://127.0.0.1:{port}/")).unwrap();
+        assert!(client.get(&https).is_err());
+        assert!(client.get_stream(&https).is_err());
+        assert_eq!(requests.try_iter().count(), 1);
     }
 
     #[test]

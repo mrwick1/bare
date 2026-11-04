@@ -1,0 +1,12 @@
+# TLS and its crypto, by hand. Step 1: SHA-256, HMAC-SHA256 and HKDF-SHA256 only.
+[package]
+name = "bare-tls"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# Test and measure the fallback even on CPUs with SHA instructions.
+[features]
+force-portable = []
+
+[dependencies]
