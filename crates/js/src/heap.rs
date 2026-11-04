@@ -1257,7 +1257,7 @@ impl Heap {
     /// It replaces `del` elements at `start` with `items` and returns the removed ones (`None` is a hole).
     /// It answers `Ok(None)` and changes nothing unless the result is exactly what the generic algorithm gives:
     /// `o` is an array of length `len` with all elements in dense storage (no accessor, no sparse or special
-    /// index), a writable `length`, no indexed property on the prototype chain, and an extensible array (moving a
+    /// index), a writable `length`, no indexed property on the prototype chain (a view has virtual ones), and an extensible array (moving a
     /// value into a hole adds a property, which a non-extensible array refuses). Errors: a stale handle or a size limit.
     pub fn splice_dense(&mut self, o: ObjId, len: u32, start: usize, del: usize, items: &[Value]) -> R<Option<Vec<Option<Value>>>> {
         for &v in items {
@@ -1275,7 +1275,8 @@ impl Heap {
         let mut p = obj.proto;
         while let Some(c) = p {
             let po = self.obj(c)?;
-            if !po.elems.is_empty() || po.props.index_keys != 0 {
+            // A view prototype has integer-indexed keys that are not stored in `elems` (any length, even 0).
+            if !po.elems.is_empty() || po.props.index_keys != 0 || (po.exotic && self.view_parts(c).is_some()) {
                 return Ok(None);
             }
             p = po.proto;

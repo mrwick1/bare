@@ -328,3 +328,28 @@ fn symbol_keys_and_primitive_prototypes_are_intact() {
     assert_eq!(s("var a = []; a[Symbol.iterator] === Array.prototype.values && Array.prototype.keys !== Array.prototype.entries"), "ok:true");
     assert_eq!(s("Map.prototype[Symbol.species]; Object.getOwnPropertyDescriptor(Map, Symbol.species).get.call(5)"), "ok:5");
 }
+
+/// A view prototype has virtual indices that are not in `elems`. The dense splice must leave such an array to the
+/// generic algorithm, for any view length (a length-0 view stops an indexed write that reaches it).
+#[test]
+fn the_dense_splice_fast_path_refuses_an_array_whose_prototype_is_a_view() {
+    let mut h = Heap::default();
+    let buf = h.new_buffer(None, 4).unwrap();
+    let v2 = h.new_view(None, buf, 0, 2).unwrap();
+    h.view_set(v2, 1, 7);
+    let a = h.new_array(Some(v2)).unwrap();
+    h.set(a, PropertyKey::Index(0), Value::Number(1.0)).unwrap();
+    h.set(a, PropertyKey::Index(1), Value::Number(2.0)).unwrap();
+    assert!(h.splice_dense(a, 2, 0, 1, &[]).unwrap().is_none(), "virtual indices of the prototype are visible");
+    assert!(matches!(h.get(a, PropertyKey::Index(1)).unwrap(), Get::Value(Value::Number(n)) if n == 2.0), "nothing changed");
+    // the removed slot would show the inherited virtual byte through the hole it leaves
+    let b = h.new_array(Some(v2)).unwrap();
+    assert!(matches!(h.get(b, PropertyKey::Index(1)).unwrap(), Get::Value(Value::Number(n)) if n == 7.0));
+    // a zero-length view: an indexed write is rejected at the prototype, so the array stays empty
+    let v0 = h.new_view(None, buf, 0, 0).unwrap();
+    let c = h.new_array(Some(v0)).unwrap();
+    h.set(c, PropertyKey::Index(3), Value::Number(1.0)).unwrap();
+    assert!(h.get_own_property(c, PropertyKey::Index(3)).unwrap().is_none(), "the write was rejected by the view prototype");
+    assert!(h.splice_dense(c, 0, 0, 0, &[Value::Number(9.0)]).unwrap().is_none());
+    assert_eq!(h.get_own_property(c, PropertyKey::Index(0)).unwrap().is_none(), true);
+}
