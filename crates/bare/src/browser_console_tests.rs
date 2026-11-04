@@ -330,3 +330,61 @@ fn console_does_not_leak_into_other_globals() {
         assert_eq!(js(&mut b, "typeof window.chrome + typeof window.opera + typeof navigator"), "undefinedundefinedundefined");
     });
 }
+
+#[test]
+fn numeric_format_inputs_are_bounded_and_scans_consume_steps() {
+    big(|| {
+        let mut b = mk();
+        b.set_console_limits(ConsoleLimits { max_format_bytes: 16, ..Default::default() });
+        let fmt = Value::String(b.it.heap.intern_str("%d").unwrap());
+        let text = Value::String(b.it.heap.intern_str(&"0".repeat(64)).unwrap());
+        let r = ConsoleRecord { seq: 0, level: ConsoleLevel::Log, args: vec![fmt, text] };
+        assert!(matches!(b.format_console_record(&r), Err(Error::Limit(LimitKind::Host("console-format")))));
+    });
+    big(|| {
+        let mut b = Browser::new(tree::parse("<body></body>"), BrowserLimits::default(), EvalLimits { max_steps: 10, ..Default::default() }, HeapLimits::default()).unwrap();
+        let fmt = Value::String(b.it.heap.intern_str("%d").unwrap());
+        let text = Value::String(b.it.heap.intern_str(&"0".repeat(8192)).unwrap());
+        let r = ConsoleRecord { seq: 0, level: ConsoleLevel::Log, args: vec![fmt, text] };
+        assert!(matches!(b.format_console_record(&r), Err(Error::Limit(LimitKind::Steps))));
+    });
+}
+
+#[test]
+fn formatting_symbol_descriptions_consumes_steps_before_copying() {
+    big(|| {
+        let mut b = Browser::new(tree::parse("<body></body>"), BrowserLimits::default(), EvalLimits { max_steps: 10, ..Default::default() }, HeapLimits::default()).unwrap();
+        let text = b.it.heap.intern_str(&"x".repeat(8192)).unwrap();
+        let sym = Value::Symbol(b.it.heap.new_symbol(Some(text)).unwrap());
+        let r = ConsoleRecord { seq: 0, level: ConsoleLevel::Log, args: vec![sym] };
+        assert!(matches!(b.format_console_record(&r), Err(Error::Limit(LimitKind::Steps))));
+    });
+}
+
+#[test]
+fn integer_formatting_uses_decimal_string_prefixes_and_js_whitespace() {
+    big(|| {
+        let mut b = mk();
+        js(&mut b, "console.log('%i|%i|%i|%i', 1e21, 1e-7, '\\uFEFF42px', '\\u008542px');");
+        assert_eq!(lines(&mut b), ["L:1|1|42|NaN"]);
+    });
+}
+
+#[test]
+fn console_roots_participate_in_weak_stream_and_aggregate_collection() {
+    big(|| {
+        let mut b = mk();
+        assert_eq!(js(&mut b, "var key = {}, wm = new WeakMap(), all; (function () { var s = new ReadableStream({ start(c) { wm.set(key, c); } }); var r = s.getReader(); all = Promise.all([r.read()]); })(); console.log(key); key = null; 0"), "0");
+        b.drain().unwrap();
+        b.collect(&[]).unwrap();
+        assert_eq!(b.it.weak_tracked(), (1, 1));
+        assert_eq!(b.stream_stats().streams, 1);
+        assert_eq!(b.it.agg_stats().records, 1);
+        let records = b.take_console_records();
+        assert_eq!(records.len(), 1);
+        b.collect(&[]).unwrap();
+        assert_eq!(b.it.weak_tracked(), (1, 0));
+        assert_eq!(b.stream_stats().streams, 0);
+        assert_eq!(b.it.agg_stats().records, 0);
+    });
+}

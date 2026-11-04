@@ -16,8 +16,8 @@
 //! - `max_args`: arguments of one call. More is `Error::Limit(Host("console-args"))`, fatal, like every other host cap.
 //! - `max_records`: kept records. When the sink is full the oldest record is dropped and `dropped` goes up by one.
 //!   With 0 nothing is kept and every call counts as dropped.
-//! - Each call charges `1 + args` steps. `max_format_bytes` bounds the output of `format_console_record`
-//!   (`Limit(Host("console-format"))`).
+//! - Each call charges `1 + args` steps. `max_format_bytes` bounds UTF-8 output bytes and UTF-16 text input units
+//!   for `format_console_record` (`Limit(Host("console-format"))`). Text scans are charged before copying.
 //!
 //! Collection
 //! - The values of kept records are roots (`Dom::roots`), so a slot they use is never reused while the record exists.
@@ -25,11 +25,11 @@
 //! - A record that was taken is the caller's. The browser no longer roots it. Pass its values in `extra` of
 //!   `Browser::collect`, or they are freed and the stale `Value`s are refused by the heap (generation check) later.
 //!
-//! Formatting (`Browser::format_console_record`) follows the Console Standard Logger and Formatter, with gates
-//! - Logger: no arguments gives "", one argument is printed as it is, more than one runs Formatter when the first is a
-//!   string (the Standard does not say what a non-string first argument does; browsers format only strings). Printer is
-//!   implementation-defined: the pieces are joined with one space.
-//! - Formatter handles `%s %d %i %f %o %O %c` and `%%`. `%%` is not in the Standard text but all browsers do it. A
+//! Formatting (`Browser::format_console_record`) is a data-only driver formatter. Capture does not run the
+//! script-visible Console Standard Formatter coercions; this is a deliberate compatibility limit.
+//! - No arguments gives "". A string first argument with more arguments enables substitutions. Other values use
+//!   fixed data-only representations. Pieces are joined with one space; this does not claim browser Printer parity.
+//! - Formatter handles `%s %d %i %f %o %O %c` and `%%`. `%%` is a local convention beyond the Standard text. A
 //!   specifier with no argument left stays as text. `%c` takes an argument and prints nothing.
 //! - The Standard converts with `String`, `parseInt` and `parseFloat`, which run user code on an object. This module
 //!   never runs user code to log. So an object or function prints as `[object]` or `[function]` for every specifier,
@@ -44,7 +44,7 @@
 
 use crate::browser::*;
 use bare_js::eval::{Error, Interp};
-use bare_js::value::{PropertyKey, Value};
+use bare_js::value::{PropertyKey, StrId, Value, is_js_space, number_to_string, string_to_number};
 use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
 use std::fmt;
@@ -56,7 +56,7 @@ pub struct ConsoleLimits {
     pub max_records: usize,
     /// Arguments of one call. `console-args`.
     pub max_args: usize,
-    /// Bytes of one formatted line. `console-format`.
+    /// UTF-8 output bytes and UTF-16 input units allowed by the driver formatter. `console-format`.
     pub max_format_bytes: usize,
 }
 
@@ -229,84 +229,83 @@ impl Out {
     }
 }
 
+/// Check UTF-8 size and work before allocating a display string. Lone surrogates use U+FFFD.
+fn text(d: &Dom, it: &mut Interp<'_>, s: StrId, max: usize) -> R<String> {
+    let len = it.heap.str_len(s).map_err(Error::Heap)?;
+    if len > max { return Err(d.lim("console-format")); }
+    it.charge(1 + (len / 16) as u64)?;
+    let mut bytes = 0usize;
+    for c in char::decode_utf16(it.heap.str_units(s).map_err(Error::Heap)?.iter().copied()) {
+        bytes = bytes.saturating_add(c.unwrap_or(char::REPLACEMENT_CHARACTER).len_utf8());
+        if bytes > max { return Err(d.lim("console-format")); }
+    }
+    it.heap.to_string_lossy(s).map_err(Error::Heap)
+}
+
 /// A primitive as `%s` prints it. An object is a fixed tag: no user code runs.
 fn plain(d: &Dom, it: &mut Interp<'_>, v: Value, quote: bool, out: &mut Out) -> R<()> {
     it.charge(1)?;
     match v {
         Value::String(s) => {
-            let len = it.heap.str_len(s).map_err(Error::Heap)?;
-            if len > out.max {
-                return Err(d.lim("console-format"));
-            }
-            it.charge((len / 32) as u64)?;
-            let t = it.heap.to_string_lossy(s).map_err(Error::Heap)?;
+            let room = out.max.saturating_sub(out.s.len());
+            let t = text(d, it, s, room.saturating_sub(if quote { 2 } else { 0 }))?;
             if quote {
                 out.push(d, "\"")?;
                 out.push(d, &t)?;
                 out.push(d, "\"")
-            } else {
-                out.push(d, &t)
+            } else { out.push(d, &t) }
+        }
+        Value::Symbol(s) => {
+            let desc = it.heap.symbol_description(s).map_err(Error::Heap)?;
+            out.push(d, "Symbol(")?;
+            if let Some(desc) = desc {
+                let t = text(d, it, desc, out.max.saturating_sub(out.s.len()).saturating_sub(1))?;
+                out.push(d, &t)?;
             }
+            out.push(d, ")")
         }
         Value::Number(0.0) => out.push(d, "0"),
         Value::Object(o) => out.push(d, if it.is_callable_value(Value::Object(o)) { "[function]" } else { "[object]" }),
-        v => {
-            let t = it.display(v);
-            out.push(d, &t)
-        }
+        v => out.push(d, &it.display(v)),
     }
 }
 
-fn int_prefix(s: &str) -> f64 {
-    let t = s.trim_start();
-    let (neg, t) = match t.as_bytes().first() {
-        Some(b'-') => (true, &t[1..]),
-        Some(b'+') => (false, &t[1..]),
-        _ => (false, t),
-    };
-    let digits = t.bytes().take_while(u8::is_ascii_digit).count();
-    if digits == 0 {
-        return f64::NAN;
-    }
-    let n: f64 = t[..digits].parse().unwrap_or(f64::NAN);
-    if neg { -n } else { n }
-}
-
-fn float_prefix(s: &str) -> f64 {
-    let t = s.trim_start();
-    let b = t.as_bytes();
-    let mut i = usize::from(matches!(b.first(), Some(b'-' | b'+')));
-    if t[i..].starts_with("Infinity") {
-        return if b.first() == Some(&b'-') { f64::NEG_INFINITY } else { f64::INFINITY };
+/// The decimal prefix used by parseInt(..., 10) or parseFloat, over borrowed UTF-16.
+fn numeric_prefix(units: &[u16], float: bool) -> f64 {
+    let start = units.iter().position(|&u| !is_js_space(u)).unwrap_or(units.len());
+    let t = &units[start..];
+    let mut i = usize::from(matches!(t.first(), Some(43 | 45)));
+    if float && t[i..].starts_with(&[73, 110, 102, 105, 110, 105, 116, 121]) {
+        return if t.first() == Some(&45) { f64::NEG_INFINITY } else { f64::INFINITY };
     }
     let mut digits = 0;
-    while i < b.len() && b[i].is_ascii_digit() { i += 1; digits += 1; }
-    if i < b.len() && b[i] == b'.' {
+    while matches!(t.get(i), Some(48..=57)) { i += 1; digits += 1; }
+    if float && t.get(i) == Some(&46) {
         i += 1;
-        while i < b.len() && b[i].is_ascii_digit() { i += 1; digits += 1; }
+        while matches!(t.get(i), Some(48..=57)) { i += 1; digits += 1; }
     }
-    if digits == 0 {
-        return f64::NAN;
-    }
+    if digits == 0 { return f64::NAN; }
     let mantissa_end = i;
-    if i < b.len() && matches!(b[i], b'e' | b'E') {
+    if float && matches!(t.get(i), Some(69 | 101)) {
         let mut j = i + 1;
-        if j < b.len() && matches!(b[j], b'+' | b'-') { j += 1; }
+        if matches!(t.get(j), Some(43 | 45)) { j += 1; }
         let e0 = j;
-        while j < b.len() && b[j].is_ascii_digit() { j += 1; }
+        while matches!(t.get(j), Some(48..=57)) { j += 1; }
         i = if j > e0 { j } else { mantissa_end };
     }
-    t[..i].parse().unwrap_or(f64::NAN)
+    string_to_number(&t[..i])
 }
 
-/// `%d %i %f` of a primitive, `parseInt(v, 10)` or `parseFloat(v)` without user code.
-fn numeric(it: &mut Interp<'_>, v: Value, float: bool) -> R<f64> {
+/// Numeric formatting stays data-only. Scan borrowed strings within the format-input and step caps.
+fn numeric(d: &Dom, it: &mut Interp<'_>, v: Value, float: bool, max: usize) -> R<f64> {
     Ok(match v {
         Value::Number(n) if float => n,
-        Value::Number(n) => if n.is_finite() { n.trunc() } else { f64::NAN },
+        Value::Number(n) => numeric_prefix(&number_to_string(n).encode_utf16().collect::<Vec<_>>(), false),
         Value::String(s) => {
-            let t = it.heap.to_string_lossy(s).map_err(Error::Heap)?;
-            if float { float_prefix(&t) } else { int_prefix(&t) }
+            let len = it.heap.str_len(s).map_err(Error::Heap)?;
+            if len > max { return Err(d.lim("console-format")); }
+            it.charge(1 + (len / 16) as u64)?;
+            numeric_prefix(it.heap.str_units(s).map_err(Error::Heap)?, float)
         }
         _ => f64::NAN,
     })
@@ -317,10 +316,7 @@ fn format(d: &Dom, it: &mut Interp<'_>, args: &[Value], max: usize) -> R<String>
     let Some((&first, rest)) = args.split_first() else { return Ok(out.s) };
     let target = match first {
         Value::String(s) if !rest.is_empty() => {
-            let len = it.heap.str_len(s).map_err(Error::Heap)?;
-            if len > max { return Err(d.lim("console-format")); }
-            it.charge((len / 32) as u64)?;
-            Some(it.heap.to_string_lossy(s).map_err(Error::Heap)?)
+            Some(text(d, it, s, max)?)
         }
         _ => None,
     };
@@ -353,7 +349,7 @@ fn format(d: &Dom, it: &mut Interp<'_>, args: &[Value], max: usize) -> R<String>
                 's' => plain(d, it, v, false, &mut out)?,
                 'o' | 'O' => plain(d, it, v, true, &mut out)?,
                 _ => {
-                    let n = if matches!(v, Value::Symbol(_) | Value::Object(_)) { f64::NAN } else { numeric(it, v, spec == 'f')? };
+                    let n = if matches!(v, Value::Symbol(_) | Value::Object(_)) { f64::NAN } else { numeric(d, it, v, spec == 'f', max)? };
                     plain(d, it, Value::Number(n), false, &mut out)?;
                 }
             }
