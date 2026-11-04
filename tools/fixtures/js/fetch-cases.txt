@@ -1,0 +1,110 @@
+=== headers-normalize-combine-sort
+var out = [], h = new Headers({'B-Name': ' v1 ', 'a-name': 'x'});
+h.append('b-name', 'v2'); h.append('A-NAME', 'y'); h.set('C', '1'); h.set('c', '2'); h.set('d', '3'); h.delete('D');
+var seen = []; h.forEach(function (v, k, o) { seen.push(k + '=' + v + (o === h)); });
+out.push(h.get('b-NAME'), h.get('a-name'), h.get('c'), String(h.get('zz')), h.has('A-Name'), h.has('d'), seen.join(';'));
+(function () { return out.join('|'); })
+=== headers-from-pairs-and-headers
+var out = [];
+out.push(new Headers([['x', '1'], ['X', '2']]).get('x'), new Headers(new Headers({a: '1'})).get('a'), new Headers().get('a') === null);
+var h = new Headers({a: '1'}); h.set('a', ' two '); out.push(h.get('a'));
+(function () { return out.join('|'); })
+=== headers-errors
+var out = [];
+function t(f) { try { f(); out.push('ok'); } catch (e) { out.push(e.name); } }
+t(function () { new Headers().append('bad name', 'x'); });
+t(function () { new Headers().append('', 'x'); });
+t(function () { new Headers().append('x', 'a\nb'); });
+t(function () { new Headers().append('x', '\u0100'); });
+t(function () { new Headers([['a']]); });
+t(function () { new Headers('abc'); });
+t(function () { new Headers(null); });
+t(function () { Headers(); });
+(function () { return out.join('|'); })
+=== request-properties
+var out = [];
+var q = new Request('http://localhost/api/x?y=1', {method: 'post', body: 'b', headers: {'A': '1'}});
+var q2 = q.clone();
+out.push(q.method, q.url, q.headers.get('a'), q.credentials, q.mode, q.redirect, q.bodyUsed, q2.method, q2.headers.get('content-type'));
+out.push(new Request('http://localhost/x', {method: 'patch'}).method, new Request('http://localhost/x', {method: 'Options'}).method, new Request('http://localhost/x').method);
+(function () { return out.join('|'); })
+=== request-errors
+var out = [];
+function t(f) { try { f(); out.push('ok'); } catch (e) { out.push(e.name); } }
+t(function () { new Request('http://localhost/x', {method: 'GET', body: 'b'}); });
+t(function () { new Request('http://localhost/x', {method: 'TRACE'}); });
+t(function () { new Request(); });
+t(function () { new Request('http://localhost/x', {redirect: 'bogus'}); });
+t(function () { new Request('http://localhost/x', {credentials: 'bogus'}); });
+t(function () { var a = new Request('http://localhost/x', {method: 'POST', body: 'z'}); new Request(a); new Request(a); });
+(function () { return out.join('|'); })
+=== request-text
+var out = [];
+var q = new Request('http://localhost/x', {method: 'POST', body: 'héllo'});
+out.push(q.headers.get('content-type'), q.bodyUsed);
+q.text().then(function (t) { out.push(t, q.bodyUsed); return q.text(); }).then(function () { out.push('no'); }, function (e) { out.push(e.name); });
+(function () { return out.join('|'); })
+=== response-properties
+var out = [];
+var r = new Response('hi', {status: 201, statusText: 'Made', headers: {'X-A': 'b'}});
+out.push(r.status, r.ok, r.statusText, r.type, r.url === '', r.redirected, r.headers.get('x-a'), r.headers.get('content-type'), r.bodyUsed);
+out.push(new Response(null).status, new Response(null, {status: 299}).ok, new Response(null, {status: 300}).ok, new Response(null, {status: 599}).ok);
+out.push(new Response(null, {status: 204}).body === null, new Response(null).body === null, new Response('').body === null);
+(function () { return out.join('|'); })
+=== response-errors
+var out = [];
+function t(f) { try { f(); out.push('ok'); } catch (e) { out.push(e.name); } }
+t(function () { new Response('x', {status: 204}); });
+t(function () { new Response('x', {status: 99}); });
+t(function () { new Response('x', {status: 600}); });
+t(function () { new Response('x', {statusText: 'a\nb'}); });
+t(function () { new Response(); });
+(function () { return out.join('|'); })
+=== response-consume-once
+var out = [];
+var r = new Response('{"k":[1,2]}');
+var c = r.clone();
+out.push(r.bodyUsed, c.bodyUsed);
+r.json().then(function (j) {
+  out.push(j.k.length, r.bodyUsed, c.bodyUsed);
+  try { r.clone(); } catch (e) { out.push('clone:' + e.name); }
+  return r.text().then(function () { out.push('no'); }, function (e) { out.push('again:' + e.name); return c.text(); });
+}).then(function (t) { out.push(t, c.bodyUsed); });
+(function () { return out.join('|'); })
+=== response-array-buffer-and-bad-json
+var out = [];
+new Response('abc').arrayBuffer().then(function (ab) { out.push(ab.byteLength, new Uint8Array(ab)[1]); });
+new Response('{bad').json().then(function () { out.push('no'); }, function (e) { out.push(e.name); });
+new Response(new Uint8Array([104, 105])).text().then(function (t) { out.push(t); });
+(function () { return out.join('|'); })
+=== response-reader
+var out = [];
+var r = new Response('abcdef'), s = r.body, rd = s.getReader();
+out.push(s === r.body, s.locked, r.bodyUsed);
+try { s.getReader(); } catch (e) { out.push('lock:' + e.name); }
+rd.read().then(function (x) {
+  out.push(x.done, x.value.length, x.value[0], x.value[5], r.bodyUsed);
+  return rd.read();
+}).then(function (y) {
+  out.push(y.done, String(y.value));
+  rd.releaseLock(); out.push(s.locked);
+  return rd.read().then(function () { out.push('no'); }, function (e) { out.push('released:' + e.name); });
+}).then(function () {
+  return r.text().then(function () { out.push('no'); }, function (e) { out.push('used:' + e.name); });
+});
+(function () { return out.join('|'); })
+=== response-reader-cancel
+var out = [];
+var r = new Response('abcdef'), rd = r.body.getReader();
+rd.cancel().then(function () { return rd.read(); }).then(function (x) { out.push(x.done, r.bodyUsed); });
+(function () { return out.join('|'); })
+=== response-body-cancel-then-consume
+var out = [];
+var r = new Response('abcdef');
+r.body.cancel().then(function () { out.push(r.bodyUsed); return r.text(); }).then(function () { out.push('no'); }, function (e) { out.push(e.name); });
+(function () { return out.join('|'); })
+=== response-locked-body-rejects-text
+var out = [];
+var r = new Response('abcdef'); r.body.getReader();
+r.text().then(function () { out.push('no'); }, function (e) { out.push(e.name); });
+(function () { return out.join('|'); })

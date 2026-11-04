@@ -153,6 +153,8 @@ ArrayBuffer, Uint8Array and UTF-8 TextEncoder/TextDecoder foundations are integr
 
 Timers, queueMicrotask, performance.now and primitive MessageChannel delivery are integrated. Tasks run only when the driver pumps them. A virtual clock supports deterministic tests. Callbacks share the normal VM guards, run checkpoints and participate in collection. The pump checks sticky job failures before taking tasks, including when the microtask queue is empty. Page readiness, animation frames, object message cloning and the central navigation/network/task loop remain open. See [resources.md](resources.md#browser-task-scheduler).
 
+The fetch foundation is integrated with the scheduler. Requests queue genuine Promises, then a network pump uses verified bare-net I/O and checks every redirect against the initial origin. Headers, Request, Response and buffered byte readers have caps and collection hooks. JSON/text/array-buffer consumption and loopback HTTPS tests pass. The pump checks failed checkpoints before I/O. Document-URL wiring, CORS, cookies, live streaming and actual staging login remain open. See [resources.md](resources.md#fetch-and-buffered-response-readers).
+
 | Topic | Work | Check before closing |
 | --- | --- | --- |
 | 1 | Add DOM creation, attributes, text replacement, insertion, removal and queries required by the target. | DOM invariants, node identity, detached nodes and mutation tests agree with Chrome. |

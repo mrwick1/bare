@@ -249,6 +249,7 @@ pub struct Dom {
     pub(crate) fixed: RefCell<Vec<ObjId>>,
     pub(crate) start: Instant,
     pub(crate) sched: RefCell<crate::browser_scheduler::Sched>,
+    pub(crate) fetch: crate::browser_fetch::Fetch,
 }
 
 impl Host for Dom {
@@ -264,6 +265,7 @@ impl Host for Dom {
         out.extend(self.fixed.borrow().iter().map(|&o| Value::Object(o)));
         out.extend(self.doc_wrapper.get().map(|&o| Value::Object(o)));
         self.sched_roots(out);
+        self.fetch.roots(out);
     }
 
     fn trace(&self, owner: ObjId, out: &mut Vec<Value>) {
@@ -288,6 +290,7 @@ impl Host for Dom {
                 }
             }
         }
+        self.fetch.trace(owner, out);
     }
 
     fn prune(&self, live: &dyn Fn(ObjId) -> bool) {
@@ -304,6 +307,7 @@ impl Host for Dom {
         st.n_listeners = st.listeners.values().map(Vec::len).sum();
         st.events.retain(|&o, _| live(o));
         self.sched_prune(live);
+        self.fetch.prune(live);
     }
 
     fn report_exception(&self, it: &mut Interp<'_>, thrown: Value) {
@@ -632,10 +636,10 @@ impl Dom {
             let k = self.key(it, name)?;
             it.define_data(g, k, v, true, true, true)?;
         }
-        Ok(())
+        crate::browser_fetch::install(self, it)
     }
 
-    fn define_accessor(&self, it: &mut Interp<'_>, o: ObjId, key: PropertyKey, get: ObjId, set: Option<ObjId>) -> R<()> {
+    pub(crate) fn define_accessor(&self, it: &mut Interp<'_>, o: ObjId, key: PropertyKey, get: ObjId, set: Option<ObjId>) -> R<()> {
         let d = PropertyDescriptor { get: Some(Some(get)), set: Some(set), enumerable: Some(true), configurable: Some(true), ..Default::default() };
         match it.heap.define_own_property(o, key, &d) {
             Ok(_) => Ok(()),
@@ -793,6 +797,7 @@ impl Browser {
             fixed: RefCell::default(),
             start: Instant::now(),
             sched: RefCell::default(),
+            fetch: Default::default(),
         });
         it.set_host(dom.clone())?;
         it.host_scope(|it| {

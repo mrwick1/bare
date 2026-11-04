@@ -248,6 +248,27 @@ impl Client {
         Ok(self.follow(req, false)?.0)
     }
 
+    /// Send one request and read one reply. Do not follow a redirect (a 3xx comes back as it is, so the caller can
+    /// check where it goes before any socket opens), and do not use the cache. The request check, the pool, the
+    /// verified TLS and the rule that a POST is never sent twice are the same as for `send`. The reply body may have
+    /// `max_body` bytes at most: a bigger `Content-Length` fails before a byte is read, and a chunked or
+    /// close-ended body fails when it passes the limit. The error names no header value and no body byte.
+    pub fn send_once(&mut self, req: &Request, max_body: usize) -> Result<Arc<Response>, Error> {
+        check_request(req)?;
+        let plan = Plan { method: req.method, headers: Cow::Borrowed(req.headers), body: req.body };
+        let (mut response, mut body) = self.start(req.url, &plan, "")?;
+        if body.size_hint() > max_body {
+            return Err("the reply is too big".into());
+        }
+        let mut bytes = Vec::with_capacity(body.size_hint());
+        (&mut body).take((max_body as u64).saturating_add(1)).read_to_end(&mut bytes)?;
+        if bytes.len() > max_body {
+            return Err("the reply is too big".into());
+        }
+        response.body = bytes;
+        Ok(Arc::new(response))
+    }
+
     /// Like `send`, with a body that reads from the connection. See `get_stream`.
     pub fn send_stream(&mut self, req: &Request) -> Result<Streamed, Error> {
         let (response, body) = self.follow(req, true)?;
@@ -1442,6 +1463,43 @@ mod tests {
         assert_eq!(response.status, 404);
         assert_eq!(response.body, b"gone");
         // A browser shows the body of a 404 page. It is not an error for the user.
+    }
+
+    #[test]
+    fn send_once_accepts_the_maximum_body_cap() {
+        let (port, _) = serve(vec![(vec!["HTTP/1.1 200 OK\r\nContent-Length: 1\r\n\r\nx"], false)]);
+        assert_eq!(Client::new().send_once(&Request::get(&url(port)), usize::MAX).unwrap().body, b"x");
+    }
+
+    #[test]
+    fn send_once_returns_a_redirect_and_sends_no_second_request() {
+        let (port, requests) = serve(vec![(vec!["HTTP/1.1 307 Temporary Redirect\r\nLocation: http://127.0.0.1:9/x\r\nContent-Length: 0\r\n\r\n"], false)]);
+        let body = b"{}";
+        let response = Client::new().send_once(&Request::post(&url(port), &[("Authorization", "Bearer s3cret")], body), 1024).unwrap();
+        assert_eq!((response.status, response.header("location")), (307, Some("http://127.0.0.1:9/x")));
+        assert!(requests.recv().unwrap().starts_with("POST / HTTP/1.1"));
+        assert!(requests.recv_timeout(Duration::from_millis(100)).is_err(), "a second request was sent");
+    }
+
+    #[test]
+    fn send_once_caps_the_body_before_and_while_it_reads() {
+        let (port, _) = serve(vec![(vec!["HTTP/1.1 200 OK\r\nContent-Length: 10\r\n\r\n0123456789"], false)]);
+        let r = Client::new().send_once(&Request::get(&url(port)), 10).unwrap();
+        assert_eq!(r.body, b"0123456789");
+        let (port, _) = serve(vec![(vec!["HTTP/1.1 200 OK\r\nContent-Length: 10\r\n\r\n0123456789"], false)]);
+        assert_eq!(Client::new().send_once(&Request::get(&url(port)), 9).err().unwrap().to_string(), "the reply is too big");
+        let chunked = "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n5\r\nworld\r\n0\r\n\r\n";
+        let (port, _) = serve(vec![(vec![chunked], false)]);
+        assert_eq!(Client::new().send_once(&Request::get(&url(port)), 9).err().unwrap().to_string(), "the reply is too big");
+        let (port, _) = serve(vec![(vec![chunked], false)]);
+        assert_eq!(Client::new().send_once(&Request::get(&url(port)), 10).unwrap().body, b"helloworld");
+    }
+
+    #[test]
+    fn send_once_checks_the_request_before_any_socket() {
+        let u = Url::parse("http://127.0.0.1:9/").unwrap();
+        let e = Client::new().send_once(&Request::post(&u, &[("Host", "evil")], b"x"), 10).err().unwrap().to_string();
+        assert!(e.contains("sets the Host header itself"), "{e}");
     }
 
     #[test]

@@ -6,6 +6,9 @@
 pub mod browser;
 mod browser_dom;
 mod browser_events;
+pub mod browser_fetch;
+#[cfg(test)]
+mod browser_fetch_tests;
 #[cfg(test)]
 mod browser_tests;
 mod browser_scheduler;

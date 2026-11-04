@@ -1047,3 +1047,28 @@ All nine release load cases pass with checked results, a virtual clock, 1 GiB ad
 After collection, all three cases have zero timers, tasks, queued messages and events. The message case retains two ports for its live channel; the others retain none. CPU uses 10 ms ticks. Reproduce with tools/js/scheduler_check.sh and tools/js/scheduler_load.sh with an output path.
 
 Not tested: actual bundles, staging, browser event-loop comparison, real timer precision, other platforms or hard allocator OOM. requestAnimationFrame, requestIdleCallback, window.postMessage, BroadcastChannel, ErrorEvent/window.onerror, object structured clone and transfers are absent. Native constructor subclassing still needs the language integration. Navigation and network pumps remain separate pending work.
+
+
+## Fetch and buffered response readers
+
+The browser library now binds fetch, Headers, Request, Response and a buffered byte-reader subset. fetch validates and queues a request with a pending Promise. run_network_tasks performs actual bare-net I/O, settles the Promise and runs a checkpoint. Host-created Promises use the existing resolve/reject machinery; callers must settle them once and root them while pending.
+
+Client.send_once returns one response without cache or automatic redirects. It retains request validation, verified TLS, pooling and the POST no-resend rule. Fetch checks the initial origin before DNS/socket work and checks every redirect before another request. Cross-origin requests are unsupported. Cross-origin and HTTPS-to-HTTP redirects reject without forwarding bodies or credentials. Managed request headers are filtered; response Set-Cookie is hidden. Diagnostics omit paths, queries, headers and bodies.
+
+Bodies are fully buffered. getReader yields checked Uint8Array chunks from those bytes; this is not live socket streaming. text, json and arrayBuffer enforce single-consumer state. Clones share immutable bytes with separate consumption state. Pending Promises and response/header/reader edges participate in Host collection. Body accounting is conservative for shared clones. Objects count until explicit collection.
+
+Parent resolved scheduler and fetch Host hooks as a union. Four new regressions failed before their fixes. Numeric record header names now survive conversion. Zero diagnostic capacity retains nothing and counts drops. The network pump checks even an empty failed checkpoint before I/O and preserves fatal pump errors. Abort checks the same state before settling queued requests. The maximum usize body cap no longer overflows its one-extra-byte read limit.
+
+All 1,106 workspace tests pass. Changed-crate release checks and JS clippy with warnings denied pass. The suite includes real loopback HTTP and four private-CA HTTPS cases: POST/GET, wrong root/host, and redirect refusals. The 14 pure-object Node cases match; event15, scheduler15, binary79, Promise62 and evaluator202 cases still match. Node never executes app bundles. Real network fetch was not compared against Node.
+
+All nine bounded release load cases pass under 1 GiB address space and45 seconds per process. Final samples ran with concurrent work; no speed improvement is claimed.
+
+| Workload at 100x | Work | Run ms | CPU ms | Peak RSS MiB |
+| --- | --- | --- | --- | --- |
+| POST | 10,000 loopback requests, queue up to8 | 284.1 | 240 | 7.5 |
+| Byte reader | 100 MiB through chunks | 37.7 | 30 | 9.8 |
+| Objects | 100k Header/Request/Response/clone/reader rounds | 1,117.4 | 1,110 | 7.8 |
+
+Each case leaves zero fetch objects, pending requests and retained/queued body bytes after collection. Object-case collection takes182.2 ms and is included in run time. Timings check Rust-side results; byte-reader checks sample each chunk at its first, middle and last byte. CPU uses10 ms ticks. Reproduce with tools/js/fetch_check.sh and tools/js/fetch_load.sh with an output path.
+
+The document must configure the allowed origin and update_fetch_base_url after URL changes. Queued requests retain their original origin. Cross-origin/CORS, cookies, Origin/Referer, signal-based abort, custom stream sources, BYOB, pipe operations, non-ASCII headers and Headers iterator protocols remain absent or gated. Headers.forEach uses a snapshot. getSetCookie returns an empty list, including on manually created headers. Network statusText is empty because the HTTP layer drops its reason phrase. In-progress blocking I/O cannot be interrupted; abort handles queued requests only. The client timeout can exceed a pump's desired wall budget. A fatal driver error requires discarding the realm. No staging, credentials, GUI, browser comparison or native subclass/Symbol integration was tested.
