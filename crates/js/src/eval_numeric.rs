@@ -8,7 +8,7 @@
 //   16 bytes from `/dev/urandom`. A failed read, or an all-zero seed, is an explicit `Unsupported`; there is no time
 //   or PID fallback. The state is not cryptographic and nothing else reads it. Each call does no allocation.
 //   Tests set `rng` directly to get a fixed sequence.
-// - `Number.prototype.toString(radix)` for primitive numbers (`this` must be a number; there are no wrapper objects).
+// - `Number.prototype.toString(radix)` for primitive numbers and the intrinsic prototype's zero value.
 //   Radix 10 uses `number_to_string`. The other radixes follow V8's `DoubleToRadixCString`: the spec leaves non-10
 //   radixes to the implementation, and V8's digit rule (digits up to half the gap to the next double, round-half-even,
 //   integer part divided by the radix while the quotient is >= 2^53) is what Node shows. The output is at most ~1100 characters.
@@ -21,7 +21,10 @@ const RADIX_BUF: usize = 2200;
 const RADIX_DIGITS: &[u8; 36] = b"0123456789abcdefghijklmnopqrstuvwxyz";
 
 /// Digits of `x` (finite, any sign) in `radix` (2..=36, not 10) into `buf`; the text is `buf[start..end]`.
-/// This is V8's `DoubleToRadixCString`.
+/// Ported from V8 12.4.254 `src/numbers/conversions.cc`, `DoubleToRadixCString`.
+/// Copyright 2011 the V8 project authors. All rights reserved.
+/// See `../LICENSE-V8` for the BSD-3-Clause terms.
+/// Source: https://github.com/v8/v8/blob/12.4.254/src/numbers/conversions.cc
 fn radix_text(x: f64, radix: u32, buf: &mut [u8; RADIX_BUF]) -> (usize, usize) {
     let r = radix as f64;
     let (mut int_at, mut frac_at) = (RADIX_BUF / 2, RADIX_BUF / 2);
@@ -133,7 +136,11 @@ impl<'p> Interp<'p> {
     }
 
     fn number_to_string_radix(&mut self, this: Value, radix: Value) -> Res<Value> {
-        let Value::Number(x) = this else { return Err(self.type_err("Number.prototype.toString requires that 'this' be a Number")) };
+        let x = match this {
+            Value::Number(x) => x,
+            Value::Object(o) if Some(o) == self.ao.number_proto => 0.0,
+            _ => return Err(self.type_err("Number.prototype.toString requires that 'this' be a Number")),
+        };
         let radix = if matches!(radix, Value::Undefined) { 10.0 } else { self.ao_int(radix)? };
         if !(2.0..=36.0).contains(&radix) {
             return Err(self.mk_err(RANGE_ERROR, "toString() radix must be between 2 and 36"));
@@ -144,6 +151,7 @@ impl<'p> Interp<'p> {
         }
         let mut buf = [0u8; RADIX_BUF];
         let (a, b) = radix_text(x, radix, &mut buf);
+        self.work(b - a, 5)?;
         let text = std::str::from_utf8(&buf[a..b]).expect("ASCII digits");
         Ok(Value::String(h!(self, self.heap.intern_str(text))))
     }
@@ -156,9 +164,12 @@ impl<'p> Interp<'p> {
 
 /// 16 bytes of OS randomness, never all zero. `None` when the source cannot be read.
 fn os_seed() -> Option<[u64; 2]> {
-    use std::io::Read;
+    seed_from(&mut std::fs::File::open("/dev/urandom").ok()?)
+}
+
+fn seed_from(source: &mut impl std::io::Read) -> Option<[u64; 2]> {
     let mut b = [0u8; 16];
-    std::fs::File::open("/dev/urandom").ok()?.read_exact(&mut b).ok()?;
+    source.read_exact(&mut b).ok()?;
     let s = [u64::from_le_bytes(b[..8].try_into().ok()?), u64::from_le_bytes(b[8..].try_into().ok()?)];
     (s != [0, 0]).then_some(s)
 }

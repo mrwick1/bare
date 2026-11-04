@@ -187,3 +187,32 @@ fn limits_bound_the_work() {
     assert!(out.starts_with("limit:Heap") || out == "number:1000", "{out}");
     assert_eq!(run("(5e-324).toString(2).length + ':' + (1.7976931348623157e308).toString(2).length"), "string:1076:1024");
 }
+
+#[test]
+fn number_prototype_itself_represents_zero() {
+    assert_eq!(run("Number.prototype.toString(2)"), "string:0");
+}
+
+#[test]
+fn radix_conversion_charges_long_output_work() {
+    big(|| {
+        let prog = parse_script("0", Limits::default()).unwrap();
+        let mut it = Interp::new(&prog, Heap::default(), EvalLimits { max_steps: 20, ..Default::default() }).unwrap();
+        let f = it.get_prop(Value::Number(1.0), it.k_to_string).unwrap();
+        assert!(matches!(it.call(f, Value::Number(f64::from_bits(1)), &[Value::Number(2.0)]), Err(Error::Limit(LimitKind::Steps))));
+    });
+}
+
+
+#[test]
+fn seed_failure_never_uses_a_fallback() {
+    use std::io::{self, Cursor, Read};
+    struct Fails;
+    impl Read for Fails {
+        fn read(&mut self, _: &mut [u8]) -> io::Result<usize> { Err(io::Error::other("unavailable")) }
+    }
+    assert_eq!(seed_from(&mut Fails), None);
+    assert_eq!(seed_from(&mut Cursor::new([1; 15])), None);
+    assert_eq!(seed_from(&mut Cursor::new([0; 16])), None);
+    assert_eq!(seed_from(&mut Cursor::new([1; 16])), Some([0x0101010101010101; 2]));
+}
