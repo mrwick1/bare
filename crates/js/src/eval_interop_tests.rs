@@ -351,5 +351,5 @@ fn the_dense_splice_fast_path_refuses_an_array_whose_prototype_is_a_view() {
     h.set(c, PropertyKey::Index(3), Value::Number(1.0)).unwrap();
     assert!(h.get_own_property(c, PropertyKey::Index(3)).unwrap().is_none(), "the write was rejected by the view prototype");
     assert!(h.splice_dense(c, 0, 0, 0, &[Value::Number(9.0)]).unwrap().is_none());
-    assert_eq!(h.get_own_property(c, PropertyKey::Index(0)).unwrap().is_none(), true);
+    assert!(h.get_own_property(c, PropertyKey::Index(0)).unwrap().is_none());
 }
