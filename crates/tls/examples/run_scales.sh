@@ -8,9 +8,9 @@ E=target/release/examples/crypto_stress
 ulimit -v 524288
 MIB=1048576
 for x in 1 10 100; do
-  for c in sha hmac; do timeout 300 $E $c $((64 * MIB * x)) | tail -1; done
-  timeout 300 $E hkdf $((2000 * x)) | tail -1
-  timeout 300 $E small $((100000 * x)) | tail -1
+  for c in sha hmac; do timeout 300 $E $c $((64 * MIB * x)); done
+  timeout 300 $E hkdf $((2000 * x))
+  timeout 300 $E small $((100000 * x))
 done
 # Chunk size: many tiny updates against one big one (64 MiB total).
-for chunk in 1 7 64 1000 65536; do timeout 300 $E sha $((64 * MIB)) $chunk | tail -1; done
+for chunk in 1 7 64 1000 65536; do timeout 300 $E sha $((64 * MIB)) $chunk; done

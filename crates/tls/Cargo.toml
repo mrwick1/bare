@@ -5,4 +5,8 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+# Test and measure the fallback even on CPUs with SHA instructions.
+[features]
+force-portable = []
+
 [dependencies]

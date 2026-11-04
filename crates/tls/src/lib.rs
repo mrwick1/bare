@@ -10,5 +10,5 @@
 pub mod hkdf;
 pub mod hmac;
 pub mod sha256;
-#[cfg(target_arch = "x86_64")]
+#[cfg(all(target_arch = "x86_64", not(feature = "force-portable")))]
 mod sha256_x86;

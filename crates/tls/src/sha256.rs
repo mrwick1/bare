@@ -115,7 +115,7 @@ pub fn sha256(data: &[u8]) -> [u8; DIGEST_LEN] {
 // On x86-64 with the SHA extensions we use the CPU instructions (`sha256_x86.rs`).
 // Else we use the portable code below. The check runs once per call, not once per block.
 fn compress_blocks(state: &mut [u32; 8], data: &[u8]) {
-    #[cfg(target_arch = "x86_64")]
+    #[cfg(all(target_arch = "x86_64", not(feature = "force-portable")))]
     if crate::sha256_x86::available() {
         // SAFETY: `available()` just confirmed that the CPU has the needed features.
         unsafe { crate::sha256_x86::compress_blocks(state, data) };
@@ -283,7 +283,7 @@ mod tests {
             let mut fast = INIT;
             compress_blocks(&mut fast, &data[..64 * blocks]);
             assert_eq!(soft, fast, "{blocks} blocks");
-            #[cfg(target_arch = "x86_64")]
+            #[cfg(all(target_arch = "x86_64", not(feature = "force-portable")))]
             if crate::sha256_x86::available() {
                 let mut hw = INIT;
                 unsafe { crate::sha256_x86::compress_blocks(&mut hw, &data[..64 * blocks]) };
