@@ -505,6 +505,8 @@ pub struct Program<'a> {
 }
 
 /// How many nodes of each kind a program has, and the bytes they use (capacity not counted).
+/// The counts include unreachable expressions: the parser reads an assignment target, a destructuring
+/// target or an arrow parameter as an expression first, then converts it to a pattern. The expression stays in the arena.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Stats {
     pub exprs: usize,
