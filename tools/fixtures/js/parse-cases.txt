@@ -1,0 +1,4287 @@
+a + b * c
+%%
+a * b + c
+%%
+a - b - c
+%%
+a ** b ** c
+%%
+(a ** b) ** c
+%%
+a ** -b
+%%
+(-a) ** b
+%%
+a = b = c
+%%
+a ? b : c ? d : e
+%%
+a ? b ? c : d : e
+%%
+a || b && c
+%%
+a && b || c
+%%
+a ?? b
+%%
+a ?? (b || c)
+%%
+(a && b) ?? c
+%%
+a | b ^ c & d
+%%
+a == b < c
+%%
+a << b + c
+%%
+a in b
+%%
+a instanceof b
+%%
+!a in b
+%%
+typeof a === 'x'
+%%
+- - a
+%%
++ + a
+%%
+a++ + ++b
+%%
+a - -b
+%%
+a+++b
+%%
+void 0, 1
+%%
+new a.b.c
+%%
+new a().b
+%%
+new new a()()
+%%
+new (a())()
+%%
+new a()()
+%%
+new a(b)(c)
+%%
+new a.b()
+%%
+a ? (b, c) : d
+%%
+x = y => y
+%%
+a, b, c
+%%
+a = (b, c)
+%%
+a += b -= c
+%%
+a **= b ??= c
+%%
+a &&= b ||= c
+%%
+a >>>= 1
+%%
+a = b ? c : d = e
+%%
+a ? b : c = d
+%%
+-a ** b
+%%
+typeof a ** b
+%%
+await a ** b
+%%
+!a ** b
+%%
+-(a ** b)
+%%
+a ** b ** -c
+%%
+++a ** b
+%%
+a ?? b || c
+%%
+a || b ?? c
+%%
+a && b ?? c
+%%
+a ?? b && c
+%%
+1 = 2
+%%
+a + b = c
+%%
+++a++
+%%
+a++ = 1
+%%
+(a, b) = 1
+%%
+a ? b
+%%
+a ? b :
+%%
+a +
+%%
+* a
+%%
+(
+%%
+)
+%%
+a b
+%%
+a ? b : c ? d
+%%
+1 + + 2
+%%
+a ++ b
+%%
+a = = b
+%%
+x => x
+%%
+(x) => x
+%%
+(x, y) => x + y
+%%
+() => {}
+%%
+() => ({})
+%%
+(a = 1, b) => a
+%%
+({a}) => a
+%%
+([a, b]) => a
+%%
+(...a) => a
+%%
+(a, ...b) => a
+%%
+async x => x
+%%
+async (x) => x
+%%
+async () => {}
+%%
+async (a, b) => a
+%%
+x => y => z
+%%
+a ? b => c : d => e
+%%
+a = () => 1
+%%
+(a, b)
+%%
+(a)
+%%
+((a))
+%%
+((a)) => 1
+%%
+(a, (b)) => 1
+%%
+(a,) => 1
+%%
+(a,)
+%%
+(,) => 1
+%%
+(...a, b) => 1
+%%
+(...a,) => 1
+%%
+x
+=> 1
+%%
+(x)
+=> 1
+%%
+async
+x => 1
+%%
+async (x)
+=> 1
+%%
+async(x)
+%%
+async
+function f(){}
+%%
+x = async function(){}
+%%
+x = async () => await 1
+%%
+async function f(){ await x }
+%%
+async function f(){ return await x }
+%%
+function f(){ await }
+%%
+await 1
+%%
+async function f(await){}
+%%
+async function await(){}
+%%
+(async function await(){})
+%%
+(async await => 1)
+%%
+() => {}()
+%%
+() => {} + 1
+%%
+() => {}.x
+%%
+(a) => {}.x
+%%
+a + () => 1
+%%
+a || () => 1
+%%
+x = a ? () => 1 : () => 2
+%%
+(() => {})()
+%%
+(() => 1)()
+%%
+(a => a)(1)
+%%
+(async () => {})()
+%%
+a = b => c, d
+%%
+f(a => a, b => b)
+%%
+[a => a, (b) => b]
+%%
+({ a: x => x })
+%%
+x = (a, b) => ({ a, b })
+%%
+x = ({a, b}) => a + b
+%%
+x = ([a, b] = [1, 2]) => a
+%%
+x = ({a} = {}) => a
+%%
+x = (a = (b) => b) => a
+%%
+(a, b) => { "use strict"; }
+%%
+(a = 1) => { "use strict"; }
+%%
+(eval) => 1
+%%
+"use strict"; (eval) => 1
+%%
+"use strict"; eval => 1
+%%
+(a, a) => 1
+%%
+a => a => a
+%%
+async a => a
+%%
+async (a = 1) => a
+%%
+async ({a}) => a
+%%
+async ([a]) => a
+%%
+async (...a) => a
+%%
+async (a,) => a
+%%
+async (a, ...b,) => a
+%%
+async(a, ...b)
+%%
+async(...a)
+%%
+async ((a)) => 1
+%%
+async ({a = 1}) => a
+%%
+async ({a = 1})
+%%
+(await) => 1
+%%
+async (await) => 1
+%%
+async (a = await 1) => 1
+%%
+async function f(){ (a = await 1) => 1 }
+%%
+async function f(){ (await) => 1 }
+%%
+(a, b) => c => d
+%%
+x = async
+%%
+x = async
+%%
+async
+%%
+async()
+%%
+async()()
+%%
+async.x
+%%
+async = 1
+%%
+async => 1
+%%
+new async()
+%%
+new async
+%%
+var [a, b] = c
+%%
+var [a, , b] = c
+%%
+var [a = 1, ...b] = c
+%%
+var {a, b: c, d = 1, e: f = 2, ...g} = h
+%%
+var {[k]: v} = o
+%%
+var {a: [b, {c}]} = o
+%%
+let [a] = b
+%%
+const {a} = b
+%%
+[a, b] = c
+%%
+[a, b = 1, ...c] = d
+%%
+[a.b, c[d]] = e
+%%
+({a, b} = c)
+%%
+({a: b.c, d = 1} = e)
+%%
+({...a} = b)
+%%
+({...a.b} = c)
+%%
+[...a.b] = c
+%%
+for ([a, b] of c);
+%%
+for ({a, b} of c);
+%%
+for ([a.b] in c);
+%%
+[(a)] = b
+%%
+[(a.b)] = c
+%%
+({a: (b)} = c)
+%%
+([a]) = 1
+%%
+({a}) = 1
+%%
+[(a = 1)] = b
+%%
+({a = 1})
+%%
+({a = 1}, b)
+%%
+({a = 1}) => a
+%%
+({a = 1} = b)
+%%
+[{a = 1}] = b
+%%
+[{a = 1}.x]
+%%
+f({a = 1})
+%%
+x = {a = 1}
+%%
+var {a = 1}
+%%
+var [a]
+%%
+const a
+%%
+let a
+%%
+let a, b = 1
+%%
+var a, a
+%%
+var {a, a} = b
+%%
+let {a, a} = b
+%%
+var [...a, b] = c
+%%
+var [...a,] = c
+%%
+[...a,] = b
+%%
+({...a,} = b)
+%%
+({...{a}} = b)
+%%
+var {...{a}} = b
+%%
+var {...[a]} = b
+%%
+[...[a, b]] = c
+%%
+[...a = 1] = b
+%%
+({__proto__: a, __proto__: b})
+%%
+({__proto__: a, __proto__: b} = c)
+%%
+({__proto__: a, ['__proto__']: b})
+%%
+({'__proto__': a, __proto__: b})
+%%
+({__proto__, __proto__})
+%%
+({__proto__: a, __proto__(){}})
+%%
+[a, b] = [b, a]
+%%
+[[a]] = b
+%%
+[{a}] = b
+%%
+({a: [b]} = c)
+%%
+({a: {b}} = c)
+%%
+[a = b = c] = d
+%%
+({a = b = c} = d)
+%%
+[a, ...[b, c]] = d
+%%
+({ a: b = 1 } = c)
+%%
+({ [a]: b } = c)
+%%
+({ 'a': b } = c)
+%%
+({ 1: b } = c)
+%%
+[a.b = 1] = c
+%%
+[this.a] = b
+%%
+[this] = b
+%%
+[f()] = b
+%%
+[a + b] = c
+%%
+[1] = c
+%%
+({a: 1} = c)
+%%
+({a() {}} = c)
+%%
+({get a() {}} = c)
+%%
+[...a, ...b] = c
+%%
+({...a, ...b} = c)
+%%
+({...a, b} = c)
+%%
+[[...a]] = b
+%%
+[...a.b, c] = d
+%%
+var {a: b = 1, c: [d] = []} = e
+%%
+function f({a, b}, [c, d], e = 1, ...f) {}
+%%
+function f(a, {a}) {}
+%%
+function f(...[a, b]) {}
+%%
+function f(...a = 1) {}
+%%
+function f(...a, b) {}
+%%
+function f(a,) {}
+%%
+function f(,) {}
+%%
+(function(a, b,){})
+%%
+f(a, b,)
+%%
+f(,)
+%%
+f(...a, b)
+%%
+[,]
+%%
+[,,]
+%%
+[a,,b]
+%%
+[a,]
+%%
+[...a]
+%%
+[...a, b]
+%%
+[a, ...b,]
+%%
+a.b.c
+%%
+a[b][c]
+%%
+a(b)(c)
+%%
+a?.b
+%%
+a?.[b]
+%%
+a?.(b)
+%%
+a?.b.c
+%%
+a?.b?.c
+%%
+a?.b(c)
+%%
+(a?.b).c
+%%
+a?.b.c(d)?.e
+%%
+a?.b = 1
+%%
+a?.b++
+%%
+++a?.b
+%%
+for (a?.b of c);
+%%
+a?.`x`
+%%
+a?.b`x`
+%%
+new a?.b
+%%
+new a?.()
+%%
+a?.5:1
+%%
+a ?. b
+%%
+a?.[0]?.[1]
+%%
+a?.b?.()
+%%
+a?.()?.()
+%%
+a?.b.c.d
+%%
+a.b?.c.d
+%%
+delete a?.b
+%%
+delete a.b
+%%
+(a?.b)()
+%%
+(a?.b)`x`
+%%
+a?.b ?? c
+%%
+a?.b || c
+%%
+x = a?.b
+%%
+a?.b[c]
+%%
+a?.b(c)(d)
+%%
+a?.[b](c)
+%%
+super.x
+%%
+super()
+%%
+class A extends B { constructor(){ super() } }
+%%
+class A { constructor(){ super() } }
+%%
+class A extends B { m(){ super.x; super[y]; super.z() } }
+%%
+class A { m(){ super.x } }
+%%
+class A extends B { m(){ super() } }
+%%
+class A extends B { constructor(){ () => super() } }
+%%
+class A extends B { constructor(){ function f(){ super() } } }
+%%
+({ m(){ super.x } })
+%%
+({ m: function(){ super.x } })
+%%
+function f(){ super.x }
+%%
+({ m(){ super() } })
+%%
+class A extends B { constructor(){ super?.x } }
+%%
+class A extends B { constructor(){ new super.x() } }
+%%
+class A extends B { constructor(){ super } }
+%%
+class A extends B { constructor(){ super``  } }
+%%
+new.target
+%%
+function f(){ new.target }
+%%
+() => new.target
+%%
+function f(){ () => new.target }
+%%
+function f(){ new.target.x }
+%%
+function f(){ new.targe }
+%%
+function f(){ new.target = 1 }
+%%
+a.class
+%%
+a.if
+%%
+a.#b
+%%
+a.new
+%%
+a.new.target
+%%
+f(a)(b)(c)
+%%
+f()()
+%%
+a.b().c().d()
+%%
+a[b]()
+%%
+(a, b).c
+%%
+(a, b)()
+%%
+(function(){})()
+%%
+(function(){}())
+%%
+!function(){}()
+%%
++function(){}()
+%%
+new function(){}
+%%
+new function(){}()
+%%
+new (function(){})
+%%
+new class {}
+%%
+new class {}()
+%%
+x = new Foo
+%%
+x = new Foo()
+%%
+x = new Foo().bar
+%%
+x = new Foo.bar
+%%
+x = new (Foo().bar)
+%%
+x = new Foo()()
+%%
+new a`b`
+%%
+new a`b`()
+%%
+a`b``c`
+%%
+a.b`c`
+%%
+a()`b`
+%%
+`a`
+%%
+`a${b}c`
+%%
+`a${b}${c}d`
+%%
+`${`${a}`}`
+%%
+tag`a${b}`
+%%
+`\u{41}`
+%%
+`\unicode`
+%%
+tag`\unicode`
+%%
+`a${}`
+%%
+`a${b`
+%%
+`${a}}`
+%%
+`${{a:1}.a}`
+%%
+`${ ()=>{} }`
+%%
+`${function(){ return `x` }}`
+%%
+`a` + `b`
+%%
+`a${b}` / 2
+%%
+`a${b}` /c/ d
+%%
+`${a}${b}${c}`
+%%
+`line
+two`
+%%
+`\``
+%%
+`$`
+%%
+`$ {a}`
+%%
+`\${a}`
+%%
+`${a ? `b` : `c`}`
+%%
+`${a, b}`
+%%
+`${/}/.source}`
+%%
+`${a /b/ c}`
+%%
+tag`\xg`
+%%
+`\xg`
+%%
+`\01`
+%%
+tag`\01`
+%%
+`\u{110000}`
+%%
+tag`\u{110000}`
+%%
+`${`
+%%
+`${a`
+%%
+`${a}`
+%%
+`
+%%
+`a
+%%
+"use strict"; 010
+%%
+010
+%%
+"use strict"; var x = 010
+%%
+function f(){ "use strict"; 010 }
+%%
+function f(){ "use strict"; with(a){} }
+%%
+"use strict"; with (a) {}
+%%
+with (a) {}
+%%
+"use strict"; var eval
+%%
+"use strict"; var let
+%%
+var let = 1
+%%
+"use strict"; arguments = 1
+%%
+"use strict"; eval++
+%%
+"use strict"; delete a
+%%
+"use strict"; delete a.b
+%%
+"use strict"; delete (a)
+%%
+"use strict"; delete ((a))
+%%
+delete a
+%%
+"use strict"; function f(a, a){}
+%%
+function f(a, a){}
+%%
+function f(a, a){ "use strict" }
+%%
+function f(a = 1, a){}
+%%
+function f(a, ...a){}
+%%
+function f(a, {a}){}
+%%
+function f(a = 1){ "use strict" }
+%%
+function f({a}){ "use strict" }
+%%
+function f(...a){ "use strict" }
+%%
+function eval(){ "use strict" }
+%%
+function f(eval){ "use strict" }
+%%
+function f(){ "use strict"; var eval }
+%%
+"use strict"; ({ eval } = a)
+%%
+"use strict"; ({ eval = 1 } = a)
+%%
+"use strict"; [eval] = a
+%%
+"use strict"; [arguments] = a
+%%
+"use strict"; ({ a: eval } = a)
+%%
+"use strict"; "\07"
+%%
+'use strict'; 08
+%%
+"use\x20strict"; 010
+%%
+("use strict"); 010
+%%
+"use strict" + 1; 010
+%%
+"use strict".length; 010
+%%
+function f(){ "use strict"; } 010
+%%
+"use strict"; function f(){ 010 }
+%%
+"use strict"; implements
+%%
+"use strict"; var yield
+%%
+var yield
+%%
+var await
+%%
+"use strict"; package: 1
+%%
+class A { m(){ 010 } }
+%%
+class A { m(){ var let } }
+%%
+class let {}
+%%
+class A { m(a, a){} }
+%%
+"use strict"; "\8"
+%%
+"\8"
+%%
+"use strict"; 08.5
+%%
+"use strict"; 0.5
+%%
+"use strict"; 0
+%%
+"use strict"; 00
+%%
+"use strict"; 0_1
+%%
+"a"; "use strict"; 010
+%%
+"a"; 1; "use strict"; 010
+%%
+1; "use strict"; 010
+%%
+"use strict"
+; 010
+%%
+"use strict"
+010
+%%
+"use strict"
++ 1; 010
+%%
+"use strict"
+.x; 010
+%%
+'use strict'; (function(){ var public })
+%%
+function f(){ 'use strict'; var public }
+%%
+function f(){ var public }
+%%
+"use strict"; function public(){}
+%%
+"use strict"; function f(static){}
+%%
+"use strict"; (function static(){})
+%%
+"use strict"; ({ static: 1 })
+%%
+"use strict"; ({ static })
+%%
+"use strict"; a.static
+%%
+"use strict"; let: 1
+%%
+let: 1
+%%
+"use strict"; try {} catch (eval) {}
+%%
+"use strict"; try {} catch (let) {}
+%%
+"use strict"; for (eval of a);
+%%
+"use strict"; for (var eval in a);
+%%
+"use strict"; eval => 1
+%%
+"use strict"; x = { eval(){} }
+%%
+"use strict"; x = { set a(eval){} }
+%%
+"use strict"; function f(){ return arguments }
+%%
+//! unsupported
+"use strict"; function* g(){}
+%%
+"use strict"; if (a) function f(){}
+%%
+"use strict"; if (a) ; else function f(){}
+%%
+"use strict"; a: function f(){}
+%%
+"use strict"; { function f(){} function f(){} }
+%%
+"use strict"; function f(){} function f(){}
+%%
+"use strict"; var f; function f(){}
+%%
+"use strict"; let f; { function f(){} }
+%%
+a
+b
+%%
+a
+++b
+%%
+a
+(b)
+%%
+a
+[b]
+%%
+a
+/b/g
+%%
+return
+%%
+function f(){ return
+1 }
+%%
+function f(){ return 1 }
+%%
+function f(){ return
+}
+%%
+function f(){ return; }
+%%
+throw
+a
+%%
+throw a
+%%
+break
+%%
+while(1) break
+%%
+while(1) { break
+}
+%%
+a: while(1) continue a
+%%
+a: { break a }
+%%
+a: { continue a }
+%%
+a: b: while(1) continue a
+%%
+a: a: ;
+%%
+a: ; a: ;
+%%
+while(1) continue b
+%%
+x: while(1) { function f(){ break x } }
+%%
+switch (a) { case 1: break; default: break }
+%%
+switch (a) { default: default: }
+%%
+switch (a) { case 1: continue }
+%%
+switch (a) { case 1: while(1) continue }
+%%
+do ; while(0) a
+%%
+do ; while(0)
+a
+%%
+do ; while(0); a
+%%
+do a; while(0) b
+%%
+for(;;) break
+%%
+if (a) ; else ;
+%%
+if (a) b
+else c
+%%
+if (a) function f(){}
+%%
+if (a) class A{}
+%%
+if (a) let x
+%%
+if (a) let
+x
+%%
+if (a) let [x] = 1
+%%
+while (a) function f(){}
+%%
+while (a) let
+x
+%%
+a: function f(){}
+%%
+if (a) a: function f(){}
+%%
+for (;;) a: function f(){}
+%%
+a: b: function f(){}
+%%
+a: let
+x
+%%
+a: let [x] = 1
+%%
+a: class A {}
+%%
+a: const b = 1
+%%
+let
+x
+%%
+let [a] = b
+%%
+let
+[a] = b
+%%
+x = let
+%%
+let = 1
+%%
+let.a
+%%
+let(a)
+%%
+let in a
+%%
+let instanceof a
+%%
+let
+in
+a
+%%
+const a = 1
+%%
+const a
+%%
+var a = 1, b
+%%
+for (let [a] of b);
+%%
+for (let in a);
+%%
+for (let of a);
+%%
+for (let of of a);
+%%
+for (let.a in b);
+%%
+for (let = 1;;);
+%%
+for (let;;);
+%%
+for (let
+x of a);
+%%
+for (var a = 1 in b);
+%%
+for (var a = 1 of b);
+%%
+for (let a = 1 in b);
+%%
+for (const a = 1 in b);
+%%
+for (var [a] = 1 in b);
+%%
+for (var a, b of c);
+%%
+for (var a, b in c);
+%%
+for (var a, b;;);
+%%
+for (a in b, c);
+%%
+for (a of b, c);
+%%
+for (a = 1 in b);
+%%
+for ((a = 1) in b);
+%%
+for (async of b);
+%%
+for ((async) of b);
+%%
+for (async in b);
+%%
+for (async.x of b);
+%%
+for (async of => 1;;);
+%%
+for await (a of b);
+%%
+async function f(){ for await (a of b); }
+%%
+async function f(){ for await (a in b); }
+%%
+async function f(){ for await (;;); }
+%%
+async function f(){ for await (var a of b); }
+%%
+async function f(){ for await (let a of b); }
+%%
+async function f(){ for await (const [a] of b); }
+%%
+function f(){ for await (a of b); }
+%%
+for (const a of b) ;
+%%
+for (const a;;)
+%%
+for (const a = 1;;)
+%%
+for (a of b);
+%%
+for (a.b of c);
+%%
+for ((a, b) of c);
+%%
+for (x of y) z; for (x in y) z;
+%%
+for (var i = 0, j = 1; i < j; i++, j--) ;
+%%
+for (i in a) for (j in b) ;
+%%
+for (var [a] = b;;) ;
+%%
+for (var [a];;) ;
+%%
+for ("a" in b);
+%%
+for (a in b in c) ;
+%%
+for (var a = (b in c);;) ;
+%%
+for (a = b in c;;)
+%%
+for (a ? b in c : d;;) ;
+%%
+for (a = () => b in c;;) ;
+%%
+for (var a = function(){ b in c };;) ;
+%%
+for (var a = [b in c];;) ;
+%%
+for (var a = {b: c in d};;) ;
+%%
+for (var a = (b) in c;;) ;
+%%
+for (var a = b in c;;) ;
+%%
+for (var a = (b in c) in d);
+%%
+for (a in (b in c));
+%%
+for (a of (b in c));
+%%
+for ((a in b);;);
+%%
+for (a in b);
+%%
+for (a of b) ;
+%%
+for ([a] of b);
+%%
+for ([a = 1] of b);
+%%
+for ({a = 1} of b);
+%%
+for ({a = 1};;);
+%%
+for ({a = 1} in b);
+%%
+for ([a] = b;;);
+%%
+for ([a].x of b);
+%%
+for ([a][0] of b);
+%%
+for (a.b in c);
+%%
+for (a[b] of c);
+%%
+for (this.a in b);
+%%
+for (f() in b);
+%%
+for (f() of b);
+%%
+for (a++ in b);
+%%
+for (new.target of b);
+%%
+for (a?.b in c);
+%%
+for (var of of a);
+%%
+for (var of in a);
+%%
+for (of of a);
+%%
+for (of in a);
+%%
+for (let of in a);
+%%
+for (let in in a);
+%%
+for (var async of a);
+%%
+for (let async of a);
+%%
+for (;;) ;
+%%
+for (;;);
+%%
+for (a;b;c) d
+%%
+for (a,b;c,d;e,f) ;
+%%
+for (;;)
+;
+%%
+for (var i = 0;;) { break; }
+%%
+for (var i of [1]) { continue }
+%%
+for (const a in b) { const a = 1 }
+%%
+for (let a of b) { let a }
+%%
+for (let a of b) { var a }
+%%
+for (let [a, a] of b);
+%%
+for (let a, a;;);
+%%
+for (const [a, b] of c);
+%%
+for (var a of b) { var a }
+%%
+for (let a;;) { function a(){} }
+%%
+for (let a of b) function f(){}
+%%
+for (let a of b) let
+x
+%%
+for (let a of b) let [x] = 1
+%%
+class A {}
+%%
+class A extends B {}
+%%
+class A extends (B, C) {}
+%%
+class A extends B.c {}
+%%
+class A extends B() {}
+%%
+class A extends a ? b : c {}
+%%
+class A extends a || b {}
+%%
+class A extends a = b {}
+%%
+class A extends async () => {} {}
+%%
+class A extends function(){} {}
+%%
+class A extends class {} {}
+%%
+class A extends {} {}
+%%
+class A extends [] {}
+%%
+class A extends `x` {}
+%%
+class A extends new B {}
+%%
+class A extends new B() {}
+%%
+class A extends B`x` {}
+%%
+class A extends B?.c {}
+%%
+class A extends super.x {}
+%%
+class A { constructor(){} }
+%%
+class A { constructor(){} constructor(){} }
+%%
+class A { get constructor(){} }
+%%
+class A { set constructor(v){} }
+%%
+class A { async constructor(){} }
+%%
+class A { constructor; }
+%%
+class A { constructor = 1 }
+%%
+class A { 'constructor'(){} }
+%%
+class A { 'constructor'(){} constructor(){} }
+%%
+class A { 'constructor'; }
+%%
+class A { static constructor(){} }
+%%
+class A { static constructor; }
+%%
+class A { static 'constructor'; }
+%%
+class A { static 'constructor'(){} static constructor(){} }
+%%
+class A { ['constructor'](){} ['constructor'](){} }
+%%
+class A { ['constructor']; }
+%%
+class A { static prototype(){} }
+%%
+class A { static prototype; }
+%%
+class A { static 'prototype'(){} }
+%%
+class A { prototype(){} }
+%%
+class A { prototype; }
+%%
+class A { static ['prototype'](){} }
+%%
+class A { static get prototype(){} }
+%%
+class A { a; b = 1; static c; static d = 2; }
+%%
+class A { a = 1
+b = 2 }
+%%
+class A { a
+b }
+%%
+class A { a = 1 b = 2 }
+%%
+class A { a b }
+%%
+class A { a; b }
+%%
+class A { a = 1, b = 2 }
+%%
+class A { static a(){} static get b(){} static set b(v){} }
+%%
+class A { get a(){} set a(v){} }
+%%
+class A { get a(){ } get a(){ } }
+%%
+class A { #a; #b = 1; static #c; get #d(){} set #d(v){} #m(){} static #s(){} }
+%%
+class A { #a; #a; }
+%%
+class A { #a; #a(){} }
+%%
+class A { #a(){} #a; }
+%%
+class A { get #a(){} get #a(){} }
+%%
+class A { set #a(v){} set #a(v){} }
+%%
+class A { get #a(){} set #a(v){} }
+%%
+class A { set #a(v){} get #a(){} }
+%%
+class A { static get #a(){} static set #a(v){} }
+%%
+class A { static get #a(){} set #a(v){} }
+%%
+class A { get #a(){} #a(){} }
+%%
+class A { get #a(){} get #a(){} set #a(v){} }
+%%
+class A { #constructor }
+%%
+class A { #constructor(){} }
+%%
+class A { m(){ this.#a } }
+%%
+class A { #a; m(){ this.#a; this?.#a; #a in this } }
+%%
+class A { #a; m(){ delete this.#a } }
+%%
+class A { #a; m(){ delete this?.#a } }
+%%
+class A { #a; m(){ delete (this.#a) } }
+%%
+class A { #a; m(){ delete this.#a.b } }
+%%
+class A { #a; m(){ class B { n(o){ o.#a } } } }
+%%
+class A { m(){ class B { #b; n(o){ o.#a } } } }
+%%
+class A { #a; m(){ #a in this } }
+%%
+class A { #a; m(){ 1 + #a in this } }
+%%
+class A { #a; m(){ #a } }
+%%
+class A { #a; m(){ #a + 1 } }
+%%
+class A { #a; m(){ (#a in this) in x } }
+%%
+class A { #a; m(){ #a in this in x } }
+%%
+class A { #a; m(){ #a in #a in this } }
+%%
+class A { #a; m(){ x = #a in this } }
+%%
+class A { #a; m(){ !#a in this } }
+%%
+class A { #a; m(){ #a in this && #a in that } }
+%%
+class A { #a; m(){ for (#a in x;;); } }
+%%
+class A { #a; m(){ for (x of #a in y); } }
+%%
+class A { #a; m(){ for (var x = #a in y;;); } }
+%%
+class A { #a; m(){ super.#a } }
+%%
+class A { #a; m(){ a.#a.#a } }
+%%
+class A { #a; m(){ a?.#a } }
+%%
+class A { #a; m(){ a?.b.#a } }
+%%
+class A { #a; m(){ a.#a() } }
+%%
+class A { #a; m(){ a.#a`x` } }
+%%
+class A { #a; m(){ new a.#a } }
+%%
+class A { #a; m(){ a.#a = 1; a.#a++; ++a.#a; a.#a += 1 } }
+%%
+class A { #a; m(){ [a.#a] = b } }
+%%
+class A { #a; m(){ ({x: a.#a} = b) } }
+%%
+class A { #a; m(){ a.# a } }
+%%
+class A { #a; m(){ a.#b } }
+%%
+class A { #a; static m(){ a.#a } }
+%%
+class A { #a; x = this.#a }
+%%
+class A { x = this.#a; #a }
+%%
+class A { #a = this.#b; #b }
+%%
+class A { static #a = 1; static b = A.#a }
+%%
+class A { static x = this; y = () => this; z = arguments }
+%%
+class A { x = () => arguments }
+%%
+class A { x = function(){ arguments } }
+%%
+class A { x = { m(){ arguments } } }
+%%
+class A { x = { a: arguments } }
+%%
+class A { x = { arguments } }
+%%
+class A { x = (arguments) }
+%%
+class A { x = [arguments] }
+%%
+class A { x = `${arguments}` }
+%%
+class A { x = eval }
+%%
+class A { x = (() => () => arguments) }
+%%
+class A { static x = arguments }
+%%
+class A { [arguments] = 1 }
+%%
+class A { m(){ arguments } }
+%%
+class A { m(a = arguments){} }
+%%
+class A { async m(){ await 1 } }
+%%
+class A { async
+m(){} }
+%%
+class A { static
+m(){} }
+%%
+class A { get
+a(){} }
+%%
+class A { set
+a(v){} }
+%%
+class A { static static(){} }
+%%
+class A { static async(){} }
+%%
+class A { static get(){} }
+%%
+class A { static set(){} }
+%%
+class A { get(){} set(){} async(){} static(){} }
+%%
+class A { get; set; static; async; }
+%%
+class A { get = 1; set = 2; static = 3; async = 4 }
+%%
+class A { static async = 1 }
+%%
+class A { static get = 1 }
+%%
+class A { static static = 1 }
+%%
+class A { async = 1; static async }
+%%
+class A { get
+; set
+; }
+%%
+class A { static
+; }
+%%
+class A { async
+; }
+%%
+class A { async
+a }
+%%
+class A { 'a' = 1; 1 = 2; [x] = 3; 1n = 4 }
+%%
+class A { ;;; }
+%%
+class A { ; a; ; b; }
+%%
+class A extends B { constructor(){ super(); super.x; } }
+%%
+class A { x = super.y }
+%%
+class A extends B { x = super() }
+%%
+class A extends B { x = () => super() }
+%%
+class A { constructor(){ new.target } }
+%%
+class A { x = new.target }
+%%
+class A { x = () => new.target }
+%%
+class A { m(a, a){} }
+%%
+(class {})
+%%
+(class A {})
+%%
+x = class A {}
+%%
+x = class extends A {}
+%%
+class
+A {}
+%%
+class { }
+%%
+class A { }; class A { }
+%%
+class A { } class A { }
+%%
+class A { m(){} n(){} }
+%%
+class A { 'm'(){} 1(){} [a](){} }
+%%
+class A { get [a](){} set [a](v){} static [a]; }
+%%
+class A { set a(...v){} }
+%%
+class A { set a(){} }
+%%
+class A { get a(b){} }
+%%
+class A { set a(b = 1){} }
+%%
+class A { set a({b}){} }
+%%
+class A { set a([b]){} }
+%%
+class A { set a(b, c){} }
+%%
+class A { get a(){ return 1 } set a(v){ } }
+%%
+class A { static get [a](){} }
+%%
+class A { static async m(){} }
+%%
+class A { static async [a](){} }
+%%
+class A { async [a](){} }
+%%
+class A { async 'a'(){} async 1(){} async #p(){} }
+%%
+class A { static #p; static async #q(){} static get #r(){} static set #r(v){} }
+%%
+class A { await(){} yield(){} let(){} }
+%%
+class A { if(){} class(){} new(){} }
+%%
+class A { x = 1; ['y'] = 2; 'z' = 3; 4 = 5 }
+%%
+class A { x = a, b }
+%%
+class A { x = (a, b) }
+%%
+class A { x = () => {} y = 1 }
+%%
+class A { x = () => {}
+y = 1 }
+%%
+class A { x = function(){}
+y = 1 }
+%%
+class A { x = 1
+*y(){} }
+%%
+class A { x
+[y](){} }
+%%
+class A { x = 1
+[y](){} }
+%%
+class A { x
+(y){} }
+%%
+class A { x = 1
+(y) }
+%%
+class A { static
+x = 1 }
+%%
+//! unsupported
+class A { static
+*g(){} }
+%%
+//! unsupported
+class A { static
+{ } }
+%%
+//! unsupported
+class A { get
+*g(){} }
+%%
+class A { 'use strict'; }
+%%
+class A { static; }
+%%
+class A { static static; }
+%%
+class A { static static static; }
+%%
+class A { static static static(){} }
+%%
+class A { x }
+%%
+class A { x = 1 }
+%%
+class A {
+x
+}
+%%
+class A { m(){} ; n(){} }
+%%
+class A { m(){}
+n(){} }
+%%
+class A { m(){} n(){} ; }
+%%
+class A extends B { constructor(a, b){ super(a, b); this.x = a } }
+%%
+class A extends B { constructor(){ super(); } m(){ super.m() } static s(){ super.s() } get g(){ return super.g } set g(v){ super.g = v } }
+%%
+class A { static s(){ return new this() } }
+%%
+class A extends B { static x = super.y }
+%%
+class A extends B { static m(){ super() } }
+%%
+class A extends B { get g(){ super() } }
+%%
+class A { constructor(){ return {} } }
+%%
+class A { constructor(){ return } }
+%%
+class A { m(){ return } }
+%%
+class A { x = return }
+%%
+class A { x = function(){ return } }
+%%
+class A { x = () => { return } }
+%%
+class A { x = yield }
+%%
+class A { yield = 1; await = 2; let = 3 }
+%%
+class A { x = await }
+%%
+async function f(){ class A { x = await 1 } }
+%%
+async function f(){ class A { x = await } }
+%%
+async function f(){ class A { [await 1] = 2 } }
+%%
+async function f(){ class A { m(){ await } } }
+%%
+async function f(){ class A extends (await 1) {} }
+%%
+async function f(){ class await {} }
+%%
+class A { m(){ var let } }
+%%
+class A { m(){ let } }
+%%
+class A { m(){ let = 1 } }
+%%
+class A { m(){ yield } }
+%%
+class A { m(){ function yield(){} } }
+%%
+class A { m(){ var yield } }
+%%
+class A { m(){ with (a) {} } }
+%%
+class A { m(){ delete a } }
+%%
+class A { m(){ delete a.b } }
+%%
+class A { m(){ eval = 1 } }
+%%
+class A { m(){ eval++ } }
+%%
+class A { m(){ arguments++ } }
+%%
+class A { m(eval){} }
+%%
+class A { m(){ 0777 } }
+%%
+class A { m(){ '\777' } }
+%%
+class A { m(){ 08 } }
+%%
+class A { m(){ 1e3 } }
+%%
+class A { m(){ function f(a, a){} } }
+%%
+class A { m(){ (a, a) => 1 } }
+%%
+class A { m(){ if (a) function f(){} } }
+%%
+class A { m(){ a: function f(){} } }
+%%
+class A { m(){ { function f(){} function f(){} } } }
+%%
+class A { m(){ function f(){} function f(){} } }
+%%
+class A { m(){ var f; function f(){} } }
+%%
+class A { m(){ let f; function f(){} } }
+%%
+class A { m(){ for (var i = 0 in x); } }
+%%
+class A { [await] = 1 }
+%%
+class A { [yield] = 1 }
+%%
+class A { static [yield] = 1 }
+%%
+class A { x = yield }
+%%
+//! unsupported
+class A { static async *[x](){} }
+%%
+//! unsupported
+class A { *g(){} }
+%%
+//! unsupported
+class A { static { } }
+%%
+//! unsupported
+class A { static x; static { } }
+%%
+//! unsupported
+function* g(){}
+%%
+//! unsupported
+x = function*(){}
+%%
+//! unsupported
+({ *g(){} })
+%%
+//! unsupported
+async function* g(){}
+%%
+//! unsupported
+({ async *g(){} })
+%%
+function f(){ yield }
+%%
+function f(){ yield 1 }
+%%
+function f(){ yield = 1 }
+%%
+function f(){ var yield }
+%%
+function f(yield){}
+%%
+function yield(){}
+%%
+function f(){ function yield(){} }
+%%
+yield
+%%
+yield: 1
+%%
+yield = 1
+%%
+yield => 1
+%%
+"use strict"; yield
+%%
+"use strict"; yield: 1
+%%
+"use strict"; yield = 1
+%%
+"use strict"; yield => 1
+%%
+"use strict"; function yield(){}
+%%
+//! unsupported
+import a from 'b'
+%%
+//! unsupported
+import 'a'
+%%
+//! unsupported
+import {a} from 'b'
+%%
+//! unsupported
+import * as a from 'b'
+%%
+//! unsupported
+export const a = 1
+%%
+//! unsupported
+export default 1
+%%
+//! unsupported
+export {a}
+%%
+//! unsupported
+export * from 'a'
+%%
+//! unsupported
+import('x')
+%%
+//! unsupported
+import.meta
+%%
+//! unsupported
+x = import('x')
+%%
+//! unsupported
+import('x').then(y)
+%%
+//! unsupported
+import()
+%%
+//! unsupported
+import(a, b)
+%%
+//! unsupported
+import
+(a)
+%%
+//! unsupported
+new import('x')
+%%
+//! unsupported
+import
+%%
+//! unsupported
+export
+%%
+({})
+%%
+({a})
+%%
+({a, b})
+%%
+({a: 1, b: 2})
+%%
+({a, ...b})
+%%
+({...a, b})
+%%
+({a(){}, get b(){}, set b(v){}, async c(){}})
+%%
+({[a]: 1, [b](){}, get [c](){}})
+%%
+({'a': 1, 2: 3, 1n: 4})
+%%
+({get: 1, set: 2, async: 3, static: 4, await: 5})
+%%
+({get, set, async})
+%%
+({get(){}, set(){}, async(){}})
+%%
+({async get(){}, async set(){}})
+%%
+({get a(){}, get a(){}})
+%%
+({if: 1, class: 2, new: 3})
+%%
+({if})
+%%
+({a: 1,})
+%%
+({,})
+%%
+({a b})
+%%
+({a: })
+%%
+({get a(b){}})
+%%
+({set a(){}})
+%%
+({set a(b, c){}})
+%%
+({set a(...b){}})
+%%
+({async a: 1})
+%%
+({async
+a(){}})
+%%
+({async a(){}})
+%%
+({get
+a(){}})
+%%
+({set
+a(v){}})
+%%
+({a = 1})
+%%
+({eval})
+%%
+({yield})
+%%
+"use strict"; ({yield})
+%%
+({await})
+%%
+async function f(){ ({await}) }
+%%
+async function f(){ ({await: 1}) }
+%%
+async function f(){ ({a: await 1}) }
+%%
+async function f(){ ({[await 1]: 1}) }
+%%
+async function f(){ ({m(){ await }}) }
+%%
+async function f(){ ({await(){}}) }
+%%
+async function f(){ ({async await(){}}) }
+%%
+({"__proto__": 1})
+%%
+({a: function(){}, b: () => 1, c: class {}})
+%%
+({ 0.5: 1, 0x10: 2, .5: 3 })
+%%
+({ a: 1, ...{ b: 2 } })
+%%
+x = { a, b } = c
+%%
+({ a, b } = c) => 1
+%%
+({ a: 1 }) => 1
+%%
+({ a() {} }) => 1
+%%
+({ a = 1 }) => a
+%%
+({ a, b: { c = 1 } }) => a
+%%
+({ a: b = 1 }) => b
+%%
+({ ...a }) => a
+%%
+({ ...a, b }) => a
+%%
+({ ...{a} }) => a
+%%
+({ ...a.b }) => a
+%%
+({ a: b.c }) => a
+%%
+({ a: (b) }) => a
+%%
+({ [a]: b }) => b
+%%
+({ 'a': b }) => b
+%%
+({ 1: b }) => b
+%%
+({ get a(){} }) => 1
+%%
+({ a, ...b,}) => 1
+%%
+({ a, ...b,} = c)
+%%
+({ if }) => 1
+%%
+({ if: a }) => a
+%%
+({ a: if }) => a
+%%
+({ this }) => 1
+%%
+({ this: a }) => a
+%%
+({a: 1})
+%%
+({a: 1}).a
+%%
+({}).toString()
+%%
+({}.toString())
+%%
+({} + 1)
+%%
+({}) + 1
+%%
+({a}) + 1
+%%
+({a: 1} + 1)
+%%
+({ __proto__: null })
+%%
+({ __proto__: null, a })
+%%
+({ __proto__: null, ["__proto__"]: 1 })
+%%
+({ __proto__() {}, __proto__: 1 })
+%%
+({ get __proto__(){}, __proto__: 1 })
+%%
+({ __proto__: 1, get __proto__(){} })
+%%
+({ "__proto__": 1, '__proto__': 2 })
+%%
+({ __proto__: 1, "__proto__": 2 })
+%%
+({ "__proto__": 1, "__proto__": 2 } = a)
+%%
+[{ __proto__: 1, __proto__: 2 }]
+%%
+[{ __proto__: 1, __proto__: 2 }] = a
+%%
+f({ __proto__: 1, __proto__: 2 })
+%%
+x = { __proto__: 1, __proto__: 2 }
+%%
+({ a: { __proto__: 1, __proto__: 2 } } = b)
+%%
+({ a: { __proto__: 1, __proto__: 2 } })
+%%
+({ a: { __proto__: 1, __proto__: 2 } }) => 1
+%%
+{}
+%%
+{ a }
+%%
+{ a; b }
+%%
+;
+%%
+var a
+%%
+var a = 1, b = 2
+%%
+if (a) b; else c
+%%
+if (a) { } else if (b) { } else { }
+%%
+for (;;) ;
+%%
+while (a) b
+%%
+do a; while (b)
+%%
+do { } while (a); b
+%%
+try { } catch (e) { }
+%%
+try { } catch { }
+%%
+try { } finally { }
+%%
+try { } catch (e) { } finally { }
+%%
+try { }
+%%
+try { } catch () { }
+%%
+try { } catch (e, f) { }
+%%
+try { } catch ([a, b]) { }
+%%
+try { } catch ({a}) { }
+%%
+try { } catch (e) { var e }
+%%
+try { } catch (e) { let e }
+%%
+try { } catch ([e]) { var e }
+%%
+try { } catch ({e}) { var e }
+%%
+try { } catch (e) { function e(){} }
+%%
+try { } catch (e) { var e = 1 }
+%%
+try { } catch (e) { for (var e of x); }
+%%
+try { } catch (e) { for (var e in x); }
+%%
+try { } catch (e) { for (var e;;); }
+%%
+try { } catch (e) { { var e } }
+%%
+try { } catch (e) { { let e } }
+%%
+try { } catch (e) { (function(e){}) }
+%%
+try { } catch (e) { var f; let g }
+%%
+try { } catch (e) { let f; var f }
+%%
+try { } catch (e = 1) { }
+%%
+try { } catch (...e) { }
+%%
+try { } catch (a.b) { }
+%%
+try { } catch (1) { }
+%%
+try { } catch (e) { } catch (f) { }
+%%
+try { } finally { } catch (e) { }
+%%
+try { } catch (e) finally { }
+%%
+try { } finally { } finally { }
+%%
+try {
+%%
+try {} catch (e) {}
+%%
+} catch (e) {}
+%%
+switch (a) { }
+%%
+switch (a) { case 1: case 2: b; break; default: c }
+%%
+switch (a) { case 1: let x; case 2: let x; }
+%%
+switch (a) { case 1: let x; } let x
+%%
+switch (a) { case 1: var x; case 2: var x; }
+%%
+switch (a) { case 1: function f(){} case 2: function f(){} }
+%%
+switch (a) { case 1: let f; case 2: function f(){} }
+%%
+switch (a) { case 1: { let x } case 2: { let x } }
+%%
+switch (a) { default: case 1: }
+%%
+switch (a) { case 1 }
+%%
+switch (a) { case: }
+%%
+switch (a) { a }
+%%
+switch { }
+%%
+switch (a) { case 1: default: break; case 2: }
+%%
+switch (a) { case 1: break }
+%%
+switch (a) { case 1: { break } }
+%%
+switch (a) { case 1: if (b) break }
+%%
+switch (a) { case 1: x: break x }
+%%
+switch (a) { case 1: function f(){ break } }
+%%
+switch (a) { case b ? c : d: e }
+%%
+switch (a) { case b: c: d }
+%%
+switch (a) { case (b): c }
+%%
+switch (a) { case b in c: d }
+%%
+switch (a) { case 1: continue }
+%%
+switch (a) { case 1: while (b) continue }
+%%
+label: x
+%%
+a: b: c
+%%
+debugger
+%%
+debugger;
+%%
+with (a) b
+%%
+throw a
+%%
+throw a, b
+%%
+return
+%%
+function f(){ return }
+%%
+function f(){ return a, b }
+%%
+function f(){ return
+a }
+%%
+function f(){ return (
+a) }
+%%
+function f(){ return a
++ b }
+%%
+function f(){ return a +
+b }
+%%
+function f(){ return ++
+a }
+%%
+function f(){ return a
+++ }
+%%
+function f(){ return a
+++b }
+%%
+function f(){ return function(){} }
+%%
+function f(){ return class {} }
+%%
+function f(){ return /x/ }
+%%
+function f(){ return /x/g.test(y) }
+%%
+function f(){ return `x` }
+%%
+function f(){ return {} }
+%%
+function f(){ return {a} }
+%%
+function f(){ return [] }
+%%
+function f(){ return () => 1 }
+%%
+function f(){ return async () => 1 }
+%%
+function f(){ return x => y }
+%%
+function f(){ return new X }
+%%
+function f(){ return delete x.y }
+%%
+function f(){ return typeof x }
+%%
+function f(){ return void 0 }
+%%
+function f(){ return !x }
+%%
+function f(){ return -x }
+%%
+function f(){ return this }
+%%
+function f(){ return null }
+%%
+function f(){ return 1 }
+%%
+function f(){ return "x" }
+%%
+x = function f(){}
+%%
+function f(){}
+%%
+function f(){} function f(){}
+%%
+let a; let a
+%%
+let a; var a
+%%
+var a; let a
+%%
+var a; { let a }
+%%
+{ var a } let a
+%%
+{ let a } var a
+%%
+let a; { var a }
+%%
+function f(){ let a; var a }
+%%
+function f(a){ let a }
+%%
+function f(a){ var a }
+%%
+function f(a){ { let a } }
+%%
+function f(){ let f }
+%%
+function f(){} let f
+%%
+let f; function f(){}
+%%
+{ function f(){} function f(){} }
+%%
+{ function f(){} var f }
+%%
+{ var f; function f(){} }
+%%
+{ function f(){} let f }
+%%
+{ let f; function f(){} }
+%%
+{ function f(){} function f(){} let g }
+%%
+{ function f(){} { function f(){} } }
+%%
+{ function f(){} { var f } }
+%%
+{ { var f } function f(){} }
+%%
+function f(){ var g; function g(){} }
+%%
+function f(){ function g(){} function g(){} }
+%%
+function f(){ function g(){} var g }
+%%
+function f(){ function g(){} let g }
+%%
+function f(){ let g; function g(){} }
+%%
+function f(a){ function a(){} }
+%%
+function f(a){ { function a(){} } }
+%%
+function f(a){ { let a } }
+%%
+function f(a, b = a){}
+%%
+function f(a = b, b){}
+%%
+function f(a = a){}
+%%
+function f(a, b = () => a){}
+%%
+function f(a = function(){ var a }){}
+%%
+function f(a = () => { let a }){}
+%%
+function f(a){ var a; { let a } }
+%%
+function f(){ { let a } var a }
+%%
+function f(){ var a; { let a } }
+%%
+function f(){ { var a } let a }
+%%
+function f(){ { var a } { let a } }
+%%
+function f(){ { let a } { let a } }
+%%
+function f(){ try {} catch (a) { var a } }
+%%
+function f(){ try {} catch (a) { let a } }
+%%
+function f(a){ try {} catch (a) { var a } }
+%%
+function f(a){ try {} catch (b) { let a } }
+%%
+function f(){ let a; try {} catch (a) {} }
+%%
+function f(){ let a; try {} catch (b) { var a } }
+%%
+function f(){ let a; { var b; var a } }
+%%
+function f(){ let a; { { var a } } }
+%%
+function f(){ { { let a } } var a }
+%%
+function f(){ for (let a;;) { var a } }
+%%
+function f(){ for (let a;;) { let a } }
+%%
+function f(){ for (let a of b) { var a } }
+%%
+function f(){ for (let a of b) { let a } }
+%%
+function f(){ for (var a;;) { let a } }
+%%
+function f(){ for (var a;;) { var a } }
+%%
+function f(){ for (let a, b;;) { } }
+%%
+function f(){ for (let a, a;;) { } }
+%%
+function f(){ for (let a = 1, b = a;;) { } }
+%%
+function f(){ for (const a = 1, a = 2;;) { } }
+%%
+function f(){ for (let a in b) { let a } }
+%%
+function f(){ for (let a in b) { var a } }
+%%
+function f(){ switch (a) { case 1: let b; } let b }
+%%
+function f(){ switch (a) { case 1: var b; } let b }
+%%
+function f(){ switch (a) { case 1: let b; } var b }
+%%
+function f(){ switch (a) { case 1: let b; default: var b } }
+%%
+function f(){ if (a) { let b } let b }
+%%
+function f(){ if (a) { var b } let b }
+%%
+function f(){ if (a) { let b } var b }
+%%
+function f(){ if (a) function g(){} let g }
+%%
+function f(){ if (a) function g(){} var g }
+%%
+function f(){ if (a) function g(){} function g(){} }
+%%
+function f(){ if (a) function g(){} else function g(){} }
+%%
+function f(){ if (a) function g(){} else var g }
+%%
+function f(){ while (a) { function g(){} } let g }
+%%
+function f(){ label: function g(){} let g }
+%%
+function f(){ label: function g(){} var g }
+%%
+function f(){ label: function g(){} function g(){} }
+%%
+function f(){ a: a: ; }
+%%
+function f(){ a: { a: ; } }
+%%
+function f(){ a: { function g(){ a: ; } } }
+%%
+function f(){ a: { b: ; a: ; } }
+%%
+function f(){ a: ; a: ; }
+%%
+function f(){ a: while (1) { a: ; } }
+%%
+function f(){ a: while (1) { b: while (1) { continue a } } }
+%%
+function f(){ a: while (1) { b: { continue a } } }
+%%
+function f(){ a: { b: while (1) { continue a } } }
+%%
+function f(){ a: { continue a } }
+%%
+function f(){ a: b: while (1) { continue a } }
+%%
+function f(){ a: b: { continue a } }
+%%
+function f(){ a: b: c: while (1) { continue a; continue b; continue c } }
+%%
+function f(){ a: for (;;) { break a } }
+%%
+function f(){ a: { break a } }
+%%
+function f(){ a: { { break a } } }
+%%
+function f(){ a: switch (1) { case 1: break a } }
+%%
+function f(){ a: switch (1) { case 1: continue a } }
+%%
+function f(){ a: if (1) { break a } }
+%%
+function f(){ a: if (1) { continue a } }
+%%
+function f(){ a: if (1) break a }
+%%
+function f(){ break a }
+%%
+function f(){ continue a }
+%%
+function f(){ a: break b }
+%%
+function f(){ a: continue b }
+%%
+function f(){ a: (function(){ break a }) }
+%%
+function f(){ a: (() => { break a }) }
+%%
+function f(){ a: ({ m(){ break a } }) }
+%%
+function f(){ a: class A { m(){ break a } } }
+%%
+function f(){ a: while (1) { class A { x = () => { break a } } } }
+%%
+function f(){ while (1) { function g(){ break } } }
+%%
+function f(){ while (1) { () => { break } } }
+%%
+function f(){ while (1) { class A { m(){ break } } } }
+%%
+function f(){ switch (1) { case 1: function g(){ break } } }
+%%
+function f(){ do { break } while (1) }
+%%
+function f(){ do { continue } while (1) }
+%%
+function f(){ do break; while (1) }
+%%
+function f(){ do continue; while (1) }
+%%
+function f(){ while (1) break }
+%%
+function f(){ while (1) continue }
+%%
+function f(){ for (;;) break }
+%%
+function f(){ for (;;) continue }
+%%
+function f(){ for (a in b) break }
+%%
+function f(){ for (a in b) continue }
+%%
+function f(){ for (a of b) break }
+%%
+function f(){ for (a of b) continue }
+%%
+function f(){ if (a) break }
+%%
+function f(){ if (a) continue }
+%%
+function f(){ { break } }
+%%
+function f(){ { continue } }
+%%
+function f(){ break }
+%%
+function f(){ continue }
+%%
+function f(){ try { break } finally { } }
+%%
+function f(){ while (1) try { break } finally { continue } }
+%%
+function f(){ with (a) break }
+%%
+function f(){ with (a) { while (1) break } }
+%%
+(a, b)
+%%
+(a)
+%%
+((a, b), c)
+%%
+a = 1, b = 2
+%%
+/a/
+%%
+/a/g
+%%
+/[/]/
+%%
+a / b / c
+%%
+a /b/ c
+%%
+a = /x/ / /y/
+%%
+x = a /= 2
+%%
+x = /=/
+%%
+if (a) /b/.test(c)
+%%
+a++ /b/ 2
+%%
+a
+/b/g.x
+%%
+() => /x/
+%%
+(a) / 2
+%%
+a[0] / 2
+%%
+{} /x/
+%%
+({}) / 2
+%%
+`a` / 2
+%%
+typeof /x/
+%%
+/x/ / 2
+%%
+/x/.test(a)
+%%
+x = [/a/, /b/]
+%%
+function f(){} /x/
+%%
+(function(){}) / 2
+%%
+x = function(){} / 2
+%%
+x = a
+/b/g
+%%
+x = a++
+/b/g
+%%
+x = a
+++/b/g
+%%
+x = (a)
+/b/g
+%%
+if (a) /b/g
+%%
+while (a) /b/g
+%%
+do /b/g; while (a)
+%%
+for (;;) /b/g
+%%
+a: /b/g
+%%
+else /b/g
+%%
+x = {} / 2
+%%
+x = [] / 2
+%%
+x = a.b / 2
+%%
+x = a() / 2
+%%
+x = a`b` / 2
+%%
+x = this / 2
+%%
+x = null / 2
+%%
+x = true / 2
+%%
+x = 1 / 2
+%%
+x = "a" / 2
+%%
+x = /a/ / 2
+%%
+x = a / /b/
+%%
+x = a / /b/ / c
+%%
+x = a /= /b/
+%%
+x = a ? /b/ : /c/
+%%
+x = a || /b/
+%%
+x = !/b/
+%%
+x = -/b/
+%%
+x = typeof /b/
+%%
+x = void /b/
+%%
+x = delete /b/
+%%
+x = new /b/
+%%
+x = (/b/)
+%%
+x = [/b/]
+%%
+x = {a: /b/}
+%%
+x = a[/b/]
+%%
+x = a(/b/)
+%%
+x = `${/b/}`
+%%
+x = async () => /b/
+%%
+x = () => /b/
+%%
+x = a => /b/
+%%
+return /b/
+%%
+x = /b/ in c
+%%
+x = a in /b/
+%%
+x = /b/ instanceof c
+%%
+x = /[\]/]/
+%%
+x = /\//
+%%
+x = /a/gimsuy
+%%
+x = /a/gg
+%%
+x = /a/x
+%%
+x = /a/dgimsuy
+%%
+x = /a/v
+%%
+x = /
+%%
+x = /a
+%%
+x = /a
+/
+%%
+x = /[
+]/
+%%
+x = /a/g.source
+%%
+x = /a/gi.test('b')
+%%
+x = /(?:a)(?=b)(?!c)(?<=d)(?<!e)/
+%%
+x = /(?<n>a)\k<n>/
+%%
+x = /\p{L}/u
+%%
+x = a++ / 2
+%%
+x = a-- / 2
+%%
+x = (a) / 2 / 3
+%%
+x = a / b / c
+%%
+x = a / (b / c)
+%%
+x = a /b/ c
+%%
+x = a /b/g
+%%
+1.5
+%%
+.5
+%%
+5.
+%%
+0x1f
+%%
+0b11
+%%
+0o17
+%%
+017
+%%
+089
+%%
+1_000
+%%
+1e3
+%%
+10n
+%%
+0xFn
+%%
+1__0
+%%
+1_
+%%
+0_1
+%%
+0b
+%%
+0x
+%%
+1e
+%%
+1e+
+%%
+1.e3
+%%
+1.5.5
+%%
+1..toString()
+%%
+1 .toString()
+%%
+1.toString()
+%%
+0.toString()
+%%
+01.toString()
+%%
+08.5
+%%
+08.5.toString()
+%%
+09
+%%
+00
+%%
+0.0
+%%
+0e0
+%%
+0E0
+%%
+0x0
+%%
+0X0
+%%
+0b0
+%%
+0B0
+%%
+0o0
+%%
+0O0
+%%
+0n
+%%
+00n
+%%
+01n
+%%
+1.5n
+%%
+1e3n
+%%
+"a\nb"
+%%
+'a\'b'
+%%
+"\u{1F600}"
+%%
+'\x41'
+%%
+"\0"
+%%
+"\1"
+%%
+"\8"
+%%
+"\u00"
+%%
+"\u{110000}"
+%%
+"\x"
+%%
+"\xg"
+%%
+"a
+b"
+%%
+"a\
+b"
+%%
+'a\
+b'
+%%
+" "
+%%
+"a b"
+%%
+"a b"
+%%
+"é"
+%%
+'日本'
+%%
+"😀"
+%%
+"\
+%%
+"
+%%
+"a\
+%%
+b"
+%%
+x = 'a' 'b'
+%%
+x = "a" + 'b'
+%%
+x = ""
+%%
+x = ''
+%%
+x = "'"
+%%
+x = '"'
+%%
+x = "\""
+%%
+x = '\''
+%%
+x = "\\"
+%%
+x = '\\'
+%%
+x = "\a"
+%%
+x = "\z"
+%%
+x = "\/"
+%%
+x = "\ud800"
+%%
+x = "\udc00"
+%%
+x = "𐀀"
+%%
+x = "\u{d800}"
+%%
+var of, async, get, set, static, let, yield, await
+%%
+var of = 1; of
+%%
+async = 1
+%%
+get = 1
+%%
+set = 1
+%%
+static = 1
+%%
+let = 1
+%%
+yield = 1
+%%
+await = 1
+%%
+of = 1
+%%
+x = { of, async, get, set, static, let, yield, await }
+%%
+x = { of: 1, async: 2, get: 3, set: 4, static: 5, let: 6, yield: 7, await: 8 }
+%%
+x.of; x.async; x.get; x.set; x.static; x.let; x.yield; x.await
+%%
+function of(){} function async(){} function get(){} function set(){} function static(){} function let(){} function yield(){} function await(){}
+%%
+function f(of, async, get, set, static, let, yield, await){}
+%%
+(of, async, get, set, static, let, yield, await) => 1
+%%
+of => 1
+%%
+async => 1
+%%
+get => 1
+%%
+set => 1
+%%
+static => 1
+%%
+let => 1
+%%
+yield => 1
+%%
+await => 1
+%%
+a: of: async: get: set: static: let: yield: await: ;
+%%
+class of {} class async {} class get {} class set {} class static {} class await {}
+%%
+class A { of; async; get; set; static; let; yield; await }
+%%
+async function async(){}
+%%
+async function get(){}
+%%
+async function let(){}
+%%
+async function yield(){}
+%%
+async function await(){}
+%%
+async function f(){ var await }
+%%
+async function f(){ var async }
+%%
+async function f(){ var yield }
+%%
+async function f(){ var let }
+%%
+async function f(){ let await }
+%%
+async function f(){ await: 1 }
+%%
+async function f(){ function await(){} }
+%%
+async function f(){ (function await(){}) }
+%%
+async function f(){ (async function await(){}) }
+%%
+async function f(){ class await {} }
+%%
+async function f(){ x.await }
+%%
+async function f(){ x = { await: 1 } }
+%%
+async function f(){ x = { await } }
+%%
+async function f(){ x = { await() {} } }
+%%
+async function f(){ await await 1 }
+%%
+async function f(){ await (await 1) }
+%%
+async function f(){ await -1 }
+%%
+async function f(){ await +1 }
+%%
+async function f(){ await !1 }
+%%
+async function f(){ await ~1 }
+%%
+async function f(){ await typeof 1 }
+%%
+async function f(){ await void 1 }
+%%
+async function f(){ await delete a.b }
+%%
+async function f(){ await ++a }
+%%
+async function f(){ await a++ }
+%%
+async function f(){ await a.b }
+%%
+async function f(){ await a() }
+%%
+async function f(){ await new A }
+%%
+async function f(){ await class {} }
+%%
+async function f(){ await function(){} }
+%%
+async function f(){ await () => 1 }
+%%
+async function f(){ await async () => 1 }
+%%
+async function f(){ await /x/ }
+%%
+async function f(){ await `x` }
+%%
+async function f(){ await [] }
+%%
+async function f(){ await {} }
+%%
+async function f(){ await this }
+%%
+async function f(){ await null }
+%%
+async function f(){ await 1 + 1 }
+%%
+async function f(){ await 1 ** 2 }
+%%
+async function f(){ (await 1) ** 2 }
+%%
+async function f(){ 2 ** await 1 }
+%%
+async function f(){ a = await b }
+%%
+async function f(){ a += await b }
+%%
+async function f(){ a ? await b : await c }
+%%
+async function f(){ a, await b }
+%%
+async function f(){ [await a] }
+%%
+async function f(){ ({a: await b}) }
+%%
+async function f(){ f(await a) }
+%%
+async function f(){ `${await a}` }
+%%
+async function f(){ for (await a;;); }
+%%
+async function f(){ for (a of await b); }
+%%
+async function f(){ for (a in await b); }
+%%
+async function f(){ if (await a) ; }
+%%
+async function f(){ while (await a) ; }
+%%
+async function f(){ do ; while (await a) }
+%%
+async function f(){ switch (await a) { case await b: } }
+%%
+async function f(){ return await a }
+%%
+async function f(){ throw await a }
+%%
+async function f(){ var a = await b }
+%%
+async function f(){ let [a] = await b }
+%%
+async function f(){ try { await a } catch (e) { await b } finally { await c } }
+%%
+async function f(){ label: await a }
+%%
+async function f(){ with (await a) ; }
+%%
+async function f(){ x = async () => await 1 }
+%%
+async function f(){ x = async function(){ await 1 } }
+%%
+async function f(){ x = function(){ await } }
+%%
+async function f(){ x = function(){ await 1 } }
+%%
+async function f(){ x = () => await 1 }
+%%
+async function f(){ x = () => await }
+%%
+async function f(){ x = () => { await } }
+%%
+async function f(){ x = () => { await 1 } }
+%%
+async function f(){ x = { m(){ await } } }
+%%
+async function f(){ x = { async m(){ await 1 } } }
+%%
+async function f(){ x = class { m(){ await } } }
+%%
+async function f(){ x = class { async m(){ await 1 } } }
+%%
+async function f(){ x = class { y = await } }
+%%
+async function f(){ x = class { y = await 1 } }
+%%
+async function f(){ x = class { [await 1](){} } }
+%%
+async function f(){ x = class extends (await 1) {} }
+%%
+async function f(await){}
+%%
+async function f(a = await 1){}
+%%
+async function f(a = await){}
+%%
+async function f({a = await 1}){}
+%%
+async (a = await 1) => 1
+%%
+async (await) => 1
+%%
+async await => 1
+%%
+async (a, await) => 1
+%%
+async ({await}) => 1
+%%
+async ([await]) => 1
+%%
+async (...await) => 1
+%%
+(a = await 1) => 1
+%%
+(await) => 1
+%%
+await => 1
+%%
+async function f(){ (await) => 1 }
+%%
+async function f(){ await => 1 }
+%%
+async function f(){ (a = await 1) => 1 }
+%%
+async function f(){ async (a = await 1) => 1 }
+%%
+async function f(){ async (await) => 1 }
+%%
+function f(){ async (await) => 1 }
+%%
+function f(await){}
+%%
+function f(a = await){}
+%%
+function await(){}
+%%
+function f(){ function await(){} }
+%%
+function f(){ var await }
+%%
+function f(){ await: 1 }
+%%
+function f(){ await 1 }
+%%
+function f(){ await }
+%%
+function f(){ await = 1 }
+%%
+function f(){ await.x }
+%%
+function f(){ await[0] }
+%%
+function f(){ await() }
+%%
+function f(){ await`x` }
+%%
+function f(){ await++ }
+%%
+function f(){ ++await }
+%%
+function f(){ await => 1 }
+%%
+function f(){ (await) => 1 }
+%%
+function f(){ (await, await) => 1 }
+%%
+function f(){ x = { await } }
+%%
+function f(){ x = { await: 1 } }
+%%
+async () => { function g(){ await } }
+%%
+async () => { () => await }
+%%
+async () => { () => await 1 }
+%%
+async () => { (() => await) }
+%%
+async () => { (() => { await }) }
+%%
+async () => { (() => { await 1 }) }
+%%
+async () => { (async () => { await 1 }) }
+%%
+async () => { function await(){} }
+%%
+async () => { var await }
+%%
+async () => { await }
+%%
+async () => await
+%%
+async () => await 1
+%%
+async () => { await 1 }
+%%
+async function f(){ new await }
+%%
+async function f(){ new await() }
+%%
+async function f(){ new (await a) }
+%%
+async function f(){ new (await a)() }
+%%
+async function f(){ new await a }
+%%
+async function f(){ typeof await a }
+%%
+async function f(){ !await a }
+%%
+async function f(){ -await a }
+%%
+async function f(){ - await a ** 2 }
+%%
+async function f(){ (-await a) ** 2 }
+%%
+async function f(){ delete await a }
+%%
+async function f(){ void await a }
+%%
+async function f(){ a ?? await b }
+%%
+async function f(){ await a ?? b }
+%%
+async function f(){ a || await b }
+%%
+async function f(){ await a || b }
+%%
+async function f(){ await a ?? b || c }
+%%
+async function f(){ a in await b }
+%%
+async function f(){ await a in b }
+%%
+async function f(){ a instanceof await b }
+%%
+async function f(){ a + await b }
+%%
+async function f(){ await a + b }
+%%
+async function f(){ a - await b }
+%%
+async function f(){ a * await b }
+%%
+async function f(){ a / await b }
+%%
+async function f(){ a % await b }
+%%
+async function f(){ a << await b }
+%%
+async function f(){ a & await b }
+%%
+async function f(){ a == await b }
+%%
+async function f(){ a < await b }
+%%
+async function f(){ a, await b, c }
+%%
+async function f(){ a = b = await c }
+%%
+async function f(){ a = await b = c }
+%%
+async function f(){ await a = b }
+%%
+async function f(){ (await a) = b }
+%%
+async function f(){ [await a] = b }
+%%
+async function f(){ ({a: await b} = c) }
+%%
+async function f(){ for (await a of b); }
+%%
+async function f(){ for ((await a) of b); }
+%%
+async function f(){ for ([await a] of b); }
+%%
+async function f(){ for (a.b[await c] of d); }
+%%
+async function f(){ for (var a of await b); }
+%%
+async function f(){ for (var a = await b;;); }
+%%
+async function f(){ for (var a in await b); }
+%%
+async function f(){ for (let a of await b); }
+%%
+async function f(){ for (const a of await b); }
+%%
+async function f(){ for await (let a of await b); }
+%%
+async function f(){ for await (a.b of c); }
+%%
+async function f(){ for await (a of b, c); }
+%%
+async function f(){ for await (var a = 1 of b); }
+%%
+async function f(){ for await (let a, b of c); }
+%%
+async function f(){ for await ([a, b] of c); }
+%%
+async function f(){ for await ({a, b} of c); }
+%%
+async function f(){ for await (async of b); }
+%%
+async function f(){ for await ((async) of b); }
+%%
+async function f(){ for await (let of b); }
+%%
+async function f(){ for await (of of b); }
+%%
+async function f(){ for await (x of y) z }
+%%
+async function f(){ for await (x of y) { z } }
+%%
+async function f(){ for await (x of y) function g(){} }
+%%
+async function f(){ for await (x of y) let
+z }
+%%
+async function f(){ a: for await (x of y) continue a }
+%%
+async function f(){ for await (x of y) break }
+%%
+async function f(){ for await (x of y) continue }
+%%
+async function f(){ for await (x of y) await z }
+%%
+async function f(){ for await (x of y) for await (z of w); }
+%%
+async function f(){ for await (x of async function(){}); }
+%%
+async () => { for await (x of y); }
+%%
+async x => { for await (x of y); }
+%%
+() => { for await (x of y); }
+%%
+async function f(){ () => { for await (x of y); } }
+%%
+async function f(){ async () => { for await (x of y); } }
+%%
+async function f(){ { for await (x of y); } }
+%%
+async function f(){ if (a) for await (x of y); }
+%%
+async function f(){ for await (x of y); for await (x of y); }
+%%
+async function f(){ for await (x of y) for (z of w); }
+%%
+async function f(){ for (x of y) for await (z of w); }
+%%
+async function f(){ for (x in y) for await (z of w); }
+%%
+async function f(){ for (;;) for await (z of w); }
+%%
+async function f(){ while (a) for await (z of w); }
+%%
+async function f(){ do for await (z of w); while (a) }
+%%
+async function f(){ with (a) for await (z of w); }
+%%
+async function f(){ a: for await (z of w); }
+%%
+async function f(){ try { for await (z of w); } catch (e) { } }
+%%
+async function f(){ switch (a) { case 1: for await (z of w); } }
+%%
+class A { async m(){ for await (x of y); } }
+%%
+({ async m(){ for await (x of y); } })
+%%
+class A { m(){ for await (x of y); } }
+%%
+({ m(){ for await (x of y); } })
+%%
+class A { x = () => { for await (x of y); } }
+%%
+a /* unterminated
+%%
+"unterminated
+%%
+'a
+%%
+`a
+%%
+a = 
+%%
+a = {
+%%
+a = [
+%%
+a = (
+%%
+a = (b
+%%
+f(
+%%
+f(a,
+%%
+f(a b)
+%%
+function
+%%
+function f
+%%
+function f(
+%%
+function f()
+%%
+function f() {
+%%
+class
+%%
+class A
+%%
+class A {
+%%
+if
+%%
+if (
+%%
+if (a
+%%
+if (a)
+%%
+for
+%%
+for (
+%%
+for (;;
+%%
+switch (a) {
+%%
+try {
+%%
+a ? b :
+%%
+[1, 2
+%%
+{a: 1
+%%
+x = {a: 1
+%%
+let
+%%
+let x =
+%%
+var
+%%
+var 1
+%%
+var a =
+%%
+1 +
+%%
+@
+%%
+a #b
+%%
+}
+%%
+)
+%%
+]
+%%
+a)
+%%
+a]
+%%
+a;}
+%%
+a;)
+%%
+{
+%%
+{{
+%%
+{{}
+%%
+(
+%%
+((
+%%
+((a)
+%%
+[
+%%
+[[
+%%
+[[]
+%%
+x = [
+%%
+x = [[
+%%
+x = [[]
+%%
+x = [a
+%%
+x = [a,
+%%
+x = [a, b
+%%
+f(a
+%%
+f(a,
+%%
+f(a, b
+%%
+new
+%%
+new a(
+%%
+new a(b
+%%
+new.
+%%
+new.target.
+%%
+a.
+%%
+a?.
+%%
+a?.[
+%%
+a?.(
+%%
+a?.[b
+%%
+a?.(b
+%%
+a[
+%%
+a[b
+%%
+a(
+%%
+a`
+%%
+a`b
+%%
+a`${
+%%
+a`${b
+%%
+a`${b}
+%%
+x = function
+%%
+x = function(
+%%
+x = function()
+%%
+x = function() {
+%%
+x = function() { return
+%%
+x = () =>
+%%
+x = () => {
+%%
+x = (a) =>
+%%
+x = (a, b) =>
+%%
+x = async () =>
+%%
+x = async function
+%%
+x = class
+%%
+x = class {
+%%
+x = class A
+%%
+x = class A {
+%%
+x = class A extends
+%%
+x = class A extends B
+%%
+x = class A extends B {
+%%
+x = {a
+%%
+x = {a:
+%%
+x = {a: 1
+%%
+x = {a: 1,
+%%
+x = {get
+%%
+x = {get a
+%%
+x = {get a(
+%%
+x = {get a()
+%%
+x = {get a() {
+%%
+x = {get a() {}
+%%
+x = {[
+%%
+x = {[a
+%%
+x = {[a]
+%%
+x = {[a]:
+%%
+x = {...
+%%
+x = {...a
+%%
+x = {async
+%%
+x = {async a
+%%
+x = {async a(
+%%
+x = {async a()
+%%
+x = {async a() {
+%%
+x = {async a() {}
+%%
+x = {'a
+%%
+x = {1
+%%
+x = {1:
+%%
+x = 1 +
+%%
+x = 1 + 2 +
+%%
+x = a ? b
+%%
+x = a ? b :
+%%
+x = a ? b : c ?
+%%
+x = a ?? 
+%%
+x = a ?. 
+%%
+x = a ** 
+%%
+x = !
+%%
+x = typeof
+%%
+x = void
+%%
+x = delete
+%%
+x = ++
+%%
+x = --
+%%
+x = a++ ++
+%%
+x = a-- --
+%%
+x = ++a ++
+%%
+x = a ++ b
+%%
+x = a = 
+%%
+x = a += 
+%%
+x = a ||= 
+%%
+x = ...a
+%%
+x = (...a)
+%%
+x = [...]
+%%
+x = [...a b]
+%%
+x = {...a b}
+%%
+x = f(...)
+%%
+x = f(... a)
+%%
+x = f(...a b)
+%%
+var a b
+%%
+var a = 1 b
+%%
+var a, b c
+%%
+var [a
+%%
+var [a,
+%%
+var [a, b
+%%
+var [a, b]
+%%
+var {a
+%%
+var {a,
+%%
+var {a, b
+%%
+var {a, b}
+%%
+var {a: 
+%%
+var {a: b
+%%
+var {a: b,
+%%
+var {[
+%%
+var {[a
+%%
+var {[a]
+%%
+var {[a]:
+%%
+var {...
+%%
+var {...a
+%%
+var {...a,
+%%
+let [a
+%%
+let {a
+%%
+const [a
+%%
+const {a
+%%
+for (var a
+%%
+for (var a of
+%%
+for (var a of b
+%%
+for (var a of b)
+%%
+for (a of
+%%
+for (a of b
+%%
+for (a of b)
+%%
+for (a in
+%%
+for (a in b
+%%
+for (a in b)
+%%
+for (;
+%%
+for (;;
+%%
+for (;;)
+%%
+for (a;
+%%
+for (a;b
+%%
+for (a;b;
+%%
+for (a;b;c
+%%
+for (a;b;c)
+%%
+while
+%%
+while (
+%%
+while (a
+%%
+while (a)
+%%
+do
+%%
+do a
+%%
+do a;
+%%
+do a; while
+%%
+do a; while (
+%%
+do a; while (b
+%%
+do a; while (b)
+%%
+switch
+%%
+switch (
+%%
+switch (a
+%%
+switch (a)
+%%
+switch (a) {
+%%
+switch (a) { case
+%%
+switch (a) { case 1
+%%
+switch (a) { case 1:
+%%
+switch (a) { default
+%%
+switch (a) { default:
+%%
+try
+%%
+try {
+%%
+try { }
+%%
+try { } catch
+%%
+try { } catch (
+%%
+try { } catch (e
+%%
+try { } catch (e)
+%%
+try { } catch (e) {
+%%
+try { } finally
+%%
+try { } finally {
+%%
+throw
+%%
+throw a
+%%
+label:
+%%
+label: label:
+%%
+a:
+%%
+a: b:
+%%
+a: b: c:
+%%
+break
+%%
+break a
+%%
+continue
+%%
+continue a
+%%
+return
+%%
+return a
+%%
+debugger
+%%
+with
+%%
+with (
+%%
+with (a
+%%
+with (a)
+%%
+function f(a
+%%
+function f(a,
+%%
+function f(a, b
+%%
+function f(a, b)
+%%
+function f(a, b) {
+%%
+function f(a = 
+%%
+function f(a = 1
+%%
+function f(...
+%%
+function f(...a
+%%
+function f([
+%%
+function f({
+%%
+function f([a
+%%
+function f({a
+%%
+function f([a]
+%%
+function f({a}
+%%
+async
+%%
+async function
+%%
+async function f
+%%
+async function f(
+%%
+async function f()
+%%
+async function f() {
+%%
+async () 
+%%
+async (a
+%%
+async (a,
+%%
+async (a, b
+%%
+async (a, b)
+%%
+async (a, b) =>
+%%
+async a
+%%
+async a =>
+%%
+class A extends
+%%
+class A extends B
+%%
+class A extends B {
+%%
+class A { a
+%%
+class A { a =
+%%
+class A { a = 1
+%%
+class A { a(
+%%
+class A { a()
+%%
+class A { a() {
+%%
+class A { a() {}
+%%
+class A { get
+%%
+class A { get a
+%%
+class A { get a(
+%%
+class A { get a()
+%%
+class A { get a() {
+%%
+class A { set a(v
+%%
+class A { static
+%%
+class A { static a
+%%
+class A { static a(
+%%
+class A { #
+%%
+class A { #a
+%%
+class A { #a(
+%%
+class A { async
+%%
+class A { async a
+%%
+class A { async a(
+%%
+class A { [
+%%
+class A { [a
+%%
+class A { [a]
+%%
+class A { [a](
+%%
+class A { 'a
+%%
+class A { 1
+%%
+class A { 1(
+%%
+class A { ;
+%%
+`${
+%%
+`${a
+%%
+`${a}
+%%
+`${a}b
+%%
+`${a}b${
+%%
+`${a}b${c
+%%
+`${a}b${c}
+%%
+`${a}b${c}d
+%%
+`\u
+%%
+`\u{
+%%
+`\u{1
+%%
+`\x
+%%
+`\x1
+%%
+`\0
+%%
+`\1
+%%
+tag`\u
+%%
+tag`\u{
+%%
+tag`\x
+%%
+/
+%%
+/a
+%%
+/a/
+%%
+/a/g
+%%
+/a/gg
+%%
+/[
+%%
+/[a
+%%
+/[a]
+%%
+/(
+%%
+/(a
+%%
+/\/
+%%
+/\
+%%
+//
+%%
+/*
+%%
+/**/
+%%
+/* */ a
+%%
+/* */a
+%%
+a /* */ b
+%%
+a /* */
+b
+%%
+a // b
+c
+%%
+a // b
+%%
+a
+#!/usr/bin/env node
+%%
+ #!/usr/bin/env node
+%%
+
+#!/usr/bin/env node
+%%
+a#!/usr/bin/env node
+%%
+
+%%
+ 

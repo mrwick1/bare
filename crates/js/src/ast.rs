@@ -1,0 +1,704 @@
+//! The JavaScript syntax tree (ES2022 script), built by [`crate::parse::parse_script`].
+//!
+//! Layout, in plain words:
+//! - A [`Program`] borrows the source text and owns every node. Nodes live in flat `Vec` arenas, one
+//!   arena per node type. A node refers to another node by an [`Id`]: a 32-bit index that stays valid
+//!   as long as the `Program` lives (nodes are never moved out or removed).
+//! - A list (call arguments, statements in a block, ...) is a [`List`]: a `start` and a `len` into one
+//!   shared `Vec<u32>`. Read it with [`Program::list`].
+//! - Nodes do not copy text. A name, a string, a number, a regexp or a template piece is a byte [`Span`]
+//!   into the source. Decode it on demand with [`Program::name`], [`Program::string`],
+//!   [`Program::number`], [`Program::quasi`] (UTF-16 code units for strings, as JavaScript needs).
+//! - Every node has a byte span. [`Program::location`] turns an offset into a line and UTF-16 column.
+//!
+//! The tree is executable structure: nothing is skipped or kept as opaque source text. Things that
+//! are valid syntax but not supported yet (generators, modules, class static blocks) are parse
+//! errors with [`crate::parse::ErrorKind::Unsupported`]. They never produce a tree.
+//!
+//! Distinctions an executor needs, kept on purpose:
+//! - [`ExprKind::Paren`]: `(a)` is not `a` (name inference, `(a?.b).c`, directive detection).
+//! - [`ExprKind::Chain`]: wraps a whole optional chain, where `?.` short-circuits to.
+//! - Assignment targets and bindings are [`Pat`] nodes, never expressions pretending to be patterns.
+//! - [`StmtKind::Directive`]: a string expression statement in a directive prologue.
+//! - [`Func::strict`], [`Func::simple_params`], [`FuncKind`]: code is strict, has plain parameters,
+//!   and which kind of function it is.
+//!
+//! Scope analysis (which names a function uses or captures) is not done here: that is for the
+//! compiler that walks this tree.
+
+use crate::lex::{self, Kind, NumberBase, TemplatePart, Token};
+use std::borrow::Cow;
+use std::marker::PhantomData;
+use std::num::NonZeroU32;
+
+/// A typed index of a node of type `T`. `Option<Id<T>>` is 4 bytes.
+pub struct Id<T>(NonZeroU32, PhantomData<fn() -> T>);
+
+impl<T> Clone for Id<T> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl<T> Copy for Id<T> {}
+impl<T> PartialEq for Id<T> {
+    fn eq(&self, o: &Self) -> bool {
+        self.0 == o.0
+    }
+}
+impl<T> Eq for Id<T> {}
+impl<T> std::hash::Hash for Id<T> {
+    fn hash<H: std::hash::Hasher>(&self, h: &mut H) {
+        self.0.hash(h)
+    }
+}
+impl<T> std::fmt::Debug for Id<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "#{}", self.0)
+    }
+}
+
+impl<T> Id<T> {
+    /// The id of the node at arena position `index` (the first node is position 0).
+    pub(crate) fn from_index(index: usize) -> Id<T> {
+        // The parser limits the node count far below u32::MAX, so `index + 1` fits and is not zero.
+        Id(NonZeroU32::new(index as u32 + 1).unwrap_or(NonZeroU32::MIN), PhantomData)
+    }
+    fn from_raw(raw: u32) -> Id<T> {
+        Id(NonZeroU32::new(raw).unwrap_or(NonZeroU32::MIN), PhantomData)
+    }
+    pub(crate) fn from_raw_pub(raw: u32) -> Id<T> {
+        Id::from_raw(raw)
+    }
+    pub(crate) fn raw(self) -> u32 {
+        self.0.get()
+    }
+    pub fn index(self) -> usize {
+        self.0.get() as usize - 1
+    }
+}
+
+/// A run of ids stored in [`Program`]. Read with [`Program::list`].
+pub struct List<T> {
+    pub(crate) start: u32,
+    pub(crate) len: u32,
+    _p: PhantomData<fn() -> T>,
+}
+impl<T> Clone for List<T> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl<T> Copy for List<T> {}
+impl<T> std::fmt::Debug for List<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "[{}+{}]", self.start, self.len)
+    }
+}
+impl<T> List<T> {
+    pub(crate) fn new(start: u32, len: u32) -> List<T> {
+        List { start, len, _p: PhantomData }
+    }
+    pub fn len(self) -> usize {
+        self.len as usize
+    }
+    pub fn is_empty(self) -> bool {
+        self.len == 0
+    }
+}
+
+pub type ExprId = Id<Expr>;
+pub type StmtId = Id<Stmt>;
+pub type PatId = Id<Pat>;
+pub type FuncId = Id<Func>;
+pub type ClassId = Id<Class>;
+
+/// Byte offsets `start..end` into the source.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub struct Span {
+    pub start: u32,
+    pub end: u32,
+}
+
+// ---------------------------------------------------------------- expressions
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UnaryOp {
+    Neg,
+    Plus,
+    Not,
+    BitNot,
+    Typeof,
+    Void,
+    Delete,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BinaryOp {
+    Add,
+    Sub,
+    Mul,
+    Div,
+    Mod,
+    Exp,
+    Eq,
+    Ne,
+    StrictEq,
+    StrictNe,
+    Lt,
+    Gt,
+    Le,
+    Ge,
+    Shl,
+    Shr,
+    UShr,
+    BitAnd,
+    BitOr,
+    BitXor,
+    In,
+    Instanceof,
+}
+
+/// `&&`, `||`, `??`: the right side runs only sometimes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LogicalOp {
+    And,
+    Or,
+    Nullish,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AssignOp {
+    /// `=`
+    Assign,
+    /// `+=`, `-=`, ...
+    Compound(BinaryOp),
+    /// `&&=`, `||=`, `??=`: the right side runs only sometimes.
+    Logical(LogicalOp),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UpdateOp {
+    Inc,
+    Dec,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct Expr {
+    pub kind: ExprKind,
+    pub span: Span,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum ExprKind {
+    /// A name used as a value. The node span is the name.
+    Ident,
+    This,
+    Null,
+    Bool(bool),
+    /// The span is the token. Value: [`Program::number`].
+    Number(NumberBase),
+    /// `10n`. The span includes `n`. No value is computed.
+    BigInt,
+    /// The span includes the quotes. Value: [`Program::string`].
+    String,
+    /// `/body/flags`. The span is the token. The flags are checked. The pattern grammar is **not**
+    /// checked here: see [`crate::parse::REGEXP_PATTERN_VALIDATED`].
+    RegExp,
+    Template(Id<Template>),
+    Tagged { tag: ExprId, quasi: Id<Template> },
+    /// Elements are expressions, [`ExprKind::Spread`] or [`ExprKind::Hole`].
+    Array(List<Expr>),
+    Object(List<Prop>),
+    /// A function or arrow function expression (also the value of a method).
+    Function(FuncId),
+    Class(ClassId),
+    Unary { op: UnaryOp, arg: ExprId },
+    /// `arg` is an identifier, a member access, or either in parentheses.
+    Update { op: UpdateOp, prefix: bool, arg: ExprId },
+    Binary { op: BinaryOp, left: ExprId, right: ExprId },
+    Logical { op: LogicalOp, left: ExprId, right: ExprId },
+    Assign { op: AssignOp, target: PatId, value: ExprId },
+    Cond { test: ExprId, cons: ExprId, alt: ExprId },
+    /// `callee` may be [`ExprKind::Super`] (a `super(...)` call). `optional`: written `?.(`.
+    Call { callee: ExprId, args: List<Expr>, optional: bool },
+    New { callee: ExprId, args: List<Expr> },
+    /// `obj.name` or `obj?.name`. `name` is the span of the property name.
+    Member { obj: ExprId, name: Span, optional: bool },
+    /// `obj[index]` or `obj?.[index]`.
+    Index { obj: ExprId, index: ExprId, optional: bool },
+    /// `obj.#name`. `name` includes the `#`.
+    PrivateMember { obj: ExprId, name: Span, optional: bool },
+    /// `#name in right`. `name` includes the `#`.
+    PrivateIn { name: Span, right: ExprId },
+    /// Only as the callee of a call, or the object of a member access.
+    Super,
+    NewTarget,
+    Await(ExprId),
+    /// At least two expressions.
+    Seq(List<Expr>),
+    /// Only in an array, call arguments or `new` arguments.
+    Spread(ExprId),
+    /// An elision in an array: `[a, , b]`.
+    Hole,
+    /// `( expr )`. Kept: see the module comment.
+    Paren(ExprId),
+    /// The whole optional chain `a?.b.c`. Inside, some links have `optional: true`. If a `?.` link finds
+    /// `null`/`undefined`, the value of this whole node is `undefined`.
+    Chain(ExprId),
+}
+
+/// A template literal: `n` expressions and `n + 1` pieces. Read with [`Program::template_quasis`] and
+/// [`Program::template_exprs`] (they share one interleaved list).
+#[derive(Clone, Copy, Debug)]
+pub struct Template {
+    pub(crate) start: u32,
+    pub(crate) n_exprs: u32,
+}
+
+/// One piece of a template. The span includes the delimiters (`` ` ``, `}`, `${`).
+#[derive(Clone, Copy, Debug)]
+pub struct Quasi {
+    pub span: Span,
+    pub part: TemplatePart,
+    /// The cooked value does not exist (legal only in a tagged template).
+    pub bad_escape: bool,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum Key {
+    /// A spread property has no key.
+    None,
+    /// An identifier name (keywords included) or shorthand.
+    Name(Span),
+    Str(Span),
+    Num(Span),
+    BigInt(Span),
+    /// `[expr]`
+    Computed(ExprId),
+    /// `#name` (class elements only). The span includes `#`.
+    Private(Span),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PropKind {
+    /// `key: value`
+    Init,
+    /// `name` or `name = default` (the latter only as the target of a pattern; the value is an assignment).
+    Shorthand,
+    Method,
+    Get,
+    Set,
+    /// `...value`
+    Spread,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct Prop {
+    pub kind: PropKind,
+    pub key: Key,
+    /// For `Method`, `Get`, `Set`: an [`ExprKind::Function`].
+    pub value: ExprId,
+    pub span: Span,
+}
+
+// ---------------------------------------------------------------- patterns
+
+#[derive(Clone, Copy, Debug)]
+pub struct Pat {
+    pub kind: PatKind,
+    pub span: Span,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum PatKind {
+    /// A name. The node span is the name.
+    Ident,
+    /// `a.b` or `a[b]` as an assignment target (never in a declaration or a parameter).
+    Member(ExprId),
+    /// Elements: patterns, [`PatKind::Hole`], and at most one [`PatKind::Rest`] at the end.
+    Array(List<Pat>),
+    Object(List<PatProp>),
+    /// `target = default`
+    Assign { target: PatId, default: ExprId },
+    Rest(PatId),
+    Hole,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct PatProp {
+    /// `Key::None` for a rest property.
+    pub key: Key,
+    /// For a rest property: the [`PatKind::Rest`].
+    pub value: PatId,
+    pub span: Span,
+}
+
+// ---------------------------------------------------------------- functions and classes
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FuncKind {
+    Normal,
+    Arrow,
+    Method,
+    Getter,
+    Setter,
+    /// A class constructor.
+    Constructor,
+    /// The constructor of a class with `extends`: `super(...)` is allowed.
+    DerivedConstructor,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum Body {
+    Block(List<Stmt>),
+    /// The expression of a concise arrow `x => x + 1`.
+    Expr(ExprId),
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct Func {
+    pub name: Option<Span>,
+    /// Patterns: identifiers, destructuring, defaults ([`PatKind::Assign`]), and a last [`PatKind::Rest`].
+    pub params: List<Pat>,
+    pub body: Body,
+    pub kind: FuncKind,
+    pub is_async: bool,
+    /// The body is strict code (inherited, a class, or a `"use strict"` directive).
+    pub strict: bool,
+    /// All parameters are plain identifiers (no default, rest or destructuring).
+    pub simple_params: bool,
+    /// Function and method values start at `(`; other functions at `function`, `async` or the first parameter.
+    pub span: Span,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct Class {
+    pub name: Option<Span>,
+    pub superclass: Option<ExprId>,
+    pub elems: List<ClassElem>,
+    pub span: Span,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum ElemKind {
+    /// Includes the constructor (its function has [`FuncKind::Constructor`]).
+    Method(FuncId),
+    Getter(FuncId),
+    Setter(FuncId),
+    /// A field and its initializer.
+    Field(Option<ExprId>),
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct ClassElem {
+    pub kind: ElemKind,
+    pub is_static: bool,
+    pub key: Key,
+    pub span: Span,
+}
+
+// ---------------------------------------------------------------- statements
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum VarKind {
+    Var,
+    Let,
+    Const,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct Declarator {
+    pub target: PatId,
+    pub init: Option<ExprId>,
+    pub span: Span,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum ForInit {
+    None,
+    /// A [`StmtKind::Var`].
+    Var(StmtId),
+    Expr(ExprId),
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum ForLeft {
+    /// A [`StmtKind::Var`] with one declarator. Only `for (var a = 1 in o)` (sloppy) has an initializer.
+    Var(StmtId),
+    Pat(PatId),
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct Case {
+    /// `None` for `default`.
+    pub test: Option<ExprId>,
+    pub body: List<Stmt>,
+    pub span: Span,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct Catch {
+    pub param: Option<PatId>,
+    /// A [`StmtKind::Block`].
+    pub body: StmtId,
+    pub span: Span,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct Stmt {
+    pub kind: StmtKind,
+    pub span: Span,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum StmtKind {
+    Expr(ExprId),
+    /// A string in a directive prologue (`"use strict"`). The expression is the string literal.
+    Directive(ExprId),
+    Var { kind: VarKind, decls: List<Declarator> },
+    Function(FuncId),
+    Class(ClassId),
+    Return(Option<ExprId>),
+    If { test: ExprId, cons: StmtId, alt: Option<StmtId> },
+    For { init: ForInit, test: Option<ExprId>, update: Option<ExprId>, body: StmtId },
+    ForIn { left: ForLeft, right: ExprId, body: StmtId },
+    /// `is_await`: `for await (... of ...)`
+    ForOf { left: ForLeft, right: ExprId, body: StmtId, is_await: bool },
+    While { test: ExprId, body: StmtId },
+    DoWhile { body: StmtId, test: ExprId },
+    /// The label is a span of the name.
+    Break(Option<Span>),
+    Continue(Option<Span>),
+    Throw(ExprId),
+    Try { block: StmtId, handler: Option<Id<Catch>>, finalizer: Option<StmtId> },
+    Switch { disc: ExprId, cases: List<Case> },
+    Labeled { label: Span, body: StmtId },
+    Block(List<Stmt>),
+    Empty,
+    Debugger,
+    With { obj: ExprId, body: StmtId },
+}
+
+// ---------------------------------------------------------------- program
+
+/// A parsed script. Borrows the source, owns all nodes.
+#[derive(Debug)]
+pub struct Program<'a> {
+    pub source: &'a str,
+    pub body: List<Stmt>,
+    /// The script starts with a `"use strict"` directive.
+    pub strict: bool,
+    pub(crate) exprs: Vec<Expr>,
+    pub(crate) stmts: Vec<Stmt>,
+    pub(crate) pats: Vec<Pat>,
+    pub(crate) funcs: Vec<Func>,
+    pub(crate) classes: Vec<Class>,
+    pub(crate) props: Vec<Prop>,
+    pub(crate) pat_props: Vec<PatProp>,
+    pub(crate) templates: Vec<Template>,
+    pub(crate) quasis: Vec<Quasi>,
+    pub(crate) decls: Vec<Declarator>,
+    pub(crate) cases: Vec<Case>,
+    pub(crate) catches: Vec<Catch>,
+    pub(crate) elems: Vec<ClassElem>,
+    pub(crate) lists: Vec<u32>,
+}
+
+/// How many nodes of each kind a program has, and the bytes they use (capacity not counted).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Stats {
+    pub exprs: usize,
+    pub stmts: usize,
+    pub pats: usize,
+    pub funcs: usize,
+    pub classes: usize,
+    pub props: usize,
+    pub pat_props: usize,
+    pub templates: usize,
+    pub quasis: usize,
+    pub decls: usize,
+    pub cases: usize,
+    pub catches: usize,
+    pub elems: usize,
+    pub list_items: usize,
+    pub bytes: usize,
+}
+
+impl Stats {
+    pub fn nodes(&self) -> usize {
+        self.exprs + self.stmts + self.pats + self.funcs + self.classes + self.props + self.pat_props
+            + self.templates + self.quasis + self.decls + self.cases + self.catches + self.elems
+    }
+}
+
+fn token_of(kind: Kind, span: Span, escapes: bool) -> Token {
+    Token { kind, start: span.start, end: span.end, newline_before: false, escapes }
+}
+
+impl<'a> Program<'a> {
+    pub(crate) fn new(source: &'a str) -> Program<'a> {
+        Program {
+            source,
+            body: List::new(0, 0),
+            strict: false,
+            exprs: Vec::new(),
+            stmts: Vec::new(),
+            pats: Vec::new(),
+            funcs: Vec::new(),
+            classes: Vec::new(),
+            props: Vec::new(),
+            pat_props: Vec::new(),
+            templates: Vec::new(),
+            quasis: Vec::new(),
+            decls: Vec::new(),
+            cases: Vec::new(),
+            catches: Vec::new(),
+            elems: Vec::new(),
+            lists: Vec::new(),
+        }
+    }
+
+    pub fn expr(&self, id: ExprId) -> &Expr {
+        &self.exprs[id.index()]
+    }
+    pub fn stmt(&self, id: StmtId) -> &Stmt {
+        &self.stmts[id.index()]
+    }
+    pub fn pat(&self, id: PatId) -> &Pat {
+        &self.pats[id.index()]
+    }
+    pub fn func(&self, id: FuncId) -> &Func {
+        &self.funcs[id.index()]
+    }
+    pub fn class(&self, id: ClassId) -> &Class {
+        &self.classes[id.index()]
+    }
+    pub fn prop(&self, id: Id<Prop>) -> &Prop {
+        &self.props[id.index()]
+    }
+    pub fn pat_prop(&self, id: Id<PatProp>) -> &PatProp {
+        &self.pat_props[id.index()]
+    }
+    pub fn template(&self, id: Id<Template>) -> &Template {
+        &self.templates[id.index()]
+    }
+    pub fn quasi_node(&self, id: Id<Quasi>) -> &Quasi {
+        &self.quasis[id.index()]
+    }
+    pub fn decl(&self, id: Id<Declarator>) -> &Declarator {
+        &self.decls[id.index()]
+    }
+    pub fn case(&self, id: Id<Case>) -> &Case {
+        &self.cases[id.index()]
+    }
+    pub fn catch(&self, id: Id<Catch>) -> &Catch {
+        &self.catches[id.index()]
+    }
+    pub fn elem(&self, id: Id<ClassElem>) -> &ClassElem {
+        &self.elems[id.index()]
+    }
+
+    /// The ids in a list.
+    pub fn list<T>(&self, l: List<T>) -> impl ExactSizeIterator<Item = Id<T>> + Clone + '_ {
+        self.lists[l.start as usize..(l.start + l.len) as usize].iter().map(|&r| Id::from_raw(r))
+    }
+
+    /// The pieces of a template, in order.
+    pub fn template_quasis(&self, t: &Template) -> impl Iterator<Item = Id<Quasi>> + '_ {
+        let t = *t;
+        (0..=t.n_exprs as usize).map(move |i| Id::from_raw(self.lists[t.start as usize + 2 * i]))
+    }
+
+    /// The expressions between the pieces of a template, in order.
+    pub fn template_exprs(&self, t: &Template) -> impl ExactSizeIterator<Item = ExprId> + '_ {
+        let t = *t;
+        (0..t.n_exprs as usize).map(move |i| Id::from_raw(self.lists[t.start as usize + 2 * i + 1]))
+    }
+
+    /// The source text of a span.
+    pub fn text(&self, span: Span) -> &'a str {
+        self.source.get(span.start as usize..span.end as usize).unwrap_or("")
+    }
+
+    /// The name in a span (an identifier, a property name, or a `#private` name without the `#`):
+    /// `\u` escapes decoded. Borrowed from the source when there is no escape.
+    pub fn name(&self, span: Span) -> Cow<'a, str> {
+        let t = self.text(span);
+        let t = t.strip_prefix('#').unwrap_or(t);
+        if !t.as_bytes().contains(&b'\\') {
+            return Cow::Borrowed(t);
+        }
+        let tok = token_of(Kind::Ident, Span { start: span.start + (self.text(span).len() - t.len()) as u32, end: span.end }, true);
+        lex::ident_name(self.source, &tok).unwrap_or(Cow::Borrowed(t))
+    }
+
+    /// Append the value of a string literal (a [`ExprKind::String`] span or a [`Key::Str`] span).
+    pub fn string(&self, span: Span, out: &mut Vec<u16>) -> Result<(), lex::Error> {
+        lex::decode_string(self.source, &token_of(Kind::String { legacy_octal: false }, span, true), out)
+    }
+
+    /// The value of a number literal.
+    pub fn number(&self, span: Span, base: NumberBase) -> Option<f64> {
+        lex::number_value(self.source, &token_of(Kind::Number(base), span, false))
+    }
+
+    /// Append the cooked (`raw = false`) or raw value of a template piece. A cooked piece with a bad
+    /// escape fails.
+    pub fn quasi(&self, q: &Quasi, raw: bool, out: &mut Vec<u16>) -> Result<(), lex::Error> {
+        let kind = Kind::Template { part: q.part, bad_escape: q.bad_escape };
+        lex::decode_template(self.source, &token_of(kind, q.span, true), raw, out)
+    }
+
+    /// The pattern and flags of a regexp literal.
+    pub fn regexp(&self, span: Span) -> Option<(&'a str, &'a str)> {
+        lex::regexp_parts(self.source, &token_of(Kind::RegExp, span, false))
+    }
+
+    /// Line (from 1) and UTF-16 column (from 0) of a byte offset.
+    pub fn location(&self, byte: u32) -> lex::Location {
+        lex::location(self.source, byte as usize)
+    }
+
+    pub fn stats(&self) -> Stats {
+        use std::mem::size_of_val;
+        Stats {
+            exprs: self.exprs.len(),
+            stmts: self.stmts.len(),
+            pats: self.pats.len(),
+            funcs: self.funcs.len(),
+            classes: self.classes.len(),
+            props: self.props.len(),
+            pat_props: self.pat_props.len(),
+            templates: self.templates.len(),
+            quasis: self.quasis.len(),
+            decls: self.decls.len(),
+            cases: self.cases.len(),
+            catches: self.catches.len(),
+            elems: self.elems.len(),
+            list_items: self.lists.len(),
+            bytes: size_of_val(&*self.exprs) + size_of_val(&*self.stmts) + size_of_val(&*self.pats)
+                + size_of_val(&*self.funcs) + size_of_val(&*self.classes) + size_of_val(&*self.props)
+                + size_of_val(&*self.pat_props) + size_of_val(&*self.templates) + size_of_val(&*self.quasis)
+                + size_of_val(&*self.decls) + size_of_val(&*self.cases) + size_of_val(&*self.catches)
+                + size_of_val(&*self.elems) + size_of_val(&*self.lists),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::mem::size_of;
+
+    /// The node sizes are part of the design (fast, light). A change here must be on purpose.
+    #[test]
+    fn node_sizes() {
+        assert_eq!(size_of::<ExprId>(), 4);
+        assert_eq!(size_of::<Option<ExprId>>(), 4);
+        assert_eq!(size_of::<List<Expr>>(), 8);
+        assert!(size_of::<ExprKind>() <= 16, "ExprKind {}", size_of::<ExprKind>());
+        assert!(size_of::<Expr>() <= 24, "Expr {}", size_of::<Expr>());
+        assert!(size_of::<Stmt>() <= 32, "Stmt {}", size_of::<Stmt>());
+        assert!(size_of::<Pat>() <= 24, "Pat {}", size_of::<Pat>());
+    }
+}
