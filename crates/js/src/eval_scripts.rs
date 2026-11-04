@@ -1,0 +1,245 @@
+// Shared-realm multi-script execution. Included by `eval.rs` (`include!`), so it shares that module's imports.
+//
+// One realm is one heap, one global object and one global lexical environment (env 0). Scripts come in through
+// `Interp::new` (the first one) and `Interp::run_script` (any later one, text in, owned by the realm).
+//
+// How code ownership works
+// - A script is an owned `Program<'static>` (its source is copied) behind an `Rc`. No borrow, no leak, no unsafe.
+// - Everything the evaluator caches per node (names, literal strings, function scope tables) belongs to one script.
+//   The ids are indexes into that script's arenas, so two scripts reuse the same ids for different nodes.
+//   The code of the CURRENT script lives in the `Interp` fields (`prog`, `expr_name`, ...), so the hot paths
+//   are unchanged. The other scripts are parked in `scripts`. `select` swaps one in with 8 pointer-sized swaps.
+// - Every closure records `script`, the slot of the script that made it. `call_script` selects that script
+//   and puts the caller's script back on every exit, normal, throw or limit.
+// - Names are interned once for the whole realm (`names`), so a binding name means the same in every script.
+// - Retention: a script and its caches stay until the realm is dropped, even if no closure reaches them. The
+//   bounds are `EvalLimits::max_scripts`, `max_script_source` and `max_script_nodes`, checked before the
+//   source is parsed and while it is parsed. A script rejected during parse or preflight is not kept and
+//   its interned names are removed again. Runtime failures keep code for already-created closures.
+//
+// GC: `script_roots` gives the parked scripts' cached strings to `roots`. The names are rooted once.
+
+/// The per-script code and caches (see the header). The slot of the current script holds an empty placeholder.
+struct Code {
+    prog: Rc<Program<'static>>,
+    expr_name: Vec<u32>,
+    pat_name: Vec<u32>,
+    stmt_label: Vec<u32>,
+    func_name: Vec<u32>,
+    expr_str: Vec<Option<StrId>>,
+    prop_str: Vec<Option<StrId>>,
+    scopes: Vec<FScope>,
+}
+
+impl Code {
+    fn placeholder(prog: &Rc<Program<'static>>) -> Code {
+        Code { prog: prog.clone(), expr_name: Vec::new(), pat_name: Vec::new(), stmt_label: Vec::new(), func_name: Vec::new(), expr_str: Vec::new(), prop_str: Vec::new(), scopes: Vec::new() }
+    }
+
+    /// Empty caches sized for the tree.
+    fn new(prog: Rc<Program<'static>>) -> Code {
+        let st = prog.stats();
+        Code {
+            expr_name: vec![0; st.exprs],
+            pat_name: vec![0; st.pats],
+            stmt_label: vec![0; st.stmts],
+            func_name: vec![0; st.funcs],
+            expr_str: vec![None; st.exprs],
+            prop_str: vec![None; st.props],
+            scopes: (0..=st.funcs).map(|_| FScope::default()).collect(),
+            prog,
+        }
+    }
+}
+
+fn is_restricted(p: Option<Property>) -> bool {
+    matches!(p, Some(Property::Data { configurable: false, .. } | Property::Accessor { configurable: false, .. }))
+}
+
+impl<'p> Interp<'p> {
+    /// A realm with no script yet. Builtins are installed. Add code with [`Interp::run_script`].
+    /// The first slot holds an empty script and counts toward `max_scripts`.
+    pub fn realm(heap: Heap, limits: EvalLimits) -> Result<Interp<'p>, Error> {
+        let empty = crate::parse::parse_script("", Default::default()).map_err(|_| unsupported("empty script", Span::default()))?;
+        let mut it = Self::with_code(Rc::new(empty.into_owned()), heap, limits)?;
+        it.install_builtins()?;
+        it.install_promise()?;
+        Ok(it)
+    }
+
+    /// Parse `source` as a script, check it (Unsupported is found before anything runs), keep it, and run it in
+    /// the shared realm. It sees every earlier global (`var`, functions, `let`, `const`) and closures from earlier
+    /// scripts keep running their own code. Redeclaring an existing lexical, or a lexical over an existing `var` or
+    /// non-configurable global, throws a `SyntaxError` before the script changes anything.
+    ///
+    /// Errors: a syntax error is a thrown `SyntaxError`. [`Error::Unsupported`] has the span in THIS source.
+    /// `Limit(Scripts | ScriptSource | ScriptNodes)` means the realm refused the script and nothing changed.
+    /// The text is copied: the host may drop `source` at once. Not allowed while a call is active.
+    pub fn run_script(&mut self, source: &str) -> Result<Value, Error> {
+        if self.depth != 0 {
+            return Err(unsupported("run_script during a call", Span::default()));
+        }
+        let id = self.add_script(source)?;
+        self.exec_script(id)
+    }
+
+    /// Parse, check and keep a script. On any error nothing is kept.
+    fn add_script(&mut self, source: &str) -> Res<usize> {
+        if self.scripts.len() >= self.limits.max_scripts {
+            return Err(Error::Limit(LimitKind::Scripts));
+        }
+        let src_room = self.limits.max_script_source.saturating_sub(self.script_source);
+        let per_script_source = src_room.min(crate::lex::MAX_SOURCE_LEN);
+        if source.len() > per_script_source {
+            return Err(Error::Limit(LimitKind::ScriptSource));
+        }
+        let node_room = self.limits.max_script_nodes.saturating_sub(self.script_nodes);
+        let pl = crate::parse::Limits { max_source: per_script_source, max_nodes: node_room.min(u32::MAX as usize) as u32, ..Default::default() };
+        let parsed = match crate::parse::parse_script(source, pl) {
+            Ok(p) => p,
+            Err(e) => {
+                use crate::parse::{ErrorKind as K, LimitKind as L};
+                return Err(match e.kind {
+                    K::Limit(L::Source) => Error::Limit(LimitKind::ScriptSource),
+                    K::Limit(L::Nodes | L::List) => Error::Limit(LimitKind::ScriptNodes),
+                    K::Limit(L::Depth) => Error::Limit(LimitKind::TraversalDepth),
+                    K::Unsupported => unsupported(e.msg, Span { start: e.start, end: e.end }),
+                    _ => self.mk_err(4, e.msg),
+                });
+            }
+        };
+        let st = parsed.stats();
+        let nodes = st.nodes() + st.list_items;
+        if nodes > node_room {
+            return Err(Error::Limit(LimitKind::ScriptNodes));
+        }
+        let (id, old, names_mark) = (self.scripts.len(), self.cur, self.names.len());
+        self.scripts.push(Code::new(Rc::new(parsed.into_owned())));
+        self.select(id);
+        let r = self.walk_program();
+        self.select(old);
+        if let Err(e) = r {
+            self.scripts.pop();
+            for n in self.names.drain(names_mark..) {
+                self.name_map.remove(&n);
+            }
+            self.name_strs.truncate(names_mark);
+            return Err(e);
+        }
+        self.script_source += source.len();
+        self.script_nodes += nodes;
+        Ok(id)
+    }
+
+    /// Make script `id` the current one: its code and caches go into the `Interp` fields.
+    fn select(&mut self, id: usize) {
+        if id == self.cur {
+            return;
+        }
+        let c = &mut self.scripts[id];
+        std::mem::swap(&mut self.prog, &mut c.prog);
+        std::mem::swap(&mut self.expr_name, &mut c.expr_name);
+        std::mem::swap(&mut self.pat_name, &mut c.pat_name);
+        std::mem::swap(&mut self.stmt_label, &mut c.stmt_label);
+        std::mem::swap(&mut self.func_name, &mut c.func_name);
+        std::mem::swap(&mut self.expr_str, &mut c.expr_str);
+        std::mem::swap(&mut self.prop_str, &mut c.prop_str);
+        std::mem::swap(&mut self.scopes, &mut c.scopes);
+        // slot `cur` held the placeholder and slot `id` now holds the old current code: exchange them
+        self.scripts.swap(self.cur, id);
+        self.cur = id;
+    }
+
+    /// The function node `fid` of script `script` (a closure's own code, not the current script's).
+    fn func_of(&self, script: u32, fid: FuncId) -> Func {
+        if script as usize == self.cur { *self.prog.func(fid) } else { *self.scripts[script as usize].prog.func(fid) }
+    }
+
+    /// Cached strings of the parked scripts, for `roots`.
+    fn script_roots(&self, v: &mut Vec<Value>) {
+        for c in &self.scripts {
+            v.extend(c.expr_str.iter().flatten().map(|&s| Value::String(s)));
+            v.extend(c.prop_str.iter().flatten().map(|&s| Value::String(s)));
+        }
+    }
+
+    /// Run script `id` at the top level and give back the caller's script.
+    fn exec_script(&mut self, id: usize) -> Result<Value, Error> {
+        let old = self.cur;
+        self.begin();
+        self.completion = Value::Undefined;
+        self.select(id);
+        let r = self.exec_current();
+        self.select(old);
+        self.env = 0;
+        r
+    }
+
+    /// GlobalDeclarationInstantiation checks (before anything is declared), for the current script.
+    fn check_global_decls(&mut self) -> Res<()> {
+        let prog = self.prog.clone();
+        let top = self.scopes.len() - 1;
+        let (mut lex, mut funcs) = (Vec::new(), Vec::new());
+        for s in prog.list(prog.body) {
+            match prog.stmt(s).kind {
+                StmtKind::Var { kind, decls } if kind != VarKind::Var => {
+                    for d in prog.list(decls) {
+                        self.pat_names(prog.decl(d).target, &mut lex);
+                    }
+                }
+                StmtKind::Function(fid) => funcs.push(self.func_name[fid.index()]),
+                _ => {}
+            }
+        }
+        let redeclared = |it: &mut Self, n: u32| it.mk_err(4, &format!("Identifier '{}' has already been declared", it.names[n as usize]));
+        for &n in &lex {
+            let key = self.name_key(n)?;
+            if self.find_in(0, n).is_some() || is_restricted(h!(self, self.heap.get_own_property(self.global, key))) {
+                return Err(redeclared(self, n));
+            }
+        }
+        for i in 0..self.scopes[top].vars.len() + funcs.len() {
+            let n = if i < funcs.len() { funcs[i] } else { self.scopes[top].vars[i - funcs.len()] };
+            if self.find_in(0, n).is_some() {
+                return Err(redeclared(self, n));
+            }
+            if i < funcs.len() {
+                // CanDeclareGlobalFunction: an existing non-configurable property must be a writable, enumerable data property
+                let key = self.name_key(n)?;
+                match h!(self, self.heap.get_own_property(self.global, key)) {
+                    Some(Property::Data { writable: true, enumerable: true, .. }) | None => {}
+                    Some(Property::Data { configurable: true, .. } | Property::Accessor { configurable: true, .. }) => {}
+                    Some(_) => return Err(self.type_err(&format!("Cannot redefine property: {}", self.names[n as usize]))),
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Instantiate and run the current script's body in the global environment.
+    fn exec_current(&mut self) -> Result<Value, Error> {
+        self.env = 0;
+        self.strict = self.prog.strict;
+        let prog = self.prog.clone();
+        self.check_global_decls()?;
+        let n = self.scopes.len() - 1;
+        for i in 0..self.scopes[n].vars.len() {
+            let name = self.scopes[n].vars[i];
+            let key = self.name_key(name)?;
+            if !h!(self, self.heap.has_own_property(self.global, key)) {
+                let d = PropertyDescriptor { value: Some(Value::Undefined), writable: Some(true), enumerable: Some(true), configurable: Some(false), ..Default::default() };
+                h!(self, self.heap.define_own_property(self.global, key, &d));
+            }
+        }
+        let r = match self.declare_scope(prog.body, true) {
+            Ok(()) => self.exec_list(prog.body),
+            Err(e) => Err(Ctl::Err(e)),
+        };
+        self.env = 0;
+        match r {
+            Ok(()) => Ok(self.completion),
+            Err(Ctl::Err(e)) => Err(e),
+            Err(_) => Err(unsupported("stray break, continue or return", Span::default())),
+        }
+    }
+}

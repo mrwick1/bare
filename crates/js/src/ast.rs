@@ -481,10 +481,10 @@ pub enum StmtKind {
 
 // ---------------------------------------------------------------- program
 
-/// A parsed script. Borrows the source, owns all nodes.
-#[derive(Debug)]
+/// A parsed script. Borrows the source (or owns it after [`Program::into_owned`]), owns all nodes.
+#[derive(Debug, Clone)]
 pub struct Program<'a> {
-    pub source: &'a str,
+    pub source: Cow<'a, str>,
     pub body: List<Stmt>,
     /// The script starts with a `"use strict"` directive.
     pub strict: bool,
@@ -537,10 +537,27 @@ fn token_of(kind: Kind, span: Span, escapes: bool) -> Token {
     Token { kind, start: span.start, end: span.end, newline_before: false, escapes }
 }
 
+/// Give back the spare capacity of an arena that will not grow again.
+fn tight<T>(mut v: Vec<T>) -> Vec<T> {
+    v.shrink_to_fit();
+    v
+}
+
+/// [`Program::name`] on a plain source text (the parser has the text before it has a stable `Program`).
+pub(crate) fn name_in(source: &str, span: Span) -> Cow<'_, str> {
+    let full = source.get(span.start as usize..span.end as usize).unwrap_or("");
+    let t = full.strip_prefix('#').unwrap_or(full);
+    if !t.as_bytes().contains(&b'\\') {
+        return Cow::Borrowed(t);
+    }
+    let tok = token_of(Kind::Ident, Span { start: span.start + (full.len() - t.len()) as u32, end: span.end }, true);
+    lex::ident_name(source, &tok).unwrap_or(Cow::Borrowed(t))
+}
+
 impl<'a> Program<'a> {
     pub(crate) fn new(source: &'a str) -> Program<'a> {
         Program {
-            source,
+            source: Cow::Borrowed(source),
             body: List::new(0, 0),
             strict: false,
             exprs: Vec::new(),
@@ -557,6 +574,18 @@ impl<'a> Program<'a> {
             catches: Vec::new(),
             elems: Vec::new(),
             lists: Vec::new(),
+        }
+    }
+
+    /// The same tree with an owned copy of the source. It holds no borrow, so a host can keep it
+    /// after the source text is gone. Node ids and spans are unchanged.
+    pub fn into_owned(self) -> Program<'static> {
+        Program {
+            source: Cow::Owned(self.source.into_owned()),
+            body: self.body, strict: self.strict, exprs: tight(self.exprs), stmts: tight(self.stmts), pats: tight(self.pats),
+            funcs: tight(self.funcs), classes: tight(self.classes), props: tight(self.props), pat_props: tight(self.pat_props),
+            templates: tight(self.templates), quasis: tight(self.quasis), decls: tight(self.decls), cases: tight(self.cases),
+            catches: tight(self.catches), elems: tight(self.elems), lists: tight(self.lists),
         }
     }
 
@@ -618,47 +647,41 @@ impl<'a> Program<'a> {
     }
 
     /// The source text of a span.
-    pub fn text(&self, span: Span) -> &'a str {
+    pub fn text(&self, span: Span) -> &str {
         self.source.get(span.start as usize..span.end as usize).unwrap_or("")
     }
 
     /// The name in a span (an identifier, a property name, or a `#private` name without the `#`):
     /// `\u` escapes decoded. Borrowed from the source when there is no escape.
-    pub fn name(&self, span: Span) -> Cow<'a, str> {
-        let t = self.text(span);
-        let t = t.strip_prefix('#').unwrap_or(t);
-        if !t.as_bytes().contains(&b'\\') {
-            return Cow::Borrowed(t);
-        }
-        let tok = token_of(Kind::Ident, Span { start: span.start + (self.text(span).len() - t.len()) as u32, end: span.end }, true);
-        lex::ident_name(self.source, &tok).unwrap_or(Cow::Borrowed(t))
+    pub fn name(&self, span: Span) -> Cow<'_, str> {
+        name_in(&self.source, span)
     }
 
     /// Append the value of a string literal (a [`ExprKind::String`] span or a [`Key::Str`] span).
     pub fn string(&self, span: Span, out: &mut Vec<u16>) -> Result<(), lex::Error> {
-        lex::decode_string(self.source, &token_of(Kind::String { legacy_octal: false }, span, true), out)
+        lex::decode_string(&self.source, &token_of(Kind::String { legacy_octal: false }, span, true), out)
     }
 
     /// The value of a number literal.
     pub fn number(&self, span: Span, base: NumberBase) -> Option<f64> {
-        lex::number_value(self.source, &token_of(Kind::Number(base), span, false))
+        lex::number_value(&self.source, &token_of(Kind::Number(base), span, false))
     }
 
     /// Append the cooked (`raw = false`) or raw value of a template piece. A cooked piece with a bad
     /// escape fails.
     pub fn quasi(&self, q: &Quasi, raw: bool, out: &mut Vec<u16>) -> Result<(), lex::Error> {
         let kind = Kind::Template { part: q.part, bad_escape: q.bad_escape };
-        lex::decode_template(self.source, &token_of(kind, q.span, true), raw, out)
+        lex::decode_template(&self.source, &token_of(kind, q.span, true), raw, out)
     }
 
     /// The pattern and flags of a regexp literal.
-    pub fn regexp(&self, span: Span) -> Option<(&'a str, &'a str)> {
-        lex::regexp_parts(self.source, &token_of(Kind::RegExp, span, false))
+    pub fn regexp(&self, span: Span) -> Option<(&str, &str)> {
+        lex::regexp_parts(&self.source, &token_of(Kind::RegExp, span, false))
     }
 
     /// Line (from 1) and UTF-16 column (from 0) of a byte offset.
     pub fn location(&self, byte: u32) -> lex::Location {
-        lex::location(self.source, byte as usize)
+        lex::location(&self.source, byte as usize)
     }
 
     pub fn stats(&self) -> Stats {

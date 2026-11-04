@@ -9,6 +9,9 @@
 //! - Errors: [`Error::Throw`] is a JavaScript exception, [`Error::Unsupported`] is a construct or builtin that
 //!   is not implemented, [`Error::Limit`] is an execution limit, [`Error::Heap`] is a heap fault (a bug).
 //!
+//! More scripts: `Interp::realm` makes an empty realm and [`Interp::run_script`] adds source text to the same heap,
+//! global object and global lexical environment. Closures keep the code of their own script. See `eval_scripts.rs`.
+//!
 //! Unsupported is found BEFORE anything runs. `Interp::new` walks every reachable node. Syntax that is not
 //! implemented gives [`Error::Unsupported`] with its span: classes, async functions and `await`, tagged
 //! templates, regexp literals, BigInt, `super`, `new.target`, private names, `with`, `for await`.
@@ -48,6 +51,8 @@ use crate::heap::*;
 use crate::value::*;
 use std::collections::{HashMap, HashSet};
 use std::hash::{BuildHasherDefault, Hasher};
+use std::marker::PhantomData;
+use std::rc::Rc;
 
 // ------------------------------------------------------------------ public types
 
@@ -62,11 +67,17 @@ pub struct EvalLimits {
     pub max_envs: usize,
     /// Function objects the evaluator tracks (closures, natives, bound functions).
     pub max_functions: usize,
+    /// Scripts a realm keeps (see [`Interp::run_script`]). The first slot, empty or not, counts.
+    pub max_scripts: usize,
+    /// Source bytes of all kept scripts together. A script that does not fit is refused before it is parsed.
+    pub max_script_source: usize,
+    /// Syntax tree nodes (plus list entries) of all kept scripts together. The parser stops at the budget.
+    pub max_script_nodes: usize,
 }
 
 impl Default for EvalLimits {
     fn default() -> Self {
-        EvalLimits { max_steps: 100_000_000, max_call_depth: 100, max_envs: 1 << 20, max_functions: 1 << 20 }
+        EvalLimits { max_steps: 100_000_000, max_call_depth: 100, max_envs: 1 << 20, max_functions: 1 << 20, max_scripts: 4096, max_script_source: 64 << 20, max_script_nodes: 8 << 20 }
     }
 }
 
@@ -85,6 +96,12 @@ pub enum LimitKind {
     PromiseReactions,
     /// Jobs per microtask drain.
     DrainJobs,
+    /// The realm keeps too many scripts.
+    Scripts,
+    /// The kept scripts have too many source bytes together.
+    ScriptSource,
+    /// The kept scripts have too many syntax nodes together, or one list or nesting is too large.
+    ScriptNodes,
     Heap(Limit),
 }
 
@@ -112,6 +129,10 @@ pub struct EvalStats {
     pub live_envs: usize,
     pub env_slots: usize,
     pub functions: usize,
+    /// Scripts kept by the realm (the first slot counts), their source bytes and their syntax nodes.
+    pub scripts: usize,
+    pub script_source: usize,
+    pub script_nodes: usize,
 }
 
 // ------------------------------------------------------------------ small internals
@@ -215,7 +236,8 @@ enum Nat {
 }
 
 enum Callee {
-    Script { fid: FuncId, env: u32, self_binding: bool },
+    /// `script` is the slot of the script that owns `fid`.
+    Script { script: u32, fid: FuncId, env: u32, self_binding: bool },
     Native(Nat),
     Bound { target: ObjId, this: Value, args: Vec<Value> },
     Promise(PFn),
@@ -264,7 +286,13 @@ enum Ref {
 // ------------------------------------------------------------------ the interpreter
 
 pub struct Interp<'p> {
-    prog: &'p Program<'p>,
+    /// The code of the current script. See `eval_scripts.rs`.
+    prog: Rc<Program<'static>>,
+    cur: usize,
+    scripts: Vec<Code>,
+    script_source: usize,
+    script_nodes: usize,
+    _p: PhantomData<&'p ()>,
     /// The heap. Public so a host can read results. Do not collect it directly: use [`Interp::collect`].
     pub heap: Heap,
     limits: EvalLimits,
@@ -334,7 +362,27 @@ fn is_nullish(v: Value) -> bool {
 impl<'p> Interp<'p> {
     /// Check the whole tree (Unsupported is reported here, before anything runs) and build the global
     /// object and the builtins in `heap`.
-    pub fn new(prog: &'p Program<'p>, mut heap: Heap, mut limits: EvalLimits) -> Result<Interp<'p>, Error> {
+    pub fn new(prog: &'p Program<'p>, heap: Heap, limits: EvalLimits) -> Result<Interp<'p>, Error> {
+        Self::check_code_limits(prog, &limits)?;
+        let mut it = Self::with_code(Rc::new(prog.clone().into_owned()), heap, limits)?;
+        it.walk_program()?;
+        it.install_builtins()?;
+        it.install_promise()?;
+        Ok(it)
+    }
+
+    fn check_code_limits(prog: &Program<'_>, limits: &EvalLimits) -> Res<()> {
+        if limits.max_scripts == 0 { return Err(Error::Limit(LimitKind::Scripts)); }
+        if prog.source.len() > limits.max_script_source { return Err(Error::Limit(LimitKind::ScriptSource)); }
+        let stats = prog.stats();
+        if stats.nodes() + stats.list_items > limits.max_script_nodes { return Err(Error::Limit(LimitKind::ScriptNodes)); }
+        if limits.max_envs == 0 { return Err(Error::Limit(LimitKind::Envs)); }
+        Ok(())
+    }
+
+    fn with_code(prog: Rc<Program<'static>>, mut heap: Heap, mut limits: EvalLimits) -> Result<Interp<'p>, Error> {
+        let stats = prog.stats();
+        Self::check_code_limits(&prog, &limits)?;
         limits.max_call_depth = limits.max_call_depth.min(100);
         if limits.max_envs == 0 { return Err(Error::Limit(LimitKind::Envs)); }
         macro_rules! e {
@@ -362,9 +410,16 @@ impl<'p> Interp<'p> {
             e!(key("toString")), e!(key("valueOf")), e!(key("__proto__")), e!(key("value")), e!(key("writable")),
             e!(key("enumerable")), e!(key("configurable")), e!(key("get")), e!(key("set")),
         ];
-        let p = prog;
+        let p = &prog;
         let mut it = Interp {
-            prog,
+            cur: 0,
+            scripts: vec![Code::placeholder(&prog)],
+            script_source: prog.source.len(),
+            script_nodes: stats.nodes() + stats.list_items,
+            _p: PhantomData,
+            strict: prog.strict,
+            cur_strict: prog.strict,
+            prog: prog.clone(),
             heap,
             limits,
             steps: 0,
@@ -387,7 +442,6 @@ impl<'p> Interp<'p> {
             live_envs: 0,
             funcs: FxMap::default(),
             env: 0,
-            strict: prog.strict,
             ret: Value::Undefined,
             completion: Value::Undefined,
             pending_labels: Vec::new(),
@@ -412,16 +466,12 @@ impl<'p> Interp<'p> {
             k_configurable: ks[11],
             k_get: ks[12],
             k_set: ks[13],
-            cur_strict: prog.strict,
             n_arguments: 0,
         };
         it.n_arguments = it.intern_name("arguments");
         // The global lexical environment: id 0, never freed.
         it.envs.push(Env { parent: NONE, bindings: Vec::new(), index: None, this: Some(Value::Object(global)), captured: true, live: true, var_scope: true });
         it.live_envs = 1;
-        it.walk_program()?;
-        it.install_builtins()?;
-        it.install_promise()?;
         Ok(it)
     }
 
@@ -435,7 +485,7 @@ impl<'p> Interp<'p> {
     }
 
     pub fn stats(&self) -> EvalStats {
-        EvalStats { steps: self.steps, live_envs: self.live_envs, env_slots: self.envs.len(), functions: self.funcs.len() }
+        EvalStats { steps: self.steps, live_envs: self.live_envs, env_slots: self.envs.len(), functions: self.funcs.len(), scripts: self.scripts.len(), script_source: self.script_source, script_nodes: self.script_nodes }
     }
 
     /// Run the script once. Returns its completion value (see the module comment). A second call is
@@ -445,30 +495,7 @@ impl<'p> Interp<'p> {
             return Err(unsupported("run called twice", Span::default()));
         }
         self.ran = true;
-        self.begin();
-        self.completion = Value::Undefined;
-        self.env = 0;
-        self.strict = self.prog.strict;
-        let prog = self.prog;
-        let n = self.scopes.len() - 1;
-        for i in 0..self.scopes[n].vars.len() {
-            let name = self.scopes[n].vars[i];
-            let key = self.name_key(name)?;
-            if !h!(self, self.heap.has_own_property(self.global, key)) {
-                let d = PropertyDescriptor { value: Some(Value::Undefined), writable: Some(true), enumerable: Some(true), configurable: Some(false), ..Default::default() };
-                h!(self, self.heap.define_own_property(self.global, key, &d));
-            }
-        }
-        let r = match self.declare_scope(prog.body, true) {
-            Ok(()) => self.exec_list(prog.body),
-            Err(e) => Err(Ctl::Err(e)),
-        };
-        self.env = 0;
-        match r {
-            Ok(()) => Ok(self.completion),
-            Err(Ctl::Err(e)) => Err(e),
-            Err(_) => Err(unsupported("stray break, continue or return", Span::default())),
-        }
+        self.exec_script(0)
     }
 
     /// Call a function value (a closure, a native or a bound function) from the host.
@@ -498,6 +525,7 @@ impl<'p> Interp<'p> {
         v.extend(self.name_strs.iter().flatten().map(|&s| Value::String(s)));
         v.extend(self.expr_str.iter().flatten().map(|&s| Value::String(s)));
         v.extend(self.prop_str.iter().flatten().map(|&s| Value::String(s)));
+        self.script_roots(&mut v);
         for e in self.envs.iter().filter(|e| e.live) {
             v.extend(e.bindings.iter().map(|b| b.value));
             v.extend(e.this);
@@ -625,8 +653,8 @@ impl<'p> Interp<'p> {
     }
 
     fn name_at(&mut self, span: Span) -> u32 {
-        let n = self.prog.name(span);
-        self.intern_name(&n)
+        let prog = self.prog.clone();
+        self.intern_name(&prog.name(span))
     }
 
     fn name_str(&mut self, n: u32) -> Res<StrId> {
@@ -710,7 +738,7 @@ impl<'p> Interp<'p> {
     // ------------------------------------------------------------ the first walk (Unsupported + hoisting)
 
     fn walk_program(&mut self) -> Res<()> {
-        let prog = self.prog;
+        let prog = self.prog.clone();
         let top = self.scopes.len() - 1;
         self.cur_strict = prog.strict;
         for s in prog.list(prog.body) {
@@ -724,7 +752,7 @@ impl<'p> Interp<'p> {
     }
 
     fn w_func_inner(&mut self, fid: FuncId, outer_args: usize) -> Res<()> {
-        let prog = self.prog;
+        let prog = self.prog.clone();
         let f = *prog.func(fid);
         if f.is_async {
             return Err(unsupported("async function", f.span));
@@ -755,7 +783,7 @@ impl<'p> Interp<'p> {
     }
 
     fn pat_names(&mut self, p: PatId, out: &mut Vec<u32>) {
-        let prog = self.prog;
+        let prog = self.prog.clone();
         let pat = *prog.pat(p);
         match pat.kind {
             PatKind::Ident => {
@@ -784,7 +812,7 @@ impl<'p> Interp<'p> {
     }
 
     fn w_pat_inner(&mut self, p: PatId, fs: usize, ac: usize) -> Res<()> {
-        let prog = self.prog;
+        let prog = self.prog.clone();
         let pat = *prog.pat(p);
         match pat.kind {
             PatKind::Ident => {
@@ -821,7 +849,7 @@ impl<'p> Interp<'p> {
     }
 
     fn w_stmt_inner(&mut self, s: StmtId, fs: usize, ac: usize, nested: bool) -> Res<()> {
-        let prog = self.prog;
+        let prog = self.prog.clone();
         let st = *prog.stmt(s);
         match st.kind {
             StmtKind::Expr(e) | StmtKind::Directive(e) | StmtKind::Throw(e) => self.w_expr(e, fs, ac)?,
@@ -933,7 +961,7 @@ impl<'p> Interp<'p> {
     }
 
     fn w_expr_inner(&mut self, e: ExprId, fs: usize, ac: usize) -> Res<()> {
-        let prog = self.prog;
+        let prog = self.prog.clone();
         let ex = *prog.expr(e);
         match ex.kind {
             ExprKind::Ident => {
@@ -1234,7 +1262,7 @@ impl<'p> Interp<'p> {
     /// uninitialized (TDZ), function declarations as initialized closures. `func_top`: the list is a
     /// function or script body, where functions are var-scoped.
     fn declare_scope(&mut self, l: List<Stmt>, func_top: bool) -> Res<()> {
-        let prog = self.prog;
+        let prog = self.prog.clone();
         for s in prog.list(l) {
             match prog.stmt(s).kind {
                 StmtKind::Var { kind, decls } if kind != VarKind::Var => {
@@ -1263,11 +1291,11 @@ impl<'p> Interp<'p> {
     // ------------------------------------------------------------ functions
 
     fn make_closure(&mut self, fid: FuncId, name: Option<StrId>, is_expr: bool) -> Res<Value> {
-        let prog = self.prog;
+        let prog = self.prog.clone();
         let f = *prog.func(fid);
         self.capture();
         let self_binding = is_expr && f.name.is_some() && f.kind == FuncKind::Normal;
-        let o = self.new_func_object(Callee::Script { fid, env: self.env, self_binding })?;
+        let o = self.new_func_object(Callee::Script { script: self.cur as u32, fid, env: self.env, self_binding })?;
         let nstr = match (f.name.is_some(), name) {
             (true, _) => self.name_str(self.func_name[fid.index()])?,
             (false, Some(s)) => s,
@@ -1301,13 +1329,13 @@ impl<'p> Interp<'p> {
         self.tick()?;
         let Value::Object(o) = f else { return Err(self.type_err("value is not a function")) };
         enum D {
-            S(FuncId, u32, bool),
+            S(u32, FuncId, u32, bool),
             N(Nat),
             B(ObjId, Value, Vec<Value>),
             P(PFn),
         }
         let d = match self.funcs.get(&o) {
-            Some(&Callee::Script { fid, env, self_binding }) => D::S(fid, env, self_binding),
+            Some(&Callee::Script { script, fid, env, self_binding }) => D::S(script, fid, env, self_binding),
             Some(&Callee::Native(n)) => D::N(n),
             Some(Callee::Bound { target, this, args }) => D::B(*target, *this, args.clone()),
             Some(&Callee::Promise(pf)) => D::P(pf),
@@ -1315,7 +1343,7 @@ impl<'p> Interp<'p> {
         };
         self.depth += 1;
         let r = match d {
-            D::S(fid, env, sb) => self.call_script(o, fid, env, sb, this, args),
+            D::S(script, fid, env, sb) => self.call_script((script, fid), o, env, sb, this, args),
             D::N(n) => self.call_native(n, this, args, false),
             D::P(pf) => self.call_promise(pf, this, args, false),
             D::B(t, bthis, mut bargs) => {
@@ -1342,13 +1370,13 @@ impl<'p> Interp<'p> {
         }
         self.tick()?;
         enum D {
-            S(FuncId, u32, bool),
+            S(u32, FuncId, u32, bool),
             N(Nat),
             B(ObjId, Vec<Value>),
             P(PFn),
         }
         let d = match self.funcs.get(&o) {
-            Some(&Callee::Script { fid, env, self_binding }) if self.prog.func(fid).kind == FuncKind::Normal => D::S(fid, env, self_binding),
+            Some(&Callee::Script { script, fid, env, self_binding }) if self.func_of(script, fid).kind == FuncKind::Normal => D::S(script, fid, env, self_binding),
             Some(&Callee::Native(n)) if matches!(n, Nat::ObjectCtor | Nat::FnCtor | Nat::ArrayCtor | Nat::ErrorCtor(_)) => D::N(n),
             Some(&Callee::Native(Nat::StringFn | Nat::NumberFn | Nat::BooleanFn)) => return Err(unsupported("wrapper object (new String/Number/Boolean)", Span::default())),
             Some(Callee::Bound { target, args, .. }) => D::B(*target, args.clone()),
@@ -1357,11 +1385,11 @@ impl<'p> Interp<'p> {
         };
         self.depth += 1;
         let r = match d {
-            D::S(fid, env, sb) => (|| {
+            D::S(script, fid, env, sb) => (|| {
                 let pv = self.get_prop(f, self.k_prototype)?;
                 let proto = if let Value::Object(p) = pv { p } else { self.object_proto };
                 let obj = h!(self, self.heap.new_object(Some(proto)));
-                let r = self.call_script(o, fid, env, sb, Value::Object(obj), args)?;
+                let r = self.call_script((script, fid), o, env, sb, Value::Object(obj), args)?;
                 Ok(if matches!(r, Value::Object(_)) { r } else { Value::Object(obj) })
             })(),
             D::N(n) => self.call_native(n, Value::Undefined, args, true),
@@ -1375,11 +1403,15 @@ impl<'p> Interp<'p> {
         r
     }
 
-    fn call_script(&mut self, fobj: ObjId, fid: FuncId, cenv: u32, self_binding: bool, this: Value, args: &[Value]) -> Res<Value> {
+    fn call_script(&mut self, (script, fid): (u32, FuncId), fobj: ObjId, cenv: u32, self_binding: bool, this: Value, args: &[Value]) -> Res<Value> {
         let (saved_env, saved_strict) = (self.env, self.strict);
         let env = self.new_env(cenv, true)?;
         self.env = env;
+        // The callee runs on its own script code. The caller's code comes back on every exit.
+        let saved_script = self.cur;
+        self.select(script as usize);
         let r = self.call_body(fobj, fid, env, self_binding, this, args);
+        self.select(saved_script);
         self.env = saved_env;
         self.strict = saved_strict;
         self.release(env);
@@ -1387,7 +1419,7 @@ impl<'p> Interp<'p> {
     }
 
     fn call_body(&mut self, fobj: ObjId, fid: FuncId, env: u32, self_binding: bool, this: Value, args: &[Value]) -> Res<Value> {
-        let prog = self.prog;
+        let prog = self.prog.clone();
         let f = *prog.func(fid);
         self.strict = f.strict;
         if f.kind != FuncKind::Arrow {
@@ -1570,7 +1602,7 @@ impl<'p> Interp<'p> {
     }
 
     fn prop_key(&mut self, pid: Id<Prop>, key: Key) -> Res<PropertyKey> {
-        let prog = self.prog;
+        let prog = self.prog.clone();
         match key {
             Key::Computed(e) => {
                 let v = self.eval_expr(e)?;
@@ -1581,7 +1613,7 @@ impl<'p> Interp<'p> {
                 if let Some(s) = self.prop_str[pid.index()] {
                     return Ok(h!(self, self.heap.key_from_string(s)));
                 }
-                let s = self.key_string(key, prog)?;
+                let s = self.key_string(key, &prog)?;
                 self.prop_str[pid.index()] = Some(s);
                 Ok(h!(self, self.heap.key_from_string(s)))
             }
@@ -1673,7 +1705,7 @@ impl<'p> Interp<'p> {
     }
 
     fn eval_args(&mut self, l: List<Expr>) -> Res<Vec<Value>> {
-        let prog = self.prog;
+        let prog = self.prog.clone();
         let mut out = self.arg_pool.pop().unwrap_or_default();
         out.clear();
         for a in prog.list(l) {
@@ -1695,7 +1727,7 @@ impl<'p> Interp<'p> {
     }
 
     fn link_inner(&mut self, e: ExprId) -> Res<Option<(Value, Value)>> {
-        let prog = self.prog;
+        let prog = self.prog.clone();
         let ex = *prog.expr(e);
         match ex.kind {
             ExprKind::Member { obj, name, optional } => {
@@ -1753,7 +1785,7 @@ impl<'p> Interp<'p> {
 
     fn eval_expr_inner(&mut self, e: ExprId) -> Res<Value> {
         self.tick()?;
-        let prog = self.prog;
+        let prog = self.prog.clone();
         let ex = *prog.expr(e);
         match ex.kind {
             ExprKind::Ident => self.get_name(self.expr_name[e.index()]),
@@ -1862,7 +1894,7 @@ impl<'p> Interp<'p> {
     }
 
     fn eval_object(&mut self, l: List<Prop>) -> Res<Value> {
-        let prog = self.prog;
+        let prog = self.prog.clone();
         let o = h!(self, self.heap.new_object(Some(self.object_proto)));
         for pid in prog.list(l) {
             let p = *prog.prop(pid);
@@ -2073,7 +2105,7 @@ impl<'p> Interp<'p> {
     }
 
     fn eval_assign(&mut self, op: AssignOp, target: PatId, value: ExprId) -> Res<Value> {
-        let prog = self.prog;
+        let prog = self.prog.clone();
         let pat = *prog.pat(target);
         let r = match pat.kind {
             PatKind::Ident => Ref::Name(self.pat_name[target.index()]),
@@ -2121,7 +2153,7 @@ impl<'p> Interp<'p> {
     }
 
     fn bind_pattern_inner(&mut self, p: PatId, v: Value, mode: Bind) -> Res<()> {
-        let prog = self.prog;
+        let prog = self.prog.clone();
         let pat = *prog.pat(p);
         match pat.kind {
             PatKind::Ident => {
@@ -2201,7 +2233,7 @@ impl<'p> Interp<'p> {
                             self.coerce_key(kv)?
                         }
                         k => {
-                            let s = self.key_string(k, prog)?;
+                            let s = self.key_string(k, &prog)?;
                             h!(self, self.heap.key_from_string(s))
                         }
                     };
@@ -2380,7 +2412,7 @@ impl<'p> Interp<'p> {
     // ------------------------------------------------------------ statements
 
     fn exec_list(&mut self, l: List<Stmt>) -> Ex {
-        let prog = self.prog;
+        let prog = self.prog.clone();
         for s in prog.list(l) {
             self.exec(s)?;
         }
@@ -2419,7 +2451,7 @@ impl<'p> Interp<'p> {
 
     fn exec_inner(&mut self, s: StmtId) -> Ex {
         self.tick()?;
-        let prog = self.prog;
+        let prog = self.prog.clone();
         let st = *prog.stmt(s);
         let top = self.depth == 0;
         match st.kind {
@@ -2633,7 +2665,7 @@ impl<'p> Interp<'p> {
     }
 
     fn exec_switch(&mut self, d: Value, cases: List<Case>, any_lex: bool, labels: &[u32]) -> Ex {
-        let prog = self.prog;
+        let prog = self.prog.clone();
         if any_lex {
             for c in prog.list(cases) {
                 self.declare_scope(prog.case(c).body, false)?;
@@ -2664,7 +2696,7 @@ impl<'p> Interp<'p> {
     }
 
     fn exec_for(&mut self, init: ForInit, test: Option<ExprId>, update: Option<ExprId>, body: StmtId, labels: &[u32]) -> Ex {
-        let prog = self.prog;
+        let prog = self.prog.clone();
         let mut per_iter = false;
         match init {
             ForInit::None => {}
@@ -2723,7 +2755,7 @@ impl<'p> Interp<'p> {
     }
 
     fn exec_for_each(&mut self, left: ForLeft, right: ExprId, body: StmtId, is_of: bool, labels: &[u32]) -> Ex {
-        let prog = self.prog;
+        let prog = self.prog.clone();
         let rv = self.eval_expr(right)?;
         let outer = self.env;
         let mut lexical: Option<(PatId, VarKind)> = None;
@@ -2831,6 +2863,7 @@ fn num_base(t: &str) -> NumBase {
 
 include!("eval_native.rs");
 include!("eval_promise.rs");
+include!("eval_scripts.rs");
 
 #[cfg(test)]
 #[path = "eval_tests.rs"]
@@ -2839,3 +2872,7 @@ mod tests;
 #[cfg(test)]
 #[path = "eval_promise_tests.rs"]
 mod promise_tests;
+
+#[cfg(test)]
+#[path = "eval_scripts_tests.rs"]
+mod script_tests;

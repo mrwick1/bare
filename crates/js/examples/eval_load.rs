@@ -208,7 +208,7 @@ fn run_case(name: String, scale: usize) {
     let prog = parse_script(&c.src, Limits::default()).unwrap_or_else(|e| die(format!("parse: {e}")));
     let parse_ms = t0.elapsed().as_secs_f64() * 1e3;
     let t1 = Instant::now();
-    let limits = EvalLimits { max_steps: u64::MAX / 2, max_call_depth: 100, max_envs: 1 << 22, max_functions: 1 << 22 };
+    let limits = EvalLimits { max_steps: u64::MAX / 2, max_call_depth: 100, max_envs: 1 << 22, max_functions: 1 << 22, ..Default::default() };
     let mut it = Interp::new(&prog, Heap::default(), limits).unwrap_or_else(|e| die(format!("setup: {e:?}")));
     let setup_ms = t1.elapsed().as_secs_f64() * 1e3;
     let (a0, b0, cpu0) = (ALLOCS.load(Relaxed), BYTES.load(Relaxed), cpu_ms());
