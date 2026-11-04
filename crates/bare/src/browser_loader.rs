@@ -1,0 +1,906 @@
+//! The page script loader and task driver: it runs the classic scripts of a document in ONE realm, then drives the
+//! tasks that those scripts queue (script loads, `fetch`, timers) until the page is quiet or a budget ends.
+//!
+//! Use: [`Browser::run_page`] with the real document URL, an HTTP client and [`PageLimits`]. Call
+//! [`Browser::configure_fetch`] first if the page uses `fetch` (the loader does not touch the fetch client or origin).
+//! The parent navigation module owns the URL: it calls `run_page` after it made the `Browser` from the fetched
+//! document, and `update_fetch_base_url` for later URL changes. `run_page` has no other seam and no navigation API.
+//!
+//! The document is pre-parsed (the whole DOM exists before the first script runs). So this is NOT the parser-blocking
+//! model of HTML: a script cannot `document.write`, cannot see a half-built DOM, and a script that removes a later
+//! `<script>` does not stop it. The scheduling that is kept:
+//! 1. Blocking classic scripts (inline, and external with no `async`/`defer`) run one by one in document order. An external
+//!    one is fetched at its turn. A microtask checkpoint follows each script (and each `error`/`load` event listener).
+//! 2. `readyState` becomes `interactive` (`readystatechange`). Defer scripts run in document order.
+//! 3. `DOMContentLoaded` is dispatched at the document (bubbles to the window).
+//! 4. Async scripts run as separate tasks, in document order (a real browser runs them in arrival order, at any point
+//!    before `load`). Then rounds of tasks: queued scripts, `fetch` requests, timers, each category at most `batch` tasks per
+//!    round, so a zero-delay timer loop cannot starve the network or scripts. When no script is queued, `readyState`
+//!    becomes `complete` and `load` is dispatched at the window (it does not wait for timers or `fetch`).
+//! 5. The page is settled when nothing is queued and the next timer is more than `quiet` away (or there is none).
+//!
+//! Scripts
+//! - Classic only. A `type=module` script is `Fatal::Unsupported("module script")`: the engine has no modules. A `nomodule`
+//!   script is skipped (`resources::discover`). Other `type` values are data. Every `<script>` element runs separately, even
+//!   when two elements name one URL (the bytes are fetched once: they are kept for the repeats and freed after the last).
+//! - A response is used only as `resources::fetch` allows: 2xx, a JavaScript `Content-Type` (a 404 or HTML page never runs),
+//!   no `Content-Encoding`, size caps. A failed external script is never run. It gets an `error` event, a successful one
+//!   a `load` event (also when the script threw). Inline scripts get no event. Events go through the DOM dispatch: listeners
+//!   and `onload`/`onerror` handlers run as normal listeners.
+//! - `document.currentScript` is the element while its script runs (inline, external, dynamic), else `null`. It is cleared
+//!   when the script throws too. `document.readyState` is `loading`, `interactive` or `complete`.
+//! - A script that throws is reported (`Browser::take_reports`, event type `error`) and loading goes on. `window.onerror` and
+//!   `ErrorEvent` are absent. Diagnostics hold only the error name.
+//! - Fatal: any `Unsupported`, `Limit` or heap fault, a failed microtask checkpoint, a module script. The run stops at once
+//!   and no JS runs and no I/O starts after that (a second `run_page` returns the same stop).
+//!
+//! Dynamic scripts (`document.createElement('script')`)
+//! - `HTMLScriptElement` has `src`, `type`, `async`, `defer`, `text`, `onload`, `onerror`. Inserting a connected classic
+//!   script (or a subtree that holds one), and setting `src` on a connected script that has not started, "prepares" it once.
+//!   The element is marked started, so removing and inserting it again runs nothing. `src`, `type` and the inline text are
+//!   read at that moment. An empty `src` or one that does not resolve to http(s) queues an `error` event.
+//! - External dynamic scripts are tasks, in the order of insertion (all are `async`; the "force async" flag is not modelled).
+//!   Inline dynamic scripts cannot run inside `appendChild` (the engine does not nest scripts): they run right after the
+//!   current script (before its microtask checkpoint) or, from a timer, `fetch` or event task, after the pump step (whose own
+//!   checkpoint already ran). This is a deviation: code after `appendChild` runs first.
+//! - The URL base is the document base (`<base href>` or the page URL). A pending script element is a GC root until it has run.
+//!
+//! Budgets (`PageLimits`): tasks, rounds, wall time, fetches and bytes (`resources::Limits`), pending dynamic scripts and their
+//! inline bytes, kept diagnostics. A blocking socket call is not interrupted: one read can pass `max_time` by the client timeout.
+//! Not here: stylesheets, `window.onload`, `DOMContentLoaded` for scripts that were added late, `defer` on dynamic scripts,
+//! `integrity`, `crossorigin`, `nonce`, CSP, `<noscript>`, a service worker.
+
+use crate::browser::{Browser, Dom, H, Listener, R, Target as EvTarget, illegal_constructor, unsupported};
+use crate::browser_dom as nd;
+use crate::resources::{self, Expect, JS_TYPES, Kind, Limits, LoadError, Source, Timing, WS};
+use bare_html::dom::{NodeData, NodeId};
+use bare_js::eval::{Error, Interp};
+use bare_js::value::{ObjId, Value};
+use bare_net::http::Client;
+use bare_url::Url;
+use std::cell::{Cell, OnceCell, RefCell};
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::rc::Rc;
+use std::time::{Duration, Instant};
+
+type V = R<Value>;
+
+fn arg(a: &[Value], i: usize) -> Value {
+    a.get(i).copied().unwrap_or(Value::Undefined)
+}
+
+// ---------------------------------------------------------------------------------------------- public types
+
+/// Bounds of one `run_page`. Each is checked before the thing grows or starts.
+#[derive(Clone, Debug)]
+pub struct PageLimits {
+    /// References, distinct URLs, one resource, all kept text. `max_time` here is not used: see `max_time` below.
+    pub resources: Limits,
+    /// All tasks together: scripts, network tasks, timers, messages.
+    pub max_tasks: usize,
+    /// Loop rounds after the page is parsed.
+    pub max_rounds: usize,
+    /// Wall time of the whole run.
+    pub max_time: Duration,
+    /// Tasks of one kind in one round.
+    pub batch: usize,
+    /// Stop when nothing is queued and the next timer is further away than this.
+    pub quiet: Duration,
+    /// Dynamic scripts that wait to run, and the bytes of their inline text.
+    pub max_pending_scripts: usize,
+    pub max_pending_script_bytes: usize,
+    /// Collect the heap every this many rounds.
+    pub collect_every: usize,
+    /// Kept diagnostics. More are counted, not kept.
+    pub max_diagnostics: usize,
+}
+
+impl Default for PageLimits {
+    fn default() -> Self {
+        PageLimits {
+            resources: Limits::default(),
+            max_tasks: 100_000,
+            max_rounds: 100_000,
+            max_time: Duration::from_secs(60),
+            batch: 8,
+            quiet: Duration::from_secs(1),
+            max_pending_scripts: 256,
+            max_pending_script_bytes: 8 << 20,
+            collect_every: 32,
+            max_diagnostics: 64,
+        }
+    }
+}
+
+pub struct PageConfig {
+    /// The real document URL (http or https). Relative script URLs resolve against it (or against `<base href>`).
+    pub url: String,
+    /// The client that downloads scripts. `Client::new()` trusts the OS roots; a test passes `Client::with_roots`.
+    pub client: Client,
+    pub limits: PageLimits,
+}
+
+/// Why a run ended.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Stop {
+    /// Nothing is queued and no timer is near.
+    Settled,
+    TaskBudget,
+    RoundBudget,
+    TimeBudget,
+    Fatal(Fatal),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Fatal {
+    /// The engine or the host does not do this yet (a label, never source).
+    Unsupported(&'static str),
+    /// A hard cap of the evaluator or the host. The name of the cap.
+    Limit(String),
+    Heap,
+    /// A microtask job failed in a way that cannot be undone, or a checkpoint threw.
+    Poisoned,
+    /// The URL or the page could not be set up.
+    Setup(String),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PageResult {
+    pub stop: Stop,
+    /// `loading`, `interactive` or `complete`.
+    pub ready_state: &'static str,
+    /// Script runs (a repeated element counts each time).
+    pub scripts_run: usize,
+    /// Scripts that threw (reported, loading went on).
+    pub script_throws: usize,
+    /// External scripts that did not load and were not run.
+    pub load_errors: usize,
+    pub tasks: usize,
+    pub rounds: usize,
+    pub fetches: usize,
+    /// Bytes of script text downloaded.
+    pub bytes: usize,
+    /// Short sanitized lines (origin and path of a script, an error name, a label): never source, headers, bodies or queries.
+    pub diagnostics: Vec<String>,
+    pub dropped_diagnostics: usize,
+}
+
+// ---------------------------------------------------------------------------------------------- host state
+
+enum Ext {
+    Fetch(NodeId, Url),
+    /// `src` is empty or does not resolve: an `error` event.
+    Fail(NodeId),
+}
+
+/// The state that the DOM host needs: script elements, the lifecycle, the queues of dynamic scripts.
+#[derive(Default)]
+pub(crate) struct Scripts {
+    enabled: Cell<bool>,
+    pub(crate) proto: OnceCell<ObjId>,
+    fixed: RefCell<Vec<ObjId>>,
+    /// 0 `loading`, 1 `interactive`, 2 `complete`.
+    ready: Cell<u8>,
+    current: Cell<Option<NodeId>>,
+    base: RefCell<Option<String>>,
+    started: RefCell<HashSet<NodeId>>,
+    inline: RefCell<VecDeque<(NodeId, String)>>,
+    external: RefCell<VecDeque<Ext>>,
+    pending_bytes: Cell<usize>,
+    /// (max pending scripts, max pending inline bytes)
+    caps: Cell<(usize, usize)>,
+    /// `(element, is_error)` to the id of its `onload` / `onerror` listener.
+    handlers: RefCell<HashMap<(NodeId, bool), u64>>,
+    fatal: RefCell<Option<Fatal>>,
+}
+
+impl Dom {
+    pub(crate) fn scripts_roots(&self, out: &mut Vec<Value>) {
+        let s = &self.scripts;
+        out.extend(s.fixed.borrow().iter().map(|&o| Value::Object(o)));
+        let st = self.st.borrow();
+        let mut keep = |n: &NodeId| out.extend(st.by_node.get(n).map(|&o| Value::Object(o)));
+        s.inline.borrow().iter().for_each(|(n, _)| keep(n));
+        s.external.borrow().iter().for_each(|e| match e {
+            Ext::Fetch(n, _) | Ext::Fail(n) => keep(n),
+        });
+        s.current.get().iter().for_each(keep);
+    }
+
+    /// A node went into the tree. Every classic `<script>` of it (it may be a subtree) is prepared.
+    pub(crate) fn script_inserted(&self, it: &mut Interp<'_>, node: NodeId) -> R<()> {
+        if !self.scripts.enabled.get() || !self.is_element(node) {
+            return Ok(());
+        }
+        let found = {
+            let doc = self.doc.borrow();
+            let mut up = node;
+            while let Some(p) = doc.parent(up) {
+                it.charge(1)?;
+                up = p;
+            }
+            if up != doc.root() {
+                return Ok(());
+            }
+            let (script, template) = (doc.find_atom("script"), doc.find_atom("template"));
+            let mut found = Vec::new();
+            let mut stack = vec![node];
+            while let Some(n) = stack.pop() {
+                it.charge(1)?;
+                if let NodeData::Element { name, .. } = *doc.data(n) {
+                    if Some(name) == script {
+                        found.push(n);
+                    }
+                    if Some(name) == template {
+                        continue;
+                    }
+                }
+                let mut c = doc.last_child(n);
+                while let Some(k) = c {
+                    stack.push(k);
+                    c = doc.prev_sibling(k);
+                }
+            }
+            found
+        };
+        for s in found {
+            self.prepare_script(it, s)?;
+        }
+        Ok(())
+    }
+
+    /// `src` was set on `node`.
+    pub(crate) fn script_src_changed(&self, it: &mut Interp<'_>, node: NodeId) -> R<()> {
+        let is_script = {
+            let doc = self.doc.borrow();
+            matches!(*doc.data(node), NodeData::Element { name, .. } if doc.atom_str(name) == "script")
+        };
+        if self.scripts.enabled.get() && is_script {
+            // Only a script in the tree is prepared (`script_inserted` checks it and walks one node).
+            self.script_inserted(it, node)?;
+        }
+        Ok(())
+    }
+
+    /// The "prepare the script element" steps for a classic script that is in the document.
+    fn prepare_script(&self, _it: &mut Interp<'_>, el: NodeId) -> R<()> {
+        let s = &self.scripts;
+        if s.started.borrow().contains(&el) {
+            return Ok(());
+        }
+        let (src, text) = {
+            let doc = self.doc.borrow();
+            let attr = |n: &str| doc.find_atom(n).and_then(|a| doc.attr(el, a));
+            match attr("type").map(|t| t.trim_matches(WS)) {
+                None | Some("") => {}
+                Some(t) if t.eq_ignore_ascii_case("module") => return Err(Error::Unsupported(unsupported("module script"))),
+                Some(t) if JS_TYPES.iter().any(|j| t.eq_ignore_ascii_case(j)) => {}
+                Some(_) => return Ok(()),
+            }
+            if attr("nomodule").is_some() {
+                return Ok(());
+            }
+            match attr("src") {
+                Some(src) => (Some(src.to_string()), String::new()),
+                None => (None, resources::inline_source(&doc, el).into_owned()),
+            }
+        };
+        let (max_scripts, max_bytes) = s.caps.get();
+        if s.inline.borrow().len() + s.external.borrow().len() >= max_scripts {
+            return Err(self.lim("pending-scripts"));
+        }
+        match src {
+            Some(src) => {
+                s.started.borrow_mut().insert(el);
+                let raw = src.trim_matches(WS);
+                let url = s.base.borrow().as_deref().and_then(|b| Url::parse(b).ok()).filter(|_| !raw.is_empty()).and_then(|b| b.join(raw).ok());
+                s.external.borrow_mut().push_back(match url {
+                    Some(u) => Ext::Fetch(el, u),
+                    None => Ext::Fail(el),
+                });
+            }
+            None if text.is_empty() => {}
+            None => {
+                if s.pending_bytes.get() + text.len() > max_bytes {
+                    return Err(self.lim("pending-script-bytes"));
+                }
+                s.started.borrow_mut().insert(el);
+                s.pending_bytes.set(s.pending_bytes.get() + text.len());
+                s.inline.borrow_mut().push_back((el, text));
+            }
+        }
+        Ok(())
+    }
+}
+
+// ---------------------------------------------------------------------------------------------- JS surface
+
+fn script_src(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
+    let n = d.el(it, this)?;
+    let raw = match nd::attr_get(d, it, n, "src")? {
+        Value::Null => String::new(),
+        v => d.string_arg(it, v)?,
+    };
+    // The IDL value is the resolved URL when it resolves, else the text.
+    let resolved = d.scripts.base.borrow().as_deref().and_then(|b| Url::parse(b).ok()).filter(|_| !raw.trim_matches(WS).is_empty()).and_then(|b| b.join(raw.trim_matches(WS)).ok());
+    d.js_str(it, &resolved.map_or(raw, |u| u.to_string()))
+}
+
+fn set_script_src(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
+    let n = d.el(it, this)?;
+    let s = d.string_arg(it, arg(a, 0))?;
+    nd::attr_set(d, it, n, "src", &s)?;
+    d.script_src_changed(it, n)?;
+    Ok(Value::Undefined)
+}
+
+fn script_type(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
+    let n = d.el(it, this)?;
+    match nd::attr_get(d, it, n, "type")? {
+        Value::Null => d.js_str(it, ""),
+        v => Ok(v),
+    }
+}
+
+fn set_script_type(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
+    let n = d.el(it, this)?;
+    let s = d.string_arg(it, arg(a, 0))?;
+    nd::attr_set(d, it, n, "type", &s)?;
+    Ok(Value::Undefined)
+}
+
+fn flag(d: &Dom, it: &mut Interp<'_>, this: Value, name: &str) -> V {
+    let n = d.el(it, this)?;
+    let doc = d.doc.borrow();
+    Ok(Value::Bool(doc.find_atom(name).and_then(|a| doc.attr(n, a)).is_some()))
+}
+
+fn set_flag(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value], name: &str) -> V {
+    let n = d.el(it, this)?;
+    if it.to_js_bool(arg(a, 0))? {
+        nd::attr_set(d, it, n, name, "")?;
+    } else {
+        d.doc.borrow_mut().remove_attr(n, name);
+    }
+    Ok(Value::Undefined)
+}
+
+fn script_async(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
+    flag(d, it, this, "async")
+}
+
+fn set_script_async(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
+    set_flag(d, it, this, a, "async")
+}
+
+fn script_defer(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
+    flag(d, it, this, "defer")
+}
+
+fn set_script_defer(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
+    set_flag(d, it, this, a, "defer")
+}
+
+/// The listener of an `on...` handler: one per element and event, kept in the normal listener list.
+fn handler_get(d: &Dom, it: &mut Interp<'_>, this: Value, is_error: bool) -> V {
+    let n = d.el(it, this)?;
+    let Some(id) = d.scripts.handlers.borrow().get(&(n, is_error)).copied() else { return Ok(Value::Null) };
+    let st = d.st.borrow();
+    Ok(st.listeners.get(&EvTarget::Node(n)).and_then(|v| v.iter().find(|l| l.id == id)).map_or(Value::Null, |l| Value::Object(l.cb)))
+}
+
+fn handler_set(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value], is_error: bool) -> V {
+    let n = d.el(it, this)?;
+    let cb = match arg(a, 0) {
+        v @ Value::Object(o) if it.is_callable_value(v) => Some(o),
+        _ => None,
+    };
+    let (t, ty) = (EvTarget::Node(n), if is_error { "error" } else { "load" });
+    let old = d.scripts.handlers.borrow().get(&(n, is_error)).copied();
+    let mut st = d.st.borrow_mut();
+    let st = &mut *st;
+    let at = old.and_then(|id| st.listeners.get(&t).and_then(|v| v.iter().position(|l| l.id == id)));
+    match (at, cb) {
+        (Some(i), Some(cb)) => st.listeners.get_mut(&t).expect("found")[i].cb = cb,
+        (Some(i), None) => {
+            let v = st.listeners.get_mut(&t).expect("found");
+            v.remove(i);
+            if v.is_empty() {
+                st.listeners.remove(&t);
+            }
+            st.n_listeners -= 1;
+            d.scripts.handlers.borrow_mut().remove(&(n, is_error));
+        }
+        (None, Some(cb)) => {
+            if st.n_listeners >= d.lim.max_listeners {
+                return Err(d.lim("dom-listeners"));
+            }
+            let list = st.listeners.entry(t).or_default();
+            if list.len() >= d.lim.max_listeners_per_target {
+                return Err(d.lim("dom-listeners-per-target"));
+            }
+            st.next_id += 1;
+            let id = st.next_id;
+            list.push(Listener { id, ty: ty.into(), cb, capture: false, once: false, passive: false });
+            st.n_listeners += 1;
+            d.scripts.handlers.borrow_mut().insert((n, is_error), id);
+        }
+        (None, None) => {}
+    }
+    Ok(Value::Undefined)
+}
+
+fn script_onload(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
+    handler_get(d, it, this, false)
+}
+
+fn set_script_onload(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
+    handler_set(d, it, this, a, false)
+}
+
+fn script_onerror(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
+    handler_get(d, it, this, true)
+}
+
+fn set_script_onerror(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
+    handler_set(d, it, this, a, true)
+}
+
+fn script_text(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
+    d.el(it, this)?;
+    nd::text_content(d, it, this, a)
+}
+
+fn set_script_text(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
+    d.el(it, this)?;
+    nd::set_text_content(d, it, this, a)
+}
+
+fn doc_ready_state(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
+    d.nd(it, this)?;
+    d.js_str(it, ["loading", "interactive", "complete"][d.scripts.ready.get() as usize])
+}
+
+fn doc_current_script(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
+    d.nd(it, this)?;
+    d.wrap_opt(it, d.scripts.current.get())
+}
+
+pub(crate) fn install(d: &Dom, it: &mut Interp<'_>) -> R<()> {
+    let proto = d.obj(it, d.p().html)?;
+    let _ = d.scripts.proto.set(proto);
+    let acc = |it: &mut Interp<'_>, on: ObjId, name: &str, g: H, s: Option<H>| -> R<()> {
+        let gf = d.add_fn(it, g, &format!("get {name}"), 0, false)?;
+        let sf = s.map(|h| d.add_fn(it, h, &format!("set {name}"), 1, false)).transpose()?;
+        let k = d.key(it, name)?;
+        d.define_accessor(it, on, k, gf, sf)
+    };
+    for (name, g, s) in [
+        ("src", script_src as H, set_script_src as H),
+        ("type", script_type, set_script_type),
+        ("async", script_async, set_script_async),
+        ("defer", script_defer, set_script_defer),
+        ("text", script_text, set_script_text),
+        ("onload", script_onload, set_script_onload),
+        ("onerror", script_onerror, set_script_onerror),
+    ] {
+        acc(it, proto, name, g, Some(s))?;
+    }
+    let document = d.p().document;
+    acc(it, document, "readyState", doc_ready_state, None)?;
+    acc(it, document, "currentScript", doc_current_script, None)?;
+    let f = d.add_fn(it, illegal_constructor, "HTMLScriptElement", 0, false)?;
+    let (kp, kc) = (d.key(it, "prototype")?, d.key(it, "constructor")?);
+    it.define_data(f, kp, Value::Object(proto), false, false, false)?;
+    it.define_data(proto, kc, Value::Object(f), true, false, true)?;
+    let k = d.key(it, "HTMLScriptElement")?;
+    let g = it.global_object();
+    it.define_data(g, k, Value::Object(f), true, false, true)?;
+    *d.scripts.fixed.borrow_mut() = vec![proto, f];
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------------------------- the driver
+
+impl Browser {
+    /// Dispatch a new non-cancelable event at `t`. A checkpoint follows each listener (the driver flag).
+    fn fire(&mut self, t: EvTarget, ty: &str, bubbles: bool) -> R<()> {
+        let dom = self.dom.clone();
+        let was = std::mem::replace(&mut dom.st.borrow_mut().driver, true);
+        let r = self.it.host_scope(|it| {
+            let e = dom.new_event(it, ty, bubbles, false, false, None)?;
+            dom.dispatch(it, t, e).map(|_| ())
+        });
+        dom.st.borrow_mut().driver = was;
+        r
+    }
+
+    /// Run the classic scripts of the page, then its tasks, within `cfg.limits`. See the module comment for the order.
+    /// It never panics on page input and never returns an `Err`: the result says why it stopped.
+    pub fn run_page(&mut self, cfg: PageConfig) -> PageResult {
+        let dom = self.dom.clone();
+        let mut res = PageResult { stop: Stop::Settled, ready_state: "loading", scripts_run: 0, script_throws: 0, load_errors: 0, tasks: 0, rounds: 0, fetches: 0, bytes: 0, diagnostics: Vec::new(), dropped_diagnostics: 0 };
+        let prior = dom.scripts.fatal.borrow().clone();
+        if let Some(f) = prior {
+            res.stop = Stop::Fatal(f);
+            return res;
+        }
+        let setup = |res: &mut PageResult, why: String| {
+            res.stop = Stop::Fatal(Fatal::Setup(why));
+        };
+        if dom.scripts.enabled.replace(true) {
+            setup(&mut res, "run_page was already called".into());
+            return res;
+        }
+        let page = match Url::parse(&cfg.url) {
+            Ok(u) => u,
+            Err(_) => {
+                setup(&mut res, "the page URL is not an http(s) URL".into());
+                return res;
+            }
+        };
+        let disc = match resources::discover(&dom.doc.borrow(), &page, &cfg.limits.resources) {
+            Ok(d) => d,
+            Err(e) => {
+                setup(&mut res, e.to_string());
+                return res;
+            }
+        };
+        let s = &dom.scripts;
+        *s.base.borrow_mut() = Some(disc.base.clone());
+        s.caps.set((cfg.limits.max_pending_scripts, cfg.limits.max_pending_script_bytes));
+        s.started.borrow_mut().extend(disc.items.iter().map(|i| i.node));
+        let mut refs = vec![0usize; disc.targets.len()];
+        let mut items = Vec::new();
+        for (n, item) in disc.items.iter().enumerate() {
+            if let Kind::Script { module, timing, source } = item.kind {
+                if let Source::External(t) = source {
+                    refs[t] += 1;
+                }
+                items.push(Parsed { n, node: item.node, module, timing, source });
+            }
+        }
+        let deadline = Instant::now() + cfg.limits.max_time;
+        let mut run = Run {
+            b: self,
+            dom: dom.clone(),
+            client: cfg.client,
+            lim: cfg.limits,
+            deadline,
+            cache: (0..disc.targets.len()).map(|_| None).collect(),
+            refs,
+            retained: 0,
+            res,
+            disc,
+            items,
+            async_queue: VecDeque::new(),
+            loaded: false,
+        };
+        let stop = run.go();
+        let mut res = run.res;
+        if let Stop::Fatal(f) = &stop {
+            *dom.scripts.fatal.borrow_mut() = Some(f.clone());
+        }
+        res.stop = stop;
+        res.ready_state = ["loading", "interactive", "complete"][dom.scripts.ready.get() as usize];
+        res
+    }
+}
+
+#[derive(Clone, Copy)]
+struct Parsed {
+    /// Index in the discovery items (for labels).
+    n: usize,
+    node: NodeId,
+    module: bool,
+    timing: Timing,
+    source: Source,
+}
+
+struct Run<'a> {
+    b: &'a mut Browser,
+    dom: Rc<Dom>,
+    client: Client,
+    lim: PageLimits,
+    deadline: Instant,
+    /// The text of an external script target that more parsed elements still wait for, or why it failed.
+    cache: Vec<Option<Result<String, String>>>,
+    refs: Vec<usize>,
+    retained: usize,
+    res: PageResult,
+    disc: resources::Discovery,
+    items: Vec<Parsed>,
+    async_queue: VecDeque<Parsed>,
+    loaded: bool,
+}
+
+type Flow = Result<(), Stop>;
+
+fn fatal_of(e: Error) -> Stop {
+    Stop::Fatal(match e {
+        Error::Unsupported(u) => Fatal::Unsupported(u.what),
+        Error::Limit(l) => Fatal::Limit(format!("{l:?}")),
+        Error::Heap(_) => Fatal::Heap,
+        Error::Throw(_) => Fatal::Poisoned,
+    })
+}
+
+fn label(u: &Url) -> String {
+    format!("{}://{}:{}{}", u.scheme, u.host, u.port, u.path.split('?').next().unwrap_or(""))
+}
+
+fn reason(e: &LoadError) -> String {
+    match e {
+        // The text of a network error can name a host or an address: a fixed label instead.
+        LoadError::Network(_) => "network error".into(),
+        e => e.to_string(),
+    }
+}
+
+/// One download, counted. Free function so that the caller can borrow other fields of `Run` at the same time.
+fn download(client: &mut Client, lim: &PageLimits, deadline: Instant, retained: usize, res: &mut PageResult, target: &resources::Target) -> Result<String, String> {
+    if res.fetches >= lim.resources.max_fetches {
+        return Err("fetch budget used".into());
+    }
+    res.fetches += 1;
+    match resources::fetch(client, target, &lim.resources, deadline, retained) {
+        Ok(r) => {
+            res.bytes += r.text.len();
+            Ok(r.text)
+        }
+        Err(e) => Err(reason(&e)),
+    }
+}
+
+impl Run<'_> {
+    fn diag(&mut self, line: String) {
+        if self.res.diagnostics.len() < self.lim.max_diagnostics {
+            self.res.diagnostics.push(line.chars().take(200).collect());
+        } else {
+            self.res.dropped_diagnostics += 1;
+        }
+    }
+
+    fn budget(&self) -> Flow {
+        if self.res.tasks >= self.lim.max_tasks {
+            return Err(Stop::TaskBudget);
+        }
+        if Instant::now() >= self.deadline {
+            return Err(Stop::TimeBudget);
+        }
+        Ok(())
+    }
+
+    fn fatal(&mut self, e: Error, what: &str) -> Stop {
+        let stop = fatal_of(e);
+        self.diag(format!("fatal in {what}: {stop:?}"));
+        stop
+    }
+
+    /// Run one script in the realm with `currentScript` set. A throw is reported and ends only this script.
+    fn run_one(&mut self, node: NodeId, source: &str, what: &str) -> Flow {
+        self.budget()?;
+        self.dom.scripts.current.set(Some(node));
+        let r = self.b.run_script(source);
+        self.dom.scripts.current.set(None);
+        self.res.scripts_run += 1;
+        self.res.tasks += 1;
+        match r {
+            Ok(_) => Ok(()),
+            Err(Error::Throw(v)) => {
+                self.dom.report(&mut self.b.it, v, "error", EvTarget::Window);
+                self.res.script_throws += 1;
+                let name = match v {
+                    Value::Object(_) => self.dom.st.borrow().reports.back().map(|r| r.message.split(':').next().unwrap_or("").chars().filter(|c| c.is_ascii_alphanumeric() || *c == '_').take(40).collect::<String>()).unwrap_or_default(),
+                    _ => "non-error value".into(),
+                };
+                self.diag(format!("script threw {name}: {what}"));
+                Ok(())
+            }
+            Err(e) => Err(self.fatal(e, what)),
+        }
+    }
+
+    /// After a script or task: dynamic inline scripts that it queued run now, then the microtask checkpoint.
+    fn after_js(&mut self) -> Flow {
+        loop {
+            let next = self.dom.scripts.inline.borrow_mut().pop_front();
+            let Some((node, text)) = next else { break };
+            let pending = &self.dom.scripts.pending_bytes;
+            pending.set(pending.get().saturating_sub(text.len()));
+            self.run_one(node, &text, "dynamic inline script")?;
+        }
+        match self.b.drain() {
+            Ok(_) => Ok(()),
+            Err(e) => Err(self.fatal(e, "microtask checkpoint")),
+        }
+    }
+
+    fn fire(&mut self, t: EvTarget, ty: &str, bubbles: bool) -> Flow {
+        match self.b.fire(t, ty, bubbles) {
+            Ok(()) => Ok(()),
+            Err(e) => Err(self.fatal(e, ty)),
+        }
+    }
+
+    fn set_ready(&mut self, state: u8) -> Flow {
+        self.dom.scripts.ready.set(state);
+        let root = self.dom.doc.borrow().root();
+        self.fire(EvTarget::Node(root), "readystatechange", false)?;
+        self.after_js()
+    }
+
+    /// An external script has its result: run it and send `load`, or send `error`. Nothing failed is ever run.
+    fn finish_external(&mut self, node: NodeId, what: &str, text: Result<String, String>) -> Flow {
+        match text {
+            Ok(text) => {
+                self.run_one(node, &text, what)?;
+                self.after_js()?;
+                self.fire(EvTarget::Node(node), "load", false)?;
+            }
+            Err(why) => {
+                self.res.load_errors += 1;
+                self.diag(format!("script failed: {what}: {why}"));
+                self.fire(EvTarget::Node(node), "error", false)?;
+            }
+        }
+        self.after_js()
+    }
+
+    /// Run one script element that was in the page when it was parsed.
+    fn run_parsed(&mut self, p: Parsed) -> Flow {
+        if p.module {
+            self.diag(format!("module script #{}", p.n));
+            return Err(Stop::Fatal(Fatal::Unsupported("module script")));
+        }
+        match p.source {
+            Source::Inline => {
+                let text = resources::inline_source(&self.dom.doc.borrow(), p.node).into_owned();
+                self.run_one(p.node, &text, &format!("inline script #{}", p.n))?;
+                self.after_js()
+            }
+            Source::External(t) => {
+                let what = label(&self.disc.targets[t].url);
+                let text = match self.cache[t].take() {
+                    Some(Ok(text)) => {
+                        self.retained -= text.len();
+                        Ok(text)
+                    }
+                    Some(Err(why)) => Err(why),
+                    None => download(&mut self.client, &self.lim, self.deadline, self.retained, &mut self.res, &self.disc.targets[t]),
+                };
+                self.refs[t] -= 1;
+                // Keep what a later element still needs: the text, or the reason (a failure is not retried).
+                let keep = if self.refs[t] == 0 {
+                    None
+                } else {
+                    match &text {
+                        Ok(t) => Some(Ok(t.clone())),
+                        Err(why) => Some(Err(why.clone())),
+                    }
+                };
+                if let Some(k) = keep {
+                    if let Ok(t) = &k {
+                        self.retained += t.len();
+                    }
+                    self.cache[t] = Some(k);
+                }
+                self.finish_external(p.node, &what, text)
+            }
+        }
+    }
+
+    /// One queued dynamic external script. Gives false when none is queued.
+    fn run_dynamic(&mut self) -> Result<bool, Stop> {
+        let next = self.dom.scripts.external.borrow_mut().pop_front();
+        let Some(next) = next else { return Ok(false) };
+        self.budget()?;
+        match next {
+            Ext::Fail(node) => self.finish_external(node, "dynamic script", Err("empty or bad src".into()))?,
+            Ext::Fetch(node, url) => {
+                let what = label(&url);
+                let target = resources::Target { expect: Expect::Script, url };
+                let text = download(&mut self.client, &self.lim, self.deadline, self.retained, &mut self.res, &target);
+                self.finish_external(node, &what, text)?;
+            }
+        }
+        Ok(true)
+    }
+
+    fn go(&mut self) -> Stop {
+        match self.go_inner() {
+            Ok(()) => unreachable!("go_inner ends with a stop"),
+            Err(stop) => stop,
+        }
+    }
+
+    fn go_inner(&mut self) -> Flow {
+        let items = self.items.clone();
+        for p in items.iter().filter(|p| p.timing == Timing::Blocking) {
+            self.run_parsed(*p)?;
+        }
+        self.set_ready(1)?;
+        for p in items.iter().filter(|p| p.timing == Timing::Defer) {
+            self.run_parsed(*p)?;
+        }
+        let root = self.dom.doc.borrow().root();
+        self.fire(EvTarget::Node(root), "DOMContentLoaded", true)?;
+        self.after_js()?;
+        self.async_queue.extend(items.iter().filter(|p| p.timing == Timing::Async));
+        self.rounds()
+    }
+
+    /// The rounds of tasks. Returns the reason to stop (always an `Err`).
+    fn rounds(&mut self) -> Flow {
+        let batch = self.lim.batch.max(1);
+        loop {
+            if self.res.rounds >= self.lim.max_rounds {
+                return Err(Stop::RoundBudget);
+            }
+            self.res.rounds += 1;
+            self.budget()?;
+            let mut did = 0usize;
+            if !self.loaded && self.async_queue.is_empty() && self.dom.scripts.external.borrow().is_empty() {
+                self.loaded = true;
+                self.set_ready(2)?;
+                self.fire(EvTarget::Window, "load", false)?;
+                self.after_js()?;
+                did += 1;
+            }
+            for _ in 0..batch {
+                if let Some(p) = self.async_queue.pop_front() {
+                    self.run_parsed(p)?;
+                } else if !self.run_dynamic()? {
+                    break;
+                }
+                did += 1;
+            }
+            for _ in 0..batch {
+                if self.b.pending_fetches() == 0 {
+                    break;
+                }
+                self.budget()?;
+                let n = self.b.run_network_tasks(1).map_err(fatal_of)?;
+                self.res.tasks += n;
+                did += n;
+                self.after_js()?;
+                if n == 0 {
+                    break;
+                }
+            }
+            for _ in 0..batch {
+                self.budget()?;
+                let pump = self.b.run_scheduled_tasks(1).map_err(fatal_of)?;
+                if pump.ran == 0 {
+                    break;
+                }
+                self.res.tasks += pump.ran;
+                did += pump.ran;
+                self.after_js()?;
+            }
+            if self.res.rounds % self.lim.collect_every.max(1) == 0 {
+                self.b.collect(&[]).map_err(fatal_of)?;
+            }
+            if did > 0 {
+                continue;
+            }
+            // Idle: wait for the next timer if it is near, else the page is settled.
+            let Some(due) = self.b.next_scheduled_due() else { return Err(Stop::Settled) };
+            let gap = due - self.b.now();
+            if gap > self.lim.quiet.as_secs_f64() * 1000.0 {
+                return Err(Stop::Settled);
+            }
+            if self.b.uses_virtual_clock() {
+                let pump = self.b.advance_to(due, batch).map_err(fatal_of)?;
+                self.res.tasks += pump.ran;
+                self.after_js()?;
+            } else {
+                let wait = Duration::from_secs_f64(gap.max(0.0) / 1000.0);
+                if Instant::now() + wait >= self.deadline {
+                    return Err(Stop::TimeBudget);
+                }
+                std::thread::sleep(wait);
+            }
+        }
+    }
+}

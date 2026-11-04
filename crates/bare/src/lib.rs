@@ -21,3 +21,8 @@ mod browser_tests;
 mod browser_scheduler;
 #[cfg(test)]
 mod browser_scheduler_tests;
+pub mod resources;
+mod browser_loader;
+pub use browser_loader::{Fatal, PageConfig, PageLimits, PageResult, Stop};
+#[cfg(test)]
+mod browser_loader_tests;

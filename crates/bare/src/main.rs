@@ -5,6 +5,8 @@
 //! It prints the DOM tree of the page. Add `--source` to print the source of the page instead,
 //! `--styles` to print the computed style of each element, or `--layout` to print the place and size of each box.
 //! `--resources` downloads the external scripts and style sheets of the page and lists them (see `resources.rs`).
+//! `--run` runs the classic scripts of the page and its timers and `fetch` calls (see `browser_loader.rs`), then prints a short
+//! sanitized status. It prints no source, headers, bodies or query strings.
 //! `--width=900` sets the width of the window (1280 if not given).
 //!
 //! Comments compare Rust with JavaScript, because you know JS.
@@ -18,7 +20,7 @@ use bare_net::http;
 use bare_url::Url;
 use std::io::{Read, Write};
 
-mod resources;
+use bare::resources;
 // Now we can write `Url` instead of `bare_url::Url`.
 
 fn main() {
@@ -31,6 +33,7 @@ fn main() {
     let styles = args.iter().any(|a| a == "--styles");
     let layout = args.iter().any(|a| a == "--layout");
     let resources = args.iter().any(|a| a == "--resources");
+    let run = args.iter().any(|a| a == "--run");
     let width = args
         .iter()
         .find_map(|a| a.strip_prefix("--width="))
@@ -112,7 +115,13 @@ fn main() {
         let mut doc = parser.finish();
         // Build the DOM tree.
         drop(out);
-        if resources {
+        if run {
+            let Ok(page) = url.as_ref() else {
+                eprintln!("error: --run needs a valid URL");
+                std::process::exit(2);
+            };
+            std::process::exit(run_page(doc, page.to_string()));
+        } else if resources {
             let Ok(page) = url.as_ref() else {
                 eprintln!("error: --resources needs a valid URL");
                 std::process::exit(2);
@@ -210,4 +219,44 @@ fn computed_styles(doc: &mut bare_html::dom::Document, page: Option<&Url>, viewp
         }
     }
     rules.compute(doc)
+}
+
+/// `--run`: a realm over `doc`, the loader and the driver. The VM needs a big stack: 8 MiB is the floor in release,
+/// a debug build uses more stack per frame. Exit code: 0 settled or a budget ended it, 1 fatal.
+fn run_page(doc: bare_html::dom::Document, page: String) -> i32 {
+    use bare::browser::{Browser, BrowserLimits};
+    use bare::browser_fetch::{FetchConfig, FetchLimits};
+    use bare::{PageConfig, PageLimits, Stop};
+    let stack = if cfg!(debug_assertions) { 64 << 20 } else { 8 << 20 };
+    let worker = std::thread::Builder::new().stack_size(stack).spawn(move || {
+        let eval = bare_js::eval::EvalLimits { max_steps: 2_000_000_000, ..Default::default() };
+        let mut b = match Browser::new(doc, BrowserLimits::default(), eval, bare_js::heap::HeapLimits::default()) {
+            Ok(b) => b,
+            Err(e) => {
+                eprintln!("error: realm: {e:?}");
+                return 1;
+            }
+        };
+        let fetch = FetchConfig { base_url: Some(page.clone()), client: http::Client::new(), limits: FetchLimits::default() };
+        if let Err(e) = b.configure_fetch(fetch) {
+            eprintln!("error: fetch: {e}");
+            return 1;
+        }
+        let r = b.run_page(PageConfig { url: page, client: http::Client::new(), limits: PageLimits::default() });
+        println!("stop: {:?}", r.stop);
+        println!("ready: {}", r.ready_state);
+        println!("scripts run {}, threw {}, load errors {}", r.scripts_run, r.script_throws, r.load_errors);
+        println!("tasks {}, rounds {}, fetches {}, script bytes {}", r.tasks, r.rounds, r.fetches, r.bytes);
+        for d in &r.diagnostics {
+            println!("note: {d}");
+        }
+        if r.dropped_diagnostics > 0 {
+            println!("note: {} more not shown", r.dropped_diagnostics);
+        }
+        for d in b.take_fetch_diagnostics() {
+            println!("fetch: {d}");
+        }
+        if matches!(r.stop, Stop::Fatal(_)) { 1 } else { 0 }
+    });
+    worker.map_or(1, |w| w.join().unwrap_or(1))
 }

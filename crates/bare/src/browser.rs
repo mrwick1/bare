@@ -252,6 +252,7 @@ pub struct Dom {
     pub(crate) fetch: crate::browser_fetch::Fetch,
     /// Navigation, history and storage state (`browser_navigation.rs`).
     pub(crate) nav: crate::browser_navigation::Nav,
+    pub(crate) scripts: crate::browser_loader::Scripts,
 }
 
 impl Host for Dom {
@@ -269,6 +270,7 @@ impl Host for Dom {
         self.sched_roots(out);
         self.fetch.roots(out);
         crate::browser_navigation::roots(self, out);
+        self.scripts_roots(out);
     }
 
     fn trace(&self, owner: ObjId, out: &mut Vec<Value>) {
@@ -437,6 +439,7 @@ impl Dom {
                 match *doc.data(n) {
                     NodeData::Element { name, .. } => match doc.atom_str(name) {
                         "input" => p.input,
+                        "script" => self.scripts.proto.get().copied().unwrap_or(p.html),
                         "svg" | "math" => p.element,
                         _ => p.html,
                     },
@@ -644,7 +647,8 @@ impl Dom {
             it.define_data(g, k, v, true, true, true)?;
         }
         crate::browser_navigation::install(self, it)?;
-        crate::browser_fetch::install(self, it)
+        crate::browser_fetch::install(self, it)?;
+        crate::browser_loader::install(self, it)
     }
 
     pub(crate) fn define_accessor(&self, it: &mut Interp<'_>, o: ObjId, key: PropertyKey, get: ObjId, set: Option<ObjId>) -> R<()> {
@@ -660,7 +664,7 @@ pub(crate) fn unsupported(what: &'static str) -> bare_js::eval::Unsupported {
     bare_js::eval::Unsupported { what, span: Default::default() }
 }
 
-fn illegal_constructor(_: &Dom, it: &mut Interp<'_>, _: Value, _: &[Value]) -> R<Value> {
+pub(crate) fn illegal_constructor(_: &Dom, it: &mut Interp<'_>, _: Value, _: &[Value]) -> R<Value> {
     Err(it.type_error("Illegal constructor"))
 }
 
@@ -807,6 +811,7 @@ impl Browser {
             sched: RefCell::default(),
             fetch: Default::default(),
             nav: Default::default(),
+            scripts: Default::default(),
         });
         it.set_host(dom.clone())?;
         it.host_scope(|it| {

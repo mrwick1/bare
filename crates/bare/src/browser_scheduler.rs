@@ -753,6 +753,11 @@ impl Browser {
         Ok(())
     }
 
+    /// True after `use_virtual_clock`: the driver moves time, nothing sleeps.
+    pub fn uses_virtual_clock(&self) -> bool {
+        self.dom.sched.borrow().virtual_now.is_some()
+    }
+
     /// Milliseconds since the time origin (what `performance.now()` gives now).
     pub fn now(&self) -> f64 {
         self.dom.now_ms()

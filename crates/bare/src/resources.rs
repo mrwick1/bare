@@ -137,6 +137,8 @@ pub struct Discovery {
     /// In the order of the page. A URL that two items use is one target.
     pub items: Vec<Item>,
     pub targets: Vec<Target>,
+    /// The document base URL (the first good `<base href>`, else the page). A script that the page adds later resolves against it.
+    pub base: String,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -155,7 +157,7 @@ impl fmt::Display for DiscoverError {
 }
 
 /// The JavaScript MIME types of the HTML standard. `type` and `Content-Type` are compared with them, ignoring ASCII case.
-const JS_TYPES: [&str; 16] = [
+pub const JS_TYPES: [&str; 16] = [
     "application/ecmascript",
     "application/javascript",
     "application/x-ecmascript",
@@ -174,7 +176,7 @@ const JS_TYPES: [&str; 16] = [
     "text/x-javascript",
 ];
 
-const WS: [char; 5] = [' ', '\t', '\n', '\x0c', '\r'];
+pub const WS: [char; 5] = [' ', '\t', '\n', '\x0c', '\r'];
 
 struct Atoms {
     script: Option<Atom>,
@@ -320,7 +322,7 @@ pub fn discover(doc: &Document, page: &Url, limits: &Limits) -> Result<Discovery
         let kind = if is_script { Kind::Script { module, timing: timing(true), source: Source::External(index) } } else { Kind::Stylesheet { target: index } };
         items.push(Item { node, kind });
     }
-    Ok(Discovery { items, targets })
+    Ok(Discovery { items, targets, base: base.to_string() })
 }
 
 /// The text of an inline script: the text children of the element. One child (the usual case) is borrowed, not copied.
@@ -418,7 +420,9 @@ pub fn load(targets: &[Target], limits: &Limits) -> Loaded {
     Loaded { results, retained }
 }
 
-fn fetch(client: &mut http::Client, target: &Target, limits: &Limits, deadline: Instant, retained: usize) -> Result<Resource, LoadError> {
+/// Download one target with the caps of `limits`. `retained` is the text that the caller already keeps (the total cap),
+/// and `deadline` ends the work. The caller counts fetches.
+pub fn fetch(client: &mut http::Client, target: &Target, limits: &Limits, deadline: Instant, retained: usize) -> Result<Resource, LoadError> {
     if Instant::now() >= deadline {
         return Err(LoadError::TimedOut);
     }
@@ -541,7 +545,7 @@ pub fn report(doc: &Document, page: &Url) -> (String, bool) {
 
 #[cfg(test)]
 #[path = "test_server.rs"]
-mod test_server;
+pub(crate) mod test_server;
 
 #[cfg(test)]
 mod tests {
