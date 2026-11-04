@@ -15,3 +15,13 @@ if diff "$tmp/o" "$tmp/m" > "$tmp/d"; then
 else
   echo "adapter cases: DIFFERENCES (< node, > bare-js)"; cat "$tmp/d"; exit 1
 fi
+# Generic iterators across await (Node vm, empty context; promise_oracle.mjs reads the log before and after the checkpoint).
+cargo build --release -q -p bare-js --example async_check
+cases=$here/../fixtures/js/adapter-async-cases.txt
+node "$here/promise_oracle.mjs" "$cases" > "$tmp/o2"
+target/release/examples/async_check "$cases" > "$tmp/m2"
+if diff "$tmp/o2" "$tmp/m2" > "$tmp/d2"; then
+  echo "adapter async cases: $(wc -l < "$tmp/m2") match"
+else
+  echo "adapter async cases: DIFFERENCES (< node, > bare-js)"; cat "$tmp/d2"; exit 1
+fi

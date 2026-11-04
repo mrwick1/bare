@@ -50,7 +50,16 @@ fn run_case(src: &str) -> String {
 
 #[test]
 fn corpus_matches_node() {
-    let (cases, expected) = (include_str!("../../../tools/fixtures/js/interact-cases.txt"), include_str!("../../../tools/fixtures/js/interact-cases.expected"));
+    check_corpus(include_str!("../../../tools/fixtures/js/interact-cases.txt"), include_str!("../../../tools/fixtures/js/interact-cases.expected"), 20);
+}
+
+/// Generic iterators (Map, Set, custom, string) in async frames and class methods (`adapter-async-cases.txt`).
+#[test]
+fn adapter_async_corpus_matches_node() {
+    check_corpus(include_str!("../../../tools/fixtures/js/adapter-async-cases.txt"), include_str!("../../../tools/fixtures/js/adapter-async-cases.expected"), 10);
+}
+
+fn check_corpus(cases: &'static str, expected: &'static str, at_least: usize) {
     big(move || {
         let mut list: Vec<(&str, Vec<&str>)> = Vec::new();
         for line in cases.lines() {
@@ -62,7 +71,7 @@ fn corpus_matches_node() {
         }
         let want: Vec<&str> = expected.lines().collect();
         assert_eq!(list.len(), want.len());
-        assert!(list.len() >= 20);
+        assert!(list.len() >= at_least);
         let mut bad = Vec::new();
         for ((name, lines), w) in list.iter().zip(want) {
             let got = format!("{name}\t{}", run_case(lines.join("\n").trim_end_matches('\n')));
@@ -324,5 +333,134 @@ fn a_throw_in_a_resumed_class_method_rejects_and_the_jobs_per_drain_cap_is_resum
         assert_eq!(out(&mut it, "log.join()"), "1,2,3,12,13");
         assert_eq!(out(&mut it, "ps[0] instanceof Promise"), "true");
         assert_eq!(it.unhandled_rejections().len(), 1);
+    });
+}
+
+// ------------------------------------------------------------------ generic iterators in async frames
+
+const ITER_SRC: &str = "var log = []; var gate; var p = new Promise(function (r) { gate = r; });
+    var src = { [Symbol.iterator]() { var i = 0; return { next() { return { value: { n: i }, done: i++ >= 3 }; }, return() { log.push('ret'); return {}; } }; } };
+    class K { #t = []; async run() { for (var x of src) { await p; this.#t.push(x.n); } return this.#t.join(); } }
+    var res; new K().run().then(function (v) { res = v; }); src = null; 0";
+
+#[test]
+fn a_suspended_generic_iteration_keeps_its_iterator_and_state_through_collect() {
+    big(|| {
+        let mut it = realm(lim());
+        assert_eq!(out(&mut it, ITER_SRC), "0");
+        assert_eq!(it.async_stats().activations, 1);
+        // the iterable, the iterator and its `next` are held only by the suspended frame; so is the class instance
+        for _ in 0..3 {
+            it.collect(&[]).unwrap();
+        }
+        assert_eq!(it.async_stats().activations, 1);
+        assert_eq!(it.private_slots(), 1);
+        assert_eq!(out(&mut it, "gate(0); 0"), "0");
+        it.drain_microtasks().unwrap();
+        assert_eq!(out(&mut it, "res + '|' + log.join()"), "0,1,2|");
+        assert_eq!(it.async_stats().activations, 0);
+        assert_eq!(it.async_stats().slots, 0);
+        assert_eq!(it.async_stats().frames, 0);
+        it.collect(&[]).unwrap();
+        assert_eq!(it.private_slots(), 0);
+    });
+}
+
+#[test]
+fn an_unreachable_suspended_iteration_is_dropped_whole_and_its_slot_never_aliases() {
+    big(|| {
+        let mut it = realm(lim());
+        out(&mut it, "var log = []; var mk = function (tag) { return { [Symbol.iterator]() { var i = 0; return { next() { return { value: tag + i, done: i++ >= 2 }; }, return() { log.push('r' + tag); return {}; } }; } }; };
+                      var hang = function () { return new Promise(function () {}); };
+                      for (var i = 0; i < 60; i++) (async function (t) { for (var x of mk(t)) { await hang(); } })(i);
+                      0");
+        assert_eq!(it.async_stats().activations, 60);
+        it.collect(&[]).unwrap();
+        // nothing can resume them: all dropped, and no `return` ran for a dropped iteration
+        assert_eq!(it.async_stats().activations, 0);
+        assert_eq!(it.async_stats().slots, 0);
+        assert_eq!(it.async_stats().frames, 0);
+        assert_eq!(out(&mut it, "log.length"), "0");
+        // the freed table slots are reused by new activations with a fresh generation
+        out(&mut it, "var res = []; var gate; var p = new Promise(function (r) { gate = r; });
+                      for (var i = 0; i < 5; i++) (async function (t) { for (var x of mk('n' + t)) { await p; res.push(x); } })(i); 0");
+        assert_eq!(it.async_stats().activations, 5);
+        out(&mut it, "gate(0)");
+        it.drain_microtasks().unwrap();
+        assert_eq!(out(&mut it, "res.length + ':' + res.slice(0, 2).join()"), "10:n00,n10");
+        assert_eq!(it.async_stats().activations, 0);
+    });
+}
+
+#[test]
+fn generic_iterators_cross_scripts_with_colliding_node_ids_in_async_frames() {
+    big(|| {
+        let mut it = realm(lim());
+        // the same shape in both scripts: the iterator is made in one, the loop and its await run in the other
+        let a = "var log = []; function mkA(tag) { return { [Symbol.iterator]() { var i = 0; return { next() { return { value: tag + i, done: i++ >= 2 }; }, return() { log.push('rA' + tag); return {}; } }; } }; }
+                 class CA { #n = 'a'; async run(src) { for (var x of src) { await null; log.push(this.#n + x); if (x.endsWith('1')) break; } return 'doneA'; } }";
+        let b = "function mkB(tag) { return { [Symbol.iterator]() { var i = 0; return { next() { return { value: tag + i, done: i++ >= 2 }; }, return() { log.push('rB' + tag); return {}; } }; } }; }
+                 class CB { #n = 'b'; async run(src) { for (var x of src) { await null; log.push(this.#n + x); if (x.endsWith('1')) break; } return 'doneB'; } }";
+        out(&mut it, a);
+        out(&mut it, b);
+        out(&mut it, "var r = []; new CA().run(mkB('x')).then(function (v) { r.push(v); }); new CB().run(mkA('y')).then(function (v) { r.push(v); }); 0");
+        it.collect(&[]).unwrap();
+        it.drain_microtasks().unwrap();
+        assert_eq!(out(&mut it, "log.join() + '|' + r.join()"), "ax0,by0,ax1,rBx,by1,rAy|doneA,doneB");
+        assert_eq!(it.async_stats().activations, 0);
+    });
+}
+
+#[test]
+fn a_limit_or_gate_in_an_async_iteration_closes_nothing_and_runs_no_more_js() {
+    let setup = "var log = []; var it = { [Symbol.iterator]() { return { next() { return { value: 1, done: false }; }, return() { log.push('ret'); return {}; } }; } };";
+    // a step limit inside the body after a resume
+    big(move || {
+        let mut it = realm(EvalLimits { max_steps: 50_000, ..Default::default() });
+        out(&mut it, &format!("{setup} (async function () {{ for (var x of it) {{ await null; for (;;) {{}} }} }})(); 0"));
+        assert!(matches!(it.drain_microtasks(), Err(Error::Limit(LimitKind::Steps))));
+        assert_eq!(out(&mut it, "log.length"), "0");
+        // sticky, and still no replay
+        assert!(matches!(it.drain_microtasks(), Err(Error::Limit(LimitKind::Steps))));
+        assert_eq!(out(&mut it, "log.length"), "0");
+    });
+    // an Unsupported gate in the body
+    big(move || {
+        let mut it = realm(lim());
+        out(&mut it, &format!("{setup} (async function () {{ for (var x of it) {{ await null; Promise.all([]); }} }})(); 0"));
+        assert!(matches!(it.drain_microtasks(), Err(Error::Unsupported(_))));
+        assert_eq!(out(&mut it, "log.length"), "0");
+    });
+    // the iterator buffer cap of a spread after an await is a limit, not a rejection
+    big(move || {
+        let mut it = realm(lim());
+        it.set_sc_limits(ScLimits { max_iter_buffer: 3, ..Default::default() });
+        out(&mut it, &format!("{setup} var n = 0; var many = {{ [Symbol.iterator]() {{ return {{ next() {{ n++; return {{ value: n, done: n > 10 }}; }}, return() {{ log.push('ret'); return {{}}; }} }}; }} }}; (async function () {{ await null; return Math.max(...many); }})(); 0"));
+        let r = it.drain_microtasks(); assert!(matches!(r, Err(Error::Limit(LimitKind::Sc(ScLimit::IterBuffer)))), "{r:?}");
+        assert_eq!(out(&mut it, "log.length + ',' + n"), "0,4");
+        assert_eq!(it.unhandled_rejections().len(), 0);
+    });
+}
+
+#[test]
+fn the_jobs_per_drain_cap_is_resumable_with_generic_iterations_and_replays_nothing() {
+    big(|| {
+        let mut it = realm(lim());
+        it.set_promise_limits(PromiseLimits { max_jobs_per_drain: 3, ..Default::default() });
+        out(&mut it, "var log = []; var s = new Set([1, 2, 3]);
+                      async function f(t) { for (var x of s) { await null; log.push(t + x); } return t; }
+                      var ps = [f('a'), f('b'), f('c')]; 0");
+        let mut refusals = 0;
+        loop {
+            match it.drain_microtasks() {
+                Ok(_) => break,
+                Err(Error::Limit(LimitKind::DrainJobs)) => refusals += 1,
+                Err(e) => panic!("{e:?}"),
+            }
+        }
+        assert!(refusals >= 2, "{refusals}");
+        // every effect happened once, in the order of the queue
+        assert_eq!(out(&mut it, "log.join()"), "a1,b1,c1,a2,b2,c2,a3,b3,c3");
+        assert_eq!(it.async_stats().activations, 0);
     });
 }

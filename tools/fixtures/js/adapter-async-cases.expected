@@ -1,0 +1,13 @@
+forof_set_across_await_with_private	sync ## sync|x1|x2|x3|done6
+forof_map_destructure_across_await	 ## a1,b2
+forof_custom_iterator_break_closes	n0 ## n0|x0|n1|x1|ret|end
+forof_throw_closes_and_original_wins	 ## ret|body0
+forof_break_with_throwing_return_rejects	 ## ret|rej:from-return
+forof_return_inside_closes	 ## ret|r2
+forof_labels_close_inner_then_outer	 ## o0i0|o0i1|reti|o1i0|reti|reto|end
+forof_string_and_array_across_await	 ## 10:a,😀,b,1,2
+forof_set_mutated_while_suspended	 ## 1,2,3,4
+forof_two_activations_share_a_set	 ## 1p|2p|1q|2q
+spread_and_pattern_with_await	 ## 1,2,x,y/1,2|5,6/78,9
+class_with_iterator_method_and_private_state	 ## 7:1/1
+rejected_await_in_for_of_closes	 ## ret|rej
