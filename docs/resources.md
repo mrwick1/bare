@@ -450,3 +450,29 @@ Parent built `tools/crypto/sha384_load.rs` with `rustc --edition=2024 -C opt-lev
 The delegate tried a separate unroll for rounds 0 to 15. Its measured gain was about 1%, within noise, so the change was removed. The final implementation keeps the simpler loop. Parent did not reproduce that discarded variant. No CPU-specific path was added.
 
 Checks: all 517 workspace tests passed. All 33 crypto tests passed in release with default and forced-portable builds. SHA-384 adds seven tests for standard vectors, padding boundaries, deterministic oracle inputs, incremental splits, cloning and length arithmetic. Clippy passed with all features. No 32-bit, big-endian or non-x86 hardware was tested.
+
+## X25519 and OS random input
+
+2026-11-04, archMachine, release. X25519 uses five 51-bit limbs and fixed ladder steps. A dedicated square uses 15 products instead of 25. Addition and subtraction defer carries within documented limb bounds. The delegated before/after runs identified field arithmetic as the main cost and reported lower per-call time after these changes. Parent verified the final implementation with the runs below; the earlier variant was not measured again.
+
+Parent built `tools/crypto/x25519_load.rs` with `rustc --edition=2024 -C opt-level=3`. Each load process had a 512 MiB address-space limit and a 45 s timeout. Each exchange computes two public keys and two shared secrets. Both secrets must agree. The next iteration uses the preceding results. Input data is deterministic test data, not real credentials.
+
+| Scale | Exchanges | X25519 calls | Wall seconds | CPU seconds | Microseconds per call | Peak RSS KiB | Loop allocations |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| 1x | 2,000 | 8,000 | 0.267 | 0.26 | 33.38 | 2,492 | 0 |
+| 10x | 20,000 | 80,000 | 2.688 | 2.68 | 33.60 | 2,508 | 0 |
+| 100x | 200,000 | 800,000 | 26.463 | 26.34 | 33.08 | 2,504 | 0 |
+
+Parent reran `oracle 100000` against the installed Python cryptography/OpenSSL implementation. Results: 97,332 identical outputs, 2,668 all-zero outputs rejected by OpenSSL, and no differences. The RFC 7748 million-iteration check also passed separately in release (32.50 s). It remains ignored in normal workspace tests because of its duration.
+
+Linux random input uses `getrandom` with flags 0. This waits for initialized kernel random input and needs no device file. Reference: [Linux getrandom manual](https://man7.org/linux/man-pages/man2/getrandom.2.html). Short reads and EINTR pass through `Read::read_exact`; errors clear the full output. Other Unix platforms use `/dev/urandom`; unsupported platforms return an error. No source failure falls back to another generator.
+
+Parent ran `random 1`, `random 10`, and `random 100` in separate processes with a 512 MiB limit and a 30 s timeout. Each call fills 32 bytes, which are consumed without logging their contents.
+
+| Scale | Calls | Wall seconds | CPU seconds | Peak RSS KiB | Loop allocations |
+| --- | --- | --- | --- | --- | --- |
+| 1x | 100,000 | 0.007 | 0.00 | 2,572 | 0 |
+| 10x | 1,000,000 | 0.069 | 0.06 | 2,580 | 0 |
+| 100x | 10,000,000 | 0.699 | 0.69 | 2,528 | 0 |
+
+CPU accounting has 10 ms resolution on this machine; a printed 0.00 s is not zero CPU use. Tests passed: 532 workspace tests, 48 crypto tests in release with default and forced-portable builds, and the separate million-iteration vector. Clippy passes with all features. A regression test covers clearing partial random output on EOF and hard errors. No TLS handshake, non-Linux source, unavailable-getrandom failure, cross-target assembly or timing harness was tested. Secret stack copies are not comprehensively erased.
