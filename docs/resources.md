@@ -650,3 +650,29 @@ The delegate measured gains from jumping between block-comment stars and widenin
 Checks: 774 workspace tests pass; 26 lexer tests pass in debug and release; crate clippy is clean. Reproduce target comparisons with `ACORN=file:///path/to/acorn.mjs tools/js_lex_check.sh <bundle-dir>`. The small checked-in sample is under `tools/fixtures/js`. The oracle parses source and never executes it.
 
 Not implemented or tested: parser integration, executable code, browser execution, non-ASCII identifiers, regexp pattern grammar, regexp v flag and BigInt values. The lexer reports legacy octal and bad template escapes; the parser must enforce strict-mode and tagged-template rules. Scanning the target files does not establish React/Next.js compatibility or login E2E.
+
+## Managed values and heap
+
+2026-11-04, archMachine, release. Values hold typed generation handles. Strings use UTF-16 units and weak interning. Object storage keeps descriptors, prototype links, dense array elements and sparse properties. The collector marks an explicit root set with a work list, then sweeps unreachable cycles. It does not recurse through the Rust stack. Freed generations cannot become valid again; exhausted slots retire.
+
+Parent review added four failing regressions. Invalid constructor limits could panic. Index 2^32-1 could overflow array length. Stale keys could escape through key conversion. Creating the property hash index could exceed the account byte cap. The fixes return typed errors and charge index creation before mutation. `Heap::new` is now fallible. An allocation-count check also failed because an oversized rejected string was copied before its byte check. Borrowed UTF-16 and UTF-8 strings that exceed the total budget now reject with zero allocations in that check. The live payload cap is not a cap on all temporary buffers or allocator capacity.
+
+Parent built `tools/js/heap_load.rs` with release rustc and ran each case and scale in a fresh process, with a 1 GiB address-space cap and 45 s timeout. Each case checks semantics, counts and checksums. The results below are one parent sample per scale; they do not establish a speed-up over the delegate's discarded implementations.
+
+| Workload | 1x / 10x / 100x | Wall seconds | Main measured cost | Peak RSS KiB |
+| --- | --- | --- | --- | --- |
+| Lookup/update | 2M / 20M / 200M operations | 0.057 / 0.558 / 5.585 | 28 / 28 / 28 ns/op | 2,648 / 2,688 / 2,648 |
+| Small objects | 10k / 100k / 1M objects | 0.004 / 0.039 / 0.404 | 94 / 96 / 101 ns per build/read operation | 5,544 / 33,568 / 312,172 |
+| Many properties | 10k / 100k / 1M keys | 0.004 / 0.048 / 0.915 | define 79 / 81 / 146 ns/key; read 19 / 28 / 73 | 5,360 / 30,876 / 294,348 |
+| String interning | 2k / 20k / 200k distinct strings | 0.015 / 0.303 / 6.466 | hit 28 / 58 / 126 ns | 3,068 / 7,148 / 49,264 |
+| Fixed-live-set churn | 20 / 200 / 2,000 rounds, 10k temporary objects per round | 0.060 / 0.644 / 6.866 | 299 / 322 / 343 ns per allocation/collection operation | 6,624 / 6,572 / 6,768 |
+
+At 100x, small objects account for 248 bytes each. After collection their live payload returns to baseline, but RSS remains 98,140 KiB because slot metadata and allocator capacity remain. Slots must preserve generations; keeping every freed Object-sized slot is a remaining representation cost, not a requirement. The churn case keeps 1,001 live objects, 11,001 object slots and 256,094 accounted bytes every round. Its RSS grows 224 KiB after round one. Average collection pause is 343 us and maximum is 2,035 us in the 100x parent run. Larger property and string working sets have higher per-operation costs; parent did not isolate their cause.
+
+The delegate measured faster property-key hashing and four-unit string hashing. Parent reproduced final results only. String-key validation stayed in place after a small measured removal gain. The current fast hashes are not DoS-resistant. Heap storage bounds do not bound hash-collision work; evaluator execution limits remain a later gate.
+
+Reproduce: `rustc --edition=2024 -C opt-level=3 tools/js/heap_load.rs -o <out>`, then `<out> run lookup|small|bigprops|strings|churn 1|10|100`. `<out> caps` checks rejected-string allocations. Parent ran the Node oracle with seed 17 and 20,000 conversion cases: 20,000 number-to-string, 20,000 string-to-number, 19 other conversions, 361 equality cases and 84,011 operation-result lines matched. Only small generated programs ran in Node; no target bundle ran.
+
+Checks: 810 workspace tests pass on the final rerun. All 62 assembled JS tests pass in debug and release; crate clippy is clean. The first workspace run failed on an existing HTTPS same-origin redirect timeout. That test then passed alone and all 12 HTTPS tests passed in ten consecutive suite runs. The cause remains unknown; these repeats do not prove it is fixed. Parent did not change HTTP behavior in this heap integration.
+
+Remaining limits: no function objects, accessor calls, object ToPrimitive, Proxy, Symbol.for, BigInt, for-in enumeration or automatic GC. Cross-heap handles are forbidden by contract and not detected. All managed handles held in Rust locals must be rooted before collection. Byte accounting excludes allocator slack, and individual string conversion can use temporary storage. No browser execution, closure lifetime, multi-heap isolation, hard allocator-OOM recovery or login E2E was tested.

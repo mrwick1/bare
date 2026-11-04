@@ -4,6 +4,7 @@
 //! Unit tests of both modules: rustc --edition=2024 --test tools/js/heap_load.rs -o <t> && <t>
 //!
 //! <out> run <workload> <scale: 1|10|100>   one workload in this process, one result line
+//! <out> caps                               rejected-string allocation checks
 //! <out> all [workload]                     every scale in its own child process, each with
 //!                                          `ulimit -v` (address space) and `timeout`
 //! <out> oracle <dir> [seed] [cases]        generate Node snippets, run them, compare output
@@ -864,6 +865,20 @@ fn oracle(dir: &str, seed: u64, cases: usize) {
     println!("oracle ok");
 }
 
+fn check_rejected_string_allocations() {
+    let mut h = Heap::new(HeapLimits { max_bytes: 512, ..Default::default() }).unwrap();
+    let units = vec![b'x' as u16; 65536];
+    let text = "x".repeat(65536);
+    for utf8 in [false, true] {
+        let before = ALLOCS.load(Relaxed);
+        let result = if utf8 { h.intern_str(&text) } else { h.intern_units(&units) };
+        let allocations = ALLOCS.load(Relaxed) - before;
+        assert_eq!(result.err(), Some(HeapError::Limit(Limit::Bytes)));
+        assert_eq!(allocations, 0, "rejected utf8={utf8} string allocated before its budget check");
+    }
+    println!("rejected string allocations: 0");
+}
+
 fn main() {
     let a: Vec<String> = std::env::args().collect();
     match a.get(1).map(String::as_str) {
@@ -873,9 +888,10 @@ fn main() {
             run(&a[2], scale);
         }
         Some("all") => all(a.get(2).map(String::as_str)),
+        Some("caps") => check_rejected_string_allocations(),
         Some("oracle") if a.len() >= 3 => oracle(&a[2], a.get(3).map_or(12345, |s| s.parse().unwrap()), a.get(4).map_or(2000, |s| s.parse().unwrap())),
         _ => {
-            eprintln!("usage: {} run <workload> <1|10|100> | all [workload] | oracle <dir> [seed] [cases]", a[0]);
+            eprintln!("usage: {} run <workload> <1|10|100> | caps | all [workload] | oracle <dir> [seed] [cases]", a[0]);
             std::process::exit(2);
         }
     }

@@ -108,6 +108,8 @@ The lexer foundation of topic 2 is complete. `bare-js` scans borrowed source wit
 
 Next implementation split: build the parser over the reviewed lexer API while managed values and heap storage proceed independently. Use borrowed source spans and UTF-16 string semantics. Keep handles stable across collection. The parser follows the lexer interface; executable code, scopes, built-ins and the event loop follow their tested foundations. Each output gets isolated correctness and bounded load checks before integration. Parent owns crate exports and shared progress. No app-specific login shortcut replaces JavaScript execution.
 
+The managed-value and collectible-heap foundations of topic 3 are complete. Stable generation handles represent UTF-16 strings, symbols and ordinary objects. Descriptors, prototypes, array length/index storage and explicit-root mark/sweep are implemented. `Heap::new(limits)` returns an error when limits cannot fit the permanent key. Collection preserves reachable graphs and reclaims unreachable cycles. Callers must keep every live handle in the root set and must not mix heaps. Scopes, closures, function objects, accessor execution, ToPrimitive, Proxy, Symbol.for and automatic collection remain open. The account byte cap excludes allocator slack and retained free-slot capacity. The million-object load leaves 98,140 KiB RSS after collection; this remains an optimization target.
+
 | Topic | Work | Check before closing |
 | --- | --- | --- |
 | 1 | Inventory syntax and built-ins in the deployed bundles. Save versioned public inputs for repeatable tests. | Record bundle hashes and explicit unsupported features. A small sample is not proof of complete compatibility. |

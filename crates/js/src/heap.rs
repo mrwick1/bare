@@ -45,7 +45,7 @@ impl Default for HeapLimits {
             max_objects: 1 << 24,
             max_strings: 1 << 24,
             max_symbols: 1 << 20,
-            max_string_units: (1 << 29) - 24, // the V8 limit
+            max_string_units: (1 << 29) - 24, // max_bytes also bounds string payload
             max_bytes: 1 << 30,
         }
     }
@@ -174,11 +174,8 @@ fn validate_apply(extensible: bool, cur: Option<Property>, d: &PropertyDescripto
                     return None;
                 }
             }
-            Property::Data { value, writable: false, .. } => {
-                if d.writable == Some(true) || d.value.is_some_and(|v| !v.same_value(value)) {
-                    return None;
-                }
-            }
+            Property::Data { value, writable: false, .. }
+                if d.writable == Some(true) || d.value.is_some_and(|v| !v.same_value(value)) => return None,
             _ => {}
         }
     }
@@ -197,8 +194,7 @@ fn validate_apply(extensible: bool, cur: Option<Property>, d: &PropertyDescripto
 
 /// Hasher for property keys. A key is two small integers (a kind and an index or handle), so a
 /// multiply-and-rotate hash is enough; the default SipHash was 35% of lookup time (measured).
-/// It is not DoS-proof, which is fine: the keys are heap handles, not page-chosen text, and a
-/// page can only slow its own tab.
+/// This is not a DoS-resistant hash. Heap limits bound storage, not hash-collision work.
 #[derive(Default)]
 struct KeyHasher(u64);
 
@@ -337,8 +333,12 @@ struct Symbol {
     description: Option<StrId>,
 }
 
+fn string_cost(units: usize) -> usize {
+    std::mem::size_of::<Slot<Str>>() + units * 2 + 8 // 8: two interner slots at load 0.5
+}
+
 fn str_bytes(s: &Str) -> usize {
-    std::mem::size_of::<Slot<Str>>() + s.units.len() * 2 + 8 // 8: two interner slots at load 0.5
+    string_cost(s.units.len())
 }
 
 // ---------- slabs ----------
@@ -361,6 +361,9 @@ struct Slab<T> {
 impl<T> Slab<T> {
     fn new(max: usize) -> Self {
         Slab { slots: Vec::new(), free: Vec::new(), marks: Vec::new(), live: 0, retired: 0, max, allocs: 0 }
+    }
+    fn can_alloc(&self) -> bool {
+        !self.free.is_empty() || (self.slots.len() < self.max && self.slots.len() < u32::MAX as usize)
     }
     fn alloc(&mut self, v: T, limit: Limit) -> Result<(u32, u32), HeapError> {
         let (i, gn) = if let Some(i) = self.free.pop() {
@@ -526,18 +529,19 @@ pub struct Heap {
 
 impl Default for Heap {
     fn default() -> Self {
-        Heap::new(HeapLimits::default())
+        Heap::new(HeapLimits::default()).expect("default limits fit the permanent length string")
     }
 }
 
 type R<T> = Result<T, HeapError>;
 
 impl Heap {
-    pub fn new(limits: HeapLimits) -> Heap {
+    /// Fails when the limits cannot hold the permanent length-key string.
+    pub fn new(limits: HeapLimits) -> R<Heap> {
         let mut h = Heap {
             limits,
             objects: Slab::new(limits.max_objects),
-            strings: Slab::new(limits.max_strings.max(1)),
+            strings: Slab::new(limits.max_strings),
             symbols: Slab::new(limits.max_symbols),
             interner: Interner { table: vec![0; 16], count: 0 },
             bytes: 0,
@@ -545,8 +549,8 @@ impl Heap {
             gray: Vec::new(),
             length: StrId { index: 0, gn: 0 },
         };
-        h.length = h.intern_str("length").expect("the first string always fits");
-        h
+        h.length = h.intern_str("length")?;
+        Ok(h)
     }
 
     pub fn limits(&self) -> HeapLimits {
@@ -594,7 +598,8 @@ impl Heap {
     }
     fn check_key(&self, k: PropertyKey) -> R<()> {
         match k {
-            PropertyKey::Index(_) => Ok(()),
+            PropertyKey::Index(i) if i <= MAX_INDEX => Ok(()),
+            PropertyKey::Index(_) => Err(HeapError::InvalidKey),
             PropertyKey::Symbol(s) => self.sym(s).map(drop),
             PropertyKey::String(s) => {
                 let u = &self.str(s)?.units;
@@ -624,20 +629,23 @@ impl Heap {
     }
 
     pub fn intern_str(&mut self, s: &str) -> R<StrId> {
+        let units = if s.is_ascii() { s.len() } else { s.encode_utf16().count() };
+        if units > self.limits.max_string_units { return Err(HeapError::Limit(Limit::StringLength)); }
+        if string_cost(units) > self.limits.max_bytes { return Err(HeapError::Limit(Limit::Bytes)); }
         self.intern_vec(s.encode_utf16().collect())
     }
 
     fn intern(&mut self, units: std::borrow::Cow<[u16]>) -> R<StrId> {
+        if units.len() > self.limits.max_string_units { return Err(HeapError::Limit(Limit::StringLength)); }
+        let cost = string_cost(units.len());
+        if cost > self.limits.max_bytes { return Err(HeapError::Limit(Limit::Bytes)); }
         let hash = hash_units(&units);
         if let Some(i) = self.interner.find(&self.strings, hash, &units) {
             return Ok(StrId { index: i, gn: self.strings.slots[i as usize].gn });
         }
-        if units.len() > self.limits.max_string_units {
-            return Err(HeapError::Limit(Limit::StringLength));
-        }
-        let s = Str { units: units.into_owned().into_boxed_slice(), hash };
-        let cost = str_bytes(&s);
         self.charge(cost)?;
+        if !self.strings.can_alloc() { return Err(HeapError::Limit(Limit::Strings)); }
+        let s = Str { units: units.into_owned().into_boxed_slice(), hash };
         if (self.interner.count + 1) * 2 > self.interner.table.len() {
             // Grow before the insert so the load stays at most 0.5 and a probe always ends.
             let size = self.interner.table.len() * 2;
@@ -675,10 +683,9 @@ impl Heap {
     pub fn code_point_at(&self, s: StrId, i: usize) -> R<Option<(u32, u8)>> {
         let u = &self.str(s)?.units;
         let Some(&hi) = u.get(i) else { return Ok(None) };
-        if (0xD800..0xDC00).contains(&hi) {
-            if let Some(&lo) = u.get(i + 1).filter(|l| (0xDC00..0xE000).contains(*l)) {
-                return Ok(Some((0x10000 + (((hi as u32) - 0xD800) << 10) + (lo as u32 - 0xDC00), 2)));
-            }
+        if (0xD800..0xDC00).contains(&hi)
+            && let Some(&lo) = u.get(i + 1).filter(|l| (0xDC00..0xE000).contains(*l)) {
+            return Ok(Some((0x10000 + (((hi as u32) - 0xD800) << 10) + (lo as u32 - 0xDC00), 2)));
         }
         Ok(Some((hi as u32, 1)))
     }
@@ -747,6 +754,7 @@ impl Heap {
 
     /// The key as a JS value: a string (made from the index for `Index`) or a symbol.
     pub fn key_to_value(&mut self, k: PropertyKey) -> R<Value> {
+        self.check_key(k)?;
         Ok(match k {
             PropertyKey::Index(i) => Value::String(self.intern_str(&i.to_string())?),
             PropertyKey::String(s) => Value::String(s),
@@ -841,6 +849,7 @@ impl Heap {
 
     fn alloc_object(&mut self, proto: Option<ObjId>, is_array: bool) -> R<ObjId> {
         self.check_opt_obj(proto)?;
+        if !self.objects.can_alloc() { return Err(HeapError::Limit(Limit::Objects)); }
         let mut props = PropMap::new();
         if is_array {
             let len = PropertyKey::String(self.length);
@@ -905,10 +914,9 @@ impl Heap {
     }
 
     fn own(&self, o: &Object, key: PropertyKey) -> Option<Property> {
-        if let PropertyKey::Index(i) = key {
-            if let Some(Some(v)) = o.elems.get(i as usize) {
-                return Some(Property::Data { value: *v, writable: true, enumerable: true, configurable: true });
-            }
+        if let PropertyKey::Index(i) = key
+            && let Some(Some(v)) = o.elems.get(i as usize) {
+            return Some(Property::Data { value: *v, writable: true, enumerable: true, configurable: true });
         }
         o.props.get(key)
     }
@@ -1071,7 +1079,11 @@ impl Heap {
         let in_elems = matches!(key, PropertyKey::Index(i) if matches!(obj.elems.get(i as usize), Some(Some(_))));
         let extra = match key {
             PropertyKey::Index(i) if obj.dense_ok(i, &new) => (i as usize + 1).saturating_sub(obj.elems.len()) * ELEM_BYTES,
-            _ if cur.is_none() || in_elems => ENTRY_BYTES + INDEX_ENTRY_BYTES,
+            _ if cur.is_none() || in_elems => ENTRY_BYTES + if obj.props.index.is_some() {
+                INDEX_ENTRY_BYTES
+            } else if obj.props.entries.len() + 1 > INDEX_AT {
+                (obj.props.live as usize + 1) * INDEX_ENTRY_BYTES
+            } else { 0 },
             _ => 0,
         };
         self.charge(extra)?;
@@ -1172,8 +1184,8 @@ impl Heap {
                 match p {
                     Property::Data { value, .. } => m.value(value),
                     Property::Accessor { get, set, .. } => {
-                        get.map(|g| m.obj(g));
-                        set.map(|s| m.obj(s));
+                        if let Some(g) = get { m.obj(g); }
+                        if let Some(s) = set { m.obj(s); }
                     }
                 }
             }
@@ -1208,10 +1220,9 @@ impl Marker<'_> {
         }
     }
     fn sym(&mut self, s: SymId) {
-        if !std::mem::replace(&mut self.ymarks[s.index as usize], true) {
-            if let Some(d) = self.ysl[s.index as usize].val.as_ref().unwrap().description {
-                self.smarks[d.index as usize] = true;
-            }
+        if !std::mem::replace(&mut self.ymarks[s.index as usize], true)
+            && let Some(d) = self.ysl[s.index as usize].val.as_ref().unwrap().description {
+            self.smarks[d.index as usize] = true;
         }
     }
     fn value(&mut self, v: Value) {
@@ -1254,12 +1265,11 @@ impl Object {
     }
 
     fn remove(&mut self, key: PropertyKey) -> bool {
-        if let PropertyKey::Index(i) = key {
-            if let Some(e @ Some(_)) = self.elems.get_mut(i as usize) {
-                *e = None;
-                self.trim_elems();
-                return true;
-            }
+        if let PropertyKey::Index(i) = key
+            && let Some(e @ Some(_)) = self.elems.get_mut(i as usize) {
+            *e = None;
+            self.trim_elems();
+            return true;
         }
         self.props.remove(key)
     }
@@ -1290,6 +1300,46 @@ impl Object {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn invalid_limits_do_not_panic() {
+        for limits in [HeapLimits { max_bytes: 0, ..Default::default() }, HeapLimits { max_string_units: 0, ..Default::default() }, HeapLimits { max_strings: 0, ..Default::default() }] {
+            let result = std::panic::catch_unwind(|| Heap::new(limits));
+            assert!(result.is_ok());
+            assert!(result.unwrap().is_err());
+        }
+    }
+
+    #[test]
+    fn maximum_u32_is_not_an_index_key() {
+        let mut h = Heap::default();
+        let a = h.new_array(None).unwrap();
+        assert_eq!(h.set(a, PropertyKey::Index(u32::MAX), Value::Null), Err(HeapError::InvalidKey));
+    }
+
+    #[test]
+    fn property_index_creation_respects_byte_cap() {
+        let mut h = Heap::default();
+        let keys: Vec<_> = (0..=INDEX_AT).map(|i| h.key_from_str(&format!("key{i}")).unwrap()).collect();
+        let o = h.new_object(None).unwrap();
+        for &k in &keys[..INDEX_AT] { h.set(o, k, Value::Null).unwrap(); }
+        let before = h.stats().bytes;
+        h.limits.max_bytes = before + ENTRY_BYTES + INDEX_ENTRY_BYTES;
+        assert_eq!(h.set(o, keys[INDEX_AT], Value::Null), Err(HeapError::Limit(Limit::Bytes)));
+        assert_eq!(h.stats().bytes, before);
+        assert_eq!(h.own_keys(o).unwrap().len(), INDEX_AT);
+    }
+
+    #[test]
+    fn stale_keys_cannot_be_converted_to_values() {
+        let mut h = Heap::default();
+        let s = h.intern_str("temporary").unwrap();
+        let y = h.new_symbol(None).unwrap();
+        h.collect(&[]).unwrap();
+        for k in [PropertyKey::String(s), PropertyKey::Symbol(y)] {
+            assert!(matches!(h.key_to_value(k), Err(HeapError::Stale)));
+        }
+    }
 
     fn n(v: f64) -> Value {
         Value::Number(v)
@@ -1755,7 +1805,7 @@ mod tests {
 
     #[test]
     fn generation_wrap_retires_the_slot() {
-        let mut h = Heap::new(HeapLimits { max_objects: 2, ..Default::default() });
+        let mut h = Heap::new(HeapLimits { max_objects: 2, ..Default::default() }).unwrap();
         let a = h.new_object(None).unwrap();
         // Pretend this slot has been reused 2^32-1 times.
         h.objects.slots[a.index as usize].gn = u32::MAX;
@@ -1776,7 +1826,7 @@ mod tests {
 
     #[test]
     fn allocation_caps() {
-        let mut h = Heap::new(HeapLimits { max_objects: 3, max_strings: 4, max_symbols: 2, max_string_units: 8, ..Default::default() });
+        let mut h = Heap::new(HeapLimits { max_objects: 3, max_strings: 4, max_symbols: 2, max_string_units: 8, ..Default::default() }).unwrap();
         for _ in 0..3 {
             h.new_object(None).unwrap();
         }
@@ -1801,7 +1851,7 @@ mod tests {
 
     #[test]
     fn byte_budget_bounds_growth_and_stays_exact() {
-        let mut h = Heap::new(HeapLimits { max_bytes: 20_000, ..Default::default() });
+        let mut h = Heap::new(HeapLimits { max_bytes: 20_000, ..Default::default() }).unwrap();
         let o = h.new_object(None).unwrap();
         let mut i = 0u32;
         let err = loop {
@@ -1828,7 +1878,7 @@ mod tests {
         h.collect(&[Value::Object(o)]).unwrap();
         assert_eq!(h.stats().bytes, recount(&h));
         // Dense elements are charged too.
-        let mut h = Heap::new(HeapLimits { max_bytes: 20_000, ..Default::default() });
+        let mut h = Heap::new(HeapLimits { max_bytes: 20_000, ..Default::default() }).unwrap();
         let a = h.new_array(None).unwrap();
         let mut hit = false;
         for j in 0..100_000 {
@@ -1973,7 +2023,7 @@ mod tests {
         // Measured on x86-64: Value 16, Property 32, entry 48, Object 80, Slot<Object> 88.
         assert!(size_of::<Value>() <= 16);
         assert!(size_of::<Property>() <= 32);
-        assert!(ENTRY_BYTES <= 48);
+        const { assert!(ENTRY_BYTES <= 48); }
         assert!(size_of::<Slot<Object>>() <= 88);
         assert!(size_of::<Slot<Str>>() <= 32);
     }
