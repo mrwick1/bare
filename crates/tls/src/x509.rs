@@ -370,8 +370,14 @@ fn check_name(name: Tlv<'_>) -> Result<()> {
             return Err(Error::Name);
         }
         let mut atvs = Reader::new(set.content);
+        let mut previous: Option<&[u8]> = None;
         while !atvs.is_empty() {
             let atv = atvs.read_tag(der::SEQUENCE).map_err(|_| Error::Name)?;
+            // X.690 11.6: SET OF elements are ordered by their complete DER encodings.
+            if previous.is_some_and(|p| p > atv.full) {
+                return Err(Error::Name);
+            }
+            previous = Some(atv.full);
             let mut a = Reader::new(atv.content);
             let oid = a.read_tag(der::OID).map_err(|_| Error::Name)?;
             der::check_oid(oid.content).map_err(|_| Error::Name)?;
@@ -1094,6 +1100,17 @@ mod tests {
         let mut m = b.clone();
         m[n - 9] = 8;
         assert!(parse(&m).is_err());
+    }
+
+    #[test]
+    fn rdn_set_order_is_canonical() {
+        let a = tlv(0x30, &cat(&[&tlv(6, NAME_OID_CN), &tlv(0x0c, b"A")]));
+        let b = tlv(0x30, &cat(&[&tlv(6, NAME_OID_CN), &tlv(0x0c, b"B")]));
+        let mut p = Parts::ok();
+        p.issuer = tlv(0x30, &tlv(0x31, &cat(&[&a, &b])));
+        assert!(p.parse().is_ok());
+        p.issuer = tlv(0x30, &tlv(0x31, &cat(&[&b, &a])));
+        assert_eq!(p.err(), Error::Name);
     }
 
     #[test]

@@ -91,7 +91,8 @@ fn main() {
         include_bytes!("../fixtures/x509/staging-3-isrg-x2-crosssigned.der"),
         include_bytes!("../fixtures/x509/isrg-root-x2.der"),
     ];
-    let rounds = base * scale;
+    assert!(base > 0, "base rounds must be positive");
+    let rounds = base.checked_mul(scale).filter(|r| r.checked_mul(10).is_some()).expect("workload size overflow");
     let mut buf = vec![0u8; 2048]; // reused mutation buffer
     let (mut rng, mut sum, mut ok, mut bad, mut bytes) = (0x9e3779b97f4a7c15u64, 0u64, 0u64, 0u64, 0u64);
     let c0 = cpu_secs();

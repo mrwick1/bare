@@ -21,7 +21,7 @@ pub enum Error {
     LengthTooLarge,
     /// Tag number 31 or more (multi-byte tag).
     HighTag,
-    /// A different tag than the one the caller expected.
+    /// A forbidden tag, or a different tag than the caller expected.
     WrongTag,
     /// Bytes left over after the last expected element.
     TrailingData,
@@ -84,6 +84,10 @@ impl<'a> Reader<'a> {
             return Err(Error::Truncated);
         }
         let tag = b[0];
+        // End-of-contents belongs to BER indefinite-length encoding, not DER values.
+        if matches!(tag, 0x00 | 0x20) {
+            return Err(Error::WrongTag);
+        }
         if tag & 0x1f == 0x1f {
             return Err(Error::HighTag);
         }
@@ -241,6 +245,12 @@ mod tests {
         // High tag numbers.
         assert_eq!(rd(&[0x1f, 1, 0]).unwrap_err(), Error::HighTag);
         assert_eq!(rd(&[0xbf, 0x21, 0]).unwrap_err(), Error::HighTag);
+    }
+
+    #[test]
+    fn end_of_contents_is_not_a_der_value() {
+        assert!(rd(&[0, 0]).is_err());
+        assert!(rd(&[0x20, 0]).is_err());
     }
 
     #[test]

@@ -476,3 +476,19 @@ Parent ran `random 1`, `random 10`, and `random 100` in separate processes with 
 | 100x | 10,000,000 | 0.699 | 0.69 | 2,528 | 0 |
 
 CPU accounting has 10 ms resolution on this machine; a printed 0.00 s is not zero CPU use. Tests passed: 532 workspace tests, 48 crypto tests in release with default and forced-portable builds, and the separate million-iteration vector. Clippy passes with all features. A regression test covers clearing partial random output on EOF and hard errors. No TLS handshake, non-Linux source, unavailable-getrandom failure, cross-target assembly or timing harness was tested. Secret stack copies are not comprehensively erased.
+
+## DER and certificate parsing
+
+2026-11-04, archMachine, release. `der` reads bounded TLVs as borrowed slices. `x509` parses the fields needed by the staging chain without copying certificate data or building a recursive tree. Certificate size is capped at 64 KiB and extension count at 64. Duplicate extensions are checked against a fixed stack array of prior OID slices. The delegated profile identified rescanning encoded extensions as the main cost; the array preserves the check and avoids reparsing. Parent did not reproduce the discarded implementation.
+
+Parent review added regression tests and fixes for forbidden end-of-contents values and canonical ordering of multi-valued name sets. Both tests failed before their fixes. OpenSSL expectations were regenerated and did not change. Parent ran the load driver with a 512 MiB address-space limit and a 30 s timeout per process. Each round parses five public certificates and five mutated copies. An accepted mutation is syntactically parseable; it is not a trusted certificate.
+
+| Scale | Parser calls | Input MiB | Wall seconds | CPU seconds | Peak RSS KiB | Loop allocations |
+| --- | --- | --- | --- | --- | --- | --- |
+| 1x | 200,000 | 150 | 0.07 | 0.06 | 2,444 | 0 |
+| 10x | 2,000,000 | 1,509 | 0.67 | 0.66 | 2,428 | 0 |
+| 100x | 20,000,000 | 15,094 | 6.77 | 6.75 | 2,444 | 0 |
+
+Reproduce with `rustc --edition=2024 -C opt-level=3 tools/crypto/x509_load.rs -o <out>` and `<out> 1|10|100`. All 563 workspace tests pass. All 79 normal crypto tests pass in release with default and forced-portable builds. Clippy passes with all features. Prefix truncation, malformed lengths/extensions, random mutations, borrow boundaries and fixed-date cases are covered. The long X25519 test remains a separate ignored test.
+
+This measures parsing only. X509 name values and some unused GeneralName forms remain opaque. The caller must enforce critical-extension handling, leaf/issuer policy, hostname, validity, path length and signature verification. RSA verification and compressed EC keys are unsupported. Only the five fixture certificates and their mutations were tested; no other target hardware was tested.
