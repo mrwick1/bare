@@ -24,8 +24,9 @@
 // names, `%home`) and `%nt` in the environments it saves, so private reads and writes and `super.m()` work
 // across an `await`. Class code is owned by a script: `ClassData::script` says which. Constructor bodies and field
 // initializers run with that script selected (`in_script`), and the caller's script comes back on every exit.
-// A subclass of Promise or of a host constructor is refused with `Unsupported` when it is constructed:
-// those constructors do not take a `new.target` yet. Error, Array, Object, Function and RegExp parents work.
+// A subclass of Promise, of a host constructor, of a byte class (`ArrayBuffer`, `Uint8Array`, `TextEncoder`,
+// `TextDecoder`) or of Map or Set is refused with `Unsupported` when it is constructed: those constructors do not
+// take a `new.target` yet. Error, Array, Object, Function and RegExp parents work.
 
 const F_NT: u8 = 1;
 const F_DERIVED: u8 = 2;
@@ -294,12 +295,18 @@ impl<'p> Interp<'p> {
     }
 
     /// Keep in sync with the cases of `construct_inner`.
+    /// A native constructor that builds a branded object and cannot take another `new.target` (the byte classes, Map, Set).
+    /// A prototype patch after the call would give the wrong brand, so a subclass of one is refused when it is constructed.
+    fn native_no_nt(n: Nat) -> bool {
+        matches!(n, Nat::Bin(b) if b.ctor_name().is_some() || b == BinFn::TaCtor) || matches!(n, Nat::Sc(f) if f.is_ctor())
+    }
+
     fn is_constructor(&self, mut o: ObjId) -> bool {
         loop {
             match self.funcs.get(&o) {
                 Some(Callee::Class) => return true,
                 Some(&Callee::Script { script, fid, .. }) => return self.func_of(script, fid).kind == FuncKind::Normal,
-                Some(&Callee::Native(n)) => return matches!(n, Nat::ObjectCtor | Nat::FnCtor | Nat::ArrayCtor | Nat::ErrorCtor(_) | Nat::Ext(Bi::RegExpCtor)),
+                Some(&Callee::Native(n)) => return matches!(n, Nat::ObjectCtor | Nat::FnCtor | Nat::ArrayCtor | Nat::ErrorCtor(_) | Nat::Ext(Bi::RegExpCtor)) || Self::native_no_nt(n),
                 Some(&Callee::Host { ctor, .. }) => return ctor,
                 Some(&Callee::Promise(pf)) => return matches!(pf, PFn::Ctor),
                 Some(&Callee::Bound { target, .. }) => o = target,
@@ -346,6 +353,7 @@ impl<'p> Interp<'p> {
             Some(Callee::Class) => D::Class,
             Some(&Callee::Script { script, fid, env, self_binding }) if self.func_of(script, fid).kind == FuncKind::Normal => D::Script(script, fid, env, self_binding),
             Some(&Callee::Native(n)) if matches!(n, Nat::ObjectCtor | Nat::FnCtor | Nat::ArrayCtor | Nat::ErrorCtor(_) | Nat::Ext(Bi::RegExpCtor)) => D::Native(n),
+            Some(&Callee::Native(n)) if Self::native_no_nt(n) => D::NoNt("subclassing a native constructor (new.target is not passed to the constructor)"),
             Some(&Callee::Promise(PFn::Ctor)) => D::NoNt("subclassing Promise (new.target is not passed to the constructor)"),
             Some(&Callee::Host { ctor: true, .. }) => D::NoNt("subclassing a host constructor (new.target is not passed to the constructor)"),
             Some(Callee::Bound { target, args, .. }) => D::Bound(*target, args.clone()),

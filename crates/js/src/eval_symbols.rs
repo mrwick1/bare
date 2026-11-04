@@ -702,7 +702,12 @@ impl<'p> Interp<'p> {
         if done {
             return Ok(None);
         }
-        let len = self.length_of(src)?;
+        // A typed array has its own length: the spec does not read `length` for it (not even through
+        // `Array.prototype.values.call`).
+        let len = match src {
+            Value::Object(so) if let Some((_, _, l)) = self.heap.view_parts(so) => l as u64,
+            _ => self.length_of(src)?,
+        };
         let save = |it: &mut Self, i: u64, done: bool| {
             if let Some(IterState::Array { i: si, done: sd, .. }) = it.sc.iters.get_mut(&o) {
                 *si = i;

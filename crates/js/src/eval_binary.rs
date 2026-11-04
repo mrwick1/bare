@@ -7,13 +7,18 @@
 // - `Uint8Array(length | buffer, byteOffset, length | typedArray | array | array-like)`, the getters `buffer`, `byteLength`,
 //   `byteOffset`, `length`, `BYTES_PER_ELEMENT`, `set(source, offset)`, `subarray` (shared bytes), `slice` (copy), integer
 //   indexing (read, write, `in`, `delete`, `Object.keys`, `Object.getOwnPropertyDescriptor`, `defineProperty`) and iteration.
+//   `new Uint8Array(iterable)` takes every value through the shared iterator protocol of `eval_symbols.rs` (an object whose
+//   `@@iterator` is not undefined or null), then converts each. `values`, `keys`, `entries` and `[@@iterator]` of
+//   `%TypedArray%.prototype` make the shared array iterator (no second engine); it reads the view's own length.
 //   `%TypedArray%` is not global, but `Object.getPrototypeOf(Uint8Array)` finds it, as in a browser.
 // - `TextEncoder` (`encoding`, `encode`, `encodeInto`) and `TextDecoder` (`encoding`, `fatal`, `ignoreBOM`, `decode` with
 //   `stream`). UTF-8 only. A known WHATWG label of another encoding is `Unsupported`; an unknown label is a `RangeError`.
 // Gates (explicit `Unsupported`, never silent): resizable `ArrayBuffer` options, `resize`, `transfer`, and the typed-array
-// methods that are not above (`fill`, `map`, `indexOf`, `from`, `of`, ...).
-// Absent: `SharedArrayBuffer`, `DataView`, every other typed-array family, detached buffers, `Symbol.iterator` and
-// `Symbol.toStringTag` of these classes (symbols are not in this evaluator yet).
+// methods that are not above (`fill`, `map`, `indexOf`, `from`, `of`, ...). `@@toStringTag` is bound for the four classes
+// (a data property for `ArrayBuffer`, `TextEncoder` and `TextDecoder`, a getter on `%TypedArray%.prototype`). `slice` and
+// `subarray` read `constructor` and `@@species`: `undefined`, `null` and the intrinsic class give the default; any other
+// constructor is `Unsupported`. A class that extends one of these constructors is `Unsupported` when it is constructed.
+// Absent: `SharedArrayBuffer`, `DataView`, every other typed-array family and detached buffers.
 //
 // Limits: backing bytes are capped for one buffer and for all live buffers (`Interp::set_binary_limits`; errors
 // `Heap(BufferLength)` and `Heap(BufferBytes)`), every size is checked before the allocation or the copy, and every
@@ -37,6 +42,10 @@ enum BinFn {
     TaSet,
     TaSubarray,
     TaSlice,
+    TaValues,
+    TaKeys,
+    TaEntries,
+    TaTag,
     U8Ctor,
     EncCtor,
     EncEncoding,
@@ -69,6 +78,9 @@ struct BinProtos {
     u8: ObjId,
     enc: ObjId,
     dec: ObjId,
+    /// The intrinsic `ArrayBuffer` and `Uint8Array`: the defaults of `SpeciesConstructor`.
+    ab_c: ObjId,
+    u8_c: ObjId,
 }
 
 #[derive(Default)]
@@ -76,14 +88,13 @@ struct BinaryState {
     protos: Option<BinProtos>,
 }
 
-const TA_GATES: [(&str, &str); 22] = [
+const TA_GATES: [(&str, &str); 19] = [
     ("fill", "TypedArray.prototype.fill"), ("copyWithin", "TypedArray.prototype.copyWithin"), ("reverse", "TypedArray.prototype.reverse"),
     ("sort", "TypedArray.prototype.sort"), ("indexOf", "TypedArray.prototype.indexOf"), ("lastIndexOf", "TypedArray.prototype.lastIndexOf"),
     ("includes", "TypedArray.prototype.includes"), ("join", "TypedArray.prototype.join"), ("map", "TypedArray.prototype.map"),
     ("filter", "TypedArray.prototype.filter"), ("forEach", "TypedArray.prototype.forEach"), ("reduce", "TypedArray.prototype.reduce"),
     ("every", "TypedArray.prototype.every"), ("some", "TypedArray.prototype.some"), ("find", "TypedArray.prototype.find"),
-    ("findIndex", "TypedArray.prototype.findIndex"), ("at", "TypedArray.prototype.at"), ("entries", "TypedArray.prototype.entries"),
-    ("keys", "TypedArray.prototype.keys"), ("values", "TypedArray.prototype.values"), ("toString", "TypedArray.prototype.toString"),
+    ("findIndex", "TypedArray.prototype.findIndex"), ("at", "TypedArray.prototype.at"), ("toString", "TypedArray.prototype.toString"),
     ("toReversed", "TypedArray.prototype.toReversed"),
 ];
 
@@ -125,7 +136,7 @@ impl<'p> Interp<'p> {
 
     fn binary_roots(&self, out: &mut Vec<Value>) {
         if let Some(p) = self.bin.protos {
-            out.extend([p.ab, p.ta, p.u8, p.enc, p.dec].map(Value::Object));
+            out.extend([p.ab, p.ta, p.u8, p.enc, p.dec, p.ab_c, p.u8_c].map(Value::Object));
         }
     }
 
@@ -160,9 +171,12 @@ impl<'p> Interp<'p> {
         let (ab_p, ta_p) = (proto(self, op)?, proto(self, op)?);
         let u8_p = proto(self, ta_p)?;
         let (enc_p, dec_p) = (proto(self, op)?, proto(self, op)?);
-        self.bin.protos = Some(BinProtos { ab: ab_p, ta: ta_p, u8: u8_p, enc: enc_p, dec: dec_p });
+        self.bin.protos = Some(BinProtos { ab: ab_p, ta: ta_p, u8: u8_p, enc: enc_p, dec: dec_p, ab_c: ab_p, u8_c: u8_p });
 
+        let species = PropertyKey::Symbol(self.sc.wk[WK_SPECIES]);
         let ab = self.bin_ctor("ArrayBuffer", BinFn::AbCtor, 1, ab_p)?;
+        self.sc_getter(ab, species, "get [Symbol.species]", ScFn::Species)?;
+        self.sc_tag(ab_p, "ArrayBuffer")?;
         self.bin_global("ArrayBuffer", ab)?;
         self.bin_method(ab, "isView", BinFn::AbIsView, 1)?;
         self.bin_getter(ab_p, "byteLength", BinFn::AbByteLength, false)?;
@@ -179,6 +193,17 @@ impl<'p> Interp<'p> {
         self.bin_method(ta_p, "set", BinFn::TaSet, 1)?;
         self.bin_method(ta_p, "subarray", BinFn::TaSubarray, 2)?;
         self.bin_method(ta_p, "slice", BinFn::TaSlice, 2)?;
+        // `values` is `[Symbol.iterator]`; the iterator is the shared array iterator of `eval_symbols.rs`.
+        let tv = self.native(Nat::Bin(BinFn::TaValues), "values", 0)?;
+        let kv = h!(self, self.heap.key_from_str("values"));
+        self.def(ta_p, kv, Value::Object(tv), true, false, true)?;
+        self.def(ta_p, self.sc.k_iterator, Value::Object(tv), true, false, true)?;
+        self.bin_method(ta_p, "keys", BinFn::TaKeys, 0)?;
+        self.bin_method(ta_p, "entries", BinFn::TaEntries, 0)?;
+        let tag = self.native(Nat::Bin(BinFn::TaTag), "get [Symbol.toStringTag]", 0)?;
+        let d = PropertyDescriptor { get: Some(Some(tag)), set: Some(None), enumerable: Some(false), configurable: Some(true), ..Default::default() };
+        h!(self, self.heap.define_own_property(ta_p, self.sc.k_to_string_tag, &d));
+        self.sc_getter(ta, species, "get [Symbol.species]", ScFn::Species)?;
         for (n, w) in TA_GATES {
             self.bin_method(ta_p, n, BinFn::Gate(w), 0)?;
         }
@@ -191,14 +216,20 @@ impl<'p> Interp<'p> {
         self.def(u8c, k, Value::Number(1.0), false, false, false)?;
         self.def(u8_p, k, Value::Number(1.0), false, false, false)?;
         self.bin_global("Uint8Array", u8c)?;
+        if let Some(p) = &mut self.bin.protos {
+            p.ab_c = ab;
+            p.u8_c = u8c;
+        }
 
         let enc = self.bin_ctor("TextEncoder", BinFn::EncCtor, 0, enc_p)?;
         self.bin_global("TextEncoder", enc)?;
+        self.sc_tag(enc_p, "TextEncoder")?;
         self.bin_getter(enc_p, "encoding", BinFn::EncEncoding, true)?;
         self.bin_method(enc_p, "encode", BinFn::EncEncode, 0)?;
         self.bin_method(enc_p, "encodeInto", BinFn::EncEncodeInto, 2)?;
         let dec = self.bin_ctor("TextDecoder", BinFn::DecCtor, 0, dec_p)?;
         self.bin_global("TextDecoder", dec)?;
+        self.sc_tag(dec_p, "TextDecoder")?;
         self.bin_getter(dec_p, "encoding", BinFn::DecEncoding, true)?;
         self.bin_getter(dec_p, "fatal", BinFn::DecFatal, true)?;
         self.bin_getter(dec_p, "ignoreBOM", BinFn::DecIgnoreBom, true)?;
@@ -257,12 +288,20 @@ impl<'p> Interp<'p> {
         Err(self.incompatible(what, this))
     }
 
-    /// `SpeciesConstructor(o, default)` without `@@species` (no symbols yet): it still reads `constructor`, rejects a
-    /// non-object and accepts `undefined`. The result is always the default constructor.
-    fn bin_species(&mut self, o: ObjId) -> Res<()> {
-        match self.get_prop(Value::Object(o), self.k_constructor)? {
-            Value::Undefined | Value::Object(_) => Ok(()),
-            _ => Err(self.type_err("object.constructor is not a constructor")),
+    /// `SpeciesConstructor(o, default)`: reads `constructor`, then `constructor[@@species]` (each once). `undefined`, `null`
+    /// and the intrinsic `default` give the default. Another constructor is `Unsupported` (`what`): it would need
+    /// `Construct` with result checks. A value that is not a constructor is a `TypeError`.
+    fn bin_species(&mut self, o: ObjId, default: ObjId, what: &'static str) -> Res<()> {
+        let c = match self.get_prop(Value::Object(o), self.k_constructor)? {
+            Value::Undefined => return Ok(()),
+            c @ Value::Object(_) => c,
+            _ => return Err(self.type_err("object.constructor is not a constructor")),
+        };
+        match self.get_prop(c, self.wk_key(WK_SPECIES))? {
+            Value::Undefined | Value::Null => Ok(()),
+            Value::Object(s) if s == default => Ok(()),
+            Value::Object(s) if self.is_constructor(s) => Err(unsupported(what, Span::default())),
+            _ => Err(self.type_err("object.constructor[Symbol.species] is not a constructor")),
         }
     }
 
@@ -326,7 +365,7 @@ impl<'p> Interp<'p> {
                 let first = self.num_integer(a0)?;
                 let first = Self::rel_index(first, len);
                 let last = if matches!(a1, Value::Undefined) { len } else { let e = self.num_integer(a1)?; Self::rel_index(e, len) };
-                self.bin_species(o)?;
+                self.bin_species(o, p.unwrap().ab_c, "ArrayBuffer species constructor other than ArrayBuffer")?;
                 let last = last.max(first);
                 self.work(last - first, 6)?;
                 Ok(Value::Object(h!(self, self.heap.new_buffer_copy(Some(p.unwrap().ab), o, first, last))))
@@ -345,13 +384,26 @@ impl<'p> Interp<'p> {
                 Ok(Value::Number(off as f64))
             }
             U8Ctor => self.u8_construct(a0, a1, a2),
+            TaValues | TaKeys | TaEntries => {
+                let (what, w) = match f {
+                    TaKeys => (IterWhat::Keys, "%TypedArray%.prototype.keys"),
+                    TaEntries => (IterWhat::Entries, "%TypedArray%.prototype.entries"),
+                    _ => (IterWhat::Values, "%TypedArray%.prototype.values"),
+                };
+                self.this_view(this, w)?;
+                self.sc_array_iter(this, what)
+            }
+            TaTag => match this {
+                Value::Object(o) if self.heap.exotic_kind(o) == Some(ExoticKind::View) => self.str_value("Uint8Array"),
+                _ => Ok(Value::Undefined),
+            },
             TaSet => self.ta_set(this, a0, a1),
             TaSubarray => {
                 let (o, buf, off, len) = self.this_view(this, "%TypedArray%.prototype.subarray")?;
                 let first = self.num_integer(a0)?;
                 let first = Self::rel_index(first, len);
                 let last = if matches!(a1, Value::Undefined) { len } else { let e = self.num_integer(a1)?; Self::rel_index(e, len) };
-                self.bin_species(o)?;
+                self.bin_species(o, p.unwrap().u8_c, "typed array species constructor other than Uint8Array")?;
                 let n = last.saturating_sub(first);
                 Ok(Value::Object(h!(self, self.heap.new_view(Some(p.unwrap().u8), buf, off + first, n))))
             }
@@ -360,7 +412,7 @@ impl<'p> Interp<'p> {
                 let first = self.num_integer(a0)?;
                 let first = Self::rel_index(first, len);
                 let last = if matches!(a1, Value::Undefined) { len } else { let e = self.num_integer(a1)?; Self::rel_index(e, len) };
-                self.bin_species(o)?;
+                self.bin_species(o, p.unwrap().u8_c, "typed array species constructor other than Uint8Array")?;
                 let last = last.max(first);
                 self.work(last - first, 6)?;
                 let p = p.unwrap();
@@ -453,15 +505,16 @@ impl<'p> Interp<'p> {
                 let buf = h!(self, self.heap.new_buffer_copy(Some(p.ab), src, 0, len));
                 Ok(Value::Object(h!(self, self.heap.new_view(Some(p.u8), buf, 0, len))))
             }
-            _ if h!(self, self.heap.is_array(src)) => {
-                // An array is iterated: read every element first, then convert each one.
+            _ if let Some(mut it) = self.iter_open(a0)? => {
+                // An iterable (`@@iterator` is not undefined or null): take every value first, then convert each one.
+                // `IteratorToList` does not close the iterator on an error. The values are bounded before they grow.
                 let cap = self.heap.buffer_limits().1;
-                let mut it = self.iter_start_val(a0)?;
                 let mut vals = Vec::new();
                 while let Some(v) = self.iter_next(&mut it)? {
                     if vals.len() >= cap {
                         return Err(Error::Limit(LimitKind::Heap(Limit::BufferLength)));
                     }
+                    self.iter_buffer_room(vals.len())?;
                     vals.push(v);
                 }
                 let out = self.new_u8(vals.len())?;

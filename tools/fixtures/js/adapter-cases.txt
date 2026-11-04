@@ -1,0 +1,108 @@
+# bare-js byte and iterator adapter cases: Uint8Array from iterables, typed-array iterators, toStringTag and species.
+# Same format and oracle as binary-cases.txt (tools/js/binary_oracle.mjs). Only our own tiny programs run here.
+=== u8_from_set_and_map
+function J(x){return Array.prototype.join.call(x)}
+J(new Uint8Array(new Set([1, 2, 3, 3]))) + "|" + J(new Uint8Array(new Map([[5, 6]]).keys())) + "|" + J(new Uint8Array("ab".length)) + "|" + J(new Uint8Array(new Set([1.9, -1, 256, "7"]).values()))
+=== u8_iterator_wins_over_length
+function J(x){return Array.prototype.join.call(x)}
+var o = {length: 3, 0: 1, 1: 2, 2: 3, [Symbol.iterator]: function(){ var i = 0; return {next: function(){ return i < 2 ? {value: 40 + i++, done: false} : {done: true}; }}; }};
+J(new Uint8Array(o)) + "|" + J(new Uint8Array({length: 2, 0: 8, 1: 9, [Symbol.iterator]: undefined})) + "|" + J(new Uint8Array({length: 2, 0: 8, 1: 9, [Symbol.iterator]: null}))
+=== u8_collects_values_before_converting
+var L = [];
+var it = {[Symbol.iterator]: function(){ var i = 0; return {next: function(){ L.push("n" + i); if (i < 3) { var k = i++; return {value: {valueOf: function(){ L.push("v" + k); return k; }}, done: false}; } return {done: true}; }, return: function(){ L.push("ret"); return {}; }}; }};
+var u = new Uint8Array(it);
+L.join(",") + "|" + u.length
+=== u8_iterable_errors_do_not_close
+var L = [];
+function mk(thrower){ return {[Symbol.iterator]: function(){ var i = 0; return {next: function(){ if (i++ == 1) thrower(); return {value: 1, done: false}; }, return: function(){ L.push("ret"); return {}; }}; }}; }
+function E(f){try{f();return "ok"}catch(e){return e.name}}
+E(function(){ return new Uint8Array(mk(function(){ throw new RangeError("x"); })); }) + "|" + E(function(){ return new Uint8Array({[Symbol.iterator]: function(){ var i = 0; return {next: function(){ return i++ ? {done: true} : {value: {valueOf: function(){ throw new SyntaxError("v"); }}, done: false}; }, return: function(){ L.push("ret2"); return {}; }}; }}); }) + "|" + L.join(",")
+=== u8_iterable_protocol_errors
+function E(f){try{f();return "ok"}catch(e){return e.name}}
+[E(function(){ return new Uint8Array({[Symbol.iterator]: 5}); }), E(function(){ return new Uint8Array({[Symbol.iterator]: function(){ return 1; }}); }), E(function(){ return new Uint8Array({[Symbol.iterator]: function(){ return {next: function(){ return 3; }}; }}); }), E(function(){ return new Uint8Array({[Symbol.iterator]: function(){ return {next: 4}; }}); })].join("|")
+=== u8_array_with_replaced_iterator
+function J(x){return Array.prototype.join.call(x)}
+var a = [1, 2, 3]; a[Symbol.iterator] = function(){ var i = 0; return {next: function(){ return i < 1 ? {value: 90 + i++, done: false} : {done: true}; }}; };
+J(new Uint8Array(a)) + "|" + J(new Uint8Array([1, 2, 3]))
+=== u8_values_keys_entries
+var u = new Uint8Array([7, 8, 9]);
+function J(x){return Array.prototype.join.call(Array.from ? Array.from(x) : [...x])}
+var out = [];
+for (var v of u.values()) out.push(v);
+for (var k of u.keys()) out.push("k" + k);
+for (var e of u.entries()) out.push(e.join(":"));
+for (var s of u) out.push("s" + s);
+out.join(",")
+=== u8_iterator_identity_and_shape
+var P = Uint8Array.prototype; var TP = Object.getPrototypeOf(P);
+var d = Object.getOwnPropertyDescriptor(TP, Symbol.iterator);
+[P[Symbol.iterator] === P.values, P.values === TP.values, TP.values !== Array.prototype.values, TP.values.name, TP.values.length, TP.keys.name, TP.entries.name, TP[Symbol.iterator].name, d.writable, d.enumerable, d.configurable, P.hasOwnProperty("values"), Object.getPrototypeOf(new Uint8Array(1).values()) === Object.getPrototypeOf([].values()), Object.prototype.toString.call(new Uint8Array(1).keys())].join("|")
+=== u8_iterator_receiver_checks
+function E(f){try{f();return "ok"}catch(e){return e.name}}
+var TP = Object.getPrototypeOf(Uint8Array.prototype);
+[E(function(){ return TP.values.call([]); }), E(function(){ return TP.keys.call({length: 1}); }), E(function(){ return TP.entries.call(undefined); }), E(function(){ return TP.values.call(new ArrayBuffer(1)); }), E(function(){ return TP[Symbol.iterator].call("ab"); }), typeof TP.values.call(new Uint8Array(1)).next, E(function(){ return Array.prototype.values.call(new Uint8Array(2)).next().value; }), Array.prototype.join.call({[Symbol.iterator]: 1, length: 2, 0: "a", 1: "b"}), [...Array.prototype.keys.call(new Uint8Array(3))].join(), [...Array.prototype.entries.call(new Uint8Array([4, 5]))].join(";")].join("|")
+=== u8_iterator_sees_writes_and_aliases
+var b = new ArrayBuffer(4); var u = new Uint8Array(b); var w = new Uint8Array(b, 1, 3); var it = u.values(); var out = [];
+out.push(it.next().value); u[1] = 50; w[1] = 60; out.push(it.next().value); out.push(it.next().value); out.push(it.next().value); var last = it.next(); out.push(last.done, last.value);
+u[3] = 1; out.push(it.next().done);
+out.join(",")
+=== u8_iterator_uses_the_view_length_not_the_property
+var u = new Uint8Array([1, 2]); Object.defineProperty(u, "length", {value: 5}); var n = 0; for (var x of u) n++;
+var c = 0; for (var y of Array.prototype.values.call(u)) c++;
+n + "," + c + "," + u.length
+=== u8_iterator_break_closes
+var L = []; var AIP = Object.getPrototypeOf(Object.getPrototypeOf([].values()));
+var AI = Object.getPrototypeOf([].values());
+AI.return = function(){ L.push("closed"); return {}; };
+var u = new Uint8Array([1, 2, 3]);
+for (var x of u) { L.push(x); if (x == 2) break; }
+var [a] = u; var [p, q, r] = u;
+delete AI.return;
+L.join(",") + "|" + a + p + q + r
+=== u8_spread_and_destructure_and_collections
+var u = new Uint8Array([3, 1, 3]); var s = new Set(u); var m = new Map(new Uint8Array([1]).entries());
+function f(){ return arguments.length; }
+[[...u].join(), s.size, m.get(0), f(...u), [].concat([...u], [...new Uint8Array(0)]).length, Math.max(...u)].join("|")
+=== tag_array_buffer_and_codecs
+var ts = Object.prototype.toString;
+var d = Object.getOwnPropertyDescriptor(ArrayBuffer.prototype, Symbol.toStringTag);
+[ts.call(new ArrayBuffer(1)), ts.call(new Uint8Array(1)), ts.call(ArrayBuffer.prototype), ts.call(Uint8Array.prototype), ts.call(Object.getPrototypeOf(Uint8Array.prototype)), d.value, d.writable, d.enumerable, d.configurable].join("|")
+=== tag_typed_array_getter
+var TP = Object.getPrototypeOf(Uint8Array.prototype);
+var d = Object.getOwnPropertyDescriptor(TP, Symbol.toStringTag);
+var g = d.get;
+[typeof g, g.name, g.length, d.set, d.enumerable, d.configurable, g.call(new Uint8Array(1)), g.call([]), g.call(5), g.call(undefined), g.call(new ArrayBuffer(1)), Object.getOwnPropertyDescriptor(Uint8Array.prototype, Symbol.toStringTag)].join("|")
+=== tag_overrides_are_honored
+var ts = Object.prototype.toString;
+var u = new Uint8Array(1); u[Symbol.toStringTag] = "X"; var b = new ArrayBuffer(1); Object.defineProperty(b, Symbol.toStringTag, {value: "Y"});
+var o = Object.create(Uint8Array.prototype);
+var base = {__proto__: ArrayBuffer.prototype, get [Symbol.toStringTag]() { return "Z"; }};
+[ts.call(u), ts.call(b), ts.call(o), ts.call(base), String(u.byteLength)].join("|")
+=== tag_codecs_are_inherited_not_own
+var e = new TextEncoder(); var d = new TextDecoder();
+[Object.prototype.hasOwnProperty.call(e, Symbol.toStringTag), Object.prototype.hasOwnProperty.call(new ArrayBuffer(1), Symbol.toStringTag), Object.prototype.hasOwnProperty.call(new Uint8Array(1), Symbol.toStringTag), typeof Object.getOwnPropertyDescriptor(TextEncoder.prototype, Symbol.toStringTag), typeof Object.getOwnPropertyDescriptor(TextDecoder.prototype, Symbol.toStringTag)].join("|")
+=== species_defaults_and_shape
+var TA = Object.getPrototypeOf(Uint8Array);
+var da = Object.getOwnPropertyDescriptor(ArrayBuffer, Symbol.species); var dt = Object.getOwnPropertyDescriptor(TA, Symbol.species);
+[ArrayBuffer[Symbol.species] === ArrayBuffer, TA[Symbol.species] === TA, Uint8Array[Symbol.species] === Uint8Array, typeof da.get, da.get.name, dt.get.name, da.set, da.enumerable, da.configurable, da.get.call(7)].join("|")
+=== species_reads_and_defaults
+var L = [];
+function J(x){return Array.prototype.join.call(x)}
+var b = new ArrayBuffer(4); b.constructor = {get [Symbol.species]() { L.push("ab"); return undefined; }};
+var s1 = b.slice(1, 3);
+var u = new Uint8Array([1, 2, 3, 4]); u.constructor = {get [Symbol.species]() { L.push("sub"); return null; }};
+var s2 = u.subarray(1, 3); var s3 = u.slice(1, 3);
+var b2 = new ArrayBuffer(2); b2.constructor = undefined; var s4 = b2.slice(0);
+var u2 = new Uint8Array(2); u2.constructor = ArrayBuffer.prototype.constructor === ArrayBuffer ? Uint8Array : 0;
+[L.join(), s1.byteLength, s1 instanceof ArrayBuffer, J(s2), s2 instanceof Uint8Array, J(s3), s4.byteLength, u2.slice(0).length].join("|")
+=== species_errors
+function E(f){try{f();return "ok"}catch(e){return e.name}}
+var b = new ArrayBuffer(4); var u = new Uint8Array(4);
+[E(function(){ b.constructor = 5; return b.slice(0); }), E(function(){ b.constructor = {[Symbol.species]: 3}; return b.slice(0); }), E(function(){ u.constructor = "x"; return u.subarray(0); }), E(function(){ u.constructor = {[Symbol.species]: {}}; return u.slice(0); })].join("|")
+=== species_order_of_coercion
+var L = [];
+var b = new ArrayBuffer(4); b.constructor = {get [Symbol.species]() { L.push("species"); }};
+b.slice({valueOf: function(){ L.push("begin"); return 1; }}, {valueOf: function(){ L.push("end"); return 3; }});
+var u = new Uint8Array(4); u.constructor = {get [Symbol.species]() { L.push("usp"); }};
+u.subarray({valueOf: function(){ L.push("b2"); return 1; }}, {valueOf: function(){ L.push("e2"); return 3; }});
+L.join()
