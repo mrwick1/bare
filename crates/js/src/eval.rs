@@ -13,11 +13,12 @@
 //! global object and global lexical environment. Closures keep the code of their own script. See `eval_scripts.rs`.
 //!
 //! Unsupported is found BEFORE anything runs. `Interp::new` walks every reachable node. Syntax that is not
-//! implemented gives [`Error::Unsupported`] with its span: classes, async functions and `await`, tagged
-//! templates, BigInt, `super`, `new.target`, private names, `with`, `for await`. A regexp literal is compiled by `Interp::new`;
+//! implemented gives [`Error::Unsupported`] with its span: async functions and `await`, tagged
+//! templates, BigInt, `super` outside a class element, `new.target` in a field initializer, `with`, `for await`. A regexp literal is compiled by `Interp::new`;
 //! an invalid pattern, lookbehind, named groups or the flags `u`, `v`, `d` are `Unsupported` there (see `eval_builtins.rs`).
 //! A missing builtin (`WeakMap`, `Reflect`, ...) is an ordinary `ReferenceError` at run time, as in a bare engine.
 //! `JSON.parse`, `RegExp` and a small `String.prototype` are bound in `eval_builtins.rs`, which lists what is and is not there.
+//! Classes are supported: see `eval_classes.rs` for what runs and what does not.
 //!
 //! Heap contract: the heap never collects by itself. [`Interp::roots`] lists every value the evaluator
 //! owns (global object, builtin prototypes, every live environment binding and `this`, every function
@@ -107,6 +108,8 @@ pub enum LimitKind {
     ScriptNodes,
     /// A cap of the embedder's [`Host`] (nodes, listeners, traversal results, ...). The name says which.
     Host(&'static str),
+    /// Private slots of all objects together (see `Interp::set_private_slot_limit`).
+    PrivateSlots,
     Heap(Limit),
     /// A bound of a RegExp binding (see `eval_builtins.rs`).
     Regexp(RegexpLimit),
@@ -261,6 +264,8 @@ enum Callee {
     Promise(PFn),
     /// A method of the embedder's [`Host`]. `ctor` allows `new`.
     Host { id: u32, ctor: bool },
+    /// A class constructor. Its code and fields are in `ClassState::classes` (see `eval_classes.rs`).
+    Class,
 }
 
 #[derive(Default)]
@@ -304,6 +309,10 @@ struct It {
 enum Ref {
     Name(u32),
     Prop(Value, PropertyKey),
+    /// `base.#name`: the name object, the `#name` id and the binding flags.
+    Priv(Value, ObjId, u32, u8),
+    /// `super[key]` with this value of `this`.
+    Super(Value, PropertyKey),
 }
 
 // ------------------------------------------------------------------ the interpreter
@@ -378,6 +387,8 @@ pub struct Interp<'p> {
     // Walk context
     cur_strict: bool,
     n_arguments: u32,
+    /// Class state (see `eval_classes.rs`).
+    cls: ClassState,
 }
 
 fn unsupported(what: &'static str, span: Span) -> Error {
@@ -506,8 +517,10 @@ impl<'p> Interp<'p> {
             k_get: ks[12],
             k_set: ks[13],
             n_arguments: 0,
+            cls: ClassState::default(),
         };
         it.n_arguments = it.intern_name("arguments");
+        it.cls_init();
         // The global lexical environment: id 0, never freed.
         it.envs.push(Env { parent: NONE, bindings: Vec::new(), index: None, this: Some(Value::Object(global)), captured: true, live: true, var_scope: true });
         it.live_envs = 1;
@@ -590,6 +603,7 @@ impl<'p> Interp<'p> {
                 v.extend(args.iter().copied());
             }
         }
+        self.cls_roots(&mut v);
         v
     }
 
@@ -653,6 +667,7 @@ impl<'p> Interp<'p> {
                 work.push(Value::Object(buf));
             }
             self.sc_trace(o, &mut work);
+            self.cls_trace(o, &mut work, &mut env_work);
             let keys = h!(self, self.heap.stored_keys(o));
             for k in keys {
                 match h!(self, self.heap.get_own_property(o, k)) {
@@ -680,6 +695,7 @@ impl<'p> Interp<'p> {
             h.prune(&|o| seen.contains(&o));
         }
         self.sc_prune(&seen);
+        self.cls_prune(&seen);
         let mut roots = self.roots();
         roots.extend_from_slice(extra);
         roots.extend_from_slice(&host_vals);
@@ -800,6 +816,9 @@ impl<'p> Interp<'p> {
     /// Source text of an expression for an error message, as V8 prints a callee.
     fn src_text(&self, e: ExprId) -> String {
         let t = self.prog.text(self.prog.expr(e).span);
+        if let Some(rest) = t.strip_prefix("super").filter(|r| r.starts_with(['.', '['])) {
+            return format!("(intermediate value){rest}");
+        }
         if t.len() <= 80 && !t.contains('\n') { t.to_string() } else { "expression".to_string() }
     }
 
@@ -829,14 +848,13 @@ impl<'p> Interp<'p> {
         if f.is_async {
             return Err(unsupported("async function", f.span));
         }
-        if !matches!(f.kind, FuncKind::Normal | FuncKind::Arrow | FuncKind::Method | FuncKind::Getter | FuncKind::Setter) {
-            return Err(unsupported("class constructor", f.span));
-        }
         if let Some(n) = f.name {
             self.func_name[fid.index()] = self.name_at(n);
         }
         let saved = self.cur_strict;
         self.cur_strict = f.strict;
+        let new_cur = if f.kind == FuncKind::Arrow { self.cls.cur } else { self.cls.elem_ctx.take() };
+        let saved_cur = std::mem::replace(&mut self.cls.cur, new_cur);
         let me = fid.index();
         let args_scope = if f.kind == FuncKind::Arrow { outer_args } else { me };
         for p in prog.list(f.params) {
@@ -851,6 +869,7 @@ impl<'p> Interp<'p> {
             Body::Expr(e) => self.w_expr(e, me, args_scope)?,
         }
         self.cur_strict = saved;
+        self.cls.cur = saved_cur;
         Ok(())
     }
 
@@ -946,7 +965,7 @@ impl<'p> Interp<'p> {
                     self.scopes[fs].vars.push(n);
                 }
             }
-            StmtKind::Class(_) => return Err(unsupported("class", st.span)),
+            StmtKind::Class(c) => self.w_class(c, fs, ac)?,
             StmtKind::Return(e) => {
                 if let Some(e) = e {
                     self.w_expr(e, fs, ac)?;
@@ -1043,7 +1062,8 @@ impl<'p> Interp<'p> {
                     self.scopes[ac].uses_args = true;
                 }
             }
-            ExprKind::This | ExprKind::Null | ExprKind::Bool(_) | ExprKind::Number(_) | ExprKind::String | ExprKind::Hole => {}
+            ExprKind::This => self.cls_w_this(e, ac),
+            ExprKind::Null | ExprKind::Bool(_) | ExprKind::Number(_) | ExprKind::String | ExprKind::Hole => {}
             ExprKind::BigInt => return Err(unsupported("BigInt literal", ex.span)),
             ExprKind::RegExp => self.ext_walk_regexp(e, ex.span)?,
             ExprKind::Template(t) => {
@@ -1068,7 +1088,7 @@ impl<'p> Interp<'p> {
                 }
             }
             ExprKind::Function(f) => self.w_func(f, ac)?,
-            ExprKind::Class(_) => return Err(unsupported("class", ex.span)),
+            ExprKind::Class(c) => self.w_class(c, fs, ac)?,
             ExprKind::Unary { arg, .. } | ExprKind::Update { arg, .. } | ExprKind::Spread(arg) | ExprKind::Paren(arg) | ExprKind::Chain(arg) => self.w_expr(arg, fs, ac)?,
             ExprKind::Binary { left, right, .. } | ExprKind::Logical { left, right, .. } => {
                 self.w_expr(left, fs, ac)?;
@@ -1094,9 +1114,16 @@ impl<'p> Interp<'p> {
                 self.w_expr(obj, fs, ac)?;
                 self.w_expr(index, fs, ac)?;
             }
-            ExprKind::PrivateMember { .. } | ExprKind::PrivateIn { .. } => return Err(unsupported("private name", ex.span)),
-            ExprKind::Super => return Err(unsupported("super", ex.span)),
-            ExprKind::NewTarget => return Err(unsupported("new.target", ex.span)),
+            ExprKind::PrivateMember { obj, name, .. } => {
+                self.cls_w_private(e, name);
+                self.w_expr(obj, fs, ac)?;
+            }
+            ExprKind::PrivateIn { name, right } => {
+                self.cls_w_private(e, name);
+                self.w_expr(right, fs, ac)?;
+            }
+            ExprKind::Super => self.cls_w_super(ex.span)?,
+            ExprKind::NewTarget => self.cls_w_new_target(ex.span, ac)?,
             ExprKind::Await(_) => return Err(unsupported("await", ex.span)),
         }
         Ok(())
@@ -1325,7 +1352,7 @@ impl<'p> Interp<'p> {
     fn has_lexical(&self, l: List<Stmt>) -> bool {
         self.prog.list(l).any(|s| match self.prog.stmt(s).kind {
             StmtKind::Var { kind, .. } => kind != VarKind::Var,
-            StmtKind::Function(_) => true,
+            StmtKind::Function(_) | StmtKind::Class(_) => true,
             _ => false,
         })
     }
@@ -1354,6 +1381,7 @@ impl<'p> Interp<'p> {
                         self.env_declare(self.env, n, INIT | MUT, f);
                     }
                 }
+                StmtKind::Class(c) => self.declare_class(c),
                 _ => {}
             }
         }
@@ -1413,6 +1441,7 @@ impl<'p> Interp<'p> {
             Some(&Callee::Native(n)) => D::N(n),
             Some(Callee::Bound { target, this, args }) => D::B(*target, *this, args.clone()),
             Some(&Callee::Promise(pf)) => D::P(pf),
+            Some(Callee::Class) => return Err(self.class_call_error(o)),
             None => return Err(self.type_err("value is not a function")),
         };
         self.depth += 1;
@@ -1450,8 +1479,10 @@ impl<'p> Interp<'p> {
             B(ObjId, Vec<Value>),
             P(PFn),
             H(u32),
+            C,
         }
         let d = match self.funcs.get(&o) {
+            Some(Callee::Class) => D::C,
             Some(&Callee::Host { id, ctor: true }) => D::H(id),
             Some(&Callee::Script { script, fid, env, self_binding }) if self.func_of(script, fid).kind == FuncKind::Normal => D::S(script, fid, env, self_binding),
             Some(&Callee::Native(n)) if matches!(n, Nat::ObjectCtor | Nat::FnCtor | Nat::ArrayCtor | Nat::ErrorCtor(_) | Nat::Ext(Bi::RegExpCtor)) || matches!(n, Nat::Bin(b) if b.ctor_name().is_some() || b == BinFn::TaCtor) || matches!(n, Nat::Sc(f) if f.is_ctor()) => D::N(n),
@@ -1466,9 +1497,13 @@ impl<'p> Interp<'p> {
                 let pv = self.get_prop(f, self.k_prototype)?;
                 let proto = if let Value::Object(p) = pv { p } else { self.object_proto };
                 let obj = h!(self, self.heap.new_object(Some(proto)));
-                let r = self.call_script((script, fid), o, env, sb, Value::Object(obj), args)?;
+                self.cls_set_nt(script, fid, o);
+                let r = self.call_script((script, fid), o, env, sb, Value::Object(obj), args);
+                self.cls.pending_nt = None;
+                let r = r?;
                 Ok(if matches!(r, Value::Object(_)) { r } else { Value::Object(obj) })
             })(),
+            D::C => self.construct_class_body(o, args, o),
             D::N(n) => self.call_native(n, Value::Undefined, args, true),
             D::P(pf) => self.call_promise(pf, Value::Undefined, args, true),
             D::H(id) => self.call_host(id, Value::Undefined, args, true),
@@ -1500,6 +1535,9 @@ impl<'p> Interp<'p> {
         let prog = self.prog.clone();
         let f = *prog.func(fid);
         self.strict = f.strict;
+        if self.cls.fflags[fid.index()] != 0 {
+            self.cls_frame(env, fid, fobj);
+        }
         if f.kind != FuncKind::Arrow {
             let t = if !f.strict && is_nullish(this) { Value::Object(self.global) } else { this };
             self.envs[env as usize].this = Some(t);
@@ -1789,6 +1827,7 @@ impl<'p> Interp<'p> {
         let ex = *self.prog.expr(e);
         match ex.kind {
             ExprKind::Function(fid) if self.prog.func(fid).name.is_none() => self.make_closure(fid, name, true),
+            ExprKind::Class(c) if self.prog.class(c).name.is_none() => self.eval_class(c, name),
             ExprKind::Paren(inner) => self.eval_named(inner, name),
             _ => self.eval_expr(e),
         }
@@ -1821,6 +1860,9 @@ impl<'p> Interp<'p> {
         let prog = self.prog.clone();
         let ex = *prog.expr(e);
         match ex.kind {
+            ExprKind::Member { obj, .. } | ExprKind::Index { obj, .. } if self.cls.super_used && is_super(&prog, obj) => self.super_link(e),
+            ExprKind::Call { callee, .. } if self.cls.super_used && is_super(&prog, callee) => self.super_call(e),
+            ExprKind::PrivateMember { .. } => self.link_private(e),
             ExprKind::Member { obj, name, optional } => {
                 let Some((base, _)) = self.link(obj)? else { return Ok(None) };
                 if optional && is_nullish(base) {
@@ -1857,7 +1899,7 @@ impl<'p> Interp<'p> {
                 self.arg_pool.push(argv);
                 Ok(Some((r, Value::Undefined)))
             }
-            ExprKind::Paren(inner) if matches!(self.unparen(inner), ExprKind::Member { .. } | ExprKind::Index { .. } | ExprKind::Chain(_)) => self.link(inner),
+            ExprKind::Paren(inner) if matches!(self.unparen(inner), ExprKind::Member { .. } | ExprKind::Index { .. } | ExprKind::PrivateMember { .. } | ExprKind::Chain(_)) => self.link(inner),
             ExprKind::Chain(inner) => Ok(Some(self.link(inner)?.unwrap_or((Value::Undefined, Value::Undefined)))),
             _ => Ok(Some((self.eval_expr(e)?, Value::Undefined))),
         }
@@ -1880,7 +1922,8 @@ impl<'p> Interp<'p> {
         let ex = *prog.expr(e);
         match ex.kind {
             ExprKind::Ident => self.get_name(self.expr_name[e.index()]),
-            ExprKind::This => Ok(self.lookup_this()),
+            ExprKind::This if self.expr_name[e.index()] == 0 => Ok(self.lookup_this()),
+            ExprKind::This => self.this_binding(),
             ExprKind::Null => Ok(Value::Null),
             ExprKind::Bool(b) => Ok(Value::Bool(b)),
             ExprKind::Number(base) => Ok(Value::Number(self.num_lit(ex.span, base))),
@@ -1964,7 +2007,11 @@ impl<'p> Interp<'p> {
                 let t = self.eval_expr(test)?;
                 if self.truthy(t)? { self.eval_expr(cons) } else { self.eval_expr(alt) }
             }
-            ExprKind::Call { .. } | ExprKind::Member { .. } | ExprKind::Index { .. } => Ok(self.link(e)?.map_or(Value::Undefined, |p| p.0)),
+            ExprKind::Call { .. } | ExprKind::Member { .. } | ExprKind::Index { .. } | ExprKind::PrivateMember { .. } => Ok(self.link(e)?.map_or(Value::Undefined, |p| p.0)),
+            ExprKind::Class(c) => self.eval_class(c, None),
+            ExprKind::PrivateIn { .. } => self.eval_private_in(e),
+            ExprKind::NewTarget => self.eval_new_target(),
+            ExprKind::Super => Err(self.mk_err(REFERENCE_ERROR, "Unsupported reference to 'super'")),
             ExprKind::Chain(inner) => Ok(self.link(inner)?.map_or(Value::Undefined, |p| p.0)),
             ExprKind::New { callee, args } => {
                 let f = self.eval_expr(callee)?;
@@ -2174,10 +2221,7 @@ impl<'p> Interp<'p> {
         match ex.kind {
             ExprKind::Ident => Ok(Ref::Name(self.expr_name[e.index()])),
             ExprKind::Paren(i) => self.expr_ref(i),
-            ExprKind::Member { .. } | ExprKind::Index { .. } => {
-                let (b, k) = self.member_ref(e)?;
-                Ok(Ref::Prop(b, k))
-            }
+            ExprKind::Member { .. } | ExprKind::Index { .. } | ExprKind::PrivateMember { .. } => self.member_target(e),
             _ => Err(unsupported("update target", ex.span)),
         }
     }
@@ -2186,6 +2230,8 @@ impl<'p> Interp<'p> {
         match *r {
             Ref::Name(n) => self.get_name(n),
             Ref::Prop(b, k) => self.get_prop(b, k),
+            Ref::Priv(b, pn, n, fl) => self.priv_get(b, pn, n, fl),
+            Ref::Super(this, k) => self.super_get(this, k),
         }
     }
 
@@ -2193,6 +2239,8 @@ impl<'p> Interp<'p> {
         match *r {
             Ref::Name(n) => self.assign_name(n, v),
             Ref::Prop(b, k) => self.put_prop(b, k, v),
+            Ref::Priv(b, pn, n, fl) => self.priv_put(b, pn, n, fl, v),
+            Ref::Super(this, k) => self.super_set(this, k, v),
         }
     }
 
@@ -2201,10 +2249,7 @@ impl<'p> Interp<'p> {
         let pat = *prog.pat(target);
         let r = match pat.kind {
             PatKind::Ident => Ref::Name(self.pat_name[target.index()]),
-            PatKind::Member(me) => {
-                let (b, k) = self.member_ref(me)?;
-                Ref::Prop(b, k)
-            }
+            PatKind::Member(me) => self.member_target(me)?,
             PatKind::Array(_) | PatKind::Object(_) if op == AssignOp::Assign => {
                 let v = self.eval_expr(value)?;
                 self.bind_pattern(target, v, Bind::Assign)?;
@@ -2270,8 +2315,8 @@ impl<'p> Interp<'p> {
                 }
             }
             PatKind::Member(me) => {
-                let (b, k) = self.member_ref(me)?;
-                self.put_prop(b, k, v)
+                let r = self.member_target(me)?;
+                self.ref_put(&r, v)
             }
             PatKind::Assign { target, default } => {
                 let v = if matches!(v, Value::Undefined) {
@@ -2490,7 +2535,7 @@ impl<'p> Interp<'p> {
                 }
             }
             StmtKind::Function(fid) => self.annex_b(fid)?,
-            StmtKind::Class(_) => return Err(unsupported("class", st.span).into()),
+            StmtKind::Class(c) => self.exec_class_decl(c)?,
             StmtKind::Return(e) => {
                 let v = match e {
                     Some(e) => self.eval_expr(e)?,
@@ -2896,6 +2941,11 @@ include!("eval_host.rs");
 include!("eval_array_object.rs");
 include!("eval_symbols.rs");
 include!("eval_collections.rs");
+include!("eval_classes.rs");
+
+#[cfg(test)]
+#[path = "eval_class_tests.rs"]
+mod class_tests;
 
 #[cfg(test)]
 #[path = "eval_tests.rs"]

@@ -74,18 +74,14 @@ fn setup<'a>(prog: &'a Program<'a>, limits: EvalLimits) -> Interp<'a> {
 fn unsupported_is_found_before_anything_runs() {
     // Each script would set `ran = 1` first. `Interp::new` must fail, so nothing can run.
     let cases = [
-        ("class A {}", "class"),
-        ("var a = class {};", "class"),
         ("async function f() {}", "async function"),
         ("var f = async () => 1;", "async function"),
-        ("function g() { return await_it; } function h() { class B {} }", "class"),
         ("tag`x`", "tagged template"),
         ("var r = /a(?<=b)/;", "lookbehind"),
         ("var b = 10n;", "BigInt literal"),
-        ("var o = { m() { return super.x; } };", "super"),
-        ("function f() { return new.target; }", "new.target"),
+        ("var o = { m() { return super.x; } };", "super outside a class element"),
+        ("class A { x = new.target; }", "new.target in a class field initializer"),
         ("with ({}) {}", "with statement"),
-        ("function f() { try { } finally { class C {} } }", "class"),
     ];
     for (src, what) in cases {
         let prog = parse_script(src, Limits::default()).unwrap_or_else(|e| panic!("{src}: {e}"));

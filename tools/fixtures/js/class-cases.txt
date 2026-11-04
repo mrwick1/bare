@@ -1,0 +1,263 @@
+# bare-js class cases. A case starts with `=== name`. Same format and oracle as eval-cases.txt.
+# Every case is a tiny independent program; Node (vm, empty context) is the oracle.
+# `t(f)` is repeated in each case: it returns the result or `Name: message` of a throw.
+=== basic
+class A { constructor(x) { this.x = x; } twice() { return this.x * 2; } } new A(4).twice()
+=== default_ctor
+class A {} var a = new A(); [typeof A, a instanceof A, Object.getPrototypeOf(a) === A.prototype, A.length, A.name].join()
+=== ctor_length_name
+class A { constructor(a, b = 1, c) {} } [A.length, A.name].join()
+=== method_descriptors
+class A { m() {} static s() {} get g() { return 1; } set g(v) {} }
+function d(o, k) { var x = Object.getOwnPropertyDescriptor(o, k); return x.enumerable + "/" + x.configurable + "/" + (x.writable === undefined ? "acc" : x.writable); }
+[d(A.prototype, "m"), d(A, "s"), d(A.prototype, "g"), d(A.prototype, "constructor"), d(A, "prototype"), Object.keys(A.prototype).length, Object.keys(A).length].join()
+=== own_keys_of_class
+class A { static s() {} m() {} get g() { return 1; } } [A.hasOwnProperty("length"), A.hasOwnProperty("name"), A.hasOwnProperty("prototype"), A.hasOwnProperty("s"), A.hasOwnProperty("m")].join()
+=== call_without_new
+class A {} function t(f) { try { return String(f()); } catch (e) { return e.name + ": " + e.message; } }
+[t(() => A()), t(() => A.call({})), t(() => A.apply(null, [])), t(() => (class {})())].join("|")
+=== tdz_before_declaration
+function t(f) { try { return String(f()); } catch (e) { return e.name + ": " + e.message; } }
+var r = t(() => new A()); class A {} r + "|" + typeof A
+=== tdz_typeof
+function t(f) { try { return String(f()); } catch (e) { return e.name + ": " + e.message; } }
+t(() => typeof B) + "|" + (class B {}, "after")
+=== tdz_in_heritage
+function t(f) { try { return String(f()); } catch (e) { return e.name + ": " + e.message; } }
+t(() => { class A extends A {} }) + "|" + t(() => { class A { static x = A.y; static y = 1; } return A.x; }) + "|" + t(() => { class A { [A]() {} } })
+=== tdz_survives_failed_class
+function t(f) { try { return String(f()); } catch (e) { return e.name + ": " + e.message; } }
+function boom() { throw new Error("k"); }
+var peek; function f() { peek = () => typeof D; class D { [boom()]() {} } } try { f(); } catch (e) {} t(peek)
+=== class_name_scope
+var B = class A { static n() { return typeof A; } }; B.n() + "," + typeof A + "," + B.name
+=== class_name_inner_const
+function t(f) { try { return String(f()); } catch (e) { return e.name + ": " + e.message; } }
+t(() => { class A { static m() { A = 1; } } A.m(); }) + "|" + t(() => { class A {} A = 5; return A; })
+=== anonymous_names
+var C = class {}; var o = { D: class {} }; var e = (class {}); var f; f = class {}; [C.name, o.D.name, e.name === "", f.name, (class { static x = 1; }).name === ""].join()
+=== strict_this
+class A { m() { return this; } } var m = new A().m; String(m()) + "," + (function() { return this === undefined; }).call(undefined)
+=== static_members
+class A { static x = 1; static y = A.x + 1; static m() { return this.y; } static ["c" + 1] = this.x + 10; } [A.x, A.y, A.m(), A.c1].join()
+=== static_this_and_order
+var log = []; class A { static a = log.push("a"); static [(log.push("k"), "b")] = log.push("b"); static c = log.push("c"); } log.join()
+=== accessors
+class A { constructor() { this._v = 1; } get v() { return this._v; } set v(x) { this._v = x * 2; } static get s() { return "S"; } } var a = new A(); a.v = 5; [a.v, A.s, "v" in a, a.hasOwnProperty("v")].join()
+=== accessor_getter_only
+function t(f) { try { return String(f()); } catch (e) { return e.name + ": " + e.message; } }
+class A { get v() { return 1; } } var a = new A(); t(() => { a.v = 2; return a.v; })
+=== accessor_names
+class A { get g() { return 1; } set g(v) {} m() {} static s() {} } var d = Object.getOwnPropertyDescriptor(A.prototype, "g"); [d.get.name, d.set.name, A.prototype.m.name, A.s.name].join()
+=== computed_keys
+var k = "dyn"; class A { [k + "1"]() { return 1; } [1 + 1]() { return 2; } "str"() { return 3; } 42() { return 4; } } var a = new A(); [a.dyn1(), a[2](), a.str(), a[42](), A.prototype.dyn1.name, A.prototype[2].name].join()
+=== computed_order
+var log = []; function k(n) { log.push(n); return n; } class A { [k("a")]() {} static [k("b")] = k("static-init"); [k("c")] = k("field-init"); get [k("d")]() { return 1; } } log.push("defined"); new A(); log.join()
+=== derived_basic
+class A { constructor(x) { this.x = x; } who() { return "A"; } } class B extends A { constructor(x, y) { super(x); this.y = y; } who() { return "B>" + super.who(); } }
+var b = new B(1, 2); [b.x, b.y, b.who(), b instanceof A, b instanceof B, Object.getPrototypeOf(B) === A, Object.getPrototypeOf(B.prototype) === A.prototype].join()
+=== derived_default_ctor
+class A { constructor(a, b) { this.s = a + b; } } class B extends A {} class C extends B {} var c = new C(3, 4); [c.s, C.length, B.length, c instanceof A].join()
+=== derived_default_spread_args
+class A { constructor() { this.n = arguments.length; } } class B extends A {} new B(1, 2, 3).n
+=== this_before_super
+function t(f) { try { return String(f()); } catch (e) { return e.name + ": " + e.message; } }
+class A {} class B extends A { constructor() { this.x = 1; super(); } } class C extends A { constructor() { } } class D extends A { constructor() { super(); super(); } }
+class E extends A { constructor() { var f = () => this; f(); super(); } } class F extends A { constructor() { var f = () => super(); f(); this.ok = 1; } }
+[t(() => new B()), t(() => new C()), t(() => new D()), t(() => new E()), t(() => new F().ok)].join("|")
+=== derived_return_rules
+function t(f) { try { return String(f()); } catch (e) { return e.name + ": " + e.message; } }
+class A {} class B extends A { constructor(r) { super(); return r; } } class C extends A { constructor() { return { c: 1 }; } } class D extends A { constructor() { return 1; } }
+[typeof t(() => new B(undefined)), t(() => new B(5)), t(() => new B({ z: 1 }).z), t(() => new C().c), t(() => new D())].join("|")
+=== base_return_rules
+class A { constructor(r) { this.a = 1; return r; } } [typeof new A(5).a, new A({ z: 2 }).z, new A(undefined).a, new A(null).a].join()
+=== super_property
+class A { m() { return "Am:" + this.tag; } get g() { return "Ag:" + this.tag; } static s() { return "As:" + this.tag; } }
+class B extends A { constructor() { super(); this.tag = "b"; } m() { return "B>" + super.m(); } get g() { return "B>" + super.g; } static s() { return "B>" + super.s(); } k() { return super["m"](); } arrow() { return (() => super.m())(); } }
+B.tag = "static"; var b = new B(); [b.m(), b.g, B.s(), b.k(), b.arrow()].join()
+=== super_home_object
+class A { m() { return "A"; } } class B extends A { m() { return super.m() + "B"; } } var f = B.prototype.m; var other = { m() { return "other"; } };
+[f.call({}), f.call(other), f.call(Object.create(null))].join()
+=== super_property_set
+class A { set x(v) { this._x = "set:" + v; } } class B extends A { m() { super.x = 5; return this._x; } n() { super.y = 7; return this.hasOwnProperty("y") + ":" + this.y; } p() { this.z = 1; super.z += 2; return this.z; } } var b = new B(); [b.m(), b.n(), b.p()].join()
+=== super_property_missing
+function t(f) { try { return String(f()); } catch (e) { return e.name + ": " + e.message; } }
+class A {} class B extends A { m() { return super.nothing; } n() { return super.nothing(); } } var b = new B(); [t(() => b.m()), t(() => b.n())].join("|")
+=== super_in_static_field_and_field
+class A { get v() { return "A"; } static get sv() { return "SA"; } } class B extends A { f = super.v; static sf = super.sv; g = () => super.v + "!"; } var b = new B(); [b.f, B.sf, b.g()].join()
+=== delete_super
+function t(f) { try { return String(f()); } catch (e) { return e.name + ": " + e.message; } }
+class A {} class B extends A { m() { delete super.x; } } t(() => new B().m())
+=== static_inheritance
+class A { static sm() { return "sm:" + this.name; } static f = 1; } class B extends A { static sm2() { return super.sm() + "!"; } } [B.sm(), B.sm2(), B.f, B.hasOwnProperty("f")].join()
+=== fields_basic
+class A { a = 1; b = this.a + 1; ["c"] = 3; d; static e = 5; f = () => this.a; } var a = new A(); [a.a, a.b, a.c, a.hasOwnProperty("d"), a.d, A.e, a.hasOwnProperty("e"), a.f(), a.f.name, Object.keys(a).join("+")].join()
+=== fields_define_not_set
+class A { set x(v) { throw new Error("setter called"); } } class B extends A { x = 1; } var b = new B(); b.x + "," + Object.getOwnPropertyDescriptor(b, "x").writable
+=== field_order_base
+var log = []; class A { f = log.push("field"); constructor() { log.push("ctor-body"); } } new A(); log.join()
+=== field_order_derived
+var log = []; class A { constructor() { log.push("A-ctor"); } fa = log.push("A-field"); } class B extends A { fb = log.push("B-field"); constructor() { log.push("B-before"); super(); log.push("B-after"); } } new B(); log.join()
+=== field_order_derived_default
+var log = []; class A { fa = log.push("A-field"); constructor() { log.push("A-ctor"); } } class B extends A { fb = log.push("B-field"); } new B(); log.join()
+=== field_sees_super_fields
+class A { a = 1; } class B extends A { b = this.a + 1; } var b = new B(); b.a + "," + b.b
+=== field_throws
+function t(f) { try { return String(f()); } catch (e) { return e.name + ": " + e.message; } }
+var log = []; class A { a = log.push("a"); b = (() => { throw new RangeError("bad"); })(); c = log.push("c"); } [t(() => new A()), log.join()].join("|")
+=== field_function_names
+class A { f = function() {}; g = () => {}; ["h"] = class {}; static s = function() {}; } var a = new A(); [a.f.name, a.g.name, a.h.name, A.s.name].join()
+=== field_per_instance
+class A { o = {}; n = Math_n(); } var c = 0; function Math_n() { return ++c; } var a = new A(), b = new A(); [a.o === b.o, a.n, b.n].join()
+=== private_fields
+class A { #x = 1; #y; constructor() { this.#y = 2; } sum() { return this.#x + this.#y; } inc() { this.#x++; this.#y += 10; return this.#x + ":" + this.#y; } static peek(o) { return o.#x; } }
+var a = new A(); [a.sum(), a.inc(), A.peek(a), Object.keys(a).length, JSON_free(a)].join()
+function JSON_free(o) { return Object.keys(o).join("") + typeof o.x; }
+=== private_brand_errors
+function t(f) { try { return String(f()); } catch (e) { return e.name + ": " + e.message; } }
+class A { #x = 1; static get(o) { return o.#x; } static set(o) { o.#x = 2; return o.#x; } static has(o) { return #x in o; } }
+[t(() => A.get({})), t(() => A.set({})), t(() => A.get(null)), t(() => A.set(undefined)), A.has(new A()), A.has({}), t(() => A.has(1)), t(() => A.has(null))].join("|")
+=== private_distinct_per_evaluation
+function mk() { return class { #x = 1; static has(o) { return #x in o; } static get(o) { return o.#x; } }; }
+var A = mk(), B = mk(); [A.has(new A()), A.has(new B()), B.has(new B())].join()
+=== private_not_inherited_by_proto
+class A { #x = 1; static get(o) { return o.#x; } } function t(f) { try { return String(f()); } catch (e) { return e.name; } }
+var a = new A(); var o = Object.create(a); [A.get(a), t(() => A.get(o))].join()
+=== private_in_derived
+class A { #p = "A"; pa() { return this.#p; } } class B extends A { #p = "B"; pb() { return this.#p; } } var b = new B(); [b.pa(), b.pb()].join()
+=== private_in_derived_before_super
+function t(f) { try { return String(f()); } catch (e) { return e.name + ": " + e.message; } }
+class A { constructor(o) { return o; } } class B extends A { #x = 1; static has(o) { return #x in o; } } var o = {}; new B(o); [B.has(o), B.has(new B({}))].join()
+=== private_double_init
+function t(f) { try { return String(f()); } catch (e) { return e.name + ": " + e.message; } }
+class A { constructor(o) { return o; } } class B extends A { #x = 1; } var o = {}; new B(o); t(() => new B(o))
+=== private_methods
+class A { #m() { return "m:" + this.v; } get #g() { return "g:" + this.v; } set #g(x) { this.v = x; } static #s() { return "s"; } v = 1; run() { this.#g = 5; return [this.#m(), this.#g, A.#s()].join(); } static viaStatic() { return A.#s(); } }
+new A().run()
+=== private_method_errors
+function t(f) { try { return String(f()); } catch (e) { return e.name + ": " + e.message; } }
+class A { #m() {} get #g() { return 1; } set #h(v) {} static #s() {} static call(o) { return o.#m(); } static wr(o) { o.#m = 1; } static gg(o) { o.#g = 1; } static hh(o) { return o.#h; } static sc(o) { return o.#s(); } }
+[t(() => A.call({})), t(() => A.wr(new A())), t(() => A.gg(new A())), t(() => A.hh(new A())), t(() => A.sc({})), t(() => A.sc(A))].join("|")
+=== private_method_identity
+class A { #m() {} static get(o) { return o.#m; } } var a = new A(), b = new A(); [A.get(a) === A.get(b), typeof A.get(a), A.get(a).name].join()
+=== private_static_fields
+class A { static #n = 1; static bump() { return ++A.#n; } static get() { return this.#n; } } class B extends A {} function t(f) { try { return String(f()); } catch (e) { return e.name; } }
+[A.bump(), A.get(), t(() => B.get())].join()
+=== private_optional_and_destructure
+class A { #x = 1; static g(o) { return o?.#x; } set(v) { [this.#x] = [v]; ({ a: this.#x } = { a: v + 1 }); return this.#x; } static chain(o) { return o?.p.#x; } }
+[A.g(null), A.g(new A()), new A().set(5), A.chain(undefined), A.chain({ p: new A() })].join()
+=== private_compound_ops
+class A { #n = 5; #s = "a"; #u; go() { this.#n **= 2; this.#n -= 1; this.#s += "b"; this.#u ??= "init"; this.#u ??= "again"; this.#n &&= this.#n + 1; return [this.#n, this.#s, this.#u].join(); } } new A().go()
+=== private_name_in_closure
+class A { #x = 7; get f() { return () => this.#x; } } new A().f()
+=== private_shadow_nested_class
+class A { #x = "outer"; static inner(o) { return class { #x = "inner"; get() { return o.#x; } own() { return this.#x; } }; } } function t(f) { try { return String(f()); } catch (e) { return e.name + ": " + e.message; } }
+var a = new A(); var I = A.inner(a); var i = new I(); [t(() => i.get()), i.own()].join()
+=== private_accessor_pair_static
+class A { static get #v() { return "sv"; } static set #v(x) { A.stored = x; } static t() { A.#v = 9; return A.#v + ":" + A.stored; } } A.t()
+=== private_field_function_name
+class A { #f = function() {}; #g = () => {}; get n() { return this.#f.name + "," + this.#g.name; } } new A().n
+=== private_methods_before_fields
+var log = []; class A { #m() { return "m"; } f = (log.push(this.#m()), 1); } new A(); log.join()
+=== private_not_enumerable_or_reflected
+class A { #x = 1; y = 2; } var a = new A(); var o = {}; for (var k in a) o[k] = 1; [Object.keys(a).join(), Object.keys(o).join(), a.hasOwnProperty("#x"), "#x" in a].join()
+=== new_target_function
+function F() { return new.target === undefined ? "call" : (new.target === F ? "new" : "other"); } function G() { this.r = F.call(this); } [F(), new F() instanceof F, new G().r].join()
+=== new_target_function_value
+function F() { this.nt = new.target; } var o = new F(); (o.nt === F) + "," + typeof (function() { return new.target; })()
+=== new_target_class
+class A { constructor() { this.nt = new.target.name; } } class B extends A {} class C extends B { constructor() { super(); this.mine = new.target === C; } } [new A().nt, new B().nt, new C().nt, new C().mine].join()
+=== new_target_arrow_and_method
+class A { constructor() { this.f = () => new.target.name; } m() { return new.target; } } [new A().f(), String(new A().m())].join()
+=== new_target_in_derived_arrow
+class A { constructor() { this.nt = new.target.name; } } class B extends A { constructor() { var f = () => super(); f(); } } new B().nt
+=== extends_error
+class E extends Error { constructor(m) { super(m); this.name = "E"; } } var e = new E("boom"); [e instanceof E, e instanceof Error, e.message, e.name, String(e)].join()
+=== extends_error_default
+class E extends Error {} class F extends TypeError {} var e = new E("x"), f = new F("y"); [e.message, e.name, String(e), f instanceof TypeError, f instanceof Error, f.name, e.constructor === E].join()
+=== extends_error_throw
+class MyErr extends Error { constructor(m, code) { super(m); this.code = code; } } try { throw new MyErr("oops", 7); } catch (e) { [e instanceof MyErr, e.message, e.code].join() }
+=== extends_object_array
+class O extends Object { constructor() { super(); this.o = 1; } } class A extends Array { } var a = new A(); a.push(1, 2); [new O().o, new O() instanceof Object, a.length, a instanceof A, Array.isArray(a)].join()
+=== extends_plain_function
+function F(x) { this.x = x; } F.prototype.hi = function() { return "hi" + this.x; }; class G extends F { constructor() { super(3); } } var g = new G(); [g.hi(), g instanceof F, g instanceof G, Object.getPrototypeOf(g) === G.prototype].join()
+=== extends_member_expression
+var ns = { Base: class { constructor() { this.b = 1; } } }; class D extends ns.Base { } new D().b
+=== extends_call_expression
+function mix(B) { return class extends B { mixed() { return "mixed"; } }; } class A { a() { return "a"; } } class M extends mix(A) {} var m = new M(); [m.a(), m.mixed(), m instanceof A].join()
+=== extends_null
+function t(f) { try { return String(f()); } catch (e) { return e.name; } }
+class N extends null {} [Object.getPrototypeOf(N.prototype) === null, Object.getPrototypeOf(N) === Function.prototype, t(() => new N())].join()
+=== extends_invalid
+function t(f) { try { return String(f()); } catch (e) { return e.name; } }
+function G() {} G.prototype = 5;
+[t(() => { class A extends 5 {} }), t(() => { class A extends (() => {}) {} }), t(() => { class A extends undefined {} }), t(() => { class A extends ({}) {} }), t(() => { class A extends G {} })].join()
+=== extends_evaluation_order
+var log = []; function h() { log.push("heritage"); return class {}; } class A extends h() { [(log.push("key"), "m")]() {} static s = log.push("static"); } log.join()
+=== extends_side_effect_throws
+function t(f) { try { return String(f()); } catch (e) { return e.name + ": " + e.message; } }
+function bad() { throw new TypeError("heritage"); } t(() => { class A extends bad() {} })
+=== super_spread_args
+class A { constructor(a, b, c) { this.v = [a, b, c].join("-"); } } class B extends A { constructor(...args) { super(...args, 3); } } new B(1, 2).v
+=== super_call_in_arrow_after_return
+class A {} var saved; class B extends A { constructor() { saved = () => super(); super(); } } new B(); var r; try { saved(); r = "no"; } catch (e) { r = e.name; } r
+=== bound_class
+class A { constructor(a, b) { this.s = a + b; } } var B = A.bind(null, 1); [new B(2).s, new B(2) instanceof A, B.name].join()
+=== class_in_function_and_loop
+function mk(n) { return class { v() { return n; } }; } var cs = []; for (var i = 0; i < 3; i++) cs.push(mk(i)); [new cs[0]().v(), new cs[2]().v(), cs[0] === cs[1], new cs[1]() instanceof cs[0]].join()
+=== class_in_block_scope
+{ class A { static x = 1; } var seen = typeof A; } seen + "," + typeof A
+=== class_decl_hoist_in_function
+function t(f) { try { return String(f()); } catch (e) { return e.name; } }
+function f() { var a = t(() => typeof Z); class Z {} return a + new Z().constructor.name; } f()
+=== class_recursion_and_self_reference
+class Node1 { constructor(d) { this.kids = d > 0 ? [new Node1(d - 1), new Node1(d - 1)] : []; } count() { var n = 1; this.kids.forEach(function(k) { n += k.count(); }); return n; } } new Node1(4).count()
+=== static_name_method
+class A { static name() { return "custom"; } } class B { static name = "field"; } [typeof A.name, A.name(), B.name].join()
+=== constructor_string_key
+function t(f) { try { return String(f()); } catch (e) { return e.name; } }
+class A { "constructor"() { this.q = 1; } } class B { static constructor() { return "static"; } } [new A().q, B.constructor()].join()
+=== method_not_constructor
+function t(f) { try { return String(f()); } catch (e) { return e.name + ": " + e.message; } }
+class A { m() {} get g() { return 1; } static s() {} } var a = new A(); [t(() => new a.m()), t(() => new A.s()), "prototype" in a.m].join("|")
+=== getter_this_derived
+class A { get who() { return this.n; } } class B extends A { n = "bn"; } new B().who
+=== inherited_accessor_with_field_shadow
+class A { get x() { return 1; } } class B extends A { x = 2; } new B().x
+=== instanceof_and_prototype_chain
+class A {} class B extends A {} class C extends B {} var c = new C(); [c instanceof A, c instanceof B, Object.getPrototypeOf(Object.getPrototypeOf(c)) === B.prototype].join()
+=== to_string_tags
+class A {} [Object.prototype.toString.call(new A()), Object.prototype.toString.call(A), typeof A, A.prototype.constructor === A].join()
+=== abrupt_in_constructor
+function t(f) { try { return String(f()); } catch (e) { return e.name + ": " + e.message; } }
+class A { constructor() { throw new RangeError("ctor"); } } class B extends A {} class C { constructor() { try { throw 1; } finally { this.f = "fin"; } } } [t(() => new A()), t(() => new B()), t(() => new C())].join("|")
+=== early_return_in_constructor
+class A { constructor(x) { this.a = 1; if (x) return; this.b = 2; } } [Object.keys(new A(true)).join(), Object.keys(new A(false)).join()].join("|")
+=== getter_setter_static_and_instance_same_name
+class A { static get v() { return "static"; } get v() { return "inst"; } } [A.v, new A().v].join()
+=== method_overwrites
+class A { m() { return 1; } m() { return 2; } } new A().m()
+=== class_expression_in_call_args
+function id(x) { return x; } new (id(class { constructor() { this.k = "ok"; } }))().k
+=== field_initializer_closure_captures_scope
+function mk(v) { return class { f = () => v; static s = () => v + 1; }; } var C = mk(10); [new C().f(), C.s()].join()
+=== field_this_in_nested_function
+class A { x = 1; f = function() { return this === undefined ? "undef" : "obj"; }; } new A().f()
+=== class_with_semicolons_and_asi
+class A { a = 1
+b = 2; ; m() { return this.a + this.b } static
+s() { return 3 } } [new A().m(), A.s()].join()
+=== computed_key_this_is_outer
+var o = { k: "kk", make() { return class { [this.k]() { return 1; } }; } }; Object.keys(Object.getOwnPropertyDescriptor(o.make().prototype, "kk") ? { kk: 1 } : {}).join()
+=== derived_ctor_this_in_nested_class
+class A {} class B extends A { constructor() { super(); this.C = class { f = this === undefined; }; } } var b = new B(); new b.C().f
+=== derived_computed_key_uses_ctor_this
+class A {} class B extends A { constructor() { super(); this.K = class { [this.key]() { return "x"; } }; } get key() { return "kk"; } } typeof new B().K.prototype.kk
+=== getter_in_computed_key_class_static
+var n = 0; class A { static [(n++, "x")] = n; static [(n++, "y")] = n; } [A.x, A.y].join()
+=== instance_count_and_identity
+class A { static count = 0; id = ++A.count; } var a = new A(), b = new A(); [a.id, b.id, A.count].join()
+=== class_value_in_array_and_object
+var o = { K: class { static v = 1; } }; var arr = [class { static v = 2; }]; [o.K.v, arr[0].v].join()
+=== sloppy_function_vs_class_this
+function S() { return this === undefined ? "u" : "g"; } class C { m() { return S(); } } new C().m()
