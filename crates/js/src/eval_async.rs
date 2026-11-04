@@ -88,6 +88,9 @@ enum Slot {
     V(Value),
     K(PropertyKey),
     N(u32),
+    /// A for-of iteration in flight: the whole `It` (source, kind, position), including a generic iterator and its
+    /// `next` method. `run_trace` marks every value in it.
+    It(It),
 }
 
 /// An abrupt completion in flight. A `Return` or `Throw` value is held in a slot while a `finally` runs.
@@ -156,7 +159,8 @@ enum Fr {
     ForU { s: StmtId, lb: Lbl, per: bool },
     OfR { s: StmtId, lb: Lbl },
     OfScope { outer: u32, cur: u32, base: u32 },
-    OfB { s: StmtId, lb: Lbl, i: u32, base: u32 },
+    /// The body of a for-of runs. Slot `base` is `Slot::It`.
+    OfB { s: StmtId, lb: Lbl, base: u32 },
     TryB { s: StmtId, env: u32 },
     TryC { s: StmtId, env: u32 },
     /// A `finally` block runs. `kind`: 0 normal, 1 break, 2 continue, 3 return, 4 throw (the value is in slot `base`).
@@ -225,6 +229,14 @@ fn run_trace(run: &Run, work: &mut Vec<Value>, env_work: &mut Vec<u32>) {
             Slot::V(v) => work.push(v),
             Slot::K(PropertyKey::String(s)) => work.push(Value::String(s)),
             Slot::K(PropertyKey::Symbol(y)) => work.push(Value::Symbol(y)),
+            Slot::It(it) => {
+                work.push(it.src);
+                match it.kind {
+                    ItKind::Plain => {}
+                    ItKind::Coll { owner, .. } => work.push(Value::Object(owner)),
+                    ItKind::Generic { iter, next } => work.extend([iter, next]),
+                }
+            }
             _ => {}
         }
     }
@@ -1624,11 +1636,14 @@ impl<'p> Interp<'p> {
         }
     }
 
-    fn of_iter(&mut self, run: &mut Run, s: StmtId, lb: Lbl, i: u32, base: u32) -> Res<Step> {
+    fn of_iter(&mut self, run: &mut Run, s: StmtId, lb: Lbl, base: u32) -> Res<Step> {
         let StmtKind::ForOf { body, .. } = self.prog.stmt(s).kind else { return Err(unsupported("for-of", Span::default())) };
         let (target, lexical, _) = self.of_target(s)?;
-        let mut it = It { src: sval(run, base as usize), i: i as usize };
-        let Some(v) = self.iter_next(&mut it)? else { return val(Value::Undefined) };
+        let Slot::It(mut it) = run.slots[base as usize] else { return Err(unsupported("for-of", Span::default())) };
+        // `iter_next` marks the iteration done after the end or an error, so a throw from here is never closed.
+        let step = self.iter_next(&mut it);
+        run.slots[base as usize] = Slot::It(it);
+        let Some(v) = step? else { return val(Value::Undefined) };
         let Some(&Fr::OfScope { outer, cur, .. }) = run.stack.last() else { return Err(unsupported("for-of", Span::default())) };
         if let Some(kind) = lexical {
             if cur != NONE {
@@ -1648,7 +1663,7 @@ impl<'p> Interp<'p> {
         } else {
             self.bind_pattern(target, v, Bind::Assign)?;
         }
-        self.fpush(run, Fr::OfB { s, lb, i: it.i as u32, base })?;
+        self.fpush(run, Fr::OfB { s, lb, base })?;
         nx(Next::Exec(body))
     }
 
@@ -1752,10 +1767,10 @@ impl<'p> Interp<'p> {
                 let (_, _, right) = self.of_target(s)?;
                 let outer = self.env;
                 let base = run.slots.len() as u32;
-                self.iter_start(v, right)?;
-                self.spush(run, Slot::V(v))?;
+                let it = self.iter_start(v, right)?;
+                self.spush(run, Slot::It(it))?;
                 self.fpush(run, Fr::OfScope { outer, cur: NONE, base })?;
-                self.of_iter(run, s, lb, 0, base)
+                self.of_iter(run, s, lb, base)
             }
             Fr::OfScope { outer, cur, base } => {
                 self.env = outer;
@@ -1765,7 +1780,7 @@ impl<'p> Interp<'p> {
                 self.strunc(run, base as usize);
                 val(Value::Undefined)
             }
-            Fr::OfB { s, lb, i, base } => self.of_iter(run, s, lb, i, base),
+            Fr::OfB { s, lb, base } => self.of_iter(run, s, lb, base),
             Fr::TryB { s, env } | Fr::TryC { s, env } => {
                 let StmtKind::Try { finalizer, .. } = self.prog.stmt(s).kind else { return Err(unsupported("try", Span::default())) };
                 if finalizer.is_some() { self.fin_start(run, s, env, None) } else { val(Value::Undefined) }
@@ -1837,11 +1852,26 @@ impl<'p> Interp<'p> {
                     Abr::Continue(l) if lb.has(l) => return self.for_after_body(run, s, lb, per),
                     _ => {}
                 },
-                Fr::OfB { s, lb, i, base } => match abr {
-                    Abr::Break(l) if lb.has(l) => return val(Value::Undefined),
-                    Abr::Continue(l) if lb.has(l) => return self.of_iter(run, s, lb, i, base),
-                    _ => {}
-                },
+                Fr::OfB { s, lb, base } => {
+                    if matches!(abr, Abr::Continue(l) if lb.has(l)) {
+                        return self.of_iter(run, s, lb, base);
+                    }
+                    // Any other abrupt completion leaves the loop: IteratorClose. An error of `return` replaces a
+                    // break, continue or return and loses to a throw. A limit, Unsupported or a heap fault is final.
+                    let Slot::It(mut it) = run.slots[base as usize] else { return Err(unsupported("for-of", Span::default())) };
+                    match abr {
+                        Abr::Throw(v) => {
+                            let e = self.iter_close_throw(&mut it, Error::Throw(v));
+                            if !matches!(e, Error::Throw(_)) {
+                                return Err(e);
+                            }
+                        }
+                        _ => self.iter_close(&mut it)?,
+                    }
+                    if matches!(abr, Abr::Break(l) if lb.has(l)) {
+                        return val(Value::Undefined);
+                    }
+                }
                 Fr::TryB { s, env } => {
                     let StmtKind::Try { handler, finalizer, .. } = self.prog.stmt(s).kind else { return Err(unsupported("try", Span::default())) };
                     match (abr, handler) {

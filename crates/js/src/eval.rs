@@ -307,6 +307,7 @@ enum Bind {
 
 /// A started iteration (see `iter_open` in `eval_symbols.rs`): an array-like or string by index, a Map or Set by
 /// cursor, or any object through the iterator protocol. `done` is set at the end, after an error and after a close.
+#[derive(Clone, Copy)]
 struct It {
     src: Value,
     i: usize,

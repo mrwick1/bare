@@ -96,6 +96,7 @@ enum IterState {
 }
 
 /// How a started iteration steps. `Plain` is an array-like (by index) or a string (by code point).
+#[derive(Clone, Copy)]
 enum ItKind {
     Plain,
     Coll { owner: ObjId, what: IterWhat, cur: Cursor },
