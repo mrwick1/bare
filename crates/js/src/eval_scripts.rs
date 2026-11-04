@@ -134,6 +134,7 @@ impl<'p> Interp<'p> {
                 self.name_map.remove(&n);
             }
             self.name_strs.truncate(names_mark);
+            self.async_forget(id);
             return Err(e);
         }
         self.script_source += source.len();

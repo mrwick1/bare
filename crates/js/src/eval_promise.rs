@@ -6,7 +6,7 @@
 // Gates (explicit `Unsupported`, never silent): `Promise.all`, `allSettled`, `race`, `any` and any static call
 // whose `this` is not the intrinsic `Promise`. `then`, `catch` and `finally` read `constructor` and its `@@species`:
 // `undefined`, `null` and `Promise` give the default and another callable is a gate. `Promise[@@species]` and
-// `Promise.prototype[@@toStringTag]` exist. `async`/`await` is NOT supported.
+// `Promise.prototype[@@toStringTag]` exist. `async`/`await` lives in `eval_async.rs`.
 //
 // The queue is separate from timers and the network. Nothing runs by itself: the host calls
 // [`Interp::drain_microtasks`] after a script or a task. Jobs run FIFO.
@@ -83,6 +83,8 @@ struct Reaction {
     on_ok: Value,
     on_err: Value,
     derived: ObjId,
+    /// An `await` of an async function activation (`on_ok`, `on_err` and `derived` are then unused).
+    act: Option<ActRef>,
 }
 
 struct PromiseData {
@@ -98,6 +100,8 @@ enum Job {
     /// A host callback from `queueMicrotask`: called with no arguments. An ordinary throw goes to
     /// [`Host::report_exception`] and the queue goes on.
     Callback { cb: Value },
+    /// Resume the suspended async function activation `act` (see `eval_async.rs`).
+    Resume { act: ActRef, arg: Value, rejected: bool },
 }
 
 #[derive(Default)]
@@ -248,6 +252,7 @@ impl<'p> Interp<'p> {
                 Job::React { handler, arg, derived, .. } => out.extend([handler, arg, Value::Object(derived)]),
                 Job::Thenable { promise, thenable, then } => out.extend([Value::Object(promise), thenable, then]),
                 Job::Callback { cb } => out.push(cb),
+                Job::Resume { arg, .. } => out.push(arg),
             }
         }
     }
@@ -486,6 +491,10 @@ impl<'p> Interp<'p> {
         let reactions = std::mem::take(&mut d.reactions);
         self.promise.reactions -= n;
         for r in reactions {
+            if let Some(act) = r.act {
+                self.promise.queue.push_back(Job::Resume { act, arg: v, rejected });
+                continue;
+            }
             let handler = if rejected { r.on_err } else { r.on_ok };
             self.promise.queue.push_back(Job::React { handler, arg: v, derived: r.derived, rejected });
         }
@@ -503,7 +512,7 @@ impl<'p> Interp<'p> {
                     return Err(Error::Limit(LimitKind::PromiseReactions));
                 }
                 self.promise.reactions += 1;
-                self.promise.map.get_mut(&p).expect("promise").reactions.push(Reaction { on_ok, on_err, derived });
+                self.promise.map.get_mut(&p).expect("promise").reactions.push(Reaction { on_ok, on_err, derived, act: None });
             }
             PState::Fulfilled(v) => self.enqueue(Job::React { handler: on_ok, arg: v, derived, rejected: false })?,
             PState::Rejected(v) => self.enqueue(Job::React { handler: on_err, arg: v, derived, rejected: true })?,
@@ -537,6 +546,7 @@ impl<'p> Interp<'p> {
                     Ok(())
                 }
             },
+            Job::Resume { act, arg, rejected } => self.async_resume(act, arg, rejected),
             Job::Thenable { promise, thenable, then } => {
                 let (res, rej, pair) = self.resolving_functions(promise)?;
                 if let Err(e) = self.call_fn(then, thenable, &[res, rej]) {

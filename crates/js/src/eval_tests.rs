@@ -74,8 +74,8 @@ fn setup<'a>(prog: &'a Program<'a>, limits: EvalLimits) -> Interp<'a> {
 fn unsupported_is_found_before_anything_runs() {
     // Each script would set `ran = 1` first. `Interp::new` must fail, so nothing can run.
     let cases = [
-        ("async function f() {}", "async function"),
-        ("var f = async () => 1;", "async function"),
+        ("async function f() { switch (await 1) {} }", "await inside switch"),
+        ("var f = async () => { for (var k in await 1) {} };", "await inside for-in"),
         ("tag`x`", "tagged template"),
         ("var r = /a(?<=b)/;", "lookbehind"),
         ("var b = 10n;", "BigInt literal"),

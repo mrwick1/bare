@@ -173,11 +173,9 @@ fn unsupported_class_shapes_are_found_before_anything_runs() {
     assert_eq!(unsupported_what("class A { m() { return { n() { return super.x; } }; } }"), "super outside a class element");
     assert_eq!(unsupported_what("class A { x = new.target; }"), "new.target in a class field initializer");
     assert_eq!(unsupported_what("class A { static x = () => new.target; }"), "new.target in a class field initializer");
-    assert_eq!(unsupported_what("class A { async m() {} }"), "async function");
-    assert_eq!(unsupported_what("class A { m() { return async () => 1; } }"), "async function");
     assert_eq!(unsupported_what("class A { 1n() {} }"), "BigInt property key");
     // Nothing ran: the script would have set a global first.
-    let prog = parse_script("var ran = 1; class A { async m() {} }", Limits::default()).unwrap();
+    let prog = parse_script("var ran = 1; class A { 1n() {} }", Limits::default()).unwrap();
     assert!(Interp::new(&prog, Heap::default(), EvalLimits::default()).is_err());
     // The parser rejects these: they never reach the evaluator.
     for src in ["class A { static { } }", "class A { *g() {} }", "class A { static *g() {} }"] {
