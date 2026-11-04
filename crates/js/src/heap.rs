@@ -9,9 +9,11 @@
 //! - A handle kept only in a Rust local and not in `roots` is dead after `collect`.
 //! - Handles of one heap must not be given to another heap (not detected).
 //!
-//! Storage: one slab (a `Vec` of slots with a free list) for each kind. A slot has a generation
-//! number. Freeing a slot adds 1. A slot whose generation would pass `u32::MAX` is retired and
-//! never reused, so a stale handle can never match a new owner.
+//! Storage: one slab for each kind. A handle names a slot. A slot is 8 bytes of metadata: a
+//! generation number and the position of its value in a dense `Vec` of live values. Freeing a slot
+//! adds 1 to the generation. A slot whose generation would pass `u32::MAX` is retired and never
+//! reused, so a stale handle can never match a new owner. Metadata is never released; the dense
+//! payload `Vec` is, so a large burst of dead objects does not keep Object-sized capacity.
 //!
 //! Collector: mark and sweep. Marking uses an explicit work list, not Rust recursion, so a long
 //! prototype chain or a deep object graph cannot overflow the stack. Cycles are collected when
@@ -317,8 +319,13 @@ const ELEM_BYTES: usize = std::mem::size_of::<Option<Value>>();
 /// Accounted cost of one hash-index entry (key + position + table overhead, estimate).
 const INDEX_ENTRY_BYTES: usize = 24;
 
+/// Accounted cost of one live value in a slab: the value and its 8-byte slot metadata.
+const fn slot_bytes<T>() -> usize {
+    std::mem::size_of::<T>() + std::mem::size_of::<Meta>()
+}
+
 fn obj_bytes(o: &Object) -> usize {
-    std::mem::size_of::<Slot<Object>>()
+    slot_bytes::<Object>()
         + o.elems.len() * ELEM_BYTES
         + o.props.entries.len() * ENTRY_BYTES
         + if o.props.index.is_some() { o.props.live as usize * INDEX_ENTRY_BYTES } else { 0 }
@@ -334,7 +341,7 @@ struct Symbol {
 }
 
 fn string_cost(units: usize) -> usize {
-    std::mem::size_of::<Slot<Str>>() + units * 2 + 8 // 8: two interner slots at load 0.5
+    slot_bytes::<Str>() + units * 2 + 8 // 8: two interner slots at load 0.5
 }
 
 fn str_bytes(s: &Str) -> usize {
@@ -343,79 +350,122 @@ fn str_bytes(s: &Str) -> usize {
 
 // ---------- slabs ----------
 
-struct Slot<T> {
+/// Vacant marker for `Meta::dense`. A slab never has `u32::MAX` slots, so it is never a position.
+const VACANT: u32 = u32::MAX;
+
+/// Stable per-slot data. `dense` is the position of the value in `Slab::live`, or `VACANT`.
+struct Meta {
     gn: u32,
-    val: Option<T>,
+    dense: u32,
 }
 
+/// Slots are stable; values are dense. `meta[slot].dense` and `back[dense]` are inverse:
+/// `back[meta[i].dense] == i` for every occupied slot. A sweep compacts `live` and `back` in order
+/// and rewrites `dense` of the survivors that moved. A free slot is on `free` exactly once; a retired slot is on neither.
 struct Slab<T> {
-    slots: Vec<Slot<T>>,
+    meta: Vec<Meta>,
+    live: Vec<T>,
+    back: Vec<u32>,
     free: Vec<u32>,
+    /// Mark bits by dense position. Only valid during `collect`.
     marks: Vec<bool>,
-    live: usize,
     retired: usize,
     max: usize,
     allocs: u64,
+    /// `allocs` at the previous sweep, to measure how much a mutator allocates between sweeps.
+    allocs_at_sweep: u64,
 }
+
+/// Payload capacity is released only when at least this many bytes would be freed.
+const TRIM_MIN_BYTES: usize = 1 << 20;
 
 impl<T> Slab<T> {
     fn new(max: usize) -> Self {
-        Slab { slots: Vec::new(), free: Vec::new(), marks: Vec::new(), live: 0, retired: 0, max, allocs: 0 }
+        Slab { meta: Vec::new(), live: Vec::new(), back: Vec::new(), free: Vec::new(), marks: Vec::new(), retired: 0, max, allocs: 0, allocs_at_sweep: 0 }
     }
     fn can_alloc(&self) -> bool {
-        !self.free.is_empty() || (self.slots.len() < self.max && self.slots.len() < u32::MAX as usize)
+        !self.free.is_empty() || (self.meta.len() < self.max && self.meta.len() < u32::MAX as usize)
     }
     fn alloc(&mut self, v: T, limit: Limit) -> Result<(u32, u32), HeapError> {
         let (i, gn) = if let Some(i) = self.free.pop() {
-            (i, self.slots[i as usize].gn)
-        } else if self.slots.len() < self.max && self.slots.len() < u32::MAX as usize {
-            self.slots.push(Slot { gn: 0, val: None });
-            (self.slots.len() as u32 - 1, 0)
+            (i, self.meta[i as usize].gn)
+        } else if self.meta.len() < self.max && self.meta.len() < u32::MAX as usize {
+            self.meta.push(Meta { gn: 0, dense: VACANT });
+            (self.meta.len() as u32 - 1, 0)
         } else {
             return Err(HeapError::Limit(limit));
         };
-        self.slots[i as usize].val = Some(v);
-        self.live += 1;
+        self.meta[i as usize].dense = self.live.len() as u32;
+        self.live.push(v);
+        self.back.push(i);
         self.allocs += 1;
         Ok((i, gn))
     }
+    /// `VACANT` is `u32::MAX`, and `live` never has that many values, so a vacant slot misses here.
     fn get(&self, index: u32, gn: u32) -> Option<&T> {
-        let s = self.slots.get(index as usize)?;
-        if s.gn == gn { s.val.as_ref() } else { None }
+        let m = self.meta.get(index as usize)?;
+        if m.gn == gn { self.live.get(m.dense as usize) } else { None }
     }
     fn get_mut(&mut self, index: u32, gn: u32) -> Option<&mut T> {
-        let s = self.slots.get_mut(index as usize)?;
-        if s.gn == gn { s.val.as_mut() } else { None }
+        let m = self.meta.get(index as usize)?;
+        if m.gn == gn { self.live.get_mut(m.dense as usize) } else { None }
     }
-    /// Free a slot: bump the generation, or retire the slot when the generation cannot grow.
-    fn release(&mut self, i: usize) {
-        let s = &mut self.slots[i];
-        s.val = None;
-        self.live -= 1;
-        match s.gn.checked_add(1) {
-            Some(g) => {
-                s.gn = g;
-                self.free.push(i as u32);
-            }
-            None => self.retired += 1,
-        }
-    }
-    /// Free every live slot whose mark is clear and clear all marks. `f` sees each freed value.
+    /// Free every live value whose mark is clear, in allocation order. `f` sees each freed value.
+    /// Survivors keep their slots and their relative order; their dense positions shift down.
+    /// Marks are left stale: `collect` rebuilds them.
     fn sweep(&mut self, mut f: impl FnMut(&T)) -> usize {
-        let mut freed = 0;
-        for i in 0..self.slots.len() {
-            if self.slots[i].val.is_none() {
-                continue;
-            }
-            if self.marks[i] {
-                self.marks[i] = false;
+        let before = self.live.len();
+        let Slab { meta, live, back, free, marks, retired, .. } = self;
+        // One pass: drop the dead in order, and compact `back` and rewrite `dense` in step.
+        let (mut i, mut w) = (0, 0);
+        live.retain(|v| {
+            let slot = back[i] as usize;
+            let keep = marks[i];
+            if keep {
+                if w != i {
+                    back[w] = slot as u32;
+                    meta[slot].dense = w as u32;
+                }
+                w += 1;
             } else {
-                f(self.slots[i].val.as_ref().unwrap());
-                self.release(i);
-                freed += 1;
+                f(v);
+                let m = &mut meta[slot];
+                m.dense = VACANT;
+                match m.gn.checked_add(1) {
+                    Some(g) => {
+                        m.gn = g;
+                        free.push(slot as u32);
+                    }
+                    None => *retired += 1,
+                }
             }
+            i += 1;
+            keep
+        });
+        back.truncate(w);
+        self.marks.clear();
+        self.trim();
+        self.allocs_at_sweep = self.allocs;
+        before - self.live.len()
+    }
+    /// Give back large excess payload capacity. Keep room for twice the live values and for as
+    /// many new values as were allocated since the previous sweep, so steady churn does not
+    /// shrink and regrow every round. A burst that dies with no new allocation is released.
+    fn trim(&mut self) {
+        let since = (self.allocs - self.allocs_at_sweep).min(usize::MAX as u64) as usize;
+        let keep = (self.live.len() * 2).max(self.live.len().saturating_add(since));
+        let excess = self.live.capacity().saturating_sub(keep) * std::mem::size_of::<T>();
+        if excess >= TRIM_MIN_BYTES && self.live.capacity() >= keep * 2 {
+            self.live.shrink_to(keep);
+            self.back.shrink_to(keep);
+            self.marks.shrink_to(keep);
         }
-        freed
+    }
+    /// Capacity bytes of the slab's own vectors (not of buffers the values own).
+    fn capacity_bytes(&self) -> usize {
+        use std::mem::size_of;
+        self.meta.capacity() * size_of::<Meta>() + self.live.capacity() * size_of::<T>()
+            + (self.back.capacity() + self.free.capacity()) * 4 + self.marks.capacity()
     }
 }
 
@@ -447,6 +497,7 @@ fn hash_units(units: &[u16]) -> u32 {
 }
 
 impl Interner {
+    /// Entries are dense positions in `strs.live`. A sweep moves values, so `rebuild` follows it.
     fn find(&self, strs: &Slab<Str>, hash: u32, units: &[u16]) -> Option<u32> {
         let mask = self.table.len() - 1;
         let mut p = hash as usize & mask;
@@ -455,31 +506,29 @@ impl Interner {
             if e == 0 {
                 return None;
             }
-            let s = strs.slots[e as usize - 1].val.as_ref().unwrap();
+            let s = &strs.live[e as usize - 1];
             if s.hash == hash && *s.units == *units {
                 return Some(e - 1);
             }
             p = (p + 1) & mask;
         }
     }
-    fn insert_slot(&mut self, hash: u32, slot: u32) {
+    fn insert_slot(&mut self, hash: u32, dense: u32) {
         let mask = self.table.len() - 1;
         let mut p = hash as usize & mask;
         while self.table[p] != 0 {
             p = (p + 1) & mask;
         }
-        self.table[p] = slot + 1;
+        self.table[p] = dense + 1;
         self.count += 1;
     }
     fn rebuild(&mut self, strs: &Slab<Str>) {
-        let size = (strs.live * 2).next_power_of_two().max(16);
+        let size = (strs.live.len() * 2).next_power_of_two().max(16);
         self.table.clear();
         self.table.resize(size, 0);
         self.count = 0;
-        for (i, s) in strs.slots.iter().enumerate() {
-            if let Some(s) = &s.val {
-                self.insert_slot(s.hash, i as u32);
-            }
+        for (d, s) in strs.live.iter().enumerate() {
+            self.insert_slot(s.hash, d as u32);
         }
     }
 }
@@ -501,6 +550,11 @@ pub struct Stats {
     pub retired_slots: usize,
     /// Accounted bytes of live payload (length based; allocator slack not included).
     pub bytes: usize,
+    /// Capacity, in values, of the dense object payload vector and of the slot metadata vector.
+    pub object_payload_capacity: usize,
+    pub object_metadata_capacity: usize,
+    /// Capacity bytes of all slab vectors (metadata, payload, mappings, free lists, marks).
+    pub slab_capacity_bytes: usize,
     pub total_object_allocs: u64,
     pub total_string_allocs: u64,
     pub total_symbol_allocs: u64,
@@ -559,12 +613,15 @@ impl Heap {
 
     pub fn stats(&self) -> Stats {
         Stats {
-            live_objects: self.objects.live,
-            live_strings: self.strings.live,
-            live_symbols: self.symbols.live,
-            object_slots: self.objects.slots.len(),
-            string_slots: self.strings.slots.len(),
-            symbol_slots: self.symbols.slots.len(),
+            live_objects: self.objects.live.len(),
+            live_strings: self.strings.live.len(),
+            live_symbols: self.symbols.live.len(),
+            object_slots: self.objects.meta.len(),
+            string_slots: self.strings.meta.len(),
+            symbol_slots: self.symbols.meta.len(),
+            object_payload_capacity: self.objects.live.capacity(),
+            object_metadata_capacity: self.objects.meta.capacity(),
+            slab_capacity_bytes: self.objects.capacity_bytes() + self.strings.capacity_bytes() + self.symbols.capacity_bytes(),
             retired_slots: self.objects.retired + self.strings.retired + self.symbols.retired,
             bytes: self.bytes,
             total_object_allocs: self.objects.allocs,
@@ -641,7 +698,8 @@ impl Heap {
         if cost > self.limits.max_bytes { return Err(HeapError::Limit(Limit::Bytes)); }
         let hash = hash_units(&units);
         if let Some(i) = self.interner.find(&self.strings, hash, &units) {
-            return Ok(StrId { index: i, gn: self.strings.slots[i as usize].gn });
+            let index = self.strings.back[i as usize];
+            return Ok(StrId { index, gn: self.strings.meta[index as usize].gn });
         }
         self.charge(cost)?;
         if !self.strings.can_alloc() { return Err(HeapError::Limit(Limit::Strings)); }
@@ -652,14 +710,12 @@ impl Heap {
             self.interner.table.clear();
             self.interner.table.resize(size, 0);
             self.interner.count = 0;
-            for (i, sl) in self.strings.slots.iter().enumerate() {
-                if let Some(old) = &sl.val {
-                    self.interner.insert_slot(old.hash, i as u32);
-                }
+            for (d, old) in self.strings.live.iter().enumerate() {
+                self.interner.insert_slot(old.hash, d as u32);
             }
         }
         let (index, gn) = self.strings.alloc(s, Limit::Strings)?;
-        self.interner.insert_slot(hash, index);
+        self.interner.insert_slot(hash, self.strings.live.len() as u32 - 1);
         self.bytes += cost;
         Ok(StrId { index, gn })
     }
@@ -726,7 +782,7 @@ impl Heap {
         if let Some(d) = description {
             self.str(d)?;
         }
-        let cost = std::mem::size_of::<Slot<Symbol>>();
+        let cost = slot_bytes::<Symbol>();
         self.charge(cost)?;
         let (index, gn) = self.symbols.alloc(Symbol { description }, Limit::Symbols)?;
         self.bytes += cost;
@@ -1152,23 +1208,28 @@ impl Heap {
         }
         self.collections += 1;
         let Heap { objects, strings, symbols, gray, length, .. } = self;
-        strings.marks.clear();
-        strings.marks.resize(strings.slots.len(), false);
-        symbols.marks.clear();
-        symbols.marks.resize(symbols.slots.len(), false);
+        for sl in [&mut strings.marks, &mut symbols.marks] {
+            sl.clear();
+        }
+        strings.marks.resize(strings.live.len(), false);
+        symbols.marks.resize(symbols.live.len(), false);
         objects.marks.clear();
-        objects.marks.resize(objects.slots.len(), false);
+        objects.marks.resize(objects.live.len(), false);
         gray.clear();
 
-        let mut m = Marker { smarks: &mut strings.marks, ymarks: &mut symbols.marks, omarks: &mut objects.marks, ysl: &symbols.slots, gray };
-        m.smarks[length.index as usize] = true;
+        let mut m = Marker {
+            smeta: &strings.meta, smarks: &mut strings.marks,
+            ymeta: &symbols.meta, ymarks: &mut symbols.marks, yl: &symbols.live,
+            ometa: &objects.meta, omarks: &mut objects.marks, gray,
+        };
+        m.str(*length);
         for &r in roots {
             m.value(r);
         }
-        // Work list: pop an object, mark everything it points to. No recursion.
-        let osl = &objects.slots;
-        while let Some(i) = m.gray.pop() {
-            let o = osl[i as usize].val.as_ref().unwrap();
+        // Work list of dense positions: pop an object, mark everything it points to. No recursion.
+        let ol = &objects.live;
+        while let Some(d) = m.gray.pop() {
+            let o = &ol[d as usize];
             if let Some(p) = o.proto {
                 m.obj(p);
             }
@@ -1177,7 +1238,7 @@ impl Heap {
             }
             for (k, p) in o.props.iter() {
                 match k {
-                    PropertyKey::String(s) => m.smarks[s.index as usize] = true,
+                    PropertyKey::String(s) => m.str(s),
                     PropertyKey::Symbol(s) => m.sym(s),
                     PropertyKey::Index(_) => {}
                 }
@@ -1195,7 +1256,7 @@ impl Heap {
         let c = Collected {
             objects: objects.sweep(|o| freed_bytes += obj_bytes(o)),
             strings: strings.sweep(|s| freed_bytes += str_bytes(s)),
-            symbols: symbols.sweep(|_| freed_bytes += std::mem::size_of::<Slot<Symbol>>()),
+            symbols: symbols.sweep(|_| freed_bytes += slot_bytes::<Symbol>()),
         };
         self.bytes -= freed_bytes;
         // The interner is weak: rebuild it from the strings that survived.
@@ -1204,30 +1265,39 @@ impl Heap {
     }
 }
 
-/// Mark bits, split from the slabs so the work loop can read objects while it marks.
+/// Mark bits by dense position, split from the slabs so the work loop can read objects while it
+/// marks. Handles reached from live objects are valid, so the metadata lookups cannot be vacant.
 struct Marker<'a> {
+    smeta: &'a [Meta],
     smarks: &'a mut Vec<bool>,
+    ymeta: &'a [Meta],
     ymarks: &'a mut Vec<bool>,
+    yl: &'a [Symbol],
+    ometa: &'a [Meta],
     omarks: &'a mut Vec<bool>,
-    ysl: &'a [Slot<Symbol>],
     gray: &'a mut Vec<u32>,
 }
 
 impl Marker<'_> {
     fn obj(&mut self, o: ObjId) {
-        if !std::mem::replace(&mut self.omarks[o.index as usize], true) {
-            self.gray.push(o.index);
+        let d = self.ometa[o.index as usize].dense;
+        if !std::mem::replace(&mut self.omarks[d as usize], true) {
+            self.gray.push(d);
         }
     }
+    fn str(&mut self, s: StrId) {
+        self.smarks[self.smeta[s.index as usize].dense as usize] = true;
+    }
     fn sym(&mut self, s: SymId) {
-        if !std::mem::replace(&mut self.ymarks[s.index as usize], true)
-            && let Some(d) = self.ysl[s.index as usize].val.as_ref().unwrap().description {
-            self.smarks[d.index as usize] = true;
+        let d = self.ymeta[s.index as usize].dense as usize;
+        if !std::mem::replace(&mut self.ymarks[d], true)
+            && let Some(desc) = self.yl[d].description {
+            self.str(desc);
         }
     }
     fn value(&mut self, v: Value) {
         match v {
-            Value::String(s) => self.smarks[s.index as usize] = true,
+            Value::String(s) => self.str(s),
             Value::Symbol(s) => self.sym(s),
             Value::Object(o) => self.obj(o),
             _ => {}
@@ -1808,7 +1878,7 @@ mod tests {
         let mut h = Heap::new(HeapLimits { max_objects: 2, ..Default::default() }).unwrap();
         let a = h.new_object(None).unwrap();
         // Pretend this slot has been reused 2^32-1 times.
-        h.objects.slots[a.index as usize].gn = u32::MAX;
+        h.objects.meta[a.index as usize].gn = u32::MAX;
         let old = ObjId { index: a.index, gn: u32::MAX };
         assert!(h.is_extensible(old).is_ok());
         h.collect(&[]).unwrap();
@@ -1870,9 +1940,9 @@ mod tests {
         assert!(h.stats().bytes <= 20_000);
         // Bytes equal the sum recomputed from scratch, before and after collection.
         let recount = |h: &Heap| {
-            h.objects.slots.iter().filter_map(|s| s.val.as_ref()).map(obj_bytes).sum::<usize>()
-                + h.strings.slots.iter().filter_map(|s| s.val.as_ref()).map(str_bytes).sum::<usize>()
-                + h.symbols.live * std::mem::size_of::<Slot<Symbol>>()
+            h.objects.live.iter().map(obj_bytes).sum::<usize>()
+                + h.strings.live.iter().map(str_bytes).sum::<usize>()
+                + h.symbols.live.len() * slot_bytes::<Symbol>()
         };
         assert_eq!(h.stats().bytes, recount(&h));
         h.collect(&[Value::Object(o)]).unwrap();
@@ -1997,7 +2067,7 @@ mod tests {
             let _ = o;
         }
         assert_eq!(h.intern_str("keep").unwrap(), keep_s);
-        assert!(h.interner.count == h.strings.live);
+        assert!(h.interner.count == h.strings.live.len());
         assert!(h.interner.table.len() <= 64); // the table shrank back
         assert_eq!(h.stats().collections, 20);
     }
@@ -2020,12 +2090,13 @@ mod tests {
     #[test]
     fn layout_sizes_do_not_grow() {
         use std::mem::size_of;
-        // Measured on x86-64: Value 16, Property 32, entry 48, Object 80, Slot<Object> 88.
+        // Measured on x86-64: Value 16, Property 32, entry 48, Object 80, Meta 8.
         assert!(size_of::<Value>() <= 16);
         assert!(size_of::<Property>() <= 32);
         const { assert!(ENTRY_BYTES <= 48); }
-        assert!(size_of::<Slot<Object>>() <= 88);
-        assert!(size_of::<Slot<Str>>() <= 32);
+        assert!(slot_bytes::<Object>() <= 88);
+        assert_eq!(size_of::<Meta>(), 8);
+        assert!(slot_bytes::<Str>() <= 32);
     }
 
     #[test]
@@ -2056,5 +2127,250 @@ mod tests {
         assert!(!h.has_own_property(o, PropertyKey::Symbol(b)).unwrap());
         assert_eq!(h.symbol_description(a).unwrap(), Some(d));
         assert_eq!(h.to_property_key(Value::Symbol(b)).unwrap(), PropertyKey::Symbol(b));
+    }
+
+    // ----- dense payload remapping -----
+
+    /// The slot and dense mappings agree, the free list is exact, and the interner matches.
+    fn check_slabs(h: &Heap) {
+        fn one<T>(s: &Slab<T>) {
+            assert_eq!(s.live.len(), s.back.len());
+            for (d, &slot) in s.back.iter().enumerate() {
+                assert_eq!(s.meta[slot as usize].dense as usize, d);
+            }
+            assert_eq!(s.meta.iter().filter(|m| m.dense != VACANT).count(), s.live.len());
+            let mut free = s.free.clone();
+            free.sort_unstable();
+            free.dedup();
+            assert_eq!(free.len(), s.free.len(), "slot on the free list twice");
+            assert!(s.free.iter().all(|&i| s.meta[i as usize].dense == VACANT));
+            assert_eq!(s.free.len() + s.retired + s.live.len(), s.meta.len());
+        }
+        one(&h.objects);
+        one(&h.strings);
+        one(&h.symbols);
+        assert_eq!(h.interner.count, h.strings.live.len());
+        for sl in &h.strings.live {
+            let i = h.interner.find(&h.strings, sl.hash, &sl.units).unwrap();
+            assert!(std::ptr::eq(&h.strings.live[i as usize], sl));
+        }
+    }
+
+    /// Unlinked objects; object i holds `n = i`.
+    fn numbered(h: &mut Heap, count: usize) -> Vec<ObjId> {
+        let kn = key(h, "n");
+        (0..count)
+            .map(|i| {
+                let o = h.new_object(None).unwrap();
+                setn(h, o, kn, i as f64);
+                o
+            })
+            .collect()
+    }
+
+    #[test]
+    fn removing_a_middle_object_remaps_survivors() {
+        let mut h = Heap::default();
+        let kn = key(&mut h, "n");
+        let o = numbered(&mut h, 5);
+        let roots = [o[0], o[2], o[4]].map(Value::Object);
+        let c = h.collect(&roots).unwrap();
+        assert_eq!(c.objects, 2);
+        check_slabs(&h);
+        for i in [0, 2, 4] {
+            assert_eq!(num(&h, o[i], kn), i as f64);
+        }
+        for i in [1, 3] {
+            assert_eq!(h.get_prototype_of(o[i]), Err(HeapError::Stale));
+        }
+        // Freed slots are reused; old handles to them stay stale and survivors stay intact.
+        let a = h.new_object(None).unwrap();
+        let b = h.new_object(None).unwrap();
+        assert!([o[1].index, o[3].index].contains(&a.index) && [o[1].index, o[3].index].contains(&b.index));
+        assert!(h.is_extensible(o[1]).is_err() && h.is_extensible(o[3]).is_err());
+        setn(&mut h, a, kn, 100.0);
+        setn(&mut h, b, kn, 200.0);
+        assert_eq!((num(&h, a, kn), num(&h, b, kn)), (100.0, 200.0));
+        for i in [0, 2, 4] {
+            assert_eq!(num(&h, o[i], kn), i as f64);
+        }
+        check_slabs(&h);
+    }
+
+    #[test]
+    fn repeated_collections_keep_mappings_for_every_live_fraction() {
+        let mut h = Heap::default();
+        let kn = key(&mut h, "n");
+        let length = Value::String(h.length);
+        let sn = match kn {
+            PropertyKey::String(a) => Value::String(a),
+            _ => unreachable!(),
+        };
+        // (live percent, step): which objects survive each round, over fresh and reused slots.
+        let mut live: Vec<(ObjId, f64)> = Vec::new();
+        let mut next = 0.0;
+        for (round, pct) in [0usize, 100, 10, 50, 90, 1, 100, 0, 33, 67].into_iter().enumerate() {
+            for _ in 0..3000 {
+                let o = h.new_object(None).unwrap();
+                setn(&mut h, o, kn, next);
+                live.push((o, next));
+                next += 1.0;
+            }
+            // Keep a pseudo-random pct of all objects, scattered over the dense array.
+            let mut x = round as u64 * 7919 + 1;
+            let mut keep = Vec::new();
+            for &(o, v) in &live {
+                x = x.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                if (x >> 33) % 100 < pct as u64 {
+                    keep.push((o, v));
+                }
+            }
+            let mut roots: Vec<Value> = keep.iter().map(|&(o, _)| Value::Object(o)).collect();
+            roots.extend([length, sn]);
+            let before = h.stats();
+            let c = h.collect(&roots).unwrap();
+            assert_eq!(c.objects, live.len() - keep.len());
+            assert_eq!(h.stats().live_objects, keep.len());
+            assert_eq!(h.stats().object_slots, before.object_slots);
+            check_slabs(&h);
+            for &(o, v) in &keep {
+                assert_eq!(num(&h, o, kn), v);
+            }
+            for &(o, _) in live.iter().filter(|e| !keep.iter().any(|k| k.0 == e.0)).take(50) {
+                assert_eq!(h.is_extensible(o), Err(HeapError::Stale));
+            }
+            live = keep;
+        }
+    }
+
+    #[test]
+    fn collection_keeps_every_edge_kind_after_positions_shift() {
+        let mut h = Heap::default();
+        // Dead objects first, so every survivor moves down in the dense array.
+        for _ in 0..10 {
+            h.new_object(None).unwrap();
+        }
+        let holder = h.new_object(None).unwrap();
+        for _ in 0..7 {
+            h.new_object(None).unwrap();
+        }
+        let proto = h.new_object(None).unwrap();
+        h.set_prototype_of(holder, Some(proto)).unwrap();
+        let key_str = h.intern_str("keystr").unwrap();
+        let val_str = h.intern_str("valstr").unwrap();
+        let desc_str = h.intern_str("descstr").unwrap();
+        let sym = h.new_symbol(Some(desc_str)).unwrap();
+        let (getter, setter, elem, sparse_elem) = (h.new_object(None).unwrap(), h.new_object(None).unwrap(), h.new_object(None).unwrap(), h.new_object(None).unwrap());
+        h.set(holder, PropertyKey::String(key_str), Value::String(val_str)).unwrap();
+        h.set(holder, PropertyKey::Symbol(sym), n(1.0)).unwrap();
+        let acc = key(&mut h, "acc");
+        h.define_own_property(holder, acc, &PropertyDescriptor { get: Some(Some(getter)), set: Some(Some(setter)), ..Default::default() }).unwrap();
+        let arr = h.new_array(None).unwrap();
+        h.set(arr, PropertyKey::Index(0), Value::Object(elem)).unwrap();
+        h.define_own_property(arr, PropertyKey::Index(2), &PropertyDescriptor { value: Some(Value::Object(sparse_elem)), ..Default::default() }).unwrap();
+        let ak = key(&mut h, "arr");
+        h.set(holder, ak, Value::Object(arr)).unwrap();
+        let before = h.stats().bytes;
+        for round in 0..3 {
+            let c = h.collect(&[Value::Object(holder)]).unwrap();
+            assert_eq!(c.objects, if round == 0 { 17 } else { 0 });
+            check_slabs(&h);
+            for id in [proto, getter, setter, elem, sparse_elem, arr] {
+                assert!(h.is_extensible(id).is_ok());
+            }
+            assert_eq!(h.get_prototype_of(holder).unwrap(), Some(proto));
+            assert!(matches!(val(&h, holder, PropertyKey::String(key_str)), Value::String(x) if x == val_str));
+            assert_eq!(num(&h, holder, PropertyKey::Symbol(sym)), 1.0);
+            assert!(matches!(h.get_own_property(holder, acc).unwrap(), Some(Property::Accessor { get: Some(g), set: Some(t), .. }) if g == getter && t == setter));
+            assert!(matches!(val(&h, arr, PropertyKey::Index(0)), Value::Object(x) if x == elem));
+            assert!(matches!(val(&h, arr, PropertyKey::Index(2)), Value::Object(x) if x == sparse_elem));
+            assert_eq!(h.symbol_description(sym).unwrap(), Some(desc_str));
+            assert_eq!(h.to_string_lossy(desc_str).unwrap(), "descstr");
+            assert_eq!(h.intern_str("valstr").unwrap(), val_str); // the interner follows moved strings
+        }
+        assert!(h.stats().bytes < before);
+    }
+
+    #[test]
+    fn retired_slot_in_the_middle_does_not_break_remapping() {
+        let mut h = Heap::new(HeapLimits { max_objects: 8, ..Default::default() }).unwrap();
+        let kn = key(&mut h, "n");
+        let o = numbered(&mut h, 6);
+        h.objects.meta[o[2].index as usize].gn = u32::MAX; // next free retires it
+        let stale = ObjId { index: o[2].index, gn: u32::MAX };
+        assert!(h.is_extensible(stale).is_ok());
+        let roots = [o[0], o[1], o[3], o[5]].map(Value::Object);
+        assert_eq!(h.collect(&roots).unwrap().objects, 2);
+        check_slabs(&h);
+        assert_eq!(h.stats().retired_slots, 1);
+        assert_eq!(h.is_extensible(stale), Err(HeapError::Stale));
+        for i in [0, 1, 3, 5] {
+            assert_eq!(num(&h, o[i], kn), i as f64);
+        }
+        // 8 slots: 6 created (1 retired, 1 free) and 2 never created.
+        let a = h.new_object(None).unwrap();
+        assert_eq!(a.index, o[4].index);
+        for _ in 0..2 {
+            assert_ne!(h.new_object(None).unwrap().index, o[2].index);
+        }
+        assert_eq!(h.new_object(None).err(), Some(HeapError::Limit(Limit::Objects)));
+        check_slabs(&h);
+        assert_eq!(h.is_extensible(stale), Err(HeapError::Stale));
+    }
+
+    #[test]
+    fn dead_burst_releases_payload_but_keeps_slots_and_generations() {
+        let mut h = Heap::default();
+        let o = numbered(&mut h, 60_000);
+        let slots = h.stats().object_slots;
+        assert!(h.stats().object_payload_capacity >= 60_000);
+        // Keep every 100th: a small live fraction scattered through the array.
+        let keep: Vec<Value> = o.iter().step_by(100).map(|&x| Value::Object(x)).collect();
+        let kn = key(&mut h, "n");
+        let mut roots = keep.clone();
+        roots.push(Value::String(h.length));
+        roots.push(match kn { PropertyKey::String(s) => Value::String(s), _ => unreachable!() });
+        let c = h.collect(&roots).unwrap();
+        assert_eq!(c.objects, 60_000 - 600);
+        // The sweep cannot tell this burst from steady churn, so it keeps the room for the 60k
+        // allocations it just saw. The next sweep, with no new allocation, releases it.
+        assert!(h.stats().object_payload_capacity >= 60_000);
+        assert_eq!(h.collect(&roots).unwrap().objects, 0);
+        let st = h.stats();
+        assert!(st.object_payload_capacity <= 4 * 600, "payload capacity {}", st.object_payload_capacity);
+        assert_eq!(st.object_slots, slots); // metadata is kept
+        assert!(st.object_metadata_capacity >= slots);
+        check_slabs(&h);
+        for (i, &x) in o.iter().enumerate().step_by(100) {
+            assert_eq!(num(&h, x, kn), i as f64);
+        }
+        // Every dead handle is stale, even after its slot is reused.
+        for _ in 0..1000 {
+            h.new_object(None).unwrap();
+        }
+        assert!(o.iter().enumerate().filter(|(i, _)| i % 100 != 0).all(|(_, &x)| h.is_extensible(x).is_err()));
+        // All slots reused: none were lost.
+        assert_eq!(h.stats().object_slots, slots);
+        check_slabs(&h);
+    }
+
+    #[test]
+    fn steady_churn_does_not_shrink_and_regrow() {
+        let mut h = Heap::default();
+        let mut caps = Vec::new();
+        for _ in 0..6 {
+            for _ in 0..30_000 {
+                h.new_object(None).unwrap();
+            }
+            h.collect(&[]).unwrap();
+            caps.push(h.stats().object_payload_capacity);
+            check_slabs(&h);
+        }
+        // The first round may trim; after that the capacity stays put while the churn continues.
+        assert!(caps[2..].iter().all(|&c| c == caps[2]), "{caps:?}");
+        assert!(caps[2] >= 30_000);
+        // The churn stops: the next sweep releases the capacity.
+        h.collect(&[]).unwrap();
+        assert!(h.stats().object_payload_capacity <= 4);
     }
 }
