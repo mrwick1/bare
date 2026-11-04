@@ -7,3 +7,4 @@ license.workspace = true
 
 [dependencies]
 bare-url = { path = "../url" }
+bare-tls = { path = "../tls" }

@@ -18,6 +18,8 @@
 
 use crate::{dns, tcp};
 // JS: like `import * as dns from "./dns"`: other files in this crate.
+use bare_tls::client::{self, ClientStream};
+use bare_tls::trust_store::{self, TrustStore};
 use bare_url::{Scheme, Url};
 // JS: like `import { Url } from "bare-url"`: from another package.
 use std::borrow::Cow;
@@ -65,7 +67,7 @@ const MAX_REDIRECTS: usize = 20;
 // two pages that point at each other would send us around forever.
 
 /// An open connection that waits for a next request, and the time it became idle.
-type IdleConnection = (TcpStream, Instant);
+type IdleConnection = (Stream, Instant);
 
 /// A server: the scheme, the host and the port. A connection only works for the server it was opened to, and a
 /// plain connection must never serve an `https` request, so the scheme is part of the key.
@@ -169,17 +171,9 @@ pub struct Client {
     // It lives in memory only. `MAX_CACHE` is the size limit.
     cache_bytes: usize,
     // How many bytes the cache holds, counted with `cache_size`.
-}
-
-/// Refuse an https URL. We have no TLS yet, so a request sent now would go in plain text.
-/// Callers check this before the cache, DNS and the socket. The `Err` is a plain text message.
-/// The transport that adds TLS replaces this check: `open` and `Stream` are the places (see `docs/progress.md`).
-fn refuse_https(url: &Url) -> Result<(), Error> {
-    if url.scheme == Scheme::Https {
-        return Err("https is not supported yet, so the request was not sent".into());
-        // `return Err(..)` leaves the function early. JS: like `throw new Error(..)`, but as a value.
-    }
-    Ok(())
+    roots: Option<TrustStore>,
+    // The trusted root certificates for https. `open` loads the OS bundle on the first https connection and keeps it.
+    // The roots never come from a peer.
 }
 
 /// Check a request before any DNS lookup or socket. The messages name no header value and no body byte.
@@ -211,18 +205,31 @@ fn cache_size(response: &Response) -> usize {
 
 /// A reused connection that the server closed is dead, and we can see it before we write: the server's FIN makes a
 /// read return 0. Used before a POST, which we must never send twice.
-fn alive(stream: &TcpStream) -> bool {
-    if stream.set_nonblocking(true).is_err() {
+/// For TLS, we look at the socket under it (peek: nothing is read) and ask the TLS stream if it holds bytes.
+/// Any byte waiting on the socket, even an alert, means "not alive": a fresh connection is safe, a guess is not.
+fn alive(stream: &Stream) -> bool {
+    let tcp = match stream {
+        Stream::Tcp(tcp) => tcp,
+        Stream::Tls(tls) if tls.reusable() => tls.get_ref(),
+        _ => return false,
+    };
+    if tcp.set_nonblocking(true).is_err() {
         return false;
     }
-    let alive = matches!(stream.peek(&mut [0u8; 1]), Err(e) if e.kind() == ErrorKind::WouldBlock);
+    let alive = matches!(tcp.peek(&mut [0u8; 1]), Err(e) if e.kind() == ErrorKind::WouldBlock);
     // No bytes and no close: `WouldBlock`. Bytes that nobody asked for mean that the connection is out of step.
-    stream.set_nonblocking(false).is_ok() && alive
+    tcp.set_nonblocking(false).is_ok() && alive
 }
 
 impl Client {
     pub fn new() -> Client {
         Client::default()
+    }
+
+    /// A client that trusts these roots for https, and not the OS bundle. For tests with a private CA.
+    /// The roots are the only trust anchors: there is no way to turn the checks off.
+    pub fn with_roots(roots: TrustStore) -> Client {
+        Client { roots: Some(roots), ..Client::default() }
     }
 
     /// Fetch a URL. Follow redirects, and use the cache. Any status can come back: a 404 is still a page.
@@ -261,7 +268,6 @@ impl Client {
         // Where a redirect sends us. We own this `Url`, so it must live outside the loop.
         for _ in 0..=MAX_REDIRECTS {
             // `0..=20` is 21 turns: the first request plus 20 redirects.
-            refuse_https(current)?;
             let (response, body) = if stream { self.hop_stream(current, &plan)? } else { (self.load(current, &plan)?, None) };
             let Some(location) = redirect_target(&response) else {
                 return Ok((response, body));
@@ -269,7 +275,7 @@ impl Client {
             };
             let target = current.join(location)?;
             // `Location` may be relative, like "/new". `join` makes it a full URL.
-            // A link to `https://` is a full URL too. The guard above refuses it on the next turn.
+            // A link to `https://` is a full URL too. The next turn opens it with verified TLS.
             if !current.same_origin(&target) && plan.headers.iter().any(|(n, _)| SECRET_HEADERS.iter().any(|s| n.eq_ignore_ascii_case(s))) {
                 plan.headers = Cow::Owned(plan.headers.iter().filter(|(n, _)| !SECRET_HEADERS.iter().any(|s| n.eq_ignore_ascii_case(s))).copied().collect());
             }
@@ -300,8 +306,7 @@ impl Client {
 
     /// Get one URL from the cache, or from the server. Do not follow redirects.
     fn load(&mut self, url: &Url, plan: &Plan) -> Result<Arc<Response>, Error> {
-        refuse_https(url)?;
-        // Before the cache: a plain copy of the same host, port and path must not answer an https URL. The scheme is in the key too.
+        // A plain copy of the same host, port and path must not answer an https URL: the scheme is in the cache key.
         if !plan.cacheable() {
             return Ok(Arc::new(self.fetch(url, plan, "")?));
         }
@@ -383,8 +388,7 @@ impl Client {
     /// Send a request and read the status and the headers. The body is not read: the `Body` reads it from the
     /// connection when the caller asks. Reuse an idle connection when there is one.
     fn start(&mut self, url: &Url, plan: &Plan, conditions: &str) -> Result<(Response, Body), Error> {
-        refuse_https(url)?;
-        // The last check before a socket. The idle list is keyed by scheme too, so a plain connection never serves https.
+        // The idle list is keyed by scheme too, so a plain connection never serves https.
         let server = (url.scheme, url.host.clone(), url.port);
         let idle = self.idle.lock().unwrap().remove(&server);
         let get = plan.method == Method::Get;
@@ -393,7 +397,7 @@ impl Client {
             Some((stream, since)) if since.elapsed() < MAX_IDLE && (get || alive(&stream)) => (stream, true),
             // There is a connection, and it has not been idle for too long. Use it. A POST also needs the
             // server to have kept it: we cannot retry a POST after a write, so we look first.
-            _ => (open(url)?, false),
+            _ => (open(url, &mut self.roots)?, false),
             // `_` means "anything else": no connection, or an old one. Open a new one.
             // An old connection is dropped here, and Rust closes it for us.
         };
@@ -404,7 +408,7 @@ impl Client {
             // We cannot know that before we try. The error is not the page's fault, so we
             // try once more on a new connection. This is safe because GET only reads.
             // Never for a POST: the server may have got the request and done what it says, and a second one would do it twice.
-            stream = open(url)?;
+            stream = open(url, &mut self.roots)?;
             result = send(&mut stream, url, plan, conditions);
         }
         let (head, leftover) = result?;
@@ -418,7 +422,7 @@ impl Client {
             return Err("the reply is too big".into());
         }
         let reusable = !head.response.close && head.framing != Framing::UntilClose;
-        let live = Live::new(Stream::Tcp(stream), leftover, head.framing, reusable.then(|| (self.idle.clone(), server)));
+        let live = Live::new(stream, leftover, head.framing, reusable.then(|| (self.idle.clone(), server)));
         Ok((head.response, Body(Source::Live(Box::new(live)))))
     }
 
@@ -450,13 +454,23 @@ pub struct Streamed {
     pub body: Body,
 }
 
-/// Open a new connection to the server of this URL.
-fn open(url: &Url) -> Result<TcpStream, Error> {
+/// Open a new connection to the server of this URL. The only place that makes a `Stream`.
+/// `https`: TCP, then a TLS 1.3 handshake with the host name checked against `roots` (loaded from the OS on first use).
+/// The handshake runs under the read and write time limits that `tcp::connect` sets.
+fn open(url: &Url, roots: &mut Option<TrustStore>) -> Result<Stream, Error> {
     let addrs: Vec<SocketAddr> = dns::resolve(&url.host)?.into_iter().map(|ip| SocketAddr::new(ip, url.port)).collect();
     // Our own DNS lookup (see `dns.rs`) gives IP addresses. Add the port to each one.
     // JS: `ips.map(ip => ({ ip, port }))`.
-    Ok(tcp::connect(&addrs)?)
+    let tcp = tcp::connect(&addrs)?;
     // Open a connection, with time limits (see `tcp.rs`).
+    if url.scheme == Scheme::Http {
+        return Ok(Stream::Tcp(tcp));
+    }
+    let roots = match roots {
+        Some(roots) => roots,
+        None => roots.insert(trust_store::load_system()?.0),
+    };
+    Ok(Stream::Tls(Box::new(client::connect(tcp, &url.host, roots)?)))
 }
 
 /// The request line, the headers and the blank line. A small body is added to the end by the caller.
@@ -485,8 +499,8 @@ fn request_head(url: &Url, plan: &Plan, conditions: &str, extra: usize) -> Vec<u
 }
 
 /// Send one request, and read the status line and the headers of the reply. Gives them, and the bytes of the body that came with them.
-fn send(stream: &mut TcpStream, url: &Url, plan: &Plan, conditions: &str) -> Result<(Head, Vec<u8>), Error> {
-    // `&mut TcpStream` means we borrow the connection and may change it. The caller keeps it.
+fn send(stream: &mut Stream, url: &Url, plan: &Plan, conditions: &str) -> Result<(Head, Vec<u8>), Error> {
+    // `&mut Stream` means we borrow the connection and may change it. The caller keeps it.
     let inline = plan.body.len() <= INLINE_BODY;
     let mut out = request_head(url, plan, conditions, if inline { plan.body.len() } else { 0 });
     if inline {
@@ -494,7 +508,7 @@ fn send(stream: &mut TcpStream, url: &Url, plan: &Plan, conditions: &str) -> Res
         // A small body goes in the same write as the head: one packet, no wait for an acknowledgement between two.
     }
     stream.write_all(&out)?;
-    // Send the request. A connection sends bytes, not text. `write_all` keeps writing until all bytes are sent, or there is an error.
+    // Send the request (over TLS: as encrypted records). A connection sends bytes, not text. `write_all` keeps writing until all bytes are sent, or there is an error.
     if !inline && let Err(e) = stream.write_all(plan.body) {
         // A big body goes from the slice of the caller: no copy. A server may answer early ("413 too big") and close.
         // Then the write fails, but the answer is on the connection. It is not reusable: the server did not read the body.
@@ -506,6 +520,7 @@ fn send(stream: &mut TcpStream, url: &Url, plan: &Plan, conditions: &str) -> Res
             Err(_) => Err(e.into()),
         };
     }
+    stream.flush()?;
     read_head(stream)
 }
 
@@ -766,6 +781,9 @@ struct Live {
 /// A connection. In tests it can also be some bytes in memory: a reply that stops, or a reply that ends.
 enum Stream {
     Tcp(TcpStream),
+    /// TCP under verified TLS. Boxed: the record layer holds big buffers. Reads and writes always go through the TLS
+    /// layer, so its read-ahead and record sequence numbers stay right.
+    Tls(Box<ClientStream<TcpStream>>),
     /// The connection went back to the pool, or was dropped. It gives no bytes.
     Closed,
     #[cfg(test)]
@@ -776,12 +794,30 @@ impl Read for Stream {
     fn read(&mut self, out: &mut [u8]) -> io::Result<usize> {
         match self {
             Stream::Tcp(stream) => stream.read(out),
+            Stream::Tls(stream) => stream.read(out),
             Stream::Closed => Ok(0),
             #[cfg(test)]
             Stream::Fake(bytes, closed) => match bytes.read(out)? {
                 0 if !*closed && !out.is_empty() => Err(ErrorKind::WouldBlock.into()),
                 n => Ok(n),
             },
+        }
+    }
+}
+
+impl Write for Stream {
+    fn write(&mut self, data: &[u8]) -> io::Result<usize> {
+        match self {
+            Stream::Tcp(stream) => stream.write(data),
+            Stream::Tls(stream) => stream.write(data),
+            _ => Err(ErrorKind::NotConnected.into()),
+        }
+    }
+    fn flush(&mut self) -> io::Result<()> {
+        match self {
+            Stream::Tcp(stream) => stream.flush(),
+            Stream::Tls(stream) => stream.flush(),
+            _ => Err(ErrorKind::NotConnected.into()),
         }
     }
 }
@@ -815,10 +851,17 @@ impl Live {
     /// The body is complete. Give the connection back, if nothing is left on it and the server will keep it.
     fn finish(&mut self) {
         self.done = true;
-        if self.at == self.buf.len()
+        // A TLS stream with bytes of its own (the rest of a record, half a handshake message) or a close is not given back.
+        let clean = match &self.stream {
+            Stream::Tcp(_) => true,
+            Stream::Tls(tls) => tls.reusable(),
+            _ => false,
+        };
+        if clean
+            && self.at == self.buf.len()
             && let Some((pool, server)) = self.pool.take()
-            && let Stream::Tcp(stream) = std::mem::replace(&mut self.stream, Stream::Closed)
         {
+            let stream = std::mem::replace(&mut self.stream, Stream::Closed);
             pool.lock().unwrap().insert(server, (stream, Instant::now()));
         }
     }
@@ -1292,57 +1335,104 @@ mod tests {
         listener.accept().is_err()
     }
 
-    #[test]
-    fn https_is_refused_before_any_connection() {
-        let target = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        // A real listener on this machine. If the client connects to it, the test sees it.
-        let port = target.local_addr().unwrap().port();
-        let url = Url::parse(&format!("https://127.0.0.1:{port}/")).unwrap();
-        let error = Client::new().get(&url).err().unwrap();
-        assert!(error.to_string().contains("https is not supported"));
-        assert!(nothing_connects(&target));
-        let error = Client::new().get_stream(&url).err().unwrap();
-        assert!(error.to_string().contains("https is not supported"));
-        assert!(nothing_connects(&target));
-        // The plain text request never leaves the machine, and no DNS lookup runs first.
+    /// A peer that is not trusted: it takes one connection, keeps what the client sends until the client closes
+    /// (or 1 s passes), answers a plain text reply that a real server would never send as its first bytes, and
+    /// closes. Gives the port and a channel with the bytes it received.
+    fn untrusted() -> (u16, std::sync::mpsc::Receiver<Vec<u8>>) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream.set_read_timeout(Some(Duration::from_secs(1))).unwrap();
+            let mut got = Vec::new();
+            let mut buf = [0u8; 4096];
+            let n = stream.read(&mut buf).unwrap_or(0);
+            got.extend_from_slice(&buf[..n]);
+            let _ = stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 6\r\n\r\nSECRET");
+            while let Ok(n) = stream.read(&mut buf) {
+                if n == 0 {
+                    break;
+                }
+                got.extend_from_slice(&buf[..n]);
+            }
+            let _ = tx.send(got);
+        });
+        (port, rx)
+    }
+
+    fn tls_url(port: u16, path: &str) -> Url {
+        // `localhost`, not an address: the TLS client sends a host name and does not support IP hosts.
+        Url::parse(&format!("https://localhost:{port}{path}")).unwrap()
+    }
+
+    /// The client sent a TLS handshake record (type 22, version 3.x) and nothing else readable: no request line, no header, no body.
+    fn only_a_client_hello(wire: &[u8]) {
+        assert!(wire.len() > 5 && wire[0] == 22 && wire[1] == 3, "not a TLS record: {:?}", &wire[..wire.len().min(16)]);
+        let text = String::from_utf8_lossy(wire);
+        for secret in ["GET ", "POST ", "HTTP/1.1", "Authorization", "s3cret", "hunter2", "Cookie"] {
+            assert!(!text.contains(secret), "plain text {secret:?} reached an untrusted peer");
+        }
     }
 
     #[test]
-    fn https_redirect_is_refused_before_any_connection() {
-        let target = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let port = target.local_addr().unwrap().port();
-        let moved = format!("HTTP/1.1 302 Found\r\nLocation: https://127.0.0.1:{port}/\r\nContent-Length: 0\r\n\r\n");
+    fn https_sends_tls_records_and_no_plain_request_to_an_untrusted_peer() {
+        let secret = [("Authorization", "Bearer s3cret")];
+        let (port, wire) = untrusted();
+        let error = Client::new().get(&tls_url(port, "/")).err().unwrap();
+        // The peer's plain text reply is not a TLS record: the handshake fails, and the reply is not a page.
+        assert!(!error.to_string().contains("SECRET"));
+        only_a_client_hello(&wire.recv().unwrap());
+        let (port, wire) = untrusted();
+        assert!(Client::new().get_stream(&tls_url(port, "/")).is_err());
+        only_a_client_hello(&wire.recv().unwrap());
+        let (port, wire) = untrusted();
+        let error = Client::new().post(&tls_url(port, "/login"), &secret, b"pw=hunter2").err().unwrap().to_string();
+        assert!(!error.contains("s3cret") && !error.contains("hunter2"), "{error}");
+        only_a_client_hello(&wire.recv().unwrap());
+        let (port, wire) = untrusted();
+        assert!(Client::new().send_stream(&Request::post(&tls_url(port, "/login"), &secret, b"pw=hunter2")).is_err());
+        only_a_client_hello(&wire.recv().unwrap());
+    }
+
+    #[test]
+    fn an_https_redirect_from_a_plain_server_opens_tls_and_sends_no_plain_text() {
+        let (target, wire) = untrusted();
+        let moved = format!("HTTP/1.1 302 Found\r\nLocation: https://localhost:{target}/\r\nContent-Length: 0\r\n\r\n");
         let (server, _) = serve(vec![(vec![Box::leak(moved.into_boxed_str())], false)]);
-        let error = Client::new().get(&url(server)).err().unwrap();
-        assert!(error.to_string().contains("https is not supported"));
-        assert!(nothing_connects(&target));
-        // The redirect comes from a plain server. The client must not follow it to https.
+        assert!(Client::new().get(&url(server)).is_err());
+        only_a_client_hello(&wire.recv().unwrap());
     }
 
     #[test]
     fn https_never_reuses_a_plain_connection() {
-        // A plain connection to this server stays idle after the first reply. The idle list is keyed by
-        // host and port, so an https request to the same host and port would find it if the guard ran later.
-        let (port, requests) = serve(vec![(vec![OK, OK], false)]);
-        // The server would answer a second request on the same connection. If the guard were late, it would.
+        // A plain connection to this host and port waits in the pool. The pool is keyed by scheme, so https opens its own
+        // connection and starts a handshake. The idle plain connection gets no byte.
+        let idle = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let (port, wire) = untrusted();
         let mut client = Client::new();
-        assert_eq!(client.get(&url(port)).unwrap().body, b"ok");
-        let https = Url::parse(&format!("https://127.0.0.1:{port}/")).unwrap();
-        assert!(client.get(&https).is_err());
-        assert_eq!(requests.try_iter().count(), 1);
-        // Only the first, plain request reached the server.
+        let plain = TcpStream::connect(idle.local_addr().unwrap()).unwrap();
+        client.idle.lock().unwrap().insert((Scheme::Http, "localhost".to_string(), port), (Stream::Tcp(plain), Instant::now()));
+        assert!(client.get(&tls_url(port, "/")).is_err());
+        only_a_client_hello(&wire.recv().unwrap());
+        let (mut held, _) = idle.accept().unwrap();
+        held.set_read_timeout(Some(Duration::from_millis(100))).unwrap();
+        assert!(held.read(&mut [0u8; 1]).is_err(), "bytes reached the idle plain connection");
+        assert!(client.idle.lock().unwrap().contains_key(&(Scheme::Http, "localhost".to_string(), port)));
     }
 
     #[test]
     fn https_never_gets_a_cached_plain_reply() {
-        // The cache is keyed by host, port and path, not by scheme. A fresh plain copy must not answer an https request.
-        let (port, requests) = serve(vec![(vec![page("Cache-Control: max-age=60\r\n", "a")], false)]);
-        let mut client = Client::new();
-        assert_eq!(client.get(&url(port)).unwrap().body, b"a");
-        let https = Url::parse(&format!("https://127.0.0.1:{port}/")).unwrap();
-        assert!(client.get(&https).is_err());
-        assert!(client.get_stream(&https).is_err());
-        assert_eq!(requests.try_iter().count(), 1);
+        // A fresh plain copy must not answer an https request for the same host, port and path.
+        for stream in [false, true] {
+            let (port, wire) = untrusted();
+            let mut client = Client::new();
+            let plain = Arc::new(Response { status: 200, body: b"plain".to_vec(), ..Response::default() });
+            client.cache.insert((Scheme::Http, "localhost".to_string(), port, "/".to_string()), Cached { response: plain, stored: Instant::now(), fresh_for: Duration::from_secs(60) });
+            let url = tls_url(port, "/");
+            assert!(if stream { client.get_stream(&url).is_err() } else { client.get(&url).is_err() });
+            only_a_client_hello(&wire.recv().unwrap());
+        }
     }
 
     #[test]
@@ -1687,16 +1777,6 @@ mod tests {
     }
 
     #[test]
-    fn https_posts_are_refused_before_any_connection() {
-        let target = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let url = Url::parse(&format!("https://127.0.0.1:{}/login", target.local_addr().unwrap().port())).unwrap();
-        let error = Client::new().post(&url, JSON, b"{}").err().unwrap();
-        assert!(error.to_string().contains("https is not supported"));
-        assert!(Client::new().send_stream(&Request::post(&url, JSON, b"{}")).is_err());
-        assert!(nothing_connects(&target));
-    }
-
-    #[test]
     fn redirects_turn_a_post_into_a_get_like_fetch() {
         // 301 and 302 (POST only) and 303: GET, no body, no body headers. The `Authorization` of the same origin stays.
         for code in [301, 302, 303] {
@@ -1882,7 +1962,7 @@ mod tests {
         let (port, requests) = serve(vec![(vec![OK], false)]);
         let mut client = Client::new();
         let stale = TcpStream::connect(dummy.local_addr().unwrap()).unwrap();
-        client.idle.lock().unwrap().insert((Scheme::Https, "127.0.0.1".to_string(), port), (stale, Instant::now()));
+        client.idle.lock().unwrap().insert((Scheme::Https, "127.0.0.1".to_string(), port), (Stream::Tcp(stale), Instant::now()));
         assert_eq!(client.get(&url(port)).unwrap().body, b"ok");
         assert_eq!(seen(&requests).len(), 1);
         assert!(client.idle.lock().unwrap().contains_key(&(Scheme::Https, "127.0.0.1".to_string(), port)));

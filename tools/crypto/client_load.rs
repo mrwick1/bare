@@ -63,6 +63,15 @@ mod sha384;
 #[path = "../../crates/tls/src/x25519.rs"]
 mod x25519;
 #[allow(dead_code)]
+#[path = "../../crates/tls/src/hostname.rs"]
+mod hostname;
+#[allow(dead_code)]
+#[path = "../../crates/tls/src/trust_store.rs"]
+mod trust_store;
+#[allow(dead_code)]
+#[path = "../../crates/tls/src/verify.rs"]
+mod verify;
+#[allow(dead_code)]
 #[path = "../../crates/tls/src/x509.rs"]
 mod x509;
 

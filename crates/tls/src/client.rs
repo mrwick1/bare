@@ -30,7 +30,8 @@ use crate::hello::{self, ClientHelloParams, HelloError};
 use crate::key_schedule::{HandshakeSecret, Transcript};
 use crate::record::{self, Record, RecordLayer};
 use crate::sha256::sha256;
-use crate::{ecc, random, x25519, x509};
+use crate::trust_store::TrustStore;
+use crate::{ecc, random, verify, x25519, x509};
 use std::fmt;
 use std::io::{self, ErrorKind, Read, Write};
 use std::time::{Duration, Instant};
@@ -238,9 +239,24 @@ fn wipe(b: &mut [u8]) {
 /// Bytes of randomness a handshake takes: X25519 scalar, client random, session ID.
 const RANDOM_LEN: usize = 96;
 
+/// The real validator: `verify::verify_server_chain` against caller-supplied independent roots.
+/// `VerifiedPeer::leaf()` is `chain[0]`, the certificate whose key checks CertificateVerify.
+struct Roots<'a>(&'a TrustStore);
+
+impl ChainVerifier for Roots<'_> {
+    fn verify_chain(&self, chain: &[&[u8]], host: &str, now: i64) -> Result<(), String> {
+        verify::verify_server_chain(chain, self.0, host, now).map(|_| ()).map_err(|e| e.to_string())
+    }
+}
+
+/// Connect over `io`: TLS 1.3 handshake with `host`, the chain checked against `roots`
+/// (never against certificates the peer sends), the real clock and OS random.
+/// The caller must set socket read and write timeouts.
+pub fn connect<T: Read + Write>(io: T, host: &str, roots: &TrustStore) -> Result<ClientStream<T>, Error> {
+    connect_with(io, host, &Roots(roots))
+}
+
 /// Connect over `io` with the real clock and OS random.
-// Unused until `verify.rs` exists: the public constructor passes its verifier here.
-#[allow(dead_code)]
 pub(crate) fn connect_with<T: Read + Write, V: ChainVerifier>(
     io: T,
     host: &str,
@@ -614,9 +630,15 @@ impl<T: Read + Write> ClientStream<T> {
         self.http11
     }
 
-    #[allow(dead_code)] // used by the net crate once connected
     pub fn get_ref(&self) -> &T {
         &self.rl.get_ref().io
+    }
+
+    /// True when the stream is open and holds no unread plaintext or half a handshake message.
+    /// A caller that keeps the connection idle must check this first. It cannot know whether
+    /// the peer has sent more bytes: for that, look at the transport (`get_ref`) too.
+    pub fn reusable(&self) -> bool {
+        self.state == State::Open && self.pending_pos == self.pending.len() && self.hs_pos == self.hs.len()
     }
 
     /// Send `close_notify` and flush. The stream may still be read until the peer closes.
@@ -1277,6 +1299,30 @@ mod tests {
             assert_eq!((c.hs_pos, c.hs.len()), (0, 10));
             c.hs.clear();
         }
+    }
+
+    #[test]
+    fn reusable_means_open_with_nothing_held_back() {
+        // Fresh: yes. Half a record read: no. The rest read: yes again.
+        let (_, wire) = happy(|s| s.app(b"0123456789"));
+        let mut c = connect(wire).unwrap();
+        assert!(c.reusable());
+        let mut two = [0u8; 2];
+        c.read_exact(&mut two).unwrap();
+        assert!(!c.reusable(), "eight bytes of the record are still held");
+        let mut rest = [0u8; 8];
+        c.read_exact(&mut rest).unwrap();
+        assert!(c.reusable());
+        // Half a ticket waits in the handshake buffer: no.
+        let t = new_session_ticket(&[7; 64], &[]);
+        let (_, wire) = happy(|s| s.post_handshake(&t[..20]));
+        let mut c = connect(wire).unwrap();
+        assert!(c.read(&mut two).is_err() || !c.reusable());
+        // After close_notify: no.
+        let (_, wire) = happy(|s| s.close_notify());
+        let mut c = connect(wire).unwrap();
+        assert_eq!(read_all(&mut c).unwrap(), b"");
+        assert!(!c.reusable());
     }
 
     #[test]
