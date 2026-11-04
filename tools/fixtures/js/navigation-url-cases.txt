@@ -1,0 +1,1104 @@
+=== abs-000
+var f = function () { try { var u = new URL("http://a.com/a/../b"); return [u.href, u.protocol, u.host, u.hostname, u.port, u.pathname, u.search, u.hash, u.origin].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== abs-001
+var f = function () { try { var u = new URL("http://a.com/a b?x y#f g"); return [u.href, u.protocol, u.host, u.hostname, u.port, u.pathname, u.search, u.hash, u.origin].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== abs-002
+var f = function () { try { var u = new URL("http://a.com/a^b|c"); return [u.href, u.protocol, u.host, u.hostname, u.port, u.pathname, u.search, u.hash, u.origin].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== abs-003
+var f = function () { try { var u = new URL("http://a.com/%2e%2E/x"); return [u.href, u.protocol, u.host, u.hostname, u.port, u.pathname, u.search, u.hash, u.origin].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== abs-004
+var f = function () { try { var u = new URL("http://a\\b"); return [u.href, u.protocol, u.host, u.hostname, u.port, u.pathname, u.search, u.hash, u.origin].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== abs-005
+var f = function () { try { var u = new URL("http:/a.com"); return [u.href, u.protocol, u.host, u.hostname, u.port, u.pathname, u.search, u.hash, u.origin].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== abs-006
+var f = function () { try { var u = new URL("http:a.com"); return [u.href, u.protocol, u.host, u.hostname, u.port, u.pathname, u.search, u.hash, u.origin].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== abs-007
+var f = function () { try { var u = new URL("http:///a.com/x"); return [u.href, u.protocol, u.host, u.hostname, u.port, u.pathname, u.search, u.hash, u.origin].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== abs-008
+var f = function () { try { var u = new URL("http://u:p@a.com/"); return [u.href, u.protocol, u.host, u.hostname, u.port, u.pathname, u.search, u.hash, u.origin].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== abs-009
+var f = function () { try { var u = new URL("HTTP://EXAMPLE.com:80/"); return [u.href, u.protocol, u.host, u.hostname, u.port, u.pathname, u.search, u.hash, u.origin].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== abs-010
+var f = function () { try { var u = new URL("https://a.com:443"); return [u.href, u.protocol, u.host, u.hostname, u.port, u.pathname, u.search, u.hash, u.origin].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== abs-011
+var f = function () { try { var u = new URL("https://a.com:80/"); return [u.href, u.protocol, u.host, u.hostname, u.port, u.pathname, u.search, u.hash, u.origin].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== abs-012
+var f = function () { try { var u = new URL("http://a.com:443/"); return [u.href, u.protocol, u.host, u.hostname, u.port, u.pathname, u.search, u.hash, u.origin].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== abs-013
+var f = function () { try { var u = new URL("http://a.com:0/"); return [u.href, u.protocol, u.host, u.hostname, u.port, u.pathname, u.search, u.hash, u.origin].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== abs-014
+var f = function () { try { var u = new URL("http://a.com:65536/"); return [u.href, u.protocol, u.host, u.hostname, u.port, u.pathname, u.search, u.hash, u.origin].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== abs-015
+var f = function () { try { var u = new URL("http://a.com:08080/"); return [u.href, u.protocol, u.host, u.hostname, u.port, u.pathname, u.search, u.hash, u.origin].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== abs-016
+var f = function () { try { var u = new URL("http://a.com?q=1"); return [u.href, u.protocol, u.host, u.hostname, u.port, u.pathname, u.search, u.hash, u.origin].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== abs-017
+var f = function () { try { var u = new URL("http://a.com#"); return [u.href, u.protocol, u.host, u.hostname, u.port, u.pathname, u.search, u.hash, u.origin].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== abs-018
+var f = function () { try { var u = new URL("http://a.com/?"); return [u.href, u.protocol, u.host, u.hostname, u.port, u.pathname, u.search, u.hash, u.origin].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== abs-019
+var f = function () { try { var u = new URL("http://a.com/?#"); return [u.href, u.protocol, u.host, u.hostname, u.port, u.pathname, u.search, u.hash, u.origin].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== abs-020
+var f = function () { try { var u = new URL("http://a.com/#?"); return [u.href, u.protocol, u.host, u.hostname, u.port, u.pathname, u.search, u.hash, u.origin].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== abs-021
+var f = function () { try { var u = new URL("http://b\u00fccher.de/"); return [u.href, u.protocol, u.host, u.hostname, u.port, u.pathname, u.search, u.hash, u.origin].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== abs-022
+var f = function () { try { var u = new URL("http://xn--bcher-kva.de/"); return [u.href, u.protocol, u.host, u.hostname, u.port, u.pathname, u.search, u.hash, u.origin].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== abs-023
+var f = function () { try { var u = new URL("http://fa\u00df.de"); return [u.href, u.protocol, u.host, u.hostname, u.port, u.pathname, u.search, u.hash, u.origin].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== abs-024
+var f = function () { try { var u = new URL("http://A.b/%7e"); return [u.href, u.protocol, u.host, u.hostname, u.port, u.pathname, u.search, u.hash, u.origin].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== abs-025
+var f = function () { try { var u = new URL("http://127.1/"); return [u.href, u.protocol, u.host, u.hostname, u.port, u.pathname, u.search, u.hash, u.origin].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== abs-026
+var f = function () { try { var u = new URL("http://0x7f.1/"); return [u.href, u.protocol, u.host, u.hostname, u.port, u.pathname, u.search, u.hash, u.origin].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== abs-027
+var f = function () { try { var u = new URL("http://[::1]:3000/"); return [u.href, u.protocol, u.host, u.hostname, u.port, u.pathname, u.search, u.hash, u.origin].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== abs-028
+var f = function () { try { var u = new URL("http://[::1]/"); return [u.href, u.protocol, u.host, u.hostname, u.port, u.pathname, u.search, u.hash, u.origin].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== abs-029
+var f = function () { try { var u = new URL("http://[1:0:0:0:0:0:0:1]/"); return [u.href, u.protocol, u.host, u.hostname, u.port, u.pathname, u.search, u.hash, u.origin].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== abs-030
+var f = function () { try { var u = new URL("http://a.com/a'b?a'b"); return [u.href, u.protocol, u.host, u.hostname, u.port, u.pathname, u.search, u.hash, u.origin].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== abs-031
+var f = function () { try { var u = new URL("http://a.com/\t\nx"); return [u.href, u.protocol, u.host, u.hostname, u.port, u.pathname, u.search, u.hash, u.origin].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== abs-032
+var f = function () { try { var u = new URL("  http://a.com/ "); return [u.href, u.protocol, u.host, u.hostname, u.port, u.pathname, u.search, u.hash, u.origin].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== abs-033
+var f = function () { try { var u = new URL("http://a b/"); return [u.href, u.protocol, u.host, u.hostname, u.port, u.pathname, u.search, u.hash, u.origin].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== abs-034
+var f = function () { try { var u = new URL("http://a<b/"); return [u.href, u.protocol, u.host, u.hostname, u.port, u.pathname, u.search, u.hash, u.origin].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== abs-035
+var f = function () { try { var u = new URL("http://a.com:/"); return [u.href, u.protocol, u.host, u.hostname, u.port, u.pathname, u.search, u.hash, u.origin].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== abs-036
+var f = function () { try { var u = new URL("http://a.com:80:80/"); return [u.href, u.protocol, u.host, u.hostname, u.port, u.pathname, u.search, u.hash, u.origin].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== abs-037
+var f = function () { try { var u = new URL("http://a_b.com/"); return [u.href, u.protocol, u.host, u.hostname, u.port, u.pathname, u.search, u.hash, u.origin].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== abs-038
+var f = function () { try { var u = new URL("http://a.com./"); return [u.href, u.protocol, u.host, u.hostname, u.port, u.pathname, u.search, u.hash, u.origin].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== abs-039
+var f = function () { try { var u = new URL("http://a.com/.."); return [u.href, u.protocol, u.host, u.hostname, u.port, u.pathname, u.search, u.hash, u.origin].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== abs-040
+var f = function () { try { var u = new URL("http://a.com/a/."); return [u.href, u.protocol, u.host, u.hostname, u.port, u.pathname, u.search, u.hash, u.origin].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== abs-041
+var f = function () { try { var u = new URL("http://a.com/a/%2E"); return [u.href, u.protocol, u.host, u.hostname, u.port, u.pathname, u.search, u.hash, u.origin].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== abs-042
+var f = function () { try { var u = new URL("http://a.com//x"); return [u.href, u.protocol, u.host, u.hostname, u.port, u.pathname, u.search, u.hash, u.origin].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== abs-043
+var f = function () { try { var u = new URL("http://a.com/a//b"); return [u.href, u.protocol, u.host, u.hostname, u.port, u.pathname, u.search, u.hash, u.origin].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== abs-044
+var f = function () { try { var u = new URL("http://a.com/a/b/../../../c"); return [u.href, u.protocol, u.host, u.hostname, u.port, u.pathname, u.search, u.hash, u.origin].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== abs-045
+var f = function () { try { var u = new URL("http://a.com/%41%zz%"); return [u.href, u.protocol, u.host, u.hostname, u.port, u.pathname, u.search, u.hash, u.origin].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== abs-046
+var f = function () { try { var u = new URL("http://a.com/a?b=c&d=e#frag"); return [u.href, u.protocol, u.host, u.hostname, u.port, u.pathname, u.search, u.hash, u.origin].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== abs-047
+var f = function () { try { var u = new URL("http://a.com/\u00e4?\u00e4#\u00e4"); return [u.href, u.protocol, u.host, u.hostname, u.port, u.pathname, u.search, u.hash, u.origin].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== abs-048
+var f = function () { try { var u = new URL("http://exam%70le.com"); return [u.href, u.protocol, u.host, u.hostname, u.port, u.pathname, u.search, u.hash, u.origin].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== abs-049
+var f = function () { try { var u = new URL("http://EXAMPLE.COM"); return [u.href, u.protocol, u.host, u.hostname, u.port, u.pathname, u.search, u.hash, u.origin].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== abs-050
+var f = function () { try { var u = new URL("http://a.com/{x}"); return [u.href, u.protocol, u.host, u.hostname, u.port, u.pathname, u.search, u.hash, u.origin].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== abs-051
+var f = function () { try { var u = new URL("http://a.com/?{x}'\"<>"); return [u.href, u.protocol, u.host, u.hostname, u.port, u.pathname, u.search, u.hash, u.origin].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== abs-052
+var f = function () { try { var u = new URL("http://a.com/#{x}'\"<>`"); return [u.href, u.protocol, u.host, u.hostname, u.port, u.pathname, u.search, u.hash, u.origin].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== abs-053
+var f = function () { try { var u = new URL("http://a.com/\"<>`"); return [u.href, u.protocol, u.host, u.hostname, u.port, u.pathname, u.search, u.hash, u.origin].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== abs-054
+var f = function () { try { var u = new URL("ftp://a.com/"); return [u.href, u.protocol, u.host, u.hostname, u.port, u.pathname, u.search, u.hash, u.origin].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== abs-055
+var f = function () { try { var u = new URL("mailto:a@b.c"); return [u.href, u.protocol, u.host, u.hostname, u.port, u.pathname, u.search, u.hash, u.origin].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== abs-056
+var f = function () { try { var u = new URL("javascript:alert(1)"); return [u.href, u.protocol, u.host, u.hostname, u.port, u.pathname, u.search, u.hash, u.origin].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== abs-057
+var f = function () { try { var u = new URL("localhost:3000/x"); return [u.href, u.protocol, u.host, u.hostname, u.port, u.pathname, u.search, u.hash, u.origin].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== abs-058
+var f = function () { try { var u = new URL("//a.com/x"); return [u.href, u.protocol, u.host, u.hostname, u.port, u.pathname, u.search, u.hash, u.origin].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== abs-059
+var f = function () { try { var u = new URL("/x"); return [u.href, u.protocol, u.host, u.hostname, u.port, u.pathname, u.search, u.hash, u.origin].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== abs-060
+var f = function () { try { var u = new URL("x"); return [u.href, u.protocol, u.host, u.hostname, u.port, u.pathname, u.search, u.hash, u.origin].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== abs-061
+var f = function () { try { var u = new URL(""); return [u.href, u.protocol, u.host, u.hostname, u.port, u.pathname, u.search, u.hash, u.origin].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== abs-062
+var f = function () { try { var u = new URL("http://"); return [u.href, u.protocol, u.host, u.hostname, u.port, u.pathname, u.search, u.hash, u.origin].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== abs-063
+var f = function () { try { var u = new URL("http://:80/"); return [u.href, u.protocol, u.host, u.hostname, u.port, u.pathname, u.search, u.hash, u.origin].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== abs-064
+var f = function () { try { var u = new URL("http://.com/"); return [u.href, u.protocol, u.host, u.hostname, u.port, u.pathname, u.search, u.hash, u.origin].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== abs-065
+var f = function () { try { var u = new URL("http://a..com/"); return [u.href, u.protocol, u.host, u.hostname, u.port, u.pathname, u.search, u.hash, u.origin].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== abs-066
+var f = function () { try { var u = new URL("http://-a.com/"); return [u.href, u.protocol, u.host, u.hostname, u.port, u.pathname, u.search, u.hash, u.origin].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== abs-067
+var f = function () { try { var u = new URL("http://a.com:99999999999/"); return [u.href, u.protocol, u.host, u.hostname, u.port, u.pathname, u.search, u.hash, u.origin].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== abs-068
+var f = function () { try { var u = new URL("http://1.2.3.4.5/"); return [u.href, u.protocol, u.host, u.hostname, u.port, u.pathname, u.search, u.hash, u.origin].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== abs-069
+var f = function () { try { var u = new URL("http://256.1.1.1/"); return [u.href, u.protocol, u.host, u.hostname, u.port, u.pathname, u.search, u.hash, u.origin].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== abs-070
+var f = function () { try { var u = new URL("http://a.com/%"); return [u.href, u.protocol, u.host, u.hostname, u.port, u.pathname, u.search, u.hash, u.origin].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== abs-071
+var f = function () { try { var u = new URL("http://a.com/a%20b"); return [u.href, u.protocol, u.host, u.hostname, u.port, u.pathname, u.search, u.hash, u.origin].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== abs-072
+var f = function () { try { var u = new URL("https://staging.example.test/login?next=%2Fjourneys#top"); return [u.href, u.protocol, u.host, u.hostname, u.port, u.pathname, u.search, u.hash, u.origin].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== abs-073
+var f = function () { try { var u = new URL("https://staging.example.test:8443/a/b/c.html?x=1&y=2#z"); return [u.href, u.protocol, u.host, u.hostname, u.port, u.pathname, u.search, u.hash, u.origin].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== rel-000
+var f = function () { try { var u = new URL("", "https://a.com:8443/p/q/r.html?k=v#h"); return [u.href, u.pathname, u.search, u.hash, u.origin].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== rel-001
+var f = function () { try { var u = new URL("#x", "https://a.com:8443/p/q/r.html?k=v#h"); return [u.href, u.pathname, u.search, u.hash, u.origin].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== rel-002
+var f = function () { try { var u = new URL("?y=1", "https://a.com:8443/p/q/r.html?k=v#h"); return [u.href, u.pathname, u.search, u.hash, u.origin].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== rel-003
+var f = function () { try { var u = new URL("?", "https://a.com:8443/p/q/r.html?k=v#h"); return [u.href, u.pathname, u.search, u.hash, u.origin].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== rel-004
+var f = function () { try { var u = new URL("y", "https://a.com:8443/p/q/r.html?k=v#h"); return [u.href, u.pathname, u.search, u.hash, u.origin].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== rel-005
+var f = function () { try { var u = new URL("./y", "https://a.com:8443/p/q/r.html?k=v#h"); return [u.href, u.pathname, u.search, u.hash, u.origin].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== rel-006
+var f = function () { try { var u = new URL("../y", "https://a.com:8443/p/q/r.html?k=v#h"); return [u.href, u.pathname, u.search, u.hash, u.origin].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== rel-007
+var f = function () { try { var u = new URL("../../../../y", "https://a.com:8443/p/q/r.html?k=v#h"); return [u.href, u.pathname, u.search, u.hash, u.origin].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== rel-008
+var f = function () { try { var u = new URL("/y", "https://a.com:8443/p/q/r.html?k=v#h"); return [u.href, u.pathname, u.search, u.hash, u.origin].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== rel-009
+var f = function () { try { var u = new URL("//b.com/y", "https://a.com:8443/p/q/r.html?k=v#h"); return [u.href, u.pathname, u.search, u.hash, u.origin].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== rel-010
+var f = function () { try { var u = new URL("//b.com", "https://a.com:8443/p/q/r.html?k=v#h"); return [u.href, u.pathname, u.search, u.hash, u.origin].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== rel-011
+var f = function () { try { var u = new URL("http://c.com/z", "https://a.com:8443/p/q/r.html?k=v#h"); return [u.href, u.pathname, u.search, u.hash, u.origin].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== rel-012
+var f = function () { try { var u = new URL("y?q#f", "https://a.com:8443/p/q/r.html?k=v#h"); return [u.href, u.pathname, u.search, u.hash, u.origin].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== rel-013
+var f = function () { try { var u = new URL("y/../z", "https://a.com:8443/p/q/r.html?k=v#h"); return [u.href, u.pathname, u.search, u.hash, u.origin].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== rel-014
+var f = function () { try { var u = new URL(".", "https://a.com:8443/p/q/r.html?k=v#h"); return [u.href, u.pathname, u.search, u.hash, u.origin].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== rel-015
+var f = function () { try { var u = new URL("..", "https://a.com:8443/p/q/r.html?k=v#h"); return [u.href, u.pathname, u.search, u.hash, u.origin].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== rel-016
+var f = function () { try { var u = new URL("./", "https://a.com:8443/p/q/r.html?k=v#h"); return [u.href, u.pathname, u.search, u.hash, u.origin].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== rel-017
+var f = function () { try { var u = new URL("a b", "https://a.com:8443/p/q/r.html?k=v#h"); return [u.href, u.pathname, u.search, u.hash, u.origin].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== rel-018
+var f = function () { try { var u = new URL("?a b#c d", "https://a.com:8443/p/q/r.html?k=v#h"); return [u.href, u.pathname, u.search, u.hash, u.origin].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== rel-019
+var f = function () { try { var u = new URL("/y?z", "https://a.com:8443/p/q/r.html?k=v#h"); return [u.href, u.pathname, u.search, u.hash, u.origin].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== rel-020
+var f = function () { try { var u = new URL("x:y", "https://a.com:8443/p/q/r.html?k=v#h"); return [u.href, u.pathname, u.search, u.hash, u.origin].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== rel-021
+var f = function () { try { var u = new URL("1a:b", "https://a.com:8443/p/q/r.html?k=v#h"); return [u.href, u.pathname, u.search, u.hash, u.origin].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== rel-022
+var f = function () { try { var u = new URL("a/b:c", "https://a.com:8443/p/q/r.html?k=v#h"); return [u.href, u.pathname, u.search, u.hash, u.origin].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== rel-023
+var f = function () { try { var u = new URL("#", "https://a.com:8443/p/q/r.html?k=v#h"); return [u.href, u.pathname, u.search, u.hash, u.origin].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== rel-024
+var f = function () { try { var u = new URL("?#", "https://a.com:8443/p/q/r.html?k=v#h"); return [u.href, u.pathname, u.search, u.hash, u.origin].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== rel-025
+var f = function () { try { var u = new URL("%2e%2e/y", "https://a.com:8443/p/q/r.html?k=v#h"); return [u.href, u.pathname, u.search, u.hash, u.origin].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== rel-026
+var f = function () { try { var u = new URL("/a/./b", "https://a.com:8443/p/q/r.html?k=v#h"); return [u.href, u.pathname, u.search, u.hash, u.origin].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== rel-027
+var f = function () { try { var u = new URL("..%2fx", "https://a.com:8443/p/q/r.html?k=v#h"); return [u.href, u.pathname, u.search, u.hash, u.origin].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== rel-028
+var f = function () { try { var u = new URL("  y  ", "https://a.com:8443/p/q/r.html?k=v#h"); return [u.href, u.pathname, u.search, u.hash, u.origin].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== rel-029
+var f = function () { try { var u = new URL("\ty\n", "https://a.com:8443/p/q/r.html?k=v#h"); return [u.href, u.pathname, u.search, u.hash, u.origin].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== rel-030
+var f = function () { try { var u = new URL("https:y", "https://a.com:8443/p/q/r.html?k=v#h"); return [u.href, u.pathname, u.search, u.hash, u.origin].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== rel-031
+var f = function () { try { var u = new URL("http:y", "https://a.com:8443/p/q/r.html?k=v#h"); return [u.href, u.pathname, u.search, u.hash, u.origin].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== rel-032
+var f = function () { try { var u = new URL("y\\z", "https://a.com:8443/p/q/r.html?k=v#h"); return [u.href, u.pathname, u.search, u.hash, u.origin].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== rel-033
+var f = function () { try { var u = new URL("//u:p@b.com/", "https://a.com:8443/p/q/r.html?k=v#h"); return [u.href, u.pathname, u.search, u.hash, u.origin].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== rel-034
+var f = function () { try { var u = new URL("//b.com:99/", "https://a.com:8443/p/q/r.html?k=v#h"); return [u.href, u.pathname, u.search, u.hash, u.origin].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== rel-035
+var f = function () { try { var u = new URL("//[::1]/", "https://a.com:8443/p/q/r.html?k=v#h"); return [u.href, u.pathname, u.search, u.hash, u.origin].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== rel-036
+var f = function () { try { var u = new URL("mailto:x", "https://a.com:8443/p/q/r.html?k=v#h"); return [u.href, u.pathname, u.search, u.hash, u.origin].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== rel-037
+var f = function () { try { var u = new URL("javascript:1", "https://a.com:8443/p/q/r.html?k=v#h"); return [u.href, u.pathname, u.search, u.hash, u.origin].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== relb-000
+var f = function () { try { var u = new URL("x", "http://a.com"); return u.href; } catch (e) { return "throw:" + e.name; } };
+f
+=== relb-001
+var f = function () { try { var u = new URL("x", "http://a.com/"); return u.href; } catch (e) { return "throw:" + e.name; } };
+f
+=== relb-002
+var f = function () { try { var u = new URL("x", "http://a.com/a"); return u.href; } catch (e) { return "throw:" + e.name; } };
+f
+=== relb-003
+var f = function () { try { var u = new URL("x", "http://a.com/a/"); return u.href; } catch (e) { return "throw:" + e.name; } };
+f
+=== relb-004
+var f = function () { try { var u = new URL("?z", "http://a.com/a/b?q"); return u.href; } catch (e) { return "throw:" + e.name; } };
+f
+=== relb-005
+var f = function () { try { var u = new URL("", "http://a.com/a/b?q#f"); return u.href; } catch (e) { return "throw:" + e.name; } };
+f
+=== relb-006
+var f = function () { try { var u = new URL("x", "nonsense"); return u.href; } catch (e) { return "throw:" + e.name; } };
+f
+=== relb-007
+var f = function () { try { var u = new URL("x", "mailto:a@b"); return u.href; } catch (e) { return "throw:" + e.name; } };
+f
+=== relb-008
+var f = function () { try { var u = new URL("../../x", "http://a.com/a/b"); return u.href; } catch (e) { return "throw:" + e.name; } };
+f
+=== relb-009
+var f = function () { try { var u = new URL("../../../x", "http://a.com/a/b/"); return u.href; } catch (e) { return "throw:" + e.name; } };
+f
+=== relb-010
+var f = function () { try { var u = new URL("c d", "http://a.com/a b"); return u.href; } catch (e) { return "throw:" + e.name; } };
+f
+=== relb-011
+var f = function () { try { var u = new URL("b", "http://a.com:8080/a"); return u.href; } catch (e) { return "throw:" + e.name; } };
+f
+=== relb-012
+var f = function () { try { var u = new URL("//b/c", "http://[::1]:81/a"); return u.href; } catch (e) { return "throw:" + e.name; } };
+f
+=== set-href-a-0
+var f = function () { try { var u = new URL("http://a.com/p/q?x=1#f"); u.href = "http://b.com/x?y#z"; return [u.href, u.host, u.port, u.pathname, u.search, u.hash].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== set-href-a-1
+var f = function () { try { var u = new URL("http://a.com/p/q?x=1#f"); u.href = "nonsense"; return [u.href, u.host, u.port, u.pathname, u.search, u.hash].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== set-href-a-2
+var f = function () { try { var u = new URL("http://a.com/p/q?x=1#f"); u.href = "mailto:x"; return [u.href, u.host, u.port, u.pathname, u.search, u.hash].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== set-protocol-a-3
+var f = function () { try { var u = new URL("http://a.com/p/q?x=1#f"); u.protocol = "https"; return [u.href, u.host, u.port, u.pathname, u.search, u.hash].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== set-protocol-a-4
+var f = function () { try { var u = new URL("http://a.com/p/q?x=1#f"); u.protocol = "https:"; return [u.href, u.host, u.port, u.pathname, u.search, u.hash].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== set-protocol-a-5
+var f = function () { try { var u = new URL("http://a.com/p/q?x=1#f"); u.protocol = "ftp"; return [u.href, u.host, u.port, u.pathname, u.search, u.hash].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== set-protocol-a-6
+var f = function () { try { var u = new URL("http://a.com/p/q?x=1#f"); u.protocol = "mailto"; return [u.href, u.host, u.port, u.pathname, u.search, u.hash].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== set-protocol-a-7
+var f = function () { try { var u = new URL("http://a.com/p/q?x=1#f"); u.protocol = "HTTP:x"; return [u.href, u.host, u.port, u.pathname, u.search, u.hash].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== set-host-a-8
+var f = function () { try { var u = new URL("http://a.com/p/q?x=1#f"); u.host = "b.com:99"; return [u.href, u.host, u.port, u.pathname, u.search, u.hash].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== set-host-a-9
+var f = function () { try { var u = new URL("http://a.com/p/q?x=1#f"); u.host = "b.com"; return [u.href, u.host, u.port, u.pathname, u.search, u.hash].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== set-host-a-10
+var f = function () { try { var u = new URL("http://a.com/p/q?x=1#f"); u.host = "[::1]:7"; return [u.href, u.host, u.port, u.pathname, u.search, u.hash].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== set-host-a-11
+var f = function () { try { var u = new URL("http://a.com/p/q?x=1#f"); u.host = "b.com:"; return [u.href, u.host, u.port, u.pathname, u.search, u.hash].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== set-host-a-12
+var f = function () { try { var u = new URL("http://a.com/p/q?x=1#f"); u.host = "b.com:x"; return [u.href, u.host, u.port, u.pathname, u.search, u.hash].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== set-host-a-13
+var f = function () { try { var u = new URL("http://a.com/p/q?x=1#f"); u.host = "bad host"; return [u.href, u.host, u.port, u.pathname, u.search, u.hash].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== set-hostname-a-14
+var f = function () { try { var u = new URL("http://a.com/p/q?x=1#f"); u.hostname = "c.com"; return [u.href, u.host, u.port, u.pathname, u.search, u.hash].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== set-hostname-a-15
+var f = function () { try { var u = new URL("http://a.com/p/q?x=1#f"); u.hostname = "c.com:5"; return [u.href, u.host, u.port, u.pathname, u.search, u.hash].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== set-hostname-a-16
+var f = function () { try { var u = new URL("http://a.com/p/q?x=1#f"); u.hostname = "C.COM"; return [u.href, u.host, u.port, u.pathname, u.search, u.hash].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== set-hostname-a-17
+var f = function () { try { var u = new URL("http://a.com/p/q?x=1#f"); u.hostname = ""; return [u.href, u.host, u.port, u.pathname, u.search, u.hash].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== set-port-a-18
+var f = function () { try { var u = new URL("http://a.com/p/q?x=1#f"); u.port = "99"; return [u.href, u.host, u.port, u.pathname, u.search, u.hash].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== set-port-a-19
+var f = function () { try { var u = new URL("http://a.com/p/q?x=1#f"); u.port = ""; return [u.href, u.host, u.port, u.pathname, u.search, u.hash].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== set-port-a-20
+var f = function () { try { var u = new URL("http://a.com/p/q?x=1#f"); u.port = "99x"; return [u.href, u.host, u.port, u.pathname, u.search, u.hash].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== set-port-a-21
+var f = function () { try { var u = new URL("http://a.com/p/q?x=1#f"); u.port = "x"; return [u.href, u.host, u.port, u.pathname, u.search, u.hash].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== set-port-a-22
+var f = function () { try { var u = new URL("http://a.com/p/q?x=1#f"); u.port = "65536"; return [u.href, u.host, u.port, u.pathname, u.search, u.hash].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== set-port-a-23
+var f = function () { try { var u = new URL("http://a.com/p/q?x=1#f"); u.port = "80"; return [u.href, u.host, u.port, u.pathname, u.search, u.hash].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== set-pathname-a-24
+var f = function () { try { var u = new URL("http://a.com/p/q?x=1#f"); u.pathname = "/a b/../c"; return [u.href, u.host, u.port, u.pathname, u.search, u.hash].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== set-pathname-a-25
+var f = function () { try { var u = new URL("http://a.com/p/q?x=1#f"); u.pathname = "x"; return [u.href, u.host, u.port, u.pathname, u.search, u.hash].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== set-pathname-a-26
+var f = function () { try { var u = new URL("http://a.com/p/q?x=1#f"); u.pathname = "/a?b#c"; return [u.href, u.host, u.port, u.pathname, u.search, u.hash].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== set-pathname-a-27
+var f = function () { try { var u = new URL("http://a.com/p/q?x=1#f"); u.pathname = ""; return [u.href, u.host, u.port, u.pathname, u.search, u.hash].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== set-pathname-a-28
+var f = function () { try { var u = new URL("http://a.com/p/q?x=1#f"); u.pathname = "//x"; return [u.href, u.host, u.port, u.pathname, u.search, u.hash].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== set-search-a-29
+var f = function () { try { var u = new URL("http://a.com/p/q?x=1#f"); u.search = "?a=b c"; return [u.href, u.host, u.port, u.pathname, u.search, u.hash].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== set-search-a-30
+var f = function () { try { var u = new URL("http://a.com/p/q?x=1#f"); u.search = "a=b#c"; return [u.href, u.host, u.port, u.pathname, u.search, u.hash].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== set-search-a-31
+var f = function () { try { var u = new URL("http://a.com/p/q?x=1#f"); u.search = ""; return [u.href, u.host, u.port, u.pathname, u.search, u.hash].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== set-search-a-32
+var f = function () { try { var u = new URL("http://a.com/p/q?x=1#f"); u.search = "?"; return [u.href, u.host, u.port, u.pathname, u.search, u.hash].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== set-search-a-33
+var f = function () { try { var u = new URL("http://a.com/p/q?x=1#f"); u.search = "?%zz'"; return [u.href, u.host, u.port, u.pathname, u.search, u.hash].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== set-hash-a-34
+var f = function () { try { var u = new URL("http://a.com/p/q?x=1#f"); u.hash = "#a b"; return [u.href, u.host, u.port, u.pathname, u.search, u.hash].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== set-hash-a-35
+var f = function () { try { var u = new URL("http://a.com/p/q?x=1#f"); u.hash = "a"; return [u.href, u.host, u.port, u.pathname, u.search, u.hash].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== set-hash-a-36
+var f = function () { try { var u = new URL("http://a.com/p/q?x=1#f"); u.hash = ""; return [u.href, u.host, u.port, u.pathname, u.search, u.hash].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== set-hash-a-37
+var f = function () { try { var u = new URL("http://a.com/p/q?x=1#f"); u.hash = "#"; return [u.href, u.host, u.port, u.pathname, u.search, u.hash].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== set-hash-a-38
+var f = function () { try { var u = new URL("http://a.com/p/q?x=1#f"); u.hash = "#{`x`}"; return [u.href, u.host, u.port, u.pathname, u.search, u.hash].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== set-href-b-0
+var f = function () { try { var u = new URL("https://a.com:80/"); u.href = "http://b.com/x?y#z"; return [u.href, u.host, u.port, u.pathname, u.search, u.hash].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== set-href-b-1
+var f = function () { try { var u = new URL("https://a.com:80/"); u.href = "nonsense"; return [u.href, u.host, u.port, u.pathname, u.search, u.hash].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== set-href-b-2
+var f = function () { try { var u = new URL("https://a.com:80/"); u.href = "mailto:x"; return [u.href, u.host, u.port, u.pathname, u.search, u.hash].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== set-protocol-b-3
+var f = function () { try { var u = new URL("https://a.com:80/"); u.protocol = "https"; return [u.href, u.host, u.port, u.pathname, u.search, u.hash].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== set-protocol-b-4
+var f = function () { try { var u = new URL("https://a.com:80/"); u.protocol = "https:"; return [u.href, u.host, u.port, u.pathname, u.search, u.hash].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== set-protocol-b-5
+var f = function () { try { var u = new URL("https://a.com:80/"); u.protocol = "ftp"; return [u.href, u.host, u.port, u.pathname, u.search, u.hash].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== set-protocol-b-6
+var f = function () { try { var u = new URL("https://a.com:80/"); u.protocol = "mailto"; return [u.href, u.host, u.port, u.pathname, u.search, u.hash].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== set-protocol-b-7
+var f = function () { try { var u = new URL("https://a.com:80/"); u.protocol = "HTTP:x"; return [u.href, u.host, u.port, u.pathname, u.search, u.hash].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== set-host-b-8
+var f = function () { try { var u = new URL("https://a.com:80/"); u.host = "b.com:99"; return [u.href, u.host, u.port, u.pathname, u.search, u.hash].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== set-host-b-9
+var f = function () { try { var u = new URL("https://a.com:80/"); u.host = "b.com"; return [u.href, u.host, u.port, u.pathname, u.search, u.hash].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== set-host-b-10
+var f = function () { try { var u = new URL("https://a.com:80/"); u.host = "[::1]:7"; return [u.href, u.host, u.port, u.pathname, u.search, u.hash].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== set-host-b-11
+var f = function () { try { var u = new URL("https://a.com:80/"); u.host = "b.com:"; return [u.href, u.host, u.port, u.pathname, u.search, u.hash].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== set-host-b-12
+var f = function () { try { var u = new URL("https://a.com:80/"); u.host = "b.com:x"; return [u.href, u.host, u.port, u.pathname, u.search, u.hash].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== set-host-b-13
+var f = function () { try { var u = new URL("https://a.com:80/"); u.host = "bad host"; return [u.href, u.host, u.port, u.pathname, u.search, u.hash].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== set-hostname-b-14
+var f = function () { try { var u = new URL("https://a.com:80/"); u.hostname = "c.com"; return [u.href, u.host, u.port, u.pathname, u.search, u.hash].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== set-hostname-b-15
+var f = function () { try { var u = new URL("https://a.com:80/"); u.hostname = "c.com:5"; return [u.href, u.host, u.port, u.pathname, u.search, u.hash].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== set-hostname-b-16
+var f = function () { try { var u = new URL("https://a.com:80/"); u.hostname = "C.COM"; return [u.href, u.host, u.port, u.pathname, u.search, u.hash].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== set-hostname-b-17
+var f = function () { try { var u = new URL("https://a.com:80/"); u.hostname = ""; return [u.href, u.host, u.port, u.pathname, u.search, u.hash].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== set-port-b-18
+var f = function () { try { var u = new URL("https://a.com:80/"); u.port = "99"; return [u.href, u.host, u.port, u.pathname, u.search, u.hash].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== set-port-b-19
+var f = function () { try { var u = new URL("https://a.com:80/"); u.port = ""; return [u.href, u.host, u.port, u.pathname, u.search, u.hash].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== set-port-b-20
+var f = function () { try { var u = new URL("https://a.com:80/"); u.port = "99x"; return [u.href, u.host, u.port, u.pathname, u.search, u.hash].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== set-port-b-21
+var f = function () { try { var u = new URL("https://a.com:80/"); u.port = "x"; return [u.href, u.host, u.port, u.pathname, u.search, u.hash].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== set-port-b-22
+var f = function () { try { var u = new URL("https://a.com:80/"); u.port = "65536"; return [u.href, u.host, u.port, u.pathname, u.search, u.hash].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== set-port-b-23
+var f = function () { try { var u = new URL("https://a.com:80/"); u.port = "80"; return [u.href, u.host, u.port, u.pathname, u.search, u.hash].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== set-pathname-b-24
+var f = function () { try { var u = new URL("https://a.com:80/"); u.pathname = "/a b/../c"; return [u.href, u.host, u.port, u.pathname, u.search, u.hash].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== set-pathname-b-25
+var f = function () { try { var u = new URL("https://a.com:80/"); u.pathname = "x"; return [u.href, u.host, u.port, u.pathname, u.search, u.hash].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== set-pathname-b-26
+var f = function () { try { var u = new URL("https://a.com:80/"); u.pathname = "/a?b#c"; return [u.href, u.host, u.port, u.pathname, u.search, u.hash].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== set-pathname-b-27
+var f = function () { try { var u = new URL("https://a.com:80/"); u.pathname = ""; return [u.href, u.host, u.port, u.pathname, u.search, u.hash].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== set-pathname-b-28
+var f = function () { try { var u = new URL("https://a.com:80/"); u.pathname = "//x"; return [u.href, u.host, u.port, u.pathname, u.search, u.hash].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== set-search-b-29
+var f = function () { try { var u = new URL("https://a.com:80/"); u.search = "?a=b c"; return [u.href, u.host, u.port, u.pathname, u.search, u.hash].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== set-search-b-30
+var f = function () { try { var u = new URL("https://a.com:80/"); u.search = "a=b#c"; return [u.href, u.host, u.port, u.pathname, u.search, u.hash].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== set-search-b-31
+var f = function () { try { var u = new URL("https://a.com:80/"); u.search = ""; return [u.href, u.host, u.port, u.pathname, u.search, u.hash].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== set-search-b-32
+var f = function () { try { var u = new URL("https://a.com:80/"); u.search = "?"; return [u.href, u.host, u.port, u.pathname, u.search, u.hash].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== set-search-b-33
+var f = function () { try { var u = new URL("https://a.com:80/"); u.search = "?%zz'"; return [u.href, u.host, u.port, u.pathname, u.search, u.hash].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== set-hash-b-34
+var f = function () { try { var u = new URL("https://a.com:80/"); u.hash = "#a b"; return [u.href, u.host, u.port, u.pathname, u.search, u.hash].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== set-hash-b-35
+var f = function () { try { var u = new URL("https://a.com:80/"); u.hash = "a"; return [u.href, u.host, u.port, u.pathname, u.search, u.hash].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== set-hash-b-36
+var f = function () { try { var u = new URL("https://a.com:80/"); u.hash = ""; return [u.href, u.host, u.port, u.pathname, u.search, u.hash].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== set-hash-b-37
+var f = function () { try { var u = new URL("https://a.com:80/"); u.hash = "#"; return [u.href, u.host, u.port, u.pathname, u.search, u.hash].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== set-hash-b-38
+var f = function () { try { var u = new URL("https://a.com:80/"); u.hash = "#{`x`}"; return [u.href, u.host, u.port, u.pathname, u.search, u.hash].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== set-href-c-0
+var f = function () { try { var u = new URL("http://a.com:8080/p"); u.href = "http://b.com/x?y#z"; return [u.href, u.host, u.port, u.pathname, u.search, u.hash].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== set-href-c-1
+var f = function () { try { var u = new URL("http://a.com:8080/p"); u.href = "nonsense"; return [u.href, u.host, u.port, u.pathname, u.search, u.hash].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== set-href-c-2
+var f = function () { try { var u = new URL("http://a.com:8080/p"); u.href = "mailto:x"; return [u.href, u.host, u.port, u.pathname, u.search, u.hash].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== set-protocol-c-3
+var f = function () { try { var u = new URL("http://a.com:8080/p"); u.protocol = "https"; return [u.href, u.host, u.port, u.pathname, u.search, u.hash].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== set-protocol-c-4
+var f = function () { try { var u = new URL("http://a.com:8080/p"); u.protocol = "https:"; return [u.href, u.host, u.port, u.pathname, u.search, u.hash].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== set-protocol-c-5
+var f = function () { try { var u = new URL("http://a.com:8080/p"); u.protocol = "ftp"; return [u.href, u.host, u.port, u.pathname, u.search, u.hash].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== set-protocol-c-6
+var f = function () { try { var u = new URL("http://a.com:8080/p"); u.protocol = "mailto"; return [u.href, u.host, u.port, u.pathname, u.search, u.hash].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== set-protocol-c-7
+var f = function () { try { var u = new URL("http://a.com:8080/p"); u.protocol = "HTTP:x"; return [u.href, u.host, u.port, u.pathname, u.search, u.hash].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== set-host-c-8
+var f = function () { try { var u = new URL("http://a.com:8080/p"); u.host = "b.com:99"; return [u.href, u.host, u.port, u.pathname, u.search, u.hash].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== set-host-c-9
+var f = function () { try { var u = new URL("http://a.com:8080/p"); u.host = "b.com"; return [u.href, u.host, u.port, u.pathname, u.search, u.hash].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== set-host-c-10
+var f = function () { try { var u = new URL("http://a.com:8080/p"); u.host = "[::1]:7"; return [u.href, u.host, u.port, u.pathname, u.search, u.hash].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== set-host-c-11
+var f = function () { try { var u = new URL("http://a.com:8080/p"); u.host = "b.com:"; return [u.href, u.host, u.port, u.pathname, u.search, u.hash].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== set-host-c-12
+var f = function () { try { var u = new URL("http://a.com:8080/p"); u.host = "b.com:x"; return [u.href, u.host, u.port, u.pathname, u.search, u.hash].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== set-host-c-13
+var f = function () { try { var u = new URL("http://a.com:8080/p"); u.host = "bad host"; return [u.href, u.host, u.port, u.pathname, u.search, u.hash].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== set-hostname-c-14
+var f = function () { try { var u = new URL("http://a.com:8080/p"); u.hostname = "c.com"; return [u.href, u.host, u.port, u.pathname, u.search, u.hash].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== set-hostname-c-15
+var f = function () { try { var u = new URL("http://a.com:8080/p"); u.hostname = "c.com:5"; return [u.href, u.host, u.port, u.pathname, u.search, u.hash].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== set-hostname-c-16
+var f = function () { try { var u = new URL("http://a.com:8080/p"); u.hostname = "C.COM"; return [u.href, u.host, u.port, u.pathname, u.search, u.hash].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== set-hostname-c-17
+var f = function () { try { var u = new URL("http://a.com:8080/p"); u.hostname = ""; return [u.href, u.host, u.port, u.pathname, u.search, u.hash].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== set-port-c-18
+var f = function () { try { var u = new URL("http://a.com:8080/p"); u.port = "99"; return [u.href, u.host, u.port, u.pathname, u.search, u.hash].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== set-port-c-19
+var f = function () { try { var u = new URL("http://a.com:8080/p"); u.port = ""; return [u.href, u.host, u.port, u.pathname, u.search, u.hash].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== set-port-c-20
+var f = function () { try { var u = new URL("http://a.com:8080/p"); u.port = "99x"; return [u.href, u.host, u.port, u.pathname, u.search, u.hash].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== set-port-c-21
+var f = function () { try { var u = new URL("http://a.com:8080/p"); u.port = "x"; return [u.href, u.host, u.port, u.pathname, u.search, u.hash].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== set-port-c-22
+var f = function () { try { var u = new URL("http://a.com:8080/p"); u.port = "65536"; return [u.href, u.host, u.port, u.pathname, u.search, u.hash].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== set-port-c-23
+var f = function () { try { var u = new URL("http://a.com:8080/p"); u.port = "80"; return [u.href, u.host, u.port, u.pathname, u.search, u.hash].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== set-pathname-c-24
+var f = function () { try { var u = new URL("http://a.com:8080/p"); u.pathname = "/a b/../c"; return [u.href, u.host, u.port, u.pathname, u.search, u.hash].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== set-pathname-c-25
+var f = function () { try { var u = new URL("http://a.com:8080/p"); u.pathname = "x"; return [u.href, u.host, u.port, u.pathname, u.search, u.hash].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== set-pathname-c-26
+var f = function () { try { var u = new URL("http://a.com:8080/p"); u.pathname = "/a?b#c"; return [u.href, u.host, u.port, u.pathname, u.search, u.hash].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== set-pathname-c-27
+var f = function () { try { var u = new URL("http://a.com:8080/p"); u.pathname = ""; return [u.href, u.host, u.port, u.pathname, u.search, u.hash].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== set-pathname-c-28
+var f = function () { try { var u = new URL("http://a.com:8080/p"); u.pathname = "//x"; return [u.href, u.host, u.port, u.pathname, u.search, u.hash].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== set-search-c-29
+var f = function () { try { var u = new URL("http://a.com:8080/p"); u.search = "?a=b c"; return [u.href, u.host, u.port, u.pathname, u.search, u.hash].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== set-search-c-30
+var f = function () { try { var u = new URL("http://a.com:8080/p"); u.search = "a=b#c"; return [u.href, u.host, u.port, u.pathname, u.search, u.hash].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== set-search-c-31
+var f = function () { try { var u = new URL("http://a.com:8080/p"); u.search = ""; return [u.href, u.host, u.port, u.pathname, u.search, u.hash].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== set-search-c-32
+var f = function () { try { var u = new URL("http://a.com:8080/p"); u.search = "?"; return [u.href, u.host, u.port, u.pathname, u.search, u.hash].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== set-search-c-33
+var f = function () { try { var u = new URL("http://a.com:8080/p"); u.search = "?%zz'"; return [u.href, u.host, u.port, u.pathname, u.search, u.hash].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== set-hash-c-34
+var f = function () { try { var u = new URL("http://a.com:8080/p"); u.hash = "#a b"; return [u.href, u.host, u.port, u.pathname, u.search, u.hash].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== set-hash-c-35
+var f = function () { try { var u = new URL("http://a.com:8080/p"); u.hash = "a"; return [u.href, u.host, u.port, u.pathname, u.search, u.hash].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== set-hash-c-36
+var f = function () { try { var u = new URL("http://a.com:8080/p"); u.hash = ""; return [u.href, u.host, u.port, u.pathname, u.search, u.hash].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== set-hash-c-37
+var f = function () { try { var u = new URL("http://a.com:8080/p"); u.hash = "#"; return [u.href, u.host, u.port, u.pathname, u.search, u.hash].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== set-hash-c-38
+var f = function () { try { var u = new URL("http://a.com:8080/p"); u.hash = "#{`x`}"; return [u.href, u.host, u.port, u.pathname, u.search, u.hash].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== sp-parse-000
+var f = function () { var p = new URLSearchParams(""); var o = []; p.forEach(function (v, k) { o.push(k + "=" + v); }); return [p.toString(), o.join(";"), p.get("a"), p.getAll("a").join(","), p.has("b"), p.size].join("|"); };
+f
+=== sp-parse-001
+var f = function () { var p = new URLSearchParams("?"); var o = []; p.forEach(function (v, k) { o.push(k + "=" + v); }); return [p.toString(), o.join(";"), p.get("a"), p.getAll("a").join(","), p.has("b"), p.size].join("|"); };
+f
+=== sp-parse-002
+var f = function () { var p = new URLSearchParams("a=1"); var o = []; p.forEach(function (v, k) { o.push(k + "=" + v); }); return [p.toString(), o.join(";"), p.get("a"), p.getAll("a").join(","), p.has("b"), p.size].join("|"); };
+f
+=== sp-parse-003
+var f = function () { var p = new URLSearchParams("?a=1&b=2&a=3"); var o = []; p.forEach(function (v, k) { o.push(k + "=" + v); }); return [p.toString(), o.join(";"), p.get("a"), p.getAll("a").join(","), p.has("b"), p.size].join("|"); };
+f
+=== sp-parse-004
+var f = function () { var p = new URLSearchParams("a=1&&b"); var o = []; p.forEach(function (v, k) { o.push(k + "=" + v); }); return [p.toString(), o.join(";"), p.get("a"), p.getAll("a").join(","), p.has("b"), p.size].join("|"); };
+f
+=== sp-parse-005
+var f = function () { var p = new URLSearchParams("a&b="); var o = []; p.forEach(function (v, k) { o.push(k + "=" + v); }); return [p.toString(), o.join(";"), p.get("a"), p.getAll("a").join(","), p.has("b"), p.size].join("|"); };
+f
+=== sp-parse-006
+var f = function () { var p = new URLSearchParams("=x&=y"); var o = []; p.forEach(function (v, k) { o.push(k + "=" + v); }); return [p.toString(), o.join(";"), p.get("a"), p.getAll("a").join(","), p.has("b"), p.size].join("|"); };
+f
+=== sp-parse-007
+var f = function () { var p = new URLSearchParams("a=%41%zz&b=+&c=%2B"); var o = []; p.forEach(function (v, k) { o.push(k + "=" + v); }); return [p.toString(), o.join(";"), p.get("a"), p.getAll("a").join(","), p.has("b"), p.size].join("|"); };
+f
+=== sp-parse-008
+var f = function () { var p = new URLSearchParams("a=\u00fc&b=%C3%BC"); var o = []; p.forEach(function (v, k) { o.push(k + "=" + v); }); return [p.toString(), o.join(";"), p.get("a"), p.getAll("a").join(","), p.has("b"), p.size].join("|"); };
+f
+=== sp-parse-009
+var f = function () { var p = new URLSearchParams("%ff=%fe"); var o = []; p.forEach(function (v, k) { o.push(k + "=" + v); }); return [p.toString(), o.join(";"), p.get("a"), p.getAll("a").join(","), p.has("b"), p.size].join("|"); };
+f
+=== sp-parse-010
+var f = function () { var p = new URLSearchParams("a=1#frag"); var o = []; p.forEach(function (v, k) { o.push(k + "=" + v); }); return [p.toString(), o.join(";"), p.get("a"), p.getAll("a").join(","), p.has("b"), p.size].join("|"); };
+f
+=== sp-parse-011
+var f = function () { var p = new URLSearchParams("  a=b"); var o = []; p.forEach(function (v, k) { o.push(k + "=" + v); }); return [p.toString(), o.join(";"), p.get("a"), p.getAll("a").join(","), p.has("b"), p.size].join("|"); };
+f
+=== sp-parse-012
+var f = function () { var p = new URLSearchParams("a=b=c&d"); var o = []; p.forEach(function (v, k) { o.push(k + "=" + v); }); return [p.toString(), o.join(";"), p.get("a"), p.getAll("a").join(","), p.has("b"), p.size].join("|"); };
+f
+=== sp-parse-013
+var f = function () { var p = new URLSearchParams("a%20b=c+d"); var o = []; p.forEach(function (v, k) { o.push(k + "=" + v); }); return [p.toString(), o.join(";"), p.get("a"), p.getAll("a").join(","), p.has("b"), p.size].join("|"); };
+f
+=== sp-op-000-0
+var f = function () { try { var p = new URLSearchParams("a=1&b=2&a=3"); p.append("x","1"); p.append("x","2"); p.append("y z","ü&="); return [p.toString(), p.size, p.has("a"), p.has("a","3")].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== sp-op-000-1
+var f = function () { try { var p = new URLSearchParams(""); p.append("x","1"); p.append("x","2"); p.append("y z","ü&="); return [p.toString(), p.size, p.has("a"), p.has("a","3")].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== sp-op-000-2
+var f = function () { try { var p = new URLSearchParams("?z=1"); p.append("x","1"); p.append("x","2"); p.append("y z","ü&="); return [p.toString(), p.size, p.has("a"), p.has("a","3")].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== sp-op-001-0
+var f = function () { try { var p = new URLSearchParams("a=1&b=2&a=3"); p.set("a","9"); return [p.toString(), p.size, p.has("a"), p.has("a","3")].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== sp-op-001-1
+var f = function () { try { var p = new URLSearchParams(""); p.set("a","9"); return [p.toString(), p.size, p.has("a"), p.has("a","3")].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== sp-op-001-2
+var f = function () { try { var p = new URLSearchParams("?z=1"); p.set("a","9"); return [p.toString(), p.size, p.has("a"), p.has("a","3")].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== sp-op-002-0
+var f = function () { try { var p = new URLSearchParams("a=1&b=2&a=3"); p.set("n","new"); return [p.toString(), p.size, p.has("a"), p.has("a","3")].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== sp-op-002-1
+var f = function () { try { var p = new URLSearchParams(""); p.set("n","new"); return [p.toString(), p.size, p.has("a"), p.has("a","3")].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== sp-op-002-2
+var f = function () { try { var p = new URLSearchParams("?z=1"); p.set("n","new"); return [p.toString(), p.size, p.has("a"), p.has("a","3")].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== sp-op-003-0
+var f = function () { try { var p = new URLSearchParams("a=1&b=2&a=3"); p.delete("a"); return [p.toString(), p.size, p.has("a"), p.has("a","3")].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== sp-op-003-1
+var f = function () { try { var p = new URLSearchParams(""); p.delete("a"); return [p.toString(), p.size, p.has("a"), p.has("a","3")].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== sp-op-003-2
+var f = function () { try { var p = new URLSearchParams("?z=1"); p.delete("a"); return [p.toString(), p.size, p.has("a"), p.has("a","3")].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== sp-op-004-0
+var f = function () { try { var p = new URLSearchParams("a=1&b=2&a=3"); p.delete("a","3"); return [p.toString(), p.size, p.has("a"), p.has("a","3")].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== sp-op-004-1
+var f = function () { try { var p = new URLSearchParams(""); p.delete("a","3"); return [p.toString(), p.size, p.has("a"), p.has("a","3")].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== sp-op-004-2
+var f = function () { try { var p = new URLSearchParams("?z=1"); p.delete("a","3"); return [p.toString(), p.size, p.has("a"), p.has("a","3")].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== sp-op-005-0
+var f = function () { try { var p = new URLSearchParams("a=1&b=2&a=3"); p.delete("a","zz"); return [p.toString(), p.size, p.has("a"), p.has("a","3")].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== sp-op-005-1
+var f = function () { try { var p = new URLSearchParams(""); p.delete("a","zz"); return [p.toString(), p.size, p.has("a"), p.has("a","3")].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== sp-op-005-2
+var f = function () { try { var p = new URLSearchParams("?z=1"); p.delete("a","zz"); return [p.toString(), p.size, p.has("a"), p.has("a","3")].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== sp-op-006-0
+var f = function () { try { var p = new URLSearchParams("a=1&b=2&a=3"); p.sort(); return [p.toString(), p.size, p.has("a"), p.has("a","3")].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== sp-op-006-1
+var f = function () { try { var p = new URLSearchParams(""); p.sort(); return [p.toString(), p.size, p.has("a"), p.has("a","3")].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== sp-op-006-2
+var f = function () { try { var p = new URLSearchParams("?z=1"); p.sort(); return [p.toString(), p.size, p.has("a"), p.has("a","3")].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== sp-op-007-0
+var f = function () { try { var p = new URLSearchParams("a=1&b=2&a=3"); p.append("b","1"); p.append("a","0"); p.append("ä","1"); p.append("A","1"); p.sort(); return [p.toString(), p.size, p.has("a"), p.has("a","3")].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== sp-op-007-1
+var f = function () { try { var p = new URLSearchParams(""); p.append("b","1"); p.append("a","0"); p.append("ä","1"); p.append("A","1"); p.sort(); return [p.toString(), p.size, p.has("a"), p.has("a","3")].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== sp-op-007-2
+var f = function () { try { var p = new URLSearchParams("?z=1"); p.append("b","1"); p.append("a","0"); p.append("ä","1"); p.append("A","1"); p.sort(); return [p.toString(), p.size, p.has("a"), p.has("a","3")].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== sp-op-008-0
+var f = function () { try { var p = new URLSearchParams("a=1&b=2&a=3"); p.append("\ud800","x"); p.append("k","\udc00"); return [p.toString(), p.size, p.has("a"), p.has("a","3")].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== sp-op-008-1
+var f = function () { try { var p = new URLSearchParams(""); p.append("\ud800","x"); p.append("k","\udc00"); return [p.toString(), p.size, p.has("a"), p.has("a","3")].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== sp-op-008-2
+var f = function () { try { var p = new URLSearchParams("?z=1"); p.append("\ud800","x"); p.append("k","\udc00"); return [p.toString(), p.size, p.has("a"), p.has("a","3")].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== sp-op-009-0
+var f = function () { try { var p = new URLSearchParams("a=1&b=2&a=3"); p.delete("a"); p.delete("b"); return [p.toString(), p.size, p.has("a"), p.has("a","3")].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== sp-op-009-1
+var f = function () { try { var p = new URLSearchParams(""); p.delete("a"); p.delete("b"); return [p.toString(), p.size, p.has("a"), p.has("a","3")].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== sp-op-009-2
+var f = function () { try { var p = new URLSearchParams("?z=1"); p.delete("a"); p.delete("b"); return [p.toString(), p.size, p.has("a"), p.has("a","3")].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== sp-op-010-0
+var f = function () { try { var p = new URLSearchParams("a=1&b=2&a=3"); p.append("*-._~!()'","*-._~!()'"); return [p.toString(), p.size, p.has("a"), p.has("a","3")].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== sp-op-010-1
+var f = function () { try { var p = new URLSearchParams(""); p.append("*-._~!()'","*-._~!()'"); return [p.toString(), p.size, p.has("a"), p.has("a","3")].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== sp-op-010-2
+var f = function () { try { var p = new URLSearchParams("?z=1"); p.append("*-._~!()'","*-._~!()'"); return [p.toString(), p.size, p.has("a"), p.has("a","3")].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== sp-op-011-0
+var f = function () { try { var p = new URLSearchParams("a=1&b=2&a=3"); p.append(1,2); p.append(null,undefined); p.append({},[1,2]); return [p.toString(), p.size, p.has("a"), p.has("a","3")].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== sp-op-011-1
+var f = function () { try { var p = new URLSearchParams(""); p.append(1,2); p.append(null,undefined); p.append({},[1,2]); return [p.toString(), p.size, p.has("a"), p.has("a","3")].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== sp-op-011-2
+var f = function () { try { var p = new URLSearchParams("?z=1"); p.append(1,2); p.append(null,undefined); p.append({},[1,2]); return [p.toString(), p.size, p.has("a"), p.has("a","3")].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== sp-op-012-0
+var f = function () { try { var p = new URLSearchParams("a=1&b=2&a=3"); p.set("a","1"); p.set("a","2"); return [p.toString(), p.size, p.has("a"), p.has("a","3")].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== sp-op-012-1
+var f = function () { try { var p = new URLSearchParams(""); p.set("a","1"); p.set("a","2"); return [p.toString(), p.size, p.has("a"), p.has("a","3")].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== sp-op-012-2
+var f = function () { try { var p = new URLSearchParams("?z=1"); p.set("a","1"); p.set("a","2"); return [p.toString(), p.size, p.has("a"), p.has("a","3")].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== sp-op-013-0
+var f = function () { try { var p = new URLSearchParams("a=1&b=2&a=3"); p.append("a","1"); p.delete("a"); p.append("a","5"); return [p.toString(), p.size, p.has("a"), p.has("a","3")].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== sp-op-013-1
+var f = function () { try { var p = new URLSearchParams(""); p.append("a","1"); p.delete("a"); p.append("a","5"); return [p.toString(), p.size, p.has("a"), p.has("a","3")].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== sp-op-013-2
+var f = function () { try { var p = new URLSearchParams("?z=1"); p.append("a","1"); p.delete("a"); p.append("a","5"); return [p.toString(), p.size, p.has("a"), p.has("a","3")].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== sp-live-000-0
+var f = function () { try { var u = new URL("http://a.com/p?a=1&b=2#f"); var r = (u.searchParams.append("n","v")); return [r, u.href, u.search, u.searchParams.toString()].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== sp-live-000-1
+var f = function () { try { var u = new URL("http://a.com/p"); var r = (u.searchParams.append("n","v")); return [r, u.href, u.search, u.searchParams.toString()].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== sp-live-000-2
+var f = function () { try { var u = new URL("http://a.com/p?"); var r = (u.searchParams.append("n","v")); return [r, u.href, u.search, u.searchParams.toString()].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== sp-live-001-0
+var f = function () { try { var u = new URL("http://a.com/p?a=1&b=2#f"); var r = (u.searchParams.set("a","z z")); return [r, u.href, u.search, u.searchParams.toString()].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== sp-live-001-1
+var f = function () { try { var u = new URL("http://a.com/p"); var r = (u.searchParams.set("a","z z")); return [r, u.href, u.search, u.searchParams.toString()].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== sp-live-001-2
+var f = function () { try { var u = new URL("http://a.com/p?"); var r = (u.searchParams.set("a","z z")); return [r, u.href, u.search, u.searchParams.toString()].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== sp-live-002-0
+var f = function () { try { var u = new URL("http://a.com/p?a=1&b=2#f"); var r = (u.searchParams.delete("a"); u.searchParams.delete("b")); return [r, u.href, u.search, u.searchParams.toString()].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== sp-live-002-1
+var f = function () { try { var u = new URL("http://a.com/p"); var r = (u.searchParams.delete("a"); u.searchParams.delete("b")); return [r, u.href, u.search, u.searchParams.toString()].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== sp-live-002-2
+var f = function () { try { var u = new URL("http://a.com/p?"); var r = (u.searchParams.delete("a"); u.searchParams.delete("b")); return [r, u.href, u.search, u.searchParams.toString()].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== sp-live-003-0
+var f = function () { try { var u = new URL("http://a.com/p?a=1&b=2#f"); var r = (u.searchParams.sort()); return [r, u.href, u.search, u.searchParams.toString()].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== sp-live-003-1
+var f = function () { try { var u = new URL("http://a.com/p"); var r = (u.searchParams.sort()); return [r, u.href, u.search, u.searchParams.toString()].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== sp-live-003-2
+var f = function () { try { var u = new URL("http://a.com/p?"); var r = (u.searchParams.sort()); return [r, u.href, u.search, u.searchParams.toString()].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== sp-live-004-0
+var f = function () { try { var u = new URL("http://a.com/p?a=1&b=2#f"); var r = (u.search = "?q=1&q=2"; u.searchParams.append("r","3")); return [r, u.href, u.search, u.searchParams.toString()].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== sp-live-004-1
+var f = function () { try { var u = new URL("http://a.com/p"); var r = (u.search = "?q=1&q=2"; u.searchParams.append("r","3")); return [r, u.href, u.search, u.searchParams.toString()].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== sp-live-004-2
+var f = function () { try { var u = new URL("http://a.com/p?"); var r = (u.search = "?q=1&q=2"; u.searchParams.append("r","3")); return [r, u.href, u.search, u.searchParams.toString()].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== sp-live-005-0
+var f = function () { try { var u = new URL("http://a.com/p?a=1&b=2#f"); var r = (u.href = "http://b.com/?m=1"); return [r, u.href, u.search, u.searchParams.toString()].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== sp-live-005-1
+var f = function () { try { var u = new URL("http://a.com/p"); var r = (u.href = "http://b.com/?m=1"); return [r, u.href, u.search, u.searchParams.toString()].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== sp-live-005-2
+var f = function () { try { var u = new URL("http://a.com/p?"); var r = (u.href = "http://b.com/?m=1"); return [r, u.href, u.search, u.searchParams.toString()].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== sp-live-006-0
+var f = function () { try { var u = new URL("http://a.com/p?a=1&b=2#f"); var r = (u.searchParams.append("a","1"); u.search = ""); return [r, u.href, u.search, u.searchParams.toString()].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== sp-live-006-1
+var f = function () { try { var u = new URL("http://a.com/p"); var r = (u.searchParams.append("a","1"); u.search = ""); return [r, u.href, u.search, u.searchParams.toString()].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== sp-live-006-2
+var f = function () { try { var u = new URL("http://a.com/p?"); var r = (u.searchParams.append("a","1"); u.search = ""); return [r, u.href, u.search, u.searchParams.toString()].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== sp-live-007-0
+var f = function () { try { var u = new URL("http://a.com/p?a=1&b=2#f"); var r = (u.hash = "#h"; u.searchParams.append("k","v")); return [r, u.href, u.search, u.searchParams.toString()].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== sp-live-007-1
+var f = function () { try { var u = new URL("http://a.com/p"); var r = (u.hash = "#h"; u.searchParams.append("k","v")); return [r, u.href, u.search, u.searchParams.toString()].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== sp-live-007-2
+var f = function () { try { var u = new URL("http://a.com/p?"); var r = (u.hash = "#h"; u.searchParams.append("k","v")); return [r, u.href, u.search, u.searchParams.toString()].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== sp-live-008-0
+var f = function () { try { var u = new URL("http://a.com/p?a=1&b=2#f"); var r = (var p = u.searchParams; p.append("a","2"); u.search = "?c=d"; p.append("e","f")); return [r, u.href, u.search, u.searchParams.toString()].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== sp-live-008-1
+var f = function () { try { var u = new URL("http://a.com/p"); var r = (var p = u.searchParams; p.append("a","2"); u.search = "?c=d"; p.append("e","f")); return [r, u.href, u.search, u.searchParams.toString()].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== sp-live-008-2
+var f = function () { try { var u = new URL("http://a.com/p?"); var r = (var p = u.searchParams; p.append("a","2"); u.search = "?c=d"; p.append("e","f")); return [r, u.href, u.search, u.searchParams.toString()].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== sp-live-009-0
+var f = function () { try { var u = new URL("http://a.com/p?a=1&b=2#f"); var r = (u.searchParams === u.searchParams); return [r, u.href, u.search, u.searchParams.toString()].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== sp-live-009-1
+var f = function () { try { var u = new URL("http://a.com/p"); var r = (u.searchParams === u.searchParams); return [r, u.href, u.search, u.searchParams.toString()].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== sp-live-009-2
+var f = function () { try { var u = new URL("http://a.com/p?"); var r = (u.searchParams === u.searchParams); return [r, u.href, u.search, u.searchParams.toString()].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== sp-live-010-0
+var f = function () { try { var u = new URL("http://a.com/p?a=1&b=2#f"); var r = (u.search = "?a b"; u.searchParams.append("x","y z")); return [r, u.href, u.search, u.searchParams.toString()].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== sp-live-010-1
+var f = function () { try { var u = new URL("http://a.com/p"); var r = (u.search = "?a b"; u.searchParams.append("x","y z")); return [r, u.href, u.search, u.searchParams.toString()].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== sp-live-010-2
+var f = function () { try { var u = new URL("http://a.com/p?"); var r = (u.search = "?a b"; u.searchParams.append("x","y z")); return [r, u.href, u.search, u.searchParams.toString()].join("|"); } catch (e) { return "throw:" + e.name; } };
+f
+=== sp-init-000
+var f = function () { try { var p = new URLSearchParams([["a","1"],["b","2"],["a","3"]]); return p.toString(); } catch (e) { return "throw:" + e.name; } };
+f
+=== sp-init-001
+var f = function () { try { var p = new URLSearchParams({"a":"1","b":"2"}); return p.toString(); } catch (e) { return "throw:" + e.name; } };
+f
+=== sp-init-002
+var f = function () { try { var p = new URLSearchParams({"b":"1","a":"2","1":"x"}); return p.toString(); } catch (e) { return "throw:" + e.name; } };
+f
+=== sp-init-003
+var f = function () { try { var p = new URLSearchParams([]); return p.toString(); } catch (e) { return "throw:" + e.name; } };
+f
+=== sp-init-004
+var f = function () { try { var p = new URLSearchParams({}); return p.toString(); } catch (e) { return "throw:" + e.name; } };
+f
+=== sp-init-005
+var f = function () { try { var p = new URLSearchParams([["a"]]); return p.toString(); } catch (e) { return "throw:" + e.name; } };
+f
+=== sp-init-006
+var f = function () { try { var p = new URLSearchParams([["a","b","c"]]); return p.toString(); } catch (e) { return "throw:" + e.name; } };
+f
+=== sp-init-007
+var f = function () { try { var p = new URLSearchParams(["ab"]); return p.toString(); } catch (e) { return "throw:" + e.name; } };
+f
+=== sp-init-008
+var f = function () { try { var p = new URLSearchParams([1]); return p.toString(); } catch (e) { return "throw:" + e.name; } };
+f
+=== sp-init-010
+var f = function () { try { var p = new URLSearchParams(undefined); return p.toString(); } catch (e) { return "throw:" + e.name; } };
+f
+=== sp-init-011
+var f = function () { try { var p = new URLSearchParams("?x=1"); return p.toString(); } catch (e) { return "throw:" + e.name; } };
+f
+=== sp-init-012
+var f = function () { try { var p = new URLSearchParams(42); return p.toString(); } catch (e) { return "throw:" + e.name; } };
+f
+=== sp-init-013
+var f = function () { try { var p = new URLSearchParams(true); return p.toString(); } catch (e) { return "throw:" + e.name; } };
+f
+=== sp-init-014
+var f = function () { try { var p = new URLSearchParams(new URLSearchParams("a=1&b=2")); return p.toString(); } catch (e) { return "throw:" + e.name; } };
+f
+=== sp-init-015
+var f = function () { try { var p = new URLSearchParams(new URL("http://a.com/?q=1").searchParams); return p.toString(); } catch (e) { return "throw:" + e.name; } };
+f
+=== sp-init-016
+var f = function () { try { var p = new URLSearchParams([["a",1],["b",null]]); return p.toString(); } catch (e) { return "throw:" + e.name; } };
+f
+=== sp-init-017
+var f = function () { try { var p = new URLSearchParams({"a":{"toString":function(){return "ts";}}}); return p.toString(); } catch (e) { return "throw:" + e.name; } };
+f
+=== sp-iter-entries
+var f = function () { var p = new URLSearchParams("a=1&b=2&a=3"); var it = p.entries(); var o = []; for (var r = it.next(); !r.done; r = it.next()) o.push(r.value.join("=")); return o.join(";") + "|" + it.next().done; };
+f
+=== sp-iter-keys-values
+var f = function () { var p = new URLSearchParams("a=1&b=2"); var k = p.keys(), v = p.values(); return [k.next().value, k.next().value, k.next().done, v.next().value, v.next().value, v.next().done].join(","); };
+f
+=== sp-iter-live
+var f = function () { var p = new URLSearchParams("a=1"); var it = p.entries(); it.next(); p.append("b","2"); var r = it.next(); return r.done + "|" + (r.value && r.value.join("=")); };
+f
+=== sp-iter-done-sticky
+var f = function () { var p = new URLSearchParams("a=1"); var it = p.keys(); it.next(); it.next(); p.append("b","2"); return String(it.next().done); };
+f
+=== sp-foreach-mutate
+var f = function () { var p = new URLSearchParams("a=1&b=2"); var seen = []; p.forEach(function (v, k) { seen.push(k); if (k === "a") p.append("c", "3"); }); return seen.join(",") + "|" + p; };
+f
+=== sp-foreach-throw
+var f = function () { var p = new URLSearchParams("a=1&b=2"); var n = 0; try { p.forEach(function () { n++; throw new RangeError("x"); }); } catch (e) { return e.name + n; } };
+f
+=== sp-foreach-this
+var f = function () { var p = new URLSearchParams("a=1"); var t; p.forEach(function (v, k, o) { t = [this.z, o === p].join(); }, {z: 7}); return t; };
+f
+=== sp-foreach-notfn
+var f = function () { try { new URLSearchParams("a=1").forEach(1); } catch (e) { return e.name; } };
+f
+=== sp-argcount
+var f = function () { var o = []; ["append","set"].forEach(function (m) { try { new URLSearchParams()[m]("a"); o.push("ok"); } catch (e) { o.push(e.name); } }); ["get","getAll","has","delete"].forEach(function (m) { try { new URLSearchParams()[m](); o.push("ok"); } catch (e) { o.push(e.name); } }); return o.join(); };
+f
+=== url-argcount
+var f = function () { var o = []; try { new URL(); o.push("ok"); } catch (e) { o.push(e.name); } try { URL.canParse(); o.push("ok"); } catch (e) { o.push(e.name); } return o.join(); };
+f
+=== url-canparse
+var f = function () { return [URL.canParse("http://a.com"), URL.canParse("a"), URL.canParse("a","http://b.com"), URL.canParse("a","b"), URL.canParse("")].join(); };
+f
+=== url-tostring-json
+var f = function () { var u = new URL("http://a.com/x y?z#w"); return [String(u), u.toString(), JSON.stringify(u), JSON.stringify({u: u}), u + ""].join("|"); };
+f
+=== url-new-required
+var f = function () { try { URL("http://a.com"); } catch (e) { return e.name; } };
+f
+=== sp-new-required
+var f = function () { try { URLSearchParams(""); } catch (e) { return e.name; } };
+f
+=== url-coerce-order
+var f = function () { var log = []; try { new URL({toString: function () { log.push("u"); return "x"; }}, {toString: function () { log.push("b"); return "http://a.com"; }}); } catch (e) { log.push(e.name); } return log.join(); };
+f
+=== url-coerce-order-bad-base
+var f = function () { var log = []; try { new URL({toString: function () { log.push("u"); return "http://a.com"; }}, {toString: function () { log.push("b"); return "nonsense"; }}); } catch (e) { log.push(e.name); } return log.join(); };
+f
+=== url-illegal-this
+var f = function () { var o = []; var d = Object.getOwnPropertyDescriptor(URL.prototype, "href"); try { d.get.call({}); } catch (e) { o.push(e.name); } try { URLSearchParams.prototype.get.call({}, "a"); } catch (e) { o.push(e.name); } return o.join(); };
+f
+=== url-readonly
+var f = function () { var u = new URL("http://a.com/p?a=1"); u.origin = "x"; u.searchParams = 1; return [u.origin, u.searchParams.get("a")].join(); };
+f
+=== url-username
+var f = function () { var u = new URL("http://a.com/"); return [u.username === "", u.password === ""].join(); };
+f
+=== url-tostringtag
+var f = function () { return [typeof URL, typeof URLSearchParams, URL.length, URLSearchParams.length, URL.name, new URL("http://a.com") instanceof URL, new URLSearchParams() instanceof URLSearchParams].join(); };
+f

@@ -1,0 +1,792 @@
+//! Navigation and origin-scoped storage for the browser host: `URL`, `URLSearchParams`, `location`, `history`,
+//! `document.URL/baseURI`, `localStorage`, `sessionStorage`. No network, no file. Files:
+//! `browser_navigation_url.rs` (URL records over `bare_url`), `_params.rs` (JS `URL`/`URLSearchParams`), `_state.rs`
+//! (history state cloning), `_storage.rs` (the store and `Storage`), `_tests.rs`.
+//!
+//! The document URL
+//! - `Browser::new` has no URL. Until `Browser::set_document_url(url)` is called, everything that needs one
+//!   (`location.*`, `history.*`, `document.URL/baseURI`, `localStorage`, `sessionStorage`, `window.origin`) stops the
+//!   script with `Error::Unsupported("document URL is not configured ...")`. Nothing pretends to be a staging origin.
+//!   `new URL(absolute)`, `URL.canParse` and `URLSearchParams` need no document URL.
+//! - `set_document_url` starts a new document: one history entry, empty queues. The integrator calls it after a load
+//!   (and calls the fetch module's `update_fetch_base_url` with `document_url()` when `url_generation()` changed: every
+//!   URL change from script, from traversal or from a fragment navigation raises it).
+//! - `document_url()`, `base_uri()` and `resolve_url()` give the loader the URL state. `<base href>` is not read:
+//!   `baseURI` is always the document URL (a gate, not a claim).
+//!
+//! History (same-document only)
+//! - `pushState`/`replaceState` clone the state (see `_state.rs`) and parse the URL against the document URL. Order:
+//!   `title`, `url` coercion, then state cloning (a `DataCloneError` wins over a bad URL), then URL checks. A URL of
+//!   another origin (or another scheme) throws `SecurityError` and commits nothing. A history holds `max_history_entries`
+//!   entries (the oldest drops, as in a browser); pushing drops the entries after the current one.
+//! - `back`/`forward`/`go(n)` and fragment navigation are QUEUED. They run in `Browser::run_navigation_tasks`: the
+//!   URL changes then, `popstate` fires on `window` (a plain `Event` with an own `state`), and `hashchange` (own
+//!   `oldURL`/`newURL`) when only the fragment differs. A run handles the tasks queued when it started. `go(0)` is a reload.
+//!   A fragment change by `location.hash`, `location.href = "#x"` or `location.assign("#x")` updates the URL at once, makes
+//!   an entry, and queues `popstate` then `hashchange` (to verify: this order is from the HTML Standard by reading).
+//! - Anything else that changes the URL (`location.assign/replace/reload`, `location.href = other`, `location.search = x`,
+//!   `go(0)`) is a `NavigationRequest` for the loader (`take_navigation_request`). No document is loaded here. The
+//!   current URL does not change until the loader calls `set_document_url`.
+//!
+//! Gates: no `onpopstate` property handler, no `PopStateEvent`/`HashChangeEvent` classes, no `history.length` cap other
+//! than `max_history_entries`, no scroll restoration (the `scrollRestoration` value is only stored), no `location.ancestorOrigins`,
+//! no `document.referrer`/`domain`, no `storage` event. Not compared with Chrome except through Node's `URL` (see
+//! `tools/js/navigation_check.sh`): history, location and storage are checked against hand-written structural expectations.
+//!
+//! GC: URL wrappers, params wrappers and iterators are traced to each other (`trace`) and pruned when unreachable.
+//! The permanent objects (`location`, `history`, `localStorage`, `sessionStorage`, prototypes) are roots. The cloned state
+//! of an entry is native data; its materialized object is cached and rooted only while the entry lives.
+
+use crate::browser::*;
+use crate::browser_navigation_params as pr;
+use crate::browser_navigation_state::{self as st, State};
+use crate::browser_navigation_storage as sto;
+pub use crate::browser_navigation_storage::{StorageLimits, StoreError, WebStorage};
+use crate::browser_navigation_url::{self as nu, Part, Rec, UErr};
+use bare_js::eval::{Error, Interp};
+use bare_js::value::{ObjId, Value};
+use std::cell::{Cell, OnceCell, RefCell};
+use std::collections::{HashMap, VecDeque};
+use std::rc::Rc;
+
+/// Bounds of the navigation module. Each is checked before the thing grows (`Limit(Host(name))`).
+#[derive(Clone, Copy, Debug)]
+pub struct NavLimits {
+    /// Live `URL`, `URLSearchParams` and iterator wrappers together.
+    pub max_objects: usize,
+    /// Bytes of one URL or one URL string argument.
+    pub max_url_bytes: usize,
+    /// Pairs in one `URLSearchParams`.
+    pub max_params: usize,
+    /// Bytes of all live `URLSearchParams` lists (a pair costs its text plus 32).
+    pub max_param_bytes: usize,
+    /// Entries of the history (the oldest drops).
+    pub max_history_entries: usize,
+    /// Bytes of one history state, of all states, and the nesting depth and objects of one state.
+    pub max_state_bytes: usize,
+    pub max_total_state_bytes: usize,
+    pub max_state_depth: usize,
+    pub max_state_nodes: usize,
+    /// Queued traversal/fragment tasks, and queued navigation requests.
+    pub max_tasks: usize,
+    pub max_requests: usize,
+    /// UTF-16 units of one storage key or value.
+    pub max_item_units: usize,
+}
+
+impl Default for NavLimits {
+    fn default() -> Self {
+        NavLimits {
+            max_objects: 1 << 16,
+            max_url_bytes: 1 << 20,
+            max_params: 1 << 14,
+            max_param_bytes: 8 << 20,
+            max_history_entries: 50,
+            max_state_bytes: 1 << 20,
+            max_total_state_bytes: 8 << 20,
+            max_state_depth: 64,
+            max_state_nodes: 1 << 14,
+            max_tasks: 64,
+            max_requests: 64,
+            max_item_units: 1 << 20,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NavigationKind {
+    /// `location.assign(url)` or `location.href = url`.
+    Assign,
+    /// `location.replace(url)`, or an assign to the URL that is already current.
+    Replace,
+    /// `location.reload()` and `history.go(0)`: `url` is the current URL.
+    Reload,
+}
+
+/// A document load that script asked for. The loader decides what to do (this module never loads).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NavigationRequest {
+    pub kind: NavigationKind,
+    /// The absolute target URL, with its fragment.
+    pub url: String,
+    /// The document URL when the request was made.
+    pub from: String,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct NavigationStats {
+    pub history_len: usize,
+    pub history_index: usize,
+    pub pending_tasks: usize,
+    pub pending_requests: usize,
+    pub urls: usize,
+    pub params: usize,
+    pub iterators: usize,
+    pub param_bytes: usize,
+    pub state_bytes: usize,
+    pub url_generation: u64,
+}
+
+pub(crate) struct Entry {
+    pub url: Rec,
+    pub state: Option<Rc<State>>,
+    /// The object that `history.state` returned. A root while the entry lives.
+    pub cache: Option<ObjId>,
+}
+
+impl Entry {
+    fn bytes(&self) -> usize {
+        self.state.as_ref().map_or(0, |s| s.bytes)
+    }
+}
+
+pub(crate) enum Task {
+    /// `history.go(n)`, n not 0. The target is computed when the task runs.
+    Traverse(i32),
+    /// A fragment navigation that already changed the URL.
+    Fragment { old: String, new: String },
+}
+
+#[derive(Default)]
+pub(crate) struct NavState {
+    /// Empty until the document URL is configured.
+    pub entries: Vec<Entry>,
+    pub cur: usize,
+    pub generation: u64,
+    pub tasks: VecDeque<Task>,
+    pub requests: VecDeque<NavigationRequest>,
+    pub urls: HashMap<ObjId, pr::UrlObj>,
+    pub params: HashMap<ObjId, pr::ParamsObj>,
+    pub iters: HashMap<ObjId, pr::IterObj>,
+    pub param_bytes: usize,
+    pub state_bytes: usize,
+    pub store: WebStorage,
+    pub manual_scroll: bool,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct NavObjs {
+    pub url: ObjId,
+    pub params: ObjId,
+    pub iter: ObjId,
+    pub location: ObjId,
+    pub history: ObjId,
+    pub local: ObjId,
+    pub session: ObjId,
+}
+
+#[derive(Default)]
+pub(crate) struct Nav {
+    pub s: RefCell<NavState>,
+    pub p: OnceCell<NavObjs>,
+    pub lim: Cell<NavLimits>,
+}
+
+pub(crate) const NOURL: &str = "document URL is not configured (call Browser::set_document_url)";
+
+fn arg(a: &[Value], i: usize) -> Value {
+    a.get(i).copied().unwrap_or(Value::Undefined)
+}
+
+// ------------------------------------------------------------------------------------------ Host hooks
+
+pub(crate) fn roots(d: &Dom, out: &mut Vec<Value>) {
+    let n = d.nav.s.borrow();
+    out.extend(n.entries.iter().filter_map(|e| e.cache).map(Value::Object));
+}
+
+pub(crate) fn trace(d: &Dom, owner: ObjId, out: &mut Vec<Value>) {
+    let n = d.nav.s.borrow();
+    if let Some(u) = n.urls.get(&owner) {
+        out.extend(u.sp.map(Value::Object));
+    } else if let Some(p) = n.params.get(&owner) {
+        out.extend(p.url.map(Value::Object));
+    } else if let Some(i) = n.iters.get(&owner) {
+        out.push(Value::Object(i.sp));
+    }
+}
+
+pub(crate) fn prune(d: &Dom, live: &dyn Fn(ObjId) -> bool) {
+    let mut n = d.nav.s.borrow_mut();
+    let n = &mut *n;
+    n.urls.retain(|&o, _| live(o));
+    n.iters.retain(|&o, _| live(o));
+    n.params.retain(|&o, _| live(o));
+    n.param_bytes = n.params.values().map(|p| p.bytes).sum();
+}
+
+impl Dom {
+    /// An object that is not plain data: DOM wrappers, events, and this module's objects.
+    pub(crate) fn is_host_object(&self, o: ObjId) -> bool {
+        let n = self.nav.s.borrow();
+        let st = self.st.borrow();
+        st.by_obj.contains_key(&o) || st.events.contains_key(&o) || n.urls.contains_key(&o) || n.params.contains_key(&o) || n.iters.contains_key(&o) || self.nav.p.get().is_some_and(|p| [p.location, p.history, p.local, p.session].contains(&o))
+    }
+
+    fn cur_rec(&self) -> R<Rec> {
+        let n = self.nav.s.borrow();
+        match n.entries.get(n.cur) {
+            Some(e) => Ok(e.url.clone()),
+            None => Err(Error::Unsupported(unsupported(NOURL))),
+        }
+    }
+
+    fn fire_window(&self, it: &mut Interp<'_>, ty: &str, props: &[(&str, Value)]) -> R<()> {
+        let e = self.new_event(it, ty, false, false, false, None)?;
+        for &(k, v) in props {
+            let key = self.key(it, k)?;
+            it.define_data(e, key, v, false, false, true)?;
+        }
+        self.dispatch(it, Target::Window, e)?;
+        Ok(())
+    }
+
+    /// The value of `history.state` for entry `idx`.
+    fn entry_state(&self, it: &mut Interp<'_>, idx: usize) -> R<Value> {
+        let (state, cache) = {
+            let n = self.nav.s.borrow();
+            let e = &n.entries[idx];
+            (e.state.clone(), e.cache)
+        };
+        if let Some(c) = cache {
+            return Ok(Value::Object(c));
+        }
+        let Some(state) = state else { return Ok(Value::Null) };
+        let v = st::materialize(self, it, &state)?;
+        if let Value::Object(o) = v {
+            self.nav.s.borrow_mut().entries[idx].cache = Some(o);
+        }
+        Ok(v)
+    }
+
+    fn run_task(&self, it: &mut Interp<'_>, t: Task) -> R<()> {
+        match t {
+            Task::Fragment { old, new } => {
+                let (o, n) = (self.js_str(it, &old)?, self.js_str(it, &new)?);
+                self.fire_window(it, "popstate", &[("state", Value::Null)])?;
+                self.fire_window(it, "hashchange", &[("oldURL", o), ("newURL", n)])
+            }
+            Task::Traverse(delta) => {
+                let (old, new, idx) = {
+                    let mut n = self.nav.s.borrow_mut();
+                    let to = n.cur as i64 + delta as i64;
+                    if n.entries.is_empty() || to < 0 || to >= n.entries.len() as i64 {
+                        return Ok(());
+                    }
+                    let old = n.entries[n.cur].url.clone();
+                    n.cur = to as usize;
+                    let new = n.entries[n.cur].url.clone();
+                    if old.href() != new.href() {
+                        n.generation += 1;
+                    }
+                    (old, new, n.cur)
+                };
+                let state = self.entry_state(it, idx)?;
+                self.fire_window(it, "popstate", &[("state", state)])?;
+                if old.u == new.u && old.frag != new.frag {
+                    let (o, n) = (self.js_str(it, &old.href())?, self.js_str(it, &new.href())?);
+                    self.fire_window(it, "hashchange", &[("oldURL", o), ("newURL", n)])?;
+                }
+                Ok(())
+            }
+        }
+    }
+
+    /// Make `rec` the current entry (`replace`) or a new one after it. Caps were checked by the caller.
+    fn commit(&self, rec: Rec, state: Option<Rc<State>>, replace: bool) {
+        let lim = self.nav.lim.get();
+        let mut n = self.nav.s.borrow_mut();
+        let n = &mut *n;
+        let changed = n.entries[n.cur].url.href() != rec.href();
+        let new = Entry { url: rec, state, cache: None };
+        let add = new.bytes();
+        if replace {
+            let old = std::mem::replace(&mut n.entries[n.cur], new);
+            n.state_bytes -= old.bytes();
+        } else {
+            for e in n.entries.drain(n.cur + 1..) {
+                n.state_bytes -= e.bytes();
+            }
+            n.entries.push(new);
+            while n.entries.len() > lim.max_history_entries.max(1) {
+                n.state_bytes -= n.entries.remove(0).bytes();
+            }
+            n.cur = n.entries.len() - 1;
+        }
+        n.state_bytes += add;
+        if changed {
+            n.generation += 1;
+        }
+    }
+
+    /// `Location` navigation to `new` (already resolved against the document URL).
+    fn navigate(&self, it: &mut Interp<'_>, new: Rec, replace: bool) -> R<()> {
+        let lim = self.nav.lim.get();
+        let cur = self.cur_rec()?;
+        let same = new.href() == cur.href();
+        if new.u == cur.u && new.frag.is_some() {
+            if self.nav.s.borrow().tasks.len() >= lim.max_tasks {
+                return Err(self.lim("nav-tasks"));
+            }
+            it.charge(1)?;
+            let task = Task::Fragment { old: cur.href(), new: new.href() };
+            self.commit(new, None, replace || same);
+            self.nav.s.borrow_mut().tasks.push_back(task);
+            return Ok(());
+        }
+        if self.nav.s.borrow().requests.len() >= lim.max_requests {
+            return Err(self.lim("nav-requests"));
+        }
+        let kind = if replace || same { NavigationKind::Replace } else { NavigationKind::Assign };
+        self.nav.s.borrow_mut().requests.push_back(NavigationRequest { kind, url: new.href(), from: cur.href() });
+        Ok(())
+    }
+
+    fn reload_request(&self) -> R<()> {
+        let cur = self.cur_rec()?;
+        if self.nav.s.borrow().requests.len() >= self.nav.lim.get().max_requests {
+            return Err(self.lim("nav-requests"));
+        }
+        let href = cur.href();
+        self.nav.s.borrow_mut().requests.push_back(NavigationRequest { kind: NavigationKind::Reload, url: href.clone(), from: href });
+        Ok(())
+    }
+}
+
+// ------------------------------------------------------------------------------------------ Location
+
+fn loc_check(d: &Dom, it: &mut Interp<'_>, this: Value) -> R<()> {
+    match (this, d.nav.p.get()) {
+        (Value::Object(o), Some(p)) if o == p.location => Ok(()),
+        _ => Err(it.type_error("Illegal invocation")),
+    }
+}
+
+fn loc_get(d: &Dom, it: &mut Interp<'_>, this: Value, part: Part) -> R<Value> {
+    loc_check(d, it, this)?;
+    let s = part.get(&d.cur_rec()?);
+    d.js_str(it, &s)
+}
+
+fn resolve(d: &Dom, it: &mut Interp<'_>, s: &str) -> R<Rec> {
+    let cur = d.cur_rec()?;
+    nu::parse(s, Some(&cur)).map_err(|e| pr::uerr(d, it, e, &format!("'{s}' is not a valid URL."), true))
+}
+
+fn loc_set(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value], part: Part) -> R<Value> {
+    loc_check(d, it, this)?;
+    d.cur_rec()?;
+    let v = pr::usv(d, it, arg(a, 0))?;
+    let new = if part == Part::Href {
+        resolve(d, it, &v)?
+    } else {
+        let mut c = d.cur_rec()?;
+        let before = c.clone();
+        if part == Part::Hash {
+            // unlike `URL.hash`, an empty value gives an empty fragment, not none
+            c.set_fragment(&v);
+        } else {
+            part.set(&mut c, &v).map_err(|e| pr::uerr(d, it, e, "Invalid URL", true))?;
+        }
+        if part == Part::Hash && c.frag == before.frag {
+            return Ok(Value::Undefined);
+        }
+        c
+    };
+    d.navigate(it, new, false)?;
+    Ok(Value::Undefined)
+}
+
+fn loc_go(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value], replace: bool) -> R<Value> {
+    loc_check(d, it, this)?;
+    d.cur_rec()?;
+    if a.is_empty() {
+        let name = if replace { "replace" } else { "assign" };
+        return Err(it.type_error(&format!("Failed to execute '{name}' on 'Location': 1 argument required, but only 0 present.")));
+    }
+    let s = pr::usv(d, it, arg(a, 0))?;
+    let new = resolve(d, it, &s)?;
+    d.navigate(it, new, replace)?;
+    Ok(Value::Undefined)
+}
+
+fn loc_reload(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> R<Value> {
+    loc_check(d, it, this)?;
+    d.reload_request()?;
+    Ok(Value::Undefined)
+}
+
+fn win_set_location(d: &Dom, it: &mut Interp<'_>, _: Value, a: &[Value]) -> R<Value> {
+    let loc = Value::Object(d.nav.p.get().expect("installed").location);
+    loc_set(d, it, loc, a, Part::Href)
+}
+
+fn loc_obj(d: &Dom, _: &mut Interp<'_>, _: Value, _: &[Value]) -> R<Value> {
+    Ok(Value::Object(d.nav.p.get().expect("installed").location))
+}
+
+fn doc_url(d: &Dom, it: &mut Interp<'_>, _: Value, _: &[Value]) -> R<Value> {
+    let s = d.cur_rec()?.href();
+    d.js_str(it, &s)
+}
+
+fn win_origin(d: &Dom, it: &mut Interp<'_>, _: Value, _: &[Value]) -> R<Value> {
+    let s = d.cur_rec()?.origin();
+    d.js_str(it, &s)
+}
+
+// ------------------------------------------------------------------------------------------ History
+
+fn hist_check(d: &Dom, it: &mut Interp<'_>, this: Value) -> R<()> {
+    match (this, d.nav.p.get()) {
+        (Value::Object(o), Some(p)) if o == p.history => d.cur_rec().map(drop),
+        _ => Err(it.type_error("Illegal invocation")),
+    }
+}
+
+fn sec_err(d: &Dom, it: &mut Interp<'_>, name: &str, url: &str, cur: &Rec) -> Error {
+    d.dom_err(it, "SecurityError", &format!("Failed to execute '{name}' on 'History': A history state object with URL '{url}' cannot be created in a document with origin '{}'.", cur.origin()))
+}
+
+fn push_replace(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value], replace: bool) -> R<Value> {
+    let name = if replace { "replaceState" } else { "pushState" };
+    hist_check(d, it, this)?;
+    if a.len() < 2 {
+        return Err(it.type_error(&format!("Failed to execute '{name}' on 'History': 2 arguments required, but only {} present.", a.len())));
+    }
+    it.to_js_string(a[1])?;
+    let url = match arg(a, 2) {
+        Value::Undefined | Value::Null => None,
+        v => Some(pr::usv(d, it, v)?),
+    };
+    let lim = d.nav.lim.get();
+    let state = st::serialize(d, it, a[0])?;
+    // The URL is read after the state getters ran: they may have navigated.
+    let cur = d.cur_rec()?;
+    let new = match &url {
+        None => cur.clone(),
+        Some(s) => match nu::parse(s, Some(&cur)) {
+            Ok(r) => r,
+            Err(UErr::Invalid | UErr::Scheme) => return Err(sec_err(d, it, name, s, &cur)),
+            Err(UErr::Gate(w)) => return Err(Error::Unsupported(unsupported(w))),
+        },
+    };
+    if new.origin() != cur.origin() {
+        return Err(sec_err(d, it, name, &new.href(), &cur));
+    }
+    {
+        let n = d.nav.s.borrow();
+        let old = if replace { n.entries[n.cur].bytes() } else { n.entries[n.cur + 1..].iter().map(Entry::bytes).sum() };
+        if n.state_bytes - old + state.bytes > lim.max_total_state_bytes {
+            return Err(d.lim("history-state-total"));
+        }
+    }
+    d.commit(new, Some(Rc::new(state)), replace);
+    Ok(Value::Undefined)
+}
+
+fn go(d: &Dom, it: &mut Interp<'_>, delta: f64) -> R<Value> {
+    let delta = if delta.is_finite() { delta.trunc().clamp(-1e9, 1e9) as i32 } else { 0 };
+    if delta == 0 {
+        d.reload_request()?;
+        return Ok(Value::Undefined);
+    }
+    if d.nav.s.borrow().tasks.len() >= d.nav.lim.get().max_tasks {
+        return Err(d.lim("nav-tasks"));
+    }
+    it.charge(1)?;
+    d.nav.s.borrow_mut().tasks.push_back(Task::Traverse(delta));
+    Ok(Value::Undefined)
+}
+
+fn hist_go(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> R<Value> {
+    hist_check(d, it, this)?;
+    let n = it.to_js_number(arg(a, 0))?;
+    go(d, it, n)
+}
+
+fn hist_back(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> R<Value> {
+    hist_check(d, it, this)?;
+    go(d, it, -1.0)
+}
+
+fn hist_forward(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> R<Value> {
+    hist_check(d, it, this)?;
+    go(d, it, 1.0)
+}
+
+fn hist_length(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> R<Value> {
+    hist_check(d, it, this)?;
+    Ok(Value::Number(d.nav.s.borrow().entries.len() as f64))
+}
+
+fn hist_state(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> R<Value> {
+    hist_check(d, it, this)?;
+    let idx = d.nav.s.borrow().cur;
+    d.entry_state(it, idx)
+}
+
+fn hist_scroll(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> R<Value> {
+    hist_check(d, it, this)?;
+    let s = if d.nav.s.borrow().manual_scroll { "manual" } else { "auto" };
+    d.js_str(it, s)
+}
+
+fn hist_set_scroll(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> R<Value> {
+    hist_check(d, it, this)?;
+    let s = it.to_js_string(arg(a, 0))?;
+    let s = it.heap.to_string_lossy(s).map_err(Error::Heap)?;
+    match s.as_str() {
+        "auto" => d.nav.s.borrow_mut().manual_scroll = false,
+        "manual" => d.nav.s.borrow_mut().manual_scroll = true,
+        _ => {}
+    }
+    Ok(Value::Undefined)
+}
+
+// ------------------------------------------------------------------------------------------ install
+
+fn def_fn(d: &Dom, it: &mut Interp<'_>, o: ObjId, name: &str, len: u32, h: H) -> R<()> {
+    let f = d.add_fn(it, h, name, len, false)?;
+    let k = d.key(it, name)?;
+    it.define_data(o, k, Value::Object(f), true, false, true)
+}
+
+fn def_acc(d: &Dom, it: &mut Interp<'_>, o: ObjId, name: &str, get: H, set: Option<H>) -> R<()> {
+    let g = d.add_fn(it, get, &format!("get {name}"), 0, false)?;
+    let s = match set {
+        Some(h) => Some(d.add_fn(it, h, &format!("set {name}"), 1, false)?),
+        None => None,
+    };
+    let k = d.key(it, name)?;
+    d.define_accessor(it, o, k, g, s)
+}
+
+macro_rules! parts {
+    ($d:expr, $it:expr, $o:expr, $get:ident, $set:ident, [$(($name:expr, $part:expr)),*]) => {
+        $( def_acc($d, $it, $o, $name, |d, it, t, _| $get(d, it, t, $part), Some(|d, it, t, a| $set(d, it, t, a, $part)))?; )*
+    };
+}
+
+pub(crate) fn install(d: &Dom, it: &mut Interp<'_>) -> R<()> {
+    let g = *d.global.get().expect("installed");
+    let op = it.object_prototype();
+    let mut protos = Vec::new();
+    for _ in 0..6 {
+        protos.push(d.obj(it, op)?);
+    }
+    let (url, params, iter, loc_proto, hist_proto, storage_proto) = (protos[0], protos[1], protos[2], protos[3], protos[4], protos[5]);
+    let (location, history, local, session) = (d.obj(it, loc_proto)?, d.obj(it, hist_proto)?, d.obj(it, storage_proto)?, d.obj(it, storage_proto)?);
+    // Named property access is not modeled: a write like `localStorage.x = 1` must not look like storage.
+    for o in [local, session] {
+        if let Err(e) = it.heap.prevent_extensions(o) {
+            return Err(it.heap_error(e));
+        }
+    }
+    let _ = d.nav.p.set(NavObjs { url, params, iter, location, history, local, session });
+
+    // URL
+    parts!(d, it, url, url_get_h, url_set_h, [
+        ("href", Part::Href), ("protocol", Part::Protocol), ("host", Part::Host), ("hostname", Part::Hostname),
+        ("port", Part::Port), ("pathname", Part::Pathname), ("search", Part::Search), ("hash", Part::Hash)
+    ]);
+    def_acc(d, it, url, "origin", pr::url_origin, None)?;
+    def_acc(d, it, url, "username", pr::url_userinfo, Some(pr::url_set_userinfo))?;
+    def_acc(d, it, url, "password", pr::url_userinfo, Some(pr::url_set_userinfo))?;
+    def_acc(d, it, url, "searchParams", pr::url_search_params, None)?;
+    def_fn(d, it, url, "toString", 0, pr::url_to_string)?;
+    def_fn(d, it, url, "toJSON", 0, pr::url_to_string)?;
+
+    // URLSearchParams
+    for (name, len, h) in [
+        ("append", 2, pr::p_append as H), ("delete", 1, pr::p_delete), ("get", 1, pr::p_get), ("getAll", 1, pr::p_get_all),
+        ("has", 1, pr::p_has), ("set", 2, pr::p_set), ("sort", 0, pr::p_sort), ("toString", 0, pr::p_to_string),
+        ("forEach", 1, pr::p_for_each), ("keys", 0, pr::p_keys), ("values", 0, pr::p_values), ("entries", 0, pr::p_entries),
+    ] {
+        def_fn(d, it, params, name, len, h)?;
+    }
+    def_acc(d, it, params, "size", pr::p_size, None)?;
+    def_fn(d, it, iter, "next", 0, pr::iter_next)?;
+
+    // Location
+    parts!(d, it, loc_proto, loc_get, loc_set, [
+        ("href", Part::Href), ("protocol", Part::Protocol), ("host", Part::Host), ("hostname", Part::Hostname),
+        ("port", Part::Port), ("pathname", Part::Pathname), ("search", Part::Search), ("hash", Part::Hash)
+    ]);
+    def_acc(d, it, loc_proto, "origin", |d, it, t, _| loc_check(d, it, t).and_then(|_| win_origin(d, it, t, &[])), None)?;
+    def_fn(d, it, loc_proto, "assign", 1, |d, it, t, a| loc_go(d, it, t, a, false))?;
+    def_fn(d, it, loc_proto, "replace", 1, |d, it, t, a| loc_go(d, it, t, a, true))?;
+    def_fn(d, it, loc_proto, "reload", 0, loc_reload)?;
+    def_fn(d, it, loc_proto, "toString", 0, |d, it, t, _| loc_get(d, it, t, Part::Href))?;
+
+    // History
+    def_fn(d, it, hist_proto, "pushState", 2, |d, it, t, a| push_replace(d, it, t, a, false))?;
+    def_fn(d, it, hist_proto, "replaceState", 2, |d, it, t, a| push_replace(d, it, t, a, true))?;
+    def_fn(d, it, hist_proto, "go", 0, hist_go)?;
+    def_fn(d, it, hist_proto, "back", 0, hist_back)?;
+    def_fn(d, it, hist_proto, "forward", 0, hist_forward)?;
+    def_acc(d, it, hist_proto, "length", hist_length, None)?;
+    def_acc(d, it, hist_proto, "state", hist_state, None)?;
+    def_acc(d, it, hist_proto, "scrollRestoration", hist_scroll, Some(hist_set_scroll))?;
+
+    // Storage
+    def_fn(d, it, storage_proto, "getItem", 1, sto::get_item)?;
+    def_fn(d, it, storage_proto, "setItem", 2, sto::set_item)?;
+    def_fn(d, it, storage_proto, "removeItem", 1, sto::remove_item)?;
+    def_fn(d, it, storage_proto, "clear", 0, sto::clear)?;
+    def_fn(d, it, storage_proto, "key", 1, sto::key)?;
+    def_acc(d, it, storage_proto, "length", sto::length, None)?;
+
+    // document and window
+    let p = d.p();
+    def_acc(d, it, p.document, "URL", doc_url, None)?;
+    def_acc(d, it, p.document, "documentURI", doc_url, None)?;
+    def_acc(d, it, p.node, "baseURI", doc_url, None)?;
+    def_acc(d, it, p.document, "location", loc_obj, Some(win_set_location))?;
+    def_acc(d, it, g, "location", loc_obj, Some(win_set_location))?;
+    def_acc(d, it, g, "origin", win_origin, None)?;
+
+    // constructors and globals
+    let (kp, kc) = (d.key(it, "prototype")?, d.key(it, "constructor")?);
+    let mut fixed = vec![url, params, iter, loc_proto, hist_proto, storage_proto, location, history, local, session];
+    let ifaces: [(&str, ObjId, H, bool); 5] = [
+        ("URL", url, pr::url_ctor, true),
+        ("URLSearchParams", params, pr::params_ctor, true),
+        ("Location", loc_proto, illegal, false),
+        ("History", hist_proto, illegal, false),
+        ("Storage", storage_proto, illegal, false),
+    ];
+    for (name, proto, h, ctor) in ifaces {
+        let f = d.add_fn(it, h, name, if name == "URLSearchParams" { 0 } else { 1 }, ctor)?;
+        it.define_data(f, kp, Value::Object(proto), false, false, false)?;
+        it.define_data(proto, kc, Value::Object(f), true, false, true)?;
+        let k = d.key(it, name)?;
+        it.define_data(g, k, Value::Object(f), true, false, true)?;
+        if name == "URL" {
+            def_fn(d, it, f, "canParse", 1, pr::url_can_parse)?;
+        }
+        fixed.push(f);
+    }
+    for (name, v) in [("history", history), ("localStorage", local), ("sessionStorage", session)] {
+        let k = d.key(it, name)?;
+        it.define_data(g, k, Value::Object(v), true, true, true)?;
+    }
+    d.fixed.borrow_mut().extend(fixed);
+    Ok(())
+}
+
+fn url_get_h(d: &Dom, it: &mut Interp<'_>, t: Value, part: Part) -> R<Value> {
+    pr::url_get(d, it, t, part)
+}
+
+fn url_set_h(d: &Dom, it: &mut Interp<'_>, t: Value, a: &[Value], part: Part) -> R<Value> {
+    pr::url_set(d, it, t, a, part)
+}
+
+fn illegal(_: &Dom, it: &mut Interp<'_>, _: Value, _: &[Value]) -> R<Value> {
+    Err(it.type_error("Illegal constructor"))
+}
+
+// ------------------------------------------------------------------------------------------ Browser API
+
+impl Browser {
+    /// Replace the bounds of this module. Call it before scripts run.
+    pub fn set_navigation_limits(&mut self, l: NavLimits) {
+        self.dom.nav.lim.set(l);
+    }
+
+    /// Start a new document at `url` (absolute `http` or `https`): one history entry with a null state, empty queues.
+    /// Pending navigation requests and tasks of the old document are dropped.
+    pub fn set_document_url(&mut self, url: &str) -> Result<(), String> {
+        let rec = nu::parse(url, None).map_err(|e| match e {
+            UErr::Invalid => format!("not an absolute URL: {url}"),
+            UErr::Scheme => "only http and https URLs are supported".to_string(),
+            UErr::Gate(w) => format!("not supported: {w}"),
+        })?;
+        let mut n = self.dom.nav.s.borrow_mut();
+        n.entries.clear();
+        n.entries.push(Entry { url: rec, state: None, cache: None });
+        n.cur = 0;
+        n.tasks.clear();
+        n.requests.clear();
+        n.state_bytes = 0;
+        n.generation += 1;
+        Ok(())
+    }
+
+    /// The current document URL (with its fragment), or `None` until it is configured.
+    pub fn document_url(&self) -> Option<String> {
+        self.dom.cur_rec().ok().map(|r| r.href())
+    }
+
+    /// `document.baseURI`. It is the document URL (`<base>` is not read).
+    pub fn base_uri(&self) -> Option<String> {
+        self.document_url()
+    }
+
+    /// Resolve `input` against the document URL the way `location.assign` does. For the loader and fetch.
+    pub fn resolve_url(&self, input: &str) -> Result<String, String> {
+        let cur = self.dom.cur_rec().map_err(|_| NOURL.to_string())?;
+        match nu::parse(input, Some(&cur)) {
+            Ok(r) => Ok(r.href()),
+            Err(UErr::Invalid) => Err(format!("not a valid URL: {input}")),
+            Err(UErr::Scheme) => Err("only http and https URLs are supported".to_string()),
+            Err(UErr::Gate(w)) => Err(format!("not supported: {w}")),
+        }
+    }
+
+    /// Raised each time the document URL changes (script, traversal, fragment navigation, `set_document_url`).
+    pub fn url_generation(&self) -> u64 {
+        self.dom.nav.s.borrow().generation
+    }
+
+    /// Run the queued traversal and fragment tasks that were queued when this call started: `popstate`, `hashchange`.
+    /// Each task is one host operation with its own step budget. The first `Limit`, `Unsupported` or fault ends the call
+    /// (that task is spent, the rest stay queued, and no JS runs after the error). Returns the tasks that ran.
+    pub fn run_navigation_tasks(&mut self) -> R<usize> {
+        let dom = self.dom.clone();
+        let n = dom.nav.s.borrow().tasks.len();
+        let mut done = 0;
+        for _ in 0..n {
+            let t = dom.nav.s.borrow_mut().tasks.pop_front();
+            let Some(t) = t else { break };
+            done += 1;
+            dom.st.borrow_mut().driver = true;
+            let r = self.it.host_scope(|it| dom.run_task(it, t));
+            dom.st.borrow_mut().driver = false;
+            r?;
+        }
+        Ok(done)
+    }
+
+    /// The oldest document load that script asked for, if any.
+    pub fn take_navigation_request(&mut self) -> Option<NavigationRequest> {
+        self.dom.nav.s.borrow_mut().requests.pop_front()
+    }
+
+    pub fn navigation_stats(&self) -> NavigationStats {
+        let n = self.dom.nav.s.borrow();
+        NavigationStats {
+            history_len: n.entries.len(),
+            history_index: n.cur,
+            pending_tasks: n.tasks.len(),
+            pending_requests: n.requests.len(),
+            urls: n.urls.len(),
+            params: n.params.len(),
+            iterators: n.iters.len(),
+            param_bytes: n.param_bytes,
+            state_bytes: n.state_bytes,
+            url_generation: n.generation,
+        }
+    }
+
+    /// The storage of this browser. Clones share the data (`WebStorage::new_session` shares only `localStorage`).
+    pub fn storage(&self) -> WebStorage {
+        self.dom.nav.s.borrow().store.clone()
+    }
+
+    /// Use `store` (a new browser for the same session, for example). The old store is not touched.
+    pub fn attach_storage(&mut self, store: WebStorage) {
+        self.dom.nav.s.borrow_mut().store = store;
+    }
+}

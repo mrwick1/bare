@@ -250,6 +250,8 @@ pub struct Dom {
     pub(crate) start: Instant,
     pub(crate) sched: RefCell<crate::browser_scheduler::Sched>,
     pub(crate) fetch: crate::browser_fetch::Fetch,
+    /// Navigation, history and storage state (`browser_navigation.rs`).
+    pub(crate) nav: crate::browser_navigation::Nav,
 }
 
 impl Host for Dom {
@@ -266,10 +268,12 @@ impl Host for Dom {
         out.extend(self.doc_wrapper.get().map(|&o| Value::Object(o)));
         self.sched_roots(out);
         self.fetch.roots(out);
+        crate::browser_navigation::roots(self, out);
     }
 
     fn trace(&self, owner: ObjId, out: &mut Vec<Value>) {
         self.sched_trace(owner, out);
+        crate::browser_navigation::trace(self, owner, out);
         let st = self.st.borrow();
         if let Some(&t) = st.by_obj.get(&owner) {
             for l in st.listeners.get(&t).into_iter().flatten() {
@@ -294,6 +298,7 @@ impl Host for Dom {
     }
 
     fn prune(&self, live: &dyn Fn(ObjId) -> bool) {
+        crate::browser_navigation::prune(self, live);
         let mut st = self.st.borrow_mut();
         let st = &mut *st;
         st.by_obj.retain(|&o, t| matches!(t, Target::Window) || live(o));
@@ -323,6 +328,8 @@ fn domexc_codes(name: &str) -> u32 {
         "NotSupportedError" => 9,
         "InvalidStateError" => 11,
         "SyntaxError" => 12,
+        "SecurityError" => 18,
+        "QuotaExceededError" => 22,
         "DataCloneError" => 25,
         _ => 0,
     }
@@ -636,6 +643,7 @@ impl Dom {
             let k = self.key(it, name)?;
             it.define_data(g, k, v, true, true, true)?;
         }
+        crate::browser_navigation::install(self, it)?;
         crate::browser_fetch::install(self, it)
     }
 
@@ -798,6 +806,7 @@ impl Browser {
             start: Instant::now(),
             sched: RefCell::default(),
             fetch: Default::default(),
+            nav: Default::default(),
         });
         it.set_host(dom.clone())?;
         it.host_scope(|it| {
