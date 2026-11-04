@@ -332,3 +332,51 @@ fn parser_corpus_never_panics_or_faults() {
         assert!(ran > 100);
     });
 }
+
+#[test]
+fn sparse_native_loops_consume_steps() {
+    big(|| {
+        for source in ["Array(1000).forEach(function() {});", "Array(1000).join('');"] {
+            let prog = parse_script(source, Limits::default()).unwrap();
+            let mut it = Interp::new(&prog, Heap::default(), EvalLimits { max_steps: 100, ..Default::default() }).unwrap();
+            assert!(matches!(it.run(), Err(Error::Limit(LimitKind::Steps))), "native loop escaped budget: {source}");
+        }
+    });
+}
+
+#[test]
+fn preflight_cannot_recurse_through_unbounded_flat_trees() {
+    big(|| {
+        let source = "1+".repeat(1000) + "1";
+        let prog = parse_script(&source, Limits::default()).unwrap();
+        assert!(matches!(Interp::new(&prog, Heap::default(), EvalLimits::default()), Err(Error::Limit(_))));
+    });
+}
+
+#[test]
+fn generic_array_methods_preserve_property_rules() {
+    big(|| {
+        assert_eq!(run_case("var a={length:1}; Object.defineProperty(a,'0',{value:7,configurable:false}); var result; try { Array.prototype.pop.call(a); } catch(e) { result=e.name; } result;"), "string:TypeError");
+        assert_eq!(run_case("var a={length:4294967295}; Array.prototype.push.call(a,7); a[4294967295] + ':' + a.length;"), "string:7:4294967296");
+    });
+}
+
+#[test]
+fn string_builders_stop_at_the_heap_string_cap() {
+    big(|| {
+        let prog = parse_script("Array(1000).join('xxxxxxxx');", Limits::default()).unwrap();
+        let heap = Heap::new(HeapLimits { max_string_units: 64, ..Default::default() }).unwrap();
+        let mut it = Interp::new(&prog, heap, EvalLimits { max_steps: 100, ..Default::default() }).unwrap();
+        assert!(matches!(it.run(), Err(Error::Limit(LimitKind::Heap(Limit::StringLength)))));
+    });
+}
+
+#[test]
+fn call_depth_cannot_be_unbounded_and_zero_envs_are_rejected() {
+    big(|| {
+        let prog = parse_script("function f() { return f(); } f();", Limits::default()).unwrap();
+        let mut it = Interp::new(&prog, Heap::default(), EvalLimits { max_call_depth: u32::MAX, ..Default::default() }).unwrap();
+        assert!(matches!(it.run(), Err(Error::Limit(LimitKind::CallDepth | LimitKind::TraversalDepth))));
+        assert!(matches!(Interp::new(&prog, Heap::default(), EvalLimits { max_envs: 0, ..Default::default() }), Err(Error::Limit(LimitKind::Envs))));
+    });
+}

@@ -1,4 +1,4 @@
-//! JavaScript syntax, managed values, JSON and regexp foundations. Execution is not built yet.
+//! JavaScript syntax, managed values, JSON, regexp matching and a bounded evaluator subset.
 
 pub mod ast;
 pub mod lex;
@@ -7,3 +7,5 @@ pub mod value;
 pub mod heap;
 pub mod json;
 pub mod regexp;
+
+pub mod eval;

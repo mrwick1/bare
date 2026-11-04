@@ -19,6 +19,7 @@ impl<'p> Interp<'p> {
                     Value::Object(o) => {
                         let mut out = Vec::new();
                         for k in h!(self, self.heap.own_keys(o)) {
+                            self.tick()?;
                             if matches!(k, PropertyKey::Symbol(_)) {
                                 continue;
                             }
@@ -34,14 +35,15 @@ impl<'p> Interp<'p> {
                 };
                 let mut vals = Vec::with_capacity(keys.len());
                 for k in keys {
+                    self.tick()?;
                     vals.push(h!(self, self.heap.key_to_value(k)));
                 }
                 self.new_array_from(&vals)
             }
             Nat::ObjectDefineProperty => {
                 let Value::Object(o) = a0 else { return Err(self.type_err("Object.defineProperty called on non-object")) };
-                let key = self.to_key(arg(args, 1))?;
-                let d = self.to_descriptor(arg(args, 2))?;
+                let key = self.coerce_key(arg(args, 1))?;
+                let d = self.property_descriptor(arg(args, 2))?;
                 if !h!(self, self.heap.define_own_property(o, key, &d)) {
                     let k = self.key_text(key);
                     return Err(self.type_err(&format!("Cannot redefine property: {k}")));
@@ -54,7 +56,7 @@ impl<'p> Interp<'p> {
                     Value::Undefined | Value::Null => return Err(self.type_err("Cannot convert undefined or null to object")),
                     _ => return Ok(Value::Undefined),
                 };
-                let key = self.to_key(arg(args, 1))?;
+                let key = self.coerce_key(arg(args, 1))?;
                 let Some(p) = h!(self, self.heap.get_own_property(o, key)) else { return Ok(Value::Undefined) };
                 let r = h!(self, self.heap.new_object(Some(self.object_proto)));
                 let (k_value, k_writable, k_get, k_set, k_enum, k_conf) = (self.k_value, self.k_writable, self.k_get, self.k_set, self.k_enumerable, self.k_configurable);
@@ -94,7 +96,7 @@ impl<'p> Interp<'p> {
                 if is_nullish(this) {
                     return Err(self.type_err("Cannot convert undefined or null to object"));
                 }
-                let key = self.to_key(a0)?;
+                let key = self.coerce_key(a0)?;
                 Ok(Value::Bool(match this {
                     Value::Object(o) => h!(self, self.heap.has_own_property(o, key)),
                     Value::String(s) => key == self.k_length || matches!(key, PropertyKey::Index(i) if (i as usize) < h!(self, self.heap.str_len(s))),
@@ -165,9 +167,12 @@ impl<'p> Interp<'p> {
             Nat::ArrayIsArray => Ok(Value::Bool(matches!(a0, Value::Object(o) if h!(self, self.heap.is_array(o))))),
             Nat::ArrPush => {
                 let len = self.length_of(this)?;
+                if args.len() as u64 > 9007199254740991 - len { return Err(self.type_err("Array-like length exceeds the safe integer limit")); }
                 for (i, &v) in args.iter().enumerate() {
+                    self.tick()?;
+                    let key = self.index_key(len + i as u64)?;
                     let saved = std::mem::replace(&mut self.strict, true);
-                    let r = self.put_prop(this, PropertyKey::Index((len + i as u64) as u32), v);
+                    let r = self.put_prop(this, key, v);
                     self.strict = saved;
                     r?;
                 }
@@ -186,10 +191,12 @@ impl<'p> Interp<'p> {
                         self.put_prop(this, self.k_length, Value::Number(0.0))?;
                         return Ok(Value::Undefined);
                     }
-                    let k = PropertyKey::Index((len - 1) as u32);
+                    let k = self.index_key(len - 1)?;
                     let v = self.get_prop(this, k)?;
-                    if let Value::Object(o) = this {
-                        h!(self, self.heap.delete(o, k));
+                    if let Value::Object(o) = this
+                        && !h!(self, self.heap.delete(o, k)) {
+                        let key = self.key_text(k);
+                        return Err(self.type_err(&format!("Cannot delete property '{key}'")));
                     }
                     self.put_prop(this, self.k_length, Value::Number((len - 1) as f64))?;
                     Ok(v)
@@ -203,10 +210,11 @@ impl<'p> Interp<'p> {
                     let t = self.display(a0);
                     return Err(self.type_err(&format!("{t} is not a function")));
                 }
-                let Value::Object(o) = this else { return Ok(Value::Undefined) };
                 for i in 0..len {
-                    let k = PropertyKey::Index(i as u32);
-                    if h!(self, self.heap.has_property(o, k)) {
+                    self.tick()?;
+                    let k = self.index_key(i)?;
+                    let has = match this { Value::Object(o) => h!(self, self.heap.has_property(o, k)), Value::String(s) => i < h!(self, self.heap.str_len(s)) as u64, _ => false };
+                    if has {
                         let v = self.get_prop(this, k)?;
                         self.call_fn(a0, arg(args, 1), &[v, Value::Number(i as f64), this])?;
                     }
@@ -215,17 +223,18 @@ impl<'p> Interp<'p> {
             }
             Nat::ArrJoin => {
                 let len = self.length_of(this)?;
-                let sep = if matches!(a0, Value::Undefined) { h!(self, self.heap.intern_str(",")) } else { self.to_str(a0)? };
-                let sep_units: Vec<u16> = h!(self, self.heap.str_units(sep)).to_vec();
+                let sep = if matches!(a0, Value::Undefined) { h!(self, self.heap.intern_str(",")) } else { self.coerce_string(a0)? };
                 let mut out: Vec<u16> = Vec::new();
                 for i in 0..len {
+                    self.tick()?;
                     if i > 0 {
-                        out.extend_from_slice(&sep_units);
+                        self.append_string(&mut out, h!(self, self.heap.str_units(sep)))?;
                     }
-                    let v = self.get_prop(this, PropertyKey::Index(i as u32))?;
+                    let key = self.index_key(i)?;
+                    let v = self.get_prop(this, key)?;
                     if !is_nullish(v) {
-                        let s = self.to_str(v)?;
-                        out.extend_from_slice(h!(self, self.heap.str_units(s)));
+                        let s = self.coerce_string(v)?;
+                        self.append_string(&mut out, h!(self, self.heap.str_units(s)))?;
                     }
                 }
                 Ok(Value::String(h!(self, self.heap.intern_vec(out))))
@@ -233,7 +242,7 @@ impl<'p> Interp<'p> {
             Nat::ErrorCtor(k) => {
                 let o = h!(self, self.heap.new_object(Some(self.error_protos[k as usize])));
                 if !matches!(a0, Value::Undefined) {
-                    let m = self.to_str(a0)?;
+                    let m = self.coerce_string(a0)?;
                     self.def(o, self.k_message, Value::String(m), true, false, true)?;
                 }
                 let _ = is_new;
@@ -244,9 +253,9 @@ impl<'p> Interp<'p> {
                     return Err(self.type_err("Error.prototype.toString requires that 'this' be an Object"));
                 }
                 let nv = self.get_prop(this, self.k_name)?;
-                let name = if matches!(nv, Value::Undefined) { "Error".to_string() } else { let s = self.to_str(nv)?; self.heap.to_string_lossy(s).unwrap_or_default() };
+                let name = if matches!(nv, Value::Undefined) { "Error".to_string() } else { let s = self.coerce_string(nv)?; self.heap.to_string_lossy(s).unwrap_or_default() };
                 let mv = self.get_prop(this, self.k_message)?;
-                let msg = if matches!(mv, Value::Undefined) { String::new() } else { let s = self.to_str(mv)?; self.heap.to_string_lossy(s).unwrap_or_default() };
+                let msg = if matches!(mv, Value::Undefined) { String::new() } else { let s = self.coerce_string(mv)?; self.heap.to_string_lossy(s).unwrap_or_default() };
                 let r = if name.is_empty() { msg } else if msg.is_empty() { name } else { format!("{name}: {msg}") };
                 Ok(Value::String(h!(self, self.heap.intern_str(&r))))
             }
@@ -254,19 +263,24 @@ impl<'p> Interp<'p> {
                 if args.is_empty() {
                     return Ok(Value::String(h!(self, self.heap.intern_str(""))));
                 }
-                Ok(Value::String(self.to_str(a0)?))
+                Ok(Value::String(self.coerce_string(a0)?))
             }
-            Nat::NumberFn => Ok(Value::Number(if args.is_empty() { 0.0 } else { self.to_number(a0)? })),
+            Nat::NumberFn => Ok(Value::Number(if args.is_empty() { 0.0 } else { self.coerce_number(a0)? })),
             Nat::BooleanFn => Ok(Value::Bool(self.truthy(a0)?)),
-            Nat::IsNaN => Ok(Value::Bool(self.to_number(a0)?.is_nan())),
+            Nat::IsNaN => Ok(Value::Bool(self.coerce_number(a0)?.is_nan())),
         }
+    }
+
+    fn index_key(&mut self, index: u64) -> Res<PropertyKey> {
+        if index <= MAX_INDEX as u64 { return Ok(PropertyKey::Index(index as u32)); }
+        Ok(h!(self, self.heap.key_from_str(&index.to_string())))
     }
 
     /// `length` of an array-like `this`, as `ToLength`.
     fn length_of(&mut self, this: Value) -> Res<u64> {
         let l = self.get_prop(this, self.k_length)?;
-        let n = self.to_number(l)?;
-        Ok(if n.is_nan() || n <= 0.0 { 0 } else { n.min(4294967295.0) as u64 })
+        let n = self.coerce_number(l)?;
+        Ok(if n.is_nan() || n <= 0.0 { 0 } else { n.min(9007199254740991.0) as u64 })
     }
 
     /// The elements of an array-like (for `apply`). `undefined` and `null` are an empty list.
@@ -280,6 +294,7 @@ impl<'p> Interp<'p> {
                 }
                 let mut out = Vec::with_capacity(len as usize);
                 for i in 0..len {
+                    self.tick()?;
                     out.push(self.get_prop(v, PropertyKey::Index(i as u32))?);
                 }
                 Ok(out)
@@ -288,7 +303,7 @@ impl<'p> Interp<'p> {
         }
     }
 
-    fn to_descriptor(&mut self, d: Value) -> Res<PropertyDescriptor> {
+    fn property_descriptor(&mut self, d: Value) -> Res<PropertyDescriptor> {
         let Value::Object(o) = d else {
             let t = self.display(d);
             return Err(self.type_err(&format!("Property description must be an object: {t}")));

@@ -22,13 +22,14 @@
 //! environments and function entries that nothing reaches (a worklist over the object graph, no Rust
 //! recursion), then calls `Heap::collect(roots)`. It refuses to run while a call is active. A value you keep
 //! outside the evaluator (a `Throw` value, a result) must be passed as `extra` or it is stale after `collect`.
-//! The interpreter owns the heap (`it.heap`), so a handle of another heap can never get in.
+//! Host code must never inject handles from another heap. Heap ownership does not detect foreign-handle collisions.
 //!
-//! Limits ([`EvalLimits`]): steps (every statement and expression), call depth (every call, native and bound
+//! Limits ([`EvalLimits`]): steps (statements, expressions and traversed native elements), call depth (every call, native and bound
 //! too), live environments, function slots. A limit ends the run with [`Error::Limit`], never a JS value, and
 //! cannot be caught by `try`. A heap limit is [`LimitKind::Heap`]. Native stack: one JS call level needs about
 //! 5 to 7 KiB in a release build (measured: depth 99 overflows 512 KiB and fits 768 KiB). A debug build needs several
-//! times more. `max_call_depth` defaults to 100, so run on a thread with at least 8 MiB (release) or 64 MiB (debug).
+//! times more. `max_call_depth` is clamped to 100. Recursive setup and execution walks share a hard
+//! ceiling of 512 frames. Run on a thread with at least 8 MiB (release) or 64 MiB (debug).
 //!
 //! Known deviations, on purpose (each is a gate, not a silent skip):
 //! - One environment per call holds parameters, `arguments`, `var`s and the body's `let`/`const`.
@@ -53,8 +54,9 @@ use std::hash::{BuildHasherDefault, Hasher};
 /// Execution limits. Every one is checked before the thing grows.
 #[derive(Clone, Copy, Debug)]
 pub struct EvalLimits {
-    /// Statements plus expressions evaluated, per `run` or per top-level `call`.
+    /// Statements, expressions and traversed native elements, per `run` or top-level `call`.
     pub max_steps: u64,
+    /// Clamped to 100. Tree/execution recursion also has a shared hard ceiling of 512 frames.
     pub max_call_depth: u32,
     /// Live environments (scopes). Environments that no closure captured are freed on scope exit.
     pub max_envs: usize,
@@ -72,6 +74,7 @@ impl Default for EvalLimits {
 pub enum LimitKind {
     Steps,
     CallDepth,
+    TraversalDepth,
     Envs,
     Functions,
     Heap(Limit),
@@ -259,6 +262,7 @@ pub struct Interp<'p> {
     steps: u64,
     step_limit: u64,
     depth: u32,
+    frames: u32,
     ran: bool,
     // names and caches filled by the first walk
     name_map: FxMap<String, u32>,
@@ -320,7 +324,9 @@ fn is_nullish(v: Value) -> bool {
 impl<'p> Interp<'p> {
     /// Check the whole tree (Unsupported is reported here, before anything runs) and build the global
     /// object and the builtins in `heap`.
-    pub fn new(prog: &'p Program<'p>, mut heap: Heap, limits: EvalLimits) -> Result<Interp<'p>, Error> {
+    pub fn new(prog: &'p Program<'p>, mut heap: Heap, mut limits: EvalLimits) -> Result<Interp<'p>, Error> {
+        limits.max_call_depth = limits.max_call_depth.min(100);
+        if limits.max_envs == 0 { return Err(Error::Limit(LimitKind::Envs)); }
         macro_rules! e {
             ($x:expr) => {
                 match $x {
@@ -354,6 +360,7 @@ impl<'p> Interp<'p> {
             steps: 0,
             step_limit: 0,
             depth: 0,
+            frames: 0,
             ran: false,
             name_map: FxMap::default(),
             names: vec![String::new()],
@@ -547,8 +554,8 @@ impl<'p> Interp<'p> {
                 work.push(Value::Object(p));
             }
         }
-        for i in 0..self.envs.len() {
-            if self.envs[i].live && !env_seen[i] {
+        for (i, &seen) in env_seen.iter().enumerate() {
+            if self.envs[i].live && !seen {
                 self.free_env(i as u32);
             }
         }
@@ -577,7 +584,7 @@ impl<'p> Interp<'p> {
         let r = (|| {
             let key = self.heap.key_from_str(name).map_err(Error::Heap)?;
             let x = self.get_prop(v, key)?;
-            let s = self.to_str(x)?;
+            let s = self.coerce_string(x)?;
             self.heap.to_string_lossy(s).map_err(Error::Heap)
         })();
         r.unwrap_or_else(|_| "?".into())
@@ -652,6 +659,15 @@ impl<'p> Interp<'p> {
         }
     }
 
+    /// Bound recursive tree and execution walks, including flat parser trees.
+    fn descend<T, E: From<Error>>(&mut self, f: impl FnOnce(&mut Self) -> Result<T, E>) -> Result<T, E> {
+        if self.frames >= 512 { return Err(Error::Limit(LimitKind::TraversalDepth).into()); }
+        self.frames += 1;
+        let result = f(self);
+        self.frames -= 1;
+        result
+    }
+
     fn tick(&mut self) -> Res<()> {
         self.steps += 1;
         if self.steps > self.step_limit {
@@ -683,6 +699,10 @@ impl<'p> Interp<'p> {
     }
 
     fn w_func(&mut self, fid: FuncId, outer_args: usize) -> Res<()> {
+        self.descend(|it| it.w_func_inner(fid, outer_args))
+    }
+
+    fn w_func_inner(&mut self, fid: FuncId, outer_args: usize) -> Res<()> {
         let prog = self.prog;
         let f = *prog.func(fid);
         if f.is_async {
@@ -739,6 +759,10 @@ impl<'p> Interp<'p> {
     }
 
     fn w_pat(&mut self, p: PatId, fs: usize, ac: usize) -> Res<()> {
+        self.descend(|it| it.w_pat_inner(p, fs, ac))
+    }
+
+    fn w_pat_inner(&mut self, p: PatId, fs: usize, ac: usize) -> Res<()> {
         let prog = self.prog;
         let pat = *prog.pat(p);
         match pat.kind {
@@ -772,6 +796,10 @@ impl<'p> Interp<'p> {
     }
 
     fn w_stmt(&mut self, s: StmtId, fs: usize, ac: usize, nested: bool) -> Res<()> {
+        self.descend(|it| it.w_stmt_inner(s, fs, ac, nested))
+    }
+
+    fn w_stmt_inner(&mut self, s: StmtId, fs: usize, ac: usize, nested: bool) -> Res<()> {
         let prog = self.prog;
         let st = *prog.stmt(s);
         match st.kind {
@@ -880,6 +908,10 @@ impl<'p> Interp<'p> {
     }
 
     fn w_expr(&mut self, e: ExprId, fs: usize, ac: usize) -> Res<()> {
+        self.descend(|it| it.w_expr_inner(e, fs, ac))
+    }
+
+    fn w_expr_inner(&mut self, e: ExprId, fs: usize, ac: usize) -> Res<()> {
         let prog = self.prog;
         let ex = *prog.expr(e);
         match ex.kind {
@@ -1011,9 +1043,9 @@ impl<'p> Interp<'p> {
         self.method(ap, "join", Nat::ArrJoin, 1)?;
         self.method(ap, "toString", Nat::ArrJoin, 0)?;
         let mut error_ctor: Option<ObjId> = None;
-        for i in 0..5 {
+        for (i, &error_name) in ERR_NAMES.iter().enumerate() {
             let proto = self.error_protos[i];
-            let c = self.native(Nat::ErrorCtor(i as u8), ERR_NAMES[i], 1)?;
+            let c = self.native(Nat::ErrorCtor(i as u8), error_name, 1)?;
             self.def(c, self.k_prototype, Value::Object(proto), false, false, false)?;
             self.def(proto, self.k_constructor, Value::Object(c), true, false, true)?;
             if let Some(base) = error_ctor {
@@ -1021,7 +1053,7 @@ impl<'p> Interp<'p> {
             } else {
                 error_ctor = Some(c);
             }
-            let nm = h!(self, self.heap.intern_str(ERR_NAMES[i]));
+            let nm = h!(self, self.heap.intern_str(error_name));
             self.def(proto, self.k_name, Value::String(nm), true, false, true)?;
             let empty = h!(self, self.heap.intern_str(""));
             self.def(proto, self.k_message, Value::String(empty), true, false, true)?;
@@ -1031,7 +1063,7 @@ impl<'p> Interp<'p> {
                 let base = self.error_protos[0];
                 h!(self, self.heap.set_prototype_of(proto, Some(base)));
             }
-            let k = h!(self, self.heap.key_from_str(ERR_NAMES[i]));
+            let k = h!(self, self.heap.key_from_str(error_name));
             self.def(g, k, Value::Object(c), true, false, true)?;
         }
         for (name, n) in [("String", Nat::StringFn), ("Number", Nat::NumberFn), ("Boolean", Nat::BooleanFn), ("isNaN", Nat::IsNaN)] {
@@ -1238,6 +1270,10 @@ impl<'p> Interp<'p> {
     }
 
     fn call_fn(&mut self, f: Value, this: Value, args: &[Value]) -> Res<Value> {
+        self.descend(|it| it.call_fn_inner(f, this, args))
+    }
+
+    fn call_fn_inner(&mut self, f: Value, this: Value, args: &[Value]) -> Res<Value> {
         if self.depth >= self.limits.max_call_depth {
             return Err(Error::Limit(LimitKind::CallDepth));
         }
@@ -1268,6 +1304,10 @@ impl<'p> Interp<'p> {
     }
 
     fn construct(&mut self, f: Value, args: &[Value], callee: ExprId) -> Res<Value> {
+        self.descend(|it| it.construct_inner(f, args, callee))
+    }
+
+    fn construct_inner(&mut self, f: Value, args: &[Value], callee: ExprId) -> Res<Value> {
         let not_ctor = |s: &mut Self| {
             let d = s.src_text(callee);
             Err(s.type_err(&format!("{d} is not a constructor")))
@@ -1383,7 +1423,17 @@ impl<'p> Interp<'p> {
 
     // ------------------------------------------------------------ conversions
 
-    fn to_primitive(&mut self, v: Value, hint: Hint) -> Res<Value> {
+    /// Check temporary string growth before allocating the appended units.
+    fn append_string(&self, out: &mut Vec<u16>, units: &[u16]) -> Res<()> {
+        let limits = self.heap.limits();
+        let len = out.len().checked_add(units.len()).ok_or(Error::Limit(LimitKind::Heap(Limit::StringLength)))?;
+        if len > limits.max_string_units { return Err(Error::Limit(LimitKind::Heap(Limit::StringLength))); }
+        if len > limits.max_bytes / 2 { return Err(Error::Limit(LimitKind::Heap(Limit::Bytes))); }
+        out.extend_from_slice(units);
+        Ok(())
+    }
+
+    fn coerce_primitive(&mut self, v: Value, hint: Hint) -> Res<Value> {
         let Value::Object(_) = v else { return Ok(v) };
         let order = if hint == Hint::String { [self.k_to_string, self.k_value_of] } else { [self.k_value_of, self.k_to_string] };
         for k in order {
@@ -1398,21 +1448,21 @@ impl<'p> Interp<'p> {
         Err(self.type_err("Cannot convert object to primitive value"))
     }
 
-    fn to_number(&mut self, v: Value) -> Res<f64> {
-        let p = self.to_primitive(v, Hint::Number)?;
+    fn coerce_number(&mut self, v: Value) -> Res<f64> {
+        let p = self.coerce_primitive(v, Hint::Number)?;
         if let Value::Symbol(_) = p {
             return Err(self.type_err("Cannot convert a Symbol value to a number"));
         }
         Ok(h!(self, self.heap.to_number(p)))
     }
 
-    fn to_str(&mut self, v: Value) -> Res<StrId> {
-        let p = self.to_primitive(v, Hint::String)?;
+    fn coerce_string(&mut self, v: Value) -> Res<StrId> {
+        let p = self.coerce_primitive(v, Hint::String)?;
         Ok(h!(self, self.heap.to_string(p)))
     }
 
-    fn to_key(&mut self, v: Value) -> Res<PropertyKey> {
-        let p = self.to_primitive(v, Hint::String)?;
+    fn coerce_key(&mut self, v: Value) -> Res<PropertyKey> {
+        let p = self.coerce_primitive(v, Hint::String)?;
         Ok(h!(self, self.heap.to_property_key(p)))
     }
 
@@ -1497,7 +1547,7 @@ impl<'p> Interp<'p> {
         match key {
             Key::Computed(e) => {
                 let v = self.eval_expr(e)?;
-                self.to_key(v)
+                self.coerce_key(v)
             }
             Key::None | Key::Private(_) | Key::BigInt(_) => Err(unsupported("property key", Span::default())),
             _ => {
@@ -1614,6 +1664,10 @@ impl<'p> Interp<'p> {
     }
 
     fn link(&mut self, e: ExprId) -> Res<Option<(Value, Value)>> {
+        self.descend(|it| it.link_inner(e))
+    }
+
+    fn link_inner(&mut self, e: ExprId) -> Res<Option<(Value, Value)>> {
         let prog = self.prog;
         let ex = *prog.expr(e);
         match ex.kind {
@@ -1633,10 +1687,10 @@ impl<'p> Interp<'p> {
                 let iv = self.eval_expr(index)?;
                 if is_nullish(base) {
                     let t = self.display(base);
-                    let ks = self.to_str(iv).map(|s| self.heap.to_string_lossy(s).unwrap_or_default()).unwrap_or_default();
+                    let ks = self.coerce_string(iv).map(|s| self.heap.to_string_lossy(s).unwrap_or_default()).unwrap_or_default();
                     return Err(self.type_err(&format!("Cannot read properties of {t} (reading '{ks}')")));
                 }
-                let key = self.to_key(iv)?;
+                let key = self.coerce_key(iv)?;
                 Ok(Some((self.get_prop(base, key)?, base)))
             }
             ExprKind::Call { callee, args, optional } => {
@@ -1667,6 +1721,10 @@ impl<'p> Interp<'p> {
     }
 
     fn eval_expr(&mut self, e: ExprId) -> Res<Value> {
+        self.descend(|it| it.eval_expr_inner(e))
+    }
+
+    fn eval_expr_inner(&mut self, e: ExprId) -> Res<Value> {
         self.tick()?;
         let prog = self.prog;
         let ex = *prog.expr(e);
@@ -1695,8 +1753,8 @@ impl<'p> Interp<'p> {
                     let _ = prog.quasi(prog.quasi_node(*q), false, &mut out);
                     if let Some(&x) = exprs.get(i) {
                         let v = self.eval_expr(x)?;
-                        let s = self.to_str(v)?;
-                        out.extend_from_slice(h!(self, self.heap.str_units(s)));
+                        let s = self.coerce_string(v)?;
+                        self.append_string(&mut out, h!(self, self.heap.str_units(s)))?;
                     }
                 }
                 Ok(Value::String(h!(self, self.heap.intern_vec(out))))
@@ -1731,7 +1789,7 @@ impl<'p> Interp<'p> {
             ExprKind::Update { op, prefix, arg } => {
                 let r = self.expr_ref(arg)?;
                 let old = self.ref_get(&r)?;
-                let n = self.to_number(old)?;
+                let n = self.coerce_number(old)?;
                 let new = if op == UpdateOp::Inc { n + 1.0 } else { n - 1.0 };
                 self.ref_put(&r, Value::Number(new))?;
                 Ok(Value::Number(if prefix { new } else { n }))
@@ -1883,15 +1941,15 @@ impl<'p> Interp<'p> {
             }
             UnaryOp::Neg => {
                 let v = self.eval_expr(arg)?;
-                Ok(Value::Number(-self.to_number(v)?))
+                Ok(Value::Number(-self.coerce_number(v)?))
             }
             UnaryOp::Plus => {
                 let v = self.eval_expr(arg)?;
-                Ok(Value::Number(self.to_number(v)?))
+                Ok(Value::Number(self.coerce_number(v)?))
             }
             UnaryOp::BitNot => {
                 let v = self.eval_expr(arg)?;
-                Ok(Value::Number(!to_int32(self.to_number(v)?) as f64))
+                Ok(Value::Number(!to_int32(self.coerce_number(v)?) as f64))
             }
         }
     }
@@ -1950,10 +2008,10 @@ impl<'p> Interp<'p> {
                 let iv = self.eval_expr(index)?;
                 if is_nullish(base) {
                     let t = self.display(base);
-                    let ks = self.to_str(iv).map(|s| self.heap.to_string_lossy(s).unwrap_or_default()).unwrap_or_default();
+                    let ks = self.coerce_string(iv).map(|s| self.heap.to_string_lossy(s).unwrap_or_default()).unwrap_or_default();
                     return Err(self.type_err(&format!("Cannot read properties of {t} (reading '{ks}')")));
                 }
-                Ok((base, self.to_key(iv)?))
+                Ok((base, self.coerce_key(iv)?))
             }
             ExprKind::Paren(i) => self.member_ref(i),
             _ => Err(unsupported("assignment target", ex.span)),
@@ -2032,6 +2090,10 @@ impl<'p> Interp<'p> {
     }
 
     fn bind_pattern(&mut self, p: PatId, v: Value, mode: Bind) -> Res<()> {
+        self.descend(|it| it.bind_pattern_inner(p, v, mode))
+    }
+
+    fn bind_pattern_inner(&mut self, p: PatId, v: Value, mode: Bind) -> Res<()> {
         let prog = self.prog;
         let pat = *prog.pat(p);
         match pat.kind {
@@ -2109,7 +2171,7 @@ impl<'p> Interp<'p> {
                     let key = match pp.key {
                         Key::Computed(e) => {
                             let kv = self.eval_expr(e)?;
-                            self.to_key(kv)?
+                            self.coerce_key(kv)?
                         }
                         k => {
                             let s = self.key_string(k, prog)?;
@@ -2151,6 +2213,7 @@ impl<'p> Interp<'p> {
     }
 
     fn iter_next(&mut self, it: &mut It) -> Res<Option<Value>> {
+        self.tick()?;
         match it.src {
             Value::String(s) => {
                 let Some((_, n)) = h!(self, self.heap.code_point_at(s, it.i)) else { return Ok(None) };
@@ -2160,7 +2223,7 @@ impl<'p> Interp<'p> {
             }
             src => {
                 let len = self.get_prop(src, self.k_length)?;
-                let len = self.to_number(len)?;
+                let len = self.coerce_number(len)?;
                 if (it.i as f64) >= len {
                     return Ok(None);
                 }
@@ -2191,7 +2254,7 @@ impl<'p> Interp<'p> {
         }
         match op {
             Add => {
-                let (pa, pb) = (self.to_primitive(a, Hint::Default)?, self.to_primitive(b, Hint::Default)?);
+                let (pa, pb) = (self.coerce_primitive(a, Hint::Default)?, self.coerce_primitive(b, Hint::Default)?);
                 if matches!(pa, Value::String(_)) || matches!(pb, Value::String(_)) {
                     let sa = h!(self, self.heap.to_string(pa));
                     let sb = h!(self, self.heap.to_string(pb));
@@ -2201,8 +2264,8 @@ impl<'p> Interp<'p> {
                 Ok(Value::Number(x + y))
             }
             Sub | Mul | Div | Mod | Exp | Shl | Shr | UShr | BitAnd | BitOr | BitXor => {
-                let x = self.to_number(a)?;
-                let y = self.to_number(b)?;
+                let x = self.coerce_number(a)?;
+                let y = self.coerce_number(b)?;
                 Ok(Value::Number(match op {
                     Sub => x - y,
                     Mul => x * y,
@@ -2224,7 +2287,7 @@ impl<'p> Interp<'p> {
             Eq => Ok(Value::Bool(self.loose_eq(a, b)?)),
             Ne => Ok(Value::Bool(!self.loose_eq(a, b)?)),
             Lt | Gt | Le | Ge => {
-                let (pa, pb) = (self.to_primitive(a, Hint::Number)?, self.to_primitive(b, Hint::Number)?);
+                let (pa, pb) = (self.coerce_primitive(a, Hint::Number)?, self.coerce_primitive(b, Hint::Number)?);
                 let r = match op {
                     Lt => self.less(pa, pb)? == Some(true),
                     Gt => self.less(pb, pa)? == Some(true),
@@ -2236,10 +2299,10 @@ impl<'p> Interp<'p> {
             In => {
                 let Value::Object(o) = b else {
                     let t = self.display(b);
-                    let k = self.to_str(a).map(|s| self.heap.to_string_lossy(s).unwrap_or_default()).unwrap_or_default();
+                    let k = self.coerce_string(a).map(|s| self.heap.to_string_lossy(s).unwrap_or_default()).unwrap_or_default();
                     return Err(self.type_err(&format!("Cannot use 'in' operator to search for '{k}' in {t}")));
                 };
-                let key = self.to_key(a)?;
+                let key = self.coerce_key(a)?;
                 Ok(Value::Bool(h!(self, self.heap.has_property(o, key))))
             }
             Instanceof => {
@@ -2251,6 +2314,7 @@ impl<'p> Interp<'p> {
                     return Err(self.type_err("Function has non-object prototype in instanceof check"));
                 };
                 while let Some(p) = h!(self, self.heap.get_prototype_of(o)) {
+                    self.tick()?;
                     if p == callee_proto {
                         return Ok(Value::Bool(true));
                     }
@@ -2275,11 +2339,11 @@ impl<'p> Interp<'p> {
         match (a, b) {
             (Value::Object(_), Value::Object(_)) => Ok(a.strict_equals(b)),
             (Value::Object(_), x) if !is_nullish(x) => {
-                let p = self.to_primitive(a, Hint::Default)?;
+                let p = self.coerce_primitive(a, Hint::Default)?;
                 self.loose_eq(p, b)
             }
             (x, Value::Object(_)) if !is_nullish(x) => {
-                let p = self.to_primitive(b, Hint::Default)?;
+                let p = self.coerce_primitive(b, Hint::Default)?;
                 self.loose_eq(a, p)
             }
             _ => Ok(h!(self, self.heap.loose_equals(a, b))),
@@ -2323,6 +2387,10 @@ impl<'p> Interp<'p> {
     }
 
     fn exec(&mut self, s: StmtId) -> Ex {
+        self.descend(|it| it.exec_inner(s))
+    }
+
+    fn exec_inner(&mut self, s: StmtId) -> Ex {
         self.tick()?;
         let prog = self.prog;
         let st = *prog.stmt(s);
@@ -2702,6 +2770,7 @@ impl<'p> Interp<'p> {
         let mut out = Vec::new();
         loop {
             for k in h!(self, self.heap.own_keys(o)) {
+                self.tick()?;
                 if matches!(k, PropertyKey::Symbol(_)) || !seen.insert(k) {
                     continue;
                 }

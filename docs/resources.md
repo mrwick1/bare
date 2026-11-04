@@ -798,3 +798,37 @@ All 122 assembled JS tests pass in debug and release, crate clippy is clean, and
 Reproduce with `rustc --edition=2024 -C opt-level=3 tools/js/heap_load.rs -o <out>` and `<out> run small|lookup|churn 100`. `LIVE_PCT=10 <out> run frac 100` checks scattered survivors. Every invocation should use a separate process and the caps above. Earlier foundation tables describe the older slot representation.
 
 Not tested by the parent in this change: other allocators/platforms, hard OOM, multiple heaps, browser/evaluator workloads, a new full big-properties or strings performance matrix, or capacity release from metadata/free/gray vectors. The delegate's wider matrix was partly noisy and is not used to claim a CPU improvement. This change does not add automatic collection or alter the explicit-root contract.
+
+
+## JavaScript evaluator
+
+`bare_js::eval::Interp` walks the parser AST and owns a managed heap. It first checks every reachable syntax node, then runs the script once. Host code can call a function value later. The tested subset includes primitive operators and conversions, lexical scope and TDZ, var and function hoisting, ordinary functions and arrows, closures, arguments, defaults/rest, object/array patterns, loops and labels, exceptions and finally, optional chains, construction and descriptor-aware getters/setters. Builtins cover a small Object, Function, Array, Error and primitive-conversion set. This is not full language or staging compatibility.
+
+Classes, async functions, await, tagged templates, regexp/BigInt literals, super, new.target, private names, with and for-await are rejected during setup. Missing globals such as Promise, JSON and Map throw ReferenceError. Some unsupported builtin operations return Unsupported at run time, including wrapper construction, Function construction and Object(primitive). Parser-level unsupported syntax remains separate.
+
+Defaults bound each top-level run/call to 100 million counted steps, 100 call levels, 1 Mi environments and 1 Mi tracked functions. Calls are clamped to 100 levels even if the caller raises the limit. Recursive setup and execution share a hard ceiling of 512 frames. Long flat parser trees can therefore return TraversalDepth during evaluator setup. Run on a thread with at least 8 MiB in release or 64 MiB in debug; arbitrary smaller embedding stacks are unsupported. Parent verified recursive calls and a 20,001-term flat tree stop with limits on an 8 MiB release thread.
+
+Parent regressions found that sparse Array.forEach and Array.join loops could run without consuming steps, and that setup recursion lacked a hard bound. Those tests failed on the submitted behavior and pass with the fixes. Native traversals now charge steps; temporary join/template append growth checks string-length and byte bounds before expansion. Parent also fixed generic Array.pop ignoring non-configurable deletion and array-like indices at and above 2^32-1. Large indices become ordinary string property keys, and ToLength uses the safe-integer bound. All these limits remain distinct from catchable JavaScript exceptions. Join no longer copies its separator buffer on entry.
+
+Collection stays explicit and never runs within an active call. Environments and function metadata live outside the heap; roots includes their bindings, this values, closures, bound arguments, builtin objects and cached keys. Interp.collect first finds reachable environments/functions, then collects the heap. Host-held results or thrown values must be passed as extra roots. Host code must not inject handles from another heap; ownership does not detect foreign-handle collisions. Tests keep a live closure after collecting more than 2,000 dead closures and validate direct heap collection with the exposed roots.
+
+Parent matched all 202 committed tiny programs against Node vm in an empty context. Five are limit cases and three throw objects. Only generated tiny programs execute under Node; no staging bundle executes. All 141 assembled JS tests pass in debug and release. The 892-test workspace run passes and crate clippy is clean. The final unit/oracle run also passes after removing the separator copy.
+
+Parent ran eight load cases at 1x, 10x and 100x in fresh release processes, each with a 1 GiB address-space cap and 45-second timeout. Every checksum passed. Loads ran alongside other work. Results below are final measurements, not a before/after speed claim.
+
+| 100x workload | Run milliseconds | Peak RSS MiB | Counted steps |
+| --- | --- | --- | --- |
+| Loop | 8,642.8 | 3.3 | 320,000,011 |
+| Function calls | 5,553.6 | 3.3 | 210,000,012 |
+| Fibonacci | 219.0 | 3.5 | 12,341,484 |
+| Retained closures | 1,102.5 | 535.6 | 20,500,022 |
+| Objects | 2,949.6 | 93.2 | 66,006,021 |
+| Synthetic webpack queue | 34.4 | 20.7 | 675,034 |
+| Throws | 1,953.7 | 301.1 | 46,000,014 |
+| Concatenation | 85.9 | 194.7 | 80,012 |
+
+The load harness raises the step cap for its workload sizes. The call workload allocates 33 times in the run; it reuses argument vectors. Retaining 500,000 closures keeps 500,001 environments and about one million heap objects. Ordinary functions eagerly own prototype objects. Repeated string concatenation remains quadratic in copied/interned text; 10,000 concatenations retain about 191 MiB of accounted heap data until collection. Throws likewise accumulate until collection. These are measured remaining costs. The synthetic webpack case tests queue/callback shapes only.
+
+Known semantic deviations: parameter and body bindings share an environment, so default parameters can see body vars and have no TDZ. Arguments is unmapped and not iterable. Primitive sloppy this is not boxed. String.prototype and function toString are absent. Array/string iteration lacks user-defined iterator protocols. Script completion uses a simplified rule rather than full UpdateEmpty. Cyclic Array.join currently ends at an execution limit instead of producing the usual empty cycle element. Global declaration descriptor checks differ from Node vm's host behavior and are not part of that oracle.
+
+Reproduce with `tools/js/eval_check.sh` and `tools/js/eval_load.sh <output-file>`. Not tested: real staging execution, DOM/network integration, async/Promise or class behavior, mapped arguments, full iterator semantics, full UpdateEmpty, automatic collection during execution, hard allocator OOM recovery, Windows or macOS. Internal evaluator vectors and allocator slack are outside the heap payload-byte accounting.
