@@ -623,3 +623,30 @@ Reproduce: `cargo run --release -p bare-net --example https_load -- hs|ka|big|po
 Public staging checks use `bare` itself. `sh tools/staging_https_check.sh` prints `ok /login sha256 0bc6a3d32df8098c47b0de2d683ebcbeb5653d67717c39aa67c2bf2bbc12f773`. `bare --resources` reports 17 successful downloads and 575,754 bytes. Parent separately parsed the fixture's script/stylesheet references, ran `bare --source` for each distinct target and compared SHA-256 after removing only the CLI's final newline. All 17 match `tools/fixtures/staging/manifest-2026-11-04.json`. No live load or authenticated POST was run.
 
 Remaining limits: no HRR, TLS 1.2, resumption, KeyUpdate handling, wildcard SANs or IP-literal HTTPS. Key limits fail closed. Dropping a stream does not send close_notify. Early replies during a failed large TLS upload can surface as an error; POST is still never retried. Blocking application I/O uses socket timeouts. No non-Linux host or long-term leak measurement was tested. Runtime-generated chunks, JavaScript execution and login E2E remain open.
+
+## JavaScript lexical foundation
+
+2026-11-04, archMachine, release. `bare-js::lex` borrows source text and emits 12-byte tokens with byte spans, newline metadata and escape facts. Source size is capped at 64 MiB. The caller supplies division, regexp or template-continuation goals. Decoders produce UTF-16 code units only on request. The lexer keeps no parser stack or per-token String.
+
+Parent review reproduced a panic when a public string token ended inside a UTF-8 character. The regression failed before the fix. Decoders now check source ranges and literal delimiters before slicing. Numeric decoding checks radix prefixes and digits. The same regression covers huge offsets, template boundaries and short numeric spans. Tokens carry no source identity; callers must pair them with the correct source.
+
+Parent compared all 15 cached scripts with installed Acorn 8.15.0. Classes, byte spans and newline flags match. The oracle supplies the lexical goals. Every literal decoder is exercised, but the bundle comparison does not compare all decoded values or establish a real parser's goal selection. Separate unit tests check decoded values and errors. No target script was executed.
+
+Parent ran `tools/js_lex_load.sh 3`, then repeated the small-token and repeated-literal cases with five samples after other checks finished. Each scale is a fresh process. The harness caps address space at 1 GiB and runtime at 120 s. Counts, spans, checksums and malformed-input results are asserted. The table uses later five-sample medians for small/repeat and initial three-sample medians for other cases.
+
+| Case | Bytes at 1x / 10x / 100x | Median milliseconds | 100x peak RSS KiB | Timed-loop allocations |
+| --- | --- | --- | --- | --- |
+| Small tokens | about 0.5 / 5 / 50 MiB | 3.85 / 40.74 / 405.74 | 53,600 | 0 |
+| Repeated literals | same sizes | 2.88 / 15.40 / 157.91 | 53,636 | 0 |
+| Comments | same sizes | 0.27 / 2.40 / 26.03 | 53,616 | 0 |
+| Strings, scan | same sizes | 0.48 / 4.39 / 53.61 | 53,652 | 0 |
+| Strings, decode | same sizes | 1.24 / 12.34 / 125.18 | 53,632 | 0 |
+| Malformed cases | 116,501 / 1,165,081 / 11,650,841 short sources plus one large bad source | 5.80 / 59.25 / 603.87 | 104,824 | 0 |
+
+The 100x small case has 28,973,805 tokens; the repeated case has 11,121,250. Sources are held before timing. The decode buffer is reused. The malformed case keeps additional constructed input, which explains its higher RSS. Initial concurrent 100x medians were 742 ms for small and 431 ms for repeat; later medians were 406 and 158 ms without a code change. This variation does not establish an optimization gain.
+
+The delegate measured gains from jumping between block-comment stars and widening ASCII directly to UTF-16. Parent reproduced the final code only. Punctuator, identifier-loop and inline experiments gave no reliable gain in the delegated runs and were reverted. No further optimization was justified by the parent checks.
+
+Checks: 774 workspace tests pass; 26 lexer tests pass in debug and release; crate clippy is clean. Reproduce target comparisons with `ACORN=file:///path/to/acorn.mjs tools/js_lex_check.sh <bundle-dir>`. The small checked-in sample is under `tools/fixtures/js`. The oracle parses source and never executes it.
+
+Not implemented or tested: parser integration, executable code, browser execution, non-ASCII identifiers, regexp pattern grammar, regexp v flag and BigInt values. The lexer reports legacy octal and bad template escapes; the parser must enforce strict-mode and tagged-template rules. Scanning the target files does not establish React/Next.js compatibility or login E2E.

@@ -104,7 +104,9 @@ Build the JavaScript interpreter from module 9. Bring forward the single-page sc
 
 Topic 1 initial evidence is complete in [staging-js-requirements.md](staging-js-requirements.md). All 15 inspected scripts match the public manifest and parse with the external ES2022 syntax oracle. There is no JS runtime in `bare` yet. The evidence includes private fields, async functions, webpack queue replay and browser API call sites. It does not prove runtime reachability or compatibility.
 
-Next implementation split: build the lexer and literal decoding independently from managed values and heap storage. Use borrowed source spans and UTF-16 string semantics. Keep handles stable across collection. The parser follows the lexer interface; executable code, scopes, built-ins and the event loop follow their tested foundations. Each output gets isolated correctness and bounded load checks before integration. Parent owns crate exports and shared progress. No app-specific login shortcut replaces JavaScript execution.
+The lexer foundation of topic 2 is complete. `bare-js` scans borrowed source with explicit slash/template goals. Tokens hold byte spans and newline flags. Literal decoding uses UTF-16 code units. All 15 cached bundles match Acorn token classes, spans and newline flags when Acorn supplies the goals. A parser must still choose these goals itself. Non-ASCII identifiers, regexp pattern grammar and strict-mode rules remain unsupported or deferred. There is no parser or executor yet.
+
+Next implementation split: build the parser over the reviewed lexer API while managed values and heap storage proceed independently. Use borrowed source spans and UTF-16 string semantics. Keep handles stable across collection. The parser follows the lexer interface; executable code, scopes, built-ins and the event loop follow their tested foundations. Each output gets isolated correctness and bounded load checks before integration. Parent owns crate exports and shared progress. No app-specific login shortcut replaces JavaScript execution.
 
 | Topic | Work | Check before closing |
 | --- | --- | --- |
