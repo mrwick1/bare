@@ -279,6 +279,7 @@ impl<'p> Interp<'p> {
             Nat::Ext(x) => self.call_ext(x, this, args, is_new),
             Nat::Ao(f) => self.call_ao(f, this, args),
             Nat::Sc(f) => self.call_sc(f, this, args, is_new),
+            Nat::Refl(f) => self.call_refl(f, args),
         }
     }
 
@@ -303,9 +304,9 @@ impl<'p> Interp<'p> {
                 if len > (1 << 20) {
                     return Err(self.mk_err(RANGE_ERROR, "Too many arguments in function call"));
                 }
+                self.spend(len)?;
                 let mut out = Vec::with_capacity(len as usize);
                 for i in 0..len {
-                    self.tick()?;
                     out.push(self.get_prop(v, PropertyKey::Index(i as u32))?);
                 }
                 Ok(out)

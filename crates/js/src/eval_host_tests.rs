@@ -343,3 +343,15 @@ fn host_iteration_uses_the_shared_engine() {
         assert_eq!(out(&mut it, "symiter(a) === a[S] && drain([1, 2])"), "2");
     });
 }
+
+#[test]
+fn a_host_constructor_with_a_different_new_target_is_a_gate() {
+    big(|| {
+        let (mut it, _t) = setup();
+        let r = out(&mut it, "function G() {} Reflect.construct(Thing, [], G)");
+        assert!(r.starts_with("unsupported:subclassing a host constructor"), "{r}");
+        assert_eq!(out(&mut it, "typeof Reflect.construct(Thing, [], Thing)"), "object");
+        assert_eq!(out(&mut it, "typeof Reflect.construct(Thing, [])"), "object");
+        assert_eq!(out(&mut it, "try { Reflect.construct(echo, []) } catch (e) { e.name }"), "TypeError");
+    });
+}

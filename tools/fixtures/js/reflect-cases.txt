@@ -1,0 +1,306 @@
+# bare-js Object.getOwnPropertyNames, Reflect.ownKeys and Reflect.construct cases (Node is the oracle; same format as weak-cases.txt).
+# Messages are not compared: errors are logged by name. Function own-key lists differ on purpose (V8 adds `arguments` and
+# `caller`) so no case prints them.
+=== names_basic
+var log = []; function L(x) { log.push(String(x)); }
+var o = { b: 1, 2: 'x', a: 2, 1: 'y' };
+Object.defineProperty(o, 'hidden', { value: 1, enumerable: false });
+Object.defineProperty(o, 0, { value: 1, enumerable: false });
+var s1 = Symbol('s1'); o[s1] = 1;
+L(Object.getOwnPropertyNames(o)); L(Object.keys(o));
+L(Array.isArray(Object.getOwnPropertyNames(o)));
+var a = [5, 6, 7]; a.extra = 1;
+L(Object.getOwnPropertyNames(a)); L(Object.getOwnPropertyNames([]));
+L(Object.getOwnPropertyNames(Object.create(o)));
+L(Object.getOwnPropertyNames('ab')); L(Object.getOwnPropertyNames(''));
+L(Object.getOwnPropertyNames(5)); L(Object.getOwnPropertyNames(true)); L(Object.getOwnPropertyNames(Symbol('q')));
+L(Object.getOwnPropertyNames.length); L(Object.getOwnPropertyNames.name);
+L(Object.getOwnPropertyNames({ 4294967295: 1, 4294967294: 2, '01': 3, '-1': 4, x: 5 }));
+L(Object.getOwnPropertyNames(function () {}).indexOf('length') >= 0);
+L(Object.getOwnPropertyNames(function () {}).indexOf('prototype') >= 0);
+(function () { return log.join('|'); })
+=== names_errors
+var log = []; function L(x) { log.push(String(x)); }
+function t(v) { try { Object.getOwnPropertyNames(v); L('ok'); } catch (e) { L(e.name); } }
+t(undefined); t(null); t(0); t(''); t({});
+try { Object.getOwnPropertyNames(); } catch (e) { L(e.name); }
+(function () { return log.join('|'); })
+=== names_frozen_sealed
+var log = []; function L(x) { log.push(String(x)); }
+var o = Object.defineProperty({}, 'k', { get: function () { L('getter ran'); return 1; }, enumerable: false });
+L(Object.getOwnPropertyNames(o));
+var s = { z: 1, y: 2 }; delete s.z; s.z = 3; s.w = 4;
+L(Object.getOwnPropertyNames(s));
+(function () { return log.join('|'); })
+=== ownkeys_order
+var log = []; function L(x) { log.push(String(x)); }
+var s1 = Symbol('s1'), s2 = Symbol('s2');
+var o = {}; o.b = 1; o[s1] = 1; o[2] = 1; o.a = 1; o[s2] = 1; o[1] = 1; o['01'] = 1;
+Object.defineProperty(o, 'nope', { value: 1 });
+Object.defineProperty(o, s2, { value: 1, enumerable: false });
+var k = Reflect.ownKeys(o);
+L(k.length); L(k.map(function (x) { return typeof x === 'symbol' ? x.toString() : x; }));
+L(k[k.length - 2] === s1); L(k[k.length - 1] === s2);
+L(Array.isArray(k)); L(Reflect.ownKeys([1, 2]).join()); L(Reflect.ownKeys([]).join());
+L(Reflect.ownKeys(Object.create(o)).length);
+L(Reflect.ownKeys.length); L(Reflect.ownKeys.name);
+L(typeof Reflect); L(Object.prototype.toString.call(Reflect));
+L(Object.getPrototypeOf(Reflect) === Object.prototype);
+L(Reflect.construct.length); L(Reflect.construct.name);
+(function () { return log.join('|'); })
+=== ownkeys_errors
+var log = []; function L(x) { log.push(String(x)); }
+function t(v) { try { Reflect.ownKeys(v); L('ok'); } catch (e) { L(e.name); } }
+t(undefined); t(null); t(1); t('s'); t(true); t(Symbol()); t({}); t([]); t(function () {});
+try { Reflect.ownKeys(); } catch (e) { L(e.name); }
+(function () { return log.join('|'); })
+=== construct_function
+var log = []; function L(x) { log.push(String(x)); }
+function F(a, b) { this.s = a + b; this.nt = new.target === F; this.args = arguments.length; }
+function G() {}
+var r = Reflect.construct(F, [1, 2]);
+L(r.s); L(r.nt); L(r.args); L(r instanceof F); L(Object.getPrototypeOf(r) === F.prototype);
+var r2 = Reflect.construct(F, [3, 4], G);
+L(r2.s); L(r2.nt); L(r2 instanceof F); L(r2 instanceof G); L(Object.getPrototypeOf(r2) === G.prototype);
+var r3 = Reflect.construct(F, [5, 6], F);
+L(r3.nt); L(r3 instanceof F);
+function H() { this.seen = new.target === G; }
+L(Reflect.construct(H, [], G).seen);
+L(Reflect.construct(F, []).s); L(Reflect.construct(F, [1]).s);
+(function () { return log.join('|'); })
+=== construct_new_target_value
+var log = []; function L(x) { log.push(String(x)); }
+var seen;
+function F() { seen = new.target; }
+function G() {}
+Reflect.construct(F, [], G); L(seen === G);
+Reflect.construct(F, []); L(seen === F);
+new F(); L(seen === F);
+F(); L(seen);
+function Arrow() { var f = () => new.target; this.v = f() === G; }
+L(Reflect.construct(Arrow, [], G).v);
+(function () { return log.join('|'); })
+=== construct_class
+var log = []; function L(x) { log.push(String(x)); }
+class A { constructor(x) { this.x = x; this.nt = new.target.name; } }
+class B extends A { constructor(x) { super(x * 2); this.bnt = new.target.name; } }
+class C {}
+var a = Reflect.construct(A, [1]); L(a.x); L(a.nt); L(a instanceof A);
+var a2 = Reflect.construct(A, [1], B); L(a2.nt); L(a2 instanceof B); L(a2 instanceof A); L(Object.getPrototypeOf(a2) === B.prototype);
+var b = Reflect.construct(B, [2]); L(b.x); L(b.nt); L(b.bnt); L(b instanceof B);
+var b2 = Reflect.construct(B, [2], C); L(b2.x); L(b2.nt); L(b2.bnt); L(b2 instanceof C); L(b2 instanceof B); L(Object.getPrototypeOf(b2) === C.prototype);
+class D { f = 1; constructor() { this.g = new.target === D; } }
+L(Reflect.construct(D, []).g);
+class P { constructor() { this.p = 1; } }
+class Q extends P { x = 5; y = this.p + 1; }
+var q = Reflect.construct(Q, [], C); L(q.x); L(q.y); L(q instanceof C); L(q instanceof Q);
+try { A(); } catch (e) { L(e.name); }
+class E { static s() {} m() {} }
+try { Reflect.construct(E.s, []); } catch (e) { L(e.name); }
+try { Reflect.construct(E.prototype.m, []); } catch (e) { L(e.name); }
+(function () { return log.join('|'); })
+=== construct_returns
+var log = []; function L(x) { log.push(String(x)); }
+var o = { tag: 'explicit' };
+function R() { this.a = 1; return o; }
+function P() { this.a = 1; return 5; }
+function U() { this.a = 1; return undefined; }
+function N() { this.a = 1; return null; }
+L(Reflect.construct(R, []) === o); L(Reflect.construct(R, [], P) === o); L(Reflect.construct(P, []).a); L(Reflect.construct(U, []).a); L(Reflect.construct(N, []).a);
+class K { constructor() { return o; } }
+class K2 extends K { constructor() { super(); this.z = 1; } }
+L(Reflect.construct(K, []) === o); L(Reflect.construct(K2, []) === o); L(o.z);
+class KP { constructor() { return 7; } }
+try { Reflect.construct(class extends KP { constructor() { super(); return 1; } }, []); } catch (e) { L(e.name); }
+L(Reflect.construct(KP, []) instanceof KP);
+(function () { return log.join('|'); })
+=== construct_bound
+var log = []; function L(x) { log.push(String(x)); }
+function F(a, b, c) { this.v = [a, b, c].join('-'); this.nt = new.target === F; this.me = new.target === bf; }
+var bf = F.bind(null, 1);
+L(Reflect.construct(bf, [2, 3]).v); L(Reflect.construct(bf, [2, 3]).nt); L(Reflect.construct(bf, [2, 3]).me);
+function G() {}
+var r = Reflect.construct(bf, [2, 3], G); L(r.v); L(r.nt); L(r instanceof G); L(r instanceof F);
+var r2 = Reflect.construct(F, [7, 8, 9], bf); L(r2.v); L(r2.nt); L(r2.me); L(r2 instanceof F);
+var bb = bf.bind(null, 2); L(Reflect.construct(bb, [3]).v);
+class A { constructor(x) { this.x = x; } }
+L(Reflect.construct(A.bind(null, 4), []).x); L(Reflect.construct(A.bind(null, 4), [], bf) instanceof A);
+var arrowBound = (function () {}).bind(null);
+try { Reflect.construct(arrowBound, []); L('ok'); } catch (e) { L(e.name); }
+var arr = (() => 1).bind(null);
+try { Reflect.construct(arr, []); L('ok'); } catch (e) { L(e.name); }
+(function () { return log.join('|'); })
+=== construct_validation
+var log = []; function L(x) { log.push(String(x)); }
+function t(name, f) { try { f(); L(name + ':ok'); } catch (e) { L(name + ':' + e.name); } }
+function F() {}
+t('undef', function () { Reflect.construct(); });
+t('num', function () { Reflect.construct(1, []); });
+t('obj', function () { Reflect.construct({}, []); });
+t('arrow', function () { Reflect.construct(() => 1, []); });
+t('method', function () { Reflect.construct({ m() {} }.m, []); });
+t('getter', function () { Reflect.construct(Object.getOwnPropertyDescriptor({ get g() { return 1; } }, 'g').get, []); });
+t('async', function () { Reflect.construct(async function () {}, []); });
+t('asyncarrow', function () { Reflect.construct(async () => {}, []); });
+t('builtin-fn', function () { Reflect.construct(Object.keys, []); });
+t('reflect-fn', function () { Reflect.construct(Reflect.ownKeys, []); });
+t('reflect-ctor', function () { Reflect.construct(Reflect.construct, []); });
+t('nt-undef', function () { Reflect.construct(F, [], undefined); });
+t('nt-null', function () { Reflect.construct(F, [], null); });
+t('nt-num', function () { Reflect.construct(F, [], 1); });
+t('nt-arrow', function () { Reflect.construct(F, [], () => 1); });
+t('nt-obj', function () { Reflect.construct(F, [], {}); });
+t('nt-async', function () { Reflect.construct(F, [], async function () {}); });
+t('args-missing', function () { Reflect.construct(F); });
+t('args-undef', function () { Reflect.construct(F, undefined); });
+t('args-null', function () { Reflect.construct(F, null); });
+t('args-num', function () { Reflect.construct(F, 1); });
+t('args-str', function () { Reflect.construct(F, 'ab'); });
+t('args-sym', function () { Reflect.construct(F, Symbol()); });
+t('args-fn', function () { Reflect.construct(F, function () {}); });
+t('args-obj', function () { Reflect.construct(F, {}); });
+t('new-ownKeys', function () { new Reflect.ownKeys({}); });
+t('new-construct', function () { new Reflect.construct(F, []); });
+t('new-names', function () { new Object.getOwnPropertyNames({}); });
+t('class-ok', function () { Reflect.construct(class {}, []); });
+(function () { return log.join('|'); })
+=== construct_validation_order
+var log = []; function L(x) { log.push(String(x)); }
+var args = { get length() { L('len'); return 0; } };
+try { Reflect.construct(1, args); } catch (e) { L('t:' + e.name); }
+try { Reflect.construct(function () {}, args, 1); } catch (e) { L('nt:' + e.name); }
+try { Reflect.construct(function () {}, args, undefined); } catch (e) { L('nt2:' + e.name); }
+try { Reflect.construct(function () {}, 1, 1); } catch (e) { L('both:' + e.name); }
+try { Reflect.construct(1, 1, 1); } catch (e) { L('all:' + e.name); }
+Reflect.construct(function () {}, args); L('done');
+(function () { return log.join('|'); })
+=== construct_arraylike_order
+var log = []; function L(x) { log.push(String(x)); }
+var al = {};
+Object.defineProperty(al, 'length', { get: function () { L('length'); return 3; } });
+Object.defineProperty(al, 0, { get: function () { L('0'); return 'a'; } });
+Object.defineProperty(al, 1, { get: function () { L('1'); return 'b'; } });
+Object.defineProperty(al, 2, { get: function () { L('2'); return 'c'; } });
+Object.defineProperty(al, 3, { get: function () { L('3'); return 'd'; } });
+function F() { L('ctor:' + Array.prototype.join.call(arguments, '')); this.n = arguments.length; }
+var r = Reflect.construct(F, al); L(r.n);
+var NT = (function () {}).bind(null);
+Object.defineProperty(NT, 'prototype', { get: function () { L('ntproto'); return {}; } });
+Reflect.construct(F, { length: 0 }, NT);
+Reflect.construct(F, { get length() { L('len2'); return 0; } }, NT);
+function len(v) { return Reflect.construct(F, { length: v, 0: 'x', 1: 'y', 2: 'z' }).n; }
+L(len(2)); L(len('2')); L(len(2.9)); L(len(-5)); L(len(NaN)); L(len(undefined)); L(len({ valueOf: function () { return 1; } })); L(len(null)); L(len(true));
+try { len({ valueOf: function () { throw new RangeError('x'); } }); } catch (e) { L(e.name); }
+try { Reflect.construct(F, { length: 1, get 0() { throw new TypeError('boom'); } }); } catch (e) { L(e.name); }
+try { Reflect.construct(F, { length: Symbol() }); } catch (e) { L(e.name); }
+(function () { return log.join('|'); })
+=== construct_arraylike_forms
+var log = []; function L(x) { log.push(String(x)); }
+function F() { this.a = Array.prototype.slice.call(arguments); }
+L(Reflect.construct(F, [1, , 3]).a.length); L(Reflect.construct(F, [1, , 3]).a[1]);
+(function () { L(Reflect.construct(F, arguments).a); })(7, 8, 9);
+L(Reflect.construct(F, { length: 2 }).a.length);
+var a = [1, 2]; a.length = 5; L(Reflect.construct(F, a).a.length);
+var big = []; for (var i = 0; i < 1000; i++) big.push(i);
+L(Reflect.construct(F, big).a.length);
+var inherited = Object.create({ 0: 'p', length: 1 }); L(Reflect.construct(F, inherited).a);
+var arr = [1, 2, 3]; var seen;
+function M() { arr.length = 1; seen = arguments.length; }
+Reflect.construct(M, arr); L(seen);
+(function () { return log.join('|'); })
+=== construct_return_prototype
+var log = []; function L(x) { log.push(String(x)); }
+function F() {}
+function G() {} G.prototype = 5;
+var r = Reflect.construct(F, [], G); L(Object.getPrototypeOf(r) === Object.prototype);
+function H() {} H.prototype = null;
+L(Object.getPrototypeOf(Reflect.construct(F, [], H)) === Object.prototype);
+var np = { x: 1 }; function I() {} I.prototype = np;
+L(Object.getPrototypeOf(Reflect.construct(F, [], I)) === np);
+var bf = F.bind(null);
+L(Object.getPrototypeOf(Reflect.construct(F, [], bf)) === Object.prototype);
+L('prototype' in bf);
+class C { static x() {} }
+L(Object.getPrototypeOf(Reflect.construct(F, [], C)) === C.prototype);
+L(Object.getPrototypeOf(Reflect.construct(F, [], Object)) === Object.prototype);
+L(Object.getPrototypeOf(Reflect.construct(F, [], Array)) === Array.prototype);
+L(Object.getPrototypeOf(Reflect.construct(F, [], Error)) === Error.prototype);
+L(Object.getPrototypeOf(Reflect.construct(F, [], RegExp)) === RegExp.prototype);
+L(Object.getPrototypeOf(Reflect.construct(F, [], Map)) === Map.prototype);
+L(Object.getPrototypeOf(Reflect.construct(F, [], String)) === String.prototype);
+L(Object.getPrototypeOf(Reflect.construct(F, [], Number)) === Number.prototype);
+(function () { return log.join('|'); })
+=== construct_natives
+var log = []; function L(x) { log.push(String(x)); }
+function G() {} G.prototype = Object.create(Error.prototype);
+var a = Reflect.construct(Array, [3]); L(a.length); L(Array.isArray(a)); L(Reflect.construct(Array, [1, 2, 3]).join());
+var a2 = Reflect.construct(Array, [2], G); L(Array.isArray(a2)); L(a2 instanceof G); L(a2.length);
+var e = Reflect.construct(Error, ['msg']); L(e.message); L(e instanceof Error); L(e.name);
+var e2 = Reflect.construct(TypeError, ['m2'], G); L(e2 instanceof G); L(e2 instanceof TypeError); L(e2.message);
+var e3 = Reflect.construct(RangeError, ['m3']); L(e3 instanceof RangeError); L(e3.name);
+L(Object.getPrototypeOf(Reflect.construct(Object, [], G)) === G.prototype);
+var o = Reflect.construct(Object, []); L(Object.getPrototypeOf(o) === Object.prototype);
+var re = Reflect.construct(RegExp, ['a+', 'g']); L(re.source); L(re.global); L(re.test('caat'));
+var re2 = Reflect.construct(RegExp, ['b'], G); L(re2 instanceof G); L(re2.source);
+var m = Reflect.construct(Map, [[[1, 2]]]); L(m.get(1)); L(m instanceof Map); L(m.size);
+var m2 = Reflect.construct(Map, [], Map); L(m2.size);
+var s = Reflect.construct(Set, [[1, 1, 2]]); L(s.size);
+var w = Reflect.construct(WeakMap, []); L(w instanceof WeakMap);
+var ws = Reflect.construct(WeakSet, [], WeakSet); L(ws instanceof WeakSet);
+var p = Reflect.construct(Promise, [function (res) { res(1); }]); L(p instanceof Promise);
+L(Reflect.construct(Uint8Array, [3]).length); L(Reflect.construct(ArrayBuffer, [4]).byteLength);
+try { Reflect.construct(Symbol, []); } catch (e) { L(e.name); }
+try { Reflect.construct(Math.max, []); } catch (e) { L(e.name); }
+try { Reflect.construct(JSON.parse, []); } catch (e) { L(e.name); }
+try { Reflect.construct(Object.keys, []); } catch (e) { L(e.name); }
+(function () { return log.join('|'); })
+=== construct_nested
+var log = []; function L(x) { log.push(String(x)); }
+function Parent(x) { this.x = x; this.nt = new.target === Child; }
+function Child() { return Reflect.construct(Parent, arguments, new.target); }
+Child.prototype = Object.create(Parent.prototype);
+var c = new Child(9); L(c.x); L(c.nt); L(c instanceof Child); L(c instanceof Parent);
+class Base { constructor(v) { this.v = v; } }
+function Legacy(v) { return Reflect.construct(Base, [v + 1], new.target || Legacy); }
+Legacy.prototype = Object.create(Base.prototype); Legacy.prototype.constructor = Legacy;
+var l = new Legacy(1); L(l.v); L(l instanceof Legacy); L(l instanceof Base);
+class Sub extends Legacy { constructor() { super(10); this.sub = true; } }
+var s = new Sub(); L(s.v); L(s.sub); L(s instanceof Sub); L(s instanceof Legacy); L(Object.getPrototypeOf(s) === Sub.prototype);
+function Rec(n) { this.n = n; if (n > 0) this.child = Reflect.construct(Rec, [n - 1]); }
+var r = new Rec(5); var d = 0; for (var q = r; q; q = q.child) d++; L(d);
+class Sub2 extends Base {}
+var s2 = Reflect.construct(Sub2, [4], Legacy); L(s2.v); L(s2 instanceof Legacy);
+(function () { return log.join('|'); })
+=== construct_react_shape
+var log = []; function L(x) { log.push(String(x)); }
+function Fake() { throw Error('x'); }
+Object.defineProperty(Fake.prototype, 'props', { set: function () { throw Error('p'); } });
+var r;
+function Comp() { this.props = 1; }
+if (typeof Reflect === 'object' && Reflect.construct) {
+  try { Reflect.construct(Fake, []); } catch (e) { r = e; }
+  L(r.message);
+  try { Reflect.construct(Comp, [], Fake); L('no throw'); } catch (e) { L(e.message); }
+}
+L(typeof Reflect === 'object');
+(function () { return log.join('|'); })
+=== names_webpack_shape
+var log = []; function L(x) { log.push(String(x)); }
+var proto = { inherited: 1 };
+var root = Object.create(proto); root.own = 2; Object.defineProperty(root, 'hidden', { value: 3 });
+var seen = {};
+var skip = [null, Object.prototype, Array.prototype, Function.prototype];
+for (var i = 2 & 2 && root; typeof i == 'object' && !~skip.indexOf(i); i = Object.getPrototypeOf(i))
+  Object.getOwnPropertyNames(i).forEach(function (t) { seen[t] = function () { return root[t]; }; });
+L(Object.keys(seen)); L(seen.hidden()); L(seen.inherited()); L(seen.own());
+(function () { return log.join('|'); })
+=== names_views_sparse
+var log = []; function L(x) { log.push(String(x)); }
+var u = new Uint8Array(3);
+L(Object.getOwnPropertyNames(u)); L(Reflect.ownKeys(u).length);
+u.extra = 1; L(Object.getOwnPropertyNames(u)); L(Reflect.ownKeys(new Uint8Array(0)).length);
+L(Object.getOwnPropertyNames(new ArrayBuffer(4)));
+var a = []; a[4000000000] = 1; a[3] = 2; L(Object.getOwnPropertyNames(a));
+L(Object.getOwnPropertyNames(new Array(4294967295)));
+var s = []; s[7] = 1; L(Reflect.ownKeys(s));
+(function () { return log.join('|'); })

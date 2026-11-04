@@ -17,7 +17,7 @@
 //! templates, BigInt, `super` outside a class element, `new.target` in a field initializer, `with`, `for await`, and `await` in `switch`, `for-in`, optional chains, `delete`, `++`/`--`, computed keys and binding patterns.
 //! Async functions and arrows run in a bounded continuation machine: see `eval_async.rs`. A regexp literal is compiled by `Interp::new`;
 //! an invalid pattern, lookbehind, named groups or the flags `u`, `v`, `d` are `Unsupported` there (see `eval_builtins.rs`).
-//! A missing builtin (`WeakRef`, `Reflect`, ...) is an ordinary `ReferenceError` at run time, as in a bare engine.
+//! A missing builtin (`WeakRef`, `Proxy`, ...) is an ordinary `ReferenceError` at run time, as in a bare engine.
 //! `JSON.parse`, `RegExp` and a small `String.prototype` are bound in `eval_builtins.rs`, which lists what is and is not there.
 //! Classes are supported: see `eval_classes.rs` for what runs and what does not.
 //!
@@ -265,6 +265,7 @@ enum Nat {
     Bin(BinFn),
     Ao(AoFn),
     Sc(ScFn),
+    Refl(ReflFn),
 }
 
 enum Callee {
@@ -426,6 +427,7 @@ impl<'p> Interp<'p> {
         it.install_array_object()?;
         it.install_promise()?;
         it.install_binary()?;
+        it.install_reflect()?;
         Ok(it)
     }
 
@@ -3012,6 +3014,7 @@ include!("eval_numeric.rs");
 include!("eval_symbols.rs");
 include!("eval_collections.rs");
 include!("eval_weak.rs");
+include!("eval_reflect.rs");
 include!("eval_classes.rs");
 include!("eval_async.rs");
 
@@ -3077,3 +3080,7 @@ mod async_tests;
 #[cfg(test)]
 #[path = "eval_weak_tests.rs"]
 mod weak_tests;
+
+#[cfg(test)]
+#[path = "eval_reflect_tests.rs"]
+mod reflect_tests;
