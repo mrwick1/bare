@@ -14,8 +14,10 @@
 //!
 //! Unsupported is found BEFORE anything runs. `Interp::new` walks every reachable node. Syntax that is not
 //! implemented gives [`Error::Unsupported`] with its span: classes, async functions and `await`, tagged
-//! templates, regexp literals, BigInt, `super`, `new.target`, private names, `with`, `for await`.
-//! A missing builtin (`Map`, `Promise`, `JSON`, ...) is an ordinary `ReferenceError` at run time, as in a bare engine.
+//! templates, BigInt, `super`, `new.target`, private names, `with`, `for await`. A regexp literal is compiled by `Interp::new`;
+//! an invalid pattern, lookbehind, named groups or the flags `u`, `v`, `d` are `Unsupported` there (see `eval_builtins.rs`).
+//! A missing builtin (`Map`, `Promise`, `Symbol`, ...) is an ordinary `ReferenceError` at run time, as in a bare engine.
+//! `JSON.parse`, `RegExp` and a small `String.prototype` are bound in `eval_builtins.rs`, which lists what is and is not there.
 //!
 //! Heap contract: the heap never collects by itself. [`Interp::roots`] lists every value the evaluator
 //! owns (global object, builtin prototypes, every live environment binding and `this`, every function
@@ -39,8 +41,8 @@
 //!   Default-parameter expressions can see the body `var`s. Parameters have no TDZ.
 //! - `arguments` is an unmapped ordinary object (not iterable); sloppy mode never maps it to the parameters.
 //! - Sloppy `this` that is a primitive is not boxed. There are no wrapper objects.
-//! - Builtins are a tiny set (see `install_builtins`). `String.prototype` is absent, so `"a".charAt` is
-//!   `undefined`. Symbols cannot be created, so `for...of`, spread and array patterns work on arrays and
+//! - Builtins are a small set (see `install_builtins` and `install_ext`). `String.prototype` has only the methods the
+//!   staging bundles call. Symbols cannot be created, so `for...of`, spread and array patterns work on arrays and
 //!   strings only (that is exact while no `Symbol.iterator` exists), and `ToPrimitive` skips `@@toPrimitive`.
 //! - The script completion value is the value of the last expression statement that ran (reset to
 //!   `undefined` by `if`, loops, `switch`, `try`). It is not full UpdateEmpty.
@@ -103,6 +105,10 @@ pub enum LimitKind {
     /// The kept scripts have too many syntax nodes together, or one list or nesting is too large.
     ScriptNodes,
     Heap(Limit),
+    /// A bound of a RegExp binding (see `eval_builtins.rs`).
+    Regexp(RegexpLimit),
+    /// A bound of the `JSON.parse` text parser.
+    Json(crate::json::LimitKind),
 }
 
 /// Valid syntax or a builtin that is not implemented. `span` is the byte range of the construct
@@ -233,6 +239,8 @@ enum Nat {
     NumberFn,
     BooleanFn,
     IsNaN,
+    /// JSON, RegExp and String.prototype bindings (`eval_builtins.rs`).
+    Ext(Bi),
 }
 
 enum Callee {
@@ -331,6 +339,8 @@ pub struct Interp<'p> {
     array_proto: ObjId,
     error_protos: [ObjId; 5],
     promise: PromiseState,
+    /// JSON, RegExp and String bindings: state of `eval_builtins.rs`.
+    ext: Ext,
     // permanent keys
     k_length: PropertyKey,
     k_name: PropertyKey,
@@ -367,6 +377,7 @@ impl<'p> Interp<'p> {
         let mut it = Self::with_code(Rc::new(prog.clone().into_owned()), heap, limits)?;
         it.walk_program()?;
         it.install_builtins()?;
+        it.install_ext()?;
         it.install_promise()?;
         Ok(it)
     }
@@ -404,6 +415,7 @@ impl<'p> Interp<'p> {
         for p in error_protos.iter_mut() {
             *p = e!(heap.new_object(Some(object_proto)));
         }
+        let ext = e!(Ext::new(&mut heap, object_proto));
         let mut key = |s: &str| heap.key_from_str(s);
         let ks = [
             e!(key("length")), e!(key("name")), e!(key("message")), e!(key("prototype")), e!(key("constructor")),
@@ -452,6 +464,7 @@ impl<'p> Interp<'p> {
             array_proto,
             error_protos,
             promise: PromiseState::default(),
+            ext,
             k_length: ks[0],
             k_name: ks[1],
             k_message: ks[2],
@@ -517,6 +530,7 @@ impl<'p> Interp<'p> {
     pub fn roots(&self) -> Vec<Value> {
         let mut v = vec![Value::Object(self.global), Value::Object(self.object_proto), Value::Object(self.function_proto), Value::Object(self.array_proto), self.ret, self.completion];
         v.extend(self.error_protos.iter().map(|&o| Value::Object(o)));
+        self.ext_roots(&mut v);
         for k in [self.k_length, self.k_name, self.k_message, self.k_prototype, self.k_constructor, self.k_to_string, self.k_value_of, self.k_proto, self.k_value, self.k_writable, self.k_enumerable, self.k_configurable, self.k_get, self.k_set] {
             if let PropertyKey::String(s) = k {
                 v.push(Value::String(s));
@@ -556,6 +570,7 @@ impl<'p> Interp<'p> {
         let mut env_seen = vec![false; self.envs.len()];
         let mut work: Vec<Value> = vec![Value::Object(self.global), Value::Object(self.object_proto), Value::Object(self.function_proto), Value::Object(self.array_proto), self.ret, self.completion];
         work.extend(self.error_protos.iter().map(|&o| Value::Object(o)));
+        self.ext_roots(&mut work);
         work.extend_from_slice(extra);
         self.promise_roots(&mut work);
         let mut env_work: Vec<u32> = vec![0];
@@ -609,6 +624,7 @@ impl<'p> Interp<'p> {
         }
         self.funcs.retain(|o, _| seen.contains(o));
         self.promise_prune(&seen);
+        self.ext_prune(&seen);
         let mut roots = self.roots();
         roots.extend_from_slice(extra);
         Ok(h!(self, self.heap.collect(&roots)))
@@ -973,7 +989,7 @@ impl<'p> Interp<'p> {
             }
             ExprKind::This | ExprKind::Null | ExprKind::Bool(_) | ExprKind::Number(_) | ExprKind::String | ExprKind::Hole => {}
             ExprKind::BigInt => return Err(unsupported("BigInt literal", ex.span)),
-            ExprKind::RegExp => return Err(unsupported("regexp literal", ex.span)),
+            ExprKind::RegExp => self.ext_walk_regexp(e, ex.span)?,
             ExprKind::Template(t) => {
                 let t = *prog.template(t);
                 for x in prog.template_exprs(&t) {
@@ -1377,7 +1393,7 @@ impl<'p> Interp<'p> {
         }
         let d = match self.funcs.get(&o) {
             Some(&Callee::Script { script, fid, env, self_binding }) if self.func_of(script, fid).kind == FuncKind::Normal => D::S(script, fid, env, self_binding),
-            Some(&Callee::Native(n)) if matches!(n, Nat::ObjectCtor | Nat::FnCtor | Nat::ArrayCtor | Nat::ErrorCtor(_)) => D::N(n),
+            Some(&Callee::Native(n)) if matches!(n, Nat::ObjectCtor | Nat::FnCtor | Nat::ArrayCtor | Nat::ErrorCtor(_) | Nat::Ext(Bi::RegExpCtor)) => D::N(n),
             Some(&Callee::Native(Nat::StringFn | Nat::NumberFn | Nat::BooleanFn)) => return Err(unsupported("wrapper object (new String/Number/Boolean)", Span::default())),
             Some(Callee::Bound { target, args, .. }) => D::B(*target, args.clone()),
             Some(&Callee::Promise(pf @ PFn::Ctor)) => D::P(pf),
@@ -1555,7 +1571,7 @@ impl<'p> Interp<'p> {
                 {
                     return Ok(Value::String(h!(self, self.heap.substring(s, i as usize, i as usize + 1))));
                 }
-                self.object_proto
+                self.ext.string_proto
             }
             _ => self.object_proto,
         };
@@ -1803,6 +1819,7 @@ impl<'p> Interp<'p> {
                 self.expr_str[e.index()] = Some(s);
                 Ok(Value::String(s))
             }
+            ExprKind::RegExp => self.ext_eval_regexp(e),
             ExprKind::Template(t) => {
                 let t = *prog.template(t);
                 let mut out: Vec<u16> = Vec::new();
@@ -2864,6 +2881,7 @@ fn num_base(t: &str) -> NumBase {
 include!("eval_native.rs");
 include!("eval_promise.rs");
 include!("eval_scripts.rs");
+include!("eval_builtins.rs");
 
 #[cfg(test)]
 #[path = "eval_tests.rs"]
@@ -2876,3 +2894,6 @@ mod promise_tests;
 #[cfg(test)]
 #[path = "eval_scripts_tests.rs"]
 mod script_tests;
+#[cfg(test)]
+#[path = "eval_builtins_tests.rs"]
+mod builtin_tests;

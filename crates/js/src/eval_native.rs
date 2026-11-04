@@ -90,6 +90,7 @@ impl<'p> Interp<'p> {
             Nat::ObjectGetPrototypeOf => match a0 {
                 Value::Object(o) => Ok(h!(self, self.heap.get_prototype_of(o)).map_or(Value::Null, Value::Object)),
                 Value::Undefined | Value::Null => Err(self.type_err("Cannot convert undefined or null to object")),
+                Value::String(_) => Ok(Value::Object(self.ext.string_proto)),
                 _ => Ok(Value::Object(self.object_proto)),
             },
             Nat::ObjHasOwn => {
@@ -112,6 +113,7 @@ impl<'p> Interp<'p> {
                     Value::String(_) => "String",
                     Value::Symbol(_) => "Symbol",
                     Value::Object(o) if self.funcs.contains_key(&o) => "Function",
+                    Value::Object(o) if self.ext.regexps.contains_key(&o) => "RegExp",
                     Value::Object(o) if h!(self, self.heap.is_array(o)) => "Array",
                     Value::Object(_) => "Object",
                 };
@@ -268,6 +270,7 @@ impl<'p> Interp<'p> {
             Nat::NumberFn => Ok(Value::Number(if args.is_empty() { 0.0 } else { self.coerce_number(a0)? })),
             Nat::BooleanFn => Ok(Value::Bool(self.truthy(a0)?)),
             Nat::IsNaN => Ok(Value::Bool(self.coerce_number(a0)?.is_nan())),
+            Nat::Ext(x) => self.call_ext(x, this, args, is_new),
         }
     }
 

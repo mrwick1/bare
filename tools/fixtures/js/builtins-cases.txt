@@ -1,0 +1,180 @@
+=== json basic
+var o = JSON.parse('{"a":[1,2,{"b":null}],"c":"x\\u00e9","d":true}'); o.a.length + ":" + o.a[2].b + o.c + o.d + (Object.getPrototypeOf(o) === Object.prototype) + Array.isArray(o.a) + (Object.getPrototypeOf(o.a) === Array.prototype);
+=== json numbers
+[JSON.parse("-0"), 1 / JSON.parse("-0"), JSON.parse("1e3"), JSON.parse(" 12 "), JSON.parse("1E+2"), JSON.parse("0.5"), JSON.parse("1e400")].join();
+=== json proto key is own
+var o = JSON.parse('{"__proto__":1,"a":2}'); Object.keys(o).join() + o.__proto__ + (Object.getPrototypeOf(o) === Object.prototype);
+=== json duplicate key
+var o = JSON.parse('{"a":1,"b":2,"a":3}'); Object.keys(o).join() + o.a;
+=== json lone surrogate
+var s = JSON.parse('"\\ud800x\\udc00"'); s.length + ":" + s.charCodeAt(0) + ":" + s.charCodeAt(2);
+=== json syntax errors
+var bad = ["", "{", "[1,]", "01", "'a'", '{"a":1,}', '"\\x"', '"a\nb"', "1 2", "undefined", "+1", "[1", '{"a"}', "tru", '"\\u12"', "-", "1.", ".5", " 1", "[]x"], out = []; for (var i = 0; i < bad.length; i++) { try { JSON.parse(bad[i]); out.push("ok"); } catch (e) { out.push(e.name); } } out.join();
+=== json coercion
+[JSON.parse(123), JSON.parse(null), JSON.parse(true), JSON.parse("[1]", 5).length, JSON.parse({ toString: function () { return "[7]"; } })[0]].join();
+=== json nested
+var s = "", i; for (i = 0; i < 50; i++) s += "["; s += "1"; for (i = 0; i < 50; i++) s += "]"; var v = JSON.parse(s), d = 0; while (Array.isArray(v)) { v = v[0]; d++; } d + ":" + v;
+=== json empty containers and escapes
+var o = JSON.parse('{"a":{},"b":[],"c":"\\n\\t\\"\\\\\\/\\b\\f\\r","":0}'); [Object.keys(o).join("|"), o.c.length, o.c.charCodeAt(2), o.c.charCodeAt(4), o[""]].join();
+=== re literal exec
+var r = /a(b)?c/.exec("xacz"); [r.length, r[0], typeof r[1], r.index, r.input, typeof r.groups, Object.keys(r).join()].join("|");
+=== re test global lastIndex
+var r = /a/g; [r.test("aa"), r.lastIndex, r.test("aa"), r.lastIndex, r.test("aa"), r.lastIndex].join();
+=== re sticky
+var r = /a/y; r.lastIndex = 1; [r.test("ba"), r.lastIndex, r.test("ba"), r.lastIndex, r.test("ab"), r.lastIndex].join();
+=== re lastIndex coercion
+var r = /a/g; r.lastIndex = "1"; var x = r.exec("aaa").index; r.lastIndex = { valueOf: function () { return 2; } }; [x, r.exec("aaa").index, r.lastIndex].join();
+=== re lastIndex untouched without g or y
+var r = /a/; r.lastIndex = 5; [r.test("a"), r.lastIndex, r.exec("a").index].join();
+=== re lastIndex beyond length resets
+var r = /a/g; r.lastIndex = 10; [r.test("a"), r.lastIndex].join();
+=== re lastIndex negative and NaN
+var r = /a/g; r.lastIndex = -3; var a = r.exec("a").index; r.lastIndex = NaN; r.lastIndex + ":" + a + ":" + r.exec("a").index + ":" + r.lastIndex;
+=== re lastIndex fractional and infinity
+var r = /a/g; r.lastIndex = 1.9; var a = r.test("aa"); r.lastIndex = Infinity; [a, r.lastIndex === Infinity, r.test("aa"), r.lastIndex].join();
+=== re lastIndex valueOf throws
+var r = /a/; r.lastIndex = { valueOf: function () { throw new RangeError("v"); } }; try { r.test("a"); "no"; } catch (e) { e.name; }
+=== re lastIndex descriptor
+var d = Object.getOwnPropertyDescriptor(/a/, "lastIndex"); [d.value, d.writable, d.enumerable, d.configurable].join();
+=== re lastIndex redefine and delete
+var r = /a/g, out = []; try { Object.defineProperty(r, "lastIndex", { enumerable: true }); out.push("ok"); } catch (e) { out.push(e.name); } try { Object.defineProperty(r, "lastIndex", { value: 3 }); out.push(r.lastIndex); } catch (e) { out.push(e.name); } out.push(delete r.lastIndex); out.push(r.hasOwnProperty("lastIndex")); out.join();
+=== re lastIndex nonwritable
+var r = /a/g; Object.defineProperty(r, "lastIndex", { writable: false }); var o = []; try { r.exec("a"); o.push("ok"); } catch (e) { o.push(e.name); } try { "a".replace(r, "x"); o.push("ok"); } catch (e) { o.push(e.name); } try { r.test("b"); o.push("ok"); } catch (e) { o.push(e.name); } try { "a".match(r); o.push("ok"); } catch (e) { o.push(e.name); } o.join();
+=== re lastIndex nonwritable without g
+var r = /a/; Object.defineProperty(r, "lastIndex", { writable: false }); [r.test("a"), r.exec("b"), "a".replace(r, "x"), "a".match(r)[0]].join();
+=== re source and flags
+[/a\/b/g.source, new RegExp("a/b").source, new RegExp("").source, new RegExp("\n").source, new RegExp("[/]").source, new RegExp("\\/").source, /x/gi.flags, new RegExp("x", "ig").flags, /x/.global, /x/g.global, /x/i.ignoreCase, /x/m.multiline, /x/s.dotAll, /x/y.sticky, /x/.unicode, /x/.hasIndices].join("|");
+=== re to string
+[String(/a\/b/gi), String(new RegExp("")), "" + /x/, /x/.toString()].join();
+=== re constructor
+var r = /a/g; [RegExp(r) === r, new RegExp(r) === r, new RegExp(r).flags, new RegExp(r, "i").flags, new RegExp(r, "i").source, RegExp("a", "g").flags, new RegExp(undefined).source, new RegExp("a", undefined).flags, typeof RegExp.prototype.exec, RegExp.length, RegExp.name, RegExp.prototype.constructor === RegExp, r.constructor === RegExp].join();
+=== re constructor coerces
+[new RegExp(12).source, new RegExp(null).source, new RegExp({ toString: function () { return "q+"; } }).source, new RegExp("a", { toString: function () { return "g"; } }).flags].join();
+=== re invalid patterns
+var bad = ["(", ")", "[b-a]", "a**", "\\", "(?", "x{2,1}", "[", "a(?:", "\\k<a", "+", "?", "*a", "{1}"], out = []; for (var i = 0; i < bad.length; i++) { try { new RegExp(bad[i]); out.push("ok"); } catch (e) { out.push(e.name); } } out.join();
+=== re invalid flags
+var bad = ["gg", "x", "ii", "G", "gimsy ", "yy"], out = []; for (var i = 0; i < bad.length; i++) { try { new RegExp("a", bad[i]); out.push("ok"); } catch (e) { out.push(e.name); } } out.join();
+=== re literal is fresh each evaluation
+function f() { return /a/g; } var a = f(), b = f(); a.lastIndex = 3; [a === b, b.lastIndex, a.lastIndex].join();
+=== re literal compiled once keeps no state
+function f(s) { var r = /a/g; r.test(s); return r.lastIndex; } [f("aa"), f("aa"), f("b")].join();
+=== re zero length global replace
+["abc".replace(/x*/g, "-"), "abc".replace(/(?:)/g, "-"), "aaa".replace(/a*?/g, "-"), "".replace(/(?:)/g, "x"), "ab".replace(/\b/g, "|"), "aaa".replace(/a*/g, "-"), "baac".replace(/a*/g, "-")].join();
+=== re zero length global match
+["abc".match(/x*/g).length, "abc".match(/x*/g).join("|"), "aab".match(/a*/g).join("|"), "".match(/x*/g).length].join();
+=== re substitutions
+"2020-01-02".replace(/(\d+)-(\d+)-(\d+)/, "$3/$2/$1|$&|$$|$'|$`|$0|$4|$10|$01|$1x|$<a>|$");
+=== re substitutions with 10 groups
+"abcdefghijk".replace(/(a)(b)(c)(d)(e)(f)(g)(h)(i)(j)/, "$10|$11|$1|$01|$001|$9$");
+=== re unmatched captures
+["ab".replace(/(x)?(b)/, "[$1|$2]"), "ab".replace(/(x)?(b)/, function (m, a, b, i, s) { return [m, typeof a, b, i, s].join(); }), "ab".replace(/(x|(b))*/, "<$2>")].join(" ");
+=== re replace callback arguments
+["abc".replace(/b/, function () { return arguments.length; }), "abc".replace(/(b)/, function () { return arguments.length; }), "abcb".replace(/b/g, function (m, i, s) { return "[" + i + s.length + "]"; }), "abc".replace(/b/, function () { return undefined; }), "abc".replace(/b/, function () { return 12; })].join();
+=== re replace callback this
+var t; "a".replace(/a/, function () { t = this === (function () { return this; })(); }); t;
+=== re replace callback reentrancy
+var r = /a/g; var s = "aXa".replace(r, function (m) { return r.test("a") ? "1" : "0"; }); s + ":" + r.lastIndex;
+=== re replace callback nested replace on same regexp
+var r = /(\d)/g; "a1b2".replace(r, function (m, d) { return "<" + "x9y8".replace(r, "#") + d + ">"; });
+=== re replace callback throws
+try { "a".replace(/a/, function () { throw new TypeError("boom"); }); "no"; } catch (e) { e.name + ":" + e.message; }
+=== re replace callback sees lastIndex zero
+var r = /a/g, seen = []; "aa".replace(r, function () { seen.push(r.lastIndex); return ""; }); seen.join();
+=== re replace callback may reset regexp
+var r = /a/g, n = 0; "aaa".replace(r, function () { r.lastIndex = 7; n++; return "b"; }); n + ":" + r.lastIndex;
+=== re replace sticky and global sticky
+["aab".replace(/a/y, "x"), "aab".replace(/a/gy, "x"), "baa".replace(/a/gy, "x"), "baa".replace(/a/y, "x")].join();
+=== re replace non-global ignores later matches
+["aaa".replace(/a/, "b"), "aaa".replace(/a/g, "b"), "aAa".replace(/a/gi, "b")].join();
+=== re match groups array
+var m = "xaby".match(/(a)(z)?(b)/); [m.length, m.index, m.input, m[0], m[1], typeof m[2], m[3], typeof m.groups].join();
+=== re match global strings
+["a1b22c333".match(/\d+/g).join("|"), "abc".match(/x/g), "abc".match(/b/).index, "abc".match(/b/g).index].join();
+=== re match string and undefined argument
+["a.c".match(".")[0], "abc".match()[0] === "", "abc".match("(b)")[1], "a+b".match("\\+").index].join();
+=== re match invalid string pattern
+try { "a+b".match("+"); "no"; } catch (e) { e.name; }
+=== re split
+["a1b22c".split(/\d/).join("|"), "a1b".split(/(\d)/).join("|"), "abc".split(/(?:)/).join("|"), "abc".split(/b/, 1).join("|"), "".split(/x/).length, "".split(/(?:)/).length, "ab".split(/a*?/).join("|"), "abc".split(/(b)|(x)/).length, "abc".split(/b/, 0).length, "ab".split(/b/, 5).join("|")].join(" ");
+=== re split html example
+"A<B>bold</B>and<CODE>coded</CODE>".split(/<(\/)?([^<>]+)>/).join("|");
+=== re split sticky
+["a,b".split(/,/y).join("|"), "a,b,".split(/,/gy).join("|"), "a1b".split(/\d/g).join("|")].join(" ");
+=== re split does not touch lastIndex
+var r = /a/g; r.lastIndex = 1; var p = "bab".split(r); p.join("|") + ":" + r.lastIndex;
+=== re split empty matches at edges
+["abc".split(/$/).join("|"), "abc".split(/^/).join("|"), "abc".split(/(?=b)/).join("|"), "a\nb".split(/^/m).join("|"), "abc".split(/c*/).join("|")].join(" ");
+=== re flags behaviour
+[/^b/m.test("a\nb"), /^b/.test("a\nb"), /A/i.test("a"), /./s.test("\n"), /./.test("\n"), /a$/m.test("a\nb"), /é/i.test("É"), /[a-c]/i.test("B")].join();
+=== re captures and backrefs
+["abab".match(/(ab)\1/)[0], /(a)|(b)/.exec("b")[1], /(?:a|b)+/.exec("abba")[0], /a{2,3}/.exec("aaaa")[0], /a+?/.exec("aaa")[0], /(a*)*/.exec("b")[0].length].join();
+=== re non-bmp and lone surrogates
+["a😀b".replace(/./g, "x"), "😀".match(/./g).length, "😀".split("").length, "😀".replace(/\ude00/, "x").charCodeAt(0), "😀".replace(/\ud83d/, "x").length, /^.$/.test("😀"), /😀/.test("😀"), /[😀]/.exec("😀").index, "😀".match(/(?:)/g).length].join();
+=== re captures keep lone surrogates
+var m = /(.)/.exec("😀"); [m[1].length, m[1].charCodeAt(0), m.index, m.input.length].join();
+=== re exec own keys and brand
+[Object.keys(/a/.exec("a")).join(), Object.keys(/a/).length, /a/.hasOwnProperty("lastIndex"), Object.prototype.toString.call(/a/), typeof /a/, Object.getPrototypeOf(/a/) === RegExp.prototype].join();
+=== re prototype members
+[RegExp.prototype.source, typeof RegExp.prototype.global, RegExp.prototype.toString(), typeof Object.getOwnPropertyDescriptor(RegExp.prototype, "global").get, Object.getOwnPropertyDescriptor(RegExp.prototype, "exec").enumerable, Object.getOwnPropertyDescriptor(RegExp.prototype, "source").configurable].join();
+=== re receiver checks
+var o = []; try { RegExp.prototype.exec.call({}, "a"); o.push("ok"); } catch (e) { o.push(e.name); } try { RegExp.prototype.test.call(1, "a"); o.push("ok"); } catch (e) { o.push(e.name); } try { Object.getOwnPropertyDescriptor(RegExp.prototype, "global").get.call({}); o.push("ok"); } catch (e) { o.push(e.name); } try { RegExp.prototype.toString.call(1); o.push("ok"); } catch (e) { o.push(e.name); } o.join();
+=== re exec argument coercion
+[/1/.test(1), /undefined/.test(), /null/.test(null), /a,b/.test(["a", "b"]), /x/.exec("y")].join();
+=== re bundle shaped
+["/journeys/abc".match(/^\/journeys\/(?!new\/?$)[^/]+\/?$/) !== null, /^\/journeys\/(?!new\/?$)[^/]+\/?$/.test("/journeys/new"), "/clients/12/x".match(/^\/clients\/[^/]+\/([^/]+)/)[1], "a.b*c".replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "x%3Ay".replace(/%3A/i, ":"), "a b".replace(/ /g, function (e) { return "\\" + e.charCodeAt(0) + " "; }), /^(2272|2461|3299)$/.test("2461"), "Error\n  at x".match(/\n( *(at )?)/)[1]].join("|");
+=== re backtracking is bounded
+/(a+)+b/.test("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaac");
+=== str indexOf
+["abcabc".indexOf("c"), "abcabc".indexOf("c", 3), "abcabc".indexOf("c", 6), "abc".indexOf(""), "abc".indexOf("", 10), "abc".indexOf("", -5), "abc".indexOf("abcd"), "abc".indexOf("bc", -1), "abc".indexOf("c", NaN), "abc".indexOf(), "undefined".indexOf(), "a1".indexOf(1), "aaa".indexOf("aa", 1), "abc".indexOf("a", Infinity)].join();
+=== str includes starts ends
+["abc".includes("b"), "abc".includes("b", 2), "abc".includes(""), "abc".startsWith("ab"), "abc".startsWith("bc", 1), "abc".startsWith("", 9), "abc".startsWith("abcd"), "abc".endsWith("bc"), "abc".endsWith("ab", 2), "abc".endsWith("abc", 99), "abc".endsWith("", 0), "abc".endsWith("a", -1), "abc".endsWith("c", undefined), "abc".startsWith("a", -5)].join();
+=== str search arg regexp is a type error
+var o = []; var f = ["includes", "startsWith", "endsWith"]; for (var i = 0; i < 3; i++) { try { "abc"[f[i]](/b/); o.push("ok"); } catch (e) { o.push(e.name); } } o.join();
+=== str slice
+["abcdef".slice(2), "abcdef".slice(-2), "abcdef".slice(1, -1), "abcdef".slice(4, 2), "abcdef".slice(-100, 2), "abcdef".slice(2, 100), "abcdef".slice(NaN, 3), "abcdef".slice(), "abcdef".slice(0, -12), "abcdef".slice(-3, -1), "abcdef".slice("1", "3"), "abcdef".slice(1, undefined), "abcdef".slice(Infinity), "abcdef".slice(-Infinity, 1)].join("|");
+=== str substring
+["abcdef".substring(2), "abcdef".substring(4, 2), "abcdef".substring(-3, 2), "abcdef".substring(NaN, 3), "abcdef".substring(2, NaN), "abcdef".substring(1, 100), "abcdef".substring(), "abcdef".substring(Infinity), "abcdef".substring(3, undefined)].join("|");
+=== str charAt charCodeAt
+["abc".charAt(1), "abc".charAt(5) === "", "abc".charAt(-1) === "", "abc".charAt(), "abc".charAt("1"), "abc".charAt(1.9), "abc".charCodeAt(1), "abc".charCodeAt(9), "abc".charCodeAt(-1), "abc".charCodeAt(), "abc".charCodeAt(NaN), "é".charCodeAt(0)].join();
+=== str concat
+["a".concat("b", 1, null, undefined, true), "a".concat(), "".concat(), String.prototype.concat.call(12, 3), "a".concat({ toString: function () { return "z"; } })].join();
+=== str trim
+["  a b \t\n".trim(), " ﻿  　  a b  ".trim().length, "​a​".trim().length, "᠎a".trim().length, "".trim().length, "   ".trim().length, "\v\fx\r".trim()].join("|");
+=== str case
+["Hello éß".toUpperCase(), "İ".toLowerCase().length, "Σ".toLowerCase(), "AΣ".toLowerCase(), "AΣ B".toLowerCase(), "ΣA".toLowerCase(), "abc".toUpperCase(), "ABC".toLowerCase(), "ẞ".toLowerCase(), "ﬁ".toUpperCase(), "i̇".toUpperCase().length].join();
+=== str case lone surrogates and non-bmp
+var u = "a\ud800b\udc00c😀".toUpperCase(); [u.length, u.charCodeAt(1), u.charCodeAt(3), u.charCodeAt(5), u.charCodeAt(6), u.charAt(0), "𐐨".toUpperCase().charCodeAt(0), "𐐀".toLowerCase().charCodeAt(1)].join();
+=== str split
+["a,b,c".split(",").join("|"), "a,b,c".split(",", 2).join("|"), "abc".split("").join("|"), "abc".split("", 2).join("|"), "".split(",").length, "".split("").length, "abc".split().length, "abc".split(undefined).join("|"), "abc".split(",", 0).length, "a,b".split(",", undefined).length, "a,,b".split(",").join("|"), ",a,".split(",").length, "abc".split("abc").length, "aXbXc".split("X", -1).length, "abc".split("c").join("|"), "a1b1".split(1).join("|"), "a?b".split("?", 1).join("|")].join(" ");
+=== str split limit coercion
+["a,b,c".split(",", "2").length, "a,b,c".split(",", 2.9).length, "a,b,c".split(",", 4294967297).length, "a,b,c".split(",", NaN).length, "a,b,c".split(",", { valueOf: function () { return 1; } }).length].join();
+=== str replace string pattern
+["abcabc".replace("b", "X"), "abc".replace("", "-"), "abc".replace("c", "$&$&"), "abc".replace("b", "[$`|$']"), "abc".replace("b", "$$"), "abc".replace("b", "$1"), "abc".replace("x", "y"), "a1".replace(1, "x"), "abc".replace("b"), "abc".replace(), "aXb".replace("X", function (m, i, s) { return [m, i, s].join("/"); }), "abc".replace("b", function () { return 5; }), "a.b".replace(".", "$0")].join();
+=== str replace argument coercion order
+var log = []; var p = { toString: function () { log.push("p"); return "b"; } }, r = { toString: function () { log.push("r"); return "X"; } }; var out = "abc".replace(p, r); log.join() + ":" + out;
+=== str methods this coercion
+[String.prototype.indexOf.call(12345, "34"), String.prototype.slice.call(12345, 1, 3), String.prototype.trim.call(true), String.prototype.toUpperCase.call({ toString: function () { return "ab"; } }), String.prototype.charAt.call([1, 2], 1), String.prototype.split.call(1.5, ".").join("|")].join();
+=== str methods null this
+var o = [], f = ["indexOf", "slice", "split", "replace", "match", "trim", "toLowerCase", "charAt", "concat", "includes"]; for (var i = 0; i < f.length; i++) { try { String.prototype[f[i]].call(null, "a"); o.push("ok"); } catch (e) { o.push(e.name); } try { String.prototype[f[i]].call(undefined, "a"); o.push("ok"); } catch (e) { o.push(e.name); } } o.join();
+=== str detached method
+var f = "abc".charAt; try { f(0); "no"; } catch (e) { e.name; }
+=== str to string and value of
+var o = []; o.push("a".toString(), "b".valueOf()); try { String.prototype.toString.call(1); o.push("ok"); } catch (e) { o.push(e.name); } try { String.prototype.valueOf.call({}); o.push("ok"); } catch (e) { o.push(e.name); } o.join();
+=== str fromCharCode
+[String.fromCharCode(), String.fromCharCode(65, 66.9, "67"), String.fromCharCode(0x10041).charCodeAt(0), String.fromCharCode(-1).charCodeAt(0), String.fromCharCode(0xd83d, 0xde00).length, String.fromCharCode(0xd83d, 0xde00) === "😀", String.fromCharCode(NaN).charCodeAt(0)].join();
+=== str prototype shape
+[Object.getPrototypeOf("a") === String.prototype, String.prototype.constructor === String, typeof String.prototype.slice, Object.keys(String.prototype).length, String.prototype.slice.length, String.prototype.indexOf.name, String.prototype.replace.length, Object.getOwnPropertyDescriptor(String.prototype, "slice").enumerable, "abc".length, "abc"[1], typeof "a".nope, "a".hasOwnProperty("slice")].join();
+=== str prototype is extensible
+String.prototype.myExt = function () { return this.length; }; "abc".myExt();
+=== str non-bmp indexes
+var s = "a😀b"; [s.length, s.indexOf("b"), s.indexOf("\ude00"), s.slice(1, 2).length, s.slice(1, 2).charCodeAt(0), s.slice(2).charCodeAt(0), s.substring(2, 1).length, s.charAt(1).charCodeAt(0), s.charCodeAt(2), s.split("\ud83d").length, s.split("\ud83d")[1].charCodeAt(0), s.startsWith("\ud83d", 1), s.endsWith("\ude00", 3), s.includes("😀"), s.replace("\ud83d", "X").length, s.concat("\ud83d").length, s.trim().length, s.toLowerCase() === s].join();
+=== str replace keeps lone surrogates around
+var s = "😀"; var a = s.replace("\ud83d", ""), b = s.replace("\ude00", ""); [a.length, a.charCodeAt(0), b.length, b.charCodeAt(0), (a + "\ud83d").length].join();
+=== str adjacent halves join into one string
+("\ud83d" + "\ude00") === "😀" && ("\ud83d" + "\ude00").length === 2;
+=== str bundle shaped
+["x?a=1".split("?")[0], "a\nb\nc".split("\n").length, "/auth/x".startsWith("/auth/"), "t*".endsWith("*"), "agents".includes("gent"), "A B".toLowerCase(), "  x ".trim(), "ab:cd".substring(0, "ab:cd".indexOf(":")), "a b".split(" ").join("-"), "abcdefghijklmnopqrstuvwxyz".slice(-12), "e8 ".concat(1, ")")].join("|");
+=== str huge repeat via concat in loop is bounded
+var s = "x"; for (var i = 0; i < 12; i++) s = s.concat(s); s.length;
+=== str regexp as this
+String.prototype.slice.call(/abc/g, 1, 4);

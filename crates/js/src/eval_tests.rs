@@ -80,7 +80,7 @@ fn unsupported_is_found_before_anything_runs() {
         ("var f = async () => 1;", "async function"),
         ("function g() { return await_it; } function h() { class B {} }", "class"),
         ("tag`x`", "tagged template"),
-        ("var r = /a+/;", "regexp literal"),
+        ("var r = /a(?<=b)/;", "lookbehind"),
         ("var b = 10n;", "BigInt literal"),
         ("var o = { m() { return super.x; } };", "super"),
         ("function f() { return new.target; }", "new.target"),
@@ -105,7 +105,7 @@ fn unsupported_is_found_before_anything_runs() {
 
 #[test]
 fn missing_builtins_are_reference_errors_not_silent() {
-    assert_eq!(run_case("typeof Map + typeof WeakMap + typeof JSON"), "string:undefinedundefinedundefined");
+    assert_eq!(run_case("typeof Map + typeof WeakMap + typeof Symbol"), "string:undefinedundefinedundefined");
     assert_eq!(run_case("new Map()"), "throw:ReferenceError:Map is not defined");
     assert_eq!(run_case("new String('x')"), "other:Unsupported(Unsupported { what: \"wrapper object (new String/Number/Boolean)\", span: Span { start: 0, end: 0 } })");
     assert_eq!(run_case("Function('return 1')"), "other:Unsupported(Unsupported { what: \"Function constructor (dynamic code)\", span: Span { start: 0, end: 0 } })");
@@ -216,7 +216,7 @@ fn collect_keeps_what_roots_reach_and_frees_the_rest() {
         let after = (it.stats(), it.heap.stats());
         assert!(freed.objects > 1000, "{freed:?}");
         assert!(after.0.live_envs < 10, "{:?}", after.0);
-        assert!(after.0.functions < 50, "{:?}", after.0);
+        assert!(after.0.functions < 120, "{:?}", after.0);
         assert!(after.1.live_objects < before.1.live_objects / 10);
         // the survivor still has its closure state, its strings and the shared data object
         let keep = global_get(&mut it, "keep");

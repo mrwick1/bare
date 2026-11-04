@@ -1,0 +1,90 @@
+json basic	string:3:nullxétruetruetruetrue
+json numbers	string:0,-Infinity,1000,12,100,0.5,Infinity
+json proto key is own	string:__proto__,a1true
+json duplicate key	string:a,b3
+json lone surrogate	string:3:55296:56320
+json syntax errors	string:SyntaxError,SyntaxError,SyntaxError,SyntaxError,SyntaxError,SyntaxError,SyntaxError,SyntaxError,SyntaxError,SyntaxError,SyntaxError,SyntaxError,SyntaxError,SyntaxError,SyntaxError,SyntaxError,SyntaxError,SyntaxError,SyntaxError,SyntaxError
+json coercion	string:123,,true,1,7
+json nested	string:50:1
+json empty containers and escapes	string:a|b|c|,8,34,47,0
+re literal exec	string:2|ac|undefined|1|xacz|undefined|0,1,index,input,groups
+re test global lastIndex	string:true,1,true,2,false,0
+re sticky	string:true,2,false,0,true,1
+re lastIndex coercion	string:1,2,3
+re lastIndex untouched without g or y	string:true,5,0
+re lastIndex beyond length resets	string:false,0
+re lastIndex negative and NaN	string:NaN:0:0:1
+re lastIndex fractional and infinity	string:true,true,false,0
+re lastIndex valueOf throws	string:RangeError
+re lastIndex descriptor	string:0,true,false,false
+re lastIndex redefine and delete	string:TypeError,3,false,true
+re lastIndex nonwritable	string:TypeError,TypeError,TypeError,TypeError
+re lastIndex nonwritable without g	string:true,,x,a
+re source and flags	string:a\\/b|a\\/b|(?:)|\\n|[/]|\\/|gi|gi|false|true|true|true|true|true|false|false
+re to string	string:/a\\/b/gi,/(?:)/,/x/,/x/
+re constructor	string:true,false,g,i,a,g,(?:),,function,2,RegExp,true,true
+re constructor coerces	string:12,null,q+,g
+re invalid patterns	string:SyntaxError,SyntaxError,SyntaxError,SyntaxError,SyntaxError,SyntaxError,SyntaxError,SyntaxError,SyntaxError,ok,SyntaxError,SyntaxError,SyntaxError,SyntaxError
+re invalid flags	string:SyntaxError,SyntaxError,SyntaxError,SyntaxError,SyntaxError,SyntaxError
+re literal is fresh each evaluation	string:false,0,3
+re literal compiled once keeps no state	string:1,1,0
+re zero length global replace	string:-a-b-c-,-a-b-c-,-a-a-a-,x,|ab|,--,-b--c-
+re zero length global match	string:4,|||,aa||,1
+re substitutions	string:02/01/2020|2020-01-02|$|||$0|$4|20200|2020|2020x|$<a>|$
+re substitutions with 10 groups	string:j|a1|a|a|$001|i$k
+re unmatched captures	string:a[|b] ab,undefined,b,1,ab <>ab
+re replace callback arguments	string:a3c,a4c,a[14]c[34],aundefinedc,a12c
+re replace callback this	boolean:true
+re replace callback reentrancy	string:1X0:0
+re replace callback nested replace on same regexp	string:a<x#y#1>b<x#y#2>
+re replace callback throws	string:TypeError:boom
+re replace callback sees lastIndex zero	string:0,0
+re replace callback may reset regexp	string:3:7
+re replace sticky and global sticky	string:xab,xxb,baa,baa
+re replace non-global ignores later matches	string:baa,bbb,bbb
+re match groups array	string:4,1,xaby,ab,a,undefined,b,undefined
+re match global strings	string:1|22|333,,1,
+re match string and undefined argument	string:a,true,b,1
+re match invalid string pattern	string:SyntaxError
+re split	string:a|b||c a|1|b a|b|c a 1 0 a|b 4 0 a|
+re split html example	string:A||B|bold|/|B|and||CODE|coded|/|CODE|
+re split sticky	string:a|b a|b| a|b
+re split does not touch lastIndex	string:b|b:1
+re split empty matches at edges	string:abc abc a|bc a\n|b a|b|
+re flags behaviour	string:true,false,true,true,false,true,true,true
+re captures and backrefs	string:abab,,abba,aaa,a,0
+re non-bmp and lone surrogates	string:xxxx,2,2,55357,2,false,true,0,3
+re captures keep lone surrogates	string:1,55357,0,2
+re exec own keys and brand	string:0,index,input,groups,0,true,[object RegExp],object,true
+re prototype members	string:(?:),undefined,/(?:)/,function,false,true
+re receiver checks	string:TypeError,TypeError,TypeError,TypeError
+re exec argument coercion	string:true,true,true,true,
+re bundle shaped	string:true|false|x|a\\.b\\*c|x:y|a\\32 b|true|  at 
+re backtracking is bounded	limit
+str indexOf	string:2,5,-1,0,3,0,-1,1,2,-1,0,1,1,-1
+str includes starts ends	string:true,false,true,true,true,true,false,true,true,true,true,false,true,true
+str search arg regexp is a type error	string:TypeError,TypeError,TypeError
+str slice	string:cdef|ef|bcde||ab|cdef|abc|abcdef||de|bc|bcdef||a
+str substring	string:cdef|cd|ab|abc|ab|bcdef|abcdef||def
+str charAt charCodeAt	string:b,true,true,a,b,b,98,NaN,NaN,97,97,233
+str concat	string:ab1nullundefinedtrue,a,,123,az
+str trim	string:a b|3|3|2|0|0|x
+str case	string:HELLO ÉSS,2,σ,aς,aς b,σa,ABC,abc,ß,FI,2
+str case lone surrogates and non-bmp	string:7,55296,56320,55357,56832,A,55297,56360
+str split	string:a|b|c a|b a|b|c a|b 1 0 1 abc 0 2 a||b 3 2 3 ab| a|b| a
+str split limit coercion	string:2,2,1,0,1
+str replace string pattern	string:aXcabc,-abc,abcc,a[a|c]c,a$c,a$1c,abc,ax,aundefinedc,abc,aX/1/aXbb,a5c,a$0b
+str replace argument coercion order	string:p,r:aXc
+str methods this coercion	string:2,23,true,AB,,,1|5
+str methods null this	string:TypeError,TypeError,TypeError,TypeError,TypeError,TypeError,TypeError,TypeError,TypeError,TypeError,TypeError,TypeError,TypeError,TypeError,TypeError,TypeError,TypeError,TypeError,TypeError,TypeError
+str detached method	string:TypeError
+str to string and value of	string:a,b,TypeError,TypeError
+str fromCharCode	string:,ABC,65,65535,2,true,0
+str prototype shape	string:true,true,function,0,2,indexOf,2,false,3,b,undefined,false
+str prototype is extensible	number:3
+str non-bmp indexes	string:4,3,2,1,55357,56832,1,55357,56832,2,56832,true,true,true,4,5,4,true
+str replace keeps lone surrogates around	string:1,56832,1,55357,2
+str adjacent halves join into one string	boolean:true
+str bundle shaped	string:x|3|true|true|true|a b|x|ab|a-b|opqrstuvwxyz|e8 1)
+str huge repeat via concat in loop is bounded	number:4096
+str regexp as this	string:abc

@@ -1,0 +1,1239 @@
+// JSON.parse, RegExp and String.prototype for the evaluator. Included by `eval.rs` (`include!`), so it shares
+// that module's imports and private items.
+//
+// What is bound (everything else is absent, so a call is an ordinary TypeError or ReferenceError):
+// - `JSON.parse(text)`. A reviver function is `Unsupported`. There is no `JSON.stringify`.
+// - `RegExp(pattern, flags)`, `new RegExp(...)`, regexp literals, `exec`, `test`, `toString`, the flag getters,
+//   an own `lastIndex` data property. Engine gates (flags u/v/d, lookbehind, named groups, quantified lookahead)
+//   are `Unsupported`, never a different match. There is no `Symbol`, so `String.prototype.match/replace/split`
+//   recognise a regexp by identity (not by `@@match`), and they do not call a user `exec`: a regexp whose `exec`
+//   was replaced is `Unsupported`.
+// - `String.fromCharCode` and `String.prototype`: indexOf, includes, startsWith, endsWith, slice, substring,
+//   charAt, charCodeAt, split, match, replace, concat, trim, toLowerCase, toUpperCase, toString, valueOf.
+//   These are exactly the string methods the inspected staging bundles call (see docs/staging-js-requirements.md).
+//
+// State: a regexp object is an ordinary heap object. Its compiled pattern lives in `Ext::regexps`, keyed by the
+// object handle (a handle includes the slot generation, so a reused slot never sees old data). `collect` drops the
+// entries of dead objects. The source and flags strings of live entries are roots. No code here collects.
+
+use crate::json;
+use crate::regexp as rx;
+
+const SYNTAX_ERROR: usize = 4;
+const UNSET: (u32, u32) = (u32::MAX, u32::MAX);
+/// The regexp scratch memory is released when it grows beyond this many bytes.
+const SCRATCH_KEEP: usize = 1 << 22;
+
+/// Which RegExp or JSON bound ended a run. Never catchable by `try`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RegexpLimit {
+    /// Pattern too long, nested too deep, too many instructions or groups.
+    Compile,
+    /// One match attempt used more than `BuiltinLimits::regexp_steps`.
+    Steps,
+    /// The backtrack stack reached `regexp_stack_frames`.
+    Stack,
+    /// The input is longer than `regexp_input_units`.
+    Input,
+    /// One global match, replace or split would hold more than `max_matches` capture slots.
+    Matches,
+    /// A split result would hold more than `max_items` elements.
+    Items,
+}
+
+/// Bounds of the bindings. They add to `EvalLimits` and the heap limits. The match work of every call is also
+/// charged to `EvalLimits::max_steps` (one step per regexp work unit; string scans and copies one step per 8 or 32 units).
+#[derive(Clone, Copy, Debug)]
+pub struct BuiltinLimits {
+    /// Work of one regexp match attempt.
+    pub regexp_steps: u64,
+    /// Longest input (UTF-16 units) a regexp may scan.
+    pub regexp_input_units: usize,
+    /// Backtrack stack frames of one match attempt.
+    pub regexp_stack_frames: usize,
+    /// Capture slots (matches times groups plus one) one global match, replace or split may hold.
+    pub max_matches: usize,
+    /// Elements one `split` result may hold.
+    pub max_items: usize,
+    /// `JSON.parse` limits.
+    pub json: json::JsonLimits,
+}
+
+impl Default for BuiltinLimits {
+    fn default() -> Self {
+        BuiltinLimits {
+            regexp_steps: 50_000_000,
+            regexp_input_units: 1 << 24,
+            regexp_stack_frames: 1 << 20,
+            max_matches: 1 << 22,
+            max_items: 1 << 20,
+            json: json::JsonLimits { max_source_units: 1 << 24, max_depth: 1024, max_nodes: 1 << 22, max_text_units: 1 << 24 },
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Bi {
+    JsonParse,
+    RegExpCtor,
+    ReExec,
+    ReTest,
+    ReToString,
+    ReGetter(u8),
+    StrFromCharCode,
+    StrToString,
+    StrIndexOf,
+    StrIncludes,
+    StrStartsWith,
+    StrEndsWith,
+    StrSlice,
+    StrSubstring,
+    StrCharAt,
+    StrCharCodeAt,
+    StrSplit,
+    StrMatch,
+    StrReplace,
+    StrConcat,
+    StrTrim,
+    StrToLower,
+    StrToUpper,
+}
+
+const RE_GETTERS: [&str; 9] = ["source", "flags", "global", "ignoreCase", "multiline", "dotAll", "sticky", "unicode", "hasIndices"];
+
+/// A regexp literal, compiled once by the first walk. The object is made fresh on every evaluation.
+struct Lit {
+    re: Rc<rx::Regex>,
+    source: Vec<u16>,
+    flags: String,
+    strs: Option<(StrId, StrId)>,
+}
+
+struct ReData {
+    re: Rc<rx::Regex>,
+    source: StrId,
+    flags: StrId,
+}
+
+/// State of the bindings. Every handle in it is a root (see `ext_roots`) except `regexps` keys and `cache` keys.
+struct Ext {
+    bl: BuiltinLimits,
+    string_proto: ObjId,
+    regexp_proto: ObjId,
+    json_obj: ObjId,
+    regexp_ctor: Option<ObjId>,
+    exec_fn: Option<ObjId>,
+    regexps: FxMap<ObjId, ReData>,
+    lits: FxMap<(u32, u32), Lit>,
+    /// Compiled patterns of `RegExp(src, flags)` by string handles. Cleared by `collect`.
+    cache: FxMap<(StrId, StrId), (Rc<rx::Regex>, StrId, StrId)>,
+    scratch: rx::Scratch,
+    k_last_index: PropertyKey,
+    k_index: PropertyKey,
+    k_input: PropertyKey,
+    k_groups: PropertyKey,
+    k_exec: PropertyKey,
+}
+
+impl Ext {
+    fn new(heap: &mut Heap, object_proto: ObjId) -> Result<Ext, HeapError> {
+        let string_proto = heap.new_object(Some(object_proto))?;
+        let regexp_proto = heap.new_object(Some(object_proto))?;
+        let json_obj = heap.new_object(Some(object_proto))?;
+        Ok(Ext {
+            bl: BuiltinLimits::default(),
+            string_proto,
+            regexp_proto,
+            json_obj,
+            regexp_ctor: None,
+            exec_fn: None,
+            regexps: FxMap::default(),
+            lits: FxMap::default(),
+            cache: FxMap::default(),
+            scratch: rx::Scratch::new(),
+            k_last_index: heap.key_from_str("lastIndex")?,
+            k_index: heap.key_from_str("index")?,
+            k_input: heap.key_from_str("input")?,
+            k_groups: heap.key_from_str("groups")?,
+            k_exec: heap.key_from_str("exec")?,
+        })
+    }
+}
+
+/// Matches of one call: `n` slots per match, `(start, end)` in UTF-16 units, `UNSET` for a group that did not take part.
+struct MatchList {
+    n: usize,
+    v: Vec<(u32, u32)>,
+}
+
+impl MatchList {
+    fn len(&self) -> usize {
+        self.v.len() / self.n
+    }
+    fn row(&self, i: usize) -> &[(u32, u32)] {
+        &self.v[i * self.n..(i + 1) * self.n]
+    }
+}
+
+fn is_js_space(c: u16) -> bool {
+    matches!(c, 9..=13 | 0x20 | 0xA0 | 0x1680 | 0x2000..=0x200A | 0x2028 | 0x2029 | 0x202F | 0x205F | 0x3000 | 0xFEFF)
+}
+
+/// Work-bounded `indexOf` on code units. `budget` is in steps (1 per 8 units). `None` when the budget ran out.
+fn find_units(hay: &[u16], needle: &[u16], from: usize, budget: &mut u64) -> Option<Option<usize>> {
+    let n = needle.len();
+    if from > hay.len() {
+        return Some(None);
+    }
+    if n == 0 {
+        return Some(Some(from));
+    }
+    if hay.len() < n {
+        return Some(None);
+    }
+    let (last, first) = (hay.len() - n, needle[0]);
+    let mut i = from;
+    let mut work = 0u64;
+    let spend = |work: &mut u64, budget: &mut u64| -> bool {
+        let steps = *work / 8;
+        *work -= steps * 8;
+        if steps > *budget {
+            *budget = 0;
+            return false;
+        }
+        *budget -= steps;
+        true
+    };
+    while i <= last {
+        match hay[i..=last].iter().position(|&c| c == first) {
+            None => {
+                work += (last + 1 - i) as u64;
+                return if spend(&mut work, budget) { Some(None) } else { None };
+            }
+            Some(k) => {
+                i += k;
+                work += k as u64 + 1;
+            }
+        }
+        let m = hay[i..i + n].iter().zip(needle).take_while(|(a, b)| a == b).count();
+        if m == n {
+            return if spend(&mut work, budget) { Some(Some(i)) } else { None };
+        }
+        work += m as u64;
+        if work >= 8 && !spend(&mut work, budget) {
+            return None;
+        }
+        i += 1;
+    }
+    if spend(&mut work, budget) { Some(None) } else { None }
+}
+
+/// `EscapeRegExpPattern`: the text `source` shows. `/` outside a class and line terminators are escaped.
+fn escape_source(p: &[u16]) -> Vec<u16> {
+    if p.is_empty() {
+        return "(?:)".encode_utf16().collect();
+    }
+    let mut out = Vec::with_capacity(p.len() + 4);
+    let mut in_class = false;
+    let lt = |c: u16| match c {
+        0x0A => Some("\\n"),
+        0x0D => Some("\\r"),
+        0x2028 => Some("\\u2028"),
+        0x2029 => Some("\\u2029"),
+        _ => None,
+    };
+    let mut i = 0;
+    while i < p.len() {
+        let c = p[i];
+        if c == b'\\' as u16 && i + 1 < p.len() {
+            if let Some(e) = lt(p[i + 1]) {
+                out.extend(e.encode_utf16());
+            } else {
+                out.extend_from_slice(&p[i..i + 2]);
+            }
+            i += 2;
+            continue;
+        }
+        if let Some(e) = lt(c) {
+            out.extend(e.encode_utf16());
+        } else if c == b'/' as u16 && !in_class {
+            out.extend("\\/".encode_utf16());
+        } else {
+            if c == b'[' as u16 {
+                in_class = true;
+            } else if c == b']' as u16 {
+                in_class = false;
+            }
+            out.push(c);
+        }
+        i += 1;
+    }
+    out
+}
+
+fn canon_flags(f: rx::Flags) -> String {
+    let mut s = String::new();
+    for (on, c) in [(f.global, 'g'), (f.ignore_case, 'i'), (f.multiline, 'm'), (f.dot_all, 's'), (f.sticky, 'y')] {
+        if on {
+            s.push(c);
+        }
+    }
+    s
+}
+
+fn flag_gate(c: char) -> &'static str {
+    match c {
+        'u' => "regexp flag u",
+        'v' => "regexp flag v",
+        _ => "regexp flag d",
+    }
+}
+
+impl<'p> Interp<'p> {
+    /// Replace the bounds of the bindings (defaults: [`BuiltinLimits::default`]).
+    pub fn set_builtin_limits(&mut self, bl: BuiltinLimits) {
+        self.ext.bl = bl;
+    }
+
+    /// How many regexp objects the evaluator tracks (for tools and tests). `collect` drops the dead ones.
+    pub fn regexp_objects(&self) -> usize {
+        self.ext.regexps.len()
+    }
+
+    // ------------------------------------------------------------ hooks for eval.rs
+
+    /// The permanent roots of the bindings, and the strings of every live regexp.
+    fn ext_roots(&self, v: &mut Vec<Value>) {
+        let e = &self.ext;
+        v.extend([e.string_proto, e.regexp_proto, e.json_obj].map(Value::Object));
+        v.extend(e.regexp_ctor.into_iter().chain(e.exec_fn).map(Value::Object));
+        for k in [e.k_last_index, e.k_index, e.k_input, e.k_groups, e.k_exec] {
+            if let PropertyKey::String(s) = k {
+                v.push(Value::String(s));
+            }
+        }
+        for d in e.regexps.values() {
+            v.push(Value::String(d.source));
+            v.push(Value::String(d.flags));
+        }
+        for l in e.lits.values() {
+            if let Some((a, b)) = l.strs {
+                v.push(Value::String(a));
+                v.push(Value::String(b));
+            }
+        }
+    }
+
+    /// Forget the regexps of dead objects and every cached string handle (called by `collect`, before `Heap::collect`).
+    fn ext_prune(&mut self, seen: &FxSet<ObjId>) {
+        self.ext.regexps.retain(|o, _| seen.contains(o));
+        self.ext.cache.clear();
+    }
+
+    /// First walk: compile a literal now, so a bad pattern fails `Interp::new` before any script effect.
+    /// There is no early SyntaxError channel in `Interp::new`, so an invalid pattern is reported as `Unsupported`
+    /// with the literal's span. The parser checks only the flags, never the pattern.
+    fn ext_walk_regexp(&mut self, e: ExprId, span: Span) -> Res<()> {
+        let Some((pat, flags)) = self.prog.regexp(span) else { return Err(unsupported("regexp literal", span)) };
+        let units: Vec<u16> = pat.encode_utf16().collect();
+        let re = match rx::Regex::new(&units, flags) {
+            Ok(re) => re,
+            Err(rx::CompileError::Syntax { .. }) => return Err(unsupported("regexp literal: invalid pattern (early SyntaxError)", span)),
+            Err(rx::CompileError::Unsupported { what, .. }) => return Err(unsupported(what, span)),
+            Err(rx::CompileError::InvalidFlags(_)) => return Err(unsupported("regexp literal: invalid flags (early SyntaxError)", span)),
+            Err(rx::CompileError::UnsupportedFlag(c)) => return Err(unsupported(flag_gate(c), span)),
+            Err(rx::CompileError::Limit(_)) => return Err(unsupported("regexp literal: compile limit", span)),
+        };
+        let flags = canon_flags(re.flags());
+        self.ext.lits.insert((self.cur as u32, e.index() as u32), Lit { re: Rc::new(re), source: escape_source(&units), flags, strs: None });
+        Ok(())
+    }
+
+    /// A regexp literal evaluates to a new object every time. Only the immutable compiled pattern is shared.
+    fn ext_eval_regexp(&mut self, e: ExprId) -> Res<Value> {
+        let Some(l) = self.ext.lits.get(&(self.cur as u32, e.index() as u32)) else { return Err(unsupported("regexp literal", Span::default())) };
+        let (re, strs) = (l.re.clone(), l.strs);
+        let (src, fl) = match strs {
+            Some(p) => p,
+            None => {
+                let (u, f) = (l.source.clone(), l.flags.clone());
+                let p = (h!(self, self.heap.intern_vec(u)), h!(self, self.heap.intern_str(&f)));
+                if let Some(l) = self.ext.lits.get_mut(&(self.cur as u32, e.index() as u32)) {
+                    l.strs = Some(p);
+                }
+                p
+            }
+        };
+        Ok(Value::Object(self.make_regexp(re, src, fl)?))
+    }
+
+    // ------------------------------------------------------------ installation
+
+    fn install_ext(&mut self) -> Res<()> {
+        let g = self.global;
+        let at = |s: &mut Self, o: ObjId, name: &str, v: Value| -> Res<()> {
+            let k = h!(s, s.heap.key_from_str(name));
+            s.def(o, k, v, true, false, true)
+        };
+        // JSON
+        let j = self.ext.json_obj;
+        self.method(j, "parse", Nat::Ext(Bi::JsonParse), 2)?;
+        at(self, g, "JSON", Value::Object(j))?;
+        // RegExp
+        let rp = self.ext.regexp_proto;
+        let c = self.native(Nat::Ext(Bi::RegExpCtor), "RegExp", 2)?;
+        self.def(c, self.k_prototype, Value::Object(rp), false, false, false)?;
+        self.def(rp, self.k_constructor, Value::Object(c), true, false, true)?;
+        at(self, g, "RegExp", Value::Object(c))?;
+        self.ext.regexp_ctor = Some(c);
+        self.ext.exec_fn = Some(self.method(rp, "exec", Nat::Ext(Bi::ReExec), 1)?);
+        self.method(rp, "test", Nat::Ext(Bi::ReTest), 1)?;
+        self.method(rp, "toString", Nat::Ext(Bi::ReToString), 0)?;
+        for (i, name) in RE_GETTERS.iter().enumerate() {
+            let f = self.native(Nat::Ext(Bi::ReGetter(i as u8)), &format!("get {name}"), 0)?;
+            let k = h!(self, self.heap.key_from_str(name));
+            let d = PropertyDescriptor { get: Some(Some(f)), set: Some(None), enumerable: Some(false), configurable: Some(true), ..Default::default() };
+            h!(self, self.heap.define_own_property(rp, k, &d));
+        }
+        // String
+        let sk = h!(self, self.heap.key_from_str("String"));
+        let Some(Property::Data { value: Value::Object(sc), .. }) = h!(self, self.heap.get_own_property(g, sk)) else { return Err(unsupported("String constructor missing", Span::default())) };
+        let sp = self.ext.string_proto;
+        self.def(sc, self.k_prototype, Value::Object(sp), false, false, false)?;
+        self.def(sp, self.k_constructor, Value::Object(sc), true, false, true)?;
+        self.method(sc, "fromCharCode", Nat::Ext(Bi::StrFromCharCode), 1)?;
+        let methods: [(&str, Bi, u32); 17] = [
+            ("toString", Bi::StrToString, 0),
+            ("valueOf", Bi::StrToString, 0),
+            ("indexOf", Bi::StrIndexOf, 1),
+            ("includes", Bi::StrIncludes, 1),
+            ("startsWith", Bi::StrStartsWith, 1),
+            ("endsWith", Bi::StrEndsWith, 1),
+            ("slice", Bi::StrSlice, 2),
+            ("substring", Bi::StrSubstring, 2),
+            ("charAt", Bi::StrCharAt, 1),
+            ("charCodeAt", Bi::StrCharCodeAt, 1),
+            ("split", Bi::StrSplit, 2),
+            ("match", Bi::StrMatch, 1),
+            ("replace", Bi::StrReplace, 2),
+            ("concat", Bi::StrConcat, 1),
+            ("trim", Bi::StrTrim, 0),
+            ("toLowerCase", Bi::StrToLower, 0),
+            ("toUpperCase", Bi::StrToUpper, 0),
+        ];
+        for (name, x, len) in methods {
+            self.method(sp, name, Nat::Ext(x), len)?;
+        }
+        Ok(())
+    }
+
+    // ------------------------------------------------------------ budgets and small helpers
+
+    /// Charge `n` steps. A bulk charge is checked after the work, so the work itself must be bounded by the caller.
+    fn spend(&mut self, n: u64) -> Res<()> {
+        self.steps = self.steps.saturating_add(n);
+        if self.steps > self.step_limit { Err(Error::Limit(LimitKind::Steps)) } else { Ok(()) }
+    }
+
+    fn spend_units(&mut self, n: usize) -> Res<()> {
+        self.spend(n as u64 / 32)
+    }
+
+    fn this_str(&mut self, this: Value, name: &str) -> Res<StrId> {
+        if is_nullish(this) {
+            return Err(self.type_err(&format!("String.prototype.{name} called on null or undefined")));
+        }
+        self.coerce_string(this)
+    }
+
+    /// `ToIntegerOrInfinity`.
+    fn int_arg(&mut self, v: Value) -> Res<f64> {
+        let n = self.coerce_number(v)?;
+        Ok(if n.is_nan() { 0.0 } else { n.trunc() })
+    }
+
+    fn sub(&mut self, s: StrId, a: usize, b: usize) -> Res<StrId> {
+        self.spend_units(b.saturating_sub(a))?;
+        Ok(h!(self, self.heap.substring(s, a, b)))
+    }
+
+    fn str_value(&mut self, s: &str) -> Res<Value> {
+        Ok(Value::String(h!(self, self.heap.intern_str(s))))
+    }
+
+    fn new_str(&mut self, units: Vec<u16>) -> Res<Value> {
+        Ok(Value::String(h!(self, self.heap.intern_vec(units))))
+    }
+
+    fn regexp_of(&self, v: Value) -> Option<ObjId> {
+        match v {
+            Value::Object(o) if self.ext.regexps.contains_key(&o) => Some(o),
+            _ => None,
+        }
+    }
+
+    /// Budgeted `indexOf` of `needle` in `hay` from `from`.
+    fn search(&mut self, hay: StrId, needle: StrId, from: usize) -> Res<Option<usize>> {
+        let mut budget = self.step_limit.saturating_sub(self.steps);
+        let before = budget;
+        let r = {
+            let (h, n) = (h!(self, self.heap.str_units(hay)), h!(self, self.heap.str_units(needle)));
+            find_units(h, n, from, &mut budget)
+        };
+        self.steps += before - budget;
+        match r {
+            Some(r) => Ok(r),
+            None => Err(Error::Limit(LimitKind::Steps)),
+        }
+    }
+
+    // ------------------------------------------------------------ dispatch
+
+    fn call_ext(&mut self, x: Bi, this: Value, args: &[Value], is_new: bool) -> Res<Value> {
+        let a0 = arg(args, 0);
+        match x {
+            Bi::JsonParse => self.json_parse(a0, arg(args, 1)),
+            Bi::RegExpCtor => self.regexp_ctor(a0, arg(args, 1), is_new),
+            Bi::ReExec => {
+                let r = self.this_regexp(this, "exec")?;
+                let s = self.coerce_string(a0)?;
+                match self.re_exec_raw(r, s)? {
+                    None => Ok(Value::Null),
+                    Some(m) => self.match_result(s, &m.spans),
+                }
+            }
+            Bi::ReTest => {
+                let r = self.this_regexp(this, "test")?;
+                let s = self.coerce_string(a0)?;
+                self.gate_exec(r)?;
+                Ok(Value::Bool(self.re_exec_raw(r, s)?.is_some()))
+            }
+            Bi::ReToString => {
+                let Value::Object(o) = this else { return Err(self.type_err("RegExp.prototype.toString requires that 'this' be an Object")) };
+                let (src, fl) = match self.ext.regexps.get(&o) {
+                    Some(d) => (Value::String(d.source), Value::String(d.flags)),
+                    None => {
+                        let (ks, kf) = (h!(self, self.heap.key_from_str("source")), h!(self, self.heap.key_from_str("flags")));
+                        (self.get_prop(this, ks)?, self.get_prop(this, kf)?)
+                    }
+                };
+                let (src, fl) = (self.coerce_string(src)?, self.coerce_string(fl)?);
+                let mut out: Vec<u16> = vec![b'/' as u16];
+                self.append_string(&mut out, h!(self, self.heap.str_units(src)))?;
+                out.push(b'/' as u16);
+                self.append_string(&mut out, h!(self, self.heap.str_units(fl)))?;
+                self.new_str(out)
+            }
+            Bi::ReGetter(i) => self.re_getter(this, i),
+            Bi::StrFromCharCode => {
+                let mut out = Vec::with_capacity(args.len());
+                for &a in args {
+                    self.tick()?;
+                    out.push(to_uint32(self.coerce_number(a)?) as u16);
+                }
+                self.new_str(out)
+            }
+            Bi::StrToString => match this {
+                Value::String(_) => Ok(this),
+                _ => Err(self.type_err("String.prototype.toString requires that 'this' be a String")),
+            },
+            Bi::StrIndexOf => {
+                let s = self.this_str(this, "indexOf")?;
+                let needle = self.coerce_string(a0)?;
+                let len = h!(self, self.heap.str_len(s));
+                let from = self.int_arg(arg(args, 1))?.clamp(0.0, len as f64) as usize;
+                Ok(Value::Number(self.search(s, needle, from)?.map_or(-1.0, |i| i as f64)))
+            }
+            Bi::StrIncludes | Bi::StrStartsWith | Bi::StrEndsWith => self.str_search_method(x, this, args),
+            Bi::StrSlice => {
+                let s = self.this_str(this, "slice")?;
+                let len = h!(self, self.heap.str_len(s)) as f64;
+                let start = self.int_arg(a0)?;
+                let end = if matches!(arg(args, 1), Value::Undefined) { len } else { self.int_arg(arg(args, 1))? };
+                let rel = |n: f64| if n < 0.0 { (len + n).max(0.0) } else { n.min(len) };
+                let (from, to) = (rel(start) as usize, rel(end) as usize);
+                if from >= to {
+                    return self.str_value("");
+                }
+                Ok(Value::String(self.sub(s, from, to)?))
+            }
+            Bi::StrSubstring => {
+                let s = self.this_str(this, "substring")?;
+                let len = h!(self, self.heap.str_len(s)) as f64;
+                let a = self.int_arg(a0)?.clamp(0.0, len);
+                let b = if matches!(arg(args, 1), Value::Undefined) { len } else { self.int_arg(arg(args, 1))?.clamp(0.0, len) };
+                Ok(Value::String(self.sub(s, a.min(b) as usize, a.max(b) as usize)?))
+            }
+            Bi::StrCharAt => {
+                let s = self.this_str(this, "charAt")?;
+                let len = h!(self, self.heap.str_len(s));
+                let p = self.int_arg(a0)?;
+                if p < 0.0 || p >= len as f64 {
+                    return self.str_value("");
+                }
+                Ok(Value::String(self.sub(s, p as usize, p as usize + 1)?))
+            }
+            Bi::StrCharCodeAt => {
+                let s = self.this_str(this, "charCodeAt")?;
+                let len = h!(self, self.heap.str_len(s));
+                let p = self.int_arg(a0)?;
+                if p < 0.0 || p >= len as f64 {
+                    return Ok(Value::Number(f64::NAN));
+                }
+                Ok(Value::Number(h!(self, self.heap.code_unit_at(s, p as usize)).unwrap_or(0) as f64))
+            }
+            Bi::StrSplit => self.str_split(this, a0, arg(args, 1)),
+            Bi::StrMatch => {
+                let s = self.this_str(this, "match")?;
+                let r = match self.regexp_of(a0) {
+                    Some(r) => r,
+                    None => {
+                        let p = if matches!(a0, Value::Undefined) { h!(self, self.heap.intern_str("")) } else { self.coerce_string(a0)? };
+                        let empty = h!(self, self.heap.intern_str(""));
+                        self.regexp_create(p, empty)?
+                    }
+                };
+                self.gate_exec(r)?;
+                let flags = self.ext.regexps[&r].re.flags();
+                if !flags.global {
+                    return match self.re_exec_raw(r, s)? {
+                        None => Ok(Value::Null),
+                        Some(m) => self.match_result(s, &m.spans),
+                    };
+                }
+                let ml = self.collect_matches(r, s, false)?;
+                if ml.len() == 0 {
+                    return Ok(Value::Null);
+                }
+                let mut items = Vec::with_capacity(ml.len());
+                for i in 0..ml.len() {
+                    self.tick()?;
+                    let (a, b) = ml.row(i)[0];
+                    items.push(Value::String(self.sub(s, a as usize, b as usize)?));
+                }
+                self.new_array_from(&items)
+            }
+            Bi::StrReplace => {
+                let s = self.this_str(this, "replace")?;
+                let (sv, rv) = (a0, arg(args, 1));
+                let func = if self.is_callable(rv) { Some(rv) } else { None };
+                if let Some(r) = self.regexp_of(sv) {
+                    let tpl = if func.is_none() { Some(self.coerce_string(rv)?) } else { None };
+                    self.gate_exec(r)?;
+                    let flags = self.ext.regexps[&r].re.flags();
+                    let ml = if flags.global {
+                        self.collect_matches(r, s, true)?
+                    } else {
+                        match self.re_exec_raw(r, s)? {
+                            None => return Ok(Value::String(s)),
+                            Some(m) => MatchList { n: m.spans.len(), v: m.spans.iter().map(|x| x.map_or(UNSET, |(a, b)| (a as u32, b as u32))).collect() },
+                        }
+                    };
+                    return self.build_replacement(&ml, s, func, tpl);
+                }
+                let search = self.coerce_string(sv)?;
+                let tpl = if func.is_none() { Some(self.coerce_string(rv)?) } else { None };
+                let Some(p) = self.search(s, search, 0)? else { return Ok(Value::String(s)) };
+                let m = h!(self, self.heap.str_len(search));
+                let ml = MatchList { n: 1, v: vec![(p as u32, (p + m) as u32)] };
+                self.build_replacement(&ml, s, func, tpl)
+            }
+            Bi::StrConcat => {
+                let s = self.this_str(this, "concat")?;
+                let mut out: Vec<u16> = Vec::new();
+                self.append_string(&mut out, h!(self, self.heap.str_units(s)))?;
+                for &a in args {
+                    self.tick()?;
+                    let t = self.coerce_string(a)?;
+                    self.append_string(&mut out, h!(self, self.heap.str_units(t)))?;
+                }
+                self.spend_units(out.len())?;
+                self.new_str(out)
+            }
+            Bi::StrTrim => {
+                let s = self.this_str(this, "trim")?;
+                let (a, b) = {
+                    let u = h!(self, self.heap.str_units(s));
+                    let a = u.iter().position(|&c| !is_js_space(c)).unwrap_or(u.len());
+                    let b = u.iter().rposition(|&c| !is_js_space(c)).map_or(a, |i| i + 1);
+                    (a, b)
+                };
+                Ok(Value::String(self.sub(s, a, b)?))
+            }
+            Bi::StrToLower | Bi::StrToUpper => {
+                let s = self.this_str(this, if x == Bi::StrToLower { "toLowerCase" } else { "toUpperCase" })?;
+                let out = self.case_map(s, x == Bi::StrToUpper)?;
+                self.new_str(out)
+            }
+        }
+    }
+
+    /// `includes`, `startsWith`, `endsWith`: the argument must not be a regexp.
+    fn str_search_method(&mut self, x: Bi, this: Value, args: &[Value]) -> Res<Value> {
+        let name = match x {
+            Bi::StrIncludes => "includes",
+            Bi::StrStartsWith => "startsWith",
+            _ => "endsWith",
+        };
+        let s = self.this_str(this, name)?;
+        if self.regexp_of(arg(args, 0)).is_some() {
+            return Err(self.type_err(&format!("First argument to String.prototype.{name} must not be a regular expression")));
+        }
+        let needle = self.coerce_string(arg(args, 0))?;
+        let len = h!(self, self.heap.str_len(s));
+        let m = h!(self, self.heap.str_len(needle));
+        let pos = arg(args, 1);
+        match x {
+            Bi::StrIncludes => {
+                let from = self.int_arg(pos)?.clamp(0.0, len as f64) as usize;
+                Ok(Value::Bool(self.search(s, needle, from)?.is_some()))
+            }
+            Bi::StrStartsWith => {
+                let from = self.int_arg(pos)?.clamp(0.0, len as f64) as usize;
+                self.spend_units(m)?;
+                let (h, n) = (h!(self, self.heap.str_units(s)), h!(self, self.heap.str_units(needle)));
+                Ok(Value::Bool(from + m <= len && h[from..from + m] == *n))
+            }
+            _ => {
+                let end = if matches!(pos, Value::Undefined) { len } else { self.int_arg(pos)?.clamp(0.0, len as f64) as usize };
+                self.spend_units(m)?;
+                let (h, n) = (h!(self, self.heap.str_units(s)), h!(self, self.heap.str_units(needle)));
+                Ok(Value::Bool(m <= end && h[end - m..end] == *n))
+            }
+        }
+    }
+
+    /// Full-string case mapping (Rust's Unicode tables). Lone surrogates stay. Segments end at ASCII white space and
+    /// lone surrogates, which cannot change a final-sigma decision, so the work and the growth are bounded per segment.
+    fn case_map(&mut self, s: StrId, upper: bool) -> Res<Vec<u16>> {
+        let len = h!(self, self.heap.str_len(s));
+        self.spend_units(len)?;
+        let src = h!(self, self.heap.str_units(s));
+        let mut out: Vec<u16> = Vec::new();
+        if src.iter().all(|&c| c < 128) {
+            self.append_string(&mut out, src)?;
+            for c in out.iter_mut() {
+                if upper { c.make_ascii_uppercase_u16() } else { c.make_ascii_lowercase_u16() }
+            }
+            return Ok(out);
+        }
+        let cap = self.heap.limits().max_string_units;
+        let mut seg = String::new();
+        let flush = |seg: &mut String, out: &mut Vec<u16>, this: &Self| -> Res<()> {
+            if seg.is_empty() {
+                return Ok(());
+            }
+            if out.len().saturating_add(seg.len().saturating_mul(3)) > cap {
+                return Err(Error::Limit(LimitKind::Heap(Limit::StringLength)));
+            }
+            let m = if upper { seg.to_uppercase() } else { seg.to_lowercase() };
+            let units: Vec<u16> = m.encode_utf16().collect();
+            seg.clear();
+            this.append_string(out, &units)
+        };
+        for r in char::decode_utf16(src.iter().copied()) {
+            match r {
+                Ok(c) if !c.is_ascii_whitespace() => seg.push(c),
+                Ok(c) => {
+                    flush(&mut seg, &mut out, self)?;
+                    self.append_string(&mut out, &[c as u16])?;
+                }
+                Err(e) => {
+                    flush(&mut seg, &mut out, self)?;
+                    self.append_string(&mut out, &[e.unpaired_surrogate()])?;
+                }
+            }
+        }
+        flush(&mut seg, &mut out, self)?;
+        Ok(out)
+    }
+
+    // ------------------------------------------------------------ split
+
+    fn str_split(&mut self, this: Value, sepv: Value, limv: Value) -> Res<Value> {
+        let s = self.this_str(this, "split")?;
+        let lim = if matches!(limv, Value::Undefined) { u32::MAX } else { to_uint32(self.coerce_number(limv)?) };
+        if let Some(r) = self.regexp_of(sepv) {
+            self.gate_exec(r)?;
+            return self.split_regexp(r, s, lim);
+        }
+        let sep = if matches!(sepv, Value::Undefined) { None } else { Some(self.coerce_string(sepv)?) };
+        if lim == 0 {
+            return self.new_array_from(&[]);
+        }
+        let Some(sep) = sep else { return self.new_array_from(&[Value::String(s)]) };
+        let size = h!(self, self.heap.str_len(s));
+        let m = h!(self, self.heap.str_len(sep));
+        let max = self.ext.bl.max_items;
+        if size == 0 {
+            return if m == 0 { self.new_array_from(&[]) } else { self.new_array_from(&[Value::String(s)]) };
+        }
+        let mut items: Vec<Value> = Vec::new();
+        if m == 0 {
+            let n = size.min(lim as usize);
+            if n > max {
+                return Err(Error::Limit(LimitKind::Regexp(RegexpLimit::Items)));
+            }
+            items.reserve(n);
+            for i in 0..n {
+                self.tick()?;
+                items.push(Value::String(self.sub(s, i, i + 1)?));
+            }
+            return self.new_array_from(&items);
+        }
+        let mut p = 0;
+        loop {
+            self.tick()?;
+            let Some(q) = self.search(s, sep, p)? else { break };
+            if items.len() >= max {
+                return Err(Error::Limit(LimitKind::Regexp(RegexpLimit::Items)));
+            }
+            items.push(Value::String(self.sub(s, p, q)?));
+            if items.len() as u64 == lim as u64 {
+                return self.new_array_from(&items);
+            }
+            p = q + m;
+        }
+        if items.len() >= max {
+            return Err(Error::Limit(LimitKind::Regexp(RegexpLimit::Items)));
+        }
+        items.push(Value::String(self.sub(s, p, size)?));
+        self.new_array_from(&items)
+    }
+
+    /// `RegExp.prototype[@@split]` without the species constructor: the same pieces, no copy of the regexp is made,
+    /// and the regexp's own `lastIndex` is never read or written.
+    fn split_regexp(&mut self, r: ObjId, s: StrId, lim: u32) -> Res<Value> {
+        let re = self.ext.regexps[&r].re.clone();
+        let sticky = re.flags().sticky;
+        if lim == 0 {
+            return self.new_array_from(&[]);
+        }
+        let size = h!(self, self.heap.str_len(s));
+        if size == 0 {
+            return match self.run_engine(&re, s, 0)? {
+                Some(_) => self.new_array_from(&[]),
+                None => self.new_array_from(&[Value::String(s)]),
+            };
+        }
+        let max = self.ext.bl.max_items;
+        let mut items: Vec<Value> = Vec::new();
+        let (mut p, mut q) = (0usize, 0usize);
+        macro_rules! push {
+            ($v:expr) => {{
+                if items.len() >= max {
+                    return Err(Error::Limit(LimitKind::Regexp(RegexpLimit::Items)));
+                }
+                items.push($v);
+                if items.len() as u64 == lim as u64 {
+                    return self.new_array_from(&items);
+                }
+            }};
+        }
+        while q < size {
+            self.tick()?;
+            let Some(m) = self.run_engine(&re, s, q)? else {
+                if sticky {
+                    q += 1;
+                    continue;
+                }
+                break;
+            };
+            let (ms, me) = m.spans[0].unwrap_or((q, q));
+            if ms >= size {
+                break;
+            }
+            let e = me.min(size);
+            if e == p {
+                q = ms + 1;
+                continue;
+            }
+            let piece = self.sub(s, p, ms)?;
+            push!(Value::String(piece));
+            p = e;
+            for g in 1..m.spans.len() {
+                let v = match m.spans[g] {
+                    Some((a, b)) => Value::String(self.sub(s, a, b)?),
+                    None => Value::Undefined,
+                };
+                push!(v);
+            }
+            q = p;
+        }
+        let tail = self.sub(s, p, size)?;
+        push!(Value::String(tail));
+        self.new_array_from(&items)
+    }
+
+    // ------------------------------------------------------------ replace
+
+    /// Build the result of `replace` from the matches. Callbacks run after every match was found, as in the spec.
+    fn build_replacement(&mut self, ml: &MatchList, s: StrId, func: Option<Value>, tpl: Option<StrId>) -> Res<Value> {
+        let mut out: Vec<u16> = Vec::new();
+        let mut next = 0usize;
+        for i in 0..ml.len() {
+            self.tick()?;
+            let row = ml.row(i);
+            let (ms, me) = (row[0].0 as usize, row[0].1 as usize);
+            let repl: Option<StrId> = if let Some(f) = func {
+                let mut cargs: Vec<Value> = Vec::with_capacity(row.len() + 2);
+                for &(a, b) in row {
+                    cargs.push(if (a, b) == UNSET { Value::Undefined } else { Value::String(self.sub(s, a as usize, b as usize)?) });
+                }
+                cargs.push(Value::Number(ms as f64));
+                cargs.push(Value::String(s));
+                let rv = self.call_fn(f, Value::Undefined, &cargs)?;
+                Some(self.coerce_string(rv)?)
+            } else {
+                None
+            };
+            if ms >= next {
+                self.append_string(&mut out, &h!(self, self.heap.str_units(s))[next..ms])?;
+                match (repl, tpl) {
+                    (Some(r), _) => self.append_string(&mut out, h!(self, self.heap.str_units(r)))?,
+                    (None, Some(t)) => self.append_subst(&mut out, t, s, row)?,
+                    (None, None) => {}
+                }
+                next = me;
+            }
+        }
+        let len = h!(self, self.heap.str_len(s));
+        if next < len {
+            self.append_string(&mut out, &h!(self, self.heap.str_units(s))[next..])?;
+        }
+        self.spend_units(out.len())?;
+        self.new_str(out)
+    }
+
+    /// `GetSubstitution` without named groups: `$$ $& $` $' $n $nn`.
+    fn append_subst(&self, out: &mut Vec<u16>, tpl: StrId, s: StrId, row: &[(u32, u32)]) -> Res<()> {
+        let t = self.heap.str_units(tpl).map_err(Error::Heap)?;
+        let src = self.heap.str_units(s).map_err(Error::Heap)?;
+        let (ms, me) = (row[0].0 as usize, row[0].1 as usize);
+        let ncap = row.len() - 1;
+        let dollar = b'$' as u16;
+        let digit = |c: Option<u16>| c.and_then(|c| (b'0' as u16..=b'9' as u16).contains(&c).then(|| (c - b'0' as u16) as usize));
+        let mut i = 0;
+        while i < t.len() {
+            let j = t[i..].iter().position(|&c| c == dollar).map_or(t.len(), |k| i + k);
+            if j > i {
+                self.append_string(out, &t[i..j])?;
+                i = j;
+                continue;
+            }
+            let next = t.get(i + 1).copied();
+            match next {
+                Some(c) if c == dollar => {
+                    self.append_string(out, &[dollar])?;
+                    i += 2;
+                }
+                Some(c) if c == b'&' as u16 => {
+                    self.append_string(out, &src[ms..me])?;
+                    i += 2;
+                }
+                Some(c) if c == b'`' as u16 => {
+                    self.append_string(out, &src[..ms])?;
+                    i += 2;
+                }
+                Some(c) if c == b'\'' as u16 => {
+                    self.append_string(out, &src[me.min(src.len())..])?;
+                    i += 2;
+                }
+                _ => {
+                    let Some(d1) = digit(next) else {
+                        self.append_string(out, &[dollar])?;
+                        i += 1;
+                        continue;
+                    };
+                    let two = digit(t.get(i + 2).copied()).map(|d2| d1 * 10 + d2).filter(|&n| (1..=ncap).contains(&n));
+                    let (g, used) = match two {
+                        Some(n) => (n, 3),
+                        None if (1..=ncap).contains(&d1) => (d1, 2),
+                        None => {
+                            self.append_string(out, &[dollar])?;
+                            i += 1;
+                            continue;
+                        }
+                    };
+                    if row[g] != UNSET {
+                        self.append_string(out, &src[row[g].0 as usize..row[g].1 as usize])?;
+                    }
+                    i += used;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    // ------------------------------------------------------------ JSON
+
+    fn json_parse(&mut self, text: Value, reviver: Value) -> Res<Value> {
+        let s = self.coerce_string(text)?;
+        if self.is_callable(reviver) {
+            return Err(unsupported("JSON.parse reviver", Span::default()));
+        }
+        let len = h!(self, self.heap.str_len(s));
+        if len > self.ext.bl.json.max_source_units {
+            return Err(Error::Limit(LimitKind::Json(json::LimitKind::Source)));
+        }
+        self.spend((len / 16) as u64)?;
+        let units = h!(self, self.heap.str_units(s)).to_vec();
+        let opts = json::JsonOptions { object_proto: Some(self.object_proto), array_proto: Some(self.array_proto) };
+        let lim = self.ext.bl.json;
+        match json::parse(&mut self.heap, &units, &opts, &lim) {
+            Ok(v) => Ok(v),
+            Err(e) => Err(match e.kind {
+                json::ErrorKind::Syntax(k) => {
+                    let what = match k {
+                        json::Syntax::UnexpectedEnd => return Err(self.mk_err(SYNTAX_ERROR, "Unexpected end of JSON input")),
+                        json::Syntax::BadNumber => "Bad number",
+                        json::Syntax::BadEscape => "Bad escaped character",
+                        json::Syntax::ControlChar => "Bad control character in string literal",
+                        json::Syntax::TrailingData => "Unexpected non-whitespace character after JSON",
+                        json::Syntax::InvalidUtf8 | json::Syntax::UnexpectedChar => "Unexpected token",
+                    };
+                    self.mk_err(SYNTAX_ERROR, &format!("{what} in JSON at position {}", e.offset))
+                }
+                json::ErrorKind::Limit(k) => Error::Limit(LimitKind::Json(k)),
+                json::ErrorKind::Heap(he) => self.herr(he),
+            }),
+        }
+    }
+
+    // ------------------------------------------------------------ RegExp objects
+
+    fn make_regexp(&mut self, re: Rc<rx::Regex>, source: StrId, flags: StrId) -> Res<ObjId> {
+        self.tick()?;
+        let o = h!(self, self.heap.new_object(Some(self.ext.regexp_proto)));
+        self.def(o, self.ext.k_last_index, Value::Number(0.0), true, false, false)?;
+        self.ext.regexps.insert(o, ReData { re, source, flags });
+        Ok(o)
+    }
+
+    fn compile_err(&mut self, e: rx::CompileError, pat: &[u16]) -> Error {
+        match e {
+            rx::CompileError::Syntax { msg, .. } => {
+                let p = String::from_utf16_lossy(pat);
+                self.mk_err(SYNTAX_ERROR, &format!("Invalid regular expression: /{p}/: {msg}"))
+            }
+            rx::CompileError::Unsupported { what, .. } => unsupported(what, Span::default()),
+            rx::CompileError::InvalidFlags(c) => self.mk_err(SYNTAX_ERROR, &format!("Invalid flags supplied to RegExp constructor '{c}'")),
+            rx::CompileError::UnsupportedFlag(c) => unsupported(flag_gate(c), Span::default()),
+            rx::CompileError::Limit(_) => Error::Limit(LimitKind::Regexp(RegexpLimit::Compile)),
+        }
+    }
+
+    /// `new RegExp(pattern, flags)` from two strings. The compiled pattern and the `source` and `flags` strings
+    /// are cached by the two handles until the next `collect`, so a hot `new RegExp(s)` pays one hash lookup.
+    fn regexp_create(&mut self, pat: StrId, flags: StrId) -> Res<ObjId> {
+        if let Some((re, src, fl)) = self.ext.cache.get(&(pat, flags)).cloned() {
+            return self.make_regexp(re, src, fl);
+        }
+        let units = h!(self, self.heap.str_units(pat)).to_vec();
+        let fl = h!(self, self.heap.to_string_lossy(flags));
+        let re = match rx::Regex::new(&units, &fl) {
+            Ok(re) => Rc::new(re),
+            Err(e) => return Err(self.compile_err(e, &units)),
+        };
+        self.spend((units.len() + re.program_len()) as u64 / 8)?;
+        let src = h!(self, self.heap.intern_vec(escape_source(&units)));
+        let fl = h!(self, self.heap.intern_str(&canon_flags(re.flags())));
+        if self.ext.cache.len() >= 256 {
+            self.ext.cache.clear();
+        }
+        self.ext.cache.insert((pat, flags), (re.clone(), src, fl));
+        self.make_regexp(re, src, fl)
+    }
+
+    fn regexp_ctor(&mut self, p: Value, f: Value, is_new: bool) -> Res<Value> {
+        if let Some(po) = self.regexp_of(p) {
+            if matches!(f, Value::Undefined) {
+                if !is_new {
+                    let c = self.get_prop(p, self.k_constructor)?;
+                    if matches!((c, self.ext.regexp_ctor), (Value::Object(a), Some(b)) if a == b) {
+                        return Ok(p);
+                    }
+                }
+                let d = &self.ext.regexps[&po];
+                let (re, src, fl) = (d.re.clone(), d.source, d.flags);
+                return Ok(Value::Object(self.make_regexp(re, src, fl)?));
+            }
+            let src = self.ext.regexps[&po].source;
+            let fl = self.coerce_string(f)?;
+            return Ok(Value::Object(self.regexp_create(src, fl)?));
+        }
+        let ps = if matches!(p, Value::Undefined) { h!(self, self.heap.intern_str("")) } else { self.coerce_string(p)? };
+        let fs = if matches!(f, Value::Undefined) { h!(self, self.heap.intern_str("")) } else { self.coerce_string(f)? };
+        Ok(Value::Object(self.regexp_create(ps, fs)?))
+    }
+
+    fn this_regexp(&mut self, this: Value, m: &str) -> Res<ObjId> {
+        match self.regexp_of(this) {
+            Some(o) => Ok(o),
+            None => {
+                let t = self.display(this);
+                Err(self.type_err(&format!("Method RegExp.prototype.{m} called on incompatible receiver {t}")))
+            }
+        }
+    }
+
+    fn re_getter(&mut self, this: Value, i: u8) -> Res<Value> {
+        let Value::Object(o) = this else { return Err(self.type_err("RegExp getter called on non-object")) };
+        let Some(d) = self.ext.regexps.get(&o) else {
+            if o == self.ext.regexp_proto {
+                return if i == 0 { self.str_value("(?:)") } else if i == 1 { self.str_value("") } else { Ok(Value::Undefined) };
+            }
+            let t = RE_GETTERS[i as usize];
+            return Err(self.type_err(&format!("RegExp.prototype.{t} getter called on non-RegExp object")));
+        };
+        let f = d.re.flags();
+        Ok(match i {
+            0 => Value::String(d.source),
+            1 => Value::String(d.flags),
+            2 => Value::Bool(f.global),
+            3 => Value::Bool(f.ignore_case),
+            4 => Value::Bool(f.multiline),
+            5 => Value::Bool(f.dot_all),
+            6 => Value::Bool(f.sticky),
+            _ => Value::Bool(false),
+        })
+    }
+
+    /// A user `exec` is not run: it is `Unsupported`. A missing or non-callable `exec` is the built-in.
+    fn gate_exec(&mut self, r: ObjId) -> Res<()> {
+        let e = self.get_prop(Value::Object(r), self.ext.k_exec)?;
+        match (e, self.ext.exec_fn) {
+            (Value::Object(a), Some(b)) if a == b => Ok(()),
+            _ if self.is_callable(e) => Err(unsupported("RegExp with a replaced exec method", Span::default())),
+            _ => Ok(()),
+        }
+    }
+
+    fn set_last_index(&mut self, r: ObjId, n: f64) -> Res<()> {
+        let saved = std::mem::replace(&mut self.strict, true);
+        let res = self.put_prop(Value::Object(r), self.ext.k_last_index, Value::Number(n));
+        self.strict = saved;
+        res
+    }
+
+    /// One bounded match attempt. Its work is charged to the evaluator budget.
+    fn run_engine(&mut self, re: &rx::Regex, s: StrId, from: usize) -> Res<Option<rx::Match>> {
+        let left = self.step_limit.saturating_sub(self.steps);
+        if left == 0 {
+            return Err(Error::Limit(LimitKind::Steps));
+        }
+        let cap = self.ext.bl.regexp_steps;
+        let lim = rx::Limits { max_steps: cap.min(left), max_input_units: self.ext.bl.regexp_input_units, max_stack_frames: self.ext.bl.regexp_stack_frames };
+        let units = self.heap.str_units(s).map_err(Error::Heap)?;
+        let r = re.exec(units, from, &lim, None, &mut self.ext.scratch);
+        self.steps = self.steps.saturating_add(self.ext.scratch.steps);
+        if self.ext.scratch.retained_bytes() > SCRATCH_KEEP {
+            self.ext.scratch.release();
+        }
+        match r {
+            Ok(m) if self.steps > self.step_limit => {
+                let _ = m;
+                Err(Error::Limit(LimitKind::Steps))
+            }
+            Ok(m) => Ok(m),
+            Err(rx::ExecError::StepLimit) => Err(Error::Limit(if left <= cap { LimitKind::Steps } else { LimitKind::Regexp(RegexpLimit::Steps) })),
+            Err(rx::ExecError::StackLimit) => Err(Error::Limit(LimitKind::Regexp(RegexpLimit::Stack))),
+            Err(rx::ExecError::InputTooLarge) => Err(Error::Limit(LimitKind::Regexp(RegexpLimit::Input))),
+            Err(rx::ExecError::Cancelled) => Err(unsupported("regexp cancel flag", Span::default())),
+        }
+    }
+
+    /// `RegExpBuiltinExec` up to the result array: reads and coerces `lastIndex` (this can run script), matches,
+    /// then writes `lastIndex` for `g` and `y`. The regexp data is copied first, so nothing stays borrowed.
+    fn re_exec_raw(&mut self, r: ObjId, s: StrId) -> Res<Option<rx::Match>> {
+        let re = self.ext.regexps[&r].re.clone();
+        let lv = self.get_prop(Value::Object(r), self.ext.k_last_index)?;
+        let n = self.coerce_number(lv)?;
+        let fl = re.flags();
+        let track = fl.global || fl.sticky;
+        let li = if !track || n.is_nan() || n <= 0.0 { 0.0 } else { n.trunc().min(9007199254740991.0) };
+        let len = h!(self, self.heap.str_len(s));
+        if li > len as f64 {
+            if track {
+                self.set_last_index(r, 0.0)?;
+            }
+            return Ok(None);
+        }
+        let m = self.run_engine(&re, s, li as usize)?;
+        match m {
+            None => {
+                if track {
+                    self.set_last_index(r, 0.0)?;
+                }
+                Ok(None)
+            }
+            Some(m) => {
+                if track {
+                    let end = m.spans[0].map_or(0, |x| x.1);
+                    self.set_last_index(r, end as f64)?;
+                }
+                Ok(Some(m))
+            }
+        }
+    }
+
+    /// All matches of a global regexp, from index 0. Sets `lastIndex` to 0 first (a read-only `lastIndex` throws)
+    /// and leaves it 0, as the spec's loop does. The capture slots are checked against `max_matches` before each push.
+    fn collect_matches(&mut self, r: ObjId, s: StrId, groups: bool) -> Res<MatchList> {
+        let re = self.ext.regexps[&r].re.clone();
+        self.set_last_index(r, 0.0)?;
+        let len = h!(self, self.heap.str_len(s));
+        let n = if groups { re.group_count() + 1 } else { 1 };
+        let mut ml = MatchList { n, v: Vec::new() };
+        let mut pos = 0usize;
+        while pos <= len {
+            self.tick()?;
+            let Some(m) = self.run_engine(&re, s, pos)? else { break };
+            if ml.v.len() + n > self.ext.bl.max_matches {
+                return Err(Error::Limit(LimitKind::Regexp(RegexpLimit::Matches)));
+            }
+            for g in 0..n {
+                ml.v.push(m.spans[g].map_or(UNSET, |(a, b)| (a as u32, b as u32)));
+            }
+            let (a, b) = m.spans[0].unwrap_or((pos, pos));
+            pos = if a == b { b + 1 } else { b };
+        }
+        self.set_last_index(r, 0.0)?;
+        Ok(ml)
+    }
+
+    /// The array `exec` returns: captures, then `index`, `input`, `groups`.
+    fn match_result(&mut self, s: StrId, spans: &[Option<(usize, usize)>]) -> Res<Value> {
+        let a = h!(self, self.heap.new_array(Some(self.array_proto)));
+        for (i, sp) in spans.iter().enumerate() {
+            let v = match *sp {
+                Some((x, y)) => Value::String(self.sub(s, x, y)?),
+                None => Value::Undefined,
+            };
+            self.def(a, PropertyKey::Index(i as u32), v, true, true, true)?;
+        }
+        let start = spans[0].map_or(0, |x| x.0);
+        self.def(a, self.ext.k_index, Value::Number(start as f64), true, true, true)?;
+        self.def(a, self.ext.k_input, Value::String(s), true, true, true)?;
+        self.def(a, self.ext.k_groups, Value::Undefined, true, true, true)?;
+        Ok(Value::Object(a))
+    }
+}
+
+trait AsciiCaseU16 {
+    fn make_ascii_uppercase_u16(&mut self);
+    fn make_ascii_lowercase_u16(&mut self);
+}
+
+impl AsciiCaseU16 for u16 {
+    fn make_ascii_uppercase_u16(&mut self) {
+        if (b'a' as u16..=b'z' as u16).contains(self) {
+            *self -= 32;
+        }
+    }
+    fn make_ascii_lowercase_u16(&mut self) {
+        if (b'A' as u16..=b'Z' as u16).contains(self) {
+            *self += 32;
+        }
+    }
+}
