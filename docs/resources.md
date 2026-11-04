@@ -687,3 +687,30 @@ The parent regression formatted 100,000 characters before truncation on the chil
 The delegate reported 368 suite runs, exceeding its 200-run cap. Its total elapsed time was estimated, not measured. The parent used the explicit 40-run cap above. No runtime HTTP or TLS behavior changed. Other OpenSSL versions, non-Linux systems and live staging were not tested in this change.
 
 Final checks: 813 workspace tests passed. The final 15-test HTTPS suite passed after lint-only cleanup. Harness clippy has no findings; the three existing net library warnings remain.
+
+
+## JSON parsing
+
+`bare_js::json::{parse,parse_utf8}` reads JSON into the existing managed heap. It uses an explicit frame stack, data descriptors and caller-supplied object and array prototypes. Null prototypes are the API default. Duplicate keys retain their first position and last value. `__proto__` is an own data property. Strings preserve UTF-16 units, including lone surrogates. Number grammar is strict; negative zero, overflow and subnormal values are retained. Long number tokens use 800 significant digits and a sticky digit before the float parser to avoid a reproduced huge-mantissa result error.
+
+Defaults: 128 Mi units of source, 1,024 open containers, 16 Mi values and 128 Mi decoded text units. UTF-8 input uses its byte length for the source check before conversion. Depth is clamped to 1,048,576 even if the caller raises the limit. Source, depth, node and text failures are distinct from syntax and heap errors. Error offsets count UTF-16 units except invalid UTF-8, which counts bytes. Heap handles from another heap remain forbidden by the existing heap contract.
+
+Parent review found that the UTF-8 entry converted input before validating prototype handles. The allocation-counter regression failed with three allocations for a rejected stale handle. The fixed entry rejects that handle with zero allocations. The parser never invokes setters or collects roots. Failed parses can leave unreachable allocations until the caller collects with its own roots; successful results must also be rooted before collection.
+
+Parent checked 20,759 generated inputs against Node with seed 17: 15,363 accepted, 5,396 rejected and zero mismatches. The comparison covers acceptance, number bits, UTF-16 strings, own-property order and data descriptors. It runs generated texts only. All 75 assembled JS tests pass, and crate clippy is clean. The workspace run passed 826 tests.
+
+The parent ran all five workloads at 1x, 10x and 100x in separate release processes with a 1 GiB address-space cap and 45-second timeout. All checksums passed. Values below are one sample per scale on archMachine; RSS includes the generated source and verification walk. These measurements do not establish a parser speed-up.
+
+| Workload | Values at 1x / 10x / 100x | Parse seconds | Peak RSS KiB |
+| --- | --- | --- | --- |
+| Records | 45,001 / 450,001 / 4,500,001 | 0.004 / 0.043 / 0.483 | 8,004 / 57,080 / 548,084 |
+| Numbers | 100,001 / 1,000,001 / 10,000,001 | 0.007 / 0.070 / 0.685 | 7,296 / 49,052 / 386,744 |
+| Strings | 5,001 / 50,001 / 500,001 | 0.001 / 0.013 / 0.165 | 5,304 / 33,596 / 336,688 |
+| Wide object and array | 25,003 / 250,003 / 2,500,003 | 0.001 / 0.014 / 0.184 | 4,144 / 17,516 / 171,220 |
+| Deep arrays and objects | 2,003 / 20,003 / 200,003 | 0.000 / 0.003 / 0.030 | 3,164 / 9,272 / 72,444 |
+
+The first parent 10-million-number run aborted under the 1 GiB address-space cap. The harness materialized every array key and pending value during verification. Replacing that with an array cursor let the same workload pass under the same cap. The parser was unchanged. The final harness uses the 1 GiB cap by default. Parsing allocates about 0.56 times per record value, once per distinct string and 38 times in the whole 10-million-number case. Existing heap property storage accounts for most allocations.
+
+Adversarial checks passed under 1 GiB and 45 seconds: a 100-million-opening-bracket flood stopped at depth 1,024; an override stopped at the hard depth cap; node, decoded-text and heap-byte limits fired; long-number tokens and one million duplicate keys completed. Peak RSS for the whole cap process was 504,628 KiB. Truncation checks did not panic. Reproduce with `rustc --edition=2024 -C opt-level=3 tools/js/json_load.rs -o <out>`, then `<out> preflight`, `<out> caps`, `<out> all` or `<out> oracle <dir> 17 20000`.
+
+Not tested: reviver callbacks, stringify, evaluator integration, target bundle execution, browser behavior, Windows, macOS, hard allocator OOM recovery or exhaustive float rounding. Default caps bound parser work and storage; they do not recover from an allocator abort.
