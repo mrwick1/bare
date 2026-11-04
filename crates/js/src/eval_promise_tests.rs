@@ -293,13 +293,14 @@ fn unreferenced_promise_cycles_are_reclaimed() {
               a.then(function () { return ra; });      // and the resolver
           })();
           var keep = new Promise(function () {}); keep.then(function () {});", |it| {
+        let intrinsic_functions = it.stats().functions;
         it.run().unwrap();
         let before = (it.promise.map.len(), it.stats().functions, it.heap.stats().live_objects, it.promise.reactions);
         assert!(before.0 >= 2000 && before.3 >= 1500, "{before:?}");
         it.collect(&[]).unwrap();
         let after = (it.promise.map.len(), it.stats().functions, it.heap.stats().live_objects, it.promise.reactions);
         assert!(after.0 <= 3, "{after:?}");
-        assert!(after.1 < 100, "{after:?}");
+        assert!(after.1 <= intrinsic_functions + 2, "{after:?}");
         assert!(after.2 < before.2 / 10, "{before:?} {after:?}");
         assert!(after.3 <= 1, "{after:?}");
         assert!(it.promise.done_pairs.len() <= 2, "{}", it.promise.done_pairs.len());

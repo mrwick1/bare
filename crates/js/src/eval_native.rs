@@ -19,7 +19,7 @@ impl<'p> Interp<'p> {
                 let keys = match a0 {
                     Value::Object(o) => {
                         let mut out = Vec::new();
-                        for k in h!(self, self.heap.own_keys(o)) {
+                        for k in self.property_keys(o)? {
                             self.tick()?;
                             if matches!(k, PropertyKey::Symbol(_)) {
                                 continue;

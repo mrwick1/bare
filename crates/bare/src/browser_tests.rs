@@ -713,3 +713,16 @@ fn dom_string_copies_share_the_execution_budget() {
         }
     });
 }
+
+#[test]
+fn host_collection_traces_byte_views_and_their_buffer_callbacks() {
+    big(|| {
+        let mut b = browser();
+        js(&mut b, "(function(){var n = document.getElementById('s'); var label = 'kept'; n.bytes = new TextEncoder().encode(JSON.stringify({v:/left/.test('left')})); n.bytes.buffer.read = function(){return label;};})();");
+        js(&mut b, "(function(){var n = document.getElementById('s'); n.addEventListener('decode', function(){Promise.resolve().then(function(){n.textContent = new TextDecoder().decode(n.bytes) + ':' + n.bytes.buffer.read();});});})();");
+        b.collect(&[]).unwrap();
+        let n = b.query("#s").unwrap().unwrap();
+        b.dispatch(n, "decode", false, false).unwrap();
+        assert_eq!(js(&mut b, "document.getElementById('s').textContent"), "{\"v\":true}:kept");
+    });
+}

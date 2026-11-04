@@ -103,13 +103,18 @@ pub fn encode_into(units: &[u16], out: &mut [u8]) -> (usize, usize) {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Malformed;
 
-fn emit(d: &mut Decoder, cp: u32, out: &mut Vec<u16>) {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DecodeError { Malformed, OutputLimit }
+
+fn emit(d: &mut Decoder, cp: u32, out: &mut Vec<u16>, max_units: usize) -> Result<(), DecodeError> {
     if !d.bom_seen {
         d.bom_seen = true;
         if cp == 0xFEFF && !d.ignore_bom {
-            return;
+            return Ok(());
         }
     }
+    let count = if cp >= 0x10000 { 2 } else { 1 };
+    if count > max_units.saturating_sub(out.len()) { return Err(DecodeError::OutputLimit); }
     if cp >= 0x10000 {
         let c = cp - 0x10000;
         out.push(0xD800 + (c >> 10) as u16);
@@ -117,6 +122,7 @@ fn emit(d: &mut Decoder, cp: u32, out: &mut Vec<u16>) {
     } else {
         out.push(cp as u16);
     }
+    Ok(())
 }
 
 /// The WHATWG UTF-8 decoder over one chunk. `flush` is true for the last chunk: a sequence that is still open is
@@ -124,12 +130,19 @@ fn emit(d: &mut Decoder, cp: u32, out: &mut Vec<u16>) {
 /// returns `Malformed`; the output and the registers are then unspecified, and the caller resets them.
 /// Output is at most one unit for each input byte plus one for each byte still open from the previous chunk.
 pub fn decode_utf8(d: &mut Decoder, input: &[u8], flush: bool, out: &mut Vec<u16>) -> Result<(), Malformed> {
+    decode_utf8_bounded(d, input, flush, out, usize::MAX).map_err(|_| Malformed)
+}
+
+/// Decode with an output cap checked before each append. State is unspecified on error.
+pub fn decode_utf8_bounded(d: &mut Decoder, input: &[u8], flush: bool, out: &mut Vec<u16>, max_units: usize) -> Result<(), DecodeError> {
+    if out.len() > max_units { return Err(DecodeError::OutputLimit); }
     let mut i = 0;
     while i < input.len() {
         if d.needed == 0 {
             // An ASCII run needs no state.
             let run = input[i..].iter().position(|&b| b >= 0x80).unwrap_or(input.len() - i);
             if run > 0 {
+                if run > max_units.saturating_sub(out.len()) { return Err(DecodeError::OutputLimit); }
                 d.bom_seen = true;
                 out.extend(input[i..i + run].iter().map(|&b| b as u16));
                 i += run;
@@ -161,9 +174,9 @@ pub fn decode_utf8(d: &mut Decoder, input: &[u8], flush: bool, out: &mut Vec<u16
                 }
                 _ => {
                     if d.fatal {
-                        return Err(Malformed);
+                        return Err(DecodeError::Malformed);
                     }
-                    emit(d, 0xFFFD, out);
+                    emit(d, 0xFFFD, out, max_units)?;
                 }
             }
             continue;
@@ -173,9 +186,9 @@ pub fn decode_utf8(d: &mut Decoder, input: &[u8], flush: bool, out: &mut Vec<u16
             (d.cp, d.needed, d.seen, d.lower, d.upper) = (0, 0, 0, 0x80, 0xBF);
             i -= 1;
             if d.fatal {
-                return Err(Malformed);
+                return Err(DecodeError::Malformed);
             }
-            emit(d, 0xFFFD, out);
+            emit(d, 0xFFFD, out, max_units)?;
             continue;
         }
         (d.lower, d.upper) = (0x80, 0xBF);
@@ -184,15 +197,15 @@ pub fn decode_utf8(d: &mut Decoder, input: &[u8], flush: bool, out: &mut Vec<u16
         if d.seen == d.needed {
             let cp = d.cp;
             (d.cp, d.needed, d.seen) = (0, 0, 0);
-            emit(d, cp, out);
+            emit(d, cp, out, max_units)?;
         }
     }
     if flush && d.needed != 0 {
         (d.cp, d.needed, d.seen, d.lower, d.upper) = (0, 0, 0, 0x80, 0xBF);
         if d.fatal {
-            return Err(Malformed);
+            return Err(DecodeError::Malformed);
         }
-        emit(d, 0xFFFD, out);
+        emit(d, 0xFFFD, out, max_units)?;
     }
     Ok(())
 }
@@ -289,5 +302,27 @@ mod tests {
             let got = dec(&[&b[..cut], &b[cut..]], false, true).unwrap();
             assert_eq!(got, want, "{b:x?} cut {cut}");
         }
+    }
+}
+
+#[cfg(test)]
+mod bounded_tests {
+    use super::*;
+
+    #[test]
+    fn bounded_output_preserves_pairs_and_allows_a_stripped_bom() {
+        let mut d = Decoder::new(false, false);
+        let mut out = Vec::new();
+        assert_eq!(decode_utf8_bounded(&mut d, &[0xEF, 0xBB, 0xBF], true, &mut out, 0), Ok(()));
+        assert!(out.is_empty());
+        for cap in [0, 1] {
+            let mut d = Decoder::new(false, false);
+            let mut out = Vec::new();
+            assert_eq!(decode_utf8_bounded(&mut d, "😀".as_bytes(), true, &mut out, cap), Err(DecodeError::OutputLimit));
+            assert!(out.is_empty());
+        }
+        let mut d = Decoder::new(false, false);
+        assert_eq!(decode_utf8_bounded(&mut d, "😀".as_bytes(), true, &mut out, 2), Ok(()));
+        assert_eq!(out, [0xD83D, 0xDE00]);
     }
 }

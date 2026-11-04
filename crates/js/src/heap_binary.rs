@@ -123,7 +123,8 @@ impl Heap {
             Some(t) if t <= self.max_buffer_bytes => {}
             _ => return Err(HeapError::Limit(Limit::BufferBytes)),
         }
-        self.charge(n)
+        let total = n.checked_add(slot_bytes::<Object>()).ok_or(HeapError::Limit(Limit::Bytes))?;
+        self.charge(total)
     }
 
     /// Allocate the object of an exotic payload. Nothing is allocated when it fails.
@@ -154,10 +155,12 @@ impl Heap {
     /// A new buffer with a copy of bytes `start..end` of a buffer or view. Both caps are checked before the copy.
     /// `InvalidKey` when the range does not fit `src`.
     pub fn new_buffer_copy(&mut self, proto: Option<ObjId>, src: ObjId, start: usize, end: usize) -> R<ObjId> {
-        let n = end.saturating_sub(start);
-        self.check_buffer(n)?;
+        self.check_opt_obj(proto)?;
+        if !self.objects.can_alloc() { return Err(HeapError::Limit(Limit::Objects)); }
         let all = self.bytes(src).ok_or(HeapError::Stale)?;
-        let part = if n == 0 { &[][..] } else { all.get(start..end).ok_or(HeapError::InvalidKey)? };
+        let part = all.get(start..end).ok_or(HeapError::InvalidKey)?;
+        let n = part.len();
+        self.check_buffer(n)?;
         let mut v = Vec::new();
         v.try_reserve_exact(n).map_err(|_| HeapError::Limit(Limit::BufferBytes))?;
         v.extend_from_slice(part);
@@ -419,5 +422,34 @@ impl Exotic {
             Exotic::Buffer(v) => Exotic::Buffer(std::mem::take(v)),
             _ => Exotic::Encoder,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn buffer_payload_and_object_share_one_heap_budget() {
+        for from in [false, true] {
+            let mut h = Heap::default();
+            h.limits.max_bytes = h.bytes + slot_bytes::<Object>() + 15;
+            let before = h.stats();
+            let r = if from { h.new_buffer_from(None, vec![0; 16]) } else { h.new_buffer(None, 16) };
+            assert_eq!(r, Err(HeapError::Limit(Limit::Bytes)));
+            assert_eq!(h.stats().bytes, before.bytes);
+            assert_eq!(h.stats().live_objects, before.live_objects);
+        }
+    }
+
+    #[test]
+    fn empty_buffer_copies_still_validate_the_range() {
+        let mut h = Heap::default();
+        let b = h.new_buffer(None, 4).unwrap();
+        let before = h.stats().live_objects;
+        for (start, end) in [(5, 5), (3, 2)] {
+            assert_eq!(h.new_buffer_copy(None, b, start, end), Err(HeapError::InvalidKey));
+        }
+        assert_eq!(h.stats().live_objects, before);
     }
 }

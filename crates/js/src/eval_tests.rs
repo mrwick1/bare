@@ -135,7 +135,8 @@ fn limits_are_distinct_and_not_catchable() {
     assert_eq!(limit_of("var f = function() {}; for (var i = 0; i < 500; i++) f = f.bind(null); f()", EvalLimits::default(), Heap::default()), LimitKind::CallDepth);
     let envs = EvalLimits { max_envs: 50, ..Default::default() };
     assert_eq!(limit_of("var keep = []; function mk(n) { return function() { return n; }; } for (var i = 0; i < 1000; i++) keep.push(mk(i));", envs, Heap::default()), LimitKind::Envs);
-    let funcs = EvalLimits { max_functions: 100, ..Default::default() };
+    let intrinsic_functions = big(|| Interp::realm(Heap::default(), EvalLimits::default()).unwrap().stats().functions);
+    let funcs = EvalLimits { max_functions: intrinsic_functions + 100, ..Default::default() };
     assert_eq!(limit_of("var keep = []; for (var i = 0; i < 1000; i++) keep.push(function() {});", funcs, Heap::default()), LimitKind::Functions);
     let heap = Heap::new(HeapLimits { max_bytes: 1 << 20, ..Default::default() }).unwrap();
     assert!(matches!(limit_of("var s = 'xxxxxxxx'; for (;;) s += s;", EvalLimits::default(), heap), LimitKind::Heap(_)));

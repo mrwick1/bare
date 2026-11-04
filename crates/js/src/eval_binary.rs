@@ -408,10 +408,6 @@ impl<'p> Interp<'p> {
         }
     }
 
-    fn str_value(&mut self, s: &str) -> Res<Value> {
-        Ok(Value::String(h!(self, self.heap.intern_str(s))))
-    }
-
     fn brand(&mut self, this: Value, kind: ExoticKind, class: &str) -> Res<()> {
         match this {
             Value::Object(o) if self.heap.exotic_kind(o) == Some(kind) => Ok(()),
@@ -541,6 +537,7 @@ impl<'p> Interp<'p> {
         let fatal = self.flag(dict, "fatal")?;
         let ignore_bom = self.flag(dict, "ignoreBOM")?;
         if let Some(s) = lab {
+            self.work(h!(self, self.heap.str_len(s)), 4)?;
             match crate::text::label(h!(self, self.heap.str_units(s))) {
                 crate::text::Label::Utf8 => {}
                 crate::text::Label::Other(_) => return Err(unsupported("TextDecoder encoding other than utf-8", Span::default())),
@@ -571,28 +568,25 @@ impl<'p> Interp<'p> {
         st.streaming = stream;
         let bom_at_start = st.bom_seen;
         let len = src.and_then(|o| self.heap.bytes(o)).map_or(0, <[u8]>::len);
-        // At most one unit for each byte, plus the bytes of a sequence still open from the last chunk (at most 3), plus one for a
-        // flushed error. Checked before the output vector exists.
-        let bound = len + 4;
         let lim = self.heap.limits();
-        if bound > lim.max_string_units {
-            return Err(Error::Limit(LimitKind::Heap(Limit::StringLength)));
-        }
-        if bound.saturating_mul(2) > lim.max_bytes {
-            return Err(Error::Limit(LimitKind::Heap(Limit::Bytes)));
-        }
+        let cap = lim.max_string_units.min(lim.max_bytes / 2);
         self.work(len, 4)?;
         let mut out: Vec<u16> = Vec::new();
-        out.try_reserve_exact(bound).map_err(|_| Error::Limit(LimitKind::Heap(Limit::Bytes)))?;
+        out.try_reserve_exact(len.saturating_add(4).min(cap)).map_err(|_| Error::Limit(LimitKind::Heap(Limit::Bytes)))?;
         let bytes = src.and_then(|o| self.heap.bytes(o)).unwrap_or(&[]);
-        let r = crate::text::decode_utf8(&mut st, bytes, !stream, &mut out);
-        if r.is_err() {
-            // A fatal error drops the rest of this chunk and resets the decoder. A BOM seen only in this failed call does not count.
-            st.reset();
-            st.bom_seen = bom_at_start;
-            st.streaming = stream;
-            self.heap.set_decoder(me, st);
-            return Err(self.type_err("The encoded data was not valid for encoding utf-8"));
+        match crate::text::decode_utf8_bounded(&mut st, bytes, !stream, &mut out, cap) {
+            Err(crate::text::DecodeError::OutputLimit) => {
+                return Err(Error::Limit(LimitKind::Heap(if cap == lim.max_string_units { Limit::StringLength } else { Limit::Bytes })));
+            }
+            Err(crate::text::DecodeError::Malformed) => {
+                // A fatal error drops this chunk; a newly seen BOM in the failed call does not count.
+                st.reset();
+                st.bom_seen = bom_at_start;
+                st.streaming = stream;
+                self.heap.set_decoder(me, st);
+                return Err(self.type_err("The encoded data was not valid for encoding utf-8"));
+            }
+            Ok(()) => {}
         }
         let s = h!(self, self.heap.intern_vec(out));
         self.heap.set_decoder(me, st);

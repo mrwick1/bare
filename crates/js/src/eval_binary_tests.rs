@@ -581,3 +581,24 @@ fn collect_does_not_walk_or_charge_view_indices() {
         assert_eq!(it.display(r), "1");
     });
 }
+
+#[test]
+fn view_enumeration_checks_steps_before_materializing_keys() {
+    let heap = Heap::new(HeapLimits { max_bytes: 4 << 20, ..Default::default() }).unwrap();
+    assert_eq!(run_with("var u = new Uint8Array(3000000); Object.keys(u)", heap, EvalLimits { max_steps: 100, ..Default::default() }, |_| {}), "limit:Steps");
+}
+
+#[test]
+fn decoder_accepts_output_exactly_at_the_string_cap() {
+    let heap = || Heap::new(HeapLimits { max_string_units: 64, ..Default::default() }).unwrap();
+    assert_eq!(run_with("new TextDecoder().decode(new Uint8Array(64)).length", heap(), EvalLimits::default(), |_| {}), "number:64");
+    let bytes = vec!["195,169"; 64].join(",");
+    let src = format!("new TextDecoder().decode(new Uint8Array([{bytes}])).length");
+    assert_eq!(run_with(&src, heap(), EvalLimits::default(), |_| {}), "number:64");
+}
+
+#[test]
+fn decoder_label_scans_consume_steps() {
+    let src = format!("new TextDecoder('{}utf-8')", " ".repeat(8192));
+    assert_eq!(run_with(&src, Heap::default(), EvalLimits { max_steps: 100, ..Default::default() }, |_| {}), "limit:Steps");
+}

@@ -341,7 +341,7 @@ impl<'p> Interp<'p> {
         } else if let Some(p) = &st.plist {
             (Some(p.clone()), p.len(), 0x7b)
         } else {
-            let all = h!(self, self.heap.own_keys(o));
+            let all = self.property_keys(o)?;
             if all.len() > st.lim.max_keys {
                 return Err(keys_limit());
             }

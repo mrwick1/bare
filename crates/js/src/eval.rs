@@ -2013,7 +2013,7 @@ impl<'p> Interp<'p> {
     /// CopyDataProperties: own enumerable properties of `src` onto `to`, skipping `skip`.
     fn copy_props(&mut self, to: ObjId, src: Value, skip: &[PropertyKey]) -> Res<()> {
         let keys: Vec<PropertyKey> = match src {
-            Value::Object(o) => h!(self, self.heap.own_keys(o)),
+            Value::Object(o) => self.property_keys(o)?,
             Value::String(s) => (0..h!(self, self.heap.str_len(s)) as u32).map(PropertyKey::Index).collect(),
             _ => return Ok(()),
         };
@@ -2884,6 +2884,14 @@ impl<'p> Interp<'p> {
         r
     }
 
+    /// Charge virtual view indices before materializing their key list.
+    fn property_keys(&mut self, o: ObjId) -> Res<Vec<PropertyKey>> {
+        if let Some((_, _, len)) = self.heap.view_parts(o) {
+            self.spend(len as u64)?;
+        }
+        Ok(h!(self, self.heap.own_keys(o)))
+    }
+
     fn for_in_keys(&mut self, v: Value) -> Res<Vec<PropertyKey>> {
         let mut o = match v {
             Value::Object(o) => o,
@@ -2893,7 +2901,7 @@ impl<'p> Interp<'p> {
         let mut seen: FxSet<PropertyKey> = FxSet::default();
         let mut out = Vec::new();
         loop {
-            for k in h!(self, self.heap.own_keys(o)) {
+            for k in self.property_keys(o)? {
                 self.tick()?;
                 if matches!(k, PropertyKey::Symbol(_)) || !seen.insert(k) {
                     continue;
