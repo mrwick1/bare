@@ -122,7 +122,7 @@ Long decimal conversion now uses one bounded significant-prefix reducer for nume
 
 Observed numeric builtins are integrated: Math.clz32/log/random/LN2 and Number.prototype.toString(radix). Random state is per realm and seeded once from OS input; it is not used for cryptography. Radix output is bounded and charged. The intrinsic number prototype represents zero for toString. Math.log uses the platform logarithm and is not promised bit-identical to Node. Wrapper Number objects remain unsupported. See [resources.md](resources.md#numeric-builtins).
 
-Promise objects and the host-driven microtask checkpoint are complete for the tested subset. Reactions and thenable jobs run FIFO. Promise state, closures and queued jobs survive explicit collection. Queue, metadata and drain work are bounded. A failed running job leaves later drains failed; a jobs-per-checkpoint cap is resumable. Async/await is integrated below. Promise combinators remain unsupported. See [resources.md](resources.md#promise-jobs).
+Promise objects and the host-driven microtask checkpoint are complete for the tested subset. Reactions and thenable jobs run FIFO. Promise state, closures and queued jobs survive explicit collection. Queue, metadata and drain work are bounded. A failed running job leaves later drains failed; a jobs-per-checkpoint cap is resumable. Async/await is integrated below. Promise.all, allSettled, race and any are integrated below. See [resources.md](resources.md#promise-jobs).
 
 Shared-realm multi-script execution is complete. Scripts share globals and lexical bindings; closures retain their owning script and restore caller state after cross-script calls, throws and limits. Promise jobs from different scripts survive collection and run in FIFO checkpoints. Code stays until realm teardown under explicit script/source/node budgets. See [resources.md](resources.md#shared-realm-scripts).
 
@@ -144,6 +144,8 @@ The managed-value and collectible-heap foundations of topic 3 are complete. Stab
 Resource checks: parse time and memory per bundle, property access, closure calls, promise chains, timer queues, collection pauses and retained heap after repeated runs. Check strings and executable code for unnecessary copies. Measure before adding caches or alternate representations.
 
 Exit: the interpreter passes the target language tests and scheduler checks. Full React/Next.js startup also requires S3. Do not mark compatibility complete until the real application boots.
+
+Promise aggregation now uses the existing FIFO queue and iterator protocol. AggregateError carries ordered errors and an optional cause. Aggregate records are traced once per collection and pruned with unreachable callbacks. Pending inputs, weak values and browser-owned DOM nodes survive explicit collection across scripts. Custom Promise constructors and AggregateError subclasses remain gates. See [resources.md](resources.md#promise-combinators). This closes the aggregation gap, not application startup.
 
 ### S3 DOM and browser APIs
 

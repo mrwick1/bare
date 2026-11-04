@@ -806,3 +806,19 @@ fn subclassing_a_host_event_is_refused_instead_of_returning_the_wrong_brand() {
         assert_eq!(js(&mut b, "class H { #e = new Event('z'); get t() { return this.#e.type; } } new H().t"), "z");
     });
 }
+
+#[test]
+fn promise_all_keeps_a_weak_dom_value_across_scripts_and_collection() {
+    big(|| {
+        let mut b = browser();
+        assert_eq!(js(&mut b, "var key = {}, wm = new WeakMap(), resolveInput; wm.set(key, document.createElement('strong')); var pending = new Promise(function (r) { resolveInput = r; }); 0"), "0");
+        assert_eq!(js(&mut b, "Promise.all([pending, Promise.resolve('b')]).then(function (values) { var el = wm.get(key); el.textContent = values.join('/'); document.body.appendChild(el); key = null; }); 0"), "0");
+        b.collect(&[]).unwrap();
+        assert_eq!(js(&mut b, "resolveInput('a'); 0"), "0");
+        b.drain().unwrap();
+        b.collect(&[]).unwrap();
+        assert_eq!(js(&mut b, "document.querySelector('strong').textContent"), "a/b");
+        assert_eq!(b.it.weak_tracked(), (1, 0));
+        assert_eq!(b.it.agg_stats(), Default::default());
+    });
+}

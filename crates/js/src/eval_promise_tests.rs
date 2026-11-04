@@ -104,15 +104,8 @@ fn out_text(it: &mut Interp) -> String {
 
 #[test]
 fn gates_are_explicit_unsupported_not_silent() {
-    for (src, what) in [
-        ("Promise.all([])", "Promise.all"),
-        ("Promise.allSettled([])", "Promise.allSettled"),
-        ("Promise.race([])", "Promise.race"),
-        ("Promise.any([])", "Promise.any"),
-        ("Promise.resolve.call(function () {}, 1)", "Promise static method on a constructor other than Promise"),
-    ] {
-        assert_eq!(run_case(src), format!("unsupported:{what}"), "{src}");
-    }
+    let src = "Promise.resolve.call(function () {}, 1)";
+    assert_eq!(run_case(src), "unsupported:Promise static method on a constructor other than Promise", "{src}");
     // an async shape that is not supported is found before anything runs
     for src in ["async function f() { switch (await 1) { default: } }", "var f = async () => { for (var k in await 1) {} };"] {
         let prog = parse_script(src, Limits::default()).unwrap();

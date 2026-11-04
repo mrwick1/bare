@@ -308,7 +308,7 @@ impl<'p> Interp<'p> {
                 Some(&Callee::Script { script, fid, .. }) => return self.func_of(script, fid).kind == FuncKind::Normal,
                 Some(&Callee::Native(n)) => return matches!(n, Nat::ObjectCtor | Nat::FnCtor | Nat::ArrayCtor | Nat::ErrorCtor(_) | Nat::Ext(Bi::RegExpCtor)) || Self::native_no_nt(n),
                 Some(&Callee::Host { ctor, .. }) => return ctor,
-                Some(&Callee::Promise(pf)) => return matches!(pf, PFn::Ctor),
+                Some(&Callee::Promise(pf)) => return matches!(pf, PFn::Ctor | PFn::AggErrCtor),
                 Some(&Callee::Bound { target, .. }) => o = target,
                 None => return false,
             }
@@ -355,6 +355,7 @@ impl<'p> Interp<'p> {
             Some(&Callee::Native(n)) if matches!(n, Nat::ObjectCtor | Nat::FnCtor | Nat::ArrayCtor | Nat::ErrorCtor(_) | Nat::Ext(Bi::RegExpCtor)) => D::Native(n),
             Some(&Callee::Native(n)) if Self::native_no_nt(n) => D::NoNt("subclassing a native constructor (new.target is not passed to the constructor)"),
             Some(&Callee::Promise(PFn::Ctor)) => D::NoNt("subclassing Promise (new.target is not passed to the constructor)"),
+            Some(&Callee::Promise(PFn::AggErrCtor)) => D::NoNt("subclassing AggregateError (new.target is not passed to the constructor)"),
             Some(&Callee::Host { ctor: true, .. }) => D::NoNt("subclassing a host constructor (new.target is not passed to the constructor)"),
             Some(Callee::Bound { target, args, .. }) => D::Bound(*target, args.clone()),
             _ => {
