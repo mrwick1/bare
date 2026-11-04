@@ -2,6 +2,7 @@
 //!
 //! Build: rustc --edition=2024 -C opt-level=3 tools/crypto/x25519_load.rs -o <out>
 //! Run:   <out> load <scale: 1|10|100> [base_iters=2000]
+//!        <out> random <scale: 1|10|100> [base_calls=100000]
 //!        <out> oracle [pairs=20000]
 //!
 //! load: base_iters * scale iterations. Each iteration is a full key exchange: two public
@@ -17,6 +18,9 @@
 #[allow(dead_code)]
 #[path = "../../crates/tls/src/x25519.rs"]
 mod x25519;
+#[allow(dead_code)]
+#[path = "../../crates/tls/src/random.rs"]
+mod random;
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::io::Write;
@@ -79,7 +83,7 @@ impl Rng {
 }
 
 fn load(scale: u64, base: u64) {
-    let iters = base * scale;
+    let iters = base.checked_mul(scale).filter(|n| n.checked_mul(4).is_some()).expect("workload size overflow");
     let mut a = [7u8; 32];
     let mut b = [9u8; 32];
     let cpu0 = cpu_secs(); // allocates, so read the counter after it
@@ -103,6 +107,21 @@ fn load(scale: u64, base: u64) {
         wall * 1e6 / (iters * 4) as f64,
         peak_rss_kib()
     );
+}
+
+fn random_load(scale: u64, base: u64) {
+    let calls = base.checked_mul(scale).expect("workload size overflow");
+    let mut buf = [0u8; 32];
+    let cpu0 = cpu_secs();
+    let (alloc0, start) = (ALLOCS.load(Relaxed), Instant::now());
+    for _ in 0..calls {
+        random::fill(&mut buf).expect("OS random source failed");
+        std::hint::black_box(&buf);
+    }
+    let wall = start.elapsed().as_secs_f64();
+    let allocs = ALLOCS.load(Relaxed) - alloc0;
+    let cpu = cpu_secs() - cpu0;
+    println!("random scale={scale} calls={calls} bytes_per_call=32 wall={wall:.3}s cpu={cpu:.2}s peak_rss_kib={} loop_allocations={allocs}", peak_rss_kib());
 }
 
 const PY: &str = r#"
@@ -170,9 +189,16 @@ fn main() {
             assert!(base > 0, "base_iters must be positive");
             load(scale, base);
         }
+        Some("random") if (3..=4).contains(&a.len()) => {
+            let scale: u64 = a[2].parse().expect("scale must be 1, 10 or 100");
+            assert!(matches!(scale, 1 | 10 | 100), "scale must be 1, 10 or 100");
+            let base = a.get(3).map_or(100000, |s| s.parse().expect("base_calls must be positive"));
+            assert!(base > 0, "base_calls must be positive");
+            random_load(scale, base);
+        }
         Some("oracle") if a.len() <= 3 => oracle(a.get(2).map_or(20000, |s| s.parse().expect("pairs"))),
         _ => {
-            eprintln!("usage: {} load <1|10|100> [base_iters] | oracle [pairs]", a[0]);
+            eprintln!("usage: {} load <1|10|100> [base_iters] | random <1|10|100> [base_calls] | oracle [pairs]", a[0]);
             std::process::exit(2);
         }
     }

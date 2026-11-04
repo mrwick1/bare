@@ -13,8 +13,8 @@
 //! - There are no tables and no array indexes that come from secret data.
 //! - Field code has no data-dependent branches. `/` and `%` are never used on secrets.
 //!
-//! Limits: nobody examined the machine code. The compiler may still change the shape of
-//! this code. Secrets are not wiped from the stack after use. Hand-written crypto is for
+//! Limits: source-level structure is not a timing guarantee. Other targets and compilers
+//! may change the shape of this code. Secrets are not wiped from the stack after use. Hand-written crypto is for
 //! learning only. See the warning in lib.rs.
 
 use std::fmt;
@@ -425,8 +425,8 @@ mod tests {
     fn field_round_trip_and_reduction() {
         // to_bytes(from_bytes(x)) is x for canonical x, and x - p for p <= x < 2^255.
         let mut x = [0u8; 32];
-        for i in 0..32 {
-            x[i] = (i as u8).wrapping_mul(37).wrapping_add(11);
+        for (i, byte) in x.iter_mut().enumerate() {
+            *byte = (i as u8).wrapping_mul(37).wrapping_add(11);
         }
         x[31] &= 0x7f;
         x[31] &= 0x3f; // below p
