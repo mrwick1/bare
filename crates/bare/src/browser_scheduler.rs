@@ -1,0 +1,848 @@
+//! Task scheduling of the browser host: timers, `queueMicrotask`, `performance.now` and `MessageChannel`.
+//! See `browser.rs` for the host design. This file owns its own state (`Sched`) and hooks into `Dom` in four places
+//! only: install, roots, trace and prune.
+//!
+//! Model
+//! - One task queue, ordered by `(due time, sequence number)`. A timer task is due at `now + delay`. A message
+//!   delivery task is due at `now` when it is queued. Equal due times run in queue order. There is no OS timer,
+//!   thread or server: nothing runs unless the driver calls `Browser::run_scheduled_tasks` or `advance_to`.
+//! - Clock: `Monotonic` (default, `Instant`) or `Virtual` (`Browser::use_virtual_clock`). A virtual clock moves only
+//!   when the driver moves it, so tests never sleep. `performance.now()` and `Event.timeStamp` read the same clock.
+//!   `advance_to(t)` steps the clock to each due task in order (a task takes zero virtual time), then to `t`.
+//! - A task runs in one `host_scope` (a fresh step budget, the normal call-depth guard), then a microtask checkpoint.
+//!   Microtasks that the checkpoint leaves (a `DrainJobs` cap) run first in the next pump.
+//! - `run_scheduled_tasks(max)` runs at most `max` due tasks and returns. It never sleeps. `Pump::next_due` says when
+//!   the driver may call again. It is separate from any navigation or network pump.
+//! - A listener or callback that throws is reported (`Browser::take_reports`) and the pump goes on. Any other error
+//!   (a Limit, Unsupported, a heap fault) ends the pump and is sticky: later pumps return it and run no JS.
+//!
+//! Timers (spec: HTML "timer initialization steps")
+//! - `setTimeout`/`setInterval(callback, delay, ...args)`. The delay is WebIDL `long`: `ToInt32`, then negative is 0.
+//!   So `2**31` becomes `-2**31`, which becomes 0 (browsers do the same). From the 6th level of nested timers a delay
+//!   below 4 ms becomes 4 ms. A timer set from a message task has level 1.
+//! - Ids are numbers from 1, never reused. `clearTimeout` and `clearInterval` are the same function. An interval
+//!   that is cleared while its callback runs is not queued again. An interval is queued again after each run, at
+//!   `clock when the run started + interval`, even when its callback throws.
+//! - A string callback (it would be `eval`) and any other non-function is `Unsupported`.
+//!
+//! `queueMicrotask(cb)` queues a real job in the VM microtask queue (`Interp::queue_microtask`). A throw is reported
+//! (event type `microtask`) and later jobs run. A Limit or Unsupported ends the checkpoint (sticky, as for Promise jobs).
+//!
+//! `MessageChannel` / `MessagePort` / `MessageEvent`
+//! - A port is an `EventTarget` (the common listener code runs). `onmessage` (the setter also starts the port),
+//!   `addEventListener('message')`, `start()`, `close()`, `postMessage(message[, transfer])`.
+//! - A message is queued in the receiving port. Before `start()` it waits there. After it, each message is one task.
+//!   `close()` disentangles the pair: later posts from either port are dropped (no error). Messages that were
+//!   queued before the close are still delivered, to both ports (the HTML Standard queues no check on the closed
+//!   state, and Node behaves the same; not checked in a browser).
+//! - Payloads: undefined, null, booleans, numbers and strings. A function or symbol throws `DataCloneError`. Any
+//!   object (plain data, array, Map, buffers, ports) is `Unsupported`: it needs a real structured clone. A non-empty
+//!   transfer list is `Unsupported`.
+//! - `MessageEvent` has `data`, `origin` (empty), `lastEventId` (empty), `source` (null) and `ports` (an empty array).
+//!   It is not constructible. `isTrusted` is false (the Event getter), which differs from a browser.
+//! - Deviations: `ports` is not frozen. `port1` and `port2` are own read-only properties of the channel, not
+//!   prototype getters. A handler set with `onmessage` and an `addEventListener` with the same function count as one
+//!   listener. `onmessageerror`, the `close` event, `window.postMessage` and `BroadcastChannel` are absent.
+//!
+//! Not here: `requestAnimationFrame`, `requestIdleCallback`, `setImmediate`, an `error` event or `onerror` for
+//! reported exceptions, `ErrorEvent`.
+//!
+//! GC: timers keep their callbacks and arguments (they are roots). A port that has queued delivery tasks is a root.
+//! A port keeps its peer, its queued payloads and its listeners alive. So an unreachable channel (a cycle) is pruned,
+//! with its queued messages, at the next `collect`. Ids of ports are generation checked, so a reused slot never
+//! finds the state of an old port. Events are pruned by `collect` only: collect between pumps in a long run.
+
+use crate::browser::*;
+use bare_js::eval::{Error, Interp};
+use bare_js::value::{ObjId, Value};
+use std::collections::{BTreeMap, HashMap, VecDeque};
+
+type V = R<Value>;
+
+fn arg(a: &[Value], i: usize) -> Value {
+    a.get(i).copied().unwrap_or(Value::Undefined)
+}
+
+/// Bounds of the scheduler. Each one is checked before the thing grows and ends with `Limit(Host(name))`.
+#[derive(Clone, Copy, Debug)]
+pub struct SchedLimits {
+    /// Live timers (`timers`).
+    pub max_timers: usize,
+    /// Extra arguments of one timer (`timer-args`).
+    pub max_timer_args: usize,
+    /// Live message ports (`message-ports`).
+    pub max_ports: usize,
+    /// Queued messages in all ports (`messages`).
+    pub max_queued_messages: usize,
+    /// Bytes of the queued messages (`message-bytes`).
+    pub max_queued_message_bytes: usize,
+}
+
+impl Default for SchedLimits {
+    fn default() -> Self {
+        SchedLimits { max_timers: 1 << 16, max_timer_args: 256, max_ports: 1 << 14, max_queued_messages: 1 << 16, max_queued_message_bytes: 16 << 20 }
+    }
+}
+
+/// `(due time as f64 bits, sequence)`. The bits of a non-negative f64 sort like the number.
+type Key = (u64, u64);
+
+enum Task {
+    Timer(u64),
+    Deliver(ObjId),
+}
+
+struct Timer {
+    cb: Value,
+    args: Vec<Value>,
+    /// `Some(ms)` for `setInterval`.
+    interval: Option<u32>,
+    nesting: u32,
+    /// The queued task, or `None` while the callback of an interval runs.
+    key: Option<Key>,
+}
+
+struct Port {
+    peer: Option<ObjId>,
+    enabled: bool,
+    /// Queued messages with their byte cost.
+    inbox: VecDeque<(Value, usize)>,
+    /// The queued delivery tasks of this port, oldest first: one per message once the port is enabled, else none.
+    keys: VecDeque<Key>,
+    /// Listener id of the `onmessage` handler.
+    handler: Option<u64>,
+}
+
+struct MsgEvent {
+    data: Value,
+    ports: Option<Value>,
+}
+
+#[derive(Clone, Copy)]
+struct SProtos {
+    port: ObjId,
+    channel: ObjId,
+    event: ObjId,
+    perf: ObjId,
+}
+
+#[derive(Default)]
+pub(crate) struct Sched {
+    limits: SchedLimits,
+    /// `Some(t)`: the virtual clock reads `t`. `None`: the monotonic clock.
+    virtual_now: Option<f64>,
+    protos: Option<SProtos>,
+    tasks: BTreeMap<Key, Task>,
+    seq: u64,
+    next_timer: u64,
+    timers: HashMap<u64, Timer>,
+    ports: HashMap<ObjId, Port>,
+    msg_events: HashMap<ObjId, MsgEvent>,
+    queued: usize,
+    queued_bytes: usize,
+    /// Nesting level of the timer task that runs now (0 outside a timer task).
+    nesting: u32,
+    halted: Option<Error>,
+}
+
+/// What a pump did.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Pump {
+    /// Tasks that ran.
+    pub ran: usize,
+    /// True when it stopped at `max_tasks` with more work due.
+    pub capped: bool,
+    /// Due time (ms) of the earliest queued task, if any.
+    pub next_due: Option<f64>,
+}
+
+/// Counters for tests and the load tool.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct SchedStats {
+    pub timers: usize,
+    pub tasks: usize,
+    pub ports: usize,
+    pub queued_messages: usize,
+    pub queued_message_bytes: usize,
+    pub message_events: usize,
+    /// The pump ended with a non-throw error and runs no more JS.
+    pub halted: bool,
+}
+
+/// A task taken out of the queue, ready to run without any borrow.
+enum Run {
+    Timer { id: u64, cb: Value, args: Vec<Value>, nesting: u32, repeat: bool },
+    Deliver { port: ObjId, data: Value },
+    Nothing,
+}
+
+fn to_int32(n: f64) -> i32 {
+    if !n.is_finite() { 0 } else { n.trunc().rem_euclid(4294967296.0) as u32 as i32 }
+}
+
+impl Dom {
+    /// Milliseconds since the time origin, on the clock in use.
+    pub(crate) fn now_ms(&self) -> f64 {
+        self.sched.borrow().virtual_now.unwrap_or_else(|| self.start.elapsed().as_secs_f64() * 1000.0)
+    }
+
+    /// The roots of the scheduler: prototypes, the callbacks and arguments of timers, and the ports with queued tasks.
+    pub(crate) fn sched_roots(&self, out: &mut Vec<Value>) {
+        let s = self.sched.borrow();
+        if let Some(p) = s.protos {
+            out.extend([p.port, p.channel, p.event, p.perf].map(Value::Object));
+        }
+        for t in s.timers.values() {
+            out.push(t.cb);
+            out.extend_from_slice(&t.args);
+        }
+        out.extend(s.ports.iter().filter(|(_, p)| !p.keys.is_empty()).map(|(&o, _)| Value::Object(o)));
+    }
+
+    pub(crate) fn sched_trace(&self, owner: ObjId, out: &mut Vec<Value>) {
+        let s = self.sched.borrow();
+        if let Some(p) = s.ports.get(&owner) {
+            out.extend(p.peer.map(Value::Object));
+            out.extend(p.inbox.iter().map(|m| m.0));
+        } else if let Some(e) = s.msg_events.get(&owner) {
+            out.push(e.data);
+            out.extend(e.ports);
+        }
+    }
+
+    pub(crate) fn sched_prune(&self, live: &dyn Fn(ObjId) -> bool) {
+        let mut s = self.sched.borrow_mut();
+        let s = &mut *s;
+        s.ports.retain(|&o, _| live(o));
+        s.msg_events.retain(|&o, _| live(o));
+        let ports = &s.ports;
+        s.tasks.retain(|_, t| match t {
+            Task::Deliver(o) => ports.contains_key(o),
+            Task::Timer(_) => true,
+        });
+        s.queued = s.ports.values().map(|p| p.inbox.len()).sum();
+        s.queued_bytes = s.ports.values().flat_map(|p| p.inbox.iter().map(|m| m.1)).sum();
+    }
+
+    // ------------------------------------------------------------ queue
+
+    fn schedule(&self, due: f64, task: Task) -> R<Key> {
+        let mut s = self.sched.borrow_mut();
+        let seq = s.seq;
+        s.seq = seq.checked_add(1).ok_or_else(|| self.lim("task-seq"))?;
+        let key = (due.to_bits(), seq);
+        s.tasks.insert(key, task);
+        Ok(key)
+    }
+
+    fn next_due(&self) -> Option<f64> {
+        self.sched.borrow().tasks.keys().next().map(|k| f64::from_bits(k.0))
+    }
+
+    /// Take the earliest task if it is due at `upto` or before. Gives its due time.
+    fn pop_due(&self, upto: f64) -> Option<(f64, Run)> {
+        let mut s = self.sched.borrow_mut();
+        let s = &mut *s;
+        let key = *s.tasks.keys().next()?;
+        let due = f64::from_bits(key.0);
+        if due > upto {
+            return None;
+        }
+        let task = s.tasks.remove(&key).expect("key exists");
+        let run = match task {
+            Task::Timer(id) => match s.timers.get_mut(&id) {
+                None => Run::Nothing,
+                Some(t) => {
+                    let (cb, args, nesting, repeat) = (t.cb, t.args.clone(), t.nesting, t.interval.is_some());
+                    if repeat {
+                        t.key = None;
+                    } else {
+                        s.timers.remove(&id);
+                    }
+                    Run::Timer { id, cb, args, nesting, repeat }
+                }
+            },
+            Task::Deliver(port) => match s.ports.get_mut(&port) {
+                Some(p) if p.keys.front() == Some(&key) => {
+                    p.keys.pop_front();
+                    match p.inbox.pop_front() {
+                        Some((data, bytes)) => {
+                            s.queued -= 1;
+                            s.queued_bytes -= bytes;
+                            Run::Deliver { port, data }
+                        }
+                        None => Run::Nothing,
+                    }
+                }
+                _ => Run::Nothing,
+            },
+        };
+        Some((due, run))
+    }
+
+    /// Run one task: one `host_scope`, then a checkpoint. A throw of the callback is reported.
+    fn run_task(&self, it: &mut Interp<'_>, run: Run) -> R<()> {
+        match run {
+            Run::Nothing => Ok(()),
+            Run::Timer { id, cb, args, nesting, repeat } => {
+                self.sched.borrow_mut().nesting = nesting;
+                let this = Value::Object(*self.global.get().expect("installed"));
+                let r = it.host_scope(|it| {
+                    it.charge(1)?;
+                    match it.call(cb, this, &args) {
+                        Ok(_) => {}
+                        Err(Error::Throw(v)) => self.report(it, v, if repeat { "interval" } else { "timeout" }, Target::Window),
+                        Err(e) => return Err(e),
+                    }
+                    it.host_checkpoint().map(|_| ())
+                });
+                self.sched.borrow_mut().nesting = 0;
+                r?;
+                if repeat {
+                    self.requeue_interval(id, nesting + 1)?;
+                }
+                Ok(())
+            }
+            Run::Deliver { port, data } => it.host_scope(|it| {
+                it.charge(1)?;
+                if self.has_message_listener(port) {
+                    let ev = self.new_msg_event(it, data)?;
+                    self.dispatch(it, Target::Obj(port), ev)?;
+                }
+                it.host_checkpoint().map(|_| ())
+            }),
+        }
+    }
+
+    fn has_message_listener(&self, port: ObjId) -> bool {
+        self.st.borrow().listeners.get(&Target::Obj(port)).is_some_and(|v| v.iter().any(|l| &*l.ty == "message"))
+    }
+
+    fn requeue_interval(&self, id: u64, nesting: u32) -> R<()> {
+        let now = self.now_ms();
+        let Some((interval, level)) = self.sched.borrow().timers.get(&id).map(|t| (t.interval.unwrap_or(0), nesting.min(1 << 20))) else { return Ok(()) };
+        let delay = if level > 5 { interval.max(4) } else { interval };
+        let key = self.schedule(now + delay as f64, Task::Timer(id))?;
+        let mut s = self.sched.borrow_mut();
+        if let Some(t) = s.timers.get_mut(&id) {
+            t.key = Some(key);
+            t.nesting = level;
+        }
+        Ok(())
+    }
+
+    // ------------------------------------------------------------ install
+
+    pub(crate) fn install_scheduler(&self, it: &mut Interp<'_>) -> R<()> {
+        let g = it.global_object();
+        let p = self.p();
+        let op = it.object_prototype();
+        let (port, channel, event, perf) = (self.obj(it, p.et)?, self.obj(it, op)?, self.obj(it, p.event)?, self.obj(it, op)?);
+        self.sched.borrow_mut().protos = Some(SProtos { port, channel, event, perf });
+        let kc = self.key(it, "constructor")?;
+        let kp = self.key(it, "prototype")?;
+        for (name, h, len) in [
+            ("setTimeout", set_timeout as H, 1),
+            ("setInterval", set_interval as H, 1),
+            ("clearTimeout", clear_timer as H, 1),
+            ("clearInterval", clear_timer as H, 1),
+            ("queueMicrotask", queue_microtask as H, 1),
+        ] {
+            let f = self.add_fn(it, h, name, len, false)?;
+            let k = self.key(it, name)?;
+            it.define_data(g, k, Value::Object(f), true, true, true)?;
+        }
+        // interface objects
+        for (name, proto, ctor) in [
+            ("MessageChannel", channel, Some(message_channel_ctor as H)),
+            ("MessagePort", port, None),
+            ("MessageEvent", event, None),
+        ] {
+            let f = self.add_fn(it, ctor.unwrap_or(illegal), name, 0, ctor.is_some())?;
+            it.define_data(f, kp, Value::Object(proto), false, false, false)?;
+            it.define_data(proto, kc, Value::Object(f), true, false, true)?;
+            let k = self.key(it, name)?;
+            it.define_data(g, k, Value::Object(f), true, false, true)?;
+        }
+        let acc = |it: &mut Interp<'_>, on: ObjId, name: &str, get: H, set: Option<H>| -> R<()> {
+            let key = self.key(it, name)?;
+            let gf = self.add_fn(it, get, &format!("get {name}"), 0, false)?;
+            let sf = match set {
+                Some(s) => Some(self.add_fn(it, s, &format!("set {name}"), 1, false)?),
+                None => None,
+            };
+            let d = bare_js::heap::PropertyDescriptor { get: Some(Some(gf)), set: Some(sf), enumerable: Some(true), configurable: Some(true), ..Default::default() };
+            match it.heap.define_own_property(on, key, &d) {
+                Ok(_) => Ok(()),
+                Err(e) => Err(it.heap_error(e)),
+            }
+        };
+        let method = |it: &mut Interp<'_>, on: ObjId, name: &str, h: H, len: u32| -> R<()> {
+            let f = self.add_fn(it, h, name, len, false)?;
+            let k = self.key(it, name)?;
+            it.define_data(on, k, Value::Object(f), true, true, true)
+        };
+        method(it, port, "postMessage", port_post_message, 1)?;
+        method(it, port, "start", port_start, 0)?;
+        method(it, port, "close", port_close, 0)?;
+        acc(it, port, "onmessage", port_onmessage, Some(set_port_onmessage))?;
+        for (name, h) in [("data", msg_data as H), ("origin", msg_empty), ("lastEventId", msg_empty), ("source", msg_source), ("ports", msg_ports)] {
+            acc(it, event, name, h, None)?;
+        }
+        method(it, perf, "now", performance_now, 0)?;
+        let po = self.obj(it, perf)?;
+        let k = self.key(it, "performance")?;
+        it.define_data(g, k, Value::Object(po), true, true, true)?;
+        Ok(())
+    }
+
+    // ------------------------------------------------------------ messages
+
+    fn new_msg_event(&self, it: &mut Interp<'_>, data: Value) -> R<ObjId> {
+        let proto = self.sched.borrow().protos.expect("installed").event;
+        let e = self.new_event_proto(it, "message", false, false, false, proto)?;
+        self.sched.borrow_mut().msg_events.insert(e, MsgEvent { data, ports: None });
+        Ok(e)
+    }
+
+    fn port_of(&self, it: &mut Interp<'_>, this: Value) -> R<ObjId> {
+        match this {
+            Value::Object(o) if self.sched.borrow().ports.contains_key(&o) => Ok(o),
+            _ => Err(it.type_error("Illegal invocation")),
+        }
+    }
+
+    /// Queue a delivery task for each message of `port` that has none, if the port is enabled.
+    fn start_port(&self, port: ObjId) -> R<()> {
+        let now = self.now_ms();
+        let missing = {
+            let s = self.sched.borrow();
+            match s.ports.get(&port) {
+                Some(p) if !p.enabled => p.inbox.len(),
+                _ => 0,
+            }
+        };
+        if let Some(p) = self.sched.borrow_mut().ports.get_mut(&port) {
+            p.enabled = true;
+        }
+        for _ in 0..missing {
+            let key = self.schedule(now, Task::Deliver(port))?;
+            if let Some(p) = self.sched.borrow_mut().ports.get_mut(&port) {
+                p.keys.push_back(key);
+            }
+        }
+        Ok(())
+    }
+
+    /// The cost of a message and the message, or the error that `postMessage` throws.
+    fn clone_payload(&self, it: &mut Interp<'_>, v: Value) -> R<(Value, usize)> {
+        match v {
+            Value::Undefined | Value::Null | Value::Bool(_) | Value::Number(_) => Ok((v, 16)),
+            Value::String(s) => {
+                let len = it.heap.str_len(s).map_err(Error::Heap)?;
+                it.charge((len / 64) as u64)?;
+                Ok((v, 16usize.saturating_add(len.saturating_mul(2))))
+            }
+            Value::Symbol(_) => Err(self.dom_err(it, "DataCloneError", "Symbol could not be cloned.")),
+            Value::Object(_) if it.is_callable_value(v) => Err(self.dom_err(it, "DataCloneError", "function could not be cloned.")),
+            Value::Object(_) => Err(Error::Unsupported(unsupported("MessagePort.postMessage of an object (structured clone)"))),
+        }
+    }
+
+    /// A transfer list or `{ transfer }` option must be empty.
+    fn no_transfer(&self, it: &mut Interp<'_>, v: Value) -> R<()> {
+        let list = match v {
+            Value::Undefined | Value::Null => return Ok(()),
+            Value::Object(_) => {
+                if self.is_array_like(it, v)? {
+                    v
+                } else {
+                    let kt = self.key(it, "transfer")?;
+                    it.get_value(v, kt)?
+                }
+            }
+            _ => return Err(it.type_error("Failed to execute 'postMessage' on 'MessagePort': The transfer argument is not an object.")),
+        };
+        if matches!(list, Value::Undefined | Value::Null) {
+            return Ok(());
+        }
+        let kl = self.key(it, "length")?;
+        let n = it.get_value(list, kl)?;
+        if it.to_js_number(n)? != 0.0 {
+            return Err(Error::Unsupported(unsupported("MessagePort.postMessage transfer list")));
+        }
+        Ok(())
+    }
+
+    fn is_array_like(&self, it: &mut Interp<'_>, v: Value) -> R<bool> {
+        let kl = self.key(it, "length")?;
+        Ok(matches!(it.get_value(v, kl)?, Value::Number(_)))
+    }
+}
+
+fn illegal(_: &Dom, it: &mut Interp<'_>, _: Value, _: &[Value]) -> V {
+    Err(it.type_error("Illegal constructor"))
+}
+
+// ------------------------------------------------------------------------------------------ timers
+
+fn window_this(d: &Dom, it: &mut Interp<'_>, this: Value) -> R<()> {
+    match this {
+        Value::Undefined | Value::Null => Ok(()),
+        Value::Object(o) if Some(&o) == d.global.get() => Ok(()),
+        _ => Err(it.type_error("Illegal invocation")),
+    }
+}
+
+fn set_timer(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value], repeat: bool) -> V {
+    window_this(d, it, this)?;
+    let name = if repeat { "setInterval" } else { "setTimeout" };
+    if a.is_empty() {
+        return Err(it.type_error(&format!("Failed to execute '{name}' on 'Window': 1 argument required, but only 0 present.")));
+    }
+    let cb = a[0];
+    if !it.is_callable_value(cb) {
+        return Err(Error::Unsupported(unsupported(match (repeat, matches!(cb, Value::String(_))) {
+            (false, true) => "setTimeout with a string callback (eval)",
+            (true, true) => "setInterval with a string callback (eval)",
+            (false, false) => "setTimeout with a non-function callback",
+            (true, false) => "setInterval with a non-function callback",
+        })));
+    }
+    let n = it.to_js_number(arg(a, 1))?;
+    let mut delay = to_int32(n).max(0) as u32;
+    let args: Vec<Value> = a.iter().skip(2).copied().collect();
+    let now = d.now_ms();
+    let (id, level) = {
+        let s = d.sched.borrow();
+        if args.len() > s.limits.max_timer_args {
+            return Err(d.lim("timer-args"));
+        }
+        if s.timers.len() >= s.limits.max_timers {
+            return Err(d.lim("timers"));
+        }
+        let id = s.next_timer + 1;
+        if id > i32::MAX as u64 {
+            return Err(d.lim("timer-ids"));
+        }
+        (id, s.nesting.saturating_add(1))
+    };
+    if level > 5 && delay < 4 {
+        delay = 4;
+    }
+    it.charge(1 + args.len() as u64)?;
+    let key = d.schedule(now + delay as f64, Task::Timer(id))?;
+    let mut s = d.sched.borrow_mut();
+    s.next_timer = id;
+    s.timers.insert(id, Timer { cb, args, interval: repeat.then_some(delay), nesting: level, key: Some(key) });
+    Ok(Value::Number(id as f64))
+}
+
+fn set_timeout(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
+    set_timer(d, it, this, a, false)
+}
+
+fn set_interval(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
+    set_timer(d, it, this, a, true)
+}
+
+fn clear_timer(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
+    window_this(d, it, this)?;
+    let n = it.to_js_number(arg(a, 0))?;
+    let id = to_int32(n);
+    let mut s = d.sched.borrow_mut();
+    if id > 0
+        && let Some(t) = s.timers.remove(&(id as u64))
+        && let Some(k) = t.key
+    {
+        s.tasks.remove(&k);
+    }
+    Ok(Value::Undefined)
+}
+
+fn queue_microtask(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
+    window_this(d, it, this)?;
+    if !it.is_callable_value(arg(a, 0)) {
+        return Err(it.type_error("Failed to execute 'queueMicrotask' on 'Window': parameter 1 is not of type 'Function'."));
+    }
+    it.queue_microtask(a[0])?;
+    Ok(Value::Undefined)
+}
+
+fn performance_now(d: &Dom, _: &mut Interp<'_>, _: Value, _: &[Value]) -> V {
+    Ok(Value::Number(d.now_ms()))
+}
+
+// ------------------------------------------------------------------------------------------ message ports
+
+fn message_channel_ctor(d: &Dom, it: &mut Interp<'_>, _: Value, _: &[Value]) -> V {
+    if d.sched.borrow().ports.len() + 2 > d.sched.borrow().limits.max_ports {
+        return Err(d.lim("message-ports"));
+    }
+    if d.st.borrow().by_obj.len() + 2 > d.lim.max_wrappers {
+        return Err(d.lim("dom-wrappers"));
+    }
+    let protos = d.sched.borrow().protos.expect("installed");
+    let (p1, p2, ch) = (d.obj(it, protos.port)?, d.obj(it, protos.port)?, d.obj(it, protos.channel)?);
+    let (k1, k2) = (d.key(it, "port1")?, d.key(it, "port2")?);
+    it.define_data(ch, k1, Value::Object(p1), false, false, false)?;
+    it.define_data(ch, k2, Value::Object(p2), false, false, false)?;
+    let mut st = d.st.borrow_mut();
+    let mut s = d.sched.borrow_mut();
+    for (me, peer) in [(p1, p2), (p2, p1)] {
+        st.by_obj.insert(me, Target::Obj(me));
+        s.ports.insert(me, Port { peer: Some(peer), enabled: false, inbox: VecDeque::new(), keys: VecDeque::new(), handler: None });
+    }
+    Ok(Value::Object(ch))
+}
+
+fn port_post_message(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
+    let port = d.port_of(it, this)?;
+    if a.is_empty() {
+        return Err(it.type_error("Failed to execute 'postMessage' on 'MessagePort': 1 argument required, but only 0 present."));
+    }
+    d.no_transfer(it, arg(a, 1))?;
+    let (data, bytes) = d.clone_payload(it, a[0])?;
+    let now = d.now_ms();
+    let target = {
+        let s = d.sched.borrow();
+        let Some(p) = s.ports.get(&port) else { return Ok(Value::Undefined) };
+        let Some(peer) = p.peer else { return Ok(Value::Undefined) };
+        if s.queued >= s.limits.max_queued_messages {
+            return Err(d.lim("messages"));
+        }
+        if s.queued_bytes.saturating_add(bytes) > s.limits.max_queued_message_bytes {
+            return Err(d.lim("message-bytes"));
+        }
+        peer
+    };
+    let enabled = d.sched.borrow().ports[&target].enabled;
+    let key = if enabled { Some(d.schedule(now, Task::Deliver(target))?) } else { None };
+    let mut s = d.sched.borrow_mut();
+    s.queued += 1;
+    s.queued_bytes += bytes;
+    let t = s.ports.get_mut(&target).expect("checked");
+    t.inbox.push_back((data, bytes));
+    t.keys.extend(key);
+    Ok(Value::Undefined)
+}
+
+fn port_start(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
+    let port = d.port_of(it, this)?;
+    d.start_port(port)?;
+    Ok(Value::Undefined)
+}
+
+fn port_close(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
+    let port = d.port_of(it, this)?;
+    let mut s = d.sched.borrow_mut();
+    let peer = s.ports.get_mut(&port).expect("checked").peer.take();
+    if let Some(q) = peer.and_then(|q| s.ports.get_mut(&q)) {
+        q.peer = None;
+    }
+    Ok(Value::Undefined)
+}
+
+fn port_onmessage(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
+    let port = d.port_of(it, this)?;
+    let Some(id) = d.sched.borrow().ports[&port].handler else { return Ok(Value::Null) };
+    let st = d.st.borrow();
+    Ok(st.listeners.get(&Target::Obj(port)).and_then(|v| v.iter().find(|l| l.id == id)).map_or(Value::Null, |l| Value::Object(l.cb)))
+}
+
+fn set_port_onmessage(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
+    let port = d.port_of(it, this)?;
+    let cb = match arg(a, 0) {
+        v @ Value::Object(o) if it.is_callable_value(v) => Some(o),
+        _ => None,
+    };
+    let t = Target::Obj(port);
+    let old = d.sched.borrow().ports[&port].handler;
+    {
+    let mut st = d.st.borrow_mut();
+    let st = &mut *st;
+    let existing = old.and_then(|id| st.listeners.get(&t).and_then(|v| v.iter().position(|l| l.id == id)));
+    match (existing, cb) {
+        (Some(i), Some(cb)) => st.listeners.get_mut(&t).expect("found")[i].cb = cb,
+        (Some(i), None) => {
+            let v = st.listeners.get_mut(&t).expect("found");
+            v.remove(i);
+            if v.is_empty() {
+                st.listeners.remove(&t);
+            }
+            st.n_listeners -= 1;
+            d.sched.borrow_mut().ports.get_mut(&port).expect("checked").handler = None;
+        }
+        (None, Some(cb)) => {
+            if st.n_listeners >= d.lim.max_listeners {
+                return Err(d.lim("dom-listeners"));
+            }
+            let list = st.listeners.entry(t).or_default();
+            if list.len() >= d.lim.max_listeners_per_target {
+                return Err(d.lim("dom-listeners-per-target"));
+            }
+            st.next_id += 1;
+            let id = st.next_id;
+            list.push(Listener { id, ty: "message".into(), cb, capture: false, once: false, passive: false });
+            st.n_listeners += 1;
+            d.sched.borrow_mut().ports.get_mut(&port).expect("checked").handler = Some(id);
+        }
+        (None, None) => {}
+    }
+    }
+    if cb.is_some() {
+        d.start_port(port)?;
+    }
+    Ok(Value::Undefined)
+}
+
+// ------------------------------------------------------------------------------------------ MessageEvent
+
+fn msg_event<T>(d: &Dom, it: &mut Interp<'_>, this: Value, f: impl FnOnce(&mut MsgEvent) -> T) -> R<T> {
+    if let Value::Object(o) = this
+        && let Some(e) = d.sched.borrow_mut().msg_events.get_mut(&o)
+    {
+        return Ok(f(e));
+    }
+    Err(it.type_error("Illegal invocation"))
+}
+
+fn msg_data(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
+    msg_event(d, it, this, |e| e.data)
+}
+
+fn msg_empty(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
+    msg_event(d, it, this, |_| ())?;
+    d.js_str(it, "")
+}
+
+fn msg_source(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
+    msg_event(d, it, this, |_| Value::Null)
+}
+
+fn msg_ports(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
+    if let Some(v) = msg_event(d, it, this, |e| e.ports)? {
+        return Ok(v);
+    }
+    let arr = it.array_from(&[])?;
+    msg_event(d, it, this, |e| e.ports = Some(arr))?;
+    Ok(arr)
+}
+
+// ------------------------------------------------------------------------------------------ the driver
+
+impl Browser {
+    /// Limits of the scheduler. Set them before scripts run.
+    pub fn set_sched_limits(&mut self, l: SchedLimits) {
+        self.dom.sched.borrow_mut().limits = l;
+    }
+
+    /// Switch to a virtual clock that starts at the current time and moves only with `advance_to` / `advance_time`.
+    pub fn use_virtual_clock(&mut self) {
+        let now = self.dom.now_ms();
+        self.dom.sched.borrow_mut().virtual_now = Some(now);
+    }
+
+    /// Like `use_virtual_clock`, starting at `t` ms. `t` must not be before the current time (time never goes back).
+    pub fn use_virtual_clock_at(&mut self, t: f64) -> R<()> {
+        if !t.is_finite() || t < self.dom.now_ms() {
+            return Err(Error::Unsupported(unsupported("the virtual clock cannot start before the current time")));
+        }
+        self.dom.sched.borrow_mut().virtual_now = Some(t);
+        Ok(())
+    }
+
+    /// Milliseconds since the time origin (what `performance.now()` gives now).
+    pub fn now(&self) -> f64 {
+        self.dom.now_ms()
+    }
+
+    /// Due time of the earliest queued task.
+    pub fn next_scheduled_due(&self) -> Option<f64> {
+        self.dom.next_due()
+    }
+
+    pub fn sched_stats(&self) -> SchedStats {
+        let s = self.dom.sched.borrow();
+        SchedStats {
+            timers: s.timers.len(),
+            tasks: s.tasks.len(),
+            ports: s.ports.len(),
+            queued_messages: s.queued,
+            queued_message_bytes: s.queued_bytes,
+            message_events: s.msg_events.len(),
+            halted: s.halted.is_some(),
+        }
+    }
+
+    /// Run at most `max_tasks` tasks that are due on the current clock, oldest first, then return. It does not wait.
+    /// A task that throws is reported and the pump goes on. Any other error ends the pump and every later pump
+    /// returns it without running JS. Collect between pumps in a long run (events are freed only by `collect`).
+    pub fn run_scheduled_tasks(&mut self, max_tasks: usize) -> R<Pump> {
+        self.pump(max_tasks, None)
+    }
+
+    /// Virtual clock only: run every task due up to time `t` (ms), stepping the clock to each task's due time,
+    /// then set the clock to `t`. Stops early at `max_tasks` (`capped`); call again to go on.
+    pub fn advance_to(&mut self, t: f64, max_tasks: usize) -> R<Pump> {
+        if !t.is_finite() || t < 0.0 {
+            return Err(Error::Unsupported(unsupported("advance_to needs a finite non-negative time")));
+        }
+        if self.dom.sched.borrow().virtual_now.is_none() {
+            return Err(Error::Unsupported(unsupported("advance_to on the monotonic clock")));
+        }
+        self.pump(max_tasks, Some(t))
+    }
+
+    /// `advance_to(now + ms)`.
+    pub fn advance_time(&mut self, ms: f64, max_tasks: usize) -> R<Pump> {
+        let t = self.dom.now_ms() + ms;
+        self.advance_to(t, max_tasks)
+    }
+
+    fn pump(&mut self, max: usize, target: Option<f64>) -> R<Pump> {
+        let dom = self.dom.clone();
+        if let Some(e) = dom.sched.borrow().halted {
+            return Err(e);
+        }
+        let was = std::mem::replace(&mut dom.st.borrow_mut().driver, true);
+        let r = self.pump_inner(&dom, max, target);
+        dom.st.borrow_mut().driver = was;
+        if let Err(e) = r {
+            dom.sched.borrow_mut().halted = Some(e);
+        }
+        r
+    }
+
+    fn pump_inner(&mut self, dom: &Dom, max: usize, target: Option<f64>) -> R<Pump> {
+        if self.it.pending_jobs() > 0 {
+            self.it.host_scope(|it| it.host_checkpoint().map(|_| ()))?;
+        }
+        let mut ran = 0usize;
+        let mut capped = false;
+        loop {
+            let upto = target.unwrap_or_else(|| dom.now_ms());
+            if ran >= max {
+                capped = dom.next_due().is_some_and(|d| d <= upto);
+                break;
+            }
+            let Some((due, run)) = dom.pop_due(upto) else { break };
+            if target.is_some()
+                && let Some(t) = &mut dom.sched.borrow_mut().virtual_now
+            {
+                *t = t.max(due);
+            }
+            if !matches!(run, Run::Nothing) {
+                ran += 1;
+            }
+            dom.run_task(&mut self.it, run)?;
+        }
+        if let Some(t) = target
+            && !capped
+            && let Some(c) = &mut dom.sched.borrow_mut().virtual_now
+        {
+            *c = c.max(t);
+        }
+        Ok(Pump { ran, capped, next_due: dom.next_due() })
+    }
+}

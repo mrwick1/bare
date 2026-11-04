@@ -41,8 +41,8 @@
 //! - A JS string with a lone surrogate cannot be stored in the UTF-8 document: `Error::Unsupported`. Valid pairs round-trip.
 //! - `createElementNS` accepts only the HTML namespace. Other namespaces, `namespaceURI`, SVG/MathML and shadow DOM
 //!   are `Unsupported` or absent. `new Document()`, `DocumentFragment`, `innerHTML`, `outerHTML`, `attributes`,
-//!   `classList`, `dataset`, `style`, `getElementsBy*`, `before/after/replaceWith`, layout APIs, `location`, timers and
-//!   network are absent.
+//!   `classList`, `dataset`, `style`, `getElementsBy*`, `before/after/replaceWith`, layout APIs, `location` and
+//!   network are absent. Timers, `queueMicrotask`, `performance.now` and `MessageChannel` are in `browser_scheduler.rs`.
 //! - `addEventListener` option `signal` is `Unsupported`. `isTrusted` is always false. Events made by the test driver
 //!   are plain `Event`s (no `MouseEvent`/`InputEvent` fields).
 //! - Default actions are NOT implemented: no link navigation, no form submission or validation, no checkbox toggle or
@@ -58,6 +58,7 @@
 
 use crate::browser_dom as nd;
 use crate::browser_events as ev;
+pub use crate::browser_scheduler::{Pump, SchedLimits, SchedStats};
 use bare_css::selector::{Selector, parse_selector_list};
 use bare_html::dom::{Document, NodeData, NodeId};
 use bare_js::eval::{Error, EvalLimits, Host, Interp, LimitKind};
@@ -247,6 +248,7 @@ pub struct Dom {
     /// Prototypes and interface objects: permanent roots.
     pub(crate) fixed: RefCell<Vec<ObjId>>,
     pub(crate) start: Instant,
+    pub(crate) sched: RefCell<crate::browser_scheduler::Sched>,
 }
 
 impl Host for Dom {
@@ -261,9 +263,11 @@ impl Host for Dom {
     fn roots(&self, out: &mut Vec<Value>) {
         out.extend(self.fixed.borrow().iter().map(|&o| Value::Object(o)));
         out.extend(self.doc_wrapper.get().map(|&o| Value::Object(o)));
+        self.sched_roots(out);
     }
 
     fn trace(&self, owner: ObjId, out: &mut Vec<Value>) {
+        self.sched_trace(owner, out);
         let st = self.st.borrow();
         if let Some(&t) = st.by_obj.get(&owner) {
             for l in st.listeners.get(&t).into_iter().flatten() {
@@ -299,6 +303,11 @@ impl Host for Dom {
         });
         st.n_listeners = st.listeners.values().map(Vec::len).sum();
         st.events.retain(|&o, _| live(o));
+        self.sched_prune(live);
+    }
+
+    fn report_exception(&self, it: &mut Interp<'_>, thrown: Value) {
+        self.report(it, thrown, "microtask", Target::Window);
     }
 }
 
@@ -310,6 +319,7 @@ fn domexc_codes(name: &str) -> u32 {
         "NotSupportedError" => 9,
         "InvalidStateError" => 11,
         "SyntaxError" => 12,
+        "DataCloneError" => 25,
         _ => 0,
     }
 }
@@ -518,7 +528,7 @@ impl Dom {
         }
     }
 
-    fn add_fn(&self, it: &mut Interp<'_>, h: H, name: &str, len: u32, ctor: bool) -> R<ObjId> {
+    pub(crate) fn add_fn(&self, it: &mut Interp<'_>, h: H, name: &str, len: u32, ctor: bool) -> R<ObjId> {
         let id = self.handlers.borrow().len() as u32;
         self.handlers.borrow_mut().push((h, ctor));
         it.host_function(id, name, len, ctor)
@@ -782,9 +792,13 @@ impl Browser {
             handlers: RefCell::default(),
             fixed: RefCell::default(),
             start: Instant::now(),
+            sched: RefCell::default(),
         });
         it.set_host(dom.clone())?;
-        it.host_scope(|it| dom.install(it))?;
+        it.host_scope(|it| {
+            dom.install(it)?;
+            dom.install_scheduler(it)
+        })?;
         Ok(Browser { it, dom })
     }
 

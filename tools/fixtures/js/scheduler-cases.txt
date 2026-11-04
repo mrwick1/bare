@@ -1,0 +1,45 @@
+=== microtask order
+var log = []; Promise.resolve().then(function () { log.push('p1') }); queueMicrotask(function () { log.push('q1'); queueMicrotask(function () { log.push('q3') }) }); Promise.resolve().then(function () { log.push('p2') }); queueMicrotask(function () { log.push('q2') }); log.push('sync');
+(function () { return log.join() })
+=== timers by delay
+var log = []; setTimeout(function () { log.push('c') }, 30); setTimeout(function () { log.push('a') }, 10); setTimeout(function () { log.push('b') }, 20); setTimeout(function () { log.push('b2') }, 20);
+(function () { return log.join() })
+=== timer arguments
+var log = []; setTimeout(function (a, b, c) { log.push(a + '|' + b + '|' + c + '|' + arguments.length) }, 5, 'x', 2, null);
+(function () { return log.join() })
+=== clear before fire and ids
+var log = []; var a = setTimeout(function () { log.push('a') }, 10); var b = setTimeout(function () { log.push('b') }, 10); clearTimeout(a); clearTimeout(12345); clearTimeout(undefined);
+(function () { return log.join() })
+=== interval cleared by itself
+var log = [], n = 0; var id = setInterval(function () { n++; log.push('i' + n); if (n === 3) clearInterval(id) }, 5);
+(function () { return log.join() })
+=== interval cleared from a timer
+var log = [], n = 0; var id = setInterval(function () { n++; log.push('i') }, 10); setTimeout(function () { clearInterval(id); log.push('cleared') }, 35);
+(function () { return log.join() })
+=== nested timer and microtask order
+var log = []; setTimeout(function () { log.push('t1'); setTimeout(function () { log.push('t3') }, 5); Promise.resolve().then(function () { log.push('m1') }) }, 5); setTimeout(function () { log.push('t2') }, 5);
+(function () { return log.join() })
+=== message order and primitives
+var log = [], c = new MessageChannel(); c.port1.onmessage = function (e) { log.push(typeof e.data + ':' + (e.data === e.data ? (1 / e.data === -Infinity ? '-0' : String(e.data)) : 'NaN')) }; c.port2.postMessage('a'); c.port2.postMessage(null); c.port2.postMessage(7); c.port2.postMessage(-0); c.port2.postMessage(NaN); c.port2.postMessage(true); log.push('sync'); setTimeout(function () { c.port1.close() }, 40);
+(function () { return log.join() })
+=== message event fields
+var log = [], c = new MessageChannel(); c.port1.onmessage = function (e) { log.push([e.type, e.target === c.port1, e.origin === '', e.lastEventId === '', e.source === null, e.ports.length, e.bubbles, e.cancelable, e.data].join()); c.port1.close() }; c.port2.postMessage(null);
+(function () { return log.join() })
+=== message before microtask
+var log = [], c = new MessageChannel(); c.port1.onmessage = function () { log.push('msg'); c.port1.close() }; c.port2.postMessage(1); queueMicrotask(function () { log.push('mt') }); Promise.resolve().then(function () { log.push('p') }); log.push('sync');
+(function () { return log.join() })
+=== ping pong
+var log = [], d = new MessageChannel(); d.port1.onmessage = function (e) { log.push('1:' + e.data); if (e.data < 3) d.port1.postMessage(e.data + 1); else d.port1.close() }; d.port2.onmessage = function (e) { log.push('2:' + e.data); d.port2.postMessage(e.data + 1) }; d.port2.postMessage(0); d.port1.postMessage(10);
+(function () { return log.join() })
+=== message timer interleave
+var log = [], c = new MessageChannel(); c.port1.onmessage = function () { log.push('msg'); c.port1.close() }; setTimeout(function () { log.push('t30') }, 30); c.port2.postMessage(1);
+(function () { return log.join() })
+=== onmessage replaced and cleared
+var log = [], c = new MessageChannel(); function f1() { log.push('f1') } function f2() { log.push('f2'); c.port1.close() } c.port1.onmessage = f1; c.port1.onmessage = f2; log.push(c.port1.onmessage === f2); c.port2.postMessage(1);
+(function () { return log.join() })
+=== functions cannot be cloned
+var log = [], c = new MessageChannel(); try { c.port1.postMessage(function () {}) } catch (e) { log.push(e.name + ':' + e.code) } c.port1.close();
+(function () { return log.join() })
+=== close stops later messages
+var log = [], c = new MessageChannel(); c.port2.onmessage = function (e) { log.push('2:' + e.data) }; c.port1.onmessage = function (e) { log.push('1:' + e.data) }; c.port1.postMessage('z'); setTimeout(function () { c.port1.close(); c.port2.postMessage('late'); c.port1.postMessage('later') }, 20); setTimeout(function () { c.port2.close() }, 50);
+(function () { return log.join() })
