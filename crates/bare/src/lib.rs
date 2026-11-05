@@ -67,6 +67,9 @@ mod browser_loader_tests;
 mod browser_platform_tests;
 mod browser_style;
 mod browser_style_block;
+pub mod browser_computed;
+#[cfg(test)]
+mod browser_computed_tests;
 #[cfg(test)]
 mod browser_style_tests;
 #[cfg(test)]

@@ -41,7 +41,7 @@
 //! A border has a width of 0 when its style is `none` or `hidden`.
 //!
 //! Inherited properties (a child gets the value of the parent when it has none of its own): `color`, `font-size`, `font-weight`,
-//! `font-style`, `line-height`, `text-align`, `text-transform`, `white-space`, `list-style-type`, `visibility`.
+//! `font-style`, `line-height`, `text-align`, `text-transform`, `white-space`, `list-style-type`, `visibility`, `direction`.
 //! The others start at their starting value.
 //!
 //! Left out:
@@ -876,6 +876,7 @@ fn initial(p: Property) -> Value {
         BorderCollapse => Value::Keyword(K::Separate),
         CaptionSide => Value::Keyword(K::Top),
         VerticalAlign => Value::Keyword(K::Baseline),
+        Direction => Value::Keyword(K::Ltr),
         BorderSpacingH | BorderSpacingV => px(0.0),
         MarginTop | MarginRight | MarginBottom | MarginLeft | PaddingTop | PaddingRight | PaddingBottom | PaddingLeft => px(0.0),
         BorderTopWidth | BorderRightWidth | BorderBottomWidth | BorderLeftWidth => px(3.0),
@@ -887,7 +888,7 @@ fn initial(p: Property) -> Value {
 /// Does a child take the value of the parent when it has no value of its own?
 fn inherited(p: Property) -> bool {
     use Property::*;
-    matches!(p, TextColor | FontSize | FontWeight | FontStyle | LineHeight | TextAlign | TextTransform | WhiteSpace | ListStyleType | Visibility | BorderCollapse | BorderSpacingH | BorderSpacingV | CaptionSide)
+    matches!(p, TextColor | FontSize | FontWeight | FontStyle | LineHeight | TextAlign | TextTransform | WhiteSpace | ListStyleType | Visibility | BorderCollapse | BorderSpacingH | BorderSpacingV | CaptionSide | Direction)
 }
 
 /// The font size of the element, in pixels. It is first, because `em` in the other properties needs it.
@@ -1142,18 +1143,30 @@ pub enum Source {
 /// is left out, and so is an alternate style sheet (`rel="alternate stylesheet"`): a browser does not use it unless the user asks.
 /// An empty `media` is good.
 pub fn sources(doc: &Document, viewport: (f32, f32)) -> Vec<Source> {
+    sources_capped(doc, viewport, usize::MAX, usize::MAX).unwrap_or_default()
+}
+
+/// The same, but `None` before more than `max_sources` sources, or more than `max_bytes` bytes of `<style>` text and `href`, are copied.
+pub fn sources_capped(doc: &Document, viewport: (f32, f32), max_sources: usize, max_bytes: usize) -> Option<Vec<Source>> {
     // A name that no node in the page has cannot be on any element, so `None` is a good answer for a name that is not in the table.
     let (style, link, media, rel, href) = (doc.find_atom("style"), doc.find_atom("link"), doc.find_atom("media"), doc.find_atom("rel"), doc.find_atom("href"));
     let attr = |el, name: Option<Atom>| name.and_then(|n| doc.attr(el, n));
     let mut out = Vec::new();
+    let (mut bytes, mut over) = (0usize, false);
     walk(doc, &mut |el| {
         let NodeData::Element { name, .. } = *doc.data(el) else { return };
         let (is_style, is_link) = (Some(name) == style, Some(name) == link);
-        if !(is_style || is_link) || !attr(el, media).is_none_or(|m| at_rules::media_matches(m, viewport)) {
+        if over || !(is_style || is_link) || !attr(el, media).is_none_or(|m| at_rules::media_matches(m, viewport)) {
             return;
         }
         if is_style {
-            let mut text = String::new();
+            let size: usize = doc.children(el).map(|c| if let NodeData::Text(span) = *doc.data(c) { doc.text(span).len() } else { 0 }).sum();
+            bytes = bytes.saturating_add(size);
+            over = out.len() >= max_sources || bytes > max_bytes;
+            if over {
+                return;
+            }
+            let mut text = String::with_capacity(size);
             for c in doc.children(el) {
                 if let NodeData::Text(span) = *doc.data(c) {
                     text.push_str(doc.text(span));
@@ -1163,11 +1176,15 @@ pub fn sources(doc: &Document, viewport: (f32, f32)) -> Vec<Source> {
         } else if let Some(rel) = attr(el, rel) {
             let has = |word: &str| rel.split_ascii_whitespace().any(|w| w.eq_ignore_ascii_case(word));
             if let (true, false, Some(h)) = (has("stylesheet"), has("alternate"), attr(el, href)) {
-                out.push(Source::Link(h.to_string()));
+                bytes = bytes.saturating_add(h.len());
+                over = out.len() >= max_sources || bytes > max_bytes;
+                if !over {
+                    out.push(Source::Link(h.to_string()));
+                }
             }
         }
     });
-    out
+    (!over).then_some(out)
 }
 
 /// Call `f` for each node of the tree, in the order of the page. A loop with a stack.
@@ -1235,6 +1252,38 @@ mod tests {
         assert_eq!(get(html, &[], "b", Property::PaddingTop), px(5.0));
         assert_eq!(get(html, &[], "c", Property::PaddingLeft), px(1.0));
         assert_eq!(get(html, &["td { padding: 0 }"], "a", Property::PaddingLeft), px(0.0));
+    }
+
+    #[test]
+    fn direction_starts_ltr_inherits_and_follows_the_cascade() {
+        use Keyword::{Ltr, Rtl};
+        let k = |w| Value::Keyword(w);
+        let html = "<html id=h><body id=b><div id=d><p id=p>x</p></div><span id=s dir=rtl><i id=i></i></span><input id=t type=tel></body></html>";
+        let g = |sheets: &[&str], id| get(html, sheets, id, Property::Direction);
+        // Starting value ltr, inherited by a child.
+        assert_eq!(g(&[], "p"), k(Ltr));
+        assert_eq!(g(&["div { direction: rtl }"], "d"), k(Rtl));
+        assert_eq!(g(&["div { direction: rtl }"], "p"), k(Rtl));
+        // `initial`, `inherit` and `unset` go through the engine.
+        assert_eq!(g(&["div { direction: rtl } p { direction: initial }"], "p"), k(Ltr));
+        assert_eq!(g(&["div { direction: rtl } p { direction: ltr } p { direction: inherit }"], "p"), k(Rtl));
+        assert_eq!(g(&["div { direction: rtl } p { direction: unset }"], "p"), k(Rtl));
+        assert_eq!(g(&["body { --x: rtl } div { direction: var(--x) }"], "d"), k(Rtl));
+        // A value that is not a direction is dropped: the older one stays.
+        assert_eq!(g(&["div { direction: rtl; direction: auto; direction: 1px }"], "d"), k(Rtl));
+        // The `dir` attribute is a rule of the browser sheet: it is inherited, and any rule of the page beats it.
+        assert_eq!(g(&[], "s"), k(Rtl));
+        assert_eq!(g(&[], "i"), k(Rtl));
+        assert_eq!(g(&["span { direction: ltr }"], "s"), k(Ltr));
+        assert_eq!(g(&["i { direction: ltr }"], "i"), k(Ltr));
+        assert_eq!(get("<div dir=RTL id=d></div>", &[], "d", Property::Direction), k(Rtl));
+        assert_eq!(get("<div dir=rtl id=d style='direction: ltr'></div>", &[], "d", Property::Direction), k(Ltr));
+        // A tel input is ltr by itself, inside an rtl page too.
+        assert_eq!(get("<div dir=rtl><input id=t type=tel></div>", &[], "t", Property::Direction), k(Ltr));
+        assert_eq!(get("<div dir=rtl><input id=t type=tel dir=rtl></div>", &[], "t", Property::Direction), k(Rtl));
+        assert_eq!(get("<div dir=rtl><input id=t type=text></div>", &[], "t", Property::Direction), k(Rtl));
+        // `dir=auto` has no rule of the browser here (it needs the text): the value is inherited.
+        assert_eq!(get("<div dir=rtl><p dir=auto id=p></div>", &[], "p", Property::Direction), k(Rtl));
     }
 
     #[test]

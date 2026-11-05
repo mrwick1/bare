@@ -35,8 +35,8 @@
 //!   still whole. A shorthand with `var()` has no longhand text (`""`), and writing or removing one of its longhands is
 //!   `Unsupported` before anything changes.
 //! - Lone surrogates are `Unsupported` at every string entry (the document is UTF-8), never ignored.
-//! - No indexed access (`style[0]`), no iterator, no `getPropertyCSSValue`, `parentRule` is `null`. No computed style
-//!   (`getComputedStyle`), no SVG `style`, no `innerHTML`/`outerHTML` parse of `style`, no layout reads.
+//! - No indexed access (`style[0]`), no iterator, no `getPropertyCSSValue`, `parentRule` is `null`. No SVG `style`, no `innerHTML`/`outerHTML` parse of `style`, no layout reads.
+//! - Computed style is `browser_computed.rs`. It has its own read-only prototype under this one.
 //! - `new CSSStyleDeclaration()` and a subclass of it throw `TypeError: Illegal constructor`.
 
 use crate::browser::*;
@@ -88,14 +88,14 @@ struct SState {
 pub(crate) struct Style {
     lim: Cell<StyleLimits>,
     s: RefCell<SState>,
-    proto: OnceCell<ObjId>,
+    pub(crate) proto: OnceCell<ObjId>,
     fixed: RefCell<Vec<ObjId>>,
     /// The host function id of the call in progress (set by `Dom::call`; the named accessors read it first).
     pub(crate) cur: Cell<u32>,
     /// Function id of a named getter or setter -> index in `props`.
-    fns: RefCell<HashMap<u32, usize>>,
+    pub(crate) fns: RefCell<HashMap<u32, usize>>,
     /// The supported property names, in CSS form.
-    props: OnceCell<Vec<&'static str>>,
+    pub(crate) props: OnceCell<Vec<&'static str>>,
 }
 
 /// `-webkit-x-y` -> `WebkitXY`, `margin-top` -> `marginTop` (CSSOM "CSS property to IDL attribute").
@@ -116,7 +116,7 @@ fn camel(css: &str) -> String {
 }
 
 /// The IDL attribute names of one property.
-fn keys_of(css: &str) -> Vec<String> {
+pub(crate) fn keys_of(css: &str) -> Vec<String> {
     let camel = camel(css);
     let mut keys = vec![camel.clone()];
     if css.contains('-') {
@@ -367,7 +367,7 @@ fn remove_property(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V 
 }
 
 /// The property of the named accessor that is running.
-fn current(d: &Dom, it: &mut Interp<'_>) -> R<&'static str> {
+pub(crate) fn current(d: &Dom, it: &mut Interp<'_>) -> R<&'static str> {
     let i = d.style.fns.borrow().get(&d.style.cur.get()).copied();
     match (i, d.style.props.get()) {
         (Some(i), Some(p)) => Ok(p[i]),

@@ -157,6 +157,7 @@ properties! {
     TableLayout => "table-layout",
     CaptionSide => "caption-side",
     VerticalAlign => "vertical-align",
+    Direction => "direction",
 }
 
 /// A length or a percent. The fixed units are already `Px`.
@@ -236,7 +237,8 @@ keywords! {
     SelfEnd => "self-end", First => "first", Last => "last", LastBaseline => "last baseline",
     Safe => "safe", Unsafe => "unsafe", InlineTable => "inline-table", Separate => "separate",
     Top => "top", Bottom => "bottom", Middle => "middle", Sub => "sub",
-    Super => "super", TextTop => "text-top", TextBottom => "text-bottom",
+    Super => "super", TextTop => "text-top", TextBottom => "text-bottom", Ltr => "ltr",
+    Rtl => "rtl",
 }
 
 /// The value of one property. It does not say which property: a `Declared` has that.
@@ -859,6 +861,7 @@ fn longhand(property: Property, part: Part) -> Option<Value> {
         Float => one_of(part, &[K::None, K::Left, K::Right]),
         Clear => one_of(part, &[K::None, K::Left, K::Right, K::Both]),
         Visibility => one_of(part, &[K::Visible, K::Hidden, K::Collapse]),
+        Direction => one_of(part, &[K::Ltr, K::Rtl]),
         WhiteSpace => one_of(part, &[K::Normal, K::Nowrap, K::Pre, K::PreWrap, K::PreLine, K::BreakSpaces]),
         TextAlign => one_of(part, &[K::Left, K::Right, K::Center, K::Justify, K::Start, K::End]),
         TextDecoration => one_of(part, &[K::None, K::Underline, K::Overline, K::LineThrough]),
