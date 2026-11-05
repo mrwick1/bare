@@ -386,7 +386,7 @@ fn payload_and_misuse_gates_are_explicit() {
 fn limits_are_checked_before_growth() {
     big(|| {
         let mut b = browser();
-        b.set_sched_limits(SchedLimits { max_timers: 3, max_timer_args: 2, max_ports: 2, max_queued_messages: 2, max_queued_message_bytes: 100 });
+        b.set_sched_limits(SchedLimits { max_timers: 3, max_timer_args: 2, max_ports: 2, max_queued_messages: 2, max_queued_message_bytes: 100, ..Default::default() });
         assert_eq!(js(&mut b, "setTimeout(function () {}, 0, 1, 2, 3)"), host_limit("timer-args"));
         assert_eq!(js(&mut b, "var t1 = setTimeout(function () {}, 0); setTimeout(function () {}, 0); setInterval(function () {}, 5); 0"), "0");
         assert_eq!(js(&mut b, "setTimeout(function () {}, 0)"), host_limit("timers"));

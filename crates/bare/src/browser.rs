@@ -19,7 +19,7 @@
 //!
 //! Supported (tested):
 //! - Globals: `window`, `self`, `globalThis` (the same object), `document`, `Node`, `Element`, `HTMLElement`,
-//!   `HTMLInputElement`, `CharacterData`, `Text`, `Comment`, `Document`, `EventTarget`, `Event`, `CustomEvent`,
+//!   `HTMLInputElement`, `HTMLIFrameElement` (inert brand only: no `contentWindow`, no nested context, no fetch), `CharacterData`, `Text`, `Comment`, `Document`, `EventTarget`, `Event`, `CustomEvent`,
 //!   `DOMException`.
 //! - Node: `nodeType nodeName nodeValue parentNode parentElement childNodes firstChild lastChild previousSibling
 //!   nextSibling ownerDocument isConnected textContent appendChild insertBefore removeChild replaceChild cloneNode
@@ -30,6 +30,7 @@
 //! - CharacterData: `data length`. Document: `createElement createElementNS createTextNode createComment getElementById
 //!   documentElement head body doctype defaultView querySelector(All)`.
 //! - `<input>`: `value checked type defaultValue defaultChecked` with native state (dirty value, checkedness).
+//! - `<input>` text selection (`selectionStart selectionEnd selectionDirection setSelectionRange select`, `select` event task): `browser_selection.rs`.
 //! - Events: `Event`, `CustomEvent` (`detail`), `addEventListener` (capture, once, passive; function or `handleEvent`
 //!   object), `removeEventListener`, `dispatchEvent`, capture / target / bubble phases through the document to `window`,
 //!   `preventDefault`, `stopPropagation`, `stopImmediatePropagation`, `composedPath`, `new EventTarget()`.
@@ -62,6 +63,7 @@
 use crate::browser_dom as nd;
 use crate::browser_namespace as ns;
 use crate::browser_events as ev;
+use crate::browser_selection as sel;
 pub use crate::browser_scheduler::{Pump, SchedLimits, SchedStats};
 use bare_css::selector::{Selector, parse_selector_list};
 use bare_html::dom::{Document, NodeData, NodeId, Ns};
@@ -181,6 +183,10 @@ pub struct Report {
 pub(crate) struct Input {
     pub value: Option<String>,
     pub checked: Option<bool>,
+    /// Text selection (`browser_selection.rs`). `None`: caret at the end of the value.
+    pub sel: Option<crate::browser_selection::Sel>,
+    /// Selection API "has scheduled selectionchange event": a `Task::SelectionChange` of this input is queued.
+    pub sc_pending: bool,
 }
 
 #[derive(Default)]
@@ -211,6 +217,7 @@ pub(crate) struct Protos {
     pub html: ObjId,
     pub svg: ObjId,
     pub input: ObjId,
+    pub iframe: ObjId,
     pub chardata: ObjId,
     pub text: ObjId,
     pub comment: ObjId,
@@ -475,6 +482,7 @@ impl Dom {
                         Ns::MathMl => p.element,
                         _ => match doc.atom_str(name) {
                             "input" => p.input,
+                            "iframe" => p.iframe,
                             "script" => self.scripts.proto.get().copied().unwrap_or(p.html),
                             _ => p.html,
                         },
@@ -598,6 +606,7 @@ impl Dom {
         let html = mk(it, element)?;
         let svg = mk(it, element)?;
         let input = mk(it, html)?;
+        let iframe = mk(it, html)?;
         let chardata = mk(it, node)?;
         let text = mk(it, chardata)?;
         let comment = mk(it, chardata)?;
@@ -606,13 +615,13 @@ impl Dom {
         let custom = mk(it, event)?;
         let focus = mk(it, event)?;
         let domexc = mk(it, ep)?;
-        let _ = self.p.set(Protos { et, node, element, html, svg, input, chardata, text, comment, document, event, custom, focus, domexc });
+        let _ = self.p.set(Protos { et, node, element, html, svg, input, iframe, chardata, text, comment, document, event, custom, focus, domexc });
         // The global object is `window`: it is an EventTarget.
         if let Err(e) = it.heap.set_prototype_of(g, Some(et)) {
             return Err(it.heap_error(e));
         }
         self.st.borrow_mut().by_obj.insert(g, Target::Window);
-        let mut fixed = vec![et, node, element, html, svg, input, chardata, text, comment, document, event, custom, focus, domexc];
+        let mut fixed = vec![et, node, element, html, svg, input, iframe, chardata, text, comment, document, event, custom, focus, domexc];
 
         // methods and accessors
         for d in DEFS {
@@ -638,13 +647,14 @@ impl Dom {
         }
 
         // interface objects
-        let ifaces: [(&str, ObjId, Option<H>); 14] = [
+        let ifaces: [(&str, ObjId, Option<H>); 15] = [
             ("EventTarget", et, Some(ev::event_target_ctor as H)),
             ("Node", node, None),
             ("Element", element, None),
             ("HTMLElement", html, None),
             ("SVGElement", svg, None),
             ("HTMLInputElement", input, None),
+            ("HTMLIFrameElement", iframe, None),
             ("CharacterData", chardata, None),
             ("Text", text, None),
             ("Comment", comment, None),
@@ -786,6 +796,11 @@ pub(crate) static DEFS: &[Def] = &[
     Def { on: &[Document], name: "defaultView", len: 0, kind: G(nd::default_view) },
     Def { on: &[Input], name: "value", len: 0, kind: A(nd::input_value, nd::set_input_value) },
     Def { on: &[Input], name: "checked", len: 0, kind: A(nd::input_checked, nd::set_input_checked) },
+    Def { on: &[Input], name: "selectionStart", len: 0, kind: A(sel::selection_start, sel::set_selection_start) },
+    Def { on: &[Input], name: "selectionEnd", len: 0, kind: A(sel::selection_end, sel::set_selection_end) },
+    Def { on: &[Input], name: "selectionDirection", len: 0, kind: A(sel::selection_direction, sel::set_selection_direction) },
+    Def { on: &[Input], name: "setSelectionRange", len: 2, kind: M(sel::set_selection_range_method) },
+    Def { on: &[Input], name: "select", len: 0, kind: M(sel::select_method) },
     Def { on: &[Input], name: "type", len: 0, kind: A(nd::input_type, nd::set_input_type) },
     Def { on: &[Input], name: "defaultValue", len: 0, kind: A(nd::default_value, nd::set_default_value) },
     Def { on: &[Input], name: "defaultChecked", len: 0, kind: A(nd::default_checked, nd::set_default_checked) },

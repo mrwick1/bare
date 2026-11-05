@@ -29,16 +29,21 @@ mod browser_navigation_tests;
 #[cfg(test)]
 mod browser_namespace_tests;
 #[cfg(test)]
+mod browser_iframe_tests;
+#[cfg(test)]
 mod browser_tests;
 pub mod browser_platform;
 mod browser_platform_class;
 mod browser_platform_query;
 mod browser_scheduler;
+mod browser_selection;
+#[cfg(test)]
+mod browser_selection_tests;
 #[cfg(test)]
 mod browser_scheduler_tests;
 pub mod resources;
 mod browser_loader;
-pub use browser_loader::{Fatal, NavStop, PageConfig, PageLimits, PageResult, Stop};
+pub use browser_loader::{Fatal, Input, NavStop, PageConfig, PageLimits, PageResult, Stop};
 pub mod browser_session;
 #[cfg(test)]
 mod browser_session_tests;
@@ -50,3 +55,5 @@ mod browser_style;
 mod browser_style_block;
 #[cfg(test)]
 mod browser_style_tests;
+#[cfg(test)]
+mod browser_resume_tests;
