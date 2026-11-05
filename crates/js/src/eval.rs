@@ -177,6 +177,14 @@ pub struct EvalStats {
 
 // ------------------------------------------------------------------ small internals
 
+/// Capacity to keep in a table of `len` entries after a collect: twice the live entries, or the live entries plus
+/// `since` (what the program made since the previous collect), so steady churn does not shrink and regrow every
+/// round. `Some` only when that frees at least 1 MiB and at least half of the capacity, as `Slab::trim` does.
+fn trim_to(len: usize, cap: usize, since: usize, entry: usize) -> Option<usize> {
+    let keep = (len * 2).max(len.saturating_add(since));
+    (cap >= keep.saturating_mul(2) && (cap - keep).saturating_mul(entry) >= 1 << 20).then_some(keep)
+}
+
 #[derive(Default)]
 struct Fx(u64);
 impl Hasher for Fx {
@@ -403,6 +411,8 @@ pub struct Interp<'p> {
     // environments and functions
     envs: Vec<Env>,
     free_envs: Vec<u32>,
+    /// Heap object allocations at the end of the previous `collect` (see `trim_tables`).
+    gc_allocs: u64,
     live_envs: usize,
     funcs: FxMap<ObjId, Callee>,
     // run state
@@ -554,6 +564,7 @@ impl<'p> Interp<'p> {
             scopes: (0..=p.stats().funcs).map(|_| FScope::default()).collect(),
             envs: Vec::new(),
             free_envs: Vec::new(),
+            gc_allocs: 0,
             live_envs: 0,
             funcs: FxMap::default(),
             env: 0,
@@ -791,10 +802,52 @@ impl<'p> Interp<'p> {
         self.date_prune(&seen);
         self.cls_prune(&seen);
         self.async_prune(&act_seen);
+        self.trim_tables();
         let mut roots = self.roots();
         roots.extend_from_slice(extra);
         roots.extend_from_slice(&host_vals);
-        Ok(h!(self, self.heap.collect(&roots)))
+        let r = h!(self, self.heap.collect(&roots));
+        self.gc_allocs = self.heap.stats().total_object_allocs;
+        Ok(r)
+    }
+
+    /// Give back the capacity of the side tables after a burst died, by the rule of `Slab::trim` (see `trim_to`).
+    /// The heap objects made since the previous collect stand for the entries made since then. Free environments
+    /// lose their bindings buffers, and free slots at the end of the environment table go.
+    fn trim_tables(&mut self) {
+        use std::mem::size_of;
+        let since = (self.heap.stats().total_object_allocs - self.gc_allocs).min(usize::MAX as u64) as usize;
+        if let Some(k) = trim_to(self.funcs.len(), self.funcs.capacity(), since, size_of::<(ObjId, Callee)>()) {
+            self.funcs.shrink_to(k);
+        }
+        let pm = &mut self.promise.map;
+        if let Some(k) = trim_to(pm.len(), pm.capacity(), since, size_of::<(ObjId, PromiseData)>()) {
+            pm.shrink_to(k);
+        }
+        let dp = &mut self.promise.done_pairs;
+        if let Some(k) = trim_to(dp.len(), dp.capacity(), since, size_of::<u64>()) {
+            dp.shrink_to(k);
+        }
+        let q = &mut self.promise.queue;
+        if let Some(k) = trim_to(q.len(), q.capacity(), since, size_of::<Job>()) {
+            q.shrink_to(k);
+        }
+        let acts = &mut self.aw.acts;
+        if let Some(k) = trim_to(acts.len(), acts.capacity(), since, size_of::<ActSlot>()) {
+            acts.shrink_to(k);
+        }
+        for &i in &self.free_envs {
+            self.envs[i as usize].bindings = Vec::new();
+        }
+        while self.envs.len() > 1 && self.envs.last().is_some_and(|e| !e.live) {
+            self.envs.pop();
+        }
+        let n = self.envs.len() as u32;
+        self.free_envs.retain(|&i| i < n);
+        if let Some(k) = trim_to(self.envs.len(), self.envs.capacity(), since, size_of::<Env>()) {
+            self.envs.shrink_to(k);
+            self.free_envs.shrink_to(k);
+        }
     }
 
     /// Text of a value for tools and tests: strings raw, numbers as JavaScript prints them.

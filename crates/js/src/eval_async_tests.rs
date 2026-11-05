@@ -443,6 +443,29 @@ fn a_pending_promise_keeps_room_for_one_reaction_only() {
 }
 
 #[test]
+fn a_dead_burst_gives_the_side_tables_back_after_a_quiet_collect() {
+    big(|| {
+        let mut it = realm(EvalLimits { max_steps: 50_000_000, ..Default::default() });
+        out(&mut it, "var keep = []; function burst(n) { for (var i = 0; i < n; i++) { let a = i; keep.push(() => a); keep.push(new Promise(function () {}).then(function () {})); keep.push((async function () { await new Promise(function () {}); })()); } } 0");
+        it.collect(&[]).unwrap();
+        it.collect(&[]).unwrap();
+        out(&mut it, "burst(40000); queueMicrotask(function () {}); 0");
+        it.drain_microtasks().unwrap();
+        let big = (it.funcs.capacity(), it.envs.capacity(), it.promise.map.capacity(), it.aw.acts.capacity(), it.promise.queue.capacity());
+        assert!(big.0 > 100_000 && big.1 > 40_000 && big.2 > 80_000 && big.3 > 40_000, "{big:?}");
+        out(&mut it, "keep = []; 0");
+        it.collect(&[]).unwrap();
+        it.collect(&[]).unwrap();
+        let small = (it.funcs.capacity(), it.envs.capacity(), it.promise.map.capacity(), it.aw.acts.capacity());
+        assert!(small.0 < 4096 && small.1 < 4096 && small.2 < 4096 && small.3 < 4096, "{small:?}");
+        assert!(it.envs.iter().all(|e| e.live || e.bindings.capacity() == 0), "a free environment keeps its bindings buffer");
+        // the realm still works and grows again
+        assert_eq!(out(&mut it, "keep = []; burst(100); keep.length"), "300");
+        it.drain_microtasks().unwrap();
+    });
+}
+
+#[test]
 fn unreachable_activation_cycles_are_dropped_and_reachable_ones_stay() {
     big(|| {
         let mut it = realm(lim());

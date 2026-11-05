@@ -441,3 +441,5 @@ RegExp `i` with `u` is built with simple case folding from Unicode 18 data. The 
 The async machine now runs `await` inside `switch`: in the discriminant, in case tests and in case bodies. The live login now passes that gate. It stops at the next one, `generators are not supported`. See [resources.md](resources.md#await-inside-switch).
 
 The async machine uses less memory. `await` of a value that is not an object makes no hidden promise, and a pending promise keeps room for one reaction, not four. A paused `await k` takes 685 B, down from 902 B. The async load rows that await such values take 10-23 MiB less peak memory and 9-27% fewer cycles. See [resources.md](resources.md#async-activation-memory).
+
+After a burst of garbage dies, a quiet collect now gives the side tables back: functions, promises, settled resolver pairs, the microtask queue, async activations and environments. Arrows, promises, `let` scopes and async calls now keep 2-6% of the burst, down from 32-62%. See [resources.md](resources.md#side-tables-after-a-collect).
