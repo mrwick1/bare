@@ -310,6 +310,8 @@ pub struct Dom {
     pub(crate) style: crate::browser_style::Style,
     /// `getComputedStyle` and its sheet state (`browser_computed.rs`).
     pub(crate) computed: crate::browser_computed::Computed,
+    /// `offsetWidth` and `offsetHeight` (`browser_geometry.rs`).
+    pub(crate) geometry: crate::browser_geometry::Geometry,
     /// `Element.attributes`, `NamedNodeMap` and `Attr` (`browser_attr.rs`).
     pub(crate) attr: crate::browser_attr::AttrHost,
     /// `Document.getElementsByName` and the live `NodeList` (`browser_nodelist.rs`).
@@ -790,6 +792,7 @@ impl Dom {
         crate::browser_console::install(self, it)?;
         crate::browser_style::install(self, it)?;
         crate::browser_computed::install(self, it)?;
+        crate::browser_geometry::install(self, it)?;
         crate::browser_handlers::install(self, it)
     }
 
@@ -1006,6 +1009,7 @@ impl Browser {
             plat: Default::default(),
             style: Default::default(),
             computed: Default::default(),
+            geometry: Default::default(),
             attr: Default::default(),
             nl: Default::default(),
         });

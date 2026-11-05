@@ -224,7 +224,7 @@ impl Snap {
 }
 
 impl Dom {
-    fn gate(what: &'static str) -> Error {
+    pub(crate) fn gate(what: &'static str) -> Error {
         Error::Unsupported(unsupported(what))
     }
 
@@ -282,34 +282,37 @@ impl Dom {
         Ok(p)
     }
 
-    /// The style of `el` now, or `None` when the element is not connected (an empty declaration).
-    fn snapshot(&self, it: &mut Interp<'_>, el: NodeId) -> R<Option<Snap>> {
+    /// Is `el` in the document tree? `false`: it is not connected (a detached tree, or a shadow tree that is not attached). A connected shadow tree is a gate.
+    pub(crate) fn in_document(&self, it: &mut Interp<'_>, el: NodeId) -> R<bool> {
+        let doc = self.doc.borrow();
+        let mut top = el;
+        while let Some(p) = doc.parent(top) {
+            it.charge(1)?;
+            top = p;
+        }
+        it.charge(1)?;
+        if top != doc.root() {
+            if matches!(doc.data(top), NodeData::ShadowRoot) {
+                let mut including = top;
+                while let Some(p) = doc.parent_or_host(including) {
+                    it.charge(1)?;
+                    including = p;
+                }
+                if including == doc.root() {
+                    return Err(Self::gate("computed style in a shadow tree (shadow cascade is not implemented)"));
+                }
+            }
+            return Ok(false);
+        }
+        Ok(true)
+    }
+
+    /// The styles of the whole document now (the cascade of one read). Charged and capped as described in the header.
+    pub(crate) fn cascade_now(&self, it: &mut Interp<'_>) -> R<Styles> {
         let l = self.computed.lim.get();
         let vp = self.plat.s.borrow().viewport;
-        {
-            let doc = self.doc.borrow();
-            let mut top = el;
-            while let Some(p) = doc.parent(top) {
-                it.charge(1)?;
-                top = p;
-            }
-            it.charge(1)?;
-            if top != doc.root() {
-                if matches!(doc.data(top), NodeData::ShadowRoot) {
-                    let mut including = top;
-                    while let Some(p) = doc.parent_or_host(including) {
-                        it.charge(1)?;
-                        including = p;
-                    }
-                    if including == doc.root() {
-                        return Err(Self::gate("computed style in a shadow tree (shadow cascade is not implemented)"));
-                    }
-                }
-                return Ok(None);
-            }
-            if doc.len() > l.max_nodes {
-                return Err(self.lim("computed-nodes"));
-            }
+        if self.doc.borrow().len() > l.max_nodes {
+            return Err(self.lim("computed-nodes"));
         }
         let mut doc = self.doc.borrow_mut();
         it.charge(doc.len() as u64 / 4 + 1)?;
@@ -347,7 +350,15 @@ impl Dom {
         drop(doc);
         let doc = self.doc.borrow();
         self.computed.computes.set(self.computed.computes.get() + 1);
-        let styles = rules.compute(&doc);
+        Ok(rules.compute(&doc))
+    }
+
+    /// The style of `el` now, or `None` when the element is not connected (an empty declaration).
+    fn snapshot(&self, it: &mut Interp<'_>, el: NodeId) -> R<Option<Snap>> {
+        if !self.in_document(it, el)? {
+            return Ok(None);
+        }
+        let styles = self.cascade_now(it)?;
         match styles.style(el).cloned() {
             Some(style) => Ok(Some(Snap { styles, style })),
             None => Err(Self::gate(NO_STYLE)),
