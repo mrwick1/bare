@@ -58,6 +58,7 @@
 
 use crate::ast::*;
 use crate::date;
+use crate::{ieee754, number};
 use crate::heap::*;
 use crate::value::*;
 use std::collections::{HashMap, HashSet};
@@ -305,6 +306,13 @@ enum Nat {
     IsNaN,
     ParseInt,
     EncodeUriComponent,
+    ParseFloat,
+    IsFinite,
+    EncodeUri,
+    DecodeUri,
+    DecodeUriComponent,
+    Escape,
+    Unescape,
     /// JSON, RegExp and String.prototype bindings (`eval_builtins.rs`).
     Ext(Bi),
     Bin(BinFn),
@@ -1409,7 +1417,21 @@ impl<'p> Interp<'p> {
             let k = h!(self, self.heap.key_from_str(error_name));
             self.def(g, k, Value::Object(c), true, false, true)?;
         }
-        for (name, n) in [("String", Nat::StringFn), ("Number", Nat::NumberFn), ("Boolean", Nat::BooleanFn), ("isNaN", Nat::IsNaN), ("parseInt", Nat::ParseInt), ("encodeURIComponent", Nat::EncodeUriComponent)] {
+        for (name, n) in [
+            ("String", Nat::StringFn),
+            ("Number", Nat::NumberFn),
+            ("Boolean", Nat::BooleanFn),
+            ("isNaN", Nat::IsNaN),
+            ("parseInt", Nat::ParseInt),
+            ("encodeURIComponent", Nat::EncodeUriComponent),
+            ("parseFloat", Nat::ParseFloat),
+            ("isFinite", Nat::IsFinite),
+            ("encodeURI", Nat::EncodeUri),
+            ("decodeURI", Nat::DecodeUri),
+            ("decodeURIComponent", Nat::DecodeUriComponent),
+            ("escape", Nat::Escape),
+            ("unescape", Nat::Unescape),
+        ] {
             let f = self.native(n, name, if name == "parseInt" { 2 } else { 1 })?;
             let k = h!(self, self.heap.key_from_str(name));
             self.def(g, k, Value::Object(f), true, false, true)?;
@@ -2717,7 +2739,7 @@ impl<'p> Interp<'p> {
                     Div => x / y,
                     Mod => x % y,
                     Exp => {
-                        if y.is_nan() || (x.abs() == 1.0 && y.is_infinite()) { f64::NAN } else { x.powf(y) }
+                        ieee754::pow(x, y)
                     }
                     Shl => to_int32(x).wrapping_shl(to_uint32(y) & 31) as f64,
                     Shr => (to_int32(x) >> (to_uint32(y) & 31)) as f64,
@@ -3060,6 +3082,10 @@ mod tagged_tests;
 #[cfg(test)]
 #[path = "eval_intl_tests.rs"]
 mod intl_tests;
+
+#[cfg(test)]
+#[path = "eval_number_tests.rs"]
+mod number_tests;
 
 #[cfg(test)]
 #[path = "eval_stack_tests.rs"]

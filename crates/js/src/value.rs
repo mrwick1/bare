@@ -218,13 +218,16 @@ pub fn parse_int(units: &[u16], radix: i32) -> f64 {
     if neg { -v } else { v }
 }
 
-/// `encodeURIComponent` (section 19.2.6.5): percent-encode the UTF-8 bytes of everything but `A-Za-z0-9-_.!~*'()`.
-/// `None` for a lone surrogate (URIError).
-pub fn encode_uri_component(units: &[u16]) -> Option<String> {
+/// The characters `encodeURI` keeps besides those of `encodeURIComponent` (uriReserved and `#`).
+pub const URI_RESERVED: &str = ";/?:@&=+$,#";
+
+/// `encodeURIComponent` (section 19.2.6.5), or `encodeURI` with `extra` = [`URI_RESERVED`]: percent-encode the UTF-8
+/// bytes of everything but `A-Za-z0-9-_.!~*'()` and `extra`. `None` for a lone surrogate (URIError).
+pub fn encode_uri_component(units: &[u16], extra: &str) -> Option<String> {
     let mut out = String::with_capacity(units.len());
     for c in char::decode_utf16(units.iter().copied()) {
         let c = c.ok()?;
-        if c.is_ascii_alphanumeric() || "-_.!~*'()".contains(c) {
+        if c.is_ascii_alphanumeric() || "-_.!~*'()".contains(c) || extra.contains(c) {
             out.push(c);
         } else {
             for b in c.encode_utf8(&mut [0; 4]).bytes() {
@@ -233,6 +236,108 @@ pub fn encode_uri_component(units: &[u16]) -> Option<String> {
         }
     }
     Some(out)
+}
+
+/// Decode (section 19.2.6.1) for `decodeURIComponent` (`reserved` empty) and `decodeURI` ([`URI_RESERVED`]): each
+/// `%XX` sequence is one UTF-8 character. An escape of a reserved ASCII character stays as it is. `None` for a bad
+/// escape or bad UTF-8 (URIError).
+pub fn decode_uri(units: &[u16], reserved: &str) -> Option<Vec<u16>> {
+    let hex = |i: usize| -> Option<u8> {
+        let h = |u: u16| char::from_u32(u as u32)?.to_digit(16);
+        if *units.get(i)? != b'%' as u16 {
+            return None;
+        }
+        Some((h(*units.get(i + 1)?)? * 16 + h(*units.get(i + 2)?)?) as u8)
+    };
+    let mut out = Vec::with_capacity(units.len());
+    let mut k = 0;
+    while k < units.len() {
+        if units[k] != b'%' as u16 {
+            out.push(units[k]);
+            k += 1;
+            continue;
+        }
+        let b = hex(k)?;
+        if b < 0x80 {
+            if reserved.contains(b as char) {
+                out.extend_from_slice(&units[k..k + 3]);
+            } else {
+                out.push(b as u16);
+            }
+            k += 3;
+            continue;
+        }
+        let n = b.leading_ones() as usize;
+        if !(2..=4).contains(&n) {
+            return None;
+        }
+        let mut bytes = [b, 0, 0, 0];
+        for (j, slot) in bytes.iter_mut().enumerate().take(n).skip(1) {
+            *slot = hex(k + 3 * j).filter(|c| c & 0xC0 == 0x80)?;
+        }
+        // from_utf8 refuses overlong forms, surrogates and values above U+10FFFF
+        let c = std::str::from_utf8(&bytes[..n]).ok()?.chars().next()?;
+        out.extend_from_slice(c.encode_utf16(&mut [0; 2]));
+        k += 3 * n;
+    }
+    Some(out)
+}
+
+/// `escape` (section B.2.1.1): `%XX` below 256 and `%uXXXX` above, except `A-Za-z0-9@*_+-./`.
+pub fn escape(units: &[u16]) -> String {
+    use std::fmt::Write;
+    let mut out = String::with_capacity(units.len());
+    for &u in units {
+        let _ = match escape_size(u) {
+            1 => write!(out, "{}", u as u8 as char),
+            3 => write!(out, "%{u:02X}"),
+            _ => write!(out, "%u{u:04X}"),
+        };
+    }
+    out
+}
+
+/// The length of `escape` output for one unit: 1 (kept), 3 (`%XX`) or 6 (`%uXXXX`).
+pub fn escape_size(u: u16) -> usize {
+    if u < 128 && ((u as u8).is_ascii_alphanumeric() || b"@*_+-./".contains(&(u as u8))) {
+        1
+    } else if u < 256 {
+        3
+    } else {
+        6
+    }
+}
+
+/// `unescape` (section B.2.1.2): `%uXXXX` and `%XX` become their unit. Any other `%` stays.
+pub fn unescape(units: &[u16]) -> Vec<u16> {
+    let h = |i: usize, n: usize| -> Option<u16> {
+        let mut v = 0u16;
+        for &u in units.get(i..i + n)? {
+            v = v * 16 + char::from_u32(u as u32)?.to_digit(16)? as u16;
+        }
+        Some(v)
+    };
+    let mut out = Vec::with_capacity(units.len());
+    let mut k = 0;
+    while k < units.len() {
+        let u = units[k];
+        if u == b'%' as u16 {
+            if units.get(k + 1) == Some(&(b'u' as u16)) {
+                if let Some(v) = h(k + 2, 4) {
+                    out.push(v);
+                    k += 6;
+                    continue;
+                }
+            } else if let Some(v) = h(k + 1, 2) {
+                out.push(v);
+                k += 3;
+                continue;
+            }
+        }
+        out.push(u);
+        k += 1;
+    }
+    out
 }
 
 /// StringToNumber (section 7.1.4.1.1): `Number("...")`. Invalid text gives NaN.

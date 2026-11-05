@@ -1,6 +1,7 @@
 //! Load for the numeric builtins: one fresh process runs one kind at N iterations and prints time and peak RSS.
 //!
 //!   numeric_load KIND N EXPECTED_CHECKSUM        KIND: empty | random | clz32 | log | radix16 | radix36frac | radix2sub | isnan
+//!   | pow | sin | atan2 | tofixed | toprecision | toexp | parsefloat | encodeuri | escape
 //!
 //! The first call (seed read from the OS for `random`) is timed apart from the hot loop. Run it under `ulimit -v`
 //! (1 GiB) and `timeout` (45 s).
@@ -41,6 +42,15 @@ fn main() {
         "radix36frac" => "(i / 7 + 0.123).toString(36).length",
         "radix2sub" => "(5e-324 * (i + 1)).toString(2).length",
         "isnan" => "(Number.isNaN(i / 0 - Infinity) ? 1 : 0) + (Number.isNaN(i) ? 1 : 0)", // always 1 per iteration: checksum = N
+        "pow" => "(i % 100) ** 1.5",
+        "sin" => "Math.sin(i) + 1",
+        "atan2" => "Math.atan2(i, 7) + 2",
+        "tofixed" => "(i / 7).toFixed(2).length",
+        "toprecision" => "(i * 1.1).toPrecision(6).length",
+        "toexp" => "(i / 3).toExponential().length",
+        "parsefloat" => "parseFloat(i / 7 + 'x')",
+        "encodeuri" => "encodeURI('\\u00e9 /?#' + i).length",
+        "escape" => "escape('\\u00e9 /?#' + i).length",
         _ => panic!("kind"),
     };
     let child = std::thread::Builder::new().stack_size(if cfg!(debug_assertions) { 64 << 20 } else { 8 << 20 }).spawn(move || {
@@ -51,7 +61,7 @@ fn main() {
             assert!(actual >= 0.0 && actual < n as f64);
         } else {
             let expected: f64 = expected.expect("an independent checksum is required").parse().unwrap();
-            if kind == "log" {
+            if ["log", "pow", "sin", "atan2", "parsefloat"].contains(&kind.as_str()) {
                 assert!((actual - expected).abs() <= 1e-12 * expected.abs().max(1.0));
             } else {
                 assert_eq!(actual, expected);

@@ -16,7 +16,63 @@
 //   Property reads on a number primitive search it (`get_prop`).
 // - `Number.isNaN`: true only for a `Value::Number` that is NaN. No conversion, so no valueOf/toString/Symbol.toPrimitive
 //   call and no getter runs. Every other value, and a missing argument, gives false. Global `isNaN` is separate and coerces.
-// Not supported: other Number methods, `Number.prototype` on wrapper objects, `Object(5)`.
+// - The rest of `Math`: the constants, and the functions of fdlibm as V8 has them (`ieee754.rs`, bit for bit with
+//   Node: `tools/js/math_check.sh`). `hypot` is V8's (`math.tq`: scale by the largest, Kahan sum), `sign`, `fround`,
+//   `imul`, `ceil` and `sqrt` are exact. `Math.log` and the `**` operator use the same port.
+// - `Number.parseFloat` and `Number.parseInt` are the global functions (the same objects). `Number.isFinite`,
+//   `isInteger` and `isSafeInteger` do no conversion. The constants are frozen data properties.
+// - `toFixed`, `toExponential` and `toPrecision` round half up on the exact decimal value of the double
+//   (`number.rs`), as V8 does, with V8's RangeError messages.
+// Not supported: `toLocaleString`, `valueOf`, `Number.prototype` on wrapper objects, `Object(5)`.
+
+/// The one-argument `Math` functions after ToNumber: (name, function).
+type Unary = fn(f64) -> f64;
+const MATH_UNARY: [(&str, Unary); 23] = [
+    ("acos", ieee754::acos),
+    ("acosh", ieee754::acosh),
+    ("asin", ieee754::asin),
+    ("asinh", ieee754::asinh),
+    ("atan", ieee754::atan),
+    ("atanh", ieee754::atanh),
+    ("cbrt", ieee754::cbrt),
+    ("ceil", f64::ceil),
+    ("cos", ieee754::cos),
+    ("cosh", ieee754::cosh),
+    ("exp", ieee754::exp),
+    ("expm1", ieee754::expm1),
+    ("fround", |x| x as f32 as f64),
+    ("log1p", ieee754::log1p),
+    ("log10", ieee754::log10),
+    ("log2", ieee754::log2),
+    ("sign", |x| if x < 0.0 { -1.0 } else if x > 0.0 { 1.0 } else { x }),
+    ("sin", ieee754::sin),
+    ("sinh", ieee754::sinh),
+    ("sqrt", f64::sqrt),
+    ("tan", ieee754::tan),
+    ("tanh", ieee754::tanh),
+    ("log", ieee754::log),
+];
+
+const MATH_CONSTANTS: [(&str, f64); 7] = [
+    ("E", std::f64::consts::E),
+    ("LN10", std::f64::consts::LN_10),
+    ("LOG10E", std::f64::consts::LOG10_E),
+    ("LOG2E", std::f64::consts::LOG2_E),
+    ("PI", std::f64::consts::PI),
+    ("SQRT1_2", std::f64::consts::FRAC_1_SQRT_2),
+    ("SQRT2", std::f64::consts::SQRT_2),
+];
+
+const NUMBER_CONSTANTS: [(&str, f64); 8] = [
+    ("EPSILON", f64::EPSILON),
+    ("MAX_SAFE_INTEGER", 9007199254740991.0),
+    ("MIN_SAFE_INTEGER", -9007199254740991.0),
+    ("MAX_VALUE", f64::MAX),
+    ("MIN_VALUE", 5e-324),
+    ("NaN", f64::NAN),
+    ("POSITIVE_INFINITY", f64::INFINITY),
+    ("NEGATIVE_INFINITY", f64::NEG_INFINITY),
+];
 
 /// Longest non-10 text: 1024 integer digits (radix 2), 1074 fraction digits, sign and point.
 const RADIX_BUF: usize = 2200;
@@ -93,21 +149,41 @@ fn radix_text(x: f64, radix: u32, buf: &mut [u8; RADIX_BUF]) -> (usize, usize) {
 }
 
 impl<'p> Interp<'p> {
-    /// `Math.clz32`, `Math.log`, `Math.LN2`, `Math.random` and `Number.prototype.toString`.
+    /// `Math` beyond abs, floor, round, trunc, max and min, and `Number` with its prototype.
     fn install_numeric(&mut self, math: ObjId) -> Res<()> {
         use AoFn::*;
-        for (name, f, len) in [("clz32", MathClz32, 1), ("log", MathLog, 1), ("random", MathRandom, 0)] {
+        for (name, f, len) in [("clz32", MathClz32, 1), ("random", MathRandom, 0), ("atan2", MathAtan2, 2), ("pow", MathPow, 2), ("imul", MathImul, 2), ("hypot", MathHypot, 2)] {
             self.method(math, name, Nat::Ao(f), len)?;
         }
-        let k = h!(self, self.heap.key_from_str("LN2"));
-        self.def(math, k, Value::Number(std::f64::consts::LN_2), false, false, false)?;
+        for (i, (name, _)) in MATH_UNARY.iter().enumerate() {
+            self.method(math, name, Nat::Ao(MathUnary(i as u8)), 1)?;
+        }
+        for (name, x) in MATH_CONSTANTS.iter().chain(&[("LN2", std::f64::consts::LN_2)]) {
+            let k = h!(self, self.heap.key_from_str(name));
+            self.def(math, k, Value::Number(*x), false, false, false)?;
+        }
+        self.sc_tag(math, "Math")?;
         let np = h!(self, self.heap.new_object(Some(self.object_proto)));
         self.ao.number_proto = Some(np);
         self.method(np, "toString", Nat::Ao(NumToString), 1)?;
+        for (name, f) in [("toFixed", NumToFixed), ("toExponential", NumToExponential), ("toPrecision", NumToPrecision)] {
+            self.method(np, name, Nat::Ao(f), 1)?;
+        }
         let kn = h!(self, self.heap.key_from_str("Number"));
         let Get::Value(Value::Object(nc)) = h!(self, self.heap.get(self.global, kn)) else { return Err(unsupported("Number constructor missing", Span::default())) };
         self.def(np, self.k_constructor, Value::Object(nc), true, false, true)?;
-        self.method(nc, "isNaN", Nat::Ao(NumIsNaN), 1)?;
+        for (name, f) in [("isNaN", NumIsNaN), ("isFinite", NumIsFinite), ("isInteger", NumIsInteger), ("isSafeInteger", NumIsSafeInteger)] {
+            self.method(nc, name, Nat::Ao(f), 1)?;
+        }
+        for name in ["parseFloat", "parseInt"] {
+            let k = h!(self, self.heap.key_from_str(name));
+            let Get::Value(f) = h!(self, self.heap.get(self.global, k)) else { return Err(unsupported("global parse function missing", Span::default())) };
+            self.def(nc, k, f, true, false, true)?;
+        }
+        for (name, x) in NUMBER_CONSTANTS {
+            let k = h!(self, self.heap.key_from_str(name));
+            self.def(nc, k, Value::Number(x), false, false, false)?;
+        }
         self.def(nc, self.k_prototype, Value::Object(np), false, false, false)
     }
 
@@ -117,11 +193,109 @@ impl<'p> Interp<'p> {
                 let x = self.coerce_number(arg(args, 0))?;
                 Ok(Value::Number(to_uint32(x).leading_zeros() as f64))
             }
-            AoFn::MathLog => Ok(Value::Number(self.coerce_number(arg(args, 0))?.ln())),
+            AoFn::MathUnary(i) => Ok(Value::Number(MATH_UNARY[i as usize].1(self.coerce_number(arg(args, 0))?))),
+            AoFn::MathAtan2 | AoFn::MathPow | AoFn::MathImul => {
+                let y = self.coerce_number(arg(args, 0))?;
+                let x = self.coerce_number(arg(args, 1))?;
+                Ok(Value::Number(match f {
+                    AoFn::MathAtan2 => ieee754::atan2(y, x),
+                    AoFn::MathPow => ieee754::pow(y, x),
+                    _ => to_int32(y).wrapping_mul(to_int32(x)) as f64,
+                }))
+            }
+            AoFn::MathHypot => self.math_hypot(args),
             AoFn::MathRandom => self.math_random(),
             AoFn::NumIsNaN => Ok(Value::Bool(matches!(arg(args, 0), Value::Number(x) if x.is_nan()))),
+            AoFn::NumIsFinite | AoFn::NumIsInteger | AoFn::NumIsSafeInteger => {
+                let Value::Number(x) = arg(args, 0) else { return Ok(Value::Bool(false)) };
+                Ok(Value::Bool(match f {
+                    AoFn::NumIsFinite => x.is_finite(),
+                    AoFn::NumIsInteger => x.is_finite() && x.trunc() == x,
+                    _ => x.is_finite() && x.trunc() == x && x.abs() <= 9007199254740991.0,
+                }))
+            }
+            AoFn::NumToFixed | AoFn::NumToExponential | AoFn::NumToPrecision => self.number_format(f, this, arg(args, 0)),
             _ => self.number_to_string_radix(this, arg(args, 0)),
         }
+    }
+
+    /// `Math.hypot` as V8 has it (`math.tq`): ToNumber on every argument, then Infinity wins over NaN, then the values
+    /// are scaled by the largest and summed with Kahan compensation.
+    fn math_hypot(&mut self, args: &[Value]) -> Res<Value> {
+        let mut abs = Vec::with_capacity(args.len());
+        let (mut max, mut nan) = (0.0f64, false);
+        for &a in args {
+            let x = self.coerce_number(a)?;
+            if x.is_nan() {
+                nan = true;
+                abs.push(0.0);
+            } else {
+                abs.push(x.abs());
+                max = max.max(x.abs());
+            }
+        }
+        if max == f64::INFINITY {
+            return Ok(Value::Number(f64::INFINITY));
+        }
+        if nan {
+            return Ok(Value::Number(f64::NAN));
+        }
+        if max == 0.0 {
+            return Ok(Value::Number(0.0));
+        }
+        let (mut sum, mut comp) = (0.0f64, 0.0f64);
+        for a in abs {
+            let n = a / max;
+            let summand = n * n - comp;
+            let pre = sum + summand;
+            comp = (pre - sum) - summand;
+            sum = pre;
+        }
+        Ok(Value::Number(sum.sqrt() * max))
+    }
+
+    /// `toFixed`, `toExponential` and `toPrecision`: the argument checks in spec order, with V8's messages.
+    fn number_format(&mut self, f: AoFn, this: Value, digits: Value) -> Res<Value> {
+        let name = match f {
+            AoFn::NumToFixed => "toFixed",
+            AoFn::NumToExponential => "toExponential",
+            _ => "toPrecision",
+        };
+        let x = match this {
+            Value::Number(x) => x,
+            Value::Object(o) if Some(o) == self.ao.number_proto => 0.0,
+            _ => return Err(self.type_err(&format!("Number.prototype.{name} requires that 'this' be a Number"))),
+        };
+        if f == AoFn::NumToPrecision && matches!(digits, Value::Undefined) {
+            return Ok(Value::String(h!(self, self.heap.intern_str(&number_to_string(x)))));
+        }
+        let undefined = matches!(digits, Value::Undefined);
+        let d = self.ao_int(digits)?;
+        let (lo, msg) = match f {
+            AoFn::NumToFixed => (0.0, "toFixed() digits argument must be between 0 and 100"),
+            AoFn::NumToExponential => (0.0, "toExponential() argument must be between 0 and 100"),
+            _ => (1.0, "toPrecision() argument must be between 1 and 100"),
+        };
+        let bad = !(lo..=100.0).contains(&d);
+        // toFixed checks the range first; the other two give the text of a non-finite number first
+        if f == AoFn::NumToFixed && bad {
+            return Err(self.mk_err(RANGE_ERROR, msg));
+        }
+        if !x.is_finite() {
+            return Ok(Value::String(h!(self, self.heap.intern_str(&number_to_string(x)))));
+        }
+        if bad {
+            return Err(self.mk_err(RANGE_ERROR, msg));
+        }
+        let d = d as usize;
+        let text = match f {
+            AoFn::NumToFixed if x.abs() >= 1e21 => number_to_string(x),
+            AoFn::NumToFixed => number::to_fixed(x, d),
+            AoFn::NumToExponential => number::to_exponential(x, (!undefined).then_some(d)),
+            _ => number::to_precision(x, d),
+        };
+        self.work(text.len(), 5)?;
+        Ok(Value::String(h!(self, self.heap.intern_str(&text))))
     }
 
     fn math_random(&mut self) -> Res<Value> {
