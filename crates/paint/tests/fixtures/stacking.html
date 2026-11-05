@@ -1,0 +1,23 @@
+<!doctype html>
+<style>
+body { margin: 0 }
+div { width: 80px; height: 60px }
+.p { position: absolute }
+#a { left: 10px; top: 10px; background: #ef4444; z-index: 2 }
+#b { left: 50px; top: 30px; background: #3b82f6; z-index: 1 }
+#c { left: 90px; top: 10px; background: #22c55e; z-index: 5; opacity: 0.5 }
+#d { left: 120px; top: 30px; background: #f59e0b; z-index: 3 }
+#w { position: absolute; left: 200px; top: 10px; width: 100px; height: 80px; background: #e5e7eb; z-index: 0 }
+#w .n { position: absolute; left: 10px; top: 10px; width: 60px; height: 40px; background: #8b5cf6; z-index: -1 }
+#w .f { position: absolute; left: 40px; top: 30px; width: 50px; height: 40px; background: #14b8a6 }
+.o { position: absolute; left: 10px; top: 120px; width: 150px; height: 50px; background: #111; opacity: 0.4 }
+.o span { position: absolute; left: 20px; top: 10px; width: 60px; height: 30px; background: #fff; opacity: 0.5 }
+.fl { display: flex; position: absolute; left: 180px; top: 120px }
+.fl i { width: 40px; height: 40px; margin-right: -20px; background: #ef4444 }
+.fl i:nth-child(2) { background: #3b82f6; z-index: 1 }
+.fl i:nth-child(3) { background: #22c55e }
+</style>
+<div id="a" class="p"></div><div id="b" class="p"></div><div id="c" class="p"></div><div id="d" class="p"></div>
+<div id="w"><div class="n"></div><div class="f"></div></div>
+<div class="o"><span></span></div>
+<div class="fl"><i></i><i></i><i></i></div>

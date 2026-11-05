@@ -90,12 +90,14 @@ pub struct Tree<'a> {
     start: Option<Atom>,
     value: Option<Atom>,
     body: Option<Atom>,
+    /// The atoms of the form controls (`controls.rs`).
+    pub controls: crate::controls::Atoms,
     // The atoms of these names, if the page has them. A page with no `<br>` has no atom for `br`.
 }
 
 impl<'a> Tree<'a> {
     pub fn new(doc: &'a Document, styles: &'a Styles) -> Tree<'a> {
-        Tree { doc, styles, br: doc.find_atom("br"), ol: doc.find_atom("ol"), start: doc.find_atom("start"), value: doc.find_atom("value"), body: doc.find_atom("body") }
+        Tree { doc, styles, br: doc.find_atom("br"), ol: doc.find_atom("ol"), start: doc.find_atom("start"), value: doc.find_atom("value"), body: doc.find_atom("body"), controls: crate::controls::Atoms::new(doc) }
     }
 
     /// The `html` element: the root of the boxes. `None` if it is not shown.

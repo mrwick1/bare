@@ -3,9 +3,13 @@
 //! Layout measures with fixed numbers (`bare_layout::font`: a letter is 0.6 em). Paint draws the outlines of the same
 //! font, Noto Sans Mono, whose advance is 600 of 1000 units. So a painted letter sits where layout says it sits.
 //!
-//! The font is a subset of the Regular and of the Bold file (Basic Latin, Latin-1, the usual punctuation, bullets, boxes
-//! and arrows; 22 KB each), built into the program with `include_bytes!`. Both have the same advance, so bold text keeps its width. No system font is read: the pixels of a test do not depend on
-//! the machine. The license is `data/fonts/OFL.txt`. A letter that the subset lacks is not drawn (a gap in `docs/resources.md`).
+//! The font is a subset of the Regular and of the Bold file (Basic Latin, Latin-1, the punctuation block, currency
+//! signs with the rupee, arrows, a few math signs and the geometric shapes; 32 KB each), built into the program with
+//! `include_bytes!`. Both have the same advance, so bold text keeps its width. A third face, a subset of Noto Sans Symbols2
+//! (4 KB: check marks, crosses, stars, the menu and warning signs), draws the characters that Noto Sans Mono lacks: it is
+//! the fallback. No system font is read: the pixels of a test do not depend on the machine. The license is
+//! `data/fonts/OFL.txt`. A letter that none of the faces has (Chinese, Japanese, Korean, emoji) is not drawn (a gap in
+//! `docs/resources.md`).
 //!
 //! Why a cache: filling an outline is the costly part of text. A page repeats the same letters at the same size, so
 //! each (glyph, size, quarter pixel) is filled once into a coverage mask, and every use is a blit of the mask.
@@ -17,6 +21,10 @@ use std::hash::{BuildHasherDefault, Hasher};
 
 static REGULAR: &[u8] = include_bytes!("../../../data/fonts/NotoSansMono-Regular-subset.ttf");
 static BOLD: &[u8] = include_bytes!("../../../data/fonts/NotoSansMono-Bold-subset.ttf");
+static SYMBOLS: &[u8] = include_bytes!("../../../data/fonts/NotoSansSymbols2-subset.ttf");
+
+/// The face of a glyph: 0 regular, 1 bold, 2 the fallback of symbols.
+pub type FaceId = u8;
 
 /// How many places a glyph can take between two pixels. Skia uses 4 as well.
 pub const SUBPIXELS: f32 = 4.0;
@@ -75,7 +83,7 @@ impl Face {
 }
 
 pub struct Glyphs {
-    faces: [Face; 2],
+    faces: [Face; 3],
     entries: HashMap<u64, Entry, BuildHasherDefault<Fx>>,
     /// All masks, one after the other: no allocation for each glyph.
     masks: Vec<u8>,
@@ -83,22 +91,26 @@ pub struct Glyphs {
 
 impl Glyphs {
     pub fn new() -> Glyphs {
-        Glyphs { faces: [Face::new(REGULAR), Face::new(BOLD)], entries: HashMap::default(), masks: Vec::new() }
+        Glyphs { faces: [Face::new(REGULAR), Face::new(BOLD), Face::new(SYMBOLS)], entries: HashMap::default(), masks: Vec::new() }
     }
 
-    /// The glyph of a character in the regular face (`bold` false) or the bold one. 0 is the "missing" glyph: the
-    /// face has no outline for it.
-    pub fn glyph(&self, bold: bool, c: char) -> u16 {
+    /// The face and the glyph of a character, in the regular face (`bold` false) or the bold one, or in the fallback when
+    /// the main face lacks it. The glyph 0 is the "missing" glyph: no face has an outline for it.
+    pub fn glyph(&self, bold: bool, c: char) -> (FaceId, u16) {
         let face = &self.faces[bold as usize];
-        match c as usize {
+        let id = match c as usize {
             i if i < 128 => face.ascii[i],
             _ => face.font.glyph_id(c).0,
+        };
+        if id == 0 && c as u32 >= 0x2000 {
+            return (2, self.faces[2].font.glyph_id(c).0);
         }
+        (bold as FaceId, id)
     }
 
     /// The mask of a glyph at `size` pixels and a place `sub` quarters of a pixel right of a whole pixel. Made on the first call.
-    pub fn get(&mut self, bold: bool, id: u16, size: f32, sub: u8) -> Entry {
-        let key = (size.to_bits() as u64) << 32 | (id as u64) << 8 | (bold as u64) << 4 | sub as u64;
+    pub fn get(&mut self, face: FaceId, id: u16, size: f32, sub: u8) -> Entry {
+        let key = (size.to_bits() as u64) << 32 | (id as u64) << 8 | (face as u64) << 4 | sub as u64;
         if let Some(&e) = self.entries.get(&key) {
             return e;
         }
@@ -106,13 +118,13 @@ impl Glyphs {
             self.entries.clear();
             self.masks.clear();
         }
-        let e = self.fill(bold, id, size, sub);
+        let e = self.fill(face, id, size, sub);
         self.entries.insert(key, e);
         e
     }
 
-    fn fill(&mut self, bold: bool, id: u16, size: f32, sub: u8) -> Entry {
-        let face = &self.faces[bold as usize];
+    fn fill(&mut self, face: FaceId, id: u16, size: f32, sub: u8) -> Entry {
+        let face = &self.faces[face as usize];
         let glyph = Glyph { id: GlyphId(id), scale: PxScale::from(size * face.scale), position: point(sub as f32 / SUBPIXELS, 0.0) };
         let at = self.masks.len() as u32;
         let Some(outline) = face.font.outline_glyph(glyph) else {
@@ -154,23 +166,25 @@ mod tests {
     #[test]
     fn letters_have_masks_and_spaces_do_not() {
         let mut g = Glyphs::new();
-        let a = g.glyph(false, 'A');
+        let (face, a) = g.glyph(false, 'A');
         assert_ne!(a, 0);
-        let e = g.get(false, a, 16.0, 0);
+        let e = g.get(face, a, 16.0, 0);
         assert!(e.w > 0 && e.h > 0);
         // The capital A of a 16 px font is about 11 px tall and sits on the baseline: its mask is above it.
         assert!(e.top < 0 && e.top > -16, "{}", e.top);
         assert!(g.mask(e).contains(&255));
-        let s = g.get(false, g.glyph(false, ' '), 16.0, 0);
+        let (face, space) = g.glyph(false, ' ');
+        let s = g.get(face, space, 16.0, 0);
         assert_eq!((s.w, s.h), (0, 0));
         // The same request is a hit: no new mask.
         let before = g.stats();
-        g.get(false, a, 16.0, 0);
+        g.get(face, a, 16.0, 0);
         assert_eq!(g.stats(), before);
-        g.get(false, a, 16.0, 1);
+        g.get(face, a, 16.0, 1);
         assert_eq!(g.stats().0, before.0 + 1);
         // The bold face has its own mask, with more ink.
-        let bold = g.get(true, g.glyph(true, 'A'), 16.0, 0);
+        let (bface, bid) = g.glyph(true, 'A');
+        let bold = g.get(bface, bid, 16.0, 0);
         let ink = |e| g.mask(e).iter().map(|&c| c as u32).sum::<u32>();
         assert!(ink(bold) > ink(e));
     }
@@ -188,6 +202,11 @@ mod tests {
     #[test]
     fn missing_characters_are_glyph_zero() {
         let g = Glyphs::new();
-        assert_eq!(g.glyph(false, '\u{4e2d}'), 0);
+        assert_eq!(g.glyph(false, '\u{4e2d}').1, 0);
+        // The rupee sign is in the main face, the check mark only in the fallback.
+        assert_eq!(g.glyph(false, '\u{20b9}').0, 0);
+        assert_ne!(g.glyph(false, '\u{20b9}').1, 0);
+        assert_eq!(g.glyph(true, '\u{2713}').0, 2);
+        assert_ne!(g.glyph(true, '\u{2713}').1, 0);
     }
 }

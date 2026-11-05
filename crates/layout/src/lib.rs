@@ -5,6 +5,7 @@
 
 pub mod block;
 pub mod boxes;
+pub mod controls;
 pub mod flex;
 pub mod floats;
 // `pub mod` makes the module visible to other crates: `bare_layout::boxes`.

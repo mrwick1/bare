@@ -247,6 +247,9 @@ pub fn sized(cx: &mut Cx, node: NodeId, space: Space, forced: Option<(f32, f32, 
 /// `table.rs` takes care of, so here it is `auto`.
 pub(crate) fn sized_with(cx: &mut Cx, node: NodeId, space: Space, forced: Option<(f32, f32, f32)>, tall: Option<f32>, pos: Pos, sides: Option<(Sides, Sides)>) -> Done {
     let style = cx.tree.style(node);
+    // A form control that has no size of its own in the style sheet: the size of its content when `auto` (`controls.rs`).
+    let control = crate::controls::of(&cx.tree, node);
+    let own = control.and_then(|c| crate::controls::size(&cx.tree, node, c));
     let plan = (context(cx, node) == Context::Table).then(|| crate::table::Plan::new(cx, node, space.width));
     let (border, padding) = match (&plan, sides) {
         (Some(p), _) => p.sides(),
@@ -261,7 +264,7 @@ pub(crate) fn sized_with(cx: &mut Cx, node: NodeId, space: Space, forced: Option
     };
     let (width, margin_left, margin_right) = match &plan {
         Some(p) => p.widths(cx, forced, space.width, bp.horizontal()),
-        None => forced.unwrap_or_else(|| widths(cx, style, space.width, bp.horizontal())),
+        None => forced.unwrap_or_else(|| widths_or(cx, style, space.width, bp.horizontal(), own.map(|s| s.0))),
     };
     let margin = |p| resolve(cx, style.get(p), Some(space.width)).unwrap_or(0.0);
     let (margin_top, margin_bottom) = (margin(Property::MarginTop), margin(Property::MarginBottom));
@@ -272,7 +275,7 @@ pub(crate) fn sized_with(cx: &mut Cx, node: NodeId, space: Space, forced: Option
 
     let border_box = style.get(Property::BoxSizing) == Value::Keyword(Keyword::BorderBox);
     let content = |v: f32| if border_box { (v - bp.vertical()).max(0.0) } else { v };
-    let height = tall.or_else(|| if plan.is_some() || sides.is_some() { None } else { resolve(cx, style.get(Property::Height), space.height).map(content) });
+    let height = tall.or_else(|| if plan.is_some() || sides.is_some() { None } else { resolve(cx, style.get(Property::Height), space.height).map(content) }).or(own.map(|s| s.1));
     let min = resolve(cx, style.get(Property::MinHeight), space.height).map_or(0.0, content);
     let max = resolve(cx, style.get(Property::MaxHeight), space.height).map(content);
     let clamp = |h: f32| max.map_or(h, |m| h.min(m)).max(min);
@@ -286,7 +289,10 @@ pub(crate) fn sized_with(cx: &mut Cx, node: NodeId, space: Space, forced: Option
     // the boxes inside keep what they found the first time: else each level of `auto` boxes would double the work.
     let auto = (oy == Keyword::Auto, ox == Keyword::Auto);
     let mut bars = (oy == Keyword::Scroll, ox == Keyword::Scroll);
-    let mut retry = auto.0 || auto.1;
+    // Chrome reserves the scrollbar of a `<textarea>` that scrolls, whether it is there or not: the text wraps at `cols`.
+    let reserve = control == Some(crate::controls::Control::TextArea) && auto.0;
+    bars.0 |= reserve;
+    let mut retry = (auto.0 || auto.1) && !reserve;
     if retry && cx.again > 0 && let Some(&known) = cx.bars.get(&(node.index() as u32)) {
         bars = known;
         retry = false;
@@ -388,7 +394,22 @@ pub(crate) fn sized_with(cx: &mut Cx, node: NodeId, space: Space, forced: Option
     let content_height = floats_bottom.map_or(content_height, |b| content_height.max(b));
     done.content = content_height;
     // A scrollbar at the bottom is inside the height, if the box has one. Else the box grows by it.
+    let natural = content_height;
     let content_height = clamp(height.unwrap_or(content_height + gy));
+    // Chrome centers the content of a `<button>` in its height.
+    if control == Some(crate::controls::Control::Button) && content_height > natural + gy {
+        let dy = (content_height - gy - natural) / 2.0;
+        let mut j = fragment + 1;
+        while j < cx.out.len() {
+            cx.out[j].rect.y += dy;
+            j = cx.out[j].end as usize;
+        }
+        done.baseline = done.baseline.map(|b| b + dy);
+    }
+    // The text line of a field, a button made from an `<input>` or a select is not a box: its baseline is computed.
+    if matches!(control, Some(crate::controls::Control::Field | crate::controls::Control::Label | crate::controls::Control::Select)) {
+        done.baseline = Some(bp.top + crate::controls::baseline(&cx.tree, node, content_height));
+    }
     done.through = kids.open && bottom_open && content_height == 0.0 && bp.vertical() == 0.0;
     if kids.open && !done.through {
         // The margins inside reached the top, but the block has a height: they stay at the top, and the bottom is closed.
@@ -612,12 +633,18 @@ pub(crate) fn solve_margins(ml: Option<f32>, mr: Option<f32>, cb: f32, bp: f32, 
 /// The content width and the left and right margins of a block (CSS 2.1, 10.3.3, with `box-sizing`, `min-width` and
 /// `max-width`). `bp`: the borders and padding of both sides.
 pub fn widths(cx: &Cx, style: &ComputedStyle, cb: f32, bp: f32) -> (f32, f32, f32) {
+    widths_or(cx, style, cb, bp, None)
+}
+
+/// `widths`, with `auto`: the width of a box that is not as wide as its container when `width` is `auto` (a form
+/// control, `controls.rs`). `None` is the block rule: fill the container.
+pub fn widths_or(cx: &Cx, style: &ComputedStyle, cb: f32, bp: f32, auto: Option<f32>) -> (f32, f32, f32) {
     let border_box = style.get(Property::BoxSizing) == Value::Keyword(Keyword::BorderBox);
     let content = |v: f32| if border_box { (v - bp).max(0.0) } else { v };
     let ml = resolve(cx, style.get(Property::MarginLeft), Some(cb));
     let mr = resolve(cx, style.get(Property::MarginRight), Some(cb));
     let solve = |width: Option<f32>| solve_margins(ml, mr, cb, bp, width);
-    let (mut w, mut l, mut r) = solve(resolve(cx, style.get(Property::Width), Some(cb)).map(content));
+    let (mut w, mut l, mut r) = solve(resolve(cx, style.get(Property::Width), Some(cb)).map(content).or(auto));
     if let Some(max) = resolve(cx, style.get(Property::MaxWidth), Some(cb)).map(content)
         && w > max
     {

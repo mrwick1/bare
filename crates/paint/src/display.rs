@@ -16,20 +16,28 @@
 //! 4. the lines: backgrounds and borders of inline boxes, text and markers, in tree order, with the inline-blocks as contexts,
 //! 5. the positioned boxes, each one a context, in tree order.
 //!
-//! Gaps, on purpose (S4 topic 3 adds them when the target needs them): no `z-index` (the property is not parsed), so a
-//! positioned box paints in tree order over the normal flow. A positioned box makes a context in step 5, but its own
-//! positioned children paint inside it and not in the context above. A flex or grid item paints as a block, not as an
-//! inline-block. A box with `overflow` other than `visible` paints as one unit in the place of a block (step 2). No
-//! scrollbars. Borders are solid only (`dashed`, `dotted`, `double` and the 3D styles draw as `solid`), with square
-//! corners: where two sides meet, the top and the bottom side own the corner pixels. No radius (the property is not parsed).
-//! An inline box cut over two lines draws the borders of all four sides on each piece.
+//! A box that makes a stacking context (the root, a positioned box or a flex item with `z-index`, any box with `opacity`
+//! under 1) paints as one unit. The boxes with a `z-index` other than 0 that are inside it, at any depth that is not
+//! another context, wait in `DisplayList::hoist`. The context paints them at the end: the negative ones first (after its own
+//! background, before the blocks in it), the positive ones last, sorted by `z-index` and then by tree order. A flex or grid
+//! item paints as an inline-block (step 4). A page with no `opacity` and no `z-index` skips all of this.
+//!
+//! `opacity` under 1 is a layer: `PushLayer` keeps the pixels behind the box, the box paints as usual, and `PopLayer`
+//! mixes the result with the kept pixels. Over an opaque backdrop that is the same as drawing the box in a layer of its own and
+//! mixing the layer in, and it needs no second canvas. The layer covers the border boxes and the text of the whole box.
+//!
+//! Gaps, on purpose: no scrollbars. `double`, `groove`, `ridge`, `inset` and `outset` borders draw as `solid`. A rounded
+//! box draws its border in one color (with four colors the sides are square), `dashed` and `dotted` borders that are
+//! rounded draw as `solid`, and `overflow` clips to the square padding box, also when the box is rounded. An inline box
+//! cut over two lines draws the borders of all four sides on each piece. `z-index` of an inline box does nothing.
 
-use crate::canvas::IRect;
+use crate::canvas::{IRect, Shape};
 use bare_css::cascade::{ComputedStyle, Styles};
 use bare_css::color::Color;
-use bare_css::values::{Keyword, Property, Value};
+use bare_css::values::{Keyword, Length, Property, Value};
 use bare_html::dom::{Document, NodeData, NodeId};
 use bare_layout::boxes::{self, Kind, Tree};
+use bare_layout::controls::{self, Control};
 use bare_layout::fragment::{Fragment, Kind as FragmentKind, Layout};
 use bare_layout::font::Metrics;
 use bare_layout::text::{self, Transform, WhiteSpace};
@@ -42,9 +50,18 @@ pub enum Item {
     /// A run of text: `len` bytes at `at` in `DisplayList::text`. `x` is the left edge of the first letter, in pixels, and
     /// `baseline` is a whole pixel row.
     Text { x: f32, baseline: i32, size: f32, color: u32, at: u32, len: u32, bold: bool },
+    /// A rectangle with round corners: `DisplayList::shapes[shape]`.
+    Fill { shape: u32, color: u32 },
+    /// What is in `shapes[shape]` and not in `shapes[shape + 1]`: a round border.
+    Ring { shape: u32, color: u32 },
+    /// A line of `width` pixels through `n` points from `DisplayList::points[at]`. One point is a dot.
+    Stroke { at: u32, n: u32, width: f32, color: u32 },
     /// Draw nothing outside `IRect` (and outside the clips before it) until the matching `PopClip`.
     PushClip(IRect),
     PopClip,
+    /// Everything up to the matching `PopLayer` shows with `alpha` (0 to 255) of its strength, inside `IRect`.
+    PushLayer { r: IRect, alpha: u8 },
+    PopLayer,
     /// A box that waits for its turn in the order of painting. Only in the scratch lists, never in `items`.
     Later(u32),
 }
@@ -56,10 +73,35 @@ pub struct DisplayList {
     pub text: String,
     /// The color of the page behind everything: the canvas.
     pub background: u32,
+    /// The shapes of `Item::Fill` and `Item::Ring`.
+    pub shapes: Vec<Shape>,
+    /// The points of `Item::Stroke`.
+    pub points: Vec<(f32, f32)>,
     // The scratch lists of `build`. They keep their memory from one frame to the next.
     lines: Vec<Item>,
     floats: Vec<u32>,
     positioned: Vec<u32>,
+    hoist: Vec<Hoisted>,
+}
+
+/// A box of a stacking context with a `z-index` other than 0, on its way up to the context. `clip` is what clipped it
+/// where it is in the tree.
+#[derive(Clone, Copy)]
+struct Hoisted {
+    z: i32,
+    frag: u32,
+    clip: IRect,
+}
+
+/// What the styles of the page need from paint: the checks are skipped when no style asks for them.
+#[derive(Default, Clone, Copy)]
+struct Page {
+    /// `opacity` under 1 or `z-index` is used.
+    stack: bool,
+    /// A flex or grid container is used.
+    flex: bool,
+    /// The page has an `<input>`, `<select>`, `<textarea>` or `<button>`.
+    controls: bool,
 }
 
 /// `Color` as `0xAARRGGBB`.
@@ -74,7 +116,8 @@ enum Layer {
     /// A context in the place of the lines: an inline-block.
     Atomic,
     Float,
-    Positioned,
+    /// A positioned box, or a box that makes a stacking context. `z`: the order in its context.
+    Positioned(i32),
     /// A context in the place of a block: a box that clips.
     Clipped,
 }
@@ -95,6 +138,9 @@ impl DisplayList {
         self.lines.clear();
         self.floats.clear();
         self.positioned.clear();
+        self.hoist.clear();
+        self.shapes.clear();
+        self.points.clear();
         self.background = 0xffff_ffff;
         let tree = Tree::new(doc, styles);
         let Some(root) = tree.root() else { return };
@@ -118,7 +164,12 @@ impl DisplayList {
             self.background = crate::canvas::blend(argb(canvas), 0xffff_ffff, canvas.a as u32);
         }
         let view = IRect { x0: 0, y0: 0, x1: view.0 as i32, y1: view.1 as i32 };
-        let mut b = Builder { tree, doc, frags: &layout.fragments, list: self, view, propagated, depth: 0 };
+        let mut page = Page { controls: [tree.controls.input, tree.controls.select, tree.controls.textarea, tree.controls.button].iter().any(Option::is_some), ..Page::default() };
+        for style in styles.each() {
+            page.stack |= matches!(style.get(Property::Opacity), Value::Number(o) if o < 1.0) || matches!(style.get(Property::ZIndex), Value::Number(_));
+            page.flex |= matches!(style.get(Property::Display), Value::Keyword(Keyword::Flex | Keyword::InlineFlex | Keyword::Grid | Keyword::InlineGrid));
+        }
+        let mut b = Builder { tree, doc, frags: &layout.fragments, list: self, view, propagated, depth: 0, page, clips: Vec::new() };
         b.context(0);
     }
 }
@@ -138,6 +189,9 @@ struct Builder<'a> {
     /// The element whose background is the canvas.
     propagated: NodeId,
     depth: usize,
+    page: Page,
+    /// The clips that are open now (the same as the ones of `Painter::draw`).
+    clips: Vec<IRect>,
 }
 
 impl Builder<'_> {
@@ -149,23 +203,58 @@ impl Builder<'_> {
         }
     }
 
+    /// Is this box an item of a flex or grid container?
+    fn item(&self, node: NodeId) -> bool {
+        self.page.flex && matches!(self.tree.kind(node), Kind::Block | Kind::ListItem) && self.tree.is_flex_or_grid(self.doc.flat_parent(node))
+    }
+
+    /// The place of a box in the order of its stacking context, if the box makes one: `z-index` (it counts for a positioned
+    /// box and a flex item) and `opacity`. A box that is no context gives `None`.
+    fn stack(&self, f: &Fragment, style: &ComputedStyle) -> Option<i32> {
+        if !self.page.stack {
+            return None;
+        }
+        let z = match style.get(Property::ZIndex) {
+            Value::Number(n) if style.get(Property::Position) != Value::Keyword(Keyword::Static) || self.item(f.node) => Some(n as i32),
+            _ => None,
+        };
+        match style.get(Property::Opacity) {
+            Value::Number(o) if o < 1.0 => Some(z.unwrap_or(0)),
+            _ => z,
+        }
+    }
+
     fn layer(&self, f: &Fragment, style: &ComputedStyle) -> Layer {
         let kind = self.tree.kind(f.node);
         match kind {
-            Kind::OutOfFlow => return Layer::Positioned,
+            Kind::OutOfFlow => return Layer::Positioned(self.stack(f, style).unwrap_or(0)),
             Kind::Float => return Layer::Float,
             _ => {}
         }
         // `relative` and `sticky` boxes paint over the flow. An inline box stays in its line (a gap).
-        if kind != Kind::Inline && style.get(Property::Position) != Value::Keyword(Keyword::Static) {
-            return Layer::Positioned;
+        if kind != Kind::Inline {
+            let stack = self.stack(f, style);
+            if stack.is_some() || style.get(Property::Position) != Value::Keyword(Keyword::Static) {
+                return Layer::Positioned(stack.unwrap_or(0));
+            }
         }
         match kind {
             Kind::Inline => Layer::Inline,
             Kind::Atomic => Layer::Atomic,
+            _ if self.item(f.node) => Layer::Atomic,
             _ if clips(style) => Layer::Clipped,
             _ => Layer::Block,
         }
+    }
+
+    /// The border boxes of the fragments `i..end`, together, in whole pixels: what a layer must hold.
+    fn extent(&self, i: usize) -> IRect {
+        let mut r = IRect { x0: i32::MAX, y0: i32::MAX, x1: i32::MIN, y1: i32::MIN };
+        for f in &self.frags[i..self.frags[i].end as usize] {
+            let (x0, y0, x1, y1) = (f.rect.x.floor() as i32, f.rect.y.floor() as i32, (f.rect.x + f.rect.w).ceil() as i32, (f.rect.y + f.rect.h).ceil() as i32);
+            r = IRect { x0: r.x0.min(x0), y0: r.y0.min(y0), x1: r.x1.max(x1), y1: r.y1.max(y1) };
+        }
+        r
     }
 
     /// Paint the fragment `i` and everything in it, in the order of the module comment.
@@ -175,16 +264,41 @@ impl Builder<'_> {
         }
         let f = self.frags[i];
         let style = self.tree.style(f.node);
+        let sc = i == 0 || self.stack(&f, style).is_some();
+        let mut layer = false;
+        if self.page.stack && i > 0 {
+            let alpha = match style.get(Property::Opacity) {
+                Value::Number(o) if o < 1.0 => (o * 255.0 + 0.5) as u8,
+                _ => 255,
+            };
+            if alpha == 0 {
+                return;
+            }
+            if alpha < 255 {
+                let r = self.extent(i).intersect(self.view);
+                if r.is_empty() {
+                    return;
+                }
+                self.list.items.push(Item::PushLayer { r, alpha });
+                layer = true;
+            }
+        }
         let clip = if i > 0 && clips(style) { Some(padding_box(&f, style)) } else { None };
         self.decor(&f, style, false);
         // A box that clips, with its inside outside the canvas, has nothing more to show.
         if let Some(c) = clip {
             if c.intersect(self.view).is_empty() {
+                if layer {
+                    self.list.items.push(Item::PopLayer);
+                }
                 return;
             }
             self.list.items.push(Item::PushClip(c));
+            self.clips.push(c);
         }
         self.depth += 1;
+        let hoist = self.list.hoist.len();
+        let inside = self.list.items.len();
         let (lines, floats, positioned) = (self.list.lines.len(), self.list.floats.len(), self.list.positioned.len());
         let end = f.end as usize;
         let mut j = i + 1;
@@ -210,7 +324,12 @@ impl Builder<'_> {
                             self.list.floats.push(j as u32);
                             j = g.end as usize;
                         }
-                        Layer::Positioned => {
+                        Layer::Positioned(z) if z != 0 => {
+                            let clip = self.clips.last().copied().unwrap_or(self.view);
+                            self.list.hoist.push(Hoisted { z, frag: j as u32, clip });
+                            j = g.end as usize;
+                        }
+                        Layer::Positioned(_) => {
                             self.list.positioned.push(j as u32);
                             j = g.end as usize;
                         }
@@ -250,10 +369,52 @@ impl Builder<'_> {
             self.context(self.list.positioned[k] as usize);
         }
         self.list.positioned.truncate(positioned);
+        if sc {
+            self.hoisted(hoist, inside);
+        }
         if clip.is_some() {
             self.list.items.push(Item::PopClip);
+            self.clips.pop();
+        }
+        if layer {
+            self.list.items.push(Item::PopLayer);
         }
         self.depth -= 1;
+    }
+
+    /// The end of a stacking context: paint the boxes that came up to it from `hoist`. The ones with a negative `z-index`
+    /// go to the place `inside` (behind the blocks of the context), the others to the end.
+    fn hoisted(&mut self, hoist: usize, inside: usize) {
+        let end = self.list.hoist.len();
+        if end == hoist {
+            return;
+        }
+        self.list.hoist[hoist..].sort_by_key(|h| (h.z, h.frag));
+        let negative = self.list.hoist[hoist..].partition_point(|h| h.z < 0) + hoist;
+        let before = self.list.items.len();
+        for k in hoist..end {
+            if k == negative {
+                // The negative ones are done: move them in front of what the context painted before.
+                let moved = self.list.items.len() - before;
+                self.list.items[inside..].rotate_right(moved);
+            }
+            let h = self.list.hoist[k];
+            let clipped = h.clip != self.view;
+            if clipped {
+                self.list.items.push(Item::PushClip(h.clip));
+                self.clips.push(h.clip);
+            }
+            self.context(h.frag as usize);
+            if clipped {
+                self.list.items.push(Item::PopClip);
+                self.clips.pop();
+            }
+        }
+        if negative == end {
+            let moved = self.list.items.len() - before;
+            self.list.items[inside..].rotate_right(moved);
+        }
+        self.list.hoist.truncate(hoist);
     }
 
     /// The background and the borders of one box. `line`: it goes in the lines, not in the blocks.
@@ -265,23 +426,48 @@ impl Builder<'_> {
         if b.is_empty() {
             return;
         }
-        let bg = argb(style.color(Property::BackgroundColor));
-        if bg >> 24 != 0 && f.node != self.propagated {
-            self.rect(line, b, bg);
+        let control = if !line && self.page.controls { controls::of(&self.tree, f.node) } else { None };
+        let native = control.filter(|&c| is_native(style, c));
+        if let Some(c) = native {
+            self.native(f, b, c);
+        } else {
+            let round = radii(style, b);
+            let bg = argb(style.color(Property::BackgroundColor));
+            if bg >> 24 != 0 && f.node != self.propagated {
+                match round {
+                    Some(s) => self.fill(line, s, bg),
+                    None => self.rect(line, b, bg),
+                }
+            }
+            self.borders(line, b, style, round);
         }
-        let side = |w: Property, s: Property, c: Property| -> (i32, u32) {
+        if let Some(c) = control {
+            self.control(f, style, c);
+        }
+    }
+
+    fn borders(&mut self, line: bool, b: IRect, style: &ComputedStyle, round: Option<Shape>) {
+        #[derive(Clone, Copy, PartialEq)]
+        enum Dash {
+            Solid,
+            Dashed,
+            Dotted,
+        }
+        let side = |w: Property, s: Property, c: Property| -> (i32, u32, Dash) {
             let w = style.px(w);
             match style.get(s) {
-                Value::Keyword(Keyword::None | Keyword::Hidden) => (0, 0),
-                _ if w <= 0.0 => (0, 0),
-                // Chrome: a width under 1 px is 1 px, and others go down to whole pixels.
-                _ => ((w.floor() as i32).max(1), argb(style.color(c))),
+                Value::Keyword(Keyword::None | Keyword::Hidden) => (0, 0, Dash::Solid),
+                _ if w <= 0.0 => (0, 0, Dash::Solid),
+                // The computed width is a whole number already (`Styles` snaps it, as Chrome does).
+                Value::Keyword(Keyword::Dashed) => (w as i32, argb(style.color(c)), Dash::Dashed),
+                Value::Keyword(Keyword::Dotted) => (w as i32, argb(style.color(c)), Dash::Dotted),
+                _ => (w as i32, argb(style.color(c)), Dash::Solid),
             }
         };
-        let (top, tc) = side(Property::BorderTopWidth, Property::BorderTopStyle, Property::BorderTopColor);
-        let (right, rc) = side(Property::BorderRightWidth, Property::BorderRightStyle, Property::BorderRightColor);
-        let (bottom, bc) = side(Property::BorderBottomWidth, Property::BorderBottomStyle, Property::BorderBottomColor);
-        let (left, lc) = side(Property::BorderLeftWidth, Property::BorderLeftStyle, Property::BorderLeftColor);
+        let (top, tc, td) = side(Property::BorderTopWidth, Property::BorderTopStyle, Property::BorderTopColor);
+        let (right, rc, rd) = side(Property::BorderRightWidth, Property::BorderRightStyle, Property::BorderRightColor);
+        let (bottom, bc, bd) = side(Property::BorderBottomWidth, Property::BorderBottomStyle, Property::BorderBottomColor);
+        let (left, lc, ld) = side(Property::BorderLeftWidth, Property::BorderLeftStyle, Property::BorderLeftColor);
         if top + right + bottom + left == 0 {
             return;
         }
@@ -291,19 +477,213 @@ impl Builder<'_> {
         let bottom = bottom.min(h - top);
         let left = left.min(w);
         let right = right.min(w - left);
+        if let Some(outer) = round
+            && tc == rc
+            && rc == bc
+            && bc == lc
+        {
+            self.list.shapes.push(outer);
+            self.list.shapes.push(outer.inset(top, right, bottom, left));
+            if tc >> 24 != 0 {
+                let shape = self.list.shapes.len() as u32 - 2;
+                self.push(line, Item::Ring { shape, color: tc });
+            } else {
+                self.list.shapes.truncate(self.list.shapes.len() - 2);
+            }
+            return;
+        }
         let (y0, y1) = (b.y0 + top, b.y1 - bottom);
+        // Each side as a rectangle, or as dashes along it.
+        let side = |this: &mut Self, r: IRect, horizontal: bool, width: i32, color: u32, dash: Dash| match dash {
+            Dash::Solid => this.rect(line, r, color),
+            _ => this.dashes(line, r, horizontal, width, color, dash == Dash::Dotted),
+        };
+        // A dashed side runs the whole length of the box, as in Chrome, and the sides next to it overlap in the corners.
+        let across = |d: Dash, full: IRect, short: IRect| if d == Dash::Solid { short } else { full };
         if top > 0 {
-            self.rect(line, IRect { y1: b.y0 + top, ..b }, tc);
+            side(self, IRect { y1: b.y0 + top, ..b }, true, top, tc, td);
         }
         if bottom > 0 {
-            self.rect(line, IRect { y0: b.y1 - bottom, ..b }, bc);
+            side(self, IRect { y0: b.y1 - bottom, ..b }, true, bottom, bc, bd);
         }
         if left > 0 {
-            self.rect(line, IRect { x1: b.x0 + left, y0, y1, ..b }, lc);
+            side(self, across(ld, IRect { x1: b.x0 + left, ..b }, IRect { x1: b.x0 + left, y0, y1, ..b }), false, left, lc, ld);
         }
         if right > 0 {
-            self.rect(line, IRect { x0: b.x1 - right, y0, y1, ..b }, rc);
+            side(self, across(rd, IRect { x0: b.x1 - right, ..b }, IRect { x0: b.x1 - right, y0, y1, ..b }), false, right, rc, rd);
         }
+    }
+
+    /// A `dashed` or `dotted` side. The dashes are as Chrome sizes them (`StrokeData::SetupPaintDashPathEffect`): a dash is
+    /// 3 times the width for a width under 3, and 2 times above (the gap starts as 2 and 1 times), a dot is the width and
+    /// so is the gap. Then the gap grows or shrinks a little so that a whole number of dashes fills the side, from end to end.
+    fn dashes(&mut self, line: bool, r: IRect, horizontal: bool, width: i32, color: u32, dotted: bool) {
+        let len = if horizontal { r.x1 - r.x0 } else { r.y1 - r.y0 } as f32;
+        let w = width as f32;
+        let (dash, gap) = match () {
+            _ if dotted => (w, w),
+            _ if width >= 3 => (2.0 * w, w),
+            _ => (3.0 * w, 2.0 * w),
+        };
+        // The number of dashes: the one before and the one after the size that fits, the gap nearer to the first wins.
+        let low = ((len + gap) / (dash + gap)).floor().max(1.0);
+        let gap_of = |n: f32| (len - n * dash) / (n - 1.0);
+        let (n, gap) = if low < 2.0 || len <= dash {
+            (1.0, 0.0)
+        } else if gap_of(low + 1.0) <= 0.0 || (gap_of(low) - gap).abs() < (gap_of(low + 1.0) - gap).abs() {
+            (low, gap_of(low))
+        } else {
+            (low + 1.0, gap_of(low + 1.0))
+        };
+        let (dash, round) = if n == 1.0 && len <= dash { (len, false) } else { (dash, dotted && width >= 4) };
+        let (lo, hi) = if horizontal { (self.view.x0 as f32, self.view.x1 as f32) } else { (self.view.y0 as f32, self.view.y1 as f32) };
+        let start = if horizontal { r.x0 } else { r.y0 } as f32;
+        for k in 0..n as u32 {
+            let at = start + k as f32 * (dash + gap);
+            if at + dash < lo || at > hi {
+                continue;
+            }
+            let (a, z) = (snap(at), snap(at + dash).max(snap(at) + 1));
+            if round {
+                // The dot sits in the middle of the side.
+                let (cx, cy) = if horizontal { (at + dash / 2.0, (r.y0 + r.y1) as f32 / 2.0) } else { ((r.x0 + r.x1) as f32 / 2.0, at + dash / 2.0) };
+                let n = self.list.points.len() as u32;
+                self.list.points.push((cx, cy));
+                self.push(line, Item::Stroke { at: n, n: 1, width: w, color });
+            } else if horizontal {
+                self.rect(line, IRect { x0: a, x1: z, ..r }, color);
+            } else {
+                self.rect(line, IRect { y0: a, y1: z, ..r }, color);
+            }
+        }
+    }
+
+    fn fill(&mut self, line: bool, s: Shape, color: u32) {
+        if color >> 24 != 0 && !s.r.intersect(self.view).is_empty() {
+            let shape = self.list.shapes.len() as u32;
+            self.list.shapes.push(s);
+            self.push(line, Item::Fill { shape, color });
+        }
+    }
+
+    /// A round border of `width` pixels around `s`, in `color`.
+    fn ring(&mut self, s: Shape, width: i32, color: u32) {
+        let shape = self.list.shapes.len() as u32;
+        self.list.shapes.push(s);
+        self.list.shapes.push(s.inset(width, width, width, width));
+        self.list.items.push(Item::Ring { shape, color });
+    }
+
+    fn stroke(&mut self, points: &[(f32, f32)], width: f32, color: u32) {
+        let at = self.list.points.len() as u32;
+        self.list.points.extend_from_slice(points);
+        self.list.items.push(Item::Stroke { at, n: points.len() as u32, width, color });
+    }
+
+    /// The look of Chrome's own form controls, for a control whose style is the one of the UA style sheet (`is_native`).
+    fn native(&mut self, f: &Fragment, b: IRect, c: Control) {
+        let a = &self.tree.controls;
+        let checked = a.checked.is_some_and(|at| self.doc.attr(f.node, at).is_some());
+        const GRAY: u32 = 0xff76_7676;
+        const BLUE: u32 = 0xff00_75ff;
+        let (x, y) = (b.x0 as f32, b.y0 as f32);
+        match c {
+            Control::Field | Control::TextArea | Control::Select => {
+                // A 1 px border with the corner pixels left out: Chrome draws no more of the corner.
+                let (m, e) = (IRect { x0: b.x0 + 1, x1: b.x1 - 1, ..b }, IRect { y0: b.y0 + 1, y1: b.y1 - 1, ..b });
+                self.rect(false, m, 0xffff_ffff);
+                self.rect(false, e, 0xffff_ffff);
+                self.rect(false, IRect { y1: b.y0 + 1, ..m }, GRAY);
+                self.rect(false, IRect { y0: b.y1 - 1, ..m }, GRAY);
+                self.rect(false, IRect { x1: b.x0 + 1, ..e }, GRAY);
+                self.rect(false, IRect { x0: b.x1 - 1, ..e }, GRAY);
+                if c == Control::TextArea {
+                    // The grip: two short slanted lines in the corner.
+                    let (gx, gy) = (b.x1 as f32, b.y1 as f32);
+                    self.stroke(&[(gx - 3.0, gy - 1.5), (gx - 1.5, gy - 3.0)], 1.0, 0xff76_7676);
+                    self.stroke(&[(gx - 6.5, gy - 1.5), (gx - 1.5, gy - 6.5)], 1.0, 0xff76_7676);
+                }
+                if c == Control::Select {
+                    // The arrow: a "v" 8.6 px wide at the right.
+                    let (cx, cy) = (b.x1 as f32 - 7.8, (b.y0 + b.y1) as f32 / 2.0);
+                    self.stroke(&[(cx - 4.3, cy - 2.1), (cx, cy + 2.3), (cx + 4.3, cy - 2.1)], 1.8, 0xff00_0000);
+                }
+            }
+            Control::Label | Control::Button => {
+                let s = Shape::new(b, [2.9; 8]);
+                self.fill(false, s, 0xffef_efef);
+                self.ring(s, 1, GRAY);
+            }
+            Control::Check { radio: false } => {
+                let s = Shape::new(b, [2.9; 8]);
+                if checked {
+                    self.fill(false, Shape::new(b, [2.0; 8]), BLUE);
+                    self.stroke(&[(x + 3.2, y + 5.9), (x + 5.7, y + 9.0), (x + 10.3, y + 3.3)], 1.9, 0xffff_ffff);
+                } else {
+                    self.fill(false, s, 0xffff_ffff);
+                    self.ring(s, 1, GRAY);
+                }
+            }
+            Control::Check { radio: true } => {
+                let s = Shape::new(b, [(b.x1 - b.x0) as f32 / 2.0; 8]);
+                if checked {
+                    self.fill(false, s, BLUE);
+                    self.fill(false, s.inset(1, 1, 1, 1), 0xffff_ffff);
+                    self.stroke(&[((b.x0 + b.x1) as f32 / 2.0, (b.y0 + b.y1) as f32 / 2.0)], 6.0, BLUE);
+                } else {
+                    self.fill(false, s, 0xffff_ffff);
+                    self.ring(s, 1, GRAY);
+                }
+            }
+        }
+    }
+
+    /// The text of a control: the value of a field, its placeholder, the label of a button, the option of a select. It sits
+    /// in the content box, one line, centered in the height, and the box clips it.
+    fn control(&mut self, f: &Fragment, style: &ComputedStyle, c: Control) {
+        let a = self.tree.controls;
+        let get = |name: Option<_>| name.and_then(|at| self.doc.attr(f.node, at)).unwrap_or("");
+        let m = Metrics::of(style);
+        let (value, color): (String, u32) = match c {
+            Control::Field => {
+                let v = get(a.value);
+                let is_password = a.kind.and_then(|k| self.doc.attr(f.node, k)).is_some_and(|k| k.eq_ignore_ascii_case("password"));
+                if v.is_empty() {
+                    (get(a.placeholder).to_string(), 0xff75_7575)
+                } else if is_password {
+                    ("\u{2022}".repeat(v.chars().count()), argb(style.color(Property::TextColor)))
+                } else {
+                    (v.to_string(), argb(style.color(Property::TextColor)))
+                }
+            }
+            Control::Label => (controls::label(&self.tree, f.node).to_string(), argb(style.color(Property::TextColor))),
+            Control::Select => (controls::selected_text(&self.tree, f.node), argb(style.color(Property::TextColor))),
+            // The text of a textarea is its child, and layout places it. Only the placeholder is ours.
+            Control::TextArea if self.doc.children(f.node).next().is_none() => (get(a.placeholder).to_string(), 0xff75_7575),
+            _ => return,
+        };
+        if value.is_empty() || color >> 24 == 0 {
+            return;
+        }
+        let px = |p| style.px(p);
+        let (l, t) = (px(Property::BorderLeftWidth) + px(Property::PaddingLeft), px(Property::BorderTopWidth) + px(Property::PaddingTop));
+        let w = f.rect.w - l - px(Property::BorderRightWidth) - px(Property::PaddingRight);
+        let h = f.rect.h - t - px(Property::BorderBottomWidth) - px(Property::PaddingBottom);
+        let content = IRect { x0: snap(f.rect.x + l), y0: snap(f.rect.y + t), x1: snap(f.rect.x + l + w), y1: snap(f.rect.y + t + h) };
+        if content.intersect(self.view).is_empty() {
+            return;
+        }
+        // The line is as wide as the letters: the label of a button is in the middle.
+        let width = controls::text_width(&m, &value);
+        let x = f.rect.x + l + if c == Control::Label { ((w - width) / 2.0).max(0.0) } else { 0.0 };
+        let baseline = snap(f.rect.y + t + if c == Control::TextArea { m.ascent } else { controls::baseline(&self.tree, f.node, h) });
+        let at = self.list.text.len() as u32;
+        self.list.text.push_str(&value);
+        let len = value.len() as u32;
+        let bold = matches!(style.get(Property::FontWeight), Value::Number(w) if w >= 600.0);
+        self.list.items.push(Item::PushClip(content));
+        self.list.items.push(Item::Text { x, baseline, size: m.size, color, at, len, bold });
+        self.list.items.push(Item::PopClip);
     }
 
     fn rect(&mut self, line: bool, r: IRect, color: u32) {
@@ -401,4 +781,46 @@ fn padding_box(f: &Fragment, style: &ComputedStyle) -> IRect {
     let b = border_box(f);
     let w = |p| style.px(p).max(0.0).floor() as i32;
     IRect { x0: b.x0 + w(Property::BorderLeftWidth), y0: b.y0 + w(Property::BorderTopWidth), x1: b.x1 - w(Property::BorderRightWidth), y1: b.y1 - w(Property::BorderBottomWidth) }
+}
+
+/// Has the control the look of the UA style sheet (border, background), so that Chrome draws it with its own theme? A style
+/// of the page (`border`, `background`, `appearance: none`) turns the theme off, and the box is then the one of CSS.
+fn is_native(style: &ComputedStyle, c: Control) -> bool {
+    use Keyword as K;
+    if style.get(Property::Appearance) == Value::Keyword(K::None) {
+        return false;
+    }
+    let (bg, width, kind) = match c {
+        Control::Field => (0xffff_ffff, 2.0, K::Inset),
+        Control::Label | Control::Button => (0xffef_efef, 2.0, K::Outset),
+        Control::TextArea | Control::Select => (0xffff_ffff, 1.0, K::Solid),
+        Control::Check { .. } => (0, 0.0, K::None),
+    };
+    if argb(style.color(Property::BackgroundColor)) != bg {
+        return false;
+    }
+    let sides = [
+        (Property::BorderTopWidth, Property::BorderTopStyle, Property::BorderTopColor),
+        (Property::BorderRightWidth, Property::BorderRightStyle, Property::BorderRightColor),
+        (Property::BorderBottomWidth, Property::BorderBottomStyle, Property::BorderBottomColor),
+        (Property::BorderLeftWidth, Property::BorderLeftStyle, Property::BorderLeftColor),
+    ];
+    sides.iter().all(|&(w, s, col)| {
+        style.px(w) == width && (width == 0.0 || (style.get(s) == Value::Keyword(kind) && argb(style.color(col)) == 0xff76_7676))
+    })
+}
+
+/// The shape of a box with `border-radius`, or `None` if all four corners are square.
+fn radii(style: &ComputedStyle, b: IRect) -> Option<Shape> {
+    let (w, h) = ((b.x1 - b.x0) as f32, (b.y1 - b.y0) as f32);
+    let corner = |p| match style.get(p) {
+        Value::Length(Length::Px(x)) if x > 0.0 => (x, x),
+        Value::Length(Length::Percent(x)) if x > 0.0 => (x / 100.0 * w, x / 100.0 * h),
+        _ => (0.0, 0.0),
+    };
+    let c = [Property::BorderTopLeftRadius, Property::BorderTopRightRadius, Property::BorderBottomRightRadius, Property::BorderBottomLeftRadius].map(corner);
+    if c.iter().all(|&(x, y)| x == 0.0 && y == 0.0) {
+        return None;
+    }
+    Some(Shape::new(b, [c[0].0, c[0].1, c[1].0, c[1].1, c[2].0, c[2].1, c[3].0, c[3].1]))
 }
