@@ -2461,3 +2461,102 @@ Validation:
 Not tested: BigInt elements (gated), resizable buffers, a realm with a user-defined subclass, other engines, and the live staging login.
 
 V8 quirks noticed: the receiver wording (above) and `findIndexLast` in a detached message. Both are matched. Node 22.18 gives a result for `fill(v, undefined, end)` that this change does not copy. V8 converts the value before the index in `with`.
+
+## Intl.NumberFormat, Intl.Collator and Intl.PluralRules
+
+The live staging dashboard calls `Number.prototype.toLocaleString` with `en-IN` and `String.prototype.localeCompare`. bare now has `Intl.NumberFormat`, `Intl.Collator`, `Intl.PluralRules`, `Intl.getCanonicalLocales`, and both methods. `(1234567.89).toLocaleString("en-IN")` gives `12,34,567.89`.
+
+Crates and data (ICU4X 2.4, Unicode-3.0 license):
+
+- Crates: `icu_decimal` (digits, grouping), `icu_plurals`, `icu_collator`, `fixed_decimal` (exact decimals and rounding), `icu_locale_core`. All are used with `default-features = false`, so no compiled data is linked.
+- Data: `crates/js/src/icu_data` is made by `tools/js/icu_data_gen.sh` (icu4x-datagen 2.4.0, CLDR 49). It holds the 5 English locales of `intl.rs` and the root. The collator reads the root collation: English has no tailoring. The Chinese and other tailorings are dropped. The data is 676 KB of source.
+- Currency symbols and digits are not in ICU4X (its currency formatter is unstable). `tools/js/intl_num_gen.mjs` makes `intl_num_data.rs` from the ICU 77 data of Node 22.18. It has 22 symbols, 87 narrow symbols and the non-2-digit currencies.
+- Compact notation needs the unstable `CompactDecimalFormatter`. It is a gate.
+
+Data choice, measured (release, stripped `eval_check`, main a3e4c7a is the base):
+
+| Build | Size | Change |
+| --- | ---: | ---: |
+| main | 1,771,600 B | - |
+| ICU4X with its compiled data (all locales and all collations) | 3,220,928 B | +1,449,328 B (+82%) |
+| ICU4X with the baked data of 5 English locales (chosen) | 2,291,736 B | +520,136 B (+29%) |
+
+The same code in a small test program (no bare-js): 1,682,072 B with compiled data, 747,056 B with the baked data. Most of the saving is the collation tailorings (2.1 MB of source) and the locales that bare does not format. The text segment grew by 239 KB (ICU4X code and ours). The read-only data grew by 202 KB.
+
+Run time of the chosen build (`eval_check -e`, minimum of 5 runs, machine under load, so wall time is not exact; instructions are):
+
+| Run | Instructions | Peak RSS |
+| --- | ---: | ---: |
+| `1` on main | 2,146,256 | 11.9 MiB |
+| `1` | 2,105,580 | 12.0 MiB |
+| first `toLocaleString("en-IN")` | 2,128,212 (+22.6 k over `1`) | 11.9 MiB |
+| first `localeCompare` | 2,116,850 (+11.3 k) | 11.9 MiB |
+| first `Intl.NumberFormat` made and used | 2,283,698 (+178 k, of which 150 k make `Intl`) | 12.0 MiB |
+| 100,000 `toLocaleString("en-IN")` | 1,610 M, 355 ms | 13.0 MiB |
+| 100,000 `localeCompare` | 908 M, 107 ms | 11.9 MiB |
+| the same loop with string concatenation | 1,058 M, 269 ms | 12.2 MiB |
+
+The first call costs 11 k to 23 k instructions. ICU4X data is read in place, so no data is parsed or copied. The RSS did not change by more than the noise of the run.
+
+Design:
+
+- `Intl` is made on its first read. The realm gets a `Intl` accessor and the methods `toLocaleString` and `localeCompare`. Before this change, the realm made all of `Intl` at set-up (84 k instructions, 4% of an empty run). Now an empty run is 1.9% cheaper than on main. Known deviation: `Object.getOwnPropertyDescriptor(globalThis, "Intl")` shows an accessor until the first read.
+- Option reads follow ECMA-402 order and the messages of V8, as for `Intl.DateTimeFormat`. The digit options follow SetNumberFormatDigitOptions, including `roundingPriority`, `roundingMode` and `trailingZeroDisplay`.
+- A Number is read as its shortest digits (so `1.005` rounds to `1.01`, as in V8). A string argument keeps its exact digits.
+- `toLocaleString` and `localeCompare` make no tracked object. A call with options builds a small struct from the options and uses the shared ICU4X formatter. The formatters and collators are made once and shared.
+- Number formatters, collators and plural rules count against `max_formatters` with the date formatters, and `collect` drops the dead ones. The object is not made past the cap.
+- `format` and `compare` are getters that return one bound function per object, as in V8.
+- A tag such as `en-US-US` is now a malformed tag ("Incorrect locale information provided"), as in V8. Before, it gave "Invalid language tag". This also fixes `Intl.DateTimeFormat`.
+
+Gates (Unsupported, never a silent wrong result):
+
+- `style: "unit"`, `notation` other than `standard`, `currencyDisplay: "name"`, `numberingSystem` other than `latn`, `roundingIncrement` other than 1.
+- `formatRange` and `formatRangeToParts`.
+- Collator `usage: "search"` and any `collation`.
+- A locale with an extension (`-u-`, `-t-`, `-x-`).
+- Locales other than the 5 English ones fall back to `en-US`, as for `Intl.DateTimeFormat`.
+
+Known deviations: `Intl.supportedValuesOf` and the other constructors (`RelativeTimeFormat`, `ListFormat`, `Locale`, `DisplayNames`, `Segmenter`) do not exist. A wrong receiver that is an object shows as `#<Object>` or `#<NumberFormat>` in the new code only. The old `DateTimeFormat` code shows `object`.
+
+`Intl.DateTimeFormat` stays hand-written. ICU4X date formatting was not measured here. Its time zone and calendar data would come on top of the 520 KB. Our patterns are 12.6 KB and a formatter costs 105 B. Hypothesis: ICU4X is not smaller. Replace it only if a page needs a locale or a calendar that the tables do not have.
+
+Load test (`tools/js/intl_load.sh`, release, one process per row, 100x = 1M calls, machine under load):
+
+| row | work | run | peak RSS |
+| --- | --- | ---: | ---: |
+| `nf_format` | 1M `format` calls on one en-IN formatter | 1,344 ms | 101.9 MiB |
+| `nf_locale` | 1M `toLocaleString("en-IN")` calls | 1,637 ms | 101.9 MiB |
+| `nf_locale_opts` | 1M `toLocaleString("en-US", { style: "currency", currency: "USD" })` calls | 1,941 ms | 4.5 MiB |
+| `cmp` | 1M `localeCompare` calls with accents | 786 ms | 4.4 MiB |
+| `cmp_opts` | 1M `localeCompare` calls with `{ numeric, sensitivity }` | 1,348 ms | 4.4 MiB |
+| `plain` | 1M string concatenations (baseline) | 1,116 ms | 4.2 MiB |
+
+The 102 MiB of `nf_format` and `nf_locale` is the result strings (66 bytes each): the evaluator does not collect during a run. Hypothesis: a string over 7 characters is a heap object, and `nf_locale_opts` makes strings of 7 characters or less. The `locale` row of `Intl.DateTimeFormat` behaves the same way.
+
+A profile of `toLocaleString` is flat: the evaluator (`Heap::intern`, `Heap::lookup`, `link_inner`) is above the ICU4X code. ICU4X (`Cache::format`, the grouper) is about 4%. No fast path was added.
+
+Results against main a3e4c7a, 10 runs per row, minimum cycles and instructions (user), same machine and load (`perf stat`):
+
+- `eval_load` (8 rows, scales 1 and 10): instructions are within -1.45% and +0.24%. The 1x rows are lower, because the realm set-up is cheaper (`concat` -1.44%, `webpack` -0.66%, `fib` -0.18%). `throws` is +0.24% at 10x. Hypothesis: code layout.
+- `numeric_load` (16 rows, 1,000 and 10,000): instructions are within -0.75% and +0.15%. Cycles are noise: the load of the machine changed between runs.
+- `intl_load` rows that existed before: `format` +0.12% to +0.32%, `parts` +0.11% to +0.96%, `make` +1.79% to +2.88%, `locale` +1.37%. This is a regression over 1% on `make` and `locale`, which build a `DateTimeFormat` with options. The option names grew from 20 to 46, and every option read finds its name in a `match` on the text. A first version that scanned the array cost +9.9%. The `match` brought it to +1.4%. One more small cost is the larger `Intl` made on first use (+25 objects). It is not removed.
+- Cycles of all rows vary by more than 5% between runs, because other jobs ran on the machine (load 8 to 12). They are not used for any claim.
+
+Validation:
+
+- 74 Node cases (`tools/fixtures/js/intl-num-cases.txt`, `tools/js/intl_num_check.sh`) match Node 22.18. They cover:
+  - grouping and decimals for en-US, en, en-GB, en-CA and en-IN;
+  - negatives, NaN, Infinity, -0, 1e21 and 5e-324;
+  - rounding (half expand on shortest digits, all 9 modes, significant digits, `roundingPriority`, `trailingZeroDisplay`);
+  - percent, currency (INR, USD, JPY, CHF, 12 narrow symbols, accounting, 5 sign displays) and string arguments;
+  - `formatToParts` and `resolvedOptions` for each locale;
+  - option errors, option read order, receiver errors and the shape of the builtins;
+  - collation order with accents, case, numeric, sensitivity, `ignorePunctuation`, `caseFirst`;
+  - cardinal and ordinal plural rules;
+  - `getCanonicalLocales` and `localeCompare` errors.
+- The currency tables are made from Node itself. Any difference in ICU versions shows in the check.
+- 90 `Intl.DateTimeFormat` cases still match Node (`tools/js/intl_check.sh`). The Node oracle has a 2 s timeout. Under load it stops a matrix case with `limit`. I ran the oracle once with a 60 s timeout to confirm.
+- Rust tests: ICU4X wrappers (grouping, rounding, currency, parts, collation, plural), lazy `Intl`, GC of the new objects, the shared cap, the gates, `new` for `PluralRules`, and the option-name index.
+- `cargo test --workspace --release` passes. The checks `eval`, `number`, `builtins`, `date`, `math`, `class`, `intl_num`, `arrobj`, `reflect`, `sc`, `weak`, `tagged`, `generator`, `async`, `promise` and `stringify` match Node. `parse_check.sh` fails with `ERR_MODULE_NOT_FOUND` in Node before it runs our code. It was not run on main.
+
+Limits: one machine, under load. The live staging page was not run on this build. Locales other than the 5 English ones were not tested.

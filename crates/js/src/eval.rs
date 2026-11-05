@@ -1712,7 +1712,7 @@ impl<'p> Interp<'p> {
             Some(Callee::Class) => D::C,
             Some(&Callee::Host { id, ctor: true, nt }) => D::H(id, nt),
             Some(&Callee::Script { script, fid, env, self_binding }) if self.func_of(script, fid).is_plain_ctor() => D::S(script, fid, env, self_binding),
-            Some(&Callee::Native(n)) if matches!(n, Nat::ObjectCtor | Nat::FnCtor | Nat::ArrayCtor | Nat::ErrorCtor(_) | Nat::Ext(Bi::RegExpCtor) | Nat::Sc(ScFn::IterCtor)) || matches!(n, Nat::Bin(b) if b.ctor_name().is_some() || b == BinFn::TaCtor) || matches!(n, Nat::Sc(f) if f.is_ctor()) || n == Nat::Date(DateFn::Ctor) || n == Nat::Intl(IntlFn::DtfCtor) => D::N(n),
+            Some(&Callee::Native(n)) if matches!(n, Nat::ObjectCtor | Nat::FnCtor | Nat::ArrayCtor | Nat::ErrorCtor(_) | Nat::Ext(Bi::RegExpCtor) | Nat::Sc(ScFn::IterCtor)) || matches!(n, Nat::Bin(b) if b.ctor_name().is_some() || b == BinFn::TaCtor) || matches!(n, Nat::Sc(f) if f.is_ctor()) || n == Nat::Date(DateFn::Ctor) || matches!(n, Nat::Intl(f) if f.is_ctor()) => D::N(n),
             Some(&Callee::Native(Nat::StringFn | Nat::NumberFn | Nat::BooleanFn)) => return Err(unsupported("wrapper object (new String/Number/Boolean)", Span::default())),
             Some(Callee::Bound { target, args, .. }) => D::B(*target, args.clone()),
             Some(&Callee::Promise(pf @ (PFn::Ctor | PFn::AggErrCtor))) => D::P(pf),
@@ -3097,6 +3097,10 @@ mod tagged_tests;
 #[cfg(test)]
 #[path = "eval_intl_tests.rs"]
 mod intl_tests;
+
+#[cfg(test)]
+#[path = "eval_intl_num_tests.rs"]
+mod intl_num_tests;
 
 #[cfg(test)]
 #[path = "eval_number_tests.rs"]

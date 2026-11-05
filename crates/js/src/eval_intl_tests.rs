@@ -6,7 +6,7 @@ use super::*;
 use crate::heap::Heap;
 use crate::parse::{parse_script, Limits};
 
-fn big<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {
+pub(super) fn big<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {
     std::thread::Builder::new().stack_size(64 << 20).spawn(f).unwrap().join().unwrap()
 }
 
@@ -30,13 +30,13 @@ fn show(it: &mut Interp, r: Result<Value, Error>) -> String {
     }
 }
 
-fn realm() -> Interp<'static> {
+pub(super) fn realm() -> Interp<'static> {
     let mut it = Interp::realm(Heap::default(), EvalLimits::default()).expect("realm");
     it.set_default_time_zone("UTC").unwrap();
     it
 }
 
-fn out(it: &mut Interp, src: &str) -> String {
+pub(super) fn out(it: &mut Interp, src: &str) -> String {
     let r = it.run_script(src);
     show(it, r)
 }

@@ -3,7 +3,19 @@
 name = "bare-js"
 version.workspace = true
 edition.workspace = true
-license = "(MIT OR Apache-2.0) AND BSD-3-Clause"
+license = "(MIT OR Apache-2.0) AND BSD-3-Clause AND Unicode-3.0"
 
 [dependencies]
 bare-unicode = { path = "../unicode" }
+fixed_decimal = "0.7.3"
+# ICU4X without its compiled data: the data of 5 English locales is in `src/icu_data` (see `tools/js/icu_data_gen.sh`)
+icu_collator = { version = "2.4.0", default-features = false }
+icu_collections = "2.4.0"
+icu_decimal = { version = "2.4.0", default-features = false, features = ["alloc"] }
+icu_locale_core = "2.4.0"
+icu_locale_fallback = { version = "2.4.0", features = ["compiled_data"] }
+icu_normalizer = { version = "2.4.0", default-features = false }
+icu_plurals = { version = "2.4.0", default-features = false }
+icu_provider = { version = "2.4.0", features = ["baked"] }
+writeable = "0.6.4"
+zerovec = "0.11"
