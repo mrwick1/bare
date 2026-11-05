@@ -420,6 +420,29 @@ fn a_switch_holds_its_discriminant_in_a_slot_only_while_a_case_test_awaits() {
 }
 
 #[test]
+fn await_of_a_primitive_makes_no_hidden_promise_and_keeps_the_order() {
+    big(|| {
+        let mut it = realm(lim());
+        out(&mut it, "var out = []; async function f(k) { await k; out.push('f' + k); await 'x'; out.push('g' + k); } f(1); f(2); Promise.resolve().then(function () { out.push('t'); }); 0");
+        // the two result promises and the one from Promise.resolve and then: four, and no promise per await
+        assert_eq!(it.promise.map.len(), 4);
+        it.drain_microtasks().unwrap();
+        assert_eq!(out(&mut it, "out.join('|')"), "f1|f2|t|g1|g2");
+        assert_eq!(it.promise.map.len(), 4);
+    });
+}
+
+#[test]
+fn a_pending_promise_keeps_room_for_one_reaction_only() {
+    big(|| {
+        let mut it = realm(lim());
+        out(&mut it, "var res; var p = new Promise(function (r) { res = r; }); p.then(function () {}); async function f() { await q; } var q = new Promise(function () {}); f(); 0");
+        let caps: Vec<usize> = it.promise.map.values().filter(|d| !d.reactions.is_empty()).map(|d| d.reactions.capacity()).collect();
+        assert_eq!(caps, vec![1, 1]);
+    });
+}
+
+#[test]
 fn unreachable_activation_cycles_are_dropped_and_reachable_ones_stay() {
     big(|| {
         let mut it = realm(lim());

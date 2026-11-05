@@ -9,7 +9,9 @@
 //   frames. Every await-free subtree runs on the ordinary evaluator, so its semantics are the existing ones.
 // - The first run is synchronous up to the first await (a real Promise is returned). `await v` does
 //   `PromiseResolve(%Promise%, v)` and stores the activation on that promise as a reaction. The reaction becomes a
-//   `Job::Resume` in the same FIFO microtask queue as `then` jobs, even for a fulfilled or non-promise `v`.
+//   `Job::Resume` in the same FIFO microtask queue as `then` jobs, even for a fulfilled or non-promise `v`. For a
+//   `v` that is not an object, the promise of `PromiseResolve` is never visible and already fulfilled, so no
+//   promise is made: the resume job is queued at once, at the same point in the queue.
 //   A resume restores the script, the environment and the strict flag of the activation, and gives back the
 //   caller's on every exit (success, throw and limit). Nothing here owns an OS thread, a timer or a busy loop.
 // - Normal completion resolves the result promise. A JavaScript throw rejects it. A limit, `Unsupported` or heap
@@ -113,7 +115,10 @@ enum Next {
 enum Out {
     Done(Value),
     Threw(Value),
+    /// Wait for a promise.
     Wait(ObjId),
+    /// `await` of a value that is not an object: resume with it in a job, as from a fulfilled promise.
+    Ready(Value),
 }
 
 enum Step {
@@ -716,9 +721,10 @@ impl<'p> Interp<'p> {
         Some(run)
     }
 
-    /// Store `run` as an activation that waits for the promise `p`, or fail before anything changes.
-    fn suspend(&mut self, mut run: Run, p: ObjId) -> Res<()> {
-        let pending = matches!(self.promise.map.get(&p).map(|d| &d.state), Some(PState::Pending));
+    /// Store `run` as an activation that waits for the promise `Ok(p)`, or that resumes with the value `Err(v)`,
+    /// or fail before anything changes.
+    fn suspend(&mut self, mut run: Run, w: Result<ObjId, Value>) -> Res<()> {
+        let pending = w.is_ok_and(|p| matches!(self.promise.map.get(&p).map(|d| &d.state), Some(PState::Pending)));
         let precheck = (|| {
             if self.aw.live >= self.aw.limits.max_activations {
                 return Err(Error::Limit(LimitKind::AsyncActivations));
@@ -740,7 +746,7 @@ impl<'p> Interp<'p> {
         };
         self.aw.next_era = era;
         run.cur_env = self.env;
-        run.awaiting = Some(p);
+        run.awaiting = w.ok();
         let idx = match self.aw.free.pop() {
             Some(i) => {
                 self.aw.acts[i as usize] = ActSlot { era, run: Some(run) };
@@ -753,10 +759,20 @@ impl<'p> Interp<'p> {
         };
         self.aw.live += 1;
         let act = ActRef { idx, era };
+        let p = match w {
+            Ok(p) => p,
+            Err(v) => {
+                self.promise.queue.push_back(Job::Resume { act, arg: v, rejected: false });
+                return Ok(());
+            }
+        };
         let d = self.promise.map.get_mut(&p).expect("tracked promise");
         d.handled = true;
         match d.state {
             PState::Pending => {
+                if d.reactions.capacity() == 0 {
+                    d.reactions.reserve_exact(1);
+                }
                 d.reactions.push(Reaction { on_ok: Value::Undefined, on_err: Value::Undefined, derived: p, act: Some(act) });
                 self.promise.reactions += 1;
             }
@@ -921,7 +937,8 @@ impl<'p> Interp<'p> {
                 self.run_discard(run);
                 self.reject_promise(result, v)
             }
-            Ok(Out::Wait(p)) => self.suspend(run, p),
+            Ok(Out::Wait(p)) => self.suspend(run, Ok(p)),
+            Ok(Out::Ready(v)) => self.suspend(run, Err(v)),
             Err(e) => {
                 self.run_discard(run);
                 Err(e)
@@ -1062,7 +1079,12 @@ impl<'p> Interp<'p> {
         }
     }
 
+    /// `Await(v)`. For a value that is not an object, `PromiseResolve` makes a promise that no script can see and
+    /// that is already fulfilled, so the machine skips it and queues the resume job at once, in the same order.
     fn await_value(&mut self, v: Value) -> Res<Step> {
+        if !matches!(v, Value::Object(_)) {
+            return Ok(Step::Out(Out::Ready(v)));
+        }
         match self.promise_resolve(v)? {
             Value::Object(p) => Ok(Step::Out(Out::Wait(p))),
             _ => Err(unsupported("await", Span::default())),
