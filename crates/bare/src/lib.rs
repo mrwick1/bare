@@ -6,6 +6,9 @@
 pub mod browser;
 mod browser_dom;
 mod browser_events;
+mod browser_focus;
+#[cfg(test)]
+mod browser_focus_tests;
 pub mod browser_fetch;
 pub mod browser_console;
 #[cfg(test)]

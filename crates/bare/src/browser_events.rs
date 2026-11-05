@@ -42,7 +42,7 @@ impl Dom {
         }
     }
 
-    fn event_of(&self, it: &mut Interp<'_>, v: Value) -> R<ObjId> {
+    pub(crate) fn event_of(&self, it: &mut Interp<'_>, v: Value) -> R<ObjId> {
         match v {
             Value::Object(o) if self.st.borrow().events.contains_key(&o) => Ok(o),
             _ => Err(it.type_error("Illegal invocation")),
@@ -85,6 +85,8 @@ impl Dom {
             detail: Value::Null,
             path: Vec::new(),
             time: self.now_ms(),
+            related: Value::Null,
+            is_focus: false,
         };
         self.st.borrow_mut().events.insert(o, e);
         Ok(o)
@@ -280,7 +282,7 @@ impl Dom {
 
 // ------------------------------------------------------------------------------------------ constructors
 
-fn init_flag(d: &Dom, it: &mut Interp<'_>, init: Value, name: &str) -> R<bool> {
+pub(crate) fn init_flag(d: &Dom, it: &mut Interp<'_>, init: Value, name: &str) -> R<bool> {
     let k = d.key(it, name)?;
     let v = it.get_value(init, k)?;
     it.to_js_bool(v)

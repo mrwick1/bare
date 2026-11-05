@@ -46,8 +46,9 @@
 //!   network are absent. Timers, `queueMicrotask`, `performance.now` and `MessageChannel` are in `browser_scheduler.rs`.
 //! - `addEventListener` option `signal` is `Unsupported`. `isTrusted` is always false. Events made by the test driver
 //!   are plain `Event`s (no `MouseEvent`/`InputEvent` fields).
+//! - Focus (`browser_focus.rs`): `focus()`, `blur()`, `document.activeElement`, `FocusEvent`. Read its header.
 //! - Default actions are NOT implemented: no link navigation, no form submission or validation, no checkbox toggle or
-//!   radio-group exclusion on click, no focus. The test driver sets native input state itself, then dispatches events.
+//!   radio-group exclusion on click. Focus does not follow a click. The test driver sets native input state itself, then dispatches events.
 //! - `<input>` has no value sanitization (newline stripping, number/date parsing). `select` and `textarea` have no
 //!   `value` state.
 //! - Microtasks: the test driver runs a checkpoint after each listener it started from the host. Dispatch from JS does not.
@@ -158,6 +159,9 @@ pub(crate) struct EventState {
     pub detail: Value,
     pub path: Vec<Target>,
     pub time: f64,
+    /// `FocusEvent.relatedTarget` (null for other events). Traced, so a saved event keeps the node.
+    pub related: Value,
+    pub is_focus: bool,
 }
 
 /// A listener exception that did not stop dispatch.
@@ -194,6 +198,8 @@ pub(crate) struct State {
     pub sel_cache: HashMap<String, Rc<Vec<Selector>>>,
     /// True while the test driver runs a dispatch from the host (a microtask checkpoint follows each listener).
     pub driver: bool,
+    /// The focused element and the transition guards (`browser_focus.rs`).
+    pub focus: crate::browser_focus::FocusState,
 }
 
 #[derive(Clone, Copy)]
@@ -209,6 +215,7 @@ pub(crate) struct Protos {
     pub document: ObjId,
     pub event: ObjId,
     pub custom: ObjId,
+    pub focus: ObjId,
     pub domexc: ObjId,
 }
 
@@ -217,11 +224,13 @@ pub(crate) enum P {
     Et,
     Node,
     Element,
+    Html,
     Input,
     CharData,
     Document,
     Event,
     Custom,
+    Focus,
 }
 
 pub(crate) enum Kind {
@@ -304,7 +313,7 @@ impl Host for Dom {
                 out.extend(doc.children(n).filter_map(|c| st.by_node.get(&c)).map(|&o| Value::Object(o)));
             }
         } else if let Some(e) = st.events.get(&owner) {
-            out.extend([e.target, e.current, e.detail]);
+            out.extend([e.target, e.current, e.detail, e.related]);
             for &t in &e.path {
                 match t {
                     Target::Node(n) => out.extend(st.by_node.get(&n).map(|&o| Value::Object(o))),
@@ -555,11 +564,13 @@ impl Dom {
             P::Et => ps.et,
             P::Node => ps.node,
             P::Element => ps.element,
+            P::Html => ps.html,
             P::Input => ps.input,
             P::CharData => ps.chardata,
             P::Document => ps.document,
             P::Event => ps.event,
             P::Custom => ps.custom,
+            P::Focus => ps.focus,
         }
     }
 
@@ -586,14 +597,15 @@ impl Dom {
         let document = mk(it, node)?;
         let event = mk(it, op)?;
         let custom = mk(it, event)?;
+        let focus = mk(it, event)?;
         let domexc = mk(it, ep)?;
-        let _ = self.p.set(Protos { et, node, element, html, input, chardata, text, comment, document, event, custom, domexc });
+        let _ = self.p.set(Protos { et, node, element, html, input, chardata, text, comment, document, event, custom, focus, domexc });
         // The global object is `window`: it is an EventTarget.
         if let Err(e) = it.heap.set_prototype_of(g, Some(et)) {
             return Err(it.heap_error(e));
         }
         self.st.borrow_mut().by_obj.insert(g, Target::Window);
-        let mut fixed = vec![et, node, element, html, input, chardata, text, comment, document, event, custom, domexc];
+        let mut fixed = vec![et, node, element, html, input, chardata, text, comment, document, event, custom, focus, domexc];
 
         // methods and accessors
         for d in DEFS {
@@ -619,7 +631,7 @@ impl Dom {
         }
 
         // interface objects
-        let ifaces: [(&str, ObjId, Option<H>); 12] = [
+        let ifaces: [(&str, ObjId, Option<H>); 13] = [
             ("EventTarget", et, Some(ev::event_target_ctor as H)),
             ("Node", node, None),
             ("Element", element, None),
@@ -631,6 +643,7 @@ impl Dom {
             ("Document", document, None),
             ("Event", event, Some(ev::event_ctor as H)),
             ("CustomEvent", custom, Some(ev::custom_event_ctor as H)),
+            ("FocusEvent", focus, Some(crate::browser_focus::focus_event_ctor as H)),
             ("DOMException", domexc, None),
         ];
         let (kp, kc) = (self.key(it, "prototype")?, self.key(it, "constructor")?);
@@ -777,6 +790,10 @@ pub(crate) static DEFS: &[Def] = &[
     Def { on: &[Event], name: "stopImmediatePropagation", len: 0, kind: M(ev::stop_immediate_propagation) },
     Def { on: &[Event], name: "composedPath", len: 0, kind: M(ev::composed_path) },
     Def { on: &[Custom], name: "detail", len: 0, kind: G(ev::custom_detail) },
+    Def { on: &[Html], name: "focus", len: 0, kind: M(crate::browser_focus::focus) },
+    Def { on: &[Html], name: "blur", len: 0, kind: M(crate::browser_focus::blur) },
+    Def { on: &[Document], name: "activeElement", len: 0, kind: G(crate::browser_focus::active_element) },
+    Def { on: &[Focus], name: "relatedTarget", len: 0, kind: G(crate::browser_focus::related_target) },
 ];
 
 // ---------------------------------------------------------------------------------------------- Browser
