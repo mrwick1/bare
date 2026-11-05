@@ -241,6 +241,14 @@ impl Page {
         Some(offset_at(&f.text, x as f32 - f.x + f.scroll, &f.m))
     }
 
+    /// Which document is the page now? A node of an old one means nothing after a navigation.
+    fn doc_id(&mut self) -> usize {
+        match &self.source {
+            Source::Session(s) => s.documents(),
+            Source::Browser(_) => 0,
+        }
+    }
+
     fn cursor_over(&mut self, n: Option<NodeId>) -> Cursor {
         let Some(n) = n else { return Cursor::Default };
         let Some(b) = self.browser() else { return Cursor::Default };
@@ -270,7 +278,7 @@ impl Page {
                 SessionStop::LoadFailed(why) => Some(why),
                 _ => None,
             },
-            Source::Browser(b) => b.drain().and_then(|_| b.run_scheduled_tasks(1000)).err().map(|e| format!("{e:?}")),
+            Source::Browser(b) => b.drain().and_then(|_| b.run_navigation_tasks()).and_then(|_| b.run_scheduled_tasks(1000)).err().map(|e| format!("{e:?}")),
         };
         if let Some(f) = fatal {
             self.note(format!("page: {f}"));
@@ -303,12 +311,12 @@ impl Page {
             Event::PointerMove { x, y, buttons, mods: m } => {
                 self.pointer = Pointer { x, y, buttons, mods: mods(m) };
                 let target = self.hit(x, y);
-                let p = self.pointer;
+                let (p, doc) = (self.pointer, self.doc_id());
                 let r = self.browser().map(|b| b.ui_pointer_move(target, p));
                 if let Some(r) = r {
                     h.redraw = self.after(r);
                 }
-                h.cursor = Some(self.cursor_over(target));
+                h.cursor = Some(if self.doc_id() == doc { self.cursor_over(target) } else { Cursor::Default });
             }
             Event::PointerButton { x, y, button, buttons, pressed, mods: m } => {
                 self.pointer = Pointer { x, y, buttons, mods: mods(m) };
@@ -317,13 +325,17 @@ impl Page {
                     Some(n) if pressed && button == 0 && self.browser().is_some_and(|b| b.is_text_input(n)) => self.caret_at(n, x),
                     _ => None,
                 };
-                let p = self.pointer;
+                let (p, doc) = (self.pointer, self.doc_id());
                 let r = self.browser().map(|b| b.ui_pointer_button(target, p, button, pressed, caret));
                 if let Some(r) = r {
                     h.redraw = self.after(r);
                 }
-                // The page under the pointer may have changed.
-                h.cursor = Some(self.cursor_over(target));
+                // The back and forward buttons of a mouse.
+                if !pressed && (button == 3 || button == 4) {
+                    h.redraw |= self.history_go(if button == 3 { -1 } else { 1 });
+                }
+                // The page under the pointer may have changed, or be another document.
+                h.cursor = Some(if self.doc_id() == doc { self.cursor_over(target) } else { Cursor::Default });
             }
             Event::PointerLeave => {
                 let p = self.pointer;
@@ -341,11 +353,15 @@ impl Page {
             }
             Event::Key { key, code, pressed, repeat, text, mods: m } => {
                 let tab = pressed && key == "Tab";
+                let key_name = key.clone();
                 let before = if tab { self.browser().and_then(|b| b.active_element().ok().flatten()) } else { None };
                 let k = KeyInput { key, code: code.to_string(), text, repeat, mods: mods(m) };
                 let r = self.browser().map(|b| b.ui_key(k, pressed));
                 if let Some(r) = r {
                     h.redraw = self.after(r);
+                }
+                if pressed && m.alt && (key_name == "ArrowLeft" || key_name == "ArrowRight") {
+                    h.redraw |= self.history_go(if key_name == "ArrowLeft" { -1 } else { 1 });
                 }
                 if pressed {
                     if let Some(k) = self.browser().and_then(|b| b.take_scroll_key()) {
@@ -413,6 +429,17 @@ impl Page {
             b.set_scroll(s);
         }
         moved
+    }
+
+    /// Go back (`-1`) or forward (`1`) in the history: inside the document, or to the neighbor document of the session.
+    fn history_go(&mut self, delta: i32) -> bool {
+        let r = self.browser().map(|b| b.history_go(delta));
+        if let Some(Err(e)) = r {
+            self.note(format!("history: {e:?}"));
+            return false;
+        }
+        self.settle();
+        true
     }
 
     /// Send the `scroll` events that a scroll queued, now (one for each target), instead of at the next task.

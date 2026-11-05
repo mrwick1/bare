@@ -252,35 +252,9 @@ impl Dom {
         }
     }
 
-    /// HTML "submit" a form from a submit button, up to the gates (see the header).
+    /// HTML "submit" a form from a submit button or from Enter in a field: validation, the `submit` event, the navigation.
     pub(crate) fn submit_form(&self, it: &mut Interp<'_>, form: NodeId, submitter: Option<NodeId>) -> R<()> {
-        if !self.is_connected_node(it, form)? {
-            return Ok(()); // cannot navigate
-        }
-        let no_validate = {
-            let doc = self.doc.borrow();
-            submitter.is_some_and(|s| attr(&doc, s, "formnovalidate").is_some()) || attr(&doc, form, "novalidate").is_some()
-        };
-        if !no_validate {
-            return Err(Error::Unsupported(unsupported("form constraint validation (set noValidate or formNoValidate)")));
-        }
-        let who = match submitter {
-            Some(s) => self.wrap(it, s)?,
-            None => Value::Null,
-        };
-        let e = self.new_event_proto(it, "submit", true, true, false, self.p().submit)?;
-        {
-            let mut st = self.st.borrow_mut();
-            let trusted = st.ui.active;
-            let ev = st.events.get_mut(&e).expect("just made");
-            ev.related = who;
-            ev.is_submit = true;
-            ev.trusted = trusted;
-        }
-        if !self.dispatch(it, Target::Node(form), e)? || !self.is_connected_node(it, form)? {
-            return Ok(());
-        }
-        Err(Error::Unsupported(unsupported("native form submission navigation (cancel the submit event)")))
+        self.submit_with(it, form, submitter, true, true)
     }
 }
 

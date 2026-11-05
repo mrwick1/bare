@@ -211,6 +211,8 @@ pub(crate) struct Input {
     pub sc_pending: bool,
     /// The value before the first edit that no `change` event has reported yet (`browser_ui.rs`).
     pub edited: Option<String>,
+    /// A user typed in it (the dirty value flag of the standard, for `minlength`).
+    pub typed: bool,
 }
 
 #[derive(Default)]
@@ -979,6 +981,12 @@ pub(crate) static DEFS: &[Def] = &[
     Def { on: &[Button], name: "form", len: 0, kind: G(fm::button_form) },
     Def { on: &[Button], name: "formNoValidate", len: 0, kind: A(fm::button_form_no_validate, fm::set_button_form_no_validate) },
     Def { on: &[Form], name: "noValidate", len: 0, kind: A(fm::form_no_validate, fm::set_form_no_validate) },
+    Def { on: &[Form], name: "requestSubmit", len: 0, kind: M(crate::browser_submit::request_submit) },
+    Def { on: &[Form], name: "submit", len: 0, kind: M(crate::browser_submit::submit_method) },
+    Def { on: &[Form], name: "checkValidity", len: 0, kind: M(crate::browser_submit::form_check_validity) },
+    Def { on: &[Form], name: "reportValidity", len: 0, kind: M(crate::browser_submit::form_report_validity) },
+    Def { on: &[Input, Button], name: "checkValidity", len: 0, kind: M(crate::browser_submit::control_check_validity) },
+    Def { on: &[Input, Button], name: "reportValidity", len: 0, kind: M(crate::browser_submit::control_report_validity) },
     Def { on: &[Submit], name: "submitter", len: 0, kind: G(fm::submit_event_submitter) },
     Def { on: &[Event], name: "type", len: 0, kind: G(ev::event_type) },
     Def { on: &[Event], name: "target", len: 0, kind: G(ev::event_target) },

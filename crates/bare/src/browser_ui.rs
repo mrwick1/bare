@@ -477,7 +477,7 @@ impl Dom {
     }
 
     /// The other radios of the group of `t`: same `name`, same form owner, same tree.
-    fn radio_group(&self, it: &mut Interp<'_>, t: NodeId) -> R<Vec<NodeId>> {
+    pub(crate) fn radio_group(&self, it: &mut Interp<'_>, t: NodeId) -> R<Vec<NodeId>> {
         let (name, root) = {
             let doc = self.doc.borrow();
             let Some(name) = attr(&doc, t, "name").filter(|s| !s.is_empty()).map(str::to_string) else { return Ok(Vec::new()) };
@@ -535,7 +535,7 @@ impl Dom {
         self.activate(it, t)
     }
 
-    fn input_checked(&self, n: NodeId) -> bool {
+    pub(crate) fn input_checked(&self, n: NodeId) -> bool {
         self.st.borrow().inputs.get(&n).and_then(|i| i.checked).unwrap_or_else(|| attr(&self.doc.borrow(), n, "checked").is_some())
     }
 
@@ -701,6 +701,18 @@ impl Dom {
         if kind != "insertText" && from == to {
             return Ok(());
         }
+        // `maxlength`: the typed text is cut to fit, and nothing happens when none of it fits.
+        let fitted;
+        let text = match (kind, text, self.max_length(n)) {
+            ("insertText", Some(t), Some(max)) => {
+                fitted = crate::browser_submit::fit_units(t, max.saturating_sub(u16_len(&value) - (to - from)));
+                if fitted.is_empty() {
+                    return Ok(());
+                }
+                Some(fitted.as_str())
+            }
+            _ => text,
+        };
         if !self.input_ev(it, n, "beforeinput", kind, text)? {
             return Ok(());
         }
@@ -714,7 +726,12 @@ impl Dom {
         new.push_str(&value[b..]);
         let caret = from + u16_len(text);
         self.put_input_value(None, n, new)?;
-        self.st.borrow_mut().inputs.entry(n).or_default().edited.get_or_insert(value);
+        {
+            let mut st = self.st.borrow_mut();
+            let i = st.inputs.entry(n).or_default();
+            i.edited.get_or_insert(value);
+            i.typed = true;
+        }
         self.set_selection_range(it, n, Some(caret), Some(caret), Dir::None)?;
         self.input_ev(it, n, "input", kind, if text.is_empty() { None } else { Some(text) })?;
         Ok(())

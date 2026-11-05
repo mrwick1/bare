@@ -56,7 +56,7 @@ fn drain_requests(b: &mut Browser) -> Vec<NavigationRequest> {
 }
 
 fn req(kind: NavigationKind, url: &str, from: &str) -> NavigationRequest {
-    NavigationRequest { kind, url: url.into(), from: from.into() }
+    NavigationRequest { kind, url: url.into(), from: from.into(), body: None }
 }
 
 // ------------------------------------------------------------------------------------------ configuration
