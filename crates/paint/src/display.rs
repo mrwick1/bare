@@ -26,7 +26,7 @@
 //! mixes the result with the kept pixels. Over an opaque backdrop that is the same as drawing the box in a layer of its own and
 //! mixing the layer in, and it needs no second canvas. The layer covers the border boxes and the text of the whole box.
 //!
-//! Gaps, on purpose: no scrollbars. `double`, `groove`, `ridge`, `inset` and `outset` borders draw as `solid`. A rounded
+//! Gaps, on purpose: `double`, `groove`, `ridge`, `inset` and `outset` borders draw as `solid`. A rounded
 //! box draws its border in one color (with four colors the sides are square), `dashed` and `dotted` borders that are
 //! rounded draw as `solid`, and `overflow` clips to the square padding box, also when the box is rounded. An inline box
 //! cut over two lines draws the borders of all four sides on each piece. `z-index` of an inline box does nothing.

@@ -59,6 +59,8 @@ pub struct Page {
     pointer: Pointer,
     /// Is the display list of `frame` built? A scroll draws it again with other offsets and builds nothing.
     built: bool,
+    /// The text fields of `frame`, found when its display list was built (a pass over all the fragments).
+    inputs: Vec<NodeId>,
     /// Listener errors and render errors, kept for tests. The first of each also goes to stderr.
     pub errors: Vec<String>,
     started: Instant,
@@ -166,6 +168,7 @@ impl Page {
             canvas: Canvas::new(viewport.0.max(1), viewport.1.max(1)),
             pointer: Pointer::default(),
             built: false,
+            inputs: Vec::new(),
             errors: Vec::new(),
             started: Instant::now(),
             first_frame: None,
@@ -345,7 +348,8 @@ impl Page {
                 }
             }
             Event::Wheel { x, y, dx, dy, .. } => {
-                let target = self.hit(x, y);
+                // Only a scroll container can take the wheel before the page: with none, the hit test would find nothing to use.
+                let target = if self.frame_now().is_some_and(|f| !f.areas.list.is_empty()) { self.hit(x, y) } else { None };
                 if self.scroll_with(|g, s| g.wheel(s, target, dx as f32, dy as f32)) {
                     h.redraw = true;
                     self.send_scroll_events();
@@ -382,15 +386,15 @@ impl Page {
     /// Paint the page into the canvas, then the fields. The display list is built once for a frame; a scroll draws it again.
     pub fn paint(&mut self) -> &[u32] {
         self.frame_now();
-        let Page { source, frame, painter, canvas, built, .. } = self;
+        let Page { source, frame, painter, canvas, built, inputs, .. } = self;
         let b = source.browser();
         if let (Some(b), Some(f)) = (b, frame.as_ref()) {
             let focus = b.active_element().ok().flatten();
             let scroll = b.scroll().clone();
             let doc = b.document();
             let doc = doc.borrow();
-            let inputs: Vec<NodeId> = f.layout.fragments.iter().filter(|g| g.kind == Kind::Box && doc.is_html(g.node, "input") && b.is_text_input(g.node)).map(|g| g.node).collect();
             if !*built {
+                *inputs = f.layout.fragments.iter().filter(|g| g.kind == Kind::Box && doc.is_html(g.node, "input") && b.is_text_input(g.node)).map(|g| g.node).collect();
                 // Paint draws the placeholder of an empty field. The text, the selection and the caret are drawn here.
                 painter.list.hosted.clear();
                 painter.list.hosted.extend(inputs.iter().map(|&n| (n, !b.input_value(n).unwrap_or_default().is_empty())));
@@ -398,7 +402,7 @@ impl Page {
                 *built = true;
             }
             painter.draw_view(canvas, Some(&View { scroll: &scroll, areas: &f.areas, bars: f.bars }));
-            for n in inputs {
+            for &n in inputs.iter() {
                 let value = b.input_value(n).unwrap_or_default();
                 let sel = b.input_selection(n);
                 let focused = focus == Some(n);

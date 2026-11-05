@@ -2651,8 +2651,8 @@ Release build, archMachine. In-process, through `Page::handle` and `Page::paint`
 - `<textarea>` cannot be edited: the browser has no value state for it (`browser_selection.rs`). `contenteditable`, clipboard keys, Ctrl+Left and Ctrl+Right, IME and `composition` events, `maxlength`, number filtering, `contextmenu`, drag selection and double-click word selection are absent.
 - `:hover`, `:focus` and `:active` do not match. The cascade has no input state. Checkbox and radio boxes, `<input type=submit>` labels and the placeholder are not drawn (the paint crate draws controls in topic 3). Until then the demo fixtures give fields explicit borders. Topic 3 may paint the text of fields itself: then the field text in `page.rs` must go.
 - Timers and animations that are not due at an input event do not run: the window loop has no timer and `Waker` is not used. A navigation or a `fetch` that a listener starts runs inside `Session::resume` and blocks the loop until it settles.
-- A link click starts a navigation, and a form submit that no listener cancels is still `Unsupported` (native form navigation and constraint validation are gates of `browser_form.rs`); the window prints the error and goes on. `<base>`, `target`, `download` and `<summary>` toggling are not done.
-- Radios are all Tab stops (HTML tabs into the checked radio of a group only). There is no scroll offset: topic 5 adds scrolling, and the caller then subtracts it before the hit test.
+- A link click starts a navigation, and a form submit now validates and navigates (topic 5). `<base>`, `target`, `download` and `<summary>` toggling are not done.
+- Radios are all Tab stops (HTML tabs into the checked radio of a group only). Scrolling came in topic 5 (see "Scrolling").
 - `new MouseEvent(...)`, `new PointerEvent(...)`, `new KeyboardEvent(...)` and `new InputEvent(...)` throw `TypeError`: only the window makes these events.
 - The window event `PointerLeave` runs `mouseout` and `mouseleave` at the last element, with no `relatedTarget`.
 - The isTrusted flag follows the window: focus and `submit` events made by the host are trusted while a window event runs, and not otherwise (Chrome also marks the events of a script call to `focus()` as trusted; here they stay not trusted).
@@ -2817,3 +2817,61 @@ Validation:
 | numeric_empty | 820,679,379 | 817,374,615 | -0.403% |
 
 - Load test: `tools/js/wrapper_load.sh`, 12 kinds at 1k, 10k and 100k iterations, one process for each row under 1 GiB, checksums from Node. Net cost for each iteration, at 100k: `new Number(i).valueOf()` 0.55 µs, `new Boolean` 0.63 µs, `Object(i)` 0.54 µs, `new String('x' + i).length` 1.04 µs, `new String('abcdef')[i % 6]` 0.72 µs, `new Number(i).toFixed(1)` 0.92 µs, `new Number(i) == i` 0.62 µs, `JSON.stringify(new String('a'))` 1.17 µs, `Object.keys(new String('abcdef'))` 1.82 µs. The control, a method call on a primitive (`(i).toFixed(0).length + 'abc'.length`), costs 0.73 µs and allocates no wrapper. The time for each iteration is flat from 1k to 100k, so the cost is linear. Peak RSS grows with the garbage until a collection (`newnumber` 4.9 MiB at 1k, 19 MiB at 100k), and does not grow with the live set.
+
+## Scrolling
+
+S4 topic 5. Crates: `bare-layout`, `bare-paint`, `bare-window`, `bare`. Date: 2026-11-06. Machine: archMachine, release build. Chrome: Google Chrome 155.0.8059.39, headless, 400 by 300 window, classic scrollbars.
+
+### Design
+
+- Layout makes fragments in page coordinates and never runs again for a scroll. `bare_layout::scroll::areas` reads the fragments once. For each box with `overflow` other than `visible`, and for the page, it gives the padding box, the bars, and the size of the scrollable overflow (`scrollWidth`, `scrollHeight`). A `position: fixed` box does not count for the page, and what a container holds does not count for the boxes around it.
+- The offsets live in `Dom::scrolling` (`bare_paint::Scroll`: the page, and one pair for each container). Offsets are whole pixels. They are clamped to `0..=scrollWidth - clientWidth` when they are set, and again at each frame.
+- Paint builds one display list for the whole page (`Painter::build`) and draws it with the offsets (`Painter::draw_view`). A scroll does not build the list again. `PushScroll` and `PopScroll` move what is inside a container. `PushFixed` puts a fixed box back at the window. The bars are items of the list (`Bars`) and the bars of the page are drawn after it.
+- A hit test takes a point in window coordinates (`hit_test_scrolled`). It adds the page offset for the boxes of the page, and the offset of a container when it goes into one. A point on a bar hits the container.
+- The page has bars when its content is bigger than the window. A bar takes 15 px, so layout runs again at the smaller size. `Dom::layout_areas` keeps the bar state, so a page whose bars do not change is laid out once.
+- The window sends one `Event::Wheel` for each `wl_pointer` frame (`value120` is used when the compositor gives it; 120 units are one tick of 53 px). The wheel goes to the innermost container under the pointer that can move that way, then to the page (chaining). The window skips the hit test when the page has no container.
+- Keys scroll the page when the focus is not a field that uses the key: arrow 40 px, Page keys `max(h * 0.875, h - 40)` rounded down, Space and Shift+Space one page, Home and End the ends. A key that only scrolls does not make a new frame (no cascade, no layout). Tab and Shift+Tab to a field that is out of view scroll it in: centered when none of it shows, the nearest edge when part of it shows.
+- Script API: `scrollTop`, `scrollLeft`, `scrollWidth`, `scrollHeight`, `clientWidth`, `clientHeight`, `clientTop`, `clientLeft`, `getBoundingClientRect` (minus the offsets), `scrollTo`, `scroll`, `scrollBy` and `scrollIntoView` on elements. `scrollX`, `scrollY`, `pageXOffset`, `pageYOffset`, `innerWidth`, `innerHeight`, `scrollTo`, `scroll` and `scrollBy` on the window. `document.scrollingElement`. Reading an offset costs nothing. Any other read, and every write, run the cascade and one layout, like `offsetWidth`.
+- The `scroll` event: a change of an offset queues its target once. One task 16 ms later (the window: right after the input) sends one event to each queued target. The event of the page goes to the document and bubbles to the window. The event of an element does not bubble.
+- History of documents (`browser_session.rs`): the session keeps the URL of each document, and the scroll of each when it ends. Back and forward past the entries of one document load the neighbor with a `GET`, then put its scroll back. A new navigation drops the entries after it.
+- Forms (`browser_submit.rs`): Enter in a field, a submit button and `requestSubmit()` validate the form. If it is invalid, each invalid control gets an `invalid` event, the first one gets the focus, and no `submit` event follows. If no listener cancels `submit`, the entry list is encoded (`application/x-www-form-urlencoded`) and the form loads its action: `GET` replaces the query and drops the fragment, `POST` sends the body once.
+
+### Check against Chrome
+
+- `tools/ui/chrome_scroll.mjs` runs the 43 steps of `tools/fixtures/ui/scroll-steps.txt` on `tools/fixtures/ui/scroll.html` in headless Chrome and writes `chrome-scroll.txt`. The test `scroll_matches_chrome` runs the same steps in `bare` and compares each result as text. All 43 match: sizes (`clientWidth` 385 and `scrollHeight` 1700 of the page, 310 by 410 for the `#box` container), rectangles before and after a scroll, clamping, `scrollIntoView`, the key sizes (40 px, 262 px for Page Down), and the counts of `scroll` events. Chrome sends one event for each target and none for a scroll that moves nothing. The test waits for the task between two steps, as the Chrome run does.
+- Pixels: the test `the_page_scrollbar_has_the_pixels_of_chrome` checks the bar of a page of 1,000 px at four offsets against runs of pixels that Chrome gave. The track is `#fcfcfc` and 15 px wide, the arrows are `#8b8b8b` in 5 rows (rows 6 to 10 and 288 to 292), and the thumb is `#8b8b8b`. The start of a thumb is allowed to differ by one row and one shade (`#8e`): the round ends are drawn as a shape here and shaded in Chrome (hypothesis: curve shading, not checked). No other pixel difference was recorded.
+- Not compared with Chrome: the wheel tick of 53 px (it is the Linux value from memory; a live wheel of 20 clicks moved the page by 1,060 px, which only shows that the code uses 53), the history of documents, and the validation rules (written from the HTML Standard).
+
+### Measurements
+
+Release build, archMachine, through `Page::handle` and `Page::paint` in a window of 800 by 600. The page is LINES lines of text in 20 blocks. Run: `cargo run --release -p bare --example scroll_load -- LINES`.
+
+| What | 10,000 lines | 100,000 lines |
+| --- | ---: | ---: |
+| Parse and realm | 4.4 ms | 22 ms |
+| First paint (cascade, layout twice for the bars, display list, raster) | 15.6 ms | 140 ms |
+| Allocations of the first paint | 41,496 (7.4 MB) | 401,511 (68 MB) |
+| RSS after the first paint | 14.5 MB | 46.1 MB |
+| Wheel step with a paint, p50 / p99 / max | 0.34 / 0.39 / 0.57 ms | 0.87 / 0.98 / 1.5 ms |
+| Allocations of a wheel step | 6 (829 bytes) | 6 (829 bytes) |
+| Layouts during 2,000 steps | 0 | 0 |
+| Arrow or Page key (press, release, paint), p50 | 0.35 ms | 0.91 ms |
+| RSS after 2,000 steps | 15.5 MB | 46.2 MB |
+| Idle CPU in 3 s after the steps | 0 ms | 0 ms |
+| Click (move, press, release), p50 / p99 | 13.8 / 15.8 ms | 145 / 313 ms |
+
+- Before the fix, the same step took 1.3 ms and 3.3 ms. A profile showed two passes over all the fragments for each step: the hit test of the wheel, and the search for the text fields in `Page::paint`. The window now skips the hit test when the page has no container, and finds the fields once for each built list. The 6 allocations of a step are the copy of the offsets and the event lists.
+- The time of a step still grows with the page (0.34 ms to 0.87 ms for 10 times more lines): the draw walks the whole display list and skips what is out of view item by item. A list that is indexed by position would remove that. It was not built, because a step is under 1 ms at 100,000 lines.
+- Keys did a new layout twice for each key (the key down and the key up) before the fix. A test (`a_scroll_key_does_not_lay_out_again`) checks that they do not now.
+- A click costs a new frame: the pointer button and the key down always report a change (`ui_call(true, ...)`, from topic 4), so the next paint runs the cascade and the layout again. On 10,000 lines that is 13.8 ms, on 100,000 lines 145 ms (200 layouts for 100 clicks). It is not a scroll cost, and it was not changed. Fix: report a change only when a listener ran or a default action changed a node.
+
+### Gaps
+
+- `position: sticky` is not modelled: a sticky box scrolls as a normal one. `scroll-behavior`, `scroll-snap` and `overscroll-behavior` are ignored, and every scroll is instant (Chrome animates a wheel or key scroll and ends at the same place).
+- The keys scroll the page only, not the container that holds the focus. A script `focus()` does not scroll; Tab does. No `wheel` event is sent to the page. Touchpad kinetic scrolling is not built.
+- `scrollWidth` and `scrollHeight` of an element that does not clip are its padding box. `getBoundingClientRect` gives a plain object with eight fields. `100vh` and `vw` use the window minus the bars; Chrome uses the window.
+- Scroll restoration inside one document is not done (`history.scrollRestoration` is stored only). A document that a traversal loads again gets its scroll back. Its `history.state` and its form values do not come back. `history.length` counts the entries of the document, not of the session. An entry that a form `POST` made is not loaded again (a body is never sent twice), so back and forward onto it do nothing.
+- Validation: `pattern`, `step`, date types, `setCustomValidity`, `validity` and `validationMessage` are not built. `<select>` and `<textarea>` are not validated, and are sent with the value of their markup. No message bubble is drawn for an invalid field: the window focuses the first one and scrolls to it. `enctype` `multipart/form-data` and `text/plain` with `POST` are `Unsupported`. `target` is ignored.
+- A window title shows the first URL only (it does not follow a navigation).
+- The live staging login was not run on this build.
+

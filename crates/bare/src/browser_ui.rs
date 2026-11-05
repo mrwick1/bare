@@ -28,14 +28,14 @@
 //! - A click toggles a checkbox before the click event runs (a listener sees the new state) and undoes it when the click is
 //!   canceled; otherwise `input` and `change` follow. A radio does the same and clears the others of its group (same `name`
 //!   and form owner). A click on a label focuses and clicks its control. A click on `a[href]` starts a navigation
-//!   (`navigate_href`). A submit button submits its form (`browser_form.rs`, with its gates).
+//!   (`navigate_href`). A submit button submits its form (`browser_form.rs`, `browser_submit.rs`: validation, then native navigation).
 //! - Editing: text, Backspace, Delete, Left, Right, Home, End (Shift extends the selection), Ctrl+A. Offsets are UTF-16
 //!   units, as for `selectionStart`. The value changes through `put_input_value`, the same state that `input.value` reads.
 //!
 //! Gaps (none is faked): `<textarea>` has no value state in this host, so it cannot be edited; `contenteditable`;
-//! clipboard keys; Ctrl+Left/Right word moves; IME and `compositionstart`; `maxlength`, `readonly` is honored but
+//! clipboard keys; Ctrl+Left/Right word moves; IME and `compositionstart`; `readonly` is honored but
 //! `type=number` does not filter text; `contextmenu`; `:hover`/`:focus` styling; radio groups in the Tab order (every
-//! radio is a stop); `<summary>` toggling; `<label>` click coordinates of the second click; scrolling; `new MouseEvent(...)`
+//! radio is a stop); `<summary>` toggling; `<label>` click coordinates of the second click; `new MouseEvent(...)`
 //! and the other four constructors (illegal, as events are made by the window only).
 
 use crate::browser::*;
@@ -883,7 +883,8 @@ impl Browser {
         let r = self.driven(f);
         self.dom.st.borrow_mut().ui.active = false;
         let (_, reports) = r?;
-        if always {
+        // A key that only scrolls the page changes no node: its offsets are not the page (see `ui_key`).
+        if always && !self.dom.scroll_key_set(false) {
             self.dom.bump();
         }
         // The events are freed by `collect`: keep room for the next call (the cap is `max_events`).
@@ -916,7 +917,10 @@ impl Browser {
 
     /// A key went down or up.
     pub fn ui_key(&mut self, k: KeyInput, down: bool) -> R<UiOutcome> {
-        self.ui_call(true, |d, it| d.ui_key(it, &k, down))
+        // Only a key down and the Space key up have a default action that may change the page. A listener that runs says so itself.
+        self.dom.scroll_key_set(true);
+        let always = down || k.code == "Space";
+        self.ui_call(always, |d, it| d.ui_key(it, &k, down))
     }
 
     /// Is `node` an `<input>` that takes text and that the user can edit?

@@ -29,7 +29,7 @@
 //!   current URL does not change until the loader calls `set_document_url`.
 //!
 //! Gates: no `onpopstate` property handler, no `PopStateEvent`/`HashChangeEvent` classes, no `history.length` cap other
-//! than `max_history_entries`, no scroll restoration (the `scrollRestoration` value is only stored), no `location.ancestorOrigins`,
+//! than `max_history_entries`, no scroll restoration inside one document (the `scrollRestoration` value is only stored; the session restores the scroll of a document that a traversal loads again), no `location.ancestorOrigins`,
 //! no `document.referrer`/`domain`, no `storage` event. Not compared with Chrome except through Node's `URL` (see
 //! `tools/js/navigation_check.sh`): history, location and storage are checked against hand-written structural expectations.
 //!

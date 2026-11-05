@@ -160,3 +160,18 @@ fn the_page_does_not_lay_out_again_for_a_scroll() {
         assert_eq!(p.browser().unwrap().geometry_stats().layouts, before, "a scroll only draws again");
     });
 }
+
+#[test]
+fn a_scroll_key_does_not_lay_out_again() {
+    big(|| {
+        let mut p = page_of(LONG, 400, 300);
+        p.paint();
+        let before = p.browser().unwrap().geometry_stats().layouts;
+        for k in ["ArrowDown", "PageDown", "End", "Home"] {
+            key(&mut p, k, false);
+            p.paint();
+        }
+        assert_eq!(p.browser().unwrap().geometry_stats().layouts, before, "the key and its release only draw again");
+        assert_eq!(eval(&mut p, "scrollY"), "0", "Home came last");
+    });
+}

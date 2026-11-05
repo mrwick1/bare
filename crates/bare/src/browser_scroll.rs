@@ -412,6 +412,15 @@ impl Dom {
     pub(crate) fn note_scroll_key(&self, k: ScrollKey) {
         self.scrolling.s.borrow_mut().key = Some(k);
     }
+
+    /// Put the scroll key of an earlier call away (`None`), and say whether one is set (`Some(true)`).
+    pub(crate) fn scroll_key_set(&self, clear: bool) -> bool {
+        let mut st = self.scrolling.s.borrow_mut();
+        if clear {
+            st.key = None;
+        }
+        st.key.is_some()
+    }
 }
 
 // ---------------------------------------------------------------------------------------------- script API
