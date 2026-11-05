@@ -2246,3 +2246,79 @@ Load test: `cargo run --release -p bare --example preload_load -- font|style|scr
 The font rows keep no body: 1,000 fonts of 2 KiB cost 3 MiB of RSS over the empty page. The `script` row runs one style pass for each dynamic script (1,003 passes at 100x), as before this change. The style sheet rows from `sheets_load` at 100x take 473/1,019 ms (linked/dynamic) on main and 482/1,027 ms with this change, and 497/1,008 against 475/1,016 ms on a repeat: no change beyond noise.
 
 Gaps: `modulepreload` (modules do not run in `bare`), `type`, `imagesrcset`, `integrity`, `crossorigin` as a CORS mode, `fetchpriority`, `Link:` headers and `prefetch` are ignored. `document.scripts` is a snapshot, not a live `HTMLCollection`. A preloaded script text that a script took is not kept, so a second script with the same URL fetches again. A mixed-content `http:` font gives the diagnostic `insecure script URL refused`, which names the wrong kind. A page that adds more than `max_references` preload links stops with `Limit("preload-links")`. Not tested: the live staging login (the parent runs it), a real browser comparison of event order, and other platforms.
+
+## Batch 2 built-ins: Iterator, Set methods and small built-ins
+
+Batch 2 adds the iterator helpers, the Set methods and a group of small built-ins. `tools/js/builtin_inventory.sh` now prints 202 of 655 missing, down from 241 on main a273925 (and 311 before batch 1). Two of the 202 names are getters that throw on the prototype (`Set.prototype.size`, `Symbol.prototype.description`); the Node cases check them by hand. Older sections of this file that say a name is absent describe the state before this batch.
+
+Added:
+
+- `Iterator` (abstract constructor, a subclass works), `Iterator.from`, `Iterator.prototype` with `map`, `filter`, `take`, `drop`, `flatMap`, `reduce`, `toArray`, `forEach`, `some`, `every`, `find`, `[Symbol.iterator]` and the accessors `constructor` and `[Symbol.toStringTag]`. Array, String, Map, Set, generator and helper iterators all inherit from it.
+- `Set.prototype`: `union`, `intersection`, `difference`, `symmetricDifference`, `isSubsetOf`, `isSupersetOf`, `isDisjointFrom`, with GetSetRecord. The `size` getters of Map and Set match Node.
+- `Symbol.prototype.description`, `Symbol.dispose`, `Symbol.asyncDispose`. `Boolean.prototype` with `toString` and `valueOf`. `JSON[Symbol.toStringTag]`.
+- `EvalError`, `Error.captureStackTrace`, and `Error.stackTraceLimit` (honoured by `new Error` and by `captureStackTrace`).
+- `WeakRef` with `deref`, and `FinalizationRegistry` with `register` and `unregister`.
+- `Promise.withResolvers`.
+
+Design:
+
+- A helper is a `Copy` record (`Helper`, 136 bytes) in `sc.helpers`, not a generator. It has the states of the specification: suspended-start, suspended-yield, executing and completed. A reentrant `next` throws "Generator is already running".
+- A helper reads its source with `iter_next`, so an array, string, Map, Set, generator or helper source needs no result object per step. `for-of`, spread and the consumers read a helper the same way (`iter_native_step`). A chain read by a consumer makes only the helper records and the result: 9 objects for a 1,000,000-item chain. A call of `next()` makes the one result object that the specification requires.
+- Closing follows the specification. `take` closes the source on the `next` after its count is reached. A throwing callback closes the source and keeps its own error. An error from the source's `next` never closes it. `return()` on a helper closes the inner iterator, then the source. `flatMap` opens an inner array or string with the same fast paths.
+- Order of checks and message text follow Node 22 (V8 12.4): receiver, then callable, then one read of `next`. A bad argument does not close the receiver (later specification versions do). V8 names the method, not the value, for a missing callable.
+- The Set methods read `size`, `has` and `keys` once. When the argument is a real Set or Map with the intrinsic `has` or `keys`, the method calls the intrinsic directly and makes no iterator and no result object. The result starts as a copy of the entry list and index of the receiver (`coll_clone`, a memcpy-like copy when no entry was deleted). Methods that walk the receiver use a cursor, so an entry that `has` adds is visited and one it deletes is skipped, as in the specification. A `-0` from `keys()` is stored as `+0`.
+- `Error.captureStackTrace` reuses the lazy stack text of `eval_stack.rs`. The default limit is 10. A limit that is not a number, or a deleted limit, gives no stack, as in V8.
+- A WeakRef keeps its target out of the roots. A collection clears the target of a ref that was not marked. The registry keeps its callback and held values alive and holds targets and tokens weakly. `collect` runs only between jobs, so the KeepDuringJob list is always empty.
+- Cleanup callbacks never run on their own. The host calls `Interp::run_finalizers()` as a task after a collection. It runs each dead cell's callback once and reports a throw to `Host::report_exception`. A host that never calls it gets the "never run" behaviour that the specification allows.
+- `Promise.withResolvers` returns a plain object with `promise`, `resolve` and `reject`, made with the intrinsic capability. It uses the same gate as the other Promise statics for a `this` that is not the intrinsic `Promise`.
+
+Gates and deviations (never silent):
+
+- A subclass of `WeakRef` or `FinalizationRegistry` is `Unsupported`, like Map, Set, WeakMap and WeakSet. A subclass of `Iterator` works.
+- A non-registered Symbol as a WeakRef target or registry target or token is `Unsupported`, like the WeakMap gate. A registered Symbol is a TypeError.
+- `Promise.withResolvers.call(F)` with a user constructor is `Unsupported`.
+- `Symbol.dispose` and `Symbol.asyncDispose` follow the specification (non-writable, non-enumerable, non-configurable). Node 22 does not define them in a `vm` context, so the corpus has no case for them. A Rust test checks them. Nothing reads them: there is no `using`.
+- `Error.prepareStackTrace` stays absent. `Atomics` stays absent. The stack text is bare's own frame format (as before).
+- The realm now holds 38 more function objects and 44 more heap objects (418 and 461, against 380 and 417 on main). The test `the_other_caps_still_apply_to_combinators` had a function cap of 400 that left 20 spare. It is now 600.
+
+Load test (`tools/js/iterator_load.sh`, release, one process per row, setup not counted, n = 1,000,000, Sets of 500,000 with 250,000 shared, one run each on a quiet machine):
+
+| row | operation | time | objects made | peak RSS |
+| --- | --- | ---: | ---: | ---: |
+| `chain` | `values().map().filter().take(250000).reduce()` | 285 ms | 9 | 19.5 MiB |
+| `array_chain` | the same with `map`, `filter`, `slice`, `reduce` of Array | 467 ms | 6 | 46.2 MiB |
+| `chain_forof` | the chain read by `for-of` | 331 ms | 8 | 19.4 MiB |
+| `flatmap` | `flatMap(x => [x, x]).drop(10).reduce()` | 1,244 ms | 1,000,005 | 381.9 MiB |
+| `generic` | `map` over a hand-written iterator object | 972 ms | 1,000,004 | 290.3 MiB |
+| `set_union` | `A.union(B)` | 105 ms | 1 | 159.4 MiB |
+| `set_inter` | `A.intersection(B)` | 95 ms | 1 | 134.5 MiB |
+| `set_diff` | `A.difference(B)` | 82 ms | 1 | 148.0 MiB |
+| `set_sym` | `A.symmetricDifference(B)` | 116 ms | 1 | 159.5 MiB |
+| `set_like` | `A.intersection(setLike)` (script `has`) | 216 ms | 1 | 134.4 MiB |
+| `set_union_like` | `A.union(setLike)` (script `keys`) | 115 ms | 2 | 159.4 MiB |
+| `resolvers` | 250,000 `Promise.withResolvers()` + `then` + `resolve`, drained | 913 ms | 1,500,000 | 488.7 MiB |
+| `promise_new` | the same with `new Promise` | 991 ms | 1,500,000 | 545.6 MiB |
+
+A helper chain makes no object per step, so it runs 1.6 times faster than the Array methods on this input and needs 42% of their memory. `flatmap` and `generic` make one object per item because the script makes it (the inner array, the result of `next`). RSS grows with those objects because nothing is collected during a run. `Promise.withResolvers` makes as many objects as `new Promise` (6 per promise and handler) and takes about the same time (913 ms against 991 ms in the final run; an earlier run on a loaded machine gave the other order). At x1 and x10 the matrix gives the same shape.
+
+Results, release, main a273925 vs this change, 10 interleaved runs per build, `perf stat -e instructions:u,cycles:u`, minimum of each, with the machine shared with other builds (cycles vary by several percent between runs):
+
+- The realm setup costs 166,000 more instructions (2.525 M on main, 2.692 M here, `eval_check -e 1`). That is +6.6% of a realm and 0.07 ms. It comes from the 38 new function objects (about 4,400 instructions each, the same as the existing ones).
+- Instructions at scale 10 on `eval_load`, `gen_load`, `promise_load` and `async_load` (31 rows) are within -0.25% to +1.05%, except `eval_load concat` at +2.79%. Two rows are over +1%: `eval_load fib` (+1.05%) and `concat` (the row is only 10 M instructions, so the setup is 3% of it).
+- At scale 1 the setup cost shows: `async_load` rows +3.0% to +4.0%, `eval_load concat` +7.3%, `eval_load webpack` +3.0%, `eval_load fib` +1.8%, `gen_load` rows +0.3% to +1.7%, `promise_load` rows +0.5% to +1.7%. In the async, generator, promise, `concat` and `webpack` rows the excess is a fixed 0.27 M to 0.5 M instructions.
+- `eval_load fib` and `calls` grow by about 0.3% to 1% with the scale as well (+3.1 M instructions at x10 on fib, against +0.5 M at x1). A profile of `fib` x10 on both builds shows the same functions in the same order (`eval_expr_inner` 25.3% against 26.2%). Hypothesis: code layout and inlining in `eval_expr_inner` changed with the larger module. To verify: build with `-C codegen-units=1` and compare. Not done.
+- Minimum cycles vary from -6% to +12% with no matching change in instructions (one earlier series gave +41% on `promise_load fanout` and +17% on `eval_load calls`, which the next series did not repeat). Hypothesis: noise from the shared machine.
+
+Validation:
+
+- 80 Node cases (`tools/fixtures/js/iterator-cases.txt`, `tools/js/iterator_check.sh`). They cover the shapes and descriptors, inheritance, every helper and consumer, argument validation, order of the reads, laziness, closing on early exit and on a throw in every position, reentrancy, `Iterator.from`, the Set methods with Sets, Maps and set-likes, the order of the reads of the record, the branch that `size` selects, mutation during `has` and `keys`, `-0` and `NaN`, errors, Boolean, `Symbol.prototype.description`, EvalError, `captureStackTrace`, `stackTraceLimit`, `Promise.withResolvers`, the JSON tag, WeakRef and FinalizationRegistry. Two matrix cases hash 300 random helper chains and 120 random Set operations. All match Node 22.18.
+- Cases that print a message use the V8 text. Cases whose message bare words in another way print only the error name.
+- Rust tests (`eval_iterator_tests.rs`): the corpus without the matrices, the size of a helper, the call order of a lazy chain, closing on early exit, on throw and when done, Set methods with set-likes and their caps, `-0`, objects made per step (fewer than 40 for three chained helpers over 10,000 items, fewer than 20 for three Set methods over 20,000 entries), helpers freed by `collect` and kept alive by their source, callback and inner iterator, reentrancy, gates, WeakRef after a collection, `run_finalizers` (including a throwing callback and `unregister`), the weak caps, the stack limit and `captureStackTrace`, `Promise.withResolvers` order, Boolean and the dispose symbols.
+- `cargo test --workspace --release` passes. The other `tools/js/*_check.sh` scripts that run here pass (`parse_check.sh` needs the npm package `acorn`, which is not installed here).
+
+Problems seen, not changed:
+
+- A BigInt literal and `new String(...)` stop with `Unsupported` in the evaluator, so some Node cases avoid them.
+- A getter that reads `typeof this` on a primitive gives the primitive type in bare. Node (sloppy mode) gives "object".
+- `browser_fetch_tests::reused_connections_and_posts_are_never_resent` failed once in a full parallel run and passed in each of 3 solo runs and in the next full run. Hypothesis: a timing race in the test server.
+- `tools/js/number_check.sh` printed `limit` for `math_unary_matrix` on the Node side once while the machine was busy. It passed on the next run.
