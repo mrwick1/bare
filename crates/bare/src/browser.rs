@@ -613,6 +613,13 @@ impl Dom {
         it.host_function(id, name, len, ctor)
     }
 
+    /// A constructor that takes a different `new.target` (only `URLSearchParams`: it reads it with `host_proto_from_new_target`).
+    pub(crate) fn add_ctor_nt(&self, it: &mut Interp<'_>, h: H, name: &str, len: u32) -> R<ObjId> {
+        let id = self.handlers.borrow().len() as u32;
+        self.handlers.borrow_mut().push((h, true));
+        it.host_ctor_with_new_target(id, name, len)
+    }
+
     pub(crate) fn install(&self, it: &mut Interp<'_>) -> R<()> {
         let g = it.global_object();
         let _ = self.global.set(g);
