@@ -210,6 +210,8 @@ pub fn parse_int(units: &[u16], radix: i32) -> f64 {
     let v = if r == 10 {
         let s: String = t[..n].iter().map(|&u| u as u8 as char).collect();
         s.parse::<f64>().unwrap_or(f64::NAN)
+    } else if matches!(r, 2 | 4 | 8 | 16 | 32) {
+        radix_digits(&t[..n], (r as u32).trailing_zeros())
     } else {
         t[..n].iter().fold(0.0, |a, &u| a * r as f64 + digit(u).unwrap() as f64)
     };
@@ -301,8 +303,8 @@ fn radix_digits(d: &[u16], bits: u32) -> f64 {
     for &u in d {
         let v = match u {
             0x30..=0x39 => u - 0x30,
-            0x61..=0x66 => u - 0x61 + 10,
-            0x41..=0x46 => u - 0x41 + 10,
+            0x61..=0x7a => u - 0x61 + 10,
+            0x41..=0x5a => u - 0x41 + 10,
             _ => return f64::NAN,
         } as u64;
         if v >= 1 << bits {

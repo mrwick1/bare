@@ -252,3 +252,16 @@ fn global_encode_uri_component() {
         assert_eq!(run(src), want, "{src}");
     }
 }
+
+#[test]
+fn hydration_globals_charge_scans_and_round_power_radices_once() {
+    big(|| {
+        assert_eq!(run("parseInt('3eb146685257bdd640fb',16) === 2.9605686903448163e23"), "boolean:true");
+        for call in ["parseInt(s)", "encodeURIComponent(s)"] {
+            let mut it = Interp::realm(Heap::default(), EvalLimits::default()).unwrap();
+            it.run_script("var s = new Array(10000).join('1');").unwrap();
+            it.limits.max_steps = 100;
+            assert!(matches!(it.run_script(call), Err(Error::Limit(LimitKind::Steps))), "{call}");
+        }
+    });
+}
