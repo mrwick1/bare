@@ -17,7 +17,7 @@
 //!
 //! Not supported (explicit, never faked):
 //! - Any other namespace, and a null namespace for an element. MathML has no `MathMLElement`: its wrappers are plain `Element`s.
-//! - `Attr` nodes (`attributes`, `getAttributeNode`), `setAttributeNode`, and the namespace lookup methods (`lookupNamespaceURI`).
+//! - (Moved) `Attr` nodes, `Element.attributes`, `getAttributeNode(NS)`, `setAttributeNode(NS)`, `removeAttributeNode` and `createAttribute(NS)` live in `browser_attr.rs` (read its header). The namespace lookup methods (`lookupNamespaceURI`) are not supported.
 //! - SVG drawing, layout and style. An SVG element has no `style`, `className` as `SVGAnimatedString`, `getBBox` or the other SVG DOM.
 //!   Style comes from the separate CSSStyleDeclaration work: this file gives it the native identity (`Document::element_ns`) and
 //!   nothing else. CSS selectors match the local name in any namespace; `svg|a` namespace selectors do not exist.
@@ -70,7 +70,7 @@ fn qname_parts(q: &str) -> Option<(Option<&str>, &str)> {
 
 /// "Validate and extract" of the DOM Standard. Gives the prefix and the local name. `ns` is the namespace string as the page gave it
 /// (`None` for null; an empty string is null too).
-fn extract<'a>(d: &Dom, it: &mut Interp<'_>, ns: Option<&str>, qname: &'a str) -> R<(Option<&'a str>, &'a str)> {
+pub(crate) fn extract<'a>(d: &Dom, it: &mut Interp<'_>, ns: Option<&str>, qname: &'a str) -> R<(Option<&'a str>, &'a str)> {
     let Some((prefix, local)) = qname_parts(qname) else {
         return Err(d.dom_err(it, "InvalidCharacterError", &format!("The qualified name provided ('{qname}') is not a valid name.")));
     };
@@ -85,7 +85,7 @@ fn extract<'a>(d: &Dom, it: &mut Interp<'_>, ns: Option<&str>, qname: &'a str) -
 }
 
 /// A namespace argument: `null`, `undefined` and the empty string are no namespace.
-fn ns_arg(d: &Dom, it: &mut Interp<'_>, v: Value) -> R<Option<String>> {
+pub(crate) fn ns_arg(d: &Dom, it: &mut Interp<'_>, v: Value) -> R<Option<String>> {
     Ok(match v {
         Value::Null | Value::Undefined => None,
         v => Some(d.string_arg(it, v)?).filter(|s| !s.is_empty()),
@@ -95,7 +95,7 @@ fn ns_arg(d: &Dom, it: &mut Interp<'_>, v: Value) -> R<Option<String>> {
 const ATTR_NS: &str = "setAttributeNS with a namespace other than none, XML, XMLNS or XLink";
 
 /// The namespace of an attribute that the host stores. `Err(())` for one that it does not.
-fn attr_ns_of(ns: Option<&str>) -> Result<Option<Ns>, ()> {
+pub(crate) fn attr_ns_of(ns: Option<&str>) -> Result<Option<Ns>, ()> {
     match ns {
         None => Ok(None),
         Some(u) => match Ns::from_uri(u) {

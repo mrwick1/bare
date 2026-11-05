@@ -10,6 +10,9 @@ mod browser_focus;
 #[cfg(test)]
 mod browser_focus_tests;
 mod browser_namespace;
+mod browser_attr;
+#[cfg(test)]
+mod browser_attr_tests;
 pub mod browser_fetch;
 pub mod browser_console;
 #[cfg(test)]
@@ -32,6 +35,8 @@ mod browser_namespace_tests;
 mod browser_iframe_tests;
 #[cfg(test)]
 mod browser_link_tests;
+#[cfg(test)]
+mod browser_root_node_tests;
 #[cfg(test)]
 mod browser_tests;
 pub mod browser_platform;

@@ -110,7 +110,7 @@ impl<'p> Interp<'p> {
             let mut n = 0;
             for i in 0..list.len() {
                 let k = list[i];
-                if !matches!(k, PropertyKey::Symbol(_)) && h!(self, self.heap.get_own_property(o, k)).is_some_and(|p| p.enumerable()) {
+                if !matches!(k, PropertyKey::Symbol(_)) && hx!(self, self.heap.get_own_property(o, k)).is_some_and(|p| p.enumerable()) {
                     list[n] = k;
                     n += 1;
                 }
@@ -125,10 +125,10 @@ impl<'p> Interp<'p> {
     /// `undefined` deletes, anything else is `CreateDataProperty`. A refusal (`false`) is ignored.
     fn rv_store(&mut self, o: ObjId, key: PropertyKey, v: Value) -> Res<()> {
         if let Value::Undefined = v {
-            h!(self, self.heap.delete(o, key));
+            hx!(self, self.heap.delete(o, key));
         } else {
             let d = PropertyDescriptor { value: Some(v), writable: Some(true), enumerable: Some(true), configurable: Some(true), ..Default::default() };
-            h!(self, self.heap.define_own_property(o, key, &d));
+            hx!(self, self.heap.define_own_property(o, key, &d));
         }
         Ok(())
     }

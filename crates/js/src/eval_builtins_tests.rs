@@ -27,11 +27,11 @@ fn show(it: &Interp, v: Value) -> String {
 }
 
 /// Run `src`. `Ok` is the shown completion value or `throw:Name:message`. `Err` is a non-JS outcome.
-fn eval_with(src: &str, el: EvalLimits, bl: BuiltinLimits, heap: Heap) -> Result<String, Error> {
+fn eval_with(src: &str, el: EvalLimits, bl: BuiltinLimits, heap: HeapLimits) -> Result<String, Error> {
     let src = src.to_string();
     big(move || {
         let prog = parse_script(&src, Limits::default()).unwrap_or_else(|e| panic!("{src:?}: {e}"));
-        let mut it = Interp::new(&prog, heap, el)?;
+        let mut it = Interp::new(&prog, Heap::new(heap).unwrap(), el)?;
         it.set_builtin_limits(bl);
         match it.run() {
             Ok(v) => Ok(show(&it, v)),
@@ -42,10 +42,10 @@ fn eval_with(src: &str, el: EvalLimits, bl: BuiltinLimits, heap: Heap) -> Result
 }
 
 fn run(src: &str) -> String {
-    eval_with(src, EvalLimits { max_steps: 5_000_000, ..Default::default() }, BuiltinLimits::default(), Heap::default()).unwrap_or_else(|e| panic!("{src}: {e:?}"))
+    eval_with(src, EvalLimits { max_steps: 5_000_000, ..Default::default() }, BuiltinLimits::default(), HeapLimits::default()).unwrap_or_else(|e| panic!("{src}: {e:?}"))
 }
 
-fn limit(src: &str, el: EvalLimits, bl: BuiltinLimits, heap: Heap) -> LimitKind {
+fn limit(src: &str, el: EvalLimits, bl: BuiltinLimits, heap: HeapLimits) -> LimitKind {
     match eval_with(src, el, bl, heap) {
         Err(Error::Limit(k)) => k,
         other => panic!("{src}: {other:?}"),
@@ -53,7 +53,7 @@ fn limit(src: &str, el: EvalLimits, bl: BuiltinLimits, heap: Heap) -> LimitKind 
 }
 
 fn unsupported_of(src: &str) -> &'static str {
-    match eval_with(src, EvalLimits::default(), BuiltinLimits::default(), Heap::default()) {
+    match eval_with(src, EvalLimits::default(), BuiltinLimits::default(), HeapLimits::default()) {
         Err(Error::Unsupported(u)) => u.what,
         other => panic!("{src}: {other:?}"),
     }
@@ -75,7 +75,7 @@ fn corpus_matches_node() {
     let mut bad = Vec::new();
     for ((name, lines), w) in list.iter().zip(want) {
         let src = lines.join("\n");
-        let got = match eval_with(src.trim_end_matches('\n'), EvalLimits { max_steps: 500_000, ..Default::default() }, BuiltinLimits::default(), Heap::default()) {
+        let got = match eval_with(src.trim_end_matches('\n'), EvalLimits { max_steps: 500_000, ..Default::default() }, BuiltinLimits::default(), HeapLimits::default()) {
             Ok(s) => s,
             Err(Error::Limit(_)) => "limit".into(),
             Err(e) => format!("other:{e:?}"),
@@ -134,31 +134,31 @@ fn invalid_literal_stops_before_any_effect() {
 fn regexp_work_is_charged_and_capped_distinctly() {
     let hostile = "var s = 'a'; for (var i = 0; i < 6; i++) s += s; /(a+)+b/.test(s + 'c')";
     // The evaluator budget ends first: Steps.
-    assert_eq!(limit(hostile, EvalLimits { max_steps: 200_000, ..Default::default() }, BuiltinLimits::default(), Heap::default()), LimitKind::Steps);
+    assert_eq!(limit(hostile, EvalLimits { max_steps: 200_000, ..Default::default() }, BuiltinLimits::default(), HeapLimits::default()), LimitKind::Steps);
     // The per-attempt regexp budget ends first: Regexp(Steps).
     let bl = BuiltinLimits { regexp_steps: 100_000, ..Default::default() };
-    assert_eq!(limit(hostile, EvalLimits::default(), bl, Heap::default()), LimitKind::Regexp(RegexpLimit::Steps));
+    assert_eq!(limit(hostile, EvalLimits::default(), bl, HeapLimits::default()), LimitKind::Regexp(RegexpLimit::Steps));
     // The same limit through each entry point.
     for src in ["new RegExp('(a+)+b').exec(S)", "'x'.concat(S).replace(/(a+)+b/, 'z')", "S.match(/(a+)+b/g)", "S.split(/(a+)+b/)", "/(a+)+b/y.test(S)"] {
         let src = format!("var S = 'a'; for (var i = 0; i < 6; i++) S += S; S += 'c'; {src}");
-        assert_eq!(limit(&src, EvalLimits::default(), bl, Heap::default()), LimitKind::Regexp(RegexpLimit::Steps), "{src}");
+        assert_eq!(limit(&src, EvalLimits::default(), bl, HeapLimits::default()), LimitKind::Regexp(RegexpLimit::Steps), "{src}");
     }
     // Stack frames.
     let bl = BuiltinLimits { regexp_stack_frames: 64, ..Default::default() };
     let src = "var s = ''; for (var i = 0; i < 100; i++) s += 'ab'; /(?:a|b)*c/.test(s)";
-    assert_eq!(limit(src, EvalLimits::default(), bl, Heap::default()), LimitKind::Regexp(RegexpLimit::Stack));
+    assert_eq!(limit(src, EvalLimits::default(), bl, HeapLimits::default()), LimitKind::Regexp(RegexpLimit::Stack));
     // Input length.
     let bl = BuiltinLimits { regexp_input_units: 100, ..Default::default() };
     let src = "var s = 'a'; for (var i = 0; i < 8; i++) s += s; /a/.test(s)";
-    assert_eq!(limit(src, EvalLimits::default(), bl, Heap::default()), LimitKind::Regexp(RegexpLimit::Input));
+    assert_eq!(limit(src, EvalLimits::default(), bl, HeapLimits::default()), LimitKind::Regexp(RegexpLimit::Input));
     assert_eq!(run("/a/.test('a')"), "boolean:true");
     // Compile limit.
     let src = "var p = 'a'; for (var i = 0; i < 17; i++) p += p; new RegExp(p)";
-    assert_eq!(limit(src, EvalLimits::default(), BuiltinLimits::default(), Heap::default()), LimitKind::Regexp(RegexpLimit::Compile));
+    assert_eq!(limit(src, EvalLimits::default(), BuiltinLimits::default(), HeapLimits::default()), LimitKind::Regexp(RegexpLimit::Compile));
     // Not catchable by try.
     let src = "try { new RegExp('(a+)+b').test('aaaaaaaaaaaaaaaaaaaaaaaaaaaaaac'); } catch (e) { 'caught' }";
     let bl = BuiltinLimits { regexp_steps: 10_000, ..Default::default() };
-    assert_eq!(limit(src, EvalLimits::default(), bl, Heap::default()), LimitKind::Regexp(RegexpLimit::Steps));
+    assert_eq!(limit(src, EvalLimits::default(), bl, HeapLimits::default()), LimitKind::Regexp(RegexpLimit::Steps));
 }
 
 #[test]
@@ -166,23 +166,23 @@ fn matches_and_items_are_capped_before_growth() {
     let bl = BuiltinLimits { max_matches: 1000, max_items: 500, ..Default::default() };
     let build = "var s = 'a'; for (var i = 0; i < 11; i++) s += s;"; // 2048 units
     let el = EvalLimits::default();
-    assert_eq!(limit(&format!("{build} s.replace(/a/g, 'b')"), el, bl, Heap::default()), LimitKind::Regexp(RegexpLimit::Matches));
-    assert_eq!(limit(&format!("{build} s.match(/a/g)"), el, bl, Heap::default()), LimitKind::Regexp(RegexpLimit::Matches));
-    assert_eq!(limit(&format!("{build} s.match(/(?:)/g)"), el, bl, Heap::default()), LimitKind::Regexp(RegexpLimit::Matches));
+    assert_eq!(limit(&format!("{build} s.replace(/a/g, 'b')"), el, bl, HeapLimits::default()), LimitKind::Regexp(RegexpLimit::Matches));
+    assert_eq!(limit(&format!("{build} s.match(/a/g)"), el, bl, HeapLimits::default()), LimitKind::Regexp(RegexpLimit::Matches));
+    assert_eq!(limit(&format!("{build} s.match(/(?:)/g)"), el, bl, HeapLimits::default()), LimitKind::Regexp(RegexpLimit::Matches));
     // Capture groups count: 600 matches of 2 slots exceed 1000 slots.
-    assert_eq!(limit("var s = ''; for (var i = 0; i < 600; i++) s += 'a'; s.replace(/(a)/g, 'b')", el, bl, Heap::default()), LimitKind::Regexp(RegexpLimit::Matches));
+    assert_eq!(limit("var s = ''; for (var i = 0; i < 600; i++) s += 'a'; s.replace(/(a)/g, 'b')", el, bl, HeapLimits::default()), LimitKind::Regexp(RegexpLimit::Matches));
     assert_eq!(run("var s = ''; for (var i = 0; i < 300; i++) s += 'a'; s.replace(/(a)/g, 'b').length"), "number:300");
-    assert_eq!(limit(&format!("{build} s.split('')"), el, bl, Heap::default()), LimitKind::Regexp(RegexpLimit::Items));
-    assert_eq!(limit(&format!("{build} s.split(/a/)"), el, bl, Heap::default()), LimitKind::Regexp(RegexpLimit::Items));
-    assert_eq!(limit(&format!("{build} s.split('a')"), el, bl, Heap::default()), LimitKind::Regexp(RegexpLimit::Items));
+    assert_eq!(limit(&format!("{build} s.split('')"), el, bl, HeapLimits::default()), LimitKind::Regexp(RegexpLimit::Items));
+    assert_eq!(limit(&format!("{build} s.split(/a/)"), el, bl, HeapLimits::default()), LimitKind::Regexp(RegexpLimit::Items));
+    assert_eq!(limit(&format!("{build} s.split('a')"), el, bl, HeapLimits::default()), LimitKind::Regexp(RegexpLimit::Items));
     // A limit on the split result is not hit when `limit` stops earlier.
-    assert_eq!(eval_with(&format!("{build} s.split('', 10).length"), el, bl, Heap::default()).unwrap(), "number:10");
-    assert_eq!(eval_with(&format!("{build} s.split(/a/, 10).length"), el, bl, Heap::default()).unwrap(), "number:10");
+    assert_eq!(eval_with(&format!("{build} s.split('', 10).length"), el, bl, HeapLimits::default()).unwrap(), "number:10");
+    assert_eq!(eval_with(&format!("{build} s.split(/a/, 10).length"), el, bl, HeapLimits::default()).unwrap(), "number:10");
 }
 
 #[test]
 fn output_strings_are_capped_before_growth() {
-    let heap = || Heap::new(HeapLimits { max_string_units: 3000, ..Default::default() }).unwrap();
+    let heap = || HeapLimits { max_string_units: 3000, ..Default::default() };
     let el = EvalLimits::default();
     let bl = BuiltinLimits::default();
     let build = "var s = 'a'; for (var i = 0; i < 11; i++) s += s;"; // 2048
@@ -198,10 +198,10 @@ fn output_strings_are_capped_before_growth() {
     }
     // Case mapping that grows: U+00DF becomes "SS".
     let src = "var s = '\\u00df'; for (var i = 0; i < 11; i++) s += s; s.toUpperCase().length";
-    assert_eq!(eval_with(src, el, bl, Heap::default()).unwrap(), "number:4096");
-    assert_eq!(limit(src, el, bl, Heap::new(HeapLimits { max_string_units: 3000, ..Default::default() }).unwrap()), LimitKind::Heap(Limit::StringLength));
+    assert_eq!(eval_with(src, el, bl, HeapLimits::default()).unwrap(), "number:4096");
+    assert_eq!(limit(src, el, bl, HeapLimits { max_string_units: 3000, ..Default::default() }), LimitKind::Heap(Limit::StringLength));
     let src = "var s = '\\u00df'; for (var i = 0; i < 11; i++) s += s; s.toUpperCase()";
-    assert_eq!(limit(src, el, bl, Heap::new(HeapLimits { max_string_units: 3000, ..Default::default() }).unwrap()), LimitKind::Heap(Limit::StringLength));
+    assert_eq!(limit(src, el, bl, HeapLimits { max_string_units: 3000, ..Default::default() }), LimitKind::Heap(Limit::StringLength));
 }
 
 #[test]
@@ -223,7 +223,7 @@ fn string_scans_and_loops_use_the_step_budget() {
         "s.slice(0, 262000).trim()",
     ] {
         let src = format!("{build} {body}");
-        assert_eq!(limit(&src, el, BuiltinLimits::default(), Heap::default()), LimitKind::Steps, "{body}");
+        assert_eq!(limit(&src, el, BuiltinLimits::default(), HeapLimits::default()), LimitKind::Steps, "{body}");
     }
 }
 
@@ -235,19 +235,19 @@ fn json_limits_are_distinct() {
         f(&mut b);
         b
     };
-    let kind = |src: &str, b: BuiltinLimits| limit(src, el, b, Heap::default());
+    let kind = |src: &str, b: BuiltinLimits| limit(src, el, b, HeapLimits::default());
     assert_eq!(kind("JSON.parse('[1,2,3]')", mk(|b| b.json.max_source_units = 4)), LimitKind::Json(json::LimitKind::Source));
     assert_eq!(kind("JSON.parse('[[[1]]]')", mk(|b| b.json.max_depth = 2)), LimitKind::Json(json::LimitKind::Depth));
     assert_eq!(kind("JSON.parse('[1,2,3]')", mk(|b| b.json.max_nodes = 3)), LimitKind::Json(json::LimitKind::Nodes));
     assert_eq!(kind("JSON.parse('\"abcdef\"')", mk(|b| b.json.max_text_units = 3)), LimitKind::Json(json::LimitKind::Text));
-    let heap = Heap::new(HeapLimits { max_objects: 200, ..Default::default() }).unwrap();
+    let heap = HeapLimits { max_objects: 200, ..Default::default() };
     assert_eq!(limit("JSON.parse('[' + new Array(300).join('{},') + '{}]')", el, BuiltinLimits::default(), heap), LimitKind::Heap(Limit::Objects));
     // Deep input is iterative: 5000 levels do not touch the native stack.
     let src = "var s = '', i; for (i = 0; i < 5000; i++) s += '['; for (i = 0; i < 5000; i++) s += ']'; var v = JSON.parse(s), d = 0; while (v.length) { v = v[0]; d++; } d";
-    assert_eq!(eval_with(src, EvalLimits { max_steps: 5_000_000, ..el }, mk(|b| b.json.max_depth = 10_000), Heap::default()).unwrap(), "number:4999");
+    assert_eq!(eval_with(src, EvalLimits { max_steps: 5_000_000, ..el }, mk(|b| b.json.max_depth = 10_000), HeapLimits::default()).unwrap(), "number:4999");
     // A syntax error is a catchable SyntaxError, a limit is not.
     assert_eq!(run("try { JSON.parse('{') } catch (e) { e.name }"), "string:SyntaxError");
-    assert_eq!(eval_with("try { JSON.parse('[[1]]') } catch (e) { 'caught' }", el, mk(|b| b.json.max_depth = 1), Heap::default()).unwrap_err().to_string_tag(), "limit");
+    assert_eq!(eval_with("try { JSON.parse('[[1]]') } catch (e) { 'caught' }", el, mk(|b| b.json.max_depth = 1), HeapLimits::default()).unwrap_err().to_string_tag(), "limit");
 }
 
 trait Tag {
@@ -387,9 +387,9 @@ fn collect_is_refused_inside_a_callback_and_roots_hold_after() {
 fn callback_reentrancy_respects_depth_and_frame_limits() {
     let el = EvalLimits::default();
     let src = "function f(n) { return 'a'.replace(/a/, function () { return f(n + 1); }); } f(0)";
-    assert_eq!(limit(src, el, BuiltinLimits::default(), Heap::default()), LimitKind::CallDepth);
+    assert_eq!(limit(src, el, BuiltinLimits::default(), HeapLimits::default()), LimitKind::CallDepth);
     let src = "function f(n) { return 'a'.replace('a', function () { return f(n + 1); }); } f(0)";
-    assert_eq!(limit(src, el, BuiltinLimits::default(), Heap::default()), LimitKind::CallDepth);
+    assert_eq!(limit(src, el, BuiltinLimits::default(), HeapLimits::default()), LimitKind::CallDepth);
     // Shallow reentrancy with the same regexp and the same scratch memory is exact.
     assert_eq!(run("var r = /(\\d)(\\d)?/g; 'a12b3'.replace(r, function (m, a, b) { return '<' + 'x45'.replace(r, '#') + a + (b || '') + '>'; })"), "string:a<x#12>b<x#3>");
     assert_eq!(run("var r = /a/g; var n = 0; 'aaa'.replace(r, function () { n++; return n < 3 ? 'x'.replace(/x/g, function () { return 'y'; }) : 'z'; })"), "string:yyz");
@@ -465,7 +465,7 @@ fn regexp_to_string_reads_overridden_properties() {
 
 #[test]
 fn case_mapping_checks_the_actual_output_length() {
-    let heap = Heap::new(HeapLimits { max_string_units: 128, ..Default::default() }).unwrap();
+    let heap = HeapLimits { max_string_units: 128, ..Default::default() };
     let src = format!("'{}'.toUpperCase()", "é".repeat(64));
     assert_eq!(eval_with(&src, EvalLimits::default(), BuiltinLimits::default(), heap).unwrap(), format!("string:{}", "É".repeat(64)));
 }
@@ -473,7 +473,7 @@ fn case_mapping_checks_the_actual_output_length() {
 #[test]
 fn trimming_whitespace_consumes_scan_work() {
     let src = format!("'{}'.trim()", " ".repeat(8192));
-    assert_eq!(limit(&src, EvalLimits { max_steps: 100, ..Default::default() }, BuiltinLimits::default(), Heap::default()), LimitKind::Steps);
+    assert_eq!(limit(&src, EvalLimits { max_steps: 100, ..Default::default() }, BuiltinLimits::default(), HeapLimits::default()), LimitKind::Steps);
 }
 
 #[test]

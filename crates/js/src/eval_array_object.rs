@@ -212,7 +212,7 @@ impl<'p> Interp<'p> {
 
     fn ao_has(&mut self, this: Value, k: PropertyKey) -> Res<bool> {
         Ok(match this {
-            Value::Object(o) => h!(self, self.heap.has_property(o, k)),
+            Value::Object(o) => hx!(self, self.heap.has_property(o, k)),
             Value::String(s) => matches!(k, PropertyKey::Index(i) if (i as usize) < h!(self, self.heap.str_len(s))),
             _ => false,
         })
@@ -233,7 +233,7 @@ impl<'p> Interp<'p> {
     /// `DeletePropertyOrThrow`.
     fn ao_delete(&mut self, this: Value, k: PropertyKey) -> Res<()> {
         let ok = match this {
-            Value::Object(o) => h!(self, self.heap.delete(o, k)),
+            Value::Object(o) => hx!(self, self.heap.delete(o, k)),
             Value::String(s) => !matches!(k, PropertyKey::Index(i) if (i as usize) < h!(self, self.heap.str_len(s))),
             _ => true,
         };
@@ -246,7 +246,7 @@ impl<'p> Interp<'p> {
 
     /// `CreateDataPropertyOrThrow` on an object this module made.
     fn ao_create(&mut self, a: ObjId, k: PropertyKey, v: Value) -> Res<()> {
-        if h!(self, self.heap.define_own_property(a, k, &PropertyDescriptor::data(v))) {
+        if hx!(self, self.heap.define_own_property(a, k, &PropertyDescriptor::data(v))) {
             return Ok(());
         }
         let t = self.key_text(k);
@@ -259,7 +259,7 @@ impl<'p> Interp<'p> {
         }
         let a = h!(self, self.heap.new_array(Some(self.array_proto)));
         if len > 0 {
-            h!(self, self.heap.set(a, self.k_length, Value::Number(len as f64)));
+            hx!(self, self.heap.set(a, self.k_length, Value::Number(len as f64)));
         }
         Ok(a)
     }
@@ -760,7 +760,7 @@ impl<'p> Interp<'p> {
             for k in keys {
                 self.tick()?;
                 if let Value::Object(o) = src {
-                    match h!(self, self.heap.get_own_property(o, k)) {
+                    match hx!(self, self.heap.get_own_property(o, k)) {
                         Some(p) if p.enumerable() => {}
                         _ => continue,
                     }
@@ -788,7 +788,7 @@ impl<'p> Interp<'p> {
                 continue;
             }
             if let Value::Object(o) = src {
-                match h!(self, self.heap.get_own_property(o, k)) {
+                match hx!(self, self.heap.get_own_property(o, k)) {
                     Some(p) if p.enumerable() => {}
                     _ => continue,
                 }

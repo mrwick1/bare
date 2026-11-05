@@ -519,6 +519,39 @@ pub(crate) fn is_connected(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value
     Ok(Value::Bool(cur == doc.root()))
 }
 
+/// `Node.getRootNode(options)`: the topmost ancestor, or the node itself when it has no parent. There are no shadow roots,
+/// so `composed` cannot change the answer, but its getter still runs (WebIDL). The options are read before the walk, so a
+/// getter that moves the node is seen by the walk. More than `max_tree_depth` ancestors is a limit, not a wrong root.
+pub(crate) fn get_root_node(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
+    let attr = matches!(this, Value::Object(o) if d.attr.s.borrow().attrs.contains_key(&o));
+    let n = if attr { None } else { Some(d.nd(it, this)?) };
+    match arg(a, 0) {
+        // WebIDL dictionary: undefined and null are an empty dictionary; any other primitive is a TypeError.
+        Value::Undefined | Value::Null => {}
+        opts @ Value::Object(_) => {
+            let k = d.key(it, "composed")?;
+            it.get_value(opts, k)?;
+        }
+        _ => return Err(it.type_error("Failed to execute 'getRootNode' on 'Node': parameter 1 is not of type 'GetRootNodeOptions'.")),
+    }
+    // Attr nodes have no parent, including when attached to an element.
+    let Some(n) = n else { return Ok(this) };
+    let root = {
+        let doc = d.doc.borrow();
+        let (mut cur, mut depth) = (n, 0);
+        while let Some(p) = doc.parent(cur) {
+            it.charge(1)?;
+            depth += 1;
+            if depth > d.lim.max_tree_depth {
+                return Err(d.lim("dom-depth"));
+            }
+            cur = p;
+        }
+        cur
+    };
+    d.wrap(it, root)
+}
+
 pub(crate) fn child_nodes(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
     let n = d.nd(it, this)?;
     let kids = d.kids(it, n, false)?;

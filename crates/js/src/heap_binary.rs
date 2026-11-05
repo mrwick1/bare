@@ -24,6 +24,8 @@ pub(super) enum Exotic {
     View { buffer: ObjId, offset: usize, len: usize },
     Encoder,
     Decoder(Decoder),
+    /// An object whose array-index properties are read from the host each time (see `IndexedSource`). It holds no data.
+    Indexed,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -32,6 +34,30 @@ pub enum ExoticKind {
     View,
     Encoder,
     Decoder,
+    Indexed,
+}
+
+/// What a host says about one index of a host-indexed object right now.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Slot {
+    /// No property at this index (it is at or after the length).
+    Absent,
+    /// A property whose value is this object.
+    Ready(ObjId),
+    /// A property whose JavaScript object does not exist yet. The heap answers `NeedsHost`; the host makes the object.
+    Missing,
+}
+
+/// The read side of a host-indexed object (`Heap::new_indexed`). The host keeps the truth; the heap keeps no copy of the
+/// length or of the elements, so the answers are live. Both methods must be cheap, must not allocate JavaScript objects,
+/// and must not run JavaScript. They get `&self`: an answer cannot change anything. `owner` is the object that was asked,
+/// which can be a prototype of the object that the page touched.
+pub trait IndexedSource {
+    /// How many indices are properties of `owner` now. `Ok(0)`: `owner` is not a live object of this host. `Err`: the host
+    /// cannot answer now (for example its state is borrowed). The error stops the script; it is never an empty answer.
+    fn indexed_len(&self, owner: ObjId) -> Result<usize, HeapError>;
+    /// The property at `index` of `owner` now. `Err` as for `indexed_len`.
+    fn indexed_item(&self, owner: ObjId, index: usize) -> Result<Slot, HeapError>;
 }
 
 /// State of a UTF-8 `TextDecoder`: the options, and the WHATWG decoder registers (a partly read sequence is at most
@@ -111,6 +137,7 @@ impl Heap {
             Exotic::View { .. } => ExoticKind::View,
             Exotic::Encoder => ExoticKind::Encoder,
             Exotic::Decoder(_) => ExoticKind::Decoder,
+            Exotic::Indexed => ExoticKind::Indexed,
         })
     }
 
@@ -191,6 +218,41 @@ impl Heap {
             return Err(HeapError::InvalidKey);
         }
         self.make_exotic(proto, || Exotic::View { buffer, offset, len })
+    }
+
+    /// An object whose integer-index properties come from the host (`set_indexed_source`), each time they are read.
+    /// Properties follow the WebIDL legacy platform object rules for an indexed getter without a setter: an index below the
+    /// length is an own, enumerable, configurable, non-writable data property; it cannot be written, defined or deleted
+    /// (`false`), and a write or define at any index is rejected. An index at or after the length is no property, and the
+    /// prototype chain goes on. Keys that are not array indices are ordinary.
+    pub fn new_indexed(&mut self, proto: Option<ObjId>) -> R<ObjId> {
+        self.make_exotic(proto, || Exotic::Indexed)
+    }
+
+    /// Install the host that answers for every `new_indexed` object of this heap.
+    /// The heap owns the `Rc`, and drops it with the heap or when a new source replaces it. A heap with a host source is
+    /// therefore not `Send` (a DOM is `Rc` and `RefCell`): it stays on the thread that made it. The compiler enforces this.
+    /// API cost: a pure `Heap` is `!Send` too. Build it on the thread that uses it. A moved heap does not compile:
+    ///
+    /// ```compile_fail
+    /// fn needs_send<T: Send>(_: T) {}
+    /// needs_send(bare_js::heap::Heap::default());
+    /// ```
+    pub fn set_indexed_source(&mut self, source: std::rc::Rc<dyn IndexedSource>) {
+        self.indexed = Some(source);
+    }
+
+    fn source(&self) -> R<&std::rc::Rc<dyn IndexedSource>> {
+        self.indexed.as_ref().ok_or(HeapError::HostUnavailable)
+    }
+
+    /// The number of virtual integer indices of `o`: the bytes of a view, or the live length of a host-indexed object.
+    pub fn virtual_len(&self, o: ObjId) -> R<usize> {
+        match self.exotic(o) {
+            Some(Exotic::View { len, .. }) => Ok(*len),
+            Some(Exotic::Indexed) => self.source()?.indexed_len(o),
+            _ => Ok(0),
+        }
     }
 
     pub fn new_encoder(&mut self, proto: Option<ObjId>) -> R<ObjId> {
@@ -329,6 +391,23 @@ impl Heap {
         }))
     }
 
+    /// `[[GetOwnProperty]]` of a key on any exotic object: `Some(r)` ends the lookup there, `None` means the ordinary rules.
+    /// `want_value` false is for the callers that only ask whether the property exists (`in`, `delete`): they never make a
+    /// `Missing` object, and get a placeholder value.
+    pub(super) fn exotic_own(&self, o: ObjId, key: PropertyKey, want_value: bool) -> R<Option<Option<Property>>> {
+        if let Some(r) = self.view_own(o, key) {
+            return Ok(Some(r));
+        }
+        let (Some(Exotic::Indexed), PropertyKey::Index(i)) = (self.exotic(o), key) else { return Ok(None) };
+        let value = match self.source()?.indexed_item(o, i as usize)? {
+            Slot::Absent => return Ok(None),
+            Slot::Ready(v) => Value::Object(v),
+            Slot::Missing if want_value => return Err(HeapError::NeedsHost { owner: o, index: i }),
+            Slot::Missing => Value::Undefined,
+        };
+        Ok(Some(Some(Property::Data { value, writable: false, enumerable: true, configurable: true })))
+    }
+
     /// ToUint8 of a primitive. An object needs the evaluator (`NeedsExecution`).
     fn to_uint8(&self, v: Value) -> R<u8> {
         Ok(to_uint32(self.to_number(v)?) as u8)
@@ -374,6 +453,9 @@ impl Heap {
 
     /// `[[DefineOwnProperty]]` of an integer-indexed key on a view. `None`: ordinary rules.
     pub(super) fn view_define(&mut self, o: ObjId, key: PropertyKey, d: &PropertyDescriptor) -> R<Option<bool>> {
+        if matches!(key, PropertyKey::Index(_)) && matches!(self.exotic(o), Some(Exotic::Indexed)) {
+            return Ok(Some(false)); // no indexed setter: an index cannot be defined, in range or not
+        }
         let Some(r) = self.view_index(o, key) else { return Ok(None) };
         let Some(i) = r else { return Ok(Some(false)) };
         if d.configurable == Some(false) || d.enumerable == Some(false) || d.is_accessor() || d.writable == Some(false) {
@@ -388,9 +470,9 @@ impl Heap {
 
     /// The indices of a view, ahead of its other own keys. Checks the memory for the key list first.
     pub(super) fn view_keys(&self, o: ObjId) -> R<Vec<PropertyKey>> {
-        let Some(Exotic::View { len, .. }) = self.exotic(o) else { return Ok(Vec::new()) };
+        let len = self.virtual_len(o)?;
         self.charge(len.saturating_mul(std::mem::size_of::<PropertyKey>()))?;
-        Ok((0..*len as u32).map(PropertyKey::Index).collect())
+        Ok((0..len.min(MAX_INDEX as usize) as u32).map(PropertyKey::Index).collect())
     }
 
     /// Drop the payload of every dead exotic object and release its bytes. Called after a sweep.

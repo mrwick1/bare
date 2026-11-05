@@ -24,7 +24,7 @@ impl<'p> Interp<'p> {
                             if matches!(k, PropertyKey::Symbol(_)) {
                                 continue;
                             }
-                            if matches!(h!(self, self.heap.get_own_property(o, k)), Some(p) if p.enumerable()) {
+                            if matches!(hx!(self, self.heap.get_own_property(o, k)), Some(p) if p.enumerable()) {
                                 out.push(k);
                             }
                         }
@@ -45,7 +45,7 @@ impl<'p> Interp<'p> {
                 let Value::Object(o) = a0 else { return Err(self.type_err("Object.defineProperty called on non-object")) };
                 let key = self.coerce_key(arg(args, 1))?;
                 let d = self.property_descriptor(arg(args, 2))?;
-                if !h!(self, self.heap.define_own_property(o, key, &d)) {
+                if !hx!(self, self.heap.define_own_property(o, key, &d)) {
                     let k = self.key_text(key);
                     return Err(self.type_err(&format!("Cannot redefine property: {k}")));
                 }
@@ -58,7 +58,7 @@ impl<'p> Interp<'p> {
                     _ => return Ok(Value::Undefined),
                 };
                 let key = self.coerce_key(arg(args, 1))?;
-                let Some(p) = h!(self, self.heap.get_own_property(o, key)) else { return Ok(Value::Undefined) };
+                let Some(p) = hx!(self, self.heap.get_own_property(o, key)) else { return Ok(Value::Undefined) };
                 let r = h!(self, self.heap.new_object(Some(self.object_proto)));
                 let (k_value, k_writable, k_get, k_set, k_enum, k_conf) = (self.k_value, self.k_writable, self.k_get, self.k_set, self.k_enumerable, self.k_configurable);
                 match p {
@@ -102,7 +102,7 @@ impl<'p> Interp<'p> {
                 }
                 let key = self.coerce_key(a0)?;
                 Ok(Value::Bool(match this {
-                    Value::Object(o) => h!(self, self.heap.has_own_property(o, key)),
+                    Value::Object(o) => hx!(self, self.heap.has_own_property(o, key)),
                     Value::String(s) => key == self.k_length || matches!(key, PropertyKey::Index(i) if (i as usize) < h!(self, self.heap.str_len(s))),
                     _ => false,
                 }))
@@ -190,7 +190,7 @@ impl<'p> Interp<'p> {
                     let k = self.index_key(len - 1)?;
                     let v = self.get_prop(this, k)?;
                     if let Value::Object(o) = this
-                        && !h!(self, self.heap.delete(o, k)) {
+                        && !hx!(self, self.heap.delete(o, k)) {
                         let key = self.key_text(k);
                         return Err(self.type_err(&format!("Cannot delete property '{key}'")));
                     }
@@ -209,7 +209,7 @@ impl<'p> Interp<'p> {
                 for i in 0..len {
                     self.tick()?;
                     let k = self.index_key(i)?;
-                    let has = match this { Value::Object(o) => h!(self, self.heap.has_property(o, k)), Value::String(s) => i < h!(self, self.heap.str_len(s)) as u64, _ => false };
+                    let has = match this { Value::Object(o) => hx!(self, self.heap.has_property(o, k)), Value::String(s) => i < h!(self, self.heap.str_len(s)) as u64, _ => false };
                     if has {
                         let v = self.get_prop(this, k)?;
                         self.call_fn(a0, arg(args, 1), &[v, Value::Number(i as f64), this])?;
@@ -294,7 +294,7 @@ impl<'p> Interp<'p> {
             if *len < 0.0 || len.fract() != 0.0 || *len > u32::MAX as f64 {
                 return Err(self.mk_err(RANGE_ERROR, "Invalid array length"));
             }
-            h!(self, self.heap.set(a, self.k_length, Value::Number(*len)));
+            hx!(self, self.heap.set(a, self.k_length, Value::Number(*len)));
             return Ok(Value::Object(a));
         }
         self.new_array_from_proto(args, proto)
@@ -349,7 +349,7 @@ impl<'p> Interp<'p> {
         };
         let mut out = PropertyDescriptor::default();
         for (k, which) in [(self.k_enumerable, 0), (self.k_configurable, 1), (self.k_value, 2), (self.k_writable, 3), (self.k_get, 4), (self.k_set, 5)] {
-            if !h!(self, self.heap.has_property(o, k)) {
+            if !hx!(self, self.heap.has_property(o, k)) {
                 continue;
             }
             let v = self.get_prop(d, k)?;
