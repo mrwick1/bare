@@ -258,6 +258,27 @@ impl<'p> Interp<'p> {
             Nat::NumberFn => Ok(Value::Number(if args.is_empty() { 0.0 } else { self.coerce_number(a0)? })),
             Nat::BooleanFn => Ok(Value::Bool(self.truthy(a0)?)),
             Nat::IsNaN => Ok(Value::Bool(self.coerce_number(a0)?.is_nan())),
+            Nat::ParseInt => {
+                let s = self.coerce_string(a0)?;
+                let radix = to_int32(self.coerce_number(args.get(1).copied().unwrap_or(Value::Undefined))?);
+                self.spend_units(h!(self, self.heap.str_len(s)))?;
+                Ok(Value::Number(parse_int(h!(self, self.heap.str_units(s)), radix)))
+            }
+            Nat::EncodeUriComponent => {
+                let s = self.coerce_string(a0)?;
+                self.spend_units(h!(self, self.heap.str_len(s)))?;
+                let mut size = 0usize;
+                let cap = self.heap.limits().max_string_units;
+                for c in char::decode_utf16(h!(self, self.heap.str_units(s)).iter().copied()) {
+                    let Ok(c) = c else { return Err(self.mk_err(URI_ERROR, "URI malformed")) };
+                    size = size.saturating_add(if c.is_ascii_alphanumeric() || "-_.!~*'()".contains(c) { 1 } else { 3 * c.len_utf8() });
+                    if size > cap { return Err(Error::Limit(LimitKind::Heap(Limit::StringLength))); }
+                }
+                match encode_uri_component(h!(self, self.heap.str_units(s))) {
+                    Some(out) => Ok(Value::String(h!(self, self.heap.intern_str(&out)))),
+                    None => Err(self.mk_err(URI_ERROR, "URI malformed")),
+                }
+            }
             Nat::Ext(x) => self.call_ext(x, this, args, is_new),
             Nat::Ao(f) => self.call_ao(f, this, args),
             Nat::Sc(f) => self.call_sc(f, this, args, is_new),

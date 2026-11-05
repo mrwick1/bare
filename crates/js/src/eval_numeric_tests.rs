@@ -216,3 +216,52 @@ fn seed_failure_never_uses_a_fallback() {
     assert_eq!(seed_from(&mut Cursor::new([0; 16])), None);
     assert_eq!(seed_from(&mut Cursor::new([1; 16])), Some([0x0101010101010101; 2]));
 }
+
+#[test]
+fn global_parse_int() {
+    for (src, want) in [
+        ("typeof parseInt", "string:function"), ("parseInt.length", "number:2"), ("parseInt.name", "string:parseInt"),
+        ("parseInt('42')", "number:42"), ("parseInt('  -17px')", "number:-17"), ("parseInt('+8')", "number:8"),
+        ("parseInt('0x1F')", "number:31"), ("parseInt('0X1f', 16)", "number:31"), ("parseInt('0x1F', 10)", "number:0"),
+        ("parseInt('11', 2)", "number:3"), ("parseInt('zz', 36)", "number:1295"), ("parseInt('7', 2)", "number:NaN"),
+        ("parseInt('9', 37)", "number:NaN"), ("parseInt('9', 1)", "number:NaN"), ("parseInt('12', 0)", "number:12"),
+        ("parseInt('')", "number:NaN"), ("parseInt('-')", "number:NaN"), ("parseInt('abc')", "number:NaN"),
+        ("parseInt()", "number:NaN"), ("parseInt(undefined)", "number:NaN"), ("parseInt(null, 36)", "number:1112745"),
+        ("1 / parseInt('-0')", "number:-Infinity"), ("parseInt('3.9')", "number:3"), ("parseInt(12.9)", "number:12"),
+        ("parseInt('12', 4294967298)", "number:1"), ("parseInt('123456789012345678901234567890')", "number:1.2345678901234568e+29"),
+        ("parseInt('\\u00a0\\n 5')", "number:5"), ("parseInt({toString(){return '9'}})", "number:9"),
+    ] {
+        assert_eq!(run(src), want, "{src}");
+    }
+}
+
+#[test]
+fn global_encode_uri_component() {
+    for (src, want) in [
+        ("typeof encodeURIComponent", "string:function"), ("encodeURIComponent.length", "number:1"), ("encodeURIComponent.name", "string:encodeURIComponent"),
+        ("encodeURIComponent('abc-_.!~*\\'()XYZ019')", "string:abc-_.!~*'()XYZ019"),
+        ("encodeURIComponent('a b&c=d/e?f#g;h:i@j,k+l$')", "string:a%20b%26c%3Dd%2Fe%3Ff%23g%3Bh%3Ai%40j%2Ck%2Bl%24"),
+        ("encodeURIComponent('\\u00e9')", "string:%C3%A9"), ("encodeURIComponent('\\u20ac')", "string:%E2%82%AC"),
+        ("encodeURIComponent('\\ud83d\\ude00')", "string:%F0%9F%98%80"), ("encodeURIComponent('\\0')", "string:%00"),
+        ("encodeURIComponent('')", "string:"), ("encodeURIComponent()", "string:undefined"), ("encodeURIComponent(null)", "string:null"),
+        ("encodeURIComponent(12.5)", "string:12.5"), ("encodeURIComponent({toString(){return 'x y'}})", "string:x%20y"),
+        ("var m; try{ encodeURIComponent('\\ud800') }catch(e){ m = e.name + ':' + e.message + ':' + (e instanceof URIError) + ':' + (e instanceof Error) } m", "string:URIError:URI malformed:true:true"),
+        ("var m; try{ encodeURIComponent('\\udc00x') }catch(e){ m = e.name } m", "string:URIError"),
+        ("new URIError('q').message + Object.prototype.toString.call(new URIError('q'))", "string:q[object Object]"),
+    ] {
+        assert_eq!(run(src), want, "{src}");
+    }
+}
+
+#[test]
+fn hydration_globals_charge_scans_and_round_power_radices_once() {
+    big(|| {
+        assert_eq!(run("parseInt('3eb146685257bdd640fb',16) === 2.9605686903448163e23"), "boolean:true");
+        for call in ["parseInt(s)", "encodeURIComponent(s)"] {
+            let mut it = Interp::realm(Heap::default(), EvalLimits::default()).unwrap();
+            it.run_script("var s = new Array(10000).join('1');").unwrap();
+            it.limits.max_steps = 100;
+            assert!(matches!(it.run_script(call), Err(Error::Limit(LimitKind::Steps))), "{call}");
+        }
+    });
+}

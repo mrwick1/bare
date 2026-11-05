@@ -31,6 +31,8 @@ fn main() {
     let (kind, n) = (a[1].clone(), a[2].parse::<u64>().unwrap());
     let expected = a.get(3).cloned();
     let body = match kind.as_str() {
+        "parseint" => "parseInt(i.toString(16),16)",
+        "uricomponent" => "encodeURIComponent('é /?#').length",
         "empty" => "0",
         "random" => "Math.random()",
         "clz32" => "Math.clz32(i)",
@@ -40,7 +42,7 @@ fn main() {
         "radix2sub" => "(5e-324 * (i + 1)).toString(2).length",
         _ => panic!("kind"),
     };
-    let child = std::thread::Builder::new().stack_size(64 << 20).spawn(move || {
+    let child = std::thread::Builder::new().stack_size(if cfg!(debug_assertions) { 64 << 20 } else { 8 << 20 }).spawn(move || {
         let (_, first) = run(&format!("(function(){{ var i = 0; return {body}; }})()"));
         let (r, hot) = run(&format!("var acc = 0; for (var i = 0; i < {n}; i++) {{ var item = {body}; if (!(item >= 0) || ({random} && !(item < 1))) throw 1; acc += item; }} acc", random = kind == "random"));
         let actual: f64 = r.parse().expect("the engine must return a numeric checksum");

@@ -391,3 +391,5 @@ Known gaps of module 4:
 - Load limits: a reply head may be 256 KB, a reply 128 MB and 120 seconds, and the HTTP cache 64 MB (it empties when full). The Noah's Ark check reads 256 entries only.
 
 Array.prototype.fill is integrated with strict generic writes and a preflight work bound. The cached page now settles with zero throws, resource errors and unhandled rejections. No form is present. This does not close the hydration gate. See [resources.md](resources.md#array-fill).
+
+The Flight client now has parseInt and React's error formatter has encodeURIComponent/URIError. A labeled-block break bug that made React's lazy-element switch fail is fixed. The trace next reaches missing Date.now; Date and iframe work are separate integrations. Error.stack and React hydration mismatch 418 remain unverified follow-ups. See [resources.md](resources.md#hydration-globals-and-labeled-control-flow).

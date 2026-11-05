@@ -223,6 +223,14 @@ var s = ""; for (var i = 0; i < 10; i++) { if (i % 2) continue; if (i > 6) break
 var s = ""; outer: for (var i = 0; i < 3; i++) { for (var j = 0; j < 3; j++) { if (j == 2) continue outer; if (i == 2) break outer; s += i + "" + j + ","; } } s
 === labeled_block
 var s = "a"; blk: { s += "b"; break blk; s += "c"; } s + "d"
+=== labeled_block_break_from_switch
+var s = ""; e: { switch (1) { case 0: s = "a"; break e; case 1: s = "b"; break e; } s = "bad"; } s
+=== labeled_block_break_from_loop
+var s = ""; e: { for (;;) { s += "x"; break e; } s = "bad"; } s
+=== labeled_if_break_from_loop
+var s = ""; e: if (true) { for (var i = 0; i < 3; i++) { s += i; if (i == 1) break e; } s += "bad"; } s + "|"
+=== labeled_block_inside_loop_body
+var s = ""; for (var i = 0; i < 3; i++) { e: { switch (i) { case 1: break e; } s += i; } } s
 === labeled_continue_do
 var n = 0; l: do { n++; continue l; } while (n < 3); n
 === switch_basic
