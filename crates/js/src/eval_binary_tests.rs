@@ -39,14 +39,14 @@ fn fmt_result(it: &mut Interp, r: Result<Value, Error>) -> String {
 
 /// Run a script with default limits and show the result.
 fn run(src: &str) -> String {
-    run_with(src, Heap::default(), EvalLimits { max_steps: 5_000_000, ..Default::default() }, |_| {})
+    run_with(src, HeapLimits::default(), EvalLimits { max_steps: 5_000_000, ..Default::default() }, |_| {})
 }
 
-fn run_with(src: &str, heap: Heap, limits: EvalLimits, setup: impl FnOnce(&mut Interp) + Send + 'static) -> String {
+fn run_with(src: &str, heap: HeapLimits, limits: EvalLimits, setup: impl FnOnce(&mut Interp) + Send + 'static) -> String {
     let src = src.to_string();
     big(move || {
         let prog = parse_script(&src, Limits::default()).unwrap_or_else(|e| panic!("{src:?}: {e}"));
-        let mut it = Interp::new(&prog, heap, limits).expect("setup");
+        let mut it = Interp::new(&prog, Heap::new(heap).unwrap(), limits).expect("setup");
         setup(&mut it);
         let r = it.run();
         fmt_result(&mut it, r)
@@ -152,13 +152,13 @@ fn webidl_argument_order_and_dictionaries() {
 
 // ---------------------------------------------------------------- limits
 
-fn limited(heap: Heap, total: usize, single: usize, src: &str) -> String {
+fn limited(heap: HeapLimits, total: usize, single: usize, src: &str) -> String {
     run_with(src, heap, EvalLimits { max_steps: 50_000_000, ..Default::default() }, move |it| it.set_binary_limits(total, single))
 }
 
 #[test]
 fn buffer_caps_are_checked_before_allocation_and_are_distinct() {
-    let h = Heap::default;
+    let h = HeapLimits::default;
     // One buffer.
     assert_eq!(limited(h(), 1000, 600, "new ArrayBuffer(700)"), "limit:Heap(BufferLength)");
     assert_eq!(limited(h(), 1000, 600, "new Uint8Array(700)"), "limit:Heap(BufferLength)");
@@ -179,7 +179,7 @@ fn buffer_caps_are_checked_before_allocation_and_are_distinct() {
     assert_eq!(limited(h(), 1000, 600, "var a = new ArrayBuffer(600); var b = a.slice(0, 600); b.byteLength"), "limit:Heap(BufferBytes)");
     assert_eq!(limited(h(), 1000, 600, "var u = new Uint8Array(600); new Uint8Array(u); 1"), "limit:Heap(BufferBytes)");
     // The heap byte budget also counts the bytes.
-    let small = Heap::new(HeapLimits { max_bytes: 1 << 20, ..Default::default() }).unwrap();
+    let small = HeapLimits { max_bytes: 1 << 20, ..Default::default() };
     assert_eq!(limited(small, usize::MAX, usize::MAX, "new ArrayBuffer(2000000)"), "limit:Heap(Bytes)");
 }
 
@@ -187,9 +187,9 @@ fn buffer_caps_are_checked_before_allocation_and_are_distinct() {
 fn array_like_length_is_checked_before_any_element_is_read() {
     let src = "var reads = 0; var o = {length: 100000, get 0() { reads++; return 1; }}; var r;
                try { new Uint8Array(o); } catch (e) { r = e.name; } r";
-    assert_eq!(limited(Heap::default(), 1 << 20, 1000, src), "limit:Heap(BufferLength)");
+    assert_eq!(limited(HeapLimits::default(), 1 << 20, 1000, src), "limit:Heap(BufferLength)");
     // An array that is longer than the cap stops while it is read, with the same limit.
-    assert_eq!(limited(Heap::default(), 1 << 20, 100, "var a = []; for (var i = 0; i < 200; i++) a.push(i); new Uint8Array(a)"), "limit:Heap(BufferLength)");
+    assert_eq!(limited(HeapLimits::default(), 1 << 20, 100, "var a = []; for (var i = 0; i < 200; i++) a.push(i); new Uint8Array(a)"), "limit:Heap(BufferLength)");
     // A huge ToLength does not loop or allocate.
     assert_eq!(run("new Uint8Array({length: 9007199254740991})"), "limit:Heap(BufferLength)");
     assert_eq!(run("new Uint8Array({length: Infinity})"), "limit:Heap(BufferLength)");
@@ -200,7 +200,7 @@ fn array_like_length_is_checked_before_any_element_is_read() {
 #[test]
 fn passes_over_bytes_consume_steps() {
     let limits = EvalLimits { max_steps: 20_000, ..Default::default() };
-    let heap = || Heap::default();
+    let heap = || HeapLimits::default();
     // 64 MiB copied is 1M steps: refused before the allocation.
     let r = run_with("var u = new Uint8Array(67108864); u.slice(0)", heap(), limits, |_| {});
     assert_eq!(r, "limit:Steps");
@@ -230,26 +230,26 @@ fn passes_over_bytes_consume_steps() {
 
 #[test]
 fn key_enumeration_of_a_huge_view_is_charged_before_the_list_exists() {
-    let heap = Heap::new(HeapLimits { max_bytes: 4 << 20, ..Default::default() }).unwrap();
+    let heap = HeapLimits { max_bytes: 4 << 20, ..Default::default() };
     // A 3 MiB buffer fits the budget; a key list for 3M elements (8 bytes each) does not.
     let src = "var u = new Uint8Array(3000000); Object.keys(u).length";
     assert_eq!(limited(heap, usize::MAX, usize::MAX, src), "limit:Heap(Bytes)");
-    let heap = Heap::new(HeapLimits { max_bytes: 4 << 20, ..Default::default() }).unwrap();
+    let heap = HeapLimits { max_bytes: 4 << 20, ..Default::default() };
     assert_eq!(limited(heap, usize::MAX, usize::MAX, "var u = new Uint8Array(3000000); var n = 0; for (var k in u) n++; n"), "limit:Heap(Bytes)");
-    let heap = Heap::new(HeapLimits { max_bytes: 4 << 20, ..Default::default() }).unwrap();
+    let heap = HeapLimits { max_bytes: 4 << 20, ..Default::default() };
     assert_eq!(limited(heap, usize::MAX, usize::MAX, "var u = new Uint8Array(3000000); var o = {...u}; 1"), "limit:Heap(Bytes)");
 }
 
 #[test]
 fn text_output_and_decoder_state_are_bounded() {
     // The decoded text cannot pass the heap's string cap: one unit for each byte is the bound, checked first.
-    let heap = Heap::new(HeapLimits { max_string_units: 64, ..Default::default() }).unwrap();
+    let heap = HeapLimits { max_string_units: 64, ..Default::default() };
     assert_eq!(limited(heap, usize::MAX, usize::MAX, "new TextDecoder().decode(new Uint8Array(100))"), "limit:Heap(StringLength)");
-    let heap = Heap::new(HeapLimits { max_string_units: 64, ..Default::default() }).unwrap();
+    let heap = HeapLimits { max_string_units: 64, ..Default::default() };
     assert_eq!(limited(heap, usize::MAX, usize::MAX, "new TextDecoder().decode(new Uint8Array(50)).length"), "number:50");
     // The encoder checks the byte length against the buffer cap before it allocates.
-    assert_eq!(limited(Heap::default(), 1 << 20, 10, "new TextEncoder().encode('\\u20ac\\u20ac\\u20ac\\u20ac')"), "limit:Heap(BufferLength)");
-    assert_eq!(limited(Heap::default(), 1 << 20, 12, "new TextEncoder().encode('\\u20ac\\u20ac\\u20ac\\u20ac').length"), "number:12");
+    assert_eq!(limited(HeapLimits::default(), 1 << 20, 10, "new TextEncoder().encode('\\u20ac\\u20ac\\u20ac\\u20ac')"), "limit:Heap(BufferLength)");
+    assert_eq!(limited(HeapLimits::default(), 1 << 20, 12, "new TextEncoder().encode('\\u20ac\\u20ac\\u20ac\\u20ac').length"), "number:12");
     // A decoder holds a fixed state however much streams through it: 100000 one-byte chunks of a 3-byte sequence.
     let r = run("var d = new TextDecoder(); var n = 0; var c = [new Uint8Array([0xE2]), new Uint8Array([0x82]), new Uint8Array([0xAC])];
                  for (var i = 0; i < 100000; i++) n += d.decode(c[i % 3], {stream: true}).length; n + d.decode().length");
@@ -577,8 +577,8 @@ fn collect_does_not_walk_or_charge_view_indices() {
     // A 3 MB view with a 4 MB byte budget: listing its keys would cost 24 MB, so collect must not do it.
     big(|| {
         let prog = parse_script("var u = new Uint8Array(3000000); u.tag = {a: 1}; function probe() { return u.tag.a; }", Limits::default()).unwrap();
-        let heap = Heap::new(HeapLimits { max_bytes: 4 << 20, ..Default::default() }).unwrap();
-        let mut it = Interp::new(&prog, heap, EvalLimits::default()).unwrap();
+        let heap = HeapLimits { max_bytes: 4 << 20, ..Default::default() };
+        let mut it = Interp::new(&prog, Heap::new(heap).unwrap(), EvalLimits::default()).unwrap();
         it.run().unwrap();
         let steps = it.stats().steps;
         it.collect(&[]).unwrap();
@@ -593,13 +593,13 @@ fn collect_does_not_walk_or_charge_view_indices() {
 
 #[test]
 fn view_enumeration_checks_steps_before_materializing_keys() {
-    let heap = Heap::new(HeapLimits { max_bytes: 4 << 20, ..Default::default() }).unwrap();
+    let heap = HeapLimits { max_bytes: 4 << 20, ..Default::default() };
     assert_eq!(run_with("var u = new Uint8Array(3000000); Object.keys(u)", heap, EvalLimits { max_steps: 100, ..Default::default() }, |_| {}), "limit:Steps");
 }
 
 #[test]
 fn decoder_accepts_output_exactly_at_the_string_cap() {
-    let heap = || Heap::new(HeapLimits { max_string_units: 64, ..Default::default() }).unwrap();
+    let heap = || HeapLimits { max_string_units: 64, ..Default::default() };
     assert_eq!(run_with("new TextDecoder().decode(new Uint8Array(64)).length", heap(), EvalLimits::default(), |_| {}), "number:64");
     let bytes = vec!["195,169"; 64].join(",");
     let src = format!("new TextDecoder().decode(new Uint8Array([{bytes}])).length");
@@ -609,7 +609,7 @@ fn decoder_accepts_output_exactly_at_the_string_cap() {
 #[test]
 fn decoder_label_scans_consume_steps() {
     let src = format!("new TextDecoder('{}utf-8')", " ".repeat(8192));
-    assert_eq!(run_with(&src, Heap::default(), EvalLimits { max_steps: 100, ..Default::default() }, |_| {}), "limit:Steps");
+    assert_eq!(run_with(&src, HeapLimits::default(), EvalLimits { max_steps: 100, ..Default::default() }, |_| {}), "limit:Steps");
 }
 
 // ---------------------------------------------------------------- iterables, species and subclass gates
@@ -695,7 +695,7 @@ fn a_typed_array_iterator_takes_no_result_objects_and_follows_the_buffer() {
 #[test]
 fn object_assign_values_and_entries_charge_view_indices_before_materializing_keys() {
     for call in ["Object.assign({}, u)", "Object.values(u)", "Object.entries(u)"] {
-        let heap = Heap::new(HeapLimits { max_bytes: 4 << 20, ..Default::default() }).unwrap();
+        let heap = HeapLimits { max_bytes: 4 << 20, ..Default::default() };
         assert_eq!(run_with(&format!("var u = new Uint8Array(3000000); {call}"), heap, EvalLimits { max_steps: 100, ..Default::default() }, |_| {}), "limit:Steps", "{call}");
     }
 }
@@ -705,8 +705,8 @@ fn collect_with_a_suspended_view_iteration_does_not_walk_the_view_indices() {
     // The frame holds the iterator over a 3 MB view; a key list of it would cost 24 MB against a 4 MB budget.
     big(|| {
         let prog = parse_script("var u = new Uint8Array(3000000); var gate; var p = new Promise(function (r) { gate = r; }); var n = 0; (async function () { for (var x of u) { await p; n++; if (n == 2) break; } })(); function probe() { return n; }", Limits::default()).unwrap();
-        let heap = Heap::new(HeapLimits { max_bytes: 4 << 20, ..Default::default() }).unwrap();
-        let mut it = Interp::new(&prog, heap, EvalLimits::default()).unwrap();
+        let heap = HeapLimits { max_bytes: 4 << 20, ..Default::default() };
+        let mut it = Interp::new(&prog, Heap::new(heap).unwrap(), EvalLimits::default()).unwrap();
         it.run().unwrap();
         assert_eq!(it.async_stats().activations, 1);
         let steps = it.stats().steps;

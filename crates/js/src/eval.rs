@@ -3017,7 +3017,7 @@ impl<'p> Interp<'p> {
 
     /// Charge virtual view indices before materializing their key list.
     fn property_keys(&mut self, o: ObjId) -> Res<Vec<PropertyKey>> {
-        let len = self.heap.virtual_len(o);
+        let len = h!(self, self.heap.virtual_len(o));
         if len != 0 {
             self.spend(len as u64)?;
         }

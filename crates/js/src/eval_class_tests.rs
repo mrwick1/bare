@@ -69,11 +69,11 @@ fn probe(it: &mut Interp, name: &str) -> String {
     outcome(it, r)
 }
 
-fn limit_of(src: &str, limits: EvalLimits, heap: Heap) -> LimitKind {
+fn limit_of(src: &str, limits: EvalLimits, heap: HeapLimits) -> LimitKind {
     let src = src.to_string();
     big(move || {
         let prog = parse_script(&src, Limits::default()).unwrap();
-        let mut it = Interp::new(&prog, heap, limits).unwrap();
+        let mut it = Interp::new(&prog, Heap::new(heap).unwrap(), limits).unwrap();
         match it.run() {
             Err(Error::Limit(k)) => k,
             other => panic!("{src}: {:?}", other.map(|v| it.display(v))),
@@ -198,13 +198,13 @@ fn class_constructor_calls_from_the_host_are_type_errors() {
 #[test]
 fn recursion_through_constructors_hits_the_call_depth_limit() {
     let d = EvalLimits::default();
-    assert_eq!(limit_of("class A { constructor() { new A(); } } new A();", d, Heap::default()), LimitKind::CallDepth);
-    assert_eq!(limit_of("class A { f = new A(); } new A();", d, Heap::default()), LimitKind::CallDepth);
-    assert_eq!(limit_of("class A { static s = new A(); constructor() { new A(); } } ", d, Heap::default()), LimitKind::CallDepth);
-    assert_eq!(limit_of("class A { m() { return this.m(); } } new A().m();", d, Heap::default()), LimitKind::CallDepth);
-    assert_eq!(limit_of("class A { get g() { return this.g; } } new A().g;", d, Heap::default()), LimitKind::CallDepth);
-    assert_eq!(limit_of("class A { #p = 1; get #g() { return this.#g; } m() { return this.#g; } } new A().m();", d, Heap::default()), LimitKind::CallDepth);
-    assert_eq!(limit_of("class A { m() { return this.m(); } } class B extends A { m() { return super.m(); } } new B().m();", EvalLimits { max_call_depth: u32::MAX, ..d }, Heap::default()), LimitKind::CallDepth);
+    assert_eq!(limit_of("class A { constructor() { new A(); } } new A();", d, HeapLimits::default()), LimitKind::CallDepth);
+    assert_eq!(limit_of("class A { f = new A(); } new A();", d, HeapLimits::default()), LimitKind::CallDepth);
+    assert_eq!(limit_of("class A { static s = new A(); constructor() { new A(); } } ", d, HeapLimits::default()), LimitKind::CallDepth);
+    assert_eq!(limit_of("class A { m() { return this.m(); } } new A().m();", d, HeapLimits::default()), LimitKind::CallDepth);
+    assert_eq!(limit_of("class A { get g() { return this.g; } } new A().g;", d, HeapLimits::default()), LimitKind::CallDepth);
+    assert_eq!(limit_of("class A { #p = 1; get #g() { return this.#g; } m() { return this.#g; } } new A().m();", d, HeapLimits::default()), LimitKind::CallDepth);
+    assert_eq!(limit_of("class A { m() { return this.m(); } } class B extends A { m() { return super.m(); } } new B().m();", EvalLimits { max_call_depth: u32::MAX, ..d }, HeapLimits::default()), LimitKind::CallDepth);
 }
 
 #[test]
@@ -217,8 +217,8 @@ fn a_deep_derived_chain_is_a_limit_not_a_native_stack_overflow() {
         explicit += &format!("class C{i} extends C{} {{ constructor() {{ super(); }} }}\n", i - 1);
     }
     let d = EvalLimits { max_call_depth: u32::MAX, ..Default::default() };
-    assert_eq!(limit_of(&(implicit.clone() + "new C150();"), d, Heap::default()), LimitKind::CallDepth);
-    assert_eq!(limit_of(&(explicit.clone() + "new C150();"), d, Heap::default()), LimitKind::CallDepth);
+    assert_eq!(limit_of(&(implicit.clone() + "new C150();"), d, HeapLimits::default()), LimitKind::CallDepth);
+    assert_eq!(limit_of(&(explicit.clone() + "new C150();"), d, HeapLimits::default()), LimitKind::CallDepth);
     // 60 levels fit.
     let ok = |src: String| run_case(&src);
     let short: String = implicit.lines().take(61).collect::<Vec<_>>().join("\n");
@@ -245,16 +245,16 @@ fn nested_classes_are_bounded_by_the_parser_and_the_walk() {
 fn other_limits_are_distinct_for_classes() {
     let d = EvalLimits::default();
     let small = EvalLimits { max_steps: 100_000, ..d };
-    assert_eq!(limit_of("class A { a = 1; b = 2; c = 3; } while (true) new A();", small, Heap::default()), LimitKind::Steps);
-    assert_eq!(limit_of("class A { a = (() => { while (true) {} })(); } new A();", small, Heap::default()), LimitKind::Steps);
-    assert_eq!(limit_of("class A { static a = (() => { for (;;) {} })(); }", small, Heap::default()), LimitKind::Steps);
-    assert_eq!(limit_of("class A { [(() => { for (;;) {} })()]() {} }", small, Heap::default()), LimitKind::Steps);
+    assert_eq!(limit_of("class A { a = 1; b = 2; c = 3; } while (true) new A();", small, HeapLimits::default()), LimitKind::Steps);
+    assert_eq!(limit_of("class A { a = (() => { while (true) {} })(); } new A();", small, HeapLimits::default()), LimitKind::Steps);
+    assert_eq!(limit_of("class A { static a = (() => { for (;;) {} })(); }", small, HeapLimits::default()), LimitKind::Steps);
+    assert_eq!(limit_of("class A { [(() => { for (;;) {} })()]() {} }", small, HeapLimits::default()), LimitKind::Steps);
     // The cap counts the intrinsic functions too: allow 100 more than a fresh realm holds.
     let intrinsic = big(|| Interp::realm(Heap::default(), EvalLimits::default()).unwrap().stats().functions);
-    assert_eq!(limit_of("var k = []; for (var i = 0; i < 1000; i++) k.push(class { m() {} });", EvalLimits { max_functions: intrinsic + 100, ..d }, Heap::default()), LimitKind::Functions);
-    assert_eq!(limit_of("var k = []; for (var i = 0; i < 1000; i++) k.push(class { m() {} });", EvalLimits { max_envs: 50, ..d }, Heap::default()), LimitKind::Envs);
+    assert_eq!(limit_of("var k = []; for (var i = 0; i < 1000; i++) k.push(class { m() {} });", EvalLimits { max_functions: intrinsic + 100, ..d }, HeapLimits::default()), LimitKind::Functions);
+    assert_eq!(limit_of("var k = []; for (var i = 0; i < 1000; i++) k.push(class { m() {} });", EvalLimits { max_envs: 50, ..d }, HeapLimits::default()), LimitKind::Envs);
     let intrinsic_objects = big(|| Interp::realm(Heap::default(), EvalLimits::default()).unwrap().heap.stats().live_objects);
-    let heap = Heap::new(HeapLimits { max_objects: intrinsic_objects + 100, ..Default::default() }).unwrap();
+    let heap = HeapLimits { max_objects: intrinsic_objects + 100, ..Default::default() };
     assert!(matches!(limit_of("class A { x = 1; } var k = []; for (;;) k.push(new A());", d, heap), LimitKind::Heap(Limit::Objects)));
 }
 

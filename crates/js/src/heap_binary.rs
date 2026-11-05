@@ -37,23 +37,6 @@ pub enum ExoticKind {
     Indexed,
 }
 
-// The host of a heap is not `Send` (a DOM is `Rc` and `RefCell`), but a `Heap` is, and tests and callers move one into a
-// thread before they use it. So the heap holds only a number, and the host (an `Rc`) lives in this table of the thread that
-// installed it. A heap used on another thread finds nothing: its indexed objects then have no elements. `Drop for Heap`
-// removes the entry when it runs on the installing thread.
-thread_local! {
-    static SOURCES: std::cell::RefCell<HashMap<u64, std::rc::Rc<dyn IndexedSource>>> = std::cell::RefCell::new(HashMap::new());
-}
-static NEXT_SOURCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
-
-impl Drop for Heap {
-    fn drop(&mut self) {
-        if let Some(id) = self.indexed {
-            let _ = SOURCES.try_with(|m| m.borrow_mut().remove(&id));
-        }
-    }
-}
-
 /// What a host says about one index of a host-indexed object right now.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Slot {
@@ -70,10 +53,11 @@ pub enum Slot {
 /// and must not run JavaScript. They get `&self`: an answer cannot change anything. `owner` is the object that was asked,
 /// which can be a prototype of the object that the page touched.
 pub trait IndexedSource {
-    /// How many indices are properties of `owner` now. `None`: `owner` is not a live object of this host.
-    fn indexed_len(&self, owner: ObjId) -> Option<usize>;
-    /// The property at `index` of `owner` now.
-    fn indexed_item(&self, owner: ObjId, index: usize) -> Slot;
+    /// How many indices are properties of `owner` now. `Ok(0)`: `owner` is not a live object of this host. `Err`: the host
+    /// cannot answer now (for example its state is borrowed). The error stops the script; it is never an empty answer.
+    fn indexed_len(&self, owner: ObjId) -> Result<usize, HeapError>;
+    /// The property at `index` of `owner` now. `Err` as for `indexed_len`.
+    fn indexed_item(&self, owner: ObjId, index: usize) -> Result<Slot, HeapError>;
 }
 
 /// State of a UTF-8 `TextDecoder`: the options, and the WHATWG decoder registers (a partly read sequence is at most
@@ -246,23 +230,28 @@ impl Heap {
     }
 
     /// Install the host that answers for every `new_indexed` object of this heap.
-    /// The host must be used on this thread only: it stays in a table of this thread (see `SOURCES`).
+    /// The heap owns the `Rc`, and drops it with the heap or when a new source replaces it. A heap with a host source is
+    /// therefore not `Send` (a DOM is `Rc` and `RefCell`): it stays on the thread that made it. The compiler enforces this.
+    /// API cost: a pure `Heap` is `!Send` too. Build it on the thread that uses it. A moved heap does not compile:
+    ///
+    /// ```compile_fail
+    /// fn needs_send<T: Send>(_: T) {}
+    /// needs_send(bare_js::heap::Heap::default());
+    /// ```
     pub fn set_indexed_source(&mut self, source: std::rc::Rc<dyn IndexedSource>) {
-        let id = *self.indexed.get_or_insert_with(|| NEXT_SOURCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed));
-        SOURCES.with(|m| m.borrow_mut().insert(id, source));
+        self.indexed = Some(source);
     }
 
-    fn source(&self) -> Option<std::rc::Rc<dyn IndexedSource>> {
-        let id = self.indexed?;
-        SOURCES.try_with(|m| m.borrow().get(&id).cloned()).ok().flatten()
+    fn source(&self) -> R<&std::rc::Rc<dyn IndexedSource>> {
+        self.indexed.as_ref().ok_or(HeapError::HostUnavailable)
     }
 
     /// The number of virtual integer indices of `o`: the bytes of a view, or the live length of a host-indexed object.
-    pub fn virtual_len(&self, o: ObjId) -> usize {
+    pub fn virtual_len(&self, o: ObjId) -> R<usize> {
         match self.exotic(o) {
-            Some(Exotic::View { len, .. }) => *len,
-            Some(Exotic::Indexed) => self.source().and_then(|s| s.indexed_len(o)).unwrap_or(0),
-            _ => 0,
+            Some(Exotic::View { len, .. }) => Ok(*len),
+            Some(Exotic::Indexed) => self.source()?.indexed_len(o),
+            _ => Ok(0),
         }
     }
 
@@ -410,8 +399,7 @@ impl Heap {
             return Ok(Some(r));
         }
         let (Some(Exotic::Indexed), PropertyKey::Index(i)) = (self.exotic(o), key) else { return Ok(None) };
-        let Some(src) = self.source() else { return Ok(None) };
-        let value = match src.indexed_item(o, i as usize) {
+        let value = match self.source()?.indexed_item(o, i as usize)? {
             Slot::Absent => return Ok(None),
             Slot::Ready(v) => Value::Object(v),
             Slot::Missing if want_value => return Err(HeapError::NeedsHost { owner: o, index: i }),
@@ -482,7 +470,7 @@ impl Heap {
 
     /// The indices of a view, ahead of its other own keys. Checks the memory for the key list first.
     pub(super) fn view_keys(&self, o: ObjId) -> R<Vec<PropertyKey>> {
-        let len = self.virtual_len(o);
+        let len = self.virtual_len(o)?;
         self.charge(len.saturating_mul(std::mem::size_of::<PropertyKey>()))?;
         Ok((0..len.min(MAX_INDEX as usize) as u32).map(PropertyKey::Index).collect())
     }

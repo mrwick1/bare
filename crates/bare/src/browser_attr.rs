@@ -47,7 +47,7 @@ use crate::browser_dom::{arg, valid_name};
 use crate::browser_namespace as ns;
 use bare_html::dom::{Atom, NodeData, NodeId, RemovedAttr, Span};
 use bare_js::eval::{Error, Interp};
-use bare_js::heap::{IndexedSource, Slot};
+use bare_js::heap::{HeapError, IndexedSource, Slot};
 use bare_js::value::{ObjId, Value};
 use std::cell::{OnceCell, RefCell};
 use std::collections::HashMap;
@@ -133,26 +133,27 @@ pub(crate) fn prune(d: &Dom, live: &dyn Fn(ObjId) -> bool) {
 }
 
 impl IndexedSource for Dom {
-    fn indexed_len(&self, owner: ObjId) -> Option<usize> {
-        let el = *self.attr.s.try_borrow().ok()?.maps.get(&owner)?;
-        Some(self.doc.try_borrow().ok()?.attr_count(el))
+    fn indexed_len(&self, owner: ObjId) -> Result<usize, HeapError> {
+        let t = self.attr.s.try_borrow().map_err(|_| HeapError::HostUnavailable)?;
+        let Some(&el) = t.maps.get(&owner) else { return Ok(0) };
+        Ok(self.doc.try_borrow().map_err(|_| HeapError::HostUnavailable)?.attr_count(el))
     }
 
-    fn indexed_item(&self, owner: ObjId, index: usize) -> Slot {
-        let Ok(t) = self.attr.s.try_borrow() else { return Slot::Missing };
-        let Some(&el) = t.maps.get(&owner) else { return Slot::Absent };
-        let Ok(doc) = self.doc.try_borrow() else { return Slot::Missing };
-        let NodeData::Element { attrs, .. } = *doc.data(el) else { return Slot::Absent };
-        let Some(a) = doc.attrs(attrs).get(index) else { return Slot::Absent };
+    fn indexed_item(&self, owner: ObjId, index: usize) -> Result<Slot, HeapError> {
+        let t = self.attr.s.try_borrow().map_err(|_| HeapError::HostUnavailable)?;
+        let Some(&el) = t.maps.get(&owner) else { return Ok(Slot::Absent) };
+        let doc = self.doc.try_borrow().map_err(|_| HeapError::HostUnavailable)?;
+        let NodeData::Element { attrs, .. } = *doc.data(el) else { return Ok(Slot::Absent) };
+        let Some(a) = doc.attrs(attrs).get(index) else { return Ok(Slot::Absent) };
         // A removal is waiting in the log: the table can still hold the `Attr` of an attribute that was removed and added back.
         // `fill_indexed` drains the log, then the read repeats.
         if doc.has_removed_attrs() {
-            return Slot::Missing;
+            return Ok(Slot::Missing);
         }
-        match t.by_el.get(&el).and_then(|l| l.iter().find(|(x, _)| *x == a.name)) {
+        Ok(match t.by_el.get(&el).and_then(|l| l.iter().find(|(x, _)| *x == a.name)) {
             Some(&(_, o)) => Slot::Ready(o),
             None => Slot::Missing,
-        }
+        })
     }
 }
 

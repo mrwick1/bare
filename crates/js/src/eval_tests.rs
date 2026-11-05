@@ -107,11 +107,11 @@ fn missing_builtins_are_reference_errors_not_silent() {
     assert_eq!(run_case("Function('return 1')"), "other:Unsupported(Unsupported { what: \"Function constructor (dynamic code)\", span: Span { start: 0, end: 0 } })");
 }
 
-fn limit_of(src: &str, limits: EvalLimits, heap: Heap) -> LimitKind {
+fn limit_of(src: &str, limits: EvalLimits, heap: HeapLimits) -> LimitKind {
     let src = src.to_string();
     big(move || {
         let prog = parse_script(&src, Limits::default()).unwrap();
-        let mut it = Interp::new(&prog, heap, limits).unwrap();
+        let mut it = Interp::new(&prog, Heap::new(heap).unwrap(), limits).unwrap();
         match it.run() {
             Err(Error::Limit(k)) => k,
             other => panic!("{src}: {:?}", other.map(|v| it.display(v))),
@@ -122,19 +122,19 @@ fn limit_of(src: &str, limits: EvalLimits, heap: Heap) -> LimitKind {
 #[test]
 fn limits_are_distinct_and_not_catchable() {
     let small = EvalLimits { max_steps: 100_000, ..Default::default() };
-    assert_eq!(limit_of("while (true) {}", small, Heap::default()), LimitKind::Steps);
-    assert_eq!(limit_of("for (;;) {}", small, Heap::default()), LimitKind::Steps);
+    assert_eq!(limit_of("while (true) {}", small, HeapLimits::default()), LimitKind::Steps);
+    assert_eq!(limit_of("for (;;) {}", small, HeapLimits::default()), LimitKind::Steps);
     // try/catch/finally cannot swallow a limit
-    assert_eq!(limit_of("try { for (;;) {} } catch (e) { 1 } finally { 2 }", small, Heap::default()), LimitKind::Steps);
-    assert_eq!(limit_of("function f() { return f(); } try { f(); } catch (e) { 1 }", small, Heap::default()), LimitKind::CallDepth);
+    assert_eq!(limit_of("try { for (;;) {} } catch (e) { 1 } finally { 2 }", small, HeapLimits::default()), LimitKind::Steps);
+    assert_eq!(limit_of("function f() { return f(); } try { f(); } catch (e) { 1 }", small, HeapLimits::default()), LimitKind::CallDepth);
     // a bound-function chain is a call depth too, so it cannot overflow the Rust stack
-    assert_eq!(limit_of("var f = function() {}; for (var i = 0; i < 500; i++) f = f.bind(null); f()", EvalLimits::default(), Heap::default()), LimitKind::CallDepth);
+    assert_eq!(limit_of("var f = function() {}; for (var i = 0; i < 500; i++) f = f.bind(null); f()", EvalLimits::default(), HeapLimits::default()), LimitKind::CallDepth);
     let envs = EvalLimits { max_envs: 50, ..Default::default() };
-    assert_eq!(limit_of("var keep = []; function mk(n) { return function() { return n; }; } for (var i = 0; i < 1000; i++) keep.push(mk(i));", envs, Heap::default()), LimitKind::Envs);
+    assert_eq!(limit_of("var keep = []; function mk(n) { return function() { return n; }; } for (var i = 0; i < 1000; i++) keep.push(mk(i));", envs, HeapLimits::default()), LimitKind::Envs);
     let intrinsic_functions = big(|| Interp::realm(Heap::default(), EvalLimits::default()).unwrap().stats().functions);
     let funcs = EvalLimits { max_functions: intrinsic_functions + 100, ..Default::default() };
-    assert_eq!(limit_of("var keep = []; for (var i = 0; i < 1000; i++) keep.push(function() {});", funcs, Heap::default()), LimitKind::Functions);
-    let heap = Heap::new(HeapLimits { max_bytes: 1 << 20, ..Default::default() }).unwrap();
+    assert_eq!(limit_of("var keep = []; for (var i = 0; i < 1000; i++) keep.push(function() {});", funcs, HeapLimits::default()), LimitKind::Functions);
+    let heap = HeapLimits { max_bytes: 1 << 20, ..Default::default() };
     assert!(matches!(limit_of("var s = 'xxxxxxxx'; for (;;) s += s;", EvalLimits::default(), heap), LimitKind::Heap(_)));
 }
 

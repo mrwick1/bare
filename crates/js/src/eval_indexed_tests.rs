@@ -3,7 +3,7 @@
 //! without a DOM. Each test runs on a big stack.
 
 use super::*;
-use crate::heap::{Heap, IndexedSource, Slot};
+use crate::heap::{Heap, HeapError, IndexedSource, Slot};
 use std::cell::{Cell, RefCell};
 
 fn big<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {
@@ -21,18 +21,18 @@ struct X {
 }
 
 impl IndexedSource for X {
-    fn indexed_len(&self, owner: ObjId) -> Option<usize> {
-        (self.owner.get() == Some(owner)).then(|| self.items.borrow().len())
+    fn indexed_len(&self, owner: ObjId) -> Result<usize, HeapError> {
+        Ok(if self.owner.get() == Some(owner) { self.items.try_borrow().map_err(|_| HeapError::HostUnavailable)?.len() } else { 0 })
     }
-    fn indexed_item(&self, owner: ObjId, i: usize) -> Slot {
+    fn indexed_item(&self, owner: ObjId, i: usize) -> Result<Slot, HeapError> {
         if self.owner.get() != Some(owner) {
-            return Slot::Absent;
+            return Ok(Slot::Absent);
         }
-        match self.items.borrow().get(i) {
+        Ok(match self.items.try_borrow().map_err(|_| HeapError::HostUnavailable)?.get(i) {
             None => Slot::Absent,
             Some(None) => Slot::Missing,
             Some(Some(o)) => Slot::Ready(*o),
-        }
+        })
     }
 }
 
@@ -226,5 +226,76 @@ fn the_collector_follows_host_edges_and_drops_dead_objects() {
         x.items.borrow_mut().clear();
         it.collect(&[]).unwrap();
         assert!(it.heap.stats().live_objects < before);
+    });
+}
+
+#[test]
+fn the_heap_owns_its_source_and_drops_it_with_the_heap() {
+    big(|| {
+        let (it, x) = setup();
+        let weak = Rc::downgrade(&x);
+        drop(x);
+        assert!(weak.upgrade().is_some(), "the interpreter and the heap still hold the host");
+        drop(it);
+        assert!(weak.upgrade().is_none(), "no table keeps the host after the heap is gone");
+    });
+}
+
+#[test]
+fn a_new_source_releases_the_old_one_and_two_heaps_do_not_alias() {
+    let (mut h1, mut h2) = (Heap::default(), Heap::default());
+    let (a, b) = (Rc::new(X::default()), Rc::new(X::default()));
+    let (o1, o2) = (h1.new_indexed(None).unwrap(), h2.new_indexed(None).unwrap());
+    a.owner.set(Some(o1));
+    b.owner.set(Some(o2));
+    a.items.borrow_mut().extend([None, None, None]);
+    b.items.borrow_mut().push(None);
+    h1.set_indexed_source(a.clone());
+    h2.set_indexed_source(b.clone());
+    assert_eq!((h1.virtual_len(o1), h2.virtual_len(o2)), (Ok(3), Ok(1)));
+    // Replace: the old host is released at once, the heap answers from the new one.
+    let (weak, c) = (Rc::downgrade(&a), Rc::new(X::default()));
+    c.owner.set(Some(o1));
+    h1.set_indexed_source(c);
+    drop(a);
+    assert!(weak.upgrade().is_none());
+    assert_eq!((h1.virtual_len(o1), h2.virtual_len(o2)), (Ok(0), Ok(1)));
+    drop(h1);
+    assert_eq!(h2.virtual_len(o2), Ok(1));
+}
+
+#[test]
+fn a_host_that_cannot_answer_is_an_error_never_an_empty_list() {
+    // No source at all.
+    let mut h = Heap::default();
+    let o = h.new_indexed(None).unwrap();
+    assert_eq!(h.virtual_len(o), Err(HeapError::HostUnavailable));
+    assert_eq!(h.own_keys(o), Err(HeapError::HostUnavailable));
+    assert_eq!(h.own_key_slots(o), Err(HeapError::HostUnavailable));
+    assert!(matches!(h.get_own_property(o, PropertyKey::Index(0)), Err(HeapError::HostUnavailable)));
+    // A source whose cell is borrowed by a writer.
+    let x = Rc::new(X::default());
+    x.owner.set(Some(o));
+    x.items.borrow_mut().push(Some(o));
+    h.set_indexed_source(x.clone());
+    assert_eq!(h.virtual_len(o), Ok(1));
+    let w = x.items.borrow_mut();
+    assert_eq!(h.virtual_len(o), Err(HeapError::HostUnavailable));
+    assert_eq!(h.own_keys(o), Err(HeapError::HostUnavailable));
+    assert!(matches!(h.get_own_property(o, PropertyKey::Index(0)), Err(HeapError::HostUnavailable)));
+    drop(w);
+    assert_eq!(h.own_keys(o).unwrap().len(), 1);
+}
+
+#[test]
+fn a_borrowed_host_stops_the_script() {
+    big(|| {
+        let (mut it, x) = setup();
+        out(&mut it, "var m = make(); grow(2)");
+        let w = x.items.borrow_mut();
+        assert_eq!(out(&mut it, "Object.keys(m).length"), "other:Heap(HostUnavailable)");
+        assert_eq!(out(&mut it, "0 in m"), "other:Heap(HostUnavailable)");
+        drop(w);
+        assert_eq!(out(&mut it, "Object.keys(m).length"), "2");
     });
 }

@@ -90,11 +90,11 @@ fn corpus_survives_collect() {
     });
 }
 
-fn with_limits(src: &str, sc: ScLimits, heap: Heap) -> String {
+fn with_limits(src: &str, sc: ScLimits, heap: HeapLimits) -> String {
     let src = src.to_string();
     big(move || {
         let prog = parse_script(&src, Limits::default()).unwrap();
-        let mut it = Interp::new(&prog, heap, EvalLimits { max_steps: 2_000_000, ..Default::default() }).unwrap();
+        let mut it = Interp::new(&prog, Heap::new(heap).unwrap(), EvalLimits { max_steps: 2_000_000, ..Default::default() }).unwrap();
         it.set_sc_limits(sc);
         match it.run() {
             Ok(v) => format!("ok:{}", esc(&it.display(v))),
@@ -103,8 +103,8 @@ fn with_limits(src: &str, sc: ScLimits, heap: Heap) -> String {
     })
 }
 
-fn small_heap() -> Heap {
-    Heap::new(HeapLimits { max_bytes: 256 << 20, ..Default::default() }).unwrap()
+fn small_heap() -> HeapLimits {
+    HeapLimits { max_bytes: 256 << 20, ..Default::default() }
 }
 
 fn run(src: &str) -> String {
@@ -119,29 +119,29 @@ fn every_cap_is_a_distinct_limit_and_not_catchable() {
         l
     };
     let reg = c(&|l| l.max_registry = 3);
-    assert_eq!(with_limits("Symbol.for('a'); Symbol.for('b'); Symbol.for('c'); Symbol.for('a') === Symbol.for('a')", reg, Heap::default()), "ok:true");
-    assert_eq!(with_limits("Symbol.for('a'); Symbol.for('b'); Symbol.for('c'); try { Symbol.for('d'); } catch (e) { 'caught'; }", reg, Heap::default()), "limit:Sc(Registry)");
+    assert_eq!(with_limits("Symbol.for('a'); Symbol.for('b'); Symbol.for('c'); Symbol.for('a') === Symbol.for('a')", reg, HeapLimits::default()), "ok:true");
+    assert_eq!(with_limits("Symbol.for('a'); Symbol.for('b'); Symbol.for('c'); try { Symbol.for('d'); } catch (e) { 'caught'; }", reg, HeapLimits::default()), "limit:Sc(Registry)");
     let colls = c(&|l| l.max_collections = 2);
-    assert_eq!(with_limits("new Map(); new Set(); try { new Map(); } catch (e) {}", colls, Heap::default()), "limit:Sc(Collections)");
+    assert_eq!(with_limits("new Map(); new Set(); try { new Map(); } catch (e) {}", colls, HeapLimits::default()), "limit:Sc(Collections)");
     let ent = c(&|l| l.max_entries = 4);
-    assert_eq!(with_limits("var m = new Map(); for (var i = 0; i < 4; i++) m.set(i, i); m.set(0, 'overwrite ok'); m.size", ent, Heap::default()), "ok:4");
-    assert_eq!(with_limits("var m = new Map(); for (var i = 0; i < 5; i++) m.set(i, i);", ent, Heap::default()), "limit:Sc(Entries)");
-    assert_eq!(with_limits("var s = new Set([1, 2, 3, 4, 5]);", ent, Heap::default()), "limit:Sc(Entries)");
+    assert_eq!(with_limits("var m = new Map(); for (var i = 0; i < 4; i++) m.set(i, i); m.set(0, 'overwrite ok'); m.size", ent, HeapLimits::default()), "ok:4");
+    assert_eq!(with_limits("var m = new Map(); for (var i = 0; i < 5; i++) m.set(i, i);", ent, HeapLimits::default()), "limit:Sc(Entries)");
+    assert_eq!(with_limits("var s = new Set([1, 2, 3, 4, 5]);", ent, HeapLimits::default()), "limit:Sc(Entries)");
     // a full collection with holes compacts instead of failing
-    assert_eq!(with_limits("var m = new Map(); for (var i = 0; i < 4; i++) m.set(i, i); m.delete(0); m.delete(1); m.set(9, 9); m.set(10, 10); m.size", ent, Heap::default()), "ok:4");
+    assert_eq!(with_limits("var m = new Map(); for (var i = 0; i < 4; i++) m.set(i, i); m.delete(0); m.delete(1); m.set(9, 9); m.set(10, 10); m.size", ent, HeapLimits::default()), "ok:4");
     let total = c(&|l| l.max_total_entries = 5);
-    assert_eq!(with_limits("var a = new Map([[1, 1], [2, 2], [3, 3]]); var b = new Set([1, 2, 3]);", total, Heap::default()), "limit:Sc(TotalEntries)");
+    assert_eq!(with_limits("var a = new Map([[1, 1], [2, 2], [3, 3]]); var b = new Set([1, 2, 3]);", total, HeapLimits::default()), "limit:Sc(TotalEntries)");
     let its = c(&|l| l.max_iterators = 3);
-    assert_eq!(with_limits("var m = new Map(); m.keys(); m.values(); [][Symbol.iterator](); 1", its, Heap::default()), "ok:1");
-    assert_eq!(with_limits("var m = new Map(); m.keys(); m.values(); m.entries(); m.keys();", its, Heap::default()), "limit:Sc(Iterators)");
+    assert_eq!(with_limits("var m = new Map(); m.keys(); m.values(); [][Symbol.iterator](); 1", its, HeapLimits::default()), "ok:1");
+    assert_eq!(with_limits("var m = new Map(); m.keys(); m.values(); m.entries(); m.keys();", its, HeapLimits::default()), "limit:Sc(Iterators)");
     // for-of and spread over a Map, Set or array make no iterator object (fast path)
-    assert_eq!(with_limits("var m = new Map([[1, 2]]); for (var i = 0; i < 100; i++) { for (var x of m) {} [...m]; var [a] = m; }; 1", its, Heap::default()), "ok:1");
+    assert_eq!(with_limits("var m = new Map([[1, 2]]); for (var i = 0; i < 100; i++) { for (var x of m) {} [...m]; var [a] = m; }; 1", its, HeapLimits::default()), "ok:1");
     let buf = c(&|l| l.max_iter_buffer = 10);
-    assert_eq!(with_limits("function f() { return arguments.length; } f(...[1, 2, 3, 4, 5, 6, 7, 8, 9, 10])", buf, Heap::default()), "ok:10");
-    assert_eq!(with_limits("function f() {} f(...[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11])", buf, Heap::default()), "limit:Sc(IterBuffer)");
-    assert_eq!(with_limits("var [a, ...r] = new Set([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);", buf, Heap::default()), "limit:Sc(IterBuffer)");
+    assert_eq!(with_limits("function f() { return arguments.length; } f(...[1, 2, 3, 4, 5, 6, 7, 8, 9, 10])", buf, HeapLimits::default()), "ok:10");
+    assert_eq!(with_limits("function f() {} f(...[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11])", buf, HeapLimits::default()), "limit:Sc(IterBuffer)");
+    assert_eq!(with_limits("var [a, ...r] = new Set([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);", buf, HeapLimits::default()), "limit:Sc(IterBuffer)");
     // heap symbol cap is the heap's own limit
-    let heap = Heap::new(HeapLimits { max_symbols: 40, ..Default::default() }).unwrap();
+    let heap = HeapLimits { max_symbols: 40, ..Default::default() };
     assert!(with_limits("for (var i = 0; i < 100; i++) Symbol('x');", ScLimits::default(), heap).starts_with("limit:Heap(Symbols)"));
 }
 
@@ -152,14 +152,14 @@ fn an_infinite_iterator_ends_with_a_limit_and_runs_no_js_afterwards() {
         let src = "var closed = 0, fin = 0; var it = { [Symbol.iterator]() { return this; }, next() { return { value: 1, done: false }; }, return() { closed++; return {}; } };
             try { for (var x of it) {} } catch (e) { fin = 1; } finally { fin += 2; }";
         let prog = parse_script(src, Limits::default()).unwrap();
-        let mut it = Interp::new(&prog, small_heap(), EvalLimits { max_steps: 500_000, ..Default::default() }).unwrap();
+        let mut it = Interp::new(&prog, Heap::new(small_heap()).unwrap(), EvalLimits { max_steps: 500_000, ..Default::default() }).unwrap();
         assert!(matches!(it.run(), Err(Error::Limit(LimitKind::Steps))));
         assert!(matches!(global(&mut it, "closed"), Value::Number(n) if n == 0.0));
         assert!(matches!(global(&mut it, "fin"), Value::Number(n) if n == 0.0));
     });
     // spread of an infinite iterator stops at the buffer cap (arguments, rest) or the heap cap (array literal)
     let src = "var it = { [Symbol.iterator]() { return this; }, next() { return { value: 1, done: false }; } }; var a = [...it];";
-    let heap = Heap::new(HeapLimits { max_bytes: 1 << 20, ..Default::default() }).unwrap();
+    let heap = HeapLimits { max_bytes: 1 << 20, ..Default::default() };
     assert!(with_limits(src, ScLimits::default(), heap).starts_with("limit:Heap(Bytes)"));
     let src = "var it = { [Symbol.iterator]() { return this; }, next() { return { value: 1, done: false }; } }; function f() {} f(...it);";
     let lim = ScLimits { max_iter_buffer: 1000, ..Default::default() };

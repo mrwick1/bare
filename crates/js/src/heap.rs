@@ -84,6 +84,8 @@ pub enum HeapError {
     /// A property of a host-indexed object (`new_indexed`) has no JavaScript object yet. Nothing was changed. The evaluator asks
     /// the host to make it (`Host::fill_indexed`) and repeats the operation.
     NeedsHost { owner: ObjId, index: u32 },
+    /// A host-indexed object has no host source, or the host cannot answer now (its state is borrowed). It stops the script.
+    HostUnavailable,
 }
 
 #[path = "heap_binary.rs"]
@@ -600,8 +602,9 @@ pub struct Heap {
     buffer_bytes: usize,
     max_buffer_bytes: usize,
     max_buffer_len: usize,
-    /// The key of the host that answers for the indexed properties of `new_indexed` objects (see `binary::SOURCES`).
-    indexed: Option<u64>,
+    /// The host that answers for the indexed properties of `new_indexed` objects. The heap owns it, so it dies with the heap.
+    /// An `Rc` makes `Heap` `!Send`: a heap stays on its thread. A moved heap cannot lose its host silently.
+    indexed: Option<std::rc::Rc<dyn IndexedSource>>,
 }
 
 impl Default for Heap {
@@ -1114,7 +1117,7 @@ impl Heap {
     /// Includes dense holes, removed property slots and virtual byte-view indices.
     pub fn own_key_slots(&self, o: ObjId) -> R<usize> {
         let ob = self.obj(o)?;
-        let virtual_len = self.virtual_len(o);
+        let virtual_len = self.virtual_len(o)?;
         Ok(ob.elems.len().saturating_add(ob.props.entries.len()).saturating_add(virtual_len))
     }
 

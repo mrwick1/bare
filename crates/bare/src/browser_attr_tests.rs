@@ -395,3 +395,55 @@ fn steps_are_charged_and_limits_hold_for_large_maps() {
         assert!(r.starts_with("limit:Steps"), "{r}");
     });
 }
+
+#[test]
+fn two_browsers_on_one_thread_do_not_share_a_source_and_free_the_dom() {
+    big(|| {
+        let mut a = browser();
+        let mut b = browser_with("<!doctype html><html><body><p id=only></p></body></html>", BrowserLimits::default());
+        ok(&mut a, "var m = document.getElementById('a').attributes; [m.length, m[0].name].join()", "3,id");
+        ok(&mut b, "var m = document.getElementById('only').attributes; [m.length, m[0].name].join()", "1,id");
+        // Each map still answers from its own document after the other one changes.
+        ok(&mut a, "document.getElementById('a').setAttribute('z', '1'); m.length", "4");
+        ok(&mut b, "m.length", "1");
+        // The source lives and dies with its heap: no thread table keeps a dropped document.
+        let (wa, wb) = (std::rc::Rc::downgrade(&a.dom), std::rc::Rc::downgrade(&b.dom));
+        drop(a);
+        assert!(wa.upgrade().is_none() && wb.upgrade().is_some());
+        ok(&mut b, "m[0].value", "only");
+        drop(b);
+        assert!(wb.upgrade().is_none());
+    });
+}
+
+#[test]
+fn a_borrowed_document_stops_the_script_instead_of_reading_an_empty_map() {
+    big(|| {
+        let mut b = browser();
+        ok(&mut b, "var m = document.getElementById('a').attributes; m.length", "3");
+        let doc = b.document();
+        let w = doc.borrow_mut();
+        for src in ["Object.keys(m).length", "0 in m", "Reflect.ownKeys(m).length"] {
+            let r = js(&mut b, src);
+            assert_eq!(r, "other:Heap(HostUnavailable)", "{src}");
+        }
+        drop(w);
+        ok(&mut b, "Object.keys(m).join()", "0,1,2");
+    });
+}
+
+#[test]
+fn creating_and_dropping_browsers_leaves_no_host_behind() {
+    big(|| {
+        let mut weak = Vec::new();
+        for i in 0..100 {
+            let mut b = browser();
+            ok(&mut b, "var m = document.getElementById('a').attributes; m.length", "3");
+            if i % 10 == 0 {
+                ok(&mut b, "document.getElementById('a').setAttribute('q', '1'); m[3].name", "q");
+            }
+            weak.push(std::rc::Rc::downgrade(&b.dom));
+        }
+        assert!(weak.iter().all(|w| w.upgrade().is_none()));
+    });
+}
