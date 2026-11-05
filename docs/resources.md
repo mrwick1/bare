@@ -2109,3 +2109,110 @@ Known differences from Node 22:
 Other problems found and not changed: `Object.create(proto, properties)` was still a gate (fixed after this batch; see below). `Object.getOwnPropertyDescriptor("ab", 0)` returns `undefined` for a primitive string. `hasOwnProperty` converts `this` before the key, and the specification converts the key first. `Array.prototype.slice` takes 62 ms for 1M elements, 60 times more than the in-place paths above.
 
 Not tested: a real page on this build (the live login was not run), `Proxy`, `DataView` and typed arrays other than `Uint8Array` with these methods, locales other than the root rules, and Node versions other than 22.
+
+## Paint and pixel capture
+
+S4 topic 1. The crate is `bare-paint` (`crates/paint/`). Date: 2026-11-05. Machine: archMachine (16 cores), release build.
+
+### Design
+
+- Layout gives a flat list of fragments in tree order. Paint reads that list once and writes a display list (`display.rs`): rectangles, text runs and clips. A second pass draws the list into a `Canvas` (`canvas.rs`). The canvas is a `Vec<u32>` of opaque `0xAARRGGBB` pixels, as `decisions.md` ("Platforms") asks.
+- A `Painter` keeps the display list, the text buffer, the scratch lists and the glyph cache between frames. A repeat paint allocates nothing (a test checks the capacities and the pixel buffer address).
+- The order is CSS 2.1 Appendix E for each context: own background and borders, block backgrounds, floats, lines (inline backgrounds, text, markers, inline-blocks), positioned boxes. Floats, inline-blocks, boxes that clip and positioned boxes are contexts. The scratch lists are stacks that a context uses and gives back, so the walk is one pass over the fragments plus one visit for each context.
+- The root background (or the `body` background) becomes the canvas color, and the element does not paint it twice.
+- Rectangles snap to whole pixels like Chrome: each edge goes to the nearest pixel. A border width under 1 px is 1 px, and other widths go down to whole pixels.
+- What is outside the canvas makes no item. A box that clips and has no inside on the canvas ends its walk.
+- Text: the text of a fragment goes into one `String` (no `String` for each run on the common path). Letters are `font::width_of` apart, in whole tenths of an em as layout adds them, so a run ends where layout says. The baseline is `rect.y + ascent`, as layout computed it, on a whole pixel row. Each letter sits on a quarter of a pixel.
+- Glyphs come from Noto Sans Mono Regular and Bold, as subsets of 22 KB each (`data/fonts/`, license `OFL.txt`) built into the program. The subset holds Basic Latin, Latin-1, common punctuation, bullets, boxes and arrows. Built in means that the pixels do not depend on the machine. The layout metrics (600 of 1000 units) equal the advance of the font: a test checks it for both files.
+- The glyph cache maps (face, glyph, size, quarter pixel) to a coverage mask. Masks live in one `Vec<u8>`, the map uses a one-multiply hash, and the cache starts again from empty at 8 MB.
+- Capture: `png.rs` writes RGB rows through the `png` crate's stream writer: no copy of the whole picture. `bare --paint=OUT.png FILE.html [--width=N]` lays out a local file with no network and writes the window (N by 800).
+
+### Crate choices
+
+Each row is one spike (`target/spike`, not kept) on the same subset font. 95 ASCII glyphs, 200 repetitions, sizes 12, 16, 24 and 48 px. Binary size is the stripped release binary of the spike, minus 345,624 B for an empty `main`.
+
+| Work | Candidate | Time | Binary |
+| --- | --- | --- | ---: |
+| Fill one glyph outline (µs, 12 / 16 / 24 / 48 px) | tiny-skia 0.12 path fill into a new pixmap, outlines from skrifa 0.44 | 10.1 / 7.8 / 8.7 / 15.0 | +1,118,872 B |
+| | skrifa 0.44 and ab_glyph_rasterizer 0.1 | 1.07 / 1.42 / 2.11 / 5.10 | +923,408 B |
+| | fontdue 0.9.5 (no fractional x offset in its public API) | 0.36 / 0.39 / 0.53 / 1.09 | +142,976 B |
+| | ab_glyph 0.2.32 (with a 0.25 px offset) | 1.64 / 1.14 / 1.30 / 2.28 | +165,328 B |
+| Solid rectangles, 10,000 of 60 by 20 px, half translucent (µs for each) | tiny-skia `fill_rect`, no anti-alias | 2.47 | +240,224 B |
+| | hand-written row fill and blend | 0.72 | 0 |
+| PNG of a 1280 by 800 picture (a page-like test picture) | `png` 0.18.1, `Fast`, `Sub` filter | 1.45 ms, 261,014 B | +161,008 B |
+| | `png`, `Balanced` | 17.6 ms, 98,794 B | |
+| | own writer, stored deflate blocks | 22.4 ms (naive CRC), 4,097,178 B | +31,360 B |
+
+Choices:
+
+- tiny-skia is not used. A filled glyph costs about 6.5 times more than with ab_glyph (14 to 28 times more than with fontdue; the spike allocates a pixmap for each glyph, and that is part of the cost). A plain rectangle costs 3.4 times more. It adds 1.1 MB to the binary with skrifa (0.24 MB alone, in the rectangle spike). Paint here needs only axis-aligned solid rectangles and glyph masks. tiny-skia comes back when a topic needs paths, gradients or radius. `border-radius` is not parsed yet.
+- Rectangles are hand-written (about 30 lines in `canvas.rs`).
+- ab_glyph (Apache-2.0) fills the outlines. fontdue is 2 to 5 times faster per glyph and 22 KB smaller, but it cannot place a glyph at a fraction of a pixel, and the glyph cache makes the per-glyph time matter little (see the load test). Chrome and Firefox place letters at fractions of a pixel with Skia. The width of a letter here is 9.6 px at 16 px, so whole pixel places would make uneven gaps.
+- `png` 0.18.1 writes the capture. The own writer is 130 KB smaller but makes files 16 times bigger. `Fast` makes a 1280 by 800 capture in 1.5 ms.
+- skrifa was not adopted: with ab_glyph (ttf-parser inside) it was 0.76 MB larger and not faster.
+
+Added crates (versions in `Cargo.lock`): `ab_glyph` 0.2.32 (Apache-2.0), `ab_glyph_rasterizer` 0.1.10 (Apache-2.0), `owned_ttf_parser` 0.25.1 (MIT OR Apache-2.0), `ttf-parser` 0.25.1 (MIT OR Apache-2.0), `png` 0.18.1 (MIT OR Apache-2.0) with `fdeflate`, `flate2`, `miniz_oxide`, `crc32fast`, `bitflags`, `simd-adler32`, `adler2`, `cfg-if` and `zlib-rs` (MIT, Zlib or Apache-2.0). Measured on the `bare` binary: stripped 5,384,464 B before, 5,722,024 B after: +337,560 B (+6.3%). The two font subsets are 44,796 B of that.
+
+### Check against Chrome
+
+Method: `google-chrome-stable --headless=new --hide-scrollbars --force-device-scale-factor=1 --window-size=400,800 --screenshot=out.png file.html`. Each fixture gets `* { font-family: 'Noto Sans Mono' !important }` after the doctype, as in the layout checks. `bare --paint=out.png --width=400 fixture.html` gives the other picture. Both are 400 by 800. Pixel difference counts:
+
+| Fixture | Pixels that differ | What differs |
+| --- | ---: | --- |
+| `backgrounds` (fractional edges, margins, a translucent box, `body` background) | 0 of 320,000 | nothing: the same in every pixel |
+| `borders` | 416 | 20 pixels at the corners where sides have two colors (Chrome draws a diagonal, we draw square corners), and the rest is the `dashed` border (we draw `solid`) |
+| `order` (clip, float, relative, absolute, inline-block) | 1,396 | glyph shading only: all boxes and their order are the same, and all differing pixels are in text |
+| `text` | 7,598 | glyph shading: 17,312 pixels hold ink in one picture or both, and 2,051 of those differ by more than 64 levels. The ink boxes of four checked lines are at the same place to 1 px |
+| `login` | 18,872 | glyph shading, and the inputs: layout gives `<input>` only its padding and border (no line of text and no value), so the page is shorter and every box under the first input moves |
+
+The text shading differs because Chrome uses hinted FreeType glyphs and we fill unhinted outlines. The plan says that exact Chrome pixels are not an initial gate.
+
+### Load test
+
+`cargo run --release -p bare-paint --example load -- <case> <n> [canvas height]`. One process for each row. A canvas of 1280 by 800 unless noted. Times are in milliseconds. `list` makes the display list, `raster` draws it into a cold canvas and glyph cache, `repeat` is the whole second frame (list and raster, everything warm), `png` encodes the capture. `list KB` is the memory of the display list, the text buffer and the scratch lists.
+
+| Case | n | Fragments | Layout | list | raster | repeat | png | list KB | Glyphs |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| boxes (background and border) | 100 | 102 | 0.0 | 0.01 | 0.50 | 0.39 | 1.7 | | 0 |
+| | 1,000 | 1,002 | 0.2 | 0.05 | 0.21 | 0.21 | 1.5 | | 0 |
+| | 10,000 | 10,002 | 1.7 | 0.43 | 0.42 | 0.81 | 1.6 | | 0 |
+| | 100,000 | 100,002 | 15.3 | 4.55 | 0.30 | 4.41 | 1.6 | 14 | 0 |
+| lines (one text line each) | 100 | 202 | 0.1 | 0.02 | 0.72 | 0.43 | 2.9 | | 42 |
+| | 1,000 | 2,002 | 0.6 | 0.09 | 0.59 | 0.52 | 3.0 | | 42 |
+| | 10,000 | 20,002 | 5.6 | 0.79 | 0.57 | 1.25 | 2.9 | | 42 |
+| | 100,000 | 200,002 | 56.6 | 7.88 | 0.69 | 8.72 | 2.9 | 5 | 42 |
+| mixed (card, heading, inline boxes, text) | 100 | 1,002 | 0.2 | 0.04 | 0.35 | 0.25 | 1.9 | | 21 |
+| | 1,000 | 10,002 | 1.6 | 0.28 | 0.34 | 0.52 | 1.9 | | 21 |
+| | 10,000 | 100,002 | 16.8 | 2.74 | 0.44 | 2.99 | 1.8 | | 21 |
+| | 100,000 | 1,000,002 | 154.4 | 27.1 | 0.60 | 27.7 | 1.8 | 8 | 21 |
+| nested (20 levels) | 100,000 | 105,023 | 22.1 | 3.37 | 1.13 | 4.41 | 1.7 | | 1 |
+| dense (a full screen of 4,800 letters) | 100 | 302 | 0.1 | 0.03 | 0.94 | 0.73 | 3.6 | 6 | 69 |
+| | 10,000 | 30,002 | 9.8 | 2.03 | 1.07 | 2.79 | 3.6 | 6 | 69 |
+
+Results:
+
+- The list costs 27 to 45 ns for each fragment (the page is walked once, with a style lookup for each box). It is 14 to 30% of the layout time. The raster of a screen costs 0.2 to 1.1 ms, so a 1280 by 800 frame of a page of 100,000 boxes takes 4.4 ms, and one of 1,000,000 fragments takes 28 ms, nearly all of it in the walk over fragments that are not on the canvas.
+- The display list holds only what is on the canvas: 334 items for 100,000 boxes, 14 KB. The glyph cache holds 21 to 69 glyphs (up to 6 KB of masks) for a full screen.
+- The glyph cache makes a screen of 4,800 letters 4 to 5 times faster: 0.8 to 1.1 ms with the cache, 4.2 ms when the cache is turned off (`MAX_BYTES` 0, measured once and put back). The two measurements are the only comparison; the per-glyph numbers in the spike show the same ratio.
+- A canvas of the whole page costs the pixel bandwidth: 1280 by 8192 (42 MB) takes 6 to 8 ms to draw and 29 ms to encode as PNG, and 1280 by 16384 (84 MB) takes 15 ms and 58 ms. A page of 10,000 lines is 220,000 px high, so a capture of the whole page needs a canvas that big (1.1 GB) or a capture in pieces. Not built.
+- Extra RSS of a viewport paint (`VmHWM` after `clear_refs`, over the 4.1 MB canvas that already exists) is at most 108 KB in every run (the canvas is the memory that matters: 4 bytes for each pixel, 4.1 MB for 1280 by 800).
+
+Possible savings, not made because the walk is already small: skip a whole subtree that is below the canvas. It is not safe with the data that layout gives: a child can sit outside its parent (negative margins, absolute boxes, overflow), and layout keeps no visual overflow rectangle. Add the rectangle to layout first.
+
+### Gaps
+
+- No `z-index` (not parsed). A positioned box paints in tree order over the flow, and its positioned children paint inside it.
+- Flex and grid items paint as blocks, not as inline-blocks.
+- A box with `overflow` other than `visible` paints as one unit. No scrollbars.
+- Borders: only `solid`. `dashed`, `dotted`, `double` and the 3D styles draw as `solid`. Square corners: the top and bottom sides own the corner pixels when two sides differ in color. No radius.
+- An inline box cut over two lines draws all four borders on each piece.
+- Text decoration is read from the parent of the text only, as a line in the color of the text (no thickness or color from CSS). Italic is not drawn (no italic face). Bold is the Bold face for `font-weight` 600 and more.
+- A letter that the font subset lacks (Chinese, Japanese, Korean, most symbols and emoji) is not drawn, and layout still gives it its width. There is no fallback font. A tab or a newline kept by `white-space: pre` is not drawn and has no width in paint.
+- No images, no SVG, no gradients, no shadows, no opacity (not parsed), no form control drawing: layout makes an `<input>` with no text, and paint draws its border and background only.
+- No hit testing and no scroll offset: the canvas is the top of the page.
+
+Problems seen in other crates, not changed:
+
+- Layout: `border-width: 0.4px` stays 0.4 px. Chrome gives 1 px (a width under 1 px is 1 px). Each such border moves the boxes under it.
+- Layout: an `<input>` has no line of text and no `value` text, so its height is only its padding and border.
+- `bare --layout` and `bare --styles` accept only `http://` and `https://` URLs. Only `--paint` reads a local file.

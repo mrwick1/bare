@@ -49,7 +49,7 @@ Use a dedicated staging account. Read credentials from the vault at run time. Do
 
 ### Journey status
 
-Status on 2026-11-05, main bd26c75. The work is in S3 topic 6. All runs are headless, through the session driver. S4 is not started.
+Status on 2026-11-05, main bd26c75. The work is in S3 topic 6. All runs are headless, through the session driver. S4 topic 1 (paint and pixel capture) is built. The other S4 topics are not started.
 
 | Step | Status |
 | --- | --- |
@@ -492,3 +492,5 @@ Batch 1 of the missing built-ins runs: 68 Array, String, Object and Reflect name
 
 
 On 2026-11-05 the live login ran on main d32be77 (batch 1). It stopped at `Unsupported("Object.create properties argument")` before navigation. `Object.create` now applies its second argument with `ObjectDefineProperties`. The live login on this fix stores its token, then stays on `/login` with no throw and no console error: 22 scripts and 39 fetches settle without a navigation. Hypothesis: the new built-ins let the Next.js client router run a client-side navigation, where it earlier fell back to a full page load. To verify: trace the router after the submit.
+
+S4 topic 1 is built: a software paint pipeline and pixel capture (`crates/paint`, `bare --paint=OUT.png FILE.html`). Layout's fragments become a display list in CSS painting order (backgrounds, solid borders, text, markers, clips for `overflow`, floats, inline-blocks and positioned boxes), and the list is drawn into a `Vec<u32>`. Text uses the outlines of the real Noto Sans Mono, at the places and widths that layout used; a test checks the pitch to 0.02 px. Five fixtures give repeatable pixel hashes and exact pixels, and `backgrounds` is the same as Chrome in all 320,000 pixels. A frame of 100,000 boxes takes 4.4 ms, and 1,000,000 fragments take 28 ms. The glyph cache makes a screen of text 4 to 5 times faster. The adopted crates are ab_glyph and png (+337 KB of binary with the font subsets). tiny-skia was measured and left out. Gaps: no `z-index`, only solid borders, no radius, no images, no form-control text, no Chrome-exact glyph shading. See [resources.md](resources.md#paint-and-pixel-capture). Next: topic 2, the Wayland window.

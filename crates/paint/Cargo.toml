@@ -1,0 +1,14 @@
+# Paint: the display list, the pixel buffer, glyphs from the font file, and PNG capture.
+[package]
+name = "bare-paint"
+version.workspace = true
+edition.workspace = true
+# The vendored font (`data/fonts`) is under the SIL Open Font License 1.1.
+license = "(MIT OR Apache-2.0) AND OFL-1.1"
+
+[dependencies]
+ab_glyph = "0.2"
+bare-css = { path = "../css" }
+bare-html = { path = "../html" }
+bare-layout = { path = "../layout" }
+png = "0.18"

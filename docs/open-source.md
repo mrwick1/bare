@@ -75,6 +75,18 @@ Study these for architecture. Take parts from them.
 | [winit](https://github.com/rust-windowing/winit) | Apache-2.0 | 6,249 | Cross-platform windows and input. |
 | [wgpu](https://github.com/gfx-rs/wgpu) | Apache-2.0 | 18,466 | GPU API. Needed only for a GPU renderer. |
 
+### Adopted for S4 topic 1 (2026-11-05)
+
+| Part | License | Used as | Measured |
+| --- | --- | --- | --- |
+| [ab_glyph](https://github.com/alexheretic/ab-glyph) 0.2.32, with `ab_glyph_rasterizer` 0.1.10, `owned_ttf_parser` 0.25.1 and `ttf-parser` 0.25.1 | Apache-2.0 (the last two MIT OR Apache-2.0) | crate: glyph outlines to coverage masks | 1.1 to 2.3 µs for a glyph, +165 KB of binary |
+| [png](https://github.com/image-rs/image-png) 0.18.1 and its dependencies (`fdeflate`, `flate2`, `miniz_oxide`, `crc32fast`, `bitflags`, `simd-adler32`, `adler2`, `cfg-if`, `zlib-rs`) | MIT OR Apache-2.0 (`miniz_oxide`, `zlib-rs` and `adler2` also Zlib or 0BSD) | crate: PNG capture | 1.5 ms for 1280 by 800, +161 KB of binary |
+| [Noto Sans Mono](https://github.com/notofonts/latin-greek-cyrillic) 2.014, Regular and Bold, cut down by `pyftsubset` | SIL OFL 1.1 | copied data: `data/fonts/*.ttf`, built into `bare-paint` | 22 KB each. License text: `data/fonts/OFL.txt` |
+
+Measured and not adopted (the numbers are in [resources.md](resources.md#paint-and-pixel-capture)): tiny-skia 0.12 (6.5 times slower for glyphs, 3.4 times slower for plain rectangles, +1.1 MB), skrifa 0.44 with ab_glyph_rasterizer (+0.76 MB over ab_glyph), fontdue 0.9.5 (faster, but no fractional glyph offset). The first candidate list below still names tiny-skia and skrifa: it is the plan before the measurement.
+
+The OFL asks that the license text travels with the font. It is in `data/fonts/OFL.txt`, and `crates/paint/Cargo.toml` lists `OFL-1.1` in its license. We do not sell the font by itself, and the subsets keep the glyph shapes unchanged.
+
 ## Network
 
 `bare` already has TLS 1.3, HTTP/1.1 and URL parsing. These are references.
@@ -90,7 +102,7 @@ Study these for architecture. Take parts from them.
 This order is a proposal. It is not measured yet.
 
 1. ICU4X for `Intl`, `toLocaleString` and `localeCompare`. These gates block the live login now.
-2. The S4 stack: tiny-skia, skrifa, harfrust, Parley and smithay-client-toolkit. S4 has not started, so nothing of ours is replaced.
+2. The S4 stack: tiny-skia, skrifa, harfrust, Parley and smithay-client-toolkit. S4 topic 1 is built with ab_glyph and hand-written rectangles (see above). Nothing of ours is replaced.
 3. regress and temporal_rs, when a page needs a RegExp feature or Temporal that we do not have.
 4. Larger changes, each one a separate decision: Blitz as the base of the renderer. Boa as the JS engine was measured and rejected on 2026-11-05.
 

@@ -7,6 +7,7 @@
 //! `--resources` downloads the external scripts and style sheets of the page and lists them (see `resources.rs`).
 //! `--run` loads the page and runs its classic scripts, its timers and `fetch` calls (see `browser_loader.rs`), then prints a short
 //! sanitized status. It prints no source, headers, bodies or query strings.
+//! `--paint=out.png page.html` paints a local file into a PNG of the window size, with no network (see `paint_file`).
 //! `--width=900` sets the width of the window (1280 if not given).
 //!
 //! Comments compare Rust with JavaScript, because you know JS.
@@ -41,6 +42,7 @@ fn main() {
         .filter(|w| *w > 0.0);
     // `find_map`: the first flag that starts with `--width=`, without that start. JS: `args.find(...)?.slice(8)`.
     let viewport = (width.unwrap_or(VIEWPORT.0), VIEWPORT.1);
+    let paint = args.iter().find_map(|a| a.strip_prefix("--paint="));
     let arg = match args.iter().find(|a| !a.starts_with("--")) {
         // Get the first word that is not a flag: the URL.
         // It may be missing. Rust makes us handle that case.
@@ -57,6 +59,9 @@ fn main() {
     };
     // `let` is like `const`: `arg` cannot change.
 
+    if let Some(out) = paint {
+        std::process::exit(paint_file(arg, out, viewport));
+    }
     if run {
         // The session loads the first document itself (one verified path for every document).
         if Url::parse(arg).is_err() {
@@ -221,6 +226,32 @@ fn computed_styles(doc: &mut bare_html::dom::Document, page: Option<&Url>, viewp
         }
     }
     rules.compute(doc)
+}
+
+/// `--paint=OUT.png FILE.html`: lay out a local file and write the picture of the window as a PNG. No network: the
+/// `<link>` style sheets are not fetched (a note says so), the `<style>` elements work.
+fn paint_file(path: &str, out: &str, viewport: (f32, f32)) -> i32 {
+    let text = match std::fs::read(path) {
+        Ok(bytes) => encoding::decode(&bytes, None),
+        Err(e) => {
+            eprintln!("error: {path}: {e}");
+            return 1;
+        }
+    };
+    let mut doc = bare_html::tree::parse(&text);
+    let computed = computed_styles(&mut doc, None, viewport);
+    let result = bare_layout::layout(&doc, &computed, viewport);
+    let canvas = bare_paint::capture(&doc, &computed, &result, viewport.0 as u32, viewport.1 as u32);
+    match bare_paint::png::write_file(&canvas, std::path::Path::new(out)) {
+        Ok(()) => {
+            println!("{out}: {}x{}, hash {:016x}", canvas.width, canvas.height, canvas.hash());
+            0
+        }
+        Err(e) => {
+            eprintln!("error: {out}: {e}");
+            1
+        }
+    }
 }
 
 /// `--run`: a session over the real URL (document load, scripts, timers, `fetch`, navigations: `browser_session.rs`).
