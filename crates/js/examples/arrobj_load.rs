@@ -1,7 +1,7 @@
 //! Load test for the Array/Object/Math methods. One case at one scale per process, so that the peak memory
 //! belongs to that run. Same output format and caps as `eval_load`.
 //!
-//!   arrobj_load CASE SCALE    CASE: mapfilter | sort | queue | objects | arrays    SCALE: 1, 10, 100
+//!   arrobj_load CASE SCALE    CASE: mapfilter | sort | queue | objects | arrays | fill    SCALE: 1, 10, 100
 //!
 //! Each case builds a small program, runs it, and checks the result against the same computation done in Rust
 //! (the checksum). A wrong checksum exits with status 1 and prints no timing. It prints parse, setup and run
@@ -99,6 +99,17 @@ fn case(name: &str, scale: usize) -> Case {
                      r.reduce(function(p, c) {{ return p + c; }}, 0) + ',' + r.length + ',' + (r.some(function(x) {{ return x < 0; }}) ? 1 : 0)"
                 ),
                 expect: format!("{s},{cnt},0"),
+            }
+        }
+        "fill" => {
+            let n = 4_000 * scale;
+            let mut model = vec![3u64; n];
+            model[n / 4..n / 2].fill(7);
+            model[n - 17..].fill(5);
+            let sum: u64 = model.iter().enumerate().map(|(i, v)| (i as u64 % 13) * v).sum();
+            Case {
+                src: format!("var a = new Array({n}); var same = a.fill(3) === a; a.fill(7, {}, {}); a.fill(5, -17); var sum = 0; for(var i=0; i<a.length; i++) sum += (i%13)*a[i]; var o = {{length:{n}}}; Array.prototype.fill.call(o,2); [same,sum,o[0],o[{}]].join(',')", n / 4, n / 2, n - 1),
+                expect: format!("true,{sum},2,2"),
             }
         }
         "sort" => {
@@ -225,5 +236,5 @@ fn main() {
     let scale: usize = a[2].parse().unwrap_or_else(|_| die("scale".into()));
     let name = a[1].clone();
     // 16 MiB: a JS call level needs a few KiB of native stack and max_call_depth is 100.
-    std::thread::Builder::new().stack_size(16 << 20).spawn(move || run_case(name, scale)).unwrap().join().unwrap_or_else(|_| die("panic".into()));
+    std::thread::Builder::new().stack_size(if cfg!(debug_assertions) { 64 << 20 } else { 8 << 20 }).spawn(move || run_case(name, scale)).unwrap().join().unwrap_or_else(|_| die("panic".into()));
 }

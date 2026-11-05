@@ -344,3 +344,21 @@ fn fill_a_throwing_setter_stops_the_walk() {
 fn fill_recursion_through_a_setter_hits_the_call_guard() {
     assert_eq!(run("Object.defineProperty(Array.prototype,'0',{set:function(v){ Array(1).fill(v) },configurable:true}); Array(1).fill(1)"), "limit:CallDepth");
 }
+
+#[test]
+fn fill_uses_cross_script_setters_and_preserves_failed_checkpoints() {
+    big(|| {
+        let mut it = Interp::realm(Heap::default(), EvalLimits::default()).unwrap();
+        it.run_script("var seen = []; var target = {length:2}; Object.defineProperty(target,'0',{set:function(v){seen.push(v)}}); var savedFill = Array.prototype.fill;").unwrap();
+        it.run_script("Promise.resolve().then(function(){savedFill.call(target,7)});").unwrap();
+        it.collect(&[]).unwrap();
+        it.drain_microtasks().unwrap();
+        let v = it.run_script("seen.join() + ':' + target[1]").unwrap();
+        assert_eq!(it.display(v), "7:7");
+        it.run_script("var afterFill = 0; Promise.resolve().then(function(){try{savedFill.call({length:9007199254740991},1)}finally{afterFill=1}});").unwrap();
+        assert!(matches!(it.drain_microtasks(), Err(Error::Limit(LimitKind::Steps))));
+        assert!(matches!(it.drain_microtasks(), Err(Error::Limit(LimitKind::Steps))));
+        let v = it.run_script("afterFill").unwrap();
+        assert_eq!(it.display(v), "0");
+    });
+}
