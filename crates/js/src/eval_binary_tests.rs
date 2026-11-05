@@ -95,7 +95,7 @@ fn unsupported_subset_is_explicit() {
     assert_eq!(g("new ArrayBuffer(4).transfer()"), "unsupported:ArrayBuffer.prototype.transfer");
     assert_eq!(g("Uint8Array.from([1])"), "unsupported:TypedArray.from");
     assert_eq!(g("Uint8Array.of(1)"), "unsupported:TypedArray.of");
-    for m in ["fill", "copyWithin", "reverse", "sort", "indexOf", "lastIndexOf", "includes", "join", "map", "filter", "forEach", "reduce", "every", "some", "find", "findIndex", "at", "toString", "toReversed"] {
+    for m in ["fill", "copyWithin", "reverse", "sort", "lastIndexOf", "includes", "join", "map", "filter", "forEach", "reduce", "every", "some", "find", "findIndex", "at", "toString", "toReversed"] {
         assert_eq!(g(&format!("new Uint8Array(2).{m}()")), format!("unsupported:TypedArray.prototype.{m}"), "{m}");
     }
     // Other encodings: a real label is a gate, a made-up one is a RangeError.
@@ -715,5 +715,79 @@ fn collect_with_a_suspended_view_iteration_does_not_walk_the_view_indices() {
         assert_eq!(it.stats().steps, steps, "collect charges nothing");
         assert_eq!(it.async_stats().activations, 1);
         assert_eq!(it.heap.stats().buffer_bytes, 3000000);
+    });
+}
+
+// ---------------------------------------------------------------- %TypedArray%.prototype.indexOf
+
+/// The result, the steps, the object allocations and the buffer bytes of a script (a fresh heap and budget).
+fn indexof_probe(src: &'static str, max_steps: u64) -> (String, u64, u64, usize) {
+    big(move || {
+        let prog = parse_script(src, Limits::default()).unwrap();
+        let mut it = Interp::new(&prog, Heap::default(), EvalLimits { max_steps, ..Default::default() }).unwrap();
+        let r = it.run();
+        let s = fmt_result(&mut it, r);
+        let st = it.heap.stats();
+        (s, it.stats().steps, st.total_object_allocs, st.buffer_bytes)
+    })
+}
+
+#[test]
+fn indexof_returns_strict_matches_as_numbers() {
+    assert_eq!(run("new Uint8Array([1, 2, 3]).indexOf(2)"), "number:1");
+    assert_eq!(run("new Uint8Array([1, 2, 3]).indexOf(9)"), "number:-1");
+    assert_eq!(run("new Uint8Array(0).indexOf(0)"), "number:-1");
+    assert_eq!(run("new Uint8Array([0]).indexOf(-0)"), "number:0");
+    assert_eq!(run("new Uint8Array([1]).indexOf(NaN)"), "number:-1");
+    assert_eq!(run("new Uint8Array([1]).indexOf('1')"), "number:-1");
+    assert_eq!(run("new Uint8Array([1]).indexOf(1, -1)"), "number:0");
+    assert_eq!(run("new Uint8Array([1]).indexOf(1, 1)"), "number:-1");
+}
+
+#[test]
+fn indexof_charges_each_64_byte_chunk_before_it_is_read() {
+    // A miss over 1 MiB is 16384 chunks; a 64-byte view is one chunk. The difference is exact, so the setup cancels.
+    let (miss, s_big, objs_big, bytes_big) = indexof_probe("var u = new Uint8Array(1048576); u.indexOf(9)", 1_000_000);
+    let (_, s_small, objs_small, bytes_small) = indexof_probe("var u = new Uint8Array(64); u.indexOf(9)", 1_000_000);
+    assert_eq!(miss, "number:-1");
+    assert_eq!(s_big - s_small, 16383);
+    // The scan allocates nothing and copies no bytes: the object count and the buffer bytes are those of the view.
+    assert_eq!((objs_big, bytes_big), (objs_small, 1048576));
+    assert_eq!(bytes_small, 64);
+    // An early match costs the chunks it reached: byte 6400 is in chunk 100, so 101 chunks in all.
+    let (hit, s_hit, _, _) = indexof_probe("var u = new Uint8Array(1048576); u[6400] = 7; u.indexOf(7)", 1_000_000);
+    let (_, s_small_hit, _, _) = indexof_probe("var u = new Uint8Array(64); u[0] = 7; u.indexOf(7)", 1_000_000);
+    assert_eq!(hit, "number:6400");
+    assert_eq!(s_hit - s_small_hit, 100);
+    // A limit ends the scan at the first chunk past it: the step count is the limit plus one, and nothing more is read.
+    let (r, s, _, _) = indexof_probe("var u = new Uint8Array(1048576); u.indexOf(9)", 50);
+    assert_eq!(r, "limit:Steps");
+    assert_eq!(s, 51);
+}
+
+#[test]
+fn indexof_limit_is_fatal_and_runs_no_more_js() {
+    big(|| {
+        let prog = parse_script("var L = []; var u = new Uint8Array(67108864); try { u.indexOf(9, {valueOf: function () { L.push('from'); return 0; }}); } finally { L.push('finally'); }", Limits::default()).unwrap();
+        let mut it = Interp::new(&prog, Heap::default(), EvalLimits { max_steps: 20_000, ..Default::default() }).unwrap();
+        let r = it.run();
+        assert_eq!(fmt_result(&mut it, r), "limit:Steps");
+        // The fromIndex conversion ran before the scan. The scan's limit is not catchable, so `finally` did not run.
+        let l = global(&mut it, "L");
+        assert_eq!(it.get_str(l, "length"), "1");
+    });
+}
+
+#[test]
+fn indexof_survives_global_deletion_and_collection() {
+    big(|| {
+        let mut it = Interp::realm(Heap::default(), EvalLimits { max_steps: 50_000_000, ..Default::default() }).unwrap();
+        // The view is the only holder of its buffer; the method is held by a global that outlives the constructor.
+        let r = it.run_script("var b = new ArrayBuffer(4); var v = new Uint8Array(b, 1, 2); v[1] = 9; var f = Uint8Array.prototype.indexOf; b = null; delete Uint8Array; 0");
+        assert!(r.is_ok());
+        it.collect(&[]).unwrap();
+        it.collect(&[]).unwrap();
+        let r = it.run_script("[f.call(v, 9), f.call(v, 0), f.length, typeof Uint8Array].join('|')");
+        assert_eq!(fmt_result(&mut it, r), "string:1|0|1|undefined");
     });
 }

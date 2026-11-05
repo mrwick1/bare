@@ -406,3 +406,61 @@ strs.forEach(function(s){ n++; if (d.decode(e.encode(s)) !== s) bad++; });
 var o = new TextDecoder("utf-8", {ignoreBOM: true}); n++; if (o.decode(e.encode("﻿a")) !== "﻿a") bad++;
 n++; if (d.decode(e.encode("﻿a")) !== "a") bad++;
 bad + "/" + n
+=== ta_indexof_shape
+var f = Uint8Array.prototype.indexOf; var tp = Object.getPrototypeOf(Uint8Array.prototype); var d = Object.getOwnPropertyDescriptor(tp, "indexOf");
+[f.length, f.name, d.enumerable, d.writable, d.configurable, tp.indexOf === f, typeof f].join("|")
+=== ta_indexof_brand
+function E(f){try{return String(f())}catch(e){return e.name}}
+var f = Uint8Array.prototype.indexOf;
+[E(function(){return f.call({length: 2, 0: 1}, 1)}), E(function(){return f.call(new ArrayBuffer(2), 0)}), E(function(){return f.call(undefined, 1)}), E(function(){return f.call(null, 1)}), E(function(){return f.call([1, 2], 1)}), E(function(){return f.call(5, 1)}), E(function(){return Uint8Array.prototype.indexOf(1)}), E(function(){return f.call(new Uint8Array(2), 0)})].join("|")
+=== ta_indexof_empty_view_skips_from
+var L = []; var fi = {valueOf: function(){ L.push("from"); return 0; }};
+[new Uint8Array(0).indexOf(0, fi), new Uint8Array(0).indexOf(undefined, fi), new Uint8Array(0).indexOf(0), L.length].join("|")
+=== ta_indexof_brand_before_from
+var L = []; var f = Uint8Array.prototype.indexOf; var fi = {valueOf: function(){ L.push("from"); return 0; }};
+var e = ""; try { f.call({}, 1, fi); } catch (x) { e = x.name; }
+var e2 = ""; try { f.call(new Uint8Array(0), 1, fi); } catch (x) { e2 = x.name; }
+[e, e2, L.length].join("|")
+=== ta_indexof_equality
+var u = new Uint8Array([0, 1, 255, 128]); var nan = NaN;
+[u.indexOf(0), u.indexOf(-0), u.indexOf(1), u.indexOf(255), u.indexOf(128), u.indexOf(nan), u.indexOf(256), u.indexOf(-1), u.indexOf(1.5), u.indexOf(Infinity), u.indexOf(-Infinity), u.indexOf("1"), u.indexOf(true), u.indexOf(), u.indexOf(null), u.indexOf(undefined), u.indexOf([1]), u.indexOf("0"), u.indexOf(new Uint8Array([1]))].join("|")
+=== ta_indexof_nan_and_zero_in_view
+var u = new Uint8Array([0, 0]); var z = new Uint8Array(2);
+[u.indexOf(NaN), u.indexOf(-0), u.indexOf(0.0), z.indexOf(-0, 1), z.indexOf(NaN, 0)].join("|")
+=== ta_indexof_search_is_not_coerced
+var L = []; var s = {valueOf: function(){ L.push("s"); return 1; }, toString: function(){ L.push("t"); return "1"; }};
+var u = new Uint8Array([1, 1]);
+[u.indexOf(s), L.length].join("|")
+=== ta_indexof_from_edges
+var u = new Uint8Array([7, 0, 7, 0, 7]); var out = [];
+[undefined, null, NaN, "1", 1.9, -0.5, -1, -1.5, -4, -5, -6, -Infinity, Infinity, 5, 4, 2.5, 1e300, -1e300, "x", true, false, "2"].forEach(function (x) { out.push(u.indexOf(7, x)); });
+out.join(",")
+=== ta_indexof_from_converted_once_in_order
+var L = []; var u = new Uint8Array([1, 2, 3]);
+var fi = {valueOf: function(){ L.push("v"); return 1; }, toString: function(){ L.push("t"); return "0"; }};
+var r = u.indexOf(3, fi);
+var bad = {valueOf: function(){ L.push("bad"); throw new RangeError("x"); }};
+var e = ""; try { u.indexOf(9, bad); } catch (x) { e = x.name; }
+var e2 = ""; try { new Uint8Array(0).indexOf(9, bad); } catch (x) { e2 = x.name; }
+[r, e, e2, L.join(",")].join("|")
+=== ta_indexof_from_symbol_throws
+var u = new Uint8Array([1]);
+function E(f){try{return String(f())}catch(e){return e.name}}
+[E(function(){return u.indexOf(1, Symbol())}), E(function(){return new Uint8Array(0).indexOf(1, Symbol())})].join("|")
+=== ta_indexof_mutation_in_from
+var u = new Uint8Array([5, 5, 0, 9]);
+var a = u.indexOf(9, {valueOf: function(){ u[2] = 9; return 0; }});
+var b = u.indexOf(5, {valueOf: function(){ u[0] = 0; return 0; }});
+var c = u.indexOf(9, {valueOf: function(){ u[3] = 0; return 0; }});
+[a, b, c, Array.prototype.join.call(u)].join("|")
+=== ta_indexof_offsets_and_subarray
+var b = new ArrayBuffer(8); var all = new Uint8Array(b); all.set([1, 2, 3, 4, 5, 6, 7, 8]);
+var v = new Uint8Array(b, 2, 4); var s = all.subarray(1, 6); var t = s.subarray(-2);
+[v.indexOf(3), v.indexOf(6), v.indexOf(2), v.indexOf(3, 1), v.indexOf(6, -1), s.indexOf(2), s.indexOf(6), s.indexOf(1), t.indexOf(5), t.indexOf(6), t.indexOf(4), t.indexOf(6, -1), all.indexOf(3)].join("|")
+=== ta_indexof_view_bounds_do_not_leak
+var b = new Uint8Array([9, 0, 9, 0, 9]);
+[new Uint8Array(b.buffer, 1, 1).indexOf(9), new Uint8Array(b.buffer, 1, 1).indexOf(0), new Uint8Array(b.buffer, 2, 3).indexOf(9, 1), new Uint8Array(b.buffer, 4, 1).indexOf(0), new Uint8Array(b.buffer, 1, 0).indexOf(0)].join("|")
+=== ta_indexof_survives_global_deletion
+var u = new Uint8Array([4, 5, 6]); var v = new Uint8Array(u.buffer, 1, 2); var f = u.indexOf;
+delete Uint8Array;
+[f.call(u, 6), f.call(v, 6), typeof Uint8Array].join("|")

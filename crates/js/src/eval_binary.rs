@@ -5,8 +5,9 @@
 // Supported:
 // - `ArrayBuffer(length)`, `.byteLength`, `.slice(begin, end)`, `ArrayBuffer.isView`.
 // - `Uint8Array(length | buffer, byteOffset, length | typedArray | array | array-like)`, the getters `buffer`, `byteLength`,
-//   `byteOffset`, `length`, `BYTES_PER_ELEMENT`, `set(source, offset)`, `subarray` (shared bytes), `slice` (copy), integer
-//   indexing (read, write, `in`, `delete`, `Object.keys`, `Object.getOwnPropertyDescriptor`, `defineProperty`) and iteration.
+//   `byteOffset`, `length`, `BYTES_PER_ELEMENT`, `set(source, offset)`, `subarray` (shared bytes), `slice` (copy),
+//   `indexOf` (strict equality, see `eval_binary_search.rs`), integer indexing (read, write, `in`, `delete`,
+//   `Object.keys`, `Object.getOwnPropertyDescriptor`, `defineProperty`) and iteration.
 //   `new Uint8Array(iterable)` takes every value through the shared iterator protocol of `eval_symbols.rs` (an object whose
 //   `@@iterator` is not undefined or null), then converts each. `values`, `keys`, `entries` and `[@@iterator]` of
 //   `%TypedArray%.prototype` make the shared array iterator (no second engine); it reads the view's own length.
@@ -14,7 +15,7 @@
 // - `TextEncoder` (`encoding`, `encode`, `encodeInto`) and `TextDecoder` (`encoding`, `fatal`, `ignoreBOM`, `decode` with
 //   `stream`). UTF-8 only. A known WHATWG label of another encoding is `Unsupported`; an unknown label is a `RangeError`.
 // Gates (explicit `Unsupported`, never silent): resizable `ArrayBuffer` options, `resize`, `transfer`, and the typed-array
-// methods that are not above (`fill`, `map`, `indexOf`, `from`, `of`, ...). `@@toStringTag` is bound for the four classes
+// methods that are not above (`fill`, `map`, `from`, `of`, ...). `@@toStringTag` is bound for the four classes
 // (a data property for `ArrayBuffer`, `TextEncoder` and `TextDecoder`, a getter on `%TypedArray%.prototype`). `slice` and
 // `subarray` read `constructor` and `@@species`: `undefined`, `null` and the intrinsic class give the default; any other
 // constructor is `Unsupported`. A class that extends one of these constructors is `Unsupported` when it is constructed.
@@ -42,6 +43,7 @@ enum BinFn {
     TaSet,
     TaSubarray,
     TaSlice,
+    TaIndexOf,
     TaValues,
     TaKeys,
     TaEntries,
@@ -88,9 +90,9 @@ struct BinaryState {
     protos: Option<BinProtos>,
 }
 
-const TA_GATES: [(&str, &str); 19] = [
+const TA_GATES: [(&str, &str); 18] = [
     ("fill", "TypedArray.prototype.fill"), ("copyWithin", "TypedArray.prototype.copyWithin"), ("reverse", "TypedArray.prototype.reverse"),
-    ("sort", "TypedArray.prototype.sort"), ("indexOf", "TypedArray.prototype.indexOf"), ("lastIndexOf", "TypedArray.prototype.lastIndexOf"),
+    ("sort", "TypedArray.prototype.sort"), ("lastIndexOf", "TypedArray.prototype.lastIndexOf"),
     ("includes", "TypedArray.prototype.includes"), ("join", "TypedArray.prototype.join"), ("map", "TypedArray.prototype.map"),
     ("filter", "TypedArray.prototype.filter"), ("forEach", "TypedArray.prototype.forEach"), ("reduce", "TypedArray.prototype.reduce"),
     ("every", "TypedArray.prototype.every"), ("some", "TypedArray.prototype.some"), ("find", "TypedArray.prototype.find"),
@@ -193,6 +195,7 @@ impl<'p> Interp<'p> {
         self.bin_method(ta_p, "set", BinFn::TaSet, 1)?;
         self.bin_method(ta_p, "subarray", BinFn::TaSubarray, 2)?;
         self.bin_method(ta_p, "slice", BinFn::TaSlice, 2)?;
+        self.bin_method(ta_p, "indexOf", BinFn::TaIndexOf, 1)?;
         // `values` is `[Symbol.iterator]`; the iterator is the shared array iterator of `eval_symbols.rs`.
         let tv = self.native(Nat::Bin(BinFn::TaValues), "values", 0)?;
         let kv = h!(self, self.heap.key_from_str("values"));
@@ -398,6 +401,7 @@ impl<'p> Interp<'p> {
                 _ => Ok(Value::Undefined),
             },
             TaSet => self.ta_set(this, a0, a1),
+            TaIndexOf => self.ta_index_of(this, a0, a1),
             TaSubarray => {
                 let (o, buf, off, len) = self.this_view(this, "%TypedArray%.prototype.subarray")?;
                 let first = self.num_integer(a0)?;

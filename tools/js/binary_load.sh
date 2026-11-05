@@ -10,7 +10,7 @@ bin=target/release/examples/binary_load
 status=0
 : > "$out"
 for scale in 1 10 100; do
-  for case in copy scan scanarr codec stream; do
+  for case in copy scan scanarr codec stream indexof; do
     if ! ( ulimit -v 1048576; timeout 45 "$bin" "$case" "$scale" ) >> "$out" 2>&1; then
       echo "FAILED: case=$case scale=$scale" | tee -a "$out" >&2
       status=1
