@@ -1,0 +1,168 @@
+Chrome Chrome/155.0.8059.39
+
+## A1 script-inserted link, slow
+1ms same task: rgb(0, 0, 0) sheets=0
+1ms link.sheet is null
+1ms microtask: rgb(0, 0, 0) sheets=0
+1ms timer 0: rgb(0, 0, 0) sheets=0
+403ms load event /s.css?c=1,2,3&d=400&k
+403ms in link load: rgb(1, 2, 3) sheets=1
+403ms link.sheet is set
+403ms window load: rgb(1, 2, 3) sheets=1
+901ms at 900ms: rgb(1, 2, 3) sheets=1
+  server: a1 requested 1ms sent 401ms
+
+## A2 script-inserted link, 404
+1ms same task: rgb(0, 0, 0) sheets=0
+2ms error event /missing.css?k=a2
+601ms at 600ms: rgb(0, 0, 0) sheets=1
+
+## A3 script-inserted link, URL already loaded by a link
+50ms first script: rgb(1, 2, 3) sheets=1
+51ms same task, same URL again: rgb(1, 2, 3) sheets=2
+51ms microtask: rgb(1, 2, 3) sheets=2
+51ms load event /s.css?c=1,2,3&d=50&k=
+51ms timer 0: rgb(1, 2, 3) sheets=2
+  server: a3 requested -1ms sent 49ms
+
+## A4 script-inserted link, URL already loaded by fetch
+103ms fetch done
+103ms same task after fetch: rgb(0, 0, 0) sheets=0
+103ms timer 0: rgb(0, 0, 0) sheets=0
+104ms load event /s.css?c=1,2,3&d=100&k
+303ms at +200ms: rgb(1, 2, 3) sheets=1
+  server: a4 requested 2ms sent 102ms
+
+## B1 href changed on a loaded link
+51ms first script: rgb(1, 2, 3) sheets=1
+51ms same task after href change: rgb(1, 2, 3) sheets=1
+51ms link.sheet is set
+51ms microtask: rgb(1, 2, 3) sheets=1
+51ms timer 0: rgb(1, 2, 3) sheets=1
+453ms in link load: rgb(4, 5, 6) sheets=1
+951ms at 900ms: rgb(4, 5, 6) sheets=1
+  server: b1a requested -1ms sent 49ms
+  server: b1b requested 51ms sent 452ms
+
+## B2 script sets href on a link made earlier without href
+1ms no href: rgb(0, 0, 0) sheets=0
+2ms same task after href: rgb(0, 0, 0) sheets=0
+407ms load event 
+902ms at 900ms: rgb(1, 2, 3) sheets=1
+  server: b2 requested 3ms sent 403ms
+
+## C1 parser-inserted link in head, then inline script
+400ms script runs
+400ms inline script after link: rgb(1, 2, 3) sheets=1
+  server: c1 requested -2ms sent 398ms
+
+## C2 parser-inserted link in body, then inline script
+417ms script runs
+418ms inline script after link: rgb(1, 2, 3) sheets=1
+  server: c2 requested 13ms sent 414ms
+
+## C3 inline script, then parser-inserted link
+1ms script before link: rgb(0, 0, 0) sheets=0
+400ms second script
+400ms second script after link: rgb(1, 2, 3) sheets=1
+  server: c3 requested -4ms sent 397ms
+
+## C4 parser-inserted link media=print
+0ms script runs
+0ms inline script: rgb(0, 0, 0) sheets=0
+  server: c4 requested 1ms sent 401ms
+
+## C5 parser-inserted link disabled
+1ms script runs
+1ms inline script: rgb(0, 0, 0) sheets=0
+
+## C6 parser-inserted link, async external script after it
+403ms external script runs: rgb(1, 2, 3) sheets=1
+405ms after external script: rgb(1, 2, 3) sheets=1
+  server: /r.js?k=c6 requested 0ms sent 1ms
+  server: c6 requested -1ms sent 400ms
+
+## C7 parser-inserted link, defer script
+418ms external script runs: rgb(1, 2, 3) sheets=1
+  server: /r.js?k=c7 requested 17ms sent 18ms
+  server: c7 requested 15ms sent 416ms
+
+## D1 script preload as=style, then rel changed to stylesheet
+0ms after preload insert: rgb(0, 0, 0) sheets=0
+403ms preload load event
+403ms same task after rel=stylesheet: rgb(1, 2, 3) sheets=1
+403ms sheet set
+403ms microtask: rgb(1, 2, 3) sheets=1
+403ms preload load event
+403ms same task after rel=stylesheet: rgb(1, 2, 3) sheets=1
+403ms sheet set
+403ms microtask: rgb(1, 2, 3) sheets=1
+403ms timer 0: rgb(1, 2, 3) sheets=1
+403ms timer 0: rgb(1, 2, 3) sheets=1
+  server: d1 requested 1ms sent 402ms
+
+## D2 preload loaded, then a new stylesheet link with the same URL
+203ms preload load event
+204ms same task after stylesheet insert: rgb(1, 2, 3) sheets=1
+204ms sheet set
+204ms microtask: rgb(1, 2, 3) sheets=1
+204ms load event /s.css?c=1,2,3&d=200&k
+204ms timer 0: rgb(1, 2, 3) sheets=1
+505ms at +300ms: rgb(1, 2, 3) sheets=1
+  server: d2 requested 2ms sent 203ms
+
+## D3 preload still loading, stylesheet link with the same URL inserted
+1ms same task: rgb(0, 0, 0) sheets=0
+403ms load event /s.css?c=1,2,3&d=400&k
+901ms at 900ms: rgb(1, 2, 3) sheets=1
+  server: d3 requested 1ms sent 402ms
+
+## E1 script-inserted link media=print
+1ms same task: rgb(0, 0, 0) sheets=0
+102ms load event /s.css?c=1,2,3&d=100&k
+501ms at 500ms: rgb(0, 0, 0) sheets=1
+601ms same task after media=all: rgb(1, 2, 3) sheets=1
+1101ms +500ms: rgb(1, 2, 3) sheets=1
+  server: e1 requested 1ms sent 101ms
+
+## F1 script-inserted link disabled
+0ms same task: rgb(0, 0, 0) sheets=0
+500ms at 500ms: rgb(0, 0, 0) sheets=0
+501ms same task after disabled=false: rgb(0, 0, 0) sheets=0
+603ms load event /s.css?c=1,2,3&d=100&k
+1001ms +500ms: rgb(1, 2, 3) sheets=1
+  server: f1 requested 501ms sent 602ms
+
+## F2 loaded link, disabled set
+51ms before: rgb(1, 2, 3) sheets=1
+51ms same task after disabled=true: rgb(0, 0, 0) sheets=0
+51ms same task after disabled=false: rgb(1, 2, 3) sheets=1
+  server: f2 requested 0ms sent 50ms
+
+## G1 loaded link removed
+51ms before: rgb(1, 2, 3) sheets=1
+51ms same task after remove: rgb(0, 0, 0) sheets=0
+51ms same task after re-insert: rgb(1, 2, 3) sheets=1
+51ms timer 0: rgb(1, 2, 3) sheets=1
+551ms at 500ms: rgb(1, 2, 3) sheets=1
+  server: g1 requested -1ms sent 50ms
+
+## H1 link inserted by innerHTML
+1ms same task: rgb(0, 0, 0) sheets=0
+801ms at 800ms: rgb(1, 2, 3) sheets=1
+  server: h1 requested 1ms sent 301ms
+
+## I1 script-inserted style with @import
+1ms bg rgb(7, 8, 9)
+1ms same task: rgb(0, 0, 0) sheets=1
+801ms bg rgb(7, 8, 9)
+801ms at 800ms: rgb(1, 2, 3) sheets=1
+  server: i1 requested 1ms sent 301ms
+
+## J1 two script-inserted links, slow then fast
+52ms load event /s.css?c=4,5,6&d=50&k=
+250ms at 250ms (fast loaded, slow not): rgb(4, 5, 6) sheets=1
+501ms load event /s.css?c=1,2,3&d=500&k
+900ms at 900ms: rgb(4, 5, 6) sheets=2
+  server: j1b requested 1ms sent 51ms
+  server: j1a requested 0ms sent 500ms

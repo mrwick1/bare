@@ -61,7 +61,8 @@
 //! Budgets (`PageLimits`): tasks, rounds, wall time, fetches and bytes (`resources::Limits`), pending dynamic scripts and their
 //! inline bytes, kept diagnostics. A blocking socket call is not interrupted: one read can pass `max_time` by the client timeout.
 //! Style sheets: the driver fetches the active static and added sheets and supplies them to `getComputedStyle` before the next script
-//! (`browser_loader/sheets.rs` has the rules, the order and the caps). Their downloads share the fetch and byte budgets above.
+//! (`browser_loader/sheets.rs` has the rules, the order and the caps). Their downloads share the fetch and byte budgets above. A
+//! sheet that a script adds and that has not loaded adds no rules to a read in the same task (Chrome does the same).
 //! Preload links: a connected `<link rel=preload>` that a script added is fetched by its `as` and gets `load` or `error` as a task
 //! (`browser_loader/preload.rs`).
 //! Not here: `window.onload`, `DOMContentLoaded` for scripts that were added late, `defer` on dynamic scripts,

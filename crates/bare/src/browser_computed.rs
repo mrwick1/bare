@@ -10,7 +10,12 @@
 //!   with `Browser::set_external_stylesheet(href, parts)`, keyed by the exact `href` attribute text (`@import` of an inline `<style>`:
 //!   keyed by the exact url text). `parts` are the flattened sheets in cascade order, imports first (what `main.rs` `add_sheet` does).
 //!   A sheet that is linked but not supplied makes every computed read `Unsupported`: a missing sheet is never read as "no rules".
-//!   Supply an empty list for a sheet that failed to load, if the page should go on without it. `Browser::style_availability` tells which
+//!   The exception is a driver that called `Browser::set_pending_sheets(true)` (the page loader does, once the sheets of the parsed
+//!   document are in): then a sheet that is not supplied is "still loading", as in Chrome. It adds no rules, and the reads go on
+//!   (Chrome: a script-inserted `<link>` is not in `styleSheets` and has no rules until it loads). A link keeps the sheet that it had
+//!   until a new `href` is supplied (`Computed::bound`, set by `style_availability`). Still `Unsupported`: a link whose old sheet is
+//!   gone, and a link with a `media` text (it may have just been turned on). A cached or preloaded URL is in the cache of the driver:
+//!   it is supplied before the `<link>` asks. Supply an empty list for a sheet that failed to load, if the page should go on without it. `Browser::style_availability` tells which
 //!   sheets are missing, so the loader knows what to fetch. A `<link>` with a `media` that does not match the viewport, an alternate
 //!   sheet and a link without `href` are not sources (`cascade::sources`).
 //! - Order of sheets: `<style>` and `<link>` in tree order, an `@import` of an inline sheet before its text. A later sheet beats an earlier one on a tie.
@@ -41,7 +46,7 @@
 //!   lists, `calc()` with a percent): no text. A shorthand that cannot be built from its longhands (`border` with different sides, `font`): the same gate.
 //! - `direction` of an element whose `dir` chain reaches `dir=auto` or a `<bdi>` with no `ltr/rtl` before an explicit one: it depends on
 //!   the text (not read). This is conservative: a rule of the page that sets `direction` in between does not lift it.
-//! - `cssText` of a computed declaration. External sheets that are not supplied (see above).
+//! - `cssText` of a computed declaration. External sheets that are not supplied, unless the driver loads them later (see above).
 //!
 //! Caps (`ComputedLimits`, `Limit(Host(name))`, never catchable). All are checked before the work that they bound, because
 //! `RuleSet::compute` cannot be interrupted: `computed-objects` (live objects), `computed-nodes` (document nodes at a read: the
@@ -52,7 +57,7 @@
 //! build and before the compute. Names that the sheets add to the document table are bounded by the sheet bytes and checked against
 //! `max_names` after the build.
 //!
-//! Not done: no cache of `Styles` between reads (each read costs one pass over the document), no live `getComputedStyle` of a
+//! Not done: `document.styleSheets` does not exist (when it does, a pending sheet must not be in it, as in Chrome), no cache of `Styles` between reads (each read costs one pass over the document), no live `getComputedStyle` of a
 //! pseudo-element, no `@container`, `@import` inside a supplied part (the embedder flattens), `<link disabled>`, `<style disabled>`.
 
 use crate::browser::*;
@@ -145,6 +150,10 @@ pub(crate) struct Computed {
     fixed: RefCell<Vec<ObjId>>,
     ext: RefCell<HashMap<String, Vec<SheetPart>>>,
     ext_bytes: Cell<usize>,
+    /// The driver loads a sheet that a script adds after the task (`Browser::set_pending_sheets`): until then the sheet adds no rules.
+    pending_ok: Cell<bool>,
+    /// A `<link>` to the `href` of the sheet it had at the last `style_availability`. It keeps those rules until the new sheet is supplied.
+    bound: RefCell<HashMap<NodeId, String>>,
     /// Moves when a supplied sheet is set or removed. `ResizeObserver` reads it to know that styles may have changed.
     pub(crate) sheet_gen: Cell<u64>,
     cache: RefCell<Option<Built>>,
@@ -167,6 +176,8 @@ struct Plan {
     bytes: usize,
     missing: Vec<String>,
     more: bool,
+    /// A missing sheet that a read must not take as "no rules" (see the header).
+    strict: bool,
 }
 
 /// A layer of an imported piece: `outer` is the layer of the `@import`, `inner` the layer the piece had (as `main.rs` joins them).
@@ -231,13 +242,17 @@ impl Dom {
     }
 
     /// The sheets of one read, in cascade order, and the supplied external ones that are missing.
-    fn plan(&self, doc: &mut bare_html::dom::Document, vp: (f32, f32)) -> R<Plan> {
+    /// With `record`, each `<link>` is bound to the sheet that it has now (`Computed::bound`).
+    fn plan(&self, doc: &mut bare_html::dom::Document, vp: (f32, f32), record: bool) -> R<Plan> {
         let l = self.computed.lim.get();
         let Some(sources) = cascade::sources_capped(doc, vp, l.max_sources, l.max_sheet_bytes) else {
             return Err(self.lim("computed-sources"));
         };
         let ext = self.computed.ext.borrow();
-        let mut p = Plan { parts: Vec::new(), bytes: 0, missing: Vec::new(), more: false };
+        let mut p = Plan { parts: Vec::new(), bytes: 0, missing: Vec::new(), more: false, strict: false };
+        let (pending_ok, bound) = (self.computed.pending_ok.get(), self.computed.bound.borrow());
+        // With `record`: the links of this plan, and the bindings that change.
+        let (mut seen, mut changes) = (Vec::new(), Vec::new());
         fn add(d: &Dom, p: &mut Plan, layer: Option<String>, text: &str) -> R<()> {
             let l = d.computed.lim.get();
             p.bytes = p.bytes.saturating_add(text.len());
@@ -253,7 +268,7 @@ impl Dom {
             }
             if p.missing.len() < 16 { p.missing.push(href.to_string()) } else { p.more = true }
         }
-        for s in sources {
+        for (s, el) in sources {
             match s {
                 Source::Inline(text) => {
                     if text.contains("@import") {
@@ -264,7 +279,10 @@ impl Dom {
                                         add(self, &mut p, join_layer(imp.layer.as_deref(), part.layer.as_deref()), &part.text)?;
                                     }
                                 }
-                                None => miss(&mut p, &imp.href),
+                                None => {
+                                    miss(&mut p, &imp.href);
+                                    p.strict |= !pending_ok;
+                                }
                             }
                         }
                     }
@@ -276,9 +294,42 @@ impl Dom {
                         for part in parts {
                             add(self, &mut p, part.layer.clone(), &part.text)?;
                         }
+                        if record {
+                            seen.push(el);
+                            if bound.get(&el) != Some(&href) {
+                                changes.push((el, href));
+                            }
+                        }
                     }
-                    None => miss(&mut p, &href),
+                    None => {
+                        miss(&mut p, &href);
+                        // Chrome: the link keeps the sheet that it had until the new one has loaded. Else it has none.
+                        let old = bound.get(&el);
+                        match old.and_then(|k| ext.get(k)) {
+                            Some(parts) => {
+                                for part in parts {
+                                    add(self, &mut p, part.layer.clone(), &part.text)?;
+                                }
+                            }
+                            // The link had a sheet that is gone, or a `media` may have just turned it on (Chrome loaded it before).
+                            None => p.strict |= old.is_some() || doc.find_atom("media").and_then(|m| doc.attr(el, m)).is_some_and(|m| !m.trim().is_empty()),
+                        }
+                        p.strict |= !pending_ok;
+                        if record && old.is_some() {
+                            seen.push(el);
+                        }
+                    }
                 },
+            }
+        }
+        drop(bound);
+        if record {
+            let mut bound = self.computed.bound.borrow_mut();
+            bound.extend(changes);
+            // A link that is not a source any more loses its binding. Rare: only when there are more bindings than links.
+            if bound.len() > seen.len() {
+                let keep: std::collections::HashSet<NodeId> = seen.into_iter().collect();
+                bound.retain(|n, _| keep.contains(n));
             }
         }
         Ok(p)
@@ -318,8 +369,8 @@ impl Dom {
         }
         let mut doc = self.doc.borrow_mut();
         it.charge(doc.len() as u64 / 4 + 1)?;
-        let plan = self.plan(&mut doc, vp)?;
-        if !plan.missing.is_empty() {
+        let plan = self.plan(&mut doc, vp, false)?;
+        if plan.strict {
             return Err(Self::gate(MISSING));
         }
         it.charge(plan.bytes as u64 / 32)?;
@@ -679,6 +730,14 @@ impl Browser {
         Ok(())
     }
 
+    /// Say that the driver loads a sheet that a script adds, after the task that added it, and tells the page with `load` or
+    /// `error`. From then on a `<link>` or `@import` that is not supplied is a sheet that is still loading, as in Chrome: it adds no rules
+    /// and a read does not stop. Call it when every sheet of the parsed document is supplied. Before it (and for an embedder that
+    /// never calls it) a missing sheet is `Unsupported`.
+    pub fn set_pending_sheets(&mut self, on: bool) {
+        self.dom.computed.pending_ok.set(on);
+    }
+
     /// Forget a supplied sheet: a `<link>` to it is missing again. False when there was none.
     pub fn remove_external_stylesheet(&mut self, href: &str) -> bool {
         let c = &self.dom.computed;
@@ -700,7 +759,7 @@ impl Browser {
         let d = &self.dom;
         let vp = d.plat.s.borrow().viewport;
         let mut doc = d.doc.borrow_mut();
-        let p = d.plan(&mut doc, vp)?;
+        let p = d.plan(&mut doc, vp, true)?;
         Ok(if p.missing.is_empty() { StyleAvailability::Ready } else { StyleAvailability::MissingExternal { hrefs: p.missing, more: p.more } })
     }
 }
