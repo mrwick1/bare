@@ -169,6 +169,9 @@ pub enum NodeData {
     Text(Span),
     /// `<!-- text -->`. Use `Document::text` to read it.
     Comment(Span),
+    /// The top of a shadow tree (DOM Standard, ShadowRoot). It has no parent link and is never a child: the nodes of its tree have it as their top. Its host
+    /// and mode are in sparse tables (`Document::shadow_host`), so a page without shadow roots pays nothing. The tree builder never makes one.
+    ShadowRoot,
 }
 
 struct Node {
@@ -218,6 +221,10 @@ pub struct Document {
     revision: u64,
     // Moves at every change that can alter a tree query: a node joins or leaves the tree, an attribute is set or removed, an
     // element gets a namespace. See `revision`.
+    shadow_of: HashMap<u32, NodeId, BuildHasherDefault<Fnv>>,
+    // The shadow root of each shadow host, by `NodeId::index` of the host. The root is not a child of the host: the light links of the host never show it.
+    shadow_host: HashMap<u32, (NodeId, bool), BuildHasherDefault<Fnv>>,
+    // The way back: the host of each shadow root, and whether its mode is open. A host that is not in `shadow_of` has no root.
 }
 
 /// A watched attribute that was removed: the element, the name and the value it had. The value stays readable
@@ -285,6 +292,8 @@ impl Document {
             watched: HashSet::default(),
             removed: Vec::new(),
             revision: 0,
+            shadow_of: HashMap::default(),
+            shadow_host: HashMap::default(),
         };
         // The order matters: it must match `Atom::ID` and `Atom::CLASS`.
         doc.intern("id");
@@ -315,6 +324,36 @@ impl Document {
     /// The parent of this node. `None` for the top node.
     pub fn parent(&self, id: NodeId) -> Option<NodeId> {
         self.nodes[id.index()].parent
+    }
+
+    /// The shadow root of the host `host`, if it has one (open or closed).
+    pub fn shadow_root(&self, host: NodeId) -> Option<NodeId> {
+        self.shadow_of.get(&(host.index() as u32)).copied()
+    }
+
+    /// The host of the shadow root `root`. `None` for any other node.
+    pub fn shadow_host(&self, root: NodeId) -> Option<NodeId> {
+        self.shadow_host.get(&(root.index() as u32)).map(|&(h, _)| h)
+    }
+
+    /// Is the shadow root `root` in open mode? `false` for a closed root and for any other node.
+    pub fn shadow_is_open(&self, root: NodeId) -> bool {
+        self.shadow_host.get(&(root.index() as u32)).is_some_and(|&(_, open)| open)
+    }
+
+    /// The parent of this node in the shadow-including tree: its parent, or the host when this node is a shadow root. JS: the step of `getRootNode({composed: true})`.
+    pub fn parent_or_host(&self, id: NodeId) -> Option<NodeId> {
+        self.nodes[id.index()].parent.or_else(|| self.shadow_host(id))
+    }
+
+    /// Give the element `host` a new, empty shadow root. The caller checked that `host` can be a host and has no root yet. The root is not in the light
+    /// tree of the host. Gives the root.
+    pub fn attach_shadow(&mut self, host: NodeId, open: bool) -> NodeId {
+        debug_assert!(matches!(self.nodes[host.index()].data, NodeData::Element { .. }) && !self.shadow_of.contains_key(&(host.index() as u32)));
+        let root = self.new_node(NodeData::ShadowRoot);
+        self.shadow_of.insert(host.index() as u32, root);
+        self.shadow_host.insert(root.index() as u32, (host, open));
+        root
     }
 
     /// The children of this node, in order.
@@ -680,10 +719,10 @@ impl Document {
 
     /// Copy the node `n` of `src` into this document, with no parent and no children. An element keeps its name, its namespace, its prefix, and
     /// each attribute keeps its namespace; the names go in this name table and the values in this text buffer. The caller checked the caps
-    /// first (`new_names_in`, `text_bytes`, `attr_slots`). Gives `None` for the top node, which cannot be copied.
+    /// first (`new_names_in`, `text_bytes`, `attr_slots`). Gives `None` for the top node and for a shadow root, which cannot be copied.
     pub fn import_node(&mut self, src: &Document, n: NodeId) -> Option<NodeId> {
         Some(match *src.data(n) {
-            NodeData::Document => return None,
+            NodeData::Document | NodeData::ShadowRoot => return None,
             NodeData::Text(sp) => self.create_text(src.text(sp)),
             NodeData::Comment(sp) => self.create_comment(src.text(sp)),
             NodeData::Doctype(sp) => self.create_doctype(src.text(sp)),
@@ -953,7 +992,7 @@ impl Document {
         // `&mut String` means we borrow the string and may add to it. JS: pass an array and `push`.
         let indent = "  ".repeat(depth);
         match self.data(id) {
-            NodeData::Document => {}
+            NodeData::Document | NodeData::ShadowRoot => {}
             NodeData::Doctype(name) => out.push_str(&format!("| {indent}<!DOCTYPE {}>\n", self.text(*name))),
             NodeData::Comment(text) => out.push_str(&format!("| {indent}<!-- {} -->\n", self.text(*text))),
             NodeData::Text(text) => out.push_str(&format!("| {indent}\"{}\"\n", self.text(*text))),

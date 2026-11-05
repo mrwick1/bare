@@ -129,6 +129,11 @@ impl Dom {
             if cur == doc.root() && ty != "load" {
                 path.push(Target::Window);
             }
+            // The path ends at a shadow root. Not composed: that is the standard path. Composed: the standard goes on at the host and retargets, which
+            // this host does not do, so the event is refused before any listener runs (never a wrong path).
+            if doc.shadow_host(cur).is_some() && self.st.borrow().events[&ev].composed {
+                return Err(Error::Unsupported(unsupported("dispatch of a composed event across a shadow root (retargeting is not implemented)")));
+            }
         }
         let tv = self.target_value(it, target)?;
         let bubbles = {
@@ -286,6 +291,7 @@ impl Dom {
                 bare_html::dom::NodeData::Text(_) => "#text".into(),
                 bare_html::dom::NodeData::Comment(_) => "#comment".into(),
                 bare_html::dom::NodeData::Document => "#document".into(),
+                bare_html::dom::NodeData::ShadowRoot => "#shadow-root".into(),
                 bare_html::dom::NodeData::Doctype(_) => "#doctype".into(),
             },
         };
