@@ -171,7 +171,7 @@ impl<'p> Interp<'p> {
         if let Value::Object(o) = replacer {
             if self.is_callable(replacer) {
                 st.replacer = Some(replacer);
-            } else if h!(self, self.heap.is_array(o)) {
+            } else if self.o_is_array(o)? {
                 st.plist = Some(Rc::new(self.sj_property_list(o, &lim)?));
             }
         }
@@ -260,7 +260,7 @@ impl<'p> Interp<'p> {
 
     /// The replacer array as a property list: strings and numbers, deduplicated, in order.
     fn sj_property_list(&mut self, o: ObjId, lim: &StringifyLimits) -> Res<Vec<PropertyKey>> {
-        let len = match hx!(self, self.heap.get_own_property(o, self.k_length)) {
+        let len = match hx!(self, self.heap.get_own_property(o, self.k_length), self.px_length_prop(o)?) {
             Some(Property::Data { value: Value::Number(n), .. }) => n as usize,
             _ => 0,
         };
@@ -349,8 +349,8 @@ impl<'p> Interp<'p> {
             return Err(Error::Limit(LimitKind::Stringify(StringifyLimit::Depth)));
         }
         let keys_limit = || Error::Limit(LimitKind::Stringify(StringifyLimit::Keys));
-        let (keys, len, open) = if h!(self, self.heap.is_array(o)) {
-            let len = match hx!(self, self.heap.get_own_property(o, self.k_length)) {
+        let (keys, len, open) = if self.o_is_array(o)? {
+            let len = match hx!(self, self.heap.get_own_property(o, self.k_length), self.px_length_prop(o)?) {
                 Some(Property::Data { value: Value::Number(n), .. }) => n as usize,
                 _ => 0,
             };
@@ -368,7 +368,7 @@ impl<'p> Interp<'p> {
             self.spend(all.len() as u64)?;
             let mut list = Vec::new();
             for k in all {
-                if !matches!(k, PropertyKey::Symbol(_)) && hx!(self, self.heap.peek_own_property(o, k)).is_some_and(|p| p.enumerable()) {
+                if !matches!(k, PropertyKey::Symbol(_)) && self.o_peek(o, k)?.is_some_and(|p| p.enumerable()) {
                     list.push(k);
                 }
             }

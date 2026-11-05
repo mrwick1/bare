@@ -17,7 +17,7 @@
 //   newTarget)` runs on the one dispatcher of `eval_classes.rs` (`construct_nt`), so `new.target`, the prototype of the
 //   result, class fields, derived classes, bound functions and explicit object returns are the ones `new` and `super()` use.
 // - The `Reflect` global is an ordinary object with `@@toStringTag` and these two methods plus the eleven of
-//   `eval_object_more.rs`. There is no Proxy.
+//   `eval_object_more.rs`. Each of them sees through a `Proxy` (`eval_proxy.rs`).
 //
 // Gates (never silent)
 // - A native constructor that cannot take a `new.target` (Map, Set, WeakMap, WeakSet, Promise, AggregateError, the byte
@@ -54,7 +54,8 @@ impl<'p> Interp<'p> {
         self.sc_tag(r, "Reflect")?;
         let k = h!(self, self.heap.key_from_str("Reflect"));
         self.def(g, k, Value::Object(r), true, false, true)?;
-        self.install_object_more(oc, op, r)
+        self.install_object_more(oc, op, r)?;
+        self.install_proxy()
     }
 
     fn call_refl(&mut self, f: ReflFn, this: Value, args: &[Value]) -> Res<Value> {
@@ -111,6 +112,10 @@ impl<'p> Interp<'p> {
             self.tick()?;
             match self.funcs.get(&o) {
                 Some(&Callee::Bound { target, .. }) => o = target,
+                Some(&Callee::Proxy { ctor: true }) => {
+                    let Some(Some((t, _))) = h!(self, self.heap.proxy_parts(o)) else { return Ok(true) };
+                    o = t;
+                }
                 _ => return Ok(self.is_constructor(o)),
             }
         }

@@ -276,7 +276,7 @@ impl<'p> Interp<'p> {
 
     fn ao_has(&mut self, this: Value, k: PropertyKey) -> Res<bool> {
         Ok(match this {
-            Value::Object(o) => hx!(self, self.heap.has_property(o, k)),
+            Value::Object(o) => self.o_has_property(o, k)?,
             _ => false,
         })
     }
@@ -296,7 +296,7 @@ impl<'p> Interp<'p> {
     /// `DeletePropertyOrThrow`.
     fn ao_delete(&mut self, this: Value, k: PropertyKey) -> Res<()> {
         let ok = match this {
-            Value::Object(o) => hxw!(self, self.heap.delete(o, k)),
+            Value::Object(o) => self.o_delete(o, k)?,
             _ => true,
         };
         if ok {
@@ -330,7 +330,7 @@ impl<'p> Interp<'p> {
     /// The intrinsic `Array` and an `undefined` or `null` species give a plain array. Any other callable is a gate.
     fn ao_species(&mut self, this: Value, len: u64) -> Res<ObjId> {
         if let Value::Object(o) = this
-            && h!(self, self.heap.is_array(o))
+            && self.o_is_array(o)?
         {
             let mut c = self.get_prop(this, self.k_constructor)?;
             if matches!(c, Value::Object(_)) {
@@ -364,7 +364,7 @@ impl<'p> Interp<'p> {
         if !matches!(s, Value::Undefined) {
             return self.truthy(s);
         }
-        Ok(h!(self, self.heap.is_array(o)))
+        self.o_is_array(o)
     }
 
     // ------------------------------------------------------------ callback methods
@@ -793,6 +793,7 @@ impl<'p> Interp<'p> {
         Ok(sx != sy && h!(self, self.heap.str_units(sx)) > h!(self, self.heap.str_units(sy)))
     }
 
+    #[inline] // the compiler inlined it before the proxy change moved other inlining decisions (measured: 1.5% on `sort`)
     fn ao_sort_key(&mut self, vals: &[Value], keys: &mut [Option<StrId>], i: u32) -> Res<StrId> {
         if let Some(s) = keys[i as usize] {
             return Ok(s);
@@ -819,7 +820,7 @@ impl<'p> Interp<'p> {
             for k in keys {
                 self.tick()?;
                 if let Value::Object(o) = src {
-                    match hx!(self, self.heap.peek_own_property(o, k)) {
+                    match self.o_peek(o, k)? {
                         Some(p) if p.enumerable() => {}
                         _ => continue,
                     }
@@ -847,7 +848,7 @@ impl<'p> Interp<'p> {
                 continue;
             }
             if let Value::Object(o) = src {
-                match hx!(self, self.heap.peek_own_property(o, k)) {
+                match self.o_peek(o, k)? {
                     Some(p) if p.enumerable() => {}
                     _ => continue,
                 }

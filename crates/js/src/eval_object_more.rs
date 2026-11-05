@@ -94,18 +94,20 @@ impl<'p> Interp<'p> {
             }
             ObjIs => Ok(Value::Bool(a0.same_value(a1))),
             ObjPreventExtensions => {
-                if let Value::Object(o) = a0 {
-                    h!(self, self.heap.prevent_extensions(o));
+                if let Value::Object(o) = a0
+                    && !self.o_prevent_extensions(o)?
+                {
+                    return Err(self.type_err("'preventExtensions' on proxy: trap returned falsish"));
                 }
                 Ok(a0)
             }
             ObjSeal | ObjFreeze => self.ro_integrity(a0, f == ObjFreeze),
             ObjIsExtensible => Ok(Value::Bool(match a0 {
-                Value::Object(o) => h!(self, self.heap.is_extensible(o)),
+                Value::Object(o) => self.o_is_extensible(o)?,
                 _ => false,
             })),
             ObjIsFrozen | ObjIsSealed => Ok(Value::Bool(match a0 {
-                Value::Object(o) => hx!(self, self.heap.test_integrity(o, f == ObjIsFrozen)),
+                Value::Object(o) => hx!(self, self.heap.test_integrity(o, f == ObjIsFrozen), self.px_test_integrity(o, f == ObjIsFrozen)?),
                 _ => true,
             })),
             ObjDefineProperties => {
@@ -131,7 +133,7 @@ impl<'p> Interp<'p> {
                 let Value::Object(mut v) = a0 else { return Ok(Value::Bool(false)) };
                 self.ao_cvt(this)?;
                 let Value::Object(o) = this else { return Ok(Value::Bool(false)) };
-                while let Some(p) = h!(self, self.heap.get_prototype_of(v)) {
+                while let Some(p) = self.o_get_prototype_of(v)? {
                     self.tick()?;
                     if p == o {
                         return Ok(Value::Bool(true));
@@ -144,7 +146,7 @@ impl<'p> Interp<'p> {
                 let key = self.coerce_key(a0)?;
                 self.ao_cvt(this)?;
                 Ok(Value::Bool(match this {
-                    Value::Object(o) => matches!(hx!(self, self.heap.get_own_property(o, key)), Some(p) if p.enumerable()),
+                    Value::Object(o) => matches!(self.o_get_own_property(o, key)?, Some(p) if p.enumerable()),
                     Value::String(s) => matches!(key, PropertyKey::Index(i) if (i as usize) < h!(self, self.heap.str_len(s))),
                     _ => false,
                 }))
@@ -201,7 +203,20 @@ impl<'p> Interp<'p> {
                     Value::Object(o) => o,
                     v => self.ro_prim_proto(v),
                 };
-                Ok(match hx!(self, self.heap.lookup(start, key)) {
+                // a proxy on the chain: the loop of the specification (own property, then [[GetPrototypeOf]])
+                let found = hx!(self, self.heap.lookup(start, key), {
+                    let (mut cur, mut found) = (Some(start), None);
+                    while let Some(c) = cur {
+                        self.tick()?;
+                        if let Some(p) = self.o_get_own_property(c, key)? {
+                            found = Some((c, p));
+                            break;
+                        }
+                        cur = self.o_get_prototype_of(c)?;
+                    }
+                    found
+                });
+                Ok(match found {
                     Some((_, Property::Accessor { get, set, .. })) => (if f == ProtoLookupGetter { get } else { set }).map_or(Value::Undefined, Value::Object),
                     _ => Value::Undefined,
                 })
@@ -221,48 +236,43 @@ impl<'p> Interp<'p> {
                 let o = self.ro_target(a0, "defineProperty")?;
                 let key = self.coerce_key(a1)?;
                 let d = self.property_descriptor(a2)?;
-                Ok(Value::Bool(hxw!(self, self.heap.define_own_property(o, key, &d))))
+                Ok(Value::Bool(self.o_define_own_property(o, key, &d)?))
             }
             RDeleteProperty => {
                 let o = self.ro_target(a0, "deleteProperty")?;
                 let key = self.coerce_key(a1)?;
-                Ok(Value::Bool(hxw!(self, self.heap.delete(o, key))))
+                Ok(Value::Bool(self.o_delete(o, key)?))
             }
             RGet => {
                 let o = self.ro_target(a0, "get")?;
                 let key = self.coerce_key(a1)?;
                 let receiver = if args.len() > 2 { a2 } else { a0 };
-                match hx!(self, self.heap.get(o, key)) {
-                    Get::Value(v) => Ok(v),
-                    Get::Accessor { getter: Some(g) } => self.call_fn(Value::Object(g), receiver, &[]),
-                    Get::Accessor { getter: None } => Ok(Value::Undefined),
-                }
+                self.o_get(o, key, receiver)
             }
             RGetOwnPropertyDescriptor => {
                 let o = self.ro_target(a0, "getOwnPropertyDescriptor")?;
                 let key = self.coerce_key(a1)?;
-                match hx!(self, self.heap.get_own_property(o, key)) {
+                match self.o_get_own_property(o, key)? {
                     Some(p) => self.ro_descriptor_object(p),
                     None => Ok(Value::Undefined),
                 }
             }
             RGetPrototypeOf => {
                 let o = self.ro_target(a0, "getPrototypeOf")?;
-                Ok(h!(self, self.heap.get_prototype_of(o)).map_or(Value::Null, Value::Object))
+                Ok(self.o_get_prototype_of(o)?.map_or(Value::Null, Value::Object))
             }
             RHas => {
                 let o = self.ro_target(a0, "has")?;
                 let key = self.coerce_key(a1)?;
-                Ok(Value::Bool(hx!(self, self.heap.has_property(o, key))))
+                Ok(Value::Bool(self.o_has_property(o, key)?))
             }
             RIsExtensible => {
                 let o = self.ro_target(a0, "isExtensible")?;
-                Ok(Value::Bool(h!(self, self.heap.is_extensible(o))))
+                Ok(Value::Bool(self.o_is_extensible(o)?))
             }
             RPreventExtensions => {
                 let o = self.ro_target(a0, "preventExtensions")?;
-                h!(self, self.heap.prevent_extensions(o));
-                Ok(Value::Bool(true))
+                Ok(Value::Bool(self.o_prevent_extensions(o)?))
             }
             RSet => {
                 let o = self.ro_target(a0, "set")?;
@@ -323,7 +333,7 @@ impl<'p> Interp<'p> {
     /// `Object.getPrototypeOf(v)`.
     fn ro_proto_of(&mut self, v: Value) -> Res<Value> {
         match v {
-            Value::Object(o) => Ok(h!(self, self.heap.get_prototype_of(o)).map_or(Value::Null, Value::Object)),
+            Value::Object(o) => Ok(self.o_get_prototype_of(o)?.map_or(Value::Null, Value::Object)),
             Value::Undefined | Value::Null => Err(self.type_err("Cannot convert undefined or null to object")),
             _ => Ok(Value::Object(self.ro_prim_proto(v))),
         }
@@ -344,12 +354,12 @@ impl<'p> Interp<'p> {
     /// `o.[[SetPrototypeOf]](proto)`: `None` when it worked.
     fn ro_set_proto(&mut self, o: ObjId, proto: Option<ObjId>) -> Res<Option<ProtoFail>> {
         if o == self.object_proto {
-            return Ok((h!(self, self.heap.get_prototype_of(o)) != proto).then_some(ProtoFail::Immutable));
+            return Ok((self.o_get_prototype_of(o)? != proto).then_some(ProtoFail::Immutable));
         }
-        if h!(self, self.heap.set_prototype_of(o, proto)) {
+        if self.o_set_prototype_of(o, proto)? {
             return Ok(None);
         }
-        Ok(Some(if h!(self, self.heap.is_extensible(o)) { ProtoFail::Cyclic } else { ProtoFail::NotExtensible }))
+        Ok(Some(if self.o_is_extensible(o)? { ProtoFail::Cyclic } else { ProtoFail::NotExtensible }))
     }
 
     fn ro_proto_err(&mut self, o: ObjId, why: ProtoFail) -> Error {
@@ -365,14 +375,18 @@ impl<'p> Interp<'p> {
 
     /// `DefinePropertyOrThrow`.
     fn ro_define(&mut self, o: ObjId, key: PropertyKey, d: &PropertyDescriptor) -> Res<()> {
-        if hxw!(self, self.heap.define_own_property(o, key, d)) {
+        if self.o_define_own_property(o, key, d)? {
             return Ok(());
+        }
+        if self.heap.is_proxy(o) {
+            let k = self.key_text(key);
+            return Err(self.type_err(&format!("'defineProperty' on proxy: trap returned falsish for property '{k}'")));
         }
         if self.heap.is_view_bad_index(o, key) {
             return Err(self.type_err("Invalid typed array index"));
         }
         let k = self.key_text(key);
-        if !h!(self, self.heap.is_extensible(o)) && !hx!(self, self.heap.has_own_property(o, key)) {
+        if !self.o_is_extensible(o)? && !self.o_has_own(o, key)? {
             return Err(self.type_err(&format!("Cannot define property {k}, object is not extensible")));
         }
         Err(self.type_err(&format!("Cannot redefine property: {k}")))
@@ -381,7 +395,7 @@ impl<'p> Interp<'p> {
     /// `HasOwnProperty` of a value that `ToObject` would accept.
     fn ro_has_own(&mut self, v: Value, key: PropertyKey) -> Res<bool> {
         Ok(match v {
-            Value::Object(o) => hx!(self, self.heap.has_own_property(o, key)),
+            Value::Object(o) => self.o_has_own(o, key)?,
             Value::String(s) => key == self.k_length || matches!(key, PropertyKey::Index(i) if (i as usize) < h!(self, self.heap.str_len(s))),
             _ => false,
         })
@@ -444,7 +458,7 @@ impl<'p> Interp<'p> {
         for k in keys {
             self.tick()?;
             let p = match v {
-                Value::Object(o) => hx!(self, self.heap.get_own_property(o, k)),
+                Value::Object(o) => self.o_get_own_property(o, k)?,
                 Value::String(s) => self.ro_string_own(s, k)?,
                 _ => None,
             };
@@ -461,7 +475,7 @@ impl<'p> Interp<'p> {
         let Value::Object(o) = v else { return Ok(v) };
         let slots = hx!(self, self.heap.own_key_slots(o)) as u64;
         self.ao_reserve(slots / 8)?;
-        if !hx!(self, self.heap.set_integrity(o, frozen)) {
+        if !hx!(self, self.heap.set_integrity(o, frozen), self.px_set_integrity(o, frozen)?) {
             return Err(self.type_err("Cannot freeze array buffer views with elements"));
         }
         self.spend(slots / 8 + 1)?;
@@ -479,7 +493,7 @@ impl<'p> Interp<'p> {
         for k in keys {
             self.tick()?;
             let enumerable = match props {
-                Value::Object(p) => matches!(hx!(self, self.heap.get_own_property(p, k)), Some(x) if x.enumerable()),
+                Value::Object(p) => matches!(self.o_get_own_property(p, k)?, Some(x) if x.enumerable()),
                 _ => true,
             };
             if enumerable {
@@ -500,7 +514,7 @@ impl<'p> Interp<'p> {
             if view && matches!(v, Value::Object(_)) {
                 v = Value::Number(self.coerce_number(v)?);
             }
-            return Ok(match hxw!(self, self.heap.set(o, key, v)) {
+            return Ok(match hxw!(self, self.heap.set(o, key, v), if self.o_set(o, key, v, receiver)? { Set::Done } else { Set::Rejected }) {
                 Set::Done => true,
                 Set::Rejected => false,
                 Set::Setter(s) => {
@@ -512,7 +526,7 @@ impl<'p> Interp<'p> {
         if view {
             return Err(unsupported("Reflect.set on an integer index of a byte view with another receiver", Span::default()));
         }
-        match hx!(self, self.heap.lookup(o, key)) {
+        match hx!(self, self.heap.lookup(o, key), return self.o_set(o, key, v, receiver)) {
             Some((_, Property::Accessor { set: Some(s), .. })) => {
                 self.call_fn(Value::Object(s), receiver, &[v])?;
                 Ok(true)
@@ -520,10 +534,10 @@ impl<'p> Interp<'p> {
             Some((_, Property::Accessor { set: None, .. } | Property::Data { writable: false, .. })) => Ok(false),
             _ => {
                 let Value::Object(r) = receiver else { return Ok(false) };
-                Ok(match hx!(self, self.heap.get_own_property(r, key)) {
+                Ok(match self.o_get_own_property(r, key)? {
                     Some(Property::Accessor { .. } | Property::Data { writable: false, .. }) => false,
-                    Some(Property::Data { .. }) => hxw!(self, self.heap.define_own_property(r, key, &PropertyDescriptor { value: Some(v), ..Default::default() })),
-                    None => hxw!(self, self.heap.define_own_property(r, key, &PropertyDescriptor::data(v))),
+                    Some(Property::Data { .. }) => self.o_define_own_property(r, key, &PropertyDescriptor { value: Some(v), ..Default::default() })?,
+                    None => self.o_define_own_property(r, key, &PropertyDescriptor::data(v))?,
                 })
             }
         }

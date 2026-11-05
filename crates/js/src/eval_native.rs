@@ -25,7 +25,7 @@ impl<'p> Interp<'p> {
                             if matches!(k, PropertyKey::Symbol(_)) {
                                 continue;
                             }
-                            if matches!(hx!(self, self.heap.peek_own_property(o, k)), Some(p) if p.enumerable()) {
+                            if matches!(self.o_peek(o, k)?, Some(p) if p.enumerable()) {
                                 out.push(k);
                             }
                         }
@@ -56,7 +56,7 @@ impl<'p> Interp<'p> {
                     _ => return Ok(Value::Undefined),
                 };
                 let key = self.coerce_key(arg(args, 1))?;
-                let Some(p) = hx!(self, self.heap.get_own_property(o, key)) else { return Ok(Value::Undefined) };
+                let Some(p) = self.o_get_own_property(o, key)? else { return Ok(Value::Undefined) };
                 let r = h!(self, self.heap.new_object(Some(self.object_proto)));
                 let (k_value, k_writable, k_get, k_set, k_enum, k_conf) = (self.k_value, self.k_writable, self.k_get, self.k_set, self.k_enumerable, self.k_configurable);
                 match p {
@@ -88,7 +88,7 @@ impl<'p> Interp<'p> {
                 Ok(Value::Object(o))
             }
             Nat::ObjectGetPrototypeOf => match a0 {
-                Value::Object(o) => Ok(h!(self, self.heap.get_prototype_of(o)).map_or(Value::Null, Value::Object)),
+                Value::Object(o) => Ok(self.o_get_prototype_of(o)?.map_or(Value::Null, Value::Object)),
                 Value::Undefined | Value::Null => Err(self.type_err("Cannot convert undefined or null to object")),
                 Value::String(_) => Ok(Value::Object(self.ext.string_proto)),
                 Value::Symbol(_) => Ok(Value::Object(self.sc.symbol_proto)),
@@ -101,7 +101,7 @@ impl<'p> Interp<'p> {
                 }
                 let key = self.coerce_key(a0)?;
                 Ok(Value::Bool(match this {
-                    Value::Object(o) => hx!(self, self.heap.has_own_property(o, key)),
+                    Value::Object(o) => self.o_has_own(o, key)?,
                     Value::String(s) => key == self.k_length || matches!(key, PropertyKey::Index(i) if (i as usize) < h!(self, self.heap.str_len(s))),
                     _ => false,
                 }))
@@ -116,7 +116,7 @@ impl<'p> Interp<'p> {
                     Value::Symbol(_) => "Symbol",
                     Value::Object(o) if self.funcs.contains_key(&o) => "Function",
                     Value::Object(o) if self.ext.regexps.contains_key(&o) => "RegExp",
-                    Value::Object(o) if h!(self, self.heap.is_array(o)) => "Array",
+                    Value::Object(o) if self.o_is_array(o)? => "Array",
                     Value::Object(o) if self.date.times.contains_key(&o) => "Date",
                     Value::Object(o) if o == self.sc.bool_proto => "Boolean",
                     Value::Object(o) if Some(o) == self.ao.number_proto => "Number",
@@ -155,7 +155,12 @@ impl<'p> Interp<'p> {
                     return Err(self.type_err("Bind must be called on a function"));
                 }
                 let bargs = args.get(1..).unwrap_or(&[]).to_vec();
-                let tl = self.get_prop(this, self.k_length)?;
+                // a proxy target: BoundFunctionCreate asks [[GetPrototypeOf]], then HasOwnProperty("length") (spec order, visible to traps)
+                let px = self.heap.is_proxy(t);
+                if px {
+                    self.o_get_prototype_of(t)?;
+                }
+                let tl = if !px || self.o_get_own_property(t, self.k_length)?.is_some() { self.get_prop(this, self.k_length)? } else { Value::Undefined };
                 let len = if let Value::Number(l) = tl { (l - bargs.len() as f64).max(0.0) } else { 0.0 };
                 let tn = self.get_prop(this, self.k_name)?;
                 let tn = if let Value::String(s) = tn { self.heap.to_string_lossy(s).unwrap_or_default() } else { String::new() };
@@ -167,7 +172,7 @@ impl<'p> Interp<'p> {
             }
             Nat::FnCtor => Err(unsupported("Function constructor (dynamic code)", Span::default())),
             Nat::ArrayCtor => self.array_ctor(args, self.array_proto),
-            Nat::ArrayIsArray => Ok(Value::Bool(matches!(a0, Value::Object(o) if h!(self, self.heap.is_array(o))))),
+            Nat::ArrayIsArray => Ok(Value::Bool(matches!(a0, Value::Object(o) if self.o_is_array(o)?))),
             Nat::ArrPush => {
                 let this = self.ao_recv(this)?;
                 let len = self.length_of(this)?;
@@ -199,7 +204,7 @@ impl<'p> Interp<'p> {
                     let k = self.index_key(len - 1)?;
                     let v = self.get_prop(this, k)?;
                     if let Value::Object(o) = this
-                        && !hxw!(self, self.heap.delete(o, k)) {
+                        && !self.o_delete(o, k)? {
                         let key = self.key_text(k);
                         return Err(self.type_err(&format!("Cannot delete property '{key}'")));
                     }
@@ -219,7 +224,7 @@ impl<'p> Interp<'p> {
                 for i in 0..len {
                     self.tick()?;
                     let k = self.index_key(i)?;
-                    let has = match this { Value::Object(o) => hx!(self, self.heap.has_property(o, k)), _ => false };
+                    let has = match this { Value::Object(o) => self.o_has_property(o, k)?, _ => false };
                     if has {
                         let v = self.get_prop(this, k)?;
                         self.call_fn(a0, arg(args, 1), &[v, Value::Number(i as f64), this])?;
@@ -303,6 +308,7 @@ impl<'p> Interp<'p> {
             Nat::Ao(f) => self.call_ao(f, this, args),
             Nat::Sc(f) => self.call_sc(f, this, args, is_new),
             Nat::Refl(f) => self.call_refl(f, this, args),
+            Nat::Px(f) => self.call_px(f, args, is_new),
             Nat::Date(f) => self.call_date(f, this, args, is_new),
             Nat::Intl(f) => self.call_intl(f, this, args, is_new),
         }
@@ -399,7 +405,7 @@ impl<'p> Interp<'p> {
         };
         let mut out = PropertyDescriptor::default();
         for (k, which) in [(self.k_enumerable, 0), (self.k_configurable, 1), (self.k_value, 2), (self.k_writable, 3), (self.k_get, 4), (self.k_set, 5)] {
-            if !hx!(self, self.heap.has_property(o, k)) {
+            if !self.o_has_property(o, k)? {
                 continue;
             }
             let v = self.get_prop(d, k)?;
