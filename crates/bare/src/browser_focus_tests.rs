@@ -276,3 +276,28 @@ fn fatal_errors_stop_the_transition_and_the_cap_is_charged() {
         assert!(b.focus(z).unwrap().focused);
     });
 }
+
+#[test]
+fn related_target_requires_a_native_focus_event() {
+    big(|| {
+        let mut b = setup();
+        assert_eq!(js(&mut b, "var relatedGetter = Object.getOwnPropertyDescriptor(FocusEvent.prototype, 'relatedTarget').get; var rejected = 0; [new Event('focus'), new CustomEvent('focus'), Object.create(FocusEvent.prototype)].forEach(function(e) { try { relatedGetter.call(e); } catch(e) { if(e instanceof TypeError) rejected++; } }); rejected"), "3");
+        assert_eq!(js(&mut b, "relatedGetter.call(new FocusEvent('focus')) === null"), "true");
+    });
+}
+
+#[test]
+fn a_blur_listener_that_moves_focus_stops_the_old_transition() {
+    big(|| {
+        let mut b = setup();
+        assert_eq!(js(&mut b, "$('a').focus(); $('a').addEventListener('blur', function(){ log.push('blur-a'); $('e').focus(); }); $('a').addEventListener('focusout', function(){ log.push('stale-focusout'); }); $('b').focus(); active() + ':' + log.join()"), "e:blur-a");
+    });
+}
+
+#[test]
+fn active_element_checks_the_document_receiver_before_focus_state() {
+    big(|| {
+        let mut b = setup();
+        assert_eq!(js(&mut b, "$('a').focus(); var activeGetter = Object.getOwnPropertyDescriptor(Document.prototype, 'activeElement').get; var badActive = 0; [{}, $('a'), Object.create(Document.prototype)].forEach(function(o){ try { activeGetter.call(o); } catch(e) { if(e instanceof TypeError) badActive++; } }); badActive"), "3");
+    });
+}

@@ -161,6 +161,7 @@ pub(crate) struct EventState {
     pub time: f64,
     /// `FocusEvent.relatedTarget` (null for other events). Traced, so a saved event keeps the node.
     pub related: Value,
+    pub is_focus: bool,
 }
 
 /// A listener exception that did not stop dispatch.

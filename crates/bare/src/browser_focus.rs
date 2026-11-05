@@ -13,7 +13,7 @@
 //!
 //! The focus update is applied between the events: focus is cleared before `blur` runs, so `activeElement` is the
 //! body inside a `blur` listener, and a `focus()` call there is not a nested blur of the same element. (The HTML text
-//! sets the focused area only in the "new chain" loop. This is the order the engines use and it keeps re-entry finite.)
+//! sets the focused area only in the "new chain" loop. This local policy keeps re-entry finite; browser equivalence is unverified.)
 //! If a listener moves focus while a transition runs, the rest of that transition stops: the later focus wins.
 //! `focusin` is skipped when the element lost focus in its own `focus` listener. A transition that nests deeper than
 //! `MAX_DEPTH` ends the call with `Limit("dom-focus-depth")`. A fatal error stops the transition: no later event runs.
@@ -38,7 +38,7 @@
 //! element unfocusable. Also absent: `iframe`, `area`, `audio`/`video` controls, scroll containers, shadow hosts and
 //! `delegatesFocus`, `<dialog>` modality, `autofocus`, the `change` event of an uncommitted edit on blur, window
 //! `focus`/`blur`, `document.hasFocus()`, `:focus` and `:focus-visible` matching, `FocusEvent.view`, selection and caret
-//! effects, Tab navigation, and focus following a click. `relatedTarget` is read on any event (null off a `FocusEvent`).
+//! effects, Tab navigation, and focus following a click.
 //!
 //! `focus(options)`: `preventScroll` is read and accepted. No scroll state exists, so nothing is scrolled either way.
 //! `focusVisible` is `Unsupported` (nothing reads `:focus-visible`). A non-object, non-null option is a `TypeError`.
@@ -165,6 +165,7 @@ impl Dom {
 
     fn fire_focus(&self, it: &mut Interp<'_>, target: NodeId, ty: &str, bubbles: bool, related: Option<NodeId>) -> R<()> {
         let ev = self.new_event_proto(it, ty, bubbles, false, true, self.p().focus)?;
+        self.st.borrow_mut().events.get_mut(&ev).expect("just made").is_focus = true;
         if let Some(r) = related {
             let v = self.wrap(it, r)?;
             self.st.borrow_mut().events.get_mut(&ev).expect("just made").related = v;
@@ -196,6 +197,9 @@ impl Dom {
             self.set_focus(None);
             let e = self.epoch();
             self.fire_focus(it, o, "blur", false, to)?;
+            if self.epoch() != e {
+                return Ok(());
+            }
             self.fire_focus(it, o, "focusout", true, to)?;
             if self.epoch() != e {
                 return Ok(());
@@ -254,6 +258,9 @@ pub(crate) fn blur(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V 
 }
 
 pub(crate) fn active_element(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
+    if d.nd(it, this)? != d.doc.borrow().root() {
+        return Err(it.type_error("Illegal invocation"));
+    }
     if let Some(n) = d.current_focus(it)? {
         return d.wrap(it, n);
     }
@@ -265,6 +272,9 @@ pub(crate) fn active_element(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Val
 
 pub(crate) fn related_target(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
     let o = d.event_of(it, this)?;
+    if !d.st.borrow().events[&o].is_focus {
+        return Err(it.type_error("Illegal invocation"));
+    }
     Ok(d.st.borrow().events[&o].related)
 }
 
@@ -291,7 +301,12 @@ pub(crate) fn focus_event_ctor(d: &Dom, it: &mut Interp<'_>, _: Value, a: &[Valu
         _ => return Err(it.type_error("The event initializer is not an object.")),
     }
     let e = d.new_event_proto(it, &ty, bubbles, cancelable, composed, d.p().focus)?;
-    d.st.borrow_mut().events.get_mut(&e).expect("just made").related = related;
+    {
+        let mut st = d.st.borrow_mut();
+        let event = st.events.get_mut(&e).expect("just made");
+        event.related = related;
+        event.is_focus = true;
+    }
     Ok(Value::Object(e))
 }
 
