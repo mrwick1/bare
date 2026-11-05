@@ -1096,9 +1096,6 @@ impl<'p> Interp<'p> {
 
     fn json_parse(&mut self, text: Value, reviver: Value) -> Res<Value> {
         let s = self.coerce_string(text)?;
-        if self.is_callable(reviver) {
-            return Err(unsupported("JSON.parse reviver", Span::default()));
-        }
         let len = h!(self, self.heap.str_len(s));
         if len > self.ext.bl.json.max_source_units {
             return Err(Error::Limit(LimitKind::Json(json::LimitKind::Source)));
@@ -1108,6 +1105,7 @@ impl<'p> Interp<'p> {
         let opts = json::JsonOptions { object_proto: Some(self.object_proto), array_proto: Some(self.array_proto) };
         let lim = self.ext.bl.json;
         match json::parse(&mut self.heap, &units, &opts, &lim) {
+            Ok(v) if self.is_callable(reviver) => self.json_revive(v, reviver),
             Ok(v) => Ok(v),
             Err(e) => Err(match e.kind {
                 json::ErrorKind::Syntax(k) => {

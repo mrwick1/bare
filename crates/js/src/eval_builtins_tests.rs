@@ -114,7 +114,6 @@ fn gates_are_explicit_unsupported() {
     assert_eq!(unsupported_of("new RegExp('(?<=a)b')"), "lookbehind");
     assert_eq!(unsupported_of("new RegExp('a', 'u')"), "regexp flag u");
     assert_eq!(unsupported_of("RegExp('(?<x>a)')"), "named group");
-    assert_eq!(unsupported_of("JSON.parse('[1]', function (k, v) { return v; })"), "JSON.parse reviver");
     assert_eq!(unsupported_of("var r = /a/; r.exec = function () { return null; }; r.test('a')"), "RegExp with a replaced exec method");
     assert_eq!(unsupported_of("var r = /a/g; r.exec = function () { return null; }; 'a'.replace(r, 'b')"), "RegExp with a replaced exec method");
     assert_eq!(unsupported_of("var r = /a/; r.exec = function () { return null; }; 'a'.split(r)"), "RegExp with a replaced exec method");

@@ -1,0 +1,104 @@
+=== identity reviver keeps the value
+JSON.stringify(JSON.parse('{"a":[1,{"b":null}],"c":"x"}', function (k, v) { return v; }));
+=== postorder with this and key strings
+var log = []; JSON.parse('{"a":[1,2],"b":{"c":3}}', function (k, v) { log.push(typeof k + ":" + k + ":" + (this === undefined ? "u" : Object.keys(this).join("+"))); return v; }); log.join("|");
+=== root holder key is the empty string
+var seen; var r = JSON.parse('5', function (k, v) { seen = [k, Object.keys(this), this[""], Object.getPrototypeOf(this) === Object.prototype]; return v + 1; }); [r, seen.join("/")].join();
+=== root result undefined is returned
+typeof JSON.parse('[1]', function () {});
+=== root primitive and null
+[JSON.parse('null', function (k, v) { return v === null ? "n" : v; }), JSON.parse('"s"', function (k, v) { return v + "!"; }), JSON.parse('true', function (k, v) { return !v; })].join();
+=== object replacement and deletion
+JSON.stringify(JSON.parse('{"a":1,"b":2,"c":3}', function (k, v) { if (k === "a") return undefined; if (k === "b") return v * 10; return v; }));
+=== array deletion leaves holes and replacement
+var a = JSON.parse('[1,2,3,4]', function (k, v) { if (k === "1") return undefined; if (k === "2") return "x"; return v; }); [a.length, 1 in a, a[2], a.join()].join("|");
+=== array elements are replaced by objects that are not visited again
+var n = 0; var a = JSON.parse('[1,2]', function (k, v) { n++; return k === "0" ? { z: [1] } : v; }); [n, JSON.stringify(a)].join();
+=== duplicate keys keep the last and one visit
+var log = []; JSON.parse('{"a":1,"a":2}', function (k, v) { log.push(k + v); return v; }); log.join();
+=== utf16 keys and lone surrogates
+var log = []; JSON.parse('{"\\ud83d\\ude00":1,"\\ud800":2,"é":3}', function (k, v) { log.push(k.length + ":" + k.charCodeAt(0)); return v; }); log.join();
+=== integer keys order before strings
+var log = []; JSON.parse('{"b":1,"2":2,"a":3,"1":4}', function (k, v) { log.push(k); return v; }); log.join();
+=== proto key is plain data
+var log = []; var o = JSON.parse('{"__proto__":{"x":1}}', function (k, v) { log.push(k); return v; }); [log.join(), Object.getPrototypeOf(o) === Object.prototype, Object.keys(o).join()].join("|");
+=== later key deleted by an earlier callback is read as undefined
+var log = []; JSON.parse('{"a":1,"b":2,"c":3}', function (k, v) { log.push(k + ":" + v); if (k === "a") delete this.b; return v; }); log.join();
+=== later key added by a callback is not visited
+var log = []; JSON.parse('{"a":1,"b":2}', function (k, v) { log.push(k); if (k === "a") this.z = 9; return v; }); log.join();
+=== later key replaced by a callback is visited with the new value
+var log = []; JSON.parse('{"a":1,"b":2}', function (k, v) { log.push(k + ":" + JSON.stringify(v)); if (k === "a") this.b = [7]; return v; }); log.join();
+=== array length grows during the walk is a snapshot
+var log = []; JSON.parse('[1,2]', function (k, v) { log.push(k); if (k === "0") this.push(5); return v; }); log.join();
+=== array length shrinks during the walk
+var log = []; JSON.parse('[1,2,3]', function (k, v) { log.push(k + ":" + v); if (k === "0") this.length = 1; return v; }); log.join();
+=== nested array length snapshot taken when the array is first reached
+var log = []; JSON.parse('[[1,2],3]', function (k, v) { log.push(k); if (k === "0" && !Array.isArray(v)) this.push(9); return v; }); log.join();
+=== key list snapshot of an object is fixed before children
+var log = []; JSON.parse('{"o":{"p":1,"q":2},"r":3}', function (k, v) { log.push(k); if (k === "p") { this.q2 = 1; delete this.q; } return v; }); log.join();
+=== non-enumerable key made by a callback after the snapshot is still visited
+var log = []; JSON.parse('{"a":1,"b":2}', function (k, v) { log.push(k + ":" + v); if (k === "a") Object.defineProperty(this, "b", { value: 5, enumerable: false, configurable: true, writable: true }); return v; }); log.join();
+=== getter installed on a later key runs once with this as holder
+var n = 0; var r = JSON.parse('{"a":1,"b":2}', function (k, v) { if (k === "a") Object.defineProperty(this, "b", { get: function () { n++; return 42; }, enumerable: true, configurable: true }); return k === "b" ? v + 1 : v; }); [n, r.b].join();
+=== replacement of an accessor with a data property
+var r = JSON.parse('{"a":1,"b":2}', function (k, v) { if (k === "a") Object.defineProperty(this, "b", { get: function () { return 3; }, enumerable: true, configurable: true }); return k === "b" ? v * 2 : v; }); var d = Object.getOwnPropertyDescriptor(r, "b"); [d.value, d.writable, d.enumerable, d.configurable, "get" in d].join();
+=== CreateDataProperty fails silently on a non-configurable property
+var r = JSON.parse('{"a":1,"b":2}', function (k, v) { if (k === "a") Object.defineProperty(this, "b", { value: 2, writable: false, configurable: false, enumerable: true }); return k === "b" ? 99 : v; }); r.b;
+=== delete fails silently on a non-configurable property
+var r = JSON.parse('{"a":1,"b":2}', function (k, v) { if (k === "a") Object.defineProperty(this, "b", { value: 2, configurable: false, enumerable: true, writable: true }); return k === "b" ? undefined : v; }); r.b;
+=== non-writable data property is not replaced and is not an error
+var r = JSON.parse('{"a":1,"b":2}', function (k, v) { if (k === "a") Object.defineProperty(this, "b", { value: 2, writable: false, configurable: false, enumerable: true }); return k === "b" ? 5 : v; }); [r.b, Object.getOwnPropertyDescriptor(r, "b").writable].join();
+=== replacement lengthens an array through a hole
+var r = JSON.parse('[1,2]', function (k, v) { if (k === "0") this.length = 5; return k === "1" ? "y" : v; }); [r.length, r[1]].join();
+=== reviver sees inherited array elements
+Array.prototype[1] = "inh"; var log = []; var r = JSON.parse('[0,1]', function (k, v) { if (k === "0") delete this[1]; log.push(k + ":" + v); return v; }); delete Array.prototype[1]; log.join();
+=== callback throws and catch outside
+try { JSON.parse('{"a":1}', function (k, v) { if (k === "a") throw new RangeError("boom"); return v; }); "no"; } catch (e) { e.name + ":" + e.message; }
+=== callback throws a primitive
+try { JSON.parse('[1]', function () { throw 7; }); } catch (e) { typeof e + e; }
+=== throw inside callback stops later visits
+var n = 0; try { JSON.parse('[1,2,3]', function (k) { n++; if (k === "1") throw 1; }); } catch (e) {} n;
+=== reentrant JSON.parse in the reviver
+var out = []; JSON.parse('{"a":"[1,2]"}', function (k, v) { if (k === "a") out.push(JSON.stringify(JSON.parse(v, function (k2, v2) { return typeof v2 === "number" ? v2 * 2 : v2; }))); return v; }); out.join();
+=== reentrant JSON.parse that throws is caught inside
+var out = []; JSON.parse('[1]', function (k, v) { try { JSON.parse("{", function () {}); } catch (e) { out.push(e.name); } return v; }); out.join();
+=== reentrant parse gets syntax error before reviver runs
+var n = 0; try { JSON.parse("[1,", function () { n++; }); } catch (e) { n + e.name; }
+=== cross-script callbacks run their own code
+var vm = 1; function mk() { return function (k, v) { return typeof v === "number" ? v + 1 : v; }; } var f = mk(); JSON.stringify(JSON.parse('[1,[2],{"a":3}]', f));
+=== reviver is a bound function and this is the holder
+var h = []; var f = function (k, v) { h.push(this === undefined); return v; }.bind({ z: 1 }); JSON.parse('[1]', f); h.join();
+=== reviver is an arrow function
+JSON.stringify(JSON.parse('{"a":[1,2]}', (k, v) => typeof v === "number" ? v * 3 : v));
+=== reviver is called with exactly name and value in ES2022 order
+var r = []; JSON.parse('[7]', function (k, v) { r.push(typeof k + ":" + typeof v); return v; }); r.join();
+=== a callable that is not a function value is not callable
+JSON.parse('[1]', {}).length + JSON.parse('[1]', null).length + JSON.parse('[1]', 3).length + JSON.parse('[1]', "f").length;
+=== non-callable reviver behaves as before
+JSON.stringify([JSON.parse('{"a":1}', undefined), JSON.parse('[1,{"b":2}]', []), JSON.parse('2', true)]);
+=== syntax errors do not call the reviver
+var n = 0; try { JSON.parse('{"a":}', function () { n++; return 1; }); } catch (e) { n + ":" + e.name; }
+=== reviver function value replaced at the root
+typeof JSON.parse('1', function () { return function () {}; });
+=== returning the holder shape in arrays
+JSON.stringify(JSON.parse('[[1],[2]]', function (k, v) { return Array.isArray(v) ? v.concat([0]) : v; }));
+=== negative zero and big numbers pass through
+var r = JSON.parse('[-0,1e400,0.1]', function (k, v) { return v; }); [1 / r[0], r[1], r[2]].join();
+=== callback replaces an object by itself for a cycle that is not walked again
+var r = JSON.parse('{"a":{"b":1}}', function (k, v) { if (k === "b") return this; return v; }); r.a.b === r.a;
+=== callback makes a later sibling point at an ancestor then walk ends via mutation
+var n = 0; var r = JSON.parse('{"a":{"b":1,"c":2},"d":3}', function (k, v) { n++; if (k === "b") this.c = 5; return v; }); n;
+=== key order of replaced keys is kept
+var r = JSON.parse('{"a":1,"b":2,"c":3}', function (k, v) { if (k === "a") return undefined; if (k === "b") return undefined; return v; }); Object.keys(r).join();
+=== deleted then recreated key moves to the end
+var r = JSON.parse('{"a":1,"b":2,"c":3}', function (k, v) { return k === "a" ? undefined : v; }); r.a = 0; Object.keys(r).join();
+=== undefined return for an array leaves length
+var r = JSON.parse('[1,2,3]', function (k, v) { return k === "2" ? undefined : v; }); r.length + ":" + (2 in r);
+=== reviver length and name unaffected by being called
+var f = function (k, v) { return v; }; JSON.parse("[1]", f); [f.length, f.name].join();
+=== reviver sees mutation of holder via this for the root wrapper
+var r = JSON.parse('1', function (k, v) { this.other = 2; return v; }); r;
+=== typeof the key for index keys on objects
+var t = []; JSON.parse('{"1":1}', function (k) { t.push(typeof k); }); t.join();
+=== state restored after a throwing reviver
+var f = function () { throw 1; }; try { JSON.parse("[1]", f); } catch (e) {} JSON.stringify(JSON.parse('{"a":[1]}', function (k, v) { return v; }));
