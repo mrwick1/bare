@@ -81,10 +81,11 @@ impl<'p> Interp<'p> {
                     Value::Null => None,
                     _ => return Err(self.type_err("Object prototype may only be an Object or null")),
                 };
+                let o = h!(self, self.heap.new_object(proto));
                 if !matches!(arg(args, 1), Value::Undefined) {
-                    return Err(unsupported("Object.create properties argument", Span::default()));
+                    self.ro_define_properties(o, arg(args, 1))?;
                 }
-                Ok(Value::Object(h!(self, self.heap.new_object(proto))))
+                Ok(Value::Object(o))
             }
             Nat::ObjectGetPrototypeOf => match a0 {
                 Value::Object(o) => Ok(h!(self, self.heap.get_prototype_of(o)).map_or(Value::Null, Value::Object)),
