@@ -223,3 +223,15 @@ fn colliding_ids_across_scripts_and_collection_between_calls() {
         assert_eq!(b.navigation_stats().param_bytes, 0);
     });
 }
+
+#[test]
+fn a_limit_in_a_subclass_job_poisoned_checkpoint_never_replays() {
+    big(|| {
+        let mut b = mk(EvalLimits { max_steps: 3000, ..Default::default() });
+        js(&mut b, NT);
+        js(&mut b, "var hits=0, later=0; var target=mkNt(function () { hits++; while(true) {} }); Promise.resolve().then(function () { Reflect.construct(URLSearchParams, [], target); }); Promise.resolve().then(function () { later++; });");
+        assert!(matches!(b.drain(), Err(Error::Limit(LimitKind::Steps))));
+        assert!(matches!(b.drain(), Err(Error::Limit(LimitKind::Steps))));
+        assert_eq!(js(&mut b, "[hits,later].join()"), "1,0");
+    });
+}

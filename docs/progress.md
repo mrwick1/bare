@@ -411,3 +411,5 @@ The assembled workspace passes 1,717 tests. Release JS, HTML and bare tests pass
 
 
 Element.innerHTML now parses supported HTML contexts into the native tree and serializes native children. Fragment scripts remain inert after moves and clones. Unsupported table/select/template/foreign contexts are explicit gates. The cached run gets past React's script-creation path, then stops at Unsupported("subclassing a host constructor (new.target is not passed to the constructor)"). No form or authentication is verified. See [resources.md](resources.md#native-html-fragments).
+
+URLSearchParams opts in to host new.target propagation. Derived construction creates native params state with the requested prototype; other host constructors remain gated. Constructor state is restored after nested calls and all error exits. The parent added a Promise-job test: a limited prototype getter runs once, poisons later drains, and blocks later jobs. The cached bootstrap result is recorded in resources.md after validation.
