@@ -176,3 +176,11 @@ fn rel_caps_are_checked_before_the_write_and_on_read() {
     assert_eq!(js(&mut b, "var n = document.createElement('link'); n.rel = 'x'; 0"), lim("dom-text"));
     assert_eq!(js(&mut b, "n.hasAttribute('rel')"), "false");
 }
+
+
+#[test]
+fn rel_reflects_only_the_null_namespace_attribute() {
+    let mut b = browser(PAGE);
+    assert_eq!(js(&mut b, "var x = document.createElement('link'); x.setAttributeNS('http://www.w3.org/1999/xlink','rel','foreign'); x.rel"), "");
+    assert_eq!(js(&mut b, "x.rel = 'own'; [x.rel, x.getAttributeNS(null,'rel'), x.getAttributeNS('http://www.w3.org/1999/xlink','rel')].join()"), "own,own,foreign");
+}

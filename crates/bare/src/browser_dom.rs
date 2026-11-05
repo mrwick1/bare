@@ -1204,8 +1204,10 @@ pub(crate) fn link_el(d: &Dom, it: &mut Interp<'_>, this: Value) -> R<NodeId> {
 }
 
 pub(crate) fn link_rel(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    link_el(d, it, this)?;
-    reflect_get(d, it, this, "rel")
+    let n = link_el(d, it, this)?;
+    let doc = d.doc.borrow();
+    let value = doc.find_atom("rel").and_then(|a| doc.attr(n, a)).unwrap_or("");
+    d.js_str(it, value)
 }
 
 pub(crate) fn set_link_rel(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
