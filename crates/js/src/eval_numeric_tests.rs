@@ -265,3 +265,50 @@ fn hydration_globals_charge_scans_and_round_power_radices_once() {
         }
     });
 }
+
+#[test]
+fn number_is_nan_true_only_for_number_nan() {
+    for (src, want) in [
+        ("Number.isNaN(NaN)", "boolean:true"), ("Number.isNaN(0/0)", "boolean:true"), ("Number.isNaN(Infinity-Infinity)", "boolean:true"),
+        ("Number.isNaN(-NaN)", "boolean:true"), ("Number.isNaN(Math.log(-1))", "boolean:true"), ("Number.isNaN(NaN, 1)", "boolean:true"),
+        ("Number.isNaN(0)", "boolean:false"), ("Number.isNaN(-0)", "boolean:false"), ("Number.isNaN(Infinity)", "boolean:false"),
+        ("Number.isNaN(-Infinity)", "boolean:false"), ("Number.isNaN(5e-324)", "boolean:false"), ("Number.isNaN(1.7976931348623157e308)", "boolean:false"),
+        ("Number.isNaN(1)", "boolean:false"), ("Number.isNaN()", "boolean:false"), ("Number.isNaN(undefined)", "boolean:false"),
+        ("Number.isNaN(null)", "boolean:false"), ("Number.isNaN(true)", "boolean:false"), ("Number.isNaN('NaN')", "boolean:false"),
+        ("Number.isNaN('')", "boolean:false"), ("Number.isNaN(Symbol())", "boolean:false"), ("Number.isNaN({})", "boolean:false"),
+        ("Number.isNaN([NaN])", "boolean:false"), ("Number.isNaN(function(){})", "boolean:false"), ("Number.isNaN(1, NaN)", "boolean:false"),
+        ("isNaN('abc') && !Number.isNaN('abc')", "boolean:true"), // the global isNaN still coerces
+    ] {
+        assert_eq!(run(src), want, "{src}");
+    }
+}
+
+#[test]
+fn number_is_nan_never_coerces() {
+    assert_eq!(
+        run("var n=0; var o={get valueOf(){n++; return function(){return NaN}}, toString(){n++; return 'NaN'}}; [Number.isNaN(o), n].join()"),
+        "string:false,0"
+    );
+}
+
+#[test]
+fn number_is_nan_shape_and_not_a_constructor() {
+    assert_eq!(run("var d=Object.getOwnPropertyDescriptor(Number,'isNaN'); [d.writable,d.enumerable,d.configurable,Number.isNaN.length,Number.isNaN.name].join()"), "string:true,false,true,1,isNaN");
+    assert_eq!(run("var t; try { new Number.isNaN(NaN) } catch (e) { t = e.name } t"), "string:TypeError");
+}
+
+#[test]
+fn number_is_nan_survives_gc_and_deleting_number() {
+    big(|| {
+        let prog = parse_script("var f = Number.isNaN; delete globalThis.Number; f", Limits::default()).unwrap();
+        let mut it = Interp::new(&prog, Heap::default(), EvalLimits::default()).unwrap();
+        let f = it.run().unwrap();
+        it.collect(&[f]).unwrap();
+        it.collect(&[f]).unwrap();
+        let r = it.call_fn(f, Value::Undefined, &[Value::Number(f64::NAN)]).unwrap();
+        assert_eq!(show(&it, r), "boolean:true");
+    });
+    // Steps: a loop of calls stops at the step limit.
+    let out = big(|| outcome("for (;;) Number.isNaN(1)", EvalLimits { max_steps: 20_000, ..Default::default() }, Heap::default()));
+    assert_eq!(out, "limit:Steps");
+}

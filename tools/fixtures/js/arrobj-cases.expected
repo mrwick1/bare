@@ -215,3 +215,10 @@ fill_setter_order	string:s03|true
 fill_null_receiver	string:TypeError
 fill_arguments_object	number:2
 fill_length_property	number:1
+number_isnan_values	string:true,true,true,true,true,false,false,false,false,false,false,false
+number_isnan_non_numbers	string:false,false,false,false,false,false,false,false,false,false,true,false
+number_isnan_no_coercion	string:false,false,0
+number_isnan_global_still_coerces	string:true,false,false
+number_isnan_shape	string:true,false,true,1,isNaN,function
+number_isnan_new	string:TypeError
+number_isnan_alias_after_delete	string:true,false,undefined

@@ -438,3 +438,17 @@ var r; try{Array.prototype.fill.call(null,1); r='no'}catch(e){r=e.name} r
 function f(){ return Array.prototype.fill.call(arguments,0).length } f(1,2)
 === fill_length_property
 Array.prototype.fill.length
+=== number_isnan_values
+[Number.isNaN(NaN),Number.isNaN(0/0),Number.isNaN(Infinity-Infinity),Number.isNaN(-NaN),Number.isNaN(Math.log(-1)),Number.isNaN(0),Number.isNaN(-0),Number.isNaN(Infinity),Number.isNaN(-Infinity),Number.isNaN(5e-324),Number.isNaN(1.7976931348623157e308),Number.isNaN(1)].join()
+=== number_isnan_non_numbers
+[Number.isNaN(),Number.isNaN(undefined),Number.isNaN(null),Number.isNaN(true),Number.isNaN("NaN"),Number.isNaN(""),Number.isNaN(Symbol()),Number.isNaN({}),Number.isNaN([NaN]),Number.isNaN(function(){}),Number.isNaN(NaN,1),Number.isNaN(1,NaN)].join()
+=== number_isnan_no_coercion
+var n=0; var o={get valueOf(){n++; return function(){return NaN}}, toString(){n++; return "NaN"}}; [Number.isNaN(o), Number.isNaN("NaN"), n].join()
+=== number_isnan_global_still_coerces
+[isNaN("abc"), isNaN("1"), Number.isNaN("abc")].join()
+=== number_isnan_shape
+var d=Object.getOwnPropertyDescriptor(Number,"isNaN"); [d.writable,d.enumerable,d.configurable,Number.isNaN.length,Number.isNaN.name,typeof Number.isNaN].join()
+=== number_isnan_new
+var r; try { new Number.isNaN(NaN); r = "no" } catch (e) { r = e.name } r
+=== number_isnan_alias_after_delete
+var f = Number.isNaN; delete globalThis.Number; [f(NaN), f(0), typeof Number].join()
