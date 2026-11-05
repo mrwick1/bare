@@ -20,7 +20,7 @@
 // by one call (`json.max_nodes`). Callbacks can add keys, elements and cycles, so the walk is bound again here: an
 // array longer than the remaining visit budget, or an object with more keys than that, ends with
 // `Json(Nodes)`; a stack deeper than `max_depth` ends with `Json(Depth)`. Work is charged to the step budget:
-// one step per visit and one per own key listed.
+// one step per visit and one per key storage slot scanned. The node cap also bounds key snapshots, including holes and removed slots.
 
 /// One open object or array.
 struct RvFrame {

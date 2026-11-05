@@ -200,6 +200,8 @@ Uint8Array.indexOf is integrated. It uses strict numeric equality, converts from
 
 Native DOM namespace identity and SVG/MathML construction are integrated. Namespaced attributes, wrapper brands and moves/clones use the native document identity. The tree builder now controls raw-text/RCDATA mode and foreign CDATA. Foreign scope borders stop formatting recovery from crossing integration points. Borrowed HTML style/focus methods reject foreign receivers; dynamic SVG scripts remain inert. This does not provide SVG layout/drawing, SVG style, fragment parsing or complete namespace/name support. See [resources.md](resources.md#native-namespaces-and-foreign-content).
 
+JSON.parse now supports callable revivers with ES2022 postorder traversal. Callback mutations, property deletion/replacement and cross-script calls use the evaluator's existing paths. Visit/depth and key-snapshot bounds also cover callback-injected values. The newer third source-context argument remains absent, rather than being fabricated. See [resources.md](resources.md#json-reviver-traversal).
+
 ### S4 Window paint and input
 
 Build on layout and the original modules 5 and 6. Paint into an OS-independent pixel buffer. Keep Wayland behind the window interface described in `decisions.md`.
