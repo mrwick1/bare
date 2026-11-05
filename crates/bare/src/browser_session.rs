@@ -14,6 +14,10 @@
 //! its own [`SessionStop`]; the reason of the last document is kept (`Page`). A fatal error of a document ends the
 //! session and nothing is loaded after it, also when a navigation is queued.
 //!
+//! `Session::resume(&[Input])` goes on with the settled document: the existing `click`, `type_text` and `submit` primitives,
+//! then the same rounds of `run_page` (no reload, no second loop). The budgets above are session-wide: documents, tasks,
+//! rounds and time (time inside `run` and `resume` only) stay spent. Every stop but `Settled` ends the session for good.
+//!
 //! Document load: GET, redirects followed here one by one (`Client::send_once`: a redirect is checked before any socket
 //! opens): at most `max_redirects`, http or https only, no downgrade from https to http. The status must be 2xx (a
 //! 404 page is not run), `Content-Type` `text/html` (XML/XHTML is unsupported), no `Content-Encoding`, at most
@@ -24,7 +28,7 @@
 
 use crate::browser::{Browser, BrowserLimits};
 use crate::browser_fetch::FetchLimits;
-use crate::browser_loader::{PageConfig, PageLimits, PageResult, Stop, deadline_after, label};
+use crate::browser_loader::{Input, PageConfig, PageLimits, PageResult, Stop, deadline_after, label};
 use crate::browser_navigation::{NavLimits, WebStorage};
 use bare_html::{encoding, tree};
 use bare_js::eval::EvalLimits;
@@ -122,6 +126,19 @@ pub struct Session {
     store: WebStorage,
     /// The last document. Dropped before the next one is requested.
     browser: Option<Browser>,
+    /// What the session has used so far, shared by `run` and every `resume`.
+    used: Used,
+}
+
+#[derive(Default)]
+struct Used {
+    documents: usize,
+    tasks: usize,
+    rounds: usize,
+    /// Time spent inside `run` and `resume`. Time between calls is not charged.
+    time: Duration,
+    /// Why the session cannot go on. Set by every stop but `Settled` and `NoTarget`.
+    ended: Option<SessionStop>,
 }
 
 fn is_html(content_type: Option<&str>) -> bool {
@@ -195,7 +212,7 @@ fn load_document(client: &mut Client, url: &str, lim: &SessionLimits, deadline: 
 impl Session {
     pub fn new(mut cfg: SessionConfig) -> Session {
         let store = cfg.storage.take().unwrap_or_default();
-        Session { cfg, store, browser: None }
+        Session { cfg, store, browser: None, used: Used::default() }
     }
 
     /// The storage of the session: it lives through every document.
@@ -209,67 +226,103 @@ impl Session {
     }
 
     /// Load the first document and every document that a navigation asks for, within the limits. It never panics on
-    /// page input. Call it on a thread with a big stack (8 MiB release, 64 MiB debug): the VM recurses.
+    /// page input. Call it on a thread with a big stack (8 MiB release, 64 MiB debug): the VM recurses. A second call
+    /// starts a new run with new budgets.
     pub fn run(&mut self) -> SessionResult {
-        let lim = self.cfg.limits.clone();
-        let deadline = deadline_after(lim.max_time);
+        self.used = Used::default();
+        let first = self.cfg.url.clone();
+        self.drive(Some(first), &[])
+    }
+
+    /// Go on with the settled document of the last `run` or `resume`: take `steps` through `Browser::click`, `type_text`
+    /// and `submit` (one task each), then run the same network, microtask, timer and navigation pumps. The realm is not
+    /// reloaded; a navigation that a listener asks for makes a fresh realm as in `run`. The documents, tasks, rounds and
+    /// time that `run` and earlier resumes used stay used. After any stop but `Settled` (and `Page(NoTarget)`, which
+    /// leaves the page intact) the session is ended: a call gives the same stop and runs nothing. The result covers this
+    /// call only. Same stack rule as `run`.
+    pub fn resume(&mut self, steps: &[Input]) -> SessionResult {
         let mut out = SessionResult { stop: SessionStop::Page(Stop::Settled), pages: Vec::new(), urls: Vec::new(), tasks: 0, rounds: 0 };
-        let mut next = self.cfg.url.clone();
+        if let Some(stop) = &self.used.ended {
+            out.stop = stop.clone();
+        } else if self.browser.is_none() {
+            out.stop = SessionStop::LoadFailed("there is no document to resume".into());
+        } else {
+            return self.drive(None, steps);
+        }
+        out
+    }
+
+    fn drive(&mut self, next: Option<String>, steps: &[Input]) -> SessionResult {
+        let start = Instant::now();
+        let before = self.used.time;
+        let mut out = SessionResult { stop: SessionStop::Page(Stop::Settled), pages: Vec::new(), urls: Vec::new(), tasks: 0, rounds: 0 };
+        out.stop = self.drive_loop(next, steps, &mut out);
+        self.used.time = before + start.elapsed();
+        if !matches!(out.stop, SessionStop::Page(Stop::Settled | Stop::NoTarget(_))) {
+            self.used.ended = Some(out.stop.clone());
+        }
+        out
+    }
+
+    fn drive_loop(&mut self, mut next: Option<String>, steps: &[Input], out: &mut SessionResult) -> SessionStop {
+        let lim = self.cfg.limits.clone();
+        let deadline = deadline_after(lim.max_time.saturating_sub(self.used.time));
         loop {
-            if out.pages.len() >= lim.max_documents {
-                out.stop = SessionStop::DocumentLimit;
-                return out;
+            if next.is_some() && self.used.documents >= lim.max_documents {
+                return SessionStop::DocumentLimit;
             }
-            if Instant::now() >= deadline {
-                out.stop = SessionStop::TimeBudget;
-                return out;
+            if self.used.time >= lim.max_time || Instant::now() >= deadline {
+                return SessionStop::TimeBudget;
             }
-            if out.tasks >= lim.max_tasks {
-                out.stop = SessionStop::TaskBudget;
-                return out;
+            if self.used.tasks >= lim.max_tasks {
+                return SessionStop::TaskBudget;
             }
-            if out.rounds >= lim.max_rounds {
-                out.stop = SessionStop::RoundBudget;
-                return out;
-            }
-            // The old document ends here: its realm, timers and callbacks are gone before the next load starts.
-            self.browser = None;
-            let (url, html) = match load_document(&mut (self.cfg.client)(), &next, &lim, deadline) {
-                Ok(d) => d,
-                Err(why) => {
-                    out.stop = SessionStop::LoadFailed(why);
-                    return out;
-                }
-            };
-            let page_url = url.split('#').next().and_then(|u| Url::parse(u).ok()).map_or_else(|| "?".to_string(), |u| label(&u));
-            let mut b = match Browser::new(tree::parse(&html), self.cfg.browser, self.cfg.eval, self.cfg.heap) {
-                Ok(b) => b,
-                Err(_) => {
-                    out.stop = SessionStop::LoadFailed("the realm could not be made".into());
-                    return out;
-                }
-            };
-            drop(html);
-            if let Some((w, h)) = self.cfg.viewport
-                && b.set_viewport(w, h).is_err() {
-                out.stop = SessionStop::LoadFailed("the viewport is invalid".into());
-                return out;
-            }
-            if self.cfg.virtual_clock {
-                b.use_virtual_clock();
-            }
-            b.attach_storage(self.store.clone());
-            if b.set_document_url(&url).is_err() {
-                out.stop = SessionStop::LoadFailed("the document URL could not be configured".into());
-                return out;
+            if self.used.rounds >= lim.max_rounds {
+                return SessionStop::RoundBudget;
             }
             let mut page = self.cfg.page.clone();
             page.max_time = page.max_time.min(deadline.saturating_duration_since(Instant::now()));
-            page.max_tasks = page.max_tasks.min(lim.max_tasks - out.tasks);
-            page.max_rounds = page.max_rounds.min(lim.max_rounds - out.rounds);
-            let client = (self.cfg.client)();
-            let fetch = ((self.cfg.client)(), self.cfg.fetch);
-            let r = b.run_page(PageConfig { url: url.clone(), client, limits: page, fetch: Some(fetch) });
+            page.max_tasks = page.max_tasks.min(lim.max_tasks - self.used.tasks);
+            page.max_rounds = page.max_rounds.min(lim.max_rounds - self.used.rounds);
+            let (b, r) = match next.take() {
+                None => {
+                    // The settled document goes on: same realm, no load.
+                    let mut b = self.browser.take().expect("resume checked the browser");
+                    let r = b.resume_page((self.cfg.client)(), page, steps);
+                    (b, r)
+                }
+                Some(url) => {
+                    // The old document ends here: its realm, timers and callbacks are gone before the next load starts.
+                    self.browser = None;
+                    let (url, html) = match load_document(&mut (self.cfg.client)(), &url, &lim, deadline) {
+                        Ok(d) => d,
+                        Err(why) => return SessionStop::LoadFailed(why),
+                    };
+                    let Ok(mut b) = Browser::new(tree::parse(&html), self.cfg.browser, self.cfg.eval, self.cfg.heap) else {
+                        return SessionStop::LoadFailed("the realm could not be made".into());
+                    };
+                    drop(html);
+                    if let Some((w, h)) = self.cfg.viewport
+                        && b.set_viewport(w, h).is_err() {
+                        return SessionStop::LoadFailed("the viewport is invalid".into());
+                    }
+                    if self.cfg.virtual_clock {
+                        b.use_virtual_clock();
+                    }
+                    b.attach_storage(self.store.clone());
+                    if b.set_document_url(&url).is_err() {
+                        return SessionStop::LoadFailed("the document URL could not be configured".into());
+                    }
+                    self.used.documents += 1;
+                    let client = (self.cfg.client)();
+                    let fetch = ((self.cfg.client)(), self.cfg.fetch);
+                    let r = b.run_page(PageConfig { url, client, limits: page, fetch: Some(fetch) });
+                    (b, r)
+                }
+            };
+            let page_url = b.document_url().and_then(|u| Url::parse(u.split('#').next().unwrap_or("")).ok()).map_or_else(|| "?".to_string(), |u| label(&u));
+            self.used.tasks += r.tasks;
+            self.used.rounds += r.rounds;
             out.tasks += r.tasks;
             out.rounds += r.rounds;
             out.urls.push(page_url);
@@ -277,11 +330,8 @@ impl Session {
             out.pages.push(r);
             self.browser = Some(b);
             match stop {
-                Stop::Navigate(n) => next = n.0.url,
-                stop => {
-                    out.stop = SessionStop::Page(stop);
-                    return out;
-                }
+                Stop::Navigate(n) => next = Some(n.0.url),
+                stop => return SessionStop::Page(stop),
             }
         }
     }

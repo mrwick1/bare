@@ -150,6 +150,19 @@ pub enum Stop {
     /// documents ([`crate::browser_session::Session`]) acts on it. A fatal error in the same task wins over it.
     Navigate(NavStop),
     Fatal(Fatal),
+    /// Only from [`crate::browser_session::Session::resume`]: step `n` found no element (or its selector was bad). Nothing
+    /// after that step ran. The page is intact and the session is not ended.
+    NoTarget(usize),
+}
+
+/// One input of [`crate::browser_session::Session::resume`]: a selector (first match, as `querySelector`) and the existing
+/// `Browser` primitive that acts on it. No default action runs (see `browser.rs`).
+#[derive(Clone, Copy, Debug)]
+pub enum Input<'a> {
+    Click(&'a str),
+    /// A text-like `<input>` and the text: sets its value, then fires `input`.
+    Type(&'a str, &'a str),
+    Submit(&'a str),
 }
 
 /// The request of [`Stop::Navigate`]. `Debug` prints the kind and `origin + path` only: a query, a fragment or a
@@ -225,6 +238,8 @@ pub(crate) struct Scripts {
     /// `(element, is_error)` to the id of its `onload` / `onerror` listener.
     handlers: RefCell<HashMap<(NodeId, bool), u64>>,
     fatal: RefCell<Option<Fatal>>,
+    /// Script downloads and bytes so far, kept between runs so that a resume cannot reset the fetch budget.
+    used: Cell<(usize, usize)>,
 }
 
 impl Dom {
@@ -632,6 +647,53 @@ impl Browser {
         };
         let stop = run.go();
         let mut res = run.res;
+        dom.scripts.used.set((res.fetches, res.bytes));
+        if let Stop::Fatal(f) = &stop {
+            *dom.scripts.fatal.borrow_mut() = Some(f.clone());
+        }
+        res.stop = stop;
+        res.ready_state = ["loading", "interactive", "complete"][dom.scripts.ready.get() as usize];
+        res
+    }
+}
+
+impl Browser {
+    /// Take the inputs of `steps` in order, then run the rounds again on a page that `run_page` settled: the same realm,
+    /// DOM, queues and pumps, no reload. A sticky fatal stops it before any JS or I/O. `limits` is what is left of the
+    /// session; the fetch budget of the page carries over. A page that did not run, or has no URL, is a `Setup` fatal.
+    pub(crate) fn resume_page(&mut self, client: Client, limits: PageLimits, steps: &[Input]) -> PageResult {
+        let dom = self.dom.clone();
+        let (fetches, bytes) = dom.scripts.used.get();
+        let mut res = PageResult { stop: Stop::Settled, ready_state: "loading", scripts_run: 0, script_throws: 0, load_errors: 0, tasks: 0, rounds: 0, fetches, bytes, diagnostics: Vec::new(), dropped_diagnostics: 0 };
+        let prior = dom.scripts.fatal.borrow().clone();
+        if let Some(f) = prior {
+            res.stop = Stop::Fatal(f);
+            return res;
+        }
+        let page = self.document_url().and_then(|u| Url::parse(&u).ok());
+        let Some(page) = page.filter(|_| dom.scripts.enabled.get()) else {
+            res.stop = Stop::Fatal(Fatal::Setup("resume needs a page that ran".into()));
+            return res;
+        };
+        let mut run = Run {
+            b: self,
+            dom: dom.clone(),
+            client,
+            https_only: page.scheme == bare_url::Scheme::Https,
+            deadline: deadline_after(limits.max_time),
+            lim: limits,
+            cache: Vec::new(),
+            refs: Vec::new(),
+            retained: 0,
+            res,
+            disc: resources::Discovery { items: Vec::new(), targets: Vec::new(), base: String::new() },
+            items: Vec::new(),
+            async_queue: VecDeque::new(),
+            loaded: dom.scripts.ready.get() == 2,
+        };
+        let stop = run.resume(steps).err().unwrap_or(Stop::Settled);
+        let mut res = run.res;
+        dom.scripts.used.set((res.fetches, res.bytes));
         if let Stop::Fatal(f) = &stop {
             *dom.scripts.fatal.borrow_mut() = Some(f.clone());
         }
@@ -885,6 +947,36 @@ impl Run<'_> {
             }
         }
         Ok(true)
+    }
+
+    /// The inputs, one task each, then the rounds. A navigation that an input queued ends the run before the next input.
+    /// Always an `Err`: the reason to stop.
+    fn resume(&mut self, steps: &[Input]) -> Flow {
+        for (i, step) in steps.iter().enumerate() {
+            self.budget()?;
+            let sel = match *step { Input::Click(s) | Input::Type(s, _) | Input::Submit(s) => s };
+            let node = match self.b.query(sel) {
+                Ok(Some(n)) => n,
+                Ok(None) | Err(Error::Throw(_)) => return Err(Stop::NoTarget(i)),
+                Err(e) => return Err(self.fatal(e, "input selector")),
+            };
+            self.res.tasks += 1;
+            let r = match *step {
+                Input::Click(_) => self.b.click(node),
+                Input::Type(_, t) => self.b.type_text(node, t),
+                Input::Submit(_) => self.b.submit(node),
+            };
+            if let Err(e) = r {
+                return Err(self.fatal(e, "input"));
+            }
+            self.after_js()?;
+        }
+        let stop = self.rounds().unwrap_err();
+        if stop == Stop::Settled && self.res.tasks > 0
+            && let Err(e) = self.b.collect(&[]) {
+            return Err(self.fatal(e, "collect"));
+        }
+        Err(stop)
     }
 
     fn go(&mut self) -> Stop {
