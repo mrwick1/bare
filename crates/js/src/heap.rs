@@ -1099,6 +1099,14 @@ impl Heap {
         self.own_keys_with(o, true)
     }
 
+    /// Upper bound on keys and storage slots scanned by `own_keys`, without allocating.
+    /// Includes dense holes, removed property slots and virtual byte-view indices.
+    pub fn own_key_slots(&self, o: ObjId) -> R<usize> {
+        let ob = self.obj(o)?;
+        let virtual_len = self.view_parts(o).map_or(0, |(_, _, len)| len);
+        Ok(ob.elems.len().saturating_add(ob.props.entries.len()).saturating_add(virtual_len))
+    }
+
     /// Like `own_keys`, but without the virtual integer indices of a byte view. For tracing: those hold no references.
     pub fn stored_keys(&self, o: ObjId) -> R<Vec<PropertyKey>> {
         self.own_keys_with(o, false)

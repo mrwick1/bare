@@ -3013,6 +3013,7 @@ include!("eval_binary_search.rs");
 include!("eval_scripts.rs");
 include!("eval_builtins.rs");
 include!("eval_json_stringify.rs");
+include!("eval_json_revive.rs");
 include!("eval_host.rs");
 include!("eval_array_object.rs");
 include!("eval_numeric.rs");
@@ -3053,6 +3054,10 @@ mod builtin_tests;
 #[cfg(test)]
 #[path = "eval_json_stringify_tests.rs"]
 mod stringify_tests;
+
+#[cfg(test)]
+#[path = "eval_json_revive_tests.rs"]
+mod revive_tests;
 
 #[cfg(test)]
 #[path = "eval_host_tests.rs"]
