@@ -35,7 +35,7 @@ Study these for architecture. Take parts from them.
 
 | Project | License | Stars | What it gives |
 | --- | --- | ---: | --- |
-| [Boa](https://github.com/boa-dev/boa) | MIT | 7,659 | Full JS engine. 94.12% of test262 at v0.21 (2025-10). Register VM, NaN boxing. To verify: main is near 96%. |
+| [Boa](https://github.com/boa-dev/boa) | MIT | 7,659 | Full JS engine. 94.12% of test262 at v0.21 (2025-10). Register VM, NaN boxing. To verify: main is near 96%. Measured on 2026-11-05: slower than bare-js, so we copy its built-ins, not the engine. See [resources.md](resources.md#boa-compared-with-bare-js). |
 | [Nova](https://github.com/trynova/nova) | MPL-2.0 | 1,958 | Data-oriented engine: one vector per heap type, 32-bit handles. 1.0 in 2026-03, about 80% of test262. Its docs say it is not fast yet. |
 | [regress](https://github.com/ridiculousfish/regress) | Apache-2.0 | 225 | ECMAScript RegExp engine. Boa uses it. |
 | [temporal_rs](https://github.com/boa-dev/temporal) | Apache-2.0 | 240 | Temporal API. Passes the test262 Temporal tests. |
@@ -92,7 +92,7 @@ This order is a proposal. It is not measured yet.
 1. ICU4X for `Intl`, `toLocaleString` and `localeCompare`. These gates block the live login now.
 2. The S4 stack: tiny-skia, skrifa, harfrust, Parley and smithay-client-toolkit. S4 has not started, so nothing of ours is replaced.
 3. regress and temporal_rs, when a page needs a RegExp feature or Temporal that we do not have.
-4. Larger changes, each one a separate decision: Boa as the JS engine, or Blitz as the base of the renderer.
+4. Larger changes, each one a separate decision: Blitz as the base of the renderer. Boa as the JS engine was measured and rejected on 2026-11-05.
 
 ## Sources
 

@@ -1969,3 +1969,44 @@ Validation:
 - 22 Node cases (`tools/fixtures/js/number-cases.txt`, `tools/js/number_check.sh`). They cover parsing, the constants and shapes, special values, coercion order, the three formats with their errors, URI round trips and errors, `escape`, and `fromCodePoint`. Four matrix cases hash 63,000 Math results, 21,000 `toFixed` results and the other formats.
 - `tools/js/math_check.sh` compares the 22 fdlibm functions with Node bit for bit on 75,811 inputs (`tools/js/math_gen.mjs`): random values, special values, values near multiples of π/2, overflow thresholds and random bit patterns. All match.
 - Rust tests (`eval_number_tests.rs`, `number.rs`): the corpus without the matrices, the string cap for `encodeURI` and `escape`, step charges for each scan, and GC after the globals are deleted. Unit tests cover `exact_digits`, rounding and `float_prefix`.
+
+## Boa compared with bare-js
+
+On 2026-11-05 the live login ran on main c13c257. It stores its token, goes to `/` and settles with 42 scripts and no throws. It then reports `TypeError: [...u.e].reverse is not a function`. `Array.prototype.reverse` is missing.
+
+A built-in inventory followed. `tools/js/builtin_inventory.sh` lists the standard built-ins of Node 22.18 and checks each one in bare-js. 311 of 655 are missing. Some of the 311 are getters that throw on the prototype, for example `Map.prototype.size`. The staging bundles call many of the missing names: Array `reverse`, `at`, `flat`; Object `setPrototypeOf`, `getOwnPropertySymbols`, `defineProperties`, `freeze`; `Proxy`, `BigInt`, `DataView`, most typed arrays and the Iterator helpers. `BigInt` and `Proxy` change the core value and property code.
+
+The question was: switch to Boa, or keep bare-js and add the built-ins. Boa (MIT) passes about 94% of test262 at v0.21. We measured Boa 0.22.0 against bare-js before the decision.
+
+Setup: AMD Ryzen 9 5900HX, release builds. Boa runs `Context::eval` in a small runner outside the repository. bare-js runs `eval_check -e`. Each row is the best of 3 runs. Peak RSS is `ru_maxrss` from `wait4`. Both engines give the Node result on every row.
+
+| Workload | bare-js s | bare-js MiB | Boa s | Boa MiB | Boa time / bare-js time |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| empty script | 0.00 | 12.3 | 0.00 | 12.3 | - |
+| arithmetic loop, 3M | 1.55 | 12.3 | 2.07 | 12.3 | 1.34x |
+| 300k small objects | 0.53 | 94.0 | 0.74 | 62.0 | 1.41x |
+| 1M function and closure calls | 0.86 | 12.3 | 1.04 | 12.3 | 1.21x |
+| 200k strings, join, indexOf | 0.39 | 41.1 | 0.37 | 45.5 | 0.96x |
+| 200k array map, filter, sort | 0.37 | 12.3 | 0.42 | 14.3 | 1.12x |
+| JSON stringify and parse, 50k objects | 0.20 | 88.2 | 0.86 | 261.1 | 4.40x |
+| 300k class instances | 0.53 | 89.5 | 0.76 | 13.1 | 1.43x |
+| Map and Set, 200k keys | 0.53 | 49.4 | 0.51 | 36.8 | 0.96x |
+
+The 40 cached staging chunks (1.7 MiB):
+
+| Engine | Work | Time | Peak RSS |
+| --- | --- | ---: | ---: |
+| bare-js | parse | 0.030 s | 12.5 MiB |
+| Boa | parse and compile to bytecode | 0.634 s | 52.6 MiB |
+
+Stripped binary: bare-js `eval_check` is 1.8 MB. The Boa runner is 13.0 MB, with 176 crates.
+
+Results:
+
+- bare-js runs faster on 6 of 8 workloads, by 1.1x to 4.4x. Boa is 4% faster on the other two (strings, Map and Set).
+- bare-js parses the real chunks 21 times faster. Boa also compiles to bytecode, so the rows are not the same work. A page pays both costs before it runs.
+- Boa uses less memory when garbage builds up during one script: 13 MiB against 90 MiB for the class row. `eval_check` does not collect during a run. Hypothesis: a collection inside long scripts closes most of this gap. To verify in the session, which collects between tasks.
+
+Decision: keep bare-js. Add the missing built-ins in batches. Use Boa's code as a reference and copy it where that is faster than writing it. Use ICU4X for locale data. Re-run `tools/js/builtin_inventory.sh` after each batch.
+
+Limits: one machine, 3 runs per row, microbenchmarks only. The real page was not run on Boa, because Boa has no DOM.
