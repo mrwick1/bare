@@ -41,6 +41,8 @@ mod browser_selection;
 mod browser_selection_tests;
 #[cfg(test)]
 mod browser_scheduler_tests;
+#[cfg(test)]
+mod browser_date_tests;
 pub mod resources;
 mod browser_loader;
 pub use browser_loader::{Fatal, Input, NavStop, PageConfig, PageLimits, PageResult, Stop};

@@ -1,0 +1,122 @@
+=== date_shape
+[typeof Date, Date.length, Date.name, typeof Date.now, Date.now.length, Date.parse.length, Date.UTC.length, Date.prototype.constructor === Date, Object.prototype.toString.call(new Date(0)), Object.prototype.toString.call(Date.prototype)].join("|");
+=== date_prototype_methods
+var p = Date.prototype; ["getTime","valueOf","setTime","toISOString","toJSON","toUTCString","getUTCFullYear","getUTCMonth","getUTCDate","getUTCDay","getUTCHours","getUTCMinutes","getUTCSeconds","getUTCMilliseconds","setUTCMilliseconds","setUTCSeconds","setUTCMinutes","setUTCHours","setUTCDate","setUTCMonth","setUTCFullYear"].map(function (n) { return n + ":" + typeof p[n] + ":" + p[n].length; }).join("|");
+=== date_to_primitive_shape
+var d = Object.getOwnPropertyDescriptor(Date.prototype, Symbol.toPrimitive); [d.writable, d.enumerable, d.configurable, d.value.name, d.value.length, Date.prototype.toGMTString === Date.prototype.toUTCString].join();
+=== date_now_shape
+var a = Date.now(); [typeof a, a === Math.floor(a), a > 1.5e12, a < 8.64e15, Date.now() >= a].join();
+=== date_utc_basic
+[Date.UTC(1970, 0, 1), Date.UTC(2000, 0, 1), Date.UTC(2020), Date.UTC(2020, 1, 29, 12, 30, 45, 678), Date.UTC(1999, 11, 31, 23, 59, 59, 999)].join();
+=== date_utc_two_digit_years
+[Date.UTC(0, 0), Date.UTC(99, 0), Date.UTC(100, 0), Date.UTC(-1, 0), Date.UTC(99.9, 0), Date.UTC(-0.5, 0)].join();
+=== date_utc_nan_and_defaults
+[Date.UTC(), Date.UTC(NaN), Date.UTC(2020, NaN), Date.UTC(2020, 0, NaN), Date.UTC(Infinity), Date.UTC(2020, 0, 1, 0, 0, 0, Infinity), Date.UTC(undefined, 0)].join();
+=== date_utc_month_overflow
+[Date.UTC(2020, 12), Date.UTC(2020, -1), Date.UTC(2020, 23), Date.UTC(2020, 24), Date.UTC(2020, -13), Date.UTC(2020, 0, 0), Date.UTC(2020, 0, 32), Date.UTC(2020, 2, 0), Date.UTC(2021, 1, 29)].join();
+=== date_utc_time_overflow
+[Date.UTC(2020, 0, 1, 24), Date.UTC(2020, 0, 1, 25, 61, 61, 1001), Date.UTC(2020, 0, 1, -1), Date.UTC(2020, 0, 1, 0, 0, 0, -1)].join();
+=== date_utc_fraction_truncation
+[Date.UTC(1970, 0, 1, 0, 0, 0, 0.9), Date.UTC(1970, 0, 1, 0, 0, 0, -0.9), Date.UTC(1970, 0, 1.9), Date.UTC(1970, 0.9, 1), Date.UTC(1970, 0, 1, 0, 0, 59.999), 1 / Date.UTC(1970, 0, 1, 0, 0, 0, -0.5) === Infinity].join();
+=== date_leap_years
+[Date.UTC(2000, 1, 29), Date.UTC(1900, 1, 29), Date.UTC(2100, 1, 29), Date.UTC(2400, 1, 29), Date.UTC(2023, 1, 29), Date.UTC(2024, 1, 29), Date.UTC(1600, 2, 1) - Date.UTC(1600, 1, 28)].join();
+=== date_leap_year_iso
+["2000-02-29T00:00:00.000Z", "2100-03-01T00:00:00.000Z", "2024-02-29T23:59:59.999Z", "2023-03-01T00:00:00.000Z"].map(function (s) { var t = Date.parse(s); return isNaN(t) ? "NaN" : new Date(t).toISOString(); }).join();
+=== date_utc_year_range_edges
+[Date.UTC(275760, 8, 13), Date.UTC(275760, 8, 13, 0, 0, 0, 1), Date.UTC(-271821, 3, 20), Date.UTC(-271821, 3, 19, 23, 59, 59, 999), Date.UTC(1e6, 0), Date.UTC(1e300, 0), Date.UTC(2020, 1e300), Date.UTC(2020, 0, 1e300)].join();
+=== date_utc_coercion_order
+var log = []; function o(n, v) { return { valueOf: function () { log.push(n); return v; } }; } var r = Date.UTC(o("y", NaN), o("m", 0), o("d", 1), o("h", 0), o("mi", 0), o("s", 0), o("ms", 0), o("extra", 5)); log.join() + "|" + r;
+=== date_utc_coercion_throws
+var r = []; try { Date.UTC({ valueOf: function () { throw new RangeError("boom"); } }); } catch (e) { r.push(e.name + e.message); } try { Date.UTC(Symbol()); } catch (e) { r.push(e.name); } r.join();
+=== date_new_number
+[new Date(0).getTime(), new Date(1e12).getTime(), new Date(-1).getTime(), new Date(1.9).getTime(), new Date(-1.9).getTime(), 1 / new Date(-0).getTime() === Infinity, new Date(8.64e15).getTime(), new Date(8.64e15 + 1).getTime(), new Date(-8.64e15).getTime(), new Date(-8.64e15 - 1).getTime()].join();
+=== date_new_nan_timeclip
+[new Date(NaN).getTime(), new Date(Infinity).getTime(), new Date(-Infinity).getTime(), new Date(undefined).getTime(), new Date("x").getTime(), new Date({}).getTime(), new Date(true).getTime(), new Date(null).getTime(), new Date(1e300).getTime()].join();
+=== date_new_from_date
+var a = new Date(123456789); var b = new Date(a); a.setTime(1); [b.getTime(), a.getTime(), b !== a].join();
+=== date_new_from_valueof_object
+[new Date({ valueOf: function () { return 77; } }).getTime(), new Date({ toString: function () { return "1970-01-01T00:00:00.050Z"; }, valueOf: function () { return {}; } }).getTime()].join();
+=== date_new_from_to_primitive
+var o = {}; o[Symbol.toPrimitive] = function (h) { return h === "default" ? 5 : 6; }; new Date(o).getTime();
+=== date_new_from_iso_string
+[new Date("1970-01-01T00:00:00.000Z").getTime(), new Date("2020-06-15T12:34:56Z").getTime(), new Date("2020-06-15T12:34:56+02:00").getTime(), new Date("2020-06-15T12:34:56-05:30").getTime()].join();
+=== date_instance_checks
+var d = new Date(5); [d instanceof Date, typeof d, Object.getPrototypeOf(d) === Date.prototype, d.constructor === Date, Object.keys(d).length, JSON.stringify(d), Object.prototype.toString.call(d), d.hasOwnProperty("getTime")].join();
+=== date_valueof_gettime
+var d = new Date(42); [d.valueOf(), d.getTime(), +d, d - 2, d * 2, d > 41, d < 43, new Date(1) < new Date(2), new Date(5) - new Date(2), Math.max(new Date(3), 4), d == d, d == new Date(42), d === d, Number(d), isNaN(new Date(NaN))].join();
+=== date_brand_checks
+var r = []; [Date.prototype.getTime, Date.prototype.valueOf, Date.prototype.setTime, Date.prototype.toISOString, Date.prototype.getUTCFullYear, Date.prototype.setUTCHours, Date.prototype.toUTCString].forEach(function (f) { [{}, Date.prototype, 5, "x", undefined, null, [], function () {}].forEach(function (t) { try { f.call(t, 1); r.push("ok"); } catch (e) { r.push(e.name); } }); }); r.join("|");
+=== date_set_time
+var d = new Date(0); var r = [d.setTime(1000), d.getTime(), d.setTime(NaN), d.getTime(), d.setTime(8.64e15), d.setTime(8.64e15 + 1), d.getTime(), d.setTime(5.9), d.getTime(), 1 / d.setTime(-0) === Infinity, d.setTime(), d.setTime("12"), d.setTime(new Date(9))]; r.join();
+=== date_set_time_coercion_throws
+var d = new Date(7); try { d.setTime({ valueOf: function () { throw new RangeError("z"); } }); } catch (e) { e.name + d.getTime(); }
+=== date_to_iso_string
+[new Date(0).toISOString(), new Date(1577836800123).toISOString(), new Date(-1).toISOString(), new Date(Date.UTC(2020, 1, 29, 23, 59, 59, 999)).toISOString(), new Date(8.64e15).toISOString(), new Date(-8.64e15).toISOString(), new Date(Date.UTC(10000, 0)).toISOString(), new Date(Date.UTC(9999, 11, 31, 23, 59, 59, 999)).toISOString(), new Date(Date.UTC(-1, 0)).toISOString(), new Date(Date.UTC(0, 0)).toISOString(), new Date(-62198755200000).toISOString(), new Date(-62167219200000).toISOString(), new Date(-62167219200001).toISOString()].join();
+=== date_to_iso_invalid_throws
+try { new Date(NaN).toISOString(); } catch (e) { [e.name, e.message].join(); }
+=== date_to_json
+[new Date(0).toJSON(), new Date(NaN).toJSON(), JSON.stringify({ d: new Date(86400000), e: new Date(NaN) }), JSON.stringify([new Date(1)]), Date.prototype.toJSON.call({ toISOString: function () { return "custom"; } }), Date.prototype.toJSON.call({ valueOf: function () { return Infinity; }, toISOString: function () { return "no"; } }), Date.prototype.toJSON.call({ valueOf: function () { return 5; }, toISOString: function () { return "yes"; } })].join("|");
+=== date_to_json_errors
+var r = []; try { Date.prototype.toJSON.call({}); } catch (e) { r.push(e.name); } try { Date.prototype.toJSON.call({ toISOString: 1, valueOf: function () { return 1; } }); } catch (e) { r.push(e.name); } try { Date.prototype.toJSON.call(null); } catch (e) { r.push(e.name); } r.join();
+=== date_to_utc_string
+[new Date(0).toUTCString(), new Date(1577836800000).toUTCString(), new Date(NaN).toUTCString(), new Date(-62198755200000).toUTCString(), new Date(8.64e15).toUTCString(), new Date(-8.64e15).toUTCString(), new Date(Date.UTC(10, 0)).toUTCString(), new Date(Date.UTC(2024, 1, 29, 5, 6, 7)).toUTCString()].join("|");
+=== date_utc_getters
+var d = new Date(Date.UTC(2021, 11, 31, 23, 59, 58, 987)); [d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate(), d.getUTCDay(), d.getUTCHours(), d.getUTCMinutes(), d.getUTCSeconds(), d.getUTCMilliseconds()].join();
+=== date_utc_getters_nan
+var d = new Date(NaN); [d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate(), d.getUTCDay(), d.getUTCHours(), d.getUTCMinutes(), d.getUTCSeconds(), d.getUTCMilliseconds(), d.getTime(), d.valueOf()].join();
+=== date_utc_getters_negative_epochs
+[-1, -86400000, -86400001, -1e12, -62198755200000, -8.64e15, -2208988800000].map(function (t) { var d = new Date(t); return [t, d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate(), d.getUTCDay(), d.getUTCHours(), d.getUTCMinutes(), d.getUTCSeconds(), d.getUTCMilliseconds()].join(":"); }).join("|");
+=== date_utc_weekdays
+[0, 86400000, 2 * 86400000, 3 * 86400000, 4 * 86400000, 5 * 86400000, 6 * 86400000, -86400000, -7 * 86400000, 8.64e15, -8.64e15].map(function (t) { return new Date(t).getUTCDay(); }).join();
+=== date_roundtrip_days
+var bad = 0, n = 0; for (var t = -8.64e15; t <= 8.64e15; t += 8.64e15 / 977 + 3333) { var d = new Date(t); var y = d.getUTCFullYear(); if (y < 0 || y > 99) { n++; var u = Date.UTC(y, d.getUTCMonth(), d.getUTCDate(), d.getUTCHours(), d.getUTCMinutes(), d.getUTCSeconds(), d.getUTCMilliseconds()); if (u !== Math.trunc(t)) bad++; } } [bad, n > 1900].join();
+=== date_roundtrip_iso_parse
+var bad = 0; for (var t = -8.64e15; t <= 8.64e15; t += 8.64e15 / 811 + 7777) { var s = new Date(t).toISOString(); if (Date.parse(s) !== Math.trunc(t)) bad++; var u = new Date(t).toUTCString(); if (Math.abs(Date.parse(u) - Math.trunc(t)) >= 1000) bad++; } bad;
+=== date_set_utc_milliseconds
+var d = new Date(Date.UTC(2020, 0, 1, 1, 2, 3, 4)); [d.setUTCMilliseconds(999), d.toISOString(), d.setUTCMilliseconds(1000), d.toISOString(), d.setUTCMilliseconds(-1), d.toISOString(), d.setUTCMilliseconds(NaN), d.getTime()].join();
+=== date_set_utc_seconds
+var d = new Date(Date.UTC(2020, 0, 1, 1, 2, 3, 4)); [d.setUTCSeconds(59), d.toISOString(), d.setUTCSeconds(60, 5), d.toISOString(), d.setUTCSeconds(-1), d.toISOString(), d.setUTCSeconds(0, 0), d.toISOString()].join();
+=== date_set_utc_minutes
+var d = new Date(Date.UTC(2020, 0, 1, 1, 2, 3, 4)); [d.setUTCMinutes(61), d.toISOString(), d.setUTCMinutes(0, 59, 999), d.toISOString(), d.setUTCMinutes(-1), d.toISOString()].join();
+=== date_set_utc_hours
+var d = new Date(Date.UTC(2020, 0, 1, 1, 2, 3, 4)); [d.setUTCHours(25), d.toISOString(), d.setUTCHours(0, 0, 0, 0), d.toISOString(), d.setUTCHours(-1, 61, 61, 1001), d.toISOString()].join();
+=== date_set_utc_date
+var d = new Date(Date.UTC(2020, 0, 31, 1, 2, 3, 4)); [d.setUTCDate(29), d.toISOString(), d.setUTCDate(0), d.toISOString(), d.setUTCDate(32), d.toISOString(), d.setUTCDate(NaN), d.getTime()].join();
+=== date_set_utc_month
+var d = new Date(Date.UTC(2020, 0, 31, 1, 2, 3, 4)); [d.setUTCMonth(1), d.toISOString(), d.setUTCMonth(12), d.toISOString(), d.setUTCMonth(-1, 15), d.toISOString(), d.setUTCMonth(0, 31), d.toISOString()].join();
+=== date_set_utc_full_year
+var d = new Date(Date.UTC(2020, 1, 29, 1, 2, 3, 4)); [d.setUTCFullYear(2021), d.toISOString(), d.setUTCFullYear(2024, 1, 29), d.toISOString(), d.setUTCFullYear(1, 0, 1), d.toISOString(), d.setUTCFullYear(-5), d.toISOString(), d.setUTCFullYear(275760, 8, 14), d.getTime()].join();
+=== date_set_utc_full_year_from_invalid
+var d = new Date(NaN); [d.setUTCFullYear(2000), d.toISOString(), new Date(NaN).setUTCFullYear(2000, 5, 15), new Date(NaN).setUTCMonth(1), new Date(NaN).setUTCHours(1), new Date(NaN).setUTCDate(1), new Date(NaN).setUTCFullYear(NaN)].join();
+=== date_set_utc_clip
+var d = new Date(8.64e15); [d.setUTCMilliseconds(1), d.getTime(), new Date(0).setUTCFullYear(300000), new Date(0).setUTCHours(1e300), new Date(0).setUTCMonth(Infinity)].join();
+=== date_set_utc_missing_args
+var d = new Date(0); [d.setUTCMilliseconds(), d.setUTCSeconds(), d.setUTCMinutes(), d.setUTCHours(), d.setUTCDate(), d.setUTCMonth(), d.setUTCFullYear(), d.getTime()].join();
+=== date_set_utc_brand
+var r = []; ["setUTCMilliseconds","setUTCSeconds","setUTCMinutes","setUTCHours","setUTCDate","setUTCMonth","setUTCFullYear"].forEach(function (n) { try { Date.prototype[n].call({}, 1); } catch (e) { r.push(e.name); } }); r.join();
+=== date_parse_iso_forms
+["2020", "2020-06", "2020-06-15", "2020-06-15T12:34Z", "2020-06-15T12:34:56Z", "2020-06-15T12:34:56.7Z", "2020-06-15T12:34:56.78Z", "2020-06-15T12:34:56.789Z", "2020-06-15T12:34:56.7891234Z", "2020-06-15T12:34+01:00", "2020-06-15T12:34:56-23:59", "+002020-06-15", "-000001-01-01", "+275760-09-13T00:00:00.000Z", "-271821-04-20T00:00:00.000Z"].map(Date.parse).join();
+=== date_parse_iso_boundary
+["2020-01-01T24:00:00Z", "2020-01-01T24:00:00.000Z", "2020-12-31T24:00Z", "2020-01-01T23:59:59.999Z", "+275760-09-13T00:00:00.001Z", "+275760-09-14", "-271821-04-19T23:59:59.999Z", "-271821-04-20"].map(Date.parse).join();
+=== date_parse_iso_invalid
+["2020-13-01", "2020-00-01", "2020-06-00", "2020-01-01T24:00:01Z", "2020-01-01T25:00Z", "2020-01-01T00:60Z", "2020-01-01T00:00:60Z", "-000000-01-01T00:00:00Z", "2020-01-01T00:00:00+24:00", "2020-01-01T00:00:00+00:60"].map(function (s) { return Date.parse(s); }).join();
+=== date_parse_utc_string
+["Thu, 01 Jan 1970 00:00:00 GMT", "Tue, 01 Jan 2020 00:00:00 GMT", "Sat, 29 Feb 2020 23:59:59 GMT", "Sat, 13 Sep 275760 00:00:00 GMT"].map(Date.parse).join();
+=== date_parse_utc_string_invalid
+["Tue, 32 Jan 2020 00:00:00 GMT", "Sat, 14 Sep 275760 00:00:00 GMT"].map(function (s) { return Date.parse(s); }).join();
+=== date_parse_no_digits_is_nan
+["", " ", "abc", "undefined", "NaN", "Jan", "Tue", "T", "Z"].map(Date.parse).join();
+=== date_parse_coerces
+[Date.parse(), Date.parse(undefined), Date.parse(null), Date.parse({ toString: function () { return "1970-01-01T00:00:00.001Z"; } }), Date.parse(["1970-01-01T00:00:00.003Z"])].join();
+=== date_parse_symbol_throws
+try { Date.parse(Symbol()); } catch (e) { e.name; }
+=== date_function_prototype_chain
+var d = new Date(0); [Object.getPrototypeOf(Date) === Function.prototype, Object.getPrototypeOf(Date.prototype) === Object.prototype, Date.prototype.hasOwnProperty("constructor"), Object.getOwnPropertyDescriptor(Date, "prototype").writable, Object.getOwnPropertyDescriptor(Date.prototype, "getTime").enumerable, Object.getOwnPropertyDescriptor(Date, "now").writable].join();
+=== date_to_primitive_default_hint
+var d = new Date(5); var tp = Date.prototype[Symbol.toPrimitive]; [tp.call(d, "number"), tp.call({ valueOf: function () { return 9; }, toString: function () { return "s"; } }, "number"), tp.call({ valueOf: function () { return 9; }, toString: function () { return "s"; } }, "string"), tp.call({ valueOf: function () { return 9; }, toString: function () { return "s"; } }, "default")].join();
+=== date_to_primitive_errors
+var tp = Date.prototype[Symbol.toPrimitive]; var r = []; [undefined, "x", "", 1, {}].forEach(function (h) { try { tp.call({}, h); r.push("ok"); } catch (e) { r.push(e.name); } }); try { tp.call(1, "number"); } catch (e) { r.push(e.name); } r.join();
+=== date_sorting_and_map_keys
+var ds = [new Date(30), new Date(10), new Date(20)]; ds.sort(function (a, b) { return a - b; }); var m = new Map(); m.set(ds[0], "a"); var w = new WeakMap(); w.set(ds[1], "b"); [ds.map(Number).join("/"), m.get(ds[0]), m.get(new Date(10)), w.get(ds[1])].join();
+=== date_json_roundtrip_nested
+var o = { d: new Date(1), a: [new Date(2)] }; [JSON.stringify(o), JSON.stringify(JSON.parse(JSON.stringify(o)))].join("|");
