@@ -2216,3 +2216,33 @@ Problems seen in other crates, not changed:
 - Layout: `border-width: 0.4px` stays 0.4 px. Chrome gives 1 px (a width under 1 px is 1 px). Each such border moves the boxes under it.
 - Layout: an `<input>` has no line of text and no `value` text, so its height is only its padding and border.
 - `bare --layout` and `bare --styles` accept only `http://` and `https://` URLs. Only `--paint` reads a local file.
+
+## Preload links
+
+Found on 2026-11-05 from the live login trace on main 0798ea3. After the login submit, the Next.js App Router starts a client-side navigation to `/`. It fetches the RSC payload and adds 22 route chunks, which all load. React 19 then adds `<link rel=preload as=style href=...css>` with `appendChild` and waits for its `load` or `error` event before it commits the route. `bare` never fetched a preload link and never fired an event on it, so the navigation hung with no error. Two other gaps showed in the same trace: `HTMLLinkElement.href` was not reflected (`typeof link.href` was `undefined`), and `document.scripts` threw.
+
+Design (`browser_loader/preload.rs`, with a change in `resources::fetch`):
+
+- A preload pass runs inside each style pass, at the same driver boundaries. It runs again after it fires an event, so a link that a `load` listener adds is handled in the same boundary. It reads the document only when `Document::revision` moved.
+- A link is handled when it is an HTML `link` in the tree, its `rel` has `preload`, its `href` resolves to an http(s) URL, its `media` matches and its `as` is a destination of the Fetch Standard. A missing or unknown `as` gives no fetch and no event. A link that is detached or changed before its turn is skipped.
+- `as=style` goes through `fetch_sheet`, so a later `<link rel=stylesheet>` with the same URL reads the cached text and does not fetch. `as=script` is fetched with the script MIME rules. Its text is kept by URL until the first parsed or dynamic script with that URL takes it. Kept text counts in the total byte cap. Every other destination (`font`, `image`, `fetch`, ...) uses the new `Expect::Opaque`: status, redirects, time and the size cap of one resource apply, the body is read in an 8 KiB buffer and dropped, and nothing is decoded.
+- `load` or `error` is dispatched as a task (`res.tasks` grows by one). It never runs inside `appendChild`. A failure counts in `PreloadStats::failed` and names its origin and path in a diagnostic. The fetch count, the byte total, the time limit and the new `preload-links` cap (`max_references`) apply. As in `sheets.rs`, a time, style-size or link cap ends the run. A script or opaque fetch that hits the fetch or size cap gives `error`.
+- The same URL is fetched once per document and kind. Each `(link, href text)` gets one event, so a changed `href` loads again and a later `as` starts the load.
+- The links of the parsed document are only marked, not fetched. A browser fires their events before any script can listen, `bare` has no HTTP cache, and the staging login has four font preloads that would cost four fetches per page for no gain.
+- `HTMLLinkElement` now reflects `href` (the resolved URL, else the text; the setter writes the attribute), `as` (a known destination in lower case, else the empty string) and `crossOrigin` (`null`, `anonymous` or `use-credentials`). `document.scripts` is a snapshot array of the script elements, like `getElementsByTagName`.
+- A dynamic `<link rel=stylesheet>`, with or without `data-precedence`, already loaded, applied and fired `load` or `error` when it got its `href` with `setAttribute`. It failed with `link.href = ...` only because `href` was a plain expando property. The reflection fixes that.
+
+Validation. Eleven tests in `preload_tests.rs` use real pages and a loopback server. Their reduced fixture is the React pattern: a timer adds a preload link, the commit waits for its `load`, then it adds the style sheet link with `data-precedence` and waits for its `load`. On main with only a stub of the new result field, 8 of the 9 tests written first failed (the React test logged only `appended`); the detached-link test passes on both, by design. All 11 pass now. They also cover `error` on a 404 and on a wrong MIME type for each kind, a detached link, a link removed in the same task, an unknown or empty `as`, a parsed preload, `load` after `appendChild` and after a microtask, script reuse, one fetch for 30 links to two URLs, a late `as`, a changed `href`, the fetch cap, the size cap, and the reflection. The workspace passes 2,053 tests with `cargo test --workspace --release`. One existing test that pinned the link prototype to the name `rel` now lists the four names.
+
+Load test: `cargo run --release -p bare --example preload_load -- font|style|script|dups 1|10|100`. Each row is one process under 1 GiB of address space, on a virtual clock, one sample, with a loaded machine (load average 10 to 20). Every row checks the event counts and that the server saw one request for each URL. The follow-up stylesheet and script of the `style` and `script` rows cost no request.
+
+| Case (links / URLs) | 1x | 10x | 100x |
+| --- | --- | --- | --- |
+| font, 10 / 100 / 1,000 URLs, 2 KiB each | 3.1 ms, 7.6 MiB | 10.3 ms, 7.6 MiB | 71 ms, 10.6 MiB |
+| style, then `<link rel=stylesheet>` | 2.3 ms, 7.5 MiB | 6.5 ms, 8.3 MiB | 115 ms, 14.6 MiB |
+| script, then `<script src>` | 3.0 ms, 7.4 MiB | 4.7 ms, 7.8 MiB | 75 ms, 12.2 MiB |
+| dups, 10 URLs | 2.2 ms, 7.5 MiB | 3.7 ms, 7.6 MiB | 21 ms, 10.0 MiB |
+
+The font rows keep no body: 1,000 fonts of 2 KiB cost 3 MiB of RSS over the empty page. The `script` row runs one style pass for each dynamic script (1,003 passes at 100x), as before this change. The style sheet rows from `sheets_load` at 100x take 473/1,019 ms (linked/dynamic) on main and 482/1,027 ms with this change, and 497/1,008 against 475/1,016 ms on a repeat: no change beyond noise.
+
+Gaps: `modulepreload` (modules do not run in `bare`), `type`, `imagesrcset`, `integrity`, `crossorigin` as a CORS mode, `fetchpriority`, `Link:` headers and `prefetch` are ignored. `document.scripts` is a snapshot, not a live `HTMLCollection`. A preloaded script text that a script took is not kept, so a second script with the same URL fetches again. A mixed-content `http:` font gives the diagnostic `insecure script URL refused`, which names the wrong kind. A page that adds more than `max_references` preload links stops with `Limit("preload-links")`. Not tested: the live staging login (the parent runs it), a real browser comparison of event order, and other platforms.

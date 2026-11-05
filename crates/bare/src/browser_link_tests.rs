@@ -42,7 +42,7 @@ fn interface_and_prototype_shape() {
     assert_eq!(js(&mut b, "typeof HTMLLinkElement + ',' + HTMLLinkElement.name + ',' + HTMLLinkElement.length + ',' + (window.HTMLLinkElement === HTMLLinkElement)"), "function,HTMLLinkElement,0,true");
     assert_eq!(js(&mut b, "Object.getPrototypeOf(HTMLLinkElement.prototype) === HTMLElement.prototype && HTMLLinkElement.prototype.constructor === HTMLLinkElement"), "true");
     assert_eq!(js(&mut b, "Object.getPrototypeOf(document.getElementById('a')) === HTMLLinkElement.prototype"), "true");
-    assert_eq!(js(&mut b, "Object.getOwnPropertyNames(HTMLLinkElement.prototype).sort().join()"), "constructor,rel");
+    assert_eq!(js(&mut b, "Object.getOwnPropertyNames(HTMLLinkElement.prototype).sort().join()"), "as,constructor,crossOrigin,href,rel");
     // like every host interface object here: not a constructor, and no instance can be made
     assert!(js(&mut b, "new HTMLLinkElement()").starts_with("throw:TypeError"));
     assert!(js(&mut b, "HTMLLinkElement()").starts_with("throw:TypeError"));

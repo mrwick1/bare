@@ -91,6 +91,17 @@ fn by_tag(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
     wrap_all(d, it, &ids)
 }
 
+/// `document.scripts`: the HTML `script` elements of the document in tree order, as a snapshot array like `getElementsByTagName`.
+pub(crate) fn scripts(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
+    let root = d.nd(it, this)?;
+    if !matches!(d.data(root), NodeData::Document) {
+        return Err(it.type_error("Illegal invocation"));
+    }
+    let atom = d.doc.borrow().find_atom("script");
+    let ids = if atom.is_none() { Vec::new() } else { collect(d, it, root, |doc, c| (matches!(doc.data(c), NodeData::Element { name, .. } if Some(*name) == atom) && !doc.is_foreign(c), 0))? };
+    wrap_all(d, it, &ids)
+}
+
 fn by_class(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
     let root = d.nd(it, this)?;
     if a.is_empty() {
