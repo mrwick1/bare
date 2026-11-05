@@ -388,3 +388,53 @@ var a=[0,,2,,4,5]; var d=a.splice(1,3,"x"); Object.keys(d).join()+"|"+d.length+"
 var a=[]; for(var i=0;i<50;i++) a.push(i); var n=a.unshift("a","b","c"); n+"|"+a[0]+a[2]+a[3]+"|"+a[52]
 === fast_shift_holes
 var a=[,1,,2,,]; var f=a.shift(); String(f)+"|"+a.length+"|"+Object.keys(a).join()
+=== fill_basic
+[1,2,3].fill(0).join()
+=== fill_returns_receiver
+var a=[1,2]; a.fill(5)===a
+=== fill_range
+[1,2,3,4,5].fill(9,1,-1).join()
+=== fill_negative_start
+[1,2,3,4].fill(0,-2).join()
+=== fill_start_clamp
+[1,2,3].fill(7,-10,100).join()
+=== fill_nan_inf
+[1,2,3].fill(0,NaN,Infinity).join()+"|"+[1,2,3].fill(0,-Infinity).join()+"|"+[1,2,3].fill(0,Infinity).join()+"|"+[1,2,3].fill(0,0,-Infinity).join()
+=== fill_fraction
+[1,2,3,4].fill(9,1.9,3.2).join()+"|"+[1,2,3].fill(0,-0.5).join()
+=== fill_default_undefined
+[1,2].fill(3,undefined,undefined).join()
+=== fill_null_bounds
+[1,2,3].fill(4,null,null).join()+"|"+[1,2,3].fill(4,null).join()
+=== fill_empty_range
+[1,2].fill(0,2).join()+"|"+[].fill(1).length
+=== fill_holes
+var a=[,1,,3]; a.fill(0); Object.keys(a).join()+"|"+a.join()
+=== fill_generic_object
+var o={length:3}; Array.prototype.fill.call(o,'x'); o[0]+o[1]+o[2]+":"+Object.keys(o).join()
+=== fill_length_read_once
+var n=0; var o={get length(){n++; return 2}}; Array.prototype.fill.call(o,1); n
+=== fill_coercion_order
+var log=[]; var o={get length(){log.push('len'); return 2}}; Array.prototype.fill.call(o,0,{valueOf:function(){log.push('s'); return 0}},{valueOf:function(){log.push('e'); return 1}}); log.join()
+=== fill_coercion_shrinks_receiver
+var a=[1,2,3]; a.fill(0,0,{valueOf:function(){a.length=1; return 3}}); a.length+":"+a.join()
+=== fill_coercion_grows_receiver
+var a=[1]; a.fill(0,0,{valueOf:function(){a.push(5,6); return 2}}); a.join()
+=== fill_value_not_coerced
+var n=0; var v={valueOf:function(){n++; return 1}}; [1,2].fill(v); n
+=== fill_frozen_throws
+var a=[1,2]; Object.defineProperty(a,0,{writable:false}); Object.defineProperty(a,1,{writable:false}); var r; try{a.fill(0); r='no'}catch(e){r=e.name+':'+a.join()} r
+=== fill_readonly_element_stops
+var a=[1,2,3]; Object.defineProperty(a,1,{writable:false}); var r; try{a.fill(0); r='no'}catch(e){r=e.name+':'+a.join()} r
+=== fill_inherited_setter
+var log=[]; Object.defineProperty(Array.prototype,'1',{set:function(v){log.push(v)},configurable:true}); var a=[,,]; a.fill(7); delete Array.prototype[1]; log.join()+"|"+Object.keys(a).join()
+=== fill_inherited_readonly
+Object.defineProperty(Array.prototype,'0',{value:1,writable:false,configurable:true}); var r; try{Array(2).fill(2); r='no'}catch(e){r=e.name} delete Array.prototype[0]; r
+=== fill_setter_order
+var log=[]; var o={length:2}; Object.defineProperty(o,'0',{set:function(v){log.push('s0'+v)}}); Array.prototype.fill.call(o,3); log.join()+"|"+(o[1]===3)
+=== fill_null_receiver
+var r; try{Array.prototype.fill.call(null,1); r='no'}catch(e){r=e.name} r
+=== fill_arguments_object
+function f(){ return Array.prototype.fill.call(arguments,0).length } f(1,2)
+=== fill_length_property
+Array.prototype.fill.length

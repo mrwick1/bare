@@ -282,3 +282,83 @@ fn removed_globals_do_not_break_the_species_check() {
     assert_eq!(run("var A=Array; Array=1; var r=[1,2].map(function(x){return x}); r.length+','+(r.constructor===A)"), "string:2,true");
     assert_eq!(run("var A=Array; delete globalThis.Array; [1,2].slice().length"), "number:2");
 }
+
+// ---------------------------------------------------------------- Array.prototype.fill
+
+#[test]
+fn fill_receiver_gates_and_errors() {
+    assert_eq!(run("Array.prototype.fill.call(1, 0)"), "unsupported:Array.prototype.fill on a primitive receiver (wrapper object)");
+    assert_eq!(run("Array.prototype.fill.call('ab', 'x')"), "unsupported:Array.prototype.fill on a primitive receiver (wrapper object)");
+    assert_eq!(run("Array.prototype.fill.call(undefined, 0)"), "throw:TypeError");
+}
+
+#[test]
+fn fill_reserves_its_steps_before_the_first_write() {
+    // The setter on index 5 counts writes. Under 500 steps, a fill of 1000 holes must fail before any write.
+    big(|| {
+        let setup = "var n = 0; Object.defineProperty(Array.prototype, '5', {set: function(){ n++ }, configurable: true}); ";
+        let lim = EvalLimits { max_steps: 500, ..Default::default() };
+        let small = format!("{setup} Array(100).fill(0); 1");
+        let prog = parse_script(&small, Limits::default()).unwrap();
+        let mut it = Interp::new(&prog, Heap::default(), lim).unwrap();
+        assert!(it.run().is_ok());
+        let n = global_get(&mut it, "n");
+        assert_eq!(it.display(n), "1", "the small fill reaches the setter");
+
+        let big_src = format!("{setup} Array(1000).fill(0); 1");
+        let prog = parse_script(&big_src, Limits::default()).unwrap();
+        let mut it = Interp::new(&prog, Heap::default(), lim).unwrap();
+        assert!(matches!(it.run(), Err(Error::Limit(LimitKind::Steps))));
+        let n = global_get(&mut it, "n");
+        assert_eq!(it.display(n), "0", "the big fill never writes");
+    });
+}
+
+#[test]
+fn fill_huge_ranges_are_steps_limits_and_sparse_writes_are_cheap() {
+    assert_eq!(run("Array(4294967295).fill(0)"), "limit:Steps");
+    assert_eq!(run("var a=[]; a.length=4294967295; a.fill(0, 0, 4294967295)"), "limit:Steps");
+    assert_eq!(run("var a=[]; a.length=4294967295; a.fill(1, 4294967290); a[4294967294]"), "number:1");
+    assert_eq!(run("var a=[]; a.length=4294967295; a.fill(1, 4294967290); a.length"), "number:4294967295");
+}
+
+#[test]
+fn fill_heap_cap_stops_growth_and_is_not_catchable() {
+    big(|| {
+        let mk = || Heap::new(HeapLimits { max_bytes: 1 << 20, ..Default::default() }).unwrap();
+        let lim = EvalLimits { max_steps: 50_000_000, ..Default::default() };
+        let prog = parse_script("Array(200000).fill(0); 1", Limits::default()).unwrap();
+        let mut it = Interp::new(&prog, mk(), lim).unwrap();
+        assert!(matches!(it.run(), Err(Error::Limit(LimitKind::Heap(Limit::Bytes)))));
+        assert!(it.heap.stats().bytes <= 1 << 20, "the cap holds after the error");
+        assert_eq!(outcome("var r='caught'; try{ Array(200000).fill(0) }catch(e){ r='caught' } r", lim, mk()), "limit:Heap(Bytes)");
+    });
+}
+
+#[test]
+fn fill_a_throwing_setter_stops_the_walk() {
+    assert_eq!(run("var n=0; Object.defineProperty(Array.prototype,'1',{set:function(){n++; throw new Error('x')},configurable:true}); try{Array(4).fill(0)}catch(e){} n"), "number:1");
+}
+
+#[test]
+fn fill_recursion_through_a_setter_hits_the_call_guard() {
+    assert_eq!(run("Object.defineProperty(Array.prototype,'0',{set:function(v){ Array(1).fill(v) },configurable:true}); Array(1).fill(1)"), "limit:CallDepth");
+}
+
+#[test]
+fn fill_uses_cross_script_setters_and_preserves_failed_checkpoints() {
+    big(|| {
+        let mut it = Interp::realm(Heap::default(), EvalLimits::default()).unwrap();
+        it.run_script("var seen = []; var target = {length:2}; Object.defineProperty(target,'0',{set:function(v){seen.push(v)}}); var savedFill = Array.prototype.fill;").unwrap();
+        it.run_script("Promise.resolve().then(function(){savedFill.call(target,7)});").unwrap();
+        it.collect(&[]).unwrap();
+        it.drain_microtasks().unwrap();
+        let v = it.run_script("seen.join() + ':' + target[1]").unwrap();
+        assert_eq!(it.display(v), "7:7");
+        it.run_script("var afterFill = 0; Promise.resolve().then(function(){try{savedFill.call({length:9007199254740991},1)}finally{afterFill=1}});").unwrap();
+        assert!(matches!(it.drain_microtasks(), Err(Error::Limit(LimitKind::Steps))));
+        assert!(matches!(it.drain_microtasks(), Err(Error::Limit(LimitKind::Steps))));
+        let v = it.run_script("afterFill").unwrap();
+        assert_eq!(it.display(v), "0");
+    });
+}

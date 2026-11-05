@@ -1315,3 +1315,16 @@ The workspace passes 1,544 tests. JS debug and release pass 433 tests, with one 
 No source-context support, Proxy behavior, allocator OOM, real-browser comparison, GUI, live staging authentication or cross-platform validation was tested. Node runs authored tiny programs only.
 
 The final integrated cached run reports Page(Settled), 22 tasks, 21 scripts, zero script throws/load errors and one unhandled rejection. It fetched 15 files totaling 469,525 bytes. The required form is absent and the check exits 1. Settled describes the queue state only. A temporary bare-only probe read the rejected promise reason: TypeError, Array(12).fill is not a function. The probe was removed. This identifies the next runtime blocker; successful hydration and authentication are not established. The bootstrap acceptance check now also requires zero unhandled rejections.
+
+
+## Array fill
+
+Array.prototype.fill reads length once, converts relative start/end bounds in order and reserves traversal work before the first write. Each visited index uses the existing strict Set path, so holes, inherited setters, receiver mutation and non-writable properties follow ordinary property rules. It returns the receiver. Nullish receivers throw. Other primitives remain Unsupported because wrapper objects are absent. TypedArray.fill remains a separate gate.
+
+Six child tests failed before implementation. The parent added a load case with an independent Rust array model and array-like receiver checks. A cross-script setter survives collection before its Promise job runs. A huge fill inside a job stops before writes with Steps; finally does not run and the next checkpoint repeats the failure. No dense fast path or new heap shortcut was added.
+
+No wrapper-object behavior, Object.freeze/Proxy coverage, live staging authentication, GUI or cross-platform behavior was tested. Node runs only authored cases. Existing property descriptors are used to test write failures without Object.freeze.
+
+The parent workspace passes 1,551 tests. Release JS passes 439 tests before the added interaction test; that final test passes separately in debug and release. JS clippy with warnings denied is clean. All 217 authored Array/Object Node cases match. All 18 capped load rows pass under 1 GiB address space and 45 seconds, on an 8 MiB release VM stack. Fill uses 4k/40k/400k elements at 1x/10x/100x. It takes 3.1/30.9/315.5 ms wall and 4.2/6.4/29.6 MiB peak RSS. The model checks array contents, relative ranges, receiver identity and array-like writes. These are single samples, not a measured speed improvement. Reproduce with tools/js/arrobj_check.sh and tools/js/arrobj_load.sh.
+
+The final cached run reports Page(Settled), 22 tasks, 21 scripts, 15 fetches and 469,525 script bytes. Script throws, load errors and unhandled rejections are all zero. The form remains absent and the check exits 1. The previous fill rejection is resolved; the remaining hydration failure is unclassified. No authentication was attempted.

@@ -181,7 +181,7 @@ WeakMap and WeakSet are integrated with ephemeron collection. Values become reac
 
 Native HTMLElement.style and CSSStyleDeclaration are integrated. Reads and writes share the native style attribute and cascade. Supported shorthands expose their longhands. Unknown declarations survive unrelated writes. Parsing, reconstructed values and serialized output have explicit bounds. Detached style objects participate in collection. Authored values are not fully canonicalized; SVG style, indexed properties and computed style remain open. See [resources.md](resources.md#native-inline-style-declarations).
 
-The cached login now executes all 21 scripts with no script throws or load errors, then reaches Page(Settled) after byte search and reviver support, with one unhandled TypeError from Array(12).fill. It still has no form and exits 1. This is local cached execution, not staging authentication or successful hydration.
+The cached login now executes all 21 scripts with no script throws or load errors, then reaches Page(Settled) after byte search and reviver support, with zero unhandled rejections after Array.fill support. It still has no form and exits 1; the remaining hydration failure is unclassified. This is local cached execution, not staging authentication or successful hydration.
 
 | Topic | Work | Check before closing |
 | --- | --- | --- |
@@ -389,3 +389,5 @@ Known gaps of module 4:
 - CSS tokenizer: the caller gives text. A style sheet that is not UTF-8 needs the encoding rules of the CSS standard (`@charset`, BOM, the `Content-Type` header). The tokenizer does not preprocess the input: it reads `\r`, `\r\n` and `\x0C` as newlines where the standard needs it.
 - Tree builder: no parser pause for scripts (`document.write`), and no preload scanner. Both need module 9 and the network in the loop.
 - Load limits: a reply head may be 256 KB, a reply 128 MB and 120 seconds, and the HTTP cache 64 MB (it empties when full). The Noah's Ark check reads 256 entries only.
+
+Array.prototype.fill is integrated with strict generic writes and a preflight work bound. The cached page now settles with zero throws, resource errors and unhandled rejections. No form is present. This does not close the hydration gate. See [resources.md](resources.md#array-fill).
