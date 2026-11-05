@@ -39,6 +39,9 @@ version = "0.1.0"
 [[package]]
 name = "bare-js"
 version = "0.1.0"
+dependencies = [
+ "bare-unicode",
+]
 
 [[package]]
 name = "bare-layout"

@@ -96,7 +96,6 @@ fn gates_are_explicit_unsupported() {
         ("var r = /a(?<=b)/;", "lookbehind"),
         ("var r = /(?<n>a)/;", "named group"),
         ("var r = /(?=a)*/;", "quantified lookahead"),
-        ("var r = /a/iu;", "regexp flags i and u together (Unicode case folding is not built)"),
         ("var r = /\\p{L}/u;", "regexp Unicode property escape"),
         ("var r = /a/d;", "regexp flag d"),
         ("function f() { return /[b-a]/; }", "regexp literal: invalid pattern (early SyntaxError)"),

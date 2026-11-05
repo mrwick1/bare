@@ -1,18 +1,21 @@
 #!/bin/sh
-# Full check of crates/js/src/regexp.rs without cargo (parent has not wired the module yet).
+# Full check of crates/js/src/regexp.rs without cargo. bare-unicode is built as an rlib first.
 #   tools/js/regexp_check.sh [OUT_DIR]
 # Needs rustc and node. (To rebuild regexp_inventory.jsonl, run regexp_inventory.mjs with ACORN set.) Reads only public patterns; no target bundle is run.
 set -eu
 here=$(cd "$(dirname "$0")" && pwd)
 src=$here/../../crates/js/src/regexp.rs
 out=${1:-$(mktemp -d)}
-rustc --edition 2024 --test "$src" -o "$out/unit_debug" && "$out/unit_debug" -q
-rustc --edition 2024 -O --test "$src" -o "$out/unit_release" && "$out/unit_release" -q
-rustc --edition 2024 --test "$here/regexp_load.rs" -o "$out/oracle_debug" && "$out/oracle_debug" -q
-rustc --edition 2024 -O "$here/regexp_load.rs" -o "$out/regexp_load"
+rustc --edition 2024 -O --crate-type rlib --crate-name bare_unicode "$here/../../crates/unicode/src/lib.rs" -o "$out/libbare_unicode.rlib"
+ext="--extern bare_unicode=$out/libbare_unicode.rlib"
+rustc --edition 2024 --test $ext "$src" -o "$out/unit_debug" && "$out/unit_debug" -q
+rustc --edition 2024 -O --test $ext "$src" -o "$out/unit_release" && "$out/unit_release" -q
+rustc --edition 2024 --test $ext "$here/regexp_load.rs" -o "$out/oracle_debug" && "$out/oracle_debug" -q
+rustc --edition 2024 -O $ext "$here/regexp_load.rs" -o "$out/regexp_load"
 "$out/regexp_load" preflight
 "$out/regexp_load" canon-dump > "$out/canon.txt"
 node "$here/regexp_canon_check.mjs" < "$out/canon.txt"
+"$out/regexp_load" fold-dump | node "$here/regexp_fold_check.mjs"
 node "$here/regexp_oracle.mjs" --target "$here/regexp_inventory.jsonl" > "$out/target.tsv"
 "$out/regexp_load" check "$out/target.tsv"
 for seed in 11 12 13; do
