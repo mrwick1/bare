@@ -704,3 +704,15 @@ fn implied_values_come_from_the_engine() {
     js(&mut b, "s.cssText = ''; s.font = '12px Arial'");
     assert_eq!(js(&mut b, "s.fontWeight + ',' + s.fontStyle + ',' + s.lineHeight"), "400,normal,normal");
 }
+
+#[test]
+fn expanded_shorthand_getters_obey_the_output_byte_cap() {
+    let mut b = at("<div id=a></div>");
+    js(&mut b, A);
+    let value = format!("calc(1px{})", " + 0px".repeat(80));
+    let style = format!("margin: {value}; margin-left: 2px");
+    js(&mut b, &format!("a.setAttribute('style', '{}')", style));
+    b.set_style_limits(StyleLimits { max_bytes: style.len(), ..Default::default() });
+    assert_eq!(js(&mut b, "s.getPropertyValue('margin')"), lim("style-bytes"));
+    assert_eq!(js(&mut b, "a.getAttribute('style')"), style);
+}

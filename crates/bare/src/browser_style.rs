@@ -210,7 +210,7 @@ impl Dom {
     /// `removeProperty`: the old value of the property (`""` if none).
     fn style_remove(&self, it: &mut Interp<'_>, el: NodeId, name: &str) -> R<String> {
         let mut list = self.style_read(it, el)?;
-        let (old, changed) = remove(&mut list, &key(name), &mut |n| it.charge(n)).map_err(|f| self.style_fail(f))?;
+        let (old, changed) = remove(&mut list, &key(name), self.style_lim().max_bytes, &mut |n| it.charge(n)).map_err(|f| self.style_fail(f))?;
         if changed {
             self.style_write(it, el, &list)?;
         }
@@ -219,7 +219,7 @@ impl Dom {
 
     fn style_get(&self, it: &mut Interp<'_>, el: NodeId, name: &str) -> R<Option<String>> {
         let list = self.style_read(it, el)?;
-        get(&list, &key(name), &mut |n| it.charge(n)).map_err(|f| self.style_fail(f))
+        get(&list, &key(name), self.style_lim().max_bytes, &mut |n| it.charge(n)).map_err(|f| self.style_fail(f))
     }
 
 /// The element of a `CSSStyleDeclaration` object.

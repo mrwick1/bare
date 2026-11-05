@@ -101,9 +101,8 @@ pub fn parse_declarations(input: &str) -> Vec<Declaration<'_>> {
     Parser::new(input).declaration_list(false, usize::MAX).0
 }
 
-/// Like `parse_declarations`, but it stops as soon as it has read `cap + 1` declarations, and it never keeps more than
-/// that. The flag is `true` when the input held more than `cap`. Use it when the input comes from a script: the list is
-/// then bounded before it grows, and not after it was built whole.
+/// Like `parse_declarations`, but retains at most `cap` declarations. One extra valid declaration is parsed to detect
+/// overflow, then discarded. The flag is `true` when the input held more than `cap`.
 pub fn parse_declarations_capped(input: &str, cap: usize) -> (Vec<Declaration<'_>>, bool) {
     Parser::new(input).declaration_list(false, cap)
 }
@@ -312,13 +311,10 @@ impl<'a> Parser<'a> {
     // ---- Declarations ----
 
     /// Parse declarations until the end of the style sheet, or, when `nested`, until the `}` of our block.
-    /// Stops after `cap + 1` declarations (the flag is then `true`).
+    /// Retains at most `cap` declarations, with a flag when another valid declaration is found.
     fn declaration_list(&mut self, nested: bool, cap: usize) -> (Vec<Declaration<'a>>, bool) {
         let mut declarations = Vec::new();
         loop {
-            if declarations.len() > cap {
-                return (declarations, true);
-            }
             match self.peek() {
                 None => return (declarations, false),
                 Some(Token::Whitespace | Token::Semicolon) => {
@@ -330,7 +326,12 @@ impl<'a> Parser<'a> {
                 }
                 Some(Token::AtKeyword(_)) => self.skip_statement(nested, true),
                 // An at-rule inside a block: we do not use it. We skip it, with its block.
-                Some(Token::Ident(_)) => declarations.extend(self.declaration(nested)),
+                Some(Token::Ident(_)) => {
+                    if let Some(d) = self.declaration(nested) {
+                        if declarations.len() == cap { return (declarations, true); }
+                        declarations.push(d);
+                    }
+                }
                 Some(_) => self.skip_statement(nested, false),
                 // Something that cannot start a declaration. The standard says: skip to the next `;`.
             }
@@ -460,10 +461,9 @@ mod tests {
         let (list, more) = parse_declarations_capped("a:1;b:2;c:3", 3);
         assert_eq!((list.len(), more), (3, false));
         let (list, more) = parse_declarations_capped("a:1;b:2;c:3;d:4;e:5", 3);
-        assert_eq!((list.len(), more), (4, true));
-        assert_eq!(list[3].name, "d");
+        assert_eq!((list.len(), more), (3, true));
         let (list, more) = parse_declarations_capped("a:1;b:2", 0);
-        assert_eq!((list.len(), more), (1, true));
+        assert_eq!((list.len(), more), (0, true));
         assert!(!parse_declarations_capped("", 0).1);
         assert!(!parse_declarations_capped(";;x;y", 0).1);
         // Same result as the unbounded parse when the cap is not reached.
@@ -695,5 +695,20 @@ mod tests {
             show(&parse_stylesheet(&text));
             show_declarations(&parse_declarations(&text));
         }
+    }
+}
+
+#[cfg(test)]
+mod strict_cap_tests {
+    use super::parse_declarations_capped;
+
+    #[test]
+    fn capped_parser_never_keeps_a_declaration_beyond_the_cap() {
+        let (list, more) = parse_declarations_capped("a:1;b:2;c:3", 2);
+        assert!(more);
+        assert_eq!(list.len(), 2);
+        let (list, more) = parse_declarations_capped("a:1", 0);
+        assert!(more);
+        assert!(list.is_empty());
     }
 }

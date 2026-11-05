@@ -353,35 +353,37 @@ const BUILD: &[(&str, Join)] = &[
     ("border-bottom", Join::Seq), ("border-left", Join::Seq), ("border", Join::Border),
 ];
 
-fn join(how: Join, t: &[&str]) -> Option<String> {
+fn join(how: Join, t: &[&str], max: usize) -> F<Option<String>> {
+    let joined = |parts: &[&str]| -> F<Option<String>> {
+        let len = parts.iter().try_fold(parts.len().saturating_sub(1), |n, p| n.checked_add(p.len()));
+        if len.is_none_or(|n| n > max) { return Err(Fail::Bytes); }
+        Ok(Some(parts.join(" ")))
+    };
     if wide(t[0]) && t.iter().all(|x| x.eq_ignore_ascii_case(t[0])) {
-        return Some(t[0].to_ascii_lowercase());
+        if t[0].len() > max { return Err(Fail::Bytes); }
+        return Ok(Some(t[0].to_ascii_lowercase()));
     }
-    if t.iter().any(|x| wide(x) || has_var(x)) {
-        return None;
-    }
-    Some(match how {
+    if t.iter().any(|x| wide(x) || has_var(x)) { return Ok(None); }
+    match how {
         Join::Box4 => {
             let n = if t[1] != t[3] { 4 } else if t[0] != t[2] { 3 } else if t[0] != t[1] { 2 } else { 1 };
-            t[..n].join(" ")
+            joined(&t[..n])
         }
-        Join::Pair => if t[0] == t[1] { t[0].to_string() } else { t.join(" ") },
-        Join::Seq => t.join(" "),
+        Join::Pair => joined(if t[0] == t[1] { &t[..1] } else { t }),
+        Join::Seq => joined(t),
         Join::Border => {
             let same = |a: &[&str]| a.iter().all(|x| *x == a[0]);
-            if !(same(&t[0..4]) && same(&t[4..8]) && same(&t[8..12])) {
-                return None;
-            }
-            [t[0], t[4], t[8]].join(" ")
+            if !(same(&t[0..4]) && same(&t[4..8]) && same(&t[8..12])) { return Ok(None); }
+            joined(&[t[0], t[4], t[8]])
         }
-    })
+    }
 }
 
 /// The value of a shorthand written from its longhands. `None` when a longhand is missing, the priorities differ, or the
 /// longhands cannot be joined.
-fn build(list: &[Decl], name: &str, how: Join, charge: Charge) -> F<Option<(String, bool)>> {
+fn build(list: &[Decl], name: &str, how: Join, max: usize, charge: Charge) -> F<Option<(String, bool)>> {
     let mut cache: Vec<(usize, Texts)> = Vec::new();
-    let mut parts: Vec<String> = Vec::new();
+    let mut owners = Vec::new();
     let mut important = None;
     for &p in longs(name) {
         let Some(i) = owner(list, p) else { return Ok(None) };
@@ -391,25 +393,32 @@ fn build(list: &[Decl], name: &str, how: Join, charge: Charge) -> F<Option<(Stri
         if !cache.iter().any(|(j, _)| *j == i) {
             cache.push((i, texts(&list[i], charge)?));
         }
+        owners.push((i, p));
+    }
+    let mut refs = Vec::new();
+    for (i, p) in owners {
         let t = &cache.iter().find(|(j, _)| *j == i).expect("cached").1;
         match t.iter().find(|(q, _)| *q == p) {
-            Some((_, Some(x))) if !x.is_empty() => parts.push(x.to_string()),
+            Some((_, Some(x))) if !x.is_empty() => refs.push(x.as_ref()),
             _ => return Ok(None),
         }
     }
-    let refs: Vec<&str> = parts.iter().map(String::as_str).collect();
-    Ok(join(how, &refs).map(|s| (s, important.unwrap_or(false))))
+    Ok(join(how, &refs, max)?.map(|s| (s, important.unwrap_or(false))))
 }
 
 /// `getPropertyValue`. `None`: nothing to read (the property is not set, or a shorthand that cannot be written).
-pub(crate) fn get(list: &[Decl], name: &str, charge: Charge) -> F<Option<String>> {
+pub(crate) fn get(list: &[Decl], name: &str, max: usize, charge: Charge) -> F<Option<String>> {
     if custom(name) {
         return Ok(list.iter().find(|d| d.kind == Kind::Custom && d.name == name).map(|d| d.value.clone()));
     }
     if let Some(p) = Property::from_name(name) {
         return match owner(list, p) {
             None => Ok(None),
-            Some(i) => Ok(long_text(&list[i], p, charge)?.map(|t| t.into_owned())),
+            Some(i) => {
+                let t = long_text(&list[i], p, charge)?;
+                if t.as_ref().is_some_and(|t| t.len() > max) { return Err(Fail::Bytes); }
+                Ok(t.map(|t| t.into_owned()))
+            }
         };
     }
     if !SHORTHANDS.contains(&name) {
@@ -419,7 +428,7 @@ pub(crate) fn get(list: &[Decl], name: &str, charge: Charge) -> F<Option<String>
         return Ok(Some(d.value.clone()));
     }
     match BUILD.iter().find(|(n, _)| *n == name) {
-        Some(&(_, how)) => Ok(build(list, name, how, charge)?.map(|(s, _)| s)),
+        Some(&(_, how)) => Ok(build(list, name, how, max, charge)?.map(|(s, _)| s)),
         None => Ok(None),
     }
 }
@@ -469,8 +478,8 @@ pub(crate) fn set(list: &mut Vec<Decl>, name: &str, value: &str, important: bool
 }
 
 /// `removeProperty`: the old value, and whether the list changed.
-pub(crate) fn remove(list: &mut Vec<Decl>, name: &str, charge: Charge) -> F<(String, bool)> {
-    let old = get(list, name, charge)?.unwrap_or_default();
+pub(crate) fn remove(list: &mut Vec<Decl>, name: &str, max: usize, charge: Charge) -> F<(String, bool)> {
+    let old = get(list, name, max, charge)?.unwrap_or_default();
     charge(1 + list.len() as u64)?;
     let before = (list.len(), length(list));
     if custom(name) {
@@ -489,19 +498,23 @@ pub(crate) fn remove(list: &mut Vec<Decl>, name: &str, charge: Charge) -> F<(Str
 // ------------------------------------------------------------------------------------------------ output
 
 /// An identifier as CSS text: what is not a name character is written as a hex escape.
-fn ident(name: &str) -> Cow<'_, str> {
-    if name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || !c.is_ascii()) {
-        return Cow::Borrowed(name);
-    }
-    let mut s = String::with_capacity(name.len() + 4);
+fn ident(name: &str, max: usize) -> F<Cow<'_, str>> {
+    let mut len = 0usize;
+    let mut escape = false;
     for c in name.chars() {
-        if c.is_ascii_alphanumeric() || c == '-' || c == '_' || !c.is_ascii() {
-            s.push(c);
-        } else {
-            s.push_str(&format!("\\{:x} ", c as u32));
-        }
+        let safe = c.is_ascii_alphanumeric() || c == '-' || c == '_' || !c.is_ascii();
+        escape |= !safe;
+        let n = if safe { c.len_utf8() } else { 2 + if (c as u32) < 16 { 1 } else { 2 } };
+        len = len.checked_add(n).ok_or(Fail::Bytes)?;
+        if len > max { return Err(Fail::Bytes); }
     }
-    Cow::Owned(s)
+    if !escape { return Ok(Cow::Borrowed(name)); }
+    let mut s = String::with_capacity(len);
+    for c in name.chars() {
+        if c.is_ascii_alphanumeric() || c == '-' || c == '_' || !c.is_ascii() { s.push(c); }
+        else { s.push_str(&format!("\\{:x} ", c as u32)); }
+    }
+    Ok(Cow::Owned(s))
 }
 
 /// Output text with a byte cap that is checked before each piece is added.
@@ -512,12 +525,10 @@ struct Out {
 
 impl Out {
     fn decl(&mut self, name: &str, value: &str, important: bool) -> F<()> {
-        let name = ident(name);
         let tail = if important { " !important;" } else { ";" };
-        let add = usize::from(!self.s.is_empty()) + name.len() + 2 + value.len() + tail.len();
-        if self.s.len().saturating_add(add) > self.max {
-            return Err(Fail::Bytes);
-        }
+        let rest = usize::from(!self.s.is_empty()).checked_add(2).and_then(|n| n.checked_add(value.len())).and_then(|n| n.checked_add(tail.len())).ok_or(Fail::Bytes)?;
+        let room = self.max.checked_sub(self.s.len()).and_then(|n| n.checked_sub(rest)).ok_or(Fail::Bytes)?;
+        let name = ident(name, room)?;
         if !self.s.is_empty() {
             self.s.push(' ');
         }
@@ -557,7 +568,7 @@ pub(crate) fn serialize(list: &[Decl], lim: Lim, charge: Charge) -> F<String> {
                         if mask_of(name) & done != 0 {
                             continue;
                         }
-                        if let Some((v, important)) = build(list, name, how, charge)? {
+                        if let Some((v, important)) = build(list, name, how, lim.bytes, charge)? {
                             out.decl(name, &v, important)?;
                             done |= mask_of(name);
                             wrote = true;
