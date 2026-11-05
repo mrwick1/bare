@@ -359,6 +359,18 @@ fn load_model() {
         let mut b = Browser::new(tree::parse(&format!("<body>{body}")), BrowserLimits::default(), EvalLimits { max_steps: 2_000_000_000, ..Default::default() }, HeapLimits::default()).unwrap();
         let r = js(&mut b, "document.getElementById('t').offsetWidth + 'x' + document.getElementById('t').offsetHeight");
         let s = b.geometry_stats();
+        if shape == "wide" && [1, 10, 100].contains(&scale) {
+            if scale == 100 {
+                assert_eq!(r, lim("geometry-nodes"));
+                assert_eq!(s.layouts, 0);
+            } else {
+                // UA body margins: 1280 - 2*8. The 16px font has round(16*1.069) + round(16*.293) = 22px lines.
+                assert_eq!(r, "1264x22");
+                assert_eq!(s.layouts, 2);
+                assert_eq!(s.last_fragments, (300 * scale + 4) as u64);
+                assert!(s.last_fragments <= s.last_bound);
+            }
+        }
         println!("{shape} scale {scale}: {r}, layouts {}, fragments {} (bound {}), {:?}", s.layouts, s.last_fragments, s.last_bound, started.elapsed());
     }).unwrap().join().unwrap();
 }
@@ -401,4 +413,6 @@ fn hidden_shadow_hosts_do_not_gate_visible_geometry() {
     let mut b = page("#t { width: 16px; height: 18px } #hidden { display: none }", "<button id=t></button><div id=hidden></div>");
     assert_eq!(js(&mut b, "document.getElementById('hidden').attachShadow({mode:'open'}); 'ok'"), "ok");
     assert_eq!(size(&mut b, "t"), "16x18");
+    assert_eq!(js(&mut b, "var host = document.createElement('div'); document.body.appendChild(host); host.attachShadow({mode:'open'}); 'ok'"), "ok");
+    assert_eq!(size(&mut b, "hidden"), "0x0");
 }
