@@ -75,7 +75,7 @@ fn main() {
         die("usage: selection_load CASE SCALE".into());
     }
     let (name, scale) = (args[1].clone(), args[2].parse::<usize>().unwrap_or_else(|_| die("bad scale".into())));
-    let t = std::thread::Builder::new().stack_size(64 << 20).spawn(move || exec(&name, scale)).unwrap();
+    let t = std::thread::Builder::new().stack_size(if cfg!(debug_assertions) { 64 << 20 } else { 8 << 20 }).spawn(move || exec(&name, scale)).unwrap();
     t.join().unwrap_or_else(|_| die("panic".into()));
 }
 

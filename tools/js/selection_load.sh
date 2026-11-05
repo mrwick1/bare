@@ -4,7 +4,14 @@
 # The caps: 45 s wall time and 1 GiB of address space per run. A case that hits a cap, or whose checksum is wrong,
 # fails the run. 6 processes in total.
 set -u
-out=${1:-/dev/stdout}
+tmp=
+if [ "$#" -gt 0 ]; then
+  out=$1
+else
+  tmp=$(mktemp) || exit 1
+  out=$tmp
+  trap 'rm -f "$tmp"' EXIT HUP INT TERM
+fi
 cargo build --release -q -p bare --example selection_load || exit 1
 bin=target/release/examples/selection_load
 status=0
@@ -17,4 +24,8 @@ for scale in 1 10 100; do
     fi
   done
 done
+rows=$(grep -c 'checksum=ok' "$out" || true)
+[ "$rows" -eq 6 ] || status=1
+[ -z "$tmp" ] || cat "$out"
+echo "rows=$rows expected=6 status=$status" >&2
 exit $status
