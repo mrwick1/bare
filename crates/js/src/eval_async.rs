@@ -166,7 +166,7 @@ enum Fr {
     TryC { s: StmtId, env: u32 },
     /// The discriminant of switch `s` is being evaluated.
     SwD { s: StmtId },
-    /// A switch runs. Slot `base` holds the discriminant. Catches an unlabeled break.
+    /// A switch runs. Catches an unlabeled break. While a case test awaits, slot `base` holds the discriminant.
     SwS { base: u32 },
     /// The test of case `i` is being evaluated.
     SwT { s: StmtId, base: u32, i: u32 },
@@ -1528,21 +1528,26 @@ impl<'p> Interp<'p> {
 
     /// Compare the discriminant (slot `base`) with the case tests of switch `s` from case `i`, as in
     /// `eval_statements.rs`. Await-free tests run inline. No match: the `default` clause, or nothing.
-    fn sw_test(&mut self, run: &mut Run, s: StmtId, base: u32, mut i: usize) -> Res<Step> {
+    /// The discriminant `d` goes into slot `base` only before a test that awaits, and leaves it when a body starts.
+    fn sw_test(&mut self, run: &mut Run, s: StmtId, base: u32, d: Value, mut i: usize) -> Res<Step> {
         let StmtKind::Switch { cases, .. } = self.prog.stmt(s).kind else { return Err(unsupported("switch", Span::default())) };
-        let d = sval(run, base as usize);
         while i < cases.len() {
             if let Some(t) = self.prog.case(self.list_at(cases, i)).test {
                 if self.aw_expr(t) {
+                    if run.slots.len() == base as usize {
+                        self.spush(run, Slot::V(d))?;
+                    }
                     self.fpush(run, Fr::SwT { s, base, i: i as u32 })?;
                     return nx(Next::Eval(t));
                 }
                 if d.strict_equals(self.eval_expr(t)?) {
+                    self.strunc(run, base as usize);
                     return self.sw_body(run, s, i);
                 }
             }
             i += 1;
         }
+        self.strunc(run, base as usize);
         match (0..cases.len()).find(|&k| self.prog.case(self.list_at(cases, k)).test.is_none()) {
             Some(k) => self.sw_body(run, s, k),
             None => val(Value::Undefined),
@@ -1838,7 +1843,6 @@ impl<'p> Interp<'p> {
             Fr::SwD { s } => {
                 let StmtKind::Switch { cases, .. } = self.prog.stmt(s).kind else { return Err(unsupported("switch", Span::default())) };
                 let base = run.slots.len() as u32;
-                self.spush(run, Slot::V(v))?;
                 self.fpush(run, Fr::SwS { base })?;
                 let prog = self.prog.clone();
                 if prog.list(cases).any(|c| self.has_lexical(prog.case(c).body)) {
@@ -1850,14 +1854,20 @@ impl<'p> Interp<'p> {
                         self.declare_scope(prog.case(c).body, false)?;
                     }
                 }
-                self.sw_test(run, s, base, 0)
+                self.sw_test(run, s, base, v, 0)
             }
             Fr::SwS { base } => {
                 self.strunc(run, base as usize);
                 val(Value::Undefined)
             }
             Fr::SwT { s, base, i } => {
-                if sval(run, base as usize).strict_equals(v) { self.sw_body(run, s, i as usize) } else { self.sw_test(run, s, base, i as usize + 1) }
+                let d = sval(run, base as usize);
+                if d.strict_equals(v) {
+                    self.strunc(run, base as usize);
+                    self.sw_body(run, s, i as usize)
+                } else {
+                    self.sw_test(run, s, base, d, i as usize + 1)
+                }
             }
             Fr::SwB { s, i } => self.sw_body(run, s, i as usize + 1),
             Fr::Fin { kind, label, base } => {

@@ -400,6 +400,26 @@ fn a_switch_keeps_its_discriminant_and_scope_alive_across_collects_and_frees_the
 }
 
 #[test]
+fn a_switch_holds_its_discriminant_in_a_slot_only_while_a_case_test_awaits() {
+    big(|| {
+        let mut it = realm(lim());
+        // await-free tests: paused in a body, no slot
+        out(&mut it, "var out = []; async function f(k) { switch (k) { case 0: let a = k; await 0; out.push(a); break; default: await 1; out.push('d'); } } f(0); f(1); 0");
+        assert_eq!((it.async_stats().activations, it.async_stats().slots), (2, 0));
+        it.drain_microtasks().unwrap();
+        assert_eq!(out(&mut it, "out.join('|')"), "0|d");
+        // an awaited test: one slot while it waits, none once the body runs
+        out(&mut it, "var log = []; var res; async function g(k) { switch (k) { case 1: log.push('one'); break; case await new Promise(function (r) { res = r; }): await 0; log.push('two'); } } g(2); 0");
+        assert_eq!(it.async_stats().slots, 1);
+        out(&mut it, "res(2)");
+        it.drain_microtasks().unwrap();
+        assert_eq!(out(&mut it, "log.join('|')"), "two");
+        let st = it.async_stats();
+        assert_eq!((st.activations, st.frames, st.slots), (0, 0, 0));
+    });
+}
+
+#[test]
 fn unreachable_activation_cycles_are_dropped_and_reachable_ones_stay() {
     big(|| {
         let mut it = realm(lim());
