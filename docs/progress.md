@@ -26,7 +26,7 @@ The module numbers below remain stable for existing code and benchmark reference
 
 Priority: run the deployed voicebot dashboard in `bare` and test its login journey. Implement S1 to S5 in order. Each topic must pass its checks before the next topic starts. A topic can need several small PRs. All topics without a completion note below are planned.
 
-Keep the existing rules: Rust, no external crates, small interfaces, and one-way crate dependencies. Chrome is a reference for tests. It is not the runtime of `bare`.
+Keep the existing rules: Rust, small interfaces, and one-way crate dependencies. External crates and copied open-source code are allowed since 2026-11-05; see [open-source.md](open-source.md). Chrome is a reference for tests. It is not the runtime of `bare`.
 
 ### Acceptance journey
 
