@@ -26,6 +26,7 @@
 // Storage: one `Dtf` per formatter object in `intl.dtfs`, capped by `max_formatters`, pruned by `collect`. Zones are read once
 // and kept (up to 64) by name. A zone file read is charged as steps.
 
+use crate::icu;
 use crate::intl;
 use crate::tz::{self, Zone};
 
@@ -41,6 +42,34 @@ enum IntlFn {
     DtfResolved,
     /// `Date.prototype.toLocaleString` (0), `toLocaleDateString` (1), `toLocaleTimeString` (2).
     DateLocale(u8),
+    /// The getter and the setter of the global `Intl` until it is first read (see `install_intl`).
+    LazyIntl,
+    NfCtor,
+    CollCtor,
+    PrCtor,
+    /// `supportedLocalesOf` of NumberFormat (0), Collator (1) and PluralRules (2).
+    Supported(u8),
+    NfFormatGet,
+    NfFormat,
+    NfToParts,
+    NfResolved,
+    /// `formatRange` (0), `formatRangeToParts` (1) and `selectRange` (2): gates.
+    NfRange(u8),
+    CollCompareGet,
+    CollCompare,
+    CollResolved,
+    PrSelect,
+    PrResolved,
+    GetCanonical,
+    NumLocale,
+    StrLocaleCompare,
+}
+
+impl IntlFn {
+    /// A constructor that `new` can call.
+    fn is_ctor(self) -> bool {
+        matches!(self, IntlFn::DtfCtor | IntlFn::NfCtor | IntlFn::CollCtor | IntlFn::PrCtor)
+    }
 }
 
 /// A formatter: what `resolvedOptions` reports and what `format` needs.
@@ -58,10 +87,25 @@ struct Dtf {
 
 struct IntlState {
     dtfs: FxMap<ObjId, Dtf>,
+    nfs: FxMap<ObjId, IntlNf>,
+    colls: FxMap<ObjId, IntlColl>,
+    prs: FxMap<ObjId, IntlPr>,
+    /// The ICU4X formatters and collators, made on first use.
+    icu: icu::Cache,
     intl: ObjId,
     proto: ObjId,
     ctor: ObjId,
     format_fn: ObjId,
+    /// The other constructors, their prototypes and the shared `format` and `compare` functions. All `object_proto` until the
+    /// first read of `Intl` makes them.
+    nf_proto: ObjId,
+    nf_ctor: ObjId,
+    nf_format: ObjId,
+    coll_proto: ObjId,
+    coll_ctor: ObjId,
+    coll_compare: ObjId,
+    pr_proto: ObjId,
+    pr_ctor: ObjId,
     zones: FxMap<Rc<str>, Rc<Zone>>,
     default_zone: Option<(Rc<str>, Rc<Zone>)>,
     /// The keys of `OPTION_NAMES`, made once (rooted).
@@ -72,16 +116,98 @@ struct IntlState {
 
 impl IntlState {
     fn new(o: ObjId) -> IntlState {
-        IntlState { dtfs: FxMap::default(), intl: o, proto: o, ctor: o, format_fn: o, zones: FxMap::default(), default_zone: None, keys: Vec::new(), utc: None }
+        IntlState {
+            dtfs: FxMap::default(),
+            nfs: FxMap::default(),
+            colls: FxMap::default(),
+            prs: FxMap::default(),
+            icu: icu::Cache::default(),
+            intl: o,
+            proto: o,
+            ctor: o,
+            format_fn: o,
+            nf_proto: o,
+            nf_ctor: o,
+            nf_format: o,
+            coll_proto: o,
+            coll_ctor: o,
+            coll_compare: o,
+            pr_proto: o,
+            pr_ctor: o,
+            zones: FxMap::default(),
+            default_zone: None,
+            keys: Vec::new(),
+            utc: None,
+        }
     }
 }
 
 const MAX_ZONES: usize = 64;
-/// The options that CreateDateTimeFormat reads. Their keys are made once at install.
-const OPTION_NAMES: [&str; 20] = [
+/// The options that the constructors read. Their keys are made once, on the first read of an option.
+const OPTION_NAMES: [&str; 46] = [
     "localeMatcher", "calendar", "numberingSystem", "hour12", "hourCycle", "timeZone", "weekday", "era", "year", "month", "day",
     "dayPeriod", "hour", "minute", "second", "fractionalSecondDigits", "timeZoneName", "formatMatcher", "dateStyle", "timeStyle",
+    // NumberFormat, PluralRules and Collator
+    "style", "currency", "currencyDisplay", "currencySign", "unit", "unitDisplay", "notation", "minimumIntegerDigits",
+    "minimumFractionDigits", "maximumFractionDigits", "minimumSignificantDigits", "maximumSignificantDigits", "roundingIncrement",
+    "roundingMode", "roundingPriority", "trailingZeroDisplay", "compactDisplay", "useGrouping", "signDisplay", "usage",
+    "collation", "numeric", "caseFirst", "sensitivity", "ignorePunctuation", "type",
 ];
+
+/// The index of `name` in `OPTION_NAMES`. A `match` on the text compares the length first: a scan of the array cost 10% on
+/// `new Intl.DateTimeFormat` with options.
+fn option_index(name: &str) -> Option<usize> {
+    Some(match name {
+        "localeMatcher" => 0,
+        "calendar" => 1,
+        "numberingSystem" => 2,
+        "hour12" => 3,
+        "hourCycle" => 4,
+        "timeZone" => 5,
+        "weekday" => 6,
+        "era" => 7,
+        "year" => 8,
+        "month" => 9,
+        "day" => 10,
+        "dayPeriod" => 11,
+        "hour" => 12,
+        "minute" => 13,
+        "second" => 14,
+        "fractionalSecondDigits" => 15,
+        "timeZoneName" => 16,
+        "formatMatcher" => 17,
+        "dateStyle" => 18,
+        "timeStyle" => 19,
+        "style" => 20,
+        "currency" => 21,
+        "currencyDisplay" => 22,
+        "currencySign" => 23,
+        "unit" => 24,
+        "unitDisplay" => 25,
+        "notation" => 26,
+        "minimumIntegerDigits" => 27,
+        "minimumFractionDigits" => 28,
+        "maximumFractionDigits" => 29,
+        "minimumSignificantDigits" => 30,
+        "maximumSignificantDigits" => 31,
+        "roundingIncrement" => 32,
+        "roundingMode" => 33,
+        "roundingPriority" => 34,
+        "trailingZeroDisplay" => 35,
+        "compactDisplay" => 36,
+        "useGrouping" => 37,
+        "signDisplay" => 38,
+        "usage" => 39,
+        "collation" => 40,
+        "numeric" => 41,
+        "caseFirst" => 42,
+        "sensitivity" => 43,
+        "ignorePunctuation" => 44,
+        "type" => 45,
+        _ => return None,
+    })
+}
+
 /// Steps charged for each zone file read.
 const ZONE_READ_STEPS: u64 = 10_000;
 
@@ -113,7 +239,8 @@ impl<'p> Interp<'p> {
     // ------------------------------------------------------------ GC
 
     fn intl_roots(&self, out: &mut Vec<Value>) {
-        out.extend([self.intl.intl, self.intl.proto, self.intl.ctor, self.intl.format_fn].map(Value::Object));
+        let i = &self.intl;
+        out.extend([i.intl, i.proto, i.ctor, i.format_fn, i.nf_proto, i.nf_ctor, i.nf_format, i.coll_proto, i.coll_ctor, i.coll_compare, i.pr_proto, i.pr_ctor].map(Value::Object));
         out.extend(self.intl.keys.iter().filter_map(|k| if let PropertyKey::String(s) = k { Some(Value::String(*s)) } else { None }));
     }
 
@@ -122,16 +249,29 @@ impl<'p> Interp<'p> {
             out.push(Value::Object(o));
             out.extend(d.bound.map(Value::Object));
         }
+        for (&o, n) in &self.intl.nfs {
+            out.push(Value::Object(o));
+            out.extend(n.bound.map(Value::Object));
+        }
+        for (&o, c) in &self.intl.colls {
+            out.push(Value::Object(o));
+            out.extend(c.bound.map(Value::Object));
+        }
+        out.extend(self.intl.prs.keys().map(|&o| Value::Object(o)));
     }
 
     fn intl_trace(&self, o: ObjId, out: &mut Vec<Value>) {
-        if let Some(b) = self.intl.dtfs.get(&o).and_then(|d| d.bound) {
+        let bound = self.intl.dtfs.get(&o).and_then(|d| d.bound).or_else(|| self.intl.nfs.get(&o).and_then(|n| n.bound)).or_else(|| self.intl.colls.get(&o).and_then(|c| c.bound));
+        if let Some(b) = bound {
             out.push(Value::Object(b));
         }
     }
 
     fn intl_prune(&mut self, seen: &FxSet<ObjId>) {
         self.intl.dtfs.retain(|o, _| seen.contains(o));
+        self.intl.nfs.retain(|o, _| seen.contains(o));
+        self.intl.colls.retain(|o, _| seen.contains(o));
+        self.intl.prs.retain(|o, _| seen.contains(o));
         if self.intl.dtfs.capacity() > 64 && self.intl.dtfs.len() * 4 < self.intl.dtfs.capacity() {
             self.intl.dtfs.shrink_to_fit();
         }
@@ -139,11 +279,33 @@ impl<'p> Interp<'p> {
 
     // ------------------------------------------------------------ install
 
+    /// The global `Intl` is an accessor until a script first reads it, so a realm that never uses `Intl` pays for one function
+    /// and not for the 25 of the namespace (`intl_make`). The read replaces the accessor with the data property of the spec.
+    /// The date, number and string methods are installed at once: they need no object.
     fn install_intl(&mut self) -> Res<()> {
-        let intl = h!(self, self.heap.new_object(Some(self.object_proto)));
         let k = h!(self, self.heap.key_from_str("Intl"));
-        self.def(self.global, k, Value::Object(intl), true, false, true)?;
+        let g = self.new_func_object(Callee::Native(Nat::Intl(IntlFn::LazyIntl)))?;
+        let d = PropertyDescriptor { get: Some(Some(g)), set: Some(Some(g)), enumerable: Some(false), configurable: Some(true), ..Default::default() };
+        h!(self, self.heap.define_own_property(self.global, k, &d));
+        for (i, n) in ["toLocaleString", "toLocaleDateString", "toLocaleTimeString"].iter().enumerate() {
+            self.method(self.date.proto, n, Nat::Intl(IntlFn::DateLocale(i as u8)), 0)?;
+        }
+        if let Some(np) = self.ao.number_proto {
+            self.method(np, "toLocaleString", Nat::Intl(IntlFn::NumLocale), 0)?;
+        }
+        let sp = self.ext.string_proto;
+        self.method(sp, "localeCompare", Nat::Intl(IntlFn::StrLocaleCompare), 1)?;
+        Ok(())
+    }
+
+    /// Make `Intl` and everything on it, and define the global as a data property.
+    fn intl_make(&mut self) -> Res<ObjId> {
+        let intl = h!(self, self.heap.new_object(Some(self.object_proto)));
         self.sc_tag(intl, "Intl")?;
+        let k = h!(self, self.heap.key_from_str("getCanonicalLocales"));
+        let f = self.native(Nat::Intl(IntlFn::GetCanonical), "getCanonicalLocales", 1)?;
+        self.def(intl, k, Value::Object(f), true, false, true)?;
+        // DateTimeFormat
         let proto = h!(self, self.heap.new_object(Some(self.object_proto)));
         let ctor = self.native(Nat::Intl(IntlFn::DtfCtor), "DateTimeFormat", 0)?;
         self.def(ctor, self.k_prototype, Value::Object(proto), false, false, false)?;
@@ -153,20 +315,55 @@ impl<'p> Interp<'p> {
         self.method(ctor, "supportedLocalesOf", Nat::Intl(IntlFn::DtfSupported), 1)?;
         self.method(proto, "resolvedOptions", Nat::Intl(IntlFn::DtfResolved), 0)?;
         self.method(proto, "formatToParts", Nat::Intl(IntlFn::DtfToParts), 1)?;
-        let g = self.native(Nat::Intl(IntlFn::DtfFormatGet), "get format", 0)?;
-        let k = h!(self, self.heap.key_from_str("format"));
-        let d = PropertyDescriptor { get: Some(Some(g)), set: Some(None), enumerable: Some(false), configurable: Some(true), ..Default::default() };
-        h!(self, self.heap.define_own_property(proto, k, &d));
+        self.getter(proto, "format", Nat::Intl(IntlFn::DtfFormatGet))?;
         self.sc_tag(proto, "Intl.DateTimeFormat")?;
-        let f = self.native(Nat::Intl(IntlFn::DtfFormat), "", 1)?;
-        for (i, n) in ["toLocaleString", "toLocaleDateString", "toLocaleTimeString"].iter().enumerate() {
-            self.method(self.date.proto, n, Nat::Intl(IntlFn::DateLocale(i as u8)), 0)?;
-        }
-        let mut keys = Vec::with_capacity(OPTION_NAMES.len());
-        for n in OPTION_NAMES {
-            keys.push(h!(self, self.heap.key_from_str(n)));
-        }
-        self.intl = IntlState { intl, proto, ctor, format_fn: f, keys, ..IntlState::new(intl) };
+        let format_fn = self.native(Nat::Intl(IntlFn::DtfFormat), "", 1)?;
+        // NumberFormat
+        let (nf_ctor, nf_proto) = self.intl_ctor(intl, "NumberFormat", IntlFn::NfCtor, IntlFn::Supported(0), "Intl.NumberFormat")?;
+        self.method(nf_proto, "resolvedOptions", Nat::Intl(IntlFn::NfResolved), 0)?;
+        self.method(nf_proto, "formatToParts", Nat::Intl(IntlFn::NfToParts), 1)?;
+        self.getter(nf_proto, "format", Nat::Intl(IntlFn::NfFormatGet))?;
+        self.method(nf_proto, "formatRange", Nat::Intl(IntlFn::NfRange(0)), 2)?;
+        self.method(nf_proto, "formatRangeToParts", Nat::Intl(IntlFn::NfRange(1)), 2)?;
+        let nf_format = self.native(Nat::Intl(IntlFn::NfFormat), "", 1)?;
+        // Collator
+        let (coll_ctor, coll_proto) = self.intl_ctor(intl, "Collator", IntlFn::CollCtor, IntlFn::Supported(1), "Intl.Collator")?;
+        self.method(coll_proto, "resolvedOptions", Nat::Intl(IntlFn::CollResolved), 0)?;
+        self.getter(coll_proto, "compare", Nat::Intl(IntlFn::CollCompareGet))?;
+        let coll_compare = self.native(Nat::Intl(IntlFn::CollCompare), "", 2)?;
+        // PluralRules
+        let (pr_ctor, pr_proto) = self.intl_ctor(intl, "PluralRules", IntlFn::PrCtor, IntlFn::Supported(2), "Intl.PluralRules")?;
+        self.method(pr_proto, "resolvedOptions", Nat::Intl(IntlFn::PrResolved), 0)?;
+        self.method(pr_proto, "select", Nat::Intl(IntlFn::PrSelect), 1)?;
+        self.method(pr_proto, "selectRange", Nat::Intl(IntlFn::NfRange(2)), 2)?;
+        let i = &mut self.intl;
+        (i.intl, i.proto, i.ctor, i.format_fn) = (intl, proto, ctor, format_fn);
+        (i.nf_proto, i.nf_ctor, i.nf_format, i.coll_proto, i.coll_ctor, i.coll_compare, i.pr_proto, i.pr_ctor) =
+            (nf_proto, nf_ctor, nf_format, coll_proto, coll_ctor, coll_compare, pr_proto, pr_ctor);
+        let k = h!(self, self.heap.key_from_str("Intl"));
+        self.def(self.global, k, Value::Object(intl), true, false, true)?;
+        Ok(intl)
+    }
+
+    /// A constructor `name` on `intl` with its prototype, `supportedLocalesOf` and `Symbol.toStringTag`.
+    fn intl_ctor(&mut self, intl: ObjId, name: &str, ctor: IntlFn, supported: IntlFn, tag: &str) -> Res<(ObjId, ObjId)> {
+        let proto = h!(self, self.heap.new_object(Some(self.object_proto)));
+        let c = self.native(Nat::Intl(ctor), name, 0)?;
+        self.def(c, self.k_prototype, Value::Object(proto), false, false, false)?;
+        self.def(proto, self.k_constructor, Value::Object(c), true, false, true)?;
+        let k = h!(self, self.heap.key_from_str(name));
+        self.def(intl, k, Value::Object(c), true, false, true)?;
+        self.method(c, "supportedLocalesOf", Nat::Intl(supported), 1)?;
+        self.sc_tag(proto, tag)?;
+        Ok((c, proto))
+    }
+
+    /// An accessor `name` with a getter and no setter.
+    fn getter(&mut self, on: ObjId, name: &str, n: Nat) -> Res<()> {
+        let g = self.native(n, &format!("get {name}"), 0)?;
+        let k = h!(self, self.heap.key_from_str(name));
+        let d = PropertyDescriptor { get: Some(Some(g)), set: Some(None), enumerable: Some(false), configurable: Some(true), ..Default::default() };
+        h!(self, self.heap.define_own_property(on, k, &d));
         Ok(())
     }
 
@@ -215,9 +412,15 @@ impl<'p> Interp<'p> {
         Ok(out)
     }
 
-    /// The key of option `name`: made once for `OPTION_NAMES`.
+    /// The key of option `name`: made once for `OPTION_NAMES`, on the first option read.
     fn intl_key(&mut self, name: &str) -> Res<PropertyKey> {
-        match OPTION_NAMES.iter().position(|n| *n == name).and_then(|i| self.intl.keys.get(i)) {
+        if self.intl.keys.is_empty() {
+            for n in OPTION_NAMES {
+                let k = h!(self, self.heap.key_from_str(n));
+                self.intl.keys.push(k);
+            }
+        }
+        match option_index(name).and_then(|i| self.intl.keys.get(i)) {
             Some(&k) => Ok(k),
             None => Ok(h!(self, self.heap.key_from_str(name))),
         }
@@ -225,6 +428,11 @@ impl<'p> Interp<'p> {
 
     /// GetOption for a string: `None` when absent, else one of `values` (its index) or a RangeError.
     fn intl_opt(&mut self, opts: Option<Value>, name: &str, values: &[&str]) -> Res<Option<usize>> {
+        self.intl_opt_for("Intl.DateTimeFormat", opts, name, values)
+    }
+
+    /// `intl_opt` for the constructor `who`, which the RangeError names.
+    fn intl_opt_for(&mut self, who: &str, opts: Option<Value>, name: &str, values: &[&str]) -> Res<Option<usize>> {
         let Some(o) = opts else { return Ok(None) };
         let k = self.intl_key(name)?;
         let v = self.get_prop(o, k)?;
@@ -235,7 +443,7 @@ impl<'p> Interp<'p> {
         let s = h!(self, self.heap.to_string_lossy(s));
         match values.iter().position(|x| *x == s) {
             Some(i) => Ok(Some(i)),
-            None => Err(self.range_error(&format!("Value {s} out of range for Intl.DateTimeFormat options property {name}"))),
+            None => Err(self.range_error(&format!("Value {s} out of range for {who} options property {name}"))),
         }
     }
 
@@ -430,12 +638,21 @@ impl<'p> Interp<'p> {
 
     // ------------------------------------------------------------ natives
 
-    /// A call without `new` makes a formatter too, so `is_new` is not needed.
-    fn call_intl(&mut self, f: IntlFn, this: Value, args: &[Value]) -> Res<Value> {
+    /// A call without `new` makes a formatter too (but not plural rules), so `is_new` is only for PluralRules.
+    fn call_intl(&mut self, f: IntlFn, this: Value, args: &[Value], is_new: bool) -> Res<Value> {
         let (a0, a1) = (arg(args, 0), arg(args, 1));
         match f {
+            IntlFn::LazyIntl => {
+                // the getter has no argument; the setter has the new value
+                if let Some(&v) = args.first() {
+                    let k = h!(self, self.heap.key_from_str("Intl"));
+                    self.def(self.global, k, v, true, false, true)?;
+                    return Ok(Value::Undefined);
+                }
+                Ok(Value::Object(self.intl_make()?))
+            }
             IntlFn::DtfCtor => {
-                if self.intl.dtfs.len() >= self.sc.limits.max_formatters {
+                if self.intl_formatters() >= self.sc.limits.max_formatters {
                     return Err(Error::Limit(LimitKind::Sc(ScLimit::Formatters)));
                 }
                 let d = self.intl_create(a0, a1, 0, 1)?;
@@ -537,6 +754,9 @@ impl<'p> Interp<'p> {
                 let s = self.intl_format(&d, t, None)?;
                 self.str_value(&s)
             }
+            _ => self.call_intl_num(f, this, args, is_new),
         }
     }
 }
+
+include!("eval_intl_num.rs");

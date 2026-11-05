@@ -298,7 +298,7 @@ impl<'p> Interp<'p> {
     /// A native constructor that builds a branded object and cannot take another `new.target` (the byte classes, Map, Set).
     /// A prototype patch after the call would give the wrong brand, so a subclass of one is refused when it is constructed.
     fn native_no_nt(n: Nat) -> bool {
-        matches!(n, Nat::Bin(b) if b.ctor_name().is_some() || b == BinFn::TaCtor) || matches!(n, Nat::Sc(f) if f.is_ctor()) || n == Nat::Date(DateFn::Ctor) || n == Nat::Intl(IntlFn::DtfCtor)
+        matches!(n, Nat::Bin(b) if b.ctor_name().is_some() || b == BinFn::TaCtor) || matches!(n, Nat::Sc(f) if f.is_ctor()) || n == Nat::Date(DateFn::Ctor) || matches!(n, Nat::Intl(f) if f.is_ctor())
     }
 
     fn is_constructor(&self, mut o: ObjId) -> bool {

@@ -17,7 +17,7 @@ Survey date: 2026-11-05. Stars, licenses and last-push dates come from the GitHu
 `bare` is MIT or Apache-2.0.
 
 - MIT, Apache-2.0, BSD and ISC code: we can use or copy it. Keep the copyright notice and the license text. `crates/js/LICENSE-V8` shows the pattern.
-- Unicode-3.0 (ICU4X): permissive. Keep the notice.
+- Unicode-3.0 (ICU4X): permissive. Keep the notice. `crates/js/LICENSE-UNICODE` has the text, and the `license` field of `crates/js/Cargo.toml` names it. It covers the ICU4X crates and the data in `crates/js/src/icu_data`, which comes from CLDR and ICU. `crates/js/src/intl_num_data.rs` holds currency symbols that come from the same CLDR data.
 - MPL-2.0 (Servo, Stylo, cssparser, lightningcss, Nova): file-level copyleft. We can use it as a crate. A file that we copy and change stays MPL-2.0, and its source must stay available. Keep copied MPL files in their own module with the license header.
 
 ## Whole engines
@@ -39,7 +39,7 @@ Study these for architecture. Take parts from them.
 | [Nova](https://github.com/trynova/nova) | MPL-2.0 | 1,958 | Data-oriented engine: one vector per heap type, 32-bit handles. 1.0 in 2026-03, about 80% of test262. Its docs say it is not fast yet. |
 | [regress](https://github.com/ridiculousfish/regress) | Apache-2.0 | 225 | ECMAScript RegExp engine. Boa uses it. |
 | [temporal_rs](https://github.com/boa-dev/temporal) | Apache-2.0 | 240 | Temporal API. Passes the test262 Temporal tests. |
-| [ICU4X](https://github.com/unicode-org/icu4x) | Unicode-3.0 | 1,878 | Locale data and formatting: dates, numbers, collation, plural rules, segmentation. It covers `Intl`, `toLocaleString` and `localeCompare`. |
+| [ICU4X](https://github.com/unicode-org/icu4x) | Unicode-3.0 | 1,878 | Locale data and formatting: dates, numbers, collation, plural rules, segmentation. Adopted on 2026-11-05 for `Intl.NumberFormat`, `Intl.Collator`, `Intl.PluralRules`, `toLocaleString` and `localeCompare`: `icu_decimal`, `icu_plurals`, `icu_collator`, `fixed_decimal`, `icu_locale_core`, with baked data of 5 English locales. Cost, measured: +520 KB in the stripped `eval_check` (+29%, against +1.45 MB with compiled data), 22 k instructions and no measurable memory for a first call. See [resources.md](resources.md#intlnumberformat-intlcollator-and-intlpluralrules). |
 
 ## HTML, CSS and layout
 
@@ -112,7 +112,7 @@ The OFL asks that the license text travels with the font. It is in `data/fonts/O
 
 This order is a proposal. It is not measured yet.
 
-1. ICU4X for `Intl`, `toLocaleString` and `localeCompare`. These gates block the live login now.
+1. ICU4X for `Intl`, `toLocaleString` and `localeCompare`. Done for numbers, collation and plural rules on 2026-11-05. `Intl.DateTimeFormat` stays hand-written. ICU4X date formatting, relative time, lists and segmentation are not adopted.
 2. The S4 stack: tiny-skia, skrifa, harfrust and Parley. S4 topic 1 is built with ab_glyph and hand-written rectangles, and S4 topic 2 with smithay-client-toolkit (see above). Nothing of ours is replaced.
 3. regress and temporal_rs, when a page needs a RegExp feature or Temporal that we do not have.
 4. Larger changes, each one a separate decision: Blitz as the base of the renderer. Boa as the JS engine was measured and rejected on 2026-11-05.

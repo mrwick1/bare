@@ -118,7 +118,8 @@ fn gates_are_explicit() {
     }
     assert_eq!(run("new ArrayBuffer(4, {maxByteLength: 8})"), "unsupported:resizable ArrayBuffer");
     assert_eq!(run("new ArrayBuffer(4).resize(2)"), "unsupported:ArrayBuffer.prototype.resize");
-    assert_eq!(run("new Int8Array([1]).toLocaleString()"), "unsupported:Number.prototype.toLocaleString");
+    assert_eq!(run("new Int8Array([1]).toLocaleString()"), "string:1");
+    assert_eq!(run("new Float64Array([1234.5, -2]).toLocaleString()"), "string:1,234.5,-2");
     assert_eq!(run("new Int8Array(0).toLocaleString()"), "string:");
     // A species or `from` receiver that is not one of the ten intrinsic classes is a gate, never a wrong type.
     let sp = "unsupported:typed array species constructor other than the intrinsic class";

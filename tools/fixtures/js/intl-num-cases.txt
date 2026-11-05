@@ -1,0 +1,272 @@
+# bare-js Intl number, collation and plural cases. A case starts with `=== name`. Same format and oracle as eval-cases.txt.
+# Tiny authored programs for Intl.NumberFormat, Number.prototype.toLocaleString, Intl.Collator, String.prototype.localeCompare,
+# Intl.PluralRules and Intl.getCanonicalLocales. Never a bundle. Node 22 is the oracle. Gates (Unsupported in bare-js) are not here:
+# they are in the Rust tests.
+=== nf_decimal_locales
+var xs = [1234.5, 0, -0, NaN, Infinity, -Infinity, 1e21, 1e-7, 123456789.123456, -1234567.891, 0.5, 999999.9995, 1e15 + 0.5];
+JSON.stringify(["en-US", "en", "en-GB", "en-CA", "en-IN"].map(function (l) { var f = new Intl.NumberFormat(l); return xs.map(function (x) { return f.format(x); }); }))
+=== nf_indian_grouping
+var f = new Intl.NumberFormat("en-IN");
+JSON.stringify([0, 1, 12, 123, 1234, 12345, 123456, 1234567, 12345678, 123456789, 1234567890, 12345678901.25, -1234567.891, 9876543210123].map(function (x) { return f.format(x); }))
+=== nf_to_locale_indian
+JSON.stringify([1234567.891, 12345.6, 100, 0.001, -5000000].map(function (x) { return x.toLocaleString("en-IN"); }))
+=== nf_to_locale_options
+JSON.stringify([
+  (1234.5678).toLocaleString("en-US", { maximumFractionDigits: 2 }),
+  (1234.5).toLocaleString("en-US", { minimumFractionDigits: 2 }),
+  (1234567.891).toLocaleString("en-IN", { maximumFractionDigits: 0 }),
+  (0.256).toLocaleString("en-US", { style: "percent" }),
+  (1234.5).toLocaleString("en-IN", { style: "currency", currency: "INR" }),
+  (1234.5).toLocaleString(undefined, { style: "currency", currency: "USD" }),
+  (5).toLocaleString(), (5).toLocaleString("en"), (5).toLocaleString(["xx", "en-GB"]), (5).toLocaleString("en", undefined),
+  (5).toLocaleString(undefined, {}), (12345.678).toLocaleString("en-US", { useGrouping: false })
+])
+=== nf_to_locale_this
+function t(f) { try { return f(); } catch (e) { return e.name + ": " + e.message; } }
+JSON.stringify([
+  t(function () { return Number.prototype.toLocaleString.call("x"); }),
+  t(function () { return Number.prototype.toLocaleString.call({}); }),
+  t(function () { return Number.prototype.toLocaleString.call(undefined); }),
+  t(function () { return Number.prototype.toLocaleString.call(5, "en", null); }),
+  t(function () { return (5).toLocaleString("en_US"); }),
+  t(function () { return (5).toLocaleString("en", { style: "x" }); }),
+  t(function () { return (5).toLocaleString(null); }),
+  Number.prototype.toLocaleString.length, Number.prototype.toLocaleString.name
+])
+=== nf_rounding_half_expand
+var cases = [[1.005, 2], [2.5, 0], [1.45, 1], [-1.5, 0], [0.0005, 3], [1234.5678, 2], [1.255, 2], [8.345, 2], [0.045, 2], [-0.005, 2], [999.995, 2], [0.5, 0], [1.5, 0], [-2.5, 0], [4.35, 1], [1e21 + 1, 0]];
+JSON.stringify(cases.map(function (c) { return new Intl.NumberFormat("en-US", { maximumFractionDigits: c[1] }).format(c[0]); }))
+=== nf_rounding_modes
+var modes = ["ceil", "floor", "expand", "trunc", "halfCeil", "halfFloor", "halfExpand", "halfTrunc", "halfEven"];
+var xs = [1.5, 2.5, -1.5, -2.5, 1.2, -1.2, 1.7, -1.7, 0.4, -0.4, 0.5, -0.5];
+JSON.stringify(modes.map(function (m) { var f = new Intl.NumberFormat("en-US", { maximumFractionDigits: 0, roundingMode: m }); return xs.map(function (x) { return f.format(x); }).join(" "); }))
+=== nf_rounding_modes_fraction
+var modes = ["ceil", "floor", "expand", "trunc", "halfCeil", "halfFloor", "halfExpand", "halfTrunc", "halfEven"];
+var xs = [1.005, 1.015, 1.025, -1.005, -1.025, 0.125, 0.135, 2.675, 1.0000001, -1.0000001];
+JSON.stringify(modes.map(function (m) { var f = new Intl.NumberFormat("en-US", { maximumFractionDigits: 2, roundingMode: m }); return xs.map(function (x) { return f.format(x); }).join(" "); }))
+=== nf_fraction_digits
+var opts = [{ minimumFractionDigits: 2 }, { minimumFractionDigits: 5 }, { maximumFractionDigits: 0 }, { maximumFractionDigits: 5 }, { minimumFractionDigits: 1, maximumFractionDigits: 3 }, { minimumFractionDigits: 0, maximumFractionDigits: 0 }, { minimumFractionDigits: 2, maximumFractionDigits: 2 }, { maximumFractionDigits: 100 }, { minimumFractionDigits: 100 }];
+var xs = [0, 1, 1.5, 1.23456789, 12345.6, -0.001, 1e-10, 123456.7891];
+JSON.stringify(opts.map(function (o) { var f = new Intl.NumberFormat("en-US", o); return xs.map(function (x) { return f.format(x); }).join(" "); }))
+=== nf_significant_digits
+var opts = [{ maximumSignificantDigits: 1 }, { maximumSignificantDigits: 3 }, { minimumSignificantDigits: 3 }, { minimumSignificantDigits: 2, maximumSignificantDigits: 4 }, { minimumSignificantDigits: 1, maximumSignificantDigits: 21 }, { maximumSignificantDigits: 2, minimumFractionDigits: 3 }, { minimumSignificantDigits: 5 }];
+var xs = [0, 9.96, 99.96, 123456, 0.00123456, 1.5, 12, 1e21, -0.000999, 5];
+JSON.stringify(opts.map(function (o) { var f = new Intl.NumberFormat("en-US", o); return xs.map(function (x) { return f.format(x); }).join(" "); }))
+=== nf_rounding_priority
+var opts = [{ roundingPriority: "morePrecision", maximumSignificantDigits: 3, maximumFractionDigits: 1 }, { roundingPriority: "lessPrecision", maximumSignificantDigits: 3, maximumFractionDigits: 1 }, { roundingPriority: "morePrecision", minimumSignificantDigits: 2, maximumSignificantDigits: 2, minimumFractionDigits: 0, maximumFractionDigits: 3 }, { roundingPriority: "lessPrecision", maximumSignificantDigits: 2, maximumFractionDigits: 2 }, { roundingPriority: "auto", maximumSignificantDigits: 2, maximumFractionDigits: 2 }];
+var xs = [123.456, 0.012345, 1.5, 99.99, 1234567.891, 0];
+JSON.stringify(opts.map(function (o) { var f = new Intl.NumberFormat("en-US", o); return xs.map(function (x) { return f.format(x); }).join(" "); }))
+=== nf_trailing_zero
+var opts = [{ trailingZeroDisplay: "stripIfInteger", minimumFractionDigits: 2 }, { trailingZeroDisplay: "auto", minimumFractionDigits: 2 }, { trailingZeroDisplay: "stripIfInteger", style: "currency", currency: "USD" }, { trailingZeroDisplay: "stripIfInteger", maximumSignificantDigits: 3, minimumSignificantDigits: 3 }];
+var xs = [5, 5.5, 5.001, 1234, 0, -3];
+JSON.stringify(opts.map(function (o) { var f = new Intl.NumberFormat("en-US", o); return xs.map(function (x) { return f.format(x); }).join(" "); }))
+=== nf_min_integer_digits
+var opts = [{ minimumIntegerDigits: 1 }, { minimumIntegerDigits: 3 }, { minimumIntegerDigits: 21 }, { minimumIntegerDigits: 2, useGrouping: true }, { minimumIntegerDigits: 6, minimumFractionDigits: 2 }];
+var xs = [0, 5, 12345, 1234567, 0.5, -7];
+JSON.stringify(opts.map(function (o) { var f = new Intl.NumberFormat("en-IN", o); return xs.map(function (x) { return f.format(x); }).join(" "); }))
+=== nf_use_grouping
+var gs = [true, false, "true", "false", "auto", "always", "min2", 0, "", null, undefined];
+var xs = [999, 1000, 1234, 9999, 10000, 12345, 123456, 1234567];
+JSON.stringify(["en-US", "en-IN"].map(function (l) { return gs.map(function (g) { var f = new Intl.NumberFormat(l, { useGrouping: g }); return String(g) + ":" + xs.map(function (x) { return f.format(x); }).join(" "); }); }))
+=== nf_sign_display
+var modes = ["auto", "never", "always", "exceptZero", "negative"];
+var xs = [5, -5, 0, -0, 0.0001, -0.0001, NaN, Infinity, -Infinity, 0.5, -0.5];
+JSON.stringify(modes.map(function (m) { return [m].concat([{}, { maximumFractionDigits: 0 }, { style: "currency", currency: "USD" }, { style: "percent" }].map(function (o) { o.signDisplay = m; var f = new Intl.NumberFormat("en-US", o); return xs.map(function (x) { return f.format(x); }).join(" "); })); }))
+=== nf_currency_usd_inr
+var xs = [0, 1, 1234.5, -1234.5, 1234567.891, 0.005, -0.001, 99.995, NaN, Infinity, -Infinity];
+JSON.stringify(["en-US", "en-IN", "en-GB", "en-CA", "en"].map(function (l) { return ["USD", "INR", "EUR", "GBP", "CAD", "JPY"].map(function (c) { var f = new Intl.NumberFormat(l, { style: "currency", currency: c }); return c + ":" + xs.map(function (x) { return f.format(x); }).join(" "); }); }))
+=== nf_currency_digits
+var xs = [0, 1234.5, -1234.5678, 0.0005];
+JSON.stringify(["JPY", "KRW", "KWD", "BHD", "CLP", "VND", "XAF", "CHF", "CNY", "ABC", "usd", "xxx"].map(function (c) { var f = new Intl.NumberFormat("en-US", { style: "currency", currency: c }); var r = f.resolvedOptions(); return [c, r.currency, r.minimumFractionDigits, r.maximumFractionDigits].concat(xs.map(function (x) { return f.format(x); })); }))
+=== nf_currency_display
+var xs = [1234.5, -1234.5, NaN, Infinity, -Infinity];
+JSON.stringify(["symbol", "narrowSymbol", "code"].map(function (d) { return ["USD", "CAD", "EUR", "INR", "AUD", "SEK", "NOK", "CHF", "ZAR", "XOF", "PLN", "BRL"].map(function (c) { var f = new Intl.NumberFormat("en-US", { style: "currency", currency: c, currencyDisplay: d }); return d + ":" + c + ":" + xs.map(function (x) { return f.format(x); }).join(" "); }); }))
+=== nf_currency_display_locales
+var xs = [12.5, -12.5];
+JSON.stringify(["en-CA", "en-IN", "en-GB"].map(function (l) { return ["USD", "CAD", "JPY", "GBP", "INR", "EUR"].map(function (c) { return [ "symbol", "narrowSymbol", "code" ].map(function (d) { var f = new Intl.NumberFormat(l, { style: "currency", currency: c, currencyDisplay: d }); return l + ":" + c + ":" + d + ":" + xs.map(function (x) { return f.format(x); }).join(" "); }); }); }))
+=== nf_currency_accounting
+var xs = [1234.5, -1234.5, 0, -0, NaN, -0.001];
+JSON.stringify(["USD", "CHF", "INR"].map(function (c) { return ["auto", "always", "exceptZero", "never", "negative"].map(function (s) { var f = new Intl.NumberFormat("en-US", { style: "currency", currency: c, currencySign: "accounting", signDisplay: s }); return c + ":" + s + ":" + xs.map(function (x) { return f.format(x); }).join(" "); }); }))
+=== nf_currency_options
+var f = [{ minimumFractionDigits: 0 }, { maximumFractionDigits: 0 }, { minimumFractionDigits: 3 }, { maximumFractionDigits: 4 }, { maximumSignificantDigits: 3 }, { useGrouping: false }, { minimumIntegerDigits: 5 }, { roundingMode: "floor" }];
+JSON.stringify(f.map(function (o) { o.style = "currency"; o.currency = "USD"; var nf = new Intl.NumberFormat("en-US", o); return [nf.format(1234.5678), nf.format(-0.5), nf.format(0)].join(" "); }))
+=== nf_percent
+var xs = [0, 0.256, -0.256, 1, 12.345, 0.00005, 1e-7, NaN, Infinity, 1234.5, 0.12345678];
+var opts = [{}, { maximumFractionDigits: 1 }, { minimumFractionDigits: 2 }, { maximumSignificantDigits: 2 }, { signDisplay: "always" }, { useGrouping: false }];
+JSON.stringify(["en-US", "en-IN"].map(function (l) { return opts.map(function (o) { o.style = "percent"; var f = new Intl.NumberFormat(l, o); return xs.map(function (x) { return f.format(x); }).join(" "); }); }))
+=== nf_parts_decimal
+var f = new Intl.NumberFormat("en-IN", { minimumFractionDigits: 2 });
+JSON.stringify([1234567.891, -0.5, NaN, Infinity, -Infinity, 0, 12].map(function (x) { return f.formatToParts(x); }))
+=== nf_parts_currency_percent
+var a = new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" }), b = new Intl.NumberFormat("en-US", { style: "currency", currency: "CHF", currencySign: "accounting" }), c = new Intl.NumberFormat("en-US", { style: "percent", signDisplay: "always" }), d = new Intl.NumberFormat("en-IN", { style: "currency", currency: "INR", currencyDisplay: "code" });
+JSON.stringify([a.formatToParts(-1234.5), b.formatToParts(-1234.5), b.formatToParts(5), c.formatToParts(0.256), c.formatToParts(-0.5), d.formatToParts(1234567.5), a.formatToParts(NaN), c.formatToParts(Infinity)])
+=== nf_parts_text_matches
+var f = new Intl.NumberFormat("en-IN", { style: "currency", currency: "INR" });
+JSON.stringify([1, 1234567.891, -12.5, NaN, Infinity].map(function (x) { return f.formatToParts(x).map(function (p) { return p.value; }).join("") === f.format(x); }))
+=== nf_resolved_options
+var os = [undefined, { style: "currency", currency: "inr" }, { style: "percent" }, { maximumSignificantDigits: 3 }, { minimumFractionDigits: 2, useGrouping: false }, { style: "currency", currency: "JPY", currencyDisplay: "code", currencySign: "accounting" }, { signDisplay: "exceptZero", roundingMode: "floor", trailingZeroDisplay: "stripIfInteger" }, { roundingPriority: "morePrecision", maximumSignificantDigits: 2, maximumFractionDigits: 1 }, { roundingPriority: "lessPrecision", minimumFractionDigits: 1 }, { useGrouping: "min2" }, { useGrouping: true }, { minimumIntegerDigits: 4 }, { style: "decimal", currency: "USD", currencyDisplay: "code" }];
+JSON.stringify(["en-US", "en-IN", "en-GB", "en", "en-CA"].map(function (l) { return os.map(function (o) { return new Intl.NumberFormat(l, o).resolvedOptions(); }); }))
+=== nf_resolved_keys_order
+JSON.stringify([undefined, { style: "currency", currency: "USD" }, { maximumSignificantDigits: 2 }, { roundingPriority: "morePrecision", maximumSignificantDigits: 2 }].map(function (o) { return Object.keys(new Intl.NumberFormat("en", o).resolvedOptions()); }))
+=== nf_string_args
+var f = new Intl.NumberFormat("en-US", { maximumFractionDigits: 20 });
+JSON.stringify(["1234567890123456789012.5", "0.1", "-12.50", "+7", " 42 ", "1e3", "0x10", "", "  ", "abc", "Infinity", "-Infinity", "12345678901234567890", "0.30000000000000004", "007", ".5", "5.", "1,234"].map(function (s) { return f.format(s); }))
+=== nf_string_args_rounding
+var f = new Intl.NumberFormat("en-US", { maximumFractionDigits: 2 });
+JSON.stringify(["1.005", "1.0049999999999999999", "2.675", "0.125", "123456789012345678.995"].map(function (s) { return f.format(s) + "|" + f.format(Number(s)); }))
+=== nf_other_args
+var f = new Intl.NumberFormat("en-US");
+JSON.stringify([null, undefined, true, false, [], [5], {}, { valueOf: function () { return 7; } }, new Date(5), 1e300, -1e300, 5e-324, 1.7976931348623157e308, 2 ** 53, 2 ** 53 + 2, 0.1 + 0.2, 123456789012345680000].map(function (x) { return f.format(x); }))
+=== nf_symbol_arg
+function t(f) { try { return f(); } catch (e) { return e.name + ": " + e.message; } }
+JSON.stringify([t(function () { return new Intl.NumberFormat().format(Symbol()); }), t(function () { return new Intl.NumberFormat().formatToParts(Symbol()); })])
+=== nf_format_bound
+var f = new Intl.NumberFormat("en-US"), g = f.format;
+JSON.stringify([f.format === g, g(1234.5), [1, 2000, 3000000].map(g), g.length, g.name, typeof g, Object.getOwnPropertyDescriptor(Intl.NumberFormat.prototype, "format").set, Object.getOwnPropertyDescriptor(Intl.NumberFormat.prototype, "format").get.name])
+=== nf_construct_call
+function t(f) { try { return f(); } catch (e) { return e.name + ": " + e.message; } }
+JSON.stringify([Intl.NumberFormat("en") instanceof Intl.NumberFormat, new Intl.NumberFormat() instanceof Intl.NumberFormat, Intl.NumberFormat.length, Intl.NumberFormat.name, Object.prototype.toString.call(new Intl.NumberFormat()), Intl.NumberFormat.prototype.constructor === Intl.NumberFormat, Object.getOwnPropertyNames(Intl.NumberFormat.prototype).join(), Object.getOwnPropertyNames(Intl.NumberFormat).join(), String(Intl.NumberFormat.prototype[Symbol.toStringTag]), Object.getPrototypeOf(new Intl.NumberFormat()) === Intl.NumberFormat.prototype])
+=== nf_receiver_errors
+function t(f) { try { return f(); } catch (e) { return e.name + ": " + e.message; } }
+var d = Object.getOwnPropertyDescriptor(Intl.NumberFormat.prototype, "format").get;
+JSON.stringify([t(function () { return d.call({}); }), t(function () { return d.call(5); }), t(function () { return d.call(undefined); }), t(function () { return Intl.NumberFormat.prototype.formatToParts.call({}); }), t(function () { return Intl.NumberFormat.prototype.resolvedOptions.call({}); }), t(function () { return Intl.NumberFormat.prototype.resolvedOptions.call(null); }), t(function () { return Intl.NumberFormat.prototype.format; }), t(function () { return Intl.NumberFormat.prototype.formatToParts.call(new Intl.DateTimeFormat()); })])
+=== nf_option_errors
+function t(o, l) { try { new Intl.NumberFormat(l || "en-US", o); return "ok"; } catch (e) { return e.name + ": " + e.message; } }
+JSON.stringify([{ maximumFractionDigits: 101 }, { minimumFractionDigits: -1 }, { minimumFractionDigits: 5, maximumFractionDigits: 2 }, { minimumIntegerDigits: 0 }, { minimumIntegerDigits: 22 }, { minimumSignificantDigits: 0 }, { maximumSignificantDigits: 22 }, { maximumSignificantDigits: 2, minimumSignificantDigits: 3 }, { style: "foo" }, { style: "currency" }, { style: "currency", currency: "US" }, { style: "currency", currency: "USDD" }, { currency: "12$" }, { currency: "u s" }, { notation: "x" }, { currencyDisplay: "x" }, { currencySign: "x" }, { signDisplay: "x" }, { useGrouping: "x" }, { useGrouping: 1 }, { useGrouping: {} }, { compactDisplay: "x" }, { roundingMode: "x" }, { roundingIncrement: 3 }, { roundingIncrement: 0 }, { roundingIncrement: 5001 }, { roundingPriority: "x" }, { trailingZeroDisplay: "x" }, { numberingSystem: "x" }, { numberingSystem: "ab-cd" }, { localeMatcher: "x" }, { minimumFractionDigits: "abc" }, { maximumFractionDigits: "abc" }, { maximumFractionDigits: NaN }, { minimumIntegerDigits: "x" }, { unitDisplay: "x" }, { unit: "foo" }, { unit: "meter-per-foo" }, { style: "unit" }, { unit: "second-per-second-per-second" }, null, 5, "abc", true].map(function (o) { return t(o); }).concat([t(undefined, "en_US"), t(undefined, ""), t(undefined, "x"), t(undefined, null), t(undefined, 5), t(undefined, [5]), t(undefined, ["en", "x"]), t({}, ["en", "EN-us"])]))
+=== nf_option_coercion
+var f = new Intl.NumberFormat("en-US", { maximumFractionDigits: 2.9, minimumFractionDigits: "1", minimumIntegerDigits: "2", style: { toString: function () { return "percent"; } } });
+JSON.stringify([f.resolvedOptions().maximumFractionDigits, f.resolvedOptions().minimumFractionDigits, f.resolvedOptions().minimumIntegerDigits, f.resolvedOptions().style, f.format(0.1234)])
+=== nf_option_order
+function spy(log, names, vals) { var o = {}; names.forEach(function (n) { Object.defineProperty(o, n, { get: function () { log.push(n); return vals ? vals[n] : undefined; }, enumerable: true }); }); return o; }
+var log = [];
+var names = ["localeMatcher","numberingSystem","style","currency","currencyDisplay","currencySign","unit","unitDisplay","notation","minimumIntegerDigits","minimumFractionDigits","maximumFractionDigits","minimumSignificantDigits","maximumSignificantDigits","roundingIncrement","roundingMode","roundingPriority","trailingZeroDisplay","compactDisplay","useGrouping","signDisplay"];
+new Intl.NumberFormat("en", spy(log, names));
+(5).toLocaleString("en", spy(log, names));
+JSON.stringify(log)
+=== nf_option_order_values
+function spy(log, names, vals) { var o = {}; names.forEach(function (n) { Object.defineProperty(o, n, { get: function () { log.push(n); return vals ? vals[n] : undefined; }, enumerable: true }); }); return o; }
+var log = [];
+var names = ["localeMatcher","numberingSystem","style","currency","currencyDisplay","currencySign","unit","unitDisplay","notation","minimumIntegerDigits","minimumFractionDigits","maximumFractionDigits","minimumSignificantDigits","maximumSignificantDigits","roundingIncrement","roundingMode","roundingPriority","trailingZeroDisplay","compactDisplay","useGrouping","signDisplay"];
+var p = spy(log, names, { style: "currency", currency: "USD", notation: "standard", roundingMode: "floor", useGrouping: "min2", maximumSignificantDigits: 4 });
+var f = new Intl.NumberFormat("en", p);
+JSON.stringify([log, f.format(12345.678)])
+=== nf_supported_locales
+JSON.stringify([Intl.NumberFormat.supportedLocalesOf(["en-US", "en", "en-IN", "en-GB", "en-CA", "xx"]), Intl.NumberFormat.supportedLocalesOf("en-GB"), Intl.NumberFormat.supportedLocalesOf([]), Intl.NumberFormat.supportedLocalesOf(), Intl.NumberFormat.supportedLocalesOf("en", { localeMatcher: "lookup" }), Intl.NumberFormat.supportedLocalesOf.length, Intl.NumberFormat.supportedLocalesOf.name])
+=== nf_locale_resolution
+JSON.stringify(["en", "en-US", "en-CA", "en-IN", "en-GB", "EN-gb", ["xx", "en-GB"], ["en-GB", "en-IN"], undefined, []].map(function (l) { return new Intl.NumberFormat(l).resolvedOptions().locale; }))
+=== nf_dtf_untouched
+var d = new Intl.DateTimeFormat("en-US", { timeZone: "UTC", year: "numeric", month: "short", day: "numeric" });
+JSON.stringify([d.format(0), Intl.DateTimeFormat.name, typeof Intl.NumberFormat, Object.prototype.toString.call(Intl), ["Collator", "DateTimeFormat", "NumberFormat", "PluralRules", "getCanonicalLocales"].filter(function (n) { return n in Intl; }).join()])
+=== nf_intl_global
+var d = Object.getOwnPropertyDescriptor(globalThis, "Intl");
+JSON.stringify([typeof Intl, "Intl" in globalThis, Intl === globalThis.Intl, d.enumerable, d.configurable, Object.keys(globalThis).indexOf("Intl")])
+=== nf_intl_global_assign
+var saved = Intl;
+Intl = 5;
+var a = Intl;
+Intl = saved;
+JSON.stringify([a, Intl === saved, typeof Intl.NumberFormat])
+=== nf_scale_big_small
+var f = new Intl.NumberFormat("en-US", { maximumFractionDigits: 20 });
+JSON.stringify([1e21, 1.5e21, 1e-7, 1.234e-10, 123456789012345678, 1e100, 5e-324, 2 ** 70, 0.1, 0.2, 0.3, 1 / 3, 2 / 3, 100 / 3].map(function (x) { return f.format(x); }))
+=== coll_sort_basic
+var w = ["b", "a", "Z", "é", "e", "E", "z", "A", "résumé", "resume", "Resume", "ä", "a b", "ab", "a-b", "a_b", "1", "10", "2", "", " ", "-", "ß", "ss", "Æ", "ae", "ø", "o"];
+JSON.stringify([w.slice().sort(function (a, b) { return a.localeCompare(b); }), w.slice().sort(new Intl.Collator().compare), w.slice().sort(new Intl.Collator("en-US").compare)])
+=== coll_accents_case
+var c = new Intl.Collator("en");
+var pairs = [["a", "b"], ["a", "A"], ["A", "a"], ["a", "á"], ["á", "a"], ["e", "é"], ["résumé", "resume"], ["resume", "Resume"], ["Résumé", "resume"], ["ä", "a"], ["z", "ä"], ["a", "a"], ["", "a"], ["a", ""], ["", ""], ["ab", "a"], ["Ab", "aB"], ["café", "café"], ["é", "é"], ["ä", "ä"]];
+JSON.stringify(pairs.map(function (p) { return c.compare(p[0], p[1]); }))
+=== coll_sensitivity
+var pairs = [["a", "A"], ["a", "á"], ["a", "Á"], ["A", "á"], ["a", "b"], ["résumé", "resume"], ["Résumé", "résumé"], ["e", "E"], ["ab", "AB"], ["a", "a"]];
+JSON.stringify(["base", "accent", "case", "variant"].map(function (s) { var c = new Intl.Collator("en", { sensitivity: s }); return s + ":" + pairs.map(function (p) { return c.compare(p[0], p[1]); }).join(" "); }))
+=== coll_numeric
+var w = ["a10", "a2", "a1", "a02", "a100", "b1", "A1", "10", "9", "1.5", "1.10", "007", "7", "x-10", "x-9", "file 20", "file 3"];
+JSON.stringify([w.slice().sort(new Intl.Collator("en", { numeric: true }).compare), w.slice().sort(new Intl.Collator("en", { numeric: false }).compare), ["1", "01", "001"].sort(new Intl.Collator("en", { numeric: true }).compare)])
+=== coll_case_first
+var w = ["a", "A", "b", "B", "á", "Á", "aa", "Aa", "aA", "AA"];
+JSON.stringify(["upper", "lower", "false", undefined].map(function (cf) { return w.slice().sort(new Intl.Collator("en", { caseFirst: cf }).compare); }))
+=== coll_ignore_punctuation
+var w = ["a b", "ab", "a-b", "a_b", "a.b", "a,b", "a  b", "a$b", "a+b", "A b", "b", " a", "-a", "a"];
+JSON.stringify([w.slice().sort(new Intl.Collator("en", { ignorePunctuation: true }).compare), w.slice().sort(new Intl.Collator("en", { ignorePunctuation: false }).compare), ["a b", "ab", "a-b"].map(function (x) { return new Intl.Collator("en", { ignorePunctuation: true }).compare(x, "ab"); }), ["a b", "ab", "a-b"].map(function (x) { return new Intl.Collator("en", { ignorePunctuation: true, sensitivity: "base" }).compare(x, "AB"); })])
+=== coll_combined_options
+var w = ["a10", "A2", "á1", "a-1", "A 10", "b", "B2", "ab"];
+var os = [{ numeric: true, sensitivity: "base" }, { numeric: true, caseFirst: "upper", ignorePunctuation: true }, { sensitivity: "accent", caseFirst: "lower" }, { sensitivity: "case", numeric: true }];
+JSON.stringify(os.map(function (o) { return w.slice().sort(new Intl.Collator("en-GB", o).compare); }))
+=== coll_symbols_unicode
+var w = ["a", "$", "€", "1", "!", "~", " ", "\u0000", "😀", "あ", "中", "ａ", "Ａ", "x\ud800y", "́", "á", "ẛ̣", "ﬁ", "fi", "Ω", "Ω", "ω"];
+JSON.stringify(w.slice().sort(new Intl.Collator().compare).map(function (s) { return s.charCodeAt(0); }))
+=== coll_compare_values
+var c = new Intl.Collator();
+JSON.stringify([c.compare("a", "b"), c.compare("b", "a"), c.compare("a", "a"), c.compare(), c.compare("undefined"), c.compare(undefined, "undefined"), c.compare(1, 2), c.compare(10, 9), c.compare(null, "null"), c.compare({ toString: function () { return "x"; } }, "x"), c.compare("a")])
+=== coll_compare_bound
+var c = new Intl.Collator("en"), g = c.compare;
+JSON.stringify([c.compare === g, g.length, g.name, typeof g, g("a", "b"), ["b", "a", "c"].sort(g), Object.getOwnPropertyDescriptor(Intl.Collator.prototype, "compare").set, Object.getOwnPropertyDescriptor(Intl.Collator.prototype, "compare").get.name])
+=== coll_resolved_options
+var os = [undefined, { sensitivity: "base" }, { numeric: true }, { numeric: false, caseFirst: "upper" }, { caseFirst: "lower" }, { ignorePunctuation: true }, { usage: "sort", sensitivity: "case", numeric: 1, ignorePunctuation: "x" }, { numeric: "false" }, { numeric: "" }, { caseFirst: false }];
+JSON.stringify(["en", "en-US", "en-GB", "en-IN", "en-CA", undefined, ["xx"]].map(function (l) { return os.map(function (o) { return new Intl.Collator(l, o).resolvedOptions(); }); }))
+=== coll_resolved_keys_order
+JSON.stringify(Object.keys(new Intl.Collator("en").resolvedOptions()))
+=== coll_construct_call
+JSON.stringify([Intl.Collator("en") instanceof Intl.Collator, new Intl.Collator() instanceof Intl.Collator, Intl.Collator.length, Intl.Collator.name, Object.prototype.toString.call(new Intl.Collator()), Object.getOwnPropertyNames(Intl.Collator.prototype).join(), Object.getOwnPropertyNames(Intl.Collator).join(), Intl.Collator.supportedLocalesOf(["en-US", "en-IN", "xx", "en-GB"]), Intl.Collator.prototype.constructor === Intl.Collator])
+=== coll_errors
+function t(f) { try { return f(); } catch (e) { return e.name + ": " + e.message; } }
+JSON.stringify([t(function () { return new Intl.Collator("en", { sensitivity: "x" }); }), t(function () { return new Intl.Collator("en", { usage: "x" }); }), t(function () { return new Intl.Collator("en", { caseFirst: "x" }); }), t(function () { return new Intl.Collator("en", { collation: "x" }); }), t(function () { return new Intl.Collator("en", { collation: "a" }); }), t(function () { return new Intl.Collator("en", { localeMatcher: "x" }); }), t(function () { return new Intl.Collator("en", null); }), t(function () { return new Intl.Collator("en_US"); }), t(function () { return new Intl.Collator(null); }), t(function () { return new Intl.Collator("x"); }), t(function () { return Intl.Collator.prototype.resolvedOptions.call({}); }), t(function () { return Object.getOwnPropertyDescriptor(Intl.Collator.prototype, "compare").get.call({}); }), t(function () { return Intl.Collator.prototype.compare; }), t(function () { return new Intl.Collator("en", 5).resolvedOptions().usage; })])
+=== coll_option_order
+function spy(log, names, vals) { var o = {}; names.forEach(function (n) { Object.defineProperty(o, n, { get: function () { log.push(n); return vals ? vals[n] : undefined; }, enumerable: true }); }); return o; }
+var log = [];
+var names = ["usage","localeMatcher","collation","numeric","caseFirst","sensitivity","ignorePunctuation"];
+new Intl.Collator("en", spy(log, names));
+"a".localeCompare("b", "en", spy(log, names));
+JSON.stringify(log)
+=== lc_basic
+JSON.stringify([["a", "b"], ["b", "a"], ["a", "a"], ["a", "A"], ["A", "a"], ["é", "e"], ["e", "é"], ["résumé", "resume"], ["z", "ä"], ["", ""], ["", "a"], ["10", "9"], ["a", undefined], ["undefined", undefined], ["a"]].map(function (p) { return p.length === 1 ? p[0].localeCompare() : p[0].localeCompare(p[1]); }))
+=== lc_args
+JSON.stringify([
+  "a".localeCompare("B", "en"), "a".localeCompare("B", "en-GB"), "a".localeCompare("B", ["xx", "en-IN"]), "a".localeCompare("A", "en", { sensitivity: "base" }), "a".localeCompare("á", "en", { sensitivity: "base" }), "a".localeCompare("á", "en", { sensitivity: "accent" }),
+  "a2".localeCompare("a10", "en", { numeric: true }), "a2".localeCompare("a10"), "a".localeCompare("A", undefined, { caseFirst: "upper" }), "a".localeCompare("A", undefined, { caseFirst: "lower" }), "a b".localeCompare("ab", "en", { ignorePunctuation: true }),
+  "a".localeCompare("b", undefined, undefined), "a".localeCompare("b", undefined, {}), "a".localeCompare("b", [], {}), "a".localeCompare(5, "en"), "5".localeCompare(5), String.prototype.localeCompare.call(5, 4), String.prototype.localeCompare.call({}, "[object Object]"), String.prototype.localeCompare.call(true, "true")
+])
+=== lc_errors
+function t(f) { try { return f(); } catch (e) { return e.name + ": " + e.message; } }
+JSON.stringify([t(function () { return String.prototype.localeCompare.call(null, "a"); }), t(function () { return String.prototype.localeCompare.call(undefined, "a"); }), t(function () { return "a".localeCompare("b", "x"); }), t(function () { return "a".localeCompare("b", "en_US"); }), t(function () { return "a".localeCompare("b", "en", { sensitivity: "x" }); }), t(function () { return "a".localeCompare("b", "en", null); }), t(function () { return "a".localeCompare("b", null); }), t(function () { return "a".localeCompare("b", "en", { caseFirst: "x" }); }), t(function () { return "a".localeCompare(Symbol()); }), String.prototype.localeCompare.length, String.prototype.localeCompare.name])
+=== lc_sort_dashboard
+var rows = [{ n: "Zeta" }, { n: "alpha" }, { n: "Éclair" }, { n: "beta" }, { n: "Alpha" }, { n: "eclair" }, { n: "agent 10" }, { n: "agent 9" }, { n: "Agent 1" }, { n: "ägent" }, { n: "" }];
+JSON.stringify([rows.slice().sort(function (a, b) { return a.n.localeCompare(b.n); }).map(function (r) { return r.n; }), rows.slice().sort(function (a, b) { return a.n.localeCompare(b.n, undefined, { numeric: true, sensitivity: "base" }); }).map(function (r) { return r.n; })])
+=== lc_collator_reuse
+var c = new Intl.Collator(undefined, { numeric: true, sensitivity: "base" });
+var w = []; for (var i = 0; i < 30; i++) w.push("item" + ((i * 7) % 30) + (i % 3 ? "" : "X"));
+JSON.stringify([w.slice().sort(c.compare).join(), w.slice().sort(function (a, b) { return a.localeCompare(b, undefined, { numeric: true, sensitivity: "base" }); }).join()])
+=== pr_cardinal
+var p = new Intl.PluralRules("en");
+JSON.stringify([0, 1, 1.0, 1.5, 2, 3, 10, 11, 100, 101, -1, -0, 0.5, 1e21, NaN, Infinity, -Infinity, "1", "1.0", "x", null, undefined, true, 2.00001].map(function (x) { return p.select(x); }))
+=== pr_ordinal
+var p = new Intl.PluralRules("en", { type: "ordinal" });
+JSON.stringify([0, 1, 2, 3, 4, 5, 10, 11, 12, 13, 14, 21, 22, 23, 24, 100, 101, 102, 103, 111, 112, 113, 121, 1.5, -1, -2, -3, NaN, Infinity].map(function (x) { return p.select(x); }))
+=== pr_digits
+var os = [{ minimumFractionDigits: 1 }, { maximumFractionDigits: 0 }, { minimumFractionDigits: 2, maximumFractionDigits: 2 }, { maximumSignificantDigits: 1 }, { minimumSignificantDigits: 3 }, { minimumIntegerDigits: 3 }, { roundingMode: "floor", maximumFractionDigits: 0 }, { roundingPriority: "morePrecision", maximumSignificantDigits: 2, maximumFractionDigits: 0 }, { trailingZeroDisplay: "stripIfInteger", minimumFractionDigits: 1 }];
+var xs = [1, 1.0, 1.4, 1.5, 0.99, 1.001, 2, 1.96, 0.5, 0];
+JSON.stringify(os.map(function (o) { var p = new Intl.PluralRules("en", o); return xs.map(function (x) { return p.select(x); }).join(" "); }))
+=== pr_resolved
+var os = [undefined, { type: "ordinal" }, { minimumFractionDigits: 1 }, { maximumSignificantDigits: 2 }, { minimumIntegerDigits: 2 }, { roundingMode: "ceil" }, { roundingPriority: "lessPrecision", maximumSignificantDigits: 2, maximumFractionDigits: 1 }, { trailingZeroDisplay: "stripIfInteger" }];
+JSON.stringify(["en", "en-US", "en-GB", "en-IN", undefined, ["xx"], ["xx", "en-CA"]].map(function (l) { return os.map(function (o) { return new Intl.PluralRules(l, o).resolvedOptions(); }); }))
+=== pr_resolved_keys_order
+JSON.stringify([undefined, { maximumSignificantDigits: 2 }].map(function (o) { return Object.keys(new Intl.PluralRules("en", o).resolvedOptions()); }))
+=== pr_construct_errors
+function t(f) { try { return f(); } catch (e) { return e.name + ": " + e.message; } }
+JSON.stringify([t(function () { return Intl.PluralRules("en"); }), t(function () { return Intl.PluralRules.call(undefined, "en"); }), t(function () { return new Intl.PluralRules("en", { type: "x" }); }), t(function () { return new Intl.PluralRules("en", null); }), t(function () { return new Intl.PluralRules("en_US"); }), t(function () { return new Intl.PluralRules("en", { minimumFractionDigits: 200 }); }), t(function () { return Intl.PluralRules.prototype.select.call({}, 1); }), t(function () { return Intl.PluralRules.prototype.resolvedOptions.call({}); }), t(function () { return new Intl.PluralRules("en").select(Symbol()); }), Intl.PluralRules.length, Intl.PluralRules.name, Object.prototype.toString.call(new Intl.PluralRules()), Object.getOwnPropertyNames(Intl.PluralRules.prototype).join(), Intl.PluralRules.supportedLocalesOf(["en-US", "xx", "en-GB"])])
+=== pr_option_order
+function spy(log, names, vals) { var o = {}; names.forEach(function (n) { Object.defineProperty(o, n, { get: function () { log.push(n); return vals ? vals[n] : undefined; }, enumerable: true }); }); return o; }
+var log = [];
+var names = ["localeMatcher","type","minimumIntegerDigits","minimumFractionDigits","maximumFractionDigits","minimumSignificantDigits","maximumSignificantDigits","roundingIncrement","roundingMode","roundingPriority","trailingZeroDisplay"];
+new Intl.PluralRules("en", spy(log, names));
+JSON.stringify(log)
+=== gcl_basic
+JSON.stringify([Intl.getCanonicalLocales("EN-us"), Intl.getCanonicalLocales(["en-US", "EN-us", "en-gb"]), Intl.getCanonicalLocales("en-latn-us"), Intl.getCanonicalLocales("zh-hans-cn"), Intl.getCanonicalLocales(), Intl.getCanonicalLocales([]), Intl.getCanonicalLocales(5), Intl.getCanonicalLocales({ length: 1, 0: "en-in" }), Intl.getCanonicalLocales("fr-ca"), Intl.getCanonicalLocales("de-DE-1996"), Intl.getCanonicalLocales.length, Intl.getCanonicalLocales.name])
+=== gcl_errors
+function t(f) { try { return JSON.stringify(f()); } catch (e) { return e.name + ": " + e.message; } }
+JSON.stringify([t(function () { return Intl.getCanonicalLocales("en_US"); }), t(function () { return Intl.getCanonicalLocales(null); }), t(function () { return Intl.getCanonicalLocales(""); }), t(function () { return Intl.getCanonicalLocales([5]); }), t(function () { return Intl.getCanonicalLocales(["en", "x"]); }), t(function () { return Intl.getCanonicalLocales("en-US-US"); }), t(function () { return Intl.getCanonicalLocales("a-b-c"); })])
+=== gc_after_use
+var keep = new Intl.NumberFormat("en-IN", { style: "currency", currency: "INR" }), k = new Intl.Collator("en"), p = new Intl.PluralRules("en");
+var f = keep.format, c = k.compare; var s = 0;
+for (var i = 0; i < 200; i++) { new Intl.NumberFormat("en").format(i); new Intl.Collator("en").compare("a", "b"); new Intl.PluralRules("en").select(i); s += (i * 1234.5).toLocaleString("en-IN").length + "a".localeCompare("b"); }
+JSON.stringify([f(1234567.5), c("a", "B"), p.select(1), s])

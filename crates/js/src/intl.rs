@@ -146,7 +146,7 @@ pub fn canonical_tag(s: &str) -> Result<String, TagError> {
     while j < parts.len() {
         let s = parts[j];
         if s.len() != 1 || !alnum(s) {
-            return Err(TagError::Invalid);
+            return Err(TagError::Malformed);
         }
         let bit = 1u128 << (s.as_bytes()[0].to_ascii_lowercase() - b'0');
         if seen & bit != 0 {
