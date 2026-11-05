@@ -204,21 +204,23 @@ fn recursion_through_constructors_hits_the_call_depth_limit() {
     assert_eq!(limit_of("class A { m() { return this.m(); } } new A().m();", d, HeapLimits::default()), LimitKind::CallDepth);
     assert_eq!(limit_of("class A { get g() { return this.g; } } new A().g;", d, HeapLimits::default()), LimitKind::CallDepth);
     assert_eq!(limit_of("class A { #p = 1; get #g() { return this.#g; } m() { return this.#g; } } new A().m();", d, HeapLimits::default()), LimitKind::CallDepth);
-    assert_eq!(limit_of("class A { m() { return this.m(); } } class B extends A { m() { return super.m(); } } new B().m();", EvalLimits { max_call_depth: u32::MAX, max_traversal_depth: 768, ..d }, HeapLimits::default()), LimitKind::CallDepth);
+    // With the call ceiling of 256, the 768 native frames of this recursion end first.
+    assert_eq!(limit_of("class A { m() { return this.m(); } } class B extends A { m() { return super.m(); } } new B().m();", EvalLimits { max_call_depth: u32::MAX, max_traversal_depth: 768, ..d }, HeapLimits::default()), LimitKind::TraversalDepth);
 }
 
 #[test]
 fn a_deep_derived_chain_is_a_limit_not_a_native_stack_overflow() {
-    // C0 <- C1 <- ... <- C150: `new C150()` needs 151 nested constructions. Default derived and explicit.
+    // C0 <- C1 <- ... <- C300: `new C300()` needs 301 nested constructions. Default derived and explicit.
     let mut implicit = String::from("class C0 {}\n");
     let mut explicit = String::from("class C0 {}\n");
-    for i in 1..=150 {
+    for i in 1..=300 {
         implicit += &format!("class C{i} extends C{} {{}}\n", i - 1);
         explicit += &format!("class C{i} extends C{} {{ constructor() {{ super(); }} }}\n", i - 1);
     }
     let d = EvalLimits { max_call_depth: u32::MAX, max_traversal_depth: 768, ..Default::default() };
-    assert_eq!(limit_of(&(implicit.clone() + "new C150();"), d, HeapLimits::default()), LimitKind::CallDepth);
-    assert_eq!(limit_of(&(explicit.clone() + "new C150();"), d, HeapLimits::default()), LimitKind::CallDepth);
+    assert_eq!(limit_of(&(implicit.clone() + "new C300();"), d, HeapLimits::default()), LimitKind::CallDepth);
+    // An explicit `super()` costs more native frames per level: the 768-frame guard ends it before the call ceiling.
+    assert_eq!(limit_of(&(explicit.clone() + "new C300();"), d, HeapLimits::default()), LimitKind::TraversalDepth);
     // 60 levels fit.
     let ok = |src: String| run_case(&src);
     let short: String = implicit.lines().take(61).collect::<Vec<_>>().join("\n");

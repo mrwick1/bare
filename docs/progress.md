@@ -426,3 +426,6 @@ Live name collections, input/change handler properties and the native shadow-roo
 
 
 Submit-button clicks now dispatch a native SubmitEvent after a non-canceled click, with disabled-control checks and live form ownership. Validation and native navigation remain explicit gates. Native offset dimensions use the real cascade and bounded layout; hidden subtrees do not consume visible geometry limits. Visible shadow hosts and culled inline boxes still gate. The workspace passes 1,958 tests. A reduced cached-React input probe confirms driver input updates controlled state. The full login still stops at TraversalDepth with no form. See [resources.md](resources.md#form-activation-and-native-border-box-dimensions).
+
+
+Compound statements now run in a bounded heap-frame machine, not in native recursion. The evaluator call ceiling is 256, and SessionConfig::new selects it. The 768 native-frame guard still bounds the stack, because every call also takes a native frame. The full cached login now creates the form. It stops at the visible shadow-host geometry gate. See [resources.md](resources.md#statement-machine-and-call-ceiling).
