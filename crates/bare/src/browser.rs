@@ -23,7 +23,7 @@
 //!   `DOMException`.
 //! - Node: `nodeType nodeName nodeValue parentNode parentElement childNodes firstChild lastChild previousSibling
 //!   nextSibling ownerDocument isConnected textContent appendChild insertBefore removeChild replaceChild cloneNode
-//!   contains hasChildNodes`.
+//!   contains hasChildNodes getRootNode`.
 //! - Element: `tagName localName namespaceURI prefix getAttributeNS setAttributeNS hasAttributeNS removeAttributeNS id className getAttribute setAttribute removeAttribute hasAttribute getAttributeNames
 //!   children firstElementChild lastElementChild previousElementSibling nextElementSibling childElementCount append
 //!   prepend remove matches closest querySelector querySelectorAll` (selectors from `bare_css`).
@@ -772,6 +772,7 @@ pub(crate) static DEFS: &[Def] = &[
     Def { on: &[Node], name: "replaceChild", len: 2, kind: M(nd::replace_child) },
     Def { on: &[Node], name: "cloneNode", len: 0, kind: M(nd::clone_node) },
     Def { on: &[Node], name: "contains", len: 1, kind: M(nd::contains) },
+    Def { on: &[Node], name: "getRootNode", len: 0, kind: M(nd::get_root_node) },
     Def { on: &[Node], name: "hasChildNodes", len: 0, kind: M(nd::has_child_nodes) },
     Def { on: PARENT, name: "children", len: 0, kind: G(nd::children) },
     Def { on: PARENT, name: "firstElementChild", len: 0, kind: G(nd::first_element_child) },
