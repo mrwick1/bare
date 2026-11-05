@@ -34,11 +34,14 @@
 //! Limits ([`EvalLimits`]): steps (statements, expressions and traversed native elements), call depth (every call, native and bound
 //! too), live environments, function slots. A limit ends the run with [`Error::Limit`], never a JS value, and
 //! cannot be caught by `try`. A heap limit is [`LimitKind::Heap`].
-//! Defaults: `max_call_depth` 100 and `max_traversal_depth` 512 (`EvalLimits::default`). Hard ceilings: `max_call_depth`
-//! is clamped to 128 and `max_traversal_depth` to 768. A recursive setup or execution walk shares one frame counter,
-//! checked against `max_traversal_depth`. Native stack, measured and not a formal bound: on the test fixtures a
-//! release run at the ceilings stayed inside an 8 MiB thread, and a debug run inside 64 MiB. Run on a thread with at
-//! least 8 MiB (release) or 64 MiB (debug). Samples do not prove a general stack-safety bound.
+//! Defaults: `max_call_depth` 100, `max_traversal_depth` 512 and `max_statement_frames` 512 (`EvalLimits::default`). Hard ceilings:
+//! `max_call_depth` is clamped to 128, `max_traversal_depth` to 768 and `max_statement_frames` to 768. Two different things are
+//! counted. `max_traversal_depth` bounds NATIVE recursion (expressions, patterns, calls, constructors, the setup walk, `exec`).
+//! `max_statement_frames` bounds the pending control frames of blocks, loops, `switch`, `try` and labels, which live on the heap
+//! in the statement machine (`eval_statements.rs`), all synchronous calls together. A statement frame is not a native frame.
+//! Native stack, measured and not a formal bound: on the test fixtures a release run at the ceilings stayed inside an 8 MiB
+//! thread, and a debug run inside 64 MiB. Run on a thread with at least 8 MiB (release) or 64 MiB (debug). Samples do not
+//! prove a general stack-safety bound.
 //!
 //! Known deviations, on purpose (each is a gate, not a silent skip):
 //! - One environment per call holds parameters, `arguments`, `var`s and the body's `let`/`const`.
@@ -71,8 +74,11 @@ pub struct EvalLimits {
     pub max_steps: u64,
     /// Clamped to 128. The default is 100.
     pub max_call_depth: u32,
-    /// Recursive setup and execution walks, shared. Clamped to 768. The default is 512.
+    /// Native recursion: expressions, patterns, calls, constructors, setup walks and `exec`, shared. Clamped to 768. The default is 512.
     pub max_traversal_depth: u32,
+    /// Pending statement control frames (blocks, loops, `switch`, `try`, labels) of all synchronous calls together. Heap, not
+    /// native stack. Clamped to 768. The default is 512. Zero refuses the first body.
+    pub max_statement_frames: u32,
     /// Live environments (scopes). Environments that no closure captured are freed on scope exit.
     pub max_envs: usize,
     /// Function objects the evaluator tracks (closures, natives, bound functions).
@@ -87,7 +93,7 @@ pub struct EvalLimits {
 
 impl Default for EvalLimits {
     fn default() -> Self {
-        EvalLimits { max_steps: 100_000_000, max_call_depth: 100, max_traversal_depth: 512, max_envs: 1 << 20, max_functions: 1 << 20, max_scripts: 4096, max_script_source: 64 << 20, max_script_nodes: 8 << 20 }
+        EvalLimits { max_steps: 100_000_000, max_call_depth: 100, max_traversal_depth: 512, max_statement_frames: 512, max_envs: 1 << 20, max_functions: 1 << 20, max_scripts: 4096, max_script_source: 64 << 20, max_script_nodes: 8 << 20 }
     }
 }
 
@@ -96,6 +102,8 @@ pub enum LimitKind {
     Steps,
     CallDepth,
     TraversalDepth,
+    /// Pending statement control frames (see [`EvalLimits::max_statement_frames`]).
+    StatementFrames,
     Envs,
     Functions,
     /// Microtask queue length.
@@ -376,6 +384,10 @@ pub struct Interp<'p> {
     step_limit: u64,
     depth: u32,
     frames: u32,
+    /// Pending control frames of all synchronous calls together (see `eval_statements.rs`).
+    stmt_frames: u32,
+    /// Empty frame buffers of finished machine runs, reused to save an allocation per call (see `eval_statements.rs`).
+    sf_pool: Vec<Vec<SFrame>>,
     ran: bool,
     // names and caches filled by the first walk
     name_map: FxMap<String, u32>,
@@ -483,6 +495,7 @@ impl<'p> Interp<'p> {
         Self::check_code_limits(&prog, &limits)?;
         limits.max_call_depth = limits.max_call_depth.min(128);
         limits.max_traversal_depth = limits.max_traversal_depth.min(768);
+        limits.max_statement_frames = limits.max_statement_frames.min(768);
         if limits.max_envs == 0 { return Err(Error::Limit(LimitKind::Envs)); }
         macro_rules! e {
             ($x:expr) => {
@@ -526,6 +539,8 @@ impl<'p> Interp<'p> {
             step_limit: 0,
             depth: 0,
             frames: 0,
+            stmt_frames: 0,
+            sf_pool: Vec::new(),
             ran: false,
             name_map: FxMap::default(),
             names: vec![String::new()],
@@ -678,7 +693,7 @@ impl<'p> Interp<'p> {
     /// Free unreachable environments and function entries, then `Heap::collect`. `extra` are the values
     /// the host still holds (results, thrown values). Refused while a call is active.
     pub fn collect(&mut self, extra: &[Value]) -> Result<Collected, Error> {
-        if self.depth != 0 {
+        if self.depth != 0 || self.stmt_frames != 0 {
             return Err(unsupported("collect during a call", Span::default()));
         }
         let mut seen: FxSet<ObjId> = FxSet::default();
@@ -2603,31 +2618,6 @@ impl<'p> Interp<'p> {
 
     // ------------------------------------------------------------ statements
 
-    fn exec_list(&mut self, l: List<Stmt>) -> Ex {
-        let prog = self.prog.clone();
-        for s in prog.list(l) {
-            self.exec(s)?;
-        }
-        Ok(())
-    }
-
-    /// Run `body` in a new environment when `needs` (frees it afterwards, restores the old one).
-    fn exec_block(&mut self, l: List<Stmt>) -> Ex {
-        if !self.has_lexical(l) {
-            return self.exec_list(l);
-        }
-        let saved = self.env;
-        let env = self.new_env(saved, false)?;
-        self.env = env;
-        let r = match self.declare_scope(l, false) {
-            Ok(()) => self.exec_list(l),
-            Err(e) => Err(Ctl::Err(e)),
-        };
-        self.env = saved;
-        self.release(env);
-        r
-    }
-
     fn loop_step(r: Ex, labels: &[u32]) -> Result<bool, Ctl> {
         match r {
             Ok(()) => Ok(true),
@@ -2635,189 +2625,6 @@ impl<'p> Interp<'p> {
             Err(Ctl::Continue(l)) if l == 0 || labels.contains(&l) => Ok(true),
             Err(c) => Err(c),
         }
-    }
-
-    fn exec(&mut self, s: StmtId) -> Ex {
-        self.descend(|it| it.exec_inner(s))
-    }
-
-    fn exec_inner(&mut self, s: StmtId) -> Ex {
-        self.tick()?;
-        let prog = self.prog.clone();
-        let st = *prog.stmt(s);
-        let top = self.depth == 0;
-        // Only a label directly on a loop or switch is its own. Any other statement ends the label list.
-        if !matches!(st.kind, StmtKind::Labeled { .. } | StmtKind::While { .. } | StmtKind::DoWhile { .. } | StmtKind::For { .. } | StmtKind::ForIn { .. } | StmtKind::ForOf { .. } | StmtKind::Switch { .. }) {
-            self.pending_labels.clear();
-        }
-        match st.kind {
-            StmtKind::Expr(e) | StmtKind::Directive(e) => {
-                let v = self.eval_expr(e)?;
-                if top {
-                    self.completion = v;
-                }
-            }
-            StmtKind::Var { kind, decls } => {
-                for d in prog.list(decls) {
-                    let d = *prog.decl(d);
-                    let name = if let PatKind::Ident = prog.pat(d.target).kind { Some(self.name_str(self.pat_name[d.target.index()])?) } else { None };
-                    match (kind, d.init) {
-                        (VarKind::Var, None) => {}
-                        (VarKind::Var, Some(i)) => {
-                            let v = self.eval_named(i, name)?;
-                            self.bind_pattern(d.target, v, Bind::Assign)?;
-                        }
-                        (_, init) => {
-                            let v = match init {
-                                Some(i) => self.eval_named(i, name)?,
-                                None => Value::Undefined,
-                            };
-                            self.bind_pattern(d.target, v, Bind::Init)?;
-                        }
-                    }
-                }
-            }
-            StmtKind::Function(fid) => self.annex_b(fid)?,
-            StmtKind::Class(c) => self.exec_class_decl(c)?,
-            StmtKind::Return(e) => {
-                let v = match e {
-                    Some(e) => self.eval_expr(e)?,
-                    None => Value::Undefined,
-                };
-                self.ret = v;
-                return Err(Ctl::Return);
-            }
-            StmtKind::If { test, cons, alt } => {
-                if top {
-                    self.completion = Value::Undefined;
-                }
-                let t = self.eval_expr(test)?;
-                if self.truthy(t)? {
-                    self.exec(cons)?;
-                } else if let Some(a) = alt {
-                    self.exec(a)?;
-                }
-            }
-            StmtKind::While { test, body } => {
-                let labels = std::mem::take(&mut self.pending_labels);
-                if top {
-                    self.completion = Value::Undefined;
-                }
-                loop {
-                    self.tick()?;
-                    let t = self.eval_expr(test)?;
-                    if !self.truthy(t)? || !Self::loop_step(self.exec(body), &labels)? {
-                        break;
-                    }
-                }
-            }
-            StmtKind::DoWhile { body, test } => {
-                let labels = std::mem::take(&mut self.pending_labels);
-                if top {
-                    self.completion = Value::Undefined;
-                }
-                loop {
-                    self.tick()?;
-                    if !Self::loop_step(self.exec(body), &labels)? {
-                        break;
-                    }
-                    let t = self.eval_expr(test)?;
-                    if !self.truthy(t)? {
-                        break;
-                    }
-                }
-            }
-            StmtKind::For { init, test, update, body } => {
-                let labels = std::mem::take(&mut self.pending_labels);
-                if top {
-                    self.completion = Value::Undefined;
-                }
-                let saved = self.env;
-                let r = self.exec_for(init, test, update, body, &labels);
-                let cur = self.env;
-                self.env = saved;
-                if cur != saved {
-                    self.release(cur);
-                }
-                r?;
-            }
-            StmtKind::ForIn { left, right, body } | StmtKind::ForOf { left, right, body, .. } => {
-                let labels = std::mem::take(&mut self.pending_labels);
-                if top {
-                    self.completion = Value::Undefined;
-                }
-                let is_of = matches!(st.kind, StmtKind::ForOf { .. });
-                let saved = self.env;
-                let r = self.exec_for_each(left, right, body, is_of, &labels);
-                self.env = saved;
-                r?;
-            }
-            StmtKind::Break(l) => return Err(Ctl::Break(if l.is_some() { self.stmt_label[s.index()] } else { 0 })),
-            StmtKind::Continue(l) => return Err(Ctl::Continue(if l.is_some() { self.stmt_label[s.index()] } else { 0 })),
-            StmtKind::Throw(e) => {
-                let v = self.eval_expr(e)?;
-                return Err(Ctl::Err(Error::Throw(v)));
-            }
-            StmtKind::Try { block, handler, finalizer } => {
-                if top {
-                    self.completion = Value::Undefined;
-                }
-                let (env, strict) = (self.env, self.strict);
-                let mut r = self.exec(block);
-                if let (Err(Ctl::Err(Error::Throw(v))), Some(c)) = (&r, handler) {
-                    let v = *v;
-                    self.env = env;
-                    self.strict = strict;
-                    r = self.exec_catch(*prog.catch(c), v);
-                }
-                if let Some(f) = finalizer {
-                    if let Err(Ctl::Err(e)) = &r
-                        && !matches!(e, Error::Throw(_))
-                    {
-                        return r;
-                    }
-                    self.env = env;
-                    self.strict = strict;
-                    let saved_ret = self.ret;
-                    self.exec(f)?;
-                    self.ret = saved_ret;
-                }
-                return r;
-            }
-            StmtKind::Switch { disc, cases } => {
-                let labels = std::mem::take(&mut self.pending_labels);
-                if top {
-                    self.completion = Value::Undefined;
-                }
-                let d = self.eval_expr(disc)?;
-                let saved = self.env;
-                let any_lex = prog.list(cases).any(|c| self.has_lexical(prog.case(c).body));
-                let env = if any_lex { Some(self.new_env(saved, false)?) } else { None };
-                if let Some(e) = env {
-                    self.env = e;
-                }
-                let r = self.exec_switch(d, cases, any_lex, &labels);
-                self.env = saved;
-                if let Some(e) = env {
-                    self.release(e);
-                }
-                r?;
-            }
-            StmtKind::Labeled { body, .. } => {
-                let label = self.stmt_label[s.index()];
-                self.pending_labels.push(label);
-                let r = self.exec(body);
-                self.pending_labels.clear();
-                match r {
-                    Err(Ctl::Break(l)) if l == label => {}
-                    r => return r,
-                }
-            }
-            StmtKind::Block(l) => self.exec_block(l)?,
-            StmtKind::Empty | StmtKind::Debugger => {}
-            StmtKind::With { .. } => return Err(unsupported("with statement", st.span).into()),
-        }
-        Ok(())
     }
 
     /// Annex B.3.3: in sloppy code a function declared in a block is also assigned to the var of the
@@ -2841,98 +2648,6 @@ impl<'p> Interp<'p> {
             && let Some(j) = self.find_in(e, n)
         {
             self.envs[e as usize].bindings[j].value = v;
-        }
-        Ok(())
-    }
-
-    fn exec_catch(&mut self, c: Catch, v: Value) -> Ex {
-        let saved = self.env;
-        let env = self.new_env(saved, false)?;
-        self.env = env;
-        let r = (|| {
-            if let Some(p) = c.param {
-                self.bind_pattern(p, v, Bind::Declare)?;
-            }
-            self.exec(c.body)
-        })();
-        self.env = saved;
-        self.release(env);
-        r
-    }
-
-    fn exec_switch(&mut self, d: Value, cases: List<Case>, any_lex: bool, labels: &[u32]) -> Ex {
-        let prog = self.prog.clone();
-        if any_lex {
-            for c in prog.list(cases) {
-                self.declare_scope(prog.case(c).body, false)?;
-            }
-        }
-        let mut start = None;
-        for (i, c) in prog.list(cases).enumerate() {
-            if let Some(t) = prog.case(c).test {
-                let v = self.eval_expr(t)?;
-                if d.strict_equals(v) {
-                    start = Some(i);
-                    break;
-                }
-            }
-        }
-        if start.is_none() {
-            start = prog.list(cases).position(|c| prog.case(c).test.is_none());
-        }
-        let Some(start) = start else { return Ok(()) };
-        for c in prog.list(cases).skip(start) {
-            let r = self.exec_list(prog.case(c).body);
-            match r {
-                Err(Ctl::Break(l)) if l == 0 || labels.contains(&l) => return Ok(()),
-                r => r?,
-            }
-        }
-        Ok(())
-    }
-
-    fn exec_for(&mut self, init: ForInit, test: Option<ExprId>, update: Option<ExprId>, body: StmtId, labels: &[u32]) -> Ex {
-        let prog = self.prog.clone();
-        let mut per_iter = false;
-        match init {
-            ForInit::None => {}
-            ForInit::Expr(e) => {
-                self.eval_expr(e)?;
-            }
-            ForInit::Var(v) => {
-                if let StmtKind::Var { kind, decls } = prog.stmt(v).kind
-                    && kind != VarKind::Var
-                {
-                    per_iter = true;
-                    let env = self.new_env(self.env, false)?;
-                    self.env = env;
-                    for d in prog.list(decls) {
-                        self.declare_pat_lexical(prog.decl(d).target, if kind == VarKind::Let { MUT } else { 0 });
-                    }
-                }
-                self.exec(v)?;
-            }
-        }
-        loop {
-            if per_iter && self.envs[self.env as usize].captured {
-                self.copy_env()?;
-            }
-            self.tick()?;
-            if let Some(t) = test {
-                let v = self.eval_expr(t)?;
-                if !self.truthy(v)? {
-                    break;
-                }
-            }
-            if !Self::loop_step(self.exec(body), labels)? {
-                break;
-            }
-            if per_iter && self.envs[self.env as usize].captured {
-                self.copy_env()?;
-            }
-            if let Some(u) = update {
-                self.eval_expr(u)?;
-            }
         }
         Ok(())
     }
@@ -3076,6 +2791,7 @@ fn num_base(t: &str) -> NumBase {
     NumBase::Decimal
 }
 
+include!("eval_statements.rs");
 include!("eval_native.rs");
 include!("eval_promise.rs");
 include!("eval_promise_combinators.rs");
@@ -3187,3 +2903,7 @@ mod reflect_tests;
 #[cfg(test)]
 #[path = "eval_depth_tests.rs"]
 mod depth_tests;
+
+#[cfg(test)]
+#[path = "eval_statements_tests.rs"]
+mod statements_tests;

@@ -1,0 +1,132 @@
+# bare-js statement machine cases. A case starts with `=== name`. Same format and oracle as eval-cases.txt.
+# Tiny authored programs for blocks, loops, switch, try, labels, closures, IteratorClose and callbacks. Never a bundle.
+=== block_nested_shadow
+var o = []; let a = 1; { let a = 2; { let a = 3; o.push(a); } o.push(a); } o.push(a); o.join()
+=== block_tdz
+var r; { try { x; r = "no"; } catch (e) { r = e.name; } let x = 1; } r
+=== block_function_hoist
+var r = typeof f; { function f() { return 1; } } r + "," + typeof f
+=== if_else_chain
+function k(n) { if (n < 0) return "neg"; else if (n === 0) return "zero"; else { return "pos"; } } [k(-1), k(0), k(5)].join()
+=== while_continue_break
+var s = 0, i = 0; while (i < 10) { i++; if (i % 2) continue; if (i > 8) break; s += i; } s + "," + i
+=== do_while_runs_once
+var n = 0; do { n++; } while (false); do n += 10; while (n < 30); n
+=== do_while_continue_test
+var n = 0, c = 0; do { n++; if (n < 3) continue; c++; } while (n < 5); n + "," + c
+=== for_let_closures
+var fs = []; for (let i = 0; i < 3; i++) fs.push(function () { return i; }); fs.map(function (f) { return f(); }).join()
+=== for_let_closure_in_update
+var fs = []; for (let i = 0; i < 3; fs.push(function () { return i; }), i++); fs.map(function (f) { return f(); }).join()
+=== for_let_closure_continue
+var fs = []; for (let i = 0; i < 5; i++) { if (i % 2) continue; fs.push(function () { return i; }); } fs.map(function (f) { return f(); }).join()
+=== for_var_shared
+var fs = []; for (var i = 0; i < 3; i++) fs.push(function () { return i; }); fs.map(function (f) { return f(); }).join()
+=== for_empty_parts
+var n = 0; for (;;) { if (++n > 4) break; } n
+=== for_const_init_throws_on_update
+var r; try { for (const i = 0; i < 2; i++) {} } catch (e) { r = e.name; } r
+=== for_init_tdz
+var r; try { for (let i = i; ;) { break; } } catch (e) { r = e.name; } r
+=== for_in_keys
+var o = { a: 1, b: 2, c: 3 }, k = []; for (var p in o) { if (p === "b") continue; k.push(p); } k.join()
+=== for_of_array_closures
+var fs = []; for (let v of [1, 2, 3]) fs.push(function () { return v; }); fs.map(function (f) { return f(); }).join()
+=== labeled_continue_outer
+var o = []; outer: for (var i = 0; i < 3; i++) { for (var j = 0; j < 3; j++) { if (j === 1) continue outer; o.push(i + "" + j); } } o.join()
+=== labeled_break_outer
+var o = []; outer: for (var i = 0; i < 3; i++) { for (var j = 0; j < 3; j++) { if (i === 1) break outer; o.push(i + "" + j); } } o.join()
+=== labeled_block_break
+var o = []; a: { o.push(1); b: { o.push(2); break a; } o.push(3); } o.push(4); o.join()
+=== labeled_while_and_do
+var n = 0; a: while (true) { b: do { n++; if (n < 3) continue a; break a; } while (true); } n
+=== labeled_not_on_loop
+var n = 0; a: { b: for (;;) { n++; if (n > 2) break a; continue b; } } n
+=== labeled_switch_break
+var o = []; s: switch (1) { case 1: o.push("a"); break s; case 2: o.push("b"); } o.join()
+=== switch_fallthrough_default_middle
+function k(n) { var o = []; switch (n) { case 1: o.push("one"); default: o.push("def"); case 2: o.push("two"); break; case 3: o.push("three"); } return o.join("+"); } [k(1), k(2), k(3), k(9)].join()
+=== switch_lexical_scope
+var r = []; switch (2) { case 1: let z = 1; case 2: try { z; } catch (e) { r.push(e.name); } z = 5; } r.join()
+=== switch_continue_in_loop
+var o = []; for (var i = 0; i < 4; i++) { switch (i) { case 1: continue; case 2: break; default: o.push("d" + i); } o.push("e" + i); } o.join()
+=== switch_strict_compare
+var o = []; switch ("1") { case 1: o.push("num"); break; case "1": o.push("str"); } o.join()
+=== switch_nested_break_inner_only
+var o = []; switch (1) { case 1: switch (2) { case 2: o.push("in"); break; } o.push("out"); break; case 3: o.push("never"); } o.join()
+=== switch_case_throws_before_match
+var r; try { switch (1) { case (function () { throw new RangeError("t"); })(): break; } } catch (e) { r = e.name; } r
+=== try_catch_basic
+var r; try { throw new TypeError("m"); } catch (e) { r = e.name + ":" + e.message; } r
+=== try_catch_param_assignable
+var r; try { throw 1; } catch (e) { e = e + 1; r = e; } r
+=== try_catch_scope
+var e = "outer", r; try { throw "inner"; } catch (e) { r = e; } r + "," + e
+=== try_finally_order
+var o = []; try { o.push("t"); } finally { o.push("f"); } o.join()
+=== finally_overrides_return
+function f() { try { return "try"; } finally { return "fin"; } } f()
+=== finally_normal_keeps_return
+var o = []; function f() { try { return "try"; } finally { o.push("fin"); } } f() + "," + o.join()
+=== finally_overrides_throw
+function f() { try { throw new Error("a"); } finally { return "swallowed"; } } f()
+=== finally_throw_replaces_throw
+var r; try { try { throw new Error("a"); } finally { throw new TypeError("b"); } } catch (e) { r = e.name + e.message; } r
+=== finally_break_overrides_return
+function f() { for (;;) { try { return "ret"; } finally { break; } } return "after"; } f()
+=== finally_continue_overrides_throw
+var o = []; for (var i = 0; i < 3; i++) { try { throw i; } finally { o.push("f" + i); continue; } } o.join()
+=== finally_return_value_restored
+function f() { var x = 1; try { return x; } finally { x = 2; g(); } function g() { return "other"; } } f()
+=== finally_nested_returns
+var o = []; function f() { try { try { return "a"; } finally { o.push("in"); } } finally { o.push("out"); } } f() + "," + o.join()
+=== catch_rethrow_finally_order
+var o = []; try { try { throw 1; } catch (e) { o.push("c" + e); throw e + 1; } finally { o.push("f"); } } catch (e2) { o.push("o" + e2); } o.join()
+=== catch_in_loop_with_break
+var o = []; for (var i = 0; i < 5; i++) { try { if (i === 2) throw i; o.push(i); } catch (e) { break; } finally { o.push("f" + i); } } o.join()
+=== try_return_in_catch_runs_finally
+var o = []; function f() { try { throw 1; } catch (e) { return "c"; } finally { o.push("f"); } } f() + o.join()
+=== catch_binding_error_runs_finally
+var o = []; try { try { throw 1; } catch (e) { undefinedName; } finally { o.push("f"); } } catch (x) { o.push(x.name); } o.join()
+=== try_deep_nesting
+var d = 0; function f(n) { if (n === 0) return "bottom"; try { try { { return f(n - 1); } } finally { d++; } } catch (e) { return "caught"; } } f(30) + d
+=== resource_error_skips_finally
+var x = 0; try { while (true) { x++; } } finally { x = -1; } 1
+=== resource_error_skips_catch
+var x = 0; try { for (;;) { x++; } } catch (e) { x = -1; } 1
+=== forof_close_on_break
+var log = []; var it = { [Symbol.iterator]() { return { i: 0, next() { return { value: this.i++, done: false }; }, return() { log.push("close"); return {}; } }; } }; for (var v of it) { if (v === 2) break; log.push(v); } log.join()
+=== forof_close_on_return
+var log = []; var it = { [Symbol.iterator]() { return { i: 0, next() { return { value: this.i++, done: false }; }, return() { log.push("close"); return {}; } }; } }; function f() { for (var v of it) { if (v === 1) return "r" + v; } } f() + log.join()
+=== forof_close_on_throw
+var log = []; var it = { [Symbol.iterator]() { return { i: 0, next() { return { value: this.i++, done: false }; }, return() { log.push("close"); return {}; } }; } }; try { for (var v of it) { throw new Error("x"); } } catch (e) { log.push(e.message); } log.join()
+=== forof_no_close_on_exhaustion
+var log = []; var it = { [Symbol.iterator]() { return { i: 0, next() { return { value: this.i, done: this.i++ > 1 }; }, return() { log.push("close"); return {}; } }; } }; for (var v of it) log.push(v); log.join()
+=== forof_labeled_continue_closes_inner
+var log = []; function mk(n) { return { [Symbol.iterator]() { return { i: 0, next() { return { value: this.i++, done: false }; }, return() { log.push("close" + n); return {}; } }; } }; } var c = 0; outer: for (var a of mk("A")) { for (var b of mk("B")) { if (c++ >= 3) break outer; continue outer; } } log.join()
+=== forof_body_try_finally_break
+var log = []; var it = { [Symbol.iterator]() { return { i: 0, next() { return { value: this.i++, done: false }; }, return() { log.push("close"); return {}; } }; } }; for (var v of it) { try { if (v === 1) break; } finally { log.push("f" + v); } } log.join()
+=== forof_close_throw_masks_nothing_on_throw
+var r; var it = { [Symbol.iterator]() { return { next() { return { value: 1, done: false }; }, return() { throw new Error("close"); } }; } }; try { for (var v of it) { throw new TypeError("body"); } } catch (e) { r = e.message; } r
+=== forof_close_throw_on_break
+var r; var it = { [Symbol.iterator]() { return { next() { return { value: 1, done: false }; }, return() { throw new Error("close"); } }; } }; try { for (var v of it) { break; } } catch (e) { r = e.message; } r
+=== class_method_callbacks
+class A { constructor() { this.out = []; } run(xs) { var self = this; xs.forEach(function (x) { for (var i = 0; i < x; i++) { try { if (i === 1) throw i; self.out.push(x + ":" + i); } catch (e) { self.out.push("c" + e); } finally { self.out.push("f"); } } }); return this.out.join(); } } new A().run([1, 2])
+=== class_super_with_loops
+class A { m(n) { var s = 0; for (var i = 0; i < n; i++) { if (i === 2) continue; s += i; } return s; } } class B extends A { m(n) { switch (n) { case 5: return super.m(n) + 100; default: return super.m(n); } } } [new B().m(5), new B().m(3)].join()
+=== class_static_and_getter_statements
+class A { static s(n) { a: for (;;) { for (;;) { if (n-- < 0) break a; } } return n; } get g() { try { return 1; } finally { this.x = 2; } } } var a = new A(); [A.s(3), a.g, a.x].join()
+=== callback_returns_through_loops
+function find(xs, p) { for (var i = 0; i < xs.length; i++) { if (p(xs[i])) return i; } return -1; } [find([1, 2, 3], function (x) { for (;;) { return x > 1; } }), find([1], function () { try { return false; } finally { } })].join()
+=== recursion_with_blocks
+function f(n) { if (n === 0) return 0; { let k = n; { return k + f(n - 1); } } } f(40)
+=== closure_captures_block_env
+var fs = []; for (var i = 0; i < 3; i++) { let j = i * 2; { let k = j + 1; fs.push(function () { return j + "," + k; }); } } fs.map(function (f) { return f(); }).join("|")
+=== arguments_in_nested_statements
+function f() { var o = []; for (var i = 0; i < arguments.length; i++) { switch (typeof arguments[i]) { case "number": o.push("n"); break; default: o.push("o"); } } return o.join(); } f(1, "a", 2)
+=== long_flat_list
+var s = 0; { s += 1; s += 2; s += 3; { s += 4; } s += 5; } s
+=== completion_if_loop
+var a = 1; if (a) { 2; } 3
+=== return_value_through_many_frames
+function f() { a: for (;;) { switch (1) { case 1: try { { return "deep"; } } finally { } } } } f()

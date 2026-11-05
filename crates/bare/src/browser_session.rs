@@ -89,7 +89,7 @@ impl SessionConfig {
             fetch: FetchLimits::default(),
             limits: SessionLimits::default(),
             browser: BrowserLimits::default(),
-            eval: EvalLimits { max_traversal_depth: 768, max_call_depth: 128, ..Default::default() },
+            eval: EvalLimits { max_traversal_depth: 768, max_call_depth: 128, max_statement_frames: 768, ..Default::default() },
             heap: HeapLimits::default(),
             viewport: None,
             virtual_clock: false,
