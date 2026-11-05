@@ -437,8 +437,11 @@ impl<'p> Interp<'p> {
                 Err(c) => SAct::Leave(Err(c)),
             },
             SFrame::DoWhile { body, test, labels } => match Self::loop_step(r, labels) {
-                Ok(true) => match self.test_true(*test).and_then(|t| self.tick().map(|_| t)) {
-                    Ok(true) => SAct::Go(SGo::Stmt(*body)),
+                Ok(true) => match self.test_true(*test) {
+                    Ok(true) => match self.tick() {
+                        Ok(()) => SAct::Go(SGo::Stmt(*body)),
+                        Err(e) => SAct::Leave(Err(e.into())),
+                    },
                     Ok(false) => SAct::Leave(Ok(())),
                     Err(e) => SAct::Leave(Err(e.into())),
                 },

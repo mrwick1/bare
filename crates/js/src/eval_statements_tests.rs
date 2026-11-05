@@ -319,3 +319,20 @@ fn a_realm_survives_a_frame_fault_and_runs_the_next_script() {
         assert_eq!(it.run_script("var z = 0; { { z = 7 } } z").map(|v| it.display(v)).unwrap(), "7");
     });
 }
+
+
+#[test]
+fn terminating_a_do_while_does_not_charge_an_extra_iteration() {
+    real_stack(|| {
+        fn steps(src: &str) -> u64 {
+            let prog = crate::parse::parse_script(src, Default::default()).unwrap();
+            let mut it = Interp::new(&prog, Heap::default(), lim(768)).unwrap();
+            it.begin();
+            let before = it.steps;
+            assert!(it.exec(prog.list(prog.body).next().unwrap()).is_ok());
+            it.steps - before
+        }
+        // Each loop enters once. The false literal costs one expression step; break costs one statement step.
+        assert_eq!(steps("do {} while (false)"), steps("do { break } while (true)"));
+    });
+}
