@@ -27,6 +27,9 @@ pub enum Event {
     PointerButton { x: f64, y: f64, button: u8, buttons: u16, pressed: bool, mods: Mods },
     /// The pointer left the window.
     PointerLeave,
+    /// The wheel or a touchpad scrolled. `dx` and `dy` are CSS pixels, positive to the right and down (as DOM `deltaX` and
+    /// `deltaY`). A wheel notch is `WHEEL_TICK_PX`; a touchpad gives its own pixels. One event for each pointer frame.
+    Wheel { x: f64, y: f64, dx: f64, dy: f64, mods: Mods },
     /// A key went down or up. `key` and `code` are the DOM `KeyboardEvent` values. `text` is what the key types (only
     /// for a press), `None` for a key with no text and when ctrl or alt or logo is held.
     Key { key: String, code: &'static str, pressed: bool, repeat: bool, text: Option<String>, mods: Mods },
@@ -43,14 +46,31 @@ pub enum Cursor {
     Text,
 }
 
+/// CSS pixels for one notch of a mouse wheel (`value120` of 120). To verify against Chrome on a real wheel: see `docs/resources.md`,
+/// "Scrolling".
+pub const WHEEL_TICK_PX: f64 = 53.0;
+
+/// The pixels of one pointer frame of axis events. `value120`: the high-resolution wheel steps (120 is one notch), `discrete`:
+/// the old whole notches, `absolute`: the pixel value that the compositor gives (a touchpad, or a wheel with no steps).
+pub fn wheel_px(value120: i32, discrete: i32, absolute: f64) -> f64 {
+    if value120 != 0 {
+        value120 as f64 / 120.0 * WHEEL_TICK_PX
+    } else if discrete != 0 {
+        discrete as f64 * WHEEL_TICK_PX
+    } else {
+        absolute
+    }
+}
+
 /// The DOM `MouseEvent.button` for a Linux button code (`BTN_LEFT` is 0x110), or `None` for a button we do not map.
 pub fn button_of(linux: u32) -> Option<u8> {
     match linux {
         0x110 => Some(0),
         0x112 => Some(1),
         0x111 => Some(2),
-        0x116 => Some(3),
-        0x115 => Some(4),
+        // `BTN_SIDE` and `BTN_BACK` go back, `BTN_EXTRA` and `BTN_FORWARD` go forward (X buttons 8 and 9).
+        0x113 | 0x116 => Some(3),
+        0x114 | 0x115 => Some(4),
         _ => None,
     }
 }
@@ -321,6 +341,8 @@ mod tests {
         assert_eq!(button_of(0x111), Some(2));
         assert_eq!(button_of(0x112), Some(1));
         assert_eq!(button_of(0x999), None);
+        assert_eq!((button_of(0x113), button_of(0x116)), (Some(3), Some(3)), "the back buttons");
+        assert_eq!((button_of(0x114), button_of(0x115)), (Some(4), Some(4)), "the forward buttons");
         assert_eq!((button_bit(0), button_bit(1), button_bit(2)), (1, 4, 2));
     }
 
@@ -369,5 +391,14 @@ mod tests {
         assert!(!repeats("ControlRight"));
         assert!(repeats("KeyA"));
         assert!(repeats("Backspace"));
+    }
+
+    #[test]
+    fn a_wheel_notch_is_53_px_and_a_touchpad_gives_its_pixels() {
+        assert_eq!(wheel_px(120, 0, 15.0), 53.0, "one notch in value120");
+        assert_eq!(wheel_px(-240, 0, -30.0), -106.0);
+        assert!((wheel_px(30, 0, 3.75) - 13.25).abs() < 1e-9, "a quarter of a notch from a high-resolution wheel");
+        assert_eq!(wheel_px(0, 2, 20.0), 106.0, "an old compositor: whole notches");
+        assert_eq!(wheel_px(0, 0, 7.5), 7.5, "a touchpad: pixels as given");
     }
 }

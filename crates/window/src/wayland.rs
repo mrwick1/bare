@@ -29,7 +29,7 @@ use smithay_client_toolkit::reexports::client::{
 use smithay_client_toolkit::seat::{
     Capability, SeatHandler, SeatState,
     keyboard::{KeyEvent, KeyboardHandler, Keysym, Modifiers, RawModifiers, RepeatInfo},
-    pointer::{CursorIcon, PointerEvent, PointerEventKind, PointerHandler, ThemeSpec, ThemedPointer},
+    pointer::{AxisScroll, CursorIcon, PointerEvent, PointerEventKind, PointerHandler, ThemeSpec, ThemedPointer},
 };
 use smithay_client_toolkit::{
     compositor::{CompositorHandler, CompositorState, FrameCallbackData},
@@ -461,6 +461,9 @@ impl SeatHandler for State {
 
 impl PointerHandler for State {
     fn pointer_frame(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_pointer::WlPointer, events: &[PointerEvent]) {
+        // The axis events of this frame add up to one wheel event: a notch can arrive as `value120`, `discrete` and `absolute`.
+        let (mut h, mut v) = (AxisScroll::default(), AxisScroll::default());
+        let mut wheel_at = None;
         for e in events {
             if &e.surface != self.window.wl_surface() {
                 continue;
@@ -486,8 +489,20 @@ impl PointerHandler for State {
                     }
                     self.pending.push(Event::PointerButton { x, y, button: b, buttons: self.buttons, pressed, mods: self.mods });
                 }
-                // Scrolling is S4 topic 5.
-                PointerEventKind::Axis { .. } => {}
+                PointerEventKind::Axis { horizontal, vertical, .. } => {
+                    for (sum, a) in [(&mut h, horizontal), (&mut v, vertical)] {
+                        sum.absolute += a.absolute;
+                        sum.discrete += a.discrete;
+                        sum.value120 += a.value120;
+                    }
+                    wheel_at = Some((x, y));
+                }
+            }
+        }
+        if let Some((x, y)) = wheel_at {
+            let (dx, dy) = (input::wheel_px(h.value120, h.discrete, h.absolute), input::wheel_px(v.value120, v.discrete, v.absolute));
+            if dx != 0.0 || dy != 0.0 {
+                self.pending.push(Event::Wheel { x, y, dx, dy, mods: self.mods });
             }
         }
     }
