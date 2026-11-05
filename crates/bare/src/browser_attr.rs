@@ -700,3 +700,17 @@ impl Dom {
         t.attrs.contains_key(&o) || t.maps.contains_key(&o)
     }
 }
+
+/// Counters for tests and the load tool.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct AttrStats {
+    pub attrs: usize,
+    pub maps: usize,
+}
+
+impl Browser {
+    pub fn attr_stats(&self) -> AttrStats {
+        let s = self.dom.attr.s.borrow();
+        AttrStats { attrs: s.attrs.len(), maps: s.maps.len() }
+    }
+}

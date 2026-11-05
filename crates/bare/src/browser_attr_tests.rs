@@ -134,7 +134,7 @@ fn attr_fields_come_from_the_native_name_and_namespace() {
     big(|| {
         let mut b = browser();
         ok(&mut b, &format!("var s = document.createElementNS('{SVG}', 'svg'); s.setAttributeNS('{XLINK}', 'xlink:href', '#a'); s.setAttributeNS('{XML}', 'xml:lang', 'en'); s.setAttributeNS('{XMLNS}', 'xmlns:xlink', '{XLINK}'); s.setAttributeNS('{XMLNS}', 'xmlns', '{SVG}'); s.setAttribute('viewBox', '0 0 1 1'); s.setAttribute('a:b', 'c'); var m = s.attributes; Array.prototype.map.call(m, function (a) {{ return [a.name, a.localName, a.prefix, a.namespaceURI, a.value].join('~'); }}).join('\\n')"),
-            &format!("xlink:href~href~xlink~{XLINK}~#a\nxml:lang~lang~xml~{XML}~en\nxmlns:xlink~xlink~xmlns~{XMLNS}~{XLINK}\nxmlns~xmlns~~{XMLNS}~{SVG}\nviewBox~viewBox~~~0 0 1 1\na:b~a:b~~~c"));
+            format!("xlink:href~href~xlink~{XLINK}~#a\nxml:lang~lang~xml~{XML}~en\nxmlns:xlink~xlink~xmlns~{XMLNS}~{XLINK}\nxmlns~xmlns~~{XMLNS}~{SVG}\nviewBox~viewBox~~~0 0 1 1\na:b~a:b~~~c"));
         ok(&mut b, "var a = s.getAttributeNode('viewBox'); [a.nodeType, a.nodeName, a.nodeValue, a.textContent, a.specified, a.isConnected, a.parentNode, a.firstChild, a.childNodes.length, a.hasChildNodes()].join()", "2,viewBox,0 0 1 1,0 0 1 1,true,false,,,0,false");
         ok(&mut b, "a.nodeValue = 'x'; var x1 = s.getAttribute('viewBox'); a.textContent = null; [x1, s.getAttribute('viewBox') === '', a.value === ''].join()", "x,true,true");
         ok(&mut b, "a.value = undefined; s.getAttribute('viewBox')", "undefined");

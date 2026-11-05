@@ -1295,7 +1295,7 @@ impl Heap {
         while let Some(c) = p {
             let po = self.obj(c)?;
             // A view prototype has integer-indexed keys that are not stored in `elems` (any length, even 0).
-            if !po.elems.is_empty() || po.props.index_keys != 0 || (po.exotic && self.virtual_len(c) != 0) {
+            if !po.elems.is_empty() || po.props.index_keys != 0 || po.exotic {
                 return Ok(None);
             }
             p = po.proto;

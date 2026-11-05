@@ -43,9 +43,9 @@
 //!   snapshot arrays, not live `NodeList`/`HTMLCollection`.
 //! - A JS string with a lone surrogate cannot be stored in the UTF-8 document: `Error::Unsupported`. Valid pairs round-trip.
 //! - Namespaces are in `browser_namespace.rs` (read its header): HTML, SVG and MathML elements, attributes in no namespace, XML,
-//!   XMLNS and XLink. Any other namespace is `Unsupported`. Shadow DOM is absent. `new Document()`, `DocumentFragment`, `innerHTML`, `outerHTML`, `attributes`,
+//!   XMLNS and XLink. Any other namespace is `Unsupported`. Shadow DOM is absent. `new Document()`, `DocumentFragment`, `innerHTML`, `outerHTML`,
 //!   `dataset`, `style`, `before/after/replaceWith`, layout APIs, `location` and
-//!   network are absent. Timers, `queueMicrotask`, `performance.now` and `MessageChannel` are in `browser_scheduler.rs`.
+//!   network are absent. Timers, `queueMicrotask`, `performance.now` and `MessageChannel` are in `browser_scheduler.rs`. `Element.attributes` and `Attr` are in `browser_attr.rs`.
 //! - `addEventListener` option `signal` is `Unsupported`. `isTrusted` is always false. Events made by the test driver
 //!   are plain `Event`s (no `MouseEvent`/`InputEvent` fields).
 //! - Focus (`browser_focus.rs`): `focus()`, `blur()`, `document.activeElement`, `FocusEvent`. Read its header.

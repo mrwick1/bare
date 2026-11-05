@@ -17,7 +17,7 @@
 //!
 //! Not supported (explicit, never faked):
 //! - Any other namespace, and a null namespace for an element. MathML has no `MathMLElement`: its wrappers are plain `Element`s.
-//! - `Attr` nodes (`attributes`, `getAttributeNode`), `setAttributeNode`, and the namespace lookup methods (`lookupNamespaceURI`).
+//! - (Moved) `Attr` nodes, `Element.attributes`, `getAttributeNode(NS)`, `setAttributeNode(NS)`, `removeAttributeNode` and `createAttribute(NS)` live in `browser_attr.rs` (read its header). The namespace lookup methods (`lookupNamespaceURI`) are not supported.
 //! - SVG drawing, layout and style. An SVG element has no `style`, `className` as `SVGAnimatedString`, `getBBox` or the other SVG DOM.
 //!   Style comes from the separate CSSStyleDeclaration work: this file gives it the native identity (`Document::element_ns`) and
 //!   nothing else. CSS selectors match the local name in any namespace; `svg|a` namespace selectors do not exist.
