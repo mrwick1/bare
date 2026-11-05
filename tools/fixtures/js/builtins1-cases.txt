@@ -142,3 +142,17 @@ T(function(){return Reflect.getOwnPropertyDescriptor({a:1},"a")})+"|"+T(function
 === reflect_vs_object_equivalence
 var S=function(v){if(Array.isArray(v)){var o=[];for(var i=0;i<v.length;i++)o.push(i in v?S(v[i]):"<h>");return "["+o.join()+"]"}if(typeof v==="string")return JSON.stringify(v);if(typeof v==="symbol")return v.toString();if(typeof v==="function")return "fn";if(typeof v==="object"&&v!==null)return "{"+Object.keys(v).map(function(k){return k+":"+S(v[k])}).join()+"}";return Object.is(v,-0)?"-0":String(v)};var T=function(f){try{return S(f())}catch(e){return e.name+": "+e.message}};var M=function(f){try{return S(f())}catch(e){return e.name}};var N=function(f){try{S(f());return "ok"}catch(e){return e.name}};
 T(function(){var o={};var p=Reflect.ownKeys({b:1,a:2,1:1});return p})+"|"+T(function(){var l=[];var h={get a(){l.push("g");return 1}};Reflect.get(h,"a");return l})+"|"+T(function(){return typeof Reflect.get+typeof Reflect.set+typeof Reflect.construct})+"|"+T(function(){return Object.prototype.toString.call(Reflect)})+"|"+T(function(){return Reflect.construct(function(){this.x=1},[]).x})+"|"+T(function(){return Reflect.ownKeys(Object.freeze([1]))})
+=== obj_create_props
+var r = [];
+var p = { z: 1 };
+var o = Object.create(p, { a: { value: 1, enumerable: true }, b: { get: function () { return this.a + 1; } }, c: { value: 3 } });
+r.push(Object.getPrototypeOf(o) === p, o.a, o.b, o.c, o.z, Object.keys(o).join(':'));
+var d = Object.getOwnPropertyDescriptor(o, 'c'); r.push(d.writable, d.enumerable, d.configurable);
+r.push(Object.getOwnPropertyNames(Object.create(null, { x: { value: 0 } })).join());
+r.push(Object.keys(Object.create({}, undefined)).length);
+try { Object.create({}, null); } catch (e) { r.push(e.name); }
+try { Object.create({}, { a: 1 }); } catch (e) { r.push(e.name); }
+try { Object.create({}, { a: { get: 1 } }); } catch (e) { r.push(e.name); }
+var order = []; Object.create({}, { get k() { order.push('k'); return { value: 1 }; }, get j() { order.push('j'); return { value: 2 }; } });
+r.push(order.join());
+r.join()

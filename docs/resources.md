@@ -2106,6 +2106,6 @@ Known differences from Node 22:
 - `toLocaleString` of an array that holds itself stops at the depth limit. V8 returns `""`. `join` has the same difference.
 - Array `toLocaleString` calls `toLocaleString` on each element, and `Number.prototype.toLocaleString` is not bound yet, so `[1].toLocaleString()` throws.
 
-Other problems found and not changed: `Object.create(proto, properties)` is still a gate. `Object.getOwnPropertyDescriptor("ab", 0)` returns `undefined` for a primitive string. `hasOwnProperty` converts `this` before the key, and the specification converts the key first. `Array.prototype.slice` takes 62 ms for 1M elements, 60 times more than the in-place paths above.
+Other problems found and not changed: `Object.create(proto, properties)` was still a gate (fixed after this batch; see below). `Object.getOwnPropertyDescriptor("ab", 0)` returns `undefined` for a primitive string. `hasOwnProperty` converts `this` before the key, and the specification converts the key first. `Array.prototype.slice` takes 62 ms for 1M elements, 60 times more than the in-place paths above.
 
 Not tested: a real page on this build (the live login was not run), `Proxy`, `DataView` and typed arrays other than `Uint8Array` with these methods, locales other than the root rules, and Node versions other than 22.
