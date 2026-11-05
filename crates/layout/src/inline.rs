@@ -92,7 +92,7 @@ impl Iterator for Events<'_, '_> {
             let kind = self.tree.kind(node);
             if kind == Kind::Inline {
                 self.open.push(node);
-                self.next = self.tree.doc.children(node).next();
+                self.next = self.tree.doc.flat_children(node).next();
                 return Some(Event::Open(node));
             }
             self.next = self.after(node);
@@ -249,7 +249,7 @@ fn inline_box(cx: &Cx, node: NodeId, width: f32) -> Inline {
     let edges = (border.left + padding.left, border.right + padding.right);
     let (above, below) = reach(cx, node);
     let paint = style.color(Property::BackgroundColor).a != 0 || border.horizontal() + border.vertical() != 0.0;
-    let parent = cx.tree.doc.parent(node).expect("an inline box has a parent");
+    let parent = cx.tree.doc.flat_parent(node).expect("an inline box has a parent");
     let same_font = reach(cx, parent) == (above, below);
     let flat = margins == (0.0, 0.0) && edges == (0.0, 0.0) && padding.vertical() == 0.0;
     let positioned = cx.tree.position(node) != Keyword::Static;
@@ -623,7 +623,7 @@ impl Breaker<'_, '_> {
                 Item::Text { node, start, end, x, w } if end > start => {
                     let m = Metrics::of(tree.style(node));
                     let at = self.cx.out.len() as u32;
-                    let (rx, ry) = moved(self.cx, self.block, tree.doc.parent(node).expect("a text node has a parent"));
+                    let (rx, ry) = moved(self.cx, self.block, tree.doc.flat_parent(node).expect("a text node has a parent"));
                     self.cx.out.push(Fragment {
                         rect: Rect { x: dx + x + rx, y: y + baseline - m.ascent + ry, w, h: m.ascent + m.descent },
                         node,
@@ -637,7 +637,7 @@ impl Breaker<'_, '_> {
                     for f in &mut fragments {
                         f.end += base;
                     }
-                    let (rx, ry) = moved(self.cx, self.block, tree.doc.parent(fragments[0].node).expect("an inline-block has a parent"));
+                    let (rx, ry) = moved(self.cx, self.block, tree.doc.flat_parent(fragments[0].node).expect("an inline-block has a parent"));
                     fragments[0].rect.x = dx + x + margin_left + rx;
                     fragments[0].rect.y = y + baseline - b + margin_top + ry;
                     self.cx.out.append(&mut fragments);
@@ -730,7 +730,7 @@ fn moved(cx: &Cx, block: NodeId, mut node: NodeId) -> (f32, f32) {
             x += dx;
             y += dy;
         }
-        let Some(parent) = cx.tree.doc.parent(node) else { break };
+        let Some(parent) = cx.tree.doc.flat_parent(node) else { break };
         node = parent;
     }
     (x, y)

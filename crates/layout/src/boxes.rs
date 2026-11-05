@@ -109,7 +109,7 @@ impl<'a> Tree<'a> {
     pub fn style(&self, node: NodeId) -> &'a ComputedStyle {
         let element = match self.doc.data(node) {
             NodeData::Element { .. } => node,
-            _ => self.doc.parent(node).expect("a text node has a parent"),
+            _ => self.doc.flat_parent(node).expect("a text node has a parent"),
         };
         self.styles.style(element).expect("layout only asks for the style of a box")
     }
@@ -125,12 +125,12 @@ impl<'a> Tree<'a> {
                 match display {
                     // A column and a column group make no box: they only give widths to the table (`table.rs`).
                     Keyword::None | Keyword::TableColumn | Keyword::TableColumnGroup => Kind::None,
-                    _ if self.doc.parent(node) == Some(self.doc.root()) => Kind::Block,
+                    _ if self.doc.flat_parent(node) == Some(self.doc.root()) => Kind::Block,
                     _ if matches!(style.get(Property::Position), Value::Keyword(Keyword::Absolute | Keyword::Fixed)) => Kind::OutOfFlow,
                     // A child of a flex or grid container is an item: a block, whatever its `display` and `float`
                     // ("blockified", CSS Display 3).
-                    Keyword::ListItem if self.is_flex_or_grid(self.doc.parent(node)) => Kind::ListItem,
-                    _ if self.is_flex_or_grid(self.doc.parent(node)) => Kind::Block,
+                    Keyword::ListItem if self.is_flex_or_grid(self.doc.flat_parent(node)) => Kind::ListItem,
+                    _ if self.is_flex_or_grid(self.doc.flat_parent(node)) => Kind::Block,
                     // The root element is always a block, whatever its `display` (CSS Display 3: "blockify").
                     // `float` does nothing on a box that is out of the flow (CSS 2.1, 9.7).
                     _ if matches!(style.get(Property::Float), Value::Keyword(Keyword::Left | Keyword::Right)) => Kind::Float,
@@ -159,8 +159,8 @@ impl<'a> Tree<'a> {
     pub fn children(&self, block: NodeId) -> Children<'_, 'a> {
         // A block holds lines if no child is a block (the common case for `p`, `h1`, `li`), else it holds blocks and
         // the runs of inline content between them become anonymous blocks. This needs one look at all the children first.
-        let has_blocks = self.doc.children(block).any(|c| self.kind(c).is_block());
-        Children { tree: self, next: self.doc.children(block).next(), has_blocks }
+        let has_blocks = self.doc.flat_children(block).any(|c| self.kind(c).is_block());
+        Children { tree: self, next: self.doc.flat_children(block).next(), has_blocks }
     }
 
     /// The `overflow-x` and `overflow-y` of a block, as layout uses them. The root element gives its values to the window,
@@ -176,7 +176,7 @@ impl<'a> Tree<'a> {
             (k(Property::OverflowX), k(Property::OverflowY))
         };
         let visible = (Keyword::Visible, Keyword::Visible);
-        let Some(parent) = self.doc.parent(node) else { return visible };
+        let Some(parent) = self.doc.flat_parent(node) else { return visible };
         if parent == self.doc.root() {
             return visible;
         }
@@ -340,7 +340,7 @@ pub fn dump(tree: &Tree) -> String {
                 Kind::Break => out += &format!("{indent}break\n"),
                 Kind::Inline => {
                     out += &format!("{indent}inline {}\n", name(tree, node));
-                    let kids: Vec<_> = tree.doc.children(node).collect();
+                    let kids: Vec<_> = tree.doc.flat_children(node).collect();
                     stack.extend(kids.into_iter().rev().map(|c| (Item::Inline(c), depth + 1)));
                 }
                 Kind::Atomic | Kind::Float | Kind::OutOfFlow => {

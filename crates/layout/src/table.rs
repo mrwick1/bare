@@ -574,11 +574,11 @@ impl Plan {
                 let end = v.find(|c: char| !c.is_ascii_digit()).unwrap_or(v.len());
                 v[..end].parse::<usize>().unwrap_or(1).clamp(1, MAX_COLSPAN as usize)
             };
-            for child in tree.doc.children(table) {
+            for child in tree.doc.flat_children(table) {
                 match tree.styles.style(child).map(|s| s.get(Property::Display)) {
                     Some(Value::Keyword(Keyword::TableColumnGroup)) => {
                         let mut any = false;
-                        for c in tree.doc.children(child) {
+                        for c in tree.doc.flat_children(child) {
                             if tree.styles.style(c).map(|s| s.get(Property::Display)) == Some(Value::Keyword(Keyword::TableColumn)) {
                                 any = true;
                                 give(&mut self.cols, c, span_of(c), &mut at);
