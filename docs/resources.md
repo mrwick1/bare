@@ -2961,7 +2961,82 @@ Validation:
 - `tools/js/proxy_check.sh`: 68 cases against Node 22.18 (`tools/fixtures/js/proxy-cases.txt`), run again after a collection. 7 of them are the trap-order matrix: they log the traps of `get`, `set`, `has`, `delete`, `keys`, `values`, `entries`, `getOwnPropertyNames`, `getOwnPropertyDescriptors`, `assign` (source and target), spread, `JSON.stringify`, `for-in`, `getPrototypeOf`, `setPrototypeOf`, `isExtensible`, `preventExtensions`, `freeze`, `seal`, `isFrozen`, `isSealed`, `instanceof`, `Array.isArray`, `defineProperty`, `hasOwnProperty`, `propertyIsEnumerable`, every `Reflect` function, `set` with a receiver, an inherited `get`, `has` and `set`, `call`, `new`, `bind`, `Function.prototype.call`, `apply` and `typeof`, and the order matches Node. The others cover the invariant of each trap (accept and reject), revocation in every method and inside a trap, trap arguments, callable and constructable proxies, `new.target`, classes, `super`, `Array` methods on a proxied array, `JSON.stringify`, `for-in`, a handler that is a proxy, a reactive store and a validation proxy.
 - 13 tests in `crates/js/src/eval_proxy_tests.rs`: the corpus again with a collection between the two reads; the 10,000-deep chain; the 10,000-deep prototype chain; 12 shapes of trap recursion; a runaway trap; a huge `ownKeys` answer; proxies, handlers and revokers across a collection; a revoked proxy gives its target and handler back; 1,000 dropped proxies leave no object; the builtin surface; the typed-array and wrapper gates; a checksum through a forwarding proxy.
 - `cargo test --workspace --release` passes. 30 existing `tools/js/*_check.sh` scripts still match Node. `regexp_check.sh` prints timing and does not compare. `parse_check.sh` fails in Node with `ERR_MODULE_NOT_FOUND` on this machine. `browser_check.sh` and `adapter_check.sh` were not run. Two older tests asserted that `Proxy` was missing. They now assert `Atomics`.
-- Interpreter cost against main 5978d55, same example binaries, `perf stat -e instructions:u`, the minimum of 10 runs, AMD Ryzen 9 5900HX, rustc 1.96.0, scale 10 (`numeric_load` n = 10,000): 47 rows of `eval_load` (8), `binary_load` (9), `arrobj_load` (15) and `numeric_load` (15), without `random`. The change runs from -0.11% to +1.15%; the mean is +0.31%. The goal was below +0.5% on each row. It is not met on 8 rows: `arrobj_load` `arrays` +1.15% and `descriptors` +0.81%, `numeric_load` `empty` +0.58%, `clz32` +0.53%, `log` +0.52%, `sin` +0.52% and `pow` +0.50%, and `eval_load` `concat` +0.51%. The `empty` row is a loop over global variables, so about 46 instructions of 8,100 for each iteration. Before the rebase on the primitive wrapper objects (PR 148) the same rows were within -0.49% to +0.49% against 8599baf. The source of the heap paths of `lookup`, `set` and `get_name` is the same as on main, and `lookup` has the same size in bytes. The changes of `get_prop` (`inline(never)`), the call dispatch (one arm) and `herr` (`cold`) did not help or made it worse, and were removed. The cause is not found: to verify: the layout of the code after the merge. The first build was worse: +1.7% on `loop`, +2.5% on `scan` and `scanarr`, +1.5% on `sort` and `tosorted`. The causes were all inlining decisions, not new work: `validate_apply` got a second caller and was outlined (fixed with `inline(always)`); the proxy arm inside `get_prop` and `put_prop` made them too large to inline (moved to `get_miss` and `set_miss`); a proxy arm in `exotic_set` is not needed, because `lookup` meets the proxy next (removed); `ao_sort_key` was outlined (fixed with `inline`). Trap names are interned when the first proxy is made, so a realm without proxies pays only the `Proxy` constructor: +20 k instructions at start (`repeat`, a 6.5 M instruction run, shows +0.30%).
+- Interpreter cost against main c3127aa (its `crates/js` is the same as on 5978d55). Each binary was built in its own `CARGO_TARGET_DIR`; the example binaries differ by `md5sum`. `perf stat -e instructions:u`, the minimum of 3 runs, AMD Ryzen 9 5900HX, rustc 1.96.0. 62 rows: 47 at scale 10 (`eval_load` 8, `binary_load` 9, `arrobj_load` 15 and `numeric_load` 15 with n = 10,000, without `random`) and the 15 `arrobj_load` rows at scale 1. The goal is below +0.5% on each row, and all 62 meet it. The 47 rows at scale 10 run from -0.82% to +0.41% (mean +0.10%). All 62 run from -1.53% to +0.43% (mean +0.07%; 13 rows are below zero). The table is at the end of this section.
+- Why the first build cost up to +1.15%. It was found with a single-step counter: a ptrace program that runs a binary without ASLR, steps each instruction and counts it by address. It matches `perf stat` within 400 instructions. The counts per function of the two binaries (`arrays`, `descriptors`, `repeat` at scale 1 and `numeric_load empty` at n = 1,000) then show where the extra instructions are. `perf record` was not usable: sample skid moved the counts between a function and its callers. `size_of::<HeapError>()` is 24 bytes and `size_of::<Result<Value, HeapError>>()` is 24 bytes on main and on this branch, so the new variant did not change a layout. The causes are all code generation, not new work:
+  1. `ao_search` (`indexOf` and `includes`). On main the compiler split the loop on `includes`. After the change it did not, and the merged loop ran 46 instructions for each element instead of 36 (it also copied the `index_key` answer through the stack). This was 80% of the `arrays` cost. The fix is two loops in the source. `arrays` at scale 10 is now 138,385,629 against 139,096,994 on main (-0.51%).
+  2. `define_own_property`. A third `exotic == ...` test (`NAMED`, `STR`, `PROXY`) made the compiler build a jump table that every plain `define` paid for (4 instructions). `EXOTIC_PROXY` is now the bit 8, tested with `&`. This was the cost of `descriptors` and of the `numeric_load` loops over global variables.
+  3. The `o_*` dispatch methods (`o_peek`, `o_get_own_property`, `o_has_own`, `o_has_property`, `o_define_own_property`, `o_delete`, `o_own_keys`) were outlined and called. Each is now `inline(always)` with one heap call and a test. The loop for a host fill, a proxy and an error moved to `heap_miss` and `heap_miss_w` (`cold`).
+  4. The collector (`collect`) asked the heap for the proxy payload of every object. It does so only after the first proxy is made (`px.ready`).
+  The start-up of a realm costs about +14 k instructions (`repeat` at scale 1, 4.5 M instructions: +0.30%). It is the `Proxy` constructor and `revocable` (function objects, interned names and their share of the first collection). The trap names are still interned on the first `new Proxy`.
+- Rows near the limit. `replaceall` (+0.43% at scale 1, +0.40% at scale 10) is +360 k instructions in `build_replacement` and +120 k in `search`. Neither function is changed by this PR. The hot loop has the same instructions with other registers and 4 more spills. `numeric_load` `empty`, `clz32`, `log`, `pow`, `sin` and `atan2` (+0.35% to +0.41%) are 2 to 5 instructions in each of `get_name`, `assign_name` and `machine`, again with different registers. To verify: a later change to unrelated code can move these rows by the same amount in either direction.
+- Drift. `arrays` at scale 10 was 138,539,132 on 17744a9 and 139,097,968 on main 5978d55 (+0.40%). With the two loops of cause 1 it is 138,385,365 on this branch, so the split also recovers that drift. Whether main lost it by the same merge of the two loops was not traced; to verify.
+
+  Instructions of the 62 rows (`perf stat -e instructions:u`, minimum of 3):
+
+  | Row | main c3127aa | Proxy | Change |
+  | --- | ---: | ---: | ---: |
+  | eval_load loop | 12,632,641,617 | 12,672,656,081 | +0.32% |
+  | eval_load calls | 8,392,861,276 | 8,402,885,410 | +0.12% |
+  | eval_load fib | 293,286,535 | 292,850,320 | -0.15% |
+  | eval_load closures | 1,216,097,406 | 1,217,221,806 | +0.09% |
+  | eval_load objects | 4,126,022,534 | 4,128,967,180 | +0.07% |
+  | eval_load webpack | 56,730,283 | 56,788,598 | +0.10% |
+  | eval_load throws | 3,135,577,683 | 3,144,496,124 | +0.28% |
+  | eval_load concat | 10,938,490 | 10,969,813 | +0.29% |
+  | binary_load copy | 28,352,461 | 28,367,887 | +0.05% |
+  | binary_load scan | 7,654,999,903 | 7,681,021,567 | +0.34% |
+  | binary_load scanarr | 16,892,769,031 | 16,927,786,192 | +0.21% |
+  | binary_load codec | 423,315,583 | 423,328,444 | +0.00% |
+  | binary_load stream | 396,211,871 | 396,407,064 | +0.05% |
+  | binary_load indexof | 493,147,333 | 493,354,622 | +0.04% |
+  | binary_load f64from | 1,004,094,075 | 1,003,106,894 | -0.10% |
+  | binary_load i32sort | 703,393,589 | 703,408,516 | +0.00% |
+  | binary_load dataview | 15,341,483,159 | 15,383,497,503 | +0.27% |
+  | arrobj_load mapfilter x1 | 34,187,545 | 33,960,534 | -0.66% |
+  | arrobj_load sort x1 | 91,939,147 | 91,731,746 | -0.23% |
+  | arrobj_load queue x1 | 24,449,851 | 24,494,065 | +0.18% |
+  | arrobj_load objects x1 | 11,517,824 | 11,521,429 | +0.03% |
+  | arrobj_load arrays x1 | 20,917,533 | 20,598,390 | -1.53% |
+  | arrobj_load fill x1 | 44,551,437 | 44,660,269 | +0.24% |
+  | arrobj_load reverse x1 | 388,428,095 | 389,322,982 | +0.23% |
+  | arrobj_load flat x1 | 75,182,530 | 75,124,081 | -0.08% |
+  | arrobj_load tosorted x1 | 83,628,708 | 83,703,382 | +0.09% |
+  | arrobj_load lastindexof x1 | 413,800,790 | 414,028,408 | +0.06% |
+  | arrobj_load pad x1 | 6,324,076 | 6,338,509 | +0.23% |
+  | arrobj_load repeat x1 | 4,512,269 | 4,525,941 | +0.30% |
+  | arrobj_load replaceall x1 | 38,942,300 | 39,110,670 | +0.43% |
+  | arrobj_load freeze x1 | 206,427,517 | 205,886,384 | -0.26% |
+  | arrobj_load descriptors x1 | 11,179,510 | 11,196,018 | +0.15% |
+  | arrobj_load mapfilter x10 | 303,240,486 | 300,825,565 | -0.80% |
+  | arrobj_load sort x10 | 1,021,044,512 | 1,018,796,699 | -0.22% |
+  | arrobj_load queue x10 | 290,240,166 | 290,453,414 | +0.07% |
+  | arrobj_load objects x10 | 75,740,659 | 75,118,420 | -0.82% |
+  | arrobj_load arrays x10 | 139,096,994 | 138,385,629 | -0.51% |
+  | arrobj_load fill x10 | 406,755,801 | 407,694,054 | +0.23% |
+  | arrobj_load reverse x10 | 3,859,045,578 | 3,867,680,320 | +0.22% |
+  | arrobj_load flat x10 | 712,573,316 | 711,833,889 | -0.10% |
+  | arrobj_load tosorted x10 | 938,027,116 | 938,639,969 | +0.07% |
+  | arrobj_load lastindexof x10 | 4,112,468,816 | 4,114,496,512 | +0.05% |
+  | arrobj_load pad x10 | 24,567,188 | 24,582,331 | +0.06% |
+  | arrobj_load repeat x10 | 6,538,528 | 6,552,435 | +0.21% |
+  | arrobj_load replaceall x10 | 350,770,480 | 352,191,099 | +0.40% |
+  | arrobj_load freeze x10 | 2,024,105,569 | 2,018,595,531 | -0.27% |
+  | arrobj_load descriptors x10 | 72,139,190 | 72,155,087 | +0.02% |
+  | numeric_load empty | 138,037,129 | 138,602,459 | +0.41% |
+  | numeric_load clz32 | 157,063,709 | 157,655,319 | +0.38% |
+  | numeric_load log | 159,854,931 | 160,445,722 | +0.37% |
+  | numeric_load radix16 | 202,249,483 | 202,782,949 | +0.26% |
+  | numeric_load radix36frac | 192,393,209 | 193,033,058 | +0.33% |
+  | numeric_load radix2sub | 731,537,079 | 732,131,063 | +0.08% |
+  | numeric_load pow | 156,648,642 | 157,200,381 | +0.35% |
+  | numeric_load sin | 160,408,199 | 160,998,607 | +0.37% |
+  | numeric_load atan2 | 162,726,723 | 163,292,696 | +0.35% |
+  | numeric_load tofixed | 191,696,794 | 192,231,085 | +0.28% |
+  | numeric_load toprecision | 191,499,494 | 192,050,263 | +0.29% |
+  | numeric_load toexp | 253,692,368 | 254,496,745 | +0.32% |
+  | numeric_load parsefloat | 254,073,574 | 254,480,660 | +0.16% |
+  | numeric_load encodeuri | 272,809,393 | 273,214,361 | +0.15% |
+  | numeric_load escape | 241,417,824 | 241,877,503 | +0.19% |
 - Load test: `tools/js/proxy_load.sh`, 8 cases at 1x, 10x and 100x (1,000, 10,000 and 100,000 iterations), one process for each row under 1 GiB of address space. The checksum comes from Rust. All 24 rows pass.
 
 | Case (what one iteration does) | 1x | 10x | 100x |
