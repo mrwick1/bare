@@ -285,6 +285,7 @@ fn number_is_nan_true_only_for_number_nan() {
 
 #[test]
 fn number_is_nan_never_coerces() {
+    assert_eq!(run("var n=0; var o={get [Symbol.toPrimitive](){n++; throw new Error('coerced')}}; [Number.isNaN(o),n].join()"), "string:false,0");
     assert_eq!(
         run("var n=0; var o={get valueOf(){n++; return function(){return NaN}}, toString(){n++; return 'NaN'}}; [Number.isNaN(o), n].join()"),
         "string:false,0"
