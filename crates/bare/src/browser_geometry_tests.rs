@@ -387,3 +387,18 @@ fn stack_probe() {
         println!("{shape} depth {n}: {}", js(&mut b, "document.getElementById('t').parentNode.offsetWidth"));
     }).unwrap().join().unwrap();
 }
+
+#[test]
+fn hidden_subtrees_do_not_consume_layout_bounds() {
+    big(|| {
+        let mut b = page("#t { width: 16px; height: 18px } #hidden { display: none }", &format!("<button id=t></button><script>{}</script><div id=hidden>{}</div>", "x".repeat(70_000), "y".repeat(70_000)));
+        assert_eq!(size(&mut b, "t"), "16x18");
+    });
+}
+
+#[test]
+fn hidden_shadow_hosts_do_not_gate_visible_geometry() {
+    let mut b = page("#t { width: 16px; height: 18px } #hidden { display: none }", "<button id=t></button><div id=hidden></div>");
+    assert_eq!(js(&mut b, "document.getElementById('hidden').attachShadow({mode:'open'}); 'ok'"), "ok");
+    assert_eq!(size(&mut b, "t"), "16x18");
+}

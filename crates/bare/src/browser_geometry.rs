@@ -30,8 +30,8 @@
 //!   = the node count) and copies finished inline-blocks and flex or grid items once into it, so memory is about `bound * 40` bytes.
 //! - `geometry-nesting`: the depth of nested boxes that layout lays out more than once (flex, grid, table, inline-block, float, absolute or fixed,
 //!   `overflow: auto|scroll`). Each level can lay its content out again (a stretched flex or grid item, a scroll bar that appears, a shrink-to-fit
-//!   measure), so work grows by a factor per level. The factor 4 is a conservative reading of `flex.rs`, `grid.rs`, `intrinsic.rs` and
-//!   `block.rs` (`again`).
+//!   measure), so work grows by a factor per level. The factor 4 is an estimate from `flex.rs`, `grid.rs`, `intrinsic.rs` and
+//!   `block.rs` (`again`). It is not a proven bound on every layout path.
 //! - `geometry-work`: `(nodes + text bytes) * (1 + 4^nesting)`. It is charged as steps before layout. The walk itself is charged first.
 //!
 //! Not done: `getBoundingClientRect`, `offsetParent`, `offsetLeft`, `offsetTop`, `ResizeObserver`, a cache, shadow or transformed geometry.
@@ -154,6 +154,9 @@ fn walk(doc: &Document, styles: &Styles, l: &GeometryLimits) -> Result<Bound, Re
         match *doc.data(node) {
             NodeData::Element { name, .. } => {
                 let Some(style) = styles.style(node) else { continue };
+                if style.get(Property::Display) == Cv::Keyword(Keyword::None) {
+                    continue;
+                }
                 if doc.shadow_root(node).is_some() {
                     return Err(Refuse::Host);
                 }
@@ -210,7 +213,7 @@ impl Dom {
             return Ok((0, 0));
         }
         let styles = self.cascade_now(it)?;
-        if styles.style(el).is_none() {
+        if styles.style(el).is_none_or(|s| s.get(Property::Display) == Cv::Keyword(Keyword::None)) {
             return Ok((0, 0));
         }
         let l = self.geometry.lim.get();
@@ -223,7 +226,7 @@ impl Dom {
             Err(Refuse::Host) => return Err(Self::gate(SHADOW_HOST)),
         };
         // The work is reserved before layout starts: it cannot be interrupted.
-        it.charge(bound.work / 4 + 1)?;
+        it.charge(bound.work + 1)?;
         let layout = bare_layout::layout(&doc, &styles, vp);
         let mut s = self.geometry.stats.get();
         s = GeometryStats { layouts: s.layouts + 1, last_bound: bound.fragments, last_fragments: layout.fragments.len() as u64 };
