@@ -168,7 +168,7 @@ struct Plan {
 }
 
 /// A layer of an imported piece: `outer` is the layer of the `@import`, `inner` the layer the piece had (as `main.rs` joins them).
-fn join_layer(outer: Option<&str>, inner: Option<&str>) -> Option<String> {
+pub(crate) fn join_layer(outer: Option<&str>, inner: Option<&str>) -> Option<String> {
     match (outer, inner) {
         (Some(o), Some(n)) if !n.is_empty() => Some(format!("{o}.{n}")),
         (o, None | Some("")) if o.is_some() => o.map(str::to_string),
@@ -670,14 +670,11 @@ impl Browser {
     }
 
     /// Whether `getComputedStyle` can read now, or which external sheets are missing. Reads the document, runs no JS, charges no steps.
-    /// A cap (`computed-nodes`, `computed-sources`) is an error, as it is for a read.
+    /// Source caps are errors. The cascade node cap applies to computed reads, not sheet discovery.
     pub fn style_availability(&self) -> R<StyleAvailability> {
         let d = &self.dom;
         let vp = d.plat.s.borrow().viewport;
         let mut doc = d.doc.borrow_mut();
-        if doc.len() > d.computed.lim.get().max_nodes {
-            return Err(d.lim("computed-nodes"));
-        }
         let p = d.plan(&mut doc, vp)?;
         Ok(if p.missing.is_empty() { StyleAvailability::Ready } else { StyleAvailability::MissingExternal { hrefs: p.missing, more: p.more } })
     }

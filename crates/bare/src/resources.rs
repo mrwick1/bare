@@ -328,6 +328,33 @@ pub fn discover(doc: &Document, page: &Url, limits: &Limits) -> Result<Discovery
     Ok(Discovery { items, targets, base: base.to_string() })
 }
 
+/// The document base URL now: the first `<base href>` that resolves against `page`, else `None` (the base is `page`; the rule of `discover`).
+/// The driver calls it again after scripts ran, because a script can add or change a `<base>`.
+pub fn document_base(doc: &Document, page: &Url) -> Option<Url> {
+    let (base, template, href) = (doc.find_atom("base"), doc.find_atom("template"), doc.find_atom("href"));
+    let mut stack = vec![doc.root()];
+    while let Some(node) = stack.pop() {
+        if let NodeData::Element { name, .. } = *doc.data(node)
+            && !doc.is_foreign(node)
+        {
+            if Some(name) == template {
+                continue;
+            }
+            if Some(name) == base
+                && let Some(u) = href.and_then(|h| doc.attr(node, h)).and_then(|h| page.join(h.trim_matches(WS)).ok())
+            {
+                return Some(u);
+            }
+        }
+        let mut child = doc.last_child(node);
+        while let Some(c) = child {
+            stack.push(c);
+            child = doc.prev_sibling(c);
+        }
+    }
+    None
+}
+
 /// The text of an inline script: the text children of the element. One child (the usual case) is borrowed, not copied.
 pub fn inline_source(doc: &Document, node: NodeId) -> Cow<'_, str> {
     let mut texts = doc.children(node).filter_map(|c| if let NodeData::Text(s) = *doc.data(c) { Some(doc.text(s)) } else { None });
@@ -341,6 +368,8 @@ pub fn inline_source(doc: &Document, node: NodeId) -> Cow<'_, str> {
 /// A downloaded resource. The server bytes are decoded to text, and the bytes are not kept.
 #[derive(Debug)]
 pub struct Resource {
+    /// Final response URL, used as the base of relative CSS imports.
+    pub url: Url,
     pub text: String,
 }
 
@@ -513,7 +542,7 @@ pub fn fetch(client: &mut http::Client, target: &Target, limits: &Limits, deadli
     if text.len() > room {
         return Err(LoadError::TotalTooLarge);
     }
-    Ok(Resource { text })
+    Ok(Resource { url: current, text })
 }
 
 /// UTF-8 is the default for scripts and styles. A UTF-8 body with no BOM becomes the `String` without a copy.

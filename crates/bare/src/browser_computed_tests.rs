@@ -413,7 +413,7 @@ fn caps_are_uncatchable_and_checked_before_the_expensive_work() {
     assert_eq!(js(&mut b, "var ran = 0; try { getComputedStyle(document.body).display; ran = 1; } catch (e) { ran = 2; } ran"), lim("computed-nodes"));
     assert_eq!(js(&mut b, "ran"), "0");
     assert_eq!(b.computed_stats().builds, 0);
-    assert!(b.style_availability().is_err());
+    assert_eq!(b.style_availability().unwrap(), crate::browser_computed::StyleAvailability::Ready);
     // computed-sources: sheet count, and bytes (before anything is parsed or built)
     let mut b = at("<style>a{}</style><style>b{}</style><div id=a></div>");
     b.set_computed_limits(ComputedLimits { max_sources: 1, ..Default::default() });
