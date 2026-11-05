@@ -149,7 +149,7 @@ impl Heap {
     pub fn bigint_to_string(&mut self, v: Value, radix: u32) -> R<StrId> {
         let mut buf = [0u64; 1];
         let a = self.bigint_sv(v, &mut buf)?;
-        let digits = (bigint::bit_len(a.mag) as f64 / (radix as f64).log2()) as usize + 2;
+        let digits = bigint::digits_bound(bigint::bit_len(a.mag), radix);
         if digits > self.limits.max_string_units || string_cost(digits) > self.limits.max_bytes {
             return Err(HeapError::Limit(Limit::StringLength));
         }

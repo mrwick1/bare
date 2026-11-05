@@ -2764,7 +2764,7 @@ Gates removed: the wrapper `Unsupported` in `new`, `Reflect.construct` and the `
 
 Not done:
 
-- `Object(1n)` and BigInt wrappers. At the time of this work `Value` has no BigInt kind. When BigInt merges, add `Value::BigInt` to `wrapper_proto` and to the four `this` functions.
+- `Object(1n)` and BigInt wrappers: done in the BigInt change (`to_object` and `thisBigIntValue`).
 - `structuredClone`: the engine has none.
 - `String.prototype`, `Number.prototype`, `Boolean.prototype` and `Symbol.prototype` are ordinary objects with a special case in the four `this` functions. `Object.getOwnPropertyNames(String.prototype)` has no `length`.
 - Two older differences remain: the read-only assignment and `delete` messages, and the `toString` radix message differ from V8. The Node cases use `e.name` to avoid them.
@@ -3067,6 +3067,7 @@ Design:
 - Two `i64` operands never reach the limb code. `+ - * / %` run in `i128`, which is exact for them. Only a result outside `i64` makes a heap entry.
 - The limb code is in `bigint.rs`: `u64` limbs, sign and magnitude. Multiplication switches to Karatsuba above 32 limbs. Division is Knuth D with a Möller–Granlund reciprocal for the quotient digit. `toString` is divide and conquer above 32 limbs. Bit operations use the two's complement form. `>>` rounds toward minus infinity. `to_f64` is correctly rounded. Comparison with a Number is exact (`cmp_f64`).
 - A heap entry costs about 54 bytes at 2 limbs, measured (the slot, the entry, the limbs and the table share). Entries are traced and swept by the collector. The table is weak and is rebuilt after a sweep.
+- `BigInt` is installed lazily like `Intl` (see the cost section). The wrapper object of a BigInt is the `Exotic::Prim` of the primitive wrapper change, with `BigInt.prototype`.
 - A BigInt typed array keeps its elements in the byte buffer. A read gives `Value::BigInt`. A `BigUint64Array` element above `i64::MAX` needs a heap entry, and the read path has no `&mut`. So `view_own_big` returns `BigUnsigned(raw)`, and `get_own_property` and `lookup` make the entry. A write converts with ToBigInt and wraps to 64 bits. A path that calls `heap.set` or `heap.define_own_property` with a value that is not a BigInt gets `NeedsBigInt`. `put_prop`, `Reflect.set` and `Object.defineProperty` convert and repeat. Any other path is an `Unsupported` gate.
 - Limits: a BigInt of more than `max_big_limbs` limbs is `Limit::BigLimbs`, a fatal limit (never a catchable error). The size of a result is checked before the operation allocates it, with an upper bound from the operand sizes (for a power: bits of the base times the exponent). So a result close to the cap can be refused though it would fit. An operation charges steps for its work (`work / 64`). `toString` checks the string cap first.
 - Errors use the V8 messages: `Cannot mix BigInt and other types, use explicit conversions`, `Division by zero`, `BigInts have no unsigned right shift, use >> instead`, `Do not know how to serialize a BigInt`, `The number 1.5 cannot be converted to a BigInt because it is not an integer`, `Cannot convert abc to a BigInt`, and `toString() radix argument must be between 2 and 36`. A negative exponent gives `undefined must be positive`. That text is a quirk of V8 12.4 (Node 22) and it is matched.
@@ -3111,41 +3112,104 @@ All 21 rows pass. A collect after the run frees every heap BigInt but the last o
 
 ### Cost on the Number path
 
-I compared instructions (`perf stat`, user mode) and cycles (minimum of 10 runs, pinned to one core) of the new build and of main 17744a9 on the rows of `eval_load`, `numeric_load`, `binary_load` and `arrobj_load`: 96 rows in all. The brief says a regression on a row without BigInt must stay under 0.5%. It does not hold on every row.
+The brief says a row without BigInt must regress less than 0.5% in instructions. I measured instructions (`perf stat`, user mode, one core) of this build and of main 5978d55 on `eval_load`, `arrobj_load` and `binary_load` at scales 1, 10 and 100 (96 rows), and on `numeric_load` at 1,000 and 10,000 iterations (38 rows). The first version of this change missed the limit on 17 rows.
 
-Instructions:
+Result: no row is over +0.5%. The worst is `arrobj_load` `tosorted` at scale 100 (+0.42%), then `repeat` at scale 1 (+0.32%), `pad` at scale 1 (+0.24%) and `copy` at scale 1 (+0.22%). 112 of 134 rows have fewer instructions than main. The largest falls are `arrays` (−7% to −8%), `lastindexof` (−3.8%), `loop` (−3.5%) and `objects` (−2.8%). The table is at the end of this section.
 
-- 79 of 96 rows fall or stay within +0.5%. The largest falls are `eval_load` `loop` (−3.0%), `calls` (−2.1%), `objects` (−1.8%), `throws` (−1.9%), `arrobj_load` `lastindexof` (−2.1%) and `reverse` (−1.8%), and `numeric_load` `pow` (−2.5% at 10000).
-- 17 rows are over +0.5%. Without the start-up rows below they are: `eval_load` `fib` (+1.08%, +0.90%), `arrobj_load` `arrays` (+1.19%, +1.00%), `sort` (+0.61%, +0.86%), `tosorted` (+0.67%, +0.97%), `objects` at scale 1 (+0.59%) and `binary_load` `dataview` (+0.51%, +0.51%).
-- The rows at scale 1 that run under 10M instructions (`eval_load` `concat` +1.92%, `webpack` +0.91%, `binary_load` `copy` +1.46%, `arrobj_load` `pad` +1.52%, `repeat` +2.19%) show a fixed start-up cost: a realm runs about 100k more instructions, to install `BigInt` and its prototype. At scale 10 the same rows are +0.05% to +1.46%.
-- Before the fix below, `binary_load` `scan` and `scanarr` ran +0.9% to +1.2% and `arrays` +2.8% to +3.1%. I moved the BigInt error paths of `heap.set`, `heap.lookup` and `heap.get_own_property` into `#[cold]` functions that are never inlined, and marked the BigInt evaluator functions `#[inline(never)]`. `scan` and `scanarr` then fell to −0.4%, and `arrays` to about +1%. I did not find the cause of the rest. A profile of `fib` shows the same functions with a different share of inlining (`get_name`, `lookup`, `num_lit`), so the likely cause is the code layout of the large `eval_expr_inner`. That is a hypothesis.
+Causes of the first regression, and the fix for each. I found them with `perf record`, `perf annotate`, `objdump`, `nm` and `readelf -r`, and a per-realm instruction probe:
 
-Cycles: the new build ran 3% to 10% more cycles (minimum of 10) on many rows, including rows with fewer instructions (`numeric_load` `empty` at 10000: −0.95% instructions, +9% cycles). Cache and branch misses are equal or lower (`numeric_load empty 10000`: L1 icache misses 13,884 to 9,076; branch misses 50,244 to 49,668). The same gap shows on 3 different cores and in both run orders, so it is not noise. I do not know the cause. To verify: a run on a quiet machine, `perf stat` with the front-end and back-end stall counters, and a build with a different code alignment.
+- A realm built `BigInt` and its prototype at setup: +36k instructions for each realm. `BigInt` is now installed like `Intl`. The realm gets a global accessor, and the getter builds the constructor and the prototype on the first read, then replaces the accessor with a data property. A realm that never reads `BigInt` pays +5k. The code that needs the prototype (`get_prop` on a BigInt, `Object.getPrototypeOf`, `ToObject`, the sloppy `this`) calls `big_proto`, which builds it once.
+- The collector function `Marker::value` was no longer inlined once it handled `BigHeap`: +27k instructions in each `collect`. The `BigHeap` arm is now a `#[cold]` function and `Marker::value` inlines again.
+- `bigint.rs` called `log2` and `pow`. Each is a versioned libm symbol that the dynamic loader resolves at every process start, about 33k instructions each. That was +66k on every run, and it was the whole gap of the rows that run under 10M instructions (`pad`, `repeat`, `copy`, `concat`). A bound on the digits of a result now comes from the exponent bits of the `f64` (`pow_estimate`, `digits_bound`), with no libm call.
+- `get_prop` carried the BigInt path inline. The BigInt receiver is now a `#[cold]` function (`get_prop_big`), and `get_prop` ends in one `lookup`. `#[inline]` is back on the small helpers of `Value` and the typed arrays (`is_bigint`, `strict_equals`, `same_value`, `same_value_zero`, `ta_conv`, `ta_write`, `ta_bytes`) that the first version had left to the compiler.
 
-I did not change the Number paths. The operators test `Value::Number` first and go to the BigInt code only after that check fails.
+I did not change the order of the tests in the operators. They test `Value::Number` first and go to the BigInt code only after that check fails.
+
+Cycles (minimum of 10 runs, this build and main interleaved in each round, `taskset -c 3`, on a machine with a load of 7 to 9): the gap is real and is not fixed. At scale 1 the mean is +1.5% and 18 of 32 rows are over +0.5%. At scale 10 the mean is +2.1% and 24 of 32 rows are over +0.5%. The largest are `arrays` (+5.4% at scale 1, +31% at scale 10), `objects` at scale 1 (+14.6%), `dataview` (+8.0%), `scanarr` (+5.8% to +7.0%) and `flat` at scale 10 (+6.8%). `mapfilter` at scale 10 is −25% and `fill` at scale 10 is −11%, so a row can move either way. Rows with fewer instructions have more cycles (`arrays`: −8% instructions and +31% cycles). A scale 100 run of `arrays` gave +33% to +40%, from 3 runs. I did not find the cause. Hypothesis: stalls from store-to-load forwarding. The 16-byte `Value` is written in two parts and read back with one wide load on the path through `lookup`, `get_prop` and `ao_search`, and the code layout of the build decides if that happens. Instruction counts cannot show it. I tried a cold `big_equals`, `#[repr(C, u8)]` on `Value` and a split of the `ao_search` loop. None of them changed the cycles, and I reverted them. To verify: a quiet machine, `perf stat` with the back-end stall counters, and `perf annotate` of `ao_search` on both builds.
+
+Percent of instructions and cycles against main 5978d55 (`+` is more in this build). Instruction columns: scales 1, 10 and 100. Cycle columns: scales 1 and 10.
+
+| Row | Instr. 1 | Instr. 10 | Instr. 100 | Cycles 1 | Cycles 10 |
+|---|---|---|---|---|---|
+| `eval_load` `loop` | -3.47% | -3.45% | -3.44% | +2.4% | +2.1% |
+| `eval_load` `calls` | -2.61% | -2.62% | -2.62% | +1.9% | +2.1% |
+| `eval_load` `fib` | +0.02% | -0.03% | -0.03% | +1.9% | +2.7% |
+| `eval_load` `closures` | -1.66% | -1.73% | -1.73% | +1.6% | +3.2% |
+| `eval_load` `objects` | -2.75% | -2.81% | -2.81% | +3.1% | +3.5% |
+| `eval_load` `webpack` | -0.61% | -1.12% | -1.31% | +2.8% | +2.9% |
+| `eval_load` `throws` | -2.18% | -2.10% | -2.11% | +0.0% | +1.0% |
+| `eval_load` `concat` | +0.12% | -0.53% | -0.41% | +1.1% | -2.5% |
+| `arrobj_load` `mapfilter` | -2.93% | -3.35% | -3.39% | -4.2% | -25.0% |
+| `arrobj_load` `sort` | -0.76% | -0.36% | -0.01% | -2.5% | +4.4% |
+| `arrobj_load` `queue` | -2.28% | -1.98% | -0.51% | +0.2% | +1.8% |
+| `arrobj_load` `objects` | -0.75% | -2.07% | -1.53% | +14.6% | +4.3% |
+| `arrobj_load` `arrays` | -7.10% | -8.18% | -8.35% | +5.4% | +31.1% |
+| `arrobj_load` `fill` | -2.67% | -2.97% | -3.00% | +0.1% | -11.2% |
+| `arrobj_load` `reverse` | -3.05% | -3.08% | -3.08% | -1.2% | +5.6% |
+| `arrobj_load` `flat` | -1.74% | -1.85% | -1.86% | -2.3% | +6.8% |
+| `arrobj_load` `tosorted` | -0.29% | +0.10% | +0.42% | +0.8% | +2.2% |
+| `arrobj_load` `lastindexof` | -3.81% | -3.84% | -3.83% | +1.8% | +1.4% |
+| `arrobj_load` `pad` | +0.24% | +0.06% | +0.01% | -3.2% | +0.8% |
+| `arrobj_load` `repeat` | +0.32% | +0.21% | +0.05% | -0.6% | +2.0% |
+| `arrobj_load` `replaceall` | -1.28% | -1.48% | -1.50% | -1.7% | -2.1% |
+| `arrobj_load` `freeze` | -2.49% | -2.55% | -2.53% | +1.6% | +3.7% |
+| `arrobj_load` `descriptors` | -0.51% | -1.08% | -1.16% | -0.6% | +2.8% |
+| `binary_load` `copy` | +0.22% | +0.05% | +0.01% | -0.3% | -0.5% |
+| `binary_load` `scan` | -0.44% | -0.44% | -0.44% | +4.9% | +4.6% |
+| `binary_load` `scanarr` | -1.00% | -1.01% | -1.01% | +5.8% | +7.0% |
+| `binary_load` `codec` | +0.03% | +0.00% | +0.00% | +4.9% | +5.9% |
+| `binary_load` `stream` | -0.10% | -0.15% | -0.15% | +0.9% | +1.2% |
+| `binary_load` `indexof` | +0.03% | +0.01% | +0.01% | +0.7% | +0.2% |
+| `binary_load` `f64from` | -1.41% | -1.47% | -1.48% | -0.9% | -1.1% |
+| `binary_load` `i32sort` | +0.02% | +0.00% | +0.00% | -0.5% | -0.8% |
+| `binary_load` `dataview` | -0.17% | -0.18% | -0.18% | +8.0% | +7.3% |
+
+| Row (`numeric_load`) | 1,000 | 10,000 |
+|---|---|---|
+| `atan2` | -0.69% | -1.06% |
+| `clz32` | -0.73% | -1.16% |
+| `empty` | -0.64% | -1.13% |
+| `encodeuri` | -0.30% | -0.38% |
+| `escape` | -0.38% | -0.53% |
+| `isnan` | -1.38% | -1.93% |
+| `log` | -0.68% | -1.09% |
+| `parsefloat` | -0.86% | -1.15% |
+| `parseint` | -0.70% | -0.99% |
+| `pow` | -2.23% | -3.46% |
+| `radix16` | -0.58% | -0.82% |
+| `radix2sub` | -0.15% | -0.18% |
+| `radix36frac` | -1.12% | -1.77% |
+| `random` | -0.84% | -1.30% |
+| `sin` | -0.67% | -1.09% |
+| `toexp` | -1.01% | -1.27% |
+| `tofixed` | -1.30% | -1.85% |
+| `toprecision` | -0.59% | -0.88% |
+| `uricomponent` | -0.36% | -0.52% |
 
 ### Validation
 
-- 56 Node cases (`tools/fixtures/js/bigint-cases.txt`, `tools/js/bigint_check.sh`) match Node 22.18. They cover literals in 4 bases with separators, every operator and the error messages, comparison and equality with Numbers and Strings, `BigInt()`, `asIntN`, `asUintN`, `toString` in every radix, Map, Set, JSON, templates, property keys, the typed arrays and `DataView`. 8 matrix cases (`arith_matrix`, `div_matrix`, `radix_matrix`, `parse_matrix`, `number_matrix`, `shift_matrix`, `pow_matrix`, `bigint_typed_matrix`) give a count and a hash of many random results for every operator and radix, so a difference in one value shows.
+- 58 Node cases (`tools/fixtures/js/bigint-cases.txt`, `tools/js/bigint_check.sh`) match Node 22.18. They cover literals in 4 bases with separators, every operator and the error messages, comparison and equality with Numbers and Strings, `BigInt()`, `asIntN`, `asUintN`, `toString` in every radix, Map, Set, JSON, templates, property keys, the typed arrays and `DataView`, the wrapper object (`Object(1n)`, ToObject, the sloppy `this`) and `toLocaleString` with locales and options. 8 matrix cases (`arith_matrix`, `div_matrix`, `radix_matrix`, `parse_matrix`, `number_matrix`, `shift_matrix`, `pow_matrix`, `bigint_typed_matrix`) give a count and a hash of many random results for every operator and radix, so a difference in one value shows.
 - 74 parse cases of BigInt literals match Acorn (`tools/js/parse_check.sh`, 2,207 cases in all).
-- 20 Rust tests (`bigint_tests.rs` and `eval_bigint_tests.rs`): arithmetic against plain models, the corpus, one entry for equal values, collect with survivors, a held result, the limb cap before allocation, the string cap, steps, and each gate.
-- `cargo test --workspace --release` passes. The 3 old tests that expected a BigInt gate (`gates_are_explicit`, `unsupported_is_found_before_anything_runs`, `unsupported_class_shapes_are_found_before_anything_runs`) now expect the new behavior. The other `*_check.sh` tools (eval, arrobj, binary, builtins, class, date, generator, iterator, number, math, promise, async, interact, intl, adapter) still match Node.
+- 20 Rust tests (`bigint_tests.rs` and `eval_bigint_tests.rs`): arithmetic against plain models, the corpus, one entry for equal values, collect with survivors, a held result, the limb cap before allocation, the string cap, steps, the wrapper object and the `toLocaleString` gate. One test of the console (`a_bigint_prints_with_an_n`) checks `console.log` and `%d` of a BigInt.
+- `cargo test --workspace --release` passes. The 3 old tests that expected a BigInt gate (`gates_are_explicit`, `unsupported_is_found_before_anything_runs`, `unsupported_class_shapes_are_found_before_anything_runs`) now expect the new behavior. The other `*_check.sh` tools (all 35 in `tools/js`, with `TMPDIR` on a disk that has room; `parse_check.sh` needs `ACORN`) still match Node. `tools/js/bigint_load.sh` passes all 21 rows again after the rebase.
 
 ### Gates
 
 Each is `Unsupported`, never a wrong result:
 
-- `Object(1n)`, `new Object(1n)` and `Reflect.construct` of a wrapper. This evaluator has no wrapper objects.
-- `BigInt.prototype.toLocaleString` with arguments, or on a value of more than 3 digits. It needs the grouping of `Intl.NumberFormat`, which another change adds. A short value without arguments gives the `toString` text.
+- `BigInt.prototype.toLocaleString`, `Intl.NumberFormat.prototype.format` and `formatToParts` of a value of more than 32,767 digits. They pass the decimal digits of the BigInt to ICU4X as a string, so the result is exact. The ICU4X decimal has a 16-bit magnitude, so it cannot hold more digits. Any option or locale that `Intl.NumberFormat` does not support is also a gate for a BigInt (for example `notation`, `style: "unit"` and `roundingIncrement`; `de-DE` and `fr-FR` use the `en` data).
 - A BigInt in the state of `history.pushState` (structured clone): the browser layer stops with a gate.
 - A value that is not a BigInt written to a BigInt typed-array element by a path that calls `heap.set` or `heap.define_own_property` directly.
 
-Not tested: `console.log` of a BigInt, structured clone, the wrapper object, a BigInt under `Intl`, cycles on a quiet machine, and the live staging login.
+Gates lifted in this change: `Object(1n)`, `new Object(1n)`, ToObject of a BigInt and the sloppy `this` of a BigInt now make an `Exotic::Prim` wrapper. `BigInt.prototype` methods accept a BigInt or a wrapper of one as `this`. `console.log(1n)` prints `1n`, and `%d` and `%i` with a BigInt print `1n`. `toLocaleString` with arguments or with more than 3 digits runs.
+
+Not tested: `structuredClone` of a BigInt, a locale other than `en` for a BigInt, cycles on a quiet machine, and the live staging login.
 
 Problems noticed, not changed:
 
-- `console.log(1n)` prints `1`. Node prints `1n`. `%d` with a BigInt gives `NaN`.
-- `String.prototype.localeCompare` is missing.
+- `Object.getOwnPropertyDescriptor(globalThis, 'BigInt')` is an accessor until the first read of `BigInt`. Node gives a data property.
+- A frozen wrapper object gives `#<Object> is not extensible` from `Object.setPrototypeOf`. V8 gives `[object BigInt]` for a BigInt wrapper. This is the wrapper message of the earlier change and I did not change it.
+- `Intl.NumberFormat` gaps seen with a BigInt: `notation`, `style: "unit"`, `roundingIncrement`, locales other than `en`, and the text of the invalid-locale `RangeError` (`Incorrect locale information provided`; V8 says `Invalid language tag: ...` from `toLocaleString`).
 - The `WeakSet` error message has a `: 1` suffix that V8 does not have.
 - `ta_sort_in_place` calls `coerce_number` twice for each element.
 - `/` and `toString` of very large values are slower than num-bigint (see the table).

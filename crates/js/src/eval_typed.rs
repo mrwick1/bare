@@ -108,11 +108,13 @@ impl<'p> Interp<'p> {
     }
 
     /// ToNumber, or ToBigInt for the BigInt types, of `v` for an element of type `ty`. The result is a Number or a BigInt.
+    #[inline]
     fn ta_conv(&mut self, ty: Elem, v: Value) -> Res<Value> {
         if ty.is_big() { self.to_bigint(v) } else { Ok(Value::Number(self.coerce_number(v)?)) }
     }
 
     /// Write a value that `ta_conv` made. An index that is gone ignores the write.
+    #[inline]
     fn ta_write(&mut self, o: ObjId, i: usize, cv: Value) {
         match cv {
             Value::Number(n) => self.heap.view_store(o, i, n),
@@ -121,6 +123,7 @@ impl<'p> Interp<'p> {
     }
 
     /// The bytes of one element for a value that `ta_conv` made, for `fill`.
+    #[inline]
     fn ta_bytes(&self, ty: Elem, cv: Value) -> [u8; 8] {
         let mut one = [0u8; 8];
         match cv {
@@ -594,7 +597,6 @@ impl<'p> Interp<'p> {
             if t.ty.is_big() {
                 let Some(v) = h!(self, self.heap.view_load_big(t.o, i)) else { continue };
                 if locale {
-                    // `BigInt.prototype.toLocaleString` is a gate beyond 3 digits (see `eval_bigint.rs`).
                     let key = self.key_to_locale_string();
                     let m = self.get_prop(v, key)?;
                     let r = self.call_fn(m, v, &[])?;

@@ -94,7 +94,7 @@ impl<'p> Interp<'p> {
                 Value::Symbol(_) => Ok(Value::Object(self.sc.symbol_proto)),
                 Value::Number(_) => Ok(Value::Object(self.ao.number_proto.unwrap_or(self.object_proto))),
                 Value::Bool(_) => Ok(Value::Object(self.sc.bool_proto)),
-                Value::BigInt(_) | Value::BigHeap(_) => Ok(Value::Object(self.big.proto)),
+                Value::BigInt(_) | Value::BigHeap(_) => Ok(Value::Object(self.big_proto()?)),
             },
             Nat::ObjHasOwn => {
                 if is_nullish(this) {

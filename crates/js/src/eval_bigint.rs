@@ -15,6 +15,10 @@
 // - ToString (also for `+` with a string, template literals and property keys), ToBoolean, ToPrimitive of an object whose
 //   `valueOf` or `Symbol.toPrimitive` gives a BigInt, `Number(1n)`, `BigInt(x)` (a function, not a constructor),
 //   `BigInt.asIntN`, `BigInt.asUintN`, `BigInt.prototype.toString(radix)`, `valueOf`, `toLocaleString`, `@@toStringTag`.
+// - A wrapper object (`Object(1n)`, ToObject, the sloppy `this` of a BigInt) is an `Exotic::Prim` like the other wrappers
+//   (`eval_wrapper.rs`). `thisBigIntValue` accepts a BigInt and a wrapper of one.
+// - `toLocaleString(locales, options)` is `Intl.NumberFormat(locales, options).format(x)`: the decimal digits of the BigInt go to
+//   ICU4X as a string, so the result is exact.
 // - `JSON.stringify` of a BigInt is the V8 TypeError. BigInt64Array, BigUint64Array and the DataView BigInt methods use these values.
 //
 // Limits (a `Limit`, never a wrong result): a BigInt of more than `HeapLimits::max_big_limbs` limbs. The size of a result is
@@ -22,27 +26,30 @@
 // of limb steps (the Karatsuba count for a large product, `la * lb` for a division, `limbs^2 / 2` for text).
 //
 // Gates (`Unsupported`)
-// - `Object(1n)`, `new Object(1n)` and `Reflect.construct` of a wrapper: there are no wrapper objects in this evaluator.
-// - `BigInt.prototype.toLocaleString` with arguments, or on a value of more than 3 digits: it needs `Intl.NumberFormat`
-//   (grouping). A short value without arguments gives the same text as `toString`.
+// - `BigInt.prototype.toLocaleString` (and `Intl.NumberFormat.prototype.format` of a BigInt) of a value with more than 32,767
+//   digits: the ICU4X decimal has a 16-bit magnitude.
 //
 // State: `BigState` holds the prototype and the constructor. Both are GC roots, so they survive `delete globalThis.BigInt`.
+// Both are made on first use (`big_proto`), like `Intl`: the global `BigInt` is an accessor until a script reads it, so a realm
+// that never uses a BigInt pays for one function. A property read on a BigInt value makes them too.
 
 use crate::bigint as bi;
 
 struct BigState {
     proto: ObjId,
     ctor: ObjId,
+    made: bool,
 }
 
 impl BigState {
     fn new(o: ObjId) -> BigState {
-        BigState { proto: o, ctor: o }
+        BigState { proto: o, ctor: o, made: false }
     }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum BigFn {
+    Lazy,
     Ctor,
     AsIntN,
     AsUintN,
@@ -70,7 +77,7 @@ fn i128_parts(v: i128) -> bi::Int {
 /// Work of a product of `la` by `lb` limbs, in limb steps: schoolbook below the Karatsuba size, else `n^1.585`.
 fn mul_work(la: usize, lb: usize) -> u64 {
     let (a, b) = (la.max(lb) as f64, la.min(lb) as f64);
-    if b < bi::KARATSUBA as f64 { (a * b) as u64 } else { (a * b.powf(0.585)) as u64 }
+    if b < bi::KARATSUBA as f64 { (a * b) as u64 } else { (a * bi::pow_estimate(b, 0.585)) as u64 }
 }
 
 /// The operation of `op` on two BigInts that are not both `i64`, or that need the limb routines. `max` is the limb cap.
@@ -150,17 +157,42 @@ impl<'p> Interp<'p> {
         out.extend([self.big.proto, self.big.ctor].map(Value::Object));
     }
 
+    /// The global `BigInt` is an accessor until a script first reads it (see `big_make`). The read replaces it with the data
+    /// property of the spec; a write replaces it with the written value.
     fn install_bigint(&mut self) -> Res<()> {
+        let k = h!(self, self.heap.key_from_str("BigInt"));
+        let g = self.new_func_object(Callee::Native(Nat::Big(BigFn::Lazy)))?;
+        let d = PropertyDescriptor { get: Some(Some(g)), set: Some(Some(g)), enumerable: Some(false), configurable: Some(true), ..Default::default() };
+        h!(self, self.heap.define_own_property(self.global, k, &d));
+        Ok(())
+    }
+
+    /// Make `BigInt.prototype` and the constructor once. It does not touch the global.
+    #[cold]
+    #[inline(never)]
+    fn big_make(&mut self) -> Res<()> {
+        self.big.made = true;
         let proto = h!(self, self.heap.new_object(Some(self.object_proto)));
         let ctor = self.native(Nat::Big(BigFn::Ctor), "BigInt", 1)?;
-        self.sc_global("BigInt", ctor, proto)?;
-        self.big = BigState { proto, ctor };
+        self.def(ctor, self.k_prototype, Value::Object(proto), false, false, false)?;
+        self.def(proto, self.k_constructor, Value::Object(ctor), true, false, true)?;
+        self.big.proto = proto;
+        self.big.ctor = ctor;
         self.method(ctor, "asUintN", Nat::Big(BigFn::AsUintN), 2)?;
         self.method(ctor, "asIntN", Nat::Big(BigFn::AsIntN), 2)?;
         self.method(proto, "toLocaleString", Nat::Big(BigFn::ToLocaleString), 0)?;
         self.method(proto, "toString", Nat::Big(BigFn::ToString), 0)?;
         self.method(proto, "valueOf", Nat::Big(BigFn::ValueOf), 0)?;
         self.sc_tag(proto, "BigInt")
+    }
+
+    /// `BigInt.prototype`, made on first use.
+    #[inline]
+    fn big_proto(&mut self) -> Res<ObjId> {
+        if !self.big.made {
+            self.big_make()?;
+        }
+        Ok(self.big.proto)
     }
 
     // ------------------------------------------------------------ values
@@ -315,7 +347,7 @@ impl<'p> Interp<'p> {
                     let e = if let Value::BigInt(e) = b { e as f64 } else { 1e18 };
                     let limbs = (self.heap.bigint_bits(a) as f64 * e) / 64.0 + 1.0;
                     // A result over the size cap is refused below. It costs nothing, so the size cap speaks first.
-                    if limbs > max as f64 { 0 } else { (limbs.powf(1.585) * 2.0) as u64 }
+                    if limbs > max as f64 { 0 } else { (bi::pow_estimate(limbs, 1.585) * 2.0) as u64 }
                 }
             },
             _ => (la + lb) as u64,
@@ -413,17 +445,43 @@ impl<'p> Interp<'p> {
 
     // ------------------------------------------------------------ natives
 
-    /// The BigInt of a method receiver, or the V8 TypeError. There are no wrapper objects.
+    /// thisBigIntValue: the BigInt of a method receiver (a BigInt or a wrapper of one), or the V8 TypeError.
     fn this_bigint(&mut self, this: Value, name: &str) -> Res<Value> {
         if this.is_bigint() {
             return Ok(this);
         }
+        if let Value::Object(o) = this
+            && let Some(v) = self.heap.primitive_value(o)
+            && v.is_bigint()
+        {
+            return Ok(v);
+        }
         Err(self.type_err(&format!("BigInt.prototype.{name} requires that 'this' be a BigInt")))
+    }
+
+    /// A BigInt as an ICU4X number: its decimal digits, so the value stays exact.
+    fn intl_big_num(&mut self, v: Value) -> Res<icu::Num> {
+        let limbs = self.big_limbs(v) as u64;
+        self.spend(limbs * limbs / 128)?;
+        let t = self.heap.bigint_text(v);
+        icu::num_from_decimal_str(&t).ok_or_else(|| unsupported("BigInt.prototype.toLocaleString of more than 32,767 digits", Span::default()))
     }
 
     fn call_bigint(&mut self, f: BigFn, this: Value, args: &[Value]) -> Res<Value> {
         let (a0, a1) = (arg(args, 0), arg(args, 1));
         match f {
+            BigFn::Lazy => {
+                // the getter has no argument; the setter has the new value
+                let k = h!(self, self.heap.key_from_str("BigInt"));
+                if let Some(&v) = args.first() {
+                    self.def(self.global, k, v, true, false, true)?;
+                    return Ok(Value::Undefined);
+                }
+                self.big_proto()?;
+                let c = Value::Object(self.big.ctor);
+                self.def(self.global, k, c, true, false, true)?;
+                Ok(c)
+            }
             BigFn::Ctor => {
                 let p = self.coerce_primitive(a0, Hint::Number)?;
                 let Value::Number(n) = p else { return self.to_bigint(p) };
@@ -467,10 +525,10 @@ impl<'p> Interp<'p> {
             BigFn::ValueOf => self.this_bigint(this, "valueOf"),
             BigFn::ToLocaleString => {
                 let v = self.this_bigint(this, "toLocaleString")?;
-                match v {
-                    Value::BigInt(n) if args.is_empty() && n.unsigned_abs() < 1000 => Ok(Value::String(h!(self, self.heap.bigint_to_string(v, 10)))),
-                    _ => Err(unsupported("BigInt.prototype.toLocaleString of more than 3 digits, or with arguments (needs Intl.NumberFormat)", Span::default())),
-                }
+                let f = self.intl_nf_create(a0, a1, "BigInt.prototype.toLocaleString")?;
+                let x = self.intl_big_num(v)?;
+                let s = self.intl_num_format(&f, x, None);
+                self.str_value(&s)
             }
         }
     }

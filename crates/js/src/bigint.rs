@@ -699,6 +699,26 @@ fn dc_digits(num: &[u64], radix: u32, n: usize, base: u64, bases: &[(Vec<u64>, u
 }
 
 /// `Number.prototype.toString(radix)` for a BigInt: lower-case digits, a leading `-` for a negative value.
+/// `log2(x)` for `x >= 1`, read off the exponent and the mantissa: exact for a power of two, never above the true value, within 0.09.
+/// `f64::log2` and `f64::powf` are libm symbols. Each one costs the dynamic loader about 30,000 instructions at every process start,
+/// in every program that links this crate. So the size and work estimates here use bit arithmetic.
+fn lg(x: f64) -> f64 {
+    let b = x.to_bits();
+    ((b >> 52) as i64 - 1023) as f64 + (b & ((1 << 52) - 1)) as f64 / (1u64 << 52) as f64
+}
+
+/// `x^p` for `x >= 1` and `p >= 0`, by the same piecewise-linear `log2` and its inverse. It is a work estimate: the error is under 9%.
+pub fn pow_estimate(x: f64, p: f64) -> f64 {
+    let y = p * lg(x);
+    let e = y.floor();
+    f64::from_bits(((e as i64 + 1023) as u64) << 52) * (1.0 + (y - e))
+}
+
+/// An upper bound for the digits of a number of `bits` bits in `radix` (2 to 36).
+pub fn digits_bound(bits: u64, radix: u32) -> usize {
+    (bits as f64 / lg(radix as f64)) as usize + 2
+}
+
 pub fn to_string_radix(a: Sv, radix: u32) -> String {
     debug_assert!((2..=36).contains(&radix));
     if a.mag.is_empty() {
@@ -723,7 +743,7 @@ pub fn to_string_radix(a: Sv, radix: u32) -> String {
         }
     } else {
         let (n, base) = chunk(radix);
-        out.reserve((bit_len(a.mag) as f64 / (radix as f64).log2()) as usize + 2);
+        out.reserve(digits_bound(bit_len(a.mag), radix));
         if a.mag.len() < DC_LIMBS {
             small_digits(a.mag.to_vec(), radix, n, base, &mut out, 0);
         } else {

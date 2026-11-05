@@ -201,7 +201,7 @@ impl<'p> Interp<'p> {
                 let key = self.coerce_key(a0)?;
                 let start = match this {
                     Value::Object(o) => o,
-                    v => self.ro_prim_proto(v),
+                    v => self.ro_prim_proto(v)?,
                 };
                 // a proxy on the chain: the loop of the specification (own property, then [[GetPrototypeOf]])
                 let found = hx!(self, self.heap.lookup(start, key), {
@@ -321,14 +321,14 @@ impl<'p> Interp<'p> {
     }
 
     /// The prototype that a primitive has: what `Object.getPrototypeOf` gives for it.
-    fn ro_prim_proto(&self, v: Value) -> ObjId {
-        match v {
+    fn ro_prim_proto(&mut self, v: Value) -> Res<ObjId> {
+        Ok(match v {
             Value::String(_) => self.ext.string_proto,
             Value::Symbol(_) => self.sc.symbol_proto,
             Value::Number(_) => self.ao.number_proto.unwrap_or(self.object_proto),
-            Value::BigInt(_) | Value::BigHeap(_) => self.big.proto,
+            Value::BigInt(_) | Value::BigHeap(_) => self.big_proto()?,
             _ => self.object_proto,
-        }
+        })
     }
 
     /// `Object.getPrototypeOf(v)`.
@@ -336,7 +336,7 @@ impl<'p> Interp<'p> {
         match v {
             Value::Object(o) => Ok(self.o_get_prototype_of(o)?.map_or(Value::Null, Value::Object)),
             Value::Undefined | Value::Null => Err(self.type_err("Cannot convert undefined or null to object")),
-            _ => Ok(Value::Object(self.ro_prim_proto(v))),
+            _ => Ok(Value::Object(self.ro_prim_proto(v)?)),
         }
     }
 

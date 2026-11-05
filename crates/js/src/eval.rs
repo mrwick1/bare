@@ -2081,8 +2081,24 @@ impl<'p> Interp<'p> {
             Value::Symbol(_) => self.sc.symbol_proto,
             Value::Number(_) => self.ao.number_proto.unwrap_or(self.object_proto),
             Value::Bool(_) => self.sc.bool_proto,
-            Value::BigInt(_) | Value::BigHeap(_) => self.big.proto,
+            Value::BigInt(_) | Value::BigHeap(_) => return self.get_prop_big(base, key),
         };
+        let got = match self.heap.get(o, key) {
+            Ok(g) => g,
+            Err(e) => self.get_miss(o, key, base, e)?,
+        };
+        match got {
+            Get::Value(v) => Ok(v),
+            Get::Accessor { getter: Some(g) } => self.call_fn(Value::Object(g), base, &[]),
+            Get::Accessor { getter: None } => Ok(Value::Undefined),
+        }
+    }
+
+    /// `get_prop` of a BigInt: the property of `BigInt.prototype`. Out of line, to keep `get_prop` small.
+    #[cold]
+    #[inline(never)]
+    fn get_prop_big(&mut self, base: Value, key: PropertyKey) -> Res<Value> {
+        let o = self.big_proto()?;
         let got = match self.heap.get(o, key) {
             Ok(g) => g,
             Err(e) => self.get_miss(o, key, base, e)?,

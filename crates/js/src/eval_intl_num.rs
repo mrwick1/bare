@@ -346,6 +346,9 @@ impl<'p> Interp<'p> {
         if let Value::Symbol(_) = p {
             return Err(self.type_err("Cannot convert a Symbol value to a number"));
         }
+        if p.is_bigint() {
+            return self.intl_big_num(p);
+        }
         Ok(icu::num_from_f64(h!(self, self.heap.to_number(p))))
     }
 

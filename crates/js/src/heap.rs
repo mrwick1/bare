@@ -1777,9 +1777,15 @@ impl Marker<'_> {
             Value::String(s) => self.str(s),
             Value::Symbol(s) => self.sym(s),
             Value::Object(o) => self.obj(o),
-            Value::BigHeap(b) => self.bmarks[self.bmeta[b.index as usize].dense as usize] = true,
+            Value::BigHeap(b) => self.big(b),
             _ => {}
         }
+    }
+    /// Out of line: a marked heap BigInt is rare, and a call-site that is bigger is not inlined into the marking loops.
+    #[cold]
+    #[inline(never)]
+    fn big(&mut self, b: BigId) {
+        self.bmarks[self.bmeta[b.index as usize].dense as usize] = true;
     }
 }
 

@@ -181,25 +181,25 @@ fn big_work_is_charged_as_steps() {
     });
 }
 
-/// What stays behind a gate: the wrapper object. Each gate says what it needs.
+/// The wrapper object is an `Exotic::Prim` like the other wrappers.
 #[test]
-fn the_wrapper_object_is_a_gate() {
-    for src in ["Object(1n)", "new Object(1n)", "Object(2n ** 64n)"] {
-        let r = run(src);
-        assert!(r.starts_with("unsupported:") && r.contains("wrapper"), "{src}: {r}");
-    }
-    // A primitive keeps working through its prototype without a wrapper.
-    assert_eq!(run("(5n).toString(2) + (2n ** 64n).toString(16)"), "string:10110000000000000000");
+fn the_wrapper_object() {
+    assert_eq!(run("typeof Object(1n) + typeof new Object(2n ** 64n)"), "string:objectobject");
+    assert_eq!(run("Object(2n ** 64n).toString(16) + Object(5n).valueOf()"), "string:100000000000000005");
+    assert_eq!(run("(function () { return typeof this; }).call(1n)"), "string:object");
+    assert_eq!(run("(function () { 'use strict'; return typeof this; }).call(1n)"), "string:bigint");
+    assert_eq!(run("Object(1n) instanceof BigInt"), "boolean:true");
+    assert_eq!(run("Object(1n) == 1n"), "boolean:true");
+    assert_eq!(run("Object(1n) === 1n"), "boolean:false");
 }
 
-/// `toLocaleString` stays a gate until `Intl.NumberFormat` lands: up to 3 digits it equals `toString`.
+/// `toLocaleString` is `Intl.NumberFormat(...).format(x)` on the exact digits. Only a value of more than 32,767 digits is a gate.
 #[test]
-fn to_locale_string_gate() {
-    assert_eq!(run("(999n).toLocaleString() + (-5n).toLocaleString()"), "string:999-5");
-    let r = run("(1000n).toLocaleString()");
-    assert!(r.starts_with("unsupported:") && r.contains("Intl.NumberFormat"), "{r}");
-    let r = run("(5n).toLocaleString('de')");
-    assert!(r.starts_with("unsupported:"), "{r}");
+fn to_locale_string_is_exact() {
+    assert_eq!(run("(2n ** 70n).toLocaleString()"), "string:1,180,591,620,717,411,303,424");
+    assert_eq!(run("(1234567n).toLocaleString('en-IN') + '|' + (-1234567n).toLocaleString('en-US')"), "string:12,34,567|-1,234,567");
+    let r = run("(10n ** 40000n).toLocaleString()");
+    assert!(r.starts_with("unsupported:") && r.contains("32,767"), "{r}");
 }
 
 #[test]

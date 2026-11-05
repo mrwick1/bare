@@ -52,11 +52,13 @@ pub enum Value {
 
 impl Value {
     /// Is this a BigInt of either form?
+    #[inline]
     pub fn is_bigint(self) -> bool {
         matches!(self, Value::BigInt(_) | Value::BigHeap(_))
     }
 
     /// `a === b`.
+    #[inline]
     pub fn strict_equals(self, other: Value) -> bool {
         use Value::*;
         match (self, other) {
@@ -73,6 +75,7 @@ impl Value {
     }
 
     /// `Object.is(a, b)`: NaN is NaN, +0 is not -0.
+    #[inline]
     pub fn same_value(self, other: Value) -> bool {
         match (self, other) {
             (Value::Number(a), Value::Number(b)) => {
@@ -83,6 +86,7 @@ impl Value {
     }
 
     /// SameValueZero (`Map`, `Set`, `includes`): NaN is NaN, +0 is -0.
+    #[inline]
     pub fn same_value_zero(self, other: Value) -> bool {
         match (self, other) {
             (Value::Number(a), Value::Number(b)) => (a.is_nan() && b.is_nan()) || a == b,
