@@ -1,0 +1,50 @@
+gen_basic_next	string:1:false,2:false,3:true,undefined:true,undefined:true
+gen_received_values	string:1,11,15
+gen_no_yield	string:7,true
+gen_empty_yield	string:,false,true
+gen_params_bound_at_call	string:param,made,body
+gen_param_error_throws_at_call	string:p
+gen_for_of	string:0,1,4,9
+gen_spread_and_destructure	string:1,2,3|1|2,3
+gen_array_from	string:a,b,aa,bb
+gen_float64_from_numbers	string:3:1,2,3|2:4,5
+gen_return_method	string:9,true,true
+gen_return_before_start	string:4,true,false,true
+gen_return_runs_finally	string:fin,5,true
+gen_finally_yields_on_return	string:cleanup,false,5,true
+gen_throw_method_caught	string:caught x,false,true
+gen_throw_uncaught	string:boom,true
+gen_throw_before_start	string:early,true
+gen_body_throw_finishes	string:TypeError,{"done":true}
+gen_already_running	string:TypeError
+gen_this_and_arguments	string:3,2
+gen_closure_state	string:0,1,2,0,1
+gen_class_methods	string:1,2|0,1,2
+gen_object_iterable	string:x,y
+gen_delegate_generator	string:1,sent,ret,true
+gen_delegate_array_string	string:1,2,a,b,3
+gen_delegate_custom_iterator	string:0,1,1,end,true,/b/c
+gen_delegate_throw_forwarded	string:inner caught E
+gen_delegate_return_forwarded	string:inner fin,outer fin,8,true
+gen_delegate_throw_no_method	string:TypeError,true
+gen_delegate_not_iterable	string:TypeError
+gen_for_of_break_closes	string:1,closed
+gen_destructure_closes	string:closed,1
+gen_yield_in_expressions	string:1,2|3|9
+gen_yield_in_loops_and_switch	string:2,sa,0,1,d
+gen_yield_in_try_catch_finally	string:1,c:e,f,after
+gen_labels_continue	string:00,10,11,20,21,22
+gen_prototype_chain	string:true,true,true,function,false,[object Generator],Generator,GeneratorFunction,true
+gen_prototype_descriptor	string:true,false,false,0
+gen_custom_prototype	string:extra,true
+gen_non_object_prototype	boolean:true
+gen_not_constructor	string:TypeError
+gen_methods_wrong_receiver	string:TypeError
+gen_methods_length_name	string:1,return,throw,g,0
+gen_expression_named	string:0,1,1,2,3,5,8,13,fib
+gen_many_independent	string:0,1,2,3,4,0,10,20,30,40
+gen_block_lexical_decl	string:function,function,undefined,undefined,function
+gen_yield_as_identifier_outside	number:5
+gen_yield_star_return_value_from_array	string:1,undefined
+gen_return_in_try_finally_override	string:fin,true
+gen_infinite_take	string:0,1,2,3,4

@@ -5,8 +5,8 @@
 //   ACORN=file:///path/to/acorn.mjs node tools/js/parse_oracle.mjs dump FILE
 //   ACORN=... node tools/js/parse_oracle.mjs cases FILE      (cases separated by lines `%%`)
 //
-// A case whose first line is `//! unsupported` is valid ES2022 that bare-js reports as unsupported (generators,
-// modules, static blocks). The oracle prints `unsupported` for it (Acorn rejects module syntax in a script, so the mark is the claim).
+// A case whose first line is `//! unsupported` is valid ES2022 that bare-js reports as unsupported (async
+// generators, modules, static blocks). The oracle prints `unsupported` for it (Acorn rejects module syntax in a script, so the mark is the claim).
 import { readFileSync } from 'node:fs';
 
 const acorn = await (process.env.ACORN ? import(process.env.ACORN) : import('acorn'));
@@ -40,7 +40,7 @@ function dumpTree(src) {
     return D(p.key);
   };
   const fn = (tag, n) =>
-    `(${tag}${S(n)} ${n.id ? n.id.name : '-'} ${n.async ? 'async' : 'sync'} ${n.type === 'ArrowFunctionExpression' ? 'arrow' : 'func'} (params${L(n.params)}) ` +
+    `(${tag}${S(n)} ${n.id ? n.id.name : '-'} ${n.async ? 'async' : 'sync'}${n.generator ? ' gen' : ''} ${n.type === 'ArrowFunctionExpression' ? 'arrow' : 'func'} (params${L(n.params)}) ` +
     (n.body.type === 'BlockStatement' ? `(body${L(n.body.body)})` : `(expr ${D(n.body)})`) + ')';
   const cls = (tag, n) => {
     let o = `(${tag}${S(n)} ${n.id ? n.id.name : '-'} ${n.superClass ? D(n.superClass) : '-'}`;
@@ -99,6 +99,7 @@ function dumpTree(src) {
       case 'ChainExpression': return `(chain${S(n)} ${D(n.expression)})`;
       case 'SequenceExpression': return `(seq${S(n)}${L(n.expressions)})`;
       case 'AwaitExpression': return `(await${S(n)} ${D(n.argument)})`;
+      case 'YieldExpression': return `(yield${S(n)} ${n.delegate ? 'delegate' : '-'} ${n.argument ? D(n.argument) : '-'})`;
       case 'Super': return `(super${S(n)})`;
       case 'MetaProperty': return `(newtarget${S(n)})`;
       // statements

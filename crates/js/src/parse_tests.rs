@@ -58,7 +58,7 @@ fn show_expr(p: &Program, id: ExprId) -> String {
             let f = p.func(f);
             let kind = if f.kind == FuncKind::Arrow { "arrow" } else { "fn" };
             let ps: Vec<String> = p.list(f.params).map(|x| show_pat(p, x)).collect();
-            format!("({}{} ({}){})", if f.is_async { "async " } else { "" }, kind, ps.join(" "),
+            format!("({}{} ({}){})", if f.is_async() { "async " } else { "" }, kind, ps.join(" "),
                 match f.body { Body::Expr(b) => format!(" => {}", show_expr(p, b)), Body::Block(_) => " {}".into() })
         }
         _ => format!("<{:?}>", std::mem::discriminant(&e.kind)),
@@ -269,7 +269,7 @@ fn contexts() {
         "class A extends B { constructor(){ function f(){ super() } } }", "x: while(1) { function f(){ break x } }", "function f(){ await 1 }",
         "switch (a) { default: default: }", "switch (a) { case 1: continue }", "class A { m(){ this.#a } }", "class A { #a; #a }",
         "class A { constructor(){} constructor(){} }", "class A { get constructor(){} }", "class A { static prototype(){} }", "class A { #constructor }",
-        "class A { #a; m(){ delete this.#a } }", "class A { x = arguments }", "class A { m(){ super() } }", "async function f(await){}", "function* g(){} yield"] {
+        "class A { #a; m(){ delete this.#a } }", "class A { x = arguments }", "class A { m(){ super() } }", "async function f(await){}", "function* g(){ yield\n* 2 }", "function* g(){ var yield }"] {
         err(s);
     }
     ok("function f(){ new.target }");
@@ -398,8 +398,8 @@ fn regexp_pattern_gate() {
 #[test]
 fn unsupported_syntax_is_a_precise_error() {
     for (s, what) in [
-        ("function* g(){}", "generators"), ("x = function*(){}", "generators"), ("({ *g(){} })", "generators"), ("class A { *g(){} }", "generators"),
-        ("async function* g(){}", "generators"), ("class A { static { } }", "static blocks"), ("import a from 'b'", "import"),
+        ("async function* g(){}", "async generators"), ("x = async function*(){}", "async generators"),
+        ("({ async *g(){} })", "async generators"), ("class A { async *g(){} }", "async generators"), ("class A { static { } }", "static blocks"), ("import a from 'b'", "import"),
         ("export default 1", "export"), ("import('x')", "import"), ("import.meta", "import"),
     ] {
         let e = err(s);

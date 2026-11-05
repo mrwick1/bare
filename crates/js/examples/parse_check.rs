@@ -116,7 +116,10 @@ impl<'a> Dump<'a> {
             Some(n) => self.name(n),
             None => self.dash(),
         }
-        self.out.push_str(if f.is_async { " async" } else { " sync" });
+        self.out.push_str(if f.is_async() { " async" } else { " sync" });
+        if f.is_generator() {
+            self.out.push_str(" gen");
+        }
         self.out.push_str(if f.kind == FuncKind::Arrow { " arrow" } else { " func" });
         self.out.push_str(" (params");
         for p in self.p.list(f.params) {
@@ -395,6 +398,15 @@ impl<'a> Dump<'a> {
                 self.open("await", sp);
                 self.sp();
                 self.expr(a);
+                self.close();
+            }
+            ExprKind::Yield { arg, delegate } => {
+                self.open("yield", sp);
+                self.out.push_str(if delegate { " delegate " } else { " - " });
+                match arg {
+                    Some(a) => self.expr(a),
+                    None => self.dash(),
+                }
                 self.close();
             }
             ExprKind::Seq(l) => {

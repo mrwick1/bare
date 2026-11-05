@@ -165,6 +165,9 @@ enum ScFn {
     WeakSetAdd,
     WeakSetHas,
     WeakSetDelete,
+    GenNext,
+    GenReturn,
+    GenThrow,
 }
 
 impl ScFn {
@@ -552,6 +555,9 @@ impl<'p> Interp<'p> {
             ScFn::FnHasInstance => Ok(Value::Bool(self.ordinary_has_instance(this, a0)?)),
             ScFn::Species => Ok(this),
             ScFn::IterSelf => Ok(this),
+            ScFn::GenNext => self.gen_method(this, GenHow::Next(a0)),
+            ScFn::GenReturn => self.gen_method(this, GenHow::Return(a0)),
+            ScFn::GenThrow => self.gen_method(this, GenHow::Throw(a0)),
             ScFn::ArrayValues | ScFn::ArrayKeys | ScFn::ArrayEntries => {
                 if is_nullish(this) {
                     return Err(self.type_err("Array.prototype.values called on null or undefined"));
@@ -799,7 +805,7 @@ impl<'p> Interp<'p> {
         if no == s.f_set_next && coll_is_map(st) == Some(false) {
             return self.coll_iter_step(io, false).map(Some);
         }
-        Ok(None)
+        self.gen_step(io, no)
     }
 
     /// The code point of `s` at `i` as a string, and its length in code units.

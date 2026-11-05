@@ -687,6 +687,7 @@ impl<'p> Interp<'p> {
         self.date_roots(&mut v);
         self.date_all_values(&mut v);
         self.async_all_values(&mut v);
+        self.gen_all_values(&mut v);
         for (&o, c) in &self.funcs {
             v.push(Value::Object(o));
             if let Callee::Promise(pf) = c {
@@ -731,6 +732,7 @@ impl<'p> Interp<'p> {
         let mut agg_seen: FxSet<u64> = FxSet::default();
         let mut env_work: Vec<u32> = vec![0];
         let mut act_seen = vec![false; self.aw.acts.len()];
+        self.gen_roots(&mut work);
         self.async_queue_roots(&mut work, &mut env_work, &mut act_seen);
         loop {
             if let Some(e) = env_work.pop() {
@@ -772,6 +774,7 @@ impl<'p> Interp<'p> {
             self.weak_trace(o, &seen, &mut pending, &mut work);
             self.cls_trace(o, &mut work, &mut env_work);
             self.async_promise_trace(o, &mut work, &mut env_work, &mut act_seen);
+            self.gen_trace(o, &mut work, &mut env_work);
             let keys = h!(self, self.heap.stored_keys(o));
             for k in keys {
                 match hx!(self, self.heap.peek_own_property(o, k)) {
@@ -803,6 +806,7 @@ impl<'p> Interp<'p> {
         self.date_prune(&seen);
         self.cls_prune(&seen);
         self.async_prune(&act_seen);
+        self.gen_prune(&seen);
         self.trim_tables();
         let mut roots = self.roots();
         roots.extend_from_slice(extra);
@@ -1002,7 +1006,7 @@ impl<'p> Interp<'p> {
     fn w_func_inner(&mut self, fid: FuncId, outer_args: usize) -> Res<()> {
         let prog = self.prog.clone();
         let f = *prog.func(fid);
-        if f.is_async {
+        if f.is_async() || f.is_generator() {
             self.async_preflight(fid)?;
         }
         if let Some(n) = f.name {
@@ -1117,7 +1121,8 @@ impl<'p> Interp<'p> {
             }
             StmtKind::Function(fid) => {
                 self.w_func(fid, ac)?;
-                if nested && !self.cur_strict {
+                // Annex B.3.3 is only for plain functions, not async functions or generators.
+                if nested && !self.cur_strict && prog.func(fid).is_plain_ctor() {
                     let n = self.func_name[fid.index()];
                     self.scopes[fs].vars.push(n);
                 }
@@ -1286,6 +1291,14 @@ impl<'p> Interp<'p> {
                     return Err(unsupported("await in this position", ex.span));
                 }
                 self.w_expr(a, fs, ac)?;
+            }
+            ExprKind::Yield { arg, .. } => {
+                if !self.aw_expr(e) {
+                    return Err(unsupported("yield in this position", ex.span));
+                }
+                if let Some(a) = arg {
+                    self.w_expr(a, fs, ac)?;
+                }
             }
         }
         Ok(())
@@ -1580,7 +1593,9 @@ impl<'p> Interp<'p> {
         }
         self.def(o, self.k_length, Value::Number(len as f64), false, false, true)?;
         self.def(o, self.k_name, Value::String(nstr), false, false, true)?;
-        if f.kind == FuncKind::Normal && !f.is_async {
+        if f.is_generator() {
+            self.gen_function(o)?;
+        } else if f.kind == FuncKind::Normal && !f.is_async() {
             // Most functions never use their prototype (98.6% on the staging login), so the object waits.
             h!(self, self.heap.add_lazy_prototype(o));
         }
@@ -1653,7 +1668,7 @@ impl<'p> Interp<'p> {
         let d = match self.funcs.get(&o) {
             Some(Callee::Class) => D::C,
             Some(&Callee::Host { id, ctor: true, nt }) => D::H(id, nt),
-            Some(&Callee::Script { script, fid, env, self_binding }) if self.func_of(script, fid).kind == FuncKind::Normal && !self.func_of(script, fid).is_async => D::S(script, fid, env, self_binding),
+            Some(&Callee::Script { script, fid, env, self_binding }) if self.func_of(script, fid).is_plain_ctor() => D::S(script, fid, env, self_binding),
             Some(&Callee::Native(n)) if matches!(n, Nat::ObjectCtor | Nat::FnCtor | Nat::ArrayCtor | Nat::ErrorCtor(_) | Nat::Ext(Bi::RegExpCtor)) || matches!(n, Nat::Bin(b) if b.ctor_name().is_some() || b == BinFn::TaCtor) || matches!(n, Nat::Sc(f) if f.is_ctor()) || n == Nat::Date(DateFn::Ctor) => D::N(n),
             Some(&Callee::Native(Nat::StringFn | Nat::NumberFn | Nat::BooleanFn)) => return Err(unsupported("wrapper object (new String/Number/Boolean)", Span::default())),
             Some(Callee::Bound { target, args, .. }) => D::B(*target, args.clone()),
@@ -1688,8 +1703,11 @@ impl<'p> Interp<'p> {
 
     fn call_script(&mut self, (script, fid): (u32, FuncId), fobj: ObjId, cenv: u32, self_binding: bool, this: Value, args: &[Value]) -> Res<Value> {
         let new = std::mem::take(&mut self.stk.new);
-        if self.func_of(script, fid).is_async {
+        if self.func_of(script, fid).is_async() {
             return self.call_async((script, fid), fobj, cenv, self_binding, this, args);
+        }
+        if self.func_of(script, fid).is_generator() {
+            return self.call_generator((script, fid), fobj, cenv, self_binding, this, args);
         }
         let (saved_env, saved_strict) = (self.env, self.strict);
         let env = self.new_env(cenv, true)?;
@@ -2691,7 +2709,7 @@ impl<'p> Interp<'p> {
     /// Annex B.3.3: in sloppy code a function declared in a block is also assigned to the var of the
     /// same name when the declaration is evaluated.
     fn annex_b(&mut self, fid: FuncId) -> Res<()> {
-        if self.strict || self.envs[self.env as usize].var_scope {
+        if self.strict || self.envs[self.env as usize].var_scope || !self.prog.func(fid).is_plain_ctor() {
             return Ok(());
         }
         let n = self.func_name[fid.index()];
@@ -2873,6 +2891,7 @@ include!("eval_date.rs");
 include!("eval_reflect.rs");
 include!("eval_classes.rs");
 include!("eval_async.rs");
+include!("eval_generator.rs");
 
 #[cfg(test)]
 #[path = "eval_class_tests.rs"]
@@ -2944,6 +2963,10 @@ mod interop_tests;
 #[cfg(test)]
 #[path = "eval_async_tests.rs"]
 mod async_tests;
+
+#[cfg(test)]
+#[path = "eval_generator_tests.rs"]
+mod generator_tests;
 
 #[cfg(test)]
 #[path = "eval_stack_tests.rs"]

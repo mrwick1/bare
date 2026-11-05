@@ -1,0 +1,102 @@
+# bare-js generator cases. A case starts with `=== name`. Same format and oracle as eval-cases.txt.
+# Tiny authored programs for function*, yield, yield*, next/return/throw, finally and the iterator protocol. Never a bundle.
+=== gen_basic_next
+function* g() { yield 1; yield 2; return 3; } var it = g(); var o = []; for (var i = 0; i < 5; i++) { var r = it.next(); o.push(r.value + ":" + r.done); } o.join()
+=== gen_received_values
+function* g() { var a = yield 1; var b = yield a + 1; return a + b; } var it = g(); [it.next("x").value, it.next(10).value, it.next(5).value].join()
+=== gen_no_yield
+function* g() { return 7; } var r = g().next(); r.value + "," + r.done
+=== gen_empty_yield
+function* g() { yield; } var it = g(); var r = it.next(); [r.value, r.done, it.next().done].join()
+=== gen_params_bound_at_call
+var log = []; function* g(a = log.push("param")) { log.push("body"); yield a; } var it = g(); log.push("made"); it.next(); log.join()
+=== gen_param_error_throws_at_call
+function* g(a = (function () { throw new Error("p"); })()) { yield 1; } try { g(); "no" } catch (e) { e.message }
+=== gen_for_of
+function* g(n) { for (var i = 0; i < n; i++) yield i * i; } var o = []; for (var x of g(4)) o.push(x); o.join()
+=== gen_spread_and_destructure
+function* g() { yield 1; yield 2; yield 3; } var [a, ...b] = g(); [...g()].join() + "|" + a + "|" + b.join()
+=== gen_array_from
+function* g() { yield "a"; yield "b"; } Array.from(g()).join() + "," + Array.from(g(), function (x) { return x + x; }).join()
+=== gen_float64_from_numbers
+function numbers(t, e) { return Array.from(function* (t, e) { if (void 0 === e) for (let e of t) null != e && (e = +e) >= e && (yield e); else { let r = -1; for (let n of t) null != (n = e(n, ++r, t)) && (n = +n) >= n && (yield n); } }(t, e)); } var a = numbers([1, null, "2", NaN, 3]); var b = numbers([{ v: 4 }, { v: null }, { v: 5 }], function (d) { return d.v; }); a.length + ":" + Array.from(a).join() + "|" + b.length + ":" + Array.from(b).join()
+=== gen_return_method
+function* g() { yield 1; yield 2; } var it = g(); it.next(); var r = it.return(9); [r.value, r.done, it.next().done].join()
+=== gen_return_before_start
+var ran = false; function* g() { ran = true; yield 1; } var it = g(); var r = it.return(4); [r.value, r.done, ran, it.next().done].join()
+=== gen_return_runs_finally
+var o = []; function* g() { try { yield 1; yield 2; } finally { o.push("fin"); } } var it = g(); it.next(); var r = it.return(5); o.push(r.value, r.done); o.join()
+=== gen_finally_yields_on_return
+function* g() { try { yield 1; } finally { yield "cleanup"; } } var it = g(); it.next(); var a = it.return(5); var b = it.next(); [a.value, a.done, b.value, b.done].join()
+=== gen_throw_method_caught
+function* g() { try { yield 1; } catch (e) { yield "caught " + e; } } var it = g(); it.next(); var r = it.throw("x"); [r.value, r.done, it.next().done].join()
+=== gen_throw_uncaught
+function* g() { yield 1; } var it = g(); it.next(); var m; try { it.throw(new Error("boom")); } catch (e) { m = e.message; } m + "," + it.next().done
+=== gen_throw_before_start
+function* g() { yield 1; } var it = g(); var m; try { it.throw("early"); } catch (e) { m = e; } m + "," + it.next().done
+=== gen_body_throw_finishes
+function* g() { yield 1; throw new TypeError("t"); } var it = g(); it.next(); var n; try { it.next(); } catch (e) { n = e.name; } n + "," + JSON.stringify(it.next())
+=== gen_already_running
+var it; function* g() { try { it.next(); } catch (e) { yield e.name; } } it = g(); it.next().value
+=== gen_this_and_arguments
+var o = { k: 3, *m() { yield this.k; yield arguments.length; } }; var it = o.m(1, 2); [it.next().value, it.next().value].join()
+=== gen_closure_state
+function* counter() { var n = 0; while (true) { var reset = yield n++; if (reset) n = 0; } } var c = counter(); [c.next().value, c.next().value, c.next().value, c.next(true).value, c.next().value].join()
+=== gen_class_methods
+class A { constructor() { this.xs = [1, 2]; } *[Symbol.iterator]() { yield* this.xs; } static *range(n) { for (let i = 0; i < n; i++) yield i; } } [...new A()].join() + "|" + [...A.range(3)].join()
+=== gen_object_iterable
+var o = { *[Symbol.iterator]() { yield "x"; yield "y"; } }; [...o].join()
+=== gen_delegate_generator
+function* inner() { var r = yield 1; yield r; return "ret"; } function* outer() { var v = yield* inner(); yield v; } var it = outer(); [it.next().value, it.next("sent").value, it.next().value, it.next().done].join()
+=== gen_delegate_array_string
+function* g() { yield* [1, 2]; yield* "ab"; yield* new Set([3]); } [...g()].join()
+=== gen_delegate_custom_iterator
+var calls = []; var inner = { [Symbol.iterator]() { return this; }, i: 0, next(v) { calls.push(v); return this.i < 2 ? { value: this.i++, done: false, extra: 1 } : { value: "end", done: true }; } }; function* g() { var r = yield* inner; yield r; } var it = g(); var a = it.next("a"); var b = it.next("b"); var c = it.next("c"); var d = it.next("d"); [a.value, a.extra, b.value, c.value, d.done, calls.join("/")].join()
+=== gen_delegate_throw_forwarded
+function* inner() { try { yield 1; } catch (e) { yield "inner caught " + e; } } function* outer() { yield* inner(); } var it = outer(); it.next(); it.throw("E").value
+=== gen_delegate_return_forwarded
+var o = []; function* inner() { try { yield 1; } finally { o.push("inner fin"); } } function* outer() { try { yield* inner(); } finally { o.push("outer fin"); } } var it = outer(); it.next(); var r = it.return(8); o.push(r.value, r.done); o.join()
+=== gen_delegate_throw_no_method
+var closed = false; var inner = { [Symbol.iterator]() { return this; }, next() { return { value: 1, done: false }; }, return() { closed = true; return {}; } }; function* g() { yield* inner; } var it = g(); it.next(); var n; try { it.throw("x"); } catch (e) { n = e.name; } n + "," + closed
+=== gen_delegate_not_iterable
+function* g() { yield* 5; } var n; try { g().next(); } catch (e) { n = e.name; } n
+=== gen_for_of_break_closes
+var o = []; function* g() { try { yield 1; yield 2; } finally { o.push("closed"); } } for (var x of g()) { o.push(x); break; } o.join()
+=== gen_destructure_closes
+var o = []; function* g() { try { yield 1; yield 2; yield 3; } finally { o.push("closed"); } } var [a] = g(); o.push(a); o.join()
+=== gen_yield_in_expressions
+function* g() { var a = [yield 1, yield 2]; var o = { k: yield 3 }; var s = (yield 4) + (yield 5); return a.join() + "|" + o.k + "|" + s; } var it = g(); var r; var i = 0; do { r = it.next(i++); } while (!r.done); r.value
+=== gen_yield_in_loops_and_switch
+function* g(xs) { for (const x of xs) { switch (typeof x) { case "number": yield x * 2; break; default: yield "s" + x; } } let i = 0; while (i < 2) { yield i++; } do { yield "d"; } while (false); } [...g([1, "a"])].join()
+=== gen_yield_in_try_catch_finally
+function* g() { try { yield 1; throw new Error("e"); } catch (e) { yield "c:" + e.message; } finally { yield "f"; } yield "after"; } [...g()].join()
+=== gen_labels_continue
+function* g() { outer: for (let i = 0; i < 3; i++) { for (let j = 0; j < 3; j++) { if (j > i) continue outer; yield i + "" + j; } } } [...g()].join()
+=== gen_prototype_chain
+function* g() {} var GF = Object.getPrototypeOf(g); var GP = Object.getPrototypeOf(g.prototype); var IP = Object.getPrototypeOf(GP); [GF === Object.getPrototypeOf(function* () {}), GP === GF.prototype, Object.getPrototypeOf(g()) === g.prototype, typeof IP[Symbol.iterator], g.prototype.hasOwnProperty("constructor"), Object.prototype.toString.call(g()), GP[Symbol.toStringTag], GF[Symbol.toStringTag], GP.constructor === GF].join()
+=== gen_prototype_descriptor
+function* g() {} var d = Object.getOwnPropertyDescriptor(g, "prototype"); [d.writable, d.enumerable, d.configurable, Object.keys(g.prototype).length].join()
+=== gen_custom_prototype
+function* g() { yield 1; } g.prototype.extra = function () { return "extra"; }; var it = g(); it.extra() + "," + (it[Symbol.iterator]() === it)
+=== gen_non_object_prototype
+function* g() { yield 1; } g.prototype = 5; var it = g(); Object.getPrototypeOf(it) === Object.getPrototypeOf(function* () {}).prototype
+=== gen_not_constructor
+function* g() {} var n; try { new g(); } catch (e) { n = e.name; } n
+=== gen_methods_wrong_receiver
+function* g() {} var next = g.prototype.next; var n; try { next.call({}); } catch (e) { n = e.name; } n
+=== gen_methods_length_name
+function* g() {} var GP = Object.getPrototypeOf(g.prototype); [GP.next.length, GP.return.name, GP.throw.name, g.name, g.length].join()
+=== gen_expression_named
+var f = function* fib() { var a = 0, b = 1; for (;;) { yield a; [a, b] = [b, a + b]; } }; var it = f(); var o = []; for (var i = 0; i < 8; i++) o.push(it.next().value); o.join() + "," + f.name
+=== gen_many_independent
+function* g(k) { yield k; yield k * 10; } var its = []; for (var i = 0; i < 5; i++) its.push(g(i)); var o = []; its.forEach(function (it) { o.push(it.next().value); }); its.forEach(function (it) { o.push(it.next().value); }); o.join()
+=== gen_block_lexical_decl
+var o = []; { function* g() { yield 1; } async function a() {} function f() {} o.push(typeof g, typeof a); } o.push(typeof g, typeof a, typeof f); o.join()
+=== gen_yield_as_identifier_outside
+var yield = 5; function f() { return yield; } f()
+=== gen_yield_star_return_value_from_array
+function* g() { var r = yield* [1]; yield r; } [...g()].map(String).join()
+=== gen_return_in_try_finally_override
+function* g() { try { yield 1; } finally { return "fin"; } } var it = g(); it.next(); var r = it.return("x"); r.value + "," + r.done
+=== gen_infinite_take
+function* nat() { var n = 0; for (;;) yield n++; } var o = []; for (var x of nat()) { if (x > 4) break; o.push(x); } o.join()

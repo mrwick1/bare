@@ -234,6 +234,8 @@ pub enum ExprKind {
     Super,
     NewTarget,
     Await(ExprId),
+    /// `yield`, `yield x` or `yield* x`. Only inside a generator.
+    Yield { arg: Option<ExprId>, delegate: bool },
     /// At least two expressions.
     Seq(List<Expr>),
     /// Only in an array, call arguments or `new` arguments.
@@ -362,13 +364,37 @@ pub struct Func {
     pub params: List<Pat>,
     pub body: Body,
     pub kind: FuncKind,
-    pub is_async: bool,
+    /// Async function or generator. One byte for both keeps `Func` at 44 bytes.
+    pub mode: FuncMode,
     /// The body is strict code (inherited, a class, or a `"use strict"` directive).
     pub strict: bool,
     /// All parameters are plain identifiers (no default, rest or destructuring).
     pub simple_params: bool,
     /// Function and method values start at `(`; other functions at `function`, `async` or the first parameter.
     pub span: Span,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FuncMode {
+    Plain,
+    Async,
+    /// `function*` or a `*` method. Async generators are not supported.
+    Generator,
+}
+
+impl Func {
+    pub fn is_async(&self) -> bool {
+        self.mode == FuncMode::Async
+    }
+
+    pub fn is_generator(&self) -> bool {
+        self.mode == FuncMode::Generator
+    }
+
+    /// An ordinary `function` (not an arrow, method, async function or generator): `new` can call it.
+    pub fn is_plain_ctor(&self) -> bool {
+        self.kind == FuncKind::Normal && self.mode == FuncMode::Plain
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -737,5 +763,6 @@ mod tests {
         assert!(size_of::<Expr>() <= 24, "Expr {}", size_of::<Expr>());
         assert!(size_of::<Stmt>() <= 32, "Stmt {}", size_of::<Stmt>());
         assert!(size_of::<Pat>() <= 24, "Pat {}", size_of::<Pat>());
+        assert!(size_of::<Func>() <= 44, "Func {}", size_of::<Func>());
     }
 }
