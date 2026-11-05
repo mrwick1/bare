@@ -2339,7 +2339,7 @@ S4 topic 2. The crate is `bare-window` (`crates/window/`). Date: 2026-11-05. Mac
 - Size limits: a side is at least 1 and at most 8192 px (256 MB for a buffer). Size 0 from the compositor means "your choice": the first time it is the `--width` size (1280 by 800), later the size we have.
 - Close: `xdg_toplevel.close` or `Control::close` ends the loop. The buffers and the window are dropped, and the socket is flushed before it closes.
 - HiDPI: not done. Paint draws one canvas pixel for each CSS pixel and has no device pixel ratio. A buffer scale of 2 with a canvas of the same size would show the page at half size. So the buffer scale stays 1, and a compositor with a scale above 1 enlarges the picture (a blurry window). A sharp window needs a scale in paint (rectangles, glyph size, snapping) and in layout (`vw`, media queries): that is a topic of its own. `OutputState` is bound, so a later topic can read `scale_factor` and `wp_fractional_scale` without a change to the connection code.
-- Input: not here (S4 topic 4). The toolkit is built without `xkbcommon` and `calloop`, so no key map code is linked yet. Keyboard text needs `xkbcommon` then (libxkbcommon 1.13 is installed).
+- Input: not here. S4 topic 4 added it: see "Window input" below. The toolkit now has the `xkbcommon` feature.
 - Style is computed once, at load. A resize runs layout and paint only. A `@media` rule or a `vw` length does not follow a resize until S4 topic 6.
 
 ### Crate choice
@@ -2387,10 +2387,10 @@ The resize time of the real page is the number above plus its own layout and pai
 
 ### Gaps
 
-- No input events at all (pointer, keyboard, focus): S4 topic 4. The window cannot be moved or closed from inside the page. The compositor can close it.
+- No input events at all (pointer, keyboard, focus): added by S4 topic 4, see "Window input" below. The window cannot be moved or closed from inside the page. The compositor can close it.
 - No HiDPI scale (see Design), no fractional scale, no `wp_viewporter`.
 - No client-side decorations. `WindowDecorations::RequestServer` asks for server decorations. A compositor with none shows a window with no title bar (cage does this).
-- No cursor shape and no clipboard.
+- No cursor shape (added by S4 topic 4) and no clipboard.
 - `Waker` wakes the loop, but nothing in `bare` calls it yet. Timers, `fetch` and scripts (S4 topic 6, S5) will.
 - A hidden window gets no frame callback, so it draws nothing until it shows again. This is wanted. The cost is that a `Waker` request can wait a long time.
 - If the compositor never sends `release` (a broken one), both buffers stay busy and the window stops drawing. There is no timeout and no third buffer.
@@ -2599,3 +2599,59 @@ Validation:
 A read or a write costs 1.0 to 1.8 µs. Time grows in a straight line with the operations, and memory does not grow, because a collection runs every 10,000 operations. `Object.keys` is quadratic in the number of attributes: for each name, `Object.keys` asks `peek_own_property`, and each ask scans the attributes. 50 attributes cost 26 µs. This is the weak point. It is within the step budget (the scan of a long list is charged), but a list with thousands of attributes is slow.
 
 Gates and gaps: a lone surrogate in a name or value is `Unsupported` (the document is UTF-8). `Object.freeze` and `Object.seal` of a map that has names are refused with `TypeError`. `[[PreventExtensions]]` of a map is not forced to `false`. `new DOMStringMap()` is an illegal constructor. A map is not plain data for `structuredClone` or `history.replaceState`. A write on a path without `hx!` (an `h!` site) gives `Error::Heap(NeedsNamed)`, never a silent success. The `peek_own_property` of a name gives the placeholder `undefined` (its callers read only flags). The error texts follow Blink as remembered and are not checked against Chrome. Not tested: a real browser comparison (the oracles in `tools/js` run Node and have no DOM), the live staging login (the parent runs it), and other platforms.
+
+## Window input
+
+S4 topic 4. Date: 2026-11-06. Machine: archMachine, release build. `bare --window http://...` now runs the page in a session and sends pointer and keyboard input to it. A `--window FILE.html` stays a static picture (a session needs an `http(s)` URL).
+
+### Design
+
+- Hit testing (`crates/paint/src/hit.rs`). `hit_test(doc, styles, layout, x, y)` gives the topmost node at a point. It walks the fragments in the same order as `display.rs` (self, blocks, floats, lines, positioned) and keeps the last one that contains the point, so the picture and the hit agree. A test paints a page with overlapping boxes, floats and positioned boxes and checks that the pixel color and the hit node name the same box. Topic 3 (z-index) changes the paint order. The function reads the order from one place in `hit.rs` (`Phase`, `Hit::context`): topic 3 must change that place and the consistency test with it. The cost is one pass over the fragments with no allocation.
+- Window events (`crates/window/src/input.rs`, `wayland.rs`). `wl_pointer` and `wl_keyboard` go through smithay-client-toolkit with the `xkbcommon` feature. The window turns them into `Event::{PointerMove, PointerButton, PointerLeave, Key}` with the DOM `button`, `buttons`, `key` and `code` (evdev scancode to `code`, keysym to `key`). All events of one loop round come before the next frame, so a burst makes one frame. Key repeat is a poll timeout from the repeat rate and delay of the compositor: no timer thread, and the loop sleeps without a timeout when no key is down. The cursor shape (arrow, hand over a link or a button, I-beam over a text field) uses the cursor theme of the system.
+- Events and default actions (`crates/bare/src/browser_ui.rs`). Events are real `MouseEvent`, `PointerEvent`, `KeyboardEvent` and `InputEvent` objects with `isTrusted` true, dispatched through the normal path (capture, target, bubble, one microtask checkpoint after each listener). The editing writes the same native value and selection state as `input.value` and `setSelectionRange` (UTF-16 offsets). Tab order is the HTML sequential order. The header of the file lists the rules.
+- The page (`crates/bare/src/page.rs`). One event: hit test, `Browser::ui_*`, then `Session::resume` runs what the listeners queued (microtasks, tasks, a navigation), then the old layout is dropped and one frame is asked for. A frame cascades and lays out again, paints, and draws what the paint crate does not yet: the text of `<input>` fields, the selection (blue) and the caret (1 px, steady, text color). A password shows bullets. A press in a text field puts the caret at the nearest letter boundary.
+- Redraw. Only an event that ran a listener or changed the page (a press, a key) asks for a frame. A pointer move over a page with no listener asks for none. There is no busy loop and no timer.
+- Event objects of window input are freed by the heap collector. The browser has a cap of 16,384 live events, so `ui_*` collects when half of it is used.
+
+### Event order against Chrome
+
+`tools/ui/chrome_record.mjs` drives headless Chrome (CDP `Input.dispatchMouseEvent` and `dispatchKeyEvent`, the same pipeline as a device) over `tools/fixtures/ui/events.html`. A script on `window` logs each event with `type @target`, the pointer and key fields, `bubbles`, `cancelable`, `isTrusted` and the constructor name. The log of 25 scenarios is `tools/fixtures/ui/chrome-events.txt`. The test `events_match_chrome` (`browser_ui_tests.rs`) sends the same input to `Page::handle` (the window boundary) and compares every line.
+
+Result: all 25 scenarios give the same lines in the same order. The scenarios are: move into a button, between two elements and out to the page; click on a button, link, text field, checkbox and submit button; typing, capital letters with Shift, Backspace, Delete, arrows, Home, Shift+Arrow, Ctrl+A; Tab and Shift+Tab; Enter in a password field (`keypress`, `beforeinput` with `insertLineBreak`, `change`, a click on the default button, `submit`); Space on a checkbox (`click` on key up, then `input`, `change`); Enter on a submit button; `change` before `blur` after an edit. Chrome facts that the test fixes: a click is a `PointerEvent`, `pointerdown` has `detail` 0 and `mousedown` has `detail` 1, `input` of a checkbox is a plain `Event`, `enter` and `leave` events go only to elements with a listener, a field that gets focus by Tab has its text selected, and `change` fires on blur only when the value differs from its value at focus.
+
+Left out of the comparison: `select` and `selectionchange`. Both are queued tasks, so their place between key events depends on task timing (Chrome puts `selectionchange` before `keyup` in one scenario and after it in another). `browser_selection_tests.rs` tests them.
+
+### Checks
+
+- `hit.rs`: 9 unit tests with no compositor: blocks and the root, text and nested boxes, lines over blocks, absolute boxes, floats and a clipping box, hidden boxes, inline-blocks, list markers, and one test that paints a page and checks that the hit node is the box the painter drew on top.
+- `input.rs` (window): 6 unit tests (button and key maps, repeat rule).
+- `browser_ui_tests.rs`: 17 tests. They cover the 25-scenario Chrome comparison, tab order (positive `tabindex`, hidden, disabled, `tabindex=-1`, wrap in both directions), editing at the caret and over a selection with an emoji (two UTF-16 units), the caret from a press position, cancel of `keydown`, `keypress`, `beforeinput` (stop the edit) and `input` (not cancelable), a canceled click on a checkbox (undone, no `input`), radio groups, a label click, a link click (navigation request, none when canceled), implicit submission with one field and no button, a disabled button, `isTrusted`, no constructors for the four classes, 10,000 key and move rounds inside the event cap, bullets for a password and the caret and selection pixels.
+- Live (hyprcage screen 800 by 600, a local `python3 -m http.server`, `tools/fixtures/ui/login.html`): a click in the user field, typing `arjun`, Tab to the password field, typing `s3cret` (6 bullets, caret after them), a click on the checkbox, Shift+Tab twice, Backspace (deleted the selected `arjun`), Enter. The page showed `submitted: user= pass=6 chars remember=true trusted=true`, `focus: user`, the I-beam over the field and the hand over the label.
+
+### Measurements
+
+Release build, archMachine. In-process, through `Page::handle` and `Page::paint` on a 400 by 400 page of 27 nodes, 10,000 rounds of (one key press and release, one move, a paint after the key, a click every 10th round). The field holds up to 100 letters. Run: `cargo test --release -p bare --lib measure_input -- --ignored --nocapture`.
+
+| What | p50 | p99 |
+| --- | ---: | ---: |
+| Key press and release: hit test not needed, events, edit, session pump | 6 us | 11 us |
+| Key to a painted frame (adds cascade, layout and paint of the page) | 45 us | 63 us |
+| Pointer move (hit test and events) | 5 us | 9 us |
+| Click (move, press, release) | 32 us | 46 us |
+
+- Cost grows with the length of the value: with 40,000 letters in one field, a key took 76 us and a frame 497 us (the value is measured once for each edit and the text is drawn whole).
+- Idle CPU after the live login: 0 ticks in 5 s (the process waits in `poll`). RSS 14.0 MB, 2 threads. The whole live run, from the start to after Enter, used 3 ticks (30 ms).
+- Memory over 10,000 events: RSS 16.5 MB after 1,000 rounds, 17.0 MB after 10,000 and 17.3 MB after 20,000 (a round is 3 to 4 window events). The growth is 0.5 MB for 10,000 rounds and slows (270 kB, 240 kB, 290 kB for 4,000, 5,000 and 10,000 rounds). Hypothesis: allocator and heap arena growth, not a leak that grows with each event; not checked with a heap profile. The event table stayed under 4,200 entries.
+- The input to frame latency on a real compositor was not measured: the numbers above end at the painted canvas. The compositor adds its own frame time.
+
+### Gaps
+
+- `<textarea>` cannot be edited: the browser has no value state for it (`browser_selection.rs`). `contenteditable`, clipboard keys, Ctrl+Left and Ctrl+Right, IME and `composition` events, `maxlength`, number filtering, `contextmenu`, drag selection and double-click word selection are absent.
+- `:hover`, `:focus` and `:active` do not match. The cascade has no input state. Checkbox and radio boxes, `<input type=submit>` labels and the placeholder are not drawn (the paint crate draws controls in topic 3). Until then the demo fixtures give fields explicit borders. Topic 3 may paint the text of fields itself: then the field text in `page.rs` must go.
+- Timers and animations that are not due at an input event do not run: the window loop has no timer and `Waker` is not used. A navigation or a `fetch` that a listener starts runs inside `Session::resume` and blocks the loop until it settles.
+- A link click starts a navigation, and a form submit that no listener cancels is still `Unsupported` (native form navigation and constraint validation are gates of `browser_form.rs`); the window prints the error and goes on. `<base>`, `target`, `download` and `<summary>` toggling are not done.
+- Radios are all Tab stops (HTML tabs into the checked radio of a group only). There is no scroll offset: topic 5 adds scrolling, and the caller then subtracts it before the hit test.
+- `new MouseEvent(...)`, `new PointerEvent(...)`, `new KeyboardEvent(...)` and `new InputEvent(...)` throw `TypeError`: only the window makes these events.
+- The window event `PointerLeave` runs `mouseout` and `mouseleave` at the last element, with no `relatedTarget`.
+- The isTrusted flag follows the window: focus and `submit` events made by the host are trusted while a window event runs, and not otherwise (Chrome also marks the events of a script call to `focus()` as trusted; here they stay not trusted).
+

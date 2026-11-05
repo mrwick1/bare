@@ -9,16 +9,27 @@
 //! 3. The buffer stays busy until `wl_buffer.release`. A buffer of a size that is no longer wanted is destroyed only
 //!    when it is free and a new frame needs its slot. Until the new frame is ready, the old one stays on screen.
 //! 4. The loop sleeps in `poll` on the Wayland socket and on the wake pipe, with no timeout. An idle window uses no CPU.
+//!
+//! Input: the seat gives a pointer and a keyboard (smithay-client-toolkit, with xkbcommon for the layout). Their handlers
+//! only queue `Event`s in `State::pending`. The loop hands the queue to `App::event` after the Wayland events of the round
+//! are read, and before the draw, so many events make one frame. The one timer is the key repeat: while a key is held, the
+//! `poll` timeout is the time to the next repeat (`input::Repeat`), and it is `None` again as soon as the key goes up.
 
+use crate::input::{self, Cursor, Event, Mods, Repeat};
 use crate::redraw::{Redraw, next_size};
 use crate::slots::{Pick, Slots};
 use crate::{App, Config, Control, Error};
-use rustix::event::{PollFd, PollFlags, poll};
+use rustix::event::{PollFd, PollFlags, Timespec, poll};
 use smithay_client_toolkit::reexports::client::{
     Connection, EventQueue, QueueHandle,
     backend::WaylandError,
     globals::registry_queue_init,
-    protocol::{wl_buffer, wl_output, wl_shm, wl_surface},
+    protocol::{wl_buffer, wl_keyboard, wl_output, wl_pointer, wl_seat, wl_shm, wl_surface},
+};
+use smithay_client_toolkit::seat::{
+    Capability, SeatHandler, SeatState,
+    keyboard::{KeyEvent, KeyboardHandler, Keysym, Modifiers, RawModifiers, RepeatInfo},
+    pointer::{CursorIcon, PointerEvent, PointerEventKind, PointerHandler, ThemeSpec, ThemedPointer},
 };
 use smithay_client_toolkit::{
     compositor::{CompositorHandler, CompositorState, FrameCallbackData},
@@ -39,6 +50,7 @@ use smithay_client_toolkit::{
 use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
 use std::sync::Arc;
+use std::time::Instant;
 
 /// Counts for a test or a measurement. Nothing here costs time in the loop.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -89,8 +101,23 @@ impl Drop for Buf {
 struct State {
     registry: RegistryState,
     output: OutputState,
+    seat: SeatState,
+    compositor: CompositorState,
+    conn: Connection,
     shm: Shm,
     window: XdgWindow,
+    pointer: Option<ThemedPointer>,
+    keyboard: Option<wl_keyboard::WlKeyboard>,
+    /// Events that the handlers queued, for `App::event`.
+    pending: Vec<Event>,
+    mods: Mods,
+    /// DOM `buttons` bit mask of the held buttons, and the last pointer position.
+    buttons: u16,
+    pos: (f64, f64),
+    repeat: Repeat,
+    /// The key that repeats: its scancode, keysym and text.
+    repeating: Option<(u32, Keysym, Option<String>)>,
+    cursor: Cursor,
     slots: Slots,
     bufs: [Option<Buf>; 2],
     redraw: Redraw,
@@ -130,8 +157,21 @@ impl Window {
         let state = State {
             registry: RegistryState::new(&globals),
             output: OutputState::new(&globals, &qh),
+            seat: SeatState::new(&globals, &qh),
+            compositor,
+            conn: conn.clone(),
             shm,
             window,
+            pointer: None,
+            keyboard: None,
+            pending: Vec::new(),
+            mods: Mods::default(),
+            buttons: 0,
+            pos: (0.0, 0.0),
+            // The defaults of most toolkits, until the compositor gives its own with `repeat_info`.
+            repeat: Repeat::new(25, 600),
+            repeating: None,
+            cursor: Cursor::Default,
             slots: Slots::default(),
             bufs: [None, None],
             redraw: Redraw::default(),
@@ -154,6 +194,8 @@ impl Window {
         let fail = |e: WaylandError| Error(format!("wayland: {e}"));
         while !self.state.exit {
             self.queue.dispatch_pending(&mut self.state).map_err(|e| Error(format!("wayland: {e}")))?;
+            self.state.repeat_due();
+            self.state.deliver(app);
             // One draw for all the events of this round.
             self.state.maybe_draw(app, &qh);
             if let Some(e) = self.state.error.take() {
@@ -175,7 +217,9 @@ impl Window {
                 PollFd::new(&wl_fd, if flushed { PollFlags::IN } else { PollFlags::IN | PollFlags::OUT }),
                 PollFd::new(&self.wake_rx, PollFlags::IN),
             ];
-            match poll(&mut fds, None) {
+            // Sleep until an event, or until the next key repeat when a key is held.
+            let timeout = self.state.repeat.wait(Instant::now()).map(|d| Timespec { tv_sec: d.as_secs() as _, tv_nsec: d.subsec_nanos() as _ });
+            match poll(&mut fds, timeout.as_ref()) {
                 Ok(_) => {}
                 Err(rustix::io::Errno::INTR) => continue,
                 Err(e) => return Err(Error(format!("poll: {e}"))),
@@ -206,6 +250,55 @@ impl Window {
 }
 
 impl State {
+    /// Queue the repeats that are due.
+    fn repeat_due(&mut self) {
+        let now = Instant::now();
+        while let Some(code) = self.repeat.due(now) {
+            match &self.repeating {
+                Some((c, sym, text)) if *c == code => {
+                    let ev = self.key_event(code, *sym, text.clone(), true, true);
+                    self.pending.push(ev);
+                }
+                _ => self.repeat.clear(),
+            }
+        }
+    }
+
+    fn key_event(&self, scancode: u32, sym: Keysym, text: Option<String>, pressed: bool, repeat: bool) -> Event {
+        let m = self.mods;
+        // The text of a key is typed text only: no control characters, and none while ctrl, alt or the logo key is held.
+        let text = text.filter(|t| pressed && !t.is_empty() && !t.chars().any(char::is_control) && !m.ctrl && !m.alt && !m.meta);
+        Event::Key { key: input::key_of(sym.raw(), text.as_deref()), code: input::code_of(scancode), pressed, repeat, text, mods: m }
+    }
+
+    /// Give the queued events to the app, one by one, and do what each asks for.
+    fn deliver(&mut self, app: &mut dyn App) {
+        for ev in std::mem::take(&mut self.pending) {
+            let mut ctl = Control::default();
+            app.event(ev, &mut ctl);
+            if ctl.redraw {
+                self.redraw.request();
+            }
+            self.exit |= ctl.close;
+            if let Some(c) = ctl.cursor {
+                self.cursor = c;
+                self.apply_cursor();
+            }
+        }
+    }
+
+    fn apply_cursor(&self) {
+        let icon = match self.cursor {
+            Cursor::Default => CursorIcon::Default,
+            Cursor::Pointer => CursorIcon::Pointer,
+            Cursor::Text => CursorIcon::Text,
+        };
+        // No enter serial yet (the pointer is not over the window) is not an error: the shape is set on the next enter.
+        if let Some(p) = &self.pointer {
+            let _ = p.set_cursor(&self.conn, icon);
+        }
+    }
+
     fn maybe_draw(&mut self, app: &mut dyn App, qh: &QueueHandle<State>) {
         if !self.redraw.should_draw(self.slots.any_free()) {
             return;
@@ -324,6 +417,123 @@ impl ProvidesRegistryState for State {
         &mut self.registry
     }
     registry_handlers![];
+}
+
+impl SeatHandler for State {
+    fn seat_state(&mut self) -> &mut SeatState {
+        &mut self.seat
+    }
+    fn new_seat(&mut self, _: &Connection, _: &QueueHandle<Self>, _: wl_seat::WlSeat) {}
+
+    fn new_capability(&mut self, _: &Connection, qh: &QueueHandle<Self>, seat: wl_seat::WlSeat, capability: Capability) {
+        match capability {
+            Capability::Pointer if self.pointer.is_none() => {
+                let surface = self.compositor.create_surface(qh);
+                match self.seat.get_pointer_with_theme::<_, ()>(qh, &seat, self.shm.wl_shm(), surface, ThemeSpec::System) {
+                    Ok(p) => self.pointer = Some(p),
+                    Err(e) => self.error = Some(format!("pointer: {e}")),
+                }
+            }
+            Capability::Keyboard if self.keyboard.is_none() => match self.seat.get_keyboard(qh, &seat, None) {
+                Ok(k) => self.keyboard = Some(k),
+                Err(e) => self.error = Some(format!("keyboard: {e}")),
+            },
+            _ => {}
+        }
+    }
+
+    fn remove_capability(&mut self, _: &Connection, _: &QueueHandle<Self>, _: wl_seat::WlSeat, capability: Capability) {
+        match capability {
+            Capability::Pointer => self.pointer = None,
+            Capability::Keyboard => {
+                if let Some(k) = self.keyboard.take() {
+                    k.release();
+                }
+                self.repeat.clear();
+                self.repeating = None;
+            }
+            _ => {}
+        }
+    }
+
+    fn remove_seat(&mut self, _: &Connection, _: &QueueHandle<Self>, _: wl_seat::WlSeat) {}
+}
+
+impl PointerHandler for State {
+    fn pointer_frame(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_pointer::WlPointer, events: &[PointerEvent]) {
+        for e in events {
+            if &e.surface != self.window.wl_surface() {
+                continue;
+            }
+            self.pos = e.position;
+            let (x, y) = e.position;
+            match e.kind {
+                PointerEventKind::Enter { .. } => {
+                    // The shape must be set again after each enter.
+                    self.apply_cursor();
+                    self.pending.push(Event::PointerMove { x, y, buttons: self.buttons, mods: self.mods });
+                }
+                PointerEventKind::Leave { .. } => self.pending.push(Event::PointerLeave),
+                PointerEventKind::Motion { .. } => self.pending.push(Event::PointerMove { x, y, buttons: self.buttons, mods: self.mods }),
+                PointerEventKind::Press { button, .. } | PointerEventKind::Release { button, .. } => {
+                    let pressed = matches!(e.kind, PointerEventKind::Press { .. });
+                    let Some(b) = input::button_of(button) else { continue };
+                    let bit = input::button_bit(b);
+                    if pressed {
+                        self.buttons |= bit;
+                    } else {
+                        self.buttons &= !bit;
+                    }
+                    self.pending.push(Event::PointerButton { x, y, button: b, buttons: self.buttons, pressed, mods: self.mods });
+                }
+                // Scrolling is S4 topic 5.
+                PointerEventKind::Axis { .. } => {}
+            }
+        }
+    }
+}
+
+impl KeyboardHandler for State {
+    fn enter(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_keyboard::WlKeyboard, _: &wl_surface::WlSurface, _: u32, _: &[u32], _: &[Keysym]) {}
+
+    fn leave(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_keyboard::WlKeyboard, _: &wl_surface::WlSurface, _: u32) {
+        // All held keys are released when the window loses the keyboard focus, and the repeat stops.
+        self.repeat.clear();
+        self.repeating = None;
+        self.mods = Mods::default();
+    }
+
+    fn press_key(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_keyboard::WlKeyboard, _: u32, e: KeyEvent) {
+        let ev = self.key_event(e.raw_code, e.keysym, e.utf8.clone(), true, false);
+        if input::repeats(input::code_of(e.raw_code)) {
+            self.repeat.press(e.raw_code, Instant::now());
+            self.repeating = Some((e.raw_code, e.keysym, e.utf8));
+        }
+        self.pending.push(ev);
+    }
+
+    // Only for a compositor that repeats by itself (we turn that off: the loop repeats, one source for the rate).
+    fn repeat_key(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_keyboard::WlKeyboard, _: u32, _: KeyEvent) {}
+
+    fn release_key(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_keyboard::WlKeyboard, _: u32, e: KeyEvent) {
+        self.repeat.release(e.raw_code);
+        if self.repeating.as_ref().is_some_and(|(c, ..)| *c == e.raw_code) {
+            self.repeating = None;
+        }
+        let ev = self.key_event(e.raw_code, e.keysym, None, false, false);
+        self.pending.push(ev);
+    }
+
+    fn update_modifiers(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_keyboard::WlKeyboard, _: u32, m: Modifiers, _: RawModifiers, _: u32) {
+        self.mods = Mods { shift: m.shift, ctrl: m.ctrl, alt: m.alt, meta: m.logo };
+    }
+
+    fn update_repeat_info(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_keyboard::WlKeyboard, info: RepeatInfo) {
+        self.repeat = match info {
+            RepeatInfo::Repeat { rate, delay } => Repeat::new(rate.get(), delay),
+            RepeatInfo::Disable => Repeat::new(0, 0),
+        };
+    }
 }
 
 delegate_dispatch2!(State);

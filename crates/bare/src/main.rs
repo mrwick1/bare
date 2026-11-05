@@ -8,7 +8,8 @@
 //! `--run` loads the page and runs its classic scripts, its timers and `fetch` calls (see `browser_loader.rs`), then prints a short
 //! sanitized status. It prints no source, headers, bodies or query strings.
 //! `--paint=out.png page.html` paints a local file into a PNG of the window size, with no network (see `paint_file`).
-//! `--window page.html` (or an `http(s)` URL) opens a Wayland window that shows the painted page (see `show_window`).
+//! `--window page.html` opens a Wayland window that shows the painted page (see `show_window`). `--window http://...` opens an
+//! interactive one: scripts run, and the pointer and the keyboard work (see `page.rs`).
 //! `--width=900` sets the width of the window (1280 if not given).
 //!
 //! Comments compare Rust with JavaScript, because you know JS.
@@ -306,6 +307,9 @@ impl bare_window::App for Page {
 /// `--window PAGE`: open a window that shows the page, and run until it closes. With `BARE_WINDOW_STATS` set, print
 /// the frame, buffer and wake-up counts and the time of the first frame to stderr when the window closes.
 fn show_window(arg: &str, viewport: (f32, f32)) -> i32 {
+    if arg.starts_with("http://") || arg.starts_with("https://") {
+        return show_interactive(arg, viewport);
+    }
     let started = std::time::Instant::now();
     let (doc, styles) = match load_page(arg, viewport) {
         Ok(page) => page,
@@ -329,6 +333,37 @@ fn show_window(arg: &str, viewport: (f32, f32)) -> i32 {
             1
         }
     }
+}
+
+/// `--window URL`: the page runs in a session (scripts, `fetch`, navigation), and the window sends pointer and keyboard
+/// input to it (see `page.rs`). The VM needs a big stack, as for `--run`. With `BARE_WINDOW_STATS` set, print the counts.
+fn show_interactive(url: &str, viewport: (f32, f32)) -> i32 {
+    let url = url.to_string();
+    let stack = if cfg!(debug_assertions) { 64 << 20 } else { 8 << 20 };
+    let worker = std::thread::Builder::new().stack_size(stack).spawn(move || {
+        let size = (viewport.0 as u32, viewport.1 as u32);
+        let mut page = match bare::page::Page::open(&url, size) {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!("error: {e}");
+                return 1;
+            }
+        };
+        let config = bare_window::Config { title: format!("bare: {url}"), app_id: "bare".into(), size };
+        match bare_window::Window::open(&config).and_then(|w| w.run(&mut page)) {
+            Ok(stats) => {
+                if std::env::var_os("BARE_WINDOW_STATS").is_some() {
+                    eprintln!("{stats:?}, first frame {:?}", page.first_frame);
+                }
+                0
+            }
+            Err(e) => {
+                eprintln!("error: {e}");
+                1
+            }
+        }
+    });
+    worker.map_or(1, |w| w.join().unwrap_or(1))
 }
 
 /// `--run`: a session over the real URL (document load, scripts, timers, `fetch`, navigations: `browser_session.rs`).

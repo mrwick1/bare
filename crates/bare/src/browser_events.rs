@@ -88,6 +88,8 @@ impl Dom {
             related: Value::Null,
             is_focus: false,
             is_submit: false,
+            ui: None,
+            trusted: false,
         };
         self.st.borrow_mut().events.insert(o, e);
         Ok(o)
@@ -194,6 +196,7 @@ impl Dom {
             }
             self.st.borrow_mut().events.get_mut(&ev).expect("event is registered").in_passive = l.passive;
             it.charge(1)?;
+            self.st.borrow_mut().ui.epoch += 1;
             let r = if l.handler { self.call_handler(it, &l, cur, ev) } else { self.call_listener(it, &l, cur, Value::Object(ev)) };
             self.st.borrow_mut().events.get_mut(&ev).expect("event is registered").in_passive = false;
             match r {
@@ -462,9 +465,9 @@ pub(crate) fn event_default_prevented(d: &Dom, it: &mut Interp<'_>, this: Value,
     with_event(d, it, this, |e| Value::Bool(e.canceled))
 }
 
-/// Always false: no event of this browser is a user event.
+/// True for the events of the window input (`browser_ui.rs`), false for all others.
 pub(crate) fn event_is_trusted(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    with_event(d, it, this, |_| Value::Bool(false))
+    with_event(d, it, this, |e| Value::Bool(e.trusted))
 }
 
 pub(crate) fn event_time_stamp(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {

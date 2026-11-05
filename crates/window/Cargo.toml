@@ -7,7 +7,7 @@ license.workspace = true
 
 [dependencies]
 rustix = { version = "1.1.6", features = ["event"] }
-smithay-client-toolkit = { version = "0.21.1", default-features = false }
+smithay-client-toolkit = { version = "0.21.1", default-features = false, features = ["xkbcommon"] }
 
 [dev-dependencies]
 memmap2 = "0.9.12"
