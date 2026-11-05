@@ -3,7 +3,14 @@
 # with 45 s wall time and 1 GiB of address space. A wrong result or a missing limit fails the run.
 #   tools/js/revive_load.sh [OUTPUT_FILE]
 set -u
-out=${1:-/dev/stdout}
+tmp=
+if [ "$#" -gt 0 ]; then
+  out=$1
+else
+  tmp=$(mktemp) || exit 1
+  out=$tmp
+  trap 'rm -f "$tmp"' EXIT HUP INT TERM
+fi
 cargo build --release -q -p bare-js --example revive_load || exit 1
 bin=target/release/examples/revive_load
 status=0
@@ -16,4 +23,8 @@ for scale in 1 10 100; do
     fi
   done
 done
+rows=$(grep -c 'checksum=ok' "$out" || true)
+[ "$rows" -eq 15 ] || status=1
+[ -z "$tmp" ] || cat "$out"
+echo "rows=$rows expected=15 status=$status" >&2
 exit $status

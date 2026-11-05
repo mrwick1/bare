@@ -208,3 +208,9 @@ fn callbacks_from_two_scripts_run_their_own_code() {
         assert_eq!(r, "[[3,[4]],[3,[6]]]");
     });
 }
+
+#[test]
+fn a_reviver_injected_view_hits_the_node_cap_before_key_materialization() {
+    let src = "var u = new Uint8Array(1048576); JSON.parse('[0,{}]', function(k,v) { if(k === '0') this[1] = u; return v; })";
+    assert_eq!(run_with(src, EvalLimits { max_steps: 10_000, ..Default::default() }, bl(|b| b.json.max_nodes = 8)), lim(JL::Nodes));
+}

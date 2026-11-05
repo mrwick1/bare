@@ -7,7 +7,7 @@
 // callbacks are seen. A result of `undefined` runs `[[Delete]]`, any other result `CreateDataProperty`; a `false`
 // answer of either is ignored, as in the spec.
 //
-// Gate: the current draft (ES2027) adds a third `context` argument with the `source` text of primitives (JSON
+// Compatibility limit: the current standard adds a third `context` argument with the `source` text of primitives (JSON
 // parse source text access). This engine targets ES2022, keeps no parse records and passes two arguments. It
 // never invents a `context`.
 //
@@ -101,18 +101,21 @@ impl<'p> Interp<'p> {
             }
             (None, len)
         } else {
-            let all = self.property_keys(o)?;
-            if all.len() > remaining {
+            let slots = h!(self, self.heap.own_key_slots(o));
+            if slots > remaining {
                 return Err(nodes_limit());
             }
-            self.spend(all.len() as u64)?;
-            let mut list = Vec::new();
-            for k in all {
+            self.spend(slots as u64)?;
+            let mut list = h!(self, self.heap.own_keys(o));
+            let mut n = 0;
+            for i in 0..list.len() {
+                let k = list[i];
                 if !matches!(k, PropertyKey::Symbol(_)) && h!(self, self.heap.get_own_property(o, k)).is_some_and(|p| p.enumerable()) {
-                    list.push(k);
+                    list[n] = k;
+                    n += 1;
                 }
             }
-            let n = list.len();
+            list.truncate(n);
             (Some(list), n)
         };
         st.stack.push(RvFrame { obj: o, holder, name: key, keys, len, next: 0 });

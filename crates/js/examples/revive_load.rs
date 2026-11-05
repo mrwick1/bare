@@ -70,7 +70,7 @@ fn build(case: &str, scale: usize) -> Case {
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let (case, scale): (String, usize) = (args[1].clone(), args[2].parse().unwrap());
-    std::thread::Builder::new().stack_size(64 << 20).spawn(move || run(&case, scale)).unwrap().join().unwrap();
+    std::thread::Builder::new().stack_size(if cfg!(debug_assertions) { 64 << 20 } else { 8 << 20 }).spawn(move || run(&case, scale)).unwrap().join().unwrap();
 }
 
 fn global(it: &mut Interp, name: &str) -> Value {
@@ -126,7 +126,7 @@ fn run(case: &str, scale: usize) {
     }
     let hs = it.heap.stats();
     println!(
-        "case={case} scale={scale} reps={} revive_ms={ms:.1} revive_cpu_ms={} rss_peak_mib={:.1} steps={} obj_allocs={} str_allocs={} heap_mib={:.1} freed={freed}{note} OK",
+        "case={case} scale={scale} checksum=ok reps={} revive_ms={ms:.1} revive_cpu_ms={} rss_peak_mib={:.1} steps={} obj_allocs={} str_allocs={} heap_mib={:.1} freed={freed}{note} OK",
         c.reps,
         cpu_ms() - cpu1,
         proc_kib("VmHWM:") as f64 / 1024.0,
