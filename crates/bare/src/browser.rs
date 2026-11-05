@@ -30,7 +30,7 @@
 //! - CharacterData: `data length`. Document: `createElement createElementNS createTextNode createComment getElementById
 //!   documentElement head body doctype defaultView querySelector(All)`.
 //! - `<input>`: `value checked type defaultValue defaultChecked` with native state (dirty value, checkedness).
-- `<input>` text selection (`selectionStart selectionEnd selectionDirection setSelectionRange select`, `select` event task): `browser_selection.rs`.
+//! - `<input>` text selection (`selectionStart selectionEnd selectionDirection setSelectionRange select`, `select` event task): `browser_selection.rs`.
 //! - Events: `Event`, `CustomEvent` (`detail`), `addEventListener` (capture, once, passive; function or `handleEvent`
 //!   object), `removeEventListener`, `dispatchEvent`, capture / target / bubble phases through the document to `window`,
 //!   `preventDefault`, `stopPropagation`, `stopImmediatePropagation`, `composedPath`, `new EventTarget()`.
@@ -185,6 +185,8 @@ pub(crate) struct Input {
     pub checked: Option<bool>,
     /// Text selection (`browser_selection.rs`). `None`: caret at the end of the value.
     pub sel: Option<crate::browser_selection::Sel>,
+    /// Selection API "has scheduled selectionchange event": a `Task::SelectionChange` of this input is queued.
+    pub sc_pending: bool,
 }
 
 #[derive(Default)]

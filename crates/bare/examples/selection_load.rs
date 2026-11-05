@@ -7,7 +7,7 @@
 //! strings and indexes near the ends. `short` values are 0 to 9 UTF-16 units with surrogate pairs. `long` values are
 //! about 4000 units. The checksum is a rolling hash of the selection that JS reads after every operation, and of the
 //! target of every `select` event in order. A separate Rust model of the HTML algorithm (it shares no code with the
-//! host) gives the expected values, the expected number of `select` tasks, and the native state of each input,
+//! host) gives the expected values, the expected number of `select` and coalesced `selectionchange` tasks, and the native state of each input,
 //! which is compared with `Browser::input_selection` after every batch (no JS read). Batches of 500 run through
 //! a pump of at most 256 tasks and a `collect`. At the end no task, event or wrapper of a batch is left.
 
@@ -148,13 +148,15 @@ fn exec(name: &str, scale: usize) {
         (rng >> 33) as usize
     };
     let n = 1000 * scale;
-    let (mut exp_h, mut exp_h2, mut exp_ev) = (0u64, 0u64, 0u64);
+    let (mut exp_h, mut exp_h2, mut exp_ev, mut exp_sc) = (0u64, 0u64, 0u64, 0u64);
     let (mut pumps, mut tasks, mut max_queue) = (0usize, 0usize, 0usize);
     let cpu0 = cpu_ms();
     let t = Instant::now();
     for base in (0..n).step_by(BATCH) {
         let mut script = String::new();
         let mut order = Vec::new();
+        // selectionchange: one task per input per batch (the batch is one script, the pump comes after it)
+        let mut pending = [false; INPUTS];
         for _ in 0..BATCH {
             let i = next() % INPUTS;
             let k = next() % 6;
@@ -187,9 +189,15 @@ fn exec(name: &str, scale: usize) {
                 3 => m.set(0, u32::MAX, 0),
                 4 => {
                     // the value setter: a different value moves the caret to the end and clears the direction
+                    let mut moved = false;
                     if v != m.val {
                         (m.val, m.len) = (v, lens[v]);
+                        moved = (m.s, m.e, m.d) != (m.len, m.len, 0);
                         (m.s, m.e, m.d) = (m.len, m.len, 0);
+                    }
+                    if moved && !pending[i] {
+                        pending[i] = true;
+                        exp_sc += 1;
                     }
                     false
                 }
@@ -201,6 +209,10 @@ fn exec(name: &str, scale: usize) {
             exp_h = (exp_h * 31 + m.s as u64 * 7 + m.e as u64 * 3 + m.d as u64) % P;
             if changed {
                 order.push(i as u64);
+                if !pending[i] {
+                    pending[i] = true;
+                    exp_sc += 1;
+                }
             }
             script.push_str(&format!("op({i}, {k}, {a}, {bb}, {ds}, {v});\n"));
         }
@@ -235,8 +247,8 @@ fn exec(name: &str, scale: usize) {
     if got != format!("{exp_ev},{exp_h2}") {
         die(format!("events: {got} != {exp_ev},{exp_h2}"));
     }
-    if tasks as u64 != exp_ev {
-        die(format!("tasks run {tasks} != expected select tasks {exp_ev}"));
+    if tasks as u64 != exp_ev + exp_sc {
+        die(format!("tasks run {tasks} != expected select tasks {exp_ev} + selectionchange tasks {exp_sc}"));
     }
     b.collect(&[]).unwrap_or_else(|e| die(format!("collect: {e:?}")));
     let (s, st) = (b.sched_stats(), b.stats());
@@ -244,7 +256,7 @@ fn exec(name: &str, scale: usize) {
         die(format!("not empty at the end: {s:?} events={}", st.events));
     }
     println!(
-        "{name:6} x{scale:<3} checksum=ok run={:.1}ms cpu={}ms peak_rss={:.1}MiB | ops={n} select_tasks={exp_ev} pumps={pumps} max_queue={max_queue} after: tasks={} events={} wrappers={}",
+        "{name:6} x{scale:<3} checksum=ok run={:.1}ms cpu={}ms peak_rss={:.1}MiB | ops={n} select_tasks={exp_ev} selectionchange_tasks={exp_sc} pumps={pumps} max_queue={max_queue} after: tasks={} events={} wrappers={}",
         t.elapsed().as_secs_f64() * 1e3,
         cpu_ms() - cpu0,
         status_kib("VmHWM:") as f64 / 1024.0,

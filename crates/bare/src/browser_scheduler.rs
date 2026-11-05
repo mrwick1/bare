@@ -79,11 +79,13 @@ pub struct SchedLimits {
     pub max_queued_message_bytes: usize,
     /// Queued `select` event tasks of text controls (`select-tasks`).
     pub max_select_tasks: usize,
+    /// Queued `selectionchange` tasks of text controls, at most one per control (`selectionchange-tasks`).
+    pub max_selectionchange_tasks: usize,
 }
 
 impl Default for SchedLimits {
     fn default() -> Self {
-        SchedLimits { max_timers: 1 << 16, max_timer_args: 256, max_ports: 1 << 14, max_queued_messages: 1 << 16, max_queued_message_bytes: 16 << 20, max_select_tasks: 1 << 14 }
+        SchedLimits { max_timers: 1 << 16, max_timer_args: 256, max_ports: 1 << 14, max_queued_messages: 1 << 16, max_queued_message_bytes: 16 << 20, max_select_tasks: 1 << 14, max_selectionchange_tasks: 1 << 14 }
     }
 }
 
@@ -95,6 +97,8 @@ enum Task {
     Deliver(ObjId),
     /// `select` event of a text control (`browser_selection.rs`).
     Select(NodeId),
+    /// `selectionchange` event of a text control (`browser_selection.rs`).
+    SelectionChange(NodeId),
 }
 
 struct Timer {
@@ -147,6 +151,8 @@ pub(crate) struct Sched {
     queued_bytes: usize,
     /// Queued `Task::Select`.
     selects: usize,
+    /// Queued `Task::SelectionChange`.
+    changes: usize,
     /// Nesting level of the timer task that runs now (0 outside a timer task).
     nesting: u32,
     halted: Option<Error>,
@@ -181,6 +187,7 @@ enum Run {
     Timer { id: u64, cb: Value, args: Vec<Value>, nesting: u32, repeat: bool },
     Deliver { port: ObjId, data: Value },
     Select(NodeId),
+    SelectionChange(NodeId),
     Nothing,
 }
 
@@ -226,7 +233,7 @@ impl Dom {
         let ports = &s.ports;
         s.tasks.retain(|_, t| match t {
             Task::Deliver(o) => ports.contains_key(o),
-            Task::Timer(_) | Task::Select(_) => true,
+            Task::Timer(_) | Task::Select(_) | Task::SelectionChange(_) => true,
         });
         s.queued = s.ports.values().map(|p| p.inbox.len()).sum();
         s.queued_bytes = s.ports.values().flat_map(|p| p.inbox.iter().map(|m| m.1)).sum();
@@ -243,13 +250,32 @@ impl Dom {
         Ok(key)
     }
 
-    /// Queue the `select` event task of a text control. The cap is checked before anything changes.
-    pub(crate) fn queue_select(&self, n: NodeId) -> R<()> {
-        if self.sched.borrow().selects >= self.sched.borrow().limits.max_select_tasks {
+    /// Check the caps of the tasks that a selection change would queue: `select` (always one per change) and
+    /// `selectionchange` (none when this input has one pending). Nothing changes. Call it before any state write.
+    pub(crate) fn selection_room(&self, n: NodeId, change: bool, select: bool) -> R<()> {
+        let s = self.sched.borrow();
+        if select && s.selects >= s.limits.max_select_tasks {
             return Err(self.lim("select-tasks"));
         }
-        self.schedule(self.now_ms(), Task::Select(n))?;
-        self.sched.borrow_mut().selects += 1;
+        if change && s.changes >= s.limits.max_selectionchange_tasks && !self.st.borrow().inputs.get(&n).is_some_and(|i| i.sc_pending) {
+            return Err(self.lim("selectionchange-tasks"));
+        }
+        Ok(())
+    }
+
+    /// Queue what a selection change needs, after `selection_room` said yes. The `selectionchange` task comes first
+    /// (the selection changes before HTML queues `select`). Selection API "schedule a selectionchange event": nothing
+    /// when this input has a task pending; else set the flag and queue.
+    pub(crate) fn queue_selection_tasks(&self, n: NodeId, change: bool, select: bool) -> R<()> {
+        if change && !self.st.borrow().inputs.get(&n).is_some_and(|i| i.sc_pending) {
+            self.schedule(self.now_ms(), Task::SelectionChange(n))?;
+            self.sched.borrow_mut().changes += 1;
+            self.st.borrow_mut().inputs.entry(n).or_default().sc_pending = true;
+        }
+        if select {
+            self.schedule(self.now_ms(), Task::Select(n))?;
+            self.sched.borrow_mut().selects += 1;
+        }
         Ok(())
     }
 
@@ -283,6 +309,14 @@ impl Dom {
             Task::Select(n) => {
                 s.selects -= 1;
                 Run::Select(n)
+            }
+            Task::SelectionChange(n) => {
+                s.changes -= 1;
+                // "Firing selectionchange event" step 1: the flag is cleared before anything is dispatched.
+                if let Some(i) = self.st.borrow_mut().inputs.get_mut(&n) {
+                    i.sc_pending = false;
+                }
+                Run::SelectionChange(n)
             }
             Task::Deliver(port) => match s.ports.get_mut(&port) {
                 Some(p) if p.keys.front() == Some(&key) => {
@@ -325,9 +359,9 @@ impl Dom {
                 }
                 Ok(())
             }
-            Run::Select(n) => it.host_scope(|it| {
+            Run::Select(n) | Run::SelectionChange(n) => it.host_scope(|it| {
                 it.charge(1)?;
-                self.fire_select(it, n)?;
+                self.fire_at_input(it, n, if matches!(run, Run::Select(_)) { "select" } else { "selectionchange" })?;
                 it.host_checkpoint().map(|_| ())
             }),
             Run::Deliver { port, data } => it.host_scope(|it| {

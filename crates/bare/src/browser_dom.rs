@@ -314,30 +314,43 @@ impl Dom {
 
     /// The value of an `<input>` as JS reads it.
     pub(crate) fn input_value_of(&self, n: NodeId) -> Option<String> {
-        let doc = self.doc.borrow();
-        let NodeData::Element { name, .. } = *doc.data(n) else { return None };
-        if doc.atom_str(name) != "input" || doc.is_foreign(n) {
-            return None;
-        }
-        if let Some(v) = self.st.borrow().inputs.get(&n).and_then(|i| i.value.clone()) {
-            return Some(v);
-        }
-        let attr = doc.find_atom("value").and_then(|a| doc.attr(n, a)).map(str::to_string);
-        Some(attr.unwrap_or_else(|| if matches!(input_kind(&doc, n), "checkbox" | "radio") { "on".into() } else { String::new() }))
+        self.with_input_value(n, str::to_string)
     }
 
-    fn put_input_value(&self, n: NodeId, v: String) -> R<()> {
-        let changed = self.input_value_of(n).as_deref() != Some(v.as_str());
-        let mut st = self.st.borrow_mut();
-        let old = st.inputs.get(&n).and_then(|i| i.value.as_ref()).map_or(0, String::len);
-        if st.input_bytes - old + v.len() > self.lim.max_text_bytes {
+    /// Run `f` on the value of an `<input>` as JS reads it, borrowed (no copy). `f` must not touch the DOM or its state.
+    pub(crate) fn with_input_value<T>(&self, n: NodeId, f: impl FnOnce(&str) -> T) -> Option<T> {
+        let doc = self.doc.borrow();
+        if !crate::browser_selection::is_html_input(&doc, n) {
+            return None;
+        }
+        let st = self.st.borrow();
+        if let Some(v) = st.inputs.get(&n).and_then(|i| i.value.as_deref()) {
+            return Some(f(v));
+        }
+        let attr = doc.find_atom("value").and_then(|a| doc.attr(n, a));
+        Some(f(attr.unwrap_or(if matches!(input_kind(&doc, n), "checkbox" | "radio") { "on" } else { "" })))
+    }
+
+    /// Set the dirty value. A value that differs puts the caret at the end (HTML: setting `value`), and when that
+    /// moves the selection of a text control, schedules its `selectionchange`. `it` is the JS caller that pays for
+    /// the scans; the test driver has none (see `Dom::selection_after_value`).
+    pub(crate) fn put_input_value(&self, it: Option<&mut Interp<'_>>, n: NodeId, v: String) -> R<()> {
+        let changed = self.with_input_value(n, |old| old != v) != Some(false);
+        let moved = if changed { self.selection_after_value(it, n, &v)? } else { false };
+        let old = self.st.borrow().inputs.get(&n).and_then(|i| i.value.as_ref()).map_or(0, String::len);
+        if self.st.borrow().input_bytes - old + v.len() > self.lim.max_text_bytes {
             return Err(self.lim("dom-input-bytes"));
         }
-        st.input_bytes = st.input_bytes - old + v.len();
-        let i = st.inputs.entry(n).or_default();
-        i.value = Some(v);
-        if changed {
-            i.sel = None; // the caret moves to the end (HTML: setting `value`)
+        self.selection_room(n, moved, false)?; // every cap is checked before the first write
+        self.queue_selection_tasks(n, moved, false)?;
+        {
+            let mut st = self.st.borrow_mut();
+            st.input_bytes = st.input_bytes - old + v.len();
+            let i = st.inputs.entry(n).or_default();
+            i.value = Some(v);
+            if changed {
+                i.sel = None; // the caret moves to the end (HTML: setting `value`)
+            }
         }
         Ok(())
     }
@@ -359,7 +372,7 @@ impl Dom {
             if t.len() > self.lim.max_string_bytes {
                 return Err(self.lim("dom-string"));
             }
-            self.put_input_value(n, t.to_string())?;
+            self.put_input_value(None, n, t.to_string())?;
         }
         if let Some(c) = checked {
             if !is_check {
@@ -776,6 +789,7 @@ pub(crate) fn clone_node(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value])
             };
             if let Some(mut i) = st.inputs.get(&src).cloned() {
                 i.sel = None; // the cloning steps copy value and checkedness, not the selection
+                i.sc_pending = false; // the clone has no task of its own
                 st.input_bytes += i.value.as_ref().map_or(0, String::len);
                 st.inputs.insert(c, i);
             }
@@ -1123,7 +1137,7 @@ pub(crate) fn set_input_value(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Va
         "checkbox" | "radio" | "submit" | "reset" | "button" | "image" | "hidden" => attr_set(d, it, n, "value", &s)?,
         "file" if !s.is_empty() => return Err(d.dom_err(it, "InvalidStateError", "This input element accepts a filename, which may only be programmatically set to the empty string.")),
         "file" => {}
-        _ => d.put_input_value(n, s)?,
+        _ => d.put_input_value(Some(it), n, s)?,
     }
     Ok(Value::Undefined)
 }
@@ -1161,8 +1175,10 @@ pub(crate) fn default_value(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Valu
 }
 
 pub(crate) fn set_default_value(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
-    input_el(d, it, this)?;
-    reflect_set(d, it, this, a, "value")
+    let n = input_el(d, it, this)?;
+    let s = d.string_arg(it, arg(a, 0))?;
+    d.set_value_attr(it, n, &s)?;
+    Ok(Value::Undefined)
 }
 
 pub(crate) fn default_checked(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
