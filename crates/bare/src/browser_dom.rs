@@ -36,6 +36,38 @@ pub(crate) fn next_in(doc: &Document, root: NodeId, cur: NodeId, depth: usize) -
     }
 }
 
+/// Like `next_in`, but a host's shadow tree is walked too: its root comes right after the host (one level down), then the light children of the host.
+/// This is for bounds only (the depth of a subtree): a query or `textContent` must use `next_in`, which never enters a shadow tree.
+fn next_composed(doc: &Document, root: NodeId, cur: NodeId, depth: usize) -> Option<(NodeId, usize)> {
+    if let Some(r) = doc.shadow_root(cur) {
+        return Some((r, depth + 1));
+    }
+    if let Some(c) = doc.children(cur).next() {
+        return Some((c, depth + 1));
+    }
+    let (mut n, mut d) = (cur, depth);
+    loop {
+        if n == root {
+            return None;
+        }
+        if let Some(s) = doc.next_sibling(n) {
+            return Some((s, d));
+        }
+        d -= 1;
+        match doc.parent(n) {
+            Some(p) => n = p,
+            None => {
+                // `n` is a shadow root that is done: go on with the light children of its host.
+                let host = doc.shadow_host(n)?;
+                if let Some(c) = doc.children(host).next() {
+                    return Some((c, d + 1));
+                }
+                n = host;
+            }
+        }
+    }
+}
+
 pub(crate) fn backtracking(s: &Selector) -> u32 {
     let n = s.compounds.len();
     s.compounds
@@ -114,10 +146,11 @@ impl Dom {
         Ok(())
     }
 
+    /// The number of steps up to the top of the shadow-including tree: a step is a parent link, or a root to its host.
     pub(crate) fn depth_of(&self, it: &mut Interp<'_>, n: NodeId) -> R<usize> {
         let doc = self.doc.borrow();
         let (mut d, mut cur) = (0, n);
-        while let Some(p) = doc.parent(cur) {
+        while let Some(p) = doc.parent_or_host(cur) {
             it.charge(1)?;
             d += 1;
             cur = p;
@@ -125,10 +158,11 @@ impl Dom {
         Ok(d)
     }
 
+    /// How deep the subtree of `n` goes, counting the shadow trees of its hosts (a root is one level below its host).
     fn height_of(&self, it: &mut Interp<'_>, n: NodeId) -> R<usize> {
         let doc = self.doc.borrow();
         let (mut cur, mut d, mut max) = (n, 0, 0);
-        while let Some((c, cd)) = next_in(&doc, n, cur, d) {
+        while let Some((c, cd)) = next_composed(&doc, n, cur, d) {
             it.charge(1)?;
             (cur, d) = (c, cd);
             max = max.max(d);
@@ -214,23 +248,25 @@ impl Dom {
             Text,
             Comment,
             Doctype,
+            Frag,
         }
         let kind = |n: NodeId| match self.data(n) {
             NodeData::Document => K::Doc,
+            NodeData::ShadowRoot => K::Frag,
             NodeData::Element { .. } => K::El,
             NodeData::Text(_) => K::Text,
             NodeData::Comment(_) => K::Comment,
             NodeData::Doctype(_) => K::Doctype,
         };
         let (pk, nk) = (kind(parent), kind(node));
-        if !matches!(pk, K::Doc | K::El) {
+        if !matches!(pk, K::Doc | K::El | K::Frag) {
             return Err(self.dom_err(it, "HierarchyRequestError", "This node type does not support this method."));
         }
         if nk == K::Doc {
             return Err(self.dom_err(it, "HierarchyRequestError", "A Document cannot be inserted."));
         }
         {
-            // `node` must not be `parent` or one of its ancestors.
+            // `node` must not be `parent` or one of its host-including ancestors (a root leads to its host).
             let doc = self.doc.borrow();
             let mut cur = Some(parent);
             while let Some(c) = cur {
@@ -239,7 +275,7 @@ impl Dom {
                     drop(doc);
                     return Err(self.dom_err(it, "HierarchyRequestError", "The new child element contains the parent."));
                 }
-                cur = doc.parent(c);
+                cur = doc.parent_or_host(c);
             }
         }
         if let Some(b) = before
@@ -272,7 +308,11 @@ impl Dom {
                 return Err(self.dom_err(it, "HierarchyRequestError", "This document cannot take that child here."));
             }
         }
-        let height = if self.doc.borrow().children(node).next().is_some() { self.height_of(it, node)? } else { 0 };
+        if nk == K::Frag {
+            // The standard inserts the children of a fragment. Not done: refuse, before anything changes.
+            return Err(Error::Unsupported(unsupported("inserting a ShadowRoot or DocumentFragment as a node (fragment insertion)")));
+        }
+        let height = if self.doc.borrow().children(node).next().is_some() || self.doc.borrow().shadow_root(node).is_some() { self.height_of(it, node)? } else { 0 };
         if self.depth_of(it, parent)? + 1 + height > self.lim.max_tree_depth {
             return Err(self.lim("dom-depth"));
         }
@@ -403,6 +443,7 @@ pub(crate) fn node_type(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) 
         NodeData::Comment(_) => 8.0,
         NodeData::Document => 9.0,
         NodeData::Doctype(_) => 10.0,
+        NodeData::ShadowRoot => 11.0,
     }))
 }
 
@@ -415,6 +456,7 @@ pub(crate) fn node_name(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) 
             NodeData::Text(_) => "#text".into(),
             NodeData::Comment(_) => "#comment".into(),
             NodeData::Document => "#document".into(),
+            NodeData::ShadowRoot => "#document-fragment".into(),
             NodeData::Doctype(sp) => doc.text(sp).to_string(),
         }
     };
@@ -512,25 +554,28 @@ pub(crate) fn is_connected(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value
     let n = d.nd(it, this)?;
     let doc = d.doc.borrow();
     let mut cur = n;
-    while let Some(p) = doc.parent(cur) {
+    // Shadow-including: a node of a shadow tree is connected when its host is.
+    while let Some(p) = doc.parent_or_host(cur) {
         it.charge(1)?;
         cur = p;
     }
     Ok(Value::Bool(cur == doc.root()))
 }
 
-/// `Node.getRootNode(options)`: the topmost ancestor, or the node itself when it has no parent. There are no shadow roots,
-/// so `composed` cannot change the answer, but its getter still runs (WebIDL). The options are read before the walk, so a
-/// getter that moves the node is seen by the walk. More than `max_tree_depth` ancestors is a limit, not a wrong root.
+/// `Node.getRootNode(options)`: the topmost ancestor, or the node itself when it has no parent. A shadow root is the root of its own tree; with
+/// `composed` true the walk goes on from a shadow root to its host. The options are read before the walk (the getter runs once), so a
+/// getter that moves the node is seen by the walk. More than `max_tree_depth` steps is a limit, not a wrong root.
 pub(crate) fn get_root_node(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
     let attr = matches!(this, Value::Object(o) if d.attr.s.borrow().attrs.contains_key(&o));
     let n = if attr { None } else { Some(d.nd(it, this)?) };
+    let mut composed = false;
     match arg(a, 0) {
         // WebIDL dictionary: undefined and null are an empty dictionary; any other primitive is a TypeError.
         Value::Undefined | Value::Null => {}
         opts @ Value::Object(_) => {
             let k = d.key(it, "composed")?;
-            it.get_value(opts, k)?;
+            let v = it.get_value(opts, k)?;
+            composed = it.to_js_bool(v)?;
         }
         _ => return Err(it.type_error("Failed to execute 'getRootNode' on 'Node': parameter 1 is not of type 'GetRootNodeOptions'.")),
     }
@@ -539,7 +584,7 @@ pub(crate) fn get_root_node(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Valu
     let root = {
         let doc = d.doc.borrow();
         let (mut cur, mut depth) = (n, 0);
-        while let Some(p) = doc.parent(cur) {
+        while let Some(p) = if composed { doc.parent_or_host(cur) } else { doc.parent(cur) } {
             it.charge(1)?;
             depth += 1;
             if depth > d.lim.max_tree_depth {
@@ -635,7 +680,7 @@ pub(crate) fn text_content(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value
         match *doc.data(n) {
             NodeData::Document | NodeData::Doctype(_) => return Ok(Value::Null),
             NodeData::Text(sp) | NodeData::Comment(sp) => doc.text(sp).to_string(),
-            NodeData::Element { .. } => {
+            NodeData::Element { .. } | NodeData::ShadowRoot => {
                 let mut s = String::new();
                 let (mut cur, mut depth) = (n, 0);
                 while let Some((c, cd)) = next_in(&doc, n, cur, depth) {
@@ -661,7 +706,7 @@ pub(crate) fn set_text_content(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[V
     let v = arg(a, 0);
     let s = if matches!(v, Value::Null | Value::Undefined) { String::new() } else { d.string_arg(it, v)? };
     match d.data(n) {
-        NodeData::Element { .. } => {
+        NodeData::Element { .. } | NodeData::ShadowRoot => {
             let mut doc = d.doc.borrow_mut();
             d.room(&doc, !s.is_empty() as usize, s.len())?;
             while let Some(c) = doc.children(n).next() {
@@ -766,6 +811,10 @@ pub(crate) fn clone_node(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value])
     if matches!(d.data(n), NodeData::Document) {
         return Err(d.dom_err(it, "NotSupportedError", "Cloning a Document is not supported."));
     }
+    // DOM Standard cloneNode(): a shadow root cannot be cloned. (A host is cloned without its root: `clonable` is always false here.)
+    if matches!(d.data(n), NodeData::ShadowRoot) {
+        return Err(d.dom_err(it, "NotSupportedError", "ShadowRoot nodes are not clonable."));
+    }
     // Count first, so a clone that does not fit makes no node at all.
     let (mut count, mut bytes, mut attrs, mut input_bytes) = (1usize, 0usize, 0usize, 0usize);
     {
@@ -818,7 +867,7 @@ pub(crate) fn clone_node(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value])
                     let t = doc.text(sp).to_string();
                     doc.create_doctype(&t)
                 }
-                NodeData::Document => unreachable!("checked above"),
+                NodeData::Document | NodeData::ShadowRoot => unreachable!("checked above, and a root is never a child"),
             };
             d.copy_script_started(src, c);
             if let Some(mut i) = st.inputs.get(&src).cloned() {

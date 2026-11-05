@@ -748,7 +748,7 @@ fn set_port_onmessage(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) ->
             }
             st.next_id += 1;
             let id = st.next_id;
-            list.push(Listener { id, ty: "message".into(), cb, capture: false, once: false, passive: false });
+            list.push(Listener { id, ty: "message".into(), cb, capture: false, once: false, passive: false, handler: false });
             st.n_listeners += 1;
             d.sched.borrow_mut().ports.get_mut(&port).expect("checked").handler = Some(id);
         }

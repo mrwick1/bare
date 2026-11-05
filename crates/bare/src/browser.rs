@@ -19,7 +19,7 @@
 //!
 //! Supported (tested):
 //! - Globals: `window`, `self`, `globalThis` (the same object), `document`, `Node`, `Element`, `HTMLElement`,
-//!   `HTMLInputElement`, `HTMLIFrameElement` (inert brand only: no `contentWindow`, no nested context, no fetch), `HTMLLinkElement`, `CharacterData`, `Text`, `Comment`, `Document`, `EventTarget`, `Event`, `CustomEvent`,
+//!   `HTMLInputElement`, `HTMLIFrameElement` (inert brand only: no `contentWindow`, no nested context, no fetch), `HTMLLinkElement`, `CharacterData`, `Text`, `Comment`, `Document`, `DocumentFragment` and `ShadowRoot` (illegal constructors), `EventTarget`, `Event`, `CustomEvent`,
 //!   `DOMException`.
 //! - Node: `nodeType nodeName nodeValue parentNode parentElement childNodes firstChild lastChild previousSibling
 //!   nextSibling ownerDocument isConnected textContent appendChild insertBefore removeChild replaceChild cloneNode
@@ -43,9 +43,10 @@
 //! Gates and deviations (on purpose, none is silently faked)
 //! - Lists (`childNodes`, `children`, `querySelectorAll`, `getElementsByTagName`, `getElementsByClassName`) are plain
 //!   snapshot arrays, not live `NodeList`/`HTMLCollection`.
+//!   The one live `NodeList` is the result of `document.getElementsByName` (`browser_nodelist.rs`).
 //! - A JS string with a lone surrogate cannot be stored in the UTF-8 document: `Error::Unsupported`. Valid pairs round-trip.
 //! - Namespaces are in `browser_namespace.rs` (read its header): HTML, SVG and MathML elements, attributes in no namespace, XML,
-//!   XMLNS and XLink. Any other namespace is `Unsupported`. Shadow DOM is absent. `new Document()`, `DocumentFragment`, `outerHTML`, `insertAdjacentHTML`,
+//!   XMLNS and XLink. Any other namespace is `Unsupported`. Shadow roots are a tree foundation only (`browser_shadow.rs`: read its header for the gates). `new Document()`, `createDocumentFragment`, `new DocumentFragment()`, `outerHTML`, `insertAdjacentHTML`,
 //!   `dataset`, `style`, `before/after/replaceWith`, layout APIs, `location` and
 //!   network are absent. Timers, `queueMicrotask`, `performance.now` and `MessageChannel` are in `browser_scheduler.rs`. `Element.attributes` and `Attr` are in `browser_attr.rs`.
 //! - `addEventListener` option `signal` is `Unsupported`. `isTrusted` is always false. Events made by the test driver
@@ -70,6 +71,7 @@ use crate::browser_namespace as ns;
 use crate::browser_attr as at;
 use crate::browser_events as ev;
 use crate::browser_selection as sel;
+use crate::browser_shadow as sh;
 pub use crate::browser_scheduler::{Pump, SchedLimits, SchedStats};
 use bare_css::selector::{Selector, parse_selector_list};
 use bare_html::dom::{Document, NodeData, NodeId, Ns};
@@ -150,6 +152,8 @@ pub(crate) struct Listener {
     pub capture: bool,
     pub once: bool,
     pub passive: bool,
+    /// The listener of an event handler property (`oninput`): `cb` is the handler's current value (`browser_handlers.rs`).
+    pub handler: bool,
 }
 
 pub(crate) struct EventState {
@@ -229,6 +233,8 @@ pub(crate) struct Protos {
     pub text: ObjId,
     pub comment: ObjId,
     pub document: ObjId,
+    pub fragment: ObjId,
+    pub shadow: ObjId,
     pub event: ObjId,
     pub custom: ObjId,
     pub focus: ObjId,
@@ -245,6 +251,8 @@ pub(crate) enum P {
     Link,
     CharData,
     Document,
+    Fragment,
+    Shadow,
     Event,
     Custom,
     Focus,
@@ -293,6 +301,8 @@ pub struct Dom {
     pub(crate) computed: crate::browser_computed::Computed,
     /// `Element.attributes`, `NamedNodeMap` and `Attr` (`browser_attr.rs`).
     pub(crate) attr: crate::browser_attr::AttrHost,
+    /// `Document.getElementsByName` and the live `NodeList` (`browser_nodelist.rs`).
+    pub(crate) nl: crate::browser_nodelist::NodeListHost,
 }
 
 impl Host for Dom {
@@ -318,6 +328,7 @@ impl Host for Dom {
         crate::browser_style::roots(self, out);
         crate::browser_computed::roots(self, out);
         at::roots(self, out);
+        crate::browser_nodelist::roots(self, out);
     }
 
     fn trace(&self, owner: ObjId, out: &mut Vec<Value>) {
@@ -327,6 +338,7 @@ impl Host for Dom {
         crate::browser_style::trace(self, owner, out);
         crate::browser_computed::trace(self, owner, out);
         at::trace(self, owner, out);
+        crate::browser_nodelist::trace(self, owner, out);
         let st = self.st.borrow();
         if let Some(&t) = st.by_obj.get(&owner) {
             for l in st.listeners.get(&t).into_iter().flatten() {
@@ -336,6 +348,8 @@ impl Host for Dom {
                 let doc = self.doc.borrow();
                 out.extend(doc.parent(n).and_then(|p| st.by_node.get(&p)).map(|&o| Value::Object(o)));
                 out.extend(doc.children(n).filter_map(|c| st.by_node.get(&c)).map(|&o| Value::Object(o)));
+                // A host and its root (either mode) keep each other's wrapper alive, so a detached pair is one cycle and an expando is not lost.
+                out.extend(doc.shadow_host(n).into_iter().chain(doc.shadow_root(n)).filter_map(|x| st.by_node.get(&x)).map(|&o| Value::Object(o)));
             }
         } else if let Some(e) = st.events.get(&owner) {
             out.extend([e.target, e.current, e.detail, e.related]);
@@ -357,6 +371,7 @@ impl Host for Dom {
         crate::browser_style::prune(self, live);
         crate::browser_computed::prune(self, live);
         at::prune(self, live);
+        crate::browser_nodelist::prune(self, live);
         let mut st = self.st.borrow_mut();
         let st = &mut *st;
         st.by_obj.retain(|&o, t| matches!(t, Target::Window) || live(o));
@@ -379,6 +394,9 @@ impl Host for Dom {
     }
 
     fn fill_indexed(&self, it: &mut Interp<'_>, owner: ObjId, index: u32) -> R<()> {
+        if crate::browser_nodelist::fill(self, it, owner, index)? {
+            return Ok(());
+        }
         at::fill(self, it, owner, index)
     }
 }
@@ -490,7 +508,8 @@ impl Dom {
                 chain.push(n);
                 cur = doc.parent(n);
             }
-            if st.by_obj.len() + chain.len() > self.lim.max_wrappers {
+            let attrs = self.attr.s.borrow();
+            if st.by_obj.len() + attrs.attrs.len() + attrs.maps.len() + self.nl.s.borrow().lists.len() + chain.len() > self.lim.max_wrappers {
                 return Err(self.lim("dom-wrappers"));
             }
         }
@@ -515,6 +534,7 @@ impl Dom {
                     NodeData::Text(_) => p.text,
                     NodeData::Comment(_) => p.comment,
                     NodeData::Document => p.document,
+                    NodeData::ShadowRoot => p.shadow,
                     NodeData::Doctype(_) => p.node,
                 }
             };
@@ -608,6 +628,8 @@ impl Dom {
             P::Link => ps.link,
             P::CharData => ps.chardata,
             P::Document => ps.document,
+            P::Fragment => ps.fragment,
+            P::Shadow => ps.shadow,
             P::Event => ps.event,
             P::Custom => ps.custom,
             P::Focus => ps.focus,
@@ -645,17 +667,19 @@ impl Dom {
         let text = mk(it, chardata)?;
         let comment = mk(it, chardata)?;
         let document = mk(it, node)?;
+        let fragment = mk(it, node)?;
+        let shadow = mk(it, fragment)?;
         let event = mk(it, op)?;
         let custom = mk(it, event)?;
         let focus = mk(it, event)?;
         let domexc = mk(it, ep)?;
-        let _ = self.p.set(Protos { et, node, element, html, svg, input, iframe, link, chardata, text, comment, document, event, custom, focus, domexc });
+        let _ = self.p.set(Protos { et, node, element, html, svg, input, iframe, link, chardata, text, comment, document, fragment, shadow, event, custom, focus, domexc });
         // The global object is `window`: it is an EventTarget.
         if let Err(e) = it.heap.set_prototype_of(g, Some(et)) {
             return Err(it.heap_error(e));
         }
         self.st.borrow_mut().by_obj.insert(g, Target::Window);
-        let mut fixed = vec![et, node, element, html, svg, input, iframe, link, chardata, text, comment, document, event, custom, focus, domexc];
+        let mut fixed = vec![et, node, element, html, svg, input, iframe, link, chardata, text, comment, document, fragment, shadow, event, custom, focus, domexc];
 
         // methods and accessors
         for d in DEFS {
@@ -681,7 +705,7 @@ impl Dom {
         }
 
         // interface objects
-        let ifaces: [(&str, ObjId, Option<H>); 16] = [
+        let ifaces: [(&str, ObjId, Option<H>); 18] = [
             ("EventTarget", et, Some(ev::event_target_ctor as H)),
             ("Node", node, None),
             ("Element", element, None),
@@ -694,6 +718,8 @@ impl Dom {
             ("Text", text, None),
             ("Comment", comment, None),
             ("Document", document, None),
+            ("DocumentFragment", fragment, None),
+            ("ShadowRoot", shadow, None),
             ("Event", event, Some(ev::event_ctor as H)),
             ("CustomEvent", custom, Some(ev::custom_event_ctor as H)),
             ("FocusEvent", focus, Some(crate::browser_focus::focus_event_ctor as H)),
@@ -712,7 +738,7 @@ impl Dom {
         }
         // constants
         for (iface, consts) in [
-            ("Node", &[("ELEMENT_NODE", 1.0), ("TEXT_NODE", 3.0), ("COMMENT_NODE", 8.0), ("DOCUMENT_NODE", 9.0), ("DOCUMENT_TYPE_NODE", 10.0)][..]),
+            ("Node", &[("ELEMENT_NODE", 1.0), ("TEXT_NODE", 3.0), ("COMMENT_NODE", 8.0), ("DOCUMENT_NODE", 9.0), ("DOCUMENT_TYPE_NODE", 10.0), ("DOCUMENT_FRAGMENT_NODE", 11.0)][..]),
             ("Event", &[("NONE", 0.0), ("CAPTURING_PHASE", 1.0), ("AT_TARGET", 2.0), ("BUBBLING_PHASE", 3.0)][..]),
         ] {
             let f = ctors.iter().find(|c| c.0 == iface).expect("interface").1;
@@ -738,9 +764,11 @@ impl Dom {
         crate::browser_loader::install(self, it)?;
         self.install_platform(it)?;
         at::install(self, it)?;
+        crate::browser_nodelist::install(self, it)?;
         crate::browser_console::install(self, it)?;
         crate::browser_style::install(self, it)?;
-        crate::browser_computed::install(self, it)
+        crate::browser_computed::install(self, it)?;
+        crate::browser_handlers::install(self, it)
     }
 
     pub(crate) fn define_accessor(&self, it: &mut Interp<'_>, o: ObjId, key: PropertyKey, get: ObjId, set: Option<ObjId>) -> R<()> {
@@ -763,7 +791,7 @@ pub(crate) fn illegal_constructor(_: &Dom, it: &mut Interp<'_>, _: Value, _: &[V
 use Kind::{Accessor as A, Get as G, Method as M};
 use P::*;
 
-const PARENT: &[P] = &[Element, Document];
+const PARENT: &[P] = &[Element, Document, Fragment];
 const CHILD: &[P] = &[Element, CharData];
 
 /// Every host method. The order is the order of function ids, but nothing depends on it.
@@ -825,6 +853,14 @@ pub(crate) static DEFS: &[Def] = &[
     Def { on: &[Element], name: "setAttributeNS", len: 3, kind: M(ns::set_attribute_ns) },
     Def { on: &[Element], name: "hasAttributeNS", len: 2, kind: M(ns::has_attribute_ns) },
     Def { on: &[Element], name: "removeAttributeNS", len: 2, kind: M(ns::remove_attribute_ns) },
+    Def { on: &[Element], name: "attachShadow", len: 1, kind: M(sh::attach_shadow) },
+    Def { on: &[Element], name: "shadowRoot", len: 0, kind: G(sh::shadow_root) },
+    Def { on: &[Shadow], name: "mode", len: 0, kind: G(sh::mode) },
+    Def { on: &[Shadow], name: "delegatesFocus", len: 0, kind: G(sh::flag_false) },
+    Def { on: &[Shadow], name: "slotAssignment", len: 0, kind: G(sh::slot_assignment) },
+    Def { on: &[Shadow], name: "clonable", len: 0, kind: G(sh::flag_false) },
+    Def { on: &[Shadow], name: "serializable", len: 0, kind: G(sh::flag_false) },
+    Def { on: &[Shadow], name: "host", len: 0, kind: G(sh::host) },
     Def { on: &[Element], name: "matches", len: 1, kind: M(nd::matches_selector) },
     Def { on: &[Element], name: "closest", len: 1, kind: M(nd::closest) },
     Def { on: CHILD, name: "remove", len: 0, kind: M(nd::remove) },
@@ -832,11 +868,12 @@ pub(crate) static DEFS: &[Def] = &[
     Def { on: &[CharData], name: "length", len: 0, kind: G(nd::data_length) },
     Def { on: &[Document], name: "createElement", len: 1, kind: M(nd::create_element) },
     Def { on: &[Document], name: "createElementNS", len: 2, kind: M(ns::create_element_ns) },
+    Def { on: &[Document], name: "getElementsByName", len: 1, kind: M(crate::browser_nodelist::get_elements_by_name) },
     Def { on: &[Document], name: "createAttribute", len: 1, kind: M(at::create_attribute) },
     Def { on: &[Document], name: "createAttributeNS", len: 2, kind: M(at::create_attribute_ns) },
     Def { on: &[Document], name: "createTextNode", len: 1, kind: M(nd::create_text_node) },
     Def { on: &[Document], name: "createComment", len: 1, kind: M(nd::create_comment) },
-    Def { on: &[Document], name: "getElementById", len: 1, kind: M(nd::get_element_by_id) },
+    Def { on: &[Document, Fragment], name: "getElementById", len: 1, kind: M(nd::get_element_by_id) },
     Def { on: &[Document], name: "documentElement", len: 0, kind: G(nd::document_element) },
     Def { on: &[Document], name: "head", len: 0, kind: G(nd::head) },
     Def { on: &[Document], name: "body", len: 0, kind: G(nd::body) },
@@ -937,6 +974,7 @@ impl Browser {
             style: Default::default(),
             computed: Default::default(),
             attr: Default::default(),
+            nl: Default::default(),
         });
         it.set_host(dom.clone())?;
         it.heap.set_indexed_source(dom.clone());

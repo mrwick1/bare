@@ -178,7 +178,7 @@ impl Dom {
     /// Is `o` one of this module's objects (so not plain data for structured clone)?
     pub(crate) fn is_platform_object(&self, o: ObjId) -> bool {
         let s = self.plat.s.borrow();
-        s.mql.contains_key(&o) || s.lists.contains_key(&o) || s.iters.contains_key(&o) || self.is_style_object(o) || self.is_attr_object(o)
+        s.mql.contains_key(&o) || s.lists.contains_key(&o) || s.iters.contains_key(&o) || self.is_style_object(o) || self.is_attr_object(o) || self.is_nodelist_object(o)
     }
 
     pub(crate) fn pl_limits(&self) -> PlatformLimits {
@@ -380,7 +380,7 @@ fn onchange_set(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
             }
             st.next_id += 1;
             let id = st.next_id;
-            st.listeners.entry(t).or_default().push(Listener { id, ty: Rc::from("change"), cb: f, capture: false, once: false, passive: false });
+            st.listeners.entry(t).or_default().push(Listener { id, ty: Rc::from("change"), cb: f, capture: false, once: false, passive: false, handler: false });
             st.n_listeners += 1;
             drop(st);
             d.plat.s.borrow_mut().mql.get_mut(&o).expect("checked").handler = Some(id);

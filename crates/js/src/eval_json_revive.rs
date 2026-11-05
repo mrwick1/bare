@@ -101,12 +101,12 @@ impl<'p> Interp<'p> {
             }
             (None, len)
         } else {
-            let slots = h!(self, self.heap.own_key_slots(o));
+            let slots = hx!(self, self.heap.own_key_slots(o));
             if slots > remaining {
                 return Err(nodes_limit());
             }
             self.spend(slots as u64)?;
-            let mut list = h!(self, self.heap.own_keys(o));
+            let mut list = hx!(self, self.heap.own_keys(o));
             let mut n = 0;
             for i in 0..list.len() {
                 let k = list[i];

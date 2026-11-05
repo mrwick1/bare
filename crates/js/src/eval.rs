@@ -3026,11 +3026,12 @@ impl<'p> Interp<'p> {
 
     /// Charge virtual view indices before materializing their key list.
     fn property_keys(&mut self, o: ObjId) -> Res<Vec<PropertyKey>> {
-        let len = h!(self, self.heap.virtual_len(o));
+        // `hx!`: a host-indexed object whose host cache is stale asks to be filled first (`Host::fill_indexed`).
+        let len = hx!(self, self.heap.virtual_len(o));
         if len != 0 {
             self.spend(len as u64)?;
         }
-        Ok(h!(self, self.heap.own_keys(o)))
+        Ok(hx!(self, self.heap.own_keys(o)))
     }
 
     fn for_in_keys(&mut self, v: Value) -> Res<Vec<PropertyKey>> {

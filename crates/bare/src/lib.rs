@@ -6,14 +6,21 @@
 pub mod browser;
 mod browser_dom;
 mod browser_fragment;
+mod browser_shadow;
 mod browser_events;
+mod browser_handlers;
+#[cfg(test)]
+mod browser_handler_tests;
 mod browser_focus;
 #[cfg(test)]
 mod browser_focus_tests;
 mod browser_namespace;
 mod browser_attr;
+mod browser_nodelist;
 #[cfg(test)]
 mod browser_attr_tests;
+#[cfg(test)]
+mod browser_nodelist_tests;
 pub mod browser_fetch;
 pub mod browser_console;
 #[cfg(test)]
@@ -40,6 +47,8 @@ mod browser_iframe_tests;
 mod browser_link_tests;
 #[cfg(test)]
 mod browser_root_node_tests;
+#[cfg(test)]
+mod browser_shadow_tests;
 #[cfg(test)]
 mod browser_fragment_tests;
 #[cfg(test)]
