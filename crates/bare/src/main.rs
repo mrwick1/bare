@@ -8,6 +8,7 @@
 //! `--run` loads the page and runs its classic scripts, its timers and `fetch` calls (see `browser_loader.rs`), then prints a short
 //! sanitized status. It prints no source, headers, bodies or query strings.
 //! `--paint=out.png page.html` paints a local file into a PNG of the window size, with no network (see `paint_file`).
+//! `--window page.html` (or an `http(s)` URL) opens a Wayland window that shows the painted page (see `show_window`).
 //! `--width=900` sets the width of the window (1280 if not given).
 //!
 //! Comments compare Rust with JavaScript, because you know JS.
@@ -43,6 +44,7 @@ fn main() {
     // `find_map`: the first flag that starts with `--width=`, without that start. JS: `args.find(...)?.slice(8)`.
     let viewport = (width.unwrap_or(VIEWPORT.0), VIEWPORT.1);
     let paint = args.iter().find_map(|a| a.strip_prefix("--paint="));
+    let window = args.iter().any(|a| a == "--window");
     let arg = match args.iter().find(|a| !a.starts_with("--")) {
         // Get the first word that is not a flag: the URL.
         // It may be missing. Rust makes us handle that case.
@@ -61,6 +63,9 @@ fn main() {
 
     if let Some(out) = paint {
         std::process::exit(paint_file(arg, out, viewport));
+    }
+    if window {
+        std::process::exit(show_window(arg, viewport));
     }
     if run {
         // The session loads the first document itself (one verified path for every document).
@@ -228,18 +233,34 @@ fn computed_styles(doc: &mut bare_html::dom::Document, page: Option<&Url>, viewp
     rules.compute(doc)
 }
 
-/// `--paint=OUT.png FILE.html`: lay out a local file and write the picture of the window as a PNG. No network: the
-/// `<link>` style sheets are not fetched (a note says so), the `<style>` elements work.
+/// Load a page for `--paint` and `--window`: a local file, read with no network (its `<link>` style sheets are not
+/// fetched, the `<style>` elements work), or an `http(s)` URL (its style sheets are fetched). It returns the parsed
+/// document with its style, ready for layout.
+fn load_page(arg: &str, viewport: (f32, f32)) -> Result<(bare_html::dom::Document, cascade::Styles), String> {
+    let (text, url) = if arg.starts_with("http://") || arg.starts_with("https://") {
+        let url = Url::parse(arg).map_err(|e| format!("{arg}: {e}"))?;
+        let r = http::Client::new().get(&url).map_err(|e| format!("{arg}: {e}"))?;
+        if r.status != 200 {
+            eprintln!("status: {}", r.status);
+        }
+        (encoding::decode(&r.body, r.header("content-type")), Some(url))
+    } else {
+        (encoding::decode(&std::fs::read(arg).map_err(|e| format!("{arg}: {e}"))?, None), None)
+    };
+    let mut doc = bare_html::tree::parse(&text);
+    let styles = computed_styles(&mut doc, url.as_ref(), viewport);
+    Ok((doc, styles))
+}
+
+/// `--paint=OUT.png FILE.html`: lay out a page and write the picture of the window as a PNG.
 fn paint_file(path: &str, out: &str, viewport: (f32, f32)) -> i32 {
-    let text = match std::fs::read(path) {
-        Ok(bytes) => encoding::decode(&bytes, None),
+    let (doc, computed) = match load_page(path, viewport) {
+        Ok(page) => page,
         Err(e) => {
-            eprintln!("error: {path}: {e}");
+            eprintln!("error: {e}");
             return 1;
         }
     };
-    let mut doc = bare_html::tree::parse(&text);
-    let computed = computed_styles(&mut doc, None, viewport);
     let result = bare_layout::layout(&doc, &computed, viewport);
     let canvas = bare_paint::capture(&doc, &computed, &result, viewport.0 as u32, viewport.1 as u32);
     match bare_paint::png::write_file(&canvas, std::path::Path::new(out)) {
@@ -249,6 +270,62 @@ fn paint_file(path: &str, out: &str, viewport: (f32, f32)) -> i32 {
         }
         Err(e) => {
             eprintln!("error: {out}: {e}");
+            1
+        }
+    }
+}
+
+/// The page in the window. A new size lays the page out again at that size and makes a new canvas. The style is not
+/// computed again (a `@media` rule or a `vw` length does not follow the resize; S4 topic 6 does that). A frame paints the
+/// layout of the last size.
+struct Page {
+    doc: bare_html::dom::Document,
+    styles: cascade::Styles,
+    layout: Option<bare_layout::fragment::Layout>,
+    painter: bare_paint::Painter,
+    canvas: bare_paint::canvas::Canvas,
+    /// For `BARE_WINDOW_STATS`: when the program started, and the time that the first frame was made.
+    started: std::time::Instant,
+    first_frame: Option<std::time::Duration>,
+}
+
+impl bare_window::App for Page {
+    fn resize(&mut self, width: u32, height: u32) {
+        self.layout = Some(bare_layout::layout(&self.doc, &self.styles, (width as f32, height as f32)));
+        self.canvas = bare_paint::canvas::Canvas::new(width, height);
+    }
+
+    fn frame(&mut self, _: &mut bare_window::Control) -> &[u32] {
+        let layout = self.layout.as_ref().expect("the window calls `resize` before `frame`");
+        self.painter.paint(&self.doc, &self.styles, layout, &mut self.canvas);
+        self.first_frame.get_or_insert_with(|| self.started.elapsed());
+        &self.canvas.pixels
+    }
+}
+
+/// `--window PAGE`: open a window that shows the page, and run until it closes. With `BARE_WINDOW_STATS` set, print
+/// the frame, buffer and wake-up counts and the time of the first frame to stderr when the window closes.
+fn show_window(arg: &str, viewport: (f32, f32)) -> i32 {
+    let started = std::time::Instant::now();
+    let (doc, styles) = match load_page(arg, viewport) {
+        Ok(page) => page,
+        Err(e) => {
+            eprintln!("error: {e}");
+            return 1;
+        }
+    };
+    let config = bare_window::Config { title: format!("bare: {arg}"), app_id: "bare".into(), size: (viewport.0 as u32, viewport.1 as u32) };
+    let mut page = Page { doc, styles, layout: None, painter: bare_paint::Painter::new(), canvas: bare_paint::canvas::Canvas::new(1, 1), started, first_frame: None };
+    let result = bare_window::Window::open(&config).and_then(|w| w.run(&mut page));
+    match result {
+        Ok(stats) => {
+            if std::env::var_os("BARE_WINDOW_STATS").is_some() {
+                eprintln!("{stats:?}, first frame {:?}", page.first_frame);
+            }
+            0
+        }
+        Err(e) => {
+            eprintln!("error: {e}");
             1
         }
     }

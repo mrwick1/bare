@@ -2322,3 +2322,79 @@ Problems seen, not changed:
 - A getter that reads `typeof this` on a primitive gives the primitive type in bare. Node (sloppy mode) gives "object".
 - `browser_fetch_tests::reused_connections_and_posts_are_never_resent` failed once in a full parallel run and passed in each of 3 solo runs and in the next full run. Hypothesis: a timing race in the test server.
 - `tools/js/number_check.sh` printed `limit` for `math_unary_matrix` on the Node side once while the machine was busy. It passed on the next run.
+
+## Wayland window
+
+S4 topic 2. The crate is `bare-window` (`crates/window/`). Date: 2026-11-05. Machine: archMachine (Hyprland, Wayland, 16 cores), release build. `bare --window FILE.html` opens a window with the painted page. The argument can also be an `http(s)` URL: it goes through `get` and the style sheet loader of `--layout`, with no scripts.
+
+### Design
+
+- The interface is small (`lib.rs`). The program implements `App`: `resize(w, h)` says the size, `frame(ctl)` gives `w * h` pixels. `Control` lets a frame ask to close or to draw again. `Waker` is a handle that wakes the loop from another thread and asks for a frame (a timer or a fetch will use it). `Window::open` connects, `run` shows the window and blocks until it closes.
+- Only `wayland.rs` knows Wayland. `redraw.rs` (when to draw) and `slots.rs` (which buffer to use) are plain logic with unit tests, so a port to Windows or macOS keeps them. No trait object: a port adds a module with the same names and the app does not change.
+- Event loop: `dispatch_pending`, one draw, `flush`, then `poll` on the Wayland socket and on a pipe for the `Waker`, with no timeout. The window never wakes by itself. There is no timer, no polling and no thread. The loop uses `prepare_read`, so a second thread could read the socket later.
+- Buffers: `wl_shm` `XRGB8888`, two slots. Each slot has its own pool (`RawPool`, one `memfd`) and one `wl_buffer`. A slot is busy from `commit` until `wl_buffer.release`. A busy slot is never drawn into and never attached. A free slot of the right size is used again, so a window that keeps its size allocates nothing after its first two frames. A free slot of another size is destroyed (`wl_buffer.destroy`, then the pool is unmapped and closed) and made again at the new size.
+- Frames: the first `configure` gives the size, and nothing is drawn before it. A frame is drawn only when all four hold: something changed, the window has a size, the callback of the last frame came (`wl_surface.frame`), and a slot is free. Many events in one round make one draw. A `configure` with the size that was already drawn (a focus change) changes nothing.
+- Resize: the compositor sends a size, which is recorded and acknowledged by the toolkit. The next draw calls `App::resize`, and `bare` then lays the page out again at the new size and makes a new canvas. The commit with the new size is the first one that the compositor sees, so the old frame stays until the new one is ready. If both slots are busy, the resize waits for a `release`.
+- Copy: the canvas (`Vec<u32>`) is copied into the shared buffer row by row (`to_le_bytes`). For 1280 by 800 this takes 0.09 to 0.10 ms, the same as a `memcpy` (4 MB, warm). Painting straight into the shared memory would save that, and needs `Canvas` to borrow a slice. Not done: 0.1 ms is under 5% of a frame.
+- Size limits: a side is at least 1 and at most 8192 px (256 MB for a buffer). Size 0 from the compositor means "your choice": the first time it is the `--width` size (1280 by 800), later the size we have.
+- Close: `xdg_toplevel.close` or `Control::close` ends the loop. The buffers and the window are dropped, and the socket is flushed before it closes.
+- HiDPI: not done. Paint draws one canvas pixel for each CSS pixel and has no device pixel ratio. A buffer scale of 2 with a canvas of the same size would show the page at half size. So the buffer scale stays 1, and a compositor with a scale above 1 enlarges the picture (a blurry window). A sharp window needs a scale in paint (rectangles, glyph size, snapping) and in layout (`vw`, media queries): that is a topic of its own. `OutputState` is bound, so a later topic can read `scale_factor` and `wp_fractional_scale` without a change to the connection code.
+- Input: not here (S4 topic 4). The toolkit is built without `xkbcommon` and `calloop`, so no key map code is linked yet. Keyboard text needs `xkbcommon` then (libxkbcommon 1.13 is installed).
+- Style is computed once, at load. A resize runs layout and paint only. A `@media` rule or a `vw` length does not follow a resize until S4 topic 6.
+
+### Crate choice
+
+Two spikes in `scratchpad`, not kept: a window that fills one color, in the stripped release binary (empty `main`: 343,512 B). Both ran 10 s idle on a hyprcage screen.
+
+| Candidate | Binary (stripped) | Over an empty `main` | RSS idle | CPU ticks, context switches in 10 s idle |
+| --- | ---: | ---: | ---: | --- |
+| `bare-window` (smithay-client-toolkit 0.21.1, no default features) | 856,288 B | +512,776 B | 10.6 MB | 0, 0 |
+| winit 0.30.13 (`wayland` only) with softbuffer 0.4 (`wayland` only) | 1,850,848 B | +1,507,336 B | 12.4 MB | 0, 0 |
+
+Choice: smithay-client-toolkit. Both sleep when idle. The toolkit costs a third of the binary of winit. It also keeps the buffer lifecycle in our hands: with winit and softbuffer the buffers, `release` and the frame callback are hidden, and the plan asks to check them. winit would bring a port to Windows and macOS. `decisions.md` ("Platforms") keeps one window module for each OS, and each is a thin layer, so this does not change the choice now.
+
+The `bare` binary (stripped): 5,844,992 B before (main a273925), 6,329,840 B after, +484,848 B (+8.3%).
+
+### Checks
+
+- `cargo test -p bare-window`: 9 unit tests (draw rules, buffer choice, size rules) and `tests/lifecycle.rs`. That test runs the window against a compositor of its own in the same process (`wayland-server`, over a socket pair): no desktop and no `WAYLAND_DISPLAY`. The fake compositor holds a buffer until `release`, fires the frame callback only when told, hashes the memory of every held buffer at every turn, and counts live pools and buffers. It checks:
+  - the first frame has the size of the program and carries the number of the frame (the content arrives);
+  - an idle window draws nothing for 300 ms and woke up fewer than 10 times (a busy loop would count thousands), and a configure with the same size draws nothing;
+  - a frame waits for the callback of the last frame, and five configures before the callback make one frame at the last size;
+  - 50 resizes: each gets exactly one frame at its size, at most 3 buffers are alive at any moment (2 at rest), and 30 redraws from another thread (`Waker`) use no new buffer;
+  - with both buffers held, a redraw and a resize draw nothing, and write nothing into a held buffer. After the release, one frame has the new size;
+  - close from the program and from the compositor both end `run`, and leave 0 pools and 0 buffers;
+  - the file descriptors of the process after all scenarios equal the count before.
+  A change that lets the program use a busy buffer makes the test fail (tried once, then removed).
+- `tests/live.rs` opens a real window and closes it after three frames, with two wakes from another thread. It opens a window, so it runs only with `BARE_WINDOW_LIVE=1` and a `WAYLAND_DISPLAY`. Without them it prints why and passes. `cargo test --workspace --release` therefore never opens a window on a person's screen.
+- Live run (hyprcage screen `hc-bare-live`, cage): `live` passed (0.40 s).
+- The `http` path of `load_page` was run with `--paint` against a local `python3 -m http.server`: the same hash as the file. `--window` with a URL was not run.
+
+### Measurements
+
+| What | Result |
+| --- | --- |
+| First frame (`bare --window order.html` and `text.html`, hyprcage screens of 1280 by 800 and 900 by 600): from the start of `show_window` to the commit. It includes the file read, parse, style, the connection, the first configure, layout and paint | 1.67 ms and 1.57 ms |
+| Pixels of the window against `bare --paint` (screenshot of the screen; 900 by 600 against the same page painted at 900 wide and cut to 600) | 900 by 600: 0 pixels differ. 1280 by 800: 253 pixels differ, all in the 16 by 23 box of the mouse cursor, which the screenshot draws |
+| Idle CPU, 10 s, window open | 0 ticks of 10 ms, 0 context switches. The process waits in `poll`. RSS 13.6 MB, 7 file descriptors, 1 thread |
+| Frames and wake-ups for open, a second configure with the same size, close | 1 frame, 1 buffer made, 3 wake-ups, 2 configures |
+| Resize to new frame, fake compositor, synthetic app (a canvas that fills one color), `configure` sent to `commit` seen, 50 sizes from 200 by 150 to 599 by 449 | median 0.64 and 0.82 ms, worst 1.2 and 1.5 ms (2 runs) |
+| RSS after 50 resizes (change between resize 10 and resize 50) | +544 kB. A run of 500 resizes: -212 kB over the last 490. Buffers alive: 2 at rest, 3 at most |
+| Copy of one 1280 by 800 canvas into the buffer | 0.09 to 0.10 ms |
+| Stripped binary of `bare` | +484,848 B (+8.3%) |
+
+The resize time of the real page is the number above plus its own layout and paint. Topic 1 measured them: 0.2 to 1.1 ms for the raster of a screen, and layout of a page of 100,000 boxes in 15 ms. It was not measured in a window: cage always sizes a window to its screen, so a hyprcage screen cannot resize one. The resize path is checked on the fake compositor only. The real compositor (Hyprland) was not resized.
+
+### Gaps
+
+- No input events at all (pointer, keyboard, focus): S4 topic 4. The window cannot be moved or closed from inside the page. The compositor can close it.
+- No HiDPI scale (see Design), no fractional scale, no `wp_viewporter`.
+- No client-side decorations. `WindowDecorations::RequestServer` asks for server decorations. A compositor with none shows a window with no title bar (cage does this).
+- No cursor shape and no clipboard.
+- `Waker` wakes the loop, but nothing in `bare` calls it yet. Timers, `fetch` and scripts (S4 topic 6, S5) will.
+- A hidden window gets no frame callback, so it draws nothing until it shows again. This is wanted. The cost is that a `Waker` request can wait a long time.
+- If the compositor never sends `release` (a broken one), both buffers stay busy and the window stops drawing. There is no timeout and no third buffer.
+- The page is loaded before the window opens, so a slow URL shows nothing until it loads. A load error prints and exits with 1.
+- `bare --paint` now also accepts an `http(s)` URL, because it shares `load_page` with `--window`.
+
+Problems seen in other crates, not changed: none new. The notes under "Paint and pixel capture" still hold.

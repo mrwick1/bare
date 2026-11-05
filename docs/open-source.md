@@ -83,6 +83,17 @@ Study these for architecture. Take parts from them.
 | [png](https://github.com/image-rs/image-png) 0.18.1 and its dependencies (`fdeflate`, `flate2`, `miniz_oxide`, `crc32fast`, `bitflags`, `simd-adler32`, `adler2`, `cfg-if`, `zlib-rs`) | MIT OR Apache-2.0 (`miniz_oxide`, `zlib-rs` and `adler2` also Zlib or 0BSD) | crate: PNG capture | 1.5 ms for 1280 by 800, +161 KB of binary |
 | [Noto Sans Mono](https://github.com/notofonts/latin-greek-cyrillic) 2.014, Regular and Bold, cut down by `pyftsubset` | SIL OFL 1.1 | copied data: `data/fonts/*.ttf`, built into `bare-paint` | 22 KB each. License text: `data/fonts/OFL.txt` |
 
+### Adopted for S4 topic 2 (2026-11-05)
+
+| Part | License | Used as | Measured |
+| --- | --- | --- | --- |
+| [smithay-client-toolkit](https://github.com/Smithay/client-toolkit) 0.21.1 with no default features (no calloop, no xkbcommon), and `wayland-client` 0.31.15, `wayland-backend` 0.3.17, `wayland-protocols` 0.32.13 (and its `-wlr`, `-misc`, `-experimental` siblings), `wayland-csd-frame`, `wayland-cursor`, `wayland-scanner`, `wayland-sys`, `xcursor`, `cursor-icon`, `quick-xml`, `downcast-rs`, `smallvec`, `thiserror`, `log`, `memchr`, `memmap2`, `xkeysym` | MIT (`downcast-rs`, `smallvec`, `thiserror`, `log`, `memmap2`, `xkeysym`, `cursor-icon`: MIT or Apache-2.0 or Zlib; `memchr`: Unlicense or MIT) | crate: Wayland window, `wl_shm` pools | window spike: +513 KB of binary, 0 CPU idle |
+| [rustix](https://github.com/bytecodealliance/rustix) 1.1.6 (with `errno`, `libc`, `linux-raw-sys`), already a dependency of the Wayland crates | Apache-2.0 WITH LLVM-exception, Apache-2.0 or MIT | crate: `poll` on the Wayland socket and the wake pipe | - |
+
+Dev-dependencies, only for `cargo test`: `wayland-server` 0.31.14 (the fake compositor of `crates/window/tests/lifecycle.rs`), and `wayland-protocols` with its `server` feature.
+
+Measured and not adopted for the window: winit 0.30.13 with softbuffer 0.4 (+1,507 KB of binary, the same idle cost, 1.8 MB more RSS in the spike). See [resources.md](resources.md#wayland-window).
+
 Measured and not adopted (the numbers are in [resources.md](resources.md#paint-and-pixel-capture)): tiny-skia 0.12 (6.5 times slower for glyphs, 3.4 times slower for plain rectangles, +1.1 MB), skrifa 0.44 with ab_glyph_rasterizer (+0.76 MB over ab_glyph), fontdue 0.9.5 (faster, but no fractional glyph offset). The first candidate list below still names tiny-skia and skrifa: it is the plan before the measurement.
 
 The OFL asks that the license text travels with the font. It is in `data/fonts/OFL.txt`, and `crates/paint/Cargo.toml` lists `OFL-1.1` in its license. We do not sell the font by itself, and the subsets keep the glyph shapes unchanged.
@@ -102,7 +113,7 @@ The OFL asks that the license text travels with the font. It is in `data/fonts/O
 This order is a proposal. It is not measured yet.
 
 1. ICU4X for `Intl`, `toLocaleString` and `localeCompare`. These gates block the live login now.
-2. The S4 stack: tiny-skia, skrifa, harfrust, Parley and smithay-client-toolkit. S4 topic 1 is built with ab_glyph and hand-written rectangles (see above). Nothing of ours is replaced.
+2. The S4 stack: tiny-skia, skrifa, harfrust and Parley. S4 topic 1 is built with ab_glyph and hand-written rectangles, and S4 topic 2 with smithay-client-toolkit (see above). Nothing of ours is replaced.
 3. regress and temporal_rs, when a page needs a RegExp feature or Temporal that we do not have.
 4. Larger changes, each one a separate decision: Blitz as the base of the renderer. Boa as the JS engine was measured and rejected on 2026-11-05.
 
