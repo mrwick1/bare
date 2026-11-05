@@ -60,7 +60,17 @@ impl<'p> Interp<'p> {
     /// A function object that calls host method `id`. `ctor` allows `new`. The function has no `prototype`:
     /// a constructor's owner defines it. Counts toward `max_functions`.
     pub fn host_function(&mut self, id: u32, name: &str, len: u32, ctor: bool) -> Result<ObjId, Error> {
-        let o = self.new_func_object(Callee::Host { id, ctor })?;
+        self.host_function_with(id, name, len, ctor, false)
+    }
+
+    /// Like `host_function(.., true)`, and `Reflect.construct` and `class extends` may give it a different `new.target`.
+    /// The constructor reads it with [`Interp::host_proto_from_new_target`]. Other host constructors refuse such a call.
+    pub fn host_ctor_with_new_target(&mut self, id: u32, name: &str, len: u32) -> Result<ObjId, Error> {
+        self.host_function_with(id, name, len, true, true)
+    }
+
+    fn host_function_with(&mut self, id: u32, name: &str, len: u32, ctor: bool, nt: bool) -> Result<ObjId, Error> {
+        let o = self.new_func_object(Callee::Host { id, ctor, nt })?;
         let s = h!(self, self.heap.intern_str(name));
         self.def(o, self.k_length, Value::Number(len as f64), false, false, true)?;
         self.def(o, self.k_name, Value::String(s), false, false, true)?;
@@ -72,9 +82,23 @@ impl<'p> Interp<'p> {
         host.fill_indexed(self, owner, index)
     }
 
-    fn call_host(&mut self, id: u32, this: Value, args: &[Value], is_new: bool) -> Res<Value> {
+    fn call_host(&mut self, id: u32, this: Value, args: &[Value], is_new: bool, nt: Option<ObjId>) -> Res<Value> {
         let Some(host) = self.host.clone() else { return Err(unsupported("host function without a host", Span::default())) };
-        host.call(self, id, this, args, is_new)
+        // This call sees its own `new.target` (none for a plain call). The caller's comes back on every exit.
+        let saved = std::mem::replace(&mut self.host_nt, nt);
+        let r = host.call(self, id, this, args, is_new);
+        self.host_nt = saved;
+        r
+    }
+
+    /// GetPrototypeFromConstructor for the host constructor that is running: `Get(newTarget, "prototype")`, or `default`
+    /// when that is not an object (and when the function was not given a `new.target`). Read it when the constructor makes
+    /// its object, after it converted its arguments. It may run a getter, so hold no host borrow.
+    pub fn host_proto_from_new_target(&mut self, default: ObjId) -> Result<ObjId, Error> {
+        match self.host_nt {
+            Some(nt) => self.proto_from_ctor_or(nt, default),
+            None => Ok(default),
+        }
     }
 
     /// Charge `n` steps of work (a traversal the host does for JavaScript). `Limit(Steps)` when the budget ends.

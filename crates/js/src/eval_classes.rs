@@ -347,6 +347,7 @@ impl<'p> Interp<'p> {
         }
         enum D {
             Class,
+            Host(u32),
             Script(u32, FuncId, u32, bool),
             /// A constructor that cannot take a different `new.target` yet (Promise, a host constructor).
             NoNt(&'static str),
@@ -355,12 +356,13 @@ impl<'p> Interp<'p> {
         }
         let d = match self.funcs.get(&f) {
             Some(Callee::Class) => D::Class,
+            Some(&Callee::Host { id, ctor: true, nt: true }) => D::Host(id),
             Some(&Callee::Script { script, fid, env, self_binding }) if self.func_of(script, fid).kind == FuncKind::Normal && !self.func_of(script, fid).is_async => D::Script(script, fid, env, self_binding),
             Some(&Callee::Native(n)) if matches!(n, Nat::ObjectCtor | Nat::FnCtor | Nat::ArrayCtor | Nat::ErrorCtor(_) | Nat::Ext(Bi::RegExpCtor)) => D::Native(n),
             Some(&Callee::Native(n)) if Self::native_no_nt(n) => D::NoNt("subclassing a native constructor (new.target is not passed to the constructor)"),
             Some(&Callee::Promise(PFn::Ctor)) => D::NoNt("subclassing Promise (new.target is not passed to the constructor)"),
             Some(&Callee::Promise(PFn::AggErrCtor)) => D::NoNt("subclassing AggregateError (new.target is not passed to the constructor)"),
-            Some(&Callee::Host { ctor: true, .. }) => D::NoNt("subclassing a host constructor (new.target is not passed to the constructor)"),
+            Some(&Callee::Host { ctor: true, nt: false, .. }) => D::NoNt("subclassing a host constructor (new.target is not passed to the constructor)"),
             Some(&Callee::Native(Nat::StringFn | Nat::NumberFn | Nat::BooleanFn)) => return Err(unsupported("wrapper object (new String/Number/Boolean)", Span::default())),
             Some(Callee::Bound { target, args, .. }) => D::Bound(*target, args.clone()),
             _ => {
@@ -380,6 +382,16 @@ impl<'p> Interp<'p> {
                 r
             }
             D::NoNt(what) => Err(unsupported(what, Span::default())),
+            D::Host(id) => {
+                if self.depth >= self.limits.max_call_depth {
+                    return Err(Error::Limit(LimitKind::CallDepth));
+                }
+                self.tick()?;
+                self.depth += 1;
+                let r = self.call_host(id, Value::Undefined, args, true, Some(nt));
+                self.depth -= 1;
+                r
+            }
             D::Script(script, fid, env, sb) => {
                 if self.depth >= self.limits.max_call_depth {
                     return Err(Error::Limit(LimitKind::CallDepth));

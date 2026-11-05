@@ -300,8 +300,8 @@ enum Callee {
     Native(Nat),
     Bound { target: ObjId, this: Value, args: Vec<Value> },
     Promise(PFn),
-    /// A method of the embedder's [`Host`]. `ctor` allows `new`.
-    Host { id: u32, ctor: bool },
+    /// A method of the embedder's [`Host`]. `ctor` allows `new`. `nt` (a constructor only) also takes a different `new.target`.
+    Host { id: u32, ctor: bool, nt: bool },
     /// A class constructor. Its code and fields are in `ClassState::classes` (see `eval_classes.rs`).
     Class,
 }
@@ -434,6 +434,8 @@ pub struct Interp<'p> {
     cls: ClassState,
     /// Call frames for `Error.stack` (see `eval_stack.rs`).
     stk: StackState,
+    /// `new.target` of the host constructor that is running (see `call_host`). Only set for the length of that call.
+    host_nt: Option<ObjId>,
     k_stack: PropertyKey,
 }
 
@@ -569,6 +571,7 @@ impl<'p> Interp<'p> {
             k_set: ks[13],
             k_stack: ks[14],
             stk: StackState::default(),
+            host_nt: None,
             n_arguments: 0,
             cls: ClassState::default(),
         };
@@ -622,6 +625,7 @@ impl<'p> Interp<'p> {
     pub fn roots(&self) -> Vec<Value> {
         let mut v = vec![Value::Object(self.global), Value::Object(self.object_proto), Value::Object(self.function_proto), Value::Object(self.array_proto), self.ret, self.completion];
         v.extend(self.error_protos.iter().map(|&o| Value::Object(o)));
+        v.extend(self.host_nt.map(Value::Object));
         self.ext_roots(&mut v);
         for k in [self.k_length, self.k_name, self.k_message, self.k_prototype, self.k_constructor, self.k_to_string, self.k_value_of, self.k_proto, self.k_value, self.k_writable, self.k_enumerable, self.k_configurable, self.k_get, self.k_set, self.k_stack] {
             if let PropertyKey::String(s) = k {
@@ -1533,7 +1537,7 @@ impl<'p> Interp<'p> {
             D::S(script, fid, env, sb) => self.call_script((script, fid), o, env, sb, this, args),
             D::N(n) => self.call_native(n, this, args, false),
             D::P(pf) => self.call_promise(pf, this, args, false),
-            D::H(id) => self.call_host(id, this, args, false),
+            D::H(id) => self.call_host(id, this, args, false, None),
             D::B(t, bthis, mut bargs) => {
                 bargs.extend_from_slice(args);
                 self.call_fn(Value::Object(t), bthis, &bargs)
@@ -1562,12 +1566,12 @@ impl<'p> Interp<'p> {
             N(Nat),
             B(ObjId, Vec<Value>),
             P(PFn),
-            H(u32),
+            H(u32, bool),
             C,
         }
         let d = match self.funcs.get(&o) {
             Some(Callee::Class) => D::C,
-            Some(&Callee::Host { id, ctor: true }) => D::H(id),
+            Some(&Callee::Host { id, ctor: true, nt }) => D::H(id, nt),
             Some(&Callee::Script { script, fid, env, self_binding }) if self.func_of(script, fid).kind == FuncKind::Normal && !self.func_of(script, fid).is_async => D::S(script, fid, env, self_binding),
             Some(&Callee::Native(n)) if matches!(n, Nat::ObjectCtor | Nat::FnCtor | Nat::ArrayCtor | Nat::ErrorCtor(_) | Nat::Ext(Bi::RegExpCtor)) || matches!(n, Nat::Bin(b) if b.ctor_name().is_some() || b == BinFn::TaCtor) || matches!(n, Nat::Sc(f) if f.is_ctor()) || n == Nat::Date(DateFn::Ctor) => D::N(n),
             Some(&Callee::Native(Nat::StringFn | Nat::NumberFn | Nat::BooleanFn)) => return Err(unsupported("wrapper object (new String/Number/Boolean)", Span::default())),
@@ -1591,7 +1595,7 @@ impl<'p> Interp<'p> {
             D::C => self.construct_class_body(o, args, o),
             D::N(n) => self.call_native(n, Value::Undefined, args, true),
             D::P(pf) => self.call_promise(pf, Value::Undefined, args, true),
-            D::H(id) => self.call_host(id, Value::Undefined, args, true),
+            D::H(id, nt) => self.call_host(id, Value::Undefined, args, true, nt.then_some(o)),
             D::B(t, mut bargs) => {
                 bargs.extend_from_slice(args);
                 self.construct(Value::Object(t), &bargs, callee)
@@ -3125,6 +3129,10 @@ mod revive_tests;
 #[cfg(test)]
 #[path = "eval_host_tests.rs"]
 mod host_tests;
+
+#[cfg(test)]
+#[path = "eval_host_nt_tests.rs"]
+mod host_nt_tests;
 
 #[cfg(test)]
 #[path = "eval_indexed_tests.rs"]

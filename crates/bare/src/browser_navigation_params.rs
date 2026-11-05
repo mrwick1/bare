@@ -143,8 +143,12 @@ fn new_url(d: &Dom, it: &mut Interp<'_>, rec: Rec) -> R<ObjId> {
 }
 
 fn new_params(d: &Dom, it: &mut Interp<'_>, list: Vec<(String, String)>, url: Option<ObjId>) -> R<ObjId> {
+    new_params_in(d, it, list, url, d.nav.p.get().expect("installed").params)
+}
+
+fn new_params_in(d: &Dom, it: &mut Interp<'_>, list: Vec<(String, String)>, url: Option<ObjId>, proto: ObjId) -> R<ObjId> {
     room(d)?;
-    let o = d.obj(it, d.nav.p.get().expect("installed").params)?;
+    let o = d.obj(it, proto)?;
     d.nav.s.borrow_mut().params.insert(o, ParamsObj { list: Vec::new(), url, bytes: 0 });
     if let Err(e) = set_list(d, o, list) {
         d.nav.s.borrow_mut().params.remove(&o);
@@ -399,7 +403,10 @@ pub(crate) fn params_ctor(d: &Dom, it: &mut Interp<'_>, _: Value, a: &[Value]) -
             form_parse(s.strip_prefix('?').unwrap_or(&s))
         }
     };
-    Ok(Value::Object(new_params(d, it, list, None)?))
+    // Web IDL: the init is converted first (overload resolution), then `Get(newTarget, "prototype")`, then the object is made.
+    let intrinsic = d.nav.p.get().expect("installed").params;
+    let proto = it.host_proto_from_new_target(intrinsic)?;
+    Ok(Value::Object(new_params_in(d, it, list, None, proto)?))
 }
 
 /// Set the list of `sp` and the byte count that goes with it.

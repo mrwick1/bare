@@ -1,8 +1,8 @@
 //! Load test for the navigation module. One case at one scale per process.
 //!
-//!   navigation_load CASE SCALE      CASE: url | iterate | history | storage | route      SCALE: 1, 10, 100
+//!   navigation_load CASE SCALE      CASE: url | iterate | subclass | history | storage | route      SCALE: 1, 10, 100
 //!
-//! iterate: SCALE*1000 rounds that build `URLSearchParams` from a Map, an iterator and a pair iterable and iterate them (for-of with a
+//! subclass: SCALE*1000 rounds that build derived-class and `Reflect.construct(.., newTarget)` `URLSearchParams` and check prototypes, native state and that only one kept instance survives a collect. iterate: SCALE*1000 rounds that build `URLSearchParams` from a Map, an iterator and a pair iterable and iterate them (for-of with a
 //! live append, spread, `Array.from`, an early break). url: SCALE*1000 `URL` objects with live `searchParams` (append, set, sort, get, hash change). history: SCALE*1000
 //! `pushState`/`replaceState` of cyclic state graphs, with traversal run by the driver (the history is capped at 50
 //! entries). storage: SCALE*1000 writes, reads and removals over 3 origins, with UTF-16 values. route: SCALE*500 rounds of
@@ -166,6 +166,40 @@ fn exec(name: &str, scale: usize) {
                 }
             }
             expect("iterate", got.to_string(), want.to_string());
+        }
+        "subclass" => {
+            // Each round: a derived-class instance (default and explicit constructor), and `Reflect.construct` with a different new.target.
+            // One instance is kept for the whole run: only it survives a collect.
+            let n = 1000 * scale;
+            run(&mut b, "class L extends URLSearchParams {} class M extends L { constructor(x) { super(x); } } var keep = new M('keep=1');
+                function chunk(start, count) { var s = 0;
+                  for (var i = start; i < start + count; i++) {
+                    var p = new L('a' + i + '=1&b=2'); p.append('c', '' + (i % 7)); s += p.toString().length;
+                    var q = Reflect.construct(URLSearchParams, [[['k', '' + (i % 5)]]], M);
+                    s += (Object.getPrototypeOf(q) === M.prototype) + q.get('k').length + (q instanceof L);
+                  }
+                  return s; }");
+            let (mut want, mut got) = (0usize, 0usize);
+            for start in (0..n).step_by(CHUNK) {
+                got += run(&mut b, &format!("chunk({start}, {CHUNK})")).parse::<usize>().unwrap_or_else(|_| die("chunk result".into()));
+                for i in start..start + CHUNK {
+                    // "a<i>=1&b=2&c<d>" is digits + 11 bytes; the second object adds 1 + 1 + 1
+                    want += digits(i) + 11 + 3;
+                }
+                collect(&mut b);
+                let st = b.navigation_stats();
+                if st.params != 1 || st.param_bytes != 32 + 4 + 1 {
+                    die(format!("only `keep` may survive a collect: {st:?}"));
+                }
+            }
+            expect("subclass", got.to_string(), want.to_string());
+            expect("subclass keep", run(&mut b, "keep.get('keep') + (keep instanceof L) + (Object.getPrototypeOf(keep) === M.prototype)"), "1truetrue".to_string());
+            run(&mut b, "keep = null;");
+            collect(&mut b);
+            let st = b.navigation_stats();
+            if st.params != 0 || st.param_bytes != 0 {
+                die(format!("params survived the last collect: {st:?}"));
+            }
         }
         "history" => {
             let n = 1000 * scale;
@@ -339,7 +373,7 @@ fn exec(name: &str, scale: usize) {
 fn main() {
     let a: Vec<String> = std::env::args().collect();
     if a.len() != 3 {
-        die("usage: navigation_load url|iterate|history|storage|route 1|10|100".into());
+        die("usage: navigation_load url|iterate|subclass|history|storage|route 1|10|100".into());
     }
     let scale: usize = a[2].parse().unwrap_or_else(|_| die("scale".into()));
     // the evaluator recurses: run on a big stack
