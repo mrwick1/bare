@@ -1341,3 +1341,5 @@ Parent regressions failed before fixes for rounding and uncharged global scans. 
 JS debug and release pass 443 tests with one existing ignore. All 206 evaluator Node cases match. JS clippy with warnings denied is clean. Six fresh capped release load runs cover 1k/10k/100k iterations, with independent numeric and encoded-length checksums. At 100k, parseInt takes 130 ms wall and 11.2 MiB peak RSS; URI encoding takes 148 ms and 4.0 MiB. The release VM uses 8 MiB stack. These are single samples, not before/after speed claims.
 
 The child's cached bare-only trace next reached Date.now in the prefetch cache and reported Date absent. It also observed an undefined HTMLIFrameElement in a reduced React commit probe. Date support and native iframe branding are separate work. Error.stack is absent and React catches its probe error. React hydration error 418 was observed but not diagnosed. Temporary tracing was removed. No fetched bundle ran in Node, and no GUI, live staging authentication or cross-platform validation was performed.
+
+The parent workspace passes 1,554 tests. No workspace failure occurred in this integration pass.
