@@ -216,7 +216,10 @@ pub fn discover(doc: &Document, page: &Url, limits: &Limits) -> Result<Discovery
     let mut base: Option<Url> = None;
     let mut stack = vec![doc.root()];
     while let Some(node) = stack.pop() {
-        if let NodeData::Element { name, .. } = *doc.data(node) {
+        // An SVG `script`, `link` or `base` is not an HTML resource (the loader would be wrong to run or fetch it).
+        if let NodeData::Element { name, .. } = *doc.data(node)
+            && !doc.is_foreign(node)
+        {
             let tag = Some(name);
             if tag == at.template {
                 continue;

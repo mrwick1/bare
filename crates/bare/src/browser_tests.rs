@@ -211,10 +211,10 @@ fn create_element_ns_is_gated() {
     big(|| {
         let mut b = browser();
         assert_eq!(js(&mut b, "document.createElementNS('http://www.w3.org/1999/xhtml', 'section').tagName"), "SECTION");
-        assert_eq!(js(&mut b, "document.createElementNS('http://www.w3.org/2000/svg', 'svg')"), "unsupported:createElementNS outside the HTML namespace (the native document has no namespaces)");
-        assert_eq!(js(&mut b, "document.createElementNS(null, 'x')"), "unsupported:createElementNS outside the HTML namespace (the native document has no namespaces)");
-        assert_eq!(js(&mut b, "document.createElementNS('http://www.w3.org/1999/xhtml', 'x:y')"), "unsupported:createElementNS with a prefix or capital letters (names are lowercase in the native document)");
-        assert_eq!(js(&mut b, "[typeof document.createDocumentFragment, typeof document.body.innerHTML, typeof document.body.classList, typeof document.body.namespaceURI, typeof document.getElementsByTagName].join()"), "undefined,undefined,object,undefined,function");
+        assert_eq!(js(&mut b, "document.createElementNS('http://www.w3.org/2000/svg', 'svg').namespaceURI"), "http://www.w3.org/2000/svg");
+        assert_eq!(js(&mut b, "document.createElementNS(null, 'x')"), "unsupported:createElementNS with a null namespace");
+        assert_eq!(js(&mut b, "document.createElementNS('http://www.w3.org/1999/xhtml', 'x:y')"), "unsupported:createElementNS in the HTML namespace with a prefix or capital letters (names are lowercase in the native document)");
+        assert_eq!(js(&mut b, "[typeof document.createDocumentFragment, typeof document.body.innerHTML, typeof document.body.classList, typeof document.body.namespaceURI, typeof document.getElementsByTagName].join()"), "undefined,undefined,object,string,function");
     });
 }
 
@@ -314,7 +314,7 @@ fn listener_exceptions_are_reported_and_dispatch_continues() {
         assert_eq!(js(&mut b, "var ev = new Event('ok'); s.dispatchEvent(ev); s.dispatchEvent(ev)"), "true");
         // an Unsupported thing in a listener stops dispatch too
         js(&mut b, "s.addEventListener('uns', function () { document.createElementNS('x', 'y') }); s.addEventListener('uns', L('never2'));");
-        assert_eq!(js(&mut b, "s.dispatchEvent(new Event('uns')); log.join()"), "unsupported:createElementNS outside the HTML namespace (the native document has no namespaces)");
+        assert_eq!(js(&mut b, "s.dispatchEvent(new Event('uns')); log.join()"), "unsupported:createElementNS with a namespace other than HTML, SVG or MathML");
         // reports are capped; the oldest is dropped and counted
         let mut small = browser_with(PAGE, BrowserLimits { max_reports: 3, ..Default::default() });
         js(&mut small, "var s = document.getElementById('s'); s.addEventListener('t', function () { throw 1 });");

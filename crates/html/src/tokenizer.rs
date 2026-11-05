@@ -29,6 +29,10 @@
 //! (`&amp;` becomes `&`), or a NUL character. Most of a page has none of these.
 //! JS: like `str.slice(a, b)`, which in the engine can point into the big string.
 //!
+//! Who picks raw text: `tokenize` picks it by the tag name, as the standalone tokenizer. A tree builder reads with `Tokens::for_tree`
+//! and picks it itself, by the element that it made. In SVG and MathML these names are ordinary elements. CDATA is the same:
+//! the tree builder says if it is allowed now.
+//!
 //! Left out: the states for the doctype's public and system names, and the script data
 //! escapes (`<!--<script>` inside a script).
 //!
@@ -38,6 +42,8 @@ use std::borrow::Cow;
 use std::collections::VecDeque;
 
 use crate::charref;
+
+mod cdata;
 
 /// One attribute: its name and its value.
 pub type Attr<'a> = (Cow<'a, str>, Cow<'a, str>);
@@ -118,7 +124,34 @@ impl<'a> Tokens<'a> {
         value: Pending::default(),
         self_closing: false,
         raw_name: mark.raw_name,
+        manual: false,
+        foreign: false,
         }
+    }
+
+    /// The same, for a tree builder. The tokenizer does not pick raw text by the tag name any more: the tree builder says, with `enter_raw`,
+    /// after it reads a start tag, because only the HTML rules make an element with raw text (`<svg><style>` holds markup).
+    /// The tree builder also says, with `set_foreign`, if the current node is not an HTML element: then `<![CDATA[` is text.
+    /// Both are set again before each `next`. `tokenize` does neither: it picks raw text by the name, and has no CDATA.
+    pub fn for_tree(input: &'a str, mark: Mark, more: bool) -> Tokens<'a> {
+        Tokens { manual: true, ..Tokens::new(input, mark, more) }
+    }
+
+    /// The tree builder made an HTML element for the start tag that was given last. If its name has raw text (or RCDATA), read it so.
+    /// Only for `for_tree`, and only right after the start tag, before the next token.
+    pub fn enter_raw(&mut self, name: &str) {
+        if let Some((refs, raw_name)) = raw_text_kind(name) {
+            self.state = State::RawText(refs);
+            self.raw_name = raw_name;
+            // The mark is just after the tag, so it takes the new state: a parser that is cut here starts in raw text.
+            self.mark.state = self.state;
+            self.mark.raw_name = raw_name;
+        }
+    }
+
+    /// The adjusted current node is not in the HTML namespace: `<![CDATA[` starts a CDATA section.
+    pub fn set_foreign(&mut self, foreign: bool) {
+        self.foreign = foreign;
     }
 
     /// The place after the last token that we gave out (or the place we started).
@@ -252,6 +285,10 @@ pub struct Tokens<'a> {
 
     raw_name: &'static str,
     // The tag that started the raw text, like "script". Its end tag ends the raw text.
+    manual: bool,
+    // True when the tree builder picks the raw text (`for_tree`).
+    foreign: bool,
+    // True when the tree builder says that CDATA sections are allowed now.
 }
 
 impl<'a> Iterator for Tokens<'a> {
@@ -417,7 +454,9 @@ impl<'a> Tokens<'a> {
             // An end tag may have attributes, like `</p class=x>`. The standard says to ignore them.
             return;
         }
-        if let Some((refs, raw_name)) = raw_text_kind(&name) {
+        if !self.manual
+            && let Some((refs, raw_name)) = raw_text_kind(&name)
+        {
             self.state = State::RawText(refs);
             self.raw_name = raw_name;
         }
@@ -442,7 +481,8 @@ impl<'a> Tokens<'a> {
                     match self.read() {
                         Some('<') => self.state = State::TagOpen,
                         Some('&') => self.char_ref(false),
-                        Some(_) => {} // A NUL character in text is dropped, like the tree builder does.
+                        Some(_) if self.foreign => self.text.text(input, "\u{FFFD}"),
+                        Some(_) => {} // HTML data drops NUL; foreign text replaces it.
                         None => return,
                     }
                 }
@@ -624,6 +664,8 @@ impl<'a> Tokens<'a> {
                     } else if self.looking_at("doctype") {
                         self.pos += 7;
                         self.state = State::Doctype;
+                    } else if self.foreign && self.cdata() {
+                        // A CDATA section, or the wait for more input. See `cdata.rs`.
                     } else {
                         self.state = State::BogusComment;
                         // `<![CDATA[x]]>` is also here. Outside of SVG and MathML it is a comment.
@@ -728,7 +770,7 @@ impl<'a> Tokens<'a> {
 
 /// Does a start tag with this name switch to raw text? Gives whether character references work in it,
 /// and the name as a `'static` text.
-fn raw_text_kind(name: &str) -> Option<(bool, &'static str)> {
+pub(crate) fn raw_text_kind(name: &str) -> Option<(bool, &'static str)> {
     Some(match name {
         "title" => (true, "title"),
         "textarea" => (true, "textarea"),
@@ -949,6 +991,95 @@ mod tests {
         assert!(matches!(&tokens[3], Token::StartTag { name: Cow::Owned(_), .. })); // `P` became `p`.
         assert!(matches!(&tokens[4], Token::Text(Cow::Owned(_)))); // `&amp;` was decoded.
         assert_eq!(tokens[4], text("x & y"));
+    }
+
+    /// Read with `for_tree`: the test plays the tree builder. `raw` lists the tags that the builder made as HTML elements with raw text.
+    fn tree_tokens<'a>(input: &'a str, foreign: bool, raw: &[&str]) -> Vec<Token<'a>> {
+        let mut tokens = Tokens::for_tree(input, Mark::default(), false);
+        tokens.set_foreign(foreign);
+        let mut out = Vec::new();
+        while let Some(token) = tokens.next() {
+            if let Token::StartTag { name, .. } = &token
+                && raw.contains(&&**name)
+            {
+                tokens.enter_raw(name);
+            }
+            out.push(token);
+        }
+        out
+    }
+
+    #[test]
+    fn a_tree_reader_picks_raw_text_itself() {
+        // Without `enter_raw` the tag name does nothing: `<title>` and `<style>` hold markup.
+        assert_eq!(tree_tokens("<title><b>&amp;</b></title>", false, &[]), [start("title", &[]), start("b", &[]), text("&"), end("b"), end("title")]);
+        // With it, RCDATA (references) and RAWTEXT (none), as `tokenize` does.
+        assert_eq!(tree_tokens("<title><b>&amp;</b></title>", false, &["title"]), [start("title", &[]), text("<b>&</b>"), end("title")]);
+        assert_eq!(tree_tokens("<style><b>&amp;</b></style>", false, &["style"]), [start("style", &[]), text("<b>&amp;</b>"), end("style")]);
+        assert_eq!(tree_tokens("<plaintext></plaintext>", false, &["plaintext"]), [start("plaintext", &[]), text("</plaintext>")]);
+        // A name that has no raw text is ignored.
+        assert_eq!(tree_tokens("<p><b>", false, &["p"]), [start("p", &[]), start("b", &[])]);
+        // `tokenize` is as before.
+        assert_eq!(all("<title><b>&amp;</b></title>"), [start("title", &[]), text("<b>&</b>"), end("title")]);
+    }
+
+    #[test]
+    fn cdata_is_text_only_when_the_tree_reader_allows_it() {
+        assert_eq!(tree_tokens("a<![CDATA[<b>&amp;]]>b", true, &[]), [text("a<b>&amp;b")]);
+        assert_eq!(tree_tokens("a<![CDATA[<b>&amp;]]>b", false, &[]), [text("a"), Token::Comment("[CDATA[<b".into()), text("&]]>b")]);
+        // A bogus comment ends at the first `>`.
+        assert_eq!(all("<![CDATA[x]]>"), [Token::Comment("[CDATA[x]]".into())]);
+        assert_eq!(tree_tokens("<![CDATA[x]]", true, &[]), [text("x]]")]);
+        assert_eq!(tree_tokens("<![CDATA[", true, &[]), []);
+        assert_eq!(tree_tokens("<![CDATA[a]]]]>", true, &[]), [text("a]]")]);
+        assert_eq!(tree_tokens("<![CDATA[]]><b>", true, &[]), [start("b", &[])]);
+        // The marker is case sensitive and exact.
+        assert_eq!(tree_tokens("<![cdata[x]]>", true, &[]), [Token::Comment("[cdata[x]]".into())]);
+        assert_eq!(tree_tokens("<![CDAT>", true, &[]), [Token::Comment("[CDAT".into())]);
+    }
+
+    #[test]
+    fn cdata_and_raw_text_survive_every_cut() {
+        // Feed the page in two pieces, at every byte. The tokens after the cut come from the mark, which holds the raw text state.
+        let page = "<![CDATA[a]]x]]]>b<style>&amp;</style>c";
+        let whole = tree_tokens(page, true, &["style"]);
+        for cut in 0..=page.len() {
+            let mut out: Vec<String> = Vec::new();
+            let mut mark = Mark::default();
+            let mut rest = page[..cut].to_string();
+            for (pass, more) in [(0, true), (1, false)] {
+                if pass == 1 {
+                    rest.push_str(&page[cut..]);
+                }
+                let mut tokens = Tokens::for_tree(&rest, mark, more);
+                tokens.set_foreign(true);
+                while let Some(token) = tokens.next() {
+                    if matches!(&token, Token::StartTag { name, .. } if &**name == "style") {
+                        tokens.enter_raw("style");
+                    }
+                    out.push(format!("{token:?}"));
+                }
+                mark = tokens.mark();
+                rest.drain(..mark.done());
+                mark = mark.rebased();
+            }
+            // Adjacent text tokens can join or split at a cut, so compare the text and the other tokens in order.
+            let join = |tokens: Vec<String>| -> Vec<String> {
+                let mut joined: Vec<String> = Vec::new();
+                for t in tokens {
+                    match (joined.last_mut(), t.strip_prefix("Text(\"")) {
+                        (Some(last), Some(more)) if last.starts_with("Text(\"") => {
+                            last.truncate(last.len() - 2);
+                            last.push_str(more);
+                        }
+                        _ => joined.push(t),
+                    }
+                }
+                joined
+            };
+            let want: Vec<String> = whole.iter().map(|t| format!("{t:?}")).collect();
+            assert_eq!(join(out), join(want), "cut at {cut}");
+        }
     }
 
     #[test]

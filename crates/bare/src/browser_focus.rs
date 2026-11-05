@@ -85,7 +85,7 @@ impl Dom {
     pub(crate) fn focusable(&self, it: &mut Interp<'_>, n: NodeId) -> R<bool> {
         let doc = self.doc.borrow();
         let tag = |e: NodeId| match *doc.data(e) {
-            NodeData::Element { name, .. } => doc.atom_str(name),
+            NodeData::Element { name, .. } if !doc.is_foreign(e) => doc.atom_str(name),
             _ => "",
         };
         let attr = |e: NodeId, a: &str| doc.find_atom(a).and_then(|x| doc.attr(e, x));
@@ -229,7 +229,7 @@ impl Dom {
 
 fn html_el(d: &Dom, it: &mut Interp<'_>, this: Value) -> R<NodeId> {
     let n = d.nd(it, this)?;
-    if d.is_element(n) { Ok(n) } else { Err(it.type_error("Illegal invocation")) }
+    if d.is_element(n) && !d.doc.borrow().is_foreign(n) { Ok(n) } else { Err(it.type_error("Illegal invocation")) }
 }
 
 pub(crate) fn focus(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {

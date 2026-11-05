@@ -24,7 +24,7 @@
 //! - Node: `nodeType nodeName nodeValue parentNode parentElement childNodes firstChild lastChild previousSibling
 //!   nextSibling ownerDocument isConnected textContent appendChild insertBefore removeChild replaceChild cloneNode
 //!   contains hasChildNodes`.
-//! - Element: `tagName localName id className getAttribute setAttribute removeAttribute hasAttribute getAttributeNames
+//! - Element: `tagName localName namespaceURI prefix getAttributeNS setAttributeNS hasAttributeNS removeAttributeNS id className getAttribute setAttribute removeAttribute hasAttribute getAttributeNames
 //!   children firstElementChild lastElementChild previousElementSibling nextElementSibling childElementCount append
 //!   prepend remove matches closest querySelector querySelectorAll` (selectors from `bare_css`).
 //! - CharacterData: `data length`. Document: `createElement createElementNS createTextNode createComment getElementById
@@ -40,8 +40,8 @@
 //! - Lists (`childNodes`, `children`, `querySelectorAll`, `getElementsByTagName`, `getElementsByClassName`) are plain
 //!   snapshot arrays, not live `NodeList`/`HTMLCollection`.
 //! - A JS string with a lone surrogate cannot be stored in the UTF-8 document: `Error::Unsupported`. Valid pairs round-trip.
-//! - `createElementNS` accepts only the HTML namespace. Other namespaces, `namespaceURI`, SVG/MathML and shadow DOM
-//!   are `Unsupported` or absent. `new Document()`, `DocumentFragment`, `innerHTML`, `outerHTML`, `attributes`,
+//! - Namespaces are in `browser_namespace.rs` (read its header): HTML, SVG and MathML elements, attributes in no namespace, XML,
+//!   XMLNS and XLink. Any other namespace is `Unsupported`. Shadow DOM is absent. `new Document()`, `DocumentFragment`, `innerHTML`, `outerHTML`, `attributes`,
 //!   `dataset`, `style`, `before/after/replaceWith`, layout APIs, `location` and
 //!   network are absent. Timers, `queueMicrotask`, `performance.now` and `MessageChannel` are in `browser_scheduler.rs`.
 //! - `addEventListener` option `signal` is `Unsupported`. `isTrusted` is always false. Events made by the test driver
@@ -60,10 +60,11 @@
 //! oracle (`tools/js/browser_oracle.mjs`).
 
 use crate::browser_dom as nd;
+use crate::browser_namespace as ns;
 use crate::browser_events as ev;
 pub use crate::browser_scheduler::{Pump, SchedLimits, SchedStats};
 use bare_css::selector::{Selector, parse_selector_list};
-use bare_html::dom::{Document, NodeData, NodeId};
+use bare_html::dom::{Document, NodeData, NodeId, Ns};
 use bare_js::eval::{Error, EvalLimits, Host, Interp, LimitKind};
 use bare_js::heap::{Heap, HeapLimits, PropertyDescriptor};
 use bare_js::value::{ObjId, PropertyKey, Value};
@@ -208,6 +209,7 @@ pub(crate) struct Protos {
     pub node: ObjId,
     pub element: ObjId,
     pub html: ObjId,
+    pub svg: ObjId,
     pub input: ObjId,
     pub chardata: ObjId,
     pub text: ObjId,
@@ -467,11 +469,15 @@ impl Dom {
             let proto = {
                 let doc = self.doc.borrow();
                 match *doc.data(n) {
-                    NodeData::Element { name, .. } => match doc.atom_str(name) {
-                        "input" => p.input,
-                        "script" => self.scripts.proto.get().copied().unwrap_or(p.html),
-                        "svg" | "math" => p.element,
-                        _ => p.html,
+                    // The brand follows the namespace of the native node, not its name: an SVG `input` is not an `<input>`.
+                    NodeData::Element { name, .. } => match doc.element_ns(n) {
+                        Ns::Svg => p.svg,
+                        Ns::MathMl => p.element,
+                        _ => match doc.atom_str(name) {
+                            "input" => p.input,
+                            "script" => self.scripts.proto.get().copied().unwrap_or(p.html),
+                            _ => p.html,
+                        },
                     },
                     NodeData::Text(_) => p.text,
                     NodeData::Comment(_) => p.comment,
@@ -590,6 +596,7 @@ impl Dom {
         let node = mk(it, et)?;
         let element = mk(it, node)?;
         let html = mk(it, element)?;
+        let svg = mk(it, element)?;
         let input = mk(it, html)?;
         let chardata = mk(it, node)?;
         let text = mk(it, chardata)?;
@@ -599,13 +606,13 @@ impl Dom {
         let custom = mk(it, event)?;
         let focus = mk(it, event)?;
         let domexc = mk(it, ep)?;
-        let _ = self.p.set(Protos { et, node, element, html, input, chardata, text, comment, document, event, custom, focus, domexc });
+        let _ = self.p.set(Protos { et, node, element, html, svg, input, chardata, text, comment, document, event, custom, focus, domexc });
         // The global object is `window`: it is an EventTarget.
         if let Err(e) = it.heap.set_prototype_of(g, Some(et)) {
             return Err(it.heap_error(e));
         }
         self.st.borrow_mut().by_obj.insert(g, Target::Window);
-        let mut fixed = vec![et, node, element, html, input, chardata, text, comment, document, event, custom, focus, domexc];
+        let mut fixed = vec![et, node, element, html, svg, input, chardata, text, comment, document, event, custom, focus, domexc];
 
         // methods and accessors
         for d in DEFS {
@@ -631,11 +638,12 @@ impl Dom {
         }
 
         // interface objects
-        let ifaces: [(&str, ObjId, Option<H>); 13] = [
+        let ifaces: [(&str, ObjId, Option<H>); 14] = [
             ("EventTarget", et, Some(ev::event_target_ctor as H)),
             ("Node", node, None),
             ("Element", element, None),
             ("HTMLElement", html, None),
+            ("SVGElement", svg, None),
             ("HTMLInputElement", input, None),
             ("CharacterData", chardata, None),
             ("Text", text, None),
@@ -746,6 +754,8 @@ pub(crate) static DEFS: &[Def] = &[
     Def { on: PARENT, name: "prepend", len: 0, kind: M(nd::prepend) },
     Def { on: &[Element], name: "tagName", len: 0, kind: G(nd::tag_name) },
     Def { on: &[Element], name: "localName", len: 0, kind: G(nd::local_name) },
+    Def { on: &[Element], name: "namespaceURI", len: 0, kind: G(ns::namespace_uri) },
+    Def { on: &[Element], name: "prefix", len: 0, kind: G(ns::prefix) },
     Def { on: &[Element], name: "previousElementSibling", len: 0, kind: G(nd::previous_element_sibling) },
     Def { on: &[Element], name: "nextElementSibling", len: 0, kind: G(nd::next_element_sibling) },
     Def { on: &[Element], name: "id", len: 0, kind: A(nd::id, nd::set_id) },
@@ -755,13 +765,17 @@ pub(crate) static DEFS: &[Def] = &[
     Def { on: &[Element], name: "removeAttribute", len: 1, kind: M(nd::remove_attribute) },
     Def { on: &[Element], name: "hasAttribute", len: 1, kind: M(nd::has_attribute) },
     Def { on: &[Element], name: "getAttributeNames", len: 0, kind: M(nd::get_attribute_names) },
+    Def { on: &[Element], name: "getAttributeNS", len: 2, kind: M(ns::get_attribute_ns) },
+    Def { on: &[Element], name: "setAttributeNS", len: 3, kind: M(ns::set_attribute_ns) },
+    Def { on: &[Element], name: "hasAttributeNS", len: 2, kind: M(ns::has_attribute_ns) },
+    Def { on: &[Element], name: "removeAttributeNS", len: 2, kind: M(ns::remove_attribute_ns) },
     Def { on: &[Element], name: "matches", len: 1, kind: M(nd::matches_selector) },
     Def { on: &[Element], name: "closest", len: 1, kind: M(nd::closest) },
     Def { on: CHILD, name: "remove", len: 0, kind: M(nd::remove) },
     Def { on: &[CharData], name: "data", len: 0, kind: A(nd::node_value_text, nd::set_node_value_text) },
     Def { on: &[CharData], name: "length", len: 0, kind: G(nd::data_length) },
     Def { on: &[Document], name: "createElement", len: 1, kind: M(nd::create_element) },
-    Def { on: &[Document], name: "createElementNS", len: 2, kind: M(nd::create_element_ns) },
+    Def { on: &[Document], name: "createElementNS", len: 2, kind: M(ns::create_element_ns) },
     Def { on: &[Document], name: "createTextNode", len: 1, kind: M(nd::create_text_node) },
     Def { on: &[Document], name: "createComment", len: 1, kind: M(nd::create_comment) },
     Def { on: &[Document], name: "getElementById", len: 1, kind: M(nd::get_element_by_id) },

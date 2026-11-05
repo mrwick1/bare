@@ -8,8 +8,9 @@
 //!   length of the `class` attribute and the number of names) and checks `max_results` before each result is added
 //!   (`Limit(Host("dom-results"))`). No document borrow is held while wrappers are made.
 //! - `getElementsByTagName(name)`: `*` matches every element. Any other name is lowercased (ASCII) and compared with the
-//!   element name; this is the HTML namespace in an HTML document, the only namespace this host has. A name that is not
-//!   in the document name table cannot match anything, so it costs nothing.
+//!   element name for an HTML element. An SVG or MathML element is compared with its qualified name as given (case-sensitive), as the DOM
+//!   Standard says for an HTML document. A name that is not in the document name table cannot match an HTML element, and a page with no
+//!   foreign element costs nothing for it.
 //! - `getElementsByClassName(names)`: `names` is split on ASCII white space; an element matches when its `class`
 //!   attribute has every name (case-sensitive: the document is always in standards mode here, no quirks mode). No names:
 //!   empty result. More than `max_class_tokens` distinct names is a Limit.
@@ -63,10 +64,28 @@ fn by_tag(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
     let ids = if name == "*" {
         collect(d, it, root, |_, _| (true, 0))?
     } else {
-        let atom = d.doc.borrow().find_atom(&name.to_ascii_lowercase());
-        match atom {
-            None => Vec::new(),
-            Some(atom) => collect(d, it, root, |doc, c| (matches!(*doc.data(c), NodeData::Element { name, .. } if name == atom), 0))?,
+        // An HTML element is compared with the lowercase name. An SVG or MathML element is compared, with its prefix, with the name as given.
+        let (atom, foreign) = {
+            let doc = d.doc.borrow();
+            (doc.find_atom(&name.to_ascii_lowercase()), doc.has_foreign())
+        };
+        if atom.is_none() && !foreign {
+            Vec::new()
+        } else {
+            collect(d, it, root, |doc, c| {
+                let NodeData::Element { name: local, .. } = *doc.data(c) else { return (false, 0) };
+                if !doc.is_foreign(c) {
+                    return (Some(local) == atom, 0);
+                }
+                let own = doc.atom_str(local);
+                (
+                    match doc.element_prefix(c) {
+                        None => name == own,
+                        Some(p) => name.strip_prefix(p).and_then(|r| r.strip_prefix(':')) == Some(own),
+                    },
+                    0,
+                )
+            })?
         }
     };
     wrap_all(d, it, &ids)

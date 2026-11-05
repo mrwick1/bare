@@ -79,7 +79,7 @@ fn lower(s: &str) -> String {
 
 /// A name for an element or an attribute: not empty, no space, `/`, `>`, `=`, quotes, `<` or NUL, and not starting
 /// with a digit, `-` or `.`.
-fn valid_name(s: &str) -> bool {
+pub(crate) fn valid_name(s: &str) -> bool {
     !s.is_empty()
         && !s.starts_with(|c: char| c.is_ascii_digit() || c == '-' || c == '.')
         && !s.contains(|c: char| c.is_ascii_whitespace() || matches!(c, '/' | '>' | '=' | '"' | '\'' | '<' | '\0'))
@@ -92,7 +92,7 @@ impl Dom {
     }
 
     /// Room for `nodes` more nodes and `text` more bytes of text in the native arena.
-    fn room(&self, doc: &Document, nodes: usize, text: usize) -> R<()> {
+    pub(crate) fn room(&self, doc: &Document, nodes: usize, text: usize) -> R<()> {
         if doc.len() + nodes > self.lim.max_nodes {
             return Err(self.lim("dom-nodes"));
         }
@@ -316,7 +316,7 @@ impl Dom {
     pub(crate) fn input_value_of(&self, n: NodeId) -> Option<String> {
         let doc = self.doc.borrow();
         let NodeData::Element { name, .. } = *doc.data(n) else { return None };
-        if doc.atom_str(name) != "input" {
+        if doc.atom_str(name) != "input" || doc.is_foreign(n) {
             return None;
         }
         if let Some(v) = self.st.borrow().inputs.get(&n).and_then(|i| i.value.clone()) {
@@ -342,7 +342,7 @@ impl Dom {
         let kind = {
             let doc = self.doc.borrow();
             match *doc.data(n) {
-                NodeData::Element { name, .. } if doc.atom_str(name) == "input" => input_kind(&doc, n),
+                NodeData::Element { name, .. } if doc.atom_str(name) == "input" && !doc.is_foreign(n) => input_kind(&doc, n),
                 _ => return Err(Error::Unsupported(unsupported("test driver: not an <input> element"))),
             }
         };
@@ -393,7 +393,7 @@ pub(crate) fn node_name(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) 
     let s = {
         let doc = d.doc.borrow();
         match *doc.data(n) {
-            NodeData::Element { name, .. } => doc.atom_str(name).to_ascii_uppercase(),
+            NodeData::Element { .. } => crate::browser_namespace::tag(&doc, n),
             NodeData::Text(_) => "#text".into(),
             NodeData::Comment(_) => "#comment".into(),
             NodeData::Document => "#document".into(),
@@ -792,9 +792,7 @@ pub(crate) fn clone_node(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value])
 pub(crate) fn tag_name(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
     let n = d.el(it, this)?;
     let s = {
-        let doc = d.doc.borrow();
-        let NodeData::Element { name, .. } = *doc.data(n) else { unreachable!() };
-        doc.atom_str(name).to_ascii_uppercase()
+        crate::browser_namespace::tag(&d.doc.borrow(), n)
     };
     d.js_str(it, &s)
 }
@@ -861,25 +859,42 @@ pub(crate) fn set_class_name(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Val
 
 pub(crate) fn get_attribute(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
     let n = d.el(it, this)?;
-    let name = lower(&d.string_arg(it, arg(a, 0))?);
-    attr_get(d, it, n, &name)
+    let name = d.string_arg(it, arg(a, 0))?;
+    let s = {
+        let doc = d.doc.borrow();
+        let name = crate::browser_namespace::attr_key(&doc, n, &name);
+        doc.find_attr_qname(n, &name).and_then(|a| doc.attr(n, a)).map(str::to_string)
+    };
+    match s {
+        Some(s) => d.js_str(it, &s),
+        None => Ok(Value::Null),
+    }
 }
 
 pub(crate) fn has_attribute(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
     let n = d.el(it, this)?;
-    let name = lower(&d.string_arg(it, arg(a, 0))?);
+    let name = d.string_arg(it, arg(a, 0))?;
     let doc = d.doc.borrow();
-    Ok(Value::Bool(doc.find_atom(&name).and_then(|a| doc.attr(n, a)).is_some()))
+    Ok(Value::Bool(doc.find_attr_qname(n, &crate::browser_namespace::attr_key(&doc, n, &name)).is_some()))
 }
 
 pub(crate) fn set_attribute(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
     let n = d.el(it, this)?;
-    let name = lower(&d.string_arg(it, arg(a, 0))?);
+    let name = d.string_arg(it, arg(a, 0))?;
     let value = d.string_arg(it, arg(a, 1))?;
+    let (name, existing) = {
+        let doc = d.doc.borrow();
+        let name = crate::browser_namespace::attr_key(&doc, n, &name);
+        let existing = doc.find_attr_qname(n, &name);
+        (name, existing)
+    };
     if !valid_name(&name) {
         return Err(d.dom_err(it, "InvalidCharacterError", &format!("'{name}' is not a valid attribute name.")));
     }
-    attr_set(d, it, n, &name, &value)?;
+    match existing {
+        Some(at) => crate::browser_namespace::put(d, it, n, Some(at), None, &name, &value)?,
+        None => attr_set(d, it, n, &name, &value)?,
+    }
     if name == "src" {
         d.script_src_changed(it, n)?;
     }
@@ -888,10 +903,13 @@ pub(crate) fn set_attribute(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Valu
 
 pub(crate) fn remove_attribute(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
     let n = d.el(it, this)?;
-    let name = lower(&d.string_arg(it, arg(a, 0))?);
+    let name = d.string_arg(it, arg(a, 0))?;
     let mut doc = d.doc.borrow_mut();
     it.charge(doc.attr_count(n) as u64 + 1)?;
-    doc.remove_attr(n, &name);
+    let name = crate::browser_namespace::attr_key(&doc, n, &name);
+    if let Some(at) = doc.find_attr_qname(n, &name) {
+        doc.remove_attr_atom(n, at);
+    }
     Ok(Value::Undefined)
 }
 
@@ -970,7 +988,7 @@ fn new_name(d: &Dom, it: &mut Interp<'_>, v: Value) -> R<String> {
     Ok(lower(&name))
 }
 
-fn make_element(d: &Dom, it: &mut Interp<'_>, name: &str) -> V {
+pub(crate) fn make_element(d: &Dom, it: &mut Interp<'_>, name: &str) -> V {
     let n = {
         let mut doc = d.doc.borrow_mut();
         d.room(&doc, 1, 0)?;
@@ -986,25 +1004,6 @@ pub(crate) fn create_element(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Val
     d.nd(it, this)?;
     let name = new_name(d, it, arg(a, 0))?;
     make_element(d, it, &name)
-}
-
-pub(crate) fn create_element_ns(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
-    d.nd(it, this)?;
-    let ns = match arg(a, 0) {
-        Value::Null | Value::Undefined => None,
-        v => Some(d.string_arg(it, v)?),
-    };
-    let qname = d.string_arg(it, arg(a, 1))?;
-    if ns.as_deref() != Some("http://www.w3.org/1999/xhtml") {
-        return Err(Error::Unsupported(unsupported("createElementNS outside the HTML namespace (the native document has no namespaces)")));
-    }
-    if !valid_name(&qname) {
-        return Err(d.dom_err(it, "InvalidCharacterError", &format!("The tag name provided ('{qname}') is not a valid name.")));
-    }
-    if qname.contains(':') || qname.bytes().any(|b| b.is_ascii_uppercase()) {
-        return Err(Error::Unsupported(unsupported("createElementNS with a prefix or capital letters (names are lowercase in the native document)")));
-    }
-    make_element(d, it, &qname)
 }
 
 pub(crate) fn create_text_node(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
@@ -1061,7 +1060,7 @@ fn doc_child(d: &Dom, it: &mut Interp<'_>, this: Value, pick: impl Fn(&Document,
 }
 
 fn is_named(doc: &Document, n: NodeId, names: &[&str]) -> bool {
-    matches!(*doc.data(n), NodeData::Element { name, .. } if names.contains(&doc.atom_str(name)))
+    matches!(*doc.data(n), NodeData::Element { name, .. } if names.contains(&doc.atom_str(name))) && !doc.is_foreign(n)
 }
 
 pub(crate) fn document_element(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {

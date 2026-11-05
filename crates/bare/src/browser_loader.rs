@@ -261,10 +261,10 @@ impl Dom {
             while let Some(n) = stack.pop() {
                 it.charge(1)?;
                 if let NodeData::Element { name, .. } = *doc.data(n) {
-                    if Some(name) == script {
+                    if Some(name) == script && !doc.is_foreign(n) {
                         found.push(n);
                     }
-                    if Some(name) == template {
+                    if Some(name) == template && !doc.is_foreign(n) {
                         continue;
                     }
                 }
@@ -286,7 +286,7 @@ impl Dom {
     pub(crate) fn script_src_changed(&self, it: &mut Interp<'_>, node: NodeId) -> R<()> {
         let is_script = {
             let doc = self.doc.borrow();
-            matches!(*doc.data(node), NodeData::Element { name, .. } if doc.atom_str(name) == "script")
+            doc.is_html(node, "script")
         };
         if self.scripts.enabled.get() && is_script {
             // Only a script in the tree is prepared (`script_inserted` checks it and walks one node).

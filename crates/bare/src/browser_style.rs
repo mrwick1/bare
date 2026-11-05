@@ -47,7 +47,7 @@ use crate::browser_style_block as blk;
 use bare_css::values::{Property, SHORTHANDS};
 use bare_js::eval::Error;
 use std::borrow::Cow;
-use bare_html::dom::{NodeData, NodeId};
+use bare_html::dom::NodeId;
 use bare_js::eval::Interp;
 use bare_js::value::{ObjId, Value};
 use std::cell::{Cell, OnceCell, RefCell};
@@ -236,8 +236,7 @@ impl Dom {
     fn style_html_el(&self, it: &mut Interp<'_>, this: Value) -> R<NodeId> {
         let n = self.el(it, this)?;
         let doc = self.doc.borrow();
-        let NodeData::Element { name, .. } = *doc.data(n) else { unreachable!() };
-        if matches!(doc.atom_str(name), "svg" | "math") {
+        if doc.is_foreign(n) {
             drop(doc);
             return Err(it.type_error("Illegal invocation"));
         }
