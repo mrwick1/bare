@@ -591,8 +591,14 @@ impl<'p> Interp<'p> {
             let Some(x) = self.heap.view_load(t.o, i) else { continue };
             if locale {
                 let key = self.key_to_locale_string();
+                // Only `Number.prototype.toLocaleString` formats a number. `Object.prototype.toLocaleString` would give
+                // "1234.5" where V8 gives "1,234.5", so a realm without the Number one is a gate, not a wrong text.
+                let own = match self.ao.number_proto {
+                    Some(np) => hx!(self, self.heap.get_own_property(np, key)).is_some(),
+                    None => false,
+                };
                 let m = self.get_prop(Value::Number(x), key)?;
-                if matches!(m, Value::Undefined) {
+                if !own || matches!(m, Value::Undefined) {
                     return Err(unsupported("Number.prototype.toLocaleString", Span::default()));
                 }
                 let r = self.call_fn(m, Value::Number(x), &[])?;

@@ -2401,14 +2401,14 @@ Problems seen in other crates, not changed: none new. The notes under "Paint and
 
 ## Typed arrays, DataView and ArrayBuffer members
 
-The built-in inventory of Node 22.18 (see "Boa compared with bare-js") listed 311 missing built-ins. This topic is batch 3. It adds:
+This topic is batch 3 of the missing built-ins (see "Boa compared with bare-js"). It adds:
 
 - The 11 typed-array constructors: `Int8Array`, `Uint8Array`, `Uint8ClampedArray`, `Int16Array`, `Uint16Array`, `Int32Array`, `Uint32Array`, `Float32Array`, `Float64Array`, `BigInt64Array` and `BigUint64Array`. `Uint8Array` was the only one before.
 - `%TypedArray%`: `from`, `of`, the getters, and every method of the prototype: `at`, `copyWithin`, `entries`, `every`, `fill`, `filter`, `find`, `findIndex`, `findLast`, `findLastIndex`, `forEach`, `includes`, `indexOf`, `join`, `keys`, `lastIndexOf`, `map`, `reduce`, `reduceRight`, `reverse`, `set`, `slice`, `some`, `sort`, `subarray`, `toLocaleString`, `toReversed`, `toSorted`, `toString`, `values` and `with`.
 - `DataView`: the constructor, the getters, and `get` and `set` for 8 element types with `littleEndian`.
 - `ArrayBuffer`: `maxByteLength`, `resizable`, `detached` and `transfer`/`transferToFixedLength`.
 
-The inventory now lists 253 missing. 11 of those are getter false positives of the inventory script. The `SharedArrayBuffer` items are still absent.
+`tools/js/builtin_inventory.sh` now prints 145 of 655 missing, down from 202 on main 38f55d5. The `SharedArrayBuffer` items are still absent.
 
 Design:
 
@@ -2427,7 +2427,7 @@ Gates (each is `Unsupported`, never a wrong result):
 - Reading or writing an element of a BigInt array (this engine has no BigInt), and the 4 `DataView` BigInt methods. An empty array, and the methods that only move bytes, run.
 - `ArrayBuffer.prototype.resize` and the `maxByteLength` option of the constructor. `resizable` is always false.
 - A subclass, a `@@species` other than the default, and a `from` or `of` receiver that is not one of the intrinsics.
-- `toLocaleString` of a non-empty array, until `Number.prototype.toLocaleString` exists.
+- `toLocaleString` of a non-empty array, while `Number.prototype` has no own `toLocaleString`. `Object.prototype.toLocaleString` would give `1234.5` where V8 gives `1,234.5`. (`(1234.5).toLocaleString()` has the same wrong result today. It is not part of this change.)
 - An object with `valueOf` as the value in `Object.defineProperty` on a typed-array index.
 
 `SharedArrayBuffer` and resizable buffers are not done.
@@ -2445,7 +2445,7 @@ Load test (`tools/js/binary_load.sh`, release, one process per row, 1 GiB addres
 
 All 27 rows (9 cases, 3 scales) check their result against a Rust model and stay inside the caps. A `DataView` turn costs about 1.3 µs. Three calls per turn is the interpreter cost of a method call, not of the conversion.
 
-Results, release, main a3e4c7a vs this change. Instructions are `perf stat -e instructions:u` (deterministic). Cycles are the minimum of 10 interleaved runs. Over 1% on instructions:
+Results, release, main a3e4c7a vs this change before the rebase onto main 38f55d5 (not measured again after it). Instructions are `perf stat -e instructions:u` (deterministic). Cycles are the minimum of 10 interleaved runs. Over 1% on instructions:
 
 - Fixed start-up cost: 0.37M instructions per realm for the new constructors and prototypes. It shows at x1 in the small rows (`eval_load concat` +10.6%, `webpack` +4.5%, `binary_load copy` +6.8%, `arrobj_load objects` +3.8%). At x100 the same rows are +0.01% to +0.7%.
 - `eval_load loop` +1.2% at all three scales and `throws` +1.0% to +1.2%. Neither runs a typed array. Hypothesis: hash layout. The global object has more properties, and the property table (`PropMap`, Fx-style hash) then makes a different collision pattern. Evidence: adding 11 plain globals to the base build gave +1.0% to +1.2% on the same rows.
