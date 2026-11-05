@@ -54,3 +54,7 @@ a:link { color: #0000ee; text-decoration-line: underline }
 small { font-size: smaller }
 big { font-size: larger }
 mark { background-color: yellow; color: black }
+
+/* Text direction (HTML, "Bidirectional text"). `dir=auto` and `bdi` need the text: no rule here. The app gates that case. */
+[dir=ltr i], input[type=tel i]:not([dir=rtl i]):not([dir=auto i]) { direction: ltr }
+[dir=rtl i] { direction: rtl }

@@ -57,6 +57,7 @@
 //!   `value` state.
 //! - Microtasks: the test driver runs a checkpoint after each listener it started from the host. Dispatch from JS does not.
 //! - `matchMedia`, `classList` and `getElementsBy*` are in `browser_platform.rs` (read its header).
+//! - `getComputedStyle` and the read-only computed declaration are in `browser_computed.rs` (read its header: external sheets are supplied by the embedder, used values are gated).
 //! - Subclassing host constructors with `class X extends Event` needs `new.target` plumbing in the evaluator (not done).
 //!
 //! Not browser-verified: nothing here was compared with Chrome. DOM behavior follows the DOM Standard by reading, and
@@ -288,6 +289,8 @@ pub struct Dom {
     pub(crate) plat: crate::browser_platform::Platform,
     /// `HTMLElement.style` / `CSSStyleDeclaration` (`browser_style.rs`).
     pub(crate) style: crate::browser_style::Style,
+    /// `getComputedStyle` and its sheet state (`browser_computed.rs`).
+    pub(crate) computed: crate::browser_computed::Computed,
     /// `Element.attributes`, `NamedNodeMap` and `Attr` (`browser_attr.rs`).
     pub(crate) attr: crate::browser_attr::AttrHost,
 }
@@ -313,6 +316,7 @@ impl Host for Dom {
         self.scripts_roots(out);
         crate::browser_platform::roots(self, out);
         crate::browser_style::roots(self, out);
+        crate::browser_computed::roots(self, out);
         at::roots(self, out);
     }
 
@@ -321,6 +325,7 @@ impl Host for Dom {
         crate::browser_navigation::trace(self, owner, out);
         crate::browser_platform::trace(self, owner, out);
         crate::browser_style::trace(self, owner, out);
+        crate::browser_computed::trace(self, owner, out);
         at::trace(self, owner, out);
         let st = self.st.borrow();
         if let Some(&t) = st.by_obj.get(&owner) {
@@ -350,6 +355,7 @@ impl Host for Dom {
         crate::browser_navigation::prune(self, live);
         crate::browser_platform::prune(self, live);
         crate::browser_style::prune(self, live);
+        crate::browser_computed::prune(self, live);
         at::prune(self, live);
         let mut st = self.st.borrow_mut();
         let st = &mut *st;
@@ -381,6 +387,7 @@ fn domexc_codes(name: &str) -> u32 {
     match name {
         "HierarchyRequestError" => 3,
         "InvalidCharacterError" => 5,
+        "NoModificationAllowedError" => 7,
         "NotFoundError" => 8,
         "NotSupportedError" => 9,
         "InUseAttributeError" => 10,
@@ -732,7 +739,8 @@ impl Dom {
         self.install_platform(it)?;
         at::install(self, it)?;
         crate::browser_console::install(self, it)?;
-        crate::browser_style::install(self, it)
+        crate::browser_style::install(self, it)?;
+        crate::browser_computed::install(self, it)
     }
 
     pub(crate) fn define_accessor(&self, it: &mut Interp<'_>, o: ObjId, key: PropertyKey, get: ObjId, set: Option<ObjId>) -> R<()> {
@@ -927,6 +935,7 @@ impl Browser {
             scripts: Default::default(),
             plat: Default::default(),
             style: Default::default(),
+            computed: Default::default(),
             attr: Default::default(),
         });
         it.set_host(dom.clone())?;
