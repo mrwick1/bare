@@ -216,3 +216,9 @@ fn repeated_walks_return_the_same_root_at_1_10_and_100_calls() {
         }
     });
 }
+
+#[test]
+fn attributes_are_their_own_root_and_convert_options() {
+    let mut b = browser();
+    assert_eq!(js(&mut b, "var e = document.getElementById('p'); e.setAttribute('x', 'v'); var a = e.getAttributeNode('x'), reads = 0; var opts = {get composed() { reads++; e.removeAttributeNode(a); return true; }}; [a.getRootNode() === a, a.getRootNode(opts) === a, a.getRootNode() === a, reads, a.ownerElement === null].join()"), "true,true,true,1,true");
+}

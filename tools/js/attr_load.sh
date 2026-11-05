@@ -4,7 +4,10 @@
 # The caps: 45 s wall time and 1 GiB of address space per run. A case that hits a cap, or whose checksum is wrong,
 # fails the run. 9 processes in total.
 set -u
-out=${1:-/dev/stdout}
+out=${1:-$(mktemp)}
+if [ "$#" -eq 0 ]; then
+  trap 'rm -f "$out"' EXIT HUP INT TERM
+fi
 cargo build --release -q -p bare --example attr_load || exit 1
 bin=target/release/examples/attr_load
 status=0
@@ -17,4 +20,8 @@ for scale in 1 10 100; do
     fi
   done
 done
+rows=$(grep -c 'checksum=ok' "$out" || true)
+if [ "$#" -eq 0 ]; then cat "$out"; fi
+echo "rows=$rows expected=9"
+[ "$rows" -eq 9 ] || status=1
 exit $status

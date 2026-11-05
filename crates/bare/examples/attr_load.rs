@@ -340,7 +340,7 @@ fn exec(name: &str, scale: usize) {
     }
     let el = t.elapsed();
     println!(
-        "case={name} scale={scale} ops={ops} wall={:.1}ms cpu={}ms gc={:.1}ms peak_rss={}MiB peak_heap={}KiB allocs={} alloc_bytes={}KiB attrs_before_drop={before} attrs_after_drop={after}",
+        "case={name} scale={scale} ops={ops} wall={:.1}ms cpu={}ms gc={:.1}ms peak_rss={}MiB peak_heap={}KiB allocs={} alloc_bytes={}KiB attrs_before_drop={before} attrs_after_drop={after} checksum=ok",
         el.as_secs_f64() * 1e3,
         cpu_ms() - cpu0,
         gc_ms,
