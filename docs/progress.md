@@ -433,3 +433,5 @@ Compound statements now run in a bounded heap-frame machine, not in native recur
 Visible shadow hosts are laid out from the flat tree. Page rules do not reach into a shadow tree. Slots and shadow style sheets remain explicit gates. The full cached login now reaches Page(Settled). React then removes the form, because a layout effect throws `ReferenceError: ResizeObserver is not defined`. See [resources.md](resources.md#flat-tree-layout-for-shadow-hosts).
 
 `ResizeObserver` is built over the native cascade and layout. A scheduler rendering step delivers it, only when the page changed. The full cached login now settles with the form present: email, password and the Radix checkbox. React still logs the recoverable error 419. See [resources.md](resources.md#resizeobserver-and-the-rendering-step).
+
+The live staging login stores its token. The next route chunks need the RegExp `u` flag, which is now built and checked against Node. Property escapes, named groups and `i` with `u` remain gates. See [resources.md](resources.md#regexp-u-flag).

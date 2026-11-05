@@ -311,7 +311,7 @@ fn escape_source(p: &[u16]) -> Vec<u16> {
 
 fn canon_flags(f: rx::Flags) -> String {
     let mut s = String::new();
-    for (on, c) in [(f.global, 'g'), (f.ignore_case, 'i'), (f.multiline, 'm'), (f.dot_all, 's'), (f.sticky, 'y')] {
+    for (on, c) in [(f.global, 'g'), (f.ignore_case, 'i'), (f.multiline, 'm'), (f.dot_all, 's'), (f.unicode, 'u'), (f.sticky, 'y')] {
         if on {
             s.push(c);
         }
@@ -961,7 +961,7 @@ impl<'p> Interp<'p> {
             self.tick()?;
             let Some(m) = self.run_engine(&re, s, q)? else {
                 if sticky {
-                    q += 1;
+                    q = self.advance(&re, s, q)?;
                     continue;
                 }
                 break;
@@ -972,7 +972,7 @@ impl<'p> Interp<'p> {
             }
             let e = me.min(size);
             if e == p {
-                q = ms + 1;
+                q = self.advance(&re, s, ms)?;
                 continue;
             }
             let piece = self.sub(s, p, ms)?;
@@ -1237,6 +1237,7 @@ impl<'p> Interp<'p> {
             4 => Value::Bool(f.multiline),
             5 => Value::Bool(f.dot_all),
             6 => Value::Bool(f.sticky),
+            7 => Value::Bool(f.unicode),
             _ => Value::Bool(false),
         })
     }
@@ -1259,6 +1260,11 @@ impl<'p> Interp<'p> {
     }
 
     /// One bounded match attempt. Its work is charged to the evaluator budget.
+    /// `AdvanceStringIndex` of `s` at `i`: by a code point with `u`, else by a code unit.
+    fn advance(&self, re: &rx::Regex, s: StrId, i: usize) -> Res<usize> {
+        Ok(re.advance(self.heap.str_units(s).map_err(Error::Heap)?, i))
+    }
+
     fn run_engine(&mut self, re: &rx::Regex, s: StrId, from: usize) -> Res<Option<rx::Match>> {
         let left = self.step_limit.saturating_sub(self.steps);
         if left == 0 {
@@ -1338,7 +1344,7 @@ impl<'p> Interp<'p> {
                 ml.v.push(m.spans[g].map_or(UNSET, |(a, b)| (a as u32, b as u32)));
             }
             let (a, b) = m.spans[0].unwrap_or((pos, pos));
-            pos = if a == b { b + 1 } else { b };
+            pos = if a == b { self.advance(&re, s, b)? } else { b };
         }
         self.set_last_index(r, 0.0)?;
         Ok(ml)
