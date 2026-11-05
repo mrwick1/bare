@@ -4,6 +4,7 @@
 //!   eval_check CASES_FILE
 //!   eval_check -e 'SOURCE'     (one script, for debugging)
 //!   EVAL_STACK_KIB=N           native stack of the run thread (to measure stack use per call level)
+//!   EVAL_CHECK_STEPS=N         step budget of each case (default 500,000)
 //!
 //! `unsupported:WHAT` is printed when a construct or builtin is not implemented. `limit` for an execution limit.
 
@@ -34,7 +35,7 @@ fn run(src: &str) -> String {
         Ok(p) => p,
         Err(e) => return format!("parse-error:{}", esc(e.msg)),
     };
-    let mut it = match Interp::new(&prog, Heap::default(), EvalLimits { max_steps: 500_000, ..Default::default() }) {
+    let mut it = match Interp::new(&prog, Heap::default(), EvalLimits { max_steps: std::env::var("EVAL_CHECK_STEPS").ok().and_then(|v| v.parse().ok()).unwrap_or(500_000), ..Default::default() }) {
         Ok(i) => i,
         Err(Error::Unsupported(u)) => return format!("unsupported:{}", u.what),
         Err(e) => return format!("setup-error:{e:?}"),

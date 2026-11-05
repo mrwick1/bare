@@ -1844,3 +1844,73 @@ Results, release, main aa52994 vs this change, 10 interleaved runs per build: in
 Known gaps: `String.raw`, `Object.freeze`, `Object.isFrozen` and `Object.isExtensible` do not exist yet. `await` inside a tagged template is a gate.
 
 Validation: 40 new Node cases (`tools/fixtures/js/tagged-cases.txt`, `tools/js/tagged_check.sh`) cover cooked and raw values, CR and CRLF, bad escapes, per-site identity, freezing and descriptors, key order, `this` for member, index and `super` tags, evaluation order, chained tags, `new`, arrows, classes, generators and async functions. Rust tests cover GC of a site object that only the table holds, and sites in more than one script.
+
+## Intl.DateTimeFormat
+
+The live login stopped at `ReferenceError: Intl is not defined` after it went to `/`. The post-login chunks call `Intl.DateTimeFormat("en-US", { timeZone: "Asia/Kolkata", ... }).formatToParts(...)` at module level. They also call `toLocaleDateString` and `toLocaleTimeString` with `en-US`, `en-CA` and a `timeZone`. bare now has `Intl.DateTimeFormat` and the three `Date.prototype.toLocale*String` methods.
+
+Design:
+
+- Locales: `en-US`, `en`, `en-CA`, `en-IN` and `en-GB`. Lookup drops subtags from the right, so `en-AU` is `en`. A locale with no match falls back to `en-US`. ECMA-402 allows this when a locale is not available, but Node formats `fr` in French.
+- Patterns come from tables, not from a CLDR pattern generator. `tools/js/intl_gen.mjs` makes `crates/js/src/intl_data.rs` from the ICU 77 data of Node 22.18. The tables are:
+  - a date pattern for each set of date fields;
+  - a time pattern for each set of time fields and hour cycle;
+  - a joiner (", " or " at ");
+  - 576 whole patterns for the pairs that ICU does not join;
+  - the style patterns;
+  - the default hour cycles;
+  - the names.
+
+  The data is 619 patterns in a 12,628 B pool. Nothing is generated at run time.
+- Time zones come from the system tzdata. `tz.rs` reads TZif v1 to v4 from `TZDIR` or `/usr/share/zoneinfo` on first use, with its POSIX footer rule. A realm keeps up to 64 zones by name. A file read costs 10,000 steps. The UTC names and fixed offsets (`+05:30`) need no file. The default zone is `set_default_time_zone`, else `TZ`, else the `/etc/localtime` link target, else UTC.
+- Options are read in the order of CreateDateTimeFormat, with V8's RangeError and TypeError messages. hour12 replaces hourCycle. A style together with a field throws.
+- V8 quirks, found by the Node comparison:
+  - `format()` prints U+202F (narrow no-break space) as U+0020. `formatToParts()` keeps U+202F.
+  - When `toLocale*String` fills in the default time fields, h11 prints as h12 and h24 as h23.
+  - Locale errors have two messages. A malformed subtag gives "Incorrect locale information provided". Other errors give "Invalid language tag: <tag in lower case>".
+- `format` is a getter that gives one bound function per formatter. The formatter keeps the function alive, and the function keeps the formatter alive.
+- Gates (unsupported): `era`, `dayPeriod`, `fractionalSecondDigits`, `timeZoneName`, a locale extension (`-u-`, `-t-`, `-x-`), a style that prints a zone name (`timeStyle` full or long), and a year before 1.
+- Known deviations:
+  - `resolvedOptions().timeZone` gives the name as it was passed in (`Asia/Kolkata`). V8 gives `Asia/Calcutta`.
+  - `calendar` and `numberingSystem` always resolve to `gregory` and `latn`.
+  - A wrong receiver that is an object shows as `object`, not `#<Object>`. This is the same for every builtin in bare.
+
+Storage: one `Dtf` per formatter in `intl.dtfs`, capped by `max_formatters` (65,536) and pruned by `collect`. The 20 option keys are made once and rooted. UTC is one shared zone.
+
+Optimization: the first profile of `toLocaleTimeString` with options showed `Heap::intern` at the top. Each option read interned its name again. With the keys cached, that row runs 45% fewer instructions, and `make` runs 41% fewer. The first memory run showed 285 B per formatter outside the heap, because each UTC formatter made its own zone. With one shared UTC zone, the cost is 105 B. What remains is the spec's 20 option reads (`Heap::lookup`) and the interpreter. In `format`, the Intl code is about 10% of the profile.
+
+Load test (`tools/js/intl_load.sh`, release, one process per row, 100x):
+
+| row | work | run | peak RSS |
+| --- | --- | ---: | ---: |
+| `make` | 50,000 formatters kept alive | 92 ms | 16.1 MiB |
+| `format` | 1M `format` calls on one formatter | 791 ms | 4.3 MiB |
+| `parts` | 100,000 `formatToParts` calls | 207 ms | 126.8 MiB |
+| `locale` | 1M `toLocaleTimeString` calls with options, Asia/Kolkata | 2,157 ms | 139.7 MiB |
+| `plain` | 1M string concatenations of the same length (baseline) | 1,138 ms | 4.4 MiB |
+
+A formatter costs one heap object and 105 B outside the heap. This is the difference between `make` and the same loop with `{}` (`INTL_EMPTY=1`). A `format` call costs less than the baseline concatenation. `parts` and `locale` keep their garbage (4 objects per call, and one `Date` per call) until the collect after the run.
+
+Results, release, main fda7325 vs this change, 10 interleaved runs per build:
+
+- Instructions are within -0.18% to +0.20% on every row of the cached login boot, `parse_load`, `eval_load`, `class_load`, `reflect_load`, `async_load` and `promise_load`. The exception is `eval_load concat` at +0.96%. Hypothesis: this is the larger realm setup.
+- Minimum cycles on `parse_load` rose 3% to 7%, but its instructions did not change, and `parse_load` does not run the evaluator. To verify: code layout.
+- Peak RSS rises by about 0.1 MiB, which is the size of the binary.
+
+Validation:
+
+- 90 Node cases (`tools/fixtures/js/intl-cases.txt`, `tools/js/intl_check.sh`, TZ=UTC) cover:
+  - the bundle's exact calls;
+  - defaults for each method, and styles with hour cycles;
+  - DST in New York and Sydney, Kolkata in 1943, and LMT;
+  - zone names, offsets and bad names;
+  - locale resolution and errors, and `supportedLocalesOf`;
+  - option errors, option order and wrong receivers;
+  - the `format` getter, the shape of the builtins, `resolvedOptions`, part types, every hour cycle around the clock, years, names and day periods.
+- 60 matrix cases format every option combination for each locale, weekday width and year width at 4 instants. Each returns a count and a hash.
+- Rust tests cover:
+  - TZif parsing of every version, and POSIX rules;
+  - tag canonicalization;
+  - the patterns and the U+202F rule;
+  - GC of formatters and their bound `format`;
+  - the formatter cap, the gates, locale fallback and system zones.

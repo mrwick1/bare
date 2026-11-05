@@ -25,7 +25,7 @@ pub fn time_clip(t: f64) -> f64 {
 }
 
 /// Days since the epoch of the civil date (`m` 1..=12). Hinnant's algorithm, exact in `i64`.
-fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
+pub(crate) fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
     let y = y - (m <= 2) as i64;
     let era = y.div_euclid(400);
     let yoe = y - era * 400;
@@ -35,7 +35,7 @@ fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
 }
 
 /// The civil date `(year, month 1..=12, day 1..=31)` of a day number.
-fn civil_from_days(z: i64) -> (i64, i64, i64) {
+pub(crate) fn civil_from_days(z: i64) -> (i64, i64, i64) {
     let z = z + 719_468;
     let era = z.div_euclid(146_097);
     let doe = z - era * 146_097;
