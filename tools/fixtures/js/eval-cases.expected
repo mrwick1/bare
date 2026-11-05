@@ -109,6 +109,10 @@ do_while	number:11
 for_break_continue	string:0246
 labeled_break	string:00,01,10,11,
 labeled_block	string:abd
+labeled_block_break_from_switch	string:b
+labeled_block_break_from_loop	string:x
+labeled_if_break_from_loop	string:01|
+labeled_block_inside_loop_body	string:02
 labeled_continue_do	number:3
 switch_basic	string:one,twothree,twothree,other
 switch_fallthrough	string:23

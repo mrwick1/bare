@@ -260,6 +260,8 @@ enum Nat {
     NumberFn,
     BooleanFn,
     IsNaN,
+    ParseInt,
+    EncodeUriComponent,
     /// JSON, RegExp and String.prototype bindings (`eval_builtins.rs`).
     Ext(Bi),
     Bin(BinFn),
@@ -289,7 +291,8 @@ struct FScope {
 const TYPE_ERROR: usize = 1;
 const RANGE_ERROR: usize = 2;
 const REFERENCE_ERROR: usize = 3;
-const ERR_NAMES: [&str; 5] = ["Error", "TypeError", "RangeError", "ReferenceError", "SyntaxError"];
+const URI_ERROR: usize = 5;
+const ERR_NAMES: [&str; 6] = ["Error", "TypeError", "RangeError", "ReferenceError", "SyntaxError", "URIError"];
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Hint {
@@ -374,7 +377,7 @@ pub struct Interp<'p> {
     object_proto: ObjId,
     function_proto: ObjId,
     array_proto: ObjId,
-    error_protos: [ObjId; 5],
+    error_protos: [ObjId; 6],
     promise: PromiseState,
     /// JSON, RegExp and String bindings: state of `eval_builtins.rs`.
     ext: Ext,
@@ -460,7 +463,7 @@ impl<'p> Interp<'p> {
         let function_proto = e!(heap.new_object(Some(object_proto)));
         let array_proto = e!(heap.new_array(Some(object_proto)));
         let global = e!(heap.new_object(Some(object_proto)));
-        let mut error_protos = [object_proto; 5];
+        let mut error_protos = [object_proto; 6];
         for p in error_protos.iter_mut() {
             *p = e!(heap.new_object(Some(object_proto)));
         }
@@ -1251,8 +1254,8 @@ impl<'p> Interp<'p> {
             let k = h!(self, self.heap.key_from_str(error_name));
             self.def(g, k, Value::Object(c), true, false, true)?;
         }
-        for (name, n) in [("String", Nat::StringFn), ("Number", Nat::NumberFn), ("Boolean", Nat::BooleanFn), ("isNaN", Nat::IsNaN)] {
-            let f = self.native(n, name, 1)?;
+        for (name, n) in [("String", Nat::StringFn), ("Number", Nat::NumberFn), ("Boolean", Nat::BooleanFn), ("isNaN", Nat::IsNaN), ("parseInt", Nat::ParseInt), ("encodeURIComponent", Nat::EncodeUriComponent)] {
+            let f = self.native(n, name, if name == "parseInt" { 2 } else { 1 })?;
             let k = h!(self, self.heap.key_from_str(name));
             self.def(g, k, Value::Object(f), true, false, true)?;
         }
@@ -2581,6 +2584,10 @@ impl<'p> Interp<'p> {
         let prog = self.prog.clone();
         let st = *prog.stmt(s);
         let top = self.depth == 0;
+        // Only a label directly on a loop or switch is its own. Any other statement ends the label list.
+        if !matches!(st.kind, StmtKind::Labeled { .. } | StmtKind::While { .. } | StmtKind::DoWhile { .. } | StmtKind::For { .. } | StmtKind::ForIn { .. } | StmtKind::ForOf { .. } | StmtKind::Switch { .. }) {
+            self.pending_labels.clear();
+        }
         match st.kind {
             StmtKind::Expr(e) | StmtKind::Directive(e) => {
                 let v = self.eval_expr(e)?;

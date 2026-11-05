@@ -181,6 +181,58 @@ pub fn is_js_space(u: u16) -> bool {
     matches!(u, 9..=13 | 0x20 | 0xA0 | 0x1680 | 0x2000..=0x200A | 0x2028 | 0x2029 | 0x202F | 0x205F | 0x3000 | 0xFEFF)
 }
 
+/// `parseInt` (section 19.2.5): the longest digit prefix of `units` in `radix` (ToInt32 of the argument). Else NaN.
+pub fn parse_int(units: &[u16], radix: i32) -> f64 {
+    let mut t = &units[units.iter().position(|&u| !is_js_space(u)).unwrap_or(units.len())..];
+    let neg = t.first() == Some(&(b'-' as u16));
+    if neg || t.first() == Some(&(b'+' as u16)) {
+        t = &t[1..];
+    }
+    let mut r = radix;
+    let mut strip = true;
+    if r != 0 {
+        if !(2..=36).contains(&r) {
+            return f64::NAN;
+        }
+        strip = r == 16;
+    } else {
+        r = 10;
+    }
+    if strip && t.len() >= 2 && t[0] == b'0' as u16 && (t[1] == b'x' as u16 || t[1] == b'X' as u16) {
+        t = &t[2..];
+        r = 16;
+    }
+    let digit = |u: u16| char::from_u32(u as u32).and_then(|c| c.to_digit(36)).filter(|&d| (d as i32) < r);
+    let n = t.iter().take_while(|&&u| digit(u).is_some()).count();
+    if n == 0 {
+        return f64::NAN;
+    }
+    let v = if r == 10 {
+        let s: String = t[..n].iter().map(|&u| u as u8 as char).collect();
+        s.parse::<f64>().unwrap_or(f64::NAN)
+    } else {
+        t[..n].iter().fold(0.0, |a, &u| a * r as f64 + digit(u).unwrap() as f64)
+    };
+    if neg { -v } else { v }
+}
+
+/// `encodeURIComponent` (section 19.2.6.5): percent-encode the UTF-8 bytes of everything but `A-Za-z0-9-_.!~*'()`.
+/// `None` for a lone surrogate (URIError).
+pub fn encode_uri_component(units: &[u16]) -> Option<String> {
+    let mut out = String::with_capacity(units.len());
+    for c in char::decode_utf16(units.iter().copied()) {
+        let c = c.ok()?;
+        if c.is_ascii_alphanumeric() || "-_.!~*'()".contains(c) {
+            out.push(c);
+        } else {
+            for b in c.encode_utf8(&mut [0; 4]).bytes() {
+                out.push_str(&format!("%{b:02X}"));
+            }
+        }
+    }
+    Some(out)
+}
+
 /// StringToNumber (section 7.1.4.1.1): `Number("...")`. Invalid text gives NaN.
 pub fn string_to_number(units: &[u16]) -> f64 {
     let start = units.iter().position(|&u| !is_js_space(u)).unwrap_or(units.len());
