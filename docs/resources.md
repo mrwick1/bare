@@ -2571,7 +2571,7 @@ Design of the hook (`crates/js/src/heap_named.rs`, read its header first). An ob
 
 The cost for an ordinary object is nil. `Object::exotic` is now a `u8` (`EXOTIC`, `EXOTIC_NAMED`), so the object keeps its size. Every dispatch point sits behind the `exotic != 0` test that already guarded views. A read that finds a name leaves the loop of `lookup` through a cold call (`realize`), which gives the real value (it needs the interner). `hx!` is unchanged. Only writes use `hxw!`, because only writes ask for `NeedsNamed`.
 
-How `Proxy` would reuse it (not built). A `Proxy` is another exotic kind, flagged the same way, and dispatched at the same points. Its methods run script, so none can be answered from `&self`. Each point would store a `NamedRequest`-like record with more `NamedOp`s (`Get`, `GetOwn`, `Has`, `Keys`) and return `NeedsNamed`. The evaluator would run the trap, check the invariants against the target and complete the request with a richer answer than a boolean. `hxw!` would become `hx!` for the read sites of a heap that has proxies. The collector would mark `target` and `handler`. The table in the header of `heap_named.rs` lists the points.
+`Proxy` did not reuse this request slot. It was built later with its own answer, `HeapError::Proxy`, because a trap result is made in the evaluator (see [Proxy](#proxy)).
 
 `dataset` (`crates/bare/src/browser_dataset.rs`):
 
@@ -2932,3 +2932,126 @@ Cost: no sheet is pending in these rows, so the cost is the bookkeeping for the 
 A first version rebuilt the binding table at each pass and cost +1.4% on `dynamic`. It now changes only the bindings that differ.
 
 The staging login chunks hold three reads of `getComputedStyle` (saved login scripts, `tools/staging_js_fetch.py`): `shouldSkipElement` of the Next.js App Router layout router (chunk `2117`: `getComputedStyle(e).position` for `sticky` or `fixed`, in `handlePotentialScroll`, which runs in the commit of a navigation), the Radix `Presence` ref callback (chunk `6792`, reads the object only), and the `direction` of `<html>` in the toaster (chunk `4438`). Hypothesis, not verified on the live page: the first one is the reader that stops the page, because React commits the route sheet in the same task. `sheets_tests.rs` has a React-like fixture of that pattern.
+
+## Proxy
+
+Found on 2026-11-06. The staging bundles use `Proxy` for reactive state (a `get` trap that tracks and a `set` trap that triggers) and `Reflect.ownKeys` inside an `ownKeys` trap. On main 5978d55 (the same count on 8599baf), `tools/js/builtin_inventory.sh` reported 126 of 655 built-ins missing, and `Proxy` and `Proxy.revocable` were two of them. `Reflect` was already complete (batch 1). The task note named 145 missing on 17744a9. Main had moved since then; the merges between were not traced. After this change the count is 124 of 655.
+
+Design (`crates/js/src/heap_proxy.rs`, `crates/js/src/eval_proxy.rs`; read the headers first). The heap cannot run script, and a trap is script. So the heap never runs a trap. A proxy is an exotic object with the flag `EXOTIC_PROXY` and a payload `(target, handler)`. Every heap operation that meets a proxy changes nothing and answers `HeapError::Proxy(p)`. The evaluator then runs the internal method of `p`: it reads the trap, calls it, checks the invariants against the target and calls the heap again for the target. There is no request record, because the answer is made in the evaluator and never has to go back through the heap. This differs from the host named-property hook (`heap_named.rs`), which stores a request. An earlier note in that file said a proxy would reuse the request slot. It did not need to.
+
+| Internal method | Where the heap answers `Proxy(p)` | Evaluator method |
+| --- | --- | --- |
+| `[[GetPrototypeOf]]`, `[[SetPrototypeOf]]`, `[[IsExtensible]]`, `[[PreventExtensions]]` | the flag test at the top of each entry point | `px_get_prototype_of`, `px_set_prototype_of`, `px_is_extensible`, `px_prevent_extensions` |
+| `[[GetOwnProperty]]` | `exotic_own`, behind the `exotic != 0` test that views already use | `px_get_own_property` |
+| `[[DefineOwnProperty]]` | inside `exotic != 0` of `define_own_property` | `px_define_own_property` |
+| `[[HasProperty]]`, `[[Get]]`, `[[Set]]`, `[[Delete]]` | the chain walks (`lookup`, `has_property`) call `exotic_own` for each object | `px_has`, `px_get`, `px_set`, `px_delete` |
+| `[[OwnPropertyKeys]]` | `own_keys` | `px_own_keys` |
+| `[[Call]]`, `[[Construct]]` | not in the heap: `Callee::Proxy { ctor }` in the function table, set when the target is callable | `px_call`, `px_construct` |
+
+A proxy on a prototype chain is found by the chain walk. The evaluator then redoes the operation from the first object with the generic algorithm of the specification (`o_get_slow`, `o_set` with the receiver, `o_has_slow`). Call sites use `hx!(s, heap_op, fallback)`: the third argument runs when the heap answered `Proxy`. A call site with no fallback turns the answer into `Unsupported` (`herr`), never into a wrong value. Reads that sit on hot paths (`get_prop`, `put_prop`) keep the proxy arm in a cold function (`get_miss`, `set_miss`), so they stay as small as before.
+
+What is built: `new Proxy` and `Proxy.revocable`; all 13 traps with the invariant checks of ECMA-262 10.5, in spec order; a trap that is `undefined` or `null` forwards to the target; a trap that is not callable is a `TypeError`; revocation (a `TypeError` on every internal method, `typeof` still answers, and a revoked function proxy is still `"function"`); callable and constructable proxies (`new.target` is the proxy, `bind`, `call`, `apply`, `Reflect.apply`, `Reflect.construct`, `class extends` a proxy); proxies as prototypes (`get`, `set` with the receiver, `has`, `for-in`, `super.x` and `super.x = v` through a proxy home prototype). Routed through the dispatch: `in`, `delete`, `instanceof`, `Array.isArray` (it sees through, and `Array.prototype` methods use the proxy as an array-like), `Object.keys`, `values`, `entries`, `assign`, `fromEntries`, `getOwnPropertyNames`, `getOwnPropertySymbols`, `getOwnPropertyDescriptor(s)`, `defineProperty`, `defineProperties`, `create`, `freeze`, `seal`, `isFrozen`, `isSealed`, `preventExtensions`, `getPrototypeOf`, `setPrototypeOf`, spread, destructuring, `JSON.stringify`, `__lookupGetter__`, and all of `Reflect`. A `for-in` over a proxy follows V8: `ownKeys`, then `getPrototypeOf`, then a `getOwnPropertyDescriptor` at each step (not all up front).
+
+Caps. A proxy of a proxy, a trap that touches its own proxy and a handler that is a proxy all end as `Limit`, never as a native stack overflow. The walks use `descend` (traversal depth 512), the calls use the call depth (100) and each internal method charges one step. A 10,000-deep proxy chain gives `Limit(TraversalDepth)` on `get`, `set`, `has`, `delete`, `ownKeys`, `getPrototypeOf`, `setPrototypeOf`, `isExtensible`, `preventExtensions`, `defineProperty`, `getOwnPropertyDescriptor`, `JSON.stringify`, `for-in`, `freeze`, `Reflect.ownKeys` and spread. `Array.isArray` over a 10,000-deep proxy chain, and `instanceof` and `for-in` over a 10,000-deep prototype chain of proxies, are loops, so they finish with the right answer. A runaway trap ends as `Limit(Steps)` and `try` does not catch it. The key list of an `ownKeys` result has the cap of `array_like` (1,048,576).
+
+Gates and gaps (no wrong answer). The receiver of a proxied `[[Set]]` that is a typed array or a host object follows the generic algorithm, not the special `[[Set]]` of that object, except that an invalid integer index ends the walk. `new Proxy(new Uint8Array(2), {}).length` is a `TypeError`, as in Node. `Number(new Proxy(new Number(5), {}))` is a `TypeError`, as in Node, and a proxy of a `String` object reads `length`, indexes and keys as in Node (18 wrapper cases in the corpus). A native that reads the heap with `h!` and meets a proxy answers `Unsupported: Proxy: this operation has no trap dispatch yet`. A probe of about 130 operations against Node found none left that is not also `Unsupported` for a plain object (`with`, `super` in an object literal) or wrong for a plain object too (`new Error(m, { cause })` ignores `cause`). The messages of the `TypeError`s differ from V8 in some places (for example a falsish `set` trap in strict mode). The tests compare names, not messages.
+
+Validation:
+
+- `tools/js/proxy_check.sh`: 68 cases against Node 22.18 (`tools/fixtures/js/proxy-cases.txt`), run again after a collection. 7 of them are the trap-order matrix: they log the traps of `get`, `set`, `has`, `delete`, `keys`, `values`, `entries`, `getOwnPropertyNames`, `getOwnPropertyDescriptors`, `assign` (source and target), spread, `JSON.stringify`, `for-in`, `getPrototypeOf`, `setPrototypeOf`, `isExtensible`, `preventExtensions`, `freeze`, `seal`, `isFrozen`, `isSealed`, `instanceof`, `Array.isArray`, `defineProperty`, `hasOwnProperty`, `propertyIsEnumerable`, every `Reflect` function, `set` with a receiver, an inherited `get`, `has` and `set`, `call`, `new`, `bind`, `Function.prototype.call`, `apply` and `typeof`, and the order matches Node. The others cover the invariant of each trap (accept and reject), revocation in every method and inside a trap, trap arguments, callable and constructable proxies, `new.target`, classes, `super`, `Array` methods on a proxied array, `JSON.stringify`, `for-in`, a handler that is a proxy, a reactive store and a validation proxy.
+- 13 tests in `crates/js/src/eval_proxy_tests.rs`: the corpus again with a collection between the two reads; the 10,000-deep chain; the 10,000-deep prototype chain; 12 shapes of trap recursion; a runaway trap; a huge `ownKeys` answer; proxies, handlers and revokers across a collection; a revoked proxy gives its target and handler back; 1,000 dropped proxies leave no object; the builtin surface; the typed-array and wrapper gates; a checksum through a forwarding proxy.
+- `cargo test --workspace --release` passes. 30 existing `tools/js/*_check.sh` scripts still match Node. `regexp_check.sh` prints timing and does not compare. `parse_check.sh` fails in Node with `ERR_MODULE_NOT_FOUND` on this machine. `browser_check.sh` and `adapter_check.sh` were not run. Two older tests asserted that `Proxy` was missing. They now assert `Atomics`.
+- Interpreter cost against main c3127aa (its `crates/js` is the same as on 5978d55). Each binary was built in its own `CARGO_TARGET_DIR`; the example binaries differ by `md5sum`. `perf stat -e instructions:u`, the minimum of 3 runs, AMD Ryzen 9 5900HX, rustc 1.96.0. 62 rows: 47 at scale 10 (`eval_load` 8, `binary_load` 9, `arrobj_load` 15 and `numeric_load` 15 with n = 10,000, without `random`) and the 15 `arrobj_load` rows at scale 1. The goal is below +0.5% on each row, and all 62 meet it. The 47 rows at scale 10 run from -0.82% to +0.41% (mean +0.10%). All 62 run from -1.53% to +0.43% (mean +0.07%; 13 rows are below zero). The table is at the end of this section.
+- Why the first build cost up to +1.15%. It was found with a single-step counter: a ptrace program that runs a binary without ASLR, steps each instruction and counts it by address. It matches `perf stat` within 400 instructions. The counts per function of the two binaries (`arrays`, `descriptors`, `repeat` at scale 1 and `numeric_load empty` at n = 1,000) then show where the extra instructions are. `perf record` was not usable: sample skid moved the counts between a function and its callers. `size_of::<HeapError>()` is 24 bytes and `size_of::<Result<Value, HeapError>>()` is 24 bytes on main and on this branch, so the new variant did not change a layout. The causes are all code generation, not new work:
+  1. `ao_search` (`indexOf` and `includes`). On main the compiler split the loop on `includes`. After the change it did not, and the merged loop ran 46 instructions for each element instead of 36 (it also copied the `index_key` answer through the stack). This was 80% of the `arrays` cost. The fix is two loops in the source. `arrays` at scale 10 is now 138,385,629 against 139,096,994 on main (-0.51%).
+  2. `define_own_property`. A third `exotic == ...` test (`NAMED`, `STR`, `PROXY`) made the compiler build a jump table that every plain `define` paid for (4 instructions). `EXOTIC_PROXY` is now the bit 8, tested with `&`. This was the cost of `descriptors` and of the `numeric_load` loops over global variables.
+  3. The `o_*` dispatch methods (`o_peek`, `o_get_own_property`, `o_has_own`, `o_has_property`, `o_define_own_property`, `o_delete`, `o_own_keys`) were outlined and called. Each is now `inline(always)` with one heap call and a test. The loop for a host fill, a proxy and an error moved to `heap_miss` and `heap_miss_w` (`cold`).
+  4. The collector (`collect`) asked the heap for the proxy payload of every object. It does so only after the first proxy is made (`px.ready`).
+  The start-up of a realm costs about +14 k instructions (`repeat` at scale 1, 4.5 M instructions: +0.30%). It is the `Proxy` constructor and `revocable` (function objects, interned names and their share of the first collection). The trap names are still interned on the first `new Proxy`.
+- Rows near the limit. `replaceall` (+0.43% at scale 1, +0.40% at scale 10) is +360 k instructions in `build_replacement` and +120 k in `search`. Neither function is changed by this PR. The hot loop has the same instructions with other registers and 4 more spills. `numeric_load` `empty`, `clz32`, `log`, `pow`, `sin` and `atan2` (+0.35% to +0.41%) are 2 to 5 instructions in each of `get_name`, `assign_name` and `machine`, again with different registers. To verify: a later change to unrelated code can move these rows by the same amount in either direction.
+- Drift. `arrays` at scale 10 was 138,539,132 on 17744a9 and 139,097,968 on main 5978d55 (+0.40%). With the two loops of cause 1 it is 138,385,365 on this branch, so the split also recovers that drift. Whether main lost it by the same merge of the two loops was not traced; to verify.
+
+  Instructions of the 62 rows (`perf stat -e instructions:u`, minimum of 3):
+
+  | Row | main c3127aa | Proxy | Change |
+  | --- | ---: | ---: | ---: |
+  | eval_load loop | 12,632,641,617 | 12,672,656,081 | +0.32% |
+  | eval_load calls | 8,392,861,276 | 8,402,885,410 | +0.12% |
+  | eval_load fib | 293,286,535 | 292,850,320 | -0.15% |
+  | eval_load closures | 1,216,097,406 | 1,217,221,806 | +0.09% |
+  | eval_load objects | 4,126,022,534 | 4,128,967,180 | +0.07% |
+  | eval_load webpack | 56,730,283 | 56,788,598 | +0.10% |
+  | eval_load throws | 3,135,577,683 | 3,144,496,124 | +0.28% |
+  | eval_load concat | 10,938,490 | 10,969,813 | +0.29% |
+  | binary_load copy | 28,352,461 | 28,367,887 | +0.05% |
+  | binary_load scan | 7,654,999,903 | 7,681,021,567 | +0.34% |
+  | binary_load scanarr | 16,892,769,031 | 16,927,786,192 | +0.21% |
+  | binary_load codec | 423,315,583 | 423,328,444 | +0.00% |
+  | binary_load stream | 396,211,871 | 396,407,064 | +0.05% |
+  | binary_load indexof | 493,147,333 | 493,354,622 | +0.04% |
+  | binary_load f64from | 1,004,094,075 | 1,003,106,894 | -0.10% |
+  | binary_load i32sort | 703,393,589 | 703,408,516 | +0.00% |
+  | binary_load dataview | 15,341,483,159 | 15,383,497,503 | +0.27% |
+  | arrobj_load mapfilter x1 | 34,187,545 | 33,960,534 | -0.66% |
+  | arrobj_load sort x1 | 91,939,147 | 91,731,746 | -0.23% |
+  | arrobj_load queue x1 | 24,449,851 | 24,494,065 | +0.18% |
+  | arrobj_load objects x1 | 11,517,824 | 11,521,429 | +0.03% |
+  | arrobj_load arrays x1 | 20,917,533 | 20,598,390 | -1.53% |
+  | arrobj_load fill x1 | 44,551,437 | 44,660,269 | +0.24% |
+  | arrobj_load reverse x1 | 388,428,095 | 389,322,982 | +0.23% |
+  | arrobj_load flat x1 | 75,182,530 | 75,124,081 | -0.08% |
+  | arrobj_load tosorted x1 | 83,628,708 | 83,703,382 | +0.09% |
+  | arrobj_load lastindexof x1 | 413,800,790 | 414,028,408 | +0.06% |
+  | arrobj_load pad x1 | 6,324,076 | 6,338,509 | +0.23% |
+  | arrobj_load repeat x1 | 4,512,269 | 4,525,941 | +0.30% |
+  | arrobj_load replaceall x1 | 38,942,300 | 39,110,670 | +0.43% |
+  | arrobj_load freeze x1 | 206,427,517 | 205,886,384 | -0.26% |
+  | arrobj_load descriptors x1 | 11,179,510 | 11,196,018 | +0.15% |
+  | arrobj_load mapfilter x10 | 303,240,486 | 300,825,565 | -0.80% |
+  | arrobj_load sort x10 | 1,021,044,512 | 1,018,796,699 | -0.22% |
+  | arrobj_load queue x10 | 290,240,166 | 290,453,414 | +0.07% |
+  | arrobj_load objects x10 | 75,740,659 | 75,118,420 | -0.82% |
+  | arrobj_load arrays x10 | 139,096,994 | 138,385,629 | -0.51% |
+  | arrobj_load fill x10 | 406,755,801 | 407,694,054 | +0.23% |
+  | arrobj_load reverse x10 | 3,859,045,578 | 3,867,680,320 | +0.22% |
+  | arrobj_load flat x10 | 712,573,316 | 711,833,889 | -0.10% |
+  | arrobj_load tosorted x10 | 938,027,116 | 938,639,969 | +0.07% |
+  | arrobj_load lastindexof x10 | 4,112,468,816 | 4,114,496,512 | +0.05% |
+  | arrobj_load pad x10 | 24,567,188 | 24,582,331 | +0.06% |
+  | arrobj_load repeat x10 | 6,538,528 | 6,552,435 | +0.21% |
+  | arrobj_load replaceall x10 | 350,770,480 | 352,191,099 | +0.40% |
+  | arrobj_load freeze x10 | 2,024,105,569 | 2,018,595,531 | -0.27% |
+  | arrobj_load descriptors x10 | 72,139,190 | 72,155,087 | +0.02% |
+  | numeric_load empty | 138,037,129 | 138,602,459 | +0.41% |
+  | numeric_load clz32 | 157,063,709 | 157,655,319 | +0.38% |
+  | numeric_load log | 159,854,931 | 160,445,722 | +0.37% |
+  | numeric_load radix16 | 202,249,483 | 202,782,949 | +0.26% |
+  | numeric_load radix36frac | 192,393,209 | 193,033,058 | +0.33% |
+  | numeric_load radix2sub | 731,537,079 | 732,131,063 | +0.08% |
+  | numeric_load pow | 156,648,642 | 157,200,381 | +0.35% |
+  | numeric_load sin | 160,408,199 | 160,998,607 | +0.37% |
+  | numeric_load atan2 | 162,726,723 | 163,292,696 | +0.35% |
+  | numeric_load tofixed | 191,696,794 | 192,231,085 | +0.28% |
+  | numeric_load toprecision | 191,499,494 | 192,050,263 | +0.29% |
+  | numeric_load toexp | 253,692,368 | 254,496,745 | +0.32% |
+  | numeric_load parsefloat | 254,073,574 | 254,480,660 | +0.16% |
+  | numeric_load encodeuri | 272,809,393 | 273,214,361 | +0.15% |
+  | numeric_load escape | 241,417,824 | 241,877,503 | +0.19% |
+- Load test: `tools/js/proxy_load.sh`, 8 cases at 1x, 10x and 100x (1,000, 10,000 and 100,000 iterations), one process for each row under 1 GiB of address space. The checksum comes from Rust. All 24 rows pass.
+
+| Case (what one iteration does) | 1x | 10x | 100x |
+| --- | --- | --- | --- |
+| `get_trap` (a `get` trap that computes) | 1.0 ms | 8.3 ms | 80 ms |
+| `set_trap` (a `set` trap that writes the target) | 1.3 ms | 10.7 ms | 104 ms |
+| `noop` (empty handler, `set` and `get`) | 1.1 ms | 9.7 ms | 95 ms |
+| `forward` (`Reflect.get` and `Reflect.set` in the traps) | 1.9 ms | 16.6 ms | 163 ms |
+| `array_mapfilter` (1,000 elements, `get` and `has` traps; `map` then `filter`) | 19.5 ms | 190 ms | 1,852 ms, 29 MiB |
+| `reactive` (store with tracking and triggering, two keys, one effect) | 3.8 ms | 35 ms | 348 ms |
+| `chain` (10 proxies, no traps) | 3.0 ms | 29.7 ms | 297 ms |
+| `keys` (`Object.keys` with `ownKeys` and 50 `getOwnPropertyDescriptor` calls) | 6.2 ms | 59 ms | 588 ms, 177 MiB |
+
+Time grows in a straight line. Peak memory is 4 to 7 MiB, except in two cases. `array_mapfilter` makes 2,000 result arrays. `keys` makes one descriptor object for each key and call: 500,000 objects at 100x. The engine collects only when the host calls `collect` (the load example calls it after each stage), so that garbage stays until then. This is the rule of the engine and not new. Cost of one operation, counted in instructions on a global-variable loop (`promise_check -e`, 200,000 iterations, the cost of the empty loop removed): a plain `p.v` read 823, the same read through a proxy with no traps 1,781, with a `get` trap that reads the target 4,048, and with `Reflect.get` in the trap 5,670. A plain `p.v = i` is 4,763 and with a `set` trap 8,685.
+
+Boa compared (boa_engine 0.22.0, `builtins/proxy/mod.rs`, 1,248 lines). Boa gives every object a table of function pointers for the 13 internal methods (`InternalObjectMethods`: `BASIC`, `CALLABLE`, `CONSTRUCTOR`), and a proxy has its own table. bare-js has one flag in the object header and no table, and the evaluator does the dispatch. Boa limits the depth with its VM recursion limit. bare-js uses the limits it already had. No Boa code was copied, so `docs/open-source.md` has no new entry.
+
+Not tested: a real page on this build (the live login was not run), `Proxy` over a host object (an element, `dataset`, a `NodeList`) and a proxy passed to a host function (`addEventListener`, `fetch` options), typed arrays and `DataView` behind a proxy beyond the cases above, `with` (it is `Unsupported` on a plain object too), and Node versions other than 22.18. Node runs authored cases only.

@@ -1,0 +1,638 @@
+# bare-js Proxy cases (Node is the oracle; same format as reflect-cases.txt). Errors are logged by name, not by message.
+# `H(log)` builds a handler with all 13 traps. Each trap logs its name and its key, then forwards to Reflect.
+# The `order_*` cases are the trap-order matrix: one operation each, the log is the order of the traps.
+=== order_get_set_has_delete
+var log = []; function L(x) { log.push(String(x)); }
+function H() { var h = {}; ['get','set','has','deleteProperty','defineProperty','getOwnPropertyDescriptor','ownKeys','getPrototypeOf','setPrototypeOf','isExtensible','preventExtensions','apply','construct'].forEach(function (n) { h[n] = function () { L(n + (typeof arguments[1] === 'string' ? ':' + arguments[1] : '')); return Reflect[n].apply(null, arguments); }; }); return h; }
+var p = new Proxy({ a: 1 }, H());
+L('--get'); p.a; L('--get-miss'); p.zz; L('--set'); p.b = 2; L('--has'); 'a' in p; L('--delete'); delete p.a;
+L('--set-existing'); p.b = 3; L('--set-sym'); p[Symbol.iterator] = 1;
+(function () { return log.join('|'); })
+=== order_keys_family
+var log = []; function L(x) { log.push(String(x)); }
+function H() { var h = {}; ['get','set','has','deleteProperty','defineProperty','getOwnPropertyDescriptor','ownKeys','getPrototypeOf','setPrototypeOf','isExtensible','preventExtensions','apply','construct'].forEach(function (n) { h[n] = function () { L(n + (typeof arguments[1] === 'string' ? ':' + arguments[1] : '')); return Reflect[n].apply(null, arguments); }; }); return h; }
+var p = new Proxy({ a: 1, b: 2 }, H());
+L('--keys'); Object.keys(p); L('--values'); Object.values(p); L('--entries'); Object.entries(p);
+L('--gopn'); Object.getOwnPropertyNames(p); L('--gops'); Object.getOwnPropertySymbols(p);
+L('--gopds'); Object.getOwnPropertyDescriptors(p); L('--reflect.ownKeys'); Reflect.ownKeys(p);
+L('--assign-from'); Object.assign({}, p); L('--assign-to'); Object.assign(p, { c: 3 });
+L('--spread'); ({ ...p }); L('--json'); JSON.stringify(p);
+(function () { return log.join('|'); })
+=== order_forin_proto_ops
+var log = []; function L(x) { log.push(String(x)); }
+function H() { var h = {}; ['get','set','has','deleteProperty','defineProperty','getOwnPropertyDescriptor','ownKeys','getPrototypeOf','setPrototypeOf','isExtensible','preventExtensions','apply','construct'].forEach(function (n) { h[n] = function () { L(n + (typeof arguments[1] === 'string' ? ':' + arguments[1] : '')); return Reflect[n].apply(null, arguments); }; }); return h; }
+var p = new Proxy({ a: 1, b: 2 }, H());
+L('--forin'); for (var k in p) L('k=' + k);
+L('--getproto'); Object.getPrototypeOf(p); L('--setproto'); Object.setPrototypeOf(p, null);
+L('--isext'); Object.isExtensible(p); L('--prevent'); Object.preventExtensions(p);
+L('--freeze'); Object.freeze(new Proxy({ q: 1 }, H())); L('--seal'); Object.seal(new Proxy({ q: 1 }, H()));
+L('--isfrozen'); Object.isFrozen(new Proxy({ q: 1 }, H())); L('--issealed'); Object.isSealed(new Proxy({ q: 1 }, H()));
+L('--instanceof'); ({}) instanceof Object; (p instanceof Object);
+L('--isarray'); Array.isArray(p);
+L('--define'); Object.defineProperty(new Proxy({}, H()), 'z', { value: 1 });
+L('--gopd'); Object.getOwnPropertyDescriptor(new Proxy({ a: 1 }, H()), 'a');
+L('--hasown'); Object.prototype.hasOwnProperty.call(new Proxy({ a: 1 }, H()), 'a');
+L('--propIsEnum'); Object.prototype.propertyIsEnumerable.call(new Proxy({ a: 1 }, H()), 'a');
+(function () { return log.join('|'); })
+=== order_reflect_ops
+var log = []; function L(x) { log.push(String(x)); }
+function H() { var h = {}; ['get','set','has','deleteProperty','defineProperty','getOwnPropertyDescriptor','ownKeys','getPrototypeOf','setPrototypeOf','isExtensible','preventExtensions','apply','construct'].forEach(function (n) { h[n] = function () { L(n + (typeof arguments[1] === 'string' ? ':' + arguments[1] : '')); return Reflect[n].apply(null, arguments); }; }); return h; }
+var p = new Proxy({ a: 1 }, H());
+Reflect.get(p, 'a'); Reflect.set(p, 'a', 2); Reflect.has(p, 'a'); Reflect.deleteProperty(p, 'a');
+Reflect.defineProperty(p, 'b', { value: 1, configurable: true }); Reflect.getOwnPropertyDescriptor(p, 'b');
+Reflect.ownKeys(p); Reflect.getPrototypeOf(p); Reflect.setPrototypeOf(p, null); Reflect.isExtensible(p);
+Reflect.preventExtensions(p);
+(function () { return log.join('|'); })
+=== order_set_receiver
+var log = []; function L(x) { log.push(String(x)); }
+function H() { var h = {}; ['get','set','has','deleteProperty','defineProperty','getOwnPropertyDescriptor','ownKeys','getPrototypeOf','setPrototypeOf','isExtensible','preventExtensions','apply','construct'].forEach(function (n) { h[n] = function () { L(n + (typeof arguments[1] === 'string' ? ':' + arguments[1] : '')); return Reflect[n].apply(null, arguments); }; }); return h; }
+var p = new Proxy({}, H());
+L('--set'); p.x = 1;
+L('--set-with-forwarding'); var q = new Proxy({}, { set: function (t, k, v, r) { L('qset:' + k + ':' + (r === q)); return Reflect.set(t, k, v, r); }, defineProperty: function (t, k, d) { L('qdef:' + k); return Reflect.defineProperty(t, k, d); }, getOwnPropertyDescriptor: function (t, k) { L('qgopd:' + k); return Reflect.getOwnPropertyDescriptor(t, k); } });
+q.y = 2;
+L('--receiver-other'); var other = {}; Reflect.set(p, 'w', 5, other); L(other.w); L(Object.keys(p).join());
+(function () { return log.join('|'); })
+=== order_proto_chain
+var log = []; function L(x) { log.push(String(x)); }
+function H() { var h = {}; ['get','set','has','deleteProperty','defineProperty','getOwnPropertyDescriptor','ownKeys','getPrototypeOf','setPrototypeOf','isExtensible','preventExtensions','apply','construct'].forEach(function (n) { h[n] = function () { L(n + (typeof arguments[1] === 'string' ? ':' + arguments[1] : '')); return Reflect[n].apply(null, arguments); }; }); return h; }
+var p = new Proxy({ inherited: 1 }, H());
+var o = Object.create(p); o.own = 1;
+L('--get-own'); o.own; L('--get-inherited'); o.inherited; L('--get-missing'); o.nothing;
+L('--has'); 'inherited' in o; 'nothing' in o;
+L('--set-new'); o.fresh = 1; L('--set-inherited'); o.inherited = 2;
+L(Object.keys(o).join());
+L('--forin'); for (var k in o) L('k=' + k);
+(function () { return log.join('|'); })
+=== order_call_construct
+var log = []; function L(x) { log.push(String(x)); }
+function H() { var h = {}; ['get','set','has','deleteProperty','defineProperty','getOwnPropertyDescriptor','ownKeys','getPrototypeOf','setPrototypeOf','isExtensible','preventExtensions','apply','construct'].forEach(function (n) { h[n] = function () { L(n + (typeof arguments[1] === 'string' ? ':' + arguments[1] : '')); return Reflect[n].apply(null, arguments); }; }); return h; }
+function F(a, b) { this.s = a + b; return undefined; }
+var p = new Proxy(F, H());
+L('--call'); p(1, 2); L('--new'); var r = new p(1, 2); L(r.s);
+L('--call-method'); p.call(null, 1, 2); p.apply(null, [1, 2]);
+L('--bind'); var bf = p.bind(null, 1); bf(2);
+L('--typeof'); L(typeof p); L(typeof new Proxy({}, {})); L(typeof new Proxy(function () {}, {}));
+L('--instanceof'); L(r instanceof p);
+L('--reflect'); Reflect.apply(p, null, [1, 2]); Reflect.construct(p, [1, 2]);
+(function () { return log.join('|'); })
+=== basic_get_set
+var log = []; function L(x) { log.push(String(x)); }
+var p = new Proxy({ a: 1 }, { get: function (t, k, r) { return k in t ? t[k] : 'dflt:' + String(k); }, set: function (t, k, v) { t[k] = v * 2; return true; } });
+L(p.a); L(p.q); p.b = 4; L(p.b); L(Object.keys(p).join());
+L(typeof p); L(Object.prototype.toString.call(p));
+(function () { return log.join('|'); })
+=== no_handler_traps_forward
+var log = []; function L(x) { log.push(String(x)); }
+var t = { a: 1 }, p = new Proxy(t, {});
+p.b = 2; L(t.b); L(p.a); L('a' in p); delete p.a; L('a' in t); L(Object.keys(p).join());
+Object.defineProperty(p, 'c', { value: 3, enumerable: true, configurable: true }); L(t.c);
+L(Object.getPrototypeOf(p) === Object.prototype); L(Object.isExtensible(p)); Object.preventExtensions(p); L(Object.isExtensible(t));
+L(JSON.stringify(p));
+(function () { return log.join('|'); })
+=== constructor_errors
+var log = []; function L(x) { log.push(String(x)); }
+function t(f) { try { f(); L('ok'); } catch (e) { L(e.name); } }
+t(function () { new Proxy({}, {}); }); t(function () { Proxy({}, {}); }); t(function () { new Proxy(1, {}); });
+t(function () { new Proxy({}, 1); }); t(function () { new Proxy(); }); t(function () { new Proxy(null, {}); });
+t(function () { new Proxy({}, null); }); t(function () { new Proxy('a', {}); }); t(function () { new Proxy(function () {}, function () {}); });
+t(function () { new Proxy(new Proxy({}, {}), {}); });
+L(Proxy.length); L(Proxy.name); L(typeof Proxy.revocable); L(Proxy.revocable.length); L(Proxy.revocable.name);
+L(Proxy.prototype); L(Object.prototype.toString.call(Proxy));
+(function () { return log.join('|'); })
+=== revocable_basic
+var log = []; function L(x) { log.push(String(x)); }
+function t(f) { try { f(); L('ok'); } catch (e) { L(e.name); } }
+var r = Proxy.revocable({ a: 1 }, {});
+L(Object.keys(r).join()); L(typeof r.proxy); L(typeof r.revoke); L(r.revoke.length); L(r.revoke.name === ''); L(r.revoke());
+L(r.revoke());
+t(function () { r.proxy.a; }); t(function () { r.proxy.a = 1; }); t(function () { 'a' in r.proxy; }); t(function () { delete r.proxy.a; });
+t(function () { Object.keys(r.proxy); }); t(function () { Object.getPrototypeOf(r.proxy); }); t(function () { Object.setPrototypeOf(r.proxy, null); });
+t(function () { Object.isExtensible(r.proxy); }); t(function () { Object.preventExtensions(r.proxy); });
+t(function () { Object.defineProperty(r.proxy, 'x', { value: 1 }); }); t(function () { Object.getOwnPropertyDescriptor(r.proxy, 'a'); });
+t(function () { Array.isArray(r.proxy); }); t(function () { JSON.stringify(r.proxy); }); t(function () { for (var k in r.proxy); });
+t(function () { typeof r.proxy; }); t(function () { r.proxy instanceof Object; }); t(function () { Object.prototype.toString.call(r.proxy); });
+L(typeof r.proxy);
+var rf = Proxy.revocable(function () { return 1; }, {}); rf.revoke(); L(typeof rf.proxy);
+t(function () { rf.proxy(); }); t(function () { new rf.proxy(); });
+t(function () { new Proxy(r.proxy, {}); }); t(function () { Proxy.revocable(1, {}); });
+t(function () { Proxy.revocable({}, {}).revoke.call(null); });
+(function () { return log.join('|'); })
+=== revoke_in_trap
+var log = []; function L(x) { log.push(String(x)); }
+function t(f) { try { f(); L('ok'); } catch (e) { L(e.name); } }
+var r = Proxy.revocable({ a: 1 }, { get: function (t, k) { r.revoke(); return 5; } });
+L(r.proxy.a); t(function () { r.proxy.a; });
+(function () { return log.join('|'); })
+=== trap_not_callable
+var log = []; function L(x) { log.push(String(x)); }
+function t(f) { try { f(); L('ok'); } catch (e) { L(e.name); } }
+t(function () { new Proxy({}, { get: 1 }).x; }); t(function () { new Proxy({}, { get: null }).x; }); t(function () { new Proxy({}, { get: undefined }).x; });
+t(function () { new Proxy({}, { get: {} }).x; }); t(function () { 'x' in new Proxy({}, { has: 'str' }); });
+t(function () { new Proxy(function () {}, { apply: 1 })(); });
+var h = {}; var p = new Proxy({ x: 1 }, h); L(p.x); h.get = function () { return 'late'; }; L(p.x);
+var n = 0; var ph = new Proxy({}, { get: function (t, k) { n++; return undefined; } }); var p2 = new Proxy({ y: 2 }, ph); L(p2.y); L(n);
+(function () { return log.join('|'); })
+=== invariant_get
+var log = []; function L(x) { log.push(String(x)); }
+function t(f) { try { L(f()); } catch (e) { L(e.name); } }
+var t1 = {}; Object.defineProperty(t1, 'ro', { value: 1, writable: false, configurable: false });
+t(function () { return new Proxy(t1, { get: function () { return 2; } }).ro; });
+t(function () { return new Proxy(t1, { get: function () { return 1; } }).ro; });
+var t2 = {}; Object.defineProperty(t2, 'acc', { set: function () {}, configurable: false });
+t(function () { return new Proxy(t2, { get: function () { return 2; } }).acc; });
+t(function () { return new Proxy(t2, { get: function () { return undefined; } }).acc; });
+var t3 = {}; Object.defineProperty(t3, 'w', { value: 1, writable: true, configurable: false });
+t(function () { return new Proxy(t3, { get: function () { return 2; } }).w; });
+t(function () { return new Proxy({ c: 1 }, { get: function () { return 2; } }).c; });
+(function () { return log.join('|'); })
+=== invariant_set
+var log = []; function L(x) { log.push(String(x)); }
+function t(f) { try { L(f()); } catch (e) { L(e.name); } }
+'use strict';
+var t1 = {}; Object.defineProperty(t1, 'ro', { value: 1, writable: false, configurable: false });
+t(function () { return Reflect.set(new Proxy(t1, { set: function () { return true; } }), 'ro', 2); });
+t(function () { return Reflect.set(new Proxy(t1, { set: function () { return true; } }), 'ro', 1); });
+t(function () { return Reflect.set(new Proxy(t1, { set: function () { return false; } }), 'ro', 2); });
+var t2 = {}; Object.defineProperty(t2, 'acc', { get: function () {}, configurable: false });
+t(function () { return Reflect.set(new Proxy(t2, { set: function () { return true; } }), 'acc', 2); });
+t(function () { return Reflect.set(new Proxy({}, { set: function () { return 0; } }), 'x', 2); });
+t(function () { return (function () { 'use strict'; new Proxy({}, { set: function () { return false; } }).x = 1; return 'no throw'; })(); });
+t(function () { return (function () { new Proxy({}, { set: function () { return false; } }).x = 1; return 'no throw'; })(); });
+(function () { return log.join('|'); })
+=== invariant_has_delete
+var log = []; function L(x) { log.push(String(x)); }
+function t(f) { try { L(f()); } catch (e) { L(e.name); } }
+var t1 = {}; Object.defineProperty(t1, 'nc', { value: 1, configurable: false });
+t(function () { return 'nc' in new Proxy(t1, { has: function () { return false; } }); });
+t(function () { return 'nc' in new Proxy(t1, { has: function () { return true; } }); });
+var t2 = { e: 1 }; Object.preventExtensions(t2);
+t(function () { return 'e' in new Proxy(t2, { has: function () { return false; } }); });
+t(function () { return 'zz' in new Proxy(t2, { has: function () { return true; } }); });
+t(function () { return Reflect.deleteProperty(new Proxy(t1, { deleteProperty: function () { return true; } }), 'nc'); });
+t(function () { return Reflect.deleteProperty(new Proxy(t1, { deleteProperty: function () { return false; } }), 'nc'); });
+t(function () { return Reflect.deleteProperty(new Proxy(t2, { deleteProperty: function () { return true; } }), 'e'); });
+t(function () { return (function () { 'use strict'; return delete new Proxy({}, { deleteProperty: function () { return false; } }).x; })(); });
+t(function () { return delete new Proxy({}, { deleteProperty: function () { return false; } }).x; });
+(function () { return log.join('|'); })
+=== invariant_gopd
+var log = []; function L(x) { log.push(String(x)); }
+function t(f) { try { L(f()); } catch (e) { L(e.name); } }
+var t1 = {}; Object.defineProperty(t1, 'nc', { value: 1, configurable: false });
+var t2 = { c: 1 }; Object.preventExtensions(t2);
+function g(target, trap, key) { return Object.getOwnPropertyDescriptor(new Proxy(target, { getOwnPropertyDescriptor: trap }), key); }
+t(function () { return g(t1, function () { return undefined; }, 'nc'); });
+t(function () { return g(t2, function () { return undefined; }, 'c'); });
+t(function () { return g({}, function () { return 5; }, 'x'); });
+t(function () { return g({}, function () { return { value: 1, configurable: false }; }, 'x'); });
+t(function () { return g({ x: 1 }, function () { return { value: 1, configurable: false }; }, 'x'); });
+t(function () { return g(t2, function () { return { value: 1, configurable: true }; }, 'new'); });
+t(function () { return JSON.stringify(g({}, function () { return { value: 7, configurable: true }; }, 'x')); });
+t(function () { return JSON.stringify(g({ x: 1 }, function () { return { get: undefined, configurable: true }; }, 'x')); });
+t(function () { return g({ w: 1 }, function () { return { value: 1, writable: false, configurable: false }; }, 'w'); });
+var t3 = {}; Object.defineProperty(t3, 'w', { value: 1, writable: true, configurable: false });
+t(function () { return g(t3, function () { return { value: 1, writable: false, configurable: false }; }, 'w'); });
+t(function () { return g(t1, function () { return { value: 1, configurable: false }; }, 'nc'); });
+t(function () { return g(t1, function () { return { value: 2, configurable: false }; }, 'nc'); });
+(function () { return log.join('|'); })
+=== invariant_define
+var log = []; function L(x) { log.push(String(x)); }
+function t(f) { try { L(f()); } catch (e) { L(e.name); } }
+var ne = { }; Object.preventExtensions(ne);
+function d(target, trap, key, desc) { return Reflect.defineProperty(new Proxy(target, { defineProperty: trap }), key, desc); }
+t(function () { return d({}, function () { return false; }, 'x', { value: 1 }); });
+t(function () { return d(ne, function () { return true; }, 'x', { value: 1 }); });
+t(function () { return d({}, function () { return true; }, 'x', { value: 1, configurable: false }); });
+t(function () { return d({ x: 1 }, function () { return true; }, 'x', { value: 1, configurable: false }); });
+t(function () { return d({}, function () { return true; }, 'x', { value: 1, configurable: true }); });
+t(function () { return d({ x: 1 }, function () { return true; }, 'x', { value: 2, configurable: true }); });
+var nc = {}; Object.defineProperty(nc, 'k', { value: 1, writable: true, configurable: false });
+t(function () { return d(nc, function () { return true; }, 'k', { value: 2, writable: false, configurable: false }); });
+t(function () { return d(nc, function () { return true; }, 'k', { value: 1, writable: true, configurable: false }); });
+t(function () { return Object.defineProperty(new Proxy({}, { defineProperty: function () { return false; } }), 'x', { value: 1 }); });
+t(function () { var seen; d({}, function (t, k, desc) { seen = Object.keys(desc).join(); return true; }, 'x', { value: 1, foo: 2, enumerable: true }); return seen; });
+(function () { return log.join('|'); })
+=== invariant_ownkeys
+var log = []; function L(x) { log.push(String(x)); }
+function t(f) { try { L(f()); } catch (e) { L(e.name); } }
+var nc = {}; Object.defineProperty(nc, 'nc', { value: 1, configurable: false });
+var ne = { a: 1, b: 2 }; Object.preventExtensions(ne);
+function k(target, res) { return Reflect.ownKeys(new Proxy(target, { ownKeys: function () { return res; } })); }
+t(function () { return k({}, 5); }); t(function () { return k({}, [1]); }); t(function () { return k({}, ['a', 'a']); });
+t(function () { return k(nc, []); }); t(function () { return k(nc, ['nc']).join(); });
+t(function () { return k(ne, ['a']); }); t(function () { return k(ne, ['a', 'b', 'c']); }); t(function () { return k(ne, ['b', 'a']).join(); });
+t(function () { return k({ a: 1 }, ['x', 'y']).join(); }); t(function () { return k({}, { length: 1, 0: 'a' }).join(); });
+t(function () { return k({}, ['a', Symbol.iterator]).length; });
+t(function () { return Object.keys(new Proxy({ a: 1, b: 2 }, { ownKeys: function () { return ['b', 'a', 'zz']; } })).join(); });
+t(function () { return Object.getOwnPropertyNames(new Proxy({}, { ownKeys: function () { return ['x']; } })).join(); });
+(function () { return log.join('|'); })
+=== invariant_proto_ext
+var log = []; function L(x) { log.push(String(x)); }
+function t(f) { try { L(f()); } catch (e) { L(e.name); } }
+var ne = {}; Object.preventExtensions(ne);
+t(function () { return Object.getPrototypeOf(new Proxy({}, { getPrototypeOf: function () { return 1; } })); });
+t(function () { return Object.getPrototypeOf(new Proxy({}, { getPrototypeOf: function () { return null; } })); });
+t(function () { return Object.getPrototypeOf(new Proxy(ne, { getPrototypeOf: function () { return null; } })); });
+t(function () { return Object.getPrototypeOf(new Proxy(ne, { getPrototypeOf: function () { return Array.prototype; } })) === Array.prototype; });
+t(function () { return Object.getPrototypeOf(new Proxy({}, { getPrototypeOf: function () { return Array.prototype; } })) === Array.prototype; });
+t(function () { return Reflect.setPrototypeOf(new Proxy({}, { setPrototypeOf: function () { return false; } }), null); });
+t(function () { return Reflect.setPrototypeOf(new Proxy(ne, { setPrototypeOf: function () { return true; } }), null); });
+t(function () { return Reflect.setPrototypeOf(new Proxy(ne, { setPrototypeOf: function () { return true; } }), Object.prototype); });
+t(function () { return Object.setPrototypeOf(new Proxy({}, { setPrototypeOf: function () { return false; } }), null); });
+t(function () { return Object.isExtensible(new Proxy({}, { isExtensible: function () { return false; } })); });
+t(function () { return Object.isExtensible(new Proxy(ne, { isExtensible: function () { return true; } })); });
+t(function () { return Object.isExtensible(new Proxy({}, { isExtensible: function () { return 1; } })); });
+t(function () { return Reflect.preventExtensions(new Proxy({}, { preventExtensions: function () { return true; } })); });
+t(function () { return Reflect.preventExtensions(new Proxy({}, { preventExtensions: function () { return false; } })); });
+t(function () { return Object.preventExtensions(new Proxy({}, { preventExtensions: function () { return false; } })); });
+t(function () { return Object.preventExtensions(new Proxy(ne, { preventExtensions: function () { return true; } })) !== undefined; });
+t(function () { var x = Object.preventExtensions(new Proxy({}, { preventExtensions: function (t) { Object.preventExtensions(t); return true; } })); return Object.isExtensible(x); });
+(function () { return log.join('|'); })
+=== trap_args
+var log = []; function L(x) { log.push(String(x)); }
+var t = { a: 1 }; var h = {};
+h.get = function (tt, k, r) { L('get:' + (tt === t) + ':' + String(k) + ':' + (r === p) + ':' + (this === h)); return 1; };
+h.set = function (tt, k, v, r) { L('set:' + (tt === t) + ':' + String(k) + ':' + v + ':' + (r === p) + ':' + arguments.length); return true; };
+h.has = function (tt, k) { L('has:' + String(k) + ':' + arguments.length); return true; };
+h.deleteProperty = function (tt, k) { L('del:' + k + ':' + arguments.length); return true; };
+h.getPrototypeOf = function (tt) { L('gpo:' + arguments.length); return Object.prototype; };
+h.ownKeys = function (tt) { L('ok:' + arguments.length); return ['a']; };
+h.getOwnPropertyDescriptor = function (tt, k) { L('gopd:' + k + ':' + arguments.length); return { value: 1, configurable: true, enumerable: true }; };
+var p = new Proxy(t, h);
+p.x; p.y = 2; 'z' in p; delete p.w; Object.getPrototypeOf(p); Object.keys(p);
+var s = Symbol('s'); p[s]; p[1]; p[s] = 1;
+var o = Object.create(p); o.inh; o.q = 1;
+(function () { return log.join('|'); })
+=== call_construct_args
+var log = []; function L(x) { log.push(String(x)); }
+function F(a) { this.a = a; }
+var h = { apply: function (t, th, args) { L('apply:' + (t === F) + ':' + th + ':' + Array.isArray(args) + ':' + args.join() + ':' + arguments.length); return 'r'; },
+  construct: function (t, args, nt) { L('construct:' + (t === F) + ':' + Array.isArray(args) + ':' + args.join() + ':' + (nt === p) + ':' + arguments.length); return { custom: 1 }; } };
+var p = new Proxy(F, h);
+L(p(1, 2)); L(p.call('T', 3)); L(p.apply('T', [4, 5])); L(Reflect.apply(p, 'U', [6]));
+L(new p(1).custom); L(Reflect.construct(p, [2]).custom); function NT() {} L(Reflect.construct(p, [3], NT).custom);
+var bound = p.bind('B', 9); L(bound()); L(new bound().custom);
+L(Function.prototype.call.call(p, 'V', 7));
+(function () { return log.join('|'); })
+=== call_construct_invariants
+var log = []; function L(x) { log.push(String(x)); }
+function t(f) { try { L(f()); } catch (e) { L(e.name); } }
+function F() {}
+t(function () { return new (new Proxy(F, { construct: function () { return 1; } }))(); });
+t(function () { return typeof new (new Proxy(F, { construct: function () { return {}; } }))(); });
+t(function () { return new (new Proxy(function () {}, { construct: function () { return undefined; } }))(); });
+t(function () { return new (new Proxy({}, {}))(); });
+t(function () { return (new Proxy({}, { apply: function () {} }))(); });
+t(function () { return new (new Proxy(function () {}, {}))() instanceof Object; });
+t(function () { return new (new Proxy(() => 1, {}))(); });
+t(function () { return new (new Proxy(Math.max, {}))(); });
+t(function () { return new (new Proxy(function () {}, { construct: null }))() instanceof Object; });
+t(function () { return (new Proxy(function () { return 5; }, { apply: undefined }))(); });
+t(function () { return typeof new Proxy(class {}, {}); });
+t(function () { return (new Proxy(class {}, {}))(); });
+t(function () { class A { constructor() { this.v = 1; } } return new (new Proxy(A, {}))().v; });
+t(function () { class A { constructor() { this.v = new.target === P; } } var P = new Proxy(A, {}); return new P().v; });
+t(function () { function A() { this.k = Object.getPrototypeOf(this) === A.prototype; } return new (new Proxy(A, {}))().k; });
+t(function () { function A() {} var P = new Proxy(A, { get: function (t, k, r) { return k === 'prototype' ? Array.prototype : t[k]; } }); return Object.getPrototypeOf(new P()) === Array.prototype; });
+(function () { return log.join('|'); })
+=== proxy_as_prototype
+var log = []; function L(x) { log.push(String(x)); }
+var p = new Proxy({}, {
+  get: function (t, k, r) { L('get:' + String(k) + ':' + (r === o)); return k === 'virt' ? 42 : undefined; },
+  set: function (t, k, v, r) { L('set:' + String(k) + ':' + (r === o)); return Reflect.set(t, k, v, r); },
+  has: function (t, k) { L('has:' + String(k)); return k === 'virt'; } });
+var o = Object.create(p);
+L(o.virt); L(o.nope); o.own = 1; L(o.own); L('virt' in o); L('own' in o); L('other' in o);
+L(Object.keys(o).join()); L(Object.getOwnPropertyNames(o).join()); L(o.hasOwnProperty === undefined);
+L(Object.getPrototypeOf(o) === p);
+var o2 = Object.create(p); o2.z = 5; L(Object.keys(o2).join()); L(Object.getOwnPropertyDescriptor(o2, 'z').writable);
+class C extends Object {} Object.setPrototypeOf(C.prototype, p); L(new C().virt);
+(function () { return log.join('|'); })
+=== proxy_proto_getter_receiver
+var log = []; function L(x) { log.push(String(x)); }
+var base = { get g() { return this.name; } };
+var p = new Proxy(base, {});
+var o = Object.create(p); o.name = 'o'; L(o.g);
+var p2 = new Proxy(base, { get: function (t, k, r) { return Reflect.get(t, k, r); } }); var o2 = Object.create(p2); o2.name = 'o2'; L(o2.g);
+var p3 = new Proxy(base, { get: function (t, k, r) { return Reflect.get(t, k); } }); var o3 = Object.create(p3); o3.name = 'o3'; L(o3.g);
+(function () { return log.join('|'); })
+=== is_array_through
+var log = []; function L(x) { log.push(String(x)); }
+function t(f) { try { L(f()); } catch (e) { L(e.name); } }
+L(Array.isArray(new Proxy([], {}))); L(Array.isArray(new Proxy({}, {}))); L(Array.isArray(new Proxy(new Proxy([], {}), {})));
+L(Object.prototype.toString.call(new Proxy([], {}))); L(Object.prototype.toString.call(new Proxy({}, {}))); L(Object.prototype.toString.call(new Proxy(function () {}, {})));
+L(JSON.stringify(new Proxy([1, 2, 3], {}))); L(JSON.stringify(new Proxy({ a: [1, new Proxy([2], {})] }, {})));
+L([].concat(new Proxy([1, 2], {})).length); L([0].concat(new Proxy({ length: 1, 0: 'a' }, {})).length);
+L(Array.prototype.slice.call(new Proxy([1, 2, 3], {}), 1).join());
+L(Array.prototype.map.call(new Proxy([1, 2, 3], {}), function (x) { return x * 2; }).join());
+L(Array.prototype.filter.call(new Proxy([1, 2, 3, 4], {}), function (x) { return x % 2; }).join());
+L(Array.from(new Proxy([1, 2, 3], {})).join()); L([...new Proxy([1, 2], {})].join());
+L(Array.prototype.join.call(new Proxy([1, 2, 3], {}), '-'));
+L(new Proxy([1, 2, 3], {}).length); L(Object.keys(new Proxy([1, 2], {})).join());
+t(function () { var a = new Proxy([], {}); a.push(1, 2); return a.length + ':' + a[1]; });
+t(function () { var a = new Proxy([3, 1, 2], {}); a.sort(); return a.join(); });
+t(function () { var a = new Proxy([1, 2, 3], {}); a.length = 1; return a.join() + ':' + a.length; });
+t(function () { var a = new Proxy([1, 2, 3], {}); return a.reverse().join(); });
+t(function () { var a = new Proxy([1, 2, 3], {}); return a.indexOf(2) + ':' + a.includes(3); });
+(function () { return log.join('|'); })
+=== array_map_filter_traps
+var log = []; function L(x) { log.push(String(x)); }
+var n = { get: 0, has: 0, set: 0, def: 0 };
+var p = new Proxy([1, 2, 3, 4], { get: function (t, k, r) { n.get++; return Reflect.get(t, k, r); }, has: function (t, k) { n.has++; return Reflect.has(t, k); }, set: function (t, k, v, r) { n.set++; return Reflect.set(t, k, v, r); }, defineProperty: function (t, k, d) { n.def++; return Reflect.defineProperty(t, k, d); } });
+L(p.map(function (x) { return x + 1; }).join()); L(JSON.stringify(n));
+L(p.filter(function (x) { return x > 2; }).join()); L(JSON.stringify(n));
+L(p.reduce(function (a, b) { return a + b; }, 0)); L(JSON.stringify(n));
+p.push(5); L(JSON.stringify(n)); L(p.pop()); L(JSON.stringify(n));
+p.forEach(function () {}); L(JSON.stringify(n));
+(function () { return log.join('|'); })
+=== json_stringify_proxy
+var log = []; function L(x) { log.push(String(x)); }
+function t(f) { try { L(f()); } catch (e) { L(e.name); } }
+var gl = [];
+var p = new Proxy({ a: 1, b: { c: 2 } }, { get: function (t, k, r) { gl.push(String(k)); return Reflect.get(t, k, r); }, ownKeys: function (t) { gl.push('ownKeys'); return Reflect.ownKeys(t); }, getOwnPropertyDescriptor: function (t, k) { gl.push('gopd:' + k); return Reflect.getOwnPropertyDescriptor(t, k); } });
+L(JSON.stringify(p)); L(gl.join());
+L(JSON.stringify(new Proxy({ toJSON: function () { return 'tj'; } }, {})));
+L(JSON.stringify({ x: new Proxy(function () {}, {}) })); L(JSON.stringify(new Proxy(function () {}, {})));
+L(JSON.stringify([new Proxy({ q: 1 }, {})])); L(JSON.stringify(new Proxy([1, [2]], {}), null, 1).replace(/\n/g, '~'));
+L(JSON.stringify(new Proxy({ a: 1, b: 2 }, { ownKeys: function () { return ['b']; }, getOwnPropertyDescriptor: function (t, k) { return { value: t[k], enumerable: true, configurable: true }; } })));
+L(JSON.stringify({ a: 1, b: 2, c: 3 }, new Proxy(['a', 'c'], {})));
+L(JSON.stringify(new Proxy({ a: new Date(0) }, {})));
+(function () { return log.join('|'); })
+=== for_in_proxy
+var log = []; function L(x) { log.push(String(x)); }
+var p = new Proxy({ a: 1, b: 2, c: 3 }, {});
+var ks = []; for (var k in p) ks.push(k); L(ks.join());
+var p2 = new Proxy({ a: 1 }, { ownKeys: function () { return ['a', 'b']; }, getOwnPropertyDescriptor: function (t, k) { return k === 'b' ? { value: 2, enumerable: true, configurable: true } : Reflect.getOwnPropertyDescriptor(t, k); } });
+ks = []; for (var k in p2) ks.push(k); L(ks.join());
+var o = Object.create(new Proxy({ inh: 1 }, {})); o.own = 1; ks = []; for (var k in o) ks.push(k); L(ks.join());
+var p3 = new Proxy({ a: 1, b: 2 }, { ownKeys: function (t) { return ['b', 'a']; } }); ks = []; for (var k in p3) ks.push(k); L(ks.join());
+var p4 = new Proxy({ a: 1, b: 2 }, { getPrototypeOf: function () { return { fromProto: 1 }; } }); ks = []; for (var k in p4) ks.push(k); L(ks.join());
+var p5 = new Proxy({ a: 1, b: 2 }, { getOwnPropertyDescriptor: function (t, k) { return k === 'a' ? undefined : Reflect.getOwnPropertyDescriptor(t, k); } }); ks = []; for (var k in p5) ks.push(k); L(ks.join());
+var p6 = new Proxy({ a: 1, [Symbol('s')]: 1 }, {}); ks = []; for (var k in p6) ks.push(k); L(ks.join());
+(function () { return log.join('|'); })
+=== object_static_through_proxy
+var log = []; function L(x) { log.push(String(x)); }
+var p = new Proxy({ a: 1, b: 2 }, { get: function (t, k, r) { return typeof k === 'string' ? t[k] * 10 : t[k]; } });
+L(Object.keys(p).join()); L(Object.values(p).join()); L(Object.entries(p).join(';'));
+L(JSON.stringify(Object.assign({}, p))); L(JSON.stringify({ ...p })); L(JSON.stringify(Object.fromEntries(Object.entries(p))));
+L(JSON.stringify(Object.getOwnPropertyDescriptors(p)));
+var q = Object.assign(new Proxy({}, { set: function (t, k, v) { t[k] = 'S' + v; return true; } }), { x: 1, y: 2 }); L(JSON.stringify(q));
+L(Object.hasOwn(p, 'a')); L(Object.prototype.hasOwnProperty.call(p, 'a')); L(Object.prototype.propertyIsEnumerable.call(p, 'b')); L('a' in p); L(Object.prototype.hasOwnProperty.call(p, 'zz'));
+L(Object.isFrozen(p)); L(Object.isSealed(p)); L(Object.isFrozen(Object.freeze(new Proxy({ a: 1 }, {}))));
+var s = new Proxy({ a: 1 }, {}); Object.seal(s); L(Object.isSealed(s)); L(Object.isExtensible(s)); delete s.a; L('a' in s);
+var f = new Proxy({ a: 1 }, {}); Object.freeze(f); f.a = 5; L(f.a); L(Object.isFrozen(f));
+(function () { return log.join('|'); })
+=== define_properties_create
+var log = []; function L(x) { log.push(String(x)); }
+var dl = []; var tgt = new Proxy({}, { defineProperty: function (t, k, d) { dl.push(k + ':' + JSON.stringify(d)); return Reflect.defineProperty(t, k, d); } });
+Object.defineProperties(tgt, { a: { value: 1, enumerable: true }, b: { get: function () { return 2; } } }); L(dl.join('|'));
+var props = new Proxy({ x: { value: 1 }, y: { value: 2 } }, { get: function (t, k) { L('props.get:' + String(k)); return t[k]; }, ownKeys: function (t) { L('props.ownKeys'); return Reflect.ownKeys(t); }, getOwnPropertyDescriptor: function (t, k) { L('props.gopd:' + k); return Reflect.getOwnPropertyDescriptor(t, k); } });
+L(Object.keys(Object.defineProperties({}, props)).length);
+L(Object.getPrototypeOf(Object.create(new Proxy({}, {}))) !== null);
+(function () { return log.join('|'); })
+=== instanceof_proxy
+var log = []; function L(x) { log.push(String(x)); }
+function t(f) { try { L(f()); } catch (e) { L(e.name); } }
+function F() {} var P = new Proxy(F, {});
+L(new F() instanceof P); L(new P() instanceof F); L(({}) instanceof P);
+var tr = []; var Q = new Proxy(F, { get: function (t, k, r) { tr.push(String(k)); return Reflect.get(t, k, r); }, getPrototypeOf: function (t) { tr.push('gpo'); return Reflect.getPrototypeOf(t); } });
+L(new F() instanceof Q); L(tr.join());
+t(function () { return {} instanceof new Proxy({}, {}); });
+var o = new Proxy({}, { getPrototypeOf: function () { return F.prototype; } }); L(o instanceof F);
+L(Object.prototype.isPrototypeOf.call(F.prototype, o));
+L(F.prototype.isPrototypeOf(new Proxy(new F(), {})));
+var HI = new Proxy({}, { get: function (t, k) { return k === Symbol.hasInstance ? function (v) { return v === 1; } : undefined; } }); L(1 instanceof HI); L(2 instanceof HI);
+(function () { return log.join('|'); })
+=== typeof_tostring_misc
+var log = []; function L(x) { log.push(String(x)); }
+function t(f) { try { L(f()); } catch (e) { L(e.name); } }
+L(typeof new Proxy({}, {})); L(typeof new Proxy([], {})); L(typeof new Proxy(function () {}, {})); L(typeof new Proxy(class {}, {})); L(typeof new Proxy(() => 1, {}));
+L(Object.prototype.toString.call(new Proxy({}, { get: function (t, k) { return k === Symbol.toStringTag ? 'Zed' : undefined; } })));
+L(Object.prototype.toString.call(new Proxy(new Date(), {}))); L(Object.prototype.toString.call(new Proxy(new Error('x'), {})));
+L(Object.prototype.toString.call(new Proxy(new Map(), {})));
+t(function () { return String(new Proxy({}, {})); }); t(function () { return String(new Proxy([1, 2], {})); });
+t(function () { return `${new Proxy({ toString: function () { return 'ts'; } }, {})}`; });
+t(function () { return new Proxy({}, {}) + ''; }); t(function () { return +new Proxy({ valueOf: function () { return 3; } }, {}); });
+t(function () { return Symbol.toPrimitive in new Proxy({}, {}); });
+t(function () { return new Proxy({ [Symbol.toPrimitive]: function () { return 9; } }, {}) * 1; });
+t(function () { return Object.getPrototypeOf(new Proxy(Object.create(null), {})); });
+t(function () { return new Map([[1, 2]]).get(1) + (new Proxy(new Map(), {}) instanceof Map ? 'm' : 'x'); });
+t(function () { return new Proxy(new Map(), {}).get(1); }); t(function () { return new Proxy(new Date(), {}).getTime(); });
+t(function () { return new Proxy(new Set([1]), {}).size; }); t(function () { return new Proxy([], {}).constructor === Array; });
+(function () { return log.join('|'); })
+=== function_proxy_props
+var log = []; function L(x) { log.push(String(x)); }
+function f(a, b) { return a + b; } var p = new Proxy(f, {});
+L(p.length); L(p.name); L(p.prototype === f.prototype); L(p(1, 2)); L(p.call(null, 3, 4)); L(p.apply(null, [5, 6])); L(p.bind(null, 1)(2));
+L(Function.prototype.toString.call(p).length > 0);
+var h = { apply: function (t, th, a) { return t.apply(th, a) * 2; } }; var p2 = new Proxy(f, h); L(p2(1, 2)); L([1, 2].map(function (x) { return p2(x, x); }).join());
+L([3, 4].map(p2).length);
+L(typeof new Proxy(function () {}, {}).bind);
+var cp = new Proxy(function () { return this; }, {}); L(cp.call(7) == 7); L(cp.call('s') == 's');
+var o = { m: new Proxy(function () { return this === o; }, {}) }; L(o.m());
+var sp = new Proxy(function () { 'use strict'; return this; }, {}); L(sp.call(undefined)); L(sp.call(null));
+(function () { return log.join('|'); })
+=== proxy_of_proxy_chain
+var log = []; function L(x) { log.push(String(x)); }
+var t = { v: 1 }; var p = t;
+for (var i = 0; i < 100; i++) p = new Proxy(p, {});
+L(p.v); p.w = 2; L(t.w); L('v' in p); L(Object.keys(p).join()); delete p.v; L('v' in t); L(JSON.stringify(p));
+var cnt = 0; var q = new Proxy({ x: 1 }, { get: function (t, k, r) { cnt++; return Reflect.get(t, k, r); } }); var qq = new Proxy(q, { get: function (t, k, r) { cnt++; return Reflect.get(t, k, r); } }); L(qq.x); L(cnt);
+(function () { return log.join('|'); })
+=== trap_throws_propagate
+var log = []; function L(x) { log.push(String(x)); }
+function t(f) { try { L(f()); } catch (e) { L(e.name + ':' + e.message); } }
+var boom = function () { throw new RangeError('boom'); };
+t(function () { return new Proxy({}, { get: boom }).x; }); t(function () { new Proxy({}, { set: boom }).x = 1; }); t(function () { return 'x' in new Proxy({}, { has: boom }); });
+t(function () { return delete new Proxy({}, { deleteProperty: boom }).x; }); t(function () { return Object.keys(new Proxy({}, { ownKeys: boom })); });
+t(function () { return Object.getPrototypeOf(new Proxy({}, { getPrototypeOf: boom })); }); t(function () { return JSON.stringify(new Proxy({}, { ownKeys: boom })); });
+t(function () { return Array.isArray(new Proxy({}, { get: boom })); }); t(function () { for (var k in new Proxy({}, { ownKeys: boom })); });
+t(function () { return new Proxy(function () {}, { apply: boom })(); }); t(function () { return new (new Proxy(function () {}, { construct: boom }))(); });
+(function () { return log.join('|'); })
+=== symbol_keys
+var log = []; function L(x) { log.push(String(x)); }
+var s = Symbol('s'); var seen = [];
+var p = new Proxy({ [s]: 1, a: 2 }, { get: function (t, k, r) { seen.push(typeof k); return Reflect.get(t, k, r); }, ownKeys: function (t) { seen.push('ownKeys'); return Reflect.ownKeys(t); } });
+p[s]; p.a; p[0]; p[Symbol.iterator]; L(seen.join()); L(Object.getOwnPropertySymbols(p).length); L(Reflect.ownKeys(p).length);
+L(Object.keys(p).join());
+var ks = Reflect.ownKeys(new Proxy({}, { ownKeys: function () { return ['b', Symbol.iterator, 'a']; } })); L(ks.length);
+(function () { return log.join('|'); })
+=== numeric_key_conversion
+var log = []; function L(x) { log.push(String(x)); }
+var seen = []; var p = new Proxy({}, { get: function (t, k) { seen.push(typeof k + ':' + String(k)); return 1; }, has: function (t, k) { seen.push('has:' + typeof k + ':' + String(k)); return true; }, set: function (t, k, v) { seen.push('set:' + typeof k); return true; } });
+p[1]; p['2']; p[1.5]; p[-0]; p[true]; p[null]; p[{}]; 3 in p; p[4] = 1; p[{ toString: function () { return 'ts'; } }];
+L(seen.join());
+(function () { return log.join('|'); })
+=== getter_setter_proxy_target
+var log = []; function L(x) { log.push(String(x)); }
+var t = { _v: 1, get v() { return this._v; }, set v(x) { this._v = x; } };
+var p = new Proxy(t, {});
+L(p.v); p.v = 5; L(t._v); L(p._v);
+var p2 = new Proxy(t, { get: function (tt, k, r) { return Reflect.get(tt, k, r); }, set: function (tt, k, v, r) { return Reflect.set(tt, k, v, r); } });
+p2.v = 9; L(t._v); L(Object.keys(t).join()); L(Object.keys(p2).join());
+L(Object.getOwnPropertyDescriptor(p, 'v').get === Object.getOwnPropertyDescriptor(t, 'v').get);
+(function () { return log.join('|'); })
+=== class_extends_proxy
+var log = []; function L(x) { log.push(String(x)); }
+function t(f) { try { L(f()); } catch (e) { L(e.name); } }
+class A { constructor(x) { this.x = x; } m() { return 'm' + this.x; } static s() { return 's'; } }
+var PA = new Proxy(A, {});
+class B extends PA { constructor() { super(5); } }
+t(function () { return new B().m(); }); t(function () { return B.s(); }); t(function () { return new B() instanceof A; });
+t(function () { return Object.getPrototypeOf(B) === PA; });
+var ct = []; var PC = new Proxy(A, { construct: function (t, a, nt) { ct.push(nt === C2); return Reflect.construct(t, a, nt); } });
+class C2 extends PC { } new C2(1); L(ct.join());
+t(function () { return new PA(2).x; }); t(function () { return PA.s(); });
+t(function () { var inst = new PA(1); return Object.getPrototypeOf(inst) === A.prototype; });
+(function () { return log.join('|'); })
+=== reactive_store
+var log = []; function L(x) { log.push(String(x)); }
+var deps = []; var running = null;
+function reactive(o) { return new Proxy(o, { get: function (t, k, r) { if (running) deps.push('track:' + String(k)); var v = Reflect.get(t, k, r); return v !== null && typeof v === 'object' ? reactive(v) : v; }, set: function (t, k, v, r) { var had = Object.prototype.hasOwnProperty.call(t, k); var ok = Reflect.set(t, k, v, r); deps.push((had ? 'set:' : 'add:') + String(k)); return ok; }, deleteProperty: function (t, k) { deps.push('del:' + String(k)); return Reflect.deleteProperty(t, k); }, has: function (t, k) { deps.push('has:' + String(k)); return Reflect.has(t, k); }, ownKeys: function (t) { deps.push('ownKeys'); return Reflect.ownKeys(t); } }); }
+var state = reactive({ count: 0, user: { name: 'a', tags: ['x'] } });
+running = true; var sum = state.count + state.user.name.length; state.user.tags.forEach(function () {}); running = null;
+state.count++; state.user.name = 'bb'; state.user.tags.push('y'); state.fresh = 1; delete state.fresh; 'count' in state; Object.keys(state);
+L(deps.join()); L(JSON.stringify(state)); L(state.user.tags.length);
+(function () { return log.join('|'); })
+=== validation_proxy_pattern
+var log = []; function L(x) { log.push(String(x)); }
+function t(f) { try { f(); L('ok'); } catch (e) { L(e.name); } }
+var v = new Proxy({}, { set: function (t, k, val) { if (typeof val !== 'number') throw new TypeError('num only'); t[k] = val; return true; } });
+t(function () { v.a = 1; }); t(function () { v.a = 'x'; }); L(v.a);
+var neg = new Proxy([1, 2, 3], { get: function (t, k, r) { var i = Number(k); return Number.isInteger(i) && i < 0 ? t[t.length + i] : Reflect.get(t, k, r); } });
+L(neg[-1]); L(neg[0]); L(neg.length); L(neg.slice(1).join()); L(neg.map(function (x) { return x; }).join());
+var ro = new Proxy({ a: 1 }, { set: function () { return false; }, deleteProperty: function () { return false; } });
+ro.a = 2; L(ro.a); delete ro.a; L(ro.a);
+t(function () { 'use strict'; ro.a = 3; });
+(function () { return log.join('|'); })
+=== reflect_receiver_semantics
+var log = []; function L(x) { log.push(String(x)); }
+function t(f) { try { L(f()); } catch (e) { L(e.name); } }
+var tgt = { set x(v) { this.got = v; } }; var recv = {};
+t(function () { return Reflect.set(tgt, 'x', 1, recv) + ':' + recv.got; });
+t(function () { var p = new Proxy({}, {}); var r = {}; return Reflect.set(p, 'k', 1, r) + ':' + r.k + ':' + Object.keys(p).length; });
+t(function () { var p = new Proxy({}, {}); return Reflect.set(p, 'k', 1, 5); });
+t(function () { var r = new Proxy({}, { defineProperty: function (t, k, d) { L('recv.define:' + k + ':' + JSON.stringify(d)); return Reflect.defineProperty(t, k, d); }, getOwnPropertyDescriptor: function (t, k) { L('recv.gopd:' + k); return Reflect.getOwnPropertyDescriptor(t, k); } }); return Reflect.set({}, 'k', 1, r); });
+t(function () { var r = new Proxy({ k: 0 }, { defineProperty: function (t, k, d) { L('recv.define2:' + JSON.stringify(d)); return Reflect.defineProperty(t, k, d); }, getOwnPropertyDescriptor: function (t, k) { L('recv.gopd2:' + k); return Reflect.getOwnPropertyDescriptor(t, k); } }); return Reflect.set({}, 'k', 1, r); });
+t(function () { return Reflect.get(new Proxy({ get a() { return this; } }, {}), 'a', 7); });
+t(function () { return Reflect.has(new Proxy({ a: 1 }, {}), 'a'); });
+t(function () { return Reflect.getPrototypeOf(new Proxy([], {})) === Array.prototype; });
+(function () { return log.join('|'); })
+=== proxy_with_frozen_target_get
+var log = []; function L(x) { log.push(String(x)); }
+function t(f) { try { L(f()); } catch (e) { L(e.name); } }
+var fz = Object.freeze({ a: 1, o: {} });
+t(function () { return new Proxy(fz, { get: function () { return 2; } }).a; }); t(function () { return new Proxy(fz, { get: function (t, k) { return t[k]; } }).a; });
+t(function () { return Object.isFrozen(new Proxy(fz, {})); }); t(function () { return Object.isSealed(new Proxy(fz, {})); });
+t(function () { return Object.keys(new Proxy(fz, { ownKeys: function () { return ['a']; } })).join(); });
+t(function () { return Object.keys(new Proxy(fz, { ownKeys: function () { return ['a', 'o', 'x']; } })).join(); });
+t(function () { return Object.keys(new Proxy(fz, { ownKeys: function () { return []; } })).join(); });
+(function () { return log.join('|'); })
+=== revocation_during_ops
+var log = []; function L(x) { log.push(String(x)); }
+function t(f) { try { L(f()); } catch (e) { L(e.name); } }
+var r = Proxy.revocable({ a: 1, b: 2 }, {}); var p = r.proxy;
+var n = 0; var q = new Proxy({ a: 1, b: 2 }, { ownKeys: function (t) { L('ownKeys'); return Reflect.ownKeys(t); }, getOwnPropertyDescriptor: function (t, k) { L('gopd:' + k); if (k === 'a') rv.revoke(); return Reflect.getOwnPropertyDescriptor(t, k); } });
+var rv = Proxy.revocable({ a: 1, b: 2 }, { ownKeys: function (t) { L('ownKeys'); return Reflect.ownKeys(t); }, getOwnPropertyDescriptor: function (t, k) { L('gopd:' + k); if (k === 'a') rv.revoke(); return Reflect.getOwnPropertyDescriptor(t, k); } });
+t(function () { return Object.keys(rv.proxy).join(); });
+t(function () { r.revoke(); return Object.prototype.toString.call(p); });
+t(function () { return typeof p; }); t(function () { return String(Proxy.revocable({}, {}).proxy === undefined); });
+(function () { return log.join('|'); })
+=== proxy_handler_is_proxy
+var log = []; function L(x) { log.push(String(x)); }
+var hl = [];
+var meta = new Proxy({}, { get: function (t, k) { hl.push(String(k)); return undefined; } });
+var p = new Proxy({ a: 1 }, meta);
+p.a; p.b = 2; 'a' in p; delete p.b; Object.keys(p); Object.getPrototypeOf(p); Object.isExtensible(p);
+L(hl.join());
+var h2 = new Proxy({}, { get: function (t, k) { return k === 'get' ? function () { return 'via-meta'; } : undefined; } }); L(new Proxy({}, h2).anything);
+(function () { return log.join('|'); })
+=== deep_recursion_trap
+var log = []; function L(x) { log.push(String(x)); }
+function t(f) { try { L(f()); } catch (e) { L(e.name); } }
+var depth = 0; var p = new Proxy({}, { get: function (t, k, r) { depth++; return depth < 50 ? r.x : depth; } });
+t(function () { return p.x; });
+(function () { return log.join('|'); })
+=== getter_on_proxy_chain_with_this
+var log = []; function L(x) { log.push(String(x)); }
+var base = { get who() { return this === p ? 'proxy' : this === base ? 'base' : 'other'; } };
+var p = new Proxy(base, {}); L(p.who); L(Reflect.get(p, 'who')); L(Reflect.get(base, 'who', p)); L(Object.create(p).who);
+(function () { return log.join('|'); })
+=== property_enumeration_after_ops
+var log = []; function L(x) { log.push(String(x)); }
+var t = { b: 1, a: 2, 1: 'x', 0: 'y' }; var p = new Proxy(t, {});
+L(Object.keys(p).join()); L(JSON.stringify(p)); L(Object.getOwnPropertyNames(p).join()); L(Object.entries(p).join(';'));
+p.c = 3; delete p.b; L(Object.keys(p).join()); Object.defineProperty(p, 'h', { value: 1, enumerable: false }); L(Object.keys(p).join()); L(Object.getOwnPropertyNames(p).join());
+L(JSON.stringify(Object.getOwnPropertyDescriptor(p, 'h'))); L(Object.getOwnPropertyDescriptor(p, 'zz'));
+(function () { return log.join('|'); })
+=== super_and_lookup_through_proxy
+var log = []; function L(x) { log.push(String(x)); }
+function t(f) { try { L(f()); } catch (e) { L(e.name); } }
+var tl = [];
+class A { m() { return 'A.m'; } get g() { return 'A.g:' + (this instanceof B); } set s(v) { this.sv = v; } }
+var P = new Proxy(A.prototype, { get: function (t, k, r) { tl.push('get:' + String(k)); return Reflect.get(t, k, r); }, set: function (t, k, v, r) { tl.push('set:' + String(k)); return Reflect.set(t, k, v, r); } });
+class B { m() { return super.m(); } get g() { return super.g; } set s(v) { super.s = v; } w(v) { super.plain = v; } }
+Object.setPrototypeOf(B.prototype, P);
+var b = new B();
+t(function () { return b.m(); }); t(function () { return b.g; }); t(function () { b.s = 4; return b.sv; }); t(function () { b.w(7); return b.plain + ':' + Object.keys(b).join(); });
+L(tl.join());
+var acc = { get x() { return 1; }, set y(v) {} };
+var pa = new Proxy(acc, { getOwnPropertyDescriptor: function (t, k) { tl.push('gopd:' + k); return Reflect.getOwnPropertyDescriptor(t, k); }, getPrototypeOf: function (t) { tl.push('gpo'); return Reflect.getPrototypeOf(t); } });
+tl = [];
+t(function () { return typeof pa.__lookupGetter__('x'); }); t(function () { return typeof pa.__lookupSetter__('y'); }); t(function () { return typeof pa.__lookupGetter__('nope'); });
+L(tl.join());
+t(function () { return typeof Object.create(pa).__lookupGetter__('x'); });
+(function () { return log.join('|'); })
+=== wrapper_1
+var r; try { r = String(Number(new Proxy(new Number(5), {}))); } catch (x) { r = "throw:" + x.name; }
+(function () { return r; })
+=== wrapper_2
+var r; try { r = String(new Proxy(new Number(5), {}) + 1); } catch (x) { r = "throw:" + x.name; }
+(function () { return r; })
+=== wrapper_3
+var r; try { r = String(Object.prototype.toString.call(new Proxy(new String('ab'),{}))); } catch (x) { r = "throw:" + x.name; }
+(function () { return r; })
+=== wrapper_4
+var r; try { r = String(new Proxy(new String('ab'),{}).length); } catch (x) { r = "throw:" + x.name; }
+(function () { return r; })
+=== wrapper_5
+var r; try { r = String(new Proxy(new String('ab'),{})[0]); } catch (x) { r = "throw:" + x.name; }
+(function () { return r; })
+=== wrapper_6
+var r; try { r = String(Object.keys(new Proxy(new String('ab'),{})).join()); } catch (x) { r = "throw:" + x.name; }
+(function () { return r; })
+=== wrapper_7
+var r; try { r = String(Number.prototype.valueOf.call(new Proxy(new Number(5),{}))); } catch (x) { r = "throw:" + x.name; }
+(function () { return r; })
+=== wrapper_8
+var r; try { r = String('ab' in new Proxy(new String('ab'),{})); } catch (x) { r = "throw:" + x.name; }
+(function () { return r; })
+=== wrapper_9
+var r; try { r = String(Object.getOwnPropertyNames(new Proxy(Object('xy'),{})).join()); } catch (x) { r = "throw:" + x.name; }
+(function () { return r; })
+=== wrapper_10
+var r; try { r = String(Object.getOwnPropertyNames(Object.assign(Object('xy'),{})).join()); } catch (x) { r = "throw:" + x.name; }
+(function () { return r; })
+=== wrapper_11
+var r; try { r = String((function(){ var s=Object('xy'); Object.setPrototypeOf(s,new Proxy({},{get(t,k){return 9}})); return s.zz+s[0]; })()); } catch (x) { r = "throw:" + x.name; }
+(function () { return r; })
+=== wrapper_12
+var r; try { r = String(Object.keys(Object.assign({}, new Proxy(Object('ab'),{}))).join()); } catch (x) { r = "throw:" + x.name; }
+(function () { return r; })
+=== wrapper_13
+var r; try { r = String((function(){ var o=Object.create(new Proxy(Object('ab'),{})); return o[0]+o.length; })()); } catch (x) { r = "throw:" + x.name; }
+(function () { return r; })
+=== wrapper_14
+var r; try { r = String((function(){ var p=new Proxy({},{}); var s=Object('ab'); return Reflect.get(Object('ab'), 'length', p); })()); } catch (x) { r = "throw:" + x.name; }
+(function () { return r; })
+=== wrapper_15
+var r; try { r = String((function(){ return Reflect.set(Object('ab'), '0', 'z', new Proxy({},{})) + ''; })()); } catch (x) { r = "throw:" + x.name; }
+(function () { return r; })
+=== wrapper_16
+var r; try { r = String(Object.entries(Object('ab')).join()); } catch (x) { r = "throw:" + x.name; }
+(function () { return r; })
+=== wrapper_17
+var r; try { r = String(JSON.stringify(new Proxy(Object('ab'),{}))); } catch (x) { r = "throw:" + x.name; }
+(function () { return r; })
+=== wrapper_18
+var r; try { r = String(JSON.stringify(Object('ab'))); } catch (x) { r = "throw:" + x.name; }
+(function () { return r; })

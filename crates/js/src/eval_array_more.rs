@@ -386,7 +386,7 @@ impl<'p> Interp<'p> {
                 el = self.call_fn(f, t, &[el, Value::Number(i as f64), src])?;
             }
             let nested = match el {
-                Value::Object(c) if depth > 0.0 => h!(self, self.heap.is_array(c)),
+                Value::Object(c) if depth > 0.0 => self.o_is_array(c)?,
                 _ => false,
             };
             if nested {

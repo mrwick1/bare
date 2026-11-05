@@ -276,7 +276,7 @@ impl<'p> Interp<'p> {
 
     fn ao_has(&mut self, this: Value, k: PropertyKey) -> Res<bool> {
         Ok(match this {
-            Value::Object(o) => hx!(self, self.heap.has_property(o, k)),
+            Value::Object(o) => self.o_has_property(o, k)?,
             _ => false,
         })
     }
@@ -296,7 +296,7 @@ impl<'p> Interp<'p> {
     /// `DeletePropertyOrThrow`.
     fn ao_delete(&mut self, this: Value, k: PropertyKey) -> Res<()> {
         let ok = match this {
-            Value::Object(o) => hxw!(self, self.heap.delete(o, k)),
+            Value::Object(o) => self.o_delete(o, k)?,
             _ => true,
         };
         if ok {
@@ -330,7 +330,7 @@ impl<'p> Interp<'p> {
     /// The intrinsic `Array` and an `undefined` or `null` species give a plain array. Any other callable is a gate.
     fn ao_species(&mut self, this: Value, len: u64) -> Res<ObjId> {
         if let Value::Object(o) = this
-            && h!(self, self.heap.is_array(o))
+            && self.o_is_array(o)?
         {
             let mut c = self.get_prop(this, self.k_constructor)?;
             if matches!(c, Value::Object(_)) {
@@ -364,7 +364,7 @@ impl<'p> Interp<'p> {
         if !matches!(s, Value::Undefined) {
             return self.truthy(s);
         }
-        Ok(h!(self, self.heap.is_array(o)))
+        self.o_is_array(o)
     }
 
     // ------------------------------------------------------------ callback methods
@@ -492,15 +492,24 @@ impl<'p> Interp<'p> {
             return Ok(not_found);
         }
         let Some(mut k) = self.ao_from_index(from, len)? else { return Ok(not_found) };
-        while k < len {
-            self.tick()?;
-            let key = self.index_key(k)?;
-            if includes {
+        // Two loops, not one with `if includes` inside: the compiler split them only by luck, and the merged loop cost 10 more
+        // instructions for each element (measured on `arrays`).
+        if includes {
+            while k < len {
+                self.tick()?;
+                let key = self.index_key(k)?;
                 let v = self.get_prop(this, key)?;
                 if v.same_value_zero(x) {
                     return Ok(Value::Bool(true));
                 }
-            } else if self.ao_has(this, key)? {
+                k += 1;
+            }
+            return Ok(not_found);
+        }
+        while k < len {
+            self.tick()?;
+            let key = self.index_key(k)?;
+            if self.ao_has(this, key)? {
                 let v = self.get_prop(this, key)?;
                 if v.strict_equals(x) {
                     return Ok(Value::Number(k as f64));
@@ -793,6 +802,7 @@ impl<'p> Interp<'p> {
         Ok(sx != sy && h!(self, self.heap.str_units(sx)) > h!(self, self.heap.str_units(sy)))
     }
 
+    #[inline] // the compiler inlined it before the proxy change moved other inlining decisions (measured: 1.5% on `sort`)
     fn ao_sort_key(&mut self, vals: &[Value], keys: &mut [Option<StrId>], i: u32) -> Res<StrId> {
         if let Some(s) = keys[i as usize] {
             return Ok(s);
@@ -819,7 +829,7 @@ impl<'p> Interp<'p> {
             for k in keys {
                 self.tick()?;
                 if let Value::Object(o) = src {
-                    match hx!(self, self.heap.peek_own_property(o, k)) {
+                    match self.o_peek(o, k)? {
                         Some(p) if p.enumerable() => {}
                         _ => continue,
                     }
@@ -847,7 +857,7 @@ impl<'p> Interp<'p> {
                 continue;
             }
             if let Value::Object(o) = src {
-                match hx!(self, self.heap.peek_own_property(o, k)) {
+                match self.o_peek(o, k)? {
                     Some(p) if p.enumerable() => {}
                     _ => continue,
                 }

@@ -28,9 +28,8 @@
 //! through the evaluator (`HeapError::NeedsNamed`, `Host::named_write`), because it can throw and needs the evaluator's budget.
 //!
 //! Not supported (needs the evaluator): calling getters and setters, `ToPrimitive` on objects
-//! (`NeedsExecution`), `typeof` of a callable (`"function"`), Symbol.for registry, Proxy (the dispatch points of
-//! `heap_named.rs` are where it would plug in),
-//! checking that an accessor is callable. Accessors are stored, validated and traced; the
+//! (`NeedsExecution`), `typeof` of a callable (`"function"`), Symbol.for registry, running a `Proxy` trap (the heap answers
+//! `HeapError::Proxy` and the evaluator runs it: `heap_proxy.rs`), checking that an accessor is callable. Accessors are stored, validated and traced; the
 //! caller gets the getter or setter object and must call it.
 
 use crate::value::*;
@@ -101,6 +100,9 @@ pub enum HeapError {
     /// waits in the heap (`take_named_request`). The evaluator runs `Host::named_write`, gives the answer back
     /// (`complete_named`) and repeats the operation, which then returns that answer. Nothing was changed when it asked.
     NeedsNamed,
+    /// The operation met a `Proxy` (`heap_proxy.rs`). The heap cannot run a trap, so it changed nothing and names the proxy. The
+    /// evaluator runs the internal method of that proxy from there. A path with no such handler turns this into `Unsupported`.
+    Proxy(ObjId),
 }
 
 #[path = "heap_binary.rs"]
@@ -111,6 +113,8 @@ mod named;
 pub use named::{NamedOp, NamedRequest, NamedSource};
 #[path = "heap_prim.rs"]
 mod prim;
+#[path = "heap_proxy.rs"]
+mod proxy;
 
 // ---------- property model ----------
 
@@ -180,7 +184,9 @@ pub enum Set {
 }
 
 /// ValidateAndApplyPropertyDescriptor (section 10.1.6.3) on one property. `None` = rejected.
-#[inline(always)] // one caller before `heap_prim.rs`: keep it inlined into `ordinary_define`
+/// `inline(always)`: `ordinary_define` was its only caller and had it inlined. `heap_prim.rs` and `is_compatible_descriptor` are more
+/// callers. Without this the compiler outlines it and every plain `define` pays a call.
+#[inline(always)]
 fn validate_apply(extensible: bool, cur: Option<Property>, d: &PropertyDescriptor) -> Option<Property> {
     if d.is_accessor() && d.is_data() {
         return None; // callers check first; keep this safe
@@ -358,6 +364,8 @@ const EXOTIC: u8 = 1;
 const EXOTIC_NAMED: u8 = 2;
 /// A String wrapper object: virtual `length` and index properties (`heap_prim.rs`).
 const EXOTIC_STR: u8 = 4;
+/// A `Proxy` (`heap_proxy.rs`). It shares the `exotic != 0` test of the other exotic objects, so an ordinary object pays nothing.
+const EXOTIC_PROXY: u8 = 8;
 
 // The flags fit in the padding.
 const _: () = assert!(std::mem::size_of::<Object>() <= 80);
@@ -1002,11 +1010,25 @@ impl Heap {
         self.alloc_object(proto, true)
     }
 
+    /// `IsArray` of an object that is not a proxy. A proxy is `Err(Proxy)`: the answer is the one of its target.
     pub fn is_array(&self, o: ObjId) -> R<bool> {
-        Ok(self.obj(o)?.is_array)
+        let ob = self.obj(o)?;
+        if ob.exotic == EXOTIC_PROXY {
+            return Err(HeapError::Proxy(o));
+        }
+        Ok(ob.is_array)
     }
 
     pub fn get_prototype_of(&self, o: ObjId) -> R<Option<ObjId>> {
+        let ob = self.obj(o)?;
+        if ob.exotic == EXOTIC_PROXY {
+            return Err(HeapError::Proxy(o));
+        }
+        Ok(ob.proto)
+    }
+
+    /// The prototype as stored, for the collector. A proxy has none (its target and handler are traced instead).
+    pub fn stored_prototype(&self, o: ObjId) -> R<Option<ObjId>> {
         Ok(self.obj(o)?.proto)
     }
 
@@ -1014,6 +1036,9 @@ impl Heap {
     /// or when the change would make a cycle.
     pub fn set_prototype_of(&mut self, o: ObjId, proto: Option<ObjId>) -> R<bool> {
         let obj = self.obj(o)?;
+        if obj.exotic == EXOTIC_PROXY {
+            return Err(HeapError::Proxy(o));
+        }
         self.check_opt_obj(proto)?;
         if obj.proto == proto {
             return Ok(true);
@@ -1033,11 +1058,17 @@ impl Heap {
     }
 
     pub fn is_extensible(&self, o: ObjId) -> R<bool> {
-        Ok(self.obj(o)?.extensible)
+        let ob = self.obj(o)?;
+        if ob.exotic == EXOTIC_PROXY {
+            return Err(HeapError::Proxy(o));
+        }
+        Ok(ob.extensible)
     }
 
     pub fn prevent_extensions(&mut self, o: ObjId) -> R<()> {
-        self.obj(o)?;
+        if self.obj(o)?.exotic == EXOTIC_PROXY {
+            return Err(HeapError::Proxy(o));
+        }
         self.objects.get_mut(o.index, o.gn).unwrap().extensible = false;
         Ok(())
     }
@@ -1224,7 +1255,11 @@ impl Heap {
     /// in creation order. An array's `length` is the first string.
     pub fn own_keys(&mut self, o: ObjId) -> R<Vec<PropertyKey>> {
         let rest = self.own_keys_with(o, true)?;
-        if self.obj(o)?.exotic != EXOTIC_NAMED {
+        let ex = self.obj(o)?.exotic;
+        if ex == EXOTIC_PROXY {
+            return Err(HeapError::Proxy(o));
+        }
+        if ex != EXOTIC_NAMED {
             return Ok(rest);
         }
         let mut keys = self.named_keys(o)?;
@@ -1300,6 +1335,10 @@ impl Heap {
         }
         let (exotic, is_array) = (obj.exotic, obj.is_array);
         if exotic != 0 {
+            // A bit test, not `==`: a third `==` makes the compiler build a jump table that every plain `define` would pay for.
+            if exotic & EXOTIC_PROXY != 0 {
+                return Err(HeapError::Proxy(o));
+            }
             if exotic == EXOTIC_NAMED && !matches!(key, PropertyKey::Symbol(_)) {
                 return self.named_write(o, key, NamedOp::Define(*d));
             }
@@ -1524,6 +1563,9 @@ impl Heap {
     /// it from being extensible (the specification says a view's elements are configurable, so sealing it would fail).
     pub fn set_integrity(&mut self, o: ObjId, frozen: bool) -> R<bool> {
         let ob = self.obj(o)?;
+        if ob.exotic == EXOTIC_PROXY {
+            return Err(HeapError::Proxy(o));
+        }
         if frozen && ob.exotic != 0 && ob.exotic != EXOTIC_STR && self.virtual_len(o)? > 0 {
             return Ok(false);
         }
@@ -1552,6 +1594,9 @@ impl Heap {
     /// `TestIntegrityLevel` (`Object.isSealed`, and `Object.isFrozen` when `frozen`), without a key list.
     pub fn test_integrity(&self, o: ObjId, frozen: bool) -> R<bool> {
         let ob = self.obj(o)?;
+        if ob.exotic == EXOTIC_PROXY {
+            return Err(HeapError::Proxy(o));
+        }
         if ob.extensible || ob.elems.iter().any(Option::is_some) || (frozen && ob.exotic != 0 && ob.exotic != EXOTIC_STR && self.virtual_len(o)? > 0) {
             return Ok(false);
         }
@@ -1597,6 +1642,10 @@ impl Heap {
                 match exotics.get(&objects.back[d as usize]) {
                     Some(binary::Exotic::View { buffer, .. }) => m.obj(*buffer),
                     Some(binary::Exotic::Prim(v)) => m.value(*v),
+                    Some(binary::Exotic::Proxy(Some((target, handler)))) => {
+                        m.obj(*target);
+                        m.obj(*handler);
+                    }
                     _ => {}
                 }
             }

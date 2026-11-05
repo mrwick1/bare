@@ -86,7 +86,7 @@ fn reflect_is_a_genuine_object_with_the_full_api() {
         assert_eq!(out(&mut it, "Reflect[Symbol.toStringTag]"), "Reflect");
         // the rest of the API came with batch 1
         assert_eq!(out(&mut it, "typeof Reflect.get + typeof Reflect.set + typeof Reflect.has + typeof Reflect.apply + typeof Reflect.defineProperty + typeof Reflect.getPrototypeOf"), "functionfunctionfunctionfunctionfunctionfunction");
-        assert_eq!(out(&mut it, "typeof Proxy"), "undefined");
+        assert_eq!(out(&mut it, "typeof Proxy"), "function");
         assert_eq!(out(&mut it, "var d = Object.getOwnPropertyDescriptor(globalThis, 'Reflect'); [d.writable, d.enumerable, d.configurable].join()"), "true,false,true");
         assert_eq!(out(&mut it, "var d = Object.getOwnPropertyDescriptor(Reflect, 'construct'); [d.writable, d.enumerable, d.configurable].join()"), "true,false,true");
         assert_eq!(out(&mut it, "var d = Object.getOwnPropertyDescriptor(Object, 'getOwnPropertyNames'); [d.writable, d.enumerable, d.configurable].join()"), "true,false,true");

@@ -803,7 +803,7 @@ impl<'p> Interp<'p> {
         let Value::Object(callee_proto) = self.get_prop(c, self.k_prototype)? else {
             return Err(self.type_err("Function has non-object prototype in instanceof check"));
         };
-        while let Some(p) = h!(self, self.heap.get_prototype_of(o)) {
+        while let Some(p) = self.o_get_prototype_of(o)? {
             self.tick()?;
             if p == callee_proto {
                 return Ok(true);

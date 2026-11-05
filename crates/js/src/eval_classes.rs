@@ -310,7 +310,8 @@ impl<'p> Interp<'p> {
                 Some(&Callee::Host { ctor, .. }) => return ctor,
                 Some(&Callee::Promise(pf)) => return matches!(pf, PFn::Ctor | PFn::AggErrCtor),
                 Some(&Callee::Bound { target, .. }) => o = target,
-                None => return false,
+                Some(&Callee::Proxy { ctor }) => return ctor,
+                Some(Callee::Revoke(_)) | None => return false,
             }
         }
     }
@@ -353,17 +354,19 @@ impl<'p> Interp<'p> {
             NoNt(&'static str),
             Native(Nat),
             Bound(ObjId, Vec<Value>),
+            Proxy,
         }
         let d = match self.funcs.get(&f) {
             Some(Callee::Class) => D::Class,
             Some(&Callee::Host { id, ctor: true, nt: true }) => D::Host(id),
             Some(&Callee::Script { script, fid, env, self_binding }) if self.func_of(script, fid).is_plain_ctor() => D::Script(script, fid, env, self_binding),
-            Some(&Callee::Native(n)) if matches!(n, Nat::ObjectCtor | Nat::FnCtor | Nat::ArrayCtor | Nat::ErrorCtor(_) | Nat::StringFn | Nat::NumberFn | Nat::BooleanFn | Nat::Ext(Bi::RegExpCtor) | Nat::Sc(ScFn::IterCtor)) => D::Native(n),
+            Some(&Callee::Native(n)) if matches!(n, Nat::ObjectCtor | Nat::FnCtor | Nat::ArrayCtor | Nat::ErrorCtor(_) | Nat::StringFn | Nat::NumberFn | Nat::BooleanFn | Nat::Ext(Bi::RegExpCtor) | Nat::Sc(ScFn::IterCtor) | Nat::Px(PxFn::Ctor)) => D::Native(n),
             Some(&Callee::Native(n)) if Self::native_no_nt(n) => D::NoNt("subclassing a native constructor (new.target is not passed to the constructor)"),
             Some(&Callee::Promise(PFn::Ctor)) => D::NoNt("subclassing Promise (new.target is not passed to the constructor)"),
             Some(&Callee::Promise(PFn::AggErrCtor)) => D::NoNt("subclassing AggregateError (new.target is not passed to the constructor)"),
             Some(&Callee::Host { ctor: true, nt: false, .. }) => D::NoNt("subclassing a host constructor (new.target is not passed to the constructor)"),
             Some(Callee::Bound { target, args, .. }) => D::Bound(*target, args.clone()),
+            Some(&Callee::Proxy { ctor: true }) => D::Proxy,
             _ => {
                 let d = self.src_text(callee);
                 return Err(self.type_err(&format!("{d} is not a constructor")));
@@ -381,6 +384,16 @@ impl<'p> Interp<'p> {
                 r
             }
             D::NoNt(what) => Err(unsupported(what, Span::default())),
+            D::Proxy => {
+                if self.depth >= self.limits.max_call_depth {
+                    return Err(Error::Limit(LimitKind::CallDepth));
+                }
+                self.tick()?;
+                self.depth += 1;
+                let r = self.px_construct(f, args, nt, callee);
+                self.depth -= 1;
+                r
+            }
             D::Host(id) => {
                 if self.depth >= self.limits.max_call_depth {
                     return Err(Error::Limit(LimitKind::CallDepth));
@@ -591,7 +604,7 @@ impl<'p> Interp<'p> {
             let k = self.key_text(key);
             return Err(self.type_err(&format!("Cannot read properties of null (reading '{k}')")));
         };
-        match h!(self, self.heap.get(base, key)) {
+        match hx!(self, self.heap.get(base, key), Get::Value(self.o_get_slow(base, key, this)?)) {
             Get::Value(v) => Ok(v),
             Get::Accessor { getter: Some(g) } => self.call_fn(Value::Object(g), this, &[]),
             Get::Accessor { getter: None } => Ok(Value::Undefined),
@@ -602,7 +615,15 @@ impl<'p> Interp<'p> {
     fn super_set(&mut self, this: Value, key: PropertyKey, v: Value) -> Res<()> {
         let base = self.super_base(Span::default())?;
         let found = match base {
-            Some(b) => h!(self, self.heap.lookup(b, key)),
+            // a proxy as the home prototype: `super.k = v` is its [[Set]] with `this` as the receiver
+            Some(b) => hx!(self, self.heap.lookup(b, key), {
+                return if self.o_set(b, key, v, this)? {
+                    Ok(())
+                } else {
+                    let k = self.key_text(key);
+                    Err(self.type_err(&format!("Cannot assign to read only property '{k}' of object")))
+                };
+            }),
             None => None,
         };
         let reject = |s: &mut Self| {

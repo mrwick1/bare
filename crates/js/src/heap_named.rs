@@ -34,13 +34,10 @@
 //! property that must not hide a prototype property) needs a visibility check on the chain. `[[PreventExtensions]]` is not
 //! forced to `false`. `peek_own_property` gives a placeholder `undefined` value for a name (its callers read only the flags).
 //!
-//! How `Proxy` would plug in (not built). A `Proxy` is another exotic kind (`Exotic::Proxy { target, handler }`, flag `proxy`)
-//! that is dispatched at the same points of the table. Its internal methods run script (the traps), so none can be answered
-//! from `&self`: each point stores a `NamedRequest`-like record (with `Get`, `GetOwn`, `Has`, `Keys` as extra `NamedOp`s) and
-//! answers `NeedsNamed`; the evaluator runs the trap with `Interp`, checks the invariants against the target, and completes the
-//! request with a richer answer (a value, an optional property, a key list instead of a boolean); the repeat returns it.
-//! The `hxw!` loop, the request slot and the dispatch points stay as they are. The collector marks `target` and `handler`
-//! from the exotic payload (`Exotic::View` shows how). Revoking a proxy empties the payload.
+//! `Proxy` is built (`heap_proxy.rs`). It does not use the request slot: a proxy is another exotic flag (`EXOTIC_PROXY`) tested at the
+//! same points, and each internal method answers `HeapError::Proxy(p)` and changes nothing. The evaluator runs the trap, checks the
+//! invariants against the target and calls the heap again for the target. A proxy needs no request record, because its answer is
+//! made in the evaluator and never has to go back through the heap.
 
 use super::binary::Exotic;
 use super::*;

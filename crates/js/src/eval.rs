@@ -17,7 +17,7 @@
 //! templates, BigInt, `super` outside a class element, `new.target` in a field initializer, `with`, `for await`, and `await` in `switch`, `for-in`, optional chains, `delete`, `++`/`--`, computed keys and binding patterns.
 //! Async functions and arrows run in a bounded continuation machine: see `eval_async.rs`. A regexp literal is compiled by `Interp::new`;
 //! an invalid pattern, lookbehind, named groups or the flags `u`, `v`, `d` are `Unsupported` there (see `eval_builtins.rs`).
-//! A missing builtin (`WeakRef`, `Proxy`, ...) is an ordinary `ReferenceError` at run time, as in a bare engine.
+//! A missing builtin (`WeakRef`, ...) is an ordinary `ReferenceError` at run time, as in a bare engine.
 //! `JSON.parse`, `RegExp` and a small `String.prototype` are bound in `eval_builtins.rs`, which lists what is and is not there.
 //! Classes are supported: see `eval_classes.rs` for what runs and what does not.
 //!
@@ -238,7 +238,31 @@ macro_rules! h {
 // JS object yet) is not an error: the host makes the object (`Host::fill_indexed`) and the operation runs again. The heap
 // changed nothing when it asked, so a repeat is safe. At most 2 repeats: the host must have made the object by then, or the
 // result is an error, never a loop. Only for expressions that move nothing, because they run again.
+// `hx!(s, e, p)` and `hxw!(s, e, p)`: `p` is what to do when the operation met a `Proxy` (`HeapError::Proxy`). It is an expression
+// of the same type as the answer. It runs the internal method of the proxy (`eval_proxy.rs`), which can call script. Without `p`, a
+// proxy is `Unsupported` (`herr`): the path has no trap dispatch yet.
 macro_rules! hx {
+    ($s:expr, $e:expr, $px:expr) => {{
+        let mut fills = 0u8;
+        loop {
+            match $e {
+                Ok(v) => break v,
+                Err(HeapError::NeedsHost { owner, index }) if fills < 2 => {
+                    fills += 1;
+                    if let Err(e) = $s.host_fill(owner, index) {
+                        return Err(e.into());
+                    }
+                }
+                Err(HeapError::Proxy(_)) => {
+                    #[allow(unreachable_code)]
+                    {
+                        break $px;
+                    }
+                }
+                Err(e) => return Err($s.herr(e).into()),
+            }
+        }
+    }};
     ($s:expr, $e:expr) => {{
         let mut fills = 0u8;
         loop {
@@ -260,6 +284,27 @@ macro_rules! hx {
 // a host named object (`Host::named_write`), the heap keeps its answer, and the repeat returns it (`heap_named.rs`). Reads have
 // no such arm: a read never asks for it, and the reads are the hot paths.
 macro_rules! hxw {
+    ($s:expr, $e:expr, $px:expr) => {{
+        let mut fills = 0u8;
+        loop {
+            match $e {
+                Ok(v) => break v,
+                Err(ask @ (HeapError::NeedsHost { .. } | HeapError::NeedsNamed)) if fills < 2 => {
+                    fills += 1;
+                    if let Err(e) = $s.host_ask(ask) {
+                        return Err(e.into());
+                    }
+                }
+                Err(HeapError::Proxy(_)) => {
+                    #[allow(unreachable_code)]
+                    {
+                        break $px;
+                    }
+                }
+                Err(e) => return Err($s.herr(e).into()),
+            }
+        }
+    }};
     ($s:expr, $e:expr) => {{
         let mut fills = 0u8;
         loop {
@@ -340,6 +385,7 @@ enum Nat {
     Ao(AoFn),
     Sc(ScFn),
     Refl(ReflFn),
+    Px(PxFn),
     Date(DateFn),
     Intl(IntlFn),
 }
@@ -354,6 +400,11 @@ enum Callee {
     Host { id: u32, ctor: bool, nt: bool },
     /// A class constructor. Its code and fields are in `ClassState::classes` (see `eval_classes.rs`).
     Class,
+    /// A proxy whose target is callable (see `eval_proxy.rs`). The target and handler are in the heap, so a revoked proxy stays
+    /// callable as a function and then throws on use. `ctor`: the target is a constructor.
+    Proxy { ctor: bool },
+    /// The `revoke` function of `Proxy.revocable`: the proxy to revoke, `None` after the first call.
+    Revoke(Option<ObjId>),
 }
 
 #[derive(Default)]
@@ -468,6 +519,7 @@ pub struct Interp<'p> {
     ao: AoState,
     sc: ScState,
     weak: WeakState,
+    px: ProxyState,
     date: DateState,
     intl: IntlState,
     aw: AsyncState,
@@ -619,6 +671,7 @@ impl<'p> Interp<'p> {
             ao: AoState::default(),
             sc: ScState::new(object_proto, ks[0]),
             weak: WeakState::new(object_proto),
+            px: ProxyState::default(),
             date: DateState::new(object_proto),
             intl: IntlState::new(object_proto),
             aw: AsyncState::default(),
@@ -737,7 +790,11 @@ impl<'p> Interp<'p> {
                 v.push(*this);
                 v.extend(args.iter().copied());
             }
+            if let Callee::Revoke(Some(p)) = c {
+                v.push(Value::Object(*p));
+            }
         }
+        self.proxy_roots(&mut v);
         self.cls_roots(&mut v);
         v
     }
@@ -800,6 +857,7 @@ impl<'p> Interp<'p> {
                     work.extend(args.iter().copied());
                 }
                 Some(&Callee::Promise(pf)) => self.pfn_trace(pf, &mut agg_seen, &mut work),
+                Some(&Callee::Revoke(Some(p))) => work.push(Value::Object(p)),
                 _ => {}
             }
             self.promise_trace(o, &mut work);
@@ -810,6 +868,14 @@ impl<'p> Interp<'p> {
             }
             if let Some((buf, _, _)) = self.heap.view_parts(o) {
                 work.push(Value::Object(buf));
+            }
+            // `px.ready` is false until the first proxy is made, so a realm without proxies pays one test for each object.
+            if self.px.ready
+                && self.heap.is_proxy(o)
+                && let Some(Some((target, handler))) = h!(self, self.heap.proxy_parts(o))
+            {
+                work.push(Value::Object(target));
+                work.push(Value::Object(handler));
             }
             self.sc_trace(o, &mut work);
             self.intl_trace(o, &mut work);
@@ -828,7 +894,7 @@ impl<'p> Interp<'p> {
                     None => {}
                 }
             }
-            if let Some(p) = h!(self, self.heap.get_prototype_of(o)) {
+            if let Some(p) = h!(self, self.heap.stored_prototype(o)) {
                 work.push(Value::Object(p));
             }
         }
@@ -962,6 +1028,7 @@ impl<'p> Interp<'p> {
             HeapError::SymbolConversion => self.mk_err(TYPE_ERROR, "Cannot convert a Symbol value to a string"),
             HeapError::SymbolToNumber => self.mk_err(TYPE_ERROR, "Cannot convert a Symbol value to a number"),
             HeapError::NeedsExecution(w) => unsupported(w, Span::default()),
+            HeapError::Proxy(_) => unsupported("Proxy: this operation has no trap dispatch yet (see eval_proxy.rs)", Span::default()),
             e => Error::Heap(e),
         }
     }
@@ -1682,9 +1749,13 @@ impl<'p> Interp<'p> {
             B(ObjId, Value, Vec<Value>),
             P(PFn),
             H(u32),
+            X,
+            R,
         }
         let d = match self.funcs.get(&o) {
             Some(&Callee::Script { script, fid, env, self_binding }) => D::S(script, fid, env, self_binding),
+            Some(Callee::Proxy { .. }) => D::X,
+            Some(Callee::Revoke(_)) => D::R,
             Some(&Callee::Host { id, .. }) => D::H(id),
             Some(&Callee::Native(n)) => D::N(n),
             Some(Callee::Bound { target, this, args }) => D::B(*target, *this, args.clone()),
@@ -1698,6 +1769,8 @@ impl<'p> Interp<'p> {
             D::N(n) => self.call_native(n, this, args, false),
             D::P(pf) => self.call_promise(pf, this, args, false),
             D::H(id) => self.call_host(id, this, args, false, None),
+            D::X => self.px_call(o, this, args),
+            D::R => self.call_revoke(o),
             D::B(t, bthis, mut bargs) => {
                 bargs.extend_from_slice(args);
                 self.call_fn(Value::Object(t), bthis, &bargs)
@@ -1728,12 +1801,14 @@ impl<'p> Interp<'p> {
             P(PFn),
             H(u32, bool),
             C,
+            X,
         }
         let d = match self.funcs.get(&o) {
             Some(Callee::Class) => D::C,
+            Some(&Callee::Proxy { ctor: true }) => D::X,
             Some(&Callee::Host { id, ctor: true, nt }) => D::H(id, nt),
             Some(&Callee::Script { script, fid, env, self_binding }) if self.func_of(script, fid).is_plain_ctor() => D::S(script, fid, env, self_binding),
-            Some(&Callee::Native(n)) if matches!(n, Nat::ObjectCtor | Nat::FnCtor | Nat::ArrayCtor | Nat::ErrorCtor(_) | Nat::StringFn | Nat::NumberFn | Nat::BooleanFn | Nat::Ext(Bi::RegExpCtor) | Nat::Sc(ScFn::IterCtor)) || matches!(n, Nat::Bin(b) if b.ctor_name().is_some() || b == BinFn::TaCtor) || matches!(n, Nat::Sc(f) if f.is_ctor()) || n == Nat::Date(DateFn::Ctor) || matches!(n, Nat::Intl(f) if f.is_ctor()) => D::N(n),
+            Some(&Callee::Native(n)) if matches!(n, Nat::ObjectCtor | Nat::FnCtor | Nat::ArrayCtor | Nat::ErrorCtor(_) | Nat::StringFn | Nat::NumberFn | Nat::BooleanFn | Nat::Ext(Bi::RegExpCtor) | Nat::Sc(ScFn::IterCtor) | Nat::Px(PxFn::Ctor)) || matches!(n, Nat::Bin(b) if b.ctor_name().is_some() || b == BinFn::TaCtor) || matches!(n, Nat::Sc(f) if f.is_ctor()) || n == Nat::Date(DateFn::Ctor) || matches!(n, Nat::Intl(f) if f.is_ctor()) => D::N(n),
             Some(Callee::Bound { target, args, .. }) => D::B(*target, args.clone()),
             Some(&Callee::Promise(pf @ (PFn::Ctor | PFn::AggErrCtor))) => D::P(pf),
             _ => return not_ctor(self),
@@ -1752,6 +1827,7 @@ impl<'p> Interp<'p> {
                 Ok(if matches!(r, Value::Object(_)) { r } else { Value::Object(obj) })
             })(),
             D::C => self.construct_class_body(o, args, o),
+            D::X => self.px_construct(o, args, o, callee),
             D::N(n) => self.call_native(n, Value::Undefined, args, true),
             D::P(pf) => self.call_promise(pf, Value::Undefined, args, true),
             D::H(id, nt) => self.call_host(id, Value::Undefined, args, true, nt.then_some(o)),
@@ -1998,10 +2074,36 @@ impl<'p> Interp<'p> {
             Value::Number(_) => self.ao.number_proto.unwrap_or(self.object_proto),
             Value::Bool(_) => self.sc.bool_proto,
         };
-        match hx!(self, self.heap.get(o, key)) {
+        let got = match self.heap.get(o, key) {
+            Ok(g) => g,
+            Err(e) => self.get_miss(o, key, base, e)?,
+        };
+        match got {
             Get::Value(v) => Ok(v),
             Get::Accessor { getter: Some(g) } => self.call_fn(Value::Object(g), base, &[]),
             Get::Accessor { getter: None } => Ok(Value::Undefined),
+        }
+    }
+
+    /// The slow side of `get_prop` (`hx!` with its proxy arm, out of line): a host fill, a proxy, or an error. It is a function of
+    /// its own so that `get_prop` stays as small as it was and the compiler keeps inlining it into the hot paths.
+    #[cold]
+    #[inline(never)]
+    fn get_miss(&mut self, o: ObjId, key: PropertyKey, base: Value, mut e: HeapError) -> Res<Get> {
+        let mut fills = 0u8;
+        loop {
+            match e {
+                HeapError::NeedsHost { owner, index } if fills < 2 => {
+                    fills += 1;
+                    self.host_fill(owner, index)?;
+                }
+                HeapError::Proxy(_) => return Ok(Get::Value(self.o_get_slow(o, key, base)?)),
+                e => return Err(self.herr(e).into()),
+            }
+            match self.heap.get(o, key) {
+                Ok(g) => return Ok(g),
+                Err(n) => e = n,
+            }
         }
     }
 
@@ -2014,7 +2116,10 @@ impl<'p> Interp<'p> {
             v = Value::Number(self.coerce_number(v)?);
         }
         match base {
-            Value::Object(o) => match hxw!(self, self.heap.set(o, key, v)) {
+            Value::Object(o) => match match self.heap.set(o, key, v) {
+                Ok(r) => r,
+                Err(e) => self.set_miss(o, key, v, base, e)?,
+            } {
                 Set::Done => Ok(()),
                 Set::Rejected if self.strict => {
                     let k = self.key_text(key);
@@ -2034,6 +2139,27 @@ impl<'p> Interp<'p> {
                 Err(self.type_err(&format!("Cannot create property '{k}' on {t}")))
             }
             _ => Ok(()),
+        }
+    }
+
+    /// The slow side of `put_prop` (`hxw!` with its proxy arm, out of line). See `get_miss`.
+    #[cold]
+    #[inline(never)]
+    fn set_miss(&mut self, o: ObjId, key: PropertyKey, v: Value, base: Value, mut e: HeapError) -> Res<Set> {
+        let mut fills = 0u8;
+        loop {
+            match e {
+                HeapError::NeedsHost { .. } | HeapError::NeedsNamed if fills < 2 => {
+                    fills += 1;
+                    self.host_ask(e)?;
+                }
+                HeapError::Proxy(_) => return Ok(if self.o_set(o, key, v, base)? { Set::Done } else { Set::Rejected }),
+                e => return Err(self.herr(e).into()),
+            }
+            match self.heap.set(o, key, v) {
+                Ok(r) => return Ok(r),
+                Err(n) => e = n,
+            }
         }
     }
 
@@ -2461,7 +2587,7 @@ impl<'p> Interp<'p> {
                 continue;
             }
             if let Value::Object(o) = src {
-                match hx!(self, self.heap.peek_own_property(o, k)) {
+                match self.o_peek(o, k)? {
                     Some(p) if p.enumerable() => {}
                     _ => continue,
                 }
@@ -2534,7 +2660,7 @@ impl<'p> Interp<'p> {
                     }
                     _ => return Ok(Value::Bool(true)),
                 };
-                let ok = hxw!(self, self.heap.delete(o, key));
+                let ok = hxw!(self, self.heap.delete(o, key), self.px_delete(o, key)?);
                 if !ok && self.strict {
                     let k = self.key_text(key);
                     return Err(self.type_err(&format!("Cannot delete property '{k}' of #<Object>")));
@@ -2796,7 +2922,7 @@ impl<'p> Interp<'p> {
                     return Err(self.type_err(&format!("Cannot use 'in' operator to search for '{k}' in {t}")));
                 };
                 let key = self.coerce_key(a)?;
-                Ok(Value::Bool(hx!(self, self.heap.has_property(o, key))))
+                Ok(Value::Bool(self.o_has_property(o, key)?))
             }
             Instanceof => self.sc_instanceof(a, b),
         }
@@ -2928,10 +3054,10 @@ impl<'p> Interp<'p> {
                     }
                 }
             } else {
-                let keys = self.for_in_keys(rv)?;
+                let (keys, proxied) = self.for_in_keys(rv)?;
                 for k in keys {
                     if let Value::Object(o) = rv
-                        && !hx!(self, self.heap.has_property(o, k))
+                        && !(if proxied { self.px_for_in_has(o, k)? } else { self.o_has_property(o, k)? })
                     {
                         continue;
                     }
@@ -2957,33 +3083,38 @@ impl<'p> Interp<'p> {
         if len != 0 {
             self.spend(len as u64)?;
         }
-        Ok(hx!(self, self.heap.own_keys(o)))
+        self.o_own_keys(o)
     }
 
-    fn for_in_keys(&mut self, v: Value) -> Res<Vec<PropertyKey>> {
+    /// The keys of a `for-in`, and whether a proxy is on the chain (then each key is checked again as V8 does: `px_for_in_has`).
+    fn for_in_keys(&mut self, v: Value) -> Res<(Vec<PropertyKey>, bool)> {
         let mut o = match v {
             Value::Object(o) => o,
-            Value::String(s) => return Ok((0..h!(self, self.heap.str_len(s)) as u32).map(PropertyKey::Index).collect()),
-            _ => return Ok(Vec::new()),
+            Value::String(s) => return Ok(((0..h!(self, self.heap.str_len(s)) as u32).map(PropertyKey::Index).collect(), false)),
+            _ => return Ok((Vec::new(), false)),
         };
         let mut seen: FxSet<PropertyKey> = FxSet::default();
         let mut out = Vec::new();
+        let mut proxied = false;
         loop {
+            let proxy = self.heap.is_proxy(o);
+            proxied |= proxy;
             for k in self.property_keys(o)? {
                 self.tick()?;
                 if matches!(k, PropertyKey::Symbol(_)) || !seen.insert(k) {
                     continue;
                 }
-                if matches!(hx!(self, self.heap.peek_own_property(o, k)), Some(p) if p.enumerable()) {
+                // V8 does not ask a proxy for the enumerability of its keys here: it asks at each step of the loop.
+                if proxy || matches!(self.o_peek(o, k)?, Some(p) if p.enumerable()) {
                     out.push(k);
                 }
             }
-            match h!(self, self.heap.get_prototype_of(o)) {
+            match self.o_get_prototype_of(o)? {
                 Some(p) => o = p,
                 None => break,
             }
         }
-        Ok(out)
+        Ok((out, proxied))
     }
 }
 
@@ -3003,6 +3134,7 @@ fn num_base(t: &str) -> NumBase {
 }
 
 include!("eval_statements.rs");
+include!("eval_proxy.rs");
 include!("eval_native.rs");
 include!("eval_promise.rs");
 include!("eval_promise_combinators.rs");
@@ -3086,6 +3218,10 @@ mod indexed_tests;
 #[cfg(test)]
 #[path = "eval_named_tests.rs"]
 mod named_tests;
+
+#[cfg(test)]
+#[path = "eval_proxy_tests.rs"]
+mod proxy_tests;
 
 #[cfg(test)]
 #[path = "eval_binary_tests.rs"]

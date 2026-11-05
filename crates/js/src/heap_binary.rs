@@ -40,6 +40,8 @@ pub(super) enum Exotic {
     Named,
     /// A primitive wrapper object: its string, number, boolean or symbol (see `heap_prim.rs`).
     Prim(Value),
+    /// A `Proxy` (see `heap_proxy.rs`): `(target, handler)`, or `None` after `revoke`.
+    Proxy(Option<(ObjId, ObjId)>),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -52,6 +54,7 @@ pub enum ExoticKind {
     Named,
     /// A String, Number, Boolean or Symbol wrapper object.
     Primitive,
+    Proxy,
 }
 
 /// The element type of a view. `Data` is a `DataView` (bytes, no integer-indexed properties).
@@ -296,6 +299,7 @@ impl Heap {
             Exotic::Indexed => ExoticKind::Indexed,
             Exotic::Named => ExoticKind::Named,
             Exotic::Prim(_) => ExoticKind::Primitive,
+            Exotic::Proxy(_) => ExoticKind::Proxy,
         })
     }
 
@@ -722,6 +726,7 @@ impl Heap {
             (Some(Exotic::Indexed), PropertyKey::Index(i)) => i,
             (Some(Exotic::Named), _) => return self.named_exists(o, key),
             (Some(Exotic::Prim(Value::String(s))), _) => return self.prim_str_own(*s, key),
+            (Some(Exotic::Proxy(_)), _) => return Err(HeapError::Proxy(o)),
             _ => return Ok(None),
         };
         let value = match self.source()?.indexed_item(o, i as usize)? {
@@ -748,6 +753,7 @@ impl Heap {
     /// `[[Set]]` of an integer-indexed key. `Some(Done)` when this object (or, for an ordinary receiver, a view it
     /// inherits from) handles the key. `None`: the ordinary algorithm runs.
     pub(super) fn exotic_set(&mut self, o: ObjId, key: PropertyKey, value: Value) -> R<Option<Set>> {
+        // A proxy needs no check here: it is no view, has no prototype, so this returns `None` and `lookup` meets it next.
         if self.obj(o)?.exotic == EXOTIC_NAMED && !matches!(key, PropertyKey::Symbol(_)) {
             return Ok(Some(if self.named_write(o, key, NamedOp::Set(value))? { Set::Done } else { Set::Rejected }));
         }
