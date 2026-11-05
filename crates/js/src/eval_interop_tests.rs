@@ -125,8 +125,6 @@ fn custom_hooks_that_are_out_of_scope_are_explicit_gates() {
     gate("var r=/a/; r.exec=function(){ return null; }; 'a'.replace(r, 'b')", "RegExp with a replaced exec method");
     gate("var r=/a/; r.exec=function(){ return null; }; 'a'.split(r)", "RegExp with a replaced exec method");
     gate("function F(){} Array.from.call(F, new Set([1]))", "Array.from with a non-Array this");
-    gate("Array.prototype.concat.call('abc', [1])", "Array.prototype.concat on a primitive receiver (wrapper object)");
-    gate("var s=Symbol(); new String(s)", "wrapper object (new String/Number/Boolean)");
     // What is not a gate: no species, a null species, the intrinsic, and ordinary iterables.
     assert_eq!(run("var a=[1,2]; a.constructor={}; a.map(function(x){return x}).length"), "ok:2");
     assert_eq!(run("var a=[1,2]; a.constructor=function F(){}; a.slice().length"), "ok:2");

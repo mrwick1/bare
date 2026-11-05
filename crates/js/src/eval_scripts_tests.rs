@@ -93,13 +93,13 @@ fn throw_and_limits_restore_the_caller_code() {
         let mut it = realm(limits());
         out(&mut it, "function boom() { throw new Error('a-fail') } function okA() { return 'A-ok' }
                       function spin() { while (true) {} } function rec() { return rec() }
-                      function bad() { return new String('x') }");
+                      function bad() { return Function('x') }");
         assert_eq!(out(&mut it, "function okB() { return 'B-ok' } var r; try { boom() } catch (e) { r = e.message } r + okB() + okA()"), "a-failB-okA-ok");
         assert_eq!(out(&mut it, "function k() { return 'k' } var s = k(); spin()"), "limit:Steps");
         assert_eq!(out(&mut it, "k() + okB() + okA() + s"), "kB-okA-okk");
         assert_eq!(out(&mut it, "function z() { return rec() } z()"), "limit:CallDepth");
         assert_eq!(out(&mut it, "z.name + k() + okA()"), "zkA-ok");
-        assert_eq!(out(&mut it, "bad()"), "unsupported:wrapper object (new String/Number/Boolean)");
+        assert_eq!(out(&mut it, "bad()"), "unsupported:Function constructor (dynamic code)");
         assert_eq!(out(&mut it, "okB() + k()"), "B-okk");
         assert_eq!(out(&mut it, "try { boom() } catch (e) { e.message } "), "a-fail");
         // a host call that throws, then a script

@@ -135,8 +135,13 @@ impl Heap {
     #[cold]
     #[inline(never)]
     pub(super) fn realize(&mut self, o: ObjId, key: PropertyKey, r: Option<Property>) -> R<Option<Property>> {
-        if r.is_none() || self.obj(o)?.exotic != EXOTIC_NAMED {
+        if r.is_none() {
             return Ok(r);
+        }
+        match self.obj(o)?.exotic {
+            EXOTIC_NAMED => {}
+            EXOTIC_STR => return self.prim_realize(o, key, r),
+            _ => return Ok(r),
         }
         let Some(units) = self.key_units(key)? else { return Ok(r) };
         let Some(text) = self.named_source()?.named_get(o, &units)? else { return Ok(r) };

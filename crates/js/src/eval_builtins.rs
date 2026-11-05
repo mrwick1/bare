@@ -97,6 +97,7 @@ enum Bi {
     StrFromCharCode,
     StrFromCodePoint,
     StrToString,
+    StrValueOf,
     StrIndexOf,
     StrIncludes,
     StrStartsWith,
@@ -472,7 +473,7 @@ impl<'p> Interp<'p> {
         self.method(sc, "fromCodePoint", Nat::Ext(Bi::StrFromCodePoint), 1)?;
         let methods: [(&str, Bi, u32); 17] = [
             ("toString", Bi::StrToString, 0),
-            ("valueOf", Bi::StrToString, 0),
+            ("valueOf", Bi::StrValueOf, 0),
             ("indexOf", Bi::StrIndexOf, 1),
             ("includes", Bi::StrIncludes, 1),
             ("startsWith", Bi::StrStartsWith, 1),
@@ -660,9 +661,9 @@ impl<'p> Interp<'p> {
                 }
                 self.new_str(out)
             }
-            Bi::StrToString => match this {
-                Value::String(_) => Ok(this),
-                _ => Err(self.type_err("String.prototype.toString requires that 'this' be a String")),
+            Bi::StrToString | Bi::StrValueOf => match self.this_string_value(this)? {
+                Some(s) => Ok(Value::String(s)),
+                None => Err(self.type_err(&format!("String.prototype.{} requires that 'this' be a String", if x == Bi::StrToString { "toString" } else { "valueOf" }))),
             },
             Bi::StrIndexOf => {
                 let s = self.this_str(this, "indexOf")?;

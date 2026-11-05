@@ -90,7 +90,7 @@ fn number_prototype_shape() {
     assert_eq!(run("var d=Object.getOwnPropertyDescriptor(Number,'prototype'); [d.writable,d.enumerable,d.configurable].join()"), "string:false,false,false");
     assert_eq!(run("Number.prototype.constructor === Number && Object.getPrototypeOf(5) === Number.prototype"), "boolean:true");
     assert_eq!(run("Number.prototype.hasOwnProperty('toString') && (5).toString === Number.prototype.toString"), "boolean:true");
-    assert_eq!(run("Number.prototype.foo = function(){ return typeof this }; (5).foo.call(1)"), "string:number"); // primitive `this` in sloppy functions is not boxed here
+    assert_eq!(run("Number.prototype.foo = function(){ return typeof this }; (5).foo.call(1)"), "string:object"); // a sloppy function boxes a primitive `this`
     assert_eq!(run("Object.prototype.zz = 3; (5).zz"), "number:3");
 }
 

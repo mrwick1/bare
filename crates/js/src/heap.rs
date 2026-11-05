@@ -109,6 +109,8 @@ pub use binary::{load, sort_elems, store, Decoder, Elem, ExoticKind, IndexedSour
 #[path = "heap_named.rs"]
 mod named;
 pub use named::{NamedOp, NamedRequest, NamedSource};
+#[path = "heap_prim.rs"]
+mod prim;
 
 // ---------- property model ----------
 
@@ -178,6 +180,7 @@ pub enum Set {
 }
 
 /// ValidateAndApplyPropertyDescriptor (section 10.1.6.3) on one property. `None` = rejected.
+#[inline(always)] // one caller before `heap_prim.rs`: keep it inlined into `ordinary_define`
 fn validate_apply(extensible: bool, cur: Option<Property>, d: &PropertyDescriptor) -> Option<Property> {
     if d.is_accessor() && d.is_data() {
         return None; // callers check first; keep this safe
@@ -339,7 +342,7 @@ struct Object {
     is_array: bool,
     /// 0 for an ordinary object. `EXOTIC`: the payload is in `Heap::exotics` (a buffer, a view, a text codec). See
     /// `heap_binary.rs`. `EXOTIC_NAMED`: also an object whose string-keyed own properties are answered by the host
-    /// (`Heap::new_named`). One byte, so the object stays within its size budget below.
+    /// (`Heap::new_named`). `EXOTIC_STR`: a String wrapper (`Heap::new_primitive`). One byte, so the object stays within its size budget below.
     exotic: u8,
     /// A function whose own `prototype` holds a placeholder: the object is made on first use (`Heap::unlazy`).
     lazy_proto: bool,
@@ -353,6 +356,8 @@ struct Object {
 
 const EXOTIC: u8 = 1;
 const EXOTIC_NAMED: u8 = 2;
+/// A String wrapper object: virtual `length` and index properties (`heap_prim.rs`).
+const EXOTIC_STR: u8 = 4;
 
 // The flags fit in the padding.
 const _: () = assert!(std::mem::size_of::<Object>() <= 80);
@@ -1255,8 +1260,11 @@ impl Heap {
         if sparse {
             idx.sort_unstable();
         }
-        let mut out: Vec<PropertyKey> = if ob.exotic == EXOTIC && virt { self.view_keys(o)? } else { Vec::new() };
+        let mut out: Vec<PropertyKey> = if matches!(ob.exotic, EXOTIC | EXOTIC_STR) && virt { self.view_keys(o)? } else { Vec::new() };
         out.extend(idx.into_iter().map(PropertyKey::Index));
+        if ob.exotic == EXOTIC_STR && virt {
+            out.push(PropertyKey::String(self.length)); // a String wrapper has `length` before its other string keys
+        }
         out.extend(strs);
         out.extend(syms);
         Ok(out)
@@ -1294,6 +1302,9 @@ impl Heap {
         if exotic != 0 {
             if exotic == EXOTIC_NAMED && !matches!(key, PropertyKey::Symbol(_)) {
                 return self.named_write(o, key, NamedOp::Define(*d));
+            }
+            if exotic == EXOTIC_STR && let Some(r) = self.prim_define(o, key, d)? {
+                return Ok(r);
             }
             if let Some(r) = self.view_define(o, key, d)? {
                 return Ok(r);
@@ -1513,7 +1524,7 @@ impl Heap {
     /// it from being extensible (the specification says a view's elements are configurable, so sealing it would fail).
     pub fn set_integrity(&mut self, o: ObjId, frozen: bool) -> R<bool> {
         let ob = self.obj(o)?;
-        if frozen && ob.exotic != 0 && self.virtual_len(o)? > 0 {
+        if frozen && ob.exotic != 0 && ob.exotic != EXOTIC_STR && self.virtual_len(o)? > 0 {
             return Ok(false);
         }
         let moved = ob.elems.iter().flatten().count();
@@ -1541,7 +1552,7 @@ impl Heap {
     /// `TestIntegrityLevel` (`Object.isSealed`, and `Object.isFrozen` when `frozen`), without a key list.
     pub fn test_integrity(&self, o: ObjId, frozen: bool) -> R<bool> {
         let ob = self.obj(o)?;
-        if ob.extensible || ob.elems.iter().any(Option::is_some) || (frozen && ob.exotic != 0 && self.virtual_len(o)? > 0) {
+        if ob.extensible || ob.elems.iter().any(Option::is_some) || (frozen && ob.exotic != 0 && ob.exotic != EXOTIC_STR && self.virtual_len(o)? > 0) {
             return Ok(false);
         }
         Ok(ob.props.iter().all(|(_, p)| !(p.configurable() || frozen && matches!(p, Property::Data { writable: true, .. }))))
@@ -1582,8 +1593,12 @@ impl Heap {
             if let Some(p) = o.proto {
                 m.obj(p);
             }
-            if o.exotic != 0 && let Some(binary::Exotic::View { buffer, .. }) = exotics.get(&objects.back[d as usize]) {
-                m.obj(*buffer);
+            if o.exotic != 0 {
+                match exotics.get(&objects.back[d as usize]) {
+                    Some(binary::Exotic::View { buffer, .. }) => m.obj(*buffer),
+                    Some(binary::Exotic::Prim(v)) => m.value(*v),
+                    _ => {}
+                }
             }
             for v in o.elems.iter().flatten() {
                 m.value(*v);

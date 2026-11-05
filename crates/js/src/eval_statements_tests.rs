@@ -181,8 +181,8 @@ fn resource_faults_clean_up_and_skip_catch_and_finally() {
         assert!(matches!(fault(nest, steps, Heap::default()), Error::Limit(LimitKind::Steps)));
         assert!(matches!(fault(nest, lim(6), Heap::default()), Error::Limit(LimitKind::StatementFrames)));
         assert!(matches!(fault(&blocks(20), EvalLimits { max_envs: 6, ..lim(768) }, Heap::default()), Error::Limit(LimitKind::Envs)));
-        // Unsupported at run time (a wrapper object), inside a scope and a try
-        assert!(matches!(fault("{ let a = 1; try { { let b = 2; new String('x'); } } finally { } }", lim(768), Heap::default()), Error::Unsupported(_)));
+        // Unsupported at run time (dynamic code), inside a scope and a try
+        assert!(matches!(fault("{ let a = 1; try { { let b = 2; Function('x'); } } finally { } }", lim(768), Heap::default()), Error::Unsupported(_)));
         // a heap fault (object cap)
         let intrinsic = Interp::realm(Heap::default(), lim(768)).unwrap().heap.stats().live_objects;
         let heap = Heap::new(HeapLimits { max_objects: intrinsic + 20, ..Default::default() }).unwrap();

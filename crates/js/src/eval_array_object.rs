@@ -22,9 +22,9 @@
 // Gates (explicit `Unsupported`, never silent)
 // - Species: the intrinsic `Array`, `undefined` and `null` give a plain array. Any other callable is a gate (a subclass
 //   or a custom `constructor`, or a custom `@@species`). A non-callable object or primitive is a `TypeError`.
-// - `concat` and `fill` on a primitive receiver, `Object.assign` with a primitive target: they need wrapper objects, which
-//   the evaluator does not have. `Array.from` / `Array.of` with a `this` that is a callable other than `Array`.
-// Known differences: a string receiver is passed to callbacks as the primitive string (no String wrapper object).
+// - `Array.from` / `Array.of` with a `this` that is a callable other than `Array`.
+// A primitive receiver is made a wrapper object first (`ao_recv`, ToObject): `Array.prototype.map.call("ab", f)` passes a String
+// wrapper as the third argument, `Array.prototype.fill.call(1, 0)` returns a Number object and `Object.assign(1, {a: 2})` too.
 // `concat` throws its RangeError (result longer than 2^32-1) before it reads the elements, not after.
 //
 // Limits (`Error::Limit`, never a JavaScript value): every element visit costs a step. A traversal that must
@@ -73,6 +73,7 @@ enum AoFn {
     MathClz32,
     MathRandom,
     NumToString,
+    NumValueOf,
     NumIsNaN,
     /// A one-argument `Math` function: the index into `MATH_UNARY`.
     MathUnary(u8),
@@ -139,16 +140,46 @@ impl<'p> Interp<'p> {
         use AoFn::*;
         let (a0, a1) = (arg(args, 0), arg(args, 1));
         match f {
-            ArrMap | ArrFilter | ArrSome | ArrEvery | ArrFind | ArrFindIndex => self.ao_iterate(f, this, a0, a1),
-            ArrReduce => self.ao_reduce(this, args),
-            ArrSplice => self.ao_splice(this, args),
-            ArrSlice => self.ao_slice(this, a0, a1),
-            ArrIncludes | ArrIndexOf => self.ao_search(f == ArrIncludes, this, a0, a1),
-            ArrConcat => self.ao_concat(this, args),
-            ArrShift => self.ao_shift(this),
-            ArrUnshift => self.ao_unshift(this, args),
-            ArrSort => self.ao_sort(this, a0),
-            ArrFill => self.ao_fill(this, a0, a1, arg(args, 2)),
+            ArrMap | ArrFilter | ArrSome | ArrEvery | ArrFind | ArrFindIndex => {
+                let this = self.ao_recv(this)?;
+                self.ao_iterate(f, this, a0, a1)
+            }
+            ArrReduce => {
+                let this = self.ao_recv(this)?;
+                self.ao_reduce(this, args)
+            }
+            ArrSplice => {
+                let this = self.ao_recv(this)?;
+                self.ao_splice(this, args)
+            }
+            ArrSlice => {
+                let this = self.ao_recv(this)?;
+                self.ao_slice(this, a0, a1)
+            }
+            ArrIncludes | ArrIndexOf => {
+                let this = self.ao_recv(this)?;
+                self.ao_search(f == ArrIncludes, this, a0, a1)
+            }
+            ArrConcat => {
+                let this = self.ao_recv(this)?;
+                self.ao_concat(this, args)
+            }
+            ArrShift => {
+                let this = self.ao_recv(this)?;
+                self.ao_shift(this)
+            }
+            ArrUnshift => {
+                let this = self.ao_recv(this)?;
+                self.ao_unshift(this, args)
+            }
+            ArrSort => {
+                let this = self.ao_recv(this)?;
+                self.ao_sort(this, a0)
+            }
+            ArrFill => {
+                let this = self.ao_recv(this)?;
+                self.ao_fill(this, a0, a1, arg(args, 2))
+            }
             ObjAssign => self.ao_assign(args),
             ObjEntries => self.ao_enum_own(a0, true),
             ObjValues => self.ao_enum_own(a0, false),
@@ -167,8 +198,11 @@ impl<'p> Interp<'p> {
                     _ => math_round(x),
                 }))
             }
-            ArrReverse | ArrAt | ArrFlat | ArrFlatMap | ArrFindLast | ArrFindLastIndex | ArrLastIndexOf | ArrReduceRight | ArrCopyWithin | ArrToReversed | ArrToSorted | ArrToSpliced | ArrWith | ArrToLocaleString => self.call_array_more(f, this, args),
-            MathClz32 | MathRandom | NumToString | NumIsNaN | MathUnary(_) | MathAtan2 | MathPow | MathImul | MathHypot | NumIsFinite | NumIsInteger | NumIsSafeInteger | NumToFixed | NumToExponential | NumToPrecision => self.call_numeric(f, this, args),
+            ArrReverse | ArrAt | ArrFlat | ArrFlatMap | ArrFindLast | ArrFindLastIndex | ArrLastIndexOf | ArrReduceRight | ArrCopyWithin | ArrToReversed | ArrToSorted | ArrToSpliced | ArrWith | ArrToLocaleString => {
+                let this = self.ao_recv(this)?;
+                self.call_array_more(f, this, args)
+            }
+            MathClz32 | MathRandom | NumToString | NumValueOf | NumIsNaN | MathUnary(_) | MathAtan2 | MathPow | MathImul | MathHypot | NumIsFinite | NumIsInteger | NumIsSafeInteger | NumToFixed | NumToExponential | NumToPrecision => self.call_numeric(f, this, args),
             MathMax | MathMin => {
                 let is_max = f == MathMax;
                 let mut r = if is_max { f64::NEG_INFINITY } else { f64::INFINITY };
@@ -243,7 +277,6 @@ impl<'p> Interp<'p> {
     fn ao_has(&mut self, this: Value, k: PropertyKey) -> Res<bool> {
         Ok(match this {
             Value::Object(o) => hx!(self, self.heap.has_property(o, k)),
-            Value::String(s) => matches!(k, PropertyKey::Index(i) if (i as usize) < h!(self, self.heap.str_len(s))),
             _ => false,
         })
     }
@@ -264,7 +297,6 @@ impl<'p> Interp<'p> {
     fn ao_delete(&mut self, this: Value, k: PropertyKey) -> Res<()> {
         let ok = match this {
             Value::Object(o) => hxw!(self, self.heap.delete(o, k)),
-            Value::String(s) => !matches!(k, PropertyKey::Index(i) if (i as usize) < h!(self, self.heap.str_len(s))),
             _ => true,
         };
         if ok {
@@ -481,9 +513,6 @@ impl<'p> Interp<'p> {
 
     fn ao_concat(&mut self, this: Value, args: &[Value]) -> Res<Value> {
         self.ao_this(this, "concat")?;
-        if !matches!(this, Value::Object(_)) {
-            return Err(unsupported("Array.prototype.concat on a primitive receiver (wrapper object)", Span::default()));
-        }
         let a = self.ao_species(this, 0)?;
         let mut n = 0u64;
         for item in std::iter::once(this).chain(args.iter().copied()) {
@@ -658,9 +687,6 @@ impl<'p> Interp<'p> {
     /// longer than the step budget never writes. The heap checks its byte cap before each element it adds.
     fn ao_fill(&mut self, this: Value, value: Value, start: Value, end: Value) -> Res<Value> {
         self.ao_this(this, "fill")?;
-        if !matches!(this, Value::Object(_)) {
-            return Err(unsupported("Array.prototype.fill on a primitive receiver (wrapper object)", Span::default()));
-        }
         let len = self.length_of(this)?;
         let k = self.ao_rel(start, len, 0)?;
         let fin = self.ao_rel(end, len, len)?;
@@ -782,12 +808,7 @@ impl<'p> Interp<'p> {
     // ------------------------------------------------------------ Object
 
     fn ao_assign(&mut self, args: &[Value]) -> Res<Value> {
-        let target = arg(args, 0);
-        match target {
-            Value::Undefined | Value::Null => return Err(self.type_err("Cannot convert undefined or null to object")),
-            Value::Object(_) => {}
-            _ => return Err(unsupported("Object.assign with a primitive target (wrapper object)", Span::default())),
-        }
+        let target = self.to_object(arg(args, 0))?;
         for &src in args.iter().skip(1) {
             let keys: Vec<PropertyKey> = match src {
                 Value::Object(o) => self.property_keys(o)?,

@@ -125,15 +125,16 @@ fn natives_whose_subclass_plumbing_is_missing_stay_honest_gates() {
 }
 
 #[test]
-fn string_number_boolean_constructors_are_gates_not_type_errors() {
+fn string_number_boolean_constructors_make_wrappers_through_reflect() {
     big(|| {
-        for c in ["String", "Number", "Boolean"] {
+        for (c, arg) in [("String", "'ab'"), ("Number", "7"), ("Boolean", "0")] {
             let mut it = realm();
-            let want = "unsupported:wrapper object (new String/Number/Boolean)";
-            assert_eq!(out(&mut it, &format!("Reflect.construct({c}, [])")), want);
-            assert_eq!(out(&mut it, &format!("function G() {{}} Reflect.construct({c}, [], G)")), want);
-            assert_eq!(out(&mut it, &format!("Reflect.construct({c}.bind(null), [], G)")), want);
-            assert_eq!(out(&mut it, &format!("Reflect.construct({c}.bind(null), [])")), want);
+            let make = "function G() {} G.prototype = { tag: 1 };";
+            out(&mut it, make);
+            assert_eq!(out(&mut it, &format!("var w = Reflect.construct({c}, [{arg}]); typeof w + (w instanceof {c})")), "objecttrue");
+            assert_eq!(out(&mut it, &format!("var g = Reflect.construct({c}, [{arg}], G); typeof g + g.tag + (g instanceof {c})")), "object1false");
+            assert_eq!(out(&mut it, &format!("var b = Reflect.construct({c}.bind(null), [{arg}]); typeof b + (b instanceof {c})")), "objecttrue");
+            assert_eq!(out(&mut it, &format!("var h = Reflect.construct({c}.bind(null), [{arg}], G); typeof h + h.tag")), "object1");
             // as new.target they are valid constructors: only the prototype is read
             assert_eq!(out(&mut it, &format!("function F() {{}} Object.getPrototypeOf(Reflect.construct(F, [], {c})) === {c}.prototype")), "true");
             assert_eq!(out(&mut it, &format!("class K {{ constructor() {{ this.t = new.target === {c}; }} }} Reflect.construct(K, [], {c}).t")), "true");

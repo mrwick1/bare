@@ -306,7 +306,7 @@ impl<'p> Interp<'p> {
             match self.funcs.get(&o) {
                 Some(Callee::Class) => return true,
                 Some(&Callee::Script { script, fid, .. }) => return self.func_of(script, fid).is_plain_ctor(),
-                Some(&Callee::Native(n)) => return matches!(n, Nat::ObjectCtor | Nat::FnCtor | Nat::ArrayCtor | Nat::ErrorCtor(_) | Nat::Ext(Bi::RegExpCtor) | Nat::Sc(ScFn::IterCtor)) || Self::native_no_nt(n),
+                Some(&Callee::Native(n)) => return matches!(n, Nat::ObjectCtor | Nat::FnCtor | Nat::ArrayCtor | Nat::ErrorCtor(_) | Nat::StringFn | Nat::NumberFn | Nat::BooleanFn | Nat::Ext(Bi::RegExpCtor) | Nat::Sc(ScFn::IterCtor)) || Self::native_no_nt(n),
                 Some(&Callee::Host { ctor, .. }) => return ctor,
                 Some(&Callee::Promise(pf)) => return matches!(pf, PFn::Ctor | PFn::AggErrCtor),
                 Some(&Callee::Bound { target, .. }) => o = target,
@@ -358,12 +358,11 @@ impl<'p> Interp<'p> {
             Some(Callee::Class) => D::Class,
             Some(&Callee::Host { id, ctor: true, nt: true }) => D::Host(id),
             Some(&Callee::Script { script, fid, env, self_binding }) if self.func_of(script, fid).is_plain_ctor() => D::Script(script, fid, env, self_binding),
-            Some(&Callee::Native(n)) if matches!(n, Nat::ObjectCtor | Nat::FnCtor | Nat::ArrayCtor | Nat::ErrorCtor(_) | Nat::Ext(Bi::RegExpCtor) | Nat::Sc(ScFn::IterCtor)) => D::Native(n),
+            Some(&Callee::Native(n)) if matches!(n, Nat::ObjectCtor | Nat::FnCtor | Nat::ArrayCtor | Nat::ErrorCtor(_) | Nat::StringFn | Nat::NumberFn | Nat::BooleanFn | Nat::Ext(Bi::RegExpCtor) | Nat::Sc(ScFn::IterCtor)) => D::Native(n),
             Some(&Callee::Native(n)) if Self::native_no_nt(n) => D::NoNt("subclassing a native constructor (new.target is not passed to the constructor)"),
             Some(&Callee::Promise(PFn::Ctor)) => D::NoNt("subclassing Promise (new.target is not passed to the constructor)"),
             Some(&Callee::Promise(PFn::AggErrCtor)) => D::NoNt("subclassing AggregateError (new.target is not passed to the constructor)"),
             Some(&Callee::Host { ctor: true, nt: false, .. }) => D::NoNt("subclassing a host constructor (new.target is not passed to the constructor)"),
-            Some(&Callee::Native(Nat::StringFn | Nat::NumberFn | Nat::BooleanFn)) => return Err(unsupported("wrapper object (new String/Number/Boolean)", Span::default())),
             Some(Callee::Bound { target, args, .. }) => D::Bound(*target, args.clone()),
             _ => {
                 let d = self.src_text(callee);
@@ -428,6 +427,7 @@ impl<'p> Interp<'p> {
                         let proto = self.proto_from_ctor_or(nt, self.error_protos[k as usize])?;
                         self.error_ctor(arg(args, 0), proto)
                     }
+                    Nat::StringFn | Nat::NumberFn | Nat::BooleanFn => self.wrapper_ctor(n, args, Some(nt)),
                     Nat::Ext(Bi::RegExpCtor) => self.regexp_ctor_nt(arg(args, 0), arg(args, 1), true, Some(nt)),
                     Nat::Sc(ScFn::IterCtor) => {
                         let proto = self.proto_from_ctor_or(nt, self.sc.iter_proto)?;

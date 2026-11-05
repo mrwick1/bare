@@ -21,8 +21,7 @@
 //   8 elements read (32 moved), and `ao_reserve` first, so a range longer than the budget does nothing.
 //
 // Gates (explicit `Unsupported`, never silent)
-// - `reverse`, `copyWithin`: a primitive receiver (they would write to a wrapper object). The shared species gate of
-//   `flat` and `flatMap` (see `ao_species`).
+// - The shared species gate of `flat` and `flatMap` (see `ao_species`).
 // Known differences: `toLocaleString` has no cycle guard (V8 prints "" for an array that holds itself; this stops at the
 // traversal-depth limit, as `join` does) and it needs `toLocaleString` on each element (`Number.prototype.toLocaleString`
 // is not bound yet).
@@ -180,7 +179,7 @@ impl<'p> Interp<'p> {
 
     fn ao_reverse(&mut self, this: Value) -> Res<Value> {
         self.ao_cvt(this)?;
-        let Value::Object(o) = this else { return Err(unsupported("Array.prototype.reverse on a primitive receiver (wrapper object)", Span::default())) };
+        let Value::Object(o) = this else { unreachable!("`ao_recv` made the receiver an object") };
         let len = self.length_of(this)?;
         if len > 1 && len <= MAX_INDEX as u64 && h!(self, self.heap.edit_dense(o, len as u32, |e| e.reverse())) {
             self.spend(len / 32 + 1)?;
@@ -215,7 +214,7 @@ impl<'p> Interp<'p> {
 
     fn ao_copy_within(&mut self, this: Value, target: Value, start: Value, end: Value) -> Res<Value> {
         self.ao_cvt(this)?;
-        let Value::Object(o) = this else { return Err(unsupported("Array.prototype.copyWithin on a primitive receiver (wrapper object)", Span::default())) };
+        let Value::Object(o) = this else { unreachable!("`ao_recv` made the receiver an object") };
         let len = self.length_of(this)?;
         let to = self.ao_rel(target, len, 0)?;
         let from = self.ao_rel(start, len, 0)?;

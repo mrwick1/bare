@@ -14,7 +14,7 @@ impl<'p> Interp<'p> {
             Nat::ObjectCtor => match a0 {
                 Value::Undefined | Value::Null => Ok(Value::Object(h!(self, self.heap.new_object(Some(self.object_proto))))),
                 Value::Object(_) => Ok(a0),
-                _ => Err(unsupported("Object(primitive) wrapper object", Span::default())),
+                _ => self.to_object(a0),
             },
             Nat::ObjectKeys => {
                 let keys = match a0 {
@@ -119,7 +119,14 @@ impl<'p> Interp<'p> {
                     Value::Object(o) if h!(self, self.heap.is_array(o)) => "Array",
                     Value::Object(o) if self.date.times.contains_key(&o) => "Date",
                     Value::Object(o) if o == self.sc.bool_proto => "Boolean",
-                    Value::Object(_) => "Object",
+                    Value::Object(o) if Some(o) == self.ao.number_proto => "Number",
+                    Value::Object(o) if o == self.ext.string_proto => "String",
+                    Value::Object(o) => match self.heap.primitive_value(o) {
+                        Some(Value::Bool(_)) => "Boolean",
+                        Some(Value::Number(_)) => "Number",
+                        Some(Value::String(_)) => "String",
+                        _ => "Object",
+                    },
                 };
                 self.sc_object_to_string(this, tag)
             }
@@ -162,6 +169,7 @@ impl<'p> Interp<'p> {
             Nat::ArrayCtor => self.array_ctor(args, self.array_proto),
             Nat::ArrayIsArray => Ok(Value::Bool(matches!(a0, Value::Object(o) if h!(self, self.heap.is_array(o))))),
             Nat::ArrPush => {
+                let this = self.ao_recv(this)?;
                 let len = self.length_of(this)?;
                 if args.len() as u64 > 9007199254740991 - len { return Err(self.type_err("Array-like length exceeds the safe integer limit")); }
                 for (i, &v) in args.iter().enumerate() {
@@ -180,6 +188,7 @@ impl<'p> Interp<'p> {
                 Ok(n)
             }
             Nat::ArrPop => {
+                let this = self.ao_recv(this)?;
                 let len = self.length_of(this)?;
                 let saved = std::mem::replace(&mut self.strict, true);
                 let r = (|| {
@@ -201,6 +210,7 @@ impl<'p> Interp<'p> {
                 r
             }
             Nat::ArrForEach => {
+                let this = self.ao_recv(this)?;
                 let len = self.length_of(this)?;
                 if !self.is_callable(a0) {
                     let t = self.display(a0);
@@ -209,7 +219,7 @@ impl<'p> Interp<'p> {
                 for i in 0..len {
                     self.tick()?;
                     let k = self.index_key(i)?;
-                    let has = match this { Value::Object(o) => hx!(self, self.heap.has_property(o, k)), Value::String(s) => i < h!(self, self.heap.str_len(s)) as u64, _ => false };
+                    let has = match this { Value::Object(o) => hx!(self, self.heap.has_property(o, k)), _ => false };
                     if has {
                         let v = self.get_prop(this, k)?;
                         self.call_fn(a0, arg(args, 1), &[v, Value::Number(i as f64), this])?;
@@ -247,6 +257,7 @@ impl<'p> Interp<'p> {
                 let r = if name.is_empty() { msg } else if msg.is_empty() { name } else { format!("{name}: {msg}") };
                 Ok(Value::String(h!(self, self.heap.intern_str(&r))))
             }
+            Nat::StringFn | Nat::NumberFn | Nat::BooleanFn if is_new => self.wrapper_ctor(n, args, None),
             Nat::StringFn => {
                 if args.is_empty() {
                     return Ok(Value::String(h!(self, self.heap.intern_str(""))));
