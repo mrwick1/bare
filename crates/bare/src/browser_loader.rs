@@ -62,6 +62,8 @@
 //! inline bytes, kept diagnostics. A blocking socket call is not interrupted: one read can pass `max_time` by the client timeout.
 //! Style sheets: the driver fetches the active static and added sheets and supplies them to `getComputedStyle` before the next script
 //! (`browser_loader/sheets.rs` has the rules, the order and the caps). Their downloads share the fetch and byte budgets above.
+//! Preload links: a connected `<link rel=preload>` that a script added is fetched by its `as` and gets `load` or `error` as a task
+//! (`browser_loader/preload.rs`).
 //! Not here: `window.onload`, `DOMContentLoaded` for scripts that were added late, `defer` on dynamic scripts,
 //! `integrity`, `crossorigin`, `nonce`, CSP, `<noscript>`, a service worker.
 
@@ -80,9 +82,13 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
+mod preload;
+#[cfg(test)]
+mod preload_tests;
 mod sheets;
 #[cfg(test)]
 mod sheets_tests;
+pub use preload::PreloadStats;
 pub use sheets::CssStats;
 
 type V = R<Value>;
@@ -217,6 +223,8 @@ pub struct PageResult {
     pub bytes: usize,
     /// Style sheet loading (see `browser_loader/sheets.rs`). Its fetches and bytes are also in `fetches` and `bytes`.
     pub css: CssStats,
+    /// `<link rel=preload>` loading (see `browser_loader/preload.rs`). Its fetches and bytes are also in `fetches` and `bytes`.
+    pub preload: PreloadStats,
     /// Short sanitized lines (origin and path of a script, an error name, a label): never source, headers, bodies or queries.
     pub diagnostics: Vec<String>,
     pub dropped_diagnostics: usize,
@@ -255,6 +263,8 @@ pub(crate) struct Scripts {
     page_spent: Cell<(usize, usize, Duration)>,
     /// Style sheets that the driver fetched and supplied to `getComputedStyle`. Lives as long as the document.
     sheets: RefCell<sheets::Sheets>,
+    /// `<link rel=preload>` results and the preloaded script texts. Lives as long as the document.
+    preloads: RefCell<preload::Preloads>,
 }
 
 impl Dom {
@@ -388,15 +398,31 @@ impl Dom {
 
 // ---------------------------------------------------------------------------------------------- JS surface
 
-fn script_src(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    let n = d.el(it, this)?;
-    let raw = match nd::attr_get(d, it, n, "src")? {
+/// The IDL value of a URL attribute: the resolved URL when it resolves against the document base, else the text.
+fn url_attr(d: &Dom, it: &mut Interp<'_>, n: NodeId, name: &str) -> V {
+    let raw = match nd::attr_get(d, it, n, name)? {
         Value::Null => String::new(),
         v => d.string_arg(it, v)?,
     };
-    // The IDL value is the resolved URL when it resolves, else the text.
     let resolved = d.scripts.base.borrow().as_deref().and_then(|b| Url::parse(b).ok()).filter(|_| !raw.trim_matches(WS).is_empty()).and_then(|b| b.join(raw.trim_matches(WS)).ok());
     d.js_str(it, &resolved.map_or(raw, |u| u.to_string()))
+}
+
+fn script_src(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
+    let n = d.el(it, this)?;
+    url_attr(d, it, n, "src")
+}
+
+pub(crate) fn link_href(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
+    let n = nd::link_el(d, it, this)?;
+    url_attr(d, it, n, "href")
+}
+
+pub(crate) fn set_link_href(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
+    let n = nd::link_el(d, it, this)?;
+    let s = d.string_arg(it, arg(a, 0))?;
+    nd::attr_set(d, it, n, "href", &s)?;
+    Ok(Value::Undefined)
 }
 
 fn set_script_src(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
@@ -592,7 +618,7 @@ impl Browser {
     /// It never panics on page input and never returns an `Err`: the result says why it stopped.
     pub fn run_page(&mut self, cfg: PageConfig) -> PageResult {
         let dom = self.dom.clone();
-        let mut res = PageResult { stop: Stop::Settled, ready_state: "loading", scripts_run: 0, script_throws: 0, load_errors: 0, tasks: 0, rounds: 0, fetches: 0, bytes: 0, css: CssStats::default(), diagnostics: Vec::new(), dropped_diagnostics: 0 };
+        let mut res = PageResult { stop: Stop::Settled, ready_state: "loading", scripts_run: 0, script_throws: 0, load_errors: 0, tasks: 0, rounds: 0, fetches: 0, bytes: 0, css: CssStats::default(), preload: PreloadStats::default(), diagnostics: Vec::new(), dropped_diagnostics: 0 };
         let prior = dom.scripts.fatal.borrow().clone();
         if let Some(f) = prior {
             res.stop = Stop::Fatal(f);
@@ -675,6 +701,7 @@ impl Browser {
         let stop = run.go();
         let mut res = run.res;
         res.css = dom.scripts.sheets.borrow().stats;
+        res.preload = dom.scripts.preloads.borrow().stats;
         dom.scripts.page_spent.set((res.tasks, res.rounds, started.elapsed()));
         dom.scripts.used.set((res.fetches, res.bytes));
         if let Stop::Fatal(f) = &stop {
@@ -699,7 +726,7 @@ impl Browser {
         limits.max_rounds = limits.max_rounds.min(caps.1.saturating_sub(spent.1));
         limits.max_time = limits.max_time.min(caps.2.saturating_sub(spent.2));
         let started = Instant::now();
-        let mut res = PageResult { stop: Stop::Settled, ready_state: "loading", scripts_run: 0, script_throws: 0, load_errors: 0, tasks: 0, rounds: 0, fetches, bytes, css: dom.scripts.sheets.borrow().stats, diagnostics: Vec::new(), dropped_diagnostics: 0 };
+        let mut res = PageResult { stop: Stop::Settled, ready_state: "loading", scripts_run: 0, script_throws: 0, load_errors: 0, tasks: 0, rounds: 0, fetches, bytes, css: dom.scripts.sheets.borrow().stats, preload: dom.scripts.preloads.borrow().stats, diagnostics: Vec::new(), dropped_diagnostics: 0 };
         let prior = dom.scripts.fatal.borrow().clone();
         if let Some(f) = prior {
             res.stop = Stop::Fatal(f);
@@ -729,6 +756,7 @@ impl Browser {
         let stop = run.resume(steps).err().unwrap_or(Stop::Settled);
         let mut res = run.res;
         res.css = dom.scripts.sheets.borrow().stats;
+        res.preload = dom.scripts.preloads.borrow().stats;
         dom.scripts.page_spent.set((spent.0.saturating_add(res.tasks), spent.1.saturating_add(res.rounds), spent.2.saturating_add(started.elapsed())));
         dom.scripts.used.set((res.fetches, res.bytes));
         if let Stop::Fatal(f) = &stop {
@@ -947,7 +975,16 @@ impl Run<'_> {
                         Ok(text)
                     }
                     Some(Err(why)) => Err(why),
-                    None => download(&mut self.client, self.https_only, &self.lim, self.deadline, self.retained + self.dom.scripts.sheets.borrow().retained, &mut self.res, &self.disc.targets[t]),
+                    None => {
+                        let preloaded = self.dom.scripts.preloads.borrow_mut().take_script(&self.disc.targets[t].url);
+                        match preloaded {
+                            Some(r) => r,
+                            None => {
+                                let kept = self.kept();
+                                download(&mut self.client, self.https_only, &self.lim, self.deadline, kept, &mut self.res, &self.disc.targets[t])
+                            }
+                        }
+                    }
                 };
                 self.refs[t] -= 1;
                 // Keep what a later element still needs: the text, or the reason (a failure is not retried).
@@ -981,7 +1018,14 @@ impl Run<'_> {
             Ext::Fetch(node, url) => {
                 let what = label(&url);
                 let target = resources::Target { expect: Expect::Script, url };
-                let text = download(&mut self.client, self.https_only, &self.lim, self.deadline, self.retained + self.dom.scripts.sheets.borrow().retained, &mut self.res, &target);
+                let preloaded = self.dom.scripts.preloads.borrow_mut().take_script(&target.url);
+                let text = match preloaded {
+                    Some(r) => r,
+                    None => {
+                        let kept = self.kept();
+                        download(&mut self.client, self.https_only, &self.lim, self.deadline, kept, &mut self.res, &target)
+                    }
+                };
                 self.finish_external(node, &what, text)?;
             }
         }

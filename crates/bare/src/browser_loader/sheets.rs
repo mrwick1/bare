@@ -89,7 +89,7 @@ pub(crate) struct Sheets {
     notified: HashSet<(NodeId, String)>,
 }
 
-fn limit(what: &str) -> Stop {
+pub(super) fn limit(what: &str) -> Stop {
     Stop::Fatal(Fatal::Limit(what.to_string()))
 }
 
@@ -149,6 +149,7 @@ impl Run<'_> {
             }
         }
         for _ in 0..MAX_PASSES {
+            let fired = self.feed_preloads(&base)?;
             let missing = match self.b.style_availability() {
                 Ok(StyleAvailability::Ready) => {
                     let (before, known) = {
@@ -156,7 +157,7 @@ impl Run<'_> {
                         (s.notified.len(), s.supplied.iter().map(|(raw, url)| (raw.clone(), url.clone(), s.fetched.get(url).is_some_and(Result::is_ok))).collect::<Vec<_>>())
                     };
                     for (raw, url, ok) in known { self.tell_links(&raw, &url, ok)?; }
-                    if self.dom.scripts.sheets.borrow().notified.len() != before { continue; }
+                    if fired || self.dom.scripts.sheets.borrow().notified.len() != before { continue; }
                     return Ok(());
                 },
                 Ok(StyleAvailability::MissingExternal { hrefs, .. }) => hrefs,
@@ -203,7 +204,7 @@ impl Run<'_> {
     }
 
     /// The text of `url`: from the cache, or from the network (counted, capped). `Ok(Err)` is a failed sheet, `Err` a stop.
-    fn fetch_sheet(&mut self, url: &Url) -> Result<Fetched, Stop> {
+    pub(super) fn fetch_sheet(&mut self, url: &Url) -> Result<Fetched, Stop> {
         let key = url.to_string();
         if let Some(c) = self.dom.scripts.sheets.borrow().fetched.get(&key) {
             return Ok(c.clone());
@@ -224,7 +225,7 @@ impl Run<'_> {
         self.dom.scripts.sheets.borrow_mut().stats.fetches += 1;
         let mut lim = self.lim.resources.clone();
         lim.max_resource_bytes = lim.max_resource_bytes.min(MAX_BODY);
-        let retained = self.retained + self.dom.scripts.sheets.borrow().retained;
+        let retained = self.kept();
         let target = resources::Target { expect: Expect::Style, url: Url { scheme: url.scheme, host: url.host.clone(), port: url.port, path: url.path.clone() } };
         match resources::fetch(&mut self.client, &target, &lim, self.deadline, retained) {
             Ok(r) => {

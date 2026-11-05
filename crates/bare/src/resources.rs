@@ -123,6 +123,9 @@ pub struct Item {
 pub enum Expect {
     Script,
     Style,
+    /// Any content type and encoding (a font, an image, a `fetch` preload). The body is read and dropped, never kept: the reply
+    /// is `Resource` with empty text. Status, redirects, the time limit and the size cap of one resource still apply.
+    Opaque,
 }
 
 /// A URL to download, and what it must be.
@@ -484,17 +487,42 @@ pub fn fetch(client: &mut http::Client, target: &Target, limits: &Limits, deadli
         return Err(LoadError::Status(response.status));
     }
     let content_type = response.header("content-type");
-    let good = content_type.map(essence).is_some_and(|m| match target.expect {
-        Expect::Script => JS_TYPES.iter().any(|j| m.eq_ignore_ascii_case(j)),
-        Expect::Style => m.eq_ignore_ascii_case("text/css"),
-    });
+    let good = target.expect == Expect::Opaque
+        || content_type.map(essence).is_some_and(|m| match target.expect {
+            Expect::Script => JS_TYPES.iter().any(|j| m.eq_ignore_ascii_case(j)),
+            _ => m.eq_ignore_ascii_case("text/css"),
+        });
     if !good {
         return Err(LoadError::Mime(content_type.map(|c| short(essence(c)))));
     }
-    if let Some(e) = response.header("content-encoding")
+    if target.expect != Expect::Opaque
+        && let Some(e) = response.header("content-encoding")
         && !e.trim_matches(WS).eq_ignore_ascii_case("identity")
     {
         return Err(LoadError::Encoding(short(e)));
+    }
+    if target.expect == Expect::Opaque {
+        // Count the bytes against the size cap of one resource, in one small buffer. Nothing is kept.
+        let declared = response.header("content-length").and_then(|v| v.trim_matches(WS).parse::<usize>().ok());
+        if declared.is_some_and(|d| d > limits.max_resource_bytes) {
+            return Err(LoadError::TooLarge);
+        }
+        let (mut buf, mut total) = ([0u8; 8 * 1024], 0usize);
+        loop {
+            if Instant::now() >= deadline {
+                return Err(LoadError::TimedOut);
+            }
+            match streamed.body.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => total += n,
+                Err(e) if e.kind() == ErrorKind::UnexpectedEof => return Err(LoadError::Truncated),
+                Err(e) => return Err(LoadError::Read(e.kind())),
+            }
+            if total > limits.max_resource_bytes {
+                return Err(LoadError::TooLarge);
+            }
+        }
+        return Ok(Resource { url: current, text: String::new() });
     }
     let (cap, room) = (limits.max_resource_bytes, limits.max_total_bytes.saturating_sub(retained));
     // Refuse a size that the server declares, before any buffer: a lie of 1 TB costs nothing.

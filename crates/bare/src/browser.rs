@@ -32,7 +32,7 @@
 //! - `<input>`: `value checked type defaultValue defaultChecked` with native state (dirty value, checkedness).
 //! - `Element.innerHTML` (`browser_fragment.rs`): native fragment parsing and serialization with explicit gates (table, select, template, html, frameset and
 //!   foreign contexts are `Unsupported`). Fragment scripts are never run.
-//! - `<link>` (HTML namespace only, `HTMLLinkElement`): `rel` as a reflected string. Setting it loads nothing.
+//! - `<link>` (HTML namespace only, `HTMLLinkElement`): `rel`, `href`, `as` and `crossOrigin` as reflected attributes. Setting them loads nothing: the page driver loads connected `rel=preload` links (`browser_loader/preload.rs`).
 //! - `<input>` text selection (`selectionStart selectionEnd selectionDirection setSelectionRange select`, `select` event task): `browser_selection.rs`.
 //! - Events: `Event`, `CustomEvent` (`detail`), `addEventListener` (capture, once, passive; function or `handleEvent`
 //!   object), `removeEventListener`, `dispatchEvent`, capture / target / bubble phases through the document to `window`,
@@ -921,6 +921,10 @@ pub(crate) static DEFS: &[Def] = &[
     Def { on: &[Input], name: "defaultValue", len: 0, kind: A(nd::default_value, nd::set_default_value) },
     Def { on: &[Input], name: "defaultChecked", len: 0, kind: A(nd::default_checked, nd::set_default_checked) },
     Def { on: &[Link], name: "rel", len: 0, kind: A(nd::link_rel, nd::set_link_rel) },
+    Def { on: &[Link], name: "href", len: 0, kind: A(crate::browser_loader::link_href, crate::browser_loader::set_link_href) },
+    Def { on: &[Link], name: "as", len: 0, kind: A(nd::link_as, nd::set_link_as) },
+    Def { on: &[Link], name: "crossOrigin", len: 0, kind: A(nd::link_cross_origin, nd::set_link_cross_origin) },
+    Def { on: &[Document], name: "scripts", len: 0, kind: G(crate::browser_platform_query::scripts) },
     Def { on: &[Input], name: "name", len: 0, kind: A(fm::input_name, fm::set_input_name) },
     Def { on: &[Input], name: "disabled", len: 0, kind: A(fm::input_disabled, fm::set_input_disabled) },
     Def { on: &[Input], name: "form", len: 0, kind: G(fm::input_form) },

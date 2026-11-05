@@ -1297,3 +1297,41 @@ pub(crate) fn set_link_rel(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value
     link_el(d, it, this)?;
     reflect_set(d, it, this, a, "rel")
 }
+
+/// The `as` values that the Fetch Standard names (its destinations). Any other text reads as the empty string.
+pub(crate) const LINK_AS: [&str; 23] = [
+    "fetch", "audio", "audioworklet", "document", "embed", "font", "frame", "iframe", "image", "json", "manifest", "object", "paintworklet",
+    "report", "script", "serviceworker", "sharedworker", "style", "track", "video", "webidentity", "worker", "xslt",
+];
+
+/// A known `as` value is given in lower case. An unknown one is the empty string (an enumerated attribute with no default).
+pub(crate) fn link_as(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
+    let n = link_el(d, it, this)?;
+    let doc = d.doc.borrow();
+    let raw = doc.find_atom("as").and_then(|a| doc.attr(n, a)).unwrap_or("");
+    let known = LINK_AS.iter().find(|k| k.eq_ignore_ascii_case(raw));
+    d.js_str(it, known.copied().unwrap_or(""))
+}
+
+pub(crate) fn set_link_as(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
+    link_el(d, it, this)?;
+    reflect_set(d, it, this, a, "as")
+}
+
+/// `null` when the attribute is absent, `use-credentials` when it says so (any case), else `anonymous`.
+pub(crate) fn link_cross_origin(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
+    let n = link_el(d, it, this)?;
+    let doc = d.doc.borrow();
+    let Some(raw) = doc.find_atom("crossorigin").and_then(|a| doc.attr(n, a)) else { return Ok(Value::Null) };
+    d.js_str(it, if raw.eq_ignore_ascii_case("use-credentials") { "use-credentials" } else { "anonymous" })
+}
+
+/// `null` removes the attribute. Any other value is converted to a string and written.
+pub(crate) fn set_link_cross_origin(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
+    let n = link_el(d, it, this)?;
+    if matches!(arg(a, 0), Value::Null) {
+        d.doc.borrow_mut().remove_attr(n, "crossorigin");
+        return Ok(Value::Undefined);
+    }
+    reflect_set(d, it, this, a, "crossorigin")
+}
