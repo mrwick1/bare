@@ -28,7 +28,6 @@
 //!
 //! Gates: the lookup is on `Document` only (no `Element.getElementsByName` exists). `getElementsByTagName` and
 //! `getElementsByClassName` are still snapshot arrays. `NodeList` is not returned by `childNodes` or `querySelectorAll`.
-//! JSON of a stale list stops with a heap error (it has no fill path) until a read of `length` makes the cache fresh.
 
 use crate::browser::*;
 use crate::browser_dom::{arg, next_in};
@@ -175,7 +174,9 @@ fn prepare(d: &Dom, it: &mut Interp<'_>, owner: ObjId) -> R<()> {
                     continue;
                 };
                 it.charge(1 + doc.attr_count(c) as u64 / 8)?;
-                if doc.element_ns(c) == Ns::Html && doc.attr(c, atom) == Some(&*name) {
+                let value = if doc.element_ns(c) == Ns::Html { doc.attr(c, atom) } else { None };
+                if let Some(value) = value { it.charge(value.len().min(name.len()) as u64 / 32 + 1)?; }
+                if value == Some(&*name) {
                     if out.len() >= d.lim.max_results {
                         return Err(d.lim("dom-results"));
                     }

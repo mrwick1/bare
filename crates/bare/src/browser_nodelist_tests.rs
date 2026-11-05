@@ -421,14 +421,11 @@ fn stale_list_works_with_has_property_keys_and_for_in_without_a_prior_length_rea
 }
 
 #[test]
-fn json_of_a_fresh_list_works_and_a_stale_one_is_a_visible_error_never_wrong() {
+fn json_of_a_stale_list_rebuilds_before_serializing_members() {
     big(|| {
         let mut b = browser();
-        ok(&mut b, "var L = document.getElementsByName('y'); L.length; typeof JSON.stringify(L)", "string");
-        ok(&mut b, "document.body.appendChild(document.createElement('hr')); L.length; typeof JSON.stringify(L)", "string");
-        let r = js(&mut b, "var a = document.createElement('i'); a.setAttribute('name', 'y'); document.body.appendChild(a); JSON.stringify(L)");
-        // Not an empty or short result: either a valid string or an explicit error.
-        assert!(r.starts_with("other:") || r.starts_with("unsupported:") || r.starts_with("throw") || r.starts_with('{') || r.starts_with('"'), "{r}");
+        ok(&mut b, "var L=document.getElementsByName('y'); L.length; document.getElementById('i2').setAttribute('name','z'); JSON.stringify(L)", "{}");
+        ok(&mut b, "document.getElementById('i2').setAttribute('name','y'); JSON.stringify(L)", "{\"0\":{}}");
     });
 }
 
@@ -499,5 +496,23 @@ fn object_to_string_and_structured_clone_treat_a_list_as_a_host_object() {
         ok(&mut b, "Object.prototype.toString.call(document.getElementsByName('x'))", "[object NodeList]");
         ok(&mut b, "try { history.pushState(document.getElementsByName('x'), ''); 'cloned' } catch (e) { e.name }", "DataCloneError");
         ok(&mut b, "try { history.pushState({ a: document.getElementsByName('x') }, ''); 'cloned' } catch (e) { e.name }", "DataCloneError");
+    });
+}
+
+#[test]
+fn long_name_comparisons_consume_the_step_budget() {
+    big(|| {
+        let name="a".repeat(8192);
+        let page=format!("<body>{}",format!("<i name='{name}'></i>").repeat(20));
+        let mut b=browser_with(&page,BrowserLimits::default(),2000);
+        assert_eq!(js(&mut b,&format!("document.getElementsByName('{name}').length")),"limit:Steps");
+    });
+}
+
+#[test]
+fn a_reviver_can_visit_a_live_list_injected_by_an_earlier_callback() {
+    big(|| {
+        let mut b=browser();
+        ok(&mut b,"var L=document.getElementsByName('y'); var keys=[]; var out=JSON.parse('{\"a\":0,\"b\":1}',function(k,v){keys.push(k); if(k==='a')this.b=L;return v}); [out.b===L, keys.join('|')].join()","true,a|0|b|");
     });
 }
