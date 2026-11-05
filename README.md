@@ -21,6 +21,7 @@ cargo run -- http://example.com            # print the DOM tree
 cargo run -- http://example.com --source   # print the page source
 cargo run -- http://example.com --styles   # print the computed style of each element
 cargo run -- http://example.com --layout   # print the place and size of each box (--width=N sets the window width)
+cargo run -- --window page.html            # open a Wayland window that shows the painted page (a local file or an http(s) URL)
 cargo test
 ```
 

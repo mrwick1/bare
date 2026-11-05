@@ -13,6 +13,7 @@ bare-layout = { path = "../layout" }
 bare-net = { path = "../net" }
 bare-paint = { path = "../paint" }
 bare-url = { path = "../url" }
+bare-window = { path = "../window" }
 
 [dev-dependencies]
 bare-tls = { path = "../tls" }

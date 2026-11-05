@@ -43,7 +43,8 @@ The repository is a Cargo workspace. Each browser part is one crate in `crates/`
 | `bare-css`     | `crates/css/`     | tokenizer, parser, selectors, cascade | `bare-html` (from topic 3) |
 | `bare-layout`  | `crates/layout/`  | box tree, text, block and inline layout | `bare-html`, `bare-css` |
 | `bare-paint`   | `crates/paint/`   | display list, pixel buffer, glyphs, PNG capture | `bare-css`, `bare-html`, `bare-layout` |
-| `bare`         | `crates/bare/`    | the app (`main.rs`)         | `bare-net`, `bare-url`, `bare-html`, `bare-paint` |
+| `bare-window`  | `crates/window/`  | window interface, Wayland backend (smithay-client-toolkit) | - |
+| `bare`         | `crates/bare/`    | the app (`main.rs`)         | `bare-net`, `bare-url`, `bare-html`, `bare-paint`, `bare-window` |
 
 Why crates, not folders in one crate:
 
@@ -169,7 +170,7 @@ Design rules, so that a port is small:
 - Paint draws into a plain pixel buffer (`Vec<u32>`). It does not draw into a window.
 - Only one trait touches the OS window. It opens a window, shows a pixel buffer, reads input events and reports a resize.
 - Each OS has its own implementation of that trait:
-  - Linux: the Wayland protocol over a Unix socket, with a shared-memory pixel buffer.
+  - Linux: the Wayland protocol over a Unix socket, with a shared-memory pixel buffer. Built in `bare-window` on smithay-client-toolkit, chosen on 2026-11-05 over winit with softbuffer (see [resources.md](resources.md#wayland-window)). The interface is `App`, `Control`, `Waker` and `Window` in `crates/window/src/lib.rs`. A trait object is not needed: a port adds a module with the same names.
   - Windows: Win32 functions (`CreateWindowExW`, `StretchDIBits`).
   - macOS: Cocoa through the Objective-C runtime (`objc_msgSend`).
 - Other OS calls (for example memory with `mmap`) also go behind small per-OS functions.
