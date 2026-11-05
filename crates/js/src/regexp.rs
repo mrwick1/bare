@@ -1,4 +1,4 @@
-//! JavaScript regular expressions (ECMA-262 `RegExp` pattern matching, non-Unicode mode).
+//! JavaScript regular expressions (ECMA-262 `RegExp` pattern matching, with and without `u`).
 //!
 //! Standalone: this file does not use the lexer, the parser or any JS value. A JS wrapper (later)
 //! owns `RegExp` objects, `lastIndex`, the result array and the `String` methods.
@@ -20,25 +20,31 @@
 //! Supported syntax: literals, `\t \n \v \f \r \0 \cX \xHH \uHHHH` and identity escapes, `.`,
 //! `\d \D \s \S \w \W`, classes with ranges and negation, `^ $ \b \B`, alternation, capturing and
 //! `(?:...)` groups, `* + ? {n} {n,} {n,m}` (greedy and lazy), backreferences `\1`, lookahead
-//! `(?=...)` and `(?!...)`, and the flags `g i m s y`. Annex B (web compatibility) rules for
+//! `(?=...)` and `(?!...)`, and the flags `g i m s u y`. Annex B (web compatibility) rules for
 //! non-Unicode patterns are followed: a lone `]` `}` or `{` is a literal, `\8` is `8`, `\1` with
 //! fewer than one group is legacy octal, `\c` without a letter is a backslash, `[\d-x]` has a
 //! literal `-`.
 //!
-//! Explicit errors, never a different pattern: flags `u v d` ([`CompileError::UnsupportedFlag`]),
-//! lookbehind, named groups and quantified lookahead ([`CompileError::Unsupported`]). Without `u`,
+//! Explicit errors, never a different pattern: flags `v d` ([`CompileError::UnsupportedFlag`]),
+//! lookbehind, named groups, quantified lookahead, and `\p` `\P` `\k` with `u`
+//! ([`CompileError::Unsupported`]). Without `u`,
 //! `\p{L}` is the literal text `p{L}`, as in ECMA-262.
 //!
 //! Case folding (`i`): `Canonicalize` of ECMA-262 22.2.2.7.3 for non-Unicode mode: the full
 //! Unicode uppercase of a code unit, if that is exactly one code unit, and not a non-ASCII unit
 //! mapped to ASCII. It uses Rust's `char::to_uppercase`, so it follows the Unicode version of the
 //! Rust standard library. Characters added to Unicode after that version are not folded.
+//! With `u`, `Canonicalize` is simple case folding (CaseFolding.txt, statuses C and S, from
+//! `bare-unicode`). A literal becomes the class of the code points with the same folding, a class
+//! is closed over folding, and `\w` `\W` `\b` also count U+017F and U+212A as word characters.
 //!
 //! Engine: the pattern becomes a small instruction list, run by a backtracking VM with an explicit
 //! heap stack. Matching never recurses, so a hostile pattern cannot overflow the Rust stack.
 //! Compile and run are bounded: see [`Limits`] and the `MAX_*` constants. A limit is an error,
 //! never "no match".
 
+use bare_unicode::fold;
+use bare_unicode::tables::{CASE_FOLD, CASE_FOLD_INV};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 /// The longest pattern, in UTF-16 code units.
@@ -204,9 +210,6 @@ impl Regex {
     /// Compile `pattern` (UTF-16 code units) with `flags` (e.g. `"gi"`).
     pub fn new(pattern: &[u16], flags: &str) -> Result<Regex, CompileError> {
         let flags = Flags::parse(flags)?;
-        if flags.unicode && flags.ignore_case {
-            return Err(CompileError::Unsupported { what: "regexp flags i and u together (Unicode case folding is not built)", at: 0 });
-        }
         if pattern.len() > MAX_PATTERN_UNITS {
             return Err(CompileError::Limit("pattern too long"));
         }
@@ -243,7 +246,8 @@ impl Regex {
                 }
                 Inst::CharI(k) => (0..128u16).filter(|&c| canon(c) == k).for_each(|c| set[c as usize] = true),
                 Inst::Any | Inst::AnyAll | Inst::AnyU | Inst::AnyAllU => return None,
-                Inst::Class(i) | Inst::ClassU(i) => (0..128u32).filter(|&c| self.classes[i as usize].matches(c, self.flags.ignore_case)).for_each(|c| set[c as usize] = true),
+                Inst::Class(i) => (0..128u32).filter(|&c| self.classes[i as usize].matches(c, self.flags.ignore_case && !self.flags.unicode)).for_each(|c| set[c as usize] = true),
+                Inst::ClassU(i) => (0..128u32).filter(|&c| self.classes[i as usize].matches(c, false)).for_each(|c| set[c as usize] = true),
                 // Zero-width steps: a superset of the real first units is still sound.
                 Inst::Start | Inst::End | Inst::MStart | Inst::MEnd | Inst::WordB(_) | Inst::NotInPair | Inst::Mark(_) | Inst::GroupStart(_) | Inst::Close(_) | Inst::Reset(..) | Inst::EmptyCheck(_) => todo.push(pc + 1),
                 Inst::Jmp(t) => todo.push(t as usize),
@@ -276,7 +280,27 @@ impl Regex {
     /// Find the first match at or after `last_index` (only at `last_index` with the `y` flag).
     /// `Ok(None)` means no match, including `last_index > input.len()`. `cancel` is polled
     /// at entry and periodically during execution. Register initialization is charged in bulk.
+    #[inline]
     pub fn exec(
+        &self,
+        input: &[u16],
+        last_index: usize,
+        limits: &Limits,
+        cancel: Option<&AtomicBool>,
+        sc: &mut Scratch,
+    ) -> Result<Option<Match>, ExecError> {
+        if self.flags.unicode && self.flags.ignore_case {
+            self.exec_in::<true>(input, last_index, limits, cancel, sc)
+        } else {
+            self.exec_in::<false>(input, last_index, limits, cancel, sc)
+        }
+    }
+
+    /// `FOLD`: `i` with `u`. `\b` and backreferences then use simple case folding. A const parameter compiles a
+    /// separate matcher for it, so the other patterns run a loop without that code. Extra instructions or call
+    /// arguments in the shared loop made `short` and `caps` 2 to 5% slower (measured).
+    #[inline(never)]
+    fn exec_in<const FOLD: bool>(
         &self,
         input: &[u16],
         last_index: usize,
@@ -298,7 +322,7 @@ impl Regex {
         // itself: V8 compiles this choice (`OptionallyStepBackToLeadSurrogate`); the oracle checks it against Node.
         if self.flags.unicode
             && inside_pair(input, s)
-            && let Some(m) = self.attempt(input, s - 1, limits, cancel, sc)?
+            && let Some(m) = self.attempt::<FOLD>(input, s - 1, limits, cancel, sc)?
         {
             return Ok(Some(m));
         }
@@ -320,7 +344,7 @@ impl Regex {
             sc.regs.clear();
             sc.regs.resize(self.nregs, UNSET);
             sc.stack.clear();
-            if self.run(input, s, limits, cancel, sc)? {
+            if self.run::<FOLD>(input, s, limits, cancel, sc)? {
                 return Ok(Some(self.spans(sc)));
             }
             if self.flags.sticky || s == input.len() || self.anchored {
@@ -335,12 +359,12 @@ impl Regex {
     /// The cold first attempt of a `u` index inside a surrogate pair, at the start of the pair.
     #[cold]
     #[inline(never)]
-    fn attempt(&self, input: &[u16], s: usize, limits: &Limits, cancel: Option<&AtomicBool>, sc: &mut Scratch) -> Result<Option<Match>, ExecError> {
+    fn attempt<const FOLD: bool>(&self, input: &[u16], s: usize, limits: &Limits, cancel: Option<&AtomicBool>, sc: &mut Scratch) -> Result<Option<Match>, ExecError> {
         charge(&mut sc.steps, self.nregs as u64, limits, cancel)?;
         sc.regs.clear();
         sc.regs.resize(self.nregs, UNSET);
         sc.stack.clear();
-        Ok(if self.run(input, s, limits, cancel, sc)? { Some(self.spans(sc)) } else { None })
+        Ok(if self.run::<FOLD>(input, s, limits, cancel, sc)? { Some(self.spans(sc)) } else { None })
     }
 
     fn spans(&self, sc: &Scratch) -> Match {
@@ -365,6 +389,26 @@ impl Regex {
         ok.then_some(pos + w)
     }
 
+    /// A backreference with `i` and `u`: compare simple case foldings, one code point at a time. A folding can
+    /// change the length in units, so each side walks on its own. Returns the end position and the work done.
+    fn backref_fold(&self, input: &[u16], regs: &[u32], g: u32, pos: usize) -> (Option<usize>, u64) {
+        let (s, e) = (regs[2 * g as usize], regs[2 * g as usize + 1]);
+        if s == UNSET || e == UNSET {
+            return (Some(pos), 0);
+        }
+        let (cap, mut i, mut p, mut work) = (&input[..e as usize], s as usize, pos, 0);
+        while i < cap.len() {
+            work += 1;
+            let Some((y, v)) = char_at(input, p) else { return (None, work) };
+            let (x, w) = code_point(cap, i);
+            if fold(x) != fold(y) {
+                return (None, work);
+            }
+            (i, p) = (i + w, p + v);
+        }
+        (Some(p), work)
+    }
+
     /// `AdvanceStringIndex`: the next index after `i`. With `u`, a surrogate pair at `i` is skipped whole.
     pub fn advance(&self, input: &[u16], i: usize) -> usize {
         if self.flags.unicode && i < input.len() { i + code_point(input, i).1 } else { i + 1 }
@@ -372,7 +416,7 @@ impl Regex {
 
     // Inlined into both callers: `exec` is the hot one.
     #[inline(always)]
-    fn run(
+    fn run<const FOLD: bool>(
         &self,
         input: &[u16],
         start: usize,
@@ -381,7 +425,8 @@ impl Regex {
         sc: &mut Scratch,
     ) -> Result<bool, ExecError> {
         let Scratch { regs, stack, steps, peak_frames } = sc;
-        let icase = self.flags.ignore_case;
+        // Non-Unicode `i` only. `i` with `u` is `FOLD`: its classes are already closed over folding.
+        let icase = self.flags.ignore_case && !FOLD;
         let len = input.len();
         let mut pc = 0usize;
         let mut pos = start;
@@ -508,12 +553,23 @@ impl Regex {
                     }
                 }
                 Inst::WordB(want) => {
-                    let a = pos > 0 && is_word(input[pos - 1]);
-                    let b = pos < len && is_word(input[pos]);
+                    let a = pos > 0 && is_word_in::<FOLD>(input[pos - 1]);
+                    let b = pos < len && is_word_in::<FOLD>(input[pos]);
                     if (a != b) == want {
                         pc += 1
                     } else {
                         failed = true
+                    }
+                }
+                Inst::BackRef(g) if FOLD => {
+                    let (r, n) = self.backref_fold(input, regs, g, pos);
+                    charge(steps, n, lim, cancel)?;
+                    match r {
+                        Some(p) => {
+                            pos = p;
+                            pc += 1;
+                        }
+                        None => failed = true,
                     }
                 }
                 Inst::BackRef(g) => {
@@ -687,8 +743,27 @@ fn code_point(input: &[u16], i: usize) -> (u32, usize) {
     }
 }
 
+/// The code points whose simple case folding equals that of `c`, as sorted ranges.
+fn fold_group(c: u32) -> Vec<(u32, u32)> {
+    let f = fold(c);
+    let mut g: Vec<(u32, u32)> = slice(CASE_FOLD_INV, f, f).iter().map(|p| (p.1, p.1)).collect();
+    g.push((f, f));
+    normalize(&mut g);
+    g
+}
+
+/// The pairs of a folding table (sorted by first value) whose first value is in `lo..=hi`.
+fn slice(t: &[(u32, u32)], lo: u32, hi: u32) -> &[(u32, u32)] {
+    &t[t.partition_point(|p| p.0 < lo)..t.partition_point(|p| p.0 <= hi)]
+}
+
 fn is_word(c: u16) -> bool {
     matches!(c, 0x30..=0x39 | 0x41..=0x5A | 0x61..=0x7A | 0x5F)
+}
+
+/// IsWordChar. With `FOLD` (`i` and `u`), U+017F and U+212A fold into the word characters, so they count too.
+fn is_word_in<const FOLD: bool>(c: u16) -> bool {
+    is_word(c) || (FOLD && (c == 0x17F || c == 0x212A))
 }
 
 /// `Canonicalize(ch)` for non-Unicode `i` patterns (ECMA-262 22.2.2.7.3).
@@ -706,6 +781,8 @@ pub fn canon(c: u16) -> u16 {
 
 const DIGIT: &[(u32, u32)] = &[(0x30, 0x39)];
 const WORD: &[(u32, u32)] = &[(0x30, 0x39), (0x41, 0x5A), (0x5F, 0x5F), (0x61, 0x7A)];
+/// With `i` and `u`, WordCharacters also holds the characters that fold into it: U+017F and U+212A.
+const WORD_FOLD: &[(u32, u32)] = &[(0x30, 0x39), (0x41, 0x5A), (0x5F, 0x5F), (0x61, 0x7A), (0x17F, 0x17F), (0x212A, 0x212A)];
 /// WhiteSpace and LineTerminator: TAB VT FF SP NBSP ZWNBSP, Zs, LF CR LS PS.
 const SPACE: &[(u32, u32)] = &[
     (0x09, 0x0D),
@@ -779,7 +856,8 @@ struct ClassSet {
 }
 
 impl ClassSet {
-    /// `c` is a code unit without `u`, a code point with `u` (and `i` is never set with `u`).
+    /// `c` is a code unit without `u`, a code point with `u`. `icase` is for non-Unicode `i` only: with `u`, the
+    /// class is already closed over case folding.
     fn matches(&self, c: u32, icase: bool) -> bool {
         let k = if icase { canon(c as u16) as u32 } else { c };
         contains(&self.ranges, k) != self.neg
@@ -1100,8 +1178,8 @@ impl<'a> Parser<'a> {
             'D' => Esc::Set(complement(DIGIT, max)),
             's' => Esc::Set(SPACE.to_vec()),
             'S' => Esc::Set(complement(SPACE, max)),
-            'w' => Esc::Set(WORD.to_vec()),
-            'W' => Esc::Set(complement(WORD, max)),
+            'w' => Esc::Set(self.word().to_vec()),
+            'W' => Esc::Set(complement(self.word(), max)),
             'b' if in_class => Esc::Char(8),
             'b' => Esc::WordB(true),
             'B' if !in_class => Esc::WordB(false),
@@ -1260,9 +1338,33 @@ impl<'a> Parser<'a> {
         }
     }
 
+    fn word(&self) -> &'static [(u32, u32)] {
+        if self.flags.unicode && self.flags.ignore_case { WORD_FOLD } else { WORD }
+    }
+
     fn add_class(&mut self, mut ranges: Vec<(u32, u32)>, neg: bool) -> Result<Node, CompileError> {
         normalize(&mut ranges);
-        if self.flags.ignore_case {
+        if self.flags.ignore_case && self.flags.unicode {
+            // Close the set over simple case folding: add every member of a folding group that has a member in
+            // the set. Both tables are sorted, so each range finds its pairs by binary search: the cost depends on
+            // the pairs that the set touches, not on the size of the ranges.
+            let mut hit = Vec::new();
+            for &(lo, hi) in &ranges {
+                hit.extend(slice(CASE_FOLD, lo, hi).iter().map(|p| p.1));
+                hit.extend(slice(CASE_FOLD_INV, lo, hi).iter().map(|p| p.0));
+            }
+            hit.sort_unstable();
+            hit.dedup();
+            self.class_work += (ranges.len() + hit.len()) as u64;
+            if self.class_work > MAX_CLASS_WORK {
+                return Err(CompileError::Limit("character class folding too large"));
+            }
+            for f in hit {
+                ranges.extend(slice(CASE_FOLD_INV, f, f).iter().map(|p| (p.1, p.1)));
+                ranges.push((f, f));
+            }
+            normalize(&mut ranges);
+        } else if self.flags.ignore_case {
             // Replace the members by their canonical forms: `canon(ch)` in set <=> some member
             // has the same canonical form as `ch`. Exact, and fast at match time.
             let mut bits = vec![0u64; 1024];
@@ -1394,15 +1496,12 @@ impl Emitter {
     fn emit_inner(&mut self, n: &Node) -> Result<(), CompileError> {
         match n {
             Node::Empty => {}
-            Node::Char(_) | Node::Any | Node::Class(_) | Node::BackRef(_) => self.emit_leaf(n)?,
+            Node::Char(_) | Node::Any | Node::Class(_) | Node::BackRef(_) | Node::WordB(_) => self.emit_leaf(n)?,
             Node::Start => {
                 self.push(if self.flags.multiline { Inst::MStart } else { Inst::Start })?;
             }
             Node::End => {
                 self.push(if self.flags.multiline { Inst::MEnd } else { Inst::End })?;
-            }
-            Node::WordB(b) => {
-                self.push(Inst::WordB(*b))?;
             }
             Node::Group(g, b) => {
                 self.push(Inst::GroupStart(*g))?;
@@ -1450,7 +1549,17 @@ impl Emitter {
     fn emit_leaf(&mut self, n: &Node) -> Result<(), CompileError> {
         match n {
             &Node::Char(c) => {
-                if self.flags.ignore_case {
+                let fold_u = self.flags.ignore_case && self.flags.unicode;
+                let group = if fold_u { fold_group(c) } else { Vec::new() };
+                if fold_u && group != [(c, c)] && group[group.len() - 1].1 < 128 {
+                    // An ASCII group (every letter but k and s): only ASCII maps to it under `canon` too, so the
+                    // inline code-unit step is exact.
+                    self.push(Inst::CharI(canon(c as u16)))?;
+                } else if fold_u && group != [(c, c)] {
+                    // The code points with the same simple case folding, compared as whole code points.
+                    self.classes.push(ClassSet { ranges: group, neg: false });
+                    self.push(Inst::ClassU(self.classes.len() as u32 - 1))?;
+                } else if self.flags.ignore_case && !fold_u {
                     self.push(Inst::CharI(canon(c as u16)))?;
                 } else if c > 0xFFFF {
                     // An astral code point is its surrogate pair.
@@ -1474,7 +1583,14 @@ impl Emitter {
                 })?;
             }
             Node::Class(i) => {
-                self.push(if self.flags.unicode { Inst::ClassU(*i) } else { Inst::Class(*i) })?;
+                // With `u`, a class without negation and without members from U+D800 can never match half of a
+                // surrogate pair, so the inline code-unit step gives the same result.
+                let c = &self.classes[*i as usize];
+                let units = !c.neg && c.ranges.last().is_none_or(|r| r.1 < 0xD800);
+                self.push(if self.flags.unicode && !units { Inst::ClassU(*i) } else { Inst::Class(*i) })?;
+            }
+            Node::WordB(b) => {
+                self.push(Inst::WordB(*b))?;
             }
             Node::BackRef(g) => {
                 self.push(Inst::BackRef(*g))?;
@@ -1621,6 +1737,12 @@ mod tests {
         assert_eq!(run("abc", "i", "ABC"), "0,3");
         assert_eq!(run("ß", "i", "SS"), "N"); // full uppercase is two units: no fold
         assert_eq!(run("k", "i", "\u{212A}"), "N"); // Kelvin sign maps to ASCII: not folded
+        // With `u`: simple case folding, by code point.
+        assert_eq!(run("k", "iu", "\u{212A}"), "0,1");
+        assert_eq!(run("\\W", "iu", "\u{17F}"), "N"); // U+017F folds to "s": a word character
+        assert_eq!(run("(s)\\1", "iu", "S\u{17F}"), "0,2;0,1");
+        assert_eq!(run("\u{10400}", "iu", "\u{10428}"), "0,2");
+        assert_eq!(run("\u{1C5}", "iu", "\u{1C4}"), "0,1"); // a group of adjacent code points is one range
         assert_eq!(run("σ", "i", "ς"), "0,1");
         assert_eq!(run("[a-z]+", "i", "ABC"), "0,3");
         assert_eq!(run("[^a-z]", "i", "A"), "N");
@@ -1678,7 +1800,6 @@ mod tests {
         for f in ["v", "d", "gv"] {
             assert!(matches!(Regex::from_str("a", f), Err(CompileError::UnsupportedFlag(_))), "{f}");
         }
-        assert!(matches!(Regex::from_str("a", "iu"), Err(CompileError::Unsupported { .. })));
         assert!(matches!(Regex::from_str("\\p{L}", "u"), Err(CompileError::Unsupported { .. })));
         for f in ["gg", "x", "G", "é", "uv"] {
             assert!(matches!(Regex::from_str("a", f), Err(CompileError::InvalidFlags(_))), "{f}");

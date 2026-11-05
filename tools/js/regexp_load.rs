@@ -1,8 +1,10 @@
-//! Standalone harness for crates/js/src/regexp.rs (no cargo, no dependencies).
-//!   rustc --edition 2024 -O tools/js/regexp_load.rs -o regexp_load          # build
-//!   rustc --edition 2024 --test tools/js/regexp_load.rs -o regexp_test      # oracle fixture test
+//! Standalone harness for crates/js/src/regexp.rs (no cargo). It needs bare-unicode as an rlib: see regexp_check.sh.
+//!   rustc --edition 2024 -O --crate-type rlib --crate-name bare_unicode crates/unicode/src/lib.rs -o libbare_unicode.rlib
+//!   rustc --edition 2024 -O --extern bare_unicode=libbare_unicode.rlib tools/js/regexp_load.rs -o regexp_load          # build
+//!   rustc --edition 2024 --test --extern bare_unicode=libbare_unicode.rlib tools/js/regexp_load.rs -o regexp_test      # oracle fixture test
 //!   regexp_load check CASES.tsv           compare every span with Node (see regexp_oracle.mjs)
 //!   regexp_load canon-dump                print canon(0..=0xFFFF), one hex value per line
+//!   regexp_load fold-dump                 print each code point with a simple case folding and its folding
 //!   regexp_load MODE SCALE [EXPECT_SUM]   one load run: MODE = short | near | caps | budget | compile
 //! A load run prints one line: wall, CPU, peak RSS, allocation count, bytes, peak live bytes,
 //! retained scratch bytes, checksum, match count, error count, steps. With EXPECT_SUM (the
@@ -305,6 +307,11 @@ fn main() {
         Some("canon-dump") => {
             for c in 0..=0xFFFFu32 {
                 println!("{:04x}", canon(c as u16));
+            }
+        }
+        Some("fold-dump") => {
+            for c in (0..=0x10FFFFu32).filter(|&c| bare_unicode::fold(c) != c) {
+                println!("{c:x} {:x}", bare_unicode::fold(c));
             }
         }
         Some(mode) => load(mode, a.get(2).and_then(|s| s.parse().ok()).unwrap_or(1), a.get(3).and_then(|s| s.parse().ok())),

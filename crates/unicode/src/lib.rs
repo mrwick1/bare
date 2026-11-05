@@ -8,7 +8,7 @@
 pub mod tables;
 // The generated data in `tables.rs`. `pub` lets other crates use it.
 
-use crate::tables::{COMBINING_CLASS, COMPOSE, DECOMPOSE};
+use crate::tables::{CASE_FOLD, COMBINING_CLASS, COMPOSE, DECOMPOSE};
 // `crate` means the root of this crate.
 use std::cmp::Ordering;
 
@@ -32,6 +32,15 @@ pub fn find<T: Copy>(table: &[(u32, u32, T)], cp: u32) -> Option<T> {
         // `Ok(index)` if found. `.ok()` turns it into `Some(index)` or `None`.
         .map(|i| table[i].2)
     // `.2` is the third item. JS: `table[i][2]`.
+}
+
+/// Simple case folding of one code point (CaseFolding.txt, statuses C and S).
+/// It maps "A" and "a" to "a". A code point without a mapping folds to itself.
+pub fn fold(cp: u32) -> u32 {
+    if cp < 0x80 {
+        return if (0x41..=0x5A).contains(&cp) { cp + 32 } else { cp };
+    }
+    CASE_FOLD.binary_search_by_key(&cp, |&(c, _)| c).map_or(cp, |i| CASE_FOLD[i].1)
 }
 
 /// A number for each character. 0 means a normal letter.
@@ -82,12 +91,10 @@ pub fn nfc(text: &str) -> String {
             let last = out.len() - 1;
             let blocked = last != s && combining_class(out[last]) >= class;
             // An accent cannot join the letter if a similar accent stands between them.
-            if !blocked {
-                if let Some(both) = compose(out[s], c) {
-                    out[s] = both;
-                    // Replace the letter with the joined character, and drop `c`.
-                    continue;
-                }
+            if !blocked && let Some(both) = compose(out[s], c) {
+                out[s] = both;
+                // Replace the letter with the joined character, and drop `c`.
+                continue;
             }
         }
         if class == 0 {
@@ -128,7 +135,7 @@ fn compose(a: char, b: char) -> Option<char> {
         // Korean L + V gives an LV syllable.
         return char::from_u32(S_BASE + ((a - L_BASE) * V_COUNT + (b - V_BASE)) * T_COUNT);
     }
-    if (S_BASE..S_BASE + S_COUNT).contains(&a) && (a - S_BASE) % T_COUNT == 0 && (T_BASE + 1..T_BASE + T_COUNT).contains(&b) {
+    if (S_BASE..S_BASE + S_COUNT).contains(&a) && (a - S_BASE).is_multiple_of(T_COUNT) && (T_BASE + 1..T_BASE + T_COUNT).contains(&b) {
         // Korean LV + T gives an LVT syllable.
         return char::from_u32(a + (b - T_BASE));
     }
