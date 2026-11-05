@@ -63,9 +63,11 @@ fn scheduler_elapsed_time_is_never_the_unix_epoch() {
         let r = js(&mut b, "[Date.now() > 1.7e12, performance.now() < 1e6, Date.now() - performance.now() > 1.7e12].join()");
         assert_eq!(r, "true,true,true");
         // a virtual scheduler clock alone leaves the wall clock on the system clock
-        b.use_virtual_clock_at(5.0).unwrap();
+        b.use_virtual_clock();
         assert_eq!(b.wall_clock(), WallClock::System);
-        assert_eq!(js(&mut b, "performance.now()"), "5");
+        assert_eq!(js(&mut b, "var frozenPerf = performance.now(); frozenPerf >= 0"), "true");
+        b.advance_time(5.0, 100).unwrap();
+        assert_eq!(js(&mut b, "performance.now() - frozenPerf"), "5");
         assert_eq!(js(&mut b, "Date.now() > 1.7e12"), "true");
         b.use_virtual_wall_clock_at(9.0).unwrap();
         assert_eq!(js(&mut b, "Date.now()"), "9");

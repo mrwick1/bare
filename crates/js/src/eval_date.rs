@@ -327,9 +327,9 @@ impl<'p> Interp<'p> {
                     return Err(self.type_err("Date.prototype[Symbol.toPrimitive] called on non-object"));
                 }
                 let number = match a0 {
-                    Value::String(s) => match h!(self, self.heap.to_string_lossy(s)).as_str() {
-                        "number" => true,
-                        "string" | "default" => false,
+                    Value::String(s) => match h!(self, self.heap.str_units(s)) {
+                        [110, 117, 109, 98, 101, 114] => true,
+                        [115, 116, 114, 105, 110, 103] | [100, 101, 102, 97, 117, 108, 116] => false,
                         _ => return Err(self.type_err("Invalid hint")),
                     },
                     _ => return Err(self.type_err("Invalid hint")),
