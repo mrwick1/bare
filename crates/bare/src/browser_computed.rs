@@ -145,6 +145,8 @@ pub(crate) struct Computed {
     fixed: RefCell<Vec<ObjId>>,
     ext: RefCell<HashMap<String, Vec<SheetPart>>>,
     ext_bytes: Cell<usize>,
+    /// Moves when a supplied sheet is set or removed. `ResizeObserver` reads it to know that styles may have changed.
+    pub(crate) sheet_gen: Cell<u64>,
     cache: RefCell<Option<Built>>,
     builds: Cell<u64>,
     computes: Cell<u64>,
@@ -673,6 +675,7 @@ impl Browser {
         }
         ext.insert(href.to_string(), parts);
         c.ext_bytes.set(total);
+        c.sheet_gen.set(c.sheet_gen.get() + 1);
         Ok(())
     }
 
@@ -684,6 +687,7 @@ impl Browser {
             Some(ps) => {
                 let n = href.len() + ps.iter().map(|p| p.text.len() + p.layer.as_ref().map_or(0, |s| s.len())).sum::<usize>();
                 c.ext_bytes.set(c.ext_bytes.get() - n);
+                c.sheet_gen.set(c.sheet_gen.get() + 1);
                 true
             }
             None => false,

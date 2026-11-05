@@ -81,6 +81,9 @@ mod browser_style;
 mod browser_style_block;
 pub mod browser_computed;
 pub mod browser_geometry;
+pub mod browser_resize;
+#[cfg(test)]
+mod browser_resize_tests;
 #[cfg(test)]
 mod browser_geometry_tests;
 #[cfg(test)]

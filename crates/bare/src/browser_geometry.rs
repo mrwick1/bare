@@ -230,6 +230,27 @@ fn walk(doc: &Document, styles: &Styles, l: &GeometryLimits) -> Result<Bound, Re
 }
 
 impl Dom {
+    /// One bounded native layout of the whole page with these styles: the preflight walk refuses or reserves the work first (see the header).
+    /// `offsetWidth`, `offsetHeight` and `ResizeObserver` share it.
+    pub(crate) fn layout_now(&self, it: &mut Interp<'_>, styles: &Styles) -> R<bare_layout::fragment::Layout> {
+        let l = self.geometry.lim.get();
+        let vp = self.plat.s.borrow().viewport;
+        let doc = self.doc.borrow();
+        it.charge(doc.len() as u64)?;
+        let bound = match walk(&doc, styles, &l) {
+            Ok(b) => b,
+            Err(Refuse::Limit(name)) => return Err(self.lim(name)),
+            Err(Refuse::Gate(why)) => return Err(Self::gate(why)),
+        };
+        // The work is reserved before layout starts: it cannot be interrupted.
+        it.charge(bound.work + 1)?;
+        let layout = bare_layout::layout(&doc, styles, vp);
+        let mut s = self.geometry.stats.get();
+        s = GeometryStats { layouts: s.layouts + 1, last_bound: bound.fragments, last_fragments: layout.fragments.len() as u64 };
+        self.geometry.stats.set(s);
+        Ok(layout)
+    }
+
     /// The border-box size of `el` in whole CSS pixels (width, height), zero when it has no box.
     fn offset_size(&self, it: &mut Interp<'_>, el: NodeId) -> R<(i32, i32)> {
         if !self.in_document(it, el)? {
@@ -239,45 +260,37 @@ impl Dom {
         if styles.style(el).is_none_or(|s| s.get(Property::Display) == Cv::Keyword(Keyword::None)) {
             return Ok((0, 0));
         }
-        let l = self.geometry.lim.get();
-        let vp = self.plat.s.borrow().viewport;
-        let doc = self.doc.borrow();
-        it.charge(doc.len() as u64)?;
-        let bound = match walk(&doc, &styles, &l) {
-            Ok(b) => b,
-            Err(Refuse::Limit(name)) => return Err(self.lim(name)),
-            Err(Refuse::Gate(why)) => return Err(Self::gate(why)),
-        };
-        // The work is reserved before layout starts: it cannot be interrupted.
-        it.charge(bound.work + 1)?;
-        let layout = bare_layout::layout(&doc, &styles, vp);
-        let mut s = self.geometry.stats.get();
-        s = GeometryStats { layouts: s.layouts + 1, last_bound: bound.fragments, last_fragments: layout.fragments.len() as u64 };
-        self.geometry.stats.set(s);
-        let (mut x0, mut x1, mut y0, mut y1, mut any) = (f32::INFINITY, f32::NEG_INFINITY, f32::INFINITY, f32::NEG_INFINITY, false);
-        for f in layout.fragments.iter().filter(|f| f.node == el && f.kind == bare_layout::fragment::Kind::Box) {
-            any = true;
-            x0 = x0.min(f.rect.x);
-            x1 = x1.max(f.rect.x + f.rect.w);
-            y0 = y0.min(f.rect.y);
-            y1 = y1.max(f.rect.y + f.rect.h);
-        }
-        if !any {
+        let layout = self.layout_now(it, &styles)?;
+        let Some(r) = border_box(&layout, el) else {
             // Layout makes no fragment for an inline box with no background and no border (`inline.rs`, "culled"): that is not "no box".
+            let doc = self.doc.borrow();
             return match bare_layout::boxes::Tree::new(&doc, &styles).kind(el) {
                 bare_layout::boxes::Kind::Inline | bare_layout::boxes::Kind::Break => Err(Self::gate(CULLED)),
                 _ => Ok((0, 0)),
             };
-        }
+        };
         let long = |v: f32| {
             let r = (v as f64 + 0.5).floor();
             (v.is_finite() && (0.0..=i32::MAX as f64).contains(&r)).then_some(r as i32)
         };
-        match (long(x1 - x0), long(y1 - y0)) {
+        match (long(r.w), long(r.h)) {
             (Some(w), Some(h)) => Ok((w, h)),
             _ => Err(Self::gate(NOT_LONG)),
         }
     }
+}
+
+/// The union of the border-box fragments of `el`: its border box (CSSOM View). `None` when layout made no box fragment for it.
+pub(crate) fn border_box(layout: &bare_layout::fragment::Layout, el: NodeId) -> Option<bare_layout::fragment::Rect> {
+    let (mut x0, mut x1, mut y0, mut y1, mut any) = (f32::INFINITY, f32::NEG_INFINITY, f32::INFINITY, f32::NEG_INFINITY, false);
+    for f in layout.fragments.iter().filter(|f| f.node == el && f.kind == bare_layout::fragment::Kind::Box) {
+        any = true;
+        x0 = x0.min(f.rect.x);
+        x1 = x1.max(f.rect.x + f.rect.w);
+        y0 = y0.min(f.rect.y);
+        y1 = y1.max(f.rect.y + f.rect.h);
+    }
+    any.then_some(bare_layout::fragment::Rect { x: x0, y: y0, w: x1 - x0, h: y1 - y0 })
 }
 
 fn offset_width(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
