@@ -1640,3 +1640,20 @@ Load test (`tools/js/async_load.sh`, release, one process per row): `switch` sus
 Memory per paused call, measured with a counting global allocator (50,000 calls, release). A switch paused in a body, with await-free tests, first stored the discriminant in a slot. That allocated the slot stack (4 slots, each big enough for a for-of iterator) for every call: 1,471 B and 6 allocations per call. The same code with `if` took 954 B and 2.8 allocations. With the lazy slot, the switch takes 1,183 B and 5 allocations (-20%). The rest of the gap is the block environment, which the spec makes for every call when a case declares `let`, and one more growth of the frame stack. The `if` form makes its block environment only on the path that runs it. Instructions and the minimum of 10 cycle runs are within 1.3% of the first version on the switch, ifchain, seq and trycatch rows. Peak RSS did not change.
 
 Validation: nine new Node cases cover the discriminant, the order of tests, `default` in the middle, fall-through after an await, lexical scope and TDZ, `break`, `continue`, labels, nested switches, throw, rejection and return. All 103 async cases match Node. A GC test collects while the switch is suspended and then checks that frames, slots and environments return to zero. The four gate tests that expected "await inside switch" now use other gates. Not tested: a speed comparison of the other load rows against main.
+
+## Async activation memory
+
+Arjun set memory as the first priority. A counting global allocator measured the bytes that one paused async call keeps (50,000 calls, release). A paused `await k` took 902 B. Two parts of it did no work:
+
+- `await v` runs `PromiseResolve(%Promise%, v)`. For a `v` that is not an object this makes a new promise, already fulfilled, that no script can see. Its only effect is one resume job in the microtask queue. The machine now queues that job at once (`Out::Ready`). The order is the same, because `PerformPromiseThen` on a fulfilled promise queues the job at that point. An object `v` keeps the full path, because reading its `then` is observable.
+- A `Vec` grows from zero to room for four items. A `Reaction` is 56 B, so the first reaction on a pending promise took 224 B, and most promises get only one. The first reaction now reserves room for exactly one. Later pushes grow as before, so many reactions on one promise stay amortized.
+
+Bytes per paused call, before and after: plain `await k` 902 to 685, a switch paused in a body 1,183 to 967, `await` of a new pending promise 2,947 to 2,779. During a drain the if-chain peak above the paused state fell from 594 to 161 B per call.
+
+`async_load` at 100x, 10 interleaved runs, against d152ad0 (instructions, minimum cycles, peak RSS): seq -11.5%, -17.8%, 23 to 4 MiB; fanout -14.8%, -27.4%, 69 to 47 MiB; closures -10.1%, -19.3%, 77 to 61 MiB; trycatch -4.0%, -9.4%, 69 to 59 MiB; switch -11.8%, -22.9%, 78 to 55 MiB; ifchain -12.5%, -23.1%, 74 to 51 MiB. The rows that await real promises cost a little more: nested +0.47%, +1.9%; pending +0.44%, +0.6%; equal RSS. `promise_load`: instructions within 0.2%, cycles 0.6-6.6% lower, chain 110 to 93 MiB, reject 226 to 209 MiB.
+
+The same measurements found more memory to remove later:
+
+- A function object with its `prototype` takes 896 B; an arrow takes 582 B. A non-arrow function makes its `prototype` object at once. V8 makes it only when a script reads it.
+- After a collection the heap keeps its largest capacity. In a run that keeps one promise of four objects made, the object payload keeps room for 5.2 objects per live one.
+- Each `let` block makes an environment, even when no closure captures it.

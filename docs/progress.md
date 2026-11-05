@@ -439,3 +439,5 @@ The live staging login stores its token. The next route chunks need the RegExp `
 RegExp `i` with `u` is built with simple case folding from Unicode 18 data. The live login now passes the route-chunk patterns and stops at the next gate, `await` inside `switch`. See [resources.md](resources.md#regexp-i-with-u).
 
 The async machine now runs `await` inside `switch`: in the discriminant, in case tests and in case bodies. The live login now passes that gate. It stops at the next one, `generators are not supported`. See [resources.md](resources.md#await-inside-switch).
+
+The async machine uses less memory. `await` of a value that is not an object makes no hidden promise, and a pending promise keeps room for one reaction, not four. A paused `await k` takes 685 B, down from 902 B. The async load rows that await such values take 10-23 MiB less peak memory and 9-27% fewer cycles. See [resources.md](resources.md#async-activation-memory).

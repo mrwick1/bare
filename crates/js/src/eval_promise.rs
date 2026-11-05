@@ -524,7 +524,12 @@ impl<'p> Interp<'p> {
                     return Err(Error::Limit(LimitKind::PromiseReactions));
                 }
                 self.promise.reactions += 1;
-                self.promise.map.get_mut(&p).expect("promise").reactions.push(Reaction { on_ok, on_err, derived, act: None });
+                let rs = &mut self.promise.map.get_mut(&p).expect("promise").reactions;
+                // Most promises get one reaction: keep room for one, not the default four.
+                if rs.capacity() == 0 {
+                    rs.reserve_exact(1);
+                }
+                rs.push(Reaction { on_ok, on_err, derived, act: None });
             }
             PState::Fulfilled(v) => self.enqueue(Job::React { handler: on_ok, arg: v, derived, rejected: false })?,
             PState::Rejected(v) => self.enqueue(Job::React { handler: on_err, arg: v, derived, rejected: true })?,
