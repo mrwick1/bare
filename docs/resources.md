@@ -1345,3 +1345,18 @@ The child's cached bare-only trace next reached Date.now in the prefetch cache a
 The parent workspace passes 1,554 tests. No workspace failure occurred in this integration pass.
 
 The parent cached run settles after 23 tasks and 21 script executions, with 15 fetches and 469,525 bytes. It has zero script throws, load errors and unhandled rejections, but reports one listener TypeError and still has no form. The check exits 1. This run does not identify the listener statement; the Date/iframe findings above come from the child's removed instrumentation.
+
+
+## Resumable input and selection
+
+Session.resume takes click, type and submit selectors through the existing Browser drivers, then runs the loader's existing task loop in the same realm. It does not reload the first document. Navigation drops the old realm and shares origin storage with the new document. Session budgets carry across calls. The parent found a per-page reset loophole: repeated resumes renewed the page's task allowance. A regression failed before the fix. Page task, round and time allowances now also retain their spent amounts. Time counts driver execution, not idle time between calls. A fresh Session.run deliberately starts a new run.
+
+Missing or invalid selectors give NoTarget at the step index and leave the session usable. Fatal, resource and budget stops remain sticky for resume. Steps after navigation do not run in the old realm. Raw Session.browser access remains a host escape from the driver budgets; callers must use resume for bounded interaction.
+
+Selection state belongs to native HTML inputs. Text, search, tel, URL and password inputs use UTF-16 offsets; other types return null and reject range setters. Input value updates reset the caret when the value changes. Clones copy value, not selection. Focus and blur preserve selection. select tasks are distinct from coalesced per-input selectionchange tasks. The pending flag clears before dispatch, so a listener can schedule the next change. Both use the existing scheduler and event engine. Queue caps are checked before state writes.
+
+The follow-up corrected missing selectionchange and scans that previously copied values before work checks. Values are borrowed and UTF-16 scans are charged first. Test counters verify no scan occurs under an insufficient budget. A parent namespace regression failed because an SVG element named input reached the native driver. The common input predicate now uses native HTML identity. Direct driver reads have no JS step budget and remain bounded by DOM text caps.
+
+HTMLIFrameElement is a native prototype brand for HTML iframe nodes, including parsed, created and cloned nodes. It inherits HTMLElement; foreign elements do not get the brand. The reduced React focus probe passes without a fake global. No nested context or contentWindow/contentDocument exists. Iframe src/srcdoc remain plain attributes, and no child document is fetched. Seven tests failed before implementation. No real React render or browser comparison is claimed by those reduced tests.
+
+Known selection gaps: textarea, setRangeText, document selection, onselectionchange, caret/layout/keyboard selection and attribute/type-change notifications are absent. Selectionchange versus select order is an implementation inference, not a browser-verified ordering claim. No GUI, authentication, live staging or cross-platform validation was run.
