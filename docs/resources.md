@@ -720,7 +720,7 @@ Not tested: reviver callbacks, stringify, evaluator integration, target bundle e
 
 `bare_js::regexp` compiles UTF-16 patterns into a bounded backtracking instruction list. Matching is iterative and returns UTF-16 spans for the whole match and captures. Supported flags are g, i, m, s and y. The caller supplies lastIndex; sticky matching uses it exactly, other matching searches forward from it. The global flag is metadata only. A later wrapper must coerce and update lastIndex, construct result arrays and advance empty matches in String operations.
 
-Unsupported flags u, v and d, lookbehind, named groups and quantified lookahead return explicit errors. Non-Unicode Annex B escapes, backreferences, positive and negative lookahead are included. Case folding uses Rust Unicode data. The Node comparison checks all 65,536 code units and 1,144 multi-member classes. Three known Unicode-version differences remain at U+A7CF, U+A7D3 and U+A7D5; no other folding differences were found.
+Unsupported flags v and d, lookbehind, named groups and quantified lookahead return explicit errors. Non-Unicode Annex B escapes, backreferences, positive and negative lookahead are included. Case folding uses Rust Unicode data. The Node comparison checks all 65,536 code units and 1,144 multi-member classes. Three known Unicode-version differences remain at U+A7CF, U+A7D3 and U+A7D5; no other folding differences were found.
 
 Compile caps: 65,536 pattern units, group depth 128, 131,072 instructions, 4,096 captures and about four million class-folding units. Default execution caps: 50 million work units, 16 Mi input units and four million backtrack frames. A limit error is distinct from no match. Cancellation is checked at entry and periodically during work. Register initialization is charged in bulk; scans, comparisons, resets and stack traversal also consume budget. Heap allocator failure is not recovered.
 
@@ -1591,3 +1591,20 @@ Load (release, one observer, N flat divs, one machine): first frame 0.71 ms, 5.7
 On the full cached login, Radix `useSize` observes the checkbox with `box: 'border-box'` and copies the size into the inline style of its hidden input (`width: 20px; height: 20px`). The page reaches Page(Settled) after 25 tasks with 0 throws, and the login form stays present. React still logs the recoverable error 419.
 
 Validation: eight new resize tests failed first (no `ResizeObserver`), then passed. They cover the interfaces and argument errors, first and changed reports, an idle page, the Radix shape, same-frame depth delivery and the loop error, a throwing callback, GC liveness, replacement and the caps. The debug workspace passes (667 bare tests). Release bare passes. Not tested: a browser comparison of sizes, vertical writing modes, percent padding, and the cost of a frame on the real login page.
+
+## RegExp `u` flag
+
+The staging route chunks use `/u` patterns, so the `u` flag is built. ECMA-262 "Pattern Semantics" and V8's regexp compiler were read on 2026-11-05. Each rule below was then checked against Node with authored oracle cases.
+
+- A pattern character and an input character are code points. A surrogate pair is one character. `.`, classes and complements cover U+0000 to U+10FFFF.
+- The search start still advances by one code unit, as in V8. A character read never starts at the trail half of a pair. A zero-width match can still sit inside a pair.
+- A `lastIndex` inside a pair first tries the start of the pair. If that attempt fails, the search starts at `lastIndex`. V8 compiles the same choice (`OptionallyStepBackToLeadSurrogate`).
+- After a backreference, a position inside a pair fails, as V8's `CheckNotInSurrogatePair` does.
+- A backreference inside its own open group matches empty.
+- Syntax is strict: identity escapes only for syntax characters and `/` (and `-` in a class); no octal; lone `]`, `{` and `}` are errors; `\c` needs a letter; a class escape cannot be a range end; a backreference must name an existing group. `\u{...}` and escaped surrogate pairs are accepted.
+- `AdvanceStringIndex` steps by code point in global `replace`, `match`, `matchAll` and `split`. The `unicode` getter and the canonical flag order `gimsuy` are added.
+- Gates: `\p` and `\P`, `\k`, and `i` with `u` (Unicode case folding is not built). Flags `v` and `d` stay gated.
+
+An astral character emits two `Char` units, so a literal costs nothing extra. `.`, classes and a lone surrogate in `u` mode use three new instructions, `AnyU`, `AnyAllU` and `ClassU`. They read one code point out of line, in a non-inlined `read_u`. The first version put that code in the dispatch loop and added a second call site for `run`. Both raised register pressure in the loop: `short` rose by 5.7% in instructions. The out-of-line read, a cold `attempt` for the step-back and an always-inlined `run` bring instructions below the previous build in all three modes. Cycles in `near` stay within the run-to-run noise (about +1.5% on the mean of three runs). The leaf arms of the emitter moved into `emit_leaf`. This keeps the recursive `emit_inner` frame small; the debug frame was 4,520 bytes, which overflowed the 2 MiB test stack at 128 nested groups. It is now 3,064 bytes, against 3,736 before.
+
+Load (release, scale 20): when `u` is added to each load pattern that accepts it, `short` and `caps` cost 2–4% more and `near` the same, with the same checksums. Validation: 233k oracle cases (hand, inventory and 11 fuzz seeds, with `u`, `mu`, `su` and `uy` fuzz flags) give 0 mismatches. The debug and release workspaces pass. Not tested: Unicode case folding, property escapes, named groups, and patterns with `u` from other real pages.

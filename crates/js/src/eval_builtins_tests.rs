@@ -96,7 +96,8 @@ fn gates_are_explicit_unsupported() {
         ("var r = /a(?<=b)/;", "lookbehind"),
         ("var r = /(?<n>a)/;", "named group"),
         ("var r = /(?=a)*/;", "quantified lookahead"),
-        ("var r = /a/u;", "regexp flag u"),
+        ("var r = /a/iu;", "regexp flags i and u together (Unicode case folding is not built)"),
+        ("var r = /\\p{L}/u;", "regexp Unicode property escape"),
         ("var r = /a/d;", "regexp flag d"),
         ("function f() { return /[b-a]/; }", "regexp literal: invalid pattern (early SyntaxError)"),
     ];
@@ -112,7 +113,7 @@ fn gates_are_explicit_unsupported() {
         }
     }
     assert_eq!(unsupported_of("new RegExp('(?<=a)b')"), "lookbehind");
-    assert_eq!(unsupported_of("new RegExp('a', 'u')"), "regexp flag u");
+    assert_eq!(unsupported_of("new RegExp('a', 'v')"), "regexp flag v");
     assert_eq!(unsupported_of("RegExp('(?<x>a)')"), "named group");
     assert_eq!(unsupported_of("var r = /a/; r.exec = function () { return null; }; r.test('a')"), "RegExp with a replaced exec method");
     assert_eq!(unsupported_of("var r = /a/g; r.exec = function () { return null; }; 'a'.replace(r, 'b')"), "RegExp with a replaced exec method");
@@ -489,4 +490,32 @@ fn regexp_literal_cache_keeps_script_provenance_across_collection() {
         let v = it.run_script("/fresh/.test('fresh')").unwrap();
         assert!(matches!(v, Value::Bool(true)));
     });
+}
+
+#[test]
+fn unicode_flag_through_the_string_methods() {
+    // Expected values were checked with Node 22 on these authored programs.
+    let cases = [
+        ("/x/gu.flags", "string:gu"),
+        ("/a/u.unicode + ',' + /a/.unicode", "string:true,false"),
+        // An empty match advances by a code point with `u` (AdvanceStringIndex), by a code unit without it.
+        ("'\u{1F600}\u{1F600}'.replace(/(?:)/gu, '-')", "string:-\u{1F600}-\u{1F600}-"),
+        ("'\u{1F600}\u{1F600}'.replace(/(?:)/g, '-').length", "number:9"),
+        ("'\u{1F600}\u{1F600}'.split(/(?:)/u).length", "number:2"),
+        ("'\u{1F600}\u{1F600}'.match(/(?:)/gu).length", "number:3"),
+        ("'\u{1F600}\u{1F600}'.match(/(?:)/g).length", "number:5"),
+        ("/^\\u{1F600}$/u.test('\u{1F600}')", "boolean:true"),
+        ("/\\u{1F600}/u.source", "string:\\\\u{1F600}"),
+        ("'\u{1F600}'.match(/./u)[0].length", "number:2"),
+        ("new RegExp('\\\\u{41}', 'u').test('A')", "boolean:true"),
+        // The /u literals of the staging app's route chunks.
+        ("'matrix(1, 0, 0, 1, 10, 20)'.match(/^matrix\\(([-\\d.e\\s,]+)\\)$/u)[1]", "string:1, 0, 0, 1, 10, 20"),
+        ("'translateX(10px) scale(2)'.match(/\\b([a-z-]*)\\(.*?\\)/gu).join('|')", "string:(10px)|scale(2)"),
+        ("'fooBar'.replace(/[A-Z]/u, function (m) { return '-' + m.toLowerCase() })", "string:foo-bar"),
+        ("try { new RegExp('\\\\a', 'u') } catch (e) { e.name + ': ' + e.message }", "string:SyntaxError: Invalid regular expression: /\\\\a/: Invalid escape"),
+        ("try { new RegExp(']', 'u') } catch (e) { e.message }", "string:Invalid regular expression: /]/: Lone quantifier brackets"),
+    ];
+    for (src, want) in cases {
+        assert_eq!(run(src), want, "{src}");
+    }
 }

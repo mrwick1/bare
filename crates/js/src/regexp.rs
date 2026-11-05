@@ -64,10 +64,12 @@ pub struct Flags {
     pub multiline: bool,
     pub dot_all: bool,
     pub sticky: bool,
+    /// `u`: the pattern and the input are code points (see the header).
+    pub unicode: bool,
 }
 
 impl Flags {
-    /// Parse a flags string. Unknown or repeated flags are errors. `u`, `v` and `d` are valid
+    /// Parse a flags string. Unknown or repeated flags are errors. `v` and `d` are valid
     /// JS flags that this engine does not support, so they are a different error.
     pub fn parse(s: &str) -> Result<Flags, CompileError> {
         let mut f = Flags::default();
@@ -88,6 +90,7 @@ impl Flags {
                 'm' => f.multiline = true,
                 's' => f.dot_all = true,
                 'y' => f.sticky = true,
+                'u' => f.unicode = true,
                 _ => unsupported = unsupported.or(Some(c)),
             }
         }
@@ -110,7 +113,7 @@ pub enum CompileError {
     Unsupported { what: &'static str, at: usize },
     /// The flags string has an unknown or repeated flag (a JS `SyntaxError`).
     InvalidFlags(char),
-    /// Valid JS flag that this engine does not implement (`u`, `v`, `d`).
+    /// Valid JS flag that this engine does not implement (`v`, `d`).
     UnsupportedFlag(char),
     /// A compile bound was exceeded (pattern length, nesting, program size, groups, class work).
     Limit(&'static str),
@@ -201,6 +204,9 @@ impl Regex {
     /// Compile `pattern` (UTF-16 code units) with `flags` (e.g. `"gi"`).
     pub fn new(pattern: &[u16], flags: &str) -> Result<Regex, CompileError> {
         let flags = Flags::parse(flags)?;
+        if flags.unicode && flags.ignore_case {
+            return Err(CompileError::Unsupported { what: "regexp flags i and u together (Unicode case folding is not built)", at: 0 });
+        }
         if pattern.len() > MAX_PATTERN_UNITS {
             return Err(CompileError::Limit("pattern too long"));
         }
@@ -236,10 +242,10 @@ impl Regex {
                     }
                 }
                 Inst::CharI(k) => (0..128u16).filter(|&c| canon(c) == k).for_each(|c| set[c as usize] = true),
-                Inst::Any | Inst::AnyAll => return None,
-                Inst::Class(i) => (0..128u16).filter(|&c| self.classes[i as usize].matches(c, self.flags.ignore_case)).for_each(|c| set[c as usize] = true),
+                Inst::Any | Inst::AnyAll | Inst::AnyU | Inst::AnyAllU => return None,
+                Inst::Class(i) | Inst::ClassU(i) => (0..128u32).filter(|&c| self.classes[i as usize].matches(c, self.flags.ignore_case)).for_each(|c| set[c as usize] = true),
                 // Zero-width steps: a superset of the real first units is still sound.
-                Inst::Start | Inst::End | Inst::MStart | Inst::MEnd | Inst::WordB(_) | Inst::Mark(_) | Inst::GroupStart(_) | Inst::Close(_) | Inst::Reset(..) | Inst::EmptyCheck(_) => todo.push(pc + 1),
+                Inst::Start | Inst::End | Inst::MStart | Inst::MEnd | Inst::WordB(_) | Inst::NotInPair | Inst::Mark(_) | Inst::GroupStart(_) | Inst::Close(_) | Inst::Reset(..) | Inst::EmptyCheck(_) => todo.push(pc + 1),
                 Inst::Jmp(t) => todo.push(t as usize),
                 Inst::Split(a, b) => todo.extend([a as usize, b as usize]),
                 Inst::Look(_, end) => todo.push(end as usize),
@@ -288,6 +294,14 @@ impl Regex {
             return Ok(None);
         }
         let mut s = last_index;
+        // With `u`, an index inside a surrogate pair first tries from the start of the pair, then from the index
+        // itself: V8 compiles this choice (`OptionallyStepBackToLeadSurrogate`); the oracle checks it against Node.
+        if self.flags.unicode
+            && inside_pair(input, s)
+            && let Some(m) = self.attempt(input, s - 1, limits, cancel, sc)?
+        {
+            return Ok(Some(m));
+        }
         if self.anchored && !self.flags.sticky && s > 0 {
             return Ok(None);
         }
@@ -307,20 +321,57 @@ impl Regex {
             sc.regs.resize(self.nregs, UNSET);
             sc.stack.clear();
             if self.run(input, s, limits, cancel, sc)? {
-                let mut spans = Vec::with_capacity(self.groups + 1);
-                for g in 0..=self.groups {
-                    let (a, b) = (sc.regs[2 * g], sc.regs[2 * g + 1]);
-                    spans.push(if a == UNSET || b == UNSET { None } else { Some((a as usize, b as usize)) });
-                }
-                return Ok(Some(Match { spans }));
+                return Ok(Some(self.spans(sc)));
             }
             if self.flags.sticky || s == input.len() || self.anchored {
                 return Ok(None);
             }
+            // By one code unit, also with `u`: a zero-width match can sit inside a surrogate pair, as in V8. A
+            // character never starts there (see `char_at`).
             s += 1;
         }
     }
 
+    /// The cold first attempt of a `u` index inside a surrogate pair, at the start of the pair.
+    #[cold]
+    #[inline(never)]
+    fn attempt(&self, input: &[u16], s: usize, limits: &Limits, cancel: Option<&AtomicBool>, sc: &mut Scratch) -> Result<Option<Match>, ExecError> {
+        charge(&mut sc.steps, self.nregs as u64, limits, cancel)?;
+        sc.regs.clear();
+        sc.regs.resize(self.nregs, UNSET);
+        sc.stack.clear();
+        Ok(if self.run(input, s, limits, cancel, sc)? { Some(self.spans(sc)) } else { None })
+    }
+
+    fn spans(&self, sc: &Scratch) -> Match {
+        let mut spans = Vec::with_capacity(self.groups + 1);
+        for g in 0..=self.groups {
+            let (a, b) = (sc.regs[2 * g], sc.regs[2 * g + 1]);
+            spans.push(if a == UNSET || b == UNSET { None } else { Some((a as usize, b as usize)) });
+        }
+        Match { spans }
+    }
+
+    /// One `u` character step (`AnyU`, `AnyAllU`, `ClassU`) at `pos`: the position after it, or `None`. Out of line,
+    /// so the dispatch loop keeps its registers for the code-unit instructions.
+    #[inline(never)]
+    fn read_u(&self, input: &[u16], pos: usize, i: Inst) -> Option<usize> {
+        let (c, w) = char_at(input, pos)?;
+        let ok = match i {
+            Inst::AnyU => !is_line_terminator_cp(c),
+            Inst::ClassU(k) => self.classes[k as usize].matches(c, false),
+            _ => true,
+        };
+        ok.then_some(pos + w)
+    }
+
+    /// `AdvanceStringIndex`: the next index after `i`. With `u`, a surrogate pair at `i` is skipped whole.
+    pub fn advance(&self, input: &[u16], i: usize) -> usize {
+        if self.flags.unicode && i < input.len() { i + code_point(input, i).1 } else { i + 1 }
+    }
+
+    // Inlined into both callers: `exec` is the hot one.
+    #[inline(always)]
     fn run(
         &self,
         input: &[u16],
@@ -414,13 +465,20 @@ impl Regex {
                     }
                 }
                 Inst::Class(i) => {
-                    if pos < len && self.classes[i as usize].matches(input[pos], icase) {
+                    if pos < len && self.classes[i as usize].matches(input[pos] as u32, icase) {
                         pos += 1;
                         pc += 1;
                     } else {
                         failed = true;
                     }
                 }
+                i @ (Inst::AnyU | Inst::AnyAllU | Inst::ClassU(_)) => match self.read_u(input, pos, i) {
+                    Some(p) => {
+                        pos = p;
+                        pc += 1;
+                    }
+                    None => failed = true,
+                },
                 Inst::Start => {
                     if pos == 0 {
                         pc += 1
@@ -479,6 +537,13 @@ impl Regex {
                         } else {
                             failed = true;
                         }
+                    }
+                }
+                Inst::NotInPair => {
+                    if inside_pair(input, pos) {
+                        failed = true;
+                    } else {
+                        pc += 1;
                     }
                 }
                 Inst::Split(a, b) => {
@@ -586,6 +651,42 @@ fn is_line_terminator(c: u16) -> bool {
     matches!(c, 0x0A | 0x0D | 0x2028 | 0x2029)
 }
 
+fn is_line_terminator_cp(c: u32) -> bool {
+    matches!(c, 0x0A | 0x0D | 0x2028 | 0x2029)
+}
+
+fn is_lead(c: u16) -> bool {
+    (0xD800..=0xDBFF).contains(&c)
+}
+
+fn is_trail(c: u16) -> bool {
+    (0xDC00..=0xDFFF).contains(&c)
+}
+
+/// With `u`: the character at `pos` and its length in units, `None` at the end and at the trail of a pair (no
+/// character starts there).
+fn char_at(input: &[u16], pos: usize) -> Option<(u32, usize)> {
+    if pos >= input.len() || inside_pair(input, pos) {
+        return None;
+    }
+    Some(code_point(input, pos))
+}
+
+/// Is `pos` between the lead and the trail of a surrogate pair?
+fn inside_pair(input: &[u16], pos: usize) -> bool {
+    pos > 0 && pos < input.len() && is_lead(input[pos - 1]) && is_trail(input[pos])
+}
+
+/// The code point at `i` (`i < input.len()`) and its length in units: a lead and a trail surrogate are one code point
+/// (ECMA-262 `CodePointAt`). A lone surrogate is itself.
+fn code_point(input: &[u16], i: usize) -> (u32, usize) {
+    let a = input[i];
+    match input.get(i + 1) {
+        Some(&b) if is_lead(a) && is_trail(b) => (0x10000 + ((a as u32 - 0xD800) << 10) + (b as u32 - 0xDC00), 2),
+        _ => (a as u32, 1),
+    }
+}
+
 fn is_word(c: u16) -> bool {
     matches!(c, 0x30..=0x39 | 0x41..=0x5A | 0x61..=0x7A | 0x5F)
 }
@@ -603,10 +704,10 @@ pub fn canon(c: u16) -> u16 {
     }
 }
 
-const DIGIT: &[(u16, u16)] = &[(0x30, 0x39)];
-const WORD: &[(u16, u16)] = &[(0x30, 0x39), (0x41, 0x5A), (0x5F, 0x5F), (0x61, 0x7A)];
+const DIGIT: &[(u32, u32)] = &[(0x30, 0x39)];
+const WORD: &[(u32, u32)] = &[(0x30, 0x39), (0x41, 0x5A), (0x5F, 0x5F), (0x61, 0x7A)];
 /// WhiteSpace and LineTerminator: TAB VT FF SP NBSP ZWNBSP, Zs, LF CR LS PS.
-const SPACE: &[(u16, u16)] = &[
+const SPACE: &[(u32, u32)] = &[
     (0x09, 0x0D),
     (0x20, 0x20),
     (0xA0, 0xA0),
@@ -619,37 +720,42 @@ const SPACE: &[(u16, u16)] = &[
     (0xFEFF, 0xFEFF),
 ];
 
+/// The last code point: of a code unit without `u`, of Unicode with `u`.
+fn max_char(unicode: bool) -> u32 {
+    if unicode { 0x10FFFF } else { 0xFFFF }
+}
+
 /// Sort and merge ranges.
-fn normalize(r: &mut Vec<(u16, u16)>) {
+fn normalize(r: &mut Vec<(u32, u32)>) {
     r.sort_unstable();
-    let mut out: Vec<(u16, u16)> = Vec::with_capacity(r.len());
+    let mut out: Vec<(u32, u32)> = Vec::with_capacity(r.len());
     for &(lo, hi) in r.iter() {
         match out.last_mut() {
-            Some(l) if (lo as u32) <= l.1 as u32 + 1 => l.1 = l.1.max(hi),
+            Some(l) if lo <= l.1 + 1 => l.1 = l.1.max(hi),
             _ => out.push((lo, hi)),
         }
     }
     *r = out;
 }
 
-fn complement(r: &[(u16, u16)]) -> Vec<(u16, u16)> {
+fn complement(r: &[(u32, u32)], max: u32) -> Vec<(u32, u32)> {
     let mut v = r.to_vec();
     normalize(&mut v);
     let mut out = Vec::new();
     let mut next = 0u32;
     for (lo, hi) in v {
-        if (lo as u32) > next {
-            out.push((next as u16, lo - 1));
+        if lo > next {
+            out.push((next, lo - 1));
         }
-        next = hi as u32 + 1;
+        next = hi + 1;
     }
-    if next <= 0xFFFF {
-        out.push((next as u16, 0xFFFF));
+    if next <= max {
+        out.push((next, max));
     }
     out
 }
 
-fn contains(r: &[(u16, u16)], c: u16) -> bool {
+fn contains(r: &[(u32, u32)], c: u32) -> bool {
     if r.len() <= 8 {
         return r.iter().any(|&(lo, hi)| lo <= c && c <= hi);
     }
@@ -668,13 +774,14 @@ fn contains(r: &[(u16, u16)], c: u16) -> bool {
 #[derive(Debug)]
 struct ClassSet {
     /// Members. With `i`, this is the set of canonical forms of the members.
-    ranges: Vec<(u16, u16)>,
+    ranges: Vec<(u32, u32)>,
     neg: bool,
 }
 
 impl ClassSet {
-    fn matches(&self, c: u16, icase: bool) -> bool {
-        let k = if icase { canon(c) } else { c };
+    /// `c` is a code unit without `u`, a code point with `u` (and `i` is never set with `u`).
+    fn matches(&self, c: u32, icase: bool) -> bool {
+        let k = if icase { canon(c as u16) as u32 } else { c };
         contains(&self.ranges, k) != self.neg
     }
 }
@@ -685,7 +792,8 @@ impl ClassSet {
 
 enum Node {
     Empty,
-    Char(u16),
+    /// A code unit, or with `u` a code point.
+    Char(u32),
     Any,
     Class(u32),
     Start,
@@ -700,8 +808,8 @@ enum Node {
 }
 
 enum Esc {
-    Char(u16),
-    Set(Vec<(u16, u16)>),
+    Char(u32),
+    Set(Vec<(u32, u32)>),
     WordB(bool),
     BackRef(u32),
 }
@@ -715,6 +823,9 @@ struct Parser<'a> {
     depth: usize,
     classes: Vec<ClassSet>,
     class_work: u64,
+    /// Capture groups not closed yet: a backreference inside its own group matches empty (V8 parses it as empty, so
+    /// the `u` surrogate check of `BackRef` does not apply to it).
+    open: Vec<u32>,
 }
 
 fn syn<T>(msg: &'static str, at: usize) -> Result<T, CompileError> {
@@ -746,7 +857,7 @@ impl<'a> Parser<'a> {
             }
             i += 1;
         }
-        Parser { p, i: 0, flags, total_groups: n, ncap: 0, depth: 0, classes: Vec::new(), class_work: 0 }
+        Parser { p, i: 0, flags, total_groups: n, ncap: 0, depth: 0, classes: Vec::new(), class_work: 0, open: Vec::new() }
     }
 
     fn peek(&self) -> Option<u16> {
@@ -823,7 +934,7 @@ impl<'a> Parser<'a> {
         self.i += 1;
         let cap_lo = self.ncap + 1;
         let atom = match c as u8 as char {
-            _ if c > 0x7F => Node::Char(c),
+            _ if c > 0x7F => Node::Char(self.literal(c)),
             '^' => return self.no_quant(Node::Start),
             '$' => return self.no_quant(Node::End),
             '(' => {
@@ -855,7 +966,11 @@ impl<'a> Parser<'a> {
                 if self.depth > MAX_DEPTH {
                     return Err(CompileError::Limit("groups nested too deeply"));
                 }
+                self.open.extend(cap);
                 let inner = self.parse_alt()?;
+                if cap.is_some() {
+                    self.open.pop();
+                }
                 self.depth -= 1;
                 if !self.eat(b')') {
                     return syn("Unterminated group", at);
@@ -878,6 +993,7 @@ impl<'a> Parser<'a> {
                 Esc::Char(c) => Node::Char(c),
                 Esc::Set(r) => self.add_class(r, false)?,
                 Esc::WordB(neg) => return self.no_quant(Node::WordB(neg)),
+                Esc::BackRef(n) if self.open.contains(&n) => Node::Empty,
                 Esc::BackRef(n) => Node::BackRef(n),
             },
             '*' | '+' | '?' => return syn("Nothing to repeat", at),
@@ -885,9 +1001,14 @@ impl<'a> Parser<'a> {
                 if self.brace(at).is_some() {
                     return syn("Nothing to repeat", at);
                 }
-                Node::Char(c)
+                if self.flags.unicode {
+                    return syn("Lone quantifier brackets", at);
+                }
+                Node::Char(c as u32)
             }
-            _ => Node::Char(c),
+            // Annex B allows a lone `]` and `}` only without `u`.
+            ']' | '}' if self.flags.unicode => return syn("Lone quantifier brackets", at),
+            _ => Node::Char(c as u32),
         };
         // Optional quantifier.
         let (min, max) = match self.peek() {
@@ -927,17 +1048,60 @@ impl<'a> Parser<'a> {
         Ok(n)
     }
 
+    /// With `u`, a lead surrogate followed by a trail surrogate in the pattern text is one code point.
+    fn literal(&mut self, c: u16) -> u32 {
+        if self.flags.unicode && is_lead(c) && self.peek().is_some_and(is_trail) {
+            let t = self.p[self.i];
+            self.i += 1;
+            return 0x10000 + ((c as u32 - 0xD800) << 10) + (t as u32 - 0xDC00);
+        }
+        c as u32
+    }
+
+    /// `\uXXXX` after the `u`: four hex digits. With `u`, also `\u{X...}` and an escaped surrogate pair.
+    fn unicode_escape(&mut self, at: usize) -> Result<Option<u32>, CompileError> {
+        let u = self.flags.unicode;
+        if u && self.eat(b'{') {
+            let mut v = 0u32;
+            let first = self.i;
+            while let Some(d) = self.peek().and_then(hex) {
+                v = v.saturating_mul(16).saturating_add(d);
+                self.i += 1;
+            }
+            if self.i == first || v > 0x10FFFF || !self.eat(b'}') {
+                return syn("Invalid Unicode escape", at);
+            }
+            return Ok(Some(v));
+        }
+        let four = |i: usize| -> Option<u32> { (0..4).map(|k| self.p.get(i + k).copied().and_then(hex)).try_fold(0, |a, x| Some(a * 16 + x?)) };
+        let Some(v) = four(self.i) else { return if u { syn("Invalid Unicode escape", at) } else { Ok(None) } };
+        self.i += 4;
+        if u
+            && (0xD800..=0xDBFF).contains(&v)
+            && self.p.get(self.i) == Some(&0x5C)
+            && self.p.get(self.i + 1) == Some(&(b'u' as u16))
+            && let Some(t) = four(self.i + 2).filter(|t| (0xDC00..=0xDFFF).contains(t))
+        {
+            self.i += 6;
+            return Ok(Some(0x10000 + ((v - 0xD800) << 10) + (t - 0xDC00)));
+        }
+        Ok(Some(v))
+    }
+
     fn parse_escape(&mut self, in_class: bool) -> Result<Esc, CompileError> {
+        let at = self.i - 1;
         let Some(c) = self.peek() else { return syn("\\ at end of pattern", self.i) };
         self.i += 1;
+        let u = self.flags.unicode;
+        let max = max_char(u);
         let ch = if c < 128 { c as u8 as char } else { '\u{80}' };
         Ok(match ch {
             'd' => Esc::Set(DIGIT.to_vec()),
-            'D' => Esc::Set(complement(DIGIT)),
+            'D' => Esc::Set(complement(DIGIT, max)),
             's' => Esc::Set(SPACE.to_vec()),
-            'S' => Esc::Set(complement(SPACE)),
+            'S' => Esc::Set(complement(SPACE, max)),
             'w' => Esc::Set(WORD.to_vec()),
-            'W' => Esc::Set(complement(WORD)),
+            'W' => Esc::Set(complement(WORD, max)),
             'b' if in_class => Esc::Char(8),
             'b' => Esc::WordB(true),
             'B' if !in_class => Esc::WordB(false),
@@ -949,12 +1113,13 @@ impl<'a> Parser<'a> {
             'c' => match self.peek() {
                 Some(l) if l < 128 && (l as u8).is_ascii_alphabetic() => {
                     self.i += 1;
-                    Esc::Char(l % 32)
+                    Esc::Char(l as u32 % 32)
                 }
-                Some(l) if in_class && l < 128 && ((l as u8).is_ascii_digit() || l == b'_' as u16) => {
+                Some(l) if !u && in_class && l < 128 && ((l as u8).is_ascii_digit() || l == b'_' as u16) => {
                     self.i += 1;
-                    Esc::Char(l % 32)
+                    Esc::Char(l as u32 % 32)
                 }
+                _ if u => return syn("Invalid escape", at),
                 _ => {
                     // Annex B: the backslash is a literal, and `c` is read again as a literal.
                     self.i -= 1;
@@ -964,19 +1129,33 @@ impl<'a> Parser<'a> {
             'x' => match (self.peek().and_then(hex), self.p.get(self.i + 1).copied().and_then(hex)) {
                 (Some(a), Some(b)) => {
                     self.i += 2;
-                    Esc::Char((a * 16 + b) as u16)
+                    Esc::Char(a * 16 + b)
                 }
-                _ => Esc::Char(c),
+                _ if u => return syn("Invalid escape", at),
+                _ => Esc::Char(c as u32),
             },
-            'u' => {
-                let v: Option<Vec<u32>> = (0..4).map(|k| self.p.get(self.i + k).copied().and_then(hex)).collect();
-                match v {
-                    Some(d) => {
-                        self.i += 4;
-                        Esc::Char(d.iter().fold(0, |a, &x| a * 16 + x) as u16)
-                    }
-                    None => Esc::Char(c),
+            'u' => match self.unicode_escape(at)? {
+                Some(v) => Esc::Char(v),
+                None => Esc::Char(c as u32),
+            },
+            // `u` grammar: `\0` not before a digit is NUL; a decimal escape is a backreference to an existing group,
+            // never an octal escape, and never inside a class.
+            '0' if u => {
+                if self.peek().is_some_and(|d| (0x30..=0x39).contains(&d)) {
+                    return syn("Invalid decimal escape", at);
                 }
+                Esc::Char(0)
+            }
+            '1'..='9' if u => {
+                let mut n = (c - 0x30) as u32;
+                while let Some(d) = self.peek().filter(|d| (0x30..=0x39).contains(d)) {
+                    n = n.saturating_mul(10).saturating_add((d - 0x30) as u32);
+                    self.i += 1;
+                }
+                if in_class || n > self.total_groups {
+                    return syn("Invalid escape", at);
+                }
+                Esc::BackRef(n)
             }
             '0'..='9' => {
                 if c != b'0' as u16 && !in_class {
@@ -995,7 +1174,7 @@ impl<'a> Parser<'a> {
                     }
                 }
                 if c >= b'8' as u16 {
-                    Esc::Char(c)
+                    Esc::Char(c as u32)
                 } else {
                     // Annex B legacy octal: up to three digits, value <= 0o377.
                     let mut v = (c - 0x30) as u32;
@@ -1010,16 +1189,22 @@ impl<'a> Parser<'a> {
                             _ => break,
                         }
                     }
-                    Esc::Char(v as u16)
+                    Esc::Char(v)
                 }
             }
-            _ => Esc::Char(c),
+            'p' | 'P' if u => return Err(CompileError::Unsupported { what: "regexp Unicode property escape", at }),
+            'k' if u => return Err(CompileError::Unsupported { what: "named group", at }),
+            // `u` identity escapes: only the syntax characters, `/`, and `-` inside a class.
+            '^' | '$' | '\\' | '.' | '*' | '+' | '?' | '(' | ')' | '[' | ']' | '{' | '}' | '|' | '/' if u => Esc::Char(c as u32),
+            '-' if u && in_class => Esc::Char(c as u32),
+            _ if u => return syn("Invalid escape", at),
+            _ => Esc::Char(c as u32),
         })
     }
 
     fn parse_class(&mut self, at: usize) -> Result<Node, CompileError> {
         let neg = self.eat(b'^');
-        let mut set: Vec<(u16, u16)> = Vec::new();
+        let mut set: Vec<(u32, u32)> = Vec::new();
         loop {
             let Some(c) = self.peek() else { return syn("Unterminated character class", at) };
             if c == b']' as u16 {
@@ -1038,6 +1223,7 @@ impl<'a> Parser<'a> {
                         }
                         set.push((x, y));
                     }
+                    _ if self.flags.unicode => return syn("Invalid character class", at_b),
                     (a, b) => {
                         // Annex B: a class escape next to `-` makes the `-` a literal.
                         for e in [a, b] {
@@ -1070,11 +1256,11 @@ impl<'a> Parser<'a> {
         if c == b'\\' as u16 {
             self.parse_escape(true)
         } else {
-            Ok(Esc::Char(c))
+            Ok(Esc::Char(self.literal(c)))
         }
     }
 
-    fn add_class(&mut self, mut ranges: Vec<(u16, u16)>, neg: bool) -> Result<Node, CompileError> {
+    fn add_class(&mut self, mut ranges: Vec<(u32, u32)>, neg: bool) -> Result<Node, CompileError> {
         normalize(&mut ranges);
         if self.flags.ignore_case {
             // Replace the members by their canonical forms: `canon(ch)` in set <=> some member
@@ -1082,11 +1268,12 @@ impl<'a> Parser<'a> {
             let mut bits = vec![0u64; 1024];
             for &(lo, hi) in &ranges {
                 self.class_work += (hi - lo) as u64 + 1;
+                // Without `u` every member is a code unit, so `canon` sees all of them.
                 if self.class_work > MAX_CLASS_WORK {
                     return Err(CompileError::Limit("character class folding too large"));
                 }
                 for c in lo..=hi {
-                    let k = canon(c) as usize;
+                    let k = canon(c as u16) as usize;
                     bits[k >> 6] |= 1 << (k & 63);
                 }
             }
@@ -1098,7 +1285,7 @@ impl<'a> Parser<'a> {
                     while c + 1 < 65536 && bits[(c + 1) >> 6] >> ((c + 1) & 63) & 1 == 1 {
                         c += 1;
                     }
-                    ranges.push((s as u16, c as u16));
+                    ranges.push((s as u32, c as u32));
                 }
                 c += 1;
             }
@@ -1120,6 +1307,10 @@ enum Inst {
     Any,
     AnyAll,
     Class(u32),
+    /// `u` forms of `Any`, `AnyAll` and `Class`: they read one code point (a surrogate pair is one).
+    AnyU,
+    AnyAllU,
+    ClassU(u32),
     Start,
     End,
     MStart,
@@ -1127,6 +1318,9 @@ enum Inst {
     /// `true` for `\b`, `false` for `\B`.
     WordB(bool),
     BackRef(u32),
+    /// With `u`, after a backreference: fail between the lead and the trail of a surrogate pair (V8 emits the same
+    /// check, `CheckNotInSurrogatePair`; the oracle checks it against Node).
+    NotInPair,
     /// Try the first target; on failure, the second.
     Split(u32, u32),
     Jmp(u32),
@@ -1200,20 +1394,7 @@ impl Emitter {
     fn emit_inner(&mut self, n: &Node) -> Result<(), CompileError> {
         match n {
             Node::Empty => {}
-            Node::Char(c) => {
-                if self.flags.ignore_case {
-                    let k = canon(*c);
-                    self.push(Inst::CharI(k))?;
-                } else {
-                    self.push(Inst::Char(*c))?;
-                }
-            }
-            Node::Any => {
-                self.push(if self.flags.dot_all { Inst::AnyAll } else { Inst::Any })?;
-            }
-            Node::Class(i) => {
-                self.push(Inst::Class(*i))?;
-            }
+            Node::Char(_) | Node::Any | Node::Class(_) | Node::BackRef(_) => self.emit_leaf(n)?,
             Node::Start => {
                 self.push(if self.flags.multiline { Inst::MStart } else { Inst::Start })?;
             }
@@ -1222,9 +1403,6 @@ impl Emitter {
             }
             Node::WordB(b) => {
                 self.push(Inst::WordB(*b))?;
-            }
-            Node::BackRef(g) => {
-                self.push(Inst::BackRef(*g))?;
             }
             Node::Group(g, b) => {
                 self.push(Inst::GroupStart(*g))?;
@@ -1262,6 +1440,49 @@ impl Emitter {
             Node::Repeat { node, min, max, greedy, cap_lo, cap_hi } => {
                 self.emit_repeat(node, *min, *max, *greedy, *cap_lo, *cap_hi)?
             }
+        }
+        Ok(())
+    }
+
+    /// Leaf nodes with the `u` variants. Kept out of the recursive `emit_inner`
+    /// so that its stack frame stays small for deep nesting.
+    #[inline(never)]
+    fn emit_leaf(&mut self, n: &Node) -> Result<(), CompileError> {
+        match n {
+            &Node::Char(c) => {
+                if self.flags.ignore_case {
+                    self.push(Inst::CharI(canon(c as u16)))?;
+                } else if c > 0xFFFF {
+                    // An astral code point is its surrogate pair.
+                    let c = c - 0x10000;
+                    self.push(Inst::Char(0xD800 + (c >> 10) as u16))?;
+                    self.push(Inst::Char(0xDC00 + (c & 0x3FF) as u16))?;
+                } else if self.flags.unicode && (0xD800..=0xDFFF).contains(&c) {
+                    // A lone surrogate must not match half of a pair: compare whole code points.
+                    self.classes.push(ClassSet { ranges: vec![(c, c)], neg: false });
+                    self.push(Inst::ClassU(self.classes.len() as u32 - 1))?;
+                } else {
+                    self.push(Inst::Char(c as u16))?;
+                }
+            }
+            Node::Any => {
+                self.push(match (self.flags.unicode, self.flags.dot_all) {
+                    (false, false) => Inst::Any,
+                    (false, true) => Inst::AnyAll,
+                    (true, false) => Inst::AnyU,
+                    (true, true) => Inst::AnyAllU,
+                })?;
+            }
+            Node::Class(i) => {
+                self.push(if self.flags.unicode { Inst::ClassU(*i) } else { Inst::Class(*i) })?;
+            }
+            Node::BackRef(g) => {
+                self.push(Inst::BackRef(*g))?;
+                if self.flags.unicode {
+                    self.push(Inst::NotInPair)?;
+                }
+            }
+            _ => unreachable!(),
         }
         Ok(())
     }
@@ -1454,13 +1675,16 @@ mod tests {
         assert!(matches!(Regex::from_str("(?<!a)b", ""), Err(CompileError::Unsupported { what: "lookbehind", .. })));
         assert!(matches!(Regex::from_str("(?<n>a)", ""), Err(CompileError::Unsupported { what: "named group", .. })));
         assert!(matches!(Regex::from_str("(?=a)*", ""), Err(CompileError::Unsupported { .. })));
-        for f in ["u", "v", "d", "gu"] {
+        for f in ["v", "d", "gv"] {
             assert!(matches!(Regex::from_str("a", f), Err(CompileError::UnsupportedFlag(_))), "{f}");
         }
+        assert!(matches!(Regex::from_str("a", "iu"), Err(CompileError::Unsupported { .. })));
+        assert!(matches!(Regex::from_str("\\p{L}", "u"), Err(CompileError::Unsupported { .. })));
         for f in ["gg", "x", "G", "é", "uv"] {
             assert!(matches!(Regex::from_str("a", f), Err(CompileError::InvalidFlags(_))), "{f}");
         }
-        assert_eq!(Flags::parse("gimsy").unwrap(), Flags { global: true, ignore_case: true, multiline: true, dot_all: true, sticky: true });
+        assert_eq!(Flags::parse("gimsy").unwrap(), Flags { global: true, ignore_case: true, multiline: true, dot_all: true, sticky: true, unicode: false });
+        assert!(Flags::parse("u").unwrap().unicode);
     }
 
     #[test]
