@@ -438,3 +438,28 @@ fn xhtml_is_not_executed_by_the_html_parser() {
         assert_eq!(get(&s, &srv, "xml"), None);
     });
 }
+
+/// A finite fiber-style walk: two mutually recursive functions over a chain of 40 nodes (81 JS calls). The default
+/// `SessionConfig` must finish it. The `try` in `a6` cannot catch a limit, so a refusal would stop the page.
+const FIBER_WALK: &str = r#"<script>
+function a5(t) { for (t = t.child; t !== null;) a6(t), t = t.sibling; }
+function a6(t) { switch (t.tag) { case 0: case 1: try { a5(t) } catch (e) {} break; default: a5(t) } }
+var root = { tag: 3, child: null, sibling: null }, tail = root;
+for (var i = 0; i < 40; i++) { var n = { tag: 0, child: null, sibling: null }; tail.child = n; tail = n; }
+a5(root);
+localStorage.setItem('walk', 'done');
+</script>"#;
+
+#[test]
+fn a_finite_forty_level_walk_completes_in_the_default_session() {
+    big(|| {
+        let srv = server(|| vec![("/", html(FIBER_WALK))]);
+        let mut c = SessionConfig::new(&srv.url("/"));
+        c.virtual_clock = true;
+        c.page.quiet = Duration::from_millis(100);
+        let mut s = Session::new(c);
+        let r = s.run();
+        assert_eq!(r.stop, SessionStop::Page(Stop::Settled), "{r:?}");
+        assert_eq!(get(&s, &srv, "walk").as_deref(), Some("done"));
+    });
+}

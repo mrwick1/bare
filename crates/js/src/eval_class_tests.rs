@@ -204,7 +204,7 @@ fn recursion_through_constructors_hits_the_call_depth_limit() {
     assert_eq!(limit_of("class A { m() { return this.m(); } } new A().m();", d, HeapLimits::default()), LimitKind::CallDepth);
     assert_eq!(limit_of("class A { get g() { return this.g; } } new A().g;", d, HeapLimits::default()), LimitKind::CallDepth);
     assert_eq!(limit_of("class A { #p = 1; get #g() { return this.#g; } m() { return this.#g; } } new A().m();", d, HeapLimits::default()), LimitKind::CallDepth);
-    assert_eq!(limit_of("class A { m() { return this.m(); } } class B extends A { m() { return super.m(); } } new B().m();", EvalLimits { max_call_depth: u32::MAX, ..d }, HeapLimits::default()), LimitKind::CallDepth);
+    assert_eq!(limit_of("class A { m() { return this.m(); } } class B extends A { m() { return super.m(); } } new B().m();", EvalLimits { max_call_depth: u32::MAX, max_traversal_depth: 768, ..d }, HeapLimits::default()), LimitKind::CallDepth);
 }
 
 #[test]
@@ -216,7 +216,7 @@ fn a_deep_derived_chain_is_a_limit_not_a_native_stack_overflow() {
         implicit += &format!("class C{i} extends C{} {{}}\n", i - 1);
         explicit += &format!("class C{i} extends C{} {{ constructor() {{ super(); }} }}\n", i - 1);
     }
-    let d = EvalLimits { max_call_depth: u32::MAX, ..Default::default() };
+    let d = EvalLimits { max_call_depth: u32::MAX, max_traversal_depth: 768, ..Default::default() };
     assert_eq!(limit_of(&(implicit.clone() + "new C150();"), d, HeapLimits::default()), LimitKind::CallDepth);
     assert_eq!(limit_of(&(explicit.clone() + "new C150();"), d, HeapLimits::default()), LimitKind::CallDepth);
     // 60 levels fit.

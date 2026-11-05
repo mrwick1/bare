@@ -40,7 +40,7 @@
 //   activation (running ones too), `max_code` marked syntax nodes over every script.
 // - The queue and reaction caps of `PromiseLimits` apply to the resume jobs. The step budget is shared:
 //   every machine step is one `tick`, and a drain shares one budget over all resumed jobs.
-// - The recursive-call ceiling (`max_call_depth`, 512 traversal frames) is unchanged: a resume counts as a call.
+// - The evaluator's configured call and traversal caps apply to resumes too: a resume counts as a call.
 //
 // GC contract. A suspended activation is reachable only through the promise it awaits (a reaction) or a queued
 // resume job. `collect` traces, for every reachable activation: the result promise, the awaited promise, every
