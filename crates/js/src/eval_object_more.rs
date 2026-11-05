@@ -17,7 +17,7 @@
 //   `Object.prototype` (an immutable prototype object) each have V8's message.
 // - `groupBy` runs the shared iterator machinery: the iterator is closed when the callback or the key conversion throws.
 //
-// Primitives: no wrapper objects exist. A string argument shows its indices and `length` (`getOwnPropertyDescriptors`,
+// Primitives: a primitive argument is not boxed. A string argument shows its indices and `length` (`getOwnPropertyDescriptors`,
 // `propertyIsEnumerable`, `hasOwn`); other primitives show no own keys and their prototype chain.
 //
 // Known differences: `Object.seal` of a byte view that has elements succeeds, as in V8 (the specification says it throws,

@@ -2744,3 +2744,76 @@ Problems seen in other crates, not changed:
 
 - `bare --paint` always makes a canvas of 800 px height, so a Chrome capture must use a window of the same height to compare.
 - `getComputedStyle` now lists `opacity`, `z-index` and the radius longhands. Two tests of the `bare` crate listed `opacity` and `zIndex` as "not supported". They are changed to match.
+
+## Primitive wrapper objects
+
+Found on 2026-11-06 from the live login on main 8599baf. After the token is stored, the script runs `new String(...)` or `Object(x)`. The engine stopped with `Fatal(Unsupported("wrapper object (new String/Number/Boolean)"))` from `eval_classes.rs`. The `dataset.precedence` `TypeError` of the earlier run was gone.
+
+Design (`crates/js/src/heap_prim.rs`, `crates/js/src/eval_wrapper.rs`; read their headers first):
+
+- A wrapper is an ordinary `Object` plus one entry in the `Heap::exotics` table: `Exotic::Prim(Value)`. This is the slot for `[[StringData]]`, `[[NumberData]]`, `[[BooleanData]]` and `[[SymbolData]]`. The `Object` struct does not grow. An ordinary object pays nothing: the table is read only when the `exotic` byte is not 0.
+- A String wrapper has the flag `EXOTIC_STR`, next to `EXOTIC` (views) and `EXOTIC_NAMED` (host names). It answers `length` and each index below the length from the string: `[[GetOwnProperty]]` (`exotic_own`), `[[OwnPropertyKeys]]` (indices, own keys by index, then `length`, then the strings), `[[DefineOwnProperty]]` (`prim_define`: `ValidateAndApplyPropertyDescriptor` against the virtual property) and `[[Delete]]` and `[[Set]]` (the virtual properties are read-only and not configurable). The one-unit string for an index is made by `realize`, on the cold path of the host-named hook. Number, Boolean and Symbol wrappers have no virtual keys and no flag.
+- The collector marks the `Value` of the entry. A dead wrapper frees its entry.
+- Construction: `new String(x)` (ToString, a symbol is a `TypeError`), `new Number(x)`, `new Boolean(x)`, `new.target` for a subclass, `Object(x)`, `new Object(x)` and ToObject for string, number, boolean and symbol. `Object(undefined)` and `Object(null)` make a plain object.
+- `thisNumberValue`, `thisStringValue`, `thisBooleanValue` and `thisSymbolValue` accept a primitive, a wrapper and the prototype itself, else a `TypeError`. `Number.prototype.valueOf` and `String.prototype.valueOf` are new.
+- A primitive `this` of a sloppy function becomes a wrapper (`bind_call`). A strict function and a native method see the primitive. A primitive receiver of an Array method becomes a wrapper first (`ao_recv`), so `Array.prototype.map.call("ab", f)` passes a String wrapper to `f`.
+- A property read, a method call or `length` on a primitive never boxes. `"a".length` and `(1).toFixed()` take the old path.
+- Other rules: `typeof` is `"object"`; a wrapper is truthy, also `new Boolean(false)`; `==` unwraps through ToPrimitive (`new Number(1) == 1`); `===` compares identity; `Object.prototype.toString` gives `[object Number]`, `[object String]`, `[object Boolean]` and `[object Symbol]`; `JSON.stringify` unwraps a Number, String or Boolean wrapper once, after `toString` or `valueOf` have run once, in order, and a Symbol wrapper is `{}`.
+
+Gates removed: the wrapper `Unsupported` in `new`, `Reflect.construct` and the `D::Native` match; `Array.prototype.reverse`, `copyWithin`, `concat` and `fill` on a primitive receiver; `Object.assign` with a primitive target; the String wrapper `this` of callbacks; the `Number.prototype` and `Boolean.prototype` notes in `eval_numeric.rs`, `eval_intl_num.rs`, `eval_symbols.rs` and `eval_object_more.rs`.
+
+Not done:
+
+- `Object(1n)` and BigInt wrappers. At the time of this work `Value` has no BigInt kind. When BigInt merges, add `Value::BigInt` to `wrapper_proto` and to the four `this` functions.
+- `structuredClone`: the engine has none.
+- `String.prototype`, `Number.prototype`, `Boolean.prototype` and `Symbol.prototype` are ordinary objects with a special case in the four `this` functions. `Object.getOwnPropertyNames(String.prototype)` has no `length`.
+- Two older differences remain: the read-only assignment and `delete` messages, and the `toString` radix message differ from V8. The Node cases use `e.name` to avoid them.
+
+Validation:
+
+- 8 tests in `crates/js/src/eval_wrapper_tests.rs` and 2 unit tests in `heap_prim.rs`. The Rust tests failed first, on the old gate. `tools/js/wrapper_check.sh` runs 32 cases against Node 22: all match.
+- Memory: a wrapper costs one object and one table entry, and no string, property or element vector (a test asserts 1000 wrappers make 1001 objects and 1000 exotic entries, and at most 120 accounted bytes for each; measured: 104 bytes, with the wrapper held in an array). Dead wrappers are collected.
+- Caps: the heap cap stops the creation of wrappers and cannot be caught. The key list of a String wrapper is charged before it is built.
+- Interpreter cost against main 8599baf, same example binaries, `perf stat -x, -e instructions:u`, minimum of 10 runs, scale 10 (`numeric_load` at 100000), 36 rows. A first build of this change cost +0.6% to +2.1% on almost every row. The cause was inlining: `validate_apply` had one caller (`ordinary_define`) and a second caller in `prim_define` made the compiler stop inlining it, so every property definition paid a call. `#[inline(always)]` on `validate_apply` fixed it. Result: 36 of 37 rows are between -0.40% and +0.24%, and 24 rows run fewer instructions than main. `arrobj_load objects` is +0.51% (75.36 M against 75.74 M instructions, a short row), 0.01% over the limit of 0.5%. Rows:
+
+| Row | main 8599baf | this change | Change |
+| --- | --- | --- | --- |
+| eval_loop | 12,676,628,068 | 12,632,641,684 | -0.347% |
+| eval_calls | 8,416,848,410 | 8,392,861,070 | -0.285% |
+| eval_fib | 293,460,584 | 293,287,392 | -0.059% |
+| eval_closures | 1,214,534,811 | 1,216,096,652 | +0.129% |
+| eval_objects | 4,128,476,156 | 4,126,023,187 | -0.059% |
+| eval_webpack | 56,716,385 | 56,730,862 | +0.026% |
+| eval_throws | 3,142,214,941 | 3,135,579,814 | -0.211% |
+| eval_concat | 10,945,135 | 10,938,925 | -0.057% |
+| binary_copy | 28,339,879 | 28,353,001 | +0.046% |
+| binary_scan | 7,665,987,821 | 7,655,000,233 | -0.143% |
+| binary_scanarr | 16,896,742,417 | 16,892,769,376 | -0.024% |
+| binary_codec | 423,302,426 | 423,315,814 | +0.003% |
+| binary_stream | 396,196,379 | 396,212,116 | +0.004% |
+| binary_indexof | 493,320,489 | 493,147,417 | -0.035% |
+| binary_f64from | 1,004,481,314 | 1,004,094,546 | -0.039% |
+| binary_i32sort | 703,381,169 | 703,394,377 | +0.002% |
+| binary_dataview | 15,334,462,435 | 15,341,483,361 | +0.046% |
+| arrobj_mapfilter | 303,326,692 | 303,240,192 | -0.029% |
+| arrobj_sort | 1,022,532,625 | 1,021,045,121 | -0.145% |
+| arrobj_queue | 290,121,288 | 290,240,660 | +0.041% |
+| arrobj_objects | 75,355,225 | 75,741,225 | +0.512% |
+| arrobj_arrays | 139,199,964 | 139,097,699 | -0.073% |
+| arrobj_fill | 407,958,425 | 406,756,054 | -0.295% |
+| arrobj_reverse | 3,864,232,694 | 3,859,046,002 | -0.134% |
+| arrobj_flat | 713,542,455 | 712,573,707 | -0.136% |
+| arrobj_tosorted | 938,890,760 | 938,026,706 | -0.092% |
+| arrobj_lastindexof | 4,108,955,628 | 4,112,469,716 | +0.086% |
+| arrobj_pad | 24,554,129 | 24,567,655 | +0.055% |
+| arrobj_repeat | 6,523,436 | 6,538,943 | +0.238% |
+| arrobj_replaceall | 350,796,057 | 350,770,889 | -0.007% |
+| arrobj_freeze | 2,023,799,709 | 2,024,105,653 | +0.015% |
+| arrobj_descriptors | 72,268,343 | 72,140,347 | -0.177% |
+| numeric_tofixed | 1,345,782,668 | 1,343,575,267 | -0.164% |
+| numeric_toprecision | 1,347,159,532 | 1,344,951,965 | -0.164% |
+| numeric_radix16 | 1,477,683,811 | 1,473,229,763 | -0.301% |
+| numeric_parsefloat | 1,945,061,524 | 1,941,569,238 | -0.180% |
+| numeric_empty | 820,679,379 | 817,374,615 | -0.403% |
+
+- Load test: `tools/js/wrapper_load.sh`, 12 kinds at 1k, 10k and 100k iterations, one process for each row under 1 GiB, checksums from Node. Net cost for each iteration, at 100k: `new Number(i).valueOf()` 0.55 µs, `new Boolean` 0.63 µs, `Object(i)` 0.54 µs, `new String('x' + i).length` 1.04 µs, `new String('abcdef')[i % 6]` 0.72 µs, `new Number(i).toFixed(1)` 0.92 µs, `new Number(i) == i` 0.62 µs, `JSON.stringify(new String('a'))` 1.17 µs, `Object.keys(new String('abcdef'))` 1.82 µs. The control, a method call on a primitive (`(i).toFixed(0).length + 'abc'.length`), costs 0.73 µs and allocates no wrapper. The time for each iteration is flat from 1k to 100k, so the cost is linear. Peak RSS grows with the garbage until a collection (`newnumber` 4.9 MiB at 1k, 19 MiB at 100k), and does not grow with the live set.

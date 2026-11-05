@@ -27,7 +27,7 @@
 //   closed early: the chain is looked at again then, and a `return` that appeared during the loop gets a real
 //   iterator object at the loop's current position.
 // - IteratorClose is skipped when the loop ends with a limit, Unsupported or a heap fault (JS must not run after a limit).
-// - `Object(symbol)` wrapper objects, `Symbol.prototype` on a boxed receiver, and `new.target` are not supported.
+// - `new.target` is not supported in a symbol or iterator native. `Object(symbol)` makes a Symbol wrapper (`eval_wrapper.rs`).
 
 /// Which resource a symbol, iterator or collection cap guards. `Error::Limit(LimitKind::Sc(_))`, never a JS value.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -597,7 +597,7 @@ impl<'p> Interp<'p> {
     }
 
     /// `Boolean.prototype`: `toString` and `valueOf`. A primitive `true` or `false` reads its properties from it.
-    /// There are no wrapper objects, so the prototype itself is the only object that has a Boolean value (`false`).
+    /// A Boolean wrapper (`eval_wrapper.rs`) and the prototype itself (`false`) are the objects that have a Boolean value.
     fn install_boolean(&mut self) -> Res<()> {
         let kb = h!(self, self.heap.key_from_str("Boolean"));
         let Get::Value(Value::Object(bc)) = h!(self, self.heap.get(self.global, kb)) else { return Err(unsupported("Boolean constructor missing", Span::default())) };
@@ -663,11 +663,7 @@ impl<'p> Interp<'p> {
                 Ok(h!(self, self.heap.symbol_description(s)).map_or(Value::Undefined, Value::String))
             }
             ScFn::BoolToString | ScFn::BoolValueOf => {
-                let b = match this {
-                    Value::Bool(b) => b,
-                    Value::Object(o) if o == self.sc.bool_proto => false,
-                    _ => return Err(self.type_err(&format!("Boolean.prototype.{} requires that 'this' be a Boolean", if f == ScFn::BoolToString { "toString" } else { "valueOf" }))),
-                };
+                let Some(b) = self.this_bool_value(this) else { return Err(self.type_err(&format!("Boolean.prototype.{} requires that 'this' be a Boolean", if f == ScFn::BoolToString { "toString" } else { "valueOf" }))) };
                 if f == ScFn::BoolValueOf {
                     return Ok(Value::Bool(b));
                 }
@@ -708,9 +704,9 @@ impl<'p> Interp<'p> {
     }
 
     fn this_symbol(&mut self, this: Value, what: &str) -> Res<SymId> {
-        match this {
-            Value::Symbol(s) => Ok(s),
-            _ => Err(self.type_err(&format!("{what} requires that 'this' be a Symbol"))),
+        match self.this_symbol_value(this) {
+            Some(s) => Ok(s),
+            None => Err(self.type_err(&format!("{what} requires that 'this' be a Symbol"))),
         }
     }
 

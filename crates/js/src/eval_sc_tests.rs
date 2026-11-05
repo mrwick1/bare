@@ -205,7 +205,7 @@ fn constructor_limits_and_errors_are_exact() {
     assert_eq!(run("new Symbol()"), "throw:TypeError:Symbol is not a constructor");
     assert_eq!(run("Symbol() + ''"), "throw:TypeError:Cannot convert a Symbol value to a string");
     assert_eq!(run("Map.prototype.get.call({}, 1)"), "throw:TypeError:Method Map.prototype.get called on incompatible receiver object");
-    assert_eq!(run("Object(Symbol())"), "unsupported:Object(primitive) wrapper object");
+    assert_eq!(run("typeof Object(Symbol())"), "ok:object");
     assert_eq!(run("new Map(5)"), "throw:TypeError:5 is not iterable");
     assert_eq!(run("new Map([1])"), "throw:TypeError:Iterator value 1 is not an entry object");
 }

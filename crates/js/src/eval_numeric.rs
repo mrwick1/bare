@@ -23,7 +23,7 @@
 //   `isInteger` and `isSafeInteger` do no conversion. The constants are frozen data properties.
 // - `toFixed`, `toExponential` and `toPrecision` round half up on the exact decimal value of the double
 //   (`number.rs`), as V8 does, with V8's RangeError messages.
-// Not supported: `toLocaleString`, `valueOf`, `Number.prototype` on wrapper objects, `Object(5)`.
+// `valueOf` and the other methods accept a Number wrapper (`eval_wrapper.rs`). Not supported here: `toLocaleString` (see `eval_intl_num.rs`).
 
 /// The one-argument `Math` functions after ToNumber: (name, function).
 type Unary = fn(f64) -> f64;
@@ -166,6 +166,7 @@ impl<'p> Interp<'p> {
         let np = h!(self, self.heap.new_object(Some(self.object_proto)));
         self.ao.number_proto = Some(np);
         self.method(np, "toString", Nat::Ao(NumToString), 1)?;
+        self.method(np, "valueOf", Nat::Ao(NumValueOf), 0)?;
         for (name, f) in [("toFixed", NumToFixed), ("toExponential", NumToExponential), ("toPrecision", NumToPrecision)] {
             self.method(np, name, Nat::Ao(f), 1)?;
         }
@@ -189,6 +190,10 @@ impl<'p> Interp<'p> {
 
     fn call_numeric(&mut self, f: AoFn, this: Value, args: &[Value]) -> Res<Value> {
         match f {
+            AoFn::NumValueOf => match self.this_number_value(this) {
+                Some(x) => Ok(Value::Number(x)),
+                None => Err(self.type_err("Number.prototype.valueOf requires that 'this' be a Number")),
+            },
             AoFn::MathClz32 => {
                 let x = self.coerce_number(arg(args, 0))?;
                 Ok(Value::Number(to_uint32(x).leading_zeros() as f64))
@@ -261,11 +266,7 @@ impl<'p> Interp<'p> {
             AoFn::NumToExponential => "toExponential",
             _ => "toPrecision",
         };
-        let x = match this {
-            Value::Number(x) => x,
-            Value::Object(o) if Some(o) == self.ao.number_proto => 0.0,
-            _ => return Err(self.type_err(&format!("Number.prototype.{name} requires that 'this' be a Number"))),
-        };
+        let Some(x) = self.this_number_value(this) else { return Err(self.type_err(&format!("Number.prototype.{name} requires that 'this' be a Number"))) };
         if f == AoFn::NumToPrecision && matches!(digits, Value::Undefined) {
             return Ok(Value::String(h!(self, self.heap.intern_str(&number_to_string(x)))));
         }
@@ -314,11 +315,7 @@ impl<'p> Interp<'p> {
     }
 
     fn number_to_string_radix(&mut self, this: Value, radix: Value) -> Res<Value> {
-        let x = match this {
-            Value::Number(x) => x,
-            Value::Object(o) if Some(o) == self.ao.number_proto => 0.0,
-            _ => return Err(self.type_err("Number.prototype.toString requires that 'this' be a Number")),
-        };
+        let Some(x) = self.this_number_value(this) else { return Err(self.type_err("Number.prototype.toString requires that 'this' be a Number")) };
         let radix = if matches!(radix, Value::Undefined) { 10.0 } else { self.ao_int(radix)? };
         if !(2.0..=36.0).contains(&radix) {
             return Err(self.mk_err(RANGE_ERROR, "toString() radix must be between 2 and 36"));

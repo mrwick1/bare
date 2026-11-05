@@ -1,0 +1,202 @@
+# bare-js primitive wrapper object cases. A case starts with `=== name`. Same format and oracle as eval-cases.txt.
+# Tiny authored programs for new String/Number/Boolean, Object(prim), the String exotic object, the `this` checks of the
+# prototype methods, conversions, JSON, Array receivers and sloppy `this`. Never a bundle. Node 22 is the oracle. The
+# gates and what Node cannot show (GC, heap cap) are in the Rust tests (`eval_wrapper_tests.rs`).
+=== construct_basic
+function t(f) { try { return f(); } catch (e) { return e.name + ": " + e.message; } }
+var s = new String("abc"), n = new Number(5), b = new Boolean(false);
+JSON.stringify([typeof s, typeof n, typeof b, s instanceof String, n instanceof Number, b instanceof Boolean, s instanceof Object,
+  s.constructor === String, n.constructor === Number, b.constructor === Boolean, Object.getPrototypeOf(s) === String.prototype,
+  Object.getPrototypeOf(n) === Number.prototype, Object.getPrototypeOf(b) === Boolean.prototype,
+  typeof String("a"), typeof Number("1"), typeof Boolean(1), typeof new String(), new String().length, new Number().valueOf(), new Boolean().valueOf(),
+  t(function () { return new String(Symbol("x")); }), String(Symbol("x")), new String(undefined).valueOf(), new String(null).valueOf(),
+  new Number("0x10").valueOf(), new Number("abc").valueOf(), new Number(null).valueOf(), new Number(undefined).valueOf(), new Boolean("").valueOf(), new Boolean("0").valueOf(),
+  new Boolean(new Boolean(false)).valueOf(), new Number(new Number(3)).valueOf(), new String(new String("q")).valueOf(), new String(123).valueOf(), new String(true).valueOf()])
+=== construct_identity
+var a = new String("x"), b = new String("x"), n1 = new Number(1), n2 = new Number(1);
+JSON.stringify([a === b, a == b, a == "x", "x" == a, a === "x", n1 == n2, n1 == 1, 1 == n1, n1 === 1, n1 < 2, n1 > 0, n1 + 1, n1 * 3, -n1, +n1,
+  new Boolean(false) == false, new Boolean(true) == true, new Boolean(false) === false, Object.is(a, a), a != "y", n1 != 1,
+  new Number(NaN) == NaN, new Number(0) == -0, new String("1") == 1, new Number(1) == "1", new Number(1) == new String("1")])
+=== truthiness
+var bf = new Boolean(false), nz = new Number(0), es = new String(""), nn = new Number(NaN);
+JSON.stringify([!!bf, !!nz, !!es, !!nn, bf ? "t" : "f", nz ? "t" : "f", es ? "t" : "f", Boolean(bf), Boolean(nz), !bf, bf && "and", bf || "or", bf.valueOf() ? "t" : "f",
+  (function () { var c = 0; if (bf) c++; if (nz) c++; if (es) c++; while (nn) { c += 10; break; } return c; })(), bf == false, bf == 0, nz == false])
+=== typeof_and_tags
+var f = Object.prototype.toString, sy = Symbol("d");
+JSON.stringify([f.call(new String("a")), f.call(new Number(1)), f.call(new Boolean(true)), f.call(Object(sy)), f.call("a"), f.call(1), f.call(true), f.call(sy),
+  f.call(Number.prototype), f.call(Boolean.prototype), f.call(String.prototype), f.call(Object(1)), f.call(Object("s")), f.call(Object(true)),
+  typeof Object(1), typeof Object("s"), typeof Object(true), typeof Object(sy), typeof Object(undefined), typeof Object(null), String(new String("t")), String(new Number(2)), String(new Boolean(true))])
+=== object_call
+var s = Object("abc"), n = Object(7), b = Object(false), sy = Symbol("q"), y = Object(sy), o = {}, a = [];
+JSON.stringify([s instanceof String, n instanceof Number, b instanceof Boolean, y instanceof Symbol, Object(o) === o, Object(a) === a, Object(s) === s,
+  s.length, s[1], n.valueOf(), b.valueOf(), y.valueOf() === sy, y.toString(), y.description, typeof Object(), typeof new Object(1), new Object("z") instanceof String,
+  new Object(true) instanceof Boolean, Object(NaN).valueOf(), Object(-0).valueOf() === 0 && 1 / Object(-0).valueOf(), Object(Infinity).toFixed(1), Object("").length])
+=== symbol_wrapper
+var sy = Symbol("desc"), w = Object(sy);
+function t(f) { try { return f(); } catch (e) { return e.name + ": " + e.message; } }
+JSON.stringify([typeof w, w == sy, w === sy, w.valueOf() === sy, w.toString(), w.description, Object.prototype.toString.call(w), Object.getPrototypeOf(w) === Symbol.prototype,
+  t(function () { return w + ""; }), t(function () { return +w; }), t(function () { return `${w}`; }), Object.keys(w).length, JSON.stringify(w), JSON.stringify({ k: w }),
+  Symbol.prototype.valueOf.call(w) === sy, Symbol.prototype.toString.call(w), typeof Object(Symbol.iterator), Object(Symbol.iterator) == Symbol.iterator, w in {}.constructor ? 1 : 0, t(function () { var o = {}; o[w] = 1; return Object.getOwnPropertySymbols(o).length; })])
+=== string_exotic_keys
+var s = new String("ab");
+s.x = 1; s[5] = "z"; s.b = 2; s[2] = "q";
+JSON.stringify([Object.keys(s), Object.getOwnPropertyNames(s), Reflect.ownKeys(s), Object.entries(s), Object.values(s), s.length, s[0], s[1], s[2], s[3], s[5], "0" in s, 1 in s, 7 in s, "length" in s,
+  s.hasOwnProperty(0), s.hasOwnProperty("length"), s.hasOwnProperty(2), s.hasOwnProperty(9), (function () { var r = []; for (var k in s) r.push(k); return r; })(),
+  JSON.stringify(s), Object.keys(new String("")), Object.getOwnPropertyNames(new String("")), Object.getOwnPropertyNames(new String("é😀")).join()])
+=== string_exotic_descriptors
+var s = new String("hey");
+JSON.stringify([Object.getOwnPropertyDescriptor(s, "0"), Object.getOwnPropertyDescriptor(s, 2), Object.getOwnPropertyDescriptor(s, "length"), Object.getOwnPropertyDescriptor(s, 3), Object.getOwnPropertyDescriptor(s, "x"),
+  Object.getOwnPropertyDescriptors(new String("ab"))])
+=== string_exotic_writes
+"use strict";
+function t(f) { try { return f(); } catch (e) { return e.name; } }
+var s = new String("abc");
+JSON.stringify([t(function () { s[0] = "z"; return s[0]; }), t(function () { s.length = 9; return s.length; }), t(function () { delete s[0]; return s[0]; }), t(function () { delete s.length; return s.length; }),
+  t(function () { s[3] = "d"; return s[3] + s.length; }), t(function () { s.foo = 1; return s.foo; }), t(function () { return delete s[7]; }), Reflect.set(s, 0, "q"), Reflect.set(s, 4, "q"), Reflect.deleteProperty(s, 0), Reflect.deleteProperty(s, 8),
+  Reflect.defineProperty(s, 0, { value: "a" }), Reflect.defineProperty(s, 0, { value: "b" }), Reflect.defineProperty(s, 0, { value: "a", writable: true }), Reflect.defineProperty(s, 0, { value: "a", enumerable: true, writable: false, configurable: false }),
+  Reflect.defineProperty(s, 0, { value: "a", enumerable: false }), Reflect.defineProperty(s, "length", { value: 3 }), Reflect.defineProperty(s, "length", { value: 4 }), Reflect.defineProperty(s, 10, { value: 1 }), s[10],
+  t(function () { Object.defineProperty(s, 1, { value: "x" }); }), t(function () { Object.defineProperty(s, 1, { get: function () {} }); }), Object.isFrozen(s), Object.isSealed(s), Object.isExtensible(s)])
+=== string_exotic_sloppy
+var s = new String("abc");
+s[0] = "z"; s.length = 9; delete s[1]; s[3] = "d";
+JSON.stringify([s[0], s.length, s[1], s[3], delete s[1], delete s[8], Object.keys(s)])
+=== string_exotic_freeze
+var s = new String("ab"), t = new String("cd");
+Object.freeze(s); Object.seal(t); t.x = 1; s.x = 1;
+JSON.stringify([Object.isFrozen(s), Object.isSealed(s), Object.isFrozen(t), Object.isSealed(t), Object.isExtensible(s), Object.isExtensible(t), s.x, t.x, Object.isFrozen(new String("")), Object.isFrozen(Object.preventExtensions(new String("")))])
+=== string_methods_on_wrapper
+var s = new String("Hello, World");
+JSON.stringify([s.toString(), s.valueOf(), s.charAt(1), s.charCodeAt(1), s.indexOf("o"), s.slice(2, 5), s.substring(1, 3), s.toUpperCase(), s.toLowerCase(), s.split(", "), s.includes("World"), s.startsWith("He"), s.endsWith("ld"),
+  s.padStart(14, "*"), s.repeat(2), s.trim(), s.concat("!", 1), s.at(-1), s + "!", s + 1, `${s}`, s.localeCompare("Hello"), s.replace("World", "x"), [...new String("a😀b")], Array.from(new String("xyz")),
+  String.prototype.toString.call(new String("w")), String.prototype.valueOf.call(new String("v")), s.length, s.search("W"), s.match(/o/g), s.normalize(), "a".concat(s)])
+=== string_this_checks
+function t(f) { try { return f(); } catch (e) { return e.name + ": " + e.message; } }
+JSON.stringify([t(function () { return String.prototype.toString.call(1); }), t(function () { return String.prototype.valueOf.call({}); }), t(function () { return String.prototype.toString.call(new Number(1)); }),
+  t(function () { return String.prototype.toString.call(Object("q")); }), t(function () { return String.prototype.valueOf.call(undefined); }), t(function () { return String.prototype.toString.call(String.prototype) === ""; }),
+  t(function () { return String.prototype.valueOf.call(new (class extends String {})("sub")); })])
+=== number_methods_on_wrapper
+var n = new Number(255.5);
+function t(f) { try { return f(); } catch (e) { return e.name + ": " + e.message; } }
+JSON.stringify([n.toString(), n.toString(16), n.toString(2), n.toFixed(1), n.toExponential(2), n.toPrecision(4), n.valueOf(), n.toLocaleString(), n + 1, n * 2, Math.floor(n), isNaN(n), isFinite(n), Number(n), parseInt(n), parseFloat(n),
+  Number.prototype.valueOf.call(n), Number.prototype.toString.call(new Number(7)), Number.prototype.toFixed.call(new Number(1.005), 2),
+  t(function () { return Number.prototype.valueOf.call("1"); }), t(function () { return Number.prototype.toString.call(new String("1")); }), t(function () { return Number.prototype.toFixed.call({}, 1); }),
+  t(function () { return Number.prototype.valueOf.call(Number.prototype); }), t(function () { return Number.prototype.toLocaleString.call(true); }), Number.isInteger(n), Number.isNaN(new Number(NaN)), t(function () { return n.toString(1); }).split(":")[0],
+  new Number(-0).valueOf() === 0 && 1 / new Number(-0).valueOf(), (5).valueOf(), (5).toFixed(2), Number.prototype.valueOf.call(5)])
+=== boolean_methods_on_wrapper
+function t(f) { try { return f(); } catch (e) { return e.name + ": " + e.message; } }
+JSON.stringify([new Boolean(true).toString(), new Boolean(false).toString(), new Boolean(true).valueOf(), new Boolean(0).valueOf(), Boolean.prototype.valueOf.call(new Boolean(true)), Boolean.prototype.toString.call(new Boolean(false)), true + new Boolean(true),
+  t(function () { return Boolean.prototype.valueOf.call(1); }), t(function () { return Boolean.prototype.toString.call(new Number(1)); }), t(function () { return Boolean.prototype.valueOf.call(Boolean.prototype); }), "" + new Boolean(false), `${new Boolean(true)}`, new Boolean(false) + 1])
+=== to_primitive
+var order = [];
+var n = new Number(3);
+n.valueOf = function () { order.push("valueOf"); return 10; };
+n.toString = function () { order.push("toString"); return "s"; };
+var r = [n + 1, `${n}`, n * 2, String(n), n + "", n == 10, n == "s", [n] + "", order.join()];
+var s = new String("q"); s.toString = function () { return "T"; }; s.valueOf = function () { return "V"; };
+r.push(s + "", `${s}`, String(s), s == "V", [s].join(), "k" + s, s.length);
+var p = new Number(1); p[Symbol.toPrimitive] = function (h) { return h; };
+r.push(p + "", `${p}`, +p);
+JSON.stringify(r)
+=== property_keys_from_wrappers
+var o = {}; o[new String("k")] = 1; o[new Number(2)] = 2; o[new Boolean(true)] = 3;
+JSON.stringify([Object.keys(o), o.k, o[2], o.true, "k" in o, new String("k") in o, ({ a: 1 }).hasOwnProperty(new String("a")), [10, 20, 30][new Number(1)], "xyz"[new Number(2)], "xyz"[new String("0")]])
+=== json_stringify
+var sy = Object(Symbol("s"));
+JSON.stringify([JSON.stringify(new String("a\"b")), JSON.stringify(new Number(1.5)), JSON.stringify(new Number(NaN)), JSON.stringify(new Number(Infinity)), JSON.stringify(new Boolean(false)), JSON.stringify(new Boolean(true)),
+  JSON.stringify([new String("x"), new Number(2), new Boolean(true), sy]), JSON.stringify({ a: new String("x"), b: new Number(-0), c: new Boolean(false), d: sy, e: Object(1) }), JSON.stringify({ k: 1, j: 2 }, [new String("k")]),
+  JSON.stringify({ 1: "a", 2: "b" }, [new Number(1)]), JSON.stringify([1, [2]], null, new Number(2)), JSON.stringify({ a: [1] }, null, new String("--")), JSON.stringify(sy), JSON.stringify(Object("s")), JSON.stringify(Object(5)),
+  JSON.stringify({ a: 1 }, function (k, v) { return typeof v === "number" ? new Number(v + 1) : v; }), (function () { var n = new Number(1); n.valueOf = function () { return 99; }; return JSON.stringify(n); })(),
+  (function () { var s = new String("a"); s.toString = function () { return "T"; }; return JSON.stringify(s); })(), (function () { var s = new String("a"); s.toJSON = function () { return "J"; }; return JSON.stringify(s); })(),
+  JSON.stringify(Object.assign(new Number(5), { x: 1 })), JSON.stringify(Object.assign(new String("ab"), { x: 1 }))])
+=== object_assign_and_spread
+var r1 = Object.assign(1, { a: 2 }), r2 = Object.assign("ab", { c: 1 }), r3 = Object.assign(true, null, { z: 1 }), r4 = Object.assign({}, new String("hi"), new Number(5), new Boolean(true));
+function t(f) { try { return f(); } catch (e) { return e.name; } }
+JSON.stringify([typeof r1, r1.a, r1.valueOf(), typeof r2, r2.length, r2.c, r2.valueOf(), typeof r3, r3.z, r3.valueOf(), r4, { ...new String("xy") }, { ...new Number(1) }, t(function () { return Object.assign(null, {}); }), t(function () { return Object.assign(undefined); }),
+  t(function () { "use strict"; return Object.assign("abc", { 0: "x" }); }), t(function () { "use strict"; return Object.assign("abc", { 3: "x" })[3]; }), Object.assign(new String("a"), { 1: "b" })[1]])
+=== array_prototype_on_primitives
+var log = [];
+var r = [Array.prototype.map.call("abc", function (v, i, a) { log.push(typeof a + ":" + (a instanceof String) + ":" + a.length); return v + i; }),
+  Array.prototype.filter.call("abcd", function (v, i) { return i % 2 === 0; }), Array.prototype.indexOf.call("abc", "c"), Array.prototype.includes.call("abc", "b"), Array.prototype.slice.call("abcd", 1, 3), Array.prototype.join.call("abc", "-"),
+  Array.prototype.concat.call(1, 2).length, typeof Array.prototype.concat.call(1, 2)[0], Array.prototype.concat.call("s", [1])[0] instanceof String, Array.prototype.concat.call(true)[0] instanceof Boolean,
+  typeof Array.prototype.fill.call(1, 0), Array.prototype.fill.call(1, 0) instanceof Number, Array.prototype.fill.call(Object(2), 7).valueOf(),
+  Array.prototype.at.call("abc", -1), Array.prototype.every.call("aaa", function (v) { return v === "a"; }), Array.prototype.some.call("abc", function (v) { return v === "c"; }), Array.prototype.find.call("abc", function (v) { return v > "a"; }),
+  Array.prototype.reduce.call("abc", function (a, v) { return v + a; }), Array.prototype.reduceRight.call("abc", function (a, v) { return a + v; }), Array.prototype.lastIndexOf.call("abca", "a"), Array.prototype.flat.call("ab"), log.join()];
+JSON.stringify(r)
+=== array_prototype_writes_on_wrappers
+function t(f) { try { return f(); } catch (e) { return e.name; } }
+JSON.stringify([t(function () { return Array.prototype.reverse.call("abc"); }), t(function () { return Array.prototype.reverse.call(new String("ab")); }), t(function () { return Array.prototype.copyWithin.call("abc", 0, 1); }),
+  t(function () { return Array.prototype.fill.call("ab", "x"); }), t(function () { return Array.prototype.sort.call("ba"); }), t(function () { return Array.prototype.push.call("ab", 1); }), t(function () { return Array.prototype.pop.call("ab"); }),
+  t(function () { return Array.prototype.shift.call("ab"); }), t(function () { return Array.prototype.splice.call("ab", 0, 1); }), t(function () { return Array.prototype.unshift.call("ab", 1); }),
+  (function () { var r = Array.prototype.reverse.call(5); return typeof r + (r instanceof Number) + r.valueOf(); })(), (function () { var r = Array.prototype.copyWithin.call(true, 0); return typeof r + r.valueOf(); })(),
+  Array.prototype.reverse.call(new Number(3)) instanceof Number, Array.prototype.toReversed.call("abc"), Array.prototype.toSorted.call("cba"), Array.prototype.with.call("abc", 1, "x"), Array.prototype.toSpliced.call("abc", 1, 1)])
+=== callbacks_this_boxing
+var r = [];
+[1].forEach(function () { r.push(typeof this, this instanceof Number, this.valueOf()); }, 5);
+[1].forEach(function () { r.push(typeof this, this instanceof String); }, "s");
+[1].forEach(function () { "use strict"; r.push(typeof this, this); }, 5);
+[1].forEach(function () { r.push(typeof this, this === globalThis); });
+[1].forEach(function () { r.push(typeof this, this === globalThis); }, null);
+[1].map(function () { r.push(typeof this, this.valueOf()); }, true);
+[1].forEach(() => { r.push(typeof this); }, 5);
+JSON.stringify(r)
+=== sloppy_this
+function sloppy() { return this; }
+function strict() { "use strict"; return this; }
+function kind() { return typeof this; }
+var s = sloppy.call("str"), n = sloppy.call(7), b = sloppy.call(true), y = sloppy.call(Symbol("q"));
+Number.prototype.me = function () { return this; };
+Number.prototype.meStrict = function () { "use strict"; return this; };
+String.prototype.me = function () { return typeof this + (this instanceof String) + this.length; };
+Boolean.prototype.me = function () { return this; };
+JSON.stringify([typeof s, s instanceof String, s.valueOf(), typeof n, n instanceof Number, n.valueOf(), typeof b, b.valueOf(), typeof y, y.toString(), typeof strict.call("x"), strict.call(5), typeof sloppy.call(undefined) + (sloppy.call(null) === globalThis),
+  kind.call(1), kind.call("a"), kind.call(false), typeof (5).me(), (5).me().valueOf(), typeof (5).meStrict(), "abc".me(), typeof true.me(), sloppy.call(s) === s, sloppy.apply(8, []).valueOf(), sloppy.bind(9)().valueOf(), sloppy.bind(9)() == 9,
+  (function () { return this === 3; }).call(3), (function () { "use strict"; return this === 3; }).call(3), (function () { return this == 3; }).call(3), (function () { return this + 1; }).call(3), (function () { return this === Object(3); }).call(3)])
+=== sloppy_this_methods_and_getters
+var o = { get g() { return typeof this; }, m() { return typeof this; } };
+function F() {}
+F.prototype.k = function () { return typeof this; };
+Object.defineProperty(Number.prototype, "self", { get: function () { return typeof this; }, configurable: true });
+Object.defineProperty(String.prototype, "selfStrict", { get: function () { "use strict"; return typeof this; }, configurable: true });
+JSON.stringify([o.g, o.m(), o.m.call(1), (5).self, "x".self, "x".selfStrict, (5).k === undefined, F.prototype.k.call("s"), (function () { return typeof this; }).call("s"), (() => typeof this)(), Function.prototype.call.call(function () { return typeof this; }, 1)])
+=== class_extends_wrappers
+class MyString extends String { shout() { return this.toUpperCase() + "!"; } }
+class MyNumber extends Number { double() { return this * 2; } }
+class MyBool extends Boolean { flip() { return !this.valueOf(); } }
+var s = new MyString("hi"), n = new MyNumber(21), b = new MyBool(true);
+JSON.stringify([s.shout(), s.length, s[0], s instanceof MyString, s instanceof String, typeof s, Object.getPrototypeOf(s) === MyString.prototype, n.double(), n instanceof Number, n.valueOf(), n + 1, b.flip(), b instanceof Boolean, Object.prototype.toString.call(s),
+  Object.keys(s), JSON.stringify(s), JSON.stringify(n), Reflect.construct(String, ["rc"], MyString) instanceof MyString, Reflect.construct(Number, [4]).valueOf(), Reflect.construct(String, ["z"]).length, new MyString().length, new MyNumber().valueOf()])
+=== reflect_construct_new_target
+function NT() {}
+NT.prototype = { marker: 1 };
+var s = Reflect.construct(String, ["ab"], NT), n = Reflect.construct(Number, ["7"], NT), b = Reflect.construct(Boolean, [0], NT);
+JSON.stringify([s.marker, s.length, s[1], s instanceof String, Object.getPrototypeOf(s) === NT.prototype, n.marker, typeof n, Object.getPrototypeOf(n) === NT.prototype, b.marker, typeof b,
+  (function () { try { Number.prototype.valueOf.call(n); return "ok"; } catch (e) { return e.name; } })(), (function () { try { return String.prototype.toString.call(s); } catch (e) { return e.name; } })()])
+=== equality_and_collections
+var a = new String("k"), m = new Map([[a, 1]]), s = new Set([new Number(1), new Number(1), 1]);
+JSON.stringify([m.get(a), m.get(new String("k")), m.get("k"), s.size, s.has(1), [new Number(1)].includes(1), [new Number(1)].indexOf(1), [new String("a")].includes("a"), [1, 2, 3].indexOf(new Number(2)),
+  Object.is(new Number(1), new Number(1)), (function () { var o = new Number(1); return [o].includes(o); })(), ["a", "b"].indexOf(new String("a")), (function () { switch (new Number(1)) { case 1: return "num"; default: return "def"; } })(),
+  new Number(1) == new Number(1), (function () { var n = new Number(1); return n == n; })()])
+=== string_and_number_misc
+var n = new Number(10), s = new String("5");
+JSON.stringify([n + s, s * n, n > s, n.toString().length, "" + n + s, [n, s].join("+"), [n, s].sort(), Math.max(n, s), Math.abs(new Number(-4)), Number(new String("12")), String(new Number(1e21)), parseInt(new String("42px")),
+  isNaN(new String("x")), new Date(new Number(0)).getTime(), new Array(new Number(3)).length, Array(new Number(3)).length, [1, 2, 3].slice(new Number(1)), "abc".charAt(new Number(1)), "abc".substring(new Number(1), new Number(2)), "abcdef".repeat(new Number(1)),
+  isFinite(new Number(Infinity)), Number.isFinite(new Number(1)), typeof Number(new Number(1)), typeof String(new String("a")), typeof Boolean(new Boolean(false)), Boolean(new Boolean(false)), new Number(1) | 0, ~new Number(5), new Number(5) ** 2, new Number(7) % 4])
+=== gc_and_many
+var keep = [];
+for (var i = 0; i < 2000; i++) { var s = new String("s" + i), n = new Number(i), b = new Boolean(i % 2); if (i % 100 === 0) keep.push(s, n, b); }
+var sum = 0;
+keep.forEach(function (v) { sum += v.valueOf().length || +v.valueOf(); });
+JSON.stringify([keep.length, sum, keep[0].length, keep[3].valueOf()])
+=== in_operator_and_proto
+function t(f) { try { return f(); } catch (e) { return e.name + ": " + e.message; } }
+var s = new String("ab");
+JSON.stringify([0 in s, 2 in s, "length" in s, "toUpperCase" in s, "valueOf" in new Number(1), t(function () { return 0 in "ab"; }), Object.getPrototypeOf(s) === String.prototype, s.hasOwnProperty("toUpperCase"), Object.hasOwn(s, 1), Object.hasOwn(s, 2),
+  Object.hasOwn(new Number(1), "valueOf"), Object.getOwnPropertyNames(new Number(1)), Object.getOwnPropertyNames(new Boolean(true)), Object.keys(Object(1)), Object.entries(new Boolean(true)), Object.getOwnPropertyNames(Object(Symbol()))])
+=== define_on_numbers_booleans
+var n = new Number(1), b = new Boolean(true);
+n.extra = 5; b.extra = 6; Object.defineProperty(n, "hidden", { value: 7, enumerable: false });
+JSON.stringify([n.extra, b.extra, n.hidden, Object.keys(n), Object.getOwnPropertyNames(n), Object.keys(b), JSON.stringify(n), JSON.stringify(b), delete n.extra, n.extra, Object.isFrozen(Object.freeze(new Number(1))), Object.isFrozen(Object.freeze(new Boolean(false)))])
+=== wrapper_prototypes_and_constructor
+JSON.stringify([Object.getPrototypeOf(new Number(1)).constructor === Number, new String("a").constructor.name, new Number(1).constructor.name, new Boolean(1).constructor.name, String.prototype.constructor === String, Number.prototype.constructor === Number,
+  Boolean.prototype.constructor === Boolean, typeof Number.prototype.valueOf, typeof Number.prototype.toFixed, Number.prototype.valueOf.length, Number.prototype.valueOf.name, Object.getOwnPropertyNames(Number.prototype).sort(),
+  Object.getOwnPropertyNames(Boolean.prototype).sort(), Object.prototype.toString.call(Object.getPrototypeOf(new Number(1)))])

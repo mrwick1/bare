@@ -47,7 +47,7 @@
 //! - One environment per call holds parameters, `arguments`, `var`s and the body's `let`/`const`.
 //!   Default-parameter expressions can see the body `var`s. Parameters have no TDZ.
 //! - `arguments` is an unmapped ordinary object (not iterable); sloppy mode never maps it to the parameters.
-//! - Sloppy `this` that is a primitive is not boxed. There are no wrapper objects.
+//! - A sloppy function boxes a primitive `this` (a wrapper object, `eval_wrapper.rs`). A `BigInt` wrapper does not exist: no BigInt.
 //! - Builtins are a small set (see `install_builtins` and `install_ext`). `String.prototype` has only the methods the
 //!   staging bundles call. Symbols, the iterator protocol (with `IteratorClose`), Map and Set are in `eval_symbols.rs`
 //!   and `eval_collections.rs`; their exact support and gates are listed at the top of those files. `ToPrimitive`,
@@ -1733,8 +1733,7 @@ impl<'p> Interp<'p> {
             Some(Callee::Class) => D::C,
             Some(&Callee::Host { id, ctor: true, nt }) => D::H(id, nt),
             Some(&Callee::Script { script, fid, env, self_binding }) if self.func_of(script, fid).is_plain_ctor() => D::S(script, fid, env, self_binding),
-            Some(&Callee::Native(n)) if matches!(n, Nat::ObjectCtor | Nat::FnCtor | Nat::ArrayCtor | Nat::ErrorCtor(_) | Nat::Ext(Bi::RegExpCtor) | Nat::Sc(ScFn::IterCtor)) || matches!(n, Nat::Bin(b) if b.ctor_name().is_some() || b == BinFn::TaCtor) || matches!(n, Nat::Sc(f) if f.is_ctor()) || n == Nat::Date(DateFn::Ctor) || matches!(n, Nat::Intl(f) if f.is_ctor()) => D::N(n),
-            Some(&Callee::Native(Nat::StringFn | Nat::NumberFn | Nat::BooleanFn)) => return Err(unsupported("wrapper object (new String/Number/Boolean)", Span::default())),
+            Some(&Callee::Native(n)) if matches!(n, Nat::ObjectCtor | Nat::FnCtor | Nat::ArrayCtor | Nat::ErrorCtor(_) | Nat::StringFn | Nat::NumberFn | Nat::BooleanFn | Nat::Ext(Bi::RegExpCtor) | Nat::Sc(ScFn::IterCtor)) || matches!(n, Nat::Bin(b) if b.ctor_name().is_some() || b == BinFn::TaCtor) || matches!(n, Nat::Sc(f) if f.is_ctor()) || n == Nat::Date(DateFn::Ctor) || matches!(n, Nat::Intl(f) if f.is_ctor()) => D::N(n),
             Some(Callee::Bound { target, args, .. }) => D::B(*target, args.clone()),
             Some(&Callee::Promise(pf @ (PFn::Ctor | PFn::AggErrCtor))) => D::P(pf),
             _ => return not_ctor(self),
@@ -1801,7 +1800,12 @@ impl<'p> Interp<'p> {
             self.cls_frame(env, fid, fobj);
         }
         if f.kind != FuncKind::Arrow {
-            let t = if !f.strict && is_nullish(this) { Value::Object(self.global) } else { this };
+            let t = match this {
+                Value::Object(_) => this,
+                _ if f.strict => this,
+                _ if is_nullish(this) => Value::Object(self.global),
+                _ => self.to_object(this)?,
+            };
             self.envs[env as usize].this = Some(t);
         }
         if self_binding {
@@ -3025,6 +3029,7 @@ include!("eval_intl.rs");
 include!("eval_reflect.rs");
 include!("eval_object_more.rs");
 include!("eval_classes.rs");
+include!("eval_wrapper.rs");
 include!("eval_async.rs");
 include!("eval_generator.rs");
 
@@ -3148,6 +3153,10 @@ mod date_tests;
 #[cfg(test)]
 #[path = "eval_reflect_tests.rs"]
 mod reflect_tests;
+
+#[cfg(test)]
+#[path = "eval_wrapper_tests.rs"]
+mod wrapper_tests;
 
 #[cfg(test)]
 #[path = "eval_depth_tests.rs"]

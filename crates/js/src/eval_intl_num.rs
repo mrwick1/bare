@@ -21,8 +21,7 @@
 // `latn`; `roundingIncrement` other than 1; Collator `usage: "search"` and any `collation`; the methods `formatRange`,
 // `formatRangeToParts` and `selectRange`.
 //
-// Known deviations: the locale of an unsupported region (`en-AU`) resolves to `en` (V8 keeps `en-AU`); `Number` wrapper objects
-// are not supported by the evaluator; `Intl` is installed on its first read, so `Object.getOwnPropertyDescriptor(globalThis,
+// Known deviations: the locale of an unsupported region (`en-AU`) resolves to `en` (V8 keeps `en-AU`); `Intl` is installed on its first read, so `Object.getOwnPropertyDescriptor(globalThis,
 // "Intl")` shows an accessor until then.
 //
 // Storage: one `IntlNf`, `IntlColl` or `IntlPr` per object, in `intl.nfs`, `intl.colls` and `intl.prs`, capped together with the date
@@ -628,11 +627,7 @@ impl<'p> Interp<'p> {
                 self.new_array_from(&out)
             }
             IntlFn::NumLocale => {
-                let x = match this {
-                    Value::Number(x) => x,
-                    Value::Object(o) if Some(o) == self.ao.number_proto => 0.0,
-                    _ => return Err(self.type_err("Number.prototype.toLocaleString requires that 'this' be a Number")),
-                };
+                let Some(x) = self.this_number_value(this) else { return Err(self.type_err("Number.prototype.toLocaleString requires that 'this' be a Number")) };
                 let f = self.intl_nf_create(a0, a1, "Number.prototype.toLocaleString")?;
                 let s = self.intl_num_format(&f, icu::num_from_f64(x), None);
                 self.str_value(&s)

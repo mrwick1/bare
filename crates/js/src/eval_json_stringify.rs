@@ -8,8 +8,9 @@
 // non-finite numbers `null`, `-0` as `0`, lone surrogates as `\udxxx`, a root that serializes to nothing returns
 // `undefined`, an active-path cycle is a `TypeError` (a shared acyclic subgraph is legal).
 //
-// Gates: Number, String, Boolean and BigInt wrapper objects and `BigInt` values do not exist in this evaluator
-// (`new String` is `Unsupported`, there is no `BigInt`), so those spec steps are not written. Add them with the types.
+// Wrapper objects: a Number, String or Boolean wrapper is written as ToNumber, ToString or its boolean (`sj_value`), also as
+// `space` and as an entry of the replacer array. A Symbol wrapper is an object with no keys (`{}`).
+// Gates: BigInt wrappers and `BigInt` values do not exist in this evaluator (no BigInt), so those spec steps are not written.
 //
 // How: no Rust recursion. A stack of `Frame`s (one per open object or array) lives in the call. Callbacks run
 // through `call_fn`, so they may re-enter `JSON.stringify`; every piece of state is local to one call. The heap
@@ -174,6 +175,15 @@ impl<'p> Interp<'p> {
                 st.plist = Some(Rc::new(self.sj_property_list(o, &lim)?));
             }
         }
+        // A Number or String wrapper as `space` is its number or string.
+        let space = match space {
+            Value::Object(o) => match self.heap.primitive_value(o) {
+                Some(Value::Number(_)) => Value::Number(self.coerce_number(space)?),
+                Some(Value::String(_)) => Value::String(self.coerce_string(space)?),
+                _ => space,
+            },
+            _ => space,
+        };
         match space {
             Value::Number(n) => {
                 let k = if n.is_nan() { 0.0 } else { n.trunc().min(10.0) };
@@ -263,6 +273,7 @@ impl<'p> Interp<'p> {
             let item = match self.get_prop(Value::Object(o), PropertyKey::Index(i as u32))? {
                 Value::String(s) => s,
                 Value::Number(n) => h!(self, self.heap.intern_str(&number_to_string(n))),
+                v @ Value::Object(o) if matches!(self.heap.primitive_value(o), Some(Value::String(_) | Value::Number(_))) => self.coerce_string(v)?,
                 _ => continue,
             };
             let key = h!(self, self.heap.key_from_string(item));
@@ -311,6 +322,15 @@ impl<'p> Interp<'p> {
             Value::Object(o) => {
                 if self.is_callable(v) {
                     return Ok(SjOut::Undef);
+                }
+                // A Number, String or Boolean wrapper is written as its primitive. A Symbol wrapper stays an object.
+                if self.heap.has_exotics() && let Some(p) = self.heap.primitive_value(o) && !matches!(p, Value::Symbol(_)) {
+                    let u = match p {
+                        Value::Number(_) => Value::Number(self.coerce_number(v)?),
+                        Value::String(_) => Value::String(self.coerce_string(v)?),
+                        _ => p,
+                    };
+                    return self.sj_value(st, u);
                 }
                 self.sj_open(st, o)?;
                 return Ok(SjOut::Open);

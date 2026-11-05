@@ -8,8 +8,8 @@
 //
 // Supported
 // - `Object.getOwnPropertyNames(O)`: strings only, enumerable or not, in native own-key order (`Heap::own_keys`: indices
-//   ascending, then strings in creation order). An object, a string (its indices, then `length`: there are no wrapper
-//   objects, the keys are computed) and any other primitive (no keys). `undefined` and `null` are a TypeError.
+//   ascending, then strings in creation order). An object (a String wrapper has its indices, then `length`, from the heap), a
+//   string (the same keys, computed, no wrapper) and any other primitive (no keys). `undefined` and `null` are a TypeError.
 // - `Reflect.ownKeys(O)`: the same keys plus symbols last. A non-object is a TypeError.
 // - `Reflect.construct(target, argumentsList [, newTarget])`. The checks run in spec order: `target` is a constructor, a
 //   present `newTarget` is a constructor (an explicit `undefined` is present), `argumentsList` is an object, then its
@@ -23,8 +23,6 @@
 // - A native constructor that cannot take a `new.target` (Map, Set, WeakMap, WeakSet, Promise, AggregateError, the byte
 //   classes, a host constructor) is `Unsupported` when `newTarget` differs from it, as `class extends` already is. With the
 //   same `newTarget` it is a plain `new`.
-// - `String`, `Number` and `Boolean` have no wrapper objects: `Reflect.construct` of one is `Unsupported`. As a `newTarget`
-//   they are valid constructors.
 // - Own keys of a function lack the `arguments` and `caller` that V8 adds to sloppy functions.
 //
 // State: none. The natives are function objects reachable from the global `Reflect` and `Object`, like every builtin.
@@ -107,13 +105,11 @@ impl<'p> Interp<'p> {
         Ok(Value::Object(a))
     }
 
-    /// A constructor, or one of the three wrapper functions that `construct` gates as `Unsupported` (they are constructors
-    /// in the language, so they must not be a TypeError here).
-    fn is_constructor_or_wrapper(&mut self, mut o: ObjId) -> Res<bool> {
+    /// `is_constructor`, with one step for each bound function that it unwraps (a long chain must not be free).
+    fn is_constructor_spending(&mut self, mut o: ObjId) -> Res<bool> {
         loop {
             self.tick()?;
             match self.funcs.get(&o) {
-                Some(&Callee::Native(Nat::StringFn | Nat::NumberFn | Nat::BooleanFn)) => return Ok(true),
                 Some(&Callee::Bound { target, .. }) => o = target,
                 _ => return Ok(self.is_constructor(o)),
             }
@@ -127,12 +123,12 @@ impl<'p> Interp<'p> {
         };
         let target = arg(args, 0);
         let Value::Object(f) = target else { return not_ctor(self, target) };
-        if !self.is_constructor_or_wrapper(f)? {
+        if !self.is_constructor_spending(f)? {
             return not_ctor(self, target);
         }
         let nt = if args.len() >= 3 {
             match args[2] {
-                Value::Object(n) if self.is_constructor_or_wrapper(n)? => n,
+                Value::Object(n) if self.is_constructor_spending(n)? => n,
                 v => return not_ctor(self, v),
             }
         } else {

@@ -38,6 +38,8 @@ pub(super) enum Exotic {
     Indexed,
     /// An object whose string-keyed properties come from the host (see `heap_named.rs`). It holds no data.
     Named,
+    /// A primitive wrapper object: its string, number, boolean or symbol (see `heap_prim.rs`).
+    Prim(Value),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -48,6 +50,8 @@ pub enum ExoticKind {
     Decoder,
     Indexed,
     Named,
+    /// A String, Number, Boolean or Symbol wrapper object.
+    Primitive,
 }
 
 /// The element type of a view. `Data` is a `DataView` (bytes, no integer-indexed properties).
@@ -277,7 +281,7 @@ impl Heap {
         !self.exotics.is_empty()
     }
 
-    fn exotic(&self, o: ObjId) -> Option<&Exotic> {
+    pub(super) fn exotic(&self, o: ObjId) -> Option<&Exotic> {
         let ob = self.objects.get(o.index, o.gn)?;
         if ob.exotic != 0 { self.exotics.get(&o.index) } else { None }
     }
@@ -291,6 +295,7 @@ impl Heap {
             Exotic::Decoder(_) => ExoticKind::Decoder,
             Exotic::Indexed => ExoticKind::Indexed,
             Exotic::Named => ExoticKind::Named,
+            Exotic::Prim(_) => ExoticKind::Primitive,
         })
     }
 
@@ -448,6 +453,7 @@ impl Heap {
             Some(Exotic::View { buffer, len, ty, .. }) if *ty != Elem::Data => Ok(if matches!(self.exotics.get(&buffer.index), Some(Exotic::Buffer(_))) { *len } else { 0 }),
             Some(Exotic::Indexed) => self.source()?.indexed_len(o),
             Some(Exotic::Named) => self.named_len(o),
+            Some(Exotic::Prim(Value::String(s))) => self.str_len(*s),
             _ => Ok(0),
         }
     }
@@ -715,6 +721,7 @@ impl Heap {
         let i = match (self.exotic(o), key) {
             (Some(Exotic::Indexed), PropertyKey::Index(i)) => i,
             (Some(Exotic::Named), _) => return self.named_exists(o, key),
+            (Some(Exotic::Prim(Value::String(s))), _) => return self.prim_str_own(*s, key),
             _ => return Ok(None),
         };
         let value = match self.source()?.indexed_item(o, i as usize)? {

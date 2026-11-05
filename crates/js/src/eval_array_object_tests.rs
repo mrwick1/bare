@@ -93,9 +93,6 @@ fn gates_are_explicit_not_silent() {
     gate("var a=[1]; a.constructor={[Symbol.species]: function F(){}}; a.slice()", "Array species constructor (subclass or custom constructor)");
     gate("var a=[1]; a.constructor={[Symbol.species]: function F(){}}; a.splice(0)", "Array species constructor (subclass or custom constructor)");
     gate("var a=[1]; a.constructor={[Symbol.species]: function F(){}}; a.concat()", "Array species constructor (subclass or custom constructor)");
-    gate("Array.prototype.concat.call('abc')", "Array.prototype.concat on a primitive receiver (wrapper object)");
-    gate("Object.assign(1, {a:1})", "Object.assign with a primitive target (wrapper object)");
-    gate("Object.assign('s', {a:1})", "Object.assign with a primitive target (wrapper object)");
     gate("function F(){} Array.from.call(F, [1])", "Array.from with a non-Array this");
     gate("function F(){} Array.of.call(F, 1)", "Array.of with a non-Array this");
     // The things that are not gates: an `Array` constructor, a non-callable `constructor`, `undefined`.
@@ -287,8 +284,8 @@ fn removed_globals_do_not_break_the_species_check() {
 
 #[test]
 fn fill_receiver_gates_and_errors() {
-    assert_eq!(run("Array.prototype.fill.call(1, 0)"), "unsupported:Array.prototype.fill on a primitive receiver (wrapper object)");
-    assert_eq!(run("Array.prototype.fill.call('ab', 'x')"), "unsupported:Array.prototype.fill on a primitive receiver (wrapper object)");
+    assert_eq!(run("var r = Array.prototype.fill.call(1, 0); typeof r + (r instanceof Number)"), "string:objecttrue");
+    assert_eq!(run("try { Array.prototype.fill.call('ab', 'x') } catch (e) { e.name }"), "string:TypeError"); // the indices of a String wrapper are read-only
     assert_eq!(run("Array.prototype.fill.call(undefined, 0)"), "throw:TypeError");
 }
 
