@@ -253,7 +253,8 @@ fn other_limits_are_distinct_for_classes() {
     let intrinsic = big(|| Interp::realm(Heap::default(), EvalLimits::default()).unwrap().stats().functions);
     assert_eq!(limit_of("var k = []; for (var i = 0; i < 1000; i++) k.push(class { m() {} });", EvalLimits { max_functions: intrinsic + 100, ..d }, Heap::default()), LimitKind::Functions);
     assert_eq!(limit_of("var k = []; for (var i = 0; i < 1000; i++) k.push(class { m() {} });", EvalLimits { max_envs: 50, ..d }, Heap::default()), LimitKind::Envs);
-    let heap = Heap::new(HeapLimits { max_objects: 300, ..Default::default() }).unwrap();
+    let intrinsic_objects = big(|| Interp::realm(Heap::default(), EvalLimits::default()).unwrap().heap.stats().live_objects);
+    let heap = Heap::new(HeapLimits { max_objects: intrinsic_objects + 100, ..Default::default() }).unwrap();
     assert!(matches!(limit_of("class A { x = 1; } var k = []; for (;;) k.push(new A());", d, heap), LimitKind::Heap(Limit::Objects)));
 }
 
