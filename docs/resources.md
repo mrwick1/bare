@@ -1656,7 +1656,7 @@ The same measurements found more memory to remove later:
 
 - A function object with its `prototype` takes 896 B; an arrow takes 582 B. A non-arrow function makes its `prototype` object at once. V8 makes it only when a script reads it. See [Lazy function prototype](#lazy-function-prototype).
 - After a collection the side tables keep their largest capacity. See [Side tables after a collect](#side-tables-after-a-collect).
-- Each `let` block makes an environment, even when no closure captures it.
+- Each `let` block makes an environment, even when no closure captures it. See [Let block declarations](#let-block-declarations).
 
 ## Side tables after a collect
 
@@ -1718,3 +1718,35 @@ Results, release, main d79a592 vs this change:
 `fib` runs the same instructions (+0.03%) in more cycles. Hypothesis: code layout. Not verified.
 
 Validation: a new test failed on main at its first object count and passes now. It checks that key lists, `in` and `hasOwnProperty` make no object, that one read makes exactly one with a stable identity, and that the prototype keeps its function alive through `constructor`. Three new Node cases cover identity, order, descriptors, `new`, `instanceof`, replacement and chains. Two GC tests counted the eager prototype objects; their counts now match the lazy heap.
+
+## Let block declarations
+
+Each entry into a block with a `let` or `const` cost about 812 instructions more than the same block with `var`, and one heap allocation. A profile showed that most of the cost was not the environment. `declare_pat_lexical` made a new `Vec` for the names, and `pat_names` interned each name again from the source text with a hash lookup. The walk before the run had already cached the name id in `pat_name`. A plain name now takes the cached id and allocates nothing. A destructuring pattern keeps the old path. A debug assert checks that the cached id is the interned one.
+
+Results, release, main 09ff02c vs this change, 10 interleaved runs per build (mean instructions, minimum cycles). Each microbenchmark row runs 2,000,000 block entries in a function:
+
+| row | instructions | min cycles | allocations |
+| --- | ---: | ---: | --- |
+| `{ let t = ...; }` in a loop | -10.4% | -10.9% | 2,000,742 → 741 |
+| `{ const t = ...; }` in a loop | -10.4% | -10.8% | 2,000,742 → 741 |
+| `for (const x of a)` | -17.3% | -18.1% | 2,000,757 → 757 |
+| `if (...) { let t = ...; }` | -5.5% | -6.0% | 1,000,742 → 741 |
+| `async_load` switch, ifchain (100x) | -2.3%, -0.6% | -1.8%, -0.3% | |
+
+All rows of `eval_load`, `class_load` and `reflect_load` (10x), and the other rows of `async_load` and `promise_load` (100x), run the same instructions (within 0.01%). Their cycles are within -3.8% to +3.0%. Peak RSS does not change.
+
+A `let` block now costs about 408 instructions more than `var`. That cost is the environment, its frame, the binding and one more hop on each name lookup.
+
+### Elision tried and dropped
+
+V8 keeps a block's `let` variables out of a context when no closure captures them. A test version put the bindings of a block in the current environment and removed them on exit. It applied only when the walk found no function or class in the block, the current environment was not captured and not the global one, and the names were plain and new there. The conditions protect against two cases: a closure made earlier would see the names, and a called function that closes over the global environment would see them too.
+
+It was correct on 9 new Node cases and on all the checks. It did not pay:
+
+- In the `let` loop it cost 1.6% more instructions than the allocation fix alone. The clash check scans the current environment, and lookups of the block names scan the function's bindings.
+- The cached login boot ran 0.06% fewer instructions, with the same memory.
+- The memory gain is one environment for each async call that is paused inside such a block. A block with an arrow, such as `await new Promise(r => ...)`, does not qualify, so the async benchmark did not change.
+
+A useful version needs analysis for each variable: is the name referenced by any closure in the function? That needs scope resolution in the walk. Measure paused generators first, because a paused generator keeps its block environments.
+
+Validation: 9 new Node cases cover shadowing and earlier closures, a called function that reads a global with the same name, exit by throw, `break` and `continue`, TDZ and `const`, parameter clashes and nesting, more than 12 bindings, catch bodies, and `await` inside blocks with interleaved calls. They match Node on main and on this change.

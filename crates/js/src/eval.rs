@@ -1504,6 +1504,14 @@ impl<'p> Interp<'p> {
     }
 
     fn declare_pat_lexical(&mut self, p: PatId, flags: u8) {
+        // A plain name: the walk before the run cached its id, so no hashing and no list.
+        let pat = *self.prog.pat(p);
+        if let PatKind::Ident = pat.kind {
+            let n = self.pat_name[p.index()];
+            debug_assert_eq!(n, self.name_at(pat.span));
+            self.env_declare(self.env, n, flags, Value::Undefined);
+            return;
+        }
         let mut names = Vec::new();
         self.pat_names(p, &mut names);
         for n in names {
