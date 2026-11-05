@@ -92,3 +92,12 @@ switch_without_await_inside_async	 ## one|i1|other|i1
 optional_chain_without_await	undefined ## undefined|undefined|false
 getter_setter_sync_in_async	 ## set2|get|set4
 completion_not_leaked_to_script	ok ## ok
+switch_await_discriminant_and_fall_through	sync ## sync|one|two|end1|three|end3|end9
+switch_await_in_case_tests_runs_in_order	t1|t2|t1|t2|t1|t2 ## t1|t2|t1|t2|t1|t2|b|t3|c|t3|2|3|5
+switch_default_in_middle_falls_through_after_awaited_tests	 ## def|two|out|three|out
+switch_await_in_body_with_break_and_fall_through	a|s1|s2 ## a|s1|s2|b|c|e|c|e
+switch_lexical_scope_across_await	ReferenceError|2|outer ## ReferenceError|2|outer|inner|ReferenceError|2|outer
+switch_break_continue_and_labels_in_loops	d0|after0 ## d0|after0|after2|d3|after3|in|x|j0|done1
+switch_throw_return_and_env_restore	 ## cboom:global|gt|hh|rsw2/string:global
+switch_no_match_no_default_and_short_circuit	 ## t1|one|end|t1|t2|end
+switch_nested_and_await_free_switch_in_async	adef|end ## adef|end|in2|mid|plain|end|indef|mid|plain|end

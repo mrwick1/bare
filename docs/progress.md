@@ -437,3 +437,5 @@ Visible shadow hosts are laid out from the flat tree. Page rules do not reach in
 The live staging login stores its token. The next route chunks need the RegExp `u` flag, which is now built and checked against Node. Property escapes, named groups and `i` with `u` remain gates. See [resources.md](resources.md#regexp-u-flag).
 
 RegExp `i` with `u` is built with simple case folding from Unicode 18 data. The live login now passes the route-chunk patterns and stops at the next gate, `await` inside `switch`. See [resources.md](resources.md#regexp-i-with-u).
+
+The async machine now runs `await` inside `switch`: in the discriminant, in case tests and in case bodies. The live login now passes that gate. It stops at the next one, `generators are not supported`. See [resources.md](resources.md#await-inside-switch).
