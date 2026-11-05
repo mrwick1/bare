@@ -1623,3 +1623,18 @@ Cost in the shared matcher loop. Every change to the dispatch loop was measured 
 
 Validation: Node checks every folding pair, and each code point against its single-code-point lower and upper case: 3,135 checks, 0 differences. The 100 other differences involve code points that Node 22 (Unicode 16) does not assign. Oracle hand cases cover the four staging patterns, ſ, K, ß and ẞ, final sigma, Deseret, `\w`, `\W`, `\b` and backreferences. The fuzz flags now include `iu`, `imu`, `isu` and `iuy`. 14 seeds give 0 mismatches. One seed-24 case is near Node's 300 ms oracle timeout, so the oracle sometimes keeps it; our engine stops at its 500M step budget on it, on main too. Not tested: Turkic and full (one-to-many) case folding, which `u` does not use, and `i` with `u` on pages other than staging.
 
+## Await inside switch
+
+After `i` with `u`, the live login stopped at `Unsupported("await inside switch")`. The async machine now runs a switch statement that contains `await`. It follows ECMA-262 CaseBlockEvaluation and the synchronous switch in `eval_statements.rs`.
+
+- `SwD` waits for the discriminant. Its value goes into one slot. `SwS` owns that slot. It frees the slot on a normal end and on any abrupt completion, and it catches an unlabeled `break`.
+- If a case body declares `let`, `const`, `class` or a function, one block environment is made for all case bodies. The existing `Scope` frame restores and releases it. Case tests run in that environment, as in the spec.
+- `sw_test` compares the tests in source order with strict equality. An await-free test runs inline on the ordinary evaluator. A test with `await` pushes `SwT` and waits. After the first match, no later test runs. With no match, the run starts at `default`, wherever it is, and falls through the clauses after it.
+- `SwB` runs one case body through `list_from`. A normal end falls through to the next body.
+- A labeled `break` and a `continue` pass through `SwS` to the `Lab` or loop frame, as before.
+
+The frames hold ids and counters only. The discriminant is in a slot, so the existing GC trace keeps it alive. The block environment is in a `Scope` frame, which the trace and `run_discard` already handle.
+
+Load test (`tools/js/async_load.sh`, release, one process per row): `switch` suspends n/2 activations in a switch with a lexical case, an awaited discriminant and an awaited case test. `ifchain` is the same program written with `if`. At 100x (50,000 activations): switch run 51 ms, drain 68 ms, peak RSS 78 MiB; ifchain run 60 ms, drain 63 ms, peak RSS 74 MiB. Hypothesis: the extra 4 MiB is the discriminant slot and the `SwS` frame of each suspended switch.
+
+Validation: nine new Node cases cover the discriminant, the order of tests, `default` in the middle, fall-through after an await, lexical scope and TDZ, `break`, `continue`, labels, nested switches, throw, rejection and return. All 103 async cases match Node. A GC test collects while the switch is suspended and then checks that frames, slots and environments return to zero. The four gate tests that expected "await inside switch" now use other gates. Not tested: a speed comparison of the other load rows against main.

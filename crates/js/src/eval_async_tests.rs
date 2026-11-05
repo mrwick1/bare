@@ -125,7 +125,6 @@ fn limit_of(r: Result<impl std::fmt::Debug, Error>) -> LimitKind {
 fn unsupported_await_positions_are_found_before_any_effect() {
     big(|| {
         for (src, what) in [
-            ("async function f() { switch (await 1) { default: } }", "await inside switch"),
             ("async function f() { var o = {}; for (var k in await o) {} }", "await inside for-in"),
             ("async function f(o) { return (await o)?.x; }", "await inside an optional chain"),
             ("async function f(o) { return o?.[await 1]; }", "await inside an optional chain"),
@@ -155,7 +154,7 @@ fn unsupported_await_positions_are_found_before_any_effect() {
         let r = it.run_script("async function* g() {}");
         assert!(matches!(r, Err(Error::Unsupported(_))), "{r:?}");
         // the first program of `Interp::new` is checked the same way
-        let prog = parse_script("var effect = 1; async function f() { switch (await 1) {} }", Limits::default()).unwrap();
+        let prog = parse_script("var effect = 1; async function f() { for (var k in await 1) {} }", Limits::default()).unwrap();
         assert!(matches!(Interp::new(&prog, Heap::default(), EvalLimits::default()), Err(Error::Unsupported(_))));
     });
 }
@@ -360,6 +359,40 @@ fn collect_between_awaits_keeps_every_saved_value_alive() {
         }
         it.collect(&[]).unwrap();
         assert_eq!(out(&mut it, "out.join('|') + '#' + obj.k1 + '#' + result.fin"), "abcxypq32undefined|defxypq32undefined|finxy#4#val");
+        let st = it.async_stats();
+        assert_eq!((st.activations, st.frames, st.slots), (0, 0, 0));
+        assert_eq!(it.stats().live_envs, { it.collect(&[]).unwrap(); it.stats().live_envs });
+    });
+}
+
+#[test]
+fn a_switch_keeps_its_discriminant_and_scope_alive_across_collects_and_frees_them() {
+    big(|| {
+        let mut it = realm(lim());
+        let src = "
+            var out = []; var res; var keep = {};
+            function wait() { return new Promise(function (r) { res = r; }); }
+            async function f() {
+              var d = { tag: 'd' + 1 };
+              var probe = d; d = null;
+              switch (probe) {
+                case await wait(): out.push('no');
+                case probe: let s = { v: 's' + 2 }; await wait(); out.push(s.v); await wait();
+                case keep: out.push('fall');
+              }
+              out.push(probe.tag);
+            }
+            f(); 0";
+        out(&mut it, src);
+        for step in 0..3 {
+            it.collect(&[]).unwrap();
+            let r = it.global_object();
+            let k = it.heap.key_from_str("res").unwrap();
+            let Get::Value(res) = it.heap.get(r, k).unwrap() else { panic!() };
+            it.call(res, Value::Undefined, &[Value::Number(step as f64)]).unwrap();
+            it.drain_microtasks().unwrap();
+        }
+        assert_eq!(out(&mut it, "out.join('|')"), "s2|fall|d1");
         let st = it.async_stats();
         assert_eq!((st.activations, st.frames, st.slots), (0, 0, 0));
         assert_eq!(it.stats().live_envs, { it.collect(&[]).unwrap(); it.stats().live_envs });

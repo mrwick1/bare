@@ -22,6 +22,7 @@
 //   An async function is not a constructor and has no `.prototype`.
 // - `await` in: expression statements, `var`/`let`/`const` initializers, `return`, `throw`, `if` tests,
 //   `while`/`do`/`for` heads and bodies, `for (x of arr)` (right side and body), blocks, `try`/`catch`/`finally`,
+//   `switch` (discriminant, case tests and bodies),
 //   labeled statements (at most three labels on one loop), and inside these expressions: unary (not `delete`),
 //   binary, logical, conditional, comma, parenthesized, template, array and object literals (the value of a
 //   non-computed key, spread), member and index reads, calls and `new` (callee, member base and arguments, with
@@ -29,7 +30,7 @@
 //   `super` property, `obj.#p` reads and calls, `#p in x`, `super.m(await x)` and `[a, b] = await x`.
 //   Async methods of classes, static ones included, keep `this`, the class scope and `%home` in their environments.
 // - Not supported (Unsupported at preflight): `await` in a parameter, a binding pattern, a computed object key, a
-//   `switch`, a `for-in`, an optional chain, `delete`, `++`/`--`, a tagged template, the heritage or a computed key
+//   `for-in`, an optional chain, `delete`, `++`/`--`, a tagged template, the heritage or a computed key
 //   of a class, `super(...)` with an await in its arguments, or `super[await k]`. `for await`,
 //   generators, top-level await and modules stay unsupported as before.
 // - Known deviations (the same as the ordinary evaluator): environments, `arguments` and `this` as in `eval.rs`;
@@ -163,6 +164,14 @@ enum Fr {
     OfB { s: StmtId, lb: Lbl, base: u32 },
     TryB { s: StmtId, env: u32 },
     TryC { s: StmtId, env: u32 },
+    /// The discriminant of switch `s` is being evaluated.
+    SwD { s: StmtId },
+    /// A switch runs. Slot `base` holds the discriminant. Catches an unlabeled break.
+    SwS { base: u32 },
+    /// The test of case `i` is being evaluated.
+    SwT { s: StmtId, base: u32, i: u32 },
+    /// The body of case `i` runs. A normal end falls through to case `i + 1`.
+    SwB { s: StmtId, i: u32 },
     /// A `finally` block runs. `kind`: 0 normal, 1 break, 2 continue, 3 return, 4 throw (the value is in slot `base`).
     Fin { kind: u8, label: u32, base: u32 },
 }
@@ -612,10 +621,7 @@ impl<'p> Interp<'p> {
                         any |= self.scan_stmt(b)?;
                     }
                 }
-                if any {
-                    return no("await inside switch");
-                }
-                false
+                any
             }
             StmtKind::Labeled { body, .. } => {
                 let b = self.scan_stmt(body)?;
@@ -1494,6 +1500,10 @@ impl<'p> Interp<'p> {
                 self.fpush(run, Fr::TryB { s, env: self.env })?;
                 nx(Next::Exec(block))
             }
+            StmtKind::Switch { disc, .. } => {
+                self.fpush(run, Fr::SwD { s })?;
+                nx(Next::Eval(disc))
+            }
             _ => Err(unsupported("await in this statement", st.span)),
         }
     }
@@ -1514,6 +1524,39 @@ impl<'p> Interp<'p> {
             }
         }
         val(Value::Undefined)
+    }
+
+    /// Compare the discriminant (slot `base`) with the case tests of switch `s` from case `i`, as in
+    /// `eval_statements.rs`. Await-free tests run inline. No match: the `default` clause, or nothing.
+    fn sw_test(&mut self, run: &mut Run, s: StmtId, base: u32, mut i: usize) -> Res<Step> {
+        let StmtKind::Switch { cases, .. } = self.prog.stmt(s).kind else { return Err(unsupported("switch", Span::default())) };
+        let d = sval(run, base as usize);
+        while i < cases.len() {
+            if let Some(t) = self.prog.case(self.list_at(cases, i)).test {
+                if self.aw_expr(t) {
+                    self.fpush(run, Fr::SwT { s, base, i: i as u32 })?;
+                    return nx(Next::Eval(t));
+                }
+                if d.strict_equals(self.eval_expr(t)?) {
+                    return self.sw_body(run, s, i);
+                }
+            }
+            i += 1;
+        }
+        match (0..cases.len()).find(|&k| self.prog.case(self.list_at(cases, k)).test.is_none()) {
+            Some(k) => self.sw_body(run, s, k),
+            None => val(Value::Undefined),
+        }
+    }
+
+    /// Run the body of case `i` of switch `s`, then fall through to the next case.
+    fn sw_body(&mut self, run: &mut Run, s: StmtId, i: usize) -> Res<Step> {
+        let StmtKind::Switch { cases, .. } = self.prog.stmt(s).kind else { return Err(unsupported("switch", Span::default())) };
+        if i >= cases.len() {
+            return val(Value::Undefined);
+        }
+        self.fpush(run, Fr::SwB { s, i: i as u32 })?;
+        self.list_from(run, self.prog.case(self.list_at(cases, i)).body, 0)
     }
 
     fn var_from(&mut self, run: &mut Run, s: StmtId, from: usize) -> Res<Step> {
@@ -1792,6 +1835,31 @@ impl<'p> Interp<'p> {
                 let StmtKind::Try { finalizer, .. } = self.prog.stmt(s).kind else { return Err(unsupported("try", Span::default())) };
                 if finalizer.is_some() { self.fin_start(run, s, env, None) } else { val(Value::Undefined) }
             }
+            Fr::SwD { s } => {
+                let StmtKind::Switch { cases, .. } = self.prog.stmt(s).kind else { return Err(unsupported("switch", Span::default())) };
+                let base = run.slots.len() as u32;
+                self.spush(run, Slot::V(v))?;
+                self.fpush(run, Fr::SwS { base })?;
+                let prog = self.prog.clone();
+                if prog.list(cases).any(|c| self.has_lexical(prog.case(c).body)) {
+                    let saved = self.env;
+                    let env = self.new_env(saved, false)?;
+                    self.env = env;
+                    self.fpush(run, Fr::Scope { saved, env })?;
+                    for c in prog.list(cases) {
+                        self.declare_scope(prog.case(c).body, false)?;
+                    }
+                }
+                self.sw_test(run, s, base, 0)
+            }
+            Fr::SwS { base } => {
+                self.strunc(run, base as usize);
+                val(Value::Undefined)
+            }
+            Fr::SwT { s, base, i } => {
+                if sval(run, base as usize).strict_equals(v) { self.sw_body(run, s, i as usize) } else { self.sw_test(run, s, base, i as usize + 1) }
+            }
+            Fr::SwB { s, i } => self.sw_body(run, s, i as usize + 1),
             Fr::Fin { kind, label, base } => {
                 let held = if kind >= 3 { sval(run, base as usize) } else { Value::Undefined };
                 self.strunc(run, base as usize);
@@ -1909,6 +1977,12 @@ impl<'p> Interp<'p> {
                     }
                 }
                 Fr::Fin { base, .. } => self.strunc(run, base as usize),
+                Fr::SwS { base } => {
+                    self.strunc(run, base as usize);
+                    if matches!(abr, Abr::Break(0)) {
+                        return val(Value::Undefined);
+                    }
+                }
                 _ => {}
             }
         }

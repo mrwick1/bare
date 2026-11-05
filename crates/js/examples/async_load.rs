@@ -1,7 +1,7 @@
 //! Load test for async functions and `await`. One case at one scale per process, so the peak
 //! memory belongs to that run.
 //!
-//!   async_load CASE SCALE    CASE: seq | fanout | nested | trycatch | pending | closures    SCALE: 1, 10, 100
+//!   async_load CASE SCALE    CASE: seq | fanout | nested | trycatch | pending | closures | switch | ifchain    SCALE: 1, 10, 100
 //!
 //! Each case builds a small program, runs it, drains the microtask queue and checks the result against the same
 //! computation done in Rust (the checksum). A `collect` runs while every activation is still suspended. A wrong checksum exits with status 1. It prints wall time per phase,
@@ -46,8 +46,15 @@ fn program(case: &str, n: usize) -> (String, f64) {
         "trycatch" => (format!("var out = [0]; async function f(k) {{ try {{ await Promise.reject(k); }} catch (e) {{ out[0] += e; }} finally {{ await 0; }} }} for (var i = 0; i < {m}; i++) f(i);{reader}"), tri(m)),
         "pending" => (format!("var out = [0]; var res; var p = new Promise(function (r) {{ res = r; }}); async function f() {{ var v = await p; out[0] += v; }} for (var i = 0; i < {m}; i++) f(); res(2);{reader}"), 2.0 * mf),
         "closures" => (format!("var out = [0]; async function f(k) {{ var big = {{ k: k }}; await 0; out[0] += big.k; }} for (var i = 0; i < {m}; i++) f(i);{reader}"), tri(m)),
+        "switch" => (format!("var out = [0]; async function f(k) {{ switch (await k % 4) {{ case 0: let a = k; await 0; out[0] += a; case 1: out[0] += 1; break; case await 2: out[0] += 2; break; default: out[0] += 3; }} }} for (var i = 0; i < {m}; i++) f(i);{reader}"), sw_sum(m)),
+        "ifchain" => (format!("var out = [0]; async function f(k) {{ var r = await k % 4; if (r === 0) {{ let a = k; await 0; out[0] += a; out[0] += 1; }} else if (r === 1) out[0] += 1; else if (r === await 2) out[0] += 2; else out[0] += 3; }} for (var i = 0; i < {m}; i++) f(i);{reader}"), sw_sum(m)),
         _ => die(format!("unknown case {case}")),
     }
+}
+
+/// The sum the `switch` and `ifchain` cases compute.
+fn sw_sum(m: usize) -> f64 {
+    (0..m).map(|k| [k + 1, 1, 2, 3][k % 4] as f64).sum()
 }
 
 fn run_case(case: String, scale: usize) {
