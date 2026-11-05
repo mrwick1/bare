@@ -481,7 +481,8 @@ impl<'a> Tokens<'a> {
                     match self.read() {
                         Some('<') => self.state = State::TagOpen,
                         Some('&') => self.char_ref(false),
-                        Some(_) => {} // A NUL character in text is dropped, like the tree builder does.
+                        Some(_) if self.foreign => self.text.text(input, "\u{FFFD}"),
+                        Some(_) => {} // HTML data drops NUL; foreign text replaces it.
                         None => return,
                     }
                 }

@@ -266,3 +266,14 @@ fn foreign_junk_ends_and_gives_the_same_tree_in_pieces() {
         assert_eq!(streamed(&[&page[..cut], &page[cut..]]), whole, "cut at {cut} in {page:?}");
     }
 }
+
+#[test]
+fn foreign_nul_replaces_and_plaintext_closes_paragraph() {
+    assert_eq!(body("<svg>a\0b</svg>"), lines(&["<svg svg>", "  \"a�b\""]));
+    assert_eq!(body("<p>a<plaintext>b"), lines(&["<p>", "  \"a\"", "<plaintext>", "  \"b\""]));
+}
+
+#[test]
+fn foreign_start_tags_keep_the_open_paragraph() {
+    assert_eq!(body("<p>a<svg><path/></svg>b"), lines(&["<p>", "  \"a\"", "  <svg svg>", "    <svg path>", "  \"b\""]));
+}

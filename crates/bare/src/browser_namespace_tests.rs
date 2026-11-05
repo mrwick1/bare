@@ -455,3 +455,16 @@ fn svg_scripts_and_links_are_not_html_resources() {
     assert_eq!(found.items.len(), 1, "{:?}", found.items);
     assert_eq!(found.base, "http://h/p");
 }
+
+#[test]
+fn html_only_style_and_focus_use_native_namespace_identity() {
+    big(|| {
+        let mut b = browser();
+        let src = format!("var foreign = document.createElementNS('{SVG}', 'rect'); foreign.setAttribute('tabindex', '0'); document.body.appendChild(foreign); var styleGetter = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'style').get; var rejected = 0; try {{ styleGetter.call(foreign); }} catch(e) {{ if(e instanceof TypeError) rejected++; }} try {{ HTMLElement.prototype.focus.call(foreign); }} catch(e) {{ if(e instanceof TypeError) rejected++; }} try {{ HTMLElement.prototype.blur.call(foreign); }} catch(e) {{ if(e instanceof TypeError) rejected++; }} rejected");
+        assert_eq!(js(&mut b, &src), "3");
+        let foreign = b.run_script("foreign").unwrap();
+        let node = b.node(foreign).unwrap();
+        assert!(!b.focus(node).unwrap().focused);
+        assert_eq!(js(&mut b, "var htmlSvg = document.createElement('svg'); typeof htmlSvg.style"), "object");
+    });
+}

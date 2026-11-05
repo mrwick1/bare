@@ -638,7 +638,7 @@ impl Dom {
         }
 
         // interface objects
-        let ifaces: [(&str, ObjId, Option<H>); 13] = [
+        let ifaces: [(&str, ObjId, Option<H>); 14] = [
             ("EventTarget", et, Some(ev::event_target_ctor as H)),
             ("Node", node, None),
             ("Element", element, None),

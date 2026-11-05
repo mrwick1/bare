@@ -439,3 +439,17 @@ fn an_https_document_does_not_fetch_a_plaintext_script() {
         assert_eq!(eval(&mut b,"typeof compromised"),"undefined");
     });
 }
+
+#[test]
+fn dynamically_inserted_svg_scripts_are_inert() {
+    big(|| {
+        let src = "<script>var executed = 0; var s = document.createElementNS('http://www.w3.org/2000/svg', 'script'); s.textContent = 'executed += 1'; document.body.appendChild(s); s.setAttribute('src', '/foreign.js');</script>";
+        let srv = server(vec![js("/foreign.js", "executed += 100")]);
+        let mut b = make(src, &srv, 5_000_000, true);
+        let r = load(&mut b, &srv, quick());
+        assert_eq!(r.stop, Stop::Settled);
+        assert_eq!(r.scripts_run, 1);
+        assert_eq!(r.fetches, 0);
+        assert_eq!(eval(&mut b, "executed"), "0");
+    });
+}

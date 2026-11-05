@@ -1069,6 +1069,7 @@ impl Builder {
             }
             "iframe" | "noembed" => self.raw_text_element(name, &attrs),
             "plaintext" => {
+                self.close_p();
                 self.reconstruct_afe();
                 self.insert_element(name, &attrs, true);
                 self.raw = Some("plaintext");
