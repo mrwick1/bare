@@ -241,7 +241,7 @@ fn a_missing_target_is_not_fatal_and_a_wrong_element_is() {
 #[test]
 fn resume_before_run_and_after_a_failed_load_does_nothing() {
     big(|| {
-        let srv = server(|| vec![]);
+        let srv = server(Vec::new);
         let mut s = Session::new(cfg(srv.url("/")));
         assert!(matches!(s.resume(&[]).stop, SessionStop::LoadFailed(_)));
         assert_eq!(srv.total(), 0);
