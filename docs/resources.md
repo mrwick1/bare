@@ -2875,3 +2875,60 @@ Release build, archMachine, through `Page::handle` and `Page::paint` in a window
 - A window title shows the first URL only (it does not follow a navigation).
 - The live staging login was not run on this build.
 
+
+## Pending style sheets
+
+Chrome 155.0.8059.39, headless, measured with `tools/ui/chrome_pending_sheet.mjs`. A local server sends each sheet after a delay (400 ms in most cases). The page reads `getComputedStyle(#t).color` and `document.styleSheets.length`. The full log is `tools/fixtures/ui/chrome-pending-sheets.txt`. "No rules" means the read gives the page without the sheet, and the sheet is not in `document.styleSheets`.
+
+| Case | What Chrome shows |
+| --- | --- |
+| A1 script inserts a `<link rel=stylesheet>` | Same task, microtask and timer 0: no rules, `sheets=0`, `link.sheet` is `null`. In the `load` event of the link: rules, `sheets=1`. |
+| A2 script-inserted link, 404 | No rules. `error` event. |
+| A3 link inserted with a URL that an earlier stylesheet link already loaded | Rules in the same task (memory cache), `sheets=2`. |
+| A4 same, but the URL was only read with `fetch()` | No rules until the link loads. `fetch` does not share the cache. |
+| B1 script changes `href` of a loaded link | The old sheet stays (rules, `link.sheet` set) until the new sheet loads. Then the new rules replace it. |
+| B2 script sets `href` on a link that had none | No rules until load. |
+| C1, C2 parser-inserted link in `head` or in `body`, then an inline script | The script waits for the sheet (it ran at 400 ms) and sees the rules. |
+| C3 inline script before a parser-inserted link | The first script sees no rules. The second waits and sees them. |
+| C6, C7 external script after the link, `defer` script | Both wait for the sheet and see the rules. |
+| C4 parser link `media=print` | Does not block. No rules. Chrome loads it anyway (the request is sent). |
+| C5 parser link `disabled` | Does not block. No rules. No request. |
+| D1 preload (`as=style`) loaded, then `rel` set to `stylesheet` on the same link | Rules in the same task, `sheets=1`. `load` fires again. |
+| D2 preload loaded, then a new stylesheet link with the same URL | Rules in the same task, `sheets=1`. |
+| D3 preload still loading, stylesheet link with the same URL | No rules until it loads. |
+| E1 script-inserted link `media=print` | Loads (event at 100 ms), `sheets=1`, no rules. Setting `media=all` gives the rules in the same task. |
+| F1 script-inserted link with `disabled` | No request, no rules, `sheets=0`. After `disabled=false` it loads, no rules until then. |
+| F2 loaded link, `disabled=true` then `false` | Rules go away and come back in the same task. |
+| G1 loaded link removed, then inserted again | Rules go away on removal. They return on insertion in the same task. |
+| H1 link inserted with `innerHTML` | Same as A1: no rules until it loads. |
+| I1 script-inserted `<style>` with `@import` | The rules of the style text apply at once. The imported rules come at 300 ms. `sheets=1`. |
+| J1 two script-inserted links, slow then fast | The fast sheet applies while the slow one waits (sheet by sheet). |
+
+Rules that follow, in `browser_computed.rs`, `browser_loader/sheets.rs` and `browser_loader/preload.rs`:
+
+- Only a sheet that is loaded has rules. A script-inserted sheet that is not loaded adds none, and a read does not stop the page. This is `Browser::set_pending_sheets(true)`. The page loader sets it when the first pass has supplied every sheet of the parsed document. The pre-parsed document has those sheets before the first script, as Chrome has (C1 to C3, C6, C7). An embedder that never sets it keeps the old stop (`Unsupported`).
+- A link keeps the sheet it had until a new `href` is supplied (B1). `style_availability` binds each link to its sheet at each pass.
+- A style preload that loaded supplies its sheet under its `href` text before its `load` runs (D1, D2). A later stylesheet link with the same text has it in the same task. The key is the exact `href` text. The same URL in another text is a new sheet in bare and a cached one in Chrome (to verify: it reads as no rules for one task).
+- Still a stop, on purpose: a link whose old sheet is gone, and a link with a `media` text. Chrome had loaded a link that its `media` turned off (E1, C4), bare did not fetch it, and a read cannot tell this case from a new link with `media=all` (a rare case).
+- Gaps that stay: `<link disabled>` is fetched and applied (C5, F1, F2: Chrome does neither). `media=print` links are not fetched (Chrome fetches them). `document.styleSheets` does not exist. When it does, a pending sheet must not be in it (A1).
+
+Cost: no sheet is pending in these rows, so the cost is the bookkeeping for the bindings. User instructions, `perf stat -e instructions:u`, minimum of 10 runs, main 5978d55 against this build:
+
+| Row | main | build | change |
+| --- | --- | --- | --- |
+| sheets_load linked 10 | 88,268,793 | 88,593,836 | +0.37% |
+| sheets_load linked 100 | 6,527,553,324 | 6,540,344,286 | +0.20% |
+| sheets_load imports 100 | 9,745,707,344 | 9,748,269,309 | +0.03% |
+| sheets_load dynamic 10 | 135,953,226 | 136,516,876 | +0.41% |
+| sheets_load dynamic 100 | 14,794,123,128 | 14,841,571,372 | +0.32% |
+| style_load setget 100 | 7,660,011,749 | 7,659,144,875 | -0.01% |
+| style_load churn 100 | 7,165,624,716 | 7,166,546,657 | +0.01% |
+| style_load attrs 100 | 5,749,161,487 | 5,748,833,568 | -0.01% |
+| style_load shorthand 100 | 19,856,976,891 | 19,856,059,588 | -0.00% |
+| browser_load mutation 100 | 11,265,490,916 | 11,265,166,000 | -0.00% |
+| browser_load lookup 100 | 12,081,733,772 | 12,083,970,492 | +0.02% |
+| browser_load event 100 | 8,622,850,847 | 8,621,445,263 | -0.02% |
+
+A first version rebuilt the binding table at each pass and cost +1.4% on `dynamic`. It now changes only the bindings that differ.
+
+The staging login chunks hold three reads of `getComputedStyle` (saved login scripts, `tools/staging_js_fetch.py`): `shouldSkipElement` of the Next.js App Router layout router (chunk `2117`: `getComputedStyle(e).position` for `sticky` or `fixed`, in `handlePotentialScroll`, which runs in the commit of a navigation), the Radix `Presence` ref callback (chunk `6792`, reads the object only), and the `direction` of `<html>` in the toaster (chunk `4438`). Hypothesis, not verified on the live page: the first one is the reader that stops the page, because React commits the route sheet in the same task. `sheets_tests.rs` has a React-like fixture of that pattern.

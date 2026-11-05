@@ -11,7 +11,9 @@
 //! Which links: HTML `link` elements in the tree (not in a `template`) whose `rel` has the token `preload`, with a non-empty `href`
 //! that resolves to an http(s) URL and a `media` that matches. The `as` value decides, as the HTML Standard says:
 //! - `style`: fetched through `fetch_sheet` (the cache of `sheets.rs`, keyed by URL). A later `<link rel=stylesheet>` with the same
-//!   URL reads that text and does not fetch.
+//!   URL reads that text and does not fetch. A good one is also supplied to `getComputedStyle` under its `href` text, before its `load`
+//!   runs (`Run::supply`): in Chrome the sheet of that URL is then in place at once for a stylesheet link (or this link, with `rel`
+//!   changed), even in the task that inserts it.
 //! - `script`: fetched with `Expect::Script`. The text is kept by URL until the first script with that URL takes it
 //!   (`take_script`, used by parsed and dynamic scripts). Kept text counts in the total byte cap (`Run::kept`).
 //! - any other destination of the Fetch Standard (`font`, `image`, `fetch`, `audio`, ...): fetched with `Expect::Opaque`. Status and
@@ -188,6 +190,11 @@ impl Run<'_> {
                 Kind::Style => {
                     let before = self.dom.scripts.sheets.borrow().stats.fetches;
                     let ok = self.fetch_sheet(&url)?.is_ok();
+                    // Chrome keeps a loaded style preload: a `<link rel=stylesheet>` for it (or this link with `rel` changed) has its sheet
+                    // at once, before its `load` runs. So the sheet is supplied under this `href` text.
+                    if ok {
+                        self.supply(&raw, base)?;
+                    }
                     let sent = self.dom.scripts.sheets.borrow().stats.fetches != before;
                     self.dom.scripts.preloads.borrow_mut().stats.fetches += sent as usize;
                     ok

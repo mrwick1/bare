@@ -310,15 +310,139 @@ fn a_sheet_that_a_script_adds_is_loaded_at_the_next_boundary_and_not_inside_the_
         assert_eq!(log, "p=rtl");
         assert_eq!(srv.hits("/dyn.css"), 1);
         assert_eq!(r.stop, Stop::Settled);
-        // In the same task there is no I/O: the read stops the page (the gate of the computed module) and the sheet is never fetched.
+        // In the same task there is no I/O, and the sheet has no rules yet (the next test). A link with a `media` text may be a link
+        // that a script just turned on, which Chrome had loaded: that read still stops the page.
         let html = format!(
-            "<p id=p></p><script>{LOG}var l = document.createElement('link'); l.rel = 'stylesheet'; l.setAttribute('href', 'dyn.css'); document.head.appendChild(l); {}</script>",
+            "<p id=p></p><script>{LOG}var l = document.createElement('link'); l.rel = 'stylesheet'; l.setAttribute('media', 'all'); l.setAttribute('href', 'dyn.css'); document.head.appendChild(l); {}</script>",
             dir("p")
         );
         let srv = css_site(&[("/dyn.css", "#p { direction: rtl }")]);
         let (_, r, _) = run(&html, &srv);
         assert!(matches!(r.stop, Stop::Fatal(Fatal::Unsupported(w)) if w.contains("external stylesheet")), "{:?}", r.stop);
         assert_eq!(srv.hits("/dyn.css"), 0);
+    });
+}
+
+/// Chrome (B1): a link whose `href` a script changed keeps the sheet that it had until the new one has loaded. A new link beside
+/// it has no sheet yet, and the sheet that is in place still counts (J1).
+#[test]
+fn a_link_keeps_its_old_sheet_while_the_new_href_loads() {
+    big(|| {
+        let srv = css_site(&[("/one.css", "#p { direction: rtl }"), ("/two.css", "#q { direction: rtl }")]);
+        let html = format!(
+            "<link id=l rel=stylesheet href=one.css><p id=p></p><p id=q></p><script>{LOG}\
+               document.getElementById('l').setAttribute('href', 'two.css'); {} {}\
+               setTimeout(function () {{ {} {} }}, 0);</script>",
+            dir("p"), dir("q"), dir("p"), dir("q")
+        );
+        let (log, r, _) = run(&html, &srv);
+        assert_eq!(log, "p=rtl|q=ltr|p=ltr|q=rtl", "{:?}", r.stop);
+        assert_eq!((r.stop, srv.hits("/one.css"), srv.hits("/two.css")), (Stop::Settled, 1, 1));
+        // A second link is new: only its own rules wait.
+        let html = format!(
+            "<link rel=stylesheet href=one.css><p id=p></p><p id=q></p><script>{LOG}\
+               var l = document.createElement('link'); l.rel = 'stylesheet'; l.setAttribute('href', 'two.css'); document.head.appendChild(l); {} {}\
+               setTimeout(function () {{ {} {} }}, 0);</script>",
+            dir("p"), dir("q"), dir("p"), dir("q")
+        );
+        let (log, r, _) = run(&html, &srv);
+        assert_eq!(log, "p=rtl|q=ltr|p=rtl|q=rtl", "{:?}", r.stop);
+    });
+}
+
+/// Chrome (D1, D2): a style preload that has loaded is in the document cache. A stylesheet link for the same `href`, or the preload
+/// link with `rel` changed to `stylesheet` (the way React does it), has the sheet in the same task. Before the preload loads it has not.
+#[test]
+fn a_loaded_style_preload_gives_its_sheet_to_a_stylesheet_link_at_once() {
+    big(|| {
+        let srv = css_site(&[("/pre.css", "#p { direction: rtl }")]);
+        let html = format!(
+            "<p id=p></p><script>{LOG}\
+               var k = document.createElement('link'); k.rel = 'preload'; k.as = 'style'; k.setAttribute('href', 'pre.css');\
+               k.addEventListener('load', function () {{\
+                 log.push('preload'); {}\
+                 var l = document.createElement('link'); l.rel = 'stylesheet'; l.setAttribute('href', 'pre.css'); document.head.appendChild(l); {}\
+               }});\
+               document.head.appendChild(k); {}</script>",
+            dir("p"), dir("p"), dir("p")
+        );
+        let (log, r, _) = run(&html, &srv);
+        assert_eq!(log, "p=ltr|preload|p=ltr|p=rtl", "{:?}", r.stop);
+        assert_eq!((r.stop, srv.hits("/pre.css")), (Stop::Settled, 1));
+        // The same link, with `rel` changed in its own `load`.
+        let html = format!(
+            "<p id=p></p><script>{LOG}\
+               var k = document.createElement('link'); k.rel = 'preload'; k.as = 'style'; k.setAttribute('href', 'pre.css');\
+               k.addEventListener('load', function () {{ if (k.rel == 'preload') {{ k.rel = 'stylesheet'; {} }} }});\
+               document.head.appendChild(k);</script>",
+            dir("p")
+        );
+        let (log, r, _) = run(&html, &srv);
+        assert_eq!(log, "p=rtl", "{:?}", r.stop);
+        assert_eq!((r.stop, srv.hits("/pre.css")), (Stop::Settled, 2));
+    });
+}
+
+/// Chrome (A2, I1): a link that fails has no rules and an `error`. An inline `<style>` that a script adds works at once, and only
+/// its `@import` waits.
+#[test]
+fn a_failed_new_link_and_a_new_style_with_an_import_read_without_the_pending_part() {
+    big(|| {
+        let srv = css_site(&[("/imp.css", "#p { direction: rtl }")]);
+        let html = format!(
+            "<p id=p></p><p id=q></p><script>{LOG}\
+               var l = document.createElement('link'); l.rel = 'stylesheet'; l.setAttribute('href', 'missing.css');\
+               l.addEventListener('error', function () {{ log.push('error'); }}); document.head.appendChild(l); {}\
+               var s = document.createElement('style'); s.textContent = '@import url(imp.css); #q {{ direction: rtl }}'; document.head.appendChild(s); {} {}\
+               setTimeout(function () {{ {} {} }}, 0);</script>",
+            dir("p"), dir("p"), dir("q"), dir("p"), dir("q")
+        );
+        let (log, r, _) = run(&html, &srv);
+        assert_eq!(log, "p=ltr|p=ltr|q=rtl|error|p=rtl|q=rtl", "{:?}", r.stop);
+        assert_eq!((r.stop, r.css.failed, srv.hits("/imp.css")), (Stop::Settled, 1, 1));
+    });
+}
+
+/// A link that was off because of its `media` and that a script turns on may have had its sheet in Chrome: it is not read as empty.
+#[test]
+fn a_media_that_turns_a_link_on_in_the_same_task_stops_the_page() {
+    big(|| {
+        let srv = css_site(&[("/print.css", "#p { direction: rtl }")]);
+        let html = format!(
+            "<link id=l rel=stylesheet href=print.css media=print><p id=p></p><script>{LOG}{}\
+               document.getElementById('l').setAttribute('media', 'all'); {}</script>",
+            dir("p"), dir("p")
+        );
+        let (log, r, _) = run(&html, &srv);
+        assert_eq!(log, "p=ltr");
+        assert!(matches!(r.stop, Stop::Fatal(Fatal::Unsupported(w)) if w.contains("external stylesheet")), "{:?}", r.stop);
+    });
+}
+
+/// The pattern of the staging login, written like React 19 and the Next.js App Router do it (names are those of their code): on a
+/// client-side navigation React preloads the route sheet (`preload`, `as=style`), then, in its commit, puts in a
+/// `<link rel=stylesheet data-precedence>` and `InnerScrollAndFocusHandler.handlePotentialScroll` reads `getComputedStyle(node).position`
+/// of the first node of the new segment (`shouldSkipElement`: a `sticky` or `fixed` node is skipped). That read is in the task of the
+/// insert. Chrome has no rules of the new sheet there, so the node is not skipped. After the sheet loads, it is skipped.
+#[test]
+fn a_react_like_route_commit_reads_position_in_the_task_that_inserts_the_route_sheet() {
+    big(|| {
+        let srv = css_site(&[("/route.css", "#first { position: sticky }"), ("/other.css", "#first { position: fixed }")]);
+        let html = format!(
+            "<main id=first></main><section id=second></section><script>{LOG}\
+               function shouldSkipElement(e) {{ return ['sticky', 'fixed'].includes(getComputedStyle(e).position); }}\
+               function handlePotentialScroll() {{ var r = document.getElementById('first'); while (shouldSkipElement(r)) {{ r = r.nextElementSibling; }} log.push('focus ' + r.id); }}\
+               function insertStylesheet(href) {{ var l = document.createElement('link'); l.rel = 'stylesheet'; l.setAttribute('href', href); l.setAttribute('data-precedence', 'next'); document.head.appendChild(l); return l; }}\
+               function preload(href) {{ var l = document.createElement('link'); l.rel = 'preload'; l.as = 'style'; l.setAttribute('href', href); document.head.appendChild(l); return l; }}\
+               var p = preload('route.css'); p.addEventListener('load', function () {{ log.push('preload loaded'); }});\
+               /* A commit that does not wait for the sheet (a sync update). */\
+               var o = insertStylesheet('other.css'); handlePotentialScroll(); o.addEventListener('load', function () {{ log.push('other loaded'); handlePotentialScroll(); }});\
+               /* A transition: the commit waits for the load of the route sheet, then reads. */\
+               setTimeout(function () {{ var r = insertStylesheet('route.css'); r.addEventListener('load', function () {{ log.push('route loaded'); handlePotentialScroll(); }}); }}, 10);</script>"
+        );
+        let (log, r, _) = run(&html, &srv);
+        assert_eq!(log, "focus first|preload loaded|other loaded|focus second|route loaded|focus second", "{:?}", r.stop);
+        assert_eq!((r.stop, r.script_throws, srv.hits("/route.css"), srv.hits("/other.css")), (Stop::Settled, 0, 1, 1));
     });
 }
 

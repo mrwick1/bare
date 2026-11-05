@@ -1168,11 +1168,12 @@ pub enum Source {
 /// is left out, and so is an alternate style sheet (`rel="alternate stylesheet"`): a browser does not use it unless the user asks.
 /// An empty `media` is good.
 pub fn sources(doc: &Document, viewport: (f32, f32)) -> Vec<Source> {
-    sources_capped(doc, viewport, usize::MAX, usize::MAX).unwrap_or_default()
+    sources_capped(doc, viewport, usize::MAX, usize::MAX).unwrap_or_default().into_iter().map(|(s, _)| s).collect()
 }
 
-/// The same, but `None` before more than `max_sources` sources, or more than `max_bytes` bytes of `<style>` text and `href`, are copied.
-pub fn sources_capped(doc: &Document, viewport: (f32, f32), max_sources: usize, max_bytes: usize) -> Option<Vec<Source>> {
+/// The same, but each source comes with its element, and the result is `None` before more than `max_sources` sources, or more than
+/// `max_bytes` bytes of `<style>` text and `href`, are copied.
+pub fn sources_capped(doc: &Document, viewport: (f32, f32), max_sources: usize, max_bytes: usize) -> Option<Vec<(Source, NodeId)>> {
     // A name that no node in the page has cannot be on any element, so `None` is a good answer for a name that is not in the table.
     let (style, link, media, rel, href) = (doc.find_atom("style"), doc.find_atom("link"), doc.find_atom("media"), doc.find_atom("rel"), doc.find_atom("href"));
     let attr = |el, name: Option<Atom>| name.and_then(|n| doc.attr(el, n));
@@ -1197,14 +1198,14 @@ pub fn sources_capped(doc: &Document, viewport: (f32, f32), max_sources: usize, 
                     text.push_str(doc.text(span));
                 }
             }
-            out.push(Source::Inline(text));
+            out.push((Source::Inline(text), el));
         } else if let Some(rel) = attr(el, rel) {
             let has = |word: &str| rel.split_ascii_whitespace().any(|w| w.eq_ignore_ascii_case(word));
             if let (true, false, Some(h)) = (has("stylesheet"), has("alternate"), attr(el, href)) {
                 bytes = bytes.saturating_add(h.len());
                 over = out.len() >= max_sources || bytes > max_bytes;
                 if !over {
-                    out.push(Source::Link(h.to_string()));
+                    out.push((Source::Link(h.to_string()), el));
                 }
             }
         }

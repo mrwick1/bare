@@ -5,8 +5,21 @@
 //! - Before the first blocking script (`go_inner`), and in `resume` before the inputs.
 //! - Before each parsed script, before each dynamic script and at the start of each round, if a task ran since the last
 //!   pass (`feed_if_ran`). So a link that a script inserted, or whose `href`/`media`/`rel` it changed, or a `<base>` it changed,
-//!   is loaded before the next script or timer. A read in the same task as the change has no sheet yet and stops the page
-//!   (`Fatal::Unsupported`, the gate of `browser_computed.rs`): the engine does no network call in a script.
+//!   is loaded before the next script or timer. The engine does no network call in a script.
+//!
+//! A read before the pass: pending sheets (as Chrome shows, `docs/resources.md#pending-style-sheets`)
+//! - The first pass that ends `Ready` has every sheet of the parsed document. The driver then calls `Browser::set_pending_sheets(true)`.
+//!   Chrome blocks a script on a parser-inserted sheet, and a pre-parsed document has them all before the first script, so that case needs
+//!   no rule. Before that call a missing sheet still stops the page (`Fatal::Unsupported`).
+//! - After it, a sheet that a script added (a `<link>`, an `@import` of a new `<style>`) and that is not supplied yet is "loading": it adds
+//!   no rules, and a read in the same task, in a microtask or in a timer before the next pass sees the page without it. The `load` of
+//!   the link runs after the supply, so a read in it sees the sheet.
+//! - A link whose `href` changed keeps the sheet that it had until the new one is supplied. `style_availability` binds each link to
+//!   its sheet at each pass for this. If that sheet is gone, or the link has a `media` text (it may have been off and just turned on, and
+//!   Chrome had loaded it), the read still stops the page: bare does not fetch a sheet that its `media` turns off.
+//! - A style preload (`preload.rs`) that loaded supplies its sheet under its `href` text before its `load` runs. A
+//!   `<link rel=stylesheet>` for it, or the same link with `rel` changed, has the sheet at once, as in Chrome (the memory cache). The key is
+//!   the exact `href` text: the same URL in another text is a new sheet that loads at the next pass.
 //! - A pass asks the document (`Browser::style_availability`) which sheets it needs and the driver does not have: this reads
 //!   the current DOM, so a node that was removed is never fetched, and a `media` that does not match is not fetched.
 //!
@@ -26,8 +39,8 @@
 //! - Nothing that is a budget is an empty sheet: a time limit is `Stop::TimeBudget`, and a size, fetch, depth, parts or
 //!   references cap is `Fatal::Limit("css-...")`. Both end the run for good: no JS and no I/O after them (the sticky fatal).
 //!
-//! Not done: `<link disabled>`, `crossorigin`, `integrity`, `Link:` headers, `@import supports()`, a changed server text is not
-//! fetched again in the same document (the cache is by URL), a sheet that a script reads before its first pass (see above).
+//! Not done: `<link disabled>` (Chrome loads nothing and adds no rules; bare fetches and applies it), `crossorigin`, `integrity`, `Link:` headers, `@import supports()`, a changed server text is not
+//! fetched again in the same document (the cache is by URL), a sheet that a script reads before the first pass ends `Ready` (it stops the page).
 
 use super::{EvTarget, Fatal, Flow, Run, Stop, WS, fatal_of, label};
 use crate::browser_computed::{SheetPart, StyleAvailability, join_layer};
@@ -152,6 +165,8 @@ impl Run<'_> {
             let fired = self.feed_preloads(&base)?;
             let missing = match self.b.style_availability() {
                 Ok(StyleAvailability::Ready) => {
+                    // Every sheet of the parsed document is in. A sheet that a script adds from now on loads after its task.
+                    self.b.set_pending_sheets(true);
                     let (before, known) = {
                         let s = self.dom.scripts.sheets.borrow();
                         (s.notified.len(), s.supplied.iter().map(|(raw, url)| (raw.clone(), url.clone(), s.fetched.get(url).is_some_and(Result::is_ok))).collect::<Vec<_>>())
@@ -172,7 +187,7 @@ impl Run<'_> {
     }
 
     /// Fetch and supply the sheet that `raw` names, then tell the `<link>` elements that wait for it.
-    fn supply(&mut self, raw: &str, base: &Url) -> Flow {
+    pub(super) fn supply(&mut self, raw: &str, base: &Url) -> Flow {
         let (parts, url, top_ok) = match base.join(raw.trim_matches(WS)) {
             Err(_) => {
                 self.sheet_failed(None, "the URL is not an http(s) URL".into());

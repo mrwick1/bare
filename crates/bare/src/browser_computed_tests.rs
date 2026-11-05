@@ -304,6 +304,35 @@ fn external_sheets_are_ordered_and_missing_ones_are_gated() {
     assert_eq!(js(&mut b, "cs.display"), "block");
 }
 
+/// Without `set_pending_sheets` a missing sheet is a gate (above). With it, a sheet that is not supplied is still loading: it adds no
+/// rules, `style_availability` still lists it, and a link keeps the sheet that it had.
+#[test]
+fn a_pending_sheet_adds_no_rules_when_the_driver_loads_it_later() {
+    let mut b = at(EXT);
+    b.set_external_stylesheet("a.css", vec![part("#a { display: flex }")]).unwrap();
+    b.set_external_stylesheet("b.css", vec![part("#a { color: blue }")]).unwrap();
+    assert_eq!(b.style_availability().unwrap(), StyleAvailability::Ready);
+    b.set_pending_sheets(true);
+    js(&mut b, "var cs = getComputedStyle(document.getElementById('a')); var l = document.createElement('link'); l.rel = 'stylesheet'; l.setAttribute('href', 'new.css'); document.head.appendChild(l); 0");
+    assert_eq!(missing(&b), ["new.css"]);
+    assert_eq!(js(&mut b, "cs.color + '|' + cs.display"), "rgb(0, 0, 255)|flex");
+    // The new link follows the supplied sheet at once.
+    b.set_external_stylesheet("new.css", vec![part("#a { color: red }")]).unwrap();
+    assert_eq!(js(&mut b, "cs.color"), "rgb(255, 0, 0)");
+    // An old link keeps its sheet while its new `href` loads. `style_availability` is the driver's pass that binds the links.
+    assert_eq!(b.style_availability().unwrap(), StyleAvailability::Ready);
+    js(&mut b, "document.head.children[0].setAttribute('href', 'c.css'); 0");
+    assert_eq!(missing(&b), ["c.css"]);
+    assert_eq!(js(&mut b, "cs.display"), "flex");
+    // If the sheet that the link had is gone, the read is a gate again.
+    assert!(b.remove_external_stylesheet("a.css"));
+    assert!(js(&mut b, "cs.display").starts_with("unsupported:computed style needs an external stylesheet"));
+    // A second driver with `false` is strict again.
+    b.set_pending_sheets(false);
+    js(&mut b, "document.head.children[0].setAttribute('href', 'b.css'); 0");
+    assert_eq!(js(&mut b, "cs.display"), "block");
+}
+
 #[test]
 fn only_real_sources_are_required() {
     let mut b = at("<!doctype html><html><head><link rel=stylesheet href='m.css' media='print'><link rel='alternate stylesheet' href='alt.css'><link rel=stylesheet><link rel=icon href=i.png><link rel=stylesheet href='  '></head><body><div id=a></div></body></html>");
