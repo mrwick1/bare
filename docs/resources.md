@@ -1552,3 +1552,10 @@ The assembled workspace passes 1,958 tests, with nine ignored. Release bare pass
 A separate reduced probe mounts a controlled input through three cached React chunks in bare. Browser::type_text fires onChange and updates React state and the rendered text. A JS-side value write followed by input dispatch is suppressed by React's value tracker. Both probe runs use loopback only. The temporary probe was removed. This verifies that reduced input path, not the login flow.
 
 The full cached login still stops at TraversalDepth after 21 tasks and scripts, 17 fetches and 575,754 bytes. Both CSS sheets load without failure. No form is present. Evaluator guards remain unchanged. No live staging, credentials, GUI, browser comparison, complete hydration or authenticated journey was tested.
+
+
+## Paused statement-machine integration
+
+The local statement-machine-review branch holds the pending synchronous statement continuation machine and a do-while step correction. Main remains29fc420 from PR116. No PR or push exists for this integration. Arjun paused all work on2026-11-05. See [session-handoff.md](session-handoff.md) for commits, files, validation, log paths, the exact cached result and the hold.
+
+The latest full cached result is CallDepth, not successful hydration. The guard refuses at128 calls while native traversal frames are503 and statement frames330. No counter leak was observed. One alternating call edge reuses the same argument handle60 times; the other edge has61 distinct handles. A finite walk or regeneration loop is not determined. Asset/function mapping from that probe remains unverified. Do not raise guards or infer a new platform blocker from this result.

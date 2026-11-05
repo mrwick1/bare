@@ -426,3 +426,6 @@ Live name collections, input/change handler properties and the native shadow-roo
 
 
 Submit-button clicks now dispatch a native SubmitEvent after a non-canceled click, with disabled-control checks and live form ownership. Validation and native navigation remain explicit gates. Native offset dimensions use the real cascade and bounded layout; hidden subtrees do not consume visible geometry limits. Visible shadow hosts and culled inline boxes still gate. The workspace passes 1,958 tests. A reduced cached-React input probe confirms driver input updates controlled state. The full login still stops at TraversalDepth with no form. See [resources.md](resources.md#form-activation-and-native-border-box-dimensions).
+
+
+Work is paused at Arjun's request on2026-11-05. The pending local statement-machine integration is in statement-machine-review, not main. It removes recursive compound-statement execution under separate bounded frames. The cached page now reaches CallDepth128 with503 native traversal frames and330 statement frames. A repeated-argument call pattern remains unresolved; finiteness is not proved. No form or authentication is verified. Read [session-handoff.md](session-handoff.md) before resuming.

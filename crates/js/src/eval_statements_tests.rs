@@ -336,3 +336,20 @@ fn terminating_a_do_while_does_not_charge_an_extra_iteration() {
         assert_eq!(steps("do {} while (false)"), steps("do { break } while (true)"));
     });
 }
+
+
+#[test]
+fn a_statement_frame_fault_poisoned_job_is_not_replayed() {
+    real_stack(|| {
+        let mut it = Interp::realm(Heap::default(), lim(768)).unwrap();
+        let src = format!("var runs=0, late=0, fin=0, cat=0; Promise.resolve().then(function() {{ runs++; try {{ {}1{} }} catch(e) {{ cat++ }} finally {{ fin++ }} }}); Promise.resolve().then(function() {{ late++ }});", "{ ".repeat(12), " }".repeat(12));
+        it.run_script(&src).unwrap();
+        it.limits.max_statement_frames = 8;
+        assert!(matches!(it.drain_microtasks(), Err(Error::Limit(LimitKind::StatementFrames))));
+        assert_eq!((it.stmt_frames, it.frames, it.depth), (0, 0, 0));
+        it.limits.max_statement_frames = 768;
+        assert!(matches!(it.drain_microtasks(), Err(Error::Limit(LimitKind::StatementFrames))));
+        assert_eq!(it.run_script("[runs,late,cat,fin].join()").map(|v| it.display(v)).unwrap(), "1,0,0,0");
+        it.collect(&[]).unwrap();
+    });
+}
