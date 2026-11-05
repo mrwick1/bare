@@ -55,7 +55,7 @@
 
 use crate::browser::*;
 use crate::browser_dom::{arg, attr_set, input_el, input_kind};
-use bare_html::dom::{Document, NodeData, NodeId};
+use bare_html::dom::{Document, NodeId};
 use bare_js::eval::{Error, Interp};
 use bare_js::value::{Value, to_uint32};
 
@@ -108,7 +108,7 @@ pub(crate) fn scans() -> usize {
 /// both go through it. (`input_el`, `driver_input` and `Dom::input_value_of`'s callers keep their own `input` name
 /// tests; they are outside this file.)
 pub(crate) fn is_html_input(doc: &Document, n: NodeId) -> bool {
-    matches!(*doc.data(n), NodeData::Element { name, .. } if doc.atom_str(name) == "input")
+    doc.is_html(n, "input")
 }
 
 /// The selection a stored state gives in a value of `len` UTF-16 units: clamped, or the caret at the end.

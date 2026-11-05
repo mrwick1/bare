@@ -240,6 +240,8 @@ pub(crate) struct Scripts {
     fatal: RefCell<Option<Fatal>>,
     /// Script downloads and bytes so far, kept between runs so that a resume cannot reset the fetch budget.
     used: Cell<(usize, usize)>,
+    page_caps: Cell<(usize, usize, Duration)>,
+    page_spent: Cell<(usize, usize, Duration)>,
 }
 
 impl Dom {
@@ -628,6 +630,8 @@ impl Browser {
                 items.push(Parsed { n, node: item.node, module, timing, source });
             }
         }
+        dom.scripts.page_caps.set((cfg.limits.max_tasks, cfg.limits.max_rounds, cfg.limits.max_time));
+        let started = Instant::now();
         let deadline = deadline_after(cfg.limits.max_time);
         let mut run = Run {
             b: self,
@@ -647,6 +651,7 @@ impl Browser {
         };
         let stop = run.go();
         let mut res = run.res;
+        dom.scripts.page_spent.set((res.tasks, res.rounds, started.elapsed()));
         dom.scripts.used.set((res.fetches, res.bytes));
         if let Stop::Fatal(f) = &stop {
             *dom.scripts.fatal.borrow_mut() = Some(f.clone());
@@ -661,9 +666,15 @@ impl Browser {
     /// Take the inputs of `steps` in order, then run the rounds again on a page that `run_page` settled: the same realm,
     /// DOM, queues and pumps, no reload. A sticky fatal stops it before any JS or I/O. `limits` is what is left of the
     /// session; the fetch budget of the page carries over. A page that did not run, or has no URL, is a `Setup` fatal.
-    pub(crate) fn resume_page(&mut self, client: Client, limits: PageLimits, steps: &[Input]) -> PageResult {
+    pub(crate) fn resume_page(&mut self, client: Client, mut limits: PageLimits, steps: &[Input]) -> PageResult {
         let dom = self.dom.clone();
         let (fetches, bytes) = dom.scripts.used.get();
+        let spent = dom.scripts.page_spent.get();
+        let caps = dom.scripts.page_caps.get();
+        limits.max_tasks = limits.max_tasks.min(caps.0.saturating_sub(spent.0));
+        limits.max_rounds = limits.max_rounds.min(caps.1.saturating_sub(spent.1));
+        limits.max_time = limits.max_time.min(caps.2.saturating_sub(spent.2));
+        let started = Instant::now();
         let mut res = PageResult { stop: Stop::Settled, ready_state: "loading", scripts_run: 0, script_throws: 0, load_errors: 0, tasks: 0, rounds: 0, fetches, bytes, diagnostics: Vec::new(), dropped_diagnostics: 0 };
         let prior = dom.scripts.fatal.borrow().clone();
         if let Some(f) = prior {
@@ -693,6 +704,7 @@ impl Browser {
         };
         let stop = run.resume(steps).err().unwrap_or(Stop::Settled);
         let mut res = run.res;
+        dom.scripts.page_spent.set((spent.0.saturating_add(res.tasks), spent.1.saturating_add(res.rounds), spent.2.saturating_add(started.elapsed())));
         dom.scripts.used.set((res.fetches, res.bytes));
         if let Stop::Fatal(f) = &stop {
             *dom.scripts.fatal.borrow_mut() = Some(f.clone());

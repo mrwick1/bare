@@ -306,3 +306,22 @@ fn resume_load() {
         println!("LOAD n={n} sum={want} fx={} hits={fetches} checksum_ok", fetches * 2);
     }).unwrap().join().unwrap();
 }
+
+#[test]
+fn page_task_budget_cannot_be_reset_by_resuming() {
+    big(|| {
+        let srv = server(|| vec![("/", html("<button id=b></button><script>document.getElementById('b').addEventListener('click', function(){localStorage.setItem('clicked','1')})</script>"))]);
+        let mut c = cfg(srv.url("/"));
+        c.page.max_tasks = 8;
+        c.limits.max_tasks = 1000;
+        let mut s = Session::new(c);
+        assert_eq!(s.run().stop, SessionStop::Page(Stop::Settled));
+        let mut stopped = false;
+        for _ in 0..20 {
+            let r = s.resume(&[Input::Click("#b")]);
+            if matches!(r.stop, SessionStop::Page(Stop::TaskBudget)) { stopped = true; break; }
+            assert_eq!(r.stop, SessionStop::Page(Stop::Settled));
+        }
+        assert!(stopped, "resume reset the per-document task budget");
+    });
+}

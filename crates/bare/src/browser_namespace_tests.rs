@@ -468,3 +468,13 @@ fn html_only_style_and_focus_use_native_namespace_identity() {
         assert_eq!(js(&mut b, "var htmlSvg = document.createElement('svg'); typeof htmlSvg.style"), "object");
     });
 }
+
+#[test]
+fn native_selection_does_not_accept_foreign_input_names() {
+    big(|| {
+        let mut b = browser();
+        let v = b.run_script("document.createElementNS('http://www.w3.org/2000/svg','input')").unwrap();
+        let n = b.node(v).unwrap();
+        assert_eq!(b.input_selection(n), None);
+    });
+}
