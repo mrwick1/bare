@@ -452,3 +452,5 @@ Error stack frames no longer scan a script from its start to find a line and col
 
 
 Generators run: `function*`, generator methods, `yield`, `yield*`, `next`, `return` and `throw`, on the async machine. A for-of over a generator makes no result objects and runs 28% faster than over a hand-written iterator. A finished generator keeps one 16 B table entry. The live login's parse gate for generators is gone. Async generators and `TypedArray.from` remain gates. See [resources.md](resources.md#generators).
+
+On 2026-11-05 the live staging login ran on main 2692526. The login stores its token. The login page runs 8 scripts with no throws. The next route chunk then stops at `Unsupported("tagged template")`. Tagged templates are the next topic. After them, the known gates are async generators and `TypedArray.from`; a d3 chunk calls `Float64Array.from` on a generator. Agents data, search and navigation are not verified yet.
