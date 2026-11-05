@@ -102,6 +102,8 @@ enum Task {
     Select(NodeId),
     /// `selectionchange` event of a text control (`browser_selection.rs`).
     SelectionChange(NodeId),
+    /// The rendering step: `ResizeObserver` delivery (`browser_resize.rs`). At most one is queued.
+    Render,
 }
 
 struct Timer {
@@ -191,6 +193,7 @@ enum Run {
     Deliver { port: ObjId, data: Value },
     Select(NodeId),
     SelectionChange(NodeId),
+    Render,
     Nothing,
 }
 
@@ -236,7 +239,7 @@ impl Dom {
         let ports = &s.ports;
         s.tasks.retain(|_, t| match t {
             Task::Deliver(o) => ports.contains_key(o),
-            Task::Timer(_) | Task::Select(_) | Task::SelectionChange(_) => true,
+            Task::Timer(_) | Task::Select(_) | Task::SelectionChange(_) | Task::Render => true,
         });
         s.queued = s.ports.values().map(|p| p.inbox.len()).sum();
         s.queued_bytes = s.ports.values().flat_map(|p| p.inbox.iter().map(|m| m.1)).sum();
@@ -321,6 +324,7 @@ impl Dom {
                 }
                 Run::SelectionChange(n)
             }
+            Task::Render => Run::Render,
             Task::Deliver(port) => match s.ports.get_mut(&port) {
                 Some(p) if p.keys.front() == Some(&key) => {
                     p.keys.pop_front();
@@ -366,6 +370,10 @@ impl Dom {
                 it.charge(1)?;
                 self.fire_at_input(it, n, if matches!(run, Run::Select(_)) { "select" } else { "selectionchange" })?;
                 it.host_checkpoint().map(|_| ())
+            }),
+            Run::Render => it.host_scope(|it| {
+                it.charge(1)?;
+                self.resize_frame(it)
             }),
             Run::Deliver { port, data } => it.host_scope(|it| {
                 it.charge(1)?;
@@ -909,6 +917,10 @@ impl Browser {
         let mut capped = false;
         loop {
             let upto = target.unwrap_or_else(|| dom.now_ms());
+            // A rendering step is due one frame (16 ms) after a change that observers could see.
+            if dom.resize_wants_frame() {
+                dom.schedule(dom.now_ms() + 16.0, Task::Render)?;
+            }
             if ran >= max {
                 capped = dom.next_due().is_some_and(|d| d <= upto);
                 break;

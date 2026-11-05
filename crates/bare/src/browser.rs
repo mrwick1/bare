@@ -312,6 +312,8 @@ pub struct Dom {
     pub(crate) computed: crate::browser_computed::Computed,
     /// `offsetWidth` and `offsetHeight` (`browser_geometry.rs`).
     pub(crate) geometry: crate::browser_geometry::Geometry,
+    /// `ResizeObserver` and its rendering step (`browser_resize.rs`).
+    pub(crate) resize: crate::browser_resize::Resize,
     /// `Element.attributes`, `NamedNodeMap` and `Attr` (`browser_attr.rs`).
     pub(crate) attr: crate::browser_attr::AttrHost,
     /// `Document.getElementsByName` and the live `NodeList` (`browser_nodelist.rs`).
@@ -342,6 +344,7 @@ impl Host for Dom {
         crate::browser_computed::roots(self, out);
         at::roots(self, out);
         crate::browser_nodelist::roots(self, out);
+        self.resize_roots(out);
     }
 
     fn trace(&self, owner: ObjId, out: &mut Vec<Value>) {
@@ -350,6 +353,7 @@ impl Host for Dom {
         crate::browser_platform::trace(self, owner, out);
         crate::browser_style::trace(self, owner, out);
         crate::browser_computed::trace(self, owner, out);
+        self.resize_trace(owner, out);
         at::trace(self, owner, out);
         crate::browser_nodelist::trace(self, owner, out);
         let st = self.st.borrow();
@@ -383,6 +387,7 @@ impl Host for Dom {
         crate::browser_platform::prune(self, live);
         crate::browser_style::prune(self, live);
         crate::browser_computed::prune(self, live);
+        self.resize_prune(live);
         at::prune(self, live);
         crate::browser_nodelist::prune(self, live);
         let mut st = self.st.borrow_mut();
@@ -793,6 +798,7 @@ impl Dom {
         crate::browser_style::install(self, it)?;
         crate::browser_computed::install(self, it)?;
         crate::browser_geometry::install(self, it)?;
+        crate::browser_resize::install(self, it)?;
         crate::browser_handlers::install(self, it)
     }
 
@@ -1010,6 +1016,7 @@ impl Browser {
             style: Default::default(),
             computed: Default::default(),
             geometry: Default::default(),
+            resize: Default::default(),
             attr: Default::default(),
             nl: Default::default(),
         });

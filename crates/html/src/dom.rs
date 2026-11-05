@@ -221,6 +221,8 @@ pub struct Document {
     revision: u64,
     // Moves at every change that can alter a tree query: a node joins or leaves the tree, an attribute is set or removed, an
     // element gets a namespace. See `revision`.
+    text_revision: u64,
+    // Moves at every edit of the text of an existing node. See `text_revision`.
     shadow_of: HashMap<u32, NodeId, BuildHasherDefault<Fnv>>,
     // The shadow root of each shadow host, by `NodeId::index` of the host. The root is not a child of the host: the light links of the host never show it.
     shadow_host: HashMap<u32, (NodeId, bool), BuildHasherDefault<Fnv>>,
@@ -292,6 +294,7 @@ impl Document {
             watched: HashSet::default(),
             removed: Vec::new(),
             revision: 0,
+            text_revision: 0,
             shadow_of: HashMap::default(),
             shadow_host: HashMap::default(),
         };
@@ -308,6 +311,12 @@ impl Document {
     /// alone: a new node with no parent, a text edit, a new name, a new span. It only grows, and it is not a count of changes.
     pub fn revision(&self) -> u64 {
         self.revision
+    }
+
+    /// A number that moves at every edit of the text of a node that exists (`set_text`, text that joins a text node). With
+    /// `revision`, a host can tell that nothing that layout reads has changed. It only grows.
+    pub fn text_revision(&self) -> u64 {
+        self.text_revision
     }
 
     /// The top node.
@@ -917,6 +926,7 @@ impl Document {
     /// Change the text of a text node, a comment or a doctype. Does nothing for other nodes.
     /// The old bytes stay in the text buffer (see `text_bytes`).
     pub fn set_text(&mut self, node: NodeId, text: &str) {
+        self.text_revision += 1;
         match self.nodes[node.index()].data {
             NodeData::Text(_) => self.nodes[node.index()].data = NodeData::Text(self.push_text(text)),
             NodeData::Comment(_) => self.nodes[node.index()].data = NodeData::Comment(self.push_text(text)),
@@ -991,6 +1001,7 @@ impl Document {
                 start
             };
             self.text.push_str(text);
+            self.text_revision += 1;
             let joined = Span { start: to_u32(start), len: to_u32(self.text.len() - start) };
             self.nodes[previous.index()].data = NodeData::Text(joined);
             return;
