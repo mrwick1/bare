@@ -241,15 +241,15 @@ fn exec(name: &str, scale: usize) {
             }
             // The native tree equals the model, and every list equals the model after the last native change.
             let d = doc.borrow();
-            for c in 0..2 {
-                let native: Vec<String> = d.children(conts[c]).map(|n| d.attr(n, bare_html::dom::Atom::ID).unwrap_or("?").to_string()).collect();
+            for (c, &container) in conts.iter().enumerate() {
+                let native: Vec<String> = d.children(container).map(|n| d.attr(n, bare_html::dom::Atom::ID).unwrap_or("?").to_string()).collect();
                 let want: Vec<String> = m.cont[c].iter().map(|j| format!("e{j}")).collect();
                 if native != want {
                     die(format!("native container {c}: {native:?} != {want:?}"));
                 }
             }
-            for j in 0..N {
-                let have = d.find_atom("name").and_then(|a| d.attr(nodes[j], a)).map(str::to_string);
+            for (j, &node) in nodes.iter().enumerate() {
+                let have = d.find_atom("name").and_then(|a| d.attr(node, a)).map(str::to_string);
                 if have != m.name[j].map(|n| NAMES[n].to_string()) {
                     die(format!("native name of e{j}: {have:?}"));
                 }
