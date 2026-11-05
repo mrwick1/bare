@@ -235,3 +235,28 @@ fn a_limit_in_a_subclass_job_poisoned_checkpoint_never_replays() {
         assert_eq!(js(&mut b, "[hits,later].join()"), "1,0");
     });
 }
+
+#[test]
+fn a_depth_limit_in_a_promise_job_is_sticky_and_never_replays() {
+    big(|| {
+        let mut b = mk(EvalLimits { max_steps: 5_000_000, max_traversal_depth: 100, ..Default::default() });
+        js(&mut b, "var hits = 0, later = 0; function deep(n) { hits++; return n === 0 ? 0 : 1 + deep(n - 1) } Promise.resolve().then(function () { deep(40) }); Promise.resolve().then(function () { later++ });");
+        assert!(matches!(b.drain(), Err(Error::Limit(LimitKind::TraversalDepth))));
+        let hits = js(&mut b, "hits");
+        assert!(matches!(b.drain(), Err(Error::Limit(LimitKind::TraversalDepth))));
+        assert_eq!(js(&mut b, "[hits, later].join()"), format!("{hits},0"));
+    });
+}
+
+#[test]
+fn host_constructor_recursion_stops_at_the_ceilings_on_a_real_stack() {
+    // 8 MiB in a release build and 64 MiB in a debug build, the stacks of a real run
+    let mib: usize = if cfg!(debug_assertions) { 64 } else { 8 };
+    std::thread::Builder::new().stack_size(mib << 20).spawn(|| {
+        let mut b = mk(EvalLimits { max_steps: 5_000_000, max_traversal_depth: 768, max_call_depth: 128, ..Default::default() });
+        js(&mut b, NT);
+        js(&mut b, "var ntD; ntD = mkNt(function () { return Reflect.construct(URLSearchParams, [], ntD); });");
+        assert_eq!(js(&mut b, "try { Reflect.construct(URLSearchParams, [], ntD) } catch (e) { 'caught' }"), format!("limit:{:?}", LimitKind::CallDepth));
+        assert_eq!(js(&mut b, "class L extends URLSearchParams {}; new L('a=1').get('a')"), "1");
+    }).unwrap().join().unwrap();
+}

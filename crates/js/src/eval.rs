@@ -33,10 +33,12 @@
 //!
 //! Limits ([`EvalLimits`]): steps (statements, expressions and traversed native elements), call depth (every call, native and bound
 //! too), live environments, function slots. A limit ends the run with [`Error::Limit`], never a JS value, and
-//! cannot be caught by `try`. A heap limit is [`LimitKind::Heap`]. Native stack: one JS call level needs about
-//! 5 to 7 KiB in a release build (measured: depth 99 overflows 512 KiB and fits 768 KiB). A debug build needs several
-//! times more. `max_call_depth` is clamped to 100. Recursive setup and execution walks share a hard
-//! ceiling of 512 frames. Run on a thread with at least 8 MiB (release) or 64 MiB (debug).
+//! cannot be caught by `try`. A heap limit is [`LimitKind::Heap`].
+//! Defaults: `max_call_depth` 100 and `max_traversal_depth` 512 (`EvalLimits::default`). Hard ceilings: `max_call_depth`
+//! is clamped to 128 and `max_traversal_depth` to 768. A recursive setup or execution walk shares one frame counter,
+//! checked against `max_traversal_depth`. Native stack, measured and not a formal bound: on the test fixtures a
+//! release run at the ceilings stayed inside an 8 MiB thread, and a debug run inside 64 MiB. Run on a thread with at
+//! least 8 MiB (release) or 64 MiB (debug). Samples do not prove a general stack-safety bound.
 //!
 //! Known deviations, on purpose (each is a gate, not a silent skip):
 //! - One environment per call holds parameters, `arguments`, `var`s and the body's `let`/`const`.
@@ -67,8 +69,10 @@ use std::rc::Rc;
 pub struct EvalLimits {
     /// Statements, expressions and traversed native elements, per `run` or top-level `call`.
     pub max_steps: u64,
-    /// Clamped to 100. Tree/execution recursion also has a shared hard ceiling of 512 frames.
+    /// Clamped to 128. The default is 100.
     pub max_call_depth: u32,
+    /// Recursive setup and execution walks, shared. Clamped to 768. The default is 512.
+    pub max_traversal_depth: u32,
     /// Live environments (scopes). Environments that no closure captured are freed on scope exit.
     pub max_envs: usize,
     /// Function objects the evaluator tracks (closures, natives, bound functions).
@@ -83,7 +87,7 @@ pub struct EvalLimits {
 
 impl Default for EvalLimits {
     fn default() -> Self {
-        EvalLimits { max_steps: 100_000_000, max_call_depth: 100, max_envs: 1 << 20, max_functions: 1 << 20, max_scripts: 4096, max_script_source: 64 << 20, max_script_nodes: 8 << 20 }
+        EvalLimits { max_steps: 100_000_000, max_call_depth: 100, max_traversal_depth: 512, max_envs: 1 << 20, max_functions: 1 << 20, max_scripts: 4096, max_script_source: 64 << 20, max_script_nodes: 8 << 20 }
     }
 }
 
@@ -477,7 +481,8 @@ impl<'p> Interp<'p> {
     fn with_code(prog: Rc<Program<'static>>, mut heap: Heap, mut limits: EvalLimits) -> Result<Interp<'p>, Error> {
         let stats = prog.stats();
         Self::check_code_limits(&prog, &limits)?;
-        limits.max_call_depth = limits.max_call_depth.min(100);
+        limits.max_call_depth = limits.max_call_depth.min(128);
+        limits.max_traversal_depth = limits.max_traversal_depth.min(768);
         if limits.max_envs == 0 { return Err(Error::Limit(LimitKind::Envs)); }
         macro_rules! e {
             ($x:expr) => {
@@ -881,7 +886,7 @@ impl<'p> Interp<'p> {
 
     /// Bound recursive tree and execution walks, including flat parser trees.
     fn descend<T, E: From<Error>>(&mut self, f: impl FnOnce(&mut Self) -> Result<T, E>) -> Result<T, E> {
-        if self.frames >= 512 { return Err(Error::Limit(LimitKind::TraversalDepth).into()); }
+        if self.frames >= self.limits.max_traversal_depth { return Err(Error::Limit(LimitKind::TraversalDepth).into()); }
         self.frames += 1;
         let result = f(self);
         self.frames -= 1;
@@ -3177,3 +3182,7 @@ mod date_tests;
 #[cfg(test)]
 #[path = "eval_reflect_tests.rs"]
 mod reflect_tests;
+
+#[cfg(test)]
+#[path = "eval_depth_tests.rs"]
+mod depth_tests;
