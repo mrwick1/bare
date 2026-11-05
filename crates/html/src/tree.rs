@@ -27,11 +27,13 @@
 //! Comments compare Rust with JavaScript, because you know JS.
 
 mod foreign;
+#[cfg(test)]
+mod context_tests;
 
 use crate::dom::{Document, NodeData, NodeId, Ns};
 use std::borrow::Cow;
 
-use crate::tokenizer::{Attr, Mark, Token, Tokens, tokenize};
+use crate::tokenizer::{Attr, Mark, Token, Tokens, raw_text_kind};
 
 /// How many entries of the list of active formatting elements the "Noah's Ark" check reads. The standard has no limit,
 /// but then 20,000 nested `<i class=a1><i class=a2>...` cost 200 million comparisons. With a limit, an identical element
@@ -41,10 +43,21 @@ const NOAH_SCAN: usize = 256;
 /// Parse a page (already decoded to text) into a DOM tree.
 pub fn parse(input: &str) -> Document {
     let mut builder = Builder::new();
-    for token in tokenize(input) {
-        builder.process(token);
-    }
+    drive(&mut builder, &mut Tokens::for_tree(input, Mark::default(), false));
     builder.done()
+}
+
+/// Give each token to the tree builder. After each one, tell the tokenizer what the tree builder decided: raw text for the HTML element
+/// that it just made, and if CDATA is allowed in the current node. The tokenizer reads ahead only to the next token, so it sees both in time.
+fn drive(builder: &mut Builder, tokens: &mut Tokens<'_>) {
+    tokens.set_foreign(builder.cdata_allowed());
+    while let Some(token) = tokens.next() {
+        builder.process(token);
+        if let Some(name) = builder.raw.take() {
+            tokens.enter_raw(name);
+        }
+        tokens.set_foreign(builder.cdata_allowed());
+    }
 }
 
 /// A parser for a page that arrives in pieces. Call `feed` for each piece of text, then `finish`.
@@ -73,10 +86,8 @@ impl Parser {
         if self.buf.len() < self.retry_at {
             return;
         }
-        let mut tokens = Tokens::new(&self.buf, self.mark, true);
-        for token in &mut tokens {
-            self.builder.process(token);
-        }
+        let mut tokens = Tokens::for_tree(&self.buf, self.mark, true);
+        drive(&mut self.builder, &mut tokens);
         let mark = tokens.mark();
         self.buf.drain(..mark.done());
         // Drop the text that we used. What is left is small, unless a token is very long.
@@ -86,9 +97,7 @@ impl Parser {
 
     /// The page is over. Read what is left, and give the tree.
     pub fn finish(mut self) -> Document {
-        for token in Tokens::new(&self.buf, self.mark, false) {
-            self.builder.process(token);
-        }
+        drive(&mut self.builder, &mut Tokens::for_tree(&self.buf, self.mark, false));
         self.builder.done()
     }
 }
@@ -286,6 +295,8 @@ struct Builder {
     // True just after `<pre>` and `<textarea>`: a "\n" right after the tag is ignored.
     foster: bool,
     // True while we move content out of a table. See `place`.
+    raw: Option<&'static str>,
+    // Set when we made an HTML element with raw text or RCDATA: `drive` tells the tokenizer, and clears it.
 }
 
 impl Builder {
@@ -300,6 +311,7 @@ impl Builder {
             form: None,
             skip_newline: false,
             foster: false,
+            raw: None,
         }
     }
 
@@ -324,6 +336,11 @@ impl Builder {
         matches!(self.doc.data(id), NodeData::Element { name, .. } if names.contains(&self.doc.atom_str(*name))) && !self.doc.is_foreign(id)
         // `matches!` with an `if` checks the pattern and then the condition. It gives true or false.
         // An SVG or MathML element is never one of the HTML elements that the rules know by name.
+    }
+
+    /// Is this a "special" element of the standard? An HTML element of the list, or an SVG or MathML integration point.
+    fn is_special(&self, id: NodeId) -> bool {
+        self.is(id, SPECIAL) || (self.doc.has_foreign() && self.foreign_scope_border(id))
     }
 
     /// The name of an element, or an empty text for other nodes.
@@ -531,7 +548,7 @@ impl Builder {
             if n == node {
                 return true;
             }
-            if self.is(n, SCOPE) {
+            if self.is(n, SCOPE) || (self.doc.has_foreign() && self.foreign_scope_border(n)) {
                 return false;
             }
         }
@@ -561,7 +578,7 @@ impl Builder {
                 return true;
             }
             // The furthest block: the first special element (a `<p>`, a `<div>`...) that was opened after the formatting element.
-            let Some(block_open) = (fe_open + 1..self.open.len()).find(|&i| self.is(self.open[i], SPECIAL)) else {
+            let Some(block_open) = (fe_open + 1..self.open.len()).find(|&i| self.is_special(self.open[i])) else {
                 // No block inside: the element just closes, with all that is inside it.
                 self.open.truncate(fe_open);
                 self.afe.remove(fe_afe);
@@ -770,6 +787,7 @@ impl Builder {
 
     /// Add an element whose content is raw text. Go to `Text` mode until its end tag.
     fn raw_text_element(&mut self, name: &str, attrs: &[Attr<'_>]) {
+        self.raw = raw_text_kind(name).map(|kind| kind.1);
         self.insert_element(name, attrs, true);
         self.text_return = self.mode;
         self.mode = Mode::Text;
@@ -1050,6 +1068,11 @@ impl Builder {
                 self.raw_text_element(name, &attrs);
             }
             "iframe" | "noembed" => self.raw_text_element(name, &attrs),
+            "plaintext" => {
+                self.reconstruct_afe();
+                self.insert_element(name, &attrs, true);
+                self.raw = Some("plaintext");
+            }
             "option" => {
                 if self.is(self.current(), &["option"]) {
                     self.open.pop();
@@ -1087,7 +1110,7 @@ impl Builder {
                 self.open.truncate(i);
                 break;
             }
-            if self.is(node, SPECIAL) && !self.is(node, &["address", "div", "p"]) {
+            if self.is_special(node) && !self.is(node, &["address", "div", "p"]) {
                 break;
             }
         }
@@ -1167,7 +1190,7 @@ impl Builder {
                 self.open.truncate(i);
                 return;
             }
-            if self.is(node, SPECIAL) {
+            if self.is_special(node) {
                 return;
             }
         }

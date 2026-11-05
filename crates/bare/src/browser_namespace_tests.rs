@@ -339,6 +339,32 @@ fn the_parser_makes_svg_and_mathml_with_their_namespace() {
     });
 }
 
+const FOREIGN_CONTEXT_PAGE: &str = "<!doctype html><html><body><svg id=sv><title id=ti><b id=tb>x</b></title><style id=st>a &amp; b<g id=sg /></style>\
+<text id=tx><![CDATA[<c>&amp;]]></text><foreignObject id=fo><style id=fs>&amp;<b></style><textarea id=ta>&amp;<b></textarea><p id=fp><![CDATA[q]]></p></foreignObject></svg>\
+<b id=out><svg><foreignObject id=f2>x</b>y</foreignObject></svg></body></html>";
+
+#[test]
+fn the_parser_picks_raw_text_and_cdata_by_namespace() {
+    big(|| {
+        let mut b = browser_with(FOREIGN_CONTEXT_PAGE, BrowserLimits::default());
+        let row = |id: &str| format!("var e = document.getElementById('{id}'); [e.namespaceURI, e.localName, e.childNodes.length, e.firstChild.nodeType, e.firstChild.data].join('|')");
+        // SVG title is an integration point: HTML markup inside. SVG style holds text and an SVG element.
+        assert_eq!(js(&mut b, "var tb = document.getElementById('tb'); [tb.namespaceURI, tb.parentNode.id, tb.firstChild.data].join('|')"), format!("{HTML}|ti|x"));
+        assert_eq!(js(&mut b, &row("st")), format!("{SVG}|style|2|3|a & b"));
+        assert_eq!(js(&mut b, "var g = document.getElementById('sg'); [g.namespaceURI, g.parentNode.id].join('|')"), format!("{SVG}|st"));
+        // CDATA in SVG is text, not decoded; the same marker in an HTML element is a comment.
+        assert_eq!(js(&mut b, &row("tx")), format!("{SVG}|text|1|3|<c>&amp;"));
+        assert_eq!(js(&mut b, "var p = document.getElementById('fp'); [p.firstChild.nodeType, p.firstChild.data].join('|')"), "8|[CDATA[q]]");
+        // The HTML style and textarea in the foreignObject keep raw text and RCDATA.
+        assert_eq!(js(&mut b, &row("fs")), format!("{HTML}|style|1|3|&amp;<b>"));
+        assert_eq!(js(&mut b, &row("ta")), format!("{HTML}|textarea|1|3|&<b>"));
+        // `</b>` does not close past the foreignObject: `y` stays inside it.
+        assert_eq!(js(&mut b, "var f = document.getElementById('f2'); [f.textContent, f.parentNode.localName, document.getElementById('out').lastElementChild.localName].join('|')"), "xy|svg|svg");
+        b.collect(&[]).unwrap();
+        assert_eq!(js(&mut b, "document.getElementById('tx').firstChild.data"), "<c>&amp;");
+    });
+}
+
 #[test]
 fn weak_values_and_collection_with_svg_wrappers() {
     big(|| {

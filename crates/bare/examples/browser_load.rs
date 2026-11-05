@@ -7,7 +7,7 @@
 //! half in the Rust test driver. lookup: SCALE*500 rounds of `querySelectorAll`, `getElementById` and `closest`
 //! on a 200 item page. svg: SCALE*1000 SVG subtrees made with `createElementNS` and namespaced attributes, appended,
 //! cloned (every 10th) and removed in blocks. svgparse: a page of SCALE*500 inline SVG icons that the parser makes, then
-//! namespace and attribute reads on the first SCALE*100 (attached wrappers stay alive, so the wrapper cap bounds the reads). Each case runs in small scripts, with a VM collect between them, and checks its
+//! namespace and attribute reads on the first SCALE*50 (attached wrappers stay alive, so the wrapper cap bounds the reads). Each icon has an SVG title with HTML markup, an SVG style with a character reference and markup, and a CDATA section. Each case runs in small scripts, with a VM collect between them, and checks its
 //! result against the same computation in Rust. Prints time, CPU, peak RSS, allocations and what the realm holds.
 //! `tools/js/browser_load.sh` runs the matrix under caps.
 
@@ -96,7 +96,7 @@ const CHUNK: usize = 100;
 fn page(name: &str, scale: usize) -> String {
     match name {
         "svgparse" => {
-            let icons: String = (0..500 * scale).map(|i| format!("<svg viewBox='0 0 24 24' xmlns='http://www.w3.org/2000/svg'><g><path d='M{i}' xlink:href='#g{i}'/><foreignObject><div>x</div></foreignObject></g></svg>")).collect();
+            let icons: String = (0..500 * scale).map(|i| format!("<svg viewBox='0 0 24 24' xmlns='http://www.w3.org/2000/svg'><g><path d='M{i}' xlink:href='#g{i}'/><foreignObject><div>x</div></foreignObject><title><b>t</b></title><style>&amp;<g/></style><text><![CDATA[<c>]]></text></g></svg>")).collect();
             format!("<body><p id=l>{icons}</p></body>")
         }
         "lookup" => {
@@ -226,14 +226,16 @@ fn exec(name: &str, scale: usize) {
             expect("svg", run(&mut b, "score"), want.to_string());
         }
         "svgparse" => {
-            // The page holds 500*scale icons. The script reads the first 100*scale: wrappers of attached nodes live until the node
-            // leaves the tree (5 for each icon), so more would end at the wrapper cap (65,536) by design.
-            let n = 100 * scale;
+            // The page holds 500*scale icons. The script reads the first 50*scale: wrappers of attached nodes live until the node
+            // leaves the tree (up to 11 for each icon), so more would end at the wrapper cap (65,536) by design.
+            let n = 50 * scale;
             run(&mut b, "var SVG = 'http://www.w3.org/2000/svg', XL = 'http://www.w3.org/1999/xlink', H = 'http://www.w3.org/1999/xhtml', score = 0, host = document.getElementById('l'), cur = host.firstElementChild;
                 function chunk(start, count) {
                   for (var i = 0; i < count; i++) {
                     var p = cur.firstElementChild.firstElementChild, fo = p.nextElementSibling;
                     score += Number(p.getAttribute('d').slice(1)) + p.getAttributeNS(XL, 'href').length + (p.namespaceURI === SVG) + (fo.localName === 'foreignObject') + (fo.firstElementChild.namespaceURI === H) + cur.getAttribute('viewBox').length;
+                    var t = fo.nextElementSibling, st = t.nextElementSibling, tx = st.nextElementSibling;
+                    score += (t.firstElementChild.namespaceURI === H) + (st.firstChild.data === '&') + (st.firstElementChild.namespaceURI === SVG) + tx.firstChild.data.length;
                     cur = cur.nextElementSibling;
                   }
                 }");
@@ -243,7 +245,8 @@ fn exec(name: &str, scale: usize) {
                 run(&mut b, &format!("chunk({start}, {CHUNK})"));
                 for i in start..start + CHUNK {
                     // d number + length of "#g<i>" + three true checks + the length of "0 0 24 24" (the svg is `cur`)
-                    want += i + (2 + i.to_string().len()) + 2 + 1 + 9;
+                    // + three true checks (HTML `b` in the SVG title, the decoded `&` in the SVG style, the SVG `g` in it) + the length of "<c>" (CDATA)
+                    want += i + (2 + i.to_string().len()) + 2 + 1 + 9 + 3 + 3;
                 }
                 collect(&mut b);
             }

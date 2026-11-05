@@ -12,13 +12,11 @@
 //! - An element in a foreign namespace is never one of the HTML elements that the other rules know by name (`p`, `a`, `table`...).
 //!   The scope search stops at an integration point, as the standard says.
 //!
+//! - Raw text and RCDATA are chosen by the tree builder, not by the tag name: the tokenizer is told with `Tokens::enter_raw` after the
+//!   HTML rules made an element (`<svg><title>` holds markup, `<svg><foreignObject><title>` holds RCDATA). CDATA is text where the
+//!   current node is not an HTML element (`Tokens::set_foreign`). See `drive` in `tree.rs`. The tests are in `context_tests.rs`.
+//!
 //! What it does not do (known gaps, on purpose):
-//! - The tokenizer decides by tag name that `title`, `style`, `script`, `textarea`, `xmp`, `iframe`, `noembed`, `noframes` and `plaintext`
-//!   hold raw text. In SVG and MathML they hold markup. So `<svg><title><b>x</b></title></svg>` gives the text `<b>x</b>`, and
-//!   `&amp;` in an SVG `<style>` is not decoded. Plain text content gives the same tree.
-//! - `<![CDATA[x]]>` in SVG is a comment (the tokenizer has no CDATA state).
-//! - The adoption agency algorithm does not count the SVG `foreignObject`, `desc`, `title` and MathML `mi mo mn ms mtext annotation-xml`
-//!   as "special" when it looks for a furthest block.
 //! - The MathML attribute `definitionurl` is adjusted, but no other MathML adjustment exists (the standard has no more).
 //! - Fragment parsing does not exist, so there is no foreign context element.
 
@@ -95,6 +93,12 @@ impl Builder {
             Token::Text(_) => !(text_point || self.html_integration_point(current)),
             _ => true,
         }
+    }
+
+    /// Does the tokenizer read `<![CDATA[` as text now? Only when the adjusted current node (the current node, as there is no fragment
+    /// parsing) is not an HTML element. It is the node, not the insertion point: in `<svg><foreignObject>` it is allowed.
+    pub(super) fn cdata_allowed(&self) -> bool {
+        self.doc.has_foreign() && !self.open.is_empty() && self.doc.element_ns(self.current()) != Ns::Html
     }
 
     /// An SVG `foreignObject`, `desc` or `title`, or a MathML `annotation-xml` that says it holds HTML.
@@ -291,15 +295,6 @@ mod tests {
         assert_eq!(body("<svg><table></table></svg>"), lines(&["<svg svg>", "<table>"]));
         // foreign content in a table is moved before the table, as any other content
         assert_eq!(body("<table><svg><rect></svg></table>"), lines(&["<svg svg>", "  <svg rect>", "<table>"]));
-    }
-
-    #[test]
-    fn known_gaps_are_what_the_header_says() {
-        // The tokenizer reads `title`, `style` and `script` as raw text in SVG too.
-        assert_eq!(body("<svg><title><b>x</b></title></svg>"), lines(&["<svg svg>", "  <svg title>", "    \"<b>x</b>\""]));
-        assert_eq!(body("<svg><style>a &amp; b</style></svg>"), lines(&["<svg svg>", "  <svg style>", "    \"a &amp; b\""]));
-        // CDATA is a comment (no CDATA state in the tokenizer)
-        assert_eq!(body("<svg><![CDATA[x]]></svg>"), lines(&["<svg svg>", "  <!-- [CDATA[x]] -->"]));
     }
 
     #[test]
