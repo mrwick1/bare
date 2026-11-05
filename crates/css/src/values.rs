@@ -29,7 +29,8 @@
 //! - `!important` is kept as a flag. The cascade uses it.
 //! - Properties that we do not know. They are dropped. The list is what layout and paint will need in module 4 and 5.
 //!   To add one, add a line in `properties!` and a case in `longhand`.
-//! - `font-family`, `background-image`, `border-radius`, `box-shadow`, `position`, `overflow`, `opacity`: later, when something needs them.
+//! - `font-family`, `background-image`, `box-shadow`: later, when something needs them.
+//! - `border-radius` takes one radius for each corner (a circle). The part after a `/` is read and dropped.
 //! - Approximations that we know: `ex` and `ch` are half an `em` (the real value needs the font). In `background`,
 //!   only the color is used, and the other parts are checked a little and ignored. In `text-decoration`, only the line kind is used.
 //!   `list-style-type` takes only the five words that we draw, and Chrome takes any word (a name of a counter style).
@@ -158,6 +159,13 @@ properties! {
     CaptionSide => "caption-side",
     VerticalAlign => "vertical-align",
     Direction => "direction",
+    ZIndex => "z-index",
+    Opacity => "opacity",
+    BorderTopLeftRadius => "border-top-left-radius",
+    BorderTopRightRadius => "border-top-right-radius",
+    BorderBottomRightRadius => "border-bottom-right-radius",
+    BorderBottomLeftRadius => "border-bottom-left-radius",
+    Appearance => "appearance",
 }
 
 /// A length or a percent. The fixed units are already `Px`.
@@ -238,7 +246,8 @@ keywords! {
     Safe => "safe", Unsafe => "unsafe", InlineTable => "inline-table", Separate => "separate",
     Top => "top", Bottom => "bottom", Middle => "middle", Sub => "sub",
     Super => "super", TextTop => "text-top", TextBottom => "text-bottom", Ltr => "ltr",
-    Rtl => "rtl",
+    Rtl => "rtl", Button => "button", Checkbox => "checkbox", Radio => "radio",
+    Textfield => "textfield", Textarea => "textarea", Menulist => "menulist",
 }
 
 /// The value of one property. It does not say which property: a `Declared` has that.
@@ -566,6 +575,11 @@ fn expand(name: &str, parts: &Parts, emit: &mut dyn FnMut(Property, Value)) -> b
         "border-right" => border(slice, &[(BorderRightWidth, BorderRightStyle, BorderRightColor)], emit),
         "border-bottom" => border(slice, &[(BorderBottomWidth, BorderBottomStyle, BorderBottomColor)], emit),
         "border-left" => border(slice, &[(BorderLeftWidth, BorderLeftStyle, BorderLeftColor)], emit),
+        // The vertical radii after a `/` are dropped: a corner is a circle here.
+        "border-radius" => {
+            let end = slice.iter().position(|p| matches!(p, Part::Slash)).unwrap_or(slice.len());
+            sides(&slice[..end], [BorderTopLeftRadius, BorderTopRightRadius, BorderBottomRightRadius, BorderBottomLeftRadius], emit)
+        }
         "background" => background(slice, emit),
         "font" => font(slice, emit),
         "list-style" => match slice {
@@ -596,7 +610,7 @@ fn expand(name: &str, parts: &Parts, emit: &mut dyn FnMut(Property, Value)) -> b
 pub const SHORTHANDS: &[&str] = &[
     "margin", "padding", "inset", "flex", "flex-flow", "gap", "border-spacing", "border-width", "border-style", "border-color",
     "border", "border-top", "border-right", "border-bottom", "border-left", "background", "font", "list-style", "text-decoration",
-    "overflow", "grid-row", "grid-column", "grid-area", "place-items", "place-self", "place-content",
+    "overflow", "border-radius", "grid-row", "grid-column", "grid-area", "place-items", "place-self", "place-content",
 ];
 
 /// The longhands of a shorthand, for `inherit` and the like. `None` if `name` is not a shorthand.
@@ -626,6 +640,7 @@ pub fn shorthand_longhands(name: &str) -> Option<&'static [Property]> {
         "list-style" => &[ListStyleType],
         "text-decoration" => &[TextDecoration],
         "overflow" => &[OverflowX, OverflowY],
+        "border-radius" => &[BorderTopLeftRadius, BorderTopRightRadius, BorderBottomRightRadius, BorderBottomLeftRadius],
         _ => return crate::grid::longhands(name),
     };
     Some(list)
@@ -908,6 +923,19 @@ fn longhand(property: Property, part: Part) -> Option<Value> {
             _ => length(part).map(Value::Length),
         },
         Position => one_of(part, &[K::Static, K::Relative, K::Absolute, K::Fixed, K::Sticky]),
+        ZIndex => match part {
+            Part::Keyword(K::Auto) => Some(Value::Keyword(K::Auto)),
+            Part::Number { value, int: true } => Some(Value::Number(value.clamp(-2_147_483_648.0, 2_147_483_647.0))),
+            _ => Option::None,
+        },
+        // A percent is the same as the number (`50%` is 0.5). Over 1 is 1, and under 0 is 0.
+        Opacity => match part {
+            Part::Number { value, .. } => Some(Value::Number(value.clamp(0.0, 1.0))),
+            Part::Percent(p) => Some(Value::Number((p / 100.0).clamp(0.0, 1.0))),
+            _ => Option::None,
+        },
+        BorderTopLeftRadius | BorderTopRightRadius | BorderBottomRightRadius | BorderBottomLeftRadius => positive(part).map(Value::Length),
+        Appearance => one_of(part, &[K::None, K::Auto, K::Button, K::Checkbox, K::Radio, K::Textfield, K::Textarea, K::Menulist]),
         Top | Right | Bottom | Left => match part {
             Part::Keyword(K::Auto) => Some(Value::Keyword(K::Auto)),
             _ => length(part).map(Value::Length),
@@ -1156,6 +1184,27 @@ mod tests {
     fn position() {
         let k = |w| Value::Keyword(w);
         assert_eq!(parse("position", "sticky"), vec![(Position, k(K::Sticky))]);
+        assert_eq!(one("z-index", "-3"), Some(Value::Number(-3.0)));
+        assert_eq!(one("z-index", "auto"), Some(Value::Keyword(K::Auto)));
+        assert_eq!(one("z-index", "1.5"), None);
+        assert_eq!(one("z-index", "10px"), None);
+        assert_eq!(one("opacity", "0.5"), Some(Value::Number(0.5)));
+        assert_eq!(one("opacity", "50%"), Some(Value::Number(0.5)));
+        assert_eq!(one("opacity", "7"), Some(Value::Number(1.0)));
+        assert_eq!(one("opacity", "-1"), Some(Value::Number(0.0)));
+        assert_eq!(one("opacity", "1px"), None);
+        assert_eq!(one("appearance", "none"), Some(Value::Keyword(K::None)));
+        assert_eq!(one("appearance", "textfield"), Some(Value::Keyword(K::Textfield)));
+        assert_eq!(one("border-top-left-radius", "4px"), px(4.0));
+        assert_eq!(one("border-top-left-radius", "-4px"), None);
+        let all = |v: f32| vec![BorderTopLeftRadius, BorderTopRightRadius, BorderBottomRightRadius, BorderBottomLeftRadius].into_iter().map(|p| (p, Value::Length(Length::Px(v)))).collect::<Vec<_>>();
+        assert_eq!(parse("border-radius", "6px"), all(6.0));
+        let two = parse("border-radius", "1px 2px");
+        assert_eq!(two.iter().map(|&(_, v)| v).collect::<Vec<_>>(), [1.0, 2.0, 1.0, 2.0].map(|v| Value::Length(Length::Px(v))));
+        let four = parse("border-radius", "1px 2px 3px 4px / 9px");
+        assert_eq!(four.iter().map(|&(_, v)| v).collect::<Vec<_>>(), [1.0, 2.0, 3.0, 4.0].map(|v| Value::Length(Length::Px(v))));
+        assert_eq!(parse("border-radius", "1px 2px 3px 4px 5px"), vec![]);
+        assert_eq!(parse("border-radius", "50%")[0].1, Value::Length(Length::Percent(50.0)));
         assert_eq!(parse("position", "auto"), vec![]);
         assert_eq!(parse("top", "-10px"), vec![(Top, Value::Length(Length::Px(-10.0)))]);
         assert_eq!(parse("left", "50%"), vec![(Left, Value::Length(Length::Percent(50.0)))]);

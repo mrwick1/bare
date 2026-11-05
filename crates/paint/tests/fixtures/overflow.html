@@ -1,0 +1,17 @@
+<!doctype html>
+<style>
+body { margin: 0; font-size: 14px }
+.box { position: absolute; width: 100px; height: 50px; background: #e5e7eb; border: 2px solid #111 }
+.in { width: 200px; height: 20px; background: #3b82f6; margin: 10px 0 0 -20px }
+#a { left: 10px; top: 10px; overflow: hidden }
+#b { left: 150px; top: 10px; overflow: auto }
+#c { left: 290px; top: 10px; overflow: scroll }
+#d { left: 10px; top: 90px; overflow: hidden; border-radius: 0 }
+#e { left: 150px; top: 90px; overflow: hidden }
+#e p { margin: 0; width: 300px }
+</style>
+<div class="box" id="a"><div class="in"></div></div>
+<div class="box" id="b"><div class="in"></div></div>
+<div class="box" id="c"><div class="in"></div></div>
+<div class="box" id="d"><div class="in" style="position:absolute;margin:0;left:60px;top:30px;background:#ef4444"></div></div>
+<div class="box" id="e"><p>Text that is much longer than the box and is cut off at its edge.</p></div>

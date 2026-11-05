@@ -2201,6 +2201,8 @@ Possible savings, not made because the walk is already small: skip a whole subtr
 
 ### Gaps
 
+S4 topic 3 closed several of these gaps: `z-index`, `opacity`, flex and grid items, `border-radius`, `dashed` and `dotted` borders, form controls, border-width snapping and part of the missing symbols. See [Paint for the staging pages](#paint-for-the-staging-pages). The list below is the state after topic 1.
+
 - No `z-index` (not parsed). A positioned box paints in tree order over the flow, and its positioned children paint inside it.
 - Flex and grid items paint as blocks, not as inline-blocks.
 - A box with `overflow` other than `visible` paints as one unit. No scrollbars.
@@ -2655,3 +2657,90 @@ Release build, archMachine. In-process, through `Page::handle` and `Page::paint`
 - The window event `PointerLeave` runs `mouseout` and `mouseleave` at the last element, with no `relatedTarget`.
 - The isTrusted flag follows the window: focus and `submit` events made by the host are trusted while a window event runs, and not otherwise (Chrome also marks the events of a script call to `focus()` as trusted; here they stay not trusted).
 
+## Paint for the staging pages
+
+S4 topic 3. Crates: `bare-css`, `bare-layout`, `bare-paint`. Date: 2026-11-06. Machine: archMachine (16 cores), release build. The aim is to draw what the staging login and the dashboard need: forms, account menus, rounded cards, layers.
+
+### Design
+
+- **Form controls.** The UA style sheet (`ua.css`) has the Chrome Linux defaults for `input`, `button`, `select` and `textarea` (font 13.3333 px, padding, border, `box-sizing`). `layout/src/controls.rs` gives the size of the content box when `width` or `height` is `auto`. A text field is `size` letters wide (20 when there is no attribute). Chrome counts the letters with the average letter width of the font (`OS/2.xAvgCharWidth`, rounded to a whole pixel) and adds the width of the font box minus that average (`head.xMax - head.xMin`, rounded). For Noto Sans Mono that is 0.644 em and 2.416 em: 203 px at 13.3333 px, so 211 px with padding and border. Buttons are as wide as their label. A `<select>` is as wide as its widest option. A `<textarea>` is `cols` letters (20) plus a scrollbar (Chrome reserves it) by `rows` lines (2). A checkbox and a radio are 13 px. The text line sits in the middle of the content box, and the baseline of the control is the baseline of that line.
+- **Text of a control.** A field has no child boxes, so paint draws its text: the `value`, or the placeholder (`#757575`) when the value is empty. A password shows one `•` for each letter. A `submit` or `button` input shows its label in the middle. A `<select>` shows the chosen option. The text is clipped to the content box. A `<textarea>` keeps its text in a child, so the normal text path draws it, and paint draws only the placeholder.
+- **Chrome's own look.** Chrome draws a control with its theme when the page does not style the border and the background. Paint does the same test: the four borders, the background and `appearance` must be the ones of the style sheet. Then it draws a 1 px `#767676` border with no pixel in the corners (field, textarea, select), a rounded `#efefef` button with the same border (radius 2.9 px), a checkbox (white, or blue `#0075ff` with a check mark), a radio (a circle and a dot) and the arrow of a select. When the page sets `border`, `background` or `appearance: none`, the control is a CSS box and gets the rounded border, the background and the text of the page. The check mark and the arrow are strokes (`Canvas::stroke`, round caps and joins).
+- **Stacking contexts.** A box makes a context when it is positioned (or a flex or grid item) with a `z-index` other than `auto`, or when its `opacity` is under 1. The boxes of a context with a `z-index` other than 0 wait in `DisplayList::hoist` while the walk goes on, with the clip that held them. At the end of the context, they are sorted by `z-index` and then by tree order. The negative ones paint first and are moved in front of the blocks of the context (`slice::rotate_right`), the others paint last. A positioned box with `z-index: auto` is no context, so its children with a `z-index` go up to the context above it. A flex or grid item paints as an inline-block. A page that has no `opacity` under 1 and no `z-index` skips all of this (`Page::stack`, found with one look at each different style, `Styles::each`).
+- **Opacity.** `PushLayer` keeps the pixels of the box area (`Canvas::save`), the box paints as usual, and `PopLayer` mixes the new pixels with the kept ones (`Canvas::restore`). Over an opaque canvas this equals a layer of its own mixed in, and there is no second canvas: the cost is one copy of the area. Overlapping children of the box mix once, not twice (a test checks that). A layer of `opacity: 0` paints nothing. The area is the border boxes of the whole subtree.
+- **Rounded boxes.** `border-radius` has four corners, with a length or a percent (the part after `/` is dropped). Radii that do not fit are cut by one factor (CSS Backgrounds 3, 5.5). `Canvas::fill_shape` fills the rows between the corners with plain fills and computes only the pixels of the corner boxes: coverage is `0.5 - distance to the arc`, in the pixel center. `Canvas::fill_ring` draws a border as the outer shape without the inner shape (the radius of the inner shape is the radius minus the border width), and looks only at the border strips and the corners. No crate was adopted. The shapes are rectangles with elliptic corners, so two functions in `canvas.rs` cover them. tiny-skia was not measured.
+- **Dashed and dotted borders.** Chrome sizes the dashes (`StrokeData::SetupPaintDashPathEffect`): a dash is 3 times the width under 3 px and 2 times above, the gap starts at 2 and 1 times, a dot is the width. Then the gap changes a little so that a whole number of dashes fills the side from end to end. The numbers were measured in Chrome: a 3 px side of 26 px has dashes of 6 and gaps of 4. A dash starts on the pixel that holds its start. A dot of 4 px and more is round, and under that it is a square (Chrome draws squares at 3 px).
+- **Border width.** The cascade snaps the computed width as Chrome does: under 1 px is 1 px, above goes down. So layout and paint both use the whole number, and a border of `0.4px` no longer moves the boxes under it.
+- **Overflow.** `overflow` other than `visible` (`hidden`, `auto`, `scroll`) clips to the padding box, as in topic 1. The padding box now uses the snapped border widths. Nothing scrolls, and no scrollbar is drawn. A box with a `z-index` that is hoisted keeps the clip that held it.
+- **Text fallback.** The two Noto Sans Mono subsets grew from 22 KB to 32 KB each (Latin-1, the punctuation block with `…`, `‹ ›` and the spaces, the currency signs with `₹`, the arrows `← ↑ → ↓ ⇒`, a few math signs, the geometric shapes). A third face, a 4 KB subset of Noto Sans Symbols2 (14 characters, same OFL license, `data/fonts/OFL-Symbols2.txt`), draws `✓ ✔ ✕ ✖ ✗ ✘ ★ ☆ ☰ ⚠ ✉ ✎ ✚`. A letter that no face has (Chinese, Japanese, Korean, emoji) is not drawn. Layout still gives it its width. A system fallback through `fc-match` was not taken: one call takes 27 ms (measured), the answer depends on the machine, and then the pixels of a test would too. The set above is fixed and the cost is 24 KB.
+
+### Check against Chrome
+
+Method as in topic 1 (`tools/paint_diff.sh FIXTURE.html OUT_DIR [WIDTH]` runs Chrome headless and `bare --paint`, then `crates/paint/examples/diff.rs` counts the pixels). Chrome gets `* { font-family: 'Noto Sans Mono' !important }`. The fixtures are in `crates/paint/tests/fixtures/`. "Big" is a pixel that differs by more than 64 levels in a channel.
+
+| Fixture | Topic 1 | Now (differ / big) | What differs now |
+| --- | ---: | ---: | --- |
+| `backgrounds` | 0 | 0 / 0 | nothing |
+| `borders` (3 colors, dashed) | 416 | 164 / 62 | the diagonal where two sides of different color meet (we draw square corners) |
+| `order` | 1,396 | 1,396 / 298 | glyph shading only |
+| `text` | 7,598 | 7,598 / 2,051 | glyph shading only |
+| `login` (topic 1 fixture) | 18,872 | 2,089 / 288 | glyph shading only: every box, border and field is at the same place and the same color |
+| `controls` (inputs, checkbox, radio, buttons, textarea, select) | none | 3,502 / 429 | glyph shading, the edge shading of the radio ring and the check mark, the arrow of the select (1 px) |
+| `radius` (radii, dashed, dotted, 0.4 px) | none | 1,751 / 628 | rounded boxes and rings: 439 pixels, 4 big (edge shading). Dashes: 184, 148 big (1 px dashes are shaded in Chrome). Dots: 828, 476 big (round dots sit at fractions of a pixel) |
+| `stacking` (z-index, opacity, negative z-index, flex item) | none | 7,700 / 0 | nothing over 1 level: the opacity pixels differ by 1 level of gray (hypothesis: Chrome truncates the mix and we round) |
+| `overflow` (hidden, auto, scroll, text) | none | 811 / 161 | glyph shading of one text line. The clips are the same |
+| `fallback` (₹, arrows, marks, Latin) | none | 5,157 / 1,576 | the symbol glyphs: Chrome uses another font for `✓ ✕ ★` and for `⇒` (wider advance), so the text after it moves |
+| `staging_login` (rounded card, inputs with values, checkbox, pill, primary button) | none | 5,092 / 681 | glyph shading only |
+
+Every difference of the new fixtures that is not text is edge shading of a curve or a dash. The boxes, the borders, the clips and the order are the same as Chrome. Chrome draws the text of a control with the same hinted FreeType as other text, so the same shading gap as in topic 1 applies.
+
+### Load test
+
+`cargo run --release -p bare-paint --example load -- <case> <n>`: 1280 by 800, one process for each row, milliseconds. New cases: `rounded` (a 2 px border, `border-radius: 8px`, background), `clipped` (`overflow: hidden` with a child of 3,000 px), `dashed` (a 2 px dashed border, the whole width), `stacked` (positioned boxes, `z-index` from -3 to 3, every third with `opacity: .8`, all on the canvas), `controls` (an input with a value, a checkbox, a select, a button in one row). `boxes` is the topic 1 case, for comparison.
+
+| Case | n | Fragments | Layout | list | raster | repeat | items |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| boxes | 100,000 | 100,002 | 18.7 | 2.69 | 0.53 | 2.97 | 334 |
+| rounded | 100 | 102 | 0.0 | 0.01 | 0.63 | 0.44 | 62 |
+| | 1,000 | 1,002 | 0.2 | 0.04 | 0.47 | 0.42 | 62 |
+| | 10,000 | 10,002 | 1.7 | 0.27 | 0.47 | 0.65 | 62 |
+| | 100,000 | 100,002 | 18.3 | 2.69 | 0.56 | 3.16 | 62 |
+| clipped | 100 | 202 | 0.1 | 0.02 | 0.39 | 0.22 | 160 |
+| | 10,000 | 20,002 | 3.5 | 0.49 | 0.26 | 0.66 | 160 |
+| | 100,000 | 200,002 | 35.9 | 4.90 | 0.71 | 5.21 | 160 |
+| dashed | 100 | 102 | 0.0 | 0.25 | 0.41 | 0.45 | 14,836 |
+| | 10,000 | 10,002 | 1.7 | 0.61 | 0.91 | 1.11 | 14,836 |
+| | 100,000 | 100,002 | 17.2 | 2.84 | 0.60 | 3.32 | 14,836 |
+| controls | 100 | 902 | 0.2 | 0.07 | 0.80 | 0.75 | 727 |
+| | 10,000 | 90,002 | 21.8 | 3.56 | 0.74 | 3.73 | 727 |
+| | 100,000 | 900,002 | 226.2 | 35.82 | 0.75 | 31.52 | 727 |
+| stacked | 100 | 102 | 0.0 | 0.02 | 0.21 | 0.15 | 168 |
+| | 1,000 | 1,002 | 0.3 | 0.23 | 1.49 | 0.88 | 1,668 |
+| | 10,000 | 10,002 | 2.2 | 1.41 | 7.79 | 8.39 | 16,668 |
+| | 100,000 | 100,002 | 29.1 | 22.24 | 70.02 | 88.13 | 166,668 |
+
+Results:
+
+- The display list stays flat. `rounded`, `clipped`, `dashed` and `controls` give the same item count from 100 to 100,000 boxes: only what is on the canvas makes items (62 items for 100,000 rounded boxes). The first version of `decor` made 10,031 items for 10,000 rounded boxes, because only rectangles were tested against the canvas. Now `decor` returns at once for a box outside the canvas.
+- The list costs 27 to 40 ns for each fragment, as in topic 1 (`rounded` 100,000: 2.69 ms, the same as `boxes`). A rounded box costs 2 shapes and 2 items, and the raster of a full screen of them is 0.5 ms.
+- A dashed border of the full width is 250 items for a box: 14,836 items for the 60 boxes on the canvas, 0.4 to 0.9 ms to draw.
+- `stacked` has all boxes on the canvas, so the raster grows with n: 70 ms for 100,000 boxes (0.42 µs for an item, with 33,333 layers). That is the cost of what is visible, not of the page. One layer costs two items and the copy of its area (40 by 30 px here).
+- `controls`: 4 controls in a row cost 9 fragments. The glyph cache holds 16 glyphs (1 KB of masks) for all the values and labels. The scratch list of the lines holds one entry for each inline-block of a parent, also the ones off the canvas: peak extra RSS is 18 MB for 100,000 rows of 4. Topic 1 has the same design. Not changed.
+- Size: the stripped `bare` binary is 6,519,600 B. The same build of `main` (00f612a) is 6,431,232 B: +88,368 B (+1.4%). The fonts are 24 KB of that (+20 KB for the two Mono subsets, +4 KB for the symbols face). The rest is code (controls, stacking, shapes, strokes). The glyph cache and the memory of a frame did not grow: the font bytes are in the binary and are read when a glyph is first drawn.
+
+### Gaps
+
+- Images, SVG and icon fonts are not drawn: `<img>` and `<svg>` draw nothing, and the box keeps the size that layout gives it. The check mark glyphs of Symbols2 are drawn as text.
+- A character that is not in the subsets (Chinese, Japanese, Korean, emoji, most of Latin Extended) is not drawn.
+- Fallback glyphs sit at the pen position and use the advance of layout (0.6 em). Chrome uses the advance of the fallback font, so text after `⇒ ✓ ★` can sit a few pixels from Chrome's.
+- Controls: `file`, `color`, `range`, `date` and the `datetime` types, `<select multiple>` and `size` > 1 (a list box), the open menu of a select, the resize grip of a textarea that is `resize: none`, `disabled` and `readonly` looks, focus rings, a caret and a selection are not drawn. Paint reads the `value` attribute. In the window, the host sets `DisplayList::hosted`: it draws the text, the selection and the caret of the text fields, and paint draws only the placeholder of an empty one. A `textarea` has no dirty value. The text-field width is 1 to 3 px from Chrome at font sizes other than 9, 12, 13.3333, 15, 18 and 40 px. A `select` whose page sets `padding` differs from Chrome by a few pixels. The placeholder of a `textarea` does not wrap. Percent padding on a control is read as 0 by paint.
+- `text-align` on the value of a text field is ignored (left). Chrome centers the label of a button always; paint does the same.
+- Mixed border colors on a rounded box draw square sides. `dashed` and `dotted` on a rounded box draw `solid`. `double`, `groove`, `ridge`, `inset` and `outset` draw `solid`. The vertical radii after `/` are dropped. `overflow` clips to the square padding box, not to the rounded one.
+- A positioned box whose containing block is not its parent is in the fragment list under its containing block, not under its parent. So the `opacity` layer of the parent does not include it, and a negative `z-index` inside such a parent goes to the context of the containing block. Chrome follows the parent in both cases.
+- `z-index` on an inline box does nothing. `opacity` on an inline box does nothing. `isolation`, `mix-blend-mode`, `filter` and `transform` do not make contexts.
+- No scrollbars and no scroll offset (as in topic 1).
+
+Problems seen in other crates, not changed:
+
+- `bare --paint` always makes a canvas of 800 px height, so a Chrome capture must use a window of the same height to compare.
+- `getComputedStyle` now lists `opacity`, `z-index` and the radius longhands. Two tests of the `bare` crate listed `opacity` and `zIndex` as "not supported". They are changed to match.

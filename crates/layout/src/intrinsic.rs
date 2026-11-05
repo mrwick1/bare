@@ -20,6 +20,10 @@ use bare_html::dom::{NodeData, NodeId};
 
 /// The min-content and max-content widths of the content box of a block container.
 pub fn sizes(cx: &mut Cx, node: NodeId) -> (f32, f32) {
+    // A form control with a text line has a width of its own (`controls.rs`).
+    if let Some((w, _)) = crate::controls::of(&cx.tree, node).and_then(|c| crate::controls::size(&cx.tree, node, c)) {
+        return (w, w);
+    }
     if let Some(&known) = cx.sizes.get(&(node.index() as u32)) {
         return known;
     }

@@ -373,10 +373,11 @@ fn a_press_puts_the_caret_where_the_text_is() {
         let mut d = Driver::new(FORM);
         d.click((50.0, Y[0]));
         d.type_chars("abcdef");
-        // The font is 16px monospace: a letter is 9.6px wide. The field starts at left 10 + border 1 = 11.
-        d.click((11.0 + 9.6 * 2.0 + 1.0, Y[0]));
+        // The style sheet gives a field a font of 13.3333px, as Chrome does: a letter is 8px wide. The field starts at
+        // left 10 + border 1 = 11.
+        d.click((11.0 + 8.0 * 2.0 + 1.0, Y[0]));
         assert_eq!(d.selection("a"), "2,2");
-        d.click((11.0 + 9.6 * 4.0 - 1.0, Y[0]));
+        d.click((11.0 + 8.0 * 4.0 - 1.0, Y[0]));
         assert_eq!(d.selection("a"), "4,4");
         d.click((300.0 - 10.0, Y[0]));
         assert_eq!(d.selection("a"), "4,4", "a press outside the field does not move the caret");
@@ -535,6 +536,24 @@ fn a_password_shows_bullets_and_text_shows_its_letters() {
         assert_ne!(a, b, "a password does not show its letters");
         assert_eq!(b, c, "a password shows one bullet for each letter");
         assert!(a.iter().any(|&p| p == 0xFF00_0000), "the letters are drawn in the text color");
+    });
+}
+
+#[test]
+fn typed_text_is_drawn_once_over_no_placeholder_and_no_old_value() {
+    big(|| {
+        let page = PAINT.replace(r#"id="a" style="top:10px" type="text""#, r#"id="a" style="top:10px" type="text" placeholder="Email""#).replace(r#"id="c" style="top:90px" type="text""#, r#"id="c" style="top:90px" type="text" value="old""#);
+        let mut d = Driver::new(&page);
+        let empty = region(&d.page.paint().to_vec(), 12, 26);
+        assert!(empty.iter().any(|&p| p != 0xFFFF_FFFF && p != 0xFF88_8888), "an empty field shows its placeholder");
+        for y in [25.0, 105.0] {
+            d.click((50.0, y));
+            d.press("a", CTRL);
+            d.type_chars("abc");
+        }
+        d.click(AT_NONE);
+        let px = d.page.paint().to_vec();
+        assert_eq!(region(&px, 12, 26), region(&px, 92, 26), "the typed text is alone: no placeholder and no old value under it");
     });
 }
 

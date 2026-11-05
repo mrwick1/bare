@@ -741,6 +741,12 @@ impl Styles {
         }
     }
 
+    /// The different styles, without the order of the nodes. A question about the whole page ("does any style use
+    /// `z-index`?") costs one look at each style, not one at each node.
+    pub fn each(&self) -> impl Iterator<Item = &ComputedStyle> {
+        self.styles.iter()
+    }
+
     /// How many different styles there are. Style 0 (the starting style) is not counted.
     pub fn unique(&self) -> usize {
         self.styles.len() - 1
@@ -885,6 +891,10 @@ fn initial(p: Property) -> Value {
         CaptionSide => Value::Keyword(K::Top),
         VerticalAlign => Value::Keyword(K::Baseline),
         Direction => Value::Keyword(K::Ltr),
+        ZIndex => Value::Keyword(K::Auto),
+        Opacity => Value::Number(1.0),
+        Appearance => Value::Keyword(K::None),
+        BorderTopLeftRadius | BorderTopRightRadius | BorderBottomRightRadius | BorderBottomLeftRadius => px(0.0),
         BorderSpacingH | BorderSpacingV => px(0.0),
         MarginTop | MarginRight | MarginBottom | MarginLeft | PaddingTop | PaddingRight | PaddingBottom | PaddingLeft => px(0.0),
         BorderTopWidth | BorderRightWidth | BorderBottomWidth | BorderLeftWidth => px(3.0),
@@ -960,10 +970,17 @@ fn compute(winners: &[Option<Value>; Property::COUNT], parent: &ComputedStyle, c
         };
         out[i] = resolve(p, raw, &out, parent, fs, cx);
     }
-    // A border with no style has no width.
+    // A border with no style has no width. Chrome gives the others a whole number of pixels: under 1 px is 1 px, and
+    // above goes down (`StyleBuilderConverter::ConvertBorderWidth`). The computed value has that width, so layout and
+    // paint both use it, and `0.4px` does not move the boxes under it.
     for side in 0..4 {
+        let w = BorderTopWidth as usize + side;
         if matches!(out[BorderTopStyle as usize + side], Value::Keyword(Keyword::None | Keyword::Hidden)) {
-            out[BorderTopWidth as usize + side] = Value::Length(Length::Px(0.0));
+            out[w] = Value::Length(Length::Px(0.0));
+        } else if let Value::Length(Length::Px(x)) = out[w]
+            && x > 0.0
+        {
+            out[w] = Value::Length(Length::Px(if x < 1.0 { 1.0 } else { x.floor() }));
         }
     }
     // `visible` and `clip` do not scroll. With the other side a scroll container, they become `auto` and `hidden` (CSS

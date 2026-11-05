@@ -29,6 +29,9 @@ pub struct Painter {
     pub list: DisplayList,
     /// The clips that are open now: the last one is the one that counts, and it is inside all the others.
     clips: Vec<IRect>,
+    /// The layers that are open: the box, the alpha and where the kept backdrop starts in `saved`.
+    layers: Vec<(IRect, u8, usize)>,
+    saved: Vec<u32>,
 }
 
 impl Painter {
@@ -44,14 +47,33 @@ impl Painter {
 
     /// Draw the display list that `paint` made.
     pub fn draw(&mut self, canvas: &mut Canvas) {
-        let Painter { glyphs, list, clips } = self;
+        let Painter { glyphs, list, clips, layers, saved } = self;
         canvas.pixels.fill(list.background);
         clips.clear();
+        layers.clear();
+        saved.clear();
         clips.push(canvas.bounds());
         for &item in &list.items {
             let clip = *clips.last().expect("the first clip is the canvas");
             match item {
                 Item::Rect { r, color } => canvas.fill(r.intersect(clip), color),
+                Item::Fill { shape, color } => canvas.fill_shape(&list.shapes[shape as usize], color, clip),
+                Item::Ring { shape, color } => canvas.fill_ring(&list.shapes[shape as usize], &list.shapes[shape as usize + 1], color, clip),
+                Item::Stroke { at, n, width, color } => canvas.stroke(&list.points[at as usize..(at + n) as usize], width, color, clip),
+                Item::PushLayer { r, alpha } => {
+                    let r = r.intersect(clip).intersect(canvas.bounds());
+                    layers.push((r, alpha, saved.len()));
+                    if !r.is_empty() {
+                        canvas.save(r, saved);
+                    }
+                }
+                Item::PopLayer => {
+                    let (r, alpha, from) = layers.pop().expect("a layer is open");
+                    if !r.is_empty() {
+                        canvas.restore(r, &saved[from..], alpha);
+                    }
+                    saved.truncate(from);
+                }
                 Item::PushClip(r) => clips.push(r.intersect(clip)),
                 Item::PopClip => {
                     clips.pop();
@@ -88,13 +110,13 @@ pub fn text(canvas: &mut Canvas, glyphs: &mut Glyphs, clip: IRect, x: f32, basel
         if c == ' ' {
             continue;
         }
-        let id = glyphs.glyph(bold, c);
+        let (face, id) = glyphs.glyph(bold, c);
         if id == 0 {
             continue;
         }
         let whole = at.floor();
         let sub = ((at - whole) * SUBPIXELS) as u8;
-        let e = glyphs.get(bold, id, size, sub.min(SUBPIXELS as u8 - 1));
+        let e = glyphs.get(face, id, size, sub.min(SUBPIXELS as u8 - 1));
         if e.w > 0 {
             canvas.mask((whole as i32 + e.left as i32, baseline + e.top as i32), (e.w as usize, e.h as usize), glyphs.mask(e), color, clip);
         }

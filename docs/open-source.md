@@ -81,7 +81,8 @@ Study these for architecture. Take parts from them.
 | --- | --- | --- | --- |
 | [ab_glyph](https://github.com/alexheretic/ab-glyph) 0.2.32, with `ab_glyph_rasterizer` 0.1.10, `owned_ttf_parser` 0.25.1 and `ttf-parser` 0.25.1 | Apache-2.0 (the last two MIT OR Apache-2.0) | crate: glyph outlines to coverage masks | 1.1 to 2.3 µs for a glyph, +165 KB of binary |
 | [png](https://github.com/image-rs/image-png) 0.18.1 and its dependencies (`fdeflate`, `flate2`, `miniz_oxide`, `crc32fast`, `bitflags`, `simd-adler32`, `adler2`, `cfg-if`, `zlib-rs`) | MIT OR Apache-2.0 (`miniz_oxide`, `zlib-rs` and `adler2` also Zlib or 0BSD) | crate: PNG capture | 1.5 ms for 1280 by 800, +161 KB of binary |
-| [Noto Sans Mono](https://github.com/notofonts/latin-greek-cyrillic) 2.014, Regular and Bold, cut down by `pyftsubset` | SIL OFL 1.1 | copied data: `data/fonts/*.ttf`, built into `bare-paint` | 22 KB each. License text: `data/fonts/OFL.txt` |
+| [Noto Sans Mono](https://github.com/notofonts/latin-greek-cyrillic) 2.014, Regular and Bold, cut down by `pyftsubset` | SIL OFL 1.1 | copied data: `data/fonts/*.ttf`, built into `bare-paint` | 22 KB each in topic 1, 32 KB each since S4 topic 3 (rupee, arrows, punctuation, a few math signs). License text: `data/fonts/OFL.txt` |
+| [Noto Sans Symbols2](https://github.com/notofonts/symbols) (the Regular file of the system package), cut down to 14 characters by `pyftsubset` | SIL OFL 1.1 | copied data: `data/fonts/NotoSansSymbols2-subset.ttf`, built into `bare-paint` as the fallback face for `✓ ✔ ✕ ✖ ✗ ✘ ★ ☆ ☰ ⚠ ✉ ✎ ✚` | 4 KB (S4 topic 3). License text: `data/fonts/OFL-Symbols2.txt` (the same OFL 1.1, with the copyright line of this font) |
 
 ### Adopted for S4 topic 2 (2026-11-05)
 

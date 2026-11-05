@@ -132,7 +132,7 @@ fn borders() {
     assert_eq!(c.pixel(17, 120), rgb(0x99, 0, 0x99));
     assert_eq!(c.pixel(18, 120), WHITE);
     assert_eq!(c.pixel(60, 102), WHITE);
-    assert_eq!(c.hash(), 0xe1dc_e9eb_bebc_2847);
+    assert_eq!(c.hash(), 0x91f6_b033_d5cf_7d87);
 }
 
 #[test]
@@ -205,12 +205,15 @@ fn login_fixture() {
     assert_eq!(c.pixel(42, 30), page);
     // The button is blue, and its label is white on it.
     let blue = rgb(0x25, 0x63, 0xeb);
-    assert_eq!(c.pixel(61, 168), blue);
-    let button = ink(&c, 60, 166, 134, 197, blue).expect("the label");
-    assert!(button.0 > 61 && button.2 < 133, "the label sits inside the button: {button:?}");
+    assert_eq!(c.pixel(61, 203), blue);
+    let button = ink(&c, 60, 202, 132, 232, blue).expect("the label");
+    assert!(button.0 > 61 && button.2 < 131, "the label sits inside the button: {button:?}");
+    // The fields have a text line, and the value is drawn. Their border is the one of the page, 1 px.
+    assert_eq!(c.pixel(60, 100), rgb(0x9c, 0xa3, 0xaf));
+    assert!(ink(&c, 63, 104, 150, 116, WHITE).is_some(), "the value of the email field");
     // The error message is red: its ink has the color of the text where the coverage is full.
     assert!(c.pixels.contains(&rgb(0xb9, 0x1c, 0x1c)));
-    assert_eq!(c.hash(), 0x41d1_9e99_2524_de24);
+    assert_eq!(c.hash(), 0xcf33_7a28_1189_34f9);
 }
 
 #[test]
@@ -312,4 +315,203 @@ fn positioned_boxes_and_floats_paint_over_block_backgrounds() {
     let c = render(&format!("{body}<div style='float:left;width:50px;height:50px;background:#f00'></div><div style='height:50px;background:#00f'></div>"));
     assert_eq!(c.pixel(10, 10), rgb(255, 0, 0));
     assert_eq!(c.pixel(60, 10), rgb(0, 0, 255));
+}
+
+/// A page with no margin, so that a box is at (0, 0).
+fn bare(body: &str) -> Canvas {
+    render(&format!("<!doctype html><style>body{{margin:0}}</style>{body}"))
+}
+
+const GRAY: u32 = 0xff76_7676;
+const BLUE: u32 = 0xff00_75ff;
+
+#[test]
+fn an_input_has_a_text_line_a_value_and_chromes_border() {
+    // Chrome: 211 by 24, a 1 px gray border, no pixel in the four corners, white inside.
+    let c = bare("<input value='hello'>");
+    assert_eq!(c.pixel(0, 0), WHITE, "the corner pixel is left out");
+    assert_eq!(c.pixel(1, 0), GRAY);
+    assert_eq!(c.pixel(0, 1), GRAY);
+    assert_eq!(c.pixel(210, 12), GRAY);
+    assert_eq!(c.pixel(100, 23), GRAY);
+    assert_eq!(c.pixel(100, 12), WHITE);
+    assert_eq!(c.pixel(211, 12), WHITE, "the box is 211 px wide");
+    // The value is in the content box (x 4 to 207, y 3 to 21), 5 letters of 8 px.
+    let v = ink(&c, 1, 1, 210, 23, WHITE).expect("the value");
+    assert!(v.0 >= 4 && v.2 <= 4 + 5 * 8 + 1 && v.1 >= 3 && v.3 <= 21, "{v:?}");
+    // The placeholder is gray, and only when the value is empty. A password shows dots, as wide as the letters.
+    let p = bare("<input placeholder='Name'>");
+    assert!(p.pixels.contains(&rgb(0x75, 0x75, 0x75)));
+    let dots = bare("<input type=password value='abcdef'>");
+    let (x0, _, x1, _) = ink(&dots, 1, 1, 210, 23, WHITE).expect("the dots");
+    assert!(x1 - x0 <= 6 * 8 && x1 - x0 >= 5 * 8, "6 dots: {x0}..{x1}");
+    // A value that is too long is cut at the content box.
+    let long = bare(&format!("<input value='{}'>", "m".repeat(60)));
+    assert_eq!(long.pixel(208, 12), WHITE);
+    assert!(ink(&long, 4, 3, 208, 21, WHITE).is_some());
+}
+
+#[test]
+fn a_page_that_styles_the_control_gets_a_css_box() {
+    // `border` and `background` of the page turn the theme off: a round blue box, and the text on it.
+    let c = bare("<input value='x' style='border:2px solid #f00;border-radius:8px;background:#0f0;width:60px'>");
+    assert_eq!(c.pixel(0, 0), WHITE, "round corner");
+    assert_eq!(c.pixel(30, 0), rgb(255, 0, 0));
+    assert_eq!(c.pixel(30, 1), rgb(255, 0, 0));
+    assert_eq!(c.pixel(30, 5), rgb(0, 255, 0));
+    let none = bare("<input value='x' style='appearance:none;width:60px'>");
+    assert_eq!(none.pixel(30, 0), rgb(0x76, 0x76, 0x76), "appearance:none keeps the 2 px inset border as a solid one");
+}
+
+#[test]
+fn checkboxes_radios_buttons_and_selects() {
+    let c = bare("<input type=checkbox checked style='position:absolute;left:0;top:0;margin:0'><input type=radio checked style='position:absolute;left:20px;top:0;margin:0'><input type=checkbox style='position:absolute;left:40px;top:0;margin:0'>");
+    assert_eq!(c.pixel(6, 1), BLUE, "checked: blue box");
+    assert_eq!(c.pixel(0, 0), 0xff9e_cbff, "the corner of the blue box is a light blue (Chrome: a9d0ff)");
+    assert_eq!(c.pixel(26, 6), BLUE, "radio dot");
+    assert_eq!(c.pixel(20, 6), BLUE, "radio ring");
+    assert_eq!(c.pixel(40, 6), GRAY, "an empty box has a gray border");
+    assert_eq!(c.pixel(46, 6), WHITE);
+    let b = bare("<button style='position:absolute;left:0;top:0;margin:0'>Go</button><input type=submit style='position:absolute;top:40px;left:0;margin:0'>");
+    assert_eq!(b.pixel(5, 5), rgb(0xef, 0xef, 0xef), "the face of a button");
+    assert_eq!(b.pixel(5, 0), GRAY);
+    // The label is in the middle: the ink has the same room left and right (the box is 32 px wide).
+    let (x0, _, x1, _) = ink(&b, 3, 3, 29, 21, rgb(0xef, 0xef, 0xef)).expect("the label");
+    assert!((x0 as i32 - (32 - x1 as i32)).abs() <= 2, "{x0} {x1}");
+    let s = bare("<select style='position:absolute;left:0;top:0'><option>One</option><option selected>Second</option></select>");
+    assert_eq!(s.pixel(1, 0), GRAY);
+    assert!(ink(&s, 4, 2, 60, 20, WHITE).is_some(), "the chosen option");
+    // The arrow is at the right.
+    assert!(ink(&s, 60, 2, 76, 20, WHITE).is_some(), "the arrow");
+}
+
+#[test]
+fn rounded_boxes_borders_and_circles() {
+    let c = bare("<div style='width:40px;height:40px;background:#f00;border-radius:10px'></div>");
+    assert_eq!(c.pixel(0, 0), WHITE);
+    assert_eq!(c.pixel(39, 39), WHITE);
+    assert_eq!(c.pixel(20, 0), rgb(255, 0, 0));
+    assert_eq!(c.pixel(0, 20), rgb(255, 0, 0));
+    assert_eq!(c.pixel(1, 1), WHITE, "the corner is cut: (1,1) is 12 px from the center of the arc, which has a radius of 10");
+    assert_eq!(c.pixel(5, 5), rgb(255, 0, 0));
+    let edge = c.pixel(3, 2);
+    assert!(edge != WHITE && edge != rgb(255, 0, 0), "the edge is anti-aliased: {edge:08x}");
+    // 50% is a circle on a square.
+    let o = bare("<div style='width:40px;height:40px;background:#00f;border-radius:50%'></div>");
+    assert_eq!(o.pixel(20, 20), rgb(0, 0, 255));
+    assert_eq!(o.pixel(2, 2), WHITE);
+    assert_eq!(o.pixel(20, 0) >> 24, 0xff);
+    // The border follows the radius: a ring, with the inside curved too.
+    let r = bare("<div style='width:30px;height:30px;border:5px solid #000;border-radius:20px;background:#ff0'></div>");
+    assert_eq!(r.pixel(20, 2), rgb(0, 0, 0));
+    assert_eq!(r.pixel(2, 20), rgb(0, 0, 0));
+    assert_eq!(r.pixel(20, 20), rgb(255, 255, 0));
+    assert_eq!(r.pixel(0, 0), WHITE);
+    // A radius that is too big is cut to fit (CSS Backgrounds 3, 5.5): 100px on a 40 by 20 box is a pill.
+    let pill = bare("<div style='width:40px;height:20px;background:#000;border-radius:100px'></div>");
+    assert_eq!(pill.pixel(20, 0), rgb(0, 0, 0));
+    assert_eq!(pill.pixel(0, 0), WHITE);
+    assert_eq!(pill.pixel(10, 10), rgb(0, 0, 0));
+}
+
+#[test]
+fn dashed_and_dotted_borders_have_chromes_pattern() {
+    // Chrome, 3 px dashed, 26 px side: dashes of 6 px with gaps of 4 px (the gap grows to fit three dashes).
+    let c = bare("<div style='width:60px;height:20px;border:3px dashed #000'></div>");
+    let col = |y| c.pixel(1, y);
+    let black = rgb(0, 0, 0);
+    assert_eq!((col(0), col(5), col(6), col(9), col(10), col(15), col(16), col(19), col(20), col(25)), (black, black, WHITE, WHITE, black, black, WHITE, WHITE, black, black));
+    assert_eq!(c.pixel(30, 10), WHITE, "the inside");
+    // 2 px dotted: squares, 2 on and about 2 off.
+    let d = bare("<div style='width:60px;height:20px;border:2px dotted #000'></div>");
+    let row: Vec<bool> = (0..12).map(|x| d.pixel(x, 0) == black).collect();
+    assert_eq!(row[..3], [true, true, false]);
+    // 6 px dotted: round dots (the corner of the dot's box is white).
+    let r = bare("<div style='width:60px;height:20px;border:6px dotted #000'></div>");
+    assert_eq!(r.pixel(3, 3), black);
+    assert_eq!(r.pixel(0, 0), WHITE);
+}
+
+#[test]
+fn border_width_snaps_like_chrome() {
+    // 0.4 px is 1 px, 2.7 px is 2 px.
+    let c = bare("<div style='width:10px;height:10px;border:0.4px solid #000'></div><div style='width:10px;height:10px;border:2.7px solid #000;margin-top:5px'></div>");
+    let black = rgb(0, 0, 0);
+    assert_eq!((c.pixel(0, 0), c.pixel(1, 1)), (black, WHITE));
+    // The first box is 12 px high, then 5 px of margin: the second starts at y 17.
+    assert_eq!((c.pixel(0, 17), c.pixel(1, 18), c.pixel(2, 19)), (black, black, WHITE));
+}
+
+#[test]
+fn opacity_mixes_the_whole_box() {
+    let c = bare("<div style='width:20px;height:20px;background:#000;opacity:.5'><div style='width:10px;height:10px;background:#fff'></div></div>");
+    // 50% of black over white is 127 or 128 gray, and the white child shows no more than the white page: it is in the layer.
+    assert_eq!(c.pixel(15, 15), rgb(127, 127, 127));
+    assert_eq!(c.pixel(5, 5), WHITE);
+    // The children do not show through each other: two overlapping children of a layer mix once.
+    let g = bare("<div style='position:relative;width:30px;height:30px;opacity:.5'><div style='position:absolute;width:20px;height:20px;background:#000'></div><div style='position:absolute;left:10px;top:10px;width:20px;height:20px;background:#000'></div></div>");
+    assert_eq!(g.pixel(15, 15), rgb(127, 127, 127), "overlap: the same gray, not darker");
+    assert_eq!(g.pixel(5, 5), rgb(127, 127, 127));
+    // 0 paints nothing, 1 is plain.
+    assert_eq!(bare("<div style='width:20px;height:20px;background:#000;opacity:0'></div>").pixel(5, 5), WHITE);
+    assert_eq!(bare("<div style='width:20px;height:20px;background:#000;opacity:1'></div>").pixel(5, 5), rgb(0, 0, 0));
+}
+
+#[test]
+fn z_index_orders_stacking_contexts() {
+    let box_ = |extra: &str, color: &str| format!("<div style='position:absolute;left:0;top:0;width:30px;height:30px;background:{color};{extra}'></div>");
+    // The later box is on top, unless the earlier has a higher z-index.
+    assert_eq!(bare(&format!("{}{}", box_("", "#f00"), box_("", "#00f"))).pixel(5, 5), rgb(0, 0, 255));
+    assert_eq!(bare(&format!("{}{}", box_("z-index:1", "#f00"), box_("", "#00f"))).pixel(5, 5), rgb(255, 0, 0));
+    assert_eq!(bare(&format!("{}{}", box_("z-index:2", "#f00"), box_("z-index:3", "#00f"))).pixel(5, 5), rgb(0, 0, 255));
+    // A negative one goes behind the blocks of the context.
+    let behind = bare(&format!("<div style='height:30px;background:#0f0'>{}</div>", box_("z-index:-1", "#f00")));
+    assert_eq!(behind.pixel(5, 5), rgb(0, 255, 0), "behind the block background");
+    // A positioned box that is not a context (no z-index) paints over its negative child, which goes up to the root...
+    let wrap = |z: &str| bare(&format!("<div style='position:relative;{z}width:50px;height:50px;background:#00f'>{}</div>", box_("z-index:-1", "#f00")));
+    assert_eq!(wrap("").pixel(5, 5), rgb(0, 0, 255));
+    // ...and a context keeps it inside, over its own background.
+    assert_eq!(wrap("z-index:0;").pixel(5, 5), rgb(255, 0, 0));
+    // A flex item with a z-index is a context, as a positioned box is.
+    let f = bare("<div style='display:flex'><i style='width:30px;height:30px;margin-right:-20px;background:#f00;z-index:1'></i><i style='width:30px;height:30px;background:#00f'></i></div>");
+    assert_eq!(f.pixel(25, 5), rgb(255, 0, 0));
+    // Without the z-index, the later item is on top.
+    let g = bare("<div style='display:flex'><i style='width:30px;height:30px;margin-right:-20px;background:#f00'></i><i style='width:30px;height:30px;background:#00f'></i></div>");
+    assert_eq!(g.pixel(25, 5), rgb(0, 0, 255));
+}
+
+#[test]
+fn a_hoisted_box_keeps_the_clip_of_its_parent() {
+    // The red box with z-index goes up to the root context, and `overflow:hidden` of its parent still cuts it.
+    let c = bare("<div style='overflow:hidden;width:20px;height:20px'><div style='position:absolute;z-index:3;left:0;top:0;width:50px;height:50px;background:#f00'></div></div>");
+    assert_eq!(c.pixel(5, 5), rgb(255, 0, 0));
+    // (A positioned child of a box that is not its containing block escapes the clip in CSS, so the clip belongs to the
+    // box whose subtree has the child. The check here is for the plain case only.)
+    assert_eq!(bare("<div style='position:relative;overflow:hidden;width:20px;height:20px'><div style='position:absolute;z-index:3;left:0;top:0;width:50px;height:50px;background:#f00'></div></div>").pixel(30, 5), WHITE);
+}
+
+#[test]
+fn symbols_outside_the_latin_subset_are_drawn() {
+    let ink_of = |s: &str| ink(&bare(&format!("<p style='margin:0;font-size:32px'>{s}</p>")), 0, 0, 100, 60, WHITE);
+    for s in ["\u{20b9}", "\u{2192}", "\u{2190}", "\u{21d2}", "\u{2026}", "\u{2260}", "\u{2264}", "\u{2039}", "\u{2713}", "\u{2715}", "\u{2605}", "\u{2630}", "\u{25be}"] {
+        assert!(ink_of(s).is_some(), "{s} has a glyph");
+    }
+    assert!(ink_of("\u{4e2d}").is_none(), "a Chinese letter is not in any face");
+    // Layers and clips stay balanced when the page has everything.
+    let p = page(&format!("{}{}", fixture!("stacking"), fixture!("controls")));
+    let mut painter = Painter::new();
+    let mut canvas = Canvas::new(W, H);
+    painter.paint(&p.doc, &p.styles, &p.layout, &mut canvas);
+    let (mut clips, mut layers) = (0i32, 0i32);
+    for i in &painter.list.items {
+        match i {
+            Item::PushClip(_) => clips += 1,
+            Item::PopClip => clips -= 1,
+            Item::PushLayer { .. } => layers += 1,
+            Item::PopLayer => layers -= 1,
+            _ => {}
+        }
+        assert!(clips >= 0 && layers >= 0);
+    }
+    assert_eq!((clips, layers), (0, 0));
 }

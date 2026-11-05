@@ -215,7 +215,7 @@ fn named_properties_and_feature_detection() {
     let mut b = at(PAGE);
     js(&mut b, A);
     assert_eq!(js(&mut b, "['color','marginTop','margin-top','margin','cssFloat','float','WebkitBorderHorizontalSpacing','webkitBorderHorizontalSpacing','-webkit-border-horizontal-spacing','backgroundColor','gridTemplateColumns','placeItems'].map(function(k){return k in s}).join()"), "true,true,true,true,true,true,true,true,true,true,true,true");
-    assert_eq!(js(&mut b, "['WebkitAnimation','webkitAnimation','animation','transition','animationend','AnimationEvent','MozAnimation','transform','opacity','foo','length2'].map(function(k){return k in s}).join()"), "false,false,false,false,false,false,false,false,false,false,false");
+    assert_eq!(js(&mut b, "['WebkitAnimation','webkitAnimation','animation','transition','animationend','AnimationEvent','MozAnimation','transform','foo','length2'].map(function(k){return k in s}).join()"), "false,false,false,false,false,false,false,false,false,false");
     // An unsupported name stays a plain JS property: it does not reach the attribute.
     assert_eq!(js(&mut b, "var before = a.getAttribute('style'); s.animation = 'x 1s'; s.animation + (a.getAttribute('style') === before)"), "x 1strue");
     js(&mut b, "s.cssText = ''; delete s.animation");
