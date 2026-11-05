@@ -3,7 +3,7 @@
 //
 // Supported
 // - Array.prototype: map, filter, find, findIndex, splice, reduce, some, every, slice, includes, indexOf, concat,
-//   shift, unshift, sort. Object: assign, entries, values, fromEntries. Array: from, of.
+//   shift, unshift, sort, fill. Object: assign, entries, values, fromEntries. Array: from, of.
 //   Math: abs, floor, round, trunc, max, min.
 // - Receivers are generic array-likes, as in the spec: `length` is read once (ToLength), holes and inherited indices
 //   follow HasProperty, every write is a strict `Set` or `DeletePropertyOrThrow`, results are made with
@@ -20,7 +20,7 @@
 // Gates (explicit `Unsupported`, never silent)
 // - Species: the intrinsic `Array`, `undefined` and `null` give a plain array. Any other callable is a gate (a subclass
 //   or a custom `constructor`, or a custom `@@species`). A non-callable object or primitive is a `TypeError`.
-// - `concat` on a primitive receiver, `Object.assign` with a primitive target: they need wrapper objects, which
+// - `concat` and `fill` on a primitive receiver, `Object.assign` with a primitive target: they need wrapper objects, which
 //   the evaluator does not have. `Array.from` / `Array.of` with a `this` that is a callable other than `Array`.
 // Known differences: a string receiver is passed to callbacks as the primitive string (no String wrapper object).
 // `concat` throws its RangeError (result longer than 2^32-1) before it reads the elements, not after.
@@ -55,6 +55,7 @@ enum AoFn {
     ArrShift,
     ArrUnshift,
     ArrSort,
+    ArrFill,
     ObjAssign,
     ObjEntries,
     ObjValues,
@@ -86,6 +87,7 @@ impl<'p> Interp<'p> {
             ("map", ArrMap, 1), ("filter", ArrFilter, 1), ("find", ArrFind, 1), ("findIndex", ArrFindIndex, 1), ("splice", ArrSplice, 2),
             ("reduce", ArrReduce, 1), ("some", ArrSome, 1), ("every", ArrEvery, 1), ("slice", ArrSlice, 2), ("includes", ArrIncludes, 1),
             ("indexOf", ArrIndexOf, 1), ("concat", ArrConcat, 1), ("shift", ArrShift, 0), ("unshift", ArrUnshift, 1), ("sort", ArrSort, 1),
+            ("fill", ArrFill, 1),
         ] {
             self.method(ap, name, Nat::Ao(f), len)?;
         }
@@ -117,6 +119,7 @@ impl<'p> Interp<'p> {
             ArrShift => self.ao_shift(this),
             ArrUnshift => self.ao_unshift(this, args),
             ArrSort => self.ao_sort(this, a0),
+            ArrFill => self.ao_fill(this, a0, a1, arg(args, 2)),
             ObjAssign => self.ao_assign(args),
             ObjEntries => self.ao_enum_own(a0, true),
             ObjValues => self.ao_enum_own(a0, false),
@@ -616,6 +619,28 @@ impl<'p> Interp<'p> {
         }
         self.ao_set_len(this, len - dc + ic)?;
         Ok(Value::Object(a))
+    }
+
+    // ------------------------------------------------------------ fill
+
+    /// `fill(value, start, end)`: a strict `Set` on each index of the range, in order. The length is read once, and
+    /// `start` and `end` are converted after it. The whole range is charged before the first write, so a range
+    /// longer than the step budget never writes. The heap checks its byte cap before each element it adds.
+    fn ao_fill(&mut self, this: Value, value: Value, start: Value, end: Value) -> Res<Value> {
+        self.ao_this(this, "fill")?;
+        if !matches!(this, Value::Object(_)) {
+            return Err(unsupported("Array.prototype.fill on a primitive receiver (wrapper object)", Span::default()));
+        }
+        let len = self.length_of(this)?;
+        let k = self.ao_rel(start, len, 0)?;
+        let fin = self.ao_rel(end, len, len)?;
+        self.ao_reserve(fin.saturating_sub(k))?;
+        for i in k..fin {
+            self.tick()?;
+            let key = self.index_key(i)?;
+            self.ao_set(this, key, value)?;
+        }
+        Ok(this)
     }
 
     // ------------------------------------------------------------ sort
