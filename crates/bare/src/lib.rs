@@ -57,7 +57,7 @@ mod browser_scheduler_tests;
 mod browser_date_tests;
 pub mod resources;
 mod browser_loader;
-pub use browser_loader::{Fatal, Input, NavStop, PageConfig, PageLimits, PageResult, Stop};
+pub use browser_loader::{CssStats, Fatal, Input, NavStop, PageConfig, PageLimits, PageResult, Stop};
 pub mod browser_session;
 #[cfg(test)]
 mod browser_session_tests;

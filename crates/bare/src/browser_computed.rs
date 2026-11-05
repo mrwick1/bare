@@ -168,7 +168,7 @@ struct Plan {
 }
 
 /// A layer of an imported piece: `outer` is the layer of the `@import`, `inner` the layer the piece had (as `main.rs` joins them).
-fn join_layer(outer: Option<&str>, inner: Option<&str>) -> Option<String> {
+pub(crate) fn join_layer(outer: Option<&str>, inner: Option<&str>) -> Option<String> {
     match (outer, inner) {
         (Some(o), Some(n)) if !n.is_empty() => Some(format!("{o}.{n}")),
         (o, None | Some("")) if o.is_some() => o.map(str::to_string),

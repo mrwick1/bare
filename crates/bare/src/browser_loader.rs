@@ -10,6 +10,7 @@
 //! The document is pre-parsed (the whole DOM exists before the first script runs). So this is NOT the parser-blocking
 //! model of HTML: a script cannot `document.write`, cannot see a half-built DOM, and a script that removes a later
 //! `<script>` does not stop it. The scheduling that is kept:
+//! 0. Active style sheets are loaded first (`sheets.rs`).
 //! 1. Blocking classic scripts (inline, and external with no `async`/`defer`) run one by one in document order. An external
 //!    one is fetched at its turn. A microtask checkpoint follows each script (and each `error`/`load` event listener).
 //! 2. `readyState` becomes `interactive` (`readystatechange`). Defer scripts run in document order.
@@ -59,7 +60,9 @@
 //!
 //! Budgets (`PageLimits`): tasks, rounds, wall time, fetches and bytes (`resources::Limits`), pending dynamic scripts and their
 //! inline bytes, kept diagnostics. A blocking socket call is not interrupted: one read can pass `max_time` by the client timeout.
-//! Not here: stylesheets, `window.onload`, `DOMContentLoaded` for scripts that were added late, `defer` on dynamic scripts,
+//! Style sheets: the driver fetches the active static and added sheets and supplies them to `getComputedStyle` before the next script
+//! (`browser_loader/sheets.rs` has the rules, the order and the caps). Their downloads share the fetch and byte budgets above.
+//! Not here: `window.onload`, `DOMContentLoaded` for scripts that were added late, `defer` on dynamic scripts,
 //! `integrity`, `crossorigin`, `nonce`, CSP, `<noscript>`, a service worker.
 
 use crate::browser::{Browser, Dom, H, Listener, R, Target as EvTarget, illegal_constructor, unsupported};
@@ -76,6 +79,11 @@ use std::cell::{Cell, OnceCell, RefCell};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::rc::Rc;
 use std::time::{Duration, Instant};
+
+mod sheets;
+#[cfg(test)]
+mod sheets_tests;
+pub use sheets::CssStats;
 
 type V = R<Value>;
 
@@ -204,8 +212,10 @@ pub struct PageResult {
     pub tasks: usize,
     pub rounds: usize,
     pub fetches: usize,
-    /// Bytes of script text downloaded.
+    /// Bytes of script and style sheet text downloaded.
     pub bytes: usize,
+    /// Style sheet loading (see `browser_loader/sheets.rs`). Its fetches and bytes are also in `fetches` and `bytes`.
+    pub css: CssStats,
     /// Short sanitized lines (origin and path of a script, an error name, a label): never source, headers, bodies or queries.
     pub diagnostics: Vec<String>,
     pub dropped_diagnostics: usize,
@@ -242,6 +252,8 @@ pub(crate) struct Scripts {
     used: Cell<(usize, usize)>,
     page_caps: Cell<(usize, usize, Duration)>,
     page_spent: Cell<(usize, usize, Duration)>,
+    /// Style sheets that the driver fetched and supplied to `getComputedStyle`. Lives as long as the document.
+    sheets: RefCell<sheets::Sheets>,
 }
 
 impl Dom {
@@ -579,7 +591,7 @@ impl Browser {
     /// It never panics on page input and never returns an `Err`: the result says why it stopped.
     pub fn run_page(&mut self, cfg: PageConfig) -> PageResult {
         let dom = self.dom.clone();
-        let mut res = PageResult { stop: Stop::Settled, ready_state: "loading", scripts_run: 0, script_throws: 0, load_errors: 0, tasks: 0, rounds: 0, fetches: 0, bytes: 0, diagnostics: Vec::new(), dropped_diagnostics: 0 };
+        let mut res = PageResult { stop: Stop::Settled, ready_state: "loading", scripts_run: 0, script_throws: 0, load_errors: 0, tasks: 0, rounds: 0, fetches: 0, bytes: 0, css: CssStats::default(), diagnostics: Vec::new(), dropped_diagnostics: 0 };
         let prior = dom.scripts.fatal.borrow().clone();
         if let Some(f) = prior {
             res.stop = Stop::Fatal(f);
@@ -661,6 +673,7 @@ impl Browser {
         };
         let stop = run.go();
         let mut res = run.res;
+        res.css = dom.scripts.sheets.borrow().stats;
         dom.scripts.page_spent.set((res.tasks, res.rounds, started.elapsed()));
         dom.scripts.used.set((res.fetches, res.bytes));
         if let Stop::Fatal(f) = &stop {
@@ -685,7 +698,7 @@ impl Browser {
         limits.max_rounds = limits.max_rounds.min(caps.1.saturating_sub(spent.1));
         limits.max_time = limits.max_time.min(caps.2.saturating_sub(spent.2));
         let started = Instant::now();
-        let mut res = PageResult { stop: Stop::Settled, ready_state: "loading", scripts_run: 0, script_throws: 0, load_errors: 0, tasks: 0, rounds: 0, fetches, bytes, diagnostics: Vec::new(), dropped_diagnostics: 0 };
+        let mut res = PageResult { stop: Stop::Settled, ready_state: "loading", scripts_run: 0, script_throws: 0, load_errors: 0, tasks: 0, rounds: 0, fetches, bytes, css: dom.scripts.sheets.borrow().stats, diagnostics: Vec::new(), dropped_diagnostics: 0 };
         let prior = dom.scripts.fatal.borrow().clone();
         if let Some(f) = prior {
             res.stop = Stop::Fatal(f);
@@ -714,6 +727,7 @@ impl Browser {
         };
         let stop = run.resume(steps).err().unwrap_or(Stop::Settled);
         let mut res = run.res;
+        res.css = dom.scripts.sheets.borrow().stats;
         dom.scripts.page_spent.set((spent.0.saturating_add(res.tasks), spent.1.saturating_add(res.rounds), spent.2.saturating_add(started.elapsed())));
         dom.scripts.used.set((res.fetches, res.bytes));
         if let Stop::Fatal(f) = &stop {
@@ -913,6 +927,7 @@ impl Run<'_> {
     /// Run one script element that was in the page when it was parsed.
     fn run_parsed(&mut self, p: Parsed) -> Flow {
         self.budget()?;
+        self.feed_if_ran()?;
         if p.module {
             self.diag(format!("module script #{}", p.n));
             return Err(Stop::Fatal(Fatal::Unsupported("module script")));
@@ -931,7 +946,7 @@ impl Run<'_> {
                         Ok(text)
                     }
                     Some(Err(why)) => Err(why),
-                    None => download(&mut self.client, self.https_only, &self.lim, self.deadline, self.retained, &mut self.res, &self.disc.targets[t]),
+                    None => download(&mut self.client, self.https_only, &self.lim, self.deadline, self.retained + self.dom.scripts.sheets.borrow().retained, &mut self.res, &self.disc.targets[t]),
                 };
                 self.refs[t] -= 1;
                 // Keep what a later element still needs: the text, or the reason (a failure is not retried).
@@ -959,12 +974,13 @@ impl Run<'_> {
         let next = self.dom.scripts.external.borrow_mut().pop_front();
         let Some(next) = next else { return Ok(false) };
         self.budget()?;
+        self.feed_if_ran()?;
         match next {
             Ext::Fail(node) => self.finish_external(node, "dynamic script", Err("empty or bad src".into()))?,
             Ext::Fetch(node, url) => {
                 let what = label(&url);
                 let target = resources::Target { expect: Expect::Script, url };
-                let text = download(&mut self.client, self.https_only, &self.lim, self.deadline, self.retained, &mut self.res, &target);
+                let text = download(&mut self.client, self.https_only, &self.lim, self.deadline, self.retained + self.dom.scripts.sheets.borrow().retained, &mut self.res, &target);
                 self.finish_external(node, &what, text)?;
             }
         }
@@ -974,6 +990,7 @@ impl Run<'_> {
     /// The inputs, one task each, then the rounds. A navigation that an input queued ends the run before the next input.
     /// Always an `Err`: the reason to stop.
     fn resume(&mut self, steps: &[Input]) -> Flow {
+        self.feed_styles()?;
         for (i, step) in steps.iter().enumerate() {
             self.budget()?;
             let sel = match *step { Input::Click(s) | Input::Type(s, _) | Input::Submit(s) => s };
@@ -1011,6 +1028,7 @@ impl Run<'_> {
     fn go_inner(&mut self) -> Flow {
         self.budget()?;
         if let Err(e) = self.b.drain() { return Err(self.fatal(e, "initial checkpoint")); }
+        self.feed_styles()?;
         let items = self.items.clone();
         for p in items.iter().filter(|p| p.timing == Timing::Blocking) {
             self.run_parsed(*p)?;
@@ -1035,6 +1053,7 @@ impl Run<'_> {
             }
             self.res.rounds += 1;
             self.budget()?;
+            self.feed_if_ran()?;
             let mut did = 0usize;
             if !self.loaded && self.async_queue.is_empty() && self.dom.scripts.external.borrow().is_empty() {
                 self.loaded = true;
