@@ -1,6 +1,6 @@
 //! Load for the numeric builtins: one fresh process runs one kind at N iterations and prints time and peak RSS.
 //!
-//!   numeric_load KIND N EXPECTED_CHECKSUM        KIND: empty | random | clz32 | log | radix16 | radix36frac | radix2sub
+//!   numeric_load KIND N EXPECTED_CHECKSUM        KIND: empty | random | clz32 | log | radix16 | radix36frac | radix2sub | isnan
 //!
 //! The first call (seed read from the OS for `random`) is timed apart from the hot loop. Run it under `ulimit -v`
 //! (1 GiB) and `timeout` (45 s).
@@ -40,6 +40,7 @@ fn main() {
         "radix16" => "(i * 2654435761).toString(16).length",
         "radix36frac" => "(i / 7 + 0.123).toString(36).length",
         "radix2sub" => "(5e-324 * (i + 1)).toString(2).length",
+        "isnan" => "(Number.isNaN(i / 0 - Infinity) ? 1 : 0) + (Number.isNaN(i) ? 1 : 0)", // always 1 per iteration: checksum = N
         _ => panic!("kind"),
     };
     let child = std::thread::Builder::new().stack_size(if cfg!(debug_assertions) { 64 << 20 } else { 8 << 20 }).spawn(move || {

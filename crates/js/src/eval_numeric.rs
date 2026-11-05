@@ -14,6 +14,8 @@
 //   integer part divided by the radix while the quotient is >= 2^53) is what Node shows. The output is at most ~1100 characters.
 //   `Number.prototype` is `AoState::number_proto`: a GC root, so it survives `delete globalThis.Number`.
 //   Property reads on a number primitive search it (`get_prop`).
+// - `Number.isNaN`: true only for a `Value::Number` that is NaN. No conversion, so no valueOf/toString/Symbol.toPrimitive
+//   call and no getter runs. Every other value, and a missing argument, gives false. Global `isNaN` is separate and coerces.
 // Not supported: other Number methods, `Number.prototype` on wrapper objects, `Object(5)`.
 
 /// Longest non-10 text: 1024 integer digits (radix 2), 1074 fraction digits, sign and point.
@@ -105,6 +107,7 @@ impl<'p> Interp<'p> {
         let kn = h!(self, self.heap.key_from_str("Number"));
         let Get::Value(Value::Object(nc)) = h!(self, self.heap.get(self.global, kn)) else { return Err(unsupported("Number constructor missing", Span::default())) };
         self.def(np, self.k_constructor, Value::Object(nc), true, false, true)?;
+        self.method(nc, "isNaN", Nat::Ao(NumIsNaN), 1)?;
         self.def(nc, self.k_prototype, Value::Object(np), false, false, false)
     }
 
@@ -116,6 +119,7 @@ impl<'p> Interp<'p> {
             }
             AoFn::MathLog => Ok(Value::Number(self.coerce_number(arg(args, 0))?.ln())),
             AoFn::MathRandom => self.math_random(),
+            AoFn::NumIsNaN => Ok(Value::Bool(matches!(arg(args, 0), Value::Number(x) if x.is_nan()))),
             _ => self.number_to_string_radix(this, arg(args, 0)),
         }
     }

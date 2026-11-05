@@ -72,6 +72,7 @@ enum AoFn {
     MathLog,
     MathRandom,
     NumToString,
+    NumIsNaN,
 }
 
 const MAX_SAFE_LEN: u64 = 9007199254740991;
@@ -138,7 +139,7 @@ impl<'p> Interp<'p> {
                     _ => math_round(x),
                 }))
             }
-            MathClz32 | MathLog | MathRandom | NumToString => self.call_numeric(f, this, args),
+            MathClz32 | MathLog | MathRandom | NumToString | NumIsNaN => self.call_numeric(f, this, args),
             MathMax | MathMin => {
                 let is_max = f == MathMax;
                 let mut r = if is_max { f64::NEG_INFINITY } else { f64::INFINITY };
