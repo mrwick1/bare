@@ -181,7 +181,7 @@ WeakMap and WeakSet are integrated with ephemeron collection. Values become reac
 
 Native HTMLElement.style and CSSStyleDeclaration are integrated. Reads and writes share the native style attribute and cascade. Supported shorthands expose their longhands. Unknown declarations survive unrelated writes. Parsing, reconstructed values and serialized output have explicit bounds. Detached style objects participate in collection. Authored values are not fully canonicalized; SVG style, indexed properties and computed style remain open. See [resources.md](resources.md#native-inline-style-declarations).
 
-The cached login now executes all 21 scripts with no script throws or load errors, then stops at Unsupported("JSON.parse reviver") after the byte-search implementation below. It still has no form and exits 1. This is local cached execution, not staging authentication or successful hydration.
+The cached login now executes all 21 scripts with no script throws or load errors, then reaches Page(Settled) after byte search and reviver support, with one unhandled TypeError from Array(12).fill. It still has no form and exits 1. This is local cached execution, not staging authentication or successful hydration.
 
 | Topic | Work | Check before closing |
 | --- | --- | --- |
@@ -196,7 +196,7 @@ Resource checks: DOM mutations, repeated queries, event listener growth, fetch c
 
 Exit: the real bundles boot, login runs, authenticated Agents data appears in the DOM, and search/navigation update it through the event system. This is a DOM-level gate. Visible mouse and keyboard operation is the S4 gate.
 
-Uint8Array.indexOf is integrated. It uses strict numeric equality, converts fromIndex once and borrows bytes after that conversion. The bounded search returns early without a full-view copy. The cached page passes this gate and reaches JSON.parse with a callable reviver. This is the next verified runtime gate. See [resources.md](resources.md#byte-view-index-search).
+Uint8Array.indexOf is integrated. It uses strict numeric equality, converts fromIndex once and borrows bytes after that conversion. The bounded search returns early without a full-view copy. The cached page passes this gate and reaches JSON.parse with a callable reviver, now supported below. See [resources.md](resources.md#byte-view-index-search).
 
 Native DOM namespace identity and SVG/MathML construction are integrated. Namespaced attributes, wrapper brands and moves/clones use the native document identity. The tree builder now controls raw-text/RCDATA mode and foreign CDATA. Foreign scope borders stop formatting recovery from crossing integration points. Borrowed HTML style/focus methods reject foreign receivers; dynamic SVG scripts remain inert. This does not provide SVG layout/drawing, SVG style, fragment parsing or complete namespace/name support. See [resources.md](resources.md#native-namespaces-and-foreign-content).
 
