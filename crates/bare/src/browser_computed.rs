@@ -295,6 +295,16 @@ impl Dom {
             }
             it.charge(1)?;
             if top != doc.root() {
+                if matches!(doc.data(top), NodeData::ShadowRoot) {
+                    let mut including = top;
+                    while let Some(p) = doc.parent_or_host(including) {
+                        it.charge(1)?;
+                        including = p;
+                    }
+                    if including == doc.root() {
+                        return Err(Self::gate("computed style in a shadow tree (shadow cascade is not implemented)"));
+                    }
+                }
                 return Ok(None);
             }
             if doc.len() > l.max_nodes {

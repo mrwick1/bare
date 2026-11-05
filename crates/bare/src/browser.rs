@@ -508,7 +508,8 @@ impl Dom {
                 chain.push(n);
                 cur = doc.parent(n);
             }
-            if st.by_obj.len() + chain.len() > self.lim.max_wrappers {
+            let attrs = self.attr.s.borrow();
+            if st.by_obj.len() + attrs.attrs.len() + attrs.maps.len() + self.nl.s.borrow().lists.len() + chain.len() > self.lim.max_wrappers {
                 return Err(self.lim("dom-wrappers"));
             }
         }

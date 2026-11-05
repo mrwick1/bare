@@ -516,3 +516,11 @@ fn a_reviver_can_visit_a_live_list_injected_by_an_earlier_callback() {
         ok(&mut b,"var L=document.getElementsByName('y'); var keys=[]; var out=JSON.parse('{\"a\":0,\"b\":1}',function(k,v){keys.push(k); if(k==='a')this.b=L;return v}); [out.b===L, keys.join('|')].join()","true,a|0|b|");
     });
 }
+
+#[test]
+fn names_and_input_handlers_keep_shadow_members_out_of_document_lists() {
+    big(|| {
+        let mut b=browser();
+        ok(&mut b,"var host=document.createElement('div');document.body.appendChild(host);var root=host.attachShadow({mode:'open'});var hidden=document.createElement('input');hidden.setAttribute('name','x');root.appendChild(hidden);var L=document.getElementsByName('x');var before=L.length;document.getElementById('i2').oninput=function(){this.setAttribute('name','x')};document.getElementById('i2').dispatchEvent(new Event('input'));[L.length===before+1,Array.prototype.indexOf.call(L,hidden)===-1,hidden.getRootNode()===root,hidden.getRootNode({composed:true})===document].join()","true,true,true,true");
+    });
+}

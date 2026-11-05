@@ -26,7 +26,7 @@
 //! What a shadow tree is NOT here (none of this is faked): no slotting (`slot` elements and `assignedNodes` do nothing and are absent),
 //! no custom elements, no `adoptedStyleSheets`, no `innerHTML`, `getHTML`, `activeElement` or `styleSheets` on `ShadowRoot`, no declarative
 //! shadow DOM, no style, layout or paint for a shadow tree (the cascade and layout start at the document and never reach it; `getComputedStyle` of
-//! a shadow element is the empty declaration of a disconnected one), no `:host`, `:host()` or `::slotted()` selectors (they are a `SyntaxError`),
+//! a connected shadow element is Unsupported), no `:host`, `:host()` or `::slotted()` selectors (they are a `SyntaxError`),
 //! no focus in a shadow tree (its elements are not focusable areas) and no script run from a shadow tree (the loader prepares only scripts
 //! whose light ancestors reach the document). `new ShadowRoot()` and `new DocumentFragment()` are illegal constructors.
 //!
@@ -132,14 +132,23 @@ pub(crate) fn attach_shadow(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Valu
         return Err(Error::Unsupported(unsupported("attachShadow with clonable, serializable or delegatesFocus true, or slotAssignment manual")));
     }
     d.room(&d.doc.borrow(), 1, 0)?;
-    if d.st.borrow().by_obj.len() >= d.lim.max_wrappers {
-        return Err(d.lim("dom-wrappers"));
+    {
+        let attrs = d.attr.s.borrow();
+        if d.st.borrow().by_obj.len() + attrs.attrs.len() + attrs.maps.len() + d.nl.s.borrow().lists.len() >= d.lim.max_wrappers {
+            return Err(d.lim("dom-wrappers"));
+        }
     }
     if d.depth_of(it, host)? + 1 > d.lim.max_tree_depth {
         return Err(d.lim("dom-depth"));
     }
+    // Reserve work and allocate the JS wrapper before changing native shadow ownership.
+    it.charge(1)?;
+    let wrapper = d.obj(it, d.p().shadow)?;
     let root = d.doc.borrow_mut().attach_shadow(host, mode == "open");
-    d.wrap(it, root)
+    let mut st = d.st.borrow_mut();
+    st.by_node.insert(root, wrapper);
+    st.by_obj.insert(wrapper, Target::Node(root));
+    Ok(Value::Object(wrapper))
 }
 
 pub(crate) fn shadow_root(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {

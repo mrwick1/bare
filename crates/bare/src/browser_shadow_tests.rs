@@ -877,3 +877,21 @@ fn shadow_load_model() {
     assert_eq!(js(&mut b, "document.querySelectorAll('span').length + document.getElementById('a').children.length"), (model_kept + 1).to_string());
     assert_eq!(js(&mut b, "document.getElementById('a').lastElementChild.shadowRoot === null || document.getElementById('a').lastElementChild.shadowRoot instanceof ShadowRoot"), "true");
 }
+
+#[test]
+fn shadow_root_creation_counts_live_lists_before_native_mutation() {
+    let w=browser().stats().wrappers;
+    let mut b=browser_with(PAGE,BrowserLimits{max_wrappers:w+2,..Default::default()},5_000_000);
+    js(&mut b,"var h=document.createElement('div'); var list=document.getElementsByName('x');");
+    let before=b.stats().nodes;
+    assert_eq!(js(&mut b,"h.attachShadow({mode:'open'})"),lim("dom-wrappers"));
+    assert_eq!(b.stats().nodes,before);
+    assert_eq!(js(&mut b,"h.shadowRoot"),"null");
+}
+
+#[test]
+fn connected_shadow_computed_style_is_gated_instead_of_faked_empty() {
+    let mut b=browser();
+    js(&mut b,"var h=document.createElement('div');var r=h.attachShadow({mode:'open'});var x=document.createElement('i');r.appendChild(x);document.body.appendChild(h);");
+    assert_eq!(js(&mut b,"getComputedStyle(x).display"),"unsupported");
+}
