@@ -1655,5 +1655,31 @@ Bytes per paused call, before and after: plain `await k` 902 to 685, a switch pa
 The same measurements found more memory to remove later:
 
 - A function object with its `prototype` takes 896 B; an arrow takes 582 B. A non-arrow function makes its `prototype` object at once. V8 makes it only when a script reads it.
-- After a collection the heap keeps its largest capacity. In a run that keeps one promise of four objects made, the object payload keeps room for 5.2 objects per live one.
+- After a collection the side tables keep their largest capacity. See [Side tables after a collect](#side-tables-after-a-collect).
 - Each `let` block makes an environment, even when no closure captures it.
+
+## Side tables after a collect
+
+`Slab::trim` already gives back object payload capacity. It keeps room for twice the live values, or for the live values plus what the program allocated since the previous sweep, whichever is larger. It shrinks only when that frees 1 MiB and half of the capacity. So a burst stays after the first collect, and a second, quiet collect releases it. The side tables had no such step. A hash map, a `VecDeque` and a `Vec` keep their capacity when entries go, so after a burst they stayed at the peak.
+
+`Interp::trim_tables` runs at the end of `collect`, after every prune, with the same rule (`trim_to`). The heap objects allocated since the previous collect stand for the entries made since then. It shrinks:
+
+- `funcs` (object to callee), the promise map, `done_pairs` and the microtask queue;
+- the async activation table (it was shrunk only when empty);
+- the environment table. A free environment drops its bindings buffer, which `free_env` keeps for reuse. Free slots at the end of the table are removed. An environment index is held only by live structures, and `collect` refuses to run inside a call, so no index points past the new end.
+
+The object slot metadata (12 B per slot ever used) stays, because object handles must stay stable.
+
+Memory still held after a burst of 60,000 items died, after two collects (counting global allocator, release, main 8134756 vs this change):
+
+| burst | main | after |
+| --- | ---: | ---: |
+| arrows | 17.1 MiB (51%) | 0.8 MiB (2.3%) |
+| function expressions | 17.9 MiB (35%) | 1.5 MiB (3.0%) |
+| promises | 39.7 MiB (32%) | 7.2 MiB (5.8%) |
+| `then` | 40.6 MiB (49%) | 3.0 MiB (3.6%) |
+| `let` scopes | 26.3 MiB (62%) | 0.8 MiB (1.8%) |
+| async calls | 66.0 MiB (37%) | 6.3 MiB (3.6%) |
+| plain objects | 0.8 MiB (4.3%) | 0.8 MiB (4.3%) |
+
+Steady churn does not shrink and regrow: 40 rounds of a 10,000-item burst with a collect after each have the same peak (48.6 MiB) on both builds. Collect time is within 10% (275-291 ms vs 283-307 ms over 3 runs). Total time was 10-15% lower (hypothesis: a shorter environment table makes the per-collect scan cheaper; not verified).
