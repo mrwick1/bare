@@ -1,0 +1,80 @@
+iterator_shape	string:function|0|Iterator|false|false|false|true|false|true|length,name,prototype,from|constructor,reduce,toArray,forEach,some,every,find,map,filter,take,drop,flatMap|1|from|true
+iterator_method_shapes	string:map:1maptruefalsetrue,filter:1filtertruefalsetrue,take:1taketruefalsetrue,drop:1droptruefalsetrue,flatMap:1flatMaptruefalsetrue,reduce:1reducetruefalsetrue,toArray:0toArraytruefalsetrue,forEach:1forEachtruefalsetrue,some:1sometruefalsetrue,every:1everytruefalsetrue,find:1findtruefalsetrue|false|5
+iterator_accessors	string:function,function,get constructor,0,set constructor,1,false,true|function,function,get [Symbol.toStringTag],0,set [Symbol.toStringTag],1,false,true|true|Iterator|7|true|[object x]|TypeError|TypeError|TypeError:set Iterator.prototype.constructor called on non-object|TypeError:set Iterator.prototype[Symbol.toStringTag] called on non-object
+iterator_inheritance	string:true,true,true,true,true,true,true,true,true,true,[object Array Iterator],[object Set Iterator],[object Generator]
+iterator_abstract	string:TypeError:Abstract class Iterator not directly constructable|TypeError:Constructor Iterator requires 'new'|true|true|function|true|true|TypeError:Abstract class Iterator not directly constructable
+iterator_subclass_methods	string:0,6,12,18|10|true|false|4|3|0,1|function
+map_filter_basic	string:10,21,32||50,61,72|3,7|3|1,1,1,1,1|1,2,1|0
+take_drop_basic	string:10,20|0|5|5|2|2|0|30,40,50|5|0|0|20,30,40,50|20,30|20,30|1|0
+take_drop_errors	string:RangeError|RangeError|RangeError|RangeError|RangeError|RangeError|RangeError|RangeError|TypeError|-1 must be positive|x must be positive|NaN must be positive
+flatmap_basic	string:1,1,2,2,3,3|0,1,2|10,20,21,30,31,32|1,9,2,9,3,9|0|0|2,3,4|1,2
+flatmap_rejects_strings	string:TypeError:Iterator.prototype.flatMap called on non-object|TypeError:Iterator.prototype.flatMap called on non-object|TypeError:Iterator.prototype.flatMap called on non-object|0
+consumers_basic	string:14|132|3|1,2,3,4|3,1,4,1,5|true|false|true|false|4||false|true|||1,2,3,4,3:0,1:1,4:2,1:3,5:4|init
+reduce_edge	string:TypeError:Reduce of a done iterator with no initial value|7|undefined|NaN|
+argument_validation	string:map:TypeErrorTypeErrorTypeErrorTypeErrorTypeErrorTypeError|filter:TypeErrorTypeErrorTypeErrorTypeErrorTypeErrorTypeError|flatMap:TypeErrorTypeErrorTypeErrorTypeErrorTypeErrorTypeError|reduce:TypeErrorTypeErrorTypeErrorTypeErrorTypeErrorTypeError|forEach:TypeErrorTypeErrorTypeErrorTypeErrorTypeErrorTypeError|some:TypeErrorTypeErrorTypeErrorTypeErrorTypeErrorTypeError|every:TypeErrorTypeErrorTypeErrorTypeErrorTypeErrorTypeError|find:TypeErrorTypeErrorTypeErrorTypeErrorTypeErrorTypeError|take:TypeErrorTypeError|drop:TypeErrorTypeError|toArray:TypeErrorTypeError
+argument_validation_messages	string:TypeError:Iterator.prototype.map called on non-object|TypeError:Iterator.prototype.take called on non-object|TypeError:Iterator.prototype.toArray called on non-object|TypeError:Iterator.prototype.reduce called on non-object|TypeError:Iterator.prototype.some called on non-object|TypeError:string "Iterator.prototype.map" is not a function|TypeError:string "Iterator.prototype.reduce" is not a function|TypeError:Iterator.from called on non-object|TypeError:Iterator.from called on non-object
+check_order	string:TypeError,get next,valueOf,get next,valueOf,RangeError,TypeError,get next,TypeError,get next,TypeError
+lazy_order	string:built,pull1,map1,filter2,pull2,map2,filter4,n1:4,pull3,map3,filter6,n2:6,n3:true,n4:true
+take_closes_source	string:made,next,a,next,b,return,c:true,end
+take_zero_closes_at_first_next	string:made,return,{"done":true},{"done":true}
+take_source_ends_before_limit_no_close	string:next,next,1
+early_exit_closes	string:true|next,next,next,return|false|next,next,next,return|1|next,next,return|next,next,return|0,1|next,next,return
+no_close_when_done	string:next,next,next,next,next,next,next,next,next
+callback_throw_closes	string:cb|cb|cb|cb|cb|cb|cb|cb|true|18
+return_error_wins_on_normal_close	string:from return|from return|from return|from return|from return|from return
+next_throw_does_not_close	string:from next|{"done":true}|from next|from next|next,next,next
+bad_result_object	string:TypeError|TypeError|TypeError|TypeError|TypeError|TypeError|RangeError
+helper_return	string:{"done":true}|return|{"done":true}|{"done":true}|return|{"done":true}|next,return|{"done":true}|0
+helper_return_no_return_method	string:{"done":true}|{"done":true}|{"done":true}|TypeError
+helper_return_bad_result	string:TypeError|{"done":true}
+flatmap_return_closes_inner_then_outer	string:onext,inext,inext,ireturn,oreturn,{"done":true},{"done":true}
+flatmap_inner_return_throws	string:inner|ireturn,oreturn
+flatmap_inner_next_throws_closes_outer	string:inner next|oreturn|{"done":true}
+flatmap_array_inner_fast_path_same_result	string:1,2,2,{"done":true},{"done":true}
+flatmap_inner_closed_on_break	string:ireturn|3
+flatmap_modified_array_iterator	string:1,2|ret,ret
+reentrant_next_throws	string:TypeError:Generator is already running,TypeError:Generator is already running,{"value":1,"done":false}
+reentrant_callback_throws	string:TypeError,TypeError
+helper_shape	string:next,return|0|next|0|return|true|Iterator Helper|false|false|true|[object Iterator Helper]|0|true|true|true|function
+helper_brand_checks	string:TypeError|TypeError|TypeError|TypeError|TypeError|TypeError|TypeError|TypeError|TypeError
+result_objects	string:value,done,7,false,value,done,,true,true,true,true
+consume_helpers_everywhere	string:2|4|2,4,6|2,4,6|3|3|6|2,4,6,2|4,6|3,5,7|fe|1-2
+helper_over_helper_chain	string:16|a1,b1,a2,b2,c2,a3,b3,a4,b4,c4
+iterator_from	string:false|true|true|next,return|0next|0return|{"value":0,"done":false}|{"custom":1}|n,r|true|true|5,6|a,b|1|true|{"done":true}|[object Iterator]|true|function
+iterator_from_errors	string:TypeError|TypeError|TypeError|TypeError|TypeError|TypeError|TypeError|TypeError|1|3|TypeError
+iterator_from_reads	string:get iter,get next,made,call next,call next
+iterator_from_wrapper_forwards_raw_result	string:true,true,TypeError
+chain_matrix	string:300:743564392
+set_methods_shape	string:union:1uniontruefalsetrue,intersection:1intersectiontruefalsetrue,difference:1differencetruefalsetrue,symmetricDifference:1symmetricDifferencetruefalsetrue,isSubsetOf:1isSubsetOftruefalsetrue,isSupersetOf:1isSupersetOftruefalsetrue,isDisjointFrom:1isDisjointFromtruefalsetrue|union,intersection,difference,symmetricDifference,isSubsetOf,isSupersetOf,isDisjointFrom
+set_methods_basic	string:1,2,3,4|1,2,3|1,2,3|2,3|3,2,1|1,3|2,3|1,2,4,5|true|false|true|false|true|false|true|true|1,2,3|3
+set_methods_results_are_new_plain_sets	string:true,true,2|true,true,2|true,true,2|true,true,2
+set_methods_with_maps_and_setlikes	string:1,2,3,9|3|2,3|2,3,8|true|true|true|1,2,3,4|2,3|1,3|1,3,5|true|true|true|1,2,3,7|1,2,3,8
+set_methods_record_errors	string:TypeError|TypeError|TypeError|TypeError|TypeError|TypeError|TypeError|RangeError|[object Set]|RangeError|1|1|1|TypeError|TypeError|TypeError|TypeError|TypeError|TypeError|TypeError|TypeError|TypeError|TypeError|TypeError
+set_methods_record_messages	string:TypeError:Set.prototype.union argument must be an object|TypeError:Set.prototype.intersection argument must be an object|TypeError:Set.prototype.isSubsetOf argument must be an object|TypeError:The .size property is NaN|RangeError:'-1' is an invalid size|RangeError:'-Infinity' is an invalid size|RangeError:'-5' is an invalid size|TypeError:Result of the keys method is not an object
+set_methods_read_order	string:size,get has,get keys,keys,get next,next,|,size,get has,get keys,keys,get next,next,|,size,get has,get keys,|,size,get has,get keys,has1,|,size,get has,get keys,has1,|,size,get has,get keys,has1,|,size,get has,get keys,has1
+set_methods_size_decides_branch	string:intersection2:keys|intersection3:has1,has2,has3|intersection4:has1,has2,has3|difference2:keys|difference3:has1,has2,has3|difference4:has1,has2,has3|isDisjointFrom2:keys|isDisjointFrom3:has1|isDisjointFrom4:has1|isSubsetOf2:|isSubsetOf3:has1,has2,has3|isSubsetOf4:has1,has2,has3|isSupersetOf2:keys|isSupersetOf3:keys|isSupersetOf4:
+set_methods_close_keys_iterator	string:false|next,next,return|true|next,next,next|false||false||1,2,3,7|next,next|1,2,3|
+set_methods_close_keys_iterator_throws	string:close|close
+set_methods_mutation_during_has	string:false/1,2,3,4|true/1,3|1,3,0/1,2,3,0|1/1|1,3/2,3,1|2/1,2,3,0|2,3/1,2|false/1,2,3,7|false/1,3
+set_methods_mutation_during_keys	string:1,2,3,5,6/1,2,3,100|1,3,5/1,2,3,6|1,2,3,5,6/1,3|2,6/1,2,3,6|1,3/1,2|false/1,2,3,5|false/1,2,3
+set_methods_symdiff_details	string:1,4,5||1
+set_methods_zero_and_nan	string:+0|+0|+0|1,+0|+0|+0,1|NaN,1|NaN||true|true
+set_methods_on_itself	string:1,2,3|1,2,3|||true|true|false|true
+set_methods_large	string:2333|334|1666|1999|2000|667|true|true|true|0,6,12,18,24|1998,1999,2004,2010,2016
+set_methods_after_deletes	string:0,4,8,12,16,20,24,28,32,36,40,44,48,52,56,60,64,68,72,76,80,84,88,92,96,5|0,4,96|8,12,16,20,24,28,32,36,40,44,48,52,56,60,64,68,72,76,80,84,88,92|25|25
+set_methods_matrix	string:840:868148130
+set_size_getters	string:function||get size|0|false|true|function|get size|TypeError|TypeError|TypeError|2|1
+boolean_prototype	string:true|false|true|false|true|false|true|false|false|constructor,toString,valueOf|true|1|0|0|toString|false|false|false|true|true|[object Boolean]|[object Boolean]|true|TypeError:Boolean.prototype.toString requires that 'this' be a Boolean|TypeError:Boolean.prototype.valueOf requires that 'this' be a Boolean|TypeError:Boolean.prototype.valueOf requires that 'this' be a Boolean|TypeError:Boolean.prototype.toString requires that 'this' be a Boolean|xtrue1|true|false
+boolean_prototype_user_methods	string:false|1|undefined
+symbol_description	string:a|true|true|k|Symbol.iterator|function||get description|0|false|true|TypeError|TypeError|TypeError|z
+eval_error	string:EvalError|m|true|true|true|true|EvalError|""|true|1|EvalError|EvalError: q|constructor,name,message|function|true|false|false|string
+error_capture_stack_trace	string:|string|Error|N: m|true|string|string|false|true|2|captureStackTrace|TypeError|TypeError|TypeError|TypeError|Error: boo|undefined|undefined|undefined|TypeError|string
+error_capture_stack_trace_header_uses_name_and_message	string:Custom: hello|Proto|only|OnlyName
+error_stack_trace_limit	string:10|true|true|true|0=0|1=1|3=3|2.9=2|-1=0|NaN=0|100=5|undefined|undefined|Error: e|undefined|undefined|"RangeError: zz"|"Error"|"TypeError: Cannot read properties of null (reading 'x')"
+promise_with_resolvers	string:function|true|false|true|0|withResolvers|promise,resolve,reject|true|function|function|1|1|true|true|true|true|true|TypeError:Promise.withResolvers called on non-object|TypeError:Promise.withResolvers called on non-object|true|true
+json_tag	string:JSON|false|false|true|[object JSON]|[object JSON]|{"a":1}|string
+weakref_basic	string:true|true|[object WeakRef]|1|WeakRef|0|deref|constructor,deref|true|false|true|WeakRef|false|true|true|false|true|true|true|0|0|0|function
+weakref_errors	string:TypeError:WeakRef: invalid target|TypeError:WeakRef: invalid target|TypeError:WeakRef: invalid target|TypeError:WeakRef: invalid target|TypeError:WeakRef: invalid target|TypeError:WeakRef: invalid target|TypeError:Constructor WeakRef requires 'new'|TypeError:Method WeakRef.prototype.deref called on incompatible receiver|TypeError:Method WeakRef.prototype.deref called on incompatible receiver undefined|TypeError:Method WeakRef.prototype.deref called on incompatible receiver|TypeError:Method WeakRef.prototype.deref called on incompatible receiver 1
+finalization_registry_basic	string:|||false|true|false|[object FinalizationRegistry]|1|FinalizationRegistry|2|1|constructor,register,unregister|true|false|true|FinalizationRegistry|true|true|0|true,false,false||
+finalization_registry_errors	string:TypeError:FinalizationRegistry: cleanup must be callable|TypeError:FinalizationRegistry: cleanup must be callable|TypeError:FinalizationRegistry: cleanup must be callable|TypeError:Constructor FinalizationRegistry requires 'new'|TypeError:FinalizationRegistry.prototype.register: invalid target|TypeError:FinalizationRegistry.prototype.register: invalid target|TypeError:FinalizationRegistry.prototype.register: target and holdings must not be same|undefined|TypeError:Invalid unregisterToken ('1')|TypeError:Invalid unregisterToken ('null')|TypeError:Invalid unregisterToken ('s')|TypeError:Invalid unregisterToken ('Symbol(x)')|TypeError:FinalizationRegistry.prototype.register: invalid target|TypeError:Invalid unregisterToken ('undefined')|TypeError:Invalid unregisterToken ('1')|TypeError:Invalid unregisterToken ('null')|TypeError:Invalid unregisterToken ('s')|TypeError:Invalid unregisterToken ('Symbol(x)')|TypeError:Method FinalizationRegistry.prototype.register called on incompatible receiver|TypeError:Method FinalizationRegistry.prototype.unregister called on incompatible receiver|TypeError:Method FinalizationRegistry.prototype.register called on incompatible receiver
+weakref_and_registry_gc_is_not_observable_in_a_job	string:true,0,object,0

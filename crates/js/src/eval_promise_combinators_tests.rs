@@ -166,7 +166,7 @@ fn caps_are_checked_before_growth_and_end_the_call_with_a_distinct_limit() {
 fn the_other_caps_still_apply_to_combinators() {
     big(|| {
         // function objects: two element functions per item for allSettled
-        let mut it = realm(EvalLimits { max_functions: 400, ..lim() });
+        let mut it = realm(EvalLimits { max_functions: 600, ..lim() });
         let r = out(&mut it, "var a = []; for (var i = 0; i < 1000; i++) a.push(i); Promise.allSettled(a)");
         assert_eq!(r, "limit:Functions");
         // promises: `PromiseResolve` makes one per non-promise item

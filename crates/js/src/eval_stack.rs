@@ -35,10 +35,18 @@
 // length seen at the push.
 //
 // The property: an own data property, writable, not enumerable, configurable (as V8 shows it). It is a plain
-// string, not V8's lazy accessor. `Error.captureStackTrace`, `Error.stackTraceLimit` and
-// `Error.prepareStackTrace` do not exist. Frames omit arguments, source bodies and URLs.
+// string, not V8's lazy accessor. Frames omit arguments, source bodies and URLs.
 // The header still contains the error name and message supplied at construction.
+//
+// `Error.stackTraceLimit` is an own data property of `Error` (default 10, writable, enumerable, configurable). It is
+// read as a data property at each capture: a number gives that many frames (a fraction is cut, a negative number or NaN
+// is 0). Any other value, or a deleted property, gives `stack` as `undefined`, as in V8. The text caps above still hold.
+// `Error.captureStackTrace(obj, fn)` defines `stack` on any object (V8's message for a non-object, a frozen
+// object and a non-configurable `stack`). With `fn` it leaves out the frames of the topmost call of `fn` and the
+// frames above it: it finds a script function or class by its code. A function that is not on the stack (a native,
+// or one that did not run) leaves no frames, as in V8. `Error.prepareStackTrace` does not exist.
 
+/// The default of `Error.stackTraceLimit`.
 const STACK_FRAMES: usize = 10;
 const STACK_UNITS: usize = 2048;
 const STACK_HEADER_UNITS: usize = 512;
@@ -113,8 +121,23 @@ impl<'p> Interp<'p> {
         None
     }
 
+    /// `Error.stackTraceLimit` as a frame count. `None`: it is not a number, so there is no stack.
+    fn stack_limit(&mut self) -> Option<usize> {
+        match self.heap.get_own_property(self.sc.err_ctor, self.sc.k_stack_limit).ok()? {
+            Some(Property::Data { value: Value::Number(n), .. }) => Some(if n.is_nan() || n < 0.0 { 0 } else { n as usize }),
+            _ => None,
+        }
+    }
+
     /// Define `stack` on the new error object `o`. Fails only with a limit (work or heap).
     fn capture_stack(&mut self, o: ObjId) -> Res<()> {
+        let s = self.stack_text(o, self.stk.frames.len())?;
+        self.def(o, self.k_stack, s.map_or(Value::Undefined, Value::String), true, false, true)
+    }
+
+    /// The `stack` text of `o` for the frames below index `top`. `None`: `Error.stackTraceLimit` is not a number.
+    fn stack_text(&mut self, o: ObjId, top: usize) -> Res<Option<StrId>> {
+        let Some(limit) = self.stack_limit() else { return Ok(None) };
         let mut text: Vec<u16> = Vec::new();
         let name = self.stack_text_prop(o, self.k_name).and_then(|s| self.heap.str_units(s).ok());
         let mut head: Vec<u16> = name.map_or_else(|| "Error".encode_utf16().collect(), |u| u[..u.len().min(STACK_HEADER_UNITS)].to_vec());
@@ -128,7 +151,7 @@ impl<'p> Interp<'p> {
         head.truncate(STACK_HEADER_UNITS);
         text.extend_from_slice(&head);
         let (base, len) = (self.stk.base, self.stk.frames.len());
-        for i in (base..len).rev().take(STACK_FRAMES) {
+        for i in (base..top.max(base)).rev().take(limit) {
             self.spend(1)?;
             let fr = self.stk.frames[i];
             let pos = if i + 1 < len { self.stk.frames[i + 1].saved_pos } else { self.stk.pos };
@@ -138,8 +161,41 @@ impl<'p> Interp<'p> {
             }
             text.extend_from_slice(&line);
         }
-        let s = h!(self, self.heap.intern_vec(text));
-        self.def(o, self.k_stack, Value::String(s), true, false, true)
+        Ok(Some(h!(self, self.heap.intern_vec(text))))
+    }
+
+    /// `Error.captureStackTrace(obj, fn)`.
+    fn error_capture(&mut self, obj: Value, f: Value) -> Res<Value> {
+        let Value::Object(o) = obj else { return Err(self.type_err("invalid_argument")) };
+        let mut top = self.stk.frames.len();
+        if let Value::Object(fo) = f
+            && self.funcs.contains_key(&fo)
+        {
+            // Not on the stack (a native, or a function that did not run): no frames.
+            top = self.stk.base;
+            let target = match self.funcs.get(&fo) {
+                Some(&Callee::Script { script, fid, .. }) => Some((script, Where::Func(fid))),
+                Some(Callee::Class) => self.cls.classes.get(&fo).map(|c| (c.script, Where::Class(c.class))),
+                _ => None,
+            };
+            let same = |a: Where, b: Where| match (a, b) {
+                (Where::Func(x), Where::Func(y)) => x == y,
+                (Where::Class(x), Where::Class(y)) => x == y,
+                _ => false,
+            };
+            if let Some((script, at)) = target
+                && let Some(i) = (self.stk.base..self.stk.frames.len()).rev().find(|&i| self.stk.frames[i].script == script && same(self.stk.frames[i].at, at))
+            {
+                top = i;
+            }
+        }
+        let s = self.stack_text(o, top)?.map_or(Value::Undefined, Value::String);
+        let d = PropertyDescriptor { value: Some(s), writable: Some(true), enumerable: Some(false), configurable: Some(true), ..Default::default() };
+        if !h!(self, self.heap.define_own_property(o, self.k_stack, &d)) {
+            let own = h!(self, self.heap.get_own_property(o, self.k_stack)).is_some();
+            return Err(self.type_err(if own { "Cannot redefine property: stack" } else { "Cannot define property stack, object is not extensible" }));
+        }
+        Ok(Value::Undefined)
     }
 
     /// `\n    at NAME (script#N:L:C)` as UTF-16.

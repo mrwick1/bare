@@ -440,6 +440,7 @@ impl<'p> Interp<'p> {
         let j = self.ext.json_obj;
         self.method(j, "parse", Nat::Ext(Bi::JsonParse), 2)?;
         self.method(j, "stringify", Nat::Ext(Bi::JsonStringify), 3)?;
+        self.sc_tag(j, "JSON")?;
         at(self, g, "JSON", Value::Object(j))?;
         // RegExp
         let rp = self.ext.regexp_proto;
