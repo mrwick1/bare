@@ -135,9 +135,7 @@ fn string_number_boolean_constructors_are_gates_not_type_errors() {
             assert_eq!(out(&mut it, &format!("Reflect.construct({c}.bind(null), [], G)")), want);
             assert_eq!(out(&mut it, &format!("Reflect.construct({c}.bind(null), [])")), want);
             // as new.target they are valid constructors: only the prototype is read
-            // (`Boolean.prototype` does not exist in bare yet, so its prototype falls back to Object.prototype)
-            let want_proto = if c == "Boolean" { "Object.prototype" } else { &format!("{c}.prototype") };
-            assert_eq!(out(&mut it, &format!("function F() {{}} Object.getPrototypeOf(Reflect.construct(F, [], {c})) === {want_proto}")), "true");
+            assert_eq!(out(&mut it, &format!("function F() {{}} Object.getPrototypeOf(Reflect.construct(F, [], {c})) === {c}.prototype")), "true");
             assert_eq!(out(&mut it, &format!("class K {{ constructor() {{ this.t = new.target === {c}; }} }} Reflect.construct(K, [], {c}).t")), "true");
         }
     });

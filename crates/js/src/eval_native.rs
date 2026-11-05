@@ -93,7 +93,7 @@ impl<'p> Interp<'p> {
                 Value::String(_) => Ok(Value::Object(self.ext.string_proto)),
                 Value::Symbol(_) => Ok(Value::Object(self.sc.symbol_proto)),
                 Value::Number(_) => Ok(Value::Object(self.ao.number_proto.unwrap_or(self.object_proto))),
-                _ => Ok(Value::Object(self.object_proto)),
+                Value::Bool(_) => Ok(Value::Object(self.sc.bool_proto)),
             },
             Nat::ObjHasOwn => {
                 if is_nullish(this) {
@@ -118,6 +118,7 @@ impl<'p> Interp<'p> {
                     Value::Object(o) if self.ext.regexps.contains_key(&o) => "RegExp",
                     Value::Object(o) if h!(self, self.heap.is_array(o)) => "Array",
                     Value::Object(o) if self.date.times.contains_key(&o) => "Date",
+                    Value::Object(o) if o == self.sc.bool_proto => "Boolean",
                     Value::Object(_) => "Object",
                 };
                 self.sc_object_to_string(this, tag)

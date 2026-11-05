@@ -8,7 +8,7 @@
 // deleted and added again as a new, later entry. `clear` keeps iterators alive; entries added after it are visited.
 // Gates: calling `Map` or `Set` without `new` is a TypeError. A subclass (`class extends Map`, `Reflect.construct` with
 // a `newTarget`) needs `new.target`, which the evaluator does not have: the class worker must pass the prototype
-// of `newTarget` into `coll_new`. `Map.groupBy` and the set methods of ES2025 are absent. WeakMap and WeakSet are in `eval_weak.rs`.
+// of `newTarget` into `coll_new`. `Map.groupBy` is absent. The set methods of ES2025 are in `eval_set_methods.rs`. WeakMap and WeakSet are in `eval_weak.rs`.
 //
 // Storage: one `Coll` per Map or Set object, in `sc.colls`, keyed by the object handle. `entries` is an append-only list.
 // A deleted entry is a hole until a compaction. `index` finds a key in O(1). Each entry has a sequence number that only

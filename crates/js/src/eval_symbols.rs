@@ -4,12 +4,17 @@
 // Supported
 // - `Symbol()`, `Symbol.for`, `Symbol.keyFor`, `Symbol.prototype.{toString, valueOf, description, @@toPrimitive,
 //   @@toStringTag}`, `String(symbol)`, `typeof`, symbol property keys, symbol primitive property access.
-// - All 13 well-known symbol identities (`Symbol.iterator` ... `Symbol.unscopables`), each a distinct non-writable,
-//   non-enumerable, non-configurable property of `Symbol`. They are not registered, so `Symbol.keyFor` gives `undefined`.
+// - All 15 well-known symbol identities (`Symbol.iterator` ... `Symbol.unscopables`, `Symbol.dispose`,
+//   `Symbol.asyncDispose`), each a distinct non-writable, non-enumerable, non-configurable property of `Symbol`. They are
+//   not registered, so `Symbol.keyFor` gives `undefined`. Nothing reads `dispose` and `asyncDispose` yet (no `using`).
 // - Protocols that are observable and honored: `@@toPrimitive` (every ToPrimitive of an object), `@@toStringTag`
 //   (`Object.prototype.toString`), `@@hasInstance` (`instanceof`, `Function.prototype[@@hasInstance]`), `@@iterator`
 //   (for-of, spread, array patterns, Map/Set constructors) with `IteratorClose` on break, continue to an outer
-//   label, return, and a thrown body error. Array iterators, `%IteratorPrototype%`.
+//   label, return, and a thrown body error. Array iterators, `%IteratorPrototype%`. `Iterator`, `Iterator.from` and the
+//   iterator helpers are in `eval_iterator.rs`. The Set methods are in `eval_set_methods.rs`.
+// - `Boolean.prototype` (`toString`, `valueOf`), `EvalError`, `Error.captureStackTrace` and `Error.stackTraceLimit`
+//   (`install_boolean`, `install_error_extras`; the stack code is in `eval_stack.rs`). WeakRef and FinalizationRegistry
+//   are in `eval_weak.rs`. `Promise.withResolvers` is in `eval_promise.rs`.
 // - Read by other modules: species (Array, Promise; Map and Set have the getter only), isConcatSpreadable (`concat`),
 //   match, replace, split (String methods, see `eval_builtins.rs`). Identity only: asyncIterator, matchAll, search, unscopables.
 //
@@ -31,9 +36,9 @@ pub enum ScLimit {
     Registry,
     /// Tracked Map and Set objects.
     Collections,
-    /// Tracked WeakMap and WeakSet objects.
+    /// Tracked WeakMap, WeakSet, WeakRef and FinalizationRegistry objects.
     WeakCollections,
-    /// Entries of one WeakMap or WeakSet, or of all of them together (`max_total_weak_entries`).
+    /// Entries of one WeakMap or WeakSet, or of all weak things together (`max_total_weak_entries`). Registry cells count too.
     WeakEntries,
     /// Slots (live and deleted, not yet compacted) of one Map or Set.
     Entries,
@@ -76,8 +81,8 @@ impl Default for ScLimits {
     }
 }
 
-const WK_NAMES: [&str; 13] = [
-    "iterator", "asyncIterator", "hasInstance", "toPrimitive", "toStringTag", "species", "isConcatSpreadable", "match", "matchAll", "replace", "search", "split", "unscopables",
+const WK_NAMES: [&str; 15] = [
+    "iterator", "asyncIterator", "hasInstance", "toPrimitive", "toStringTag", "species", "isConcatSpreadable", "match", "matchAll", "replace", "search", "split", "unscopables", "dispose", "asyncDispose",
 ];
 
 // Indexes into `WK_NAMES`.
@@ -173,11 +178,47 @@ enum ScFn {
     GenNext,
     GenReturn,
     GenThrow,
+    BoolToString,
+    BoolValueOf,
+    ErrCapture,
+    IterCtor,
+    IterFrom,
+    IterMap,
+    IterFilter,
+    IterTake,
+    IterDrop,
+    IterFlatMap,
+    IterReduce,
+    IterToArray,
+    IterForEach,
+    IterSome,
+    IterEvery,
+    IterFind,
+    IterHelperNext,
+    IterHelperReturn,
+    IterWrapNext,
+    IterWrapReturn,
+    IterCtorGet,
+    IterCtorSet,
+    IterTagGet,
+    IterTagSet,
+    SetUnion,
+    SetIntersection,
+    SetDifference,
+    SetSymDiff,
+    SetIsSubsetOf,
+    SetIsSupersetOf,
+    SetIsDisjointFrom,
+    WeakRefCtor,
+    WeakRefDeref,
+    FinRegCtor,
+    FinRegRegister,
+    FinRegUnregister,
 }
 
 impl ScFn {
     fn is_ctor(&self) -> bool {
-        matches!(self, ScFn::MapCtor | ScFn::SetCtor | ScFn::WeakMapCtor | ScFn::WeakSetCtor)
+        matches!(self, ScFn::MapCtor | ScFn::SetCtor | ScFn::WeakMapCtor | ScFn::WeakSetCtor | ScFn::WeakRefCtor | ScFn::FinRegCtor)
     }
 }
 
@@ -194,6 +235,17 @@ struct ScState {
     map_iter_proto: ObjId,
     set_iter_proto: ObjId,
     symbol_ctor: ObjId,
+    bool_proto: ObjId,
+    /// `Iterator`, `%IteratorHelperPrototype%` and `%WrapForValidIteratorPrototype%` (`eval_iterator.rs`).
+    iter_ctor: ObjId,
+    helper_proto: ObjId,
+    wrap_proto: ObjId,
+    f_helper_next: ObjId,
+    /// The intrinsic `Set.prototype.has` and `Map.prototype.has`: the set methods call them without a JS call.
+    f_set_has: ObjId,
+    f_map_has: ObjId,
+    /// The `Error` constructor, which holds `stackTraceLimit`.
+    err_ctor: ObjId,
     f_array_values: ObjId,
     f_array_next: ObjId,
     string_iter_proto: ObjId,
@@ -218,9 +270,12 @@ struct ScState {
     k_return: PropertyKey,
     k_set: PropertyKey,
     k_add: PropertyKey,
+    k_stack_limit: PropertyKey,
     hints: [Value; 3],
     colls: FxMap<ObjId, Coll>,
     iters: FxMap<ObjId, IterState>,
+    /// Iterator helper objects and `Iterator.from` wrappers.
+    helpers: FxMap<ObjId, Helper>,
     total_entries: usize,
 }
 
@@ -238,6 +293,14 @@ impl ScState {
             map_iter_proto: o,
             set_iter_proto: o,
             symbol_ctor: o,
+            bool_proto: o,
+            iter_ctor: o,
+            helper_proto: o,
+            wrap_proto: o,
+            f_helper_next: o,
+            f_set_has: o,
+            f_map_has: o,
+            err_ctor: o,
             f_array_values: o,
             f_array_next: o,
             string_iter_proto: o,
@@ -262,18 +325,20 @@ impl ScState {
             k_return: k,
             k_set: k,
             k_add: k,
+            k_stack_limit: k,
             hints: [Value::Undefined; 3],
             colls: FxMap::default(),
             iters: FxMap::default(),
+            helpers: FxMap::default(),
             total_entries: 0,
         }
     }
 
-    fn objects(&self) -> [ObjId; 23] {
+    fn objects(&self) -> [ObjId; 31] {
         [
             self.symbol_proto, self.iter_proto, self.array_iter_proto, self.map_proto, self.set_proto, self.map_iter_proto, self.set_iter_proto, self.symbol_ctor,
             self.f_array_values, self.f_array_next, self.string_iter_proto, self.f_string_iter, self.f_string_next, self.f_map_entries, self.f_map_values, self.f_map_keys, self.f_map_next, self.f_map_set, self.f_set_values,
-            self.f_set_entries, self.f_set_next, self.f_set_add, self.f_has_instance,
+            self.f_set_entries, self.f_set_next, self.f_set_add, self.f_has_instance, self.bool_proto, self.err_ctor, self.iter_ctor, self.helper_proto, self.wrap_proto, self.f_helper_next, self.f_set_has, self.f_map_has,
         ]
     }
 }
@@ -310,7 +375,7 @@ impl<'p> Interp<'p> {
             out.push(Value::String(k));
             out.push(Value::Symbol(s));
         }
-        for k in [self.sc.k_iterator, self.sc.k_to_primitive, self.sc.k_to_string_tag, self.sc.k_has_instance, self.sc.k_next, self.sc.k_done, self.sc.k_return, self.sc.k_set, self.sc.k_add] {
+        for k in [self.sc.k_iterator, self.sc.k_to_primitive, self.sc.k_to_string_tag, self.sc.k_has_instance, self.sc.k_next, self.sc.k_done, self.sc.k_return, self.sc.k_set, self.sc.k_add, self.sc.k_stack_limit] {
             match k {
                 PropertyKey::String(s) => out.push(Value::String(s)),
                 PropertyKey::Symbol(s) => out.push(Value::Symbol(s)),
@@ -336,11 +401,17 @@ impl<'p> Interp<'p> {
             Some(IterState::Str { s, .. }) => work.push(Value::String(*s)),
             None => {}
         }
+        if let Some(h) = self.sc.helpers.get(&o) {
+            work.extend([h.iter, h.next, h.f]);
+            if let Some(it) = &h.inner {
+                it_trace(it, work);
+            }
+        }
     }
 
     /// Every tracked object and what it holds (`roots` is complete at any time, like the Promise map).
     fn sc_all_values(&self, out: &mut Vec<Value>) {
-        for &o in self.sc.colls.keys().chain(self.sc.iters.keys()) {
+        for &o in self.sc.colls.keys().chain(self.sc.iters.keys()).chain(self.sc.helpers.keys()) {
             out.push(Value::Object(o));
             self.sc_trace(o, out);
         }
@@ -349,6 +420,7 @@ impl<'p> Interp<'p> {
     fn sc_prune(&mut self, seen: &FxSet<ObjId>) {
         self.sc.colls.retain(|o, _| seen.contains(o));
         self.sc.iters.retain(|o, _| seen.contains(o));
+        self.sc.helpers.retain(|o, _| seen.contains(o));
         self.sc.total_entries = self.sc.colls.values().map(|c| c.entries.len()).sum();
     }
 
@@ -473,8 +545,10 @@ impl<'p> Interp<'p> {
         self.sc_getter(mctor, species, "get [Symbol.species]", ScFn::Species)?;
         for (n, f, l) in [("get", ScFn::MapGet, 1), ("set", ScFn::MapSet, 2), ("has", ScFn::MapHas, 1), ("delete", ScFn::MapDelete, 1), ("clear", ScFn::MapClear, 0), ("forEach", ScFn::MapForEach, 1)] {
             let f = self.sc_method(mproto, n, f, l)?;
-            if n == "set" {
-                self.sc.f_map_set = f;
+            match n {
+                "set" => self.sc.f_map_set = f,
+                "has" => self.sc.f_map_has = f,
+                _ => {}
             }
         }
         let size = h!(self, self.heap.key_from_str("size"));
@@ -497,8 +571,10 @@ impl<'p> Interp<'p> {
         self.sc_getter(tctor, species, "get [Symbol.species]", ScFn::Species)?;
         for (n, f, l) in [("add", ScFn::SetAdd, 1), ("has", ScFn::SetHas, 1), ("delete", ScFn::SetDelete, 1), ("clear", ScFn::SetClear, 0), ("forEach", ScFn::SetForEach, 1)] {
             let f = self.sc_method(tproto, n, f, l)?;
-            if n == "add" {
-                self.sc.f_set_add = f;
+            match n {
+                "add" => self.sc.f_set_add = f,
+                "has" => self.sc.f_set_has = f,
+                _ => {}
             }
         }
         self.sc_getter(tproto, size, "get size", ScFn::SetSize)?;
@@ -508,12 +584,41 @@ impl<'p> Interp<'p> {
         self.def(tproto, keys, Value::Object(sv), true, false, true)?;
         self.def(tproto, self.sc.k_iterator, Value::Object(sv), true, false, true)?;
         self.sc.f_set_entries = self.sc_method(tproto, "entries", ScFn::SetEntries, 0)?;
+        self.install_set_methods(tproto)?;
         self.sc_tag(tproto, "Set")?;
         let sip = h!(self, self.heap.new_object(Some(ip)));
         self.sc.set_iter_proto = sip;
         self.sc.f_set_next = self.sc_method(sip, "next", ScFn::SetIterNext, 0)?;
         self.sc_tag(sip, "Set Iterator")?;
+        self.install_boolean()?;
+        self.install_iterator()?;
+        self.install_error_extras()?;
         self.install_weak()
+    }
+
+    /// `Boolean.prototype`: `toString` and `valueOf`. A primitive `true` or `false` reads its properties from it.
+    /// There are no wrapper objects, so the prototype itself is the only object that has a Boolean value (`false`).
+    fn install_boolean(&mut self) -> Res<()> {
+        let kb = h!(self, self.heap.key_from_str("Boolean"));
+        let Get::Value(Value::Object(bc)) = h!(self, self.heap.get(self.global, kb)) else { return Err(unsupported("Boolean constructor missing", Span::default())) };
+        let bp = h!(self, self.heap.new_object(Some(self.object_proto)));
+        self.sc.bool_proto = bp;
+        self.def(bc, self.k_prototype, Value::Object(bp), false, false, false)?;
+        self.def(bp, self.k_constructor, Value::Object(bc), true, false, true)?;
+        self.sc_method(bp, "toString", ScFn::BoolToString, 0)?;
+        self.sc_method(bp, "valueOf", ScFn::BoolValueOf, 0)?;
+        Ok(())
+    }
+
+    /// `EvalError` is made with the other errors. This adds `Error.stackTraceLimit` and `Error.captureStackTrace`.
+    fn install_error_extras(&mut self) -> Res<()> {
+        let ke = h!(self, self.heap.key_from_str("Error"));
+        let Get::Value(Value::Object(ec)) = h!(self, self.heap.get(self.global, ke)) else { return Err(unsupported("Error constructor missing", Span::default())) };
+        self.sc.err_ctor = ec;
+        self.sc.k_stack_limit = h!(self, self.heap.key_from_str("stackTraceLimit"));
+        self.def(ec, self.sc.k_stack_limit, Value::Number(STACK_FRAMES as f64), true, true, true)?;
+        self.sc_method(ec, "captureStackTrace", ScFn::ErrCapture, 2)?;
+        Ok(())
     }
 
     // ------------------------------------------------------------ dispatch
@@ -557,6 +662,18 @@ impl<'p> Interp<'p> {
                 let s = self.this_symbol(this, "Symbol.prototype.description")?;
                 Ok(h!(self, self.heap.symbol_description(s)).map_or(Value::Undefined, Value::String))
             }
+            ScFn::BoolToString | ScFn::BoolValueOf => {
+                let b = match this {
+                    Value::Bool(b) => b,
+                    Value::Object(o) if o == self.sc.bool_proto => false,
+                    _ => return Err(self.type_err(&format!("Boolean.prototype.{} requires that 'this' be a Boolean", if f == ScFn::BoolToString { "toString" } else { "valueOf" }))),
+                };
+                if f == ScFn::BoolValueOf {
+                    return Ok(Value::Bool(b));
+                }
+                Ok(Value::String(h!(self, self.heap.intern_str(if b { "true" } else { "false" }))))
+            }
+            ScFn::ErrCapture => self.error_capture(a0, arg(args, 1)),
             ScFn::FnHasInstance => Ok(Value::Bool(self.ordinary_has_instance(this, a0)?)),
             ScFn::Species => Ok(this),
             ScFn::IterSelf => Ok(this),
@@ -583,6 +700,8 @@ impl<'p> Interp<'p> {
                 self.sc_track_iter(self.sc.string_iter_proto, IterState::Str { s, i: 0, done: false })
             }
             ScFn::StrIterNext => self.str_iter_next(this),
+            _ if f.is_iter() => self.call_iter(f, this, args, is_new),
+            _ if f.is_set_op() => self.call_set_op(f, this, a0),
             _ if f.is_weak() => self.call_weak(f, this, args, is_new),
             _ => self.call_coll(f, this, args, is_new),
         }
@@ -798,6 +917,9 @@ impl<'p> Interp<'p> {
             _ => None,
         };
         let st = s.iters.get(&io);
+        if no == s.f_helper_next && s.helpers.get(&io).is_some_and(|h| h.kind != HKind::Wrap) {
+            return self.helper_step(io).map(Some);
+        }
         if no == s.f_array_next && matches!(st, Some(IterState::Array { .. })) {
             return self.array_iter_step(io).map(Some);
         }

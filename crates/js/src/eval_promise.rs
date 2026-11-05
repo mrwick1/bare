@@ -1,7 +1,7 @@
 // Promise and the microtask queue of the evaluator. Included by `eval.rs` (`include!`), so it shares that
 // module's imports and private items.
 //
-// Supported: `new Promise(executor)`, `Promise.resolve`, `Promise.reject`, `Promise.prototype.then`, `.catch`,
+// Supported: `new Promise(executor)`, `Promise.resolve`, `Promise.reject`, `Promise.withResolvers`, `Promise.prototype.then`, `.catch`,
 // `.finally`. Resolver-once state, thenable assimilation (a job, as in the spec) and self-resolution rejection are exact.
 // `Promise.all`, `allSettled`, `race`, `any` and `AggregateError` are in `eval_promise_combinators.rs`.
 // Gates (explicit `Unsupported`, never silent): any static call whose `this` is not the intrinsic `Promise`.
@@ -51,6 +51,7 @@ enum PFn {
     Ctor,
     StaticResolve,
     StaticReject,
+    StaticWithResolvers,
     Then,
     Catch,
     Finally,
@@ -217,6 +218,7 @@ impl<'p> Interp<'p> {
         for (name, f) in [("resolve", PFn::StaticResolve), ("reject", PFn::StaticReject)] {
             self.pmethod(ctor, name, f, 1)?;
         }
+        self.pmethod(ctor, "withResolvers", PFn::StaticWithResolvers, 0)?;
         self.pmethod(proto, "then", PFn::Then, 2)?;
         self.pmethod(proto, "catch", PFn::Catch, 1)?;
         self.pmethod(proto, "finally", PFn::Finally, 1)?;
@@ -326,6 +328,20 @@ impl<'p> Interp<'p> {
                 let p = self.new_promise()?;
                 self.reject_promise(p, a0)?;
                 Ok(Value::Object(p))
+            }
+            PFn::StaticWithResolvers => {
+                if !matches!(this, Value::Object(_)) {
+                    return Err(self.type_err("Promise.withResolvers called on non-object"));
+                }
+                self.intrinsic_this(this)?;
+                let p = self.new_promise()?;
+                let (res, rej, _) = self.resolving_functions(p)?;
+                let r = h!(self, self.heap.new_object(Some(self.object_proto)));
+                for (name, v) in [("promise", Value::Object(p)), ("resolve", res), ("reject", rej)] {
+                    let k = h!(self, self.heap.key_from_str(name));
+                    self.def(r, k, v, true, true, true)?;
+                }
+                Ok(Value::Object(r))
             }
             PFn::Then => {
                 let p = match this {

@@ -345,7 +345,7 @@ const TYPE_ERROR: usize = 1;
 const RANGE_ERROR: usize = 2;
 const REFERENCE_ERROR: usize = 3;
 const URI_ERROR: usize = 5;
-const ERR_NAMES: [&str; 6] = ["Error", "TypeError", "RangeError", "ReferenceError", "SyntaxError", "URIError"];
+const ERR_NAMES: [&str; 7] = ["Error", "TypeError", "RangeError", "ReferenceError", "SyntaxError", "URIError", "EvalError"];
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Hint {
@@ -438,7 +438,7 @@ pub struct Interp<'p> {
     object_proto: ObjId,
     function_proto: ObjId,
     array_proto: ObjId,
-    error_protos: [ObjId; 6],
+    error_protos: [ObjId; 7],
     promise: PromiseState,
     /// JSON, RegExp and String bindings: state of `eval_builtins.rs`.
     ext: Ext,
@@ -535,7 +535,7 @@ impl<'p> Interp<'p> {
         let function_proto = e!(heap.new_object(Some(object_proto)));
         let array_proto = e!(heap.new_array(Some(object_proto)));
         let global = e!(heap.new_object(Some(object_proto)));
-        let mut error_protos = [object_proto; 6];
+        let mut error_protos = [object_proto; 7];
         for p in error_protos.iter_mut() {
             *p = e!(heap.new_object(Some(object_proto)));
         }
@@ -1711,7 +1711,7 @@ impl<'p> Interp<'p> {
             Some(Callee::Class) => D::C,
             Some(&Callee::Host { id, ctor: true, nt }) => D::H(id, nt),
             Some(&Callee::Script { script, fid, env, self_binding }) if self.func_of(script, fid).is_plain_ctor() => D::S(script, fid, env, self_binding),
-            Some(&Callee::Native(n)) if matches!(n, Nat::ObjectCtor | Nat::FnCtor | Nat::ArrayCtor | Nat::ErrorCtor(_) | Nat::Ext(Bi::RegExpCtor)) || matches!(n, Nat::Bin(b) if b.ctor_name().is_some() || b == BinFn::TaCtor) || matches!(n, Nat::Sc(f) if f.is_ctor()) || n == Nat::Date(DateFn::Ctor) || n == Nat::Intl(IntlFn::DtfCtor) => D::N(n),
+            Some(&Callee::Native(n)) if matches!(n, Nat::ObjectCtor | Nat::FnCtor | Nat::ArrayCtor | Nat::ErrorCtor(_) | Nat::Ext(Bi::RegExpCtor) | Nat::Sc(ScFn::IterCtor)) || matches!(n, Nat::Bin(b) if b.ctor_name().is_some() || b == BinFn::TaCtor) || matches!(n, Nat::Sc(f) if f.is_ctor()) || n == Nat::Date(DateFn::Ctor) || n == Nat::Intl(IntlFn::DtfCtor) => D::N(n),
             Some(&Callee::Native(Nat::StringFn | Nat::NumberFn | Nat::BooleanFn)) => return Err(unsupported("wrapper object (new String/Number/Boolean)", Span::default())),
             Some(Callee::Bound { target, args, .. }) => D::B(*target, args.clone()),
             Some(&Callee::Promise(pf @ (PFn::Ctor | PFn::AggErrCtor))) => D::P(pf),
@@ -1970,7 +1970,7 @@ impl<'p> Interp<'p> {
             }
             Value::Symbol(_) => self.sc.symbol_proto,
             Value::Number(_) => self.ao.number_proto.unwrap_or(self.object_proto),
-            _ => self.object_proto,
+            Value::Bool(_) => self.sc.bool_proto,
         };
         match hx!(self, self.heap.get(o, key)) {
             Get::Value(v) => Ok(v),
@@ -2994,6 +2994,8 @@ include!("eval_array_more.rs");
 include!("eval_numeric.rs");
 include!("eval_symbols.rs");
 include!("eval_collections.rs");
+include!("eval_set_methods.rs");
+include!("eval_iterator.rs");
 include!("eval_weak.rs");
 include!("eval_date.rs");
 include!("eval_intl.rs");
@@ -3093,6 +3095,9 @@ mod intl_tests;
 #[cfg(test)]
 #[path = "eval_number_tests.rs"]
 mod number_tests;
+#[cfg(test)]
+#[path = "eval_iterator_tests.rs"]
+mod iterator_tests;
 
 #[cfg(test)]
 #[path = "eval_stack_tests.rs"]
