@@ -590,8 +590,15 @@ fn expand(name: &str, parts: &Parts, emit: &mut dyn FnMut(Property, Value)) -> b
     }
 }
 
+/// The shorthands that `parse_declaration` splits into longhands: every name for which `shorthand_longhands` answers.
+pub const SHORTHANDS: &[&str] = &[
+    "margin", "padding", "inset", "flex", "flex-flow", "gap", "border-spacing", "border-width", "border-style", "border-color",
+    "border", "border-top", "border-right", "border-bottom", "border-left", "background", "font", "list-style", "text-decoration",
+    "overflow", "grid-row", "grid-column", "grid-area", "place-items", "place-self", "place-content",
+];
+
 /// The longhands of a shorthand, for `inherit` and the like. `None` if `name` is not a shorthand.
-fn shorthand_longhands(name: &str) -> Option<&'static [Property]> {
+pub fn shorthand_longhands(name: &str) -> Option<&'static [Property]> {
     use Property::*;
     let list: &'static [Property] = match name {
         "margin" => &[MarginTop, MarginRight, MarginBottom, MarginLeft],
@@ -967,6 +974,18 @@ mod tests {
     use super::*;
     use Keyword as K;
     use Property::*;
+
+    /// `SHORTHANDS` is the list of every shorthand name, and no longhand is in it.
+    #[test]
+    fn shorthand_list_matches_longhands() {
+        for n in SHORTHANDS {
+            assert!(shorthand_longhands(n).is_some_and(|l| !l.is_empty()), "{n}");
+            assert!(Property::from_name(n).is_none(), "{n}");
+        }
+        for p in Property::ALL {
+            assert!(shorthand_longhands(p.name()).is_none(), "{}", p.name());
+        }
+    }
 
     fn parse(name: &str, value: &str) -> Vec<(Property, Value)> {
         let mut out = Vec::new();

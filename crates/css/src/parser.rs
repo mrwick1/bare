@@ -98,7 +98,31 @@ pub fn parse_stylesheet(input: &str) -> Vec<Rule<'_>> {
 
 /// Parse a list of declarations with no `{ }` around it: the `style="..."` attribute of an element.
 pub fn parse_declarations(input: &str) -> Vec<Declaration<'_>> {
-    Parser::new(input).declaration_list(false)
+    Parser::new(input).declaration_list(false, usize::MAX).0
+}
+
+/// Like `parse_declarations`, but retains at most `cap` declarations. One extra valid declaration is parsed to detect
+/// overflow, then discarded. The flag is `true` when the input held more than `cap`.
+pub fn parse_declarations_capped(input: &str, cap: usize) -> (Vec<Declaration<'_>>, bool) {
+    Parser::new(input).declaration_list(false, cap)
+}
+
+/// The top-level pieces of a value, as byte ranges: `1px solid rgb(1, 2, 3)` is three. A function or a block is one
+/// piece, a string is one piece, and `/` and `,` are pieces of their own. Gives `None` when there are more than `cap`.
+pub fn components(input: &str, cap: usize) -> Option<Vec<(usize, usize)>> {
+    let mut p = Parser::new(input);
+    let mut out = Vec::new();
+    loop {
+        p.skip_whitespace();
+        let Some((token, start, mut end)) = p.bump() else { return Some(out) };
+        if let Some(block) = block_start(&token) {
+            end = p.skip_block(block);
+        }
+        if out.len() == cap {
+            return None;
+        }
+        out.push((start, end));
+    }
 }
 
 /// The three kinds of block.
@@ -231,7 +255,7 @@ impl<'a> Parser<'a> {
             self.skip_block(Block::Curly);
             return None;
         }
-        let declarations = self.declaration_list(true);
+        let declarations = self.declaration_list(true, usize::MAX).0;
         // We read the block even if the prelude is empty, so that we are after its `}`.
         (!prelude.is_empty()).then_some(StyleRule { prelude, declarations })
     }
@@ -274,7 +298,7 @@ impl<'a> Parser<'a> {
             match &*name {
                 "media" | "supports" | "layer" | "container" | "document" | "-moz-document" | "scope" | "starting-style" => AtBody::Rules(self.rule_list(true, depth + 1)),
                 n if n.ends_with("keyframes") => AtBody::Rules(self.rule_list(true, depth + 1)),
-                "font-face" | "page" | "property" | "counter-style" | "viewport" | "-ms-viewport" | "font-palette-values" => AtBody::Declarations(self.declaration_list(true)),
+                "font-face" | "page" | "property" | "counter-style" | "viewport" | "-ms-viewport" | "font-palette-values" => AtBody::Declarations(self.declaration_list(true, usize::MAX).0),
                 _ => {
                     self.skip_block(Block::Curly);
                     AtBody::Skipped
@@ -287,21 +311,27 @@ impl<'a> Parser<'a> {
     // ---- Declarations ----
 
     /// Parse declarations until the end of the style sheet, or, when `nested`, until the `}` of our block.
-    fn declaration_list(&mut self, nested: bool) -> Vec<Declaration<'a>> {
+    /// Retains at most `cap` declarations, with a flag when another valid declaration is found.
+    fn declaration_list(&mut self, nested: bool, cap: usize) -> (Vec<Declaration<'a>>, bool) {
         let mut declarations = Vec::new();
         loop {
             match self.peek() {
-                None => return declarations,
+                None => return (declarations, false),
                 Some(Token::Whitespace | Token::Semicolon) => {
                     self.bump();
                 }
                 Some(Token::CloseCurly) if nested => {
                     self.bump();
-                    return declarations;
+                    return (declarations, false);
                 }
                 Some(Token::AtKeyword(_)) => self.skip_statement(nested, true),
                 // An at-rule inside a block: we do not use it. We skip it, with its block.
-                Some(Token::Ident(_)) => declarations.extend(self.declaration(nested)),
+                Some(Token::Ident(_)) => {
+                    if let Some(d) = self.declaration(nested) {
+                        if declarations.len() == cap { return (declarations, true); }
+                        declarations.push(d);
+                    }
+                }
                 Some(_) => self.skip_statement(nested, false),
                 // Something that cannot start a declaration. The standard says: skip to the next `;`.
             }
@@ -425,6 +455,36 @@ fn lowercase(name: Cow<'_, str>) -> Cow<'_, str> {
 // Only compiled for `cargo test`.
 mod tests {
     use super::*;
+
+    #[test]
+    fn capped_declarations_stop_early() {
+        let (list, more) = parse_declarations_capped("a:1;b:2;c:3", 3);
+        assert_eq!((list.len(), more), (3, false));
+        let (list, more) = parse_declarations_capped("a:1;b:2;c:3;d:4;e:5", 3);
+        assert_eq!((list.len(), more), (3, true));
+        let (list, more) = parse_declarations_capped("a:1;b:2", 0);
+        assert_eq!((list.len(), more), (0, true));
+        assert!(!parse_declarations_capped("", 0).1);
+        assert!(!parse_declarations_capped(";;x;y", 0).1);
+        // Same result as the unbounded parse when the cap is not reached.
+        assert_eq!(parse_declarations_capped("a:1;b:rgb(1;2);--c:\"x;y\" !important", 9).0, parse_declarations("a:1;b:rgb(1;2);--c:\"x;y\" !important"));
+    }
+
+    #[test]
+    fn components_split_at_the_top_level() {
+        fn cut(t: &str, cap: usize) -> Option<Vec<&str>> {
+            components(t, cap).map(|v| v.into_iter().map(|(a, b)| &t[a..b]).collect())
+        }
+        assert_eq!(cut("  1px  solid rgb(1, 2,3) ", 9), Some(vec!["1px", "solid", "rgb(1, 2,3)"]));
+        assert_eq!(cut("2 / span 3, \"a b\"", 9), Some(vec!["2", "/", "span", "3", ",", "\"a b\""]));
+        assert_eq!(cut("[a b] (c d) {e f} g", 9), Some(vec!["[a b]", "(c d)", "{e f}", "g"]));
+        assert_eq!(cut("calc(1px + (2px * 3)) x", 9), Some(vec!["calc(1px + (2px * 3))", "x"]));
+        assert_eq!(cut("a b c", 2), None);
+        assert_eq!(cut("a b", 2), Some(vec!["a", "b"]));
+        assert_eq!(cut("", 0), Some(vec![]));
+        // An unclosed block ends at the end of the text.
+        assert_eq!(cut("a rgb(1, 2", 9), Some(vec!["a", "rgb(1, 2"]));
+    }
 
     /// The rules as one line of text, so that a test can compare it with a string.
     /// `p{color:red;margin:0!}` is a style rule. A `!` after a value means `!important`.
@@ -635,5 +695,20 @@ mod tests {
             show(&parse_stylesheet(&text));
             show_declarations(&parse_declarations(&text));
         }
+    }
+}
+
+#[cfg(test)]
+mod strict_cap_tests {
+    use super::parse_declarations_capped;
+
+    #[test]
+    fn capped_parser_never_keeps_a_declaration_beyond_the_cap() {
+        let (list, more) = parse_declarations_capped("a:1;b:2;c:3", 2);
+        assert!(more);
+        assert_eq!(list.len(), 2);
+        let (list, more) = parse_declarations_capped("a:1", 0);
+        assert!(more);
+        assert!(list.is_empty());
     }
 }

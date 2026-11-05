@@ -40,3 +40,7 @@ mod browser_session_tests;
 mod browser_loader_tests;
 #[cfg(test)]
 mod browser_platform_tests;
+mod browser_style;
+mod browser_style_block;
+#[cfg(test)]
+mod browser_style_tests;
