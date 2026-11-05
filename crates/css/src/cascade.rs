@@ -301,19 +301,26 @@ impl RuleSet {
         let mut filter = AncestorFilter::new();
         let mut memo = Memo::default();
         let (mut candidates, mut matched): (Vec<u32>, Vec<u32>) = (Vec::new(), Vec::new());
-        let mut stack = vec![(doc.root(), false)];
+        let mut stack = vec![(doc.root(), false, false)];
         // The walk is a loop with a stack, and not a function that calls itself: a deep tree cannot overflow the call stack.
         // `true` means that we leave the node, and we take its hashes out of the filter.
-        while let Some((node, leaving)) = stack.pop() {
+        // It walks the flat tree: a host's children are those of its shadow root. The third value says the node is in a shadow tree.
+        // There, only the browser's rules match: the page's rules do not reach into a shadow tree (Stylo, Blink), and the
+        // shadow tree's own sheets are not built (the geometry module refuses a shadow tree that has one).
+        while let Some((node, leaving, shadow)) = stack.pop() {
             match doc.data(node) {
                 NodeData::Element { .. } if leaving => {
                     element_hashes(doc, node, &mut |h| filter.remove(h));
                     continue;
                 }
                 NodeData::Element { .. } => {
-                    let parent = doc.parent(node).map_or(0, |p| styles.of_node[p.index()]);
+                    let parent = doc.flat_parent(node).map_or(0, |p| styles.of_node[p.index()]);
                     let parent = if parent == NONE { 0 } else { parent };
                     self.candidates(doc, node, &mut candidates);
+                    if shadow {
+                        // Outside the hot loop: a light-tree element pays nothing for this.
+                        candidates.retain(|&i| self.entries[i as usize].origin == Origin::UserAgent);
+                    }
                     matched.clear();
                     for &i in &candidates {
                         let e = &self.entries[i as usize];
@@ -337,15 +344,16 @@ impl RuleSet {
                         cx.root_font_size = styles.styles[id as usize].px(Property::FontSize);
                     }
                     element_hashes(doc, node, &mut |h| filter.add(h));
-                    stack.push((node, true));
+                    stack.push((node, true, shadow));
                 }
                 NodeData::Document => {}
                 _ => continue,
             }
             // The children, so that the first child comes out of the stack first.
-            let mut child = doc.last_child(node);
+            let root = doc.shadow_root(node);
+            let mut child = doc.last_child(root.unwrap_or(node));
             while let Some(c) = child {
-                stack.push((c, false));
+                stack.push((c, false, shadow || root.is_some()));
                 child = doc.prev_sibling(c);
             }
         }

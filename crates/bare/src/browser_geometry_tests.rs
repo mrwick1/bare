@@ -177,10 +177,36 @@ fn a_shadow_tree_is_a_gate_and_not_a_guess() {
     let mut b = page("", "<div id=h></div>");
     let gate = "unsupported:computed style in a shadow tree (shadow cascade is not implemented)";
     assert_eq!(js(&mut b, "var r = document.getElementById('h').attachShadow({ mode: 'open' }); var i = r.appendChild(document.createElement('i')); i.offsetWidth"), gate);
-    // a host with a shadow root is rendered from the flat tree, which is not built
-    assert_eq!(js(&mut b, "document.getElementById('h').offsetWidth"), "unsupported:geometry of a shadow host (flat tree layout is not built)");
     // a shadow tree that is not attached to the document has no box
     assert_eq!(js(&mut b, "var h2 = document.createElement('div'); var r2 = h2.attachShadow({ mode: 'open' }); r2.appendChild(document.createElement('b')).offsetWidth"), "0");
+}
+
+#[test]
+fn a_shadow_host_is_laid_out_from_its_flat_tree() {
+    // The page rule for `.c` must not reach into the shadow tree. The line height comes to the shadow text through the host.
+    let css = ".c { height: 70px } #h { width: 100px; line-height: 40px } #k { width: 50px; height: 50px }";
+    let mut b = page(css, "<div id=h><p style='height: 100px'>light</p></div><div id=k></div>");
+    let attach = "var r = document.getElementById('h').attachShadow({ mode: 'open' }); var c = document.createElement('div'); c.className = 'c'; r.appendChild(c);";
+    assert_eq!(js(&mut b, &format!("{attach} document.getElementById('h').offsetWidth + 'x' + document.getElementById('h').offsetHeight")), "100x0");
+    // shadow text, then a shadow block of 30px: 40 + 30. The light `p` is not rendered (no slot takes it).
+    assert_eq!(js(&mut b, "r.insertBefore(document.createTextNode('x'), c); var d = r.appendChild(document.createElement('div')); d.style.height = '30px'; document.getElementById('h').offsetHeight"), "70");
+    assert_eq!(size(&mut b, "k"), "50x50");
+}
+
+#[test]
+fn the_next_route_announcer_shape_does_not_block_geometry() {
+    // Next.js appends an inline custom element whose shadow tree holds one absolutely positioned 1px region.
+    let mut b = page("#k { width: 50px; height: 50px }", "<div id=k></div>");
+    let src = "var e = document.createElement('next-route-announcer'); var t = document.createElement('div'); t.style.cssText = 'position:absolute;border:0;height:1px;margin:-1px;padding:0;width:1px;clip:rect(0 0 0 0);overflow:hidden;white-space:nowrap;word-wrap:normal'; e.attachShadow({ mode: 'open' }).appendChild(t); document.body.appendChild(e); var k = document.getElementById('k'); k.offsetWidth + 'x' + k.offsetHeight";
+    assert_eq!(js(&mut b, src), "50x50");
+}
+
+#[test]
+fn slots_and_shadow_style_sheets_stay_gates() {
+    let mut b = page("#k { width: 50px }", "<div id=h></div><div id=k></div>");
+    assert_eq!(js(&mut b, "var r = document.getElementById('h').attachShadow({ mode: 'open' }); var s = r.appendChild(document.createElement('slot')); document.getElementById('k').offsetWidth"), "unsupported:geometry of a shadow tree with a slot (slot assignment is not built)");
+    assert_eq!(js(&mut b, "s.remove(); r.appendChild(document.createElement('style')).textContent = 'div { height: 9px }'; document.getElementById('k').offsetWidth"), "unsupported:geometry of a shadow tree with a style sheet (shadow style scoping is not built)");
+    assert_eq!(js(&mut b, "r.lastChild.remove(); document.getElementById('k').offsetWidth"), "50");
 }
 
 #[test]

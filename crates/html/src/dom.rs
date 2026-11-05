@@ -327,7 +327,12 @@ impl Document {
     }
 
     /// The shadow root of the host `host`, if it has one (open or closed).
+    #[inline]
     pub fn shadow_root(&self, host: NodeId) -> Option<NodeId> {
+        // Most pages have no shadow root: skip the hash.
+        if self.shadow_of.is_empty() {
+            return None;
+        }
         self.shadow_of.get(&(host.index() as u32)).copied()
     }
 
@@ -354,6 +359,31 @@ impl Document {
         self.shadow_of.insert(host.index() as u32, root);
         self.shadow_host.insert(root.index() as u32, (host, open));
         root
+    }
+
+    /// The parent of this node in the flat tree, the tree that is rendered (Blink `FlatTreeTraversal::Parent`). A child of a shadow root has
+    /// the host as its parent. A light child of a host has no parent: slot assignment is not built, so no slot takes it, and it is not
+    /// rendered. A page with no shadow root pays one `is_empty` check.
+    #[inline]
+    pub fn flat_parent(&self, id: NodeId) -> Option<NodeId> {
+        let parent = self.parent(id)?;
+        if self.shadow_of.is_empty() {
+            return Some(parent);
+        }
+        if let Some(host) = self.shadow_host(parent) {
+            return Some(host);
+        }
+        if self.shadow_root(parent).is_some() { None } else { Some(parent) }
+    }
+
+    /// The children of this node in the flat tree: the children of its shadow root if it is a host, else its own children. Siblings are the
+    /// same in both trees, so `next_sibling` walks on from any of them.
+    #[inline]
+    pub fn flat_children(&self, id: NodeId) -> Children<'_> {
+        if self.shadow_of.is_empty() {
+            return self.children(id);
+        }
+        self.children(self.shadow_root(id).unwrap_or(id))
     }
 
     /// The children of this node, in order.

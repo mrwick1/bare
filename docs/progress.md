@@ -429,3 +429,5 @@ Submit-button clicks now dispatch a native SubmitEvent after a non-canceled clic
 
 
 Compound statements now run in a bounded heap-frame machine, not in native recursion. The evaluator call ceiling is 256, and SessionConfig::new selects it. The 768 native-frame guard still bounds the stack, because every call also takes a native frame. The full cached login now creates the form. It stops at the visible shadow-host geometry gate. See [resources.md](resources.md#statement-machine-and-call-ceiling).
+
+Visible shadow hosts are laid out from the flat tree. Page rules do not reach into a shadow tree. Slots and shadow style sheets remain explicit gates. The full cached login now reaches Page(Settled). React then removes the form, because a layout effect throws `ReferenceError: ResizeObserver is not defined`. See [resources.md](resources.md#flat-tree-layout-for-shadow-hosts).

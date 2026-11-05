@@ -1253,7 +1253,7 @@ pub(crate) fn layout(cx: &mut Cx, node: NodeId, space: Space, bp: Sides) -> Kids
             let percent = matches!(height, Value::Length(Length::Percent(_) | Length::Calc(_)));
             let target = (area_h - t0 - b0 - bpv).max(0.0);
             let again = if stretch && (area_h - t0 - b0 - l.h).abs() > 0.01 {
-                if tree.doc.children(it.node).any(|c| matches!(tree.doc.data(c), bare_html::dom::NodeData::Element { .. })) {
+                if tree.doc.flat_children(it.node).any(|c| matches!(tree.doc.data(c), bare_html::dom::NodeData::Element { .. })) {
                     Some(Some(target))
                 } else {
                     // Only text inside: the box gets taller, and its lines stay.
