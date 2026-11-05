@@ -5,6 +5,7 @@
 
 pub mod browser;
 mod browser_dom;
+mod browser_fragment;
 mod browser_events;
 mod browser_focus;
 #[cfg(test)]
@@ -37,6 +38,8 @@ mod browser_iframe_tests;
 mod browser_link_tests;
 #[cfg(test)]
 mod browser_root_node_tests;
+#[cfg(test)]
+mod browser_fragment_tests;
 #[cfg(test)]
 mod browser_tests;
 pub mod browser_platform;

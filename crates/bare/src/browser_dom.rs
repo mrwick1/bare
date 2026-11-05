@@ -114,7 +114,7 @@ impl Dom {
         Ok(())
     }
 
-    fn depth_of(&self, it: &mut Interp<'_>, n: NodeId) -> R<usize> {
+    pub(crate) fn depth_of(&self, it: &mut Interp<'_>, n: NodeId) -> R<usize> {
         let doc = self.doc.borrow();
         let (mut d, mut cur) = (0, n);
         while let Some(p) = doc.parent(cur) {
@@ -820,6 +820,7 @@ pub(crate) fn clone_node(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value])
                 }
                 NodeData::Document => unreachable!("checked above"),
             };
+            d.copy_script_started(src, c);
             if let Some(mut i) = st.inputs.get(&src).cloned() {
                 i.sel = None; // the cloning steps copy value and checkedness, not the selection
                 i.sc_pending = false; // the clone has no task of its own

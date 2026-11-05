@@ -30,6 +30,8 @@
 //! - CharacterData: `data length`. Document: `createElement createElementNS createTextNode createComment getElementById
 //!   documentElement head body doctype defaultView querySelector(All)`.
 //! - `<input>`: `value checked type defaultValue defaultChecked` with native state (dirty value, checkedness).
+//! - `Element.innerHTML` (`browser_fragment.rs`): native fragment parsing and serialization with explicit gates (table, select, template, html, frameset and
+//!   foreign contexts are `Unsupported`). Fragment scripts are never run.
 //! - `<link>` (HTML namespace only, `HTMLLinkElement`): `rel` as a reflected string. Setting it loads nothing.
 //! - `<input>` text selection (`selectionStart selectionEnd selectionDirection setSelectionRange select`, `select` event task): `browser_selection.rs`.
 //! - Events: `Event`, `CustomEvent` (`detail`), `addEventListener` (capture, once, passive; function or `handleEvent`
@@ -43,7 +45,7 @@
 //!   snapshot arrays, not live `NodeList`/`HTMLCollection`.
 //! - A JS string with a lone surrogate cannot be stored in the UTF-8 document: `Error::Unsupported`. Valid pairs round-trip.
 //! - Namespaces are in `browser_namespace.rs` (read its header): HTML, SVG and MathML elements, attributes in no namespace, XML,
-//!   XMLNS and XLink. Any other namespace is `Unsupported`. Shadow DOM is absent. `new Document()`, `DocumentFragment`, `innerHTML`, `outerHTML`,
+//!   XMLNS and XLink. Any other namespace is `Unsupported`. Shadow DOM is absent. `new Document()`, `DocumentFragment`, `outerHTML`, `insertAdjacentHTML`,
 //!   `dataset`, `style`, `before/after/replaceWith`, layout APIs, `location` and
 //!   network are absent. Timers, `queueMicrotask`, `performance.now` and `MessageChannel` are in `browser_scheduler.rs`. `Element.attributes` and `Attr` are in `browser_attr.rs`.
 //! - `addEventListener` option `signal` is `Unsupported`. `isTrusted` is always false. Events made by the test driver
@@ -62,6 +64,7 @@
 //! oracle (`tools/js/browser_oracle.mjs`).
 
 use crate::browser_dom as nd;
+use crate::browser_fragment as frag;
 use crate::browser_namespace as ns;
 use crate::browser_attr as at;
 use crate::browser_events as ev;
@@ -788,6 +791,7 @@ pub(crate) static DEFS: &[Def] = &[
     Def { on: &[Element], name: "prefix", len: 0, kind: G(ns::prefix) },
     Def { on: &[Element], name: "previousElementSibling", len: 0, kind: G(nd::previous_element_sibling) },
     Def { on: &[Element], name: "nextElementSibling", len: 0, kind: G(nd::next_element_sibling) },
+    Def { on: &[Element], name: "innerHTML", len: 0, kind: A(frag::inner_html, frag::set_inner_html) },
     Def { on: &[Element], name: "id", len: 0, kind: A(nd::id, nd::set_id) },
     Def { on: &[Element], name: "className", len: 0, kind: A(nd::class_name, nd::set_class_name) },
     Def { on: &[Element], name: "getAttribute", len: 1, kind: M(nd::get_attribute) },

@@ -21,15 +21,17 @@
 //! The standard says that every page, however broken, gives a tree. No error stops the builder.
 //!
 //! Left out (known gaps):
-//! - `<template>`, `<select>` modes, framesets and `<noscript>`. Foreign content (SVG and MathML) is cut down: see `foreign.rs`.
+//! - `<template>`, `<select>` modes, framesets and `<noscript>` (fragment parsing for `innerHTML` is in `tree/fragment.rs` and gates these). Foreign content (SVG and MathML) is cut down: see `foreign.rs`.
 //! - Quirks mode, and merging the attributes of a second `<html>` or `<body>` tag.
 //!
 //! Comments compare Rust with JavaScript, because you know JS.
 
 mod foreign;
+mod fragment;
 #[cfg(test)]
 mod context_tests;
 
+pub use fragment::{Fragment, FragmentError, FragmentLimits, context_gate, parse_fragment};
 use crate::dom::{Document, NodeData, NodeId, Ns};
 use std::borrow::Cow;
 
