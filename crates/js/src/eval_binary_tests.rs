@@ -38,11 +38,11 @@ fn fmt_result(it: &mut Interp, r: Result<Value, Error>) -> String {
 }
 
 /// Run a script with default limits and show the result.
-fn run(src: &str) -> String {
+pub(super) fn run(src: &str) -> String {
     run_with(src, HeapLimits::default(), EvalLimits { max_steps: 5_000_000, ..Default::default() }, |_| {})
 }
 
-fn run_with(src: &str, heap: HeapLimits, limits: EvalLimits, setup: impl FnOnce(&mut Interp) + Send + 'static) -> String {
+pub(super) fn run_with(src: &str, heap: HeapLimits, limits: EvalLimits, setup: impl FnOnce(&mut Interp) + Send + 'static) -> String {
     let src = src.to_string();
     big(move || {
         let prog = parse_script(&src, Limits::default()).unwrap_or_else(|e| panic!("{src:?}: {e}"));
@@ -64,7 +64,7 @@ fn adapter_corpus_matches_node() {
     check_corpus(include_str!("../../../tools/fixtures/js/adapter-cases.txt"), include_str!("../../../tools/fixtures/js/adapter-cases.expected"));
 }
 
-fn check_corpus(cases: &str, expected: &str) {
+pub(super) fn check_corpus(cases: &str, expected: &str) {
     let mut list: Vec<(&str, Vec<&str>)> = Vec::new();
     for line in cases.lines() {
         if let Some(n) = line.strip_prefix("=== ") {
@@ -92,21 +92,13 @@ fn unsupported_subset_is_explicit() {
     let g = |src: &str| run(src);
     assert_eq!(g("new ArrayBuffer(4, {maxByteLength: 8})"), "unsupported:resizable ArrayBuffer");
     assert_eq!(g("new ArrayBuffer(4).resize(2)"), "unsupported:ArrayBuffer.prototype.resize");
-    assert_eq!(g("new ArrayBuffer(4).transfer()"), "unsupported:ArrayBuffer.prototype.transfer");
-    assert_eq!(g("Uint8Array.from([1])"), "unsupported:TypedArray.from");
-    assert_eq!(g("Uint8Array.of(1)"), "unsupported:TypedArray.of");
-    for m in ["fill", "copyWithin", "reverse", "sort", "lastIndexOf", "includes", "join", "map", "filter", "forEach", "reduce", "every", "some", "find", "findIndex", "at", "toString", "toReversed"] {
-        assert_eq!(g(&format!("new Uint8Array(2).{m}()")), format!("unsupported:TypedArray.prototype.{m}"), "{m}");
-    }
     // Other encodings: a real label is a gate, a made-up one is a RangeError.
     assert_eq!(g("new TextDecoder('utf-16le')"), "unsupported:TextDecoder encoding other than utf-8");
     assert_eq!(g("new TextDecoder('latin1')"), "unsupported:TextDecoder encoding other than utf-8");
     assert_eq!(g("new TextDecoder('nope')"), "throw:RangeError:The \"nope\" encoding is not supported");
     // Absent, as in an engine without them.
-    for name in ["SharedArrayBuffer", "DataView", "Int8Array", "Uint8ClampedArray", "Uint16Array", "Int32Array", "Float32Array", "Float64Array", "BigInt64Array"] {
-        assert_eq!(g(&format!("typeof {name}")), "string:undefined", "{name}");
-        assert_eq!(g(name), format!("throw:ReferenceError:{name} is not defined"), "{name}");
-    }
+    assert_eq!(g("typeof SharedArrayBuffer"), "string:undefined");
+    assert_eq!(g("SharedArrayBuffer"), "throw:ReferenceError:SharedArrayBuffer is not defined");
     // The typed-array family root is not a global, but it is reachable.
     assert_eq!(g("typeof TypedArray + typeof Object.getPrototypeOf(Uint8Array)"), "string:undefinedfunction");
     // defineProperty with an object value would need ToNumber from the generic path: a gate, not a wrong answer.
@@ -152,7 +144,7 @@ fn webidl_argument_order_and_dictionaries() {
 
 // ---------------------------------------------------------------- limits
 
-fn limited(heap: HeapLimits, total: usize, single: usize, src: &str) -> String {
+pub(super) fn limited(heap: HeapLimits, total: usize, single: usize, src: &str) -> String {
     run_with(src, heap, EvalLimits { max_steps: 50_000_000, ..Default::default() }, move |it| it.set_binary_limits(total, single))
 }
 
@@ -269,7 +261,7 @@ fn call_depth_guard_covers_getters_called_by_the_constructors() {
 
 // ---------------------------------------------------------------- GC, stale handles and roots
 
-fn with_run<R: Send + 'static>(src: &'static str, f: impl FnOnce(&mut Interp) -> R + Send + 'static) -> R {
+pub(super) fn with_run<R: Send + 'static>(src: &'static str, f: impl FnOnce(&mut Interp) -> R + Send + 'static) -> R {
     big(move || {
         let prog = parse_script(src, Limits::default()).unwrap();
         let mut it = Interp::new(&prog, Heap::default(), EvalLimits::default()).unwrap();
@@ -278,7 +270,7 @@ fn with_run<R: Send + 'static>(src: &'static str, f: impl FnOnce(&mut Interp) ->
     })
 }
 
-fn global(it: &mut Interp, name: &str) -> Value {
+pub(super) fn global(it: &mut Interp, name: &str) -> Value {
     let k = it.heap.key_from_str(name).unwrap();
     match it.heap.get(it.global_object(), k).unwrap() {
         Get::Value(v) => v,
@@ -618,7 +610,7 @@ fn decoder_label_scans_consume_steps() {
 fn custom_species_is_an_explicit_gate_and_the_default_is_not() {
     let g = |src: &str| run(src);
     let ab = "unsupported:ArrayBuffer species constructor other than ArrayBuffer";
-    let ta = "unsupported:typed array species constructor other than Uint8Array";
+    let ta = "unsupported:typed array species constructor other than the intrinsic class";
     assert_eq!(g("var b = new ArrayBuffer(2); b.constructor = {[Symbol.species]: function(n) { return new ArrayBuffer(n); }}; b.slice(0)"), ab);
     assert_eq!(g("var u = new Uint8Array(2); u.constructor = {[Symbol.species]: function(n) { return new Uint8Array(n); }}; u.subarray(0)"), ta);
     assert_eq!(g("var u = new Uint8Array(2); u.constructor = {[Symbol.species]: function(n) { return new Uint8Array(n); }}; u.slice(0)"), ta);

@@ -1,7 +1,7 @@
-//! Load test for byte buffers, Uint8Array and the text codecs. One case at one scale per process, so the peak
+//! Load test for byte buffers, typed arrays, DataView and the text codecs. One case at one scale per process, so the peak
 //! memory belongs to that run.
 //!
-//!   binary_load CASE SCALE    CASE: copy | scan | scanarr | codec | stream | indexof    SCALE: 1, 10, 100
+//!   binary_load CASE SCALE    CASE: copy | scan | scanarr | codec | stream | indexof | f64from | i32sort | dataview    SCALE: 1, 10, 100
 //!
 //! The host builds the input bytes and hands them over without a copy. The script works on them. The host then
 //! checks the result against the same computation done in Rust. A wrong result exits with status 1. It prints
@@ -14,6 +14,10 @@
 //!   stream  SCALE x 512 KiB of mixed text in 1000-byte chunks that split code points: checks the total length
 //!   indexof SCALE x 2 MiB: hit scans over every 4096th byte (255), a miss (252) over the whole view, and a search
 //!           from the tail; checks the count, the sum of the hit positions and the three positions against the formula
+//!   f64from SCALE*20000 values from a generator through `Float64Array.from` with a map function; checks every element
+//!   i32sort SCALE*100000 random int32 values: slice, fill, sort, toReversed, set; checks the bytes against a Rust sort
+//!   dataview SCALE*100000 loop turns of `getUint32` (little endian), `setUint32` (big endian) and `getInt16`; checks the sum
+//!           and the bytes of the buffer against a Rust model
 
 use bare_js::eval::*;
 use bare_js::heap::Heap;
@@ -68,6 +72,12 @@ fn run_case(case: String, scale: usize) {
         // Byte 255 is at every 4096th index; `i % 251` never reaches 251 or more, so 252 is a miss over all the bytes.
         "indexof" => ((0..scale << 21).map(|i| if i % 4096 == 17 { 255 } else { (i % 251) as u8 }).collect(),
             "var n = 0, s = 0, k = 0; while ((k = data.indexOf(255, k)) !== -1) { n++; s += k; k++; } [n, s, data.indexOf(255), data.indexOf(252), data.indexOf(255, data.length - 4079)].join('|')".into()),
+        "f64from" => (vec![0; scale * 20_000],
+            "function* g(n) { for (var i = 0; i < n; i++) yield i; } Float64Array.from(g(data.length), function (x, k) { return x * 0.5 + k; })".into()),
+        "i32sort" => ((0..scale * 400_000).map(|i| (((i as u64).wrapping_mul(0x9E3779B97F4A7C15) >> 29) ^ (i as u64 >> 2)) as u8).collect(),
+            "var a = new Int32Array(data.buffer, 0, data.length >> 2); var t = a.slice(0); t.sort(); var r = t.toReversed(); var z = new Int32Array(a.length); z.fill(7); r.set(z.subarray(0, 100)); r.reverse(); r.sort(); r".into()),
+        "dataview" => ((0..scale * 400_000).map(|i| (i.wrapping_mul(131) >> 2) as u8).collect(),
+            "var d = new DataView(data.buffer); var s = 0; for (var i = 0; i < data.length; i += 4) { d.setUint32(i, d.getUint32(i, true) + 1, false); s += d.getInt16(i, true); } s".into()),
         "codec" => (mixed_text(mib), "var t = new TextDecoder().decode(data); var e = new TextEncoder().encode(t); [t.length, e]".into()),
         "stream" => (mixed_text(mib), "var d = new TextDecoder(); var n = 0; for (var i = 0; i < data.length; i += 1000) n += d.decode(data.subarray(i, i + 1000), {stream: true}).length; n + d.decode().length".into()),
         _ => die(format!("unknown case {case}")),
@@ -110,6 +120,38 @@ fn run_case(case: String, scale: usize) {
             }
             if it.bytes_of(enc) != Some(&keep[..]) {
                 die(format!("codec x{scale}: round trip differs"));
+            }
+        }
+        "f64from" => {
+            let want: Vec<u8> = (0..keep.len()).flat_map(|k| (k as f64 * 0.5 + k as f64).to_le_bytes()).collect();
+            if it.bytes_of(result) != Some(&want[..]) {
+                die(format!("f64from x{scale}: bytes differ"));
+            }
+        }
+        "i32sort" => {
+            // The script: the first 100 values of the reversed sort become 7, then everything is sorted again.
+            let mut w: Vec<i32> = keep.chunks_exact(4).map(|c| i32::from_le_bytes(c.try_into().unwrap())).collect();
+            w.sort_unstable();
+            w.reverse();
+            for x in w.iter_mut().take(100) {
+                *x = 7;
+            }
+            w.sort_unstable();
+            let want: Vec<u8> = w.iter().flat_map(|x| x.to_le_bytes()).collect();
+            if it.bytes_of(result) != Some(&want[..]) {
+                die(format!("i32sort x{scale}: bytes differ"));
+            }
+        }
+        "dataview" => {
+            let mut b = keep.clone();
+            let mut sum = 0f64;
+            for i in (0..b.len()).step_by(4) {
+                let v = u32::from_le_bytes(b[i..i + 4].try_into().unwrap()).wrapping_add(1);
+                b[i..i + 4].copy_from_slice(&v.to_be_bytes());
+                sum += i16::from_le_bytes([b[i], b[i + 1]]) as f64;
+            }
+            if !matches!(result, Value::Number(x) if x == sum) || it.bytes_of(data) != Some(&b[..]) {
+                die(format!("dataview x{scale}: result {} != {sum} or bytes differ", it.display(result)));
             }
         }
         "indexof" => {

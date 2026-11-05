@@ -1,0 +1,418 @@
+# bare-js typed array, DataView and ArrayBuffer cases (batch 3 of the missing built-ins). A case starts with `=== name`;
+# the last expression is the result. Node (vm, a fresh context that gets only Node's TextEncoder and TextDecoder, 2 s timeout) is
+# the oracle: tools/js/binary_oracle.mjs, run by tools/js/typed_check.sh. Only our own tiny programs run here. `E(f)` is the
+# value or `Name: message`, `J(array-like)` is a comma join. The BigInt typed arrays have no element values in bare-js, so
+# these cases use only their constructors, lengths and bytes.
+=== ty_shape
+var out = [];
+[Int8Array, Uint8Array, Uint8ClampedArray, Int16Array, Uint16Array, Int32Array, Uint32Array, Float32Array, Float64Array, BigInt64Array, BigUint64Array].forEach(function (C) {
+  var d = Object.getOwnPropertyDescriptor(C, "BYTES_PER_ELEMENT"), p = Object.getOwnPropertyDescriptor(C.prototype, "BYTES_PER_ELEMENT");
+  var pd = Object.getOwnPropertyDescriptor(C, "prototype");
+  out.push([C.name, C.length, d.value, d.writable, d.enumerable, d.configurable, p.value, p.writable, p.enumerable, p.configurable, pd.writable, pd.enumerable, pd.configurable,
+    C.prototype.constructor === C, Object.getPrototypeOf(C) === Object.getPrototypeOf(Int8Array), Object.getPrototypeOf(C.prototype) === Object.getPrototypeOf(Int8Array.prototype),
+    Object.getOwnPropertyNames(C.prototype).join("+"), Object.getOwnPropertyNames(C).sort().join("+"), typeof globalThis[C.name], Object.getOwnPropertyDescriptor(globalThis, C.name).enumerable].join(":"));
+});
+out.join("\n")
+=== ty_abstract_class
+var TA = Object.getPrototypeOf(Int8Array);
+function E(f){try{return String(f())}catch(e){return e.name+": "+e.message}}
+[TA.name, TA.length, typeof TA, TA.prototype === Object.getPrototypeOf(Int8Array.prototype), TA.prototype.constructor === TA, typeof TypedArray,
+ E(function(){return new TA()}), E(function(){return TA()}), Object.getOwnPropertyNames(TA).sort().join("+"), TA.from.length, TA.of.length, TA.from.name, TA.of.name,
+ Object.getOwnPropertyNames(TA.prototype).sort().join("+"), Object.getOwnPropertyDescriptor(TA, Symbol.species).get.name, TA[Symbol.species] === TA,
+ TA.prototype.toString === Array.prototype.toString, TA.prototype.values === TA.prototype[Symbol.iterator], TA.prototype.values.name, TA.prototype[Symbol.iterator].name].join("|")
+=== ty_method_lengths
+var TA = Object.getPrototypeOf(Int8Array).prototype, out = [];
+Object.getOwnPropertyNames(TA).sort().forEach(function (n) { var d = Object.getOwnPropertyDescriptor(TA, n); out.push(n + ":" + (d.get ? "get:" + d.get.name + ":" + d.get.length : typeof d.value === "function" ? d.value.length + ":" + d.value.name : "?") + ":" + d.enumerable + d.configurable + (d.writable === undefined ? "" : d.writable)); });
+out.join("\n")
+=== conv_int8
+J(new Int8Array([128, 255, 256, -129, 1e20, -1e20, NaN, Infinity, -Infinity, 2**32 + 5, -0.9, 3.9, "12", null, undefined, true, "0x10", [7], 127.9, -128.9]))
+function J(x){return Array.prototype.join.call(x)}
+=== conv_uint8
+function J(x){return Array.prototype.join.call(x)}
+J(new Uint8Array([-1, 256, 257, 255.9, -0.5, 1e10, NaN, Infinity, -(2**31), 2**53, 2**53 + 2, -(2**53), 4294967296, 4294967297, -4294967297]))
+=== conv_uint8c
+function J(x){return Array.prototype.join.call(x)}
+J(new Uint8ClampedArray([1.5, 2.5, 3.5, -1, 300, NaN, 0.5, 254.5, 255.5, Infinity, -Infinity, "7", null, undefined, true, 0.49999999999999994, 253.5, 1.4999999999999998, -0, 1e-300]))
+=== conv_int16_uint16
+function J(x){return Array.prototype.join.call(x)}
+J(new Int16Array([32768, -32769, 40000, 65535, 65536, 1e10, -1e10, NaN, 0.9, -0.9])) + "|" + J(new Uint16Array([65536, -1, 1e10, 0.5, -0.5, 65535.9, -65536, 2**32 + 1, NaN, Infinity]))
+=== conv_int32_uint32
+function J(x){return Array.prototype.join.call(x)}
+J(new Int32Array([2**31, 2**32, -(2**31) - 1, 1e20, 2**53, 2**53 + 2, -(2**53), 4294967295, 4294967296.5, -2147483648.5])) + "|" + J(new Uint32Array([-1, 2**32, 2**32 + 1, -(2**32) - 1, 4294967295.9, 1e20, -1e20, NaN, Infinity]))
+=== conv_float32
+function J(x){return Array.prototype.join.call(x)}
+J(new Float32Array([1.1, 16777217, 1e40, -1e40, 1e-50, 3.4028235677973366e38, 3.4028234663852886e38, 5e-324, 1.401298464324817e-45, 0.7e-45, 0.70064923216240854e-45, 0.700649232162408535e-45, 1.5, 0.1, -0, NaN, Infinity, -Infinity, 16777219, 8388609.5]))
+=== conv_float64_and_zero
+function IS(a, b){return a === b ? (a !== 0 || 1 / a === 1 / b) : (a !== a && b !== b)}
+var a = new Float64Array([1.1, NaN, -0, 0, 5e-324, 1.7976931348623157e308, -Infinity]);
+[J(a), IS(a[2], -0), IS(a[3], 0), IS(new Float32Array([-0])[0], -0), IS(new Int8Array([-0])[0], 0), IS(new Uint8ClampedArray([-0])[0], 0), 1 / new Float32Array([-0])[0]].join("|")
+function J(x){return Array.prototype.join.call(x)}
+=== conv_nan_bytes
+function J(x){return Array.prototype.join.call(x)}
+J(new Uint8Array(new Float64Array([NaN]).buffer)) + "|" + J(new Uint8Array(new Float32Array([NaN]).buffer)) + "|" + J(new Uint8Array(new Float64Array([0 / 0, -(0 / 0)]).buffer))
+=== conv_value_objects
+function J(x){return Array.prototype.join.call(x)}
+var L = [], o = {valueOf: function () { L.push("v"); return 300; }}, p = {toString: function () { L.push("s"); return "5"; }};
+var a = new Uint8Array(3); a[0] = o; a[1] = p; a[5] = o; a[-1] = o; a["1.5"] = o; a.x = o;
+J(a) + "|" + L.join("") + "|" + J(new Int16Array([o, p, "0b11", " 9 ", "", "abc", {}, [], [3], [1, 2]]))
+=== conv_symbol_throws
+function E(f){try{return String(f())}catch(e){return e.name+": "+e.message}}
+[E(function(){ return new Uint8Array([Symbol()]) }), E(function(){ var a = new Uint8Array(1); a[0] = Symbol(); }), E(function(){ return Uint8Array.of(Symbol()) })].join("|")
+=== ctor_requires_new
+function E(f){try{return String(f())}catch(e){return e.name+": "+e.message}}
+[E(function(){return Int8Array(2)}), E(function(){return Float64Array.call({}, 2)}), E(function(){return DataView(new ArrayBuffer(1))}), E(function(){return BigInt64Array(1)}), E(function(){return Uint8ClampedArray()})].join("|")
+=== ctor_length_forms
+function E(f){try{return String(f())}catch(e){return e.name+": "+e.message}}
+[new Int32Array().length, new Int32Array(undefined).length, new Int32Array(3.9).length, new Int32Array("4").length, new Int32Array(NaN).length, new Int32Array(null).length, new Int32Array(true).length, new Int32Array(-0.5).length, new Int32Array(2).byteLength, new Float64Array(3).byteLength,
+ E(function(){return new Int32Array(-1)}), E(function(){return new Float32Array(-1.5)}), E(function(){return new Int32Array(Infinity)}), E(function(){return new Int8Array(2**53)}), E(function(){return new Int8Array(Symbol())}), E(function(){return new Uint8Array(-0.9).length})].join("|")
+=== ctor_from_buffer
+function E(f){try{return String(f())}catch(e){return e.name+": "+e.message}}
+var b = new ArrayBuffer(16), s = [];
+[[Int32Array, [b]], [Int32Array, [b, 4]], [Int32Array, [b, 4, 2]], [Int32Array, [b, 16]], [Int32Array, [b, 16, 0]], [Int32Array, [b, 0, 4]], [Float64Array, [b, 8]], [Float64Array, [b, 8, 1]], [Uint16Array, [b, 2, 7]], [Int8Array, [b, 3]],
+ [Int32Array, [b, 1]], [Int32Array, [b, 2]], [Int32Array, [b, 20]], [Int32Array, [b, 4, 4]], [Int32Array, [b, 0, 5]], [Int32Array, [b, -1]], [Int32Array, [b, 0, -1]], [Float64Array, [new ArrayBuffer(12)]], [Int16Array, [new ArrayBuffer(3)]], [Int32Array, [b, 12.9]], [Int32Array, [b, "8"]], [Int32Array, [b, 0, "2"]], [Int8Array, [b, 17]], [Int8Array, [b, 16.5, 0]],
+ [Int32Array, [b, undefined, undefined]], [Int32Array, [b, 0, undefined]], [Uint8ClampedArray, [b, 5, 3]], [Int32Array, [b, 8, 1.5]]].forEach(function (c) {
+  s.push(c[0].name + "(" + c[1].map(function (x) { return x === b ? "b" : String(x) }).join() + ")=" + E(function () { var t = new c[0](c[1][0], c[1][1], c[1][2]); return t.length + "/" + t.byteOffset + "/" + t.byteLength + "/" + (t.buffer === b); }));
+});
+s.join("\n")
+=== ctor_from_buffer_argcount
+function E(f){try{return String(f())}catch(e){return e.name+": "+e.message}}
+var b = new ArrayBuffer(8);
+[E(function(){var t = new Int16Array(b, undefined, 2); return t.length + "/" + t.byteOffset}), E(function(){var t = new Int16Array(b, 2); return t.length}), E(function(){return new Int16Array(b, {valueOf: function(){return 2}}).length}), E(function(){return new Int16Array(b, 0, {valueOf: function(){return 2}}).length}), E(function(){return new Int16Array(b, 3, 100)})].join("|")
+=== ctor_from_typed_array
+function J(x){return Array.prototype.join.call(x)}
+var f = new Float64Array([1.5, -1.5, 300, -300, NaN, 70000.9, 2**32 + 3]);
+[J(new Int8Array(f)), J(new Uint8Array(f)), J(new Uint8ClampedArray(f)), J(new Int16Array(f)), J(new Uint16Array(f)), J(new Int32Array(f)), J(new Uint32Array(f)), J(new Float32Array(f)), J(new Float64Array(f)),
+ J(new Int8Array(new Uint8Array([200, 100]))), J(new Uint8ClampedArray(new Int8Array([-5, 5]))), J(new Float32Array(new Int32Array([16777217, -3]))), J(new Uint32Array(new Int8Array([-1]))), J(new Uint8Array(new Uint8ClampedArray([255, 3]))), new Uint8Array(new Float32Array(2)).buffer === undefined].join("\n")
+=== ctor_from_typed_array_is_a_copy
+var a = new Int16Array([1, 2, 3]), b = new Int16Array(a), c = new Int32Array(a);
+a[0] = 9;
+[b[0], c[0], b.buffer === a.buffer, b.byteOffset, new Int16Array(a.subarray(1)).byteOffset, new Int16Array(a.subarray(1)).length].join("|")
+=== ctor_from_iterable
+function J(x){return Array.prototype.join.call(x)}
+function* g() { yield 1; yield "2"; yield 3.7; yield null; }
+var L = [];
+var it = {}; it[Symbol.iterator] = function () { var i = 0; return {next: function () { L.push("n"); return i < 3 ? {value: i++ * 100, done: false} : {done: true}; }, return: function () { L.push("r"); return {}; }}; };
+[J(new Int8Array(g())), J(new Float32Array(new Set([0.1, 2]))), J(new Uint8Array(new Set([1, 2, 3]))), J(new Int16Array(new Map([[1, 2]]).keys())), J(new Uint8Array(it)), L.join(""), J(new Uint8Array([1, 2].values())), J(new Float64Array(new Uint8Array([5, 6]).entries().next().value))].join("|")
+=== ctor_from_array_like
+function J(x){return Array.prototype.join.call(x)}
+function E(f){try{return String(f())}catch(e){return e.name+": "+e.message}}
+[J(new Int8Array({length: 3, 0: 1, 2: 300})), J(new Int8Array({length: "2", 0: "a", 1: "7"})), J(new Int8Array({})), J(new Int8Array({length: -5})), J(new Int8Array({length: 1.9, 0: 4})), J(new Int8Array(function (a, b) {})), E(function(){return new Int8Array({get length() { throw new RangeError("len") }})}), E(function(){return new Int8Array({length: 1, get 0() { throw new RangeError("el") }})}), J(new Int8Array(new DataView(new ArrayBuffer(4))))].join("|")
+=== ctor_cross_bigint
+function E(f){try{return String(f())}catch(e){return e.name+": "+e.message}}
+[E(function(){return new Int32Array(new BigInt64Array(1))}), E(function(){return new BigInt64Array(new Int32Array(1))}), E(function(){return new BigUint64Array(new BigInt64Array(2)).length}), E(function(){return new BigInt64Array(new BigUint64Array(2)).byteLength}), E(function(){return new Float64Array(new BigInt64Array(0)).length}), E(function(){return new BigInt64Array(new Int8Array(0)).length}), new BigInt64Array(3).byteLength, new BigUint64Array(2).length, new BigInt64Array(new ArrayBuffer(16), 8).length, E(function(){return new BigInt64Array(new ArrayBuffer(12))}), E(function(){return new BigInt64Array(new ArrayBuffer(16), 4)}), new BigInt64Array([]).length, new BigInt64Array({length: 0}).length].join("|")
+=== getters_views
+var b = new ArrayBuffer(32), r = [];
+[new Int8Array(b), new Int16Array(b, 2, 3), new Int32Array(b, 8), new Float64Array(b, 8, 2), new Uint8ClampedArray(b, 31), new BigInt64Array(b, 16, 1), new Uint32Array(0), new Float32Array(b, 32)].forEach(function (t) { r.push([t.length, t.byteLength, t.byteOffset, t.buffer === b, t.BYTES_PER_ELEMENT].join("/")); });
+r.join("|")
+=== getters_receivers
+function E(f){try{return String(f())}catch(e){return e.name+": "+e.message}}
+var TA = Object.getPrototypeOf(Int8Array).prototype, r = [];
+["buffer", "byteLength", "byteOffset", "length"].forEach(function (n) { var g = Object.getOwnPropertyDescriptor(TA, n).get; r.push(n + ":" + E(function(){return g.call({})}) + ":" + E(function(){return g.call(new DataView(new ArrayBuffer(1)))}) + ":" + E(function(){return g.call(undefined)}) + ":" + E(function(){return g.call(new ArrayBuffer(1))}) + ":" + E(function(){return g.call(3)}) + ":" + E(function(){return g.call(new Int8Array(2)) === undefined})); });
+r.join("\n")
+=== tostringtag
+function E(f){try{return String(f())}catch(e){return e.name+": "+e.message}}
+var g = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(Int8Array).prototype, Symbol.toStringTag);
+[typeof g.get, g.set, g.enumerable, g.configurable, g.get.name, g.get.length, g.get.call(3), g.get.call({}), g.get.call(new DataView(new ArrayBuffer(1))), g.get.call(new Float32Array(1)), g.get.call(new Uint8ClampedArray(1)), g.get.call(new BigUint64Array(1)),
+ Object.prototype.toString.call(new Int8Array(1)), Object.prototype.toString.call(new BigInt64Array(1)), Object.prototype.toString.call(Int8Array.prototype), Object.prototype.toString.call(Object.getPrototypeOf(Int8Array)), Object.prototype.toString.call(new DataView(new ArrayBuffer(1))), Object.prototype.toString.call(new ArrayBuffer(1)), String(new Float32Array([1.5, 2])), new Int8Array(2) + ""].join("|")
+=== index_semantics
+function E(f){try{return String(f())}catch(e){return e.name+": "+e.message}}
+var a = new Float32Array([1.5, 2.5, 3.5]);
+a[3] = 9; a[-1] = 9; a["1.5"] = 9; a["-0"] = 9; a["01"] = 9; a.foo = 1; a["Infinity"] = 5; a["NaN"] = 5; a["4294967295"] = 5;
+[Object.keys(a).join(), 3 in a, 2 in a, "-0" in a, "1.5" in a, "01" in a, a["01"], a.foo, a["-0"], a[1.5], a[3], delete a[0], delete a[5], delete a["-0"], delete a.foo, a.length, Object.getOwnPropertyDescriptor(a, 1).writable, Object.getOwnPropertyDescriptor(a, 1).enumerable, Object.getOwnPropertyDescriptor(a, 1).configurable, Object.getOwnPropertyDescriptor(a, 3),
+ E(function(){return Object.defineProperty(a, 0, {value: 7, writable: false})}), E(function(){return Object.defineProperty(a, 0, {value: 7})[0]}), E(function(){return Object.defineProperty(a, 5, {value: 7})}), E(function(){return Object.defineProperty(a, 1, {get: function () {}})}), E(function(){return Object.defineProperty(a, 1, {value: "9", enumerable: true, configurable: true, writable: true})[1]})].join("|")
+=== index_inherited_receiver
+var a = new Int8Array(2), o = Object.create(a);
+o[0] = 5; o[7] = 6; o.x = 1;
+[a[0], o[0], Object.keys(o).join(), 7 in o, o[7], Object.getOwnPropertyDescriptor(o, 0) === undefined, o.hasOwnProperty(0), o.hasOwnProperty("x")].join("|")
+=== iteration
+function J(x){return Array.prototype.join.call(x)}
+var a = new Float32Array([0.5, 1.5, 2.5]), s = [], k;
+for (var v of a) s.push(v);
+for (k in a) s.push("k" + k);
+[s.join(), J([...a]), J(a.keys()), J([...a.keys()]), J([...a.entries()].map(function (e) { return e.join(":") })), J(Array.from(a)), J(Array.from(a, function (x) { return x * 2 })), JSON.stringify(a), JSON.stringify(Object.entries(a)), Object.prototype.toString.call(a.values()), a.values().next().value, a[Symbol.iterator]().toString(), typeof a.values().next, J(Object.values(a)), J(Math.max.apply(null, a) + "," + Math.min(...a))].join("|")
+=== iteration_receivers
+function E(f){try{return String(f())}catch(e){return e.name+": "+e.message}}
+var TA = Object.getPrototypeOf(Int8Array).prototype;
+["values", "keys", "entries"].map(function (n) { return n + ":" + E(function(){return TA[n].call({})}) + ":" + E(function(){return TA[n].call(new DataView(new ArrayBuffer(1)))}) + ":" + E(function(){return TA[n].call(undefined)}) + ":" + E(function(){return typeof TA[n].call(new Int8Array(1))}); }).join("\n")
+=== method_receivers
+function E(f){try{return String(f())}catch(e){return e.name+": "+e.message}}
+var TA = Object.getPrototypeOf(Int8Array).prototype, dv = new DataView(new ArrayBuffer(2)), out = [];
+["at", "copyWithin", "every", "fill", "filter", "find", "findIndex", "findLast", "findLastIndex", "forEach", "includes", "indexOf", "join", "lastIndexOf", "map", "reduce", "reduceRight", "reverse", "set", "slice", "some", "sort", "subarray", "toLocaleString", "toReversed", "toSorted", "with"].forEach(function (n) {
+  out.push(n + ":" + [{}, dv, undefined, null, 3, "x", new Int8Array(0).buffer, []].map(function (t) { return E(function(){return TA[n].call(t, function () {})}); }).join(" ## "));
+});
+out.join("\n")
+=== method_callback_not_function
+function E(f){try{return String(f())}catch(e){return e.name+": "+e.message}}
+var t = new Int8Array(2), out = [];
+["forEach", "map", "filter", "every", "some", "find", "findIndex", "findLast", "findLastIndex", "reduce", "reduceRight"].forEach(function (m) {
+  out.push(m + ":" + [1, "x", true, null, undefined, {}, [], Symbol.iterator, 1.5, -0].map(function (v) { return E(function(){return t[m](v)}); }).join(" ## "));
+});
+out.push("sort:" + [1, "x", true, null, {}, [], Symbol("q")].map(function (v) { return E(function(){return t.sort(v)}); }).join(" ## "));
+out.push("toSorted:" + [1, "x", null, {}].map(function (v) { return E(function(){return t.toSorted(v)}); }).join(" ## "));
+out.push("empty:" + [E(function(){return new Int8Array(0).map(1)}), E(function(){return new Int8Array(0).forEach()}), E(function(){return new Int8Array(0).reduce()})].join(" ## "));
+out.join("\n")
+=== method_at
+function E(f){try{return String(f())}catch(e){return e.name+": "+e.message}}
+var t = new Int16Array([10, 20, 30]);
+[t.at(0), t.at(-1), t.at(2), t.at(3), t.at(-4), t.at(), t.at(NaN), t.at(1.9), t.at(-1.9), t.at(Infinity), t.at(-Infinity), t.at("1"), t.at({valueOf: function () { return 1; }}), new Int8Array(0).at(0), E(function(){return t.at(Symbol())}), t.at.length].join("|")
+=== method_with
+function E(f){try{return String(f())}catch(e){return e.name+": "+e.message}}
+function J(x){return Array.prototype.join.call(x)}
+var t = new Int8Array([1, 2, 3]), L = [];
+[J(t.with(1, 9)), J(t.with(-1, 9)), J(t.with(0, 300)), J(t.with("1", "7")), J(t.with(0, {valueOf: function () { return 4 }})), J(t), E(function(){return t.with(3, 9)}), E(function(){return t.with(-4, 9)}), E(function(){return t.with(Infinity, 9)}), E(function(){return t.with(NaN, 9)[0]}), E(function(){return t.with(1.9, 9)}),
+ t.with(0, 1) === t, Object.getPrototypeOf(t.with(0, 1)) === Int8Array.prototype, t.with(0, 1).buffer === t.buffer, new Float32Array([1.5]).with(0, 0.1)[0], new Uint8ClampedArray(1).with(0, 999)[0], E(function(){return new Int8Array(0).with(0, 1)})].join("|")
+=== method_fill
+function E(f){try{return String(f())}catch(e){return e.name+": "+e.message}}
+function J(x){return Array.prototype.join.call(x)}
+var mk = function () { return new Int16Array([1, 2, 3, 4, 5]); };
+[J(mk().fill(9)), J(mk().fill(9, 1)), J(mk().fill(9, 1, 3)), J(mk().fill(9, -2)), J(mk().fill(9, 1, -1)), J(mk().fill(9, 3, 1)), J(mk().fill(9, -100, 100)), J(mk().fill(70000)), J(mk().fill("7")), J(mk().fill(), ), J(mk().fill(1.9, "1", "2")), J(mk().fill(NaN)), J(new Uint8ClampedArray(3).fill(300)), J(new Float32Array(2).fill(0.1)), J(new Float64Array(3).fill(-0)), 1 / new Float64Array(1).fill(-0)[0], J(new Int8Array(4).fill(1, NaN, Infinity)), J(new Int32Array(3).fill(2**31)), J(new Uint16Array(4).fill(-1, 0, 2)), J(new Int8Array(3).fill(1, undefined, undefined)),
+ mk().fill(1).length, new Int8Array(3).fill(5) instanceof Int8Array, E(function(){var t = new Int8Array(2); return t.fill(1) === t}), E(function(){return new Int8Array(2).fill(Symbol())}), E(function(){var L = []; new Int8Array(2).fill({valueOf: function () { L.push("v"); return 1 }}, {valueOf: function () { L.push("s"); return 0 }}, {valueOf: function () { L.push("e"); return 1 }}); return L.join("")})].join("|")
+=== method_copy_within
+function J(x){return Array.prototype.join.call(x)}
+var mk = function (T) { return new T([1, 2, 3, 4, 5]); };
+[J(mk(Int8Array).copyWithin(0, 3)), J(mk(Int8Array).copyWithin(1, 0, 3)), J(mk(Int8Array).copyWithin(-2, 0, 2)), J(mk(Int16Array).copyWithin(1, 0, 3)), J(mk(Float64Array).copyWithin(0, 1)), J(mk(Float32Array).copyWithin(2, 0)), J(mk(Int32Array).copyWithin(0, 5)), J(mk(Int32Array).copyWithin(5, 0)), J(mk(Int32Array).copyWithin(0, -1)), J(mk(Int32Array).copyWithin(0, 1, -1)), J(mk(Int32Array).copyWithin(-1, -5)), J(mk(Uint16Array).copyWithin(0, NaN, NaN)), J(mk(Int8Array).copyWithin(1)), J(mk(Int8Array).copyWithin()), J(mk(Int8Array).copyWithin(0, 1, undefined)), J(mk(Int8Array).copyWithin(2, 0, Infinity)), J(mk(Int8Array).copyWithin(-Infinity, Infinity)),
+ (function () { var t = mk(Int8Array); return t.copyWithin(0, 1) === t })(), (function () { var b = new Int16Array([1, 2, 3, 4, 5, 6]); var v = new Int16Array(b.buffer, 2, 4); v.copyWithin(1, 0, 3); return J(b) })(), J(new BigInt64Array(new Uint8Array([1, 0, 0, 0, 0, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0]).buffer).copyWithin(1, 0).buffer.byteLength + "")].join("|")
+=== method_reverse
+function J(x){return Array.prototype.join.call(x)}
+function E(f){try{return String(f())}catch(e){return e.name+": "+e.message}}
+var b = new Uint8Array([1, 0, 0, 0, 2, 0, 0, 0, 3, 0, 0, 0]);
+[J(new Int8Array([1, 2, 3, 4, 5]).reverse()), J(new Int8Array([1, 2, 3, 4]).reverse()), J(new Int16Array([1, 2, 3]).reverse()), J(new Float64Array([1.5, 2.5]).reverse()), J(new Float32Array([1, 2, 3, 4]).toReversed()), J(new Int32Array(b.buffer).reverse()), J(new Int8Array(0).reverse()), J(new Int8Array(1).reverse()),
+ (function () { var t = new Int8Array([1, 2, 3]), r = t.toReversed(); return [J(t), J(r), r === t, r.buffer === t.buffer, Object.getPrototypeOf(r) === Int8Array.prototype].join(" ") })(), (function () { var t = new Int8Array([1, 2, 3]); return t.reverse() === t })(), J(new Uint16Array(new Uint8Array([1, 2, 3, 4, 5, 6, 7, 8]).buffer, 2, 3).toReversed()), new BigInt64Array(2).reverse().length, new BigUint64Array(3).toReversed().byteLength, E(function(){return new Int8Array(2).toReversed.call({})})].join("|")
+=== method_search
+function E(f){try{return String(f())}catch(e){return e.name+": "+e.message}}
+var r = [];
+var f = new Float32Array([1, NaN, 0, -0, 1.5, 3, 2, 1]), i = new Int16Array([1, 2, 3, 2, 1]), u = new Uint8ClampedArray([1, 255, 0]), d = new Float64Array([0.1, NaN]);
+r.push([f.indexOf(NaN), f.includes(NaN), f.indexOf(0), f.indexOf(-0), f.includes(0), f.includes(-0), f.lastIndexOf(0), f.lastIndexOf(-0), f.indexOf(1), f.lastIndexOf(1), f.indexOf(1.5), f.indexOf(1.1), f.includes(1.1), f.indexOf("1"), f.includes("1"), f.includes(), f.indexOf(undefined), f.lastIndexOf(NaN), d.indexOf(0.1), d.includes(0.1), f.indexOf(1, 1), f.indexOf(1, -1), f.indexOf(1, -100), f.indexOf(1, 100), f.indexOf(1, NaN), f.indexOf(1, Infinity), f.indexOf(1, -Infinity)].join());
+r.push([i.indexOf(2), i.indexOf(2, 2), i.indexOf(2, -2), i.indexOf(70000), i.indexOf(1.5), i.indexOf(-1), i.indexOf(65537), i.lastIndexOf(2), i.lastIndexOf(2, 2), i.lastIndexOf(2, -3), i.lastIndexOf(2, -100), i.lastIndexOf(1, 0), i.lastIndexOf(1, undefined), i.lastIndexOf(1, NaN), i.lastIndexOf(1, Infinity), i.lastIndexOf(1, -Infinity), i.includes(3, 3), i.includes(3, 2), i.includes(1, -1), i.includes(2, -1), i.includes(null), i.includes(true), i.indexOf(3, {valueOf: function () { return 1 }})].join());
+r.push([u.indexOf(255), u.indexOf(256), u.indexOf(-1), u.includes(0), new Uint8Array([5, 6, 7]).indexOf(6), new Uint8Array([5, 6, 7]).indexOf(256 + 6), new Int8Array([-1, 5]).indexOf(255), new Int8Array([-1, 5]).indexOf(-1), new Uint32Array([4294967295]).indexOf(-1), new Uint32Array([4294967295]).indexOf(4294967295), new Int32Array([-1]).indexOf(4294967295), new Float64Array([1e300]).indexOf(1e300), new Float32Array([1e300]).indexOf(1e300), new Float32Array([16777216]).indexOf(16777217), new Float32Array([0.1]).indexOf(0.1), new Float32Array([0.1]).indexOf(Math.fround(0.1))].join());
+r.push([new Int8Array(0).indexOf(1), new Int8Array(0).includes(undefined), new Int8Array(0).lastIndexOf(0), E(function(){ return new Int8Array(0).indexOf(0, {valueOf: function () { throw new RangeError("no") }}) }), E(function(){ return new Int8Array(2).indexOf(0, {valueOf: function () { throw new RangeError("fromIndex") }}) }), E(function(){ return new Int8Array(2).includes(0, Symbol()) }), new Int8Array(2).indexOf.length, new Int8Array(2).lastIndexOf.length, new Int8Array(2).includes.length].join());
+r.push([new BigInt64Array(3).indexOf(0), new BigInt64Array(3).includes(0), new BigInt64Array(3).lastIndexOf(0), new BigUint64Array(3).includes(NaN), new BigInt64Array(3).includes(undefined), new BigInt64Array(0).includes(0)].join());
+r.push((function () { var big = new Uint8Array(1000); big[999] = 7; big[500] = 7; return [big.indexOf(7), big.lastIndexOf(7), big.lastIndexOf(7, 998), big.lastIndexOf(7, 499), big.indexOf(7, 501), big.includes(7, 1000), big.indexOf(0), big.lastIndexOf(0), big.indexOf(0, 999), big.lastIndexOf(0, 999)].join() })());
+r.push((function () { var big = new Float64Array(300); big[299] = 2.5; big[10] = 2.5; return [big.indexOf(2.5), big.lastIndexOf(2.5), big.lastIndexOf(2.5, 298), big.indexOf(2.5, 11), big.indexOf(0), big.lastIndexOf(0), big.lastIndexOf(-0, 5), big.includes(NaN)].join() })());
+r.join("\n")
+=== method_join
+function E(f){try{return String(f())}catch(e){return e.name+": "+e.message}}
+var t = new Int8Array([1, 2, 3]);
+[t.join(), t.join(undefined), t.join(null), t.join(""), t.join("--"), t.join(1), t.join({toString: function () { return "+" }}), new Int8Array(0).join(), new Int8Array(1).join("x"), new Float32Array([1.1, NaN, -0, Infinity, 1e21, 1e-7, 0.5]).join(), new Float64Array([1.1, -0, 5e-324, 123456789012345680000, 1.7976931348623157e308]).join(" "), new Uint32Array([4294967295, 0]).join(), new Int32Array([-2147483648]).join(), new Uint8ClampedArray([255, 0]).join(), new Uint16Array([65535]).join("|"),
+ E(function(){return t.join(Symbol())}), t.join.length, t.toString(), String(new Float32Array([0.1])), new Uint8Array([1, 2]) + "", [new Uint8Array([1, 2]), new Uint8Array([3])].join(";"), E(function(){var L = []; t.join({toString: function () { L.push("s"); return "," }}); return L.join()}), new BigInt64Array(0).join(), new BigInt64Array(0).toString(), E(function(){ return new Int8Array(2).join.call({}) })].join("|")
+=== method_to_locale_string
+function E(f){try{return String(f())}catch(e){return e.name+": "+e.message}}
+[E(function(){return new Int8Array(0).toLocaleString()}), E(function(){return new Int8Array(1).toLocaleString.length})].join("|")
+=== method_callbacks
+function E(f){try{return String(f())}catch(e){return e.name+": "+e.message}}
+function J(x){return Array.prototype.join.call(x)}
+var t = new Int16Array([1, 2, 3]), log = [], th = {k: 2};
+[J(t.map(function (x, i, a) { log.push(x + ":" + i + ":" + (a === t) + ":" + (this === th)); return x * 20000 }, th)), log.join(" "), J(t.map(function (x) { return x + 0.9 })), J(t.map(function () {})), J(new Uint8ClampedArray([1, 2]).map(function (x) { return x * 200 })), J(new Float32Array([1, 2]).map(function (x) { return x / 3 })),
+ J(t.filter(function (x) { return x > 1 })), J(t.filter(function () { return false })), J(new Float32Array([0.1, 0.2]).filter(function () { return true })), t.reduce(function (a, b) { return a + b }), t.reduce(function (a, b) { return a + b }, 10), t.reduceRight(function (a, b) { return a + "-" + b }), t.reduceRight(function (a, b, i) { return a + "-" + b + "@" + i }, ""), t.reduce(function (a, b, i, arr) { return a + i + (arr === t) }, ""),
+ t.find(function (x, i, a) { return x > 1 && i == 1 && a.length == 3 }), t.find(function (x) { return x > 9 }), t.findIndex(function (x) { return x > 1 }), t.findIndex(function (x) { return x > 9 }), t.findLast(function (x) { return x < 3 }), t.findLast(function (x) { return x > 9 }), t.findLastIndex(function (x) { return x < 3 }), t.findLastIndex(function (x) { return x > 9 }),
+ t.every(function (x) { return x > 0 }), t.every(function (x) { return x > 1 }), t.some(function (x) { return x > 2 }), t.some(function (x) { return x > 3 }), new Int8Array(0).every(function () { return false }), new Int8Array(0).some(function () { return true }),
+ (function () { var s = 0; t.forEach(function (x) { s += x * this.k }, th); return s })(), t.forEach(function () {}), E(function(){return new Int8Array(0).reduce(function () {})}), E(function(){return new Int8Array(0).reduceRight(function () {})}), new Int8Array(0).reduce(function () {}, "init"), E(function(){return t.forEach(function () { throw new RangeError("cb") })}),
+ (function () { var L = []; new Int8Array(3).findLast(function (x, i) { L.push(i); return false }); new Int8Array(3).find(function (x, i) { L.push(i); return false }); return L.join("") })(), t.forEach.length, t.map.length, t.reduce.length, t.find.length,
+ (function () { var u = new Int8Array([1, 2, 3]); u.forEach(function (x, i) { if (i == 0) { u[2] = 50 } }); var seen = []; u.forEach(function (x) { seen.push(x) }); return seen.join() })(), (function () { var u = new Int8Array([1, 2, 3]), s = []; u.map(function (x, i) { u[2] = 9; s.push(x); return 0 }); return s.join() })(),
+ Object.getPrototypeOf(t.map(function (x) { return x })) === Int16Array.prototype, Object.getPrototypeOf(t.filter(function () { return true })) === Int16Array.prototype, t.map(function (x) { return x }).buffer === t.buffer, E(function(){return new BigInt64Array(0).map(function () {}).length}), E(function(){return new BigInt64Array(0).filter(function () {}).length}), new BigUint64Array(0).reduce(function () {}, 5), E(function(){return new BigInt64Array(0).reduce(function () {})})].join("|")
+=== method_callbacks_detach
+function E(f){try{return String(f())}catch(e){return e.name+": "+e.message}}
+function J(x){return Array.prototype.join.call(x)}
+var out = [];
+var mk = function () { var t = new Int8Array([1, 2, 3]); return t; };
+var t1 = mk(); out.push(E(function(){ var s = []; t1.forEach(function (x, i) { if (i == 0) t1.buffer.transfer(); s.push(x) }); return s.join() }));
+var t2 = mk(); out.push(E(function(){ var s = []; t2.map(function (x, i) { if (i == 0) t2.buffer.transfer(); s.push(x); return 1 }); return s.join() }));
+var t3 = mk(); out.push(E(function(){ return t3.reduce(function (a, b, i) { if (i == 1) t3.buffer.transfer(); return a + "," + b }) }));
+var t4 = mk(); out.push(E(function(){ return t4.find(function (x, i) { if (i == 0) t4.buffer.transfer(); return x === undefined }) }));
+var t5 = mk(); out.push(E(function(){ return t5.sort(function (a, b) { t5.buffer.transfer(); return a - b }).length }));
+var t6 = mk(); out.push(E(function(){ return t6.fill(1, {valueOf: function () { t6.buffer.transfer(); return 0 }}) }));
+var t7 = mk(); out.push(E(function(){ return t7.copyWithin(0, {valueOf: function () { t7.buffer.transfer(); return 1 }}) }));
+var t8 = mk(); out.push(E(function(){ return t8.includes(undefined, {valueOf: function () { t8.buffer.transfer(); return 0 }}) }));
+var t9 = mk(); out.push(E(function(){ return t9.indexOf(1, {valueOf: function () { t9.buffer.transfer(); return 0 }}) }));
+var t10 = mk(); out.push(E(function(){ return t10.join({toString: function () { t10.buffer.transfer(); return "-" }}) }));
+var t11 = mk(); out.push(E(function(){ return t11.with(0, {valueOf: function () { t11.buffer.transfer(); return 1 }}) }));
+var t12 = mk(); out.push(E(function(){ return t12.slice({valueOf: function () { t12.buffer.transfer(); return 0 }}) }));
+var t13 = mk(); out.push(E(function(){ return t13.subarray({valueOf: function () { t13.buffer.transfer(); return 0 }}) }));
+var t14 = mk(); out.push(E(function(){ return t14.set([1], {valueOf: function () { t14.buffer.transfer(); return 0 }}) }));
+var t15 = mk(); out.push(E(function(){ return t15.at({valueOf: function () { t15.buffer.transfer(); return 0 }}) }));
+out.join("\n")
+=== method_sort
+function IS(a, b){return a === b ? (a !== 0 || 1 / a === 1 / b) : (a !== a && b !== b)}
+function E(f){try{return String(f())}catch(e){return e.name+": "+e.message}}
+function J(x){return Array.prototype.join.call(x)}
+[J(new Int8Array([3, -1, 2, -128, 127, 0]).sort()), J(new Uint8Array([3, 255, 2, 0, 128]).sort()), J(new Int16Array([300, -300, 5, 0]).sort()), J(new Uint16Array([65535, 1, 300]).sort()), J(new Int32Array([2**31 - 1, -(2**31), 5, -5]).sort()), J(new Uint32Array([4294967295, 1, 2147483648, 5]).sort()), J(new Uint8ClampedArray([9, 3, 200]).sort()),
+ J(new Float64Array([3, -0, 0, NaN, -Infinity, 1, Infinity, -1, NaN, 0.5]).sort()), IS(new Float64Array([0, -0]).sort()[0], -0), IS(new Float32Array([0, -0, 0, -0]).sort()[1], -0), J(new Float32Array([2.5, -2.5, NaN, 1e30, -1e30, 1.5]).sort()), J(new Float32Array([NaN, NaN]).sort()),
+ J(new Int8Array([3, 1, 2]).sort(function (a, b) { return b - a })), J(new Int8Array([3, 1, 2]).sort(undefined)), J(new Float64Array([3, NaN, 1, -0, 0]).sort(function (a, b) { return a - b })), J(new Uint8Array([5, 3, 9, 1, 7, 2, 8, 4, 6, 0]).sort(function (a, b) { return a % 3 - b % 3 })), J(new Int8Array([1, 2, 3]).sort(function () { return 0 })), J(new Int8Array([1, 2, 3]).sort(function () { return NaN })), J(new Int8Array([3, 2, 1]).sort(function () { return -1 })), J(new Int8Array([1, 2, 3]).sort(function () { return "1" })), J(new Int8Array([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]).sort(function (a, b) { return (a % 2) - (b % 2) })),
+ E(function(){return new Int8Array([3, 1, 2]).sort(function () { throw new RangeError("cmp") })}), E(function(){ var t = new Int8Array([3, 1, 2]); try { t.sort(function () { throw 1 }) } catch (e) {} return J(t) }), E(function(){return new Int8Array([3, 1, 2]).sort(function () { return Symbol() })}), E(function(){var t = new Int8Array([2, 1]); return t.sort() === t}), E(function(){var L = []; new Int8Array([2, 1, 3]).sort(function (a, b) { L.push(a + ">" + b); return a - b }); return L.length > 0}), new Int8Array(0).sort().length, new Int8Array(1).sort().length, new Int8Array([5]).sort(function () { throw 1 })[0],
+ J(new Int16Array(new Uint8Array([2, 0, 1, 0, 3, 0, 0, 0]).buffer, 2, 3).sort()), (function () { var b = new Int16Array([5, 4, 3, 2, 1]); var v = b.subarray(1, 4); v.sort(); return J(b) })(), J(new BigInt64Array(0).sort()), new BigUint64Array(3).sort().length].join("|")
+=== method_to_sorted
+function E(f){try{return String(f())}catch(e){return e.name+": "+e.message}}
+function J(x){return Array.prototype.join.call(x)}
+var t = new Float32Array([3, NaN, -0, 0, 1]), s = t.toSorted();
+[J(s), J(t), s === t, s.buffer === t.buffer, Object.getPrototypeOf(s) === Float32Array.prototype, J(t.toSorted(function (a, b) { return b - a })), J(new Int8Array([3, 1, 2]).toSorted(undefined)), E(function(){return t.toSorted(1)}), E(function(){return t.toSorted.call({})}), E(function(){return t.toSorted.call({}, 1)}), t.toSorted.length, new Int8Array(0).toSorted().length, E(function(){return t.toSorted(function () { throw new RangeError("c") })}), J(t)].join("|")
+=== method_set
+function E(f){try{return String(f())}catch(e){return e.name+": "+e.message}}
+function J(x){return Array.prototype.join.call(x)}
+var mk = function (T, n) { return new T(n || 5); };
+var r = [];
+r.push(J((function () { var t = mk(Int8Array); t.set([1, 2, 300]); return t })()), J((function () { var t = mk(Int8Array); t.set([1, 2], 3); return t })()), J((function () { var t = mk(Uint8Array); t.set(new Int8Array([-1, 5]), 1); return t })()), J((function () { var t = mk(Float32Array); t.set(new Float64Array([0.1, 1e40]), 2); return t })()), J((function () { var t = mk(Int16Array); t.set(new Float64Array([70000.5, -1.5, NaN]), 1); return t })()), J((function () { var t = mk(Uint8ClampedArray); t.set(new Int8Array([-5, 100, 5]), 1); return t })()), J((function () { var t = mk(Uint8ClampedArray); t.set(new Uint8Array([200, 255]), 1); return t })()),
+  J((function () { var t = mk(Int32Array); t.set(new Uint32Array([4294967295, 2]), 3); return t })()), J((function () { var t = mk(Uint32Array); t.set(new Int32Array([-1]), 4); return t })()), J((function () { var t = mk(Float64Array); t.set(new Float32Array([0.1]), 4); return t })()), J((function () { var t = mk(Int8Array); t.set("12", 1); return t })()), J((function () { var t = mk(Int8Array); t.set({length: 2, 0: 7, 1: "8"}, 2); return t })()), J((function () { var t = mk(Int8Array); t.set(new Int8Array(0), 5); t.set([], 5); t.set({}, 5); t.set(5); t.set(true); return t })()));
+r.push(J((function () { var b = new Int8Array([1, 2, 3, 4, 5]); b.set(b.subarray(0, 3), 2); return b })()), J((function () { var b = new Int8Array([1, 2, 3, 4, 5]); b.set(b.subarray(2), 0); return b })()), J((function () { var b = new Int16Array([1, 2, 3, 4]); new Int8Array(b.buffer).set(b.subarray(0, 2), 1); return new Uint8Array(b.buffer) })()), J((function () { var b = new Uint8Array([1, 2, 3, 4, 0, 0, 0, 0]); var w = new Uint8Array(b.buffer, 0, 4), f = new Float32Array(b.buffer, 4, 1); f.set(w.subarray(0, 1)); return b })()), J((function () { var b = new Float32Array([1.5, 2.5, 3.5, 4.5]); var v = new Int16Array(b.buffer, 4, 3); b.set(v.subarray(0, 2), 0); return new Uint8Array(b.buffer) })()));
+r.push(E(function(){return mk(Int8Array).set([1], -1)}), E(function(){return mk(Int8Array).set([1, 2, 3, 4, 5, 6])}), E(function(){return mk(Int8Array).set([1], 5)}), E(function(){return mk(Int8Array).set([1], 4.9)}), E(function(){return mk(Int8Array).set([1], Infinity)}), E(function(){return mk(Int8Array).set(new Int8Array(3), 3)}), E(function(){return mk(Int8Array).set(undefined)}), E(function(){return mk(Int8Array).set(null)}), E(function(){return mk(Int8Array).set([1], {valueOf: function () { return 4 }})}), E(function(){return mk(Int8Array).set([1], "2")}), E(function(){return mk(Int8Array).set()}), E(function(){return mk(Int8Array).set.call({}, [])}), E(function(){return mk(Int8Array).set.call(new DataView(new ArrayBuffer(1)), [])}),
+  E(function(){return mk(Int8Array).set(new DataView(new ArrayBuffer(2)))}), E(function(){return mk(Int8Array).set([Symbol()])}), E(function(){return mk(Int8Array).set({length: 1, get 0() { throw new RangeError("g") }})}), E(function(){return mk(Int8Array).set(new BigInt64Array(1))}), E(function(){return mk(BigInt64Array).set(new Int8Array(1))}), E(function(){return mk(BigUint64Array).set(new BigInt64Array(1), 2)}), E(function(){return mk(BigInt64Array).set(new BigUint64Array(2), 4)}), E(function(){return mk(BigInt64Array).set([], 5)}), mk(Int8Array).set.length, mk(Int8Array).set([1]));
+r.push(J((function () { var t = mk(Int8Array); var L = []; t.set({get length() { L.push("l"); return 2 }, get 0() { L.push("0"); return 1 }, get 1() { L.push("1"); return 2 }}, {valueOf: function () { L.push("o"); return 1 }}); return [L.join(""), J(t)] })()));
+r.join("\n")
+=== method_slice
+function E(f){try{return String(f())}catch(e){return e.name+": "+e.message}}
+function J(x){return Array.prototype.join.call(x)}
+var t = new Int16Array([1, 2, 3, 4, 5]), s = t.slice(1, 3), r = [];
+r.push(J(s), s.length, s.byteLength, s.byteOffset, s.buffer === t.buffer, s.buffer.byteLength, Object.getPrototypeOf(s) === Int16Array.prototype, J(t.slice()), J(t.slice(-2)), J(t.slice(1, -1)), J(t.slice(3, 1)), J(t.slice(NaN, NaN)), J(t.slice(0, Infinity)), J(t.slice(-Infinity)), J(t.slice("1", "2")), J(t.slice(undefined, undefined)), J(t.slice(10)), t.slice(10).buffer.byteLength, J(new Float64Array([1.5, 2.5]).slice(1)), J(new Uint8ClampedArray([1, 2, 3]).slice(1)), new BigInt64Array(4).slice(1, 3).byteLength, new BigInt64Array(4).slice(1, 3).length,
+  J(new Int16Array(new Uint8Array([1, 0, 2, 0, 3, 0, 4, 0]).buffer, 2, 2).slice(1)), E(function(){return t.slice.call({})}), E(function(){return t.slice(Symbol())}), E(function(){var L = []; t.slice({valueOf: function () { L.push("s"); return 0 }}, {valueOf: function () { L.push("e"); return 1 }}); return L.join("")}), t.slice.length);
+r.push((function () { var u = new Int16Array(4); u.constructor = {}; return E(function(){return u.slice(0).length}) })(), (function () { var u = new Int16Array(4); u.constructor = undefined; return u.slice(1).length })(), (function () { var u = new Int16Array(4); u.constructor = {[Symbol.species]: null}; return u.slice(1).length })(), (function () { var u = new Int16Array(4); u.constructor = {[Symbol.species]: Int16Array}; return u.slice(1).length })(), (function () { var u = new Int16Array(4); u.constructor = 5; return E(function(){return u.slice(1).length}) })(), (function () { var u = new Int16Array(4); u.constructor = {[Symbol.species]: 5}; return E(function(){return u.slice(1).length}) })());
+r.join("|")
+=== method_subarray
+function E(f){try{return String(f())}catch(e){return e.name+": "+e.message}}
+function J(x){return Array.prototype.join.call(x)}
+var b = new ArrayBuffer(16), t = new Int32Array(b), r = [];
+var s = t.subarray(1, 3);
+r.push(s.length, s.byteLength, s.byteOffset, s.buffer === b, Object.getPrototypeOf(s) === Int32Array.prototype, (function () { s[0] = 7; return t[1] })(), t.subarray(2).byteOffset, t.subarray(-1).byteOffset, t.subarray(-1).length, t.subarray(3, 1).length, t.subarray(3, 1).byteOffset, t.subarray(10).length, t.subarray(10).byteOffset, t.subarray().length, t.subarray(NaN, NaN).length, t.subarray(0, -1).length, t.subarray("1", "3").length, t.subarray(undefined, 2).length, t.subarray(1, undefined).length, t.subarray(0, Infinity).length, t.subarray(-Infinity, -Infinity).length,
+  new Float64Array(b, 8).subarray(1).byteOffset, new Uint16Array(b, 2, 4).subarray(1, 3).byteOffset, new Uint16Array(b, 2, 4).subarray(1, 3).length, new BigInt64Array(b).subarray(1).byteOffset, new BigInt64Array(b).subarray(1).length, E(function(){return t.subarray.call({})}), E(function(){return t.subarray.call(new DataView(b))}), E(function(){return t.subarray(Symbol())}), t.subarray.length, new Uint8ClampedArray(4).subarray(1, 2).length);
+r.push((function () { var u = new Int32Array(4); u.constructor = {}; return E(function(){return u.subarray(1).length}) })(), (function () { var u = new Int32Array(4); u.constructor = {[Symbol.species]: undefined}; return u.subarray(1).length })(), (function () { var u = new Int32Array(4); u.constructor = null; return E(function(){return u.subarray(1).length}) })());
+r.join("|")
+=== ab_new_members
+function E(f){try{return String(f())}catch(e){return e.name+": "+e.message}}
+var b = new ArrayBuffer(8), P = ArrayBuffer.prototype, r = [];
+["byteLength", "maxByteLength", "resizable", "detached"].forEach(function (n) { var d = Object.getOwnPropertyDescriptor(P, n); r.push(n + ":" + typeof d.get + ":" + d.set + ":" + d.enumerable + ":" + d.configurable + ":" + d.get.name + ":" + d.get.length + ":" + E(function(){return d.get.call(b)}) + ":" + E(function(){return d.get.call({})}) + ":" + E(function(){return d.get.call(new Int8Array(1))}) + ":" + E(function(){return d.get.call(undefined)})); });
+["transfer", "transferToFixedLength", "resize", "slice"].forEach(function (n) { var d = Object.getOwnPropertyDescriptor(P, n); r.push(n + ":" + typeof d.value + ":" + d.writable + ":" + d.enumerable + ":" + d.configurable + ":" + d.value.length + ":" + d.value.name); });
+r.push([new ArrayBuffer(0).maxByteLength, new ArrayBuffer(5).resizable, ArrayBuffer.isView(new DataView(b)), ArrayBuffer.isView(new Float32Array(1)), ArrayBuffer.isView(b), ArrayBuffer.isView({}), ArrayBuffer.isView(), ArrayBuffer.isView(new BigInt64Array(1))].join());
+r.join("\n")
+=== ab_transfer
+function E(f){try{return String(f())}catch(e){return e.name+": "+e.message}}
+function J(x){return Array.prototype.join.call(x)}
+var r = [];
+function fresh() { var b = new ArrayBuffer(8); new Uint8Array(b).set([1, 2, 3, 4, 5, 6, 7, 8]); return b; }
+var b = fresh(), t = b.transfer();
+r.push(b.detached, b.byteLength, b.maxByteLength, b.resizable, t.detached, t.byteLength, J(new Uint8Array(t)), t === b, Object.getPrototypeOf(t) === ArrayBuffer.prototype, E(function(){return b.transfer()}), E(function(){return b.transferToFixedLength()}), E(function(){return b.slice(0)}), E(function(){return b.slice()}), E(function(){return b.byteLength}), E(function(){return new Uint8Array(b)}), E(function(){return new Int32Array(b, 0, 0)}), E(function(){return new DataView(b)}), E(function(){return new DataView(b, 0, 0)}), E(function(){return new DataView(b, 99)}));
+var c = fresh();
+r.push(J(new Uint8Array(c.transfer(4))), J(new Uint8Array(fresh().transfer(12))), J(new Uint8Array(fresh().transfer(0))), new Uint8Array(fresh().transfer(0)).length, J(new Uint8Array(fresh().transfer(undefined))), J(new Uint8Array(fresh().transferToFixedLength(3))), J(new Uint8Array(fresh().transferToFixedLength(10))), E(function(){return fresh().transfer(-1)}), E(function(){return fresh().transfer(2**53)}), E(function(){return fresh().transfer(NaN).byteLength}), E(function(){return fresh().transfer("5").byteLength}), E(function(){return fresh().transfer(Symbol())}), E(function(){return fresh().transfer(1.9).byteLength}),
+  E(function(){return ArrayBuffer.prototype.transfer.call({})}), E(function(){return ArrayBuffer.prototype.transfer.call(new Int8Array(2))}), E(function(){return ArrayBuffer.prototype.transferToFixedLength.call(undefined)}), E(function(){var b2 = fresh(); b2.transfer(); return b2.transfer({valueOf: function () { throw new RangeError("len") }})}), E(function(){var b2 = fresh(); b2.transfer(); return b2.transfer(-1)}),
+  fresh().transfer.length, fresh().transferToFixedLength.length);
+var d = fresh(), v = new Uint8Array(d), w = new Int16Array(d, 2, 2), dv = new DataView(d, 1, 2), x = d.transfer(2);
+r.push([v.length, v.byteLength, v.byteOffset, w.length, w.byteLength, w.byteOffset, v[0], 0 in v, 1 in v, Object.keys(v).length, Object.keys(w).join(), v.buffer === d, w.buffer === d, x.byteLength, J(new Uint8Array(x)), E(function(){return dv.byteLength}), E(function(){return dv.byteOffset}), dv.buffer === d].join());
+r.join("\n")
+=== detached_typed_array_methods
+function E(f){try{return String(f())}catch(e){return e.name+": "+e.message}}
+var out = [];
+function det() { var t = new Int16Array(4); t.buffer.transfer(); return t; }
+var names = ["at", "copyWithin", "entries", "every", "fill", "filter", "find", "findIndex", "findLast", "findLastIndex", "forEach", "includes", "indexOf", "join", "keys", "lastIndexOf", "map", "reduce", "reduceRight", "reverse", "set", "slice", "some", "sort", "subarray", "toLocaleString", "toReversed", "toSorted", "values", "with"];
+names.forEach(function (n) { var t = det(); out.push(n + ":" + E(function(){ var r = t[n](function () {}, 0); return typeof r })); });
+var t = det();
+out.push([t.length, t.byteLength, t.byteOffset, t[0], t[-1], 0 in t, "0" in t, Object.keys(t).length, t.buffer.detached, t.buffer.byteLength, Object.getOwnPropertyDescriptor(t, 0), E(function(){ t[0] = 5; return t[0] }), delete t[0], E(function(){return Object.defineProperty(t, 0, {value: 1})}), E(function(){return [...t]}), E(function(){return new Int8Array(t)}), E(function(){return new Int8Array(t.buffer)}), E(function(){return Int8Array.from(t)}), E(function(){return new Int8Array(2).set(t)}), Object.prototype.toString.call(t), t.constructor === Int16Array, ArrayBuffer.isView(t), JSON.stringify(t), E(function(){return Array.prototype.join.call(t)})].join("|"));
+out.join("\n")
+=== detached_decoder_encoder
+function E(f){try{return String(f())}catch(e){return e.name+": "+e.message}}
+var b = new ArrayBuffer(4), u = new Uint8Array(b); b.transfer();
+[JSON.stringify(new TextDecoder().decode(b)), JSON.stringify(new TextDecoder().decode(u)), E(function(){return new TextEncoder().encodeInto("abc", u).written}), E(function(){return new TextEncoder().encodeInto("abc", new Int8Array(4))}), E(function(){return new TextEncoder().encodeInto("abc", new Uint8ClampedArray(4))}), E(function(){return new TextEncoder().encodeInto("abc", new DataView(new ArrayBuffer(4)))}), E(function(){return new TextEncoder().encodeInto("abc", new Uint8Array(4)).written})].join("|")
+=== from_basic
+function E(f){try{return String(f())}catch(e){return e.name+": "+e.message}}
+function J(x){return Array.prototype.join.call(x)}
+function* g() { yield 1; yield 2.5; yield "3"; }
+var r = [];
+[Int8Array, Uint8Array, Uint8ClampedArray, Int16Array, Uint16Array, Int32Array, Uint32Array, Float32Array, Float64Array].forEach(function (C) { r.push(C.name + ":" + J(C.from([1.5, 300, -1, "7", null, undefined, true]))); });
+r.push(J(Float64Array.from(g())), J(Float64Array.from(g(), function (x) { return x * 2 })), J(Int8Array.from({length: 3, 0: 1, 2: 7})), J(Int8Array.from("123")), J(Int8Array.from(new Set([1, 2]), function (x, i) { return x * 10 + i + (this ? this.z : 0) }, {z: 100})), J(Int8Array.from([1, 2], undefined, 1)), J(Int8Array.from(new Float32Array([1.5, 2.5]))), Int8Array.from([]).length, J(Int8Array.from(5)), J(Int8Array.from(true)), J(Int8Array.from({})), J(Int8Array.from(function (a, b) {})), J(Uint8Array.from(new Map([[1, 2]]).values())),
+  Object.getPrototypeOf(Float32Array.from([1])) === Float32Array.prototype, Float32Array.from([1]).buffer.byteLength, Int8Array.from.length, Int8Array.from === Uint8Array.from, Int8Array.from === Object.getPrototypeOf(Int8Array).from,
+  J(Uint8Array.from.call(Float64Array, [0.5, 1.5])), Object.getPrototypeOf(Uint8Array.from.call(Float64Array, [1])) === Float64Array.prototype);
+r.join("\n")
+=== from_order_and_errors
+function E(f){try{return String(f())}catch(e){return e.name+": "+e.message}}
+function J(x){return Array.prototype.join.call(x)}
+var TA = Object.getPrototypeOf(Int8Array), r = [], L = [];
+var it = {}; it[Symbol.iterator] = function () { var i = 0; return {next: function () { L.push("n" + i); return i < 3 ? {value: i++, done: false} : {done: true}; }}; };
+r.push(J(Int8Array.from(it, function (x, k) { L.push("m" + x + k); return x + 1 })), L.join(" "));
+L = [];
+var al = {get length() { L.push("len"); return 2 }, get 0() { L.push("g0"); return 1 }, get 1() { L.push("g1"); return 2 }};
+r.push(J(Int8Array.from(al, function (x) { L.push("m" + x); return x })), L.join(" "));
+r.push(E(function(){return Int8Array.from()}), E(function(){return Int8Array.from(null)}), E(function(){return Int8Array.from(undefined)}), E(function(){return Int8Array.from([1], 5)}), E(function(){return Int8Array.from([1], "x")}), E(function(){return Int8Array.from([1], null)}), E(function(){return Int8Array.from([1], {})}), E(function(){return Int8Array.from(undefined, 5)}), E(function(){return Int8Array.from([1], function () { throw new RangeError("map") })}), E(function(){return Int8Array.from([Symbol()])}), E(function(){return Int8Array.from([1], function () { return Symbol() })}),
+  E(function(){return TA.from([1])}), E(function(){return TA.from.call({}, [])}), E(function(){return TA.from.call(5, [])}), E(function(){return TA.from.call(undefined, [])}), E(function(){return TA.of.call(TA, 1)}), E(function(){return TA.of.call(undefined)}),
+  E(function(){var o = {}; o[Symbol.iterator] = null; return J(Int8Array.from(o))}), E(function(){var o = {length: 1, 0: 4}; o[Symbol.iterator] = undefined; return J(Int8Array.from(o))}), E(function(){var o = {}; o[Symbol.iterator] = function () { return 5 }; return Int8Array.from(o)}), E(function(){return Int8Array.from(5, function () { throw 1 })}),
+  E(function(){return J(Int8Array.from(new BigInt64Array(0)))}), E(function(){return BigInt64Array.from([]).length}), E(function(){return BigInt64Array.from({length: 0}).length}), E(function(){return BigInt64Array.from(function* () {}()).length}));
+r.join("\n")
+=== of_basic
+function E(f){try{return String(f())}catch(e){return e.name+": "+e.message}}
+function J(x){return Array.prototype.join.call(x)}
+[J(Int8Array.of()), J(Int8Array.of(1, "2", 300, 1.9, null, undefined, NaN)), J(Float32Array.of(0.1, -0)), J(Uint8ClampedArray.of(300, -1, 1.5)), Int8Array.of(1, 2).length, Int8Array.of.length, Object.getPrototypeOf(Float64Array.of(1)) === Float64Array.prototype, Int8Array.of === Uint8Array.of, J(Float64Array.of.call(Int8Array, 1.5)), E(function(){return Int8Array.of(Symbol())}), E(function(){return Int8Array.of({valueOf: function () { throw new RangeError("v") }})}), BigInt64Array.of().length].join("|")
+=== dataview_ctor
+function E(f){try{return String(f())}catch(e){return e.name+": "+e.message}}
+var b = new ArrayBuffer(16), r = [];
+function d(a, o, l) { var v = new DataView(a, o, l); return v.byteLength + "/" + v.byteOffset + "/" + (v.buffer === a); }
+r.push(DataView.length, DataView.name, typeof DataView, Object.getOwnPropertyDescriptor(DataView, "prototype").writable, DataView.prototype.constructor === DataView, Object.getPrototypeOf(DataView) === Function.prototype, Object.getPrototypeOf(new DataView(b)) === DataView.prototype, new DataView(b) instanceof DataView, Object.getOwnPropertyNames(DataView).sort().join());
+r.push(d(b), d(b, 4), d(b, 4, 2), d(b, 16), d(b, 16, 0), d(b, 0, 16), d(b, "2", "3"), d(b, 1.9, 2.9), d(b, undefined, undefined), d(b, undefined, 3), d(b, 2, undefined), d(b, null, null), d(b, NaN, NaN), d(b, true, true), d(new ArrayBuffer(0)));
+r.push(E(function(){return d(b, 17)}), E(function(){return d(b, 0, 17)}), E(function(){return d(b, 4, 13)}), E(function(){return d(b, -1)}), E(function(){return d(b, 0, -1)}), E(function(){return d(b, Infinity)}), E(function(){return d(b, 0, Infinity)}), E(function(){return d(b, 2**53)}), E(function(){return d(b, Symbol())}), E(function(){return d(b, 0, Symbol())}), E(function(){return new DataView()}), E(function(){return new DataView({})}), E(function(){return new DataView(1)}), E(function(){return new DataView(null)}), E(function(){return new DataView(new Uint8Array(4))}), E(function(){return new DataView(new DataView(b))}), E(function(){return new DataView([])}), E(function(){return DataView(b)}), E(function(){return DataView.call(new DataView(b), b)}));
+var L = [];
+r.push((function () { new DataView(b, {valueOf: function () { L.push("o"); return 1 }}, {valueOf: function () { L.push("l"); return 2 }}); return L.join("") })(), E(function(){ L = []; try { new DataView(b, {valueOf: function () { L.push("o"); return 99 }}, {valueOf: function () { L.push("l"); return 2 }}) } catch (e) { L.push(e.name) } return L.join() }));
+r.join("\n")
+=== dataview_members
+function E(f){try{return String(f())}catch(e){return e.name+": "+e.message}}
+var b = new ArrayBuffer(8), v = new DataView(b, 2, 4), P = DataView.prototype, r = [];
+Object.getOwnPropertyNames(P).sort().forEach(function (n) { var d = Object.getOwnPropertyDescriptor(P, n); r.push(n + ":" + (d.get ? "get:" + d.get.name + ":" + d.get.length + ":" + typeof d.set : typeof d.value === "function" ? d.value.length + ":" + d.value.name : String(d.value)) + ":" + d.enumerable + d.configurable + (d.writable === undefined ? "" : d.writable)); });
+var td = Object.getOwnPropertyDescriptor(P, Symbol.toStringTag);
+r.push(td.value + ":" + td.writable + td.enumerable + td.configurable, String(v), Object.prototype.toString.call(v), v[Symbol.toStringTag], Object.prototype.toString.call(P), v.buffer === b, v.byteLength, v.byteOffset, ArrayBuffer.isView(v), Object.keys(v).length, 0 in v, v[0], E(function(){return v[0] = 5}), Object.keys(v).join(), JSON.stringify(v), Object.getOwnPropertyNames(v).join(), typeof v.length);
+["buffer", "byteLength", "byteOffset"].forEach(function (n) { var g = Object.getOwnPropertyDescriptor(P, n).get; r.push(n + ":" + E(function(){return g.call({})}) + ":" + E(function(){return g.call(new Int8Array(2))}) + ":" + E(function(){return g.call(b)}) + ":" + E(function(){return g.call(undefined)}) + ":" + E(function(){return g.call(P)})); });
+r.join("\n")
+=== dataview_get_set_values
+function IS(a, b){return a === b ? (a !== 0 || 1 / a === 1 / b) : (a !== a && b !== b)}
+function J(x){return Array.prototype.join.call(x)}
+var dv = new DataView(new ArrayBuffer(16)), u = new Uint8Array(dv.buffer), r = [];
+function reset() { u.fill(0); }
+dv.setFloat64(0, 1.1); r.push(J(u.subarray(0, 8)), dv.getFloat64(0), dv.getFloat64(0, true), dv.getFloat64(0, false), dv.getFloat64(0, 1), dv.getFloat64(0, "x"), dv.getFloat64(0, ""), dv.getFloat64(0, null));
+reset(); dv.setFloat64(0, -2.5, true); r.push(J(u.subarray(0, 8)), dv.getFloat64(0, true), dv.getFloat64(0));
+reset(); dv.setFloat32(8, -2.5, true); r.push(J(u.subarray(8, 12)), dv.getFloat32(8, true), dv.getFloat32(8), dv.getFloat32(8, false));
+reset(); dv.setFloat32(0, 0.1); r.push(J(u.subarray(0, 4)), dv.getFloat32(0), dv.getFloat32(0, true));
+reset(); dv.setFloat32(0, 1e40); r.push(dv.getFloat32(0), (dv.setFloat32(0, -1e40), dv.getFloat32(0)), (dv.setFloat32(0, NaN), dv.getFloat32(0)), J(u.subarray(0, 4)), (dv.setFloat32(0, 1e-50), dv.getFloat32(0)));
+reset(); dv.setInt16(0, -2); r.push(J(u.subarray(0, 2)), dv.getInt16(0), dv.getUint16(0), dv.getInt16(0, true), dv.getUint16(0, true));
+reset(); dv.setUint16(0, 65535 + 2, true); r.push(J(u.subarray(0, 2)), dv.getUint16(0, true), dv.getInt16(0, true));
+reset(); dv.setUint32(0, 0xdeadbeef, true); r.push(J(u.subarray(0, 4)), dv.getUint32(0, true), dv.getInt32(0, true), dv.getUint32(0), dv.getInt32(0), dv.getInt16(0, true), dv.getUint16(2, true), dv.getInt8(1), dv.getUint8(1), dv.getInt8(3), dv.getUint8(3));
+reset(); dv.setInt32(4, -1); r.push(J(u.subarray(4, 8)), dv.getUint32(4), dv.getInt32(4), dv.getInt32(5), dv.getUint32(5, true));
+reset(); dv.setInt8(0, 300); dv.setInt8(1, -129); dv.setUint8(2, -1); dv.setUint8(3, 257); dv.setUint8(4, 255.9); dv.setInt8(5, "7"); dv.setInt8(6, NaN); dv.setInt8(7, Infinity); r.push(J(u.subarray(0, 8)), dv.getInt8(0), dv.getInt8(1), dv.getUint8(2), dv.getUint8(1));
+reset(); dv.setInt32(0, 2**32 + 5); dv.setInt32(4, -(2**31) - 1); dv.setUint32(8, -1); dv.setUint32(12, 2**53); r.push(J(u.subarray(0, 16)), dv.getInt32(4), dv.getUint32(8), dv.getUint32(12));
+reset(); dv.setFloat64(0, -0); dv.setFloat64(8, NaN); r.push(J(u.subarray(0, 16)), IS(dv.getFloat64(0), -0), dv.getFloat64(8), (dv.setFloat32(0, -0), IS(dv.getFloat32(0), -0)), (dv.setFloat64(0, 5e-324), dv.getFloat64(0)), (dv.setFloat64(0, Infinity, true), dv.getFloat64(0, true)));
+reset(); u.set([0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc, 0xde, 0xf0]); r.push(dv.getUint32(0).toString(16), dv.getUint32(0, true).toString(16), dv.getUint16(1).toString(16), dv.getUint16(1, true).toString(16), dv.getInt32(4).toString(16), dv.getUint32(4, true).toString(16), dv.getFloat64(0), dv.getFloat64(0, true), dv.getInt8(7), dv.getUint8(7));
+r.push(dv.setInt8(0, 1), dv.setFloat64(0, 1), dv.setInt32(0, 0, true), dv.getInt8.length, dv.setInt8.length, dv.getFloat64.name, dv.setUint16.name, dv.getBigInt64.length, dv.setBigUint64.length);
+r.join("\n")
+=== dataview_offsets_and_errors
+function E(f){try{return String(f())}catch(e){return e.name+": "+e.message}}
+var b = new ArrayBuffer(12), dv = new DataView(b, 2, 8), r = [];
+r.push(E(function(){return dv.getInt8(8)}), E(function(){return dv.getInt8(7)}), E(function(){return dv.getInt16(7)}), E(function(){return dv.getInt16(6)}), E(function(){return dv.getInt32(5)}), E(function(){return dv.getInt32(4)}), E(function(){return dv.getFloat64(1)}), E(function(){return dv.getFloat64(0)}), E(function(){return dv.getInt8(-1)}), E(function(){return dv.getInt8(-0.5)}), E(function(){return dv.getInt8(Infinity)}), E(function(){return dv.getInt8(2**53)}), E(function(){return dv.getInt8(2**53 - 1)}), E(function(){return dv.getInt8()}), E(function(){return dv.getInt8(undefined)}), E(function(){return dv.getInt8(null)}), E(function(){return dv.getInt8("3")}), E(function(){return dv.getInt8(1.9)}), E(function(){return dv.getInt8(NaN)}), E(function(){return dv.getInt8({valueOf: function () { return 2 }})}), E(function(){return dv.getInt8(Symbol())}),
+  E(function(){return dv.setInt8(8, 1)}), E(function(){return dv.setInt16(7, 1)}), E(function(){return dv.setFloat64(1, 1)}), E(function(){return dv.setInt8(-1, 1)}), E(function(){return dv.setInt8()}), E(function(){return dv.setInt8(0)}), E(function(){return dv.setInt8(0, Symbol())}), E(function(){return dv.setInt8(0, {valueOf: function () { return 3 }})}), E(function(){return dv.getInt8(0)}),
+  E(function(){return DataView.prototype.getInt8.call({}, 0)}), E(function(){return DataView.prototype.getInt8.call(new Int8Array(1), 0)}), E(function(){return DataView.prototype.getInt8.call(undefined, 0)}), E(function(){return DataView.prototype.setFloat32.call(b, 0, 0)}), E(function(){return DataView.prototype.getUint32.call(DataView.prototype, 0)}), E(function(){return DataView.prototype.setInt16.call(null, 0, 0)}));
+var L = [];
+r.push((function () { try { dv.setInt8({valueOf: function () { L.push("i"); return 99 }}, {valueOf: function () { L.push("v"); return 1 }}, {valueOf: function () { L.push("e"); return 1 }}) } catch (e) { L.push(e.name) } return L.join() })(), (function () { L = []; dv.getInt8({valueOf: function () { L.push("i"); return 0 }}, {valueOf: function () { L.push("e"); return 1 }}); return L.join() })(), (function () { L = []; try { dv.setInt8({valueOf: function () { L.push("i"); throw new RangeError("i") }}, {valueOf: function () { L.push("v"); return 1 }}) } catch (e) { L.push(e.name) } return L.join() })());
+r.join("\n")
+=== dataview_shares_memory
+function J(x){return Array.prototype.join.call(x)}
+var b = new ArrayBuffer(8), dv = new DataView(b), u = new Uint8Array(b), f = new Float32Array(b, 4, 1), i = new Int16Array(b);
+dv.setUint8(0, 7); u[1] = 9; f[0] = 1.5; i[1] = -2;
+[J(u), dv.getUint16(0, true), dv.getFloat32(4, true), dv.getInt16(2, true), i[0], u.byteLength, dv.byteLength, new DataView(b, 4).getFloat32(0, true), new DataView(u.buffer, 1, 2).getUint8(0)].join("|")
+=== dataview_bigint_gate_shapes
+function E(f){try{return String(f())}catch(e){return e.name+": "+e.message}}
+var dv = new DataView(new ArrayBuffer(8));
+[typeof dv.getBigInt64, typeof dv.setBigInt64, typeof dv.getBigUint64, typeof dv.setBigUint64, dv.getBigInt64.length, dv.setBigInt64.length, dv.getBigUint64.name, dv.setBigUint64.name, Object.getOwnPropertyNames(DataView.prototype).sort().join()].join("|")
+=== text_codecs_with_views
+function J(x){return Array.prototype.join.call(x)}
+var e = new TextEncoder().encode("hé"), f = new Float32Array([1.5]), dvv = new DataView(new TextEncoder().encode("abc").buffer);
+[J(e), new TextDecoder().decode(new DataView(e.buffer)), new TextDecoder().decode(new Uint16Array(new Uint8Array([104, 105]).buffer)), new TextDecoder().decode(new Uint8ClampedArray([104, 105])), new TextDecoder().decode(new Int8Array([104, 105])), new TextDecoder().decode(new Float32Array(new Uint8Array([104, 105, 106, 107]).buffer)), new TextDecoder().decode(dvv), J(new Uint8Array(f.buffer))].join("|")
+=== typed_arrays_with_array_methods
+function J(x){return Array.prototype.join.call(x)}
+var t = new Int16Array([3, 1, 2]);
+[J(Array.prototype.slice.call(t, 1)), J(Array.prototype.map.call(t, function (x) { return x * 2 })), Array.prototype.indexOf.call(t, 2), J(Array.from(t)), J([].concat(Array.from(t))), t.length, Array.isArray(t), J([].concat(Array.from(t.keys()))), J(Array.prototype.filter.call(t, function (x) { return x > 1 })), Array.prototype.join.call(t, "-")].join("|")
+=== many_elements
+var n = 1000, a = new Float64Array(n), i = 0, s = 0;
+for (i = 0; i < n; i++) a[i] = i * 0.5;
+for (i = 0; i < n; i++) s += a[i];
+var b = new Int32Array(a), c = new Uint8Array(b), d = Float32Array.from(a, function (x) { return x + 0.1 });
+[s, b[999], c[999], d[999], a.indexOf(499.5), a.lastIndexOf(0.5), b.reduce(function (x, y) { return x + y }, 0), new Int32Array(n).fill(7).reduce(function (x, y) { return x + y }, 0), a.slice(10, 12).join(), c.subarray(250, 254).join(), b.toSorted(function (x, y) { return y - x })[0], new Int16Array(a).sort().length].join("|")
+=== detached_iterator
+function E(f){try{return String(f())}catch(e){return e.name+": "+e.message}}
+var u = new Uint8Array(3), it = u.values(), k = u.keys(), e = u.entries(), r = [];
+r.push(JSON.stringify(it.next()), JSON.stringify(k.next()));
+u.buffer.transfer();
+r.push(E(function(){return it.next()}), E(function(){return k.next()}), E(function(){return e.next()}), E(function(){return u.values()}), E(function(){return [...u]}));
+var v = new Uint8Array(1), d = v.values(); d.next(); d.next();
+v.buffer.transfer();
+r.push(E(function(){return d.next()}));
+r.join("\n")

@@ -1,40 +1,57 @@
-// Byte buffers and text codecs of the evaluator. Included by `eval.rs` (`include!`), so it shares that module's
-// imports and private items. The storage and the integer-indexed property rules are in `heap_binary.rs`; the
-// UTF-8 codec is in `text.rs`. This file is the JavaScript surface and the checks.
+// Byte buffers, typed arrays, `DataView` and text codecs of the evaluator. Included by `eval.rs` (`include!`), so it shares
+// that module's imports and private items. The storage and the integer-indexed property rules are in `heap_binary.rs`; the
+// UTF-8 codec is in `text.rs`; the typed-array methods and `DataView` are in `eval_typed.rs`. This file is the setup, the
+// dispatch, `ArrayBuffer`, the text codecs and the typed-array constructors.
 //
 // Supported:
-// - `ArrayBuffer(length)`, `.byteLength`, `.slice(begin, end)`, `ArrayBuffer.isView`.
-// - `Uint8Array(length | buffer, byteOffset, length | typedArray | array | array-like)`, the getters `buffer`, `byteLength`,
-//   `byteOffset`, `length`, `BYTES_PER_ELEMENT`, `set(source, offset)`, `subarray` (shared bytes), `slice` (copy),
-//   `indexOf` (strict equality, see `eval_binary_search.rs`), integer indexing (read, write, `in`, `delete`,
-//   `Object.keys`, `Object.getOwnPropertyDescriptor`, `defineProperty`) and iteration.
-//   `new Uint8Array(iterable)` takes every value through the shared iterator protocol of `eval_symbols.rs` (an object whose
-//   `@@iterator` is not undefined or null), then converts each. `values`, `keys`, `entries` and `[@@iterator]` of
-//   `%TypedArray%.prototype` make the shared array iterator (no second engine); it reads the view's own length.
-//   `%TypedArray%` is not global, but `Object.getPrototypeOf(Uint8Array)` finds it, as in a browser.
+// - `ArrayBuffer(length)`, `.byteLength`, `.maxByteLength`, `.resizable` (always false), `.detached`, `.slice(begin, end)`,
+//   `.transfer(length)`, `.transferToFixedLength(length)` (the old buffer is detached: length 0, its views read as empty),
+//   `ArrayBuffer.isView`.
+// - The ten typed-array classes `Int8Array`, `Uint8Array`, `Uint8ClampedArray`, `Int16Array`, `Uint16Array`, `Int32Array`,
+//   `Uint32Array`, `Float32Array`, `Float64Array`, `BigInt64Array`, `BigUint64Array`, each with `BYTES_PER_ELEMENT` on the
+//   constructor and the prototype, over the shared `%TypedArray%` (`Object.getPrototypeOf(Uint8Array)`, not a global).
+//   Elements stay in the byte buffer in little-endian order; a view is a buffer handle, a byte offset, a length and a type.
+//   Constructor forms: `(length)`, `(buffer, byteOffset, length)`, `(typedArray)`, `(iterable)` (the shared iterator protocol
+//   of `eval_symbols.rs`: an object whose `@@iterator` is not undefined or null) and `(arrayLike)`.
+//   `%TypedArray%.from` (iterables, including generators, array-likes, a map function) and `.of`.
+//   `%TypedArray%.prototype`: `buffer`, `byteLength`, `byteOffset`, `length`, `at`, `copyWithin`, `entries`, `every`,
+//   `fill`, `filter`, `find`, `findIndex`, `findLast`, `findLastIndex`, `forEach`, `includes`, `indexOf`, `join`, `keys`,
+//   `lastIndexOf`, `map`, `reduce`, `reduceRight`, `reverse`, `set`, `slice`, `some`, `sort`, `subarray`, `toLocaleString`,
+//   `toReversed`, `toSorted`, `toString` (the function of `Array.prototype.toString`), `values`, `with`, `[@@iterator]` and
+//   the `[@@toStringTag]` getter. Integer indexing (read, write, `in`, `delete`, `Object.keys`,
+//   `Object.getOwnPropertyDescriptor`, `defineProperty`) and iteration.
+// - `DataView(buffer, byteOffset, byteLength)`, `buffer`, `byteLength`, `byteOffset`, and `get` and `set` for `Int8`, `Uint8`,
+//   `Int16`, `Uint16`, `Int32`, `Uint32`, `Float32` and `Float64`, with the `littleEndian` flag.
 // - `TextEncoder` (`encoding`, `encode`, `encodeInto`) and `TextDecoder` (`encoding`, `fatal`, `ignoreBOM`, `decode` with
 //   `stream`). UTF-8 only. A known WHATWG label of another encoding is `Unsupported`; an unknown label is a `RangeError`.
-// Gates (explicit `Unsupported`, never silent): resizable `ArrayBuffer` options, `resize`, `transfer`, and the typed-array
-// methods that are not above (`fill`, `map`, `from`, `of`, ...). `@@toStringTag` is bound for the four classes
-// (a data property for `ArrayBuffer`, `TextEncoder` and `TextDecoder`, a getter on `%TypedArray%.prototype`). `slice` and
-// `subarray` read `constructor` and `@@species`: `undefined`, `null` and the intrinsic class give the default; any other
-// constructor is `Unsupported`. A class that extends one of these constructors is `Unsupported` when it is constructed.
-// Absent: `SharedArrayBuffer`, `DataView`, every other typed-array family and detached buffers.
+// Gates (explicit `Unsupported`, never silent): resizable `ArrayBuffer` options and `resize`; every read or write of an
+// element of `BigInt64Array` and `BigUint64Array`, and `DataView` `getBigInt64`, `setBigInt64`, `getBigUint64`,
+// `setBigUint64` (this engine has no BigInt; the constructors, lengths, `BYTES_PER_ELEMENT`, `buffer` views, `slice`,
+// `subarray`, `copyWithin`, `reverse`, `toReversed`, `set` from a typed array and the default `sort` work on bytes and run).
+// `slice`, `subarray`, `map` and `filter` read `constructor` and `@@species`: `undefined`, `null` and the intrinsic class
+// give the default; any other constructor is `Unsupported`. A class that extends one of these constructors is `Unsupported`
+// when it is constructed. Absent: `SharedArrayBuffer`.
 //
 // Limits: backing bytes are capped for one buffer and for all live buffers (`Interp::set_binary_limits`; errors
 // `Heap(BufferLength)` and `Heap(BufferBytes)`), every size is checked before the allocation or the copy, and every
-// pass over bytes or elements consumes steps (one step for 64 bytes copied or 16 bytes encoded or decoded, one for
-// each element read through a JavaScript property). A limit is never a JavaScript exception.
+// pass over bytes or elements consumes steps (one step for 64 bytes copied, filled, sorted or searched, or 16 bytes encoded
+// or decoded, one for each element read through a JavaScript property or passed to a callback). A limit is never a
+// JavaScript exception.
 //
-// GC: the buffer bytes are owned by the heap object and are freed by `collect`. A view marks its buffer. The five
-// prototypes are roots.
+// GC: the buffer bytes are owned by the heap object and are freed by `collect`. A view marks its buffer. The prototypes and
+// the constructors are roots.
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum BinFn {
     AbCtor,
     AbIsView,
     AbByteLength,
+    AbMaxByteLength,
+    AbResizable,
+    AbDetached,
     AbSlice,
+    /// `transfer` (false) and `transferToFixedLength` (true). The buffers here are never resizable, so both do the same.
+    AbTransfer(bool),
     TaCtor,
     TaBuffer,
     TaByteLength,
@@ -48,7 +65,18 @@ enum BinFn {
     TaKeys,
     TaEntries,
     TaTag,
-    U8Ctor,
+    TaFrom,
+    TaOf,
+    /// A `%TypedArray%.prototype` method of `eval_typed.rs`.
+    Ta(TaM),
+    /// The constructor of one typed-array class.
+    TyCtor(Elem),
+    DvCtor,
+    DvBuffer,
+    DvByteLength,
+    DvByteOffset,
+    DvGet(Elem),
+    DvSet(Elem),
     EncCtor,
     EncEncoding,
     EncEncode,
@@ -61,11 +89,66 @@ enum BinFn {
     Gate(&'static str),
 }
 
+/// The `%TypedArray%.prototype` methods of `eval_typed.rs` (the others have their own `BinFn`).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum TaM {
+    At,
+    CopyWithin,
+    Every,
+    Fill,
+    Filter,
+    Find,
+    FindIndex,
+    FindLast,
+    FindLastIndex,
+    ForEach,
+    Includes,
+    Join,
+    LastIndexOf,
+    Map,
+    Reduce,
+    ReduceRight,
+    Reverse,
+    Any,
+    Sort,
+    ToLocaleString,
+    ToReversed,
+    ToSorted,
+    With,
+}
+
+/// The method table of `%TypedArray%.prototype`: name, function, `length`, the qualified name for messages, and whether V8
+/// words a wrong receiver as "this is not a typed array." (`true`) or "Method ... called on incompatible receiver" (`false`).
+const TA_METHODS: [(&str, TaM, u32, &str, bool); 23] = [
+    ("at", TaM::At, 1, "%TypedArray%.prototype.at", false), ("copyWithin", TaM::CopyWithin, 2, "%TypedArray%.prototype.copyWithin", true),
+    ("every", TaM::Every, 1, "%TypedArray%.prototype.every", true), ("fill", TaM::Fill, 1, "%TypedArray%.prototype.fill", true),
+    ("filter", TaM::Filter, 1, "%TypedArray%.prototype.filter", true), ("find", TaM::Find, 1, "%TypedArray%.prototype.find", true),
+    ("findIndex", TaM::FindIndex, 1, "%TypedArray%.prototype.findIndex", true), ("findLast", TaM::FindLast, 1, "%TypedArray%.prototype.findLast", true),
+    ("findLastIndex", TaM::FindLastIndex, 1, "%TypedArray%.prototype.findLastIndex", true), ("forEach", TaM::ForEach, 1, "%TypedArray%.prototype.forEach", true),
+    ("includes", TaM::Includes, 1, "%TypedArray%.prototype.includes", true), ("join", TaM::Join, 1, "%TypedArray%.prototype.join", false),
+    ("lastIndexOf", TaM::LastIndexOf, 1, "%TypedArray%.prototype.lastIndexOf", true), ("map", TaM::Map, 1, "%TypedArray%.prototype.map", true),
+    ("reduce", TaM::Reduce, 1, "%TypedArray%.prototype.reduce", true), ("reduceRight", TaM::ReduceRight, 1, "%TypedArray%.prototype.reduceRight", true),
+    ("reverse", TaM::Reverse, 0, "%TypedArray%.prototype.reverse", true), ("some", TaM::Any, 1, "%TypedArray%.prototype.some", true),
+    ("sort", TaM::Sort, 1, "%TypedArray%.prototype.sort", false), ("toLocaleString", TaM::ToLocaleString, 0, "%TypedArray%.prototype.toLocaleString", false),
+    ("toReversed", TaM::ToReversed, 0, "%TypedArray%.prototype.toReversed", false), ("toSorted", TaM::ToSorted, 1, "%TypedArray%.prototype.toSorted", false),
+    ("with", TaM::With, 2, "%TypedArray%.prototype.with", true),
+];
+
+impl TaM {
+    /// The qualified name and the receiver wording of the method.
+    fn info(self) -> (&'static str, bool) {
+        let e = &TA_METHODS[self as usize]; // the table has the order of the enum
+        debug_assert!(e.1 == self);
+        (e.3, e.4)
+    }
+}
+
 impl BinFn {
     fn ctor_name(self) -> Option<&'static str> {
         Some(match self {
             BinFn::AbCtor => "ArrayBuffer",
-            BinFn::U8Ctor => "Uint8Array",
+            BinFn::TyCtor(t) => t.name(),
+            BinFn::DvCtor => "DataView",
             BinFn::EncCtor => "TextEncoder",
             BinFn::DecCtor => "TextDecoder",
             _ => return None,
@@ -77,12 +160,16 @@ impl BinFn {
 struct BinProtos {
     ab: ObjId,
     ta: ObjId,
-    u8: ObjId,
+    /// The constructor of `%TypedArray%`.
+    ta_c: ObjId,
+    dv: ObjId,
     enc: ObjId,
     dec: ObjId,
-    /// The intrinsic `ArrayBuffer` and `Uint8Array`: the defaults of `SpeciesConstructor`.
+    /// The intrinsic `ArrayBuffer` and typed-array classes: the defaults of `SpeciesConstructor`.
     ab_c: ObjId,
-    u8_c: ObjId,
+    /// The prototype and the constructor of each typed-array class, in the order of `TYPED`.
+    ty: [ObjId; 11],
+    ty_c: [ObjId; 11],
 }
 
 #[derive(Default)]
@@ -90,15 +177,8 @@ struct BinaryState {
     protos: Option<BinProtos>,
 }
 
-const TA_GATES: [(&str, &str); 18] = [
-    ("fill", "TypedArray.prototype.fill"), ("copyWithin", "TypedArray.prototype.copyWithin"), ("reverse", "TypedArray.prototype.reverse"),
-    ("sort", "TypedArray.prototype.sort"), ("lastIndexOf", "TypedArray.prototype.lastIndexOf"),
-    ("includes", "TypedArray.prototype.includes"), ("join", "TypedArray.prototype.join"), ("map", "TypedArray.prototype.map"),
-    ("filter", "TypedArray.prototype.filter"), ("forEach", "TypedArray.prototype.forEach"), ("reduce", "TypedArray.prototype.reduce"),
-    ("every", "TypedArray.prototype.every"), ("some", "TypedArray.prototype.some"), ("find", "TypedArray.prototype.find"),
-    ("findIndex", "TypedArray.prototype.findIndex"), ("at", "TypedArray.prototype.at"), ("toString", "TypedArray.prototype.toString"),
-    ("toReversed", "TypedArray.prototype.toReversed"),
-];
+/// The reason of the gate on a BigInt typed-array element.
+const BIG_ELEM: &str = "BigInt64Array and BigUint64Array elements (no BigInt)";
 
 const MAX_SAFE: f64 = 9007199254740991.0;
 
@@ -118,13 +198,13 @@ impl<'p> Interp<'p> {
 
     /// A new `Uint8Array` over a new buffer that owns `bytes` (no copy). For code that hands network data to a script.
     pub fn new_uint8_array(&mut self, bytes: Vec<u8>) -> Result<Value, Error> {
-        let p = self.bp();
+        let (ab, u8p) = (self.bp().ab, self.bin_proto(Elem::U8));
         let len = bytes.len();
-        let buf = h!(self, self.heap.new_buffer_from(Some(p.ab), bytes));
-        Ok(Value::Object(h!(self, self.heap.new_view(Some(p.u8), buf, 0, len))))
+        let buf = h!(self, self.heap.new_buffer_from(Some(ab), bytes));
+        Ok(Value::Object(h!(self, self.heap.new_view(Some(u8p), buf, 0, len))))
     }
 
-    /// The bytes of an `ArrayBuffer` or `Uint8Array` value, borrowed with no copy. `None` for any other value.
+    /// The bytes of an `ArrayBuffer`, a typed array or a `DataView` value, borrowed with no copy. `None` for any other value.
     pub fn bytes_of(&self, v: Value) -> Option<&[u8]> {
         let Value::Object(o) = v else { return None };
         self.heap.bytes(o)
@@ -136,9 +216,20 @@ impl<'p> Interp<'p> {
         self.bin.protos.expect("install_binary ran")
     }
 
+    /// The prototype of a typed-array class (or `DataView`).
+    fn bin_proto(&self, ty: Elem) -> ObjId {
+        let p = self.bin.protos.as_ref().expect("install_binary ran");
+        if ty == Elem::Data { p.dv } else { p.ty[ty.index()] }
+    }
+
+    /// The intrinsic constructor of a typed-array class.
+    fn bin_class(&self, ty: Elem) -> ObjId {
+        self.bin.protos.as_ref().expect("install_binary ran").ty_c[ty.index()]
+    }
+
     fn binary_roots(&self, out: &mut Vec<Value>) {
-        if let Some(p) = self.bin.protos {
-            out.extend([p.ab, p.ta, p.u8, p.enc, p.dec, p.ab_c, p.u8_c].map(Value::Object));
+        if let Some(p) = &self.bin.protos {
+            out.extend([p.ab, p.ta, p.ta_c, p.dv, p.enc, p.dec, p.ab_c].into_iter().chain(p.ty).chain(p.ty_c).map(Value::Object));
         }
     }
 
@@ -160,7 +251,11 @@ impl<'p> Interp<'p> {
 
     /// An accessor property. ECMAScript built-ins are not enumerable; WebIDL attributes (`TextEncoder`) are.
     fn bin_getter(&mut self, on: ObjId, name: &str, f: BinFn, enumerable: bool) -> Res<()> {
-        let g = self.native(Nat::Bin(f), &format!("get {name}"), 0)?;
+        self.bin_getter_named(on, name, &format!("get {name}"), f, enumerable)
+    }
+
+    fn bin_getter_named(&mut self, on: ObjId, name: &str, fname: &str, f: BinFn, enumerable: bool) -> Res<()> {
+        let g = self.native(Nat::Bin(f), fname, 0)?;
         let k = h!(self, self.heap.key_from_str(name));
         let d = PropertyDescriptor { get: Some(Some(g)), set: Some(None), enumerable: Some(enumerable), configurable: Some(true), ..Default::default() };
         h!(self, self.heap.define_own_property(on, k, &d));
@@ -170,10 +265,13 @@ impl<'p> Interp<'p> {
     fn install_binary(&mut self) -> Res<()> {
         let op = self.object_proto;
         let proto = |s: &mut Self, parent: ObjId| -> Res<ObjId> { Ok(h!(s, s.heap.new_object(Some(parent)))) };
-        let (ab_p, ta_p) = (proto(self, op)?, proto(self, op)?);
-        let u8_p = proto(self, ta_p)?;
+        let (ab_p, ta_p, dv_p) = (proto(self, op)?, proto(self, op)?, proto(self, op)?);
+        let mut ty_p = [ab_p; 11];
+        for p in &mut ty_p {
+            *p = proto(self, ta_p)?;
+        }
         let (enc_p, dec_p) = (proto(self, op)?, proto(self, op)?);
-        self.bin.protos = Some(BinProtos { ab: ab_p, ta: ta_p, u8: u8_p, enc: enc_p, dec: dec_p, ab_c: ab_p, u8_c: u8_p });
+        self.bin.protos = Some(BinProtos { ab: ab_p, ta: ta_p, ta_c: ta_p, dv: dv_p, enc: enc_p, dec: dec_p, ab_c: ab_p, ty: ty_p, ty_c: ty_p });
 
         let species = PropertyKey::Symbol(self.sc.wk[WK_SPECIES]);
         let ab = self.bin_ctor("ArrayBuffer", BinFn::AbCtor, 1, ab_p)?;
@@ -183,19 +281,29 @@ impl<'p> Interp<'p> {
         self.bin_method(ab, "isView", BinFn::AbIsView, 1)?;
         self.bin_getter(ab_p, "byteLength", BinFn::AbByteLength, false)?;
         self.bin_method(ab_p, "slice", BinFn::AbSlice, 2)?;
-        for (n, w) in [("resize", "ArrayBuffer.prototype.resize"), ("transfer", "ArrayBuffer.prototype.transfer"), ("transferToFixedLength", "ArrayBuffer.prototype.transferToFixedLength")] {
-            self.bin_method(ab_p, n, BinFn::Gate(w), 0)?;
-        }
+        self.bin_getter(ab_p, "maxByteLength", BinFn::AbMaxByteLength, false)?;
+        self.bin_getter(ab_p, "resizable", BinFn::AbResizable, false)?;
+        self.bin_method(ab_p, "resize", BinFn::Gate("ArrayBuffer.prototype.resize"), 1)?;
+        self.bin_method(ab_p, "transfer", BinFn::AbTransfer(false), 0)?;
+        self.bin_method(ab_p, "transferToFixedLength", BinFn::AbTransfer(true), 0)?;
+        self.bin_getter(ab_p, "detached", BinFn::AbDetached, false)?;
 
         // %TypedArray%: the shared constructor and prototype. Not a global.
         let ta = self.bin_ctor("TypedArray", BinFn::TaCtor, 0, ta_p)?;
-        for (n, f) in [("buffer", BinFn::TaBuffer), ("byteLength", BinFn::TaByteLength), ("byteOffset", BinFn::TaByteOffset), ("length", BinFn::TaLength)] {
+        if let Some(p) = &mut self.bin.protos {
+            p.ta_c = ta;
+        }
+        self.bin_getter_named(ta_p, "buffer", "get buffer", BinFn::TaBuffer, false)?;
+        for (n, f) in [("byteLength", BinFn::TaByteLength), ("byteOffset", BinFn::TaByteOffset), ("length", BinFn::TaLength)] {
             self.bin_getter(ta_p, n, f, false)?;
         }
         self.bin_method(ta_p, "set", BinFn::TaSet, 1)?;
         self.bin_method(ta_p, "subarray", BinFn::TaSubarray, 2)?;
         self.bin_method(ta_p, "slice", BinFn::TaSlice, 2)?;
         self.bin_method(ta_p, "indexOf", BinFn::TaIndexOf, 1)?;
+        for (n, m, len, _, _) in TA_METHODS {
+            self.bin_method(ta_p, n, BinFn::Ta(m), len)?;
+        }
         // `values` is `[Symbol.iterator]`; the iterator is the shared array iterator of `eval_symbols.rs`.
         let tv = self.native(Nat::Bin(BinFn::TaValues), "values", 0)?;
         let kv = h!(self, self.heap.key_from_str("values"));
@@ -203,25 +311,52 @@ impl<'p> Interp<'p> {
         self.def(ta_p, self.sc.k_iterator, Value::Object(tv), true, false, true)?;
         self.bin_method(ta_p, "keys", BinFn::TaKeys, 0)?;
         self.bin_method(ta_p, "entries", BinFn::TaEntries, 0)?;
+        // `toString` is the very function of `Array.prototype.toString`.
+        let kts = h!(self, self.heap.key_from_str("toString"));
+        if let Some(Property::Data { value, .. }) = h!(self, self.heap.get_own_property(self.array_proto, kts)) {
+            self.def(ta_p, kts, value, true, false, true)?;
+        }
         let tag = self.native(Nat::Bin(BinFn::TaTag), "get [Symbol.toStringTag]", 0)?;
         let d = PropertyDescriptor { get: Some(Some(tag)), set: Some(None), enumerable: Some(false), configurable: Some(true), ..Default::default() };
         h!(self, self.heap.define_own_property(ta_p, self.sc.k_to_string_tag, &d));
         self.sc_getter(ta, species, "get [Symbol.species]", ScFn::Species)?;
-        for (n, w) in TA_GATES {
-            self.bin_method(ta_p, n, BinFn::Gate(w), 0)?;
-        }
-        self.bin_method(ta, "from", BinFn::Gate("TypedArray.from"), 1)?;
-        self.bin_method(ta, "of", BinFn::Gate("TypedArray.of"), 0)?;
+        self.bin_method(ta, "from", BinFn::TaFrom, 1)?;
+        self.bin_method(ta, "of", BinFn::TaOf, 0)?;
 
-        let u8c = self.bin_ctor("Uint8Array", BinFn::U8Ctor, 3, u8_p)?;
-        h!(self, self.heap.set_prototype_of(u8c, Some(ta)));
         let k = h!(self, self.heap.key_from_str("BYTES_PER_ELEMENT"));
-        self.def(u8c, k, Value::Number(1.0), false, false, false)?;
-        self.def(u8_p, k, Value::Number(1.0), false, false, false)?;
-        self.bin_global("Uint8Array", u8c)?;
+        let mut classes = [ab; 11];
+        for ty in TYPED {
+            let c = self.bin_ctor(ty.name(), BinFn::TyCtor(ty), 3, ty_p[ty.index()])?;
+            h!(self, self.heap.set_prototype_of(c, Some(ta)));
+            self.def(c, k, Value::Number(ty.size() as f64), false, false, false)?;
+            self.def(ty_p[ty.index()], k, Value::Number(ty.size() as f64), false, false, false)?;
+            self.bin_global(ty.name(), c)?;
+            classes[ty.index()] = c;
+        }
         if let Some(p) = &mut self.bin.protos {
             p.ab_c = ab;
-            p.u8_c = u8c;
+            p.ty_c = classes;
+        }
+
+        let dv = self.bin_ctor("DataView", BinFn::DvCtor, 1, dv_p)?;
+        self.bin_global("DataView", dv)?;
+        self.sc_tag(dv_p, "DataView")?;
+        for (n, f) in [("buffer", BinFn::DvBuffer), ("byteLength", BinFn::DvByteLength), ("byteOffset", BinFn::DvByteOffset)] {
+            self.bin_getter(dv_p, n, f, false)?;
+        }
+        for ty in TYPED {
+            let suffix = ty.name().trim_end_matches("Array");
+            if ty == Elem::U8C {
+                continue;
+            }
+            let (get, set) = if ty.is_big() {
+                (BinFn::Gate(if ty == Elem::BI64 { "DataView.prototype.getBigInt64" } else { "DataView.prototype.getBigUint64" }),
+                 BinFn::Gate(if ty == Elem::BI64 { "DataView.prototype.setBigInt64" } else { "DataView.prototype.setBigUint64" }))
+            } else {
+                (BinFn::DvGet(ty), BinFn::DvSet(ty))
+            };
+            self.bin_method(dv_p, &format!("get{suffix}"), get, 1)?;
+            self.bin_method(dv_p, &format!("set{suffix}"), set, 2)?;
         }
 
         let enc = self.bin_ctor("TextEncoder", BinFn::EncCtor, 0, enc_p)?;
@@ -277,14 +412,16 @@ impl<'p> Interp<'p> {
     }
 
     fn incompatible(&mut self, what: &str, this: Value) -> Error {
-        let t = self.display(this);
+        let t = self.recv_text(this);
         self.type_err(&format!("Method {what} called on incompatible receiver {t}"))
     }
 
-    /// The view behind `this`: `(object, buffer, byte offset, length)`.
+    /// The typed array or `DataView` behind `this`: `(object, buffer, byte offset, length)`. A `DataView` is not a typed
+    /// array: it fails here with the others.
     fn this_view(&mut self, this: Value, what: &str) -> Res<(ObjId, ObjId, usize, usize)> {
         if let Value::Object(o) = this
             && let Some((b, off, len)) = self.heap.view_parts(o)
+            && self.heap.view_type(o) != Some(Elem::Data)
         {
             return Ok((o, b, off, len));
         }
@@ -298,7 +435,7 @@ impl<'p> Interp<'p> {
         let c = match self.get_prop(Value::Object(o), self.k_constructor)? {
             Value::Undefined => return Ok(()),
             c @ Value::Object(_) => c,
-            _ => return Err(self.type_err("object.constructor is not a constructor")),
+            _ => return Err(self.type_err("The .constructor property is not an object")),
         };
         match self.get_prop(c, self.wk_key(WK_SPECIES))? {
             Value::Undefined | Value::Null => Ok(()),
@@ -308,14 +445,12 @@ impl<'p> Interp<'p> {
         }
     }
 
-    fn new_u8(&mut self, len: usize) -> Res<ObjId> {
-        let p = self.bp();
-        let buf = h!(self, self.heap.new_buffer(Some(p.ab), len));
-        Ok(h!(self, self.heap.new_view(Some(p.u8), buf, 0, len)))
-    }
-
-    fn put_u8(&mut self, view: ObjId, i: usize, n: f64) {
-        self.heap.view_set(view, i, to_uint32(n) as u8);
+    /// A new typed array of `len` elements over a new zeroed buffer.
+    fn new_typed(&mut self, ty: Elem, len: usize) -> Res<ObjId> {
+        let (ab, tp) = (self.bp().ab, self.bin_proto(ty));
+        let Some(bytes) = len.checked_mul(ty.size()) else { return Err(Error::Limit(LimitKind::Heap(Limit::BufferLength))) };
+        let buf = h!(self, self.heap.new_buffer(Some(ab), bytes));
+        Ok(h!(self, self.heap.new_typed_view(Some(tp), buf, 0, len, ty)))
     }
 
     /// Options of a WebIDL dictionary: `undefined` and `null` are empty; an object is read; anything else is a TypeError.
@@ -344,7 +479,6 @@ impl<'p> Interp<'p> {
         {
             return Err(self.type_err(&format!("Constructor {n} requires 'new'")));
         }
-        let p = if self.bin.protos.is_some() { Some(self.bp()) } else { None };
         match f {
             Gate(what) => Err(unsupported(what, Span::default())),
             AbCtor => {
@@ -355,92 +489,116 @@ impl<'p> Interp<'p> {
                         return Err(unsupported("resizable ArrayBuffer", Span::default()));
                     }
                 }
-                Ok(Value::Object(h!(self, self.heap.new_buffer(Some(p.unwrap().ab), len))))
+                Ok(Value::Object(h!(self, self.heap.new_buffer(Some(self.bp().ab), len))))
             }
             AbIsView => Ok(Value::Bool(matches!(a0, Value::Object(o) if self.heap.exotic_kind(o) == Some(ExoticKind::View)))),
-            AbByteLength => match this {
-                Value::Object(o) if self.heap.buffer_len(o).is_some() => Ok(Value::Number(self.heap.buffer_len(o).unwrap() as f64)),
-                _ => Err(self.incompatible("ArrayBuffer.prototype.byteLength", this)),
-            },
+            AbByteLength | AbMaxByteLength => {
+                let what = if f == AbByteLength { "get ArrayBuffer.prototype.byteLength" } else { "get ArrayBuffer.prototype.maxByteLength" };
+                match this {
+                    Value::Object(o) if let Some(n) = self.heap.buffer_len(o) => Ok(Value::Number(n as f64)),
+                    _ => Err(self.incompatible(what, this)),
+                }
+            }
+            AbResizable | AbDetached => {
+                let what = if f == AbResizable { "get ArrayBuffer.prototype.resizable" } else { "get ArrayBuffer.prototype.detached" };
+                match this {
+                    Value::Object(o) if self.heap.buffer_len(o).is_some() => Ok(Value::Bool(f == AbDetached && self.heap.buffer_detached(o))),
+                    _ => Err(self.incompatible(what, this)),
+                }
+            }
             AbSlice => {
                 let Value::Object(o) = this else { return Err(self.incompatible("ArrayBuffer.prototype.slice", this)) };
                 let Some(len) = self.heap.buffer_len(o) else { return Err(self.incompatible("ArrayBuffer.prototype.slice", this)) };
+                if self.heap.buffer_detached(o) {
+                    return Err(self.type_err("Cannot perform ArrayBuffer.prototype.slice on a detached ArrayBuffer"));
+                }
                 let first = self.num_integer(a0)?;
                 let first = Self::rel_index(first, len);
                 let last = if matches!(a1, Value::Undefined) { len } else { let e = self.num_integer(a1)?; Self::rel_index(e, len) };
-                self.bin_species(o, p.unwrap().ab_c, "ArrayBuffer species constructor other than ArrayBuffer")?;
+                let ab = self.bp();
+                self.bin_species(o, ab.ab_c, "ArrayBuffer species constructor other than ArrayBuffer")?;
+                if self.heap.buffer_detached(o) {
+                    return Err(self.type_err("Cannot perform ArrayBuffer.prototype.slice on a detached ArrayBuffer"));
+                }
                 let last = last.max(first);
                 self.work(last - first, 6)?;
-                Ok(Value::Object(h!(self, self.heap.new_buffer_copy(Some(p.unwrap().ab), o, first, last))))
+                Ok(Value::Object(h!(self, self.heap.new_buffer_copy(Some(ab.ab), o, first, last))))
             }
+            AbTransfer(fixed) => self.ab_transfer(this, a0, fixed),
             TaCtor => Err(self.type_err("Abstract class TypedArray not directly constructable")),
             TaBuffer => {
-                let (_, b, _, _) = self.this_view(this, "get TypedArray.prototype.buffer")?;
+                let (_, b, _, _) = self.this_view(this, "get %TypedArray%.prototype.buffer")?;
                 Ok(Value::Object(b))
             }
-            TaByteLength | TaLength => {
-                let (_, _, _, len) = self.this_view(this, "get TypedArray.prototype.length")?;
-                Ok(Value::Number(len as f64))
+            TaByteLength => {
+                let (o, _, _, len) = self.this_view(this, "get TypedArray.prototype.byteLength")?;
+                let ty = self.heap.view_type(o).expect("view");
+                Ok(Value::Number(if self.heap.view_detached(o) { 0.0 } else { (len * ty.size()) as f64 }))
+            }
+            TaLength => {
+                let (o, _, _, len) = self.this_view(this, "get TypedArray.prototype.length")?;
+                Ok(Value::Number(if self.heap.view_detached(o) { 0.0 } else { len as f64 }))
             }
             TaByteOffset => {
-                let (_, _, off, _) = self.this_view(this, "get TypedArray.prototype.byteOffset")?;
-                Ok(Value::Number(off as f64))
+                let (o, _, off, _) = self.this_view(this, "get TypedArray.prototype.byteOffset")?;
+                Ok(Value::Number(if self.heap.view_detached(o) { 0.0 } else { off as f64 }))
             }
-            U8Ctor => self.u8_construct(a0, a1, a2),
+            TyCtor(ty) => self.ty_construct(ty, a0, a1, a2),
+            TaFrom => self.ta_from(this, a0, a1, a2),
+            TaOf => self.ta_of(this, args),
+            Ta(m) => self.ta_method(m, this, args),
+            DvCtor => self.dv_construct(a0, a1, a2),
+            DvBuffer | DvByteLength | DvByteOffset => self.dv_getter(f, this),
+            DvGet(ty) => self.dv_get(ty, this, a0, a1),
+            DvSet(ty) => self.dv_set(ty, this, a0, a1, a2),
             TaValues | TaKeys | TaEntries => {
                 let (what, w) = match f {
                     TaKeys => (IterWhat::Keys, "%TypedArray%.prototype.keys"),
                     TaEntries => (IterWhat::Entries, "%TypedArray%.prototype.entries"),
                     _ => (IterWhat::Values, "%TypedArray%.prototype.values"),
                 };
-                self.this_view(this, w)?;
+                self.this_ta(this, w, true)?;
                 self.sc_array_iter(this, what)
             }
             TaTag => match this {
-                Value::Object(o) if self.heap.exotic_kind(o) == Some(ExoticKind::View) => self.str_value("Uint8Array"),
+                Value::Object(o) => match self.heap.view_type(o) {
+                    Some(ty) if ty != Elem::Data => self.str_value(ty.name()),
+                    _ => Ok(Value::Undefined),
+                },
                 _ => Ok(Value::Undefined),
             },
             TaSet => self.ta_set(this, a0, a1),
-            TaIndexOf => self.ta_index_of(this, a0, a1),
-            TaSubarray => {
-                let (o, buf, off, len) = self.this_view(this, "%TypedArray%.prototype.subarray")?;
-                let first = self.num_integer(a0)?;
-                let first = Self::rel_index(first, len);
-                let last = if matches!(a1, Value::Undefined) { len } else { let e = self.num_integer(a1)?; Self::rel_index(e, len) };
-                self.bin_species(o, p.unwrap().u8_c, "typed array species constructor other than Uint8Array")?;
-                let n = last.saturating_sub(first);
-                Ok(Value::Object(h!(self, self.heap.new_view(Some(p.unwrap().u8), buf, off + first, n))))
-            }
-            TaSlice => {
-                let (o, _, _, len) = self.this_view(this, "%TypedArray%.prototype.slice")?;
-                let first = self.num_integer(a0)?;
-                let first = Self::rel_index(first, len);
-                let last = if matches!(a1, Value::Undefined) { len } else { let e = self.num_integer(a1)?; Self::rel_index(e, len) };
-                self.bin_species(o, p.unwrap().u8_c, "typed array species constructor other than Uint8Array")?;
-                let last = last.max(first);
-                self.work(last - first, 6)?;
-                let p = p.unwrap();
-                let buf = h!(self, self.heap.new_buffer_copy(Some(p.ab), o, first, last));
-                Ok(Value::Object(h!(self, self.heap.new_view(Some(p.u8), buf, 0, last - first))))
-            }
-            EncCtor => Ok(Value::Object(h!(self, self.heap.new_encoder(Some(p.unwrap().enc))))),
+            TaIndexOf => self.ta_search(Search::IndexOf, this, args),
+            TaSubarray => self.ta_subarray(this, a0, a1),
+            TaSlice => self.ta_slice(this, a0, a1),
+            EncCtor => Ok(Value::Object(h!(self, self.heap.new_encoder(Some(self.bp().enc))))),
             EncEncoding => self.brand(this, ExoticKind::Encoder, "TextEncoder").and_then(|_| self.str_value("utf-8")),
             EncEncode => {
                 self.brand(this, ExoticKind::Encoder, "TextEncoder")?;
                 let s = if matches!(a0, Value::Undefined) { h!(self, self.heap.intern_str("")) } else { self.coerce_string(a0)? };
                 let n = crate::text::utf8_len(h!(self, self.heap.str_units(s)));
                 self.work(n, 4)?;
-                let p = p.unwrap();
-                let buf = h!(self, self.heap.new_buffer(Some(p.ab), n));
+                let (ab, u8p) = (self.bp().ab, self.bin_proto(Elem::U8));
+                let buf = h!(self, self.heap.new_buffer(Some(ab), n));
                 h!(self, self.heap.encode_utf8_into(s, buf));
-                Ok(Value::Object(h!(self, self.heap.new_view(Some(p.u8), buf, 0, n))))
+                Ok(Value::Object(h!(self, self.heap.new_view(Some(u8p), buf, 0, n))))
             }
             EncEncodeInto => {
                 self.brand(this, ExoticKind::Encoder, "TextEncoder")?;
                 let s = self.coerce_string(a0)?;
                 let dest = match a1 {
-                    Value::Object(d) if self.heap.exotic_kind(d) == Some(ExoticKind::View) => d,
-                    _ => return Err(self.type_err("The \"dest\" argument must be an instance of Uint8Array.")),
+                    Value::Object(d) if self.heap.view_type(d) == Some(Elem::U8) => d,
+                    other => {
+                        let found = match other {
+                            Value::Object(d) => match self.heap.view_type(d) {
+                                Some(ty) => format!(" Received an instance of {}", ty.name()),
+                                None if self.heap.buffer_len(d).is_some() => " Received an instance of ArrayBuffer".into(),
+                                None => String::new(),
+                            },
+                            _ => String::new(),
+                        };
+                        return Err(self.type_err(&format!("The \"dest\" argument must be an instance of Uint8Array.{found}")));
+                    }
                 };
                 let n = h!(self, self.heap.str_len(s)).min(self.heap.bytes(dest).map_or(0, <[u8]>::len).saturating_mul(1));
                 self.work(n, 4)?;
@@ -474,115 +632,29 @@ impl<'p> Interp<'p> {
         }
     }
 
-    // ------------------------------------------------------------ Uint8Array
-
-    fn u8_construct(&mut self, a0: Value, a1: Value, a2: Value) -> Res<Value> {
-        let Value::Object(src) = a0 else {
-            let len = self.num_index(a0, "Invalid typed array length")?;
-            return Ok(Value::Object(self.new_u8(len)?));
+    /// `ArrayBuffer.prototype.transfer` and `transferToFixedLength`: the bytes move to a new buffer, cut or zero-padded to
+    /// the new length (default: the old length). The old buffer is detached.
+    fn ab_transfer(&mut self, this: Value, new_len: Value, fixed: bool) -> Res<Value> {
+        let what = if fixed { "ArrayBuffer.prototype.transferToFixedLength" } else { "ArrayBuffer.prototype.transfer" };
+        let Value::Object(o) = this else { return Err(self.incompatible(what, this)) };
+        let Some(old) = self.heap.buffer_len(o) else { return Err(self.incompatible(what, this)) };
+        let n = if matches!(new_len, Value::Undefined) {
+            old
+        } else {
+            let x = self.num_integer(new_len)?;
+            if x < 0.0 {
+                return Err(self.mk_err(RANGE_ERROR, "Invalid array buffer length"));
+            }
+            if x > MAX_SAFE {
+                return Err(self.mk_err(RANGE_ERROR, &format!("{what}: Invalid length parameter")));
+            }
+            x as usize
         };
-        match self.heap.exotic_kind(src) {
-            Some(ExoticKind::Buffer) => {
-                let buf_len = self.heap.buffer_len(src).expect("buffer");
-                let off = self.num_index(a1, "Start offset is outside the bounds of the buffer")?;
-                let len = if matches!(a2, Value::Undefined) {
-                    if off > buf_len {
-                        return Err(self.mk_err(RANGE_ERROR, &format!("Start offset {off} is outside the bounds of the buffer")));
-                    }
-                    buf_len - off
-                } else {
-                    let n = self.num_index(a2, "Invalid typed array length")?;
-                    if off.checked_add(n).is_none_or(|e| e > buf_len) {
-                        return Err(self.mk_err(RANGE_ERROR, &format!("Invalid typed array length: {n}")));
-                    }
-                    n
-                };
-                if off > buf_len {
-                    return Err(self.mk_err(RANGE_ERROR, &format!("Start offset {off} is outside the bounds of the buffer")));
-                }
-                Ok(Value::Object(h!(self, self.heap.new_view(Some(self.bp().u8), src, off, len))))
-            }
-            Some(ExoticKind::View) => {
-                let len = self.heap.view_parts(src).expect("view").2;
-                self.work(len, 6)?;
-                let p = self.bp();
-                let buf = h!(self, self.heap.new_buffer_copy(Some(p.ab), src, 0, len));
-                Ok(Value::Object(h!(self, self.heap.new_view(Some(p.u8), buf, 0, len))))
-            }
-            _ if let Some(mut it) = self.iter_open(a0)? => {
-                // An iterable (`@@iterator` is not undefined or null): take every value first, then convert each one.
-                // `IteratorToList` does not close the iterator on an error. The values are bounded before they grow.
-                let cap = self.heap.buffer_limits().1;
-                let mut vals = Vec::new();
-                while let Some(v) = self.iter_next(&mut it)? {
-                    if vals.len() >= cap {
-                        return Err(Error::Limit(LimitKind::Heap(Limit::BufferLength)));
-                    }
-                    self.iter_buffer_room(vals.len())?;
-                    vals.push(v);
-                }
-                let out = self.new_u8(vals.len())?;
-                for (i, v) in vals.into_iter().enumerate() {
-                    self.tick()?;
-                    let n = self.coerce_number(v)?;
-                    self.put_u8(out, i, n);
-                }
-                Ok(Value::Object(out))
-            }
-            _ => {
-                // An array-like: the length, then one read and one conversion for each index.
-                let lv = self.get_prop(a0, self.k_length)?;
-                let n = self.num_length(lv)?;
-                if n > self.heap.buffer_limits().1 as f64 {
-                    return Err(Error::Limit(LimitKind::Heap(Limit::BufferLength)));
-                }
-                let n = n as usize;
-                let out = self.new_u8(n)?;
-                for i in 0..n {
-                    self.tick()?;
-                    let v = self.get_prop(a0, PropertyKey::Index(i as u32))?;
-                    let x = self.coerce_number(v)?;
-                    self.put_u8(out, i, x);
-                }
-                Ok(Value::Object(out))
-            }
+        if self.heap.buffer_detached(o) {
+            return Err(self.type_err(&format!("Cannot perform {what} on a detached ArrayBuffer")));
         }
-    }
-
-    fn ta_set(&mut self, this: Value, source: Value, offset: Value) -> Res<Value> {
-        let (target, _, _, tlen) = self.this_view(this, "%TypedArray%.prototype.set")?;
-        let off = self.num_integer(offset)?;
-        let oob = |s: &mut Self| s.mk_err(RANGE_ERROR, "offset is out of bounds");
-        if off < 0.0 {
-            return Err(oob(self));
-        }
-        if let Value::Object(s) = source
-            && let Some((_, _, slen)) = self.heap.view_parts(s)
-        {
-            if off + slen as f64 > tlen as f64 {
-                return Err(oob(self));
-            }
-            self.work(slen, 6)?;
-            let ok = self.heap.view_copy(s, 0, target, off as usize, slen);
-            debug_assert!(ok);
-            return Ok(Value::Undefined);
-        }
-        if is_nullish(source) {
-            return Err(self.type_err("Cannot convert undefined or null to object"));
-        }
-        let lv = self.get_prop(source, self.k_length)?;
-        let n = self.num_length(lv)?;
-        if off + n > tlen as f64 {
-            return Err(oob(self));
-        }
-        let off = off as usize;
-        for i in 0..n as usize {
-            self.tick()?;
-            let v = self.get_prop(source, PropertyKey::Index(i as u32))?;
-            let x = self.coerce_number(v)?;
-            self.put_u8(target, off + i, x);
-        }
-        Ok(Value::Undefined)
+        self.work(old.min(n), 6)?;
+        Ok(Value::Object(h!(self, self.heap.buffer_transfer(Some(self.bp().ab), o, n))))
     }
 
     // ------------------------------------------------------------ TextDecoder

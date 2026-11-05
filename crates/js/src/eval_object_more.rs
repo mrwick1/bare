@@ -368,6 +368,9 @@ impl<'p> Interp<'p> {
         if hx!(self, self.heap.define_own_property(o, key, d)) {
             return Ok(());
         }
+        if self.heap.is_view_bad_index(o, key) {
+            return Err(self.type_err("Invalid typed array index"));
+        }
         let k = self.key_text(key);
         if !h!(self, self.heap.is_extensible(o)) && !hx!(self, self.heap.has_own_property(o, key)) {
             return Err(self.type_err(&format!("Cannot define property {k}, object is not extensible")));

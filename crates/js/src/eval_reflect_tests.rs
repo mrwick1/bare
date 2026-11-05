@@ -299,10 +299,12 @@ fn a_non_enumerable_and_symbol_key_survive_a_collection() {
 #[test]
 fn heap_objects_cap_stops_construction_cleanly() {
     big(|| {
-        let mut it = Interp::realm(Heap::new(crate::heap::HeapLimits { max_objects: 500, ..Default::default() }).unwrap(), EvalLimits::default()).unwrap();
+        // The cap counts the intrinsic objects too: allow 300 more than a fresh realm holds.
+        let cap = Interp::realm(Heap::default(), EvalLimits::default()).unwrap().heap.stats().live_objects + 300;
+        let mut it = Interp::realm(Heap::new(crate::heap::HeapLimits { max_objects: cap, ..Default::default() }).unwrap(), EvalLimits::default()).unwrap();
         let r = out(&mut it, "function F() {} var keep = []; for (var i = 0; i < 1000; i++) keep.push(Reflect.construct(F, [])); 1");
         assert!(r.starts_with("limit:Heap"), "{r}");
-        let mut it = Interp::realm(Heap::new(crate::heap::HeapLimits { max_objects: 500, ..Default::default() }).unwrap(), EvalLimits::default()).unwrap();
+        let mut it = Interp::realm(Heap::new(crate::heap::HeapLimits { max_objects: cap, ..Default::default() }).unwrap(), EvalLimits::default()).unwrap();
         let r = out(&mut it, "var keep = []; for (var i = 0; i < 1000; i++) keep.push(Reflect.ownKeys({})); 1");
         assert!(r.starts_with("limit:Heap"), "{r}");
     });
