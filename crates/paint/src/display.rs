@@ -77,6 +77,9 @@ pub struct DisplayList {
     pub shapes: Vec<Shape>,
     /// The points of `Item::Stroke`.
     pub points: Vec<(f32, f32)>,
+    /// Text fields that the host draws the text of: the field, and whether it has text now. Paint draws only the
+    /// placeholder of an empty one, and nothing for the others. The host sets it before `build`.
+    pub hosted: Vec<(NodeId, bool)>,
     // The scratch lists of `build`. They keep their memory from one frame to the next.
     lines: Vec<Item>,
     floats: Vec<u32>,
@@ -648,7 +651,11 @@ impl Builder<'_> {
         let m = Metrics::of(style);
         let (value, color): (String, u32) = match c {
             Control::Field => {
-                let v = get(a.value);
+                let hosted = self.list.hosted.iter().find(|h| h.0 == f.node).map(|h| h.1);
+                if hosted == Some(true) {
+                    return;
+                }
+                let v = if hosted.is_some() { "" } else { get(a.value) };
                 let is_password = a.kind.and_then(|k| self.doc.attr(f.node, k)).is_some_and(|k| k.eq_ignore_ascii_case("password"));
                 if v.is_empty() {
                     (get(a.placeholder).to_string(), 0xff75_7575)

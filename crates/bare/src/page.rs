@@ -312,8 +312,11 @@ impl Page {
             let focus = b.active_element().ok().flatten();
             let doc = b.document();
             let doc = doc.borrow();
-            painter.paint(&doc, &f.styles, &f.layout, canvas);
             let inputs: Vec<NodeId> = f.layout.fragments.iter().filter(|g| g.kind == Kind::Box && doc.is_html(g.node, "input") && b.is_text_input(g.node)).map(|g| g.node).collect();
+            // Paint draws the placeholder of an empty field. The text, the selection and the caret are drawn here.
+            painter.list.hosted.clear();
+            painter.list.hosted.extend(inputs.iter().map(|&n| (n, !b.input_value(n).unwrap_or_default().is_empty())));
+            painter.paint(&doc, &f.styles, &f.layout, canvas);
             for n in inputs {
                 let value = b.input_value(n).unwrap_or_default();
                 let sel = b.input_selection(n);
