@@ -12,6 +12,9 @@ mod browser_handlers;
 #[cfg(test)]
 mod browser_handler_tests;
 mod browser_focus;
+mod browser_form;
+#[cfg(test)]
+mod browser_form_tests;
 #[cfg(test)]
 mod browser_focus_tests;
 mod browser_namespace;
