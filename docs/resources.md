@@ -1815,3 +1815,32 @@ Results, release, main 551ab69 vs this change, 10 interleaved runs per build: in
 Known deviations: an unsupported `yield` position reports the `await` message of the same gate (for example "await inside for-in"). `TypedArray.from` is still a gate, and the d3 chunk passes its generator to `Float64Array.from`.
 
 Validation: 50 new Node cases (`tools/fixtures/js/generator-cases.txt`, `tools/js/generator_check.sh`) cover the protocol, finally on return, yield in expressions, loops, switch and try, delegation to generators, arrays and custom iterators, prototypes and descriptors, receivers, and the d3 shape. The parse corpus has 46 new generator cases and matches Acorn (2,133 cases). Rust tests cover GC of suspended runs and environments, the call depth cap under deep `yield*`, the frame cap and the allocation-free for-of.
+
+## Tagged templates
+
+The live login stopped at `Unsupported("tagged template")` after it stored its token. The parser already read `` tag`...` `` and checked its escapes. bare now runs it.
+
+- The call works as an ordinary call. The tag is linked as a callee, so `o.t`x`` and `super.t`x`` get their `this`. The arguments are the strings object, then the substitutions in order. A tag that is not callable throws a TypeError after the substitutions run, as in the spec.
+- GetTemplateObject: each site gets one strings array on its first call. The array is frozen, and its `raw` property holds a frozen array of the raw pieces. A cooked piece with a bad escape is `undefined`. The same site always gives the same object, and two sites with the same text give two objects. Libraries use this identity as a cache key.
+- `Interp.tpl_objs` maps (script, expression) to the object. Scripts number their expressions from 0, so the script is part of the key. A function from another script uses the site of its own script. The table lives as long as the realm, as the spec's `[[TemplateMap]]` does. Both `collect` and `roots` root it. A test failed before `collect` rooted it: the object was freed and made again, so its identity changed.
+- The cooked and raw texts are interned, so a piece without escapes shares one string between both arrays.
+- The async preflight refuses `await` (and, in a generator, `yield`) in the tag or in a substitution: "await in a tagged template". Before this change the scan did not look inside a tagged template.
+
+Load test (`tools/js/tagged_load.sh`, release, one process per row, 100x):
+
+| row | work | run | peak RSS |
+| --- | --- | ---: | ---: |
+| `call` | 1M calls of one site | 635 ms | 4.2 MiB |
+| `plain` | the same loop as an ordinary call with an array made once | 659 ms | 4.2 MiB |
+| `sites` | 100,000 sites, each called once | 140 ms | 132 MiB |
+| `css` | 1M calls of a styled-components shape | 2,653 ms | 368 MiB |
+
+In `css`, the 1M rest arrays (`...v`) and the joined strings stay in the heap until the collect after the run. They are the cost of the tag function, not of the site.
+
+A repeated call costs no more than an ordinary call: it takes one hash lookup and makes no object. A site costs 564 B of heap: two array objects, the frozen elements and `length` as property entries, `raw`, and the interned texts. Frozen elements cannot stay in the dense element vector, because it holds only writable data. A frozen flag on the object would save about 130 B for each site. The saved staging chunks have fewer than 75 possible sites (a text count that includes backticks in strings), so this would save less than 10 KB. It is not built.
+
+Results, release, main aa52994 vs this change, 10 interleaved runs per build: instructions are within -0.12% to +0.01% on every row of the cached login boot, `parse_load`, `eval_load`, `class_load`, `reflect_load`, `async_load` and `promise_load`. Peak RSS and the boot's bytes do not change.
+
+Known gaps: `String.raw`, `Object.freeze`, `Object.isFrozen` and `Object.isExtensible` do not exist yet. `await` inside a tagged template is a gate.
+
+Validation: 40 new Node cases (`tools/fixtures/js/tagged-cases.txt`, `tools/js/tagged_check.sh`) cover cooked and raw values, CR and CRLF, bad escapes, per-site identity, freezing and descriptors, key order, `this` for member, index and `super` tags, evaluation order, chained tags, `new`, arrows, classes, generators and async functions. Rust tests cover GC of a site object that only the table holds, and sites in more than one script.

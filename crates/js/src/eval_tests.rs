@@ -80,7 +80,7 @@ fn unsupported_is_found_before_anything_runs() {
         ("function* g(o) { for (var k in o) yield k; }", "await inside for-in"),
         ("function* g(o) { o?.[yield]; }", "await inside an optional chain"),
         ("function* g() { var [a = yield] = []; }", "await in a binding pattern"),
-        ("tag`x`", "tagged template"),
+        ("function* g(t) { t`${yield}`; }", "await in a tagged template"),
         ("var r = /a(?<=b)/;", "lookbehind"),
         ("var b = 10n;", "BigInt literal"),
         ("var o = { m() { return super.x; } };", "super outside a class element"),

@@ -136,7 +136,8 @@ fn unsupported_await_positions_are_found_before_any_effect() {
             ("async function f() { for (var [a = await 1] of []) {} }", "await in a binding pattern"),
             ("async function f(o) { [o.x = await 1] = []; }", "await in an assignment pattern"),
             ("async function f() { for await (var x of []) {} }", "for await"),
-            ("async function f(t) { return t`${await 1}`; }", "tagged template"),
+            ("async function f(t) { return t`${await 1}`; }", "await in a tagged template"),
+            ("async function f(t) { return (await t)`x`; }", "await in a tagged template"),
             ("async function f(o) { return (o?.a)(await 1); }", "await in a call of an optional chain"),
         ] {
             let mut it = realm(lim());

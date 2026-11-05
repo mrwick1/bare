@@ -32,7 +32,7 @@
 //   `super` property, `obj.#p` reads and calls, `#p in x`, `super.m(await x)` and `[a, b] = await x`.
 //   Async methods of classes, static ones included, keep `this`, the class scope and `%home` in their environments.
 // - Not supported (Unsupported at preflight): `await` in a parameter, a binding pattern, a computed object key, a
-//   `for-in`, an optional chain, `delete`, `++`/`--`, a tagged template, the heritage or a computed key
+//   `for-in`, an optional chain, `delete`, `++`/`--`, a tagged template (tag or substitutions), the heritage or a computed key
 //   of a class, `super(...)` with an await in its arguments, or `super[await k]`. `for await`,
 //   generators, top-level await and modules stay unsupported as before.
 // - Known deviations (the same as the ordinary evaluator): environments, `arguments` and `this` as in `eval.rs`;
@@ -414,6 +414,17 @@ impl<'p> Interp<'p> {
                     any |= self.scan_expr(x)?;
                 }
                 any
+            }
+            ExprKind::Tagged { tag, quasi } => {
+                let t = *prog.template(quasi);
+                let mut any = self.scan_expr(tag)?;
+                for x in prog.template_exprs(&t) {
+                    any |= self.scan_expr(x)?;
+                }
+                if any {
+                    return no("await in a tagged template");
+                }
+                false
             }
             ExprKind::Array(l) | ExprKind::Seq(l) => self.scan_list(l)?,
             ExprKind::Object(l) => {
