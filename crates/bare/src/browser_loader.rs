@@ -493,7 +493,7 @@ fn handler_set(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value], is_error:
             }
             st.next_id += 1;
             let id = st.next_id;
-            list.push(Listener { id, ty: ty.into(), cb, capture: false, once: false, passive: false });
+            list.push(Listener { id, ty: ty.into(), cb, capture: false, once: false, passive: false, handler: false });
             st.n_listeners += 1;
             d.scripts.handlers.borrow_mut().insert((n, is_error), id);
         }

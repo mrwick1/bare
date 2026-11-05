@@ -7,6 +7,9 @@ pub mod browser;
 mod browser_dom;
 mod browser_fragment;
 mod browser_events;
+mod browser_handlers;
+#[cfg(test)]
+mod browser_handler_tests;
 mod browser_focus;
 #[cfg(test)]
 mod browser_focus_tests;

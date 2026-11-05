@@ -380,7 +380,7 @@ fn onchange_set(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
             }
             st.next_id += 1;
             let id = st.next_id;
-            st.listeners.entry(t).or_default().push(Listener { id, ty: Rc::from("change"), cb: f, capture: false, once: false, passive: false });
+            st.listeners.entry(t).or_default().push(Listener { id, ty: Rc::from("change"), cb: f, capture: false, once: false, passive: false, handler: false });
             st.n_listeners += 1;
             drop(st);
             d.plat.s.borrow_mut().mql.get_mut(&o).expect("checked").handler = Some(id);

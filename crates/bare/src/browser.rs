@@ -151,6 +151,8 @@ pub(crate) struct Listener {
     pub capture: bool,
     pub once: bool,
     pub passive: bool,
+    /// The listener of an event handler property (`oninput`): `cb` is the handler's current value (`browser_handlers.rs`).
+    pub handler: bool,
 }
 
 pub(crate) struct EventState {
@@ -750,7 +752,8 @@ impl Dom {
         crate::browser_nodelist::install(self, it)?;
         crate::browser_console::install(self, it)?;
         crate::browser_style::install(self, it)?;
-        crate::browser_computed::install(self, it)
+        crate::browser_computed::install(self, it)?;
+        crate::browser_handlers::install(self, it)
     }
 
     pub(crate) fn define_accessor(&self, it: &mut Interp<'_>, o: ObjId, key: PropertyKey, get: ObjId, set: Option<ObjId>) -> R<()> {

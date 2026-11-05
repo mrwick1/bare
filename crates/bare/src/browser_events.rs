@@ -171,14 +171,16 @@ impl Dom {
             let e = st.events.get_mut(&ev).expect("event is registered");
             (e.phase, e.current) = (phase, cur);
         }
-        for l in snapshot {
+        for mut l in snapshot {
             {
                 let st = self.st.borrow();
                 if st.events[&ev].stop_imm {
                     break;
                 }
-                if !st.listeners.get(&t).is_some_and(|v| v.iter().any(|x| x.id == l.id)) {
-                    continue;
+                // A property handler is called with its value at its turn (a replacement is seen, a removal skips it).
+                match st.listeners.get(&t).and_then(|v| v.iter().find(|x| x.id == l.id)) {
+                    Some(x) => l.cb = x.cb,
+                    None => continue,
                 }
             }
             if l.once {
@@ -186,7 +188,7 @@ impl Dom {
             }
             self.st.borrow_mut().events.get_mut(&ev).expect("event is registered").in_passive = l.passive;
             it.charge(1)?;
-            let r = self.call_listener(it, &l, cur, Value::Object(ev));
+            let r = if l.handler { self.call_handler(it, &l, cur, ev) } else { self.call_listener(it, &l, cur, Value::Object(ev)) };
             self.st.borrow_mut().events.get_mut(&ev).expect("event is registered").in_passive = false;
             match r {
                 Ok(_) => {}
@@ -211,6 +213,22 @@ impl Dom {
             }
             st.n_listeners -= 1;
         }
+    }
+
+    /// HTML "event handler processing algorithm": a value that is not callable is skipped without an error, `this` is
+    /// the current target, and a return value of `false` sets the canceled flag (as `preventDefault` would).
+    fn call_handler(&self, it: &mut Interp<'_>, l: &Listener, this: Value, ev: ObjId) -> V {
+        let cb = Value::Object(l.cb);
+        if !it.is_callable_value(cb) {
+            return Ok(Value::Undefined);
+        }
+        let r = it.call(cb, this, &[Value::Object(ev)])?;
+        if matches!(r, Value::Bool(false)) {
+            let mut st = self.st.borrow_mut();
+            let e = st.events.get_mut(&ev).expect("event is registered");
+            e.canceled |= e.cancelable && !e.in_passive;
+        }
+        Ok(r)
     }
 
     fn call_listener(&self, it: &mut Interp<'_>, l: &Listener, this: Value, ev: Value) -> V {
@@ -358,7 +376,7 @@ pub(crate) fn add_event_listener(d: &Dom, it: &mut Interp<'_>, this: Value, a: &
     let mut st = d.st.borrow_mut();
     let st = &mut *st;
     let list = st.listeners.entry(t).or_default();
-    if list.iter().any(|l| *l.ty == *ty && l.cb == cb && l.capture == capture) {
+    if list.iter().any(|l| *l.ty == *ty && !l.handler && l.cb == cb && l.capture == capture) {
         return Ok(Value::Undefined);
     }
     if st.n_listeners >= d.lim.max_listeners {
@@ -368,7 +386,7 @@ pub(crate) fn add_event_listener(d: &Dom, it: &mut Interp<'_>, this: Value, a: &
         return Err(d.lim("dom-listeners-per-target"));
     }
     st.next_id += 1;
-    list.push(Listener { id: st.next_id, ty: Rc::from(ty.as_str()), cb, capture, once, passive });
+    list.push(Listener { id: st.next_id, ty: Rc::from(ty.as_str()), cb, capture, once, passive, handler: false });
     st.n_listeners += 1;
     Ok(Value::Undefined)
 }
@@ -381,7 +399,7 @@ pub(crate) fn remove_event_listener(d: &Dom, it: &mut Interp<'_>, this: Value, a
         opts @ Value::Object(_) => init_flag(d, it, opts, "capture")?,
         v => it.to_js_bool(v)?,
     };
-    let found = d.st.borrow().listeners.get(&t).and_then(|v| v.iter().find(|l| *l.ty == *ty && l.cb == cb && l.capture == capture).map(|l| l.id));
+    let found = d.st.borrow().listeners.get(&t).and_then(|v| v.iter().find(|l| !l.handler && *l.ty == *ty && l.cb == cb && l.capture == capture).map(|l| l.id));
     if let Some(id) = found {
         d.remove_listener(t, id);
     }
