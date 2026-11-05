@@ -2985,10 +2985,12 @@ include!("eval_binary_search.rs");
 include!("eval_scripts.rs");
 include!("eval_stack.rs");
 include!("eval_builtins.rs");
+include!("eval_string_more.rs");
 include!("eval_json_stringify.rs");
 include!("eval_json_revive.rs");
 include!("eval_host.rs");
 include!("eval_array_object.rs");
+include!("eval_array_more.rs");
 include!("eval_numeric.rs");
 include!("eval_symbols.rs");
 include!("eval_collections.rs");
@@ -2996,6 +2998,7 @@ include!("eval_weak.rs");
 include!("eval_date.rs");
 include!("eval_intl.rs");
 include!("eval_reflect.rs");
+include!("eval_object_more.rs");
 include!("eval_classes.rs");
 include!("eval_async.rs");
 include!("eval_generator.rs");
@@ -3026,6 +3029,10 @@ mod script_tests;
 #[cfg(test)]
 #[path = "eval_builtins_tests.rs"]
 mod builtin_tests;
+
+#[cfg(test)]
+#[path = "eval_batch1_tests.rs"]
+mod batch1_tests;
 
 #[cfg(test)]
 #[path = "eval_json_stringify_tests.rs"]

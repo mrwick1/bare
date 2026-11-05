@@ -10,10 +10,13 @@
 // - `@@match`, `@@replace` and `@@split` of the argument are read first and called when defined, as the spec says;
 //   `RegExp.prototype` has the intrinsic `[@@match]`, `[@@replace]` and `[@@split]`, so a builtin regexp keeps the builtin path. `includes`, `startsWith`, `endsWith` and the
 //   `RegExp` constructor use IsRegExp (`@@match`). `new RegExp(x)` for a non-builtin regexp-like `x` is `Unsupported`.
-//   `search`, `matchAll` and `replaceAll` are not bound.
+//   `@@search` and `replaceAll` follow the same rule (`eval_string_more.rs`). `matchAll` is not bound.
 // - `String.fromCharCode`, `String.fromCodePoint` and `String.prototype`: indexOf, includes, startsWith, endsWith, slice, substring,
 //   charAt, charCodeAt, split, match, replace, concat, trim, toLowerCase, toUpperCase, toString, valueOf.
-//   These are exactly the string methods the inspected staging bundles call (see docs/staging-js-requirements.md).
+//   These are the string methods the inspected staging bundles called first (see docs/staging-js-requirements.md).
+//   `String.raw` and the batch 1 methods (at, codePointAt, lastIndexOf, padStart, padEnd, repeat, replaceAll, search,
+//   normalize, trimStart, trimEnd, trimLeft, trimRight, isWellFormed, toWellFormed, substr, toLocaleLowerCase,
+//   toLocaleUpperCase) are in `eval_string_more.rs`; `call_ext` forwards them. `matchAll` is not bound.
 //
 // State: a regexp object is an ordinary heap object. Its compiled pattern lives in `Ext::regexps`, keyed by the
 // object handle (a handle includes the slot generation, so a reused slot never sees old data). `collect` drops the
@@ -109,6 +112,25 @@ enum Bi {
     StrTrim,
     StrToLower,
     StrToUpper,
+    // Batch 1 (`eval_string_more.rs`).
+    StrRaw,
+    StrAt,
+    StrCodePointAt,
+    StrLastIndexOf,
+    StrPadStart,
+    StrPadEnd,
+    StrRepeat,
+    StrReplaceAll,
+    StrSearch,
+    StrNormalize,
+    StrTrimStart,
+    StrTrimEnd,
+    StrIsWellFormed,
+    StrToWellFormed,
+    StrSubstr,
+    StrToLocaleLower,
+    StrToLocaleUpper,
+    ReSymSearch,
 }
 
 const RE_GETTERS: [&str; 9] = ["source", "flags", "global", "ignoreCase", "multiline", "dotAll", "sticky", "unicode", "hasIndices"];
@@ -469,7 +491,7 @@ impl<'p> Interp<'p> {
         for (name, x, len) in methods {
             self.method(sp, name, Nat::Ext(x), len)?;
         }
-        Ok(())
+        self.install_string_more(sc, sp, rp)
     }
 
     // ------------------------------------------------------------ budgets and small helpers
@@ -533,6 +555,7 @@ impl<'p> Interp<'p> {
             let own = match wk {
                 WK_MATCH => Bi::ReSymMatch,
                 WK_REPLACE => Bi::ReSymReplace,
+                WK_SEARCH => Bi::ReSymSearch,
                 _ => Bi::ReSymSplit,
             };
             if matches!(self.funcs.get(&mo), Some(Callee::Native(Nat::Ext(b))) if *b == own) {
@@ -765,6 +788,7 @@ impl<'p> Interp<'p> {
                 let out = self.case_map(s, x == Bi::StrToUpper)?;
                 self.new_str(out)
             }
+            _ => self.call_str_more(x, this, args),
         }
     }
 

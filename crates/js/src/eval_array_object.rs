@@ -1,4 +1,6 @@
-// Ordinary Array and Object methods and a small Math set. Included by `eval.rs` (`include!`), so it shares that
+// Ordinary Array and Object methods and a small Math set. The Array methods of batch 1 (reverse, at, flat, flatMap, findLast,
+// findLastIndex, lastIndexOf, reduceRight, copyWithin, toReversed, toSorted, toSpliced, with, toLocaleString) are in
+// `eval_array_more.rs`; `call_ao` forwards them. `sort` and `toSorted` share `ao_merge_sort`. Included by `eval.rs` (`include!`), so it shares that
 // module's imports and private items. Every native here is `Nat::Ao(AoFn)`; `call_ao` is the one dispatch hook.
 //
 // Supported
@@ -84,6 +86,20 @@ enum AoFn {
     NumToFixed,
     NumToExponential,
     NumToPrecision,
+    ArrReverse,
+    ArrAt,
+    ArrFlat,
+    ArrFlatMap,
+    ArrFindLast,
+    ArrFindLastIndex,
+    ArrLastIndexOf,
+    ArrReduceRight,
+    ArrCopyWithin,
+    ArrToReversed,
+    ArrToSorted,
+    ArrToSpliced,
+    ArrWith,
+    ArrToLocaleString,
 }
 
 const MAX_SAFE_LEN: u64 = 9007199254740991;
@@ -107,6 +123,7 @@ impl<'p> Interp<'p> {
             self.method(oc, name, Nat::Ao(f), len)?;
         }
         self.sc_getter(ac, self.wk_key(WK_SPECIES), "get [Symbol.species]", ScFn::Species)?;
+        self.install_array_more(ap)?;
         self.method(ac, "from", Nat::Ao(ArrFrom), 1)?;
         self.method(ac, "of", Nat::Ao(ArrOf), 0)?;
         let math = h!(self, self.heap.new_object(Some(op)));
@@ -150,6 +167,7 @@ impl<'p> Interp<'p> {
                     _ => math_round(x),
                 }))
             }
+            ArrReverse | ArrAt | ArrFlat | ArrFlatMap | ArrFindLast | ArrFindLastIndex | ArrLastIndexOf | ArrReduceRight | ArrCopyWithin | ArrToReversed | ArrToSorted | ArrToSpliced | ArrWith | ArrToLocaleString => self.call_array_more(f, this, args),
             MathClz32 | MathRandom | NumToString | NumIsNaN | MathUnary(_) | MathAtan2 | MathPow | MathImul | MathHypot | NumIsFinite | NumIsInteger | NumIsSafeInteger | NumToFixed | NumToExponential | NumToPrecision => self.call_numeric(f, this, args),
             MathMax | MathMin => {
                 let is_max = f == MathMax;
@@ -681,34 +699,7 @@ impl<'p> Interp<'p> {
             }
         }
         let n = vals.len();
-        let mut idx: Vec<u32> = (0..n as u32).collect();
-        let mut tmp = idx.clone();
-        // Strings of primitives are made once: no user code can see them. Objects convert at each comparison.
-        let mut keys: Vec<Option<StrId>> = if matches!(cmp, Value::Undefined) { vec![None; n] } else { Vec::new() };
-        let mut width = 1;
-        while width < n {
-            let mut i = 0;
-            while i < n {
-                let (mid, hi) = ((i + width).min(n), (i + 2 * width).min(n));
-                let (mut l, mut r, mut o) = (i, mid, i);
-                while l < mid && r < hi {
-                    if self.ao_greater(cmp, &vals, &mut keys, idx[l], idx[r])? {
-                        tmp[o] = idx[r];
-                        r += 1;
-                    } else {
-                        tmp[o] = idx[l];
-                        l += 1;
-                    }
-                    o += 1;
-                }
-                tmp[o..o + (mid - l)].copy_from_slice(&idx[l..mid]);
-                o += mid - l;
-                tmp[o..o + (hi - r)].copy_from_slice(&idx[r..hi]);
-                i += 2 * width;
-            }
-            std::mem::swap(&mut idx, &mut tmp);
-            width *= 2;
-        }
+        let idx = self.ao_merge_sort(cmp, &vals)?;
         let count = n as u64 + undef;
         for (j, &p) in idx.iter().enumerate() {
             self.tick()?;
@@ -726,6 +717,41 @@ impl<'p> Interp<'p> {
             self.ao_delete(this, key)?;
         }
         Ok(this)
+    }
+
+    /// The stable order of `vals` under `cmp` (bottom-up merge sort): the indices of `vals`, smallest first. `vals` holds no
+    /// `undefined`. Shared by `sort` and `toSorted`.
+    fn ao_merge_sort(&mut self, cmp: Value, vals: &[Value]) -> Res<Vec<u32>> {
+        let n = vals.len();
+        let mut idx: Vec<u32> = (0..n as u32).collect();
+        let mut tmp = idx.clone();
+        // Strings of primitives are made once: no user code can see them. Objects convert at each comparison.
+        let mut keys: Vec<Option<StrId>> = if matches!(cmp, Value::Undefined) { vec![None; n] } else { Vec::new() };
+        let mut width = 1;
+        while width < n {
+            let mut i = 0;
+            while i < n {
+                let (mid, hi) = ((i + width).min(n), (i + 2 * width).min(n));
+                let (mut l, mut r, mut o) = (i, mid, i);
+                while l < mid && r < hi {
+                    if self.ao_greater(cmp, vals, &mut keys, idx[l], idx[r])? {
+                        tmp[o] = idx[r];
+                        r += 1;
+                    } else {
+                        tmp[o] = idx[l];
+                        l += 1;
+                    }
+                    o += 1;
+                }
+                tmp[o..o + (mid - l)].copy_from_slice(&idx[l..mid]);
+                o += mid - l;
+                tmp[o..o + (hi - r)].copy_from_slice(&idx[r..hi]);
+                i += 2 * width;
+            }
+            std::mem::swap(&mut idx, &mut tmp);
+            width *= 2;
+        }
+        Ok(idx)
     }
 
     /// `compare(vals[x], vals[y]) > 0`. A comparator result that is NaN counts as 0.

@@ -77,15 +77,15 @@ fn corpus_matches_node() {
 }
 
 #[test]
-fn reflect_is_a_genuine_object_with_only_the_two_methods() {
+fn reflect_is_a_genuine_object_with_the_full_api() {
     big(|| {
         let mut it = realm();
         assert_eq!(out(&mut it, "typeof Reflect"), "object");
-        assert_eq!(out(&mut it, "Reflect.ownKeys(Reflect).length"), "3");
+        assert_eq!(out(&mut it, "Reflect.ownKeys(Reflect).length"), "14");
         assert_eq!(out(&mut it, "Reflect.ownKeys(Reflect).slice(0, 2).join()"), "construct,ownKeys");
         assert_eq!(out(&mut it, "Reflect[Symbol.toStringTag]"), "Reflect");
-        // not claimed: the rest of the API stays absent, never faked
-        assert_eq!(out(&mut it, "typeof Reflect.get + typeof Reflect.set + typeof Reflect.has + typeof Reflect.apply + typeof Reflect.defineProperty + typeof Reflect.getPrototypeOf"), "undefinedundefinedundefinedundefinedundefinedundefined");
+        // the rest of the API came with batch 1
+        assert_eq!(out(&mut it, "typeof Reflect.get + typeof Reflect.set + typeof Reflect.has + typeof Reflect.apply + typeof Reflect.defineProperty + typeof Reflect.getPrototypeOf"), "functionfunctionfunctionfunctionfunctionfunction");
         assert_eq!(out(&mut it, "typeof Proxy"), "undefined");
         assert_eq!(out(&mut it, "var d = Object.getOwnPropertyDescriptor(globalThis, 'Reflect'); [d.writable, d.enumerable, d.configurable].join()"), "true,false,true");
         assert_eq!(out(&mut it, "var d = Object.getOwnPropertyDescriptor(Reflect, 'construct'); [d.writable, d.enumerable, d.configurable].join()"), "true,false,true");
@@ -301,10 +301,10 @@ fn a_non_enumerable_and_symbol_key_survive_a_collection() {
 #[test]
 fn heap_objects_cap_stops_construction_cleanly() {
     big(|| {
-        let mut it = Interp::realm(Heap::new(crate::heap::HeapLimits { max_objects: 400, ..Default::default() }).unwrap(), EvalLimits::default()).unwrap();
+        let mut it = Interp::realm(Heap::new(crate::heap::HeapLimits { max_objects: 500, ..Default::default() }).unwrap(), EvalLimits::default()).unwrap();
         let r = out(&mut it, "function F() {} var keep = []; for (var i = 0; i < 1000; i++) keep.push(Reflect.construct(F, [])); 1");
         assert!(r.starts_with("limit:Heap"), "{r}");
-        let mut it = Interp::realm(Heap::new(crate::heap::HeapLimits { max_objects: 400, ..Default::default() }).unwrap(), EvalLimits::default()).unwrap();
+        let mut it = Interp::realm(Heap::new(crate::heap::HeapLimits { max_objects: 500, ..Default::default() }).unwrap(), EvalLimits::default()).unwrap();
         let r = out(&mut it, "var keep = []; for (var i = 0; i < 1000; i++) keep.push(Reflect.ownKeys({})); 1");
         assert!(r.starts_with("limit:Heap"), "{r}");
     });

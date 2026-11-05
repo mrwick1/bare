@@ -1,5 +1,6 @@
 // `Object.getOwnPropertyNames`, `Reflect.ownKeys` and `Reflect.construct`. Included by `eval.rs` (`include!`), so it shares
 // that module's imports and private items. Every native here is `Nat::Refl(ReflFn)`; `call_refl` is the one dispatch hook.
+// The rest of the Object and Reflect functions (batch 1) are in `eval_object_more.rs`; `call_refl` forwards them with `this`.
 //
 // Observed in the staging bundles (text scan only, not a runtime proof): `Object.getOwnPropertyNames` in the webpack
 // runtime (`o`-style namespace copy over a prototype chain), `Reflect.ownKeys` inside a Proxy `ownKeys` trap, and
@@ -15,8 +16,8 @@
 //   `length` and indices are read (`array_like`, bounded and charged before the list grows), then `Construct(target, list,
 //   newTarget)` runs on the one dispatcher of `eval_classes.rs` (`construct_nt`), so `new.target`, the prototype of the
 //   result, class fields, derived classes, bound functions and explicit object returns are the ones `new` and `super()` use.
-// - The `Reflect` global is an ordinary object with these two methods and `@@toStringTag`. The rest of the Reflect API is
-//   absent on purpose (`typeof Reflect.get` is `"undefined"`). There is no Proxy.
+// - The `Reflect` global is an ordinary object with `@@toStringTag` and these two methods plus the eleven of
+//   `eval_object_more.rs`. There is no Proxy.
 //
 // Gates (never silent)
 // - A native constructor that cannot take a `new.target` (Map, Set, WeakMap, WeakSet, Promise, AggregateError, the byte
@@ -33,6 +34,15 @@ enum ReflFn {
     OwnNames,
     OwnKeys,
     Construct,
+    // Object (batch 1, `eval_object_more.rs`)
+    ObjGetOwnPropertyDescriptors, ObjGetOwnPropertySymbols, ObjHasOwn, ObjIs, ObjPreventExtensions, ObjSeal, ObjFreeze,
+    ObjIsExtensible, ObjIsFrozen, ObjIsSealed, ObjDefineProperties, ObjSetPrototypeOf, ObjGroupBy, MapGroupBy,
+    // Object.prototype
+    ProtoIsPrototypeOf, ProtoPropertyIsEnumerable, ProtoToLocaleString, ProtoGet, ProtoSet, ProtoDefineGetter,
+    ProtoDefineSetter, ProtoLookupGetter, ProtoLookupSetter,
+    // Reflect
+    RApply, RDefineProperty, RDeleteProperty, RGet, RGetOwnPropertyDescriptor, RGetPrototypeOf, RHas, RIsExtensible,
+    RPreventExtensions, RSet, RSetPrototypeOf,
 }
 
 impl<'p> Interp<'p> {
@@ -45,10 +55,11 @@ impl<'p> Interp<'p> {
         self.method(r, "ownKeys", Nat::Refl(ReflFn::OwnKeys), 1)?;
         self.sc_tag(r, "Reflect")?;
         let k = h!(self, self.heap.key_from_str("Reflect"));
-        self.def(g, k, Value::Object(r), true, false, true)
+        self.def(g, k, Value::Object(r), true, false, true)?;
+        self.install_object_more(oc, op, r)
     }
 
-    fn call_refl(&mut self, f: ReflFn, args: &[Value]) -> Res<Value> {
+    fn call_refl(&mut self, f: ReflFn, this: Value, args: &[Value]) -> Res<Value> {
         let a0 = arg(args, 0);
         match f {
             ReflFn::OwnNames => match a0 {
@@ -74,6 +85,7 @@ impl<'p> Interp<'p> {
                 _ => Err(self.type_err("Reflect.ownKeys called on non-object")),
             },
             ReflFn::Construct => self.reflect_construct(args),
+            _ => self.call_object_more(f, this, args),
         }
     }
 
