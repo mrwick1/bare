@@ -173,9 +173,9 @@ fn writes_are_no_modification_allowed() {
 fn supported_names_only_and_gates_for_unavailable_values() {
     let mut b = at(PAGE);
     js(&mut b, "var cs = getComputedStyle(document.getElementById('a')); 0");
-    assert_eq!(js(&mut b, "['direction', 'display', 'position', 'color', 'fontSize', 'marginTop', 'cssFloat', 'webkitBorderHorizontalSpacing'].map(function (k) { return k in cs; }).join()"), "true,true,true,true,true,true,true,true");
+    assert_eq!(js(&mut b, "['direction', 'display', 'position', 'color', 'fontSize', 'marginTop', 'cssFloat', 'webkitBorderHorizontalSpacing', 'opacity', 'zIndex', 'borderTopLeftRadius'].map(function (k) { return k in cs; }).join()"), "true,true,true,true,true,true,true,true,true,true,true");
     // Not supported by the engine: absent, `getPropertyValue` gives "" (CSSOM), no fake value.
-    assert_eq!(js(&mut b, "['animation', 'transform', 'WebkitAnimation', 'opacity', 'zIndex'].map(function (k) { return k in cs; }).join()"), "false,false,false,false,false");
+    assert_eq!(js(&mut b, "['animation', 'transform', 'WebkitAnimation'].map(function (k) { return k in cs; }).join()"), "false,false,false");
     assert_eq!(js(&mut b, "cs.getPropertyValue('transform') + '|' + cs.getPropertyValue('nope') + '|'"), "||");
     // Computed values that are known without layout.
     assert_eq!(js(&mut b, "cs.getPropertyValue('Display') + cs.position + cs.visibility + cs.fontWeight + cs.fontSize + cs.borderTopWidth + cs.paddingLeft"), "blockstaticvisible40016px0px0px");

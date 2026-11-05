@@ -423,7 +423,8 @@ impl Builder<'_> {
             return;
         }
         let b = border_box(f);
-        if b.is_empty() {
+        // A box outside the canvas has nothing to draw: no shape, no dash, no text of its own.
+        if b.intersect(self.view).is_empty() {
             return;
         }
         let control = if !line && self.page.controls { controls::of(&self.tree, f.node) } else { None };
@@ -543,7 +544,8 @@ impl Builder<'_> {
             if at + dash < lo || at > hi {
                 continue;
             }
-            let (a, z) = (snap(at), snap(at + dash).max(snap(at) + 1));
+            // Chrome puts a dash on the pixel that holds its start, and the end on the pixel that holds its end.
+            let (a, z) = (at.floor() as i32, ((at + dash).floor() as i32).max(at.floor() as i32 + 1));
             if round {
                 // The dot sits in the middle of the side.
                 let (cx, cy) = if horizontal { (at + dash / 2.0, (r.y0 + r.y1) as f32 / 2.0) } else { ((r.x0 + r.x1) as f32 / 2.0, at + dash / 2.0) };

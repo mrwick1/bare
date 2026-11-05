@@ -6,7 +6,10 @@
 //! (`echo 5 > /proc/self/clear_refs`), so it counts only what the paint needs on top of the page. Each run is one process.
 //!
 //! Cases: `dense` (long text lines that fill the canvas), `boxes` (a div with a background and a border), `lines` (a paragraph of one text line), `mixed` (a card with
-//! a heading, a row of inline boxes with a background, and text), `nested` (boxes 20 levels deep).
+//! a heading, a row of inline boxes with a background, and text), `nested` (boxes 20 levels deep), `rounded` (a box with a
+//! background, a 2 px border and `border-radius`), `clipped` (a box with `overflow: hidden` and a wide child), `stacked`
+//! (positioned boxes with `z-index` from -3 to 3, and every third with `opacity`), `dashed` (a box with a dashed border),
+//! `controls` (a row of an input with a value, a checkbox, a select and a button).
 
 use bare_css::cascade::{Origin, RuleSet, UA_CSS};
 use bare_paint::canvas::Canvas;
@@ -28,12 +31,25 @@ fn page(case: &str, n: usize) -> String {
             let one = format!("{}x{}", "<div class=n>".repeat(20), "</div>".repeat(20));
             one.repeat(n / 20 + 1)
         }
-        _ => panic!("cases: dense, boxes, lines, mixed, nested"),
+        "rounded" => "<div class=r></div>".repeat(n),
+        "clipped" => "<div class=c><div class=w></div></div>".repeat(n),
+        "dashed" => "<div class=d></div>".repeat(n),
+        "controls" => "<div class=k><input value='someone@example.com'> <input type=checkbox checked> <select><option>One</option></select> <button>Go</button></div>".repeat(n),
+        "stacked" => (0..n)
+            .map(|i| {
+                let (x, y) = ((i * 37) % 1200, (i * 91) % 760);
+                let op = if i % 3 == 0 { "opacity:.8;" } else { "" };
+                format!("<div class=s style='left:{x}px;top:{y}px;z-index:{};{op}background:#{:06x}'></div>", i as i32 % 7 - 3, (i * 2654435) & 0xffffff)
+            })
+            .collect(),
+        _ => panic!("cases: dense, boxes, lines, mixed, nested, rounded, clipped, stacked, dashed, controls"),
     };
     format!(
         "<!doctype html><style>body{{margin:0}} .b{{height:10px;background:#abc;border:1px solid #333}} p{{margin:0}} \
          .card{{background:#fff;border:1px solid #ccc;padding:4px}} h2{{margin:0;font-size:18px}} .chip{{background:#eef;padding:0 3px}} \
-         .n{{padding:1px;background:#f4f4f4;border-left:1px solid #999}}</style>{body}"
+         .n{{padding:1px;background:#f4f4f4;border-left:1px solid #999}} \
+         .r{{height:20px;margin:2px;background:#cde;border:2px solid #357;border-radius:8px}} .c{{height:20px;overflow:hidden;background:#eee}} .w{{width:3000px;height:10px;background:#9ab}} \
+         .d{{height:10px;border:2px dashed #333}} .k{{height:30px}} .s{{position:absolute;width:40px;height:30px}}</style>{body}"
     )
 }
 

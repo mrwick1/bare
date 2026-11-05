@@ -132,7 +132,7 @@ fn borders() {
     assert_eq!(c.pixel(17, 120), rgb(0x99, 0, 0x99));
     assert_eq!(c.pixel(18, 120), WHITE);
     assert_eq!(c.pixel(60, 102), WHITE);
-    assert_eq!(c.hash(), 0x6aec_fdbb_09ea_69d7);
+    assert_eq!(c.hash(), 0x91f6_b033_d5cf_7d87);
 }
 
 #[test]
