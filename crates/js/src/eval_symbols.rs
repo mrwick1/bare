@@ -43,6 +43,8 @@ pub enum ScLimit {
     Dates,
     /// Length of a string given to `Date.parse` or `new Date(string)`.
     DateString,
+    /// Tracked `Intl.DateTimeFormat` objects.
+    Formatters,
     /// Tracked iterator objects (Map, Set and array iterators made by a call).
     Iterators,
     /// Values collected by spread arguments, rest patterns and `iter_to_vec`.
@@ -63,13 +65,14 @@ pub struct ScLimits {
     pub max_weak_entries: usize,
     pub max_total_weak_entries: usize,
     pub max_dates: usize,
+    pub max_formatters: usize,
     /// UTF-16 units of one date string. No supported format is longer than a few dozen.
     pub max_date_string: usize,
 }
 
 impl Default for ScLimits {
     fn default() -> Self {
-        ScLimits { max_registry: 1 << 16, max_collections: 1 << 20, max_entries: 1 << 21, max_total_entries: 1 << 22, max_iterators: 1 << 20, max_iter_buffer: 1 << 21, max_weak_collections: 1 << 20, max_weak_entries: 1 << 21, max_total_weak_entries: 1 << 22, max_dates: 1 << 20, max_date_string: 128 }
+        ScLimits { max_registry: 1 << 16, max_collections: 1 << 20, max_entries: 1 << 21, max_total_entries: 1 << 22, max_iterators: 1 << 20, max_iter_buffer: 1 << 21, max_weak_collections: 1 << 20, max_weak_entries: 1 << 21, max_total_weak_entries: 1 << 22, max_dates: 1 << 20, max_formatters: 1 << 16, max_date_string: 128 }
     }
 }
 

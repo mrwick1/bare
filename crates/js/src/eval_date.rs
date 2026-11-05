@@ -11,6 +11,7 @@
 // - `getTime`, `valueOf`, `setTime`, `toISOString` (RangeError on an invalid date, `+YYYYYY` outside 0..9999), `toJSON` (generic: a
 //   non-finite number gives `null`, else `toISOString` of the receiver), `toUTCString` and `toGMTString` (the same function),
 //   `@@toPrimitive`, the 8 `getUTC*` getters and the 7 `setUTC*` setters (arguments coerced in order and before the NaN check).
+// - `toLocaleString`, `toLocaleDateString` and `toLocaleTimeString` are in `eval_intl.rs`.
 // - `Object.prototype.toString` of a Date is `[object Date]`. Every method checks its receiver: another object is a TypeError.
 // - Strings: ISO 8601 as the standard writes it (`YYYY`, `YYYY-MM`, `YYYY-MM-DD`, `THH:mm[:ss[.s+]]`, `Z` or `+HH:mm`, years
 //   `+YYYYYY`/`-YYYYYY`, `24:00`) and the `toUTCString` form. An out-of-range field is NaN (V8 accepts `2021-02-29`).
@@ -20,7 +21,7 @@
 //   `Date()` (a local string), an ISO date-time with no offset (`2020-01-01T00:00:00`), and these methods when the date is valid:
 //   `getDate`, `getDay`, `getFullYear`, `getHours`, `getMilliseconds`, `getMinutes`, `getMonth`, `getSeconds`, `getTimezoneOffset`,
 //   `getYear`, `setDate`, `setFullYear`, `setHours`, `setMilliseconds`, `setMinutes`, `setMonth`, `setSeconds`, `setYear`,
-//   `toString`, `toDateString`, `toTimeString`, `toLocale*String`. On an invalid date the getters give NaN and the string
+//   `toString`, `toDateString`, `toTimeString`. On an invalid date the getters give NaN and the string
 //   methods give `Invalid Date`: no zone changes that. They are functions, so `typeof` and feature tests work.
 //   `"" + date` and `date + 1` (hint default) call `toString`, so they are Unsupported for a valid date. `date - 1`, `+date`
 //   and comparisons use `valueOf` and work.
@@ -76,7 +77,7 @@ macro_rules! local {
     };
 }
 
-const DATE_LOCAL: [(&str, &str, u32, LocalKind); 24] = [
+const DATE_LOCAL: [(&str, &str, u32, LocalKind); 21] = [
     local!("getDate", 0, Number),
     local!("getDay", 0, Number),
     local!("getFullYear", 0, Number),
@@ -98,9 +99,6 @@ const DATE_LOCAL: [(&str, &str, u32, LocalKind); 24] = [
     local!("toString", 0, Text),
     local!("toDateString", 0, Text),
     local!("toTimeString", 0, Text),
-    local!("toLocaleString", 0, Text),
-    local!("toLocaleDateString", 0, Text),
-    local!("toLocaleTimeString", 0, Text),
 ];
 
 const DATE_GETTERS: [&str; 8] = ["getUTCFullYear", "getUTCMonth", "getUTCDate", "getUTCDay", "getUTCHours", "getUTCMinutes", "getUTCSeconds", "getUTCMilliseconds"];

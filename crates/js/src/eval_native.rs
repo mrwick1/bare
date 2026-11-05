@@ -285,6 +285,7 @@ impl<'p> Interp<'p> {
             Nat::Sc(f) => self.call_sc(f, this, args, is_new),
             Nat::Refl(f) => self.call_refl(f, args),
             Nat::Date(f) => self.call_date(f, this, args, is_new),
+            Nat::Intl(f) => self.call_intl(f, this, args),
         }
     }
 

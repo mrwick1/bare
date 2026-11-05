@@ -312,6 +312,7 @@ enum Nat {
     Sc(ScFn),
     Refl(ReflFn),
     Date(DateFn),
+    Intl(IntlFn),
 }
 
 enum Callee {
@@ -439,6 +440,7 @@ pub struct Interp<'p> {
     sc: ScState,
     weak: WeakState,
     date: DateState,
+    intl: IntlState,
     aw: AsyncState,
     // permanent keys
     k_length: PropertyKey,
@@ -490,6 +492,7 @@ impl<'p> Interp<'p> {
         it.install_binary()?;
         it.install_reflect()?;
         it.install_date()?;
+        it.install_intl()?;
         Ok(it)
     }
 
@@ -588,6 +591,7 @@ impl<'p> Interp<'p> {
             sc: ScState::new(object_proto, ks[0]),
             weak: WeakState::new(object_proto),
             date: DateState::new(object_proto),
+            intl: IntlState::new(object_proto),
             aw: AsyncState::default(),
             k_length: ks[0],
             k_name: ks[1],
@@ -690,6 +694,8 @@ impl<'p> Interp<'p> {
         self.weak_all_values(&mut v);
         self.date_roots(&mut v);
         self.date_all_values(&mut v);
+        self.intl_roots(&mut v);
+        self.intl_all_values(&mut v);
         self.async_all_values(&mut v);
         self.gen_all_values(&mut v);
         for (&o, c) in &self.funcs {
@@ -732,6 +738,7 @@ impl<'p> Interp<'p> {
         self.sc_roots(&mut work);
         self.weak_roots(&mut work);
         self.date_roots(&mut work);
+        self.intl_roots(&mut work);
         let mut pending: FxMap<ObjId, Vec<Value>> = FxMap::default();
         let mut agg_seen: FxSet<u64> = FxSet::default();
         let mut env_work: Vec<u32> = vec![0];
@@ -776,6 +783,7 @@ impl<'p> Interp<'p> {
                 work.push(Value::Object(buf));
             }
             self.sc_trace(o, &mut work);
+            self.intl_trace(o, &mut work);
             self.weak_trace(o, &seen, &mut pending, &mut work);
             self.cls_trace(o, &mut work, &mut env_work);
             self.async_promise_trace(o, &mut work, &mut env_work, &mut act_seen);
@@ -809,6 +817,7 @@ impl<'p> Interp<'p> {
         self.sc_prune(&seen);
         self.weak_prune(&seen);
         self.date_prune(&seen);
+        self.intl_prune(&seen);
         self.cls_prune(&seen);
         self.async_prune(&act_seen);
         self.gen_prune(&seen);
@@ -1680,7 +1689,7 @@ impl<'p> Interp<'p> {
             Some(Callee::Class) => D::C,
             Some(&Callee::Host { id, ctor: true, nt }) => D::H(id, nt),
             Some(&Callee::Script { script, fid, env, self_binding }) if self.func_of(script, fid).is_plain_ctor() => D::S(script, fid, env, self_binding),
-            Some(&Callee::Native(n)) if matches!(n, Nat::ObjectCtor | Nat::FnCtor | Nat::ArrayCtor | Nat::ErrorCtor(_) | Nat::Ext(Bi::RegExpCtor)) || matches!(n, Nat::Bin(b) if b.ctor_name().is_some() || b == BinFn::TaCtor) || matches!(n, Nat::Sc(f) if f.is_ctor()) || n == Nat::Date(DateFn::Ctor) => D::N(n),
+            Some(&Callee::Native(n)) if matches!(n, Nat::ObjectCtor | Nat::FnCtor | Nat::ArrayCtor | Nat::ErrorCtor(_) | Nat::Ext(Bi::RegExpCtor)) || matches!(n, Nat::Bin(b) if b.ctor_name().is_some() || b == BinFn::TaCtor) || matches!(n, Nat::Sc(f) if f.is_ctor()) || n == Nat::Date(DateFn::Ctor) || n == Nat::Intl(IntlFn::DtfCtor) => D::N(n),
             Some(&Callee::Native(Nat::StringFn | Nat::NumberFn | Nat::BooleanFn)) => return Err(unsupported("wrapper object (new String/Number/Boolean)", Span::default())),
             Some(Callee::Bound { target, args, .. }) => D::B(*target, args.clone()),
             Some(&Callee::Promise(pf @ (PFn::Ctor | PFn::AggErrCtor))) => D::P(pf),
@@ -2963,6 +2972,7 @@ include!("eval_symbols.rs");
 include!("eval_collections.rs");
 include!("eval_weak.rs");
 include!("eval_date.rs");
+include!("eval_intl.rs");
 include!("eval_reflect.rs");
 include!("eval_classes.rs");
 include!("eval_async.rs");
@@ -3046,6 +3056,10 @@ mod generator_tests;
 #[cfg(test)]
 #[path = "eval_tagged_tests.rs"]
 mod tagged_tests;
+
+#[cfg(test)]
+#[path = "eval_intl_tests.rs"]
+mod intl_tests;
 
 #[cfg(test)]
 #[path = "eval_stack_tests.rs"]
