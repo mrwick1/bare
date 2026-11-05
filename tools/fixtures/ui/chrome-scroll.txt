@@ -1,0 +1,43 @@
+JS var $ = function (i) { return document.getElementById(i) }; 'ok' => ok
+JS innerWidth + 'x' + innerHeight => 400x300
+JS document.documentElement.clientWidth + 'x' + document.documentElement.clientHeight => 385x300
+JS document.documentElement.scrollWidth + 'x' + document.documentElement.scrollHeight => 385x1700
+JS $('box').clientWidth + 'x' + $('box').clientHeight + ' ' + $('box').scrollWidth + 'x' + $('box').scrollHeight => 195x95 310x410
+JS $('hid').clientHeight + ' ' + $('hid').scrollHeight => 50 200
+JS JSON.stringify($('tall').getBoundingClientRect()) => {"x":8,"y":172,"width":369,"height":1500,"top":172,"right":377,"bottom":1672,"left":8}
+JS JSON.stringify($('fx').getBoundingClientRect()) => {"x":10,"y":20,"width":30,"height":20,"top":20,"right":40,"bottom":40,"left":10}
+JS scrollTo(0, 300); scrollX + ',' + scrollY => 0,300
+JS JSON.stringify($('tall').getBoundingClientRect()) => {"x":8,"y":-128,"width":369,"height":1500,"top":-128,"right":377,"bottom":1372,"left":8}
+JS JSON.stringify($('fx').getBoundingClientRect()) => {"x":10,"y":20,"width":30,"height":20,"top":20,"right":40,"bottom":40,"left":10}
+JS scrollBy(0, -50); pageYOffset => 250
+JS scrollTo({ top: 12, left: 0 }); scrollY => 12
+JS scrollTo(0, 99999); scrollY => 1400
+JS scrollTo(0, -5); scrollY => 0
+JS $('box').scrollTop = 50; $('box').scrollTop => 50
+JS JSON.stringify($('inner').getBoundingClientRect()) => {"x":15,"y":-35,"width":300,"height":400,"top":-35,"right":315,"bottom":365,"left":15}
+JS $('box').scrollTop = 9999; $('box').scrollTop => 315
+JS $('box').scrollLeft = 9999; $('box').scrollLeft => 115
+JS $('box').scrollTo(10, 20); $('box').scrollLeft + ',' + $('box').scrollTop => 10,20
+JS $('box').scrollBy(5, 5); $('box').scrollLeft + ',' + $('box').scrollTop => 15,25
+JS $('hid').scrollTop = 40; $('hid').scrollTop => 40
+JS $('end').scrollTop => 0
+JS $('tall').scrollIntoView(); scrollY => 172
+JS $('box').scrollTop = 0; $('box').scrollLeft = 0; $('inner').scrollIntoView(); scrollY + ',' + $('box').scrollTop => 10,5
+JS scrollTo(0, 0); $('box').scrollTop = 0; $('box').scrollLeft = 0; 'ok' => ok
+WAIT => 
+JS __n = { win: 0, doc: 0, box: 0, hid: 0 }; 'ok' => ok
+JS scrollTo(0, 10); scrollTo(0, 20); scrollBy(0, 5); $('box').scrollTop = 1; $('box').scrollTop = 2; JSON.stringify(__n) => {"win":0,"doc":0,"box":0,"hid":0}
+WAIT => 
+JS JSON.stringify(__n) => {"win":1,"doc":1,"box":1,"hid":0,"boxBubbles":false}
+JS scrollTo(scrollX, scrollY); $('box').scrollTop = $('box').scrollTop; 'ok' => ok
+WAIT => 
+JS JSON.stringify(__n) => {"win":1,"doc":1,"box":1,"hid":0,"boxBubbles":false}
+JS scrollTo(0, 0); 'ok' => ok
+WAIT => 
+KEY ArrowDown => 40
+KEY PageDown => 302
+KEY End => 1400
+KEY PageUp => 1138
+KEY Home => 0
+KEY Space => 262
+KEY Space+Shift => 0

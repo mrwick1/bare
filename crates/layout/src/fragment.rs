@@ -56,6 +56,8 @@ pub struct Layout {
     /// if `height` is more than the window.
     pub width: f32,
     pub height: f32,
+    /// The scrollbars of the `overflow: auto` boxes that needed them: (right, bottom), by `NodeId::index`. `scroll.rs` reads it.
+    pub bars: std::collections::HashMap<u32, (bool, bool)>,
 }
 
 /// Turn the places of all fragments from "relative to the parent fragment" into page coordinates.

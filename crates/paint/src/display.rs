@@ -26,7 +26,7 @@
 //! mixes the result with the kept pixels. Over an opaque backdrop that is the same as drawing the box in a layer of its own and
 //! mixing the layer in, and it needs no second canvas. The layer covers the border boxes and the text of the whole box.
 //!
-//! Gaps, on purpose: no scrollbars. `double`, `groove`, `ridge`, `inset` and `outset` borders draw as `solid`. A rounded
+//! Gaps, on purpose: `double`, `groove`, `ridge`, `inset` and `outset` borders draw as `solid`. A rounded
 //! box draws its border in one color (with four colors the sides are square), `dashed` and `dotted` borders that are
 //! rounded draw as `solid`, and `overflow` clips to the square padding box, also when the box is rounded. An inline box
 //! cut over two lines draws the borders of all four sides on each piece. `z-index` of an inline box does nothing.
@@ -39,6 +39,7 @@ use bare_html::dom::{Document, NodeData, NodeId};
 use bare_layout::boxes::{self, Kind, Tree};
 use bare_layout::controls::{self, Control};
 use bare_layout::fragment::{Fragment, Kind as FragmentKind, Layout};
+use bare_layout::scroll::Areas;
 use bare_layout::font::Metrics;
 use bare_layout::text::{self, Transform, WhiteSpace};
 
@@ -62,6 +63,16 @@ pub enum Item {
     /// Everything up to the matching `PopLayer` shows with `alpha` (0 to 255) of its strength, inside `IRect`.
     PushLayer { r: IRect, alpha: u8 },
     PopLayer,
+    /// The items until `PopScroll` are the content of the scroll container `node`: they move with its scroll offset.
+    /// The offset is read when the list is drawn, so a scroll does not build the list again.
+    PushScroll(NodeId),
+    PopScroll,
+    /// The items until `PopFixed` belong to a `position: fixed` box: they stay where they are when the page scrolls, and no
+    /// clip of a box around them cuts them.
+    PushFixed,
+    PopFixed,
+    /// The scrollbars of the scroll container `node`, drawn in the padding box `r`. The offset is read at draw time.
+    Bars { node: NodeId, r: IRect },
     /// A box that waits for its turn in the order of painting. Only in the scratch lists, never in `items`.
     Later(u32),
 }
@@ -85,6 +96,8 @@ pub struct DisplayList {
     floats: Vec<u32>,
     positioned: Vec<u32>,
     hoist: Vec<Hoisted>,
+    /// The scroll containers around the boxes that wait in `hoist`: (box, padding box). One run for each box.
+    chain: Vec<(NodeId, IRect)>,
 }
 
 /// A box of a stacking context with a `z-index` other than 0, on its way up to the context. `clip` is what clipped it
@@ -94,6 +107,8 @@ struct Hoisted {
     z: i32,
     frag: u32,
     clip: IRect,
+    /// Where the scroll containers around the box are in `DisplayList::chain`.
+    chain: (u32, u32),
 }
 
 /// What the styles of the page need from paint: the checks are skipped when no style asks for them.
@@ -136,7 +151,16 @@ impl DisplayList {
 
     /// Make the list for a page: `view` is the size of the canvas in pixels. What is outside it makes no item.
     pub fn build(&mut self, doc: &Document, styles: &Styles, layout: &Layout, view: (u32, u32)) {
+        self.build_with(doc, styles, layout, view, None);
+    }
+
+    /// Like `build`, for a page that scrolls. `areas` are its scroll containers (`bare_layout::scroll::areas`). The list holds
+    /// the whole page, not only what `view` shows: `view` is the size of the page, and what a scroll container holds is
+    /// not left out. The items of a scroll container sit between `PushScroll` and `PopScroll`, a fixed box between
+    /// `PushFixed` and `PopFixed`, so that a scroll draws the same list again with another offset.
+    pub fn build_with(&mut self, doc: &Document, styles: &Styles, layout: &Layout, view: (u32, u32), areas: Option<&Areas>) {
         self.items.clear();
+        self.chain.clear();
         self.text.clear();
         self.lines.clear();
         self.floats.clear();
@@ -172,7 +196,7 @@ impl DisplayList {
             page.stack |= matches!(style.get(Property::Opacity), Value::Number(o) if o < 1.0) || matches!(style.get(Property::ZIndex), Value::Number(_));
             page.flex |= matches!(style.get(Property::Display), Value::Keyword(Keyword::Flex | Keyword::InlineFlex | Keyword::Grid | Keyword::InlineGrid));
         }
-        let mut b = Builder { tree, doc, frags: &layout.fragments, list: self, view, propagated, depth: 0, page, clips: Vec::new() };
+        let mut b = Builder { tree, doc, frags: &layout.fragments, list: self, view, propagated, depth: 0, page, clips: Vec::new(), areas, scrolls: Vec::new() };
         b.context(0);
     }
 }
@@ -195,6 +219,10 @@ struct Builder<'a> {
     page: Page,
     /// The clips that are open now (the same as the ones of `Painter::draw`).
     clips: Vec<IRect>,
+    /// The scroll containers of the page, if it scrolls.
+    areas: Option<&'a Areas>,
+    /// The scroll containers that are open now, the inner last, with their padding boxes.
+    scrolls: Vec<(NodeId, IRect)>,
 }
 
 impl Builder<'_> {
@@ -260,8 +288,21 @@ impl Builder<'_> {
         r
     }
 
-    /// Paint the fragment `i` and everything in it, in the order of the module comment.
+    /// Paint the fragment `i` and everything in it, in the order of the module comment. A fixed box goes between
+    /// `PushFixed` and `PopFixed`.
     fn context(&mut self, i: usize) {
+        let f = self.frags[i];
+        let fixed = self.areas.is_some() && i > 0 && self.tree.kind(f.node) != Kind::Inline && self.tree.position(f.node) == Keyword::Fixed;
+        if fixed {
+            self.list.items.push(Item::PushFixed);
+        }
+        self.context_in(i);
+        if fixed {
+            self.list.items.push(Item::PopFixed);
+        }
+    }
+
+    fn context_in(&mut self, i: usize) {
         if self.depth >= MAX_DEPTH {
             return;
         }
@@ -289,6 +330,7 @@ impl Builder<'_> {
         let clip = if i > 0 && clips(style) { Some(padding_box(&f, style)) } else { None };
         self.decor(&f, style, false);
         // A box that clips, with its inside outside the canvas, has nothing more to show.
+        let outer_view = self.view;
         if let Some(c) = clip {
             if c.intersect(self.view).is_empty() {
                 if layer {
@@ -298,7 +340,15 @@ impl Builder<'_> {
             }
             self.list.items.push(Item::PushClip(c));
             self.clips.push(c);
+            if self.areas.is_some() {
+                // What is inside can be scrolled into view: nothing in it is left out for being outside the page.
+                self.list.items.push(Item::PushScroll(f.node));
+                self.scrolls.push((f.node, c));
+                self.view = IRect { x0: i32::MIN / 2, y0: i32::MIN / 2, x1: i32::MAX / 2, y1: i32::MAX / 2 };
+            }
         }
+        // The scroll containers around this one: a box that waits in `hoist` below it goes out of them, and is wrapped in them again.
+        let depth_here = self.scrolls.len();
         self.depth += 1;
         let hoist = self.list.hoist.len();
         let inside = self.list.items.len();
@@ -329,7 +379,9 @@ impl Builder<'_> {
                         }
                         Layer::Positioned(z) if z != 0 => {
                             let clip = self.clips.last().copied().unwrap_or(self.view);
-                            self.list.hoist.push(Hoisted { z, frag: j as u32, clip });
+                            let at = self.list.chain.len() as u32;
+                            self.list.chain.extend_from_slice(&self.scrolls);
+                            self.list.hoist.push(Hoisted { z, frag: j as u32, clip, chain: (at, self.scrolls.len() as u32) });
                             j = g.end as usize;
                         }
                         Layer::Positioned(_) => {
@@ -373,9 +425,17 @@ impl Builder<'_> {
         }
         self.list.positioned.truncate(positioned);
         if sc {
-            self.hoisted(hoist, inside);
+            self.hoisted(hoist, inside, depth_here);
         }
         if clip.is_some() {
+            if self.areas.is_some() {
+                self.list.items.push(Item::PopScroll);
+                self.scrolls.pop();
+                self.view = outer_view;
+                if self.areas.and_then(|a| a.get(f.node)).is_some_and(|a| a.bars != (false, false)) {
+                    self.list.items.push(Item::Bars { node: f.node, r: clip.expect("checked") });
+                }
+            }
             self.list.items.push(Item::PopClip);
             self.clips.pop();
         }
@@ -387,7 +447,7 @@ impl Builder<'_> {
 
     /// The end of a stacking context: paint the boxes that came up to it from `hoist`. The ones with a negative `z-index`
     /// go to the place `inside` (behind the blocks of the context), the others to the end.
-    fn hoisted(&mut self, hoist: usize, inside: usize) {
+    fn hoisted(&mut self, hoist: usize, inside: usize, depth_here: usize) {
         let end = self.list.hoist.len();
         if end == hoist {
             return;
@@ -402,7 +462,18 @@ impl Builder<'_> {
                 self.list.items[inside..].rotate_right(moved);
             }
             let h = self.list.hoist[k];
-            let clipped = h.clip != self.view;
+            // The scroll containers that the box left on its way up to this context: open them again around it.
+            let (at, n) = (h.chain.0 as usize, h.chain.1 as usize);
+            let reopen = n.saturating_sub(depth_here);
+            let saved = self.view;
+            for e in 0..reopen {
+                let (node, c) = self.list.chain[at + depth_here + e];
+                self.list.items.push(Item::PushClip(c));
+                self.list.items.push(Item::PushScroll(node));
+                self.clips.push(c);
+                self.view = IRect { x0: i32::MIN / 2, y0: i32::MIN / 2, x1: i32::MAX / 2, y1: i32::MAX / 2 };
+            }
+            let clipped = self.areas.is_none() && h.clip != self.view;
             if clipped {
                 self.list.items.push(Item::PushClip(h.clip));
                 self.clips.push(h.clip);
@@ -412,6 +483,12 @@ impl Builder<'_> {
                 self.list.items.push(Item::PopClip);
                 self.clips.pop();
             }
+            for _ in 0..reopen {
+                self.list.items.push(Item::PopScroll);
+                self.list.items.push(Item::PopClip);
+                self.clips.pop();
+            }
+            self.view = saved;
         }
         if negative == end {
             let moved = self.list.items.len() - before;

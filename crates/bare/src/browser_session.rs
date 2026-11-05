@@ -21,15 +21,21 @@
 //! Document load: GET, redirects followed here one by one (`Client::send_once`: a redirect is checked before any socket
 //! opens): at most `max_redirects`, http or https only, no downgrade from https to http. The status must be 2xx (a
 //! 404 page is not run), `Content-Type` `text/html` (XML/XHTML is unsupported), no `Content-Encoding`, at most
-//! `max_document_bytes`. The text is decoded by `bare_html::encoding`. Gates: no request body, so no form POST; no cookies
-//! (the client has none); no `Referer`; no cross-document history (`back` from the first entry of a document stays
-//! in that document); a failed load ends the session (the old page stays gone, as a browser error page would).
+//! `max_document_bytes`. The text is decoded by `bare_html::encoding`. A form `POST` sends its body once; a 301, 302 or 303
+//! redirect of it is a `GET` without the body, a 307 or 308 is refused (a body is never sent twice). Gates: no cookies
+//! (the client has none); no `Referer`; a failed load ends the session (the old page stays gone, as a browser error page would).
+//!
+//! History of documents: the session keeps the URL of each document it loaded, and where it is (`hist`, `at`). A `back` or `forward`
+//! (`history.go(n)`, Alt+Left, a mouse button) past the end of the document's own entries loads the neighbor document again from
+//! its URL (no cache: the state of that page, its `history.state` and its form values are not restored). A neighbor that a form
+//! `POST` made is not loaded again (a body is never sent twice; Chrome asks first): the traversal does nothing. The scroll offset of
+//! a document is kept when it ends and put back when a traversal loads it again. A new navigation drops the entries after it.
 //! Results and diagnostics name `scheme://host:port/path` only: no query, fragment, header, body or source.
 
 use crate::browser::{Browser, BrowserLimits};
 use crate::browser_fetch::FetchLimits;
 use crate::browser_loader::{Input, PageConfig, PageLimits, PageResult, Stop, deadline_after, label};
-use crate::browser_navigation::{NavLimits, WebStorage};
+use crate::browser_navigation::{Body, NavLimits, NavigationKind, WebStorage};
 use bare_html::{encoding, tree};
 use bare_js::eval::EvalLimits;
 use bare_js::heap::HeapLimits;
@@ -122,7 +128,35 @@ pub struct SessionResult {
     pub rounds: usize,
 }
 
+/// One document in the history of the session.
+struct Hist {
+    url: String,
+    /// A form `POST` made it: it is never loaded again.
+    post: bool,
+    /// How far it was scrolled when it ended.
+    scroll: (f32, f32),
+}
+
+/// How a load changes the history.
+#[derive(Clone, Copy)]
+enum How {
+    Push,
+    Replace,
+    Reload,
+    /// A traversal to this index.
+    Move(usize),
+}
+
+/// A document to load.
+struct Next {
+    url: String,
+    body: Option<Body>,
+    how: How,
+}
+
 pub struct Session {
+    hist: Vec<Hist>,
+    at: usize,
     cfg: SessionConfig,
     store: WebStorage,
     /// The last document. Dropped before the next one is requested.
@@ -154,7 +188,7 @@ pub(crate) fn redirect_allowed(from: &Url, to: &Url) -> bool {
 }
 
 /// Download one document with the caps of `lim`. Gives the final URL (with the fragment) and the decoded text.
-fn load_document(client: &mut Client, url: &str, lim: &SessionLimits, deadline: Instant) -> Result<(String, String), String> {
+fn load_document(client: &mut Client, url: &str, body: Option<&Body>, lim: &SessionLimits, deadline: Instant) -> Result<(String, String), String> {
     let max_url = NavLimits::default().max_url_bytes;
     if url.len() > max_url { return Err("the document URL is too big".into()); }
     let (bare, fragment) = match url.split_once('#') {
@@ -163,12 +197,21 @@ fn load_document(client: &mut Client, url: &str, lim: &SessionLimits, deadline: 
     };
     let mut cur = Url::parse(bare).map_err(|_| "the URL is not an http(s) URL".to_string())?;
     let mut fragment = fragment;
+    let mut body = body;
     for hop in 0..=lim.max_redirects {
         if Instant::now() >= deadline {
             return Err("the time limit passed".into());
         }
-        let resp = client.send_once(&Request::get(&cur), lim.max_document_bytes).map_err(|_| "network error".to_string())?;
+        let resp = match body {
+            Some(b) => client.send_once(&Request::post(&cur, &[("Content-Type", b.content_type.as_str())], &b.bytes), lim.max_document_bytes),
+            None => client.send_once(&Request::get(&cur), lim.max_document_bytes),
+        }
+        .map_err(|_| "network error".to_string())?;
         if matches!(resp.status, 301 | 302 | 303 | 307 | 308) {
+            if body.is_some() && matches!(resp.status, 307 | 308) {
+                return Err("a redirect would send the form body again".into());
+            }
+            body = None;
             let Some(loc) = resp.header("location") else { return Err("redirect without a location".into()) };
             if hop == lim.max_redirects {
                 return Err("too many redirects".into());
@@ -213,12 +256,17 @@ fn load_document(client: &mut Client, url: &str, lim: &SessionLimits, deadline: 
 impl Session {
     pub fn new(mut cfg: SessionConfig) -> Session {
         let store = cfg.storage.take().unwrap_or_default();
-        Session { cfg, store, browser: None, used: Used::default() }
+        Session { cfg, store, browser: None, used: Used::default(), hist: Vec::new(), at: 0 }
     }
 
     /// The storage of the session: it lives through every document.
     pub fn storage(&self) -> WebStorage {
         self.store.clone()
+    }
+
+    /// How many documents the session has loaded so far. A node of an older one means nothing in the newest.
+    pub fn documents(&self) -> usize {
+        self.used.documents
     }
 
     /// The last document, while its `Browser` is alive (after `run`).
@@ -232,7 +280,9 @@ impl Session {
     pub fn run(&mut self) -> SessionResult {
         self.used = Used::default();
         let first = self.cfg.url.clone();
-        self.drive(Some(first), &[])
+        self.hist.clear();
+        self.at = 0;
+        self.drive(Some(Next { url: first, body: None, how: How::Push }), &[])
     }
 
     /// Go on with the settled document of the last `run` or `resume`: take `steps` through `Browser::click`, `type_text`
@@ -253,7 +303,7 @@ impl Session {
         out
     }
 
-    fn drive(&mut self, next: Option<String>, steps: &[Input]) -> SessionResult {
+    fn drive(&mut self, next: Option<Next>, steps: &[Input]) -> SessionResult {
         let start = Instant::now();
         let before = self.used.time;
         let mut out = SessionResult { stop: SessionStop::Page(Stop::Settled), pages: Vec::new(), urls: Vec::new(), tasks: 0, rounds: 0 };
@@ -265,7 +315,7 @@ impl Session {
         out
     }
 
-    fn drive_loop(&mut self, mut next: Option<String>, steps: &[Input], out: &mut SessionResult) -> SessionStop {
+    fn drive_loop(&mut self, mut next: Option<Next>, mut steps: &[Input], out: &mut SessionResult) -> SessionStop {
         let lim = self.cfg.limits.clone();
         let deadline = deadline_after(lim.max_time.saturating_sub(self.used.time));
         loop {
@@ -292,12 +342,30 @@ impl Session {
                     let r = b.resume_page((self.cfg.client)(), page, steps);
                     (b, r)
                 }
-                Some(url) => {
+                Some(Next { url, body, how }) => {
                     // The old document ends here: its realm, timers and callbacks are gone before the next load starts.
                     self.browser = None;
-                    let (url, html) = match load_document(&mut (self.cfg.client)(), &url, &lim, deadline) {
+                    let (url, html) = match load_document(&mut (self.cfg.client)(), &url, body.as_ref(), &lim, deadline) {
                         Ok(d) => d,
                         Err(why) => return SessionStop::LoadFailed(why),
+                    };
+                    let scroll = match how {
+                        How::Push => {
+                            self.hist.truncate(if self.hist.is_empty() { 0 } else { self.at + 1 });
+                            self.hist.push(Hist { url: url.clone(), post: body.is_some(), scroll: (0.0, 0.0) });
+                            self.at = self.hist.len() - 1;
+                            (0.0, 0.0)
+                        }
+                        How::Replace => {
+                            self.hist[self.at] = Hist { url: url.clone(), post: body.is_some(), scroll: (0.0, 0.0) };
+                            (0.0, 0.0)
+                        }
+                        How::Reload => self.hist[self.at].scroll,
+                        How::Move(i) => {
+                            self.at = i;
+                            self.hist[i].url = url.clone();
+                            self.hist[i].scroll
+                        }
                     };
                     let Ok(mut b) = Browser::new(tree::parse(&html), self.cfg.browser, self.cfg.eval, self.cfg.heap) else {
                         return SessionStop::LoadFailed("the realm could not be made".into());
@@ -313,6 +381,10 @@ impl Session {
                     b.attach_storage(self.store.clone());
                     if b.set_document_url(&url).is_err() {
                         return SessionStop::LoadFailed("the document URL could not be configured".into());
+                    }
+                    b.cross_document_history(true);
+                    if scroll != (0.0, 0.0) {
+                        b.set_scroll(bare_paint::Scroll { x: scroll.0, y: scroll.1, ..Default::default() });
                     }
                     self.used.documents += 1;
                     let client = (self.cfg.client)();
@@ -330,10 +402,36 @@ impl Session {
             let stop = r.stop.clone();
             out.pages.push(r);
             self.browser = Some(b);
-            match stop {
-                Stop::Navigate(n) => next = Some(n.0.url),
-                stop => return SessionStop::Page(stop),
+            steps = &[];
+            let Stop::Navigate(n) = stop else { return SessionStop::Page(stop) };
+            let req = n.0;
+            // The document ends: keep where it was (its URL may have changed by `pushState`, and it was scrolled).
+            if let (Some(h), Some(b)) = (self.hist.get_mut(self.at), self.browser.as_mut()) {
+                if let Some(u) = b.document_url() {
+                    h.url = u;
+                }
+                let s = b.scroll();
+                h.scroll = (s.x, s.y);
             }
+            next = match req.kind {
+                NavigationKind::Assign => Some(Next { url: req.url, body: req.body, how: How::Push }),
+                NavigationKind::Replace => Some(Next { url: req.url, body: req.body, how: How::Replace }),
+                NavigationKind::Reload => Some(Next { url: req.url, body: None, how: How::Reload }),
+                NavigationKind::Traverse(n) => {
+                    let to = self.at as i64 + n as i64;
+                    match self.hist.get(usize::try_from(to).unwrap_or(usize::MAX)) {
+                        // Past the oldest or the newest document, or a page that a `POST` made: nothing to load. The document goes on.
+                        Some(h) if !h.post => Some(Next { url: h.url.clone(), body: None, how: How::Move(to as usize) }),
+                        _ => {
+                            // The loader only looks at the first request: take it, or the page stops on it again.
+                            if let Some(b) = self.browser.as_mut() {
+                                b.take_navigation_request();
+                            }
+                            None
+                        }
+                    }
+                }
+            };
         }
     }
 }

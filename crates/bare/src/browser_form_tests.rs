@@ -3,7 +3,7 @@
 //! from the HTML and DOM Standards (no Node DOM oracle, nothing compared with Chrome). Each test runs on a big stack.
 
 use crate::browser::*;
-use crate::browser_loader::{Fatal, Input, Stop};
+use crate::browser_loader::{Input, Stop};
 use crate::browser_session::*;
 use crate::resources::test_server::{Reply, serve};
 use bare_html::tree;
@@ -397,38 +397,44 @@ fn script_made_activation_events_and_submit_events_do_not_submit() {
     });
 }
 
-// ------------------------------------------------------------------------------------------ gates
+// ------------------------------------------------------------------------------------------ validation and navigation
 
 #[test]
-fn validation_and_native_navigation_are_gated_not_faked() {
+fn validation_and_native_navigation_follow_the_standard() {
     big(|| {
-        // 1. No novalidate, no formnovalidate: constraint validation is not built. The click is dispatched, nothing else.
+        // 1. An invalid field stops the click after `click`: `invalid` at the field, no `submit`, no navigation.
         let mut b = page("<form id=f><input id=e type=email required><button id=go>go</button></form>");
+        b.set_document_url("http://t.test/p").unwrap();
         js(&mut b, WIRE);
-        js(&mut b, "go.addEventListener('click', function () { log.push('click') })");
-        let got = outcome(click(&mut b, "#go"));
-        assert!(got.starts_with("unsupported:") && got.contains("validation"), "{got}");
-        assert_eq!(js(&mut b, "log.join()"), "click", "no submit event: an invalid form would not fire it");
-        // 2. formnovalidate on the submitter, by the IDL attribute, passes the validation gate. A submit that nobody cancels
-        //    would navigate: gated, after the one submit event.
-        let mut b = page("<form id=f><button id=go formnovalidate>go</button></form>");
+        js(&mut b, "go.addEventListener('click', function () { log.push('click') }); document.getElementById('e').addEventListener('invalid', function (e) { log.push('invalid:' + e.bubbles + e.cancelable) })");
+        assert_eq!(outcome(click(&mut b, "#go")), "ok:true:0");
+        assert_eq!(js(&mut b, "log.join()"), "click,invalid:falsetrue", "no submit event: an invalid form does not fire it");
+        assert!(b.take_navigation_request().is_none());
+        // 2. formnovalidate on the submitter skips the checks. A submit that nobody cancels navigates.
+        let mut b = page("<form id=f><input name=a value=1><button id=go formnovalidate>go</button></form>");
+        b.set_document_url("http://t.test/p").unwrap();
         js(&mut b, "var log = []; var f = document.getElementById('f'); f.addEventListener('submit', function () { log.push('submit') }); 'x'");
-        let got = outcome(click(&mut b, "#go"));
-        assert!(got.starts_with("unsupported:") && got.contains("navigation"), "{got}");
-        assert_eq!(js(&mut b, "log.join()"), "submit", "the event fired once, then the navigation was refused");
-        // 3. With the submit canceled there is no navigation: ok.
-        js(&mut b, "log.length = 0; f.addEventListener('submit', function (e) { e.preventDefault() }); 'x'");
         assert_eq!(outcome(click(&mut b, "#go")), "ok:true:0");
         assert_eq!(js(&mut b, "log.join()"), "submit");
-        // 4. The form removed by a submit listener that did not cancel: it cannot navigate, nothing to gate.
+        let r = b.take_navigation_request().expect("a navigation");
+        assert_eq!(r.url, "http://t.test/p?a=1");
+        // 3. With the submit canceled there is no navigation.
+        js(&mut b, "f.addEventListener('submit', function (e) { e.preventDefault() }); 'x'");
+        assert_eq!(outcome(click(&mut b, "#go")), "ok:true:0");
+        assert!(b.take_navigation_request().is_none());
+        // 4. The form removed by a submit listener that did not cancel: it cannot navigate.
         let mut b = page("<form id=f novalidate><button id=go>go</button></form>");
         js(&mut b, "var f = document.getElementById('f'); f.addEventListener('submit', function () { f.remove() }); 'x'");
         assert_eq!(outcome(click(&mut b, "#go")), "ok:true:0");
-        // 5. `input type=submit` with formnovalidate behaves the same; a non-submit with formnovalidate does not matter.
+        // 5. `input type=submit` with formnovalidate behaves the same.
         let mut b = page("<form id=f><input id=go type=submit formnovalidate></form>");
         js(&mut b, "var log = [], f = document.getElementById('f'); f.addEventListener('submit', function (e) { e.preventDefault(); log.push('s') }); 'x'");
         assert_eq!(outcome(click(&mut b, "#go")), "ok:true:0");
         assert_eq!(js(&mut b, "log.join()"), "s");
+        // 6. No document URL: a form that nobody cancels cannot name the page to load.
+        let mut b = page("<form id=f novalidate><button id=go>go</button></form>");
+        let got = outcome(click(&mut b, "#go"));
+        assert!(got.starts_with("unsupported:") && got.contains("URL"), "{got}");
     });
 }
 
@@ -611,17 +617,18 @@ fn session_resume_click_runs_the_authored_on_submit_fetch_once_over_loopback() {
 }
 
 #[test]
-fn session_resume_click_on_a_gated_form_stops_with_a_named_gate() {
+fn session_resume_click_on_a_form_loads_the_action_with_the_entry_list() {
     big(|| {
         let srv = serve(|path| match path {
-            "/" => html("<form id=f><input name=q><button id=go>go</button></form><script>document.getElementById('f').addEventListener('submit', function () { fetch('/hit') })</script>"),
-            "/hit" => Reply::new(200, Some("text/plain"), "x"),
+            "/" => html("<form id=f action=/search><input name=q value='a b'><input type=checkbox name=c checked><input type=checkbox name=d><button id=go name=go value=1>go</button></form>"),
+            p if p.starts_with("/search") => html("<p>found</p>"),
             _ => Reply::new(404, Some("text/plain"), "no"),
         });
         let mut s = Session::new(cfg(srv.url("/")));
         s.run();
         let r = s.resume(&[Input::Click("#go")]);
-        assert!(matches!(&r.stop, SessionStop::Page(Stop::Fatal(Fatal::Unsupported(w))) if w.contains("validation")), "{r:?}");
-        assert_eq!(srv.hits("/hit"), 0, "no submit listener ran");
+        assert_eq!(r.stop, SessionStop::Page(Stop::Settled), "{r:?}");
+        assert_eq!(srv.hits("/search?q=a+b&c=on&go=1"), 1);
     });
 }
+

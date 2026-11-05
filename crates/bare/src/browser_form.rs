@@ -26,13 +26,10 @@
 //! - `SubmitEvent` (`submitter`: read-only, null or an HTML element; traced, so a saved event keeps its submitter alive). An
 //!   event made by script, with `new SubmitEvent` or any other, only dispatches; it never submits and is never gated.
 //!
-//! Gates (named, never faked)
-//! - Constraint validation is not built. A submit button without `formnovalidate` whose form owner has no `novalidate` would
-//!   have to validate: the click is dispatched, then `Unsupported` ends the call before any `submit` event.
-//! - Native navigation is not built. A `submit` event that no listener cancels would navigate (encode the entry list, load the
-//!   action URL): after the one event, `Unsupported` ends the call. A canceled submit, or a form that left the document, is
-//!   fine. This is the shape of an app that handles `submit` itself (`preventDefault`, then `fetch`).
-//! - `Browser::submit` and `Input::Submit` stay the dispatch-only driver call of `browser.rs`: no activation, no gates.
+//! Validation and native navigation (since S4 topic 5)
+//! - A submit button validates the form, fires `submit` and, when no listener cancels it, navigates. The rules, and what is not
+//!   built, are in `browser_submit.rs`. An app that handles `submit` itself (`preventDefault`, then `fetch`) is unchanged.
+//! - `Browser::submit` and `Input::Submit` stay the dispatch-only driver call of `browser.rs`: no activation, no validation.
 //!
 //! Deviations (on purpose)
 //! - The driver's `click` is a plain `Event` (there is no `MouseEvent`); the driver marks the activation itself, so a script's
@@ -252,42 +249,16 @@ impl Dom {
         }
     }
 
-    /// HTML "submit" a form from a submit button, up to the gates (see the header).
+    /// HTML "submit" a form from a submit button or from Enter in a field: validation, the `submit` event, the navigation.
     pub(crate) fn submit_form(&self, it: &mut Interp<'_>, form: NodeId, submitter: Option<NodeId>) -> R<()> {
-        if !self.is_connected_node(it, form)? {
-            return Ok(()); // cannot navigate
-        }
-        let no_validate = {
-            let doc = self.doc.borrow();
-            submitter.is_some_and(|s| attr(&doc, s, "formnovalidate").is_some()) || attr(&doc, form, "novalidate").is_some()
-        };
-        if !no_validate {
-            return Err(Error::Unsupported(unsupported("form constraint validation (set noValidate or formNoValidate)")));
-        }
-        let who = match submitter {
-            Some(s) => self.wrap(it, s)?,
-            None => Value::Null,
-        };
-        let e = self.new_event_proto(it, "submit", true, true, false, self.p().submit)?;
-        {
-            let mut st = self.st.borrow_mut();
-            let trusted = st.ui.active;
-            let ev = st.events.get_mut(&e).expect("just made");
-            ev.related = who;
-            ev.is_submit = true;
-            ev.trusted = trusted;
-        }
-        if !self.dispatch(it, Target::Node(form), e)? || !self.is_connected_node(it, form)? {
-            return Ok(());
-        }
-        Err(Error::Unsupported(unsupported("native form submission navigation (cancel the submit event)")))
+        self.submit_with(it, form, submitter, true, true)
     }
 }
 
 impl Browser {
     /// The user driver's click: `click` (bubbles, cancelable) at `node`, then, if no listener canceled it, the activation
     /// behavior of the nearest activation target. A disabled form control gets no click at all. Submit buttons submit their
-    /// form owner: see `browser_form.rs` for the exact rules and the gates (validation, native navigation). Click and
+    /// form owner: see `browser_form.rs` for the exact rules (`browser_submit.rs` has validation and native navigation). Click and
     /// activation share one host scope and one budget. `reports` hold both stages.
     pub fn click(&mut self, node: NodeId) -> R<Dispatched> {
         let (not_canceled, reports) = self.driven(|d, it| d.user_click(it, node, None))?;

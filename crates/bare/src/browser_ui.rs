@@ -28,14 +28,14 @@
 //! - A click toggles a checkbox before the click event runs (a listener sees the new state) and undoes it when the click is
 //!   canceled; otherwise `input` and `change` follow. A radio does the same and clears the others of its group (same `name`
 //!   and form owner). A click on a label focuses and clicks its control. A click on `a[href]` starts a navigation
-//!   (`navigate_href`). A submit button submits its form (`browser_form.rs`, with its gates).
+//!   (`navigate_href`). A submit button submits its form (`browser_form.rs`, `browser_submit.rs`: validation, then native navigation).
 //! - Editing: text, Backspace, Delete, Left, Right, Home, End (Shift extends the selection), Ctrl+A. Offsets are UTF-16
 //!   units, as for `selectionStart`. The value changes through `put_input_value`, the same state that `input.value` reads.
 //!
 //! Gaps (none is faked): `<textarea>` has no value state in this host, so it cannot be edited; `contenteditable`;
-//! clipboard keys; Ctrl+Left/Right word moves; IME and `compositionstart`; `maxlength`, `readonly` is honored but
+//! clipboard keys; Ctrl+Left/Right word moves; IME and `compositionstart`; `readonly` is honored but
 //! `type=number` does not filter text; `contextmenu`; `:hover`/`:focus` styling; radio groups in the Tab order (every
-//! radio is a stop); `<summary>` toggling; `<label>` click coordinates of the second click; scrolling; `new MouseEvent(...)`
+//! radio is a stop); `<summary>` toggling; `<label>` click coordinates of the second click; `new MouseEvent(...)`
 //! and the other four constructors (illegal, as events are made by the window only).
 
 use crate::browser::*;
@@ -477,7 +477,7 @@ impl Dom {
     }
 
     /// The other radios of the group of `t`: same `name`, same form owner, same tree.
-    fn radio_group(&self, it: &mut Interp<'_>, t: NodeId) -> R<Vec<NodeId>> {
+    pub(crate) fn radio_group(&self, it: &mut Interp<'_>, t: NodeId) -> R<Vec<NodeId>> {
         let (name, root) = {
             let doc = self.doc.borrow();
             let Some(name) = attr(&doc, t, "name").filter(|s| !s.is_empty()).map(str::to_string) else { return Ok(Vec::new()) };
@@ -535,7 +535,7 @@ impl Dom {
         self.activate(it, t)
     }
 
-    fn input_checked(&self, n: NodeId) -> bool {
+    pub(crate) fn input_checked(&self, n: NodeId) -> bool {
         self.st.borrow().inputs.get(&n).and_then(|i| i.checked).unwrap_or_else(|| attr(&self.doc.borrow(), n, "checked").is_some())
     }
 
@@ -644,9 +644,36 @@ impl Dom {
             "ArrowLeft" | "ArrowRight" | "Home" | "End" if focus.is_some_and(|f| self.selection_applies(f)) => {
                 self.move_caret(it, focus.expect("checked"), &k.key, m.shift)?;
             }
+            "ArrowUp" | "ArrowDown" | "ArrowLeft" | "ArrowRight" | "PageUp" | "PageDown" | "Home" | "End" if !m.ctrl && !m.alt && !m.meta && !(matches!(k.key.as_str(), "ArrowUp" | "ArrowDown") && edit.is_some()) => {
+                use crate::browser_scroll::ScrollKey as S;
+                let key = match k.key.as_str() {
+                    "ArrowUp" => S::Up,
+                    "ArrowDown" => S::Down,
+                    "ArrowLeft" => S::Left,
+                    "ArrowRight" => S::Right,
+                    "PageUp" => S::PageUp,
+                    "PageDown" => S::PageDown,
+                    "Home" => S::Home,
+                    _ => S::End,
+                };
+                self.note_scroll_key(key);
+            }
             "a" | "A" if m.ctrl && !m.alt && focus.is_some_and(|f| self.selection_applies(f)) => {
                 let f = focus.expect("checked");
                 self.set_selection_range(it, f, Some(0), Some(u32::MAX), Dir::None)?;
+            }
+            " " if edit.is_none() && !m.ctrl && !m.alt && !m.meta => {
+                if !self.key_ev(it, t, "keypress", k)? {
+                    return Ok(());
+                }
+                // On a button, a checkbox or a radio, Space clicks on key up; elsewhere it scrolls a page.
+                let by_space = {
+                    let doc = self.doc.borrow();
+                    is_tag(&doc, t, "button") || (is_tag(&doc, t, "input") && !text_kind(nd::input_kind(&doc, t)))
+                };
+                if !by_space {
+                    self.note_scroll_key(if m.shift { crate::browser_scroll::ScrollKey::PageUp } else { crate::browser_scroll::ScrollKey::PageDown });
+                }
             }
             _ => {
                 let Some(text) = k.text.as_deref().filter(|s| !s.is_empty() && !m.ctrl && !m.alt && !m.meta) else { return Ok(()) };
@@ -674,6 +701,18 @@ impl Dom {
         if kind != "insertText" && from == to {
             return Ok(());
         }
+        // `maxlength`: the typed text is cut to fit, and nothing happens when none of it fits.
+        let fitted;
+        let text = match (kind, text, self.max_length(n)) {
+            ("insertText", Some(t), Some(max)) => {
+                fitted = crate::browser_submit::fit_units(t, max.saturating_sub(u16_len(&value) - (to - from)));
+                if fitted.is_empty() {
+                    return Ok(());
+                }
+                Some(fitted.as_str())
+            }
+            _ => text,
+        };
         if !self.input_ev(it, n, "beforeinput", kind, text)? {
             return Ok(());
         }
@@ -687,7 +726,12 @@ impl Dom {
         new.push_str(&value[b..]);
         let caret = from + u16_len(text);
         self.put_input_value(None, n, new)?;
-        self.st.borrow_mut().inputs.entry(n).or_default().edited.get_or_insert(value);
+        {
+            let mut st = self.st.borrow_mut();
+            let i = st.inputs.entry(n).or_default();
+            i.edited.get_or_insert(value);
+            i.typed = true;
+        }
         self.set_selection_range(it, n, Some(caret), Some(caret), Dir::None)?;
         self.input_ev(it, n, "input", kind, if text.is_empty() { None } else { Some(text) })?;
         Ok(())
@@ -813,6 +857,10 @@ pub struct UiOutcome {
 pub struct Frame {
     pub styles: bare_css::cascade::Styles,
     pub layout: bare_layout::fragment::Layout,
+    /// The scroll containers and the size of the page content.
+    pub areas: bare_layout::scroll::Areas,
+    /// The page bars: vertical, horizontal. The layout is narrower and shorter by their width.
+    pub bars: (bool, bool),
 }
 
 impl Browser {
@@ -822,8 +870,10 @@ impl Browser {
         let dom = self.dom.clone();
         self.it.host_scope(|it| {
             let styles = dom.cascade_now(it)?;
-            let layout = dom.layout_now(it, &styles)?;
-            Ok(Frame { styles, layout })
+            let (layout, areas, bars) = dom.layout_areas(it, &styles)?;
+            // A page that got shorter (or a box that is not a container now) puts its offsets back in range.
+            dom.clamp_scroll(&styles, &layout, &areas, bars);
+            Ok(Frame { styles, layout, areas, bars })
         })
     }
 
@@ -833,7 +883,8 @@ impl Browser {
         let r = self.driven(f);
         self.dom.st.borrow_mut().ui.active = false;
         let (_, reports) = r?;
-        if always {
+        // A key that only scrolls the page changes no node: its offsets are not the page (see `ui_key`).
+        if always && !self.dom.scroll_key_set(false) {
             self.dom.bump();
         }
         // The events are freed by `collect`: keep room for the next call (the cap is `max_events`).
@@ -846,6 +897,11 @@ impl Browser {
     /// The pointer moved over `target` (the element under it, from hit testing). `None`: no element.
     pub fn ui_pointer_move(&mut self, target: Option<NodeId>, p: Pointer) -> R<UiOutcome> {
         self.ui_call(false, |d, it| d.ui_move(it, target, &p))
+    }
+
+    /// Send the `scroll` events that wait (one for each target that moved).
+    pub fn ui_scroll_events(&mut self) -> R<UiOutcome> {
+        self.ui_call(false, |d, it| d.flush_scroll(it))
     }
 
     /// The pointer left the window.
@@ -861,7 +917,10 @@ impl Browser {
 
     /// A key went down or up.
     pub fn ui_key(&mut self, k: KeyInput, down: bool) -> R<UiOutcome> {
-        self.ui_call(true, |d, it| d.ui_key(it, &k, down))
+        // Only a key down and the Space key up have a default action that may change the page. A listener that runs says so itself.
+        self.dom.scroll_key_set(true);
+        let always = down || k.code == "Space";
+        self.ui_call(always, |d, it| d.ui_key(it, &k, down))
     }
 
     /// Is `node` an `<input>` that takes text and that the user can edit?

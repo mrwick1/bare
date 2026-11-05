@@ -24,7 +24,8 @@ use bare_layout::font::{self, Metrics};
 use bare_layout::fragment::Kind;
 use bare_paint::canvas::{Canvas, IRect};
 use bare_paint::display::argb;
-use bare_paint::Painter;
+use bare_paint::{Painter, Scroll, View};
+use crate::browser_scroll::{Align, Geo};
 use bare_window::{App, Control, Cursor, Event};
 use std::time::{Duration, Instant};
 
@@ -56,6 +57,10 @@ pub struct Page {
     painter: Painter,
     canvas: Canvas,
     pointer: Pointer,
+    /// Is the display list of `frame` built? A scroll draws it again with other offsets and builds nothing.
+    built: bool,
+    /// The text fields of `frame`, found when its display list was built (a pass over all the fragments).
+    inputs: Vec<NodeId>,
     /// Listener errors and render errors, kept for tests. The first of each also goes to stderr.
     pub errors: Vec<String>,
     started: Instant,
@@ -124,6 +129,36 @@ fn field(f: &Frame, doc: &Document, n: NodeId, text: &str, focus_end: Option<u32
     Some(Field { x, baseline, clip, m, color: argb(style.color(Property::TextColor)), text: shown, scroll })
 }
 
+/// Move the geometry of field `n` to where it is drawn now: the page and the scroll containers around it have offsets, and
+/// those containers clip it (a fixed box does not move with the page).
+fn place(f: &Frame, doc: &Document, scroll: &Scroll, n: NodeId, fld: &mut Field) {
+    let fixed = |n: NodeId| f.styles.style(n).is_some_and(|s| s.get(Property::Position) == bare_css::values::Value::Keyword(bare_css::values::Keyword::Fixed));
+    let (mut chain, mut pinned) = (Vec::new(), fixed(n));
+    let mut cur = doc.parent(n);
+    while let Some(a) = cur.filter(|_| !pinned) {
+        if f.areas.get(a).is_some() {
+            chain.push(a);
+        }
+        pinned = fixed(a);
+        cur = doc.parent(a);
+    }
+    // From the outermost box in: each clips what is inside it, at the place that the offsets outside it leave.
+    let mut off = if pinned { (0, 0) } else { (scroll.x.round() as i32, scroll.y.round() as i32) };
+    let mut clip: Option<IRect> = None;
+    for &a in chain.iter().rev() {
+        let area = f.areas.get(a).expect("listed");
+        let c = area.client();
+        let r = IRect { x0: area.pad.x.floor() as i32 - off.0, y0: area.pad.y.floor() as i32 - off.1, x1: (area.pad.x + c.0).ceil() as i32 - off.0, y1: (area.pad.y + c.1).ceil() as i32 - off.1 };
+        clip = Some(clip.map_or(r, |k| k.intersect(r)));
+        let o = scroll.of(a);
+        off = (off.0 + o.0.round() as i32, off.1 + o.1.round() as i32);
+    }
+    fld.x -= off.0 as f32;
+    fld.baseline -= off.1;
+    let moved = IRect { x0: fld.clip.x0 - off.0, y0: fld.clip.y0 - off.1, x1: fld.clip.x1 - off.0, y1: fld.clip.y1 - off.1 };
+    fld.clip = clip.map_or(moved, |k| moved.intersect(k));
+}
+
 impl Page {
     pub fn new(source: Source, viewport: (u32, u32)) -> Page {
         Page {
@@ -132,6 +167,8 @@ impl Page {
             painter: Painter::new(),
             canvas: Canvas::new(viewport.0.max(1), viewport.1.max(1)),
             pointer: Pointer::default(),
+            built: false,
+            inputs: Vec::new(),
             errors: Vec::new(),
             started: Instant::now(),
             first_frame: None,
@@ -165,7 +202,10 @@ impl Page {
         if self.frame.is_none() {
             let r = self.browser().map(|b| b.render());
             match r {
-                Some(Ok(f)) => self.frame = Some(f),
+                Some(Ok(f)) => {
+                    self.frame = Some(f);
+                    self.built = false;
+                }
                 Some(Err(e)) => self.note(format!("render: {e:?}")),
                 None => {}
             }
@@ -185,7 +225,8 @@ impl Page {
         let doc = self.browser()?.document();
         let doc = doc.borrow();
         let f = self.frame.as_ref()?;
-        bare_paint::hit::hit_test(&doc, &f.styles, &f.layout, x as f32, y as f32)
+        let scroll = self.source.browser()?.scroll();
+        bare_paint::hit::hit_test_scrolled(&doc, &f.styles, &f.layout, &f.areas, &scroll, x as f32, y as f32)
     }
 
     /// The caret offset for a press at `x` in text field `n`.
@@ -197,8 +238,18 @@ impl Page {
         let focus_end = b.input_selection(n).map(|s| s.1);
         let doc = b.document();
         let doc = doc.borrow();
-        let f = field(frame.as_ref()?, &doc, n, &value, focus_end)?;
+        let fr = frame.as_ref()?;
+        let mut f = field(fr, &doc, n, &value, focus_end)?;
+        place(fr, &doc, &b.scroll(), n, &mut f);
         Some(offset_at(&f.text, x as f32 - f.x + f.scroll, &f.m))
+    }
+
+    /// Which document is the page now? A node of an old one means nothing after a navigation.
+    fn doc_id(&mut self) -> usize {
+        match &self.source {
+            Source::Session(s) => s.documents(),
+            Source::Browser(_) => 0,
+        }
     }
 
     fn cursor_over(&mut self, n: Option<NodeId>) -> Cursor {
@@ -230,7 +281,7 @@ impl Page {
                 SessionStop::LoadFailed(why) => Some(why),
                 _ => None,
             },
-            Source::Browser(b) => b.drain().and_then(|_| b.run_scheduled_tasks(1000)).err().map(|e| format!("{e:?}")),
+            Source::Browser(b) => b.drain().and_then(|_| b.run_navigation_tasks()).and_then(|_| b.run_scheduled_tasks(1000)).err().map(|e| format!("{e:?}")),
         };
         if let Some(f) = fatal {
             self.note(format!("page: {f}"));
@@ -263,12 +314,12 @@ impl Page {
             Event::PointerMove { x, y, buttons, mods: m } => {
                 self.pointer = Pointer { x, y, buttons, mods: mods(m) };
                 let target = self.hit(x, y);
-                let p = self.pointer;
+                let (p, doc) = (self.pointer, self.doc_id());
                 let r = self.browser().map(|b| b.ui_pointer_move(target, p));
                 if let Some(r) = r {
                     h.redraw = self.after(r);
                 }
-                h.cursor = Some(self.cursor_over(target));
+                h.cursor = Some(if self.doc_id() == doc { self.cursor_over(target) } else { Cursor::Default });
             }
             Event::PointerButton { x, y, button, buttons, pressed, mods: m } => {
                 self.pointer = Pointer { x, y, buttons, mods: mods(m) };
@@ -277,13 +328,17 @@ impl Page {
                     Some(n) if pressed && button == 0 && self.browser().is_some_and(|b| b.is_text_input(n)) => self.caret_at(n, x),
                     _ => None,
                 };
-                let p = self.pointer;
+                let (p, doc) = (self.pointer, self.doc_id());
                 let r = self.browser().map(|b| b.ui_pointer_button(target, p, button, pressed, caret));
                 if let Some(r) = r {
                     h.redraw = self.after(r);
                 }
-                // The page under the pointer may have changed.
-                h.cursor = Some(self.cursor_over(target));
+                // The back and forward buttons of a mouse.
+                if !pressed && (button == 3 || button == 4) {
+                    h.redraw |= self.history_go(if button == 3 { -1 } else { 1 });
+                }
+                // The page under the pointer may have changed, or be another document.
+                h.cursor = Some(if self.doc_id() == doc { self.cursor_over(target) } else { Cursor::Default });
             }
             Event::PointerLeave => {
                 let p = self.pointer;
@@ -292,37 +347,68 @@ impl Page {
                     h.redraw = self.after(r);
                 }
             }
+            Event::Wheel { x, y, dx, dy, .. } => {
+                // Only a scroll container can take the wheel before the page: with none, the hit test would find nothing to use.
+                let target = if self.frame_now().is_some_and(|f| !f.areas.list.is_empty()) { self.hit(x, y) } else { None };
+                if self.scroll_with(|g, s| g.wheel(s, target, dx as f32, dy as f32)) {
+                    h.redraw = true;
+                    self.send_scroll_events();
+                }
+            }
             Event::Key { key, code, pressed, repeat, text, mods: m } => {
+                let tab = pressed && key == "Tab";
+                let key_name = key.clone();
+                let before = if tab { self.browser().and_then(|b| b.active_element().ok().flatten()) } else { None };
                 let k = KeyInput { key, code: code.to_string(), text, repeat, mods: mods(m) };
                 let r = self.browser().map(|b| b.ui_key(k, pressed));
                 if let Some(r) = r {
                     h.redraw = self.after(r);
+                }
+                if pressed && m.alt && (key_name == "ArrowLeft" || key_name == "ArrowRight") {
+                    h.redraw |= self.history_go(if key_name == "ArrowLeft" { -1 } else { 1 });
+                }
+                if pressed {
+                    if let Some(k) = self.browser().and_then(|b| b.take_scroll_key()) {
+                        h.redraw |= self.scroll_with(|g, s| g.key(s, k));
+                    }
+                    // Tab to a field that is out of the window: scroll it in (Chrome centers it when none of it shows).
+                    let now = if tab { self.browser().and_then(|b| b.active_element().ok().flatten()) } else { None };
+                    if let Some(n) = now.filter(|&n| Some(n) != before) {
+                        h.redraw |= self.scroll_with(|g, s| g.reveal(s, n, Align::IfNeeded, Align::IfNeeded));
+                    }
+                    self.send_scroll_events();
                 }
             }
         }
         h
     }
 
-    /// Paint the page into the canvas, then the fields.
+    /// Paint the page into the canvas, then the fields. The display list is built once for a frame; a scroll draws it again.
     pub fn paint(&mut self) -> &[u32] {
         self.frame_now();
-        let Page { source, frame, painter, canvas, .. } = self;
+        let Page { source, frame, painter, canvas, built, inputs, .. } = self;
         let b = source.browser();
         if let (Some(b), Some(f)) = (b, frame.as_ref()) {
             let focus = b.active_element().ok().flatten();
+            let scroll = b.scroll().clone();
             let doc = b.document();
             let doc = doc.borrow();
-            let inputs: Vec<NodeId> = f.layout.fragments.iter().filter(|g| g.kind == Kind::Box && doc.is_html(g.node, "input") && b.is_text_input(g.node)).map(|g| g.node).collect();
-            // Paint draws the placeholder of an empty field. The text, the selection and the caret are drawn here.
-            painter.list.hosted.clear();
-            painter.list.hosted.extend(inputs.iter().map(|&n| (n, !b.input_value(n).unwrap_or_default().is_empty())));
-            painter.paint(&doc, &f.styles, &f.layout, canvas);
-            for n in inputs {
+            if !*built {
+                *inputs = f.layout.fragments.iter().filter(|g| g.kind == Kind::Box && doc.is_html(g.node, "input") && b.is_text_input(g.node)).map(|g| g.node).collect();
+                // Paint draws the placeholder of an empty field. The text, the selection and the caret are drawn here.
+                painter.list.hosted.clear();
+                painter.list.hosted.extend(inputs.iter().map(|&n| (n, !b.input_value(n).unwrap_or_default().is_empty())));
+                painter.build(&doc, &f.styles, &f.layout, &f.areas, (canvas.width, canvas.height));
+                *built = true;
+            }
+            painter.draw_view(canvas, Some(&View { scroll: &scroll, areas: &f.areas, bars: f.bars }));
+            for &n in inputs.iter() {
                 let value = b.input_value(n).unwrap_or_default();
                 let sel = b.input_selection(n);
                 let focused = focus == Some(n);
                 let end = sel.filter(|_| focused).map(|s| if s.2 == "backward" { s.0 } else { s.1 });
-                let Some(fld) = field(f, &doc, n, &value, end) else { continue };
+                let Some(mut fld) = field(f, &doc, n, &value, end) else { continue };
+                place(f, &doc, &scroll, n, &mut fld);
                 Page::draw_field(painter, canvas, &fld, sel.filter(|_| focused));
             }
         } else {
@@ -330,6 +416,44 @@ impl Page {
         }
         self.first_frame.get_or_insert_with(|| self.started.elapsed());
         &self.canvas.pixels
+    }
+
+    /// Run `f` on the page geometry and a copy of the offsets; keep the offsets when it says that it moved something.
+    fn scroll_with(&mut self, f: impl FnOnce(&Geo, &mut Scroll) -> bool) -> bool {
+        self.frame_now();
+        let Page { source, frame, canvas, .. } = self;
+        let (Some(b), Some(fr)) = (source.browser(), frame.as_ref()) else { return false };
+        let mut s = b.scroll().clone();
+        let moved = {
+            let doc = b.document();
+            let doc = doc.borrow();
+            f(&Geo { doc: &doc, styles: &fr.styles, layout: &fr.layout, areas: &fr.areas, window: (canvas.width as f32, canvas.height as f32), bars: fr.bars }, &mut s)
+        };
+        if moved {
+            b.set_scroll(s);
+        }
+        moved
+    }
+
+    /// Go back (`-1`) or forward (`1`) in the history: inside the document, or to the neighbor document of the session.
+    fn history_go(&mut self, delta: i32) -> bool {
+        let r = self.browser().map(|b| b.history_go(delta));
+        if let Some(Err(e)) = r {
+            self.note(format!("history: {e:?}"));
+            return false;
+        }
+        self.settle();
+        true
+    }
+
+    /// Send the `scroll` events that a scroll queued, now (one for each target), instead of at the next task.
+    fn send_scroll_events(&mut self) {
+        if self.browser().is_some_and(|b| b.scroll_pending()) {
+            let r = self.browser().map(|b| b.ui_scroll_events());
+            if let Some(r) = r {
+                self.after(r);
+            }
+        }
     }
 
     fn draw_field(painter: &mut Painter, canvas: &mut Canvas, f: &Field, sel: Option<(u32, u32, &str)>) {

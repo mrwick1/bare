@@ -20,14 +20,21 @@
 //! The cost is one pass over the fragments (no allocation): the fragments are in tree order, a context that clips skips its
 //! inside when the point is outside, and nothing else skips, because a box can paint outside its parent.
 //!
-//! Gaps: no `pointer-events`, no transforms, no scroll offsets (S4 topic 5 adds them: the caller subtracts them first),
-//! no `clip-path` or border radius (a point in the rounded-off corner still hits).
+//! Scrolling (S4 topic 5): `hit_test_scrolled` takes the scroll offsets. The point is in window coordinates. The page offset
+//! is added to it for the boxes of the page, and the offset of a scroll container is added when the walk goes into it, so a
+//! click inside a scrolled box or below the fold hits what is drawn there. A `position: fixed` box is hit with the window
+//! point, as `Painter::draw_view` draws it. A point on a scrollbar of a container hits the container, not what is behind.
+//!
+//! Gaps: no `pointer-events`, no transforms, no `clip-path` or border radius (a point in the rounded-off corner still hits).
 
 use bare_css::cascade::{ComputedStyle, Styles};
 use bare_css::values::{Keyword, Property, Value};
 use bare_html::dom::{Document, NodeData, NodeId};
 use bare_layout::boxes::{Kind, Tree};
 use bare_layout::fragment::{Fragment, Kind as FragmentKind, Layout, Rect};
+use bare_layout::scroll::Areas;
+
+use crate::Scroll;
 
 /// The layers of one context, from the bottom (the order of `display.rs`).
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -53,22 +60,32 @@ const MAX_DEPTH: usize = 400;
 
 /// The topmost element at `(x, y)` in page coordinates. `None` when the page has no layout.
 pub fn hit_test(doc: &Document, styles: &Styles, layout: &Layout, x: f32, y: f32) -> Option<NodeId> {
+    hit(doc, styles, layout, None, (x, y), (x, y))
+}
+
+/// The topmost element at the window point `(x, y)` of a page that is scrolled by `scroll`.
+pub fn hit_test_scrolled(doc: &Document, styles: &Styles, layout: &Layout, areas: &Areas, scroll: &Scroll, x: f32, y: f32) -> Option<NodeId> {
+    hit(doc, styles, layout, Some((areas, scroll)), (x + scroll.x.round(), y + scroll.y.round()), (x, y))
+}
+
+fn hit(doc: &Document, styles: &Styles, layout: &Layout, scrolled: Option<(&Areas, &Scroll)>, page: (f32, f32), window: (f32, f32)) -> Option<NodeId> {
     let tree = Tree::new(doc, styles);
     let root = tree.root()?;
     let frags = &layout.fragments;
     if frags.is_empty() {
         return None;
     }
-    let h = Hit { tree, doc, frags, x, y };
-    Some(h.context(0, 0).unwrap_or(root))
+    let h = Hit { tree, doc, frags, scrolled, window };
+    Some(h.context(0, 0, page).unwrap_or(root))
 }
 
 struct Hit<'a> {
     tree: Tree<'a>,
     doc: &'a Document,
     frags: &'a [Fragment],
-    x: f32,
-    y: f32,
+    scrolled: Option<(&'a Areas, &'a Scroll)>,
+    /// The point in window coordinates: where a fixed box is hit.
+    window: (f32, f32),
 }
 
 /// The best candidate so far: the layer, then the place in tree order.
@@ -83,8 +100,8 @@ fn offer(best: &mut Best, key: (Phase, usize), node: Option<NodeId>) {
 }
 
 impl Hit<'_> {
-    fn inside(&self, r: Rect) -> bool {
-        self.x >= r.x && self.x < r.x + r.w && self.y >= r.y && self.y < r.y + r.h
+    fn inside(&self, p: (f32, f32), r: Rect) -> bool {
+        p.0 >= r.x && p.0 < r.x + r.w && p.1 >= r.y && p.1 < r.y + r.h
     }
 
     fn visible(&self, style: &ComputedStyle) -> bool {
@@ -110,19 +127,31 @@ impl Hit<'_> {
     }
 
     /// The topmost element inside the context that starts at the fragment `i`, or `None`.
-    fn context(&self, i: usize, depth: usize) -> Option<NodeId> {
+    fn context(&self, i: usize, depth: usize, p: (f32, f32)) -> Option<NodeId> {
         if depth >= MAX_DEPTH {
             return None;
         }
         let f = self.frags[i];
         let style = self.tree.style(f.node);
         let mut best: Best = None;
-        if self.visible(style) && self.inside(f.rect) {
+        if self.visible(style) && self.inside(p, f.rect) {
             offer(&mut best, (Phase::Blocks, i), Some(f.node));
         }
         // The inside of a box that clips is reached only through its padding box.
-        if i > 0 && clips(style) && !self.inside(padding_box(&f, style)) {
+        if i > 0 && clips(style) && !self.inside(p, padding_box(&f, style)) {
             return best.map(|(_, n)| n);
+        }
+        // Inside a scroll container the point moves with its offset. A point on one of its scrollbars is the container's.
+        let mut p = p;
+        if i > 0 && clips(style) && let Some((areas, scroll)) = self.scrolled {
+            if let Some(a) = areas.get(f.node) {
+                let bar = bare_layout::block::SCROLLBAR;
+                if (a.bars.0 && p.0 >= a.pad.x + a.pad.w - bar) || (a.bars.1 && p.1 >= a.pad.y + a.pad.h - bar) {
+                    return best.map(|(_, n)| n);
+                }
+            }
+            let (sx, sy) = scroll.of(f.node);
+            p = (p.0 + sx.round(), p.1 + sy.round());
         }
         let end = f.end as usize;
         let mut j = i + 1;
@@ -133,44 +162,45 @@ impl Hit<'_> {
                     let style = self.tree.style(g.node);
                     match self.layer(&g, style) {
                         Layer::Block => {
-                            if self.visible(style) && self.inside(g.rect) {
+                            if self.visible(style) && self.inside(p, g.rect) {
                                 offer(&mut best, (Phase::Blocks, j), Some(g.node));
                             }
                             j += 1;
                         }
                         Layer::Inline => {
-                            if self.visible(style) && self.inside(g.rect) {
+                            if self.visible(style) && self.inside(p, g.rect) {
                                 offer(&mut best, (Phase::Lines, j), Some(g.node));
                             }
                             j += 1;
                         }
                         Layer::Atomic => {
-                            offer(&mut best, (Phase::Lines, j), self.context(j, depth + 1));
+                            offer(&mut best, (Phase::Lines, j), self.context(j, depth + 1, p));
                             j = g.end as usize;
                         }
                         Layer::Float => {
-                            offer(&mut best, (Phase::Floats, j), self.context(j, depth + 1));
+                            offer(&mut best, (Phase::Floats, j), self.context(j, depth + 1, p));
                             j = g.end as usize;
                         }
                         Layer::Positioned => {
-                            offer(&mut best, (Phase::Positioned, j), self.context(j, depth + 1));
+                            let at = if self.scrolled.is_some() && g.kind == FragmentKind::Box && self.tree.kind(g.node) != Kind::Inline && self.tree.position(g.node) == Keyword::Fixed { self.window } else { p };
+                            offer(&mut best, (Phase::Positioned, j), self.context(j, depth + 1, at));
                             j = g.end as usize;
                         }
                         Layer::Clipped => {
-                            offer(&mut best, (Phase::Blocks, j), self.context(j, depth + 1));
+                            offer(&mut best, (Phase::Blocks, j), self.context(j, depth + 1, p));
                             j = g.end as usize;
                         }
                     }
                 }
                 FragmentKind::Text { .. } => {
-                    if self.inside(g.rect) && self.visible(self.tree.style(g.node)) {
+                    if self.inside(p, g.rect) && self.visible(self.tree.style(g.node)) {
                         // A text node is never the target of a pointer event: the element around it is.
                         offer(&mut best, (Phase::Lines, j), self.doc.parent(g.node));
                     }
                     j += 1;
                 }
                 FragmentKind::Marker { .. } => {
-                    if self.inside(g.rect) && self.visible(self.tree.style(g.node)) {
+                    if self.inside(p, g.rect) && self.visible(self.tree.style(g.node)) {
                         offer(&mut best, (Phase::Lines, j), Some(g.node));
                     }
                     j += 1;
@@ -210,6 +240,7 @@ mod tests {
     use super::*;
     use bare_css::cascade::{Origin, RuleSet, Source, UA_CSS};
     use bare_html::tree;
+    use crate::Scroll;
 
     const W: u32 = 300;
     const H: u32 = 400;
@@ -238,6 +269,27 @@ mod tests {
     impl Page {
         fn at(&self, x: f32, y: f32) -> String {
             let n = hit_test(&self.doc, &self.styles, &self.layout, x, y).expect("a layout");
+            self.name(n)
+        }
+
+        fn at_scrolled(&self, scroll: &Scroll, x: f32, y: f32) -> String {
+            let areas = bare_layout::scroll::areas(&self.doc, &self.styles, &self.layout);
+            let n = hit_test_scrolled(&self.doc, &self.styles, &self.layout, &areas, scroll, x, y).expect("a layout");
+            self.name(n)
+        }
+
+        fn id(&self, id: &str) -> NodeId {
+            let mut stack = vec![self.doc.root()];
+            while let Some(n) = stack.pop() {
+                if self.doc.attr(n, bare_html::dom::Atom::ID) == Some(id) {
+                    return n;
+                }
+                stack.extend(self.doc.children(n));
+            }
+            panic!("no #{id}")
+        }
+
+        fn name(&self, n: NodeId) -> String {
             match self.doc.data(n) {
                 NodeData::Element { .. } => {
                     let id = self.doc.find_atom("id").and_then(|a| self.doc.attr(n, a)).unwrap_or("");
@@ -359,5 +411,39 @@ mod tests {
         for n in names {
             assert!(checked.contains(n), "{n} has a pixel on top");
         }
+    }
+
+    #[test]
+    fn a_click_below_the_fold_hits_what_is_drawn_there() {
+        let p = page("<style>body{margin:0} div{height:100px} </style><div id=a></div><div id=b></div><div id=c></div><div id=d></div><div id=e></div>");
+        let s = Scroll { y: 250.0, ..Scroll::default() };
+        // The window shows the page from y 250: the point (10, 10) is the page point (10, 260), in #c.
+        assert_eq!(p.at_scrolled(&s, 10.0, 10.0), "c");
+        assert_eq!(p.at_scrolled(&s, 10.0, 160.0), "e", "410 is in the last box (400..500)");
+        assert_eq!(p.at_scrolled(&Scroll::default(), 10.0, 160.0), "b");
+    }
+
+    #[test]
+    fn a_click_in_a_scrolled_container_hits_the_scrolled_content_and_the_clip_still_cuts() {
+        let p = page("<style>body{margin:0} #s{overflow:hidden;width:100px;height:50px;margin:20px} i{display:block;height:30px} </style><div id=s><i id=i1></i><i id=i2></i><i id=i3></i><i id=i4></i></div><p id=after>after");
+        let mut s = Scroll::default();
+        assert_eq!(p.at_scrolled(&s, 30.0, 25.0), "i1");
+        s.nodes.insert(p.id("s"), (0.0, 60.0));
+        assert_eq!(p.at_scrolled(&s, 30.0, 25.0), "i3", "scrolled by 60: the third item (60..90) is at the top of the box (y 20)");
+        assert_eq!(p.at_scrolled(&s, 30.0, 60.0), "i4");
+        assert_eq!(p.at_scrolled(&s, 30.0, 80.0), "body", "below the box (20..70) the clip hides the 4th item: the page is there");
+        assert_eq!(p.at_scrolled(&s, 10.0, 95.0), "after");
+    }
+
+    #[test]
+    fn a_fixed_box_is_hit_where_it_is_drawn_and_a_scrollbar_is_the_container() {
+        let p = page("<style>body{margin:0} #t{height:900px} #f{position:fixed;left:10px;top:10px;width:40px;height:40px} #s{overflow:auto;width:100px;height:50px;margin-top:100px} #in{height:200px;width:100px}</style><div id=t></div><div id=f></div><div id=s><div id=in></div></div>");
+        let s = Scroll { y: 500.0, ..Scroll::default() };
+        assert_eq!(p.at_scrolled(&s, 20.0, 20.0), "f", "the fixed box does not move with the page");
+        assert_eq!(p.at_scrolled(&s, 70.0, 20.0), "t");
+        // The box #s is at page y 1000..1050 with a bar at its right: x 85..100.
+        let s = Scroll { y: 960.0, ..Scroll::default() };
+        assert_eq!(p.at_scrolled(&s, 50.0, 60.0), "in");
+        assert_eq!(p.at_scrolled(&s, 90.0, 60.0), "s", "on the scrollbar: the container");
     }
 }

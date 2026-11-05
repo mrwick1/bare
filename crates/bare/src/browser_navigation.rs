@@ -29,7 +29,7 @@
 //!   current URL does not change until the loader calls `set_document_url`.
 //!
 //! Gates: no `onpopstate` property handler, no `PopStateEvent`/`HashChangeEvent` classes, no `history.length` cap other
-//! than `max_history_entries`, no scroll restoration (the `scrollRestoration` value is only stored), no `location.ancestorOrigins`,
+//! than `max_history_entries`, no scroll restoration inside one document (the `scrollRestoration` value is only stored; the session restores the scroll of a document that a traversal loads again), no `location.ancestorOrigins`,
 //! no `document.referrer`/`domain`, no `storage` event. Not compared with Chrome except through Node's `URL` (see
 //! `tools/js/navigation_check.sh`): history, location and storage are checked against hand-written structural expectations.
 //!
@@ -101,6 +101,16 @@ pub enum NavigationKind {
     Replace,
     /// `location.reload()` and `history.go(0)`: `url` is the current URL.
     Reload,
+    /// `history.go(n)` past the first or the last entry of this document, when the session keeps a history of documents
+    /// (`Browser::cross_document_history`). The number is how many entries past the end the target is. `url` is the current URL.
+    Traverse(i32),
+}
+
+/// The body of a form `POST`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Body {
+    pub content_type: String,
+    pub bytes: Vec<u8>,
 }
 
 /// A document load that script asked for. The loader decides what to do (this module never loads).
@@ -111,6 +121,8 @@ pub struct NavigationRequest {
     pub url: String,
     /// The document URL when the request was made.
     pub from: String,
+    /// `Some` for a form `POST`: the session sends it. Never sent twice.
+    pub body: Option<Body>,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -162,6 +174,8 @@ pub(crate) struct NavState {
     pub state_bytes: usize,
     pub store: WebStorage,
     pub manual_scroll: bool,
+    /// The session keeps a history of documents: `go(n)` past the end of this one is a request (`NavigationKind::Traverse`).
+    pub traverse_out: bool,
     pub halted: Option<Error>,
 }
 
@@ -272,6 +286,11 @@ impl Dom {
                     let mut n = self.nav.s.borrow_mut();
                     let to = n.cur as i64 + delta as i64;
                     if n.entries.is_empty() || to < 0 || to >= n.entries.len() as i64 {
+                        if n.traverse_out && !n.entries.is_empty() && n.requests.len() < self.nav.lim.get().max_requests {
+                            let past = if to < 0 { to } else { to - (n.entries.len() as i64 - 1) };
+                            let url = n.entries[n.cur].url.href();
+                            n.requests.push_back(NavigationRequest { kind: NavigationKind::Traverse(past as i32), from: url.clone(), url, body: None });
+                        }
                         return Ok(());
                     }
                     let old = n.entries[n.cur].url.clone();
@@ -339,7 +358,7 @@ impl Dom {
             return Err(self.lim("nav-requests"));
         }
         let kind = if replace || same { NavigationKind::Replace } else { NavigationKind::Assign };
-        self.nav.s.borrow_mut().requests.push_back(NavigationRequest { kind, url: new.href(), from: cur.href() });
+        self.nav.s.borrow_mut().requests.push_back(NavigationRequest { kind, url: new.href(), from: cur.href(), body: None });
         Ok(())
     }
 
@@ -352,13 +371,46 @@ impl Dom {
         }
     }
 
+    /// A form submission: load `action` (an empty one is the document URL) with `query` in the URL (`GET`) or as the body (`POST`).
+    /// An action that is not an http(s) URL does nothing.
+    pub(crate) fn submit_navigation(&self, it: &mut Interp<'_>, action: &str, post: bool, query: &str) -> R<()> {
+        let cur = self.cur_rec()?;
+        let rec = if action.is_empty() {
+            cur.clone()
+        } else {
+            match nu::parse(action, Some(&cur)) {
+                Ok(r) => r,
+                Err(UErr::Gate(w)) => return Err(Error::Unsupported(unsupported(w))),
+                Err(_) => return Ok(()),
+            }
+        };
+        let mut href = rec.href();
+        href.truncate(href.find('#').unwrap_or(href.len()));
+        if post {
+            if self.nav.s.borrow().requests.len() >= self.nav.lim.get().max_requests {
+                return Err(self.lim("nav-requests"));
+            }
+            let body = Body { content_type: "application/x-www-form-urlencoded".into(), bytes: query.as_bytes().to_vec() };
+            self.nav.s.borrow_mut().requests.push_back(NavigationRequest { kind: NavigationKind::Assign, url: href, from: cur.href(), body: Some(body) });
+            return Ok(());
+        }
+        href.truncate(href.find('?').unwrap_or(href.len()));
+        href.push('?');
+        href.push_str(query);
+        match nu::parse(&href, None) {
+            Ok(new) => self.navigate(it, new, false),
+            Err(UErr::Gate(w)) => Err(Error::Unsupported(unsupported(w))),
+            Err(_) => Ok(()),
+        }
+    }
+
     fn reload_request(&self) -> R<()> {
         let cur = self.cur_rec()?;
         if self.nav.s.borrow().requests.len() >= self.nav.lim.get().max_requests {
             return Err(self.lim("nav-requests"));
         }
         let href = cur.href();
-        self.nav.s.borrow_mut().requests.push_back(NavigationRequest { kind: NavigationKind::Reload, url: href.clone(), from: href });
+        self.nav.s.borrow_mut().requests.push_back(NavigationRequest { kind: NavigationKind::Reload, url: href.clone(), from: href, body: None });
         Ok(())
     }
 }
@@ -798,6 +850,20 @@ impl Browser {
     }
 
     /// The oldest document load that script asked for, if any.
+    /// The session keeps a history of documents: `history.go(n)` past the end of this document becomes a request.
+    pub fn cross_document_history(&mut self, on: bool) {
+        self.dom.nav.s.borrow_mut().traverse_out = on;
+    }
+
+    /// `history.go(delta)` as the user does it (Alt+Left, the back button of a mouse): the same queued task.
+    pub fn history_go(&mut self, delta: i32) -> R<()> {
+        if self.dom.nav.s.borrow().entries.is_empty() {
+            return Ok(());
+        }
+        self.dom.nav.s.borrow_mut().tasks.push_back(Task::Traverse(delta));
+        Ok(())
+    }
+
     pub fn take_navigation_request(&mut self) -> Option<NavigationRequest> {
         self.dom.nav.s.borrow_mut().requests.pop_front()
     }

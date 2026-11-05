@@ -124,7 +124,17 @@ fn connection(mut stream: TcpStream, handler: Handler, log: Arc<Mutex<Vec<String
         let head = String::from_utf8_lossy(&seen[..end]).to_ascii_lowercase();
         seen.drain(..end);
         let path = head.split_whitespace().nth(1).unwrap_or("/").to_string();
-        log.lock().unwrap().push(head);
+        // A request body is read and logged after the head (lowercase), so it is not taken for the next request.
+        let want = head.lines().find_map(|l| l.strip_prefix("content-length:")).and_then(|v| v.trim().parse::<usize>().ok()).unwrap_or(0);
+        while seen.len() < want {
+            match stream.read(&mut piece) {
+                Ok(0) | Err(_) => return,
+                Ok(n) => seen.extend_from_slice(&piece[..n]),
+            }
+        }
+        let body = String::from_utf8_lossy(&seen[..want]).to_ascii_lowercase();
+        seen.drain(..want);
+        log.lock().unwrap().push(format!("{head}{body}"));
         // The handler is given the path as the client wrote it (lowercase: tests use lowercase paths).
         let reply = handler(&path);
         if respond(&mut stream, reply).is_err() {

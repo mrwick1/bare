@@ -1,0 +1,43 @@
+JS var $ = function (i) { return document.getElementById(i) }; 'ok'
+JS innerWidth + 'x' + innerHeight
+JS document.documentElement.clientWidth + 'x' + document.documentElement.clientHeight
+JS document.documentElement.scrollWidth + 'x' + document.documentElement.scrollHeight
+JS $('box').clientWidth + 'x' + $('box').clientHeight + ' ' + $('box').scrollWidth + 'x' + $('box').scrollHeight
+JS $('hid').clientHeight + ' ' + $('hid').scrollHeight
+JS JSON.stringify($('tall').getBoundingClientRect())
+JS JSON.stringify($('fx').getBoundingClientRect())
+JS scrollTo(0, 300); scrollX + ',' + scrollY
+JS JSON.stringify($('tall').getBoundingClientRect())
+JS JSON.stringify($('fx').getBoundingClientRect())
+JS scrollBy(0, -50); pageYOffset
+JS scrollTo({ top: 12, left: 0 }); scrollY
+JS scrollTo(0, 99999); scrollY
+JS scrollTo(0, -5); scrollY
+JS $('box').scrollTop = 50; $('box').scrollTop
+JS JSON.stringify($('inner').getBoundingClientRect())
+JS $('box').scrollTop = 9999; $('box').scrollTop
+JS $('box').scrollLeft = 9999; $('box').scrollLeft
+JS $('box').scrollTo(10, 20); $('box').scrollLeft + ',' + $('box').scrollTop
+JS $('box').scrollBy(5, 5); $('box').scrollLeft + ',' + $('box').scrollTop
+JS $('hid').scrollTop = 40; $('hid').scrollTop
+JS $('end').scrollTop
+JS $('tall').scrollIntoView(); scrollY
+JS $('box').scrollTop = 0; $('box').scrollLeft = 0; $('inner').scrollIntoView(); scrollY + ',' + $('box').scrollTop
+JS scrollTo(0, 0); $('box').scrollTop = 0; $('box').scrollLeft = 0; 'ok'
+WAIT
+JS __n = { win: 0, doc: 0, box: 0, hid: 0 }; 'ok'
+JS scrollTo(0, 10); scrollTo(0, 20); scrollBy(0, 5); $('box').scrollTop = 1; $('box').scrollTop = 2; JSON.stringify(__n)
+WAIT
+JS JSON.stringify(__n)
+JS scrollTo(scrollX, scrollY); $('box').scrollTop = $('box').scrollTop; 'ok'
+WAIT
+JS JSON.stringify(__n)
+JS scrollTo(0, 0); 'ok'
+WAIT
+KEY ArrowDown
+KEY PageDown
+KEY End
+KEY PageUp
+KEY Home
+KEY Space
+KEY Space+Shift
