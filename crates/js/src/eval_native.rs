@@ -118,6 +118,7 @@ impl<'p> Interp<'p> {
                     Value::Object(o) if self.funcs.contains_key(&o) => "Function",
                     Value::Object(o) if self.ext.regexps.contains_key(&o) => "RegExp",
                     Value::Object(o) if h!(self, self.heap.is_array(o)) => "Array",
+                    Value::Object(o) if self.date.times.contains_key(&o) => "Date",
                     Value::Object(_) => "Object",
                 };
                 self.sc_object_to_string(this, tag)
@@ -283,6 +284,7 @@ impl<'p> Interp<'p> {
             Nat::Ao(f) => self.call_ao(f, this, args),
             Nat::Sc(f) => self.call_sc(f, this, args, is_new),
             Nat::Refl(f) => self.call_refl(f, args),
+            Nat::Date(f) => self.call_date(f, this, args, is_new),
         }
     }
 

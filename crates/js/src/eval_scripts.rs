@@ -74,6 +74,7 @@ impl<'p> Interp<'p> {
         it.install_promise()?;
         it.install_binary()?;
         it.install_reflect()?;
+        it.install_date()?;
         Ok(it)
     }
 

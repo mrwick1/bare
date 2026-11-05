@@ -9,6 +9,9 @@
 //! - Clock: `Monotonic` (default, `Instant`) or `Virtual` (`Browser::use_virtual_clock`). A virtual clock moves only
 //!   when the driver moves it, so tests never sleep. `performance.now()` and `Event.timeStamp` read the same clock.
 //!   `advance_to(t)` steps the clock to each due task in order (a task takes zero virtual time), then to `t`.
+//! - The wall clock of `Date.now()` is not this clock. It counts ms since 1970 (`Browser::wall_clock`, default `SystemTime`) and
+//!   has its own virtual mode (`use_virtual_wall_clock_at`). Moving one never moves the other: a timer that fires at +1000 ms
+//!   of virtual scheduler time sees the same `Date.now()` as before, unless the driver also sets the wall clock.
 //! - A task runs in one `host_scope` (a fresh step budget, the normal call-depth guard), then a microtask checkpoint.
 //!   Microtasks that the checkpoint leaves (a `DrainJobs` cap) run first in the next pump.
 //! - `run_scheduled_tasks(max)` runs at most `max` due tasks and returns. It never sleeps. `Pump::next_due` says when
@@ -54,7 +57,7 @@
 
 use crate::browser::*;
 use bare_html::dom::NodeId;
-use bare_js::eval::{Error, Interp};
+use bare_js::eval::{Error, Interp, WallClock};
 use bare_js::value::{ObjId, Value};
 use std::collections::{BTreeMap, HashMap, VecDeque};
 
@@ -817,6 +820,24 @@ impl Browser {
     /// True after `use_virtual_clock`: the driver moves time, nothing sleeps.
     pub fn uses_virtual_clock(&self) -> bool {
         self.dom.sched.borrow().virtual_now.is_some()
+    }
+
+    /// The wall clock that `Date.now()` and `new Date()` read, in ms since 1970-01-01T00:00:00Z. The default is the system clock.
+    /// It is separate from the scheduler clock above (`performance.now()`, timers), which counts from the time origin: neither
+    /// one moves the other. `use_virtual_clock` does not touch it.
+    pub fn wall_clock(&self) -> WallClock {
+        self.it.wall_clock()
+    }
+
+    /// Fix the wall clock at `epoch_ms` (a whole number of ms within +-8.64e15, else `Unsupported`). It stays there until the driver
+    /// sets another value. It may move backward, as a real wall clock can. For deterministic tests.
+    pub fn use_virtual_wall_clock_at(&mut self, epoch_ms: f64) -> R<()> {
+        self.it.set_wall_clock(WallClock::Virtual(epoch_ms))
+    }
+
+    /// Back to the system clock.
+    pub fn use_system_wall_clock(&mut self) {
+        self.it.set_wall_clock(WallClock::System).expect("the system clock is always valid");
     }
 
     /// Milliseconds since the time origin (what `performance.now()` gives now).
