@@ -348,7 +348,7 @@ impl<'p> Interp<'p> {
             self.spend(all.len() as u64)?;
             let mut list = Vec::new();
             for k in all {
-                if !matches!(k, PropertyKey::Symbol(_)) && hx!(self, self.heap.get_own_property(o, k)).is_some_and(|p| p.enumerable()) {
+                if !matches!(k, PropertyKey::Symbol(_)) && hx!(self, self.heap.peek_own_property(o, k)).is_some_and(|p| p.enumerable()) {
                     list.push(k);
                 }
             }

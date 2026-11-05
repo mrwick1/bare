@@ -1654,7 +1654,7 @@ Bytes per paused call, before and after: plain `await k` 902 to 685, a switch pa
 
 The same measurements found more memory to remove later:
 
-- A function object with its `prototype` takes 896 B; an arrow takes 582 B. A non-arrow function makes its `prototype` object at once. V8 makes it only when a script reads it.
+- A function object with its `prototype` takes 896 B; an arrow takes 582 B. A non-arrow function makes its `prototype` object at once. V8 makes it only when a script reads it. See [Lazy function prototype](#lazy-function-prototype).
 - After a collection the side tables keep their largest capacity. See [Side tables after a collect](#side-tables-after-a-collect).
 - Each `let` block makes an environment, even when no closure captures it.
 
@@ -1683,3 +1683,38 @@ Memory still held after a burst of 60,000 items died, after two collects (counti
 | plain objects | 0.8 MiB (4.3%) | 0.8 MiB (4.3%) |
 
 Steady churn does not shrink and regrow: 40 rounds of a 10,000-item burst with a collect after each have the same peak (48.6 MiB) on both builds. Collect time is within 10% (275-291 ms vs 283-307 ms over 3 runs). Total time was 10-15% lower (hypothesis: a shorter environment table makes the per-collect scan cheaper; not verified).
+
+## Lazy function prototype
+
+A census of the cached login page found 1,854 ordinary functions. 1,523 of them were live, and the scripts never read the `prototype` of 1,501 (98.6%). Those unused objects were 25% of the live heap objects. V8 makes a function's prototype only when a script reads it. bare now does the same.
+
+A new ordinary function gets its `prototype` property with the correct attributes (writable, not enumerable, not configurable) and a placeholder value, and the object gets the `lazy_proto` flag. The `Object` stays 80 B; a compile-time assert checks this. The prototype object and its `constructor` are made by `Heap::unlazy` on the first path that reads or redefines the own `prototype` value:
+
+- `lookup` (and so `get`, `f.prototype`, `new f`, `instanceof`, a chain through `Object.create(f)`);
+- `get_own_property` (`getOwnPropertyDescriptor` and the evaluator paths that read a value);
+- `define_own_property` (assignment and `defineProperty`; a new value replaces the object, which is then garbage).
+
+Key lists, `in`, `hasOwnProperty` and `delete` (always rejected, because the property is not configurable) need no object. Paths that read only the attributes or trace values (`collect`, enumerability checks in `Object.keys`, `values`, `entries`, `assign`, spread, for-in, JSON and fetch bodies) use `peek_own_property`, which never makes the object. The placeholder is `undefined`, so tracing it costs nothing.
+
+The check runs on the object that each path already fetched. `is_lazy` tests the flag first, so other objects pay one flag test. A first version fetched the object a second time and cost +10% instructions on the `loop` row; this version costs +0.02% to +0.67%.
+
+Results, release, main d79a592 vs this change:
+
+- Bytes per kept function expression (counting global allocator, 50,000 functions): 896 to 582 B, the same as an arrow. A function whose `prototype` is read still takes 896 B.
+- The cached login page (saved bundles over loopback): live objects 7,849 to 6,019 (-23%), allocated bytes 11.39 to 11.03 MB (-3.1%). The parsed scripts hold most of the bytes.
+- Peak RSS at 100x: `promise_load` chain 93 to 64 MiB, fanout 99 to 70, thenable 283 to 226, finally 345 to 312, reject 209 to 151, ctor 339 to 261, closures 220 to 161. `eval_load` closures (10x) 52.7 to 37.2 MiB. `async_load` rows are equal; they use arrows and async functions, which have no `prototype`.
+
+10 interleaved runs per build (instructions, minimum cycles):
+
+| rows | instructions | min cycles |
+| --- | ---: | ---: |
+| `promise_load`, 7 rows at 100x | -3.8% to -13.6% | -2.2% to -11.9% |
+| `eval_load` closures, webpack (10x) | -9.3%, -2.2% | -15.0%, -2.5% |
+| `eval_load` other 6 rows (10x) | +0.03% to +0.41% | -0.4% to +1.7%; fib +2.5% (10x), +1.6% (100x) |
+| `class_load`, 6 rows (10x) | +0.26% to +0.67% | -0.6% to +2.7% |
+| `reflect_load`, 7 rows (10x) | +0.11% to +0.49% | -2.4% to +0.4% |
+| `async_load`, 8 rows (100x) | +0.02% to +0.20% | -1.5% to +0.7% |
+
+`fib` runs the same instructions (+0.03%) in more cycles. Hypothesis: code layout. Not verified.
+
+Validation: a new test failed on main at its first object count and passes now. It checks that key lists, `in` and `hasOwnProperty` make no object, that one read makes exactly one with a stable identity, and that the prototype keeps its function alive through `constructor`. Three new Node cases cover identity, order, descriptors, `new`, `instanceof`, replacement and chains. Two GC tests counted the eager prototype objects; their counts now match the lazy heap.

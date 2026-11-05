@@ -321,6 +321,8 @@ struct Object {
     is_array: bool,
     /// The payload is in `Heap::exotics` (a buffer, a view, a text codec). See `heap_binary.rs`.
     exotic: bool,
+    /// A function whose own `prototype` holds a placeholder: the object is made on first use (`Heap::unlazy`).
+    lazy_proto: bool,
     /// Dense index properties that are plain data (writable, enumerable, configurable).
     /// `None` is a hole. An index lives here or in `props`, never in both.
     elems: Vec<Option<Value>>,
@@ -328,6 +330,9 @@ struct Object {
     /// An array's `length` is the first entry.
     props: PropMap,
 }
+
+// The lazy-prototype flag fits in the padding.
+const _: () = assert!(std::mem::size_of::<Object>() <= 80);
 
 const ENTRY_BYTES: usize = std::mem::size_of::<Option<(PropertyKey, Property)>>();
 const ELEM_BYTES: usize = std::mem::size_of::<Option<Value>>();
@@ -605,6 +610,9 @@ pub struct Heap {
     /// The host that answers for the indexed properties of `new_indexed` objects. The heap owns it, so it dies with the heap.
     /// An `Rc` makes `Heap` `!Send`: a heap stays on its thread. A moved heap cannot lose its host silently.
     indexed: Option<std::rc::Rc<dyn IndexedSource>>,
+    /// `Object.prototype` and the keys `prototype` and `constructor`, for lazy function prototypes. `None`: no
+    /// object is lazy.
+    lazy: Option<(ObjId, PropertyKey, PropertyKey)>,
 }
 
 impl Default for Heap {
@@ -633,6 +641,7 @@ impl Heap {
             max_buffer_bytes: binary::DEFAULT_BUFFER_CAP,
             max_buffer_len: binary::DEFAULT_BUFFER_CAP,
             indexed: None,
+            lazy: None,
         };
         h.length = h.intern_str("length")?;
         Ok(h)
@@ -944,7 +953,7 @@ impl Heap {
             let len = PropertyKey::String(self.length);
             props.set(len, Property::Data { value: Value::Number(0.0), writable: true, enumerable: false, configurable: false });
         }
-        let o = Object { proto, extensible: true, is_array, exotic: false, elems: Vec::new(), props };
+        let o = Object { proto, extensible: true, is_array, exotic: false, lazy_proto: false, elems: Vec::new(), props };
         let cost = obj_bytes(&o);
         self.charge(cost)?;
         let (index, gn) = self.objects.alloc(o, Limit::Objects)?;
@@ -1010,8 +1019,71 @@ impl Heap {
         o.props.get(key)
     }
 
+    /// Give the heap what a lazy function prototype needs: `Object.prototype` and the keys `prototype` and
+    /// `constructor`. The realm does this once.
+    pub fn set_lazy_prototype(&mut self, object_proto: ObjId, k_prototype: PropertyKey, k_constructor: PropertyKey) -> R<()> {
+        self.obj(object_proto)?;
+        self.lazy = Some((object_proto, k_prototype, k_constructor));
+        Ok(())
+    }
+
+    /// Give the function `f` an own `prototype` (writable, not enumerable, not configurable) whose object, an
+    /// ordinary object with `constructor: f`, is made only when its value is first read or redefined. The key is
+    /// added now, so key order and `in` are as if the object existed.
+    pub fn add_lazy_prototype(&mut self, f: ObjId) -> R<()> {
+        let Some((_, kp, _)) = self.lazy else { return Err(HeapError::NeedsExecution("set_lazy_prototype first")) };
+        self.obj(f)?;
+        self.charge(ENTRY_BYTES)?;
+        self.edit(f, |ob| {
+            ob.props.set(kp, Property::Data { value: Value::Undefined, writable: true, enumerable: false, configurable: false });
+            ob.lazy_proto = true;
+        });
+        Ok(())
+    }
+
+    /// True when reading `key` of `ob` must first make its prototype object. Every path that reads or redefines an
+    /// own property value checks this on the object it already holds, so other objects pay one flag test. Key lists,
+    /// `in`, `delete` (never allowed: not configurable) and tracing do not need the object.
+    #[inline]
+    fn is_lazy(&self, ob: &Object, key: PropertyKey) -> bool {
+        ob.lazy_proto && matches!(self.lazy, Some((_, kp, _)) if kp == key)
+    }
+
+    /// Make the prototype object of the lazy function `o`. Call only when `is_lazy` is true.
+    #[cold]
+    fn unlazy(&mut self, o: ObjId) -> R<()> {
+        let Some((op, kp, kc)) = self.lazy else { return Ok(()) };
+        let p = self.alloc_object(Some(op), false)?;
+        let d = PropertyDescriptor { value: Some(Value::Object(o)), writable: Some(true), enumerable: Some(false), configurable: Some(true), ..Default::default() };
+        self.define_own_property(p, kc, &d)?;
+        self.edit(o, |ob| {
+            ob.lazy_proto = false;
+            if let Some(Property::Data { value, writable, enumerable, configurable }) = ob.props.get(kp) {
+                debug_assert!(matches!(value, Value::Undefined));
+                ob.props.set(kp, Property::Data { value: Value::Object(p), writable, enumerable, configurable });
+            }
+        });
+        Ok(())
+    }
+
     /// `Object.getOwnPropertyDescriptor`.
-    pub fn get_own_property(&self, o: ObjId, key: PropertyKey) -> R<Option<Property>> {
+    pub fn get_own_property(&mut self, o: ObjId, key: PropertyKey) -> R<Option<Property>> {
+        self.check_key(key)?;
+        let mut ob = self.obj(o)?;
+        if self.is_lazy(ob, key) {
+            self.unlazy(o)?;
+            ob = self.obj(o)?;
+        }
+        if ob.exotic && let Some(r) = self.exotic_own(o, key, true)? {
+            return Ok(r);
+        }
+        Ok(self.own(ob, key))
+    }
+
+    /// The own property as stored, without making a lazy `prototype`
+    /// object. That value reads as `undefined`; the attributes are exact.
+    /// For GC tracing and attribute checks only.
+    pub fn peek_own_property(&self, o: ObjId, key: PropertyKey) -> R<Option<Property>> {
         self.check_key(key)?;
         let ob = self.obj(o)?;
         if ob.exotic && let Some(r) = self.exotic_own(o, key, true)? {
@@ -1047,11 +1119,15 @@ impl Heap {
     }
 
     /// The first property with this key on the prototype chain, and the object that holds it.
-    pub fn lookup(&self, o: ObjId, key: PropertyKey) -> R<Option<(ObjId, Property)>> {
+    pub fn lookup(&mut self, o: ObjId, key: PropertyKey) -> R<Option<(ObjId, Property)>> {
         self.check_key(key)?;
         let mut cur = Some(o);
         while let Some(c) = cur {
-            let obj = self.obj(c)?;
+            let mut obj = self.obj(c)?;
+            if self.is_lazy(obj, key) {
+                self.unlazy(c)?;
+                obj = self.obj(c)?;
+            }
             if obj.exotic && let Some(r) = self.exotic_own(c, key, true)? {
                 return Ok(r.map(|p| (c, p)));
             }
@@ -1064,7 +1140,7 @@ impl Heap {
     }
 
     /// `o[key]` without calling anything.
-    pub fn get(&self, o: ObjId, key: PropertyKey) -> R<Get> {
+    pub fn get(&mut self, o: ObjId, key: PropertyKey) -> R<Get> {
         Ok(match self.lookup(o, key)? {
             None => Get::Value(Value::Undefined),
             Some((_, Property::Data { value, .. })) => Get::Value(value),
@@ -1162,8 +1238,12 @@ impl Heap {
     /// Errors: stale handles, a descriptor mixing data and accessor fields, an invalid array
     /// length, or a size limit.
     pub fn define_own_property(&mut self, o: ObjId, key: PropertyKey, d: &PropertyDescriptor) -> R<bool> {
-        let obj = self.obj(o)?;
+        let mut obj = self.obj(o)?;
         self.check_key(key)?;
+        if self.is_lazy(obj, key) {
+            self.unlazy(o)?;
+            obj = self.obj(o)?;
+        }
         if let Some(v) = d.value {
             self.check_value(v)?;
         }
@@ -1535,13 +1615,13 @@ mod tests {
     fn key(h: &mut Heap, s: &str) -> PropertyKey {
         h.key_from_str(s).unwrap()
     }
-    fn val(h: &Heap, o: ObjId, k: PropertyKey) -> Value {
+    fn val(h: &mut Heap, o: ObjId, k: PropertyKey) -> Value {
         match h.get(o, k).unwrap() {
             Get::Value(v) => v,
             Get::Accessor { .. } => panic!("accessor"),
         }
     }
-    fn num(h: &Heap, o: ObjId, k: PropertyKey) -> f64 {
+    fn num(h: &mut Heap, o: ObjId, k: PropertyKey) -> f64 {
         match val(h, o, k) {
             Value::Number(x) => x,
             v => panic!("{v:?}"),
@@ -1670,14 +1750,14 @@ mod tests {
         let a = key(&mut h, "a");
         assert!(matches!(h.get(o, a).unwrap(), Get::Value(Value::Undefined)));
         assert_eq!(setn(&mut h, o, a, 1.0), Set::Done);
-        assert_eq!(num(&h, o, a), 1.0);
+        assert_eq!(num(&mut h, o, a), 1.0);
         let p = h.get_own_property(o, a).unwrap().unwrap();
         assert!(matches!(p, Property::Data { writable: true, enumerable: true, configurable: true, .. }));
         let nan = f64::from_bits(0x7ff8_0000_0000_1234);
         setn(&mut h, o, a, nan);
-        assert_eq!(num(&h, o, a).to_bits(), nan.to_bits());
+        assert_eq!(num(&mut h, o, a).to_bits(), nan.to_bits());
         setn(&mut h, o, a, -0.0);
-        assert!(num(&h, o, a).is_sign_negative());
+        assert!(num(&mut h, o, a).is_sign_negative());
         assert!(h.has_own_property(o, a).unwrap());
         assert!(h.delete(o, a).unwrap());
         assert!(!h.has_own_property(o, a).unwrap());
@@ -1706,7 +1786,7 @@ mod tests {
         let w = key(&mut h, "w");
         assert!(h.define_own_property(o, w, &locked(true, true, false, 1.0)).unwrap());
         assert!(h.define_own_property(o, w, &PropertyDescriptor { value: Some(n(9.0)), writable: Some(false), ..Default::default() }).unwrap());
-        assert_eq!(num(&h, o, w), 9.0);
+        assert_eq!(num(&mut h, o, w), 9.0);
         assert!(!h.define_own_property(o, w, &PropertyDescriptor { writable: Some(true), ..Default::default() }).unwrap());
         // A configurable property can change kind; enumerable/configurable carry over.
         let c = key(&mut h, "c");
@@ -1731,7 +1811,7 @@ mod tests {
         assert!(h.define_own_property(o, ac, &PropertyDescriptor::default()).unwrap());
         let e = key(&mut h, "e");
         assert!(h.define_own_property(o, e, &PropertyDescriptor::default()).unwrap());
-        assert!(matches!(val(&h, o, e), Value::Undefined));
+        assert!(matches!(val(&mut h, o, e), Value::Undefined));
         // Non-extensible: no new keys, existing keys may change.
         h.prevent_extensions(o).unwrap();
         let nw = key(&mut h, "nw");
@@ -1801,7 +1881,7 @@ mod tests {
         for (i, &k) in ks.iter().enumerate() {
             assert_eq!(h.has_own_property(o, k).unwrap(), i % 3 == 0);
             if i % 3 == 0 {
-                assert_eq!(num(&h, o, k), i as f64);
+                assert_eq!(num(&mut h, o, k), i as f64);
             }
         }
         let want: Vec<String> = (0..200).filter(|i| i % 3 == 0).map(|i| format!("k{i}")).collect();
@@ -1822,11 +1902,11 @@ mod tests {
         let c = h.new_object(Some(b)).unwrap();
         let k = key(&mut h, "k");
         setn(&mut h, a, k, 7.0);
-        assert_eq!(num(&h, c, k), 7.0);
+        assert_eq!(num(&mut h, c, k), 7.0);
         assert!(h.has_property(c, k).unwrap());
         assert!(!h.has_own_property(c, k).unwrap());
         assert_eq!(setn(&mut h, c, k, 8.0), Set::Done); // shadows, does not write the proto
-        assert_eq!((num(&h, a, k), num(&h, c, k)), (7.0, 8.0));
+        assert_eq!((num(&mut h, a, k), num(&mut h, c, k)), (7.0, 8.0));
         // Cycles rejected: self, direct, long.
         assert!(!h.set_prototype_of(a, Some(a)).unwrap());
         assert!(!h.set_prototype_of(a, Some(c)).unwrap());
@@ -1856,7 +1936,7 @@ mod tests {
         }
         let k = key(&mut h, "k");
         setn(&mut h, root, k, 1.0);
-        assert_eq!(num(&h, cur, k), 1.0);
+        assert_eq!(num(&mut h, cur, k), 1.0);
         let c = h.collect(&[Value::Object(cur)]).unwrap();
         assert_eq!(c.objects, 0);
         assert!(!h.set_prototype_of(root, Some(cur)).unwrap());
@@ -1867,36 +1947,36 @@ mod tests {
         let mut h = Heap::default();
         let a = h.new_array(None).unwrap();
         let len = key(&mut h, "length");
-        assert_eq!(num(&h, a, len), 0.0);
+        assert_eq!(num(&mut h, a, len), 0.0);
         assert_eq!(names(&h, a), ["length"]);
         assert!(matches!(h.get_own_property(a, len).unwrap(), Some(Property::Data { writable: true, enumerable: false, configurable: false, .. })));
         setn(&mut h, a, PropertyKey::Index(2), 9.0); // leaves holes 0 and 1
-        assert_eq!(num(&h, a, len), 3.0);
+        assert_eq!(num(&mut h, a, len), 3.0);
         assert!(!h.has_own_property(a, PropertyKey::Index(0)).unwrap());
-        assert!(matches!(val(&h, a, PropertyKey::Index(1)), Value::Undefined));
+        assert!(matches!(val(&mut h, a, PropertyKey::Index(1)), Value::Undefined));
         assert_eq!(names(&h, a), ["2", "length"]);
         // Shrinking removes the elements; growing adds holes.
         assert!(h.define_own_property(a, len, &PropertyDescriptor { value: Some(n(2.0)), ..Default::default() }).unwrap());
         assert!(!h.has_own_property(a, PropertyKey::Index(2)).unwrap());
         assert_eq!(setn(&mut h, a, len, 5.0), Set::Done);
-        assert_eq!(num(&h, a, len), 5.0);
+        assert_eq!(num(&mut h, a, len), 5.0);
         assert_eq!(names(&h, a), ["length"]);
         // Length given as a numeric string, and invalid lengths.
         let s = h.intern_str("1").unwrap();
         assert!(h.define_own_property(a, len, &PropertyDescriptor { value: Some(Value::String(s)), ..Default::default() }).unwrap());
-        assert_eq!(num(&h, a, len), 1.0);
+        assert_eq!(num(&mut h, a, len), 1.0);
         for bad in [-1.0, 1.5, f64::NAN, 4294967296.0, f64::INFINITY] {
             let d = PropertyDescriptor { value: Some(n(bad)), ..Default::default() };
             assert_eq!(h.define_own_property(a, len, &d), Err(HeapError::InvalidArrayLength), "{bad}");
         }
-        assert_eq!(num(&h, a, len), 1.0);
+        assert_eq!(num(&mut h, a, len), 1.0);
         // The largest index 2^32-2 gives length 2^32-1 and uses the sparse path.
         setn(&mut h, a, PropertyKey::Index(MAX_INDEX), 1.0);
-        assert_eq!(num(&h, a, len), 4294967295.0);
+        assert_eq!(num(&mut h, a, len), 4294967295.0);
         // 2^32-1 is a plain string key, not an element.
         let big = key(&mut h, "4294967295");
         setn(&mut h, a, big, 1.0);
-        assert_eq!(num(&h, a, len), 4294967295.0);
+        assert_eq!(num(&mut h, a, len), 4294967295.0);
         assert_eq!(names(&h, a), ["0", "4294967294", "length", "4294967295"].map(String::from).iter().filter(|s| *s != "0").cloned().collect::<Vec<_>>());
         // A huge length costs no memory: it is only a number.
         assert!(h.define_own_property(a, len, &PropertyDescriptor { value: Some(n(0.0)), ..Default::default() }).unwrap());
@@ -1915,7 +1995,7 @@ mod tests {
         assert!(h.define_own_property(a, PropertyKey::Index(3), &locked(true, true, false, 3.0)).unwrap());
         let shrink = PropertyDescriptor { value: Some(n(1.0)), writable: Some(false), ..Default::default() };
         assert!(!h.define_own_property(a, len, &shrink).unwrap()); // blocked
-        assert_eq!(num(&h, a, len), 4.0);
+        assert_eq!(num(&mut h, a, len), 4.0);
         assert_eq!(names(&h, a), ["0", "1", "2", "3", "length"]);
         assert!(matches!(h.get_own_property(a, len).unwrap(), Some(Property::Data { writable: false, .. })));
         // Length is read-only now: no growth through length or index.
@@ -1946,13 +2026,13 @@ mod tests {
         assert_eq!(h.objects.get(a.index, a.gn).unwrap().elems.len(), 1);
         assert_eq!(h.objects.get(a.index, a.gn).unwrap().props.index_keys, 1); // only 5000 left sparse
         assert_eq!(names(&h, a), ["0", "5000", "length"]);
-        assert_eq!(num(&h, a, len), 5001.0);
+        assert_eq!(num(&mut h, a, len), 5001.0);
         // Deleting the last dense element trims the vector.
         assert!(h.delete(a, PropertyKey::Index(0)).unwrap());
         assert!(h.objects.get(a.index, a.gn).unwrap().elems.is_empty());
         assert!(h.delete(a, PropertyKey::Index(5000)).unwrap());
         assert_eq!(names(&h, a), ["length"]);
-        assert_eq!(num(&h, a, len), 5001.0); // delete does not shrink the length
+        assert_eq!(num(&mut h, a, len), 5001.0); // delete does not shrink the length
         // Ordinary objects take integer keys too, in numeric order.
         let o = h.new_object(None).unwrap();
         for i in [30u32, 4, 1_000_000, 4] {
@@ -2116,7 +2196,7 @@ mod tests {
         assert_eq!(h.is_extensible(ring[60]), Err(HeapError::Stale));
         assert_eq!(h.is_extensible(x), Err(HeapError::Stale));
         // Reachable data are intact.
-        assert!(val(&h, ring[0], k).strict_equals(Value::Object(ring[1])));
+        assert!(val(&mut h, ring[0], k).strict_equals(Value::Object(ring[1])));
         // No roots: everything but the permanent string goes.
         h.collect(&[]).unwrap();
         let s = h.stats();
@@ -2296,7 +2376,7 @@ mod tests {
         assert_eq!(c.objects, 2);
         check_slabs(&h);
         for i in [0, 2, 4] {
-            assert_eq!(num(&h, o[i], kn), i as f64);
+            assert_eq!(num(&mut h, o[i], kn), i as f64);
         }
         for i in [1, 3] {
             assert_eq!(h.get_prototype_of(o[i]), Err(HeapError::Stale));
@@ -2308,9 +2388,9 @@ mod tests {
         assert!(h.is_extensible(o[1]).is_err() && h.is_extensible(o[3]).is_err());
         setn(&mut h, a, kn, 100.0);
         setn(&mut h, b, kn, 200.0);
-        assert_eq!((num(&h, a, kn), num(&h, b, kn)), (100.0, 200.0));
+        assert_eq!((num(&mut h, a, kn), num(&mut h, b, kn)), (100.0, 200.0));
         for i in [0, 2, 4] {
-            assert_eq!(num(&h, o[i], kn), i as f64);
+            assert_eq!(num(&mut h, o[i], kn), i as f64);
         }
         check_slabs(&h);
     }
@@ -2352,7 +2432,7 @@ mod tests {
             assert_eq!(h.stats().object_slots, before.object_slots);
             check_slabs(&h);
             for &(o, v) in &keep {
-                assert_eq!(num(&h, o, kn), v);
+                assert_eq!(num(&mut h, o, kn), v);
             }
             for &(o, _) in live.iter().filter(|e| !keep.iter().any(|k| k.0 == e.0)).take(50) {
                 assert_eq!(h.is_extensible(o), Err(HeapError::Stale));
@@ -2397,11 +2477,11 @@ mod tests {
                 assert!(h.is_extensible(id).is_ok());
             }
             assert_eq!(h.get_prototype_of(holder).unwrap(), Some(proto));
-            assert!(matches!(val(&h, holder, PropertyKey::String(key_str)), Value::String(x) if x == val_str));
-            assert_eq!(num(&h, holder, PropertyKey::Symbol(sym)), 1.0);
+            assert!(matches!(val(&mut h, holder, PropertyKey::String(key_str)), Value::String(x) if x == val_str));
+            assert_eq!(num(&mut h, holder, PropertyKey::Symbol(sym)), 1.0);
             assert!(matches!(h.get_own_property(holder, acc).unwrap(), Some(Property::Accessor { get: Some(g), set: Some(t), .. }) if g == getter && t == setter));
-            assert!(matches!(val(&h, arr, PropertyKey::Index(0)), Value::Object(x) if x == elem));
-            assert!(matches!(val(&h, arr, PropertyKey::Index(2)), Value::Object(x) if x == sparse_elem));
+            assert!(matches!(val(&mut h, arr, PropertyKey::Index(0)), Value::Object(x) if x == elem));
+            assert!(matches!(val(&mut h, arr, PropertyKey::Index(2)), Value::Object(x) if x == sparse_elem));
             assert_eq!(h.symbol_description(sym).unwrap(), Some(desc_str));
             assert_eq!(h.to_string_lossy(desc_str).unwrap(), "descstr");
             assert_eq!(h.intern_str("valstr").unwrap(), val_str); // the interner follows moved strings
@@ -2423,7 +2503,7 @@ mod tests {
         assert_eq!(h.stats().retired_slots, 1);
         assert_eq!(h.is_extensible(stale), Err(HeapError::Stale));
         for i in [0, 1, 3, 5] {
-            assert_eq!(num(&h, o[i], kn), i as f64);
+            assert_eq!(num(&mut h, o[i], kn), i as f64);
         }
         // 8 slots: 6 created (1 retired, 1 free) and 2 never created.
         let a = h.new_object(None).unwrap();
@@ -2460,7 +2540,7 @@ mod tests {
         assert!(st.object_metadata_capacity >= slots);
         check_slabs(&h);
         for (i, &x) in o.iter().enumerate().step_by(100) {
-            assert_eq!(num(&h, x, kn), i as f64);
+            assert_eq!(num(&mut h, x, kn), i as f64);
         }
         // Every dead handle is stale, even after its slot is reused.
         for _ in 0..1000 {

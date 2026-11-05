@@ -321,3 +321,62 @@ var N = (function () {}).bind(null), out;
 Object.defineProperty(N, 'prototype', { get() { throw 7; } });
 try { Reflect.construct(Array, [NaN], N); } catch (e) { out = e === 7; }
 (function () { return out; })
+=== function_prototype_identity_order_and_descriptor
+var log = []; function L(x) { log.push(String(x)); }
+function keys(f) { return Reflect.ownKeys(f).filter(function (k) { return k !== 'arguments' && k !== 'caller'; }).map(String).join(','); }
+function F() {}
+F.extra = 1;
+L(keys(F));
+var d = Object.getOwnPropertyDescriptor(F, 'prototype');
+L([typeof d.value, d.writable, d.enumerable, d.configurable].join());
+L(F.prototype === F.prototype);
+L(F.prototype.constructor === F);
+L(Object.getPrototypeOf(F.prototype) === Object.prototype);
+L(Reflect.ownKeys(F.prototype).join());
+L(Object.getOwnPropertyDescriptor(F.prototype, 'constructor').enumerable);
+L(keys(F));
+L(['prototype' in F, F.hasOwnProperty('prototype'), delete F.prototype, typeof F.prototype].join());
+(function () { return log.join("|"); })
+=== function_prototype_new_instanceof_and_replacement
+var log = []; function L(x) { log.push(String(x)); }
+function A(x) { this.x = x; }
+var a = new A(1);
+L([Object.getPrototypeOf(a) === A.prototype, a instanceof A, a.constructor === A].join());
+function B() {}
+var p = { tag: 'p' };
+B.prototype = p;
+L([new B().tag, B.prototype === p, Object.getOwnPropertyDescriptor(B, 'prototype').writable].join());
+function C() {}
+var c0 = new C();
+C.prototype.m = function () { return 'm'; };
+L([c0.m(), C.prototype.hasOwnProperty('m')].join());
+function D() {}
+Object.defineProperty(D, 'prototype', { writable: false });
+var dp = D.prototype;
+D.prototype = 5;
+L([dp === D.prototype, typeof dp, dp.constructor === D].join());
+function E() {}
+Object.defineProperty(E, 'prototype', { value: undefined });
+L([typeof E.prototype, E.hasOwnProperty('prototype')].join());
+(function () { return log.join("|"); })
+=== function_prototype_through_chains_and_kinds
+var log = []; function L(x) { log.push(String(x)); }
+function F() {}
+var o = Object.create(F);
+L([o.prototype === F.prototype, 'prototype' in o, o.hasOwnProperty('prototype')].join());
+function G() {}
+class K extends G {}
+L([Object.getPrototypeOf(K.prototype) === G.prototype, new K() instanceof G].join());
+var arrow = () => 1, bound = F.bind(null);
+async function af() {}
+var obj = { m() {} };
+L([arrow.hasOwnProperty('prototype'), bound.hasOwnProperty('prototype'), af.hasOwnProperty('prototype'), obj.m.hasOwnProperty('prototype')].join());
+var fe = function named() {};
+L([typeof fe.prototype, fe.prototype.constructor === fe].join());
+var many = [];
+for (var i = 0; i < 3; i++) many.push(function () {});
+L([many[0].prototype !== many[1].prototype, many[2].prototype.constructor === many[2]].join());
+function H() {}
+L(JSON.stringify(Object.getOwnPropertyDescriptor(H.prototype, 'constructor').writable));
+L(Object.getOwnPropertyNames(function () {}).filter(function (k) { return k !== 'arguments' && k !== 'caller'; }).join());
+(function () { return log.join("|"); })

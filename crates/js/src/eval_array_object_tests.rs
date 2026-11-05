@@ -211,13 +211,13 @@ fn assign_copies_symbol_keys_with_get_and_set() {
         let k_src = it.heap.key_from_str("src").unwrap();
         it.def(it.global_object(), k_src, Value::Object(src_obj), true, true, true).unwrap();
         let Value::Object(t) = it.run().unwrap() else { panic!() };
-        let get = |it: &Interp, k: PropertyKey| match it.heap.get_own_property(t, k).unwrap() {
+        let get = |it: &mut Interp, k: PropertyKey| match it.heap.get_own_property(t, k).unwrap() {
             Some(Property::Data { value: Value::Number(n), .. }) => Some(n),
             _ => None,
         };
-        assert_eq!(get(&it, PropertyKey::Symbol(sym)), Some(7.0));
-        assert_eq!(get(&it, PropertyKey::Symbol(hidden)), None);
-        assert_eq!(get(&it, k_str), Some(1.0));
+        assert_eq!(get(&mut it, PropertyKey::Symbol(sym)), Some(7.0));
+        assert_eq!(get(&mut it, PropertyKey::Symbol(hidden)), None);
+        assert_eq!(get(&mut it, k_str), Some(1.0));
         // keys/values/entries skip symbols
         let prog2 = parse_script("Object.keys(src).length + ',' + Object.values(src).length + ',' + Object.entries(src).length", Limits::default()).unwrap();
         let mut heap2 = Heap::default();

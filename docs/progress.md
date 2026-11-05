@@ -443,3 +443,5 @@ The async machine now runs `await` inside `switch`: in the discriminant, in case
 The async machine uses less memory. `await` of a value that is not an object makes no hidden promise, and a pending promise keeps room for one reaction, not four. A paused `await k` takes 685 B, down from 902 B. The async load rows that await such values take 10-23 MiB less peak memory and 9-27% fewer cycles. See [resources.md](resources.md#async-activation-memory).
 
 After a burst of garbage dies, a quiet collect now gives the side tables back: functions, promises, settled resolver pairs, the microtask queue, async activations and environments. Arrows, promises, `let` scopes and async calls now keep 2-6% of the burst, down from 32-62%. See [resources.md](resources.md#side-tables-after-a-collect).
+
+An ordinary function now makes its `prototype` object only when a script reads or redefines it, as V8 does. A kept function expression takes 582 B, down from 896 B. The cached login page holds 23% fewer live objects, and the Promise load rows take 16-31% less peak memory. See [resources.md](resources.md#lazy-function-prototype).

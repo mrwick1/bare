@@ -139,9 +139,10 @@ fn unreachable_cycles_die_and_reachable_keys_keep_values() {
         assert_eq!((c0, e0), (2, 4));
         let live0 = it.heap.stats().live_objects;
         it.collect(&[]).unwrap();
-        // the dead key/value cycle, the self-keyed entry and the whole dead map are gone; `keep` stays
+        // the dead key/value cycle, the self-keyed entry and the whole dead map are gone; `keep` stays.
+        // 7 objects: k, v, k2, m2, k3, its value, and the function (no prototype object was read).
         assert_eq!(it.weak_tracked(), (1, 1));
-        assert!(it.heap.stats().live_objects + 8 <= live0, "{} {}", it.heap.stats().live_objects, live0);
+        assert!(it.heap.stats().live_objects + 7 <= live0, "{} {}", it.heap.stats().live_objects, live0);
         assert_eq!(out(&mut it, "wm.get(keep).tag"), "kept");
         // a second collection changes nothing
         it.collect(&[]).unwrap();
