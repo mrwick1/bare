@@ -220,3 +220,16 @@ fn failed_constructor_environment_does_not_mark_the_next_call_as_new() {
         assert_eq!(out(&mut it, "ordinary().includes('at new ordinary')"), "false");
     });
 }
+
+#[test]
+fn errors_deep_in_a_one_line_script_scan_it_once() {
+    big(|| {
+        // a 1.5 MB one-line script, then 300 errors with two positioned frames each, near its end
+        let filler = "var pad = 0;".repeat(1 << 17);
+        let src = format!("{filler} function g() {{ return new Error('x'); }} function f() {{ return g(); }} var s = ''; for (var i = 0; i < 300; i++) s = f().stack; s.split('\\n').length + ':' + s.split(':').pop()");
+        let mut it = realm(EvalLimits { max_steps: 3_000_000, ..Default::default() });
+        // 600 full scans would take about 20 million steps; one scan and 600 short ones take about 150,000
+        let r = out(&mut it, &src);
+        assert!(r.starts_with("4:"), "{r}");
+    });
+}

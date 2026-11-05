@@ -447,3 +447,6 @@ After a burst of garbage dies, a quiet collect now gives the side tables back: f
 An ordinary function now makes its `prototype` object only when a script reads or redefines it, as V8 does. A kept function expression takes 582 B, down from 896 B. The cached login page holds 23% fewer live objects, and the Promise load rows take 16-31% less peak memory. See [resources.md](resources.md#lazy-function-prototype).
 
 A `let` or `const` block no longer allocates and no longer hashes its names on each entry. A `let` block in a loop runs 10% fewer instructions, and a `for (const x of a)` loop runs 17% fewer. An attempt to remove block environments was measured and dropped, because it did not pay. See [resources.md](resources.md#let-block-declarations).
+
+Error stack frames no longer scan a script from its start to find a line and column. A script longer than 4 KiB gets location marks on its first lookup, and each later lookup scans at most 4 KiB. The cached login boot runs 14% fewer instructions. A profile of the boot showed that name lookup is not a hot cost there, so the next work is generators. See [resources.md](resources.md#error-stack-locations).
+

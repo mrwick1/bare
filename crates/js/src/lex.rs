@@ -223,24 +223,97 @@ impl Error {
 
 /// Line and UTF-16 column of a byte offset (clamped to the source and to a character boundary).
 pub fn location(src: &str, byte: usize) -> Location {
+    location_in(src, &[], byte)
+}
+
+/// The scan state at a character boundary: what `location` knows after reading `src[..byte]`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Mark {
+    byte: u32,
+    line: u32,
+    column: u32,
+    prev_cr: bool,
+}
+
+const MARK_START: Mark = Mark { byte: 0, line: 1, column: 0, prev_cr: false };
+
+/// Bytes between two marks: a location reads at most this many bytes once the marks exist.
+pub const MARK_STEP: usize = 4096;
+
+/// Read `src[m.byte..end]` (`end` on a character boundary) byte by byte: an ASCII byte is one UTF-16 unit, a
+/// lead byte of a 4-byte character two, a continuation byte none. LS and PS (E2 80 A8/A9) end a line.
+fn scan(src: &str, mut m: Mark, end: usize) -> Mark {
+    let b = src.as_bytes();
+    let mut i = m.byte as usize;
+    while i < end {
+        let c = b[i];
+        // Most bytes: one test, then a count without branches.
+        if c > b'\r' && c != 0xE2 {
+            m.column += u32::from(c & 0xC0 != 0x80) + u32::from(c >= 0xF0);
+            m.prev_cr = false;
+            i += 1;
+            continue;
+        }
+        match c {
+            b'\n' => {
+                if !m.prev_cr {
+                    m.line += 1;
+                    m.column = 0;
+                }
+                m.prev_cr = false;
+            }
+            b'\r' => {
+                m.line += 1;
+                m.column = 0;
+                m.prev_cr = true;
+            }
+            0xE2 if b[i + 1] == 0x80 && matches!(b[i + 2], 0xA8 | 0xA9) => {
+                m.line += 1;
+                m.column = 0;
+                m.prev_cr = false;
+                i += 3;
+                continue;
+            }
+            // a control byte below `\r`, or the lead byte of another 3-byte character: one unit
+            _ => {
+                m.prev_cr = false;
+                m.column += 1;
+            }
+        }
+        i += 1;
+    }
+    Mark { byte: end as u32, ..m }
+}
+
+/// One mark at the first character boundary at or after each multiple of `MARK_STEP`: 16 B per 4 KiB of source.
+pub fn location_marks(src: &str) -> Box<[Mark]> {
+    let mut out = Vec::with_capacity(src.len() / MARK_STEP + 1);
+    let mut m = MARK_START;
+    let mut t = 0;
+    while t < src.len() {
+        let mut e = t;
+        while !src.is_char_boundary(e) {
+            e += 1;
+        }
+        m = scan(src, m, e);
+        out.push(m);
+        t += MARK_STEP;
+    }
+    out.into_boxed_slice()
+}
+
+/// `location` that starts at the last of `marks` (from `location_marks`) at or before the offset.
+pub fn location_in(src: &str, marks: &[Mark], byte: usize) -> Location {
     let mut end = byte.min(src.len());
     while !src.is_char_boundary(end) {
         end -= 1;
     }
-    let (mut line, mut column) = (1u32, 0u32);
-    let mut prev_cr = false;
-    for ch in src[..end].chars() {
-        match ch {
-            '\n' if prev_cr => {}
-            '\n' | '\r' | '\u{2028}' | '\u{2029}' => {
-                line += 1;
-                column = 0;
-            }
-            _ => column += ch.len_utf16() as u32,
-        }
-        prev_cr = ch == '\r';
-    }
-    Location { line, column }
+    let from = match marks.partition_point(|m| m.byte as usize <= end) {
+        0 => MARK_START,
+        i => marks[i - 1],
+    };
+    let m = scan(src, from, end);
+    Location { line: m.line, column: m.column }
 }
 
 /// The offset in UTF-16 code units of a byte offset. This is the unit that Acorn and JavaScript use.
@@ -1747,4 +1820,38 @@ mod tests {
         }
     }
 
+
+    #[test]
+    fn marked_locations_match_the_full_scan() {
+        // CR, CRLF split at many offsets, LS, PS, 2-, 3- and 4-byte characters, across several marks
+        let mut src = String::new();
+        for i in 0..3000 {
+            src.push_str(["ab\r\n", "é\r", "x\u{2028}", "😀\n", "€", "\u{2029}q", "lo"][i % 7]);
+        }
+        // the character-by-character scan that the byte scan replaced
+        let reference = |byte: usize| {
+            let mut end = byte.min(src.len());
+            while !src.is_char_boundary(end) {
+                end -= 1;
+            }
+            let (mut line, mut column, mut prev_cr) = (1u32, 0u32, false);
+            for ch in src[..end].chars() {
+                match ch {
+                    '\n' if prev_cr => {}
+                    '\n' | '\r' | '\u{2028}' | '\u{2029}' => (line, column) = (line + 1, 0),
+                    _ => column += ch.len_utf16() as u32,
+                }
+                prev_cr = ch == '\r';
+            }
+            Location { line, column }
+        };
+        let marks = location_marks(&src);
+        assert_eq!(marks.len(), src.len().div_ceil(MARK_STEP));
+        for b in 0..=src.len() + 3 {
+            let want = reference(b);
+            assert_eq!(location_in(&src, &marks, b), want, "byte {b}");
+            assert_eq!(location(&src, b), want, "byte {b}");
+        }
+        assert_eq!(location_in("", &location_marks(""), 5), Location { line: 1, column: 0 });
+    }
 }
