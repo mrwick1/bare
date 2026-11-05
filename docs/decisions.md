@@ -42,7 +42,8 @@ The repository is a Cargo workspace. Each browser part is one crate in `crates/`
 | `bare-html`    | `crates/html/`    | encoding, tokenizer, DOM, tree builder | -           |
 | `bare-css`     | `crates/css/`     | tokenizer, parser, selectors, cascade | `bare-html` (from topic 3) |
 | `bare-layout`  | `crates/layout/`  | box tree, text, block and inline layout | `bare-html`, `bare-css` |
-| `bare`         | `crates/bare/`    | the app (`main.rs`)         | `bare-net`, `bare-url`, `bare-html` |
+| `bare-paint`   | `crates/paint/`   | display list, pixel buffer, glyphs, PNG capture | `bare-css`, `bare-html`, `bare-layout` |
+| `bare`         | `crates/bare/`    | the app (`main.rs`)         | `bare-net`, `bare-url`, `bare-html`, `bare-paint` |
 
 Why crates, not folders in one crate:
 
@@ -180,7 +181,13 @@ Design rules, so that a port is small:
 
 ## Fonts
 
-Text starts with a built-in bitmap font. A TrueType parser and rasterizer come later.
+Changed on 2026-11-05. Text is drawn from the outlines of Noto Sans Mono, the font whose numbers layout uses. `data/fonts/` holds Regular and Bold, each cut down to 22 KB (Basic Latin, Latin-1, common punctuation, bullets, boxes and arrows), with the OFL license. The files are built into the program, so no system font is read and the pixels do not depend on the machine. A letter that the files lack is not drawn. There is no fallback font yet. There is no bitmap font.
+
+## Paint
+
+- Layout's fragments become a display list (rectangles, text runs, clips) in CSS painting order, and a second pass draws the list into a `Vec<u32>` of opaque pixels. The list holds only what is on the canvas. The `Painter` keeps its buffers and its glyph cache between frames, so a repeat paint allocates nothing.
+- Rectangles are hand-written: 3.4 times faster than tiny-skia `fill_rect` in a spike. Glyph outlines are filled by ab_glyph into coverage masks, cached for each (face, glyph, size, quarter pixel). tiny-skia was measured and left out: 6.5 times slower for glyphs than ab_glyph and 1.1 MB more binary. fontdue was faster but cannot place a glyph at a fraction of a pixel. The PNG capture uses the `png` crate (261 KB for a page-like 1280 by 800 picture, against 4.1 MB with no compression). See [resources.md](resources.md#paint-and-pixel-capture) for the numbers.
+- Gaps (no `z-index`, solid borders only, no radius, no images or scrollbars) are listed in resources.md. Add each one when a target page needs it.
 
 ## Module plan
 

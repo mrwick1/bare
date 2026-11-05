@@ -1,0 +1,17 @@
+<!doctype html>
+<style>
+body { margin: 0; background: #fff; font-size: 16px }
+.clip { width: 100px; height: 50px; overflow: hidden; background: #ddd; border: 2px solid #000; margin: 10px }
+.clip .in { width: 300px; height: 20px; background: #f80; margin-left: 40px }
+.clip p { margin: 0; white-space: nowrap }
+.fl { float: left; width: 60px; height: 40px; background: #0cf }
+.text { background: #fe8; margin-left: 100px }
+.rel { position: relative; width: 80px; height: 30px; background: #f0f; top: -20px; left: 200px; opacity: 1 }
+.abs { position: absolute; left: 20px; top: 150px; width: 100px; height: 30px; background: #000; color: #fff }
+.ib { display: inline-block; width: 50px; height: 20px; background: #888 }
+</style>
+<div class="clip"><div class="in"></div><p>clipped clipped clipped text</p></div>
+<div class="fl"></div>
+<div class="text">text beside a float <span class="ib"></span> after</div>
+<div class="rel"></div>
+<div class="abs">abs</div>
