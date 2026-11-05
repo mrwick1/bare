@@ -97,7 +97,8 @@ pub fn make_time(h: f64, m: f64, s: f64, ms: f64) -> f64 {
 }
 
 /// MakeDay (section 21.4.1.28): the day number of year `y`, month `m` (0 is January, any integer) and day `d`.
-/// A year beyond +-1,000,000 or a month beyond +-10,000,000 is NaN, as in V8: TimeClip would drop such a date anyway.
+/// A year beyond +-1,000,000 or a month beyond +-10,000,000 is NaN, as in V8.
+/// This conservative bound can also reject oversized fields that would cancel to a supported date.
 pub fn make_day(y: f64, m: f64, d: f64) -> f64 {
     if !(y.is_finite() && m.is_finite() && d.is_finite()) {
         return f64::NAN;
