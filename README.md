@@ -2,7 +2,7 @@
 
 `bare` is a web browser written from scratch in Rust. Its purpose is to learn how the core parts of a browser work.
 
-`bare` uses no crates. Every part is written by hand: URL parsing, DNS, HTTP, HTML, and later TLS, CSS, layout, paint and JavaScript. Only the Rust standard library and direct OS calls are allowed.
+The first parts were written by hand: URL parsing, DNS, HTTP, TLS, HTML, CSS, layout and JavaScript. Since 2026-11-05, `bare` also uses or copies open-source parts that are already fast and tested. See [docs/open-source.md](docs/open-source.md).
 
 ## Status
 

@@ -12,13 +12,23 @@ The project uses Rust. Servo shows that Rust works for browser engines. Safe Rus
 
 ## Dependencies
 
-`bare` uses no crates. Every part is written by hand: URL, HTTP, TLS, HTML, CSS, layout, paint, window, fonts and JavaScript.
+Changed on 2026-11-05. Writing every part by hand cost too much time. `bare` now takes parts from open-source projects that are already fast and tested.
 
 Allowed:
 
+- External crates.
+- Code copied from open-source projects, which we can then change and optimize.
 - The Rust standard library (`std`).
-- Direct calls to OS functions (for example `mmap`, `memfd_create`), declared by hand with `extern "C"`. This is `unsafe` code. Keep it small and in per-OS modules.
-- Data files from standards bodies, for example the Unicode Character Database. These are data, not code.
+- Direct calls to OS functions, declared by hand with `extern "C"`. Keep this `unsafe` code small and in per-OS modules.
+- Data files from standards bodies, for example the Unicode Character Database.
+
+Rules:
+
+- Measure a part on our load tests before we adopt it. Speed and low memory use stay the main goals.
+- Keep license notices. Copied MPL-2.0 files stay MPL-2.0. See [open-source.md](open-source.md#license-rules).
+- Record each adoption and its measurements in progress.md and resources.md.
+
+The candidate parts are in [open-source.md](open-source.md). Parts written before this change stay unless a measured replacement is better.
 
 ## Code layout
 
