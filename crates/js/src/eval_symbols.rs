@@ -853,6 +853,11 @@ impl<'p> Interp<'p> {
         let Some(&IterState::Array { src, i, what, done }) = self.sc.iters.get(&o) else {
             return Err(self.type_err("next method called on incompatible receiver"));
         };
+        if let Value::Object(so) = src
+            && self.heap.view_detached(so)
+        {
+            return Err(self.detached_err("Array Iterator.prototype.next"));
+        }
         if done {
             return Ok(None);
         }

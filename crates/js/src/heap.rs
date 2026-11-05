@@ -83,6 +83,8 @@ pub enum HeapError {
     InvalidArrayLength,
     /// A symbol used where JS throws a TypeError (`"" + sym`, `+sym`).
     SymbolConversion,
+    /// A symbol written to an element of a typed array (ToNumber of a symbol: a TypeError in JS).
+    SymbolToNumber,
     /// The operation needs the evaluator (`ToPrimitive` on an object). Nothing was changed.
     NeedsExecution(&'static str),
     /// A property of a host-indexed object (`new_indexed`) has no JavaScript object yet. Nothing was changed. The evaluator asks
@@ -94,7 +96,7 @@ pub enum HeapError {
 
 #[path = "heap_binary.rs"]
 mod binary;
-pub use binary::{Decoder, ExoticKind, IndexedSource, Slot};
+pub use binary::{load, sort_elems, store, Decoder, Elem, ExoticKind, IndexedSource, Slot, TYPED};
 
 // ---------- property model ----------
 

@@ -1,16 +1,23 @@
-//! Byte buffers, `Uint8Array` views and text-codec state, as exotic objects of the heap.
+//! Byte buffers, typed-array views, `DataView`s and text-codec state, as exotic objects of the heap.
 //! A child module of `heap.rs` (`#[path]`), so it uses the heap's private slabs.
 //!
 //! Layout: an exotic object is an ordinary `Object` with its `exotic` flag set. Its payload lives in
 //! `Heap::exotics`, a map from the object's slot index to an [`Exotic`]. So ordinary objects pay one
-//! flag and no pointer. Bytes are never one property per byte: a buffer owns one `Vec<u8>`, a view owns
-//! three numbers and a handle of its buffer.
+//! flag and no pointer. Bytes are never one property per element: a buffer owns one `Vec<u8>`, a view owns
+//! three numbers, an element type and a handle of its buffer. A `DataView` is a view of the type `Elem::Data`: it has
+//! no integer-indexed properties.
+//!
+//! Elements stay in the buffer in little-endian byte order (all supported targets are little-endian). `load` and `store`
+//! convert one element with the exact ECMAScript rules (ToInt32 wrap, round-half-even for `Uint8ClampedArray`, `f32`
+//! rounding, canonical NaN). A read is one hash lookup for the view and one for its buffer; there is no per-element value.
 //!
 //! Rules:
 //! - A view keeps its buffer alive (the collector marks the edge). A dead buffer frees its bytes at the
 //!   next `collect`, together with its map entry.
 //! - Bytes count against `max_bytes` and against two buffer caps (`set_buffer_limits`): one buffer and all live
 //!   buffers together. Both are checked before the allocation.
+//! - A buffer that is detached (`buffer_transfer`) frees its bytes at once and stays an `ArrayBuffer` of length 0. A view
+//!   of it reads as empty: no valid index, no bytes. `bytes` and `bytes_mut` of such a view are empty slices.
 //! - Integer-indexed keys of a view follow the spec: a valid index is a writable, enumerable, configurable data
 //!   property; an invalid index (out of range, or a canonical numeric string such as `"-0"`, `"1.5"`, `"NaN"`) is
 //!   absent, ends a prototype walk, ignores writes and cannot be defined or deleted.
@@ -20,8 +27,11 @@ use super::*;
 /// What an exotic object holds.
 pub(super) enum Exotic {
     Buffer(Vec<u8>),
-    /// `buffer` is always a live buffer object. `offset + len <= buffer length`.
-    View { buffer: ObjId, offset: usize, len: usize },
+    /// A buffer whose bytes were moved away (`ArrayBuffer.prototype.transfer`). Length 0.
+    Detached,
+    /// `buffer` is always a buffer object. `offset` is in bytes and `len` in elements of `ty` (bytes for `Elem::Data`).
+    /// `offset + len * size <= buffer length` while the buffer is not detached.
+    View { buffer: ObjId, offset: usize, len: usize, ty: Elem },
     Encoder,
     Decoder(Decoder),
     /// An object whose array-index properties are read from the host each time (see `IndexedSource`). It holds no data.
@@ -35,6 +45,137 @@ pub enum ExoticKind {
     Encoder,
     Decoder,
     Indexed,
+}
+
+/// The element type of a view. `Data` is a `DataView` (bytes, no integer-indexed properties).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Elem {
+    I8,
+    U8,
+    U8C,
+    I16,
+    U16,
+    I32,
+    U32,
+    F32,
+    F64,
+    BI64,
+    BU64,
+    Data,
+}
+
+/// The ten typed-array types, in the order of `Elem::index`.
+pub const TYPED: [Elem; 11] = [Elem::I8, Elem::U8, Elem::U8C, Elem::I16, Elem::U16, Elem::I32, Elem::U32, Elem::F32, Elem::F64, Elem::BI64, Elem::BU64];
+
+impl Elem {
+    pub fn size(self) -> usize {
+        match self {
+            Elem::I8 | Elem::U8 | Elem::U8C | Elem::Data => 1,
+            Elem::I16 | Elem::U16 => 2,
+            Elem::I32 | Elem::U32 | Elem::F32 => 4,
+            Elem::F64 | Elem::BI64 | Elem::BU64 => 8,
+        }
+    }
+
+    /// The `BigInt64Array` and `BigUint64Array` types: their elements are BigInts, which this engine does not have.
+    pub fn is_big(self) -> bool {
+        matches!(self, Elem::BI64 | Elem::BU64)
+    }
+
+    pub fn is_float(self) -> bool {
+        matches!(self, Elem::F32 | Elem::F64)
+    }
+
+    /// The place of the type in `TYPED`.
+    pub fn index(self) -> usize {
+        self as usize
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Elem::I8 => "Int8Array",
+            Elem::U8 => "Uint8Array",
+            Elem::U8C => "Uint8ClampedArray",
+            Elem::I16 => "Int16Array",
+            Elem::U16 => "Uint16Array",
+            Elem::I32 => "Int32Array",
+            Elem::U32 => "Uint32Array",
+            Elem::F32 => "Float32Array",
+            Elem::F64 => "Float64Array",
+            Elem::BI64 => "BigInt64Array",
+            Elem::BU64 => "BigUint64Array",
+            Elem::Data => "DataView",
+        }
+    }
+}
+
+/// Read one element from the first `ty.size()` bytes of `b`, little-endian. The BigInt types give a lossy number: no
+/// caller may show it (the evaluator gates them first).
+#[inline]
+pub fn load(ty: Elem, b: &[u8]) -> f64 {
+    match ty {
+        Elem::I8 => b[0] as i8 as f64,
+        Elem::U8 | Elem::U8C | Elem::Data => b[0] as f64,
+        Elem::I16 => i16::from_le_bytes([b[0], b[1]]) as f64,
+        Elem::U16 => u16::from_le_bytes([b[0], b[1]]) as f64,
+        Elem::I32 => i32::from_le_bytes([b[0], b[1], b[2], b[3]]) as f64,
+        Elem::U32 => u32::from_le_bytes([b[0], b[1], b[2], b[3]]) as f64,
+        Elem::F32 => f32::from_le_bytes([b[0], b[1], b[2], b[3]]) as f64,
+        Elem::F64 => f64::from_le_bytes([b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]]),
+        Elem::BI64 => i64::from_le_bytes([b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]]) as f64,
+        Elem::BU64 => u64::from_le_bytes([b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]]) as f64,
+    }
+}
+
+/// Convert the number `n` to the type and write it to the first `ty.size()` bytes of `b`, little-endian. The integer types
+/// wrap (ToInt8 .. ToUint32 are the low bits of ToUint32). `Uint8ClampedArray` clamps and rounds half to even. `Float32`
+/// rounds to nearest even. A NaN is written in its canonical form. The BigInt types write nothing (gated by the caller).
+#[inline]
+pub fn store(ty: Elem, b: &mut [u8], n: f64) {
+    match ty {
+        Elem::I8 | Elem::U8 | Elem::Data => b[0] = to_uint32(n) as u8,
+        Elem::U8C => b[0] = if n >= 255.0 { 255 } else if n > 0.0 { n.round_ties_even() as u8 } else { 0 },
+        Elem::I16 | Elem::U16 => b[..2].copy_from_slice(&(to_uint32(n) as u16).to_le_bytes()),
+        Elem::I32 | Elem::U32 => b[..4].copy_from_slice(&to_uint32(n).to_le_bytes()),
+        Elem::F32 => b[..4].copy_from_slice(&(if n.is_nan() { f32::NAN } else { n as f32 }).to_le_bytes()),
+        Elem::F64 => b[..8].copy_from_slice(&(if n.is_nan() { f64::NAN } else { n }).to_le_bytes()),
+        Elem::BI64 | Elem::BU64 => {}
+    }
+}
+
+fn nan_last(a: bool, b: bool) -> Option<std::cmp::Ordering> {
+    match (a, b) {
+        (true, true) => Some(std::cmp::Ordering::Equal),
+        (true, false) => Some(std::cmp::Ordering::Greater),
+        (false, true) => Some(std::cmp::Ordering::Less),
+        _ => None,
+    }
+}
+
+/// Sort the elements of `b` (whole elements of `ty`) in ascending numeric order: `-0` before `+0`, NaN last. Works on a
+/// temporary copy of the elements in their own type (no per-element JavaScript value).
+pub fn sort_elems(ty: Elem, b: &mut [u8]) {
+    macro_rules! go {
+        ($t:ty, $n:expr, $cmp:expr) => {{
+            let mut v: Vec<$t> = b.chunks_exact($n).map(|c| <$t>::from_le_bytes(c.try_into().unwrap())).collect();
+            v.sort_unstable_by($cmp);
+            for (c, x) in b.chunks_exact_mut($n).zip(v) {
+                c.copy_from_slice(&x.to_le_bytes());
+            }
+        }};
+    }
+    match ty {
+        Elem::I8 => go!(i8, 1, |a, b| a.cmp(b)),
+        Elem::U8 | Elem::U8C | Elem::Data => b.sort_unstable(),
+        Elem::I16 => go!(i16, 2, |a, b| a.cmp(b)),
+        Elem::U16 => go!(u16, 2, |a, b| a.cmp(b)),
+        Elem::I32 => go!(i32, 4, |a, b| a.cmp(b)),
+        Elem::U32 => go!(u32, 4, |a, b| a.cmp(b)),
+        Elem::F32 => go!(f32, 4, |a, b| nan_last(a.is_nan(), b.is_nan()).unwrap_or_else(|| a.total_cmp(b))),
+        Elem::F64 => go!(f64, 8, |a, b| nan_last(a.is_nan(), b.is_nan()).unwrap_or_else(|| a.total_cmp(b))),
+        Elem::BI64 => go!(i64, 8, |a, b| a.cmp(b)),
+        Elem::BU64 => go!(u64, 8, |a, b| a.cmp(b)),
+    }
 }
 
 /// What a host says about one index of a host-indexed object right now.
@@ -109,6 +250,14 @@ fn canonical_numeric(heap: &Heap, key: PropertyKey) -> bool {
     text.len() == u.len() && text.bytes().zip(u).all(|(a, &b)| a as u16 == b)
 }
 
+/// Convert `src` (whole elements of `st`) to elements of `dt` in `dst` (the same element count).
+fn convert_run(st: Elem, src: &[u8], dt: Elem, dst: &mut [u8]) {
+    let (ss, ds) = (st.size(), dt.size());
+    for (s, d) in src.chunks_exact(ss).zip(dst.chunks_exact_mut(ds)) {
+        store(dt, d, load(st, s));
+    }
+}
+
 impl Heap {
     /// Set the caps for one buffer and for all live buffers together (bytes). Checked before each allocation.
     pub fn set_buffer_limits(&mut self, total: usize, single: usize) {
@@ -133,7 +282,7 @@ impl Heap {
     /// The kind of an exotic object. `None` for an ordinary or stale object.
     pub fn exotic_kind(&self, o: ObjId) -> Option<ExoticKind> {
         Some(match self.exotic(o)? {
-            Exotic::Buffer(_) => ExoticKind::Buffer,
+            Exotic::Buffer(_) | Exotic::Detached => ExoticKind::Buffer,
             Exotic::View { .. } => ExoticKind::View,
             Exotic::Encoder => ExoticKind::Encoder,
             Exotic::Decoder(_) => ExoticKind::Decoder,
@@ -198,26 +347,68 @@ impl Heap {
     /// `(units read, bytes written)`. `InvalidKey` when `dest` has no bytes.
     pub fn encode_utf8_into(&mut self, s: StrId, dest: ObjId) -> R<(usize, usize)> {
         let (slot, range) = match self.exotic(dest) {
+            Some(Exotic::Detached) => return Ok((0, 0)),
             Some(Exotic::Buffer(v)) => (dest.index, 0..v.len()),
-            Some(Exotic::View { buffer, offset, len }) => (buffer.index, *offset..*offset + *len),
+            Some(Exotic::View { buffer, offset, len, ty }) => (buffer.index, *offset..*offset + *len * ty.size()),
             _ => return Err(HeapError::InvalidKey),
         };
         let Heap { strings, exotics, .. } = self;
         let units = &strings.get(s.index, s.gn).ok_or(HeapError::Stale)?.units;
         match exotics.get_mut(&slot) {
             Some(Exotic::Buffer(v)) => Ok(crate::text::encode_into(units, &mut v[range])),
+            Some(Exotic::Detached) => Ok((0, 0)),
             _ => Err(HeapError::InvalidKey),
         }
     }
 
-    /// A view of `len` bytes at `offset` of `buffer`. `InvalidKey` when the range does not fit the buffer
-    /// or `buffer` is not a buffer.
+    /// A `Uint8Array`-shaped view of `len` bytes at `offset` of `buffer`. See `new_typed_view`.
     pub fn new_view(&mut self, proto: Option<ObjId>, buffer: ObjId, offset: usize, len: usize) -> R<ObjId> {
+        self.new_typed_view(proto, buffer, offset, len, Elem::U8)
+    }
+
+    /// A view of `len` elements of type `ty` at byte `offset` of `buffer`. `InvalidKey` when the range does not fit the
+    /// buffer, the buffer is detached, or `buffer` is not a buffer. The alignment of `offset` is the caller's rule.
+    pub fn new_typed_view(&mut self, proto: Option<ObjId>, buffer: ObjId, offset: usize, len: usize, ty: Elem) -> R<ObjId> {
         let Some(Exotic::Buffer(v)) = self.exotic(buffer) else { return Err(HeapError::InvalidKey) };
-        if offset.checked_add(len).is_none_or(|e| e > v.len()) {
+        if len.checked_mul(ty.size()).and_then(|n| n.checked_add(offset)).is_none_or(|e| e > v.len()) {
             return Err(HeapError::InvalidKey);
         }
-        self.make_exotic(proto, || Exotic::View { buffer, offset, len })
+        self.make_exotic(proto, || Exotic::View { buffer, offset, len, ty })
+    }
+
+    /// Is `o` a buffer whose bytes were moved away?
+    pub fn buffer_detached(&self, o: ObjId) -> bool {
+        matches!(self.exotic(o), Some(Exotic::Detached))
+    }
+
+    /// `ArrayBuffer.prototype.transfer`: a new buffer (with `proto`) takes the bytes of buffer `src`, cut or zero-padded to
+    /// `new_len`. `src` is detached: its bytes are gone and its length is 0. No copy when the length is the same. The caps
+    /// and the heap budget are checked before anything moves. `InvalidKey` when `src` is not an attached buffer.
+    pub fn buffer_transfer(&mut self, proto: Option<ObjId>, src: ObjId, new_len: usize) -> R<ObjId> {
+        self.check_opt_obj(proto)?;
+        if !self.objects.can_alloc() {
+            return Err(HeapError::Limit(Limit::Objects));
+        }
+        let Some(Exotic::Buffer(v)) = self.exotic(src) else { return Err(HeapError::InvalidKey) };
+        let old = v.len();
+        if new_len > self.max_buffer_len {
+            return Err(HeapError::Limit(Limit::BufferLength));
+        }
+        self.check_buffer(new_len.saturating_sub(old))?;
+        let Some(Exotic::Buffer(v)) = self.exotics.get_mut(&src.index) else { return Err(HeapError::Stale) };
+        let mut data = std::mem::take(v);
+        if new_len > old && data.try_reserve_exact(new_len - old).is_err() {
+            *v = data;
+            return Err(HeapError::Limit(Limit::BufferBytes));
+        }
+        data.resize(new_len, 0);
+        if new_len < old {
+            data.shrink_to_fit();
+        }
+        self.exotics.insert(src.index, Exotic::Detached);
+        self.bytes -= old;
+        self.buffer_bytes -= old;
+        self.make_exotic(proto, || Exotic::Buffer(data))
     }
 
     /// An object whose integer-index properties come from the host (`set_indexed_source`), each time they are read.
@@ -246,10 +437,10 @@ impl Heap {
         self.indexed.as_ref().ok_or(HeapError::HostUnavailable)
     }
 
-    /// The number of virtual integer indices of `o`: the bytes of a view, or the live length of a host-indexed object.
+    /// The number of virtual integer indices of `o`: the elements of a typed array (0 for a `DataView` or a detached buffer), or the live length of a host-indexed object.
     pub fn virtual_len(&self, o: ObjId) -> R<usize> {
         match self.exotic(o) {
-            Some(Exotic::View { len, .. }) => Ok(*len),
+            Some(Exotic::View { buffer, len, ty, .. }) if *ty != Elem::Data => Ok(if matches!(self.exotics.get(&buffer.index), Some(Exotic::Buffer(_))) { *len } else { 0 }),
             Some(Exotic::Indexed) => self.source()?.indexed_len(o),
             _ => Ok(0),
         }
@@ -284,24 +475,40 @@ impl Heap {
     pub fn buffer_len(&self, o: ObjId) -> Option<usize> {
         match self.exotic(o)? {
             Exotic::Buffer(v) => Some(v.len()),
+            Exotic::Detached => Some(0),
             _ => None,
         }
     }
 
-    /// `(buffer, byte offset, length)` of a view.
+    /// `(buffer, byte offset, length)` of a view. The length is in elements (bytes for a `DataView`). The buffer may be detached.
     pub fn view_parts(&self, o: ObjId) -> Option<(ObjId, usize, usize)> {
         match self.exotic(o)? {
-            Exotic::View { buffer, offset, len } => Some((*buffer, *offset, *len)),
+            Exotic::View { buffer, offset, len, .. } => Some((*buffer, *offset, *len)),
             _ => None,
         }
     }
 
-    /// The bytes of a buffer, or of a view. Borrowed from the heap: no copy.
+    /// The element type of a view (`Elem::Data` for a `DataView`).
+    pub fn view_type(&self, o: ObjId) -> Option<Elem> {
+        match self.exotic(o)? {
+            Exotic::View { ty, .. } => Some(*ty),
+            _ => None,
+        }
+    }
+
+    /// Is the buffer of view `o` detached? `false` for anything that is not a view.
+    pub fn view_detached(&self, o: ObjId) -> bool {
+        matches!(self.exotic(o), Some(Exotic::View { buffer, .. }) if matches!(self.exotics.get(&buffer.index), Some(Exotic::Detached)))
+    }
+
+    /// The bytes of a buffer, or of a view (empty when detached). Borrowed from the heap: no copy.
     pub fn bytes(&self, o: ObjId) -> Option<&[u8]> {
         match self.exotic(o)? {
             Exotic::Buffer(v) => Some(v),
-            Exotic::View { buffer, offset, len } => match self.exotics.get(&buffer.index) {
-                Some(Exotic::Buffer(v)) => v.get(*offset..*offset + *len),
+            Exotic::Detached => Some(&[]),
+            Exotic::View { buffer, offset, len, ty } => match self.exotics.get(&buffer.index) {
+                Some(Exotic::Buffer(v)) => v.get(*offset..*offset + *len * ty.size()),
+                Some(Exotic::Detached) => Some(&[]),
                 _ => None,
             },
             _ => None,
@@ -312,7 +519,8 @@ impl Heap {
     pub fn bytes_mut(&mut self, o: ObjId) -> Option<&mut [u8]> {
         let (slot, range) = match self.exotic(o)? {
             Exotic::Buffer(_) => (o.index, None),
-            Exotic::View { buffer, offset, len } => (buffer.index, Some(*offset..*offset + *len)),
+            Exotic::Detached => return Some(&mut []),
+            Exotic::View { buffer, offset, len, ty } => (buffer.index, Some(*offset..*offset + *len * ty.size())),
             _ => return None,
         };
         match self.exotics.get_mut(&slot) {
@@ -320,14 +528,16 @@ impl Heap {
                 None => Some(&mut v[..]),
                 Some(r) => v.get_mut(r),
             },
+            Some(Exotic::Detached) => Some(&mut []),
             _ => None,
         }
     }
 
-    /// Copy `n` bytes from view `src` at `si` to view `dst` at `di`, as `memmove` does (the ranges may overlap when
+    /// Copy `n` bytes from view `src` at byte `si` to view `dst` at byte `di`, as `memmove` does (the ranges may overlap when
     /// both views share one buffer). `false`, and nothing copied, if a range does not fit its view.
     pub fn view_copy(&mut self, src: ObjId, si: usize, dst: ObjId, di: usize, n: usize) -> bool {
-        let (Some((sb, so, sl)), Some((db, d_off, dl))) = (self.view_parts(src), self.view_parts(dst)) else { return false };
+        let (Some((sb, so, _)), Some((db, d_off, _))) = (self.view_parts(src), self.view_parts(dst)) else { return false };
+        let (sl, dl) = (self.bytes(src).map_or(0, <[u8]>::len), self.bytes(dst).map_or(0, <[u8]>::len));
         if si.checked_add(n).is_none_or(|e| e > sl) || di.checked_add(n).is_none_or(|e| e > dl) {
             return false;
         }
@@ -349,12 +559,48 @@ impl Heap {
         true
     }
 
-    /// One byte of a view; `None` when `i` is not a valid index.
+    /// `%TypedArray%.prototype.set` for a typed-array source: write the `n` elements of typed array `src` (from element 0)
+    /// to typed array `dst` from element `di`, converting each one from the type of `src` to the type of `dst`. The same
+    /// type is one byte copy. Another type converts element by element, through a copy of the source bytes when both
+    /// views share a buffer. `false`, and nothing written, if a range does not fit or a BigInt type meets a number type.
+    pub fn view_set_from(&mut self, src: ObjId, dst: ObjId, di: usize) -> bool {
+        let (Some(st), Some(dt)) = (self.view_type(src), self.view_type(dst)) else { return false };
+        let (n, dl) = (self.virtual_len(src).unwrap_or(0), self.virtual_len(dst).unwrap_or(0));
+        if st.is_big() != dt.is_big() || di.checked_add(n).is_none_or(|e| e > dl) {
+            return false;
+        }
+        // The same type, or integers of one size (the conversion wraps), keep the bytes. `Uint8ClampedArray` clamps: only a
+        // `Uint8Array` source keeps its bytes there.
+        if st == dt || (st.size() == dt.size() && !st.is_float() && !dt.is_float() && (dt != Elem::U8C || st == Elem::U8)) {
+            return self.view_copy(src, 0, dst, di * dt.size(), n * st.size());
+        }
+        let Some((sb, so, _)) = self.view_parts(src) else { return false };
+        let Some((db, d_off, _)) = self.view_parts(dst) else { return false };
+        let (ss, ds) = (st.size(), dt.size());
+        let d_at = d_off + di * ds;
+        // The source bytes: a copy when the views share a buffer (the ranges may overlap), else the vector is moved out.
+        if sb == db {
+            let Some(Exotic::Buffer(v)) = self.exotics.get_mut(&db.index) else { return false };
+            let tmp = v[so..so + n * ss].to_vec();
+            convert_run(st, &tmp, dt, &mut v[d_at..d_at + n * ds]);
+            return true;
+        }
+        let Some(Exotic::Buffer(sv)) = self.exotics.get_mut(&sb.index).map(Exotic::take) else { return false };
+        if let Some(Exotic::Buffer(dv)) = self.exotics.get_mut(&db.index) {
+            convert_run(st, &sv[so..so + n * ss], dt, &mut dv[d_at..d_at + n * ds]);
+        }
+        if let Some(Exotic::Buffer(slot)) = self.exotics.get_mut(&sb.index) {
+            *slot = sv;
+        }
+        true
+    }
+
+    /// One byte of a view; `None` when `i` is not a valid byte index.
     pub fn view_get(&self, o: ObjId, i: usize) -> Option<u8> {
         self.bytes(o)?.get(i).copied()
     }
 
-    /// Write one byte of a view; `false` when `i` is not a valid index.
+    /// Write one byte of a view; `false` when `i` is not a valid byte index.
     pub fn view_set(&mut self, o: ObjId, i: usize, b: u8) -> bool {
         match self.bytes_mut(o).and_then(|s| s.get_mut(i)) {
             Some(slot) => {
@@ -365,17 +611,58 @@ impl Heap {
         }
     }
 
+    /// Element `i` of typed array `o` as a number; `None` when `i` is not a valid index (or the buffer is detached).
+    pub fn view_load(&self, o: ObjId, i: usize) -> Option<f64> {
+        let Some(Exotic::View { buffer, offset, len, ty }) = self.exotic(o) else { return None };
+        if i >= *len {
+            return None;
+        }
+        let Some(Exotic::Buffer(v)) = self.exotics.get(&buffer.index) else { return None };
+        let at = offset + i * ty.size();
+        Some(load(*ty, v.get(at..at + ty.size())?))
+    }
+
+    /// Convert `n` to the element type and write it at index `i`; `false` when `i` is not a valid index.
+    pub fn view_store(&mut self, o: ObjId, i: usize, n: f64) -> bool {
+        let Some(Exotic::View { buffer, offset, len, ty }) = self.exotic(o) else { return false };
+        let (buffer, offset, len, ty) = (*buffer, *offset, *len, *ty);
+        if i >= len {
+            return false;
+        }
+        let Some(Exotic::Buffer(v)) = self.exotics.get_mut(&buffer.index) else { return false };
+        let at = offset + i * ty.size();
+        match v.get_mut(at..at + ty.size()) {
+            Some(b) => {
+                store(ty, b, n);
+                true
+            }
+            None => false,
+        }
+    }
+
     // ----- integer-indexed property semantics -----
 
-    /// Is `key` an integer-indexed key of the view `o` (so a write converts the value with `ToNumber` first)?
+    /// Is `key` an integer-indexed key of the typed array `o` (so a write converts the value with `ToNumber` first)?
     pub fn is_view_index_key(&self, o: ObjId, key: PropertyKey) -> bool {
         self.view_index(o, key).is_some()
     }
 
-    /// Classify `key` on `o`. `None`: `o` is not a view, or the key is not numeric: the ordinary rules apply.
+    /// `key` is an integer index that a typed array `o` does not have (out of range, or its buffer is detached).
+    pub fn is_view_bad_index(&self, o: ObjId, key: PropertyKey) -> bool {
+        match self.view_index(o, key) {
+            Some(None) => true,
+            Some(Some(_)) => self.view_detached(o),
+            None => false,
+        }
+    }
+
+    /// Classify `key` on `o`. `None`: `o` is not a typed array, or the key is not numeric: the ordinary rules apply.
     /// `Some(None)`: an invalid integer index. `Some(Some(i))`: a valid index.
     pub(super) fn view_index(&self, o: ObjId, key: PropertyKey) -> Option<Option<usize>> {
-        let Some(Exotic::View { len, .. }) = self.exotic(o) else { return None };
+        let Some(Exotic::View { len, ty, .. }) = self.exotic(o) else { return None };
+        if *ty == Elem::Data {
+            return None;
+        }
         match key {
             PropertyKey::Index(i) => Some(((i as usize) < *len).then_some(i as usize)),
             PropertyKey::String(_) if canonical_numeric(self, key) => Some(None),
@@ -383,19 +670,40 @@ impl Heap {
         }
     }
 
-    /// `[[GetOwnProperty]]` of a numeric key on a view: `Some(property)` or `Some(None)`, `None` for the ordinary path.
-    pub(super) fn view_own(&self, o: ObjId, key: PropertyKey) -> Option<Option<Property>> {
-        Some(self.view_index(o, key)?.and_then(|i| {
-            let b = self.view_get(o, i)?;
-            Some(Property::Data { value: Value::Number(b as f64), writable: true, enumerable: true, configurable: true })
-        }))
+    /// `[[GetOwnProperty]]` of a numeric key on a typed array: `Some(property)` or `Some(None)`, `None` for the ordinary
+    /// path. The elements of the BigInt types are gated (`NeedsExecution`) when the value is wanted.
+    pub(super) fn view_own(&self, o: ObjId, key: PropertyKey, want_value: bool) -> R<Option<Option<Property>>> {
+        // One view lookup and one buffer lookup: this is the element-read path of a script loop.
+        let Some(Exotic::View { buffer, offset, len, ty }) = self.exotic(o) else { return Ok(None) };
+        let i = match key {
+            _ if *ty == Elem::Data => return Ok(None),
+            PropertyKey::Index(i) if (i as usize) < *len => i as usize,
+            PropertyKey::Index(_) => return Ok(Some(None)),
+            PropertyKey::String(_) if canonical_numeric(self, key) => return Ok(Some(None)),
+            _ => return Ok(None),
+        };
+        if want_value && ty.is_big() {
+            return Err(HeapError::NeedsExecution("BigInt64Array and BigUint64Array elements (no BigInt)"));
+        }
+        // A detached buffer has no elements.
+        let Some(Exotic::Buffer(v)) = self.exotics.get(&buffer.index) else { return Ok(Some(None)) };
+        let value = if want_value {
+            let at = offset + i * ty.size();
+            match v.get(at..at + ty.size()) {
+                Some(b) => Value::Number(load(*ty, b)),
+                None => return Ok(Some(None)),
+            }
+        } else {
+            Value::Undefined
+        };
+        Ok(Some(Some(Property::Data { value, writable: true, enumerable: true, configurable: true })))
     }
 
     /// `[[GetOwnProperty]]` of a key on any exotic object: `Some(r)` ends the lookup there, `None` means the ordinary rules.
     /// `want_value` false is for the callers that only ask whether the property exists (`in`, `delete`): they never make a
     /// `Missing` object, and get a placeholder value.
     pub(super) fn exotic_own(&self, o: ObjId, key: PropertyKey, want_value: bool) -> R<Option<Option<Property>>> {
-        if let Some(r) = self.view_own(o, key) {
+        if let Some(r) = self.view_own(o, key, want_value)? {
             return Ok(Some(r));
         }
         let (Some(Exotic::Indexed), PropertyKey::Index(i)) = (self.exotic(o), key) else { return Ok(None) };
@@ -408,18 +716,25 @@ impl Heap {
         Ok(Some(Some(Property::Data { value, writable: false, enumerable: true, configurable: true })))
     }
 
-    /// ToUint8 of a primitive. An object needs the evaluator (`NeedsExecution`).
-    fn to_uint8(&self, v: Value) -> R<u8> {
-        Ok(to_uint32(self.to_number(v)?) as u8)
+    /// ToNumber of a primitive for an element write. An object needs the evaluator (`NeedsExecution`). The BigInt types
+    /// are gated: their writes need ToBigInt.
+    fn to_elem_number(&self, o: ObjId, v: Value) -> R<f64> {
+        if matches!(self.exotic(o), Some(Exotic::View { ty, .. }) if ty.is_big()) {
+            return Err(HeapError::NeedsExecution("BigInt64Array and BigUint64Array elements (no BigInt)"));
+        }
+        match v {
+            Value::Symbol(_) => Err(HeapError::SymbolToNumber),
+            _ => self.to_number(v),
+        }
     }
 
     /// `[[Set]]` of an integer-indexed key. `Some(Done)` when this object (or, for an ordinary receiver, a view it
     /// inherits from) handles the key. `None`: the ordinary algorithm runs.
     pub(super) fn exotic_set(&mut self, o: ObjId, key: PropertyKey, value: Value) -> R<Option<Set>> {
         if let Some(r) = self.view_index(o, key) {
-            let b = self.to_uint8(value)?; // ToNumber runs even for an invalid index
+            let n = self.to_elem_number(o, value)?; // ToNumber runs even for an invalid index
             if let Some(i) = r {
-                self.view_set(o, i, b);
+                self.view_store(o, i, n);
             }
             return Ok(Some(Set::Done));
         }
@@ -451,7 +766,7 @@ impl Heap {
         Ok(None)
     }
 
-    /// `[[DefineOwnProperty]]` of an integer-indexed key on a view. `None`: ordinary rules.
+    /// `[[DefineOwnProperty]]` of an integer-indexed key on a typed array. `None`: ordinary rules.
     pub(super) fn view_define(&mut self, o: ObjId, key: PropertyKey, d: &PropertyDescriptor) -> R<Option<bool>> {
         if matches!(key, PropertyKey::Index(_)) && matches!(self.exotic(o), Some(Exotic::Indexed)) {
             return Ok(Some(false)); // no indexed setter: an index cannot be defined, in range or not
@@ -461,9 +776,12 @@ impl Heap {
         if d.configurable == Some(false) || d.enumerable == Some(false) || d.is_accessor() || d.writable == Some(false) {
             return Ok(Some(false));
         }
+        if self.view_detached(o) {
+            return Ok(Some(false));
+        }
         if let Some(v) = d.value {
-            let b = self.to_uint8(v)?;
-            self.view_set(o, i, b);
+            let n = self.to_elem_number(o, v)?;
+            self.view_store(o, i, n);
         }
         Ok(Some(true))
     }

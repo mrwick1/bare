@@ -2398,3 +2398,66 @@ The resize time of the real page is the number above plus its own layout and pai
 - `bare --paint` now also accepts an `http(s)` URL, because it shares `load_page` with `--window`.
 
 Problems seen in other crates, not changed: none new. The notes under "Paint and pixel capture" still hold.
+
+## Typed arrays, DataView and ArrayBuffer members
+
+This topic is batch 3 of the missing built-ins (see "Boa compared with bare-js"). It adds:
+
+- The 11 typed-array constructors: `Int8Array`, `Uint8Array`, `Uint8ClampedArray`, `Int16Array`, `Uint16Array`, `Int32Array`, `Uint32Array`, `Float32Array`, `Float64Array`, `BigInt64Array` and `BigUint64Array`. `Uint8Array` was the only one before.
+- `%TypedArray%`: `from`, `of`, the getters, and every method of the prototype: `at`, `copyWithin`, `entries`, `every`, `fill`, `filter`, `find`, `findIndex`, `findLast`, `findLastIndex`, `forEach`, `includes`, `indexOf`, `join`, `keys`, `lastIndexOf`, `map`, `reduce`, `reduceRight`, `reverse`, `set`, `slice`, `some`, `sort`, `subarray`, `toLocaleString`, `toReversed`, `toSorted`, `toString`, `values` and `with`.
+- `DataView`: the constructor, the getters, and `get` and `set` for 8 element types with `littleEndian`.
+- `ArrayBuffer`: `maxByteLength`, `resizable`, `detached` and `transfer`/`transferToFixedLength`.
+
+`tools/js/builtin_inventory.sh` now prints 145 of 655 missing, down from 202 on main 38f55d5. The `SharedArrayBuffer` items are still absent.
+
+Design:
+
+- Elements stay in the byte buffer. There is one `Exotic::View { buffer, offset, len, ty }` for all views, with `Elem` as the type (11 types, and `Data` for `DataView`).
+- `load` and `store` (`heap_binary.rs`) convert one element exactly as the spec says. An integer type wraps by modulo 2^n through `to_uint32`. `Uint8ClampedArray` rounds half to even and clamps. `Float32Array` uses `as f32`. A NaN is stored as the canonical quiet NaN.
+- A method that does not call JavaScript works on bytes. `fill` writes one encoded element over the range. `copyWithin` and `set` of the same type are `memmove`. `set` of another type converts in runs (`convert_run`). `reverse` swaps in place. The default `sort` sorts a copy of the elements in their own type. For the BigInt types it sorts bytes. Only a method that calls back reads an element as a number, one at a time.
+- A callback can detach the buffer. Each callback method reads the element when it needs it, and a missing element reads as `undefined`. A method that is done with JavaScript checks the buffer again before it writes.
+- `indexOf`, `lastIndexOf` and `includes` search the bytes. A 1-byte search compares 8 bytes per step with an exact SWAR test (`find_byte`). Wider elements compare fixed-size chunks. Each started 64 bytes costs one step.
+- `DataView` get and set compute the error name only when they fail. A call does not allocate.
+- A numeric key that is not a valid index (`-0`, `1.5`, `"-1"`, an index past the end) is never a property of a typed array. This follows the spec and V8. A detached view has no index keys.
+- Errors use V8 messages. V8 has two wordings for a bad receiver (`this is not a typed array.` and `Method %TypedArray%.prototype.X called on incompatible receiver ...`). The text of the receiver differs too (`#<Object>`, `[object Int8Array]`). `TA_METHODS` records the wording of each method. The detached message of `findLastIndex` says `findIndexLast`, as V8 does.
+- Limits: a typed-array constructor checks the byte length against the buffer cap before it allocates. `Symbol` as an element value throws `Cannot convert a Symbol value to a number`.
+
+Gates (each is `Unsupported`, never a wrong result):
+
+- Reading or writing an element of a BigInt array (this engine has no BigInt), and the 4 `DataView` BigInt methods. An empty array, and the methods that only move bytes, run.
+- `ArrayBuffer.prototype.resize` and the `maxByteLength` option of the constructor. `resizable` is always false.
+- A subclass, a `@@species` other than the default, and a `from` or `of` receiver that is not one of the intrinsics.
+- `toLocaleString` of a non-empty array, while `Number.prototype` has no own `toLocaleString`. `Object.prototype.toLocaleString` would give `1234.5` where V8 gives `1,234.5`. (`(1234.5).toLocaleString()` has the same wrong result today. It is not part of this change.)
+- An object with `valueOf` as the value in `Object.defineProperty` on a typed-array index.
+
+`SharedArrayBuffer` and resizable buffers are not done.
+
+Optimization: the first search was generic and 6% slower than the old `Uint8Array` one. The 1-byte search now uses a word at a time. `indexof` runs 17.5% fewer instructions than before this change. The first `view_own` (the element-read path of a script loop) did 5 hash lookups. It now does 2. `scan` fell from +2.7% to +1.9%.
+
+Load test (`tools/js/binary_load.sh`, release, one process per row, 1 GiB address-space cap, 45 s cap). Rows at 100x:
+
+| row | work | run | peak RSS |
+| --- | --- | ---: | ---: |
+| `f64from` | 2,000,000 values through `Float64Array.from` with a map function | 0.91 s | 51 MiB |
+| `i32sort` | 10,000,000 int32: slice, fill, sort, toReversed, set | 0.24 s | 270 MiB |
+| `dataview` | 10,000,000 turns of `getUint32`, `setUint32`, `getInt16` | 13.3 s | 118 MiB |
+| `indexof` | 200 MiB view, hits and a miss | 0.09 s | 404 MiB |
+
+All 27 rows (9 cases, 3 scales) check their result against a Rust model and stay inside the caps. A `DataView` turn costs about 1.3 µs. Three calls per turn is the interpreter cost of a method call, not of the conversion.
+
+Results, release, main a3e4c7a vs this change before the rebase onto main 38f55d5 (not measured again after it). Instructions are `perf stat -e instructions:u` (deterministic). Cycles are the minimum of 10 interleaved runs. Over 1% on instructions:
+
+- Fixed start-up cost: 0.37M instructions per realm for the new constructors and prototypes. It shows at x1 in the small rows (`eval_load concat` +10.6%, `webpack` +4.5%, `binary_load copy` +6.8%, `arrobj_load objects` +3.8%). At x100 the same rows are +0.01% to +0.7%.
+- `eval_load loop` +1.2% at all three scales and `throws` +1.0% to +1.2%. Neither runs a typed array. Hypothesis: hash layout. The global object has more properties, and the property table (`PropMap`, Fx-style hash) then makes a different collision pattern. Evidence: adding 11 plain globals to the base build gave +1.0% to +1.2% on the same rows.
+- `binary_load scan` +1.9% and `scanarr` +0.9%. `scan` reads typed elements, so some of it is real: `view_own` now does the element decode for 11 types. About 1.2% of it is the layout effect above.
+- `binary_load indexof` -17.5%. Every other row at x10 and x100 is within -0.7% to +0.7%.
+- Minimum cycles at x10 are within -2.7% to +2.7%, except `scanarr` +2.7% and `concat` +7.7% (start-up cost on a 3.6M-instruction row), `copy` +8.9% (a 20M-cycle row).
+
+Validation:
+
+- 63 Node cases (`tools/fixtures/js/typed-cases.txt`, `tools/js/typed_check.sh`). They cover every constructor form, `from` and `of`, each method with edge arguments, conversion of every element type, `DataView` for all types and both byte orders, detaching in callbacks, and the error messages. All match Node 22.18. The 93 cases of `binary_check.sh` still match.
+- Rust tests (`eval_typed_tests.rs`): the corpus, every element type against a plain model of the conversion, the canonical NaN, each gate, the byte and step limits, detached buffers, GC with views and `find_byte` against a plain scan at every length and position.
+
+Not tested: BigInt elements (gated), resizable buffers, a realm with a user-defined subclass, other engines, and the live staging login.
+
+V8 quirks noticed: the receiver wording (above) and `findIndexLast` in a detached message. Both are matched. Node 22.18 gives a result for `fill(v, undefined, end)` that this change does not copy. V8 converts the value before the index in `with`.

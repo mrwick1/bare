@@ -939,6 +939,7 @@ impl<'p> Interp<'p> {
             HeapError::Limit(l) => Error::Limit(LimitKind::Heap(l)),
             HeapError::InvalidArrayLength => self.mk_err(RANGE_ERROR, "Invalid array length"),
             HeapError::SymbolConversion => self.mk_err(TYPE_ERROR, "Cannot convert a Symbol value to a string"),
+            HeapError::SymbolToNumber => self.mk_err(TYPE_ERROR, "Cannot convert a Symbol value to a number"),
             HeapError::NeedsExecution(w) => unsupported(w, Span::default()),
             e => Error::Heap(e),
         }
@@ -2982,6 +2983,7 @@ include!("eval_promise.rs");
 include!("eval_promise_combinators.rs");
 include!("eval_binary.rs");
 include!("eval_binary_search.rs");
+include!("eval_typed.rs");
 include!("eval_scripts.rs");
 include!("eval_stack.rs");
 include!("eval_builtins.rs");
@@ -3059,6 +3061,10 @@ mod indexed_tests;
 #[cfg(test)]
 #[path = "eval_binary_tests.rs"]
 mod binary_tests;
+
+#[cfg(test)]
+#[path = "eval_typed_tests.rs"]
+mod typed_tests;
 
 #[cfg(test)]
 #[path = "eval_array_object_tests.rs"]
