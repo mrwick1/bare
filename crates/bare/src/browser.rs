@@ -43,6 +43,7 @@
 //! Gates and deviations (on purpose, none is silently faked)
 //! - Lists (`childNodes`, `children`, `querySelectorAll`, `getElementsByTagName`, `getElementsByClassName`) are plain
 //!   snapshot arrays, not live `NodeList`/`HTMLCollection`.
+//!   The one live `NodeList` is the result of `document.getElementsByName` (`browser_nodelist.rs`).
 //! - A JS string with a lone surrogate cannot be stored in the UTF-8 document: `Error::Unsupported`. Valid pairs round-trip.
 //! - Namespaces are in `browser_namespace.rs` (read its header): HTML, SVG and MathML elements, attributes in no namespace, XML,
 //!   XMLNS and XLink. Any other namespace is `Unsupported`. Shadow DOM is absent. `new Document()`, `DocumentFragment`, `outerHTML`, `insertAdjacentHTML`,
@@ -293,6 +294,8 @@ pub struct Dom {
     pub(crate) computed: crate::browser_computed::Computed,
     /// `Element.attributes`, `NamedNodeMap` and `Attr` (`browser_attr.rs`).
     pub(crate) attr: crate::browser_attr::AttrHost,
+    /// `Document.getElementsByName` and the live `NodeList` (`browser_nodelist.rs`).
+    pub(crate) nl: crate::browser_nodelist::NodeListHost,
 }
 
 impl Host for Dom {
@@ -318,6 +321,7 @@ impl Host for Dom {
         crate::browser_style::roots(self, out);
         crate::browser_computed::roots(self, out);
         at::roots(self, out);
+        crate::browser_nodelist::roots(self, out);
     }
 
     fn trace(&self, owner: ObjId, out: &mut Vec<Value>) {
@@ -327,6 +331,7 @@ impl Host for Dom {
         crate::browser_style::trace(self, owner, out);
         crate::browser_computed::trace(self, owner, out);
         at::trace(self, owner, out);
+        crate::browser_nodelist::trace(self, owner, out);
         let st = self.st.borrow();
         if let Some(&t) = st.by_obj.get(&owner) {
             for l in st.listeners.get(&t).into_iter().flatten() {
@@ -357,6 +362,7 @@ impl Host for Dom {
         crate::browser_style::prune(self, live);
         crate::browser_computed::prune(self, live);
         at::prune(self, live);
+        crate::browser_nodelist::prune(self, live);
         let mut st = self.st.borrow_mut();
         let st = &mut *st;
         st.by_obj.retain(|&o, t| matches!(t, Target::Window) || live(o));
@@ -379,6 +385,9 @@ impl Host for Dom {
     }
 
     fn fill_indexed(&self, it: &mut Interp<'_>, owner: ObjId, index: u32) -> R<()> {
+        if crate::browser_nodelist::fill(self, it, owner, index)? {
+            return Ok(());
+        }
         at::fill(self, it, owner, index)
     }
 }
@@ -738,6 +747,7 @@ impl Dom {
         crate::browser_loader::install(self, it)?;
         self.install_platform(it)?;
         at::install(self, it)?;
+        crate::browser_nodelist::install(self, it)?;
         crate::browser_console::install(self, it)?;
         crate::browser_style::install(self, it)?;
         crate::browser_computed::install(self, it)
@@ -832,6 +842,7 @@ pub(crate) static DEFS: &[Def] = &[
     Def { on: &[CharData], name: "length", len: 0, kind: G(nd::data_length) },
     Def { on: &[Document], name: "createElement", len: 1, kind: M(nd::create_element) },
     Def { on: &[Document], name: "createElementNS", len: 2, kind: M(ns::create_element_ns) },
+    Def { on: &[Document], name: "getElementsByName", len: 1, kind: M(crate::browser_nodelist::get_elements_by_name) },
     Def { on: &[Document], name: "createAttribute", len: 1, kind: M(at::create_attribute) },
     Def { on: &[Document], name: "createAttributeNS", len: 2, kind: M(at::create_attribute_ns) },
     Def { on: &[Document], name: "createTextNode", len: 1, kind: M(nd::create_text_node) },
@@ -937,6 +948,7 @@ impl Browser {
             style: Default::default(),
             computed: Default::default(),
             attr: Default::default(),
+            nl: Default::default(),
         });
         it.set_host(dom.clone())?;
         it.heap.set_indexed_source(dom.clone());

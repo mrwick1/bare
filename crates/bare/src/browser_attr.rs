@@ -134,12 +134,18 @@ pub(crate) fn prune(d: &Dom, live: &dyn Fn(ObjId) -> bool) {
 
 impl IndexedSource for Dom {
     fn indexed_len(&self, owner: ObjId) -> Result<usize, HeapError> {
+        if let Some(r) = crate::browser_nodelist::len(self, owner) {
+            return r;
+        }
         let t = self.attr.s.try_borrow().map_err(|_| HeapError::HostUnavailable)?;
         let Some(&el) = t.maps.get(&owner) else { return Ok(0) };
         Ok(self.doc.try_borrow().map_err(|_| HeapError::HostUnavailable)?.attr_count(el))
     }
 
     fn indexed_item(&self, owner: ObjId, index: usize) -> Result<Slot, HeapError> {
+        if let Some(r) = crate::browser_nodelist::item(self, owner, index) {
+            return r;
+        }
         let t = self.attr.s.try_borrow().map_err(|_| HeapError::HostUnavailable)?;
         let Some(&el) = t.maps.get(&owner) else { return Ok(Slot::Absent) };
         let doc = self.doc.try_borrow().map_err(|_| HeapError::HostUnavailable)?;
@@ -204,7 +210,7 @@ fn protos(d: &Dom) -> (ObjId, ObjId) {
 /// Room for one more `Attr` or map object, before it is made.
 fn room(d: &Dom) -> R<()> {
     let t = d.attr.s.borrow();
-    if d.st.borrow().by_obj.len() + t.attrs.len() + t.maps.len() >= d.lim.max_wrappers {
+    if d.st.borrow().by_obj.len() + t.attrs.len() + t.maps.len() + d.nl_count() >= d.lim.max_wrappers {
         return Err(d.lim("dom-wrappers"));
     }
     Ok(())

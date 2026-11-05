@@ -215,6 +215,9 @@ pub struct Document {
     // The attributes (element index, atom) that a host holds an `Attr` object for. See `watch_attr`.
     removed: Vec<RemovedAttr>,
     // The watched attributes that were removed since the host last took the list. See `take_removed_attrs`.
+    revision: u64,
+    // Moves at every change that can alter a tree query: a node joins or leaves the tree, an attribute is set or removed, an
+    // element gets a namespace. See `revision`.
 }
 
 /// A watched attribute that was removed: the element, the name and the value it had. The value stays readable
@@ -281,11 +284,21 @@ impl Document {
             atom_ns: HashMap::default(),
             watched: HashSet::default(),
             removed: Vec::new(),
+            revision: 0,
         };
         // The order matters: it must match `Atom::ID` and `Atom::CLASS`.
         doc.intern("id");
         doc.intern("class");
         doc
+    }
+
+    /// A number that moves at every public change that can alter the answer of a tree query: a node is linked into or
+    /// detached from the tree (the parser, `insert_*`, `move_to`, `move_children`, `detach`), an attribute is set or removed
+    /// (any name, any value), or an element gets a namespace. A host that caches the nodes of a query keeps the number from
+    /// when it built the list, and builds it again when the number is not the same. Changes that cannot alter a query leave it
+    /// alone: a new node with no parent, a text edit, a new name, a new span. It only grows, and it is not a count of changes.
+    pub fn revision(&self) -> u64 {
+        self.revision
     }
 
     /// The top node.
@@ -445,6 +458,7 @@ impl Document {
     /// Put `node`, which has no parent, in the list of children of `parent`, just before `before` (or at the end).
     fn link(&mut self, node: NodeId, parent: NodeId, before: Option<NodeId>) {
         self.places = Default::default();
+        self.revision += 1;
         let before = before.filter(|&b| b != node && self.parent(b) == Some(parent));
         let prev = self.child_before(parent, before);
         let n = &mut self.nodes[node.index()];
@@ -466,6 +480,7 @@ impl Document {
         let Node { parent, prev, next, .. } = self.nodes[node.index()];
         let Some(parent) = parent else { return };
         self.places = Default::default();
+        self.revision += 1;
         match prev {
             Some(p) => self.nodes[p.index()].next = next,
             None => self.nodes[parent.index()].first_child = next,
@@ -543,6 +558,7 @@ impl Document {
     fn set_foreign(&mut self, id: NodeId, ns: Ns, prefix: Option<&str>) {
         debug_assert!(matches!(ns, Ns::Html | Ns::Svg | Ns::MathMl));
         if ns != Ns::Html {
+            self.revision += 1;
             let prefix = prefix.map(|p| self.intern(p));
             self.foreign.insert(id.index() as u32, Foreign { ns, prefix });
         }
@@ -739,6 +755,7 @@ impl Document {
     pub fn set_attr_atom(&mut self, el: NodeId, name: Atom, value: &str) {
         let NodeData::Element { name: tag, attrs } = self.nodes[el.index()].data else { return };
         let span = self.push_text(value);
+        self.revision += 1;
         self.class_sets.get_mut().remove(&el.index());
         // An empty list can start after the end (see `attrs`): it begins again at the end.
         let (start, len) = if attrs.len == 0 { (self.attrs.len(), 0) } else { (attrs.start as usize, attrs.len as usize) };
@@ -771,6 +788,7 @@ impl Document {
             return false;
         }
         let Some(at) = self.attrs[start..start + len].iter().position(|a| a.name == name) else { return false };
+        self.revision += 1;
         self.class_sets.get_mut().remove(&el.index());
         let value = self.attrs[start + at].value;
         // A watched attribute is logged once: it leaves the watch set here, so the log cannot grow without a new `watch_attr`.
@@ -1448,5 +1466,92 @@ mod tests {
             assert!(!doc.has_class(big[0], "c100") && !doc.has_class(big[0], "c"));
         }
         assert!(!doc.has_class(none[0], "a"));
+    }
+
+    /// Every public change that can alter which nodes are in the tree, or what their attributes or namespaces are, moves
+    /// `revision`. A host cache of a tree query (`getElementsByName`) is valid only while it is the same.
+    #[test]
+    fn revision_moves_on_every_tree_attribute_and_namespace_change() {
+        let mut doc = Document::new();
+        let root = doc.root();
+        let r0 = doc.revision();
+        let mut seen = vec![r0];
+        let mut moved = |doc: &Document, what: &str| {
+            let r = doc.revision();
+            assert!(r != *seen.last().unwrap(), "{what} did not change the revision");
+            seen.push(r);
+        };
+        let a = doc.insert_element(root, None, "div", &[("name", "x")]);
+        moved(&doc, "insert_element");
+        let t = doc.create_element("p");
+        let c = doc.create_text("t");
+        doc.move_to(t, a, None);
+        moved(&doc, "move_to (link)");
+        doc.move_to(t, root, Some(a));
+        moved(&doc, "move_to (reparent)");
+        doc.detach(t);
+        moved(&doc, "detach");
+        doc.move_children(root, a);
+        moved(&doc, "move_children");
+        let name = doc.intern("name");
+        doc.set_attr_atom(a, name, "y");
+        moved(&doc, "set_attr_atom (change)");
+        doc.set_attr(a, "other", "1");
+        moved(&doc, "set_attr (add)");
+        assert!(doc.remove_attr(a, "other"));
+        moved(&doc, "remove_attr");
+        assert!(doc.remove_attr_atom(a, name));
+        moved(&doc, "remove_attr_atom");
+        let svg = doc.insert_element_ns::<&str, &str>(a, None, Ns::Svg, "g", &[]);
+        moved(&doc, "insert_element_ns");
+        doc.append_text(a, "more");
+        moved(&doc, "append_text (new node)");
+        doc.append_comment_to(a, "c");
+        moved(&doc, "append_comment_to");
+        doc.append_comment("c2");
+        moved(&doc, "append_comment");
+        doc.append_doctype("html");
+        moved(&doc, "append_doctype");
+        let ns = doc.create_element_ns(Ns::Svg, None, "rect");
+        moved(&doc, "create_element_ns (set_foreign)");
+        let _ = (svg, c, ns);
+    }
+
+    /// Changes that cannot alter any tree query leave the revision alone, so a cache is not rebuilt for nothing.
+    #[test]
+    fn revision_stays_for_changes_outside_the_tree() {
+        let mut doc = Document::new();
+        let root = doc.root();
+        let a = doc.insert_element(root, None, "div", &[("name", "x")]);
+        let r = doc.revision();
+        let n = doc.create_element("i");
+        let c = doc.clone_element(a);
+        let t = doc.create_text("t");
+        let _ = doc.create_comment("c");
+        let _ = doc.create_doctype("d");
+        doc.set_text(t, "u");
+        let _ = doc.intern("other");
+        let _ = doc.new_span("s");
+        doc.detach(n);
+        assert!(!doc.remove_attr(a, "absent"));
+        let _ = c;
+        assert_eq!(doc.revision(), r);
+    }
+
+    #[test]
+    fn revision_follows_the_parser_and_import() {
+        let doc = crate::tree::parse("<!doctype html><body><i name=a></i></body>");
+        assert!(doc.revision() > 0);
+        let mut other = Document::new();
+        let r = other.revision();
+        let i = doc.children(doc.children(doc.root()).last().unwrap()).last().unwrap();
+        let body = doc.children(doc.children(doc.root()).last().unwrap()).last().unwrap();
+        let imported = other.import_node(&doc, body).unwrap();
+        let _ = (i, imported);
+        // an imported node has no parent: not a tree change; linking it is.
+        assert_eq!(other.revision(), r);
+        let root = other.root();
+        other.move_to(imported, root, None);
+        assert!(other.revision() != r);
     }
 }

@@ -12,8 +12,11 @@ mod browser_focus;
 mod browser_focus_tests;
 mod browser_namespace;
 mod browser_attr;
+mod browser_nodelist;
 #[cfg(test)]
 mod browser_attr_tests;
+#[cfg(test)]
+mod browser_nodelist_tests;
 pub mod browser_fetch;
 pub mod browser_console;
 #[cfg(test)]
