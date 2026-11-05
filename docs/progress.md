@@ -445,3 +445,5 @@ The async machine uses less memory. `await` of a value that is not an object mak
 After a burst of garbage dies, a quiet collect now gives the side tables back: functions, promises, settled resolver pairs, the microtask queue, async activations and environments. Arrows, promises, `let` scopes and async calls now keep 2-6% of the burst, down from 32-62%. See [resources.md](resources.md#side-tables-after-a-collect).
 
 An ordinary function now makes its `prototype` object only when a script reads or redefines it, as V8 does. A kept function expression takes 582 B, down from 896 B. The cached login page holds 23% fewer live objects, and the Promise load rows take 16-31% less peak memory. See [resources.md](resources.md#lazy-function-prototype).
+
+A `let` or `const` block no longer allocates and no longer hashes its names on each entry. A `let` block in a loop runs 10% fewer instructions, and a `for (const x of a)` loop runs 17% fewer. An attempt to remove block environments was measured and dropped, because it did not pay. See [resources.md](resources.md#let-block-declarations).

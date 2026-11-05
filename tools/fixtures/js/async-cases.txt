@@ -586,3 +586,13 @@ async function f(a, b) {
 }
 f(1, 2); f(1, 3); f(5, 0);
 (function () { return log.join("|"); })
+=== let_block_across_await_interleaved_calls
+var log = []; function L(x) { log.push(String(x)); }
+async function f(k) { var t = "v" + k; { let t = k * 10; L("a" + t); await null; L("b" + t); { let u = t + 1; await u; L("c" + u); } L("d" + typeof u); } L("e" + t); }
+f(1); f(2);
+(function () { return log.join("|"); })
+=== let_block_throw_and_return_across_await
+var log = []; function L(x) { log.push(String(x)); }
+async function f(k) { try { { let a = k; await a; if (a > 1) throw a; L("in" + a); } } catch (e) { L("caught" + e + typeof a); } { const b = await k; return b + 1; } }
+f(1).then(L); f(2).then(L);
+(function () { return log.join("|"); })

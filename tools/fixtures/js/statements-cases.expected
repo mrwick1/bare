@@ -63,3 +63,10 @@ arguments_in_nested_statements	string:n,o,n
 long_flat_list	number:15
 completion_if_loop	number:3
 return_value_through_many_frames	string:deep
+let_block_does_not_leak_to_an_earlier_closure	string:outer,inner
+let_block_hides_a_global_from_a_called_function	string:undefined,global,local,1,undefined
+let_block_names_go_away_on_exit_throw_and_break	string:1,undefined,2,undefined,0,4,undefined
+let_block_tdz_and_const	string:ReferenceError,TypeError,3
+let_block_clash_with_a_param_and_nesting	string:4,2,3,1
+let_block_many_bindings	string:48,undefined,0
+let_block_in_catch_and_closure_blocks	string:2,5,6

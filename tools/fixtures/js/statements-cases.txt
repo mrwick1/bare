@@ -130,3 +130,17 @@ var s = 0; { s += 1; s += 2; s += 3; { s += 4; } s += 5; } s
 var a = 1; if (a) { 2; } 3
 === return_value_through_many_frames
 function f() { a: for (;;) { switch (1) { case 1: try { { return "deep"; } } finally { } } } } f()
+=== let_block_does_not_leak_to_an_earlier_closure
+function f() { var t = "outer"; function g() { return t; } { let t = "inner"; return g() + "," + t; } } f()
+=== let_block_hides_a_global_from_a_called_function
+var u = "global"; function g() { return typeof w + "," + u; } function f() { var o = []; { let w = 1, u = "local"; o.push(g(), u, w); } o.push(typeof w); return o.join(); } f()
+=== let_block_names_go_away_on_exit_throw_and_break
+function f() { var o = []; try { { let a = 1; throw a; } } catch (e) { o.push(e, typeof a); } b: { let c = 2; o.push(c); break b; } o.push(typeof c); for (var i = 0; i < 3; i++) { let d = i * 2; if (i === 1) continue; o.push(d); } o.push(typeof d); return o.join(); } f()
+=== let_block_tdz_and_const
+function f() { var o = []; { try { x; } catch (e) { o.push(e.name); } let x = 1; const y = 2; try { y = 3; } catch (e) { o.push(e.name); } o.push(x + y); } return o.join(); } f()
+=== let_block_clash_with_a_param_and_nesting
+function f(a) { var o = []; { let a = 2; { let b = a + 1; { let a = b + 1; o.push(a); } o.push(a, b); } } o.push(a); return o.join(); } f(1)
+=== let_block_many_bindings
+function f() { var a1=1,a2=2,a3=3,a4=4,a5=5,a6=6,a7=7,a8=8,a9=9,a10=10,a11=11; var s = 0; for (var i = 0; i < 3; i++) { let b1=i,b2=i,b3=i,b4=i,b5=i; s += b1+b2+b3+b4+b5+a11; } let z = 0; return s + "," + typeof b3 + "," + z; } f()
+=== let_block_in_catch_and_closure_blocks
+function f() { var o = []; try { throw 1; } catch (e) { { let k = e + 1; o.push(k); } } { let m = 5; o.push((function () { return m; })()); } { let n = 6; var h = () => n; } o.push(h()); return o.join(); } f()
