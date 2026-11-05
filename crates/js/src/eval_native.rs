@@ -24,7 +24,7 @@ impl<'p> Interp<'p> {
                             if matches!(k, PropertyKey::Symbol(_)) {
                                 continue;
                             }
-                            if matches!(hx!(self, self.heap.get_own_property(o, k)), Some(p) if p.enumerable()) {
+                            if matches!(hx!(self, self.heap.peek_own_property(o, k)), Some(p) if p.enumerable()) {
                                 out.push(k);
                             }
                         }

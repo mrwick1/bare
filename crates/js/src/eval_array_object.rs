@@ -761,7 +761,7 @@ impl<'p> Interp<'p> {
             for k in keys {
                 self.tick()?;
                 if let Value::Object(o) = src {
-                    match hx!(self, self.heap.get_own_property(o, k)) {
+                    match hx!(self, self.heap.peek_own_property(o, k)) {
                         Some(p) if p.enumerable() => {}
                         _ => continue,
                     }
@@ -789,7 +789,7 @@ impl<'p> Interp<'p> {
                 continue;
             }
             if let Value::Object(o) = src {
-                match hx!(self, self.heap.get_own_property(o, k)) {
+                match hx!(self, self.heap.peek_own_property(o, k)) {
                     Some(p) if p.enumerable() => {}
                     _ => continue,
                 }

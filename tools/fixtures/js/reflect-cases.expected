@@ -21,3 +21,6 @@ names_views_sparse	0,1,2|3|0,1,2,extra|0||3,4000000000,length|length|7,length ##
 native_fallback_prototypes	true,true,true ## true,true,true
 native_prototype_allocation_order	proto,message,match,proto,pattern,flags ## proto,message,match,proto,pattern,flags
 array_prototype_error_before_length_error	true ## true
+function_prototype_identity_order_and_descriptor	length,name,prototype,extra|object,true,false,false|true|true|true|constructor|false|length,name,prototype,extra|true,true,false,object ## length,name,prototype,extra|object,true,false,false|true|true|true|constructor|false|length,name,prototype,extra|true,true,false,object
+function_prototype_new_instanceof_and_replacement	true,true,true|p,true,true|m,true|true,object,true|undefined,true ## true,true,true|p,true,true|m,true|true,object,true|undefined,true
+function_prototype_through_chains_and_kinds	true,true,false|true,true|false,false,false,false|object,true|true,true|true|length,name,prototype ## true,true,false|true,true|false,false,false,false|object,true|true,true|true|length,name,prototype

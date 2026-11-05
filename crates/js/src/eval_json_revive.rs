@@ -110,7 +110,7 @@ impl<'p> Interp<'p> {
             let mut n = 0;
             for i in 0..list.len() {
                 let k = list[i];
-                if !matches!(k, PropertyKey::Symbol(_)) && hx!(self, self.heap.get_own_property(o, k)).is_some_and(|p| p.enumerable()) {
+                if !matches!(k, PropertyKey::Symbol(_)) && hx!(self, self.heap.peek_own_property(o, k)).is_some_and(|p| p.enumerable()) {
                     list[n] = k;
                     n += 1;
                 }

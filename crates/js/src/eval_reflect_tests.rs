@@ -338,3 +338,28 @@ fn native_prototype_getters_run_at_the_correct_allocation_boundary() {
         assert_eq!(out(&mut it, "var T = (function () {}).bind(null); Object.defineProperty(T, 'prototype', { get() { throw 7; } }); try { Reflect.construct(Array, [NaN], T); } catch (e) { e === 7; }"), "true");
     });
 }
+
+#[test]
+fn a_function_makes_its_prototype_object_only_when_it_is_used() {
+    big(|| {
+        let mut it = realm();
+        out(&mut it, "var keep = []; 0");
+        it.collect(&[]).unwrap();
+        let base = it.heap.stats().live_objects;
+        out(&mut it, "for (var i = 0; i < 1000; i++) keep.push(function () {}); 0");
+        it.collect(&[]).unwrap();
+        assert_eq!(it.heap.stats().live_objects - base, 1000, "one object per function, no prototype yet");
+        // key listing, `in` and hasOwnProperty need no object
+        assert_eq!(out(&mut it, "Reflect.ownKeys(keep[0]).join() + ('prototype' in keep[1]) + keep[2].hasOwnProperty('prototype')"), "length,name,prototypetruetrue");
+        it.collect(&[]).unwrap();
+        assert_eq!(it.heap.stats().live_objects - base, 1000);
+        // a read makes it once, with a stable identity
+        assert_eq!(out(&mut it, "keep[3].prototype === keep[3].prototype && keep[3].prototype.constructor === keep[3]"), "true");
+        it.collect(&[]).unwrap();
+        assert_eq!(it.heap.stats().live_objects - base, 1001);
+        // the prototype keeps its function alive through `constructor`
+        assert_eq!(out(&mut it, "var p = keep[3].prototype; keep = null; 0"), "0");
+        it.collect(&[]).unwrap();
+        assert_eq!(out(&mut it, "typeof p.constructor + (p.constructor.prototype === p)"), "functiontrue");
+    });
+}

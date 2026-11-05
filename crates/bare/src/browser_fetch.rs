@@ -595,7 +595,7 @@ impl Dom {
         }
         for k in keys {
             it.charge(1)?;
-            let enumerable = it.heap.get_own_property(o, k).map_err(|e| it.heap_error(e))?.is_some_and(|p| p.enumerable());
+            let enumerable = it.heap.peek_own_property(o, k).map_err(|e| it.heap_error(e))?.is_some_and(|p| p.enumerable());
             if !enumerable {
                 continue;
             }

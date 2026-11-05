@@ -215,7 +215,8 @@ fn collect_keeps_what_roots_reach_and_frees_the_rest() {
         assert!(freed.objects > 1000, "{freed:?}");
         assert!(after.0.live_envs < 10, "{:?}", after.0);
         assert!(after.0.functions <= intrinsic_functions + 2, "{:?}", after.0);
-        assert!(after.1.live_objects < before.1.live_objects / 10);
+        // 1999 dead closures go; functions make no prototype object until it is read
+        assert!(after.1.live_objects + 1999 <= before.1.live_objects, "{} {}", after.1.live_objects, before.1.live_objects);
         // the survivor still has its closure state, its strings and the shared data object
         let keep = global_get(&mut it, "keep");
         let r = it.call(keep, Value::Undefined, &[]).unwrap();
