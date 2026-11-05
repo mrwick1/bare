@@ -278,6 +278,7 @@ struct BodyInfo {
 struct Ctx {
     in_func: bool,    // `return` is allowed
     is_async: bool,   // `await` is an operator
+    is_gen: bool,     // `yield` is an operator
     new_target: bool, // `new.target` is allowed
     super_prop: bool, // `super.x` is allowed
     super_call: bool, // `super()` is allowed
@@ -365,6 +366,32 @@ fn is_reserved_word(n: &str) -> bool {
             | "in" | "instanceof" | "new" | "null" | "return" | "super" | "switch" | "this" | "throw" | "true"
             | "try" | "typeof" | "var" | "void" | "while" | "with"
     )
+}
+
+fn func_mode(is_async: bool, is_gen: bool) -> FuncMode {
+    match (is_async, is_gen) {
+        (true, _) => FuncMode::Async,
+        (_, true) => FuncMode::Generator,
+        _ => FuncMode::Plain,
+    }
+}
+
+/// A token that can start an expression (Acorn: `startsExpr`). After `yield` it starts the argument.
+fn starts_expr(k: Kind) -> bool {
+    match k {
+        Kind::Eof => false,
+        Kind::Punct(p) => matches!(
+            p,
+            P::LBrace | P::LParen | P::LBracket | P::Plus | P::Minus | P::PlusPlus | P::MinusMinus | P::Bang
+                | P::Tilde | P::Slash | P::SlashAssign
+        ),
+        Kind::Keyword(k) => matches!(
+            k,
+            K::This | K::Super | K::New | K::Function | K::Class | K::Typeof | K::Void | K::Delete | K::Null
+                | K::True | K::False | K::Import
+        ),
+        _ => true,
+    }
 }
 
 fn is_strict_reserved(n: &str) -> bool {
@@ -641,7 +668,7 @@ impl<'a> Parser<'a> {
     fn check_word(&self, span: Span) -> R<()> {
         let text = self.p.text(span);
         let escaped = text.as_bytes().contains(&b'\\');
-        if !(escaped || self.strict || self.ctx.is_async) {
+        if !(escaped || self.strict || self.ctx.is_async || self.ctx.is_gen) {
             return Ok(());
         }
         let name = self.name_of(span);
@@ -653,6 +680,9 @@ impl<'a> Parser<'a> {
         }
         if self.ctx.is_async && name == "await" {
             return Err(self.early("'await' is not an identifier in an async function", span));
+        }
+        if self.ctx.is_gen && name == "yield" {
+            return Err(self.early("'yield' is not an identifier in a generator", span));
         }
         Ok(())
     }
@@ -1670,6 +1700,9 @@ impl<'a> Parser<'a> {
 
     fn assign_inner(&mut self, no_in: bool, _pass: bool) -> R<ExprId> {
         let start = self.tok.start;
+        if self.ctx.is_gen && self.is_word("yield") {
+            return self.parse_yield(no_in, start);
+        }
         if matches!(self.tok.kind, Kind::Punct(P::LParen) | Kind::Ident) {
             self.arrow_at = start;
         }
@@ -1688,6 +1721,21 @@ impl<'a> Parser<'a> {
         self.advance()?;
         let value = self.parse_assign(no_in, false)?;
         self.mk_expr(ExprKind::Assign { op, target, value }, start)
+    }
+
+    /// `yield`, `yield x` or `yield* x`. The current token is `yield`.
+    fn parse_yield(&mut self, no_in: bool, start: u32) -> R<ExprId> {
+        // A yield in parameters is an error, as an await is: they share `await_pos`.
+        if self.await_pos == 0 {
+            self.await_pos = start + 1;
+        }
+        self.advance()?;
+        if self.tok.newline_before || !(self.is(P::Star) || starts_expr(self.tok.kind)) {
+            return self.mk_expr(ExprKind::Yield { arg: None, delegate: false }, start);
+        }
+        let delegate = self.eat(P::Star)?;
+        let arg = self.parse_assign(no_in, false)?;
+        self.mk_expr(ExprKind::Yield { arg: Some(arg), delegate }, start)
     }
 
     fn parse_cond(&mut self, no_in: bool) -> R<ExprId> {
@@ -2366,10 +2414,14 @@ impl<'a> Parser<'a> {
                 self.advance()?;
             }
         }
-        if self.is(P::Star) {
-            return Err(self.unsupported("generators are not supported", self.tok.start, self.tok.end));
+        let is_gen = self.is(P::Star);
+        if is_gen {
+            if is_async {
+                return Err(self.unsupported("async generators are not supported", self.tok.start, self.tok.end));
+            }
+            self.advance()?;
         }
-        if !is_async && (self.is_word("get") || self.is_word("set")) {
+        if !is_async && !is_gen && (self.is_word("get") || self.is_word("set")) {
             let n = self.peek()?;
             if !Self::ends_key_word(n.kind) {
                 accessor = Some(if self.text() == "get" { PropKind::Get } else { PropKind::Set });
@@ -2378,14 +2430,14 @@ impl<'a> Parser<'a> {
         }
         let kt = self.tok;
         let (key, plain) = self.parse_prop_key()?;
-        if is_async || accessor.is_some() || self.is(P::LParen) {
+        if is_async || is_gen || accessor.is_some() || self.is(P::LParen) {
             let (kind, fkind) = match accessor {
                 Some(PropKind::Get) => (PropKind::Get, FuncKind::Getter),
                 Some(_) => (PropKind::Set, FuncKind::Setter),
                 None => (PropKind::Method, FuncKind::Method),
             };
             let fstart = self.tok.start;
-            let f = self.parse_function_rest(fstart, None, fkind, is_async)?;
+            let f = self.parse_function_rest(fstart, None, fkind, is_async, is_gen)?;
             let fend = self.prev_end;
             let value = self.mk_expr_at(ExprKind::Function(f), fstart, fend)?;
             let span = Span { start: pstart, end: self.prev_end };
@@ -2499,8 +2551,15 @@ impl<'a> Parser<'a> {
 
     fn parse_function_decl(&mut self, start: u32, is_async: bool, hanging: bool) -> R<StmtId> {
         self.advance()?; // `function`
-        if self.is(P::Star) {
-            return Err(self.unsupported("generators are not supported", self.tok.start, self.tok.end));
+        let is_gen = self.is(P::Star);
+        if is_gen {
+            if is_async {
+                return Err(self.unsupported("async generators are not supported", self.tok.start, self.tok.end));
+            }
+            if hanging {
+                return Err(self.syntax("generator declaration is not allowed here", self.tspan()));
+            }
+            self.advance()?;
         }
         if self.tok.kind != Kind::Ident {
             return Err(self.unexpected());
@@ -2508,7 +2567,7 @@ impl<'a> Parser<'a> {
         let name = self.tspan();
         self.check_binding_name(name)?;
         if !hanging {
-            let bind = if self.strict || is_async {
+            let bind = if self.strict || is_async || is_gen {
                 if self.funcs_as_var(self.nscopes - 1) { Bind::Var } else { Bind::Lex }
             } else {
                 Bind::Func
@@ -2518,26 +2577,30 @@ impl<'a> Parser<'a> {
         }
         self.advance()?;
         let fstart = start;
-        let f = self.parse_function_rest(fstart, Some(name), FuncKind::Normal, is_async)?;
+        let f = self.parse_function_rest(fstart, Some(name), FuncKind::Normal, is_async, is_gen)?;
         self.mk_stmt(StmtKind::Function(f), start)
     }
 
     fn parse_function_expr(&mut self, start: u32, is_async: bool) -> R<ExprId> {
-        if self.is(P::Star) {
-            return Err(self.unsupported("generators are not supported", self.tok.start, self.tok.end));
+        let is_gen = self.is(P::Star);
+        if is_gen {
+            if is_async {
+                return Err(self.unsupported("async generators are not supported", self.tok.start, self.tok.end));
+            }
+            self.advance()?;
         }
         let mut name = None;
         if self.tok.kind == Kind::Ident {
             let s = self.tspan();
-            let saved = self.ctx.is_async;
-            self.ctx.is_async = is_async;
+            let saved = self.ctx;
+            (self.ctx.is_async, self.ctx.is_gen) = (is_async, is_gen);
             let r = self.check_binding_name(s);
-            self.ctx.is_async = saved;
+            self.ctx = saved;
             r?;
             name = Some(s);
             self.advance()?;
         }
-        let f = self.parse_function_rest(start, name, FuncKind::Normal, is_async)?;
+        let f = self.parse_function_rest(start, name, FuncKind::Normal, is_async, is_gen)?;
         self.mk_expr(ExprKind::Function(f), start)
     }
 
@@ -2548,11 +2611,12 @@ impl<'a> Parser<'a> {
     }
 
     /// Parameters and body. The current token is `(`.
-    fn parse_function_rest(&mut self, start: u32, name: Option<Span>, kind: FuncKind, is_async: bool) -> R<FuncId> {
+    fn parse_function_rest(&mut self, start: u32, name: Option<Span>, kind: FuncKind, is_async: bool, is_gen: bool) -> R<FuncId> {
         let (saved_ctx, saved_strict, saved_lb, saved_arrow) = (self.ctx, self.strict, self.label_base, self.arrow_at);
         self.ctx = Ctx {
             in_func: true,
             is_async,
+            is_gen,
             new_target: true,
             super_prop: kind != FuncKind::Normal,
             super_call: kind == FuncKind::DerivedConstructor,
@@ -2569,7 +2633,7 @@ impl<'a> Parser<'a> {
         (self.ctx, self.strict, self.label_base, self.arrow_at) = (saved_ctx, saved_strict, saved_lb, saved_arrow);
         let (params, body, simple) = r?;
         let span = Span { start, end: self.prev_end };
-        Ok(mk!(self, funcs, Func { name, params, body, kind, is_async, strict, simple_params: simple, span }))
+        Ok(mk!(self, funcs, Func { name, params, body, kind, mode: func_mode(is_async, is_gen), strict, simple_params: simple, span }))
     }
 
     fn function_inner(&mut self, _start: u32, name: Option<Span>, kind: FuncKind, is_async: bool) -> R<(List<Pat>, Body, bool)> {
@@ -2661,6 +2725,7 @@ impl<'a> Parser<'a> {
         // An arrow keeps `this`, `super`, `new.target` and the field-initializer rule of the code around it.
         self.ctx.in_func = true;
         self.ctx.is_async = is_async;
+        self.ctx.is_gen = false;
         self.label_base = self.labels.len();
         self.push_scope(S_VAR | S_FUNC);
         let simple = self.is_simple_params(params);
@@ -2680,7 +2745,7 @@ impl<'a> Parser<'a> {
         (self.ctx, self.strict, self.label_base, self.arrow_at) = (saved_ctx, saved_strict, saved_lb, saved_arrow);
         let body = r?;
         let span = Span { start, end: self.prev_end };
-        let f = mk!(self, funcs, Func { name: None, params, body, kind: FuncKind::Arrow, is_async, strict, simple_params: simple, span });
+        let f = mk!(self, funcs, Func { name: None, params, body, kind: FuncKind::Arrow, mode: func_mode(is_async, false), strict, simple_params: simple, span });
         self.mk_expr(ExprKind::Function(f), start)
     }
 
@@ -2809,11 +2874,15 @@ impl<'a> Parser<'a> {
                 self.advance()?;
             }
         }
-        if self.is(P::Star) {
-            return Err(self.unsupported("generators are not supported", self.tok.start, self.tok.end));
+        let is_gen = self.is(P::Star);
+        if is_gen {
+            if is_async {
+                return Err(self.unsupported("async generators are not supported", self.tok.start, self.tok.end));
+            }
+            self.advance()?;
         }
         let mut accessor = None;
-        if !is_async && (self.is_word("get") || self.is_word("set")) {
+        if !is_async && !is_gen && (self.is_word("get") || self.is_word("set")) {
             let n = self.peek()?;
             // `get` + newline + `*g(){}` is a field `get` and a generator (ASI).
             if !(Self::ends_key_word(n.kind) || n.kind == Kind::Punct(P::Star) && n.newline_before) {
@@ -2845,8 +2914,8 @@ impl<'a> Parser<'a> {
                 self.declare_private(s, accessor.unwrap_or(PV_PLAIN) | static_bit)?;
             }
             if is_ctor_name && !is_static {
-                if accessor.is_some() || is_async {
-                    return Err(self.early("a class constructor cannot be a getter, setter or async", kt));
+                if accessor.is_some() || is_async || is_gen {
+                    return Err(self.early("a class constructor cannot be a getter, setter, async or a generator", kt));
                 }
                 if *ctor_seen {
                     return Err(self.early("a class can have only one constructor", kt));
@@ -2855,7 +2924,7 @@ impl<'a> Parser<'a> {
                 fkind = if derived { FuncKind::DerivedConstructor } else { FuncKind::Constructor };
             }
             let fstart = self.tok.start;
-            let f = self.parse_function_rest(fstart, None, fkind, is_async)?;
+            let f = self.parse_function_rest(fstart, None, fkind, is_async, is_gen)?;
             let kind = match fkind {
                 FuncKind::Getter => ElemKind::Getter(f),
                 FuncKind::Setter => ElemKind::Setter(f),
@@ -2865,7 +2934,7 @@ impl<'a> Parser<'a> {
             return Ok(mk!(self, elems, ClassElem { kind, is_static, key, span }));
         }
         // A field.
-        if is_async || accessor.is_some() {
+        if is_async || is_gen || accessor.is_some() {
             return Err(self.unexpected());
         }
         if is_ctor_name {
@@ -2876,7 +2945,7 @@ impl<'a> Parser<'a> {
         }
         let init = if self.eat(P::Assign)? {
             let saved = (self.ctx, self.label_base, self.arrow_at);
-            self.ctx = Ctx { in_func: false, is_async: false, new_target: true, super_prop: true, super_call: false, field_init: true };
+            self.ctx = Ctx { in_func: false, is_async: false, is_gen: false, new_target: true, super_prop: true, super_call: false, field_init: true };
             self.label_base = self.labels.len();
             let r = self.parse_assign(false, false);
             (self.ctx, self.label_base, self.arrow_at) = saved;

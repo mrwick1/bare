@@ -1772,3 +1772,46 @@ A byte scan with one `match` per byte had the same instruction count as the char
 
 Validation: a test compares the marked lookup and the plain lookup with the old character scan at every offset of a 12 KB text with CR, CRLF, LS, PS and 2-, 3- and 4-byte characters. A new stack test failed on main with `Limit(Steps)` and passes now: 300 errors with two positioned frames each, at the end of a 1.5 MB one-line script, under a 3,000,000 step budget.
 
+
+## Generators
+
+The live login stopped at `Unsupported("generators are not supported")`. The parser rejected `function*` in a d3 chunk. bare now parses and runs generators: `function*` declarations and expressions, `*m(){}` in objects and classes, `yield`, `yield*`, and `next`, `return` and `throw`. Async generators stay a gate ("async generators are not supported").
+
+Parser:
+
+- `Ctx.is_gen` makes `yield` an operator. It is parsed at the start of an assignment expression, as Acorn does. `yield` takes no argument before a newline or a token that cannot start an expression (`starts_expr`). Arrows and class field initializers reset the flag.
+- A `yield` in parameters is an early error. It shares `await_pos` with `await`, so arrow parameters and async arrow parameters check both.
+- A generator declaration is lexical in a block, and it is not allowed as the body of `if` or a label. Annex B.3.3 applies only to plain functions. The evaluator gave the var binding to block-level generators and async functions as well. It no longer does.
+- `Func.mode` (`Plain`, `Async`, `Generator`) holds both flags in one byte. Two bools made `Func` 48 B, not 44 B, and the cached login boot kept 10.6 KB more. A size assert now guards it.
+
+Runtime (`eval_generator.rs`):
+
+- A generator runs on the async machine. The preflight marks `yield` as it marks `await`, so only the nodes that contain a `yield` become frames. Every other subtree runs on the ordinary evaluator. A `yield` ends a step with `Out::Yield`. `next(v)`, `return(v)` and `throw(v)` drive the run again with `Next::Val(v)`, `Abr::Return(v)` or `Abr::Throw(v)`. `finally` blocks and the close of a for-of run as in an async function.
+- A call binds the parameters at once, so a parameter error throws at the call. Then it makes the generator object with `F.prototype`, or `%GeneratorPrototype%` when that is not an object. Generator functions are not constructors. Their own `prototype` has no `constructor`.
+- `aw.gens` maps a generator object to `Gen::{Start, Yield, Running, Done}`. A suspended run is boxed, so a finished generator costs one 16 B entry. Frames and slots count in the `AsyncLimits` caps. A call from inside a running generator to itself throws a TypeError. A resume counts as a call for the call depth cap.
+- `yield*` keeps the inner iteration in a `Slot::It`. A generic inner iterator gets `next`, `throw` and `return` with the received value. Its result objects pass through unchanged, as the spec requires for sync generators. Arrays, strings, Maps and Sets step without result objects. They have no `throw`, so a `throw` closes them and throws a TypeError.
+- `%GeneratorFunction.prototype%` and `%GeneratorPrototype%` are made with the first generator function, so a page without generators pays nothing. `%GeneratorFunction%` (the constructor that compiles source text) does not exist.
+- GC: `collect` traces a suspended run when it reaches its generator object, and drops the entries of dead objects.
+
+For-of, spread, destructuring and `Array.from` over a generator whose `next` is the intrinsic step it directly through `iter_native_step`. They make no result object for each value. V8 avoids this allocation only after its optimizing compiler removes it.
+
+Load test (`tools/js/gen_load.sh`, release, one process per row, 100x):
+
+| row | work | run | peak RSS |
+| --- | --- | ---: | ---: |
+| `forof` | 1M values, for-of over a generator | 556 ms | 4.2 MiB |
+| `iterobj` | the same loop over a hand-written iterator object | 777 ms | 291 MiB |
+| `next` | 1M explicit `next()` calls | 1,123 ms | 291 MiB |
+| `spawn` | 1M generators run to the end | 1,720 ms | 164 MiB |
+| `delegate` | 200,000 values through 6 levels of `yield*` | 298 ms | 62 MiB |
+| `finally` | 1M generators closed by `break` | 1,954 ms | 430 MiB |
+
+The heap is not collected during a run, so RSS includes the dead result objects. A profile of `next` shows the cost in the ordinary member call and the result object, not in generator code.
+
+Memory per suspended generator, counting global allocator, 20,000 generators after a collect: `yield k` 769 B (1 object), a closure 1,060 B, the d3 shape (a for-of over an array) 1,357 B, a for-of with try/finally 2,115 B. Most of this is the machine layout that async calls share: the call environment (56 B plus bindings), the boxed `Run` (88 B), the frame stack (4 frames of 28 B on the first push) and a `Slot::It` of 72 B. A smaller layout would help async calls and generators alike. It waits until a real page shows the cost. The only generator in the target bundles runs to the end at once.
+
+Results, release, main 551ab69 vs this change, 10 interleaved runs per build: instructions are within -0.16% to +0.34% on every row of the cached login boot, `parse_load`, `eval_load`, `class_load`, `reflect_load`, `async_load` and `promise_load`. Peak RSS and the boot's bytes do not change. Two cycle outliers at the same instruction count (`parse_load` bodies +21%, `eval_load` webpack +14%) gave -3.3% and +1.1% in 20 more runs each.
+
+Known deviations: an unsupported `yield` position reports the `await` message of the same gate (for example "await inside for-in"). `TypedArray.from` is still a gate, and the d3 chunk passes its generator to `Float64Array.from`.
+
+Validation: 50 new Node cases (`tools/fixtures/js/generator-cases.txt`, `tools/js/generator_check.sh`) cover the protocol, finally on return, yield in expressions, loops, switch and try, delegation to generators, arrays and custom iterators, prototypes and descriptors, receivers, and the d3 shape. The parse corpus has 46 new generator cases and matches Acorn (2,133 cases). Rust tests cover GC of suspended runs and environments, the call depth cap under deep `yield*`, the frame cap and the allocation-free for-of.

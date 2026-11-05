@@ -149,7 +149,7 @@ fn class_inventory() {
             }
         }
         for f in prog.funcs.iter() {
-            if f.is_async { bump("async fn".into()); }
+            if f.is_async() { bump("async fn".into()); }
         }
         println!("{}: {c:?}", path.file_name().unwrap().to_string_lossy());
     }
@@ -178,7 +178,7 @@ fn unsupported_class_shapes_are_found_before_anything_runs() {
     let prog = parse_script("var ran = 1; class A { 1n() {} }", Limits::default()).unwrap();
     assert!(Interp::new(&prog, Heap::default(), EvalLimits::default()).is_err());
     // The parser rejects these: they never reach the evaluator.
-    for src in ["class A { static { } }", "class A { *g() {} }", "class A { static *g() {} }"] {
+    for src in ["class A { static { } }", "class A { async *g() {} }", "class A { static async *g() {} }"] {
         let e = parse_script(src, Limits::default()).unwrap_err();
         assert_eq!(e.kind, crate::parse::ErrorKind::Unsupported, "{src}");
     }

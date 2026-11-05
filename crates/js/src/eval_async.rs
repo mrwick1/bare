@@ -77,6 +77,8 @@ pub struct AsyncStats {
     pub frames: usize,
     pub slots: usize,
     pub marks: usize,
+    /// Entries of the generator table (generator objects not yet collected).
+    pub generators: usize,
 }
 
 /// A generation-safe handle of a suspended activation.
@@ -119,6 +121,8 @@ enum Out {
     Wait(ObjId),
     /// `await` of a value that is not an object: resume with it in a job, as from a fulfilled promise.
     Ready(Value),
+    /// A generator yields a value (`false`), or passes an inner result object of `yield*` through (`true`).
+    Yield(Value, bool),
 }
 
 enum Step {
@@ -179,6 +183,8 @@ enum Fr {
     SwB { s: StmtId, i: u32 },
     /// A `finally` block runs. `kind`: 0 normal, 1 break, 2 continue, 3 return, 4 throw (the value is in slot `base`).
     Fin { kind: u8, label: u32, base: u32 },
+    /// A `yield*` waits for the next resume. Slot `base` is the inner `Slot::It`.
+    Deleg { base: u32 },
 }
 
 /// The whole state of one running or suspended async function call.
@@ -212,6 +218,9 @@ struct AsyncState {
     slots: usize,
     /// Nodes with an `await` inside: (script slot, node index, 0 expr | 1 stmt | 2 func).
     marks: FxSet<(u32, u32, u8)>,
+    /// Generator objects (`eval_generator.rs`).
+    gens: FxMap<ObjId, Gen>,
+    gen_intr: Option<GenIntr>,
 }
 
 fn nx(n: Next) -> Res<Step> {
@@ -277,7 +286,7 @@ impl<'p> Interp<'p> {
     }
 
     pub fn async_stats(&self) -> AsyncStats {
-        AsyncStats { activations: self.aw.live, table: self.aw.acts.len(), frames: self.aw.frames, slots: self.aw.slots, marks: self.aw.marks.len() }
+        AsyncStats { activations: self.aw.live, table: self.aw.acts.len(), frames: self.aw.frames, slots: self.aw.slots, marks: self.aw.marks.len(), generators: self.aw.gens.len() }
     }
 
     // ------------------------------------------------------------ preflight (marks)
@@ -390,6 +399,12 @@ impl<'p> Interp<'p> {
         let aw = match ex.kind {
             ExprKind::Await(a) => {
                 self.scan_expr(a)?;
+                true
+            }
+            ExprKind::Yield { arg, .. } => {
+                if let Some(a) = arg {
+                    self.scan_expr(a)?;
+                }
                 true
             }
             ExprKind::Template(t) => {
@@ -939,6 +954,10 @@ impl<'p> Interp<'p> {
             }
             Ok(Out::Wait(p)) => self.suspend(run, Ok(p)),
             Ok(Out::Ready(v)) => self.suspend(run, Err(v)),
+            Ok(Out::Yield(..)) => {
+                self.run_discard(run);
+                Err(unsupported("yield outside a generator", Span::default()))
+            }
             Err(e) => {
                 self.run_discard(run);
                 Err(e)
@@ -1003,7 +1022,8 @@ impl<'p> Interp<'p> {
         let base = run.slots.len() as u32;
         match ex.kind {
             ExprKind::Paren(i) => nx(Next::Eval(i)),
-            ExprKind::Await(a) | ExprKind::Unary { arg: a, .. } => self.ask(run, e, 0, base, a),
+            ExprKind::Await(a) | ExprKind::Unary { arg: a, .. } | ExprKind::Yield { arg: Some(a), .. } => self.ask(run, e, 0, base, a),
+            ExprKind::Yield { arg: None, .. } => Ok(Step::Out(Out::Yield(Value::Undefined, false))),
             ExprKind::Binary { left, .. } | ExprKind::Logical { left, .. } => self.ask(run, e, 0, base, left),
             ExprKind::Cond { test, .. } => self.ask(run, e, 0, base, test),
             ExprKind::Seq(l) => {
@@ -1225,6 +1245,12 @@ impl<'p> Interp<'p> {
         let b = base as usize;
         match ex.kind {
             ExprKind::Await(_) => self.await_value(v),
+            ExprKind::Yield { delegate: false, .. } => Ok(Step::Out(Out::Yield(v, false))),
+            ExprKind::Yield { delegate: true, .. } => {
+                let it = self.iter_start_val(v)?;
+                self.spush(run, Slot::It(it))?;
+                self.deleg_step(run, base, GenHow::Next(Value::Undefined))
+            }
             ExprKind::Unary { op, .. } => {
                 let r = match op {
                     UnaryOp::Typeof => {
@@ -1780,6 +1806,7 @@ impl<'p> Interp<'p> {
                 r => r,
             },
             Fr::Discard => val(Value::Undefined),
+            Fr::Deleg { base } => self.deleg_step(run, base, GenHow::Next(v)),
             Fr::Ret => nx(Next::Abr(Abr::Return(v))),
             Fr::Thr => nx(Next::Abr(Abr::Throw(v))),
             Fr::List { l, i } => self.list_from(run, l, i as usize),
@@ -2009,6 +2036,11 @@ impl<'p> Interp<'p> {
                     }
                 }
                 Fr::Fin { base, .. } => self.strunc(run, base as usize),
+                Fr::Deleg { base } => match abr {
+                    Abr::Throw(v) => return self.deleg_step(run, base, GenHow::Throw(v)),
+                    Abr::Return(v) => return self.deleg_step(run, base, GenHow::Return(v)),
+                    _ => self.strunc(run, base as usize),
+                },
                 Fr::SwS { base } => {
                     self.strunc(run, base as usize);
                     if matches!(abr, Abr::Break(0)) {

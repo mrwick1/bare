@@ -76,6 +76,10 @@ fn unsupported_is_found_before_anything_runs() {
     let cases = [
         ("async function f(o) { return delete o[await 1]; }", "await inside delete"),
         ("var f = async () => { for (var k in await 1) {} };", "await inside for-in"),
+        // A generator has the same preflight as an async function, and its messages name `await` too.
+        ("function* g(o) { for (var k in o) yield k; }", "await inside for-in"),
+        ("function* g(o) { o?.[yield]; }", "await inside an optional chain"),
+        ("function* g() { var [a = yield] = []; }", "await in a binding pattern"),
         ("tag`x`", "tagged template"),
         ("var r = /a(?<=b)/;", "lookbehind"),
         ("var b = 10n;", "BigInt literal"),
@@ -94,8 +98,8 @@ fn unsupported_is_found_before_anything_runs() {
             Ok(_) => panic!("{src}: accepted"),
         }
     }
-    // Generators and modules are rejected by the parser as Unsupported: they never reach the evaluator.
-    let e = parse_script("function* g() {}", Limits::default()).unwrap_err();
+    // Async generators and modules are rejected by the parser as Unsupported: they never reach the evaluator.
+    let e = parse_script("async function* g() {}", Limits::default()).unwrap_err();
     assert_eq!(e.kind, crate::parse::ErrorKind::Unsupported);
 }
 

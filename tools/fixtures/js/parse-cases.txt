@@ -976,7 +976,6 @@ let: 1
 %%
 "use strict"; function f(){ return arguments }
 %%
-//! unsupported
 "use strict"; function* g(){}
 %%
 "use strict"; if (a) function f(){}
@@ -1742,7 +1741,6 @@ class A { x = 1
 class A { static
 x = 1 }
 %%
-//! unsupported
 class A { static
 *g(){} }
 %%
@@ -1750,7 +1748,6 @@ class A { static
 class A { static
 { } }
 %%
-//! unsupported
 class A { get
 *g(){} }
 %%
@@ -1884,7 +1881,6 @@ class A { x = yield }
 //! unsupported
 class A { static async *[x](){} }
 %%
-//! unsupported
 class A { *g(){} }
 %%
 //! unsupported
@@ -1893,13 +1889,10 @@ class A { static { } }
 //! unsupported
 class A { static x; static { } }
 %%
-//! unsupported
 function* g(){}
 %%
-//! unsupported
 x = function*(){}
 %%
-//! unsupported
 ({ *g(){} })
 %%
 //! unsupported
@@ -4285,3 +4278,100 @@ a#!/usr/bin/env node
 
 %%
  
+%%
+function* g(){ yield; yield 1; yield* a; yield
+1 }
+%%
+function* g(){ x = yield; f(yield, yield 2); [yield]; ({a: yield}); (yield); return yield }
+%%
+function* g(){ yield yield 1; yield, yield }
+%%
+function* g(){ yield /re/g; yield /=/; yield
+/1/g }
+%%
+function* g(){ yield
+* 2 }
+%%
+function* g(){ yield ? 1 : 2 }
+%%
+function* g(){ a + yield }
+%%
+function* g(){ yield in x }
+%%
+function* g(){ for (yield in x); }
+%%
+function* g(){ for (x of yield) ; }
+%%
+function* g(){ x = yield* }
+%%
+function* g(){ var yield }
+%%
+function* g(yield){}
+%%
+function* g(x = yield){}
+%%
+function* g(){ (x = yield) => 1 }
+%%
+function* g(){ (yield) => 1 }
+%%
+function* g(){ async (x = yield) => 1 }
+%%
+function* g(){ async (yield); () => yield; async () => yield }
+%%
+function* g(){ function yield(){} }
+%%
+function* g(){ function f(){ var yield } }
+%%
+function* yield(){}
+%%
+(function* yield(){})
+%%
+"use strict"; function* yield(){}
+%%
+var yield; function* g(){ yield }
+%%
+l: function* g(){}
+%%
+if (1) function* g(){}
+%%
+{ function* g(){} function* g(){} }
+%%
+{ function* g(){} var g }
+%%
+function* g(){} function* g(){}
+%%
+class A { *constructor(){} }
+%%
+class A { static *constructor(){} }
+%%
+({ *get(){}, *set(){}, *async(){}, *[k](){}, *'s'(){}, *1(){} })
+%%
+({ get *g(){} })
+%%
+({ *g: 1 })
+%%
+class A { *x = 1 }
+%%
+class A { *x }
+%%
+({ *[yield](){} })
+%%
+function* g(){ ({ *[yield](){} }) }
+%%
+function* g(){ ({ *m(a = yield){} }) }
+%%
+function* g(){ ({ m(a = yield){} }) }
+%%
+"use strict"; ({ *yield(){} })
+%%
+function* g(){ class A extends (yield) {} }
+%%
+function* g(){ class A { x = yield } }
+%%
+function * g ( ) { new.target; yield
+}
+%%
+x = function*(){ yield 1 }
+%%
+function* g(){ yield
+}

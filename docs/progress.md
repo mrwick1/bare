@@ -450,3 +450,5 @@ A `let` or `const` block no longer allocates and no longer hashes its names on e
 
 Error stack frames no longer scan a script from its start to find a line and column. A script longer than 4 KiB gets location marks on its first lookup, and each later lookup scans at most 4 KiB. The cached login boot runs 14% fewer instructions. A profile of the boot showed that name lookup is not a hot cost there, so the next work is generators. See [resources.md](resources.md#error-stack-locations).
 
+
+Generators run: `function*`, generator methods, `yield`, `yield*`, `next`, `return` and `throw`, on the async machine. A for-of over a generator makes no result objects and runs 28% faster than over a hand-written iterator. A finished generator keeps one 16 B table entry. The live login's parse gate for generators is gone. Async generators and `TypedArray.from` remain gates. See [resources.md](resources.md#generators).

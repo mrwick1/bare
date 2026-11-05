@@ -305,7 +305,7 @@ impl<'p> Interp<'p> {
         loop {
             match self.funcs.get(&o) {
                 Some(Callee::Class) => return true,
-                Some(&Callee::Script { script, fid, .. }) => return self.func_of(script, fid).kind == FuncKind::Normal && !self.func_of(script, fid).is_async,
+                Some(&Callee::Script { script, fid, .. }) => return self.func_of(script, fid).is_plain_ctor(),
                 Some(&Callee::Native(n)) => return matches!(n, Nat::ObjectCtor | Nat::FnCtor | Nat::ArrayCtor | Nat::ErrorCtor(_) | Nat::Ext(Bi::RegExpCtor)) || Self::native_no_nt(n),
                 Some(&Callee::Host { ctor, .. }) => return ctor,
                 Some(&Callee::Promise(pf)) => return matches!(pf, PFn::Ctor | PFn::AggErrCtor),
@@ -357,7 +357,7 @@ impl<'p> Interp<'p> {
         let d = match self.funcs.get(&f) {
             Some(Callee::Class) => D::Class,
             Some(&Callee::Host { id, ctor: true, nt: true }) => D::Host(id),
-            Some(&Callee::Script { script, fid, env, self_binding }) if self.func_of(script, fid).kind == FuncKind::Normal && !self.func_of(script, fid).is_async => D::Script(script, fid, env, self_binding),
+            Some(&Callee::Script { script, fid, env, self_binding }) if self.func_of(script, fid).is_plain_ctor() => D::Script(script, fid, env, self_binding),
             Some(&Callee::Native(n)) if matches!(n, Nat::ObjectCtor | Nat::FnCtor | Nat::ArrayCtor | Nat::ErrorCtor(_) | Nat::Ext(Bi::RegExpCtor)) => D::Native(n),
             Some(&Callee::Native(n)) if Self::native_no_nt(n) => D::NoNt("subclassing a native constructor (new.target is not passed to the constructor)"),
             Some(&Callee::Promise(PFn::Ctor)) => D::NoNt("subclassing Promise (new.target is not passed to the constructor)"),
