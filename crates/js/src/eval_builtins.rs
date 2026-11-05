@@ -11,7 +11,7 @@
 //   `RegExp.prototype` has the intrinsic `[@@match]`, `[@@replace]` and `[@@split]`, so a builtin regexp keeps the builtin path. `includes`, `startsWith`, `endsWith` and the
 //   `RegExp` constructor use IsRegExp (`@@match`). `new RegExp(x)` for a non-builtin regexp-like `x` is `Unsupported`.
 //   `search`, `matchAll` and `replaceAll` are not bound.
-// - `String.fromCharCode` and `String.prototype`: indexOf, includes, startsWith, endsWith, slice, substring,
+// - `String.fromCharCode`, `String.fromCodePoint` and `String.prototype`: indexOf, includes, startsWith, endsWith, slice, substring,
 //   charAt, charCodeAt, split, match, replace, concat, trim, toLowerCase, toUpperCase, toString, valueOf.
 //   These are exactly the string methods the inspected staging bundles call (see docs/staging-js-requirements.md).
 //
@@ -92,6 +92,7 @@ enum Bi {
     ReSymSplit,
     ReGetter(u8),
     StrFromCharCode,
+    StrFromCodePoint,
     StrToString,
     StrIndexOf,
     StrIncludes,
@@ -445,6 +446,7 @@ impl<'p> Interp<'p> {
         self.def(sc, self.k_prototype, Value::Object(sp), false, false, false)?;
         self.def(sp, self.k_constructor, Value::Object(sc), true, false, true)?;
         self.method(sc, "fromCharCode", Nat::Ext(Bi::StrFromCharCode), 1)?;
+        self.method(sc, "fromCodePoint", Nat::Ext(Bi::StrFromCodePoint), 1)?;
         let methods: [(&str, Bi, u32); 17] = [
             ("toString", Bi::StrToString, 0),
             ("valueOf", Bi::StrToString, 0),
@@ -616,6 +618,21 @@ impl<'p> Interp<'p> {
                 for &a in args {
                     self.tick()?;
                     out.push(to_uint32(self.coerce_number(a)?) as u16);
+                }
+                self.new_str(out)
+            }
+            Bi::StrFromCodePoint => {
+                let mut out = Vec::with_capacity(args.len());
+                for &a in args {
+                    self.tick()?;
+                    let x = self.coerce_number(a)?;
+                    let Some(c) = (x.trunc() == x && (0.0..=1114111.0).contains(&x)).then_some(x as u32) else {
+                        return Err(self.mk_err(RANGE_ERROR, &format!("Invalid code point {}", number_to_string(x))));
+                    };
+                    match char::from_u32(c) {
+                        Some(ch) => out.extend_from_slice(ch.encode_utf16(&mut [0; 2])),
+                        None => out.push(c as u16), // a lone surrogate is one unit
+                    }
                 }
                 self.new_str(out)
             }

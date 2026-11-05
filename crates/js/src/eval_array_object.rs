@@ -69,10 +69,21 @@ enum AoFn {
     MathMax,
     MathMin,
     MathClz32,
-    MathLog,
     MathRandom,
     NumToString,
     NumIsNaN,
+    /// A one-argument `Math` function: the index into `MATH_UNARY`.
+    MathUnary(u8),
+    MathAtan2,
+    MathPow,
+    MathImul,
+    MathHypot,
+    NumIsFinite,
+    NumIsInteger,
+    NumIsSafeInteger,
+    NumToFixed,
+    NumToExponential,
+    NumToPrecision,
 }
 
 const MAX_SAFE_LEN: u64 = 9007199254740991;
@@ -139,7 +150,7 @@ impl<'p> Interp<'p> {
                     _ => math_round(x),
                 }))
             }
-            MathClz32 | MathLog | MathRandom | NumToString | NumIsNaN => self.call_numeric(f, this, args),
+            MathClz32 | MathRandom | NumToString | NumIsNaN | MathUnary(_) | MathAtan2 | MathPow | MathImul | MathHypot | NumIsFinite | NumIsInteger | NumIsSafeInteger | NumToFixed | NumToExponential | NumToPrecision => self.call_numeric(f, this, args),
             MathMax | MathMin => {
                 let is_max = f == MathMax;
                 let mut r = if is_max { f64::NEG_INFINITY } else { f64::INFINITY };

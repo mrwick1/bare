@@ -1914,3 +1914,58 @@ Validation:
   - the patterns and the U+202F rule;
   - GC of formatters and their bound `format`;
   - the formatter cap, the gates, locale fallback and system zones.
+
+## Number, Math and the global functions
+
+The live login stopped at `ReferenceError: parseFloat is not defined`. A scan of the 74 cached chunks found more missing functions in the same group. This topic adds them:
+
+- Globals: `parseFloat`, `isFinite`, `encodeURI`, `decodeURI`, `decodeURIComponent`, `escape` and `unescape`.
+- `Number`: `isFinite`, `isInteger`, `isSafeInteger`, the 8 constants, and `parseFloat` and `parseInt`. These two are the same objects as the globals.
+- `Number.prototype`: `toFixed`, `toExponential` and `toPrecision`.
+- `Math`: the 7 missing constants, 23 one-argument functions, and `atan2`, `pow`, `imul` and `hypot`. `Math[Symbol.toStringTag]` is "Math".
+- `String.fromCodePoint`.
+
+The Object and Reflect gaps need an extensible flag in the heap. They are the next topic.
+
+Design:
+
+- Math functions must give the same bits as V8. Rust's `f64` methods call the system libm. That libm differs from V8 in the last bit on 1% to 30% of inputs, depending on the function. `crates/js/src/ieee754.rs` is a port of V8 12.4.254 `src/base/ieee754.cc` (fdlibm), with V8's BSD license in `crates/js/LICENSE-V8`. The port keeps the C shape so it can be read against the source. The `**` operator now uses the same `pow`.
+- `Math.hypot` follows V8 `math.tq`. Infinity wins over NaN. The arguments are scaled by the largest, summed with Kahan summation, and the square root is multiplied back.
+- `toFixed`, `toExponential(n)` and `toPrecision` round half up on the exact decimal value of the double. `number::exact_digits` makes that value with a base-10^9 bignum. A double has at most 767 significant digits. So `(1.005).toFixed(2)` is "1.00", because 1.005 is 1.00499999999999989... .
+- `toExponential()` with no argument uses the digits of `Number::toString`. Rust's `{:e}` breaks a tie between two shortest texts another way, for example on `-8958.816528320312`.
+- Range checks follow V8 order: `toFixed` checks the range before NaN; the other two check finiteness first. The error messages are V8's.
+- `decodeURI` decodes UTF-8 with `str::from_utf8`, which refuses overlong forms, surrogates and values above U+10FFFF. It keeps the escape of a reserved character (`;/?:@&=+$,#`).
+- `encodeURI` and `escape` count the exact output size and check it against the string cap before they make the text. Every global that scans its argument charges the scan in steps first.
+
+Optimization: the first profile of `toFixed` showed `exact_digits` and `u32` formatting at about 7%. The function formatted each limb with `format!`. It now writes the digits directly. The `toFixed` and `toPrecision` load rows run about 15% fewer instructions. The rest of each profile is the interpreter (`eval_expr_inner`, `PropMap::find`, `Heap::lookup`, `Heap::intern`).
+
+Load test (`tools/js/numeric_load.sh`, release, one process per row, 100,000 calls):
+
+| row | call | ns per call | peak RSS |
+| --- | --- | ---: | ---: |
+| `empty` | `0` (loop baseline) | 263 | 3.9 MiB |
+| `pow` | `(i % 100) ** 1.5` | 451 | 3.9 MiB |
+| `sin` | `Math.sin(i) + 1` | 475 | 3.9 MiB |
+| `atan2` | `Math.atan2(i, 7) + 2` | 480 | 4.0 MiB |
+| `tofixed` | `(i / 7).toFixed(2).length` | 722 | 11.2 MiB |
+| `toprecision` | `(i * 1.1).toPrecision(6).length` | 762 | 11.1 MiB |
+| `toexp` | `(i / 3).toExponential().length` | 1,332 | 14.2 MiB |
+| `parsefloat` | `parseFloat(i / 7 + 'x')` | 1,277 | 22.5 MiB |
+| `encodeuri` | `encodeURI('é /?#' + i).length` | 1,482 | 30.4 MiB |
+| `escape` | `escape('é /?#' + i).length` | 1,238 | 30.1 MiB |
+
+The ns column is the time per call minus the empty loop. RSS grows with the strings each row makes, because nothing is collected during a run. A Math call costs about the same as `Math.log` before this change.
+
+Results, release, main bd26c75 vs this change, 10 interleaved runs per build:
+
+- Instructions are within -0.19% to +0.31% on most rows of the cached login boot, `parse_load`, `eval_load`, `class_load`, `reflect_load`, `async_load`, `promise_load` and `numeric_load`.
+- `eval_load concat` is +2.51% (it was +0.96% after Intl). Hypothesis: the realm setup installs more functions. To verify: profile the realm setup.
+- `reflect_load construct_args` is +0.72%. `numeric_load pow` is +0.95%, because fdlibm `pow` does more work than the system `pow` to give V8's bits.
+- Minimum cycles vary from -2% to +11% with no matching change in instructions (`reflect_load views` +10.65%). Hypothesis: code layout and noise.
+- Peak RSS is the same or about 0.4 MiB lower.
+
+Validation:
+
+- 22 Node cases (`tools/fixtures/js/number-cases.txt`, `tools/js/number_check.sh`). They cover parsing, the constants and shapes, special values, coercion order, the three formats with their errors, URI round trips and errors, `escape`, and `fromCodePoint`. Four matrix cases hash 63,000 Math results, 21,000 `toFixed` results and the other formats.
+- `tools/js/math_check.sh` compares the 22 fdlibm functions with Node bit for bit on 75,811 inputs (`tools/js/math_gen.mjs`): random values, special values, values near multiples of π/2, overflow thresholds and random bit patterns. All match.
+- Rust tests (`eval_number_tests.rs`, `number.rs`): the corpus without the matrices, the string cap for `encodeURI` and `escape`, step charges for each scan, and GC after the globals are deleted. Unit tests cover `exact_digits`, rounding and `float_prefix`.
