@@ -47,6 +47,31 @@ The deployed journey uses JavaScript bundles, client-side navigation, authentica
 
 Use a dedicated staging account. Read credentials from the vault at run time. Do not put credentials, tokens or authenticated response bodies in fixtures, traces or reports. The acceptance journey does not edit agents or place calls. Counts and agent names can change. Select a stable test agent when the automated suite is added.
 
+### Journey status
+
+Status on 2026-11-05, main bd26c75. The work is in S3 topic 6. All runs are headless, through the session driver. S4 is not started.
+
+| Step | Status |
+| --- | --- |
+| 1. Redirect to login | Passes. The cached and live login pages load and show the form. |
+| 2. Log in | Passes. The live staging login stores the token and goes to `/`. |
+| 3. Overview and its data | Blocked. The page settles with 42 scripts and no throws, then reports `ReferenceError: parseFloat is not defined`. |
+| 4. Agents data | Not verified. |
+| 5. Search `Score800` | Not verified. |
+| 6. Reload keeps the session | Not verified. |
+| 7. Sign out removes the token | Not verified. |
+| 8. Agents without a session redirects | Not verified. |
+
+Known gates before step 3, in order: `parseFloat`, `Number.prototype.toLocaleString` with `en-IN`, `localeCompare`, async generators and `TypedArray.from`. Hypothesis: more gates appear after these, because each fix so far exposed the next gate.
+
+Work that remains before the planned E2E:
+
+- S3 exit: steps 1 to 8 pass at the DOM level. Agents data appears in the DOM, and search updates it.
+- S4: software paint, a Wayland window, hit testing and pointer and keyboard input. A user completes the journey in the `bare` window.
+- S5: the selector-based driver from S3 is a start. S5 actions must use real hit testing and input dispatch, so S5 needs S4. S5 also needs a local fixture app and an unattended staging run.
+
+Not planned yet: a headless run of steps 1 to 8 through the current driver when S3 closes. It would prove the engine before paint work. The plan does not count it as the E2E.
+
 ### Work through each topic
 
 Use this cycle for each topic: implement, run huge load tests, then optimize CPU time and RAM use. Complete the cycle before moving to the next topic.
