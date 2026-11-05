@@ -135,7 +135,7 @@ fn run_case(case: String, scale: usize) {
     let t_collect = t2.elapsed();
     let after = it.heap.stats();
     println!(
-        "{case:7} x{scale:<3} bytes={:<9} run={:>8.1}ms collect={:>6.1}ms setup={:.1}ms | cpu(whole process)={:>8.1}ms peakRSS={}MiB | heap objs alloc={} strs alloc={} buffer_bytes_before={} after={} freed_objs={} | steps={}",
+        "{case:7} x{scale:<3} checksum=ok bytes={:<9} run={:>8.1}ms collect={:>6.1}ms setup={:.1}ms | cpu(whole process)={:>8.1}ms peakRSS={}MiB | heap objs alloc={} strs alloc={} buffer_bytes_before={} after={} freed_objs={} | steps={}",
         keep.len(),
         t_run.as_secs_f64() * 1e3,
         t_collect.as_secs_f64() * 1e3,
@@ -158,5 +158,5 @@ fn main() {
     }
     let scale: usize = a[2].parse().unwrap_or_else(|_| die("scale".into()));
     let name = a[1].clone();
-    std::thread::Builder::new().stack_size(16 << 20).spawn(move || run_case(name, scale)).unwrap().join().unwrap_or_else(|_| die("panic".into()));
+    std::thread::Builder::new().stack_size(if cfg!(debug_assertions) { 64 << 20 } else { 8 << 20 }).spawn(move || run_case(name, scale)).unwrap().join().unwrap_or_else(|_| die("panic".into()));
 }
