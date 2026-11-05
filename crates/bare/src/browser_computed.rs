@@ -24,8 +24,8 @@
 //!   `cssFloat`), plus custom properties through `getPropertyValue`. Anything else is not on the prototype and `getPropertyValue` gives `""`.
 //! - Values are the engine's computed values as text: keywords, `<n>px`, `<n>%`, numbers, `rgb()`/`rgba()`. `getPropertyValue` of a
 //!   shorthand is built from its longhands with the serializer of `browser_style_block.rs`.
-//! - `length` and `item(i)`: the supported longhands in the order of `Property::ALL`. A computed object of an element that is not
-//!   connected is empty (CSSOM): `length` 0, `""` everywhere. Shorthands and custom properties are not listed.
+//! - `length` and `item(i)`: the supported longhands in lexicographic order, followed by custom properties. A computed object of an element that is not
+//!   connected is empty (CSSOM): `length` 0, `""` everywhere. Shorthands are not listed.
 //! - `getPropertyPriority` is `""`. `parentRule` is `null`. `setProperty`, `removeProperty`, a `cssText` write and every named write
 //!   throw `NoModificationAllowedError` after the arguments are converted.
 //! - `direction` (`ltr`, `rtl`) is a native property: starts `ltr`, inherited, `inherit/initial/unset/var()` work. The HTML `dir` attribute
@@ -288,12 +288,12 @@ impl Dom {
         let vp = self.plat.s.borrow().viewport;
         {
             let doc = self.doc.borrow();
-            let (mut top, mut n) = (el, 0u64);
+            let mut top = el;
             while let Some(p) = doc.parent(top) {
+                it.charge(1)?;
                 top = p;
-                n += 1;
             }
-            it.charge(n / 8 + 1)?;
+            it.charge(1)?;
             if top != doc.root() {
                 return Ok(None);
             }
@@ -333,7 +333,7 @@ impl Dom {
         if work > l.max_work {
             return Err(self.lim("computed-work"));
         }
-        it.charge(doc.len() as u64 / 4 + rules.len() as u64 / 16 + 1)?;
+        it.charge(work)?;
         drop(doc);
         let doc = self.doc.borrow();
         self.computed.computes.set(self.computed.computes.get() + 1);
@@ -521,9 +521,17 @@ fn set_css_text(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
     Err(d.read_only(it, "cssText"))
 }
 
+fn names(s: &Snap) -> Vec<&str> {
+    let mut names = Property::ALL.iter().map(|p| p.name()).collect::<Vec<_>>();
+    names.sort_unstable();
+    names.extend(s.styles.custom_properties(&s.style).iter().map(|(name, _)| &**name));
+    names
+}
+
 fn length(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
     let el = d.computed_el(it, this)?;
-    Ok(Value::Number(if d.connected(it, el)? { Property::COUNT as f64 } else { 0.0 }))
+    let n = d.snapshot(it, el)?.map_or(0, |s| Property::COUNT + s.styles.custom_properties(&s.style).len());
+    Ok(Value::Number(n as f64))
 }
 
 fn parent_rule(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
@@ -535,8 +543,9 @@ fn item(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
     let el = d.computed_el(it, this)?;
     required(it, a, 1, "item")?;
     let i = crate::browser_platform_class::to_u32(it, a[0])? as usize;
-    let name = if d.connected(it, el)? { Property::ALL.get(i).map_or("", |p| p.name()) } else { "" };
-    d.js_str(it, name)
+    let Some(s) = d.snapshot(it, el)? else { return d.js_str(it, "") };
+    it.charge((Property::COUNT + s.styles.custom_properties(&s.style).len()) as u64)?;
+    d.js_str(it, names(&s).get(i).copied().unwrap_or(""))
 }
 
 fn named_get(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {

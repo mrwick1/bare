@@ -197,8 +197,8 @@ fn supported_names_only_and_gates_for_unavailable_values() {
     assert_eq!(js(&mut b, "document.getElementById('a').style.position = ''; cs.getPropertyValue('padding') + '|' + cs.getPropertyValue('border-width')"), "0px|0px");
     // Custom properties: the computed text, inherited.
     assert_eq!(js(&mut b, "document.body.style.setProperty('--gap', ' 8px '); cs.getPropertyValue('--gap') + '|' + cs.getPropertyValue('--none') + '|'"), "8px||");
-    // `length` and `item` list the supported longhands (computed objects do not list shorthands or custom properties).
-    assert_eq!(js(&mut b, "cs.length > 50 && cs.item(0) === 'display' && cs.item(cs.length) === '' && cs.item(cs.length - 1)"), "direction");
+    // `length` and `item` list sorted supported longhands, then custom properties.
+    assert_eq!(js(&mut b, "cs.length > 50 && cs.item(0) === '-webkit-border-horizontal-spacing' && cs.item(cs.length) === '' && cs.item(cs.length - 1)"), "--gap");
     assert_eq!(js(&mut b, "cs.cssText"), "unsupported:computed cssText (CSSOM and browsers differ; not faked)");
     assert_eq!(js(&mut b, "cs.parentRule"), "null");
 }
@@ -501,4 +501,22 @@ fn load_model() {
         b.collect(&[]).unwrap();
         assert_eq!(b.computed_stats().objects, held);
     }).unwrap().join().unwrap();
+}
+
+#[test]
+fn cascade_work_is_reserved_before_the_cascade_runs() {
+    big(|| {
+        let sheet = (0..100).map(|i| format!(".c{i}{{color:red}}")).collect::<String>();
+        let page = format!("<style>{sheet}</style><body>{}<p id=q>x</p>", "<div></div>".repeat(100));
+        let mut b = Browser::new(tree::parse(&page), BrowserLimits::default(), EvalLimits {max_steps: 5000, ..Default::default()}, HeapLimits::default()).unwrap();
+        assert_eq!(js(&mut b, "getComputedStyle(document.getElementById('q')).color"), "limit:Steps");
+        assert_eq!(b.computed_stats().computes, 0);
+    });
+}
+
+#[test]
+fn computed_names_are_sorted_and_include_live_custom_properties() {
+    let mut b = at("<body><p id=p style='--z: red; --a: blue'>x</p>");
+    let count = bare_css::values::Property::COUNT;
+    assert_eq!(js(&mut b, &format!("var cs=getComputedStyle(document.getElementById('p')); var names=[]; for(var i=0;i<{count};i++) names.push(cs.item(i)); [names.join()===names.slice().sort().join(),cs.length==={count}+2,cs.item({count}).slice(0,2)==='--'].join()")), "true,true,true");
 }
