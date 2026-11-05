@@ -19,8 +19,8 @@
 //!
 //! Supported (tested):
 //! - Globals: `window`, `self`, `globalThis` (the same object), `document`, `Node`, `Element`, `HTMLElement`,
-//!   `HTMLInputElement`, `HTMLIFrameElement` (inert brand only: no `contentWindow`, no nested context, no fetch), `HTMLLinkElement`, `CharacterData`, `Text`, `Comment`, `Document`, `DocumentFragment` and `ShadowRoot` (illegal constructors), `EventTarget`, `Event`, `CustomEvent`,
-//!   `DOMException`.
+//!   `HTMLInputElement`, `HTMLIFrameElement` (inert brand only: no `contentWindow`, no nested context, no fetch), `HTMLLinkElement`, `HTMLFormElement`, `HTMLButtonElement`, `CharacterData`, `Text`, `Comment`, `Document`, `DocumentFragment` and `ShadowRoot` (illegal constructors), `EventTarget`, `Event`, `CustomEvent`,
+//!   `SubmitEvent`, `DOMException`.
 //! - Node: `nodeType nodeName nodeValue parentNode parentElement childNodes firstChild lastChild previousSibling
 //!   nextSibling ownerDocument isConnected textContent appendChild insertBefore removeChild replaceChild cloneNode
 //!   contains hasChildNodes getRootNode`.
@@ -50,10 +50,12 @@
 //!   `dataset`, `style`, `before/after/replaceWith`, layout APIs, `location` and
 //!   network are absent. Timers, `queueMicrotask`, `performance.now` and `MessageChannel` are in `browser_scheduler.rs`. `Element.attributes` and `Attr` are in `browser_attr.rs`.
 //! - `addEventListener` option `signal` is `Unsupported`. `isTrusted` is always false. Events made by the test driver
-//!   are plain `Event`s (no `MouseEvent`/`InputEvent` fields).
+//!   are plain `Event`s (no `MouseEvent`/`InputEvent` fields), except the `submit` of a click activation: a `SubmitEvent`.
 //! - Focus (`browser_focus.rs`): `focus()`, `blur()`, `document.activeElement`, `FocusEvent`. Read its header.
-//! - Default actions are NOT implemented: no link navigation, no form submission or validation, no checkbox toggle or
+//! - Default actions are NOT implemented: no link navigation, no form validation or native form navigation, no checkbox toggle or
 //!   radio-group exclusion on click. Focus does not follow a click. The test driver sets native input state itself, then dispatches events.
+//!   The one exception is `Browser::click` at a submit button: it dispatches the `submit` event at the form owner, behind two named
+//!   gates (validation, native navigation). `Browser::submit` stays dispatch-only. Read `browser_form.rs`.
 //! - `<input>` has no value sanitization (newline stripping, number/date parsing). `select` and `textarea` have no
 //!   `value` state.
 //! - Microtasks: the test driver runs a checkpoint after each listener it started from the host. Dispatch from JS does not.
@@ -70,6 +72,7 @@ use crate::browser_fragment as frag;
 use crate::browser_namespace as ns;
 use crate::browser_attr as at;
 use crate::browser_events as ev;
+use crate::browser_form as fm;
 use crate::browser_selection as sel;
 use crate::browser_shadow as sh;
 pub use crate::browser_scheduler::{Pump, SchedLimits, SchedStats};
@@ -175,6 +178,8 @@ pub(crate) struct EventState {
     /// `FocusEvent.relatedTarget` (null for other events). Traced, so a saved event keeps the node.
     pub related: Value,
     pub is_focus: bool,
+    /// `SubmitEvent.submitter` is in `related` (traced). Only a `SubmitEvent` has this set.
+    pub is_submit: bool,
 }
 
 /// A listener exception that did not stop dispatch.
@@ -229,6 +234,9 @@ pub(crate) struct Protos {
     pub input: ObjId,
     pub iframe: ObjId,
     pub link: ObjId,
+    pub form: ObjId,
+    pub button: ObjId,
+    pub submit: ObjId,
     pub chardata: ObjId,
     pub text: ObjId,
     pub comment: ObjId,
@@ -249,6 +257,9 @@ pub(crate) enum P {
     Html,
     Input,
     Link,
+    Form,
+    Button,
+    Submit,
     CharData,
     Document,
     Fragment,
@@ -299,6 +310,8 @@ pub struct Dom {
     pub(crate) style: crate::browser_style::Style,
     /// `getComputedStyle` and its sheet state (`browser_computed.rs`).
     pub(crate) computed: crate::browser_computed::Computed,
+    /// `offsetWidth` and `offsetHeight` (`browser_geometry.rs`).
+    pub(crate) geometry: crate::browser_geometry::Geometry,
     /// `Element.attributes`, `NamedNodeMap` and `Attr` (`browser_attr.rs`).
     pub(crate) attr: crate::browser_attr::AttrHost,
     /// `Document.getElementsByName` and the live `NodeList` (`browser_nodelist.rs`).
@@ -527,6 +540,8 @@ impl Dom {
                             "input" => p.input,
                             "iframe" => p.iframe,
                             "link" => p.link,
+                            "form" => p.form,
+                            "button" => p.button,
                             "script" => self.scripts.proto.get().copied().unwrap_or(p.html),
                             _ => p.html,
                         },
@@ -626,6 +641,9 @@ impl Dom {
             P::Html => ps.html,
             P::Input => ps.input,
             P::Link => ps.link,
+            P::Form => ps.form,
+            P::Button => ps.button,
+            P::Submit => ps.submit,
             P::CharData => ps.chardata,
             P::Document => ps.document,
             P::Fragment => ps.fragment,
@@ -663,6 +681,8 @@ impl Dom {
         let input = mk(it, html)?;
         let iframe = mk(it, html)?;
         let link = mk(it, html)?;
+        let form = mk(it, html)?;
+        let button = mk(it, html)?;
         let chardata = mk(it, node)?;
         let text = mk(it, chardata)?;
         let comment = mk(it, chardata)?;
@@ -672,14 +692,15 @@ impl Dom {
         let event = mk(it, op)?;
         let custom = mk(it, event)?;
         let focus = mk(it, event)?;
+        let submit = mk(it, event)?;
         let domexc = mk(it, ep)?;
-        let _ = self.p.set(Protos { et, node, element, html, svg, input, iframe, link, chardata, text, comment, document, fragment, shadow, event, custom, focus, domexc });
+        let _ = self.p.set(Protos { et, node, element, html, svg, input, iframe, link, form, button, submit, chardata, text, comment, document, fragment, shadow, event, custom, focus, domexc });
         // The global object is `window`: it is an EventTarget.
         if let Err(e) = it.heap.set_prototype_of(g, Some(et)) {
             return Err(it.heap_error(e));
         }
         self.st.borrow_mut().by_obj.insert(g, Target::Window);
-        let mut fixed = vec![et, node, element, html, svg, input, iframe, link, chardata, text, comment, document, fragment, shadow, event, custom, focus, domexc];
+        let mut fixed = vec![et, node, element, html, svg, input, iframe, link, form, button, submit, chardata, text, comment, document, fragment, shadow, event, custom, focus, domexc];
 
         // methods and accessors
         for d in DEFS {
@@ -705,7 +726,7 @@ impl Dom {
         }
 
         // interface objects
-        let ifaces: [(&str, ObjId, Option<H>); 18] = [
+        let ifaces: [(&str, ObjId, Option<H>); 21] = [
             ("EventTarget", et, Some(ev::event_target_ctor as H)),
             ("Node", node, None),
             ("Element", element, None),
@@ -714,6 +735,8 @@ impl Dom {
             ("HTMLInputElement", input, None),
             ("HTMLIFrameElement", iframe, None),
             ("HTMLLinkElement", link, None),
+            ("HTMLFormElement", form, None),
+            ("HTMLButtonElement", button, None),
             ("CharacterData", chardata, None),
             ("Text", text, None),
             ("Comment", comment, None),
@@ -723,6 +746,7 @@ impl Dom {
             ("Event", event, Some(ev::event_ctor as H)),
             ("CustomEvent", custom, Some(ev::custom_event_ctor as H)),
             ("FocusEvent", focus, Some(crate::browser_focus::focus_event_ctor as H)),
+            ("SubmitEvent", submit, Some(crate::browser_form::submit_event_ctor as H)),
             ("DOMException", domexc, None),
         ];
         let (kp, kc) = (self.key(it, "prototype")?, self.key(it, "constructor")?);
@@ -768,6 +792,7 @@ impl Dom {
         crate::browser_console::install(self, it)?;
         crate::browser_style::install(self, it)?;
         crate::browser_computed::install(self, it)?;
+        crate::browser_geometry::install(self, it)?;
         crate::browser_handlers::install(self, it)
     }
 
@@ -890,6 +915,17 @@ pub(crate) static DEFS: &[Def] = &[
     Def { on: &[Input], name: "defaultValue", len: 0, kind: A(nd::default_value, nd::set_default_value) },
     Def { on: &[Input], name: "defaultChecked", len: 0, kind: A(nd::default_checked, nd::set_default_checked) },
     Def { on: &[Link], name: "rel", len: 0, kind: A(nd::link_rel, nd::set_link_rel) },
+    Def { on: &[Input], name: "name", len: 0, kind: A(fm::input_name, fm::set_input_name) },
+    Def { on: &[Input], name: "disabled", len: 0, kind: A(fm::input_disabled, fm::set_input_disabled) },
+    Def { on: &[Input], name: "form", len: 0, kind: G(fm::input_form) },
+    Def { on: &[Input], name: "formNoValidate", len: 0, kind: A(fm::input_form_no_validate, fm::set_input_form_no_validate) },
+    Def { on: &[Button], name: "name", len: 0, kind: A(fm::button_name, fm::set_button_name) },
+    Def { on: &[Button], name: "type", len: 0, kind: A(fm::button_type, fm::set_button_type) },
+    Def { on: &[Button], name: "disabled", len: 0, kind: A(fm::button_disabled, fm::set_button_disabled) },
+    Def { on: &[Button], name: "form", len: 0, kind: G(fm::button_form) },
+    Def { on: &[Button], name: "formNoValidate", len: 0, kind: A(fm::button_form_no_validate, fm::set_button_form_no_validate) },
+    Def { on: &[Form], name: "noValidate", len: 0, kind: A(fm::form_no_validate, fm::set_form_no_validate) },
+    Def { on: &[Submit], name: "submitter", len: 0, kind: G(fm::submit_event_submitter) },
     Def { on: &[Event], name: "type", len: 0, kind: G(ev::event_type) },
     Def { on: &[Event], name: "target", len: 0, kind: G(ev::event_target) },
     Def { on: &[Event], name: "currentTarget", len: 0, kind: G(ev::event_current_target) },
@@ -973,6 +1009,7 @@ impl Browser {
             plat: Default::default(),
             style: Default::default(),
             computed: Default::default(),
+            geometry: Default::default(),
             attr: Default::default(),
             nl: Default::default(),
         });
@@ -1065,11 +1102,6 @@ impl Browser {
         let new = ((total - mark) as usize).min(st.reports.len());
         let reports = st.reports.iter().skip(st.reports.len() - new).cloned().collect();
         Ok(Dispatched { not_canceled, reports })
-    }
-
-    /// `click` (bubbles, cancelable). No default action runs (see the header).
-    pub fn click(&mut self, node: NodeId) -> R<Dispatched> {
-        self.dispatch(node, "click", true, true)
     }
 
     /// `submit` at a form (bubbles, cancelable). No validation, no navigation.

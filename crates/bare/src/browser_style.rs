@@ -233,7 +233,7 @@ impl Dom {
     }
 
     /// An HTML element (`style` is on `HTMLElement`, not on `Element`).
-    fn style_html_el(&self, it: &mut Interp<'_>, this: Value) -> R<NodeId> {
+    pub(crate) fn style_html_el(&self, it: &mut Interp<'_>, this: Value) -> R<NodeId> {
         let n = self.el(it, this)?;
         let doc = self.doc.borrow();
         if doc.is_foreign(n) {

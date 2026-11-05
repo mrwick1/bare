@@ -12,6 +12,9 @@ mod browser_handlers;
 #[cfg(test)]
 mod browser_handler_tests;
 mod browser_focus;
+mod browser_form;
+#[cfg(test)]
+mod browser_form_tests;
 #[cfg(test)]
 mod browser_focus_tests;
 mod browser_namespace;
@@ -77,6 +80,9 @@ mod browser_platform_tests;
 mod browser_style;
 mod browser_style_block;
 pub mod browser_computed;
+pub mod browser_geometry;
+#[cfg(test)]
+mod browser_geometry_tests;
 #[cfg(test)]
 mod browser_computed_tests;
 #[cfg(test)]

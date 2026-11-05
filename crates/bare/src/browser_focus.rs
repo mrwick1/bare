@@ -323,7 +323,7 @@ pub struct FocusOutcome {
 
 impl Browser {
     /// Run `f` as a driver call: a microtask checkpoint follows each listener it starts.
-    fn driven<T>(&mut self, f: impl FnOnce(&Dom, &mut Interp<'_>) -> R<T>) -> R<(T, Vec<Report>)> {
+    pub(crate) fn driven<T>(&mut self, f: impl FnOnce(&Dom, &mut Interp<'_>) -> R<T>) -> R<(T, Vec<Report>)> {
         let dom = self.dom.clone();
         let mark = {
             let st = dom.st.borrow();

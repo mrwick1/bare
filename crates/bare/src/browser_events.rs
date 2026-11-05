@@ -87,6 +87,7 @@ impl Dom {
             time: self.now_ms(),
             related: Value::Null,
             is_focus: false,
+            is_submit: false,
         };
         self.st.borrow_mut().events.insert(o, e);
         Ok(o)
