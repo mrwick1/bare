@@ -1580,8 +1580,8 @@ impl<'p> Interp<'p> {
     }
 
     fn call_script(&mut self, (script, fid): (u32, FuncId), fobj: ObjId, cenv: u32, self_binding: bool, this: Value, args: &[Value]) -> Res<Value> {
+        let new = std::mem::take(&mut self.stk.new);
         if self.func_of(script, fid).is_async {
-            self.stk.new = false;
             return self.call_async((script, fid), fobj, cenv, self_binding, this, args);
         }
         let (saved_env, saved_strict) = (self.env, self.strict);
@@ -1590,7 +1590,6 @@ impl<'p> Interp<'p> {
         // The callee runs on its own script code. The caller's code comes back on every exit.
         let saved_script = self.cur;
         self.select(script as usize);
-        let new = std::mem::take(&mut self.stk.new);
         let r = self.in_frame(script, Where::Func(fid), new, |it| it.call_body(fobj, fid, env, self_binding, this, args));
         self.select(saved_script);
         self.env = saved_env;

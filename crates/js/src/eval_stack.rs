@@ -34,7 +34,8 @@
 //
 // The property: an own data property, writable, not enumerable, configurable (as V8 shows it). It is a plain
 // string, not V8's lazy accessor. `Error.captureStackTrace`, `Error.stackTraceLimit` and
-// `Error.prepareStackTrace` do not exist. No arguments, source text, URLs or values appear in the text.
+// `Error.prepareStackTrace` do not exist. Frames omit arguments, source bodies and URLs.
+// The header still contains the error name and message supplied at construction.
 
 const STACK_FRAMES: usize = 10;
 const STACK_UNITS: usize = 2048;
