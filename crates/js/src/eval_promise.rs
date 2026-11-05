@@ -535,6 +535,10 @@ impl<'p> Interp<'p> {
 
     fn run_job(&mut self, job: Job) -> Res<()> {
         self.tick()?;
+        self.in_job(|it| it.run_job_in(job))
+    }
+
+    fn run_job_in(&mut self, job: Job) -> Res<()> {
         match job {
             Job::React { handler, arg, derived, rejected } => {
                 if matches!(handler, Value::Undefined) {

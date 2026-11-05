@@ -306,6 +306,7 @@ impl<'p> Interp<'p> {
             let m = self.coerce_string(message)?;
             self.def(o, self.k_message, Value::String(m), true, false, true)?;
         }
+        self.capture_stack(o)?;
         Ok(Value::Object(o))
     }
 

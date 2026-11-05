@@ -170,6 +170,7 @@ impl<'p> Interp<'p> {
         let o = h!(self, self.heap.new_object(Some(proto)));
         let m = h!(self, self.heap.intern_str(msg));
         self.def(o, self.k_message, Value::String(m), true, false, true)?;
+        self.capture_stack(o)?;
         Ok(o)
     }
 

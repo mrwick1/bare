@@ -372,6 +372,7 @@ impl<'p> Interp<'p> {
         let list = self.iter_to_vec(arg(args, 0))?;
         self.charge_steps(list.len() as u64)?;
         self.install_errors(o, &list)?;
+        self.capture_stack(o)?;
         Ok(Value::Object(o))
     }
 }
