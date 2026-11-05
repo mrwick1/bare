@@ -27,7 +27,9 @@
 // Bounds. The frame list has at most one entry per active call, so the call depth (`max_call_depth`, 100) bounds
 // it. Text: at most `STACK_FRAMES` frames, at most `STACK_UNITS` UTF-16 units in all (the header is cut at
 // `STACK_HEADER_UNITS`), no frame is cut in the middle. Work: one step per frame and one step per 32 source bytes
-// scanned for a line and column, charged BEFORE the scan; the text is checked before it grows. The result is one
+// scanned for a line and column, charged BEFORE the scan. The first location in a script scans it once to make
+// marks every 4 KiB (`Program::location`); later ones scan at most 4 KiB, so an error deep in a one-line bundle
+// is cheap; the text is checked before it grows. The result is one
 // ordinary string on the error object. Nothing else is kept, so the GC has nothing to trace or prune and a
 // frame never outlives its call. The frames unwind on every exit (return, throw, limit) by truncating to the
 // length seen at the push.
@@ -154,7 +156,7 @@ impl<'p> Interp<'p> {
         }
         let mut loc = format!("script#{}", fr.script);
         if pos != 0 {
-            self.spend_units(pos as usize)?;
+            self.spend_units(code_prog.location_cost())?;
             let l = code_prog.location(pos - 1);
             loc = format!("{loc}:{}:{}", l.line, l.column + 1);
         }

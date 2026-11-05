@@ -1750,3 +1750,25 @@ It was correct on 9 new Node cases and on all the checks. It did not pay:
 A useful version needs analysis for each variable: is the name referenced by any closure in the function? That needs scope resolution in the walk. Measure paused generators first, because a paused generator keeps its block environments.
 
 Validation: 9 new Node cases cover shadowing and earlier closures, a called function that reads a global with the same name, exit by throw, `break` and `continue`, TDZ and `const`, parameter clashes and nesting, more than 12 bindings, catch bodies, and `await` inside blocks with interleaved calls. They match Node on main and on this change.
+
+## Error stack locations
+
+A profile of the cached login boot (saved bundles over loopback, 201 M instructions) found that `lex::location` took 17%. Each new error builds its `stack` text. For each frame with a position, `frame_line` found the line and column by scanning the script from byte 0. The bundles are minified to one long line, so every frame scanned up to the size of its script. Name lookup, which looked like the next target, did not appear in that profile.
+
+`Program::location` now makes location marks on its first call in a script longer than 4 KiB. A mark stores the byte offset, line, UTF-16 column and the carriage-return state at the first character boundary of each 4 KiB block (16 B per 4 KiB of source). A lookup finds the last mark before the offset with a binary search and scans at most 4 KiB from it. A shorter script needs no marks. The scan reads bytes, not characters. A byte above `\r` that is not `0xE2` is counted with one test and no branches: a continuation byte adds 0 units, a lead byte of a 4-byte character adds 2, other bytes add 1. Line breaks and LS/PS take the slow path. The step budget charges the bytes that the scan can read: the whole script for the first lookup, then 4 KiB.
+
+Results, release, main 5878337 vs this change, 10 interleaved runs per build (mean instructions, minimum cycles):
+
+| row | instructions | min cycles |
+| --- | ---: | ---: |
+| cached login boot | -14.0% | -7.7% |
+| `stack_load` 20,000 | +0.16% | +0.56% |
+| `eval_load` throws (10x) | +0.07% | -1.1% |
+| `eval_load` loop, webpack (10x) | 0.00%, +0.01% | -1.6%, -0.4% |
+
+The boot allocates 1.5 KB more (the marks for 575 KB of scripts). A 1 KiB step saved only 0.66% more boot instructions and cost 3.4 KB more, so the step stays 4 KiB. After this change the scan is 3.3% of the boot, mostly the single pass that makes the marks. Formatting the text only on the first read of `stack`, as V8 does, would remove that and the formatting. It needs a side table, a property hook and GC pruning. It waits until a profile shows that it is worth that cost.
+
+A byte scan with one `match` per byte had the same instruction count as the character scan, but took more cycles on short ASCII scripts (`throws` +5.7%). The fast path removed that.
+
+Validation: a test compares the marked lookup and the plain lookup with the old character scan at every offset of a 12 KB text with CR, CRLF, LS, PS and 2-, 3- and 4-byte characters. A new stack test failed on main with `Limit(Steps)` and passes now: 300 errors with two positioned frames each, at the end of a 1.5 MB one-line script, under a 3,000,000 step budget.
+

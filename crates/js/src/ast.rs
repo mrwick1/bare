@@ -502,6 +502,8 @@ pub struct Program<'a> {
     pub(crate) catches: Vec<Catch>,
     pub(crate) elems: Vec<ClassElem>,
     pub(crate) lists: Vec<u32>,
+    /// Location marks, made by the first `location` call (16 B per 4 KiB of source).
+    marks: std::cell::OnceCell<Box<[lex::Mark]>>,
 }
 
 /// How many nodes of each kind a program has, and the bytes they use (capacity not counted).
@@ -574,6 +576,7 @@ impl<'a> Program<'a> {
             catches: Vec::new(),
             elems: Vec::new(),
             lists: Vec::new(),
+            marks: Default::default(),
         }
     }
 
@@ -585,7 +588,7 @@ impl<'a> Program<'a> {
             body: self.body, strict: self.strict, exprs: tight(self.exprs), stmts: tight(self.stmts), pats: tight(self.pats),
             funcs: tight(self.funcs), classes: tight(self.classes), props: tight(self.props), pat_props: tight(self.pat_props),
             templates: tight(self.templates), quasis: tight(self.quasis), decls: tight(self.decls), cases: tight(self.cases),
-            catches: tight(self.catches), elems: tight(self.elems), lists: tight(self.lists),
+            catches: tight(self.catches), elems: tight(self.elems), lists: tight(self.lists), marks: self.marks,
         }
     }
 
@@ -679,9 +682,18 @@ impl<'a> Program<'a> {
         lex::regexp_parts(&self.source, &token_of(Kind::RegExp, span, false))
     }
 
-    /// Line (from 1) and UTF-16 column (from 0) of a byte offset.
+    /// Line (from 1) and UTF-16 column (from 0) of a byte offset. In a source longer than `lex::MARK_STEP`, the first
+    /// call makes the marks, so later calls read at most `lex::MARK_STEP` bytes. A shorter source needs none.
     pub fn location(&self, byte: u32) -> lex::Location {
-        lex::location(&self.source, byte as usize)
+        if self.source.len() <= lex::MARK_STEP {
+            return lex::location(&self.source, byte as usize);
+        }
+        lex::location_in(&self.source, self.marks.get_or_init(|| lex::location_marks(&self.source)), byte as usize)
+    }
+
+    /// The most source bytes the next `location` call reads: the whole source before the marks exist.
+    pub fn location_cost(&self) -> usize {
+        if self.marks.get().is_some() { lex::MARK_STEP } else { self.source.len() }
     }
 
     pub fn stats(&self) -> Stats {
