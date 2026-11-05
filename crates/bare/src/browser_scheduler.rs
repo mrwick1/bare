@@ -53,6 +53,7 @@
 //! finds the state of an old port. Events are pruned by `collect` only: collect between pumps in a long run.
 
 use crate::browser::*;
+use bare_html::dom::NodeId;
 use bare_js::eval::{Error, Interp};
 use bare_js::value::{ObjId, Value};
 use std::collections::{BTreeMap, HashMap, VecDeque};
@@ -76,11 +77,13 @@ pub struct SchedLimits {
     pub max_queued_messages: usize,
     /// Bytes of the queued messages (`message-bytes`).
     pub max_queued_message_bytes: usize,
+    /// Queued `select` event tasks of text controls (`select-tasks`).
+    pub max_select_tasks: usize,
 }
 
 impl Default for SchedLimits {
     fn default() -> Self {
-        SchedLimits { max_timers: 1 << 16, max_timer_args: 256, max_ports: 1 << 14, max_queued_messages: 1 << 16, max_queued_message_bytes: 16 << 20 }
+        SchedLimits { max_timers: 1 << 16, max_timer_args: 256, max_ports: 1 << 14, max_queued_messages: 1 << 16, max_queued_message_bytes: 16 << 20, max_select_tasks: 1 << 14 }
     }
 }
 
@@ -90,6 +93,8 @@ type Key = (u64, u64);
 enum Task {
     Timer(u64),
     Deliver(ObjId),
+    /// `select` event of a text control (`browser_selection.rs`).
+    Select(NodeId),
 }
 
 struct Timer {
@@ -140,6 +145,8 @@ pub(crate) struct Sched {
     msg_events: HashMap<ObjId, MsgEvent>,
     queued: usize,
     queued_bytes: usize,
+    /// Queued `Task::Select`.
+    selects: usize,
     /// Nesting level of the timer task that runs now (0 outside a timer task).
     nesting: u32,
     halted: Option<Error>,
@@ -173,6 +180,7 @@ pub struct SchedStats {
 enum Run {
     Timer { id: u64, cb: Value, args: Vec<Value>, nesting: u32, repeat: bool },
     Deliver { port: ObjId, data: Value },
+    Select(NodeId),
     Nothing,
 }
 
@@ -218,7 +226,7 @@ impl Dom {
         let ports = &s.ports;
         s.tasks.retain(|_, t| match t {
             Task::Deliver(o) => ports.contains_key(o),
-            Task::Timer(_) => true,
+            Task::Timer(_) | Task::Select(_) => true,
         });
         s.queued = s.ports.values().map(|p| p.inbox.len()).sum();
         s.queued_bytes = s.ports.values().flat_map(|p| p.inbox.iter().map(|m| m.1)).sum();
@@ -233,6 +241,16 @@ impl Dom {
         let key = (due.to_bits(), seq);
         s.tasks.insert(key, task);
         Ok(key)
+    }
+
+    /// Queue the `select` event task of a text control. The cap is checked before anything changes.
+    pub(crate) fn queue_select(&self, n: NodeId) -> R<()> {
+        if self.sched.borrow().selects >= self.sched.borrow().limits.max_select_tasks {
+            return Err(self.lim("select-tasks"));
+        }
+        self.schedule(self.now_ms(), Task::Select(n))?;
+        self.sched.borrow_mut().selects += 1;
+        Ok(())
     }
 
     fn next_due(&self) -> Option<f64> {
@@ -262,6 +280,10 @@ impl Dom {
                     Run::Timer { id, cb, args, nesting, repeat }
                 }
             },
+            Task::Select(n) => {
+                s.selects -= 1;
+                Run::Select(n)
+            }
             Task::Deliver(port) => match s.ports.get_mut(&port) {
                 Some(p) if p.keys.front() == Some(&key) => {
                     p.keys.pop_front();
@@ -303,6 +325,11 @@ impl Dom {
                 }
                 Ok(())
             }
+            Run::Select(n) => it.host_scope(|it| {
+                it.charge(1)?;
+                self.fire_select(it, n)?;
+                it.host_checkpoint().map(|_| ())
+            }),
             Run::Deliver { port, data } => it.host_scope(|it| {
                 it.charge(1)?;
                 if self.has_message_listener(port) {

@@ -36,6 +36,9 @@ pub mod browser_platform;
 mod browser_platform_class;
 mod browser_platform_query;
 mod browser_scheduler;
+mod browser_selection;
+#[cfg(test)]
+mod browser_selection_tests;
 #[cfg(test)]
 mod browser_scheduler_tests;
 pub mod resources;

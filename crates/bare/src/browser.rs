@@ -30,6 +30,7 @@
 //! - CharacterData: `data length`. Document: `createElement createElementNS createTextNode createComment getElementById
 //!   documentElement head body doctype defaultView querySelector(All)`.
 //! - `<input>`: `value checked type defaultValue defaultChecked` with native state (dirty value, checkedness).
+- `<input>` text selection (`selectionStart selectionEnd selectionDirection setSelectionRange select`, `select` event task): `browser_selection.rs`.
 //! - Events: `Event`, `CustomEvent` (`detail`), `addEventListener` (capture, once, passive; function or `handleEvent`
 //!   object), `removeEventListener`, `dispatchEvent`, capture / target / bubble phases through the document to `window`,
 //!   `preventDefault`, `stopPropagation`, `stopImmediatePropagation`, `composedPath`, `new EventTarget()`.
@@ -62,6 +63,7 @@
 use crate::browser_dom as nd;
 use crate::browser_namespace as ns;
 use crate::browser_events as ev;
+use crate::browser_selection as sel;
 pub use crate::browser_scheduler::{Pump, SchedLimits, SchedStats};
 use bare_css::selector::{Selector, parse_selector_list};
 use bare_html::dom::{Document, NodeData, NodeId, Ns};
@@ -181,6 +183,8 @@ pub struct Report {
 pub(crate) struct Input {
     pub value: Option<String>,
     pub checked: Option<bool>,
+    /// Text selection (`browser_selection.rs`). `None`: caret at the end of the value.
+    pub sel: Option<crate::browser_selection::Sel>,
 }
 
 #[derive(Default)]
@@ -790,6 +794,11 @@ pub(crate) static DEFS: &[Def] = &[
     Def { on: &[Document], name: "defaultView", len: 0, kind: G(nd::default_view) },
     Def { on: &[Input], name: "value", len: 0, kind: A(nd::input_value, nd::set_input_value) },
     Def { on: &[Input], name: "checked", len: 0, kind: A(nd::input_checked, nd::set_input_checked) },
+    Def { on: &[Input], name: "selectionStart", len: 0, kind: A(sel::selection_start, sel::set_selection_start) },
+    Def { on: &[Input], name: "selectionEnd", len: 0, kind: A(sel::selection_end, sel::set_selection_end) },
+    Def { on: &[Input], name: "selectionDirection", len: 0, kind: A(sel::selection_direction, sel::set_selection_direction) },
+    Def { on: &[Input], name: "setSelectionRange", len: 2, kind: M(sel::set_selection_range_method) },
+    Def { on: &[Input], name: "select", len: 0, kind: M(sel::select_method) },
     Def { on: &[Input], name: "type", len: 0, kind: A(nd::input_type, nd::set_input_type) },
     Def { on: &[Input], name: "defaultValue", len: 0, kind: A(nd::default_value, nd::set_default_value) },
     Def { on: &[Input], name: "defaultChecked", len: 0, kind: A(nd::default_checked, nd::set_default_checked) },

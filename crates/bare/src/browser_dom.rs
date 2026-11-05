@@ -327,13 +327,18 @@ impl Dom {
     }
 
     fn put_input_value(&self, n: NodeId, v: String) -> R<()> {
+        let changed = self.input_value_of(n).as_deref() != Some(v.as_str());
         let mut st = self.st.borrow_mut();
         let old = st.inputs.get(&n).and_then(|i| i.value.as_ref()).map_or(0, String::len);
         if st.input_bytes - old + v.len() > self.lim.max_text_bytes {
             return Err(self.lim("dom-input-bytes"));
         }
         st.input_bytes = st.input_bytes - old + v.len();
-        st.inputs.entry(n).or_default().value = Some(v);
+        let i = st.inputs.entry(n).or_default();
+        i.value = Some(v);
+        if changed {
+            i.sel = None; // the caret moves to the end (HTML: setting `value`)
+        }
         Ok(())
     }
 
@@ -366,7 +371,7 @@ impl Dom {
     }
 }
 
-fn input_kind(doc: &Document, n: NodeId) -> &'static str {
+pub(crate) fn input_kind(doc: &Document, n: NodeId) -> &'static str {
     let t = doc.find_atom("type").and_then(|a| doc.attr(n, a)).map(str::to_ascii_lowercase).unwrap_or_default();
     const KINDS: [&str; 22] = [
         "text", "search", "tel", "url", "email", "password", "date", "month", "week", "time", "datetime-local", "number", "range", "color", "checkbox", "radio", "file", "submit", "image", "reset",
@@ -769,7 +774,8 @@ pub(crate) fn clone_node(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value])
                 }
                 NodeData::Document => unreachable!("checked above"),
             };
-            if let Some(i) = st.inputs.get(&src).cloned() {
+            if let Some(mut i) = st.inputs.get(&src).cloned() {
+                i.sel = None; // the cloning steps copy value and checkedness, not the selection
                 st.input_bytes += i.value.as_ref().map_or(0, String::len);
                 st.inputs.insert(c, i);
             }
@@ -1095,7 +1101,7 @@ pub(crate) fn default_view(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value
 
 // ------------------------------------------------------------------------------------------ <input>
 
-fn input_el(d: &Dom, it: &mut Interp<'_>, this: Value) -> R<NodeId> {
+pub(crate) fn input_el(d: &Dom, it: &mut Interp<'_>, this: Value) -> R<NodeId> {
     let n = d.el(it, this)?;
     let is_input = is_named(&d.doc.borrow(), n, &["input"]);
     if is_input { Ok(n) } else { Err(it.type_error("Illegal invocation")) }
