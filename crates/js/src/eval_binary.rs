@@ -24,10 +24,9 @@
 //   `Int16`, `Uint16`, `Int32`, `Uint32`, `Float32` and `Float64`, with the `littleEndian` flag.
 // - `TextEncoder` (`encoding`, `encode`, `encodeInto`) and `TextDecoder` (`encoding`, `fatal`, `ignoreBOM`, `decode` with
 //   `stream`). UTF-8 only. A known WHATWG label of another encoding is `Unsupported`; an unknown label is a `RangeError`.
-// Gates (explicit `Unsupported`, never silent): resizable `ArrayBuffer` options and `resize`; every read or write of an
-// element of `BigInt64Array` and `BigUint64Array`, and `DataView` `getBigInt64`, `setBigInt64`, `getBigUint64`,
-// `setBigUint64` (this engine has no BigInt; the constructors, lengths, `BYTES_PER_ELEMENT`, `buffer` views, `slice`,
-// `subarray`, `copyWithin`, `reverse`, `toReversed`, `set` from a typed array and the default `sort` work on bytes and run).
+// Gates (explicit `Unsupported`, never silent): resizable `ArrayBuffer` options and `resize`; a value that is not a BigInt
+// written to a `BigInt64Array` or `BigUint64Array` element by a path that calls `heap.set` or `heap.define_own_property`
+// directly (`put_prop`, `Reflect.set` and `Object.defineProperty` convert it first).
 // `slice`, `subarray`, `map` and `filter` read `constructor` and `@@species`: `undefined`, `null` and the intrinsic class
 // give the default; any other constructor is `Unsupported`. A class that extends one of these constructors is `Unsupported`
 // when it is constructed. Absent: `SharedArrayBuffer`.
@@ -176,9 +175,6 @@ struct BinProtos {
 struct BinaryState {
     protos: Option<BinProtos>,
 }
-
-/// The reason of the gate on a BigInt typed-array element.
-const BIG_ELEM: &str = "BigInt64Array and BigUint64Array elements (no BigInt)";
 
 const MAX_SAFE: f64 = 9007199254740991.0;
 
@@ -349,14 +345,8 @@ impl<'p> Interp<'p> {
             if ty == Elem::U8C {
                 continue;
             }
-            let (get, set) = if ty.is_big() {
-                (BinFn::Gate(if ty == Elem::BI64 { "DataView.prototype.getBigInt64" } else { "DataView.prototype.getBigUint64" }),
-                 BinFn::Gate(if ty == Elem::BI64 { "DataView.prototype.setBigInt64" } else { "DataView.prototype.setBigUint64" }))
-            } else {
-                (BinFn::DvGet(ty), BinFn::DvSet(ty))
-            };
-            self.bin_method(dv_p, &format!("get{suffix}"), get, 1)?;
-            self.bin_method(dv_p, &format!("set{suffix}"), set, 2)?;
+            self.bin_method(dv_p, &format!("get{suffix}"), BinFn::DvGet(ty), 1)?;
+            self.bin_method(dv_p, &format!("set{suffix}"), BinFn::DvSet(ty), 2)?;
         }
 
         let enc = self.bin_ctor("TextEncoder", BinFn::EncCtor, 0, enc_p)?;

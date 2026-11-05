@@ -50,6 +50,8 @@ enum HKey {
     Str(StrId),
     Sym(SymId),
     Obj(ObjId),
+    Big(i64),
+    BigHeap(BigId),
 }
 
 /// SameValueZero as a hash key: strings are interned, so a handle is the content; `NaN` has one key and `-0` is `+0`.
@@ -62,6 +64,8 @@ fn hkey(v: Value) -> HKey {
         Value::String(s) => HKey::Str(s),
         Value::Symbol(s) => HKey::Sym(s),
         Value::Object(o) => HKey::Obj(o),
+        Value::BigInt(n) => HKey::Big(n),
+        Value::BigHeap(b) => HKey::BigHeap(b),
     }
 }
 

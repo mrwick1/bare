@@ -22,6 +22,7 @@ fn show(it: &Interp, v: Value) -> String {
         Value::Undefined => "undefined".into(),
         Value::Null => "null".into(),
         Value::Symbol(_) => "symbol".into(),
+        Value::BigInt(_) | Value::BigHeap(_) => format!("bigint:{}", it.display(v)),
         Value::Object(_) => it.display(v),
     }
 }

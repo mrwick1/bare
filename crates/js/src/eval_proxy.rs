@@ -322,8 +322,21 @@ impl<'p> Interp<'p> {
     fn o_define_own_property(&mut self, o: ObjId, key: PropertyKey, d: &PropertyDescriptor) -> Res<bool> {
         match self.heap.define_own_property(o, key, d) {
             Ok(v) => Ok(v),
-            Err(e) => self.heap_miss_w(e, |s| s.heap.define_own_property(o, key, d), |s| s.px_define_own_property(o, key, d)),
+            Err(e) => self.define_miss(o, key, d, e),
         }
+    }
+
+    /// The slow side of `o_define_own_property`. The `value` of a `BigInt64Array` or `BigUint64Array` element that is not a
+    /// BigInt is converted with ToBigInt, as in `set_miss`.
+    #[cold]
+    #[inline(never)]
+    fn define_miss(&mut self, o: ObjId, key: PropertyKey, d: &PropertyDescriptor, e: HeapError) -> Res<bool> {
+        if let HeapError::NeedsBigInt = e {
+            let b = self.to_bigint(d.value.unwrap_or(Value::Undefined))?;
+            let d = PropertyDescriptor { value: Some(b), ..*d };
+            return self.o_define_own_property(o, key, &d);
+        }
+        self.heap_miss_w(e, |s| s.heap.define_own_property(o, key, d), |s| s.px_define_own_property(o, key, d))
     }
 
     #[inline(always)]
@@ -443,7 +456,7 @@ impl<'p> Interp<'p> {
             }
             if self.heap.has_exotics() && self.heap.is_view_index_key(c, key) {
                 if matches!(receiver, Value::Object(r) if r == c) && matches!(v, Value::Object(_)) {
-                    v = Value::Number(self.coerce_number(v)?);
+                    v = self.ta_conv(self.heap.view_type(c).unwrap_or(Elem::U8), v)?;
                 } else if self.heap.is_view_bad_index(c, key) {
                     return Ok(true);
                 }

@@ -23,6 +23,7 @@ fn show(it: &Interp, v: Value) -> String {
         Value::Undefined => "undefined".into(),
         Value::Null => "null".into(),
         Value::Symbol(_) => "symbol".into(),
+        Value::BigInt(_) | Value::BigHeap(_) => format!("bigint:{}", it.display(v)),
         Value::Object(_) => it.display(v),
     }
 }
@@ -82,7 +83,6 @@ fn unsupported_is_found_before_anything_runs() {
         ("function* g() { var [a = yield] = []; }", "await in a binding pattern"),
         ("function* g(t) { t`${yield}`; }", "await in a tagged template"),
         ("var r = /a(?<=b)/;", "lookbehind"),
-        ("var b = 10n;", "BigInt literal"),
         ("var o = { m() { return super.x; } };", "super outside a class element"),
         ("class A { x = new.target; }", "new.target in a class field initializer"),
         ("with ({}) {}", "with statement"),

@@ -22,6 +22,7 @@ fn show(it: &Interp, v: Value) -> String {
         Value::Undefined => "undefined".into(),
         Value::Null => "null".into(),
         Value::Symbol(_) => "symbol".into(),
+        Value::BigInt(_) | Value::BigHeap(_) => format!("bigint:{}", it.display(v)),
         Value::Object(_) => it.display(v),
     }
 }
@@ -173,9 +174,8 @@ fn unsupported_class_shapes_are_found_before_anything_runs() {
     assert_eq!(unsupported_what("class A { m() { return { n() { return super.x; } }; } }"), "super outside a class element");
     assert_eq!(unsupported_what("class A { x = new.target; }"), "new.target in a class field initializer");
     assert_eq!(unsupported_what("class A { static x = () => new.target; }"), "new.target in a class field initializer");
-    assert_eq!(unsupported_what("class A { 1n() {} }"), "BigInt property key");
     // Nothing ran: the script would have set a global first.
-    let prog = parse_script("var ran = 1; class A { 1n() {} }", Limits::default()).unwrap();
+    let prog = parse_script("var ran = 1; class A { x = new.target; }", Limits::default()).unwrap();
     assert!(Interp::new(&prog, Heap::default(), EvalLimits::default()).is_err());
     // The parser rejects these: they never reach the evaluator.
     for src in ["class A { static { } }", "class A { async *g() {} }", "class A { static async *g() {} }"] {

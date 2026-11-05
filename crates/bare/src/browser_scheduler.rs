@@ -525,6 +525,7 @@ impl Dom {
                 Ok((v, 16usize.saturating_add(len.saturating_mul(2))))
             }
             Value::Symbol(_) => Err(self.dom_err(it, "DataCloneError", "Symbol could not be cloned.")),
+            Value::BigInt(_) | Value::BigHeap(_) => Ok((v, 16usize.saturating_add(it.heap.bigint_limbs(v).saturating_mul(8)))),
             Value::Object(_) if it.is_callable_value(v) => Err(self.dom_err(it, "DataCloneError", "function could not be cloned.")),
             Value::Object(_) => Err(Error::Unsupported(unsupported("MessagePort.postMessage of an object (structured clone)"))),
         }

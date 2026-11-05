@@ -292,7 +292,7 @@ impl<'p> Interp<'p> {
             return Err(Error::Limit(LimitKind::Stringify(StringifyLimit::Nodes)));
         }
         let mut key_v = None;
-        if let Value::Object(_) = v {
+        if matches!(v, Value::Object(_) | Value::BigInt(_) | Value::BigHeap(_)) {
             let f = self.get_prop(v, st.k_to_json)?;
             if self.is_callable(f) {
                 let kv = *key_v.insert(h!(self, self.heap.key_to_value(key)));
@@ -336,6 +336,7 @@ impl<'p> Interp<'p> {
                 return Ok(SjOut::Open);
             }
             Value::Undefined | Value::Symbol(_) => return Ok(SjOut::Undef),
+            Value::BigInt(_) | Value::BigHeap(_) => return Err(self.type_err("Do not know how to serialize a BigInt")),
         }
         Ok(SjOut::Done)
     }

@@ -326,6 +326,7 @@ impl<'p> Interp<'p> {
             Value::String(_) => self.ext.string_proto,
             Value::Symbol(_) => self.sc.symbol_proto,
             Value::Number(_) => self.ao.number_proto.unwrap_or(self.object_proto),
+            Value::BigInt(_) | Value::BigHeap(_) => self.big.proto,
             _ => self.object_proto,
         }
     }
@@ -512,9 +513,12 @@ impl<'p> Interp<'p> {
         let view = self.heap.has_exotics() && self.heap.is_view_index_key(o, key);
         if matches!(receiver, Value::Object(r) if r == o) {
             if view && matches!(v, Value::Object(_)) {
-                v = Value::Number(self.coerce_number(v)?);
+                v = self.ta_conv(self.heap.view_type(o).unwrap_or(Elem::U8), v)?;
             }
-            return Ok(match hxw!(self, self.heap.set(o, key, v), if self.o_set(o, key, v, receiver)? { Set::Done } else { Set::Rejected }) {
+            return Ok(match match self.heap.set(o, key, v) {
+                Ok(r) => r,
+                Err(e) => self.set_miss(o, key, v, receiver, e)?,
+            } {
                 Set::Done => true,
                 Set::Rejected => false,
                 Set::Setter(s) => {

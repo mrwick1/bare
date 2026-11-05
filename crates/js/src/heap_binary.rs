@@ -87,7 +87,7 @@ impl Elem {
         }
     }
 
-    /// The `BigInt64Array` and `BigUint64Array` types: their elements are BigInts, which this engine does not have.
+    /// The `BigInt64Array` and `BigUint64Array` types: their elements are BigInts, not numbers (`view_load_big`, `view_store_big`).
     pub fn is_big(self) -> bool {
         matches!(self, Elem::BI64 | Elem::BU64)
     }
@@ -120,7 +120,7 @@ impl Elem {
 }
 
 /// Read one element from the first `ty.size()` bytes of `b`, little-endian. The BigInt types give a lossy number: no
-/// caller may show it (the evaluator gates them first).
+/// caller may show it (a BigInt element is read with `view_load_big`).
 #[inline]
 pub fn load(ty: Elem, b: &[u8]) -> f64 {
     match ty {
@@ -139,7 +139,7 @@ pub fn load(ty: Elem, b: &[u8]) -> f64 {
 
 /// Convert the number `n` to the type and write it to the first `ty.size()` bytes of `b`, little-endian. The integer types
 /// wrap (ToInt8 .. ToUint32 are the low bits of ToUint32). `Uint8ClampedArray` clamps and rounds half to even. `Float32`
-/// rounds to nearest even. A NaN is written in its canonical form. The BigInt types write nothing (gated by the caller).
+/// rounds to nearest even. A NaN is written in its canonical form. The BigInt types write nothing (a BigInt element is written with `view_store_big`).
 #[inline]
 pub fn store(ty: Elem, b: &mut [u8], n: f64) {
     match ty {
@@ -656,6 +656,57 @@ impl Heap {
         }
     }
 
+    /// The 8 bytes of element `i` of a BigInt typed array as a `u64`; `None` when `i` is not a valid index.
+    fn view_raw64(&self, o: ObjId, i: usize) -> Option<(Elem, u64)> {
+        let Some(Exotic::View { buffer, offset, len, ty }) = self.exotic(o) else { return None };
+        if i >= *len || !ty.is_big() {
+            return None;
+        }
+        let Some(Exotic::Buffer(v)) = self.exotics.get(&buffer.index) else { return None };
+        let at = offset + i * 8;
+        Some((*ty, u64::from_le_bytes(v.get(at..at + 8)?.try_into().ok()?)))
+    }
+
+    /// Element `i` of a BigInt typed array as a BigInt; `None` when `i` is not a valid index (or the buffer is detached).
+    /// A `BigUint64Array` value above `i64::MAX` makes a heap entry.
+    pub fn view_load_big(&mut self, o: ObjId, i: usize) -> R<Option<Value>> {
+        match self.view_raw64(o, i) {
+            Some((Elem::BI64, raw)) => Ok(Some(Value::BigInt(raw as i64))),
+            Some((_, raw)) => self.bigint_from_u64(raw).map(Some),
+            None => Ok(None),
+        }
+    }
+
+    /// Write the BigInt `v` (wrapped to 64 bits, `BigInt.asUintN(64, v)`) at index `i` of a BigInt typed array; `false` when
+    /// `i` is not a valid index.
+    pub fn view_store_big(&mut self, o: ObjId, i: usize, v: Value) -> bool {
+        let raw = self.bigint_low_u64(v).to_le_bytes();
+        let Some(Exotic::View { buffer, offset, len, ty }) = self.exotic(o) else { return false };
+        let (buffer, offset, len) = (*buffer, *offset, *len);
+        if i >= len || !ty.is_big() {
+            return false;
+        }
+        let Some(Exotic::Buffer(b)) = self.exotics.get_mut(&buffer.index) else { return false };
+        match b.get_mut(offset + i * 8..offset + i * 8 + 8) {
+            Some(slot) => {
+                slot.copy_from_slice(&raw);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// `[[Set]]` of a valid or invalid index on a BigInt typed array: only a BigInt is written (`NeedsBigInt` otherwise).
+    fn view_set_big(&mut self, o: ObjId, index: Option<usize>, v: Value) -> R<()> {
+        if !v.is_bigint() {
+            return Err(HeapError::NeedsBigInt);
+        }
+        if let Some(i) = index {
+            self.view_store_big(o, i, v);
+        }
+        Ok(())
+    }
+
     // ----- integer-indexed property semantics -----
 
     /// Is `key` an integer-indexed key of the typed array `o` (so a write converts the value with `ToNumber` first)?
@@ -687,7 +738,7 @@ impl Heap {
     }
 
     /// `[[GetOwnProperty]]` of a numeric key on a typed array: `Some(property)` or `Some(None)`, `None` for the ordinary
-    /// path. The elements of the BigInt types are gated (`NeedsExecution`) when the value is wanted.
+    /// path. A BigInt element is a BigInt value (`view_own_big`).
     pub(super) fn view_own(&self, o: ObjId, key: PropertyKey, want_value: bool) -> R<Option<Option<Property>>> {
         // One view lookup and one buffer lookup: this is the element-read path of a script loop.
         let Some(Exotic::View { buffer, offset, len, ty }) = self.exotic(o) else { return Ok(None) };
@@ -699,7 +750,7 @@ impl Heap {
             _ => return Ok(None),
         };
         if want_value && ty.is_big() {
-            return Err(HeapError::NeedsExecution("BigInt64Array and BigUint64Array elements (no BigInt)"));
+            return self.view_own_big(*buffer, *offset, i, *ty);
         }
         // A detached buffer has no elements.
         let Some(Exotic::Buffer(v)) = self.exotics.get(&buffer.index) else { return Ok(Some(None)) };
@@ -713,6 +764,42 @@ impl Heap {
             Value::Undefined
         };
         Ok(Some(Some(Property::Data { value, writable: true, enumerable: true, configurable: true })))
+    }
+
+    /// The element of a BigInt typed array as a property. `BigInt64Array` and a `BigUint64Array` value up to `i64::MAX` are
+    /// inline BigInts. A larger one needs a heap entry: `BigUnsigned` (see `exotic_err`).
+    #[cold]
+    fn view_own_big(&self, buffer: ObjId, offset: usize, i: usize, ty: Elem) -> R<Option<Option<Property>>> {
+        let Some(Exotic::Buffer(v)) = self.exotics.get(&buffer.index) else { return Ok(Some(None)) };
+        let at = offset + i * 8;
+        let Some(b) = v.get(at..at + 8) else { return Ok(Some(None)) };
+        let raw = u64::from_le_bytes(b.try_into().expect("8 bytes"));
+        let value = match (ty, i64::try_from(raw)) {
+            (Elem::BI64, _) => Value::BigInt(raw as i64),
+            (_, Ok(n)) => Value::BigInt(n),
+            (_, Err(_)) => return Err(HeapError::BigUnsigned(raw)),
+        };
+        Ok(Some(Some(Property::Data { value, writable: true, enumerable: true, configurable: true })))
+    }
+
+    /// An error of `exotic_own`: a `BigUint64Array` element above `i64::MAX` (see `BigUnsigned`) is its property, anything else
+    /// fails. Kept out of line: it is off the path of every property read.
+    #[cold]
+    #[inline(never)]
+    pub(super) fn exotic_err(&mut self, e: HeapError) -> R<Property> {
+        let HeapError::BigUnsigned(raw) = e else { return Err(e) };
+        let value = self.bigint_from_u64(raw)?;
+        Ok(Property::Data { value, writable: true, enumerable: true, configurable: true })
+    }
+
+    /// `exotic_own` for a caller that only reads attributes (`peek_own_property`): a large `BigUint64Array` element reads as
+    /// `undefined` here, since no heap entry may be made.
+    #[inline]
+    pub(super) fn exotic_own_peek(&self, o: ObjId, key: PropertyKey) -> R<Option<Option<Property>>> {
+        match self.exotic_own(o, key, true) {
+            Err(HeapError::BigUnsigned(_)) => Ok(Some(Some(Property::Data { value: Value::Undefined, writable: true, enumerable: true, configurable: true }))),
+            r => r,
+        }
     }
 
     /// `[[GetOwnProperty]]` of a key on any exotic object: `Some(r)` ends the lookup there, `None` means the ordinary rules.
@@ -738,11 +825,11 @@ impl Heap {
         Ok(Some(Some(Property::Data { value, writable: false, enumerable: true, configurable: true })))
     }
 
-    /// ToNumber of a primitive for an element write. An object needs the evaluator (`NeedsExecution`). The BigInt types
-    /// are gated: their writes need ToBigInt.
+    /// ToNumber of a primitive for an element write. An object needs the evaluator (`NeedsExecution`). A BigInt type gives
+    /// `BigElement`: the caller writes a BigInt with `view_set_big`.
     fn to_elem_number(&self, o: ObjId, v: Value) -> R<f64> {
         if matches!(self.exotic(o), Some(Exotic::View { ty, .. }) if ty.is_big()) {
-            return Err(HeapError::NeedsExecution("BigInt64Array and BigUint64Array elements (no BigInt)"));
+            return Err(HeapError::BigElement);
         }
         match v {
             Value::Symbol(_) => Err(HeapError::SymbolToNumber),
@@ -758,7 +845,11 @@ impl Heap {
             return Ok(Some(if self.named_write(o, key, NamedOp::Set(value))? { Set::Done } else { Set::Rejected }));
         }
         if let Some(r) = self.view_index(o, key) {
-            let n = self.to_elem_number(o, value)?; // ToNumber runs even for an invalid index
+            // ToNumber runs even for an invalid index
+            let n = match self.to_elem_number(o, value) {
+                Err(HeapError::BigElement) => return self.view_set_big(o, r, value).map(|()| Some(Set::Done)),
+                n => n?,
+            };
             if let Some(i) = r {
                 self.view_store(o, i, n);
             }
@@ -806,8 +897,12 @@ impl Heap {
             return Ok(Some(false));
         }
         if let Some(v) = d.value {
-            let n = self.to_elem_number(o, v)?;
-            self.view_store(o, i, n);
+            match self.to_elem_number(o, v) {
+                Err(HeapError::BigElement) => self.view_set_big(o, Some(i), v)?,
+                n => {
+                    self.view_store(o, i, n?);
+                }
+            }
         }
         Ok(Some(true))
     }
