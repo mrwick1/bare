@@ -125,10 +125,10 @@ impl<'p> Interp<'p> {
     /// `undefined` deletes, anything else is `CreateDataProperty`. A refusal (`false`) is ignored.
     fn rv_store(&mut self, o: ObjId, key: PropertyKey, v: Value) -> Res<()> {
         if let Value::Undefined = v {
-            hx!(self, self.heap.delete(o, key));
+            hxw!(self, self.heap.delete(o, key));
         } else {
             let d = PropertyDescriptor { value: Some(v), writable: Some(true), enumerable: Some(true), configurable: Some(true), ..Default::default() };
-            hx!(self, self.heap.define_own_property(o, key, &d));
+            hxw!(self, self.heap.define_own_property(o, key, &d));
         }
         Ok(())
     }

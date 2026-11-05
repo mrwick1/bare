@@ -45,6 +45,13 @@ pub trait Host {
     fn fill_indexed(&self, _it: &mut Interp<'_>, _owner: ObjId, _index: u32) -> Result<(), Error> {
         Err(unsupported("indexed host object without fill_indexed", Span::default()))
     }
+    /// The heap asked for a write, define or delete on the host named object `req.owner` (`Heap::new_named`). Do it, with
+    /// the evaluator's budget and with the errors of the host (a `DOMException`, a cap). `Ok(true)` is success: `Set` is done,
+    /// the define or delete returned `true`. `Ok(false)` is the rejection that `Reflect` reports and strict mode throws.
+    /// The evaluator then repeats the operation, which returns this answer. The default cannot write, so it is `Unsupported`.
+    fn named_write(&self, _it: &mut Interp<'_>, _req: NamedRequest) -> Result<bool, Error> {
+        Err(unsupported("named host object without named_write", Span::default()))
+    }
 }
 
 impl<'p> Interp<'p> {
@@ -75,6 +82,23 @@ impl<'p> Interp<'p> {
         self.def(o, self.k_length, Value::Number(len as f64), false, false, true)?;
         self.def(o, self.k_name, Value::String(s), false, false, true)?;
         Ok(o)
+    }
+
+    /// The one cold exit of `hx!`: the heap asked the host for something (`NeedsHost` or `NeedsNamed`).
+    #[cold]
+    fn host_ask(&mut self, ask: HeapError) -> Result<(), Error> {
+        match ask {
+            HeapError::NeedsHost { owner, index } => self.host_fill(owner, index),
+            _ => self.host_named(),
+        }
+    }
+
+    fn host_named(&mut self) -> Result<(), Error> {
+        let Some(req) = self.heap.take_named_request() else { return Err(unsupported("named host object without a request", Span::default())) };
+        let Some(host) = self.host.clone() else { return Err(unsupported("named host object without a host", Span::default())) };
+        let ok = host.named_write(self, req)?;
+        self.heap.complete_named(&req, ok);
+        Ok(())
     }
 
     fn host_fill(&mut self, owner: ObjId, index: u32) -> Result<(), Error> {

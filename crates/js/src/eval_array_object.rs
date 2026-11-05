@@ -263,7 +263,7 @@ impl<'p> Interp<'p> {
     /// `DeletePropertyOrThrow`.
     fn ao_delete(&mut self, this: Value, k: PropertyKey) -> Res<()> {
         let ok = match this {
-            Value::Object(o) => hx!(self, self.heap.delete(o, k)),
+            Value::Object(o) => hxw!(self, self.heap.delete(o, k)),
             Value::String(s) => !matches!(k, PropertyKey::Index(i) if (i as usize) < h!(self, self.heap.str_len(s))),
             _ => true,
         };
@@ -276,7 +276,7 @@ impl<'p> Interp<'p> {
 
     /// `CreateDataPropertyOrThrow` on an object this module made.
     fn ao_create(&mut self, a: ObjId, k: PropertyKey, v: Value) -> Res<()> {
-        if hx!(self, self.heap.define_own_property(a, k, &PropertyDescriptor::data(v))) {
+        if hxw!(self, self.heap.define_own_property(a, k, &PropertyDescriptor::data(v))) {
             return Ok(());
         }
         let t = self.key_text(k);
@@ -289,7 +289,7 @@ impl<'p> Interp<'p> {
         }
         let a = h!(self, self.heap.new_array(Some(self.array_proto)));
         if len > 0 {
-            hx!(self, self.heap.set(a, self.k_length, Value::Number(len as f64)));
+            hxw!(self, self.heap.set(a, self.k_length, Value::Number(len as f64)));
         }
         Ok(a)
     }

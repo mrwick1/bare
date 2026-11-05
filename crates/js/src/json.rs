@@ -529,7 +529,7 @@ mod tests {
             g => panic!("{g:?}"),
         }
     }
-    fn keys(h: &Heap, o: Value) -> Vec<String> {
+    fn keys(h: &mut Heap, o: Value) -> Vec<String> {
         let Value::Object(o) = o else { panic!() };
         h.own_keys(o)
             .unwrap()
@@ -660,7 +660,7 @@ mod tests {
     #[test]
     fn objects_and_arrays() {
         let (mut h, v) = ok(r#"{"b":1,"a":2,"b":3,"2":"x","1":"y","__proto__":5,"":0}"#);
-        assert_eq!(keys(&h, v), ["1", "2", "b", "a", "__proto__", ""]);
+        assert_eq!(keys(&mut h, v), ["1", "2", "b", "a", "__proto__", ""]);
         assert!(matches!(get(&mut h, v, "b"), Value::Number(n) if n == 3.0));
         assert!(matches!(get(&mut h, v, "__proto__"), Value::Number(n) if n == 5.0));
         let Value::Object(o) = v else { panic!() };
@@ -672,7 +672,7 @@ mod tests {
         assert!(matches!(h.get_own_property(arr, len).unwrap(), Some(Property::Data { value: Value::Number(n), .. }) if n == 3.0));
         let Value::Object(d) = get(&mut h, v, "d") else { panic!() };
         assert!(!h.is_array(d).unwrap());
-        let (h, v) = ok("[1,2,3]");
+        let (mut h, v) = ok("[1,2,3]");
         let Value::Object(a) = v else { panic!() };
         assert_eq!(h.own_keys(a).unwrap().len(), 4);
         let (h, v) = ok("[]");
@@ -684,8 +684,8 @@ mod tests {
         let k = h.key_from_str("x").unwrap();
         assert!(matches!(h.get_own_property(o, k).unwrap(), Some(Property::Data { writable: true, enumerable: true, configurable: true, .. })));
         // A key that is an index on a plain object, and the largest non-index.
-        let (h, v) = ok(r#"{"4294967295":1,"4294967294":2,"01":3}"#);
-        assert_eq!(keys(&h, v), ["4294967294", "4294967295", "01"]);
+        let (mut h, v) = ok(r#"{"4294967295":1,"4294967294":2,"01":3}"#);
+        assert_eq!(keys(&mut h, v), ["4294967294", "4294967295", "01"]);
     }
 
     #[test]

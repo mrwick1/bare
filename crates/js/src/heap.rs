@@ -23,8 +23,13 @@
 //! dense array in one step when no script can tell the difference. `set_integrity` and `test_integrity` are `Object.seal`,
 //! `Object.freeze`, `Object.isSealed` and `Object.isFrozen`.
 //!
+//! Host named properties (`new_named`, `heap_named.rs`) make an object whose own string-keyed properties belong to the host
+//! (WebIDL named properties). Reads are answered at once by a `NamedSource`. A write, a define or a delete goes to the host
+//! through the evaluator (`HeapError::NeedsNamed`, `Host::named_write`), because it can throw and needs the evaluator's budget.
+//!
 //! Not supported (needs the evaluator): calling getters and setters, `ToPrimitive` on objects
-//! (`NeedsExecution`), `typeof` of a callable (`"function"`), Symbol.for registry, Proxy,
+//! (`NeedsExecution`), `typeof` of a callable (`"function"`), Symbol.for registry, Proxy (the dispatch points of
+//! `heap_named.rs` are where it would plug in),
 //! checking that an accessor is callable. Accessors are stored, validated and traced; the
 //! caller gets the getter or setter object and must call it.
 
@@ -92,11 +97,18 @@ pub enum HeapError {
     NeedsHost { owner: ObjId, index: u32 },
     /// A host-indexed object has no host source, or the host cannot answer now (its state is borrowed). It stops the script.
     HostUnavailable,
+    /// A write, define or delete of a property of a host named object (`new_named`) needs the host and the evaluator. The request
+    /// waits in the heap (`take_named_request`). The evaluator runs `Host::named_write`, gives the answer back
+    /// (`complete_named`) and repeats the operation, which then returns that answer. Nothing was changed when it asked.
+    NeedsNamed,
 }
 
 #[path = "heap_binary.rs"]
 mod binary;
 pub use binary::{load, sort_elems, store, Decoder, Elem, ExoticKind, IndexedSource, Slot, TYPED};
+#[path = "heap_named.rs"]
+mod named;
+pub use named::{NamedOp, NamedRequest, NamedSource};
 
 // ---------- property model ----------
 
@@ -325,8 +337,10 @@ struct Object {
     proto: Option<ObjId>,
     extensible: bool,
     is_array: bool,
-    /// The payload is in `Heap::exotics` (a buffer, a view, a text codec). See `heap_binary.rs`.
-    exotic: bool,
+    /// 0 for an ordinary object. `EXOTIC`: the payload is in `Heap::exotics` (a buffer, a view, a text codec). See
+    /// `heap_binary.rs`. `EXOTIC_NAMED`: also an object whose string-keyed own properties are answered by the host
+    /// (`Heap::new_named`). One byte, so the object stays within its size budget below.
+    exotic: u8,
     /// A function whose own `prototype` holds a placeholder: the object is made on first use (`Heap::unlazy`).
     lazy_proto: bool,
     /// Dense index properties that are plain data (writable, enumerable, configurable).
@@ -337,7 +351,10 @@ struct Object {
     props: PropMap,
 }
 
-// The lazy-prototype flag fits in the padding.
+const EXOTIC: u8 = 1;
+const EXOTIC_NAMED: u8 = 2;
+
+// The flags fit in the padding.
 const _: () = assert!(std::mem::size_of::<Object>() <= 80);
 
 const ENTRY_BYTES: usize = std::mem::size_of::<Option<(PropertyKey, Property)>>();
@@ -616,6 +633,8 @@ pub struct Heap {
     /// The host that answers for the indexed properties of `new_indexed` objects. The heap owns it, so it dies with the heap.
     /// An `Rc` makes `Heap` `!Send`: a heap stays on its thread. A moved heap cannot lose its host silently.
     indexed: Option<std::rc::Rc<dyn IndexedSource>>,
+    /// The host that answers for `new_named` objects, and the one request and answer in flight (`heap_named.rs`).
+    named: Box<named::NamedState>,
     /// `Object.prototype` and the keys `prototype` and `constructor`, for lazy function prototypes. `None`: no
     /// object is lazy.
     lazy: Option<(ObjId, PropertyKey, PropertyKey)>,
@@ -647,6 +666,7 @@ impl Heap {
             max_buffer_bytes: binary::DEFAULT_BUFFER_CAP,
             max_buffer_len: binary::DEFAULT_BUFFER_CAP,
             indexed: None,
+            named: Box::default(),
             lazy: None,
         };
         h.length = h.intern_str("length")?;
@@ -959,7 +979,7 @@ impl Heap {
             let len = PropertyKey::String(self.length);
             props.set(len, Property::Data { value: Value::Number(0.0), writable: true, enumerable: false, configurable: false });
         }
-        let o = Object { proto, extensible: true, is_array, exotic: false, lazy_proto: false, elems: Vec::new(), props };
+        let o = Object { proto, extensible: true, is_array, exotic: 0, lazy_proto: false, elems: Vec::new(), props };
         let cost = obj_bytes(&o);
         self.charge(cost)?;
         let (index, gn) = self.objects.alloc(o, Limit::Objects)?;
@@ -1080,8 +1100,8 @@ impl Heap {
             self.unlazy(o)?;
             ob = self.obj(o)?;
         }
-        if ob.exotic && let Some(r) = self.exotic_own(o, key, true)? {
-            return Ok(r);
+        if ob.exotic != 0 && let Some(r) = self.exotic_own(o, key, true)? {
+            return self.realize(o, key, r);
         }
         Ok(self.own(ob, key))
     }
@@ -1092,7 +1112,7 @@ impl Heap {
     pub fn peek_own_property(&self, o: ObjId, key: PropertyKey) -> R<Option<Property>> {
         self.check_key(key)?;
         let ob = self.obj(o)?;
-        if ob.exotic && let Some(r) = self.exotic_own(o, key, true)? {
+        if ob.exotic != 0 && let Some(r) = self.exotic_own(o, key, true)? {
             return Ok(r);
         }
         Ok(self.own(ob, key))
@@ -1101,7 +1121,7 @@ impl Heap {
     pub fn has_own_property(&self, o: ObjId, key: PropertyKey) -> R<bool> {
         self.check_key(key)?;
         let ob = self.obj(o)?;
-        if ob.exotic && let Some(r) = self.exotic_own(o, key, false)? {
+        if ob.exotic != 0 && let Some(r) = self.exotic_own(o, key, false)? {
             return Ok(r.is_some());
         }
         Ok(self.own(ob, key).is_some())
@@ -1113,7 +1133,7 @@ impl Heap {
         let mut cur = Some(o);
         while let Some(c) = cur {
             let obj = self.obj(c)?;
-            if obj.exotic && let Some(r) = self.exotic_own(c, key, false)? {
+            if obj.exotic != 0 && let Some(r) = self.exotic_own(c, key, false)? {
                 return Ok(r.is_some());
             }
             if self.own(obj, key).is_some() {
@@ -1134,8 +1154,8 @@ impl Heap {
                 self.unlazy(c)?;
                 obj = self.obj(c)?;
             }
-            if obj.exotic && let Some(r) = self.exotic_own(c, key, true)? {
-                return Ok(r.map(|p| (c, p)));
+            if obj.exotic != 0 && let Some(r) = self.exotic_own(c, key, true)? {
+                return self.realize_hit(c, key, r);
             }
             if let Some(p) = self.own(obj, key) {
                 return Ok(Some((c, p)));
@@ -1178,8 +1198,14 @@ impl Heap {
     /// `delete o[key]`. `false` for a non-configurable property.
     pub fn delete(&mut self, o: ObjId, key: PropertyKey) -> R<bool> {
         self.check_key(key)?;
-        if self.obj(o)?.exotic && let Some(r) = self.exotic_own(o, key, false)? {
-            return Ok(r.is_none()); // a valid index of a view or of a host-indexed object cannot be deleted
+        let ob = self.obj(o)?;
+        if ob.exotic != 0 {
+            if ob.exotic == EXOTIC_NAMED && let Some(r) = self.named_delete(o, key)? {
+                return Ok(r);
+            }
+            if let Some(r) = self.exotic_own(o, key, false)? {
+                return Ok(r.is_none()); // a valid index of a view or of a host-indexed object cannot be deleted
+            }
         }
         let Some(p) = self.own(self.obj(o)?, key) else { return Ok(true) };
         if !p.configurable() {
@@ -1191,8 +1217,14 @@ impl Heap {
 
     /// `Reflect.ownKeys`: array indices ascending, then strings in creation order, then symbols
     /// in creation order. An array's `length` is the first string.
-    pub fn own_keys(&self, o: ObjId) -> R<Vec<PropertyKey>> {
-        self.own_keys_with(o, true)
+    pub fn own_keys(&mut self, o: ObjId) -> R<Vec<PropertyKey>> {
+        let rest = self.own_keys_with(o, true)?;
+        if self.obj(o)?.exotic != EXOTIC_NAMED {
+            return Ok(rest);
+        }
+        let mut keys = self.named_keys(o)?;
+        keys.extend(rest);
+        Ok(keys)
     }
 
     /// Upper bound on keys and storage slots scanned by `own_keys`, without allocating.
@@ -1223,7 +1255,7 @@ impl Heap {
         if sparse {
             idx.sort_unstable();
         }
-        let mut out: Vec<PropertyKey> = if ob.exotic && virt { self.view_keys(o)? } else { Vec::new() };
+        let mut out: Vec<PropertyKey> = if ob.exotic == EXOTIC && virt { self.view_keys(o)? } else { Vec::new() };
         out.extend(idx.into_iter().map(PropertyKey::Index));
         out.extend(strs);
         out.extend(syms);
@@ -1259,8 +1291,13 @@ impl Heap {
             return Err(HeapError::InvalidDescriptor);
         }
         let (exotic, is_array) = (obj.exotic, obj.is_array);
-        if exotic && let Some(r) = self.view_define(o, key, d)? {
-            return Ok(r);
+        if exotic != 0 {
+            if exotic == EXOTIC_NAMED && !matches!(key, PropertyKey::Symbol(_)) {
+                return self.named_write(o, key, NamedOp::Define(*d));
+            }
+            if let Some(r) = self.view_define(o, key, d)? {
+                return Ok(r);
+            }
         }
         let obj = self.obj(o)?;
         if !is_array {
@@ -1397,7 +1434,7 @@ impl Heap {
     fn no_indexed_protos(&self, mut p: Option<ObjId>) -> R<bool> {
         while let Some(c) = p {
             let po = self.obj(c)?;
-            if !po.elems.is_empty() || po.props.index_keys != 0 || po.exotic {
+            if !po.elems.is_empty() || po.props.index_keys != 0 || po.exotic != 0 {
                 return Ok(false);
             }
             p = po.proto;
@@ -1476,7 +1513,7 @@ impl Heap {
     /// it from being extensible (the specification says a view's elements are configurable, so sealing it would fail).
     pub fn set_integrity(&mut self, o: ObjId, frozen: bool) -> R<bool> {
         let ob = self.obj(o)?;
-        if frozen && ob.exotic && self.virtual_len(o)? > 0 {
+        if frozen && ob.exotic != 0 && self.virtual_len(o)? > 0 {
             return Ok(false);
         }
         let moved = ob.elems.iter().flatten().count();
@@ -1504,7 +1541,7 @@ impl Heap {
     /// `TestIntegrityLevel` (`Object.isSealed`, and `Object.isFrozen` when `frozen`), without a key list.
     pub fn test_integrity(&self, o: ObjId, frozen: bool) -> R<bool> {
         let ob = self.obj(o)?;
-        if ob.extensible || ob.elems.iter().any(Option::is_some) || (frozen && ob.exotic && self.virtual_len(o)? > 0) {
+        if ob.extensible || ob.elems.iter().any(Option::is_some) || (frozen && ob.exotic != 0 && self.virtual_len(o)? > 0) {
             return Ok(false);
         }
         Ok(ob.props.iter().all(|(_, p)| !(p.configurable() || frozen && matches!(p, Property::Data { writable: true, .. }))))
@@ -1545,7 +1582,7 @@ impl Heap {
             if let Some(p) = o.proto {
                 m.obj(p);
             }
-            if o.exotic && let Some(binary::Exotic::View { buffer, .. }) = exotics.get(&objects.back[d as usize]) {
+            if o.exotic != 0 && let Some(binary::Exotic::View { buffer, .. }) = exotics.get(&objects.back[d as usize]) {
                 m.obj(*buffer);
             }
             for v in o.elems.iter().flatten() {
@@ -1748,7 +1785,7 @@ mod tests {
     fn setn(h: &mut Heap, o: ObjId, k: PropertyKey, x: f64) -> Set {
         h.set(o, k, n(x)).unwrap()
     }
-    fn names(h: &Heap, o: ObjId) -> Vec<String> {
+    fn names(h: &mut Heap, o: ObjId) -> Vec<String> {
         h.own_keys(o)
             .unwrap()
             .into_iter()
@@ -1973,14 +2010,14 @@ mod tests {
         let late = key(&mut h, "0");
         setn(&mut h, o, late, 0.0);
         // Integers ascending numeric (not string) order, then strings and symbols by creation.
-        assert_eq!(names(&h, o), ["0", "1", "2", "10", "b", "a", "-1", "01", "@"]);
+        assert_eq!(names(&mut h, o), ["0", "1", "2", "10", "b", "a", "-1", "01", "@"]);
         // Updating keeps the position; delete and re-add moves to the end.
         let b = key(&mut h, "b");
         setn(&mut h, o, b, 1.0);
-        assert_eq!(names(&h, o)[4], "b");
+        assert_eq!(names(&mut h, o)[4], "b");
         h.delete(o, b).unwrap();
         setn(&mut h, o, b, 1.0);
-        assert_eq!(names(&h, o), ["0", "1", "2", "10", "a", "-1", "01", "b", "@"]);
+        assert_eq!(names(&mut h, o), ["0", "1", "2", "10", "a", "-1", "01", "b", "@"]);
     }
 
     #[test]
@@ -2003,13 +2040,13 @@ mod tests {
             }
         }
         let want: Vec<String> = (0..200).filter(|i| i % 3 == 0).map(|i| format!("k{i}")).collect();
-        assert_eq!(names(&h, o), want);
+        assert_eq!(names(&mut h, o), want);
         for &k in &ks {
             h.delete(o, k).unwrap();
         }
-        assert!(names(&h, o).is_empty());
+        assert!(names(&mut h, o).is_empty());
         setn(&mut h, o, ks[5], 5.0);
-        assert_eq!(names(&h, o), ["k5"]);
+        assert_eq!(names(&mut h, o), ["k5"]);
     }
 
     #[test]
@@ -2066,19 +2103,19 @@ mod tests {
         let a = h.new_array(None).unwrap();
         let len = key(&mut h, "length");
         assert_eq!(num(&mut h, a, len), 0.0);
-        assert_eq!(names(&h, a), ["length"]);
+        assert_eq!(names(&mut h, a), ["length"]);
         assert!(matches!(h.get_own_property(a, len).unwrap(), Some(Property::Data { writable: true, enumerable: false, configurable: false, .. })));
         setn(&mut h, a, PropertyKey::Index(2), 9.0); // leaves holes 0 and 1
         assert_eq!(num(&mut h, a, len), 3.0);
         assert!(!h.has_own_property(a, PropertyKey::Index(0)).unwrap());
         assert!(matches!(val(&mut h, a, PropertyKey::Index(1)), Value::Undefined));
-        assert_eq!(names(&h, a), ["2", "length"]);
+        assert_eq!(names(&mut h, a), ["2", "length"]);
         // Shrinking removes the elements; growing adds holes.
         assert!(h.define_own_property(a, len, &PropertyDescriptor { value: Some(n(2.0)), ..Default::default() }).unwrap());
         assert!(!h.has_own_property(a, PropertyKey::Index(2)).unwrap());
         assert_eq!(setn(&mut h, a, len, 5.0), Set::Done);
         assert_eq!(num(&mut h, a, len), 5.0);
-        assert_eq!(names(&h, a), ["length"]);
+        assert_eq!(names(&mut h, a), ["length"]);
         // Length given as a numeric string, and invalid lengths.
         let s = h.intern_str("1").unwrap();
         assert!(h.define_own_property(a, len, &PropertyDescriptor { value: Some(Value::String(s)), ..Default::default() }).unwrap());
@@ -2095,10 +2132,10 @@ mod tests {
         let big = key(&mut h, "4294967295");
         setn(&mut h, a, big, 1.0);
         assert_eq!(num(&mut h, a, len), 4294967295.0);
-        assert_eq!(names(&h, a), ["0", "4294967294", "length", "4294967295"].map(String::from).iter().filter(|s| *s != "0").cloned().collect::<Vec<_>>());
+        assert_eq!(names(&mut h, a), ["0", "4294967294", "length", "4294967295"].map(String::from).iter().filter(|s| *s != "0").cloned().collect::<Vec<_>>());
         // A huge length costs no memory: it is only a number.
         assert!(h.define_own_property(a, len, &PropertyDescriptor { value: Some(n(0.0)), ..Default::default() }).unwrap());
-        assert_eq!(names(&h, a), ["length", "4294967295"]);
+        assert_eq!(names(&mut h, a), ["length", "4294967295"]);
     }
 
     #[test]
@@ -2114,7 +2151,7 @@ mod tests {
         let shrink = PropertyDescriptor { value: Some(n(1.0)), writable: Some(false), ..Default::default() };
         assert!(!h.define_own_property(a, len, &shrink).unwrap()); // blocked
         assert_eq!(num(&mut h, a, len), 4.0);
-        assert_eq!(names(&h, a), ["0", "1", "2", "3", "length"]);
+        assert_eq!(names(&mut h, a), ["0", "1", "2", "3", "length"]);
         assert!(matches!(h.get_own_property(a, len).unwrap(), Some(Property::Data { writable: false, .. })));
         // Length is read-only now: no growth through length or index.
         assert!(!h.define_own_property(a, PropertyKey::Index(4), &PropertyDescriptor::data(n(1.0))).unwrap());
@@ -2143,20 +2180,20 @@ mod tests {
         assert!(h.define_own_property(a, PropertyKey::Index(0), &PropertyDescriptor { writable: Some(true), ..Default::default() }).unwrap());
         assert_eq!(h.objects.get(a.index, a.gn).unwrap().elems.len(), 1);
         assert_eq!(h.objects.get(a.index, a.gn).unwrap().props.index_keys, 1); // only 5000 left sparse
-        assert_eq!(names(&h, a), ["0", "5000", "length"]);
+        assert_eq!(names(&mut h, a), ["0", "5000", "length"]);
         assert_eq!(num(&mut h, a, len), 5001.0);
         // Deleting the last dense element trims the vector.
         assert!(h.delete(a, PropertyKey::Index(0)).unwrap());
         assert!(h.objects.get(a.index, a.gn).unwrap().elems.is_empty());
         assert!(h.delete(a, PropertyKey::Index(5000)).unwrap());
-        assert_eq!(names(&h, a), ["length"]);
+        assert_eq!(names(&mut h, a), ["length"]);
         assert_eq!(num(&mut h, a, len), 5001.0); // delete does not shrink the length
         // Ordinary objects take integer keys too, in numeric order.
         let o = h.new_object(None).unwrap();
         for i in [30u32, 4, 1_000_000, 4] {
             setn(&mut h, o, PropertyKey::Index(i), i as f64);
         }
-        assert_eq!(names(&h, o), ["4", "30", "1000000"]);
+        assert_eq!(names(&mut h, o), ["4", "30", "1000000"]);
     }
 
     #[test]

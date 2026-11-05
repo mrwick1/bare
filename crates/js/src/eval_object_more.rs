@@ -57,7 +57,7 @@ impl<'p> Interp<'p> {
         }
         let (g, s) = (self.native(Nat::Refl(ProtoGet), "get __proto__", 0)?, self.native(Nat::Refl(ProtoSet), "set __proto__", 1)?);
         let d = PropertyDescriptor { get: Some(Some(g)), set: Some(Some(s)), enumerable: Some(false), configurable: Some(true), ..Default::default() };
-        hx!(self, self.heap.define_own_property(op, self.k_proto, &d));
+        hxw!(self, self.heap.define_own_property(op, self.k_proto, &d));
         for (name, f, len) in [
             ("apply", RApply, 3), ("defineProperty", RDefineProperty, 3), ("deleteProperty", RDeleteProperty, 2), ("get", RGet, 2),
             ("getOwnPropertyDescriptor", RGetOwnPropertyDescriptor, 2), ("getPrototypeOf", RGetPrototypeOf, 1), ("has", RHas, 2),
@@ -221,12 +221,12 @@ impl<'p> Interp<'p> {
                 let o = self.ro_target(a0, "defineProperty")?;
                 let key = self.coerce_key(a1)?;
                 let d = self.property_descriptor(a2)?;
-                Ok(Value::Bool(hx!(self, self.heap.define_own_property(o, key, &d))))
+                Ok(Value::Bool(hxw!(self, self.heap.define_own_property(o, key, &d))))
             }
             RDeleteProperty => {
                 let o = self.ro_target(a0, "deleteProperty")?;
                 let key = self.coerce_key(a1)?;
-                Ok(Value::Bool(hx!(self, self.heap.delete(o, key))))
+                Ok(Value::Bool(hxw!(self, self.heap.delete(o, key))))
             }
             RGet => {
                 let o = self.ro_target(a0, "get")?;
@@ -365,7 +365,7 @@ impl<'p> Interp<'p> {
 
     /// `DefinePropertyOrThrow`.
     fn ro_define(&mut self, o: ObjId, key: PropertyKey, d: &PropertyDescriptor) -> Res<()> {
-        if hx!(self, self.heap.define_own_property(o, key, d)) {
+        if hxw!(self, self.heap.define_own_property(o, key, d)) {
             return Ok(());
         }
         if self.heap.is_view_bad_index(o, key) {
@@ -500,7 +500,7 @@ impl<'p> Interp<'p> {
             if view && matches!(v, Value::Object(_)) {
                 v = Value::Number(self.coerce_number(v)?);
             }
-            return Ok(match hx!(self, self.heap.set(o, key, v)) {
+            return Ok(match hxw!(self, self.heap.set(o, key, v)) {
                 Set::Done => true,
                 Set::Rejected => false,
                 Set::Setter(s) => {
@@ -522,8 +522,8 @@ impl<'p> Interp<'p> {
                 let Value::Object(r) = receiver else { return Ok(false) };
                 Ok(match hx!(self, self.heap.get_own_property(r, key)) {
                     Some(Property::Accessor { .. } | Property::Data { writable: false, .. }) => false,
-                    Some(Property::Data { .. }) => hx!(self, self.heap.define_own_property(r, key, &PropertyDescriptor { value: Some(v), ..Default::default() })),
-                    None => hx!(self, self.heap.define_own_property(r, key, &PropertyDescriptor::data(v))),
+                    Some(Property::Data { .. }) => hxw!(self, self.heap.define_own_property(r, key, &PropertyDescriptor { value: Some(v), ..Default::default() })),
+                    None => hxw!(self, self.heap.define_own_property(r, key, &PropertyDescriptor::data(v))),
                 })
             }
         }

@@ -256,6 +256,27 @@ macro_rules! hx {
     }};
 }
 
+// `hxw!` is `hx!` for a write (`set`, `define_own_property`, `delete`). It also answers `NeedsNamed`: the host does the write of
+// a host named object (`Host::named_write`), the heap keeps its answer, and the repeat returns it (`heap_named.rs`). Reads have
+// no such arm: a read never asks for it, and the reads are the hot paths.
+macro_rules! hxw {
+    ($s:expr, $e:expr) => {{
+        let mut fills = 0u8;
+        loop {
+            match $e {
+                Ok(v) => break v,
+                Err(ask @ (HeapError::NeedsHost { .. } | HeapError::NeedsNamed)) if fills < 2 => {
+                    fills += 1;
+                    if let Err(e) = $s.host_ask(ask) {
+                        return Err(e.into());
+                    }
+                }
+                Err(e) => return Err($s.herr(e).into()),
+            }
+        }
+    }};
+}
+
 const NONE: u32 = u32::MAX;
 const INIT: u8 = 1;
 const MUT: u8 = 2;
@@ -1337,7 +1358,7 @@ impl<'p> Interp<'p> {
 
     fn def(&mut self, o: ObjId, key: PropertyKey, v: Value, w: bool, e: bool, c: bool) -> Res<()> {
         let d = PropertyDescriptor { value: Some(v), writable: Some(w), enumerable: Some(e), configurable: Some(c), ..Default::default() };
-        hx!(self, self.heap.define_own_property(o, key, &d));
+        hxw!(self, self.heap.define_own_property(o, key, &d));
         Ok(())
     }
 
@@ -1602,7 +1623,7 @@ impl<'p> Interp<'p> {
                     if func_top && self.env == 0 {
                         let key = self.name_key(n)?;
                         let d = PropertyDescriptor { value: Some(f), writable: Some(true), enumerable: Some(true), configurable: Some(false), ..Default::default() };
-                        hx!(self, self.heap.define_own_property(self.global, key, &d));
+                        hxw!(self, self.heap.define_own_property(self.global, key, &d));
                     } else {
                         self.env_declare(self.env, n, INIT | MUT, f);
                     }
@@ -1866,12 +1887,12 @@ impl<'p> Interp<'p> {
         }
         for a in [strings, raw] {
             let d = PropertyDescriptor { writable: Some(false), ..Default::default() };
-            hx!(self, self.heap.define_own_property(a, self.k_length, &d));
+            hxw!(self, self.heap.define_own_property(a, self.k_length, &d));
         }
         h!(self, self.heap.prevent_extensions(raw));
         let d = PropertyDescriptor { value: Some(Value::Object(raw)), writable: Some(false), enumerable: Some(false), configurable: Some(false), ..Default::default() };
         let rk = PropertyKey::String(h!(self, self.heap.intern_str("raw")));
-        hx!(self, self.heap.define_own_property(strings, rk, &d));
+        hxw!(self, self.heap.define_own_property(strings, rk, &d));
         h!(self, self.heap.prevent_extensions(strings));
         self.tpl_objs.insert(site, strings);
         Ok(Value::Object(strings))
@@ -1989,7 +2010,7 @@ impl<'p> Interp<'p> {
             v = Value::Number(self.coerce_number(v)?);
         }
         match base {
-            Value::Object(o) => match hx!(self, self.heap.set(o, key, v)) {
+            Value::Object(o) => match hxw!(self, self.heap.set(o, key, v)) {
                 Set::Done => Ok(()),
                 Set::Rejected if self.strict => {
                     let k = self.key_text(key);
@@ -2294,7 +2315,7 @@ impl<'p> Interp<'p> {
                         }
                     }
                 }
-                hx!(self, self.heap.set(a, self.k_length, Value::Number(n as f64)));
+                hxw!(self, self.heap.set(a, self.k_length, Value::Number(n as f64)));
                 Ok(Value::Object(a))
             }
             ExprKind::Object(l) => self.eval_object(l),
@@ -2410,7 +2431,7 @@ impl<'p> Interp<'p> {
                 } else {
                     PropertyDescriptor { set: Some(Some(f)), enumerable: Some(true), configurable: Some(true), ..Default::default() }
                 };
-                hx!(self, self.heap.define_own_property(o, key, &d));
+                hxw!(self, self.heap.define_own_property(o, key, &d));
             }
         }
         Ok(())
@@ -2509,7 +2530,7 @@ impl<'p> Interp<'p> {
                     }
                     _ => return Ok(Value::Bool(true)),
                 };
-                let ok = hx!(self, self.heap.delete(o, key));
+                let ok = hxw!(self, self.heap.delete(o, key));
                 if !ok && self.strict {
                     let k = self.key_text(key);
                     return Err(self.type_err(&format!("Cannot delete property '{k}' of #<Object>")));
@@ -2522,7 +2543,7 @@ impl<'p> Interp<'p> {
                     return Ok(Value::Bool(false));
                 }
                 let key = self.name_key(n)?;
-                Ok(Value::Bool(hx!(self, self.heap.delete(self.global, key))))
+                Ok(Value::Bool(hxw!(self, self.heap.delete(self.global, key))))
             }
             _ => {
                 self.eval_expr(arg)?;
@@ -3057,6 +3078,9 @@ mod host_nt_tests;
 #[cfg(test)]
 #[path = "eval_indexed_tests.rs"]
 mod indexed_tests;
+#[cfg(test)]
+#[path = "eval_named_tests.rs"]
+mod named_tests;
 
 #[cfg(test)]
 #[path = "eval_binary_tests.rs"]

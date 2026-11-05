@@ -190,7 +190,7 @@ impl<'p> Interp<'p> {
                     let k = self.index_key(len - 1)?;
                     let v = self.get_prop(this, k)?;
                     if let Value::Object(o) = this
-                        && !hx!(self, self.heap.delete(o, k)) {
+                        && !hxw!(self, self.heap.delete(o, k)) {
                         let key = self.key_text(k);
                         return Err(self.type_err(&format!("Cannot delete property '{key}'")));
                     }
@@ -333,7 +333,7 @@ impl<'p> Interp<'p> {
             if *len < 0.0 || len.fract() != 0.0 || *len > u32::MAX as f64 {
                 return Err(self.mk_err(RANGE_ERROR, "Invalid array length"));
             }
-            hx!(self, self.heap.set(a, self.k_length, Value::Number(*len)));
+            hxw!(self, self.heap.set(a, self.k_length, Value::Number(*len)));
             return Ok(Value::Object(a));
         }
         self.new_array_from_proto(args, proto)
