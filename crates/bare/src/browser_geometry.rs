@@ -233,8 +233,12 @@ impl Dom {
     /// One bounded native layout of the whole page with these styles: the preflight walk refuses or reserves the work first (see the header).
     /// `offsetWidth`, `offsetHeight` and `ResizeObserver` share it.
     pub(crate) fn layout_now(&self, it: &mut Interp<'_>, styles: &Styles) -> R<bare_layout::fragment::Layout> {
+        self.layout_areas(it, styles).map(|(l, _, _)| l)
+    }
+
+    /// One bounded native layout at the size `vp` (the window minus the page bars, see `browser_scroll.rs`).
+    pub(crate) fn layout_at(&self, it: &mut Interp<'_>, styles: &Styles, vp: (f32, f32)) -> R<bare_layout::fragment::Layout> {
         let l = self.geometry.lim.get();
-        let vp = self.plat.s.borrow().viewport;
         let doc = self.doc.borrow();
         it.charge(doc.len() as u64)?;
         let bound = match walk(&doc, styles, &l) {

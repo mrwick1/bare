@@ -17,6 +17,9 @@ pub mod browser_ui;
 pub mod page;
 #[cfg(test)]
 mod browser_ui_tests;
+mod browser_scroll;
+#[cfg(test)]
+mod browser_scroll_tests;
 #[cfg(test)]
 mod browser_form_tests;
 #[cfg(test)]

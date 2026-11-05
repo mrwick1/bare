@@ -331,6 +331,8 @@ pub struct Dom {
     pub(crate) computed: crate::browser_computed::Computed,
     /// `offsetWidth` and `offsetHeight` (`browser_geometry.rs`).
     pub(crate) geometry: crate::browser_geometry::Geometry,
+    /// Scroll offsets, page bars and `scroll` events (`browser_scroll.rs`).
+    pub(crate) scrolling: crate::browser_scroll::Scrolling,
     /// `ResizeObserver` and its rendering step (`browser_resize.rs`).
     pub(crate) resize: crate::browser_resize::Resize,
     /// `Element.attributes`, `NamedNodeMap` and `Attr` (`browser_attr.rs`).
@@ -839,6 +841,7 @@ impl Dom {
         crate::browser_style::install(self, it)?;
         crate::browser_computed::install(self, it)?;
         crate::browser_geometry::install(self, it)?;
+        crate::browser_scroll::install(self, it)?;
         crate::browser_resize::install(self, it)?;
         crate::browser_handlers::install(self, it)
     }
@@ -1089,6 +1092,7 @@ impl Browser {
             style: Default::default(),
             computed: Default::default(),
             geometry: Default::default(),
+            scrolling: Default::default(),
             resize: Default::default(),
             attr: Default::default(),
             nl: Default::default(),
