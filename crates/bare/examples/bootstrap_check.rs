@@ -14,7 +14,7 @@ fn main() {
     let mut total = 0;
     for entry in std::fs::read_dir(dir).unwrap() {
         let path = entry.unwrap().path();
-        if path.extension().is_none_or(|e| e != "js") { continue; }
+        if path.extension().is_none_or(|e| e != "js" && e != "css") { continue; }
         let mut bytes = Vec::new();
         std::fs::File::open(&path).unwrap().take((8 << 20) + 1).read_to_end(&mut bytes).unwrap();
         total += bytes.len();
@@ -26,8 +26,8 @@ fn main() {
         let srv = serve(move |path| {
             let path = path.split('?').next().unwrap_or("");
             if path == "/login" { return Reply::new(200, Some("text/html"), include_bytes!("../../../tools/fixtures/staging/login.html").to_vec()); }
-            if path.ends_with(".js") && let Some(bytes) = Path::new(path).file_name().and_then(|n| n.to_str()).and_then(|n| assets.get(n)) {
-                return Reply::js(bytes.clone());
+            if (path.ends_with(".js") || path.ends_with(".css")) && let Some(bytes) = Path::new(path).file_name().and_then(|n| n.to_str()).and_then(|n| assets.get(n)) {
+                return Reply::new(200, Some(if path.ends_with(".css") { "text/css" } else { "application/javascript" }), bytes.clone());
             }
             Reply::new(404, Some("text/plain"), "not cached")
         });
@@ -40,7 +40,7 @@ fn main() {
         let mut session = Session::new(cfg);
         let result = session.run();
         println!("stop={:?} documents={} tasks={}", result.stop, result.pages.len(), result.tasks);
-        for p in &result.pages { println!("scripts={} throws={} load_errors={} fetches={} bytes={}", p.scripts_run, p.script_throws, p.load_errors, p.fetches, p.bytes); }
+        for p in &result.pages { println!("scripts={} throws={} load_errors={} fetches={} bytes={}", p.scripts_run, p.script_throws, p.load_errors, p.fetches, p.bytes); println!("css_loaded={} css_failed={} css_bytes={}", p.css.loaded, p.css.failed, p.css.bytes); }
         let mut present = false;
         let mut unhandled = 0;
         if let Some(b) = session.browser() {
@@ -59,7 +59,7 @@ fn main() {
 
             }
         }
-        present && unhandled == 0 && matches!(result.stop, SessionStop::Page(Stop::Settled)) && result.pages.iter().all(|p| p.script_throws == 0 && p.load_errors == 0)
+        present && unhandled == 0 && matches!(result.stop, SessionStop::Page(Stop::Settled)) && result.pages.iter().all(|p| p.script_throws == 0 && p.load_errors == 0 && p.css.failed == 0)
     }).unwrap();
     if !worker.join().unwrap() { std::process::exit(1); }
 }

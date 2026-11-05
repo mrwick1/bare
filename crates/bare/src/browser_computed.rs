@@ -670,14 +670,11 @@ impl Browser {
     }
 
     /// Whether `getComputedStyle` can read now, or which external sheets are missing. Reads the document, runs no JS, charges no steps.
-    /// A cap (`computed-nodes`, `computed-sources`) is an error, as it is for a read.
+    /// Source caps are errors. The cascade node cap applies to computed reads, not sheet discovery.
     pub fn style_availability(&self) -> R<StyleAvailability> {
         let d = &self.dom;
         let vp = d.plat.s.borrow().viewport;
         let mut doc = d.doc.borrow_mut();
-        if doc.len() > d.computed.lim.get().max_nodes {
-            return Err(d.lim("computed-nodes"));
-        }
         let p = d.plan(&mut doc, vp)?;
         Ok(if p.missing.is_empty() { StyleAvailability::Ready } else { StyleAvailability::MissingExternal { hrefs: p.missing, more: p.more } })
     }

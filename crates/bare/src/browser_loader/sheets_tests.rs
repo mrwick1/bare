@@ -471,3 +471,44 @@ fn a_resume_cannot_reset_the_fetch_budget() {
         assert_eq!(srv.total(), total);
     });
 }
+
+#[test]
+fn imports_use_the_redirected_stylesheet_url_as_their_base() {
+    big(|| {
+        let srv = serve(|path| match path {
+            "/go.css" => Reply::new(302, None, "").header("Location", "/nested/real.css"),
+            "/nested/real.css" => Reply::css("@import 'child.css';"),
+            "/nested/child.css" => Reply::css("#p { direction: rtl }"),
+            _ => Reply::new(404, Some("text/plain"), "no"),
+        });
+        let html = format!("<link rel=stylesheet href=go.css><p id=p></p><script>{LOG}{}</script>", dir("p"));
+        let (log, _, _) = run(&html, &srv);
+        assert_eq!(log, "p=rtl");
+        assert_eq!(srv.hits("/child.css"), 0);
+        assert_eq!(srv.hits("/nested/child.css"), 1);
+    });
+}
+
+#[test]
+fn stylesheet_discovery_limits_stop_before_scripts() {
+    big(|| {
+        let srv = site(vec![]);
+        let (mut b, url) = browser("<link rel=stylesheet href=a.css><script>globalThis.ran=1</script>", &srv, "/page.html");
+        b.set_computed_limits(crate::browser_computed::ComputedLimits { max_sources: 0, ..Default::default() });
+        let r=b.run_page(PageConfig {url, client: Client::new(), limits: limits(), fetch: None});
+        assert!(matches!(r.stop, Stop::Fatal(Fatal::Limit(_))));
+        assert_eq!(r.scripts_run,0);
+        assert_eq!(srv.hits("/a.css"),0);
+    });
+}
+
+#[test]
+fn cached_sheet_notifies_new_active_links_but_not_inactive_links() {
+    big(|| {
+        let srv = site(vec![("/a.css", || Reply::css("p {direction:rtl}"))]);
+        let html = "<script>var log=[]; function link(id,media){var l=document.createElement('link');l.setAttribute('rel','stylesheet');l.setAttribute('href','a.css');l.setAttribute('media',media);l.addEventListener('load',function(){log.push(id+':'+l.getAttribute('media'))});document.head.appendChild(l);return l} var a=link('a','all'), b=link('b','not all'); setTimeout(function(){b.setAttribute('media','all')},0);</script>";
+        let (log,_,_) = run(html,&srv);
+        assert_eq!(log,"a:all|b:all");
+        assert_eq!(srv.hits("/a.css"),1);
+    });
+}

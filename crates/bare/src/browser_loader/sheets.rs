@@ -71,7 +71,7 @@ pub struct CssStats {
     pub feeds: usize,
 }
 
-type Fetched = Result<Rc<String>, String>;
+type Fetched = Result<(Rc<Url>, Rc<String>), String>;
 
 #[derive(Default)]
 pub(crate) struct Sheets {
@@ -150,10 +150,18 @@ impl Run<'_> {
         }
         for _ in 0..MAX_PASSES {
             let missing = match self.b.style_availability() {
-                Ok(StyleAvailability::Ready) => return Ok(()),
+                Ok(StyleAvailability::Ready) => {
+                    let (before, known) = {
+                        let s = self.dom.scripts.sheets.borrow();
+                        (s.notified.len(), s.supplied.iter().map(|(raw, url)| (raw.clone(), url.clone(), s.fetched.get(url).is_some_and(Result::is_ok))).collect::<Vec<_>>())
+                    };
+                    for (raw, url, ok) in known { self.tell_links(&raw, &url, ok)?; }
+                    if self.dom.scripts.sheets.borrow().notified.len() != before { continue; }
+                    return Ok(());
+                },
                 Ok(StyleAvailability::MissingExternal { hrefs, .. }) => hrefs,
-                // A cap of the computed module (nodes, sources). A read hits the same cap and says so: nothing is faked here.
-                Err(_) => return Ok(()),
+                // Discovery errors stop the driver before any later JavaScript or I/O.
+                Err(e) => return Err(fatal_of(e)),
             };
             for raw in missing {
                 self.supply(&raw, &base)?;
@@ -173,10 +181,10 @@ impl Run<'_> {
                 let key = url.to_string();
                 match self.fetch_sheet(&url)? {
                     Err(_) => (Vec::new(), key, false),
-                    Ok(text) => {
+                    Ok((final_url, text)) => {
                         let mut parts = Vec::new();
-                        let mut state = Flat { path: vec![key.clone()], refs: 0, bytes: 0 };
-                        self.flatten(&url, &text, None, 0, &mut state, &mut parts)?;
+                        let mut state = Flat { path: vec![key.clone(), final_url.to_string()], refs: 0, bytes: 0 };
+                        self.flatten(&final_url, &text, None, 0, &mut state, &mut parts)?;
                         (parts, key, true)
                     }
                 }
@@ -227,9 +235,9 @@ impl Run<'_> {
                 s.stats.loaded += 1;
                 s.stats.blank += no_rules(&r.text) as usize;
                 s.retained += n;
-                let text = Rc::new(r.text);
-                s.fetched.insert(key, Ok(text.clone()));
-                Ok(Ok(text))
+                let fetched = (Rc::new(r.url), Rc::new(r.text));
+                s.fetched.insert(key, Ok(fetched.clone()));
+                Ok(Ok(fetched))
             }
             Err(LoadError::TimedOut) => Err(Stop::TimeBudget),
             Err(LoadError::TooLarge) => Err(limit("css-resource-bytes")),
@@ -270,9 +278,11 @@ impl Run<'_> {
                     self.diag(format!("style sheet import cycle cut: {}", label(&child)));
                     continue;
                 }
-                let Ok(body) = self.fetch_sheet(&child)? else { continue };
+                let Ok((final_url, body)) = self.fetch_sheet(&child)? else { continue };
                 st.path.push(key);
-                self.flatten(&child, &body, join_layer(layer.as_deref(), imp.layer.as_deref()), depth + 1, st, parts)?;
+                st.path.push(final_url.to_string());
+                self.flatten(&final_url, &body, join_layer(layer.as_deref(), imp.layer.as_deref()), depth + 1, st, parts)?;
+                st.path.pop();
                 st.path.pop();
             }
         }
@@ -291,7 +301,8 @@ impl Run<'_> {
     fn tell_links(&mut self, raw: &str, url: &str, ok: bool) -> Flow {
         let nodes = {
             let doc = self.dom.doc.borrow();
-            let (link, template, rel, href) = (doc.find_atom("link"), doc.find_atom("template"), doc.find_atom("rel"), doc.find_atom("href"));
+            let (link, template, rel, href, media) = (doc.find_atom("link"), doc.find_atom("template"), doc.find_atom("rel"), doc.find_atom("href"), doc.find_atom("media"));
+            let vp = self.dom.plat.s.borrow().viewport;
             let mut out = Vec::new();
             let mut stack = vec![doc.root()];
             while let Some(n) = stack.pop() {
@@ -304,7 +315,7 @@ impl Run<'_> {
                     let attr = |a: Option<bare_html::dom::Atom>| a.and_then(|a| doc.attr(n, a));
                     if Some(name) == link && attr(href) == Some(raw) {
                         let is = |w: &str| attr(rel).is_some_and(|r| r.split_ascii_whitespace().any(|x| x.eq_ignore_ascii_case(w)));
-                        if is("stylesheet") && !is("alternate") {
+                        if is("stylesheet") && !is("alternate") && attr(media).is_none_or(|m| bare_css::at_rules::media_matches(m, vp)) {
                             out.push(n);
                         }
                     }

@@ -368,6 +368,8 @@ pub fn inline_source(doc: &Document, node: NodeId) -> Cow<'_, str> {
 /// A downloaded resource. The server bytes are decoded to text, and the bytes are not kept.
 #[derive(Debug)]
 pub struct Resource {
+    /// Final response URL, used as the base of relative CSS imports.
+    pub url: Url,
     pub text: String,
 }
 
@@ -540,7 +542,7 @@ pub fn fetch(client: &mut http::Client, target: &Target, limits: &Limits, deadli
     if text.len() > room {
         return Err(LoadError::TotalTooLarge);
     }
-    Ok(Resource { text })
+    Ok(Resource { url: current, text })
 }
 
 /// UTF-8 is the default for scripts and styles. A UTF-8 body with no BOM becomes the `String` without a copy.
