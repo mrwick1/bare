@@ -211,6 +211,19 @@ pub struct Document {
     // name table holds the qualified name. The same qualified name with no namespace is another atom (see `intern`).
     atom_ns: HashMap<u32, Ns, BuildHasherDefault<Fnv>>,
     // The way back: from the atom of a namespaced attribute to its namespace.
+    watched: HashSet<(u32, u32), BuildHasherDefault<Fnv>>,
+    // The attributes (element index, atom) that a host holds an `Attr` object for. See `watch_attr`.
+    removed: Vec<RemovedAttr>,
+    // The watched attributes that were removed since the host last took the list. See `take_removed_attrs`.
+}
+
+/// A watched attribute that was removed: the element, the name and the value it had. The value stays readable
+/// with `Document::text`, because the text buffer never frees.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RemovedAttr {
+    pub el: NodeId,
+    pub name: Atom,
+    pub value: Span,
 }
 
 /// A fast hash for short names (FNV-1a). The standard one (SipHash) is slower, and it protects against
@@ -266,6 +279,8 @@ impl Document {
             foreign: HashMap::default(),
             ns_atoms: HashMap::default(),
             atom_ns: HashMap::default(),
+            watched: HashSet::default(),
+            removed: Vec::new(),
         };
         // The order matters: it must match `Atom::ID` and `Atom::CLASS`.
         doc.intern("id");
@@ -393,6 +408,10 @@ impl Document {
 
     /// The attributes of an element, in the order of the page.
     pub fn attrs(&self, list: AttrList) -> &[Attr] {
+        // An empty list can start after the end of the list of all attributes (a removal shortened it). It has nothing to read.
+        if list.len == 0 {
+            return &[];
+        }
         &self.attrs[list.start as usize..(list.start + list.len) as usize]
     }
 
@@ -478,7 +497,9 @@ impl Document {
     pub fn clone_element(&mut self, node: NodeId) -> NodeId {
         let NodeData::Element { name, attrs } = self.nodes[node.index()].data else { panic!("clone_element: not an element") };
         let start = self.attrs.len();
-        self.attrs.extend_from_within(attrs.start as usize..(attrs.start + attrs.len) as usize);
+        if attrs.len != 0 {
+            self.attrs.extend_from_within(attrs.start as usize..(attrs.start + attrs.len) as usize);
+        }
         let id = NodeId::from_index(self.nodes.len());
         let data = NodeData::Element { name, attrs: AttrList { start: to_u32(start), len: attrs.len } };
         self.places = Default::default();
@@ -682,7 +703,8 @@ impl Document {
         let NodeData::Element { name: tag, attrs } = self.nodes[el.index()].data else { return };
         let span = self.push_text(value);
         self.class_sets.get_mut().remove(&el.index());
-        let (start, len) = (attrs.start as usize, attrs.len as usize);
+        // An empty list can start after the end (see `attrs`): it begins again at the end.
+        let (start, len) = if attrs.len == 0 { (self.attrs.len(), 0) } else { (attrs.start as usize, attrs.len as usize) };
         if let Some(a) = self.attrs[start..start + len].iter_mut().find(|a| a.name == name) {
             a.value = span;
             return;
@@ -708,14 +730,56 @@ impl Document {
     pub fn remove_attr_atom(&mut self, el: NodeId, name: Atom) -> bool {
         let NodeData::Element { name: tag, attrs } = self.nodes[el.index()].data else { return false };
         let (start, len) = (attrs.start as usize, attrs.len as usize);
+        if len == 0 {
+            return false;
+        }
         let Some(at) = self.attrs[start..start + len].iter().position(|a| a.name == name) else { return false };
         self.class_sets.get_mut().remove(&el.index());
+        let value = self.attrs[start + at].value;
+        // A watched attribute is logged once: it leaves the watch set here, so the log cannot grow without a new `watch_attr`.
+        if !self.watched.is_empty() && self.watched.remove(&(el.index() as u32, name.0)) {
+            self.removed.push(RemovedAttr { el, name, value });
+        }
         self.attrs.copy_within(start + at + 1..start + len, start + at);
         if start + len == self.attrs.len() {
             self.attrs.pop();
         }
         self.nodes[el.index()].data = NodeData::Element { name: tag, attrs: AttrList { start: attrs.start, len: attrs.len - 1 } };
         true
+    }
+
+    /// Ask to be told when the attribute `name` of `el` is removed (by any path: `remove_attr`, `remove_attr_atom`). A host
+    /// that keeps an object for one attribute calls this, so that the object can become detached with the old value.
+    /// A removal is logged once. Call it again for the next object of an attribute that was added back.
+    pub fn watch_attr(&mut self, el: NodeId, name: Atom) {
+        self.watched.insert((el.index() as u32, name.0));
+    }
+
+    /// Stop watching. Does nothing for an attribute that is not watched.
+    pub fn unwatch_attr(&mut self, el: NodeId, name: Atom) {
+        self.watched.remove(&(el.index() as u32, name.0));
+    }
+
+    /// Is a removal waiting in the log? A cheap check for hot paths.
+    pub fn has_removed_attrs(&self) -> bool {
+        !self.removed.is_empty()
+    }
+
+    /// The removals of watched attributes since the last call, oldest first. The log is empty after it.
+    pub fn take_removed_attrs(&mut self) -> Vec<RemovedAttr> {
+        std::mem::take(&mut self.removed)
+    }
+
+    /// The value of an attribute as a span (`None` if the element has no such attribute). Unlike `attr`, it does not borrow the text.
+    pub fn attr_span(&self, el: NodeId, name: Atom) -> Option<Span> {
+        let NodeData::Element { attrs, .. } = self.nodes[el.index()].data else { return None };
+        self.attrs(attrs).iter().find(|a| a.name == name).map(|a| a.value)
+    }
+
+    /// Put `text` in the text buffer and give its span, for a value that no element holds (a detached attribute).
+    /// The caller checks its text cap first (see `text_bytes`).
+    pub fn new_span(&mut self, text: &str) -> Span {
+        self.push_text(text)
     }
 
     /// How many attributes the element has. 0 for a node that is not an element.
@@ -909,6 +973,61 @@ mod tests {
         assert_eq!(doc.sibling_place(n, false, false), 0); // a detached node is in no sibling list; it must not crash
         doc.move_to(n, root, None);
         assert_eq!(doc.sibling_place(n, false, false), 2);
+    }
+
+    #[test]
+    fn an_empty_attribute_list_survives_the_removal_of_the_last_attribute_slot() {
+        // `c` is made while `a` holds the last attribute slot. Removing it shortens the list below `c`'s start.
+        let mut doc = Document::new();
+        let a = doc.create_element("a");
+        doc.set_attr(a, "x", "1");
+        let c = doc.create_element("c");
+        assert!(doc.remove_attr(a, "x"));
+        assert_eq!(doc.attr_count(c), 0);
+        assert_eq!(doc.attr(c, Atom::ID), None);
+        assert!(!doc.remove_attr(c, "id"));
+        doc.set_attr(c, "id", "k");
+        assert_eq!(doc.attr(c, Atom::ID), Some("k"));
+        assert_eq!(doc.attr_count(a), 0);
+        // `clone_element` of an empty list that starts after the end
+        let d = doc.create_element("d");
+        doc.set_attr(a, "x", "1");
+        let e = doc.create_element("e");
+        doc.remove_attr(a, "x");
+        let copy = doc.clone_element(e);
+        assert_eq!((doc.attr_count(copy), doc.attr_count(d)), (0, 0));
+    }
+
+    #[test]
+    fn a_watched_attribute_is_logged_once_with_its_value_and_by_every_removal_path() {
+        let mut doc = Document::new();
+        let a = doc.create_element("a");
+        doc.set_attr(a, "x", "1");
+        doc.set_attr(a, "y", "2");
+        let (x, y) = (doc.find_atom("x").unwrap(), doc.find_atom("y").unwrap());
+        doc.watch_attr(a, x);
+        doc.watch_attr(a, y);
+        assert!(!doc.has_removed_attrs());
+        assert!(doc.remove_attr(a, "x"));
+        doc.set_attr(a, "x", "again");
+        assert!(doc.remove_attr(a, "x")); // not watched any more: not logged again
+        assert!(doc.remove_attr_atom(a, y));
+        let log = doc.take_removed_attrs();
+        assert_eq!(log.iter().map(|r| (doc.atom_str(r.name), doc.text(r.value))).collect::<Vec<_>>(), [("x", "1"), ("y", "2")]);
+        assert!(!doc.has_removed_attrs());
+        // an unwatched attribute and a replaced value leave no log
+        doc.set_attr(a, "z", "3");
+        doc.set_attr(a, "z", "4");
+        doc.remove_attr(a, "z");
+        assert!(!doc.has_removed_attrs());
+        // `unwatch_attr` stops the log
+        doc.set_attr(a, "w", "5");
+        let w = doc.find_atom("w").unwrap();
+        doc.watch_attr(a, w);
+        doc.unwatch_attr(a, w);
+        doc.remove_attr(a, "w");
+        assert!(!doc.has_removed_attrs());
+        assert_eq!(doc.attr_span(a, w), None);
     }
 
     #[test]

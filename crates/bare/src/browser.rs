@@ -63,6 +63,7 @@
 
 use crate::browser_dom as nd;
 use crate::browser_namespace as ns;
+use crate::browser_attr as at;
 use crate::browser_events as ev;
 use crate::browser_selection as sel;
 pub use crate::browser_scheduler::{Pump, SchedLimits, SchedStats};
@@ -284,6 +285,8 @@ pub struct Dom {
     pub(crate) plat: crate::browser_platform::Platform,
     /// `HTMLElement.style` / `CSSStyleDeclaration` (`browser_style.rs`).
     pub(crate) style: crate::browser_style::Style,
+    /// `Element.attributes`, `NamedNodeMap` and `Attr` (`browser_attr.rs`).
+    pub(crate) attr: crate::browser_attr::AttrHost,
 }
 
 impl Host for Dom {
@@ -307,6 +310,7 @@ impl Host for Dom {
         self.scripts_roots(out);
         crate::browser_platform::roots(self, out);
         crate::browser_style::roots(self, out);
+        at::roots(self, out);
     }
 
     fn trace(&self, owner: ObjId, out: &mut Vec<Value>) {
@@ -314,6 +318,7 @@ impl Host for Dom {
         crate::browser_navigation::trace(self, owner, out);
         crate::browser_platform::trace(self, owner, out);
         crate::browser_style::trace(self, owner, out);
+        at::trace(self, owner, out);
         let st = self.st.borrow();
         if let Some(&t) = st.by_obj.get(&owner) {
             for l in st.listeners.get(&t).into_iter().flatten() {
@@ -342,6 +347,7 @@ impl Host for Dom {
         crate::browser_navigation::prune(self, live);
         crate::browser_platform::prune(self, live);
         crate::browser_style::prune(self, live);
+        at::prune(self, live);
         let mut st = self.st.borrow_mut();
         let st = &mut *st;
         st.by_obj.retain(|&o, t| matches!(t, Target::Window) || live(o));
@@ -362,6 +368,10 @@ impl Host for Dom {
     fn report_exception(&self, it: &mut Interp<'_>, thrown: Value) {
         self.report(it, thrown, "microtask", Target::Window);
     }
+
+    fn fill_indexed(&self, it: &mut Interp<'_>, owner: ObjId, index: u32) -> R<()> {
+        at::fill(self, it, owner, index)
+    }
 }
 
 fn domexc_codes(name: &str) -> u32 {
@@ -370,6 +380,7 @@ fn domexc_codes(name: &str) -> u32 {
         "InvalidCharacterError" => 5,
         "NotFoundError" => 8,
         "NotSupportedError" => 9,
+        "InUseAttributeError" => 10,
         "InvalidStateError" => 11,
         "SyntaxError" => 12,
         "SecurityError" => 18,
@@ -709,6 +720,7 @@ impl Dom {
         crate::browser_fetch::install(self, it)?;
         crate::browser_loader::install(self, it)?;
         self.install_platform(it)?;
+        at::install(self, it)?;
         crate::browser_console::install(self, it)?;
         crate::browser_style::install(self, it)
     }
@@ -782,6 +794,13 @@ pub(crate) static DEFS: &[Def] = &[
     Def { on: &[Element], name: "removeAttribute", len: 1, kind: M(nd::remove_attribute) },
     Def { on: &[Element], name: "hasAttribute", len: 1, kind: M(nd::has_attribute) },
     Def { on: &[Element], name: "getAttributeNames", len: 0, kind: M(nd::get_attribute_names) },
+    Def { on: &[Element], name: "attributes", len: 0, kind: G(at::attributes) },
+    Def { on: &[Element], name: "hasAttributes", len: 0, kind: M(at::has_attributes) },
+    Def { on: &[Element], name: "getAttributeNode", len: 1, kind: M(at::get_attribute_node) },
+    Def { on: &[Element], name: "getAttributeNodeNS", len: 2, kind: M(at::get_attribute_node_ns) },
+    Def { on: &[Element], name: "setAttributeNode", len: 1, kind: M(at::set_attribute_node) },
+    Def { on: &[Element], name: "setAttributeNodeNS", len: 1, kind: M(at::set_attribute_node) },
+    Def { on: &[Element], name: "removeAttributeNode", len: 1, kind: M(at::remove_attribute_node) },
     Def { on: &[Element], name: "getAttributeNS", len: 2, kind: M(ns::get_attribute_ns) },
     Def { on: &[Element], name: "setAttributeNS", len: 3, kind: M(ns::set_attribute_ns) },
     Def { on: &[Element], name: "hasAttributeNS", len: 2, kind: M(ns::has_attribute_ns) },
@@ -793,6 +812,8 @@ pub(crate) static DEFS: &[Def] = &[
     Def { on: &[CharData], name: "length", len: 0, kind: G(nd::data_length) },
     Def { on: &[Document], name: "createElement", len: 1, kind: M(nd::create_element) },
     Def { on: &[Document], name: "createElementNS", len: 2, kind: M(ns::create_element_ns) },
+    Def { on: &[Document], name: "createAttribute", len: 1, kind: M(at::create_attribute) },
+    Def { on: &[Document], name: "createAttributeNS", len: 2, kind: M(at::create_attribute_ns) },
     Def { on: &[Document], name: "createTextNode", len: 1, kind: M(nd::create_text_node) },
     Def { on: &[Document], name: "createComment", len: 1, kind: M(nd::create_comment) },
     Def { on: &[Document], name: "getElementById", len: 1, kind: M(nd::get_element_by_id) },
@@ -894,8 +915,10 @@ impl Browser {
             scripts: Default::default(),
             plat: Default::default(),
             style: Default::default(),
+            attr: Default::default(),
         });
         it.set_host(dom.clone())?;
+        it.heap.set_indexed_source(dom.clone());
         it.host_scope(|it| {
             dom.install(it)?;
             dom.install_scheduler(it)

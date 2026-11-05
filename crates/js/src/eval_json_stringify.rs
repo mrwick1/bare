@@ -250,7 +250,7 @@ impl<'p> Interp<'p> {
 
     /// The replacer array as a property list: strings and numbers, deduplicated, in order.
     fn sj_property_list(&mut self, o: ObjId, lim: &StringifyLimits) -> Res<Vec<PropertyKey>> {
-        let len = match h!(self, self.heap.get_own_property(o, self.k_length)) {
+        let len = match hx!(self, self.heap.get_own_property(o, self.k_length)) {
             Some(Property::Data { value: Value::Number(n), .. }) => n as usize,
             _ => 0,
         };
@@ -330,7 +330,7 @@ impl<'p> Interp<'p> {
         }
         let keys_limit = || Error::Limit(LimitKind::Stringify(StringifyLimit::Keys));
         let (keys, len, open) = if h!(self, self.heap.is_array(o)) {
-            let len = match h!(self, self.heap.get_own_property(o, self.k_length)) {
+            let len = match hx!(self, self.heap.get_own_property(o, self.k_length)) {
                 Some(Property::Data { value: Value::Number(n), .. }) => n as usize,
                 _ => 0,
             };
@@ -348,7 +348,7 @@ impl<'p> Interp<'p> {
             self.spend(all.len() as u64)?;
             let mut list = Vec::new();
             for k in all {
-                if !matches!(k, PropertyKey::Symbol(_)) && h!(self, self.heap.get_own_property(o, k)).is_some_and(|p| p.enumerable()) {
+                if !matches!(k, PropertyKey::Symbol(_)) && hx!(self, self.heap.get_own_property(o, k)).is_some_and(|p| p.enumerable()) {
                     list.push(k);
                 }
             }

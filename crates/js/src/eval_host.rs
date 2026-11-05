@@ -38,6 +38,13 @@ pub trait Host {
     /// A `queueMicrotask` callback threw `thrown`. Record it without running JavaScript that can fail
     /// (read data properties only). The queue goes on. The default drops the value.
     fn report_exception(&self, _it: &mut Interp<'_>, _thrown: Value) {}
+    /// The heap asked for the property at `index` of the host-indexed object `owner` (`Heap::new_indexed`), and its object
+    /// does not exist yet. Make it, so that `IndexedSource::indexed_item` answers `Slot::Ready` for it. The evaluator then
+    /// repeats the operation. Return `Ok` also when the index is gone: the repeat then finds no property. The default
+    /// cannot make it, so the operation fails with `Unsupported`.
+    fn fill_indexed(&self, _it: &mut Interp<'_>, _owner: ObjId, _index: u32) -> Result<(), Error> {
+        Err(unsupported("indexed host object without fill_indexed", Span::default()))
+    }
 }
 
 impl<'p> Interp<'p> {
@@ -58,6 +65,11 @@ impl<'p> Interp<'p> {
         self.def(o, self.k_length, Value::Number(len as f64), false, false, true)?;
         self.def(o, self.k_name, Value::String(s), false, false, true)?;
         Ok(o)
+    }
+
+    fn host_fill(&mut self, owner: ObjId, index: u32) -> Result<(), Error> {
+        let Some(host) = self.host.clone() else { return Err(unsupported("indexed host object without a host", Span::default())) };
+        host.fill_indexed(self, owner, index)
     }
 
     fn call_host(&mut self, id: u32, this: Value, args: &[Value], is_new: bool) -> Res<Value> {

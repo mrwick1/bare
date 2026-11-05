@@ -81,11 +81,14 @@ pub enum HeapError {
     SymbolConversion,
     /// The operation needs the evaluator (`ToPrimitive` on an object). Nothing was changed.
     NeedsExecution(&'static str),
+    /// A property of a host-indexed object (`new_indexed`) has no JavaScript object yet. Nothing was changed. The evaluator asks
+    /// the host to make it (`Host::fill_indexed`) and repeats the operation.
+    NeedsHost { owner: ObjId, index: u32 },
 }
 
 #[path = "heap_binary.rs"]
 mod binary;
-pub use binary::{Decoder, ExoticKind};
+pub use binary::{Decoder, ExoticKind, IndexedSource, Slot};
 
 // ---------- property model ----------
 
@@ -597,6 +600,8 @@ pub struct Heap {
     buffer_bytes: usize,
     max_buffer_bytes: usize,
     max_buffer_len: usize,
+    /// The key of the host that answers for the indexed properties of `new_indexed` objects (see `binary::SOURCES`).
+    indexed: Option<u64>,
 }
 
 impl Default for Heap {
@@ -624,6 +629,7 @@ impl Heap {
             buffer_bytes: 0,
             max_buffer_bytes: binary::DEFAULT_BUFFER_CAP,
             max_buffer_len: binary::DEFAULT_BUFFER_CAP,
+            indexed: None,
         };
         h.length = h.intern_str("length")?;
         Ok(h)
@@ -1005,14 +1011,19 @@ impl Heap {
     pub fn get_own_property(&self, o: ObjId, key: PropertyKey) -> R<Option<Property>> {
         self.check_key(key)?;
         let ob = self.obj(o)?;
-        if ob.exotic && let Some(r) = self.view_own(o, key) {
+        if ob.exotic && let Some(r) = self.exotic_own(o, key, true)? {
             return Ok(r);
         }
         Ok(self.own(ob, key))
     }
 
     pub fn has_own_property(&self, o: ObjId, key: PropertyKey) -> R<bool> {
-        Ok(self.get_own_property(o, key)?.is_some())
+        self.check_key(key)?;
+        let ob = self.obj(o)?;
+        if ob.exotic && let Some(r) = self.exotic_own(o, key, false)? {
+            return Ok(r.is_some());
+        }
+        Ok(self.own(ob, key).is_some())
     }
 
     /// `key in o`: own or inherited.
@@ -1021,7 +1032,7 @@ impl Heap {
         let mut cur = Some(o);
         while let Some(c) = cur {
             let obj = self.obj(c)?;
-            if obj.exotic && let Some(r) = self.view_own(c, key) {
+            if obj.exotic && let Some(r) = self.exotic_own(c, key, false)? {
                 return Ok(r.is_some());
             }
             if self.own(obj, key).is_some() {
@@ -1038,7 +1049,7 @@ impl Heap {
         let mut cur = Some(o);
         while let Some(c) = cur {
             let obj = self.obj(c)?;
-            if obj.exotic && let Some(r) = self.view_own(c, key) {
+            if obj.exotic && let Some(r) = self.exotic_own(c, key, true)? {
                 return Ok(r.map(|p| (c, p)));
             }
             if let Some(p) = self.own(obj, key) {
@@ -1082,8 +1093,8 @@ impl Heap {
     /// `delete o[key]`. `false` for a non-configurable property.
     pub fn delete(&mut self, o: ObjId, key: PropertyKey) -> R<bool> {
         self.check_key(key)?;
-        if self.obj(o)?.exotic && let Some(r) = self.view_own(o, key) {
-            return Ok(r.is_none()); // a valid index of a view cannot be deleted
+        if self.obj(o)?.exotic && let Some(r) = self.exotic_own(o, key, false)? {
+            return Ok(r.is_none()); // a valid index of a view or of a host-indexed object cannot be deleted
         }
         let Some(p) = self.own(self.obj(o)?, key) else { return Ok(true) };
         if !p.configurable() {
@@ -1103,7 +1114,7 @@ impl Heap {
     /// Includes dense holes, removed property slots and virtual byte-view indices.
     pub fn own_key_slots(&self, o: ObjId) -> R<usize> {
         let ob = self.obj(o)?;
-        let virtual_len = self.view_parts(o).map_or(0, |(_, _, len)| len);
+        let virtual_len = self.virtual_len(o);
         Ok(ob.elems.len().saturating_add(ob.props.entries.len()).saturating_add(virtual_len))
     }
 
@@ -1284,7 +1295,7 @@ impl Heap {
         while let Some(c) = p {
             let po = self.obj(c)?;
             // A view prototype has integer-indexed keys that are not stored in `elems` (any length, even 0).
-            if !po.elems.is_empty() || po.props.index_keys != 0 || (po.exotic && self.view_parts(c).is_some()) {
+            if !po.elems.is_empty() || po.props.index_keys != 0 || (po.exotic && self.virtual_len(c) != 0) {
                 return Ok(None);
             }
             p = po.proto;

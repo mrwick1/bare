@@ -70,7 +70,7 @@ fn qname_parts(q: &str) -> Option<(Option<&str>, &str)> {
 
 /// "Validate and extract" of the DOM Standard. Gives the prefix and the local name. `ns` is the namespace string as the page gave it
 /// (`None` for null; an empty string is null too).
-fn extract<'a>(d: &Dom, it: &mut Interp<'_>, ns: Option<&str>, qname: &'a str) -> R<(Option<&'a str>, &'a str)> {
+pub(crate) fn extract<'a>(d: &Dom, it: &mut Interp<'_>, ns: Option<&str>, qname: &'a str) -> R<(Option<&'a str>, &'a str)> {
     let Some((prefix, local)) = qname_parts(qname) else {
         return Err(d.dom_err(it, "InvalidCharacterError", &format!("The qualified name provided ('{qname}') is not a valid name.")));
     };
@@ -85,7 +85,7 @@ fn extract<'a>(d: &Dom, it: &mut Interp<'_>, ns: Option<&str>, qname: &'a str) -
 }
 
 /// A namespace argument: `null`, `undefined` and the empty string are no namespace.
-fn ns_arg(d: &Dom, it: &mut Interp<'_>, v: Value) -> R<Option<String>> {
+pub(crate) fn ns_arg(d: &Dom, it: &mut Interp<'_>, v: Value) -> R<Option<String>> {
     Ok(match v {
         Value::Null | Value::Undefined => None,
         v => Some(d.string_arg(it, v)?).filter(|s| !s.is_empty()),
@@ -95,7 +95,7 @@ fn ns_arg(d: &Dom, it: &mut Interp<'_>, v: Value) -> R<Option<String>> {
 const ATTR_NS: &str = "setAttributeNS with a namespace other than none, XML, XMLNS or XLink";
 
 /// The namespace of an attribute that the host stores. `Err(())` for one that it does not.
-fn attr_ns_of(ns: Option<&str>) -> Result<Option<Ns>, ()> {
+pub(crate) fn attr_ns_of(ns: Option<&str>) -> Result<Option<Ns>, ()> {
     match ns {
         None => Ok(None),
         Some(u) => match Ns::from_uri(u) {

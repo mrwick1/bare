@@ -213,6 +213,28 @@ macro_rules! h {
     };
 }
 
+// `h!` for a heap property operation that can reach a host-indexed object. `NeedsHost` (a property of such an object has no
+// JS object yet) is not an error: the host makes the object (`Host::fill_indexed`) and the operation runs again. The heap
+// changed nothing when it asked, so a repeat is safe. At most 2 repeats: the host must have made the object by then, or the
+// result is an error, never a loop. Only for expressions that move nothing, because they run again.
+macro_rules! hx {
+    ($s:expr, $e:expr) => {{
+        let mut fills = 0u8;
+        loop {
+            match $e {
+                Ok(v) => break v,
+                Err(HeapError::NeedsHost { owner, index }) if fills < 2 => {
+                    fills += 1;
+                    if let Err(e) = $s.host_fill(owner, index) {
+                        return Err(e.into());
+                    }
+                }
+                Err(e) => return Err($s.herr(e).into()),
+            }
+        }
+    }};
+}
+
 const NONE: u32 = u32::MAX;
 const INIT: u8 = 1;
 const MUT: u8 = 2;
@@ -716,7 +738,7 @@ impl<'p> Interp<'p> {
             self.async_promise_trace(o, &mut work, &mut env_work, &mut act_seen);
             let keys = h!(self, self.heap.stored_keys(o));
             for k in keys {
-                match h!(self, self.heap.get_own_property(o, k)) {
+                match hx!(self, self.heap.get_own_property(o, k)) {
                     Some(Property::Data { value, .. }) => work.push(value),
                     Some(Property::Accessor { get, set, .. }) => {
                         work.extend(get.map(Value::Object));
@@ -1195,7 +1217,7 @@ impl<'p> Interp<'p> {
 
     fn def(&mut self, o: ObjId, key: PropertyKey, v: Value, w: bool, e: bool, c: bool) -> Res<()> {
         let d = PropertyDescriptor { value: Some(v), writable: Some(w), enumerable: Some(e), configurable: Some(c), ..Default::default() };
-        h!(self, self.heap.define_own_property(o, key, &d));
+        hx!(self, self.heap.define_own_property(o, key, &d));
         Ok(())
     }
 
@@ -1438,7 +1460,7 @@ impl<'p> Interp<'p> {
                     if func_top && self.env == 0 {
                         let key = self.name_key(n)?;
                         let d = PropertyDescriptor { value: Some(f), writable: Some(true), enumerable: Some(true), configurable: Some(false), ..Default::default() };
-                        h!(self, self.heap.define_own_property(self.global, key, &d));
+                        hx!(self, self.heap.define_own_property(self.global, key, &d));
                     } else {
                         self.env_declare(self.env, n, INIT | MUT, f);
                     }
@@ -1764,7 +1786,7 @@ impl<'p> Interp<'p> {
             Value::Number(_) => self.ao.number_proto.unwrap_or(self.object_proto),
             _ => self.object_proto,
         };
-        match h!(self, self.heap.get(o, key)) {
+        match hx!(self, self.heap.get(o, key)) {
             Get::Value(v) => Ok(v),
             Get::Accessor { getter: Some(g) } => self.call_fn(Value::Object(g), base, &[]),
             Get::Accessor { getter: None } => Ok(Value::Undefined),
@@ -1780,7 +1802,7 @@ impl<'p> Interp<'p> {
             v = Value::Number(self.coerce_number(v)?);
         }
         match base {
-            Value::Object(o) => match h!(self, self.heap.set(o, key, v)) {
+            Value::Object(o) => match hx!(self, self.heap.set(o, key, v)) {
                 Set::Done => Ok(()),
                 Set::Rejected if self.strict => {
                     let k = self.key_text(key);
@@ -1869,7 +1891,7 @@ impl<'p> Interp<'p> {
             return if b.flags & INIT != 0 { Ok(b.value) } else { Err(self.tdz(n)) };
         }
         let key = self.name_key(n)?;
-        match h!(self, self.heap.lookup(self.global, key)) {
+        match hx!(self, self.heap.lookup(self.global, key)) {
             Some((_, Property::Data { value, .. })) => Ok(value),
             Some((_, Property::Accessor { get, .. })) => match get {
                 Some(g) => self.call_fn(Value::Object(g), Value::Object(self.global), &[]),
@@ -1898,7 +1920,7 @@ impl<'p> Interp<'p> {
             return Ok(());
         }
         let key = self.name_key(n)?;
-        if self.strict && !h!(self, self.heap.has_property(self.global, key)) {
+        if self.strict && !hx!(self, self.heap.has_property(self.global, key)) {
             let m = format!("{} is not defined", self.names[n as usize]);
             return Err(self.mk_err(REFERENCE_ERROR, &m));
         }
@@ -2062,7 +2084,7 @@ impl<'p> Interp<'p> {
                         }
                     }
                 }
-                h!(self, self.heap.set(a, self.k_length, Value::Number(n as f64)));
+                hx!(self, self.heap.set(a, self.k_length, Value::Number(n as f64)));
                 Ok(Value::Object(a))
             }
             ExprKind::Object(l) => self.eval_object(l),
@@ -2178,7 +2200,7 @@ impl<'p> Interp<'p> {
                 } else {
                     PropertyDescriptor { set: Some(Some(f)), enumerable: Some(true), configurable: Some(true), ..Default::default() }
                 };
-                h!(self, self.heap.define_own_property(o, key, &d));
+                hx!(self, self.heap.define_own_property(o, key, &d));
             }
         }
         Ok(())
@@ -2204,7 +2226,7 @@ impl<'p> Interp<'p> {
                 continue;
             }
             if let Value::Object(o) = src {
-                match h!(self, self.heap.get_own_property(o, k)) {
+                match hx!(self, self.heap.get_own_property(o, k)) {
                     Some(p) if p.enumerable() => {}
                     _ => continue,
                 }
@@ -2226,7 +2248,7 @@ impl<'p> Interp<'p> {
                     let n = self.expr_name[a.index()];
                     if self.lookup(n).is_none() {
                         let key = self.name_key(n)?;
-                        if !h!(self, self.heap.has_property(self.global, key)) {
+                        if !hx!(self, self.heap.has_property(self.global, key)) {
                             let s = h!(self, self.heap.intern_str("undefined"));
                             return Ok(Value::String(s));
                         }
@@ -2277,7 +2299,7 @@ impl<'p> Interp<'p> {
                     }
                     _ => return Ok(Value::Bool(true)),
                 };
-                let ok = h!(self, self.heap.delete(o, key));
+                let ok = hx!(self, self.heap.delete(o, key));
                 if !ok && self.strict {
                     let k = self.key_text(key);
                     return Err(self.type_err(&format!("Cannot delete property '{k}' of #<Object>")));
@@ -2290,7 +2312,7 @@ impl<'p> Interp<'p> {
                     return Ok(Value::Bool(false));
                 }
                 let key = self.name_key(n)?;
-                Ok(Value::Bool(h!(self, self.heap.delete(self.global, key))))
+                Ok(Value::Bool(hx!(self, self.heap.delete(self.global, key))))
             }
             _ => {
                 self.eval_expr(arg)?;
@@ -2539,7 +2561,7 @@ impl<'p> Interp<'p> {
                     return Err(self.type_err(&format!("Cannot use 'in' operator to search for '{k}' in {t}")));
                 };
                 let key = self.coerce_key(a)?;
-                Ok(Value::Bool(h!(self, self.heap.has_property(o, key))))
+                Ok(Value::Bool(hx!(self, self.heap.has_property(o, key))))
             }
             Instanceof => self.sc_instanceof(a, b),
         }
@@ -2974,7 +2996,7 @@ impl<'p> Interp<'p> {
                 let keys = self.for_in_keys(rv)?;
                 for k in keys {
                     if let Value::Object(o) = rv
-                        && !h!(self, self.heap.has_property(o, k))
+                        && !hx!(self, self.heap.has_property(o, k))
                     {
                         continue;
                     }
@@ -2995,7 +3017,8 @@ impl<'p> Interp<'p> {
 
     /// Charge virtual view indices before materializing their key list.
     fn property_keys(&mut self, o: ObjId) -> Res<Vec<PropertyKey>> {
-        if let Some((_, _, len)) = self.heap.view_parts(o) {
+        let len = self.heap.virtual_len(o);
+        if len != 0 {
             self.spend(len as u64)?;
         }
         Ok(h!(self, self.heap.own_keys(o)))
@@ -3015,7 +3038,7 @@ impl<'p> Interp<'p> {
                 if matches!(k, PropertyKey::Symbol(_)) || !seen.insert(k) {
                     continue;
                 }
-                if matches!(h!(self, self.heap.get_own_property(o, k)), Some(p) if p.enumerable()) {
+                if matches!(hx!(self, self.heap.get_own_property(o, k)), Some(p) if p.enumerable()) {
                     out.push(k);
                 }
             }
@@ -3102,6 +3125,10 @@ mod revive_tests;
 #[cfg(test)]
 #[path = "eval_host_tests.rs"]
 mod host_tests;
+
+#[cfg(test)]
+#[path = "eval_indexed_tests.rs"]
+mod indexed_tests;
 
 #[cfg(test)]
 #[path = "eval_binary_tests.rs"]
