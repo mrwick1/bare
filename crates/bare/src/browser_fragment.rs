@@ -27,7 +27,7 @@
 //! - `outerHTML`, `insertAdjacentHTML`, `DocumentFragment`, `Range.createContextualFragment`, `DOMParser` and `document.write` are absent.
 //!
 //! Known deviations: nested `table` and `select` are read by the page rules of the tree builder (no table or select insertion modes). A temporary
-//! text buffer that grew by joining texts counts the wasted bytes against the text cap. `cloneNode` does not copy the "already started" flag.
+//! text buffer that grew by joining texts counts the wasted bytes against the text cap. Cloning preserves the "already started" flag.
 
 use crate::browser::*;
 use crate::browser_dom::{arg, next_in};
@@ -98,10 +98,12 @@ fn serialize(d: &Dom, it: &mut Interp<'_>, doc: &Document, n: NodeId) -> R<Strin
         let mut open = false;
         match *doc.data(node) {
             NodeData::Text(sp) => {
+                it.charge(doc.text(sp).len() as u64 / 16 + 1)?;
                 let raw = doc.parent(node).is_some_and(|p| !doc.is_foreign(p) && RAW_PARENTS.contains(&doc.element_name(p)));
                 if raw { put(d, &mut out, doc.text(sp))? } else { escape(d, &mut out, doc.text(sp), false)? }
             }
             NodeData::Comment(sp) => {
+                it.charge(doc.text(sp).len() as u64 / 16 + 1)?;
                 put(d, &mut out, "<!--")?;
                 put(d, &mut out, doc.text(sp))?;
                 put(d, &mut out, "-->")?;
@@ -116,7 +118,7 @@ fn serialize(d: &Dom, it: &mut Interp<'_>, doc: &Document, n: NodeId) -> R<Strin
                 put(d, &mut out, "<")?;
                 put(d, &mut out, tag)?;
                 for a in doc.attrs(attrs) {
-                    it.charge(1)?;
+                    it.charge(1 + doc.text(a.value).len() as u64 / 16)?;
                     put(d, &mut out, " ")?;
                     put(d, &mut out, &attr_name(doc, a.name))?;
                     put(d, &mut out, "=\"")?;

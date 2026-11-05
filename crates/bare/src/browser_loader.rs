@@ -258,6 +258,11 @@ impl Dom {
     }
 
     /// The "already started" flag of a script element that the fragment parser made (HTML Standard, 4.12.1.1): it never runs, wherever it goes.
+    pub(crate) fn copy_script_started(&self, source: NodeId, copy: NodeId) {
+        let mut started = self.scripts.started.borrow_mut();
+        if started.contains(&source) { started.insert(copy); }
+    }
+
     pub(crate) fn mark_started(&self, el: NodeId) {
         self.scripts.started.borrow_mut().insert(el);
     }

@@ -374,6 +374,7 @@ fn fragment_scripts_stay_inert_in_the_document_and_start_no_fetch() {
             d.innerHTML = '<script>L(\"frag-inline\")<\\/script><script src=\"/frag.js\"><\\/script><img src=\"/img.png\" onerror=\"L(1)\"><i onclick=\"L(2)\"></i>';
             document.body.appendChild(d);
             var s = d.firstChild; d.removeChild(s); document.head.appendChild(s); document.body.insertBefore(s, null);
+            document.body.appendChild(d.cloneNode(true)); document.body.appendChild(s.cloneNode(true));
             s.setAttribute('type', 'text/javascript'); s.text = 'L(\"edited\")';
             document.body.innerHTML = '<script>L(\"body-inline\")<\\/script><script src=\"/body.js\"><\\/script>';
             document.body.appendChild(d);
@@ -410,4 +411,16 @@ fn a_very_deep_tree_is_read_and_replaced_without_recursion() {
         .unwrap();
     assert_eq!(r.0, (11 * 30_000 + 1).to_string());
     assert_eq!(r.1, format!("true,{}", 11 * 30_000 + 1));
+}
+
+#[test]
+fn serialization_text_work_hits_the_step_budget() {
+    big(|| {
+        let mut b = browser_with("<body><div id=x></div>", BrowserLimits::default(), 2000);
+        let n = b.query("#x").unwrap().unwrap();
+        let doc = b.document();
+        let text = "&".repeat(100_000);
+        { let mut doc = doc.borrow_mut(); let t = doc.create_text(&text); doc.move_to(t, n, None); }
+        assert!(js(&mut b, "document.getElementById('x').innerHTML").contains("Steps"));
+    });
 }
