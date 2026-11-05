@@ -29,6 +29,8 @@
 //!   prepend remove matches closest querySelector querySelectorAll` (selectors from `bare_css`).
 //! - CharacterData: `data length`. Document: `createElement createElementNS createTextNode createComment getElementById
 //!   documentElement head body doctype defaultView querySelector(All)`.
+//! - `HTMLElement.dataset` and `SVGElement.dataset` (`DOMStringMap`, `browser_dataset.rs`): live `data-*` attributes with the name conversion, named
+//!   properties through the host named-property hook of `bare_js::heap` (`heap_named.rs`). MathML elements have no `dataset` (no `MathMLElement` brand).
 //! - `<input>`: `value checked type defaultValue defaultChecked` with native state (dirty value, checkedness).
 //! - `Element.innerHTML` (`browser_fragment.rs`): native fragment parsing and serialization with explicit gates (table, select, template, html, frameset and
 //!   foreign contexts are `Unsupported`). Fragment scripts are never run.
@@ -47,7 +49,7 @@
 //! - A JS string with a lone surrogate cannot be stored in the UTF-8 document: `Error::Unsupported`. Valid pairs round-trip.
 //! - Namespaces are in `browser_namespace.rs` (read its header): HTML, SVG and MathML elements, attributes in no namespace, XML,
 //!   XMLNS and XLink. Any other namespace is `Unsupported`. Shadow roots are a tree foundation only (`browser_shadow.rs`: read its header for the gates). `new Document()`, `createDocumentFragment`, `new DocumentFragment()`, `outerHTML`, `insertAdjacentHTML`,
-//!   `dataset`, `style`, `before/after/replaceWith`, layout APIs, `location` and
+//!   `style`, `before/after/replaceWith`, layout APIs, `location` and
 //!   network are absent. Timers, `queueMicrotask`, `performance.now` and `MessageChannel` are in `browser_scheduler.rs`. `Element.attributes` and `Attr` are in `browser_attr.rs`.
 //! - `addEventListener` option `signal` is `Unsupported`. `isTrusted` is always false. Events made by the test driver
 //!   are plain `Event`s (no `MouseEvent`/`InputEvent` fields), except the `submit` of a click activation: a `SubmitEvent`.
@@ -318,6 +320,8 @@ pub struct Dom {
     pub(crate) attr: crate::browser_attr::AttrHost,
     /// `Document.getElementsByName` and the live `NodeList` (`browser_nodelist.rs`).
     pub(crate) nl: crate::browser_nodelist::NodeListHost,
+    /// `HTMLElement.dataset` and `DOMStringMap` (`browser_dataset.rs`).
+    pub(crate) dataset: crate::browser_dataset::DatasetHost,
 }
 
 impl Host for Dom {
@@ -344,6 +348,7 @@ impl Host for Dom {
         crate::browser_computed::roots(self, out);
         at::roots(self, out);
         crate::browser_nodelist::roots(self, out);
+        crate::browser_dataset::roots(self, out);
         self.resize_roots(out);
     }
 
@@ -356,6 +361,7 @@ impl Host for Dom {
         self.resize_trace(owner, out);
         at::trace(self, owner, out);
         crate::browser_nodelist::trace(self, owner, out);
+        crate::browser_dataset::trace(self, owner, out);
         let st = self.st.borrow();
         if let Some(&t) = st.by_obj.get(&owner) {
             for l in st.listeners.get(&t).into_iter().flatten() {
@@ -390,6 +396,7 @@ impl Host for Dom {
         self.resize_prune(live);
         at::prune(self, live);
         crate::browser_nodelist::prune(self, live);
+        crate::browser_dataset::prune(self, live);
         let mut st = self.st.borrow_mut();
         let st = &mut *st;
         st.by_obj.retain(|&o, t| matches!(t, Target::Window) || live(o));
@@ -412,10 +419,14 @@ impl Host for Dom {
     }
 
     fn fill_indexed(&self, it: &mut Interp<'_>, owner: ObjId, index: u32) -> R<()> {
-        if crate::browser_nodelist::fill(self, it, owner, index)? {
+        if crate::browser_nodelist::fill(self, it, owner, index)? || crate::browser_dataset::fill(self, it, owner)? {
             return Ok(());
         }
         at::fill(self, it, owner, index)
+    }
+
+    fn named_write(&self, it: &mut Interp<'_>, req: bare_js::heap::NamedRequest) -> R<bool> {
+        crate::browser_dataset::write(self, it, req)
     }
 }
 
@@ -794,6 +805,7 @@ impl Dom {
         self.install_platform(it)?;
         at::install(self, it)?;
         crate::browser_nodelist::install(self, it)?;
+        crate::browser_dataset::install(self, it)?;
         crate::browser_console::install(self, it)?;
         crate::browser_style::install(self, it)?;
         crate::browser_computed::install(self, it)?;
@@ -1023,9 +1035,11 @@ impl Browser {
             resize: Default::default(),
             attr: Default::default(),
             nl: Default::default(),
+            dataset: Default::default(),
         });
         it.set_host(dom.clone())?;
         it.heap.set_indexed_source(dom.clone());
+        it.heap.set_named_source(dom.clone());
         it.host_scope(|it| {
             dom.install(it)?;
             dom.install_scheduler(it)

@@ -2560,3 +2560,42 @@ Validation:
 - `cargo test --workspace --release` passes. The checks `eval`, `number`, `builtins`, `date`, `math`, `class`, `intl_num`, `arrobj`, `reflect`, `sc`, `weak`, `tagged`, `generator`, `async`, `promise` and `stringify` match Node. `parse_check.sh` fails with `ERR_MODULE_NOT_FOUND` in Node before it runs our code. It was not run on main.
 
 Limits: one machine, under load. The live staging page was not run on this build. Locales other than the 5 English ones were not tested.
+
+## HTMLElement.dataset and host named properties
+
+Found on 2026-11-05 from the live login trace on main a654a56. After the login, the Next.js client navigation to `/` reaches the commit of React. The stylesheet ordering code of React (`ck` and `cT` in the minified react-dom) reads `element.dataset.precedence` of every `<link rel=stylesheet data-precedence>` and `<style data-precedence>`. `bare` had no `HTMLElement.dataset`, so `dataset` was `undefined`. The trace shows `TypeError: Cannot read properties of undefined (reading 'precedence')`, reported from a `load` listener. The session then ran out of steps.
+
+Design of the hook (`crates/js/src/heap_named.rs`, read its header first). An object made with `Heap::new_named` is an exotic object whose own string-keyed properties belong to the host (WebIDL named properties, "legacy platform object"). The host is a `NamedSource` with four reads (`named_has`, `named_get`, `named_len`, `named_keys`). The heap answers `[[GetOwnProperty]]`, `[[HasProperty]]` and `[[OwnPropertyKeys]]` from them at once, with no evaluator, because every read path of the heap is `&self` or has no evaluator. A write cannot be answered at once: it can throw a `DOMException`, can run `toString`, must charge the step budget and must obey the caps. So `[[Set]]`, `[[DefineOwnProperty]]` and `[[Delete]]` change nothing in the heap. The heap stores one `NamedRequest` and returns `HeapError::NeedsNamed`. The evaluator (`hxw!`, the write form of `hx!`) calls `Host::named_write`, gives the answer back (`complete_named`) and repeats the operation. The repeat returns the answer. This is the loop of `NeedsHost` for host-indexed objects, with a second kind of request.
+
+The cost for an ordinary object is nil. `Object::exotic` is now a `u8` (`EXOTIC`, `EXOTIC_NAMED`), so the object keeps its size. Every dispatch point sits behind the `exotic != 0` test that already guarded views. A read that finds a name leaves the loop of `lookup` through a cold call (`realize`), which gives the real value (it needs the interner). `hx!` is unchanged. Only writes use `hxw!`, because only writes ask for `NeedsNamed`.
+
+How `Proxy` would reuse it (not built). A `Proxy` is another exotic kind, flagged the same way, and dispatched at the same points. Its methods run script, so none can be answered from `&self`. Each point would store a `NamedRequest`-like record with more `NamedOp`s (`Get`, `GetOwn`, `Has`, `Keys`) and return `NeedsNamed`. The evaluator would run the trap, check the invariants against the target and complete the request with a richer answer than a boolean. `hxw!` would become `hx!` for the read sites of a heap that has proxies. The collector would mark `target` and `handler`. The table in the header of `heap_named.rs` lists the points.
+
+`dataset` (`crates/bare/src/browser_dataset.rs`):
+
+- `dataset` is a getter on `HTMLElement.prototype` and `SVGElement.prototype`. It returns one `DOMStringMap` for each element (SameObject). The map holds only its element. Every read and write goes to the live `data-*` attributes. MathML elements have no `dataset`.
+- Name conversion: `data-foo-bar` is `fooBar`. A name with an ASCII upper letter in the attribute is not in the map. `in` and `Object.keys` list the `data-*` attributes in attribute order. Other attributes are invisible. An own name hides the prototype chain (`[LegacyOverrideBuiltIns]`).
+- The setter runs `ToString` on the value, then throws `SyntaxError` for a name with `-` and a lower case letter, and `InvalidCharacterError` when `data-` plus the name is not a valid attribute name. `delete` removes the attribute. `Object.defineProperty` with a data descriptor is a set. An accessor descriptor is `false`.
+- Caps: map objects count against `dom-wrappers`. Written names and values use the checks of `attr_set` (`dom-text`, `dom-attrs`, `dom-names`). An element with more than 32 attributes makes each read ask the evaluator to charge 1 step for 8 attributes before the scan.
+
+Validation:
+
+- 12 tests in `crates/js/src/eval_named_tests.rs` use a plain test host. 17 tests in `crates/bare/src/browser_dataset_tests.rs` use real pages. The test of the React pattern (`react_stylesheet_ordering_reads_dataset_precedence`) failed on a654a56 with the error above, and passes now. 13 dataset tests failed on a654a56 for the same reason. `cargo test --workspace --release` passes.
+- Interpreter cost against main c4cc7ec (a654a56 plus later merges; the numbers on a654a56 before the rebase were the same), same example binaries, `perf stat -e instructions:u`, scale 10, one run each (instruction counts do not vary between runs): `eval_load` loop, calls, fib, closures, objects, webpack, throws and concat are between +0.01% and +0.18%. `arrobj_load` has 15 cases: 14 are between -0.09% and +0.09%. The case `arrays` is +0.53% (139.20 M against 138.47 M instructions). It is one hot loop of `lookup`, and a change in code layout moves it. Earlier shapes of the same hook measured +3.5% there: a call that needs `&mut self` inside the loop of `lookup`, and a `NeedsNamed` arm in `hx!`. Both are out. The limit of 0.5% is missed by 0.03% on this one case.
+- Load test: `tools/js/dataset_load.sh`, 20 elements, one process for each row under 1 GiB of address space, one sample, machine load average 2 to 7, 16 cores. The checksum comes from Rust, and the native attributes must equal a model after the writes. Time and peak RSS for 1k, 10k and 100k operations:
+
+| Case, data attributes | 1k | 10k | 100k |
+| --- | --- | --- | --- |
+| read, 1 | 1.0 ms, 7 MiB | 10.2 ms, 7 MiB | 99 ms, 7 MiB |
+| read, 10 | 1.3 ms, 7 MiB | 12.9 ms, 7 MiB | 129 ms, 7 MiB |
+| read, 50 | 1.9 ms, 7 MiB | 18.4 ms, 7 MiB | 179 ms, 7 MiB |
+| write, 1 | 1.3 ms, 7 MiB | 13.7 ms, 7 MiB | 134 ms, 7 MiB |
+| write, 10 | 1.5 ms, 7 MiB | 15.2 ms, 7 MiB | 151 ms, 7 MiB |
+| write, 50 | 1.7 ms, 7 MiB | 15.9 ms, 7 MiB | 158 ms, 7 MiB |
+| `Object.keys`, 1 | 1.8 ms, 7 MiB | 17.6 ms, 10 MiB | 166 ms, 11 MiB |
+| `Object.keys`, 10 | 4.1 ms, 7 MiB | 42.7 ms, 13 MiB | 393 ms, 13 MiB |
+| `Object.keys`, 50 | 25.9 ms, 8 MiB | 258 ms, 20 MiB | 2,554 ms, 20 MiB |
+
+A read or a write costs 1.0 to 1.8 µs. Time grows in a straight line with the operations, and memory does not grow, because a collection runs every 10,000 operations. `Object.keys` is quadratic in the number of attributes: for each name, `Object.keys` asks `peek_own_property`, and each ask scans the attributes. 50 attributes cost 26 µs. This is the weak point. It is within the step budget (the scan of a long list is charged), but a list with thousands of attributes is slow.
+
+Gates and gaps: a lone surrogate in a name or value is `Unsupported` (the document is UTF-8). `Object.freeze` and `Object.seal` of a map that has names are refused with `TypeError`. `[[PreventExtensions]]` of a map is not forced to `false`. `new DOMStringMap()` is an illegal constructor. A map is not plain data for `structuredClone` or `history.replaceState`. A write on a path without `hx!` (an `h!` site) gives `Error::Heap(NeedsNamed)`, never a silent success. The `peek_own_property` of a name gives the placeholder `undefined` (its callers read only flags). The error texts follow Blink as remembered and are not checked against Chrome. Not tested: a real browser comparison (the oracles in `tools/js` run Node and have no DOM), the live staging login (the parent runs it), and other platforms.

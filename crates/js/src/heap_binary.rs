@@ -36,6 +36,8 @@ pub(super) enum Exotic {
     Decoder(Decoder),
     /// An object whose array-index properties are read from the host each time (see `IndexedSource`). It holds no data.
     Indexed,
+    /// An object whose string-keyed properties come from the host (see `heap_named.rs`). It holds no data.
+    Named,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -45,6 +47,7 @@ pub enum ExoticKind {
     Encoder,
     Decoder,
     Indexed,
+    Named,
 }
 
 /// The element type of a view. `Data` is a `DataView` (bytes, no integer-indexed properties).
@@ -276,7 +279,7 @@ impl Heap {
 
     fn exotic(&self, o: ObjId) -> Option<&Exotic> {
         let ob = self.objects.get(o.index, o.gn)?;
-        if ob.exotic { self.exotics.get(&o.index) } else { None }
+        if ob.exotic != 0 { self.exotics.get(&o.index) } else { None }
     }
 
     /// The kind of an exotic object. `None` for an ordinary or stale object.
@@ -287,6 +290,7 @@ impl Heap {
             Exotic::Encoder => ExoticKind::Encoder,
             Exotic::Decoder(_) => ExoticKind::Decoder,
             Exotic::Indexed => ExoticKind::Indexed,
+            Exotic::Named => ExoticKind::Named,
         })
     }
 
@@ -304,9 +308,9 @@ impl Heap {
     }
 
     /// Allocate the object of an exotic payload. Nothing is allocated when it fails.
-    fn make_exotic(&mut self, proto: Option<ObjId>, ex: impl FnOnce() -> Exotic) -> R<ObjId> {
+    pub(super) fn make_exotic(&mut self, proto: Option<ObjId>, ex: impl FnOnce() -> Exotic) -> R<ObjId> {
         let id = self.alloc_object(proto, false)?;
-        self.objects.get_mut(id.index, id.gn).expect("fresh object").exotic = true;
+        self.objects.get_mut(id.index, id.gn).expect("fresh object").exotic = EXOTIC;
         let ex = ex();
         if let Exotic::Buffer(v) = &ex {
             self.bytes += v.len();
@@ -437,11 +441,13 @@ impl Heap {
         self.indexed.as_ref().ok_or(HeapError::HostUnavailable)
     }
 
-    /// The number of virtual integer indices of `o`: the elements of a typed array (0 for a `DataView` or a detached buffer), or the live length of a host-indexed object.
+    /// The number of virtual own keys of `o`: the elements of a typed array (0 for a `DataView` or a detached buffer), the live length of a
+    /// host-indexed object, or the live number of names of a host named object.
     pub fn virtual_len(&self, o: ObjId) -> R<usize> {
         match self.exotic(o) {
             Some(Exotic::View { buffer, len, ty, .. }) if *ty != Elem::Data => Ok(if matches!(self.exotics.get(&buffer.index), Some(Exotic::Buffer(_))) { *len } else { 0 }),
             Some(Exotic::Indexed) => self.source()?.indexed_len(o),
+            Some(Exotic::Named) => self.named_len(o),
             _ => Ok(0),
         }
     }
@@ -462,7 +468,7 @@ impl Heap {
     }
 
     pub fn set_decoder(&mut self, o: ObjId, d: Decoder) -> bool {
-        match self.objects.get(o.index, o.gn).is_some_and(|ob| ob.exotic).then(|| self.exotics.get_mut(&o.index)).flatten() {
+        match self.objects.get(o.index, o.gn).is_some_and(|ob| ob.exotic != 0).then(|| self.exotics.get_mut(&o.index)).flatten() {
             Some(Exotic::Decoder(slot)) => {
                 *slot = d;
                 true
@@ -706,7 +712,11 @@ impl Heap {
         if let Some(r) = self.view_own(o, key, want_value)? {
             return Ok(Some(r));
         }
-        let (Some(Exotic::Indexed), PropertyKey::Index(i)) = (self.exotic(o), key) else { return Ok(None) };
+        let i = match (self.exotic(o), key) {
+            (Some(Exotic::Indexed), PropertyKey::Index(i)) => i,
+            (Some(Exotic::Named), _) => return self.named_exists(o, key),
+            _ => return Ok(None),
+        };
         let value = match self.source()?.indexed_item(o, i as usize)? {
             Slot::Absent => return Ok(None),
             Slot::Ready(v) => Value::Object(v),
@@ -731,6 +741,9 @@ impl Heap {
     /// `[[Set]]` of an integer-indexed key. `Some(Done)` when this object (or, for an ordinary receiver, a view it
     /// inherits from) handles the key. `None`: the ordinary algorithm runs.
     pub(super) fn exotic_set(&mut self, o: ObjId, key: PropertyKey, value: Value) -> R<Option<Set>> {
+        if self.obj(o)?.exotic == EXOTIC_NAMED && !matches!(key, PropertyKey::Symbol(_)) {
+            return Ok(Some(if self.named_write(o, key, NamedOp::Set(value))? { Set::Done } else { Set::Rejected }));
+        }
         if let Some(r) = self.view_index(o, key) {
             let n = self.to_elem_number(o, value)?; // ToNumber runs even for an invalid index
             if let Some(i) = r {
@@ -743,7 +756,7 @@ impl Heap {
         let mut any = false;
         while let Some(c) = cur {
             let ob = self.obj(c)?;
-            any |= ob.exotic;
+            any |= ob.exotic != 0;
             cur = ob.proto;
         }
         if !any || !matches!(key, PropertyKey::Index(_) | PropertyKey::String(_)) {
