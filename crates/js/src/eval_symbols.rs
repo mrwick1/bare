@@ -86,6 +86,8 @@ const WK_CONCAT_SPREADABLE: usize = 6;
 const WK_MATCH: usize = 7;
 const WK_REPLACE: usize = 9;
 const WK_SPLIT: usize = 11;
+const WK_SEARCH: usize = 10;
+const WK_UNSCOPABLES: usize = 12;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum IterWhat {

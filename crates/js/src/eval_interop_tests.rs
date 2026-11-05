@@ -133,8 +133,9 @@ fn custom_hooks_that_are_out_of_scope_are_explicit_gates() {
     assert_eq!(run("var a=[1,2]; a.constructor={[Symbol.species]: null}; a.filter(function(){return true}).length"), "ok:2");
     assert_eq!(run("var a=[1,2]; a.constructor={[Symbol.species]: Array}; a.concat([3]).length"), "ok:3");
     assert_eq!(run("Array.from(new Map([[1,2]])).length"), "ok:1");
-    // Symbol.search, matchAll: only identities. `'x'.search` is not bound, so it is an ordinary TypeError.
-    assert_eq!(run("try { 'x'.search(/x/) } catch (e) { e.name }"), "ok:TypeError");
+    // `'x'.search` is bound since batch 1: it finds the match at index 0. matchAll is still absent (a TypeError).
+    assert_eq!(run("try { 'x'.search(/x/) } catch (e) { e.name }"), "ok:0");
+    assert_eq!(run("try { 'x'.matchAll(/x/g) } catch (e) { e.name }"), "ok:TypeError");
 }
 
 /// Two scripts with the same shape (the same node ids), iterators, hooks, comparators and map functions crossing

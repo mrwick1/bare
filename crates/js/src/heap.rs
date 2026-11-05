@@ -19,6 +19,10 @@
 //! prototype chain or a deep object graph cannot overflow the stack. Cycles are collected when
 //! no root reaches them.
 //!
+//! Host fast paths (`array_length`, `dense_elems`, `edit_dense`, `fill_array`) let the evaluator read, change or make a plain
+//! dense array in one step when no script can tell the difference. `set_integrity` and `test_integrity` are `Object.seal`,
+//! `Object.freeze`, `Object.isSealed` and `Object.isFrozen`.
+//!
 //! Not supported (needs the evaluator): calling getters and setters, `ToPrimitive` on objects
 //! (`NeedsExecution`), `typeof` of a callable (`"function"`), Symbol.for registry, Proxy,
 //! checking that an accessor is callable. Accessors are stored, validated and traced; the
@@ -1374,14 +1378,8 @@ impl Heap {
         if alen != len || !writable || new_len > MAX_INDEX as u64 + 1 || !obj.extensible {
             return Ok(None);
         }
-        let mut p = obj.proto;
-        while let Some(c) = p {
-            let po = self.obj(c)?;
-            // A view prototype has integer-indexed keys that are not stored in `elems` (any length, even 0).
-            if !po.elems.is_empty() || po.props.index_keys != 0 || po.exotic {
-                return Ok(None);
-            }
-            p = po.proto;
+        if !self.no_indexed_protos(obj.proto)? {
+            return Ok(None);
         }
         self.charge(items.len().saturating_sub(del) * ELEM_BYTES)?;
         Ok(Some(self.edit(o, |ob| {
@@ -1390,6 +1388,124 @@ impl Heap {
             ob.set_length(Some(new_len as u32), None);
             removed
         })))
+    }
+
+    /// True when no object on the chain from `p` holds an indexed property. A view prototype has integer-indexed
+    /// keys that are not stored in `elems` (any length, even 0), so an exotic object counts as holding some.
+    fn no_indexed_protos(&self, mut p: Option<ObjId>) -> R<bool> {
+        while let Some(c) = p {
+            let po = self.obj(c)?;
+            if !po.elems.is_empty() || po.props.index_keys != 0 || po.exotic {
+                return Ok(false);
+            }
+            p = po.proto;
+        }
+        Ok(true)
+    }
+
+    /// The `length` of an array, or `None` for another object.
+    pub fn array_length(&self, o: ObjId) -> R<Option<u32>> {
+        let obj = self.obj(o)?;
+        Ok(obj.is_array.then(|| self.array_len(obj).0))
+    }
+
+    /// The elements of a plain dense array, for a read-only host fast path (`at`, `lastIndexOf`, `flat`, `toReversed`).
+    /// `None` unless every index below `len` is in dense storage or is a hole that reads `undefined` on the whole chain:
+    /// `o` is an array of length `len`, with no accessor, sparse or special index, and no indexed property on its prototypes.
+    /// The slice is valid until the next heap change, and a hole is `None`.
+    pub fn dense_elems(&self, o: ObjId, len: u64) -> R<Option<&[Option<Value>]>> {
+        let obj = self.obj(o)?;
+        if !obj.is_array || obj.props.index_keys != 0 || obj.elems.len() as u64 != len || len > MAX_INDEX as u64 {
+            return Ok(None);
+        }
+        if self.array_len(obj).0 as u64 != len || !self.no_indexed_protos(obj.proto)? {
+            return Ok(None);
+        }
+        Ok(Some(&obj.elems))
+    }
+
+    /// Change the elements of a plain dense array in place, for `reverse` and `copyWithin` (the order of elements may
+    /// change, the length never does). The same conditions as `splice_dense`, which also keep every write on an existing
+    /// element or a hole of an extensible array. `Ok(false)` and no change unless they hold.
+    pub fn edit_dense(&mut self, o: ObjId, len: u32, f: impl FnOnce(&mut [Option<Value>])) -> R<bool> {
+        let obj = self.obj(o)?;
+        if !obj.is_array || obj.props.index_keys != 0 || obj.elems.len() != len as usize || !obj.extensible {
+            return Ok(false);
+        }
+        if self.array_len(obj).0 != len || !self.no_indexed_protos(obj.proto)? {
+            return Ok(false);
+        }
+        self.edit(o, |ob| {
+            f(&mut ob.elems);
+            ob.trim_elems();
+        });
+        Ok(true)
+    }
+
+    /// Give a new empty array its elements in one step (a host fast path for results that no script can see before
+    /// they are done). `len` is the array length: more than `elems.len()` when the end is holes. Checks the byte cap
+    /// before it stores. `Ok(false)` and no change when `o` is not an empty array with no other index property.
+    pub fn fill_array(&mut self, o: ObjId, mut elems: Vec<Option<Value>>, len: u32) -> R<bool> {
+        for v in elems.iter().flatten() {
+            self.check_value(*v)?;
+        }
+        let obj = self.obj(o)?;
+        if !obj.is_array || !obj.elems.is_empty() || obj.props.index_keys != 0 || !obj.extensible {
+            return Ok(false);
+        }
+        while matches!(elems.last(), Some(None)) {
+            elems.pop();
+        }
+        if elems.len() > len as usize {
+            return Ok(false);
+        }
+        self.charge(elems.len() * ELEM_BYTES)?;
+        self.edit(o, |ob| {
+            ob.elems = elems;
+            ob.set_length(Some(len), None);
+        });
+        Ok(true)
+    }
+
+    /// `SetIntegrityLevel` (`Object.seal`, and `Object.freeze` when `frozen`) in one pass over the own properties: the
+    /// object stops being extensible, every property stops being configurable, and with `frozen` every data property stops
+    /// being writable. Dense elements move to the sparse property table, which keeps their attributes. A byte view or a
+    /// host-indexed object that has elements cannot be frozen: `Ok(false)` and no change. As in V8, sealing one only stops
+    /// it from being extensible (the specification says a view's elements are configurable, so sealing it would fail).
+    pub fn set_integrity(&mut self, o: ObjId, frozen: bool) -> R<bool> {
+        let ob = self.obj(o)?;
+        if frozen && ob.exotic && self.virtual_len(o)? > 0 {
+            return Ok(false);
+        }
+        let moved = ob.elems.iter().flatten().count();
+        self.charge(moved * (ENTRY_BYTES + INDEX_ENTRY_BYTES))?;
+        self.edit(o, |ob| {
+            ob.extensible = false;
+            for (i, v) in std::mem::take(&mut ob.elems).into_iter().enumerate() {
+                if let Some(value) = v {
+                    ob.props.set(PropertyKey::Index(i as u32), Property::Data { value, writable: !frozen, enumerable: true, configurable: false });
+                }
+            }
+            for (_, p) in ob.props.entries.iter_mut().flatten() {
+                match p {
+                    Property::Data { writable, configurable, .. } => {
+                        *configurable = false;
+                        *writable &= !frozen;
+                    }
+                    Property::Accessor { configurable, .. } => *configurable = false,
+                }
+            }
+        });
+        Ok(true)
+    }
+
+    /// `TestIntegrityLevel` (`Object.isSealed`, and `Object.isFrozen` when `frozen`), without a key list.
+    pub fn test_integrity(&self, o: ObjId, frozen: bool) -> R<bool> {
+        let ob = self.obj(o)?;
+        if ob.extensible || ob.elems.iter().any(Option::is_some) || (frozen && ob.exotic && self.virtual_len(o)? > 0) {
+            return Ok(false);
+        }
+        Ok(ob.props.iter().all(|(_, p)| !(p.configurable() || frozen && matches!(p, Property::Data { writable: true, .. }))))
     }
 
     // ----- collection -----

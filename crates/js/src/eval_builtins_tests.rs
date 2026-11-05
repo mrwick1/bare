@@ -119,8 +119,8 @@ fn gates_are_explicit_unsupported() {
     assert_eq!(unsupported_of("var r = /a/; r.exec = function () { return null; }; 'a'.split(r)"), "RegExp with a replaced exec method");
     // A non-callable exec is ignored, as in the spec.
     assert_eq!(run("var r = /a/; r.exec = 5; r.test('a')"), "boolean:true");
-    // The absent methods stay absent (no silent stand-in).
-    assert_eq!(run("typeof 'a'.replaceAll + typeof 'a'.search + typeof 'a'.matchAll + typeof ''.repeat + typeof RegExp.prototype.compile"), "string:undefinedundefinedundefinedundefinedundefined");
+    // The absent methods stay absent (no silent stand-in). `replaceAll`, `search` and `repeat` exist since batch 1.
+    assert_eq!(run("typeof 'a'.replaceAll + typeof 'a'.search + typeof 'a'.matchAll + typeof ''.repeat + typeof RegExp.prototype.compile"), "string:functionfunctionundefinedfunctionundefined");
 }
 
 #[test]

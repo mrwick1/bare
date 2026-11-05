@@ -1,7 +1,8 @@
 //! Load test for the Array/Object/Math methods. One case at one scale per process, so that the peak memory
 //! belongs to that run. Same output format and caps as `eval_load`.
 //!
-//!   arrobj_load CASE SCALE    CASE: mapfilter | sort | queue | objects | arrays | fill    SCALE: 1, 10, 100
+//!   arrobj_load CASE SCALE    CASE: mapfilter | sort | queue | objects | arrays | fill | reverse | flat | tosorted | lastindexof |
+//!                                   pad | repeat | replaceall | freeze | descriptors    SCALE: 1, 10, 100
 //!
 //! Each case builds a small program, runs it, and checks the result against the same computation done in Rust
 //! (the checksum). A wrong checksum exits with status 1 and prints no timing. It prints parse, setup and run
@@ -179,6 +180,123 @@ fn case(name: &str, scale: usize) -> Case {
                      b.length + ',' + sp.length + ',' + Array.of(1, 2).length + ',' + Math.max.apply(null, [1, h > 0 ? 5 : 0])"
                 ),
                 expect: format!("{len},{},2,5", len - 20 + 1 + 2),
+            }
+        }
+        "reverse" => {
+            let n = 20_000 * scale as u64;
+            let t: u64 = (0..n).map(|j| (j % 13) * (n - 1 - j)).sum();
+            let u: u64 = (0..n).map(|j| (j % 7) * (n - 1 - j)).sum();
+            Case {
+                src: format!(
+                    "var a = []; for (var i = 0; i < {n}; i++) a.push(i);
+                     var b = a.toReversed(); a.reverse(); var t = 0, u = 0;
+                     for (var j = 0; j < {n}; j++) {{ t += (j % 13) * a[j]; u += (j % 7) * b[j]; }}
+                     a[0] + ',' + t + ',' + u"
+                ),
+                expect: format!("{},{t},{u}", n - 1),
+            }
+        }
+        "flat" => {
+            let n = 2_000 * scale as u64;
+            let sum: u64 = (0..n).map(|i| 2 * i).sum();
+            Case {
+                src: format!(
+                    "var a = []; for (var i = 0; i < {n}; i++) a.push([i, [i]]);
+                     var f = a.flat(Infinity), s = 0; for (var j = 0; j < f.length; j++) s += f[j];
+                     var m = a.flatMap(function(x) {{ return x; }});
+                     f.length + ',' + s + ',' + a.flat().length + ',' + m.length"
+                ),
+                expect: format!("{},{sum},{},{}", 2 * n, 2 * n, 2 * n),
+            }
+        }
+        "tosorted" => {
+            let n = 2_000 * scale as u64;
+            let mut v: Vec<u64> = (0..n).map(|i| (i * 7919) % 10007).collect();
+            v.sort();
+            let chk: u64 = v.iter().enumerate().map(|(i, x)| (i as u64 % 13) * x).sum::<u64>() % 1000003;
+            let mut d: Vec<String> = (0..n).map(|i| ((i * 7919) % 10007).to_string()).collect();
+            d.sort();
+            Case {
+                src: format!(
+                    "var a = []; for (var i = 0; i < {n}; i++) a.push((i * 7919) % 10007);
+                     var b = a.toSorted(function(x, y) {{ return x - y; }}); var c = a.toSorted();
+                     var t = 0; for (var j = 0; j < b.length; j++) t += (j % 13) * b[j];
+                     (t % 1000003) + ',' + c[0] + ',' + c.length + ',' + a[1]"
+                ),
+                expect: format!("{chk},{},{n},{}", d[0], 7919),
+            }
+        }
+        "lastindexof" => {
+            let n = 50_000 * scale as u64;
+            let last = |v: u64| (0..n).rev().find(|i| i % 1000 == v).map_or(-1, |i| i as i64);
+            let h: i64 = (0..20u64).map(|k| last(k * 50) - 1).sum();
+            Case {
+                src: format!(
+                    "var a = []; for (var i = 0; i < {n}; i++) a.push(i % 1000);
+                     var h = 0; for (var k = 0; k < 20; k++) h += a.lastIndexOf(k * 50) + a.lastIndexOf(-1);
+                     var o = {{ length: {n} }}; o[{n} - 5] = 'x';
+                     h + ',' + Array.prototype.lastIndexOf.call(o, 'x')"
+                ),
+                expect: format!("{h},{}", n - 5),
+            }
+        }
+        "pad" => {
+            let n = 50_000 * scale;
+            let fill = |i: usize| ["x", "y", "z"][i % 3];
+            let head: String = (0..5).map(fill).collect();
+            let tail: String = (n - 5..n).map(|i| fill(i - 3)).collect();
+            Case {
+                src: format!(
+                    "var s = 'abc'.padStart({n}, 'xyz'), t = 'abc'.padEnd({n}, 'xyz');
+                     s.length + ',' + s.slice(0, 5) + ',' + s.slice(-3) + ',' + t.slice(-5) + ',' + t.slice(0, 3)"
+                ),
+                expect: format!("{n},{head},abc,{tail},abc"),
+            }
+        }
+        "repeat" => {
+            let n = 100_000 * scale as u64;
+            Case {
+                src: format!(
+                    "var s = 'ab'.repeat({n});
+                     s.length + ',' + s.charAt(s.length - 1) + ',' + ''.repeat({n}).length + ',' + s.lastIndexOf('ba') + ',' + s.at(-2)"
+                ),
+                expect: format!("{},b,0,{},a", 2 * n, 2 * n - 3),
+            }
+        }
+        "replaceall" => {
+            let k = 5_000 * scale as u64;
+            Case {
+                src: format!(
+                    "var s = 'a-b-c-'.repeat({k});
+                     var r = s.replaceAll('-', '++'), q = s.replaceAll('b', function(m, i) {{ return i % 10; }});
+                     r.length + ',' + q.length + ',' + r.indexOf('++') + ',' + s.replaceAll(/c/g, 'C').lastIndexOf('C')"
+                ),
+                expect: format!("{},{},1,{}", 9 * k, 6 * k, 6 * (k - 1) + 4),
+            }
+        }
+        "freeze" => {
+            let n = 20_000 * scale as u64;
+            Case {
+                src: format!(
+                    "var a = []; for (var i = 0; i < {n}; i++) a.push(i); Object.freeze(a);
+                     var o = {{}}; for (var j = 0; j < {n} / 10; j++) o['k' + j] = j; Object.freeze(o);
+                     var e; try {{ a.push(1); }} catch (x) {{ e = x.name; }}
+                     Object.isFrozen(a) + ',' + Object.isFrozen(o) + ',' + e + ',' + a.length + ',' + Object.isSealed(Object.seal(a.slice()))"
+                ),
+                expect: format!("true,true,TypeError,{n},true"),
+            }
+        }
+        "descriptors" => {
+            let n = 200 * scale as u64;
+            let sum: u64 = (0..n).sum();
+            Case {
+                src: format!(
+                    "var o = {{}}; for (var i = 0; i < {n}; i++) o['k' + i] = i;
+                     var d = Object.getOwnPropertyDescriptors(o), t = 0; for (var k in d) t += d[k].value;
+                     var a = []; for (var j = 0; j < {n}; j++) a.push(j);
+                     Object.keys(d).length + ',' + t + ',' + Object.keys(Object.getOwnPropertyDescriptors(a)).length"
+                ),
+                expect: format!("{n},{sum},{}", n + 1),
             }
         }
         _ => die(format!("unknown case {name}")),

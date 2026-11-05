@@ -1,5 +1,6 @@
 // Native builtins of the evaluator. Included by `eval.rs` (`include!`), so it shares that module's imports.
 // It holds the tiny builtin set: Object, Function.prototype, Array, Error and the conversion functions.
+// `Object.defineProperty` reports a non-extensible target as V8 does (`ro_define`, in `eval_object_more.rs`).
 
 fn arg(args: &[Value], i: usize) -> Value {
     args.get(i).copied().unwrap_or(Value::Undefined)
@@ -45,10 +46,7 @@ impl<'p> Interp<'p> {
                 let Value::Object(o) = a0 else { return Err(self.type_err("Object.defineProperty called on non-object")) };
                 let key = self.coerce_key(arg(args, 1))?;
                 let d = self.property_descriptor(arg(args, 2))?;
-                if !hx!(self, self.heap.define_own_property(o, key, &d)) {
-                    let k = self.key_text(key);
-                    return Err(self.type_err(&format!("Cannot redefine property: {k}")));
-                }
+                self.ro_define(o, key, &d)?;
                 Ok(a0)
             }
             Nat::ObjectGetOwnPropertyDescriptor => {
@@ -291,7 +289,7 @@ impl<'p> Interp<'p> {
             Nat::Ext(x) => self.call_ext(x, this, args, is_new),
             Nat::Ao(f) => self.call_ao(f, this, args),
             Nat::Sc(f) => self.call_sc(f, this, args, is_new),
-            Nat::Refl(f) => self.call_refl(f, args),
+            Nat::Refl(f) => self.call_refl(f, this, args),
             Nat::Date(f) => self.call_date(f, this, args, is_new),
             Nat::Intl(f) => self.call_intl(f, this, args),
         }

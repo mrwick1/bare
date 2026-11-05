@@ -1243,7 +1243,7 @@ All 1,437 workspace tests pass. Release passes 417 JS tests, 281 bare tests and 
 
 All 21 parent load rows pass at 1x/10x/100x under 1 GiB address space and 45 seconds. At 100x, function/class construction takes 216/254 ms and 69 MiB peak RSS. Key enumeration takes 122 ms and 49 MiB. The view/string case takes 518 ms and 96 MiB. Nested and cross-script construction take 178/204 ms and 69 MiB. The 1000-argument-list case takes 29 ms and 5 MiB. Checksums pass, followed by explicit collection. These are single samples with concurrent builds, not speed improvements. Reproduce with tools/js/reflect_check.sh and tools/js/reflect_load.sh.
 
-The Reflect object exposes only ownKeys and construct. Proxy and the rest of Reflect are absent. String/Number/Boolean construction has no wrapper objects and remains Unsupported. Native constructors without newTarget plumbing, including host constructors, collections, bytes, Promise and AggregateError, refuse differing newTarget. Function own keys omit legacy arguments/caller properties. Class field new.target remains a gate. Full bundle execution, staging authentication, GUI, other platforms and nested maximum-size argument lists were not tested.
+The Reflect object exposes only ownKeys and construct. Proxy and the rest of Reflect are absent. String/Number/Boolean construction has no wrapper objects and remains Unsupported. Native constructors without newTarget plumbing, including host constructors, collections, bytes, Promise and AggregateError, refuse differing newTarget. Function own keys omit legacy arguments/caller properties. Class field new.target remains a gate. Full bundle execution, staging authentication, GUI, other platforms and nested maximum-size argument lists were not tested. Batch 1 later added the rest of Reflect (see [Batch 1 built-ins](#batch-1-built-ins-array-string-object-reflect)).
 
 
 ## Native inline style declarations
@@ -1323,7 +1323,7 @@ Array.prototype.fill reads length once, converts relative start/end bounds in or
 
 Six child tests failed before implementation. The parent added a load case with an independent Rust array model and array-like receiver checks. A cross-script setter survives collection before its Promise job runs. A huge fill inside a job stops before writes with Steps; finally does not run and the next checkpoint repeats the failure. No dense fast path or new heap shortcut was added.
 
-No wrapper-object behavior, Object.freeze/Proxy coverage, live staging authentication, GUI or cross-platform behavior was tested. Node runs only authored cases. Existing property descriptors are used to test write failures without Object.freeze.
+No wrapper-object behavior, Object.freeze/Proxy coverage, live staging authentication, GUI or cross-platform behavior was tested. Node runs only authored cases. Existing property descriptors are used to test write failures without Object.freeze. `Object.freeze` exists since batch 1.
 
 The parent workspace passes 1,551 tests. Release JS passes 439 tests before the added interaction test; that final test passes separately in debug and release. JS clippy with warnings denied is clean. All 217 authored Array/Object Node cases match. All 18 capped load rows pass under 1 GiB address space and 45 seconds, on an 8 MiB release VM stack. Fill uses 4k/40k/400k elements at 1x/10x/100x. It takes 3.1/30.9/315.5 ms wall and 4.2/6.4/29.6 MiB peak RSS. The model checks array contents, relative ranges, receiver identity and array-like writes. These are single samples, not a measured speed improvement. Reproduce with tools/js/arrobj_check.sh and tools/js/arrobj_load.sh.
 
@@ -1841,7 +1841,7 @@ A repeated call costs no more than an ordinary call: it takes one hash lookup an
 
 Results, release, main aa52994 vs this change, 10 interleaved runs per build: instructions are within -0.12% to +0.01% on every row of the cached login boot, `parse_load`, `eval_load`, `class_load`, `reflect_load`, `async_load` and `promise_load`. Peak RSS and the boot's bytes do not change.
 
-Known gaps: `String.raw`, `Object.freeze`, `Object.isFrozen` and `Object.isExtensible` do not exist yet. `await` inside a tagged template is a gate.
+Known gaps: `String.raw`, `Object.freeze`, `Object.isFrozen` and `Object.isExtensible` do not exist yet. `await` inside a tagged template is a gate. Batch 1 later added `String.raw`, `Object.freeze`, `Object.isFrozen` and `Object.isExtensible`.
 
 Validation: 40 new Node cases (`tools/fixtures/js/tagged-cases.txt`, `tools/js/tagged_check.sh`) cover cooked and raw values, CR and CRLF, bad escapes, per-site identity, freezing and descriptors, key order, `this` for member, index and `super` tags, evaluation order, chained tags, `new`, arrows, classes, generators and async functions. Rust tests cover GC of a site object that only the table holds, and sites in more than one script.
 
@@ -2010,3 +2010,102 @@ Results:
 Decision: keep bare-js. Add the missing built-ins in batches. Use Boa's code as a reference and copy it where that is faster than writing it. Use ICU4X for locale data. Re-run `tools/js/builtin_inventory.sh` after each batch.
 
 Limits: one machine, 3 runs per row, microbenchmarks only. The real page was not run on Boa, because Boa has no DOM.
+
+## Batch 1 built-ins: Array, String, Object, Reflect
+
+The live login stopped at `TypeError: [...u.e].reverse is not a function`. Batch 1 adds the missing Array, String, Object and Reflect built-ins that the bundles and the inventory name. `tools/js/builtin_inventory.sh` now prints 241 of 655 missing, down from 311. Older sections of this file that say a name is absent describe the state before this batch.
+
+Added:
+
+- Array.prototype: `reverse`, `at`, `flat`, `flatMap`, `findLast`, `findLastIndex`, `lastIndexOf`, `reduceRight`, `copyWithin`, `toReversed`, `toSorted`, `toSpliced`, `with`, `toLocaleString`, `[Symbol.unscopables]`.
+- String: `String.raw`. String.prototype: `at`, `codePointAt`, `lastIndexOf`, `padStart`, `padEnd`, `repeat`, `replaceAll`, `search`, `normalize`, `trimStart`, `trimEnd`, `trimLeft`, `trimRight`, `isWellFormed`, `toWellFormed`, `substr`, `toLocaleLowerCase`, `toLocaleUpperCase`. `RegExp.prototype[Symbol.search]`.
+- Object: `getOwnPropertyDescriptors`, `getOwnPropertySymbols`, `hasOwn`, `is`, `preventExtensions`, `seal`, `freeze`, `isExtensible`, `isFrozen`, `isSealed`, `defineProperties`, `setPrototypeOf`, `groupBy`. Object.prototype: `isPrototypeOf`, `propertyIsEnumerable`, `toLocaleString`, the `__proto__` accessor, `__defineGetter__`, `__defineSetter__`, `__lookupGetter__`, `__lookupSetter__`.
+- Reflect: `apply`, `defineProperty`, `deleteProperty`, `get`, `getOwnPropertyDescriptor`, `getPrototypeOf`, `has`, `isExtensible`, `preventExtensions`, `set`, `setPrototypeOf`. `Map.groupBy`.
+
+Design:
+
+- Three new files: `eval_array_more.rs`, `eval_string_more.rs` and `eval_object_more.rs`. Each is `include!`d like the older builtin files and has its own install and dispatch function. The older files forward to them (`call_ao`, `call_ext`, `call_refl`). `call_refl` now receives `this`.
+- Every method follows the specification on a generic receiver: one `ToLength`, holes by `HasProperty` or read as `undefined`, strict writes, getters in the order of the specification. V8's error text is copied where Node 22 differs from the specification text.
+- Dense-array fast paths. `Heap::dense_elems` returns the element slice of a plain array when every index below `length` is dense or a hole that reads `undefined` on the whole prototype chain. `Heap::edit_dense` changes that slice in place when the array is extensible. No script runs inside a fast path, so the answer is the same as the generic algorithm. `reverse`, `copyWithin` and `fill`-like moves work in place, `lastIndexOf` and `flat` read the slice, and `toReversed`, `toSpliced` and `with` copy it. A result array is made in one step (`Heap::fill_array`), after its length and bytes are checked. The generic path runs when a condition fails.
+- Work is charged after the fact: 1 step per 8 elements read and 1 per 32 moved. `ao_reserve` runs first, so a range longer than the remaining budget fails with `Steps` before it does any work. `lastIndexOf` on a string uses a bounded scan (`rfind_units`) that charges each 256-unit chunk.
+- `toSorted` shares `ao_merge_sort` with `sort`. It makes the sorted copy first and no comparator runs after a throw.
+- `Object.freeze` and `Object.seal` run in one pass (`Heap::set_integrity`). The object stops being extensible and every property stops being configurable. With `freeze` every data property also stops being writable. Dense elements move to the property table, which keeps their attributes. A frozen element costs 72 B instead of 16 B (48 B entry and 24 B index). Freezing 1M elements adds about 56 MB. A flag that keeps dense storage for frozen arrays would avoid this. It would touch every element write, so it waits until a page needs it. `isFrozen` and `isSealed` read the flags without a key list (`Heap::test_integrity`).
+- A byte view with elements cannot be frozen (`TypeError`, as in V8 and the specification). `Object.seal` of such a view succeeds, as in V8. The specification says it throws, because the view's elements are configurable.
+- `normalize` uses `bare-unicode` (`nfd` is new, and the accent sort is now a stable sort of each run, not a swap loop that took O(n²) on a long run of accents). A string below U+0300 (NFC) or U+00C0 (NFD) is returned without a copy.
+- `groupBy` uses the shared iterator machinery. The iterator is closed when the callback or the key conversion throws. Groups are kept in first-seen order.
+
+Results, release, AMD Ryzen 9 5900HX, one script in `eval_check`, 1M-element arrays. The generic row is the same data as an array-like object:
+
+| Operation | dense path | generic path |
+| --- | ---: | ---: |
+| `reverse` | under 1 ms | 70 ms |
+| `copyWithin(1, 0)` | 1 ms | 71 ms |
+| `toReversed` | 9 ms | 30 ms |
+| `with(5, 1)` | 8 ms | 31 ms |
+| `lastIndexOf` (no match) | 1 ms | 35 ms |
+| `Object.freeze` | 81 ms | - |
+| `Object.isFrozen` | 2 ms | - |
+
+Other single runs: `toSorted()` of 200k numbers 81 ms. `flat(Infinity)` of 100k `[i, [i]]` 111 ms. `padStart(10M)` 19 ms. `repeat` to 10M units 7 ms. `replaceAll` of one unit in 1.2M units 14 ms. `normalize("NFD")` of 1M non-ASCII units 56 ms. `getOwnPropertyDescriptors` of 100k keys 42 ms. `Object.groupBy` of 1M numbers 363 ms. Each time is one run. Times of 1 ms or less are at the limit of the clock.
+
+Load rows (`tools/js/arrobj_load.sh`): 9 new cases (`reverse`, `flat`, `tosorted`, `lastindexof`, `pad`, `repeat`, `replaceall`, `freeze`, `descriptors`) at 1x, 10x and 100x. All 45 rows of the matrix have `checksum=ok`. A row includes the loop that builds its input, so the 100x times below are mostly that loop:
+
+| case (100x) | size | run | steps |
+| --- | ---: | ---: | ---: |
+| `reverse` and `toReversed` | 2M elements | 2,958 ms | 74.3 M |
+| `flat` and `flatMap` | 200k pairs | 556 ms | 8.6 M |
+| `tosorted` (comparator and default) | 200k numbers | 807 ms | 26.6 M |
+| `lastindexof` | 5M elements, 40 scans | 3,171 ms | 90.0 M |
+| `pad` | 5M units | 20 ms | 0.3 M |
+| `repeat` | 20M units | 18 ms | 0.6 M |
+| `replaceall` | 3M units | 257 ms | 12.9 M |
+| `freeze` | 2M elements, 200k keys | 2,098 ms | 27.3 M |
+| `descriptors` | 20k keys, 20k elements | 55 ms | 0.7 M |
+
+Cost on the existing rows, main a3e4c7a against this change, 10 interleaved runs per build (20 for the rows marked *), mean instructions and minimum cycles, `perf stat` user mode:
+
+| row | instructions | min cycles |
+| --- | ---: | ---: |
+| `eval_load` loop, calls, closures, objects (10x) | 0.00% to +0.03% | -0.7% to +1.1% |
+| `eval_load` fib (10x) * | +0.18% | +3.2% |
+| `eval_load` throws (10x) * | +0.22% | +3.8% |
+| `eval_load` calls (10x) * | +0.01% | +1.8% |
+| `eval_load` webpack (10x) * | +1.08% | +1.7% |
+| `eval_load` concat (10x) * | +5.32% | +3.5% |
+| `arrobj_load` old rows (10x) | -1.09% to +0.66% | -2.7% to +1.2% |
+| `numeric_load` 6 kinds (100,000) | +0.02% to +0.08% | -0.9% to +0.9% |
+| `scripts_load` many, few (10x) | +0.65%, +0.35% | +1.6%, -0.5% |
+| cached login boot (434 M instructions) | +0.31% | -0.9% |
+
+Regressions over 1%:
+
+- `webpack` (55.5 M instructions) and `concat` (9.8 M) are short rows. Both pay the fixed cost of a larger realm: 66 more function objects, +380,000 instructions and 0.03 ms for an empty script (2.15 M to 2.53 M). On the login boot this is +0.3%. A faster `native()` would cut the cost for every built-in. It is not part of this change.
+- `fib`, `throws` and `calls` show +1.8% to +3.8% cycles with no more than +0.22% instructions. Hypothesis: code layout of the larger binary. To verify with a build that adds only dead code. The cycle counts are the minimum of 10 or 20 runs and differ by up to 1% between two measurements of the same build.
+
+Validation:
+
+- 47 Node cases (`tools/fixtures/js/builtins1-cases.txt`, `tools/js/builtins1_check.sh`) match Node 22 byte for byte. They cover holes, negative and fractional indices, array-likes, getter order, species-free results, frozen and sealed arrays and views, error types, V8 messages, descriptors, `groupBy` with iterator close, the legacy accessors, and every Reflect function. The cases with `M(...)` compare only the error name. See the differences below.
+- 12 Rust tests (`eval_batch1_tests.rs`): the corpus against a saved result, the gates, the string limits, the step budgets of `lastIndexOf`, `replaceAll` and `normalize`, the deep `flat` limit, equal results of the dense and generic paths on 600-element data, holes, frozen arrays, byte views, `groupBy` close order and Reflect against Object. 5 older assertions changed, because they tested that a name was absent: `typeof 'a'.replaceAll`, `'x'.search`, `Reflect.get`, the Reflect key count, and a realm object cap that rose from 400 to 500.
+- `cargo test --workspace --release`: 2,042 tests pass, 0 fail, 9 ignored. One network test in `crates/net` failed once in an earlier full run and passed alone. This change does not touch `crates/net`.
+
+Gates (never silent):
+
+- `normalize("NFKC")` and `normalize("NFKD")`: `Unsupported`. `bare-unicode` has no compatibility tables.
+- `toLocaleLowerCase` and `toLocaleUpperCase` with a `tr`, `az` or `lt` locale: `Unsupported`. Other locales use the root rules.
+- `Reflect.set` on an integer index of a byte view with a receiver other than the target: `Unsupported`.
+- `RegExp.prototype[Symbol.search]` on a non-RegExp object with a callable `exec`: `Unsupported`.
+- `reverse` and `copyWithin` on a primitive receiver: `Unsupported`, because they would write to a wrapper object. `flat` and `flatMap` keep the species gate of the other Array methods.
+- `matchAll` is not added. It needs a RegExp String Iterator with its own iterator state. It is the one name of the scope that is still missing.
+
+Known differences from Node 22:
+
+- A rejected write keeps the message of the existing `put_prop`: `Cannot assign to read only property 'a' of object`. V8 adds `'#<Object>'` or `'[object Array]'`, and says `Cannot add property b, object is not extensible` for a new property. The error type is the same. The cases use `M` for these.
+- `Object.isFrozen(Object.preventExtensions([]))` is `false` here and `true` in V8. The array's `length` is writable, so the specification says `false`.
+- `Object.getOwnPropertyDescriptors` of a sloppy function lacks `arguments` and `caller` (the existing gate of `getOwnPropertyNames`).
+- A string longer than the heap string limit is `Error::Limit`, not a catchable `RangeError`. This is how every other string builder here behaves.
+- `toLocaleString` of an array that holds itself stops at the depth limit. V8 returns `""`. `join` has the same difference.
+- Array `toLocaleString` calls `toLocaleString` on each element, and `Number.prototype.toLocaleString` is not bound yet, so `[1].toLocaleString()` throws.
+
+Other problems found and not changed: `Object.create(proto, properties)` is still a gate. `Object.getOwnPropertyDescriptor("ab", 0)` returns `undefined` for a primitive string. `hasOwnProperty` converts `this` before the key, and the specification converts the key first. `Array.prototype.slice` takes 62 ms for 1M elements, 60 times more than the in-place paths above.
+
+Not tested: a real page on this build (the live login was not run), `Proxy`, `DataView` and typed arrays other than `Uint8Array` with these methods, locales other than the root rules, and Node versions other than 22.

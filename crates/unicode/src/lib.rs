@@ -1,4 +1,4 @@
-//! Unicode helpers: table lookups and NFC normalization.
+//! Unicode helpers: table lookups and NFC and NFD normalization.
 //!
 //! The same text can be stored in more than one way. "é" can be one character,
 //! or "e" plus a separate accent "´". Both look the same on screen.
@@ -61,8 +61,13 @@ const T_COUNT: u32 = 28;
 const S_COUNT: u32 = L_COUNT * V_COUNT * T_COUNT;
 // `const` is a fixed value. JS: a `const` at the top of a file.
 
-/// Normalize `text` to NFC.
-pub fn nfc(text: &str) -> String {
+/// Normalize `text` to NFD: split every character into its letter and accents, then put the accents in order.
+pub fn nfd(text: &str) -> String {
+    decomposed(text).into_iter().collect()
+}
+
+/// Steps 1 and 2 of NFC and the whole of NFD.
+fn decomposed(text: &str) -> Vec<char> {
     // Step 1: split every character into its letter and accents: "é" becomes "e" + "´".
     let mut chars: Vec<char> = Vec::new();
     for c in text.chars() {
@@ -71,15 +76,24 @@ pub fn nfc(text: &str) -> String {
 
     // Step 2: put the accents after each letter in a fixed order, by their number.
     // Then "a" + dot below + hat and "a" + hat + dot below become the same.
-    // Letters (number 0) never move.
-    for i in 1..chars.len() {
-        // JS: `for (let i = 1; i < chars.length; i++)`.
-        let mut j = i;
-        while j > 0 && combining_class(chars[j]) != 0 && combining_class(chars[j - 1]) > combining_class(chars[j]) {
-            chars.swap(j - 1, j);
-            j -= 1;
+    // Letters (number 0) never move. The sort is stable, so accents with the same number keep their order,
+    // and a long run of accents costs O(n log n), not O(n * n) as a swap loop does.
+    let mut i = 0;
+    while i < chars.len() {
+        if combining_class(chars[i]) == 0 {
+            i += 1;
+            continue;
         }
+        let end = chars[i..].iter().position(|&c| combining_class(c) == 0).map_or(chars.len(), |n| i + n);
+        chars[i..end].sort_by_key(|&c| combining_class(c));
+        i = end;
     }
+    chars
+}
+
+/// Normalize `text` to NFC.
+pub fn nfc(text: &str) -> String {
+    let chars = decomposed(text);
 
     // Step 3: join a letter with an accent after it, when one character exists for both.
     let mut out: Vec<char> = Vec::new();
@@ -154,6 +168,18 @@ mod tests {
         // "e" + a separate accent becomes one character.
         assert_eq!(nfc("é"), "é");
         // Already joined: no change.
+    }
+
+    #[test]
+    fn nfd_splits_and_orders_accents() {
+        assert_eq!(nfd("é"), "e\u{301}");
+        assert_eq!(nfd("\u{1E0B}\u{323}"), "d\u{323}\u{307}");
+        assert_eq!(nfd("각"), "\u{1100}\u{1161}\u{11A8}");
+        assert_eq!(nfd("a\u{301}\u{301}\u{316}"), "a\u{316}\u{301}\u{301}");
+        // A long run of accents in reverse order is sorted without a quadratic loop.
+        let run: String = std::iter::repeat_n(['\u{301}', '\u{316}'], 50_000).flatten().collect();
+        let out = nfd(&format!("a{run}"));
+        assert!(out.starts_with("a\u{316}") && out.ends_with('\u{301}') && out.chars().count() == 100_001);
     }
 
     #[test]

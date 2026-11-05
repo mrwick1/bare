@@ -137,7 +137,7 @@ fn work_is_charged_for_hole_traversals_and_no_budget_is_free() {
     assert_eq!(r, "limit:Steps");
     let r = big(move || outcome("var a=[]; a.length=100000; a.sort()", lim, Heap::default()));
     assert_eq!(r, "limit:Steps");
-    let r = big(move || outcome("var a=[]; a.length=100000; a.lastIndexOf ? 0 : a.includes(1)", lim, Heap::default()));
+    let r = big(move || outcome("var a=[]; a.length=100000; a.includes(1)", lim, Heap::default()));
     assert_eq!(r, "limit:Steps");
 }
 
