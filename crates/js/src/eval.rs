@@ -3009,6 +3009,7 @@ include!("eval_native.rs");
 include!("eval_promise.rs");
 include!("eval_promise_combinators.rs");
 include!("eval_binary.rs");
+include!("eval_binary_search.rs");
 include!("eval_scripts.rs");
 include!("eval_builtins.rs");
 include!("eval_json_stringify.rs");

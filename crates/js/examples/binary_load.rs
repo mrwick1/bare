@@ -1,7 +1,7 @@
 //! Load test for byte buffers, Uint8Array and the text codecs. One case at one scale per process, so the peak
 //! memory belongs to that run.
 //!
-//!   binary_load CASE SCALE    CASE: copy | scan | scanarr | codec | stream    SCALE: 1, 10, 100
+//!   binary_load CASE SCALE    CASE: copy | scan | scanarr | codec | stream | indexof    SCALE: 1, 10, 100
 //!
 //! The host builds the input bytes and hands them over without a copy. The script works on them. The host then
 //! checks the result against the same computation done in Rust. A wrong result exits with status 1. It prints
@@ -12,6 +12,8 @@
 //!   scan    SCALE*100000 element reads from a script loop; checks the sum
 //!   codec   SCALE x 512 KiB of mixed text: decode, then encode; checks the text length and the round trip
 //!   stream  SCALE x 512 KiB of mixed text in 1000-byte chunks that split code points: checks the total length
+//!   indexof SCALE x 2 MiB: hit scans over every 4096th byte (255), a miss (252) over the whole view, and a search
+//!           from the tail; checks the count, the sum of the hit positions and the three positions against the formula
 
 use bare_js::eval::*;
 use bare_js::heap::Heap;
@@ -63,6 +65,9 @@ fn run_case(case: String, scale: usize) {
         // The same loop over a plain Array: the baseline for the cost of an element read.
         "scanarr" => ((0..scale * 100_000).map(|i| (i % 251) as u8).collect(),
             "var a = []; for (var i = 0; i < data.length; i++) a.push(data[i]); var s = 0; for (var i = 0; i < a.length; i++) s += a[i]; s".into()),
+        // Byte 255 is at every 4096th index; `i % 251` never reaches 251 or more, so 252 is a miss over all the bytes.
+        "indexof" => ((0..scale << 21).map(|i| if i % 4096 == 17 { 255 } else { (i % 251) as u8 }).collect(),
+            "var n = 0, s = 0, k = 0; while ((k = data.indexOf(255, k)) !== -1) { n++; s += k; k++; } [n, s, data.indexOf(255), data.indexOf(252), data.indexOf(255, data.length - 4079)].join('|')".into()),
         "codec" => (mixed_text(mib), "var t = new TextDecoder().decode(data); var e = new TextEncoder().encode(t); [t.length, e]".into()),
         "stream" => (mixed_text(mib), "var d = new TextDecoder(); var n = 0; for (var i = 0; i < data.length; i += 1000) n += d.decode(data.subarray(i, i + 1000), {stream: true}).length; n + d.decode().length".into()),
         _ => die(format!("unknown case {case}")),
@@ -107,6 +112,16 @@ fn run_case(case: String, scale: usize) {
                 die(format!("codec x{scale}: round trip differs"));
             }
         }
+        "indexof" => {
+            // The expected text comes from the formula, not from the buffer: the hits are at 17 + 4096 * j.
+            let len = (scale << 21) as u64;
+            let hits: Vec<u64> = (17..len).step_by(4096).collect();
+            let want = format!("{}|{}|17|-1|{}", hits.len(), hits.iter().sum::<u64>(), len - 4079);
+            let got = it.display(result);
+            if got != want {
+                die(format!("indexof x{scale}: {got} != {want}"));
+            }
+        }
         _ => {
             let units = std::str::from_utf8(&keep).unwrap().encode_utf16().count();
             if !matches!(result, Value::Number(x) if x == units as f64) {
@@ -120,7 +135,7 @@ fn run_case(case: String, scale: usize) {
     let t_collect = t2.elapsed();
     let after = it.heap.stats();
     println!(
-        "{case:7} x{scale:<3} bytes={:<9} run={:>8.1}ms collect={:>6.1}ms setup={:.1}ms | cpu(whole process)={:>8.1}ms peakRSS={}MiB | heap objs alloc={} strs alloc={} buffer_bytes_before={} after={} freed_objs={} | steps={}",
+        "{case:7} x{scale:<3} checksum=ok bytes={:<9} run={:>8.1}ms collect={:>6.1}ms setup={:.1}ms | cpu(whole process)={:>8.1}ms peakRSS={}MiB | heap objs alloc={} strs alloc={} buffer_bytes_before={} after={} freed_objs={} | steps={}",
         keep.len(),
         t_run.as_secs_f64() * 1e3,
         t_collect.as_secs_f64() * 1e3,
@@ -143,5 +158,5 @@ fn main() {
     }
     let scale: usize = a[2].parse().unwrap_or_else(|_| die("scale".into()));
     let name = a[1].clone();
-    std::thread::Builder::new().stack_size(16 << 20).spawn(move || run_case(name, scale)).unwrap().join().unwrap_or_else(|_| die("panic".into()));
+    std::thread::Builder::new().stack_size(if cfg!(debug_assertions) { 64 << 20 } else { 8 << 20 }).spawn(move || run_case(name, scale)).unwrap().join().unwrap_or_else(|_| die("panic".into()));
 }

@@ -181,7 +181,7 @@ WeakMap and WeakSet are integrated with ephemeron collection. Values become reac
 
 Native HTMLElement.style and CSSStyleDeclaration are integrated. Reads and writes share the native style attribute and cascade. Supported shorthands expose their longhands. Unknown declarations survive unrelated writes. Parsing, reconstructed values and serialized output have explicit bounds. Detached style objects participate in collection. Authored values are not fully canonicalized; SVG style, indexed properties and computed style remain open. See [resources.md](resources.md#native-inline-style-declarations).
 
-The cached login now executes all 21 scripts with no script throws or load errors, then stops at Unsupported("TypedArray.prototype.indexOf"). It still has no form and exits 1. This is local cached execution, not staging authentication or successful hydration.
+The cached login now executes all 21 scripts with no script throws or load errors, then stops at Unsupported("JSON.parse reviver") after the byte-search implementation below. It still has no form and exits 1. This is local cached execution, not staging authentication or successful hydration.
 
 | Topic | Work | Check before closing |
 | --- | --- | --- |
@@ -195,6 +195,8 @@ The cached login now executes all 21 scripts with no script throws or load error
 Resource checks: DOM mutations, repeated queries, event listener growth, fetch cancellation, navigation teardown and detached-node retention. Release obsolete page resources and JS roots. Bound storage and response buffers.
 
 Exit: the real bundles boot, login runs, authenticated Agents data appears in the DOM, and search/navigation update it through the event system. This is a DOM-level gate. Visible mouse and keyboard operation is the S4 gate.
+
+Uint8Array.indexOf is integrated. It uses strict numeric equality, converts fromIndex once and borrows bytes after that conversion. The bounded search returns early without a full-view copy. The cached page passes this gate and reaches JSON.parse with a callable reviver. This is the next verified runtime gate. See [resources.md](resources.md#byte-view-index-search).
 
 ### S4 Window paint and input
 

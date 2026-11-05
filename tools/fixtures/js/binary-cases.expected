@@ -77,3 +77,17 @@ dec_ignore_bom_stream	string:0,2|0,1,1,0
 dec_decode_view_bytes_not_copied_early	string:abzb
 dec_decode_after_input_mutated_by_option_getter	string:zb
 roundtrip_scalar_classes	string:0/16
+ta_indexof_shape	string:1|indexOf|false|true|true|true|function
+ta_indexof_brand	string:TypeError|TypeError|TypeError|TypeError|TypeError|TypeError|TypeError|0
+ta_indexof_empty_view_skips_from	string:-1|-1|-1|0
+ta_indexof_brand_before_from	string:TypeError||0
+ta_indexof_equality	string:0|0|1|2|3|-1|-1|-1|-1|-1|-1|-1|-1|-1|-1|-1|-1|-1|-1
+ta_indexof_nan_and_zero_in_view	string:-1|0|0|1|-1
+ta_indexof_search_is_not_coerced	string:-1|0
+ta_indexof_from_edges	string:0,0,0,2,2,0,4,4,2,0,0,0,-1,-1,4,2,-1,0,0,2,0,2
+ta_indexof_from_converted_once_in_order	string:2|RangeError||v,bad
+ta_indexof_from_symbol_throws	string:TypeError|-1
+ta_indexof_mutation_in_from	string:2|1|2|0,5,9,0
+ta_indexof_offsets_and_subarray	string:0|3|-1|-1|3|0|4|-1|0|1|-1|1|2
+ta_indexof_view_bounds_do_not_leak	string:-1|0|2|-1|-1
+ta_indexof_survives_global_deletion	string:2|1|undefined

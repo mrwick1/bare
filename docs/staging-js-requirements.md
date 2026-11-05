@@ -85,3 +85,7 @@ Not reached / server-only: `AsyncLocalStorage` (`2117@102428`, `globalThis` prob
 - Offsets use UTF-16 code units; the AST scan ignores scoping, so shadowed names (`window`, `Function`) could be over-counted.
 
 Parent review: the fetch tool now requests identity encoding, rejects redirects and compressed replies, and checks per-file and remaining aggregate bytes before retaining them. Offline exact/over-cap, encoding, length, deadline and redirect regressions pass. The elapsed limit is checked between blocking operations, so one DNS/socket wait can exceed it. Directive scanning now reads the ESTree expression-statement field. No target script was executed during review.
+
+## Runtime follow-up: byte search
+
+Uint8Array.indexOf now implements the observed byte-search operation. The cached login passes that gate and stops at Unsupported("JSON.parse reviver"). All 21 scripts run with zero throws or load errors, but no form exists. Static call-site lists above do not establish complete runtime reachability.
