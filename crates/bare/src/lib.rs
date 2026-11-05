@@ -38,6 +38,8 @@ mod browser_link_tests;
 #[cfg(test)]
 mod browser_root_node_tests;
 #[cfg(test)]
+mod browser_fragment_tests;
+#[cfg(test)]
 mod browser_tests;
 pub mod browser_platform;
 mod browser_platform_class;
