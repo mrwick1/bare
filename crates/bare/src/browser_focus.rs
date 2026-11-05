@@ -165,7 +165,12 @@ impl Dom {
 
     fn fire_focus(&self, it: &mut Interp<'_>, target: NodeId, ty: &str, bubbles: bool, related: Option<NodeId>) -> R<()> {
         let ev = self.new_event_proto(it, ty, bubbles, false, true, self.p().focus)?;
-        self.st.borrow_mut().events.get_mut(&ev).expect("just made").is_focus = true;
+        {
+            let mut st = self.st.borrow_mut();
+            let trusted = st.ui.active;
+            let e = st.events.get_mut(&ev).expect("just made");
+            (e.is_focus, e.trusted) = (true, trusted);
+        }
         if let Some(r) = related {
             let v = self.wrap(it, r)?;
             self.st.borrow_mut().events.get_mut(&ev).expect("just made").related = v;
@@ -174,7 +179,7 @@ impl Dom {
     }
 
     /// Move focus to `to` (already checked as focusable) or to the viewport (`None`).
-    fn move_focus(&self, it: &mut Interp<'_>, to: Option<NodeId>) -> R<()> {
+    pub(crate) fn move_focus(&self, it: &mut Interp<'_>, to: Option<NodeId>) -> R<()> {
         {
             let mut st = self.st.borrow_mut();
             if st.focus.depth >= MAX_DEPTH {
@@ -219,7 +224,7 @@ impl Dom {
     }
 
     /// The focusing steps for `n`: nothing happens when it is not a focusable area.
-    fn focus_node(&self, it: &mut Interp<'_>, n: NodeId) -> R<()> {
+    pub(crate) fn focus_node(&self, it: &mut Interp<'_>, n: NodeId) -> R<()> {
         if self.focusable(it, n)? {
             self.move_focus(it, Some(n))?;
         }

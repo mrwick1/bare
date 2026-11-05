@@ -130,7 +130,7 @@ impl Dom {
     /// The value is borrowed, never copied. A JS caller (`it`) pays `bytes / 256` steps before the one scan, so a
     /// huge value under a small budget fails first. The no-JS driver (`it` is `None`) has no budget to charge: its
     /// scan is bounded by `max_text_bytes`, which caps both a dirty value and an attribute.
-    fn effective(&self, it: Option<&mut Interp<'_>>, n: NodeId) -> R<Option<(Sel, u32)>> {
+    pub(crate) fn effective(&self, it: Option<&mut Interp<'_>>, n: NodeId) -> R<Option<(Sel, u32)>> {
         if !self.selection_applies(n) {
             return Ok(None);
         }

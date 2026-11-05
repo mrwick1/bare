@@ -75,6 +75,7 @@ use crate::browser_namespace as ns;
 use crate::browser_attr as at;
 use crate::browser_events as ev;
 use crate::browser_form as fm;
+use crate::browser_ui as ui;
 use crate::browser_selection as sel;
 use crate::browser_shadow as sh;
 pub use crate::browser_scheduler::{Pump, SchedLimits, SchedStats};
@@ -182,6 +183,10 @@ pub(crate) struct EventState {
     pub is_focus: bool,
     /// `SubmitEvent.submitter` is in `related` (traced). Only a `SubmitEvent` has this set.
     pub is_submit: bool,
+    /// The fields of a mouse, pointer, keyboard or input event that the window made (`browser_ui.rs`). `related` holds `relatedTarget`.
+    pub ui: Option<Box<crate::browser_ui::Ui>>,
+    /// `isTrusted`: set for the events of `browser_ui.rs`.
+    pub trusted: bool,
 }
 
 /// A listener exception that did not stop dispatch.
@@ -204,6 +209,8 @@ pub(crate) struct Input {
     pub sel: Option<crate::browser_selection::Sel>,
     /// Selection API "has scheduled selectionchange event": a `Task::SelectionChange` of this input is queued.
     pub sc_pending: bool,
+    /// The value before the first edit that no `change` event has reported yet (`browser_ui.rs`).
+    pub edited: Option<String>,
 }
 
 #[derive(Default)]
@@ -224,6 +231,8 @@ pub(crate) struct State {
     pub driver: bool,
     /// The focused element and the transition guards (`browser_focus.rs`).
     pub focus: crate::browser_focus::FocusState,
+    /// Pointer state and counters of the window input (`browser_ui.rs`).
+    pub ui: crate::browser_ui::UiState,
 }
 
 #[derive(Clone, Copy)]
@@ -248,6 +257,10 @@ pub(crate) struct Protos {
     pub event: ObjId,
     pub custom: ObjId,
     pub focus: ObjId,
+    pub mouse: ObjId,
+    pub pointer: ObjId,
+    pub keyboard: ObjId,
+    pub inputev: ObjId,
     pub domexc: ObjId,
 }
 
@@ -269,6 +282,10 @@ pub(crate) enum P {
     Event,
     Custom,
     Focus,
+    Mouse,
+    Pointer,
+    Keyboard,
+    InputEv,
 }
 
 pub(crate) enum Kind {
@@ -667,6 +684,10 @@ impl Dom {
             P::Event => ps.event,
             P::Custom => ps.custom,
             P::Focus => ps.focus,
+            P::Mouse => ps.mouse,
+            P::Pointer => ps.pointer,
+            P::Keyboard => ps.keyboard,
+            P::InputEv => ps.inputev,
         }
     }
 
@@ -709,14 +730,18 @@ impl Dom {
         let custom = mk(it, event)?;
         let focus = mk(it, event)?;
         let submit = mk(it, event)?;
+        let mouse = mk(it, event)?;
+        let pointer = mk(it, mouse)?;
+        let keyboard = mk(it, event)?;
+        let inputev = mk(it, event)?;
         let domexc = mk(it, ep)?;
-        let _ = self.p.set(Protos { et, node, element, html, svg, input, iframe, link, form, button, submit, chardata, text, comment, document, fragment, shadow, event, custom, focus, domexc });
+        let _ = self.p.set(Protos { et, node, element, html, svg, input, iframe, link, form, button, submit, chardata, text, comment, document, fragment, shadow, event, custom, focus, mouse, pointer, keyboard, inputev, domexc });
         // The global object is `window`: it is an EventTarget.
         if let Err(e) = it.heap.set_prototype_of(g, Some(et)) {
             return Err(it.heap_error(e));
         }
         self.st.borrow_mut().by_obj.insert(g, Target::Window);
-        let mut fixed = vec![et, node, element, html, svg, input, iframe, link, form, button, submit, chardata, text, comment, document, fragment, shadow, event, custom, focus, domexc];
+        let mut fixed = vec![et, node, element, html, svg, input, iframe, link, form, button, submit, chardata, text, comment, document, fragment, shadow, event, custom, focus, mouse, pointer, keyboard, inputev, domexc];
 
         // methods and accessors
         for d in DEFS {
@@ -742,7 +767,7 @@ impl Dom {
         }
 
         // interface objects
-        let ifaces: [(&str, ObjId, Option<H>); 21] = [
+        let ifaces: [(&str, ObjId, Option<H>); 25] = [
             ("EventTarget", et, Some(ev::event_target_ctor as H)),
             ("Node", node, None),
             ("Element", element, None),
@@ -763,6 +788,10 @@ impl Dom {
             ("CustomEvent", custom, Some(ev::custom_event_ctor as H)),
             ("FocusEvent", focus, Some(crate::browser_focus::focus_event_ctor as H)),
             ("SubmitEvent", submit, Some(crate::browser_form::submit_event_ctor as H)),
+            ("MouseEvent", mouse, None),
+            ("PointerEvent", pointer, None),
+            ("KeyboardEvent", keyboard, None),
+            ("InputEvent", inputev, None),
             ("DOMException", domexc, None),
         ];
         let (kp, kc) = (self.key(it, "prototype")?, self.key(it, "constructor")?);
@@ -967,6 +996,34 @@ pub(crate) static DEFS: &[Def] = &[
     Def { on: &[Html], name: "blur", len: 0, kind: M(crate::browser_focus::blur) },
     Def { on: &[Document], name: "activeElement", len: 0, kind: G(crate::browser_focus::active_element) },
     Def { on: &[Focus], name: "relatedTarget", len: 0, kind: G(crate::browser_focus::related_target) },
+    Def { on: &[Mouse], name: "clientX", len: 0, kind: G(ui::client_x) },
+    Def { on: &[Mouse], name: "clientY", len: 0, kind: G(ui::client_y) },
+    Def { on: &[Mouse], name: "screenX", len: 0, kind: G(ui::client_x) },
+    Def { on: &[Mouse], name: "screenY", len: 0, kind: G(ui::client_y) },
+    Def { on: &[Mouse], name: "pageX", len: 0, kind: G(ui::client_x) },
+    Def { on: &[Mouse], name: "pageY", len: 0, kind: G(ui::client_y) },
+    Def { on: &[Mouse], name: "x", len: 0, kind: G(ui::client_x) },
+    Def { on: &[Mouse], name: "y", len: 0, kind: G(ui::client_y) },
+    Def { on: &[Mouse], name: "button", len: 0, kind: G(ui::button) },
+    Def { on: &[Mouse], name: "buttons", len: 0, kind: G(ui::buttons) },
+    Def { on: &[Mouse, Keyboard, InputEv], name: "detail", len: 0, kind: G(ui::detail) },
+    Def { on: &[Mouse, Keyboard], name: "shiftKey", len: 0, kind: G(ui::shift) },
+    Def { on: &[Mouse, Keyboard], name: "ctrlKey", len: 0, kind: G(ui::ctrl) },
+    Def { on: &[Mouse, Keyboard], name: "altKey", len: 0, kind: G(ui::alt) },
+    Def { on: &[Mouse, Keyboard], name: "metaKey", len: 0, kind: G(ui::meta) },
+    Def { on: &[Mouse], name: "relatedTarget", len: 0, kind: G(ui::related) },
+    Def { on: &[Pointer], name: "pointerType", len: 0, kind: G(ui::pointer_type) },
+    Def { on: &[Pointer], name: "isPrimary", len: 0, kind: G(ui::is_primary) },
+    Def { on: &[Pointer], name: "pointerId", len: 0, kind: G(ui::pointer_id) },
+    Def { on: &[Keyboard], name: "key", len: 0, kind: G(ui::key) },
+    Def { on: &[Keyboard], name: "code", len: 0, kind: G(ui::code) },
+    Def { on: &[Keyboard], name: "repeat", len: 0, kind: G(ui::repeat) },
+    Def { on: &[Keyboard], name: "keyCode", len: 0, kind: G(ui::key_code) },
+    Def { on: &[Keyboard], name: "which", len: 0, kind: G(ui::key_code) },
+    Def { on: &[Keyboard], name: "location", len: 0, kind: G(ui::location) },
+    Def { on: &[Keyboard, InputEv], name: "isComposing", len: 0, kind: G(ui::is_composing) },
+    Def { on: &[InputEv], name: "data", len: 0, kind: G(ui::data) },
+    Def { on: &[InputEv], name: "inputType", len: 0, kind: G(ui::input_type) },
 ];
 
 // ---------------------------------------------------------------------------------------------- Browser

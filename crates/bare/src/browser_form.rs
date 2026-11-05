@@ -121,7 +121,7 @@ impl Dom {
     }
 
     /// Is `n` connected to the document? Charges the walk.
-    fn is_connected_node(&self, it: &mut Interp<'_>, n: NodeId) -> R<bool> {
+    pub(crate) fn is_connected_node(&self, it: &mut Interp<'_>, n: NodeId) -> R<bool> {
         let doc = self.doc.borrow();
         let mut cur = n;
         while let Some(p) = doc.parent(cur) {
@@ -166,7 +166,7 @@ impl Dom {
     }
 
     /// Is the form control `n` disabled (HTML "disabled")? Not a form control: false.
-    fn is_disabled_control(&self, it: &mut Interp<'_>, n: NodeId) -> R<bool> {
+    pub(crate) fn is_disabled_control(&self, it: &mut Interp<'_>, n: NodeId) -> R<bool> {
         let doc = self.doc.borrow();
         if !tag_is(&doc, n, &["button", "input", "select", "textarea"]) {
             return Ok(false);
@@ -189,7 +189,7 @@ impl Dom {
     }
 
     /// The nearest node from `n` upward with an activation behavior (DOM "dispatch", for a bubbling click).
-    fn activation_target(&self, it: &mut Interp<'_>, n: NodeId) -> R<Option<NodeId>> {
+    pub(crate) fn activation_target(&self, it: &mut Interp<'_>, n: NodeId) -> R<Option<NodeId>> {
         let doc = self.doc.borrow();
         let mut cur = Some(n);
         while let Some(c) = cur {
@@ -204,21 +204,35 @@ impl Dom {
 
     /// The driver's click: dispatch, then the activation behavior if the click was not canceled. Gives whether the click was
     /// not canceled. Runs inside the caller's host scope.
-    pub(crate) fn user_click(&self, it: &mut Interp<'_>, node: NodeId) -> R<bool> {
+    ///
+    /// `ui` is set by the window (`browser_ui.rs`): the click is then a trusted `PointerEvent` and the target also has the
+    /// default actions of a user click (checkbox, radio, label, link). The driver's click (`None`) keeps the older rules.
+    pub(crate) fn user_click(&self, it: &mut Interp<'_>, node: NodeId, ui: Option<crate::browser_ui::Ui>) -> R<bool> {
         if self.is_disabled_control(it, node)? {
             return Ok(true);
         }
         let target = self.activation_target(it, node)?;
-        let e = self.new_event(it, "click", true, true, true, None)?;
-        let not_canceled = self.dispatch(it, Target::Node(node), e)?;
-        if let (true, Some(t)) = (not_canceled, target) {
-            self.activate(it, t)?;
+        let Some(ui) = ui else {
+            let e = self.new_event(it, "click", true, true, true, None)?;
+            let not_canceled = self.dispatch(it, Target::Node(node), e)?;
+            if let (true, Some(t)) = (not_canceled, target) {
+                self.activate(it, t)?;
+            }
+            return Ok(not_canceled);
+        };
+        let undo = match target {
+            Some(t) => self.pre_activate(it, t)?,
+            None => None,
+        };
+        let not_canceled = self.fire_ui(it, node, "click", self.p().pointer, true, true, ui.clone(), None)?;
+        if let Some(t) = target {
+            self.ui_activate(it, t, !not_canceled, undo, &ui)?;
         }
         Ok(not_canceled)
     }
 
     /// The activation behavior of `t`, reading its state now.
-    fn activate(&self, it: &mut Interp<'_>, t: NodeId) -> R<()> {
+    pub(crate) fn activate(&self, it: &mut Interp<'_>, t: NodeId) -> R<()> {
         let submits = {
             let doc = self.doc.borrow();
             if tag_is(&doc, t, &["button"]) {
@@ -233,30 +247,35 @@ impl Dom {
             return Ok(());
         }
         match self.form_owner(it, t)? {
-            Some(form) => self.submit_form(it, form, t),
+            Some(form) => self.submit_form(it, form, Some(t)),
             None => Ok(()),
         }
     }
 
     /// HTML "submit" a form from a submit button, up to the gates (see the header).
-    fn submit_form(&self, it: &mut Interp<'_>, form: NodeId, submitter: NodeId) -> R<()> {
+    pub(crate) fn submit_form(&self, it: &mut Interp<'_>, form: NodeId, submitter: Option<NodeId>) -> R<()> {
         if !self.is_connected_node(it, form)? {
             return Ok(()); // cannot navigate
         }
         let no_validate = {
             let doc = self.doc.borrow();
-            attr(&doc, submitter, "formnovalidate").is_some() || attr(&doc, form, "novalidate").is_some()
+            submitter.is_some_and(|s| attr(&doc, s, "formnovalidate").is_some()) || attr(&doc, form, "novalidate").is_some()
         };
         if !no_validate {
             return Err(Error::Unsupported(unsupported("form constraint validation (set noValidate or formNoValidate)")));
         }
-        let who = self.wrap(it, submitter)?;
+        let who = match submitter {
+            Some(s) => self.wrap(it, s)?,
+            None => Value::Null,
+        };
         let e = self.new_event_proto(it, "submit", true, true, false, self.p().submit)?;
         {
             let mut st = self.st.borrow_mut();
+            let trusted = st.ui.active;
             let ev = st.events.get_mut(&e).expect("just made");
             ev.related = who;
             ev.is_submit = true;
+            ev.trusted = trusted;
         }
         if !self.dispatch(it, Target::Node(form), e)? || !self.is_connected_node(it, form)? {
             return Ok(());
@@ -271,7 +290,7 @@ impl Browser {
     /// form owner: see `browser_form.rs` for the exact rules and the gates (validation, native navigation). Click and
     /// activation share one host scope and one budget. `reports` hold both stages.
     pub fn click(&mut self, node: NodeId) -> R<Dispatched> {
-        let (not_canceled, reports) = self.driven(|d, it| d.user_click(it, node))?;
+        let (not_canceled, reports) = self.driven(|d, it| d.user_click(it, node, None))?;
         Ok(Dispatched { not_canceled, reports })
     }
 }

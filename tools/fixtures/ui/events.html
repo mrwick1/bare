@@ -1,0 +1,51 @@
+<!DOCTYPE html>
+<html>
+<head>
+<style>
+body { margin: 0; font-size: 16px; }
+.c { position: absolute; left: 10px; width: 200px; height: 30px; box-sizing: border-box; margin: 0; padding: 0; }
+</style>
+</head>
+<body>
+<a id="link" class="c" href="#top" style="top:10px; display:block">link</a>
+<form id="form" action="/none" style="margin:0" novalidate>
+  <input id="user" class="c" style="top:60px" type="text" value="">
+  <input id="pass" class="c" style="top:110px" type="password" value="">
+  <input id="chk" type="checkbox" style="position:absolute; left:10px; top:160px; width:20px; height:20px; margin:0">
+  <button id="go" class="c" style="top:200px" type="submit">Go</button>
+</form>
+<button id="plain" class="c" style="top:250px" type="button">Plain</button>
+<script>
+window.__log = [];
+var types = ['pointerover','pointerenter','pointerdown','pointermove','pointerup','pointerout','pointerleave',
+  'mouseover','mouseenter','mousemove','mousedown','mouseup','mouseout','mouseleave','click','dblclick','auxclick','contextmenu',
+  'focus','blur','focusin','focusout','keydown','keypress','keyup','beforeinput','input','change','select','selectionchange','submit'];
+function id(t) { return t === window ? 'window' : t === document ? 'document' : (t.id || t.nodeName.toLowerCase()); }
+types.forEach(function (t) {
+  window.addEventListener(t, function (e) {
+    var p = [];
+    if (/^(pointer|mouse|click|dblclick|auxclick|contextmenu)/.test(t)) {
+      p.push('x=' + e.clientX, 'y=' + e.clientY, 'button=' + e.button, 'buttons=' + e.buttons, 'detail=' + e.detail);
+      if (e.relatedTarget !== undefined) p.push('related=' + (e.relatedTarget ? id(e.relatedTarget) : 'null'));
+      if (t.indexOf('pointer') === 0) p.push('ptype=' + e.pointerType, 'primary=' + e.isPrimary);
+    } else if (/^key/.test(t)) {
+      p.push('key=' + JSON.stringify(e.key), 'code=' + e.code, 'repeat=' + e.repeat, 'shift=' + e.shiftKey);
+    } else if (t === 'beforeinput' || t === 'input') {
+      p.push('data=' + JSON.stringify(e.data), 'inputType=' + e.inputType, 'composing=' + e.isComposing);
+    } else if (/^focus|^blur/.test(t)) {
+      p.push('related=' + (e.relatedTarget ? id(e.relatedTarget) : 'null'));
+    }
+    p.push('bubbles=' + e.bubbles, 'cancelable=' + e.cancelable, 'trusted=' + e.isTrusted, 'ctor=' + e.constructor.name);
+    window.__log.push(t + ' @' + id(e.target) + ' ' + p.join(' '));
+  }, true);
+});
+// Chrome sends `enter` and `leave` events only to elements that have a listener for them, so put one on every element.
+['pointerenter','pointerleave','mouseenter','mouseleave'].forEach(function (t) {
+  Array.prototype.forEach.call(document.querySelectorAll('*'), function (el) {
+    el.addEventListener(t, function () {});
+  });
+});
+document.getElementById('form').addEventListener('submit', function (e) { e.preventDefault(); });
+</script>
+</body>
+</html>

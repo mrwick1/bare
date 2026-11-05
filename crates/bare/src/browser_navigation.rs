@@ -343,6 +343,15 @@ impl Dom {
         Ok(())
     }
 
+    /// A click on a link: navigate to `href`, resolved against the document URL. An `href` that is not a valid URL does nothing.
+    pub(crate) fn navigate_href(&self, it: &mut Interp<'_>, href: &str) -> R<()> {
+        match nu::parse(href, Some(&self.cur_rec()?)) {
+            Ok(new) => self.navigate(it, new, false),
+            Err(UErr::Gate(w)) => Err(Error::Unsupported(unsupported(w))),
+            Err(_) => Ok(()),
+        }
+    }
+
     fn reload_request(&self) -> R<()> {
         let cur = self.cur_rec()?;
         if self.nav.s.borrow().requests.len() >= self.nav.lim.get().max_requests {

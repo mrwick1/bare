@@ -13,6 +13,10 @@ mod browser_handlers;
 mod browser_handler_tests;
 mod browser_focus;
 mod browser_form;
+pub mod browser_ui;
+pub mod page;
+#[cfg(test)]
+mod browser_ui_tests;
 #[cfg(test)]
 mod browser_form_tests;
 #[cfg(test)]

@@ -11,6 +11,7 @@
 pub mod canvas;
 pub mod display;
 pub mod glyphs;
+pub mod hit;
 pub mod png;
 
 use bare_css::cascade::Styles;
@@ -67,7 +68,7 @@ impl Painter {
 /// Draw one run of text. The letters are `font::width_of` apart, as layout placed them: whole units of a tenth of an
 /// em, added up, so a line of 1,000 letters ends where layout says.
 #[allow(clippy::too_many_arguments)]
-fn text(canvas: &mut Canvas, glyphs: &mut Glyphs, clip: IRect, x: f32, baseline: i32, size: f32, color: u32, bold: bool, run: &str) {
+pub fn text(canvas: &mut Canvas, glyphs: &mut Glyphs, clip: IRect, x: f32, baseline: i32, size: f32, color: u32, bold: bool, run: &str) {
     // Not even the tallest letter reaches the clip: skip the run.
     if (baseline as f32 + size * 0.4) < clip.y0 as f32 || (baseline as f32 - size * 1.2) > clip.y1 as f32 {
         return;

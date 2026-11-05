@@ -9,13 +9,20 @@
 //! `Window`, `Waker` and `Stats`, and nothing else changes. `redraw.rs` and `slots.rs` hold the rules that do not touch
 //! the OS (when to draw, which buffer to use), so a port keeps them.
 //!
-//! Not here yet: input (S4 topic 4), a fractional or integer HiDPI scale (paint draws one pixel for each CSS pixel, see
-//! `docs/resources.md`, "Wayland window"), and clipboard and cursor shapes.
+//! Input (S4 topic 4): `App::event` gets the pointer and keyboard events (`input.rs`). The pointer position is in window
+//! pixels. A key has its DOM `key` and `code` (the layout is read with xkbcommon, through smithay-client-toolkit), and the
+//! window repeats a held key by itself. An event can ask for a new frame (`Control::redraw`) and for a cursor shape
+//! (`Control::set_cursor`).
+//!
+//! Not here yet: a fractional or integer HiDPI scale (paint draws one pixel for each CSS pixel, see `docs/resources.md`,
+//! "Wayland window"), scroll events, touch, a text input method (IME) and the clipboard.
 
+pub mod input;
 pub mod redraw;
 pub mod slots;
 mod wayland;
 
+pub use input::{Cursor, Event, Mods};
 pub use wayland::{Stats, Waker, Window};
 
 /// What the program asks of the window for the frame in progress.
@@ -23,6 +30,7 @@ pub use wayland::{Stats, Waker, Window};
 pub struct Control {
     pub(crate) close: bool,
     pub(crate) redraw: bool,
+    pub(crate) cursor: Option<Cursor>,
 }
 
 impl Control {
@@ -35,6 +43,11 @@ impl Control {
     pub fn redraw(&mut self) {
         self.redraw = true;
     }
+
+    /// Show this cursor shape over the window from now on. The window keeps it until the next call.
+    pub fn set_cursor(&mut self, cursor: Cursor) {
+        self.cursor = Some(cursor);
+    }
 }
 
 /// The program that the window shows.
@@ -44,6 +57,12 @@ pub trait App {
 
     /// The picture at the size of the last `resize`: exactly `width * height` pixels, row by row from the top.
     fn frame(&mut self, ctl: &mut Control) -> &[u32];
+
+    /// A pointer or keyboard event. All the events of one round of the loop come before the next `frame`, so a burst of
+    /// events makes one frame. Ask for one with `ctl.redraw()` when the event changed what the picture shows.
+    fn event(&mut self, event: Event, ctl: &mut Control) {
+        let _ = (event, ctl);
+    }
 }
 
 /// What a window needs to open.
