@@ -1343,3 +1343,5 @@ JS debug and release pass 443 tests with one existing ignore. All 206 evaluator 
 The child's cached bare-only trace next reached Date.now in the prefetch cache and reported Date absent. It also observed an undefined HTMLIFrameElement in a reduced React commit probe. Date support and native iframe branding are separate work. Error.stack is absent and React catches its probe error. React hydration error 418 was observed but not diagnosed. Temporary tracing was removed. No fetched bundle ran in Node, and no GUI, live staging authentication or cross-platform validation was performed.
 
 The parent workspace passes 1,554 tests. No workspace failure occurred in this integration pass.
+
+The parent cached run settles after 23 tasks and 21 script executions, with 15 fetches and 469,525 bytes. It has zero script throws, load errors and unhandled rejections, but reports one listener TypeError and still has no form. The check exits 1. This run does not identify the listener statement; the Date/iframe findings above come from the child's removed instrumentation.
