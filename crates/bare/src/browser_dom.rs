@@ -1196,3 +1196,21 @@ pub(crate) fn set_default_checked(d: &Dom, it: &mut Interp<'_>, this: Value, a: 
     }
     Ok(Value::Undefined)
 }
+
+/// An HTML `link` in the HTML namespace. An SVG or MathML `link` is not one (`is_named` skips foreign elements).
+pub(crate) fn link_el(d: &Dom, it: &mut Interp<'_>, this: Value) -> R<NodeId> {
+    let n = d.el(it, this)?;
+    if is_named(&d.doc.borrow(), n, &["link"]) { Ok(n) } else { Err(it.type_error("Illegal invocation")) }
+}
+
+pub(crate) fn link_rel(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
+    let n = link_el(d, it, this)?;
+    let doc = d.doc.borrow();
+    let value = doc.find_atom("rel").and_then(|a| doc.attr(n, a)).unwrap_or("");
+    d.js_str(it, value)
+}
+
+pub(crate) fn set_link_rel(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
+    link_el(d, it, this)?;
+    reflect_set(d, it, this, a, "rel")
+}

@@ -19,7 +19,7 @@
 //!
 //! Supported (tested):
 //! - Globals: `window`, `self`, `globalThis` (the same object), `document`, `Node`, `Element`, `HTMLElement`,
-//!   `HTMLInputElement`, `HTMLIFrameElement` (inert brand only: no `contentWindow`, no nested context, no fetch), `CharacterData`, `Text`, `Comment`, `Document`, `EventTarget`, `Event`, `CustomEvent`,
+//!   `HTMLInputElement`, `HTMLIFrameElement` (inert brand only: no `contentWindow`, no nested context, no fetch), `HTMLLinkElement`, `CharacterData`, `Text`, `Comment`, `Document`, `EventTarget`, `Event`, `CustomEvent`,
 //!   `DOMException`.
 //! - Node: `nodeType nodeName nodeValue parentNode parentElement childNodes firstChild lastChild previousSibling
 //!   nextSibling ownerDocument isConnected textContent appendChild insertBefore removeChild replaceChild cloneNode
@@ -30,6 +30,7 @@
 //! - CharacterData: `data length`. Document: `createElement createElementNS createTextNode createComment getElementById
 //!   documentElement head body doctype defaultView querySelector(All)`.
 //! - `<input>`: `value checked type defaultValue defaultChecked` with native state (dirty value, checkedness).
+//! - `<link>` (HTML namespace only, `HTMLLinkElement`): `rel` as a reflected string. Setting it loads nothing.
 //! - `<input>` text selection (`selectionStart selectionEnd selectionDirection setSelectionRange select`, `select` event task): `browser_selection.rs`.
 //! - Events: `Event`, `CustomEvent` (`detail`), `addEventListener` (capture, once, passive; function or `handleEvent`
 //!   object), `removeEventListener`, `dispatchEvent`, capture / target / bubble phases through the document to `window`,
@@ -218,6 +219,7 @@ pub(crate) struct Protos {
     pub svg: ObjId,
     pub input: ObjId,
     pub iframe: ObjId,
+    pub link: ObjId,
     pub chardata: ObjId,
     pub text: ObjId,
     pub comment: ObjId,
@@ -235,6 +237,7 @@ pub(crate) enum P {
     Element,
     Html,
     Input,
+    Link,
     CharData,
     Document,
     Event,
@@ -483,6 +486,7 @@ impl Dom {
                         _ => match doc.atom_str(name) {
                             "input" => p.input,
                             "iframe" => p.iframe,
+                            "link" => p.link,
                             "script" => self.scripts.proto.get().copied().unwrap_or(p.html),
                             _ => p.html,
                         },
@@ -580,6 +584,7 @@ impl Dom {
             P::Element => ps.element,
             P::Html => ps.html,
             P::Input => ps.input,
+            P::Link => ps.link,
             P::CharData => ps.chardata,
             P::Document => ps.document,
             P::Event => ps.event,
@@ -607,6 +612,7 @@ impl Dom {
         let svg = mk(it, element)?;
         let input = mk(it, html)?;
         let iframe = mk(it, html)?;
+        let link = mk(it, html)?;
         let chardata = mk(it, node)?;
         let text = mk(it, chardata)?;
         let comment = mk(it, chardata)?;
@@ -615,13 +621,13 @@ impl Dom {
         let custom = mk(it, event)?;
         let focus = mk(it, event)?;
         let domexc = mk(it, ep)?;
-        let _ = self.p.set(Protos { et, node, element, html, svg, input, iframe, chardata, text, comment, document, event, custom, focus, domexc });
+        let _ = self.p.set(Protos { et, node, element, html, svg, input, iframe, link, chardata, text, comment, document, event, custom, focus, domexc });
         // The global object is `window`: it is an EventTarget.
         if let Err(e) = it.heap.set_prototype_of(g, Some(et)) {
             return Err(it.heap_error(e));
         }
         self.st.borrow_mut().by_obj.insert(g, Target::Window);
-        let mut fixed = vec![et, node, element, html, svg, input, iframe, chardata, text, comment, document, event, custom, focus, domexc];
+        let mut fixed = vec![et, node, element, html, svg, input, iframe, link, chardata, text, comment, document, event, custom, focus, domexc];
 
         // methods and accessors
         for d in DEFS {
@@ -647,7 +653,7 @@ impl Dom {
         }
 
         // interface objects
-        let ifaces: [(&str, ObjId, Option<H>); 15] = [
+        let ifaces: [(&str, ObjId, Option<H>); 16] = [
             ("EventTarget", et, Some(ev::event_target_ctor as H)),
             ("Node", node, None),
             ("Element", element, None),
@@ -655,6 +661,7 @@ impl Dom {
             ("SVGElement", svg, None),
             ("HTMLInputElement", input, None),
             ("HTMLIFrameElement", iframe, None),
+            ("HTMLLinkElement", link, None),
             ("CharacterData", chardata, None),
             ("Text", text, None),
             ("Comment", comment, None),
@@ -804,6 +811,7 @@ pub(crate) static DEFS: &[Def] = &[
     Def { on: &[Input], name: "type", len: 0, kind: A(nd::input_type, nd::set_input_type) },
     Def { on: &[Input], name: "defaultValue", len: 0, kind: A(nd::default_value, nd::set_default_value) },
     Def { on: &[Input], name: "defaultChecked", len: 0, kind: A(nd::default_checked, nd::set_default_checked) },
+    Def { on: &[Link], name: "rel", len: 0, kind: A(nd::link_rel, nd::set_link_rel) },
     Def { on: &[Event], name: "type", len: 0, kind: G(ev::event_type) },
     Def { on: &[Event], name: "target", len: 0, kind: G(ev::event_target) },
     Def { on: &[Event], name: "currentTarget", len: 0, kind: G(ev::event_current_target) },

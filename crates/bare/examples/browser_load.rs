@@ -1,13 +1,15 @@
 //! Load test for the DOM/JS bridge. One case at one scale per process.
 //!
-//!   browser_load CASE SCALE      CASE: mutation | event | lookup | svg | svgparse      SCALE: 1, 10, 100
+//!   browser_load CASE SCALE      CASE: mutation | event | lookup | svg | svgparse | rel      SCALE: 1, 10, 100
 //!
 //! mutation: SCALE*1000 elements are made, filled, appended to a list, and old ones removed in blocks.
 //! event: SCALE*1000 bubbling events through a 4 level tree with 3 listeners on the path. Half start in JS,
 //! half in the Rust test driver. lookup: SCALE*500 rounds of `querySelectorAll`, `getElementById` and `closest`
 //! on a 200 item page. svg: SCALE*1000 SVG subtrees made with `createElementNS` and namespaced attributes, appended,
 //! cloned (every 10th) and removed in blocks. svgparse: a page of SCALE*500 inline SVG icons that the parser makes, then
-//! namespace and attribute reads on the first SCALE*50 (attached wrappers stay alive, so the wrapper cap bounds the reads). Each icon has an SVG title with HTML markup, an SVG style with a character reference and markup, and a CDATA section. Each case runs in small scripts, with a VM collect between them, and checks its
+//! namespace and attribute reads on the first SCALE*50 (attached wrappers stay alive, so the wrapper cap bounds the reads). Each icon has an SVG title with HTML markup, an SVG style with a character reference and markup, and a CDATA section.
+//! rel: SCALE*1000 `link` elements get a `rel` by a string and by an object (ToString), are read and lowercased, removed (every
+//! third), cloned (every seventh) and kept as a list of at most 1000. Each case runs in small scripts, with a VM collect between them, and checks its
 //! result against the same computation in Rust. Prints time, CPU, peak RSS, allocations and what the realm holds.
 //! `tools/js/browser_load.sh` runs the matrix under caps.
 
@@ -252,6 +254,44 @@ fn exec(name: &str, scale: usize) {
             }
             expect("svgparse", run(&mut b, "score"), want.to_string());
         }
+        "rel" => {
+            // `link.rel` is a reflected string: set by a plain string and by an object (ToString), read lowercased,
+            // removed, cloned, and kept as the list of links is trimmed to 1000.
+            let n = 1000 * scale;
+            run(&mut b, "var ul = document.getElementById('l'), score = 0;
+                function chunk(start, count) {
+                  for (var i = start; i < start + count; i++) {
+                    var e = document.createElement('link');
+                    e.rel = 'R' + i + ' X';
+                    score += e.rel.length + e.rel.toLowerCase().length;
+                    e.rel = { toString: function () { return 'T' + i; } };
+                    if (i % 3 === 0) e.removeAttribute('rel');
+                    score += e.rel.length;
+                    if (i % 7 === 0) score += e.cloneNode(false).rel.length;
+                    ul.appendChild(e);
+                    if (ul.childElementCount > 1000) for (var k = 0; k < 500; k++) ul.removeChild(ul.firstChild);
+                  }
+                }");
+            let (mut want, mut count) = (0, 0);
+            let mut last = String::new();
+            for start in (0..n).step_by(CHUNK) {
+                run(&mut b, &format!("chunk({start}, {CHUNK})"));
+                for i in start..start + CHUNK {
+                    // the lowercase copy has the same length; the value after the removal (or the clone) is `v`
+                    let v = if i % 3 == 0 { 0 } else { format!("T{i}").len() };
+                    want += 2 * format!("R{i} X").len() + v + if i % 7 == 0 { v } else { 0 };
+                    count += 1;
+                    if count > 1000 {
+                        count -= 500;
+                    }
+                    last = if i % 3 == 0 { String::new() } else { format!("T{i}") };
+                }
+                collect(&mut b);
+            }
+            expect("rel", run(&mut b, "score"), want.to_string());
+            expect("rel count", run(&mut b, "ul.childElementCount"), count.to_string());
+            expect("rel last", run(&mut b, "ul.lastElementChild.rel"), last);
+        }
         _ => die(format!("unknown case {name}")),
     }
     let run_ms = t.elapsed().as_secs_f64() * 1e3;
@@ -279,7 +319,7 @@ fn exec(name: &str, scale: usize) {
 fn main() {
     let a: Vec<String> = std::env::args().collect();
     if a.len() != 3 {
-        die("usage: browser_load mutation|event|lookup|svg|svgparse 1|10|100".into());
+        die("usage: browser_load mutation|event|lookup|svg|svgparse|rel 1|10|100".into());
     }
     let scale: usize = a[2].parse().unwrap_or_else(|_| die("scale".into()));
     // the evaluator recurses: run on a big stack
