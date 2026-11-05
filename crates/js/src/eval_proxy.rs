@@ -249,33 +249,105 @@ impl<'p> Interp<'p> {
         }
     }
 
+    /// The slow side of an `o_*` read: a host fill (at most 2 repeats, as `hx!`), a proxy, or an error. `e` is the answer of the first
+    /// call, `again` repeats the heap call and `px` runs the internal method of the proxy. It is out of line so that the fast side
+    /// of every `o_*` method is one heap call and a test, and the compiler can inline it into the callers.
+    #[cold]
+    #[inline(never)]
+    fn heap_miss<T>(&mut self, mut e: HeapError, again: impl Fn(&mut Self) -> Result<T, HeapError>, px: impl FnOnce(&mut Self) -> Res<T>) -> Res<T> {
+        let mut fills = 0u8;
+        loop {
+            match e {
+                HeapError::NeedsHost { owner, index } if fills < 2 => {
+                    fills += 1;
+                    self.host_fill(owner, index)?;
+                }
+                HeapError::Proxy(_) => return px(self),
+                e => return Err(self.herr(e)),
+            }
+            match again(self) {
+                Ok(v) => return Ok(v),
+                Err(n) => e = n,
+            }
+        }
+    }
+
+    /// `heap_miss` for a write: it also answers `NeedsNamed` (as `hxw!`).
+    #[cold]
+    #[inline(never)]
+    fn heap_miss_w<T>(&mut self, mut e: HeapError, again: impl Fn(&mut Self) -> Result<T, HeapError>, px: impl FnOnce(&mut Self) -> Res<T>) -> Res<T> {
+        let mut fills = 0u8;
+        loop {
+            match e {
+                HeapError::NeedsHost { .. } | HeapError::NeedsNamed if fills < 2 => {
+                    fills += 1;
+                    self.host_ask(e)?;
+                }
+                HeapError::Proxy(_) => return px(self),
+                e => return Err(self.herr(e)),
+            }
+            match again(self) {
+                Ok(v) => return Ok(v),
+                Err(n) => e = n,
+            }
+        }
+    }
+
+    #[inline(always)]
     fn o_get_own_property(&mut self, o: ObjId, key: PropertyKey) -> Res<Option<Property>> {
-        Ok(hx!(self, self.heap.get_own_property(o, key), self.px_get_own_property(o, key)?))
+        match self.heap.get_own_property(o, key) {
+            Ok(v) => Ok(v),
+            Err(e) => self.heap_miss(e, |s| s.heap.get_own_property(o, key), |s| s.px_get_own_property(o, key)),
+        }
     }
 
     /// The same, for the paths that only need the flags (`peek_own_property` does not make a lazy function prototype).
+    #[inline(always)]
     fn o_peek(&mut self, o: ObjId, key: PropertyKey) -> Res<Option<Property>> {
-        Ok(hx!(self, self.heap.peek_own_property(o, key), self.px_get_own_property(o, key)?))
+        match self.heap.peek_own_property(o, key) {
+            Ok(v) => Ok(v),
+            Err(e) => self.heap_miss(e, |s| s.heap.peek_own_property(o, key), |s| s.px_get_own_property(o, key)),
+        }
     }
 
+    #[inline(always)]
     fn o_has_own(&mut self, o: ObjId, key: PropertyKey) -> Res<bool> {
-        Ok(hx!(self, self.heap.has_own_property(o, key), self.px_get_own_property(o, key)?.is_some()))
+        match self.heap.has_own_property(o, key) {
+            Ok(v) => Ok(v),
+            Err(e) => self.heap_miss(e, |s| s.heap.has_own_property(o, key), |s| Ok(s.px_get_own_property(o, key)?.is_some())),
+        }
     }
 
+    #[inline(always)]
     fn o_define_own_property(&mut self, o: ObjId, key: PropertyKey, d: &PropertyDescriptor) -> Res<bool> {
-        Ok(hxw!(self, self.heap.define_own_property(o, key, d), self.px_define_own_property(o, key, d)?))
+        match self.heap.define_own_property(o, key, d) {
+            Ok(v) => Ok(v),
+            Err(e) => self.heap_miss_w(e, |s| s.heap.define_own_property(o, key, d), |s| s.px_define_own_property(o, key, d)),
+        }
     }
 
+    #[inline(always)]
     fn o_has_property(&mut self, o: ObjId, key: PropertyKey) -> Res<bool> {
-        Ok(hx!(self, self.heap.has_property(o, key), self.o_has_slow(o, key)?))
+        match self.heap.has_property(o, key) {
+            Ok(v) => Ok(v),
+            Err(e) => self.heap_miss(e, |s| s.heap.has_property(o, key), |s| s.o_has_slow(o, key)),
+        }
     }
 
+    #[inline(always)]
     fn o_delete(&mut self, o: ObjId, key: PropertyKey) -> Res<bool> {
-        Ok(hxw!(self, self.heap.delete(o, key), self.px_delete(o, key)?))
+        match self.heap.delete(o, key) {
+            Ok(v) => Ok(v),
+            Err(e) => self.heap_miss_w(e, |s| s.heap.delete(o, key), |s| s.px_delete(o, key)),
+        }
     }
 
+    #[inline(always)]
     fn o_own_keys(&mut self, o: ObjId) -> Res<Vec<PropertyKey>> {
-        Ok(hx!(self, self.heap.own_keys(o), self.px_own_keys(o)?))
+        match self.heap.own_keys(o) {
+            Ok(v) => Ok(v),
+            Err(e) => self.heap_miss(e, |s| s.heap.own_keys(o), |s| s.px_own_keys(o)),
+        }
     }
 
     /// `[[Get]](key, receiver)`. The heap answers when no proxy is on the chain.

@@ -365,7 +365,7 @@ const EXOTIC_NAMED: u8 = 2;
 /// A String wrapper object: virtual `length` and index properties (`heap_prim.rs`).
 const EXOTIC_STR: u8 = 4;
 /// A `Proxy` (`heap_proxy.rs`). It shares the `exotic != 0` test of the other exotic objects, so an ordinary object pays nothing.
-const EXOTIC_PROXY: u8 = 3;
+const EXOTIC_PROXY: u8 = 8;
 
 // The flags fit in the padding.
 const _: () = assert!(std::mem::size_of::<Object>() <= 80);
@@ -1335,7 +1335,8 @@ impl Heap {
         }
         let (exotic, is_array) = (obj.exotic, obj.is_array);
         if exotic != 0 {
-            if exotic == EXOTIC_PROXY {
+            // A bit test, not `==`: a third `==` makes the compiler build a jump table that every plain `define` would pay for.
+            if exotic & EXOTIC_PROXY != 0 {
                 return Err(HeapError::Proxy(o));
             }
             if exotic == EXOTIC_NAMED && !matches!(key, PropertyKey::Symbol(_)) {

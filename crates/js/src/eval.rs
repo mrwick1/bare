@@ -869,7 +869,11 @@ impl<'p> Interp<'p> {
             if let Some((buf, _, _)) = self.heap.view_parts(o) {
                 work.push(Value::Object(buf));
             }
-            if let Some(Some((target, handler))) = h!(self, self.heap.proxy_parts(o)) {
+            // `px.ready` is false until the first proxy is made, so a realm without proxies pays one test for each object.
+            if self.px.ready
+                && self.heap.is_proxy(o)
+                && let Some(Some((target, handler))) = h!(self, self.heap.proxy_parts(o))
+            {
                 work.push(Value::Object(target));
                 work.push(Value::Object(handler));
             }
