@@ -1,0 +1,84 @@
+# bare-js tagged template cases. A case starts with `=== name`. Same format and oracle as eval-cases.txt.
+# Tiny authored programs for tag`...`: the strings object, raw values, per-site identity, `this` and order. Never a bundle.
+=== tag_basic
+function t(s, a, b) { return s.length + ":" + s.join("|") + ":" + a + ":" + b + ":" + arguments.length; } t`x${1}y${2}z`
+=== tag_no_subst
+function t(s) { return s.length + ":" + s[0] + ":" + arguments.length; } t`plain`
+=== tag_empty
+function t(s) { return s.length + ":" + JSON.stringify(s[0]) + ":" + s.raw.length; } t``
+=== tag_empty_pieces
+function t(s, a) { return JSON.stringify(s) + ":" + a; } t`${1}`
+=== tag_raw
+function t(s) { return s.raw.join("|") + "#" + s.join("|"); } t`a\nb${0}A\\`
+=== tag_raw_crlf
+function t(s) { return JSON.stringify(s.raw[0]) + JSON.stringify(s[0]); } t`a
+bc`
+=== tag_bad_escape
+function t(s) { return [typeof s[0], s.raw[0], s[1], s.raw[1]].join("|"); } t`\unicode${0}ok`
+=== tag_bad_escapes_all
+function t(s) { return s.map(function (x) { return x === undefined ? "U" : x; }).join() + "/" + s.raw.join(); } t`\xg${1}\u{110000}${2}\01`
+=== tag_identity_same_site
+function t(s) { return s; } function f() { return t`a${1}b`; } f() === f()
+=== tag_identity_loop
+function t(s) { return s; } var a = []; for (var i = 0; i < 3; i++) a.push(t`x`); (a[0] === a[1]) + "," + (a[1] === a[2])
+=== tag_identity_other_site
+function t(s) { return s; } var a = t`x`, b = t`x`; a === b
+=== tag_identity_raw
+function t(s) { return s; } function f() { return t`q`; } f().raw === f().raw
+=== tag_frozen_strings
+"use strict"; function t(s) { return s; } var s = t`a`; var r = []; try { s[0] = "z"; r.push("w"); } catch (e) { r.push(e.name); } try { s.x = 1; r.push("w"); } catch (e) { r.push(e.name); } r.push(s[0], s.x); r.join()
+=== tag_frozen_raw
+"use strict"; function t(s) { return s; } var s = t`a`; var r = []; try { s.raw[0] = "z"; r.push("w"); } catch (e) { r.push(e.name); } try { s.raw = 1; r.push("w"); } catch (e) { r.push(e.name); } r.push(s.raw[0], Array.isArray(s.raw)); r.join()
+=== tag_descriptors
+function t(s) { return s; } var s = t`a${1}b`; var d0 = Object.getOwnPropertyDescriptor(s, 0), dl = Object.getOwnPropertyDescriptor(s, "length"), dr = Object.getOwnPropertyDescriptor(s, "raw"); [d0.value, d0.writable, d0.enumerable, d0.configurable, dl.value, dl.writable, dl.configurable, dr.writable, dr.enumerable, dr.configurable].join()
+=== tag_raw_descriptor
+function t(s) { return s; } var r = t`a`.raw; var d = Object.getOwnPropertyDescriptor(r, 0); [d.writable, d.enumerable, d.configurable, Array.isArray(r)].join()
+=== tag_keys
+function t(s) { return s; } var s = t`a${1}b`; Object.getOwnPropertyNames(s).join() + "|" + Object.keys(s).join() + "|" + Object.keys(s.raw).join()
+=== tag_is_array
+function t(s) { return s; } var s = t`a`; [Array.isArray(s), Object.getPrototypeOf(s) === Array.prototype, s instanceof Array].join()
+=== tag_this_member
+var o = { k: 7, t: function (s) { return this.k + s[0]; } }; o.t`x`
+=== tag_this_index
+var o = { k: 8, t: function (s) { return this.k + s[0]; } }; o["t"]`y`
+=== tag_this_plain
+"use strict"; function t() { return typeof this; } t`x`
+=== tag_order
+var log = []; var o = { get t() { log.push("tag"); return function () { log.push("call"); }; } }; o.t`${log.push("a")}${log.push("b")}`; log.join()
+=== tag_not_callable
+var log = []; var o = { t: 1 }; try { o.t`${log.push("sub")}`; } catch (e) { log.push(e.name); } log.join()
+=== tag_chained
+function t(s) { return function (u) { return s[0] + u[0]; }; } t`a``b`
+=== tag_member_after
+function t(s) { return { v: s[0] }; } t`q`.v
+=== tag_new
+function t(s) { return function C() { this.v = s[0]; }; } new t`n`().v
+=== tag_returns_any
+function t(s, ...v) { return v.reduce(function (a, b) { return a + b; }, 0); } t`${1}${2}${3}`
+=== tag_arrow
+var t = (s, ...v) => s.raw.length + v.length; t`a${0}b${0}c`
+=== tag_subst_values
+function t(s, a, b, c) { return [typeof a, typeof b, c === null].join(); } t`${{}}${function () {}}${null}`
+=== tag_css_like
+function css(s, ...v) { return function (p) { var o = ""; for (var i = 0; i < s.length; i++) { o += s[i]; if (i < v.length) o += typeof v[i] === "function" ? v[i](p) : v[i]; } return o; }; } css`color: ${function (p) { return p.c; }}; margin: ${4}px;`({ c: "red" })
+=== tag_cache_keyed
+var seen = new WeakMap(); var n = 0; function t(s) { if (!seen.has(s)) { seen.set(s, ++n); } return seen.get(s); } function f() { return t`a`; } function g() { return t`a`; } [f(), f(), g(), g()].join()
+=== tag_in_closure_sites
+function t(s) { return s; } function mk() { return function () { return t`z`; }; } mk()() === mk()()
+=== tag_throw_in_subst
+function t() { return "no"; } try { t`${(function () { throw new Error("s"); })()}`; } catch (e) { e.message }
+=== tag_tag_throws
+function t() { throw new TypeError("inside"); } try { t`x`; } catch (e) { e.name + ":" + e.message }
+=== tag_in_class_method
+class A { constructor() { this.p = "!"; } t(s) { return s[0] + this.p; } run() { return this.t`hi`; } } new A().run()
+=== tag_super_member
+class A { t(s) { return "A" + s[0]; } } class B extends A { r() { return super.t`x`; } } new B().r()
+=== tag_unicode
+function t(s) { return s[0].length + ":" + s.raw[0]; } t`é😀\u{1F600}`
+=== tag_line_continuation
+function t(s) { return JSON.stringify(s[0]) + JSON.stringify(s.raw[0]); } t`a\
+b`
+=== tag_in_generator
+function t(s, v) { return s[0] + v; } function* g() { yield t`v${1}`; yield t`v${2}`; } [...g()].join()
+=== tag_in_async_no_await
+var r; function t(s, v) { return s[0] + v; } async function f() { return t`a${5}`; } f().then(function (v) { r = v; }); "sync"

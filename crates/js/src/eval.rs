@@ -422,6 +422,8 @@ pub struct Interp<'p> {
     completion: Value,
     pending_labels: Vec<u32>,
     arg_pool: Vec<Vec<Value>>,
+    /// The strings object of each tagged template site, by (script, expression). Kept for the realm's life, as in the spec.
+    tpl_objs: FxMap<(u32, u32), ObjId>,
     // builtin objects
     global: ObjId,
     object_proto: ObjId,
@@ -572,6 +574,7 @@ impl<'p> Interp<'p> {
             completion: Value::Undefined,
             pending_labels: Vec::new(),
             arg_pool: Vec::new(),
+            tpl_objs: FxMap::default(),
             global,
             object_proto,
             function_proto,
@@ -667,6 +670,7 @@ impl<'p> Interp<'p> {
         v.extend(self.name_strs.iter().flatten().map(|&s| Value::String(s)));
         v.extend(self.expr_str.iter().flatten().map(|&s| Value::String(s)));
         v.extend(self.prop_str.iter().flatten().map(|&s| Value::String(s)));
+        v.extend(self.tpl_objs.values().map(|&o| Value::Object(o)));
         self.script_roots(&mut v);
         for e in self.envs.iter().filter(|e| e.live) {
             v.extend(e.bindings.iter().map(|b| b.value));
@@ -733,6 +737,7 @@ impl<'p> Interp<'p> {
         let mut env_work: Vec<u32> = vec![0];
         let mut act_seen = vec![false; self.aw.acts.len()];
         self.gen_roots(&mut work);
+        work.extend(self.tpl_objs.values().map(|&o| Value::Object(o)));
         self.async_queue_roots(&mut work, &mut env_work, &mut act_seen);
         loop {
             if let Some(e) = env_work.pop() {
@@ -1234,7 +1239,13 @@ impl<'p> Interp<'p> {
                     self.w_expr(x, fs, ac)?;
                 }
             }
-            ExprKind::Tagged { .. } => return Err(unsupported("tagged template", ex.span)),
+            ExprKind::Tagged { tag, quasi } => {
+                self.w_expr(tag, fs, ac)?;
+                let t = *prog.template(quasi);
+                for x in prog.template_exprs(&t) {
+                    self.w_expr(x, fs, ac)?;
+                }
+            }
             ExprKind::Array(l) | ExprKind::Seq(l) => {
                 for x in prog.list(l) {
                     self.w_expr(x, fs, ac)?;
@@ -1793,6 +1804,47 @@ impl<'p> Interp<'p> {
         }
     }
 
+    /// GetTemplateObject: the frozen strings array of a tagged template site, made on the first call there. Its frozen
+    /// `raw` array holds the raw pieces. A cooked piece with a bad escape is `undefined`.
+    fn template_object(&mut self, e: ExprId, t: Id<Template>) -> Res<Value> {
+        let site = (self.cur as u32, e.index() as u32);
+        if let Some(&o) = self.tpl_objs.get(&site) {
+            return Ok(Value::Object(o));
+        }
+        let prog = self.prog.clone();
+        let t = *prog.template(t);
+        let strings = h!(self, self.heap.new_array(Some(self.array_proto)));
+        let raw = h!(self, self.heap.new_array(Some(self.array_proto)));
+        let mut u = Vec::new();
+        for (i, q) in prog.template_quasis(&t).enumerate() {
+            let q = prog.quasi_node(q);
+            let k = PropertyKey::Index(i as u32);
+            u.clear();
+            let cooked = if q.bad_escape {
+                Value::Undefined
+            } else {
+                let _ = prog.quasi(q, false, &mut u);
+                Value::String(h!(self, self.heap.intern_vec(std::mem::take(&mut u))))
+            };
+            self.def(strings, k, cooked, false, true, false)?;
+            u.clear();
+            let _ = prog.quasi(q, true, &mut u);
+            let r = h!(self, self.heap.intern_vec(std::mem::take(&mut u)));
+            self.def(raw, k, Value::String(r), false, true, false)?;
+        }
+        for a in [strings, raw] {
+            let d = PropertyDescriptor { writable: Some(false), ..Default::default() };
+            hx!(self, self.heap.define_own_property(a, self.k_length, &d));
+        }
+        h!(self, self.heap.prevent_extensions(raw));
+        let d = PropertyDescriptor { value: Some(Value::Object(raw)), writable: Some(false), enumerable: Some(false), configurable: Some(false), ..Default::default() };
+        let rk = PropertyKey::String(h!(self, self.heap.intern_str("raw")));
+        hx!(self, self.heap.define_own_property(strings, rk, &d));
+        h!(self, self.heap.prevent_extensions(strings));
+        self.tpl_objs.insert(site, strings);
+        Ok(Value::Object(strings))
+    }
+
     fn new_array_from(&mut self, items: &[Value]) -> Res<Value> {
         self.new_array_from_proto(items, self.array_proto)
     }
@@ -2112,6 +2164,29 @@ impl<'p> Interp<'p> {
                 self.arg_pool.push(argv);
                 Ok(Some((r, Value::Undefined)))
             }
+            ExprKind::Tagged { tag, quasi } => {
+                let (f, this) = self.link(tag)?.unwrap_or((Value::Undefined, Value::Undefined));
+                let strings = self.template_object(e, quasi)?;
+                let prog = self.prog.clone();
+                let t = *prog.template(quasi);
+                let mut argv = self.arg_pool.pop().unwrap_or_default();
+                argv.clear();
+                argv.push(strings);
+                for x in prog.template_exprs(&t) {
+                    argv.push(self.eval_expr(x)?);
+                }
+                self.mark_call(e);
+                let r = if self.is_callable(f) {
+                    self.call_fn(f, this, &argv)
+                } else {
+                    let m = format!("{} is not a function", self.src_text(tag));
+                    Err(self.type_err(&m))
+                };
+                self.stk.pos = 0;
+                let r = r?;
+                self.arg_pool.push(argv);
+                Ok(Some((r, Value::Undefined)))
+            }
             ExprKind::Paren(inner) if matches!(self.unparen(inner), ExprKind::Member { .. } | ExprKind::Index { .. } | ExprKind::PrivateMember { .. } | ExprKind::Chain(_)) => self.link(inner),
             ExprKind::Chain(inner) => Ok(Some(self.link(inner)?.unwrap_or((Value::Undefined, Value::Undefined)))),
             _ => Ok(Some((self.eval_expr(e)?, Value::Undefined))),
@@ -2220,7 +2295,7 @@ impl<'p> Interp<'p> {
                 let t = self.eval_expr(test)?;
                 if self.truthy(t)? { self.eval_expr(cons) } else { self.eval_expr(alt) }
             }
-            ExprKind::Call { .. } | ExprKind::Member { .. } | ExprKind::Index { .. } | ExprKind::PrivateMember { .. } => Ok(self.link(e)?.map_or(Value::Undefined, |p| p.0)),
+            ExprKind::Call { .. } | ExprKind::Tagged { .. } | ExprKind::Member { .. } | ExprKind::Index { .. } | ExprKind::PrivateMember { .. } => Ok(self.link(e)?.map_or(Value::Undefined, |p| p.0)),
             ExprKind::Class(c) => self.eval_class(c, None),
             ExprKind::PrivateIn { .. } => self.eval_private_in(e),
             ExprKind::NewTarget => self.eval_new_target(),
@@ -2967,6 +3042,10 @@ mod async_tests;
 #[cfg(test)]
 #[path = "eval_generator_tests.rs"]
 mod generator_tests;
+
+#[cfg(test)]
+#[path = "eval_tagged_tests.rs"]
+mod tagged_tests;
 
 #[cfg(test)]
 #[path = "eval_stack_tests.rs"]
