@@ -29,6 +29,8 @@ mod browser_navigation_tests;
 #[cfg(test)]
 mod browser_namespace_tests;
 #[cfg(test)]
+mod browser_iframe_tests;
+#[cfg(test)]
 mod browser_tests;
 pub mod browser_platform;
 mod browser_platform_class;

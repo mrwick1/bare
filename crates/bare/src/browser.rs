@@ -19,7 +19,7 @@
 //!
 //! Supported (tested):
 //! - Globals: `window`, `self`, `globalThis` (the same object), `document`, `Node`, `Element`, `HTMLElement`,
-//!   `HTMLInputElement`, `CharacterData`, `Text`, `Comment`, `Document`, `EventTarget`, `Event`, `CustomEvent`,
+//!   `HTMLInputElement`, `HTMLIFrameElement` (inert brand only: no `contentWindow`, no nested context, no fetch), `CharacterData`, `Text`, `Comment`, `Document`, `EventTarget`, `Event`, `CustomEvent`,
 //!   `DOMException`.
 //! - Node: `nodeType nodeName nodeValue parentNode parentElement childNodes firstChild lastChild previousSibling
 //!   nextSibling ownerDocument isConnected textContent appendChild insertBefore removeChild replaceChild cloneNode
@@ -211,6 +211,7 @@ pub(crate) struct Protos {
     pub html: ObjId,
     pub svg: ObjId,
     pub input: ObjId,
+    pub iframe: ObjId,
     pub chardata: ObjId,
     pub text: ObjId,
     pub comment: ObjId,
@@ -475,6 +476,7 @@ impl Dom {
                         Ns::MathMl => p.element,
                         _ => match doc.atom_str(name) {
                             "input" => p.input,
+                            "iframe" => p.iframe,
                             "script" => self.scripts.proto.get().copied().unwrap_or(p.html),
                             _ => p.html,
                         },
@@ -598,6 +600,7 @@ impl Dom {
         let html = mk(it, element)?;
         let svg = mk(it, element)?;
         let input = mk(it, html)?;
+        let iframe = mk(it, html)?;
         let chardata = mk(it, node)?;
         let text = mk(it, chardata)?;
         let comment = mk(it, chardata)?;
@@ -606,13 +609,13 @@ impl Dom {
         let custom = mk(it, event)?;
         let focus = mk(it, event)?;
         let domexc = mk(it, ep)?;
-        let _ = self.p.set(Protos { et, node, element, html, svg, input, chardata, text, comment, document, event, custom, focus, domexc });
+        let _ = self.p.set(Protos { et, node, element, html, svg, input, iframe, chardata, text, comment, document, event, custom, focus, domexc });
         // The global object is `window`: it is an EventTarget.
         if let Err(e) = it.heap.set_prototype_of(g, Some(et)) {
             return Err(it.heap_error(e));
         }
         self.st.borrow_mut().by_obj.insert(g, Target::Window);
-        let mut fixed = vec![et, node, element, html, svg, input, chardata, text, comment, document, event, custom, focus, domexc];
+        let mut fixed = vec![et, node, element, html, svg, input, iframe, chardata, text, comment, document, event, custom, focus, domexc];
 
         // methods and accessors
         for d in DEFS {
@@ -638,13 +641,14 @@ impl Dom {
         }
 
         // interface objects
-        let ifaces: [(&str, ObjId, Option<H>); 14] = [
+        let ifaces: [(&str, ObjId, Option<H>); 15] = [
             ("EventTarget", et, Some(ev::event_target_ctor as H)),
             ("Node", node, None),
             ("Element", element, None),
             ("HTMLElement", html, None),
             ("SVGElement", svg, None),
             ("HTMLInputElement", input, None),
+            ("HTMLIFrameElement", iframe, None),
             ("CharacterData", chardata, None),
             ("Text", text, None),
             ("Comment", comment, None),
