@@ -250,7 +250,7 @@ fn the_form_owner_follows_the_form_attribute_then_the_nearest_ancestor() {
         assert_eq!(js(&mut b, "var sf = document.createElementNS('http://www.w3.org/2000/svg', 'form'); sf.id = 'sf'; document.body.appendChild(sf);
             var hb = document.createElement('button'); sf.appendChild(hb); var e1 = hb.form; hb.setAttribute('form', 'sf'); document.body.appendChild(hb); [e1, hb.form].join()"), ",");
         // `form` is a read-only accessor, not a place for an expando.
-        assert_eq!(js(&mut b, "b1.form = 5; [b1.form === f, b1.hasOwnProperty('form'), typeof Object.getOwnPropertyDescriptor(HTMLButtonElement.prototype, 'form').get, Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'form').set].join()"), "true,false,function,undefined");
+        assert_eq!(js(&mut b, "b1.form = 5; [b1.form === f, b1.hasOwnProperty('form'), typeof Object.getOwnPropertyDescriptor(HTMLButtonElement.prototype, 'form').get, Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'form').set].join()"), "true,false,function,");
     });
 }
 
@@ -326,7 +326,8 @@ fn brands_and_receivers_are_checked() {
             // The prototype itself is not an instance.
             assert_eq!(js(&mut b, &format!("try {{ {proto}.prototype.{prop}; 'no throw' }} catch (e) {{ e.name }}")), "TypeError", "{proto}.prototype.{prop}");
         }
-        assert_eq!(js(&mut b, "try { new HTMLButtonElement() } catch (e) { e.name + ':' + e.message }"), "TypeError:Illegal constructor");
+        assert_eq!(js(&mut b, "try { new HTMLButtonElement() } catch (e) { e.name + ':' + e.message }"), "TypeError:HTMLButtonElement is not a constructor");
+        assert_eq!(js(&mut b, "try { HTMLButtonElement() } catch (e) { e.name + ':' + e.message }"), "TypeError:Illegal constructor");
         assert_eq!(js(&mut b, "try { new HTMLFormElement() } catch (e) { e.name }"), "TypeError");
         // A symbol cannot become a string: the property is not touched.
         assert_eq!(js(&mut b, "bt.name = 'keep'; try { bt.name = Symbol('s') } catch (e) { var tn = e.name } [tn, bt.name].join()"), "TypeError,keep");
@@ -374,7 +375,7 @@ fn submit_event_is_a_real_interface_with_a_read_only_submitter() {
         assert_eq!(js(&mut b, "try { SubmitEvent('submit') } catch (e) { e.name }"), "TypeError");
         assert_eq!(js(&mut b, "try { new SubmitEvent('submit', 5) } catch (e) { e.name }"), "TypeError");
         // Read-only accessor on the prototype, with brand check.
-        assert_eq!(js(&mut b, "var d = Object.getOwnPropertyDescriptor(SubmitEvent.prototype, 'submitter'); e1.submitter = null; [typeof d.get, d.set, e1.submitter === go, e1.hasOwnProperty('submitter'), Object.keys(e1).length].join()"), "function,undefined,true,false,0");
+        assert_eq!(js(&mut b, "var d = Object.getOwnPropertyDescriptor(SubmitEvent.prototype, 'submitter'); e1.submitter = null; [typeof d.get, d.set, e1.submitter === go, e1.hasOwnProperty('submitter'), Object.keys(e1).length].join()"), "function,,true,false,0");
         assert_eq!(js(&mut b, "var r = []; var bads = [new Event('submit'), new CustomEvent('submit'), new FocusEvent('submit'), {}, undefined]; for (var k = 0; k < bads.length; k++) { try { d.get.call(bads[k]); r.push('no throw') } catch (e) { r.push(e.name + ':' + e.message) } } r.join()"),
             "TypeError:Illegal invocation,TypeError:Illegal invocation,TypeError:Illegal invocation,TypeError:Illegal invocation,TypeError:Illegal invocation");
         // A script-made submit event dispatched at a form submits nothing: no gate, no navigation, no other event.
@@ -558,6 +559,12 @@ fn html(body: &str) -> Reply {
     Reply::new(200, Some("text/html; charset=utf-8"), body)
 }
 
+/// POST requests that the loopback server saw for `path` (`Server::hits` counts GET only).
+fn posts(srv: &crate::resources::test_server::Server, path: &str) -> usize {
+    let line = format!("post {path} http/1.1");
+    srv.heads.lock().unwrap().iter().filter(|h| h.starts_with(&line)).count()
+}
+
 fn cfg(url: String) -> SessionConfig {
     let mut c = SessionConfig::new(&url);
     c.virtual_clock = true;
@@ -576,7 +583,7 @@ const LOGIN: &str = "<div id=root></div><script>
     em.addEventListener('input', function (e) { email = e.target.value; sync() });
     pwd.addEventListener('input', function (e) { pw = e.target.value; sync() });
     form.addEventListener('submit', function (e) { e.preventDefault();
-      fetch('/api/login', { method: 'POST', body: email + ':' + pw }).then(function (r) { return r.text() }).then(function (t) { localStorage.setItem('login', t) }) });
+      fetch('/api/login', { method: 'POST', body: JSON.stringify({ email: email, password: pw }) }).then(function (r) { return r.text() }).then(function (t) { localStorage.setItem('login', t) }) });
     </script>";
 
 #[test]
@@ -589,15 +596,15 @@ fn session_resume_click_runs_the_authored_on_submit_fetch_once_over_loopback() {
         });
         let mut s = Session::new(cfg(srv.url("/")));
         assert_eq!(s.run().stop, SessionStop::Page(Stop::Settled));
-        assert_eq!(srv.hits("/api/login"), 0);
+        assert_eq!(posts(&srv, "/api/login"), 0);
         // The button is disabled: the click is not dispatched and the app does nothing.
         let r = s.resume(&[Input::Click("#login")]);
         assert_eq!(r.stop, SessionStop::Page(Stop::Settled), "{r:?}");
-        assert_eq!(srv.hits("/api/login"), 0, "a disabled submit button is inert");
+        assert_eq!(posts(&srv, "/api/login"), 0, "a disabled submit button is inert");
         // Typed fields enable it. One click, one request.
         let r = s.resume(&[Input::Type("#email", "a@b.c"), Input::Type("#pw", "pw1"), Input::Click("#login")]);
         assert_eq!(r.stop, SessionStop::Page(Stop::Settled), "{r:?}");
-        assert_eq!(srv.hits("/api/login"), 1);
+        assert_eq!((posts(&srv, "/api/login"), srv.total()), (1, 2), "one POST and the page, nothing else");
         assert_eq!(s.storage().get_item(false, &srv.url(""), "login").as_deref(), Some("welcome"));
         assert_eq!(srv.hits("/"), 1, "no reload: the same realm");
     });

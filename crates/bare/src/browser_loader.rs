@@ -164,7 +164,8 @@ pub enum Stop {
 }
 
 /// One input of [`crate::browser_session::Session::resume`]: a selector (first match, as `querySelector`) and the existing
-/// `Browser` primitive that acts on it. No default action runs (see `browser.rs`).
+/// `Browser` primitive that acts on it. No default action runs (see `browser.rs`), except that `Click` at a submit button
+/// dispatches `submit` at its form owner behind the gates of `browser_form.rs` (a gate ends the run with `Fatal::Unsupported`).
 #[derive(Clone, Copy, Debug)]
 pub enum Input<'a> {
     Click(&'a str),
