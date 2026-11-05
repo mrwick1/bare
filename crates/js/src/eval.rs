@@ -410,6 +410,9 @@ pub struct Interp<'p> {
     n_arguments: u32,
     /// Class state (see `eval_classes.rs`).
     cls: ClassState,
+    /// Call frames for `Error.stack` (see `eval_stack.rs`).
+    stk: StackState,
+    k_stack: PropertyKey,
 }
 
 fn unsupported(what: &'static str, span: Span) -> Error {
@@ -476,7 +479,7 @@ impl<'p> Interp<'p> {
         let ks = [
             e!(key("length")), e!(key("name")), e!(key("message")), e!(key("prototype")), e!(key("constructor")),
             e!(key("toString")), e!(key("valueOf")), e!(key("__proto__")), e!(key("value")), e!(key("writable")),
-            e!(key("enumerable")), e!(key("configurable")), e!(key("get")), e!(key("set")),
+            e!(key("enumerable")), e!(key("configurable")), e!(key("get")), e!(key("set")), e!(key("stack")),
         ];
         let p = &prog;
         let mut it = Interp {
@@ -542,6 +545,8 @@ impl<'p> Interp<'p> {
             k_configurable: ks[11],
             k_get: ks[12],
             k_set: ks[13],
+            k_stack: ks[14],
+            stk: StackState::default(),
             n_arguments: 0,
             cls: ClassState::default(),
         };
@@ -596,7 +601,7 @@ impl<'p> Interp<'p> {
         let mut v = vec![Value::Object(self.global), Value::Object(self.object_proto), Value::Object(self.function_proto), Value::Object(self.array_proto), self.ret, self.completion];
         v.extend(self.error_protos.iter().map(|&o| Value::Object(o)));
         self.ext_roots(&mut v);
-        for k in [self.k_length, self.k_name, self.k_message, self.k_prototype, self.k_constructor, self.k_to_string, self.k_value_of, self.k_proto, self.k_value, self.k_writable, self.k_enumerable, self.k_configurable, self.k_get, self.k_set] {
+        for k in [self.k_length, self.k_name, self.k_message, self.k_prototype, self.k_constructor, self.k_to_string, self.k_value_of, self.k_proto, self.k_value, self.k_writable, self.k_enumerable, self.k_configurable, self.k_get, self.k_set, self.k_stack] {
             if let PropertyKey::String(s) = k {
                 v.push(Value::String(s));
             }
@@ -821,6 +826,14 @@ impl<'p> Interp<'p> {
             self.heap.define_own_property(o, self.k_message, &d)?;
             Ok(Value::Object(o))
         })();
+        let r = match r {
+            Ok(Value::Object(o)) => match self.capture_stack(o) {
+                Ok(()) => Ok(Value::Object(o)),
+                Err(Error::Limit(l)) => return Error::Limit(l),
+                Err(e) => return e,
+            },
+            r => r,
+        };
         match r {
             Ok(v) => Error::Throw(v),
             Err(HeapError::Limit(l)) => Error::Limit(LimitKind::Heap(l)),
@@ -1547,6 +1560,7 @@ impl<'p> Interp<'p> {
                 let proto = if let Value::Object(p) = pv { p } else { self.object_proto };
                 let obj = h!(self, self.heap.new_object(Some(proto)));
                 self.cls_set_nt(script, fid, o);
+                self.stk.new = true;
                 let r = self.call_script((script, fid), o, env, sb, Value::Object(obj), args);
                 self.cls.pending_nt = None;
                 let r = r?;
@@ -1567,6 +1581,7 @@ impl<'p> Interp<'p> {
 
     fn call_script(&mut self, (script, fid): (u32, FuncId), fobj: ObjId, cenv: u32, self_binding: bool, this: Value, args: &[Value]) -> Res<Value> {
         if self.func_of(script, fid).is_async {
+            self.stk.new = false;
             return self.call_async((script, fid), fobj, cenv, self_binding, this, args);
         }
         let (saved_env, saved_strict) = (self.env, self.strict);
@@ -1575,7 +1590,8 @@ impl<'p> Interp<'p> {
         // The callee runs on its own script code. The caller's code comes back on every exit.
         let saved_script = self.cur;
         self.select(script as usize);
-        let r = self.call_body(fobj, fid, env, self_binding, this, args);
+        let new = std::mem::take(&mut self.stk.new);
+        let r = self.in_frame(script, Where::Func(fid), new, |it| it.call_body(fobj, fid, env, self_binding, this, args));
         self.select(saved_script);
         self.env = saved_env;
         self.strict = saved_strict;
@@ -1960,11 +1976,15 @@ impl<'p> Interp<'p> {
                     return Ok(None);
                 }
                 let argv = self.eval_args(args)?;
-                if !self.is_callable(f) {
+                self.mark_call(e);
+                let r = if self.is_callable(f) {
+                    self.call_fn(f, this, &argv)
+                } else {
                     let m = format!("{} is not a function", self.src_text(callee));
-                    return Err(self.type_err(&m));
-                }
-                let r = self.call_fn(f, this, &argv)?;
+                    Err(self.type_err(&m))
+                };
+                self.stk.pos = 0;
+                let r = r?;
                 self.arg_pool.push(argv);
                 Ok(Some((r, Value::Undefined)))
             }
@@ -2085,7 +2105,10 @@ impl<'p> Interp<'p> {
             ExprKind::New { callee, args } => {
                 let f = self.eval_expr(callee)?;
                 let argv = self.eval_args(args)?;
-                self.construct(f, &argv, callee)
+                self.mark_call(e);
+                let r = self.construct(f, &argv, callee);
+                self.stk.pos = 0;
+                r
             }
             ExprKind::Seq(l) => {
                 let mut last = Value::Undefined;
@@ -3027,6 +3050,7 @@ include!("eval_promise_combinators.rs");
 include!("eval_binary.rs");
 include!("eval_binary_search.rs");
 include!("eval_scripts.rs");
+include!("eval_stack.rs");
 include!("eval_builtins.rs");
 include!("eval_json_stringify.rs");
 include!("eval_json_revive.rs");
@@ -3103,6 +3127,10 @@ mod interop_tests;
 #[cfg(test)]
 #[path = "eval_async_tests.rs"]
 mod async_tests;
+
+#[cfg(test)]
+#[path = "eval_stack_tests.rs"]
+mod stack_tests;
 
 #[cfg(test)]
 #[path = "eval_weak_tests.rs"]

@@ -390,6 +390,7 @@ impl<'p> Interp<'p> {
                     let proto = self.proto_from_ctor(nt)?;
                     let obj = h!(self, self.heap.new_object(Some(proto)));
                     self.cls_set_nt(script, fid, nt);
+                    self.stk.new = true;
                     let r = self.call_script((script, fid), f, env, sb, Value::Object(obj), args);
                     self.cls.pending_nt = None;
                     let r = r?;
@@ -447,7 +448,8 @@ impl<'p> Interp<'p> {
     /// [[Construct]] of a class constructor. The caller has counted the call depth.
     fn construct_class_body(&mut self, f: ObjId, args: &[Value], nt: ObjId) -> Res<Value> {
         let Some(cd) = self.cls.classes.get(&f).cloned() else { return Err(unsupported("class constructor without class data", Span::default())) };
-        self.in_script(cd.script, |it| it.construct_class_in(f, &cd, args, nt))
+        let class = cd.class;
+        self.in_script(cd.script, |it| it.in_frame(cd.script, Where::Class(class), true, |it| it.construct_class_in(f, &cd, args, nt)))
     }
 
     /// The body of `construct_class_body`, with the class's own script selected.
@@ -502,7 +504,10 @@ impl<'p> Interp<'p> {
         };
         let parent = self.super_constructor(active)?;
         let argv = self.eval_args(args)?;
-        let result = self.construct_nt(parent, &argv, nt, callee)?;
+        self.mark_call(e);
+        let result = self.construct_nt(parent, &argv, nt, callee);
+        self.stk.pos = 0;
+        let result = result?;
         self.arg_pool.push(argv);
         // BindThisValue: once only.
         let Some((te, ti)) = self.lookup(self.cls.n_this) else { return Err(unsupported("super() outside a derived constructor", self.prog.expr(e).span)) };

@@ -184,7 +184,7 @@ impl<'p> Interp<'p> {
         self.begin();
         self.completion = Value::Undefined;
         self.select(id);
-        let r = self.exec_current();
+        let r = self.in_frame(id as u32, Where::Top, false, |it| it.exec_current());
         self.select(old);
         self.env = 0;
         r

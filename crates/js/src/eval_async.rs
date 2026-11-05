@@ -171,6 +171,7 @@ enum Fr {
 struct Run {
     /// Slot of the script that owns the function: every id in the frames belongs to it.
     script: u32,
+    fid: FuncId,
     strict: bool,
     result: ObjId,
     call_env: u32,
@@ -828,7 +829,7 @@ impl<'p> Interp<'p> {
         let env = self.new_env(cenv, true)?;
         self.env = env;
         self.select(script as usize);
-        let r = self.async_start((script, fid), fobj, env, self_binding, this, args, result);
+        let r = self.in_frame(script, Where::Func(fid), false, |it| it.async_start((script, fid), fobj, env, self_binding, this, args, result));
         self.select(saved_script);
         self.env = saved_env;
         self.strict = saved_strict;
@@ -864,7 +865,7 @@ impl<'p> Interp<'p> {
                 return Err(e);
             }
         }
-        let mut run = Run { script, strict: self.strict, result, call_env: env, cur_env: env, awaiting: None, stack: Vec::new(), slots: Vec::new() };
+        let mut run = Run { script, fid, strict: self.strict, result, call_env: env, cur_env: env, awaiting: None, stack: Vec::new(), slots: Vec::new() };
         let first = match f.body {
             Body::Expr(e) => self.fpush(&mut run, Fr::BodyExpr).map(|()| Next::Eval(e)),
             Body::Block(l) => self.fpush(&mut run, Fr::Body).and_then(|()| self.list_from(&mut run, l, 0)).map(|s| match s {
@@ -890,8 +891,11 @@ impl<'p> Interp<'p> {
         self.strict = run.strict;
         run.awaiting = None;
         let next = if rejected { Next::Abr(Abr::Throw(arg)) } else { Next::Val(arg) };
-        let r = self.drive(&mut run, next);
-        let r = self.async_finish(run, r);
+        let (script, fid) = (run.script, run.fid);
+        let r = self.in_frame(script, Where::Func(fid), false, |it| {
+            let r = it.drive(&mut run, next);
+            it.async_finish(run, r)
+        });
         self.depth -= 1;
         self.select(saved_script);
         self.env = saved_env;
@@ -1110,14 +1114,17 @@ impl<'p> Interp<'p> {
         let argv: Vec<Value> = (from..run.slots.len()).map(|i| sval(run, i)).collect();
         self.strunc(run, b);
         let (ExprKind::Call { callee, .. } | ExprKind::New { callee, .. }) = self.prog.expr(e).kind else { return Err(unsupported("call", Span::default())) };
-        if is_new {
-            return val(self.construct(f, &argv, callee)?);
-        }
-        if !self.is_callable(f) {
+        self.mark_call(e);
+        let r = if is_new {
+            self.construct(f, &argv, callee)
+        } else if self.is_callable(f) {
+            self.call_fn(f, this, &argv)
+        } else {
             let m = format!("{} is not a function", self.src_text(callee));
-            return Err(self.type_err(&m));
-        }
-        val(self.call_fn(f, this, &argv)?)
+            Err(self.type_err(&m))
+        };
+        self.stk.pos = 0;
+        val(r?)
     }
 
     fn nullish_base_err(&mut self, base: Value, iv: Value) -> Error {
