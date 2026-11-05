@@ -114,7 +114,7 @@ impl Dom {
         Ok(())
     }
 
-    fn depth_of(&self, it: &mut Interp<'_>, n: NodeId) -> R<usize> {
+    pub(crate) fn depth_of(&self, it: &mut Interp<'_>, n: NodeId) -> R<usize> {
         let doc = self.doc.borrow();
         let (mut d, mut cur) = (0, n);
         while let Some(p) = doc.parent(cur) {

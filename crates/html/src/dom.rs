@@ -662,6 +662,43 @@ impl Document {
         self.attrs(attrs).iter().map(|a| a.name).find(|&n| self.attr_ns(n) == ns && self.attr_local(n) == local)
     }
 
+    /// Copy the node `n` of `src` into this document, with no parent and no children. An element keeps its name, its namespace, its prefix, and
+    /// each attribute keeps its namespace; the names go in this name table and the values in this text buffer. The caller checked the caps
+    /// first (`new_names_in`, `text_bytes`, `attr_slots`). Gives `None` for the top node, which cannot be copied.
+    pub fn import_node(&mut self, src: &Document, n: NodeId) -> Option<NodeId> {
+        Some(match *src.data(n) {
+            NodeData::Document => return None,
+            NodeData::Text(sp) => self.create_text(src.text(sp)),
+            NodeData::Comment(sp) => self.create_comment(src.text(sp)),
+            NodeData::Doctype(sp) => self.create_doctype(src.text(sp)),
+            NodeData::Element { name, attrs } => {
+                let name = self.intern(src.atom_str(name));
+                let start = self.attrs.len();
+                for a in src.attrs(attrs) {
+                    let attr = Attr { name: self.intern_ns(src.attr_ns(a.name), src.atom_str(a.name)), value: self.push_text(src.text(a.value)) };
+                    self.attrs.push(attr);
+                }
+                let list = AttrList { start: to_u32(start), len: attrs.len };
+                let id = self.new_node(NodeData::Element { name, attrs: list });
+                if src.is_foreign(n) {
+                    self.set_foreign(id, src.element_ns(n), src.element_prefix(n));
+                }
+                id
+            }
+        })
+    }
+
+    /// How many names of this document (tags and attribute names) the table of `target` does not have yet. A host checks it against its name cap
+    /// before `import_node`. It counts every name of this table, also one that no node of the tree uses any more, so it is an upper bound.
+    pub fn new_names_in(&self, target: &Document) -> usize {
+        (0..self.names.len())
+            .filter(|&i| match self.atom_ns.get(&(i as u32)) {
+                Some(&ns) => target.find_ns_atom(Some(ns), &self.names[i]).is_none(),
+                None => target.find_atom(&self.names[i]).is_none(),
+            })
+            .count()
+    }
+
     /// A new text node with no parent. It does not join a neighbour (only the parser joins texts).
     pub fn create_text(&mut self, text: &str) -> NodeId {
         let span = self.push_text(text);

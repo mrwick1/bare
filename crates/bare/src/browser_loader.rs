@@ -257,6 +257,11 @@ impl Dom {
         s.current.get().iter().for_each(keep);
     }
 
+    /// The "already started" flag of a script element that the fragment parser made (HTML Standard, 4.12.1.1): it never runs, wherever it goes.
+    pub(crate) fn mark_started(&self, el: NodeId) {
+        self.scripts.started.borrow_mut().insert(el);
+    }
+
     /// A node went into the tree. Every classic `<script>` of it (it may be a subtree) is prepared.
     pub(crate) fn script_inserted(&self, it: &mut Interp<'_>, node: NodeId) -> R<()> {
         if !self.scripts.enabled.get() || !self.is_element(node) {

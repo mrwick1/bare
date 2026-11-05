@@ -149,6 +149,18 @@ impl<'a> Tokens<'a> {
         }
     }
 
+    /// Fragment parsing: the context element is `name`. If its name has raw text, RCDATA, script data or PLAINTEXT, start in that state. No start tag
+    /// was seen, so no end tag is "appropriate" (the raw name is empty): `</script>` is text, as the standard says for the fragment case.
+    /// `plaintext` keeps its own name: it never ends. Only for `for_tree`, before the first `next`.
+    pub fn enter_fragment_raw(&mut self, name: &str) {
+        if let Some((refs, raw_name)) = raw_text_kind(name) {
+            self.state = State::RawText(refs);
+            self.raw_name = if raw_name == "plaintext" { raw_name } else { "" };
+            self.mark.state = self.state;
+            self.mark.raw_name = self.raw_name;
+        }
+    }
+
     /// The adjusted current node is not in the HTML namespace: `<![CDATA[` starts a CDATA section.
     pub fn set_foreign(&mut self, foreign: bool) {
         self.foreign = foreign;
@@ -716,9 +728,9 @@ impl<'a> Tokens<'a> {
     /// We just read "<" in raw text. Is this the end tag that closes the raw text?
     /// It is `</` plus the name, in any letter case, and then a space, "/" or ">".
     fn at_raw_end_tag(&self) -> bool {
-        if self.raw_name == "plaintext" {
+        if self.raw_name == "plaintext" || self.raw_name.is_empty() {
             return false;
-            // `<plaintext>` is the one raw text element that has no end.
+            // `<plaintext>` is the one raw text element that has no end. An empty name is a fragment context: no start tag, no end tag.
         }
         let name = self.raw_name.as_bytes();
         let rest = &self.input.as_bytes()[self.pos - 1..];

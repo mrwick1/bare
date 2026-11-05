@@ -5,6 +5,7 @@
 
 pub mod browser;
 mod browser_dom;
+mod browser_fragment;
 mod browser_events;
 mod browser_focus;
 #[cfg(test)]

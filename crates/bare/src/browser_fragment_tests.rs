@@ -25,6 +25,9 @@ fn browser_with(page: &str, lim: BrowserLimits, steps: u64) -> Browser {
     Browser::new(tree::parse(page), lim, eval, HeapLimits::default()).expect("browser")
 }
 
+/// `String.prototype.repeat` does not exist in this evaluator: a doubling helper for the page.
+const REP: &str = "function rep(s, n) { var r = '', p = s; while (n) { if (n & 1) r += p; p += p; n = n >> 1 } return r } ";
+
 fn browser() -> Browser {
     browser_with(PAGE, BrowserLimits::default(), 5_000_000)
 }
@@ -86,8 +89,8 @@ fn ordinary_html_entities_comments_and_text_round_trip() {
 fn void_elements_have_no_end_tag_and_rawtext_is_not_escaped() {
     let mut b = browser();
     assert_eq!(round(&mut b, "<br><img src=x alt=\"\"><hr><input disabled><wbr>"), "<br><img src=\"x\" alt=\"\"><hr><input disabled=\"\"><wbr>");
-    assert_eq!(round(&mut b, "<script>if (a<b && c>d) { x = '&amp;' }</script><style>p>a{content:'&amp;'}</style>"), "<script>if (a<b && c>d) { x = '&amp;' }</script><style>p>a{content:'&amp;'}</style>");
-    assert_eq!(js(&mut b, "t.firstChild.textContent + '|' + t.lastChild.textContent"), "if (a<b && c>d) { x = '&amp;' }|p>a{content:'&amp;'}");
+    assert_eq!(round(&mut b, "<script>if (a<b && c>d) { x = \"&amp;\" }</script><style>p>a{content:\"&amp;\"}</style>"), "<script>if (a<b && c>d) { x = \"&amp;\" }</script><style>p>a{content:\"&amp;\"}</style>");
+    assert_eq!(js(&mut b, "t.firstChild.textContent + '|' + t.lastChild.textContent"), "if (a<b && c>d) { x = \"&amp;\" }|p>a{content:\"&amp;\"}");
     // Markup made through the DOM API serializes by the same rules.
     assert_eq!(
         js(&mut b, "var q = document.createElement('div'); q.appendChild(document.createTextNode('1 < 2 & 3 > 0\\u00a0.')); var sc = q.appendChild(document.createElement('script')); sc.appendChild(document.createTextNode('a<b&c')); q.appendChild(document.createComment('k')); q.appendChild(document.createElement('br')); q.innerHTML"),
@@ -123,7 +126,7 @@ fn svg_and_mathml_keep_their_namespaces_through_the_import() {
         "<svg viewBox=\"0 0 1 1\"><circle r=\"1\"></circle><a xlink:href=\"#h\"></a><foreignObject><p>x</p></foreignObject></svg><math><mi>x</mi></math>"
     );
     assert_eq!(
-        js(&mut b, &format!("var s = t.firstChild; [s.namespaceURI, s.firstChild.namespaceURI, s.getAttribute('viewBox'), s.childNodes[1].getAttributeNS('{xlink}', 'href'), s.childNodes[1].getAttribute('href'), s.lastChild.firstChild.namespaceURI, t.lastChild.namespaceURI, t.lastChild.firstChild.localName, s.tagName, s.lastChild.tagName].join()")),
+        js(&mut b, &format!("var s = t.firstChild; [s.namespaceURI, s.firstChild.namespaceURI, s.getAttribute('viewBox'), s.childNodes[1].getAttributeNS('{xlink}', 'href'), String(s.childNodes[1].getAttribute('href')), s.lastChild.firstChild.namespaceURI, t.lastChild.namespaceURI, t.lastChild.firstChild.localName, s.tagName, s.lastChild.tagName].join()")),
         format!("{svg},{svg},0 0 1 1,#h,null,http://www.w3.org/1999/xhtml,http://www.w3.org/1998/Math/MathML,mi,svg,foreignObject")
     );
     // A selector sees the SVG element by its (case-kept) local name.
@@ -278,16 +281,16 @@ fn the_brand_is_checked_before_anything_runs() {
 #[test]
 fn caps_fail_before_the_target_changes_and_cannot_be_caught() {
     let cases: Vec<(&str, BrowserLimits, String, &'static str)> = vec![
-        ("nodes", BrowserLimits { max_nodes: 30, ..Default::default() }, "'<i></i>'.repeat(40)".into(), "dom-nodes"),
-        ("text", BrowserLimits { max_text_bytes: 400, ..Default::default() }, "'<i>' + 'x'.repeat(500) + '</i>'".into(), "dom-text"),
+        ("nodes", BrowserLimits { max_nodes: 30, ..Default::default() }, "rep('<i></i>', 40)".into(), "dom-nodes"),
+        ("text", BrowserLimits { max_text_bytes: 400, ..Default::default() }, "'<i>' + rep('x', 500) + '</i>'".into(), "dom-text"),
         ("attrs", BrowserLimits { max_attr_slots: 20, ..Default::default() }, "'<i a=1 b=2 c=3 d=4 e=5 f=6 g=7 h=8 j=9 k=0 l=1 m=2 n=3 o=4 p=5 q=6 r=7 s=8 t=9 u=0 v=1 w=2></i>'".into(), "dom-attrs"),
         ("names", BrowserLimits { max_names: 40, ..Default::default() }, "'<i ' + Array.from({ length: 80 }, function (_, i) { return 'n' + i + '=1' }).join(' ') + '></i>'".into(), "dom-names"),
-        ("depth", BrowserLimits { max_tree_depth: 6, ..Default::default() }, "'<div>'.repeat(7)".into(), "dom-depth"),
-        ("string", BrowserLimits { max_string_bytes: 100, ..Default::default() }, "'x'.repeat(200)".into(), "dom-string"),
+        ("depth", BrowserLimits { max_tree_depth: 6, ..Default::default() }, "rep('<div>', 7)".into(), "dom-depth"),
+        ("string", BrowserLimits { max_string_bytes: 100, ..Default::default() }, "rep('x', 200)".into(), "dom-string"),
     ];
     for (what, limits, expr, kind) in cases {
         let mut b = browser_with(PAGE, limits, 5_000_000);
-        let src = format!("var d = document.createElement('div'); d.innerHTML = 'k'; var k = d.firstChild; var fin = 0, caught = 0, big = {expr}; try {{ d.innerHTML = big }} catch (e) {{ caught = 1 }} finally {{ fin = 1 }}");
+        let src = format!("{REP}var d = document.createElement('div'); d.innerHTML = 'k'; var k = d.firstChild; var fin = 0, caught = 0, big = {expr}; try {{ d.innerHTML = big }} catch (e) {{ caught = 1 }} finally {{ fin = 1 }}");
         assert_eq!(js(&mut b, &src), lim(kind), "{what}");
         // The old child is still in place, and neither catch nor finally ran.
         assert_eq!(js(&mut b, "[d.firstChild === k, d.childNodes.length, d.textContent, fin, caught].join()"), "true,1,k,0,0", "{what}");
@@ -298,11 +301,12 @@ fn caps_fail_before_the_target_changes_and_cannot_be_caught() {
 fn the_depth_bound_counts_the_depth_of_the_target() {
     let limits = BrowserLimits { max_tree_depth: 6, ..Default::default() };
     let mut b = browser_with(PAGE, limits, 5_000_000);
+    js(&mut b, REP);
     // A detached target is at depth 0: six levels fit, seven do not (the same rule as `appendChild`).
-    assert_eq!(js(&mut b, "var d = document.createElement('div'); d.innerHTML = '<div>'.repeat(6); var n = 0, c = d; while ((c = c.firstChild)) n++; n"), "6");
+    assert_eq!(js(&mut b, "var d = document.createElement('div'); d.innerHTML = rep('<div>', 6); var n = 0, c = d; while ((c = c.firstChild)) n++; n"), "6");
     // `#a` is at depth 3 (html, body, div): only three levels fit under it.
-    assert_eq!(js(&mut b, "var a = document.getElementById('a'); a.innerHTML = '<div>'.repeat(3); a.firstChild.firstChild.firstChild.tagName"), "DIV");
-    assert_eq!(js(&mut b, "a.innerHTML = '<div>'.repeat(4)"), lim("dom-depth"));
+    assert_eq!(js(&mut b, "var a = document.getElementById('a'); a.innerHTML = rep('<div>', 3); a.firstChild.firstChild.firstChild.tagName"), "DIV");
+    assert_eq!(js(&mut b, "a.innerHTML = rep('<div>', 4)"), lim("dom-depth"));
     assert_eq!(js(&mut b, "a.firstChild.firstChild.firstChild.tagName"), "DIV");
     // Text counts as one level, like an appended text node.
     assert_eq!(js(&mut b, "a.innerHTML = '<i><i><i>x'"), lim("dom-depth"));
@@ -311,9 +315,10 @@ fn the_depth_bound_counts_the_depth_of_the_target() {
 #[test]
 fn a_small_step_budget_stops_a_large_parse_before_it_runs() {
     let mut b = browser_with(PAGE, BrowserLimits::default(), 200_000);
-    assert_eq!(js(&mut b, "var d = document.createElement('div'); var s = '<i>x</i>'.repeat(10); d.innerHTML = s; d.childNodes.length"), "10");
+    js(&mut b, REP);
+    assert_eq!(js(&mut b, "var d = document.createElement('div'); var s = rep('<i>x</i>', 10); d.innerHTML = s; d.childNodes.length"), "10");
     let nodes = b.document().borrow().len();
-    let r = js(&mut b, "var big = '<b>1</b>'.repeat(120000); var kept = d.firstChild; d.innerHTML = big; 'no'");
+    let r = js(&mut b, "var big = rep('<b>1</b>', 120000); var kept = d.firstChild; d.innerHTML = big; 'no'");
     assert_eq!(r, format!("limit:{:?}", LimitKind::Steps), "{r}");
     // The parse never made a node in the page's document, and the old children stayed.
     assert!(b.document().borrow().len() <= nodes + 1, "no node of the fragment");
@@ -381,4 +386,28 @@ fn fragment_scripts_stay_inert_in_the_document_and_start_no_fetch() {
         assert_eq!((srv.hits("/frag.js"), srv.hits("/body.js"), srv.hits("/img.png")), (0, 0, 0));
         assert_eq!((r.script_throws, r.load_errors, r.fetches), (0, 0, 0), "{r:?}");
     });
+}
+
+// ---------------------------------------------------------------------------------------------- depth without recursion
+
+#[test]
+fn a_very_deep_tree_is_read_and_replaced_without_recursion() {
+    // The page parser builds 30,000 nested divs natively. The walk is iterative, so a 1 MiB stack is enough for the getter, and a replacement
+    // that imports a 30,000-deep fragment works the same way.
+    let n = 30_000;
+    let page = format!("<!doctype html><body><div id=top>{}x{}</div>", "<div>".repeat(n), "</div>".repeat(n));
+    let r = std::thread::Builder::new()
+        .stack_size(1 << 20)
+        .spawn(move || {
+            let limits = BrowserLimits { max_tree_depth: 100_000, max_nodes: 1 << 20, ..Default::default() };
+            let mut b = browser_with(&page, limits, 50_000_000);
+            let got = js(&mut b, "var top = document.getElementById('top'); top.innerHTML.length");
+            let moved = js(&mut b, "var h = top.innerHTML; top.innerHTML = h; [top.innerHTML === h, top.innerHTML.length].join()");
+            (got, moved)
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+    assert_eq!(r.0, (11 * 30_000 + 1).to_string());
+    assert_eq!(r.1, format!("true,{}", 11 * 30_000 + 1));
 }

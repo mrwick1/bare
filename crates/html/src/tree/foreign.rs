@@ -18,7 +18,7 @@
 //!
 //! What it does not do (known gaps, on purpose):
 //! - The MathML attribute `definitionurl` is adjusted, but no other MathML adjustment exists (the standard has no more).
-//! - Fragment parsing does not exist, so there is no foreign context element.
+//! - Fragment parsing (`fragment.rs`) refuses a foreign context element, so the adjusted current node is always the current node.
 
 use super::{Builder, Token};
 use crate::dom::Ns;
