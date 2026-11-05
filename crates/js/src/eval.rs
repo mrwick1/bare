@@ -35,7 +35,7 @@
 //! too), live environments, function slots. A limit ends the run with [`Error::Limit`], never a JS value, and
 //! cannot be caught by `try`. A heap limit is [`LimitKind::Heap`].
 //! Defaults: `max_call_depth` 100, `max_traversal_depth` 512 and `max_statement_frames` 512 (`EvalLimits::default`). Hard ceilings:
-//! `max_call_depth` is clamped to 128, `max_traversal_depth` to 768 and `max_statement_frames` to 768. Two different things are
+//! `max_call_depth` is clamped to 256, `max_traversal_depth` to 768 and `max_statement_frames` to 768. Two different things are
 //! counted. `max_traversal_depth` bounds NATIVE recursion (expressions, patterns, calls, constructors, the setup walk, `exec`).
 //! `max_statement_frames` bounds the pending control frames of blocks, loops, `switch`, `try` and labels, which live on the heap
 //! in the statement machine (`eval_statements.rs`), all synchronous calls together. A statement frame is not a native frame.
@@ -72,7 +72,7 @@ use std::rc::Rc;
 pub struct EvalLimits {
     /// Statements, expressions and traversed native elements, per `run` or top-level `call`.
     pub max_steps: u64,
-    /// Clamped to 128. The default is 100.
+    /// Clamped to 256. Every call also takes a traversal frame, so `max_traversal_depth` still bounds the native stack. The default is 100.
     pub max_call_depth: u32,
     /// Native recursion: expressions, patterns, calls, constructors, setup walks and `exec`, shared. Clamped to 768. The default is 512.
     pub max_traversal_depth: u32,
@@ -493,7 +493,7 @@ impl<'p> Interp<'p> {
     fn with_code(prog: Rc<Program<'static>>, mut heap: Heap, mut limits: EvalLimits) -> Result<Interp<'p>, Error> {
         let stats = prog.stats();
         Self::check_code_limits(&prog, &limits)?;
-        limits.max_call_depth = limits.max_call_depth.min(128);
+        limits.max_call_depth = limits.max_call_depth.min(256);
         limits.max_traversal_depth = limits.max_traversal_depth.min(768);
         limits.max_statement_frames = limits.max_statement_frames.min(768);
         if limits.max_envs == 0 { return Err(Error::Limit(LimitKind::Envs)); }

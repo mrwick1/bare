@@ -69,7 +69,7 @@ pub struct SessionConfig {
     pub fetch: FetchLimits,
     pub limits: SessionLimits,
     pub browser: BrowserLimits,
-    /// The evaluator limits of each document. `new` raises the depth caps to their ceilings (768 frames, 128 calls).
+    /// The evaluator limits of each document. `new` raises the depth caps to their ceilings (768 frames, 256 calls).
     pub eval: EvalLimits,
     pub heap: HeapLimits,
     /// Override the browser's default media-query viewport, in CSS pixels.
@@ -89,7 +89,7 @@ impl SessionConfig {
             fetch: FetchLimits::default(),
             limits: SessionLimits::default(),
             browser: BrowserLimits::default(),
-            eval: EvalLimits { max_traversal_depth: 768, max_call_depth: 128, max_statement_frames: 768, ..Default::default() },
+            eval: EvalLimits { max_traversal_depth: 768, max_call_depth: 256, max_statement_frames: 768, ..Default::default() },
             heap: HeapLimits::default(),
             viewport: None,
             virtual_clock: false,
