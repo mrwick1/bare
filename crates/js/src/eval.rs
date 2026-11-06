@@ -1481,6 +1481,10 @@ impl<'p> Interp<'p> {
         self.method(op, "hasOwnProperty", Nat::ObjHasOwn, 1)?;
         self.method(op, "toString", Nat::ObjToString, 0)?;
         self.method(op, "valueOf", Nat::ObjValueOf, 0)?;
+        // `Function.prototype.length` is 0 and `.name` is "" (writable false, enumerable false, configurable true).
+        let empty = h!(self, self.heap.intern_str(""));
+        self.def(fp, self.k_length, Value::Number(0.0), false, false, true)?;
+        self.def(fp, self.k_name, Value::String(empty), false, false, true)?;
         self.method(fp, "call", Nat::FnCall, 1)?;
         self.method(fp, "apply", Nat::FnApply, 2)?;
         self.method(fp, "bind", Nat::FnBind, 1)?;
