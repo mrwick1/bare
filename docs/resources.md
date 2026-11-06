@@ -3213,3 +3213,23 @@ Problems noticed, not changed:
 - The `WeakSet` error message has a `: 1` suffix that V8 does not have.
 - `ta_sort_in_place` calls `coerce_number` twice for each element.
 - `/` and `toString` of very large values are slower than num-bigint (see the table).
+
+### BigInt after Proxy
+
+The BigInt change was rebased onto main f0ea006, which added `Proxy`. Both changes edited the write paths of the evaluator.
+
+- `set_miss`, the slow side of `put_prop` and of `o_set_value`, now also answers `NeedsBigInt`: it converts the value with ToBigInt and writes again. The old `heap_set` is gone.
+- `o_define_own_property` sends `NeedsBigInt` to `define_big`, which converts the `value` and defines again. The old `heap_define` is gone.
+- `o_set` converts a view element with `ta_conv`, so a BigInt view gets ToBigInt there too.
+- `get_prop_big` uses `get_miss`, as `get_prop` does.
+
+Checks: 8 cases in `tools/fixtures/js/proxy-cases.txt` (`bigview_1` to `bigview_8`) write to `BigInt64Array` and `BigUint64Array` through `Object.defineProperty`, `Reflect.set`, a proxy and a proxy on the prototype chain. All 76 proxy cases and all 58 BigInt cases match Node. 2,288 workspace tests pass. `tools/js/builtin_inventory.sh` prints 117 of 655 missing.
+
+Cost against main f0ea006. `perf stat -e instructions:u`, minimum of 3 runs, each binary in its own `CARGO_TARGET_DIR`. 40 rows at scale 10: `eval_load` 8, `arrobj_load` 15, `binary_load` 9 and `proxy_load` 8. All 40 are below +0.5%. They run from -8.34% (`arrobj_load arrays`) to +0.37% (`proxy_load chain`).
+
+The first rebased build missed the limit on two rows. Both causes were code generation:
+
+1. `proxy_load chain` (+1.22%). The first merge sent every error of `o_define_own_property` to a new cold function, which then called `heap_miss_w`. Each proxy level of the define path took one more call. `NeedsBigInt` now has its own arm, and the other errors go to `heap_miss_w` as on main. The row fell to +0.37%.
+2. `arrobj_load arrays` (+1.94%). A `perf record` profile showed `index_key` as a function of its own, where main inlines it into the loops of `indexOf`, `includes`, `slice` and `concat`. `index_key` is now `#[inline(always)]`, and its string path (`index_key_str`) is cold. The row fell to -8.34%.
+
+Not tested: cycles, rows at scale 1 and 100, `numeric_load`, and the live staging login.

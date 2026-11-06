@@ -636,3 +636,27 @@ var r; try { r = String(JSON.stringify(new Proxy(Object('ab'),{}))); } catch (x)
 === wrapper_18
 var r; try { r = String(JSON.stringify(Object('ab'))); } catch (x) { r = "throw:" + x.name; }
 (function () { return r; })
+=== bigview_1
+var r; try { var a = new BigInt64Array(2); Object.defineProperty(a, 0, { value: "7" }); r = String(a[0]); } catch (x) { r = "throw:" + x.name; }
+(function () { return r; })
+=== bigview_2
+var r; try { var a = new BigUint64Array(1); Reflect.set(a, 0, true); r = String(a[0]); } catch (x) { r = "throw:" + x.name; }
+(function () { return r; })
+=== bigview_3
+var r; try { var a = new BigInt64Array(1); var p = new Proxy(a, {}); p[0] = "-5"; r = String(a[0]); } catch (x) { r = "throw:" + x.name; }
+(function () { return r; })
+=== bigview_4
+var r; try { var a = new BigInt64Array(1); var p = new Proxy(a, {}); p[0] = 1; r = String(a[0]); } catch (x) { r = "throw:" + x.name; }
+(function () { return r; })
+=== bigview_5
+var r; try { var a = new BigInt64Array(1); Object.defineProperty(a, 0, { value: 3 }); r = String(a[0]); } catch (x) { r = "throw:" + x.name; }
+(function () { return r; })
+=== bigview_6
+var r; try { var a = new BigInt64Array(1); var p = new Proxy(a, {}); Object.defineProperty(p, 0, { value: "9" }); r = String(a[0]); } catch (x) { r = "throw:" + x.name; }
+(function () { return r; })
+=== bigview_7
+var r; try { var a = new BigInt64Array(1); var o = Object.create(new Proxy({}, {})); Reflect.set(a, 0, "4", a); r = String(a[0]); } catch (x) { r = "throw:" + x.name; }
+(function () { return r; })
+=== bigview_8
+var r; try { var a = new BigInt64Array(1); var p = new Proxy({}, {}); Object.setPrototypeOf(a, p); a[0] = { valueOf() { return 11n; } }; r = String(a[0]); } catch (x) { r = "throw:" + x.name; }
+(function () { return r; })

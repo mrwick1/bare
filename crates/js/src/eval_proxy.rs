@@ -322,21 +322,18 @@ impl<'p> Interp<'p> {
     fn o_define_own_property(&mut self, o: ObjId, key: PropertyKey, d: &PropertyDescriptor) -> Res<bool> {
         match self.heap.define_own_property(o, key, d) {
             Ok(v) => Ok(v),
-            Err(e) => self.define_miss(o, key, d, e),
+            Err(HeapError::NeedsBigInt) => self.define_big(o, key, d),
+            Err(e) => self.heap_miss_w(e, |s| s.heap.define_own_property(o, key, d), |s| s.px_define_own_property(o, key, d)),
         }
     }
 
-    /// The slow side of `o_define_own_property`. The `value` of a `BigInt64Array` or `BigUint64Array` element that is not a
-    /// BigInt is converted with ToBigInt, as in `set_miss`.
+    /// `o_define_own_property` of a `BigInt64Array` or `BigUint64Array` element whose `value` is not a BigInt: ToBigInt (as in
+    /// `set_miss`), then the define again. A function of its own, so that the proxy path keeps one call level.
     #[cold]
     #[inline(never)]
-    fn define_miss(&mut self, o: ObjId, key: PropertyKey, d: &PropertyDescriptor, e: HeapError) -> Res<bool> {
-        if let HeapError::NeedsBigInt = e {
-            let b = self.to_bigint(d.value.unwrap_or(Value::Undefined))?;
-            let d = PropertyDescriptor { value: Some(b), ..*d };
-            return self.o_define_own_property(o, key, &d);
-        }
-        self.heap_miss_w(e, |s| s.heap.define_own_property(o, key, d), |s| s.px_define_own_property(o, key, d))
+    fn define_big(&mut self, o: ObjId, key: PropertyKey, d: &PropertyDescriptor) -> Res<bool> {
+        let b = self.to_bigint(d.value.unwrap_or(Value::Undefined))?;
+        self.o_define_own_property(o, key, &PropertyDescriptor { value: Some(b), ..*d })
     }
 
     #[inline(always)]

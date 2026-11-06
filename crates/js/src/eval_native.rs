@@ -376,8 +376,17 @@ impl<'p> Interp<'p> {
         Ok(Value::Object(o))
     }
 
+    /// Always inlined: the array loops call it for each element, and the compiler stopped inlining it once BigInt and Proxy
+    /// were both in (`arrobj_load arrays` cost +1.9%). The rare string key is out of line.
+    #[inline(always)]
     fn index_key(&mut self, index: u64) -> Res<PropertyKey> {
         if index <= MAX_INDEX as u64 { return Ok(PropertyKey::Index(index as u32)); }
+        self.index_key_str(index)
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn index_key_str(&mut self, index: u64) -> Res<PropertyKey> {
         Ok(h!(self, self.heap.key_from_str(&index.to_string())))
     }
 
