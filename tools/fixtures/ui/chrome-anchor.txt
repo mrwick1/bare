@@ -1,0 +1,20 @@
+anchor-interface-shape	function,HTMLAnchorElement,true,true,true,true,false,false,[object HTMLAnchorElement],[object HTMLAreaElement],function,function,true,true,get href,set href
+anchor-brand-check	TypeError:Illegal invocation | TypeError:Illegal invocation | TypeError:Illegal invocation | TypeError:Illegal invocation
+anchor-absolute-url-parts	https://example.com:8443/p/q?x=1&y=2#frag | https: | example.com:8443 | example.com | 8443 | /p/q | ?x=1&y=2 | #frag | https://example.com:8443
+anchor-normalizes-the-url	http://example.com/a/c?q=1#h | http: | example.com | example.com |  | /a/c | ?q=1 | #h | http://example.com\nhttps://e.com/ | https: | e.com | e.com |  | / |  |  | https://e.com\nhttp://e.com/ | http: | e.com | e.com |  | / |  |  | http://e.com\nhttp://e.com/x | http: | e.com | e.com |  | /x |  |  | http://e.com
+anchor-empty-query-and-hash	http://e.com/p? | http: | e.com | e.com |  | /p |  |  | http://e.com\nhttp://e.com/p# | http: | e.com | e.com |  | /p |  |  | http://e.com\nhttp://e.com/p?# | http: | e.com | e.com |  | /p |  |  | http://e.com\nhttp://e.com/p?a#b#c | http: | e.com | e.com |  | /p | ?a | #b#c | http://e.com
+anchor-no-href	 | : |  |  |  |  |  |  |  false
+anchor-href-setter-writes-the-attribute	http://e.com/a b > http://e.com/a%20b | 5 | null | undefined
+anchor-setter-follows-the-attribute	/one | /two?x#y | ""
+anchor-part-setters	http://e.com:81/new%20path?q#h | http://e.com:81/new%20path?a=b%20c#h | http://e.com:81/new%20path?a=b%20c#frag | http://e.com:8080/new%20path?a=b%20c#frag | http://x.test:8080/new%20path?a=b%20c#frag | http://y.test:9/new%20path?a=b%20c#frag | https://y.test:9/new%20path?a=b%20c#frag | https://y.test:9/new%20path
+anchor-part-setter-without-href	null
+anchor-to-string-is-href	http://e.com/x http://e.com/x http://e.com/y true
+anchor-other-schemes	mailto:a@b.c?subject=hi#top | mailto: |  |  |  | a@b.c | ?subject=hi | #top | null\njavascript:void(0) | javascript: |  |  |  | void(0) |  |  | null\ntel:+1234 | tel: |  |  |  | +1234 |  |  | null
+anchor-invalid-url	http:// | : |  |  |  |  |  |  | \nhttp://[bad | : |  |  |  |  |  |  | 
+anchor-created-element	"" | https://e.com/x?y=1
+anchor-clone-keeps-href	http://e.com/x#y true #y
+anchor-svg-and-xhtml-are-not-html-anchors	false undefined undefined
+area-url-parts	http://e.com:81/x/y?z#w | http: | e.com:81 | e.com | 81 | /x/y | ?z | #w | http://e.com:81
+area-setters	http://f.test/y?q=1#h /y?q=1#h
+link-href-still-reflects	http://e.com/t.css http://e.com/t.css undefined
+anchor-lazy-global	function,true,true,true

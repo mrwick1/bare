@@ -21,7 +21,7 @@
 //!
 //! `FormData`: `append`, `set`, `get`, `getAll`, `has`, `delete`, `entries`, `keys`, `values`, `forEach` and
 //! `[Symbol.iterator]`. A value is a string or a File. Another Blob becomes a File ("blob", or `filename`). A value that
-//! is not a Blob goes through `ToString`. The iterators are live. `new FormData(form)` is `Unsupported`.
+//! is not a Blob goes through `ToString`. The iterators are live. `new FormData(form)` takes the entry list of the form (`Dom::entry_list` in `browser_submit.rs`: the successful controls it owns, in tree order); a file input is an empty File named "". It fires no `formdata` event.
 //! As a `fetch`, `Request` or `Response` body (`Dom::web_body`): a Blob is its bytes, typed by its `type`; a FormData is
 //! `multipart/form-data` with a new random boundary for each request, written in one buffer.
 //!
@@ -756,15 +756,36 @@ fn cost(n: &str, e: &Ent) -> usize {
 }
 
 fn form_ctor(d: &Dom, it: &mut Interp<'_>, _: Value, a: &[Value]) -> V {
-    if !matches!(arg(a, 0), Value::Undefined) {
-        return Err(Error::Unsupported(unsupported("FormData from a form element")));
-    }
+    let form = match arg(a, 0) {
+        Value::Undefined => None,
+        v => match d.node_of(v).filter(|&n| d.doc.borrow().is_html(n, "form")) {
+            Some(n) => Some(n),
+            None => return Err(it.type_error("Failed to construct 'FormData': parameter 1 is not of type 'HTMLFormElement'.")),
+        },
+    };
     let intrinsic = d.web.s.borrow().made.expect("made").form_p;
     let proto = it.host_proto_from_new_target(intrinsic)?;
     room(d, 0)?;
+    // The entries first: the form walk can fail, and then no FormData exists.
+    let list = match form {
+        Some(f) => d.entry_list(it, f, None)?,
+        None => Vec::new(),
+    };
     let o = d.obj(it, proto)?;
     d.web.s.borrow_mut().forms.insert(o, Form::default());
     d.web.active.set(true);
+    for (n, v) in list {
+        let e = match v {
+            Some(v) => Ent::S(v),
+            None => {
+                // A file input with no file: an empty File with no name.
+                let fp = d.web.s.borrow().made.expect("made").file_p;
+                let Value::Object(f) = new_blob(d, it, fp, BlobData { bytes: Vec::new(), ty: "application/octet-stream".into(), file: Some((String::new(), it.wall_now_ms())) })? else { unreachable!() };
+                Ent::B(f)
+            }
+        };
+        push(d, o, n, e)?;
+    }
     Ok(Value::Object(o))
 }
 

@@ -169,8 +169,9 @@ pub enum NodeData {
     Text(Span),
     /// `<!-- text -->`. Use `Document::text` to read it.
     Comment(Span),
-    /// The top of a shadow tree (DOM Standard, ShadowRoot). It has no parent link and is never a child: the nodes of its tree have it as their top. Its host
-    /// and mode are in sparse tables (`Document::shadow_host`), so a page without shadow roots pays nothing. The tree builder never makes one.
+    /// The top of a shadow tree (DOM Standard, ShadowRoot), or a plain `DocumentFragment` (the contents of a `template`, `Document::create_fragment`: no host).
+    /// It has no parent link and is never a child: the nodes of its tree have it as their top. A shadow root has its host and mode in sparse tables
+    /// (`Document::shadow_host`), so a page without shadow roots pays nothing. The tree builder makes one for each `template` that has children.
     ShadowRoot,
 }
 
@@ -227,6 +228,8 @@ pub struct Document {
     // The shadow root of each shadow host, by `NodeId::index` of the host. The root is not a child of the host: the light links of the host never show it.
     shadow_host: HashMap<u32, (NodeId, bool), BuildHasherDefault<Fnv>>,
     // The way back: the host of each shadow root, and whether its mode is open. A host that is not in `shadow_of` has no root.
+    template_content: HashMap<u32, NodeId, BuildHasherDefault<Fnv>>,
+    // The contents of each HTML `template` that has any, by `NodeId::index` of the template: a fragment node that is not a child of the template.
     watcher: Option<Watcher>,
     // The host function that is told of each change (see `set_watcher`). A page with no watcher pays one `Option` check at a change.
 }
@@ -317,6 +320,7 @@ impl Document {
             text_revision: 0,
             shadow_of: HashMap::default(),
             shadow_host: HashMap::default(),
+            template_content: HashMap::default(),
             watcher: None,
         };
         // The order matters: it must match `Atom::ID` and `Atom::CLASS`.
@@ -380,6 +384,30 @@ impl Document {
     /// Is the shadow root `root` in open mode? `false` for a closed root and for any other node.
     pub fn shadow_is_open(&self, root: NodeId) -> bool {
         self.shadow_host.get(&(root.index() as u32)).is_some_and(|&(_, open)| open)
+    }
+
+    /// A new fragment node: the top of a tree with no host (JS: `document.createDocumentFragment()`).
+    pub fn create_fragment(&mut self) -> NodeId {
+        self.new_node(NodeData::ShadowRoot)
+    }
+
+    /// The contents of the HTML `template` `tpl`, if it has any yet. A page with no template contents pays one `is_empty` check.
+    #[inline]
+    pub fn template_content(&self, tpl: NodeId) -> Option<NodeId> {
+        if self.template_content.is_empty() {
+            return None;
+        }
+        self.template_content.get(&(tpl.index() as u32)).copied()
+    }
+
+    /// The contents of the HTML `template` `tpl`; an empty fragment is made if it has none. The caller checked that `tpl` is an HTML `template`.
+    pub fn make_template_content(&mut self, tpl: NodeId) -> NodeId {
+        if let Some(c) = self.template_content(tpl) {
+            return c;
+        }
+        let c = self.create_fragment();
+        self.template_content.insert(tpl.index() as u32, c);
+        c
     }
 
     /// The parent of this node in the shadow-including tree: its parent, or the host when this node is a shadow root. JS: the step of `getRootNode({composed: true})`.

@@ -1,0 +1,28 @@
+formdata-text-controls	a="1"&b=""&c="x y"&h="hid"&n="5"&e="a@b.c"&d="last"
+formdata-checkbox-and-radio	c1="on"&c3="v3"&r="b"
+formdata-checked-set-by-script	c1="on"&r="b"
+formdata-value-set-by-script	a="changed"&b="2"
+formdata-skips-disabled-and-nameless	b="4"
+formdata-fieldset-disabled	lg="legend"&b="2"
+formdata-skips-buttons	a="1"
+formdata-textarea	t="one two"&e=""&n="\\nleading"
+formdata-textarea-newlines	t="a\\nb\\nc\\nd"
+formdata-select-single	s1="b"&s2="First"&s3=""
+formdata-select-option-text-value	s="spaced text"
+formdata-select-multiple	m="a"&m="c"
+formdata-select-disabled-and-last-selected	a="2"&b="2"&d="2"
+formdata-select-in-optgroup	s="b"
+formdata-input-file-empty	up=File("",0,"application/octet-stream")&after="1" true true true 1
+formdata-tree-order-and-nesting	a="1"&b="2"&c="3"&a="4" ["1","4"]
+formdata-form-attribute	in="1"&moved="3"&outside="5" / other="2"&g1="4"
+formdata-form-attribute-unknown-id	a="1"
+formdata-no-controls	 false 
+formdata-is-a-snapshot	a="1" / a="2"&z="late"
+formdata-from-form-is-editable	a="x"&b="2"&a="y" ["x","y"] 1
+formdata-new-with-no-argument	 / 
+formdata-wrong-argument	TypeError:Failed to construct 'FormData': parameter 1 is not of type 'HTMLFormElement'. | TypeError:Failed to construct 'FormData': parameter 1 is not of type 'HTMLFormElement'. | TypeError:Failed to construct 'FormData': parameter 1 is not of type 'HTMLFormElement'. | TypeError:Failed to construct 'FormData': parameter 1 is not of type 'HTMLFormElement'. | TypeError:Failed to construct 'FormData': parameter 1 is not of type 'HTMLFormElement'. | TypeError:Failed to construct 'FormData': parameter 1 is not of type 'HTMLFormElement'. | TypeError:Failed to construct 'FormData': parameter 1 is not of type 'HTMLFormElement'.
+formdata-form-created-by-script	k="v"
+formdata-inputs-without-type-attribute-values	a="2020-01-02"&b="30"&c="#ff0000"&d="pw"&e="q"&f="http://e.com"&g="123"&h="bogus"
+formdata-value-sanitization	a="line1line2"&b="abc"&c="  padded  "
+formdata-submitter-is-not-included	a="1"
+formdata-as-a-fetch-body-shape	a,b 1,x y 2 [object FormData]

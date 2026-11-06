@@ -299,6 +299,8 @@ struct Builder {
     // True while we move content out of a table. See `place`.
     raw: Option<&'static str>,
     // Set when we made an HTML element with raw text or RCDATA: `drive` tells the tokenizer, and clears it.
+    templates: Vec<NodeId>,
+    // The `template` elements, in tree order. `done` moves the children of each into its contents.
 }
 
 impl Builder {
@@ -314,12 +316,19 @@ impl Builder {
             skip_newline: false,
             foster: false,
             raw: None,
+            templates: Vec::new(),
         }
     }
 
     /// The input is over: close the tree and give it.
     fn done(mut self) -> Document {
         self.finish();
+        for t in std::mem::take(&mut self.templates) {
+            if self.doc.children(t).next().is_some() {
+                let contents = self.doc.make_template_content(t);
+                self.doc.move_children(t, contents);
+            }
+        }
         self.doc.shrink_to_fit();
         // A `Vec` that grows keeps spare room (up to twice as much). The page is read, so give the room back.
         self.doc
@@ -379,6 +388,9 @@ impl Builder {
         if push {
             let is_p = self.is(id, &["p"]);
             self.open.push(id, is_p);
+            if name == "template" {
+                self.templates.push(id);
+            }
         }
         id
     }
@@ -1840,5 +1852,27 @@ mod tests {
         let doc = parser.finish();
         assert!(doc.dump().contains("done"));
         assert!(start.elapsed().as_secs() < 2);
+    }
+
+    #[test]
+    fn the_children_of_a_template_go_into_its_contents() {
+        let page = "<body><template><p>a</p><template><b>x</b></template></template><template></template><svg><template></template></svg>";
+        let names = |doc: &Document, n: NodeId| doc.children(n).map(|c| doc.element_name(c).to_string()).collect::<Vec<_>>();
+        for doc in [parse(page), { let mut p = Parser::new(); p.feed(&page[..30]); p.feed(&page[30..]); p.finish() }] {
+            let html = doc.children(doc.root()).find(|&c| doc.element_name(c) == "html").unwrap();
+            let body = doc.children(html).last().unwrap();
+            let kids: Vec<NodeId> = doc.children(body).collect();
+            assert_eq!(kids.len(), 3);
+            // the outer template keeps no child; its contents hold the paragraph and the inner template, which has its own contents
+            assert!(doc.children(kids[0]).next().is_none());
+            let outer = doc.template_content(kids[0]).expect("contents");
+            assert!(matches!(doc.data(outer), NodeData::ShadowRoot) && doc.shadow_host(outer).is_none() && doc.parent(outer).is_none());
+            assert_eq!(names(&doc, outer), ["p", "template"]);
+            let inner = doc.children(outer).nth(1).unwrap();
+            assert!(doc.children(inner).next().is_none());
+            assert_eq!(names(&doc, doc.template_content(inner).expect("contents")), ["b"]);
+            // a template with no child, and an SVG template, have no contents until a host asks for them
+            assert!(doc.template_content(kids[1]).is_none() && doc.template_content(kids[2]).is_none());
+        }
     }
 }

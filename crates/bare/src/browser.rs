@@ -21,6 +21,8 @@
 //! - Globals: `window`, `self`, `globalThis` (the same object), `document`, `Node`, `Element`, `HTMLElement`,
 //!   `HTMLInputElement`, `HTMLIFrameElement` (inert brand only: no `contentWindow`, no nested context, no fetch), `HTMLLinkElement`, `HTMLFormElement`, `HTMLButtonElement`, `CharacterData`, `Text`, `Comment`, `Document`, `DocumentFragment` and `ShadowRoot` (illegal constructors), `EventTarget`, `Event`, `CustomEvent`,
 //!   `SubmitEvent`, `DOMException`.
+//! - `new DocumentFragment()` and `document.createDocumentFragment()` make an empty fragment. A plain fragment (no host) goes in as its children (`Dom::place`): one change group, the fragment is left empty. A shadow root is still `Unsupported`. `before`, `after` and `replaceWith` are on `Element` and `CharacterData`. Installed after every other global (`install_late`).
+//! - `HTMLAnchorElement`, `HTMLAreaElement` and `HTMLTemplateElement` (lazy, `browser_elements.rs`): `href` and the URL parts, `template.content`. `new FormData(form)` reads the form data set.
 //! - Node: `nodeType nodeName nodeValue parentNode parentElement childNodes firstChild lastChild previousSibling
 //!   nextSibling ownerDocument isConnected textContent appendChild insertBefore removeChild replaceChild cloneNode
 //!   contains hasChildNodes getRootNode`.
@@ -48,8 +50,8 @@
 //!   The one live `NodeList` is the result of `document.getElementsByName` (`browser_nodelist.rs`).
 //! - A JS string with a lone surrogate cannot be stored in the UTF-8 document: `Error::Unsupported`. Valid pairs round-trip.
 //! - Namespaces are in `browser_namespace.rs` (read its header): HTML, SVG and MathML elements, attributes in no namespace, XML,
-//!   XMLNS and XLink. Any other namespace is `Unsupported`. Shadow roots are a tree foundation only (`browser_shadow.rs`: read its header for the gates). `new Document()`, `createDocumentFragment`, `new DocumentFragment()`, `insertAdjacentHTML`,
-//!   `style`, `before/after/replaceWith`, layout APIs, `location` and
+//!   XMLNS and XLink. Any other namespace is `Unsupported`. Shadow roots are a tree foundation only (`browser_shadow.rs`: read its header for the gates). `new Document()`, `insertAdjacentHTML`,
+//!   `style`, layout APIs, `location` and
 //!   network are absent. Timers, `queueMicrotask`, `performance.now` and `MessageChannel` are in `browser_scheduler.rs`. `Element.attributes` and `Attr` are in `browser_attr.rs`.
 //! - `addEventListener` option `signal` removes the listener on abort (`browser_abort.rs`). `isTrusted` is always false. Events made by the test driver
 //!   are plain `Event`s (no `MouseEvent`/`InputEvent` fields), except the `submit` of a click activation: a `SubmitEvent`.
@@ -390,6 +392,8 @@ pub struct Dom {
     pub(crate) xhr: crate::browser_xhr::XhrHost,
     /// `crypto`, `navigator`, `Blob`, `File` and `FormData` (`browser_web.rs`).
     pub(crate) web: crate::browser_web::WebHost,
+    /// `HTMLAnchorElement`, `HTMLAreaElement` and `HTMLTemplateElement` (`browser_elements.rs`).
+    pub(crate) els: crate::browser_elements::Els,
 }
 
 impl Host for Dom {
@@ -425,6 +429,7 @@ impl Host for Dom {
         crate::browser_abort::roots(self, out);
         crate::browser_xhr::roots(self, out);
         crate::browser_web::roots(self, out);
+        crate::browser_elements::roots(self, out);
         self.resize_roots(out);
         self.frame_roots(out);
         self.idle_roots(out);
@@ -465,7 +470,7 @@ impl Host for Dom {
                 out.extend(doc.parent(n).and_then(|p| st.by_node.get(&p)).map(|&o| Value::Object(o)));
                 out.extend(doc.children(n).filter_map(|c| st.by_node.get(&c)).map(|&o| Value::Object(o)));
                 // A host and its root (either mode) keep each other's wrapper alive, so a detached pair is one cycle and an expando is not lost.
-                out.extend(doc.shadow_host(n).into_iter().chain(doc.shadow_root(n)).filter_map(|x| st.by_node.get(&x)).map(|&o| Value::Object(o)));
+                out.extend(doc.shadow_host(n).into_iter().chain(doc.shadow_root(n)).chain(doc.template_content(n)).filter_map(|x| st.by_node.get(&x)).map(|&o| Value::Object(o)));
             }
         } else if let Some(e) = st.events.get(&owner) {
             out.extend([e.target, e.current, e.detail, e.related]);
@@ -664,6 +669,7 @@ impl Dom {
                             "link" => p.link,
                             "form" => p.form,
                             "button" => p.button,
+                            "a" | "area" | "template" => crate::browser_elements::proto(self, it, doc.atom_str(name))?,
                             "script" => self.scripts.proto.get().copied().unwrap_or(p.html),
                             t @ ("select" | "option" | "optgroup" | "textarea") => crate::browser_select::proto_for(self, it, t)?,
                             _ => p.html,
@@ -672,7 +678,8 @@ impl Dom {
                     NodeData::Text(_) => p.text,
                     NodeData::Comment(_) => p.comment,
                     NodeData::Document => p.document,
-                    NodeData::ShadowRoot => p.shadow,
+                    NodeData::ShadowRoot if doc.shadow_host(n).is_some() => p.shadow,
+                    NodeData::ShadowRoot => p.fragment,
                     NodeData::Doctype(_) => p.node,
                 }
             };
@@ -842,27 +849,28 @@ impl Dom {
             nm.push_str(p);
             nm.push_str(n);
         };
+        // One function object serves every target of a row (`Element.prototype.append === DocumentFragment.prototype.append`, unlike Chrome): a realm
+        // pays for each function it makes, and most rows of the table have 2 or 3 targets.
         for d in DEFS {
             let key = self.key(it, d.name)?;
+            let (f, s) = match d.kind {
+                Kind::Method(h) => (self.add_fn(it, h, d.name, d.len, false)?, None),
+                Kind::Get(h) => {
+                    named(&mut nm, "get ", d.name);
+                    (self.add_fn(it, h, &nm, 0, false)?, None)
+                }
+                Kind::Accessor(gh, sh) => {
+                    named(&mut nm, "get ", d.name);
+                    let f = self.add_fn(it, gh, &nm, 0, false)?;
+                    named(&mut nm, "set ", d.name);
+                    (f, Some(self.add_fn(it, sh, &nm, 1, false)?))
+                }
+            };
             for &on in d.on {
                 let target = self.pick(on);
                 match d.kind {
-                    Kind::Method(h) => {
-                        let f = self.add_fn(it, h, d.name, d.len, false)?;
-                        it.define_data(target, key, Value::Object(f), true, false, true)?;
-                    }
-                    Kind::Get(h) => {
-                        named(&mut nm, "get ", d.name);
-                        let f = self.add_fn(it, h, &nm, 0, false)?;
-                        self.define_accessor(it, target, key, f, None)?;
-                    }
-                    Kind::Accessor(gh, sh) => {
-                        named(&mut nm, "get ", d.name);
-                        let f = self.add_fn(it, gh, &nm, 0, false)?;
-                        named(&mut nm, "set ", d.name);
-                        let s = self.add_fn(it, sh, &nm, 1, false)?;
-                        self.define_accessor(it, target, key, f, Some(s))?;
-                    }
+                    Kind::Method(_) => it.define_data(target, key, Value::Object(f), true, false, true)?,
+                    _ => self.define_accessor(it, target, key, f, s)?,
                 }
             }
         }
@@ -898,7 +906,7 @@ impl Dom {
         let (kp, kc) = (self.key(it, "prototype")?, self.key(it, "constructor")?);
         let mut ctors = Vec::new();
         for (name, proto, ctor) in ifaces {
-            let f = self.add_fn(it, ctor.unwrap_or(illegal_constructor), name, 0, ctor.is_some())?;
+            let f = if name == "DocumentFragment" { self.add_ctor_nt(it, nd::fragment_ctor, name, 0)? } else { self.add_fn(it, ctor.unwrap_or(illegal_constructor), name, 0, ctor.is_some())? };
             it.define_data(f, kp, Value::Object(proto), false, false, false)?;
             it.define_data(proto, kc, Value::Object(f), true, false, true)?;
             let k = self.key(it, name)?;
@@ -954,7 +962,10 @@ impl Dom {
         crate::browser_walker::install(self, it)?;
         crate::browser_range::install(self, it)?;
         crate::browser_handlers::install(self, it)?;
-        crate::browser_select::install(self, it)
+        crate::browser_select::install(self, it)?;
+        // Last: a new host function earlier in this list moves the id of every one after it.
+        crate::browser_elements::install(self, it)?;
+        nd::install_late(self, it)
     }
 
     pub(crate) fn define_accessor(&self, it: &mut Interp<'_>, o: ObjId, key: PropertyKey, get: ObjId, set: Option<ObjId>) -> R<()> {
@@ -1233,6 +1244,7 @@ impl Browser {
             dataset: Default::default(),
             abort: Default::default(),
             web: Default::default(),
+            els: Default::default(),
         });
         it.set_host(dom.clone())?;
         it.heap.set_indexed_source(dom.clone());

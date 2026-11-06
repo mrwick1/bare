@@ -9,7 +9,7 @@ use bare_css::matching::matches;
 use bare_css::selector::{Selector, Simple};
 use bare_html::dom::{Atom, Document, NodeData, NodeId};
 use bare_js::eval::{Error, Interp};
-use bare_js::value::Value;
+use bare_js::value::{ObjId, Value};
 
 type V = R<Value>;
 
@@ -239,8 +239,8 @@ impl Dom {
         Ok(out)
     }
 
-    /// Check a node insertion (DOM Standard "ensure pre-insertion validity", the parts that apply to this tree).
-    fn check_insert(&self, it: &mut Interp<'_>, parent: NodeId, node: NodeId, before: Option<NodeId>, replacing: Option<NodeId>) -> R<()> {
+    /// Check a node insertion (DOM Standard "ensure pre-insertion validity", the parts that apply to this tree). True: `node` is a plain fragment (`is_plain_fragment`).
+    fn check_insert(&self, it: &mut Interp<'_>, parent: NodeId, node: NodeId, before: Option<NodeId>, replacing: Option<NodeId>) -> R<bool> {
         #[derive(PartialEq, Clone, Copy)]
         enum K {
             Doc,
@@ -308,40 +308,75 @@ impl Dom {
                 return Err(self.dom_err(it, "HierarchyRequestError", "This document cannot take that child here."));
             }
         }
-        if nk == K::Frag {
-            // The standard inserts the children of a fragment. Not done: refuse, before anything changes.
+        let frag = nk == K::Frag && self.is_plain_fragment(node);
+        if nk == K::Frag && (pk == K::Doc || !frag) {
+            // The standard inserts the children of a fragment. Done by `place` for a fragment with no host into an element or a fragment. Else refuse, before anything changes.
             return Err(Error::Unsupported(unsupported("inserting a ShadowRoot or DocumentFragment as a node (fragment insertion)")));
         }
         let height = if self.doc.borrow().children(node).next().is_some() || self.doc.borrow().shadow_root(node).is_some() { self.height_of(it, node)? } else { 0 };
         if self.depth_of(it, parent)? + 1 + height > self.lim.max_tree_depth {
             return Err(self.lim("dom-depth"));
         }
-        Ok(())
+        Ok(frag)
     }
 
-    /// `append` and `prepend`: the standard makes one fragment of the nodes and inserts it, so the changes are one group (one `MutationObserver`
-    /// record) and the inserted scripts run after all nodes are in. One node is the plain `insert_checked`.
-    fn insert_many(&self, it: &mut Interp<'_>, parent: NodeId, nodes: &[NodeId], before: Option<NodeId>) -> R<()> {
-        if let [n] = nodes {
+    /// `append`, `prepend`, `before`, `after`, `replaceWith` and `replaceChild` with more than one node: the standard makes one fragment of the nodes and
+    /// inserts it, so the changes are one group (one `MutationObserver` record) and the inserted scripts run after all nodes are in. `old` leaves in the same
+    /// group. One plain node is `insert_checked`.
+    fn insert_many(&self, it: &mut Interp<'_>, parent: NodeId, nodes: &[NodeId], before: Option<NodeId>, old: Option<NodeId>) -> R<()> {
+        if let ([n], None) = (nodes, old) {
             return self.insert_checked(it, parent, *n, before);
         }
+        self.place(it, parent, nodes, before, old, false)
+    }
+
+    /// Move `nodes` in, before `before`, as one change group; a plain fragment gives its children and stays empty. One node is checked first (`checked`: by
+    /// the caller), so a refusal changes nothing. Several are checked as they go in: each one changes what the next may do.
+    fn place(&self, it: &mut Interp<'_>, parent: NodeId, nodes: &[NodeId], before: Option<NodeId>, old: Option<NodeId>, checked: bool) -> R<()> {
+        let one = nodes.len() == 1;
+        if one && !checked {
+            self.check_insert(it, parent, nodes[0], old.or(before), old)?;
+        }
+        let mut moved = Vec::new();
         self.mo_group(None, || {
+            if let Some(o) = old {
+                self.doc.borrow_mut().detach(o);
+            }
             for &n in nodes {
-                self.check_insert(it, parent, n, before, None)?;
-                let mut doc = self.doc.borrow_mut();
-                let b = if before == Some(n) { doc.next_sibling(n) } else { before };
-                doc.move_to(n, parent, b);
+                let frag = if one { self.is_plain_fragment(n) } else { self.check_insert(it, parent, n, before, None)? };
+                let kids: Vec<NodeId>;
+                let items = if frag {
+                    kids = self.doc.borrow().children(n).collect();
+                    it.charge(kids.len() as u64)?;
+                    &kids[..]
+                } else {
+                    std::slice::from_ref(&n)
+                };
+                for &k in items {
+                    let mut doc = self.doc.borrow_mut();
+                    let b = if before == Some(k) { doc.next_sibling(k) } else { before };
+                    doc.move_to(k, parent, b);
+                    moved.push(k);
+                }
             }
             Ok(())
         })?;
-        for &n in nodes {
-            self.script_inserted(it, n)?;
+        for k in moved {
+            self.script_inserted(it, k)?;
         }
         Ok(())
     }
 
+    /// A fragment that is not a shadow root: `DocumentFragment`, also the contents of a `template`.
+    pub(crate) fn is_plain_fragment(&self, n: NodeId) -> bool {
+        let doc = self.doc.borrow();
+        matches!(doc.data(n), NodeData::ShadowRoot) && doc.shadow_host(n).is_none()
+    }
+
     pub(crate) fn insert_checked(&self, it: &mut Interp<'_>, parent: NodeId, node: NodeId, before: Option<NodeId>) -> R<()> {
-        self.check_insert(it, parent, node, before, None)?;
+        if self.check_insert(it, parent, node, before, None)? {
+            return self.place(it, parent, &[node], before, None, true);
+        }
         let mut doc = self.doc.borrow_mut();
         let before = if before == Some(node) { doc.next_sibling(node) } else { before };
         doc.move_to(node, parent, before);
@@ -792,22 +827,15 @@ pub(crate) fn replace_child(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Valu
     if new == old {
         return Ok(arg(a, 1));
     }
-    d.check_insert(it, parent, new, Some(old), Some(old))?;
-    d.mo_group(None, || {
-        let mut doc = d.doc.borrow_mut();
-        let before = if doc.next_sibling(old) == Some(new) { doc.next_sibling(new) } else { doc.next_sibling(old) };
-        doc.detach(old);
-        doc.move_to(new, parent, before);
-        Ok(())
-    })?;
-    d.script_inserted(it, new)?;
+    let before = d.doc.borrow().next_sibling(old);
+    d.insert_many(it, parent, &[new], before, Some(old))?;
     Ok(arg(a, 1))
 }
 
 pub(crate) fn append(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
     let parent = d.nd(it, this)?;
     let nodes = d.nodes_from(it, a)?;
-    d.insert_many(it, parent, &nodes, None)?;
+    d.insert_many(it, parent, &nodes, None, None)?;
     Ok(Value::Undefined)
 }
 
@@ -823,7 +851,7 @@ pub(crate) fn prepend(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) ->
         }
         c
     };
-    d.insert_many(it, parent, &nodes, first)?;
+    d.insert_many(it, parent, &nodes, first, None)?;
     Ok(Value::Undefined)
 }
 
@@ -833,6 +861,80 @@ pub(crate) fn remove(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> 
     Ok(Value::Undefined)
 }
 
+/// `before`, `after` and `replaceWith` (`how` 0, 1, 2) of ChildNode. A node that is also a sibling in the list does not count as the viable sibling.
+fn child_node(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value], how: u8) -> V {
+    let me = d.nd(it, this)?;
+    let nodes = d.nodes_from(it, a)?;
+    let Some(parent) = d.doc.borrow().parent(me) else { return Ok(Value::Undefined) };
+    let mut old = None;
+    let before = {
+        let doc = d.doc.borrow();
+        let skip = |it: &mut Interp<'_>, mut cur: Option<NodeId>| -> R<Option<NodeId>> {
+            while let Some(c) = cur.filter(|c| nodes.contains(c)) {
+                it.charge(nodes.len() as u64)?;
+                cur = doc.next_sibling(c);
+            }
+            Ok(cur)
+        };
+        if how == 0 {
+            // The node after the closest earlier sibling that stays, once the list has moved out.
+            let mut prev = doc.prev_sibling(me);
+            while let Some(c) = prev.filter(|c| nodes.contains(c)) {
+                it.charge(nodes.len() as u64)?;
+                prev = doc.prev_sibling(c);
+            }
+            skip(it, prev.map_or_else(|| doc.children(parent).next(), |p| doc.next_sibling(p)))?
+        } else {
+            if how == 2 && (!nodes.contains(&me) || nodes.len() == 1) {
+                old = Some(me);
+            }
+            skip(it, doc.next_sibling(me))?
+        }
+    };
+    d.insert_many(it, parent, &nodes, before, old)?;
+    Ok(Value::Undefined)
+}
+
+/// `document.createDocumentFragment()`.
+fn create_document_fragment(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
+    d.nd(it, this)?;
+    new_fragment(d, it, None)
+}
+
+/// `new DocumentFragment()`.
+pub(crate) fn fragment_ctor(d: &Dom, it: &mut Interp<'_>, _: Value, _: &[Value]) -> V {
+    let proto = it.host_proto_from_new_target(d.p().fragment)?;
+    new_fragment(d, it, Some(proto))
+}
+
+/// An empty fragment of the document. `proto`: the prototype of a subclass.
+fn new_fragment(d: &Dom, it: &mut Interp<'_>, proto: Option<ObjId>) -> V {
+    crate::browser_elements::tag_fragments(d, it)?;
+    let n = {
+        let mut doc = d.doc.borrow_mut();
+        d.room(&doc, 1, 0)?;
+        doc.create_fragment()
+    };
+    let w = d.wrap(it, n)?;
+    if let (Some(p), Value::Object(o)) = (proto.filter(|&p| p != d.p().fragment), w) {
+        it.heap.set_prototype_of(o, Some(p)).map_err(|e| it.heap_error(e))?;
+    }
+    Ok(w)
+}
+
+/// `before`, `after`, `replaceWith`, `createDocumentFragment`: installed after every other global, so their function ids do not move a host function that came before.
+/// Deviation, for the cost of a realm: `Element` and `CharacterData` share one function object for each ChildNode method (Chrome has two).
+pub(crate) fn install_late(d: &Dom, it: &mut Interp<'_>) -> R<()> {
+    d.def_method(it, d.p().document, "createDocumentFragment", 0, create_document_fragment)?;
+    let hs: [(&str, H); 3] = [("before", |d, it, t, a| child_node(d, it, t, a, 0)), ("after", |d, it, t, a| child_node(d, it, t, a, 1)), ("replaceWith", |d, it, t, a| child_node(d, it, t, a, 2))];
+    for (name, h) in hs {
+        let f = d.def_method(it, d.p().element, name, 0, h)?;
+        let k = d.key(it, name)?;
+        it.define_data(d.p().chardata, k, Value::Object(f), true, false, true)?;
+    }
+    Ok(())
+}
+
 pub(crate) fn clone_node(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
     let n = d.nd(it, this)?;
     let deep = it.to_js_bool(arg(a, 0))?;
@@ -840,7 +942,7 @@ pub(crate) fn clone_node(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value])
         return Err(d.dom_err(it, "NotSupportedError", "Cloning a Document is not supported."));
     }
     // DOM Standard cloneNode(): a shadow root cannot be cloned. (A host is cloned without its root: `clonable` is always false here.)
-    if matches!(d.data(n), NodeData::ShadowRoot) {
+    if matches!(d.data(n), NodeData::ShadowRoot) && !d.is_plain_fragment(n) {
         return Err(d.dom_err(it, "NotSupportedError", "ShadowRoot nodes are not clonable."));
     }
     // Count first, so a clone that does not fit makes no node at all.
@@ -857,6 +959,8 @@ pub(crate) fn clone_node(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value])
             input_bytes += st.inputs.get(&c).and_then(|i| i.value.as_ref()).map_or(0, String::len);
         };
         account(n);
+        // The contents of the templates in the subtree are cloned with it.
+        let mut contents: Vec<NodeId> = if deep { doc.template_content(n).into_iter().collect() } else { Vec::new() };
         if deep {
             let (mut cur, mut depth) = (n, 0);
             while let Some((c, cd)) = next_in(&doc, n, cur, depth) {
@@ -864,6 +968,18 @@ pub(crate) fn clone_node(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value])
                 (cur, depth) = (c, cd);
                 count += 1;
                 account(c);
+                contents.extend(doc.template_content(c));
+            }
+            while let Some(f) = contents.pop() {
+                count += 1;
+                let (mut cur, mut depth) = (f, 0);
+                while let Some((c, cd)) = next_in(&doc, f, cur, depth) {
+                    it.charge(1)?;
+                    (cur, depth) = (c, cd);
+                    count += 1;
+                    account(c);
+                    contents.extend(doc.template_content(c));
+                }
             }
         }
         d.room(&doc, count, bytes)?;
@@ -895,7 +1011,8 @@ pub(crate) fn clone_node(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value])
                     let t = doc.text(sp).to_string();
                     doc.create_doctype(&t)
                 }
-                NodeData::Document | NodeData::ShadowRoot => unreachable!("checked above, and a root is never a child"),
+                NodeData::ShadowRoot => doc.create_fragment(),
+                NodeData::Document => unreachable!("checked above, and a root is never a child"),
             };
             d.copy_script_started(src, c);
             if let Some(mut i) = st.inputs.get(&src).cloned() {
@@ -911,6 +1028,11 @@ pub(crate) fn clone_node(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value])
             if deep {
                 let kids: Vec<NodeId> = doc.children(src).collect();
                 stack.extend(kids.into_iter().rev().map(|k| (k, Some(c))));
+                if let Some(f) = doc.template_content(src) {
+                    let copy = doc.make_template_content(c);
+                    let kids: Vec<NodeId> = doc.children(f).collect();
+                    stack.extend(kids.into_iter().rev().map(|k| (k, Some(copy))));
+                }
             }
         }
         root_clone.expect("one clone")

@@ -22,7 +22,7 @@
 //!   `<textarea>` as controls to validate: not built. `<textarea>` and `<select>` are sent with the value that their markup gives.
 //! - No message bubble is drawn for an invalid field. The window focuses the first invalid field and scrolls to it.
 //! - `enctype="multipart/form-data"` and `text/plain` with `POST` are `Unsupported`; `GET` ignores `enctype`. `target` is ignored (the
-//!   document is replaced). `<input type=file>` sends nothing. `form.elements`, `FormData`, `form.action` and `form.method` are absent.
+//!   document is replaced). `<input type=file>` sends nothing. `form.elements`, `form.action` and `form.method` are absent. `new FormData(form)` (`browser_web.rs`) uses the same entry list, and keeps a file input as an empty File.
 //! - A form with a `javascript:` or other non-http(s) action does nothing.
 
 use crate::browser::*;
@@ -156,12 +156,16 @@ impl Dom {
         attr(&doc, n, "maxlength").and_then(|v| v.trim().parse::<u32>().ok())
     }
 
-    /// The listed controls that `form` owns, in tree order.
+    /// The listed controls that `form` owns, in tree order. The walk starts at the top of the tree of `form`: it is the document, or the top of a detached tree.
     fn owned_controls(&self, it: &mut Interp<'_>, form: NodeId) -> R<Vec<NodeId>> {
-        let root = self.doc.borrow().root();
         let mut all = Vec::new();
         {
             let doc = self.doc.borrow();
+            let mut root = form;
+            while let Some(p) = doc.parent(root) {
+                it.charge(1)?;
+                root = p;
+            }
             let (mut cur, mut depth) = (root, 0);
             while let Some((c, d)) = nd::next_in(&doc, root, cur, depth) {
                 it.charge(1)?;
@@ -180,8 +184,8 @@ impl Dom {
         Ok(out)
     }
 
-    /// The entry list of `form` for `submitter`.
-    fn entry_list(&self, it: &mut Interp<'_>, form: NodeId, submitter: Option<NodeId>) -> R<Vec<(String, String)>> {
+    /// The entry list of `form` for `submitter` (HTML "constructing the entry list"). A file input has one entry with no value: an empty file.
+    pub(crate) fn entry_list(&self, it: &mut Interp<'_>, form: NodeId, submitter: Option<NodeId>) -> R<Vec<(String, Option<String>)>> {
         let mut out = Vec::new();
         for n in self.owned_controls(it, form)? {
             if self.is_disabled_control(it, n)? {
@@ -200,41 +204,49 @@ impl Dom {
             match (tag, kind) {
                 ("button", _) => {
                     if Some(n) == submitter {
-                        out.push((name, attr_value()));
+                        out.push((name, Some(attr_value())));
                     }
                 }
                 ("input", "submit") => {
                     if Some(n) == submitter {
-                        out.push((name, attr_value()));
+                        out.push((name, Some(attr_value())));
                     }
                 }
                 ("input", "image") => {
                     if Some(n) == submitter {
                         let p = if name.is_empty() { String::new() } else { format!("{name}.") };
-                        out.push((format!("{p}x"), "0".into()));
-                        out.push((format!("{p}y"), "0".into()));
+                        out.push((format!("{p}x"), Some("0".into())));
+                        out.push((format!("{p}y"), Some("0".into())));
                     }
                 }
-                ("input", "reset" | "button" | "file") => {}
+                ("input", "file") => out.push((name, None)),
+                ("input", "reset" | "button") => {}
                 ("input", "checkbox" | "radio") => {
                     if self.input_checked(n) {
-                        out.push((name, self.input_value_of(n).unwrap_or_else(|| "on".into())));
+                        out.push((name, Some(self.input_value_of(n).unwrap_or_else(|| "on".into()))));
                     }
                 }
-                ("input", _) => out.push((name, self.input_value_of(n).map(|v| single_line(&v)).unwrap_or_default())),
-                ("textarea", _) => out.push((name, self.text_of(n))),
+                ("input", _) => out.push((name, Some(self.input_value_of(n).map(|v| single_line(&v)).unwrap_or_default()))),
+                ("textarea", _) => out.push((name, Some(self.text_of(n).replace("\r\n", "\n").replace('\r', "\n")))),
                 _ => {
-                    // A `<select>`: the options that the markup marks as selected, else the first one.
+                    // A `<select>`: the options that the markup marks as selected (a single select keeps the last one), else the first enabled option of a
+                    // single select. A disabled option is not sent.
                     let opts: Vec<NodeId> = {
                         let doc = self.doc.borrow();
                         below(&doc, n).into_iter().filter(|&o| tag_is(&doc, o, &["option"])).collect()
                     };
                     let doc = self.doc.borrow();
-                    let picked: Vec<NodeId> = opts.iter().copied().filter(|&o| attr(&doc, o, "selected").is_some()).collect();
-                    let picked = if picked.is_empty() { opts.iter().copied().take(1).collect() } else { picked };
-                    for o in picked {
+                    let enabled = |o: &NodeId| attr(&doc, *o, "disabled").is_none();
+                    let mut picked: Vec<NodeId> = opts.iter().copied().filter(|&o| attr(&doc, o, "selected").is_some()).collect();
+                    if attr(&doc, n, "multiple").is_none() {
+                        picked = match picked.last() {
+                            Some(&o) => vec![o],
+                            None => opts.iter().copied().filter(enabled).take(1).collect(),
+                        };
+                    }
+                    for o in picked.into_iter().filter(enabled) {
                         let v = attr(&doc, o, "value").map(str::to_string).unwrap_or_else(|| text_below(&doc, o).split_whitespace().collect::<Vec<_>>().join(" "));
-                        out.push((name.clone(), v));
+                        out.push((name.clone(), Some(v)));
                     }
                 }
             }
@@ -386,7 +398,7 @@ impl Dom {
         if post && !(enc.is_empty() || enc == "application/x-www-form-urlencoded") {
             return Err(Error::Unsupported(unsupported("form POST with an enctype other than application/x-www-form-urlencoded")));
         }
-        let entries = self.entry_list(it, form, submitter)?;
+        let entries: Vec<(String, String)> = self.entry_list(it, form, submitter)?.into_iter().filter_map(|(n, v)| Some((n, v?))).collect();
         it.charge(entries.len() as u64 + 1)?;
         self.submit_navigation(it, action.trim(), post, &encode_entries(&entries))
     }

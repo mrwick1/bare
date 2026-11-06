@@ -28,7 +28,7 @@
 //! shadow DOM, no style, layout or paint for a shadow tree (the cascade and layout start at the document and never reach it; `getComputedStyle` of
 //! a connected shadow element is Unsupported), no `:host`, `:host()` or `::slotted()` selectors (they are a `SyntaxError`),
 //! no focus in a shadow tree (its elements are not focusable areas) and no script run from a shadow tree (the loader prepares only scripts
-//! whose light ancestors reach the document). `new ShadowRoot()` and `new DocumentFragment()` are illegal constructors.
+//! whose light ancestors reach the document). `new ShadowRoot()` is an illegal constructor. Deviation: Chrome inserts a shadow root like a fragment (its children move); here it is `Unsupported`.
 //!
 //! Events: a path walks the parent links, so an event that is not composed and starts in a shadow tree ends at its root, which is exactly the
 //! standard path. A COMPOSED event whose path would reach a root (the standard continues at the host and retargets `target`) is refused with
@@ -66,7 +66,7 @@ fn valid_host(doc: &Document, host: NodeId) -> bool {
 /// The native root of `this`, or `Illegal invocation`.
 fn root_of(d: &Dom, it: &mut Interp<'_>, this: Value) -> R<NodeId> {
     match d.node_of(this) {
-        Some(n) if matches!(d.data(n), NodeData::ShadowRoot) => Ok(n),
+        Some(n) if matches!(d.data(n), NodeData::ShadowRoot) && d.doc.borrow().shadow_host(n).is_some() => Ok(n),
         _ => Err(it.type_error("Illegal invocation")),
     }
 }

@@ -125,6 +125,9 @@ mod browser_raf_tests;
 mod browser_idle_tests;
 #[cfg(test)]
 mod browser_element_tests;
+mod browser_elements;
+#[cfg(test)]
+mod browser_elements_tests;
 #[cfg(test)]
 mod browser_mutation_tests;
 #[cfg(test)]

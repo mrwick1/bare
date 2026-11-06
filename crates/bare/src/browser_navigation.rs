@@ -238,7 +238,7 @@ impl Dom {
         st.by_obj.contains_key(&o) || self.is_abort_controller(o) || self.is_platform_object(o) || st.events.contains_key(&o) || n.urls.contains_key(&o) || n.params.contains_key(&o) || n.iters.contains_key(&o) || self.nav.p.get().is_some_and(|p| [p.location, p.history, p.local, p.session].contains(&o))
     }
 
-    fn cur_rec(&self) -> R<Rec> {
+    pub(crate) fn cur_rec(&self) -> R<Rec> {
         let n = self.nav.s.borrow();
         match n.entries.get(n.cur) {
             Some(e) => Ok(e.url.clone()),

@@ -106,7 +106,7 @@ fn interfaces_prototypes_and_illegal_constructors() {
         ),
         "function,function,true,true,true,11,11,function,1,attachShadow,true,false,false"
     );
-    for src in ["new ShadowRoot()", "new DocumentFragment()", "ShadowRoot()", "DocumentFragment()"] {
+    for src in ["new ShadowRoot()", "ShadowRoot()", "DocumentFragment()"] {
         let out = js(&mut b, src);
         assert!(out.starts_with("throw:TypeError:"), "{src}: {out}");
     }
@@ -825,7 +825,7 @@ fn attr_and_namespace_behaviour_inside_a_shadow_tree_is_unchanged() {
 #[test]
 fn existing_light_tree_fragment_behaviour_is_unchanged() {
     let mut b = browser();
-    assert_eq!(js(&mut b, "document.getElementById('a').innerHTML = '<p>1</p><p>2</p>'; document.getElementById('a').innerHTML + '|' + document.body.getRootNode().nodeName + '|' + typeof document.createDocumentFragment"), "<p>1</p><p>2</p>|#document|undefined");
+    assert_eq!(js(&mut b, "document.getElementById('a').innerHTML = '<p>1</p><p>2</p>'; document.getElementById('a').innerHTML + '|' + document.body.getRootNode().nodeName + '|' + typeof document.createDocumentFragment"), "<p>1</p><p>2</p>|#document|function");
 }
 
 // ------------------------------------------------------------------------------------------ load model
