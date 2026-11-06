@@ -89,3 +89,30 @@ atob_unused_bits_dropped	102|102.111|102.111|102|102
 atob_errors	InvalidCharacterError:5|InvalidCharacterError:5|InvalidCharacterError:5|InvalidCharacterError:5|InvalidCharacterError:5|InvalidCharacterError:5|InvalidCharacterError:5|InvalidCharacterError:5|InvalidCharacterError:5|InvalidCharacterError:5|InvalidCharacterError:5|InvalidCharacterError:5|InvalidCharacterError:5|InvalidCharacterError:5|TypeError
 atob_coercion_and_roundtrip	×,foo,true,344,3
 base64_function_properties	function,1,atob,1,btoa
+outer_get_basic	<p id="a" class="x&quot;y" title="a&amp;b&nbsp;c&lt;d&gt;">t &amp; &lt;<b>b</b><br><!--c--><img src="x"></p>|<p id="a" class="x&quot;y" title="a&amp;b&nbsp;c&lt;d&gt;">t &amp; &lt;<b>b</b><br><!--c--><img src="x"></p>
+outer_get_alone_and_empty	<span data-x="1"></span>|<input>|<br>|<p></p>
+outer_get_raw_text_parents	<div><script>a<b&c</script><style>p>a{}</style><textarea>&lt;x</textarea><xmp>&lt;</xmp></div>
+outer_get_deep	292:281
+outer_get_svg	<svg viewBox="0 0 1 1"><circle r="1"></circle><text>a&amp;b</text></svg>
+outer_get_attribute_order_and_dupes	<a z="1" b="2" a="4"></a>
+outer_set_basic	<i>1</i>text<u>2</u>|<a></a><i>1</i>text<u>2</u><c></c>|true|true||<b id="m"></b>|5
+outer_set_first_and_last	<x></x><y></y>
+outer_set_empty_and_null	<c></c>|1
+outer_set_undefined_and_number	undefined<b></b>
+outer_set_no_parent	ok|<div></div>|
+outer_set_document_parent	NoModificationAllowedError:7:true|HTML
+outer_set_document_parent_after_tostring	str:NoModificationAllowedError
+outer_set_tostring_detaches_target	|null
+outer_set_tostring_throws	RangeError|<a></a>
+outer_set_in_shadow_root	B,#text,#comment|<b>x</b>
+outer_set_context_is_parent	<div>q</div><p>r</p>|2
+outer_set_form_context	i<b>k</b>
+outer_set_script_is_inert	0|<script>window.ran = 1</script>
+outer_set_identity_of_siblings_and_text	true|true|true||t1<a>new</a>t2
+outer_set_roundtrip_same	true,false
+outer_set_nested_tree_order	<ul><li>1</li><li>2<ul><li>3</li></ul></li></ul><p>after</p>
+outer_set_text_merges	1|aXc
+outer_set_connected_and_queries	|k|1
+outer_property_shape	function,function,true,true,get outerHTML,set outerHTML,true,,false
+outer_brand_check	TypeError,TypeError,TypeError
+outer_set_html_escape_roundtrip	&lt;&amp;&nbsp;"<b title="&lt;&gt;&quot;&amp;"></b>
