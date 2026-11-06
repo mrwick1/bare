@@ -68,7 +68,7 @@ fn a_scroll_moves_the_target_and_reports() {
 fn gates_are_unsupported() {
     let mut b = page(BOX);
     assert!(matches!(b.run_script("new IntersectionObserver(function () {}, { trackVisibility: true, delay: 100 })"), Err(Error::Unsupported(_))));
-    let mut b = page("<div id=a style='position:sticky;top:0;width:10px;height:10px'></div>");
+    let mut b = page("<span id=a style='position:sticky;top:0'>x</span>");
     js(&mut b, "new IntersectionObserver(function () {}).observe(document.getElementById('a'))");
     assert!(matches!(b.advance_time(100.0, 10_000), Err(Error::Unsupported(_))));
 }

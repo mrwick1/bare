@@ -123,6 +123,8 @@ mod browser_mutation_tests;
 #[cfg(test)]
 mod browser_intersection_tests;
 #[cfg(test)]
+mod browser_sticky_tests;
+#[cfg(test)]
 mod browser_walker_tests;
 #[cfg(test)]
 mod browser_range_tests;

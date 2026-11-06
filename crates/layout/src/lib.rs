@@ -16,6 +16,7 @@ pub mod inline;
 pub mod intrinsic;
 mod memo;
 pub mod scroll;
+pub mod sticky;
 pub mod table;
 pub mod text;
 
@@ -122,7 +123,7 @@ pub fn layout_within(doc: &Document, styles: &Styles, viewport: (f32, f32), budg
         }
     }
     fragment::absolute(&mut cx.out);
-    Layout { fragments: cx.out, width: viewport.0, height, bars: cx.bars, work: cx.work }
+    Layout { fragments: cx.out, width: viewport.0, height, view: viewport, bars: cx.bars, work: cx.work }
 }
 
 /// The fragments as text, one on each line, for tests and for `bare --layout`: the name (with `#id` if the element has

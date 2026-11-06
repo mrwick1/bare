@@ -56,6 +56,8 @@ pub struct Layout {
     /// if `height` is more than the window.
     pub width: f32,
     pub height: f32,
+    /// The size of the window that layout used (the window minus the page bars): the scrollport of the page.
+    pub view: (f32, f32),
     /// The scrollbars of the `overflow: auto` boxes that needed them: (right, bottom), by `NodeId::index`. `scroll.rs` reads it.
     pub bars: crate::Fast<(bool, bool)>,
     /// The work that layout did again, in fragments (`Cx::work`). 0 for a page that lays nothing out twice.

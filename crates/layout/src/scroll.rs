@@ -19,6 +19,7 @@
 use crate::block::SCROLLBAR;
 use crate::boxes::Tree;
 use crate::fragment::{Kind, Layout, Rect};
+use crate::sticky::{self, Sticky};
 use bare_css::cascade::Styles;
 use bare_css::values::{Keyword, Property};
 use bare_html::dom::{Document, NodeData, NodeId};
@@ -61,6 +62,11 @@ pub struct Areas {
     pub page: (f32, f32),
     /// What the root element or the first `body` gives to the window: `overflow-x` and `overflow-y`.
     pub page_overflow: (Keyword, Keyword),
+    /// The boxes with `position: sticky`, in the order of the fragments (`sticky.rs`). Empty for most pages.
+    pub sticky: Vec<Sticky>,
+    pub(crate) sticky_index: HashMap<u32, u32>,
+    /// Why this page cannot be scrolled right: a sticky box that is not modelled (the host makes it `Unsupported`).
+    pub gate: Option<&'static str>,
 }
 
 impl Areas {
@@ -93,7 +99,9 @@ pub fn page_overflow(doc: &Document, styles: &Styles) -> (Keyword, Keyword) {
 pub fn areas(doc: &Document, styles: &Styles, layout: &Layout) -> Areas {
     let tree = Tree::new(doc, styles);
     let frags = &layout.fragments;
-    let mut out = Areas { list: Vec::new(), index: HashMap::new(), page: (layout.width, layout.height), page_overflow: page_overflow(doc, styles) };
+    let mut out = Areas { list: Vec::new(), index: HashMap::new(), page: (layout.width, layout.height), page_overflow: page_overflow(doc, styles), sticky: Vec::new(), sticky_index: HashMap::new(), gate: None };
+    // The sticky boxes that are open: (their end, their place in `out.sticky`).
+    let mut sticks: Vec<(u32, u32)> = Vec::new();
     // The open containers: where they end, their place in `out.list`, the corner that their content reaches, and the padding
     // at the right and at the bottom. The end padding counts in the overflow, as in Chrome.
     type Open = (u32, usize, f32, f32, f32, f32);
@@ -111,9 +119,28 @@ pub fn areas(doc: &Document, styles: &Styles, layout: &Layout) -> Areas {
         }
         let f = frags[i];
         let (right, bottom) = (f.rect.x + f.rect.w, f.rect.y + f.rect.h);
-        if f.kind == Kind::Box && i > 0 && tree.position(f.node) == Keyword::Fixed && tree.kind(f.node) != crate::boxes::Kind::Inline {
-            i = f.end as usize;
-            continue;
+        if f.kind == Kind::Box && i > 0 {
+            match tree.position(f.node) {
+                Keyword::Fixed if tree.kind(f.node) != crate::boxes::Kind::Inline => {
+                    i = f.end as usize;
+                    continue;
+                }
+                Keyword::Sticky => {
+                    while sticks.last().is_some_and(|s| s.0 as usize <= i) {
+                        sticks.pop();
+                    }
+                    if tree.kind(f.node) == crate::boxes::Kind::Inline {
+                        out.gate.get_or_insert("position: sticky on an inline box (it has a piece on each line)");
+                    } else {
+                        let k = out.sticky.len() as u32;
+                        let rect = Rect::default();
+                        out.sticky.push(Sticky { node: f.node, frag: i as u32, parent: sticks.last().map_or(sticky::NONE, |s| s.1), scroller: open.last().map_or(sticky::NONE, |o| o.1 as u32), view: rect, rect, cb: rect, margin: [0.0; 4], inset: [None; 4] });
+                        out.sticky_index.insert(f.node.index() as u32, k);
+                        sticks.push((f.end, k));
+                    }
+                }
+                _ => {}
+            }
         }
         match open.last_mut() {
             Some(top) => {
@@ -150,6 +177,9 @@ pub fn areas(doc: &Document, styles: &Styles, layout: &Layout) -> Areas {
     }
     while let Some(o) = open.pop() {
         finish(&mut out, o);
+    }
+    if !out.sticky.is_empty() {
+        sticky::finish(&mut out, &tree, layout);
     }
     out
 }

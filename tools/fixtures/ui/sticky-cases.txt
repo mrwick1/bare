@@ -1,0 +1,176 @@
+var st = document.createElement('style'); st.textContent = 'html{overflow:hidden}body{margin:0}div{box-sizing:border-box}'; document.head.appendChild(st);
+var $ = function (i) { return document.getElementById(i) };
+var R = function (e) { var r = $(e).getBoundingClientRect(); return [r.x, r.y, r.width, r.height].map(function (v) { return Math.round(v * 100) / 100 }).join(',') };
+var P = function (ys, ids) { return ys.map(function (y) { scrollTo(0, y); return y + ':' + ids.map(R).join(' ') }).join(' | ') };
+var X = function (xs, ids) { return xs.map(function (x) { scrollTo(x, 0); return x + ':' + ids.map(R).join(' ') }).join(' | ') };
+var C = function (c, ys, ids) { return ys.map(function (y) { $(c).scrollTop = y; return y + ':' + ids.map(R).join(' ') }).join(' | ') };
+var rows = function (n, cells) { var b = $('b'); for (var i = 0; i < n; i++) { var r = document.createElement('tr'); for (var j = 0; j < cells; j++) { var d = document.createElement('td'); d.style.cssText = 'height:30px;padding:0'; if (i === 0 && j === 0) d.id = 'c0'; if (i === 5 && j === 0) d.id = 'c5'; r.appendChild(d) } b.appendChild(r) } };
+var CX = function (c, xs, ids) { return xs.map(function (x) { $(c).scrollLeft = x; return x + ':' + ids.map(R).join(' ') }).join(' | ') };
+=== header-top-zero-in-the-page
+@html <div id=h style="position:sticky;top:0;z-index:30;height:40px;background:#ccc"></div><div style="height:2000px"></div>
+var out = P([0, 10, 100, 500, 1740, 5000], ['h']); (function () { return out })
+=== header-after-a-block-sticks-at-the-top
+@html <div style="height:60px"></div><div id=h style="position:sticky;top:0;height:40px;width:200px"></div><div style="height:1000px"></div>
+var out = P([0, 30, 60, 61, 200, 900], ['h']); (function () { return out })
+=== th-in-a-scroll-container
+@html <div id=c style="overflow:hidden;width:300px;height:200px"><table id=t style="border-collapse:collapse"><thead><tr><th id=h style="position:sticky;top:0;width:100px;height:30px;padding:0"></th><th id=h2 style="position:sticky;top:0;width:100px;height:30px;padding:0"></th></tr></thead><tbody id=b></tbody></table></div>
+rows(20, 2)
+var out = C('c', [0, 10, 45, 200, 420], ['h', 'h2', 'c0', 'c5']); (function () { return out })
+=== th-with-the-top-from-a-variable
+@css :root{--header-h:24px}
+@html <div id=c style="overflow:hidden;width:300px;height:200px"><table style="border-collapse:collapse"><thead><tr><th id=h style="position:sticky;top:var(--table-sticky-top, var(--header-h));width:100px;height:30px;padding:0"></th></tr></thead><tbody id=b></tbody></table></div>
+rows(20, 1)
+var out = C('c', [0, 10, 45, 200], ['h']); (function () { return out })
+=== th-in-a-page-table
+@html <table style="border-collapse:collapse;width:300px"><thead><tr><th id=h style="position:sticky;top:0;height:30px;padding:0"></th></tr></thead><tbody id=b></tbody></table><div style="height:1500px"></div>
+rows(30, 1)
+var out = P([0, 50, 400, 800, 900, 930, 1100], ['h']); (function () { return out })
+=== th-in-a-table-with-padding-and-spacing
+@html <div id=c style="overflow:hidden;width:300px;height:200px"><table style="border-spacing:5px;padding:10px;border:3px solid"><thead><tr><th id=h style="position:sticky;top:0;width:100px;height:30px;padding:0"></th></tr></thead><tbody id=b></tbody></table></div>
+rows(20, 1)
+var out = C('c', [0, 10, 100, 400, 640, 700], ['h']); (function () { return out })
+=== bottom-sticks-to-the-bottom-of-the-window
+@html <div style="height:500px"></div><div id=s style="position:sticky;bottom:0;height:40px;width:100px"></div><div style="height:1000px"></div>
+var out = P([0, 100, 240, 300, 600], ['s']); (function () { return out })
+=== bottom-with-an-offset
+@html <div style="height:500px"></div><div id=s style="position:sticky;bottom:25px;height:40px;width:100px"></div><div style="height:1000px"></div>
+var out = P([0, 100, 240, 300], ['s']); (function () { return out })
+=== top-and-bottom-together
+@html <div style="height:100px"></div><div id=s style="position:sticky;top:10px;bottom:20px;height:40px;width:100px"></div><div style="height:1000px"></div>
+var out = P([0, 90, 100, 200, 500, 900], ['s']); (function () { return out })
+=== percent-insets
+@html <div style="height:100px"></div><div id=s style="position:sticky;top:10%;height:40px;width:100px"></div><div style="height:1000px"></div>
+var out = P([0, 50, 70, 71, 300], ['s']); (function () { return out })
+=== percent-bottom-in-a-container
+@html <div id=c style="overflow:hidden;width:300px;height:200px"><div style="height:400px"></div><div id=s style="position:sticky;bottom:10%;height:20px;width:50px"></div><div style="height:600px"></div></div>
+var out = C('c', [0, 100, 250, 400, 700], ['s']); (function () { return out })
+=== left-and-right-in-a-container
+@html <div id=c style="overflow:hidden;width:300px;height:100px"><div style="width:1500px;height:100px;position:relative"><div id=l style="position:sticky;left:10px;width:40px;height:20px"></div><div id=r style="position:absolute;left:0;top:30px;width:1500px;height:20px"><div id=s style="position:sticky;right:15px;margin-left:600px;width:40px;height:20px"></div></div></div></div>
+var out = CX('c', [0, 100, 400, 700, 1200], ['l', 's']); (function () { return out })
+=== left-percent
+@html <div id=c style="overflow:hidden;width:300px;height:100px"><div style="width:1500px;height:100px"><div id=l style="position:sticky;left:10%;width:40px;height:20px"></div></div></div>
+var out = CX('c', [0, 100, 1000, 1200, 1300], ['l']); (function () { return out })
+=== stops-at-the-end-of-its-containing-block
+@html <div style="height:100px"></div><div id=w style="height:400px"><div id=s style="position:sticky;top:0;height:50px;width:100px"></div></div><div style="height:1500px"></div>
+var out = P([0, 100, 300, 450, 500, 700], ['s', 'w']); (function () { return out })
+=== containing-block-with-padding-and-border
+@html <div style="height:100px"></div><div id=w style="height:400px;padding:30px 0 40px;border:5px solid #000"><div id=s style="position:sticky;top:0;height:50px;width:100px"></div></div><div style="height:1500px"></div>
+var out = P([0, 100, 300, 450, 500, 700], ['s', 'w']); (function () { return out })
+=== margins-of-the-sticky-box
+@html <div style="height:100px"></div><div id=w style="height:400px"><div id=s style="position:sticky;top:0;height:50px;width:100px;margin:20px 0 30px"></div></div><div style="height:1500px"></div>
+var out = P([0, 100, 130, 300, 450, 500, 700], ['s', 'w']); (function () { return out })
+=== nested-sticky
+@html <div style="height:100px"></div><div id=w style="height:800px"><div id=o style="position:sticky;top:0;height:200px;width:200px"><div style="height:60px"></div><div id=i style="position:sticky;top:50px;height:20px;width:50px"></div></div></div><div style="height:1500px"></div>
+var out = P([0, 100, 150, 200, 400, 700, 900], ['o', 'i']); (function () { return out })
+=== nested-sticky-with-an-inner-box-of-the-same-scroll
+@html <div style="height:50px"></div><div id=w style="height:900px"><div id=o style="position:sticky;top:10px;height:300px;width:200px"><div id=i style="position:sticky;top:40px;height:20px;width:50px;margin-top:80px"></div></div></div><div style="height:1500px"></div>
+var out = P([0, 50, 100, 300, 600, 900], ['o', 'i']); (function () { return out })
+=== a-sticky-box-moves-its-children
+@html <div style="height:100px"></div><div id=s style="position:sticky;top:5px;height:80px;width:100px"><div id=k style="margin:10px;height:20px;width:30px"></div></div><div style="height:1500px"></div>
+var out = P([0, 120, 300], ['s', 'k']); (function () { return out })
+=== sticky-in-an-auto-container
+@html <div id=c style="overflow:auto;width:300px;height:200px"><div style="height:50px"></div><div id=s style="position:sticky;top:10px;height:30px;width:100px"></div><div style="height:1000px"></div></div>
+var out = C('c', [0, 50, 60, 300], ['s']); (function () { return out })
+=== sticky-in-a-container-in-the-page
+@html <div style="height:100px"></div><div id=c style="overflow:hidden;width:300px;height:150px"><div id=s style="position:sticky;top:0;height:30px;width:100px"></div><div style="height:1000px"></div></div><div style="height:1500px"></div>
+var out = P([0, 60, 120], ['s', 'c']) + ' || ' + C('c', [0, 40, 600], ['s']); (function () { return out })
+=== sticky-with-a-variable-inset
+@css :root{--h:20px}
+@html <div style="height:50px"></div><div id=s style="position:sticky;top:var(--h);height:30px;width:100px"></div><div style="height:1500px"></div>
+var out = P([0, 30, 100], ['s']); (function () { return out })
+=== sticky-with-no-inset-does-not-move
+@html <div style="height:50px"></div><div id=s style="position:sticky;height:30px;width:100px"></div><div style="height:1500px"></div>
+var out = P([0, 100, 300], ['s']); (function () { return out })
+=== sticky-with-an-em-and-a-calc-inset
+@html <div style="height:50px"></div><div id=s style="position:sticky;top:calc(10% + 5px);height:30px;width:100px"></div><div id=t style="position:sticky;top:2em;height:30px;width:100px"></div><div style="height:1500px"></div>
+var out = P([0, 100, 300], ['s', 't']); (function () { return out })
+=== sticky-flex-item
+@html <div style="height:50px"></div><div id=f style="display:flex;flex-direction:column;height:600px"><div id=s style="position:sticky;top:0;height:30px;width:100px"></div><div style="flex:1"></div></div><div style="height:1500px"></div>
+var out = P([0, 100, 500, 700], ['s']); (function () { return out })
+=== sticky-in-a-wide-page-moves-left
+@html <div style="width:1500px;height:50px"></div><div style="width:1500px"><div id=s style="position:sticky;left:20px;height:30px;width:100px"></div></div><div style="height:1500px"></div>
+var out = X([0, 100, 500, 1100], ['s']); (function () { return out })
+=== body-overflow-goes-to-the-window
+@css html{overflow:visible}body{overflow-y:hidden}
+@html <div style="height:60px"></div><div id=s style="position:sticky;top:0;height:30px;width:100px"></div><div style="height:1500px"></div>
+var out = P([0, 100, 300], ['s']); (function () { return out })
+=== offset-top-of-a-sticky-box
+@html <div style="height:60px"></div><div id=w style="height:500px"><div id=s style="position:sticky;top:0;height:30px;width:100px"></div></div><div style="height:1500px"></div>
+var out = [0, 100, 400, 700].map(function (y) { scrollTo(0, y); return $('s').offsetTop + '/' + $('s').offsetLeft + '/' + $('s').offsetParent.tagName }).join(' '); (function () { return out })
+=== offset-top-in-a-positioned-parent
+@html <div id=w style="position:relative;margin-top:60px;height:500px"><div id=s style="position:sticky;top:0;height:30px;width:100px"></div></div><div style="height:1500px"></div>
+var out = [0, 100, 400, 700].map(function (y) { scrollTo(0, y); return $('s').offsetTop + '/' + $('s').offsetLeft + '/' + $('s').offsetParent.id }).join(' '); (function () { return out })
+=== scroll-position-and-the-box-after-a-script-scroll
+@html <div style="height:60px"></div><div id=s style="position:sticky;top:0;height:30px;width:100px"></div><div style="height:1500px"></div>
+var a = R('s'); scrollTo(0, 200); var b = R('s'); scrollBy(0, 100); var c = R('s'); scrollTo(0, 0); var d = R('s'); (function () { return [a, b, c, d, scrollY].join(' ') })
+=== intersection-observer-sees-the-stuck-box
+@html <div style="height:60px"></div><div id=s style="position:sticky;top:0;height:30px;width:100px"></div><div style="height:1500px"></div>
+var log = []; var io = new IntersectionObserver(function (es) { es.forEach(function (e) { log.push(Math.round(e.boundingClientRect.y) + ':' + e.isIntersecting + ':' + e.intersectionRatio) }) }, { threshold: [0, 1] }); io.observe($('s'));
+setTimeout(function () { scrollTo(0, 500) }, 50); setTimeout(function () { scrollTo(0, 0) }, 150);
+(function () { return log.join(' ') })
+=== top-and-bottom-in-conflict
+@html <div style="height:100px"></div><div id=s style="position:sticky;top:10px;bottom:20px;height:280px;width:100px"></div><div style="height:1000px"></div>
+var out = P([0, 50, 100, 200, 500], ['s']); (function () { return out })
+=== margin-top-only
+@html <div id=w style="border:1px solid;margin-top:100px;height:400px"><div id=s style="position:sticky;top:0;height:50px;width:100px;margin-top:20px"></div></div><div style="height:1500px"></div>
+var out = P([0, 100, 130, 300, 450, 500, 600], ['s', 'w']); (function () { return out })
+=== margin-bottom-only
+@html <div id=w style="border:1px solid;margin-top:100px;height:400px"><div id=s style="position:sticky;top:0;height:50px;width:100px;margin-bottom:30px"></div></div><div style="height:1500px"></div>
+var out = P([0, 100, 130, 300, 450, 500, 600], ['s', 'w']); (function () { return out })
+=== bottom-sticky-with-margins-at-the-start-of-its-block
+@html <div id=w style="border:1px solid;margin-top:500px;height:400px"><div style="height:300px"></div><div id=s style="position:sticky;bottom:0;height:50px;width:100px;margin:20px 0 30px"></div></div><div style="height:1500px"></div>
+var out = P([0, 300, 400, 600, 700, 800, 900], ['s', 'w']); (function () { return out })
+=== th-stops-at-the-end-of-its-table
+@html <div id=c style="overflow:hidden;width:300px;height:100px"><table style="border-collapse:collapse"><thead><tr><th id=h style="position:sticky;top:0;width:100px;height:30px;padding:0"></th></tr></thead><tbody id=b></tbody></table><div style="height:600px"></div></div>
+rows(6, 1)
+var out = C('c', [0, 100, 150, 200, 300, 500], ['h']); (function () { return out })
+=== th-stops-at-the-end-of-a-padded-table
+@html <div id=c style="overflow:hidden;width:300px;height:100px"><table id=t style="border-spacing:5px;padding:10px;border:3px solid"><thead><tr><th id=h style="position:sticky;top:0;width:100px;height:30px;padding:0"></th></tr></thead><tbody id=b></tbody></table><div style="height:600px"></div></div>
+rows(6, 1)
+var out = C('c', [0, 100, 150, 200, 250, 300, 500], ['h', 't']); (function () { return out })
+=== td-sticks-to-the-left-of-a-wide-table
+@html <div id=c style="overflow:hidden;width:300px;height:100px"><table style="border-collapse:collapse;width:960px"><tbody><tr><td id=a style="position:sticky;left:0;width:60px;height:30px;padding:0"></td><td style="width:900px;padding:0"></td></tr><tr><td id=b style="position:sticky;left:20px;width:60px;height:30px;padding:0"></td><td style="padding:0"></td></tr></tbody></table></div>
+var out = CX('c', [0, 40, 300, 700, 900], ['a', 'b']); (function () { return out })
+=== sticky-inline-block
+@html <div style="height:60px"></div><div id=w style="height:400px"><span id=s style="display:inline-block;position:sticky;top:0;height:30px;width:100px"></span></div><div style="height:1500px"></div>
+var out = P([0, 100, 300, 500], ['s', 'w']); (function () { return out })
+=== scrollport-is-the-padding-box
+@html <div id=c style="overflow:hidden;width:300px;height:200px;padding:20px;border:4px solid"><div style="height:30px"></div><div id=s style="position:sticky;top:0;height:30px;width:100px"></div><div style="height:1000px"></div></div>
+var out = C('c', [0, 30, 100, 400], ['s', 'c']); (function () { return out })
+=== a-sticky-box-that-also-scrolls-uses-its-parent-container
+@html <div id=c style="overflow:hidden;width:300px;height:200px"><div style="height:50px"></div><div id=s style="position:sticky;top:0;overflow:auto;height:30px;width:100px"></div><div style="height:1000px"></div></div>
+var out = C('c', [0, 40, 100, 600], ['s']); (function () { return out })
+=== sticky-with-a-scrolled-inner-container
+@html <div id=c style="overflow:hidden;width:300px;height:200px"><div style="height:50px"></div><div id=s style="position:sticky;top:0;height:60px;width:100px"><div id=d style="overflow:hidden;height:40px;width:80px"><div style="height:100px"><div id=k style="height:10px;margin-top:30px"></div></div></div></div><div style="height:1000px"></div></div>
+var out = C('c', [0, 100, 400], ['s', 'k']) + ' ' + ($('d').scrollTop = 20, R('k')) + ' ' + ($('c').scrollTop = 0, R('k')); (function () { return out })
+=== percent-inset-of-a-padded-container
+@html <div id=c style="overflow:hidden;width:300px;height:200px;padding:20px"><div style="height:60px"></div><div id=s style="position:sticky;top:10%;height:30px;width:100px"></div><div style="height:1000px"></div></div>
+var out = C('c', [0, 40, 100, 400], ['s']); (function () { return out })
+=== th-stops-at-the-end-of-a-collapsed-bordered-table
+@html <div id=c style="overflow:hidden;width:300px;height:100px"><table id=t style="border-collapse:collapse;border:6px solid;padding:10px"><thead><tr><th id=h style="position:sticky;top:0;width:100px;height:30px;padding:0"></th></tr></thead><tbody id=b></tbody></table><div style="height:600px"></div></div>
+rows(6, 1)
+var out = C('c', [0, 100, 150, 200, 250, 300, 500], ['h', 't']); (function () { return out })
+=== sticky-box-inside-an-inline-box
+@html <div style="height:60px"></div><div id=w style="height:400px"><span style="background:#ccc"><span id=s style="display:inline-block;position:sticky;top:0;height:30px;width:100px"></span></span></div><div style="height:1500px"></div>
+var out = P([0, 100, 500], ['s']); (function () { return out })
+=== margin-that-collapses-out-of-the-containing-block
+@html <div style="height:100px"></div><div id=w><div style="height:100px"></div><div id=s style="position:sticky;top:0;height:50px;width:100px;margin-bottom:30px"></div></div><div style="height:1500px"></div>
+var out = P([0, 100, 200, 220, 250, 400], ['s', 'w']); (function () { return out })
+=== sticky-taller-than-its-containing-block
+@html <div style="height:100px"></div><div id=w style="height:80px"><div id=s style="position:sticky;top:0;height:120px;width:100px"></div></div><div style="height:1500px"></div>
+var out = P([0, 100, 150, 300], ['s', 'w']); (function () { return out })
+=== sticky-with-margin-top-that-collapses-out
+@html <div style="height:100px"></div><div id=w style="height:300px"><div id=s style="position:sticky;top:0;height:50px;width:100px;margin-top:40px"></div></div><div style="height:1500px"></div>
+var out = P([0, 100, 140, 200, 400], ['s', 'w']); (function () { return out })
+=== sticky-thead
+@html <div id=c style="overflow:hidden;width:300px;height:100px"><table style="border-collapse:collapse"><thead id=h style="position:sticky;top:0"><tr><th style="width:100px;height:30px;padding:0"></th></tr></thead><tbody id=b></tbody></table><div style="height:600px"></div></div>
+rows(6, 1); var out = C('c', [0, 40, 150, 200, 300], ['h', 'c0']); (function () { return out })
+=== sticky-tr
+@html <div id=c style="overflow:hidden;width:300px;height:100px"><table style="border-collapse:collapse"><tbody id=b><tr id=h style="position:sticky;top:0"><td style="width:100px;height:30px;padding:0"></td></tr></tbody></table><div style="height:600px"></div></div>
+rows(6, 1); var out = C('c', [0, 40, 150, 200, 300], ['h', 'c0']); (function () { return out })
+=== negative-top-inset
+@html <div style="height:100px"></div><div id=s style="position:sticky;top:-20px;height:50px;width:100px"></div><div style="height:1500px"></div>
+var out = P([0, 100, 120, 130, 300], ['s']); (function () { return out })
+=== sticky-in-a-scrolled-grid
+@html <div style="height:50px"></div><div id=g style="display:grid;grid-template-columns:100px 100px;height:600px"><div id=s style="position:sticky;top:0;height:40px"></div><div></div></div><div style="height:1500px"></div>
+var out = P([0, 100, 500, 700], ['s', 'g']); (function () { return out })
