@@ -78,5 +78,5 @@ fn an_observer_with_a_registration_survives_a_collection() {
     // After a disconnect nothing keeps it.
     js(&mut b, "var m = new MutationObserver(function () {}); m.observe(a, { attributes: true }); m.disconnect(); m = null");
     b.collect(&[]).unwrap();
-    assert_eq!(b.stats().wrappers > 0, true);
+    assert!(b.stats().wrappers > 0);
 }

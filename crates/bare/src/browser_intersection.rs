@@ -541,15 +541,16 @@ impl Dom {
             }
         }
         // Which targets and roots are connected: this walks the tree with the step charge, so it is done before the geometry.
-        let (list, roots): (Vec<(ObjId, NodeId)>, Vec<(ObjId, Option<NodeId>)>) = {
+        type Roots = Vec<(ObjId, Option<NodeId>)>;
+        let (list, roots): (Vec<(ObjId, NodeId)>, Roots) = {
             let s = st.borrow();
             let pairs = s.order.iter().flat_map(|&o| s.observers[&o].obs.iter().map(move |x| (o, x.target))).collect();
             (pairs, s.order.iter().map(|&o| (o, s.observers[&o].root.filter(|_| !s.observers[&o].doc).map(|r| r.0))).collect())
         };
         let mut connected = HashMap::new();
         for &(_, t) in &list {
-            if !connected.contains_key(&t) {
-                connected.insert(t, self.in_document(it, t)?);
+            if let std::collections::hash_map::Entry::Vacant(e) = connected.entry(t) {
+                e.insert(self.in_document(it, t)?);
             }
         }
         let root_ok: HashMap<ObjId, bool> = roots.into_iter().map(|(o, r)| Ok((o, r.map_or(Ok(true), |r| self.in_document(it, r))?))).collect::<R<_>>()?;
