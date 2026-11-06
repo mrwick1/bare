@@ -3368,3 +3368,22 @@ Cost against main 61a3962. `perf stat -e instructions:u`, minimum of 3 runs, eac
 | startup (`eval_check -e 0`) | 2,979,037 | 2,984,315 | +0.177% |
 
 Not tested: cycles, rows at scale 1 and 100 of the engine matrix, a real `fetch` with a multipart body (not written), `new FormData(form)` (a gate), `Blob.stream()` and `bytes()` (absent), `userAgentData.getHighEntropyValues` (absent), the OS random source failing (no hook to make it fail), a build on another machine, and the live staging login.
+
+## Computed style inside display:none
+
+Problem: the live login stopped with `Unsupported("an element inside display:none has no computed style in the engine")`. The cascade skips a `display:none` subtree, so `Styles::style` was `None` there. Chrome 155 gives the computed values (`tools/ui/chrome_hidden_style.mjs`, log in `tools/fixtures/ui/chrome-hidden-styles.txt`, 94 cases).
+
+What runs: `RuleSet::compute_for(doc, Some(el))` styles the nodes from the root down to `el` (the flat ancestors), and nothing else, inside a hidden subtree. The cost of a hidden read is the cost of the walk plus the depth of `el`. `Dom::snap` in `browser_computed.rs` first runs the normal walk. Only when `el` has no style does it run the second walk with `Some(el)`. A shown element never pays for the second walk. `Snap.hidden` says that the element, or an ancestor, is `display:none`. For such an element `width`, `height` and `margin-*` are computed values, as in Chrome. The content of a `<template>` reads as empty (length 0), as in Chrome. A light child of a shadow host still has no style (no slots), and is still a gate.
+
+Chrome cases: the fixture covers an element that is hidden itself against one whose ancestor is hidden, nested `display:none`, a chain 40 levels deep, `display:contents`, the `hidden` attribute, `<details>`, `content-visibility:hidden`, `<select>`, an SVG subtree, an iframe document, `<template>` content, inherited `color` and `font-size`, `var()` and custom properties, `em`, `rem` and percent values, and a read after the style changed.
+
+Cost: `perf stat -e instructions:u`, minimum of 3 runs, each binary in its own `CARGO_TARGET_DIR` under `/data/bare-tmp`. Main 61a3962 (with the new `style_load` cases copied in) against this build. 37 rows: `style_load` (setget, churn, attrs, shorthand, hidden, shown), `sheets_load` and `loader_load` at 1x, 10x and 100x, and `scroll_load 10000 2000`. All are within +0.5%. The worst is `loader_load dynamic 100` at +0.31%. `style_load shown` is -0.01%, -0.00% and -0.00% at 1x, 10x and 100x. `hidden` has no main row: main stops at the first read.
+
+The first build cost `shown` +0.83% (1x), +1.84% (10x). The causes, in order of effect:
+1. `compute` and `compute_for` both called the walk. A function with two callers is not inlined, and so `candidates` and `style_of` stopped being inlined into the loop. Fix: the walk is `walk<const WANT: bool>`, `compute` is `walk::<false>`, and `candidates` and `style_of` are `#[inline(always)]`. The walk for layout has none of the `want` code.
+2. `Document::flat_parent` was no longer inlined into the loop (a call for each element, about 23 instructions). Fix: `#[inline(always)]`.
+3. The code for a hidden element and for the way to `want` is in `Way::visit` and `Way::step`, which are `#[cold]`.
+
+Hidden reads: `style_load hidden` makes 500 elements for each scale unit in a `display:none` `<div>` and reads 4 for each unit. It runs 38.3 M, 333.4 M and 17.29 G instructions at 1x, 10x and 100x. A hidden read runs the walk twice. Hypothesis: the first walk could be skipped if the caller knew that the element is hidden. Not measured.
+
+Not tested: the second walk on a page with 100,000 elements and a hidden read in a loop, a shadow tree with a `display:none` host, a read inside a `display:none` `<iframe>` from another document, `display:contents` (the engine has no such value), cycles and memory of the second walk, and the live staging login.

@@ -18,6 +18,10 @@
 //!   it is supplied before the `<link>` asks. Supply an empty list for a sheet that failed to load, if the page should go on without it. `Browser::style_availability` tells which
 //!   sheets are missing, so the loader knows what to fetch. A `<link>` with a `media` that does not match the viewport, an alternate
 //!   sheet and a link without `href` are not sources (`cascade::sources`).
+//! - Not rendered: an element inside `display:none` gets its style on demand. `RuleSet::compute_for(doc, Some(el))` styles the elements
+//!   from the root down to `el` inside a hidden subtree, in the same pass, so a hidden read costs the depth of `el`. Layout and the other
+//!   readers do not ask, so they never see a style there. The content of a `<template>` reads as empty, as in Chrome (it is in another
+//!   document there; here it is in the tree).
 //! - Order of sheets: `<style>` and `<link>` in tree order, an `@import` of an inline sheet before its text. A later sheet beats an earlier one on a tie.
 //! - Not a snapshot object: `getComputedStyle(el) !== getComputedStyle(el)`. The object has its own prototype (`CSSStyleDeclaration` is
 //!   its parent, so `instanceof` works). It does not share the brand of the mutable inline declaration of `browser_style.rs`: every
@@ -39,9 +43,9 @@
 //! Gates (on purpose, none is silently faked; each is `Error::Unsupported`)
 //! - A pseudo-element argument (`::before`, anything that starts with `:`): the engine has no pseudo-element styles.
 //! - Resolved values that are used values (CSSOM "resolved value"): `width`, `height`, `margin-*` of an element that is rendered; `top`,
-//!   `right`, `bottom`, `left` of a positioned one; a percent `padding-*`; a numeric `line-height`. They need layout. For `display:none`
-//!   they are the computed values and are read. Not used for layout here, so they are not computed from it.
-//! - An element inside `display:none` has no style in the engine (`Styles::style` is `None` below a `display:none` element).
+//!   `right`, `bottom`, `left` of a positioned one; a percent `padding-*`; a numeric `line-height`. They need layout. For an element that
+//!   is not rendered (it or an ancestor is `display:none`) they are the computed values and are read. Not used for layout here, so they are not computed from it.
+//! - A light child of a shadow host has no style (the flat tree has no slots, `RuleSet::compute_for` does not reach it).
 //! - Values that the engine keeps only loosely (`align-*`, `justify-*` lose `safe`/`unsafe`, `text-decoration-line` keeps one line, grid
 //!   lists, `calc()` with a percent): no text. A shorthand that cannot be built from its longhands (`border` with different sides, `font`): the same gate.
 //! - `direction` of an element whose `dir` chain reaches `dir=auto` or a `<bdi>` with no `ltr/rtl` before an explicit one: it depends on
@@ -163,7 +167,7 @@ pub(crate) struct Computed {
 
 const MISSING: &str = "computed style needs an external stylesheet that the embedder has not supplied (Browser::style_availability lists them)";
 const PSEUDO: &str = "getComputedStyle of a pseudo-element (the engine has no pseudo-element styles)";
-const NO_STYLE: &str = "an element inside display:none has no computed style in the engine";
+const NO_STYLE: &str = "an element that the style walk does not reach has no computed style in the engine (a light child of a shadow host: no slots)";
 const AUTO_DIR: &str = "direction depends on dir=auto or bdi (the text decides it)";
 const CSS_TEXT: &str = "computed cssText (CSSOM and browsers differ; not faked)";
 const APPROX: &str = "this property is read only approximately by the engine (no faithful computed text)";
@@ -193,6 +197,8 @@ pub(crate) fn join_layer(outer: Option<&str>, inner: Option<&str>) -> Option<Str
 struct Snap {
     styles: Styles,
     style: ComputedStyle,
+    /// The element is not rendered: it, or an ancestor, is `display:none`. Its resolved values are the computed ones.
+    hidden: bool,
 }
 
 /// A float as CSS prints it (no `-0`).
@@ -212,7 +218,7 @@ impl Snap {
             return Err(APPROX);
         }
         let v = self.style.get(p);
-        let hidden = self.style.get(Display) == Cv::Keyword(Keyword::None);
+        let hidden = self.hidden;
         let positioned = self.style.get(Position) != Cv::Keyword(Keyword::Static);
         let used = match p {
             Width | Height | MarginTop | MarginRight | MarginBottom | MarginLeft => !hidden,
@@ -362,6 +368,11 @@ impl Dom {
 
     /// The styles of the whole document now (the cascade of one read). Charged and capped as described in the header.
     pub(crate) fn cascade_now(&self, it: &mut Interp<'_>) -> R<Styles> {
+        self.cascade_for(it, None)
+    }
+
+    /// The same, and `want` is styled even inside `display:none` (`RuleSet::compute_for`).
+    fn cascade_for(&self, it: &mut Interp<'_>, want: Option<NodeId>) -> R<Styles> {
         let l = self.computed.lim.get();
         let vp = self.plat.s.borrow().viewport;
         if self.doc.borrow().len() > l.max_nodes {
@@ -403,7 +414,7 @@ impl Dom {
         drop(doc);
         let doc = self.doc.borrow();
         self.computed.computes.set(self.computed.computes.get() + 1);
-        Ok(rules.compute(&doc))
+        Ok(rules.compute_for(&doc, want))
     }
 
     /// The style of `el` now, or `None` when the element is not connected (an empty declaration).
@@ -411,11 +422,32 @@ impl Dom {
         if !self.in_document(it, el)? {
             return Ok(None);
         }
-        let styles = self.cascade_now(it)?;
-        match styles.style(el).cloned() {
-            Some(style) => Ok(Some(Snap { styles, style })),
-            None => Err(Self::gate(NO_STYLE)),
+        let mut styles = self.cascade_for(it, None)?;
+        if styles.style(el).is_none() {
+            // Not rendered: the second walk also styles the way down to `el`. A rendered element never pays for it.
+            styles = self.cascade_for(it, Some(el))?;
         }
+        let Some(style) = styles.style(el).cloned() else { return Err(Self::gate(NO_STYLE)) };
+        // Is it rendered? Is it in the content of a `<template>`? Chrome keeps that content in another document, so it reads as empty.
+        let doc = self.doc.borrow();
+        let (mut hidden, mut n) = (style.get(Property::Display) == Cv::Keyword(Keyword::None), 0u64);
+        let template = doc.find_atom("template");
+        let mut up = doc.flat_parent(el);
+        while let Some(a) = up {
+            n += 1;
+            if let NodeData::Element { name, .. } = *doc.data(a) {
+                if Some(name) == template && !doc.is_foreign(a) {
+                    drop(doc);
+                    it.charge(n / 8 + 1)?;
+                    return Ok(None);
+                }
+                hidden |= styles.style(a).is_some_and(|s| s.get(Property::Display) == Cv::Keyword(Keyword::None));
+            }
+            up = doc.flat_parent(a);
+        }
+        drop(doc);
+        it.charge(n / 8 + 1)?;
+        Ok(Some(Snap { styles, style, hidden }))
     }
 
     fn connected(&self, it: &mut Interp<'_>, el: NodeId) -> R<bool> {

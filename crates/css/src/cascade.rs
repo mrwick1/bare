@@ -293,6 +293,22 @@ impl RuleSet {
 
     /// Find the style of every element that is shown. The selectors must come from `add` with this same `doc`.
     pub fn compute(&self, doc: &Document) -> Styles {
+        self.walk::<false>(doc, None)
+    }
+
+    /// The same, and the element `want` gets its style too, even inside `display:none` (for `getComputedStyle`: CSSOM gives the
+    /// computed values of an element that is not rendered). Only the elements from the root down to `want` are styled inside a
+    /// hidden subtree, so the cost of a hidden read is the depth of `want`. Layout asks with `None` and pays nothing: the walk
+    /// below changes only at a `display:none` element and on the way from it to `want`.
+    /// An element that the walk does not reach (a light child of a shadow host: no slots) still has no style.
+    pub fn compute_for(&self, doc: &Document, want: Option<NodeId>) -> Styles {
+        if want.is_some() { self.walk::<true>(doc, want) } else { self.walk::<false>(doc, None) }
+    }
+
+    /// `WANT` is a const so that the walk for layout (`false`) has none of the code for `want`: it is the same machine code as before.
+    #[inline(always)]
+    fn walk<const WANT: bool>(&self, doc: &Document, want: Option<NodeId>) -> Styles {
+        let mut way = Way { want, path: Vec::new(), sorted: Vec::new(), on: false, at: 0 };
         let mut styles = Styles { styles: vec![ComputedStyle::initial()], of_node: vec![NONE; doc.len()], calcs: Vec::new(), grids: Vec::new(), customs: Vec::new() };
         // Style 0 is the starting style. It is the parent style of the `html` element.
         let mut cx = Cx { viewport: self.viewport, root_font_size: 16.0, layer_order: self.layer_order(), declared: &self.side, inline: RefCell::default(), computed: RefCell::default(), grids: RefCell::default(), customs: RefCell::default() };
@@ -335,9 +351,17 @@ impl RuleSet {
                     let hint = hints.as_ref().and_then(|h| h.of(doc, node));
                     let id = self.style_of(&mut styles, &mut memo, parent, &matched, (inline, hint.as_deref()), &cx);
                     styles.of_node[node.index()] = id;
-                    if styles.styles[id as usize].get(Property::Display) == Value::Keyword(Keyword::None) {
+                    let hidden = styles.styles[id as usize].get(Property::Display) == Value::Keyword(Keyword::None);
+                    if hidden {
+                        // No style for what is inside, and no filter work. `compute_for` goes on only to the node on the way to `want`.
+                        if WANT {
+                            way.visit(doc, node, id, true, shadow, (&styles, &mut cx, &mut filter, &mut stack));
+                        }
                         continue;
-                        // No style for what is inside, and no filter work.
+                    }
+                    if WANT && way.on {
+                        way.visit(doc, node, id, false, shadow, (&styles, &mut cx, &mut filter, &mut stack));
+                        continue;
                     }
                     if doc.parent(node) == Some(doc.root()) {
                         // The root element. `rem` is a multiple of its font size.
@@ -364,6 +388,7 @@ impl RuleSet {
     }
 
     /// The rules that may match the element: the ones in the lists for its id, its classes and its tag, and the "other" list.
+    #[inline(always)]
     fn candidates(&self, doc: &Document, el: NodeId, out: &mut Vec<u32>) {
         out.clear();
         out.extend_from_slice(&self.other);
@@ -387,6 +412,7 @@ impl RuleSet {
     }
 
     /// The number of the style of an element. It is found in the cache, or it is made.
+    #[inline(always)]
     fn style_of(&self, styles: &mut Styles, memo: &mut Memo, parent: u32, matched: &[u32], (inline, hint): (Option<&str>, Option<&str>), cx: &Cx<'_>) -> u32 {
         let mut key = matched.iter().fold(u64::from(parent), |h, &i| (h ^ u64::from(i)).wrapping_mul(0x0100_0000_01b3));
         // The hint is part of the key: the cells of one table share their hint, and so their style.
@@ -701,6 +727,73 @@ impl Cx<'_> {
 
 const NONE: u32 = u32::MAX;
 
+/// The way from the root to the element that `compute_for` was asked about. It is made at the first `display:none` element.
+struct Way {
+    want: Option<NodeId>,
+    /// The flat ancestors of `want` from the root down to `want`. Empty when `want` is not connected, or not made yet.
+    path: Vec<NodeId>,
+    /// The places (`NodeId::index`) of `path`, sorted: is a node on the path?
+    sorted: Vec<u32>,
+    /// The walk is on the way from a `display:none` element to `want`: only the nodes of `path` are walked.
+    on: bool,
+    /// The place of the node that is walked now in `path`, while `on`.
+    at: usize,
+}
+
+impl Way {
+    /// A `display:none` element, or a node on the way from one to `want`, got its style. `None`: nothing is below it to style.
+    /// `Some(next)`: style `next`, the next node on the way, and nothing else below this node.
+    /// A `display:none` element, or a node on the way to `want`, was styled: go on to the next node on the way, if there is one.
+    #[cold]
+    #[inline(never)]
+    fn visit(&mut self, doc: &Document, node: NodeId, id: u32, hidden: bool, shadow: bool, (styles, cx, filter, stack): (&Styles, &mut Cx<'_>, &mut AncestorFilter, &mut Vec<(NodeId, bool, bool)>)) {
+        let Some(next) = self.step(doc, node, hidden) else { return };
+        if doc.parent(node) == Some(doc.root()) {
+            cx.root_font_size = styles.styles[id as usize].px(Property::FontSize);
+        }
+        element_hashes(doc, node, &mut |h| filter.add(h));
+        stack.push((node, true, shadow));
+        stack.push((next, false, shadow || doc.shadow_root(node).is_some()));
+    }
+
+    #[cold]
+    fn step(&mut self, doc: &Document, node: NodeId, hidden: bool) -> Option<NodeId> {
+        if !self.on {
+            let want = self.want?;
+            if self.path.is_empty() {
+                let mut up = Some(want);
+                while let Some(n) = up {
+                    self.path.push(n);
+                    up = doc.flat_parent(n);
+                }
+                self.path.reverse();
+                if self.path[0] != doc.root() {
+                    self.path.clear();
+                    self.path.push(want);
+                    // Not connected: no node of the walk is on this path.
+                    self.sorted.clear();
+                } else {
+                    self.sorted = self.path.iter().map(|n| n.index() as u32).collect();
+                    self.sorted.sort_unstable();
+                }
+            }
+            debug_assert!(hidden);
+            if self.sorted.binary_search(&(node.index() as u32)).is_err() {
+                return None;
+            }
+            self.at = self.path.iter().position(|&n| n == node)?;
+            self.on = true;
+        }
+        if self.at + 1 == self.path.len() {
+            // `want` itself: its children are not styled.
+            self.on = false;
+            return None;
+        }
+        self.at += 1;
+        Some(self.path[self.at])
+    }
+}
+
 /// The styles of a document.
 pub struct Styles {
     /// The different styles. Many elements share one.
@@ -733,7 +826,7 @@ impl Styles {
     }
 
     /// The style of an element. `None` for a node that is not an element, and for an element that is not shown
-    /// (`display: none`, or inside one).
+    /// (`display: none`, or inside one), unless it was asked for with `RuleSet::compute_for`.
     pub fn style(&self, node: NodeId) -> Option<&ComputedStyle> {
         match self.of_node[node.index()] {
             NONE => None,
