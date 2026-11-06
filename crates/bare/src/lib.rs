@@ -33,6 +33,9 @@ mod browser_nodelist;
 mod browser_dataset;
 mod browser_abort;
 mod browser_encoding;
+mod browser_web;
+#[cfg(test)]
+mod browser_web_tests;
 #[cfg(test)]
 mod browser_attr_tests;
 #[cfg(test)]

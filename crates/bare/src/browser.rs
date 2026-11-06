@@ -345,6 +345,8 @@ pub struct Dom {
     pub(crate) dataset: crate::browser_dataset::DatasetHost,
     /// `AbortController` and `AbortSignal` (`browser_abort.rs`).
     pub(crate) abort: crate::browser_abort::AbortHost,
+    /// `crypto`, `navigator`, `Blob`, `File` and `FormData` (`browser_web.rs`).
+    pub(crate) web: crate::browser_web::WebHost,
 }
 
 impl Host for Dom {
@@ -373,6 +375,7 @@ impl Host for Dom {
         crate::browser_nodelist::roots(self, out);
         crate::browser_dataset::roots(self, out);
         crate::browser_abort::roots(self, out);
+        crate::browser_web::roots(self, out);
         self.resize_roots(out);
     }
 
@@ -387,6 +390,9 @@ impl Host for Dom {
         crate::browser_nodelist::trace(self, owner, out);
         crate::browser_dataset::trace(self, owner, out);
         crate::browser_abort::trace(self, owner, out);
+        if self.web.active.get() {
+            crate::browser_web::trace(self, owner, out);
+        }
         let st = self.st.borrow();
         if let Some(&t) = st.by_obj.get(&owner) {
             for l in st.listeners.get(&t).into_iter().flatten() {
@@ -422,6 +428,7 @@ impl Host for Dom {
         at::prune(self, live);
         crate::browser_nodelist::prune(self, live);
         crate::browser_dataset::prune(self, live);
+        crate::browser_web::prune(self, live);
         let mut guard = self.st.borrow_mut();
         let st = &mut *guard;
         st.by_obj.retain(|&o, t| matches!(t, Target::Window) || live(o));
@@ -466,6 +473,7 @@ fn domexc_codes(name: &str) -> u32 {
         "NotSupportedError" => 9,
         "InUseAttributeError" => 10,
         "InvalidStateError" => 11,
+        "TypeMismatchError" => 17,
         "SyntaxError" => 12,
         "SecurityError" => 18,
         "QuotaExceededError" => 22,
@@ -849,6 +857,7 @@ impl Dom {
         crate::browser_dataset::install(self, it)?;
         crate::browser_abort::install(self, it)?;
         crate::browser_encoding::install(self, it)?;
+        crate::browser_web::install(self, it)?;
         crate::browser_console::install(self, it)?;
         crate::browser_style::install(self, it)?;
         crate::browser_computed::install(self, it)?;
@@ -1116,6 +1125,7 @@ impl Browser {
             nl: Default::default(),
             dataset: Default::default(),
             abort: Default::default(),
+            web: Default::default(),
         });
         it.set_host(dom.clone())?;
         it.heap.set_indexed_source(dom.clone());

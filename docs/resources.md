@@ -3303,3 +3303,68 @@ Method: `perf stat -e instructions:u`, minimum of 3 runs, each binary in its own
 The new globals are lazy where the spec allows: `AbortController`, `AbortSignal` and `Intl.Segmenter` cost nothing until they are read. `structuredClone`, `btoa` and `atob` are native functions that the install makes. Hypothesis: they are most of the +12 k at startup. Not measured by itself. `IterState::ReStr` adds a variant and no hot-path branch.
 
 Not tested: cycles, rows at scale 1 and 100, `numeric_load`, the dictionary words of CJK and Thai, `MessagePort.postMessage` with a clone, `structuredClone` with a transfer list, `fetch` against a real network with `{signal}`, a build on another machine, and the live staging login.
+
+### crypto, navigator, Blob, File and FormData
+
+The staging chunks use `crypto.randomUUID`, `crypto.getRandomValues`, `FormData` and `navigator`. All four did not exist. They are in `crates/bare/src/browser_web.rs`.
+
+Design:
+
+- The five globals (`crypto`, `navigator`, `Blob`, `File`, `FormData`) are accessors until a script first reads or writes one, as `Intl` and `BigInt` are in the engine. The first read makes all objects of the file once and replaces its own accessor with a data property. A page that uses none of them pays for five functions.
+- The host cannot run a JavaScript prelude when a global is read: `run_script` refuses to run inside a call, and the engine has no `eval`. So the objects are native Rust, in side tables, with the same GC hooks as `URLSearchParams` (`roots`, `trace`, `prune`).
+- `crypto.getRandomValues` and `randomUUID` read `bare_tls::random::fill`. There is no other source. If it fails the call throws `OperationError`. `bare-tls` was a dev-dependency of `bare`. It is now a normal dependency. `bare-net` already links it, so no crate and no code is added to the binary.
+- `Blob` keeps a copy of its bytes (at most 64 MiB each, 256 MiB for all live Blobs, 65,536 objects). `File extends Blob`. `FormData` stores strings and Files. `append(name, blob)` stores a File named `blob`, as the XHR specification says.
+- `navigator` values are getters on `Navigator.prototype`. The user agent string is the constant `USER_AGENT`.
+- `fetch` with a Blob or a `FormData` body is a gate (`Unsupported`). It never sends `[object FormData]`. A multipart writer is a follow-up. The old gate text of `Response.blob()` still says "no Blob or FormData". It is the same gate for the other direction.
+
+Checks: 7 tests in `browser_web_tests.rs`. 3 of them run 73 scripts and compare with Node 22.18 (crypto 17, Blob and File 25, FormData 31; the tables hold the Node results). Node differs from the specification on `slice(Infinity)` and `lastModified: 1.9`. The tests follow the specification there, in `spec_cases_that_node_gets_wrong`. 4 tests check `navigator`, the lazy accessors, the specification cases, the caps and the GC. One test in `eval_wrapper_tests.rs` checks `String.prototype.length`, `Function.prototype.length` and `Function.prototype.name` against Node. It failed on the old engine first.
+
+Engine fix: `String.prototype.length` is 0 (not writable, not enumerable, not configurable, as for every String object). `Function.prototype.length` is 0 and `Function.prototype.name` is the empty string (not writable, not enumerable, configurable). An anonymous class now has the name `""` from the prototype.
+
+Cost against main 61a3962. `perf stat -e instructions:u`, minimum of 3 runs, each binary in its own `CARGO_TARGET_DIR` under `/data/bare-tmp`. 40 rows at scale 10 and the startup of an empty realm. All are below +0.5%. The worst is `arrobj_load repeat` at +0.153% (6,591,749 to 6,601,858 instructions, a fixed 10 k). Startup is +5,278 instructions (+0.177%). The host rows `browser_load lookup`, `mutation` and `event` at scale 1 (minimum of 5 runs) are -0.19%, +0.12% and +0.20%. The first version of the host hooks measured +0.5% to +0.9% on those rows. `Host::trace` runs for every object of a collect, and a RefCell borrow and two map lookups for each object were 0.8 M instructions. `Dom::trace` now reads one `Cell<bool>` first and skips the call until a `FormData` exists.
+
+| Row | main 61a3962 | this change | Change |
+| --- | --- | --- | --- |
+| eval_load loop | 12,194,696,954 | 12,194,702,428 | +0.000% |
+| eval_load calls | 8,169,917,182 | 8,169,924,290 | +0.000% |
+| eval_load fib | 293,067,049 | 293,074,868 | +0.003% |
+| eval_load closures | 1,198,027,595 | 1,198,034,188 | +0.001% |
+| eval_load objects | 4,013,608,117 | 4,013,616,713 | +0.000% |
+| eval_load webpack | 56,494,889 | 56,507,376 | +0.022% |
+| eval_load throws | 3,064,700,904 | 3,064,707,739 | +0.000% |
+| eval_load concat | 10,920,556 | 10,926,960 | +0.059% |
+| arrobj_load mapfilter | 292,896,008 | 292,906,075 | +0.003% |
+| arrobj_load sort | 1,002,664,090 | 1,002,667,796 | +0.000% |
+| arrobj_load queue | 285,786,698 | 285,790,707 | +0.001% |
+| arrobj_load objects | 74,637,118 | 74,646,236 | +0.012% |
+| arrobj_load arrays | 124,811,842 | 124,820,209 | +0.007% |
+| arrobj_load fill | 393,988,342 | 393,996,747 | +0.002% |
+| arrobj_load reverse | 3,756,010,661 | 3,756,019,210 | +0.000% |
+| arrobj_load flat | 703,315,374 | 703,324,264 | +0.001% |
+| arrobj_load tosorted | 926,419,798 | 926,426,613 | +0.001% |
+| arrobj_load lastindexof | 3,965,774,647 | 3,965,783,924 | +0.000% |
+| arrobj_load pad | 24,622,625 | 24,631,993 | +0.038% |
+| arrobj_load repeat | 6,591,749 | 6,601,858 | +0.153% |
+| arrobj_load replaceall | 345,611,453 | 345,622,359 | +0.003% |
+| arrobj_load freeze | 1,969,378,590 | 1,969,388,406 | +0.000% |
+| arrobj_load descriptors | 71,629,361 | 71,640,901 | +0.016% |
+| binary_load copy | 28,396,282 | 28,401,571 | +0.019% |
+| binary_load scan | 7,675,055,524 | 7,675,060,504 | +0.000% |
+| binary_load scanarr | 16,855,308,013 | 16,855,312,316 | +0.000% |
+| binary_load codec | 423,361,094 | 423,367,558 | +0.002% |
+| binary_load stream | 396,610,656 | 396,616,973 | +0.002% |
+| binary_load indexof | 493,368,571 | 493,374,149 | +0.001% |
+| binary_load f64from | 989,339,538 | 989,345,371 | +0.001% |
+| binary_load i32sort | 703,446,976 | 703,453,688 | +0.001% |
+| binary_load dataview | 15,426,526,607 | 15,426,533,821 | +0.000% |
+| proxy_load get_trap | 92,687,157 | 92,693,403 | +0.007% |
+| proxy_load set_trap | 125,548,026 | 125,552,387 | +0.003% |
+| proxy_load noop | 116,661,765 | 116,668,277 | +0.006% |
+| proxy_load forward | 173,751,742 | 173,638,732 | -0.065% |
+| proxy_load array_mapfilter | 1,964,996,513 | 1,965,008,166 | +0.001% |
+| proxy_load reactive | 369,776,866 | 369,663,705 | -0.031% |
+| proxy_load chain | 362,992,807 | 362,998,908 | +0.002% |
+| proxy_load keys | 627,724,329 | 627,738,125 | +0.002% |
+| startup (`eval_check -e 0`) | 2,979,037 | 2,984,315 | +0.177% |
+
+Not tested: cycles, rows at scale 1 and 100 of the engine matrix, a real `fetch` with a multipart body (not written), `new FormData(form)` (a gate), `Blob.stream()` and `bytes()` (absent), `userAgentData.getHighEntropyValues` (absent), the OS random source failing (no hook to make it fail), a build on another machine, and the live staging login.

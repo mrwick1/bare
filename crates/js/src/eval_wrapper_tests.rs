@@ -115,3 +115,19 @@ fn json_stringify_of_a_wrapper_calls_the_conversion_once_and_in_order() {
         assert_eq!(out(&mut it, "JSON.stringify([n, n]) + log.join()"), "string:[7,7]v,v");
     });
 }
+
+#[test]
+fn string_and_function_prototypes_have_length_and_name() {
+    big(|| {
+        let mut it = realm();
+        // Node 22: `0,false,false,false`, `0,false,false,true`, `,false,false,true`.
+        let d = "function d(o, k) { var x = Object.getOwnPropertyDescriptor(o, k); return [x.value, x.writable, x.enumerable, x.configurable].join(); } ";
+        out(&mut it, d);
+        assert_eq!(out(&mut it, "d(String.prototype, 'length')"), "string:0,false,false,false");
+        assert_eq!(out(&mut it, "d(Function.prototype, 'length')"), "string:0,false,false,true");
+        assert_eq!(out(&mut it, "d(Function.prototype, 'name')"), "string:,false,false,true");
+        // An anonymous class has the inherited empty name. Own names still win.
+        assert_eq!(out(&mut it, "(class {}).name + '|' + (class A {}).name + '|' + (function f(a, b) {}).length"), "string:|A|2");
+        assert_eq!(out(&mut it, "'abc'.length + new String('abcd').length"), "number:7");
+    });
+}

@@ -471,6 +471,8 @@ impl<'p> Interp<'p> {
         let sp = self.ext.string_proto;
         self.def(sc, self.k_prototype, Value::Object(sp), false, false, false)?;
         self.def(sp, self.k_constructor, Value::Object(sc), true, false, true)?;
+        // `String.prototype` is a String object with the empty string: `length` is 0 and is not configurable.
+        self.def(sp, self.k_length, Value::Number(0.0), false, false, false)?;
         self.method(sc, "fromCharCode", Nat::Ext(Bi::StrFromCharCode), 1)?;
         self.method(sc, "fromCodePoint", Nat::Ext(Bi::StrFromCodePoint), 1)?;
         let methods: [(&str, Bi, u32); 17] = [
