@@ -823,27 +823,28 @@ impl Dom {
             nm.push_str(p);
             nm.push_str(n);
         };
+        // One function object serves every target of a row (`Element.prototype.append === DocumentFragment.prototype.append`, unlike Chrome): a realm
+        // pays for each function it makes, and most rows of the table have 2 or 3 targets.
         for d in DEFS {
             let key = self.key(it, d.name)?;
+            let (f, s) = match d.kind {
+                Kind::Method(h) => (self.add_fn(it, h, d.name, d.len, false)?, None),
+                Kind::Get(h) => {
+                    named(&mut nm, "get ", d.name);
+                    (self.add_fn(it, h, &nm, 0, false)?, None)
+                }
+                Kind::Accessor(gh, sh) => {
+                    named(&mut nm, "get ", d.name);
+                    let f = self.add_fn(it, gh, &nm, 0, false)?;
+                    named(&mut nm, "set ", d.name);
+                    (f, Some(self.add_fn(it, sh, &nm, 1, false)?))
+                }
+            };
             for &on in d.on {
                 let target = self.pick(on);
                 match d.kind {
-                    Kind::Method(h) => {
-                        let f = self.add_fn(it, h, d.name, d.len, false)?;
-                        it.define_data(target, key, Value::Object(f), true, false, true)?;
-                    }
-                    Kind::Get(h) => {
-                        named(&mut nm, "get ", d.name);
-                        let f = self.add_fn(it, h, &nm, 0, false)?;
-                        self.define_accessor(it, target, key, f, None)?;
-                    }
-                    Kind::Accessor(gh, sh) => {
-                        named(&mut nm, "get ", d.name);
-                        let f = self.add_fn(it, gh, &nm, 0, false)?;
-                        named(&mut nm, "set ", d.name);
-                        let s = self.add_fn(it, sh, &nm, 1, false)?;
-                        self.define_accessor(it, target, key, f, Some(s))?;
-                    }
+                    Kind::Method(_) => it.define_data(target, key, Value::Object(f), true, false, true)?,
+                    _ => self.define_accessor(it, target, key, f, s)?,
                 }
             }
         }
