@@ -1,7 +1,7 @@
 //! `oninput` and `onchange`, the event handler IDL attributes of `GlobalEventHandlers` (HTML Standard, "event handlers").
 //!
 //! - Where: `Window` (own accessors of the global object), `Document.prototype`, `HTMLElement.prototype` and
-//!   `SVGElement.prototype`. Each interface has its own getter and setter function. MathML has no `MathMLElement` here
+//!   `SVGElement.prototype`; `onabort` is on `AbortSignal.prototype` only. Each interface has its own getter and setter function. MathML has no `MathMLElement` here
 //!   (`browser_namespace.rs`), so a MathML element has no property. Text, Node, Element and a plain `EventTarget` have none.
 //! - Storage: the handler is one `Listener` of the owner with `handler: true` and `cb` = the current value. No side table.
 //!   Setting a callable or another object stores it. A non-callable object is kept and skipped when the event runs, as the
@@ -30,8 +30,9 @@ const WINDOW: u8 = 0;
 const DOCUMENT: u8 = 1;
 const HTML: u8 = 2;
 const SVG: u8 = 3;
-const NAMES: [&str; 2] = ["oninput", "onchange"];
-const TYPES: [&str; 2] = ["input", "change"];
+const SIGNAL: u8 = 4;
+const NAMES: [&str; 3] = ["oninput", "onchange", "onabort"];
+const TYPES: [&str; 3] = ["input", "change", "abort"];
 
 impl Dom {
     /// The owner of a handler of interface `K`, or `Illegal invocation`. Window also takes `undefined` and `null`.
@@ -43,6 +44,7 @@ impl Dom {
         };
         let ok = match t {
             Some(Target::Window) => K == WINDOW,
+            Some(Target::Obj(o)) => K == SIGNAL && self.is_signal(o),
             Some(Target::Node(n)) => {
                 let doc = self.doc.borrow();
                 match (doc.data(n), K) {
@@ -101,6 +103,11 @@ fn set<const K: u8, const N: usize>(d: &Dom, it: &mut Interp<'_>, this: Value, a
         (None, None) => {}
     }
     Ok(Value::Undefined)
+}
+
+/// `onabort` of `AbortSignal.prototype`, made with the lazy `AbortSignal` (`browser_abort.rs`).
+pub(crate) fn install_onabort(d: &Dom, it: &mut Interp<'_>, proto: ObjId) -> R<()> {
+    d.def_get(it, proto, NAMES[2], get::<SIGNAL, 2>, Some(set::<SIGNAL, 2>))
 }
 
 pub(crate) fn install(d: &Dom, it: &mut Interp<'_>) -> R<()> {

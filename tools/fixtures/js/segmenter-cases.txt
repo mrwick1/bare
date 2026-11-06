@@ -1,0 +1,93 @@
+# bare-js Intl.Segmenter (Node is the oracle; same format as matchall-cases.txt). English locales only: CJK and Thai words differ (gate).
+=== grapheme_ascii
+var r = Array.from(new Intl.Segmenter().segment('abc'));
+(function () { return r.map(function (s) { return s.segment + '@' + s.index; }).join('|'); })
+=== grapheme_clusters
+var r = Array.from(new Intl.Segmenter('en', { granularity: 'grapheme' }).segment('éa\r\nb👨‍👩‍👧x🇫🇷'));
+(function () { return r.map(function (s) { return s.segment.length + '@' + s.index; }).join('|'); })
+=== word_basic
+var r = Array.from(new Intl.Segmenter('en', { granularity: 'word' }).segment('Hello, world! It’s 3.14 ok.'));
+(function () { return r.map(function (s) { return s.segment + '@' + s.index + ':' + s.isWordLike; }).join('|'); })
+=== word_keys
+var r = Array.from(new Intl.Segmenter('en', { granularity: 'word' }).segment('a b'))[0];
+(function () { return Object.keys(r).join(',') + ',' + r.input; })
+=== grapheme_keys
+var r = Array.from(new Intl.Segmenter().segment('ab'))[0];
+(function () { return Object.keys(r).join(',') + ',' + r.input + ',' + ('isWordLike' in r); })
+=== sentence
+var r = Array.from(new Intl.Segmenter('en', { granularity: 'sentence' }).segment('Hi there. How are you? Fine!  Ok'));
+(function () { return r.map(function (s) { return JSON.stringify(s.segment) + '@' + s.index; }).join('|'); })
+=== empty_string
+var r = Array.from(new Intl.Segmenter().segment(''));
+(function () { return r.length; })
+=== containing
+var g = new Intl.Segmenter('en', { granularity: 'word' }).segment('Hello world');
+var r = [0, 3, 4, 5, 6, 10, 11, -1, 1.7, NaN, Infinity, '2'].map(function (i) { var s = g.containing(i); return s ? s.segment + '@' + s.index : String(s); });
+(function () { return r.join('|'); })
+=== containing_default
+var g = new Intl.Segmenter().segment('ab');
+var r = [g.containing(), g.containing(0).segment, g.containing(undefined).index];
+(function () { return r.join('|'); })
+=== iterator_protocol
+var it = new Intl.Segmenter().segment('ab')[Symbol.iterator]();
+var a = it.next(), b = it.next(), c = it.next(), d = it.next();
+var r = [a.value.segment, a.done, b.value.segment, b.done, c.value, c.done, d.done, it[Symbol.iterator]() === it, Object.prototype.toString.call(it)];
+(function () { return r.join('|'); })
+=== iterator_proto_chain
+var it = new Intl.Segmenter().segment('a')[Symbol.iterator]();
+var ip = Object.getPrototypeOf(Object.getPrototypeOf(it));
+var r = [Object.getPrototypeOf(it).hasOwnProperty('next'), typeof ip[Symbol.iterator], ip === Object.getPrototypeOf(Object.getPrototypeOf([][Symbol.iterator]()))];
+(function () { return r.join('|'); })
+=== segments_shape
+var g = new Intl.Segmenter().segment('a');
+var p = Object.getPrototypeOf(g);
+var r = [Object.getOwnPropertyNames(p).join(','), Object.getPrototypeOf(p) === Object.prototype, typeof g.containing, g.containing.length, g[Symbol.iterator].name, g.containing.name];
+(function () { return r.join('|'); })
+=== resolved_default
+var r = new Intl.Segmenter().resolvedOptions();
+(function () { return Object.keys(r).join(',') + '|' + r.granularity; })
+=== resolved_word
+var r = new Intl.Segmenter('en-US', { granularity: 'word' }).resolvedOptions();
+(function () { return r.locale + '|' + r.granularity; })
+=== supported_locales
+var r = [Intl.Segmenter.supportedLocalesOf('en-US').join(), Intl.Segmenter.supportedLocalesOf([]).length, Intl.Segmenter.supportedLocalesOf.length];
+(function () { return r.join('|'); })
+=== call_without_new
+var r = (function () { try { Intl.Segmenter(); return 'no throw'; } catch (e) { return e.name; } })();
+(function () { return r; })
+=== bad_granularity
+var r = (function () { try { new Intl.Segmenter('en', { granularity: 'line' }); return 'no throw'; } catch (e) { return e.name; } })();
+(function () { return r; })
+=== bad_locale
+var r = (function () { try { new Intl.Segmenter('x_y'); return 'no throw'; } catch (e) { return e.name; } })();
+(function () { return r; })
+=== bad_receiver
+var r = [function () { Intl.Segmenter.prototype.segment.call({}, 'a'); }, function () { Intl.Segmenter.prototype.resolvedOptions.call(1); }, function () { var g = new Intl.Segmenter().segment('a'); g.containing.call({}, 0); }, function () { var it = new Intl.Segmenter().segment('a')[Symbol.iterator](); it.next.call({}); }].map(function (f) { try { f(); return 'no throw'; } catch (e) { return e.name; } });
+(function () { return r.join('|'); })
+=== segment_coerce
+var s = new Intl.Segmenter();
+var r = [Array.from(s.segment(123)).length, Array.from(s.segment(undefined)).map(function (x) { return x.segment; }).join(''), Array.from(s.segment(null)).length];
+(function () { return r.join('|'); })
+=== segment_symbol_throws
+var r = (function () { try { new Intl.Segmenter().segment(Symbol()); return 'no throw'; } catch (e) { return e.name; } })();
+(function () { return r; })
+=== to_string_tag
+var r = [Object.prototype.toString.call(new Intl.Segmenter()), Intl.Segmenter.name, Intl.Segmenter.length, Intl.Segmenter.prototype.constructor === Intl.Segmenter];
+(function () { return r.join('|'); })
+=== iterators_independent
+var g = new Intl.Segmenter().segment('abc');
+var i1 = g[Symbol.iterator](), i2 = g[Symbol.iterator]();
+var r = [i1.next().value.segment, i1.next().value.segment, i2.next().value.segment, i1.next().value.segment];
+(function () { return r.join('|'); })
+=== spread_and_for_of
+var g = new Intl.Segmenter('en', { granularity: 'word' }).segment('a b');
+var n = 0; for (var s of g) { n += s.index; }
+var r = [[...g].length, n];
+(function () { return r.join('|'); })
+=== surrogates_containing
+var g = new Intl.Segmenter().segment('a😀b');
+var r = [1, 2, 3].map(function (i) { return g.containing(i).index + ':' + g.containing(i).segment.length; });
+(function () { return r.join('|'); })
+=== word_numbers_punct
+var r = Array.from(new Intl.Segmenter('en', { granularity: 'word' }).segment('a_b 1,000 x-y')).map(function (s) { return s.segment + ':' + s.isWordLike; });
+(function () { return r.join('|'); })

@@ -75,7 +75,7 @@ impl<'p> Interp<'p> {
     }
 
     fn intl_formatters(&self) -> usize {
-        self.intl.dtfs.len() + self.intl.nfs.len() + self.intl.colls.len() + self.intl.prs.len()
+        self.intl.dtfs.len() + self.intl.nfs.len() + self.intl.colls.len() + self.intl.prs.len() + self.intl.segs.len()
     }
 
     // ------------------------------------------------------------ option helpers
@@ -482,7 +482,7 @@ impl<'p> Interp<'p> {
                 }
             }
             IntlFn::Supported(kind) => {
-                let who = ["Intl.NumberFormat", "Intl.Collator", "Intl.PluralRules"][kind as usize];
+                let who = ["Intl.NumberFormat", "Intl.Collator", "Intl.PluralRules", "Intl.Segmenter"][kind as usize];
                 let tags = self.intl_locales(a0)?;
                 if !matches!(a1, Value::Undefined) {
                     let o = self.intl_options(a1, who)?;
@@ -645,6 +645,7 @@ impl<'p> Interp<'p> {
                 };
                 self.intl_compare(key, x, y)
             }
+            IntlFn::SegCtor | IntlFn::SegResolved | IntlFn::SegSegment | IntlFn::SegsContaining | IntlFn::SegsIter | IntlFn::SegIterNext => self.call_intl_seg(f, this, args, is_new),
             _ => unreachable!("handled in call_intl"),
         }
     }

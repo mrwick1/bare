@@ -369,22 +369,29 @@ pub(crate) fn add_event_listener(d: &Dom, it: &mut Interp<'_>, this: Value, a: &
         Value::Object(o) => o,
         _ => return Err(it.type_error("Failed to execute 'addEventListener': parameter 2 is not of type 'Object'.")),
     };
-    let (mut capture, mut once, mut passive) = (false, false, false);
+    let (mut capture, mut once, mut passive, mut signal) = (false, false, false, None);
     match arg(a, 2) {
         opts @ Value::Object(_) => {
             capture = init_flag(d, it, opts, "capture")?;
             once = init_flag(d, it, opts, "once")?;
             passive = init_flag(d, it, opts, "passive")?;
             let k = d.key(it, "signal")?;
-            if !matches!(it.get_value(opts, k)?, Value::Undefined) {
-                return Err(Error::Unsupported(unsupported("addEventListener option signal")));
+            match it.get_value(opts, k)? {
+                Value::Undefined => {}
+                Value::Object(o) if d.is_signal(o) => signal = Some(o),
+                _ => return Err(it.type_error("Failed to execute 'addEventListener' on 'EventTarget': Failed to read the 'signal' property from 'AddEventListenerOptions': Failed to convert value to 'AbortSignal'.")),
             }
         }
         Value::Undefined | Value::Null => {}
         v => capture = it.to_js_bool(v)?,
     }
-    let mut st = d.st.borrow_mut();
-    let st = &mut *st;
+    if let Some(s) = signal
+        && d.signal_state(s).is_some_and(|s| s.0)
+    {
+        return Ok(Value::Undefined);
+    }
+    let mut guard = d.st.borrow_mut();
+    let st = &mut *guard;
     let list = st.listeners.entry(t).or_default();
     if list.iter().any(|l| *l.ty == *ty && !l.handler && l.cb == cb && l.capture == capture) {
         return Ok(Value::Undefined);
@@ -396,8 +403,16 @@ pub(crate) fn add_event_listener(d: &Dom, it: &mut Interp<'_>, this: Value, a: &
         return Err(d.lim("dom-listeners-per-target"));
     }
     st.next_id += 1;
-    list.push(Listener { id: st.next_id, ty: Rc::from(ty.as_str()), cb, capture, once, passive, handler: false });
+    let id = st.next_id;
+    list.push(Listener { id, ty: Rc::from(ty.as_str()), cb, capture, once, passive, handler: false });
     st.n_listeners += 1;
+    drop(guard);
+    if let Some(s) = signal
+        && let Err(e) = d.signal_add_algo(s, crate::browser_abort::Algo::Remove(t, id))
+    {
+        d.remove_listener(t, id);
+        return Err(e);
+    }
     Ok(Value::Undefined)
 }
 

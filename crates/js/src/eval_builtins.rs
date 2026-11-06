@@ -132,6 +132,8 @@ enum Bi {
     StrToLocaleLower,
     StrToLocaleUpper,
     ReSymSearch,
+    StrMatchAll,
+    ReSymMatchAll,
 }
 
 const RE_GETTERS: [&str; 9] = ["source", "flags", "global", "ignoreCase", "multiline", "dotAll", "sticky", "unicode", "hasIndices"];
@@ -558,6 +560,7 @@ impl<'p> Interp<'p> {
                 WK_MATCH => Bi::ReSymMatch,
                 WK_REPLACE => Bi::ReSymReplace,
                 WK_SEARCH => Bi::ReSymSearch,
+                WK_MATCH_ALL => Bi::ReSymMatchAll,
                 _ => Bi::ReSymSplit,
             };
             if matches!(self.funcs.get(&mo), Some(Callee::Native(Nat::Ext(b))) if *b == own) {

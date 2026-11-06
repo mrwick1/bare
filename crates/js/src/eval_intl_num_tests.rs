@@ -126,3 +126,36 @@ fn every_option_name_has_its_index() {
     }
     assert_eq!(option_index("nope"), None);
 }
+
+#[test]
+fn segmenter_objects_are_collected_and_capped() {
+    big(|| {
+        let mut it = realm();
+        out(&mut it, "var g = new Intl.Segmenter().segment('abc'), i = g[Symbol.iterator](); i.next();");
+        out(&mut it, "for (var k = 0; k < 20; k++) { new Intl.Segmenter().segment('x' + k)[Symbol.iterator](); } 0;");
+        assert!(it.intl.segs.len() >= 21 && it.intl.segments.len() >= 21 && it.intl.seg_iters.len() >= 21);
+        it.collect(&[]).unwrap();
+        assert_eq!((it.intl.segs.len(), it.intl.segments.len(), it.intl.seg_iters.len()), (0, 1, 1));
+        assert_eq!(out(&mut it, "i.next().value.segment + g.containing(2).segment"), "string:bc");
+        out(&mut it, "g = null; i = null;");
+        it.collect(&[]).unwrap();
+        assert_eq!((it.intl.segs.len(), it.intl.segments.len(), it.intl.seg_iters.len()), (0, 0, 0));
+        let mut it = realm();
+        it.set_sc_limits(ScLimits { max_iterators: 3, ..Default::default() });
+        assert_eq!(out(&mut it, "var g = new Intl.Segmenter().segment('abc'); g[Symbol.iterator](); g[Symbol.iterator](); 1"), "number:1");
+        assert_eq!(out(&mut it, "g[Symbol.iterator]()"), "limit:Sc(Iterators)");
+        let mut it = realm();
+        it.set_sc_limits(ScLimits { max_formatters: 1, ..Default::default() });
+        assert_eq!(out(&mut it, "new Intl.Segmenter(); new Intl.Segmenter()"), "limit:Sc(Formatters)");
+    });
+}
+
+#[test]
+fn segmenter_input_is_charged_and_long_strings_work() {
+    big(|| {
+        let mut it = realm();
+        assert_eq!(out(&mut it, "var s = new Intl.Segmenter('en', { granularity: 'word' }).segment('ab '.repeat(5000)); [...s].length"), "number:10000");
+        assert_eq!(out(&mut it, "s.containing(14999).segment"), "string: ");
+        assert_eq!(out(&mut it, "s.containing(15000)"), "undefined");
+    });
+}

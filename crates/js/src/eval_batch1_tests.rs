@@ -104,8 +104,28 @@ fn gates_are_explicit_unsupported() {
 }
 
 #[test]
-fn match_all_is_absent_on_purpose() {
-    assert_eq!(run("typeof ''.matchAll"), "string:undefined");
+fn match_all_is_a_function_and_the_regexp_method_too() {
+    assert_eq!(run("typeof ''.matchAll + typeof /a/[Symbol.matchAll]"), "string:functionfunction");
+}
+
+#[test]
+fn match_all_gates_a_replaced_exec_and_charges_its_scans() {
+    assert_eq!(unsupported_of("var r = /a/g; r.exec = function () { return null; }; 'a'.matchAll(r)"), "RegExp with a replaced exec method");
+    assert_eq!(limit("var n = 0; for (var m of ('a'.repeat(1 << 16)).matchAll(/(?:)/g)) n++; n", 200_000), LimitKind::Steps);
+}
+
+#[test]
+fn match_all_iterators_survive_and_free_with_the_collector() {
+    big(|| {
+        let prog = parse_script("var it = 'a1b2'.matchAll(/\\d/g); it.next(); for (var i = 0; i < 50; i++) 'x'.matchAll(/x/g); (function () { return it.next().value.index; })", Limits::default()).unwrap();
+        let mut it = Interp::new(&prog, Heap::new(HeapLimits::default()).unwrap(), EvalLimits { max_steps: 5_000_000, ..Default::default() }).unwrap();
+        let f = it.run().unwrap();
+        let live = it.sc.iters.len();
+        it.collect(&[f]).unwrap();
+        assert!(it.sc.iters.len() < live, "the 50 dropped iterators are freed");
+        let v = it.call(f, Value::Undefined, &[]).unwrap();
+        assert_eq!(it.display(v), "3");
+    });
 }
 
 #[test]

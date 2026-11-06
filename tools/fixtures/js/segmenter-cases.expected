@@ -1,0 +1,26 @@
+grapheme_ascii	a@0|b@1|c@2 ## a@0|b@1|c@2
+grapheme_clusters	2@0|1@2|2@3|1@5|8@6|1@14|4@15 ## 2@0|1@2|2@3|1@5|8@6|1@14|4@15
+word_basic	Hello@0:true|,@5:false| @6:false|world@7:true|!@12:false| @13:false|It’s@14:true| @18:false|3.14@19:true| @23:false|ok@24:true|.@26:false ## Hello@0:true|,@5:false| @6:false|world@7:true|!@12:false| @13:false|It’s@14:true| @18:false|3.14@19:true| @23:false|ok@24:true|.@26:false
+word_keys	segment,index,input,isWordLike,a b ## segment,index,input,isWordLike,a b
+grapheme_keys	segment,index,input,ab,false ## segment,index,input,ab,false
+sentence	"Hi there. "@0|"How are you? "@10|"Fine!  "@23|"Ok"@30 ## "Hi there. "@0|"How are you? "@10|"Fine!  "@23|"Ok"@30
+empty_string	0 ## 0
+containing	Hello@0|Hello@0|Hello@0| @5|world@6|world@6|undefined|undefined|Hello@0|Hello@0|undefined|Hello@0 ## Hello@0|Hello@0|Hello@0| @5|world@6|world@6|undefined|undefined|Hello@0|Hello@0|undefined|Hello@0
+containing_default	[object Object]|a|0 ## [object Object]|a|0
+iterator_protocol	a|false|b|false||true|true|true|[object Segmenter String Iterator] ## a|false|b|false||true|true|true|[object Segmenter String Iterator]
+iterator_proto_chain	true|function|true ## true|function|true
+segments_shape	containing|true|function|1|[Symbol.iterator]|containing ## containing|true|function|1|[Symbol.iterator]|containing
+resolved_default	locale,granularity|grapheme ## locale,granularity|grapheme
+resolved_word	en-US|word ## en-US|word
+supported_locales	en-US|0|1 ## en-US|0|1
+call_without_new	TypeError ## TypeError
+bad_granularity	RangeError ## RangeError
+bad_locale	RangeError ## RangeError
+bad_receiver	TypeError|TypeError|TypeError|TypeError ## TypeError|TypeError|TypeError|TypeError
+segment_coerce	3|undefined|4 ## 3|undefined|4
+segment_symbol_throws	TypeError ## TypeError
+to_string_tag	[object Intl.Segmenter]|Segmenter|0|true ## [object Intl.Segmenter]|Segmenter|0|true
+iterators_independent	a|b|a|c ## a|b|a|c
+spread_and_for_of	3|3 ## 3|3
+surrogates_containing	1:2|1:2|3:1 ## 1:2|1:2|3:1
+word_numbers_punct	a_b:true| :false|1,000:true| :false|x:true|-:false|y:true ## a_b:true| :false|1,000:true| :false|x:true|-:false|y:true

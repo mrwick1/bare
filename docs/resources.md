@@ -3233,3 +3233,73 @@ The first rebased build missed the limit on two rows. Both causes were code gene
 2. `arrobj_load arrays` (+1.94%). A `perf record` profile showed `index_key` as a function of its own, where main inlines it into the loops of `indexOf`, `includes`, `slice` and `concat`. `index_key` is now `#[inline(always)]`, and its string path (`index_key_str`) is cold. The row fell to -8.34%.
 
 Not tested: cycles, rows at scale 1 and 100, `numeric_load`, and the live staging login.
+
+## Browser JavaScript APIs
+
+This topic adds five APIs that the staging app uses: `AbortController` and `AbortSignal`, `structuredClone`, `btoa` and `atob`, `Intl.Segmenter`, and `String.prototype.matchAll`. The ports follow Boa for the shape of the classes (see [open-source.md](open-source.md#ported-from-boa-for-the-browser-javascript-apis-2026-11-06)). The specifications decide the behavior. Each part has its own case file, and `tools/js/web_apis_load.sh` runs the load matrix for all five.
+
+### AbortController and AbortSignal
+
+What runs: `new AbortController()`, `controller.signal`, `controller.abort(reason)`, `signal.aborted`, `signal.reason`, `signal.throwIfAborted()`, `signal.onabort`, `AbortSignal.abort(reason)`, `AbortSignal.timeout(ms)` and `AbortSignal.any(signals)`. `{signal}` works for `addEventListener` (abort removes the listener) and for `fetch`. A rejected `fetch` carries the reason. A `Request` follows `init.signal`. The default reason is a `DOMException` named `AbortError`, and a timeout gives `TimeoutError`.
+
+Design: a signal is an object in the table of event targets, so listeners, `once`, `capture` and `dispatchEvent` use the one event code. The state of a signal is in `abort.s.sigs`. The abort algorithms are small values (`Remove(target, id)` and `Fetch(promise)`), not closures, so the collector can trace them. `AbortSignal.timeout` uses the scheduler (`Task::AbortTimeout`), so a virtual clock moves it. The collector drops the state of a dead signal. Both globals are lazy accessors, like `Intl`, so a page that never reads them pays nothing.
+
+Gates: `structuredClone` of a signal is `DataCloneError`. `AbortSignal.any` of 100,000 signals ends as a `Limit`.
+
+Checks: 91 cases in `tools/fixtures/js/dom-cases.txt` match headless Chrome (`tools/js/dom_check.sh`, recorder `tools/ui/chrome_cases.mjs`). 36 are structured clone cases, 8 abort, 7 `any`, 7 static, 10 listener, 2 `throwIfAborted`, 2 `onabort`, 9 `atob` and `btoa`, and a few shape cases. Two differences from Chrome are in the fixtures on purpose: Chrome removes a listener that was added again during an abort (bare follows the DOM Standard and keeps it), and the enumerability of some DOM methods differs. 8 unit tests are in `browser_abort_tests.rs`.
+
+### structuredClone
+
+What runs: plain objects, arrays, `Date`, `RegExp` (`lastIndex` is 0 in the clone), `Map`, `Set`, the `Error` types (`name`, `message` and `stack` as a string; `cause` as an own property), `Boolean`, `Number`, `String` and `BigInt` wrappers, BigInt (inline and heap), `ArrayBuffer`, typed arrays, `DataView`, and cycles and shared references. `history.pushState` and `replaceState` use the same code, so there is one copy.
+
+Design: two phases in `browser_navigation_state.rs`. The first phase walks the value and builds a tree of `SKind` nodes in Rust, with a memo by `ObjId` for cycles and sharing. It runs no user code except getters, which the engine runs as it reads a property. The second phase builds the objects. A view is built after its buffer. A failure in phase one leaves nothing in the heap. The bounds are 64 MiB, depth 256 and 2^20 nodes for a clone (history keeps its own `NavLimits`). The engine has no Error brand, so an object with `Error.prototype` in its chain is cloned as an Error.
+
+Gates: a transfer list answers `Unsupported("structuredClone with a transfer list")`. A function, a symbol, a DOM node, a proxy, a signal and an `Intl.Segmenter` throw `DataCloneError`. `MessagePort.postMessage` of an object is still `Unsupported` (it does not call this code yet). bare lacks `cause` in the Error constructor, so the cases set it with `defineProperty`.
+
+Checks: 36 cases (`sc_*`) match Chrome. The history tests changed: byte views and Maps were gates before, and now they clone.
+
+### btoa and atob
+
+`btoa` throws `InvalidCharacterError` for a code unit above U+00FF. `atob` follows the HTML forgiving-base64 decode: it removes ASCII whitespace, accepts a missing padding, and throws for a bad length or character. Both charge steps by the length of the input. 9 cases match Chrome. The load case runs 1 to 300 bytes per round and the native code takes about 2% of the time. The rest is the engine loop that builds the test string (`Heap::intern` is 14%), so there is nothing to optimize in `btoa` or `atob`.
+
+### Intl.Segmenter
+
+What runs: `new Intl.Segmenter(locales, {granularity})` with grapheme (default), word and sentence. `segment(string)` returns a `%Segments%` object with `containing(index)` and `[Symbol.iterator]`. The iterator has `next` and the tag `Segmenter String Iterator`. A segment has `segment`, `index`, `input` and, for words, `isWordLike`. `resolvedOptions` gives `locale` and `granularity`. `supportedLocalesOf` works as for the other `Intl` classes. The constructor needs `new`.
+
+Binary size: the stripped `bare` is 7,875,320 B without it and 7,963,096 B with it, so +87,776 B (+1.1%). We keep it. The decision rule from the brief was "skip if too large". `icu_segmenter` uses rule data only: `WordSegmenter::new_for_non_complex_scripts`, with no LSTM and no dictionary data.
+
+Design: the break list of a string is made once by the first `containing` or iteration, and it is shared by every iterator of that `%Segments%` object (`Rc<Brk>`). It costs steps by length. The collector prunes `intl.segs`, `intl.segments` and `intl.seg_iters`. A segmenter counts in `max_formatters`. A `%Segments%` object and an iterator count in `max_iterators`.
+
+Gates: words of Chinese, Japanese, Thai, Lao, Khmer and Burmese are cut by the rules only (Node uses a dictionary for them). The locale does not change the rules, since there is no tailoring in the five English locales.
+
+Checks: 26 cases in `tools/fixtures/js/segmenter-cases.txt` match Node (`tools/js/segmenter_check.sh`): emoji and combining marks, `\r\n`, regional indicators, apostrophes, `3.14` and `1,000`, sentences, `containing` out of range and with `NaN`, receivers, errors and the shape of the prototypes. 2 unit tests cover collection, the caps and a 15,000-unit string. A bug that the cases found: the word iterator of ICU4X yields the break at 0, which shifted `isWordLike` by one.
+
+### String.prototype.matchAll
+
+What runs: `matchAll(regexp)` for a `RegExp` with the `g` flag, `RegExp.prototype[Symbol.matchAll]`, a string argument (made into a `g` regexp), and the RegExp String Iterator (`next`, the tag `RegExp String Iterator`). A `RegExp` without `g` throws `TypeError`. `lastIndex` of the source is copied and not changed. Empty matches advance by one code point with the `u` flag and one unit without it. The iterator is `IterState::ReStr`, with a lazy prototype that is made on first use.
+
+Gate: a regexp whose `exec` was replaced answers `Unsupported("RegExp with a replaced exec method")`. Node runs the replaced `exec`, so this case is not in the Node corpus.
+
+Checks: 27 cases in `tools/fixtures/js/matchall-cases.txt` match Node (`tools/js/matchall_check.sh`). Unit tests are in `eval_batch1_tests.rs`, `eval_builtins_tests.rs` and `eval_interop_tests.rs`. The built-in inventory goes from 117 to 110 of 655 missing.
+
+### Load test of the browser JavaScript APIs
+
+`tools/js/web_apis_load.sh` runs 5 cases at 1x, 10x and 100x (1,000 rounds per scale unit), each in its own process under a 45 s and 1 GiB cap. Each case checks its sum against Rust and checks that the live object count is back to the baseline after the last collect. All 15 rows pass.
+
+| Case | 1x run | 10x run | 100x run | 100x peak RSS |
+| --- | ---: | ---: | ---: | ---: |
+| abort | 17.5 ms | 175.4 ms | 1,988 ms | 9.5 MiB |
+| clone | 30.8 ms | 291.7 ms | 3,011 ms | 10.4 MiB |
+| base64 | 101.5 ms | 1,035.9 ms | 10,027 ms | 16.7 MiB |
+| segmenter | 21.0 ms | 217.7 ms | 2,367 ms | 10.1 MiB |
+| matchall | 15.8 ms | 156.8 ms | 1,780 ms | 9.8 MiB |
+
+Memory stays flat: the peak RSS grows by about 1 MiB from 1x to 100x for every case. The collector freed 1.4 M objects in `abort` at 100x and the live count at the end equals the start. Per round (100,000 rounds at 100x): abort 20 µs, clone 30 µs, segmenter 24 µs, matchall 18 µs, base64 100 µs (the loop that builds the string, see above).
+
+### Cost of the browser JavaScript APIs
+
+Method: `perf stat -e instructions:u`, minimum of 3 runs, each binary in its own `CARGO_TARGET_DIR`: main 9c5358f against this build. 41 rows: `eval_load` 8, `arrobj_load` 15, `binary_load` 9 and `proxy_load` 8 at scale 10, and the startup of an empty realm (`eval_check -e 0`). All 41 are below +0.5%. The worst is startup at +0.41% (2,967,274 to 2,979,473 instructions, 12 k more). The worst loop row is `arrobj_load repeat` at +0.25%. The best is `eval_load throws` at -0.24%. The other rows are between -0.01% and +0.15%.
+
+The new globals are lazy where the spec allows: `AbortController`, `AbortSignal` and `Intl.Segmenter` cost nothing until they are read. `structuredClone`, `btoa` and `atob` are native functions that the install makes. Hypothesis: they are most of the +12 k at startup. Not measured by itself. `IterState::ReStr` adds a variant and no hot-path branch.
+
+Not tested: cycles, rows at scale 1 and 100, `numeric_load`, the dictionary words of CJK and Thai, `MessagePort.postMessage` with a clone, `structuredClone` with a transfer list, `fetch` against a real network with `{signal}`, a build on another machine, and the live staging login.

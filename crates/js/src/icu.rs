@@ -452,3 +452,31 @@ pub fn compare(c: &Collator, a: &str, b: &str) -> i32 {
 #[cfg(test)]
 #[path = "icu_tests.rs"]
 mod tests;
+
+// ------------------------------------------------------------ segmentation
+
+/// The boundaries of `u` for `Intl.Segmenter`: `granularity` 0 grapheme, 1 word, 2 sentence. The result starts with 0 and ends
+/// with `u.len()`, so segment `i` is `b[i]..b[i + 1]`. For the word granularity the second list tells whether segment `i` is
+/// word-like. Rules only: no dictionary or LSTM data, so Chinese, Japanese, Thai, Lao, Khmer and Burmese words are cut by the rules.
+pub fn segment_breaks(granularity: u8, u: &[u16]) -> (Vec<u32>, Vec<bool>) {
+    let mut b: Vec<u32> = vec![0];
+    let mut wl: Vec<bool> = Vec::new();
+    match granularity {
+        0 => b.extend(icu_segmenter::GraphemeClusterSegmenter::new().segment_utf16(u).map(|i| i as u32)),
+        1 => {
+            for (i, t) in icu_segmenter::WordSegmenter::new_for_non_complex_scripts(Default::default()).segment_utf16(u).iter_with_word_type() {
+                if i != 0 {
+                    b.push(i as u32);
+                    wl.push(t.is_word_like());
+                }
+            }
+        }
+        _ => b.extend(icu_segmenter::SentenceSegmenter::new(Default::default()).segment_utf16(u).map(|i| i as u32)),
+    }
+    b.dedup();
+    if b.last() != Some(&(u.len() as u32)) {
+        b.push(u.len() as u32);
+    }
+    wl.resize(b.len() - 1, false);
+    (b, wl)
+}

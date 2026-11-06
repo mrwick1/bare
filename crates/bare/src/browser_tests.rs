@@ -265,7 +265,7 @@ fn listener_options_removal_and_mutation_during_dispatch() {
         assert_eq!(r[0].message, "TypeError: The event listener's handleEvent is not a function");
         assert_eq!(js(&mut b, "t.addEventListener('x', 5)"), "throw:TypeError:Failed to execute 'addEventListener': parameter 2 is not of type 'Object'.");
         assert_eq!(js(&mut b, "t.addEventListener('x', null)"), "undefined");
-        assert_eq!(js(&mut b, "t.addEventListener('x', f1, { signal: {} })"), "unsupported:addEventListener option signal");
+        assert_eq!(js(&mut b, "t.addEventListener('x', f1, { signal: {} })"), "throw:TypeError:Failed to execute 'addEventListener' on 'EventTarget': Failed to read the 'signal' property from 'AddEventListenerOptions': Failed to convert value to 'AbortSignal'.");
         // a bare call uses window, as in a browser
         assert_eq!(js(&mut b, "var hit = 0; addEventListener('bare', function () { hit++ }); dispatchEvent(new Event('bare')); hit"), "1");
     });

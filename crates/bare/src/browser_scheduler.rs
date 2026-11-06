@@ -106,6 +106,8 @@ enum Task {
     Render,
     /// The `scroll` events of a change of an offset (`browser_scroll.rs`). At most one is queued.
     Scroll,
+    /// `AbortSignal.timeout` (`browser_abort.rs`). The task roots its signal.
+    AbortTimeout(ObjId),
 }
 
 struct Timer {
@@ -197,6 +199,7 @@ enum Run {
     SelectionChange(NodeId),
     Render,
     Scroll,
+    AbortTimeout(ObjId),
     Nothing,
 }
 
@@ -221,6 +224,7 @@ impl Dom {
             out.extend_from_slice(&t.args);
         }
         out.extend(s.ports.iter().filter(|(_, p)| !p.keys.is_empty()).map(|(&o, _)| Value::Object(o)));
+        out.extend(s.tasks.values().filter_map(|t| if let Task::AbortTimeout(o) = t { Some(Value::Object(*o)) } else { None }));
     }
 
     pub(crate) fn sched_trace(&self, owner: ObjId, out: &mut Vec<Value>) {
@@ -242,7 +246,7 @@ impl Dom {
         let ports = &s.ports;
         s.tasks.retain(|_, t| match t {
             Task::Deliver(o) => ports.contains_key(o),
-            Task::Timer(_) | Task::Select(_) | Task::SelectionChange(_) | Task::Render | Task::Scroll => true,
+            Task::Timer(_) | Task::Select(_) | Task::SelectionChange(_) | Task::Render | Task::Scroll | Task::AbortTimeout(_) => true,
         });
         s.queued = s.ports.values().map(|p| p.inbox.len()).sum();
         s.queued_bytes = s.ports.values().flat_map(|p| p.inbox.iter().map(|m| m.1)).sum();
@@ -288,6 +292,15 @@ impl Dom {
         Ok(())
     }
 
+    /// Queue the abort of a `AbortSignal.timeout` signal in `ms` ms. It counts against `max_timers`.
+    pub(crate) fn queue_abort_timeout(&self, o: ObjId, ms: f64) -> R<()> {
+        let n = self.sched.borrow().tasks.values().filter(|t| matches!(t, Task::AbortTimeout(_))).count();
+        if n + self.sched.borrow().timers.len() >= self.sched.borrow().limits.max_timers {
+            return Err(self.lim("timers"));
+        }
+        self.schedule(self.now_ms() + ms, Task::AbortTimeout(o)).map(|_| ())
+    }
+
     fn next_due(&self) -> Option<f64> {
         self.sched.borrow().tasks.keys().next().map(|k| f64::from_bits(k.0))
     }
@@ -329,6 +342,7 @@ impl Dom {
             }
             Task::Render => Run::Render,
             Task::Scroll => Run::Scroll,
+            Task::AbortTimeout(o) => Run::AbortTimeout(o),
             Task::Deliver(port) => match s.ports.get_mut(&port) {
                 Some(p) if p.keys.front() == Some(&key) => {
                     p.keys.pop_front();
@@ -382,6 +396,11 @@ impl Dom {
             Run::Scroll => it.host_scope(|it| {
                 it.charge(1)?;
                 self.flush_scroll(it)?;
+                it.host_checkpoint().map(|_| ())
+            }),
+            Run::AbortTimeout(o) => it.host_scope(|it| {
+                it.charge(1)?;
+                self.abort_timeout_fired(it, o)?;
                 it.host_checkpoint().map(|_| ())
             }),
             Run::Deliver { port, data } => it.host_scope(|it| {
