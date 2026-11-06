@@ -397,3 +397,118 @@ var all = ''; for (var i = 0; i < 256; i++) all += String.fromCharCode(i);
 (function () { return [atob(12), atob({ toString: function () { return 'Zm9v'; } }), atob(btoa(all)) === all, btoa(all).length, atob(null).length].join(); })
 === base64_function_properties
 (function () { return [typeof atob, atob.length, atob.name, btoa.length, btoa.name].join(); })
+=== outer_get_basic
+var d = document.createElement('div'); d.innerHTML = '<p id="a" class=\'x"y\' title="a&amp;b&nbsp;c<d>">t &amp; &lt;<b>b</b><br><!--c--><img src=x></p>';
+(function () { return d.firstChild.outerHTML + '|' + d.innerHTML; })
+=== outer_get_alone_and_empty
+var e = document.createElement('span'), i = document.createElement('input'), b = document.createElement('br'), p = document.createElement('p');
+e.setAttribute('data-x', '1');
+(function () { return [e.outerHTML, i.outerHTML, b.outerHTML, p.outerHTML].join('|'); })
+=== outer_get_raw_text_parents
+var d = document.createElement('div'); d.innerHTML = '<script>a<b&c</script><style>p>a{}</style><textarea>&lt;x</textarea><xmp>&lt;</xmp>';
+(function () { return d.outerHTML; })
+=== outer_get_deep
+var d = document.createElement('div'), s = '', e = '';
+for (var i = 0; i < 40; i++) { s += '<i>'; e += '</i>'; }
+d.innerHTML = s + 'x' + e;
+(function () { return d.outerHTML.length + ':' + d.firstChild.outerHTML.length; })
+=== outer_get_svg
+var d = document.createElement('div'); d.innerHTML = '<svg viewBox="0 0 1 1"><circle r="1"></circle><text>a&amp;b</text></svg>';
+(function () { return d.firstChild.outerHTML; })
+=== outer_get_attribute_order_and_dupes
+var d = document.createElement('div'); d.innerHTML = '<a z=1 b=2 z=3 A=4>';
+(function () { return d.firstChild.outerHTML; })
+=== outer_set_basic
+var d = document.createElement('div'); d.innerHTML = '<a></a><b id=m></b><c></c>';
+var a = d.firstChild, m = a.nextSibling, c = m.nextSibling;
+var r = (m.outerHTML = '<i>1</i>text<u>2</u>');
+(function () { return [r, d.innerHTML, d.firstChild === a, d.lastChild === c, m.parentNode, m.outerHTML, d.childNodes.length].join('|'); })
+=== outer_set_first_and_last
+var d = document.createElement('div'); d.innerHTML = '<a></a><b></b>';
+var a = d.firstChild, b = d.lastChild;
+a.outerHTML = '<x></x>'; b.outerHTML = '<y></y>';
+(function () { return d.innerHTML; })
+=== outer_set_empty_and_null
+var d = document.createElement('div'); d.innerHTML = '<a></a><b></b><c></c>';
+d.firstChild.outerHTML = ''; d.firstChild.outerHTML = null;
+(function () { return d.innerHTML + '|' + d.childNodes.length; })
+=== outer_set_undefined_and_number
+var d = document.createElement('div'); d.innerHTML = '<a></a><b></b>';
+d.firstChild.outerHTML = undefined; d.firstChild.outerHTML = 42;
+(function () { return d.innerHTML; })
+=== outer_set_no_parent
+var e = document.createElement('div'), r;
+try { e.outerHTML = '<p></p>'; r = 'ok'; } catch (x) { r = x.name; }
+(function () { return [r, e.outerHTML, e.parentNode].join('|'); })
+=== outer_set_document_parent
+var r;
+try { document.documentElement.outerHTML = '<p></p>'; r = 'ok'; } catch (x) { r = x.name + ':' + x.code + ':' + (x instanceof DOMException); }
+(function () { return r + '|' + document.documentElement.tagName; })
+=== outer_set_document_parent_after_tostring
+var r, v = { toString: function () { r = 'str'; return '<p></p>'; } };
+try { document.documentElement.outerHTML = v; } catch (x) { r += ':' + x.name; }
+(function () { return r; })
+=== outer_set_tostring_detaches_target
+var d = document.createElement('div'); d.innerHTML = '<a></a>';
+var a = d.firstChild;
+a.outerHTML = { toString: function () { d.removeChild(a); return '<z></z>'; } };
+(function () { return d.innerHTML + '|' + a.parentNode; })
+=== outer_set_tostring_throws
+var d = document.createElement('div'); d.innerHTML = '<a></a>';
+var r;
+try { d.firstChild.outerHTML = { toString: function () { throw new RangeError('x'); } }; } catch (x) { r = x.name; }
+(function () { return r + '|' + d.innerHTML; })
+=== outer_set_in_shadow_root
+var host = document.createElement('div'), s = host.attachShadow({ mode: 'open' }), e = document.createElement('p');
+s.appendChild(e);
+e.outerHTML = '<b>x</b>y<!--c-->';
+(function () { return Array.from(s.childNodes).map(function (n) { return n.nodeName; }).join() + '|' + s.firstChild.outerHTML; })
+=== outer_set_context_is_parent
+var d = document.createElement('p'); d.innerHTML = '<a></a>';
+d.firstChild.outerHTML = '<div>q</div><p>r</p>';
+(function () { return d.innerHTML + '|' + d.children.length; })
+=== outer_set_form_context
+var f = document.createElement('form'), d = document.createElement('div'); f.appendChild(d);
+d.outerHTML = '<form id=n>i</form><b>k</b>';
+(function () { return f.innerHTML; })
+=== outer_set_script_is_inert
+window.ran = 0;
+var d = document.createElement('div'); d.innerHTML = '<a></a>';
+d.firstChild.outerHTML = '<script>window.ran = 1</script>';
+document.body.appendChild(d);
+(function () { return window.ran + '|' + d.innerHTML; })
+=== outer_set_identity_of_siblings_and_text
+var d = document.createElement('div'); d.innerHTML = 't1<a>in</a>t2';
+var t1 = d.firstChild, a = t1.nextSibling, t2 = a.nextSibling, inner = a.firstChild;
+a.outerHTML = '<a>new</a>';
+(function () { return [d.firstChild === t1, d.lastChild === t2, a.firstChild === inner, a.parentNode, d.innerHTML].join('|'); })
+=== outer_set_roundtrip_same
+var d = document.createElement('div'); d.innerHTML = '<p id="a" class="b">x<i>y</i><br></p>';
+var before = d.innerHTML, p = d.firstChild;
+p.outerHTML = p.outerHTML;
+(function () { return [before === d.innerHTML, d.firstChild === p].join(); })
+=== outer_set_nested_tree_order
+var d = document.createElement('div'); d.innerHTML = '<a></a>';
+d.firstChild.outerHTML = '<ul><li>1<li>2<ul><li>3</ul></ul><p>after';
+(function () { return d.innerHTML; })
+=== outer_set_text_merges
+var d = document.createElement('div'); d.innerHTML = 'a<b></b>c';
+d.querySelector('b').outerHTML = 'X';
+(function () { return d.childNodes.length + '|' + d.innerHTML; })
+=== outer_set_connected_and_queries
+var d = document.createElement('div'); d.id = 'host'; d.innerHTML = '<a id=old></a>'; document.body.appendChild(d);
+document.getElementById('old').outerHTML = '<a id=fresh class=k></a>';
+(function () { return [document.getElementById('old'), document.getElementById('fresh').className, document.querySelectorAll('#host > a').length].join('|'); })
+=== outer_property_shape
+var g = Object.getOwnPropertyDescriptor(Element.prototype, 'outerHTML');
+(function () { return [typeof g.get, typeof g.set, g.enumerable, g.configurable, g.get.name, g.set.name, 'outerHTML' in document.createElement('p'), document.outerHTML, 'outerHTML' in Text.prototype].join(); })
+=== outer_brand_check
+var g = Object.getOwnPropertyDescriptor(Element.prototype, 'outerHTML'), out = [];
+try { g.get.call({}); } catch (x) { out.push(x.name); }
+try { g.set.call(document.createTextNode('t'), 'x'); } catch (x) { out.push(x.name); }
+try { g.get.call(document); } catch (x) { out.push(x.name); }
+(function () { return out.join(); })
+=== outer_set_html_escape_roundtrip
+var d = document.createElement('div'); d.innerHTML = '<a></a>';
+d.firstChild.outerHTML = '&lt;&amp;&nbsp;&quot;<b title="&lt;&gt;&quot;&amp;">';
+(function () { return d.innerHTML; })

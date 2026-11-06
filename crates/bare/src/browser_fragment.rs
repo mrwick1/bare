@@ -89,10 +89,10 @@ fn attr_name(doc: &Document, name: bare_html::dom::Atom) -> String {
     }
 }
 
-/// The children of `n` as HTML text. Walks with the parent links, so the depth is not a limit.
-fn serialize(d: &Dom, it: &mut Interp<'_>, doc: &Document, n: NodeId) -> R<String> {
+/// The children of `n` as HTML text, or `n` itself when `outer`. Walks with the parent links, so the depth is not a limit.
+fn serialize(d: &Dom, it: &mut Interp<'_>, doc: &Document, n: NodeId, outer: bool) -> R<String> {
     let mut out = String::new();
-    let Some(mut node) = doc.children(n).next() else { return Ok(out) };
+    let Some(mut node) = (if outer { Some(n) } else { doc.children(n).next() }) else { return Ok(out) };
     loop {
         it.charge(1)?;
         let mut open = false;
@@ -113,7 +113,7 @@ fn serialize(d: &Dom, it: &mut Interp<'_>, doc: &Document, n: NodeId) -> R<Strin
                 let tag = doc.atom_str(name);
                 let html = !doc.is_foreign(node);
                 if html && matches!(tag, "template" | "noscript") {
-                    return Err(Error::Unsupported(unsupported("innerHTML of a tree with a template or noscript element (template contents and the scripting flag)")));
+                    return Err(Error::Unsupported(unsupported("serializing a tree with a template or noscript element (template contents and the scripting flag)")));
                 }
                 put(d, &mut out, "<")?;
                 put(d, &mut out, tag)?;
@@ -143,12 +143,15 @@ fn serialize(d: &Dom, it: &mut Interp<'_>, doc: &Document, n: NodeId) -> R<Strin
         }
         // Next sibling, or close the parents on the way up.
         loop {
+            if outer && node == n {
+                return Ok(out);
+            }
             if let Some(s) = doc.next_sibling(node) {
                 node = s;
                 break;
             }
             let Some(p) = doc.parent(node) else { return Ok(out) };
-            if p == n {
+            if p == n && !outer {
                 return Ok(out);
             }
             put(d, &mut out, "</")?;
@@ -161,8 +164,31 @@ fn serialize(d: &Dom, it: &mut Interp<'_>, doc: &Document, n: NodeId) -> R<Strin
 
 pub(crate) fn inner_html(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
     let n = d.el(it, this)?;
-    let s = serialize(d, it, &d.doc.borrow(), n)?;
+    let s = serialize(d, it, &d.doc.borrow(), n, false)?;
     d.js_str(it, &s)
+}
+
+pub(crate) fn outer_html(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
+    let n = d.el(it, this)?;
+    let s = serialize(d, it, &d.doc.borrow(), n, true)?;
+    d.js_str(it, &s)
+}
+
+/// `el.outerHTML = value`: parse in the context of the parent, then put the result in the place of `el`.
+/// No parent: nothing happens. A Document parent: `NoModificationAllowedError`. A DocumentFragment parent: the context is `body`.
+pub(crate) fn set_outer_html(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
+    let n = d.el(it, this)?;
+    let v = arg(a, 0);
+    let html = if matches!(v, Value::Null) { String::new() } else { d.string_arg(it, v)? };
+    let parent = {
+        let doc = d.doc.borrow();
+        doc.parent(n).map(|p| (p, matches!(doc.data(p), NodeData::Document), matches!(doc.data(p), NodeData::ShadowRoot)))
+    };
+    match parent {
+        None => Ok(Value::Undefined),
+        Some((_, true, _)) => Err(d.dom_err(it, "NoModificationAllowedError", "Failed to set the 'outerHTML' property on 'Element': This element's parent is of type '#document'.")),
+        Some((p, _, frag)) => replace(d, it, &html, p, frag, Some(n)),
+    }
 }
 
 pub(crate) fn set_inner_html(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
@@ -170,10 +196,16 @@ pub(crate) fn set_inner_html(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Val
     let v = arg(a, 0);
     // ToString may run page code; the target is read after it.
     let html = if matches!(v, Value::Null) { String::new() } else { d.string_arg(it, v)? };
+    replace(d, it, &html, n, false, None)
+}
+
+/// Parse `html` in the context of `n` (`body` when `in_frag`: `n` is a DocumentFragment). Without `this`, the nodes replace all
+/// the children of `n`. With `this` (a child of `n`), they replace `this`.
+fn replace(d: &Dom, it: &mut Interp<'_>, html: &str, n: NodeId, in_frag: bool, this: Option<NodeId>) -> V {
     let (context, ns, in_form) = {
         let doc = d.doc.borrow();
         let mut in_form = false;
-        let mut cur = Some(n);
+        let mut cur = if in_frag { None } else { Some(n) };
         while let Some(c) = cur {
             it.charge(1)?;
             if doc.is_html(c, "form") {
@@ -182,7 +214,7 @@ pub(crate) fn set_inner_html(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Val
             }
             cur = doc.parent(c);
         }
-        (doc.element_name(n).to_string(), doc.element_ns(n), in_form)
+        if in_frag { ("body".to_string(), Ns::Html, false) } else { (doc.element_name(n).to_string(), doc.element_ns(n), in_form) }
     };
     let base = d.depth_of(it, n)?;
     let lim = {
@@ -199,7 +231,7 @@ pub(crate) fn set_inner_html(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Val
     // The parse is native code that cannot be stopped from outside: the input is charged first, and each token's nodes as they are made.
     it.charge(html.len() as u64 / 16 + 1)?;
     let mut stop = None;
-    let parsed = parse_fragment(&html, &context, ns, in_form, &lim, &mut |units| match it.charge(units) {
+    let parsed = parse_fragment(html, &context, ns, in_form, &lim, &mut |units| match it.charge(units) {
         Ok(()) => true,
         Err(e) => {
             stop = Some(e);
@@ -236,11 +268,14 @@ pub(crate) fn set_inner_html(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Val
     let old = {
         let doc = d.doc.borrow();
         let mut old = 0u64;
-        for _ in doc.children(n) {
+        for _ in doc.children(n).take(if this.is_some() { 0 } else { usize::MAX }) {
             it.charge(1)?;
             old += 1;
         }
-        d.room(&doc, count, bytes)?;
+        old += u64::from(this.is_some());
+        // Text next to the result joins it (below): that copies the two texts.
+        let seam: usize = this.iter().flat_map(|&t| [doc.prev_sibling(t), doc.next_sibling(t)]).flatten().map(|x| if let NodeData::Text(sp) = *doc.data(x) { doc.text(sp).len() } else { 0 }).sum();
+        d.room(&doc, count, bytes + seam)?;
         if attrs > d.lim.max_attr_slots.saturating_sub(doc.attr_slots()) {
             return Err(d.lim("dom-attrs"));
         }
@@ -256,20 +291,43 @@ pub(crate) fn set_inner_html(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Val
 
     // Commit. Nothing below runs page code or can fail.
     let mut doc = d.doc.borrow_mut();
-    while let Some(c) = doc.children(n).next() {
-        doc.detach(c);
+    let (prev, before) = this.map_or((None, None), |t| (doc.prev_sibling(t), doc.next_sibling(t)));
+    match this {
+        Some(t) => doc.detach(t),
+        None => {
+            while let Some(c) = doc.children(n).next() {
+                doc.detach(c);
+            }
+        }
     }
     let mut path = vec![n];
     let (mut cur, mut depth) = (frag.root, 0usize);
     while let Some((c, cd)) = next_in(&frag.doc, frag.root, cur, depth) {
         (cur, depth) = (c, cd);
         let t = doc.import_node(&frag.doc, c).expect("a node of the fragment");
-        doc.move_to(t, path[cd - 1], None);
+        doc.move_to(t, path[cd - 1], if cd == 1 { before } else { None });
         path.truncate(cd);
         path.push(t);
         if doc.is_html(t, "script") {
             d.mark_started(t);
         }
     }
+    // As in Chrome, the text before and after the new nodes joins them. The DOM Parsing standard does not say it.
+    if this.is_some() {
+        let last = before.and_then(|b| doc.prev_sibling(b));
+        for a in [last, prev].into_iter().flatten() {
+            join_text(&mut doc, a);
+        }
+    }
     Ok(Value::Undefined)
+}
+
+/// If `a` and its next sibling are both text, put the text of the second in the first and remove the second.
+fn join_text(doc: &mut Document, a: NodeId) {
+    let Some(b) = doc.next_sibling(a) else { return };
+    if let (NodeData::Text(x), NodeData::Text(y)) = (*doc.data(a), *doc.data(b)) {
+        let s = format!("{}{}", doc.text(x), doc.text(y));
+        doc.set_text(a, &s);
+        doc.detach(b);
+    }
 }

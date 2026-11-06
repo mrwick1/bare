@@ -424,3 +424,101 @@ fn serialization_text_work_hits_the_step_budget() {
         assert!(js(&mut b, "document.getElementById('x').innerHTML").contains("Steps"));
     });
 }
+
+// ---------------------------------------------------------------------------------------------- outerHTML
+// The Chrome oracle for these is `tools/fixtures/js/dom-cases.txt` (the `outer_*` cases, `tools/js/dom_check.sh`).
+
+#[test]
+fn outer_html_getter_writes_the_element_and_its_subtree_only() {
+    let mut b = browser();
+    assert_eq!(js(&mut b, "var d = document.createElement('div'); d.innerHTML = 'a<p id=x class=\"c\">t&amp;<b>b</b><br></p>z'; d.firstChild.nextSibling.outerHTML"), "<p id=\"x\" class=\"c\">t&amp;<b>b</b><br></p>");
+    assert_eq!(js(&mut b, "document.createElement('br').outerHTML + document.createElement('p').outerHTML"), "<br><p></p>");
+    assert_eq!(js(&mut b, "var d = document.createElement('div'); d.innerHTML = '<i></i><b></b>'; d.firstChild.outerHTML + d.lastChild.outerHTML"), "<i></i><b></b>");
+    // A script's text is raw only inside the script itself.
+    assert_eq!(js(&mut b, "var s = document.createElement('script'); s.textContent = 'a<b&c'; s.outerHTML"), "<script>a<b&c</script>");
+}
+
+#[test]
+fn outer_html_setter_replaces_the_element_in_place() {
+    let mut b = browser();
+    assert_eq!(
+        js(&mut b, "var d = document.createElement('div'); d.innerHTML = '<a></a><b></b><c></c>'; var a = d.firstChild, m = a.nextSibling, c = d.lastChild; m.outerHTML = '<i>1</i>t<u>2</u>'; [d.innerHTML, d.firstChild === a, d.lastChild === c, m.parentNode, m.outerHTML].join('|')"),
+        "<a></a><i>1</i>t<u>2</u><c></c>|true|true||<b></b>"
+    );
+    assert_eq!(js(&mut b, "var d = document.createElement('div'); d.innerHTML = '<a></a><b></b>'; d.firstChild.outerHTML = null; d.firstChild.outerHTML = ''; d.childNodes.length"), "0");
+    assert_eq!(js(&mut b, "var d = document.createElement('div'); d.innerHTML = '<a></a>'; d.firstChild.outerHTML = 7; d.innerHTML"), "7");
+}
+
+#[test]
+fn outer_html_setter_special_parents() {
+    let mut b = browser();
+    // No parent: nothing happens, and the value is still converted.
+    assert_eq!(js(&mut b, "var n = 0, e = document.createElement('p'); e.outerHTML = { toString: function () { n++; return 'x' } }; [n, e.outerHTML].join()"), "1,<p></p>");
+    // A Document parent: NoModificationAllowedError (code 7), after the conversion.
+    assert_eq!(js(&mut b, "var n = 0; try { document.documentElement.outerHTML = { toString: function () { n++; return 'x' } } } catch (e) { [e.name, e.code, n].join() }"), "NoModificationAllowedError,7,1");
+    // A shadow root is a DocumentFragment: the context is body.
+    assert_eq!(js(&mut b, "var s = document.createElement('div').attachShadow({ mode: 'open' }), e = document.createElement('p'); s.appendChild(e); e.outerHTML = '<b>x</b>y'; Array.from(s.childNodes).map(function (n) { return n.nodeName }).join()"), "B,#text");
+    // The target leaves during ToString: the parent is read after it.
+    assert_eq!(js(&mut b, "var d = document.createElement('div'); d.innerHTML = '<a></a>'; var a = d.firstChild; a.outerHTML = { toString: function () { d.removeChild(a); return '<z></z>' } }; d.innerHTML + '|' + a.parentNode"), "|null");
+    // An abrupt ToString changes nothing.
+    assert_eq!(js(&mut b, "var d = document.createElement('div'); d.innerHTML = '<a></a>'; try { d.firstChild.outerHTML = { toString: function () { throw new RangeError('x') } } } catch (e) {} d.innerHTML"), "<a></a>");
+}
+
+#[test]
+fn outer_html_setter_uses_the_parent_as_context() {
+    let mut b = browser();
+    assert_eq!(js(&mut b, "var f = document.createElement('form'), d = document.createElement('div'); f.appendChild(d); d.outerHTML = '<form id=n>i</form><b>k</b>'; f.innerHTML"), "i<b>k</b>");
+    // A textarea parent is an RCDATA context: the markup is text.
+    assert_eq!(js(&mut b, "var d = document.createElement('textarea'); d.appendChild(document.createElement('i')); d.firstChild.outerHTML = '<b>&amp;'; d.firstChild.data"), "<b>&");
+}
+
+#[test]
+fn outer_html_setter_gates_what_the_parser_does_not_build() {
+    let mut b = browser();
+    for ctx in ["td", "table", "select", "template", "noscript"] {
+        let got = js(&mut b, &format!("var p = document.createElement('{ctx}'), e = document.createElement('p'); p.appendChild(e); e.outerHTML = 'x'; p.childNodes.length"));
+        assert!(got.starts_with("other:Unsupported"), "{ctx}: {got}");
+    }
+    // The tree is unchanged after a gate.
+    js(&mut b, "var p = document.createElement('table'), e = document.createElement('p'); p.appendChild(e); e.outerHTML = 'x'");
+    assert_eq!(js(&mut b, "[p.firstChild === e, e.parentNode === p].join()"), "true,true");
+    assert!(js(&mut b, "var d = document.createElement('div'); d.innerHTML = '<a></a>'; d.firstChild.outerHTML = '<template></template>'").starts_with("other:Unsupported"));
+    assert!(js(&mut b, "document.createElement('noscript').outerHTML").starts_with("other:Unsupported"));
+}
+
+#[test]
+fn outer_html_scripts_stay_inert_and_the_caps_apply_before_any_change() {
+    let mut b = browser();
+    assert_eq!(js(&mut b, "window.ran = 0; var d = document.createElement('div'); d.innerHTML = '<a></a>'; d.firstChild.outerHTML = '<script>window.ran = 1</script>'; document.body.appendChild(d); window.ran + d.innerHTML"), "0<script>window.ran = 1</script>");
+    let lim = BrowserLimits { max_nodes: 40, ..Default::default() };
+    let mut b = browser_with(PAGE, lim, 5_000_000);
+    let got = js(&mut b, &format!("{REP} var d = document.createElement('div'); d.innerHTML = '<a></a>'; var a = d.firstChild; a.outerHTML = rep('<i></i>', 100)"));
+    assert_eq!(got, format!("limit:{:?}", LimitKind::Host("dom-nodes")));
+    assert_eq!(js(&mut b, "[d.innerHTML, a.parentNode === d].join()"), "<a></a>,true");
+}
+
+#[test]
+fn outer_html_of_a_deep_tree_does_not_recurse() {
+    let n = 30_000;
+    let page = format!("<!doctype html><body><div id=top>{}x{}</div>", "<div>".repeat(n), "</div>".repeat(n));
+    let r = std::thread::Builder::new()
+        .stack_size(1 << 20)
+        .spawn(move || {
+            let limits = BrowserLimits { max_tree_depth: 100_000, max_nodes: 1 << 20, ..Default::default() };
+            let mut b = browser_with(&page, limits, 50_000_000);
+            js(&mut b, "var top = document.getElementById('top'); var h = top.outerHTML; top.outerHTML = h; [h.length, document.body.innerHTML === h].join()")
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+    assert_eq!(r, format!("{},true", 11 * 30_000 + 1 + 20));
+}
+
+#[test]
+fn outer_html_joins_the_text_around_the_result_as_chrome_does() {
+    let mut b = browser();
+    assert_eq!(js(&mut b, "var d = document.createElement('div'); d.innerHTML = 'a<b></b>c'; d.querySelector('b').outerHTML = 'X'; [d.childNodes.length, d.innerHTML].join()"), "1,aXc");
+    assert_eq!(js(&mut b, "var d = document.createElement('div'); d.innerHTML = 'a<b></b>c'; d.querySelector('b').outerHTML = ''; [d.childNodes.length, d.innerHTML].join()"), "1,ac");
+    assert_eq!(js(&mut b, "var d = document.createElement('div'); d.innerHTML = 'a<b></b>c'; d.querySelector('b').outerHTML = '<i></i>'; d.childNodes.length"), "3");
+    assert_eq!(js(&mut b, "var d = document.createElement('div'); d.innerHTML = 'a<b></b>'; d.querySelector('b').outerHTML = 'X<i></i>Y'; [d.childNodes.length, d.innerHTML].join()"), "3,aX<i></i>Y");
+}

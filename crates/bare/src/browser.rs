@@ -931,6 +931,7 @@ pub(crate) static DEFS: &[Def] = &[
     Def { on: &[Element], name: "previousElementSibling", len: 0, kind: G(nd::previous_element_sibling) },
     Def { on: &[Element], name: "nextElementSibling", len: 0, kind: G(nd::next_element_sibling) },
     Def { on: &[Element], name: "innerHTML", len: 0, kind: A(frag::inner_html, frag::set_inner_html) },
+    Def { on: &[Element], name: "outerHTML", len: 0, kind: A(frag::outer_html, frag::set_outer_html) },
     Def { on: &[Element], name: "id", len: 0, kind: A(nd::id, nd::set_id) },
     Def { on: &[Element], name: "className", len: 0, kind: A(nd::class_name, nd::set_class_name) },
     Def { on: &[Element], name: "getAttribute", len: 1, kind: M(nd::get_attribute) },
