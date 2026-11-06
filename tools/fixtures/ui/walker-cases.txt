@@ -1,0 +1,142 @@
+var $ = function (i) { return document.getElementById(i) };
+var nm = function (n) { return n === null ? 'null' : n.nodeType === 3 ? '#' + n.data : n.nodeType === 8 ? '!' + n.data : n.nodeType === 10 ? 'doctype' : n.nodeType === 9 ? 'document' : n.id || n.nodeName };
+var all = function (tw, m, max) { var r = [], n; for (var i = 0; i < (max || 40) && (n = tw[m]()) !== null; i++) r.push(nm(n)); return r.join(' ') };
+var err = function (f) { try { return String(f()) } catch (e) { return e.name + ': ' + e.message } };
+var tw = function (what, f, root) { return document.createTreeWalker(root || $('r'), what, f) };
+var NF = NodeFilter;
+=== defaults
+@html <div id=r><p id=p1>a<b id=b1>x</b>b</p><!--c--><ul id=u><li id=l1>1</li><li id=l2>2<span id=s>s</span></li></ul><i id=i1></i></div>
+var w = tw(); (function () { return [w.root === $('r'), w.whatToShow, w.filter, w.currentNode === $('r'), typeof w.nextNode].join(' ') })
+=== next-node-visits-everything
+@html <div id=r><p id=p1>a<b id=b1>x</b>b</p><!--c--><ul id=u><li id=l1>1</li><li id=l2>2<span id=s>s</span></li></ul><i id=i1></i></div>
+var w = tw(); (function () { return all(w, 'nextNode') })
+=== next-node-elements-only
+@html <div id=r><p id=p1>a<b id=b1>x</b>b</p><!--c--><ul id=u><li id=l1>1</li><li id=l2>2<span id=s>s</span></li></ul><i id=i1></i></div>
+var w = tw(NF.SHOW_ELEMENT); (function () { return all(w, 'nextNode') })
+=== next-node-text-and-comments
+@html <div id=r><p id=p1>a<b id=b1>x</b>b</p><!--c--><ul id=u><li id=l1>1</li><li id=l2>2<span id=s>s</span></li></ul><i id=i1></i></div>
+var w = tw(NF.SHOW_TEXT | NF.SHOW_COMMENT); (function () { return all(w, 'nextNode') })
+=== previous-node-from-the-end
+@html <div id=r><p id=p1>a<b id=b1>x</b>b</p><!--c--><ul id=u><li id=l1>1</li><li id=l2>2<span id=s>s</span></li></ul><i id=i1></i></div>
+var w = tw(NF.SHOW_ELEMENT); var n; while (n = w.nextNode()); (function () { return all(w, 'previousNode') })
+=== previous-node-with-all-nodes
+@html <div id=r><p id=p1>a<b id=b1>x</b>b</p><!--c--><ul id=u><li id=l1>1</li><li id=l2>2<span id=s>s</span></li></ul><i id=i1></i></div>
+var w = tw(); var n; while (n = w.nextNode()); (function () { return all(w, 'previousNode') })
+=== skip-descends-and-reject-does-not
+@html <div id=r><p id=p1>a<b id=b1>x</b>b</p><!--c--><ul id=u><li id=l1>1</li><li id=l2>2<span id=s>s</span></li></ul><i id=i1></i></div>
+var w = tw(NF.SHOW_ELEMENT, function (n) { return n.id === 'u' ? NF.FILTER_REJECT : n.id === 'p1' ? NF.FILTER_SKIP : NF.FILTER_ACCEPT }); (function () { return all(w, 'nextNode') })
+=== reject-and-previous-node
+@html <div id=r><p id=p1>a<b id=b1>x</b>b</p><!--c--><ul id=u><li id=l1>1</li><li id=l2>2<span id=s>s</span></li></ul><i id=i1></i></div>
+var w = tw(NF.SHOW_ELEMENT, function (n) { return n.id === 'u' ? NF.FILTER_REJECT : NF.FILTER_ACCEPT }); var n; while (n = w.nextNode()); (function () { return all(w, 'previousNode') })
+=== first-and-last-child
+@html <div id=r><p id=p1>a<b id=b1>x</b>b</p><!--c--><ul id=u><li id=l1>1</li><li id=l2>2<span id=s>s</span></li></ul><i id=i1></i></div>
+var w = tw(NF.SHOW_ELEMENT); var r = []; r.push(nm(w.firstChild())); r.push(nm(w.lastChild())); r.push(nm(w.firstChild())); w.currentNode = $('r'); w.firstChild(); r.push(nm(w.lastChild())); (function () { return r.join(' ') })
+=== first-child-through-a-skipped-parent
+@html <div id=r><p id=p1>a<b id=b1>x</b>b</p><!--c--><ul id=u><li id=l1>1</li><li id=l2>2<span id=s>s</span></li></ul><i id=i1></i></div>
+var w = tw(NF.SHOW_ELEMENT, function (n) { return n.id === 'u' ? NF.FILTER_SKIP : NF.FILTER_ACCEPT }); var r = []; w.currentNode = $('r'); r.push(nm(w.firstChild())); r.push(nm(w.nextSibling())); r.push(nm(w.nextSibling())); r.push(nm(w.nextSibling())); (function () { return r.join(' ') })
+=== first-child-with-a-rejected-parent
+@html <div id=r><p id=p1>a<b id=b1>x</b>b</p><!--c--><ul id=u><li id=l1>1</li><li id=l2>2<span id=s>s</span></li></ul><i id=i1></i></div>
+var w = tw(NF.SHOW_ELEMENT, function (n) { return n.id === 'u' ? NF.FILTER_REJECT : NF.FILTER_ACCEPT }); var r = []; w.currentNode = $('p1'); r.push(nm(w.nextSibling())); r.push(nm(w.nextSibling())); r.push(nm(w.previousSibling())); (function () { return r.join(' ') })
+=== siblings
+@html <div id=r><p id=p1>a<b id=b1>x</b>b</p><!--c--><ul id=u><li id=l1>1</li><li id=l2>2<span id=s>s</span></li></ul><i id=i1></i></div>
+var w = tw(NF.SHOW_ELEMENT); var r = []; w.currentNode = $('l1'); r.push(nm(w.nextSibling())); r.push(nm(w.nextSibling())); r.push(nm(w.previousSibling())); r.push(nm(w.previousSibling())); r.push(nm(w.previousSibling())); (function () { return r.join(' ') })
+=== siblings-through-a-skipped-sibling
+@html <div id=r><p id=p1>a<b id=b1>x</b>b</p><!--c--><ul id=u><li id=l1>1</li><li id=l2>2<span id=s>s</span></li></ul><i id=i1></i></div>
+var w = tw(NF.SHOW_ELEMENT, function (n) { return n.id === 'p1' ? NF.FILTER_SKIP : NF.FILTER_ACCEPT }); var r = []; w.currentNode = $('u'); r.push(nm(w.previousSibling())); r.push(nm(w.previousSibling())); r.push(nm(w.previousSibling())); (function () { return r.join(' ') })
+=== siblings-stop-at-the-root
+@html <div id=r><p id=p1>a<b id=b1>x</b>b</p><!--c--><ul id=u><li id=l1>1</li><li id=l2>2<span id=s>s</span></li></ul><i id=i1></i></div>
+var w = tw(NF.SHOW_ELEMENT); var r = []; w.currentNode = $('r'); r.push(nm(w.nextSibling())); r.push(nm(w.previousSibling())); w.currentNode = $('p1'); r.push(nm(w.previousSibling())); (function () { return r.join(' ') })
+=== parent-node
+@html <div id=r><p id=p1>a<b id=b1>x</b>b</p><!--c--><ul id=u><li id=l1>1</li><li id=l2>2<span id=s>s</span></li></ul><i id=i1></i></div>
+var w = tw(NF.SHOW_ELEMENT); var r = []; w.currentNode = $('s'); r.push(nm(w.parentNode())); r.push(nm(w.parentNode())); r.push(nm(w.parentNode())); r.push(nm(w.parentNode())); (function () { return r.join(' ') })
+=== parent-node-with-a-filter
+@html <div id=r><p id=p1>a<b id=b1>x</b>b</p><!--c--><ul id=u><li id=l1>1</li><li id=l2>2<span id=s>s</span></li></ul><i id=i1></i></div>
+var w = tw(NF.SHOW_ELEMENT, function (n) { return n.id === 'l2' || n.id === 'u' ? NF.FILTER_SKIP : NF.FILTER_ACCEPT }); var r = []; w.currentNode = $('s'); r.push(nm(w.parentNode())); r.push(nm(w.parentNode())); (function () { return r.join(' ') })
+=== parent-node-from-outside-the-root
+@html <div id=r><p id=p1>a<b id=b1>x</b>b</p><!--c--><ul id=u><li id=l1>1</li><li id=l2>2<span id=s>s</span></li></ul><i id=i1></i></div>
+var w = tw(NF.SHOW_ALL); w.currentNode = document.body; var r = [nm(w.parentNode())]; w.currentNode = $('r'); r.push(nm(w.parentNode())); (function () { return r.join(' ') })
+=== current-node-setter
+@html <div id=r><p id=p1>a<b id=b1>x</b>b</p><!--c--><ul id=u><li id=l1>1</li><li id=l2>2<span id=s>s</span></li></ul><i id=i1></i></div>
+var w = tw(); var r = []; w.currentNode = $('l2'); r.push(nm(w.currentNode)); r.push(nm(w.nextNode())); r.push(err(function () { w.currentNode = null })); r.push(err(function () { w.currentNode = {} })); r.push(err(function () { w.currentNode = 5 })); w.currentNode = document.body; r.push(nm(w.currentNode)); r.push(nm(w.nextNode())); (function () { return r.join(' | ') })
+=== current-node-is-kept-by-a-miss
+@html <div id=r><p id=p1>a<b id=b1>x</b>b</p><!--c--><ul id=u><li id=l1>1</li><li id=l2>2<span id=s>s</span></li></ul><i id=i1></i></div>
+var w = tw(NF.SHOW_ELEMENT); w.currentNode = $('i1'); var r = [nm(w.nextNode()), nm(w.currentNode), nm(w.firstChild()), nm(w.currentNode)]; (function () { return r.join(' ') })
+=== what-to-show-conversions
+@html <div id=r><p id=p1>a<b id=b1>x</b>b</p><!--c--><ul id=u><li id=l1>1</li><li id=l2>2<span id=s>s</span></li></ul><i id=i1></i></div>
+var r = [undefined, null, 1, -1, 4294967296, 4294967297, 1.9, NaN, '4', 'x', 0xFFFFFFFF + 2, true].map(function (v) { return err(function () { return document.createTreeWalker($('r'), v).whatToShow }) }); (function () { return r.join(' ') })
+=== what-to-show-with-a-document-root
+var r = []; [NF.SHOW_ALL, NF.SHOW_DOCUMENT_TYPE, NF.SHOW_DOCUMENT, NF.SHOW_ELEMENT].forEach(function (m) { var w = document.createTreeWalker(document, m); r.push(all(w, 'nextNode', 6)) }); (function () { return r.join(' | ') })
+=== filter-is-not-called-for-hidden-types
+@html <div id=r><p id=p1>a<b id=b1>x</b>b</p><!--c--><ul id=u><li id=l1>1</li><li id=l2>2<span id=s>s</span></li></ul><i id=i1></i></div>
+var n = 0, w = tw(NF.SHOW_ELEMENT, function () { n++; return NF.FILTER_ACCEPT }); all(w, 'nextNode'); (function () { return n })
+=== filter-sees-every-shown-node-once-per-step
+@html <div id=r><p id=p1>a<b id=b1>x</b>b</p><!--c--><ul id=u><li id=l1>1</li><li id=l2>2<span id=s>s</span></li></ul><i id=i1></i></div>
+var seen = [], w = tw(NF.SHOW_ELEMENT, function (n) { seen.push(n.id); return NF.FILTER_SKIP }); w.nextNode(); (function () { return seen.join() })
+=== filter-object-and-this
+@html <div id=r><p id=p1>a<b id=b1>x</b>b</p><!--c--><ul id=u><li id=l1>1</li><li id=l2>2<span id=s>s</span></li></ul><i id=i1></i></div>
+var ctx = [], o = { acceptNode: function (n) { ctx.push(this === o); return NF.FILTER_ACCEPT } }, w = tw(NF.SHOW_ELEMENT, o); w.nextNode(); var f = function (n) { 'use strict'; ctx.push(String(this)); return NF.FILTER_ACCEPT }; tw(NF.SHOW_ELEMENT, f).nextNode(); (function () { return ctx.join() + ' ' + (w.filter === o) + ' ' + (tw(1, f).filter === f) })
+=== filter-return-values
+@html <div id=r><p id=p1>a<b id=b1>x</b>b</p><!--c--><ul id=u><li id=l1>1</li><li id=l2>2<span id=s>s</span></li></ul><i id=i1></i></div>
+var r = []; [1, 2, 3, 0, 4, 5, true, false, '1', '2', 'x', null, undefined, 65537, 1.9, 2.5, -1, NaN, {}].forEach(function (v) { var w = tw(NF.SHOW_ELEMENT, function (n) { return n.id === 'p1' ? v : NF.FILTER_ACCEPT }); r.push(JSON.stringify(v) + '>' + all(w, 'nextNode', 3)) }); (function () { return r.join(' | ') })
+=== filter-object-without-accept-node
+@html <div id=r><p id=p1>a<b id=b1>x</b>b</p><!--c--><ul id=u><li id=l1>1</li><li id=l2>2<span id=s>s</span></li></ul><i id=i1></i></div>
+var w = tw(NF.SHOW_ELEMENT, {}); (function () { return err(function () { return w.nextNode() }) })
+=== filter-object-with-a-non-function-accept-node
+@html <div id=r><p id=p1>a<b id=b1>x</b>b</p><!--c--><ul id=u><li id=l1>1</li><li id=l2>2<span id=s>s</span></li></ul><i id=i1></i></div>
+var w = tw(NF.SHOW_ELEMENT, { acceptNode: 5 }); (function () { return err(function () { return w.nextNode() }) })
+=== filter-that-is-not-an-object
+@html <div id=r><p id=p1>a<b id=b1>x</b>b</p><!--c--><ul id=u><li id=l1>1</li><li id=l2>2<span id=s>s</span></li></ul><i id=i1></i></div>
+var r = [5, 'x', true, NaN, Symbol ? null : 0].map(function (f) { return err(function () { return tw(1, f).filter }) }); (function () { return r.join(' | ') })
+=== filter-undefined-and-null
+@html <div id=r><p id=p1>a<b id=b1>x</b>b</p><!--c--><ul id=u><li id=l1>1</li><li id=l2>2<span id=s>s</span></li></ul><i id=i1></i></div>
+var r = [undefined, null].map(function (f) { return err(function () { return String(tw(1, f).filter) + ':' + all(tw(1, f), 'nextNode', 2) }) }); (function () { return r.join(' | ') })
+=== filter-that-throws
+@html <div id=r><p id=p1>a<b id=b1>x</b>b</p><!--c--><ul id=u><li id=l1>1</li><li id=l2>2<span id=s>s</span></li></ul><i id=i1></i></div>
+var w = tw(NF.SHOW_ELEMENT, function (n) { if (n.id === 'b1') throw new RangeError('boom'); return NF.FILTER_ACCEPT }); var r = [nm(w.nextNode()), err(function () { return w.nextNode() }), nm(w.currentNode), err(function () { return w.nextNode() })]; (function () { return r.join(' ') })
+=== filter-that-calls-the-walker-again
+@html <div id=r><p id=p1>a<b id=b1>x</b>b</p><!--c--><ul id=u><li id=l1>1</li><li id=l2>2<span id=s>s</span></li></ul><i id=i1></i></div>
+var w; w = tw(NF.SHOW_ELEMENT, function (n) { return w.nextNode() ? 1 : 1 }); var r = [err(function () { return w.nextNode() }), err(function () { return w.parentNode() }), err(function () { return w.firstChild() })]; w.currentNode = $('r'); (function () { return r.join(' | ') })
+=== filter-state-is-reset-after-a-throw
+@html <div id=r><p id=p1>a<b id=b1>x</b>b</p><!--c--><ul id=u><li id=l1>1</li><li id=l2>2<span id=s>s</span></li></ul><i id=i1></i></div>
+var boom = true, w = tw(NF.SHOW_ELEMENT, function (n) { if (boom) throw new Error('x'); return 1 }); var r = [err(function () { return w.nextNode() })]; boom = false; r.push(nm(w.nextNode())); (function () { return r.join(' | ') })
+=== filter-sees-a-mutation-it-makes
+@html <div id=r><p id=p1>a<b id=b1>x</b>b</p><!--c--><ul id=u><li id=l1>1</li><li id=l2>2<span id=s>s</span></li></ul><i id=i1></i></div>
+var w = tw(NF.SHOW_ELEMENT, function (n) { if (n.id === 'p1') { var x = document.createElement('em'); x.id = 'new'; n.appendChild(x) } return 1 }); (function () { return all(w, 'nextNode') })
+=== next-node-from-a-removed-node
+@html <div id=r><p id=p1>a<b id=b1>x</b>b</p><!--c--><ul id=u><li id=l1>1</li><li id=l2>2<span id=s>s</span></li></ul><i id=i1></i></div>
+var w = tw(NF.SHOW_ELEMENT); w.currentNode = $('u'); var u = $('u'); u.parentNode.removeChild(u); (function () { return [nm(w.nextNode()), nm(w.currentNode), nm(w.parentNode())].join(' ') })
+=== removed-root-children
+@html <div id=r><p id=p1>a<b id=b1>x</b>b</p><!--c--><ul id=u><li id=l1>1</li><li id=l2>2<span id=s>s</span></li></ul><i id=i1></i></div>
+var w = tw(NF.SHOW_ELEMENT); w.nextNode(); $('r').removeChild($('i1')); (function () { return all(w, 'nextNode') })
+=== root-is-a-text-node
+@html <div id=r><p id=p1>a<b id=b1>x</b>b</p><!--c--><ul id=u><li id=l1>1</li><li id=l2>2<span id=s>s</span></li></ul><i id=i1></i></div>
+var w = document.createTreeWalker($('p1').firstChild); (function () { return [nm(w.nextNode()), nm(w.firstChild()), nm(w.parentNode()), nm(w.previousNode()), nm(w.root)].join(' ') })
+=== detached-root
+var d = document.createElement('div'); d.innerHTML = '<p>a</p><p>b</p>'; var w = document.createTreeWalker(d, NF.SHOW_ELEMENT); (function () { return all(w, 'nextNode') + ' ' + nm(w.root) })
+=== create-tree-walker-errors
+@html <div id=r><p id=p1>a<b id=b1>x</b>b</p><!--c--><ul id=u><li id=l1>1</li><li id=l2>2<span id=s>s</span></li></ul><i id=i1></i></div>
+(function () { return [function () { return document.createTreeWalker() }, function () { return document.createTreeWalker(null) }, function () { return document.createTreeWalker({}) }, function () { return document.createTreeWalker(5) }, function () { return document.createTreeWalker(window) }, function () { return document.createTreeWalker($('r'), 1, 5) }].map(err).join(' | ') })
+=== constructor-and-shape
+@html <div id=r><p id=p1>a<b id=b1>x</b>b</p><!--c--><ul id=u><li id=l1>1</li><li id=l2>2<span id=s>s</span></li></ul><i id=i1></i></div>
+(function () { return [typeof TreeWalker, typeof NodeFilter, typeof document.createTreeWalker, document.createTreeWalker.length, Object.prototype.toString.call(tw()), (function () { try { return String(new TreeWalker()) } catch (e) { return e.name + ': ' + e.message } })(), tw() instanceof TreeWalker, ['parentNode', 'firstChild', 'lastChild', 'previousSibling', 'nextSibling', 'previousNode', 'nextNode'].map(function (n) { return n + TreeWalker.prototype[n].length }).join(), ['root', 'whatToShow', 'filter', 'currentNode'].map(function (n) { var d = Object.getOwnPropertyDescriptor(TreeWalker.prototype, n); return n + (d && d.get ? 'g' : '-') + (d && d.set ? 's' : '-') }).join()].join(' ') })
+=== node-filter-constants
+@html <div id=r><p id=p1>a<b id=b1>x</b>b</p><!--c--><ul id=u><li id=l1>1</li><li id=l2>2<span id=s>s</span></li></ul><i id=i1></i></div>
+(function () { return ['FILTER_ACCEPT', 'FILTER_REJECT', 'FILTER_SKIP', 'SHOW_ALL', 'SHOW_ELEMENT', 'SHOW_ATTRIBUTE', 'SHOW_TEXT', 'SHOW_CDATA_SECTION', 'SHOW_ENTITY_REFERENCE', 'SHOW_ENTITY', 'SHOW_PROCESSING_INSTRUCTION', 'SHOW_COMMENT', 'SHOW_DOCUMENT', 'SHOW_DOCUMENT_TYPE', 'SHOW_DOCUMENT_FRAGMENT', 'SHOW_NOTATION'].map(function (n) { return n + '=' + NodeFilter[n] }).join(' ') })
+=== node-filter-constants-are-read-only
+@html <div id=r><p id=p1>a<b id=b1>x</b>b</p><!--c--><ul id=u><li id=l1>1</li><li id=l2>2<span id=s>s</span></li></ul><i id=i1></i></div>
+NodeFilter.FILTER_ACCEPT = 9; delete NodeFilter.SHOW_ALL; var d = Object.getOwnPropertyDescriptor(NodeFilter, 'SHOW_TEXT'); (function () { return [NodeFilter.FILTER_ACCEPT, NodeFilter.SHOW_ALL, d.writable, d.enumerable, d.configurable, typeof NodeFilter.prototype, (function () { try { return String(new NodeFilter()) } catch (e) { return e.name } })(), (function () { try { return String(NodeFilter()) } catch (e) { return e.name } })()].join(' ') })
+=== read-only-attributes
+@html <div id=r><p id=p1>a<b id=b1>x</b>b</p><!--c--><ul id=u><li id=l1>1</li><li id=l2>2<span id=s>s</span></li></ul><i id=i1></i></div>
+var w = tw(NF.SHOW_ELEMENT); w.root = document.body; w.whatToShow = 0; w.filter = function () {}; (function () { return [w.root === $('r'), w.whatToShow, w.filter].join(' ') })
+=== tree-walker-on-the-wrong-object
+@html <div id=r><p id=p1>a<b id=b1>x</b>b</p><!--c--><ul id=u><li id=l1>1</li><li id=l2>2<span id=s>s</span></li></ul><i id=i1></i></div>
+(function () { return ['parentNode', 'nextNode'].map(function (n) { return err(function () { return TreeWalker.prototype[n].call({}) }) }).concat(['root', 'currentNode'].map(function (n) { return err(function () { return Object.getOwnPropertyDescriptor(TreeWalker.prototype, n).get.call({}) }) })).join(' | ') })
+=== current-node-follows-accepted-nodes
+@html <div id=r><p id=p1>a<b id=b1>x</b>b</p><!--c--><ul id=u><li id=l1>1</li><li id=l2>2<span id=s>s</span></li></ul><i id=i1></i></div>
+var w = tw(NF.SHOW_ELEMENT); var r = []; r.push(nm(w.nextNode())); r.push(nm(w.currentNode)); r.push(nm(w.nextNode())); r.push(nm(w.currentNode)); r.push(nm(w.previousNode())); r.push(nm(w.currentNode)); (function () { return r.join(' ') })
+=== whitespace-text-nodes
+@html <div id=r> a <i> </i> <b>c</b> </div>
+var w = tw(NF.SHOW_TEXT); (function () { return JSON.stringify(all(w, 'nextNode')) })
+=== deep-tree
+@html <div id=r></div>
+var d = $('r'); for (var i = 0; i < 200; i++) { var c = document.createElement('i'); c.id = 'n' + i; d.appendChild(c); d = c } var w = tw(NF.SHOW_ELEMENT); var n = 0; while (w.nextNode()) n++; var m = 0; while (w.previousNode()) m++; (function () { return n + ' ' + m })

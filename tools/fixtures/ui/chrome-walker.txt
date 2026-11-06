@@ -1,0 +1,46 @@
+defaults	true 4294967295  true function
+next-node-visits-everything	p1 #a b1 #x #b !c u l1 #1 l2 #2 s #s i1
+next-node-elements-only	p1 b1 u l1 l2 s i1
+next-node-text-and-comments	#a #x #b !c #1 #2 #s
+previous-node-from-the-end	s l2 l1 u b1 p1 r
+previous-node-with-all-nodes	#s s #2 l2 #1 l1 u !c #b #x b1 #a p1 r
+skip-descends-and-reject-does-not	b1 i1
+reject-and-previous-node	b1 p1 r
+first-and-last-child	p1 b1 null b1
+first-child-through-a-skipped-parent	p1 l1 l2 i1
+first-child-with-a-rejected-parent	i1 null p1
+siblings	l2 null l1 null null
+siblings-through-a-skipped-sibling	b1 null null
+siblings-stop-at-the-root	null null null
+parent-node	l2 u r null
+parent-node-with-a-filter	r null
+parent-node-from-outside-the-root	HTML null
+current-node-setter	l2 | #2 | TypeError: Failed to set the 'currentNode' property on 'TreeWalker': Failed to convert value to 'Node'. | TypeError: Failed to set the 'currentNode' property on 'TreeWalker': Failed to convert value to 'Node'. | TypeError: Failed to set the 'currentNode' property on 'TreeWalker': Failed to convert value to 'Node'. | BODY | r
+current-node-is-kept-by-a-miss	null i1 null i1
+what-to-show-conversions	4294967295 0 1 4294967295 0 1 1 0 4 0 1 1
+what-to-show-with-a-document-root	doctype HTML HEAD STYLE BODY | doctype |  | HTML HEAD STYLE BODY
+filter-is-not-called-for-hidden-types	7
+filter-sees-every-shown-node-once-per-step	p1,b1,u,l1,l2,s,i1
+filter-object-and-this	true,undefined true true
+filter-return-values	1>p1 b1 u | 2>u l1 l2 | 3>b1 u l1 | 0>b1 u l1 | 4>b1 u l1 | 5>b1 u l1 | true>p1 b1 u | false>b1 u l1 | "1">p1 b1 u | "2">u l1 l2 | "x">b1 u l1 | null>b1 u l1 | undefined>b1 u l1 | 65537>p1 b1 u | 1.9>p1 b1 u | 2.5>u l1 l2 | -1>b1 u l1 | null>b1 u l1 | {}>b1 u l1
+filter-object-without-accept-node	TypeError: Failed to execute 'nextNode' on 'TreeWalker': Failed to execute 'acceptNode' on 'NodeFilter': The provided callback is not callable.
+filter-object-with-a-non-function-accept-node	TypeError: Failed to execute 'nextNode' on 'TreeWalker': Failed to execute 'acceptNode' on 'NodeFilter': The provided callback is not callable.
+filter-that-is-not-an-object	TypeError: Failed to execute 'createTreeWalker' on 'Document': parameter 3 is not of type 'Object'. | TypeError: Failed to execute 'createTreeWalker' on 'Document': parameter 3 is not of type 'Object'. | TypeError: Failed to execute 'createTreeWalker' on 'Document': parameter 3 is not of type 'Object'. | TypeError: Failed to execute 'createTreeWalker' on 'Document': parameter 3 is not of type 'Object'. | null
+filter-undefined-and-null	null:p1 b1 | null:p1 b1
+filter-that-throws	p1 RangeError: boom p1 RangeError: boom
+filter-that-calls-the-walker-again	InvalidStateError: Failed to execute 'nextNode' on 'TreeWalker': Filter function can't be recursive | null | InvalidStateError: Failed to execute 'nextNode' on 'TreeWalker': Filter function can't be recursive
+filter-state-is-reset-after-a-throw	Error: x | p1
+filter-sees-a-mutation-it-makes	p1 b1 new u l1 l2 s i1
+next-node-from-a-removed-node	l1 l1 u
+removed-root-children	b1 u l1 l2 s
+root-is-a-text-node	null null null null #a
+detached-root	P P DIV
+create-tree-walker-errors	TypeError: Failed to execute 'createTreeWalker' on 'Document': 1 argument required, but only 0 present. | TypeError: Failed to execute 'createTreeWalker' on 'Document': parameter 1 is not of type 'Node'. | TypeError: Failed to execute 'createTreeWalker' on 'Document': parameter 1 is not of type 'Node'. | TypeError: Failed to execute 'createTreeWalker' on 'Document': parameter 1 is not of type 'Node'. | TypeError: Failed to execute 'createTreeWalker' on 'Document': parameter 1 is not of type 'Node'. | TypeError: Failed to execute 'createTreeWalker' on 'Document': parameter 3 is not of type 'Object'.
+constructor-and-shape	function function function 1 [object TreeWalker] TypeError: Failed to construct 'TreeWalker': Illegal constructor true parentNode0,firstChild0,lastChild0,previousSibling0,nextSibling0,previousNode0,nextNode0 rootg-,whatToShowg-,filterg-,currentNodegs
+node-filter-constants	FILTER_ACCEPT=1 FILTER_REJECT=2 FILTER_SKIP=3 SHOW_ALL=4294967295 SHOW_ELEMENT=1 SHOW_ATTRIBUTE=2 SHOW_TEXT=4 SHOW_CDATA_SECTION=8 SHOW_ENTITY_REFERENCE=16 SHOW_ENTITY=32 SHOW_PROCESSING_INSTRUCTION=64 SHOW_COMMENT=128 SHOW_DOCUMENT=256 SHOW_DOCUMENT_TYPE=512 SHOW_DOCUMENT_FRAGMENT=1024 SHOW_NOTATION=2048
+node-filter-constants-are-read-only	1 4294967295 false true false undefined TypeError TypeError
+read-only-attributes	true 1 
+tree-walker-on-the-wrong-object	TypeError: Illegal invocation | TypeError: Illegal invocation | TypeError: Illegal invocation | TypeError: Illegal invocation
+current-node-follows-accepted-nodes	p1 p1 b1 b1 p1 p1
+whitespace-text-nodes	"# a  #  #  #c # "
+deep-tree	200 200
