@@ -1,6 +1,6 @@
 //! Load test for the style module (`HTMLElement.style` / `CSSStyleDeclaration`). One case at one scale per process.
 //!
-//!   style_load CASE SCALE      CASE: setget | churn | attrs | shorthand      SCALE: 1, 10, 100
+//!   style_load CASE SCALE      CASE: setget | churn | attrs | shorthand | hidden | shown      SCALE: 1, 10, 100
 //!
 //! setget: SCALE*2000 operations (`setProperty`, named setters, `removeProperty`, `getPropertyValue`, `!important`) on the
 //! style of 50 elements, checked against an ordered-list model in Rust, then the native cascade is run and the used
@@ -9,7 +9,8 @@
 //! calls that the same declaration must see (`length`, `cssText`, `getPropertyValue`), with a checksum. Each case runs in
 //! shorthand: SCALE*2000 writes of `margin`/`padding` shorthands, longhands and removals on 50 elements, checked against a
 //! model written from the standard's rules (box expansion, shortest serialization), and the native cascade must give the same
-//! pixel margins and paddings. Each case runs in
+//! pixel margins and paddings. hidden: SCALE*500 elements (with a child each, made with `innerHTML`) in a `display:none` `<div>`, and SCALE*4 reads of
+//! `position`, `color` and `font-weight` of elements in it, checked against a model. shown: the same page without `display:none`. Each case runs in
 //! small scripts with a VM collect between them. Prints time, CPU, peak RSS, allocations, and what the realm holds before
 //! and after the last collection. `tools/js/style_load.sh` runs the matrix under caps.
 
@@ -346,6 +347,27 @@ fn exec(name: &str, scale: usize) {
             after = b.style_stats().objects;
             expect("shorthand released", format!("{after},{}", b.stats().wrappers), format!("0,{wrappers0}"));
         }
+        "hidden" | "shown" => {
+            // SCALE*500 `<i class=kN><b></b></i>` in one `<div id=hid>`: `display:none` (hidden) or shown (the same reads, for comparison).
+            // SCALE*4 reads, each of three values of an element in the middle of the subtree. A read of a hidden element styles only the path.
+            let (n, reads) = (500 * scale, 4 * scale);
+            let display = if name == "hidden" { "display:none" } else { "" };
+            run(&mut b, &format!("var st=document.createElement('style'); st.textContent='#hid{{color:rgb(1,2,3);{display}}} .k0{{position:sticky}} .k1{{position:fixed}} .k2{{position:relative}} #hid b{{font-weight:700}}'; document.head.appendChild(st);
+                var h=document.createElement('div'); h.id='hid'; var html=[]; for (var i=0;i<{n};i++) html.push('<i id=e'+i+' class=k'+(i%3)+'><b></b></i>');
+                h.innerHTML=html.join(''); document.body.appendChild(h); var out=''; 0"));
+            let mut want = String::new();
+            for j in 0..reads {
+                run(&mut b, &format!("var i=({j}*7919)%{n}, e=document.getElementById('e'+i); out+=getComputedStyle(e).position+getComputedStyle(e.firstChild).color+getComputedStyle(e.firstChild).fontWeight+';'; 0"));
+                let i = j * 7919 % n;
+                want += &format!("{}rgb(1, 2, 3)700;", ["sticky", "fixed", "relative"][i % 3]);
+                ops += 3;
+            }
+            expect("hidden reads", run(&mut b, "out"), want);
+            before = b.style_stats().objects;
+            run(&mut b, "h=null");
+            collect(&mut b);
+            after = b.style_stats().objects;
+        }
         _ => die(format!("unknown case {name}")),
     }
     let run_ms = t.elapsed().as_secs_f64() * 1e3;
@@ -371,7 +393,7 @@ fn exec(name: &str, scale: usize) {
 fn main() {
     let a: Vec<String> = std::env::args().collect();
     if a.len() != 3 {
-        die("usage: style_load setget|churn|attrs|shorthand 1|10|100".into());
+        die("usage: style_load setget|churn|attrs|shorthand|hidden|shown 1|10|100".into());
     }
     let scale: usize = a[2].parse().unwrap_or_else(|_| die("scale".into()));
     let name = a[1].clone();

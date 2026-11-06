@@ -210,10 +210,67 @@ fn elements_without_a_style_say_so() {
     assert_eq!(js(&mut b, "var d = document.createElement('div'); var cs = getComputedStyle(d); cs.display + '|' + cs.direction + '|' + cs.length + '|' + cs.item(0) + '|' + cs.getPropertyValue('--x')"), "||0||");
     // Attached later: the same object now has values.
     assert_eq!(js(&mut b, "document.body.appendChild(d); cs.display + cs.length"), format!("block{}", bare_css::values::Property::COUNT));
-    // Inside `display:none`, the engine has no style for it: gate.
+    // Inside `display:none`: the computed values, as in Chrome.
     assert_eq!(js(&mut b, "getComputedStyle(document.head).display"), "none");
-    assert_eq!(js(&mut b, "getComputedStyle(document.getElementById('t')).display"), "unsupported:an element inside display:none has no computed style in the engine");
-    assert_eq!(js(&mut b, "var e = document.createElement('i'); document.head.appendChild(e); getComputedStyle(e).display"), "unsupported:an element inside display:none has no computed style in the engine");
+    assert_eq!(js(&mut b, "getComputedStyle(document.getElementById('t')).display"), "none");
+    assert_eq!(js(&mut b, "var e = document.createElement('i'); document.head.appendChild(e); getComputedStyle(e).display"), "inline");
+    // Inside a `<template>`: Chrome keeps the content in another document, so the declaration is empty (it was recorded with Chrome 155).
+    assert_eq!(js(&mut b, "var q = document.getElementById('q'); var t = getComputedStyle(q); t.display + '|' + t.length + '|' + t.position"), "|0|");
+    assert_eq!(js(&mut b, "getComputedStyle(document.getElementById('tp')).display"), "none");
+}
+
+const HIDDEN: &str = "<!doctype html><html id=r><head><style>
+  :root { --r: 7px; font-size: 20px }
+  #h1 { display: none; color: rgb(1, 2, 3); font-size: 10px; --x: hello; position: relative; width: 50%; --y: 3px }
+  #c1 { position: sticky; width: 40%; height: 2em; margin-top: 3px; top: 5px; padding-left: 10%; font-size: 2em; padding-top: var(--y) }
+  #g1 { color: inherit; --z: var(--x) there; width: var(--r); margin-left: 1rem }
+  #c2 { display: none; position: absolute } #h1 > span > b { font-weight: 700 } #c1 + #c2 { z-index: 4 } body #h1 span:first-child { line-height: 9px }
+  #n1 { display: none; color: rgb(9, 9, 9) } #n2 { position: fixed }
+  #dc { display: contents; color: rgb(4, 5, 6) } #dcc { width: 30px }
+  #hid { color: rgb(7, 8, 9) } #hidc { position: absolute }
+  #v { width: 120px; height: 20px; margin-top: 4px; position: relative; top: 2px }
+</style></head><body>
+<div id=v>v</div>
+<div id=h1><span id=c1>c1<b id=g1>g1</b></span><span id=c2>c2</span></div>
+<div id=h2 style='display:none'><div id=n1><div id=n2>n</div></div></div>
+<div id=dc><p id=dcc>x</p></div>
+<div id=hid hidden><p id=hidc>x</p></div>
+</body></html>";
+
+/// Values recorded with Chrome 155 (`tools/ui/chrome_hidden_style.mjs`, `tools/fixtures/ui/chrome-hidden-styles.txt`).
+#[test]
+fn elements_inside_display_none_have_computed_values() {
+    let mut b = at(HIDDEN);
+    js(&mut b, "var g = function (id, p) { return getComputedStyle(document.getElementById(id)).getPropertyValue(p); };");
+    // The stop of the staging login: Next.js `shouldSkipElement` reads `position` of an element that is not rendered.
+    let next = "function shouldSkipElement(e) { return ['sticky', 'fixed'].includes(getComputedStyle(e).position); }";
+    js(&mut b, next);
+    assert_eq!(js(&mut b, "shouldSkipElement(document.getElementById('c1')) + ',' + shouldSkipElement(document.getElementById('g1'))"), "true,false");
+    // Chrome: position, display, inherited color, `em`, `rem`, percent and `auto` stay computed values.
+    assert_eq!(js(&mut b, "g('c1', 'position') + ' ' + g('c1', 'display') + ' ' + g('c1', 'color') + ' ' + g('c1', 'width') + ' ' + g('c1', 'height')"), "sticky inline rgb(1, 2, 3) 40% 40px");
+    assert_eq!(js(&mut b, "g('c1', 'margin-top') + ' ' + g('c1', 'top') + ' ' + g('c1', 'padding-left') + ' ' + g('c1', 'padding-top') + ' ' + g('c1', 'font-size')"), "3px 5px 10% 3px 20px");
+    assert_eq!(js(&mut b, "g('g1', 'position') + ' ' + g('g1', 'color') + ' ' + g('g1', 'width') + ' ' + g('g1', 'margin-left') + ' ' + g('g1', 'font-size')"), "static rgb(1, 2, 3) 7px 20px 20px");
+    // Custom properties and `var()` inherit through the hidden subtree.
+    assert_eq!(js(&mut b, "g('g1', '--x') + '|' + g('g1', '--z') + '|' + g('h1', '--y')"), "hello|hello there|3px");
+    // Selectors with ancestors and siblings match inside the hidden subtree.
+    assert_eq!(js(&mut b, "g('g1', 'font-weight') + ' ' + g('c2', 'z-index') + ' ' + g('c1', 'line-height') + ' ' + g('c2', 'line-height')"), "700 4 9px normal");
+    // Nested `display:none`, and a descendant of it.
+    assert_eq!(js(&mut b, "g('c2', 'display') + ' ' + g('c2', 'position') + ' ' + g('c2', 'width')"), "none absolute auto");
+    assert_eq!(js(&mut b, "g('n1', 'display') + ' ' + g('n2', 'display') + ' ' + g('n2', 'color') + ' ' + g('n2', 'position') + ' ' + g('n2', 'width')"), "none block rgb(9, 9, 9) fixed auto");
+    // `display:contents` is not hidden (the engine has no `contents` value: Chrome says `contents` for `#dc`, here it reads as the `div` default).
+    assert_eq!(js(&mut b, "g('dcc', 'display') + ' ' + g('dcc', 'color') + ' ' + g('dcc', 'position')"), "block rgb(4, 5, 6) static");
+    // The `hidden` attribute.
+    assert_eq!(js(&mut b, "g('hid', 'display') + ' ' + g('hidc', 'display') + ' ' + g('hidc', 'color') + ' ' + g('hidc', 'position')"), "none block rgb(7, 8, 9) absolute");
+    // Deep inside `display:none` (40 levels): the style comes down the whole way.
+    js(&mut b, "var dp = document.createElement('div'); dp.id = 'dp'; dp.style.cssText = 'display:none;color:rgb(5,6,7)'; dp.innerHTML = '<div>'.repeat(40) + '<div id=dpe style=\\'position:fixed;width:10%\\'>e</div>' + '</div>'.repeat(40); document.body.appendChild(dp);");
+    assert_eq!(js(&mut b, "g('dp', 'display') + ' ' + g('dpe', 'position') + ' ' + g('dpe', 'color') + ' ' + g('dpe', 'display') + ' ' + g('dpe', 'width')"), "none fixed rgb(5, 6, 7) block 10%");
+    // A rendered element still needs layout for its used values.
+    assert_eq!(js(&mut b, "g('v', 'position') + ' ' + g('v', 'top')"), "unsupported:the resolved value is the used value, which needs layout");
+    // The object is live: the next read sees a change inside the hidden subtree and the end of `display:none`.
+    assert_eq!(js(&mut b, "var cs = getComputedStyle(document.getElementById('c1')); document.getElementById('c1').style.position = 'fixed'; cs.position"), "fixed");
+    assert_eq!(js(&mut b, "document.getElementById('h1').style.color = 'rgb(9, 8, 7)'; getComputedStyle(document.getElementById('g1')).color"), "rgb(9, 8, 7)");
+    assert_eq!(js(&mut b, "document.getElementById('h1').style.display = 'block'; getComputedStyle(document.getElementById('c1')).width"), "unsupported:the resolved value is the used value, which needs layout");
+    assert_eq!(js(&mut b, "document.getElementById('h1').style.display = ''; g('c1', 'width')"), "40%");
 }
 
 #[test]
