@@ -21,8 +21,12 @@
 // - `toLocaleLowerCase` and `toLocaleUpperCase` with a locale whose language is `tr`, `az` or `lt`: these have their own
 //   case rules.
 //
-// Left out: `matchAll`. It needs a RegExp String Iterator, which has its own state in the iterator machinery of
-// `eval_symbols.rs`.
+// - `matchAll` and `RegExp.prototype[Symbol.matchAll]`: the RegExp String Iterator is an `IterState::ReStr` object of
+//   `eval_symbols.rs`. Its prototype (`next`, `@@toStringTag`, inherits `%IteratorPrototype%`) is made by the first call. A
+//   regexp without `g` is a TypeError, checked before the hook, as in the specification. The matcher is a copy of the
+//   regexp with the same `lastIndex`, so the regexp itself is not touched. A string argument is a pattern with the `g` flag.
+//   Gates: a species constructor is not read (the copy is a plain `RegExp`), and a regexp with a replaced `exec` is `Unsupported`.
+//   The method `@@matchAll` of the fresh regexp that a string argument makes is not looked up: the builtin runs.
 
 /// Work in units that a scan costs, charged 1 step per 8. `false` when the budget ran out.
 fn charge_work(work: &mut u64, budget: &mut u64) -> bool {
@@ -102,6 +106,9 @@ impl<'p> Interp<'p> {
         ] {
             self.method(sp, name, Nat::Ext(x), len)?;
         }
+        self.method(sp, "matchAll", Nat::Ext(Bi::StrMatchAll), 1)?;
+        let f = self.native(Nat::Ext(Bi::ReSymMatchAll), "[Symbol.matchAll]", 1)?;
+        self.def(rp, self.wk_key(WK_MATCH_ALL), Value::Object(f), true, false, true)?;
         for (name, alias, x) in [("trimStart", "trimLeft", Bi::StrTrimStart), ("trimEnd", "trimRight", Bi::StrTrimEnd)] {
             let f = self.method(sp, name, Nat::Ext(x), 0)?;
             let k = h!(self, self.heap.key_from_str(alias));
@@ -237,6 +244,12 @@ impl<'p> Interp<'p> {
                 let r = self.search_receiver(this)?;
                 let s = self.coerce_string(a0)?;
                 self.re_search(r, s)
+            }
+            Bi::StrMatchAll => self.str_match_all(this, a0),
+            Bi::ReSymMatchAll => {
+                let r = self.search_receiver(this)?;
+                let s = self.coerce_string(a0)?;
+                self.re_match_all(r, s)
             }
             Bi::StrNormalize => self.str_normalize(this, a0),
             Bi::StrTrimStart | Bi::StrTrimEnd => {
@@ -408,6 +421,95 @@ impl<'p> Interp<'p> {
             res?;
         }
         Ok(Value::Number(m.map_or(-1.0, |m| m.spans[0].map_or(0, |x| x.0) as f64)))
+    }
+
+    /// `String.prototype.matchAll`.
+    fn str_match_all(&mut self, this: Value, rv: Value) -> Res<Value> {
+        if is_nullish(this) {
+            return Err(self.type_err("String.prototype.matchAll called on null or undefined"));
+        }
+        if !is_nullish(rv) {
+            if self.is_regexp(rv)? {
+                let kf = h!(self, self.heap.key_from_str("flags"));
+                let fl = self.get_prop(rv, kf)?;
+                if is_nullish(fl) {
+                    return Err(self.type_err("String.prototype.matchAll called on null or undefined"));
+                }
+                let fl = self.coerce_string(fl)?;
+                if !h!(self, self.heap.str_units(fl)).contains(&(b'g' as u16)) {
+                    return Err(self.type_err("String.prototype.matchAll called with a non-global RegExp argument"));
+                }
+            }
+            match self.str_hook(this, "matchAll", rv, WK_MATCH_ALL, &[this])? {
+                Hook::Done(v) => return Ok(v),
+                Hook::Builtin(r) => {
+                    let s = self.this_str(this, "matchAll")?;
+                    return self.re_match_all(r, s);
+                }
+                Hook::Absent => {}
+            }
+        }
+        let s = self.this_str(this, "matchAll")?;
+        let p = if matches!(rv, Value::Undefined) { h!(self, self.heap.intern_str("")) } else { self.coerce_string(rv)? };
+        let g = h!(self, self.heap.intern_str("g"));
+        let r = self.regexp_create(p, g)?;
+        self.re_match_all(r, s)
+    }
+
+    /// `RegExp.prototype[@@matchAll]` on a builtin regexp: the iterator over a copy of `r`.
+    fn re_match_all(&mut self, r: ObjId, s: StrId) -> Res<Value> {
+        self.gate_exec(r)?;
+        let (re, src, fl) = {
+            let d = &self.ext.regexps[&r];
+            (d.re.clone(), d.source, d.flags)
+        };
+        let li = self.get_prop(Value::Object(r), self.ext.k_last_index)?;
+        let n = self.coerce_number(li)?;
+        let li = if n.is_nan() || n <= 0.0 { 0.0 } else { n.trunc().min(9007199254740991.0) };
+        let f = re.flags();
+        let m = self.make_regexp(re, src, fl)?;
+        self.set_last_index(m, li)?;
+        let proto = match self.sc.re_iter_proto {
+            Some(p) => p,
+            None => {
+                let p = h!(self, self.heap.new_object(Some(self.sc.iter_proto)));
+                self.sc_method(p, "next", ScFn::ReIterNext, 0)?;
+                self.sc_tag(p, "RegExp String Iterator")?;
+                self.sc.re_iter_proto = Some(p);
+                p
+            }
+        };
+        self.sc_track_iter(proto, IterState::ReStr { re: m, s, global: f.global, done: false })
+    }
+
+    /// `next` of a RegExp String Iterator.
+    fn re_iter_next(&mut self, this: Value) -> Res<Value> {
+        let Value::Object(o) = this else { return Err(self.type_err("next method called on incompatible receiver")) };
+        let Some(&IterState::ReStr { re, s, global, done, .. }) = self.sc.iters.get(&o) else { return Err(self.type_err("next method called on incompatible receiver")) };
+        let finish = |me: &mut Self| {
+            if let Some(IterState::ReStr { done, .. }) = me.sc.iters.get_mut(&o) {
+                *done = true;
+            }
+        };
+        if done {
+            return self.sc_iter_result(Value::Undefined, true);
+        }
+        self.gate_exec(re)?;
+        let Some(m) = self.re_exec_raw(re, s)? else {
+            finish(self);
+            return self.sc_iter_result(Value::Undefined, true);
+        };
+        if !global {
+            finish(self);
+        } else if let Some((a, b)) = m.spans[0]
+            && a == b
+        {
+            let rx = self.ext.regexps[&re].re.clone();
+            let next = self.advance(&rx, s, b)?;
+            self.set_last_index(re, next as f64)?;
+        }
+        let v = self.match_result(s, &m.spans)?;
+        self.sc_iter_result(v, false)
     }
 
     /// `String.prototype.normalize`. NFC and NFD only.

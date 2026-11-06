@@ -89,6 +89,7 @@ const WK_NAMES: [&str; 15] = [
 const WK_SPECIES: usize = 5;
 const WK_CONCAT_SPREADABLE: usize = 6;
 const WK_MATCH: usize = 7;
+const WK_MATCH_ALL: usize = 8;
 const WK_REPLACE: usize = 9;
 const WK_SPLIT: usize = 11;
 const WK_SEARCH: usize = 10;
@@ -117,6 +118,8 @@ enum IterState {
     Coll { owner: ObjId, what: IterWhat, cur: Cursor, done: bool },
     Array { src: Value, i: u64, what: IterWhat, done: bool },
     Str { s: StrId, i: usize, done: bool },
+    /// A RegExp String Iterator (`eval_string_more.rs`): the matcher (a copy of the regexp), the string, `g`.
+    ReStr { re: ObjId, s: StrId, global: bool, done: bool },
 }
 
 /// How a started iteration steps. `Plain` is an array-like (by index) or a string (by code point).
@@ -144,6 +147,7 @@ enum ScFn {
     ArrayIterNext,
     StrIter,
     StrIterNext,
+    ReIterNext,
     MapCtor,
     MapGet,
     MapSet,
@@ -249,6 +253,8 @@ struct ScState {
     f_array_values: ObjId,
     f_array_next: ObjId,
     string_iter_proto: ObjId,
+    /// `%RegExpStringIteratorPrototype%`, made by the first `matchAll`.
+    re_iter_proto: Option<ObjId>,
     f_string_iter: ObjId,
     f_string_next: ObjId,
     f_map_entries: ObjId,
@@ -304,6 +310,7 @@ impl ScState {
             f_array_values: o,
             f_array_next: o,
             string_iter_proto: o,
+            re_iter_proto: None,
             f_string_iter: o,
             f_string_next: o,
             f_map_entries: o,
@@ -383,6 +390,7 @@ impl<'p> Interp<'p> {
             }
         }
         out.extend(self.sc.hints);
+        out.extend(self.sc.re_iter_proto.map(Value::Object));
     }
 
     /// What one tracked object keeps alive: a collection's keys and values, an iterator's owner or source.
@@ -399,6 +407,7 @@ impl<'p> Interp<'p> {
             Some(IterState::Coll { owner, .. }) => work.push(Value::Object(*owner)),
             Some(IterState::Array { src, .. }) => work.push(*src),
             Some(IterState::Str { s, .. }) => work.push(Value::String(*s)),
+            Some(IterState::ReStr { re, s, .. }) => work.extend([Value::Object(*re), Value::String(*s)]),
             None => {}
         }
         if let Some(h) = self.sc.helpers.get(&o) {
@@ -696,6 +705,7 @@ impl<'p> Interp<'p> {
                 self.sc_track_iter(self.sc.string_iter_proto, IterState::Str { s, i: 0, done: false })
             }
             ScFn::StrIterNext => self.str_iter_next(this),
+            ScFn::ReIterNext => self.re_iter_next(this),
             _ if f.is_iter() => self.call_iter(f, this, args, is_new),
             _ if f.is_set_op() => self.call_set_op(f, this, a0),
             _ if f.is_weak() => self.call_weak(f, this, args, is_new),

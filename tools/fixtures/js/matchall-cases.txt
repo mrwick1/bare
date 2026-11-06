@@ -1,0 +1,125 @@
+# bare-js String.prototype.matchAll and RegExp.prototype[Symbol.matchAll] (Node is the oracle; same format as proxy-cases.txt).
+# Errors are logged by name, not by message.
+=== basic
+var r = [...'a1b22c333'.matchAll(/\d+/g)];
+(function () { return r.map(function (m) { return m[0] + '@' + m.index + ':' + m.input; }).join('|'); })
+=== captures
+var r = Array.from('k1=v1;k2=v2'.matchAll(/(\w+)=(\w+)/g));
+(function () { return r.map(function (m) { return [m.length, m[0], m[1], m[2], m.index, m.groups].join(','); }).join('|'); })
+=== no_match
+var r = [...'abc'.matchAll(/x/g)];
+(function () { return r.length; })
+=== empty_matches_advance
+var r = [...'abc'.matchAll(/(?:)/g)].map(function (m) { return m.index; });
+var u = [...'a😀b'.matchAll(/(?:)/gu)].map(function (m) { return m.index; });
+var n = [...'a😀b'.matchAll(/(?:)/g)].map(function (m) { return m.index; });
+(function () { return [r.join(), u.join(), n.join()].join('|'); })
+=== string_argument_is_a_pattern
+var r = [...'a.b.c'.matchAll('.')].map(function (m) { return m[0]; });
+var s = [...'a+b+c'.matchAll('\\+')].map(function (m) { return m.index; });
+var e = [...'ab'.matchAll()].map(function (m) { return m.index; });
+var u = [...'xundefinedx'.matchAll(undefined)].length;
+var nn = [...'a null b'.matchAll(null)].map(function (m) { return m.index; });
+(function () { return [r.length, s.join(), e.join(), u, nn.join()].join('|'); })
+=== non_global_throws
+var out = [];
+try { 'a'.matchAll(/a/); } catch (e) { out.push(e.name); }
+try { 'a'.matchAll(/a/i); } catch (e) { out.push(e.name); }
+out.push([...'aa'.matchAll(/a/gi)].length, [...'aa'.matchAll(/a/gy)].length);
+(function () { return out.join(); })
+=== sticky_global
+var r = [...'aaba'.matchAll(/a/gy)].map(function (m) { return m.index; });
+(function () { return r.join(); })
+=== iterator_shape
+var it = 'aXbX'.matchAll(/X/g), proto = Object.getPrototypeOf(it);
+(function () { return [Object.prototype.toString.call(it), it[Symbol.iterator]() === it, typeof it.next, proto.hasOwnProperty('next'), Object.getPrototypeOf(proto) === Object.getPrototypeOf(Object.getPrototypeOf([][Symbol.iterator]())), proto[Symbol.toStringTag], it.next.length, Object.getOwnPropertyNames(it).length].join(); })
+=== iterator_results
+var it = 'aXbX'.matchAll(/X/g), a = it.next(), b = it.next(), c = it.next(), d = it.next();
+(function () { return [a.done, a.value.index, b.done, b.value.index, c.done, c.value, d.done, d.value].join(); })
+=== iterator_next_on_wrong_receiver
+var it = 'a'.matchAll(/a/g), out = [];
+[{}, 1, undefined, [][Symbol.iterator](), ''[Symbol.iterator]()].forEach(function (t) { try { it.next.call(t); out.push('ok'); } catch (e) { out.push(e.name); } });
+(function () { return out.join(); })
+=== receiver_regexp_untouched
+var r = /a/g; r.lastIndex = 1; var it = 'aaa'.matchAll(r), first = it.next().value.index;
+var li = r.lastIndex; it.next(); it.next();
+(function () { return [first, li, r.lastIndex].join(); })
+=== last_index_copied
+var r = /a/g; r.lastIndex = 2; var m = [...'aaaa'.matchAll(r)].map(function (x) { return x.index; });
+var r2 = /a/g; r2.lastIndex = 99; var m2 = [...'aaaa'.matchAll(r2)].length;
+var r3 = /a/g; r3.lastIndex = -5; var m3 = [...'aaaa'.matchAll(r3)].length;
+var r4 = /a/g; r4.lastIndex = '1'; var m4 = [...'aaaa'.matchAll(r4)].length;
+var r5 = /a/g; r5.lastIndex = { valueOf: function () { return 3; } }; var m5 = [...'aaaa'.matchAll(r5)].length;
+(function () { return [m.join(), m2, m3, m4, m5].join('|'); })
+=== lazy_and_live
+var r = /a/g, s = 'aaa', it = s.matchAll(r), n = 0;
+r.lastIndex = 5;
+var x = it.next().value.index;
+(function () { return x; })
+=== for_of_and_spread_and_from
+var s = 'x1y2', out = [];
+for (var m of s.matchAll(/\d/g)) out.push(m[0]);
+out.push(Array.from(s.matchAll(/\d/g), function (m) { return m.index; }).join('/'));
+out.push([...s.matchAll(/[a-z]/g)].map(function (m) { return m[0]; }).join(''));
+(function () { return out.join(); })
+=== regexp_symbol_method_direct
+var r = /(\d)/g, it = r[Symbol.matchAll]('a1b2'), tag = Object.prototype.toString.call(it), all = [...it].map(function (m) { return m[1]; }).join();
+(function () { return [tag, all, /a/[Symbol.matchAll]('aa').next().value.index, typeof RegExp.prototype[Symbol.matchAll], RegExp.prototype[Symbol.matchAll].name, RegExp.prototype[Symbol.matchAll].length].join(); })
+=== regexp_symbol_method_non_global
+var it = /a/[Symbol.matchAll]('aaa'), r = [];
+r.push(it.next().value.index, it.next().done);
+(function () { return r.join(); })
+=== symbol_matchall_user_override
+var calls = [];
+var o = { [Symbol.matchAll]: function (s) { calls.push(this === o, s); return 'custom'; } };
+var r = 'abc'.matchAll(o);
+(function () { return [r, calls.join('/')].join(); })
+=== symbol_matchall_regexp_like_needs_g
+var out = [];
+var rl = { [Symbol.match]: true, flags: 'i', [Symbol.matchAll]: function () { return 'm'; } };
+try { 'a'.matchAll(rl); } catch (e) { out.push(e.name); }
+var rg = { [Symbol.match]: true, flags: 'g', [Symbol.matchAll]: function () { return 'm2'; } };
+out.push('a'.matchAll(rg));
+var rn = { [Symbol.match]: true, flags: undefined };
+try { 'a'.matchAll(rn); } catch (e) { out.push(e.name); }
+(function () { return out.join(); })
+=== symbol_matchall_non_callable
+var out = [];
+try { 'a'.matchAll({ [Symbol.matchAll]: 5 }); } catch (e) { out.push(e.name); }
+out.push([...'a{}'.matchAll({ [Symbol.matchAll]: undefined })].length);
+out.push([...'a{}'.matchAll({ [Symbol.matchAll]: null })].length);
+(function () { return out.join(); })
+=== this_coercion
+var out = [];
+out.push([...String.prototype.matchAll.call(12321, /2/g)].length);
+out.push([...String.prototype.matchAll.call({ toString: function () { return 'zz'; } }, /z/g)].length);
+[null, undefined].forEach(function (t) { try { String.prototype.matchAll.call(t, /a/g); } catch (e) { out.push(e.name); } });
+(function () { return out.join(); })
+=== this_coercion_order
+var log = [];
+var s = { toString: function () { log.push('toString'); return 'aa'; } };
+var r = { [Symbol.match]: true, get flags() { log.push('flags'); return 'g'; }, get [Symbol.matchAll]() { log.push('matchAll'); return function () { log.push('call'); return 0; }; } };
+String.prototype.matchAll.call(s, r);
+(function () { return log.join(); })
+=== matchall_function_properties
+(function () { return [String.prototype.matchAll.length, String.prototype.matchAll.name, Object.getOwnPropertyDescriptor(String.prototype, 'matchAll').enumerable, Object.getOwnPropertyDescriptor(String.prototype, 'matchAll').writable, Symbol.matchAll.toString(), Object.getOwnPropertyDescriptor(RegExp.prototype, Symbol.matchAll).enumerable].join(); })
+=== flags_and_unicode
+var r = [...'ÀbÀ'.matchAll(/à/gi)].map(function (m) { return m.index; });
+var u = [...'😀😀'.matchAll(/./gu)].map(function (m) { return m[0].length + '@' + m.index; });
+var n = [...'😀'.matchAll(/./g)].map(function (m) { return m[0].length + '@' + m.index; });
+(function () { return [r.join(), u.join(), n.join()].join('|'); })
+=== multiline_and_dotall
+var a = [...'a\nb\nc'.matchAll(/^./gm)].map(function (m) { return m[0] + m.index; }).join();
+var b = [...'a\nb'.matchAll(/a.b/gs)].length, c = [...'a\nb'.matchAll(/a.b/g)].length;
+(function () { return [a, b, c].join('|'); })
+=== optional_group_undefined
+var r = [...'ab'.matchAll(/(a)|(b)/g)].map(function (m) { return [m[0], m[1], m[2]].join(','); });
+(function () { return r.join('|'); })
+=== two_iterators_independent
+var s = 'aaa', r = /a/g, i1 = s.matchAll(r), i2 = s.matchAll(r);
+i1.next(); i1.next();
+var out = [i2.next().value.index, i1.next().value.index, i1.next().done, i2.next().value.index].join();
+(function () { return out; })
+=== large_input
+var s = 'ab'.repeat(5000), n = 0; for (var m of s.matchAll(/a/g)) n += m.index;
+(function () { return n; })
