@@ -265,3 +265,21 @@ fn on_the_real_clock_a_one_second_interval_settles_after_about_one_second() {
         assert_eq!(r.pages[0].idle_timers, vec![1000]);
     });
 }
+
+#[test]
+fn a_timer_that_adds_a_style_sheet_each_run_is_not_quiet_while_it_does() {
+    big(|| {
+        let srv = serve(|path| match path {
+            "/" => Reply::new(200, Some("text/html; charset=utf-8"), "<script>var k = 0; function step() { k++; localStorage.setItem('n', k); if (k <= 3) { var l = document.createElement('link'); l.rel = 'stylesheet'; l.href = '/s' + k + '.css'; document.head.appendChild(l) } setTimeout(step, 400) } step()</script>"),
+            _ => Reply::new(200, Some("text/css"), "p { color: red }"),
+        });
+        let mut c = cfg(srv.url("/"));
+        c.limits.max_tasks = 5_000;
+        c.limits.max_rounds = 5_000;
+        let mut s = Session::new(c);
+        let r = s.run();
+        assert!(settled(&r), "{r:?}");
+        // The three sheets were fetched, so the timer ran the fourth time (no sheet) before the page settled.
+        assert_eq!(n(&s, &srv, "n"), 4);
+    });
+}

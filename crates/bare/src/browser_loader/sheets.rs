@@ -213,6 +213,7 @@ impl Run<'_> {
         {
             let mut s = self.dom.scripts.sheets.borrow_mut();
             s.stats.supplied += 1;
+            self.dom.forget_quiet();
             s.supplied.insert(raw.to_string(), url.clone());
         }
         self.tell_links(raw, &url, top_ok)
