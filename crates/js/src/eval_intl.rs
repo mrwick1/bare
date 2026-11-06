@@ -63,12 +63,18 @@ enum IntlFn {
     GetCanonical,
     NumLocale,
     StrLocaleCompare,
+    SegCtor,
+    SegResolved,
+    SegSegment,
+    SegsContaining,
+    SegsIter,
+    SegIterNext,
 }
 
 impl IntlFn {
     /// A constructor that `new` can call.
     fn is_ctor(self) -> bool {
-        matches!(self, IntlFn::DtfCtor | IntlFn::NfCtor | IntlFn::CollCtor | IntlFn::PrCtor)
+        matches!(self, IntlFn::DtfCtor | IntlFn::NfCtor | IntlFn::CollCtor | IntlFn::PrCtor | IntlFn::SegCtor)
     }
 }
 
@@ -90,6 +96,9 @@ struct IntlState {
     nfs: FxMap<ObjId, IntlNf>,
     colls: FxMap<ObjId, IntlColl>,
     prs: FxMap<ObjId, IntlPr>,
+    segs: FxMap<ObjId, IntlSeg>,
+    segments: FxMap<ObjId, SegData>,
+    seg_iters: FxMap<ObjId, SegIter>,
     /// The ICU4X formatters and collators, made on first use.
     icu: icu::Cache,
     intl: ObjId,
@@ -106,6 +115,10 @@ struct IntlState {
     coll_compare: ObjId,
     pr_proto: ObjId,
     pr_ctor: ObjId,
+    seg_proto: ObjId,
+    seg_ctor: ObjId,
+    segments_proto: ObjId,
+    seg_iter_proto: ObjId,
     zones: FxMap<Rc<str>, Rc<Zone>>,
     default_zone: Option<(Rc<str>, Rc<Zone>)>,
     /// The keys of `OPTION_NAMES`, made once (rooted).
@@ -121,6 +134,9 @@ impl IntlState {
             nfs: FxMap::default(),
             colls: FxMap::default(),
             prs: FxMap::default(),
+            segs: FxMap::default(),
+            segments: FxMap::default(),
+            seg_iters: FxMap::default(),
             icu: icu::Cache::default(),
             intl: o,
             proto: o,
@@ -134,6 +150,10 @@ impl IntlState {
             coll_compare: o,
             pr_proto: o,
             pr_ctor: o,
+            seg_proto: o,
+            seg_ctor: o,
+            segments_proto: o,
+            seg_iter_proto: o,
             zones: FxMap::default(),
             default_zone: None,
             keys: Vec::new(),
@@ -144,14 +164,14 @@ impl IntlState {
 
 const MAX_ZONES: usize = 64;
 /// The options that the constructors read. Their keys are made once, on the first read of an option.
-const OPTION_NAMES: [&str; 46] = [
+const OPTION_NAMES: [&str; 47] = [
     "localeMatcher", "calendar", "numberingSystem", "hour12", "hourCycle", "timeZone", "weekday", "era", "year", "month", "day",
     "dayPeriod", "hour", "minute", "second", "fractionalSecondDigits", "timeZoneName", "formatMatcher", "dateStyle", "timeStyle",
     // NumberFormat, PluralRules and Collator
     "style", "currency", "currencyDisplay", "currencySign", "unit", "unitDisplay", "notation", "minimumIntegerDigits",
     "minimumFractionDigits", "maximumFractionDigits", "minimumSignificantDigits", "maximumSignificantDigits", "roundingIncrement",
     "roundingMode", "roundingPriority", "trailingZeroDisplay", "compactDisplay", "useGrouping", "signDisplay", "usage",
-    "collation", "numeric", "caseFirst", "sensitivity", "ignorePunctuation", "type",
+    "collation", "numeric", "caseFirst", "sensitivity", "ignorePunctuation", "type", "granularity",
 ];
 
 /// The index of `name` in `OPTION_NAMES`. A `match` on the text compares the length first: a scan of the array cost 10% on
@@ -204,6 +224,7 @@ fn option_index(name: &str) -> Option<usize> {
         "sensitivity" => 43,
         "ignorePunctuation" => 44,
         "type" => 45,
+        "granularity" => 46,
         _ => return None,
     })
 }
@@ -240,7 +261,7 @@ impl<'p> Interp<'p> {
 
     fn intl_roots(&self, out: &mut Vec<Value>) {
         let i = &self.intl;
-        out.extend([i.intl, i.proto, i.ctor, i.format_fn, i.nf_proto, i.nf_ctor, i.nf_format, i.coll_proto, i.coll_ctor, i.coll_compare, i.pr_proto, i.pr_ctor].map(Value::Object));
+        out.extend([i.intl, i.proto, i.ctor, i.format_fn, i.nf_proto, i.nf_ctor, i.nf_format, i.coll_proto, i.coll_ctor, i.coll_compare, i.pr_proto, i.pr_ctor, i.seg_proto, i.seg_ctor, i.segments_proto, i.seg_iter_proto].map(Value::Object));
         out.extend(self.intl.keys.iter().filter_map(|k| if let PropertyKey::String(s) = k { Some(Value::String(*s)) } else { None }));
     }
 
@@ -258,12 +279,25 @@ impl<'p> Interp<'p> {
             out.extend(c.bound.map(Value::Object));
         }
         out.extend(self.intl.prs.keys().map(|&o| Value::Object(o)));
+        out.extend(self.intl.segs.keys().map(|&o| Value::Object(o)));
+        for (&o, d) in &self.intl.segments {
+            out.extend([Value::Object(o), Value::String(d.s)]);
+        }
+        for (&o, d) in &self.intl.seg_iters {
+            out.extend([Value::Object(o), Value::String(d.s)]);
+        }
     }
 
     fn intl_trace(&self, o: ObjId, out: &mut Vec<Value>) {
         let bound = self.intl.dtfs.get(&o).and_then(|d| d.bound).or_else(|| self.intl.nfs.get(&o).and_then(|n| n.bound)).or_else(|| self.intl.colls.get(&o).and_then(|c| c.bound));
         if let Some(b) = bound {
             out.push(Value::Object(b));
+        }
+        if let Some(d) = self.intl.segments.get(&o) {
+            out.push(Value::String(d.s));
+        }
+        if let Some(d) = self.intl.seg_iters.get(&o) {
+            out.push(Value::String(d.s));
         }
     }
 
@@ -272,6 +306,9 @@ impl<'p> Interp<'p> {
         self.intl.nfs.retain(|o, _| seen.contains(o));
         self.intl.colls.retain(|o, _| seen.contains(o));
         self.intl.prs.retain(|o, _| seen.contains(o));
+        self.intl.segs.retain(|o, _| seen.contains(o));
+        self.intl.segments.retain(|o, _| seen.contains(o));
+        self.intl.seg_iters.retain(|o, _| seen.contains(o));
         if self.intl.dtfs.capacity() > 64 && self.intl.dtfs.len() * 4 < self.intl.dtfs.capacity() {
             self.intl.dtfs.shrink_to_fit();
         }
@@ -336,6 +373,19 @@ impl<'p> Interp<'p> {
         self.method(pr_proto, "resolvedOptions", Nat::Intl(IntlFn::PrResolved), 0)?;
         self.method(pr_proto, "select", Nat::Intl(IntlFn::PrSelect), 1)?;
         self.method(pr_proto, "selectRange", Nat::Intl(IntlFn::NfRange(2)), 2)?;
+        // Segmenter
+        let (seg_ctor, seg_proto) = self.intl_ctor(intl, "Segmenter", IntlFn::SegCtor, IntlFn::Supported(3), "Intl.Segmenter")?;
+        self.method(seg_proto, "resolvedOptions", Nat::Intl(IntlFn::SegResolved), 0)?;
+        self.method(seg_proto, "segment", Nat::Intl(IntlFn::SegSegment), 1)?;
+        let segments_proto = h!(self, self.heap.new_object(Some(self.object_proto)));
+        self.method(segments_proto, "containing", Nat::Intl(IntlFn::SegsContaining), 1)?;
+        let f = self.native(Nat::Intl(IntlFn::SegsIter), "[Symbol.iterator]", 0)?;
+        self.def(segments_proto, self.sc.k_iterator, Value::Object(f), true, false, true)?;
+        let seg_iter_proto = h!(self, self.heap.new_object(Some(self.sc.iter_proto)));
+        self.method(seg_iter_proto, "next", Nat::Intl(IntlFn::SegIterNext), 0)?;
+        self.sc_tag(seg_iter_proto, "Segmenter String Iterator")?;
+        let i = &mut self.intl;
+        (i.seg_proto, i.seg_ctor, i.segments_proto, i.seg_iter_proto) = (seg_proto, seg_ctor, segments_proto, seg_iter_proto);
         let i = &mut self.intl;
         (i.intl, i.proto, i.ctor, i.format_fn) = (intl, proto, ctor, format_fn);
         (i.nf_proto, i.nf_ctor, i.nf_format, i.coll_proto, i.coll_ctor, i.coll_compare, i.pr_proto, i.pr_ctor) =
@@ -760,3 +810,4 @@ impl<'p> Interp<'p> {
 }
 
 include!("eval_intl_num.rs");
+include!("eval_intl_segmenter.rs");
