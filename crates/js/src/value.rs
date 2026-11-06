@@ -30,8 +30,11 @@ handle!(/// Handle of a symbol. Each `new_symbol` call makes a distinct identity
     SymId);
 handle!(/// Handle of an object.
     ObjId);
+handle!(/// Handle of a BigInt too large for `i64`. Like strings, equal values share one handle (see `heap_big.rs`).
+    BigId);
 
-/// A JavaScript value. No BigInt (the target bundles use none).
+/// A JavaScript value. A BigInt is `BigInt` when it fits in `i64` (inline, nothing to collect) and `BigHeap` otherwise.
+/// The two forms never overlap: `BigHeap` never holds a value that fits in `i64`, so equal BigInts have equal forms.
 /// No `PartialEq`: `==` on `f64` is wrong for NaN and `Object.is`. Use the methods below.
 #[derive(Clone, Copy, Debug)]
 pub enum Value {
@@ -43,10 +46,19 @@ pub enum Value {
     String(StrId),
     Symbol(SymId),
     Object(ObjId),
+    BigInt(i64),
+    BigHeap(BigId),
 }
 
 impl Value {
+    /// Is this a BigInt of either form?
+    #[inline]
+    pub fn is_bigint(self) -> bool {
+        matches!(self, Value::BigInt(_) | Value::BigHeap(_))
+    }
+
     /// `a === b`.
+    #[inline]
     pub fn strict_equals(self, other: Value) -> bool {
         use Value::*;
         match (self, other) {
@@ -56,11 +68,14 @@ impl Value {
             (String(a), String(b)) => a == b,
             (Symbol(a), Symbol(b)) => a == b,
             (Object(a), Object(b)) => a == b,
+            (BigInt(a), BigInt(b)) => a == b,
+            (BigHeap(a), BigHeap(b)) => a == b, // the heap keeps one handle for each value
             _ => false,
         }
     }
 
     /// `Object.is(a, b)`: NaN is NaN, +0 is not -0.
+    #[inline]
     pub fn same_value(self, other: Value) -> bool {
         match (self, other) {
             (Value::Number(a), Value::Number(b)) => {
@@ -71,6 +86,7 @@ impl Value {
     }
 
     /// SameValueZero (`Map`, `Set`, `includes`): NaN is NaN, +0 is -0.
+    #[inline]
     pub fn same_value_zero(self, other: Value) -> bool {
         match (self, other) {
             (Value::Number(a), Value::Number(b)) => (a.is_nan() && b.is_nan()) || a == b,

@@ -2320,7 +2320,7 @@ Validation:
 
 Problems seen, not changed:
 
-- A BigInt literal and `new String(...)` stop with `Unsupported` in the evaluator, so some Node cases avoid them.
+- A BigInt literal and `new String(...)` stopped with `Unsupported` in the evaluator when this was written, so some Node cases avoid them. A BigInt literal runs now (see "BigInt").
 - A getter that reads `typeof this` on a primitive gives the primitive type in bare. Node (sloppy mode) gives "object".
 - `browser_fetch_tests::reused_connections_and_posts_are_never_resent` failed once in a full parallel run and passed in each of 3 solo runs and in the next full run. Hypothesis: a timing race in the test server.
 - `tools/js/number_check.sh` printed `limit` for `math_unary_matrix` on the Node side once while the machine was busy. It passed on the next run.
@@ -2426,7 +2426,7 @@ Design:
 
 Gates (each is `Unsupported`, never a wrong result):
 
-- Reading or writing an element of a BigInt array (this engine has no BigInt), and the 4 `DataView` BigInt methods. An empty array, and the methods that only move bytes, run.
+- Reading or writing an element of a BigInt array, and the 4 `DataView` BigInt methods. They were gates when this topic landed. The BigInt topic (see "BigInt") removed them.
 - `ArrayBuffer.prototype.resize` and the `maxByteLength` option of the constructor. `resizable` is always false.
 - A subclass, a `@@species` other than the default, and a `from` or `of` receiver that is not one of the intrinsics.
 - `toLocaleString` of a non-empty array, while `Number.prototype` has no own `toLocaleString`. `Object.prototype.toLocaleString` would give `1234.5` where V8 gives `1,234.5`. (`(1234.5).toLocaleString()` has the same wrong result today. It is not part of this change.)
@@ -2460,7 +2460,7 @@ Validation:
 - 63 Node cases (`tools/fixtures/js/typed-cases.txt`, `tools/js/typed_check.sh`). They cover every constructor form, `from` and `of`, each method with edge arguments, conversion of every element type, `DataView` for all types and both byte orders, detaching in callbacks, and the error messages. All match Node 22.18. The 93 cases of `binary_check.sh` still match.
 - Rust tests (`eval_typed_tests.rs`): the corpus, every element type against a plain model of the conversion, the canonical NaN, each gate, the byte and step limits, detached buffers, GC with views and `find_byte` against a plain scan at every length and position.
 
-Not tested: BigInt elements (gated), resizable buffers, a realm with a user-defined subclass, other engines, and the live staging login.
+Not tested: BigInt elements (a gate then; the BigInt topic runs them), resizable buffers, a realm with a user-defined subclass, other engines, and the live staging login.
 
 V8 quirks noticed: the receiver wording (above) and `findIndexLast` in a detached message. Both are matched. Node 22.18 gives a result for `fill(v, undefined, end)` that this change does not copy. V8 converts the value before the index in `with`.
 
@@ -2764,7 +2764,7 @@ Gates removed: the wrapper `Unsupported` in `new`, `Reflect.construct` and the `
 
 Not done:
 
-- `Object(1n)` and BigInt wrappers. At the time of this work `Value` has no BigInt kind. When BigInt merges, add `Value::BigInt` to `wrapper_proto` and to the four `this` functions.
+- `Object(1n)` and BigInt wrappers: done in the BigInt change (`to_object` and `thisBigIntValue`).
 - `structuredClone`: the engine has none.
 - `String.prototype`, `Number.prototype`, `Boolean.prototype` and `Symbol.prototype` are ordinary objects with a special case in the four `this` functions. `Object.getOwnPropertyNames(String.prototype)` has no `length`.
 - Two older differences remain: the read-only assignment and `delete` messages, and the `toString` radix message differ from V8. The Node cases use `e.name` to avoid them.
@@ -3055,3 +3055,181 @@ Time grows in a straight line. Peak memory is 4 to 7 MiB, except in two cases. `
 Boa compared (boa_engine 0.22.0, `builtins/proxy/mod.rs`, 1,248 lines). Boa gives every object a table of function pointers for the 13 internal methods (`InternalObjectMethods`: `BASIC`, `CALLABLE`, `CONSTRUCTOR`), and a proxy has its own table. bare-js has one flag in the object header and no table, and the evaluator does the dispatch. Boa limits the depth with its VM recursion limit. bare-js uses the limits it already had. No Boa code was copied, so `docs/open-source.md` has no new entry.
 
 Not tested: a real page on this build (the live login was not run), `Proxy` over a host object (an element, `dataset`, a `NodeList`) and a proxy passed to a host function (`addEventListener`, `fetch` options), typed arrays and `DataView` behind a proxy beyond the cases above, `with` (it is `Unsupported` on a plain object too), and Node versions other than 22.18. Node runs authored cases only.
+
+## BigInt
+
+This topic adds the BigInt primitive to `bare-js`: literals, `typeof`, all operators, comparison, `BigInt()`, `BigInt.asIntN`, `BigInt.asUintN` and `BigInt.prototype`. It removes the BigInt gates of the typed arrays (`BigInt64Array`, `BigUint64Array`) and of `DataView` (`getBigInt64`, `setBigInt64`, `getBigUint64`, `setBigUint64`). `tools/js/builtin_inventory.sh` now prints 119 of 655 missing, down from 126 on main 862e424. The 7 BigInt items are the constructor, `asIntN`, `asUintN`, and `toString`, `valueOf`, `toLocaleString` and `@@toStringTag` of the prototype.
+
+Design:
+
+- `Value::BigInt(i64)` is the inline form. `Value::BigHeap(BigId)` is a heap entry for a value outside `i64`. A value has exactly one form.
+- The heap keeps one entry for each value (like strings). `new_bigint` looks the value up in a hash table first. So two handles are equal exactly when the values are equal. `===`, `Object.is`, SameValueZero, `Map` keys and `Set` members need no heap and no limb comparison.
+- Two `i64` operands never reach the limb code. `+ - * / %` run in `i128`, which is exact for them. Only a result outside `i64` makes a heap entry.
+- The limb code is in `bigint.rs`: `u64` limbs, sign and magnitude. Multiplication switches to Karatsuba above 32 limbs. Division is Knuth D with a Möller–Granlund reciprocal for the quotient digit. `toString` is divide and conquer above 32 limbs. Bit operations use the two's complement form. `>>` rounds toward minus infinity. `to_f64` is correctly rounded. Comparison with a Number is exact (`cmp_f64`).
+- A heap entry costs about 54 bytes at 2 limbs, measured (the slot, the entry, the limbs and the table share). Entries are traced and swept by the collector. The table is weak and is rebuilt after a sweep.
+- `BigInt` is installed lazily like `Intl` (see the cost section). The wrapper object of a BigInt is the `Exotic::Prim` of the primitive wrapper change, with `BigInt.prototype`.
+- A BigInt typed array keeps its elements in the byte buffer. A read gives `Value::BigInt`. A `BigUint64Array` element above `i64::MAX` needs a heap entry, and the read path has no `&mut`. So `view_own_big` returns `BigUnsigned(raw)`, and `get_own_property` and `lookup` make the entry. A write converts with ToBigInt and wraps to 64 bits. A path that calls `heap.set` or `heap.define_own_property` with a value that is not a BigInt gets `NeedsBigInt`. `put_prop`, `Reflect.set` and `Object.defineProperty` convert and repeat. Any other path is an `Unsupported` gate.
+- Limits: a BigInt of more than `max_big_limbs` limbs is `Limit::BigLimbs`, a fatal limit (never a catchable error). The size of a result is checked before the operation allocates it, with an upper bound from the operand sizes (for a power: bits of the base times the exponent). So a result close to the cap can be refused though it would fit. An operation charges steps for its work (`work / 64`). `toString` checks the string cap first.
+- Errors use the V8 messages: `Cannot mix BigInt and other types, use explicit conversions`, `Division by zero`, `BigInts have no unsigned right shift, use >> instead`, `Do not know how to serialize a BigInt`, `The number 1.5 cannot be converted to a BigInt because it is not an integer`, `Cannot convert abc to a BigInt`, and `toString() radix argument must be between 2 and 36`. A negative exponent gives `undefined must be positive`. That text is a quirk of V8 12.4 (Node 22) and it is matched.
+
+### Crate decision
+
+I measured num-bigint 0.4.8 against the own code. Both pass the same tests. The own code was written first, then compared on the same machine, release profile.
+
+| Measure | Own | num-bigint 0.4.8 |
+|---|---|---|
+| Binary size over a 346,536 B baseline | +57,952 B | +160,504 B |
+| 2-limb `+` and `*`, 1M each | 29–31 ms | 38–50 ms |
+| 1k digits: `*`, `/`, `toString` (time ÷ num-bigint) | 1.02, 1.10, 1.00 | 1.0 |
+| 10k digits: `*`, `/`, `toString` (time ÷ num-bigint) | 1.14, 1.19, 1.17 | 1.0 |
+| 100k digits `*` | 3.14 ms | 2.26 ms (own is 1.39×) |
+| 100k digits `/` | 6.17 ms | 2.16 ms (own is 2.85×) |
+| 100k digits `toString` | 14.06 ms | 5.91 ms (own is 2.38×) |
+| Parse, 1k and 100k digits (time ÷ num-bigint) | 0.66, 0.88 | 1.0 |
+| Memory of a 2-limb value | about 54 B in the heap | `Vec<u64>` and a sign, with no shared entry |
+
+Boa uses num-bigint for its `JsBigInt`. Its value is a reference-counted heap object for every BigInt, small or not. Here a small value is inline and costs no allocation, which matters more for a script than the large-number speed.
+
+Decision: the own code. The reasons are 102,552 fewer bytes of binary, faster small values, and a `to_f64` that is correctly rounded (the `num-bigint` conversion is not; it differs from Node and Python in the last bit for some inputs). The cost is speed above about 10k digits: `/` and `toString` are 2.4× to 2.9× slower than num-bigint at 100k digits. That has no use in a page script today. Known gap: no Toom-3 and no Burnikel–Ziegler division. No crate was adopted, so `docs/open-source.md` has no change.
+
+Differential check: a scratch program (not in the repository, because num-bigint is not a dependency) compared the own code with num-bigint over 200k to 300k random operations for each operation. All match, except the `to_f64` rounding above. `bigint_tests.rs` checks the code against plain models and against known values.
+
+### Load test
+
+`tools/js/bigint_load.sh` runs `bigint_load` (7 rows at scales 1, 10 and 100, one process each). The host checks each result against a formula or a Rust model that does not use the engine's BigInt code.
+
+| Row | Scale 1 | Scale 100 |
+|---|---|---|
+| `small` (inline `*`, `%`, `+`, 150M steps at scale 100) | 60.2 ms | 5.93 s, peak 5 MiB |
+| `heapmix` (64-bit LCG, values above `i64`) | 25.6 ms | 3.03 s, 5.0M entries, peak 474 MiB |
+| `mul` (a product of 100k digits at scale 100) | 0.1 ms | 114 ms |
+| `divmod` | 0.1 ms | 74 ms |
+| `tostring` (7^k and back) | 0.0 ms | 24 ms |
+| `i64sort` (50k × scale elements) | 66 ms | 6.17 s, peak 80 MiB |
+| `u64sort` (values above `i64::MAX`) | 110 ms | 10.1 s, peak 502 MiB |
+
+All 21 rows pass. A collect after the run frees every heap BigInt but the last one held (`bigints_live_after` is 0 or 1). The memory per live entry is 54 B (272,197,800 B ÷ 5,000,727 entries at `heapmix` scale 100). The sort rows spend their time in the comparator and the typed-array read (a `BigUint64Array` read above `i64::MAX` goes through the table lookup). I did not measure a Number-only baseline for `small`.
+
+### Cost on the Number path
+
+The brief says a row without BigInt must regress less than 0.5% in instructions. I measured instructions (`perf stat`, user mode, one core) of this build and of main 5978d55 on `eval_load`, `arrobj_load` and `binary_load` at scales 1, 10 and 100 (96 rows), and on `numeric_load` at 1,000 and 10,000 iterations (38 rows). The first version of this change missed the limit on 17 rows.
+
+Result: no row is over +0.5%. The worst is `arrobj_load` `tosorted` at scale 100 (+0.42%), then `repeat` at scale 1 (+0.32%), `pad` at scale 1 (+0.24%) and `copy` at scale 1 (+0.22%). 112 of 134 rows have fewer instructions than main. The largest falls are `arrays` (−7% to −8%), `lastindexof` (−3.8%), `loop` (−3.5%) and `objects` (−2.8%). The table is at the end of this section.
+
+Causes of the first regression, and the fix for each. I found them with `perf record`, `perf annotate`, `objdump`, `nm` and `readelf -r`, and a per-realm instruction probe:
+
+- A realm built `BigInt` and its prototype at setup: +36k instructions for each realm. `BigInt` is now installed like `Intl`. The realm gets a global accessor, and the getter builds the constructor and the prototype on the first read, then replaces the accessor with a data property. A realm that never reads `BigInt` pays +5k. The code that needs the prototype (`get_prop` on a BigInt, `Object.getPrototypeOf`, `ToObject`, the sloppy `this`) calls `big_proto`, which builds it once.
+- The collector function `Marker::value` was no longer inlined once it handled `BigHeap`: +27k instructions in each `collect`. The `BigHeap` arm is now a `#[cold]` function and `Marker::value` inlines again.
+- `bigint.rs` called `log2` and `pow`. Each is a versioned libm symbol that the dynamic loader resolves at every process start, about 33k instructions each. That was +66k on every run, and it was the whole gap of the rows that run under 10M instructions (`pad`, `repeat`, `copy`, `concat`). A bound on the digits of a result now comes from the exponent bits of the `f64` (`pow_estimate`, `digits_bound`), with no libm call.
+- `get_prop` carried the BigInt path inline. The BigInt receiver is now a `#[cold]` function (`get_prop_big`), and `get_prop` ends in one `lookup`. `#[inline]` is back on the small helpers of `Value` and the typed arrays (`is_bigint`, `strict_equals`, `same_value`, `same_value_zero`, `ta_conv`, `ta_write`, `ta_bytes`) that the first version had left to the compiler.
+
+I did not change the order of the tests in the operators. They test `Value::Number` first and go to the BigInt code only after that check fails.
+
+Cycles (minimum of 10 runs, this build and main interleaved in each round, `taskset -c 3`, on a machine with a load of 7 to 9): the gap is real and is not fixed. At scale 1 the mean is +1.5% and 18 of 32 rows are over +0.5%. At scale 10 the mean is +2.1% and 24 of 32 rows are over +0.5%. The largest are `arrays` (+5.4% at scale 1, +31% at scale 10), `objects` at scale 1 (+14.6%), `dataview` (+8.0%), `scanarr` (+5.8% to +7.0%) and `flat` at scale 10 (+6.8%). `mapfilter` at scale 10 is −25% and `fill` at scale 10 is −11%, so a row can move either way. Rows with fewer instructions have more cycles (`arrays`: −8% instructions and +31% cycles). A scale 100 run of `arrays` gave +33% to +40%, from 3 runs. I did not find the cause. Hypothesis: stalls from store-to-load forwarding. The 16-byte `Value` is written in two parts and read back with one wide load on the path through `lookup`, `get_prop` and `ao_search`, and the code layout of the build decides if that happens. Instruction counts cannot show it. I tried a cold `big_equals`, `#[repr(C, u8)]` on `Value` and a split of the `ao_search` loop. None of them changed the cycles, and I reverted them. To verify: a quiet machine, `perf stat` with the back-end stall counters, and `perf annotate` of `ao_search` on both builds.
+
+Percent of instructions and cycles against main 5978d55 (`+` is more in this build). Instruction columns: scales 1, 10 and 100. Cycle columns: scales 1 and 10.
+
+| Row | Instr. 1 | Instr. 10 | Instr. 100 | Cycles 1 | Cycles 10 |
+|---|---|---|---|---|---|
+| `eval_load` `loop` | -3.47% | -3.45% | -3.44% | +2.4% | +2.1% |
+| `eval_load` `calls` | -2.61% | -2.62% | -2.62% | +1.9% | +2.1% |
+| `eval_load` `fib` | +0.02% | -0.03% | -0.03% | +1.9% | +2.7% |
+| `eval_load` `closures` | -1.66% | -1.73% | -1.73% | +1.6% | +3.2% |
+| `eval_load` `objects` | -2.75% | -2.81% | -2.81% | +3.1% | +3.5% |
+| `eval_load` `webpack` | -0.61% | -1.12% | -1.31% | +2.8% | +2.9% |
+| `eval_load` `throws` | -2.18% | -2.10% | -2.11% | +0.0% | +1.0% |
+| `eval_load` `concat` | +0.12% | -0.53% | -0.41% | +1.1% | -2.5% |
+| `arrobj_load` `mapfilter` | -2.93% | -3.35% | -3.39% | -4.2% | -25.0% |
+| `arrobj_load` `sort` | -0.76% | -0.36% | -0.01% | -2.5% | +4.4% |
+| `arrobj_load` `queue` | -2.28% | -1.98% | -0.51% | +0.2% | +1.8% |
+| `arrobj_load` `objects` | -0.75% | -2.07% | -1.53% | +14.6% | +4.3% |
+| `arrobj_load` `arrays` | -7.10% | -8.18% | -8.35% | +5.4% | +31.1% |
+| `arrobj_load` `fill` | -2.67% | -2.97% | -3.00% | +0.1% | -11.2% |
+| `arrobj_load` `reverse` | -3.05% | -3.08% | -3.08% | -1.2% | +5.6% |
+| `arrobj_load` `flat` | -1.74% | -1.85% | -1.86% | -2.3% | +6.8% |
+| `arrobj_load` `tosorted` | -0.29% | +0.10% | +0.42% | +0.8% | +2.2% |
+| `arrobj_load` `lastindexof` | -3.81% | -3.84% | -3.83% | +1.8% | +1.4% |
+| `arrobj_load` `pad` | +0.24% | +0.06% | +0.01% | -3.2% | +0.8% |
+| `arrobj_load` `repeat` | +0.32% | +0.21% | +0.05% | -0.6% | +2.0% |
+| `arrobj_load` `replaceall` | -1.28% | -1.48% | -1.50% | -1.7% | -2.1% |
+| `arrobj_load` `freeze` | -2.49% | -2.55% | -2.53% | +1.6% | +3.7% |
+| `arrobj_load` `descriptors` | -0.51% | -1.08% | -1.16% | -0.6% | +2.8% |
+| `binary_load` `copy` | +0.22% | +0.05% | +0.01% | -0.3% | -0.5% |
+| `binary_load` `scan` | -0.44% | -0.44% | -0.44% | +4.9% | +4.6% |
+| `binary_load` `scanarr` | -1.00% | -1.01% | -1.01% | +5.8% | +7.0% |
+| `binary_load` `codec` | +0.03% | +0.00% | +0.00% | +4.9% | +5.9% |
+| `binary_load` `stream` | -0.10% | -0.15% | -0.15% | +0.9% | +1.2% |
+| `binary_load` `indexof` | +0.03% | +0.01% | +0.01% | +0.7% | +0.2% |
+| `binary_load` `f64from` | -1.41% | -1.47% | -1.48% | -0.9% | -1.1% |
+| `binary_load` `i32sort` | +0.02% | +0.00% | +0.00% | -0.5% | -0.8% |
+| `binary_load` `dataview` | -0.17% | -0.18% | -0.18% | +8.0% | +7.3% |
+
+| Row (`numeric_load`) | 1,000 | 10,000 |
+|---|---|---|
+| `atan2` | -0.69% | -1.06% |
+| `clz32` | -0.73% | -1.16% |
+| `empty` | -0.64% | -1.13% |
+| `encodeuri` | -0.30% | -0.38% |
+| `escape` | -0.38% | -0.53% |
+| `isnan` | -1.38% | -1.93% |
+| `log` | -0.68% | -1.09% |
+| `parsefloat` | -0.86% | -1.15% |
+| `parseint` | -0.70% | -0.99% |
+| `pow` | -2.23% | -3.46% |
+| `radix16` | -0.58% | -0.82% |
+| `radix2sub` | -0.15% | -0.18% |
+| `radix36frac` | -1.12% | -1.77% |
+| `random` | -0.84% | -1.30% |
+| `sin` | -0.67% | -1.09% |
+| `toexp` | -1.01% | -1.27% |
+| `tofixed` | -1.30% | -1.85% |
+| `toprecision` | -0.59% | -0.88% |
+| `uricomponent` | -0.36% | -0.52% |
+
+### Validation
+
+- 58 Node cases (`tools/fixtures/js/bigint-cases.txt`, `tools/js/bigint_check.sh`) match Node 22.18. They cover literals in 4 bases with separators, every operator and the error messages, comparison and equality with Numbers and Strings, `BigInt()`, `asIntN`, `asUintN`, `toString` in every radix, Map, Set, JSON, templates, property keys, the typed arrays and `DataView`, the wrapper object (`Object(1n)`, ToObject, the sloppy `this`) and `toLocaleString` with locales and options. 8 matrix cases (`arith_matrix`, `div_matrix`, `radix_matrix`, `parse_matrix`, `number_matrix`, `shift_matrix`, `pow_matrix`, `bigint_typed_matrix`) give a count and a hash of many random results for every operator and radix, so a difference in one value shows.
+- 74 parse cases of BigInt literals match Acorn (`tools/js/parse_check.sh`, 2,207 cases in all).
+- 20 Rust tests (`bigint_tests.rs` and `eval_bigint_tests.rs`): arithmetic against plain models, the corpus, one entry for equal values, collect with survivors, a held result, the limb cap before allocation, the string cap, steps, the wrapper object and the `toLocaleString` gate. One test of the console (`a_bigint_prints_with_an_n`) checks `console.log` and `%d` of a BigInt.
+- `cargo test --workspace --release` passes. The 3 old tests that expected a BigInt gate (`gates_are_explicit`, `unsupported_is_found_before_anything_runs`, `unsupported_class_shapes_are_found_before_anything_runs`) now expect the new behavior. The other `*_check.sh` tools (all 35 in `tools/js`, with `TMPDIR` on a disk that has room; `parse_check.sh` needs `ACORN`) still match Node. `tools/js/bigint_load.sh` passes all 21 rows again after the rebase.
+
+### Gates
+
+Each is `Unsupported`, never a wrong result:
+
+- `BigInt.prototype.toLocaleString`, `Intl.NumberFormat.prototype.format` and `formatToParts` of a value of more than 32,767 digits. They pass the decimal digits of the BigInt to ICU4X as a string, so the result is exact. The ICU4X decimal has a 16-bit magnitude, so it cannot hold more digits. Any option or locale that `Intl.NumberFormat` does not support is also a gate for a BigInt (for example `notation`, `style: "unit"` and `roundingIncrement`; `de-DE` and `fr-FR` use the `en` data).
+- A BigInt in the state of `history.pushState` (structured clone): the browser layer stops with a gate.
+- A value that is not a BigInt written to a BigInt typed-array element by a path that calls `heap.set` or `heap.define_own_property` directly.
+
+Gates lifted in this change: `Object(1n)`, `new Object(1n)`, ToObject of a BigInt and the sloppy `this` of a BigInt now make an `Exotic::Prim` wrapper. `BigInt.prototype` methods accept a BigInt or a wrapper of one as `this`. `console.log(1n)` prints `1n`, and `%d` and `%i` with a BigInt print `1n`. `toLocaleString` with arguments or with more than 3 digits runs.
+
+Not tested: `structuredClone` of a BigInt, a locale other than `en` for a BigInt, cycles on a quiet machine, and the live staging login.
+
+Problems noticed, not changed:
+
+- `Object.getOwnPropertyDescriptor(globalThis, 'BigInt')` is an accessor until the first read of `BigInt`. Node gives a data property.
+- A frozen wrapper object gives `#<Object> is not extensible` from `Object.setPrototypeOf`. V8 gives `[object BigInt]` for a BigInt wrapper. This is the wrapper message of the earlier change and I did not change it.
+- `Intl.NumberFormat` gaps seen with a BigInt: `notation`, `style: "unit"`, `roundingIncrement`, locales other than `en`, and the text of the invalid-locale `RangeError` (`Incorrect locale information provided`; V8 says `Invalid language tag: ...` from `toLocaleString`).
+- The `WeakSet` error message has a `: 1` suffix that V8 does not have.
+- `ta_sort_in_place` calls `coerce_number` twice for each element.
+- `/` and `toString` of very large values are slower than num-bigint (see the table).
+
+### BigInt after Proxy
+
+The BigInt change was rebased onto main f0ea006, which added `Proxy`. Both changes edited the write paths of the evaluator.
+
+- `set_miss`, the slow side of `put_prop` and of `o_set_value`, now also answers `NeedsBigInt`: it converts the value with ToBigInt and writes again. The old `heap_set` is gone.
+- `o_define_own_property` sends `NeedsBigInt` to `define_big`, which converts the `value` and defines again. The old `heap_define` is gone.
+- `o_set` converts a view element with `ta_conv`, so a BigInt view gets ToBigInt there too.
+- `get_prop_big` uses `get_miss`, as `get_prop` does.
+
+Checks: 8 cases in `tools/fixtures/js/proxy-cases.txt` (`bigview_1` to `bigview_8`) write to `BigInt64Array` and `BigUint64Array` through `Object.defineProperty`, `Reflect.set`, a proxy and a proxy on the prototype chain. All 76 proxy cases and all 58 BigInt cases match Node. 2,288 workspace tests pass. `tools/js/builtin_inventory.sh` prints 117 of 655 missing.
+
+Cost against main f0ea006. `perf stat -e instructions:u`, minimum of 3 runs, each binary in its own `CARGO_TARGET_DIR`. 40 rows at scale 10: `eval_load` 8, `arrobj_load` 15, `binary_load` 9 and `proxy_load` 8. All 40 are below +0.5%. They run from -8.34% (`arrobj_load arrays`) to +0.37% (`proxy_load chain`).
+
+The first rebased build missed the limit on two rows. Both causes were code generation:
+
+1. `proxy_load chain` (+1.22%). The first merge sent every error of `o_define_own_property` to a new cold function, which then called `heap_miss_w`. Each proxy level of the define path took one more call. `NeedsBigInt` now has its own arm, and the other errors go to `heap_miss_w` as on main. The row fell to +0.37%.
+2. `arrobj_load arrays` (+1.94%). A `perf record` profile showed `index_key` as a function of its own, where main inlines it into the loops of `indexOf`, `includes`, `slice` and `concat`. `index_key` is now `#[inline(always)]`, and its string path (`index_key_str`) is cold. The row fell to -8.34%.
+
+Not tested: cycles, rows at scale 1 and 100, `numeric_load`, and the live staging login.

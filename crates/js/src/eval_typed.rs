@@ -12,8 +12,8 @@
 // - A callback can detach the buffer (`transfer`). Every callback method reads each element when it needs it, and an element
 //   that is gone reads as `undefined`, as in the spec. A method that is done with all JavaScript checks the buffer again
 //   before it writes.
-// - The BigInt typed arrays have no element values here (this engine has no BigInt). A method that must read or write an
-//   element of one is the gate `BIG_ELEM` (`Unsupported`), unless the array is empty. The methods that move bytes run.
+// - The BigInt typed arrays hold BigInts: a read gives `Value::BigInt` (a `BigUint64Array` value above `i64::MAX` gives a heap
+//   entry), a write converts with ToBigInt (`ta_conv`) and wraps to 64 bits. Number and BigInt arrays never mix (a TypeError).
 // - Errors and their messages follow V8 (Node 22): the receiver wording of each method is in `TA_METHODS`.
 // - `from`, `of`, `map`, `filter`, `slice` and `subarray` make an instance of the intrinsic class of the receiver. A
 //   constructor that is not one of the ten intrinsics (a subclass, or a `@@species` other than the default) is `Unsupported`.
@@ -39,6 +39,7 @@ fn typeof_form(it: &Interp<'_>, v: Value) -> String {
         Value::String(_) => format!("string \"{}\"", it.display(v)),
         Value::Symbol(_) => "symbol".into(),
         Value::Object(_) => "object".into(),
+        Value::BigInt(_) | Value::BigHeap(_) => format!("bigint {}", it.display(v)),
     }
 }
 
@@ -97,14 +98,39 @@ impl<'p> Interp<'p> {
         Ok(t)
     }
 
-    /// The gate of a BigInt typed array that has an element to read or write.
-    fn big_gate(&self, t: &Ta) -> Res<()> {
-        if t.ty.is_big() && t.len > 0 { Err(unsupported(BIG_ELEM, Span::default())) } else { Ok(()) }
+    /// Element `i` of a typed array now (a Number, or a BigInt for the BigInt types), or `undefined` when it is gone (out of
+    /// range or detached).
+    fn ta_get(&mut self, t: &Ta, i: usize) -> Res<Value> {
+        if t.ty.is_big() {
+            return Ok(h!(self, self.heap.view_load_big(t.o, i)).unwrap_or(Value::Undefined));
+        }
+        Ok(self.heap.view_load(t.o, i).map_or(Value::Undefined, Value::Number))
     }
 
-    /// Element `i` of a typed array now, or `undefined` when it is gone (out of range or detached).
-    fn ta_get(&self, t: &Ta, i: usize) -> Value {
-        self.heap.view_load(t.o, i).map_or(Value::Undefined, Value::Number)
+    /// ToNumber, or ToBigInt for the BigInt types, of `v` for an element of type `ty`. The result is a Number or a BigInt.
+    #[inline]
+    fn ta_conv(&mut self, ty: Elem, v: Value) -> Res<Value> {
+        if ty.is_big() { self.to_bigint(v) } else { Ok(Value::Number(self.coerce_number(v)?)) }
+    }
+
+    /// Write a value that `ta_conv` made. An index that is gone ignores the write.
+    #[inline]
+    fn ta_write(&mut self, o: ObjId, i: usize, cv: Value) {
+        match cv {
+            Value::Number(n) => self.heap.view_store(o, i, n),
+            _ => self.heap.view_store_big(o, i, cv),
+        };
+    }
+
+    /// The bytes of one element for a value that `ta_conv` made, for `fill`.
+    #[inline]
+    fn ta_bytes(&self, ty: Elem, cv: Value) -> [u8; 8] {
+        let mut one = [0u8; 8];
+        match cv {
+            Value::Number(n) => store(ty, &mut one, n),
+            _ => one = self.heap.bigint_low_u64(cv).to_le_bytes(),
+        }
+        one
     }
 
     /// Temporary storage of `bytes` bytes for a sort, a filter or a join. It may not exceed a quarter of the heap budget.
@@ -134,8 +160,14 @@ impl<'p> Interp<'p> {
         Ok(n as usize)
     }
 
-    /// Convert `v` with ToNumber and write it at index `i`. An index that is gone ignores the write.
-    fn ta_put(&mut self, o: ObjId, i: usize, v: Value) -> Res<()> {
+    /// Convert `v` with ToNumber (ToBigInt for the BigInt types) and write it at index `i` of `o`, a view of type `ty`. An
+    /// index that is gone ignores the write.
+    fn ta_put(&mut self, o: ObjId, ty: Elem, i: usize, v: Value) -> Res<()> {
+        if ty.is_big() {
+            let cv = self.to_bigint(v)?;
+            self.heap.view_store_big(o, i, cv);
+            return Ok(());
+        }
         let n = self.coerce_number(v)?;
         self.heap.view_store(o, i, n);
         Ok(())
@@ -217,13 +249,10 @@ impl<'p> Interp<'p> {
                     self.iter_buffer_room(vals.len())?;
                     vals.push(v);
                 }
-                if ty.is_big() && !vals.is_empty() {
-                    return Err(unsupported(BIG_ELEM, Span::default()));
-                }
                 let out = self.new_typed(ty, vals.len())?;
                 for (i, v) in vals.into_iter().enumerate() {
                     self.tick()?;
-                    self.ta_put(out, i, v)?;
+                    self.ta_put(out, ty, i, v)?;
                 }
                 Ok(Value::Object(out))
             }
@@ -235,14 +264,11 @@ impl<'p> Interp<'p> {
                     return Err(Error::Limit(LimitKind::Heap(Limit::BufferLength)));
                 }
                 let n = n as usize;
-                if ty.is_big() && n > 0 {
-                    return Err(unsupported(BIG_ELEM, Span::default()));
-                }
                 let out = self.new_typed(ty, n)?;
                 for i in 0..n {
                     self.tick()?;
                     let v = self.get_prop(a0, PropertyKey::Index(i as u32))?;
-                    self.ta_put(out, i, v)?;
+                    self.ta_put(out, ty, i, v)?;
                 }
                 Ok(Value::Object(out))
             }
@@ -304,15 +330,12 @@ impl<'p> Interp<'p> {
         } else {
             vals.len()
         };
-        if ty.is_big() && len > 0 {
-            return Err(unsupported(BIG_ELEM, Span::default()));
-        }
         let out = self.new_typed(ty, len)?;
         for k in 0..len {
             self.tick()?;
             let v = if array_like { self.get_prop(source, PropertyKey::Index(k as u32))? } else { vals.get(k).copied().unwrap_or(Value::Undefined) };
             let v = if mapping { self.call_fn(mapfn, this_arg, &[v, Value::Number(k as f64)])? } else { v };
-            self.ta_put(out, k, v)?;
+            self.ta_put(out, ty, k, v)?;
         }
         Ok(Value::Object(out))
     }
@@ -320,13 +343,10 @@ impl<'p> Interp<'p> {
     /// `%TypedArray%.of(...items)`.
     fn ta_of(&mut self, this: Value, items: &[Value]) -> Res<Value> {
         let ty = self.ta_receiver(this)?;
-        if ty.is_big() && !items.is_empty() {
-            return Err(unsupported(BIG_ELEM, Span::default()));
-        }
         let out = self.new_typed(ty, items.len())?;
         for (k, &v) in items.iter().enumerate() {
             self.tick()?;
-            self.ta_put(out, k, v)?;
+            self.ta_put(out, ty, k, v)?;
         }
         Ok(Value::Object(out))
     }
@@ -352,12 +372,13 @@ impl<'p> Interp<'p> {
             if self.heap.view_detached(s) {
                 return Err(self.detached_err(what));
             }
-            if st.is_big() != t.ty.is_big() {
-                return Err(self.type_err("Cannot mix BigInt and other types, use explicit conversions"));
-            }
             let slen = self.heap.view_parts(s).expect("view").2;
             if off + slen as f64 > t.len as f64 {
                 return Err(oob(self));
+            }
+            // The spec checks the length first, then the content type.
+            if st.is_big() != t.ty.is_big() {
+                return Err(self.type_err("Cannot mix BigInt and other types, use explicit conversions"));
             }
             self.work(slen * st.size().max(t.ty.size()), 6)?;
             let ok = self.heap.view_set_from(s, t.o, off as usize);
@@ -372,14 +393,11 @@ impl<'p> Interp<'p> {
         if off + n > t.len as f64 {
             return Err(oob(self));
         }
-        if t.ty.is_big() && n > 0.0 {
-            return Err(unsupported(BIG_ELEM, Span::default()));
-        }
         let off = off as usize;
         for i in 0..n as usize {
             self.tick()?;
             let v = self.get_prop(source, PropertyKey::Index(i as u32))?;
-            self.ta_put(t.o, off + i, v)?;
+            self.ta_put(t.o, t.ty, off + i, v)?;
         }
         Ok(Value::Undefined)
     }
@@ -451,8 +469,7 @@ impl<'p> Interp<'p> {
                 if k < 0.0 || k >= t.len as f64 {
                     return Ok(Value::Undefined);
                 }
-                self.big_gate(&t)?;
-                Ok(self.ta_get(&t, k as usize))
+                self.ta_get(&t, k as usize)
             }
             Fill => self.ta_fill(t, a0, a1, a2),
             CopyWithin => self.ta_copy_within(t, a0, a1, a2),
@@ -474,17 +491,16 @@ impl<'p> Interp<'p> {
                 Ok(Value::Object(out))
             }
             With => {
-                self.big_gate_always(&t)?;
                 let rel = self.num_integer(a0)?;
                 let idx = if rel >= 0.0 { rel } else { t.len as f64 + rel };
-                let v = self.coerce_number(a1)?;
+                let v = self.ta_conv(t.ty, a1)?;
                 // `IsValidIntegerIndex` is asked after the value is converted: a detached buffer has no valid index.
                 if self.heap.view_detached(t.o) || idx < 0.0 || idx >= t.len as f64 {
                     return Err(self.mk_err(RANGE_ERROR, "Invalid typed array index"));
                 }
                 self.work(t.len * t.ty.size(), 6)?;
                 let out = self.ta_clone(&t)?;
-                self.heap.view_store(out, idx as usize, v);
+                self.ta_write(out, idx as usize, v);
                 Ok(Value::Object(out))
             }
             Join => self.ta_join(t, a0, false),
@@ -505,11 +521,6 @@ impl<'p> Interp<'p> {
         }
     }
 
-    /// The gate for a method that converts its value argument even when the array is empty (`fill`, `with`).
-    fn big_gate_always(&self, t: &Ta) -> Res<()> {
-        if t.ty.is_big() { Err(unsupported(BIG_ELEM, Span::default())) } else { Ok(()) }
-    }
-
     /// A new typed array of the same type with a copy of the elements of `t`.
     fn ta_clone(&mut self, t: &Ta) -> Res<ObjId> {
         let size = t.ty.size();
@@ -519,8 +530,7 @@ impl<'p> Interp<'p> {
     }
 
     fn ta_fill(&mut self, t: Ta, value: Value, start: Value, end: Value) -> Res<Value> {
-        self.big_gate_always(&t)?;
-        let n = self.coerce_number(value)?;
+        let cv = self.ta_conv(t.ty, value)?;
         let first = self.num_integer(start)?;
         let first = Self::rel_index(first, t.len);
         let last = if matches!(end, Value::Undefined) { t.len } else { let e = self.num_integer(end)?; Self::rel_index(e, t.len) };
@@ -531,8 +541,7 @@ impl<'p> Interp<'p> {
         if last > first {
             let size = t.ty.size();
             self.work((last - first) * size, 6)?;
-            let mut one = [0u8; 8];
-            store(t.ty, &mut one, n);
+            let one = self.ta_bytes(t.ty, cv);
             if let Some(b) = self.heap.bytes_mut(t.o) {
                 let r = &mut b[first * size..last * size];
                 if size == 1 {
@@ -576,9 +585,6 @@ impl<'p> Interp<'p> {
             let s = self.coerce_string(sep)?;
             h!(self, self.heap.str_units(s)).to_vec()
         };
-        if t.ty.is_big() && t.len > 0 {
-            return Err(unsupported(BIG_ELEM, Span::default()));
-        }
         self.spend(t.len as u64)?;
         let cap = self.heap.limits().max_string_units;
         let mut out: Vec<u16> = Vec::new();
@@ -588,6 +594,22 @@ impl<'p> Interp<'p> {
                 out.extend_from_slice(&sep);
             }
             // An element that is gone (the buffer was detached by a callback) is the empty string.
+            if t.ty.is_big() {
+                let Some(v) = h!(self, self.heap.view_load_big(t.o, i)) else { continue };
+                if locale {
+                    let key = self.key_to_locale_string();
+                    let m = self.get_prop(v, key)?;
+                    let r = self.call_fn(m, v, &[])?;
+                    let s = self.coerce_string(r)?;
+                    out.extend_from_slice(h!(self, self.heap.str_units(s)));
+                } else {
+                    out.extend(self.heap.bigint_text(v).bytes().map(u16::from));
+                }
+                if out.len() > cap {
+                    return Err(Error::Limit(LimitKind::Heap(Limit::StringLength)));
+                }
+                continue;
+            }
             let Some(x) = self.heap.view_load(t.o, i) else { continue };
             if locale {
                 let key = self.key_to_locale_string();
@@ -643,8 +665,10 @@ impl<'p> Interp<'p> {
             }
             return Ok(());
         }
-        self.big_gate(&t)?;
-        let mut v: Vec<f64> = (0..t.len).map(|i| self.heap.view_load(t.o, i).unwrap_or(0.0)).collect();
+        let mut v: Vec<Value> = Vec::with_capacity(t.len);
+        for i in 0..t.len {
+            v.push(self.ta_get(&t, i)?);
+        }
         let mut tmp = v.clone();
         // Bottom-up merge sort: stable, and it stops at the first error with the array untouched.
         let n = v.len();
@@ -655,7 +679,7 @@ impl<'p> Interp<'p> {
                 let (mid, hi) = ((i + width).min(n), (i + 2 * width).min(n));
                 let (mut l, mut r, mut k) = (i, mid, i);
                 while l < mid && r < hi {
-                    let c = self.call_fn(cmp, Value::Undefined, &[Value::Number(v[l]), Value::Number(v[r])])?;
+                    let c = self.call_fn(cmp, Value::Undefined, &[v[l], v[r]])?;
                     let c = self.coerce_number(c)?;
                     if c > 0.0 {
                         tmp[k] = v[r];
@@ -676,7 +700,7 @@ impl<'p> Interp<'p> {
         }
         // The comparator may have detached the buffer: the writes are then no-ops.
         for (i, x) in v.into_iter().enumerate() {
-            self.heap.view_store(t.o, i, x);
+            self.ta_write(t.o, i, x);
         }
         Ok(())
     }
@@ -687,12 +711,11 @@ impl<'p> Interp<'p> {
         use TaM::*;
         let (cb, this_arg) = (arg(args, 0), arg(args, 1));
         self.ta_callable(cb, m == Map)?;
-        self.big_gate(&t)?;
         let len = t.len;
         let me = Value::Object(t.o);
         let call3 = |s: &mut Self, i: usize| -> Res<(Value, Value)> {
             s.tick()?;
-            let v = s.ta_get(&t, i);
+            let v = s.ta_get(&t, i)?;
             let r = s.call_fn(cb, this_arg, &[v, Value::Number(i as f64), me])?;
             Ok((v, r))
         };
@@ -745,26 +768,24 @@ impl<'p> Interp<'p> {
                 let out = self.new_typed(t.ty, len)?;
                 for i in 0..len {
                     let (_, r) = call3(self, i)?;
-                    self.ta_put(out, i, r)?;
+                    self.ta_put(out, t.ty, i, r)?;
                 }
                 Ok(Value::Object(out))
             }
             Filter => {
                 self.ta_temp(len * 8)?;
-                let mut kept: Vec<f64> = Vec::new();
+                let mut kept: Vec<Value> = Vec::new();
                 for i in 0..len {
                     let (v, r) = call3(self, i)?;
-                    if self.truthy(r)?
-                        && let Value::Number(x) = v
-                    {
-                        kept.push(x);
+                    if self.truthy(r)? && !matches!(v, Value::Undefined) {
+                        kept.push(v);
                     }
                 }
                 let class = self.bin_class(t.ty);
                 self.bin_species(t.o, class, "typed array species constructor other than the intrinsic class")?;
                 let out = self.new_typed(t.ty, kept.len())?;
                 for (i, x) in kept.into_iter().enumerate() {
-                    self.heap.view_store(out, i, x);
+                    self.ta_write(out, i, x);
                 }
                 Ok(Value::Object(out))
             }
@@ -777,12 +798,12 @@ impl<'p> Interp<'p> {
                 } else if len == 0 {
                     return Err(self.type_err("Reduce of empty array with no initial value"));
                 } else {
-                    (self.ta_get(&t, order(0)), 1)
+                    (self.ta_get(&t, order(0))?, 1)
                 };
                 while k < len {
                     self.tick()?;
                     let i = order(k);
-                    let v = self.ta_get(&t, i);
+                    let v = self.ta_get(&t, i)?;
                     acc = self.call_fn(cb, Value::Undefined, &[acc, v, Value::Number(i as f64), me])?;
                     k += 1;
                 }
@@ -889,13 +910,17 @@ impl<'p> Interp<'p> {
         if !little {
             raw[..size].reverse();
         }
+        if ty.is_big() {
+            let w = u64::from_le_bytes(raw);
+            return Ok(if ty == Elem::BI64 { Value::BigInt(w as i64) } else { h!(self, self.heap.bigint_from_u64(w)) });
+        }
         Ok(Value::Number(load(ty, &raw)))
     }
 
     fn dv_set(&mut self, ty: Elem, this: Value, index: Value, value: Value, little: Value) -> Res<Value> {
         let Some((o, _, _, len)) = self.dv_parts(this) else { return Err(self.incompatible(&Self::dv_name(ty, true), this)) };
         let at = self.dv_index(index)?;
-        let n = self.coerce_number(value)?;
+        let cv = self.ta_conv(ty, value)?;
         let little = self.truthy(little)?;
         if self.heap.view_detached(o) {
             return Err(self.detached_err(&Self::dv_name(ty, true)));
@@ -904,8 +929,7 @@ impl<'p> Interp<'p> {
         if at.checked_add(size).is_none_or(|e| e > len) {
             return Err(self.mk_err(RANGE_ERROR, "Offset is outside the bounds of the DataView"));
         }
-        let mut raw = [0u8; 8];
-        store(ty, &mut raw, n);
+        let mut raw = self.ta_bytes(ty, cv);
         if !little {
             raw[..size].reverse();
         }

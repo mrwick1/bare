@@ -43,6 +43,10 @@ pub struct HeapLimits {
     pub max_objects: usize,
     pub max_strings: usize,
     pub max_symbols: usize,
+    /// Most BigInt entries (a BigInt that fits in `i64` is inline and has no entry).
+    pub max_bigs: usize,
+    /// Most 64-bit limbs in one BigInt. 2^18 limbs are 2^24 bits, about 5 million decimal digits.
+    pub max_big_limbs: usize,
     /// Most UTF-16 code units in one string.
     pub max_string_units: usize,
     /// Most accounted bytes (see `Heap::bytes`). Counts payload by length, not allocator slack.
@@ -55,6 +59,8 @@ impl Default for HeapLimits {
             max_objects: 1 << 24,
             max_strings: 1 << 24,
             max_symbols: 1 << 20,
+            max_bigs: 1 << 24,
+            max_big_limbs: 1 << 18,
             max_string_units: (1 << 29) - 24, // max_bytes also bounds string payload
             max_bytes: 1 << 30,
         }
@@ -66,6 +72,9 @@ pub enum Limit {
     Objects,
     Strings,
     Symbols,
+    Bigs,
+    /// One BigInt would have more limbs than `max_big_limbs`.
+    BigLimbs,
     StringLength,
     Bytes,
     /// One byte buffer is longer than `set_buffer_limits` allows.
@@ -89,8 +98,18 @@ pub enum HeapError {
     SymbolConversion,
     /// A symbol written to an element of a typed array (ToNumber of a symbol: a TypeError in JS).
     SymbolToNumber,
+    /// A BigInt where JS converts to a number (`+1n`, `Math.abs(1n)`: a TypeError in JS).
+    BigIntToNumber,
     /// The operation needs the evaluator (`ToPrimitive` on an object). Nothing was changed.
     NeedsExecution(&'static str),
+    /// A value that is not a BigInt written to an element of a `BigInt64Array` or `BigUint64Array`: the evaluator converts it
+    /// with ToBigInt and repeats the write. Nothing was changed.
+    NeedsBigInt,
+    /// Inside the heap only: a read of a `BigUint64Array` element above `i64::MAX`, which needs a heap entry (the read path
+    /// has no `&mut`). `get_own_property` and `lookup` catch it. It never reaches a caller.
+    BigUnsigned(u64),
+    /// Inside the heap only: `to_elem_number` met a BigInt view. The callers write the BigInt another way.
+    BigElement,
     /// A property of a host-indexed object (`new_indexed`) has no JavaScript object yet. Nothing was changed. The evaluator asks
     /// the host to make it (`Host::fill_indexed`) and repeats the operation.
     NeedsHost { owner: ObjId, index: u32 },
@@ -105,6 +124,8 @@ pub enum HeapError {
     Proxy(ObjId),
 }
 
+#[path = "heap_big.rs"]
+mod big;
 #[path = "heap_binary.rs"]
 mod binary;
 pub use binary::{load, sort_elems, store, Decoder, Elem, ExoticKind, IndexedSource, Slot, TYPED};
@@ -598,6 +619,8 @@ pub struct Stats {
     pub live_objects: usize,
     pub live_strings: usize,
     pub live_symbols: usize,
+    /// BigInts too large for `i64`.
+    pub live_bigints: usize,
     /// Slots ever created for each kind (live + free + retired).
     pub object_slots: usize,
     pub string_slots: usize,
@@ -632,6 +655,8 @@ pub struct Heap {
     objects: Slab<Object>,
     strings: Slab<Str>,
     symbols: Slab<Symbol>,
+    bigs: Slab<big::Big>,
+    big_table: big::BigTable,
     interner: Interner,
     bytes: usize,
     collections: u64,
@@ -669,6 +694,8 @@ impl Heap {
             objects: Slab::new(limits.max_objects),
             strings: Slab::new(limits.max_strings),
             symbols: Slab::new(limits.max_symbols),
+            bigs: Slab::new(limits.max_bigs),
+            big_table: big::BigTable::new(),
             interner: Interner { table: vec![0; 16], count: 0 },
             bytes: 0,
             collections: 0,
@@ -695,13 +722,14 @@ impl Heap {
             live_objects: self.objects.live.len(),
             live_strings: self.strings.live.len(),
             live_symbols: self.symbols.live.len(),
+            live_bigints: self.bigs.live.len(),
             object_slots: self.objects.meta.len(),
             string_slots: self.strings.meta.len(),
             symbol_slots: self.symbols.meta.len(),
             object_payload_capacity: self.objects.live.capacity(),
             object_metadata_capacity: self.objects.meta.capacity(),
-            slab_capacity_bytes: self.objects.capacity_bytes() + self.strings.capacity_bytes() + self.symbols.capacity_bytes(),
-            retired_slots: self.objects.retired + self.strings.retired + self.symbols.retired,
+            slab_capacity_bytes: self.objects.capacity_bytes() + self.strings.capacity_bytes() + self.symbols.capacity_bytes() + self.bigs.capacity_bytes(),
+            retired_slots: self.objects.retired + self.strings.retired + self.symbols.retired + self.bigs.retired,
             bytes: self.bytes,
             total_object_allocs: self.objects.allocs,
             total_string_allocs: self.strings.allocs,
@@ -728,6 +756,7 @@ impl Heap {
             Value::String(s) => self.str(s).map(drop),
             Value::Symbol(s) => self.sym(s).map(drop),
             Value::Object(o) => self.obj(o).map(drop),
+            Value::BigHeap(b) => self.check_big(b),
             _ => Ok(()),
         }
     }
@@ -921,7 +950,8 @@ impl Heap {
             Value::Bool(b) => b,
             Value::Number(n) => !(n == 0.0 || n.is_nan()),
             Value::String(s) => !self.str(s)?.units.is_empty(),
-            Value::Symbol(_) | Value::Object(_) => true,
+            Value::BigInt(n) => n != 0,
+            Value::Symbol(_) | Value::Object(_) | Value::BigHeap(_) => true, // a heap BigInt is never zero
         })
     }
 
@@ -934,6 +964,7 @@ impl Heap {
             Value::Number(n) => Ok(n),
             Value::String(s) => Ok(string_to_number(&self.str(s)?.units)),
             Value::Symbol(_) => Err(HeapError::SymbolConversion),
+            Value::BigInt(_) | Value::BigHeap(_) => Err(HeapError::BigIntToNumber),
             Value::Object(_) => Err(HeapError::NeedsExecution("ToNumber of an object calls valueOf/toString")),
         }
     }
@@ -947,6 +978,7 @@ impl Heap {
             Value::Bool(b) => self.intern_str(if b { "true" } else { "false" }),
             Value::Number(n) => self.intern_str(&number_to_string(n)),
             Value::Symbol(_) => Err(HeapError::SymbolConversion),
+            Value::BigInt(_) | Value::BigHeap(_) => self.bigint_to_string(v, 10),
             Value::Object(_) => Err(HeapError::NeedsExecution("ToString of an object calls toString/valueOf")),
         }
     }
@@ -962,6 +994,7 @@ impl Heap {
             Value::Number(_) => "number",
             Value::String(_) => "string",
             Value::Symbol(_) => "symbol",
+            Value::BigInt(_) | Value::BigHeap(_) => "bigint",
         })
     }
 
@@ -974,6 +1007,18 @@ impl Heap {
             (Undefined | Null, Undefined | Null) => true,
             (Undefined | Null, _) | (_, Undefined | Null) => false,
             (Number(x), String(s)) | (String(s), Number(x)) => x == string_to_number(&self.str(s)?.units),
+            (BigInt(_) | BigHeap(_), BigInt(_) | BigHeap(_)) => a.strict_equals(b),
+            (BigInt(_) | BigHeap(_), Number(x)) | (Number(x), BigInt(_) | BigHeap(_)) => {
+                let big = if a.is_bigint() { a } else { b };
+                let mut buf = [0u64; 1];
+                crate::bigint::cmp_f64(self.bigint_sv(big, &mut buf)?, x) == Some(std::cmp::Ordering::Equal)
+            }
+            (BigInt(_) | BigHeap(_), String(s)) | (String(s), BigInt(_) | BigHeap(_)) => {
+                let big = if a.is_bigint() { a } else { b };
+                let mut buf = [0u64; 1];
+                let v = self.bigint_sv(big, &mut buf)?;
+                crate::bigint::string_to_bigint(&self.str(s)?.units).is_some_and(|n| crate::bigint::cmp(v, n.sv()).is_eq())
+            }
             (Bool(x), _) => return self.loose_equals(Number(x as u8 as f64), b),
             (_, Bool(y)) => return self.loose_equals(a, Number(y as u8 as f64)),
             (Object(_), Object(_)) => a.strict_equals(b),
@@ -1136,8 +1181,12 @@ impl Heap {
             self.unlazy(o)?;
             ob = self.obj(o)?;
         }
-        if ob.exotic != 0 && let Some(r) = self.exotic_own(o, key, true)? {
-            return self.realize(o, key, r);
+        if ob.exotic != 0 {
+            match self.exotic_own(o, key, true) {
+                Ok(Some(r)) => return self.realize(o, key, r),
+                Ok(None) => {}
+                Err(e) => return self.exotic_err(e).map(Some),
+            }
         }
         Ok(self.own(ob, key))
     }
@@ -1148,7 +1197,7 @@ impl Heap {
     pub fn peek_own_property(&self, o: ObjId, key: PropertyKey) -> R<Option<Property>> {
         self.check_key(key)?;
         let ob = self.obj(o)?;
-        if ob.exotic != 0 && let Some(r) = self.exotic_own(o, key, true)? {
+        if ob.exotic != 0 && let Some(r) = self.exotic_own_peek(o, key)? {
             return Ok(r);
         }
         Ok(self.own(ob, key))
@@ -1190,8 +1239,12 @@ impl Heap {
                 self.unlazy(c)?;
                 obj = self.obj(c)?;
             }
-            if obj.exotic != 0 && let Some(r) = self.exotic_own(c, key, true)? {
-                return self.realize_hit(c, key, r);
+            if obj.exotic != 0 {
+                match self.exotic_own(c, key, true) {
+                    Ok(Some(r)) => return self.realize_hit(c, key, r),
+                    Ok(None) => {}
+                    Err(e) => return self.exotic_err(e).map(|p| Some((c, p))),
+                }
             }
             if let Some(p) = self.own(obj, key) {
                 return Ok(Some((c, p)));
@@ -1612,12 +1665,14 @@ impl Heap {
             self.check_value(r)?;
         }
         self.collections += 1;
-        let Heap { objects, strings, symbols, gray, length, exotics, .. } = self;
+        let Heap { objects, strings, symbols, bigs, gray, length, exotics, .. } = self;
         for sl in [&mut strings.marks, &mut symbols.marks] {
             sl.clear();
         }
         strings.marks.resize(strings.live.len(), false);
         symbols.marks.resize(symbols.live.len(), false);
+        bigs.marks.clear();
+        bigs.marks.resize(bigs.live.len(), false);
         objects.marks.clear();
         objects.marks.resize(objects.live.len(), false);
         gray.clear();
@@ -1626,6 +1681,7 @@ impl Heap {
             smeta: &strings.meta, smarks: &mut strings.marks,
             ymeta: &symbols.meta, ymarks: &mut symbols.marks, yl: &symbols.live,
             ometa: &objects.meta, omarks: &mut objects.marks, gray,
+            bmeta: &bigs.meta, bmarks: &mut bigs.marks,
         };
         m.str(*length);
         for &r in roots {
@@ -1674,10 +1730,12 @@ impl Heap {
             strings: strings.sweep(|s| freed_bytes += str_bytes(s)),
             symbols: symbols.sweep(|_| freed_bytes += slot_bytes::<Symbol>()),
         };
+        bigs.sweep(|b| freed_bytes += big::big_bytes(b));
         self.bytes -= freed_bytes;
         self.prune_exotics();
         // The interner is weak: rebuild it from the strings that survived.
         self.interner.rebuild(&self.strings);
+        self.big_table.rebuild(&self.bigs);
         Ok(c)
     }
 }
@@ -1693,6 +1751,8 @@ struct Marker<'a> {
     ometa: &'a [Meta],
     omarks: &'a mut Vec<bool>,
     gray: &'a mut Vec<u32>,
+    bmeta: &'a [Meta],
+    bmarks: &'a mut Vec<bool>,
 }
 
 impl Marker<'_> {
@@ -1717,8 +1777,15 @@ impl Marker<'_> {
             Value::String(s) => self.str(s),
             Value::Symbol(s) => self.sym(s),
             Value::Object(o) => self.obj(o),
+            Value::BigHeap(b) => self.big(b),
             _ => {}
         }
+    }
+    /// Out of line: a marked heap BigInt is rare, and a call-site that is bigger is not inlined into the marking loops.
+    #[cold]
+    #[inline(never)]
+    fn big(&mut self, b: BigId) {
+        self.bmarks[self.bmeta[b.index as usize].dense as usize] = true;
     }
 }
 

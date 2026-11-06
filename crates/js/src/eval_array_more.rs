@@ -136,6 +136,7 @@ impl<'p> Interp<'p> {
             Value::String(_) => format!("string \"{}\"", self.display(v)),
             Value::Symbol(_) => "symbol".to_string(),
             Value::Object(_) => "object".to_string(),
+            Value::BigInt(_) | Value::BigHeap(_) => format!("bigint {}", self.display(v)),
         };
         self.type_err(&format!("{t} is not a function"))
     }

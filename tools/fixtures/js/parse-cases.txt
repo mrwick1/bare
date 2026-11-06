@@ -4375,3 +4375,151 @@ x = function*(){ yield 1 }
 %%
 function* g(){ yield
 }
+%%
+0n
+%%
+0N
+%%
+0x1fn
+%%
+0XFFn
+%%
+0o17n
+%%
+0O7n
+%%
+0b101n
+%%
+0B1n
+%%
+1_000n
+%%
+0x1_fn
+%%
+0b1_0n
+%%
+0o1_7n
+%%
+1n_
+%%
+1_n
+%%
+0x_1n
+%%
+0x1_n
+%%
+0n1
+%%
+1nn
+%%
+1n.toString()
+%%
+1n .toString()
+%%
+1.n
+%%
+1.0n
+%%
+.5n
+%%
+1e1n
+%%
+1E1n
+%%
+0b2n
+%%
+0o8n
+%%
+0xgn
+%%
+0x
+%%
+08n
+%%
+09n
+%%
+0_0n
+%%
+00n
+%%
+012n
+%%
+1n
+%%
+a = 1n + 2n
+%%
+-1n
+%%
++1n
+%%
+~1n
+%%
+1n ** 2n
+%%
+-1n ** 2n
+%%
+(-1n) ** 2n
+%%
+x = {1n: 1}
+%%
+x = {0x1n: 1, 1_0n: 2}
+%%
+x = {get 1n() { return 1 }}
+%%
+x = {1n() {}}
+%%
+class A { 1n() {} static 2n = 1; get 3n() { return 1 } }
+%%
+class A { static 0x10n() {} }
+%%
+a[1n]
+%%
+a?.[1n]
+%%
+(1n)
+%%
+[1n, 2n]
+%%
+f(1n)
+%%
+1n in x
+%%
+1n instanceof X
+%%
+typeof 1n
+%%
+void 1n
+%%
+x = `${1n}`
+%%
+x = 1n ? 1n : 2n
+%%
+switch (1n) { case 1n: break }
+%%
+for (var i = 0n; i < 10n; i++);
+%%
+1n++
+%%
+++1n
+%%
+1n = 1
+%%
+let x = 1n; x += 1n
+%%
+x **= 2n
+%%
+x >>>= 1n
+%%
+9007199254740993n
+%%
+0xFFFFFFFFFFFFFFFFFFFFFFFFn
+%%
+123456789012345678901234567890123456789012345678901234567890n
+%%
+'use strict'; 010n
+%%
+'use strict'; 0n
+%%
+1n
+%%
+2

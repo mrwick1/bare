@@ -80,27 +80,10 @@ fn nan_is_stored_as_the_canonical_quiet_nan() {
 
 #[test]
 fn gates_are_explicit() {
-    let big = "unsupported:BigInt64Array and BigUint64Array elements (no BigInt)";
-    for src in [
-        "new BigInt64Array(2)[0]",
-        "new BigInt64Array(2)[0] = 1",
-        "new BigInt64Array(2).at(0)",
-        "new BigInt64Array(2).fill(0)",
-        "new BigInt64Array(2).with(0, 1)",
-        "new BigInt64Array(2).sort(function () { return 0 })",
-        "BigInt64Array.from([1])",
-        "BigInt64Array.of(1)",
-        "new BigInt64Array(2).set([1])",
-        "new BigInt64Array(2).join()",
-        "new BigInt64Array([1])",
-        "new BigInt64Array(1).forEach(function () {})",
-        "[...new BigInt64Array(1)]",
-        "JSON.stringify(new BigInt64Array(1))",
-        "Object.keys(new BigInt64Array(2))",
-        "Object.defineProperty(new BigInt64Array(1), 0, {value: 1})",
-    ] {
-        assert_eq!(run(src), big, "{src}");
-    }
+    // The BigInt types hold BigInts (the cases of `tools/fixtures/js/bigint-cases.txt` check them against Node).
+    assert_eq!(run("var a = new BigInt64Array(2); a[0] = 5n; a[1] = -1n; a[0] + a[1] + ''"), "string:4");
+    assert_eq!(run("new BigUint64Array([2n ** 64n - 1n])[0] + ''"), "string:18446744073709551615");
+    assert_eq!(run("try { new BigInt64Array(1)[0] = 1 } catch (e) { e.name + ': ' + e.message }"), "string:TypeError: Cannot convert 1 to a BigInt");
     // What needs no element value works on the BigInt types.
     assert_eq!(run("new BigInt64Array(4).slice(1).length"), "number:3");
     assert_eq!(run("new BigUint64Array(3).sort().byteLength"), "number:24");
@@ -108,14 +91,8 @@ fn gates_are_explicit() {
     assert_eq!(run("new BigInt64Array(2).includes(0) + '' + new BigInt64Array(2).indexOf(0)"), "string:false-1");
     assert_eq!(run("var a = new BigInt64Array(2), b = new BigUint64Array(1); new Uint8Array(b.buffer).fill(255); a.set(b, 1); new Uint8Array(a.buffer).join()"), "string:0,0,0,0,0,0,0,0,255,255,255,255,255,255,255,255");
     assert_eq!(run("new Uint8Array(new BigInt64Array(1).buffer, 0, 3).length + new BigInt64Array(new ArrayBuffer(16), 8).length"), "number:4");
-    // DataView: the eight real pairs work, the BigInt pair is a gate (also for a bad receiver and a bad offset).
-    for src in [
-        "new DataView(new ArrayBuffer(8)).getBigInt64(0)",
-        "new DataView(new ArrayBuffer(8)).setBigUint64(0, 1)",
-        "new DataView(new ArrayBuffer(8)).getBigUint64(9)",
-    ] {
-        assert!(run(src).starts_with("unsupported:DataView.prototype."), "{src}");
-    }
+    // DataView: the BigInt pairs work.
+    assert_eq!(run("var d = new DataView(new ArrayBuffer(8)); d.setBigUint64(0, 2n ** 64n - 1n); d.getBigInt64(0) + ''"), "string:-1");
     assert_eq!(run("new ArrayBuffer(4, {maxByteLength: 8})"), "unsupported:resizable ArrayBuffer");
     assert_eq!(run("new ArrayBuffer(4).resize(2)"), "unsupported:ArrayBuffer.prototype.resize");
     assert_eq!(run("new Int8Array([1]).toLocaleString()"), "string:1");

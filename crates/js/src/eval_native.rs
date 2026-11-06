@@ -94,6 +94,7 @@ impl<'p> Interp<'p> {
                 Value::Symbol(_) => Ok(Value::Object(self.sc.symbol_proto)),
                 Value::Number(_) => Ok(Value::Object(self.ao.number_proto.unwrap_or(self.object_proto))),
                 Value::Bool(_) => Ok(Value::Object(self.sc.bool_proto)),
+                Value::BigInt(_) | Value::BigHeap(_) => Ok(Value::Object(self.big_proto()?)),
             },
             Nat::ObjHasOwn => {
                 if is_nullish(this) {
@@ -114,6 +115,7 @@ impl<'p> Interp<'p> {
                     Value::Number(_) => "Number",
                     Value::String(_) => "String",
                     Value::Symbol(_) => "Symbol",
+                    Value::BigInt(_) | Value::BigHeap(_) => "BigInt",
                     Value::Object(o) if self.funcs.contains_key(&o) => "Function",
                     Value::Object(o) if self.ext.regexps.contains_key(&o) => "RegExp",
                     Value::Object(o) if self.o_is_array(o)? => "Array",
@@ -272,7 +274,14 @@ impl<'p> Interp<'p> {
                 }
                 Ok(Value::String(self.coerce_string(a0)?))
             }
-            Nat::NumberFn => Ok(Value::Number(if args.is_empty() { 0.0 } else { self.coerce_number(a0)? })),
+            Nat::NumberFn => Ok(Value::Number(if args.is_empty() {
+                0.0
+            } else {
+                match self.to_numeric(a0)? {
+                    Value::Number(n) => n,
+                    big => self.big_to_f64(big)?,
+                }
+            })),
             Nat::BooleanFn => Ok(Value::Bool(self.truthy(a0)?)),
             Nat::IsNaN => Ok(Value::Bool(self.coerce_number(a0)?.is_nan())),
             Nat::ParseInt => {
@@ -310,6 +319,7 @@ impl<'p> Interp<'p> {
             Nat::Refl(f) => self.call_refl(f, this, args),
             Nat::Px(f) => self.call_px(f, args, is_new),
             Nat::Date(f) => self.call_date(f, this, args, is_new),
+            Nat::Big(f) => self.call_bigint(f, this, args),
             Nat::Intl(f) => self.call_intl(f, this, args, is_new),
         }
     }
@@ -366,8 +376,17 @@ impl<'p> Interp<'p> {
         Ok(Value::Object(o))
     }
 
+    /// Always inlined: the array loops call it for each element, and the compiler stopped inlining it once BigInt and Proxy
+    /// were both in (`arrobj_load arrays` cost +1.9%). The rare string key is out of line.
+    #[inline(always)]
     fn index_key(&mut self, index: u64) -> Res<PropertyKey> {
         if index <= MAX_INDEX as u64 { return Ok(PropertyKey::Index(index as u32)); }
+        self.index_key_str(index)
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn index_key_str(&mut self, index: u64) -> Res<PropertyKey> {
         Ok(h!(self, self.heap.key_from_str(&index.to_string())))
     }
 

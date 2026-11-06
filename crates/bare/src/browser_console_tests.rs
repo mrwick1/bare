@@ -307,6 +307,25 @@ console.log();
     });
 }
 
+/// The expected lines come from Node 22.18 (`console.log` of the same calls).
+#[test]
+fn a_bigint_prints_with_an_n() {
+    big(|| {
+        let mut b = mk();
+        let src = r#"
+console.log(1n, -5n, 2n ** 70n);
+console.log('%s|%d|%i|%f|%o|%O|%c|', 1n, 2n, 3n, 4n, 5n, 6n, 7n);
+console.log('%d %i %f', 2n ** 70n, -(2n ** 70n), 2n ** 70n);
+console.log('a', 1n, 'b');
+"#;
+        js(&mut b, src);
+        assert_eq!(
+            lines(&mut b),
+            ["L:1n -5n 1180591620717411303424n", "L:1n|2n|3n|4|5n|6n||", "L:1180591620717411303424n -1180591620717411303424n 1.1805916207174113e+21", "L:a 1n b"]
+        );
+    });
+}
+
 #[test]
 fn formatted_output_is_bounded_before_it_grows() {
     big(|| {

@@ -76,6 +76,7 @@ fn ser(d: &Dom, it: &mut Interp<'_>, c: &mut Ser, v: Value, depth: usize) -> R<S
         Value::Bool(b) => SV::Bool(b),
         Value::Number(n) => SV::Num(n),
         Value::Symbol(_) => return Err(clone_err(d, it, "Symbol")),
+        Value::BigInt(_) | Value::BigHeap(_) => return Err(Error::Unsupported(unsupported("structured clone of a BigInt"))),
         Value::String(s) => {
             let len = it.heap.str_len(s).map_err(Error::Heap)?;
             add(c, d, len.saturating_mul(2) + 16)?;

@@ -76,6 +76,7 @@ impl<'p> Interp<'p> {
         it.install_reflect()?;
         it.install_date()?;
         it.install_intl()?;
+        it.install_bigint()?;
         Ok(it)
     }
 

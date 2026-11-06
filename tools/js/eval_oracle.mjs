@@ -23,6 +23,7 @@ function show(v) {
     case "boolean": return "boolean:" + v;
     case "undefined": return "undefined";
     case "function": return "function";
+    case "bigint": return "bigint:" + String(v);
     default: return v === null ? "null" : "object";
   }
 }

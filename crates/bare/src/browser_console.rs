@@ -33,7 +33,8 @@
 //!   specifier with no argument left stays as text. `%c` takes an argument and prints nothing.
 //! - The Standard converts with `String`, `parseInt` and `parseFloat`, which run user code on an object. This module
 //!   never runs user code to log. So an object or function prints as `[object]` or `[function]` for every specifier,
-//!   and `%d %i %f` of an object is `NaN`. Symbols print as `Symbol(desc)` (`%d` gives `NaN`). `%o` and `%O` print
+//!   and `%d %i %f` of an object is `NaN`. Symbols print as `Symbol(desc)` (`%d` gives `NaN`). A BigInt prints with an `n`
+//!   (`1n`) for every specifier but `%f`, which is `parseFloat` of its digits (as in Node). `%o` and `%O` print
 //!   primitives like `%s`, strings in double quotes without escapes. No grouping, indentation, `%c` styling.
 //! - A lone surrogate prints as U+FFFD (display only; the records keep the exact value).
 //!
@@ -265,6 +266,10 @@ fn plain(d: &Dom, it: &mut Interp<'_>, v: Value, quote: bool, out: &mut Out) -> 
             out.push(d, ")")
         }
         Value::Number(0.0) => out.push(d, "0"),
+        Value::BigInt(_) | Value::BigHeap(_) => {
+            out.push(d, &it.display(v))?;
+            out.push(d, "n")
+        }
         Value::Object(o) => out.push(d, if it.is_callable_value(Value::Object(o)) { "[function]" } else { "[object]" }),
         v => out.push(d, &it.display(v)),
     }
@@ -348,8 +353,16 @@ fn format(d: &Dom, it: &mut Interp<'_>, args: &[Value], max: usize) -> R<String>
                 'c' => {}
                 's' => plain(d, it, v, false, &mut out)?,
                 'o' | 'O' => plain(d, it, v, true, &mut out)?,
+                // `%d` and `%i` print a BigInt with its `n`, as Node does. `%f` is parseFloat of its digits.
+                'd' | 'i' if v.is_bigint() => plain(d, it, v, false, &mut out)?,
                 _ => {
-                    let n = if matches!(v, Value::Symbol(_) | Value::Object(_)) { f64::NAN } else { numeric(d, it, v, spec == 'f', max)? };
+                    let n = if matches!(v, Value::Symbol(_) | Value::Object(_)) {
+                        f64::NAN
+                    } else if v.is_bigint() {
+                        numeric_prefix(&it.display(v).encode_utf16().collect::<Vec<_>>(), true)
+                    } else {
+                        numeric(d, it, v, spec == 'f', max)?
+                    };
                     plain(d, it, Value::Number(n), false, &mut out)?;
                 }
             }

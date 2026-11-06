@@ -6,6 +6,7 @@
 // - `new String(x)` is ToString(x) in a String wrapper, `new Number(x)` ToNumber(x) (0 with no argument) and `new Boolean(x)` ToBoolean(x).
 //   A symbol is a `TypeError` for `new String(sym)` and a string `Symbol(desc)` for `String(sym)`. `new.target` gives the prototype
 //   (`class A extends Number`). `Object(x)` and `new Object(x)` are ToObject; `Object(undefined)` and `Object(null)` make a plain object.
+// - A BigInt has a wrapper too (`Object(1n)`): its prototype is `BigInt.prototype`, and `thisBigIntValue` (`eval_bigint.rs`) accepts it.
 // - `thisNumberValue`, `thisStringValue`, `thisBooleanValue` and `thisSymbolValue` accept a primitive, a wrapper and the prototype itself
 //   (`Number.prototype` is a Number object for `+0`, `Boolean.prototype` for `false`, `String.prototype` for `""`), else a `TypeError`.
 //   The prototype is not a real wrapper here: it is an ordinary object that these four functions treat as one.
@@ -14,7 +15,7 @@
 //   functions and native methods see the primitive. A primitive that gets a property read, a method call or `length` is never boxed:
 //   `"a".length` and `(1).toFixed()` take the same path as before.
 //
-// Not done: BigInt wrappers (`Object(1n)`: this engine has no BigInt kind), `structuredClone` (not in this engine), `Symbol.prototype`
+// Not done: `structuredClone` (not in this engine), `Symbol.prototype`
 // and `String.prototype` as exotic objects (they are ordinary objects with a special case in the four `this` functions, so
 // `Object.getOwnPropertyNames(String.prototype)` has no `length` and no indices).
 
@@ -37,6 +38,10 @@ impl<'p> Interp<'p> {
 
     /// ToObject.
     fn to_object(&mut self, v: Value) -> Res<Value> {
+        if v.is_bigint() {
+            let p = self.big_proto()?;
+            return self.wrap(p, v);
+        }
         match self.wrapper_proto(v) {
             Some(p) => self.wrap(p, v),
             None if matches!(v, Value::Object(_)) => Ok(v),

@@ -322,8 +322,18 @@ impl<'p> Interp<'p> {
     fn o_define_own_property(&mut self, o: ObjId, key: PropertyKey, d: &PropertyDescriptor) -> Res<bool> {
         match self.heap.define_own_property(o, key, d) {
             Ok(v) => Ok(v),
+            Err(HeapError::NeedsBigInt) => self.define_big(o, key, d),
             Err(e) => self.heap_miss_w(e, |s| s.heap.define_own_property(o, key, d), |s| s.px_define_own_property(o, key, d)),
         }
+    }
+
+    /// `o_define_own_property` of a `BigInt64Array` or `BigUint64Array` element whose `value` is not a BigInt: ToBigInt (as in
+    /// `set_miss`), then the define again. A function of its own, so that the proxy path keeps one call level.
+    #[cold]
+    #[inline(never)]
+    fn define_big(&mut self, o: ObjId, key: PropertyKey, d: &PropertyDescriptor) -> Res<bool> {
+        let b = self.to_bigint(d.value.unwrap_or(Value::Undefined))?;
+        self.o_define_own_property(o, key, &PropertyDescriptor { value: Some(b), ..*d })
     }
 
     #[inline(always)]
@@ -443,7 +453,7 @@ impl<'p> Interp<'p> {
             }
             if self.heap.has_exotics() && self.heap.is_view_index_key(c, key) {
                 if matches!(receiver, Value::Object(r) if r == c) && matches!(v, Value::Object(_)) {
-                    v = Value::Number(self.coerce_number(v)?);
+                    v = self.ta_conv(self.heap.view_type(c).unwrap_or(Elem::U8), v)?;
                 } else if self.heap.is_view_bad_index(c, key) {
                     return Ok(true);
                 }

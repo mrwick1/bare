@@ -66,3 +66,11 @@ wrapper_15	false ## false
 wrapper_16	0,a,1,b ## 0,a,1,b
 wrapper_17	{"0":"a","1":"b"} ## {"0":"a","1":"b"}
 wrapper_18	"ab" ## "ab"
+bigview_1	7 ## 7
+bigview_2	1 ## 1
+bigview_3	-5 ## -5
+bigview_4	throw:TypeError ## throw:TypeError
+bigview_5	throw:TypeError ## throw:TypeError
+bigview_6	9 ## 9
+bigview_7	4 ## 4
+bigview_8	11 ## 11

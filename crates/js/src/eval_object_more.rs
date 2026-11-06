@@ -201,7 +201,7 @@ impl<'p> Interp<'p> {
                 let key = self.coerce_key(a0)?;
                 let start = match this {
                     Value::Object(o) => o,
-                    v => self.ro_prim_proto(v),
+                    v => self.ro_prim_proto(v)?,
                 };
                 // a proxy on the chain: the loop of the specification (own property, then [[GetPrototypeOf]])
                 let found = hx!(self, self.heap.lookup(start, key), {
@@ -321,13 +321,14 @@ impl<'p> Interp<'p> {
     }
 
     /// The prototype that a primitive has: what `Object.getPrototypeOf` gives for it.
-    fn ro_prim_proto(&self, v: Value) -> ObjId {
-        match v {
+    fn ro_prim_proto(&mut self, v: Value) -> Res<ObjId> {
+        Ok(match v {
             Value::String(_) => self.ext.string_proto,
             Value::Symbol(_) => self.sc.symbol_proto,
             Value::Number(_) => self.ao.number_proto.unwrap_or(self.object_proto),
+            Value::BigInt(_) | Value::BigHeap(_) => self.big_proto()?,
             _ => self.object_proto,
-        }
+        })
     }
 
     /// `Object.getPrototypeOf(v)`.
@@ -335,7 +336,7 @@ impl<'p> Interp<'p> {
         match v {
             Value::Object(o) => Ok(self.o_get_prototype_of(o)?.map_or(Value::Null, Value::Object)),
             Value::Undefined | Value::Null => Err(self.type_err("Cannot convert undefined or null to object")),
-            _ => Ok(Value::Object(self.ro_prim_proto(v))),
+            _ => Ok(Value::Object(self.ro_prim_proto(v)?)),
         }
     }
 
@@ -512,9 +513,12 @@ impl<'p> Interp<'p> {
         let view = self.heap.has_exotics() && self.heap.is_view_index_key(o, key);
         if matches!(receiver, Value::Object(r) if r == o) {
             if view && matches!(v, Value::Object(_)) {
-                v = Value::Number(self.coerce_number(v)?);
+                v = self.ta_conv(self.heap.view_type(o).unwrap_or(Elem::U8), v)?;
             }
-            return Ok(match hxw!(self, self.heap.set(o, key, v), if self.o_set(o, key, v, receiver)? { Set::Done } else { Set::Rejected }) {
+            return Ok(match match self.heap.set(o, key, v) {
+                Ok(r) => r,
+                Err(e) => self.set_miss(o, key, v, receiver, e)?,
+            } {
                 Set::Done => true,
                 Set::Rejected => false,
                 Set::Setter(s) => {

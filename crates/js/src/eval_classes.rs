@@ -169,7 +169,6 @@ impl<'p> Interp<'p> {
                 Key::Private(sp) => {
                     self.private_id(sp);
                 }
-                Key::BigInt(_) => return Err(unsupported("BigInt property key", e.span)),
                 _ => {}
             }
             match e.kind {

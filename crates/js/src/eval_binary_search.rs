@@ -4,8 +4,8 @@
 //
 // The search never converts `searchElement`. Only a number can match an element: `indexOf` and `lastIndexOf` use strict
 // equality (`NaN` never matches, `-0` matches `0`), `includes` uses SameValueZero (`NaN` matches a `NaN` element). An element
-// is always a number, so any other value gives -1 (or `false`) at once, with no scan. A BigInt typed array holds BigInts, and
-// a number is never equal to one, so it gives the same answer with no scan (and no gate).
+// is always a number, so any other value gives -1 (or `false`) at once, with no scan. A BigInt typed array holds BigInts: a
+// number is never equal to one (no scan), and a BigInt that the type stores exactly is found as an 8-byte pattern.
 // Order, as in the spec: the receiver is validated first. An empty array answers before `fromIndex` is read.
 // `fromIndex` is converted once with ToIntegerOrInfinity. Only then are the bytes borrowed, because a `valueOf` may write
 // to the array, or detach its buffer (then every element reads as `undefined`: only `includes(undefined)` can match).
@@ -60,22 +60,35 @@ impl<'p> Interp<'p> {
         if self.heap.view_detached(t.o) {
             return Ok(if kind == Search::Includes && matches!(search, Value::Undefined) { Value::Bool(true) } else { miss });
         }
-        let Value::Number(x) = search else { return Ok(miss) };
         let nan_matches = kind == Search::Includes;
-        if t.ty.is_big() || (x.is_nan() && !nan_matches) {
-            return Ok(miss);
-        }
         let size = t.ty.size();
-        // The pattern: only for a value that the type stores exactly. A float zero has two encodings and a NaN has many.
-        let pat = if x.is_nan() || (t.ty.is_float() && x == 0.0) {
-            None
-        } else {
-            let mut p = [0u8; 8];
-            store(t.ty, &mut p, x);
-            if load(t.ty, &p) != x {
+        let (x, pat) = if t.ty.is_big() {
+            // Only a BigInt that the type stores exactly can match (a Number never equals a BigInt): `BigInt64Array` holds
+            // -2^63 .. 2^63-1, `BigUint64Array` holds 0 .. 2^64-1. The pattern is its 8 bytes.
+            let (mut buf, in_i64) = ([0u64; 1], matches!(search, Value::BigInt(_)));
+            let Ok(a) = self.heap.bigint_sv(search, &mut buf) else { return Ok(miss) };
+            let fits = if t.ty == Elem::BI64 { in_i64 } else { !a.neg && a.mag.len() <= 1 };
+            if !fits {
                 return Ok(miss);
             }
-            Some(p)
+            (0.0, Some(self.heap.bigint_low_u64(search).to_le_bytes()))
+        } else {
+            let Value::Number(x) = search else { return Ok(miss) };
+            if x.is_nan() && !nan_matches {
+                return Ok(miss);
+            }
+            // The pattern: only for a value that the type stores exactly. A float zero has two encodings and a NaN has many.
+            let pat = if x.is_nan() || (t.ty.is_float() && x == 0.0) {
+                None
+            } else {
+                let mut p = [0u8; 8];
+                store(t.ty, &mut p, x);
+                if load(t.ty, &p) != x {
+                    return Ok(miss);
+                }
+                Some(p)
+            };
+            (x, pat)
         };
         let bytes = self.heap.bytes(t.o).ok_or(Error::Heap(HeapError::Stale))?;
         // Whole elements of this type, first or last match in one chunk.

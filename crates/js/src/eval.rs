@@ -14,7 +14,7 @@
 //!
 //! Unsupported is found BEFORE anything runs. `Interp::new` walks every reachable node. Syntax that is not
 //! implemented gives [`Error::Unsupported`] with its span: async functions and `await`, tagged
-//! templates, BigInt, `super` outside a class element, `new.target` in a field initializer, `with`, `for await`, and `await` in `switch`, `for-in`, optional chains, `delete`, `++`/`--`, computed keys and binding patterns.
+//! templates, `super` outside a class element, `new.target` in a field initializer, `with`, `for await`, and `await` in `switch`, `for-in`, optional chains, `delete`, `++`/`--`, computed keys and binding patterns.
 //! Async functions and arrows run in a bounded continuation machine: see `eval_async.rs`. A regexp literal is compiled by `Interp::new`;
 //! an invalid pattern, lookbehind, named groups or the flags `u`, `v`, `d` are `Unsupported` there (see `eval_builtins.rs`).
 //! A missing builtin (`WeakRef`, ...) is an ordinary `ReferenceError` at run time, as in a bare engine.
@@ -388,6 +388,7 @@ enum Nat {
     Px(PxFn),
     Date(DateFn),
     Intl(IntlFn),
+    Big(BigFn),
 }
 
 enum Callee {
@@ -521,6 +522,7 @@ pub struct Interp<'p> {
     weak: WeakState,
     px: ProxyState,
     date: DateState,
+    big: BigState,
     intl: IntlState,
     aw: AsyncState,
     // permanent keys
@@ -574,6 +576,7 @@ impl<'p> Interp<'p> {
         it.install_reflect()?;
         it.install_date()?;
         it.install_intl()?;
+        it.install_bigint()?;
         Ok(it)
     }
 
@@ -673,6 +676,7 @@ impl<'p> Interp<'p> {
             weak: WeakState::new(object_proto),
             px: ProxyState::default(),
             date: DateState::new(object_proto),
+            big: BigState::new(object_proto),
             intl: IntlState::new(object_proto),
             aw: AsyncState::default(),
             k_length: ks[0],
@@ -775,6 +779,7 @@ impl<'p> Interp<'p> {
         self.weak_roots(&mut v);
         self.weak_all_values(&mut v);
         self.date_roots(&mut v);
+        self.big_roots(&mut v);
         self.date_all_values(&mut v);
         self.intl_roots(&mut v);
         self.intl_all_values(&mut v);
@@ -824,6 +829,7 @@ impl<'p> Interp<'p> {
         self.sc_roots(&mut work);
         self.weak_roots(&mut work);
         self.date_roots(&mut work);
+        self.big_roots(&mut work);
         self.intl_roots(&mut work);
         let mut pending: FxMap<ObjId, Vec<Value>> = FxMap::default();
         let mut agg_seen: FxSet<u64> = FxSet::default();
@@ -975,6 +981,7 @@ impl<'p> Interp<'p> {
             Value::String(s) => self.heap.to_string_lossy(s).unwrap_or_default(),
             Value::Symbol(s) => self.sym_text(s),
             Value::Object(o) => if self.funcs.contains_key(&o) { "function".into() } else { "object".into() },
+            Value::BigInt(_) | Value::BigHeap(_) => self.heap.bigint_text(v),
         }
     }
 
@@ -1027,8 +1034,10 @@ impl<'p> Interp<'p> {
             HeapError::InvalidArrayLength => self.mk_err(RANGE_ERROR, "Invalid array length"),
             HeapError::SymbolConversion => self.mk_err(TYPE_ERROR, "Cannot convert a Symbol value to a string"),
             HeapError::SymbolToNumber => self.mk_err(TYPE_ERROR, "Cannot convert a Symbol value to a number"),
+            HeapError::BigIntToNumber => self.mk_err(TYPE_ERROR, "Cannot convert a BigInt value to a number"),
             HeapError::NeedsExecution(w) => unsupported(w, Span::default()),
             HeapError::Proxy(_) => unsupported("Proxy: this operation has no trap dispatch yet (see eval_proxy.rs)", Span::default()),
+            HeapError::NeedsBigInt => unsupported("a value that is not a BigInt written to a BigInt typed array by a generic method", Span::default()),
             e => Error::Heap(e),
         }
     }
@@ -1336,8 +1345,7 @@ impl<'p> Interp<'p> {
                 }
             }
             ExprKind::This => self.cls_w_this(e, ac),
-            ExprKind::Null | ExprKind::Bool(_) | ExprKind::Number(_) | ExprKind::String | ExprKind::Hole => {}
-            ExprKind::BigInt => return Err(unsupported("BigInt literal", ex.span)),
+            ExprKind::Null | ExprKind::Bool(_) | ExprKind::Number(_) | ExprKind::String | ExprKind::Hole | ExprKind::BigInt => {}
             ExprKind::RegExp => self.ext_walk_regexp(e, ex.span)?,
             ExprKind::Template(t) => {
                 let t = *prog.template(t);
@@ -2073,7 +2081,24 @@ impl<'p> Interp<'p> {
             Value::Symbol(_) => self.sc.symbol_proto,
             Value::Number(_) => self.ao.number_proto.unwrap_or(self.object_proto),
             Value::Bool(_) => self.sc.bool_proto,
+            Value::BigInt(_) | Value::BigHeap(_) => return self.get_prop_big(base, key),
         };
+        let got = match self.heap.get(o, key) {
+            Ok(g) => g,
+            Err(e) => self.get_miss(o, key, base, e)?,
+        };
+        match got {
+            Get::Value(v) => Ok(v),
+            Get::Accessor { getter: Some(g) } => self.call_fn(Value::Object(g), base, &[]),
+            Get::Accessor { getter: None } => Ok(Value::Undefined),
+        }
+    }
+
+    /// `get_prop` of a BigInt: the property of `BigInt.prototype`. Out of line, to keep `get_prop` small.
+    #[cold]
+    #[inline(never)]
+    fn get_prop_big(&mut self, base: Value, key: PropertyKey) -> Res<Value> {
+        let o = self.big_proto()?;
         let got = match self.heap.get(o, key) {
             Ok(g) => g,
             Err(e) => self.get_miss(o, key, base, e)?,
@@ -2108,12 +2133,13 @@ impl<'p> Interp<'p> {
     }
 
     fn put_prop(&mut self, base: Value, key: PropertyKey, mut v: Value) -> Res<()> {
-        // A write to an integer index of a view runs ToNumber on the value first, even when the index is out of range.
+        // A write to an integer index of a view runs ToNumber (ToBigInt for a BigInt view) on the value first, even when the
+        // index is out of range.
         if let (Value::Object(o), Value::Object(_)) = (base, v)
             && self.heap.has_exotics()
             && self.heap.is_view_index_key(o, key)
         {
-            v = Value::Number(self.coerce_number(v)?);
+            v = self.ta_conv(self.heap.view_type(o).unwrap_or(Elem::U8), v)?;
         }
         match base {
             Value::Object(o) => match match self.heap.set(o, key, v) {
@@ -2142,10 +2168,12 @@ impl<'p> Interp<'p> {
         }
     }
 
-    /// The slow side of `put_prop` (`hxw!` with its proxy arm, out of line). See `get_miss`.
+    /// The slow side of `put_prop` (`hxw!` with its proxy arm, out of line). See `get_miss`. A value that is not a BigInt written
+    /// to a `BigInt64Array` or `BigUint64Array` element is converted with ToBigInt (a string and a boolean convert, anything else
+    /// is a `TypeError`) and written again.
     #[cold]
     #[inline(never)]
-    fn set_miss(&mut self, o: ObjId, key: PropertyKey, v: Value, base: Value, mut e: HeapError) -> Res<Set> {
+    fn set_miss(&mut self, o: ObjId, key: PropertyKey, mut v: Value, base: Value, mut e: HeapError) -> Res<Set> {
         let mut fills = 0u8;
         loop {
             match e {
@@ -2154,6 +2182,7 @@ impl<'p> Interp<'p> {
                     self.host_ask(e)?;
                 }
                 HeapError::Proxy(_) => return Ok(if self.o_set(o, key, v, base)? { Set::Done } else { Set::Rejected }),
+                HeapError::NeedsBigInt if !matches!(v, Value::BigInt(_) | Value::BigHeap(_)) => v = self.to_bigint(v)?,
                 e => return Err(self.herr(e).into()),
             }
             match self.heap.set(o, key, v) {
@@ -2204,6 +2233,7 @@ impl<'p> Interp<'p> {
                 let n = self.num_lit(sp, num_base(prog.text(sp)));
                 Ok(h!(self, self.heap.intern_str(&number_to_string(n))))
             }
+            Key::BigInt(sp) => self.big_key_string(sp),
             _ => Err(unsupported("property key", Span::default())),
         }
     }
@@ -2398,6 +2428,7 @@ impl<'p> Interp<'p> {
             ExprKind::Null => Ok(Value::Null),
             ExprKind::Bool(b) => Ok(Value::Bool(b)),
             ExprKind::Number(base) => Ok(Value::Number(self.num_lit(ex.span, base))),
+            ExprKind::BigInt => self.big_literal(ex.span),
             ExprKind::String => {
                 if let Some(s) = self.expr_str[e.index()] {
                     return Ok(Value::String(s));
@@ -2454,7 +2485,17 @@ impl<'p> Interp<'p> {
             ExprKind::Update { op, prefix, arg } => {
                 let r = self.expr_ref(arg)?;
                 let old = self.ref_get(&r)?;
-                let n = self.coerce_number(old)?;
+                let n = match old {
+                    Value::Number(n) => n,
+                    _ => match self.to_numeric(old)? {
+                        Value::Number(n) => n,
+                        big => {
+                            let new = self.big_step(big, op == UpdateOp::Inc)?;
+                            self.ref_put(&r, new)?;
+                            return Ok(if prefix { new } else { big });
+                        }
+                    },
+                };
                 let new = if op == UpdateOp::Inc { n + 1.0 } else { n - 1.0 };
                 self.ref_put(&r, Value::Number(new))?;
                 Ok(Value::Number(if prefix { new } else { n }))
@@ -2630,7 +2671,10 @@ impl<'p> Interp<'p> {
             }
             UnaryOp::Neg => {
                 let v = self.eval_expr(arg)?;
-                Ok(Value::Number(-self.coerce_number(v)?))
+                match self.to_numeric(v)? {
+                    Value::Number(n) => Ok(Value::Number(-n)),
+                    big => self.big_neg(big),
+                }
             }
             UnaryOp::Plus => {
                 let v = self.eval_expr(arg)?;
@@ -2638,7 +2682,10 @@ impl<'p> Interp<'p> {
             }
             UnaryOp::BitNot => {
                 let v = self.eval_expr(arg)?;
-                Ok(Value::Number(!to_int32(self.coerce_number(v)?) as f64))
+                match self.to_numeric(v)? {
+                    Value::Number(n) => Ok(Value::Number(!to_int32(n) as f64)),
+                    big => self.big_not(big),
+                }
             }
         }
     }
@@ -2879,12 +2926,23 @@ impl<'p> Interp<'p> {
                     let sb = h!(self, self.heap.to_string(pb));
                     return Ok(Value::String(h!(self, self.heap.concat(sa, sb))));
                 }
+                if pa.is_bigint() || pb.is_bigint() {
+                    let (na, nb) = (self.numeric_of_prim(pa)?, self.numeric_of_prim(pb)?);
+                    return self.big_arith(Add, na, nb);
+                }
                 let (x, y) = (h!(self, self.heap.to_number(pa)), h!(self, self.heap.to_number(pb)));
                 Ok(Value::Number(x + y))
             }
             Sub | Mul | Div | Mod | Exp | Shl | Shr | UShr | BitAnd | BitOr | BitXor => {
-                let x = self.coerce_number(a)?;
-                let y = self.coerce_number(b)?;
+                let (x, y) = if let (Value::Number(x), Value::Number(y)) = (a, b) {
+                    (x, y)
+                } else {
+                    let (na, nb) = (self.to_numeric(a)?, self.to_numeric(b)?);
+                    match (na, nb) {
+                        (Value::Number(x), Value::Number(y)) => (x, y),
+                        _ => return self.big_arith(op, na, nb),
+                    }
+                };
                 Ok(Value::Number(match op {
                     Sub => x - y,
                     Mul => x * y,
@@ -2933,6 +2991,9 @@ impl<'p> Interp<'p> {
         if let (Value::String(x), Value::String(y)) = (a, b) {
             let (ux, uy) = (h!(self, self.heap.str_units(x)), h!(self, self.heap.str_units(y)));
             return Ok(Some(ux < uy));
+        }
+        if a.is_bigint() || b.is_bigint() {
+            return Ok(self.big_order(a, b)?.map(|o| o.is_lt()));
         }
         let (x, y) = (h!(self, self.heap.to_number(a)), h!(self, self.heap.to_number(b)));
         Ok(if x.is_nan() || y.is_nan() { None } else { Some(x < y) })
@@ -3159,6 +3220,7 @@ include!("eval_weak.rs");
 include!("eval_date.rs");
 include!("eval_intl.rs");
 include!("eval_reflect.rs");
+include!("eval_bigint.rs");
 include!("eval_object_more.rs");
 include!("eval_classes.rs");
 include!("eval_wrapper.rs");
@@ -3270,6 +3332,10 @@ mod intl_num_tests;
 #[cfg(test)]
 #[path = "eval_number_tests.rs"]
 mod number_tests;
+
+#[cfg(test)]
+#[path = "eval_bigint_tests.rs"]
+mod bigint_eval_tests;
 #[cfg(test)]
 #[path = "eval_iterator_tests.rs"]
 mod iterator_tests;
