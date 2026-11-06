@@ -21,7 +21,7 @@
 //! - Globals: `window`, `self`, `globalThis` (the same object), `document`, `Node`, `Element`, `HTMLElement`,
 //!   `HTMLInputElement`, `HTMLIFrameElement` (inert brand only: no `contentWindow`, no nested context, no fetch), `HTMLLinkElement`, `HTMLFormElement`, `HTMLButtonElement`, `CharacterData`, `Text`, `Comment`, `Document`, `DocumentFragment` and `ShadowRoot` (illegal constructors), `EventTarget`, `Event`, `CustomEvent`,
 //!   `SubmitEvent`, `DOMException`.
-//! - `new DocumentFragment()` and `document.createDocumentFragment()` make an empty fragment. A plain fragment (no host) goes in as its children (`Dom::place`): one change group, the fragment is left empty. A shadow root is still `Unsupported`. `before`, `after` and `replaceWith` are on `Element` and `CharacterData`. Installed after every other global (`install_late`).
+//! - `new DocumentFragment()` and `document.createDocumentFragment()` make an empty fragment. A plain fragment (no host) goes in as its children (`Dom::place`): one change group, the fragment is left empty. A shadow root is still `Unsupported`. `before`, `after` and `replaceWith` are on `Element` and `CharacterData`. `replaceChildren` is on `Element` and `DocumentFragment` (one function object, not on `Document`). `insertAdjacentElement`, `insertAdjacentText` and `insertAdjacentHTML` are on `Element`. Installed after every other global (`install_late`).
 //! - `HTMLAnchorElement`, `HTMLAreaElement` and `HTMLTemplateElement` (lazy, `browser_elements.rs`): `href` and the URL parts, `template.content`. `new FormData(form)` reads the form data set.
 //! - Node: `nodeType nodeName nodeValue parentNode parentElement childNodes firstChild lastChild previousSibling
 //!   nextSibling ownerDocument isConnected textContent appendChild insertBefore removeChild replaceChild cloneNode
@@ -50,7 +50,7 @@
 //!   The one live `NodeList` is the result of `document.getElementsByName` (`browser_nodelist.rs`).
 //! - A JS string with a lone surrogate cannot be stored in the UTF-8 document: `Error::Unsupported`. Valid pairs round-trip.
 //! - Namespaces are in `browser_namespace.rs` (read its header): HTML, SVG and MathML elements, attributes in no namespace, XML,
-//!   XMLNS and XLink. Any other namespace is `Unsupported`. Shadow roots are a tree foundation only (`browser_shadow.rs`: read its header for the gates). `new Document()`, `insertAdjacentHTML`,
+//!   XMLNS and XLink. Any other namespace is `Unsupported`. Shadow roots are a tree foundation only (`browser_shadow.rs`: read its header for the gates). `new Document()`,
 //!   `style`, layout APIs, `location` and
 //!   network are absent. Timers, `queueMicrotask`, `performance.now` and `MessageChannel` are in `browser_scheduler.rs`. `Element.attributes` and `Attr` are in `browser_attr.rs`.
 //! - `addEventListener` option `signal` removes the listener on abort (`browser_abort.rs`). `isTrusted` is always false. Events made by the test driver

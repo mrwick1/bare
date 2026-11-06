@@ -1,0 +1,232 @@
+var $ = function (i) { return document.getElementById(i) };
+var log = [];
+function nm(n) { return n === null ? 'null' : n === undefined ? 'undefined' : n.nodeType === 1 ? n.tagName.toLowerCase() + (n.id ? '#' + n.id : '') : n.nodeType === 3 ? '"' + n.data + '"' : n.nodeType === 8 ? '<!--' + n.data + '-->' : n.nodeName }
+function list(l) { return '[' + Array.prototype.map.call(l, nm).join(',') + ']' }
+function rec(r) { return r.type + ' ' + nm(r.target) + ' +' + list(r.addedNodes) + ' -' + list(r.removedNodes) + ' p=' + nm(r.previousSibling) + ' n=' + nm(r.nextSibling) }
+var mo = new MutationObserver(function (rs) { rs.forEach(function (r) { log.push(rec(r)) }) });
+var out = function () { return log.join(' | ') };
+function el(t, id) { var e = document.createElement(t); if (id) e.id = id; return e }
+function err(f) { try { return f() } catch (e) { return e.name } }
+function errm(f) { try { return f() } catch (e) { return e.name + ':' + e.message } }
+=== replace-children-shape
+(function () { var p = el('p'), f = new DocumentFragment(), d = Object.getOwnPropertyDescriptor(Element.prototype, 'replaceChildren'); return [typeof p.replaceChildren, p.replaceChildren.length, typeof f.replaceChildren, f.replaceChildren.length, typeof document.createTextNode('x').replaceChildren, d.writable, d.configurable].join() })
+=== replace-children-with-nothing-clears
+@html <div id=host><i></i>t<b></b></div>
+var r = $('host').replaceChildren();
+(function () { return [r, $('host').childNodes.length, $('host').innerHTML === ''].join() })
+=== replace-children-with-nodes-and-strings
+@html <div id=host><i></i>t<b></b></div>
+var u = el('u'); $('host').replaceChildren('a', u, 5, null, el('s'));
+(function () { return [list($('host').childNodes), u.parentNode === $('host')].join() })
+=== replace-children-with-a-fragment
+@html <div id=host><i></i></div>
+var f = new DocumentFragment(); f.append(el('p'), el('b')); $('host').replaceChildren(f, 'x');
+(function () { return [list($('host').childNodes), f.childNodes.length].join() })
+=== replace-children-moves-an-own-child
+@html <div id=host><i id=a></i><u id=b></u><b id=c></b></div>
+var a = $('a'); $('host').replaceChildren($('b'));
+(function () { return [list($('host').childNodes), a.parentNode].join() })
+=== replace-children-moves-a-node-from-elsewhere
+@html <div id=host><i id=a></i></div><div id=src><u id=b></u></div>
+var a = $('a'); $('host').replaceChildren($('b'));
+(function () { return [list($('host').childNodes), $('src').childNodes.length, a.parentNode].join() })
+=== replace-children-the-old-children-stay-usable
+@html <div id=host><i id=a><b id=in></b></i></div>
+var a = $('a'); $('host').replaceChildren(); a.appendChild(el('u'));
+(function () { return [a.parentNode, a.isConnected, list(a.childNodes), $('in')].join() })
+=== replace-children-an-ancestor-is-refused-and-nothing-changes
+@html <div id=host><i id=a><b id=in></b></i></div>
+var e = err(function () { $('in').replaceChildren($('host')) }), e2 = err(function () { $('in').replaceChildren($('in')) });
+(function () { return [e, e2, list($('host').childNodes), list($('a').childNodes)].join() })
+=== replace-children-a-bad-node-changes-nothing
+@html <div id=host><i id=a></i></div>
+var e = err(function () { $('host').replaceChildren(el('p'), document) });
+(function () { return [e, list($('host').childNodes)].join() })
+=== replace-children-a-non-node-is-a-string
+@html <div id=host></div>
+$('host').replaceChildren({ toString: function () { return 'obj' } }, [1, 2], undefined);
+(function () { return list($('host').childNodes) })
+=== replace-children-in-a-fragment
+var f = new DocumentFragment(); f.append(el('p'), 'x'); f.replaceChildren(el('b'));
+(function () { return [list(f.childNodes), f.childNodes.length].join() })
+=== replace-children-with-itself
+@html <div id=host><i id=a></i><u id=b></u></div>
+$('host').replaceChildren($('a'), $('b'));
+(function () { return list($('host').childNodes) })
+=== replace-children-text-and-comment-kids
+@html <div id=host>x<!--c-->y</div>
+var t = $('host').firstChild; $('host').replaceChildren(t, 'z');
+(function () { return [list($('host').childNodes), $('host').textContent].join() })
+=== replace-children-is-one-record
+@html <div id=host><i id=a></i><u id=b></u></div>
+mo.observe($('host'), { childList: true }); $('host').replaceChildren(el('p'), 'x', el('s'));
+out
+=== replace-children-nothing-to-clear-no-record
+@html <div id=host></div>
+mo.observe($('host'), { childList: true }); $('host').replaceChildren();
+out
+=== replace-children-clears-with-one-record
+@html <div id=host><i id=a></i><u id=b></u></div>
+mo.observe($('host'), { childList: true }); $('host').replaceChildren();
+out
+=== replace-children-own-child-record
+@html <div id=host><i id=a></i><u id=b></u><b id=c></b></div>
+mo.observe($('host'), { childList: true }); $('host').replaceChildren($('b'));
+out
+=== replace-children-live-range
+@html <div id=host><i id=a></i><u id=b></u><b id=c></b></div>
+var r = document.createRange(); r.setStart($('host'), 1); r.setEnd($('host'), 3); $('host').replaceChildren(el('p'));
+(function () { return [r.startContainer === $('host'), r.startOffset, r.endOffset, r.collapsed].join() })
+=== replace-children-node-iterator
+@html <div id=host><i id=a></i><u id=b></u></div>
+var it = document.createNodeIterator($('host'), 1); it.nextNode(); it.nextNode(); it.nextNode(); $('host').replaceChildren(el('p', 'n'));
+(function () { return [nm(it.referenceNode), it.pointerBeforeReferenceNode, nm(it.nextNode()), nm(it.previousNode())].join() })
+=== adjacent-element-shape
+(function () { var p = el('p'); return [typeof p.insertAdjacentElement, p.insertAdjacentElement.length, typeof p.insertAdjacentText, p.insertAdjacentText.length, typeof p.insertAdjacentHTML, p.insertAdjacentHTML.length, typeof new DocumentFragment().insertAdjacentHTML, typeof document.insertAdjacentHTML, typeof document.createTextNode('x').insertAdjacentText].join() })
+=== adjacent-element-four-positions
+@html <div id=host><i id=a></i><u id=b></u></div>
+var r = [$('b').insertAdjacentElement('beforebegin', el('p', 'p1')), $('b').insertAdjacentElement('afterend', el('p', 'p2')), $('host').insertAdjacentElement('afterbegin', el('p', 'p3')), $('host').insertAdjacentElement('beforeend', el('p', 'p4'))];
+(function () { return [list($('host').childNodes), list(r)].join() })
+=== adjacent-element-case-insensitive
+@html <div id=host></div>
+$('host').insertAdjacentElement('BeforeEnd', el('p', 'x')); $('host').insertAdjacentElement('AFTERBEGIN', el('b', 'y'));
+(function () { return list($('host').childNodes) })
+=== adjacent-element-returns-the-element
+@html <div id=host></div>
+var p = el('p'), r = $('host').insertAdjacentElement('beforeend', p);
+(function () { return r === p })
+=== adjacent-element-no-parent
+(function () { var p = el('p'), q = el('q'); return [p.insertAdjacentElement('beforebegin', q), p.insertAdjacentElement('afterend', q), q.parentNode, p.insertAdjacentElement('afterbegin', q) === q, q.parentNode === p].join() })
+=== adjacent-element-bad-position
+(function () { var p = el('p'); return [errm(function () { return p.insertAdjacentElement('x', el('q')) }), errm(function () { return p.insertAdjacentElement('', el('q')) }), errm(function () { return p.insertAdjacentElement(undefined, el('q')) })].join('|') })
+=== adjacent-element-bad-node
+(function () { var p = el('p'); return [errm(function () { return p.insertAdjacentElement('beforeend', 'x') }), errm(function () { return p.insertAdjacentElement('beforeend', document.createTextNode('t')) }), errm(function () { return p.insertAdjacentElement('beforeend', null) }), errm(function () { return p.insertAdjacentElement('beforeend') })].join('|') })
+=== adjacent-element-moves-a-node
+@html <div id=host><i id=a></i></div><div id=src><u id=b></u></div>
+$('a').insertAdjacentElement('afterend', $('b'));
+(function () { return [list($('host').childNodes), $('src').childNodes.length].join() })
+=== adjacent-element-moves-itself-before-itself
+@html <div id=host><i id=a></i><u id=b></u></div>
+$('a').insertAdjacentElement('beforebegin', $('a')); $('b').insertAdjacentElement('afterend', $('b'));
+(function () { return list($('host').childNodes) })
+=== adjacent-element-ancestor-is-refused
+@html <div id=host><i id=a></i></div>
+(function () { return [err(function () { $('a').insertAdjacentElement('beforeend', $('host')) }), err(function () { $('a').insertAdjacentElement('beforeend', $('a')) }), err(function () { $('a').insertAdjacentElement('afterbegin', $('a')) })].join() })
+=== adjacent-element-position-checked-before-parent
+(function () { var p = el('p'); return [err(function () { p.insertAdjacentElement('beforebegin', 1) }), errm(function () { return p.insertAdjacentElement('nope', 1) })].join('|') })
+=== adjacent-element-next-to-the-root-element
+(function () { var h = document.documentElement; return [err(function () { h.insertAdjacentElement('beforebegin', el('p')) }), err(function () { h.insertAdjacentElement('afterend', el('p')) }), document.childNodes.length].join() })
+=== adjacent-element-in-a-fragment
+var f = new DocumentFragment(), a = el('i', 'a'); f.appendChild(a); a.insertAdjacentElement('beforebegin', el('p', 'p')); a.insertAdjacentElement('afterend', el('b', 'b'));
+(function () { return list(f.childNodes) })
+=== adjacent-element-is-one-record-each
+@html <div id=host><i id=a></i></div>
+mo.observe($('host'), { childList: true }); $('a').insertAdjacentElement('beforebegin', el('p', 'x')); $('a').insertAdjacentElement('afterend', el('b', 'y'));
+out
+=== adjacent-text-four-positions
+@html <div id=host><i id=a></i><u id=b></u></div>
+var r = [$('b').insertAdjacentText('beforebegin', 't1'), $('b').insertAdjacentText('afterend', 't2'), $('host').insertAdjacentText('afterbegin', 't3'), $('host').insertAdjacentText('beforeend', 't4')];
+(function () { return [list($('host').childNodes), r.join()].join() })
+=== adjacent-text-does-not-join-text
+@html <div id=host>x<i id=a></i>y</div>
+$('a').insertAdjacentText('beforebegin', '1'); $('a').insertAdjacentText('afterend', '2'); $('host').insertAdjacentText('afterbegin', '3'); $('host').insertAdjacentText('beforeend', '4');
+(function () { return [list($('host').childNodes), $('host').textContent].join() })
+=== adjacent-text-converts-its-argument
+@html <div id=host></div>
+$('host').insertAdjacentText('beforeend', 5); $('host').insertAdjacentText('beforeend', null); $('host').insertAdjacentText('beforeend', undefined); $('host').insertAdjacentText('beforeend', { toString: function () { return 'o' } }); $('host').insertAdjacentText('beforeend', '');
+(function () { return [list($('host').childNodes), $('host').childNodes.length].join() })
+=== adjacent-text-no-parent
+(function () { var p = el('p'); return [p.insertAdjacentText('beforebegin', 'a'), p.insertAdjacentText('afterend', 'a'), p.childNodes.length, p.insertAdjacentText('beforeend', 'a'), p.childNodes.length].join() })
+=== adjacent-text-bad-position-and-arguments
+(function () { var p = el('p'); return [errm(function () { return p.insertAdjacentText('x', 'a') }), errm(function () { return p.insertAdjacentText('beforeend') }), errm(function () { return p.insertAdjacentText() }), p.childNodes.length].join('|') })
+=== adjacent-text-next-to-the-root-element
+(function () { var h = document.documentElement; return [err(function () { h.insertAdjacentText('beforebegin', 'x') }), err(function () { h.insertAdjacentText('afterend', 'x') }), document.childNodes.length].join() })
+=== adjacent-text-is-one-record-each
+@html <div id=host><i id=a></i></div>
+mo.observe($('host'), { childList: true }); $('a').insertAdjacentText('beforebegin', 'x'); $('a').insertAdjacentText('afterend', 'y');
+out
+=== adjacent-text-live-range
+@html <div id=host><i id=a></i><u id=b></u></div>
+var r = document.createRange(); r.setStart($('host'), 1); r.setEnd($('host'), 2); $('b').insertAdjacentText('beforebegin', 'x'); $('host').insertAdjacentText('afterbegin', 'y');
+(function () { return [r.startOffset, r.endOffset].join() })
+=== adjacent-html-four-positions
+@html <div id=host><i id=a></i><u id=b></u></div>
+var r = [$('b').insertAdjacentHTML('beforebegin', '<p id=p1>1</p>'), $('b').insertAdjacentHTML('afterend', '<p id=p2>2</p>'), $('host').insertAdjacentHTML('afterbegin', '<p id=p3>3</p>'), $('host').insertAdjacentHTML('beforeend', '<p id=p4>4</p>')];
+(function () { return [list($('host').childNodes), r.join(), $('host').innerHTML].join() })
+=== adjacent-html-several-nodes-text-and-comments
+@html <div id=host><i id=a></i></div>
+$('a').insertAdjacentHTML('afterend', 'x<b>1</b><!--c-->y<u></u>');
+(function () { return [list($('host').childNodes), $('host').innerHTML].join() })
+=== adjacent-html-nested-markup
+@html <div id=host></div>
+$('host').insertAdjacentHTML('beforeend', '<ul><li>a<li>b</ul><p>x<p>y');
+(function () { return $('host').innerHTML })
+=== adjacent-html-does-not-join-text
+@html <div id=host>x<i id=a></i>y</div>
+$('a').insertAdjacentHTML('beforebegin', '1'); $('a').insertAdjacentHTML('afterend', '2'); $('host').insertAdjacentHTML('afterbegin', '3'); $('host').insertAdjacentHTML('beforeend', '4');
+(function () { return [list($('host').childNodes), $('host').childNodes.length].join() })
+=== adjacent-html-empty
+@html <div id=host><i id=a></i></div>
+$('a').insertAdjacentHTML('beforebegin', ''); $('a').insertAdjacentHTML('afterend', ''); $('host').insertAdjacentHTML('beforeend', '');
+(function () { return [list($('host').childNodes)].join() })
+=== adjacent-html-case-insensitive-position
+@html <div id=host></div>
+$('host').insertAdjacentHTML('BEFOREend', '<b></b>'); $('host').insertAdjacentHTML('AfterBegin', '<i></i>');
+(function () { return $('host').innerHTML })
+=== adjacent-html-converts-its-argument
+@html <div id=host></div>
+$('host').insertAdjacentHTML('beforeend', 5); $('host').insertAdjacentHTML('beforeend', null); $('host').insertAdjacentHTML('beforeend', undefined); $('host').insertAdjacentHTML('beforeend', { toString: function () { return '<b>o</b>' } });
+(function () { return $('host').innerHTML })
+=== adjacent-html-bad-position
+(function () { var p = el('p'); return [errm(function () { return p.insertAdjacentHTML('x', '<b></b>') }), errm(function () { return p.insertAdjacentHTML('', '') }), errm(function () { return p.insertAdjacentHTML('beforeend') }), errm(function () { return p.insertAdjacentHTML() })].join('|') })
+=== adjacent-html-no-parent
+(function () { var p = el('p'); return [errm(function () { return p.insertAdjacentHTML('beforebegin', '<b></b>') }), errm(function () { return p.insertAdjacentHTML('afterend', '<b></b>') }), p.childNodes.length].join('|') })
+=== adjacent-html-document-parent
+(function () { var h = document.documentElement; return [errm(function () { return h.insertAdjacentHTML('beforebegin', '<b></b>') }), errm(function () { return h.insertAdjacentHTML('afterend', '<b></b>') }), document.childNodes.length].join('|') })
+=== adjacent-html-fragment-parent-uses-body
+var f = new DocumentFragment(), a = el('i', 'a'); f.appendChild(a); a.insertAdjacentHTML('beforebegin', '<p>1</p>t'); a.insertAdjacentHTML('afterend', '<b>2</b>');
+(function () { return list(f.childNodes) })
+=== adjacent-html-context-is-the-element
+@html <div id=host></div><select id=sel></select><textarea id=ta></textarea><ul id=ul></ul>
+$('ta').insertAdjacentHTML('beforeend', '<b>x</b>'); $('ul').insertAdjacentHTML('beforeend', '<li>1<li>2');
+(function () { return [$('ta').childNodes.length, nm($('ta').firstChild), $('ul').childNodes.length].join() })
+=== adjacent-html-context-for-before-and-after-is-the-parent
+@html <ul id=ul><li id=a>1</li></ul><p id=pp><span id=s></span></p>
+$('a').insertAdjacentHTML('afterend', '<li>2</li>'); $('s').insertAdjacentHTML('beforebegin', '<div>x</div>');
+(function () { return [$('ul').innerHTML, $('pp').innerHTML, document.body.querySelectorAll('div').length].join() })
+=== adjacent-html-script-does-not-run
+@html <div id=host></div>
+window.ran = 0; $('host').insertAdjacentHTML('beforeend', '<script>window.ran = 1<\/script><b>x</b>');
+(function () { return [window.ran, $('host').childNodes.length, nm($('host').firstChild)].join() })
+=== adjacent-html-attributes-and-entities
+@html <div id=host></div>
+$('host').insertAdjacentHTML('beforeend', '<a href="/x?a=1&amp;b=2" class=k data-v=\'q\'>&lt;t&gt; &copy;</a>');
+(function () { var a = $('host').firstChild; return [a.getAttribute('href'), a.className, a.getAttribute('data-v'), a.textContent].join() })
+=== adjacent-html-svg
+@html <div id=host></div>
+$('host').insertAdjacentHTML('beforeend', '<svg><circle r=1></circle></svg>');
+(function () { var s = $('host').firstChild; return [s.namespaceURI, s.firstChild.namespaceURI, s.firstChild.tagName].join() })
+=== adjacent-html-in-a-form
+@html <form id=f><input name=a value=1></form>
+$('f').insertAdjacentHTML('beforeend', '<input name=b value=2>');
+(function () { var d = new FormData($('f')); return [d.get('a'), d.get('b')].join() })
+=== adjacent-html-is-one-record-each
+@html <div id=host><i id=a></i></div>
+mo.observe($('host'), { childList: true }); $('a').insertAdjacentHTML('beforebegin', '<p id=x></p>y'); $('a').insertAdjacentHTML('afterend', '<b id=z></b>');
+out
+=== adjacent-html-empty-makes-no-record
+@html <div id=host><i id=a></i></div>
+mo.observe($('host'), { childList: true }); $('a').insertAdjacentHTML('beforebegin', '');
+out
+=== adjacent-html-live-range
+@html <div id=host><i id=a></i><u id=b></u></div>
+var r = document.createRange(); r.setStart($('host'), 1); r.setEnd($('host'), 2); $('b').insertAdjacentHTML('beforebegin', '<p></p>x'); $('host').insertAdjacentHTML('afterbegin', '<s></s>');
+(function () { return [r.startOffset, r.endOffset].join() })
+=== adjacent-html-new-nodes-are-in-the-tree
+@html <div id=host></div>
+$('host').insertAdjacentHTML('beforeend', '<p id=late class=c>t</p>');
+(function () { var p = $('late'); return [p === $('host').firstChild, p.isConnected, document.querySelectorAll('.c').length, getComputedStyle(p).display].join() })
+=== adjacent-html-depth-and-order
+@html <div id=host><i id=a></i></div>
+$('a').insertAdjacentHTML('afterend', '<b><u><s>1</s></u></b>'); $('a').insertAdjacentHTML('beforebegin', '<em></em>');
+(function () { return $('host').innerHTML })
