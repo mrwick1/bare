@@ -693,3 +693,20 @@ Results: 4 topic files compare 182 cases with headless Chrome 155 (`validity` 83
 Not built, on purpose: `select[i] = option`, `select.options[i] = option` and `= null`. The engine's host-indexed objects have a read side only (`IndexedSource` has `indexed_len` and `indexed_item`, both `&self`), so a write cannot reach the host. The fix needs a write method in `crates/js`; this change does not touch the engine. `onreset` and `oninvalid` handler properties are absent (`addEventListener` works). Two checked radios of one group in the markup both read as checked until a script or a reset checks one (Chrome clears the first when the parser inserts the second). The window does not wrap or scroll a textarea, and Up, Down, Home and End do not move by line.
 
 Lazy members: the new members of `HTMLInputElement.prototype` and `HTMLButtonElement.prototype` (`validity`, `willValidate`, `validationMessage`, `setCustomValidity`, `labels`, `required`) are made when the first `input` or `button` wrapper is made, and `form.reset` when the first `form` wrapper is made, and the functions are shared with the select and textarea prototypes. A page without a control pays nothing. The deviation: `Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'validity')` is `undefined` until the page has touched an `input`. `ValidityState` and `HTMLLabelElement` are lazy globals installed last.
+
+On main 52d5d5a, with no local change to the engine, all ten live routes render, and no route logs a console error. The login now settles too; on 58864f0 it ended at the time budget. One run each, real clock, on a machine that ran parallel builds:
+
+| Route | Result | Time |
+| --- | --- | --- |
+| `/` | overview, 62 rows | 6.6 s |
+| `/calls` | "0 calls today", 2 rows | 14.6 s |
+| `/agents` | "33 agents" | 6.1 s |
+| `/journeys` | "6 journeys" | 8.1 s |
+| `/results` | "This agent has no journey yet" | 5.8 s |
+| `/clients` | "Clients" | 4.9 s |
+| `/disputes?tab=open` | "Disputes" | 5.7 s |
+| `/agents/new` | "Create agent", "Setup", 3 rows | 4.8 s |
+| `/calls?live=1` | "0 live calls" | 14.7 s |
+| `/journeys?status=paused` | "3 journeys, paused" | 9.0 s |
+
+The `DocumentFragment` constructor (#182) fixed `/results` and `/agents/new`. The `/results` text is an empty state of the app. It was not compared with Chrome on the same account (to verify). `/calls` took 34.7 s on 58864f0 and 14.6 s now; one run each, so the cause of the change is not known. The runs only load and render pages. No click, form submit or data change was tested yet.
