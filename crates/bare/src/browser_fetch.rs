@@ -158,7 +158,7 @@ const FORBIDDEN: [&str; 21] = [
     "date", "dnt", "expect", "host", "keep-alive", "origin", "referer", "set-cookie", "te", "trailer", "transfer-encoding", "upgrade", "via",
 ];
 
-fn forbidden_request(n: &str) -> bool {
+pub(crate) fn forbidden_request(n: &str) -> bool {
     FORBIDDEN.contains(&n) || n.starts_with("proxy-") || n.starts_with("sec-")
 }
 
@@ -261,7 +261,7 @@ impl HeaderList {
 }
 
 /// The bytes of a body init and the content type it implies.
-type BodyInit = (Rc<Vec<u8>>, Option<&'static str>);
+pub(crate) type BodyInit = (Rc<Vec<u8>>, Option<&'static str>);
 
 /// A body that is in memory. `None` bytes is a `null` body or a body that was consumed.
 struct Body {
@@ -334,6 +334,8 @@ struct Pending {
     headers: Vec<(String, String)>,
     body: Option<Rc<Vec<u8>>>,
     redirect: Redirect,
+    /// An `XMLHttpRequest` and its request generation (`browser_xhr.rs`). Then `promise` is `undefined`.
+    xhr: Option<(ObjId, u64)>,
 }
 
 #[derive(Default)]
@@ -367,7 +369,7 @@ pub(crate) struct Fetch {
     client: RefCell<Client>,
     protos: OnceCell<[ObjId; 6]>,
     fixed: RefCell<Vec<ObjId>>,
-    json_parse: Cell<Option<Value>>,
+    pub(crate) json_parse: Cell<Option<Value>>,
 }
 
 impl Default for Fetch {
@@ -380,7 +382,7 @@ impl Fetch {
     pub(crate) fn roots(&self, out: &mut Vec<Value>) {
         out.extend(self.fixed.borrow().iter().map(|&o| Value::Object(o)));
         out.extend(self.json_parse.get());
-        out.extend(self.st.borrow().queue.iter().map(|p| p.promise));
+        out.extend(self.st.borrow().queue.iter().flat_map(|p| [p.promise].into_iter().chain(p.xhr.map(|x| Value::Object(x.0)))));
     }
 
     pub(crate) fn trace(&self, owner: ObjId, out: &mut Vec<Value>) {
@@ -440,7 +442,7 @@ fn origin(u: &Url) -> String {
 // ---------------------------------------------------------------------------------------------- Dom side
 
 impl Dom {
-    fn fl(&self) -> FetchLimits {
+    pub(crate) fn fl(&self) -> FetchLimits {
         self.fetch.lim.get()
     }
 
@@ -659,7 +661,7 @@ impl Dom {
         }
     }
 
-    fn fetch_base(&self) -> Option<Url> {
+    pub(crate) fn fetch_base(&self) -> Option<Url> {
         let configured = self.fetch.st.borrow().base.as_ref().map(dup)?;
         let nav = self.nav.s.borrow();
         Some(nav.entries.get(nav.cur).map(|e| dup(&e.url.u)).unwrap_or(configured))
@@ -682,7 +684,7 @@ impl Dom {
     }
 
     /// The bytes of a body init, and its default content type. A copy is charged and bounded before it is made.
-    fn extract_body(&self, it: &mut Interp<'_>, v: Value) -> R<Option<BodyInit>> {
+    pub(crate) fn extract_body(&self, it: &mut Interp<'_>, v: Value) -> R<Option<BodyInit>> {
         let lim = self.fl();
         let (bytes, ty): (Vec<u8>, Option<&'static str>) = match v {
             Value::Undefined | Value::Null => return Ok(None),
@@ -706,7 +708,8 @@ impl Dom {
                     return Err(self.lim("fetch-request-body"));
                 }
                 self.reserve(it, 0, s.len())?;
-                (s.into_bytes(), Some("text/plain;charset=UTF-8"))
+                let params = matches!(v, Value::Object(o) if self.nav.s.borrow().params.contains_key(&o));
+                (s.into_bytes(), Some(if params { "application/x-www-form-urlencoded;charset=UTF-8" } else { "text/plain;charset=UTF-8" }))
             }
             _ => {
                 let s = self.string_arg(it, v)?;
@@ -1493,19 +1496,7 @@ fn prepare(d: &Dom, it: &mut Interp<'_>, promise: Value, a: &[Value]) -> R<()> {
     }
     // Policy: no DNS and no socket before this passes.
     let method = wire_method(&core.method)?;
-    {
-        let base = d.fetch_base();
-        let mut st = d.fetch.st.borrow_mut();
-        let Some(base) = base else {
-            st.diag(&lim, "blocked: no document origin is configured".into());
-            return Err(Error::Unsupported(unsupported("fetch without a configured document origin (Browser::configure_fetch)")));
-        };
-        if !base.same_origin(&core.url) {
-            let text = format!("blocked: cross-origin request to {} (CORS is a gate)", origin(&core.url));
-            st.diag(&lim, text);
-            return Err(Error::Unsupported(unsupported("fetch to another origin (CORS is not implemented)")));
-        }
-    }
+    policy(d, &lim, &core.url)?;
     let n = core.body.as_ref().map_or(0, |b| b.len());
     {
         let mut st = d.fetch.st.borrow_mut();
@@ -1529,14 +1520,71 @@ fn prepare(d: &Dom, it: &mut Interp<'_>, promise: Value, a: &[Value]) -> R<()> {
         if !headers.iter().any(|(k, _)| k == "accept") {
             headers.push(("accept".into(), "*/*".into()));
         }
-        st.queue.push_back(Pending { promise, method, url: core.url, headers, body: core.body, redirect: core.redirect });
+        st.queue.push_back(Pending { promise, method, url: core.url, headers, body: core.body, redirect: core.redirect, xhr: None });
     }
     Ok(())
 }
 
+/// The origin policy: a configured document origin, and the same origin for the request.
+fn policy(d: &Dom, lim: &FetchLimits, url: &Url) -> R<()> {
+    let base = d.fetch_base();
+    let mut st = d.fetch.st.borrow_mut();
+    let Some(base) = base else {
+        st.diag(lim, "blocked: no document origin is configured".into());
+        return Err(Error::Unsupported(unsupported("fetch without a configured document origin (Browser::configure_fetch)")));
+    };
+    if !base.same_origin(url) {
+        let text = format!("blocked: cross-origin request to {} (CORS is a gate)", origin(url));
+        st.diag(lim, text);
+        return Err(Error::Unsupported(unsupported("fetch to another origin (CORS is not implemented)")));
+    }
+    Ok(())
+}
+
+/// Queue the request of an `XMLHttpRequest` with the policy, the caps and the queue of `fetch`. `headers` are combined by name.
+pub(crate) fn queue_xhr(d: &Dom, x: (ObjId, u64), method: &str, url: Url, mut headers: Vec<(String, String)>, body: Option<Rc<Vec<u8>>>) -> R<()> {
+    let lim = d.fl();
+    {
+        let st = d.fetch.st.borrow();
+        if st.queue.len() >= lim.max_pending {
+            return Err(d.lim("fetch-queue"));
+        }
+        if st.started >= lim.max_started {
+            return Err(d.lim("fetch-requests"));
+        }
+    }
+    let method = match method {
+        "GET" => Method::Get,
+        "POST" => Method::Post,
+        _ => return Err(Error::Unsupported(unsupported("XMLHttpRequest method other than GET and POST"))),
+    };
+    policy(d, &lim, &url)?;
+    let n = body.as_ref().map_or(0, |b| b.len());
+    let mut st = d.fetch.st.borrow_mut();
+    if st.retained.saturating_add(st.queued_bytes).saturating_add(n) > lim.max_retained {
+        return Err(d.lim("fetch-retained"));
+    }
+    st.queued_bytes += n;
+    st.started += 1;
+    if !headers.iter().any(|(k, _)| k == "accept") {
+        headers.push(("accept".into(), "*/*".into()));
+    }
+    st.queue.push_back(Pending { promise: Value::Undefined, method, url, headers, body, redirect: Redirect::Follow, xhr: Some(x) });
+    Ok(())
+}
+
+/// Take the request of an `XMLHttpRequest` out of the queue, if it is still there.
+pub(crate) fn dequeue_xhr(d: &Dom, x: ObjId) {
+    let mut st = d.fetch.st.borrow_mut();
+    if let Some(i) = st.queue.iter().position(|t| t.xhr.is_some_and(|(o, _)| o == x)) {
+        let t = st.queue.remove(i).expect("position");
+        st.queued_bytes -= t.body.as_ref().map_or(0, |b| b.len());
+    }
+}
+
 // ---------------------------------------------------------------------------------------------- the network driver
 
-enum Outcome {
+pub(crate) enum Outcome {
     Done { status: u16, url: Url, redirected: bool, headers: Vec<(String, String)>, body: Vec<u8> },
     /// A network error or a policy stop. The label holds no header value, path or query.
     Failed(&'static str),
@@ -1696,6 +1744,10 @@ impl Browser {
                     st.diag(&lim, t);
                 }
             }
+            if let Some((x, seq)) = task.xhr {
+                self.xhr_deliver(x, seq, outcome)?;
+                continue;
+            }
             let promise = task.promise;
             self.it.host_scope(|it| {
                 finish(&dom, it, promise, outcome)?;
@@ -1725,6 +1777,10 @@ impl Browser {
         let n = tasks.len();
         self.it.host_scope(|it| {
             for t in tasks {
+                if let Some((x, seq)) = t.xhr {
+                    dom.xhr_abort_queued(it, x, seq)?;
+                    continue;
+                }
                 let e = dom.dom_err(it, "AbortError", "The operation was aborted.");
                 let v = thrown_value(e)?;
                 it.host_reject_promise(t.promise, v)?;

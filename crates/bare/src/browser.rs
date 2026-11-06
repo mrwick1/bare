@@ -53,6 +53,7 @@
 //!   network are absent. Timers, `queueMicrotask`, `performance.now` and `MessageChannel` are in `browser_scheduler.rs`. `Element.attributes` and `Attr` are in `browser_attr.rs`.
 //! - `addEventListener` option `signal` removes the listener on abort (`browser_abort.rs`). `isTrusted` is always false. Events made by the test driver
 //!   are plain `Event`s (no `MouseEvent`/`InputEvent` fields), except the `submit` of a click activation: a `SubmitEvent`.
+//! - `XMLHttpRequest`, its upload object and `ProgressEvent` are in `browser_xhr.rs` (read its header for the gates). Their events are trusted.
 //! - Focus (`browser_focus.rs`): `focus()`, `blur()`, `document.activeElement`, `FocusEvent`. Read its header.
 //! - Default actions are NOT implemented: no link navigation, no form validation or native form navigation, no checkbox toggle or
 //!   radio-group exclusion on click. Focus does not follow a click. The test driver sets native input state itself, then dispatches events.
@@ -353,6 +354,8 @@ pub struct Dom {
     pub(crate) dataset: crate::browser_dataset::DatasetHost,
     /// `AbortController` and `AbortSignal` (`browser_abort.rs`).
     pub(crate) abort: crate::browser_abort::AbortHost,
+    /// `XMLHttpRequest` and `ProgressEvent` (`browser_xhr.rs`).
+    pub(crate) xhr: crate::browser_xhr::XhrHost,
     /// `crypto`, `navigator`, `Blob`, `File` and `FormData` (`browser_web.rs`).
     pub(crate) web: crate::browser_web::WebHost,
 }
@@ -387,6 +390,7 @@ impl Host for Dom {
         crate::browser_nodelist::roots(self, out);
         crate::browser_dataset::roots(self, out);
         crate::browser_abort::roots(self, out);
+        crate::browser_xhr::roots(self, out);
         crate::browser_web::roots(self, out);
         self.resize_roots(out);
         self.frame_roots(out);
@@ -409,6 +413,9 @@ impl Host for Dom {
         crate::browser_nodelist::trace(self, owner, out);
         crate::browser_dataset::trace(self, owner, out);
         crate::browser_abort::trace(self, owner, out);
+        if self.xhr.active.get() {
+            crate::browser_xhr::trace(self, owner, out);
+        }
         if self.web.active.get() {
             crate::browser_web::trace(self, owner, out);
         }
@@ -468,6 +475,7 @@ impl Host for Dom {
         self.fetch.prune(live);
         self.streams.prune(live);
         crate::browser_abort::prune(self, live);
+        crate::browser_xhr::prune(self, live);
     }
 
     fn report_exception(&self, it: &mut Interp<'_>, thrown: Value) {
@@ -878,6 +886,7 @@ impl Dom {
         crate::browser_nodelist::install(self, it)?;
         crate::browser_dataset::install(self, it)?;
         crate::browser_abort::install(self, it)?;
+        crate::browser_xhr::install(self, it)?;
         crate::browser_encoding::install(self, it)?;
         crate::browser_web::install(self, it)?;
         crate::browser_console::install(self, it)?;
@@ -1139,6 +1148,7 @@ impl Browser {
             start: Instant::now(),
             sched: RefCell::default(),
             fetch: Default::default(),
+            xhr: Default::default(),
             streams: Default::default(),
             console: Default::default(),
             nav: Default::default(),

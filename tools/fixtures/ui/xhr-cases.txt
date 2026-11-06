@@ -1,0 +1,329 @@
+# XMLHttpRequest cases. The prelude is xhr-prelude.js. A case fills `out`; the runner waits for `finished`, then reads out.join('|').
+# The server (tools/ui/chrome_xhr.mjs, and the Rust one in browser_xhr_tests.rs) has the endpoints named in the cases. Chrome is the oracle.
+=== get_text
+var x = new XMLHttpRequest(); rec(x); done(x);
+out.push('new:' + x.readyState);
+x.open('GET', '/text');
+out.push('opened:' + x.readyState);
+x.send();
+out.push('sent:' + x.readyState);
+x.addEventListener('loadend', function () { out.push([x.status, x.statusText, x.responseText, x.response, path(x.responseURL), x.getResponseHeader('X-Custom'), x.getResponseHeader('content-type'), x.responseType === ''].join(',')); });
+=== get_json_type
+var x = new XMLHttpRequest(); rec(x); done(x);
+x.open('GET', '/json'); x.responseType = 'json'; x.send();
+x.addEventListener('loadend', function () { out.push(JSON.stringify(x.response) + ',' + (x.response === x.response) + ',' + err(function () { x.responseText; })); });
+=== get_json_text
+var x = new XMLHttpRequest(); done(x);
+x.open('GET', '/json'); x.send();
+x.addEventListener('loadend', function () { out.push(typeof x.response + ',' + x.responseText + ',' + x.getResponseHeader('content-type')); });
+=== bad_json
+var x = new XMLHttpRequest(); done(x);
+x.open('GET', '/badjson'); x.responseType = 'json'; x.send();
+x.addEventListener('loadend', function () { out.push(String(x.response) + ',' + x.status); });
+=== post_string
+var x = new XMLHttpRequest(); rec(x); done(x);
+x.open('POST', '/echo'); x.setRequestHeader('X-Test', 'one'); x.setRequestHeader('x-test', 'two'); x.send('a=1&b=2');
+x.addEventListener('loadend', function () { out.push(x.responseText); });
+=== post_string_content_type
+var x = new XMLHttpRequest(); done(x);
+x.open('POST', '/echo'); x.setRequestHeader('Content-Type', 'text/x-custom'); x.send('body');
+x.addEventListener('loadend', function () { out.push(x.responseText); });
+=== post_urlsearchparams
+var x = new XMLHttpRequest(); done(x);
+x.open('POST', '/echo'); x.send(new URLSearchParams({ a: '1', b: 'x y' }));
+x.addEventListener('loadend', function () { out.push(x.responseText); });
+=== post_arraybuffer
+var x = new XMLHttpRequest(); done(x);
+x.open('POST', '/echo'); x.send(new Uint8Array([104, 105, 33]).buffer);
+x.addEventListener('loadend', function () { out.push(x.responseText); });
+=== post_view
+var x = new XMLHttpRequest(); done(x);
+var b = new Uint8Array([0, 104, 105, 33, 0]);
+x.open('POST', '/echo'); x.send(new Uint8Array(b.buffer, 1, 3));
+x.addEventListener('loadend', function () { out.push(x.responseText); });
+=== get_ignores_body
+var x = new XMLHttpRequest(); done(x);
+x.open('GET', '/echo'); x.send('ignored');
+x.addEventListener('loadend', function () { out.push(x.responseText); });
+=== post_no_body
+var x = new XMLHttpRequest(); done(x);
+x.open('POST', '/echo'); x.send();
+x.addEventListener('loadend', function () { out.push(x.responseText); });
+=== post_null_body
+var x = new XMLHttpRequest(); done(x);
+x.open('POST', '/echo'); x.send(null);
+x.addEventListener('loadend', function () { out.push(x.responseText); });
+=== upload_events
+var x = new XMLHttpRequest(); rec(x); rec(x, 'u.'); done(x);
+x.open('POST', '/echo'); x.send('12345');
+=== upload_listener_but_get
+var x = new XMLHttpRequest(); rec(x); rec(x, 'u.'); done(x);
+x.open('GET', '/text'); x.send();
+=== upload_object
+var x = new XMLHttpRequest(); var u = x.upload;
+out.push([u === x.upload, u instanceof XMLHttpRequestUpload, u instanceof EventTarget, u instanceof XMLHttpRequestEventTarget, Object.prototype.toString.call(u), typeof u.onprogress, u.onload === null].join());
+after(10);
+=== status_404
+var x = new XMLHttpRequest(); rec(x); done(x);
+x.open('GET', '/missing'); x.send();
+x.addEventListener('loadend', function () { out.push([x.status, x.statusText, x.responseText].join(',')); });
+=== no_content_204
+var x = new XMLHttpRequest(); rec(x); done(x);
+x.open('GET', '/empty'); x.send();
+x.addEventListener('loadend', function () { out.push([x.status, x.statusText, JSON.stringify(x.responseText), x.getAllResponseHeaders().length > 0].join(',')); });
+=== network_error
+var x = new XMLHttpRequest(); rec(x); done(x);
+x.open('GET', '/reset'); x.send();
+x.addEventListener('loadend', function () { out.push([x.status, JSON.stringify(x.statusText), JSON.stringify(x.responseText), x.responseURL === '', x.readyState, x.getAllResponseHeaders() === '', x.getResponseHeader('content-type')].join(',')); });
+=== abort_after_send
+var x = new XMLHttpRequest(); rec(x); rec(x, 'u.'); done(x);
+x.open('POST', '/echo'); x.send('abc');
+out.push('before:' + x.readyState);
+x.abort();
+out.push('after:' + x.readyState + ',' + x.status);
+=== abort_after_send_get
+var x = new XMLHttpRequest(); rec(x); done(x);
+x.open('GET', '/text'); x.send();
+x.abort();
+out.push('after:' + x.readyState + ',' + x.status + ',' + JSON.stringify(x.responseText));
+=== abort_in_readystatechange_2
+var x = new XMLHttpRequest(); done(x);
+x.addEventListener('readystatechange', function () { out.push('rs:' + x.readyState); if (x.readyState === 2) x.abort(); });
+EV.slice(1).forEach(function (n) { x.addEventListener(n, function () { out.push(n); }); });
+x.open('GET', '/text'); x.send();
+x.addEventListener('loadend', function () { out.push('end:' + x.readyState + ',' + x.status); });
+=== abort_in_progress
+var x = new XMLHttpRequest(); done(x);
+EV.forEach(function (n) { x.addEventListener(n, function () { out.push(n + ':' + x.readyState); if (n === 'progress') x.abort(); }); });
+x.open('GET', '/text'); x.send();
+=== abort_when_unsent_and_done
+var x = new XMLHttpRequest(); rec(x);
+x.abort(); out.push('unsent:' + x.readyState);
+x.open('GET', '/text'); x.abort(); out.push('opened:' + x.readyState);
+x.send();
+x.addEventListener('loadend', function () { x.abort(); out.push('done:' + x.readyState + ',' + x.status); after(10); });
+=== abort_twice_and_resend
+var x = new XMLHttpRequest(); rec(x);
+x.open('GET', '/text'); x.send(); x.abort(); x.abort();
+x.open('GET', '/json'); x.send();
+x.addEventListener('loadend', function (e) { out.push(x.responseText); after(30); });
+=== timeout_fires
+var x = new XMLHttpRequest(); rec(x); done(x);
+x.open('GET', '/slow'); x.timeout = 50; x.send();
+x.addEventListener('loadend', function () { out.push([x.status, x.readyState, JSON.stringify(x.responseText), x.timeout].join(',')); });
+=== timeout_not_hit
+var x = new XMLHttpRequest(); rec(x); done(x);
+x.open('GET', '/text'); x.timeout = 5000; x.send();
+=== timeout_property
+var x = new XMLHttpRequest();
+out.push([x.timeout, (x.timeout = 5, x.timeout), (x.timeout = -1, x.timeout), (x.timeout = '7', x.timeout), (x.timeout = 4294967295, x.timeout), (x.timeout = 4294967296, x.timeout), (x.timeout = 1.9, x.timeout)].join());
+after(10);
+=== arraybuffer
+var x = new XMLHttpRequest(); done(x);
+x.open('GET', '/bin'); x.responseType = 'arraybuffer'; x.send();
+x.addEventListener('loadend', function () { var r = x.response; out.push([r instanceof ArrayBuffer, r.byteLength, Array.from(new Uint8Array(r)).join('.'), x.response === r, err(function () { x.responseText; })].join()); });
+=== arraybuffer_before_done
+var x = new XMLHttpRequest();
+x.open('GET', '/bin'); x.responseType = 'arraybuffer';
+out.push(String(x.response));
+x.send();
+out.push(String(x.response));
+x.addEventListener('readystatechange', function () { if (x.readyState === 3) out.push('rs3:' + String(x.response)); });
+x.addEventListener('loadend', function () { out.push('end:' + x.response.byteLength); after(10); });
+=== blob
+var x = new XMLHttpRequest(); done(x);
+x.open('GET', '/bin'); x.responseType = 'blob'; x.send();
+x.addEventListener('loadend', function () { var r = x.response; out.push([r instanceof Blob, r.size, JSON.stringify(r.type), x.response === r].join()); });
+=== blob_type_from_header
+var x = new XMLHttpRequest(); done(x);
+x.open('GET', '/json'); x.responseType = 'blob'; x.send();
+x.addEventListener('loadend', function () { out.push(JSON.stringify(x.response.type) + ',' + x.response.size); });
+=== response_type_text_explicit
+var x = new XMLHttpRequest(); done(x);
+x.open('GET', '/text'); x.responseType = 'text'; x.send();
+x.addEventListener('loadend', function () { out.push(x.response + ',' + x.responseText); });
+=== response_type_rules
+var x = new XMLHttpRequest(); var r = [];
+r.push(x.responseType === '');
+x.responseType = 'bogus'; r.push(JSON.stringify(x.responseType));
+x.responseType = 'json'; r.push(x.responseType);
+x.open('GET', '/text'); x.responseType = 'arraybuffer'; r.push(x.responseType);
+x.send();
+r.push(err(function () { x.responseType = 'text'; }));
+x.addEventListener('loadend', function () { r.push(err(function () { x.responseType = 'text'; })); out.push(r.join()); after(10); });
+=== all_headers_format
+var x = new XMLHttpRequest(); done(x);
+x.open('GET', '/headers'); x.send();
+x.addEventListener('loadend', function () { out.push(hdrs(x)); });
+=== get_response_header
+var x = new XMLHttpRequest(); done(x);
+x.open('GET', '/headers'); x.send();
+out.push(String(x.getResponseHeader('x-dup')));
+x.addEventListener('loadend', function () { out.push([x.getResponseHeader('X-DUP'), x.getResponseHeader('X-Mixed-Case'), x.getResponseHeader('set-cookie'), x.getResponseHeader('nope'), x.getResponseHeader('content-length'), err(function () { x.getResponseHeader(); })].join('|')); });
+=== all_headers_before_headers
+var x = new XMLHttpRequest();
+out.push(JSON.stringify(x.getAllResponseHeaders()) + ',' + x.getResponseHeader('a'));
+x.open('GET', '/headers');
+out.push(JSON.stringify(x.getAllResponseHeaders()) + ',' + x.getResponseHeader('a'));
+after(10);
+=== redirect
+var x = new XMLHttpRequest(); rec(x); done(x);
+x.open('GET', '/redir'); x.send();
+x.addEventListener('loadend', function () { out.push([x.status, path(x.responseURL), x.responseText].join(',')); });
+=== readystate_sequence
+var x = new XMLHttpRequest(); done(x);
+x.addEventListener('readystatechange', function () { out.push(x.readyState + ':' + x.status + ':' + JSON.stringify(x.responseText) + ':' + x.getAllResponseHeaders().split('\r\n').filter(function (l) { return /^(x-custom|content-type|content-length):/.test(l); }).length); });
+x.open('GET', '/text'); x.send();
+=== constants
+var X = XMLHttpRequest, x = new X();
+out.push([X.UNSENT, X.OPENED, X.HEADERS_RECEIVED, X.LOADING, X.DONE, x.UNSENT, x.DONE, Object.getOwnPropertyDescriptor(X, 'DONE').writable, Object.getOwnPropertyDescriptor(X, 'DONE').enumerable].join());
+after(10);
+=== open_errors
+var x = new XMLHttpRequest();
+out.push([err(function () { x.open('GE T', '/x'); }), err(function () { x.open('', '/x'); }), err(function () { x.open('CONNECT', '/x'); }), err(function () { x.open('trace', '/x'); }), err(function () { x.open('TRACK', '/x'); }), err(function () { x.open('GET', 'http://[bad'); }), err(function () { x.open(); })].join());
+after(10);
+=== open_method_case
+var x = new XMLHttpRequest(); done(x);
+x.open('post', '/echo'); x.send('q');
+x.addEventListener('loadend', function () { out.push(x.responseText); });
+=== open_resets
+var x = new XMLHttpRequest(); rec(x);
+x.open('GET', '/text'); x.setRequestHeader('X-Test', 'gone');
+x.open('GET', '/echo');
+x.send();
+x.addEventListener('loadend', function () { out.push(x.responseText); after(30); });
+=== open_twice_events
+var x = new XMLHttpRequest(); rec(x);
+x.open('GET', '/text'); x.open('GET', '/text');
+x.abort();
+x.open('GET', '/text');
+after(20);
+=== send_errors
+var x = new XMLHttpRequest(); var r = [];
+r.push(err(function () { x.send(); }));
+x.open('GET', '/text'); x.send();
+r.push(err(function () { x.send(); }));
+r.push(err(function () { x.send('a'); }));
+x.addEventListener('loadend', function () { r.push(err(function () { x.send(); })); out.push(r.join()); after(10); });
+=== set_request_header_rules
+var x = new XMLHttpRequest(); var r = [];
+r.push(err(function () { x.setRequestHeader('a', 'b'); }));
+x.open('POST', '/echo');
+r.push(err(function () { x.setRequestHeader('bad name', 'b'); }));
+r.push(err(function () { x.setRequestHeader('a', 'b\nc'); }));
+r.push(err(function () { x.setRequestHeader('Host', 'evil'); }));
+r.push(err(function () { x.setRequestHeader('Content-Length', '3'); }));
+r.push(err(function () { x.setRequestHeader('Cookie', 'a=b'); }));
+r.push(err(function () { x.setRequestHeader('Sec-Fetch-Mode', 'x'); }));
+r.push(err(function () { x.setRequestHeader('X-Test', ' padded \t'); }));
+x.send('z');
+r.push(err(function () { x.setRequestHeader('X-Other', 'b'); }));
+x.addEventListener('loadend', function () { out.push(r.join() + '|' + x.responseText); after(10); });
+=== with_credentials_rules
+var x = new XMLHttpRequest(); var r = [x.withCredentials];
+x.withCredentials = true; r.push(x.withCredentials);
+x.open('GET', '/text'); x.withCredentials = false; r.push(x.withCredentials);
+x.send();
+r.push(err(function () { x.withCredentials = true; }));
+x.addEventListener('loadend', function () { r.push(err(function () { x.withCredentials = true; })); out.push(r.join()); after(10); });
+=== override_mime_type
+var x = new XMLHttpRequest(); var r = [];
+r.push(err(function () { x.overrideMimeType('text/plain'); }));
+x.open('GET', '/json'); x.overrideMimeType('text/plain; charset=utf-8'); x.responseType = 'blob'; x.send();
+x.addEventListener('loadend', function () { r.push(JSON.stringify(x.response.type)); out.push(r.join()); after(10); });
+=== override_after_send
+var x = new XMLHttpRequest(); done(x);
+x.open('GET', '/text'); x.send();
+out.push(err(function () { x.overrideMimeType('text/html'); }));
+=== handlers_and_attributes
+var x = new XMLHttpRequest(); done(x);
+var names = ['readystatechange', 'loadstart', 'progress', 'load', 'error', 'abort', 'timeout', 'loadend'];
+out.push(names.map(function (n) { return typeof x['on' + n] + (x['on' + n] === null); }).join(), names.map(function (n) { return 'on' + n in x.upload; }).join());
+names.forEach(function (n) { x['on' + n] = function (e) { out.push('on' + n + ':' + (e instanceof ProgressEvent) + ':' + (this === x)); }; });
+x.open('GET', '/text'); x.send();
+=== handler_non_function
+var x = new XMLHttpRequest(); done(x);
+x.onload = 5; out.push(String(x.onload));
+x.onload = {}; out.push(typeof x.onload);
+x.onload = null; out.push(String(x.onload));
+x.open('GET', '/text'); x.send();
+=== handler_order_with_listener
+var x = new XMLHttpRequest(); done(x);
+x.addEventListener('load', function () { out.push('a'); });
+x.onload = function () { out.push('h'); };
+x.addEventListener('load', function () { out.push('b'); });
+x.open('GET', '/text'); x.send();
+=== progress_event_shape
+var x = new XMLHttpRequest(); done(x);
+x.addEventListener('progress', function (e) { out.push([e instanceof ProgressEvent, e instanceof Event, e.type, e.bubbles, e.cancelable, e.composed, e.isTrusted, e.lengthComputable, e.loaded, e.total, e.target === x, e.currentTarget === x, e.eventPhase].join()); });
+x.addEventListener('readystatechange', function (e) { if (x.readyState === 4) out.push([e instanceof ProgressEvent, e.type, e.bubbles, e.isTrusted].join()); });
+x.open('GET', '/len'); x.send();
+=== progress_event_ctor
+var e = new ProgressEvent('x', { loaded: 3, total: 9, lengthComputable: true, bubbles: true });
+var f = new ProgressEvent('y');
+out.push([e.type, e.loaded, e.total, e.lengthComputable, e.bubbles, f.loaded, f.total, f.lengthComputable, Object.prototype.toString.call(e), ProgressEvent.length, err(function () { new ProgressEvent(); })].join());
+after(10);
+=== length_computable
+var x = new XMLHttpRequest(); rec(x); done(x);
+x.open('GET', '/len'); x.send();
+=== no_length
+var x = new XMLHttpRequest(); rec(x); done(x);
+x.open('GET', '/chunked'); x.send();
+x.addEventListener('loadend', function () { out.push(x.responseText); });
+=== abort_event_fields
+var x = new XMLHttpRequest();
+EV.forEach(function (n) { x.addEventListener(n, function (e) { if (n !== 'readystatechange') out.push(n + ':' + e.loaded + ',' + e.total + ',' + e.lengthComputable + ',' + x.status + ',' + x.readyState); }); });
+x.open('GET', '/text'); x.send(); x.abort();
+after(30);
+=== listener_throws
+var x = new XMLHttpRequest(); done(x);
+x.addEventListener('load', function () { out.push('l1'); throw new Error('x'); });
+x.addEventListener('load', function () { out.push('l2'); });
+x.addEventListener('loadend', function () { out.push('end'); });
+x.open('GET', '/text'); x.send();
+=== send_in_loadend
+var x = new XMLHttpRequest(); var n = 0;
+x.addEventListener('loadend', function () { out.push('end' + n + ':' + x.responseText); if (n++ < 1) { x.open('GET', '/json'); x.send(); } else after(10); });
+x.open('GET', '/text'); x.send();
+=== two_requests_order
+var a = new XMLHttpRequest(), b = new XMLHttpRequest();
+a.addEventListener('loadend', function () { out.push('a'); }); b.addEventListener('loadend', function () { out.push('b'); after(20); });
+a.open('GET', '/text'); b.open('GET', '/json'); a.send(); b.send();
+=== promise_and_timer_interleave
+var x = new XMLHttpRequest(); done(x);
+EV.forEach(function (n) { x.addEventListener(n, function () { Promise.resolve().then(function () { out.push('m:' + n); }); out.push(n + (n === 'readystatechange' ? x.readyState : '')); }); });
+x.open('GET', '/text'); x.send();
+out.push('sync-end');
+=== response_url_fragment
+var x = new XMLHttpRequest(); done(x);
+x.open('GET', '/text#frag'); x.send();
+x.addEventListener('loadend', function () { out.push(path(x.responseURL)); });
+=== url_relative_and_query
+var x = new XMLHttpRequest(); done(x);
+x.open('GET', 'echo?q=1'); x.send();
+x.addEventListener('loadend', function () { out.push(path(x.responseURL) + ',' + x.status); });
+=== accept_default
+var x = new XMLHttpRequest(); done(x);
+x.open('GET', '/accept'); x.send();
+x.addEventListener('loadend', function () { out.push(x.responseText); });
+=== accept_set
+var x = new XMLHttpRequest(); done(x);
+x.open('GET', '/accept'); x.setRequestHeader('Accept', 'application/json'); x.send();
+x.addEventListener('loadend', function () { out.push(x.responseText); });
+=== object_shape
+var X = XMLHttpRequest, p = X.prototype, x = new X();
+out.push([typeof X, X.length, X.name, Object.prototype.toString.call(x), Object.getPrototypeOf(p) === XMLHttpRequestEventTarget.prototype, Object.getPrototypeOf(XMLHttpRequestEventTarget.prototype) === EventTarget.prototype, err(function () { X(); }), err(function () { new XMLHttpRequestEventTarget(); }), err(function () { new XMLHttpRequestUpload(); }), typeof p.open, p.open.length, p.send.length, p.setRequestHeader.length, p.abort.length, 'responseText' in p, Object.getOwnPropertyDescriptor(p, 'readyState').set === undefined, Object.getOwnPropertyDescriptor(p, 'timeout').set !== undefined].join());
+after(10);
+=== brand_check
+var d = Object.getOwnPropertyDescriptor(XMLHttpRequest.prototype, 'readyState').get;
+out.push([err(function () { d.call({}); }), err(function () { XMLHttpRequest.prototype.open.call({}, 'GET', '/'); }), err(function () { XMLHttpRequest.prototype.abort.call(new EventTarget()); })].join());
+after(10);
+=== response_text_decoding
+var x = new XMLHttpRequest(); done(x);
+x.open('GET', '/utf8'); x.send();
+x.addEventListener('loadend', function () { out.push(x.responseText + ',' + x.responseText.length); });
+=== load_before_loadend_status
+var x = new XMLHttpRequest(); done(x);
+x.addEventListener('load', function () { out.push('load:' + x.readyState + ':' + x.status); });
+x.addEventListener('loadend', function () { out.push('loadend:' + x.readyState + ':' + x.status); });
+x.open('GET', '/text'); x.send();
