@@ -30,6 +30,25 @@
 //! its URL (no cache: the state of that page, its `history.state` and its form values are not restored). A neighbor that a form
 //! `POST` made is not loaded again (a body is never sent twice; Chrome asks first): the traversal does nothing. The scroll offset of
 //! a document is kept when it ends and put back when a traversal loads it again. A new navigation drops the entries after it.
+//!
+//! Settled (the rule of `Browser::run_page`; the same for `run` and `resume`). A page is settled when a round does no work and
+//! none of the tasks that are due within the quiet window (`page.quiet`) blocks. Work is a script, a network task (`fetch`,
+//! XHR, script, style sheet, preload), a timer, a message, a frame or a traversal that ran in the round. All network I/O
+//! happens inside the rounds, one request at a time, so "no request in flight" holds by construction: a settled page has no
+//! request queued or running. A queued task blocks, with two exceptions:
+//! - A recurring timer whose last run was quiet. A timer is recurring if it is a `setInterval`, or a `setTimeout` whose own
+//!   callback (the same function object) armed it again, and its delay is at least 16 ms (one frame; a faster timer is a
+//!   work loop and always blocks). A run is quiet if it changed the DOM at most 8 times (node added or removed, attribute or
+//!   text written), queued no fetch, script or traversal, and queued no task except its own re-arm. A recurring timer has
+//!   no verdict before its first run, so that run is waited for (at most `quiet` away); a later busy run takes the verdict back.
+//! - The rendering step (`requestAnimationFrame`) after a quiet frame, judged the same way. The step re-queues itself while
+//!   callbacks wait. A call to `requestAnimationFrame` from outside a frame (a click, a timer) takes the verdict back.
+//!
+//! The skipped tasks stay queued and keep their due times. The loader waits for the next task of any kind, so a skipped timer
+//! runs on time while the page waits for a blocking one, and a `resume` runs it when its time comes (the virtual clock moves only
+//! while a blocking task is near). `PageResult::idle_timers` (the period in ms of each skipped timer) and `idle_frames` say what a
+//! settled page left running. Not detected: a timeout that arms a new closure each time (`setTimeout(() => tick(), 1000)`)
+//! is a chain of one-shots and blocks while it is within the window. A timer beyond the window never blocks, as before.
 //! Results and diagnostics name `scheme://host:port/path` only: no query, fragment, header, body or source.
 
 use crate::browser::{Browser, BrowserLimits};

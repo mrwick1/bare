@@ -450,6 +450,11 @@ fn origin(u: &Url) -> String {
 // ---------------------------------------------------------------------------------------------- Dom side
 
 impl Dom {
+    /// Requests that wait for `run_network_tasks` (`fetch` and XHR).
+    pub(crate) fn fetch_queued(&self) -> usize {
+        self.fetch.st.borrow().queue.len()
+    }
+
     pub(crate) fn fl(&self) -> FetchLimits {
         self.fetch.lim.get()
     }

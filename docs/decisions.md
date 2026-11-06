@@ -137,6 +137,18 @@ Chrome, Firefox, WebKit, Servo and Ladybird all store a box tree (Chrome: `Layou
 - The table decides its own width inside `sized_with` (`block.rs`): a table is a block level box with a shrink-to-fit width that is never less than the least width of its columns. `solve_margins` is the one place that finds the margins for a given width.
 - An `inline-table` is an atomic inline with the table context. The table fragment includes its captions, as the box of the table in Chrome.
 
+## Settle rule
+
+A page is settled when a round does no work and no task that blocks is due within the quiet window (`page.quiet`). The rule is in the header of `crates/bare/src/browser_session.rs`. The choices:
+
+- Recurring timers and frame loops are skipped, not cancelled. A skipped timer stays queued with its due time, so `resume` and the wait for a blocking task still run it on time. The alternative, to stop or freeze the timers at the settle, would change the page and would break a later `resume`.
+- A timer is judged by its own last run, not by its kind. A clock, a poll with no fetch and a heartbeat are quiet. A poll that fetches, or a timer that builds DOM, is not. The first run of a recurring timer is waited for (it is at most `quiet` away), because nothing is known before it. This costs up to one period of wall time, and gives the timer a verdict from a real run and not from a guess about its code.
+- A run is quiet if it changed the DOM at most 8 times (the document revision counters, always on) and queued no fetch, script, traversal or task except its own re-arm. The 8 allows a clock with several fields and a spinner. It does not allow a loop that grows the page by a few nodes each tick forever; the page limits stop that.
+- A re-armed `setTimeout` is detected by the identity of the callback function (it is the callback that is running). It is free: one compare in `setTimeout`. A new closure each time (`() => tick()`) is not detected and blocks while it is within the window. Comparing the code of the closure would need the interpreter and was not measured to be needed.
+- A timer under 16 ms (one frame) is a work loop and always blocks. It also keeps the old behavior for a `setInterval(f, 0)` spin, which a task budget must still stop.
+- A frame loop is treated like a timer: the rendering step is quiet if the frame changed the DOM at most 8 times and queued nothing but the next step. A spinner or a progress bar that writes one style in each frame does not keep the page busy. A frame that builds DOM, starts a fetch or queues a task does. A call to `requestAnimationFrame` from outside a frame (a click, a timer) takes the verdict back, so a frame that someone asked for is never skipped.
+- No clock is changed. The virtual clock moves only while a blocking task is near, so a virtual-clock session that settles has not run its skipped timers for the rest of the time.
+
 ## Code style
 
 - Plain code. No clever tricks.

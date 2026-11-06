@@ -3477,6 +3477,57 @@ Load matrix (`tools/js/observer_load.sh`, 6 processes, 1 GiB address space and 4
 These are single runs on a quiet machine, taken before `init_function` (a run under load 15 took 2.5 times longer for the same instructions). Growth with scale has known causes that are not new. `mo`: removed nodes stay in the DOM arena (200,005 nodes at 100x in `browser_load mutation` too). `raf`: the attribute text buffer never frees, and 1,000,000 `style` writes keep 11.25 MiB (`stats().text_bytes`). A page that writes a style on each frame grows without a bound; this is a follow-up for the DOM text buffer.
 
 Not tested: a page with 10,000 observed targets for `IntersectionObserver` at 100x, `MutationObserver` with `characterData` at 100x, a frame loop with `IntersectionObserver` and `ResizeObserver` together, the live staging login on this build, and `perf` rows for `svg`, `svgparse` and `rel` of `browser_load`.
+## Settle rule, recurring timers and frame loops
+
+The staging dashboard ended at `TimeBudget` after the full 60 s with 3 s of CPU. A recurring timer was always due within the quiet window (1 s), so the old rule (settled when the next task is more than `quiet` away) never held. The new rule is in the header of `crates/bare/src/browser_session.rs`; the reasons are in [decisions.md](decisions.md#settle-rule).
+
+Rule, in short. Idle round, then: no network task queued (all network I/O runs in the rounds, one request at a time, so none is in flight), and no task due within `quiet` blocks. Two kinds of task do not block: a recurring timer whose last run was quiet, and the rendering step after a quiet frame. Recurring: `setInterval`, or a `setTimeout` set while a timer with the same callback function ran; delay at least 16 ms. Quiet run: at most 8 DOM changes, no fetch, script or traversal queued, no task queued except the re-arm.
+
+Measured on synthetic pages (`browser_settle_tests.rs`, `quiet` 1 s, virtual clock unless noted). The interval and the re-armed timeout were found by the pages, not by name.
+
+| Page | Before | After |
+| --- | --- | --- |
+| `setInterval` 1000 ms, writes `textContent` | no settle (5,000 rounds, the budget) | settles after 1 judged run, 2 tasks, reports `[1000]` |
+| `setTimeout(tick, 400)` re-armed by `tick` | no settle | settles, 2 tasks, reports `[400]` |
+| Same clock on the real clock | not run on the old rule (the live page ended at `TimeBudget`, 60 s) | 1.009 s wall |
+| `setInterval` 200 ms plus a one-shot at 700 ms that adds DOM | no settle | settles after the one-shot ran, the interval ran 3 times on the way |
+| Poll with `fetch` every 5 s | settles (5 s is beyond the window) | settles after the fetch and its callback ran, same |
+| Poll with `fetch` every 300 ms | no settle | no settle (a fetch is work), `TaskBudget` |
+| Interval that builds 20 nodes for 3 runs, then nothing | no settle | settles after the 4th run (the quiet one) |
+| `setInterval` 5 ms | no settle | no settle (under one frame is a loop) |
+| rAF loop that changes nothing | no settle | settles after 1 judged frame, `idle_frames` true |
+| rAF loop that writes one style a frame | no settle | settles (decision: a spinner is ambient) |
+| rAF loop that adds 20 nodes, starts a `fetch`, or sets a timer each frame | no settle | no settle, `RoundBudget` |
+| rAF asked for by a click after the settle | n/a | the frame runs, then settles |
+| `resume` with a click that waits 700 ms next to a 200 ms interval | n/a | the interval ticks 3 times, on time |
+
+Wall time to settle on the virtual clock: 9 to 11 ms for each page (a page parse, 2 to 5 tasks). The real clock sleeps the one judged period: 1.009 s for a 1000 ms interval.
+
+Cost: `perf stat -e instructions:u`, minimum of 3 runs, main 7d67152 against this build rebased on it, each in its own `CARGO_TARGET_DIR` under `/data/bare-tmp`, release examples. 20 rows. All below +0.5%. The worst is `scheduler_load timers 1` at +0.400% (50,247,128 to 50,448,357), then `scheduler_load timers 100` +0.358%, `timers 10` +0.333%, `mixed 100` +0.175% and `mixed 1` +0.147%. The cost is two reads of the counters for each timer task and each frame (`settle_mark`: the document revisions, the length of the fetch, script and traversal queues, the sequence number). On main 4de178c, before the rebase, the worst was `timers 100` at +0.379%. `observer_load` rows are between -0.143% and -0.021%, `loader_load` rows between -0.009% and +0.135%, `session_load` -0.052% and +0.002%, `browser_load` mutation, event and lookup +0.005%, -0.036% and +0.007%.
+
+Limits and cost of the choices:
+
+- The first run of a recurring timer is waited for, so a page with an interval of 900 ms waits about 0.9 s before it settles. A recurring timer that is more than `quiet` away is not waited for and is not reported.
+- A timeout that arms a new closure each time is a chain of one-shots and blocks while it is within the window.
+- A recurring timer that adds a `<link rel=stylesheet>` counts one DOM change. The sheet is fetched by the next round, so it still loads before the settle, but the run is called quiet.
+- The verdict is the last run. If an outside event (a click) changes what the next tick does, the settle does not wait for it. A timer that starts to fetch after a click is judged when it runs.
+- A virtual-clock session that settles does not run the skipped timers for the rest of its time. A real-clock session runs them as time passes.
+
+Live staging (2026-11-06, release build of this change, real clock, `quiet` 1 s, `login` then each route in a new session with the logged-in storage; the machine ran parallel builds at times):
+
+| Route | Wall time to settle | Rounds | Skipped timers |
+| --- | --- | --- | --- |
+| `/login` | 1.8 s | 8 | none |
+| login submit, then `/` | 5.6 s to 6.2 s | 12 to 14 | 1000 ms |
+| `/` with the stored login | 5.5 s | 13 | 1000 ms |
+| `/calls` | 34 s | 148 | 1000 ms |
+| `/agents` | 4.8 s | 10 | none |
+| `/journeys` | 8.3 s | 13 | none |
+
+Before, `/` and `/calls` ended at `TimeBudget` (60 s). One run of each route. `/calls` needs 148 rounds against about 13 for `/`: the cause is not measured (to verify: a busy timer or a slow reply). A harness for this run is not in the repository; it needs the staging account from the vault.
+
+Not tested: the kind of the 1000 ms timer on the live page, a page with 10,000 recurring timers (the walk of `blocks_settle` stops at the first blocking task, so a queue of skipped timers in front costs one check each at every idle round), `setInterval` with a throwing callback, and a timer that calls `requestAnimationFrame` each tick.
+
 ## XMLHttpRequest
 
 Problem: pages that call `new XMLHttpRequest()` threw `ReferenceError`. Many libraries still use it for login and API calls.

@@ -19,7 +19,8 @@
 //!    before `load`). Then rounds of tasks: queued scripts, `fetch` requests, timers, each category at most `batch` tasks per
 //!    round, so a zero-delay timer loop cannot starve the network or scripts. When no script is queued, `readyState`
 //!    becomes `complete` and `load` is dispatched at the window (it does not wait for timers or `fetch`).
-//! 5. The page is settled when nothing is queued and the next timer is more than `quiet` away (or there is none).
+//! 5. The page is settled when nothing is queued and no task that blocks is within `quiet`. A quiet recurring timer or frame
+//!    loop does not block (the rule is in the header of `browser_session.rs`; the code is `Browser::blocks_settle`).
 //!
 //! Same-document traversal and fragment tasks (`popstate`, `hashchange`) are a fourth task category of each round.
 //! A navigation request (`location.assign/replace/reload`, `history.go(0)`) ends the run before the next script, event,
@@ -229,6 +230,10 @@ pub struct PageResult {
     /// Short sanitized lines (origin and path of a script, an error name, a label): never source, headers, bodies or queries.
     pub diagnostics: Vec<String>,
     pub dropped_diagnostics: usize,
+    /// Only when `stop` is `Settled`: the period in ms of each recurring timer that the settle rule skipped, in due order.
+    pub idle_timers: Vec<u32>,
+    /// Only when `stop` is `Settled`: a quiet `requestAnimationFrame` loop was left running.
+    pub idle_frames: bool,
 }
 
 // ---------------------------------------------------------------------------------------------- host state
@@ -269,6 +274,11 @@ pub(crate) struct Scripts {
 }
 
 impl Dom {
+    /// Scripts that wait to run (inline and external dynamic scripts).
+    pub(crate) fn scripts_queued(&self) -> usize {
+        self.scripts.inline.borrow().len() + self.scripts.external.borrow().len()
+    }
+
     pub(crate) fn scripts_roots(&self, out: &mut Vec<Value>) {
         let s = &self.scripts;
         out.extend(s.fixed.borrow().iter().map(|&o| Value::Object(o)));
@@ -619,7 +629,7 @@ impl Browser {
     /// It never panics on page input and never returns an `Err`: the result says why it stopped.
     pub fn run_page(&mut self, cfg: PageConfig) -> PageResult {
         let dom = self.dom.clone();
-        let mut res = PageResult { stop: Stop::Settled, ready_state: "loading", scripts_run: 0, script_throws: 0, load_errors: 0, tasks: 0, rounds: 0, fetches: 0, bytes: 0, css: CssStats::default(), preload: PreloadStats::default(), diagnostics: Vec::new(), dropped_diagnostics: 0 };
+        let mut res = PageResult { stop: Stop::Settled, ready_state: "loading", scripts_run: 0, script_throws: 0, load_errors: 0, tasks: 0, rounds: 0, fetches: 0, bytes: 0, css: CssStats::default(), preload: PreloadStats::default(), diagnostics: Vec::new(), dropped_diagnostics: 0, idle_timers: Vec::new(), idle_frames: false };
         let prior = dom.scripts.fatal.borrow().clone();
         if let Some(f) = prior {
             res.stop = Stop::Fatal(f);
@@ -708,6 +718,9 @@ impl Browser {
         if let Stop::Fatal(f) = &stop {
             *dom.scripts.fatal.borrow_mut() = Some(f.clone());
         }
+        if stop == Stop::Settled {
+            (res.idle_timers, res.idle_frames) = self.idle_left();
+        }
         res.stop = stop;
         res.ready_state = ["loading", "interactive", "complete"][dom.scripts.ready.get() as usize];
         res
@@ -727,7 +740,7 @@ impl Browser {
         limits.max_rounds = limits.max_rounds.min(caps.1.saturating_sub(spent.1));
         limits.max_time = limits.max_time.min(caps.2.saturating_sub(spent.2));
         let started = Instant::now();
-        let mut res = PageResult { stop: Stop::Settled, ready_state: "loading", scripts_run: 0, script_throws: 0, load_errors: 0, tasks: 0, rounds: 0, fetches, bytes, css: dom.scripts.sheets.borrow().stats, preload: dom.scripts.preloads.borrow().stats, diagnostics: Vec::new(), dropped_diagnostics: 0 };
+        let mut res = PageResult { stop: Stop::Settled, ready_state: "loading", scripts_run: 0, script_throws: 0, load_errors: 0, tasks: 0, rounds: 0, fetches, bytes, css: dom.scripts.sheets.borrow().stats, preload: dom.scripts.preloads.borrow().stats, diagnostics: Vec::new(), dropped_diagnostics: 0, idle_timers: Vec::new(), idle_frames: false };
         let prior = dom.scripts.fatal.borrow().clone();
         if let Some(f) = prior {
             res.stop = Stop::Fatal(f);
@@ -762,6 +775,9 @@ impl Browser {
         dom.scripts.used.set((res.fetches, res.bytes));
         if let Stop::Fatal(f) = &stop {
             *dom.scripts.fatal.borrow_mut() = Some(f.clone());
+        }
+        if stop == Stop::Settled {
+            (res.idle_timers, res.idle_frames) = self.idle_left();
         }
         res.stop = stop;
         res.ready_state = ["loading", "interactive", "complete"][dom.scripts.ready.get() as usize];
@@ -1154,12 +1170,14 @@ impl Run<'_> {
             if did > 0 {
                 continue;
             }
-            // Idle: wait for the next timer if it is near, else the page is settled.
-            let Some(due) = self.b.next_scheduled_due() else { return Err(Stop::Settled) };
-            let gap = due - self.b.now();
-            if gap.is_nan() || gap > self.lim.quiet.as_secs_f64() * 1000.0 {
+            // Idle: wait for the next task if one that blocks the settle is near, else the page is settled. The wait is
+            // for the next task of any kind, so a recurring timer that the rule skips still runs on time on the way.
+            let now = self.b.now();
+            if !self.b.blocks_settle(now + self.lim.quiet.as_secs_f64() * 1000.0) {
                 return Err(Stop::Settled);
             }
+            let due = self.b.next_scheduled_due().unwrap_or(now);
+            let gap = due - now;
             if self.b.uses_virtual_clock() {
                 let pump = self.b.advance_to(due, 1).map_err(fatal_of)?;
                 self.res.tasks += pump.ran;

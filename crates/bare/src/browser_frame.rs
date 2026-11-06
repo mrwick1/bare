@@ -18,6 +18,9 @@
 //!    and a microtask checkpoint follows each callback.
 //! 2. `ResizeObserver` (`browser_resize.rs`). 3. `IntersectionObserver` (`browser_intersection.rs`).
 //!
+//! The settle rule treats a rendering step as quiet when its callbacks and observers changed the DOM at most 8 times and queued nothing
+//! but the next step (`Sched::frame_idle`, `browser_scheduler.rs`). A loop of such steps does not keep a session from settling.
+//!
 //! Handles are numbers from 1, never reused. Gates: none. Bound: `animation-frame-callbacks` (live callbacks).
 //! The two globals are plain data properties of `window`. Not here: `requestIdleCallback`, `document.timeline`, `Animation`.
 
