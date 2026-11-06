@@ -227,7 +227,27 @@ pub struct Document {
     // The shadow root of each shadow host, by `NodeId::index` of the host. The root is not a child of the host: the light links of the host never show it.
     shadow_host: HashMap<u32, (NodeId, bool), BuildHasherDefault<Fnv>>,
     // The way back: the host of each shadow root, and whether its mode is open. A host that is not in `shadow_of` has no root.
+    watcher: Option<Watcher>,
+    // The host function that is told of each change (see `set_watcher`). A page with no watcher pays one `Option` check at a change.
 }
+
+/// A change of the tree that `Document::set_watcher` reports, before the document answers a later read. `prev` and `next` are the
+/// siblings of `node` at that moment (for a node that left, the siblings it had).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Change {
+    /// `node` was put in the children of `parent`.
+    Link { parent: NodeId, node: NodeId, prev: Option<NodeId>, next: Option<NodeId> },
+    /// `node` is about to leave the children of `parent`.
+    Unlink { parent: NodeId, node: NodeId, prev: Option<NodeId>, next: Option<NodeId> },
+    /// The attribute `name` of `el` is set or removed. `old` is the value before, `None` when there was none. The watcher runs
+    /// while the change is in progress: it must not read the attribute, only use `old`.
+    Attr { el: NodeId, name: Atom, old: Option<Span> },
+    /// The text of `node` changes. `old` is the value it had.
+    Text { node: NodeId, old: Span },
+}
+
+/// A host function for `Document::set_watcher`. It gets the document as it is at the call and must not run script.
+pub type Watcher = Box<dyn FnMut(&Document, Change)>;
 
 /// A watched attribute that was removed: the element, the name and the value it had. The value stays readable
 /// with `Document::text`, because the text buffer never frees.
@@ -297,6 +317,7 @@ impl Document {
             text_revision: 0,
             shadow_of: HashMap::default(),
             shadow_host: HashMap::default(),
+            watcher: None,
         };
         // The order matters: it must match `Atom::ID` and `Atom::CLASS`.
         doc.intern("id");
@@ -541,6 +562,9 @@ impl Document {
         let prev = self.child_before(parent, before);
         let n = &mut self.nodes[node.index()];
         (n.parent, n.prev, n.next) = (Some(parent), prev, before);
+        if self.watcher.is_some() {
+            self.notify(Change::Link { parent, node, prev, next: before });
+        }
         // Fix the links of the neighbours. JS: like inserting into a doubly linked list.
         match prev {
             Some(p) => self.nodes[p.index()].next = Some(node),
@@ -557,6 +581,9 @@ impl Document {
     pub fn detach(&mut self, node: NodeId) {
         let Node { parent, prev, next, .. } = self.nodes[node.index()];
         let Some(parent) = parent else { return };
+        if self.watcher.is_some() {
+            self.notify(Change::Unlink { parent, node, prev, next });
+        }
         self.places = Default::default();
         self.revision += 1;
         match prev {
@@ -838,8 +865,14 @@ impl Document {
         // An empty list can start after the end (see `attrs`): it begins again at the end.
         let (start, len) = if attrs.len == 0 { (self.attrs.len(), 0) } else { (attrs.start as usize, attrs.len as usize) };
         if let Some(a) = self.attrs[start..start + len].iter_mut().find(|a| a.name == name) {
-            a.value = span;
+            let old = std::mem::replace(&mut a.value, span);
+            if self.watcher.is_some() {
+                self.notify(Change::Attr { el, name, old: Some(old) });
+            }
             return;
+        }
+        if self.watcher.is_some() {
+            self.notify(Change::Attr { el, name, old: None });
         }
         let new_start = if start + len == self.attrs.len() {
             start
@@ -869,6 +902,9 @@ impl Document {
         self.revision += 1;
         self.class_sets.get_mut().remove(&el.index());
         let value = self.attrs[start + at].value;
+        if self.watcher.is_some() {
+            self.notify(Change::Attr { el, name, old: Some(value) });
+        }
         // A watched attribute is logged once: it leaves the watch set here, so the log cannot grow without a new `watch_attr`.
         if !self.watched.is_empty() && self.watched.remove(&(el.index() as u32, name.0)) {
             self.removed.push(RemovedAttr { el, name, value });
@@ -879,6 +915,20 @@ impl Document {
         }
         self.nodes[el.index()].data = NodeData::Element { name: tag, attrs: AttrList { start: attrs.start, len: attrs.len - 1 } };
         true
+    }
+
+    /// Tell `watcher` of every change of the tree, attributes and text from now on (`None` stops it). One watcher at a time. A page that
+    /// sets none pays one check at a change. `Link` is sent after the node is in place, the other three before the change is made, so
+    /// the old value is still readable. The watcher must not change this document.
+    pub fn set_watcher(&mut self, watcher: Option<Watcher>) {
+        self.watcher = watcher;
+    }
+
+    fn notify(&mut self, change: Change) {
+        if let Some(mut w) = self.watcher.take() {
+            w(self, change);
+            self.watcher = Some(w);
+        }
     }
 
     /// Ask to be told when the attribute `name` of `el` is removed (by any path: `remove_attr`, `remove_attr_atom`). A host
@@ -927,6 +977,11 @@ impl Document {
     /// The old bytes stay in the text buffer (see `text_bytes`).
     pub fn set_text(&mut self, node: NodeId, text: &str) {
         self.text_revision += 1;
+        if self.watcher.is_some()
+            && let NodeData::Text(old) | NodeData::Comment(old) | NodeData::Doctype(old) = self.nodes[node.index()].data
+        {
+            self.notify(Change::Text { node, old });
+        }
         match self.nodes[node.index()].data {
             NodeData::Text(_) => self.nodes[node.index()].data = NodeData::Text(self.push_text(text)),
             NodeData::Comment(_) => self.nodes[node.index()].data = NodeData::Comment(self.push_text(text)),

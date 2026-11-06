@@ -102,11 +102,18 @@ mod browser_style_block;
 pub mod browser_computed;
 pub mod browser_geometry;
 pub mod browser_resize;
+mod browser_element;
 mod browser_frame;
+mod browser_lazy;
+mod browser_mutation;
 #[cfg(test)]
 mod browser_topic_tests;
 #[cfg(test)]
 mod browser_raf_tests;
+#[cfg(test)]
+mod browser_element_tests;
+#[cfg(test)]
+mod browser_mutation_tests;
 mod browser_intersection;
 #[cfg(test)]
 mod browser_resize_tests;

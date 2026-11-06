@@ -1,6 +1,6 @@
 //! The Chrome-checked cases of the DOM APIs of this change. Each topic has a case file (`tools/fixtures/ui/<topic>-cases.txt`) and the
 //! answers of headless Chrome (`chrome-<topic>.txt`, made by `tools/ui/chrome_topic.mjs`). A case is `=== name`, then optional `@html` and
-//! `@css` lines, then a script whose last expression is a reader function. The host runs the script in a 400 x 300 window, moves the
+//! `@css` lines, then a script (lines before the first case are a prelude of every script) whose last expression is a reader function. The host runs the script in a 400 x 300 window, moves the
 //! virtual clock 400 ms (as Chrome waits 400 ms), calls the reader and compares its string with the one of Chrome.
 
 use crate::browser::*;
@@ -18,9 +18,13 @@ pub(crate) struct Case {
 
 pub(crate) fn parse(cases: &str) -> Vec<Case> {
     let mut out: Vec<Case> = Vec::new();
+    let mut pre = String::new();
     for line in cases.lines() {
         if let Some(n) = line.strip_prefix("=== ") {
-            out.push(Case { name: n.trim().into(), html: String::new(), css: String::new(), script: String::new() });
+            out.push(Case { name: n.trim().into(), html: String::new(), css: String::new(), script: pre.clone() });
+        } else if out.is_empty() {
+            pre += line;
+            pre += "\n";
         } else if let Some(k) = out.last_mut() {
             if let Some(h) = line.strip_prefix("@html ") {
                 k.html += h;

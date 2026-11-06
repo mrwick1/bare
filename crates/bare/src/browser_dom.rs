@@ -319,6 +319,27 @@ impl Dom {
         Ok(())
     }
 
+    /// `append` and `prepend`: the standard makes one fragment of the nodes and inserts it, so the changes are one group (one `MutationObserver`
+    /// record) and the inserted scripts run after all nodes are in. One node is the plain `insert_checked`.
+    fn insert_many(&self, it: &mut Interp<'_>, parent: NodeId, nodes: &[NodeId], before: Option<NodeId>) -> R<()> {
+        if let [n] = nodes {
+            return self.insert_checked(it, parent, *n, before);
+        }
+        self.mo_group(None, || {
+            for &n in nodes {
+                self.check_insert(it, parent, n, before, None)?;
+                let mut doc = self.doc.borrow_mut();
+                let b = if before == Some(n) { doc.next_sibling(n) } else { before };
+                doc.move_to(n, parent, b);
+            }
+            Ok(())
+        })?;
+        for &n in nodes {
+            self.script_inserted(it, n)?;
+        }
+        Ok(())
+    }
+
     fn insert_checked(&self, it: &mut Interp<'_>, parent: NodeId, node: NodeId, before: Option<NodeId>) -> R<()> {
         self.check_insert(it, parent, node, before, None)?;
         let mut doc = self.doc.borrow_mut();
@@ -707,16 +728,19 @@ pub(crate) fn set_text_content(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[V
     let s = if matches!(v, Value::Null | Value::Undefined) { String::new() } else { d.string_arg(it, v)? };
     match d.data(n) {
         NodeData::Element { .. } | NodeData::ShadowRoot => {
-            let mut doc = d.doc.borrow_mut();
-            d.room(&doc, !s.is_empty() as usize, s.len())?;
-            while let Some(c) = doc.children(n).next() {
-                it.charge(1)?;
-                doc.detach(c);
-            }
-            if !s.is_empty() {
-                let t = doc.create_text(&s);
-                doc.move_to(t, n, None);
-            }
+            d.mo_group(Some(n), || {
+                let mut doc = d.doc.borrow_mut();
+                d.room(&doc, !s.is_empty() as usize, s.len())?;
+                while let Some(c) = doc.children(n).next() {
+                    it.charge(1)?;
+                    doc.detach(c);
+                }
+                if !s.is_empty() {
+                    let t = doc.create_text(&s);
+                    doc.move_to(t, n, None);
+                }
+                Ok(())
+            })?;
         }
         NodeData::Text(_) | NodeData::Comment(_) => {
             let mut doc = d.doc.borrow_mut();
@@ -764,20 +788,21 @@ pub(crate) fn replace_child(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Valu
         return Ok(arg(a, 1));
     }
     d.check_insert(it, parent, new, Some(old), Some(old))?;
-    let mut doc = d.doc.borrow_mut();
-    let before = if doc.next_sibling(old) == Some(new) { doc.next_sibling(new) } else { doc.next_sibling(old) };
-    doc.detach(old);
-    doc.move_to(new, parent, before);
-    drop(doc);
+    d.mo_group(None, || {
+        let mut doc = d.doc.borrow_mut();
+        let before = if doc.next_sibling(old) == Some(new) { doc.next_sibling(new) } else { doc.next_sibling(old) };
+        doc.detach(old);
+        doc.move_to(new, parent, before);
+        Ok(())
+    })?;
     d.script_inserted(it, new)?;
     Ok(arg(a, 1))
 }
 
 pub(crate) fn append(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
     let parent = d.nd(it, this)?;
-    for n in d.nodes_from(it, a)? {
-        d.insert_checked(it, parent, n, None)?;
-    }
+    let nodes = d.nodes_from(it, a)?;
+    d.insert_many(it, parent, &nodes, None)?;
     Ok(Value::Undefined)
 }
 
@@ -793,9 +818,7 @@ pub(crate) fn prepend(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) ->
         }
         c
     };
-    for n in nodes {
-        d.insert_checked(it, parent, n, first)?;
-    }
+    d.insert_many(it, parent, &nodes, first)?;
     Ok(Value::Undefined)
 }
 

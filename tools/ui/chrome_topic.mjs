@@ -1,6 +1,6 @@
 // Run the cases of tools/fixtures/ui/<topic>-cases.txt in headless Chrome and write tools/fixtures/ui/chrome-<topic>.txt (`name<TAB>result`).
 // Usage: node tools/ui/chrome_topic.mjs raf mutation intersection walker range element
-// A case is `=== name`, then optional lines `@html MARKUP` (the body) and `@css RULES`, then a script. The last expression of the script is
+// Lines before the first case are a prelude that every script starts with. A case is `=== name`, then optional lines `@html MARKUP` (the body) and `@css RULES`, then a script. The last expression of the script is
 // a reader function. The case runs in a fresh 400x300 iframe (own realm, standards mode, no scrollbars). After the script the page waits
 // 400 ms for frames and timers, then the reader runs and its result is turned into a string. A throw gives `throw:Name:message`.
 // The bare test (`crates/bare/src/browser_topic_tests.rs`) runs the same cases on the same markup and compares.
@@ -32,10 +32,10 @@ await c.eval(`window.__run = async (html, css, src) => {
   return out;
 }`);
 for (const topic of process.argv.slice(2)) {
-  const cases = [];
+  const cases = [], pre = [];
   for (const line of readFileSync(`tools/fixtures/ui/${topic}-cases.txt`, 'utf8').split('\n')) {
-    if (line.startsWith('=== ')) cases.push({ name: line.slice(4).trim(), html: '', css: '', lines: [] });
-    else if (!cases.length) continue;
+    if (line.startsWith('=== ')) cases.push({ name: line.slice(4).trim(), html: '', css: '', lines: [...pre] });
+    else if (!cases.length) pre.push(line);
     else if (line.startsWith('@html ')) cases.at(-1).html += line.slice(6);
     else if (line.startsWith('@css ')) cases.at(-1).css += line.slice(5);
     else cases.at(-1).lines.push(line);

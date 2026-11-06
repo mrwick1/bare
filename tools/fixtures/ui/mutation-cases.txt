@@ -1,0 +1,204 @@
+var log = [];
+function nm(n) { return n === null ? 'null' : n.nodeType === 1 ? n.tagName.toLowerCase() + (n.id ? '#' + n.id : '') : n.nodeType === 3 ? '"' + n.data + '"' : n.nodeName }
+function list(l) { return '[' + Array.prototype.map.call(l, nm).join(',') + ']' }
+function rec(r) { var s = r.type + ' ' + nm(r.target); if (r.type === 'childList') s += ' +' + list(r.addedNodes) + ' -' + list(r.removedNodes) + ' p=' + nm(r.previousSibling) + ' n=' + nm(r.nextSibling); if (r.type === 'attributes') s += ' ' + r.attributeName + ' ns=' + r.attributeNamespace + ' old=' + r.oldValue; if (r.type === 'characterData') s += ' old=' + r.oldValue; return s }
+var mo = new MutationObserver(function (rs, o) { rs.forEach(function (r) { log.push(rec(r)) }) });
+var $ = function (i) { return document.getElementById(i) };
+var out = function () { return log.join(' | ') };
+=== shape
+(function () { return [typeof MutationObserver, MutationObserver.length, typeof MutationRecord, typeof mo.observe, typeof mo.disconnect, typeof mo.takeRecords, mo.observe.length, mo.disconnect.length, mo.takeRecords.length, mo.takeRecords().length, MutationObserver.name].join(' ') })
+=== constructor-errors
+(function () { var r = []; try { new MutationObserver() } catch (e) { r.push(e.name + ': ' + e.message) } try { new MutationObserver(1) } catch (e) { r.push(e.name + ': ' + e.message) } try { new MutationRecord() } catch (e) { r.push(e.name + ': ' + e.message) } return r.join(' | ') })
+=== observe-argument-errors
+(function () { var r = []; try { mo.observe() } catch (e) { r.push(e.name + ': ' + e.message) } try { mo.observe({}, { childList: true }) } catch (e) { r.push(e.name + ': ' + e.message) } try { mo.observe(document.body) } catch (e) { r.push(e.name + ': ' + e.message) } try { mo.observe(document.body, {}) } catch (e) { r.push(e.name + ': ' + e.message) } return r.join(' | ') })
+=== observe-option-errors
+(function () { var r = [], b = document.body; [{ attributes: false, attributeOldValue: true }, { attributes: false, attributeFilter: ['a'] }, { characterData: false, characterDataOldValue: true }, { childList: false }, { subtree: true }, { attributeOldValue: false }].forEach(function (o) { try { mo.observe(b, o); r.push('ok') } catch (e) { r.push(e.name + ': ' + e.message) } }); return r.join(' | ') })
+=== implied-options-and-methods-on-the-wrong-object
+(function () { var r = []; mo.observe(document.body, { attributeOldValue: true }); mo.observe(document.body, { attributeFilter: ['x'] }); mo.observe(document.body, { characterDataOldValue: true }); try { mo.observe.call({}, document.body, { childList: true }) } catch (e) { r.push(e.name + ': ' + e.message) } try { mo.disconnect.call({}) } catch (e) { r.push(e.name + ': ' + e.message) } try { mo.takeRecords.call({}) } catch (e) { r.push(e.name + ': ' + e.message) } return r.join(' | ') })
+=== append-child
+@html <div id=a></div>
+mo.observe($('a'), { childList: true }); var b = document.createElement('b'); b.id = 'x'; $('a').appendChild(b);
+out
+=== delivery-is-a-microtask
+@html <div id=a></div>
+mo.observe($('a'), { childList: true }); $('a').appendChild(document.createElement('i')); log.push('sync:' + log.length); Promise.resolve().then(function () { log.push('promise') }); setTimeout(function () { log.push('timeout') }, 0);
+out
+=== promise-queued-before-the-mutation-runs-first
+@html <div id=a></div>
+Promise.resolve().then(function () { log.push('promise') }); mo.observe($('a'), { childList: true }); $('a').appendChild(document.createElement('i'));
+out
+=== insert-before-and-siblings
+@html <div id=a><i id=x></i><i id=y></i></div>
+mo.observe($('a'), { childList: true }); $('a').insertBefore(document.createElement('b'), $('y')); $('a').insertBefore(document.createElement('u'), null);
+out
+=== remove-child
+@html <div id=a><i id=x></i><i id=y></i><i id=z></i></div>
+mo.observe($('a'), { childList: true }); $('a').removeChild($('y'));
+out
+=== element-remove
+@html <div id=a><i id=x></i><i id=y></i></div>
+mo.observe($('a'), { childList: true }); $('x').remove();
+out
+=== replace-child-is-one-record
+@html <div id=a><i id=x></i><i id=y></i><i id=z></i></div>
+mo.observe($('a'), { childList: true }); var b = document.createElement('b'); $('a').replaceChild(b, $('y'));
+out
+=== text-content-replaces-all
+@html <div id=a><i id=x></i><i id=y></i></div>
+mo.observe($('a'), { childList: true }); $('a').textContent = 'hi';
+out
+=== text-content-empty-on-empty-has-no-record
+@html <div id=a></div>
+mo.observe($('a'), { childList: true }); $('a').textContent = ''; $('a').textContent = null;
+out
+=== text-content-empty-removes-all
+@html <div id=a><i id=x></i><i id=y></i></div>
+mo.observe($('a'), { childList: true }); $('a').textContent = '';
+out
+=== append-many-is-one-record
+@html <div id=a><i id=x></i></div>
+mo.observe($('a'), { childList: true }); var b = document.createElement('b'), u = document.createElement('u'); $('a').append(b, 'txt', u);
+out
+=== prepend-many-is-one-record
+@html <div id=a><i id=x></i></div>
+mo.observe($('a'), { childList: true }); var b = document.createElement('b'), u = document.createElement('u'); $('a').prepend(b, u);
+out
+=== inner-html-is-one-record
+@html <div id=a><i id=x></i><i id=y></i></div>
+mo.observe($('a'), { childList: true, subtree: true }); $('a').innerHTML = '<p id=p><span>t</span></p>text';
+out
+=== move-inside-the-same-parent-is-two-records
+@html <div id=a><i id=x></i><i id=y></i><i id=z></i></div>
+mo.observe($('a'), { childList: true }); $('a').insertBefore($('z'), $('x'));
+out
+=== move-between-two-observed-parents
+@html <div id=a><i id=x></i></div><div id=c></div>
+mo.observe($('a'), { childList: true }); mo.observe($('c'), { childList: true }); $('c').appendChild($('x'));
+out
+=== subtree-false-ignores-descendants
+@html <div id=a><div id=b></div></div>
+mo.observe($('a'), { childList: true }); $('b').appendChild(document.createElement('i'));
+out
+=== subtree-true-sees-descendants
+@html <div id=a><div id=b></div></div>
+mo.observe($('a'), { childList: true, subtree: true }); $('b').appendChild(document.createElement('i'));
+out
+=== attribute-set-twice-and-remove
+@html <div id=a></div>
+mo.observe($('a'), { attributes: true }); $('a').setAttribute('x', '1'); $('a').setAttribute('x', '1'); $('a').removeAttribute('x'); $('a').removeAttribute('x');
+out
+=== attribute-old-value
+@html <div id=a x=1></div>
+mo.observe($('a'), { attributeOldValue: true }); $('a').setAttribute('x', '2'); $('a').setAttribute('y', '3'); $('a').setAttribute('y', '4'); $('a').removeAttribute('x');
+out
+=== attribute-old-value-off
+@html <div id=a x=1></div>
+mo.observe($('a'), { attributes: true }); $('a').setAttribute('x', '2');
+out
+=== attribute-filter
+@html <div id=a></div>
+mo.observe($('a'), { attributeFilter: ['x', 'z'] }); $('a').setAttribute('x', '1'); $('a').setAttribute('y', '1'); $('a').setAttribute('z', '1'); $('a').removeAttribute('y');
+out
+=== attribute-filter-is-case-sensitive-for-html
+@html <div id=a></div>
+mo.observe($('a'), { attributeFilter: ['X'] }); $('a').setAttribute('X', '1'); $('a').setAttribute('x', '1');
+out
+=== attribute-shortcuts
+@html <div id=a></div>
+mo.observe($('a'), { attributes: true, attributeOldValue: true }); $('a').id = 'b'; $('b').className = 'c1'; $('b').classList.add('c2'); $('b').style.width = '5px'; $('b').dataset.k = 'v'; $('b').hidden = true;
+out
+=== attribute-namespace
+@html <svg id=a></svg>
+mo.observe($('a'), { attributes: true, attributeOldValue: true }); $('a').setAttributeNS('http://www.w3.org/1999/xlink', 'xlink:href', '#a'); $('a').setAttributeNS('http://www.w3.org/1999/xlink', 'xlink:href', '#b'); $('a').removeAttributeNS('http://www.w3.org/1999/xlink', 'href');
+out
+=== attribute-filter-skips-namespaced
+@html <svg id=a></svg>
+mo.observe($('a'), { attributeFilter: ['href'] }); $('a').setAttributeNS('http://www.w3.org/1999/xlink', 'xlink:href', '#a'); $('a').setAttribute('href', '#b');
+out
+=== attributes-in-the-subtree
+@html <div id=a><div id=b></div></div>
+mo.observe($('a'), { attributes: true, subtree: true }); $('b').setAttribute('x', '1'); $('a').setAttribute('y', '1');
+out
+=== attributes-without-subtree-ignore-descendants
+@html <div id=a><div id=b></div></div>
+mo.observe($('a'), { attributes: true }); $('b').setAttribute('x', '1');
+out
+=== character-data-and-old-value
+@html <div id=a>hello</div>
+var t = $('a').firstChild; mo.observe(t, { characterData: true, characterDataOldValue: true }); t.data = 'one'; t.nodeValue = 'two'; t.textContent = 'three'; t.data += '!';
+out
+=== character-data-old-value-off
+@html <div id=a>hello</div>
+var t = $('a').firstChild; mo.observe(t, { characterData: true }); t.data = 'one';
+out
+=== character-data-in-the-subtree
+@html <div id=a>hello<b id=b>x</b></div>
+mo.observe($('a'), { characterData: true, subtree: true }); $('b').firstChild.data = 'y'; $('a').firstChild.data = 'z';
+out
+=== character-data-of-a-comment
+@html <div id=a><!--c--></div>
+var t = $('a').firstChild; mo.observe(t, { characterData: true, characterDataOldValue: true }); t.data = 'd';
+out
+=== one-record-per-observer-with-two-registrations
+@html <div id=a><div id=b></div></div>
+mo.observe($('a'), { attributes: true, subtree: true }); mo.observe($('b'), { attributes: true, attributeOldValue: true }); $('b').setAttribute('x', '1'); $('b').setAttribute('x', '2');
+out
+=== observing-again-replaces-the-options
+@html <div id=a></div>
+mo.observe($('a'), { attributes: true }); mo.observe($('a'), { childList: true }); $('a').setAttribute('x', '1'); $('a').appendChild(document.createElement('i'));
+out
+=== two-observers-in-creation-order
+@html <div id=a></div>
+var mo2 = new MutationObserver(function (rs) { log.push('second:' + rs.length) }); var mo3 = new MutationObserver(function (rs) { log.push('third:' + rs.length) }); mo3.observe($('a'), { attributes: true }); mo2.observe($('a'), { attributes: true }); mo.observe($('a'), { attributes: true }); $('a').setAttribute('x', '1');
+out
+=== disconnect-drops-queued-records
+@html <div id=a></div>
+mo.observe($('a'), { attributes: true }); $('a').setAttribute('x', '1'); mo.disconnect(); $('a').setAttribute('x', '2');
+out
+=== take-records-returns-and-clears
+@html <div id=a></div>
+mo.observe($('a'), { attributes: true }); $('a').setAttribute('x', '1'); $('a').setAttribute('x', '2'); var t = mo.takeRecords(); log.push('taken:' + t.length + ' ' + rec(t[0]) + ' ' + Array.isArray(t)); log.push('again:' + mo.takeRecords().length);
+out
+=== callback-arguments
+@html <div id=a></div>
+var m2 = new MutationObserver(function (rs, o) { log.push(Array.isArray(rs) + ' ' + rs.length + ' ' + (this === m2) + ' ' + (o === m2) + ' ' + arguments.length + ' ' + (rs[0].target === $('a')) + ' ' + (rs[0].addedNodes[0] === b)) }); var b = document.createElement('i'); m2.observe($('a'), { childList: true }); $('a').appendChild(b);
+out
+=== record-fields
+@html <div id=a></div>
+var m2 = new MutationObserver(function (rs) { var r = rs[0]; log.push([r.type, typeof r.addedNodes.length, typeof r.removedNodes.length, r.previousSibling, r.nextSibling, r.attributeName, r.attributeNamespace, r.oldValue, typeof r].join(',')) }); m2.observe($('a'), { childList: true }); $('a').appendChild(document.createElement('i'));
+out
+=== a-removed-node-is-still-observed-until-delivery
+@html <div id=a><div id=b></div></div>
+mo.observe($('a'), { attributes: true, subtree: true }); var b = $('b'); b.remove(); b.setAttribute('x', '1'); Promise.resolve().then(function () { b.setAttribute('y', '1') });
+out
+=== a-removed-node-is-not-observed-after-delivery
+@html <div id=a><div id=b></div></div>
+mo.observe($('a'), { attributes: true, subtree: true }); var b = $('b'); b.remove(); setTimeout(function () { b.setAttribute('x', '1') }, 5);
+out
+=== a-mutation-in-the-callback-queues-another-delivery
+@html <div id=a></div>
+var n = 0, m2 = new MutationObserver(function (rs) { n++; log.push('call' + n + ':' + rs.length); if (n < 3) $('a').setAttribute('x', n) }); m2.observe($('a'), { attributes: true }); $('a').setAttribute('x', 'start');
+out
+=== observe-a-detached-node
+var e = document.createElement('div'); mo.observe(e, { childList: true, attributes: true }); e.setAttribute('x', '1'); e.appendChild(document.createElement('i'));
+out
+=== observe-the-document-subtree
+@html <div id=a></div>
+mo.observe(document, { childList: true, subtree: true, attributes: true }); $('a').appendChild(document.createElement('i')); $('a').setAttribute('x', '1'); document.body.appendChild(document.createElement('u'));
+out
+=== clone-node-has-no-records
+@html <div id=a><i></i></div>
+mo.observe($('a'), { childList: true, subtree: true }); $('a').cloneNode(true);
+out
+=== remove-a-subtree-that-holds-an-observed-node
+@html <div id=a><div id=b><i id=c></i></div></div>
+mo.observe($('b'), { childList: true }); var b = $('b'); $('a').removeChild(b); b.appendChild(document.createElement('u'));
+out
+=== a-throwing-callback-does-not-stop-the-next-observer
+@html <div id=a></div>
+var m2 = new MutationObserver(function () { throw new Error('x') }); m2.observe($('a'), { attributes: true }); mo.observe($('a'), { attributes: true }); $('a').setAttribute('x', '1');
+out
+=== record-order-in-one-observer
+@html <div id=a><div id=b></div></div>
+mo.observe($('a'), { childList: true, attributes: true, subtree: true }); $('b').setAttribute('x', '1'); $('a').appendChild(document.createElement('i')); $('b').setAttribute('x', '2'); $('b').remove();
+out

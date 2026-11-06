@@ -1,0 +1,46 @@
+hidden-reflects-the-attribute	false:null true: until-found:until-found true:false true:no true:
+hidden-setter	true>true: false>false:null "x">true: "">false:null "until-found">until-found:until-found 0>false:null 5>true: null>false:null undefined>false:null "false">true:
+inert-reflects-and-sets	false true true   
+tabindex-defaults	a-1 b0 c0 d0 e0 f0 g0 h0 i-1 j0 k-1 l-1 m-1 n-1 o0 p0 q-1 r-1 s0 t-1 u0 v0 w-1
+tabindex-parsing	a5 b-1 c-3 d7 e4 f1 g-1 h0 i-1 j0 k3 l0
+tabindex-setter	3>3:3 -1.7>-1:-1 "5x">0:0 "abc">0:0 null>0:0 undefined>0:0 2147483648>-2147483648:-2147483648 true>1:1 100000000000000000000>1661992960:1661992960
+click-fires-one-click-event	b doc:b:false:true:true:true:click undefined
+click-on-a-disabled-button-does-nothing	d
+click-inside-a-click-listener-is-ignored	1
+click-again-after-the-first-finished	2
+click-on-a-submit-button-submits-the-form	submit:b
+click-cancelled-does-not-submit	click
+click-is-missing-on-svg-and-shape	undefined function true 0
+click-on-the-wrong-object	TypeError: Illegal invocation
+offset-parent-is-the-body-for-a-static-box	true 8 8 50 20
+offset-parent-null-for-root-body-none-and-fixed	    30 40 0 0  0
+offset-in-a-positioned-parent	true 7 5 18 28 true
+offset-skips-a-static-ancestor	true 4 4 true 0
+offset-rounds-to-an-integer	11 18 21 6
+offset-ignores-the-scroll-of-a-container	100 60 70
+offset-in-a-table	true 2 2 true
+offset-of-a-detached-element	 0 0 0
+offset-members-on-the-wrong-object	TypeError: Illegal invocation | TypeError: Illegal invocation | TypeError: Illegal invocation
+inner-text-block-newlines	"one\\ntwo\\nthree"
+inner-text-paragraphs	"x\\n\\ny\\n\\nz"
+inner-text-edge-breaks-are-trimmed	"x"
+inner-text-br	"a\\nb\\n\\nc"
+inner-text-collapses-white-space	"a b c d e"
+inner-text-pre-keeps-white-space	"  a\\n b  ""x y\\nz""  p  q "
+inner-text-white-space-between-blocks-and-spans	"a\\nb\\nc de f"
+inner-text-skips-display-none	"xy"
+inner-text-visibility	"xvy"
+inner-text-text-transform	"ABC DEF""Hello Big World""abc Def"
+inner-text-of-an-element-with-no-box-is-text-content	"xy z""  q  r"
+inner-text-of-a-detached-element	"a b   cd"
+inner-text-list-and-headings	"one\\ntwo\\nt\\nx"
+inner-text-table	"a\\tb\\nc\\td"
+inner-text-inline-block-and-flex	"xyz""p\\nq""m\\nn\\no"
+inner-text-replaced-and-comments	"xyzw"
+inner-text-nbsp-is-kept	"a  b c"
+inner-text-of-the-body	"one\\n\\ntwo\\nthree"
+inner-text-nested-blocks-count-once	"x\\n\\ny"
+inner-text-setter	"x\\ny\\r\\nz">x<br>y<br>z|5 "p\\rq">p<br>q|3 "">|0 null>|0 "a\\n">a<br>|2 "<b>t</b>">&lt;b&gt;t&lt;/b&gt;|1 5>5|1
+tabindex-defaults-of-more-elements	a-1 b-1 c-1 d-1 e-1 f-1 g-1 h- i-1 j-1 k-1 l-1 m- n-1 o0 p0 q-1
+inner-text-is-missing-on-svg	undefined true
+offset-of-the-body-and-html	0 0 0 0

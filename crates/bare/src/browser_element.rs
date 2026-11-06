@@ -1,0 +1,489 @@
+//! `HTMLElement` members: `hidden`, `inert`, `tabIndex` (also on `SVGElement`), `click()`, `offsetParent`, `offsetTop`, `offsetLeft` and `innerText`.
+//! Sources: HTML Standard ("The hidden attribute", "inert", "tabindex", "innerText", "rendered text collection steps", `click()`), CSSOM View
+//! (`offsetParent`, `offsetTop`, `offsetLeft`). Read by hand, then compared with headless Chrome: `tools/fixtures/ui/element-cases.txt`.
+//!
+//! What is built
+//! - `hidden`: a boolean, or the string `until-found` when the attribute is that word (ASCII case-insensitive). The setter writes `until-found`
+//!   for that string, else `""` for a true value and removes the attribute for a false one. `inert`: the attribute is there or not.
+//! - `tabIndex`: the attribute as a "valid integer" (leading white space, a sign, digits; the rest is ignored; out of `i32` is the default).
+//!   The default is 0 for `a area button input select textarea iframe object video audio`, the first `summary` of a `details`, and an SVG `a`;
+//!   else -1 (like Chrome: `contenteditable` is -1, not 0). The setter writes `ToInt32` in decimal.
+//! - `click()`: `HTMLElement` only. A disabled control does nothing. A click that is running on the same element is ignored. Else one `click`
+//!   event (`isTrusted` false, bubbles, cancelable, composed) goes to the element, and a submit button submits its form (`browser_form.rs`).
+//! - `offsetParent`, `offsetTop`, `offsetLeft`: from native layout (the same path as `offsetWidth`, see `browser_geometry.rs`). No box (detached,
+//!   `display:none` or below it) is `null` and 0. `offsetParent` is `null` for `html`, `body` and `position:fixed`, else the nearest ancestor that is
+//!   positioned, or `td th table` when the element is static, or `body`. The offsets are of the border box: against the page origin when the parent is
+//!   `null` or `body` (scroll is ignored, as layout is), else against the padding edge of the parent. Whole pixels, halves up, like `offsetWidth`.
+//! - `innerText` getter: the "rendered text collection steps" over the native cascade: `display:none` is skipped; `visibility` hides the text of the
+//!   element, not of the children; `white-space` (`normal nowrap pre pre-line pre-wrap break-spaces`) and `text-transform` apply; `br` is a line feed;
+//!   a block-level box (also a flex item, a float, an absolute box) gives one required line break at each side, `p` gives two; a table cell that is
+//!   not last in its row gives a tab, a row that is not last in its table a line feed; runs of breaks are one run of the largest; breaks at the
+//!   start and the end are dropped. An element with no box, or a detached one, gives `textContent`. Setter: the text, split at `\r\n`, `\r` and `\n`,
+//!   into text nodes with a `<br>` between; nothing is parsed.
+//!
+//! Gates (`Error::Unsupported`, none is faked)
+//! - `click()` when the activation target is a link (`a`/`area` with `href`), a `label`, a `summary` or a checkbox or radio: their default action
+//!   is built only for the window (`browser_ui.rs`). The gate comes before any event.
+//! - `innerText` over a `select` or `textarea` that is shown. `offsetTop` and `offsetLeft` when the element or its offset parent has no fragment
+//!   (a culled inline box) or more than one (an inline box that wraps). A shadow tree that is connected, as in `browser_geometry.rs`.
+//!
+//! Deviations (on purpose)
+//! - `click()` sends a plain `Event`, as the driver does (there is no `MouseEvent`, see `browser_form.rs`).
+//! - `innerText` does not know soft line wraps, so the space at the end of a wrapped line stays; `text-transform: capitalize` looks at one text node
+//!   at a time; `display:contents` is not modelled. An atomic inline (`img`, `inline-block`) counts as text on the line, so the white space around it stays.
+
+use crate::browser::*;
+use crate::browser_dom as nd;
+use bare_css::values::{Keyword, Property, Value as Cv};
+use bare_html::dom::{Document, NodeData, NodeId};
+use bare_js::eval::Interp;
+use bare_js::value::{Value, to_int32};
+
+type V = R<Value>;
+
+fn arg(a: &[Value], i: usize) -> Value {
+    a.get(i).copied().unwrap_or(Value::Undefined)
+}
+
+/// The local name of an element of any namespace, `""` for other nodes.
+fn name(doc: &Document, n: NodeId) -> &str {
+    match *doc.data(n) {
+        NodeData::Element { name, .. } => doc.atom_str(name),
+        _ => "",
+    }
+}
+
+/// The name of an HTML element, `""` for other nodes and for SVG and MathML.
+fn html_name(doc: &Document, n: NodeId) -> &str {
+    if doc.is_foreign(n) { "" } else { name(doc, n) }
+}
+
+fn attr<'a>(doc: &'a Document, n: NodeId, a: &str) -> Option<&'a str> {
+    doc.find_atom(a).and_then(|a| doc.attr(n, a))
+}
+
+fn kw(v: Cv, k: Keyword) -> bool {
+    v == Cv::Keyword(k)
+}
+
+// ---------------------------------------------------------------------------------------------- hidden, inert, tabIndex
+
+fn hidden(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
+    let n = d.style_html_el(it, this)?;
+    let found = attr(&d.doc.borrow(), n, "hidden").map(|s| s.eq_ignore_ascii_case("until-found"));
+    match found {
+        Some(true) => d.js_str(it, "until-found"),
+        found => Ok(Value::Bool(found.is_some())),
+    }
+}
+
+fn set_hidden(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
+    let n = d.style_html_el(it, this)?;
+    let v = arg(a, 0);
+    if matches!(v, Value::String(_)) && d.string_arg(it, v)?.eq_ignore_ascii_case("until-found") {
+        nd::attr_set(d, it, n, "hidden", "until-found")?;
+    } else if it.to_js_bool(v)? {
+        nd::attr_set(d, it, n, "hidden", "")?;
+    } else {
+        d.doc.borrow_mut().remove_attr(n, "hidden");
+    }
+    Ok(Value::Undefined)
+}
+
+fn inert(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
+    let n = d.style_html_el(it, this)?;
+    Ok(Value::Bool(attr(&d.doc.borrow(), n, "inert").is_some()))
+}
+
+fn set_inert(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
+    let n = d.style_html_el(it, this)?;
+    if it.to_js_bool(arg(a, 0))? {
+        nd::attr_set(d, it, n, "inert", "")?;
+    } else {
+        d.doc.borrow_mut().remove_attr(n, "inert");
+    }
+    Ok(Value::Undefined)
+}
+
+/// The default `tabIndex` of an element.
+fn default_tab(doc: &Document, n: NodeId) -> i32 {
+    let focusable = match name(doc, n) {
+        "a" => true,
+        _ if doc.is_foreign(n) => false,
+        "area" | "button" | "input" | "select" | "textarea" | "iframe" | "object" | "video" | "audio" => true,
+        "summary" => doc.parent(n).is_some_and(|p| html_name(doc, p) == "details" && doc.children(p).find(|&c| html_name(doc, c) == "summary") == Some(n)),
+        _ => false,
+    };
+    if focusable { 0 } else { -1 }
+}
+
+/// "Rules for parsing integers" (HTML Standard): `None` when there is no number or it does not fit `i32`.
+fn parse_int(s: &str) -> Option<i32> {
+    let t = s.trim_start_matches([' ', '\t', '\n', '\x0c', '\r']);
+    let (neg, t) = match t.as_bytes().first()? {
+        b'-' => (true, &t[1..]),
+        b'+' => (false, &t[1..]),
+        _ => (false, t),
+    };
+    let digits = t.bytes().take_while(u8::is_ascii_digit).count();
+    if digits == 0 {
+        return None;
+    }
+    let v = t[..digits].trim_start_matches('0').parse::<i64>().unwrap_or(if digits > 18 { i64::MAX } else { 0 });
+    i32::try_from(if neg { -v } else { v }).ok()
+}
+
+fn tab_index(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
+    let n = d.el(it, this)?;
+    let doc = d.doc.borrow();
+    Ok(Value::Number(attr(&doc, n, "tabindex").and_then(parse_int).unwrap_or_else(|| default_tab(&doc, n)) as f64))
+}
+
+fn set_tab_index(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
+    let n = d.el(it, this)?;
+    let v = to_int32(it.to_js_number(arg(a, 0))?);
+    nd::attr_set(d, it, n, "tabindex", &v.to_string())?;
+    Ok(Value::Undefined)
+}
+
+// ---------------------------------------------------------------------------------------------- click
+
+fn click(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
+    let n = d.style_html_el(it, this)?;
+    if d.is_disabled_control(it, n)? || d.clicking.borrow().contains(&n) {
+        return Ok(Value::Undefined);
+    }
+    if let Some(t) = d.activation_target(it, n)? {
+        let doc = d.doc.borrow();
+        let kind = match html_name(&doc, t) {
+            "a" | "area" => attr(&doc, t, "href").map(|_| "a link"),
+            "label" => Some("a label"),
+            "summary" => Some("a summary"),
+            "input" if matches!(nd::input_kind(&doc, t), "checkbox" | "radio") => Some("a checkbox or a radio"),
+            _ => None,
+        };
+        if kind.is_some() {
+            return Err(Dom::gate("HTMLElement.click() on a link, a label, a summary, a checkbox or a radio (the default action is built for the window only)"));
+        }
+    }
+    d.clicking.borrow_mut().push(n);
+    let r = d.user_click(it, n, None);
+    d.clicking.borrow_mut().retain(|&c| c != n);
+    r.map(|_| Value::Undefined)
+}
+
+// ---------------------------------------------------------------------------------------------- offsetParent, offsetTop, offsetLeft
+
+struct Offset {
+    parent: Option<NodeId>,
+    top: i32,
+    left: i32,
+}
+
+/// The only box fragment of `n`. `None`: it has none. A gate: it has more than one (an inline box over lines), so "the first box" is not known.
+fn one_box(layout: &bare_layout::fragment::Layout, n: NodeId) -> R<Option<bare_layout::fragment::Rect>> {
+    let mut boxes = layout.fragments.iter().filter(|f| f.node == n && f.kind == bare_layout::fragment::Kind::Box);
+    let first = boxes.next().map(|f| f.rect);
+    if boxes.next().is_some() {
+        return Err(Dom::gate("offsetTop and offsetLeft of an element with more than one box"));
+    }
+    Ok(first)
+}
+
+/// `None`: the element has no box. Else its offset parent and offsets.
+fn offset(d: &Dom, it: &mut Interp<'_>, el: NodeId) -> R<Option<Offset>> {
+    if !d.in_document(it, el)? {
+        return Ok(None);
+    }
+    let styles = d.cascade_now(it)?;
+    let shown = |n: NodeId| styles.style(n).is_some_and(|s| !kw(s.get(Property::Display), Keyword::None));
+    let doc = d.doc.borrow();
+    let (mut cur, mut parent) = (Some(el), None);
+    // The first positioned ancestor, and whether the element or an ancestor is not shown.
+    let own = styles.style(el);
+    let fixed = own.is_some_and(|s| kw(s.get(Property::Position), Keyword::Fixed));
+    let is_static = own.is_none_or(|s| kw(s.get(Property::Position), Keyword::Static));
+    let barred = fixed || matches!(html_name(&doc, el), "html" | "body");
+    while let Some(c) = cur {
+        it.charge(1)?;
+        if !shown(c) && matches!(doc.data(c), NodeData::Element { .. }) {
+            return Ok(None);
+        }
+        if c != el && parent.is_none() && !barred && matches!(doc.data(c), NodeData::Element { .. }) {
+            let by_position = styles.style(c).is_some_and(|s| !kw(s.get(Property::Position), Keyword::Static));
+            if by_position || html_name(&doc, c) == "body" || (is_static && matches!(html_name(&doc, c), "td" | "th" | "table")) {
+                parent = Some(c);
+            }
+        }
+        cur = doc.parent(c);
+    }
+    if html_name(&doc, el) == "body" {
+        return Ok(Some(Offset { parent: None, top: 0, left: 0 }));
+    }
+    drop(doc);
+    let layout = d.layout_now(it, &styles)?;
+    let Some(r) = one_box(&layout, el)? else {
+        let doc = d.doc.borrow();
+        return match bare_layout::boxes::Tree::new(&doc, &styles).kind(el) {
+            bare_layout::boxes::Kind::Inline | bare_layout::boxes::Kind::Break => Err(Dom::gate("offsetTop and offsetLeft of an inline box with no background and no border (layout makes no box for it)")),
+            _ => Ok(None),
+        };
+    };
+    let (mut x, mut y) = (r.x, r.y);
+    if let Some(p) = parent.filter(|&p| html_name(&d.doc.borrow(), p) != "body") {
+        let Some(pr) = one_box(&layout, p)? else {
+            return Err(Dom::gate("offsetTop and offsetLeft in an offset parent that has no box of its own"));
+        };
+        let ps = styles.style(p).expect("a positioned parent has a style");
+        x -= pr.x + ps.px(Property::BorderLeftWidth);
+        y -= pr.y + ps.px(Property::BorderTopWidth);
+    }
+    let long = |v: f32| {
+        let r = (v as f64 + 0.5).floor();
+        (v.is_finite() && (i32::MIN as f64..=i32::MAX as f64).contains(&r)).then_some(r as i32)
+    };
+    match (long(y), long(x)) {
+        (Some(top), Some(left)) => Ok(Some(Offset { parent, top, left })),
+        _ => Err(Dom::gate("an offset that does not fit a long")),
+    }
+}
+
+fn offset_parent(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
+    let el = d.style_html_el(it, this)?;
+    match offset(d, it, el)?.and_then(|o| o.parent) {
+        Some(p) => d.wrap(it, p),
+        None => Ok(Value::Null),
+    }
+}
+
+fn offset_top(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
+    let el = d.style_html_el(it, this)?;
+    Ok(Value::Number(offset(d, it, el)?.map_or(0, |o| o.top) as f64))
+}
+
+fn offset_left(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
+    let el = d.style_html_el(it, this)?;
+    Ok(Value::Number(offset(d, it, el)?.map_or(0, |o| o.left) as f64))
+}
+
+// ---------------------------------------------------------------------------------------------- innerText
+
+/// The result of the collection: text, plus the required line breaks that wait for the next text.
+struct Out {
+    s: String,
+    /// The largest required line break count since the last text.
+    brk: usize,
+    /// A collapsible space that waits: it is written only if more text follows on the line.
+    space: bool,
+    line_start: bool,
+}
+
+impl Out {
+    /// A required line break count item. A line break ends the line, so a waiting space is lost.
+    fn count(&mut self, n: usize) {
+        if n == 0 {
+            return;
+        }
+        self.brk = self.brk.max(n);
+        self.space = false;
+        self.line_start = true;
+    }
+
+    /// The breaks that wait are written between two texts, never at the start.
+    fn flush(&mut self) {
+        if !self.s.is_empty() {
+            self.s.extend(std::iter::repeat_n('\n', self.brk));
+        }
+        self.brk = 0;
+    }
+
+    /// A string item that is not text of the page: `br`, a tab, a line feed.
+    fn lit(&mut self, t: &str) {
+        self.flush();
+        self.s.push_str(t);
+        self.space = false;
+        self.line_start = true;
+    }
+
+    fn ch(&mut self, c: char) {
+        self.flush();
+        if self.space {
+            self.s.push(' ');
+            self.space = false;
+        }
+        self.s.push(c);
+        self.line_start = false;
+    }
+
+    /// The text of one text node under the `white-space` keyword `ws`.
+    fn text(&mut self, text: &str, ws: Keyword) {
+        let keep = matches!(ws, Keyword::Pre | Keyword::PreWrap | Keyword::BreakSpaces);
+        for c in text.chars() {
+            match c {
+                _ if keep => {
+                    self.flush();
+                    self.s.push(c);
+                    self.space = false;
+                    self.line_start = c == '\n';
+                }
+                '\n' if ws == Keyword::PreLine => self.lit("\n"),
+                ' ' | '\t' | '\n' | '\r' | '\x0c' => self.space = !self.line_start,
+                _ => self.ch(c),
+            }
+        }
+    }
+}
+
+/// `text-transform` on one text node.
+fn transform(text: &str, t: Cv) -> String {
+    if kw(t, Keyword::Uppercase) {
+        text.to_uppercase()
+    } else if kw(t, Keyword::Lowercase) {
+        text.to_lowercase()
+    } else if kw(t, Keyword::Capitalize) {
+        let (mut s, mut prev) = (String::with_capacity(text.len()), ' ');
+        for c in text.chars() {
+            if prev.is_alphanumeric() || matches!(prev, '\'' | '\u{2019}') { s.push(c) } else { s.extend(c.to_uppercase()) }
+            prev = c;
+        }
+        s
+    } else {
+        text.to_string()
+    }
+}
+
+fn inner_text(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
+    let n = d.style_html_el(it, this)?;
+    let styles = if d.in_document(it, n)? { Some(d.cascade_now(it)?) } else { None };
+    let shown = |s: &bare_css::cascade::Styles, n| s.style(n).is_some_and(|c| !kw(c.get(Property::Display), Keyword::None));
+    let Some(styles) = styles.filter(|s| shown(s, n)) else {
+        return nd::text_content(d, it, this, &[]);
+    };
+    let doc = d.doc.borrow();
+    let tree = bare_layout::boxes::Tree::new(&doc, &styles);
+    let table_part = |k: Cv| [Keyword::TableRow, Keyword::TableCell, Keyword::TableRowGroup, Keyword::TableHeaderGroup, Keyword::TableFooterGroup].iter().any(|&p| kw(k, p));
+    let group = |k: Cv| [Keyword::TableRowGroup, Keyword::TableHeaderGroup, Keyword::TableFooterGroup].iter().any(|&g| kw(k, g));
+    // A later sibling (an element) with this display.
+    let later = |mut c: NodeId, ks: &[Keyword]| {
+        while let Some(s) = doc.next_sibling(c) {
+            if styles.style(s).is_some_and(|st| ks.iter().any(|&k| kw(st.get(Property::Display), k))) {
+                return true;
+            }
+            c = s;
+        }
+        false
+    };
+    let mut out = Out { s: String::new(), brk: 0, space: false, line_start: true };
+    // The nodes to leave: the exit steps of an element run after its children.
+    let mut stack: Vec<(NodeId, bool)> = doc.children(n).collect::<Vec<_>>().into_iter().rev().map(|c| (c, false)).collect();
+    while let Some((c, exit)) = stack.pop() {
+        it.charge(1)?;
+        if out.s.len() > d.lim.max_string_bytes {
+            return Err(d.lim("dom-string"));
+        }
+        match *doc.data(c) {
+            NodeData::Text(sp) => {
+                let Some(p) = doc.parent(c).and_then(|p| styles.style(p)) else { continue };
+                if kw(p.get(Property::Visibility), Keyword::Visible) {
+                    let ws = if let Cv::Keyword(k) = p.get(Property::WhiteSpace) { k } else { Keyword::Normal };
+                    out.text(&transform(doc.text(sp), p.get(Property::TextTransform)), ws);
+                }
+            }
+            NodeData::Element { .. } => {
+                let Some(st) = styles.style(c).filter(|st| !kw(st.get(Property::Display), Keyword::None)) else { continue };
+                let visible = kw(st.get(Property::Visibility), Keyword::Visible);
+                let (kind, display) = (tree.kind(c), st.get(Property::Display));
+                let atomic = kind == bare_layout::boxes::Kind::Atomic;
+                let in_flex = doc.flat_parent(c).and_then(|p| styles.style(p)).is_some_and(|p| [Keyword::Flex, Keyword::InlineFlex, Keyword::Grid, Keyword::InlineGrid].iter().any(|&k| kw(p.get(Property::Display), k)));
+                let block = match kind {
+                    bare_layout::boxes::Kind::Block | bare_layout::boxes::Kind::ListItem => !table_part(display) || in_flex,
+                    bare_layout::boxes::Kind::Float | bare_layout::boxes::Kind::OutOfFlow => true,
+                    _ => false,
+                };
+                let p = html_name(&doc, c) == "p";
+                if !exit {
+                    if visible {
+                        if matches!(html_name(&doc, c), "select" | "textarea") {
+                            return Err(Dom::gate("innerText over a select or a textarea"));
+                        }
+                        out.count(if p { 2 } else { block as usize });
+                        if atomic {
+                            if out.space {
+                                out.flush();
+                                out.s.push(' ');
+                            }
+                            out.space = false;
+                            out.line_start = true;
+                        }
+                    }
+                    stack.push((c, true));
+                    stack.extend(doc.children(c).collect::<Vec<_>>().into_iter().rev().map(|k| (k, false)));
+                } else if visible {
+                    if html_name(&doc, c) == "br" {
+                        out.lit("\n");
+                    }
+                    if kw(display, Keyword::TableCell) && later(c, &[Keyword::TableCell]) {
+                        out.lit("\t");
+                    }
+                    let in_group = doc.parent(c).is_some_and(|g| styles.style(g).is_some_and(|s| group(s.get(Property::Display))));
+                    if kw(display, Keyword::TableRow) && (later(c, &[Keyword::TableRow]) || in_group && doc.parent(c).is_some_and(|g| later(g, &[Keyword::TableRowGroup, Keyword::TableHeaderGroup, Keyword::TableFooterGroup]))) {
+                        out.lit("\n");
+                    }
+                    out.count(if p { 2 } else { block as usize });
+                    if atomic {
+                        out.space = false;
+                        out.line_start = false;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    let s = out.s;
+    drop(doc);
+    d.js_str(it, &s)
+}
+
+fn set_inner_text(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
+    let n = d.style_html_el(it, this)?;
+    let v = arg(a, 0);
+    let s = if matches!(v, Value::Null) { String::new() } else { d.string_arg(it, v)? };
+    // `\r\n`, `\r` and `\n` are one break each.
+    let s = s.replace("\r\n", "\n").replace('\r', "\n");
+    let lines: Vec<&str> = if s.is_empty() { Vec::new() } else { s.split('\n').collect() };
+    d.mo_group(Some(n), || {
+        let mut doc = d.doc.borrow_mut();
+        d.room(&doc, lines.iter().filter(|l| !l.is_empty()).count() + lines.len().saturating_sub(1), s.len())?;
+        while let Some(c) = doc.children(n).next() {
+            it.charge(1)?;
+            doc.detach(c);
+        }
+        for (i, line) in lines.iter().enumerate() {
+            if i > 0 {
+                let br = doc.create_element("br");
+                doc.move_to(br, n, None);
+            }
+            if !line.is_empty() {
+                let t = doc.create_text(line);
+                doc.move_to(t, n, None);
+            }
+        }
+        Ok(())
+    })?;
+    Ok(Value::Undefined)
+}
+
+pub(crate) fn install(d: &Dom, it: &mut Interp<'_>) -> R<()> {
+    let (html, svg) = (d.p().html, d.p().svg);
+    d.def_get(it, html, "hidden", hidden, Some(set_hidden))?;
+    d.def_get(it, html, "inert", inert, Some(set_inert))?;
+    d.def_get(it, html, "innerText", inner_text, Some(set_inner_text))?;
+    d.def_get(it, html, "offsetParent", offset_parent, None)?;
+    d.def_get(it, html, "offsetTop", offset_top, None)?;
+    d.def_get(it, html, "offsetLeft", offset_left, None)?;
+    d.def_method(it, html, "click", 0, click)?;
+    for proto in [html, svg] {
+        d.def_get(it, proto, "tabIndex", tab_index, Some(set_tab_index))?;
+    }
+    Ok(())
+}
