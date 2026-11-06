@@ -3507,3 +3507,22 @@ Load rows (`tools/js/xhr_load.sh`, release build, 1 GiB address space cap): sequ
 | 1,000 | 31.8 ms | 9.9 MiB | 2 / 0 / 0 (baseline) |
 
 Not tested: a synchronous request (gated), `responseType = "document"` (gated), a response in a charset other than UTF-8, a request to another origin, `HEAD`, `PUT` and `DELETE` (the net layer has GET and POST), a Blob or FormData body (the parallel task has not landed), and the live staging login.
+
+
+## Range and Selection
+
+Problem: React, editors and focus libraries read `getSelection()` and `document.createRange()`. Both were missing.
+
+What runs: `document.createRange()`, `new Range()`, `Range` with `startContainer`, `startOffset`, `endContainer`, `endOffset`, `collapsed`, `commonAncestorContainer`, `setStart`, `setEnd`, `setStartBefore`, `setStartAfter`, `setEndBefore`, `setEndAfter`, `selectNode`, `selectNodeContents`, `collapse`, `cloneRange`, `detach` and `toString`. The five boundary getters are on `AbstractRange`, as in Chrome. Offsets are UTF-16 units in a Text or a Comment and child indexes elsewhere. A start after the end, or a point in another tree, moves the other point (the standard). `window.getSelection()` and `document.getSelection()` give one `Selection` per realm with `rangeCount`, `addRange`, `removeAllRanges`, `empty`, `removeRange`, `getRangeAt`, `collapse`, `setPosition`, `collapseToStart`, `collapseToEnd`, `selectAllChildren`, `isCollapsed`, `anchorNode`, `anchorOffset`, `focusNode`, `focusOffset`, `type`, `direction` and `toString`. The selection holds the range object that `addRange` was given, as Chrome does, so changing that range changes the selection. A range whose root is not the document is not added.
+
+Design (`browser_range.rs`): a range is an object with an entry `{start node, start offset, end node, end offset}` in a table, like a `TreeWalker`. The globals are lazy (`browser_lazy.rs`), and the state is made on the first read of a global or call of `getSelection` or `createRange`. A page that uses none pays the accessors only (`getSelection`, `createRange` are two host functions). The order of two points is found from the paths to the root, so it costs the depth. `toString` walks the text nodes under the common ancestor. The selection object is a GC root, it traces its range, and the collector drops the table entries of dead ranges. Bound: `ranges` (65,536 live).
+
+Gates (`Unsupported`): `deleteContents`, `extractContents`, `cloneContents`, `insertNode`, `surroundContents`, `createContextualFragment`, `getBoundingClientRect`, `getClientRects`, `compareBoundaryPoints`, `comparePoint`, `isPointInRange`, `intersectsNode`, and on `Selection`: `extend`, `setBaseAndExtent`, `containsNode`, `modify`, `deleteFromDocument`.
+
+Known gaps: a range does not update when the DOM changes. After `removeChild`, `textContent` or a text edit a boundary point keeps its node and offset, and a stale offset is clamped when it is read (a test covers it). `Selection.toString()` is the text of the Text nodes, not rendered text (Chrome adds line breaks between blocks). There is no caret, focus, `selectionchange` event or mouse selection, and the selection of an `<input>` (`browser_selection.rs`) is separate. Cutting a surrogate pair in `toString` gives U+FFFD. `Selection.direction` is `forward` for a range and `none` for a caret (a backward selection cannot be made yet).
+
+Checks: 79 cases in `tools/fixtures/ui/range-cases.txt` match Chrome 155 (`node tools/ui/chrome_topic.mjs range`, answers in `chrome-range.txt`). Two Chrome cases that depend on live ranges (a text edit under a range) were left out because the host has the gap above. 7 Rust tests cover the lazy globals, the gates, the gap, a collect, the bound, a page that does not use ranges and the UTF-16 cut.
+
+Cost: `perf stat -e instructions:u`, minimum of 3 runs, main c376437 (with PR #160) against this build, the same 52 rows as in the observer section. All below +0.5%. The worst is `loader_load mixed 1` at +0.17% (18,035,243 to 18,066,160), then `loader_load dynamic 100` +0.13% and `browser_load event 100` +0.12%. Startup is +54 instructions (2,745,040 to 2,745,094). `HTMLElement` `innerText`, `offsetParent`, `offsetTop`, `offsetLeft` and `click()` already ran from the previous section; `offsetWidth` and `offsetHeight` existed before.
+
+Not tested: the live staging login on this build, a range over a 100,000-node tree, `toString` of a very large range under the step bound, and a perf row that uses ranges at 1x, 10x, 100x (no load example was added for this API).
