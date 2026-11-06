@@ -345,6 +345,14 @@ impl Dom {
         quiet
     }
 
+    /// The driver did work that no run of a timer or a frame saw (it supplied a style sheet): no verdict stands. Each recurring
+    /// timer and the frame loop are judged again by their next run.
+    pub(crate) fn forget_quiet(&self) {
+        let mut s = self.sched.borrow_mut();
+        s.frame_idle = false;
+        s.timers.values_mut().for_each(|t| t.idle = false);
+    }
+
     // ------------------------------------------------------------ queue
 
     /// Queue the rendering step at the next frame of the grid (`browser_frame.rs`) unless one is queued.

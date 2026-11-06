@@ -8,8 +8,8 @@
 //! gives the expected number of submit events per form and per submitter; script counters must match exactly.
 //! gc: SCALE*1000 rounds of build a form and a button in script, click it from the driver, remove it; a VM collect between
 //! blocks. The realm must not keep the removed forms, buttons or events.
-//! gates: SCALE*1000 clicks at a form that needs validation (no submit event, `Unsupported`), at one whose submit is not
-//! canceled (one event, `Unsupported`) and at one whose submit is canceled (ok). Counts are checked against the model, and
+//! gates: SCALE*1000 clicks at a form that fails validation (`invalid`, no submit event, no navigation), at one whose submit is not
+//! canceled (one event, one navigation request) and at one whose submit is canceled (no request). Counts are checked, and
 //! the realm stays usable. Prints time, CPU, peak RSS and what the realm holds. `tools/js/form_load.sh` runs the matrix.
 
 use bare::browser::*;
@@ -76,6 +76,7 @@ fn exec(name: &str, scale: usize) {
     let doc = tree::parse(&format!("<body>{forms}<div id=w></div></body>"));
     let eval = EvalLimits { max_steps: u64::MAX / 2, max_scripts: 1 << 14, max_envs: 1 << 22, max_functions: 1 << 22, ..Default::default() };
     let mut b = Browser::new(doc, BrowserLimits::default(), eval, HeapLimits::default()).unwrap_or_else(|e| die(format!("browser: {e:?}")));
+    b.set_document_url("http://form.test/p").unwrap_or_else(|e| die(format!("url: {e:?}")));
     let cpu0 = cpu_ms();
     let t = Instant::now();
     let (mut gc_ms, mut freed) = (0.0, 0);
@@ -161,19 +162,25 @@ fn exec(name: &str, scale: usize) {
             expect("gc ok", run(&mut b, "ok"), n.to_string());
         }
         "gates" => {
-            run(&mut b, "var w = document.getElementById('w'); w.innerHTML = '<form id=v><button id=gv>v</button></form><form id=u><button id=gu formnovalidate>u</button></form><form id=c><button id=gc formnovalidate>c</button></form>';
+            run(&mut b, "var w = document.getElementById('w'); w.innerHTML = '<form id=v><input required><button id=gv>v</button></form><form id=u><button id=gu formnovalidate>u</button></form><form id=c><button id=gc formnovalidate>c</button></form>';
                 var seen = { v: 0, u: 0, c: 0 };
                 ['v', 'u', 'c'].forEach(function (id) { document.getElementById(id).addEventListener('submit', function (e) { seen[id]++; if (id === 'c') e.preventDefault() }) });");
             let (gv, gu, gc) = (b.query("#gv").unwrap().unwrap(), b.query("#gu").unwrap().unwrap(), b.query("#gc").unwrap().unwrap());
             for start in (0..n).step_by(CHUNK) {
                 for _ in start..start + CHUNK {
-                    match b.click(gv) {
-                        Err(Error::Unsupported(u)) if u.what.contains("validation") => {}
-                        o => die(format!("validation gate: {o:?}")),
+                    // An invalid form: `invalid` at the field, no `submit` event, no navigation.
+                    if let Err(e) = b.click(gv) {
+                        die(format!("validation gate: {e:?}"));
                     }
-                    match b.click(gu) {
-                        Err(Error::Unsupported(u)) if u.what.contains("navigation") => {}
-                        o => die(format!("navigation gate: {o:?}")),
+                    if b.take_navigation_request().is_some() {
+                        die("validation gate: navigation".into());
+                    }
+                    // A valid form whose submit is not canceled: one event, then a navigation request.
+                    if let Err(e) = b.click(gu) {
+                        die(format!("navigation gate: {e:?}"));
+                    }
+                    if b.take_navigation_request().is_none() {
+                        die("navigation gate: no request".into());
                     }
                     if !b.click(gc).unwrap_or_else(|e| die(format!("canceled submit: {e:?}"))).not_canceled {
                         die("click of a canceled submit".into());
