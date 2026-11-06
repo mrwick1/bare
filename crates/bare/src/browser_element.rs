@@ -476,10 +476,114 @@ fn set_inner_text(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
     Ok(Value::Undefined)
 }
 
+// ---------------------------------------------------------------------------------------------- draggable, checkVisibility
+
+/// The `draggable` IDL attribute: `true` and `false` (ASCII case-insensitive) decide; any other value or none is "auto", which is true for `img`, and for
+/// `a` and `area` with `href` (Chrome; the standard names only `a`).
+fn draggable(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
+    let n = d.style_html_el(it, this)?;
+    let doc = d.doc.borrow();
+    Ok(Value::Bool(match attr(&doc, n, "draggable") {
+        Some(v) if v.eq_ignore_ascii_case("true") => true,
+        Some(v) if v.eq_ignore_ascii_case("false") => false,
+        _ => match name(&doc, n) {
+            "img" => true,
+            "a" | "area" => attr(&doc, n, "href").is_some(),
+            _ => false,
+        },
+    }))
+}
+
+fn set_draggable(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
+    let n = d.style_html_el(it, this)?;
+    let on = it.to_js_bool(arg(a, 0))?;
+    nd::attr_set(d, it, n, "draggable", if on { "true" } else { "false" })?;
+    Ok(Value::Undefined)
+}
+
+/// Does a style text use what the engine does not parse: `content-visibility` or `display: contents`?
+fn unmodelled(t: &str) -> bool {
+    let t = t.to_ascii_lowercase();
+    t.contains("content-visibility") || t.match_indices("display").any(|(i, _)| t[i + 7..].trim_start().strip_prefix(':').is_some_and(|r| r.trim_start().starts_with("contents")))
+}
+
+/// `Element.checkVisibility(options)` (CSSOM View). Options are read in the order of the dictionary (sorted by name). `opacityProperty` and
+/// `visibilityProperty` are the old names of `checkOpacity` and `checkVisibilityCSS`: either one turns the check on.
+fn check_visibility(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
+    let n = d.el(it, this)?;
+    let mut opt = [false; 5];
+    match arg(a, 0) {
+        Value::Undefined | Value::Null => {}
+        o @ Value::Object(_) => {
+            for (i, k) in ["checkOpacity", "checkVisibilityCSS", "contentVisibilityAuto", "opacityProperty", "visibilityProperty"].into_iter().enumerate() {
+                let k = d.key(it, k)?;
+                let v = it.get_value(o, k)?;
+                opt[i] = it.to_js_bool(v)?;
+            }
+        }
+        _ => return Err(it.type_error("Failed to execute 'checkVisibility' on 'Element': The provided value is not of type 'CheckVisibilityOptions'.")),
+    }
+    let (opacity, visibility) = (opt[0] | opt[3], opt[1] | opt[4]);
+    {
+        let doc = d.doc.borrow();
+        if doc.is_foreign(n) {
+            return Err(Dom::gate("checkVisibility of an SVG or MathML element (Chrome's answer is not modelled)"));
+        }
+        if matches!(name(&doc, n), "option" | "optgroup") {
+            return Err(Dom::gate("checkVisibility of an option (it depends on how the select is drawn)"));
+        }
+    }
+    if !d.in_document(it, n)? {
+        return Ok(Value::Bool(false));
+    }
+    let Some(snap) = d.snapshot(it, n)? else { return Ok(Value::Bool(false)) };
+    if snap.hidden {
+        return Ok(Value::Bool(false));
+    }
+    let odd = {
+        let c = d.computed.cache.borrow();
+        let b = c.as_ref().expect("built by the snapshot");
+        *b.odd.get_or_init(|| b.key.iter().any(|(_, t)| unmodelled(t)))
+    };
+    if visibility && matches!(snap.style.get(Property::Visibility), Cv::Keyword(Keyword::Hidden | Keyword::Collapse)) {
+        return Ok(Value::Bool(false));
+    }
+    let doc = d.doc.borrow();
+    let (mut cur, mut child, mut steps) = (Some(n), n, 0u64);
+    while let Some(e) = cur {
+        steps += 1;
+        if let NodeData::Element { .. } = doc.data(e) {
+            if attr(&doc, e, "style").is_some_and(unmodelled) {
+                return Err(Dom::gate("checkVisibility with content-visibility or display: contents in a style attribute (not modelled)"));
+            }
+            if opacity && snap.styles.style(e).is_some_and(|s| s.get(Property::Opacity) == Cv::Number(0.0)) {
+                return Ok(Value::Bool(false));
+            }
+            // The content of a closed `details` (all but the first `summary`) is `content-visibility: hidden`.
+            if e != child && name(&doc, e) == "details" && !doc.is_foreign(e) && attr(&doc, e, "open").is_none() {
+                let summary = doc.children(e).find(|&c| name(&doc, c) == "summary");
+                if summary != Some(child) {
+                    return Ok(Value::Bool(false));
+                }
+            }
+        }
+        child = e;
+        cur = doc.flat_parent(e);
+    }
+    drop(doc);
+    it.charge(steps / 8 + 1)?;
+    if odd {
+        return Err(Dom::gate("checkVisibility on a page with content-visibility or display: contents in a style sheet (not modelled)"));
+    }
+    Ok(Value::Bool(true))
+}
+
 pub(crate) fn install(d: &Dom, it: &mut Interp<'_>) -> R<()> {
     let (html, svg) = (d.p().html, d.p().svg);
     d.def_get(it, html, "hidden", hidden, Some(set_hidden))?;
     d.def_get(it, html, "inert", inert, Some(set_inert))?;
+    d.def_get(it, html, "draggable", draggable, Some(set_draggable))?;
+    d.def_method(it, d.p().element, "checkVisibility", 0, check_visibility)?;
     d.def_get(it, html, "innerText", inner_text, Some(set_inner_text))?;
     d.def_get(it, html, "offsetParent", offset_parent, None)?;
     d.def_get(it, html, "offsetTop", offset_top, None)?;

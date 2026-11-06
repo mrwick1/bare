@@ -1,0 +1,96 @@
+function cv(id, o) { var e = document.getElementById(id); return o === undefined ? e.checkVisibility() : e.checkVisibility(o) }
+function all(ids, o) { return ids.map(function (i) { return cv(i, o) }).join(' ') }
+=== shape
+(function () { var d = Object.getOwnPropertyDescriptor(Element.prototype, 'checkVisibility'); return [typeof d.value, d.value.length, d.value.name, d.writable, d.configurable, 'checkVisibility' in HTMLElement.prototype, Object.prototype.hasOwnProperty.call(HTMLElement.prototype, 'checkVisibility'), typeof document.checkVisibility, 'checkVisibility' in Text.prototype].join(' ') })
+=== plain-element
+@html <div id=a>a</div><span id=b>b</span><p id=c></p><div id=d style="width:0;height:0"></div>
+(function () { return all(['a', 'b', 'c', 'd']) })
+=== not-connected
+var e = document.createElement('div'); var p = document.createElement('div'); p.appendChild(e);
+(function () { return [e.checkVisibility(), p.checkVisibility(), e.checkVisibility({ checkOpacity: true })].join(' ') })
+=== removed-after
+@html <div id=a>a</div>
+var e = document.getElementById('a'); var r = [e.checkVisibility()]; e.remove(); r.push(e.checkVisibility());
+(function () { return r.join(' ') })
+=== display-none
+@html <div id=a style="display:none"><span id=b><i id=c>c</i></span></div><div id=d><span id=e style="display:none">e</span><span id=f>f</span></div>
+(function () { return all(['a', 'b', 'c', 'd', 'e', 'f']) })
+=== display-none-by-sheet-and-attribute
+@css .h { display: none } #x { display: none }
+@html <div class=h id=a><b id=b>b</b></div><div id=x><b id=y>y</b></div><div id=h hidden><b id=h2>h</b></div><p id=ok>ok</p>
+(function () { return all(['a', 'b', 'x', 'y', 'h', 'h2', 'ok']) })
+=== head-and-script-elements
+@html <p id=p>p</p>
+(function () { return [document.head.checkVisibility(), document.documentElement.checkVisibility(), document.body.checkVisibility(), document.querySelector('style').checkVisibility()].join(' ') })
+=== opacity-zero-option-off
+@html <div id=a style="opacity:0">a</div><div id=b style="opacity:0"><i id=c>c</i></div><div id=d style="opacity:0.01">d</div><div id=e style="opacity:1"><i id=f>f</i></div>
+(function () { return all(['a', 'b', 'c', 'd', 'e', 'f']) })
+=== opacity-zero-option-on
+@html <div id=a style="opacity:0">a</div><div id=b style="opacity:0"><i id=c>c</i></div><div id=d style="opacity:0.01">d</div><div id=e style="opacity:1"><i id=f>f</i></div><div id=g style="opacity:0%">g</div><div id=h style="opacity:-1">h</div>
+(function () { return all(['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h'], { checkOpacity: true }) })
+=== opacity-property-alias
+@html <div id=a style="opacity:0"><i id=c>c</i></div>
+(function () { return [all(['a', 'c'], { opacityProperty: true }), all(['a', 'c'], { opacityProperty: false }), all(['a', 'c'], { checkOpacity: false, opacityProperty: true }), all(['a', 'c'], { checkOpacity: true, opacityProperty: false })].join('|') })
+=== opacity-deep-and-nested-one
+@html <div style="opacity:0.5"><div style="opacity:0"><div><div id=a>a</div></div></div></div><div style="opacity:0.5"><div id=b>b</div></div>
+(function () { return all(['a', 'b'], { checkOpacity: true }) })
+=== visibility-option-off
+@html <div id=a style="visibility:hidden">a<i id=b>b</i></div><div id=c style="visibility:collapse">c</div><div id=d style="visibility:hidden"><i id=e style="visibility:visible">e</i></div>
+(function () { return all(['a', 'b', 'c', 'd', 'e']) })
+=== visibility-option-on
+@html <div id=a style="visibility:hidden">a<i id=b>b</i></div><div id=c style="visibility:collapse">c</div><div id=d style="visibility:hidden"><i id=e style="visibility:visible">e</i></div><div id=f style="visibility:visible">f</div>
+(function () { return all(['a', 'b', 'c', 'd', 'e', 'f'], { checkVisibilityCSS: true }) })
+=== visibility-property-alias
+@html <div id=a style="visibility:hidden">a</div>
+(function () { return [cv('a', { visibilityProperty: true }), cv('a', { visibilityProperty: false }), cv('a', { checkVisibilityCSS: false, visibilityProperty: true }), cv('a', { checkVisibilityCSS: true, visibilityProperty: false })].join(' ') })
+=== both-options
+@html <div id=a style="opacity:0;visibility:hidden">a</div><div id=b style="opacity:0">b</div><div id=c style="visibility:hidden">c</div><div id=d>d</div>
+(function () { return all(['a', 'b', 'c', 'd'], { checkOpacity: true, checkVisibilityCSS: true }) })
+=== display-none-wins-over-options
+@html <div id=a style="display:none;opacity:1">a</div>
+(function () { return [cv('a', { checkOpacity: true }), cv('a', { checkVisibilityCSS: true }), cv('a', { contentVisibilityAuto: true })].join(' ') })
+=== content-visibility-auto-option-only
+@html <div id=a>a<i id=b>b</i></div>
+(function () { return [cv('a', { contentVisibilityAuto: true }), cv('b', { contentVisibilityAuto: true }), cv('b', { contentVisibilityAuto: false })].join(' ') })
+=== options-bad
+@html <div id=a>a</div>
+var r = [];
+[1, 'x', null, undefined, {}, [], true, function () {}, { checkOpacity: 'yes' }, { checkOpacity: 0 }, { checkOpacity: {} }, { get checkOpacity() { throw new RangeError('g') } }].forEach(function (o) { try { r.push(cv('a', o)) } catch (e) { r.push(e.name) } });
+(function () { return r.join(' ') })
+=== option-truthiness
+@html <div id=a style="opacity:0">a</div>
+(function () { return ['', 'x', 1, 0, null, undefined, NaN, {}].map(function (v) { return cv('a', { checkOpacity: v }) }).join(' ') })
+=== second-argument-ignored
+@html <div id=a style="opacity:0">a</div>
+(function () { return [document.getElementById('a').checkVisibility({ checkOpacity: true }, 5)].join(' ') })
+=== illegal-invocation
+var r = [];
+try { Element.prototype.checkVisibility.call({}) } catch (e) { r.push(e.name) }
+try { Element.prototype.checkVisibility.call(document) } catch (e) { r.push(e.name) }
+try { Element.prototype.checkVisibility.call(null) } catch (e) { r.push(e.name) }
+(function () { return r.join(' ') })
+=== inside-display-none-then-shown
+@html <div id=a style="display:none"><b id=b>b</b></div>
+var r = [cv('b')]; document.getElementById('a').style.display = 'block'; r.push(cv('b')); document.getElementById('a').style.display = 'none'; r.push(cv('b'));
+(function () { return r.join(' ') })
+=== class-toggle
+@css .off { display: none } .clear { opacity: 0 }
+@html <div id=a><b id=b>b</b></div>
+var a = document.getElementById('a'), r = [cv('b')]; a.className = 'off'; r.push(cv('b'), cv('a')); a.className = 'clear'; r.push(cv('b', { checkOpacity: true }), cv('b')); a.className = ''; r.push(cv('b', { checkOpacity: true }));
+(function () { return r.join(' ') })
+=== inherited-visibility-via-sheet
+@css #p { visibility: hidden } #q { visibility: visible }
+@html <div id=p><div id=q>q</div><div id=r>r</div></div>
+(function () { return all(['p', 'q', 'r'], { checkVisibilityCSS: true }) })
+=== details-closed
+@html <details id=d><summary id=s>s</summary><p id=p>p</p></details><details id=e open><summary>s</summary><p id=q>q</p></details>
+(function () { return all(['d', 's', 'p', 'e', 'q']) })
+=== template-and-noscript
+@html <template id=t><div id=in>in</div></template><div id=ok>ok</div>
+(function () { var t = document.getElementById('t'); return [t.checkVisibility()].join(' ') })
+=== position-and-offscreen
+@html <div id=a style="position:absolute;left:-9999px">a</div><div id=b style="position:fixed;top:5000px">b</div><div id=c style="height:0;overflow:hidden"><i id=d>d</i></div>
+(function () { return all(['a', 'b', 'c', 'd']) })
+=== iframe-document-element
+@html <p id=a>a</p>
+(function () { return [typeof document.documentElement.checkVisibility, document.documentElement.checkVisibility({ checkOpacity: true })].join(' ') })

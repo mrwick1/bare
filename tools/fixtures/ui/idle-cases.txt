@@ -1,0 +1,149 @@
+=== shape
+(function () { return [typeof requestIdleCallback, requestIdleCallback.length, requestIdleCallback.name, cancelIdleCallback.length, cancelIdleCallback.name, window.requestIdleCallback === requestIdleCallback, cancelIdleCallback(1), cancelIdleCallback(0)].join(' ') })
+=== handles-count-from-one
+var a = requestIdleCallback(function () {}), b = requestIdleCallback(function () {}), c = requestIdleCallback(function () {});
+(function () { return [a, b, c].join(' ') })
+=== deadline-shape
+var r = [];
+requestIdleCallback(function (d) { var t = d.timeRemaining(); r.push(d instanceof IdleDeadline, Object.prototype.toString.call(d), typeof t, t > 0 && t <= 50, d.didTimeout, typeof d.timeRemaining, d.timeRemaining.length, Object.keys(d).length, 'timeRemaining' in d, 'didTimeout' in IdleDeadline.prototype); });
+(function () { return r.join(' ') })
+=== this-is-window
+var r = [];
+requestIdleCallback(function () { r.push(this === window, arguments.length) });
+(function () { return r.join(' ') })
+=== runs-once-in-order
+var log = [];
+requestIdleCallback(function () { log.push('A') });
+requestIdleCallback(function () { log.push('B') });
+requestIdleCallback(function () { log.push('C') });
+(function () { return log.join(' ') })
+=== after-microtasks-and-sync
+var log = [];
+requestIdleCallback(function () { log.push('idle') });
+Promise.resolve().then(function () { log.push('micro') });
+queueMicrotask(function () { log.push('qm') });
+log.push('sync');
+(function () { return log.join(' ') })
+=== idle-vs-raf-raf-first
+var log = [];
+requestAnimationFrame(function () { log.push('raf') });
+requestIdleCallback(function () { log.push('idle') });
+(function () { return log.join(' ') })
+=== idle-vs-raf-idle-first
+var log = [];
+requestIdleCallback(function () { log.push('idle') });
+requestAnimationFrame(function () { log.push('raf') });
+(function () { return log.join(' ') })
+=== idle-vs-timer-zero
+var log = [];
+setTimeout(function () { log.push('timer') }, 0);
+requestIdleCallback(function () { log.push('idle') });
+(function () { return log.join(' ') })
+=== idle-vs-timer-zero-after
+var log = [];
+requestIdleCallback(function () { log.push('idle') });
+setTimeout(function () { log.push('timer') }, 0);
+(function () { return log.join(' ') })
+=== idle-vs-timer-late
+var log = [];
+requestIdleCallback(function () { log.push('idle') });
+setTimeout(function () { log.push('timer') }, 200);
+(function () { return log.join(' ') })
+=== time-remaining-bounded-by-timer
+var r = [];
+requestIdleCallback(function (d) { var t = d.timeRemaining(); r.push(t <= 50 && t > 0) });
+setTimeout(function () { }, 5000);
+(function () { return r.join(' ') })
+=== cancel-before-run
+var log = [];
+var a = requestIdleCallback(function () { log.push('A') });
+var b = requestIdleCallback(function () { log.push('B') });
+cancelIdleCallback(a);
+(function () { return log.join(' ') })
+=== cancel-from-earlier-callback
+var log = [], b;
+requestIdleCallback(function () { log.push('A'); cancelIdleCallback(b) });
+b = requestIdleCallback(function () { log.push('B') });
+requestIdleCallback(function () { log.push('C') });
+(function () { return log.join(' ') })
+=== cancel-twice-and-unknown
+var log = [];
+var a = requestIdleCallback(function () { log.push('A') });
+cancelIdleCallback(a); cancelIdleCallback(a); cancelIdleCallback(999); cancelIdleCallback('x'); cancelIdleCallback(undefined);
+(function () { return log.join(' ') })
+=== cancel-self-is-harmless
+var log = [], a;
+a = requestIdleCallback(function () { cancelIdleCallback(a); log.push('A') });
+(function () { return log.join(' ') })
+=== posted-during-idle-runs-later
+var log = [];
+requestIdleCallback(function () { log.push('A'); requestIdleCallback(function () { log.push('A2') }); });
+requestIdleCallback(function () { log.push('B') });
+(function () { return log.join(' ') })
+=== posted-during-idle-after-raf
+var log = [];
+requestIdleCallback(function () { log.push('A'); requestAnimationFrame(function () { log.push('raf') }); requestIdleCallback(function () { log.push('A2') }); });
+(function () { return log.join(' ') })
+=== handle-in-callback-order
+var h = [];
+var a = requestIdleCallback(function () { h.push('a') }), b = requestIdleCallback(function () { h.push('b') });
+(function () { return [a, b, h.join('')].join(' ') })
+=== throw-does-not-stop-the-rest
+var log = [];
+window.onerror = function () { log.push('onerror'); return true };
+requestIdleCallback(function () { log.push('A'); throw new Error('x') });
+requestIdleCallback(function () { log.push('B') });
+(function () { return log.join(' ').replace('onerror ', '') })
+=== microtask-between-callbacks
+var log = [];
+requestIdleCallback(function () { log.push('A'); Promise.resolve().then(function () { log.push('Am') }) });
+requestIdleCallback(function () { log.push('B') });
+(function () { return log.join(' ') })
+=== not-callable
+var r = [];
+['x', 1, null, undefined, {}].forEach(function (v) { try { requestIdleCallback(v); r.push('ok') } catch (e) { r.push(e.name) } });
+try { requestIdleCallback() } catch (e) { r.push(e.name + ':' + e.message) }
+(function () { return r.join(' ') })
+=== options-bad
+var r = [];
+[1, 'x', null, undefined, {}, { timeout: 'a' }, { timeout: -5 }, { timeout: 0 }, { timeout: 1e20 }].forEach(function (o) { try { requestIdleCallback(function () {}, o); r.push('ok') } catch (e) { r.push(e.name) } });
+(function () { return r.join(' ') })
+=== timeout-runs
+var r = [];
+requestIdleCallback(function (d) { r.push('a' + typeof d.didTimeout) }, { timeout: 100 });
+requestIdleCallback(function (d) { r.push('b' + typeof d.didTimeout) }, { timeout: 1 });
+(function () { return r.sort().join(' ') })
+=== timeout-cancel
+var r = [];
+var a = requestIdleCallback(function (d) { r.push('A') }, { timeout: 1 });
+cancelIdleCallback(a);
+(function () { return r.join(' ') })
+=== timeout-zero-and-large
+var r = [];
+requestIdleCallback(function (d) { r.push('A' + d.didTimeout) }, { timeout: 0 });
+requestIdleCallback(function (d) { r.push('B' + d.didTimeout) }, { timeout: 4294967295 });
+requestIdleCallback(function (d) { r.push('C' + d.didTimeout) }, { timeout: 4294967296 });
+(function () { return r.join(' ') })
+=== deadline-after-callback
+var d0, r = [];
+requestIdleCallback(function (d) { d0 = d; r.push(d.timeRemaining() > 0) });
+(function () { return r.join(' ') })
+=== deadline-new-object-each-callback
+var ds = [];
+requestIdleCallback(function (d) { ds.push(d) });
+requestIdleCallback(function (d) { ds.push(d) });
+(function () { return [ds.length, ds[0] === ds[1]].join(' ') })
+=== illegal-invocation
+var r = [];
+try { requestIdleCallback.call({}, function () {}); r.push('ok') } catch (e) { r.push(e.name) }
+try { cancelIdleCallback.call({}, 1); r.push('ok') } catch (e) { r.push(e.name) }
+requestIdleCallback(function () {
+  try { new IdleDeadline() } catch (e) { r.push(e.name) }
+  try { IdleDeadline.prototype.timeRemaining.call({}) } catch (e) { r.push(e.name) }
+});
+(function () { return r.join(' ') })
+=== many-between-frames
+var n = 0;
+function again() { n++; if (n < 5) requestIdleCallback(again) }
+requestIdleCallback(again);
+(function () { return n })

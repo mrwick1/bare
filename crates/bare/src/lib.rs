@@ -110,6 +110,7 @@ pub mod browser_geometry;
 pub mod browser_resize;
 mod browser_element;
 mod browser_frame;
+mod browser_idle;
 mod browser_intersection;
 mod browser_walker;
 mod browser_range;
@@ -119,6 +120,8 @@ mod browser_mutation;
 mod browser_topic_tests;
 #[cfg(test)]
 mod browser_raf_tests;
+#[cfg(test)]
+mod browser_idle_tests;
 #[cfg(test)]
 mod browser_element_tests;
 #[cfg(test)]

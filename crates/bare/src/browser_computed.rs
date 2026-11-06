@@ -140,10 +140,12 @@ pub struct ComputedStats {
     pub computes: u64,
 }
 
-struct Built {
+pub(crate) struct Built {
     vp: (f32, f32),
-    key: Vec<(Option<String>, String)>,
+    pub(crate) key: Vec<(Option<String>, String)>,
     rules: RuleSet,
+    /// Does a sheet use what the engine does not model (`content-visibility`, `display: contents`)? Read by `checkVisibility` only.
+    pub(crate) odd: OnceCell<bool>,
 }
 
 #[derive(Default)]
@@ -160,7 +162,7 @@ pub(crate) struct Computed {
     bound: RefCell<HashMap<NodeId, String>>,
     /// Moves when a supplied sheet is set or removed. `ResizeObserver` reads it to know that styles may have changed.
     pub(crate) sheet_gen: Cell<u64>,
-    cache: RefCell<Option<Built>>,
+    pub(crate) cache: RefCell<Option<Built>>,
     builds: Cell<u64>,
     computes: Cell<u64>,
 }
@@ -194,11 +196,11 @@ pub(crate) fn join_layer(outer: Option<&str>, inner: Option<&str>) -> Option<Str
 }
 
 /// The styles of the document at one read, and the style of the element asked about.
-struct Snap {
-    styles: Styles,
-    style: ComputedStyle,
+pub(crate) struct Snap {
+    pub(crate) styles: Styles,
+    pub(crate) style: ComputedStyle,
     /// The element is not rendered: it, or an ancestor, is `display:none`. Its resolved values are the computed ones.
-    hidden: bool,
+    pub(crate) hidden: bool,
 }
 
 /// A float as CSS prints it (no `-0`).
@@ -401,7 +403,7 @@ impl Dom {
                 if doc.name_count() > self.lim.max_names {
                     return Err(self.lim("dom-names"));
                 }
-                *cache = Some(Built { vp, key: plan.parts, rules });
+                *cache = Some(Built { vp, key: plan.parts, rules, odd: OnceCell::new() });
             }
         }
         let cache = self.computed.cache.borrow();
@@ -418,7 +420,7 @@ impl Dom {
     }
 
     /// The style of `el` now, or `None` when the element is not connected (an empty declaration).
-    fn snapshot(&self, it: &mut Interp<'_>, el: NodeId) -> R<Option<Snap>> {
+    pub(crate) fn snapshot(&self, it: &mut Interp<'_>, el: NodeId) -> R<Option<Snap>> {
         if !self.in_document(it, el)? {
             return Ok(None);
         }

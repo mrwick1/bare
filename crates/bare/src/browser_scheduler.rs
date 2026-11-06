@@ -55,7 +55,9 @@
 //!   prototype getters. A handler set with `onmessage` and an `addEventListener` with the same function count as one
 //!   listener. `onmessageerror`, the `close` event, `window.postMessage` and `BroadcastChannel` are absent.
 //!
-//! `requestAnimationFrame` and the rendering step are in `browser_frame.rs`. Not here: `requestIdleCallback`, `setImmediate`, an `error` event or `onerror` for
+//! `requestAnimationFrame` and the rendering step are in `browser_frame.rs`. `requestIdleCallback` is in `browser_idle.rs`: an idle
+//! period is `Task::Idle`, queued only by a request. It runs after every task that is due, and after the frame that is queued; its
+//! deadline is `min(50 ms, next task)`. `Task::IdleTimeout` runs a callback whose `timeout` passed. Not here: `setImmediate`, an `error` event or `onerror` for
 //! reported exceptions, `ErrorEvent`.
 //!
 //! GC: timers keep their callbacks and arguments (they are roots). A port that has queued delivery tasks is a root.
@@ -113,9 +115,9 @@ struct Mark {
 }
 
 /// `(due time as f64 bits, sequence)`. The bits of a non-negative f64 sort like the number.
-type Key = (u64, u64);
+pub(crate) type Key = (u64, u64);
 
-enum Task {
+pub(crate) enum Task {
     Timer(u64),
     Deliver(ObjId),
     /// `select` event of a text control (`browser_selection.rs`).
@@ -130,6 +132,10 @@ enum Task {
     AbortTimeout(ObjId),
     /// The delivery of `IntersectionObserver` entries (`browser_intersection.rs`). At most one is queued.
     Notify,
+    /// An idle period (`browser_idle.rs`). At most one is queued.
+    Idle,
+    /// The timeout of a `requestIdleCallback` callback (`browser_idle.rs`).
+    IdleTimeout(u32),
 }
 
 struct Timer {
@@ -246,6 +252,8 @@ enum Run {
     Scroll,
     AbortTimeout(ObjId),
     Notify,
+    Idle,
+    IdleTimeout(u32),
     Nothing,
 }
 
@@ -292,7 +300,7 @@ impl Dom {
         let ports = &s.ports;
         s.tasks.retain(|_, t| match t {
             Task::Deliver(o) => ports.contains_key(o),
-            Task::Timer(_) | Task::Select(_) | Task::SelectionChange(_) | Task::Render | Task::Scroll | Task::AbortTimeout(_) | Task::Notify => true,
+            Task::Timer(_) | Task::Select(_) | Task::SelectionChange(_) | Task::Render | Task::Scroll | Task::AbortTimeout(_) | Task::Notify | Task::Idle | Task::IdleTimeout(_) => true,
         });
         s.queued = s.ports.values().map(|p| p.inbox.len()).sum();
         s.queued_bytes = s.ports.values().flat_map(|p| p.inbox.iter().map(|m| m.1)).sum();
@@ -333,6 +341,7 @@ impl Dom {
             }
             self.schedule(due, Task::Render)?;
             self.frame.queued.set(true);
+            self.frame.due.set(due);
         }
         Ok(())
     }
@@ -342,7 +351,7 @@ impl Dom {
         self.schedule(self.now_ms(), Task::Notify).map(|_| ())
     }
 
-    fn schedule(&self, due: f64, task: Task) -> R<Key> {
+    pub(crate) fn schedule(&self, due: f64, task: Task) -> R<Key> {
         let mut s = self.sched.borrow_mut();
         let seq = s.seq;
         s.seq = seq.checked_add(1).ok_or_else(|| self.lim("task-seq"))?;
@@ -389,7 +398,11 @@ impl Dom {
         self.schedule(self.now_ms() + ms, Task::AbortTimeout(o)).map(|_| ())
     }
 
-    fn next_due(&self) -> Option<f64> {
+    pub(crate) fn unschedule(&self, key: Key) {
+        self.sched.borrow_mut().tasks.remove(&key);
+    }
+
+    pub(crate) fn next_due(&self) -> Option<f64> {
         self.sched.borrow().tasks.keys().next().map(|k| f64::from_bits(k.0))
     }
 
@@ -434,6 +447,8 @@ impl Dom {
             }
             Task::Scroll => Run::Scroll,
             Task::Notify => Run::Notify,
+            Task::Idle => Run::Idle,
+            Task::IdleTimeout(id) => Run::IdleTimeout(id),
             Task::AbortTimeout(o) => Run::AbortTimeout(o),
             Task::Deliver(port) => match s.ports.get_mut(&port) {
                 Some(p) if p.keys.front() == Some(&key) => {
@@ -514,6 +529,14 @@ impl Dom {
                 self.sched.borrow_mut().frame_idle = quiet;
                 Ok(())
             }
+            Run::Idle => it.host_scope(|it| {
+                it.charge(1)?;
+                self.idle_run(it)
+            }),
+            Run::IdleTimeout(id) => it.host_scope(|it| {
+                it.charge(1)?;
+                self.idle_timeout(it, id)
+            }),
             Run::Notify => it.host_scope(|it| {
                 it.charge(1)?;
                 self.io_notify(it)
