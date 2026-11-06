@@ -893,7 +893,6 @@ impl Dom {
         self.install_platform(it)?;
         at::install(self, it)?;
         crate::browser_nodelist::install(self, it)?;
-        crate::browser_select::install(self, it)?;
         crate::browser_dataset::install(self, it)?;
         crate::browser_abort::install(self, it)?;
         crate::browser_xhr::install(self, it)?;
@@ -911,7 +910,8 @@ impl Dom {
         crate::browser_intersection::install(self, it)?;
         crate::browser_walker::install(self, it)?;
         crate::browser_range::install(self, it)?;
-        crate::browser_handlers::install(self, it)
+        crate::browser_handlers::install(self, it)?;
+        crate::browser_select::install(self, it)
     }
 
     pub(crate) fn define_accessor(&self, it: &mut Interp<'_>, o: ObjId, key: PropertyKey, get: ObjId, set: Option<ObjId>) -> R<()> {
