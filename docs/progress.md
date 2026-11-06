@@ -661,4 +661,6 @@ Cost against origin/main fb36a74 (the base after PR 180), measured with `tools/j
 
 `cargo test --workspace` on the rebased head: 2,447 passed, 0 failed. The stress runs above used the code before the rebase. They were not repeated after it.
 
+Check of the clock readers and a second run. `now_ms` is the only code that reads `Dom::start`. `performance.now`, `Event.timeStamp`, `requestAnimationFrame` time, idle deadlines and the timer clock all call `now_ms`, so none can show the page a time after `last_read`. `Date` uses the separate wall clock (`WallClock`) and does not take part in this guard. A second check on the merged code: the reproducer fails on the scheduler of main 8c99ede and passes with the fix. 100 runs of `chrome_cases` and the reproducer, pinned with `stress-ng --cpu 2` to one core, gave 100 of 100 passes in 332 s. The 54 cost rows (`instr.sh`, minimum of 3, against 8c99ede) range from -0.051% to +0.067%. The worst scheduler row is `scheduler_load mixed 10` (+0.023%).
+
 Not tested: other allocators; hosts that call `use_virtual_clock_at` from their own code path; the live staging login.
