@@ -166,7 +166,7 @@ A page asks for many files. Each one costs a round trip (about 40 ms to staging)
 
 ## Identifier lookup
 
-- A name is resolved by the scope it is in, not by a search of the environment chain. The first walk of a script records the static scopes (script, function, block with lexical declarations, `for`/`for-in`/`for-of` with `let` or `const`, `catch`, `switch` with lexical declarations) and the scope of each identifier site. The first run of a site stores the number of environments to go up and the index of the binding.
+- A name is resolved by the scope it is in, not by a search of the environment chain. The first walk of a script records the static scopes (script, function, block with lexical declarations, `for`/`for-in`/`for-of` with `let` or `const`, `catch`, `switch` with lexical declarations) and the scope of each identifier site. The second run of a site stores the number of environments to go up and the index of the binding. The first run uses the full search, so code that runs once pays nothing.
 - A class is a barrier. A site behind a barrier, and a site named `arguments`, use the full search.
 - A stored index is a hint. A name check guards it, and a miss runs the full search. A wrong hop count is the only unsafe error, so a debug build checks every resolved lookup against the full search.
 - A name that no scope declares goes to the global object. A per-name hint holds the position of its property, and a key check guards it.
