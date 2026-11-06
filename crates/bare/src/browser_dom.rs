@@ -340,7 +340,7 @@ impl Dom {
         Ok(())
     }
 
-    fn insert_checked(&self, it: &mut Interp<'_>, parent: NodeId, node: NodeId, before: Option<NodeId>) -> R<()> {
+    pub(crate) fn insert_checked(&self, it: &mut Interp<'_>, parent: NodeId, node: NodeId, before: Option<NodeId>) -> R<()> {
         self.check_insert(it, parent, node, before, None)?;
         let mut doc = self.doc.borrow_mut();
         let before = if before == Some(node) { doc.next_sibling(node) } else { before };

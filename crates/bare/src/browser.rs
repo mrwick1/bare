@@ -59,8 +59,8 @@
 //!   radio-group exclusion on click. Focus does not follow a click. The test driver sets native input state itself, then dispatches events.
 //!   The one exception is `Browser::click` at a submit button: it dispatches the `submit` event at the form owner, behind two named
 //!   gates (validation, native navigation). `Browser::submit` stays dispatch-only. Read `browser_form.rs`.
-//! - `<input>` has no value sanitization (newline stripping, number/date parsing). `select` and `textarea` have no
-//!   `value` state.
+//! - `<input>` has no value sanitization (newline stripping, number/date parsing). `textarea` has a `value` set by script (no
+//!   events, no selection API, not painted or submitted).
 //! - Microtasks: the test driver runs a checkpoint after each listener it started from the host. Dispatch from JS does not.
 //! - `matchMedia`, `classList` and `getElementsBy*` are in `browser_platform.rs` (read its header).
 //! - `getComputedStyle` and the read-only computed declaration are in `browser_computed.rs` (read its header: external sheets are supplied by the embedder, used values are gated).
@@ -351,6 +351,8 @@ pub struct Dom {
     pub(crate) attr: crate::browser_attr::AttrHost,
     /// `Document.getElementsByName` and the live `NodeList` (`browser_nodelist.rs`).
     pub(crate) nl: crate::browser_nodelist::NodeListHost,
+    /// `HTMLSelectElement`, `HTMLOptionElement` and the option lists (`browser_select.rs`).
+    pub(crate) sel: crate::browser_select::SelHost,
     /// `HTMLElement.dataset` and `DOMStringMap` (`browser_dataset.rs`).
     pub(crate) dataset: crate::browser_dataset::DatasetHost,
     /// `AbortController` and `AbortSignal` (`browser_abort.rs`).
@@ -389,6 +391,7 @@ impl Host for Dom {
         crate::browser_computed::roots(self, out);
         at::roots(self, out);
         crate::browser_nodelist::roots(self, out);
+        crate::browser_select::roots(self, out);
         crate::browser_dataset::roots(self, out);
         crate::browser_abort::roots(self, out);
         crate::browser_xhr::roots(self, out);
@@ -460,6 +463,7 @@ impl Host for Dom {
         self.range_prune(live);
         at::prune(self, live);
         crate::browser_nodelist::prune(self, live);
+        crate::browser_select::prune(self, live);
         crate::browser_dataset::prune(self, live);
         crate::browser_web::prune(self, live);
         let mut guard = self.st.borrow_mut();
@@ -630,6 +634,7 @@ impl Dom {
                             "form" => p.form,
                             "button" => p.button,
                             "script" => self.scripts.proto.get().copied().unwrap_or(p.html),
+                            t @ ("select" | "option" | "optgroup" | "textarea") => crate::browser_select::proto_for(self, it, t)?,
                             _ => p.html,
                         },
                     },
@@ -888,6 +893,7 @@ impl Dom {
         self.install_platform(it)?;
         at::install(self, it)?;
         crate::browser_nodelist::install(self, it)?;
+        crate::browser_select::install(self, it)?;
         crate::browser_dataset::install(self, it)?;
         crate::browser_abort::install(self, it)?;
         crate::browser_xhr::install(self, it)?;
@@ -1172,6 +1178,7 @@ impl Browser {
             clicking: Default::default(),
             attr: Default::default(),
             nl: Default::default(),
+            sel: Default::default(),
             dataset: Default::default(),
             abort: Default::default(),
             web: Default::default(),

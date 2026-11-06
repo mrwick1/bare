@@ -334,6 +334,12 @@ impl Document {
         self.revision
     }
 
+    /// Move `revision` for a change that the host keeps outside the tree, so a host cache of a query that reads it (the selected
+    /// options of a select) is built again.
+    pub fn touch(&mut self) {
+        self.revision += 1;
+    }
+
     /// A number that moves at every edit of the text of a node that exists (`set_text`, text that joins a text node). With
     /// `revision`, a host can tell that nothing that layout reads has changed. It only grows.
     pub fn text_revision(&self) -> u64 {

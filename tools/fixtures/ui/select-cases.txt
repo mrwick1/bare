@@ -1,0 +1,478 @@
+var $ = function (i) { return document.getElementById(i) };
+var err = function (f) { try { var v = f(); return 'ok ' + String(v) } catch (e) { return e.name } };
+var vals = function (s) { return Array.prototype.map.call(s.options, function (o) { return o.value }).join() };
+var sel = function (s) { return Array.prototype.map.call(s.options, function (o) { return o.selected ? 1 : 0 }).join('') };
+var st = function (s) { return s.selectedIndex + ' ' + JSON.stringify(s.value) + ' ' + sel(s) };
+var mk = function (t, v) { var o = document.createElement('option'); o.textContent = t; if (v !== undefined) o.setAttribute('value', v); return o };
+var updateOptions = function (node, multiple, propValue, setDefaultSelected) {
+  var options = node.options;
+  if (multiple) {
+    var selectedValues = propValue; var selectedValue = {};
+    for (var i = 0; i < selectedValues.length; i++) selectedValue['$' + selectedValues[i]] = true;
+    for (var j = 0; j < options.length; j++) {
+      var selected = selectedValue.hasOwnProperty('$' + options[j].value);
+      if (options[j].selected !== selected) options[j].selected = selected;
+      if (selected && setDefaultSelected) options[j].defaultSelected = true;
+    }
+  } else {
+    var sv = '' + propValue; var defaultSelected = null;
+    for (var k = 0; k < options.length; k++) {
+      if (options[k].value === sv) { options[k].selected = true; if (setDefaultSelected) options[k].defaultSelected = true; return }
+      if (defaultSelected === null && !options[k].disabled) defaultSelected = options[k];
+    }
+    if (defaultSelected !== null) defaultSelected.selected = true;
+  }
+};
+=== interfaces
+@html <select id=s><option>a</option></select>
+(function () { var s = $('s'); return [s instanceof HTMLSelectElement, s instanceof HTMLElement, s.firstChild instanceof HTMLOptionElement, Object.prototype.toString.call(s), Object.prototype.toString.call(s.options), s.options instanceof HTMLOptionsCollection, s.options instanceof HTMLCollection, typeof Option, Option.name, Option.length].join() })
+=== optgroup-interface
+@html <select id=s><optgroup id=g label=G><option>a</option></optgroup></select>
+(function () { var g = $('g'); return [g instanceof HTMLOptGroupElement, g instanceof HTMLElement, Object.prototype.toString.call(g), g.label, g.disabled].join() })
+=== single-default-first
+@html <select id=s><option>a</option><option>b</option></select>
+(function () { var s = $('s'); return st(s) + ' ' + s.type + ' ' + s.length + ' ' + s.options.length })
+=== single-implied-end-tags
+@html <select id=s><option>a<option>b<option>c</select>
+(function () { var s = $('s'); return st(s) + ' ' + vals(s) })
+=== multiple-default-none
+@html <select id=s multiple><option>a</option><option>b</option></select>
+(function () { var s = $('s'); return st(s) + ' ' + s.type + ' ' + s.multiple })
+=== selected-attr-single
+@html <select id=s><option>a</option><option selected>b</option><option>c</option></select>
+(function () { return st($('s')) })
+=== two-selected-attr-single-last-wins
+@html <select id=s><option selected>a</option><option>b</option><option selected>c</option></select>
+(function () { return st($('s')) })
+=== two-selected-attr-multiple
+@html <select id=s multiple><option selected>a</option><option>b</option><option selected>c</option></select>
+(function () { var s = $('s'); return st(s) + ' ' + s.selectedOptions.length })
+=== disabled-first-skipped
+@html <select id=s><option disabled>a</option><option>b</option></select>
+(function () { return st($('s')) })
+=== all-disabled-none
+@html <select id=s><option disabled>a</option><option disabled>b</option></select>
+(function () { return st($('s')) })
+=== disabled-but-selected-attr
+@html <select id=s><option disabled selected>a</option><option>b</option></select>
+(function () { return st($('s')) })
+=== disabled-optgroup-skipped
+@html <select id=s><optgroup disabled><option>a</option></optgroup><option>b</option></select>
+(function () { var s = $('s'); return st(s) + ' ' + s.options[0].disabled })
+=== size-gt-1-no-default
+@html <select id=s size=3><option>a</option><option>b</option></select>
+(function () { var s = $('s'); return st(s) + ' ' + s.size })
+=== size-gt-1-selected-kept
+@html <select id=s size=3><option>a</option><option selected>b</option></select>
+(function () { return st($('s')) })
+=== size-1-explicit
+@html <select id=s size=1><option>a</option><option>b</option></select>
+(function () { var s = $('s'); return st(s) + ' ' + s.size })
+=== size-reflect
+@html <select id=s size=abc><option>a</option></select>
+(function () { var s = $('s'); var r = [s.size]; s.size = 4; r.push(s.size, s.getAttribute('size')); return r.join() })
+=== size-then-no-default-on-change
+@html <select id=s><option>a</option><option>b</option></select>
+(function () { var s = $('s'); s.setAttribute('size', '4'); s.selectedIndex = -1; var r = [st(s)]; s.removeAttribute('size'); r.push(st(s)); return r.join('|') })
+=== optgroup-options-in-list
+@html <select id=s><option>a</option><optgroup label=g><option>b</option><option>c</option></optgroup><option>d</option></select>
+(function () { var s = $('s'); return vals(s) + ' ' + s.options.length + ' ' + Array.prototype.map.call(s.options, function (o) { return o.index }).join() })
+=== optgroup-nested-not-in-list
+@html <select id=s><optgroup><optgroup><option>x</option></optgroup></optgroup><option>y</option></select>
+(function () { var s = $('s'); return s.options.length + ' ' + vals(s) })
+=== option-in-div-not-in-list
+@html <select id=s><div><option>x</option></div><option>y</option></select>
+(function () { var s = $('s'); return s.options.length + ' ' + vals(s) })
+=== optgroup-props
+@html <optgroup id=g label=Lab disabled></optgroup>
+(function () { var g = $('g'); var r = [g.label, g.disabled]; g.label = 'N'; g.disabled = false; r.push(g.getAttribute('label'), g.hasAttribute('disabled'), g.disabled); return r.join() })
+=== optgroup-label-default
+@html <optgroup id=g></optgroup>
+(function () { return JSON.stringify($('g').label) })
+=== option-value-fallback
+@html <select id=s><option>  a   b&#10; c </option><option value=v>t</option><option value="">t2</option><option></option></select>
+(function () { return JSON.stringify(Array.prototype.map.call($('s').options, function (o) { return o.value })) })
+=== option-text-getter
+@html <select id=s><option>  a   b&#10; c </option><option value=v>  hi  <b>there </b>!</option></select>
+(function () { return JSON.stringify(Array.prototype.map.call($('s').options, function (o) { return o.text })) })
+=== option-text-skips-script
+@html <select id=s><option id=o>a<script>1</script>b</option></select>
+(function () { var o = $('o'); return JSON.stringify([o.text, o.value, o.label]) })
+=== option-text-setter
+@html <select id=s><option id=o>a<b>x</b></option></select>
+(function () { var o = $('o'); o.text = 'new  text'; return JSON.stringify([o.text, o.childNodes.length, o.firstChild.data, o.value]) })
+=== option-label
+@html <select id=s><option id=o1 label=L>t</option><option id=o2> a  b </option></select>
+(function () { var o = $('o1'), p = $('o2'); var r = [o.label, p.label]; o.label = 'M'; r.push(o.getAttribute('label')); p.label = ''; r.push(JSON.stringify(p.label)); return r.join() })
+=== option-value-setter
+@html <select id=s><option id=o>t</option></select>
+(function () { var o = $('o'); o.value = 'x'; return [o.value, o.getAttribute('value'), o.text].join() })
+=== option-selected-dirtiness
+@html <select id=s><option id=a>a</option><option id=b selected>b</option></select>
+(function () { var a = $('a'), b = $('b'); var r = [a.selected, b.selected, a.defaultSelected, b.defaultSelected]; a.selected = true; r.push(a.selected, b.selected, b.defaultSelected); b.removeAttribute('selected'); r.push(b.selected, b.defaultSelected); return r.join() })
+=== option-default-selected-follows-attr-when-clean
+@html <select id=s multiple><option id=a>a</option></select>
+(function () { var a = $('a'); var r = [a.selected]; a.setAttribute('selected', ''); r.push(a.selected); a.removeAttribute('selected'); r.push(a.selected); a.defaultSelected = true; r.push(a.selected, a.hasAttribute('selected')); return r.join() })
+=== option-dirty-ignores-attr
+@html <select id=s multiple><option id=a>a</option></select>
+(function () { var a = $('a'); a.selected = true; a.setAttribute('selected', ''); a.removeAttribute('selected'); var r = [a.selected]; a.selected = false; a.setAttribute('selected', ''); r.push(a.selected, a.defaultSelected); return r.join() })
+=== option-default-selected-setter
+@html <select id=s multiple><option id=a>a</option></select>
+(function () { var a = $('a'); a.defaultSelected = true; var r = [a.getAttribute('selected'), a.defaultSelected]; a.defaultSelected = false; r.push(a.hasAttribute('selected')); return r.join() })
+=== option-disabled
+@html <select id=s><optgroup id=g disabled><option id=a>a</option></optgroup><option id=b disabled>b</option></select>
+(function () { var a = $('a'), b = $('b'); var r = [a.disabled, b.disabled]; a.disabled = true; b.disabled = false; r.push(a.hasAttribute('disabled'), b.hasAttribute('disabled')); return r.join() })
+=== option-index
+@html <select id=s><option id=a>a</option><optgroup><option id=b>b</option></optgroup></select>
+(function () { var d = document.createElement('option'); return [$('a').index, $('b').index, d.index].join() })
+=== option-form-and-select-form
+@html <form id=f><select id=s><option id=o>a</option></select></form><select id=s2><option id=o2>b</option></select><form id=f3></form>
+(function () { var s = $('s'), s2 = $('s2'); var r = [s.form === $('f'), $('o').form === $('f'), s2.form, $('o2').form]; s2.setAttribute('form', 'f3'); r.push(s2.form === $('f3'), $('o2').form === $('f3')); return r.join() })
+=== option-form-detached
+@html <p></p>
+(function () { var s = document.createElement('select'), o = document.createElement('option'); s.appendChild(o); return [s.form, o.form].join() })
+=== new-option-none
+@html <p></p>
+(function () { var o = new Option(); return JSON.stringify([o.text, o.value, o.defaultSelected, o.selected, o.nodeName, o.hasAttribute('value'), o.childNodes.length, o instanceof HTMLOptionElement]) })
+=== new-option-text
+@html <p></p>
+(function () { var o = new Option('hi'); return JSON.stringify([o.text, o.value, o.hasAttribute('value')]) })
+=== new-option-text-value
+@html <p></p>
+(function () { var o = new Option('hi', 'v'); return JSON.stringify([o.text, o.value, o.getAttribute('value')]) })
+=== new-option-value-undefined
+@html <p></p>
+(function () { var o = new Option('hi', undefined); return JSON.stringify([o.value, o.hasAttribute('value')]) })
+=== new-option-default-selected
+@html <p></p>
+(function () { var o = new Option('a', 'b', true); return [o.defaultSelected, o.selected, o.getAttribute('selected')].join() })
+=== new-option-selected-only
+@html <p></p>
+(function () { var o = new Option('a', 'b', false, true); return [o.defaultSelected, o.selected].join() })
+=== new-option-default-true-selected-false
+@html <p></p>
+(function () { var o = new Option('a', 'b', true, false); return [o.defaultSelected, o.selected].join() })
+=== new-option-number-args
+@html <p></p>
+(function () { var o = new Option(12, 34); return JSON.stringify([o.text, o.value]) })
+=== option-call-without-new
+@html <p></p>
+(function () { return err(function () { return Option('x') }) })
+=== option-no-owner-select
+@html <p></p>
+(function () { var o = new Option('a'); var s = document.createElement('select'); s.add(o); return [st(s), o.selected, o.index].join() })
+=== select-value-getter
+@html <select id=s><option value=1>a</option><option value=2 selected>b</option></select>
+(function () { return $('s').value })
+=== select-value-setter-match
+@html <select id=s><option value=1>a</option><option value=2>b</option><option value=2>c</option></select>
+(function () { var s = $('s'); s.value = '2'; return st(s) })
+=== select-value-setter-no-match
+@html <select id=s><option value=1>a</option><option value=2>b</option></select>
+(function () { var s = $('s'); s.value = 'zzz'; var r = [st(s)]; s.value = '1'; r.push(st(s)); return r.join('|') })
+=== select-value-setter-coerces
+@html <select id=s><option value=1>a</option><option value=undefined>b</option><option value=null>c</option></select>
+(function () { var s = $('s'); s.value = 1; var r = [s.selectedIndex]; s.value = undefined; r.push(s.selectedIndex); s.value = null; r.push(s.selectedIndex); return r.join() })
+=== select-value-setter-text-fallback
+@html <select id=s><option>x y</option><option>z</option></select>
+(function () { var s = $('s'); s.value = 'z'; return st(s) })
+=== select-value-getter-none
+@html <select id=s multiple><option value=1>a</option></select>
+(function () { return JSON.stringify($('s').value) })
+=== select-value-multiple-first
+@html <select id=s multiple><option value=1>a</option><option value=2 selected>b</option><option value=3 selected>c</option></select>
+(function () { var s = $('s'); s.value = '3'; return st(s) })
+=== select-selected-index-setter
+@html <select id=s><option>a</option><option>b</option><option>c</option></select>
+(function () { var s = $('s'); var r = []; s.selectedIndex = 2; r.push(st(s)); s.selectedIndex = -1; r.push(st(s)); s.selectedIndex = 5; r.push(st(s)); s.selectedIndex = 1; r.push(st(s)); return r.join('|') })
+=== select-selected-index-multiple
+@html <select id=s multiple><option selected>a</option><option selected>b</option><option>c</option></select>
+(function () { var s = $('s'); var r = [s.selectedIndex]; s.selectedIndex = 2; r.push(st(s)); s.selectedIndex = -1; r.push(st(s)); return r.join('|') })
+=== select-selected-index-fractional
+@html <select id=s><option>a</option><option>b</option><option>c</option></select>
+(function () { var s = $('s'); s.selectedIndex = 1.9; var r = [s.selectedIndex]; s.selectedIndex = '2'; r.push(s.selectedIndex); s.selectedIndex = NaN; r.push(s.selectedIndex); return r.join() })
+=== option-selected-true-clears-others
+@html <select id=s><option>a</option><option>b</option><option>c</option></select>
+(function () { var s = $('s'); s.options[2].selected = true; var r = [st(s)]; s.options[1].selected = true; r.push(st(s)); return r.join('|') })
+=== option-selected-false-single-resets
+@html <select id=s><option>a</option><option>b</option><option>c</option></select>
+(function () { var s = $('s'); s.options[2].selected = true; s.options[2].selected = false; var r = [st(s)]; s.options[0].disabled = true; s.options[1].selected = true; s.options[1].selected = false; r.push(st(s)); return r.join('|') })
+=== option-selected-false-multiple
+@html <select id=s multiple><option selected>a</option><option selected>b</option></select>
+(function () { var s = $('s'); s.options[0].selected = false; var r = [st(s)]; s.options[1].selected = false; r.push(st(s)); return r.join('|') })
+=== option-selected-true-multiple-keeps
+@html <select id=s multiple><option>a</option><option>b</option></select>
+(function () { var s = $('s'); s.options[0].selected = true; s.options[1].selected = true; return st(s) + ' ' + s.selectedOptions.length })
+=== option-selected-truthy
+@html <select id=s><option>a</option><option>b</option></select>
+(function () { var s = $('s'); s.options[1].selected = 'x'; var r = [sel(s)]; s.options[0].selected = 0; r.push(sel(s)); s.options[0].selected = ''; r.push(sel(s)); return r.join('|') })
+=== disabled-option-can-be-selected-by-script
+@html <select id=s><option>a</option><option disabled>b</option></select>
+(function () { var s = $('s'); s.options[1].selected = true; var r = [st(s)]; s.value = 'a'; r.push(st(s)); s.selectedIndex = 1; r.push(st(s)); return r.join('|') })
+=== insert-selected-option-clears-others
+@html <select id=s><option>a</option><option>b</option></select>
+(function () { var s = $('s'); var o = mk('c'); o.setAttribute('selected', ''); s.insertBefore(o, s.firstChild); return st(s) })
+=== insert-selected-option-multiple-keeps
+@html <select id=s multiple><option selected>a</option></select>
+(function () { var s = $('s'); var o = mk('c'); o.defaultSelected = true; s.appendChild(o); return st(s) })
+=== insert-dirty-selected-option
+@html <select id=s><option>a</option><option>b</option></select>
+(function () { var s = $('s'); var o = mk('c'); o.selected = true; s.appendChild(o); return st(s) })
+=== insert-into-empty-select-selects
+@html <select id=s></select>
+(function () { var s = $('s'); var r = [st(s)]; s.appendChild(mk('a')); r.push(st(s)); s.appendChild(mk('b')); r.push(st(s)); return r.join('|') })
+=== insert-into-empty-multiple
+@html <select id=s multiple></select>
+(function () { var s = $('s'); s.appendChild(mk('a')); return st(s) })
+=== insert-disabled-into-empty
+@html <select id=s></select>
+(function () { var s = $('s'); var o = mk('a'); o.disabled = true; s.appendChild(o); var r = [st(s)]; s.appendChild(mk('b')); r.push(st(s)); return r.join('|') })
+=== insert-before-keeps-selection
+@html <select id=s><option>a</option><option>b</option></select>
+(function () { var s = $('s'); s.options[1].selected = true; s.insertBefore(mk('z'), s.firstChild); return st(s) })
+=== remove-selected-option-selects-first
+@html <select id=s><option>a</option><option>b</option><option selected>c</option></select>
+(function () { var s = $('s'); s.removeChild(s.lastChild); return st(s) })
+=== remove-first-skips-disabled
+@html <select id=s><option>a</option><option disabled>b</option><option>c</option><option selected>d</option></select>
+(function () { var s = $('s'); s.removeChild(s.lastChild); return st(s) })
+=== remove-all-options
+@html <select id=s><option>a</option><option>b</option></select>
+(function () { var s = $('s'); s.removeChild(s.firstChild); s.removeChild(s.firstChild); return st(s) + ' ' + s.options.length })
+=== remove-selected-multiple-no-reset
+@html <select id=s multiple><option selected>a</option><option>b</option></select>
+(function () { var s = $('s'); s.removeChild(s.firstChild); return st(s) })
+=== remove-unselected-keeps
+@html <select id=s><option>a</option><option selected>b</option><option>c</option></select>
+(function () { var s = $('s'); s.removeChild(s.firstChild); return st(s) })
+=== optgroup-add-and-remove
+@html <select id=s><option>a</option><optgroup id=g><option selected>b</option></optgroup></select>
+(function () { var s = $('s'); var r = [st(s)]; var g = $('g'); g.appendChild(mk('c')); r.push(vals(s)); g.parentNode.removeChild(g); r.push(st(s)); s.appendChild(g); r.push(st(s)); return r.join('|') })
+=== optgroup-selected-wins
+@html <select id=s><option selected>a</option><optgroup id=g><option>b</option></optgroup></select>
+(function () { var s = $('s'); var o = mk('c'); o.setAttribute('selected', ''); $('g').appendChild(o); return st(s) })
+=== option-moved-between-selects
+@html <select id=s1><option>a</option><option id=m selected>b</option></select><select id=s2><option>x</option></select>
+(function () { $('s2').appendChild($('m')); return st($('s1')) + '|' + st($('s2')) })
+=== multiple-toggle-off-keeps-last
+@html <select id=s multiple><option selected>a</option><option selected>b</option><option>c</option></select>
+(function () { var s = $('s'); s.multiple = false; var r = [st(s), s.type, s.hasAttribute('multiple')]; return r.join('|') })
+=== multiple-toggle-off-none-selects-first
+@html <select id=s multiple><option>a</option><option>b</option></select>
+(function () { var s = $('s'); s.multiple = false; return st(s) })
+=== multiple-toggle-on-keeps
+@html <select id=s><option>a</option><option>b</option></select>
+(function () { var s = $('s'); s.multiple = true; return st(s) + ' ' + s.type })
+=== multiple-reflect
+@html <select id=s></select>
+(function () { var s = $('s'); var r = [s.multiple]; s.multiple = true; r.push(s.getAttribute('multiple'), s.multiple); s.multiple = 0; r.push(s.hasAttribute('multiple')); return r.join() })
+=== required-disabled-name-reflect
+@html <select id=s name=n required></select>
+(function () { var s = $('s'); var r = [s.required, s.disabled, s.name]; s.required = false; s.disabled = true; s.name = 'm'; r.push(s.hasAttribute('required'), s.getAttribute('disabled'), s.getAttribute('name')); return r.join() })
+=== select-name-default
+@html <select id=s></select>
+(function () { return JSON.stringify([$('s').name, $('s').type]) })
+=== autocomplete-not-needed-length
+@html <select id=s><option>a</option><option>b</option></select>
+(function () { var s = $('s'); return [s.length, typeof s.length, s.options.length === s.length].join() })
+=== select-item
+@html <select id=s><option id=a>a</option><option id=b>b</option></select>
+(function () { var s = $('s'); return [s.item(0) === $('a'), s.item(1) === $('b'), s.item(2), s.item(-1), s.options.item(1) === $('b'), s.options[0] === $('a'), s.options[5], s.options[-1]].join() })
+=== select-item-no-arg
+@html <select id=s></select>
+(function () { return err(function () { return $('s').item() }) })
+=== select-namedItem
+@html <select id=s><option id=a name=x>a</option><option id=b name=y>b</option><option id=c name=x>c</option><option id=d>d</option></select>
+(function () { var s = $('s'); return [s.namedItem('a') === $('a'), s.namedItem('y') === $('b'), s.namedItem('x') === $('a'), s.namedItem('zz'), s.namedItem('d') === $('d'), s.options.namedItem('c') === $('c'), s.namedItem('') ].join() })
+=== options-length
+@html <select id=s><option>a</option><option>b</option></select>
+(function () { var s = $('s'); return [s.options.length, s.options === s.options, s.options.length === s.length].join() })
+=== options-is-live
+@html <select id=s><option>a</option></select>
+(function () { var s = $('s'); var o = s.options; var r = [o.length]; s.appendChild(mk('b')); r.push(o.length, o[1].text); s.removeChild(s.firstChild); r.push(o.length, o[0].text); return r.join() })
+=== options-length-grow
+@html <select id=s><option>a</option></select>
+(function () { var s = $('s'); s.options.length = 4; var r = [s.options.length, JSON.stringify(vals(s)), s.childNodes.length, s.lastChild.nodeName, JSON.stringify(s.lastChild.text), s.lastChild.hasAttribute('value')]; return r.join() })
+=== options-length-grow-select-empty
+@html <select id=s></select>
+(function () { var s = $('s'); s.length = 3; return st(s) + ' ' + s.options.length })
+=== options-length-shrink
+@html <select id=s><option>a</option><option selected>b</option><option>c</option></select>
+(function () { var s = $('s'); s.options.length = 1; return st(s) + ' ' + s.options.length + ' ' + s.childNodes.length })
+=== options-length-zero
+@html <select id=s><option>a</option><option>b</option></select>
+(function () { var s = $('s'); s.options.length = 0; return st(s) + ' ' + s.options.length })
+=== options-length-same
+@html <select id=s><option>a</option><option>b</option></select>
+(function () { var s = $('s'); s.options.length = 2; return st(s) + ' ' + s.childNodes.length })
+=== options-length-optgroup-shrink
+@html <select id=s><option>a</option><optgroup id=g><option>b</option><option>c</option></optgroup></select>
+(function () { var s = $('s'); s.options.length = 2; return vals(s) + ' ' + $('g').childNodes.length })
+=== options-length-too-large-ignored
+@html <select id=s><option>a</option></select>
+(function () { var s = $('s'); s.options.length = 100001; return s.options.length })
+=== options-length-negative
+@html <select id=s><option>a</option><option>b</option></select>
+(function () { var s = $('s'); s.options.length = -1; return s.options.length })
+=== options-selected-index
+@html <select id=s><option>a</option><option selected>b</option></select>
+(function () { var s = $('s'); var r = [s.options.selectedIndex]; s.options.selectedIndex = 0; r.push(st(s)); return r.join('|') })
+=== options-iterable
+@html <select id=s><option>a</option><option>b</option></select>
+(function () { var s = $('s'); var r = []; for (var o of s.options) r.push(o.text); return r.join() + ' ' + Array.from(s.options).length + ' ' + [...s.options].length })
+=== select-add-element
+@html <select id=s><option>a</option></select>
+(function () { var s = $('s'); s.add(mk('b')); return vals(s) })
+=== select-add-before-element
+@html <select id=s><option id=a>a</option><option id=b>b</option></select>
+(function () { var s = $('s'); s.add(mk('x'), $('b')); return vals(s) })
+=== select-add-before-index
+@html <select id=s><option>a</option><option>b</option><option>c</option></select>
+(function () { var s = $('s'); s.add(mk('x'), 1); var r = [vals(s)]; s.add(mk('y'), 0); r.push(vals(s)); s.add(mk('z'), 99); r.push(vals(s)); s.add(mk('w'), -1); r.push(vals(s)); return r.join('|') })
+=== select-add-before-null
+@html <select id=s><option>a</option></select>
+(function () { var s = $('s'); s.add(mk('x'), null); s.add(mk('y'), undefined); return vals(s) })
+=== select-add-before-not-child
+@html <select id=s><option>a</option></select><p id=p></p>
+(function () { var s = $('s'); return err(function () { s.add(mk('x'), $('p')) }) })
+=== select-add-before-optgroup-child
+@html <select id=s><option>a</option><optgroup id=g><option id=b>b</option></optgroup></select>
+(function () { var s = $('s'); return err(function () { s.add(mk('x'), $('b')) }) })
+=== select-add-optgroup
+@html <select id=s><option>a</option></select>
+(function () { var s = $('s'); var g = document.createElement('optgroup'); g.appendChild(mk('b')); s.add(g); return vals(s) + ' ' + s.childNodes.length })
+=== select-add-ancestor
+@html <div id=d><select id=s></select></div>
+(function () { var s = $('s'); return err(function () { s.add($('d')) }) })
+=== select-add-non-option
+@html <select id=s></select>
+(function () { var s = $('s'); return err(function () { s.add(document.createElement('div')) }) })
+=== select-add-bad-arg
+@html <select id=s></select>
+(function () { var s = $('s'); return err(function () { s.add({}) }) })
+=== select-add-no-arg
+@html <select id=s></select>
+(function () { var s = $('s'); return err(function () { s.add() }) })
+=== options-add
+@html <select id=s><option>a</option></select>
+(function () { var s = $('s'); s.options.add(mk('b')); s.options.add(mk('c'), 0); return vals(s) })
+=== select-add-selected-clears
+@html <select id=s><option>a</option></select>
+(function () { var s = $('s'); var o = new Option('b', 'b', true, true); s.add(o); return st(s) })
+=== select-remove-index
+@html <select id=s><option>a</option><option>b</option><option>c</option></select>
+(function () { var s = $('s'); s.remove(1); var r = [vals(s)]; s.remove(5); r.push(vals(s)); s.remove(-1); r.push(vals(s)); return r.join('|') })
+=== select-remove-optgroup-child
+@html <select id=s><option>a</option><optgroup id=g><option>b</option></optgroup></select>
+(function () { var s = $('s'); s.remove(1); return vals(s) + ' ' + $('g').childNodes.length })
+=== select-remove-no-arg-removes-self
+@html <div id=d><select id=s><option>a</option></select></div>
+(function () { var s = $('s'); var r = s.remove(); return [r, $('d').childNodes.length, s.isConnected, s.options.length].join() })
+=== select-remove-selected-resets
+@html <select id=s><option>a</option><option>b</option></select>
+(function () { var s = $('s'); s.selectedIndex = 1; s.remove(1); return st(s) })
+=== options-remove
+@html <select id=s><option>a</option><option>b</option></select>
+(function () { var s = $('s'); s.options.remove(0); return vals(s) })
+=== options-remove-no-arg
+@html <select id=s><option>a</option></select>
+(function () { var s = $('s'); return err(function () { s.options.remove() }) })
+=== selected-options-live
+@html <select id=s multiple><option>a</option><option>b</option><option>c</option></select>
+(function () { var s = $('s'); var so = s.selectedOptions; var r = [so.length]; s.options[1].selected = true; r.push(so.length, so[0].text); s.options[2].selected = true; r.push(so.length, so[1].text); s.options[1].selected = false; r.push(so.length, so[0].text); return r.join() })
+=== selected-options-single
+@html <select id=s><option>a</option><option>b</option></select>
+(function () { var s = $('s'); var so = s.selectedOptions; var r = [so.length, so[0].text]; s.selectedIndex = 1; r.push(so.length, so[0].text); s.selectedIndex = -1; r.push(so.length); return r.join() })
+=== selected-options-interface
+@html <select id=s multiple><option selected>a</option></select>
+(function () { var so = $('s').selectedOptions; return [so instanceof HTMLCollection, so instanceof HTMLOptionsCollection, Object.prototype.toString.call(so), so.item(0).text, so.item(1), so.namedItem('q'), $('s').selectedOptions === $('s').selectedOptions].join() })
+=== selected-options-tracks-tree
+@html <select id=s multiple><option selected>a</option><option selected>b</option></select>
+(function () { var s = $('s'); var so = s.selectedOptions; s.removeChild(s.firstChild); var r = [so.length, so[0].text]; s.appendChild(mk('c')); s.lastChild.selected = true; r.push(so.length, so[1].text); return r.join() })
+=== events-not-fired-by-script
+@html <select id=s><option>a</option><option>b</option></select>
+(function () { var s = $('s'); var n = 0; ['input', 'change'].forEach(function (t) { s.addEventListener(t, function () { n++ }); document.addEventListener(t, function () { n++ }, true) }); s.value = 'b'; s.selectedIndex = 0; s.options[1].selected = true; s.add(mk('c')); s.remove(0); s.options.length = 0; return n })
+=== clone-select-copies-attrs-not-selectedness
+@html <select id=s><option>a</option><option>b</option></select>
+(function () { var s = $('s'); s.selectedIndex = 1; var c = s.cloneNode(true); return st(c) + ' ' + (c instanceof HTMLSelectElement) + ' ' + c.options.length })
+=== clone-option-selected-attr
+@html <select id=s multiple><option selected>a</option></select>
+(function () { var s = $('s'); var o = s.firstChild; o.selected = false; var c = o.cloneNode(true); return [c.selected, c.defaultSelected].join() })
+=== clone-select-selected-attr-kept
+@html <select id=s><option>a</option><option selected>b</option></select>
+(function () { var c = $('s').cloneNode(true); return st(c) })
+=== wrong-receiver-select
+@html <select id=s></select><div id=d></div>
+(function () { var g = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value').get; return err(function () { return g.call($('d')) }) })
+=== wrong-receiver-option
+@html <div id=d></div>
+(function () { var g = Object.getOwnPropertyDescriptor(HTMLOptionElement.prototype, 'selected').get; return err(function () { return g.call($('d')) }) })
+=== wrong-receiver-options
+@html <div id=d></div>
+(function () { var g = Object.getOwnPropertyDescriptor(HTMLOptionsCollection.prototype, 'length').get; return err(function () { return g.call({}) }) })
+=== select-in-svg-is-not-select
+@html <svg><select id=s></select></svg>
+(function () { var s = $('s'); return [s instanceof HTMLSelectElement, s.options].join() })
+=== react-single-match
+@html <select id=s><option value=a>A</option><option value=b>B</option><option value=c>C</option></select>
+(function () { var s = $('s'); updateOptions(s, false, 'b', true); var r = [st(s), s.options[1].defaultSelected, s.options[0].defaultSelected]; updateOptions(s, false, 'c', false); r.push(st(s), s.options[2].defaultSelected); return r.join('|') })
+=== react-single-no-match-default
+@html <select id=s><option value=a disabled>A</option><option value=b>B</option><option value=c>C</option></select>
+(function () { var s = $('s'); updateOptions(s, false, 'zzz', false); return st(s) })
+=== react-single-no-match-clears-then-default
+@html <select id=s><option value=a>A</option><option value=b selected>B</option></select>
+(function () { var s = $('s'); updateOptions(s, false, 'zzz', true); return st(s) })
+=== react-single-empty
+@html <select id=s></select>
+(function () { var s = $('s'); updateOptions(s, false, 'x', true); return st(s) + ' ' + s.options.length })
+=== react-multiple
+@html <select id=s multiple><option value=a>A</option><option value=b>B</option><option value=c>C</option></select>
+(function () { var s = $('s'); updateOptions(s, true, ['a', 'c'], true); var r = [st(s), s.options[0].defaultSelected, s.options[1].defaultSelected]; updateOptions(s, true, ['b'], false); r.push(st(s), s.options[0].defaultSelected); updateOptions(s, true, [], false); r.push(st(s)); return r.join('|') })
+=== react-controlled-flow
+@html <div id=d></div>
+(function () { var s = document.createElement('select'); s.multiple = false; ['a', 'b', 'c'].forEach(function (v) { var o = document.createElement('option'); o.value = v; o.textContent = v.toUpperCase(); s.appendChild(o) }); $('d').appendChild(s); updateOptions(s, false, 'c', false); var r = [st(s)]; s.value = 'a'; r.push(st(s)); updateOptions(s, false, 'b', false); r.push(st(s), s.options[1].text); return r.join('|') })
+=== react-select-multiple-set-after-create
+@html <div id=d></div>
+(function () { var s = document.createElement('select'); var o1 = mk('a', 'a'), o2 = mk('b', 'b'); s.appendChild(o1); s.appendChild(o2); s.multiple = true; var r = [st(s)]; updateOptions(s, true, ['a', 'b'], false); r.push(st(s)); return r.join('|') })
+=== option-in-select-text-update
+@html <select id=s><option id=o value=1>one</option></select>
+(function () { var o = $('o'); o.textContent = 'uno'; return [o.text, o.value, o.label].join() })
+=== select-focusable-and-tag
+@html <select id=s></select>
+(function () { var s = $('s'); return [s.tagName, s.localName, s.nodeName, s.tabIndex].join() })
+=== option-tag-props
+@html <select id=s><option id=o>a</option></select>
+(function () { var o = $('o'); return [o.tagName, o.parentNode === $('s'), o.parentElement === $('s')].join() })
+=== selected-set-before-insert-sticks-multiple
+@html <select id=s multiple></select>
+(function () { var s = $('s'); var o = mk('a'); o.selected = true; s.appendChild(o); var p = mk('b'); p.selected = true; s.appendChild(p); return st(s) })
+=== detached-option-selected-persist
+@html <p></p>
+(function () { var o = mk('a'); o.selected = true; var r = [o.selected]; var s = document.createElement('select'); s.appendChild(o); s.removeChild(o); r.push(o.selected); return r.join() })
+=== select-value-after-text-change
+@html <select id=s><option id=a>x</option><option id=b>y</option></select>
+(function () { var s = $('s'); $('a').textContent = 'q'; s.value = 'q'; return st(s) })
+=== select-value-matches-value-attr-not-text
+@html <select id=s><option value=1>x</option><option value=2>y</option></select>
+(function () { var s = $('s'); s.value = 'x'; return st(s) })
+=== set-selected-attribute-on-single-clears-others
+@html <select id=s><option>a</option><option>b</option></select>
+(function () { var s = $('s'); s.options[1].setAttribute('selected', ''); return st(s) })
+=== remove-selected-attribute-resets
+@html <select id=s><option>a</option><option selected>b</option></select>
+(function () { var s = $('s'); s.options[1].removeAttribute('selected'); return st(s) })
+=== dirty-then-attr-removed-keeps
+@html <select id=s><option>a</option><option selected>b</option></select>
+(function () { var s = $('s'); s.selectedIndex = 1; s.options[1].removeAttribute('selected'); return st(s) })
+=== many-options
+@html <select id=s></select>
+(function () { var s = $('s'); for (var i = 0; i < 300; i++) s.add(new Option('o' + i, 'v' + i)); s.value = 'v250'; var r = [s.selectedIndex, s.length]; s.options.length = 10; r.push(st(s).length > 0, s.selectedIndex); return r.join() })
+=== radix-native-value-setter
+@html <select id=s><option value=a>A</option><option value=b>B</option></select>
+(function () { var el = $('s'), v = 'b', n = 0; el.addEventListener('change', function () { n++ }); var t = Object.getOwnPropertyDescriptor(window.HTMLSelectElement.prototype, "value").set; if (t) { t.call(el, v); el.dispatchEvent(new Event("change", {bubbles: true})); } return [typeof t, el.value, el.selectedIndex, n].join() })
+=== radix-native-setters-input-textarea
+@html <input id=i><input id=c type=checkbox><textarea id=t>x</textarea>
+(function () { var r = []; var d = function (C, k) { return Object.getOwnPropertyDescriptor(window[C].prototype, k) }; var i = $('i'), c = $('c'), t = $('t'); var n = 0; [i, c, t].forEach(function (e) { e.addEventListener('input', function () { n++ }) }); d('HTMLInputElement', 'value').set.call(i, 'v'); d('HTMLInputElement', 'checked').set.call(c, true); r.push(typeof d('HTMLInputElement', 'value').get, typeof d('HTMLInputElement', 'checked').get); r.push(typeof d('HTMLTextAreaElement', 'value').set, typeof d('HTMLTextAreaElement', 'value').get); r.push(d('HTMLTextAreaElement', 'value').get.call(t)); d('HTMLTextAreaElement', 'value').set.call(t, 'w'); r.push(i.value, c.checked, t.value, n); return r.join() })
+=== textarea-interface
+@html <textarea id=t>ab</textarea><div id=d></div>
+(function () { var t = $('t'); var r = [typeof HTMLTextAreaElement, t instanceof HTMLTextAreaElement, t instanceof HTMLElement, Object.prototype.toString.call(t), $('d') instanceof HTMLTextAreaElement, t.value]; t.value = 'z'; r.push(t.value); t.value = null; r.push(JSON.stringify(t.value)); r.push(err(function () { return Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').get.call($('d')) })); r.push(err(function () { return new HTMLTextAreaElement() })); return r.join() })
