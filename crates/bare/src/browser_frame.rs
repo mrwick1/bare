@@ -22,7 +22,7 @@
 //! but the next step (`Sched::frame_idle`, `browser_scheduler.rs`). A loop of such steps does not keep a session from settling.
 //!
 //! Handles are numbers from 1, never reused. Gates: none. Bound: `animation-frame-callbacks` (live callbacks).
-//! The two globals are plain data properties of `window`. Not here: `requestIdleCallback`, `document.timeline`, `Animation`.
+//! The two globals are plain data properties of `window`. `requestIdleCallback` is in `browser_idle.rs`. Not here: `document.timeline`, `Animation`.
 
 use crate::browser::*;
 use bare_js::eval::{Error, Interp};
@@ -43,9 +43,11 @@ pub(crate) struct Frame {
     next: Cell<u32>,
     /// A `Task::Render` is queued.
     pub(crate) queued: Cell<bool>,
+    /// Due time of the queued `Task::Render`.
+    pub(crate) due: Cell<f64>,
 }
 
-fn window_this(d: &Dom, it: &mut Interp<'_>, this: Value) -> R<()> {
+pub(crate) fn window_this(d: &Dom, it: &mut Interp<'_>, this: Value) -> R<()> {
     match this {
         Value::Undefined | Value::Null => Ok(()),
         Value::Object(o) if Some(&o) == d.global.get() => Ok(()),

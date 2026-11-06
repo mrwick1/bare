@@ -1,0 +1,30 @@
+shape	function 1 requestIdleCallback 1 cancelIdleCallback true  
+handles-count-from-one	1 2 3
+deadline-shape	true [object IdleDeadline] number true false function 0 0 true true
+this-is-window	true 1
+runs-once-in-order	A B C
+after-microtasks-and-sync	sync micro qm idle
+idle-vs-raf-raf-first	raf idle
+idle-vs-raf-idle-first	raf idle
+idle-vs-timer-zero	timer idle
+idle-vs-timer-zero-after	timer idle
+idle-vs-timer-late	idle timer
+time-remaining-bounded-by-timer	true
+cancel-before-run	B
+cancel-from-earlier-callback	A C
+cancel-twice-and-unknown	
+cancel-self-is-harmless	A
+posted-during-idle-runs-later	A B A2
+posted-during-idle-after-raf	A raf A2
+handle-in-callback-order	1 2 ab
+throw-does-not-stop-the-rest	A B
+microtask-between-callbacks	A Am B
+not-callable	TypeError TypeError TypeError TypeError TypeError TypeError:Failed to execute 'requestIdleCallback' on 'Window': 1 argument required, but only 0 present.
+options-bad	TypeError TypeError ok ok ok ok ok ok ok
+timeout-runs	aboolean bboolean
+timeout-cancel	
+timeout-zero-and-large	Afalse Bfalse Cfalse
+deadline-after-callback	true
+deadline-new-object-each-callback	2 false
+illegal-invocation	TypeError TypeError TypeError TypeError
+many-between-frames	5

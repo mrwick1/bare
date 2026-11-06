@@ -340,6 +340,8 @@ pub struct Dom {
     pub(crate) resize: crate::browser_resize::Resize,
     /// `requestAnimationFrame` (`browser_frame.rs`).
     pub(crate) frame: crate::browser_frame::Frame,
+    /// `requestIdleCallback` (`browser_idle.rs`).
+    pub(crate) idle: crate::browser_idle::Idle,
     /// `MutationObserver` (`browser_mutation.rs`).
     pub(crate) mo: crate::browser_mutation::Mo,
     pub(crate) io: crate::browser_intersection::Io,
@@ -398,6 +400,7 @@ impl Host for Dom {
         crate::browser_web::roots(self, out);
         self.resize_roots(out);
         self.frame_roots(out);
+        self.idle_roots(out);
         self.mo_roots(out);
         self.io_roots(out);
         self.walk_roots(out);
@@ -480,6 +483,7 @@ impl Host for Dom {
         st.events.retain(|&o, _| live(o));
         drop(guard);
         self.sched_prune(live);
+        self.idle_prune(live);
         self.fetch.prune(live);
         self.streams.prune(live);
         crate::browser_abort::prune(self, live);
@@ -906,6 +910,7 @@ impl Dom {
         crate::browser_scroll::install(self, it)?;
         crate::browser_resize::install(self, it)?;
         crate::browser_frame::install(self, it)?;
+        crate::browser_idle::install(self, it)?;
         crate::browser_mutation::install(self, it)?;
         crate::browser_intersection::install(self, it)?;
         crate::browser_walker::install(self, it)?;
@@ -1171,6 +1176,7 @@ impl Browser {
             scrolling: Default::default(),
             resize: Default::default(),
             frame: Default::default(),
+            idle: Default::default(),
             mo: Default::default(),
             io: Default::default(),
             walk: Default::default(),

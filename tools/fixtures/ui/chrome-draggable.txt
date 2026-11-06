@@ -1,0 +1,13 @@
+shape	function function get draggable set draggable true true false false
+defaults	false false true true false true true false true false false false null false false false  false false false
+attribute-values	true:true/true false:false/false TRUE:true/true False:false/false tRuE:true/true auto:false/true :false/true yes:false/true no:false/true 1:false/true 0:false/true  true:false/true true :false/true draggable:false/true on:false/true
+valueless-and-link-states	false false true true true false
+setter-writes-true-false	true true false false false false true true
+setter-truthiness	true false true false true false false false true true false false false
+setter-after-attribute	true false false false
+link-href-live	false true false true
+attribute-is-case-folded-name	true true
+from-parsed-markup	true false true true false
+illegal-invocation	TypeError TypeError TypeError TypeError
+html-element-prototype-not-svg	 false
+object-element	false false

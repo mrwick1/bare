@@ -1,0 +1,28 @@
+shape	function 0 checkVisibility true true true false undefined false
+plain-element	true true true true
+not-connected	false false false
+removed-after	true false
+display-none	false false false true false true
+display-none-by-sheet-and-attribute	false false false false false false true
+head-and-script-elements	false true true false
+opacity-zero-option-off	true true true true true true
+opacity-zero-option-on	false false false true true true false false
+opacity-property-alias	false false|true true|false false|false false
+opacity-deep-and-nested-one	false true
+visibility-option-off	true true true true true
+visibility-option-on	false false false false true true
+visibility-property-alias	false true false false
+both-options	false false false true
+display-none-wins-over-options	false false false
+content-visibility-auto-option-only	true true true
+options-bad	TypeError TypeError true true true true TypeError true true true true RangeError
+option-truthiness	true false false true true true true false
+second-argument-ignored	false
+illegal-invocation	TypeError TypeError TypeError
+inside-display-none-then-shown	false true false
+class-toggle	true false false false true true
+inherited-visibility-via-sheet	false true false
+details-closed	true true false true true
+template-and-noscript	false
+position-and-offscreen	true true true true
+iframe-document-element	function true
