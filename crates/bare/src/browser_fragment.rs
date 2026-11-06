@@ -30,7 +30,7 @@
 //!   the HTML namespace (an SVG or MathML element).
 //! - Markup: a `template`, `noscript`, `frameset` or `frame` start tag in the value.
 //! - The getter, for a tree that holds an HTML `template` or `noscript` element (their serialization depends on template contents and the scripting flag).
-//! - `insertAdjacentHTML`, `Range.createContextualFragment`, `DOMParser` and `document.write` are absent.
+//! - `Range.createContextualFragment`, `DOMParser` and `document.write` are absent.
 //!
 //! Known deviations: nested `table` and `select` are read by the page rules of the tree builder (no table or select insertion modes). A temporary
 //! text buffer that grew by joining texts counts the wasted bytes against the text cap. Cloning preserves the "already started" flag.
@@ -193,7 +193,7 @@ pub(crate) fn set_outer_html(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Val
     match parent {
         None => Ok(Value::Undefined),
         Some((_, true, _)) => Err(d.dom_err(it, "NoModificationAllowedError", "Failed to set the 'outerHTML' property on 'Element': This element's parent is of type '#document'.")),
-        Some((p, _, frag)) => replace(d, it, &html, p, frag, Some(n)),
+        Some((p, _, frag)) => replace(d, it, &html, p, frag, Put::Over(n)),
     }
 }
 
@@ -202,12 +202,35 @@ pub(crate) fn set_inner_html(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Val
     let v = arg(a, 0);
     // ToString may run page code; the target is read after it.
     let html = if matches!(v, Value::Null) { String::new() } else { d.string_arg(it, v)? };
-    replace(d, it, &html, n, false, None)
+    replace(d, it, &html, n, false, Put::All)
 }
 
-/// Parse `html` in the context of `n` (`body` when `in_frag`: `n` is a DocumentFragment). Without `this`, the nodes replace all
-/// the children of `n`. With `this` (a child of `n`), they replace `this`.
-fn replace(d: &Dom, it: &mut Interp<'_>, html: &str, n: NodeId, in_frag: bool, this: Option<NodeId>) -> V {
+/// Where the parsed nodes go: instead of all the children of `n`, instead of one child of `n`, or in `n` before a node (None: last), keeping the rest.
+#[derive(Clone, Copy)]
+enum Put {
+    All,
+    Over(NodeId),
+    At(Option<NodeId>),
+}
+
+/// `insertAdjacentHTML(where, html)`: parse in the context of the element (`afterbegin`, `beforeend`) or of its parent, then put the nodes in place. No text joins.
+pub(crate) fn insert_adjacent_html(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
+    const NAME: &str = "insertAdjacentHTML";
+    let (me, ps) = crate::browser_dom::adjacent_start(d, it, this, a, NAME)?;
+    let html = d.string_arg(it, a[1])?;
+    let pos = crate::browser_dom::adjacent_pos(d, it, NAME, &ps)?;
+    // A parent that is a Document gives no context, as no parent.
+    let at = crate::browser_dom::adjacent_place(d, me, pos).filter(|&(n, _)| !matches!(d.data(n), NodeData::Document));
+    let Some((n, before)) = at else {
+        return Err(d.dom_err(it, "NoModificationAllowedError", "Failed to execute 'insertAdjacentHTML' on 'Element': The element has no parent."));
+    };
+    replace(d, it, &html, n, matches!(d.data(n), NodeData::ShadowRoot), Put::At(before))
+}
+
+/// Parse `html` in the context of `n` (`body` when `in_frag`: `n` is a DocumentFragment). `put`: where the nodes go.
+fn replace(d: &Dom, it: &mut Interp<'_>, html: &str, n: NodeId, in_frag: bool, put: Put) -> V {
+    let this = if let Put::Over(t) = put { Some(t) } else { None };
+    let all = matches!(put, Put::All);
     let (context, ns, in_form) = {
         let doc = d.doc.borrow();
         let mut in_form = false;
@@ -274,7 +297,7 @@ fn replace(d: &Dom, it: &mut Interp<'_>, html: &str, n: NodeId, in_frag: bool, t
     let old = {
         let doc = d.doc.borrow();
         let mut old = 0u64;
-        for _ in doc.children(n).take(if this.is_some() { 0 } else { usize::MAX }) {
+        for _ in doc.children(n).take(if all { usize::MAX } else { 0 }) {
             it.charge(1)?;
             old += 1;
         }
@@ -296,12 +319,16 @@ fn replace(d: &Dom, it: &mut Interp<'_>, html: &str, n: NodeId, in_frag: bool, t
     it.charge(old + count as u64)?;
 
     // Commit. Nothing below runs page code or can fail.
-    d.mo_group(if this.is_some() { None } else { Some(n) }, || {
+    d.mo_group(if all { Some(n) } else { None }, || {
     let mut doc = d.doc.borrow_mut();
-    let (prev, before) = this.map_or((None, None), |t| (doc.prev_sibling(t), doc.next_sibling(t)));
-    match this {
-        Some(t) => doc.detach(t),
-        None => {
+    let (prev, before) = match put {
+        Put::At(b) => (None, b),
+        _ => this.map_or((None, None), |t| (doc.prev_sibling(t), doc.next_sibling(t))),
+    };
+    match put {
+        Put::Over(t) => doc.detach(t),
+        Put::At(_) => {}
+        Put::All => {
             d.iter_told_all(&doc, n);
             while let Some(c) = doc.children(n).next() {
                 doc.detach(c);

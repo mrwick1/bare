@@ -15,6 +15,7 @@ topic_test!(anchor_cases, "anchor", 20);
 topic_test!(template_cases, "template", 23);
 topic_test!(formdata_cases, "formdata", 28);
 topic_test!(fragment_cases, "fragment", 75);
+topic_test!(insert_cases, "insert", 63);
 
 fn big<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {
     std::thread::Builder::new().stack_size(64 << 20).spawn(f).unwrap().join().unwrap()
@@ -203,6 +204,25 @@ fn a_page_can_use_scripts_of_a_fragment() {
         assert_eq!(r.stop, Stop::Settled, "{r:?}");
         let v = b.run_script("window.out.join()").unwrap();
         assert_eq!(b.it.display(v), "a4,b4,c4,x");
+    });
+}
+
+#[test]
+fn a_page_can_use_scripts_with_replace_children_and_insert_adjacent() {
+    // A script that `replaceChildren` or `insertAdjacentElement` puts in the document runs once. A script that `insertAdjacentHTML` parses never runs.
+    big(|| {
+        let doc = "<div id=a></div><div id=b></div><div id=c></div><script>
+            window.out = []; function sc(n) { var s = document.createElement('script'); s.textContent = 'window.out.push(\"' + n + '\")'; return s }
+            document.getElementById('a').replaceChildren(sc('r'), 'x', sc('s'));
+            document.getElementById('b').insertAdjacentElement('beforeend', sc('e'));
+            document.getElementById('c').insertAdjacentHTML('beforeend', '<script>window.out.push(\"h\")<\\/script>');
+        </script>";
+        let mut b = Browser::new(tree::parse(doc), BrowserLimits::default(), EvalLimits { max_steps: 5_000_000, ..Default::default() }, HeapLimits::default()).unwrap();
+        b.use_virtual_clock();
+        let r = b.run_page(PageConfig { url: "http://example.test/p/page".into(), client: Client::new(), limits: PageLimits::default(), fetch: None });
+        assert_eq!(r.stop, Stop::Settled, "{r:?}");
+        let v = b.run_script("window.out.join()").unwrap();
+        assert_eq!(b.it.display(v), "r,s,e");
     });
 }
 

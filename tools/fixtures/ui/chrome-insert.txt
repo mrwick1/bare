@@ -1,0 +1,63 @@
+replace-children-shape	function,0,function,0,undefined,true,true
+replace-children-with-nothing-clears	,0,true
+replace-children-with-nodes-and-strings	["a",u,"5","null",s],true
+replace-children-with-a-fragment	[p,b,"x"],0
+replace-children-moves-an-own-child	[u#b],
+replace-children-moves-a-node-from-elsewhere	[u#b],0,
+replace-children-the-old-children-stay-usable	,false,[b#in,u],
+replace-children-an-ancestor-is-refused-and-nothing-changes	HierarchyRequestError,HierarchyRequestError,[i#a],[b#in]
+replace-children-a-bad-node-changes-nothing	HierarchyRequestError,[i#a]
+replace-children-a-non-node-is-a-string	["obj","1,2","undefined"]
+replace-children-in-a-fragment	[b],1
+replace-children-with-itself	[i#a,u#b]
+replace-children-text-and-comment-kids	["x","z"],xz
+replace-children-is-one-record	childList div#host +[p,"x",s] -[i#a,u#b] p=null n=null
+replace-children-nothing-to-clear-no-record	
+replace-children-clears-with-one-record	childList div#host +[] -[i#a,u#b] p=null n=null
+replace-children-own-child-record	childList div#host +[u#b] -[i#a,u#b,b#c] p=null n=null
+replace-children-live-range	true,0,0,true
+replace-children-node-iterator	i#a,false,null,i#a
+adjacent-element-shape	function,2,function,2,function,2,undefined,undefined,undefined
+adjacent-element-four-positions	[p#p3,i#a,p#p1,u#b,p#p2,p#p4],[p#p1,p#p2,p#p3,p#p4]
+adjacent-element-case-insensitive	[b#y,p#x]
+adjacent-element-returns-the-element	true
+adjacent-element-no-parent	,,,true,true
+adjacent-element-bad-position	SyntaxError:Failed to execute 'insertAdjacentElement' on 'Element': The value provided ('x') is not one of 'beforeBegin', 'afterBegin', 'beforeEnd', or 'afterEnd'.|SyntaxError:Failed to execute 'insertAdjacentElement' on 'Element': The value provided ('') is not one of 'beforeBegin', 'afterBegin', 'beforeEnd', or 'afterEnd'.|SyntaxError:Failed to execute 'insertAdjacentElement' on 'Element': The value provided ('undefined') is not one of 'beforeBegin', 'afterBegin', 'beforeEnd', or 'afterEnd'.
+adjacent-element-bad-node	TypeError:Failed to execute 'insertAdjacentElement' on 'Element': parameter 2 is not of type 'Element'.|TypeError:Failed to execute 'insertAdjacentElement' on 'Element': parameter 2 is not of type 'Element'.|TypeError:Failed to execute 'insertAdjacentElement' on 'Element': parameter 2 is not of type 'Element'.|TypeError:Failed to execute 'insertAdjacentElement' on 'Element': 2 arguments required, but only 1 present.
+adjacent-element-moves-a-node	[i#a,u#b],0
+adjacent-element-moves-itself-before-itself	[i#a,u#b]
+adjacent-element-ancestor-is-refused	HierarchyRequestError,HierarchyRequestError,HierarchyRequestError
+adjacent-element-position-checked-before-parent	TypeError|TypeError:Failed to execute 'insertAdjacentElement' on 'Element': parameter 2 is not of type 'Element'.
+adjacent-element-next-to-the-root-element	HierarchyRequestError,HierarchyRequestError,2
+adjacent-element-in-a-fragment	[p#p,i#a,b#b]
+adjacent-element-is-one-record-each	childList div#host +[p#x] -[] p=null n=i#a | childList div#host +[b#y] -[] p=i#a n=null
+adjacent-text-four-positions	["t3",i#a,"t1",u#b,"t2","t4"],,,,
+adjacent-text-does-not-join-text	["3","x","1",i#a,"2","y","4"],3x12y4
+adjacent-text-converts-its-argument	["5","null","undefined","o",""],5
+adjacent-text-no-parent	,,0,,1
+adjacent-text-bad-position-and-arguments	SyntaxError:Failed to execute 'insertAdjacentText' on 'Element': The value provided ('x') is not one of 'beforeBegin', 'afterBegin', 'beforeEnd', or 'afterEnd'.|TypeError:Failed to execute 'insertAdjacentText' on 'Element': 2 arguments required, but only 1 present.|TypeError:Failed to execute 'insertAdjacentText' on 'Element': 2 arguments required, but only 0 present.|0
+adjacent-text-next-to-the-root-element	HierarchyRequestError,HierarchyRequestError,2
+adjacent-text-is-one-record-each	childList div#host +["x"] -[] p=null n=i#a | childList div#host +["y"] -[] p=i#a n=null
+adjacent-text-live-range	2,4
+adjacent-html-four-positions	[p#p3,i#a,p#p1,u#b,p#p2,p#p4],,,,,<p id="p3">3</p><i id="a"></i><p id="p1">1</p><u id="b"></u><p id="p2">2</p><p id="p4">4</p>
+adjacent-html-several-nodes-text-and-comments	[i#a,"x",b,<!--c-->,"y",u],<i id="a"></i>x<b>1</b><!--c-->y<u></u>
+adjacent-html-nested-markup	<ul><li>a</li><li>b</li></ul><p>x</p><p>y</p>
+adjacent-html-does-not-join-text	["3","x","1",i#a,"2","y","4"],7
+adjacent-html-empty	[i#a]
+adjacent-html-case-insensitive-position	<i></i><b></b>
+adjacent-html-converts-its-argument	5nullundefined<b>o</b>
+adjacent-html-bad-position	SyntaxError:Failed to execute 'insertAdjacentHTML' on 'Element': The value provided ('x') is not one of 'beforeBegin', 'afterBegin', 'beforeEnd', or 'afterEnd'.|SyntaxError:Failed to execute 'insertAdjacentHTML' on 'Element': The value provided ('') is not one of 'beforeBegin', 'afterBegin', 'beforeEnd', or 'afterEnd'.|TypeError:Failed to execute 'insertAdjacentHTML' on 'Element': 2 arguments required, but only 1 present.|TypeError:Failed to execute 'insertAdjacentHTML' on 'Element': 2 arguments required, but only 0 present.
+adjacent-html-no-parent	NoModificationAllowedError:Failed to execute 'insertAdjacentHTML' on 'Element': The element has no parent.|NoModificationAllowedError:Failed to execute 'insertAdjacentHTML' on 'Element': The element has no parent.|0
+adjacent-html-document-parent	NoModificationAllowedError:Failed to execute 'insertAdjacentHTML' on 'Element': The element has no parent.|NoModificationAllowedError:Failed to execute 'insertAdjacentHTML' on 'Element': The element has no parent.|2
+adjacent-html-fragment-parent-uses-body	[p,"t",i#a,b]
+adjacent-html-context-is-the-element	1,"<b>x</b>",2
+adjacent-html-context-for-before-and-after-is-the-parent	<li id="a">1</li><li>2</li>,<div>x</div><span id="s"></span>,1
+adjacent-html-script-does-not-run	0,2,script
+adjacent-html-attributes-and-entities	/x?a=1&b=2,k,q,<t> ©
+adjacent-html-svg	http://www.w3.org/2000/svg,http://www.w3.org/2000/svg,circle
+adjacent-html-in-a-form	1,2
+adjacent-html-is-one-record-each	childList div#host +[p#x,"y"] -[] p=null n=i#a | childList div#host +[b#z] -[] p=i#a n=null
+adjacent-html-empty-makes-no-record	
+adjacent-html-live-range	2,5
+adjacent-html-new-nodes-are-in-the-tree	true,true,1,block
+adjacent-html-depth-and-order	<em></em><i id="a"></i><b><u><s>1</s></u></b>

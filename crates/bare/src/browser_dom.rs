@@ -904,6 +904,99 @@ fn child_node(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value], how: u8) -
     Ok(Value::Undefined)
 }
 
+/// `replaceChildren` of Element and DocumentFragment: every node is checked first, so a refusal changes nothing. Then all children go and the nodes
+/// come in as one change group (one record; a live range and an iterator are told once).
+fn replace_children(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
+    let parent = d.nd(it, this)?;
+    let nodes = d.nodes_from(it, a)?;
+    for &n in &nodes {
+        d.check_insert(it, parent, n, None, None)?;
+    }
+    let mut moved = Vec::new();
+    let r = d.mo_group(Some(parent), || {
+        let mut doc = d.doc.borrow_mut();
+        d.iter_told_all(&doc, parent);
+        while let Some(c) = doc.children(parent).next() {
+            it.charge(1)?;
+            doc.detach(c);
+        }
+        for &n in &nodes {
+            let frag = matches!(doc.data(n), NodeData::ShadowRoot);
+            let kids: Vec<NodeId> = if frag { doc.children(n).collect() } else { vec![n] };
+            it.charge(kids.len() as u64)?;
+            for k in kids {
+                doc.move_to(k, parent, None);
+                moved.push(k);
+            }
+        }
+        Ok(())
+    });
+    d.iter_told_end();
+    r?;
+    for k in moved {
+        d.script_inserted(it, k)?;
+    }
+    Ok(Value::Undefined)
+}
+
+/// The start of `insertAdjacentElement/Text/HTML`: the receiver and the position text, after the argument count check.
+pub(crate) fn adjacent_start(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value], name: &str) -> R<(NodeId, String)> {
+    let me = d.el(it, this)?;
+    if a.len() < 2 {
+        return Err(it.type_error(&format!("Failed to execute '{name}' on 'Element': 2 arguments required, but only {} present.", a.len())));
+    }
+    Ok((me, d.string_arg(it, a[0])?))
+}
+
+/// `beforebegin`, `afterbegin`, `beforeend`, `afterend` (any case) as 0 to 3.
+pub(crate) fn adjacent_pos(d: &Dom, it: &mut Interp<'_>, name: &str, s: &str) -> R<u8> {
+    match ["beforebegin", "afterbegin", "beforeend", "afterend"].iter().position(|p| s.eq_ignore_ascii_case(p)) {
+        Some(i) => Ok(i as u8),
+        None => Err(d.dom_err(it, "SyntaxError", &format!("Failed to execute '{name}' on 'Element': The value provided ('{s}') is not one of 'beforeBegin', 'afterBegin', 'beforeEnd', or 'afterEnd'."))),
+    }
+}
+
+/// The parent and the node that a new node goes before, for position `pos` of `me`. None: the position is next to `me` and `me` has no parent.
+pub(crate) fn adjacent_place(d: &Dom, me: NodeId, pos: u8) -> Option<(NodeId, Option<NodeId>)> {
+    let doc = d.doc.borrow();
+    match pos {
+        0 => doc.parent(me).map(|p| (p, Some(me))),
+        1 => Some((me, doc.children(me).next())),
+        2 => Some((me, None)),
+        _ => doc.parent(me).map(|p| (p, doc.next_sibling(me))),
+    }
+}
+
+/// `insertAdjacentElement(where, element)`: the element, or null when there is no parent for `beforebegin` or `afterend`.
+fn insert_adjacent_element(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
+    const NAME: &str = "insertAdjacentElement";
+    let (me, ps) = adjacent_start(d, it, this, a, NAME)?;
+    let node = match d.node_of(a[1]).filter(|&n| d.is_element(n)) {
+        Some(n) => n,
+        None => return Err(it.type_error("Failed to execute 'insertAdjacentElement' on 'Element': parameter 2 is not of type 'Element'.")),
+    };
+    let pos = adjacent_pos(d, it, NAME, &ps)?;
+    let Some((parent, before)) = adjacent_place(d, me, pos) else { return Ok(Value::Null) };
+    d.insert_checked(it, parent, node, before)?;
+    Ok(a[1])
+}
+
+/// `insertAdjacentText(where, data)`: a new text node, which does not join its neighbours.
+fn insert_adjacent_text(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
+    const NAME: &str = "insertAdjacentText";
+    let (me, ps) = adjacent_start(d, it, this, a, NAME)?;
+    let s = d.string_arg(it, a[1])?;
+    let pos = adjacent_pos(d, it, NAME, &ps)?;
+    let Some((parent, before)) = adjacent_place(d, me, pos) else { return Ok(Value::Undefined) };
+    let t = {
+        let mut doc = d.doc.borrow_mut();
+        d.room(&doc, 1, s.len())?;
+        doc.create_text(&s)
+    };
+    d.insert_checked(it, parent, t, before)?;
+    Ok(Value::Undefined)
+}
+
 /// `document.createDocumentFragment()`.
 fn create_document_fragment(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
     d.nd(it, this)?;
@@ -931,7 +1024,7 @@ fn new_fragment(d: &Dom, it: &mut Interp<'_>, proto: Option<ObjId>) -> V {
     Ok(w)
 }
 
-/// `before`, `after`, `replaceWith`, `createDocumentFragment`: installed after every other global, so their function ids do not move a host function that came before.
+/// `before`, `after`, `replaceWith`, `replaceChildren`, `insertAdjacent*`, `createDocumentFragment`: installed after every other global, so their function ids do not move a host function that came before.
 /// Deviation, for the cost of a realm: `Element` and `CharacterData` share one function object for each ChildNode method (Chrome has two).
 pub(crate) fn install_late(d: &Dom, it: &mut Interp<'_>) -> R<()> {
     d.def_method(it, d.p().document, "createDocumentFragment", 0, create_document_fragment)?;
@@ -941,6 +1034,13 @@ pub(crate) fn install_late(d: &Dom, it: &mut Interp<'_>) -> R<()> {
         let k = d.key(it, name)?;
         it.define_data(d.p().chardata, k, Value::Object(f), true, false, true)?;
     }
+    // `replaceChildren` is one function object on Element and DocumentFragment (a deviation, for the cost of a realm: Chrome has two).
+    let f = d.def_method(it, d.p().element, "replaceChildren", 0, replace_children)?;
+    let k = d.key(it, "replaceChildren")?;
+    it.define_data(d.p().fragment, k, Value::Object(f), true, false, true)?;
+    d.def_method(it, d.p().element, "insertAdjacentElement", 2, insert_adjacent_element)?;
+    d.def_method(it, d.p().element, "insertAdjacentText", 2, insert_adjacent_text)?;
+    d.def_method(it, d.p().element, "insertAdjacentHTML", 2, crate::browser_fragment::insert_adjacent_html)?;
     Ok(())
 }
 
