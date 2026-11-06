@@ -274,6 +274,7 @@ mod tests {
         let tasks: Vec<_> = (0..12).map(|i| client.spawn(move |c| get(c, port, &format!("/{i}")))).collect();
         let bodies: Vec<String> = tasks.into_iter().map(|t| t.wait().unwrap()).collect();
         let took = start.elapsed();
+        eprintln!("12 requests at 100 ms: {took:?}");
         // 12 requests, 6 at a time, 100 ms each: two waves.
         assert!(took >= LATENCY * 2 && took < LATENCY * 5, "took {took:?}");
         assert_eq!(bodies, (0..12).map(|i| format!("body of /{i}")).collect::<Vec<_>>());

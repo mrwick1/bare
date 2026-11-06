@@ -39,6 +39,7 @@ fn run(html: &str, srv: &Server) -> (String, PageResult, Duration) {
     let start = Instant::now();
     let r = b.run_page(PageConfig { url: srv.url("/page.html"), client: Client::new(), limits, fetch: Some((Client::new(), FetchLimits::default())) });
     let took = start.elapsed();
+    eprintln!("parallel test: page took {took:?}");
     let v = b.run_script("log.join('|')").unwrap();
     (b.it.display(v), r, took)
 }
