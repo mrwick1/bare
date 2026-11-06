@@ -69,9 +69,10 @@ fn lower_configured_caps_refuse_before_they_grow() {
     real_stack(|| {
         // 81 calls for 40 levels: a call cap of 60 refuses the calls
         assert_eq!(outcome(&walk(40), caps(768, 60)), format!("limit:{:?}", LimitKind::CallDepth));
-        // 40 levels need 288 native frames (measured): 250 refuses, 300 runs
-        assert_eq!(outcome(&walk(40), caps(250, 128)), format!("limit:{:?}", LimitKind::TraversalDepth));
-        assert_eq!(outcome(&walk(40), caps(300, 128)), "walked");
+        // The traversal cap bounds the native recursion of ONE call, not of all calls together: the setup walk is the deepest
+        // recursion of this script (7 frames refuse, 8 run), and 40 levels of calls add nothing.
+        assert_eq!(outcome(&walk(40), caps(7, 128)), format!("setup limit:{:?}", LimitKind::TraversalDepth));
+        assert_eq!(outcome(&walk(40), caps(8, 128)), "walked");
         // zero refuses at once: the setup walk is the first descent
         assert_eq!(outcome("1", caps(0, 128)), format!("setup limit:{:?}", LimitKind::TraversalDepth));
         assert_eq!(outcome(&walk(1), caps(768, 0)), format!("limit:{:?}", LimitKind::CallDepth));
@@ -84,17 +85,16 @@ fn requests_above_the_hard_ceilings_are_clamped() {
         // a left-deep chain of 2000 terms is walked as 2000 levels: the clamp to 768 refuses it, no crash
         let chain = format!("{}1", "1+".repeat(2000));
         assert_eq!(outcome(&chain, caps(u32::MAX, 128)), format!("setup limit:{:?}", LimitKind::TraversalDepth));
-        // the call ceiling is 256, however large the request. A bound call costs one native frame, so a chain of bound
-        // functions reaches it before the frame ceiling: 256 nested calls run, the 257th is refused as a CallDepth.
-        // Ordinary recursion costs about 3 frames a call and ends at the frame ceiling first.
+        // the call ceiling is 10,000, however large the request: 10,000 nested calls run, the 10,001st is refused as a CallDepth
         let bound = |n: u32| format!("var g = function () {{ return 'done' }}; for (var i = 0; i < {n}; i++) g = g.bind(null); g()");
-        assert_eq!(outcome(&bound(255), caps(u32::MAX, u32::MAX)), "done");
-        assert_eq!(outcome(&bound(256), caps(u32::MAX, u32::MAX)), format!("limit:{:?}", LimitKind::CallDepth));
-        // the frame ceiling is 768: `1 + (1 + (1 + (1 + f(n - 1))))` costs about 11 native frames a level, so 60 levels
-        // (666 frames, measured) run and 120 levels (121 calls, under the call ceiling) are refused as TraversalDepth
+        assert_eq!(outcome(&bound(9_999), caps(u32::MAX, u32::MAX)), "done");
+        assert_eq!(outcome(&bound(10_000), caps(u32::MAX, u32::MAX)), format!("limit:{:?}", LimitKind::CallDepth));
+        // `1 + (1 + (1 + (1 + f(n - 1))))` costs about 11 native frames a level, but the frames are counted from the start
+        // of each call. 5,000 levels run (the stack grows by itself on the 8 MiB thread), and the ceiling ends 10,001 of them.
         let heavy = |n: u32| format!("function f(n) {{ return n === 0 ? 0 : 1 + (1 + (1 + (1 + f(n - 1)))) }} f({n})");
-        assert_eq!(outcome(&heavy(60), caps(u32::MAX, u32::MAX)), "240");
-        assert_eq!(outcome(&heavy(120), caps(u32::MAX, u32::MAX)), format!("limit:{:?}", LimitKind::TraversalDepth));
+        let wide = EvalLimits { max_statement_frames: u32::MAX, ..caps(u32::MAX, u32::MAX) };
+        assert_eq!(outcome(&heavy(5_000), wide), "20000");
+        assert_eq!(outcome(&heavy(10_001), wide), format!("limit:{:?}", LimitKind::CallDepth));
     });
 }
 
@@ -112,9 +112,10 @@ fn the_traversal_cap_is_the_configured_value_not_the_old_512() {
 fn the_counter_is_back_to_zero_after_each_fault() {
     real_stack(|| {
         let mut it = Interp::realm(Heap::default(), caps(100, 128)).unwrap();
-        // a traversal fault in the middle of a run: the next run starts from zero
-        assert!(matches!(it.run_script(&walk(40)), Err(Error::Limit(LimitKind::TraversalDepth))));
+        // a traversal fault in the middle of a run (a cyclic array joins itself without a call): the next run starts from zero
+        assert!(matches!(it.run_script("var a = []; a[0] = a; a.flat(Infinity)"), Err(Error::Limit(LimitKind::TraversalDepth))));
         assert_eq!(it.run_script("1+1").map(|v| it.display(v)).unwrap(), "2");
+        assert_eq!(it.run_script(&walk(40)).map(|v| it.display(v)).unwrap(), "walked");
         // a Throw from depth 30
         let mut it = Interp::realm(Heap::default(), caps(768, 128)).unwrap();
         assert!(matches!(it.run_script("function f(n) { if (n === 0) throw 'x'; return f(n - 1) } f(30)"), Err(Error::Throw(_))));

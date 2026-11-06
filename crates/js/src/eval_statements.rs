@@ -18,7 +18,7 @@
 // - `max_traversal_depth` counts NATIVE recursion: expressions, patterns, calls, constructors, the setup walk, and
 //   `exec`. `exec` is only entered by `for-in`/`for-of` bodies (their helper is a Rust call) and by async code. The machine
 //   entry for a function or script body is already inside `call_fn` (guarded) or `exec_current`.
-// - `max_statement_frames` (default 512, hard ceiling 768) counts pending control frames of all synchronous calls
+// - `max_statement_frames` (default 512, hard ceiling 65,536) counts pending control frames of all synchronous calls
 //   together, nested JS calls included. It is checked before each push. Heap frames are not native frames and are not
 //   added to the traversal count; expression recursion is still guarded by `max_traversal_depth` only.
 //
@@ -26,6 +26,12 @@
 // a heap fault) passes through `leave`, which restores the environment (and strictness for `try`), frees what the frame
 // created and gives back its count. A limit, unsupported construct or heap fault does not run `catch`, `finally` or
 // `IteratorClose`; an ordinary throw does. `Err(Break)` meets loops, `switch` and labels as before.
+//
+// Native frame size: `enter` and `resume` stay on the native stack while a nested call runs (a statement `f()` is entered by
+// `machine`, then `exec_simple`). They hold only the hot cases: `if`, a block and a simple statement. Loops, `try`, `switch` and
+// labels are `enter_rare`, and the per-frame step of a loop is `step_frame`, both `inline(never)`. This cut the frame of `machine`
+// from 1,120 to 416 bytes (release), and the native stack of one JS call from 4.9 KB to 2.8 KB together with the cold arms of
+// `link_inner` and `eval_expr_inner`.
 //
 // Not covered: `for-in` and `for-of` stay on their Rust helper (`exec_for_each`): its body runs `exec`, which is guarded.
 
@@ -183,6 +189,17 @@ impl<'p> Interp<'p> {
                 self.declare_scope(l, false)?;
                 Ok(SGo::Done(Ok(())))
             }
+            StmtKind::While { .. } | StmtKind::DoWhile { .. } | StmtKind::For { .. } | StmtKind::ForIn { .. } | StmtKind::ForOf { .. } | StmtKind::Try { .. } | StmtKind::Switch { .. } | StmtKind::Labeled { .. } => self.enter_rare(st, s, &stmt, top),
+            _ => Ok(SGo::Done(self.exec_simple(s, &stmt, top))),
+        }
+    }
+
+    /// The statements that push a frame other than a list. Not inlined into `enter`: its frame stays on the native stack
+    /// while a nested call runs, so the hot path (`if`, a block, a simple statement) keeps the frame small.
+    #[inline(never)]
+    fn enter_rare(&mut self, st: &mut Vec<SFrame>, s: StmtId, stmt: &Stmt, top: bool) -> Result<SGo, Ctl> {
+        let prog = self.prog.clone();
+        match stmt.kind {
             StmtKind::While { test, body } => {
                 let labels = std::mem::take(&mut self.pending_labels);
                 if top {
@@ -299,7 +316,7 @@ impl<'p> Interp<'p> {
                 self.sf_put(st, SFrame::Labeled { label });
                 Ok(SGo::Stmt(body))
             }
-            _ => Ok(SGo::Done(self.exec_simple(s, &stmt, top))),
+            _ => unreachable!("enter_rare: not a loop, try, switch or label"),
         }
     }
 
@@ -420,6 +437,7 @@ impl<'p> Interp<'p> {
         SGo::Done(r)
     }
 
+    #[inline(never)]
     fn step_frame(&mut self, f: &mut SFrame, r: Ex) -> SAct {
         match f {
             SFrame::List { l, i, .. } => {

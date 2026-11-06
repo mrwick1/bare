@@ -35,13 +35,27 @@
 //! too), live environments, function slots. A limit ends the run with [`Error::Limit`], never a JS value, and
 //! cannot be caught by `try`. A heap limit is [`LimitKind::Heap`].
 //! Defaults: `max_call_depth` 100, `max_traversal_depth` 512 and `max_statement_frames` 512 (`EvalLimits::default`). Hard ceilings:
-//! `max_call_depth` is clamped to 256, `max_traversal_depth` to 768 and `max_statement_frames` to 768. Two different things are
-//! counted. `max_traversal_depth` bounds NATIVE recursion (expressions, patterns, calls, constructors, the setup walk, `exec`).
-//! `max_statement_frames` bounds the pending control frames of blocks, loops, `switch`, `try` and labels, which live on the heap
-//! in the statement machine (`eval_statements.rs`), all synchronous calls together. A statement frame is not a native frame.
-//! Native stack, measured and not a formal bound: on the test fixtures a release run at the ceilings stayed inside an 8 MiB
-//! thread, and a debug run inside 64 MiB. Run on a thread with at least 8 MiB (release) or 64 MiB (debug). Samples do not
-//! prove a general stack-safety bound.
+//! `max_call_depth` is clamped to 10,000 (`MAX_CALL_DEPTH`, about the depth of Chrome), `max_traversal_depth` to 768 and
+//! `max_statement_frames` to 65,536. `EvalLimits::session()` is the browser page: all three at the ceiling. Three different things
+//! are counted:
+//! - `max_call_depth`: nested calls, native and bound too. It bounds the memory of the native stack (below).
+//! - `max_traversal_depth`: NATIVE recursion of ONE call (expressions, patterns, constructors, the setup walk, `exec`). The count
+//!   starts again at zero when a call, a script top level or a setup walk begins (`in_call`), and comes back when it ends. It is
+//!   not a count of all calls: it was, up to the 2026-11-06 change, and then 768 allowed fewer than 200 calls of the React shape.
+//! - `max_statement_frames`: pending control frames of blocks, loops, `switch`, `try` and labels, which live on the heap in the
+//!   statement machine (`eval_statements.rs`), all synchronous calls together. A statement frame is not a native frame.
+//!
+//! Native stack. No caller has to choose a thread size. A call of a script function, a bound function, a proxy or the host
+//! (`call_fn_inner`, `construct_inner`), a script top level and a setup walk compare the stack pointer with `stack_floor`
+//! (`low_stack`, 4 instructions). A native callee does not: it reaches script code only through a call that does. When less than `STACK_RED` is left (4 MiB, 16 MiB in a debug build),
+//! the call continues on a new segment (`stacker::grow`: `STACK_SEG` of mapped memory, 64 MiB, 256 MiB in a debug build, committed
+//! only where the stack touches it, unmapped when the call returns). `STACK_RED` covers one call at `max_traversal_depth`
+//! frames (measured 0.51 MB release and 2.9 MB debug, the worst of 20 shapes) and the native code that a call reaches. Measured
+//! on the React commit shape: 2.8 KB of native stack for each JS call in release and 15 KB in debug (4.9 KB and 26 KB before).
+//! At the ceiling of 10,000 calls a run used 31 to 58 MB of peak memory in release (recursion through `map`, `sort`, getters,
+//! `toJSON`, `Reflect.apply`, `new`). Known gaps: `super()` and the host do not start a call through `in_call` in every path (the 768
+//! frames still end such a recursion); `stacker::grow` aborts if the system refuses the mapping (a small address-space limit);
+//! an `Interp` must run on one thread stack at a time (it is not `Send`).
 //!
 //! Known deviations, on purpose (each is a gate, not a silent skip):
 //! - One environment per call holds parameters, `arguments`, `var`s and the body's `let`/`const`.
@@ -66,6 +80,16 @@ use std::hash::{BuildHasherDefault, Hasher};
 use std::marker::PhantomData;
 use std::rc::Rc;
 
+/// Hard ceilings of the three depth limits (see the header). `EvalLimits::session` uses all three.
+pub const MAX_CALL_DEPTH: u32 = 10_000;
+pub const MAX_TRAVERSAL_DEPTH: u32 = 768;
+pub const MAX_STATEMENT_FRAMES: u32 = 1 << 16;
+/// Stack that must remain below the start of a call (see `Interp::in_call`). One activation at `MAX_TRAVERSAL_DEPTH` frames
+/// measured 0.51 MB in release and 2.9 MB in debug (a chain of 760 member reads, the worst of 20 shapes); the rest is for the
+/// native code that a call reaches. A segment is `STACK_SEG` of mapped memory, committed only where the stack touches it.
+const STACK_RED: usize = if cfg!(debug_assertions) { 16 << 20 } else { 4 << 20 };
+const STACK_SEG: usize = if cfg!(debug_assertions) { 256 << 20 } else { 64 << 20 };
+
 // ------------------------------------------------------------------ public types
 
 /// Execution limits. Every one is checked before the thing grows.
@@ -73,12 +97,12 @@ use std::rc::Rc;
 pub struct EvalLimits {
     /// Statements, expressions and traversed native elements, per `run` or top-level `call`.
     pub max_steps: u64,
-    /// Clamped to 256. Every call also takes a traversal frame, so `max_traversal_depth` still bounds the native stack. The default is 100.
+    /// Nested calls. Clamped to 10,000. The stack grows by itself (see the header), so this bounds the memory of the native stack. The default is 100.
     pub max_call_depth: u32,
-    /// Native recursion: expressions, patterns, calls, constructors, setup walks and `exec`, shared. Clamped to 768. The default is 512.
+    /// Native recursion of ONE call: expressions, patterns, constructors, setup walks and `exec`. Counted from the start of each call. Clamped to 768. The default is 512.
     pub max_traversal_depth: u32,
     /// Pending statement control frames (blocks, loops, `switch`, `try`, labels) of all synchronous calls together. Heap, not
-    /// native stack. Clamped to 768. The default is 512. Zero refuses the first body.
+    /// native stack. Clamped to 65,536. The default is 512. Zero refuses the first body.
     pub max_statement_frames: u32,
     /// Live environments (scopes). Environments that no closure captured are freed on scope exit.
     pub max_envs: usize,
@@ -90,6 +114,13 @@ pub struct EvalLimits {
     pub max_script_source: usize,
     /// Syntax tree nodes (plus list entries) of all kept scripts together. The parser stops at the budget.
     pub max_script_nodes: usize,
+}
+
+impl EvalLimits {
+    /// The limits of a browser page: calls up to the ceiling (10,000, as Chrome), native recursion of one call up to its ceiling.
+    pub fn session() -> Self {
+        EvalLimits { max_call_depth: MAX_CALL_DEPTH, max_traversal_depth: MAX_TRAVERSAL_DEPTH, max_statement_frames: MAX_STATEMENT_FRAMES, ..Default::default() }
+    }
 }
 
 impl Default for EvalLimits {
@@ -473,7 +504,10 @@ pub struct Interp<'p> {
     steps: u64,
     step_limit: u64,
     depth: u32,
+    /// Native frames since the last call began (see `in_call`). A call starts again from zero.
     frames: u32,
+    /// The lowest stack address a call may start at. Below it the stack grows (see `grow_stack`).
+    stack_floor: usize,
     /// Pending control frames of all synchronous calls together (see `eval_statements.rs`).
     stmt_frames: u32,
     /// Empty frame buffers of finished machine runs, reused to save an allocation per call (see `eval_statements.rs`).
@@ -566,7 +600,7 @@ impl<'p> Interp<'p> {
     pub fn new(prog: &'p Program<'p>, heap: Heap, limits: EvalLimits) -> Result<Interp<'p>, Error> {
         Self::check_code_limits(prog, &limits)?;
         let mut it = Self::with_code(Rc::new(prog.clone().into_owned()), heap, limits)?;
-        it.walk_program()?;
+        it.in_call(|it| it.walk_program())?;
         it.install_builtins()?;
         it.install_sc()?;
         it.install_ext()?;
@@ -592,9 +626,9 @@ impl<'p> Interp<'p> {
     fn with_code(prog: Rc<Program<'static>>, mut heap: Heap, mut limits: EvalLimits) -> Result<Interp<'p>, Error> {
         let stats = prog.stats();
         Self::check_code_limits(&prog, &limits)?;
-        limits.max_call_depth = limits.max_call_depth.min(256);
-        limits.max_traversal_depth = limits.max_traversal_depth.min(768);
-        limits.max_statement_frames = limits.max_statement_frames.min(768);
+        limits.max_call_depth = limits.max_call_depth.min(MAX_CALL_DEPTH);
+        limits.max_traversal_depth = limits.max_traversal_depth.min(MAX_TRAVERSAL_DEPTH);
+        limits.max_statement_frames = limits.max_statement_frames.min(MAX_STATEMENT_FRAMES);
         if limits.max_envs == 0 { return Err(Error::Limit(LimitKind::Envs)); }
         macro_rules! e {
             ($x:expr) => {
@@ -638,6 +672,7 @@ impl<'p> Interp<'p> {
             step_limit: 0,
             depth: 0,
             frames: 0,
+            stack_floor: usize::MAX,
             stmt_frames: 0,
             sf_pool: Vec::new(),
             ran: false,
@@ -1751,6 +1786,18 @@ impl<'p> Interp<'p> {
         self.descend(|it| it.call_fn_inner(f, this, args))
     }
 
+    #[cold]
+    #[inline(never)]
+    fn call_fn_low(&mut self, f: Value, this: Value, args: &[Value]) -> Res<Value> {
+        self.grow_stack(|it| it.call_fn_inner(f, this, args))
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn construct_low(&mut self, f: Value, args: &[Value], callee: ExprId) -> Res<Value> {
+        self.grow_stack(|it| it.construct_inner(f, args, callee))
+    }
+
     fn call_fn_inner(&mut self, f: Value, this: Value, args: &[Value]) -> Res<Value> {
         if self.depth >= self.limits.max_call_depth {
             return Err(Error::Limit(LimitKind::CallDepth));
@@ -1777,21 +1824,85 @@ impl<'p> Interp<'p> {
             Some(Callee::Class) => return Err(self.class_call_error(o)),
             None => return Err(self.type_err("value is not a function")),
         };
+        // A native callee needs no stack check or frame reset: it reaches script code only through `call_fn`, which does both.
+        if !matches!(d, D::N(_)) && self.low_stack() {
+            return self.call_fn_low(f, this, args);
+        }
         self.depth += 1;
         let r = match d {
-            D::S(script, fid, env, sb) => self.call_script((script, fid), o, env, sb, this, args),
             D::N(n) => self.call_native(n, this, args, false),
-            D::P(pf) => self.call_promise(pf, this, args, false),
-            D::H(id) => self.call_host(id, this, args, false, None),
-            D::X => self.px_call(o, this, args),
-            D::R => self.call_revoke(o),
-            D::B(t, bthis, mut bargs) => {
-                bargs.extend_from_slice(args);
-                self.call_fn(Value::Object(t), bthis, &bargs)
-            }
+            d => self.in_frames(|it| match d {
+                D::S(script, fid, env, sb) => it.call_script((script, fid), o, env, sb, this, args),
+                D::P(pf) => it.call_promise(pf, this, args, false),
+                D::H(id) => it.call_host(id, this, args, false, None),
+                D::X => it.px_call(o, this, args),
+                D::R => it.call_revoke(o),
+                D::B(t, bthis, mut bargs) => {
+                    bargs.extend_from_slice(args);
+                    it.call_fn(Value::Object(t), bthis, &bargs)
+                }
+                D::N(_) => unreachable!(),
+            }),
         };
         self.depth -= 1;
         r
+    }
+
+    /// Run the body of one call, or the setup walk or top level of a script (`Interp::new`, `run`, `run_script`). Two things happen here and nowhere else:
+    /// - `frames` counts native frames from the start of THIS call, so `max_traversal_depth` bounds the recursion of one
+    ///   activation (expressions, patterns, `exec`). How many calls are nested is `max_call_depth`.
+    /// - The stack is checked: at least `STACK_RED` bytes are left below this point, enough for one activation up to
+    ///   `max_traversal_depth` frames and for the native code it calls. If not, the call continues on a new stack segment.
+    ///   The check is a compare of the stack pointer with `stack_floor` (see `grow_stack`).
+    #[inline(always)]
+    fn in_call<T>(&mut self, f: impl FnOnce(&mut Self) -> T) -> T {
+        if self.low_stack() { self.grow_stack(|it| it.in_frames(f)) } else { self.in_frames(f) }
+    }
+
+    /// True when less than `STACK_RED` bytes remain (or the end of this stack is not known yet). The hot call paths test it
+    /// first and, if true, run themselves again inside `grow_stack`, so the call body exists once.
+    #[inline(always)]
+    fn low_stack(&self) -> bool {
+        let here = 0u8;
+        (&here as *const u8 as usize) < self.stack_floor
+    }
+
+    /// Count the native frames of `f` from zero and restore the count of the caller afterwards.
+    #[inline(always)]
+    fn in_frames<T>(&mut self, f: impl FnOnce(&mut Self) -> T) -> T {
+        let saved = std::mem::take(&mut self.frames);
+        let r = f(self);
+        self.frames = saved;
+        r
+    }
+
+    /// The cold side of `in_call`: the first call on a thread, or a call near the end of the stack. The first call reads
+    /// the end of the thread stack and sets the floor. A call near the end runs on a new segment (`stacker::grow`: mapped
+    /// memory, committed only when touched, unmapped on return) with the floor of the segment, and the old floor comes back.
+    #[cold]
+    #[inline(never)]
+    fn grow_stack<T>(&mut self, f: impl FnOnce(&mut Self) -> T) -> T {
+        let here = 0u8;
+        let sp = &here as *const u8 as usize;
+        match stacker::remaining_stack() {
+            None => {
+                self.stack_floor = 0;
+                f(self)
+            }
+            Some(left) if left > STACK_RED => {
+                self.stack_floor = sp - left + STACK_RED;
+                f(self)
+            }
+            Some(_) => stacker::grow(STACK_SEG, || {
+                let here = 0u8;
+                let left = stacker::remaining_stack().unwrap_or(STACK_SEG);
+                let floor = &here as *const u8 as usize - left + STACK_RED;
+                let saved = std::mem::replace(&mut self.stack_floor, floor);
+                let r = f(self);
+                self.stack_floor = saved;
+                r
+            }),
+        }
     }
 
     fn construct(&mut self, f: Value, args: &[Value], callee: ExprId) -> Res<Value> {
@@ -1799,6 +1910,9 @@ impl<'p> Interp<'p> {
     }
 
     fn construct_inner(&mut self, f: Value, args: &[Value], callee: ExprId) -> Res<Value> {
+        if self.low_stack() {
+            return self.construct_low(f, args, callee);
+        }
         let not_ctor = |s: &mut Self| {
             let d = s.src_text(callee);
             Err(s.type_err(&format!("{d} is not a constructor")))
@@ -1828,28 +1942,28 @@ impl<'p> Interp<'p> {
             _ => return not_ctor(self),
         };
         self.depth += 1;
-        let r = match d {
+        let r = self.in_frames(|it| match d {
             D::S(script, fid, env, sb) => (|| {
-                let pv = self.get_prop(f, self.k_prototype)?;
-                let proto = if let Value::Object(p) = pv { p } else { self.object_proto };
-                let obj = h!(self, self.heap.new_object(Some(proto)));
-                self.cls_set_nt(script, fid, o);
-                self.stk.new = true;
-                let r = self.call_script((script, fid), o, env, sb, Value::Object(obj), args);
-                self.cls.pending_nt = None;
+                let pv = it.get_prop(f, it.k_prototype)?;
+                let proto = if let Value::Object(p) = pv { p } else { it.object_proto };
+                let obj = h!(it, it.heap.new_object(Some(proto)));
+                it.cls_set_nt(script, fid, o);
+                it.stk.new = true;
+                let r = it.call_script((script, fid), o, env, sb, Value::Object(obj), args);
+                it.cls.pending_nt = None;
                 let r = r?;
                 Ok(if matches!(r, Value::Object(_)) { r } else { Value::Object(obj) })
             })(),
-            D::C => self.construct_class_body(o, args, o),
-            D::X => self.px_construct(o, args, o, callee),
-            D::N(n) => self.call_native(n, Value::Undefined, args, true),
-            D::P(pf) => self.call_promise(pf, Value::Undefined, args, true),
-            D::H(id, nt) => self.call_host(id, Value::Undefined, args, true, nt.then_some(o)),
+            D::C => it.construct_class_body(o, args, o),
+            D::X => it.px_construct(o, args, o, callee),
+            D::N(n) => it.call_native(n, Value::Undefined, args, true),
+            D::P(pf) => it.call_promise(pf, Value::Undefined, args, true),
+            D::H(id, nt) => it.call_host(id, Value::Undefined, args, true, nt.then_some(o)),
             D::B(t, mut bargs) => {
                 bargs.extend_from_slice(args);
-                self.construct(Value::Object(t), &bargs, callee)
+                it.construct(Value::Object(t), &bargs, callee)
             }
-        };
+        });
         self.depth -= 1;
         r
     }
@@ -2358,9 +2472,7 @@ impl<'p> Interp<'p> {
                 }
                 let iv = self.eval_expr(index)?;
                 if is_nullish(base) {
-                    let t = self.display(base);
-                    let ks = self.coerce_string(iv).map(|s| self.heap.to_string_lossy(s).unwrap_or_default()).unwrap_or_default();
-                    return Err(self.type_err(&format!("Cannot read properties of {t} (reading '{ks}')")));
+                    return Err(self.index_nullish_err(base, iv));
                 }
                 let key = self.coerce_key(iv)?;
                 Ok(Some((self.get_prop(base, key)?, base)))
@@ -2372,44 +2484,52 @@ impl<'p> Interp<'p> {
                 }
                 let argv = self.eval_args(args)?;
                 self.mark_call(e);
-                let r = if self.is_callable(f) {
-                    self.call_fn(f, this, &argv)
-                } else {
-                    let m = format!("{} is not a function", self.src_text(callee));
-                    Err(self.type_err(&m))
-                };
+                let r = if self.is_callable(f) { self.call_fn(f, this, &argv) } else { Err(self.not_a_function(callee)) };
                 self.stk.pos = 0;
                 let r = r?;
                 self.arg_pool.push(argv);
                 Ok(Some((r, Value::Undefined)))
             }
-            ExprKind::Tagged { tag, quasi } => {
-                let (f, this) = self.link(tag)?.unwrap_or((Value::Undefined, Value::Undefined));
-                let strings = self.template_object(e, quasi)?;
-                let prog = self.prog.clone();
-                let t = *prog.template(quasi);
-                let mut argv = self.arg_pool.pop().unwrap_or_default();
-                argv.clear();
-                argv.push(strings);
-                for x in prog.template_exprs(&t) {
-                    argv.push(self.eval_expr(x)?);
-                }
-                self.mark_call(e);
-                let r = if self.is_callable(f) {
-                    self.call_fn(f, this, &argv)
-                } else {
-                    let m = format!("{} is not a function", self.src_text(tag));
-                    Err(self.type_err(&m))
-                };
-                self.stk.pos = 0;
-                let r = r?;
-                self.arg_pool.push(argv);
-                Ok(Some((r, Value::Undefined)))
-            }
+            ExprKind::Tagged { tag, quasi } => self.link_tagged(e, tag, quasi),
             ExprKind::Paren(inner) if matches!(self.unparen(inner), ExprKind::Member { .. } | ExprKind::Index { .. } | ExprKind::PrivateMember { .. } | ExprKind::Chain(_)) => self.link(inner),
             ExprKind::Chain(inner) => Ok(Some(self.link(inner)?.unwrap_or((Value::Undefined, Value::Undefined)))),
             _ => Ok(Some((self.eval_expr(e)?, Value::Undefined))),
         }
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn not_a_function(&mut self, callee: ExprId) -> Error {
+        let m = format!("{} is not a function", self.src_text(callee));
+        self.type_err(&m)
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn index_nullish_err(&mut self, base: Value, iv: Value) -> Error {
+        let t = self.display(base);
+        let ks = self.coerce_string(iv).map(|s| self.heap.to_string_lossy(s).unwrap_or_default()).unwrap_or_default();
+        self.type_err(&format!("Cannot read properties of {t} (reading '{ks}')"))
+    }
+
+    #[inline(never)]
+    fn link_tagged(&mut self, e: ExprId, tag: ExprId, quasi: Id<Template>) -> Res<Option<(Value, Value)>> {
+        let (f, this) = self.link(tag)?.unwrap_or((Value::Undefined, Value::Undefined));
+        let strings = self.template_object(e, quasi)?;
+        let prog = self.prog.clone();
+        let t = *prog.template(quasi);
+        let mut argv = self.arg_pool.pop().unwrap_or_default();
+        argv.clear();
+        argv.push(strings);
+        for x in prog.template_exprs(&t) {
+            argv.push(self.eval_expr(x)?);
+        }
+        self.mark_call(e);
+        let r = if self.is_callable(f) { self.call_fn(f, this, &argv) } else { Err(self.not_a_function(tag)) };
+        self.stk.pos = 0;
+        let r = r?;
+        self.arg_pool.push(argv);
+        Ok(Some((r, Value::Undefined)))
     }
 
     fn unparen(&self, mut e: ExprId) -> ExprKind {
@@ -2435,77 +2555,17 @@ impl<'p> Interp<'p> {
             ExprKind::Bool(b) => Ok(Value::Bool(b)),
             ExprKind::Number(base) => Ok(Value::Number(self.num_lit(ex.span, base))),
             ExprKind::BigInt => self.big_literal(ex.span),
-            ExprKind::String => {
-                if let Some(s) = self.expr_str[e.index()] {
-                    return Ok(Value::String(s));
-                }
-                let mut u = Vec::new();
-                let _ = prog.string(ex.span, &mut u);
-                let s = h!(self, self.heap.intern_vec(u));
-                self.expr_str[e.index()] = Some(s);
-                Ok(Value::String(s))
-            }
+            ExprKind::String => match self.expr_str[e.index()] {
+                Some(s) => Ok(Value::String(s)),
+                None => self.string_literal(e, ex.span),
+            },
             ExprKind::RegExp => self.ext_eval_regexp(e),
-            ExprKind::Template(t) => {
-                let t = *prog.template(t);
-                let mut out: Vec<u16> = Vec::new();
-                let quasis: Vec<_> = prog.template_quasis(&t).collect();
-                let exprs: Vec<_> = prog.template_exprs(&t).collect();
-                for (i, q) in quasis.iter().enumerate() {
-                    let _ = prog.quasi(prog.quasi_node(*q), false, &mut out);
-                    if let Some(&x) = exprs.get(i) {
-                        let v = self.eval_expr(x)?;
-                        let s = self.coerce_string(v)?;
-                        self.append_string(&mut out, h!(self, self.heap.str_units(s)))?;
-                    }
-                }
-                Ok(Value::String(h!(self, self.heap.intern_vec(out))))
-            }
-            ExprKind::Array(l) => {
-                let a = h!(self, self.heap.new_array(Some(self.array_proto)));
-                let mut n: u32 = 0;
-                for x in prog.list(l) {
-                    match prog.expr(x).kind {
-                        ExprKind::Hole => n += 1,
-                        ExprKind::Spread(inner) => {
-                            let v = self.eval_expr(inner)?;
-                            let mut it = self.iter_start(v, inner)?;
-                            while let Some(item) = self.iter_next(&mut it)? {
-                                self.def(a, PropertyKey::Index(n), item, true, true, true)?;
-                                n += 1;
-                            }
-                        }
-                        _ => {
-                            let v = self.eval_expr(x)?;
-                            self.def(a, PropertyKey::Index(n), v, true, true, true)?;
-                            n += 1;
-                        }
-                    }
-                }
-                hxw!(self, self.heap.set(a, self.k_length, Value::Number(n as f64)));
-                Ok(Value::Object(a))
-            }
+            ExprKind::Template(t) => self.eval_template(t),
+            ExprKind::Array(l) => self.eval_array(l),
             ExprKind::Object(l) => self.eval_object(l),
             ExprKind::Function(fid) => self.make_closure(fid, None, true),
             ExprKind::Unary { op, arg } => self.eval_unary(op, arg),
-            ExprKind::Update { op, prefix, arg } => {
-                let r = self.expr_ref(arg)?;
-                let old = self.ref_get(&r)?;
-                let n = match old {
-                    Value::Number(n) => n,
-                    _ => match self.to_numeric(old)? {
-                        Value::Number(n) => n,
-                        big => {
-                            let new = self.big_step(big, op == UpdateOp::Inc)?;
-                            self.ref_put(&r, new)?;
-                            return Ok(if prefix { new } else { big });
-                        }
-                    },
-                };
-                let new = if op == UpdateOp::Inc { n + 1.0 } else { n - 1.0 };
-                self.ref_put(&r, Value::Number(new))?;
-                Ok(Value::Number(if prefix { new } else { n }))
-            }
+            ExprKind::Update { op, prefix, arg } => self.eval_update(op, prefix, arg),
             ExprKind::Binary { op, left, right } => {
                 let a = self.eval_expr(left)?;
                 let b = self.eval_expr(right)?;
@@ -2531,26 +2591,108 @@ impl<'p> Interp<'p> {
             ExprKind::NewTarget => self.eval_new_target(),
             ExprKind::Super => Err(self.mk_err(REFERENCE_ERROR, "Unsupported reference to 'super'")),
             ExprKind::Chain(inner) => Ok(self.link(inner)?.map_or(Value::Undefined, |p| p.0)),
-            ExprKind::New { callee, args } => {
-                let f = self.eval_expr(callee)?;
-                let argv = self.eval_args(args)?;
-                self.mark_call(e);
-                let r = self.construct(f, &argv, callee);
-                self.stk.pos = 0;
-                r
-            }
-            ExprKind::Seq(l) => {
-                let mut last = Value::Undefined;
-                for x in prog.list(l) {
-                    last = self.eval_expr(x)?;
-                }
-                Ok(last)
-            }
+            ExprKind::New { callee, args } => self.eval_new(e, callee, args),
+            ExprKind::Seq(l) => self.eval_seq(l),
             ExprKind::Paren(inner) => self.eval_expr(inner),
             ExprKind::Spread(_) | ExprKind::Hole => Err(unsupported("spread or hole outside a list", ex.span)),
             // The first walk rejects these before anything runs.
             _ => Err(unsupported("expression", ex.span)),
         }
+    }
+
+    #[inline(never)]
+    fn string_literal(&mut self, e: ExprId, span: Span) -> Res<Value> {
+        let prog = self.prog.clone();
+        let mut u = Vec::new();
+        let _ = prog.string(span, &mut u);
+        let s = h!(self, self.heap.intern_vec(u));
+        self.expr_str[e.index()] = Some(s);
+        Ok(Value::String(s))
+    }
+
+    #[inline(never)]
+    fn eval_template(&mut self, t: Id<Template>) -> Res<Value> {
+        let prog = self.prog.clone();
+        let t = *prog.template(t);
+        let mut out: Vec<u16> = Vec::new();
+        let quasis: Vec<_> = prog.template_quasis(&t).collect();
+        let exprs: Vec<_> = prog.template_exprs(&t).collect();
+        for (i, q) in quasis.iter().enumerate() {
+            let _ = prog.quasi(prog.quasi_node(*q), false, &mut out);
+            if let Some(&x) = exprs.get(i) {
+                let v = self.eval_expr(x)?;
+                let s = self.coerce_string(v)?;
+                self.append_string(&mut out, h!(self, self.heap.str_units(s)))?;
+            }
+        }
+        Ok(Value::String(h!(self, self.heap.intern_vec(out))))
+    }
+
+    #[inline(never)]
+    fn eval_array(&mut self, l: List<Expr>) -> Res<Value> {
+        let prog = self.prog.clone();
+        let a = h!(self, self.heap.new_array(Some(self.array_proto)));
+        let mut n: u32 = 0;
+        for x in prog.list(l) {
+            match prog.expr(x).kind {
+                ExprKind::Hole => n += 1,
+                ExprKind::Spread(inner) => {
+                    let v = self.eval_expr(inner)?;
+                    let mut it = self.iter_start(v, inner)?;
+                    while let Some(item) = self.iter_next(&mut it)? {
+                        self.def(a, PropertyKey::Index(n), item, true, true, true)?;
+                        n += 1;
+                    }
+                }
+                _ => {
+                    let v = self.eval_expr(x)?;
+                    self.def(a, PropertyKey::Index(n), v, true, true, true)?;
+                    n += 1;
+                }
+            }
+        }
+        hxw!(self, self.heap.set(a, self.k_length, Value::Number(n as f64)));
+        Ok(Value::Object(a))
+    }
+
+    #[inline(never)]
+    fn eval_update(&mut self, op: UpdateOp, prefix: bool, arg: ExprId) -> Res<Value> {
+        let r = self.expr_ref(arg)?;
+        let old = self.ref_get(&r)?;
+        let n = match old {
+            Value::Number(n) => n,
+            _ => match self.to_numeric(old)? {
+                Value::Number(n) => n,
+                big => {
+                    let new = self.big_step(big, op == UpdateOp::Inc)?;
+                    self.ref_put(&r, new)?;
+                    return Ok(if prefix { new } else { big });
+                }
+            },
+        };
+        let new = if op == UpdateOp::Inc { n + 1.0 } else { n - 1.0 };
+        self.ref_put(&r, Value::Number(new))?;
+        Ok(Value::Number(if prefix { new } else { n }))
+    }
+
+    #[inline(never)]
+    fn eval_new(&mut self, e: ExprId, callee: ExprId, args: List<Expr>) -> Res<Value> {
+        let f = self.eval_expr(callee)?;
+        let argv = self.eval_args(args)?;
+        self.mark_call(e);
+        let r = self.construct(f, &argv, callee);
+        self.stk.pos = 0;
+        r
+    }
+
+    #[inline(never)]
+    fn eval_seq(&mut self, l: List<Expr>) -> Res<Value> {
+        let prog = self.prog.clone();
+        let mut last = Value::Undefined;
+        for x in prog.list(l) {
+            last = self.eval_expr(x)?;
+        }
+        Ok(last)
     }
 
     fn eval_object(&mut self, l: List<Prop>) -> Res<Value> {
@@ -3370,6 +3512,10 @@ mod wrapper_tests;
 #[cfg(test)]
 #[path = "eval_depth_tests.rs"]
 mod depth_tests;
+
+#[cfg(test)]
+#[path = "eval_recursion_tests.rs"]
+mod recursion_tests;
 
 #[cfg(test)]
 #[path = "eval_statements_tests.rs"]

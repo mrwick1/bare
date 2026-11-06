@@ -19,5 +19,6 @@ icu_plurals = { version = "2.4.0", default-features = false }
 icu_provider = { version = "2.4.0", features = ["baked"] }
 # Rule-based segmenters with compiled data and no dictionary or LSTM data (`Intl.Segmenter`, see `docs/resources.md`)
 icu_segmenter = { version = "2.4.0", default-features = false, features = ["compiled_data"] }
+stacker = "0.1.25"
 writeable = "0.6.4"
 zerovec = "0.11"

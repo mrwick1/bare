@@ -3560,3 +3560,48 @@ Upload rows (`fetch_load upload 1|10`, loopback, release build, one run): a `Fil
 
 Not tested: a body over 64 MiB, many files in one `FormData` under load, `formData()` of a body with a boundary inside a file, a live upload to the staging server, and a TLS upload.
 
+
+## Deep recursion
+
+The live staging page stopped with `Fatal(Limit("TraversalDepth"))`. The JS stack was the React 19 commit phase. `commitMutationEffectsOnFiber` (a `switch`) and `recursivelyTraverseMutationEffects` (an `if`, a `for` loop, sometimes `try/catch`) call each other once for each fiber level. One JS call of this shape cost about 4 native traversal frames, and one global counter (`max_traversal_depth`, 768) stood in for the native stack. Fewer than 200 calls fitted. Chrome allows about 10,000.
+
+Limits now (`EvalLimits::session()`, which is also the hard ceiling): `max_call_depth` 10,000 (was 256), `max_traversal_depth` 768 (unchanged, but now counted for one call, not for all calls), `max_statement_frames` 65,536 (was 768). The React shape runs 2,000 levels deep (4,000 JS calls) in the browser session. Recursion without end still ends as `Limit(CallDepth)` or `RangeError`, in debug and in release.
+
+Measured native stack (gdb `$sp` difference between frames; React commit shape):
+
+| | before | after |
+|---|---|---|
+| one JS call, release | 4.9 KB | 2.8 KB |
+| one JS call, debug | 26 KB | 15 KB |
+| frame of `machine`, release | 1,120 B | 416 B |
+| one activation at 768 traversal frames, release | - | 0.51 MB |
+| one activation at 768 traversal frames, debug | - | 2.9 MB |
+
+The options and the choice:
+1. Fewer native frames for each call. Not possible without a bytecode VM. The tree walk needs one native frame for each expression level.
+2. Smaller frames. Done. The cold arms of `eval_expr_inner`, `link_inner` and the statement machine are `#[inline(never)]`, so the hot recursion cycle (`call_fn_inner`, `call_script`, `machine`, `exec_simple`, `eval_expr_inner`) is 43% smaller.
+3. A large stack. A fixed thread size cannot hold 10,000 calls in debug (150 MB) and costs nothing only if the pages stay untouched. We use `stacker` instead: the call checks the stack pointer against `stack_floor`. When less than `STACK_RED` (4 MiB, 16 MiB in debug) is left, the call continues on a new segment of `STACK_SEG` (64 MiB, 256 MiB in debug). The segment is mapped memory that is committed only where the stack touches it, and it is unmapped when the call returns. Any thread stack works, also a 256 KiB one (test `the_stack_grows_on_a_thread_that_is_too_small`). `max_call_depth` bounds the memory: 31 to 58 MB at the ceiling (10,000 calls through `map`, `sort`, getters, `toJSON`, `Reflect.apply` and `new`).
+
+Recursion load (`recursion_load CASE DEPTH`, 8 MiB thread, release, `ulimit -v` 1 GiB):
+
+| case | depth | run | steps | peak RSS | growth |
+|---|---|---|---|---|---|
+| react | 100 | 0.92 ms | 11,234 | 5.4 MiB | 0.9 MiB |
+| react | 1,000 | 11.38 ms | 111,811 | 10.7 MiB | 6.2 MiB |
+| react | 2,000 | 20.62 ms | 223,561 | 17.8 MiB | 13.3 MiB |
+| plain (one call each level) | 2,000 | 4.15 ms | 26,013 | 11.6 MiB | 7.1 MiB |
+| runaway (no end, ends at `CallDepth`) | - | 21.59 ms | 80,006 | 37.4 MiB | 32.9 MiB |
+
+Cost: `perf stat -e instructions:u`, minimum of 3 runs, each binary in its own `CARGO_TARGET_DIR` under `/data/bare-tmp`. Main d6d9b92 against this build, 215 rows (every `*_load` example row and startup). No row is over +0.5%. The worst are `promise_load finally` +0.47%, `promise_all_load many` +0.42%, `arrobj_load objects` +0.25% and `promise_load reject` +0.22%. 100 rows are more than 0.5% faster, because a call no longer counts the frames of its callers (best `interact_load asyncpriv` -2.0%).
+
+The first build cost up to +2.2% (37 rows over +0.5%, worst `promise_load finally`). The causes, in order of effect:
+1. The stack check was in a closure that wrapped the whole call body. The body was built twice (one for the check and one for `grow_stack`), and the hot call function got worse code (+1.2%). Fix: the call function tests `low_stack()` and, if true, calls itself again inside `grow_stack` (`call_fn_low`, `construct_low`, both `#[cold]`). The body exists once.
+2. A native callee (promise functions, `map`, `push`) paid for the check and for the frame reset. Fix: the native arm of `call_fn_inner` skips both. A native reaches script code only through `call_fn`, which does both.
+
+Known gaps:
+- `super()` (an explicit chain of derived classes) and some host paths do not start a call with `in_call`. The 768 frames still end such a recursion as `TraversalDepth`, and nothing overflows. Test `a_deep_derived_chain_is_a_limit_not_a_native_stack_overflow`.
+- `stacker::grow` aborts the process if the system refuses the mapping (a small `ulimit -v`). Not tested with a 64 MiB limit in the browser.
+- A native that recurses without a JS call (`JSON.stringify` of a deep value, `flat(Infinity)` of a cycle) is bounded by the 768 frames of the activation that called it.
+- An `Interp` must run on one thread stack at a time. It is not `Send`, so this holds.
+
+Not tested: the live staging login on this build, a debug build of the browser with 10,000 calls in a thread of 256 KiB, a platform other than Linux x86-64 (`stacker` supports others), and memory of the page after 2,000 levels with a real React bundle.

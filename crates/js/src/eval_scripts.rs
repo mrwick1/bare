@@ -129,7 +129,7 @@ impl<'p> Interp<'p> {
         let (id, old, names_mark) = (self.scripts.len(), self.cur, self.names.len());
         self.scripts.push(Code::new(Rc::new(parsed.into_owned())));
         self.select(id);
-        let r = self.walk_program();
+        let r = self.in_call(|it| it.walk_program());
         self.select(old);
         if let Err(e) = r {
             self.scripts.pop();
@@ -186,7 +186,7 @@ impl<'p> Interp<'p> {
         self.begin();
         self.completion = Value::Undefined;
         self.select(id);
-        let r = self.in_frame(id as u32, Where::Top, false, |it| it.exec_current());
+        let r = self.in_call(|it| it.in_frame(id as u32, Where::Top, false, |it| it.exec_current()));
         self.select(old);
         self.env = 0;
         r

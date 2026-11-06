@@ -463,3 +463,45 @@ fn a_finite_forty_level_walk_completes_in_the_default_session() {
         assert_eq!(get(&s, &srv, "walk").as_deref(), Some("done"));
     });
 }
+
+#[test]
+fn a_react_commit_walk_2000_levels_deep_runs_under_the_default_session_limits() {
+    // The shape of React 19's commit phase: two functions that call each other once for each fiber level, with a `switch`, an
+    // `if`, a `for` loop and a `try`. The live staging app stopped with `Limit(TraversalDepth)` at 96 levels. 2,000 levels are
+    // 4,000 nested calls. The session keeps `SessionConfig::new`'s limits (only the step budget is raised).
+    big(|| {
+        let page = "<script>
+            var MASK = 3;
+            function commitMutationEffectsOnFiber(fiber, root) {
+              switch (fiber.tag) {
+                case 0: case 11: recursivelyTraverseMutationEffects(root, fiber); root.count = root.count + 1; break;
+                case 5: try { recursivelyTraverseMutationEffects(root, fiber); } catch (e) { root.err = e; } root.count = root.count + 1; break;
+                default: recursivelyTraverseMutationEffects(root, fiber);
+              }
+            }
+            function recursivelyTraverseMutationEffects(root, parentFiber) {
+              if (parentFiber.subtreeFlags & MASK) {
+                for (var child = parentFiber.child; child !== null; child = child.sibling) commitMutationEffectsOnFiber(child, root);
+              }
+            }
+            var tags = [0, 5, 3, 11], root = { tag: 3, subtreeFlags: 3, child: null, sibling: null, count: 0 }, tail = root;
+            for (var i = 0; i < 2000; i++) {
+              var n = { tag: tags[i % 4], subtreeFlags: 3, child: null, sibling: null };
+              n.sibling = { tag: 0, subtreeFlags: 0, child: null, sibling: null };
+              tail.child = n; tail = n;
+            }
+            commitMutationEffectsOnFiber(root, root);
+            localStorage.setItem('count', String(root.count));
+            </script>";
+        let srv = server(move || vec![("/", html(page))]);
+        let mut c = SessionConfig::new(&srv.url("/"));
+        c.virtual_clock = true;
+        c.page.quiet = Duration::from_millis(100);
+        c.eval.max_steps = 50_000_000;
+        let mut s = Session::new(c);
+        let r = s.run();
+        assert_eq!(r.stop, SessionStop::Page(Stop::Settled), "{r:?}");
+        assert_eq!((r.pages[0].script_throws, r.pages[0].load_errors), (0, 0));
+        assert_eq!(get(&s, &srv, "count").as_deref(), Some("3500"));
+    });
+}
