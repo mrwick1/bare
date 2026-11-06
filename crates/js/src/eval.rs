@@ -480,7 +480,8 @@ struct It {
 
 /// A reference that can be read and written: a name or a property of a value.
 enum Ref {
-    Name(u32),
+    /// A name and its site (see `eval_scope.rs`).
+    Name(u32, u32),
     Prop(Value, PropertyKey),
     /// `base.#name`: the name object, the `#name` id and the binding flags.
     Priv(Value, ObjId, u32, u8),
@@ -517,6 +518,8 @@ pub struct Interp<'p> {
     name_map: FxMap<String, u32>,
     names: Vec<String>,
     name_strs: Vec<Option<StrId>>,
+    /// For each name: the position of its property on the global object when it was last found there (a hint, checked on use).
+    name_gpos: Vec<u32>,
     expr_name: Vec<u32>,
     pat_name: Vec<u32>,
     stmt_label: Vec<u32>,
@@ -524,6 +527,13 @@ pub struct Interp<'p> {
     expr_str: Vec<Option<StrId>>,
     prop_str: Vec<Option<StrId>>,
     scopes: Vec<FScope>,
+    /// Static scopes and identifier slots of the current script (see `eval_scope.rs`), and the scope the first walk is in.
+    slots: Slots,
+    /// The scopes of all scripts and their names (see `eval_scope.rs`). A script keeps its scopes after it ran.
+    sc_all: Vec<RScope>,
+    sc_pool: Vec<u32>,
+    sc_cur: u32,
+    sc_fn_expr: bool,
     // environments and functions
     envs: Vec<Env>,
     free_envs: Vec<u32>,
@@ -679,6 +689,7 @@ impl<'p> Interp<'p> {
             name_map: FxMap::default(),
             names: vec![String::new()],
             name_strs: vec![None],
+            name_gpos: vec![NONE],
             expr_name: vec![0; p.stats().exprs],
             pat_name: vec![0; p.stats().pats],
             stmt_label: vec![0; p.stats().stmts],
@@ -686,6 +697,11 @@ impl<'p> Interp<'p> {
             expr_str: vec![None; p.stats().exprs],
             prop_str: vec![None; p.stats().props],
             scopes: (0..=p.stats().funcs).map(|_| FScope::default()).collect(),
+            slots: Slots::new(&p.stats()),
+            sc_all: Vec::new(),
+            sc_pool: Vec::new(),
+            sc_cur: NONE,
+            sc_fn_expr: false,
             envs: Vec::new(),
             free_envs: Vec::new(),
             gc_allocs: 0,
@@ -1043,6 +1059,7 @@ impl<'p> Interp<'p> {
         let i = self.names.len() as u32;
         self.names.push(s.to_string());
         self.name_strs.push(None);
+        self.name_gpos.push(NONE);
         self.name_map.insert(s.to_string(), i);
         i
     }
@@ -1151,6 +1168,8 @@ impl<'p> Interp<'p> {
         let prog = self.prog.clone();
         let top = self.scopes.len() - 1;
         self.cur_strict = prog.strict;
+        self.sc_cur = NONE;
+        self.sc_begin(RKind::Root);
         for s in prog.list(prog.body) {
             self.w_stmt(s, top, usize::MAX, false)?;
         }
@@ -1176,6 +1195,8 @@ impl<'p> Interp<'p> {
         let saved_cur = std::mem::replace(&mut self.cls.cur, new_cur);
         let me = fid.index();
         let args_scope = if f.kind == FuncKind::Arrow { outer_args } else { me };
+        let is_expr = std::mem::take(&mut self.sc_fn_expr);
+        let sc = self.sc_begin(RKind::Fn(fid, is_expr));
         for p in prog.list(f.params) {
             self.w_pat(p, me, args_scope)?;
         }
@@ -1187,6 +1208,7 @@ impl<'p> Interp<'p> {
             }
             Body::Expr(e) => self.w_expr(e, me, args_scope)?,
         }
+        self.sc_end(sc);
         self.cur_strict = saved;
         self.cls.cur = saved_cur;
         Ok(())
@@ -1228,6 +1250,7 @@ impl<'p> Interp<'p> {
             PatKind::Ident => {
                 let n = self.name_at(pat.span);
                 self.pat_name[p.index()] = n;
+                self.sc_site(self.pat_site(p.index()), n);
             }
             PatKind::Member(e) => self.w_expr(e, fs, ac)?,
             PatKind::Array(l) => {
@@ -1299,6 +1322,7 @@ impl<'p> Interp<'p> {
                 }
             }
             StmtKind::For { init, test, update, body } => {
+                let sc = self.sc_lexical_var(if let ForInit::Var(v) = init { Some(v) } else { None });
                 match init {
                     ForInit::None => {}
                     ForInit::Var(v) => self.w_stmt(v, fs, ac, true)?,
@@ -1308,14 +1332,18 @@ impl<'p> Interp<'p> {
                     self.w_expr(e, fs, ac)?;
                 }
                 self.w_stmt(body, fs, ac, true)?;
+                self.sc_end(sc);
             }
             StmtKind::ForIn { left, right, body } | StmtKind::ForOf { left, right, body, is_await: false } => {
+                // The right side runs before the iteration environment exists.
+                self.w_expr(right, fs, ac)?;
+                let sc = self.sc_lexical_var(if let ForLeft::Var(v) = left { Some(v) } else { None });
                 match left {
                     ForLeft::Var(v) => self.w_stmt(v, fs, ac, true)?,
                     ForLeft::Pat(p) => self.w_pat(p, fs, ac)?,
                 }
-                self.w_expr(right, fs, ac)?;
                 self.w_stmt(body, fs, ac, true)?;
+                self.sc_end(sc);
             }
             StmtKind::ForOf { .. } => return Err(unsupported("for await", st.span)),
             StmtKind::While { test, body } | StmtKind::DoWhile { body, test } => {
@@ -1331,10 +1359,12 @@ impl<'p> Interp<'p> {
                 self.w_stmt(block, fs, ac, true)?;
                 if let Some(c) = handler {
                     let c = *prog.catch(c);
+                    let sc = self.sc_begin(RKind::Catch(c.param));
                     if let Some(p) = c.param {
                         self.w_pat(p, fs, ac)?;
                     }
                     self.w_stmt(c.body, fs, ac, true)?;
+                    self.sc_end(sc);
                 }
                 if let Some(f) = finalizer {
                     self.w_stmt(f, fs, ac, true)?;
@@ -1342,6 +1372,8 @@ impl<'p> Interp<'p> {
             }
             StmtKind::Switch { disc, cases } => {
                 self.w_expr(disc, fs, ac)?;
+                let lex = prog.list(cases).any(|c| self.has_lexical(prog.case(c).body));
+                let sc = if lex { self.sc_begin(RKind::Switch(s)) } else { self.sc_cur };
                 for c in prog.list(cases) {
                     let c = *prog.case(c);
                     if let Some(t) = c.test {
@@ -1351,15 +1383,18 @@ impl<'p> Interp<'p> {
                         self.w_stmt(s, fs, ac, true)?;
                     }
                 }
+                self.sc_end(sc);
             }
             StmtKind::Labeled { label, body } => {
                 self.stmt_label[s.index()] = self.name_at(label);
                 self.w_stmt(body, fs, ac, true)?;
             }
             StmtKind::Block(l) => {
+                let sc = if self.has_lexical(l) { self.sc_begin(RKind::Block(s)) } else { self.sc_cur };
                 for s in prog.list(l) {
                     self.w_stmt(s, fs, ac, true)?;
                 }
+                self.sc_end(sc);
             }
             StmtKind::Empty | StmtKind::Debugger => {}
             StmtKind::With { .. } => return Err(unsupported("with statement", st.span)),
@@ -1378,6 +1413,7 @@ impl<'p> Interp<'p> {
             ExprKind::Ident => {
                 let n = self.name_at(ex.span);
                 self.expr_name[e.index()] = n;
+                self.sc_site(e.index() as u32, n);
                 if n == self.n_arguments && ac != usize::MAX {
                     self.scopes[ac].uses_args = true;
                 }
@@ -1412,7 +1448,10 @@ impl<'p> Interp<'p> {
                     self.w_expr(pr.value, fs, ac)?;
                 }
             }
-            ExprKind::Function(f) => self.w_func(f, ac)?,
+            ExprKind::Function(f) => {
+                self.sc_fn_expr = true;
+                self.w_func(f, ac)?
+            }
             ExprKind::Class(c) => self.w_class(c, fs, ac)?,
             ExprKind::Unary { arg, .. } | ExprKind::Update { arg, .. } | ExprKind::Spread(arg) | ExprKind::Paren(arg) | ExprKind::Chain(arg) => self.w_expr(arg, fs, ac)?,
             ExprKind::Binary { left, right, .. } | ExprKind::Logical { left, right, .. } => {
@@ -2373,14 +2412,30 @@ impl<'p> Interp<'p> {
         self.mk_err(REFERENCE_ERROR, &m)
     }
 
-    fn get_name(&mut self, n: u32) -> Res<Value> {
-        if let Some((e, i)) = self.lookup(n) {
+    fn get_name(&mut self, n: u32, site: u32) -> Res<Value> {
+        if let Some((e, i)) = self.find_name(n, site) {
             let b = &self.envs[e as usize].bindings[i];
             return if b.flags & INIT != 0 { Ok(b.value) } else { Err(self.tdz(n)) };
         }
+        self.get_global(n)
+    }
+
+    /// A name that no environment binds: a property of the global object.
+    #[inline(never)]
+    fn get_global(&mut self, n: u32) -> Res<Value> {
+        if let Some(s) = self.name_strs[n as usize]
+            && let Some(v) = self.heap.own_data_at(self.global, self.name_gpos[n as usize], PropertyKey::String(s))
+        {
+            return Ok(v);
+        }
         let key = self.name_key(n)?;
         match hx!(self, self.heap.lookup(self.global, key)) {
-            Some((_, Property::Data { value, .. })) => Ok(value),
+            Some((holder, Property::Data { value, .. })) => {
+                if holder == self.global {
+                    self.learn_gpos(n, key);
+                }
+                Ok(value)
+            }
             Some((_, Property::Accessor { get, .. })) => match get {
                 Some(g) => self.call_fn(Value::Object(g), Value::Object(self.global), &[]),
                 None => Ok(Value::Undefined),
@@ -2392,19 +2447,37 @@ impl<'p> Interp<'p> {
         }
     }
 
-    fn assign_name(&mut self, n: u32, v: Value) -> Res<()> {
-        if let Some((e, i)) = self.lookup(n) {
+    fn assign_name(&mut self, n: u32, v: Value, site: u32) -> Res<()> {
+        if let Some((e, i)) = self.find_name(n, site) {
             let b = &mut self.envs[e as usize].bindings[i];
-            if b.flags & INIT == 0 {
-                return Err(self.tdz(n));
+            if b.flags & (INIT | MUT) == INIT | MUT {
+                b.value = v;
+                return Ok(());
             }
-            if b.flags & MUT == 0 {
-                if b.flags & SELF != 0 && !self.strict {
-                    return Ok(());
-                }
-                return Err(self.type_err("Assignment to constant variable."));
-            }
-            b.value = v;
+            return self.assign_name_refused(n, e, i);
+        }
+        self.assign_global(n, v)
+    }
+
+    /// An assignment to a binding that is in its TDZ or is not mutable.
+    #[cold]
+    #[inline(never)]
+    fn assign_name_refused(&mut self, n: u32, e: u32, i: usize) -> Res<()> {
+        let flags = self.envs[e as usize].bindings[i].flags;
+        if flags & INIT == 0 {
+            return Err(self.tdz(n));
+        }
+        if flags & SELF != 0 && !self.strict {
+            return Ok(());
+        }
+        Err(self.type_err("Assignment to constant variable."))
+    }
+
+    #[inline(never)]
+    fn assign_global(&mut self, n: u32, v: Value) -> Res<()> {
+        if let Some(s) = self.name_strs[n as usize]
+            && self.heap.set_own_data_at(self.global, self.name_gpos[n as usize], PropertyKey::String(s), v)
+        {
             return Ok(());
         }
         let key = self.name_key(n)?;
@@ -2412,7 +2485,15 @@ impl<'p> Interp<'p> {
             let m = format!("{} is not defined", self.names[n as usize]);
             return Err(self.mk_err(REFERENCE_ERROR, &m));
         }
-        self.put_prop(Value::Object(self.global), key, v)
+        self.put_prop(Value::Object(self.global), key, v)?;
+        self.learn_gpos(n, key);
+        Ok(())
+    }
+
+    /// Keep the position of the global property `n` for the next use, but only from the second use on: a name used once pays no probe.
+    fn learn_gpos(&mut self, n: u32, key: PropertyKey) {
+        let h = &mut self.name_gpos[n as usize];
+        *h = if *h == NONE { NONE - 1 } else { self.heap.own_pos(self.global, key).unwrap_or(NONE) };
     }
 
     // ------------------------------------------------------------ expressions
@@ -2548,7 +2629,7 @@ impl<'p> Interp<'p> {
         let prog = self.prog.clone();
         let ex = *prog.expr(e);
         match ex.kind {
-            ExprKind::Ident => self.get_name(self.expr_name[e.index()]),
+            ExprKind::Ident => self.get_name(self.expr_name[e.index()], e.index() as u32),
             ExprKind::This if self.expr_name[e.index()] == 0 => Ok(self.lookup_this()),
             ExprKind::This => self.this_binding(),
             ExprKind::Null => Ok(Value::Null),
@@ -2796,7 +2877,7 @@ impl<'p> Interp<'p> {
                         a = i;
                     }
                     let n = self.expr_name[a.index()];
-                    if self.lookup(n).is_none() {
+                    if self.find_name(n, a.index() as u32).is_none() {
                         let key = self.name_key(n)?;
                         if !hx!(self, self.heap.has_property(self.global, key)) {
                             let s = h!(self, self.heap.intern_str("undefined"));
@@ -2905,7 +2986,7 @@ impl<'p> Interp<'p> {
     fn expr_ref(&mut self, e: ExprId) -> Res<Ref> {
         let ex = *self.prog.expr(e);
         match ex.kind {
-            ExprKind::Ident => Ok(Ref::Name(self.expr_name[e.index()])),
+            ExprKind::Ident => Ok(Ref::Name(self.expr_name[e.index()], e.index() as u32)),
             ExprKind::Paren(i) => self.expr_ref(i),
             ExprKind::Member { .. } | ExprKind::Index { .. } | ExprKind::PrivateMember { .. } => self.member_target(e),
             _ => Err(unsupported("update target", ex.span)),
@@ -2914,7 +2995,7 @@ impl<'p> Interp<'p> {
 
     fn ref_get(&mut self, r: &Ref) -> Res<Value> {
         match *r {
-            Ref::Name(n) => self.get_name(n),
+            Ref::Name(n, site) => self.get_name(n, site),
             Ref::Prop(b, k) => self.get_prop(b, k),
             Ref::Priv(b, pn, n, fl) => self.priv_get(b, pn, n, fl),
             Ref::Super(this, k) => self.super_get(this, k),
@@ -2923,7 +3004,7 @@ impl<'p> Interp<'p> {
 
     fn ref_put(&mut self, r: &Ref, v: Value) -> Res<()> {
         match *r {
-            Ref::Name(n) => self.assign_name(n, v),
+            Ref::Name(n, site) => self.assign_name(n, v, site),
             Ref::Prop(b, k) => self.put_prop(b, k, v),
             Ref::Priv(b, pn, n, fl) => self.priv_put(b, pn, n, fl, v),
             Ref::Super(this, k) => self.super_set(this, k, v),
@@ -2934,7 +3015,7 @@ impl<'p> Interp<'p> {
         let prog = self.prog.clone();
         let pat = *prog.pat(target);
         let r = match pat.kind {
-            PatKind::Ident => Ref::Name(self.pat_name[target.index()]),
+            PatKind::Ident => Ref::Name(self.pat_name[target.index()], self.pat_site(target.index())),
             PatKind::Member(me) => self.member_target(me)?,
             PatKind::Array(_) | PatKind::Object(_) if op == AssignOp::Assign => {
                 let v = self.eval_expr(value)?;
@@ -2944,7 +3025,7 @@ impl<'p> Interp<'p> {
             _ => return Err(unsupported("assignment target", pat.span)),
         };
         let name = match r {
-            Ref::Name(n) => Some(self.name_str(n)?),
+            Ref::Name(n, _) => Some(self.name_str(n)?),
             _ => None,
         };
         let v = match op {
@@ -2982,7 +3063,7 @@ impl<'p> Interp<'p> {
             PatKind::Ident => {
                 let n = self.pat_name[p.index()];
                 match mode {
-                    Bind::Assign => self.assign_name(n, v),
+                    Bind::Assign => self.assign_name(n, v, self.pat_site(p.index())),
                     Bind::Declare => {
                         self.env_declare(self.env, n, INIT | MUT, v);
                         Ok(())
@@ -3351,6 +3432,7 @@ include!("eval_binary.rs");
 include!("eval_binary_search.rs");
 include!("eval_typed.rs");
 include!("eval_scripts.rs");
+include!("eval_scope.rs");
 include!("eval_stack.rs");
 include!("eval_builtins.rs");
 include!("eval_string_more.rs");
@@ -3399,6 +3481,10 @@ mod promise_combinator_tests;
 #[cfg(test)]
 #[path = "eval_scripts_tests.rs"]
 mod script_tests;
+
+#[cfg(test)]
+#[path = "eval_scope_tests.rs"]
+mod scope_tests;
 #[cfg(test)]
 #[path = "eval_builtins_tests.rs"]
 mod builtin_tests;

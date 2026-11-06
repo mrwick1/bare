@@ -1274,6 +1274,41 @@ impl Heap {
         Ok(None)
     }
 
+    /// The position of the own named property `key` of `o`: the hint for `own_data_at` and `set_own_data_at`.
+    pub fn own_pos(&self, o: ObjId, key: PropertyKey) -> Option<u32> {
+        self.obj(o).ok()?.props.find(key).map(|p| p as u32)
+    }
+
+    /// The value of the own data property `key` of `o` if it sits at position `hint`. `None` is not "absent": it asks the caller to
+    /// use `lookup` (another position, an accessor, a lazy or exotic object). A hit is what `lookup` would give.
+    #[inline]
+    pub fn own_data_at(&self, o: ObjId, hint: u32, key: PropertyKey) -> Option<Value> {
+        let ob = self.obj(o).ok()?;
+        match ob.props.entries.get(hint as usize) {
+            Some(Some((k, Property::Data { value, .. }))) if *k == key && ob.exotic == 0 && !ob.lazy_proto => Some(*value),
+            _ => None,
+        }
+    }
+
+    /// Store `v` in the own writable data property `key` of `o` if it sits at position `hint`. `false` asks the caller to use `set`.
+    #[inline]
+    pub fn set_own_data_at(&mut self, o: ObjId, hint: u32, key: PropertyKey, v: Value) -> bool {
+        if self.check_value(v).is_err() {
+            return false;
+        }
+        let Some(ob) = self.objects.get_mut(o.index, o.gn) else { return false };
+        if ob.exotic != 0 || ob.lazy_proto {
+            return false;
+        }
+        match ob.props.entries.get_mut(hint as usize) {
+            Some(Some((k, Property::Data { value, writable: true, .. }))) if *k == key => {
+                *value = v;
+                true
+            }
+            _ => false,
+        }
+    }
+
     /// `o[key]` without calling anything.
     pub fn get(&mut self, o: ObjId, key: PropertyKey) -> R<Get> {
         Ok(match self.lookup(o, key)? {

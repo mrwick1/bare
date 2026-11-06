@@ -148,7 +148,10 @@ impl<'p> Interp<'p> {
     }
 
     fn w_class(&mut self, c: ClassId, fs: usize, ac: usize) -> Res<()> {
-        self.descend(|it| it.w_class_inner(c, fs, ac))
+        let sc = self.sc_begin(RKind::Barrier);
+        let r = self.descend(|it| it.w_class_inner(c, fs, ac));
+        self.sc_end(sc);
+        r
     }
 
     fn w_class_inner(&mut self, c: ClassId, fs: usize, ac: usize) -> Res<()> {

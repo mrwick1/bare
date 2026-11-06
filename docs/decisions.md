@@ -164,6 +164,16 @@ A page asks for many files. Each one costs a round trip (about 40 ms to staging)
 - HTTP/2 is not used. Staging answers HTTP/1.1 only (Chrome reports `http/1.1` for all 69 requests of three loads; `h2` gets no ALPN, see [staging-network.md](staging-network.md)), so it would change nothing there. It is a follow-up for servers that offer it.
 - The request body is copied for a worker (a `Pending` holds values of the realm and cannot leave the thread).
 
+## Identifier lookup
+
+- A name is resolved by the scope it is in, not by a search of the environment chain. The first walk of a script records the static scopes (script, function, block with lexical declarations, `for`/`for-in`/`for-of` with `let` or `const`, `catch`, `switch` with lexical declarations) and the scope of each identifier site. The first run of a site stores the number of environments to go up and the index of the binding.
+- A class is a barrier. A site behind a barrier, and a site named `arguments`, use the full search.
+- A stored index is a hint. A name check guards it, and a miss runs the full search. A wrong hop count is the only unsafe error, so a debug build checks every resolved lookup against the full search.
+- A name that no scope declares goes to the global object. A per-name hint holds the position of its property, and a key check guards it.
+- Not done: frame slots for variables that no closure captures. That needs a different environment layout, and the profile does not show it as the next cost.
+- If `with` or a direct `eval` is added, the first walk must open a barrier for the code that they can reach.
+- Reason: a bundle reads outer variables through a chain of closures, and every read searched each environment on the way. See [resources.md](resources.md#cost-of-identifier-lookup).
+
 ## Code style
 
 - Plain code. No clever tricks.
