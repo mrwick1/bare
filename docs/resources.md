@@ -3866,25 +3866,25 @@ Checks: 28 cases in `tools/fixtures/ui/visibility-cases.txt` match headless Chro
 
 ### Cost of the three APIs
 
-Method: `perf stat -e instructions:u`, minimum of 3 runs, each build in its own `CARGO_TARGET_DIR` under `/data/bare-tmp`. Main 4de178c against this change. 54 rows: `browser_load` (6 cases), `observer_load` (2), `loader_load` (3), `style_load` (4) and `scheduler_load` (3), each at 1x, 10x and 100x. `eval_load` and `eval_check -e 0` were not compared (`crates/js` is not changed). The 12 worst rows:
+Method: `tools/js/instr.sh` (`perf stat -e instructions:u`, minimum of 3 runs, large malloc cache; see [Why an unrelated name moved a row](#why-an-unrelated-name-moved-a-row)), each build in its own `CARGO_TARGET_DIR` under `/data/bare-tmp`. Main 9c8f906 against this change rebased on it. 54 rows: `browser_load` (6 cases), `observer_load` (2), `loader_load` (3), `style_load` (4: setget, churn, attrs, shorthand) and `scheduler_load` (3), each at 1x, 10x and 100x. `eval_load` and `eval_check -e 0` were not compared (`crates/js` is not changed). All 54 rows meet the +0.5% rule. The range is -0.07% to +0.33%. The 12 worst rows:
 
-| Row | main 4de178c | this change | Change |
+| Row | main 9c8f906 | this change | Change |
 | --- | --- | --- | --- |
-| observer_load raf 100 | 25,645,367,484 | 26,017,137,278 | +1.450% |
-| observer_load raf 1 | 262,776,785 | 264,452,767 | +0.638% |
-| loader_load blocking 1 | 16,297,482 | 16,340,680 | +0.265% |
-| loader_load dynamic 1 | 19,297,958 | 19,342,134 | +0.229% |
-| scheduler_load messages 1 | 60,633,362 | 60,750,549 | +0.193% |
-| scheduler_load mixed 1 | 111,931,930 | 112,116,554 | +0.165% |
-| loader_load dynamic 10 | 80,823,194 | 80,953,457 | +0.161% |
-| browser_load event 1 | 89,766,455 | 89,884,960 | +0.132% |
-| scheduler_load messages 10 | 482,407,815 | 482,955,176 | +0.113% |
-| scheduler_load timers 100 | 3,670,443,898 | 3,674,574,114 | +0.113% |
-| loader_load mixed 1 | 18,100,394 | 18,120,584 | +0.112% |
-| browser_load event 100 | 8,025,199,495 | 8,034,138,726 | +0.111% |
+| loader_load mixed 1 | 18,128,228 | 18,188,088 | +0.330% |
+| browser_load event 10 | 806,551,805 | 808,585,123 | +0.252% |
+| loader_load dynamic 1 | 19,366,457 | 19,409,425 | +0.222% |
+| loader_load blocking 1 | 16,339,761 | 16,374,984 | +0.216% |
+| browser_load event 100 | 8,006,146,257 | 8,022,551,957 | +0.205% |
+| scheduler_load timers 1 | 50,246,503 | 50,338,768 | +0.184% |
+| scheduler_load timers 100 | 3,644,788,457 | 3,650,727,993 | +0.163% |
+| scheduler_load timers 10 | 376,443,210 | 377,023,208 | +0.154% |
+| scheduler_load messages 1 | 60,119,524 | 60,209,060 | +0.149% |
+| browser_load lookup 1 | 128,684,995 | 128,869,324 | +0.143% |
+| browser_load event 1 | 89,412,506 | 89,520,017 | +0.120% |
+| browser_load lookup 10 | 1,194,366,839 | 1,195,737,501 | +0.115% |
 
-**The rule (+0.5% on every row) is not met.** Two rows fail: `observer_load raf 1` (+0.64%) and `raf 100` (+1.45%). The 52 other rows are between -0.78% and +0.27%. The cause is not code that runs in these rows: a frame loop never calls the new code. The cost depends on how many strings the start-up interns. Test on main fb233de: a hook that interns N unused names at start gives `raf 1` of 262.45 M (N=0), 262.07 M (1), 261.61 M (3), 265.73 M (6) and 259.99 M (12) instructions. So the same row moves by -1% to +1.2% with no new work. Hypothesis (not proved): the names change the handles of the strings that the script uses, and so the collisions in the hash index of the global object, which a frame loop reads on every call. The three APIs add six names (`requestIdleCallback`, `cancelIdleCallback`, `draggable`, `get draggable`, `set draggable`, `checkVisibility`).
+`observer_load raf 1` is 251,666,274 against 251,742,954 (+0.03%) and `raf 100` is 24,246,060,902 against 24,250,069,705 (+0.02%). A first measurement without `tools/js/instr.sh` (main 4de178c, default glibc) showed +0.64% and +1.45% on these two rows. The new code does not run in a frame loop, and the sweep in [Why an unrelated name moved a row](#why-an-unrelated-name-moved-a-row) shows that the default allocator alone moves these rows by up to 3.5% when the start layout changes. The six new names are not the cause.
 
-What was done to lower it: `IdleDeadline` is not a lazy accessor of `window`. That third property made `raf 10` +0.65% and `raf 100` +0.81% in an earlier build; made at the first callback it is +0.11% at 10x. The cost of the rest at start is two functions and four methods.
+What was done to lower the cost: `IdleDeadline` is not a lazy accessor of `window`. That third property made `raf 10` +0.65% and `raf 100` +0.81% in an earlier build; made at the first callback it is +0.11% at 10x. The cost of the rest at start is two functions and four methods.
 
-Not done: a change of the hash or of the sizing of the interner in `crates/js` (out of scope for this change). Not tested: cycles, `eval_load`, a build on another machine, the live staging page.
+Not tested: cycles, `eval_load`, a build on another machine, the live staging page, and whether idle callbacks keep a page from settling under the new settle rule (the `Run::Idle` arms do not call `settle_mark` and `quiet_since`).
