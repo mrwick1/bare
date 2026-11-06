@@ -93,7 +93,9 @@ fn the_checks_of_the_standard() {
             ("<input type=email>", "", true),
             ("<input type=url value=nope>", "", false),
             ("<input type=url value='https://a.test'>", "", true),
-            ("<input type=number value=abc>", "", false),
+            // The value sanitization algorithm turns a markup value that is no number into the empty string.
+            ("<input type=number value=abc>", "", true),
+            ("<input type=number value=abc required>", "", false),
             ("<input type=number value=5 min=6>", "", false),
             ("<input type=number value=5 min=1 max=9>", "", true),
             ("<input type=checkbox required>", "", false),
@@ -143,6 +145,30 @@ fn maxlength_cuts_typing() {
         click_at(&mut p, 20.0, 20.0);
         type_text(&mut p, "abcde");
         assert_eq!(eval(&mut p, "document.getElementById('i').value + ',' + n"), "abc,3");
+    });
+}
+
+#[test]
+fn a_textarea_takes_typing_lines_maxlength_and_paints_its_value() {
+    big(|| {
+        let area = "position:absolute;left:10px;top:10px;width:150px;height:60px";
+        let html = format!("<!doctype html><textarea id=t maxlength=6 style='{area}'>WWWWWWWW</textarea><script>window.log = []; var t = document.getElementById('t'); t.value = ''; ['beforeinput', 'input'].forEach(function (k) {{ t.addEventListener(k, function (e) {{ log.push(k + ':' + e.inputType + ':' + e.data) }}) }})</script>");
+        let mut p = page_in_window(&html);
+        // The dirty value is empty: nothing is drawn inside the box, not even the text children.
+        let ink = |p: &mut Page| p.paint().chunks(400).skip(14).take(50).map(|r| r[14..150].iter().filter(|&&c| c & 0xFF < 0x80).count()).sum::<usize>();
+        assert_eq!(ink(&mut p), 0, "the text children are not drawn");
+        click_at(&mut p, 20.0, 20.0);
+        type_text(&mut p, "ab");
+        press(&mut p, "Enter", "Enter", None, NO);
+        type_text(&mut p, "cdef");
+        assert_eq!(eval(&mut p, "t.value + ',' + t.selectionStart"), "ab\ncde,6");
+        assert_eq!(eval(&mut p, "log.slice(2, 6).join()"), "beforeinput:insertText:b,input:insertText:b,beforeinput:insertLineBreak:null,input:insertLineBreak:null");
+        assert!(ink(&mut p) > 0, "the lines are drawn");
+        // A click under the first line puts the caret on it; typing goes there.
+        click_at(&mut p, 150.0, 22.0);
+        eval(&mut p, "t.maxLength = 20; 0");
+        type_text(&mut p, "X");
+        assert_eq!(eval(&mut p, "t.value"), "abX\ncde");
     });
 }
 

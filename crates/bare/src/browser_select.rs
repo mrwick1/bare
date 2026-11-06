@@ -28,9 +28,15 @@
 //! Deviations (on purpose)
 //! - The rules run at the next API call, not at each insertion. Two inserts of selected options with no API call between them keep the
 //!   last in tree order, not the last inserted.
-//! - A write to an index of a collection (`select.options[i] = o`, `select[i]`) is not built; neither is `select[i]` as a read.
-//! - `labels`, `validity`, `checkValidity()`, `autocomplete`, `selectedOptions` of a `select` in a shadow tree being special: not built.
-//!   Painting a closed select reads the same state (`Browser::selected_option`).
+//! - A write to an index of a collection (`select.options[i] = o`, `select[i] = o`, `= null`) is not built: the engine's host-indexed
+//!   objects have a read side only (`IndexedSource` has `indexed_len` and `indexed_item`, both `&self`, and no write), so the write is
+//!   dropped as for any other read-only exotic object. `select[i]` as a read is not built either.
+//! - `autocomplete` and `selectedOptions` of a `select` in a shadow tree being special: not built. Painting a closed select reads the
+//!   same state (`Browser::selected_option`).
+//!
+//! Also here: the reset of the selectedness (`Dom::sel_reset`, for `form.reset()`) and the `valueMissing` test of a select (`value_missing`).
+//! `labels`, `validity`, `willValidate`, `validationMessage`, `setCustomValidity()`, `checkValidity()` and `reportValidity()` of a select, and
+//! the whole `HTMLTextAreaElement`, are in `browser_controls.rs` and `browser_textarea.rs`.
 //!
 //! Bounds: the options of one select count with `dom-results`; a list counts with the wrappers.
 
@@ -93,6 +99,8 @@ struct Made {
 pub(crate) struct SelHost {
     st: RefCell<State>,
     made: OnceCell<Made>,
+    /// The members of `HTMLTextAreaElement.prototype` are made at the first textarea wrapper or the first read of the global.
+    area: std::cell::Cell<bool>,
 }
 
 macro_rules! ch {
@@ -103,16 +111,16 @@ macro_rules! ch {
     };
 }
 
-fn has(doc: &Document, n: NodeId, name: &str) -> bool {
+pub(crate) fn has(doc: &Document, n: NodeId, name: &str) -> bool {
     doc.find_atom(name).is_some_and(|a| doc.attr(n, a).is_some())
 }
 
-fn get<'a>(doc: &'a Document, n: NodeId, name: &str) -> Option<&'a str> {
+pub(crate) fn get<'a>(doc: &'a Document, n: NodeId, name: &str) -> Option<&'a str> {
     doc.find_atom(name).and_then(|a| doc.attr(n, a))
 }
 
 /// The rules for parsing non-negative integers: leading spaces, an optional `+`, then digits. A value over `i32::MAX` is not valid.
-fn parse_u(s: &str) -> Option<u32> {
+pub(crate) fn parse_u(s: &str) -> Option<u32> {
     let s = s.trim_start_matches([' ', '\t', '\n', '\x0c', '\r']);
     let s = s.strip_prefix('+').unwrap_or(s);
     let digits = s.bytes().take_while(u8::is_ascii_digit).count();
@@ -157,7 +165,7 @@ fn collect(d: &Dom, doc: &Document, it: &mut Option<&mut Interp<'_>>, select: No
 }
 
 /// An option is disabled when it has `disabled` or its parent is a disabled `optgroup`.
-fn is_disabled(doc: &Document, o: NodeId) -> bool {
+pub(crate) fn is_disabled(doc: &Document, o: NodeId) -> bool {
     has(doc, o, "disabled") || doc.parent(o).is_some_and(|p| doc.is_html(p, "optgroup") && has(doc, p, "disabled"))
 }
 
@@ -191,7 +199,7 @@ fn text_of(doc: &Document, o: NodeId) -> String {
     out
 }
 
-fn value_of(doc: &Document, o: NodeId) -> String {
+pub(crate) fn value_of(doc: &Document, o: NodeId) -> String {
     get(doc, o, "value").map_or_else(|| text_of(doc, o), str::to_string)
 }
 
@@ -385,7 +393,7 @@ impl Dom {
         c.sel.first().map(|&i| c.opts[i as usize])
     }
 
-    fn html_el(&self, it: &mut Interp<'_>, this: Value, tag: &str) -> R<NodeId> {
+    pub(crate) fn html_el(&self, it: &mut Interp<'_>, this: Value, tag: &str) -> R<NodeId> {
         let n = self.el(it, this)?;
         if self.doc.borrow().is_html(n, tag) { Ok(n) } else { Err(it.type_error("Illegal invocation")) }
     }
@@ -420,6 +428,34 @@ impl Dom {
     fn sel_at(&self, select: NodeId, i: usize) -> Option<NodeId> {
         self.sel.st.borrow().cache[&select].opts.get(i).copied()
     }
+
+    /// The reset steps of `select`: each option takes its `selected` attribute and is clean, then the rules run again (the next `sel_sync`
+    /// sees a changed list, and counts each selected option as new, so the last one wins).
+    pub(crate) fn sel_reset(&self, it: &mut Interp<'_>, select: NodeId) -> R<()> {
+        self.sel_sync(Some(&mut *it), select)?;
+        {
+            let (mut guard, doc) = (self.sel.st.borrow_mut(), self.doc.borrow());
+            let st = &mut *guard;
+            let c = st.cache.get_mut(&select).expect("synced");
+            for &o in &c.opts {
+                let a = has(&doc, o, "selected");
+                let e = st.opt.get_mut(&o).expect("synced");
+                *e = Opt { selected: a, dirty: false, attr: a, idx: e.idx };
+            }
+            (c.rev, c.opts) = (0, Vec::new());
+            c.attrs.clear();
+        }
+        self.doc.borrow_mut().touch();
+        Ok(())
+    }
+}
+
+/// Does the select suffer from being missing (`required` and nothing chosen, or only the placeholder label option)? `browser_controls.rs`.
+pub(crate) fn value_missing(d: &Dom, it: &mut Interp<'_>, select: NodeId) -> R<bool> {
+    d.sel_sync(Some(&mut *it), select)?;
+    let (st, doc) = (d.sel.st.borrow(), d.doc.borrow());
+    let c = &st.cache[&select];
+    Ok(c.sel.is_empty() || (c.size1 && c.sel == [0] && doc.parent(c.opts[0]) == Some(select) && value_of(&doc, c.opts[0]).is_empty()))
 }
 
 /// The nodes for a list of `select`: all the options, or the selected ones. Called by `browser_nodelist.rs`.
@@ -436,7 +472,10 @@ pub(crate) fn proto_for(d: &Dom, it: &mut Interp<'_>, tag: &str) -> R<ObjId> {
     Ok(match tag {
         "select" => m.select,
         "option" => m.option,
-        "textarea" => m.textarea,
+        "textarea" => {
+            fill_area(d, it, &m)?;
+            m.textarea
+        }
         _ => m.optgroup,
     })
 }
@@ -485,6 +524,8 @@ macro_rules! reflect {
         }
     };
 }
+
+pub(crate) use reflect;
 
 reflect!("select", "multiple", select_multiple, set_select_multiple_attr, bool);
 reflect!("select", "required", select_required, set_select_required, bool);
@@ -758,32 +799,6 @@ fn set_option_value(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V
     Ok(Value::Undefined)
 }
 
-/// `textarea.value`: the value set by script, else the text children (the default value).
-fn textarea_value(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    let n = d.html_el(it, this, "textarea")?;
-    let set = d.st.borrow().inputs.get(&n).and_then(|i| i.value.clone());
-    let s = set.unwrap_or_else(|| {
-        let doc = d.doc.borrow();
-        doc.children(n).filter_map(|c| if let NodeData::Text(sp) = *doc.data(c) { Some(doc.text(sp)) } else { None }).collect()
-    });
-    d.js_str(it, &s)
-}
-
-fn set_textarea_value(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
-    let n = d.html_el(it, this, "textarea")?;
-    let v = arg(a, 0);
-    let s = if matches!(v, Value::Null) { String::new() } else { d.string_arg(it, v)? };
-    let mut st = d.st.borrow_mut();
-    let old = st.inputs.get(&n).and_then(|i| i.value.as_ref()).map_or(0, String::len);
-    if st.input_bytes - old + s.len() > d.lim.max_text_bytes {
-        drop(st);
-        return Err(d.lim("dom-input-bytes"));
-    }
-    st.input_bytes = st.input_bytes - old + s.len();
-    st.inputs.entry(n).or_default().value = Some(s);
-    Ok(Value::Undefined)
-}
-
 fn option_text(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
     let o = option_this(d, it, this)?;
     let s = text_of(&d.doc.borrow(), o);
@@ -985,7 +1000,7 @@ fn ensure(d: &Dom, it: &mut Interp<'_>) -> R<Made> {
     ] {
         d.def_get(it, option, name, g, s)?;
     }
-    d.def_get(it, textarea, "value", textarea_value, Some(set_textarea_value))?;
+    crate::browser_controls::decorate(d, it, select, true)?;
     d.def_get(it, optgroup, "disabled", group_disabled, Some(set_group_disabled))?;
     d.def_get(it, optgroup, "label", group_label, Some(set_group_label))?;
 
@@ -1002,12 +1017,26 @@ fn ens(d: &Dom, it: &mut Interp<'_>) -> R<()> {
     ensure(d, it).map(|_| ())
 }
 
+/// Make the members of the textarea prototype (once). They are 40 functions, so a page with a select but no textarea does not pay.
+fn fill_area(d: &Dom, it: &mut Interp<'_>, m: &Made) -> R<()> {
+    if !d.sel.area.get() {
+        crate::browser_textarea::install(d, it, m.textarea)?;
+        d.sel.area.set(true);
+    }
+    Ok(())
+}
+
+fn ens_area(d: &Dom, it: &mut Interp<'_>) -> R<()> {
+    let m = ensure(d, it)?;
+    fill_area(d, it, &m)
+}
+
 lazy_global!(lazy_select, "HTMLSelectElement", ens, |d| pick(d, 0));
 lazy_global!(lazy_option_el, "HTMLOptionElement", ens, |d| pick(d, 1));
 lazy_global!(lazy_optgroup, "HTMLOptGroupElement", ens, |d| pick(d, 2));
 lazy_global!(lazy_options, "HTMLOptionsCollection", ens, |d| pick(d, 3));
 lazy_global!(lazy_collection, "HTMLCollection", ens, |d| pick(d, 4));
-lazy_global!(lazy_textarea, "HTMLTextAreaElement", ens, |d| pick(d, 5));
+lazy_global!(lazy_textarea, "HTMLTextAreaElement", ens_area, |d| pick(d, 5));
 lazy_global!(lazy_option, "Option", ens, |d| pick(d, 6));
 
 pub(crate) fn install(d: &Dom, it: &mut Interp<'_>) -> R<()> {

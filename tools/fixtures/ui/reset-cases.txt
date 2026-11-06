@@ -1,0 +1,91 @@
+var $ = function (i) { return document.getElementById(i) };
+var err = function (f) { try { var v = f(); return 'ok ' + String(v) } catch (e) { return e.name } };
+var log = [];
+var sel = function (s) { return Array.prototype.map.call(s.options, function (o) { return o.selected ? 1 : 0 }).join('') };
+=== reset-method
+@html <form id=f></form>
+(function () { return [typeof $('f').reset, $('f').reset.length, $('f').reset()].join() })
+=== reset-input-text
+@html <form id=f><input id=a value=def><input id=b><input id=c value=x></form>
+(function () { var a = $('a'), b = $('b'); a.value = 'changed'; b.value = 'typed'; $('f').reset(); return [a.value, JSON.stringify(b.value), $('c').value, a.getAttribute('value')].join('|') })
+=== reset-input-default-value-tracking
+@html <form id=f><input id=a value=def></form>
+(function () { var a = $('a'), r = []; a.value = 'x'; $('f').reset(); r.push(a.value); a.setAttribute('value', 'new'); r.push(a.value); a.value = 'y'; a.setAttribute('value', 'newer'); r.push(a.value); $('f').reset(); r.push(a.value); return r.join('|') })
+=== reset-checkbox
+@html <form id=f><input id=a type=checkbox checked><input id=b type=checkbox><input id=c type=radio name=r checked><input id=d type=radio name=r></form>
+(function () { var r = []; $('a').checked = false; $('b').checked = true; $('d').checked = true; r.push(['a', 'b', 'c', 'd'].map(function (i) { return $(i).checked ? 1 : 0 }).join('')); $('f').reset(); r.push(['a', 'b', 'c', 'd'].map(function (i) { return $(i).checked ? 1 : 0 }).join('')); return r.join('|') })
+=== reset-checkbox-default-checked
+@html <form id=f><input id=a type=checkbox></form>
+(function () { var a = $('a'), r = []; a.setAttribute('checked', ''); r.push(a.checked); a.checked = false; a.setAttribute('checked', ''); r.push(a.checked); $('f').reset(); r.push(a.checked); return r.join() })
+=== reset-checkbox-value-attr
+@html <form id=f><input id=a type=checkbox value=v></form>
+(function () { var a = $('a'); a.value = 'w'; $('f').reset(); return a.value })
+=== reset-hidden-and-button-types
+@html <form id=f><input id=a type=hidden value=h><input id=b type=submit value=s><input id=c type=button value=b></form>
+(function () { $('a').value = 'H'; $('b').value = 'S'; $('f').reset(); return [$('a').value, $('b').value, $('c').value].join() })
+=== reset-textarea
+@html <form id=f><textarea id=t>def</textarea><textarea id=u></textarea></form>
+(function () { $('t').value = 'x'; $('u').value = 'y'; $('f').reset(); return [$('t').value, JSON.stringify($('u').value)].join() })
+=== reset-textarea-after-default-change
+@html <form id=f><textarea id=t>def</textarea></form>
+(function () { var t = $('t'); t.value = 'x'; t.defaultValue = 'newdef'; var a = t.value; $('f').reset(); return a + '|' + t.value })
+=== reset-select-single
+@html <form id=f><select id=s><option>a<option selected>b<option>c</select></form>
+(function () { var s = $('s'), r = [sel(s)]; s.selectedIndex = 2; r.push(sel(s)); $('f').reset(); r.push(sel(s), s.value); return r.join('|') })
+=== reset-select-default-first
+@html <form id=f><select id=s><option>a<option>b</select></form>
+(function () { var s = $('s'); s.selectedIndex = 1; $('f').reset(); return sel(s) + ' ' + s.value })
+=== reset-select-none-selected
+@html <form id=f><select id=s><option>a<option>b</select></form>
+(function () { var s = $('s'); s.selectedIndex = -1; var a = sel(s); $('f').reset(); return a + ' ' + sel(s) })
+=== reset-select-multiple
+@html <form id=f><select id=s multiple><option selected>a<option>b<option selected>c</select></form>
+(function () { var s = $('s'), r = [sel(s)]; s.options[0].selected = false; s.options[1].selected = true; r.push(sel(s)); $('f').reset(); r.push(sel(s)); return r.join('|') })
+=== reset-select-size
+@html <form id=f><select id=s size=3><option>a<option>b</select></form>
+(function () { var s = $('s'); s.selectedIndex = 1; $('f').reset(); return sel(s) + ' ' + s.selectedIndex })
+=== reset-select-default-selected-changed
+@html <form id=f><select id=s><option>a<option>b<option>c</select></form>
+(function () { var s = $('s'), r = []; s.options[2].defaultSelected = true; r.push(sel(s)); s.selectedIndex = 0; r.push(sel(s)); $('f').reset(); r.push(sel(s)); return r.join('|') })
+=== reset-select-option-dirtiness-cleared
+@html <form id=f><select id=s multiple><option>a<option>b</select></form>
+(function () { var s = $('s'), r = []; s.options[0].selected = true; $('f').reset(); r.push(sel(s)); s.options[0].setAttribute('selected', ''); r.push(sel(s)); s.options[0].selected = false; s.options[0].removeAttribute('selected'); s.options[0].setAttribute('selected', ''); r.push(sel(s)); $('f').reset(); r.push(sel(s)); return r.join('|') })
+=== reset-event
+@html <form id=f><input id=a value=d></form>
+(function () { var f = $('f'), r = []; ['capture', 'target'].forEach(function (p) { f.addEventListener('reset', function (e) { r.push(p, e.type, e.bubbles, e.cancelable, e.isTrusted, e.target === f, e.eventPhase, e.constructor.name, $('a').value) }, p === 'capture') }); document.addEventListener('reset', function () { r.push('doc') }); $('a').value = 'x'; f.reset(); return r.join() })
+=== reset-event-canceled
+@html <form id=f><input id=a value=d></form>
+(function () { var f = $('f'); f.addEventListener('reset', function (e) { e.preventDefault() }); $('a').value = 'x'; f.reset(); return $('a').value })
+=== reset-event-before-reset
+@html <form id=f><input id=a value=d></form>
+(function () { var f = $('f'), r = []; f.addEventListener('reset', function () { r.push($('a').value); $('a').value = 'inlistener' }); $('a').value = 'x'; f.reset(); r.push($('a').value); return r.join() })
+=== reset-event-nested-reset
+@html <form id=f><input id=a value=d></form>
+(function () { var f = $('f'), n = 0; f.addEventListener('reset', function () { n++; if (n < 3) f.reset() }); f.reset(); return n })
+=== reset-listed-only-owned
+@html <form id=f><input id=a value=d></form><input id=b value=d form=f><input id=c value=d>
+(function () { ['a', 'b', 'c'].forEach(function (i) { $(i).value = 'x' }); $('f').reset(); return ['a', 'b', 'c'].map(function (i) { return $(i).value }).join() })
+=== reset-detached-form
+@html <p></p>
+(function () { var f = document.createElement('form'), i = document.createElement('input'); i.defaultValue = 'd'; i.value = 'x'; f.appendChild(i); var n = 0; f.addEventListener('reset', function () { n++ }); f.reset(); return i.value + n })
+=== reset-selection
+@html <form id=f><input id=a value=def></form>
+(function () { var a = $('a'); a.value = 'longer'; a.setSelectionRange(1, 2); $('f').reset(); return a.selectionStart + ',' + a.selectionEnd })
+=== reset-brand
+@html <form id=f></form><div id=d></div><input id=i>
+(function () { $('f'); return [err(function () { HTMLFormElement.prototype.reset.call($('d')) }), err(function () { HTMLFormElement.prototype.reset.call($('i')) }), err(function () { HTMLFormElement.prototype.reset.call($('f')) })].join() })
+=== reset-validity-after
+@html <form id=f><input id=a required value=x></form>
+(function () { var a = $('a'); a.value = ''; var r = [a.validity.valueMissing]; $('f').reset(); r.push(a.validity.valueMissing); return r.join() })
+=== reset-custom-validity-kept
+@html <form id=f><input id=a></form>
+(function () { var a = $('a'); a.setCustomValidity('x'); $('f').reset(); return a.validationMessage })
+=== reset-radio-group-other-form
+@html <form id=f><input id=a type=radio name=r checked></form><form id=g><input id=b type=radio name=r checked></form>
+(function () { $('f').reset(); return $('a').checked + ',' + $('b').checked })
+=== reset-fieldset-nesting
+@html <form id=f><fieldset disabled><input id=a value=d></fieldset></form>
+(function () { $('a').value = 'x'; $('f').reset(); return $('a').value })
+=== reset-button-not-reset
+@html <form id=f><button id=b value=v></button></form>
+(function () { $('b').value = 'w'; $('f').reset(); return $('b').value })

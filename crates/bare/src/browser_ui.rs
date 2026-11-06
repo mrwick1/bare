@@ -16,7 +16,8 @@
 //!   A canceled `pointerdown` skips the two mouse events. A canceled `mousedown` skips the focus change.
 //! - Key down: `keydown`, then (when it was not canceled) `keypress` for a key that makes text and for Enter, `beforeinput`
 //!   (cancelable), the change of the value, `input`. Key up: `keyup`. Space on a button, a checkbox or a radio clicks on key up.
-//!   Enter on a button or a link clicks after `keypress`. Enter in a field: `beforeinput` (`insertLineBreak`), `change`, then a
+//!   Enter on a button or a link clicks after `keypress`. Enter in a textarea inserts a line feed (`beforeinput` and `input` with
+//!   `inputType` `insertLineBreak` and no `data`), with no `change` and no submission. Enter in a field: `beforeinput` (`insertLineBreak`), `change`, then a
 //!   click on the default submit button of the form (implicit submission).
 //! - Tab and Shift+Tab: `keydown`, the focus change, `keyup` at the new element. Tab order is the HTML sequential order:
 //!   positive `tabindex` first (ascending), then the rest in tree order; a negative `tabindex` is skipped. The focus wraps.
@@ -32,7 +33,10 @@
 //! - Editing: text, Backspace, Delete, Left, Right, Home, End (Shift extends the selection), Ctrl+A. Offsets are UTF-16
 //!   units, as for `selectionStart`. The value changes through `put_input_value`, the same state that `input.value` reads.
 //!
-//! Gaps (none is faked): `<textarea>` has no value state in this host, so it cannot be edited; `contenteditable`;
+//! A `<textarea>` is edited like a field (typing, Enter, Backspace, Delete, `maxlength`). Gaps there: Up and Down and Home and End do not
+//! move by line (Home and End go to the start and the end of the value), and the box does not wrap or scroll (`page.rs`).
+//!
+//! Gaps (none is faked): `contenteditable`;
 //! clipboard keys; Ctrl+Left/Right word moves; IME and `compositionstart`; `readonly` is honored but
 //! `type=number` does not filter text; `contextmenu`; `:hover`/`:focus` styling; radio groups in the Tab order (every
 //! radio is a stop); `<summary>` toggling; `<label>` click coordinates of the second click; `new MouseEvent(...)`
@@ -41,7 +45,7 @@
 use crate::browser::*;
 use crate::browser_dom as nd;
 use crate::browser_selection::Dir;
-use bare_html::dom::{Atom, Document, NodeData, NodeId};
+use bare_html::dom::{Document, NodeData, NodeId};
 use bare_js::eval::Interp;
 use bare_js::value::{ObjId, Value};
 
@@ -310,7 +314,7 @@ impl Dom {
     /// A text field that the user can edit now.
     fn editable(&self, n: NodeId) -> bool {
         let doc = self.doc.borrow();
-        is_tag(&doc, n, "input") && text_kind(nd::input_kind(&doc, n)) && attr(&doc, n, "readonly").is_none()
+        (is_tag(&doc, n, "textarea") || (is_tag(&doc, n, "input") && text_kind(nd::input_kind(&doc, n)))) && attr(&doc, n, "readonly").is_none()
     }
 
     // ------------------------------------------------------------------ pointer
@@ -539,33 +543,6 @@ impl Dom {
         self.st.borrow().inputs.get(&n).and_then(|i| i.checked).unwrap_or_else(|| attr(&self.doc.borrow(), n, "checked").is_some())
     }
 
-    /// The control of a label: the element that its `for` names, else its first labelable descendant.
-    fn label_control(&self, it: &mut Interp<'_>, label: NodeId) -> R<Option<NodeId>> {
-        let doc = self.doc.borrow();
-        let labelable = |n: NodeId| (is_tag(&doc, n, "input") && nd::input_kind(&doc, n) != "hidden") || ["button", "select", "textarea"].iter().any(|t| is_tag(&doc, n, t));
-        if let Some(id) = attr(&doc, label, "for") {
-            let root = doc.root();
-            let (mut cur, mut depth) = (root, 0);
-            while let Some((c, d)) = nd::next_in(&doc, root, cur, depth) {
-                it.charge(1)?;
-                (cur, depth) = (c, d);
-                if doc.attr(c, Atom::ID) == Some(id) {
-                    return Ok(labelable(c).then_some(c));
-                }
-            }
-            return Ok(None);
-        }
-        let (mut cur, mut depth) = (label, 0);
-        while let Some((c, d)) = nd::next_in(&doc, label, cur, depth) {
-            it.charge(1)?;
-            (cur, depth) = (c, d);
-            if labelable(c) {
-                return Ok(Some(c));
-            }
-        }
-        Ok(None)
-    }
-
     // ------------------------------------------------------------------ keyboard
 
     fn key_ev(&self, it: &mut Interp<'_>, target: NodeId, ty: &str, k: &KeyInput) -> R<bool> {
@@ -629,6 +606,8 @@ impl Dom {
                 };
                 if button_like {
                     self.user_click(it, t, Some(self.zero_click()))?;
+                } else if self.editable(t) && is_tag(&self.doc.borrow(), t, "textarea") {
+                    self.edit(it, t, "insertLineBreak", Some("\n"))?;
                 } else if field {
                     if self.editable(t) && !self.input_ev(it, t, "beforeinput", "insertLineBreak", None)? {
                         return Ok(());
@@ -698,13 +677,13 @@ impl Dom {
             "deleteContentForward" => (sel.start, next_off(&value, sel.start)),
             _ => (sel.start, sel.end),
         };
-        if kind != "insertText" && from == to {
+        if !kind.starts_with("insert") && from == to {
             return Ok(());
         }
         // `maxlength`: the typed text is cut to fit, and nothing happens when none of it fits.
         let fitted;
         let text = match (kind, text, self.max_length(n)) {
-            ("insertText", Some(t), Some(max)) => {
+            ("insertText" | "insertLineBreak", Some(t), Some(max)) => {
                 fitted = crate::browser_submit::fit_units(t, max.saturating_sub(u16_len(&value) - (to - from)));
                 if fitted.is_empty() {
                     return Ok(());
@@ -713,7 +692,8 @@ impl Dom {
             }
             _ => text,
         };
-        if !self.input_ev(it, n, "beforeinput", kind, text)? {
+        // An `insertLineBreak` has no `data`.
+        if !self.input_ev(it, n, "beforeinput", kind, if kind == "insertLineBreak" { None } else { text })? {
             return Ok(());
         }
         // A listener may have changed the value: read it and the range again.
@@ -733,7 +713,7 @@ impl Dom {
             i.typed = true;
         }
         self.set_selection_range(it, n, Some(caret), Some(caret), Dir::None)?;
-        self.input_ev(it, n, "input", kind, if text.is_empty() { None } else { Some(text) })?;
+        self.input_ev(it, n, "input", kind, if text.is_empty() || kind == "insertLineBreak" { None } else { Some(text) })?;
         Ok(())
     }
 

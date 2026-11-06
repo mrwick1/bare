@@ -3811,7 +3811,7 @@ What runs (`browser_select.rs`): the HTML Standard, checked against headless Chr
 - Globals: seven lazy accessors, installed last in `Browser::install`. A page that makes no select pays for 7 accessor functions only. A `textarea` wrapper makes the same interfaces.
 - `add` syncs the list only for an index argument. A sync at each call made a loop of `add` quadratic.
 
-Deviations: the rules run at the next read and not at each change. Index assignment (`select[i] = x`, `options[i] = x`) is not built. `labels`, `validity`, `checkValidity` and `autocomplete` are not built. `textarea.value` is a value set by script: no `defaultValue`, no selection API, no events. A select in the window does not draw an open menu.
+Deviations: the rules run at the next read and not at each change. Index assignment (`select[i] = x`, `options[i] = x`) is not built. A select in the window does not draw an open menu. `labels`, the constraint validation, `form.reset()` and the full `textarea` came later: see [Form controls: validation, textarea, labels and reset](#form-controls-validation-textarea-labels-and-reset).
 
 Chrome cases: `node tools/ui/chrome_topic.mjs select` runs `tools/fixtures/ui/select-cases.txt` (151 cases) in headless Chrome and writes `chrome-select.txt`. The Rust test `chrome_cases` compares each answer. Chrome 155 differs from the older text of the Standard in two places. The option list holds descendants of optgroup children. Removing `multiple` keeps the first selected option. The code follows Chrome.
 
@@ -3835,7 +3835,7 @@ Load rows (`tools/js/select_load.sh`, release build, 1 GiB address space cap). `
 
 After each churn round the realm has 2 wrappers (the baseline) and the collector frees all option objects. The `react` rows are the cost of the JS loop (an indexed read and `value` read per option) and not of the select.
 
-Not tested: a select inside a shadow root or an iframe, `form` reset and submit with a select (the form code does not read select state), a select with 100,000 options, `selectedOptions` of a `multiple` select with 10,000 selected options, and the live staging pages after this build.
+Not tested: a select inside a shadow root or an iframe, a select with 100,000 options, `selectedOptions` of a `multiple` select with 10,000 selected options, and the live staging pages after this build.
 
 ## Why an unrelated name moved a row
 
@@ -3945,3 +3945,36 @@ Steps at 10,000 options (instructions): main 18.34 G; multiply hash for the id m
 Profile of main at 10,000 options (self share of `instructions:u` samples): `link_inner` 9.9%, `browser_nodelist::item` 7.6%, `eval_expr_inner` 6.9%, `machine` 6.8%, `Heap::intern` 5.5%, `call_fn_inner` 4.6%, `Heap::lookup` 4.6%, `opt_state` 4.3%, `node_of` 4.1%, `hash_one` and SipHash `write` 6.0%. Inclusive: `get_prop` 61%, `call_host` 33%, `option_value` 15%, `indexed_item` 14%, `option_selected` 9%. The instruction samples of `item` and `node_of` sit on the first load of a hash probe (a cache miss), which is why a dense table would also save time (to verify: not measured here).
 
 All rows: 500 rows against main, none worse than +0.5% (worst `gen_load finally 10`, +0.288%), 345 better than -0.5%, median -1.62%.
+
+## Form controls: validation, textarea, labels and reset
+
+Problem: React, Radix and react-hook-form call `validity`, `checkValidity`, `labels`, `form.reset()` and the full `textarea` API. The build had none of them. This section records what the new code costs.
+
+What runs: `browser_controls.rs` (constraint validation, `labels`, `HTMLLabelElement`, reset steps), `browser_textarea.rs` (`HTMLTextAreaElement`), and the selection code of `browser_selection.rs` for a textarea. The cases are compared with headless Chrome 155: `validity` 83, `textarea` 37, `labels` 33, `reset` 29 (`node tools/ui/chrome_topic.mjs TOPIC`).
+
+Lazy members: the members that the new code adds to the `input`, `button`, `form`, `select` and `textarea` prototypes are made when the first wrapper of that tag is made. The functions are shared by the prototypes. `ValidityState` and `HTMLLabelElement` are lazy globals installed after every other global. A page with no control pays for 2 host functions at start.
+
+Method: main 3a60a7d against this change, each in its own `CARGO_TARGET_DIR` under `/data/bare-tmp`, release build. `tools/js/instr.sh` gives the minimum of 3 runs of `instructions:u` (large glibc malloc cache). The change was rebased on main before this run. 124 rows of 28 examples at scales 1 and 10 (`range_load` too). Not measured: `resources_load` (it starts a loopback server), `form_load gates` (it fails on main with "document URL is not configured", so it has no base), `sheets_load dynamic` (it fails on main with "reads differ") and the `crates/js` rows (this change does not touch the engine).
+
+Result: no row is worse than +0.5%. The worst is `select_load churn 10` at +0.420%. 124 rows are within ±0.5%. The best is `selection_load short 10` at -0.481%.
+
+| row | main | this change | change |
+| --- | ---: | ----------: | -----: |
+| `select_load churn 10` | 92,845,497 | 93,235,113 | +0.420% |
+| `form_load submit 1` | 78,373,904 | 78,599,106 | +0.287% |
+| `form_load submit 10` | 702,104,253 | 704,127,947 | +0.288% |
+| `form_load gc 10` | 1,682,248,777 | 1,685,514,648 | +0.194% |
+| `select_load value 1000` | 175,169,170 | 175,198,383 | +0.017% |
+| `selection_load short 10` | 640,522,987 | 637,442,274 | -0.481% |
+| `selection_load long 10` | 2,903,763,704 | 2,906,062,835 | +0.079% |
+| `range_load iter 1` | 86,391,299 | 86,509,466 | +0.137% |
+
+What moved the rows (found with a probe that makes one input, one select or one collect, in both builds):
+
+- `selection_load` read the kind of an input on each call. The first build made a lowercase copy of the `type` attribute and compared 22 names; a missing `type` now returns at once, and a name is compared only when the lengths match.
+- Each selection accessor looked up the node twice, because the new check for a textarea called the old check, which looked the node up again. One lookup remains. This change and the one above took `selection_load short` from +0.85% to below main.
+- The value sanitization scans a value for line breaks on each `value =`. Two calls of `memchr` cost 9,000 instructions for a value of 4,000 bytes (+0.7% on `selection_load long`). One pass over fixed chunks of 32 bytes without an early exit costs about a third of that. A clean value is not copied.
+- A host function that stays alive costs about 2,600 instructions at each collect. `select_load churn 10` collects 20 times, so the shared functions of the select prototype and the 3 functions that every page held were most of its +0.51%. `form.reset` is now made at the first form wrapper, which removed 1 function from every page.
+- Heap layout moves one row by more than the change. `select_load value 1000` read +2.66% in one build and +0.02% in the next build. A leak of 48 bytes at the start of the same example on main alone moved the row from 170,618,315 to 175,186,045 (+2.7%), and `value 100` moved by 1%. The scan compares short strings, and `memcmp` takes a different path for some addresses. Read this row only against a base with the same heap.
+
+Not tested: a page of a real site (the live staging pages) with this build, other machines, a textarea or a select inside a shadow root or an iframe, a textarea of 1 MiB in the window, `new FormData(form)` of a textarea or select (another change owns `FormData`), a `form` attribute that points to a form in another tree, and the speed of `reportValidity` on a form with 10,000 controls.

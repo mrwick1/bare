@@ -13,13 +13,16 @@
 //!   dropped) and loads it. `POST` sends `application/x-www-form-urlencoded`. The action is the submitter's `formaction`, else the
 //!   form's `action`, else the document URL. The method is `formmethod`, else `method` (`post`, else `get`; `dialog` does nothing).
 //!   The navigation is a `NavigationRequest` for the session, like `location.assign`.
-//! - Checks: `required` (text, checkbox, radio), `type=email` and `type=url`, `type=number` (a text that is no number, `min`,
-//!   `max`), `minlength` (only for a value that a user typed, as the standard says) and `maxlength`.
-//!   The `maxlength` limit of typing cuts the typed text to fit (UTF-16 units, no split pair) and sends no event when nothing fits.
+//! - The checks are the constraint validation of `browser_controls.rs` (the constraints, `validity` and the messages are there). This
+//!   file asks it which controls are invalid, fires `invalid` (trusted, since Chrome does that for a script call too) and focuses the
+//!   first. `owned_controls` walks the tree that holds the form, so a detached form validates and resets too. An `input`, `select`
+//!   and `textarea` are all checked; a disabled one, a `readonly` one and a `datalist` descendant are not candidates.
+//! - The entry list takes the API value of a textarea (CRLF and lone CR become LF; the encoder turns LF into CRLF) and the selectedness
+//!   of a select (its selected options that are not disabled), not the markup.
+//!   The `maxlength` limit of typing (`input` and `textarea`) cuts the typed text to fit (UTF-16 units, no split pair) and sends no event
+//!   when nothing fits.
 //!
 //! Gates and differences (recorded, none is faked)
-//! - `pattern`, `step`, `type=date` and the other date kinds, `setCustomValidity`, `validity`, `validationMessage`, `<select>` and
-//!   `<textarea>` as controls to validate: not built. `<textarea>` and `<select>` are sent with the value that their markup gives.
 //! - No message bubble is drawn for an invalid field. The window focuses the first invalid field and scrolls to it.
 //! - `enctype="multipart/form-data"` and `text/plain` with `POST` are `Unsupported`; `GET` ignores `enctype`. `target` is ignored (the
 //!   document is replaced). `<input type=file>` sends nothing. `form.elements`, `form.action` and `form.method` are absent. `new FormData(form)` (`browser_web.rs`) uses the same entry list, and keeps a file input as an empty File.
@@ -89,33 +92,9 @@ pub(crate) fn encode_entries(entries: &[(String, String)]) -> String {
     out
 }
 
-/// HTML "valid e-mail address": the `a@b` shape that the standard gives as a regular expression.
-fn valid_email(s: &str) -> bool {
-    let Some((local, domain)) = s.split_once('@') else { return false };
-    let atext = |c: char| c.is_ascii_alphanumeric() || ".!#$%&'*+/=?^_`{|}~-".contains(c);
-    if local.is_empty() || !local.chars().all(atext) {
-        return false;
-    }
-    !domain.is_empty()
-        && domain.split('.').all(|l| {
-            !l.is_empty() && l.len() <= 63 && l.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') && !l.starts_with('-') && !l.ends_with('-')
-        })
-}
-
-/// A valid absolute URL for `type=url`: a scheme, then something.
-fn valid_url(s: &str) -> bool {
-    let Some((scheme, rest)) = s.split_once(':') else { return false };
-    let mut c = scheme.chars();
-    c.next().is_some_and(|f| f.is_ascii_alphabetic()) && c.all(|c| c.is_ascii_alphanumeric() || "+-.".contains(c)) && !rest.is_empty()
-}
-
 /// The text with line breaks removed (the value sanitization of a single line control).
 fn single_line(s: &str) -> String {
     s.chars().filter(|&c| c != '\n' && c != '\r').collect()
-}
-
-fn units(s: &str) -> u32 {
-    s.encode_utf16().count() as u32
 }
 
 /// The longest start of `s` that is at most `room` UTF-16 units and does not split a pair.
@@ -131,33 +110,18 @@ pub(crate) fn fit_units(s: &str, room: u32) -> String {
     out
 }
 
-/// The nodes below `n` in tree order.
-fn below(doc: &Document, n: NodeId) -> Vec<NodeId> {
-    let (mut cur, mut depth, mut out) = (n, 0, Vec::new());
-    while let Some((c, d)) = nd::next_in(doc, n, cur, depth) {
-        (cur, depth) = (c, d);
-        out.push(c);
-    }
-    out
-}
-
-/// The text of the text nodes below `n`.
-fn text_below(doc: &Document, n: NodeId) -> String {
-    below(doc, n).into_iter().filter_map(|c| if let NodeData::Text(sp) = *doc.data(c) { Some(doc.text(sp).to_string()) } else { None }).collect()
-}
-
 impl Dom {
     /// The `maxlength` of a text field, if it has a valid one.
     pub(crate) fn max_length(&self, n: NodeId) -> Option<u32> {
         let doc = self.doc.borrow();
-        if !tag_is(&doc, n, &["input"]) || !TEXT_KINDS.contains(&nd::input_kind(&doc, n)) {
+        if !(tag_is(&doc, n, &["textarea"]) || (tag_is(&doc, n, &["input"]) && TEXT_KINDS.contains(&nd::input_kind(&doc, n)))) {
             return None;
         }
         attr(&doc, n, "maxlength").and_then(|v| v.trim().parse::<u32>().ok())
     }
 
     /// The listed controls that `form` owns, in tree order. The walk starts at the top of the tree of `form`: it is the document, or the top of a detached tree.
-    fn owned_controls(&self, it: &mut Interp<'_>, form: NodeId) -> R<Vec<NodeId>> {
+    pub(crate) fn owned_controls(&self, it: &mut Interp<'_>, form: NodeId) -> R<Vec<NodeId>> {
         let mut all = Vec::new();
         {
             let doc = self.doc.borrow();
@@ -227,94 +191,19 @@ impl Dom {
                     }
                 }
                 ("input", _) => out.push((name, Some(self.input_value_of(n).map(|v| single_line(&v)).unwrap_or_default()))),
-                ("textarea", _) => out.push((name, Some(self.text_of(n).replace("\r\n", "\n").replace('\r', "\n")))),
+                ("textarea", _) => out.push((name, Some(self.input_value_of(n).unwrap_or_default()))),
                 _ => {
-                    // A `<select>`: the options that the markup marks as selected (a single select keeps the last one), else the first enabled option of a
-                    // single select. A disabled option is not sent.
-                    let opts: Vec<NodeId> = {
+                    // A `<select>`: its selected options that are not disabled.
+                    for o in crate::browser_select::list_ids(self, it, n, true)? {
                         let doc = self.doc.borrow();
-                        below(&doc, n).into_iter().filter(|&o| tag_is(&doc, o, &["option"])).collect()
-                    };
-                    let doc = self.doc.borrow();
-                    let enabled = |o: &NodeId| attr(&doc, *o, "disabled").is_none();
-                    let mut picked: Vec<NodeId> = opts.iter().copied().filter(|&o| attr(&doc, o, "selected").is_some()).collect();
-                    if attr(&doc, n, "multiple").is_none() {
-                        picked = match picked.last() {
-                            Some(&o) => vec![o],
-                            None => opts.iter().copied().filter(enabled).take(1).collect(),
-                        };
-                    }
-                    for o in picked.into_iter().filter(enabled) {
-                        let v = attr(&doc, o, "value").map(str::to_string).unwrap_or_else(|| text_below(&doc, o).split_whitespace().collect::<Vec<_>>().join(" "));
-                        out.push((name.clone(), Some(v)));
+                        if !crate::browser_select::is_disabled(&doc, o) {
+                            out.push((name.clone(), Some(crate::browser_select::value_of(&doc, o))));
+                        }
                     }
                 }
             }
         }
         Ok(out)
-    }
-
-    fn text_of(&self, n: NodeId) -> String {
-        text_below(&self.doc.borrow(), n)
-    }
-
-    /// Does the constraint of `n` fail? (See the header for what is checked.)
-    fn is_invalid(&self, it: &mut Interp<'_>, n: NodeId) -> R<bool> {
-        if self.is_disabled_control(it, n)? {
-            return Ok(false);
-        }
-        let (kind, required, readonly) = {
-            let doc = self.doc.borrow();
-            if !tag_is(&doc, n, &["input"]) {
-                return Ok(false);
-            }
-            (nd::input_kind(&doc, n), attr(&doc, n, "required").is_some(), attr(&doc, n, "readonly").is_some())
-        };
-        match kind {
-            "checkbox" => return Ok(required && !self.input_checked(n)),
-            "radio" => {
-                if !required {
-                    return Ok(false);
-                }
-                let mut any = self.input_checked(n);
-                for o in self.radio_group(it, n)? {
-                    any |= self.input_checked(o);
-                }
-                return Ok(!any);
-            }
-            k if !TEXT_KINDS.contains(&k) || readonly => return Ok(false),
-            _ => {}
-        }
-        let value = single_line(&self.input_value_of(n).unwrap_or_default());
-        let value = if matches!(kind, "email" | "url" | "number") { value.trim().to_string() } else { value };
-        if value.is_empty() {
-            return Ok(required);
-        }
-        let doc = self.doc.borrow();
-        let num = |name: &str| attr(&doc, n, name).and_then(|v| v.trim().parse::<f64>().ok());
-        let bad = match kind {
-            "email" => {
-                if attr(&doc, n, "multiple").is_some() {
-                    !value.split(',').all(|p| valid_email(p.trim()))
-                } else {
-                    !valid_email(&value)
-                }
-            }
-            "url" => !valid_url(&value),
-            "number" => match value.parse::<f64>() {
-                Ok(v) if v.is_finite() && !value.starts_with('+') && !value.ends_with('.') => num("min").is_some_and(|m| v < m) || num("max").is_some_and(|m| v > m),
-                _ => true,
-            },
-            _ => false,
-        };
-        if bad {
-            return Ok(true);
-        }
-        // `minlength` and `maxlength` count only what a user typed.
-        let typed = self.st.borrow().inputs.get(&n).is_some_and(|i| i.typed);
-        let len = units(&value);
-        let limit = |name: &str| attr(&doc, n, name).and_then(|v| v.trim().parse::<u32>().ok());
-        Ok(typed && (limit("minlength").is_some_and(|m| len < m) || limit("maxlength").is_some_and(|m| len > m)))
     }
 
     /// The invalid controls of `form`, in tree order.
@@ -333,8 +222,7 @@ impl Dom {
         let mut canceled = false;
         for &n in bad {
             let e = self.new_event(it, "invalid", false, true, false, None)?;
-            let trusted = self.st.borrow().ui.active;
-            self.st.borrow_mut().events.get_mut(&e).expect("just made").trusted = trusted;
+            self.st.borrow_mut().events.get_mut(&e).expect("just made").trusted = true;
             canceled |= !self.dispatch(it, Target::Node(n), e)?;
         }
         if focus && !canceled && let Some(&first) = bad.first() {
@@ -457,7 +345,7 @@ pub(crate) fn form_report_validity(d: &Dom, it: &mut Interp<'_>, this: Value, _:
 }
 
 fn control_validity(d: &Dom, it: &mut Interp<'_>, this: Value, focus: bool) -> V {
-    let n = d.el(it, this)?;
+    let n = crate::browser_controls::control(d, it, this)?;
     let bad = if d.is_invalid(it, n)? { vec![n] } else { vec![] };
     Ok(Value::Bool(d.report_invalid(it, &bad, focus)?))
 }
@@ -483,14 +371,6 @@ mod tests {
         urlencode("x\r\ny\rz", &mut s);
         assert_eq!(s, "x%0D%0Ay%0D%0Az");
         assert_eq!(encode_entries(&[("q".into(), "a b".into()), ("n".into(), "".into())]), "q=a+b&n=");
-    }
-
-    #[test]
-    fn email_and_url_shapes() {
-        assert!(valid_email("a.b+c@example.com") && valid_email("a@b"));
-        assert!(!valid_email("a@") && !valid_email("@b") && !valid_email("a b@c.d") && !valid_email("a@-b.c") && !valid_email("a@b..c"));
-        assert!(valid_url("https://a.test") && valid_url("mailto:a@b"));
-        assert!(!valid_url("a.test") && !valid_url("1http://x") && !valid_url("http:"));
     }
 
     #[test]
