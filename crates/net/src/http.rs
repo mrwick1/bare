@@ -2054,7 +2054,11 @@ mod tests {
         let (port, requests) = serve(vec![(vec![OK], true), (vec![OK], false)]);
         let mut client = Client::new();
         client.get(&post_url(port, "/")).unwrap();
-        std::thread::sleep(Duration::from_millis(100));
+        assert_eq!(client.idle.lock().unwrap().len(), 1);
+        // Wait until the client can see the close (no sleep: a loaded machine delays the server thread).
+        while client.idle.lock().unwrap().values().all(|(stream, _)| alive(stream)) {
+            std::thread::yield_now();
+        }
         assert_eq!(client.post(&post_url(port, "/pay"), &[], b"amount=1").unwrap().body, b"ok");
         let seen = seen(&requests);
         assert_eq!(seen.iter().filter(|r| r.starts_with("POST")).count(), 1);
