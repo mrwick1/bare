@@ -1,0 +1,20 @@
+strings	(() => { const f = new FormData(); f.append('a', '1'); f.append('b', 'two words ü'); return f; })()	{}	multipart/form-data; boundary={B}	--{B}\r\nContent-Disposition: form-data; name="a"\r\n\r\n1\r\n--{B}\r\nContent-Disposition: form-data; name="b"\r\n\r\ntwo words ü\r\n--{B}--\r\n
+file	(() => { const f = new FormData(); f.append('t', 'x'); f.append('file', new File(['hello\n'], 'a.txt', { type: 'text/plain' })); return f; })()	{}	multipart/form-data; boundary={B}	--{B}\r\nContent-Disposition: form-data; name="t"\r\n\r\nx\r\n--{B}\r\nContent-Disposition: form-data; name="file"; filename="a.txt"\r\nContent-Type: text/plain\r\n\r\nhello\n\r\n--{B}--\r\n
+file-no-type	(() => { const f = new FormData(); f.append('file', new File(['abc'], 'e.bin')); return f; })()	{}	multipart/form-data; boundary={B}	--{B}\r\nContent-Disposition: form-data; name="file"; filename="e.bin"\r\nContent-Type: application/octet-stream\r\n\r\nabc\r\n--{B}--\r\n
+blob-no-type	(() => { const f = new FormData(); f.append('b', new Blob(['xyz'])); return f; })()	{}	multipart/form-data; boundary={B}	--{B}\r\nContent-Disposition: form-data; name="b"; filename="blob"\r\nContent-Type: application/octet-stream\r\n\r\nxyz\r\n--{B}--\r\n
+blob-type-name	(() => { const f = new FormData(); f.append('b', new Blob(['{}'], { type: 'application/json' }), 'j.json'); return f; })()	{}	multipart/form-data; boundary={B}	--{B}\r\nContent-Disposition: form-data; name="b"; filename="j.json"\r\nContent-Type: application/json\r\n\r\n{}\r\n--{B}--\r\n
+quote-newline-names	(() => { const f = new FormData(); f.append('a"b\nc\rd\r\ne', 'v'); f.append('f', new File(['x'], 'q"\n\r.txt')); return f; })()	{}	multipart/form-data; boundary={B}	--{B}\r\nContent-Disposition: form-data; name="a%22b%0D%0Ac%0D%0Ad%0D%0Ae"\r\n\r\nv\r\n--{B}\r\nContent-Disposition: form-data; name="f"; filename="q%22%0A%0D.txt"\r\nContent-Type: application/octet-stream\r\n\r\nx\r\n--{B}--\r\n
+lone-cr-lf	(() => { const f = new FormData(); f.append('v', 'a\nb\rc\r\nd\n\n'); return f; })()	{}	multipart/form-data; boundary={B}	--{B}\r\nContent-Disposition: form-data; name="v"\r\n\r\na\r\nb\r\nc\r\nd\r\n\r\n\r\n--{B}--\r\n
+unicode-filename	(() => { const f = new FormData(); f.append('f', new File(['x'], 'ü€.txt', { type: 'text/x-ü' })); return f; })()	{}	multipart/form-data; boundary={B}	--{B}\r\nContent-Disposition: form-data; name="f"; filename="ü€.txt"\r\nContent-Type: application/octet-stream\r\n\r\nx\r\n--{B}--\r\n
+empty-form	new FormData()	{}	multipart/form-data; boundary={B}	--{B}--\r\n
+set-order	(() => { const f = new FormData(); f.append('a', '1'); f.append('b', '2'); f.append('a', '3'); f.set('a', '9'); return f; })()	{}	multipart/form-data; boundary={B}	--{B}\r\nContent-Disposition: form-data; name="a"\r\n\r\n9\r\n--{B}\r\nContent-Disposition: form-data; name="b"\r\n\r\n2\r\n--{B}--\r\n
+blob-body-type	new Blob(['{"a":1}'], { type: 'Application/JSON' })	{}	application/json	{"a":1}
+blob-body-no-type	new Blob(['raw'])	{}		raw
+file-body	new File(['f'], 'n.txt', { type: 'text/plain' })	{}	text/plain	f
+blob-body-caller-type	new Blob(['raw'], { type: 'a/b' })	{"Content-Type":"x/y"}	x/y	raw
+form-caller-type	(() => { const f = new FormData(); f.append('a', '1'); return f; })()	{"Content-Type":"multipart/form-data; boundary=zzz"}	multipart/form-data; boundary=zzz	--{B}\r\nContent-Disposition: form-data; name="a"\r\n\r\n1\r\n--{B}--\r\n
+params	new URLSearchParams({ a: '1 2', b: 'ü&=' })	{}	application/x-www-form-urlencoded;charset=UTF-8	a=1+2&b=%C3%BC%26%3D
+params-caller-type	new URLSearchParams({ a: '1' })	{"content-type":"x/y"}	x/y	a=1
+uint8	new Uint8Array([104, 105])	{}		hi
+arraybuffer	new Uint8Array([104, 105, 106]).buffer	{}		hij
+string	'plain ü'	{}	text/plain;charset=UTF-8	plain ü

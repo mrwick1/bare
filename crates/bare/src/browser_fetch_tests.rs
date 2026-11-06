@@ -368,8 +368,6 @@ fn response_constructor_request_and_clone() {
             ("new Request('/x', {redirect:'manual'})", "fetch redirect: manual (opaque redirect responses)"),
             ("new Request('/x', {integrity:'sha256-x'})", "fetch option integrity"),
             ("new Request('/x').body", "Request.body (a request body stream)"),
-            ("new Response('x').blob()", "Body.blob and Body.formData (no Blob or FormData)"),
-            ("new Response('x').formData()", "Body.blob and Body.formData (no Blob or FormData)"),
             ("new Response('x').body.tee()", "ReadableStream tee, pipeTo, pipeThrough and async iteration"),
             ("new Response('x').body.getReader().closed", "ReadableStreamDefaultReader.closed"),
             ("new Response('x').body.getReader({mode: 'byob'})", "ReadableStream BYOB reader"),
@@ -968,5 +966,115 @@ fn a_non_simple_cross_origin_request_is_refused_before_any_socket() {
             assert_eq!(r, "unsupported:fetch to another origin (CORS is not implemented)", "{m}");
         }
         assert_eq!((other.conns.load(SeqCst), other.recs().len()), (0, 0));
+    });
+}
+
+// ------------------------------------------------------------------------------------------ Blob, FormData and other bodies
+
+/// What Chrome 155 sent for each body (`tools/ui/chrome_multipart.mjs`). `{B}` stands for the boundary.
+const CHROME_BODIES: &str = include_str!("../../../tools/fixtures/net/chrome-bodies.txt");
+const BOUNDARY: &str = "----WebKitFormBoundary0123456789abcdef";
+
+fn unescape(s: &str) -> String {
+    let mut out = String::new();
+    let mut it = s.chars();
+    while let Some(c) = it.next() {
+        out.push(if c != '\\' { c } else { match it.next() { Some('r') => '\r', Some('n') => '\n', Some('t') => '\t', Some(x) => x, None => '\\' } });
+    }
+    out
+}
+
+#[test]
+fn bodies_are_the_bytes_that_chrome_sends() {
+    big(|| {
+        let srv = serve(|_| ok("{}"));
+        let mut b = at(srv.port);
+        *b.dom.web.boundary.borrow_mut() = Some(BOUNDARY.into());
+        let cases: Vec<Vec<&str>> = CHROME_BODIES.lines().map(|l| l.split('\t').collect()).collect();
+        assert_eq!(cases.len(), 20);
+        for c in &cases {
+            let (name, expr, headers, ct, body) = (c[0], c[1], c[2], c[3], c[4]);
+            let r = js(&mut b, &format!("fetch('/{name}', {{method: 'POST', body: {expr}, headers: {headers}}})"));
+            assert!(!r.starts_with("throw") && !r.starts_with("unsupported"), "{name}: {r}");
+            b.drain().unwrap();
+            while b.pending_fetches() > 0 {
+                b.run_network_tasks(100).unwrap();
+            }
+            let recs = srv.recs();
+            let rec = recs.iter().find(|r| r.path == format!("/{name}")).unwrap_or_else(|| panic!("{name}: not sent"));
+            let want = unescape(body).replace("{B}", BOUNDARY);
+            assert_eq!(String::from_utf8_lossy(&rec.body), want, "{name}: body");
+            let want_ct: Vec<String> = if ct.is_empty() { vec![] } else { vec![ct.replace("{B}", BOUNDARY)] };
+            assert_eq!(rec.header("content-type"), want_ct, "{name}: content-type");
+        }
+    });
+}
+
+#[test]
+fn each_request_has_a_new_random_boundary() {
+    big(|| {
+        let srv = serve(|_| ok("{}"));
+        let mut b = at(srv.port);
+        js(&mut b, "var f = new FormData(); f.append('a', '1'); fetch('/1', {method: 'POST', body: f}); fetch('/2', {method: 'POST', body: f});");
+        b.drain().unwrap();
+        while b.pending_fetches() > 0 {
+            b.run_network_tasks(100).unwrap();
+        }
+        let cts: Vec<String> = srv.recs().iter().map(|r| r.header("content-type")[0].clone()).collect();
+        assert_ne!(cts[0], cts[1]);
+        for (ct, rec) in cts.iter().zip(srv.recs()) {
+            let bound = ct.strip_prefix("multipart/form-data; boundary=").unwrap();
+            let rand = bound.strip_prefix("----WebKitFormBoundary").unwrap();
+            assert!(rand.len() == 16 && rand.bytes().all(|c| c.is_ascii_alphanumeric()), "{bound}");
+            assert!(rec.body.starts_with(format!("--{bound}\r\n").as_bytes()) && rec.body.ends_with(format!("--{bound}--\r\n").as_bytes()));
+        }
+    });
+}
+
+#[test]
+fn request_and_response_take_blob_form_and_params_bodies() {
+    big(|| {
+        let mut b = at(1);
+        js(&mut b, "var out = [], f = new FormData(); f.append('a', 'x\\ny'); f.append('up', new File(['hello'], 'h.txt', {type: 'text/plain'}));");
+        for (src, want) in [
+            // FormData: the type, the text, the size, and the round trip through formData().
+            ("out.push(/^multipart\\/form-data; boundary=----WebKitFormBoundary\\w{16}$/.test(new Response(f).headers.get('content-type'))); new Response(f).text().then(function (t) { out.push(t.includes('name=\"up\"; filename=\"h.txt\"\\r\\nContent-Type: text/plain\\r\\n\\r\\nhello\\r\\n')); });", "true|true"),
+            ("var r = new Response(f); r.formData().then(function (g) { out.push(g.get('a'), g.get('up').name, g.get('up').type, g.get('up').size, [...g.keys()].join('+'), r.bodyUsed); return g.get('up').text(); }).then(function (t) { out.push(t); });", "x\r\ny|h.txt|text/plain|5|a+up|true|hello"),
+            ("new Response(f).arrayBuffer().then(function (x) { out.push(x.byteLength > 200); });", "true"),
+            ("out.push(new Request('/u', {method: 'POST', body: f}).headers.get('content-type').slice(0, 30), new Request('/u', {method: 'POST', body: f, headers: {'content-type': 'x/y'}}).headers.get('content-type'));", "multipart/form-data; boundary=|x/y"),
+            // Blob: its bytes, its type (lower case), no type means no header.
+            ("new Response(new Blob(['abc'], {type: 'Text/X'})).blob().then(function (x) { out.push(x.type, x.size); }); out.push(new Response(new Blob(['abc'])).headers.has('content-type'));", "false|text/x|3"),
+            ("new Request('/u', {method: 'POST', body: new Blob(['zz'], {type: 'a/b'})}).blob().then(function (x) { out.push(x.type); return x.text(); }).then(function (t) { out.push(t); });", "a/b|zz"),
+            // URLSearchParams, and formData() of a urlencoded body.
+            ("var q = new Request('/u', {method: 'POST', body: new URLSearchParams({a: '1 2'})}); out.push(q.headers.get('content-type')); q.text().then(function (t) { out.push(t); });", "application/x-www-form-urlencoded;charset=UTF-8|a=1+2"),
+            ("new Response('a=1&b=%C3%BC+x&a=2', {headers: {'content-type': 'application/x-www-form-urlencoded; charset=utf-8'}}).formData().then(function (g) { out.push(g.getAll('a').join(), g.get('b')); });", "1,2|ü x"),
+            ("new Response('x').formData().then(function () { out.push('bad'); }, function (e) { out.push(e.name); });", "TypeError"),
+            // Typed arrays keep no type; a string is text.
+            ("out.push(new Response(new Uint8Array([1, 2])).headers.has('content-type'), new Response('s').headers.get('content-type'));", "false|text/plain;charset=UTF-8"),
+        ] {
+            js(&mut b, "out.length = 0");
+            assert_eq!(go(&mut b, src), want, "{src}");
+        }
+    });
+}
+
+#[test]
+fn a_form_body_over_the_limit_is_refused_before_the_copy() {
+    big(|| {
+        let mut b = mk(Some("http://127.0.0.1:1/".into()), FetchLimits { max_request_body: 1000, ..Default::default() });
+        assert_eq!(js(&mut b, "var f = new FormData(); f.append('f', new Blob([new Uint8Array(2000)])); fetch('/x', {method: 'POST', body: f})"), lim("fetch-request-body"));
+        assert_eq!(js(&mut b, "fetch('/x', {method: 'POST', body: new Blob([new Uint8Array(2000)])})"), lim("fetch-request-body"));
+    });
+}
+
+#[test]
+fn multipart_parsing_handles_odd_parts() {
+    big(|| {
+        let mut b = at(1);
+        let src = "var out = [], body = ['junk', '--q', 'Content-Disposition: form-data; name=\"a%22b\"', '', 'v', '--q', 'Content-Disposition: form-data; name=\"e\"; filename=\"n%0A.bin\"', '', '', '--q', 'Content-Disposition: form-data; name=\"c\"', '', '', '--q--', 'tail'].join('\\r\\n');
+          new Response(body, {headers: {'content-type': 'multipart/form-data; boundary=\"q\"'}}).formData().then(function (g) { out.push([...g].map(function (e) { return typeof e[1] === 'string' ? e[0] + '=' + e[1] : e[0] + ':' + e[1].name + ':' + e[1].type + ':' + e[1].size; }).join(';')); });
+          new Response('--q\\r\\nbroken', {headers: {'content-type': 'multipart/form-data; boundary=q'}}).formData().then(function () { out.push('bad'); }, function (e) { out.push(e.name); });
+          new Response('--q--', {headers: {'content-type': 'multipart/form-data'}}).formData().then(function () { out.push('bad'); }, function (e) { out.push(e.name); });";
+        assert_eq!(go(&mut b, src), "a\"b=v;e:n\n.bin:text/plain:0;c=|TypeError|TypeError");
     });
 }

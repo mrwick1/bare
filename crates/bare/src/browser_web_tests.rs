@@ -193,9 +193,8 @@ fn spec_cases_that_node_gets_wrong() {
         assert_eq!(js(&mut b, "Object.prototype.toString.call(new Blob()) + Object.prototype.toString.call(new File([], 'a'))"), "[object Blob][object File]");
         // `new FormData(form)` is a gate, not a wrong answer.
         assert_eq!(js(&mut b, "new FormData(document.getElementById('f'))"), "unsupported:FormData from a form element");
-        // A Blob or a FormData as a fetch body is a gate (no multipart writer): it never sends "[object FormData]".
-        assert_eq!(js(&mut b, "fetch('http://127.0.0.1:9/x', { method: 'POST', body: new FormData() })"), "unsupported:a Blob or FormData as a body");
-        assert_eq!(js(&mut b, "fetch('http://127.0.0.1:9/x', { method: 'POST', body: new Blob(['x']) })"), "unsupported:a Blob or FormData as a body");
+        // A Blob or a FormData body is sent (tests in browser_fetch_tests.rs). Without a fetch configuration it stops at the origin gate.
+        assert_eq!(js(&mut b, "fetch('http://127.0.0.1:9/x', { method: 'POST', body: new FormData() })"), "unsupported:fetch without a configured document origin (Browser::configure_fetch)");
     });
 }
 

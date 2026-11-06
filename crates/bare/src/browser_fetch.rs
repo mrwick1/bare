@@ -35,8 +35,14 @@
 //! BYOB readers, `reader.closed` and transfer are `Unsupported`. `new ReadableStream(...)` with a script source is in
 //! `browser_streams.rs`; the stream and reader methods there dispatch on which kind of object `this` is.
 //!
-//! Gates (explicit `Unsupported`, nothing is faked): token methods and a lower-case `patch`; `Blob`/`FormData`/`URLSearchParams`/stream
-//! bodies and `blob()`/`formData()`; `Request.body` and `mode: "no-cors"`; non-empty `integrity`;
+//! Bodies ("extract a body"): a string is `text/plain;charset=UTF-8`; a `URLSearchParams` is `application/x-www-form-urlencoded;charset=UTF-8`;
+//! an `ArrayBuffer` or a view has no type; a `Blob` or `File` is its bytes with its `type` (none if empty); a `FormData` is
+//! `multipart/form-data` with a new random boundary (`Dom::web_body` in `browser_web.rs`). The type is set only when the caller set
+//! no `Content-Type`. `blob()` and `formData()` (`application/x-www-form-urlencoded` and `multipart/form-data` only, else `TypeError`)
+//! read a body of a `Request` or `Response`.
+//!
+//! Gates (explicit `Unsupported`, nothing is faked): token methods and a lower-case `patch`; stream bodies;
+//! `Request.body` and `mode: "no-cors"`; non-empty `integrity`;
 //! `cache: "only-if-cached"`; non-ASCII header values; compressed
 //! responses (`Content-Encoding` other than identity is a network error); subclassing (`class X extends Response`).
 //! Headers iteration: `keys`, `values`, `entries` and `[Symbol.iterator]` (the same function as `entries`) make live iterators. Each
@@ -56,12 +62,14 @@
 //! Not browser-verified except against Node for the pure parts (`tools/js/fetch_oracle.mjs`).
 
 use crate::browser::{Browser, Dom, Kind, R, unsupported};
+use crate::browser_navigation_url::form_serialize;
 use crate::browser_streams as streams;
 use bare_js::eval::{Error, Interp};
 use bare_js::value::{ObjId, Value};
 use bare_net::http::{Client, Method, Request as NetRequest};
 use bare_url::{Scheme, Url};
 use std::cell::{Cell, OnceCell, RefCell};
+use std::borrow::Cow;
 use std::collections::{HashMap, VecDeque};
 use std::rc::Rc;
 
@@ -261,7 +269,7 @@ impl HeaderList {
 }
 
 /// The bytes of a body init and the content type it implies.
-pub(crate) type BodyInit = (Rc<Vec<u8>>, Option<&'static str>);
+pub(crate) type BodyInit = (Rc<Vec<u8>>, Option<Cow<'static, str>>);
 
 /// A body that is in memory. `None` bytes is a `null` body or a body that was consumed.
 struct Body {
@@ -686,7 +694,7 @@ impl Dom {
     /// The bytes of a body init, and its default content type. A copy is charged and bounded before it is made.
     pub(crate) fn extract_body(&self, it: &mut Interp<'_>, v: Value) -> R<Option<BodyInit>> {
         let lim = self.fl();
-        let (bytes, ty): (Vec<u8>, Option<&'static str>) = match v {
+        let (bytes, ty): (Vec<u8>, Option<Cow<'static, str>>) = match v {
             Value::Undefined | Value::Null => return Ok(None),
             Value::Object(_) if it.bytes_of(v).is_some() => {
                 let n = it.bytes_of(v).map_or(0, <[u8]>::len);
@@ -696,31 +704,43 @@ impl Dom {
                 self.reserve(it, 0, n)?;
                 (it.bytes_of(v).map(<[u8]>::to_vec).unwrap_or_default(), None)
             }
-            Value::Object(_) if self.is_web_body(v) => return Err(Error::Unsupported(unsupported("a Blob or FormData as a body"))),
+            Value::Object(_) if let Some(n) = self.web_body_len(v) => {
+                if n > lim.max_request_body {
+                    return Err(self.lim("fetch-request-body"));
+                }
+                self.reserve(it, 0, n)?;
+                let (bytes, ty) = self.web_body(it, v, lim.max_request_body)?;
+                (bytes, ty.map(Cow::Owned))
+            }
+            Value::Object(o) if self.nav.s.borrow().params.contains_key(&o) => {
+                let s = form_serialize(&self.nav.s.borrow().params[&o].list);
+                if s.len() > lim.max_request_body {
+                    return Err(self.lim("fetch-request-body"));
+                }
+                self.reserve(it, 0, s.len())?;
+                (s.into_bytes(), Some(Cow::Borrowed("application/x-www-form-urlencoded;charset=UTF-8")))
+            }
             Value::Object(_) => {
                 let kg = self.key(it, "getReader")?;
                 let g = it.get_value(v, kg)?;
                 if it.is_callable_value(g) {
                     return Err(Error::Unsupported(unsupported("a ReadableStream as a body")));
                 }
-                let s = self.string_arg(it, v)?;
-                if s.len() > lim.max_request_body {
-                    return Err(self.lim("fetch-request-body"));
-                }
-                self.reserve(it, 0, s.len())?;
-                let params = matches!(v, Value::Object(o) if self.nav.s.borrow().params.contains_key(&o));
-                (s.into_bytes(), Some(if params { "application/x-www-form-urlencoded;charset=UTF-8" } else { "text/plain;charset=UTF-8" }))
+                self.text_body(it, v)?
             }
-            _ => {
-                let s = self.string_arg(it, v)?;
-                if s.len() > lim.max_request_body {
-                    return Err(self.lim("fetch-request-body"));
-                }
-                self.reserve(it, 0, s.len())?;
-                (s.into_bytes(), Some("text/plain;charset=UTF-8"))
-            }
+            _ => self.text_body(it, v)?,
         };
         Ok(Some((Rc::new(bytes), ty)))
+    }
+
+    /// A body that is converted to a string (UTF-8, `text/plain`).
+    fn text_body(&self, it: &mut Interp<'_>, v: Value) -> R<(Vec<u8>, Option<Cow<'static, str>>)> {
+        let s = self.string_arg(it, v)?;
+        if s.len() > self.fl().max_request_body {
+            return Err(self.lim("fetch-request-body"));
+        }
+        self.reserve(it, 0, s.len())?;
+        Ok((s.into_bytes(), Some(Cow::Borrowed("text/plain;charset=UTF-8"))))
     }
 
     fn prop(&self, it: &mut Interp<'_>, o: Value, name: &str) -> R<Value> {
@@ -1218,6 +1238,8 @@ fn resp_clone(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> R<Value
 }
 
 enum As {
+    Blob,
+    Form,
     Text,
     Json,
     Buffer,
@@ -1243,10 +1265,26 @@ fn take_body(d: &Dom, it: &mut Interp<'_>, this: Value) -> R<Option<Rc<Vec<u8>>>
 fn consume(d: &Dom, it: &mut Interp<'_>, this: Value, how: As) -> R<Value> {
     let p = it.host_new_promise()?;
     let r = (|| -> R<Value> {
+        let ct = match how {
+            As::Blob | As::Form => {
+                let o = d.brand(it, this)?;
+                let h = common(&mut d.fetch.st.borrow_mut(), o).map(|c| c.headers);
+                h.and_then(|h| d.list_of(h).get("content-type")).unwrap_or_default()
+            }
+            _ => String::new(),
+        };
         let bytes = take_body(d, it, this)?;
         let bytes = bytes.unwrap_or_default();
         let n = bytes.len();
         match how {
+            As::Blob => {
+                it.charge((n / 64) as u64)?;
+                crate::browser_web::blob_from_bytes(d, it, Rc::try_unwrap(bytes).unwrap_or_else(|rc| (*rc).clone()), ct)
+            }
+            As::Form => {
+                it.charge((n / 16) as u64)?;
+                crate::browser_web::form_from(d, it, &bytes, &ct)?.ok_or_else(|| it.type_error("Failed to fetch"))
+            }
             As::Buffer => {
                 it.charge((n / 64) as u64)?;
                 let v = Rc::try_unwrap(bytes).unwrap_or_else(|rc| (*rc).clone());
@@ -1278,8 +1316,11 @@ fn body_json(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> R<Value>
 fn body_array_buffer(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> R<Value> {
     consume(d, it, this, As::Buffer)
 }
-fn gate_blob(_: &Dom, _: &mut Interp<'_>, _: Value, _: &[Value]) -> R<Value> {
-    Err(Error::Unsupported(unsupported("Body.blob and Body.formData (no Blob or FormData)")))
+fn body_blob(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> R<Value> {
+    consume(d, it, this, As::Blob)
+}
+fn body_form_data(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> R<Value> {
+    consume(d, it, this, As::Form)
 }
 
 // ---------------------------------------------------------------------------------------------- streams
@@ -1838,8 +1879,8 @@ static DEFS: &[Def] = &[
     Def { on: Request, name: "text", len: 0, kind: M(body_text) },
     Def { on: Request, name: "json", len: 0, kind: M(body_json) },
     Def { on: Request, name: "arrayBuffer", len: 0, kind: M(body_array_buffer) },
-    Def { on: Request, name: "blob", len: 0, kind: M(gate_blob) },
-    Def { on: Request, name: "formData", len: 0, kind: M(gate_blob) },
+    Def { on: Request, name: "blob", len: 0, kind: M(body_blob) },
+    Def { on: Request, name: "formData", len: 0, kind: M(body_form_data) },
     Def { on: Response, name: "status", len: 0, kind: G(resp_status) },
     Def { on: Response, name: "ok", len: 0, kind: G(resp_ok) },
     Def { on: Response, name: "statusText", len: 0, kind: G(resp_status_text) },
@@ -1853,8 +1894,8 @@ static DEFS: &[Def] = &[
     Def { on: Response, name: "text", len: 0, kind: M(body_text) },
     Def { on: Response, name: "json", len: 0, kind: M(body_json) },
     Def { on: Response, name: "arrayBuffer", len: 0, kind: M(body_array_buffer) },
-    Def { on: Response, name: "blob", len: 0, kind: M(gate_blob) },
-    Def { on: Response, name: "formData", len: 0, kind: M(gate_blob) },
+    Def { on: Response, name: "blob", len: 0, kind: M(body_blob) },
+    Def { on: Response, name: "formData", len: 0, kind: M(body_form_data) },
     Def { on: Stream, name: "locked", len: 0, kind: G(streams::locked) },
     Def { on: Stream, name: "getReader", len: 0, kind: M(streams::get_reader) },
     Def { on: Stream, name: "cancel", len: 1, kind: M(streams::cancel) },

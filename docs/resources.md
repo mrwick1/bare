@@ -3545,3 +3545,18 @@ Chrome cases: `tools/ui/chrome_methods.mjs` runs `tools/fixtures/ui/methods-case
 Rust tests: `each_method_sends_its_exact_bytes`, `a_head_reply_has_no_body_and_the_connection_stays_in_step`, `every_method_follows_every_redirect_code_like_fetch` (net); the HEAD, forbidden, body-on-GET, cross-origin and Chrome tests (fetch); `each_method_runs_and_the_forbidden_ones_are_a_security_error` (XHR).
 
 Cost: `perf stat -e instructions:u`, minimum of 3 runs, main 71ed495 against this build, each in its own `CARGO_TARGET_DIR` under `/data/bare-tmp`. 23 rows: `fetch_load` (8), `loader_load` (5), `browser_load` (8), `xhr_load` (2). The worst is `loader_load mixed 1` at +0.084% (18,075,497 to 18,090,754). The lowest is `browser_load event 1` at -0.009%. All are below +0.5%.
+
+## Blob and FormData bodies
+
+Problem: `fetch(url, {method: 'POST', body: formData})` stopped with `Unsupported`. The staging app uploads files this way.
+
+What runs: `extract_body` in `browser_fetch.rs` asks `Dom::web_body` (`browser_web.rs`) for a `Blob` or `FormData`. A `Blob` is one copy of its bytes. A `FormData` is written into one buffer whose size is an upper bound (a name grows 6 times at most, a value 2), so the buffer never grows. The buffer becomes the `Rc<Vec<u8>>` of the request, and the network layer borrows it. The body is copied once. A first version estimated the size too low, and the buffer doubled: the `fetch` side allocated 2x the body. The estimate fixed it.
+
+Chrome 155 check: `tools/ui/chrome_multipart.mjs` runs 20 cases in headless Chrome against a local echo server and saves the raw bytes: strings, a `File`, a `Blob` without a type, a name with `"` and a newline, a value with lone LF and CR, an empty `FormData`, `set` order, a Unicode file name, `Blob` bodies with and without a type, a caller `Content-Type`, `URLSearchParams`, `Uint8Array`, `ArrayBuffer` and a string. The Rust test `bodies_are_the_bytes_that_chrome_sends` sends each case with a fixed boundary and compares the bytes and the `Content-Type` header. All 20 match.
+
+Cost: `perf stat -e instructions:u`, minimum of 3 runs, each binary in its own `CARGO_TARGET_DIR` under `/data/bare-tmp`. Main d6d9b92 (with the new `fetch_load.rs` copied in) against this build. 45 rows: `fetch_load` (post, bytes, objects, iterate), `web_apis_load` (5 cases), `streams_load` (4) and `navigation_load` (url, iterate), each at 1x, 10x and 100x. The worst repeatable row is `navigation_load url 100` at +0.15%. `fetch_load bytes 100` was +0.47% in the matrix and -0.07% in three more runs (627.08 M against 626.66 M).
+
+Upload rows (`fetch_load upload 1|10`, loopback, release build, one run): a `File` of SCALE MiB, every byte 173, in a `FormData`; the server checks the length and byte sum of the file part. 1 MiB: 3.3 ms, peak RSS 14.0 MiB. 10 MiB: 21.2 ms, peak RSS 58.8 MiB. The peak includes the script copies (`Uint8Array`, `Blob`) and the server buffers. The `fetch` side allocates 1.01 MiB and 10.01 MiB: one copy.
+
+Not tested: a body over 64 MiB, many files in one `FormData` under load, `formData()` of a body with a boundary inside a file, a live upload to the staging server, and a TLS upload.
+

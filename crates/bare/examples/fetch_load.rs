@@ -1,11 +1,14 @@
 //! Load test for `fetch` over a real loopback HTTP server inside this process. One case at one scale per process.
 //!
-//!   fetch_load CASE SCALE      CASE: post | bytes | objects      SCALE: 1, 10, 100
+//!   fetch_load CASE SCALE      CASE: post | bytes | objects | iterate | upload      SCALE: 1, 10, 100 (upload: 1 or 10)
 //!
 //! post: SCALE*100 login-style JSON POSTs, 8 chains at a time, with a VM collect between batches. Each reply carries the
 //! length and byte sum of the body the server got; the script adds them up and the total is compared with Rust.
 //! bytes: SCALE MiB of response bodies (1 MiB each), read through `body.getReader()` in 64 KiB chunks. The script checks
 //! the first, middle and last byte of each chunk against the pattern and counts the length.
+//! upload: a `FormData` with one `File` of SCALE MiB (every byte 173) as a `fetch` POST body. The server answers the length and byte sum
+//! of the file part, found between the part head and the closing boundary. `fetch_alloc` is what the thread of the case (not the server)
+//! allocated for the `fetch` call and the network: one copy of the body (the multipart buffer) and the small rest. The request limits are raised to 64 MiB for this case.
 //! objects: SCALE*1000 rounds of Headers/Request/Response/clone/reader objects, with a collect between batches, ending with
 //! zero retained entries. Prints time, CPU, peak RSS, allocations and what the fetch layer holds.
 //! `tools/js/fetch_load.sh` runs the matrix under caps. Only throwaway synthetic data. No external network.
@@ -27,6 +30,9 @@ static ALLOCS: AtomicUsize = AtomicUsize::new(0);
 static BYTES: AtomicUsize = AtomicUsize::new(0);
 static LIVE: AtomicUsize = AtomicUsize::new(0);
 static PEAK: AtomicUsize = AtomicUsize::new(0);
+/// Bytes allocated by the thread that runs the case (not the server threads).
+static MINE_BYTES: AtomicUsize = AtomicUsize::new(0);
+thread_local! { static MINE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }
 
 unsafe impl GlobalAlloc for Counting {
     unsafe fn alloc(&self, l: Layout) -> *mut u8 {
@@ -34,6 +40,9 @@ unsafe impl GlobalAlloc for Counting {
         if !p.is_null() {
             ALLOCS.fetch_add(1, Relaxed);
             BYTES.fetch_add(l.size(), Relaxed);
+            if MINE.with(|m| m.get()) {
+                MINE_BYTES.fetch_add(l.size(), Relaxed);
+            }
             let live = LIVE.fetch_add(l.size(), Relaxed) + l.size();
             PEAK.fetch_max(live, Relaxed);
         }
@@ -49,6 +58,9 @@ unsafe impl GlobalAlloc for Counting {
             ALLOCS.fetch_add(1, Relaxed);
             if new > l.size() {
                 BYTES.fetch_add(new - l.size(), Relaxed);
+                if MINE.with(|m| m.get()) {
+                    MINE_BYTES.fetch_add(new - l.size(), Relaxed);
+                }
                 let live = LIVE.fetch_add(new - l.size(), Relaxed) + new - l.size();
                 PEAK.fetch_max(live, Relaxed);
             } else {
@@ -136,7 +148,14 @@ fn conn(mut s: TcpStream) {
             }
         }
         let body: Vec<u8> = seen.drain(..len).collect();
-        let ok = if head.starts_with("get /bytes") {
+        let ok = if head.starts_with("post /upload") {
+            // The file part: after the first blank line, up to the last "\r\n--" (the closing boundary).
+            let from = body.windows(4).position(|w| w == b"\r\n\r\n").map_or(0, |p| p + 4);
+            let to = body.windows(4).rposition(|w| w == b"\r\n--").unwrap_or(body.len());
+            let sum: u64 = body[from..to].iter().map(|&b| b as u64).sum();
+            let json = format!("{{\"n\":{},\"s\":{sum}}}", to - from);
+            s.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{json}", json.len()).as_bytes())
+        } else if head.starts_with("get /bytes") {
             let mut r = format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n", data.len()).into_bytes();
             r.extend_from_slice(&data);
             s.write_all(&r)
@@ -159,9 +178,10 @@ fn drive(b: &mut Browser) {
 
 fn exec(name: &str, scale: usize) {
     let port = server();
+    MINE.with(|m| m.set(true));
     let eval = EvalLimits { max_steps: u64::MAX / 2, max_scripts: 1 << 14, max_envs: 1 << 22, max_functions: 1 << 22, ..Default::default() };
     let mut b = Browser::new(tree::parse("<body></body>"), BrowserLimits::default(), eval, HeapLimits::default()).unwrap_or_else(|e| die(format!("browser: {e:?}")));
-    b.configure_fetch(FetchConfig { base_url: Some(format!("http://127.0.0.1:{port}/app")), client: Client::new(), limits: FetchLimits::default() }).unwrap();
+    b.configure_fetch(FetchConfig { base_url: Some(format!("http://127.0.0.1:{port}/app")), client: Client::new(), limits: if name == "upload" { FetchLimits { max_request_body: 64 << 20, max_retained: 64 << 20, ..Default::default() } } else { FetchLimits::default() } }).unwrap();
     let (a0, b0, cpu0) = (ALLOCS.load(Relaxed), BYTES.load(Relaxed), cpu_ms());
     PEAK.store(LIVE.load(Relaxed), Relaxed);
     let t = Instant::now();
@@ -172,6 +192,7 @@ fn exec(name: &str, scale: usize) {
         gc_ms += t.elapsed().as_secs_f64() * 1e3;
     };
     let mut max_pending = 0;
+    let mut fetch_alloc = 0usize;
     let mut max_retained = 0;
     match name {
         "post" => {
@@ -232,6 +253,17 @@ fn exec(name: &str, scale: usize) {
             expect("objects", run(&mut b, "acc"), want.to_string());
             expect("objects pruned", format!("{}", b.fetch_stats().objects), "0".into());
         }
+        "upload" => {
+            let n = scale * MIB;
+            run(&mut b, &format!("var f = new FormData(); f.append('file', new File([new Uint8Array({n}).fill(173)], 'u.bin')); var res = ''; function up() {{ return fetch('/upload', {{method: 'POST', body: f}}).then(function (r) {{ return r.json(); }}).then(function (j) {{ res = j.n + ',' + j.s; }}); }}"));
+            let f0 = MINE_BYTES.load(Relaxed);
+            run(&mut b, "up()");
+            drive(&mut b);
+            fetch_alloc = MINE_BYTES.load(Relaxed) - f0;
+            max_retained = max_retained.max(b.fetch_stats().retained_bytes);
+            collect(&mut b);
+            expect("upload", run(&mut b, "res"), format!("{n},{}", n * 173));
+        }
         "iterate" => {
             // Headers from a Map and from another Headers' iterator, for-of with a live append, spread, keys/values, an early break.
             let n = 1000 * scale;
@@ -261,7 +293,7 @@ fn exec(name: &str, scale: usize) {
     let (allocs, abytes, peak_live) = (ALLOCS.load(Relaxed) - a0, BYTES.load(Relaxed) - b0, PEAK.load(Relaxed));
     let st = b.fetch_stats();
     println!(
-        "{name:8} x{scale:<3} checksum=ok run={run_ms:9.1}ms cpu={cpu}ms peak_rss={:.1}MiB peak_live={:.1}MiB live_after={:.1}MiB allocs={allocs} alloc={:.1}MiB | started={} pending_max={max_pending} max_retained_or_objects={max_retained} final_objects={} final_retained={} final_queued={} | gc={gc_ms:.1}ms",
+        "{name:8} x{scale:<3} checksum=ok run={run_ms:9.1}ms cpu={cpu}ms peak_rss={:.1}MiB peak_live={:.1}MiB live_after={:.1}MiB allocs={allocs} alloc={:.1}MiB | started={} pending_max={max_pending} max_retained_or_objects={max_retained} final_objects={} final_retained={} final_queued={} | gc={gc_ms:.1}ms fetch_alloc={:.2}MiB",
         status_kib("VmHWM:") as f64 / 1024.0,
         peak_live as f64 / 1048576.0,
         LIVE.load(Relaxed) as f64 / 1048576.0,
@@ -270,13 +302,14 @@ fn exec(name: &str, scale: usize) {
         st.objects,
         st.retained_bytes,
         st.queued_bytes,
+        fetch_alloc as f64 / 1048576.0,
     );
 }
 
 fn main() {
     let a: Vec<String> = std::env::args().collect();
     if a.len() != 3 {
-        die("usage: fetch_load post|bytes|objects|iterate 1|10|100".into());
+        die("usage: fetch_load post|bytes|objects|iterate|upload 1|10|100".into());
     }
     let scale: usize = a[2].parse().unwrap_or_else(|_| die("scale".into()));
     let name = a[1].clone();
