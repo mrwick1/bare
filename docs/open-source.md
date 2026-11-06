@@ -39,7 +39,19 @@ Study these for architecture. Take parts from them.
 | [Nova](https://github.com/trynova/nova) | MPL-2.0 | 1,958 | Data-oriented engine: one vector per heap type, 32-bit handles. 1.0 in 2026-03, about 80% of test262. Its docs say it is not fast yet. |
 | [regress](https://github.com/ridiculousfish/regress) | Apache-2.0 | 225 | ECMAScript RegExp engine. Boa uses it. |
 | [temporal_rs](https://github.com/boa-dev/temporal) | Apache-2.0 | 240 | Temporal API. Passes the test262 Temporal tests. |
-| [ICU4X](https://github.com/unicode-org/icu4x) | Unicode-3.0 | 1,878 | Locale data and formatting: dates, numbers, collation, plural rules, segmentation. Adopted on 2026-11-05 for `Intl.NumberFormat`, `Intl.Collator`, `Intl.PluralRules`, `toLocaleString` and `localeCompare`: `icu_decimal`, `icu_plurals`, `icu_collator`, `fixed_decimal`, `icu_locale_core`, with baked data of 5 English locales. Cost, measured: +520 KB in the stripped `eval_check` (+29%, against +1.45 MB with compiled data), 22 k instructions and no measurable memory for a first call. See [resources.md](resources.md#intlnumberformat-intlcollator-and-intlpluralrules). |
+| [ICU4X](https://github.com/unicode-org/icu4x) | Unicode-3.0 | 1,878 | Locale data and formatting: dates, numbers, collation, plural rules, segmentation. Adopted on 2026-11-06 for `Intl.Segmenter`: `icu_segmenter` 2.4 with compiled data, and no dictionary or LSTM data (+87,776 B in the stripped `bare`, +1.1%). Adopted on 2026-11-05 for `Intl.NumberFormat`, `Intl.Collator`, `Intl.PluralRules`, `toLocaleString` and `localeCompare`: `icu_decimal`, `icu_plurals`, `icu_collator`, `fixed_decimal`, `icu_locale_core`, with baked data of 5 English locales. Cost, measured: +520 KB in the stripped `eval_check` (+29%, against +1.45 MB with compiled data), 22 k instructions and no measurable memory for a first call. See [resources.md](resources.md#intlnumberformat-intlcollator-and-intlpluralrules). |
+
+### Ported from Boa for the browser JavaScript APIs (2026-11-06)
+
+Boa is MIT or Unlicense. We read its source and wrote our own code in the shape of its classes. We copied no file whole. Each file below says in its header which Boa path it follows.
+
+| Our file | Boa path (Unlicense OR MIT) | What we took |
+| --- | --- | --- |
+| `crates/bare/src/browser_abort.rs` | `core/runtime/src/abort` | The shape of `AbortController` and `AbortSignal`. The DOM Standard adds what Boa leaves out: the `abort` event, `any`, `timeout`, `{signal}` for listeners and `fetch`, and `onabort`. |
+| `crates/bare/src/browser_encoding.rs` | `core/wintertc/src/base64` | The shape of `btoa` and `atob`. The HTML forgiving-base64 rules decide the errors. |
+| `crates/js/src/eval_intl_segmenter.rs` | `core/engine/src/builtins/intl/segmenter` | The shape of `Intl.Segmenter`, `%Segments%` and `%SegmentIterator%`. The break rules are ICU4X (`icu_segmenter`, Unicode-3.0), not Boa's. |
+
+`String.prototype.matchAll` and `structuredClone` copy nothing from Boa. `matchAll` follows ECMA-262. `structuredClone` extends the clone that `history.pushState` already used.
 
 ## HTML, CSS and layout
 
@@ -113,7 +125,7 @@ The OFL asks that the license text travels with the font. It is in `data/fonts/O
 
 This order is a proposal. It is not measured yet.
 
-1. ICU4X for `Intl`, `toLocaleString` and `localeCompare`. Done for numbers, collation and plural rules on 2026-11-05. `Intl.DateTimeFormat` stays hand-written. ICU4X date formatting, relative time, lists and segmentation are not adopted.
+1. ICU4X for `Intl`, `toLocaleString` and `localeCompare`. Done for numbers, collation and plural rules on 2026-11-05. `Intl.DateTimeFormat` stays hand-written. ICU4X date formatting, relative time and lists are not adopted. Segmentation is adopted for `Intl.Segmenter` (2026-11-06).
 2. The S4 stack: tiny-skia, skrifa, harfrust and Parley. S4 topic 1 is built with ab_glyph and hand-written rectangles, and S4 topic 2 with smithay-client-toolkit (see above). Nothing of ours is replaced.
 3. regress and temporal_rs, when a page needs a RegExp feature or Temporal that we do not have.
 4. Larger changes, each one a separate decision: Blitz as the base of the renderer. Boa as the JS engine was measured and rejected on 2026-11-05.
