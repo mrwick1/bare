@@ -226,6 +226,23 @@ fn performance_now_follows_the_clock_and_the_monotonic_clock_never_goes_back() {
     });
 }
 
+/// The virtual clock may start at any time that the page has not read. Real time that passes while the page is built is
+/// not a reading. The sleep makes that delay explicit: 1100 ms pass before the switch, so `use_virtual_clock_at(1000)` must
+/// not depend on machine load. A page that has read the real clock keeps its `performance.now()` from going back.
+#[test]
+fn a_virtual_clock_may_start_at_a_time_the_page_has_not_read() {
+    big(|| {
+        let limits = || EvalLimits { max_steps: 2_000_000, ..Default::default() };
+        let mut unread = Browser::new(tree::parse("<body></body>"), BrowserLimits::default(), limits(), HeapLimits::default()).unwrap();
+        let mut read = Browser::new(tree::parse("<body></body>"), BrowserLimits::default(), limits(), HeapLimits::default()).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        assert_eq!(js(&mut read, "performance.now() > 1000"), "true");
+        assert!(read.use_virtual_clock_at(T0).is_err(), "the page read the real clock past 1000 ms");
+        unread.use_virtual_clock_at(T0).expect("the page read no time, so 1000 ms is not before its current time");
+        assert_eq!(js(&mut unread, "performance.now()"), "1000");
+    });
+}
+
 #[test]
 fn queue_microtask_is_a_real_fifo_job() {
     big(|| {
