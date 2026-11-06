@@ -2571,6 +2571,39 @@ mod tests {
         assert_eq!(h.stats().collections, 20);
     }
 
+    /// Longest and total probe distance (slots from the home slot) over all interned strings, and the load.
+    fn probe_stats(h: &Heap) -> (usize, usize, f64) {
+        let t = &h.interner.table;
+        let mask = t.len() - 1;
+        let (mut max, mut sum) = (0, 0);
+        for (p, &e) in t.iter().enumerate().filter(|(_, e)| **e != 0) {
+            let d = p.wrapping_sub(h.strings.live[e as usize - 1].hash as usize) & mask;
+            max = max.max(d);
+            sum += d;
+        }
+        (max, sum, h.interner.count as f64 / t.len() as f64)
+    }
+
+    /// Extra names must not make the interner slow or change the cost of a hot loop (resources.md, "Why an unrelated
+    /// name moved a row"): the load stays at most 0.5 and probes stay short (measured: longest 9, mean 0.43).
+    #[test]
+    fn interner_probes_stay_short_for_realm_names_and_padding() {
+        let mut it = crate::eval::Interp::realm(Heap::default(), Default::default()).unwrap();
+        it.run_script("typeof Intl + typeof BigInt + typeof Proxy + typeof Reflect").unwrap();
+        let n = it.heap.stats().live_strings;
+        assert!(n > 300, "the realm names are interned: {n}");
+        for pad in [0, 1, 3, 6, 12, 32, 1000] {
+            for i in 0..pad {
+                it.heap.intern_str(&format!("zzpad{i}")).unwrap();
+            }
+            let (max, sum, load) = probe_stats(&it.heap);
+            let live = it.heap.stats().live_strings;
+            assert!(load <= 0.5, "load {load} with {pad} extra names");
+            assert!(max <= 12, "longest probe {max} with {pad} extra names");
+            assert!(sum * 5 <= live * 3, "mean probe {} with {pad} extra names", sum as f64 / live as f64);
+        }
+    }
+
     #[test]
     fn deep_graph_collects_without_recursion() {
         let mut h = Heap::default();
