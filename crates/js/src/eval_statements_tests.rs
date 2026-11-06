@@ -45,9 +45,9 @@ fn the_frame_cap_defaults_and_clamps_in_new_and_realm() {
     assert_eq!(EvalLimits::default().max_statement_frames, 512);
     let prog = crate::parse::parse_script("1", Default::default()).unwrap();
     let it = Interp::new(&prog, Heap::default(), EvalLimits { max_statement_frames: u32::MAX, ..Default::default() }).unwrap();
-    assert_eq!(it.limits.max_statement_frames, 768);
+    assert_eq!(it.limits.max_statement_frames, MAX_STATEMENT_FRAMES);
     let it = Interp::realm(Heap::default(), EvalLimits { max_statement_frames: u32::MAX, ..Default::default() }).unwrap();
-    assert_eq!(it.limits.max_statement_frames, 768);
+    assert_eq!(it.limits.max_statement_frames, 65_536);
     let it = Interp::realm(Heap::default(), EvalLimits { max_statement_frames: 5, ..Default::default() }).unwrap();
     assert_eq!(it.limits.max_statement_frames, 5);
 }
@@ -77,13 +77,13 @@ fn a_zero_cap_refuses_the_first_body_and_setup_still_works() {
 }
 
 #[test]
-fn the_cap_is_clamped_to_768_whatever_is_asked() {
+fn the_cap_is_clamped_to_the_ceiling_whatever_is_asked() {
     real_stack(|| {
-        // one body list + seven blocks = 8 frames a call; 90 calls are 720 frames, 100 calls are 800
+        // one body list + seven blocks = 8 frames a call. The ceiling is 65,536 frames: 8,000 calls are 64,000 frames, 8,200 are 65,600
         let body = |n: u32| format!("function f(n) {{ {{ {{ {{ {{ {{ {{ {{ return n === 0 ? 0 : 1 + f(n - 1) }} }} }} }} }} }} }} }} f({n})");
-        let wide = lim(u32::MAX);
-        assert_eq!(outcome(&body(90), wide), "90");
-        assert_eq!(outcome(&body(100), wide), FRAMES);
+        let wide = EvalLimits { max_call_depth: 10_000, ..lim(u32::MAX) };
+        assert_eq!(outcome(&body(8_000), wide), "8000");
+        assert_eq!(outcome(&body(8_200), wide), FRAMES);
         // the default of 512 is below the clamp: 60 calls are 480 frames, 70 are 560
         let d = EvalLimits { max_steps: 5_000_000, max_traversal_depth: 768, max_call_depth: 128, ..Default::default() };
         assert_eq!(outcome(&body(60), d), "60");

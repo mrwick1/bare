@@ -377,8 +377,8 @@ fn string_builders_stop_at_the_heap_string_cap() {
 fn call_depth_cannot_be_unbounded_and_zero_envs_are_rejected() {
     big(|| {
         let prog = parse_script("function f() { return f(); } f();", Limits::default()).unwrap();
-        let mut it = Interp::new(&prog, Heap::default(), EvalLimits { max_call_depth: u32::MAX, ..Default::default() }).unwrap();
-        assert!(matches!(it.run(), Err(Error::Limit(LimitKind::CallDepth | LimitKind::TraversalDepth))));
+        let mut it = Interp::new(&prog, Heap::default(), EvalLimits { max_call_depth: u32::MAX, max_statement_frames: u32::MAX, ..Default::default() }).unwrap();
+        assert!(matches!(it.run(), Err(Error::Limit(LimitKind::CallDepth))));
         assert!(matches!(Interp::new(&prog, Heap::default(), EvalLimits { max_envs: 0, ..Default::default() }), Err(Error::Limit(LimitKind::Envs))));
     });
 }
