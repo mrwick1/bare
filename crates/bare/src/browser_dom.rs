@@ -923,12 +923,14 @@ fn new_fragment(d: &Dom, it: &mut Interp<'_>, proto: Option<ObjId>) -> V {
 }
 
 /// `before`, `after`, `replaceWith`, `createDocumentFragment`: installed after every other global, so their function ids do not move a host function that came before.
+/// Deviation, for the cost of a realm: `Element` and `CharacterData` share one function object for each ChildNode method (Chrome has two).
 pub(crate) fn install_late(d: &Dom, it: &mut Interp<'_>) -> R<()> {
     d.def_method(it, d.p().document, "createDocumentFragment", 0, create_document_fragment)?;
-    for o in [d.p().element, d.p().chardata] {
-        d.def_method(it, o, "before", 0, |d, it, t, a| child_node(d, it, t, a, 0))?;
-        d.def_method(it, o, "after", 0, |d, it, t, a| child_node(d, it, t, a, 1))?;
-        d.def_method(it, o, "replaceWith", 0, |d, it, t, a| child_node(d, it, t, a, 2))?;
+    let hs: [(&str, H); 3] = [("before", |d, it, t, a| child_node(d, it, t, a, 0)), ("after", |d, it, t, a| child_node(d, it, t, a, 1)), ("replaceWith", |d, it, t, a| child_node(d, it, t, a, 2))];
+    for (name, h) in hs {
+        let f = d.def_method(it, d.p().element, name, 0, h)?;
+        let k = d.key(it, name)?;
+        it.define_data(d.p().chardata, k, Value::Object(f), true, false, true)?;
     }
     Ok(())
 }
