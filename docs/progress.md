@@ -590,3 +590,20 @@ Done (`browser_select.rs`): `HTMLSelectElement`, `HTMLOptionElement`, `HTMLOptGr
 Results: 151 cases in `tools/fixtures/ui/select-cases.txt` match headless Chrome 155, among them the exact Radix snippet. 5 more Rust tests cover the lazy globals, the Radix snippet, the collector, the bounds and the painter. `cargo test --workspace` passes. Against main 746943d all 49 rows measured are below +0.5% in instructions (worst `nodelist_load churn`, +0.402%). Load rows (`tools/js/select_load.sh`): see [resources.md](resources.md#select-option-and-the-option-lists).
 
 A first build put the install of the globals early in `Browser::install`. That moved the ids of every later host function and made `observer_load raf` +0.96% and `dataset_load keys` +0.80%, with no work of ours in those rows. At the end of the list the same code gives -0.62% and -0.09%. A first `add` also synced the whole list at each call, which made `churn` quadratic (1.07 s at 1,000 options). It now syncs only for an index argument (0.06 s).
+
+On main 58864f0, with no local change to the engine, every live route settles. No route ends at the time budget now. The login reaches the overview with 62 table rows. Each other route was loaded in a new session with the logged-in storage. One run each, real clock, on a machine that ran parallel builds:
+
+| Route | Result | Time |
+| --- | --- | --- |
+| `/` | overview, 62 rows | 7.8 s |
+| `/calls` | "0 calls today", 2 rows | 34.7 s |
+| `/agents` | "33 agents" | 4.7 s |
+| `/journeys` | "6 journeys", 7 rows | 7.1 s |
+| `/results` | app error screen | 5.6 s |
+| `/clients` | "Clients", 6 rows | 4.2 s |
+| `/disputes?tab=open` | "Disputes", 7 rows | 4.9 s |
+| `/agents/new` | app error screen | 3.5 s |
+| `/calls?live=1` | "0 live calls" | 19.4 s |
+| `/journeys?status=paused` | "3 journeys, paused", 4 rows | 7.7 s |
+
+`/clients` and `/disputes` render now, because `select.options` exists. `/results` and `/agents/new` stop at the same error: `TypeError: DocumentFragment is not a constructor`, thrown in a React render. The next gate is the `DocumentFragment` constructor. `/calls` is the slowest route; the cause is not known yet (to verify).
