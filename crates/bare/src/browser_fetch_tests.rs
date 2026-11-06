@@ -61,6 +61,8 @@ pub struct Srv {
     pub port: u16,
     pub recs: Arc<Mutex<Vec<Rec>>>,
     pub conns: Arc<AtomicUsize>,
+    /// Connections that the server closed on purpose, counted after the close is sent.
+    pub closed: Arc<AtomicUsize>,
 }
 
 impl Srv {
@@ -72,20 +74,20 @@ impl Srv {
 pub fn serve(handler: impl Fn(&Rec) -> Reply + Send + Sync + 'static) -> Srv {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
-    let (recs, conns) = (Arc::new(Mutex::new(Vec::new())), Arc::new(AtomicUsize::new(0)));
+    let (recs, conns, closed) = (Arc::new(Mutex::new(Vec::new())), Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)));
     let handler = Arc::new(handler);
-    let (r2, c2) = (recs.clone(), conns.clone());
+    let (r2, c2, d2) = (recs.clone(), conns.clone(), closed.clone());
     std::thread::spawn(move || {
         for stream in listener.incoming().flatten() {
             c2.fetch_add(1, SeqCst);
-            let (h, r) = (handler.clone(), r2.clone());
-            std::thread::spawn(move || conn(stream, h, r));
+            let (h, r, d) = (handler.clone(), r2.clone(), d2.clone());
+            std::thread::spawn(move || conn(stream, h, r, d));
         }
     });
-    Srv { port, recs, conns }
+    Srv { port, recs, conns, closed }
 }
 
-fn conn(mut s: TcpStream, h: Arc<dyn Fn(&Rec) -> Reply + Send + Sync>, recs: Arc<Mutex<Vec<Rec>>>) {
+fn conn(mut s: TcpStream, h: Arc<dyn Fn(&Rec) -> Reply + Send + Sync>, recs: Arc<Mutex<Vec<Rec>>>, closed: Arc<AtomicUsize>) {
     let mut seen = Vec::new();
     let mut piece = [0u8; 8192];
     loop {
@@ -116,7 +118,13 @@ fn conn(mut s: TcpStream, h: Arc<dyn Fn(&Rec) -> Reply + Send + Sync>, recs: Arc
         let rec = Rec { method, path, head: headers, body };
         recs.lock().unwrap().push(rec.clone());
         let r = h(&rec);
-        if s.write_all(&r.raw).is_err() || r.close {
+        if s.write_all(&r.raw).is_err() {
+            return;
+        }
+        if r.close {
+            // Send the FIN now, then say so: a test that waits for `closed` knows the client can see the close.
+            let _ = s.shutdown(std::net::Shutdown::Both);
+            closed.fetch_add(1, SeqCst);
             return;
         }
     }
@@ -531,7 +539,12 @@ fn reused_connections_and_posts_are_never_resent() {
         // The server closes an idle connection (without a Connection header). A POST must open a new one and arrive once.
         let mut b = at(srv.port);
         let before = srv.recs().len();
-        go(&mut b, "var out = []; fetch('/close-after').then(function () { return new Promise(function (r) { r(); }); }).then(function () { return fetch('/after', {method:'POST', body:'once'}); }).then(function (r) { out.push(r.status); });");
+        go(&mut b, "var out = []; fetch('/close-after');");
+        // Wait for the close itself, not for a time: the client must see the FIN before it picks the connection.
+        while srv.closed.load(SeqCst) == 0 {
+            std::thread::yield_now();
+        }
+        go(&mut b, "fetch('/after', {method:'POST', body:'once'}).then(function (r) { out.push(r.status); });");
         let posts = srv.recs()[before..].iter().filter(|r| r.method == "POST").count();
         assert_eq!(posts, 1, "{:?}", srv.recs());
         assert_eq!(js(&mut b, "out.join()"), "200");
