@@ -4129,35 +4129,35 @@ Follow-ups: send `Accept-Encoding: gzip` and inflate (the bodies are 3.4 times l
 
 ## Dense host tables and cached option names
 
-Method: main 87c3209 and this change, each in its own `CARGO_TARGET_DIR` under `/data/bare-tmp`, release build, `-j3`. `tools/js/instr.sh` gives the minimum of 3 runs of `instructions:u` (with `glibc.malloc.tcache_count=65535`). AMD Ryzen 9 5900HX, glibc 2.44. The machine was shared and each sweep ran 4 rows at once, so time is not reported. Peak RSS is the maximum of 3 runs of `ru_maxrss`, without the large malloc cache.
+Method: main f3b07e8 and this change, each in its own `CARGO_TARGET_DIR` under `/data/bare-tmp`, release build, `-j3`. `tools/js/instr.sh` gives the minimum of 3 runs of `instructions:u` (with `glibc.malloc.tcache_count=65535`). AMD Ryzen 9 5900HX, glibc 2.44. The machine was shared and each sweep ran 4 rows at once, so time is not reported. Peak RSS is the maximum of 3 runs of `ru_maxrss`, without the large malloc cache.
 
 Why a profile misleads here. `perf` samples after a number of retired instructions, and a sample lands where the CPU waited. A removed cache miss moves its samples to the next wait. In the `react` row `Heap::intern` rose from 6.5% to 9.8% of the samples, while its instruction count did not rise (the total fell 4.5%). Use the totals, not the shares, to judge a change. Sampling at a period of 37,003 instructions lost samples (perf reported 6.0 G events for a run of 15.2 G), and a period of 211,019 did not.
 
 | Row | main | this change | change |
 | --- | ---: | ---: | ---: |
-| `select_load react 10` | 30,767,952 | 30,005,844 | -2.5% |
-| `select_load react 1000` | 1,535,784,822 | 1,465,131,472 | -4.6% |
-| `select_load react 10000` | 15,223,077,925 | 14,552,568,329 | -4.4% |
-| `select_load value 1000` | 175,196,491 | 95,655,950 | -45.4% |
-| `select_load value 10000` | 1,453,070,583 | 705,109,973 | -51.5% |
-| `select_load churn 10000` | 3,708,248,475 | 3,650,319,280 | -1.6% |
-| `dataset_load read 10000 10` | 152,659,725 | 147,142,651 | -3.6% |
-| `dataset_load read 10000 50` | 249,243,760 | 239,606,052 | -3.9% |
-| `dataset_load keys 10000 10` | 501,289,413 | 473,349,393 | -5.6% |
-| `nodelist_load live 10` | 415,947,484 | 414,725,279 | -0.3% |
-| `form_load submit 10` | 704,012,031 | 613,060,731 | -12.9% |
-| `form_load gc 10` | 1,685,406,657 | 1,532,015,754 | -9.1% |
-| `browser_load event 10` | 780,703,578 | 657,910,438 | -15.7% |
-| `browser_load lookup 10` | 1,155,245,769 | 1,151,630,670 | -0.3% |
-| `browser_load mutation 10` | 993,045,142 | 981,153,996 | -1.2% |
-| `browser_load svg 10` | 2,408,079,480 | 2,359,747,416 | -2.0% |
-| `focus_load focus 10` | 1,027,362,857 | 795,079,906 | -22.6% |
-| `focus_load dispatch 10` | 738,476,799 | 649,052,504 | -12.1% |
-| `handler_load 10` | 563,344,766 | 515,874,320 | -8.4% |
+| `select_load react 10` | 30,771,757 | 30,029,682 | -2.4% |
+| `select_load react 1000` | 1,535,808,915 | 1,465,951,151 | -4.5% |
+| `select_load react 10000` | 15,235,013,470 | 14,560,664,305 | -4.4% |
+| `select_load value 1000` | 170,660,757 | 95,675,535 | -43.9% |
+| `select_load value 10000` | 1,453,481,391 | 704,784,022 | -51.5% |
+| `select_load churn 10000` | 3,713,481,744 | 3,645,860,906 | -1.8% |
+| `dataset_load read 10000 10` | 152,686,202 | 147,177,905 | -3.6% |
+| `dataset_load read 10000 50` | 249,273,218 | 239,639,800 | -3.9% |
+| `dataset_load keys 10000 10` | 502,211,251 | 471,987,314 | -6.0% |
+| `nodelist_load live 10` | 416,021,274 | 414,881,407 | -0.3% |
+| `form_load submit 10` | 704,803,158 | 614,024,848 | -12.9% |
+| `form_load gc 10` | 1,686,884,012 | 1,533,074,301 | -9.1% |
+| `browser_load event 10` | 781,552,425 | 658,861,358 | -15.7% |
+| `browser_load lookup 10` | 1,155,726,286 | 1,151,634,081 | -0.4% |
+| `browser_load mutation 10` | 994,351,824 | 982,442,936 | -1.2% |
+| `browser_load svg 10` | 2,410,015,065 | 2,361,665,433 | -2.0% |
+| `focus_load focus 10` | 1,027,867,881 | 796,113,645 | -22.5% |
+| `focus_load dispatch 10` | 739,470,185 | 649,948,264 | -12.1% |
+| `handler_load 10` | 563,518,411 | 515,992,281 | -8.4% |
 
-All rows: 195 rows (every `bare` example with a case list at scale 1 and 10; `dataset_load` at 1,000 and 10,000 operations with 1, 10 and 50 attributes; `select_load` at 10, 1,000 and 10,000 options; `sticky_load` at 1, 100 and 1,000; `xhr_load` at 1 and 100; `scroll_load 10000 2000`). None is worse than +0.5%. The worst are `resources_load largechunk 10` +0.27% and `resources_load small 1` +0.08%; both use a server thread, and `small 1` ranged over 0.16% in 3 runs of the same binary. 91 are better than -0.5%, 104 are within 0.5%, and the median is -0.33%. `form_load gates` (1, 10) and `sheets_load dynamic` (1, 10) fail on main and on the change, so they have no row. The 30 `*_load` examples of `bare_js` were built on both sides and their `.text` sections are equal (`objcopy -O binary --only-section=.text`).
+All rows: 195 rows (every `bare` example with a case list at scale 1 and 10; `dataset_load` at 1,000 and 10,000 operations with 1, 10 and 50 attributes; `select_load` at 10, 1,000 and 10,000 options; `sticky_load` at 1, 100 and 1,000; `xhr_load` at 1 and 100; `scroll_load 10000 2000`). None is worse than +0.5%. The worst is `resources_load largechunk 10` at +0.43%. It uses a server thread. Four more runs per side gave 26.53–26.66 M (main) and 26.58–26.72 M (change), so the two ranges overlap and the difference is noise. 90 rows are better than -0.5%, 105 are within 0.5%, and the median is -0.35%. `form_load gates` (1, 10) and `sheets_load dynamic` (1, 10) fail on main and on the change, so they have no row. The 30 `*_load` examples of `bare_js` were built on both sides and their `.text` sections are equal (`objcopy -O binary --only-section=.text`).
 
-Profile of the baseline (main c5627a1; the cost rows above use 87c3209), self share of samples (period 211,019 on `react`, 100,000 on the others):
+Profile of the baseline (main c5627a1; the cost rows above use f3b07e8), self share of samples (period 211,019 on `react`, 100,000 on the others):
 
 | Row | Largest map and name costs |
 | --- | --- |
@@ -4168,7 +4168,7 @@ Profile of the baseline (main c5627a1; the cost rows above use 87c3209), self sh
 | `browser lookup 10` | `query` 20.6%, `compound_matches` 13.0%, `Document::attr` 8.8%, `get_element_by_id` 4.5%; no map above 1.1% |
 | `browser event 10` | `hash_one` 5.0%, SipHash `write` 4.1%, `fire` 6.2% |
 
-Peak RSS (KiB, main then change): `react 10000` 17,592 and 16,856; `churn 10000` 37,632 and 38,680; `value 10000` 10,924 and 11,036; `svg 10` 14,800 and 13,980; `mutation 100` 19,132 and 19,228; `event 100` 9,388 and 9,536; `dataset read 100000 50` 8,868 and 8,816; `nodelist live 100` 76,700 and 76,604; `focus 100` 9,396 and 9,352; `form submit 100` 10,276 and 10,264. The largest rise is `churn 10000` (+2.8%): the 10,000 option wrappers are about one in four object slots, so a 32-entry page holds about 8 of them. A page of 64 entries gave 38,452 to 38,596 KiB, no better. The sparse worst case is one wrapper in a page: a `by_obj` page is about 640 bytes (about 20 bytes for each of 32 entries, not measured), against about 30 bytes for a hash entry (estimate). The collector frees empty pages, so the worst case is bounded by the live wrappers, not by the largest slot.
+Peak RSS (KiB, main f3b07e8 then change, one run): `react 10000` 17,568 and 16,824; `churn 10000` 37,568 and 38,808; `value 10000` 11,040 and 10,936; `svg 10` 15,112 and 14,040; `mutation 100` 19,048 and 19,248; `event 100` 9,680 and 9,520; `dataset read 100000 50` 8,960 and 9,088; `nodelist live 100` 76,624 and 76,684; `focus 100` 9,232 and 9,420; `form submit 100` 10,100 and 10,384. The largest rise is `churn 10000` (+3.3%, +1.2 MiB): the 10,000 option wrappers are about one in four object slots, so a 32-entry page holds about 8 of them. A page of 64 entries gave 38,452 to 38,596 KiB, no better. The sparse worst case is one wrapper in a page: a `by_obj` page is about 640 bytes (about 20 bytes for each of 32 entries, not measured), against about 30 bytes for a hash entry (estimate). The collector frees empty pages, so the worst case is bounded by the live wrappers, not by the largest slot.
 
 Memory rule: the table grows with the pages that hold a key. The directory holds one pointer (8 bytes) for each 32 slots up to the highest live key, so one million heap slots cost at most 250 KiB of directory. `browser_idtab_tests` pins this: 50,000 objects and one key hold one page and a directory of at most 1,563 pointers; after a `retain` that drops the key, both are 0. A reused slot never matches the old key (test `a_reused_slot_does_not_answer_for_the_old_object`).
 
