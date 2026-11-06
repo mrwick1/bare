@@ -623,3 +623,22 @@ A `Range` now follows DOM changes. Its boundary points move on insert, remove, t
 Results: 63 live range cases and 54 iterator cases match headless Chrome 155 (`liverange-cases.txt`, `iterator-cases.txt`). Where Chrome and the standard differ, bare follows Chrome: a pointer before the reference node does not move when no node follows the removed node; `textContent` and `innerHTML` tell the iterators about all children before they remove any; `normalize` only removes an empty Text node. A filter that calls its own iterator is `InvalidStateError` in bare (the standard) and has no Chrome case, because Chrome has no check. All 2,446 workspace tests pass. Against main 74b924d with the large malloc cache no row of 52 is over +0.5% (worst `browser_load event 100`, +0.347%). A first run without the cache showed `style_load churn 1` at +0.51%, which was heap layout and not the change. A new load test, `tools/js/range_load.sh`, checks 100,000 operations on ranges and 100,000 iterator steps. See [resources.md](resources.md#live-ranges-nodeiterator-and-characterdata-editing).
 
 Not tested: the live staging login on this build; `before`, `after`, `replaceWith`, `insertAdjacentHTML` and `DocumentFragment` under a range (the host has none of them); the `outerHTML` join of Text nodes under a range (an open gap).
+
+## Cost of the select `react` row
+
+Problem: the `react` row of `tools/js/select_load.sh` took 2.2 s at 10,000 options. PR 174 said that the JS loop bounds it. Profile-driven work: no host code was tuned for this row.
+
+Profile (`perf record`, release, 10,000 options, 18.3 G instructions, 1.5 M loop turns, so about 12,000 instructions for each turn). The profile is flat. The top self costs were the evaluator (`link_inner`, `eval_expr_inner`, `machine`: about 20%), SipHash in std `HashMap` lookups on host paths (`hash_one` and `sip::write`: about 8%, plus the cache misses of the probes), and `Heap::intern` (7%, of which 4% came from one `Vec<u16>` for each host string). The allocator was 3%. GC was 0%.
+
+Two general fixes:
+
+- Id maps use a multiply hash (`IdMap` in `browser.rs`). `by_obj`, `by_node`, the list table and the option tables are keyed by numbers that the engine hands out. SipHash cost about 60 instructions for one key. The idea is the one of rustc's `FxHashMap`. The hash is the one that `KeyHasher` in `heap.rs` already uses. It helps every host property access, because every one calls `node_of`. Result at 10,000 options: -13.9% instructions.
+- `intern_str` and `concat` build a string of up to 64 code units on the stack and look it up before they allocate. Only a new string allocates. The idea is `StringTable::LookupKey` of V8 and `AtomizeChars` of SpiderMonkey. Result at 10,000 options: a further -3.4%.
+
+Result (`tools/js/instr.sh`, minimum of 3 runs of `instructions:u`, main 74b924d against this change): `react` 10 options 37.13 M to 30.79 M (-17.1%), 1,000 options 1.829 G to 1.536 G (-16.1%), 10,000 options 18.35 G to 15.24 G (-16.9%). Peak RSS is the same (17.2 MiB to 17.3 MiB at 10,000 options). The `churn` rows fall by 7% to 8%, and `value 10` by 13%.
+
+Cost rule: 500 rows (every `*_load` example with a case list at scale 1 and 10, `dataset_load`, `select_load` 10 and 1,000, `scroll_load`). No row is worse than +0.5%. The worst is `gen_load finally 10` at +0.29% (a run of 1.9 G). 345 rows fall by more than 0.5% (median -1.62%) and 155 stay within 0.5%. The largest falls: `session_load chain` -29%, `form_load gates` -23%, `date_load longstr` -17%, `observer_load mo` -16%. `cargo test --workspace` passes. `dns::tests::falls_back_to_tcp` failed once under a load average of 30. It passes alone on main and on this change, and no network code changed.
+
+What the profile still shows: the evaluator walks the tree and finds a name through the scope chain (`find_in`, `get_name`: 6%), `options[j]` does two hash lookups (list, then wrapper), and a `.value` read hashes the attribute name (`find_atom`) and interns the result. A slot table for wrappers indexed by `ObjId`, and resolved variable slots, would remove most of this. Both are larger changes in the DOM and the evaluator. They are not made here.
+
+Not tested: wall time (the machine had a load average of 15 to 31, and `cycles:u` of the same binary varied from 8.1 G to 11.7 G), the rows at scale 100, `regexp_load`, `numeric_load`, `wrapper_load`, `sticky_load`, `xhr_load` and `https_load`, and the live staging pages. See [resources.md](resources.md#cost-of-the-select-react-row).

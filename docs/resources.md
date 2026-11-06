@@ -3927,3 +3927,21 @@ Method: `tools/js/instr.sh` (`perf stat -e instructions:u`, minimum of 3 runs, l
 What was done to lower the cost: `IdleDeadline` is not a lazy accessor of `window`. That third property made `raf 10` +0.65% and `raf 100` +0.81% in an earlier build; made at the first callback it is +0.11% at 10x. The cost of the rest at start is two functions and four methods.
 
 Not tested: cycles, `eval_load`, a build on another machine, the live staging page, and whether idle callbacks keep a page from settling under the new settle rule (the `Run::Idle` arms do not call `settle_mark` and `quiet_since`).
+
+## Cost of the select `react` row
+
+Method: main 74b924d and this change, each in its own `CARGO_TARGET_DIR` under `/data/bare-tmp`, release build. `tools/js/instr.sh` gives the minimum of 3 runs of `instructions:u` (with `glibc.malloc.tcache_count=65535`). AMD Ryzen 9 5900HX, glibc 2.44. The machine was shared, so time is not reported.
+
+| `react` row | main | this change | change |
+| ----------- | ---: | ----------: | -----: |
+| 10 options | 37,131,886 | 30,787,583 | -17.1% |
+| 1,000 options | 1,829,156,650 | 1,535,637,559 | -16.0% |
+| 10,000 options | 18,347,708,107 | 15,240,991,491 | -16.9% |
+
+Peak RSS: 8.0, 8.9 and 17.2 MiB on main; 8.1, 8.9 and 17.3 MiB after the change.
+
+Steps at 10,000 options (instructions): main 18.34 G; multiply hash for the id maps 15.79 G (-13.9%); short strings looked up from the stack 15.26 G (-3.4%).
+
+Profile of main at 10,000 options (self share of `instructions:u` samples): `link_inner` 9.9%, `browser_nodelist::item` 7.6%, `eval_expr_inner` 6.9%, `machine` 6.8%, `Heap::intern` 5.5%, `call_fn_inner` 4.6%, `Heap::lookup` 4.6%, `opt_state` 4.3%, `node_of` 4.1%, `hash_one` and SipHash `write` 6.0%. Inclusive: `get_prop` 61%, `call_host` 33%, `option_value` 15%, `indexed_item` 14%, `option_selected` 9%. The instruction samples of `item` and `node_of` sit on the first load of a hash probe (a cache miss), which is why a dense table would also save time (to verify: not measured here).
+
+All rows: 500 rows against main, none worse than +0.5% (worst `gen_load finally 10`, +0.288%), 345 better than -0.5%, median -1.62%.
