@@ -363,7 +363,6 @@ fn response_constructor_request_and_clone() {
         // Gates.
         for (src, what) in [
             ("new Request('/x', {method:'PUT'}); fetch(new Request('/x', {method:'PUT'}))", "fetch method other than GET and POST"),
-            ("new Request('/x', {signal: {}})", "fetch option signal (AbortController)"),
             ("new Request('/x', {mode:'no-cors'})", "fetch mode: no-cors (opaque responses)"),
             ("new Request('/x', {redirect:'manual'})", "fetch redirect: manual (opaque redirect responses)"),
             ("new Request('/x', {integrity:'sha256-x'})", "fetch option integrity"),
@@ -379,6 +378,7 @@ fn response_constructor_request_and_clone() {
             let r = js(&mut gate_browser, src);
             assert_eq!(r, format!("unsupported:{what}"), "{src}");
         }
+        assert_eq!(js(&mut b, "new Request('/x', {signal: {}})"), "throw:TypeError:Failed to construct 'Request': Failed to read the 'signal' property from 'RequestInit': Failed to convert value to 'AbortSignal'.");
         assert_eq!(js(&mut b, "new Request('/x', {body: {getReader: function () {}}, method: 'POST'})"), "unsupported:a ReadableStream as a body");
     });
 }

@@ -51,7 +51,7 @@
 //!   XMLNS and XLink. Any other namespace is `Unsupported`. Shadow roots are a tree foundation only (`browser_shadow.rs`: read its header for the gates). `new Document()`, `createDocumentFragment`, `new DocumentFragment()`, `outerHTML`, `insertAdjacentHTML`,
 //!   `style`, `before/after/replaceWith`, layout APIs, `location` and
 //!   network are absent. Timers, `queueMicrotask`, `performance.now` and `MessageChannel` are in `browser_scheduler.rs`. `Element.attributes` and `Attr` are in `browser_attr.rs`.
-//! - `addEventListener` option `signal` is `Unsupported`. `isTrusted` is always false. Events made by the test driver
+//! - `addEventListener` option `signal` removes the listener on abort (`browser_abort.rs`). `isTrusted` is always false. Events made by the test driver
 //!   are plain `Event`s (no `MouseEvent`/`InputEvent` fields), except the `submit` of a click activation: a `SubmitEvent`.
 //! - Focus (`browser_focus.rs`): `focus()`, `blur()`, `document.activeElement`, `FocusEvent`. Read its header.
 //! - Default actions are NOT implemented: no link navigation, no form validation or native form navigation, no checkbox toggle or
@@ -343,6 +343,8 @@ pub struct Dom {
     pub(crate) nl: crate::browser_nodelist::NodeListHost,
     /// `HTMLElement.dataset` and `DOMStringMap` (`browser_dataset.rs`).
     pub(crate) dataset: crate::browser_dataset::DatasetHost,
+    /// `AbortController` and `AbortSignal` (`browser_abort.rs`).
+    pub(crate) abort: crate::browser_abort::AbortHost,
 }
 
 impl Host for Dom {
@@ -370,6 +372,7 @@ impl Host for Dom {
         at::roots(self, out);
         crate::browser_nodelist::roots(self, out);
         crate::browser_dataset::roots(self, out);
+        crate::browser_abort::roots(self, out);
         self.resize_roots(out);
     }
 
@@ -383,6 +386,7 @@ impl Host for Dom {
         at::trace(self, owner, out);
         crate::browser_nodelist::trace(self, owner, out);
         crate::browser_dataset::trace(self, owner, out);
+        crate::browser_abort::trace(self, owner, out);
         let st = self.st.borrow();
         if let Some(&t) = st.by_obj.get(&owner) {
             for l in st.listeners.get(&t).into_iter().flatten() {
@@ -433,6 +437,7 @@ impl Host for Dom {
         self.sched_prune(live);
         self.fetch.prune(live);
         self.streams.prune(live);
+        crate::browser_abort::prune(self, live);
     }
 
     fn report_exception(&self, it: &mut Interp<'_>, thrown: Value) {
@@ -464,6 +469,8 @@ fn domexc_codes(name: &str) -> u32 {
         "SecurityError" => 18,
         "QuotaExceededError" => 22,
         "DataCloneError" => 25,
+        "AbortError" => 20,
+        "TimeoutError" => 23,
         _ => 0,
     }
 }
@@ -839,6 +846,7 @@ impl Dom {
         at::install(self, it)?;
         crate::browser_nodelist::install(self, it)?;
         crate::browser_dataset::install(self, it)?;
+        crate::browser_abort::install(self, it)?;
         crate::browser_console::install(self, it)?;
         crate::browser_style::install(self, it)?;
         crate::browser_computed::install(self, it)?;
@@ -1105,6 +1113,7 @@ impl Browser {
             attr: Default::default(),
             nl: Default::default(),
             dataset: Default::default(),
+            abort: Default::default(),
         });
         it.set_host(dom.clone())?;
         it.heap.set_indexed_source(dom.clone());

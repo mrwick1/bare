@@ -1,0 +1,237 @@
+# DOM-side cases (headless Chrome is the oracle; see tools/js/dom_check.sh). Each case ends with a reader function.
+# Errors are logged by name, not by message. Method enumerability is left out: bare makes every DOM method non-enumerable.
+# Chrome removes a listener that was added again after `removeEventListener` when the first one had a signal. bare follows the spec (identity), so no case has that.
+=== abort_basic
+var c = new AbortController(), s = c.signal;
+var before = [s.aborted, String(s.reason)].join();
+c.abort();
+var r = s.reason;
+(function () { return [before, s.aborted, r instanceof DOMException, r.name, r.code, r.message, s.reason === r, c.signal === s].join('|'); })
+=== abort_reason_given
+var c = new AbortController(), s = c.signal, why = { x: 1 };
+c.abort(why);
+(function () { return [s.reason === why, s.aborted].join(); })
+=== abort_reason_undefined_default
+var c = new AbortController(); c.abort(undefined);
+(function () { return [c.signal.reason.name, c.signal.reason instanceof Error].join(); })
+=== abort_reason_null
+var c = new AbortController(); c.abort(null);
+(function () { return [c.signal.aborted, String(c.signal.reason)].join(); })
+=== abort_twice_keeps_first
+var c = new AbortController(), n = 0;
+c.signal.addEventListener('abort', function () { n++; });
+c.abort('a'); c.abort('b');
+(function () { return [n, c.signal.reason].join(); })
+=== abort_event_shape
+var c = new AbortController(), log = [];
+c.signal.addEventListener('abort', function (e) { log.push([e.type, e.target === c.signal, e.currentTarget === c.signal, e.bubbles, e.cancelable, e.composed, e.isTrusted, e.eventPhase, e instanceof Event, c.signal.aborted].join()); });
+c.abort();
+(function () { return log.join('|'); })
+=== abort_event_order_and_onabort
+var c = new AbortController(), log = [];
+c.signal.addEventListener('abort', function () { log.push('listener1'); });
+c.signal.onabort = function (e) { log.push('onabort:' + (this === c.signal) + ':' + e.type); };
+c.signal.addEventListener('abort', function () { log.push('listener2'); });
+c.abort();
+(function () { return log.join(); })
+=== onabort_get_set
+var s = new AbortController().signal, f = function () {};
+var a = String(s.onabort); s.onabort = f; var b = s.onabort === f; s.onabort = 5; var cc = String(s.onabort);
+(function () { return [a, b, cc].join(); })
+=== onabort_not_called_for_other_signal
+var c1 = new AbortController(), c2 = new AbortController(), log = [];
+c1.signal.onabort = function () { log.push('1'); }; c2.signal.onabort = function () { log.push('2'); };
+c2.abort();
+(function () { return log.join(); })
+=== throwIfAborted
+var c = new AbortController(), log = [];
+try { c.signal.throwIfAborted(); log.push('ok'); } catch (e) { log.push('threw'); }
+var why = {}; c.abort(why);
+try { c.signal.throwIfAborted(); log.push('ok'); } catch (e) { log.push(e === why ? 'same' : 'other'); }
+(function () { return log.join(); })
+=== throwIfAborted_default_reason
+var c = new AbortController(); c.abort(); var n;
+try { c.signal.throwIfAborted(); } catch (e) { n = e.name; }
+(function () { return n; })
+=== static_abort
+var s = AbortSignal.abort(), t = AbortSignal.abort('why');
+(function () { return [s.aborted, s.reason.name, s.reason instanceof DOMException, t.aborted, t.reason].join(); })
+=== static_abort_listener_never_fires
+var s = AbortSignal.abort(), n = 0; s.addEventListener('abort', function () { n++; });
+(function () { return n; })
+=== static_timeout
+var s = AbortSignal.timeout(50), log = [s.aborted];
+s.addEventListener('abort', function () { log.push('fired:' + s.reason.name + ':' + s.reason.code + ':' + s.reason.message); });
+(function () { return log.join(); })
+=== static_timeout_zero
+var s = AbortSignal.timeout(0), log = [s.aborted];
+s.onabort = function () { log.push('fired'); };
+(function () { return log.join() + '|' + s.aborted; })
+=== static_timeout_not_yet
+var s = AbortSignal.timeout(100000), n = 0; s.onabort = function () { n++; };
+(function () { return [s.aborted, n].join(); })
+=== static_timeout_bad_values
+var out = [];
+[-1, NaN, Infinity].forEach(function (v) { try { AbortSignal.timeout(v); out.push('ok'); } catch (e) { out.push(e.name); } });
+try { AbortSignal.timeout(); out.push('ok'); } catch (e) { out.push(e.name); }
+(function () { return out.join(); })
+=== static_timeout_string_number
+var s = AbortSignal.timeout('20'), n = 0; s.onabort = function () { n++; };
+(function () { return [n, s.aborted].join(); })
+=== any_empty_never_aborts
+var s = AbortSignal.any([]);
+(function () { return [s.aborted, String(s.reason)].join(); })
+=== any_follows_first
+var a = new AbortController(), b = new AbortController(), log = [];
+var s = AbortSignal.any([a.signal, b.signal]);
+s.addEventListener('abort', function () { log.push('any:' + s.reason + ':' + s.aborted + ':' + a.signal.aborted); });
+a.signal.addEventListener('abort', function () { log.push('a'); });
+b.abort('B'); a.abort('A');
+(function () { return log.join() + '|' + s.reason; })
+=== any_already_aborted
+var a = new AbortController(); a.abort('early');
+var s = AbortSignal.any([new AbortController().signal, a.signal]);
+(function () { return [s.aborted, s.reason].join(); })
+=== any_event_order
+var a = new AbortController(), log = [];
+var s = AbortSignal.any([a.signal]), t = AbortSignal.any([a.signal]);
+a.signal.onabort = function () { log.push('source'); s.reason; log.push('s.aborted=' + s.aborted + ' t.aborted=' + t.aborted); };
+s.onabort = function () { log.push('s'); }; t.onabort = function () { log.push('t'); };
+a.abort();
+(function () { return log.join(); })
+=== any_of_any
+var a = new AbortController(), s1 = AbortSignal.any([a.signal]), s2 = AbortSignal.any([s1]), n = 0;
+s2.onabort = function () { n++; };
+a.abort('x');
+(function () { return [s1.aborted, s2.aborted, s2.reason, n].join(); })
+=== any_timeout
+var s = AbortSignal.any([AbortSignal.timeout(30), new AbortController().signal]), log = [];
+s.onabort = function () { log.push(s.reason.name); };
+(function () { return log.join(); })
+=== any_bad_input
+var out = [];
+try { AbortSignal.any([{}]); out.push('ok'); } catch (e) { out.push(e.name); }
+try { AbortSignal.any(5); out.push('ok'); } catch (e) { out.push(e.name); }
+try { AbortSignal.any(); out.push('ok'); } catch (e) { out.push(e.name); }
+try { AbortSignal.any(new Set([new AbortController().signal])); out.push('ok'); } catch (e) { out.push(e.name); }
+(function () { return out.join(); })
+=== listener_signal_removes
+var c = new AbortController(), t = new EventTarget(), n = 0;
+t.addEventListener('x', function () { n++; }, { signal: c.signal });
+t.dispatchEvent(new Event('x')); c.abort(); t.dispatchEvent(new Event('x'));
+(function () { return n; })
+=== listener_signal_already_aborted
+var c = new AbortController(), t = new EventTarget(), n = 0; c.abort();
+t.addEventListener('x', function () { n++; }, { signal: c.signal });
+t.dispatchEvent(new Event('x'));
+(function () { return n; })
+=== listener_signal_with_once_capture
+var c = new AbortController(), t = new EventTarget(), log = [];
+t.addEventListener('x', function () { log.push('once'); }, { once: true, signal: c.signal, capture: true });
+t.addEventListener('x', function () { log.push('plain'); }, { signal: c.signal });
+t.dispatchEvent(new Event('x')); c.abort(); t.dispatchEvent(new Event('x'));
+(function () { return log.join(); })
+=== listener_signal_wrong_type
+var t = new EventTarget(), out = [];
+[null, {}, 5, 'x'].forEach(function (v) { try { t.addEventListener('x', function () {}, { signal: v }); out.push('ok'); } catch (e) { out.push(e.name); } });
+try { t.addEventListener('x', function () {}, { signal: undefined }); out.push('ok'); } catch (e) { out.push(e.name); }
+(function () { return out.join(); })
+=== listener_signal_on_window_and_node
+var c = new AbortController(), n = 0, d = document.createElement('div');
+window.addEventListener('x', function () { n++; }, { signal: c.signal });
+d.addEventListener('x', function () { n += 10; }, { signal: c.signal });
+window.dispatchEvent(new Event('x')); d.dispatchEvent(new Event('x'));
+c.abort();
+window.dispatchEvent(new Event('x')); d.dispatchEvent(new Event('x'));
+(function () { return n; })
+=== listener_signal_removed_then_abort
+var c = new AbortController(), t = new EventTarget(), n = 0, f = function () { n++; };
+t.addEventListener('x', f, { signal: c.signal }); t.removeEventListener('x', f);
+c.abort(); t.dispatchEvent(new Event('x'));
+(function () { return n; })
+=== listener_duplicate_with_signal
+var c = new AbortController(), t = new EventTarget(), n = 0, f = function () { n++; };
+t.addEventListener('x', f); t.addEventListener('x', f, { signal: c.signal });
+c.abort(); t.dispatchEvent(new Event('x'));
+(function () { return n; })
+=== listener_on_signal_with_signal
+var c = new AbortController(), log = [];
+c.signal.addEventListener('abort', function () { log.push('a1'); }, { signal: c.signal });
+c.signal.addEventListener('abort', function () { log.push('a2'); });
+c.abort();
+(function () { return log.join(); })
+=== abort_inside_listener
+var c = new AbortController(), log = [];
+c.signal.addEventListener('abort', function () { log.push('first'); c.abort('again'); });
+c.signal.addEventListener('abort', function () { log.push('second'); });
+c.abort('one');
+(function () { return log.join() + '|' + c.signal.reason; })
+=== listener_throws
+var c = new AbortController(), log = [];
+c.signal.addEventListener('abort', function () { throw new Error('x'); });
+c.signal.addEventListener('abort', function () { log.push('after'); });
+var threw = false; try { c.abort(); } catch (e) { threw = true; }
+(function () { return [log.join(), threw, c.signal.aborted].join(); })
+=== remove_listener_during_abort
+var c = new AbortController(), log = [];
+function a() { log.push('a'); c.signal.removeEventListener('abort', b); } function b() { log.push('b'); }
+c.signal.addEventListener('abort', a); c.signal.addEventListener('abort', b);
+c.abort();
+(function () { return log.join(); })
+=== shapes_and_brands
+var c = new AbortController(), s = c.signal, out = [];
+out.push(typeof AbortController, typeof AbortSignal, s instanceof AbortSignal, s instanceof EventTarget, c instanceof AbortController);
+out.push(Object.prototype.toString.call(c), Object.prototype.toString.call(s));
+out.push(AbortSignal.prototype.constructor === AbortSignal, AbortController.length, AbortSignal.length, AbortController.name, AbortSignal.name);
+out.push(Object.getPrototypeOf(AbortSignal.prototype) === EventTarget.prototype);
+(function () { return out.join(); })
+=== illegal_constructors_and_invocations
+var out = [];
+try { new AbortSignal(); out.push('ok'); } catch (e) { out.push(e.name); }
+try { AbortSignal(); out.push('ok'); } catch (e) { out.push(e.name); }
+try { AbortController(); out.push('ok'); } catch (e) { out.push(e.name); }
+try { AbortController.prototype.abort.call({}); out.push('ok'); } catch (e) { out.push(e.name); }
+try { Object.getOwnPropertyDescriptor(AbortSignal.prototype, 'aborted').get.call({}); out.push('ok'); } catch (e) { out.push(e.name); }
+try { AbortSignal.prototype.throwIfAborted.call(new AbortController()); out.push('ok'); } catch (e) { out.push(e.name); }
+(function () { return out.join(); })
+=== property_descriptors
+var d1 = Object.getOwnPropertyDescriptor(AbortSignal.prototype, 'aborted'), d2 = Object.getOwnPropertyDescriptor(AbortSignal.prototype, 'reason');
+var d3 = Object.getOwnPropertyDescriptor(AbortController.prototype, 'signal'), d4 = Object.getOwnPropertyDescriptor(AbortController.prototype, 'abort');
+var d5 = Object.getOwnPropertyDescriptor(AbortSignal, 'timeout'), g = Object.getOwnPropertyDescriptor(window, 'AbortController');
+var d6 = Object.getOwnPropertyDescriptor(AbortSignal.prototype, 'onabort');
+(function () { return [typeof d1.get, d1.set, d1.enumerable, d1.configurable, typeof d2.get, typeof d3.get, d4.writable, d4.configurable, d5.writable, typeof d6.set, g.writable, g.enumerable, g.configurable, AbortSignal.timeout.length, AbortSignal.any.length, AbortSignal.abort.length, AbortController.prototype.abort.length].join(); })
+=== signal_is_readonly
+var c = new AbortController(), s = c.signal;
+try { c.signal = 5; } catch (e) {}
+try { s.aborted = true; } catch (e) {}
+(function () { return [c.signal === s, s.aborted].join(); })
+=== global_assign
+var f = function () {};
+AbortController = f;
+(function () { return [AbortController === f, typeof AbortSignal].join(); })
+=== separate_signals
+var a = new AbortController(), b = new AbortController();
+a.abort();
+(function () { return [a.signal.aborted, b.signal.aborted, a.signal === b.signal].join(); })
+=== signal_expando_and_events
+var s = new AbortController().signal; s.custom = 5;
+var ev = new Event('abort'), got = [];
+s.addEventListener('abort', function (e) { got.push(e === ev); });
+var r = s.dispatchEvent(ev);
+(function () { return [s.custom, r, got.join(), s.aborted].join(); })
+=== promise_race_timeout
+var s = AbortSignal.timeout(20), log = [];
+new Promise(function (res, rej) { s.addEventListener('abort', function () { rej(s.reason); }); }).catch(function (e) { log.push('rejected:' + e.name); });
+(function () { return log.join(); })
+=== structured_clone_signal_fails
+var c = new AbortController(), out = [];
+try { structuredClone(c.signal); out.push('ok'); } catch (e) { out.push(e.name); }
+try { structuredClone(c); out.push('ok'); } catch (e) { out.push(e.name); }
+(function () { return out.join(); })
+=== listener_signal_react_query_shape
+var c = new AbortController(), t = new EventTarget(), log = [];
+var handler = function () { log.push('h'); };
+c.signal.addEventListener('abort', function () { log.push('cleanup'); }, { once: true });
+t.addEventListener('abort', handler, { signal: c.signal });
+t.dispatchEvent(new Event('abort')); c.abort(); t.dispatchEvent(new Event('abort'));
+(function () { return log.join(); })

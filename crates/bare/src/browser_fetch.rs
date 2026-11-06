@@ -36,7 +36,7 @@
 //! `browser_streams.rs`; the stream and reader methods there dispatch on which kind of object `this` is.
 //!
 //! Gates (explicit `Unsupported`, nothing is faked): methods other than GET and POST; `Blob`/`FormData`/`URLSearchParams`/stream
-//! bodies and `blob()`/`formData()`; `Request.body`, `signal` (AbortController) and `mode: "no-cors"`; non-empty `integrity`;
+//! bodies and `blob()`/`formData()`; `Request.body` and `mode: "no-cors"`; non-empty `integrity`;
 //! `cache: "only-if-cached"`; non-ASCII header values; compressed
 //! responses (`Content-Encoding` other than identity is a network error); subclassing (`class X extends Response`).
 //! Headers iteration: `keys`, `values`, `entries` and `[Symbol.iterator]` (the same function as `entries`) make live iterators. Each
@@ -51,6 +51,7 @@
 //! snapshot of sorted, combined entries. Bodies are not cached: the client cache is bypassed. Timeouts are the client's (120 s
 //! a reply). A request that already started its blocking I/O cannot be interrupted; [`Browser::abort_fetches`] only rejects
 //! requests that are still queued.
+//! `signal` (`browser_abort.rs`): an aborted signal rejects the promise with its reason at once; a later abort rejects a request that is still queued. A request that runs its blocking I/O is not interrupted. `request.signal` is a new signal that follows `init.signal`.
 //!
 //! Not browser-verified except against Node for the pure parts (`tools/js/fetch_oracle.mjs`).
 
@@ -300,6 +301,8 @@ struct ReqData {
     redirect: Redirect,
     credentials: &'static str,
     mode: &'static str,
+    /// The signal that follows `init.signal`, made on the first read of `request.signal` or at construction.
+    signal: Option<ObjId>,
 }
 
 struct RespData {
@@ -383,7 +386,7 @@ impl Fetch {
     pub(crate) fn trace(&self, owner: ObjId, out: &mut Vec<Value>) {
         let st = self.st.borrow();
         match st.objs.get(&owner) {
-            Some(F::Request(r)) => out.push(Value::Object(r.c.headers)),
+            Some(F::Request(r)) => out.extend([Value::Object(r.c.headers)].into_iter().chain(r.signal.map(Value::Object))),
             Some(F::Response(r)) => {
                 out.push(Value::Object(r.c.headers));
                 out.extend(r.stream.map(Value::Object));
@@ -745,6 +748,8 @@ struct Core {
     redirect: Redirect,
     credentials: &'static str,
     mode: &'static str,
+    /// The `AbortSignal` of `init.signal`, or the one of the `Request` input.
+    signal: Option<ObjId>,
 }
 
 /// Build the data of a request from `input` and `init`, the way `new Request(input, init)` and `fetch(input, init)` do.
@@ -753,8 +758,8 @@ fn make_core(d: &Dom, it: &mut Interp<'_>, input: Value, init: Value) -> R<Core>
     let mut transfer: Option<ObjId> = None;
     let mut core = match input {
         Value::Object(o) if matches!(d.fetch.st.borrow().objs.get(&o), Some(F::Request(_))) => {
-            let (method, url, redirect, credentials, mode, hdr, body, used) = match d.fetch.st.borrow().objs.get(&o) {
-                Some(F::Request(r)) => (r.method.clone(), dup(&r.url), r.redirect, r.credentials, r.mode, r.c.headers, r.c.body.bytes.clone(), r.c.body.used || r.c.body.locked),
+            let (method, url, redirect, credentials, mode, hdr, body, used, signal) = match d.fetch.st.borrow().objs.get(&o) {
+                Some(F::Request(r)) => (r.method.clone(), dup(&r.url), r.redirect, r.credentials, r.mode, r.c.headers, r.c.body.bytes.clone(), r.c.body.used || r.c.body.locked, r.signal),
                 _ => unreachable!(),
             };
             if used {
@@ -763,12 +768,12 @@ fn make_core(d: &Dom, it: &mut Interp<'_>, input: Value, init: Value) -> R<Core>
             transfer = body.is_some().then_some(o);
             let mut headers = d.list_of(hdr);
             headers.guard = Guard::Request;
-            Core { method, url, headers, body, redirect, credentials, mode }
+            Core { method, url, headers, body, redirect, credentials, mode, signal }
         }
         _ => {
             let s = d.string_arg(it, input)?;
             let url = d.resolve_url(it, &s)?;
-            Core { method: "GET".into(), url, headers: HeaderList::new(Guard::Request), body: None, redirect: Redirect::Follow, credentials: "same-origin", mode: "cors" }
+            Core { method: "GET".into(), url, headers: HeaderList::new(Guard::Request), body: None, redirect: Redirect::Follow, credentials: "same-origin", mode: "cors", signal: None }
         }
     };
     if !matches!(init, Value::Undefined | Value::Null) {
@@ -806,10 +811,11 @@ fn make_core(d: &Dom, it: &mut Interp<'_>, input: Value, init: Value) -> R<Core>
         if d.choice(it, init, "cache", &["default", "no-store", "reload", "no-cache", "force-cache", "only-if-cached"])? == Some("only-if-cached") {
             return Err(Error::Unsupported(unsupported("fetch cache: only-if-cached")));
         }
-        for name in ["signal"] {
-            if !matches!(d.prop(it, init, name)?, Value::Undefined | Value::Null) {
-                return Err(Error::Unsupported(unsupported("fetch option signal (AbortController)")));
-            }
+        match d.prop(it, init, "signal")? {
+            Value::Undefined => {}
+            Value::Null => core.signal = None,
+            Value::Object(o) if d.is_signal(o) => core.signal = Some(o),
+            _ => return Err(it.type_error("Failed to construct 'Request': Failed to read the 'signal' property from 'RequestInit': Failed to convert value to 'AbortSignal'.")),
         }
         let integrity = d.prop(it, init, "integrity")?;
         if !matches!(integrity, Value::Undefined) && !d.string_arg(it, integrity)?.is_empty() {
@@ -864,6 +870,25 @@ fn settle(it: &mut Interp<'_>, p: Value, r: R<Value>) -> R<Value> {
         Err(e) => return Err(e),
     }
     Ok(p)
+}
+
+/// The abort algorithm of a queued request: reject its promise with `reason`. A request that already left the queue is not touched.
+pub(crate) fn abort_queued(d: &Dom, it: &mut Interp<'_>, promise: Value, reason: Value) -> R<()> {
+    let found = {
+        let mut st = d.fetch.st.borrow_mut();
+        match st.queue.iter().position(|t| matches!((t.promise, promise), (Value::Object(a), Value::Object(b)) if a == b)) {
+            Some(i) => {
+                let t = st.queue.remove(i).expect("position");
+                st.queued_bytes -= t.body.as_ref().map_or(0, |b| b.len());
+                true
+            }
+            None => false,
+        }
+    };
+    if found {
+        it.host_reject_promise(promise, reason)?;
+    }
+    Ok(())
 }
 
 fn thrown_value(e: Error) -> R<Value> {
@@ -1008,7 +1033,11 @@ fn new_request_obj(d: &Dom, it: &mut Interp<'_>, core: Core) -> R<ObjId> {
     let n = core.body.as_ref().map_or(0, |b| b.len());
     d.reserve(it, 2, n)?;
     let h = d.headers_obj(it, core.headers)?;
-    d.add_obj(it, Pr::Request, F::Request(ReqData { c: Common { headers: h, body: Body::new(core.body) }, method: core.method, url: core.url, redirect: core.redirect, credentials: core.credentials, mode: core.mode }))
+    let signal = match core.signal {
+        Some(s) => Some(d.follow_signal(it, s)?),
+        None => None,
+    };
+    d.add_obj(it, Pr::Request, F::Request(ReqData { c: Common { headers: h, body: Body::new(core.body) }, method: core.method, url: core.url, redirect: core.redirect, credentials: core.credentials, mode: core.mode, signal }))
 }
 
 fn request_ctor(d: &Dom, it: &mut Interp<'_>, _: Value, a: &[Value]) -> R<Value> {
@@ -1114,13 +1143,24 @@ fn req_body_used(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> R<Va
     Ok(Value::Bool(with_req(d, it, this, |r| r.c.body.used)?))
 }
 fn req_clone(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> R<Value> {
-    let (method, url, redirect, credentials, mode, hdr, body, used) = with_req(d, it, this, |r| (r.method.clone(), dup(&r.url), r.redirect, r.credentials, r.mode, r.c.headers, r.c.body.bytes.clone(), r.c.body.used || r.c.body.locked))?;
+    let (method, url, redirect, credentials, mode, hdr, body, used, signal) = with_req(d, it, this, |r| (r.method.clone(), dup(&r.url), r.redirect, r.credentials, r.mode, r.c.headers, r.c.body.bytes.clone(), r.c.body.used || r.c.body.locked, r.signal))?;
     if used {
         return Err(it.type_error("Failed to execute 'clone' on 'Request': Request body is already used"));
     }
     let mut headers = d.list_of(hdr);
     headers.guard = Guard::Request;
-    Ok(Value::Object(new_request_obj(d, it, Core { method, url, headers, body, redirect, credentials, mode })?))
+    Ok(Value::Object(new_request_obj(d, it, Core { method, url, headers, body, redirect, credentials, mode, signal })?))
+}
+fn req_signal(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> R<Value> {
+    let o = d.brand(it, this)?;
+    if let Some(F::Request(ReqData { signal: Some(s), .. })) = d.fetch.st.borrow().objs.get(&o) {
+        return Ok(Value::Object(*s));
+    }
+    let s = d.fresh_signal(it)?;
+    if let Some(F::Request(r)) = d.fetch.st.borrow_mut().objs.get_mut(&o) {
+        r.signal = Some(s);
+    }
+    Ok(Value::Object(s))
 }
 fn gate_request_body(_: &Dom, _: &mut Interp<'_>, _: Value, _: &[Value]) -> R<Value> {
     Err(Error::Unsupported(unsupported("Request.body (a request body stream)")))
@@ -1447,6 +1487,9 @@ fn prepare(d: &Dom, it: &mut Interp<'_>, promise: Value, a: &[Value]) -> R<()> {
         }
     }
     let core = make_core(d, it, arg(a, 0), arg(a, 1))?;
+    if let Some((true, reason)) = core.signal.and_then(|s| d.signal_state(s)) {
+        return Err(Error::Throw(reason));
+    }
     // Policy: no DNS and no socket before this passes.
     let method = wire_method(&core.method)?;
     {
@@ -1467,6 +1510,11 @@ fn prepare(d: &Dom, it: &mut Interp<'_>, promise: Value, a: &[Value]) -> R<()> {
         let mut st = d.fetch.st.borrow_mut();
         if st.retained.saturating_add(st.queued_bytes).saturating_add(n) > lim.max_retained {
             return Err(d.lim("fetch-retained"));
+        }
+        if let Some(s) = core.signal {
+            drop(st);
+            d.signal_add_algo(s, crate::browser_abort::Algo::Fetch(promise))?;
+            st = d.fetch.st.borrow_mut();
         }
         st.queued_bytes += n;
         st.started += 1;
@@ -1728,6 +1776,7 @@ static DEFS: &[Def] = &[
     Def { on: Request, name: "mode", len: 0, kind: G(req_mode) },
     Def { on: Request, name: "bodyUsed", len: 0, kind: G(req_body_used) },
     Def { on: Request, name: "body", len: 0, kind: G(gate_request_body) },
+    Def { on: Request, name: "signal", len: 0, kind: G(req_signal) },
     Def { on: Request, name: "clone", len: 0, kind: M(req_clone) },
     Def { on: Request, name: "text", len: 0, kind: M(body_text) },
     Def { on: Request, name: "json", len: 0, kind: M(body_json) },

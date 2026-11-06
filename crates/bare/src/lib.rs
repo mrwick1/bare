@@ -31,6 +31,7 @@ mod browser_namespace;
 mod browser_attr;
 mod browser_nodelist;
 mod browser_dataset;
+mod browser_abort;
 #[cfg(test)]
 mod browser_attr_tests;
 #[cfg(test)]
