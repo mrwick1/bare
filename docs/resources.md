@@ -3404,3 +3404,76 @@ Chrome cases: 27 new cases (`outer_*`) in `tools/fixtures/js/dom-cases.txt`, rec
 Cost: `perf stat -e instructions:u`, minimum of 3 runs, each binary in its own `CARGO_TARGET_DIR` under `/data/bare-tmp`. Main d6d9b92 against this build. 27 rows: `fragment_load` (parse, replace, deep at 1x and 10x), `browser_load` (6 cases at 1x, 3 at 10x), `fetch_load`, `web_apis_load`, `style_load` and `loader_load` at 1x. All are below +0.5%. The worst is `fragment_load replace 10` at +0.377% (231,666,780 to 232,540,591). The best is `fragment_load parse 10` at -0.574%. `browser_load` rows are between -0.046% and +0.138%.
 
 Not tested: `outerHTML` on an element in an iframe document, on a node with a shadow root, a parent that is a `template` content (gated), and the live staging login.
+
+## requestAnimationFrame and the rendering step
+
+Problem: React and the staging app call `requestAnimationFrame`. The host has no display and no vsync, and a session must still settle.
+
+What runs: `requestAnimationFrame(cb)` gives a handle (a number from 1, never reused). `cancelAnimationFrame(handle)` cancels it. A frame is one `Task::Render` of the scheduler. It is due at the next multiple of 1000/60 ms of the scheduler clock. It runs the callbacks that were queued before it started, in call order, then `ResizeObserver`, then `IntersectionObserver`. Every callback of one frame gets the same timestamp. A callback added during a frame waits for the next frame. A throw is reported (type `animationframe`) and the frame goes on. A microtask checkpoint follows each callback.
+
+Design: a frame is queued only when a callback or an observer wants one, so an idle page queues none and `Browser::advance_time` has nothing to run. A page that asks for a frame in each frame gets one frame for each 16.67 ms of virtual time. Bound: `animation-frame-callbacks`. Gates: none. Not built: `requestIdleCallback`, `document.timeline`, `Animation`.
+
+Checks: 21 cases in `tools/fixtures/ui/raf-cases.txt` match headless Chrome (`tools/ui/chrome_topic.mjs raf`, answers in `chrome-raf.txt`). 6 Rust tests cover what Chrome cannot show: the frame grid of the virtual clock, the bounds and the step order with `ResizeObserver`.
+
+## MutationObserver
+
+Problem: the live staging login stopped at `ReferenceError: MutationObserver is not defined`, thrown from a React effect.
+
+What runs: `new MutationObserver(cb)`, `observe(node, options)` (`childList`, `attributes`, `characterData`, `subtree`, `attributeOldValue`, `characterDataOldValue`, `attributeFilter`), `disconnect()`, `takeRecords()`, and `MutationRecord` with `type`, `target`, `addedNodes`, `removedNodes`, `previousSibling`, `nextSibling`, `attributeName`, `attributeNamespace` and `oldValue`. The delivery is one microtask for the realm. `textContent`, `innerHTML`, `replaceChild` and a many-node `append` or `prepend` make one record. A node that is removed stays watched by the `subtree` observers of its old ancestors until the next delivery (transient registered observers).
+
+Design: the native document reports each change to one watcher (`Document::set_watcher`, `Change::{Link, Unlink, Attr, Text}`). The watcher is set by the first `observe` and removed with the last registration. A page with no `observe` pays one `Option` check at a change and one `Cell` read at a host call (`Dom::mo.armed`). Registrations are in a table by node, and a change walks the ancestors of its target. The microtask is queued after the host call returns, because the watcher cannot reach the interpreter. A change made by the host itself (a loader) is delivered after the next host call.
+
+Deviations: record fields are own data properties, not prototype getters. `addedNodes` and `removedNodes` are arrays, not `NodeList`. An observer with a registration or a queued record is a GC root until `disconnect`. `replaceChild` with a node from another parent queues the removal record of that parent after the record of the old child. Not built: `insertData` and `Range` edits as text changes. Bounds: `mutation-observers`, `mutation-registrations`, `mutation-records`.
+
+Checks: 52 cases in `mutation-cases.txt` match Chrome. 5 Rust tests run besides the Chrome cases.
+
+## HTMLElement members
+
+What runs: `hidden` (boolean, or `until-found`), `inert`, `tabIndex` (also on `SVGElement`), `click()`, `offsetParent`, `offsetTop`, `offsetLeft` and `innerText`. `offsetWidth` and `offsetHeight` already existed. `innerText` follows the rendered text collection steps over the native cascade: `display:none`, `visibility`, `white-space`, `text-transform`, `br`, block breaks, `p` double breaks, table cell tabs and row line feeds. The setter splits at line breaks into text nodes with `<br>`. `offsetParent` is `null` for `html`, `body` and `position:fixed`, else the nearest positioned ancestor, or `td th table` for a static element, or `body`. `click()` sends one `click` event (not trusted, bubbles, cancelable, composed) and a submit button submits its form.
+
+Gates: `click()` on a link, a `label`, a `summary`, a checkbox or a radio (their default action is built only for the window). `innerText` over a shown `select` or `textarea`. `offsetTop` and `offsetLeft` when the element or its offset parent has no fragment or more than one. A connected shadow tree.
+
+Deviations: `click()` sends a plain `Event` (there is no `MouseEvent`). `innerText` does not know soft line wraps, `capitalize` looks at one text node at a time, and `display:contents` is not modelled.
+
+Checks: 46 cases in `element-cases.txt` match Chrome. 4 Rust tests run besides the Chrome cases.
+
+## IntersectionObserver
+
+What runs: `new IntersectionObserver(cb, {root, rootMargin, threshold})`, `observe`, `unobserve`, `disconnect`, `takeRecords`, and the entry with `time`, `rootBounds`, `boundingClientRect`, `intersectionRect`, `intersectionRatio`, `isIntersecting`, `target`. One cascade and one bounded layout compute all observations in a frame. An observation reports when its threshold index or `isIntersecting` changes, and the first frame always reports. A `Task::Notify` task delivers the entries. The rectangle is cut by the `overflow` clip of each box on the containing block chain. `rootMargin` px values are floored, as in Chrome, and thresholds are `f32`, as in Chrome.
+
+Gates: `trackVisibility: true`, `position: sticky` on the target or its chain, and the gates of the cascade and layout (a missing sheet, a connected shadow tree). Deviations: entries are plain objects with own data properties, `thresholds` is not frozen, `delay` and `scrollMargin` are not read. Bounds: `intersection-observers`, `intersection-observations`.
+
+Checks: 48 cases in `intersection-cases.txt` match Chrome. 8 Rust tests run besides the Chrome cases.
+
+## TreeWalker and NodeFilter
+
+What runs: `document.createTreeWalker(root, whatToShow, filter)`, `TreeWalker` (`root`, `whatToShow`, `filter`, `currentNode`, `parentNode`, `firstChild`, `lastChild`, `previousSibling`, `nextSibling`, `previousNode`, `nextNode`) and `NodeFilter` (the constants). A filter is a function or an object with `acceptNode`, read at each call. A call from inside the filter into the same walker is `InvalidStateError`. A throw in a filter leaves `currentNode` as it was.
+
+Gates and deviations: `NodeIterator` and `createNodeIterator` are not built. A `DocumentFragment` root is not possible yet. `nextNode()` from a detached node with no later node gives `null`, as Chrome does. Bound: `tree-walkers`.
+
+Checks: 46 cases in `walker-cases.txt` match Chrome. 3 Rust tests run besides the Chrome cases.
+
+## Cost of the DOM observers and the frame step
+
+Method: `perf stat -e instructions:u`, minimum of 3 runs, each binary in its own `CARGO_TARGET_DIR` under `/data/bare-tmp`. Main d6d9b92 against this build. 84 rows: `browser_load` (mutation, event, lookup), `style_load` (five cases), `sheets_load` and `loader_load` at 1x, 10x and 100x, `scroll_load 10000 2000`, `eval_load` (8 cases at scale 10), startup of an empty realm (`eval_check -e 0`), and `arrobj_load` (15), `binary_load` (9) and `proxy_load` (8) at scale 10. All are below +0.5%. The worst is `eval_load throws` at +0.19% (3,064,704,309 to 3,070,455,909). `browser_load` falls: event -9.3% to -9.7%, mutation -5.3% to -5.7%, lookup -2.6% to -3.0%. `sheets_load` and `loader_load` at 1x fall 4% to 9%. Start of a page (`browser_load event 0`) is 9,333,137 instructions, down from 10,073,813 (-7.4%). Clippy reports 49 warnings on main and 49 on this build.
+
+The first build failed the rule on 20 rows: `loader_load mixed 1` +1.39%, `browser_load event 100` +1.16%, `sheets_load imports 1` +1.11%, `browser_load mutation 100` +0.79%. Two causes:
+1. The collector asks the host `trace` for every object, and one `trace` call costs about 4 k instructions (about 40 table lookups). 30 new function objects cost that in each collect. Fix: the collector does not ask the host about a host function (`Callee::Host`), because such a function owns no host state (`Interp::collect` in `eval.rs`). This made `browser_load event` 9-10% lower than main.
+2. A fixed start cost of +133 k instructions: about 4.5 k for each new method and 5.7 k for each new accessor (the function object, a new interned name, and the property). Fix: `Heap::init_function` stores `length` and `name` of a new function in one step, not in two `define_own_property` calls. All host and native functions use it. Start-up fell from +133 k to -740 k against main. Every `bare` row that is dominated by start-up fell 4% to 9%.
+
+Hypothesis: the same two changes explain the small drops on `style_load shown` at 1x (-3.5%). Not measured by themselves.
+
+Load matrix (`tools/js/observer_load.sh`, 6 processes, 1 GiB address space and 45 s each, checksums pass). `mo`: SCALE*1000 elements made, appended, given a `class` and removed in blocks, with one observer on the list (`childList`, `attributes`, `subtree`). `raf`: SCALE*500 frames, each sets a style on 20 elements and asks for the next frame.
+
+| case | scale | run | peak RSS | peak live | live after |
+| ---- | ----- | --- | -------- | --------- | ---------- |
+| mo | 1x | 16 ms | 8.9 MiB | 1.8 MiB | 1.3 MiB |
+| mo | 10x | 215 ms | 10.3 MiB | 3.8 MiB | 2.6 MiB |
+| mo | 100x | 2.17 s | 17.3 MiB | 11.4 MiB | 10.2 MiB |
+| raf | 1x | 29 ms | 8.3 MiB | 1.1 MiB | 1.0 MiB |
+| raf | 10x | 288 ms | 9.4 MiB | 3.1 MiB | 3.0 MiB |
+| raf | 100x | 2.85 s | 19.6 MiB | 18.0 MiB | 17.9 MiB |
+
+These are single runs on a quiet machine, taken before `init_function` (a run under load 15 took 2.5 times longer for the same instructions). Growth with scale has known causes that are not new. `mo`: removed nodes stay in the DOM arena (200,005 nodes at 100x in `browser_load mutation` too). `raf`: the attribute text buffer never frees, and 1,000,000 `style` writes keep 11.25 MiB (`stats().text_bytes`). A page that writes a style on each frame grows without a bound; this is a follow-up for the DOM text buffer.
+
+Not tested: a page with 10,000 observed targets for `IntersectionObserver` at 100x, `MutationObserver` with `characterData` at 100x, a frame loop with `IntersectionObserver` and `ResizeObserver` together, the live staging login on this build, and `perf` rows for `svg`, `svgparse` and `rel` of `browser_load`.
