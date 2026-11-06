@@ -1368,6 +1368,21 @@ impl Heap {
         r
     }
 
+    /// The `length` and `name` of a function object that has just been made and has no other property (both read-only,
+    /// not enumerable, configurable). The same result as two `define_own_property` calls, in one step: a realm makes
+    /// hundreds of host functions at start, and each saved check shows in the start-up cost.
+    pub fn init_function(&mut self, o: ObjId, length: (PropertyKey, f64), name: (PropertyKey, StrId)) -> R<()> {
+        self.obj(o)?;
+        self.charge(2 * ENTRY_BYTES)?;
+        let data = |value| Property::Data { value, writable: false, enumerable: false, configurable: true };
+        self.edit(o, |ob| {
+            ob.props.entries.reserve_exact(2);
+            ob.props.set(length.0, data(Value::Number(length.1)));
+            ob.props.set(name.0, data(Value::String(name.1)));
+        });
+        Ok(())
+    }
+
     /// `Object.defineProperty` as a boolean (`Reflect.defineProperty`): `false` when rejected.
     /// Errors: stale handles, a descriptor mixing data and accessor fields, an invalid array
     /// length, or a size limit.
