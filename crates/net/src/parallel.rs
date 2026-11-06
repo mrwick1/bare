@@ -6,6 +6,8 @@
 //!   server with HTTP/1.1, and so do we. More jobs wait in a queue, which is not bounded here: the caller bounds what it starts.
 //! - A worker thread ends when the queue is empty. Nothing runs, and no thread is kept, when the page asks for nothing.
 //! - The workers use the connection pool of the client: a connection that a worker is done with serves the next request.
+//! - At most `MAX_CONNECTING` connections are set up at once (`Gate`). A burst of new connections to one server loses SYN packets
+//!   on staging, and each lost one costs a retry after about 1 s. Measured there: 6 at once, 2 to 4 were late; 2 at once, none.
 //! - A waiting caller sleeps on a condition variable. Nothing polls.
 
 use crate::http::Client;
@@ -15,11 +17,42 @@ use std::sync::{Arc, Condvar, Mutex};
 /// Worker threads at once for one client and its forks.
 pub const MAX_WORKERS: usize = 6;
 
+/// Connections that may be set up (DNS, TCP and TLS) at once for one client and its forks.
+pub const MAX_CONNECTING: usize = 2;
+
 type Job = Box<dyn FnOnce(&mut Client) + Send>;
 
 #[derive(Default)]
 pub struct Workers {
     state: Mutex<State>,
+    pub(crate) connecting: Gate,
+}
+
+/// A counter with a limit. `enter` waits on a condition variable while the limit is reached.
+#[derive(Default)]
+pub(crate) struct Gate {
+    inside: Mutex<usize>,
+    free: Condvar,
+}
+
+pub(crate) struct Inside<'a>(&'a Gate);
+
+impl Gate {
+    pub(crate) fn enter(&self) -> Inside<'_> {
+        let mut n = self.inside.lock().unwrap();
+        while *n >= MAX_CONNECTING {
+            n = self.free.wait(n).unwrap();
+        }
+        *n += 1;
+        Inside(self)
+    }
+}
+
+impl Drop for Inside<'_> {
+    fn drop(&mut self) {
+        *self.0.inside.lock().unwrap() -= 1;
+        self.0.free.notify_one();
+    }
 }
 
 #[derive(Default)]
@@ -127,6 +160,25 @@ mod tests {
     use std::time::{Duration, Instant};
 
     const LATENCY: Duration = Duration::from_millis(100);
+
+    #[test]
+    fn the_gate_lets_at_most_max_connecting_in_at_once() {
+        let gate = Arc::new(Gate::default());
+        let (now, most) = (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)));
+        let threads: Vec<_> = (0..6)
+            .map(|_| {
+                let (gate, now, most) = (gate.clone(), now.clone(), most.clone());
+                std::thread::spawn(move || {
+                    let _inside = gate.enter();
+                    most.fetch_max(now.fetch_add(1, Ordering::SeqCst) + 1, Ordering::SeqCst);
+                    std::thread::sleep(Duration::from_millis(30));
+                    now.fetch_sub(1, Ordering::SeqCst);
+                })
+            })
+            .collect();
+        threads.into_iter().for_each(|t| t.join().unwrap());
+        assert_eq!(most.load(Ordering::SeqCst), MAX_CONNECTING);
+    }
 
     /// A server that waits `LATENCY` before each reply. Gives its port and the number of connections it accepted.
     fn slow_server() -> (u16, Arc<AtomicUsize>) {

@@ -445,6 +445,12 @@ impl Client {
 
     /// Send a request and read the status and the headers. The body is not read: the `Body` reads it from the
     /// connection when the caller asks. Reuse an idle connection when there is one.
+    /// A new connection, when the gate lets one more be set up (`parallel::MAX_CONNECTING`).
+    fn connect(&self, url: &Url, rec: &mut Option<Box<trace::Rec>>) -> Result<Stream, Error> {
+        let _inside = self.workers.connecting.enter();
+        open(url, &self.roots, rec)
+    }
+
     fn start(&mut self, url: &Url, plan: &Plan, conditions: &str) -> Result<(Response, Body), Error> {
         // The idle list is keyed by scheme too, so a plain connection never serves https.
         let server = (url.scheme, url.host.clone(), url.port);
@@ -464,7 +470,7 @@ impl Client {
             Some((stream, since)) if since.elapsed() < MAX_IDLE && (get || alive(&stream)) => (stream, true),
             // There is a connection, and it has not been idle for too long. Use it. A POST also needs the
             // server to have kept it: we cannot retry a POST after a write, so we look first.
-            _ => (open(url, &self.roots, &mut rec)?, false),
+            _ => (self.connect(url, &mut rec)?, false),
             // `_` means "anything else": no connection, or an old one. Open a new one.
             // An old connection is dropped here, and Rust closes it for us.
         };
@@ -476,7 +482,7 @@ impl Client {
             // We cannot know that before we try. The error is not the page's fault, so we
             // try once more on a new connection. This is safe because GET only reads.
             // Never for a POST: the server may have got the request and done what it says, and a second one would do it twice.
-            stream = open(url, &self.roots, &mut rec)?;
+            stream = self.connect(url, &mut rec)?;
             clock = trace::Clock::new();
             result = send(&mut stream, url, plan, conditions);
         }
