@@ -716,3 +716,44 @@ fn expanded_shorthand_getters_obey_the_output_byte_cap() {
     assert_eq!(js(&mut b, "s.getPropertyValue('margin')"), lim("style-bytes"));
     assert_eq!(js(&mut b, "a.getAttribute('style')"), style);
 }
+
+/// The kept parse (`Block`) is invisible: a run in which every call finds the attribute changed (a trailing space, so the text
+/// differs and the call parses) gives the same answers as a run that keeps parses. Debug builds also compare each kept parse
+/// with a fresh one (`style_read`).
+#[test]
+fn kept_parse_is_invisible() {
+    const NAMES: &[&str] = &["width", "margin", "margin-top", "padding", "border", "border-width", "color", "--x", "flex", "overflow", "gap", "display", "Margin-Left"];
+    const VALUES: &[&str] = &["1px", "2px 3px", "red", "0 auto", "1px solid red", "var(--x)", "inherit", "3px 4px 5px 6px", "bogus", "1px; color: blue", "", "10", "1 1 0", "1px !important"];
+    let run = |perturb: bool| {
+        let mut b = at("<!doctype html><div id=a style='color: red; margin: 0'></div><div id=b></div>");
+        js(&mut b, "var e = [document.getElementById('a'), document.getElementById('b')];");
+        let (mut seed, mut log, mut kept) = (12345u64, String::new(), 0);
+        let mut next = |n: usize| {
+            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            (seed >> 33) as usize % n
+        };
+        for _ in 0..600 {
+            let (el, name, value) = (next(2), NAMES[next(NAMES.len())], VALUES[next(VALUES.len())]);
+            let op = match next(9) {
+                0 | 1 => format!("s.setProperty('{name}', '{value}', '{}')", ["", "important"][next(2)]),
+                2 => format!("s['{}'] = '{value}'", name.replace(|c: char| c == '-', "").to_lowercase()),
+                3 => format!("s.removeProperty('{name}')"),
+                4 => format!("s.cssText = '{name}: {value}; {}: {};'", NAMES[next(NAMES.len())], VALUES[next(VALUES.len())]),
+                5 => format!("x.setAttribute('style', '{name}: {value}')"),
+                6 => format!("s.getPropertyValue('{name}') + s.getPropertyPriority('{name}')"),
+                7 => "s.cssText + s.length + s.item(1)".to_string(),
+                _ => format!("s.getPropertyValue('{name}')"),
+            };
+            let pre = if perturb { "x.setAttribute('style', (x.getAttribute('style') || '') + ' ');" } else { "" };
+            let r = js(&mut b, &format!("var x = e[{el}], s = x.style; {pre} {op}"));
+            log.push_str(&format!("{el} {op} => {r}\n"));
+            kept = b.style_stats().hits;
+        }
+        log.push_str(&js(&mut b, "e[0].style.cssText + '|' + e[1].style.cssText"));
+        (log, kept)
+    };
+    let (plain, kept) = run(false);
+    let (parsed, none) = run(true);
+    assert!(kept > 100 && none < kept / 2, "hits {kept}, with a changed text {none}");
+    assert_eq!(plain, parsed);
+}

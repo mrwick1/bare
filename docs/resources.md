@@ -3978,3 +3978,69 @@ What moved the rows (found with a probe that makes one input, one select or one 
 - Heap layout moves one row by more than the change. `select_load value 1000` read +2.66% in one build and +0.02% in the next build. A leak of 48 bytes at the start of the same example on main alone moved the row from 170,618,315 to 175,186,045 (+2.7%), and `value 100` moved by 1%. The scan compares short strings, and `memcmp` takes a different path for some addresses. Read this row only against a base with the same heap.
 
 Not tested: a page of a real site (the live staging pages) with this build, other machines, a textarea or a select inside a shadow root or an iframe, a textarea of 1 MiB in the window, `new FormData(form)` of a textarea or select (another change owns `FormData`), a `form` attribute that points to a form in another tree, and the speed of `reportValidity` on a form with 10,000 controls.
+
+## Allocations of an inline style write
+
+Problem: the `observer_load raf` loop made 417 allocations in each frame (20 style writes, so 21 for each write). PR 176 showed that this churn makes rows slow and noisy (see "Why an unrelated name moved a row"). Goal: remove the allocations of the path `el.style.x = v`, `setProperty` and `cssText`, and of the restyle that follows.
+
+Method: a throw-away allocator (not in the repository) that captures a backtrace for a random 1 in 16 of the allocations in the loop, on a release build with debug info, main 74b924d, `observer_load raf 1`. Shares of the samples, as allocations for each write (the loop makes 20 writes in a frame):
+
+| Source | Allocations for each write |
+| --- | ---: |
+| `classify` copies the name and the value of a declaration (called for the attribute and for the new value) | 4 |
+| `set` builds the probe text with `format!` | 2 |
+| `serialize` grows its output `String` | 2 |
+| `parse_declarations_capped` result `Vec` (for the attribute and for the probe) | 2 |
+| `parse_declaration` output `Vec` (once for each `classify`) | 2 |
+| `parse` result `Vec` of the attribute | 1 |
+| `texts` of a longhand | 1 |
+| `key` lowercases a name that is lowercase already | 1 |
+| `string_arg` makes a `String` of the JS value | 1 |
+| JS side: `number_to_string` (3), `concat` (1), `intern_str` (1) | 5 |
+| collector (`own_keys_with`, once for each 100 frames) | about 2 |
+
+Cause: the `style` attribute text is the state. Each write read the text, parsed it into a block of declarations, changed the block, wrote the text again and then (in the next call) parsed the same text again. The restyle in the cascade reads the same text a third time.
+
+What the engines do:
+- Blink keeps a `MutableCSSPropertyValueSet` as the state of the inline style. `setProperty` changes the set in place, and the attribute text is written later, when someone reads it (`SynchronizeStyleAttributeInternal`). WebKit does the same (`StyledElement::inlineStyleChanged`, a dirty flag for the attribute). Servo keeps a `PropertyDeclarationBlock` behind an `Arc<Locked<..>>` and Stylo reads that block directly. The text is made from it only for `getAttribute` and `cssText`. None of them parses its own output.
+- `bare` keeps the text as the state, because the cascade, selectors and `getAttribute` read the attribute. A change to the Blink model would touch all of them. The change here takes one idea from it: the parsed block is kept, and the text is the key.
+
+Changes (all in `browser_style.rs` and `browser_style_block.rs`):
+- The parse of the last read of an element is kept (`Block`: the text and its declarations, the steps that the parse charged). A read compares the attribute with the kept text: equal means the kept block is valid, so no hook has to invalidate it. A write keeps its block when the text it wrote reads back to the same list (`serialize` says so; a shorthand that is split or joined does not). A hit charges the same steps as a parse, so the step budget does not depend on the cache. Bound: 1,024 blocks of at most 1,024 bytes of text, dropped all at once past the count, and dropped with the style object at a collection. Debug builds compare each hit with a fresh parse (`debug_assert`).
+- `Decl.name` is a `Cow<'static, str>`. A supported property uses the engine's own name: no copy.
+- `serialize` writes into a buffer that `Style` owns and reuses (also the probe of `set`, and the `cssText` getter). A longhand does not build a `Texts` list to give its own value. `families` is a table built once, not 18 shorthand lookups for each longhand.
+- `parse_declaration` for `classify` writes into one thread-local buffer.
+- `key` does not copy a name that is lowercase already (every named setter passes one).
+
+Result (main fb36a74 against this change, release, AMD Ryzen 9 5900HX, glibc 2.44). Allocations are counts of the example. Time is the minimum of 3 runs on a machine with load average 20, so it is only a hint; instructions are `tools/js/instr.sh` (minimum of 3 runs of `instructions:u`).
+
+| Row | allocations | instructions | time |
+| --- | ---: | ---: | ---: |
+| `observer_load raf 1` | 208,285 to 78,472 | 243.27 M to 174.55 M (-28.2%) | 45 to 27 ms |
+| `observer_load raf 10` | | 2.368 G to 1.678 G (-29.1%) | |
+| `observer_load raf 100` | 20.81 M to 7.81 M | 23.63 G to 16.73 G (-29.2%) | 4.13 s to 2.87 s |
+| `style_load setget 1` | 49,858 to 27,907 | 96.66 M to 81.67 M (-15.5%) | 16 to 11 ms |
+| `style_load setget 100` | 3.91 M to 1.73 M | 7.171 G to 5.671 G (-20.9%) | 2.11 s to 1.42 s |
+| `style_load churn 1` | 63,275 to 28,048 | 85.91 M to 55.48 M (-35.4%) | 14 to 8 ms |
+| `style_load churn 10` | | 692.7 M to 398.4 M (-42.5%) | |
+| `style_load churn 100` | 5.74 M to 2.38 M | | 1.39 s to 0.87 s |
+| `style_load attrs 1` | 43,821 to 21,867 | 67.67 M to 45.11 M (-33.3%) | 13 to 6 ms |
+| `style_load attrs 10` | | 550.0 M to 323.5 M (-41.2%) | |
+| `style_load attrs 100` | 4.19 M to 1.99 M | | 1.29 s to 0.71 s |
+| `style_load shorthand 1` | 128,515 to 82,028 | 209.88 M to 167.30 M (-20.3%) | 49 to 26 ms |
+| `style_load shorthand 100` | 12.18 M to 7.39 M | 18.943 G to 14.567 G (-23.1%) | 4.45 s to 3.15 s |
+| `style_load hidden 1`, `shown 1` | same | -0.00%, +0.03% | same |
+
+Allocations of the loop: 417 for each frame fall to 157 (21 to 8 for each write). The style side has 3 left for each write: `string_arg`, the value `String` of the new declaration, and the result `Vec` of the probe. The other 5 are the JS engine (`number_to_string`, `concat`, `intern_str`), which another change owns (profile taken on main 74b924d; to verify on fb36a74). Peak RSS does not change (`raf 100` 19.6 MiB to 19.7 MiB, `style_load shorthand 100` 20.6 MiB to 20.7 MiB, `churn 100` 16.6 MiB to 16.8 MiB).
+
+Cost rule: `tools/js/instr.sh`, main fb36a74 against this change, 95 rows at scale 1 and 10: `attr_load`, `browser_load`, `console_load`, `dataset_load`, `fetch_load`, `focus_load`, `form_load`, `fragment_load`, `geometry_load`, `handler_load`, `loader_load`, `navigation_load`, `nodelist_load`, `observer_load`, `platform_load`, `preload_load`, `scheduler_load`, `selection_load`, `session_load`, `sheets_load`, `streams_load`, `style_load`, `web_apis_load`, `select_load`, `scroll_load 10000 300`, `xhr_load 100`. The worst is `handler_load 1` at +0.089% (50.42 M to 50.47 M). Every row that does not write a style stays within +0.09% and -1.2% (`attr_load live`).
+
+After the rebase on main 3a60a7d the same 95 rows give a worst of +0.097% (`handler_load 1`, 50.35 M to 50.40 M); `observer_load raf 1` is 243.07 M to 173.98 M (-28.4%) and `raf 100` 23.61 G to 16.68 G (-29.3%).
+
+A layout effect that is not from this change: against main 74b924d, `select_load value 1000` was +2.55% (175.73 M to 180.22 M), and `value 100` and `value 10,000` were -0.04%. The row runs no code of this change. The counts of `Document::find_atom` (572,469) and `Document::attr` (571,471) are the same in both binaries, the machine code of both functions has the same size, and the atom count of the document is the same (9). An unrelated `eprintln!` in the example made it -0.04%. On main fb36a74 it is -0.03% (170.69 M to 170.63 M). Hypothesis: the address of a string moved a `memcmp` onto another path of libc; not verified.
+
+Restyle (not changed): `RuleSet::compute` on 1,000 elements makes 41 allocations for no `style` attribute, 2,038 for `style="width: 5px"` and 3,038 for three declarations. That is 2 for each element that has an inline style, then 1 more for each extra declaration. They are the result `Vec` of `parse_declarations` and the `inline_decls` of `cascade`. An iterator over the declarations and one buffer in `Cx` would remove both. Not done: the code is in `crates/css`, it needs the 88 layout rows of `bare-stress` as a cost check, and a restyle that reads 1,000 inline styles saves about 2,000 allocations (about 0.1 M instructions). Candidate for a later PR.
+
+Tests: `cargo test --workspace` passes 2,469 tests, 0 fail (on main 3a60a7d plus this change).
+
+Not tested: wall time on a quiet machine (the load average was 20), a page that has more than 1,024 live style objects with writes in turn (the cache drops all blocks past the count; each write then parses again, as before this change), a `style` attribute longer than 1,024 bytes (never kept), `bare-stress` and `sheets_load` at scale 10 and 100, `form_load gates` and `sheets_load dynamic` (both fail on main fb36a74 too: "document URL is not configured" and "reads differ"), the rows at scale 100 other than those in the table, and the live staging pages.

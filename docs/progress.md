@@ -710,3 +710,13 @@ On main 52d5d5a, with no local change to the engine, all ten live routes render,
 | `/journeys?status=paused` | "3 journeys, paused" | 9.0 s |
 
 The `DocumentFragment` constructor (#182) fixed `/results` and `/agents/new`. The `/results` text is an empty state of the app. It was not compared with Chrome on the same account (to verify). `/calls` took 34.7 s on 58864f0 and 14.6 s now; one run each, so the cause of the change is not known. The runs only load and render pages. No click, form submit or data change was tested yet.
+
+## Allocations of an inline style write
+
+Profile-driven work on the path of `el.style.x = v`, `setProperty` and `cssText`. A frame of `observer_load raf` made 417 allocations (21 for each style write). Now it makes 157 (8 for each write), and the row runs 28% to 29% fewer instructions (`raf 1`, `10`, `100`). The `style_load` rows fall by 15% to 42% (`setget`, `shorthand`, `churn`, `attrs`) and `style_load hidden` and `shown` do not change.
+
+The `style` attribute text stays the state. The parse of the last read of each element is kept, and the attribute text is the key, so no write path has to invalidate it. A write keeps the block only when its output reads back to the same list. Other changes: supported property names are not copied, the serializer and the probe of `setProperty` reuse one buffer, a longhand does not build a text list, and the shorthand families are a table built once. Blink, WebKit and Servo keep the parsed block as the state and write the text later; `bare` cannot do that while the cascade reads the attribute. Method, profile, before and after numbers, the cost rule (95 rows, worst +0.089%) and the open items are in [resources.md](resources.md#allocations-of-an-inline-style-write).
+
+Open: the native restyle (`RuleSet::compute`) allocates 2 times for each element with an inline style (a `Vec` of declarations and one of typed values). The JS engine allocates about 5 times for each write in `number_to_string`, `concat` and `intern_str`. The collector allocates in `own_keys_with`. Not done in this PR.
+
+Tests: the new `kept_parse_is_invisible` runs 600 random calls twice, once with every call finding the text changed, and the answers must be the same. It fails when `serialize` says a block reads back although it does not.
