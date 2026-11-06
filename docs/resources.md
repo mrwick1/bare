@@ -3684,16 +3684,17 @@ Gaps:
 - A sticky box inside `position: fixed` is skipped by `areas()` and not moved.
 - Percent padding and margin of the box and of its containing block count as 0 (as in `scroll.rs`). `scroll-padding`, `writing-mode` and the wider edge of a collapsed table border are not modelled.
 
-Cost on the existing rows, main 85492b7 against this change (rebased on fb233de, `crates/layout` and `crates/paint` have no change on that merge), each build in its own `CARGO_TARGET_DIR`, `perf stat -e instructions:u`, minimum of 3. 97 rows: 88 layout cases of `bare-stress run` (default size), `scroll_load 10000 300`, `browser_load` mutation, event and lookup (scale 1), `style_load` setget and shorthand (scale 1), `observer_load` mo and raf (scale 1) and `sheets_load 1 1`. The limit is +0.5%. All 97 meet it. The range is -0.22% to +0.05%. The worst rows:
+Cost on the existing rows, main 32b8f71 against this change, each build in its own `CARGO_TARGET_DIR`, `perf stat -e instructions:u`, minimum of 3. 97 rows: 88 layout cases of `bare-stress run` (default size), `scroll_load 10000 300`, `browser_load` mutation, event and lookup (scale 1), `style_load` setget and shorthand (scale 1), `observer_load` mo and raf (scale 1) and `sheets_load 1 1`. The limit is +0.5%. All 97 meet it. The range is -0.04% to +0.09%. The worst rows (`sheets_load` is a short row of 0.59 M instructions):
 
 | row | main | this change | delta |
 | --- | ---: | ---: | ---: |
-| `scroll_load 10000 300` | 25,167.7 M | 25,179.8 M | +0.05% |
-| `layout-table-nested` | 7.126 M | 7.128 M | +0.04% |
-| `layout-grid-spanning-items` | 205.27 M | 205.35 M | +0.04% |
-| `layout-grid-nested` | 231.67 M | 231.76 M | +0.04% |
-| `browser_load mutation 1` | 113.23 M | 113.23 M | +0.00% |
-| `style_load setget 1` | 100.59 M | 100.59 M | +0.00% |
+| `sheets_load 1 1` | 0.5934 M | 0.5939 M | +0.09% |
+| `scroll_load 10000 300` | 25,058.9 M | 25,079.0 M | +0.08% |
+| `layout-grid-spanning-items` | 205.76 M | 205.84 M | +0.04% |
+| `layout-grid-nested` | 229.43 M | 229.52 M | +0.04% |
+| `layout-table-nested` | 7.091 M | 7.092 M | +0.02% |
+| `browser_load mutation 1` | 113.16 M | 113.16 M | +0.01% |
+| `style_load setget 1` | 100.60 M | 100.60 M | -0.01% |
 
 A page with no sticky box does not build a sticky list and draws with the old path. The extra work is one `match` on the position of each box in `areas()` and one scan of the styles in `Painter::paint`. The rows have no sticky box, so this is what they measure.
 
