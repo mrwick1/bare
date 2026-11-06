@@ -1,0 +1,21 @@
+shape	function 1 requestAnimationFrame 1 true 
+handles-count-from-one	1 2 3
+order-and-timestamp	A:number B:false C
+one-timestamp-per-frame	3 true true
+added-during-frame-runs-next-frame	A B C true
+cancel-before-frame	B
+cancel-during-frame	A C
+cancel-self-and-twice	A
+cancel-with-string-handle	0
+cancel-without-argument	TypeError: Failed to execute 'cancelAnimationFrame' on 'Window': 1 argument required, but only 0 present.
+request-without-argument	TypeError: Failed to execute 'requestAnimationFrame' on 'Window': 1 argument required, but only 0 present.
+request-non-function	TypeError: Failed to execute 'requestAnimationFrame' on 'Window': parameter 1 is not of type 'Function'.
+request-string	TypeError: Failed to execute 'requestAnimationFrame' on 'Window': parameter 1 is not of type 'Function'.
+throw-does-not-stop-the-frame	A B
+microtasks-run-between-callbacks	A m B
+this-of-a-callback	undefined true
+extra-arguments-and-the-callback-arguments	1
+frame-before-a-late-timer	R T
+chain-of-frames	1 2 3 4 true
+callback-added-from-a-timer	T R
+method-on-another-object	TypeError: Illegal invocation

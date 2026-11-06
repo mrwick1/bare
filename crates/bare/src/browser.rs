@@ -337,6 +337,8 @@ pub struct Dom {
     pub(crate) scrolling: crate::browser_scroll::Scrolling,
     /// `ResizeObserver` and its rendering step (`browser_resize.rs`).
     pub(crate) resize: crate::browser_resize::Resize,
+    /// `requestAnimationFrame` (`browser_frame.rs`).
+    pub(crate) frame: crate::browser_frame::Frame,
     /// `Element.attributes`, `NamedNodeMap` and `Attr` (`browser_attr.rs`).
     pub(crate) attr: crate::browser_attr::AttrHost,
     /// `Document.getElementsByName` and the live `NodeList` (`browser_nodelist.rs`).
@@ -377,6 +379,7 @@ impl Host for Dom {
         crate::browser_abort::roots(self, out);
         crate::browser_web::roots(self, out);
         self.resize_roots(out);
+        self.frame_roots(out);
     }
 
     fn trace(&self, owner: ObjId, out: &mut Vec<Value>) {
@@ -864,6 +867,7 @@ impl Dom {
         crate::browser_geometry::install(self, it)?;
         crate::browser_scroll::install(self, it)?;
         crate::browser_resize::install(self, it)?;
+        crate::browser_frame::install(self, it)?;
         crate::browser_handlers::install(self, it)
     }
 
@@ -1122,6 +1126,7 @@ impl Browser {
             geometry: Default::default(),
             scrolling: Default::default(),
             resize: Default::default(),
+            frame: Default::default(),
             attr: Default::default(),
             nl: Default::default(),
             dataset: Default::default(),
