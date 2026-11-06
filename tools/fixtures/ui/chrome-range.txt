@@ -1,0 +1,79 @@
+create-range-defaults	document:0-document:0 collapsed document
+new-range	document:0-document:0 collapsed true
+interface-shape	[object Range] true true 0 0 1 2 3 3 false
+set-start-and-end-in-text	#Hello :1-#Hello :4 ell
+set-start-element-offset	r:1-r:1 collapsed
+set-end-element-offset	r:0-r:2 Hello big worldSecond
+set-end-before-start-moves-start	#Hello :1-#Hello :1 collapsed
+set-start-after-end-moves-end	#Second:2-#Second:2 collapsed
+set-start-after-end-in-tree-order	r:2-r:2 collapsed
+set-end-before-start-in-tree-order	p1:1-p1:1 collapsed
+set-start-in-another-tree	I:0-I:0 collapsed
+set-end-in-another-tree	I:0-I:0 collapsed
+set-start-text-offset-too-big	IndexSizeError: Failed to execute 'setStart' on 'Range': The offset 7 is larger than the node's length (6).
+set-end-text-offset-too-big	IndexSizeError: Failed to execute 'setEnd' on 'Range': The offset 7 is larger than the node's length (6).
+set-start-element-offset-too-big	IndexSizeError: Failed to execute 'setStart' on 'Range': There is no child at offset 2.
+set-start-comment-offset	!c:1-!c:1 collapsed IndexSizeError: Failed to execute 'setStart' on 'Range': The offset 2 is larger than the node's length (1).
+set-start-doctype	InvalidNodeTypeError: Failed to execute 'setStart' on 'Range': The node provided is of type 'html'. | InvalidNodeTypeError: Failed to execute 'setEnd' on 'Range': The node provided is of type 'html'.
+set-start-document-and-doctype-offset	document:1-document:1 collapsed
+set-start-arguments	TypeError: Failed to execute 'setStart' on 'Range': 2 arguments required, but only 0 present. | TypeError: Failed to execute 'setStart' on 'Range': 2 arguments required, but only 1 present. | TypeError: Failed to execute 'setStart' on 'Range': parameter 1 is not of type 'Node'. | TypeError: Failed to execute 'setStart' on 'Range': parameter 1 is not of type 'Node'. | TypeError: Failed to execute 'setEnd' on 'Range': parameter 1 is not of type 'Node'.
+set-start-offset-conversion	#Hello :2-#Hello :4 IndexSizeError: Failed to execute 'setStart' on 'Range': The offset 4294967295 is larger than the node's length (6). ok undefined #Hello :0-#Hello :4
+set-start-before-and-after	p1:1-p1:2 big
+set-start-after-and-end-before	r:1-r:3 Second
+set-end-before-first-child	r:0-r:0 collapsed
+set-start-after-moves-end	r:2-r:2 collapsed
+set-before-no-parent	InvalidNodeTypeError: Failed to execute 'setStartBefore' on 'Range': the given Node has no parent. | InvalidNodeTypeError: Failed to execute 'setStartAfter' on 'Range': the given Node has no parent. | InvalidNodeTypeError: Failed to execute 'setEndBefore' on 'Range': the given Node has no parent. | InvalidNodeTypeError: Failed to execute 'setEndAfter' on 'Range': the given Node has no parent. | TypeError: Failed to execute 'setStartBefore' on 'Range': 1 argument required, but only 0 present. | TypeError: Failed to execute 'setEndAfter' on 'Range': parameter 1 is not of type 'Node'.
+set-before-a-text-node	b1:0-p1:3 big world
+select-node	p1:1-p1:2 big p1
+select-node-text	p1:0-p1:1 Hello 
+select-node-errors	InvalidNodeTypeError: Failed to execute 'selectNode' on 'Range': the given Node has no parent. | InvalidNodeTypeError: Failed to execute 'selectNode' on 'Range': the given Node has no parent. | TypeError: Failed to execute 'selectNode' on 'Range': 1 argument required, but only 0 present. | TypeError: Failed to execute 'selectNode' on 'Range': parameter 1 is not of type 'Node'.
+select-node-contents-element	p1:0-p1:3 Hello big world
+select-node-contents-text	#Hello :0-#Hello :6 Hello 
+select-node-contents-comment	!c:0-!c:1 []
+select-node-contents-document-and-doctype	document:0-document:2 InvalidNodeTypeError: Failed to execute 'selectNodeContents' on 'Range': The node provided is of type 'html'.
+select-node-contents-empty	s:0-s:0 collapsed
+collapse-to-start-and-end	#Hello :1-#Hello :1 collapsed | #Second:3-#Second:3 collapsed | #Second:3-#Second:3 collapsed
+collapse-truthy-values	#Hello :1-#Hello :1 collapsed | #Hello :5-#Hello :5 collapsed | #Hello :5-#Hello :5 collapsed undefined
+collapsed-is-live	true false
+common-ancestor	#Hello  p1 r r r
+clone-range	#Hello :1-#Second:3 | #Hello :5-#Second:3 true true
+detach-is-a-no-op	undefined #Hello :1-#Hello :3 el
+to-string-inside-one-text	[llo]
+to-string-across-elements	[llo big worldSec]
+to-string-start-in-nested-text	[ig wo]
+to-string-element-boundaries	[Hello big worldSecond]
+to-string-skips-comments	[] r:2-r:4
+to-string-empty-and-collapsed	[] [] []
+to-string-of-the-whole-document	[Hello big worldSecond] 21 true
+to-string-hidden-and-script-text	[aHbvar q = 1p{}c]
+to-string-utf16	1:5:4 2 7
+illegal-invocation	TypeError: Illegal invocation | TypeError: Illegal invocation | TypeError: Illegal invocation | TypeError: Illegal invocation | TypeError: Cannot read properties of undefined (reading 'get')
+selection-initial-state	0 true None null:0-null:0 none [] [object Selection] true true true true
+selection-interface-shape	function | 0 | true | false | TypeError: Failed to construct 'Selection': Illegal constructor
+selection-add-range	1 false Range #Hello :1-#Hello :4 forward true [ell]
+selection-add-range-twice-is-ignored	1 false Range #Hello :1-#Hello :4 forward true
+selection-add-range-outside-document-is-ignored	0 true None null:0-null:0 none
+selection-add-range-arguments	TypeError: Failed to execute 'addRange' on 'Selection': 1 argument required, but only 0 present. | TypeError: Failed to execute 'addRange' on 'Selection': parameter 1 is not of type 'Range'. | TypeError: Failed to execute 'addRange' on 'Selection': parameter 1 is not of type 'Range'. | TypeError: Failed to execute 'addRange' on 'Selection': parameter 1 is not of type 'Range'.
+selection-range-is-live	1 false Range #Hello :1-#Second:2 forward
+selection-range-is-live-after-collapse-of-the-range	1 true Caret #Hello :1-#Hello :1 none
+selection-get-range-at	IndexSizeError: Failed to execute 'getRangeAt' on 'Selection': 0 is not a valid index. | TypeError: Failed to execute 'getRangeAt' on 'Selection': 1 argument required, but only 0 present. | IndexSizeError: Failed to execute 'getRangeAt' on 'Selection': 1 is not a valid index. | IndexSizeError: Failed to execute 'getRangeAt' on 'Selection': 4294967295 is not a valid index. | ok true | ok true
+selection-remove-all-ranges-and-empty	1 false Range p1:0-p1:3 forward | 0 true None null:0-null:0 none | 0 true None null:0-null:0 none p1:0-p1:3
+selection-remove-range	NotFoundError: Failed to execute 'removeRange' on 'Selection': Range not found. | 1 false Range p1:0-p1:3 forward | ok undefined | 0 true None null:0-null:0 none | NotFoundError: Failed to execute 'removeRange' on 'Selection': Range not found. | TypeError: Failed to execute 'removeRange' on 'Selection': parameter 1 is not of type 'Range'. | TypeError: Failed to execute 'removeRange' on 'Selection': 1 argument required, but only 0 present.
+selection-collapse	1 true Caret #Hello :3-#Hello :3 none [] #Hello :3-#Hello :3 collapsed
+selection-collapse-offset-defaults-to-zero	1 true Caret p2:0-p2:0 none
+selection-collapse-null-removes	1 true Caret p2:1-p2:1 none | 0 true None null:0-null:0 none
+selection-collapse-errors	IndexSizeError: Failed to execute 'collapse' on 'Selection': The offset 9 is larger than the node's length (6). | IndexSizeError: Failed to execute 'collapse' on 'Selection': There is no child at offset 2. | InvalidNodeTypeError: Failed to execute 'collapse' on 'Selection': The node provided is of type 'html'. | TypeError: Failed to execute 'collapse' on 'Selection': 1 argument required, but only 0 present. | TypeError: Failed to execute 'collapse' on 'Selection': parameter 1 is not of type 'Node'. | ok undefined | 0 true None null:0-null:0 none
+selection-collapse-outside-document-does-nothing	1 true Caret p2:1-p2:1 none
+selection-collapse-makes-a-new-range	true #Hello :1-#Hello :1 collapsed #Hello :2-#Hello :2 collapsed
+selection-set-position	1 true Caret #Hello :2-#Hello :2 none IndexSizeError: Failed to execute 'setPosition' on 'Selection': The offset 99 is larger than the node's length (6). TypeError: Failed to execute 'setPosition' on 'Selection': 1 argument required, but only 0 present.
+selection-collapse-to-start-and-end	1 true Caret #Hello :1-#Hello :1 none | 1 true Caret #Second:3-#Second:3 none true #Hello :1-#Second:3
+selection-collapse-to-start-without-range	InvalidStateError: Failed to execute 'collapseToStart' on 'Selection': there is no selection. | InvalidStateError: Failed to execute 'collapseToEnd' on 'Selection': there is no selection.
+selection-select-all-children	1 false Range p1:0-p1:3 forward [Hello big world] p1:0-p1:3
+selection-select-all-children-text-and-errors	1 true Caret #Hello :0-#Hello :0 none | InvalidNodeTypeError: Failed to execute 'selectAllChildren' on 'Selection': The node provided is of type 'html'. | TypeError: Failed to execute 'selectAllChildren' on 'Selection': 1 argument required, but only 0 present. | TypeError: Failed to execute 'selectAllChildren' on 'Selection': parameter 1 is not of type 'Node'.
+selection-select-all-children-of-a-detached-node	1 false Range p2:0-p2:1 forward
+selection-type-and-direction	None/none Caret/none Range/forward None/none
+selection-to-string-in-one-text	[ello] [ello] 4
+selection-is-collapsed	true true false
+selection-illegal-invocation	TypeError: Illegal invocation | TypeError: Illegal invocation | TypeError: Illegal invocation | TypeError: Illegal invocation
+start-container-is-the-same-wrapper	true true true
+get-selection-exists-in-all-places	function function function function 0 0 getSelection getSelection true false

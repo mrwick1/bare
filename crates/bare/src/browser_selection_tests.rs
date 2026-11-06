@@ -65,8 +65,8 @@ fn accessors_live_on_the_input_prototype_only() {
         assert_eq!(js(&mut b, "P.setSelectionRange.call(d, 0, 1)"), "throw:TypeError:Illegal invocation");
         assert_eq!(js(&mut b, "P.select.call(d)"), "throw:TypeError:Illegal invocation");
         assert_eq!(js(&mut b, "P.select.call({})"), "throw:TypeError:Illegal invocation");
-        // no fake global selection API
-        assert_eq!(js(&mut b, "[typeof window.getSelection, typeof document.getSelection, typeof Selection, typeof Range, typeof HTMLTextAreaElement, 'setRangeText' in t].join()"), "undefined,undefined,undefined,undefined,undefined,false");
+        // The document selection is in `browser_range.rs` and is not linked with the one of a text control.
+        assert_eq!(js(&mut b, "[typeof window.getSelection, typeof document.getSelection, typeof Selection, typeof Range, typeof HTMLTextAreaElement, 'setRangeText' in t].join()"), "function,function,function,function,undefined,false");
     });
 }
 

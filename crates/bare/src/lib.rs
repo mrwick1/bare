@@ -109,6 +109,7 @@ mod browser_element;
 mod browser_frame;
 mod browser_intersection;
 mod browser_walker;
+mod browser_range;
 mod browser_lazy;
 mod browser_mutation;
 #[cfg(test)]
@@ -123,6 +124,8 @@ mod browser_mutation_tests;
 mod browser_intersection_tests;
 #[cfg(test)]
 mod browser_walker_tests;
+#[cfg(test)]
+mod browser_range_tests;
 #[cfg(test)]
 mod browser_resize_tests;
 #[cfg(test)]

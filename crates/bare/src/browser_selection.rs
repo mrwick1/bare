@@ -44,7 +44,7 @@
 //!
 //! Gates and deviations (on purpose)
 //! - `<textarea>` has no value state in this host, so it has no selection. `setRangeText`, the document-level
-//!   `selectionchange`, `onselectionchange`, `document.getSelection`, `Selection` and `Range` are absent. A `selectionchange`
+//!   `selectionchange` and `onselectionchange` are absent. `document.getSelection`, `Selection` and `Range` are in `browser_range.rs` and are not linked with this selection. A `selectionchange`
 //!   from `setAttribute('value')`, `removeAttribute` or a `type` change that alters what the selection reads is not
 //!   scheduled (only `defaultValue` is).
 //! - No caret, no layout, no mouse or keyboard selection, no focus. `select()` does not focus (the spec says it

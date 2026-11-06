@@ -1,0 +1,243 @@
+var $ = function (i) { return document.getElementById(i) };
+var nm = function (n) { return n === null ? 'null' : n.nodeType === 3 ? '#' + n.data : n.nodeType === 8 ? '!' + n.data : n.nodeType === 10 ? 'doctype' : n.nodeType === 9 ? 'document' : n.id || n.nodeName };
+var pt = function (r) { return nm(r.startContainer) + ':' + r.startOffset + '-' + nm(r.endContainer) + ':' + r.endOffset + (r.collapsed ? ' collapsed' : '') };
+var err = function (f) { try { var v = f(); return 'ok ' + String(v) } catch (e) { return e.name + ': ' + e.message } };
+var sp = function (s) { return s.rangeCount + ' ' + s.isCollapsed + ' ' + s.type + ' ' + nm(s.anchorNode) + ':' + s.anchorOffset + '-' + nm(s.focusNode) + ':' + s.focusOffset + ' ' + s.direction };
+var T = function (i, k) { return $(i).childNodes[k || 0] };
+=== create-range-defaults
+@html <div id=r><p id=p1>Hello <b id=b1>big</b> world</p><p id=p2>Second</p><!--c--><span id=s></span></div>
+var r = document.createRange(); (function () { return pt(r) + ' ' + nm(r.commonAncestorContainer) })
+=== new-range
+@html <div id=r><p id=p1>Hello <b id=b1>big</b> world</p><p id=p2>Second</p><!--c--><span id=s></span></div>
+var r = new Range(); (function () { return pt(r) + ' ' + (r.startContainer === document) })
+=== interface-shape
+@html <div id=r><p id=p1>Hello <b id=b1>big</b> world</p><p id=p2>Second</p><!--c--><span id=s></span></div>
+var r = document.createRange(); (function () { return [Object.prototype.toString.call(r), r instanceof Range, Range.prototype.constructor === Range, Range.length, Range.START_TO_START, Range.START_TO_END, Range.END_TO_END, Range.END_TO_START, r.END_TO_START, Object.prototype.hasOwnProperty.call(r, 'startOffset')].join(' ') })
+=== set-start-and-end-in-text
+@html <div id=r><p id=p1>Hello <b id=b1>big</b> world</p><p id=p2>Second</p><!--c--><span id=s></span></div>
+var r = document.createRange(); r.setStart(T('p1'), 1); r.setEnd(T('p1'), 4); (function () { return pt(r) + ' ' + r })
+=== set-start-element-offset
+@html <div id=r><p id=p1>Hello <b id=b1>big</b> world</p><p id=p2>Second</p><!--c--><span id=s></span></div>
+var r = document.createRange(); r.setStart($('r'), 1); (function () { return pt(r) })
+=== set-end-element-offset
+@html <div id=r><p id=p1>Hello <b id=b1>big</b> world</p><p id=p2>Second</p><!--c--><span id=s></span></div>
+var r = document.createRange(); r.setStart($('r'), 0); r.setEnd($('r'), 2); (function () { return pt(r) + ' ' + r })
+=== set-end-before-start-moves-start
+@html <div id=r><p id=p1>Hello <b id=b1>big</b> world</p><p id=p2>Second</p><!--c--><span id=s></span></div>
+var r = document.createRange(); r.setStart(T('p1'), 3); r.setEnd(T('p1'), 1); (function () { return pt(r) })
+=== set-start-after-end-moves-end
+@html <div id=r><p id=p1>Hello <b id=b1>big</b> world</p><p id=p2>Second</p><!--c--><span id=s></span></div>
+var r = document.createRange(); r.setStart(T('p1'), 1); r.setEnd(T('p1'), 3); r.setStart(T('p2'), 2); (function () { return pt(r) })
+=== set-start-after-end-in-tree-order
+@html <div id=r><p id=p1>Hello <b id=b1>big</b> world</p><p id=p2>Second</p><!--c--><span id=s></span></div>
+var r = document.createRange(); r.setStart($('p1'), 0); r.setEnd($('p1'), 1); r.setStart($('r'), 2); (function () { return pt(r) })
+=== set-end-before-start-in-tree-order
+@html <div id=r><p id=p1>Hello <b id=b1>big</b> world</p><p id=p2>Second</p><!--c--><span id=s></span></div>
+var r = document.createRange(); r.setStart($('r'), 2); r.setEnd($('r'), 3); r.setEnd($('p1'), 1); (function () { return pt(r) })
+=== set-start-in-another-tree
+@html <div id=r><p id=p1>Hello <b id=b1>big</b> world</p><p id=p2>Second</p><!--c--><span id=s></span></div>
+var r = document.createRange(); r.setStart(T('p1'), 1); r.setEnd(T('p1'), 3); var x = document.createElement('i'); r.setStart(x, 0); (function () { return pt(r) })
+=== set-end-in-another-tree
+@html <div id=r><p id=p1>Hello <b id=b1>big</b> world</p><p id=p2>Second</p><!--c--><span id=s></span></div>
+var r = document.createRange(); r.setStart(T('p1'), 1); r.setEnd(T('p1'), 3); var x = document.createElement('i'); r.setEnd(x, 0); (function () { return pt(r) })
+=== set-start-text-offset-too-big
+@html <div id=r><p id=p1>Hello <b id=b1>big</b> world</p><p id=p2>Second</p><!--c--><span id=s></span></div>
+var r = document.createRange(); (function () { return err(function () { r.setStart(T('p1'), 7) }) })
+=== set-end-text-offset-too-big
+@html <div id=r><p id=p1>Hello <b id=b1>big</b> world</p><p id=p2>Second</p><!--c--><span id=s></span></div>
+var r = document.createRange(); (function () { return err(function () { r.setEnd(T('p1'), 7) }) })
+=== set-start-element-offset-too-big
+@html <div id=r><p id=p1>Hello <b id=b1>big</b> world</p><p id=p2>Second</p><!--c--><span id=s></span></div>
+var r = document.createRange(); (function () { return err(function () { r.setStart($('p2'), 2) }) })
+=== set-start-comment-offset
+@html <div id=r><p id=p1>Hello <b id=b1>big</b> world</p><p id=p2>Second</p><!--c--><span id=s></span></div>
+var r = document.createRange(); r.setStart($('r').childNodes[2], 1); (function () { return pt(r) + ' ' + err(function () { r.setStart($('r').childNodes[2], 2) }) })
+=== set-start-doctype
+@html <div id=r></div>
+var r = document.createRange(); (function () { return err(function () { r.setStart(document.doctype, 0) }) + ' | ' + err(function () { r.setEnd(document.doctype, 0) }) })
+=== set-start-document-and-doctype-offset
+@html <div id=r><p id=p1>Hello <b id=b1>big</b> world</p><p id=p2>Second</p><!--c--><span id=s></span></div>
+var r = document.createRange(); r.setStart(document, 1); (function () { return pt(r) })
+=== set-start-arguments
+@html <div id=r><p id=p1>Hello <b id=b1>big</b> world</p><p id=p2>Second</p><!--c--><span id=s></span></div>
+var r = document.createRange(); (function () { return [err(function () { r.setStart() }), err(function () { r.setStart($('r')) }), err(function () { r.setStart({}, 0) }), err(function () { r.setStart(null, 0) }), err(function () { r.setEnd(1, 0) })].join(' | ') })
+=== set-start-offset-conversion
+@html <div id=r><p id=p1>Hello <b id=b1>big</b> world</p><p id=p2>Second</p><!--c--><span id=s></span></div>
+var r = document.createRange(); r.setStart(T('p1'), '2'); r.setEnd(T('p1'), 4.9); var a = pt(r); (function () { return a + ' ' + err(function () { r.setStart(T('p1'), -1) }) + ' ' + err(function () { r.setStart(T('p1'), NaN) }) + ' ' + pt(r) })
+=== set-start-before-and-after
+@html <div id=r><p id=p1>Hello <b id=b1>big</b> world</p><p id=p2>Second</p><!--c--><span id=s></span></div>
+var r = document.createRange(); r.setStartBefore($('b1')); r.setEndAfter($('b1')); (function () { return pt(r) + ' ' + r })
+=== set-start-after-and-end-before
+@html <div id=r><p id=p1>Hello <b id=b1>big</b> world</p><p id=p2>Second</p><!--c--><span id=s></span></div>
+var r = document.createRange(); r.setStartAfter($('p1')); r.setEndBefore($('s')); (function () { return pt(r) + ' ' + r })
+=== set-end-before-first-child
+@html <div id=r><p id=p1>Hello <b id=b1>big</b> world</p><p id=p2>Second</p><!--c--><span id=s></span></div>
+var r = document.createRange(); r.setStart($('r'), 2); r.setEndBefore($('p1')); (function () { return pt(r) })
+=== set-start-after-moves-end
+@html <div id=r><p id=p1>Hello <b id=b1>big</b> world</p><p id=p2>Second</p><!--c--><span id=s></span></div>
+var r = document.createRange(); r.setStart($('p1'), 0); r.setEnd($('p1'), 1); r.setStartAfter($('p2')); (function () { return pt(r) })
+=== set-before-no-parent
+@html <div id=r><p id=p1>Hello <b id=b1>big</b> world</p><p id=p2>Second</p><!--c--><span id=s></span></div>
+var r = document.createRange(); var x = document.createElement('i'); (function () { return [err(function () { r.setStartBefore(x) }), err(function () { r.setStartAfter(document) }), err(function () { r.setEndBefore(x) }), err(function () { r.setEndAfter(document) }), err(function () { r.setStartBefore() }), err(function () { r.setEndAfter(3) })].join(' | ') })
+=== set-before-a-text-node
+@html <div id=r><p id=p1>Hello <b id=b1>big</b> world</p><p id=p2>Second</p><!--c--><span id=s></span></div>
+var r = document.createRange(); r.setStartBefore($('b1').firstChild); r.setEndAfter(T('p1', 2)); (function () { return pt(r) + ' ' + r })
+=== select-node
+@html <div id=r><p id=p1>Hello <b id=b1>big</b> world</p><p id=p2>Second</p><!--c--><span id=s></span></div>
+var r = document.createRange(); r.selectNode($('b1')); (function () { return pt(r) + ' ' + r + ' ' + nm(r.commonAncestorContainer) })
+=== select-node-text
+@html <div id=r><p id=p1>Hello <b id=b1>big</b> world</p><p id=p2>Second</p><!--c--><span id=s></span></div>
+var r = document.createRange(); r.selectNode(T('p1')); (function () { return pt(r) + ' ' + r })
+=== select-node-errors
+@html <div id=r><p id=p1>Hello <b id=b1>big</b> world</p><p id=p2>Second</p><!--c--><span id=s></span></div>
+var r = document.createRange(); var x = document.createElement('i'); (function () { return [err(function () { r.selectNode(x) }), err(function () { r.selectNode(document) }), err(function () { r.selectNode() }), err(function () { r.selectNode(null) })].join(' | ') })
+=== select-node-contents-element
+@html <div id=r><p id=p1>Hello <b id=b1>big</b> world</p><p id=p2>Second</p><!--c--><span id=s></span></div>
+var r = document.createRange(); r.selectNodeContents($('p1')); (function () { return pt(r) + ' ' + r })
+=== select-node-contents-text
+@html <div id=r><p id=p1>Hello <b id=b1>big</b> world</p><p id=p2>Second</p><!--c--><span id=s></span></div>
+var r = document.createRange(); r.selectNodeContents(T('p1')); (function () { return pt(r) + ' ' + r })
+=== select-node-contents-comment
+@html <div id=r><p id=p1>Hello <b id=b1>big</b> world</p><p id=p2>Second</p><!--c--><span id=s></span></div>
+var r = document.createRange(); r.selectNodeContents($('r').childNodes[2]); (function () { return pt(r) + ' [' + r + ']' })
+=== select-node-contents-document-and-doctype
+@html <div id=r><p id=p1>Hello <b id=b1>big</b> world</p><p id=p2>Second</p><!--c--><span id=s></span></div>
+var r = document.createRange(); r.selectNodeContents(document); var a = pt(r); (function () { return a + ' ' + err(function () { r.selectNodeContents(document.doctype) }) })
+=== select-node-contents-empty
+@html <div id=r><p id=p1>Hello <b id=b1>big</b> world</p><p id=p2>Second</p><!--c--><span id=s></span></div>
+var r = document.createRange(); r.selectNodeContents($('s')); (function () { return pt(r) })
+=== collapse-to-start-and-end
+@html <div id=r><p id=p1>Hello <b id=b1>big</b> world</p><p id=p2>Second</p><!--c--><span id=s></span></div>
+var r = document.createRange(); r.setStart(T('p1'), 1); r.setEnd(T('p2'), 3); var a = r.cloneRange(); a.collapse(true); var b = r.cloneRange(); b.collapse(false); var c = r.cloneRange(); c.collapse(); (function () { return pt(a) + ' | ' + pt(b) + ' | ' + pt(c) })
+=== collapse-truthy-values
+@html <div id=r><p id=p1>Hello <b id=b1>big</b> world</p><p id=p2>Second</p><!--c--><span id=s></span></div>
+var r = document.createRange(); r.setStart(T('p1'), 1); r.setEnd(T('p1'), 5); var a = r.cloneRange(); a.collapse('x'); var b = r.cloneRange(); b.collapse(0); var c = r.cloneRange(); c.collapse(undefined); (function () { return pt(a) + ' | ' + pt(b) + ' | ' + pt(c) + ' ' + r.collapse(true) })
+=== collapsed-is-live
+@html <div id=r><p id=p1>Hello <b id=b1>big</b> world</p><p id=p2>Second</p><!--c--><span id=s></span></div>
+var r = document.createRange(); r.setStart(T('p1'), 2); r.setEnd(T('p1'), 2); var a = r.collapsed; r.setEnd(T('p1'), 3); (function () { return a + ' ' + r.collapsed })
+=== common-ancestor
+@html <div id=r><p id=p1>Hello <b id=b1>big</b> world</p><p id=p2>Second</p><!--c--><span id=s></span></div>
+var r = document.createRange(); var out = []; r.setStart(T('p1'), 1); r.setEnd(T('p1'), 3); out.push(nm(r.commonAncestorContainer)); r.setEnd($('b1').firstChild, 1); out.push(nm(r.commonAncestorContainer)); r.setEnd(T('p2'), 1); out.push(nm(r.commonAncestorContainer)); r.setStart($('r'), 0); out.push(nm(r.commonAncestorContainer)); r.setEnd($('r'), 0); out.push(nm(r.commonAncestorContainer)); (function () { return out.join(' ') })
+=== clone-range
+@html <div id=r><p id=p1>Hello <b id=b1>big</b> world</p><p id=p2>Second</p><!--c--><span id=s></span></div>
+var r = document.createRange(); r.setStart(T('p1'), 1); r.setEnd(T('p2'), 3); var k = r.cloneRange(); k.setStart(T('p1'), 5); (function () { return pt(r) + ' | ' + pt(k) + ' ' + (k !== r) + ' ' + (k instanceof Range) })
+=== detach-is-a-no-op
+@html <div id=r><p id=p1>Hello <b id=b1>big</b> world</p><p id=p2>Second</p><!--c--><span id=s></span></div>
+var r = document.createRange(); r.setStart(T('p1'), 1); r.setEnd(T('p1'), 3); var v = r.detach(); (function () { return v + ' ' + pt(r) + ' ' + r })
+=== to-string-inside-one-text
+@html <div id=r><p id=p1>Hello <b id=b1>big</b> world</p><p id=p2>Second</p><!--c--><span id=s></span></div>
+var r = document.createRange(); r.setStart(T('p1'), 2); r.setEnd(T('p1'), 5); (function () { return '[' + r + ']' })
+=== to-string-across-elements
+@html <div id=r><p id=p1>Hello <b id=b1>big</b> world</p><p id=p2>Second</p><!--c--><span id=s></span></div>
+var r = document.createRange(); r.setStart(T('p1'), 2); r.setEnd(T('p2'), 3); (function () { return '[' + r + ']' })
+=== to-string-start-in-nested-text
+@html <div id=r><p id=p1>Hello <b id=b1>big</b> world</p><p id=p2>Second</p><!--c--><span id=s></span></div>
+var r = document.createRange(); r.setStart($('b1').firstChild, 1); r.setEnd(T('p1', 2), 3); (function () { return '[' + r + ']' })
+=== to-string-element-boundaries
+@html <div id=r><p id=p1>Hello <b id=b1>big</b> world</p><p id=p2>Second</p><!--c--><span id=s></span></div>
+var r = document.createRange(); r.setStart($('r'), 0); r.setEnd($('r'), 4); (function () { return '[' + r + ']' })
+=== to-string-skips-comments
+@html <div id=r><p id=p1>Hello <b id=b1>big</b> world</p><p id=p2>Second</p><!--c--><span id=s></span></div>
+var r = document.createRange(); r.selectNodeContents($('r')); r.setStart($('r'), 2); (function () { return '[' + r + '] ' + pt(r) })
+=== to-string-empty-and-collapsed
+@html <div id=r><p id=p1>Hello <b id=b1>big</b> world</p><p id=p2>Second</p><!--c--><span id=s></span></div>
+var r = document.createRange(); r.selectNodeContents($('s')); var a = '[' + r + ']'; r.setStart(T('p1'), 2); r.collapse(true); (function () { return a + ' [' + r + '] [' + document.createRange() + ']' })
+=== to-string-of-the-whole-document
+@html <div id=r><p id=p1>Hello <b id=b1>big</b> world</p><p id=p2>Second</p><!--c--><span id=s></span></div>
+var r = document.createRange(); r.selectNodeContents($('r')); (function () { return '[' + r + '] ' + String(r).length + ' ' + (r.toString === Range.prototype.toString) })
+=== to-string-hidden-and-script-text
+@html <div id=r>a<span style='display:none'>H</span>b<script>var q = 1</script><style>p{}</style>c</div>
+var r = document.createRange(); r.selectNodeContents($('r')); (function () { return '[' + r + ']' })
+=== to-string-utf16
+@html <p id=p1>a😀b😀c</p>
+var r = document.createRange(); r.setStart(T('p1'), 1); r.setEnd(T('p1'), 5); var a = r.startOffset + ':' + r.endOffset + ':' + r.toString().length; r.setEnd(T('p1'), 3); (function () { return a + ' ' + r.toString().length + ' ' + T('p1').length })
+=== illegal-invocation
+@html <div id=r><p id=p1>Hello <b id=b1>big</b> world</p><p id=p2>Second</p><!--c--><span id=s></span></div>
+var P = Range.prototype; (function () { return [err(function () { P.setStart.call({}, document, 0) }), err(function () { return P.startOffset }), err(function () { P.toString.call(1) }), err(function () { P.cloneRange.call(null) }), err(function () { Object.getOwnPropertyDescriptor(P, 'collapsed').get.call({}) })].join(' | ') })
+=== selection-initial-state
+@html <div id=r><p id=p1>Hello <b id=b1>big</b> world</p><p id=p2>Second</p><!--c--><span id=s></span></div>
+var s = getSelection(); (function () { return sp(s) + ' [' + s + '] ' + Object.prototype.toString.call(s) + ' ' + (s instanceof Selection) + ' ' + (s === getSelection()) + ' ' + (s === document.getSelection()) + ' ' + (s === window.getSelection()) })
+=== selection-interface-shape
+@html <div id=r><p id=p1>Hello <b id=b1>big</b> world</p><p id=p2>Second</p><!--c--><span id=s></span></div>
+(function () { var s = getSelection(); return [typeof Selection, Selection.length, Selection.prototype.constructor === Selection, Object.prototype.hasOwnProperty.call(s, 'rangeCount'), err(function () { return new Selection() })].join(' | ') })
+=== selection-add-range
+@html <div id=r><p id=p1>Hello <b id=b1>big</b> world</p><p id=p2>Second</p><!--c--><span id=s></span></div>
+var s = getSelection(); var r = document.createRange(); r.setStart(T('p1'), 1); r.setEnd(T('p1'), 4); s.addRange(r); (function () { return sp(s) + ' ' + (s.getRangeAt(0) === r) + ' [' + s + ']' })
+=== selection-add-range-twice-is-ignored
+@html <div id=r><p id=p1>Hello <b id=b1>big</b> world</p><p id=p2>Second</p><!--c--><span id=s></span></div>
+var s = getSelection(); var r = document.createRange(); r.setStart(T('p1'), 1); r.setEnd(T('p1'), 4); var q = document.createRange(); q.selectNodeContents($('p2')); s.addRange(r); s.addRange(q); (function () { return sp(s) + ' ' + (s.getRangeAt(0) === r) })
+=== selection-add-range-outside-document-is-ignored
+@html <div id=r><p id=p1>Hello <b id=b1>big</b> world</p><p id=p2>Second</p><!--c--><span id=s></span></div>
+var s = getSelection(); var x = document.createElement('i'); x.textContent = 'zz'; var r = document.createRange(); r.selectNodeContents(x); s.addRange(r); (function () { return sp(s) })
+=== selection-add-range-arguments
+@html <div id=r><p id=p1>Hello <b id=b1>big</b> world</p><p id=p2>Second</p><!--c--><span id=s></span></div>
+var s = getSelection(); (function () { return [err(function () { s.addRange() }), err(function () { s.addRange({}) }), err(function () { s.addRange(null) }), err(function () { s.addRange(document) })].join(' | ') })
+=== selection-range-is-live
+@html <div id=r><p id=p1>Hello <b id=b1>big</b> world</p><p id=p2>Second</p><!--c--><span id=s></span></div>
+var s = getSelection(); var r = document.createRange(); r.setStart(T('p1'), 1); r.setEnd(T('p1'), 4); s.addRange(r); r.setEnd(T('p2'), 2); (function () { return sp(s) })
+=== selection-range-is-live-after-collapse-of-the-range
+@html <div id=r><p id=p1>Hello <b id=b1>big</b> world</p><p id=p2>Second</p><!--c--><span id=s></span></div>
+var s = getSelection(); var r = document.createRange(); r.setStart(T('p1'), 1); r.setEnd(T('p1'), 4); s.addRange(r); r.collapse(true); (function () { return sp(s) })
+=== selection-get-range-at
+@html <div id=r><p id=p1>Hello <b id=b1>big</b> world</p><p id=p2>Second</p><!--c--><span id=s></span></div>
+var s = getSelection(); var r = document.createRange(); r.selectNodeContents($('p1')); (function () { var a = [err(function () { s.getRangeAt(0) }), err(function () { s.getRangeAt() })]; s.addRange(r); a.push(err(function () { return s.getRangeAt(1) }), err(function () { return s.getRangeAt(-1) }), err(function () { return s.getRangeAt('0') === r }), err(function () { return s.getRangeAt(0) === s.getRangeAt(0) })); return a.join(' | ') })
+=== selection-remove-all-ranges-and-empty
+@html <div id=r><p id=p1>Hello <b id=b1>big</b> world</p><p id=p2>Second</p><!--c--><span id=s></span></div>
+var s = getSelection(); var r = document.createRange(); r.selectNodeContents($('p1')); s.addRange(r); var a = sp(s); s.removeAllRanges(); var b = sp(s); s.addRange(r); s.empty(); (function () { return a + ' | ' + b + ' | ' + sp(s) + ' ' + pt(r) })
+=== selection-remove-range
+@html <div id=r><p id=p1>Hello <b id=b1>big</b> world</p><p id=p2>Second</p><!--c--><span id=s></span></div>
+var s = getSelection(); var r = document.createRange(); r.selectNodeContents($('p1')); var q = document.createRange(); s.addRange(r); (function () { return [err(function () { s.removeRange(q) }), sp(s), err(function () { s.removeRange(r) }), sp(s), err(function () { s.removeRange(r) }), err(function () { s.removeRange({}) }), err(function () { s.removeRange() })].join(' | ') })
+=== selection-collapse
+@html <div id=r><p id=p1>Hello <b id=b1>big</b> world</p><p id=p2>Second</p><!--c--><span id=s></span></div>
+var s = getSelection(); s.collapse(T('p1'), 3); (function () { return sp(s) + ' [' + s + '] ' + pt(s.getRangeAt(0)) })
+=== selection-collapse-offset-defaults-to-zero
+@html <div id=r><p id=p1>Hello <b id=b1>big</b> world</p><p id=p2>Second</p><!--c--><span id=s></span></div>
+var s = getSelection(); s.collapse($('p2')); (function () { return sp(s) })
+=== selection-collapse-null-removes
+@html <div id=r><p id=p1>Hello <b id=b1>big</b> world</p><p id=p2>Second</p><!--c--><span id=s></span></div>
+var s = getSelection(); s.collapse($('p2'), 1); var a = sp(s); s.collapse(null); (function () { return a + ' | ' + sp(s) })
+=== selection-collapse-errors
+@html <div id=r><p id=p1>Hello <b id=b1>big</b> world</p><p id=p2>Second</p><!--c--><span id=s></span></div>
+var s = getSelection(); (function () { return [err(function () { s.collapse(T('p1'), 9) }), err(function () { s.collapse($('p2'), 2) }), err(function () { s.collapse(document.doctype, 0) }), err(function () { s.collapse() }), err(function () { s.collapse({}, 0) }), err(function () { s.collapse(undefined) }), sp(s)].join(' | ') })
+=== selection-collapse-outside-document-does-nothing
+@html <div id=r><p id=p1>Hello <b id=b1>big</b> world</p><p id=p2>Second</p><!--c--><span id=s></span></div>
+var s = getSelection(); s.collapse($('p2'), 1); var x = document.createElement('i'); s.collapse(x, 0); (function () { return sp(s) })
+=== selection-collapse-makes-a-new-range
+@html <div id=r><p id=p1>Hello <b id=b1>big</b> world</p><p id=p2>Second</p><!--c--><span id=s></span></div>
+var s = getSelection(); s.collapse(T('p1'), 1); var a = s.getRangeAt(0); s.collapse(T('p1'), 2); var b = s.getRangeAt(0); (function () { return (a !== b) + ' ' + pt(a) + ' ' + pt(b) })
+=== selection-set-position
+@html <div id=r><p id=p1>Hello <b id=b1>big</b> world</p><p id=p2>Second</p><!--c--><span id=s></span></div>
+var s = getSelection(); s.setPosition(T('p1'), 2); var a = sp(s); (function () { return a + ' ' + err(function () { s.setPosition(T('p1'), 99) }) + ' ' + err(function () { s.setPosition() }) })
+=== selection-collapse-to-start-and-end
+@html <div id=r><p id=p1>Hello <b id=b1>big</b> world</p><p id=p2>Second</p><!--c--><span id=s></span></div>
+var s = getSelection(); var r = document.createRange(); r.setStart(T('p1'), 1); r.setEnd(T('p2'), 3); s.addRange(r); s.collapseToStart(); var a = sp(s); s.removeAllRanges(); s.addRange(r); s.collapseToEnd(); (function () { return a + ' | ' + sp(s) + ' ' + (s.getRangeAt(0) !== r) + ' ' + pt(r) })
+=== selection-collapse-to-start-without-range
+@html <div id=r><p id=p1>Hello <b id=b1>big</b> world</p><p id=p2>Second</p><!--c--><span id=s></span></div>
+var s = getSelection(); (function () { return err(function () { s.collapseToStart() }) + ' | ' + err(function () { s.collapseToEnd() }) })
+=== selection-select-all-children
+@html <div id=r><p id=p1>Hello <b id=b1>big</b> world</p><p id=p2>Second</p><!--c--><span id=s></span></div>
+var s = getSelection(); s.selectAllChildren($('p1')); (function () { return sp(s) + ' [' + s + '] ' + pt(s.getRangeAt(0)) })
+=== selection-select-all-children-text-and-errors
+@html <div id=r><p id=p1>Hello <b id=b1>big</b> world</p><p id=p2>Second</p><!--c--><span id=s></span></div>
+var s = getSelection(); s.selectAllChildren(T('p1')); var a = sp(s); (function () { return a + ' | ' + err(function () { s.selectAllChildren(document.doctype) }) + ' | ' + err(function () { s.selectAllChildren() }) + ' | ' + err(function () { s.selectAllChildren({}) }) })
+=== selection-select-all-children-of-a-detached-node
+@html <div id=r><p id=p1>Hello <b id=b1>big</b> world</p><p id=p2>Second</p><!--c--><span id=s></span></div>
+var s = getSelection(); s.selectAllChildren($('p2')); var x = document.createElement('i'); x.textContent = 'z'; s.selectAllChildren(x); (function () { return sp(s) })
+=== selection-type-and-direction
+@html <div id=r><p id=p1>Hello <b id=b1>big</b> world</p><p id=p2>Second</p><!--c--><span id=s></span></div>
+var s = getSelection(); var out = [s.type + '/' + s.direction]; s.collapse(T('p1'), 1); out.push(s.type + '/' + s.direction); s.selectAllChildren($('p1')); out.push(s.type + '/' + s.direction); s.removeAllRanges(); out.push(s.type + '/' + s.direction); (function () { return out.join(' ') })
+=== selection-to-string-in-one-text
+@html <div id=r><p id=p1>Hello <b id=b1>big</b> world</p><p id=p2>Second</p><!--c--><span id=s></span></div>
+var s = getSelection(); var r = document.createRange(); r.setStart(T('p1'), 1); r.setEnd(T('p1'), 5); s.addRange(r); (function () { return '[' + s + '] [' + s.toString() + '] ' + String(s).length })
+=== selection-is-collapsed
+@html <div id=r><p id=p1>Hello <b id=b1>big</b> world</p><p id=p2>Second</p><!--c--><span id=s></span></div>
+var s = getSelection(); var a = s.isCollapsed; s.collapse(T('p1'), 1); var b = s.isCollapsed; s.getRangeAt(0).setEnd(T('p1'), 3); (function () { return a + ' ' + b + ' ' + s.isCollapsed })
+=== selection-illegal-invocation
+@html <div id=r><p id=p1>Hello <b id=b1>big</b> world</p><p id=p2>Second</p><!--c--><span id=s></span></div>
+var P = Selection.prototype; (function () { return [err(function () { return P.rangeCount }), err(function () { P.addRange.call({}, document.createRange()) }), err(function () { P.toString.call({}) }), err(function () { Object.getOwnPropertyDescriptor(P, 'type').get.call(1) })].join(' | ') })
+=== start-container-is-the-same-wrapper
+@html <div id=r><p id=p1>Hello <b id=b1>big</b> world</p><p id=p2>Second</p><!--c--><span id=s></span></div>
+var r = document.createRange(); r.setStart(T('p1'), 1); r.setEnd($('b1'), 0); (function () { return (r.startContainer === T('p1')) + ' ' + (r.endContainer === $('b1')) + ' ' + (r.commonAncestorContainer === $('p1')) })
+=== get-selection-exists-in-all-places
+@html <div id=r><p id=p1>Hello <b id=b1>big</b> world</p><p id=p2>Second</p><!--c--><span id=s></span></div>
+(function () { return [typeof getSelection, typeof window.getSelection, typeof document.getSelection, typeof document.createRange, getSelection.length, document.createRange.length, getSelection.name, document.getSelection.name, Object.prototype.hasOwnProperty.call(window, 'getSelection'), Object.prototype.hasOwnProperty.call(document, 'getSelection')].join(' ') })
