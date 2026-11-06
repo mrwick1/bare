@@ -29,11 +29,15 @@
 //!   text node at most one per byte (one per line, a line holds a byte at least); an inline element at most one per line, and a line of it holds
 //!   at least one unit of its subtree, so at most `1 + units(subtree)` (units: nodes and bytes of text). Layout writes into one `Vec` (capacity
 //!   = the node count) and copies finished inline-blocks and flex or grid items once into it, so memory is about `bound * 40` bytes.
-//! - `geometry-nesting`: the depth of nested boxes that layout lays out more than once (flex, grid, table, inline-block, float, absolute or fixed,
-//!   `overflow: auto|scroll`). Each level can lay its content out again (a stretched flex or grid item, a scroll bar that appears, a shrink-to-fit
-//!   measure), so work grows by a factor per level. The factor 4 is an estimate from `flex.rs`, `grid.rs`, `intrinsic.rs` and
-//!   `block.rs` (`again`). It is not a proven bound on every layout path.
-//! - `geometry-work`: `(nodes + text bytes) * (1 + 4^nesting)`. It is charged as steps before layout. The walk itself is charged first.
+//! - `geometry-work`: units of layout work done again, counted by layout itself while it runs (`bare_layout::Cx::work`: one for each
+//!   fragment that a flex or grid container or a scrollbar pass threw away to lay a box out again, and one for each fragment that a kept
+//!   result put back). A page that lays nothing out twice has none, and its own cost is bounded by the limits above. Layout stops going
+//!   deeper when it passes `max_work`, so its time is bounded without a guess of how often a box runs again: `bare_layout::layout_within` returns, the
+//!   result is thrown away, and the read stops the page. What layout did is then charged as steps. There is no limit on how deep
+//!   boxes that run again are nested: a flex or grid item that stretches is laid out again, but layout keeps the result of each box
+//!   for each space it was laid out in (`layout/src/memo.rs`), so the work is about one layout for each box for each distinct height
+//!   that reaches it (measured in `docs/resources.md`, "Layout work of geometry reads"), not a factor for each level of nesting.
+//!   Only boxes inside a scroll container that needs a scrollbar can still grow by a factor for each level; `max_work` stops those.
 //!
 //! Not done: `getBoundingClientRect`, `offsetParent`, `offsetLeft`, `offsetTop`, `ResizeObserver`, a cache, slots, shadow sheets, transformed geometry.
 
@@ -57,15 +61,13 @@ pub struct GeometryLimits {
     pub max_text: usize,
     /// Upper bound of the fragments of one layout. `geometry-fragments`.
     pub max_fragments: u64,
-    /// Nesting of boxes that layout can lay out again. `geometry-nesting`.
-    pub max_nesting: u32,
-    /// `(nodes + text bytes) * (1 + 4^nesting)`. `geometry-work`.
+    /// Units of layout work (see the header). `geometry-work`.
     pub max_work: u64,
 }
 
 impl Default for GeometryLimits {
     fn default() -> Self {
-        GeometryLimits { max_nodes: 1 << 14, max_depth: 96, max_text: 1 << 16, max_fragments: 1 << 17, max_nesting: 4, max_work: 1 << 26 }
+        GeometryLimits { max_nodes: 1 << 14, max_depth: 96, max_text: 1 << 16, max_fragments: 1 << 17, max_work: 1 << 20 }
     }
 }
 
@@ -77,6 +79,8 @@ pub struct GeometryStats {
     /// The fragment bound of the last layout, and the fragments it made.
     pub last_bound: u64,
     pub last_fragments: u64,
+    /// The work of the last layout, in units (see the header).
+    pub last_work: u64,
 }
 
 #[derive(Default)]
@@ -93,27 +97,14 @@ const NOT_LONG: &str = "geometry that is not a finite number that fits a long";
 /// What the walk found.
 struct Bound {
     fragments: u64,
-    work: u64,
+    /// Nodes and bytes of text: what the walk looked at.
+    seen: u64,
 }
 
 struct Frame<'a> {
     kids: Children<'a>,
     units: u64,
     inline: bool,
-    nest: u32,
-}
-
-/// Does layout lay the content of this box out more than once? (See the header.)
-fn multi_pass(style: &bare_css::cascade::ComputedStyle) -> bool {
-    let kw = |p| match style.get(p) {
-        Cv::Keyword(k) => Some(k),
-        _ => None,
-    };
-    !matches!(kw(Property::Display), Some(Keyword::Block | Keyword::Inline | Keyword::ListItem))
-        || matches!(kw(Property::Float), Some(Keyword::Left | Keyword::Right))
-        || matches!(kw(Property::Position), Some(Keyword::Absolute | Keyword::Fixed))
-        || matches!(kw(Property::OverflowX), Some(Keyword::Auto | Keyword::Scroll))
-        || matches!(kw(Property::OverflowY), Some(Keyword::Auto | Keyword::Scroll))
 }
 
 enum Refuse {
@@ -147,10 +138,9 @@ fn check_shadow(doc: &Document, host: NodeId) -> Result<(), Refuse> {
 /// One walk of the visible tree from the root element, without recursion. Layout reaches the same nodes and no others.
 fn walk(doc: &Document, styles: &Styles, l: &GeometryLimits) -> Result<Bound, Refuse> {
     let Some(root) = doc.children(doc.root()).find(|&n| matches!(doc.data(n), NodeData::Element { .. })) else {
-        return Ok(Bound { fragments: 0, work: 0 });
+        return Ok(Bound { fragments: 0, seen: 0 });
     };
     let (mut nodes, mut text, mut frags) = (0usize, 0usize, 0u64);
-    let mut max_nest = 0u32;
     let mut stack: Vec<Frame> = Vec::new();
     let mut next = Some(root);
     loop {
@@ -190,16 +180,11 @@ fn walk(doc: &Document, styles: &Styles, l: &GeometryLimits) -> Result<Bound, Re
                 if stack.len() + 1 > l.max_depth {
                     return Err(Refuse::Limit("geometry-depth"));
                 }
-                let nest = stack.last().map_or(0, |f| f.nest) + multi_pass(style) as u32;
-                if nest > l.max_nesting {
-                    return Err(Refuse::Limit("geometry-nesting"));
-                }
-                max_nest = max_nest.max(nest);
                 if style.get(Property::Display) == Cv::Keyword(Keyword::ListItem) {
                     frags += 1;
                 }
                 let inline = style.get(Property::Display) == Cv::Keyword(Keyword::Inline) || Some(name) == doc.find_atom("br");
-                stack.push(Frame { kids: doc.flat_children(node), units: 0, inline, nest });
+                stack.push(Frame { kids: doc.flat_children(node), units: 0, inline });
             }
             NodeData::Text(span) => {
                 let Some(top) = stack.last_mut() else { continue };
@@ -221,12 +206,7 @@ fn walk(doc: &Document, styles: &Styles, l: &GeometryLimits) -> Result<Bound, Re
             return Err(Refuse::Limit("geometry-fragments"));
         }
     }
-    let factor = 4u64.saturating_pow(max_nest).saturating_add(1);
-    let work = ((nodes + text) as u64).saturating_mul(factor);
-    if work > l.max_work {
-        return Err(Refuse::Limit("geometry-work"));
-    }
-    Ok(Bound { fragments: frags, work })
+    Ok(Bound { fragments: frags, seen: (nodes + text) as u64 })
 }
 
 impl Dom {
@@ -246,11 +226,15 @@ impl Dom {
             Err(Refuse::Limit(name)) => return Err(self.lim(name)),
             Err(Refuse::Gate(why)) => return Err(Self::gate(why)),
         };
-        // The work is reserved before layout starts: it cannot be interrupted.
-        it.charge(bound.work + 1)?;
-        let layout = bare_layout::layout(&doc, styles, vp);
+        // Layout cannot be interrupted, so it counts its own work and stops going deeper at `max_work`.
+        it.charge(bound.seen + 1)?;
+        let layout = bare_layout::layout_within(&doc, styles, vp, l.max_work);
+        if layout.work > l.max_work {
+            return Err(self.lim("geometry-work"));
+        }
+        it.charge(layout.work)?;
         let mut s = self.geometry.stats.get();
-        s = GeometryStats { layouts: s.layouts + 1, last_bound: bound.fragments, last_fragments: layout.fragments.len() as u64 };
+        s = GeometryStats { layouts: s.layouts + 1, last_bound: bound.fragments, last_fragments: layout.fragments.len() as u64, last_work: layout.work };
         self.geometry.stats.set(s);
         Ok(layout)
     }

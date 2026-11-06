@@ -14,13 +14,15 @@ pub mod fragment;
 pub mod grid;
 pub mod inline;
 pub mod intrinsic;
+mod memo;
 pub mod scroll;
 pub mod table;
 pub mod text;
 
 use bare_css::cascade::Styles;
-use bare_html::dom::{Atom, Document, NodeData, NodeId};
+use bare_html::dom::{Atom, Document, Fnv, NodeData, NodeId};
 use std::collections::HashMap;
+use std::hash::BuildHasherDefault;
 use block::{Pos, Space};
 use fragment::{Fragment, Layout};
 
@@ -36,7 +38,7 @@ pub struct Cx<'a> {
     /// The number of the last list item, for its marker.
     pub number: i32,
     /// The intrinsic widths of the boxes measured so far, by `NodeId::index` (`intrinsic.rs`).
-    pub sizes: HashMap<u32, (f32, f32)>,
+    pub sizes: Fast<(f32, f32)>,
     /// How many intrinsic measures are running, one inside the other.
     pub measuring: u32,
     /// Empty lists of fragments, to use again for the next inline-block (`inline.rs`): no new allocation for each one.
@@ -44,11 +46,11 @@ pub struct Cx<'a> {
     /// The floats of the block formatting context that is laid out now (`floats.rs`).
     pub floats: floats::Floats,
     /// The `overflow: auto` boxes that layout found to need scrollbars: (right, bottom), by `NodeId::index`.
-    pub bars: HashMap<u32, (bool, bool)>,
+    pub bars: Fast<(bool, bool)>,
     /// How many layouts run again inside one another because a box found that it needs a scrollbar (`block::sized`).
     pub again: u32,
     /// The offsets of the boxes with `position: relative`, by `NodeId::index`. They move at the end of layout.
-    pub rel: HashMap<u32, (f32, f32)>,
+    pub rel: Fast<(f32, f32)>,
     /// The page has a box with `position: fixed`.
     pub fixed: bool,
     /// The static positions that wait for their containing block. With none, no walk is needed.
@@ -56,11 +58,37 @@ pub struct Cx<'a> {
     /// How many percents met a base that is not known (`block::resolve`). A flex item whose layout met none does not
     /// depend on its height: to stretch it, layout changes only its height (`flex.rs`).
     pub unknown: std::cell::Cell<u32>,
+    /// The work that layout did more than once, in fragments: those of a layout that a flex or grid container threw away to lay the
+    /// item out again, those of a scrollbar pass that was thrown away, and those that a kept layout put back (`memo.rs`). A page that
+    /// lays nothing out twice has 0. Layout stops going deeper when it passes `budget` (`layout_within`).
+    pub work: u64,
+    pub budget: u64,
+    /// How many boxes so far could run their content again for a scrollbar (`block::sized`). A layout that adds none does not read `bars`.
+    pub scrolls: u32,
+    /// How many flex and grid items so far were laid out (`Cx::lay_item`). A box that lays out none inside is cheap to run again: it is not kept.
+    pub(crate) items: u32,
+    /// `lay_item` keeps and finds results once `work` is this much (`memo.rs`).
+    pub(crate) memo_from: u64,
+    /// How many `lay_item` calls are running. Only inside one is `fx` written, because only a result of `lay_item` is put back.
+    pub(crate) open: u32,
+    /// What layout wrote by node (`rel`, `bars`), in order, and the results kept for boxes that run again (`memo.rs`).
+    pub(crate) fx: Vec<memo::Effect>,
+    pub(crate) memo: memo::Memo,
 }
+
+/// A table by `NodeId::index`. The page picks the keys, and it can only slow down its own layout, so the fast hash of `Document` is enough.
+pub type Fast<V> = HashMap<u32, V, BuildHasherDefault<Fnv>>;
 
 /// Lay out a page in a window of `viewport` (width, height) CSS pixels.
 pub fn layout(doc: &Document, styles: &Styles, viewport: (f32, f32)) -> Layout {
-    let mut cx = Cx { tree: boxes::Tree::new(doc, styles), out: Vec::with_capacity(doc.len()), depth: 0, marker: None, number: 0, sizes: HashMap::new(), measuring: 0, spare: Vec::new(), floats: Default::default(), bars: HashMap::new(), again: 0, rel: HashMap::new(), fixed: false, waiting: 0, unknown: Default::default() };
+    layout_within(doc, styles, viewport, u64::MAX)
+}
+
+/// `layout`, but it stops going deeper once it has done `budget` units of work (`Cx::work`). The fragments are then
+/// incomplete: the caller must look at `Layout::work` and throw the result away when it is more than `budget`. Layout
+/// cannot be interrupted, so this is how a caller bounds the time of a page that it does not trust.
+pub fn layout_within(doc: &Document, styles: &Styles, viewport: (f32, f32), budget: u64) -> Layout {
+    let mut cx = Cx { tree: boxes::Tree::new(doc, styles), out: Vec::with_capacity(doc.len()), depth: 0, marker: None, number: 0, sizes: Fast::default(), measuring: 0, spare: Vec::new(), floats: Default::default(), bars: Fast::default(), again: 0, rel: Fast::default(), fixed: false, waiting: 0, unknown: Default::default(), work: 0, budget, scrolls: 0, items: 0, memo_from: memo::start().min(budget), open: 0, fx: Vec::new(), memo: Default::default() };
     // Most pages make about one fragment for each DOM node: one for each element and each text on one line, none for
     // the `head` and for the spaces between blocks. Room for that many at once saves the copies of a `Vec` that grows.
     let mut height = 0.0;
@@ -94,7 +122,7 @@ pub fn layout(doc: &Document, styles: &Styles, viewport: (f32, f32)) -> Layout {
         }
     }
     fragment::absolute(&mut cx.out);
-    Layout { fragments: cx.out, width: viewport.0, height, bars: cx.bars }
+    Layout { fragments: cx.out, width: viewport.0, height, bars: cx.bars, work: cx.work }
 }
 
 /// The fragments as text, one on each line, for tests and for `bare --layout`: the name (with `#id` if the element has

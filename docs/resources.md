@@ -3605,3 +3605,56 @@ Known gaps:
 - An `Interp` must run on one thread stack at a time. It is not `Send`, so this holds.
 
 Not tested: the live staging login on this build, a debug build of the browser with 10,000 calls in a thread of 256 KiB, a platform other than Linux x86-64 (`stacker` supports others), and memory of the page after 2,000 levels with a real React bundle.
+
+## Layout work of geometry reads
+
+Problem: a script geometry read (`offsetWidth`) stopped with `Limit(Host("geometry-nesting"))` on the staging dashboard. The rule charged `(nodes + text) * (1 + 4^nesting)` steps up front and refused above 4 levels. Nobody had measured how often layout runs a box.
+
+Measured on the page (a static dump from 2026-11-06, not committed): 251 nodes, depth 17, 594 bytes of text, 9 levels of boxes that layout can lay out twice (flex, grid, table, inline-flex, sticky and relative boxes). Layout made 185 layouts for 185 boxes in about 176 µs. No box ran twice. The estimate was the only thing that stopped the read. `tools/fixtures/ui/geometry-dashboard.html` has the same counts with invented content (207 nodes, depth 17, 9 levels, 195 bytes of text) and reads with work 0.
+
+Where a box does run twice: a flex item that stretches (`flex::relayout`) and a grid item that stretches (the "again" path in `grid.rs`) are laid out a second time at the new height. A scroll container that needs a bar runs its content a second time (`block::sized`). Intrinsic sizes are cached already and are linear. So nested containers double at each level:
+
+| Levels | Main, rows | This build, rows | This build, work | Main, grids | This build, grids |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 5 | 0.15 ms | 0.15 ms | 82 | 0.27 ms | 0.25 ms |
+| 10 | 3.6 ms | 4.0 ms | 3,048 | 4.5 ms | 6.1 ms |
+| 15 | 82 ms | 5.4 ms | 8,112 | 86 ms | 4.2 ms |
+| 18 | 713 ms | 5.0 ms | 11,312 | 682 ms | 4.1 ms |
+| 40 | not run | 12 ms | 88,312 | not run | 7.5 ms |
+| 90 | not run | 60 ms | 973,712 | not run | 24 ms |
+
+Each level is a flex row (or a grid) with a sibling that is taller the nearer it is to the outside, so every row is stretched. Layout time only, release build, one run. Main is d6d9b92 here (its layout crate is the same as on fb233de). 10 levels are under the start rule below, so they cost as much as before. Before: 2^n layouts (20 levels, 43 boxes: 2.6 million).
+
+What runs (`crates/layout/src/memo.rs`): a result of an item is a function of the box, its space, its forced width, its height, the call depth and the list number. It also changes four things outside the fragments: the boxes out of the flow that wait (`Cx::waiting`), the percents that met an unknown base (`Cx::unknown`), and the offsets and scrollbars written by node (`Cx::rel`, `Cx::bars`). All four are kept with the result and put back on a hit. When the container throws a first result away to lay the item out again, it keeps that result (`keep`). The second run of the parent then finds its children in the map. Each box is laid out once for each distinct height that reaches it. A box that starts with a list marker is never kept. A box that can run its content again for a scrollbar is kept and found only outside a scrollbar pass (`Cx::again`).
+
+Cost rules, from the first build, which cost +1% to +20% on flex and grid rows:
+1. The map works only after layout did `start` = 4,096 units of work again. A page that lays a few boxes out twice never reaches it.
+2. It works only for an item with an element inside. An item with none cannot hold another item, and laying it out twice is cheap.
+3. `lay_item` is `#[inline(always)]` and has one compare in front of `block::sized`. The rest is outside (`lay_nested`, `replay`, `record`).
+4. `Cx::sizes`, `Cx::rel`, `Cx::bars` and the map use the FNV hash of `Document` and not SipHash. Hypothesis, not measured alone: this pays for most of the rest. `position-relative-spans` is -2.2%.
+5. The map holds at most 1,048,576 fragments (about 32 MB). Past it, it is emptied and fills again. Without this, 100 copies of 40 stretched rows used 267 MiB. With it they use 71 MiB.
+
+Work and bounds. `Cx::work` counts the fragments that a container threw away to lay an item out again, the fragments of a scrollbar pass that was thrown away, and the fragments that the map put back. A page that lays nothing out twice has 0. Layout stops going deeper when `work` passes the budget (`layout_within`): `lay_item` lays the box and not its content, and a scrollbar pass does not run again. The caller reads `Layout::work` and throws a result away that is over the budget. This is a count of what was done, not an estimate of what could be done. `geometry-work` is `max_work` = 1<<20 units, and what layout did is then charged as steps. The units cost 0.06 µs to 1.2 µs each in the runs above. The page that is built to reach the limit stops in 0.9 s to 1.0 s (the `scroll` case below). `max_nesting` is removed. The other limits are as before (`max_nodes` 16,384, `max_depth` 96, `max_text` 65,536, `max_fragments` 131,072). The staging fixture uses 251 nodes, depth 17 and 594 bytes. Native stack depends on depth (about 3 frames per level, `block::MAX_DEPTH` = 400, `max_depth` = 96) and not on nesting. The map and the budget add no recursion.
+
+Unsolved by design: a scroll container that needs a bar, inside a stretched row, inside another one. The first pass of a box with a bar runs in a scrollbar pass, where the map is not used, because those results depend on the bars of the first pass. This page doubles at each level. `max_work` stops it.
+
+Load (`cargo run --release -p bare --example geometry_load CASE SCALE`, one process each, the read goes through `offsetWidth` with raised limits):
+
+| Case | Scale | Fragments | Work | Layout | First read | Peak RSS |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| dashboard | 1 | 191 | 0 | 0.3 ms | 1.0 ms | 8 MiB |
+| dashboard | 10 | 1,541 | 0 | 1.3 ms | 4.3 ms | 8 MiB |
+| dashboard | 100 | 15,041 | 0 | 7.4 ms | 32 ms | 10 MiB |
+| stretch (40 rows) | 1 | 86 | 88,312 | 7.4 ms | 16 ms | 10 MiB |
+| stretch | 10 | 824 | 823,036 | 71 ms | 82 ms | 37 MiB |
+| stretch | 100 | 8,204 | 8,190,236 | 519 ms | 815 ms | 71 MiB |
+
+`scroll` (30 scroll containers with a bar, each in a stretched row, with the default limits): the read stops with `geometry-work` after 0.9 s, 0.9 s and 1.0 s at 1x, 10x and 100x, and peak RSS is 9, 9 and 10 MiB.
+
+Cost: `perf stat -e instructions:u`, minimum of 3 runs, main fb233de against this build, each in its own `CARGO_TARGET_DIR` under `/data/bare-tmp`. 88 `bare-stress run CASE N` layout rows (block, inline, floats, overflow, position, grid, flex, table and text; N is the size in the case list), `bare-bench`, and 27 rows at scale 10: `style_load` (6), `browser_load` (6), `scroll_load 10000 2000`, `sheets_load` (3), `loader_load` (3), `session_load` (2), `platform_load` (3) and `focus_load` (3). The worst rows: `grid-sparse-spans` +0.415%, `grid-dense` +0.399%, `grid-auto-fill` +0.277%, `flex-cards-percent-height` +0.265%. The worst of the 27 other rows is `style_load churn` at +0.151%. `bare-bench` is -0.001%. Best: `position-relative-spans` -2.2%. The stress rows count the parse and the cascade too.
+
+The first build was worse: `flex-cards-percent-height` +19.6%, `grid-dense` +8.0%, `flex-nested-rows` +2.7%. The causes were a key built and a result copied for every item, a log of side effects for every box, and a work count in every box (about 50 instructions per box). The cost rules above are the fixes. Adding `lay_item` to `flex.rs` also moved `position-relative-spans` by +2.1% before the hash change, with no flex in the page: code generation, as in the computed-style topic.
+
+Layout output: 3,000 random pages (flex, grid, scroll, position, lists, tables) and 56 stretched shapes of 10 to 17 levels give the same hash of the fragments and the scrollbars on main fb233de and on this build. `memo::tests::the_map_does_not_change_a_layout` lays out 28 shapes with the map and with no map and compares the fragments and the scrollbars. The 18 fixtures of `crates/paint/tests/fixtures`, `tools/fixtures/ui` and `tools/fixtures/staging` painted with `bare --paint --width=400` give the same PNG bytes on main and on this build. `cargo test --workspace`: 2,392 passed, 0 failed, 11 ignored. Clippy: 49 warnings on main and 49 here.
+
+Not tested: the live staging page after hydration (only a static dump was measured), a new run against Chrome (the PNG bytes equal those of main, which are what Chrome was compared with), a page with 100,000 nodes and nested stretched rows, a table inside a stretched item for the count of reruns, and the cost per unit on another machine. The units are not time: 0.06 µs to 1.2 µs each here.

@@ -303,13 +303,13 @@ fn refuse(page: &str, l: GeometryLimits, name: &'static str) {
     b.set_geometry_limits(l);
     let r = js(&mut b, "var log = []; try { document.getElementById('t').offsetWidth; log.push('after') } catch (e) { log.push('catch') } finally { log.push('finally') }");
     assert_eq!(r, lim(name), "{name}");
-    // no catch and no finally ran, and native layout did not start
+    // no catch and no finally ran, and no layout finished
     assert_eq!(js(&mut b, "log.join()"), "");
     assert_eq!(b.geometry_stats().layouts, 0, "{name}");
 }
 
 #[test]
-fn limits_refuse_before_native_layout_starts() {
+fn limits_refuse_before_native_layout_starts_or_stop_it() {
     big(|| {
         let nest = |n: usize| format!("{}<i id=t>x</i>{}", "<div>".repeat(n), "</div>".repeat(n));
         let d = GeometryLimits::default();
@@ -318,19 +318,95 @@ fn limits_refuse_before_native_layout_starts() {
         refuse(&format!("<div id=t>{}</div>", "x".repeat(300)), GeometryLimits { max_text: 100, ..d }, "geometry-text");
         // 10 nested inline boxes around 20 letters: each one can be on 21 lines, so the bound is far above 100
         refuse(&format!("<div id=t>{}{}{}</div>", "<b>".repeat(10), "ab".repeat(10), "</b>".repeat(10)), GeometryLimits { max_fragments: 100, ..d }, "geometry-fragments");
-        // inline-blocks inside inline-blocks: each level can lay its content out again
-        let blocks = format!("<div id=t>{}x{}</div>", "<span style='display:inline-block'>".repeat(5), "</span>".repeat(5));
-        refuse(&blocks, GeometryLimits { max_nesting: 3, ..d }, "geometry-nesting");
-        refuse(&nest(3), GeometryLimits { max_work: 4, ..d }, "geometry-work");
+        // layout counts only what it does again: 10 stretched rows lay out 10 times again, so 4 units are not enough
+        refuse(&stretched_rows(10), GeometryLimits { max_work: 4, ..d }, "geometry-work");
     });
 }
 
 #[test]
 fn the_step_budget_is_reserved_before_layout() {
     big(|| {
-        let mut b = Browser::new(tree::parse(&format!("<body>{}<p id=t>x</p>", "<div></div>".repeat(200))), BrowserLimits::default(), EvalLimits { max_steps: 2000, ..Default::default() }, HeapLimits::default()).unwrap();
+        let mut b = Browser::new(tree::parse(&format!("<body>{}<p id=t>x</p>", "<div></div>".repeat(1000))), BrowserLimits::default(), EvalLimits { max_steps: 2000, ..Default::default() }, HeapLimits::default()).unwrap();
         assert_eq!(js(&mut b, "document.getElementById('t').offsetWidth"), "limit:Steps");
         assert_eq!(b.geometry_stats().layouts, 0);
+    });
+}
+
+/// `n` flex rows inside one another, with a sibling at each level that is taller the nearer it is to the outside, so every row is stretched.
+fn stretched_rows(n: usize) -> String {
+    let mut page = String::from("<body style='margin:0'>");
+    for k in 0..n {
+        page += &format!("<div{} style='display:flex'>", if k == 0 { " id=o" } else if k == n / 2 { " id=m" } else { "" });
+    }
+    page += "<span id=t>text</span>";
+    for k in (0..n).rev() {
+        page += &format!("<div style='height:{}px'></div></div>", 10 + 20 * (n - 1 - k));
+    }
+    page
+}
+
+#[test]
+fn work_is_charged_as_steps_after_layout_counted_it() {
+    big(|| {
+        // The walk of this page costs about 150 steps, and its layout about 40,000 units. 200 steps pay the walk and not the layout.
+        let mut b = Browser::new(tree::parse(&stretched_rows(30)), BrowserLimits::default(), EvalLimits { max_steps: 200, ..Default::default() }, HeapLimits::default()).unwrap();
+        assert_eq!(js(&mut b, "document.getElementById('o').offsetHeight"), "limit:Steps");
+        assert_eq!(b.geometry_stats().layouts, 0);
+        let mut b = at(&stretched_rows(30));
+        assert_eq!(js(&mut b, "document.getElementById('o').offsetHeight"), "590");
+        // 63 boxes: each is laid out once for each height that reaches it, and not 2^30 times. The work grows with the cube of the levels.
+        assert!(b.geometry_stats().last_work < 63 * 30 * 30, "{}", b.geometry_stats().last_work);
+    });
+}
+
+#[test]
+fn deeply_nested_stretched_flex_rows_read_in_bounded_work() {
+    big(|| {
+        // 80 levels is under `max_depth` (96). Each row is as tall as the tallest sibling, 10 + 20 * 79. The work is under `max_work`.
+        let mut b = at(&stretched_rows(80));
+        assert_eq!(js(&mut b, "document.getElementById('o').offsetHeight + ',' + document.getElementById('m').offsetHeight"), "1590,1590");
+        assert!(b.geometry_stats().last_work < 163 * 80 * 80, "{}", b.geometry_stats().last_work);
+    });
+}
+
+#[test]
+fn scroll_containers_nested_in_stretched_rows_stop_with_a_work_limit_in_bounded_time() {
+    big(|| {
+        // Every level is a scroll container that needs a bar inside a stretched row. The first pass of a box with a bar runs
+        // without the map of results, so this page doubles at each level: 2^30 layouts. `max_work` stops it.
+        let mut page = String::from("<body style='margin:0'>");
+        for _ in 0..30 {
+            page += "<div style='display:flex'><div style='overflow:auto;max-height:300px'>";
+        }
+        page += "<span id=t>text</span>";
+        for k in (0..30).rev() {
+            page += &format!("</div><div style='height:{}px'></div></div>", 10 + 20 * (29 - k));
+        }
+        let mut b = at(&page);
+        let start = std::time::Instant::now();
+        assert_eq!(js(&mut b, "document.getElementById('t').offsetWidth"), lim("geometry-work"));
+        assert!(start.elapsed().as_secs() < 20, "{:?}", start.elapsed());
+        assert_eq!(b.geometry_stats().layouts, 0);
+    });
+}
+
+/// A page with the shape of a Next.js and Tailwind dashboard that was measured on 2026-11-06: 9 levels of boxes that layout can lay out
+/// more than once (flex, grid, table, inline-flex, sticky and relative boxes) in 17 levels of elements. Invented content and styles.
+/// The first geometry read of it used to stop with `geometry-nesting` (more than 4 levels), and `geometry-work` would have been 4^9 steps.
+const DASHBOARD: &str = include_str!("../../../tools/fixtures/ui/geometry-dashboard.html");
+
+#[test]
+fn a_dashboard_shaped_page_reads_geometry_with_the_default_limits() {
+    big(|| {
+        let mut b = at(DASHBOARD);
+        // header: height 52 with border-box sizing. cell: 160 x 12. dot: 7 x 7. section: a column of 1fr is not less than the least width
+        // of its table (160 + 5 * 64 + 6 * 2 * 8 = 576), and the section adds 2 * (1 + 16): 610, over the 608 that 1fr alone gives. app: the body margin is 0.
+        let r = js(&mut b, "var q = function (s) { var e = document.querySelector(s); return e.offsetWidth + 'x' + e.offsetHeight }; [q('header.bar'), q('.cell'), q('.dot'), document.querySelector('section').offsetWidth, document.getElementById('app').offsetWidth].join()");
+        assert_eq!(r, "1280x52,160x12,7x7,610,1280");
+        let s = b.geometry_stats();
+        assert!(s.layouts >= 1 && s.last_work < 2000, "{s:?}");
+        // a read of an element deep in the page, after a change, is a new layout
+        assert_eq!(js(&mut b, "var c = document.querySelector('.cell'); c.style.width = '33px'; c.offsetWidth"), "33");
     });
 }
 
@@ -421,7 +497,7 @@ fn stack_probe() {
     std::thread::Builder::new().stack_size(kb << 10).spawn(move || {
         let page = format!("<body>{}<div id=t>x</div>{}", open.repeat(n), close.repeat(n));
         let mut b = Browser::new(tree::parse(&page), BrowserLimits::default(), EvalLimits { max_steps: u64::MAX / 2, ..Default::default() }, HeapLimits::default()).unwrap();
-        b.set_geometry_limits(GeometryLimits { max_depth: 10_000, max_nesting: 10_000, max_work: u64::MAX, max_nodes: 1 << 20, ..Default::default() });
+        b.set_geometry_limits(GeometryLimits { max_depth: 10_000, max_work: u64::MAX, max_nodes: 1 << 20, ..Default::default() });
         println!("{shape} depth {n}: {}", js(&mut b, "document.getElementById('t').parentNode.offsetWidth"));
     }).unwrap().join().unwrap();
 }

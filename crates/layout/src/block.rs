@@ -293,6 +293,7 @@ pub(crate) fn sized_with(cx: &mut Cx, node: NodeId, space: Space, forced: Option
     let reserve = control == Some(crate::controls::Control::TextArea) && auto.0;
     bars.0 |= reserve;
     let mut retry = (auto.0 || auto.1) && !reserve;
+    cx.scrolls += retry as u32;
     if retry && cx.again > 0 && let Some(&known) = cx.bars.get(&(node.index() as u32)) {
         bars = known;
         retry = false;
@@ -346,9 +347,11 @@ pub(crate) fn sized_with(cx: &mut Cx, node: NodeId, space: Space, forced: Option
             let wide = !stopped && auto.1 && right_edge(cx, fragment) > bp.left + inner.width + 0.01;
             let need = (bars.0 || (auto.0 && used > room + 0.01), bars.1 || wide);
             if !stopped {
-                cx.bars.insert(node.index() as u32, need);
+                cx.set_bars(node, need);
             }
-            if need != bars {
+            if need != bars && cx.work <= cx.budget {
+                // The pass is thrown away: that is work (`Cx::work`).
+                cx.work += (cx.out.len() - fragment) as u64;
                 // A box that shrinks to fit its content gets wider by the scrollbar, so the content keeps its room.
                 if need.0 && !bars.0 && forced.is_some() && matches!(cx.tree.kind(node), Kind::Atomic | Kind::Float) && style.get(Property::Width) == Value::Keyword(Keyword::Auto) {
                     width += SCROLLBAR;
@@ -420,7 +423,7 @@ pub(crate) fn sized_with(cx: &mut Cx, node: NodeId, space: Space, forced: Option
     if position == Keyword::Relative {
         let offset = relative_offset(cx, style, space);
         if offset != (0.0, 0.0) {
-            cx.rel.insert(node.index() as u32, offset);
+            cx.set_rel(node, offset);
         }
     }
     if position != Keyword::Static && cx.waiting > 0 {

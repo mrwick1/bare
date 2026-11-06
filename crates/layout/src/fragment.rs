@@ -57,7 +57,9 @@ pub struct Layout {
     pub width: f32,
     pub height: f32,
     /// The scrollbars of the `overflow: auto` boxes that needed them: (right, bottom), by `NodeId::index`. `scroll.rs` reads it.
-    pub bars: std::collections::HashMap<u32, (bool, bool)>,
+    pub bars: crate::Fast<(bool, bool)>,
+    /// The work that layout did again, in fragments (`Cx::work`). 0 for a page that lays nothing out twice.
+    pub work: u64,
 }
 
 /// Turn the places of all fragments from "relative to the parent fragment" into page coordinates.

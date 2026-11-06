@@ -65,6 +65,10 @@ Boa is MIT or Unlicense. We read its source and wrote our own code in the shape 
 | [lightningcss](https://github.com/parcel-bundler/lightningcss) | MPL-2.0 | 7,726 | Fast CSS parser, transformer and minifier. |
 | [Taffy](https://github.com/DioxusLabs/taffy) | MIT | 3,735 | Block, flexbox and grid layout. |
 
+### Idea taken for the layout map (2026-11-06)
+
+Taffy (MIT), Servo and Chrome (`NGLayoutResult`) keep the result of a box for the space it was laid out in. `crates/layout/src/memo.rs` does the same for one layout. We took the idea only. We copied no code and no file, so no notice is needed. The key, the replay of side effects and the start rule are our own. See `docs/resources.md`, "Layout work of geometry reads".
+
 ## Paint, fonts and text (S4)
 
 | Project | License | Stars | What it gives |

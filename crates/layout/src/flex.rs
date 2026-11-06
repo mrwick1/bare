@@ -21,10 +21,10 @@
 //! flex, grid or table container itself. Else only the height of its box changes. A row of cards with
 //! `align-items: stretch` is laid out once.
 
-use crate::block::{self, Kids, Pos, Sides, Space, border_padding, resolve};
+use crate::block::{self, Kids, Sides, Space, border_padding, resolve};
 use crate::boxes::{Child, Kind};
 use crate::fragment::{self, Fragment};
-use crate::{Cx, inline, intrinsic};
+use crate::{Cx, inline, intrinsic, memo};
 use bare_css::cascade::ComputedStyle;
 use bare_css::values::{Keyword as K, Property as P, Value};
 use bare_html::dom::NodeId;
@@ -70,6 +70,8 @@ struct Item {
     waits: u32,
     /// The place of its margin box from the content box of the container: main, cross.
     at: (f32, f32),
+    /// Its last layout, for the map of layouts that a run again throws away (`memo.rs`). `None` once the fragments changed.
+    laid: Option<Box<memo::Laid>>,
 }
 
 impl Item {
@@ -467,6 +469,7 @@ fn item(cx: &mut Cx, container: NodeId, node: NodeId, last: Option<NodeId>, spac
         moved: None,
         waits: 0,
         at: (0.0, 0.0),
+        laid: None,
     };
     if last.is_some() {
         // An anonymous item: no style of its own, no box. Its sizes are those of its lines.
@@ -557,7 +560,7 @@ fn lay(cx: &mut Cx, container: NodeId, it: &mut Item, space: Space, w: f32, tall
     } else {
         cx.number = it.number;
         // The margins are placed by the container: the box starts at 0.
-        let done = block::sized(cx, it.node, space, Some((w, 0.0, 0.0)), tall, Pos::default());
+        let done = cx.lay_item(it.node, space, (w, 0.0, 0.0), tall, &mut it.laid);
         cx.out[done.fragment].rect.x = 0.0;
         (it.cross, it.baseline, it.content) = (done.height, done.baseline.filter(|_| !cx.tree.scrolls(it.node)), done.content);
         let tree = cx.tree;
@@ -582,6 +585,7 @@ fn resize(cx: &mut Cx, container: NodeId, it: &mut Item, space: Space, w: f32, h
         return;
     }
     if it.rigid {
+        it.laid = None;
         let f = match &mut it.moved {
             Some(list) => &mut list[0],
             None => &mut cx.out[it.from],
@@ -597,6 +601,11 @@ fn resize(cx: &mut Cx, container: NodeId, it: &mut Item, space: Space, w: f32, h
 fn relayout(cx: &mut Cx, container: NodeId, it: &mut Item, space: Space, w: f32, tall: Option<f32>) {
     // The static positions in the old fragments wait no more.
     cx.waiting -= it.waits;
+    // The fragments of the first layout are thrown away: that is work (`Cx::work`).
+    cx.work += it.moved.as_ref().map_or(it.to - it.from, Vec::len) as u64;
+    if let Some(laid) = it.laid.take() {
+        memo::keep(&mut cx.memo, &laid, it.moved.as_deref().unwrap_or(&cx.out[it.from..it.to]));
+    }
     let mut list = it.moved.take().unwrap_or_default();
     list.clear();
     let saved = std::mem::replace(&mut cx.out, list);
