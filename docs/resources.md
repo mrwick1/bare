@@ -3756,3 +3756,44 @@ Load rows (`tools/js/sticky_load.sh`, release): a page with N sticky rows in a s
 | 1 | 0.8 ms | 8.6 ms | 58 us | 11.7 MiB |
 | 100 | 1.4 ms | 8.0 ms | 71 us | 11.8 MiB |
 | 1,000 | 7.2 ms | 25.4 ms | 240 us (max 1.3 ms) | 12.7 MiB |
+
+
+## select, option and the option lists
+
+Problem: React DOM and Radix UI read `select.options` and the native setter of `HTMLSelectElement.prototype.value`. Neither existed, so the pages that hold a select crashed.
+
+What runs (`browser_select.rs`): the HTML Standard, checked against headless Chrome 155.
+
+- State: each option has `selected`, a dirtiness flag, the `selected` attribute and its index. Each select has a cache of its option list, rebuilt when the document revision changes. The select list is the options that are children of the select or of an optgroup child.
+- Selectedness: the rules run when the list, `multiple`, the display size or a `selected` attribute changed. An inserted option that is selected wins in a single select. Two selected options in a single select keep the first. A single select with display size 1 and no selection selects the first option that is not disabled. The `value` and `selectedIndex` setters leave -1 when nothing matches.
+- Events: script changes fire no `input` and no `change` event.
+- Lists: `options` and `selectedOptions` are live host-indexed objects of `browser_nodelist.rs` (`Src::Options`, `Src::Selected`). Their cache is valid for one revision.
+- Painter: `Browser::selected_option` gives the option that a closed select shows. `page.rs` fills `DisplayList::chosen` before it builds the list.
+- Globals: seven lazy accessors, installed last in `Browser::install`. A page that makes no select pays for 7 accessor functions only. A `textarea` wrapper makes the same interfaces.
+- `add` syncs the list only for an index argument. A sync at each call made a loop of `add` quadratic.
+
+Deviations: the rules run at the next read and not at each change. Index assignment (`select[i] = x`, `options[i] = x`) is not built. `labels`, `validity`, `checkValidity` and `autocomplete` are not built. `textarea.value` is a value set by script: no `defaultValue`, no selection API, no events. A select in the window does not draw an open menu.
+
+Chrome cases: `node tools/ui/chrome_topic.mjs select` runs `tools/fixtures/ui/select-cases.txt` (151 cases) in headless Chrome and writes `chrome-select.txt`. The Rust test `chrome_cases` compares each answer. Chrome 155 differs from the older text of the Standard in two places. The option list holds descendants of optgroup children. Removing `multiple` keeps the first selected option. The code follows Chrome.
+
+Cost: `perf stat -e instructions:u`, minimum of 3 runs, main 746943d against this build, each in its own `CARGO_TARGET_DIR` under `/data/bare-tmp`. 49 rows at scale 10 of `browser_load` (6), `attr_load` (3), `dataset_load` (3), `fetch_load` (4), `focus_load` (3), `form_load` (3), `fragment_load` (3), `loader_load` (3), `nodelist_load` (3), `observer_load` (2), `platform_load` (3), `selection_load` (2), `session_load` (2), `style_load` (4) and `web_apis_load` (5). The worst is `nodelist_load churn` at +0.402%, then `form_load gates` +0.356% (a run of 8.8 million instructions, so 31,000 are the 7 accessors). The best is `observer_load raf` at -0.62%. Not measured: `geometry_load`, `handler_load`, `scroll_load`, `sheets_load`, `resources_load`, `streams_load` and the other examples that have no case list in `tools/js`.
+
+A first build installed the globals in the middle of `Browser::install`. Rows that do not touch a select moved: `observer_load raf` +0.96% and `dataset_load keys` +0.80%. A build with one global gave up to +0.7% and a build with no install gave 0%. The size of the change did not matter, only that the ids of the later host functions moved. The same code at the end of the list gives -0.62% and -0.09%. A change to the order of the install calls can move a row by 1% with no change in the work.
+
+Load rows (`tools/js/select_load.sh`, release build, 1 GiB address space cap). `value`: `select.value = ...` 1,000 times, each checked. `react`: the `updateOptions` loop of React DOM 100 times on a single select and a `multiple` one. `churn`: 20 rounds of `new Option`, `add`, `options.length` and a collect.
+
+| case | options | time | peak RSS |
+| ---- | ------: | ---: | -------: |
+| value | 10 | 3.7 ms | 7.9 MiB |
+| value | 1,000 | 14.1 ms | 8.4 MiB |
+| value | 10,000 | 97.7 ms | 10.6 MiB |
+| react | 10 | 3.8 ms | 7.9 MiB |
+| react | 1,000 | 226 ms | 8.8 MiB |
+| react | 10,000 | 2,249 ms | 17.2 MiB |
+| churn | 10 | 11.1 ms | 8.2 MiB |
+| churn | 1,000 | 62.1 ms | 11.0 MiB |
+| churn | 10,000 | 492 ms | 37.0 MiB |
+
+After each churn round the realm has 2 wrappers (the baseline) and the collector frees all option objects. The `react` rows are the cost of the JS loop (an indexed read and `value` read per option) and not of the select.
+
+Not tested: a select inside a shadow root or an iframe, `form` reset and submit with a select (the form code does not read select state), a select with 100,000 options, `selectedOptions` of a `multiple` select with 10,000 selected options, and the live staging pages after this build.

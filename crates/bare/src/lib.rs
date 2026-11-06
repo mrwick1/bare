@@ -30,6 +30,9 @@ mod browser_focus_tests;
 mod browser_namespace;
 mod browser_attr;
 mod browser_nodelist;
+mod browser_select;
+#[cfg(test)]
+mod browser_select_tests;
 mod browser_dataset;
 mod browser_abort;
 mod browser_xhr;

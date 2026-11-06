@@ -44,8 +44,17 @@ type V = R<Value>;
 /// Bytes of list names that are alive at one time.
 const MAX_NAME_BYTES: usize = 1 << 20;
 
+/// What a list holds: the elements with a `name` (`getElementsByName`), or the options of a select (`browser_select.rs`).
+pub(crate) enum Src {
+    Name(Rc<str>),
+    /// `select.options`.
+    Options(NodeId),
+    /// `select.selectedOptions`.
+    Selected(NodeId),
+}
+
 pub(crate) struct List {
-    name: Rc<str>,
+    src: Src,
     /// `Document::revision` when `ids` was built. `None`: not built yet.
     rev: Option<u64>,
     ids: Vec<NodeId>,
@@ -87,7 +96,9 @@ pub(crate) fn prune(d: &Dom, live: &dyn Fn(ObjId) -> bool) {
     t.lists.retain(|&o, l| {
         let keep = live(o);
         if keep {
-            names += l.name.len();
+            if let Src::Name(n) = &l.src {
+                names += n.len();
+            }
             ids += l.ids.len();
         }
         keep
@@ -151,10 +162,38 @@ pub(crate) fn fill(d: &Dom, it: &mut Interp<'_>, owner: ObjId, index: u32) -> R<
 
 /// Make the cache of the list `owner` fresh. It is the only place that scans the document for a list.
 fn prepare(d: &Dom, it: &mut Interp<'_>, owner: ObjId) -> R<()> {
-    let (name, cached, base) = {
+    let (src, cached, base) = {
         let t = d.nl.s.borrow();
         let Some(l) = t.lists.get(&owner) else { return Ok(()) };
-        (l.name.clone(), l.rev, t.cached_ids - l.ids.len())
+        (match &l.src {
+            Src::Name(n) => Ok(n.clone()),
+            Src::Options(s) => Err((*s, false)),
+            Src::Selected(s) => Err((*s, true)),
+        }, l.rev, t.cached_ids - l.ids.len())
+    };
+    let name = match src {
+        Ok(n) => n,
+        Err((select, chosen)) => {
+            if cached == Some(d.doc.borrow().revision()) {
+                return Ok(());
+            }
+            let ids = crate::browser_select::list_ids(d, it, select, chosen)?;
+            if ids.len() > d.lim.max_results {
+                return Err(d.lim("dom-results"));
+            }
+            if base + ids.len() > d.lim.max_results.saturating_mul(4) {
+                return Err(d.lim("dom-nodelist-nodes"));
+            }
+            let rev = d.doc.borrow().revision();
+            let mut t = d.nl.s.borrow_mut();
+            let t = &mut *t;
+            if let Some(l) = t.lists.get_mut(&owner) {
+                t.cached_ids = base + ids.len();
+                l.ids = ids;
+                l.rev = Some(rev);
+            }
+            return Ok(());
+        }
     };
     let (rev, ids) = {
         let doc = d.doc.borrow();
@@ -210,13 +249,13 @@ fn list_of(d: &Dom, it: &mut Interp<'_>, this: Value) -> R<ObjId> {
     Err(it.type_error("Illegal invocation"))
 }
 
-fn length(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
+pub(crate) fn length(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
     let o = list_of(d, it, this)?;
     prepare(d, it, o)?;
     Ok(Value::Number(d.nl.s.borrow().lists[&o].ids.len() as f64))
 }
 
-fn item_method(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
+pub(crate) fn item_method(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
     let o = list_of(d, it, this)?;
     if a.is_empty() {
         return Err(it.type_error("Failed to execute 'item' on 'NodeList': 1 argument required, but only 0 present."));
@@ -241,21 +280,46 @@ pub(crate) fn get_elements_by_name(d: &Dom, it: &mut Interp<'_>, this: Value, a:
         return Err(it.type_error("Failed to execute 'getElementsByName' on 'Document': 1 argument required, but only 0 present."));
     }
     let name = d.string_arg(it, arg(a, 0))?;
+    let proto = *d.nl.proto.get().expect("installed");
+    make_list(d, it, proto, Src::Name(name.into()))
+}
+
+/// A new live list over `src`, with the prototype `proto`. It counts with the wrappers.
+pub(crate) fn make_list(d: &Dom, it: &mut Interp<'_>, proto: ObjId, src: Src) -> V {
+    let n = if let Src::Name(n) = &src { n.len() } else { 0 };
     {
         let (t, at) = (d.nl.s.borrow(), d.attr.s.borrow());
         if d.st.borrow().by_obj.len() + at.attrs.len() + at.maps.len() + t.lists.len() >= d.lim.max_wrappers {
             return Err(d.lim("dom-wrappers"));
         }
-        if t.name_bytes + name.len() > MAX_NAME_BYTES {
+        if t.name_bytes + n > MAX_NAME_BYTES {
             return Err(d.lim("dom-nodelist-names"));
         }
     }
-    let proto = *d.nl.proto.get().expect("installed");
     let o = it.heap.new_indexed(Some(proto)).map_err(|e| it.heap_error(e))?;
     let mut t = d.nl.s.borrow_mut();
-    t.name_bytes += name.len();
-    t.lists.insert(o, List { name: name.into(), rev: None, ids: Vec::new() });
+    t.name_bytes += n;
+    t.lists.insert(o, List { src, rev: None, ids: Vec::new() });
     Ok(Value::Object(o))
+}
+
+/// The members of the list `this`, fresh. `None`: `this` is not a list.
+pub(crate) fn members(d: &Dom, it: &mut Interp<'_>, this: Value) -> R<Option<Vec<NodeId>>> {
+    let Value::Object(o) = this else { return Ok(None) };
+    if !d.nl.s.borrow().lists.contains_key(&o) {
+        return Ok(None);
+    }
+    prepare(d, it, o)?;
+    Ok(Some(d.nl.s.borrow().lists[&o].ids.clone()))
+}
+
+/// The select of a list made by `make_list` over the options of a select.
+pub(crate) fn select_of(d: &Dom, this: Value) -> Option<NodeId> {
+    let Value::Object(o) = this else { return None };
+    match d.nl.s.borrow().lists.get(&o)?.src {
+        Src::Options(s) | Src::Selected(s) => Some(s),
+        Src::Name(_) => None,
+    }
 }
 
 // ------------------------------------------------------------------------------------ install

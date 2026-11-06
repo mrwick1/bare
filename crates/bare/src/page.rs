@@ -398,6 +398,8 @@ impl Page {
                 // Paint draws the placeholder of an empty field. The text, the selection and the caret are drawn here.
                 painter.list.hosted.clear();
                 painter.list.hosted.extend(inputs.iter().map(|&n| (n, !b.input_value(n).unwrap_or_default().is_empty())));
+                painter.list.chosen.clear();
+                painter.list.chosen.extend(f.layout.fragments.iter().filter(|g| g.kind == Kind::Box && doc.is_html(g.node, "select")).map(|g| (g.node, b.selected_option(g.node))));
                 painter.build(&doc, &f.styles, &f.layout, &f.areas, (canvas.width, canvas.height));
                 *built = true;
             }

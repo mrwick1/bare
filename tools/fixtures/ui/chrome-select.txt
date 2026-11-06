@@ -1,0 +1,151 @@
+interfaces	true,true,true,[object HTMLSelectElement],[object HTMLOptionsCollection],true,true,function,Option,0
+optgroup-interface	true,true,[object HTMLOptGroupElement],G,false
+single-default-first	0 "a" 10 select-one 2 2
+single-implied-end-tags	0 "a" 100 a,b,c
+multiple-default-none	-1 "" 00 select-multiple true
+selected-attr-single	1 "b" 010
+two-selected-attr-single-last-wins	2 "c" 001
+two-selected-attr-multiple	0 "a" 101 2
+disabled-first-skipped	1 "b" 01
+all-disabled-none	-1 "" 00
+disabled-but-selected-attr	0 "a" 10
+disabled-optgroup-skipped	1 "b" 01 false
+size-gt-1-no-default	-1 "" 00 3
+size-gt-1-selected-kept	1 "b" 01
+size-1-explicit	0 "a" 10 1
+size-reflect	0,4,4
+size-then-no-default-on-change	-1 "" 00|0 "a" 10
+optgroup-options-in-list	a,b,c,d 4 0,1,2,3
+optgroup-nested-not-in-list	2 x,y
+option-in-div-not-in-list	2 x,y
+optgroup-props	Lab,true,N,false,false
+optgroup-label-default	""
+option-value-fallback	["a b c","v","",""]
+option-text-getter	["a b c","hi there !"]
+option-text-skips-script	["ab","ab","ab"]
+option-text-setter	["new text",1,"new  text","new text"]
+option-label	L,a b,M,""
+option-value-setter	x,x,t
+option-selected-dirtiness	false,true,false,true,true,false,true,false,false
+option-default-selected-follows-attr-when-clean	false,true,false,true,true
+option-dirty-ignores-attr	true,false,true
+option-default-selected-setter	,true,false
+option-disabled	false,true,true,false
+option-index	0,1,0
+option-form-and-select-form	true,true,,,true,true
+option-form-detached	,
+new-option-none	["","",false,false,"OPTION",false,0,true]
+new-option-text	["hi","hi",false]
+new-option-text-value	["hi","v","v"]
+new-option-value-undefined	["hi",false]
+new-option-default-selected	true,false,
+new-option-selected-only	false,true
+new-option-default-true-selected-false	true,false
+new-option-number-args	["12","34"]
+option-call-without-new	TypeError
+option-no-owner-select	0 "a" 1,true,0
+select-value-getter	2
+select-value-setter-match	1 "2" 010
+select-value-setter-no-match	-1 "" 00|0 "1" 10
+select-value-setter-coerces	0,1,2
+select-value-setter-text-fallback	1 "z" 01
+select-value-getter-none	""
+select-value-multiple-first	2 "3" 001
+select-selected-index-setter	2 "c" 001|-1 "" 000|-1 "" 000|1 "b" 010
+select-selected-index-multiple	0|2 "c" 001|-1 "" 000
+select-selected-index-fractional	1,2,0
+option-selected-true-clears-others	2 "c" 001|1 "b" 010
+option-selected-false-single-resets	0 "a" 100|1 "b" 010
+option-selected-false-multiple	1 "b" 01|-1 "" 00
+option-selected-true-multiple-keeps	0 "a" 11 2
+option-selected-truthy	01|01|01
+disabled-option-can-be-selected-by-script	1 "b" 01|0 "a" 10|1 "b" 01
+insert-selected-option-clears-others	0 "c" 100
+insert-selected-option-multiple-keeps	0 "a" 11
+insert-dirty-selected-option	2 "c" 001
+insert-into-empty-select-selects	-1 "" |0 "a" 1|0 "a" 10
+insert-into-empty-multiple	-1 "" 0
+insert-disabled-into-empty	-1 "" 0|1 "b" 01
+insert-before-keeps-selection	2 "b" 001
+remove-selected-option-selects-first	0 "a" 10
+remove-first-skips-disabled	0 "a" 100
+remove-all-options	-1 ""  0
+remove-selected-multiple-no-reset	-1 "" 0
+remove-unselected-keeps	0 "b" 10
+optgroup-add-and-remove	1 "b" 01|a,b,c|0 "a" 1|1 "b" 010
+optgroup-selected-wins	2 "c" 001
+option-moved-between-selects	0 "a" 1|1 "b" 01
+multiple-toggle-off-keeps-last	0 "a" 100|select-one|false
+multiple-toggle-off-none-selects-first	0 "a" 10
+multiple-toggle-on-keeps	0 "a" 10 select-multiple
+multiple-reflect	false,,true,false
+required-disabled-name-reflect	true,false,n,false,,m
+select-name-default	["","select-one"]
+autocomplete-not-needed-length	2,number,true
+select-item	true,true,,,true,true,,
+select-item-no-arg	TypeError
+select-namedItem	true,true,true,,true,true,
+options-length	2,true,true
+options-is-live	1,2,b,1,b
+options-length-grow	4,"a,,,",4,OPTION,"",false
+options-length-grow-select-empty	0 "" 100 3
+options-length-shrink	0 "a" 1 1 1
+options-length-zero	-1 ""  0
+options-length-same	0 "a" 10 2
+options-length-optgroup-shrink	a,b 1
+options-length-too-large-ignored	1
+options-length-negative	2
+options-selected-index	1|0 "a" 10
+options-iterable	a,b 2 2
+select-add-element	a,b
+select-add-before-element	a,x,b
+select-add-before-index	a,x,b,c|y,a,x,b,c|y,a,x,b,c,z|y,a,x,b,c,z,w
+select-add-before-null	a,x,y
+select-add-before-not-child	NotFoundError
+select-add-before-optgroup-child	NotFoundError
+select-add-optgroup	a,b 2
+select-add-ancestor	TypeError
+select-add-non-option	TypeError
+select-add-bad-arg	TypeError
+select-add-no-arg	TypeError
+options-add	c,a,b
+select-add-selected-clears	1 "b" 01
+select-remove-index	a,c|a,c|a,c
+select-remove-optgroup-child	a 0
+select-remove-no-arg-removes-self	,0,false,1
+select-remove-selected-resets	0 "a" 1
+options-remove	b
+options-remove-no-arg	TypeError
+selected-options-live	0,1,b,2,c,1,c
+selected-options-single	1,a,1,b,0
+selected-options-interface	true,false,[object HTMLCollection],a,,,true
+selected-options-tracks-tree	1,b,2,c
+events-not-fired-by-script	0
+clone-select-copies-attrs-not-selectedness	0 "a" 10 true 2
+clone-option-selected-attr	true,true
+clone-select-selected-attr-kept	1 "b" 01
+wrong-receiver-select	TypeError
+wrong-receiver-option	TypeError
+wrong-receiver-options	TypeError
+select-in-svg-is-not-select	false,
+react-single-match	1 "b" 010|true|false|2 "c" 001|false
+react-single-no-match-default	1 "b" 010
+react-single-no-match-clears-then-default	0 "a" 10
+react-single-empty	-1 ""  0
+react-multiple	0 "a" 101|true|false|1 "b" 010|true|-1 "" 000
+react-controlled-flow	2 "c" 001|0 "a" 100|1 "b" 010|B
+react-select-multiple-set-after-create	0 "a" 10|0 "a" 11
+option-in-select-text-update	uno,1,uno
+select-focusable-and-tag	SELECT,select,SELECT,0
+option-tag-props	OPTION,true,true
+selected-set-before-insert-sticks-multiple	0 "a" 11
+detached-option-selected-persist	true,true
+select-value-after-text-change	0 "q" 10
+select-value-matches-value-attr-not-text	-1 "" 00
+set-selected-attribute-on-single-clears-others	1 "b" 01
+remove-selected-attribute-resets	0 "a" 10
+dirty-then-attr-removed-keeps	1 "b" 01
+many-options	250,300,true,0
+radix-native-value-setter	function,b,1,1
+radix-native-setters-input-textarea	function,function,function,function,x,v,true,w,0
+textarea-interface	function,true,true,[object HTMLTextAreaElement],false,ab,z,"",TypeError,TypeError

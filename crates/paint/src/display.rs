@@ -95,6 +95,9 @@ pub struct DisplayList {
     /// Text fields that the host draws the text of: the field, and whether it has text now. Paint draws only the
     /// placeholder of an empty one, and nothing for the others. The host sets it before `build`.
     pub hosted: Vec<(NodeId, bool)>,
+    /// The option that a closed `<select>` shows now, when the host knows it (script and the window can change it): the select, and
+    /// its option or `None`. A select that is not here shows the option with the `selected` attribute, or the first. The host sets it before `build`.
+    pub chosen: Vec<(NodeId, Option<NodeId>)>,
     // The scratch lists of `build`. They keep their memory from one frame to the next.
     lines: Vec<Item>,
     floats: Vec<u32>,
@@ -757,7 +760,13 @@ impl Builder<'_> {
                 }
             }
             Control::Label => (controls::label(&self.tree, f.node).to_string(), argb(style.color(Property::TextColor))),
-            Control::Select => (controls::selected_text(&self.tree, f.node), argb(style.color(Property::TextColor))),
+            Control::Select => {
+                let text = match self.list.chosen.iter().find(|c| c.0 == f.node) {
+                    Some(&(_, o)) => o.map(|o| controls::option_text(&self.tree, o)).unwrap_or_default(),
+                    None => controls::selected_text(&self.tree, f.node),
+                };
+                (text, argb(style.color(Property::TextColor)))
+            }
             // The text of a textarea is its child, and layout places it. Only the placeholder is ours.
             Control::TextArea if self.doc.children(f.node).next().is_none() => (get(a.placeholder).to_string(), 0xff75_7575),
             _ => return,
