@@ -32,7 +32,7 @@
 //! - `HTMLElement.dataset` and `SVGElement.dataset` (`DOMStringMap`, `browser_dataset.rs`): live `data-*` attributes with the name conversion, named
 //!   properties through the host named-property hook of `bare_js::heap` (`heap_named.rs`). MathML elements have no `dataset` (no `MathMLElement` brand).
 //! - `<input>`: `value checked type defaultValue defaultChecked` with native state (dirty value, checkedness).
-//! - `Element.innerHTML` (`browser_fragment.rs`): native fragment parsing and serialization with explicit gates (table, select, template, html, frameset and
+//! - `Element.innerHTML` and `outerHTML` (`browser_fragment.rs`): native fragment parsing and serialization with explicit gates (table, select, template, html, frameset and
 //!   foreign contexts are `Unsupported`). Fragment scripts are never run.
 //! - `<link>` (HTML namespace only, `HTMLLinkElement`): `rel`, `href`, `as` and `crossOrigin` as reflected attributes. Setting them loads nothing: the page driver loads connected `rel=preload` links (`browser_loader/preload.rs`).
 //! - `<input>` text selection (`selectionStart selectionEnd selectionDirection setSelectionRange select`, `select` event task): `browser_selection.rs`.
@@ -48,7 +48,7 @@
 //!   The one live `NodeList` is the result of `document.getElementsByName` (`browser_nodelist.rs`).
 //! - A JS string with a lone surrogate cannot be stored in the UTF-8 document: `Error::Unsupported`. Valid pairs round-trip.
 //! - Namespaces are in `browser_namespace.rs` (read its header): HTML, SVG and MathML elements, attributes in no namespace, XML,
-//!   XMLNS and XLink. Any other namespace is `Unsupported`. Shadow roots are a tree foundation only (`browser_shadow.rs`: read its header for the gates). `new Document()`, `createDocumentFragment`, `new DocumentFragment()`, `outerHTML`, `insertAdjacentHTML`,
+//!   XMLNS and XLink. Any other namespace is `Unsupported`. Shadow roots are a tree foundation only (`browser_shadow.rs`: read its header for the gates). `new Document()`, `createDocumentFragment`, `new DocumentFragment()`, `insertAdjacentHTML`,
 //!   `style`, `before/after/replaceWith`, layout APIs, `location` and
 //!   network are absent. Timers, `queueMicrotask`, `performance.now` and `MessageChannel` are in `browser_scheduler.rs`. `Element.attributes` and `Attr` are in `browser_attr.rs`.
 //! - `addEventListener` option `signal` removes the listener on abort (`browser_abort.rs`). `isTrusted` is always false. Events made by the test driver

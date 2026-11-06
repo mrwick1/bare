@@ -3387,3 +3387,20 @@ The first build cost `shown` +0.83% (1x), +1.84% (10x). The causes, in order of 
 Hidden reads: `style_load hidden` makes 500 elements for each scale unit in a `display:none` `<div>` and reads 4 for each unit. It runs 38.3 M, 333.4 M and 17.29 G instructions at 1x, 10x and 100x. A hidden read runs the walk twice. Hypothesis: the first walk could be skipped if the caller knew that the element is hidden. Not measured.
 
 Not tested: the second walk on a page with 100,000 elements and a hidden read in a loop, a shadow tree with a `display:none` host, a read inside a `display:none` `<iframe>` from another document, `display:contents` (the engine has no such value), cycles and memory of the second walk, and the live staging login.
+
+## Element.outerHTML
+
+Problem: `el.outerHTML` was `undefined`. Pages (and React) read it to copy or replace an element.
+
+What runs: `outerHTML` is an accessor on `Element.prototype`, next to `innerHTML` (`browser_fragment.rs`). It adds no new algorithm.
+
+- Getter: the same iterative serializer, with a flag that starts at the element and closes its tag on the way up. No recursion, so a 30,000-deep tree works.
+- Setter: `replace(...)` is the old `innerHTML` setter with two changes. The context is the parent, and the commit puts the new nodes before the next sibling of the element, then detaches the element. The old element is never freed, so held wrappers stay valid. The input is converted first (`null` is the empty string), and the parent is read after that, so a `toString` that removes the element is seen.
+- Parent rules: no parent does nothing. A Document parent throws `NoModificationAllowedError` (code 7). A shadow root is a DocumentFragment, so the context is `body`. A table, select, template, html, frameset or foreign parent is `Unsupported`, as for `innerHTML`, before anything changes.
+- Text joins: Chrome joins a text node before or after the result with its neighbour (`a<b></b>c` with `outerHTML = "X"` leaves one node `aXc`). The standard does not say it. The commit does the same at the two seams, and the text cap counts the copy.
+
+Chrome cases: 27 new cases (`outer_*`) in `tools/fixtures/js/dom-cases.txt`, recorded with `tools/js/dom_check.sh --update`. They cover the getter (attribute escaping, void elements, raw text parents, SVG, depth), the setter (position, identity of siblings, first and last child, `null`, `undefined`, numbers, no parent, Document parent, shadow root, form context, `p` context, inert scripts, text joins, a `toString` that detaches or throws) and the property shape (descriptor, brand check). 118 cases match.
+
+Cost: `perf stat -e instructions:u`, minimum of 3 runs, each binary in its own `CARGO_TARGET_DIR` under `/data/bare-tmp`. Main d6d9b92 against this build. 27 rows: `fragment_load` (parse, replace, deep at 1x and 10x), `browser_load` (6 cases at 1x, 3 at 10x), `fetch_load`, `web_apis_load`, `style_load` and `loader_load` at 1x. All are below +0.5%. The worst is `fragment_load replace 10` at +0.377% (231,666,780 to 232,540,591). The best is `fragment_load parse 10` at -0.574%. `browser_load` rows are between -0.046% and +0.138%.
+
+Not tested: `outerHTML` on an element in an iframe document, on a node with a shadow root, a parent that is a `template` content (gated), and the live staging login.

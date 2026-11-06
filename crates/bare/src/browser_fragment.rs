@@ -14,6 +14,12 @@
 //!    Every HTML `script` of the fragment gets the "already started" flag (`Dom::mark_started`): it never runs and starts no fetch, whatever
 //!    happens to it later. No event attribute is wired (this host has no inline handlers), and no second loader exists.
 //!
+//! `outerHTML`: the getter writes the element itself and its subtree with the same serializer. The setter (DOM Parsing standard) converts the value
+//! (`null` is empty), then reads the parent: no parent does nothing, a Document parent throws `NoModificationAllowedError`, a ShadowRoot (the
+//! only DocumentFragment here) gives the context `body`, and any other parent is the context element. It goes through the same parse, measure and
+//! commit as `innerHTML`; the new nodes take the place of the element, which is detached (never freed). As in Chrome (the standard is silent), a
+//! text node before or after the result joins its neighbour.
+//!
 //! Getter: the fragment serialization algorithm for the children of the element, iterative (no recursion, any depth), capped by `max_string_bytes`.
 //! Text is escaped (`&`, no-break space, `<`, `>`) except in `style`, `script`, `xmp`, `iframe`, `noembed`, `noframes` and `plaintext`. An attribute
 //! value is escaped (`&`, no-break space, `"`, `<`, `>`; the last two follow the current standard and are to verify against a browser). The void
@@ -24,7 +30,7 @@
 //!   the HTML namespace (an SVG or MathML element).
 //! - Markup: a `template`, `noscript`, `frameset` or `frame` start tag in the value.
 //! - The getter, for a tree that holds an HTML `template` or `noscript` element (their serialization depends on template contents and the scripting flag).
-//! - `outerHTML`, `insertAdjacentHTML`, `createDocumentFragment`, `Range.createContextualFragment`, `DOMParser` and `document.write` are absent.
+//! - `insertAdjacentHTML`, `createDocumentFragment`, `Range.createContextualFragment`, `DOMParser` and `document.write` are absent.
 //!
 //! Known deviations: nested `table` and `select` are read by the page rules of the tree builder (no table or select insertion modes). A temporary
 //! text buffer that grew by joining texts counts the wasted bytes against the text cap. Cloning preserves the "already started" flag.
