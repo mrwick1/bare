@@ -68,3 +68,8 @@ child-node-text-node	[b,"x",p]
 mutation-child-node-replace-with-is-one-record	childList div#host +[p,b,"t"] -[u#old] p=i#a n=i#c
 mutation-child-node-before-is-one-record	childList div#host +[p,b,"t"] -[] p=i#a n=u#old
 tree-walker-on-a-fragment	p,p,i,b
+live-range-follows-a-fragment-insert	4,5,false,true
+live-range-inside-the-inserted-fragment	true,0,true,0,true
+live-range-around-a-replaced-child	0,4,true
+live-range-follows-replace-with	1,5,false
+node-iterator-follows-a-fragment-insert	i#b,i#b

@@ -14,7 +14,7 @@ use bare_net::http::Client;
 topic_test!(anchor_cases, "anchor", 20);
 topic_test!(template_cases, "template", 23);
 topic_test!(formdata_cases, "formdata", 28);
-topic_test!(fragment_cases, "fragment", 70);
+topic_test!(fragment_cases, "fragment", 75);
 
 fn big<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {
     std::thread::Builder::new().stack_size(64 << 20).spawn(f).unwrap().join().unwrap()

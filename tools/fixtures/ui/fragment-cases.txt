@@ -249,3 +249,23 @@ out
 === tree-walker-on-a-fragment
 var f = frag('p', 'b'); f.firstChild.appendChild(el('i'));
 (function () { var w = document.createTreeWalker(f, 1), r = [nm(w.root === f ? w.currentNode.firstChild : null)]; while (w.nextNode()) r.push(nm(w.currentNode)); return r.join() })
+=== live-range-follows-a-fragment-insert
+@html <div id=host><i id=a></i><i id=b></i><i id=c></i></div>
+var r = document.createRange(); r.setStart($('host'), 1); r.setEnd($('host'), 2); $('host').insertBefore(frag('p', 'b', 'u'), $('a'));
+(function () { return [r.startOffset, r.endOffset, r.collapsed, r.startContainer === $('host')].join() })
+=== live-range-inside-the-inserted-fragment
+@html <div id=host></div>
+var f = frag('p', 'b'), r = document.createRange(); r.selectNodeContents(f); $('host').appendChild(f);
+(function () { return [r.startContainer === f, r.startOffset, r.endContainer === f, r.endOffset, r.collapsed].join() })
+=== live-range-around-a-replaced-child
+@html <div id=host><i id=a></i><u id=old></u><i id=c></i></div>
+var r = document.createRange(); r.setStart($('host'), 0); r.setEnd($('host'), 3); $('host').replaceChild(frag('p', 'b'), $('old'));
+(function () { return [r.startOffset, r.endOffset, r.toString() === ''].join() })
+=== live-range-follows-replace-with
+@html <div id=host><i id=a></i><u id=old></u><i id=c></i></div>
+var r = document.createRange(); r.setStart($('host'), 2); r.setEnd($('host'), 3); $('old').replaceWith(frag('p', 'b'), 't');
+(function () { return [r.startOffset, r.endOffset, r.collapsed].join() })
+=== node-iterator-follows-a-fragment-insert
+@html <div id=host><i id=a></i><i id=b></i></div>
+var it = document.createNodeIterator($('host'), 1); it.nextNode(); it.nextNode(); var cur = it.nextNode(); $('host').insertBefore(frag('p', 'b'), $('b'));
+(function () { var r = [nm(cur)]; while (it.nextNode()) r.push(nm(it.referenceNode)); r.push(nm(it.previousNode())); return r.join() })
