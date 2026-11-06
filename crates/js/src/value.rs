@@ -30,6 +30,12 @@ handle!(/// Handle of a symbol. Each `new_symbol` call makes a distinct identity
     SymId);
 handle!(/// Handle of an object.
     ObjId);
+impl ObjId {
+    /// The number of the slot, without the generation. A host table indexed by it must keep the whole handle to tell a reused slot.
+    pub fn slot(self) -> usize {
+        self.index as usize
+    }
+}
 handle!(/// Handle of a BigInt too large for `i64`. Like strings, equal values share one handle (see `heap_big.rs`).
     BigId);
 

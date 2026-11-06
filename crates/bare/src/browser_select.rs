@@ -48,7 +48,7 @@ use bare_html::dom::{Atom, Document, NodeData, NodeId};
 use bare_js::eval::Error;
 use bare_js::eval::Interp;
 use bare_js::value::{ObjId, Value};
-use std::cell::{OnceCell, RefCell};
+use std::cell::{Cell, OnceCell, RefCell};
 use std::collections::HashSet;
 
 type V = R<Value>;
@@ -80,7 +80,7 @@ struct Cache {
 
 #[derive(Default)]
 struct State {
-    opt: IdMap<NodeId, Opt>,
+    opt: IdTab<NodeId, Opt>,
     cache: IdMap<NodeId, Cache>,
 }
 
@@ -100,7 +100,9 @@ pub(crate) struct SelHost {
     st: RefCell<State>,
     made: OnceCell<Made>,
     /// The members of `HTMLTextAreaElement.prototype` are made at the first textarea wrapper or the first read of the global.
-    area: std::cell::Cell<bool>,
+    area: Cell<bool>,
+    /// The atoms of `value`, `selected` and `disabled`, with the size of the name table (plus one) when the name was last missing.
+    atoms: [Cell<(usize, Option<Atom>)>; 3],
 }
 
 macro_rules! ch {
@@ -109,6 +111,34 @@ macro_rules! ch {
             i.charge($n)?;
         }
     };
+}
+
+/// The atom of an attribute name. The three names that option properties read at each access come from `SelHost::atoms`, so a
+/// read does not hash the name. A name that the document lacks stays missing until the name table grows, because a name is never
+/// removed. The document of a `Dom` never changes, so a cached atom stays valid.
+fn atom(d: &Dom, doc: &Document, name: &str) -> Option<Atom> {
+    let i = match name {
+        "value" => 0,
+        "selected" => 1,
+        "disabled" => 2,
+        _ => return doc.find_atom(name),
+    };
+    let (seen, a) = d.sel.atoms[i].get();
+    if a.is_some() || seen == doc.name_count() + 1 {
+        return a;
+    }
+    let a = doc.find_atom(name);
+    d.sel.atoms[i].set((doc.name_count() + 1, a));
+    a
+}
+
+/// `has` and `get` for the reads that run at each option property access.
+pub(crate) fn has_in(d: &Dom, doc: &Document, n: NodeId, name: &str) -> bool {
+    atom(d, doc, name).is_some_and(|a| doc.attr(n, a).is_some())
+}
+
+fn get_in<'a>(d: &Dom, doc: &'a Document, n: NodeId, name: &str) -> Option<&'a str> {
+    atom(d, doc, name).and_then(|a| doc.attr(n, a))
 }
 
 pub(crate) fn has(doc: &Document, n: NodeId, name: &str) -> bool {
@@ -169,8 +199,9 @@ pub(crate) fn is_disabled(doc: &Document, o: NodeId) -> bool {
     has(doc, o, "disabled") || doc.parent(o).is_some_and(|p| doc.is_html(p, "optgroup") && has(doc, p, "disabled"))
 }
 
-fn first_enabled(doc: &Document, opts: &[NodeId]) -> Option<usize> {
-    opts.iter().position(|&o| !is_disabled(doc, o))
+fn first_enabled(d: &Dom, doc: &Document, opts: &[NodeId]) -> Option<usize> {
+    let off = |o: NodeId| !has_in(d, doc, o, "disabled") && !doc.parent(o).is_some_and(|p| doc.is_html(p, "optgroup") && has_in(d, doc, p, "disabled"));
+    opts.iter().position(|&o| off(o))
 }
 
 /// The text of an option: the text of its descendants but not of `script` elements, with the ASCII white space stripped and collapsed.
@@ -203,8 +234,8 @@ pub(crate) fn value_of(doc: &Document, o: NodeId) -> String {
     get(doc, o, "value").map_or_else(|| text_of(doc, o), str::to_string)
 }
 
-fn value_is(doc: &Document, o: NodeId, want: &str) -> bool {
-    match get(doc, o, "value") {
+fn value_is(d: &Dom, doc: &Document, o: NodeId, want: &str) -> bool {
+    match get_in(d, doc, o, "value") {
         Some(v) => v == want,
         None => text_of(doc, o) == want,
     }
@@ -221,7 +252,7 @@ impl Dom {
         let (list, attrs, multiple, size1) = {
             let doc = self.doc.borrow();
             let list = collect(self, &doc, &mut it, select)?;
-            let attrs: Vec<bool> = list.iter().map(|&o| has(&doc, o, "selected")).collect();
+            let attrs: Vec<bool> = list.iter().map(|&o| has_in(self, &doc, o, "selected")).collect();
             let multiple = has(&doc, select, "multiple");
             (list, attrs, multiple, !multiple && display_size(&doc, select) == 1)
         };
@@ -238,7 +269,7 @@ impl Dom {
         for (i, &o) in list.iter().enumerate() {
             ch!(it, 1);
             let a = attrs[i];
-            let e = st.opt.entry(o).or_insert(Opt { selected: a, dirty: false, attr: a, idx: 0 });
+            let e = st.opt.get_or_insert(o, Opt { selected: a, dirty: false, attr: a, idx: 0 });
             e.idx = i as u32;
             if e.attr != a {
                 e.attr = a;
@@ -268,7 +299,7 @@ impl Dom {
             }
             if sel.is_empty() && size1 {
                 let doc = self.doc.borrow();
-                if let Some(i) = first_enabled(&doc, &list) {
+                if let Some(i) = first_enabled(self, &doc, &list) {
                     st.opt.get_mut(&list[i]).expect("synced").selected = true;
                     sel.push(i as u32);
                 }
@@ -305,9 +336,9 @@ impl Dom {
                 return Ok((Some(s), *e));
             }
         }
-        let a = has(&self.doc.borrow(), o, "selected");
+        let a = has_in(self, &self.doc.borrow(), o, "selected");
         let mut st = self.sel.st.borrow_mut();
-        let e = st.opt.entry(o).or_insert(Opt { selected: a, dirty: false, attr: a, idx: 0 });
+        let e = st.opt.get_or_insert(o, Opt { selected: a, dirty: false, attr: a, idx: 0 });
         if e.attr != a {
             e.attr = a;
             if !e.dirty {
@@ -373,7 +404,7 @@ impl Dom {
                 // "Ask for a reset": a single select with display size 1 selects the first option that is not disabled.
                 if !c.multiple && c.size1 && c.sel.is_empty() {
                     let doc = self.doc.borrow();
-                    if let Some(i) = first_enabled(&doc, &c.opts) {
+                    if let Some(i) = first_enabled(self, &doc, &c.opts) {
                         st.opt.get_mut(&c.opts[i]).expect("synced").selected = true;
                         c.sel.push(i as u32);
                     }
@@ -511,7 +542,7 @@ macro_rules! reflect {
     ($tag:literal, $attr:literal, $get:ident, $set:ident, bool) => {
         fn $get(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
             let n = d.html_el(it, this, $tag)?;
-            Ok(Value::Bool(has(&d.doc.borrow(), n, $attr)))
+            Ok(Value::Bool($crate::browser_select::has_in(d, &d.doc.borrow(), n, $attr)))
         }
         fn $set(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
             let n = d.html_el(it, this, $tag)?;
@@ -600,7 +631,7 @@ fn set_select_value(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V
         let doc = d.doc.borrow();
         for (i, &o) in opts.iter().enumerate() {
             it.charge(1)?;
-            if value_is(&doc, o, &want) {
+            if value_is(d, &doc, o, &want) {
                 at = Some(i);
                 break;
             }
@@ -788,8 +819,11 @@ fn option_this(d: &Dom, it: &mut Interp<'_>, this: Value) -> R<NodeId> {
 
 fn option_value(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
     let o = option_this(d, it, this)?;
-    let s = value_of(&d.doc.borrow(), o);
-    d.js_str(it, &s)
+    let doc = d.doc.borrow();
+    match get_in(d, &doc, o, "value") {
+        Some(v) => d.js_str(it, v),
+        None => d.js_str(it, &text_of(&doc, o)),
+    }
 }
 
 fn set_option_value(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
@@ -849,7 +883,7 @@ fn set_option_selected(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -
 
 fn option_default_selected(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
     let o = option_this(d, it, this)?;
-    Ok(Value::Bool(has(&d.doc.borrow(), o, "selected")))
+    Ok(Value::Bool(has_in(d, &d.doc.borrow(), o, "selected")))
 }
 
 fn set_option_default_selected(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {

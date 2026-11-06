@@ -41,7 +41,6 @@ use bare_js::eval::Interp;
 use bare_js::heap::{HeapError, NamedOp, NamedRequest, NamedSource};
 use bare_js::value::{ObjId, PropertyKey, Value};
 use std::cell::{Cell, OnceCell, RefCell};
-use std::collections::HashMap;
 
 type V = R<Value>;
 
@@ -51,9 +50,9 @@ const SCAN_FREE: usize = 32;
 #[derive(Default)]
 struct DState {
     /// `DOMStringMap` object -> its element.
-    objs: HashMap<ObjId, NodeId>,
+    objs: IdTab<ObjId, NodeId>,
     /// element -> its map (`SameObject`).
-    by_el: HashMap<NodeId, ObjId>,
+    by_el: IdTab<NodeId, ObjId>,
 }
 
 #[derive(Default)]

@@ -20,7 +20,7 @@
 
 use crate::browser::*;
 use crate::browser_dom::arg;
-use crate::browser_select::{get, has, reflect};
+use crate::browser_select::{get, reflect};
 use crate::browser_selection as sel;
 use bare_html::dom::{Document, NodeData, NodeId};
 use bare_js::eval::Interp;
