@@ -66,7 +66,7 @@ fn valid_host(doc: &Document, host: NodeId) -> bool {
 /// The native root of `this`, or `Illegal invocation`.
 fn root_of(d: &Dom, it: &mut Interp<'_>, this: Value) -> R<NodeId> {
     match d.node_of(this) {
-        Some(n) if matches!(d.data(n), NodeData::ShadowRoot) => Ok(n),
+        Some(n) if matches!(d.data(n), NodeData::ShadowRoot) && d.doc.borrow().shadow_host(n).is_some() => Ok(n),
         _ => Err(it.type_error("Illegal invocation")),
     }
 }

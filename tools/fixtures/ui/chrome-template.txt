@@ -1,0 +1,23 @@
+template-interface-shape	function,HTMLTemplateElement,true,true,true,false,[object HTMLTemplateElement],function,,true,true,get content
+template-content-is-a-fragment	11,#document-fragment,true,true,[object DocumentFragment],3,P,text,true,,false
+template-children-move-to-the-content	0,,false,0,true,2,true,ab
+template-content-reads-like-a-parent	2,in,I,x,2,k,,
+template-content-elements-are-inert	false,11,false,0
+template-created-element	true,11,0,true
+template-append-to-the-template-is-not-the-content	1,0
+template-clone-content-deep	11,4,<p class="a">1</p>,<b>2</b>,t,8,true,true,,true,4
+template-clone-content-shallow	11,0,1
+template-clone-content-is-independent	1,1,2
+template-clone-template-element-deep	true,0,2,<p>1</p>,2,true
+template-clone-template-element-shallow	true,0
+template-append-clone-to-the-document	2,<p>1</p>,B,0,2,true
+template-insert-before-a-clone	3,P,B,I
+template-append-content-moves-the-nodes	2,0,true
+template-append-clone-twice	3,true
+template-nested	true,0,1,B,,true
+template-empty	0,,false,0
+template-content-keeps-expando	7,true
+template-content-listeners	p,frag:P
+template-set-content-is-ignored	true,1
+template-brand-check	TypeError:Illegal invocation | TypeError:Illegal invocation | TypeError:Illegal invocation
+template-in-table-keeps-the-content	0,1,B

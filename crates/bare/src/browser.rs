@@ -21,6 +21,7 @@
 //! - Globals: `window`, `self`, `globalThis` (the same object), `document`, `Node`, `Element`, `HTMLElement`,
 //!   `HTMLInputElement`, `HTMLIFrameElement` (inert brand only: no `contentWindow`, no nested context, no fetch), `HTMLLinkElement`, `HTMLFormElement`, `HTMLButtonElement`, `CharacterData`, `Text`, `Comment`, `Document`, `DocumentFragment` and `ShadowRoot` (illegal constructors), `EventTarget`, `Event`, `CustomEvent`,
 //!   `SubmitEvent`, `DOMException`.
+//! - `HTMLAnchorElement`, `HTMLAreaElement` and `HTMLTemplateElement` (lazy, `browser_elements.rs`): `href` and the URL parts, `template.content`. `new FormData(form)` reads the form data set.
 //! - Node: `nodeType nodeName nodeValue parentNode parentElement childNodes firstChild lastChild previousSibling
 //!   nextSibling ownerDocument isConnected textContent appendChild insertBefore removeChild replaceChild cloneNode
 //!   contains hasChildNodes getRootNode`.
@@ -364,6 +365,8 @@ pub struct Dom {
     pub(crate) xhr: crate::browser_xhr::XhrHost,
     /// `crypto`, `navigator`, `Blob`, `File` and `FormData` (`browser_web.rs`).
     pub(crate) web: crate::browser_web::WebHost,
+    /// `HTMLAnchorElement`, `HTMLAreaElement` and `HTMLTemplateElement` (`browser_elements.rs`).
+    pub(crate) els: crate::browser_elements::Els,
 }
 
 impl Host for Dom {
@@ -399,6 +402,7 @@ impl Host for Dom {
         crate::browser_abort::roots(self, out);
         crate::browser_xhr::roots(self, out);
         crate::browser_web::roots(self, out);
+        crate::browser_elements::roots(self, out);
         self.resize_roots(out);
         self.frame_roots(out);
         self.idle_roots(out);
@@ -439,7 +443,7 @@ impl Host for Dom {
                 out.extend(doc.parent(n).and_then(|p| st.by_node.get(&p)).map(|&o| Value::Object(o)));
                 out.extend(doc.children(n).filter_map(|c| st.by_node.get(&c)).map(|&o| Value::Object(o)));
                 // A host and its root (either mode) keep each other's wrapper alive, so a detached pair is one cycle and an expando is not lost.
-                out.extend(doc.shadow_host(n).into_iter().chain(doc.shadow_root(n)).filter_map(|x| st.by_node.get(&x)).map(|&o| Value::Object(o)));
+                out.extend(doc.shadow_host(n).into_iter().chain(doc.shadow_root(n)).chain(doc.template_content(n)).filter_map(|x| st.by_node.get(&x)).map(|&o| Value::Object(o)));
             }
         } else if let Some(e) = st.events.get(&owner) {
             out.extend([e.target, e.current, e.detail, e.related]);
@@ -638,6 +642,7 @@ impl Dom {
                             "link" => p.link,
                             "form" => p.form,
                             "button" => p.button,
+                            "a" | "area" | "template" => crate::browser_elements::proto(self, it, doc.atom_str(name))?,
                             "script" => self.scripts.proto.get().copied().unwrap_or(p.html),
                             t @ ("select" | "option" | "optgroup" | "textarea") => crate::browser_select::proto_for(self, it, t)?,
                             _ => p.html,
@@ -646,7 +651,8 @@ impl Dom {
                     NodeData::Text(_) => p.text,
                     NodeData::Comment(_) => p.comment,
                     NodeData::Document => p.document,
-                    NodeData::ShadowRoot => p.shadow,
+                    NodeData::ShadowRoot if doc.shadow_host(n).is_some() => p.shadow,
+                    NodeData::ShadowRoot => p.fragment,
                     NodeData::Doctype(_) => p.node,
                 }
             };
@@ -914,6 +920,7 @@ impl Dom {
         crate::browser_xhr::install(self, it)?;
         crate::browser_encoding::install(self, it)?;
         crate::browser_web::install(self, it)?;
+        crate::browser_elements::install(self, it)?;
         crate::browser_console::install(self, it)?;
         crate::browser_style::install(self, it)?;
         crate::browser_computed::install(self, it)?;
@@ -1207,6 +1214,7 @@ impl Browser {
             dataset: Default::default(),
             abort: Default::default(),
             web: Default::default(),
+            els: Default::default(),
         });
         it.set_host(dom.clone())?;
         it.heap.set_indexed_source(dom.clone());

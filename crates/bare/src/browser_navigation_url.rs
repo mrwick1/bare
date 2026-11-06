@@ -49,12 +49,12 @@ fn frag_encode(s: &str) -> String {
     o
 }
 
-fn clean(s: &str) -> String {
+pub(crate) fn clean(s: &str) -> String {
     s.chars().filter(|c| !matches!(c, '\t' | '\n' | '\r')).collect()
 }
 
 /// `(scheme, text after the colon)` when `s` starts with a URL scheme.
-fn scheme_of(s: &str) -> Option<(&str, &str)> {
+pub(crate) fn scheme_of(s: &str) -> Option<(&str, &str)> {
     let end = s.find(|c: char| !(c.is_ascii_alphanumeric() || "+-.".contains(c)))?;
     (end > 0 && s.as_bytes()[0].is_ascii_alphabetic() && s.as_bytes()[end] == b':').then(|| (&s[..end], &s[end + 1..]))
 }

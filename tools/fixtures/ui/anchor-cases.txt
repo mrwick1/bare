@@ -1,0 +1,82 @@
+var $ = function (i) { return document.getElementById(i) };
+var js = JSON.stringify;
+var parts = function (a) { return [a.href, a.protocol, a.host, a.hostname, a.port, a.pathname, a.search, a.hash, a.origin].join(' | ') };
+=== anchor-interface-shape
+@html <a id=a href="http://e.com/"></a><area id=r><link id=l><div id=d></div>
+(function () { var a = $('a'), d = Object.getOwnPropertyDescriptor(HTMLAnchorElement.prototype, 'href'); return [typeof HTMLAnchorElement, HTMLAnchorElement.name, Object.getPrototypeOf(a) === HTMLAnchorElement.prototype, Object.getPrototypeOf(HTMLAnchorElement.prototype) === HTMLElement.prototype, Object.getPrototypeOf($('r')) === HTMLAreaElement.prototype, a instanceof HTMLAnchorElement, $('d') instanceof HTMLAnchorElement, $('r') instanceof HTMLAnchorElement, Object.prototype.toString.call(a), Object.prototype.toString.call($('r')), typeof d.get, typeof d.set, d.enumerable, d.configurable, d.get.name, d.set.name].join() })
+=== anchor-brand-check
+@html <div id=d></div>
+(function () { var g = Object.getOwnPropertyDescriptor(HTMLAnchorElement.prototype, 'href').get, r = []; [$('d'), {}, document, document.createElement('area')].forEach(function (x) { try { r.push(g.call(x)) } catch (e) { r.push(e.name + ':' + e.message) } }); return r.join(' | ') })
+=== anchor-absolute-url-parts
+@html <a id=a href="https://example.com:8443/p/q?x=1&y=2#frag"></a>
+(function () { return parts($('a')) })
+=== anchor-normalizes-the-url
+@html <a id=a href="HTTP://Example.COM:80/a/./b/../c?q=1#h"></a><a id=b href="https://e.com:443"></a><a id=c href="http://e.com"></a><a id=d href="  http://e.com/x  "></a>
+(function () { return ['a', 'b', 'c', 'd'].map(function (i) { return parts($(i)) }).join('\n') })
+=== anchor-empty-query-and-hash
+@html <a id=a href="http://e.com/p?"></a><a id=b href="http://e.com/p#"></a><a id=c href="http://e.com/p?#"></a><a id=d href="http://e.com/p?a#b#c"></a>
+(function () { return ['a', 'b', 'c', 'd'].map(function (i) { return parts($(i)) }).join('\n') })
+=== anchor-no-href
+@html <a id=a></a>
+(function () { return parts($('a')) + ' ' + $('a').hasAttribute('href') })
+=== anchor-href-setter-writes-the-attribute
+@html <a id=a></a>
+var a = $('a'), r = [];
+a.href = 'http://e.com/a b'; r.push(a.getAttribute('href') + ' > ' + a.href);
+a.href = 5; r.push(a.getAttribute('href'));
+a.href = null; r.push(a.getAttribute('href'));
+a.href = undefined; r.push(a.getAttribute('href'));
+(function () { return r.join(' | ') })
+=== anchor-setter-follows-the-attribute
+@html <a id=a href="http://e.com/one"></a>
+var a = $('a'), r = [a.pathname];
+a.setAttribute('href', 'http://e.com/two?x#y'); r.push(a.pathname + a.search + a.hash);
+a.removeAttribute('href'); r.push(js(a.href));
+(function () { return r.join(' | ') })
+=== anchor-part-setters
+@html <a id=a href="http://e.com:81/p?q#h"></a>
+var a = $('a'), r = [];
+a.pathname = '/new path'; r.push(a.getAttribute('href'));
+a.search = 'a=b c'; r.push(a.getAttribute('href'));
+a.hash = 'frag'; r.push(a.getAttribute('href'));
+a.port = '8080'; r.push(a.getAttribute('href'));
+a.hostname = 'x.test'; r.push(a.getAttribute('href'));
+a.host = 'y.test:9'; r.push(a.getAttribute('href'));
+a.protocol = 'https'; r.push(a.getAttribute('href'));
+a.search = ''; a.hash = ''; r.push(a.getAttribute('href'));
+(function () { return r.join(' | ') })
+=== anchor-part-setter-without-href
+@html <a id=a></a>
+var a = $('a'); a.pathname = '/x'; a.hash = 'y';
+(function () { return js(a.getAttribute('href')) })
+=== anchor-to-string-is-href
+@html <a id=a href="http://e.com/x"></a><area id=r href="http://e.com/y">
+(function () { return [String($('a')), $('a') + '', String($('r')), $('a').toString === HTMLAnchorElement.prototype.toString].join(' ') })
+=== anchor-other-schemes
+@html <a id=a href="mailto:a@b.c?subject=hi#top"></a><a id=b href="javascript:void(0)"></a><a id=c href="tel:+1234"></a>
+(function () { return ['a', 'b', 'c'].map(function (i) { return parts($(i)) }).join('\n') })
+=== anchor-invalid-url
+@html <a id=a href="http://"></a><a id=b href="http://[bad"></a>
+(function () { return ['a', 'b'].map(function (i) { return parts($(i)) }).join('\n') })
+=== anchor-created-element
+var a = document.createElement('a'), r = [js(a.href)];
+a.href = 'https://e.com/x?y=1'; r.push(a.origin + a.pathname + a.search);
+(function () { return r.join(' | ') })
+=== anchor-clone-keeps-href
+@html <a id=a href="http://e.com/x#y">t</a>
+(function () { var c = $('a').cloneNode(true); return [c.href, c instanceof HTMLAnchorElement, c.hash].join(' ') })
+=== anchor-svg-and-xhtml-are-not-html-anchors
+@html <svg><a id=s href="http://e.com/"></a></svg>
+(function () { var s = $('s'); return [s instanceof HTMLAnchorElement, typeof s.protocol, typeof s.pathname].join(' ') })
+=== area-url-parts
+@html <map name=m><area id=r shape=rect coords="0,0,1,1" href="http://e.com:81/x/y?z#w"></map>
+(function () { return parts($('r')) })
+=== area-setters
+@html <map name=m><area id=r href="http://e.com/x"></map>
+var r = $('r'); r.href = 'http://f.test/y'; r.search = 'q=1'; r.hash = 'h';
+(function () { return r.getAttribute('href') + ' ' + r.pathname + r.search + r.hash })
+=== link-href-still-reflects
+@html <link id=l href="http://e.com/s.css">
+(function () { var l = $('l'); l.href = 'http://e.com/t.css'; return [l.href, l.getAttribute('href'), typeof l.protocol].join(' ') })
+=== anchor-lazy-global
+(function () { return [typeof HTMLAnchorElement, 'HTMLAreaElement' in window, 'HTMLTemplateElement' in window, window.HTMLAnchorElement === HTMLAnchorElement].join() })

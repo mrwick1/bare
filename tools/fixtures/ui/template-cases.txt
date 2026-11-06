@@ -1,0 +1,85 @@
+var $ = function (i) { return document.getElementById(i) };
+var js = JSON.stringify;
+=== template-interface-shape
+@html <template id=t></template><div id=d></div>
+(function () { var t = $('t'), g = Object.getOwnPropertyDescriptor(HTMLTemplateElement.prototype, 'content'); return [typeof HTMLTemplateElement, HTMLTemplateElement.name, Object.getPrototypeOf(t) === HTMLTemplateElement.prototype, Object.getPrototypeOf(HTMLTemplateElement.prototype) === HTMLElement.prototype, t instanceof HTMLTemplateElement, $('d') instanceof HTMLTemplateElement, Object.prototype.toString.call(t), typeof g.get, g.set, g.enumerable, g.configurable, g.get.name].join() })
+=== template-content-is-a-fragment
+@html <template id=t><p>a</p><b>b</b>text</template>
+(function () { var t = $('t'), c = t.content; return [c.nodeType, c.nodeName, c instanceof DocumentFragment, c instanceof Node, Object.prototype.toString.call(c), c.childNodes.length, c.firstChild.nodeName, c.lastChild.nodeValue, c === t.content, c.parentNode, c.isConnected].join() })
+=== template-children-move-to-the-content
+@html <template id=t><p>a</p><b>b</b></template>
+(function () { var t = $('t'); return [t.childNodes.length, t.firstChild, t.hasChildNodes(), t.children.length, t.textContent === '', t.content.children.length, t.content.firstChild.parentNode === t.content, t.content.textContent].join() })
+=== template-content-reads-like-a-parent
+@html <template id=t><div id=in class=k><span>x</span></div><i>y</i></template>
+(function () { var c = $('t').content; return [c.childElementCount, c.firstElementChild.id, c.lastElementChild.tagName, c.querySelector('span').textContent, c.querySelectorAll('div,i').length, c.getElementById('in').className, document.getElementById('in'), document.querySelector('span')].join() })
+=== template-content-elements-are-inert
+@html <template id=t><div id=in></div></template>
+(function () { var e = $('t').content.firstChild; return [e.isConnected, e.parentNode.nodeType, document.contains(e), document.querySelectorAll('div').length].join() })
+=== template-created-element
+var t = document.createElement('template');
+(function () { return [t instanceof HTMLTemplateElement, t.content.nodeType, t.content.childNodes.length, t.content === t.content].join() })
+=== template-append-to-the-template-is-not-the-content
+var t = document.createElement('template'); t.appendChild(document.createElement('p'));
+(function () { return [t.childNodes.length, t.content.childNodes.length].join() })
+=== template-clone-content-deep
+@html <template id=t><p class=a>1</p><b>2</b>t<!--c--></template>
+var c = $('t').content.cloneNode(true);
+(function () { var t = $('t').content; return [c.nodeType, c.childNodes.length, c.firstChild.outerHTML, c.childNodes[1].outerHTML, c.childNodes[2].nodeValue, c.childNodes[3].nodeType, c !== t, c.firstChild !== t.firstChild, c.parentNode, c instanceof DocumentFragment, t.childNodes.length].join() })
+=== template-clone-content-shallow
+@html <template id=t><p>1</p></template>
+(function () { var c = $('t').content.cloneNode(false); return [c.nodeType, c.childNodes.length, $('t').content.childNodes.length].join() })
+=== template-clone-content-is-independent
+@html <template id=t><p>1</p></template>
+var c = $('t').content.cloneNode(true); c.firstChild.textContent = 'changed'; c.appendChild(document.createElement('hr'));
+(function () { return [$('t').content.firstChild.textContent, $('t').content.childNodes.length, c.childNodes.length].join() })
+=== template-clone-template-element-deep
+@html <template id=t><p>1</p><b>2</b></template>
+var c = $('t').cloneNode(true);
+(function () { return [c instanceof HTMLTemplateElement, c.childNodes.length, c.content.childNodes.length, c.content.firstChild.outerHTML, $('t').content.childNodes.length, c.content !== $('t').content].join() })
+=== template-clone-template-element-shallow
+@html <template id=t><p>1</p></template>
+var c = $('t').cloneNode(false);
+(function () { return [c instanceof HTMLTemplateElement, c.content.childNodes.length].join() })
+=== template-append-clone-to-the-document
+@html <template id=t><p>1</p><b>2</b></template><div id=host></div>
+var c = $('t').content.cloneNode(true), r = [];
+$('host').appendChild(c);
+(function () { return [$('host').childNodes.length, $('host').firstChild.outerHTML, $('host').lastChild.tagName, c.childNodes.length, $('t').content.childNodes.length, $('host').firstChild.isConnected].join() })
+=== template-insert-before-a-clone
+@html <template id=t><p>1</p><b>2</b></template><div id=host><i id=ref></i></div>
+$('host').insertBefore($('t').content.cloneNode(true), $('ref'));
+(function () { return [$('host').childNodes.length, $('host').firstChild.tagName, $('host').childNodes[1].tagName, $('host').lastChild.tagName].join() })
+=== template-append-content-moves-the-nodes
+@html <template id=t><p>1</p><b>2</b></template><div id=host></div>
+var p = $('t').content.firstChild; $('host').appendChild($('t').content);
+(function () { return [$('host').childNodes.length, $('t').content.childNodes.length, p.parentNode === $('host')].join() })
+=== template-append-clone-twice
+@html <template id=t><p>1</p></template><div id=host></div>
+for (var i = 0; i < 3; i++) $('host').appendChild($('t').content.cloneNode(true));
+(function () { return [$('host').childNodes.length, $('host').children[0] !== $('host').children[2]].join() })
+=== template-nested
+@html <template id=t><p>1</p><template id=n><b>2</b></template></template>
+(function () { var n = $('t').content.firstChild.nextSibling; return [n instanceof HTMLTemplateElement, n.childNodes.length, n.content.childNodes.length, n.content.firstChild.tagName, $('n'), $('t').content.getElementById('n') === n].join() })
+=== template-empty
+@html <template id=t></template>
+(function () { var c = $('t').content; return [c.childNodes.length, c.firstChild, c.hasChildNodes(), c.cloneNode(true).childNodes.length].join() })
+=== template-content-keeps-expando
+@html <template id=t><p>1</p></template>
+var c = $('t').content; c.expando = 7;
+(function () { return [$('t').content.expando, $('t').content === c].join() })
+=== template-content-listeners
+@html <template id=t><p id=in>1</p></template>
+var log = []; $('t').content.addEventListener('x', function (e) { log.push('frag:' + e.target.nodeName) });
+$('t').content.firstChild.addEventListener('x', function () { log.push('p') });
+$('t').content.firstChild.dispatchEvent(new Event('x', { bubbles: true }));
+(function () { return log.join() })
+=== template-set-content-is-ignored
+@html <template id=t><p>1</p></template>
+var c = $('t').content; $('t').content = 5;
+(function () { return [$('t').content === c, $('t').content.childNodes.length].join() })
+=== template-brand-check
+@html <div id=d></div>
+(function () { var g = Object.getOwnPropertyDescriptor(HTMLTemplateElement.prototype, 'content').get, r = []; [$('d'), {}, document].forEach(function (x) { try { r.push(g.call(x)) } catch (e) { r.push(e.name + ':' + e.message) } }); return r.join(' | ') })
+=== template-in-table-keeps-the-content
+@html <table><tbody><tr><td><template id=t><b>x</b></template></td></tr></tbody></table>
+(function () { var t = $('t'); return [t.childNodes.length, t.content.childNodes.length, t.content.firstChild.tagName].join() })

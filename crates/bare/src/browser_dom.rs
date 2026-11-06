@@ -240,7 +240,7 @@ impl Dom {
     }
 
     /// Check a node insertion (DOM Standard "ensure pre-insertion validity", the parts that apply to this tree).
-    fn check_insert(&self, it: &mut Interp<'_>, parent: NodeId, node: NodeId, before: Option<NodeId>, replacing: Option<NodeId>) -> R<()> {
+    fn check_insert(&self, it: &mut Interp<'_>, parent: NodeId, node: NodeId, before: Option<NodeId>, replacing: Option<NodeId>, frag_ok: bool) -> R<()> {
         #[derive(PartialEq, Clone, Copy)]
         enum K {
             Doc,
@@ -308,8 +308,9 @@ impl Dom {
                 return Err(self.dom_err(it, "HierarchyRequestError", "This document cannot take that child here."));
             }
         }
-        if nk == K::Frag {
-            // The standard inserts the children of a fragment. Not done: refuse, before anything changes.
+        if nk == K::Frag && !(frag_ok && pk != K::Doc) {
+            // The standard inserts the children of a fragment. Done only by `insert_checked`, for a fragment with no host into an element or a fragment
+            // (`is_plain_fragment`). Else refuse, before anything changes.
             return Err(Error::Unsupported(unsupported("inserting a ShadowRoot or DocumentFragment as a node (fragment insertion)")));
         }
         let height = if self.doc.borrow().children(node).next().is_some() || self.doc.borrow().shadow_root(node).is_some() { self.height_of(it, node)? } else { 0 };
@@ -327,7 +328,7 @@ impl Dom {
         }
         self.mo_group(None, || {
             for &n in nodes {
-                self.check_insert(it, parent, n, before, None)?;
+                self.check_insert(it, parent, n, before, None, false)?;
                 let mut doc = self.doc.borrow_mut();
                 let b = if before == Some(n) { doc.next_sibling(n) } else { before };
                 doc.move_to(n, parent, b);
@@ -340,8 +341,21 @@ impl Dom {
         Ok(())
     }
 
+    /// A fragment that is not a shadow root: `DocumentFragment`, also the contents of a `template`.
+    pub(crate) fn is_plain_fragment(&self, n: NodeId) -> bool {
+        let doc = self.doc.borrow();
+        matches!(doc.data(n), NodeData::ShadowRoot) && doc.shadow_host(n).is_none()
+    }
+
     pub(crate) fn insert_checked(&self, it: &mut Interp<'_>, parent: NodeId, node: NodeId, before: Option<NodeId>) -> R<()> {
-        self.check_insert(it, parent, node, before, None)?;
+        let frag = self.is_plain_fragment(node);
+        self.check_insert(it, parent, node, before, None, frag)?;
+        if frag {
+            // DOM "insert": the children go in as one change group and the fragment is left empty.
+            let kids: Vec<NodeId> = self.doc.borrow().children(node).collect();
+            it.charge(kids.len() as u64)?;
+            return self.insert_many(it, parent, &kids, before);
+        }
         let mut doc = self.doc.borrow_mut();
         let before = if before == Some(node) { doc.next_sibling(node) } else { before };
         doc.move_to(node, parent, before);
@@ -792,7 +806,7 @@ pub(crate) fn replace_child(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Valu
     if new == old {
         return Ok(arg(a, 1));
     }
-    d.check_insert(it, parent, new, Some(old), Some(old))?;
+    d.check_insert(it, parent, new, Some(old), Some(old), false)?;
     d.mo_group(None, || {
         let mut doc = d.doc.borrow_mut();
         let before = if doc.next_sibling(old) == Some(new) { doc.next_sibling(new) } else { doc.next_sibling(old) };
@@ -840,7 +854,7 @@ pub(crate) fn clone_node(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value])
         return Err(d.dom_err(it, "NotSupportedError", "Cloning a Document is not supported."));
     }
     // DOM Standard cloneNode(): a shadow root cannot be cloned. (A host is cloned without its root: `clonable` is always false here.)
-    if matches!(d.data(n), NodeData::ShadowRoot) {
+    if matches!(d.data(n), NodeData::ShadowRoot) && !d.is_plain_fragment(n) {
         return Err(d.dom_err(it, "NotSupportedError", "ShadowRoot nodes are not clonable."));
     }
     // Count first, so a clone that does not fit makes no node at all.
@@ -857,6 +871,8 @@ pub(crate) fn clone_node(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value])
             input_bytes += st.inputs.get(&c).and_then(|i| i.value.as_ref()).map_or(0, String::len);
         };
         account(n);
+        // The contents of the templates in the subtree are cloned with it.
+        let mut contents: Vec<NodeId> = if deep { doc.template_content(n).into_iter().collect() } else { Vec::new() };
         if deep {
             let (mut cur, mut depth) = (n, 0);
             while let Some((c, cd)) = next_in(&doc, n, cur, depth) {
@@ -864,6 +880,18 @@ pub(crate) fn clone_node(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value])
                 (cur, depth) = (c, cd);
                 count += 1;
                 account(c);
+                contents.extend(doc.template_content(c));
+            }
+            while let Some(f) = contents.pop() {
+                count += 1;
+                let (mut cur, mut depth) = (f, 0);
+                while let Some((c, cd)) = next_in(&doc, f, cur, depth) {
+                    it.charge(1)?;
+                    (cur, depth) = (c, cd);
+                    count += 1;
+                    account(c);
+                    contents.extend(doc.template_content(c));
+                }
             }
         }
         d.room(&doc, count, bytes)?;
@@ -895,7 +923,8 @@ pub(crate) fn clone_node(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value])
                     let t = doc.text(sp).to_string();
                     doc.create_doctype(&t)
                 }
-                NodeData::Document | NodeData::ShadowRoot => unreachable!("checked above, and a root is never a child"),
+                NodeData::ShadowRoot => doc.create_fragment(),
+                NodeData::Document => unreachable!("checked above, and a root is never a child"),
             };
             d.copy_script_started(src, c);
             if let Some(mut i) = st.inputs.get(&src).cloned() {
@@ -911,6 +940,11 @@ pub(crate) fn clone_node(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value])
             if deep {
                 let kids: Vec<NodeId> = doc.children(src).collect();
                 stack.extend(kids.into_iter().rev().map(|k| (k, Some(c))));
+                if let Some(f) = doc.template_content(src) {
+                    let copy = doc.make_template_content(c);
+                    let kids: Vec<NodeId> = doc.children(f).collect();
+                    stack.extend(kids.into_iter().rev().map(|k| (k, Some(copy))));
+                }
             }
         }
         root_clone.expect("one clone")

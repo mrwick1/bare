@@ -1,0 +1,93 @@
+var $ = function (i) { return document.getElementById(i) };
+var js = JSON.stringify;
+var dump = function (fd) { var r = []; fd.forEach(function (v, k) { r.push(k + '=' + (typeof v === 'string' ? js(v) : 'File(' + js(v.name) + ',' + v.size + ',' + js(v.type) + ')')) }); return r.join('&') };
+=== formdata-text-controls
+@html <form id=f><input name=a value=1><input name=b><input type=text name=c value="x y"><input type=hidden name=h value=hid><input type=number name=n value=5><input type=email name=e value="a@b.c"><input name=d value=last></form>
+(function () { return dump(new FormData($('f'))) })
+=== formdata-checkbox-and-radio
+@html <form id=f><input type=checkbox name=c1 checked><input type=checkbox name=c2><input type=checkbox name=c3 value=v3 checked><input type=radio name=r value=a><input type=radio name=r value=b checked><input type=radio name=r value=c><input type=radio name=q value=z></form>
+(function () { return dump(new FormData($('f'))) })
+=== formdata-checked-set-by-script
+@html <form id=f><input type=checkbox name=c1><input type=checkbox name=c2 checked><input type=radio name=r value=a><input type=radio name=r value=b></form>
+var f = $('f'); document.querySelector('[name=c1]').checked = true; document.querySelector('[name=c2]').checked = false; document.querySelector('[value=b]').checked = true;
+(function () { return dump(new FormData(f)) })
+=== formdata-value-set-by-script
+@html <form id=f><input name=a value=1><input name=b value=2></form>
+document.querySelector('[name=a]').value = 'changed';
+(function () { return dump(new FormData($('f'))) })
+=== formdata-skips-disabled-and-nameless
+@html <form id=f><input name=a value=1 disabled><input value=2><input name="" value=3><input name=b value=4><textarea disabled name=t>x</textarea><select disabled name=s><option>o</option></select><input type=checkbox name=c checked disabled></form>
+(function () { return dump(new FormData($('f'))) })
+=== formdata-fieldset-disabled
+@html <form id=f><fieldset disabled><input name=a value=1><legend><input name=lg value=legend></legend></fieldset><fieldset><input name=b value=2></fieldset><fieldset disabled><fieldset><input name=c value=3></fieldset></fieldset></form>
+(function () { return dump(new FormData($('f'))) })
+=== formdata-skips-buttons
+@html <form id=f><input name=a value=1><input type=submit name=s value=go><input type=reset name=r value=r><input type=button name=b value=b><input type=image name=i><button name=bt value=btn>b</button><button type=submit name=bs value=x>b</button><button type=button name=bb>b</button></form>
+(function () { return dump(new FormData($('f'))) })
+=== formdata-textarea
+@html <form id=f><textarea name=t>one two</textarea><textarea name=e></textarea><textarea name=n>&#10;&#10;leading</textarea></form>
+(function () { return dump(new FormData($('f'))) })
+=== formdata-textarea-newlines
+@html <form id=f><textarea name=t>a&#10;b&#13;&#10;c&#13;d</textarea></form>
+(function () { return dump(new FormData($('f'))) })
+=== formdata-select-single
+@html <form id=f><select name=s1><option value=a>A</option><option value=b selected>B</option></select><select name=s2><option>First</option><option>Second</option></select><select name=s3><option value="">None</option></select></form>
+(function () { return dump(new FormData($('f'))) })
+=== formdata-select-option-text-value
+@html <form id=f><select name=s><option selected>  spaced   text  </option></select></form>
+(function () { return dump(new FormData($('f'))) })
+=== formdata-select-multiple
+@html <form id=f><select name=m multiple><option value=a selected>A</option><option value=b>B</option><option value=c selected>C</option></select><select name=n multiple><option>x</option></select></form>
+(function () { return dump(new FormData($('f'))) })
+=== formdata-select-disabled-and-last-selected
+@html <form id=f><select name=a><option value=1 selected>1</option><option value=2 selected>2</option></select><select name=b><option value=1 disabled>1</option><option value=2>2</option></select><select name=c><option value=1 selected disabled>1</option><option value=2>2</option></select><select name=d multiple><option value=1 selected disabled>1</option><option value=2 selected>2</option></select></form>
+(function () { return dump(new FormData($('f'))) })
+=== formdata-select-in-optgroup
+@html <form id=f><select name=s><optgroup label=g><option value=a>A</option><option value=b selected>B</option></optgroup></select></form>
+(function () { return dump(new FormData($('f'))) })
+=== formdata-input-file-empty
+@html <form id=f><input type=file name=up><input name=after value=1></form>
+(function () { var fd = new FormData($('f')); var v = fd.get('up'); return [dump(fd), v instanceof File, v instanceof Blob, fd.has('up'), fd.getAll('up').length].join(' ') })
+=== formdata-tree-order-and-nesting
+@html <form id=f><div><input name=a value=1><p><input name=b value=2></p></div><table><tr><td><input name=c value=3></td></tr></table><input name=a value=4></form>
+(function () { var fd = new FormData($('f')); return [dump(fd), js(fd.getAll('a'))].join(' ') })
+=== formdata-form-attribute
+@html <form id=f><input name=in value=1><input name=other form=g value=2><input name=moved form=f value=3></form><form id=g><input name=g1 value=4></form><input name=outside form=f value=5><input name=none value=6>
+(function () { return dump(new FormData($('f'))) + ' / ' + dump(new FormData($('g'))) })
+=== formdata-form-attribute-unknown-id
+@html <form id=f><input name=a value=1><input name=b form=nope value=2></form>
+(function () { return dump(new FormData($('f'))) })
+=== formdata-no-controls
+@html <form id=f><div>nothing</div></form>
+(function () { var fd = new FormData($('f')); return [dump(fd), fd.has('x'), fd.get('x')].join(' ') })
+=== formdata-is-a-snapshot
+@html <form id=f><input name=a value=1></form>
+var f = $('f'), fd = new FormData(f); document.querySelector('input').value = '2'; var i = document.createElement('input'); i.name = 'z'; i.value = 'late'; f.appendChild(i);
+(function () { return dump(fd) + ' / ' + dump(new FormData(f)) })
+=== formdata-from-form-is-editable
+@html <form id=f><input name=a value=1></form>
+var fd = new FormData($('f')); fd.append('b', '2'); fd.set('a', 'x'); fd.append('a', 'y');
+(function () { return dump(fd) + ' ' + js(fd.getAll('a')) + ' ' + document.querySelector('input').value })
+=== formdata-new-with-no-argument
+(function () { return [dump(new FormData()), dump(new FormData(undefined))].join(' / ') })
+=== formdata-wrong-argument
+@html <form id=f></form><div id=d></div>
+(function () { var r = []; [null, 5, 'form', {}, $('d'), document, [$('f')]].forEach(function (x) { try { new FormData(x); r.push('ok') } catch (e) { r.push(e.name + ':' + e.message) } }); return r.join(' | ') })
+=== formdata-form-created-by-script
+var f = document.createElement('form'), i = document.createElement('input'); i.name = 'k'; i.value = 'v'; f.appendChild(i);
+(function () { return dump(new FormData(f)) })
+=== formdata-inputs-without-type-attribute-values
+@html <form id=f><input name=a type=date value="2020-01-02"><input name=b type=range value=30><input name=c type=color value="#ff0000"><input name=d type=password value=pw><input name=e type=search value=q><input name=f type=url value="http://e.com"><input name=g type=tel value="123"><input name=h type=BOGUS value=bogus></form>
+(function () { return dump(new FormData($('f'))) })
+=== formdata-value-sanitization
+@html <form id=f><input name=a value="line1&#10;line2"><input name=b value=abc><input name=c value="  padded  "></form>
+(function () { return dump(new FormData($('f'))) })
+=== formdata-submitter-is-not-included
+@html <form id=f><input name=a value=1><button id=b name=btn value=go>x</button></form>
+var seen = [];
+$('f').addEventListener('submit', function (e) { e.preventDefault(); seen.push(dump(new FormData(e.target))) });
+$('b').click();
+(function () { return seen.join(' / ') })
+=== formdata-as-a-fetch-body-shape
+@html <form id=f><input name=a value=1><input name=b value="x y"></form>
+(function () { var fd = new FormData($('f')); return [Array.from(fd.keys()).join(), Array.from(fd.values()).join(), Array.from(fd).length, Object.prototype.toString.call(fd)].join(' ') })

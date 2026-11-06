@@ -253,7 +253,7 @@ pub(crate) struct Scripts {
     /// 0 `loading`, 1 `interactive`, 2 `complete`.
     ready: Cell<u8>,
     current: Cell<Option<NodeId>>,
-    base: RefCell<Option<String>>,
+    pub(crate) base: RefCell<Option<String>>,
     started: RefCell<HashSet<NodeId>>,
     inline: RefCell<VecDeque<(NodeId, String)>>,
     external: RefCell<VecDeque<Ext>>,

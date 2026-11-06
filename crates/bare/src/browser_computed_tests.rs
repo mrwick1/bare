@@ -215,7 +215,7 @@ fn elements_without_a_style_say_so() {
     assert_eq!(js(&mut b, "getComputedStyle(document.getElementById('t')).display"), "none");
     assert_eq!(js(&mut b, "var e = document.createElement('i'); document.head.appendChild(e); getComputedStyle(e).display"), "inline");
     // Inside a `<template>`: Chrome keeps the content in another document, so the declaration is empty (it was recorded with Chrome 155).
-    assert_eq!(js(&mut b, "var q = document.getElementById('q'); var t = getComputedStyle(q); t.display + '|' + t.length + '|' + t.position"), "|0|");
+    assert_eq!(js(&mut b, "var q = document.getElementById('tp').content.firstChild; var t = getComputedStyle(q); t.display + '|' + t.length + '|' + t.position"), "|0|");
     assert_eq!(js(&mut b, "getComputedStyle(document.getElementById('tp')).display"), "none");
 }
 

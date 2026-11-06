@@ -191,8 +191,9 @@ fn spec_cases_that_node_gets_wrong() {
         assert_eq!(js(&mut b, "FormData.length"), "0");
         assert_eq!(js(&mut b, "Object.keys(FormData.prototype).join()"), "append,delete,get,getAll,has,set,forEach,keys,values,entries");
         assert_eq!(js(&mut b, "Object.prototype.toString.call(new Blob()) + Object.prototype.toString.call(new File([], 'a'))"), "[object Blob][object File]");
-        // `new FormData(form)` is a gate, not a wrong answer.
-        assert_eq!(js(&mut b, "new FormData(document.getElementById('f'))"), "unsupported:FormData from a form element");
+        // `new FormData(form)` reads the form (tests in browser_elements_tests.rs); another argument is a TypeError.
+        assert_eq!(js(&mut b, "[...new FormData(document.getElementById('f'))].length"), "0");
+        assert_eq!(js(&mut b, "new FormData({})"), "throw:TypeError:Failed to construct 'FormData': parameter 1 is not of type 'HTMLFormElement'.");
         // A Blob or a FormData body is sent (tests in browser_fetch_tests.rs). Without a fetch configuration it stops at the origin gate.
         assert_eq!(js(&mut b, "fetch('http://127.0.0.1:9/x', { method: 'POST', body: new FormData() })"), "unsupported:fetch without a configured document origin (Browser::configure_fetch)");
     });
