@@ -79,8 +79,7 @@ impl<'p> Interp<'p> {
     fn host_function_with(&mut self, id: u32, name: &str, len: u32, ctor: bool, nt: bool) -> Result<ObjId, Error> {
         let o = self.new_func_object(Callee::Host { id, ctor, nt })?;
         let s = h!(self, self.heap.intern_str(name));
-        self.def(o, self.k_length, Value::Number(len as f64), false, false, true)?;
-        self.def(o, self.k_name, Value::String(s), false, false, true)?;
+        h!(self, self.heap.init_function(o, (self.k_length, len as f64), (self.k_name, s)));
         Ok(o)
     }
 

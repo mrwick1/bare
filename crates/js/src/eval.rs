@@ -855,7 +855,10 @@ impl<'p> Interp<'p> {
             if !seen.insert(o) {
                 continue;
             }
+            // A host function owns no host state: the embedder's `trace` is not asked about it.
+            let mut host_fn = false;
             match self.funcs.get(&o) {
+                Some(Callee::Host { .. }) => host_fn = true,
                 Some(Callee::Script { env, .. }) => env_work.push(*env),
                 Some(Callee::Bound { target, this, args }) => {
                     work.push(Value::Object(*target));
@@ -867,7 +870,7 @@ impl<'p> Interp<'p> {
                 _ => {}
             }
             self.promise_trace(o, &mut work);
-            if let Some(h) = &host {
+            if let Some(h) = host.as_ref().filter(|_| !host_fn) {
                 let from = host_vals.len();
                 h.trace(o, &mut host_vals);
                 work.extend_from_slice(&host_vals[from..]);
@@ -1440,8 +1443,7 @@ impl<'p> Interp<'p> {
     fn native(&mut self, n: Nat, name: &str, len: u32) -> Res<ObjId> {
         let o = self.new_func_object(Callee::Native(n))?;
         let s = h!(self, self.heap.intern_str(name));
-        self.def(o, self.k_length, Value::Number(len as f64), false, false, true)?;
-        self.def(o, self.k_name, Value::String(s), false, false, true)?;
+        h!(self, self.heap.init_function(o, (self.k_length, len as f64), (self.k_name, s)));
         Ok(o)
     }
 

@@ -296,6 +296,7 @@ fn replace(d: &Dom, it: &mut Interp<'_>, html: &str, n: NodeId, in_frag: bool, t
     it.charge(old + count as u64)?;
 
     // Commit. Nothing below runs page code or can fail.
+    d.mo_group(if this.is_some() { None } else { Some(n) }, || {
     let mut doc = d.doc.borrow_mut();
     let (prev, before) = this.map_or((None, None), |t| (doc.prev_sibling(t), doc.next_sibling(t)));
     match this {
@@ -325,6 +326,8 @@ fn replace(d: &Dom, it: &mut Interp<'_>, html: &str, n: NodeId, in_frag: bool, t
             join_text(&mut doc, a);
         }
     }
+    Ok(())
+    })?;
     Ok(Value::Undefined)
 }
 

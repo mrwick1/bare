@@ -1,0 +1,84 @@
+=== shape
+(function () { return [typeof requestAnimationFrame, requestAnimationFrame.length, requestAnimationFrame.name, cancelAnimationFrame.length, window.requestAnimationFrame === requestAnimationFrame, cancelAnimationFrame(1)].join(' ') })
+=== handles-count-from-one
+var a = requestAnimationFrame(function () {}), b = requestAnimationFrame(function () {}), c = requestAnimationFrame(function () {});
+(function () { return [a, b, c].join(' ') })
+=== order-and-timestamp
+var log = [];
+requestAnimationFrame(function (t) { log.push('A:' + typeof t) });
+requestAnimationFrame(function (t) { log.push('B:' + (t === log.t)); });
+requestAnimationFrame(function (t) { log.t = t; log.push('C') });
+(function () { return log.join(' ') })
+=== one-timestamp-per-frame
+var ts = [];
+requestAnimationFrame(function (t) { ts.push(t) });
+requestAnimationFrame(function (t) { ts.push(t) });
+requestAnimationFrame(function (t) { ts.push(t) });
+(function () { return ts.length + ' ' + (ts[0] === ts[1] && ts[1] === ts[2]) + ' ' + (ts[0] <= performance.now()) })
+=== added-during-frame-runs-next-frame
+var log = [], t = [];
+requestAnimationFrame(function (a) { log.push('A'); t.push(a); requestAnimationFrame(function (c) { log.push('C'); t.push(c) }) });
+requestAnimationFrame(function () { log.push('B') });
+(function () { return log.join(' ') + ' ' + (t[1] > t[0]) })
+=== cancel-before-frame
+var log = [], id = requestAnimationFrame(function () { log.push('A') });
+requestAnimationFrame(function () { log.push('B') });
+cancelAnimationFrame(id);
+(function () { return log.join(' ') })
+=== cancel-during-frame
+var log = [], b;
+requestAnimationFrame(function () { log.push('A'); cancelAnimationFrame(b) });
+b = requestAnimationFrame(function () { log.push('B') });
+requestAnimationFrame(function () { log.push('C') });
+(function () { return log.join(' ') })
+=== cancel-self-and-twice
+var log = [], a = requestAnimationFrame(function () { log.push('A'); cancelAnimationFrame(a) });
+cancelAnimationFrame(a + 100); cancelAnimationFrame('x'); cancelAnimationFrame(null); cancelAnimationFrame(-1);
+(function () { return log.join(' ') })
+=== cancel-with-string-handle
+var log = [], a = requestAnimationFrame(function () { log.push('A') });
+cancelAnimationFrame(String(a));
+(function () { return log.length })
+=== cancel-without-argument
+(function () { try { cancelAnimationFrame() } catch (e) { return e.name + ": " + e.message } })
+=== request-without-argument
+(function () { try { requestAnimationFrame() } catch (e) { return e.name + ": " + e.message } })
+=== request-non-function
+(function () { try { requestAnimationFrame(1) } catch (e) { return e.name + ": " + e.message } })
+=== request-string
+(function () { try { requestAnimationFrame('x = 1') } catch (e) { return e.name + ": " + e.message } })
+=== throw-does-not-stop-the-frame
+var log = [];
+requestAnimationFrame(function () { log.push('A'); throw new Error('x') });
+requestAnimationFrame(function () { log.push('B') });
+(function () { return log.join(' ') })
+=== microtasks-run-between-callbacks
+var log = [];
+requestAnimationFrame(function () { log.push('A'); Promise.resolve().then(function () { log.push('m') }) });
+requestAnimationFrame(function () { log.push('B') });
+(function () { return log.join(' ') })
+=== this-of-a-callback
+var log = [];
+requestAnimationFrame(function () { 'use strict'; log.push(String(this)) });
+requestAnimationFrame(function () { log.push(this === window) });
+(function () { return log.join(' ') })
+=== extra-arguments-and-the-callback-arguments
+var log = [];
+requestAnimationFrame(function () { log.push(arguments.length) }, 1, 2);
+(function () { return log.join(' ') })
+=== frame-before-a-late-timer
+var log = [];
+setTimeout(function () { log.push('T') }, 100);
+requestAnimationFrame(function () { log.push('R') });
+(function () { return log.join(' ') })
+=== chain-of-frames
+var log = [], t = [];
+function step(ts) { t.push(ts); log.push(t.length); if (t.length < 4) requestAnimationFrame(step) }
+requestAnimationFrame(step);
+(function () { return log.join(' ') + ' ' + (t[1] > t[0] && t[2] > t[1] && t[3] > t[2]) })
+=== callback-added-from-a-timer
+var log = [];
+setTimeout(function () { requestAnimationFrame(function () { log.push('R') }); log.push('T') }, 10);
+(function () { return log.join(' ') })
+=== method-on-another-object
+(function () { try { requestAnimationFrame.call({}, function () {}) } catch (e) { return e.name + ": " + e.message } })

@@ -47,7 +47,7 @@
 //!   prototype getters. A handler set with `onmessage` and an `addEventListener` with the same function count as one
 //!   listener. `onmessageerror`, the `close` event, `window.postMessage` and `BroadcastChannel` are absent.
 //!
-//! Not here: `requestAnimationFrame`, `requestIdleCallback`, `setImmediate`, an `error` event or `onerror` for
+//! `requestAnimationFrame` and the rendering step are in `browser_frame.rs`. Not here: `requestIdleCallback`, `setImmediate`, an `error` event or `onerror` for
 //! reported exceptions, `ErrorEvent`.
 //!
 //! GC: timers keep their callbacks and arguments (they are roots). A port that has queued delivery tasks is a root.
@@ -108,6 +108,8 @@ enum Task {
     Scroll,
     /// `AbortSignal.timeout` (`browser_abort.rs`). The task roots its signal.
     AbortTimeout(ObjId),
+    /// The delivery of `IntersectionObserver` entries (`browser_intersection.rs`). At most one is queued.
+    Notify,
 }
 
 struct Timer {
@@ -200,6 +202,7 @@ enum Run {
     Render,
     Scroll,
     AbortTimeout(ObjId),
+    Notify,
     Nothing,
 }
 
@@ -246,13 +249,33 @@ impl Dom {
         let ports = &s.ports;
         s.tasks.retain(|_, t| match t {
             Task::Deliver(o) => ports.contains_key(o),
-            Task::Timer(_) | Task::Select(_) | Task::SelectionChange(_) | Task::Render | Task::Scroll | Task::AbortTimeout(_) => true,
+            Task::Timer(_) | Task::Select(_) | Task::SelectionChange(_) | Task::Render | Task::Scroll | Task::AbortTimeout(_) | Task::Notify => true,
         });
         s.queued = s.ports.values().map(|p| p.inbox.len()).sum();
         s.queued_bytes = s.ports.values().flat_map(|p| p.inbox.iter().map(|m| m.1)).sum();
     }
 
     // ------------------------------------------------------------ queue
+
+    /// Queue the rendering step at the next frame of the grid (`browser_frame.rs`) unless one is queued.
+    pub(crate) fn want_frame(&self) -> R<()> {
+        if !self.frame.queued.get() {
+            let f = crate::browser_frame::FRAME_MS;
+            let now = self.now_ms();
+            let mut due = ((now / f).floor() + 1.0) * f;
+            if due - now < 1e-6 {
+                due += f;
+            }
+            self.schedule(due, Task::Render)?;
+            self.frame.queued.set(true);
+        }
+        Ok(())
+    }
+
+    /// Queue the delivery of `IntersectionObserver` entries now (a task after the current one).
+    pub(crate) fn want_notify(&self) -> R<()> {
+        self.schedule(self.now_ms(), Task::Notify).map(|_| ())
+    }
 
     fn schedule(&self, due: f64, task: Task) -> R<Key> {
         let mut s = self.sched.borrow_mut();
@@ -340,8 +363,12 @@ impl Dom {
                 }
                 Run::SelectionChange(n)
             }
-            Task::Render => Run::Render,
+            Task::Render => {
+                self.frame.queued.set(false);
+                Run::Render
+            }
             Task::Scroll => Run::Scroll,
+            Task::Notify => Run::Notify,
             Task::AbortTimeout(o) => Run::AbortTimeout(o),
             Task::Deliver(port) => match s.ports.get_mut(&port) {
                 Some(p) if p.keys.front() == Some(&key) => {
@@ -391,7 +418,11 @@ impl Dom {
             }),
             Run::Render => it.host_scope(|it| {
                 it.charge(1)?;
-                self.resize_frame(it)
+                self.frame_run(it)
+            }),
+            Run::Notify => it.host_scope(|it| {
+                it.charge(1)?;
+                self.io_notify(it)
             }),
             Run::Scroll => it.host_scope(|it| {
                 it.charge(1)?;
@@ -946,9 +977,9 @@ impl Browser {
         let mut capped = false;
         loop {
             let upto = target.unwrap_or_else(|| dom.now_ms());
-            // A rendering step is due one frame (16 ms) after a change that observers could see.
-            if dom.resize_wants_frame() {
-                dom.schedule(dom.now_ms() + 16.0, Task::Render)?;
+            // A rendering step is due at the next frame of the grid after a change that observers could see.
+            if dom.frame_wanted() {
+                dom.want_frame()?;
             }
             if dom.scroll_wants_task() {
                 dom.schedule(dom.now_ms() + 16.0, Task::Scroll)?;

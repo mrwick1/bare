@@ -1,0 +1,52 @@
+shape	function 1 function function function function 1 0 0 0 MutationObserver
+constructor-errors	TypeError: Failed to construct 'MutationObserver': 1 argument required, but only 0 present. | TypeError: Failed to construct 'MutationObserver': parameter 1 is not of type 'Function'. | TypeError: Failed to construct 'MutationRecord': Illegal constructor
+observe-argument-errors	TypeError: Failed to execute 'observe' on 'MutationObserver': 1 argument required, but only 0 present. | TypeError: Failed to execute 'observe' on 'MutationObserver': parameter 1 is not of type 'Node'. | TypeError: Failed to execute 'observe' on 'MutationObserver': The options object must set at least one of 'attributes', 'characterData', or 'childList' to true. | TypeError: Failed to execute 'observe' on 'MutationObserver': The options object must set at least one of 'attributes', 'characterData', or 'childList' to true.
+observe-option-errors	TypeError: Failed to execute 'observe' on 'MutationObserver': The options object may only set 'attributeOldValue' to true when 'attributes' is true or not present. | TypeError: Failed to execute 'observe' on 'MutationObserver': The options object may only set 'attributeFilter' when 'attributes' is true or not present. | TypeError: Failed to execute 'observe' on 'MutationObserver': The options object may only set 'characterDataOldValue' to true when 'characterData' is true or not present. | TypeError: Failed to execute 'observe' on 'MutationObserver': The options object must set at least one of 'attributes', 'characterData', or 'childList' to true. | TypeError: Failed to execute 'observe' on 'MutationObserver': The options object must set at least one of 'attributes', 'characterData', or 'childList' to true. | ok
+implied-options-and-methods-on-the-wrong-object	TypeError: Illegal invocation | TypeError: Illegal invocation | TypeError: Illegal invocation
+append-child	childList div#a +[b#x] -[] p=null n=null
+delivery-is-a-microtask	sync:0 | childList div#a +[i] -[] p=null n=null | promise | timeout
+promise-queued-before-the-mutation-runs-first	promise | childList div#a +[i] -[] p=null n=null
+insert-before-and-siblings	childList div#a +[b] -[] p=i#x n=i#y | childList div#a +[u] -[] p=i#y n=null
+remove-child	childList div#a +[] -[i#y] p=i#x n=i#z
+element-remove	childList div#a +[] -[i#x] p=null n=i#y
+replace-child-is-one-record	childList div#a +[b] -[i#y] p=i#x n=i#z
+text-content-replaces-all	childList div#a +["hi"] -[i#x,i#y] p=null n=null
+text-content-empty-on-empty-has-no-record	
+text-content-empty-removes-all	childList div#a +[] -[i#x,i#y] p=null n=null
+append-many-is-one-record	childList div#a +[b,"txt",u] -[] p=i#x n=null
+prepend-many-is-one-record	childList div#a +[b,u] -[] p=null n=i#x
+inner-html-is-one-record	childList div#a +[p#p,"text"] -[i#x,i#y] p=null n=null
+move-inside-the-same-parent-is-two-records	childList div#a +[] -[i#z] p=i#y n=null | childList div#a +[i#z] -[] p=null n=i#x
+move-between-two-observed-parents	childList div#a +[] -[i#x] p=null n=null | childList div#c +[i#x] -[] p=null n=null
+subtree-false-ignores-descendants	
+subtree-true-sees-descendants	childList div#b +[i] -[] p=null n=null
+attribute-set-twice-and-remove	attributes div#a x ns=null old=null | attributes div#a x ns=null old=null | attributes div#a x ns=null old=null
+attribute-old-value	attributes div#a x ns=null old=1 | attributes div#a y ns=null old=null | attributes div#a y ns=null old=3 | attributes div#a x ns=null old=2
+attribute-old-value-off	attributes div#a x ns=null old=null
+attribute-filter	attributes div#a x ns=null old=null | attributes div#a z ns=null old=null
+attribute-filter-is-case-sensitive-for-html	
+attribute-shortcuts	attributes div#b id ns=null old=a | attributes div#b class ns=null old=null | attributes div#b class ns=null old=c1 | attributes div#b style ns=null old=null | attributes div#b data-k ns=null old=null | attributes div#b hidden ns=null old=null
+attribute-namespace	attributes svg#a href ns=http://www.w3.org/1999/xlink old=null | attributes svg#a href ns=http://www.w3.org/1999/xlink old=#a | attributes svg#a href ns=http://www.w3.org/1999/xlink old=#b
+attribute-filter-skips-namespaced	attributes svg#a href ns=null old=null
+attributes-in-the-subtree	attributes div#b x ns=null old=null | attributes div#a y ns=null old=null
+attributes-without-subtree-ignore-descendants	
+character-data-and-old-value	characterData "three!" old=hello | characterData "three!" old=one | characterData "three!" old=two | characterData "three!" old=three
+character-data-old-value-off	characterData "one" old=null
+character-data-in-the-subtree	characterData "y" old=null | characterData "z" old=null
+character-data-of-a-comment	characterData #comment old=c
+one-record-per-observer-with-two-registrations	attributes div#b x ns=null old=null | attributes div#b x ns=null old=1
+observing-again-replaces-the-options	childList div#a +[i] -[] p=null n=null
+two-observers-in-creation-order	attributes div#a x ns=null old=null | second:1 | third:1
+disconnect-drops-queued-records	
+take-records-returns-and-clears	taken:2 attributes div#a x ns=null old=null true | again:0
+callback-arguments	true 1 true true 2 true true
+record-fields	childList,number,number,,,,,,object
+a-removed-node-is-still-observed-until-delivery	attributes div#b x ns=null old=null
+a-removed-node-is-not-observed-after-delivery	
+a-mutation-in-the-callback-queues-another-delivery	call1:1 | call2:1 | call3:1
+observe-a-detached-node	attributes div x ns=null old=null | childList div +[i] -[] p=null n=null
+observe-the-document-subtree	childList div#a +[i] -[] p=null n=null | attributes div#a x ns=null old=null | childList body +[u] -[] p=div#a n=null
+clone-node-has-no-records	
+remove-a-subtree-that-holds-an-observed-node	childList div#b +[u] -[] p=i#c n=null
+a-throwing-callback-does-not-stop-the-next-observer	attributes div#a x ns=null old=null
+record-order-in-one-observer	attributes div#b x ns=null old=null | childList div#a +[i] -[] p=div#b n=null | attributes div#b x ns=null old=null | childList div#a +[] -[div#b] p=null n=i

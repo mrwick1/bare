@@ -1,0 +1,137 @@
+var $ = function (i) { return document.getElementById(i) };
+var log = [];
+var js = JSON.stringify;
+=== hidden-reflects-the-attribute
+@html <div id=a></div><div id=b hidden></div><div id=c hidden=until-found></div><div id=d hidden=false></div><div id=e hidden=no></div><div id=f hidden=""></div>
+(function () { return ['a', 'b', 'c', 'd', 'e', 'f'].map(function (i) { return $(i).hidden + ':' + $(i).getAttribute('hidden') }).join(' ') })
+=== hidden-setter
+@html <div id=a></div>
+var r = [], a = $('a'); [true, false, 'x', '', 'until-found', 0, 5, null, undefined, 'false'].forEach(function (v) { a.hidden = v; r.push(js(v) + '>' + a.hidden + ':' + a.getAttribute('hidden')) }); (function () { return r.join(' ') })
+=== inert-reflects-and-sets
+@html <div id=a></div><div id=b inert></div><div id=c inert=false></div>
+var a = $('a'), r = [a.inert, $('b').inert, $('c').inert]; a.inert = true; r.push(a.getAttribute('inert')); a.inert = false; r.push(a.getAttribute('inert')); a.inert = 'x'; r.push(a.getAttribute('inert')); (function () { return r.join(' ') })
+=== tabindex-defaults
+@html <div id=a></div><a id=b></a><a id=c href=x></a><button id=d></button><input id=e><input id=f type=hidden><textarea id=g></textarea><select id=h></select><div id=i contenteditable></div><iframe id=j></iframe><span id=k></span><svg id=l></svg><label id=m></label><details id=n><summary id=o>s</summary></details><area id=p><form id=q></form><img id=r><object id=s></object><embed id=t><video id=u></video><audio id=v></audio><div id=w contenteditable=false></div><body id=x>
+(function () { return 'abcdefghijklmnopqrstuvw'.split('').map(function (i) { return $(i) ? i + $(i).tabIndex : i + '-' }).join(' ') })
+=== tabindex-parsing
+@html <div id=a tabindex=5></div><div id=b tabindex=abc></div><div id=c tabindex=-3></div><div id=d tabindex=" 7 "></div><div id=e tabindex=+4></div><div id=f tabindex=1.5></div><div id=g tabindex=""></div><div id=h tabindex=0x10></div><div id=i tabindex=99999999999></div><div id=j tabindex=-0></div><div id=k tabindex="3px"></div><button id=l tabindex=abc></button>
+(function () { return 'abcdefghijkl'.split('').map(function (i) { return i + $(i).tabIndex }).join(' ') })
+=== tabindex-setter
+@html <div id=a></div>
+var r = [], a = $('a'); [3, -1.7, '5x', 'abc', null, undefined, 2147483648, true, 1e20].forEach(function (v) { a.tabIndex = v; r.push(js(v) + '>' + a.getAttribute('tabindex') + ':' + a.tabIndex) }); (function () { return r.join(' ') })
+=== click-fires-one-click-event
+@html <div id=a><button id=b>x</button></div>
+var r = []; document.addEventListener('click', function (e) { r.push('doc:' + e.target.id + ':' + e.isTrusted + ':' + e.bubbles + ':' + e.cancelable + ':' + e.composed + ':' + e.type) }); $('b').addEventListener('click', function () { r.push('b') }); log.push(String($('b').click())); (function () { return r.join(' ') + ' ' + log.join() })
+=== click-on-a-disabled-button-does-nothing
+@html <button id=b disabled>x</button><fieldset disabled><button id=c>y</button></fieldset><div id=d></div>
+var r = []; document.addEventListener('click', function (e) { r.push(e.target.id) }); $('b').click(); $('c').click(); $('d').click(); (function () { return r.join() })
+=== click-inside-a-click-listener-is-ignored
+@html <button id=b>x</button>
+var n = 0; $('b').addEventListener('click', function () { n++; if (n < 5) $('b').click() }); $('b').click(); (function () { return n })
+=== click-again-after-the-first-finished
+@html <button id=b>x</button>
+var n = 0; $('b').addEventListener('click', function () { n++ }); $('b').click(); $('b').click(); (function () { return n })
+=== click-on-a-submit-button-submits-the-form
+@html <form id=f><input name=q value=1><button id=b>go</button></form>
+var r = []; $('f').addEventListener('submit', function (e) { e.preventDefault(); r.push('submit:' + e.submitter.id) }); $('b').click(); (function () { return r.join() })
+=== click-cancelled-does-not-submit
+@html <form id=f><button id=b>go</button></form>
+var r = []; $('f').addEventListener('submit', function (e) { e.preventDefault(); r.push('submit') }); $('b').addEventListener('click', function (e) { e.preventDefault(); r.push('click') }); $('b').click(); (function () { return r.join() })
+=== click-is-missing-on-svg-and-shape
+@html <svg id=s></svg>
+(function () { return typeof $('s').click + ' ' + typeof document.body.click + ' ' + HTMLElement.prototype.hasOwnProperty('click') + ' ' + document.body.click.length })
+=== click-on-the-wrong-object
+(function () { try { HTMLElement.prototype.click.call({}) } catch (e) { return e.name + ': ' + e.message } })
+=== offset-parent-is-the-body-for-a-static-box
+@html <div id=a style="width:50px;height:20px"></div>
+(function () { var a = $('a'); return [a.offsetParent === document.body, a.offsetTop, a.offsetLeft, a.offsetWidth, a.offsetHeight].join(' ') })
+=== offset-parent-null-for-root-body-none-and-fixed
+@html <div id=a style="display:none"></div><div id=b style="position:fixed;top:30px;left:40px;width:10px;height:10px"></div><div id=c style="display:none"><i id=d></i></div>
+(function () { return [document.documentElement.offsetParent, document.body.offsetParent, $('a').offsetParent, $('b').offsetParent, $('b').offsetTop, $('b').offsetLeft, $('a').offsetTop, $('a').offsetLeft, $('d').offsetParent, $('d').offsetTop].join(' ') })
+=== offset-in-a-positioned-parent
+@html <div id=p style="position:relative;left:20px;top:10px;width:200px;height:100px;border:3px solid"><div id=s><div id=k style="position:absolute;left:5px;top:7px;width:10px;height:10px"></div></div></div>
+(function () { var k = $('k'); return [k.offsetParent === $('p'), k.offsetTop, k.offsetLeft, $('p').offsetTop, $('p').offsetLeft, $('p').offsetParent === document.body].join(' ') })
+=== offset-skips-a-static-ancestor
+@html <div id=p style="position:absolute;left:30px;top:40px;width:100px;height:100px"><div id=s style="padding:4px"><div id=k style="width:10px;height:10px"></div></div></div>
+(function () { var k = $('k'); return [k.offsetParent === $('p'), k.offsetTop, k.offsetLeft, $('s').offsetParent === $('p'), $('s').offsetTop].join(' ') })
+=== offset-rounds-to-an-integer
+@html <div id=a style="margin:10.6px 0 0 10.4px;width:20.7px;height:5.5px"></div>
+(function () { var a = $('a'); return [a.offsetTop, a.offsetLeft, a.offsetWidth, a.offsetHeight].join(' ') })
+=== offset-ignores-the-scroll-of-a-container
+@html <div id=c style="position:relative;overflow:hidden;width:100px;height:50px"><div id=k style="position:absolute;top:100px;left:60px;width:10px;height:10px"></div></div>
+$('c').scrollTop = 30; (function () { var k = $('k'); return [k.offsetTop, k.offsetLeft, k.getBoundingClientRect().top - $('c').getBoundingClientRect().top].join(' ') })
+=== offset-in-a-table
+@html <table id=t style="border:3px solid"><tr><td id=c style="width:20px;height:10px;padding:0"></td></tr></table>
+(function () { var c = $('c'); return [c.offsetParent === $('t'), c.offsetTop, c.offsetLeft, $('t').offsetParent === document.body].join(' ') })
+=== offset-of-a-detached-element
+(function () { var e = document.createElement('div'); return [e.offsetParent, e.offsetTop, e.offsetLeft, e.offsetWidth].join(' ') })
+=== offset-members-on-the-wrong-object
+(function () { var r = []; ['offsetParent', 'offsetTop', 'offsetLeft'].forEach(function (n) { try { Object.getOwnPropertyDescriptor(HTMLElement.prototype, n).get.call({}) } catch (e) { r.push(e.name + ': ' + e.message) } }); return r.join(' | ') })
+=== inner-text-block-newlines
+@html <div id=a>one<div>two</div>three</div>
+(function () { return js($('a').innerText) })
+=== inner-text-paragraphs
+@html <div id=a>x<p>y</p>z</div>
+(function () { return js($('a').innerText) })
+=== inner-text-edge-breaks-are-trimmed
+@html <div id=a><p>x</p></div>
+(function () { return js($('a').innerText) })
+=== inner-text-br
+@html <div id=a>a<br>b<br><br>c</div>
+(function () { return js($('a').innerText) })
+=== inner-text-collapses-white-space
+@html <div id=a></div>
+$('a').innerHTML = '  a   b\n c  <span> d </span>  e  '; (function () { return js($('a').innerText) })
+=== inner-text-pre-keeps-white-space
+@html <pre id=a></pre><div id=b style="white-space:pre-line"></div><div id=c style="white-space:pre-wrap"></div>
+$('a').textContent = '  a\n b  '; $('b').textContent = '  x   y\n  z  '; $('c').textContent = '  p  q '; (function () { return js($('a').innerText) + js($('b').innerText) + js($('c').innerText) })
+=== inner-text-white-space-between-blocks-and-spans
+@html <div id=a></div>
+$('a').innerHTML = '<div>a </div> <div> b</div><span>c </span><span> d</span><b>e</b> <i>f</i>'; (function () { return js($('a').innerText) })
+=== inner-text-skips-display-none
+@html <div id=a>x<span style="display:none">hid</span>y<script>1</script><style>b{}</style></div>
+(function () { return js($('a').innerText) })
+=== inner-text-visibility
+@html <div id=a>x<span style="visibility:hidden">h<b style="visibility:visible">v</b></span>y</div>
+(function () { return js($('a').innerText) })
+=== inner-text-text-transform
+@html <div id=a style="text-transform:uppercase">abc <i>def</i></div><div id=b style="text-transform:capitalize">hello big world</div><div id=c style="text-transform:lowercase">ABC <i style="text-transform:none">Def</i></div>
+(function () { return js($('a').innerText) + js($('b').innerText) + js($('c').innerText) })
+=== inner-text-of-an-element-with-no-box-is-text-content
+@html <div id=a style="display:none">x<b>y</b> <i>z</i></div><div id=b style="display:none"><i id=c>  q  <u>r</u></i></div>
+(function () { return js($('a').innerText) + js($('c').innerText) })
+=== inner-text-of-a-detached-element
+(function () { var e = document.createElement('div'); e.innerHTML = 'a <b>b</b>   c<p>d</p>'; return js(e.innerText) })
+=== inner-text-list-and-headings
+@html <div id=a><ul><li>one</li><li>two</li></ul><h1>t</h1>x</div>
+(function () { return js($('a').innerText) })
+=== inner-text-table
+@html <table id=a><tr><td>a</td><td>b</td></tr><tr><td>c</td><td>d</td></tr></table>
+(function () { return js($('a').innerText) })
+=== inner-text-inline-block-and-flex
+@html <div id=a>x<span style="display:inline-block">y</span>z</div><div id=b style="display:flex"><span>p</span><span>q</span></div><div id=c>m<span style="display:block">n</span>o</div>
+(function () { return js($('a').innerText) + js($('b').innerText) + js($('c').innerText) })
+=== inner-text-replaced-and-comments
+@html <div id=a>x<img alt=q>y<!--c-->z<input value=v>w</div>
+(function () { return js($('a').innerText) })
+=== inner-text-nbsp-is-kept
+@html <div id=a>a&nbsp;&nbsp;b  c</div>
+(function () { return js($('a').innerText) })
+=== inner-text-of-the-body
+@html <p>one</p><div>two</div>three
+(function () { return js(document.body.innerText) })
+=== inner-text-nested-blocks-count-once
+@html <div id=a><div><div><p>x</p></div></div><div>y</div></div>
+(function () { return js($('a').innerText) })
+=== inner-text-setter
+@html <div id=a><i>old</i></div>
+var r = []; [ 'x\ny\r\nz', 'p\rq', '', null, 'a\n', '<b>t</b>', 5 ].forEach(function (v) { $('a').innerText = v; r.push(js(v) + '>' + $('a').innerHTML + '|' + $('a').childNodes.length) }); (function () { return r.join(' ') })
+=== tabindex-defaults-of-more-elements
+@html <fieldset id=a></fieldset><output id=b></output><meter id=c></meter><progress id=d></progress><legend id=e></legend><option id=f></option><datalist id=g></datalist><dialog id=i></dialog><summary id=j></summary><details id=k></details><menu id=l></menu><td id=m></td><canvas id=n></canvas><svg><a id=o></a></svg><svg><a id=p href=x></a></svg><svg><g id=q></g></svg>
+(function () { return 'abcdefghijklmnopq'.split('').map(function (i) { return i + ($(i) ? $(i).tabIndex : '-') }).join(' ') })
+=== inner-text-is-missing-on-svg
+@html <svg id=s></svg>
+(function () { return typeof $('s').innerText + ' ' + HTMLElement.prototype.hasOwnProperty('innerText') })
+=== offset-of-the-body-and-html
+@html <div id=a style="width:10px;height:10px"></div>
+(function () { return [document.body.offsetTop, document.body.offsetLeft, document.documentElement.offsetTop, document.documentElement.offsetLeft].join(' ') })

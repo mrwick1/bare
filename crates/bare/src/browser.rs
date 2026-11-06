@@ -337,6 +337,14 @@ pub struct Dom {
     pub(crate) scrolling: crate::browser_scroll::Scrolling,
     /// `ResizeObserver` and its rendering step (`browser_resize.rs`).
     pub(crate) resize: crate::browser_resize::Resize,
+    /// `requestAnimationFrame` (`browser_frame.rs`).
+    pub(crate) frame: crate::browser_frame::Frame,
+    /// `MutationObserver` (`browser_mutation.rs`).
+    pub(crate) mo: crate::browser_mutation::Mo,
+    pub(crate) io: crate::browser_intersection::Io,
+    pub(crate) walk: crate::browser_walker::Walk,
+    /// The elements whose `click()` is running (`browser_element.rs`).
+    pub(crate) clicking: RefCell<Vec<NodeId>>,
     /// `Element.attributes`, `NamedNodeMap` and `Attr` (`browser_attr.rs`).
     pub(crate) attr: crate::browser_attr::AttrHost,
     /// `Document.getElementsByName` and the live `NodeList` (`browser_nodelist.rs`).
@@ -356,7 +364,11 @@ impl Host for Dom {
         if needs_new && !is_new {
             return Err(it.type_error("Failed to construct: please use the 'new' operator"));
         }
-        h(self, it, this, args)
+        let r = h(self, it, this, args);
+        if self.mo.armed() {
+            self.mo_after(it)?;
+        }
+        r
     }
 
     fn roots(&self, out: &mut Vec<Value>) {
@@ -377,6 +389,10 @@ impl Host for Dom {
         crate::browser_abort::roots(self, out);
         crate::browser_web::roots(self, out);
         self.resize_roots(out);
+        self.frame_roots(out);
+        self.mo_roots(out);
+        self.io_roots(out);
+        self.walk_roots(out);
     }
 
     fn trace(&self, owner: ObjId, out: &mut Vec<Value>) {
@@ -386,6 +402,9 @@ impl Host for Dom {
         crate::browser_style::trace(self, owner, out);
         crate::browser_computed::trace(self, owner, out);
         self.resize_trace(owner, out);
+        self.mo_trace(owner, out);
+        self.io_trace(owner, out);
+        self.walk_trace(owner, out);
         at::trace(self, owner, out);
         crate::browser_nodelist::trace(self, owner, out);
         crate::browser_dataset::trace(self, owner, out);
@@ -425,6 +444,9 @@ impl Host for Dom {
         crate::browser_style::prune(self, live);
         crate::browser_computed::prune(self, live);
         self.resize_prune(live);
+        self.mo_prune(live);
+        self.io_prune(live);
+        self.walk_prune(live);
         at::prune(self, live);
         crate::browser_nodelist::prune(self, live);
         crate::browser_dataset::prune(self, live);
@@ -862,8 +884,13 @@ impl Dom {
         crate::browser_style::install(self, it)?;
         crate::browser_computed::install(self, it)?;
         crate::browser_geometry::install(self, it)?;
+        crate::browser_element::install(self, it)?;
         crate::browser_scroll::install(self, it)?;
         crate::browser_resize::install(self, it)?;
+        crate::browser_frame::install(self, it)?;
+        crate::browser_mutation::install(self, it)?;
+        crate::browser_intersection::install(self, it)?;
+        crate::browser_walker::install(self, it)?;
         crate::browser_handlers::install(self, it)
     }
 
@@ -1122,6 +1149,11 @@ impl Browser {
             geometry: Default::default(),
             scrolling: Default::default(),
             resize: Default::default(),
+            frame: Default::default(),
+            mo: Default::default(),
+            io: Default::default(),
+            walk: Default::default(),
+            clicking: Default::default(),
             attr: Default::default(),
             nl: Default::default(),
             dataset: Default::default(),
