@@ -556,6 +556,9 @@ struct Interner {
     count: usize,
 }
 
+/// Strings up to this many code units are built on the stack before the interner lookup.
+const SHORT_UNITS: usize = 64;
+
 fn hash_units(units: &[u16]) -> u32 {
     const K: u64 = 0x517c_c1b7_2722_0a95;
     let mut h: u64 = units.len() as u64;
@@ -799,6 +802,16 @@ impl Heap {
         let units = if s.is_ascii() { s.len() } else { s.encode_utf16().count() };
         if units > self.limits.max_string_units { return Err(HeapError::Limit(Limit::StringLength)); }
         if string_cost(units) > self.limits.max_bytes { return Err(HeapError::Limit(Limit::Bytes)); }
+        // A short string is looked up from a stack buffer: only a new string allocates (V8 `StringTable::LookupKey`).
+        if s.len() <= SHORT_UNITS {
+            let mut buf = [0u16; SHORT_UNITS];
+            let mut n = 0;
+            for u in s.encode_utf16() {
+                buf[n] = u;
+                n += 1;
+            }
+            return self.intern(std::borrow::Cow::Borrowed(&buf[..n]));
+        }
         self.intern_vec(s.encode_utf16().collect())
     }
 
@@ -862,7 +875,14 @@ impl Heap {
         if x.len() + y.len() > self.limits.max_string_units {
             return Err(HeapError::Limit(Limit::StringLength));
         }
-        let mut v = Vec::with_capacity(x.len() + y.len());
+        let n = x.len() + y.len();
+        if n <= SHORT_UNITS {
+            let mut buf = [0u16; SHORT_UNITS];
+            buf[..x.len()].copy_from_slice(x);
+            buf[x.len()..n].copy_from_slice(y);
+            return self.intern(std::borrow::Cow::Borrowed(&buf[..n]));
+        }
+        let mut v = Vec::with_capacity(n);
         v.extend_from_slice(x);
         v.extend_from_slice(y);
         self.intern_vec(v)

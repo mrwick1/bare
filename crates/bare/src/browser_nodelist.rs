@@ -36,7 +36,6 @@ use bare_js::eval::Interp;
 use bare_js::heap::{HeapError, Slot};
 use bare_js::value::{ObjId, PropertyKey, Value};
 use std::cell::{OnceCell, RefCell};
-use std::collections::HashMap;
 use std::rc::Rc;
 
 type V = R<Value>;
@@ -62,7 +61,7 @@ pub(crate) struct List {
 
 #[derive(Default)]
 pub(crate) struct Tables {
-    pub(crate) lists: HashMap<ObjId, List>,
+    pub(crate) lists: IdMap<ObjId, List>,
     name_bytes: usize,
     cached_ids: usize,
 }
