@@ -78,6 +78,7 @@ use bare_html::dom::{NodeData, NodeId};
 use bare_js::eval::{Error, Interp};
 use bare_js::value::{ObjId, Value};
 use bare_net::http::Client;
+use bare_net::parallel::{MAX_WORKERS, Task};
 use bare_url::Url;
 use std::cell::{Cell, OnceCell, RefCell};
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -87,6 +88,8 @@ use std::time::{Duration, Instant};
 mod preload;
 #[cfg(test)]
 mod preload_tests;
+#[cfg(test)]
+mod parallel_tests;
 mod sheets;
 #[cfg(test)]
 mod sheets_tests;
@@ -692,11 +695,13 @@ impl Browser {
         }
         dom.scripts.page_caps.set((cfg.limits.max_tasks, cfg.limits.max_rounds, cfg.limits.max_time));
         let started = Instant::now();
+        bare_net::trace::page_start();
         let deadline = deadline_after(cfg.limits.max_time);
         let mut run = Run {
             b: self,
             dom: dom.clone(),
-            client: cfg.client,
+            net: Net::new(cfg.client),
+            cursor: 0,
             https_only: page.scheme == bare_url::Scheme::Https,
             lim: cfg.limits,
             deadline,
@@ -754,7 +759,8 @@ impl Browser {
         let mut run = Run {
             b: self,
             dom: dom.clone(),
-            client,
+            net: Net::new(client),
+            cursor: 0,
             https_only: page.scheme == bare_url::Scheme::Https,
             deadline: deadline_after(limits.max_time),
             lim: limits,
@@ -795,10 +801,57 @@ struct Parsed {
     source: Source,
 }
 
+/// The client of the page, and the downloads that run on worker threads: started early, taken when the page needs them.
+struct Net {
+    client: Client,
+    /// By the kind and the URL of the target. A download that finished waits here, with its text, until it is taken.
+    started: HashMap<String, Task<Result<resources::Resource, LoadError>>>,
+}
+
+/// Downloads that are started and not taken at once: the connections that a server gets (Chrome opens 6 for HTTP/1.1). It also bounds
+/// the text that finished early and waits to be taken.
+const WINDOW: usize = MAX_WORKERS;
+
+impl Net {
+    fn new(client: Client) -> Net {
+        Net { client, started: HashMap::new() }
+    }
+
+    fn key(target: &resources::Target) -> String {
+        format!("{:?} {}", target.expect, target.url)
+    }
+
+    /// Start the download of `target` on a worker thread. Nothing happens when `WINDOW` downloads wait, or this one runs already.
+    fn start(&mut self, target: &resources::Target, lim: &Limits, deadline: Instant, retained: usize) {
+        let key = Net::key(target);
+        if self.started.len() >= WINDOW || self.started.contains_key(&key) {
+            return;
+        }
+        let url = Url { scheme: target.url.scheme, host: target.url.host.clone(), port: target.url.port, path: target.url.path.clone() };
+        let (target, lim) = (resources::Target { expect: target.expect, url }, lim.clone());
+        self.started.insert(key, self.client.spawn(move |client| resources::fetch(client, &target, &lim, deadline, retained)));
+    }
+
+    /// The result for `target`: the download that was started, or a new one that this thread waits for.
+    fn fetch(&mut self, target: &resources::Target, lim: &Limits, deadline: Instant, retained: usize) -> Result<resources::Resource, LoadError> {
+        match self.started.remove(&Net::key(target)) {
+            // The text counts against the total cap now, with what the page keeps now (it was read with the room of the time it started).
+            Some(task) => match task.wait() {
+                Some(Ok(r)) if r.text.len() > lim.max_total_bytes.saturating_sub(retained) => Err(LoadError::TotalTooLarge),
+                Some(r) => r,
+                None => Err(LoadError::Network("a download thread failed".into())),
+            },
+            None => resources::fetch(&mut self.client, target, lim, deadline, retained),
+        }
+    }
+}
+
 struct Run<'a> {
     b: &'a mut Browser,
     dom: Rc<Dom>,
-    client: Client,
+    net: Net,
+    /// The next target of `disc.targets` that `prefetch` looks at.
+    cursor: usize,
     https_only: bool,
     lim: PageLimits,
     deadline: Instant,
@@ -845,13 +898,13 @@ fn reason(e: &LoadError) -> String {
 }
 
 /// One download, counted. Free function so that the caller can borrow other fields of `Run` at the same time.
-fn download(client: &mut Client, https_only: bool, lim: &PageLimits, deadline: Instant, retained: usize, res: &mut PageResult, target: &resources::Target) -> Result<String, String> {
+fn download(net: &mut Net, https_only: bool, lim: &PageLimits, deadline: Instant, retained: usize, res: &mut PageResult, target: &resources::Target) -> Result<String, String> {
     if https_only && target.url.scheme == bare_url::Scheme::Http { return Err("insecure script URL refused".into()); }
     if res.fetches >= lim.resources.max_fetches {
         return Err("fetch budget used".into());
     }
     res.fetches += 1;
-    match resources::fetch(client, target, &lim.resources, deadline, retained) {
+    match bare_net::trace::blocked(|| net.fetch(target, &lim.resources, deadline, retained)) {
         Ok(r) => {
             res.bytes += r.text.len();
             Ok(r.text)
@@ -898,7 +951,11 @@ impl Run<'_> {
     fn run_one(&mut self, node: NodeId, source: &str, what: &str) -> Flow {
         self.budget()?;
         self.dom.scripts.current.set(Some(node));
+        let t = bare_net::trace::on().then(Instant::now);
         let r = self.b.run_script(source);
+        if let Some(t) = t {
+            bare_net::trace::mark(|| format!("script {what}"), t.elapsed().as_micros() as u64);
+        }
         self.dom.scripts.current.set(None);
         self.res.scripts_run += 1;
         self.res.tasks += 1;
@@ -998,7 +1055,9 @@ impl Run<'_> {
                             Some(r) => r,
                             None => {
                                 let kept = self.kept();
-                                download(&mut self.client, self.https_only, &self.lim, self.deadline, kept, &mut self.res, &self.disc.targets[t])
+                                let r = download(&mut self.net, self.https_only, &self.lim, self.deadline, kept, &mut self.res, &self.disc.targets[t]);
+                                self.prefetch();
+                                r
                             }
                         }
                     }
@@ -1026,6 +1085,7 @@ impl Run<'_> {
 
     /// One queued dynamic external script. Gives false when none is queued.
     fn run_dynamic(&mut self) -> Result<bool, Stop> {
+        self.prefetch();
         let next = self.dom.scripts.external.borrow_mut().pop_front();
         let Some(next) = next else { return Ok(false) };
         self.budget()?;
@@ -1040,7 +1100,9 @@ impl Run<'_> {
                     Some(r) => r,
                     None => {
                         let kept = self.kept();
-                        download(&mut self.client, self.https_only, &self.lim, self.deadline, kept, &mut self.res, &target)
+                        let r = download(&mut self.net, self.https_only, &self.lim, self.deadline, kept, &mut self.res, &target);
+                        self.prefetch();
+                        r
                     }
                 };
                 self.finish_external(node, &what, text)?;
@@ -1081,14 +1143,55 @@ impl Run<'_> {
     }
 
     fn go(&mut self) -> Stop {
+        bare_net::trace::mark(|| "go".into(), 0);
         match self.go_inner() {
             Ok(()) => unreachable!("go_inner ends with a stop"),
             Err(stop) => stop,
         }
     }
 
+    /// Start the downloads that the page will need, while fewer than `WINDOW` wait: first the files of the parsed document, in its order,
+    /// then the dynamic scripts in the queue. A script is taken when it is its turn to run, so the order of the scripts does not change.
+    /// Nothing starts that the page would refuse to load, and no more than the fetch budget allows. One download alone gains nothing from
+    /// a worker thread: the page thread makes it when its turn comes.
+    fn prefetch(&mut self) {
+        let lim = self.lim.resources.clone();
+        let room = WINDOW.saturating_sub(self.net.started.len()).min(lim.max_fetches.saturating_sub(self.res.fetches + self.net.started.len()));
+        let allowed = |https_only: bool, u: &Url| !(https_only && u.scheme == bare_url::Scheme::Http);
+        let copy = |u: &Url| Url { scheme: u.scheme, host: u.host.clone(), port: u.port, path: u.path.clone() };
+        let mut cursor = self.cursor;
+        let mut todo = Vec::new();
+        while cursor < self.disc.targets.len() && todo.len() < room {
+            let t = &self.disc.targets[cursor];
+            if allowed(self.https_only, &t.url) {
+                todo.push(resources::Target { expect: t.expect, url: copy(&t.url) });
+            }
+            cursor += 1;
+        }
+        let preloads = self.dom.scripts.preloads.borrow();
+        for e in self.dom.scripts.external.borrow().iter().take(WINDOW) {
+            if let Ext::Fetch(_, u) = e && todo.len() < room && allowed(self.https_only, u) && !preloads.has_script(u) {
+                todo.push(resources::Target { expect: Expect::Script, url: copy(u) });
+            }
+        }
+        drop(preloads);
+        if todo.len() + self.net.started.len() < 2 {
+            return;
+        }
+        self.cursor = cursor;
+        let kept = self.kept();
+        for t in &todo {
+            let mut lim = lim.clone();
+            if t.expect == Expect::Style {
+                lim.max_resource_bytes = lim.max_resource_bytes.min(sheets::MAX_BODY);
+            }
+            self.net.start(t, &lim, self.deadline, kept);
+        }
+    }
+
     fn go_inner(&mut self) -> Flow {
         self.budget()?;
+        self.prefetch();
         if let Err(e) = self.b.drain() { return Err(self.fatal(e, "initial checkpoint")); }
         self.feed_styles()?;
         let items = self.items.clone();
@@ -1188,6 +1291,7 @@ impl Run<'_> {
                 if Instant::now() + wait >= self.deadline {
                     return Err(Stop::TimeBudget);
                 }
+                bare_net::trace::slept(wait);
                 std::thread::sleep(wait);
             }
         }

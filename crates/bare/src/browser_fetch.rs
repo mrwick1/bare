@@ -67,6 +67,7 @@ use crate::browser_streams as streams;
 use bare_js::eval::{Error, Interp};
 use bare_js::value::{ObjId, Value};
 use bare_net::http::{Client, Method, Request as NetRequest};
+use bare_net::parallel::{MAX_WORKERS, Task};
 use bare_url::{Scheme, Url};
 use std::cell::{Cell, OnceCell, RefCell};
 use std::borrow::Cow;
@@ -344,6 +345,26 @@ struct Pending {
     redirect: Redirect,
     /// An `XMLHttpRequest` and its request generation (`browser_xhr.rs`). Then `promise` is `undefined`.
     xhr: Option<(ObjId, u64)>,
+    /// When it was queued (only when `BARE_NET_TRACE` is set).
+    queued: Option<std::time::Instant>,
+    /// Its I/O, started on a worker thread before its turn (see `start_queued`). The outcome and the diagnostics.
+    started: Option<Task<(Outcome, Vec<String>)>>,
+}
+
+/// What a worker thread needs to send a queued request. It owns its data: a `Pending` holds values of the realm.
+struct Wire {
+    method: Method,
+    url: Url,
+    headers: Vec<(String, String)>,
+    body: Option<Vec<u8>>,
+    redirect: Redirect,
+    queued: Option<std::time::Instant>,
+}
+
+impl Pending {
+    fn wire(&self) -> Wire {
+        Wire { method: self.method, url: dup(&self.url), headers: self.headers.clone(), body: self.body.as_deref().cloned(), redirect: self.redirect, queued: self.queued }
+    }
 }
 
 #[derive(Default)]
@@ -1572,7 +1593,7 @@ fn prepare(d: &Dom, it: &mut Interp<'_>, promise: Value, a: &[Value]) -> R<()> {
         if !headers.iter().any(|(k, _)| k == "accept") {
             headers.push(("accept".into(), "*/*".into()));
         }
-        st.queue.push_back(Pending { promise, method, url: core.url, headers, body: core.body, redirect: core.redirect, xhr: None });
+        st.queue.push_back(Pending { promise, method, url: core.url, headers, body: core.body, redirect: core.redirect, xhr: None, queued: bare_net::trace::on().then(std::time::Instant::now), started: None });
     }
     Ok(())
 }
@@ -1617,7 +1638,7 @@ pub(crate) fn queue_xhr(d: &Dom, x: (ObjId, u64), method: &str, url: Url, mut he
     if !headers.iter().any(|(k, _)| k == "accept") {
         headers.push(("accept".into(), "*/*".into()));
     }
-    st.queue.push_back(Pending { promise: Value::Undefined, method, url, headers, body, redirect: Redirect::Follow, xhr: Some(x) });
+    st.queue.push_back(Pending { promise: Value::Undefined, method, url, headers, body, redirect: Redirect::Follow, xhr: Some(x), queued: bare_net::trace::on().then(std::time::Instant::now), started: None });
     Ok(())
 }
 
@@ -1640,13 +1661,13 @@ pub(crate) enum Outcome {
     TooBig,
 }
 
-fn run_one(client: &mut Client, lim: &FetchLimits, task: &Pending, diag: &mut Vec<String>) -> Outcome {
+fn run_one(client: &mut Client, lim: &FetchLimits, task: &Wire, diag: &mut Vec<String>) -> Outcome {
     let first_origin = dup(&task.url);
     let (mut method, mut url, mut headers, mut body) = (task.method, dup(&task.url), task.headers.clone(), task.body.clone());
     let mut redirected = false;
     for hop in 0..=lim.max_redirects {
         let wire: Vec<(&str, &str)> = headers.iter().map(|(n, v)| (n.as_str(), v.as_str())).collect();
-        let bytes: &[u8] = body.as_deref().map_or(&[], |b| b.as_slice());
+        let bytes: &[u8] = body.as_deref().unwrap_or(&[]);
         let req = NetRequest { method, url: &url, headers: &wire, body: bytes };
         let resp = match client.send_once(&req, lim.max_response_body) {
             Ok(r) => r,
@@ -1758,13 +1779,45 @@ impl Browser {
         result
     }
 
+    /// Start the I/O of the first queued requests on worker threads, so that they run together. They settle in the order of the queue,
+    /// as before: only the waiting is shared. At most `MAX_WORKERS` run at once, and the queue is not scanned further.
+    /// A request that is not a GET or a HEAD may change the server. It starts only when all before it are done, and nothing after it
+    /// starts before it is done: the server sees these requests in the order of the script, as before.
+    fn start_queued(&self) {
+        if self.dom.fetch.st.borrow().queue.len() < 2 {
+            // One request alone gains nothing from a worker thread: this thread makes it.
+            return;
+        }
+        let (lim, client) = (self.dom.fl(), self.dom.fetch.client.borrow());
+        for (i, p) in self.dom.fetch.st.borrow_mut().queue.iter_mut().take(MAX_WORKERS).enumerate() {
+            let safe = p.method.safe();
+            if !safe && i > 0 {
+                break;
+            }
+            if p.started.is_none() {
+                let wire = p.wire();
+                p.started = Some(client.spawn(move |client| {
+                    if let Some(t) = wire.queued {
+                        bare_net::trace::wanted(t);
+                    }
+                    let mut diag = Vec::new();
+                    (run_one(client, &lim, &wire, &mut diag), diag)
+                }));
+            }
+            if !safe {
+                break;
+            }
+        }
+    }
+
     fn run_network_tasks_inner(&mut self, max: usize) -> R<usize> {
         let dom = self.dom.clone();
         self.it.host_scope(|it| it.host_checkpoint().map(|_| ()))?;
         let mut n = 0;
         while n < max {
             let lim = dom.fl();
-            let Some(task) = ({
+            self.start_queued();
+            let Some(mut task) = ({
                 let mut st = dom.fetch.st.borrow_mut();
                 let t = st.queue.pop_front();
                 if let Some(t) = &t {
@@ -1775,11 +1828,17 @@ impl Browser {
                 break;
             };
             n += 1;
-            let mut diag = Vec::new();
-            let outcome = {
-                let mut client = dom.fetch.client.borrow_mut();
-                run_one(&mut client, &lim, &task, &mut diag)
-            };
+            let (outcome, diag) = bare_net::trace::blocked(|| match task.started.take() {
+                // A lost worker is a network error.
+                Some(t) => t.wait().unwrap_or((Outcome::Failed("network error"), Vec::new())),
+                None => {
+                    let (mut diag, wire) = (Vec::new(), task.wire());
+                    if let Some(t) = wire.queued {
+                        bare_net::trace::wanted(t);
+                    }
+                    (run_one(&mut dom.fetch.client.borrow_mut(), &lim, &wire, &mut diag), diag)
+                }
+            });
             {
                 let mut st = dom.fetch.st.borrow_mut();
                 if let Outcome::Failed(label) = &outcome {

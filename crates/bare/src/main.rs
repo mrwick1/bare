@@ -366,6 +366,13 @@ fn show_interactive(url: &str, viewport: (f32, f32)) -> i32 {
     worker.map_or(1, |w| w.join().unwrap_or(1))
 }
 
+/// CPU time of this process (all threads), from `/proc/self/stat`. For `BARE_NET_TRACE` only.
+fn cpu_us() -> u64 {
+    let s = std::fs::read_to_string("/proc/self/stat").unwrap_or_default();
+    let f: Vec<u64> = s.rsplit_once(')').map_or("", |x| x.1).split_whitespace().skip(11).take(2).filter_map(|v| v.parse().ok()).collect();
+    f.iter().sum::<u64>() * 10_000
+}
+
 /// `--run`: a session over the real URL (document load, scripts, timers, `fetch`, navigations: `browser_session.rs`).
 /// The VM needs a big stack: 8 MiB is the floor in release, a debug build uses more stack per frame.
 /// Exit code: 0 settled or a budget ended it, 1 fatal or a failed load.
@@ -377,7 +384,12 @@ fn run_page(page: String, viewport: (f32, f32)) -> i32 {
         let mut cfg = SessionConfig::new(&page);
         cfg.viewport = Some(viewport);
         let mut s = Session::new(cfg);
+        let wall = std::time::Instant::now();
         let r = s.run();
+        if bare_net::trace::on() {
+            eprintln!("wall_us\t{}\ncpu_us\t{}", wall.elapsed().as_micros(), cpu_us());
+            bare_net::trace::dump();
+        }
         println!("stop: {:?}", r.stop);
         println!("documents {}, tasks {}, rounds {}", r.pages.len(), r.tasks, r.rounds);
         for (u, p) in r.urls.iter().zip(&r.pages) {

@@ -57,7 +57,7 @@ const MAX_IMPORT_DEPTH: usize = 8;
 const MAX_IMPORT_REFS: usize = 256;
 const MAX_PARTS: usize = 256;
 /// One body, and the flat text of one supplied sheet. The computed module takes 4 MiB for a sheet and its key.
-const MAX_BODY: usize = 4 << 20;
+pub(super) const MAX_BODY: usize = 4 << 20;
 const MAX_FLAT: usize = MAX_BODY - (64 << 10);
 /// Passes of one boundary. Each supplies at least one new key, so this is a bound on keys, not a loop guard against a bug.
 const MAX_PASSES: usize = 64;
@@ -242,7 +242,9 @@ impl Run<'_> {
         lim.max_resource_bytes = lim.max_resource_bytes.min(MAX_BODY);
         let retained = self.kept();
         let target = resources::Target { expect: Expect::Style, url: Url { scheme: url.scheme, host: url.host.clone(), port: url.port, path: url.path.clone() } };
-        match resources::fetch(&mut self.client, &target, &lim, self.deadline, retained) {
+        let fetched = self.net.fetch(&target, &lim, self.deadline, retained);
+        self.prefetch();
+        match fetched {
             Ok(r) => {
                 let n = r.text.len();
                 self.res.bytes += n;
