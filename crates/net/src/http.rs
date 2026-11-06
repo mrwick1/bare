@@ -1779,9 +1779,9 @@ mod tests {
         Url::parse(&format!("http://127.0.0.1:{port}{path}")).unwrap()
     }
 
-    /// Wait for the server thread to pass on what it saw, then take it all.
+    /// Take what the server saw. No wait is needed: `serve` sends each request before it writes the reply, so every
+    /// request that a client has an answer for is already in the channel.
     fn seen(requests: &std::sync::mpsc::Receiver<String>) -> Vec<String> {
-        std::thread::sleep(Duration::from_millis(100));
         requests.try_iter().collect()
     }
 
