@@ -1,0 +1,83 @@
+interface	function,[object ValidityState],true,true,valueMissing,typeMismatch,patternMismatch,tooLong,tooShort,rangeUnderflow,rangeOverflow,stepMismatch,badInput,customError,valid,constructor,true,false,TypeError,true
+interface-names	true,true,true,true,true,true
+validity-live	true,false,true
+required-text	10000000000 true "Please fill out this field." false|00000000001 true "" true|00000000001 true "" true|10000000000 true "Please fill out this field." false|10000000000 true "Please fill out this field." false|10000000000 true "Please fill out this field." false|10000000000 true "Please fill out this field." false|10000000000 true "Please fill out this field." false
+required-whitespace	00000000001 true "" true
+required-set-value	10000000000 true "Please fill out this field." false|00000000001 true "" true|10000000000
+required-checkbox	10000000000 true "Please check this box if you want to proceed." false|00000000001 true "" true|00000000001 true "" true|00000000001 true "" true
+required-radio	10000000000 true "Please select one of these options." false|10000000000 true "Please select one of these options." false|10000000000 true "Please select one of these options." false|00000000001 true "" true|10000000000 true "Please select one of these options." false
+barred-types	false 00000000001|false 00000000001|false 00000000001|false 00000000001|true 00000000001
+barred-readonly	00000000001 false "" true|10000000000 false "" true|00000000001 false "" true|00000000001 false "" true
+barred-fieldset	false 00000000001|true 10000000000|true 10000000000
+barred-datalist	false 10000000000|true 10000000000
+email-shapes	"x" true|"x@" true|"@x" true|"x@y" false|"x@y.z" false|"a b@c.d" true|"x@-y.z" true|"x@y..z" true|"x@y." true|".x@y.z" false|"x.@y.z" false|"x..y@z.w" false|"ü@x.y" true|"x@ü.y" true|"x@y z" true|"a'b@c.d" false|"x@y_z" true|"x@y" false|"x@@y" true|"a@b@c" true
+email-messages	Please include an '@' in the email address. 'x' is missing an '@'.|Please enter a part following '@'. 'x@' is incomplete.|Please enter a part followed by '@'. '@x' is incomplete.|'.' is used at a wrong position in 'y..z'.|'.' is used at a wrong position in '.y'.|'.' is used at a wrong position in 'y.'.|A part followed by '@' should not contain the symbol ' '.|A part following '@' should not contain the symbol '@'.|A part followed by '@' should not contain the symbol 'ü'.||
+email-multiple	"x@y" false|"x@y,z@w" false|"x@y,z@w" false|"x@y,z" true|"," true|"x@y," true|"x@y,z@w" false
+url-shapes	"http://a.test" false|"a.test" true|"mailto:a@b" false|"http:" true|"http://" true|"1http://x" true|"x:y" false|"https://exa mple.com" false|"HTTP://A.TEST" false|"//a.test" true|"/a" true|"javascript:alert(1)" false|"file:///a" false|"http://a:99999" true|"http://a.test" false
+url-message	01000000000 true "Please enter a URL." false
+type-mismatch-not-for-text	0000000000100000000001
+pattern-basic	00000000001 true "" true|00000000001 true "" true|00100000000 true "Please match the requested format." false|00000000001 true "" true
+pattern-anchored	00100000000|00000000001|00000000001
+pattern-invalid-ignored	00000000001|00000000001
+pattern-title	Please match the requested format.|Please match the requested format.|Please match the requested format.
+pattern-types	00100000000|00000000001|00000000001|00100000000
+pattern-set-after	00000000001|00100000000|00000000001
+pattern-unicode	00000000001
+length-script-set-is-not-flagged	00000000001|00000000001|00000000001|00000000001|00000000001|00000000001
+number-range	"" 00000000001|"4" 00000100000|"5" 00000000001|"7.5" 00000001000|"10" 00000000001|"11" 00000010000|"-3" 00000100000|"1e1" 00000000001|"1e2" 00000010000
+number-messages	Value must be less than or equal to 10.|Value must be greater than or equal to 5.|Value must be less than or equal to 10.|Please enter a valid value. The two nearest valid values are 2 and 4.|Please enter a valid value. The two nearest valid values are 0 and 0.5.|Value must be greater than or equal to 5.
+number-sanitize	""|"5"|""|""|""|""|".5"|"-.5"|""|"1e5"|""|""|""|""|""|""|""|""
+number-step	00000000001|00000001000|00000000001|00000000001|00000000001|00000000001|00000000001|00000000001|00000000001
+number-step-messages	|Please enter a valid value. The two nearest valid values are 3 and 5.|||Please enter a valid value. The two nearest valid values are 3 and 13.
+number-required	10000000000 true "Please fill out this field." false|00000000001 true "" true
+number-min-max-invalid-attrs	00000000001|00000110000
+range-attrs-on-text-ignored	00000000001|00000000001
+custom-validity	00000000001 true "" true|00000000010 true "bad" false|00000000001 true "" true|00000000010 true "undefined" false|00000000010 true "null" false|00000000010 true "5" false|10000000010 true "x" false
+custom-validity-args	TypeError|1|0|0
+custom-validity-barred	00000000010 false "" true|00000000010 false "" true|00000000010 false "" true
+message-priority	Please fill out this field.|Please include an '@' in the email address. 'bad' is missing an '@'.|mine
+message-barred-is-empty	""
+message-required-kinds	Please check this box if you want to proceed.|Please select one of these options.|Please fill out this field.|Please select an item in the list.|Please fill out this field.
+select-required	10000000000 true "Please select an item in the list." false|00000000001 true "" true|10000000000 true "Please select an item in the list." false|10000000000 true "Please select an item in the list." false|00000000001 true "" true|10000000000 true "Please select an item in the list." false|00000000001 true "" true
+select-required-placeholder-rule	00000000001|00000000001|00000000001|00000000001
+select-required-changes	10000000000|00000000001|10000000000|10000000000
+select-barred	10000000000 false "" true|10000000000 false "" true
+select-custom	00000000001 true "" true|00000000010 true "no" false
+textarea-required	10000000000 true "Please fill out this field." false|00000000001 true "" true|00000000001 true "" true|00000000001
+textarea-newline-required	00000000001
+textarea-custom	00000000001 true "" true|00000000010 true "no" false
+button-validity	true 00000000001|false 00000000001|false 00000000001|true 00000000001
+button-custom	00000000010 true "x" false|00000000010 false "" true
+form-check-validity	false,true|a:false:true:2
+form-check-validity-order	false|a:false:true:2,b:false:true:2,c:false:true:2,d:false:true:2
+form-invalid-event-bubbling	form-capture,a:false:true:2
+form-no-validate	true,false,false,false,true
+form-no-validate-set	false,,true,false
+form-check-validity-nothing-to-check	true,true,true
+form-check-validity-with-form-attr	false|a:false:true:2
+form-check-validity-detached	false,false,false
+invalid-event-fields	invalid,false,true,true,true,true,Event
+invalid-event-canceled	false|a,b:false:true:2
+check-validity-returns	false,true,false,true|a:false:true:2,a:false:true:2
+check-validity-barred-fires-nothing	true,true,true|0
+report-validity-no-ui-and-focus	false,true,false
+custom-validity-form	true,false,true
+custom-validity-survives-value-change	00000000010 true "x" false
+brand-checks	TypeError|ok true|TypeError|TypeError
+non-form-elements-have-none	false,false,false,false,false
+validity-state-props-readonly	true,undefined
+validity-flags-all-sets	01100000000
+validity-types-text-vs-others	true 10000000000|true 00000000001|true 00000000001|true 10000000000
+type-change	00000000001|01000000000|01000000000|10000000000|false
+required-attr-toggle	00000000001|10000000000|00000000001|10000000000|true
+disabled-toggle	true,false,true
+barred-flags-still-computed	01000000000 false|00100000000 false|00000100000 false|01000000000 false|00100000000 false|00000100000 false|00000000001 false
+email-messages-more	x@-y.z => Please enter an email address.|x@y-.z => Please enter an email address.|x@y_z => A part following '@' should not contain the symbol '_'.|x@ü.y => A part following '@' should not contain the symbol 'ü'.|x@y z => A part following '@' should not contain the symbol ' '.|a(b@c.d => A part followed by '@' should not contain the symbol '('.|a,b@c.d => A part followed by '@' should not contain the symbol ','.|x@y@z => A part following '@' should not contain the symbol '@'.|x@[1.2.3.4] => A part following '@' should not contain the symbol '['.|x@y.z. => '.' is used at a wrong position in 'y.z.'.|x@.. => '.' is used at a wrong position in '..'.|ab@c d => A part following '@' should not contain the symbol ' '.|"a"@b.c => A part followed by '@' should not contain the symbol '"'.
+email-multiple-messages	x@y,z => Please include an '@' in the email address. 'z' is missing an '@'.|x@y,,z@w => Please enter a non-empty email address.|,x@y => Please enter a non-empty email address.
+number-step-nearest	1 => 00000001000 Please enter a valid value. The two nearest valid values are 0 and 3.|2 => 00000001000 Please enter a valid value. The two nearest valid values are 0 and 3.|4 => 00000001000 Please enter a valid value. The two nearest valid values are 3 and 6.|8 => 00000001000 Please enter a valid value. The two nearest valid values are 6 and 9.|9.5 => 00000001000 Please enter a valid value. The nearest valid value is 9.|10 => 00000001000 Please enter a valid value. The nearest valid value is 9.|11 => 00000011000 Value must be less than or equal to 10.|-1 => 00000101000 Value must be greater than or equal to 0.
+number-step-nearest-fractions	0.25 => 00000001000 Please enter a valid value. The two nearest valid values are 0.2 and 0.3.|0.3 => 00000000001 |1.05 => 00000001000 Please enter a valid value. The two nearest valid values are 1 and 1.1.|0.1 => 00000000001 |-0.05 => 00000001000 Please enter a valid value. The two nearest valid values are -0.1 and 0.
+number-step-only-one-nearest	00000001000 Please enter a valid value. The nearest valid value is 4.|00000001000 Please enter a valid value. The nearest valid value is 1.
+url-spaces	https://exa mple.com false|http://a b false|http://[::1] false|http://a:80 false|ftp://x false|ws://x false|blob:x false|data:,x false
+value-sanitize-text	"  abc  "|"abc"|"abc"|"  abc  "|"  abc  "|"  abc  "
+value-sanitize-default	"xy"|"http://a.b"|"a@b"|"a@b,c@d"
+email-multiple-pattern	00000000001

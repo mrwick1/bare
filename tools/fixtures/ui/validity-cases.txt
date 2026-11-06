@@ -1,0 +1,256 @@
+var $ = function (i) { return document.getElementById(i) };
+var K = ['valueMissing', 'typeMismatch', 'patternMismatch', 'tooLong', 'tooShort', 'rangeUnderflow', 'rangeOverflow', 'stepMismatch', 'badInput', 'customError', 'valid'];
+var vs = function (e) { return K.map(function (k) { return e.validity[k] ? 1 : 0 }).join('') };
+var all = function (e) { return vs(e) + ' ' + e.willValidate + ' ' + JSON.stringify(e.validationMessage) + ' ' + e.checkValidity() };
+var err = function (f) { try { var v = f(); return 'ok ' + String(v) } catch (e) { return e.name } };
+var log = [];
+var watch = function (e) { e.addEventListener('invalid', function (ev) { log.push((ev.target.id || ev.target.name) + ':' + ev.bubbles + ':' + ev.cancelable + ':' + ev.eventPhase) }) };
+=== interface
+@html <input id=a><select id=s></select><textarea id=t></textarea><button id=b></button>
+(function () { var v = $('a').validity; return [typeof ValidityState, Object.prototype.toString.call(v), v === $('a').validity, v instanceof ValidityState, Object.getOwnPropertyNames(ValidityState.prototype).join(), $('s').validity === $('s').validity, $('s').validity === $('a').validity, err(function () { return new ValidityState() }), Object.getPrototypeOf(v) === ValidityState.prototype].join() })
+=== interface-names
+@html <input id=a>
+(function () { return ['validity', 'willValidate', 'validationMessage', 'checkValidity', 'reportValidity', 'setCustomValidity'].map(function (k) { return k in $('a') }).join() })
+=== validity-live
+@html <input id=a required value=x>
+(function () { var v = $('a').validity, r = [v.valid]; $('a').value = ''; r.push(v.valid, v.valueMissing); return r.join() })
+=== required-text
+@html <input id=a required><input id=b required value=x><input id=c><input id=d required type=search><input id=e required type=tel><input id=f required type=password><input id=g required type=url><input id=h required type=email>
+(function () { return ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h'].map(function (i) { return all($(i)) }).join('|') })
+=== required-whitespace
+@html <input id=a required value="  ">
+(function () { return all($('a')) })
+=== required-set-value
+@html <input id=a required>
+(function () { var r = [all($('a'))]; $('a').value = 'x'; r.push(all($('a'))); $('a').value = ''; r.push(vs($('a'))); return r.join('|') })
+=== required-checkbox
+@html <input id=a type=checkbox required><input id=b type=checkbox required checked><input id=c type=checkbox>
+(function () { var r = [all($('a')), all($('b')), all($('c'))]; $('a').checked = true; r.push(all($('a'))); return r.join('|') })
+=== required-radio
+@html <form id=f><input id=a type=radio name=r required><input id=b type=radio name=r></form><input id=c type=radio name=q required>
+(function () { var r = [all($('a')), all($('b')), all($('c'))]; $('b').checked = true; r.push(all($('a')), all($('c'))); return r.join('|') })
+=== barred-types
+@html <input id=a type=hidden required><input id=b type=button required><input id=c type=reset required><input id=d type=image required><input id=e type=submit required>
+(function () { return ['a', 'b', 'c', 'd', 'e'].map(function (i) { return $(i).willValidate + ' ' + vs($(i)) }).join('|') })
+=== barred-readonly
+@html <input id=a required readonly><input id=b required readonly type=checkbox><textarea id=c required readonly></textarea><input id=d required disabled>
+(function () { return ['a', 'b', 'c', 'd'].map(function (i) { return all($(i)) }).join('|') })
+=== barred-fieldset
+@html <fieldset disabled><input id=a required><legend><input id=b required></legend></fieldset><fieldset><input id=c required></fieldset>
+(function () { return ['a', 'b', 'c'].map(function (i) { return $(i).willValidate + ' ' + vs($(i)) }).join('|') })
+=== barred-datalist
+@html <datalist><input id=a required></datalist><input id=b required>
+(function () { return ['a', 'b'].map(function (i) { return $(i).willValidate + ' ' + vs($(i)) }).join('|') })
+=== email-shapes
+@html <input id=a type=email>
+(function () { var a = $('a'), r = []; ['x', 'x@', '@x', 'x@y', 'x@y.z', 'a b@c.d', 'x@-y.z', 'x@y..z', 'x@y.', '.x@y.z', 'x.@y.z', 'x..y@z.w', 'ü@x.y', 'x@ü.y', 'x@y z', "a'b@c.d", 'x@y_z', ' x@y ', 'x@@y', 'a@b@c'].forEach(function (v) { a.value = v; r.push(JSON.stringify(a.value) + ' ' + a.validity.typeMismatch) }); return r.join('|') })
+=== email-messages
+@html <input id=a type=email>
+(function () { var a = $('a'), r = []; ['x', 'x@', '@x', 'x@y..z', 'x@.y', 'x@y.', 'a b@c.d', 'x@@y', 'ü@x.y', 'x.@y.z', '.x@y.z'].forEach(function (v) { a.value = v; r.push(a.validationMessage) }); return r.join('|') })
+=== email-multiple
+@html <input id=a type=email multiple>
+(function () { var a = $('a'), r = []; ['x@y', 'x@y,z@w', 'x@y, z@w', 'x@y,z', ',', 'x@y,', ' x@y , z@w '].forEach(function (v) { a.value = v; r.push(JSON.stringify(a.value) + ' ' + a.validity.typeMismatch) }); return r.join('|') })
+=== url-shapes
+@html <input id=a type=url>
+(function () { var a = $('a'), r = []; ['http://a.test', 'a.test', 'mailto:a@b', 'http:', 'http://', '1http://x', 'x:y', 'https://exa mple.com', 'HTTP://A.TEST', '//a.test', '/a', 'javascript:alert(1)', 'file:///a', 'http://a:99999', ' http://a.test '].forEach(function (v) { a.value = v; r.push(JSON.stringify(a.value) + ' ' + a.validity.typeMismatch) }); return r.join('|') })
+=== url-message
+@html <input id=a type=url value=abc>
+(function () { return all($('a')) })
+=== type-mismatch-not-for-text
+@html <input id=a value=abc><input id=b type=search value=abc>
+(function () { return vs($('a')) + vs($('b')) })
+=== pattern-basic
+@html <input id=a pattern="[a-z]+"><input id=b pattern="[a-z]+" value=abc><input id=c pattern="[a-z]+" value=abc1><input id=d pattern="[a-z]+" value="">
+(function () { return ['a', 'b', 'c', 'd'].map(function (i) { return all($(i)) }).join('|') })
+=== pattern-anchored
+@html <input id=a pattern="a|b" value=ab><input id=b pattern="a|b" value=a><input id=c pattern="a.c" value=abc>
+(function () { return ['a', 'b', 'c'].map(function (i) { return vs($(i)) }).join('|') })
+=== pattern-invalid-ignored
+@html <input id=a pattern="[" value=x><input id=b pattern="(" value=x>
+(function () { return ['a', 'b'].map(function (i) { return vs($(i)) }).join('|') })
+=== pattern-title
+@html <input id=a pattern="[0-9]+" title="digits only" value=x><input id=b pattern="[0-9]+" value=x><input id=c pattern="[0-9]+" title="" value=x>
+(function () { return ['a', 'b', 'c'].map(function (i) { return $(i).validationMessage }).join('|') })
+=== pattern-types
+@html <input id=a type=email pattern="x.*" value="y@z.w"><input id=b type=number pattern="[0-9]" value=12><input id=c type=checkbox pattern="x"><input id=d type=url pattern="http:.*" value="https://a.b">
+(function () { return ['a', 'b', 'c', 'd'].map(function (i) { return vs($(i)) }).join('|') })
+=== pattern-set-after
+@html <input id=a value=ab>
+(function () { var a = $('a'), r = [vs(a)]; a.setAttribute('pattern', 'a'); r.push(vs(a)); a.removeAttribute('pattern'); r.push(vs(a)); return r.join('|') })
+=== pattern-unicode
+@html <input id=a pattern="\p{L}+" value="é">
+(function () { return vs($('a')) })
+=== length-script-set-is-not-flagged
+@html <input id=a minlength=5 value=ab><input id=b maxlength=2 value=abcd><textarea id=c minlength=5>ab</textarea><textarea id=d maxlength=2>abcd</textarea>
+(function () { var r = ['a', 'b', 'c', 'd'].map(function (i) { return vs($(i)) }); $('a').value = 'x'; $('b').value = 'xyzzy'; r.push(vs($('a')), vs($('b'))); return r.join('|') })
+=== number-range
+@html <input id=a type=number min=5 max=10>
+(function () { var a = $('a'), r = []; ['', '4', '5', '7.5', '10', '11', '-3', '1e1', '1e2'].forEach(function (v) { a.value = v; r.push(JSON.stringify(a.value) + ' ' + vs(a)) }); return r.join('|') })
+=== number-messages
+@html <input id=a type=number min=5 max=10><input id=b type=number min=5><input id=c type=number max=10><input id=d type=number step=2 min=0 value=3><input id=e type=number step=0.5 min=0 value=0.3>
+(function () { $('a').value = 4; $('b').value = 4; $('c').value = 11; $('a').value = 11; var r = [$('a').validationMessage, $('b').validationMessage, $('c').validationMessage, $('d').validationMessage, $('e').validationMessage]; $('a').value = 4; r.push($('a').validationMessage); return r.join('|') })
+=== number-sanitize
+@html <input id=a type=number><input id=b type=number value=abc><input id=c type=number value=" 5 ">
+(function () { var a = $('a'), r = []; ['abc', '5', ' 5', '5 ', '+5', '5.', '.5', '-.5', '1e', '1e5', 'Infinity', 'NaN', '0x10', '1,5', '--1', '1e400'].forEach(function (v) { a.value = v; r.push(JSON.stringify(a.value)) }); r.push(JSON.stringify($('b').value), JSON.stringify($('c').value)); return r.join('|') })
+=== number-step
+@html <input id=a type=number step=2 value=3><input id=b type=number step=2 min=1 value=4><input id=c type=number step=any value=3.33><input id=d type=number value=1.5><input id=e type=number step=0.1 value=0.3><input id=f type=number min=0.5 step=1 value=1.5><input id=g type=number step=0 value=1><input id=h type=number step=-1 value=1><input id=i type=number step=abc value=1.5>
+(function () { return ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i'].map(function (i) { return vs($(i)) }).join('|') })
+=== number-step-messages
+@html <input id=a type=number step=2 value=3><input id=b type=number step=2 min=1 value=4><input id=c type=number value=1.5><input id=d type=number step=10 value=14><input id=e type=number step=10 min=3 value=5>
+(function () { return ['a', 'b', 'c', 'd', 'e'].map(function (i) { return $(i).validationMessage }).join('|') })
+=== number-required
+@html <input id=a type=number required><input id=b type=number required value=0>
+(function () { return all($('a')) + '|' + all($('b')) })
+=== number-min-max-invalid-attrs
+@html <input id=a type=number min=abc max=xyz value=5><input id=b type=number min=10 max=1 value=5>
+(function () { return vs($('a')) + '|' + vs($('b')) })
+=== range-attrs-on-text-ignored
+@html <input id=a min=5 max=10 step=3 value=1><input id=b type=email min=5 value="a@b.c">
+(function () { return vs($('a')) + '|' + vs($('b')) })
+=== custom-validity
+@html <input id=a><input id=b required>
+(function () { var a = $('a'), r = [all(a)]; a.setCustomValidity('bad'); r.push(all(a)); a.setCustomValidity(''); r.push(all(a)); a.setCustomValidity(undefined); r.push(all(a)); a.setCustomValidity(null); r.push(all(a)); a.setCustomValidity(5); r.push(all(a)); a.setCustomValidity(''); $('b').setCustomValidity('x'); r.push(all($('b'))); return r.join('|') })
+=== custom-validity-args
+@html <input id=a>
+(function () { return err(function () { return $('a').setCustomValidity() }) + '|' + $('a').setCustomValidity.length + '|' + $('a').checkValidity.length + '|' + $('a').reportValidity.length })
+=== custom-validity-barred
+@html <input id=a type=hidden><input id=b readonly><input id=c disabled>
+(function () { ['a', 'b', 'c'].forEach(function (i) { $(i).setCustomValidity('x') }); return ['a', 'b', 'c'].map(function (i) { return all($(i)) }).join('|') })
+=== message-priority
+@html <input id=a type=email required value="" pattern="a">
+(function () { var a = $('a'), r = [a.validationMessage]; a.value = 'bad'; r.push(a.validationMessage); a.setCustomValidity('mine'); r.push(a.validationMessage); return r.join('|') })
+=== message-barred-is-empty
+@html <input id=a required disabled><input id=b required readonly>
+(function () { return JSON.stringify($('a').validationMessage + $('b').validationMessage) })
+=== message-required-kinds
+@html <input id=a required type=checkbox><input id=b required type=radio name=g><textarea id=c required></textarea><select id=d required><option value="">x</option></select><input id=e required type=number>
+(function () { return ['a', 'b', 'c', 'd', 'e'].map(function (i) { return $(i).validationMessage }).join('|') })
+=== select-required
+@html <select id=a required><option value="">choose<option value=1>one</select><select id=b required><option value=1>one<option value=2>two</select><select id=c required multiple><option value=1>one</select><select id=d required size=3><option value="">x<option value=1>y</select><select id=e required><option>no value</option></select><select id=f required></select><select id=g><option value="">x</select>
+(function () { return ['a', 'b', 'c', 'd', 'e', 'f', 'g'].map(function (i) { return all($(i)) }).join('|') })
+=== select-required-placeholder-rule
+@html <select id=a required><optgroup label=g><option value="">x</option></optgroup></select><select id=b required><option value="" disabled>x</option><option value=1>y</option></select><select id=c required><option value="">x</option><option value="" selected>y</option></select><select id=d required><option value=1>x</option><option value="">y</option></select>
+(function () { return ['a', 'b', 'c', 'd'].map(function (i) { return vs($(i)) }).join('|') })
+=== select-required-changes
+@html <select id=a required><option value="">x</option><option value=1>y</option></select>
+(function () { var a = $('a'), r = [vs(a)]; a.value = '1'; r.push(vs(a)); a.selectedIndex = 0; r.push(vs(a)); a.selectedIndex = -1; r.push(vs(a)); return r.join('|') })
+=== select-barred
+@html <select id=a required disabled><option value="">x</option></select><fieldset disabled><select id=b required><option value="">x</option></select></fieldset>
+(function () { return all($('a')) + '|' + all($('b')) })
+=== select-custom
+@html <select id=a><option>x</select>
+(function () { var a = $('a'), r = [all(a)]; a.setCustomValidity('no'); r.push(all(a)); return r.join('|') })
+=== textarea-required
+@html <textarea id=a required></textarea><textarea id=b required>x</textarea><textarea id=c></textarea>
+(function () { var r = ['a', 'b', 'c'].map(function (i) { return all($(i)) }); $('a').value = 'q'; r.push(vs($('a'))); return r.join('|') })
+=== textarea-newline-required
+@html <textarea id=a required></textarea>
+(function () { $('a').value = '\n'; return vs($('a')) })
+=== textarea-custom
+@html <textarea id=a></textarea>
+(function () { var a = $('a'), r = [all(a)]; a.setCustomValidity('no'); r.push(all(a)); return r.join('|') })
+=== button-validity
+@html <button id=a></button><button id=b type=button></button><button id=c type=reset></button><button id=d type=submit></button>
+(function () { return ['a', 'b', 'c', 'd'].map(function (i) { return $(i).willValidate + ' ' + vs($(i)) }).join('|') })
+=== button-custom
+@html <button id=a type=submit></button><button id=b type=button></button>
+(function () { $('a').setCustomValidity('x'); $('b').setCustomValidity('x'); return all($('a')) + '|' + all($('b')) })
+=== form-check-validity
+@html <form id=f><input id=a required><input id=b><input id=c required value=x></form>
+(function () { watch($('a')); watch($('b')); watch($('c')); var r = [$('f').checkValidity()]; $('a').value = 'v'; r.push($('f').checkValidity()); return r.join() + '|' + log.join() })
+=== form-check-validity-order
+@html <form id=f><input id=a required><textarea id=b required></textarea><select id=c required><option value="">x</select><input id=d type=email value=q></form>
+(function () { ['a', 'b', 'c', 'd'].forEach(function (i) { watch($(i)) }); return $('f').checkValidity() + '|' + log.join() })
+=== form-invalid-event-bubbling
+@html <form id=f><input id=a required></form>
+(function () { var f = $('f'); f.addEventListener('invalid', function () { log.push('form-bubble') }); f.addEventListener('invalid', function () { log.push('form-capture') }, true); watch($('a')); $('f').checkValidity(); return log.join() })
+=== form-no-validate
+@html <form id=f novalidate><input id=a required></form>
+(function () { return [$('f').noValidate, $('f').checkValidity(), $('f').reportValidity(), $('a').checkValidity(), $('f').hasAttribute('novalidate')].join() })
+=== form-no-validate-set
+@html <form id=f></form>
+(function () { var f = $('f'), r = [f.noValidate]; f.noValidate = true; r.push(f.getAttribute('novalidate'), f.noValidate); f.noValidate = false; r.push(f.hasAttribute('novalidate')); return r.join() })
+=== form-check-validity-nothing-to-check
+@html <form id=f></form><form id=g><input disabled required><button type=button></button></form>
+(function () { return $('f').checkValidity() + ',' + $('g').checkValidity() + ',' + $('f').reportValidity() })
+=== form-check-validity-with-form-attr
+@html <form id=f></form><input id=a required form=f>
+(function () { watch($('a')); return $('f').checkValidity() + '|' + log.join() })
+=== form-check-validity-detached
+@html <p></p>
+(function () { var f = document.createElement('form'), i = document.createElement('input'); i.required = true; f.appendChild(i); return f.checkValidity() + ',' + f.reportValidity() + ',' + i.checkValidity() })
+=== invalid-event-fields
+@html <input id=a required>
+(function () { var r = []; $('a').addEventListener('invalid', function (e) { r.push(e.type, e.bubbles, e.cancelable, e.isTrusted, e.target === $('a'), e instanceof Event, e.constructor.name) }); $('a').checkValidity(); return r.join() })
+=== invalid-event-canceled
+@html <form id=f><input id=a required><input id=b required></form>
+(function () { $('a').addEventListener('invalid', function (e) { e.preventDefault(); log.push('a') }); watch($('b')); return $('f').checkValidity() + '|' + log.join() })
+=== check-validity-returns
+@html <input id=a required><input id=b>
+(function () { watch($('a')); watch($('b')); return [$('a').checkValidity(), $('b').checkValidity(), $('a').reportValidity(), $('b').reportValidity()].join() + '|' + log.join() })
+=== check-validity-barred-fires-nothing
+@html <input id=a required disabled><input id=b type=hidden required>
+(function () { watch($('a')); watch($('b')); return [$('a').checkValidity(), $('b').checkValidity(), $('a').reportValidity()].join() + '|' + log.length })
+=== report-validity-no-ui-and-focus
+@html <form id=f><input id=a required><input id=b required></form>
+(function () { var r = [$('f').reportValidity(), document.activeElement === $('a'), document.activeElement === document.body]; return r.join() })
+=== custom-validity-form
+@html <form id=f><input id=a></form>
+(function () { var r = [$('f').checkValidity()]; $('a').setCustomValidity('x'); r.push($('f').checkValidity()); $('a').setCustomValidity(''); r.push($('f').checkValidity()); return r.join() })
+=== custom-validity-survives-value-change
+@html <input id=a>
+(function () { $('a').setCustomValidity('x'); $('a').value = 'q'; return all($('a')) })
+=== brand-checks
+@html <input id=a><div id=d></div>
+(function () { $('a'); var g = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'validity').get; return [err(function () { return g.call($('d')) }), err(function () { return g.call($('a')) !== undefined }), err(function () { return HTMLInputElement.prototype.checkValidity.call($('d')) }), err(function () { return HTMLFormElement.prototype.checkValidity.call($('a')) })].join('|') })
+=== non-form-elements-have-none
+@html <div id=d></div><label id=l></label>
+(function () { return ['validity', 'willValidate', 'checkValidity', 'setCustomValidity', 'labels'].map(function (k) { return k in $('d') || k in $('l') }).join() })
+=== validity-state-props-readonly
+@html <input id=a required>
+(function () { var v = $('a').validity; v.valueMissing = false; return v.valueMissing + ',' + Object.getOwnPropertyDescriptor(ValidityState.prototype, 'valid').set })
+=== validity-flags-all-sets
+@html <input id=a type=email required pattern="x" value="q">
+(function () { return vs($('a')) })
+=== validity-types-text-vs-others
+@html <input id=a type=date required><input id=b type=color required><input id=c type=range required><input id=d type=file required>
+(function () { return ['a', 'b', 'c', 'd'].map(function (i) { return $(i).willValidate + ' ' + vs($(i)) }).join('|') })
+=== type-change
+@html <input id=a value=abc required>
+(function () { var a = $('a'), r = [vs(a)]; a.type = 'email'; r.push(vs(a)); a.type = 'url'; r.push(vs(a)); a.type = 'checkbox'; r.push(vs(a)); a.type = 'hidden'; r.push(a.willValidate); return r.join('|') })
+=== required-attr-toggle
+@html <input id=a>
+(function () { var a = $('a'), r = [vs(a)]; a.required = true; r.push(vs(a)); a.required = false; r.push(vs(a)); a.setAttribute('required', ''); r.push(vs(a), a.required); return r.join('|') })
+=== disabled-toggle
+@html <input id=a required>
+(function () { var a = $('a'), r = [a.willValidate]; a.disabled = true; r.push(a.willValidate); a.disabled = false; r.push(a.willValidate); return r.join() })
+=== barred-flags-still-computed
+@html <input id=a type=email value=q disabled><input id=b pattern="a" value=q disabled><input id=c type=number min=5 value=1 disabled><input id=d type=email value=q readonly><input id=e pattern="a" value=q readonly><input id=f type=number min=5 value=1 readonly><input id=g type=hidden pattern="a" value=q>
+(function () { return ['a', 'b', 'c', 'd', 'e', 'f', 'g'].map(function (i) { return vs($(i)) + ' ' + $(i).willValidate }).join('|') })
+=== email-messages-more
+@html <input id=a type=email>
+(function () { var a = $('a'), r = []; ['x@-y.z', 'x@y-.z', 'x@y_z', 'x@ü.y', 'x@y z', 'a(b@c.d', 'a,b@c.d', 'x@y@z', 'x@[1.2.3.4]', 'x@y.z.', 'x@..', 'ab@c d', '"a"@b.c'].forEach(function (v) { a.value = v; r.push(v + ' => ' + a.validationMessage) }); return r.join('|') })
+=== email-multiple-messages
+@html <input id=a type=email multiple>
+(function () { var a = $('a'), r = []; ['x@y,z', 'x@y,,z@w', ',x@y'].forEach(function (v) { a.value = v; r.push(v + ' => ' + a.validationMessage) }); return r.join('|') })
+=== number-step-nearest
+@html <input id=a type=number min=0 max=10 step=3>
+(function () { var a = $('a'), r = []; ['1', '2', '4', '8', '9.5', '10', '11', '-1'].forEach(function (v) { a.value = v; r.push(v + ' => ' + vs(a) + ' ' + a.validationMessage) }); return r.join('|') })
+=== number-step-nearest-fractions
+@html <input id=a type=number step=0.1>
+(function () { var a = $('a'), r = []; ['0.25', '0.3', '1.05', '0.1', '-0.05'].forEach(function (v) { a.value = v; r.push(v + ' => ' + vs(a) + ' ' + a.validationMessage) }); return r.join('|') })
+=== number-step-only-one-nearest
+@html <input id=a type=number min=0 max=5 step=4><input id=b type=number min=1 max=3 step=4 value=2>
+(function () { var a = $('a'); a.value = '4.5'; return vs(a) + ' ' + a.validationMessage + '|' + vs($('b')) + ' ' + $('b').validationMessage })
+=== url-spaces
+@html <input id=a type=url>
+(function () { var a = $('a'), r = []; ['https://exa mple.com', 'http://a b', 'http://[::1]', 'http://a:80', 'ftp://x', 'ws://x', 'blob:x', 'data:,x'].forEach(function (v) { a.value = v; r.push(v + ' ' + a.validity.typeMismatch) }); return r.join('|') })
+=== value-sanitize-text
+@html <input id=a><input id=b type=url><input id=c type=email><input id=d type=search><input id=e type=password><input id=f type=tel>
+(function () { return ['a', 'b', 'c', 'd', 'e', 'f'].map(function (i) { var e = $(i); e.value = '  a\nb\r\nc  '; return JSON.stringify(e.value) }).join('|') })
+=== value-sanitize-default
+@html <input id=a value="x&#10;y"><input id=b type=url value="  http://a.b  "><input id=c type=email value=" a@b "><input id=d type=email multiple value=" a@b , c@d ">
+(function () { return ['a', 'b', 'c', 'd'].map(function (i) { return JSON.stringify($(i).value) }).join('|') })
+=== email-multiple-pattern
+@html <input id=a type=email multiple pattern="a@b" value="a@b,a@b">
+(function () { return vs($('a')) })

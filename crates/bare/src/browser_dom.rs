@@ -416,21 +416,25 @@ impl Dom {
     /// Run `f` on the value of an `<input>` as JS reads it, borrowed (no copy). `f` must not touch the DOM or its state.
     pub(crate) fn with_input_value<T>(&self, n: NodeId, f: impl FnOnce(&str) -> T) -> Option<T> {
         let doc = self.doc.borrow();
-        if !crate::browser_selection::is_html_input(&doc, n) {
-            return None;
-        }
+        let area = crate::browser_selection::text_control(&doc, n)?;
         let st = self.st.borrow();
         if let Some(v) = st.inputs.get(&n).and_then(|i| i.value.as_deref()) {
             return Some(f(v));
         }
-        let attr = doc.find_atom("value").and_then(|a| doc.attr(n, a));
-        Some(f(attr.unwrap_or(if matches!(input_kind(&doc, n), "checkbox" | "radio") { "on" } else { "" })))
+        if area {
+            return Some(f(&crate::browser_textarea::api_value(&crate::browser_textarea::default_text(&doc, n))));
+        }
+        let kind = input_kind(&doc, n);
+        let Some(attr) = doc.find_atom("value").and_then(|a| doc.attr(n, a)) else { return Some(f(if matches!(kind, "checkbox" | "radio") { "on" } else { "" })) };
+        let multiple = kind == "email" && doc.find_atom("multiple").is_some_and(|a| doc.attr(n, a).is_some());
+        Some(f(&crate::browser_controls::sanitize(kind, multiple, attr)))
     }
 
     /// Set the dirty value. A value that differs puts the caret at the end (HTML: setting `value`), and when that
     /// moves the selection of a text control, schedules its `selectionchange`. `it` is the JS caller that pays for
     /// the scans; the test driver has none (see `Dom::selection_after_value`).
     pub(crate) fn put_input_value(&self, it: Option<&mut Interp<'_>>, n: NodeId, v: String) -> R<()> {
+        let area = self.doc.borrow().is_html(n, "textarea");
         let changed = self.with_input_value(n, |old| old != v) != Some(false);
         let moved = if changed { self.selection_after_value(it, n, &v)? } else { false };
         let old = self.st.borrow().inputs.get(&n).and_then(|i| i.value.as_ref()).map_or(0, String::len);
@@ -443,9 +447,11 @@ impl Dom {
             let mut st = self.st.borrow_mut();
             st.input_bytes = st.input_bytes - old + v.len();
             let i = st.inputs.entry(n).or_default();
+            // A changed value puts the caret at the end (HTML: setting `value`). An input keeps that as `None`; a textarea stores it.
+            let end = if changed && area { Some(crate::browser_selection::caret_end(&v, true)) } else { None };
             i.value = Some(v);
             if changed {
-                i.sel = None; // the caret moves to the end (HTML: setting `value`)
+                i.sel = end;
             }
         }
         Ok(())
@@ -481,12 +487,15 @@ impl Dom {
 }
 
 pub(crate) fn input_kind(doc: &Document, n: NodeId) -> &'static str {
-    let t = doc.find_atom("type").and_then(|a| doc.attr(n, a)).map(str::to_ascii_lowercase).unwrap_or_default();
+    let t = doc.find_atom("type").and_then(|a| doc.attr(n, a)).unwrap_or("");
     const KINDS: [&str; 22] = [
         "text", "search", "tel", "url", "email", "password", "date", "month", "week", "time", "datetime-local", "number", "range", "color", "checkbox", "radio", "file", "submit", "image", "reset",
         "button", "hidden",
     ];
-    KINDS.iter().find(|k| **k == t).copied().unwrap_or("text")
+    if t.is_empty() {
+        return "text";
+    }
+    KINDS.iter().find(|k| k.len() == t.len() && k.eq_ignore_ascii_case(t)).copied().unwrap_or("text")
 }
 
 // ------------------------------------------------------------------------------------------ Node
@@ -1470,7 +1479,15 @@ pub(crate) fn set_input_value(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Va
         "checkbox" | "radio" | "submit" | "reset" | "button" | "image" | "hidden" => attr_set(d, it, n, "value", &s)?,
         "file" if !s.is_empty() => return Err(d.dom_err(it, "InvalidStateError", "This input element accepts a filename, which may only be programmatically set to the empty string.")),
         "file" => {}
-        _ => d.put_input_value(Some(it), n, s)?,
+        _ => {
+            let multiple = kind == "email" && d.doc.borrow().find_atom("multiple").is_some_and(|a| d.doc.borrow().attr(n, a).is_some());
+            let clean = match crate::browser_controls::sanitize(kind, multiple, &s) {
+                std::borrow::Cow::Owned(o) => Some(o),
+                std::borrow::Cow::Borrowed(b) if b.len() != s.len() => Some(b.to_string()),
+                _ => None,
+            };
+            d.put_input_value(Some(it), n, clean.unwrap_or(s))?
+        }
     }
     Ok(Value::Undefined)
 }
@@ -1487,6 +1504,12 @@ pub(crate) fn input_checked(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Valu
 pub(crate) fn set_input_checked(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
     let n = input_el(d, it, this)?;
     let b = it.to_js_bool(arg(a, 0))?;
+    // A radio that gets checked unchecks the others of its group.
+    if b && input_kind(&d.doc.borrow(), n) == "radio" {
+        for o in d.radio_group(it, n)? {
+            d.st.borrow_mut().inputs.entry(o).or_default().checked = Some(false);
+        }
+    }
     d.st.borrow_mut().inputs.entry(n).or_default().checked = Some(b);
     Ok(Value::Undefined)
 }

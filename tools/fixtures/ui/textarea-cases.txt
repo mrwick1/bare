@@ -1,0 +1,114 @@
+var $ = function (i) { return document.getElementById(i) };
+var err = function (f) { try { var v = f(); return 'ok ' + String(v) } catch (e) { return e.name } };
+var sel = function (t) { return t.selectionStart + ',' + t.selectionEnd + ',' + t.selectionDirection };
+=== interface
+@html <textarea id=t></textarea>
+(function () { var t = $('t'); return [typeof HTMLTextAreaElement, t instanceof HTMLTextAreaElement, t instanceof HTMLElement, Object.prototype.toString.call(t), t.type, t.nodeName, t.constructor === HTMLTextAreaElement, document.createElement('textarea') instanceof HTMLTextAreaElement, err(function () { return new HTMLTextAreaElement() })].join() })
+=== names
+@html <textarea id=t></textarea>
+(function () { return ['value', 'defaultValue', 'textLength', 'rows', 'cols', 'maxLength', 'minLength', 'placeholder', 'required', 'readOnly', 'disabled', 'name', 'wrap', 'form', 'selectionStart', 'selectionEnd', 'selectionDirection', 'setSelectionRange', 'select', 'labels', 'validity', 'willValidate', 'validationMessage', 'checkValidity', 'reportValidity', 'setCustomValidity', 'type', 'dirName', 'autocomplete'].filter(function (k) { return !(k in $('t')) }).join() })
+=== default-value
+@html <textarea id=t>abc</textarea>
+(function () { var t = $('t'); return [t.value, t.defaultValue, t.textContent, t.textLength, t.childNodes.length].join('|') })
+=== default-value-empty
+@html <textarea id=t></textarea>
+(function () { var t = $('t'); return [JSON.stringify(t.value), JSON.stringify(t.defaultValue), t.textLength, t.childNodes.length].join('|') })
+=== first-newline-dropped
+@html <p id=p></p>
+(function () { $('p').innerHTML = '<textarea id=t>\nx\ny</textarea>'; var t = $('t'); return [JSON.stringify(t.value), JSON.stringify(t.defaultValue), t.textLength].join('|') })
+=== crlf-in-markup
+@html <p id=p></p>
+(function () { $('p').innerHTML = '<textarea id=t>a&#13;&#10;b&#13;c</textarea>'; var t = $('t'); return [JSON.stringify(t.value), JSON.stringify(t.defaultValue), JSON.stringify(t.textContent), t.textLength].join('|') })
+=== set-value
+@html <textarea id=t>abc</textarea>
+(function () { var t = $('t'), r = []; t.value = 'x'; r.push(t.value, t.defaultValue, t.textContent, t.childNodes.length, t.textLength); return r.join('|') })
+=== set-value-types
+@html <textarea id=t>abc</textarea>
+(function () { var t = $('t'), r = []; [null, undefined, 5, true, {}, ['a', 'b'], '', 'a\r\nb\rc\nd'].forEach(function (v) { t.value = v; r.push(JSON.stringify(t.value) + ' ' + t.textLength) }); return r.join('|') })
+=== set-value-throw
+@html <textarea id=t></textarea>
+(function () { var t = $('t'); return err(function () { t.value = { toString: function () { throw new RangeError('x') } } }) + '|' + err(function () { t.value = Symbol() }) })
+=== dirty-flag-blocks-text-changes
+@html <textarea id=t>abc</textarea>
+(function () { var t = $('t'), r = []; t.textContent = 'one'; r.push(t.value); t.value = 'dirty'; t.textContent = 'two'; r.push(t.value, t.defaultValue); return r.join('|') })
+=== not-dirty-follows-children
+@html <textarea id=t>abc</textarea>
+(function () { var t = $('t'), r = []; t.textContent = 'two'; r.push(t.value); t.appendChild(document.createTextNode('+')); r.push(t.value); t.firstChild.data = 'X'; r.push(t.value); t.innerHTML = 'iii'; r.push(t.value); t.removeChild(t.firstChild); r.push(JSON.stringify(t.value)); return r.join('|') })
+=== child-elements-ignored
+@html <textarea id=t>abc</textarea>
+(function () { var t = $('t'); t.appendChild(document.createElement('b')); t.lastChild.textContent = 'zz'; t.appendChild(document.createTextNode('q')); return [t.value, t.defaultValue, t.textContent].join('|') })
+=== default-value-set
+@html <textarea id=t>abc</textarea>
+(function () { var t = $('t'), r = []; t.defaultValue = 'new'; r.push(t.value, t.defaultValue, t.textContent, t.childNodes.length); t.value = 'dirty'; t.defaultValue = 'again'; r.push(t.value, t.defaultValue, t.textContent); t.defaultValue = ''; r.push(t.childNodes.length); return r.join('|') })
+=== default-value-set-crlf
+@html <textarea id=t></textarea>
+(function () { var t = $('t'); t.defaultValue = 'a\r\nb'; return [JSON.stringify(t.value), JSON.stringify(t.defaultValue), JSON.stringify(t.textContent)].join('|') })
+=== rows-cols-defaults
+@html <textarea id=t></textarea><textarea id=u rows=5 cols=40></textarea><textarea id=v rows=abc cols=-3></textarea><textarea id=w rows=0 cols=0></textarea><textarea id=x rows=3.7 cols=" 9 "></textarea><textarea id=y rows=+4 cols=2e1></textarea>
+(function () { return ['t', 'u', 'v', 'w', 'x', 'y'].map(function (i) { return $(i).rows + 'x' + $(i).cols }).join('|') })
+=== rows-cols-set
+@html <textarea id=t></textarea>
+(function () { var t = $('t'), r = []; t.rows = 7; t.cols = 33; r.push(t.getAttribute('rows'), t.getAttribute('cols'), t.rows, t.cols); r.push(err(function () { t.rows = 0 }), err(function () { t.cols = 0 })); t.rows = '4'; r.push(t.getAttribute('rows')); t.rows = -1; r.push(t.getAttribute('rows')); t.cols = 4294967295; r.push(t.cols, t.getAttribute('cols')); t.rows = 2.9; r.push(t.getAttribute('rows')); return r.join('|') })
+=== max-min-length
+@html <textarea id=t></textarea><textarea id=u maxlength=5 minlength=2></textarea><textarea id=v maxlength=abc minlength=-4></textarea><textarea id=w maxlength=" 7 "></textarea><textarea id=x maxlength=3.9></textarea>
+(function () { return ['t', 'u', 'v', 'w', 'x'].map(function (i) { return $(i).maxLength + ',' + $(i).minLength }).join('|') })
+=== max-min-length-set
+@html <textarea id=t></textarea>
+(function () { var t = $('t'), r = []; t.maxLength = 9; t.minLength = 3; r.push(t.getAttribute('maxlength'), t.getAttribute('minlength')); r.push(err(function () { t.maxLength = -1 }), err(function () { t.minLength = -2 })); r.push(t.maxLength, t.minLength); r.push(err(function () { t.maxLength = 2 }), err(function () { t.minLength = 10 })); r.push(t.maxLength, t.minLength); t.maxLength = '5'; r.push(t.maxLength); t.maxLength = 3.9; r.push(t.maxLength); return r.join('|') })
+=== max-min-length-set-messages
+@html <textarea id=t></textarea>
+(function () { var t = $('t'), r = []; t.maxLength = 9; t.minLength = 3; [function () { t.maxLength = -1 }, function () { t.minLength = -2 }, function () { t.maxLength = 2 }, function () { t.minLength = 10 }].forEach(function (f) { try { f() } catch (e) { r.push(e.name + ':' + e.message) } }); return r.join('|') })
+=== max-length-set-nan
+@html <textarea id=t></textarea>
+(function () { var t = $('t'); t.maxLength = NaN; var a = t.maxLength + ',' + t.getAttribute('maxlength'); t.maxLength = 1e20; return a + '|' + t.maxLength + ',' + t.getAttribute('maxlength') })
+=== reflect-strings
+@html <textarea id=t></textarea>
+(function () { var t = $('t'), r = []; r.push(JSON.stringify([t.placeholder, t.name, t.wrap, t.dirName, t.autocomplete])); t.placeholder = 'p'; t.name = 'n'; t.wrap = 'hard'; t.dirName = 'd.dir'; t.autocomplete = 'off'; r.push(t.getAttribute('placeholder'), t.getAttribute('name'), t.getAttribute('wrap'), t.getAttribute('dirname'), t.getAttribute('autocomplete')); t.setAttribute('wrap', 'bogus'); r.push(t.wrap); t.setAttribute('wrap', 'OFF'); r.push(t.wrap); return r.join('|') })
+=== reflect-bools
+@html <textarea id=t></textarea>
+(function () { var t = $('t'), r = [t.required, t.readOnly, t.disabled]; t.required = true; t.readOnly = true; t.disabled = true; r.push(t.hasAttribute('required'), t.hasAttribute('readonly'), t.hasAttribute('disabled'), t.getAttribute('required'), t.required, t.readOnly, t.disabled); t.readOnly = false; r.push(t.hasAttribute('readonly')); return r.join() })
+=== form-owner
+@html <form id=f><textarea id=a></textarea></form><textarea id=b form=f></textarea><textarea id=c></textarea>
+(function () { return ['a', 'b', 'c'].map(function (i) { return $(i).form === $('f') }).join() })
+=== selection-initial
+@html <textarea id=a>abc</textarea><textarea id=b></textarea><textarea id=c>a&#10;bc</textarea>
+(function () { return ['a', 'b', 'c'].map(function (i) { return sel($(i)) }).join('|') })
+=== selection-after-value-set
+@html <textarea id=t>abc</textarea>
+(function () { var t = $('t'), r = []; t.value = 'hello'; r.push(sel(t)); t.value = 'hi'; r.push(sel(t)); t.value = ''; r.push(sel(t)); return r.join('|') })
+=== selection-set-range
+@html <textarea id=t>abcdef</textarea>
+(function () { var t = $('t'), r = []; t.setSelectionRange(1, 3); r.push(sel(t)); t.setSelectionRange(2, 99, 'backward'); r.push(sel(t)); t.setSelectionRange(5, 1); r.push(sel(t)); t.selectionStart = 2; r.push(sel(t)); t.selectionEnd = 1; r.push(sel(t)); t.selectionDirection = 'forward'; r.push(sel(t)); t.select(); r.push(sel(t)); return r.join('|') })
+=== selection-default-value-change
+@html <textarea id=t>abc</textarea>
+(function () { var t = $('t'), r = [sel(t)]; t.defaultValue = 'longer text'; r.push(sel(t)); t.setSelectionRange(1, 2); t.defaultValue = 'zz'; r.push(sel(t)); return r.join('|') })
+=== selection-surrogate
+@html <textarea id=t></textarea>
+(function () { var t = $('t'); t.value = 'a😀b'; t.setSelectionRange(2, 3); return sel(t) + '|' + t.textLength })
+=== selection-throws-never
+@html <textarea id=t>abc</textarea>
+(function () { var t = $('t'); return [err(function () { return t.setSelectionRange(0) }), err(function () { return t.setSelectionRange(0, 1) }), err(function () { return t.select() })].join() })
+=== labels
+@html <label id=l for=t>L</label><textarea id=t></textarea><label id=m>M<textarea id=u></textarea></label>
+(function () { var t = $('t'), u = $('u'); return [t.labels.length, t.labels[0] === $('l'), u.labels.length, u.labels[0] === $('m'), t.labels === t.labels, Object.prototype.toString.call(t.labels)].join() })
+=== required-readonly-disabled-validity
+@html <textarea id=a required></textarea><textarea id=b required readonly></textarea><textarea id=c required disabled></textarea>
+(function () { return ['a', 'b', 'c'].map(function (i) { return $(i).willValidate + ' ' + $(i).validity.valueMissing }).join('|') })
+=== value-getter-brand
+@html <textarea id=t>x</textarea><input id=i><div id=d></div>
+(function () { var g = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value'); return [err(function () { return g.get.call($('d')) }), err(function () { return g.get.call($('i')) }), err(function () { return g.get.call($('t')) }), err(function () { return Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').get.call($('t')) })].join() })
+=== clone-node
+@html <textarea id=t>abc</textarea>
+(function () { var t = $('t'); t.value = 'dirty'; var c = t.cloneNode(true); return [c.value, c.defaultValue, c.textContent, sel(c)].join('|') })
+=== clone-node-after-text-edit
+@html <textarea id=t>abc</textarea>
+(function () { var t = $('t'); t.firstChild.data = 'edited'; var c = t.cloneNode(true); return [c.value, c.defaultValue].join('|') })
+=== inner-text-and-text-content
+@html <textarea id=t>abc</textarea>
+(function () { var t = $('t'); t.value = 'x'; return [t.textContent, t.innerHTML, t.outerHTML].join('|') })
+=== value-with-markup-chars
+@html <textarea id=t></textarea>
+(function () { var t = $('t'); t.value = '<b>&amp;</b>'; return [t.value, t.innerHTML, t.textLength].join('|') })
+=== form-reset-keeps-nothing
+@html <form id=f><textarea id=t>abc</textarea></form>
+(function () { var t = $('t'); t.value = 'x'; t.setSelectionRange(0, 1); $('f').reset(); return [t.value, sel(t)].join('|') })

@@ -1,0 +1,33 @@
+interface	function,true,true,[object HTMLLabelElement],true,TypeError,truetruetrue
+control-for	a
+control-nested	a
+control-for-wins-over-nested	b
+control-for-non-labelable	null
+control-for-missing	null
+control-for-empty	null
+control-none	null
+control-labelable-kinds	i|null|s|t|u|o|m|p|null|null
+control-nested-first-labelable	t
+control-for-first-id-in-tree-order	null
+control-detached	,,true
+control-for-detached-but-id-in-doc	null|a
+control-live	null,a,null,b,null
+control-same-object	true
+html-for	a|""|q|q|z|5
+label-form	null,null,null,null
+label-form-attr	f
+label-form-from-control	null,i
+input-labels	l1+l2+l3||3|0
+input-labels-tree-order	z+y
+input-labels-hidden	null|
+input-labels-live	1,2,true,1,0
+input-labels-type-change	1,null,1
+labels-api	1,true,,true,,function,1,true
+labels-readonly	function,undefined,1
+select-labels	l|m
+button-labels	l
+label-in-label	a|b|l|m
+label-click-none-here	function
+non-label	false,false
+brand	TypeError,ok null
+wrapper-identity	true,true,true

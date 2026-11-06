@@ -1,0 +1,29 @@
+reset-method	function,0,
+reset-input-text	def|""|x|def
+reset-input-default-value-tracking	def|new|y|newer
+reset-checkbox	0101|1010
+reset-checkbox-default-checked	true,false,true
+reset-checkbox-value-attr	w
+reset-hidden-and-button-types	H,S,b
+reset-textarea	def,""
+reset-textarea-after-default-change	x|newdef
+reset-select-single	010|001|010|b
+reset-select-default-first	10 a
+reset-select-none-selected	00 10
+reset-select-multiple	101|011|101
+reset-select-size	00 -1
+reset-select-default-selected-changed	001|100|001
+reset-select-option-dirtiness-cleared	00|10|00|10
+reset-event	capture,reset,true,true,true,true,2,Event,x,target,reset,true,true,true,true,2,Event,x,doc
+reset-event-canceled	x
+reset-event-before-reset	x,d
+reset-event-nested-reset	1
+reset-listed-only-owned	d,d,x
+reset-detached-form	d1
+reset-selection	3,3
+reset-brand	TypeError,TypeError,ok undefined
+reset-validity-after	true,false
+reset-custom-validity-kept	x
+reset-radio-group-other-form	true,true
+reset-fieldset-nesting	d
+reset-button-not-reset	w

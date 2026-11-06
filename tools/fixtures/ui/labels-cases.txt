@@ -1,0 +1,103 @@
+var $ = function (i) { return document.getElementById(i) };
+var err = function (f) { try { var v = f(); return 'ok ' + String(v) } catch (e) { return e.name } };
+var ids = function (l) { return l === null ? 'null' : Array.prototype.map.call(l, function (e) { return e.id }).join('+') };
+var ctl = function (l) { return l.control === null ? 'null' : l.control.id };
+=== interface
+@html <label id=l></label>
+(function () { var l = $('l'); return [typeof HTMLLabelElement, l instanceof HTMLLabelElement, l instanceof HTMLElement, Object.prototype.toString.call(l), document.createElement('label') instanceof HTMLLabelElement, err(function () { return new HTMLLabelElement() }), ['control', 'htmlFor', 'form'].map(function (k) { return k in l }).join('')].join() })
+=== control-for
+@html <label id=l for=a>L</label><input id=a><input id=b>
+(function () { return ctl($('l')) })
+=== control-nested
+@html <label id=l>L<span><input id=a></span><input id=b></label>
+(function () { return ctl($('l')) })
+=== control-for-wins-over-nested
+@html <label id=l for=b><input id=a></label><input id=b>
+(function () { return ctl($('l')) })
+=== control-for-non-labelable
+@html <label id=l for=d><input id=a></label><div id=d></div>
+(function () { return ctl($('l')) })
+=== control-for-missing
+@html <label id=l for=zzz><input id=a></label>
+(function () { return ctl($('l')) })
+=== control-for-empty
+@html <label id=l for=""><input id=a></label>
+(function () { return ctl($('l')) })
+=== control-none
+@html <label id=l>just text</label>
+(function () { return ctl($('l')) })
+=== control-labelable-kinds
+@html <label id=a for=i>x</label><input id=i><label id=b for=h>x</label><input id=h type=hidden><label id=c for=s>x</label><select id=s></select><label id=d for=t>x</label><textarea id=t></textarea><label id=e for=u>x</label><button id=u></button><label id=f for=o>x</label><output id=o></output><label id=g for=m>x</label><meter id=m></meter><label id=h2 for=p>x</label><progress id=p></progress><label id=i2 for=fs>x</label><fieldset id=fs></fieldset><label id=j for=ob>x</label><object id=ob></object>
+(function () { return ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h2', 'i2', 'j'].map(function (i) { return ctl($(i)) }).join('|') })
+=== control-nested-first-labelable
+@html <label id=l><span id=s></span><input id=h type=hidden><textarea id=t></textarea><input id=i></label>
+(function () { return ctl($('l')) })
+=== control-for-first-id-in-tree-order
+@html <label id=l for=x></label><div id=x></div><input id=x>
+(function () { return ctl($('l')) })
+=== control-detached
+@html <p></p>
+(function () { var l = document.createElement('label'), i = document.createElement('input'); i.id = 'zz'; l.htmlFor = 'zz'; var r = [l.control]; l.appendChild(document.createElement('span')); r.push(l.control); l.removeAttribute('for'); l.firstChild.appendChild(i); r.push(l.control === i); return r.join() })
+=== control-for-detached-but-id-in-doc
+@html <label id=l for=a>x</label><input id=a>
+(function () { var l = $('l').cloneNode(true); return String(l.control) + '|' + String(l.htmlFor) })
+=== control-live
+@html <label id=l for=a>x</label>
+(function () { var r = [ctl($('l'))]; var i = document.createElement('input'); i.id = 'a'; document.body.appendChild(i); r.push(ctl($('l'))); i.id = 'b'; r.push(ctl($('l'))); $('l').htmlFor = 'b'; r.push(ctl($('l'))); i.remove(); r.push(ctl($('l'))); return r.join() })
+=== control-same-object
+@html <label id=l for=a>x</label><input id=a>
+(function () { return $('l').control === $('a') })
+=== html-for
+@html <label id=l for=a>x</label><label id=m></label>
+(function () { var l = $('l'), m = $('m'), r = [l.htmlFor, JSON.stringify(m.htmlFor)]; m.htmlFor = 'q'; r.push(m.getAttribute('for'), m.htmlFor); l.setAttribute('for', 'z'); r.push(l.htmlFor); m.htmlFor = 5; r.push(m.getAttribute('for')); return r.join('|') })
+=== label-form
+@html <form id=f><label id=a for=i>x</label><label id=b>y</label></form><input id=i><label id=c>z</label><form id=g><label id=d for=i>x</label></form>
+(function () { return ['a', 'b', 'c', 'd'].map(function (i) { var f = $(i).form; return f === null ? 'null' : f.id }).join() })
+=== label-form-attr
+@html <form id=f></form><form id=g><label id=a for=i>x</label></form><input id=i form=f>
+(function () { return $('a').form === null ? 'null' : $('a').form.id })
+=== label-form-from-control
+@html <form id=f></form><label id=a form=f><input id=i></label>
+(function () { var l = $('a'); return [l.form === null ? 'null' : l.form.id, l.control.id].join() })
+=== input-labels
+@html <label id=l1 for=a>1</label><label id=l2>2<input id=a></label><label id=l3 for=a>3</label><input id=b>
+(function () { return [ids($('a').labels), ids($('b').labels), $('a').labels.length, $('b').labels.length].join('|') })
+=== input-labels-tree-order
+@html <label id=z for=a>z</label><input id=a><label id=y for=a>y</label>
+(function () { return ids($('a').labels) })
+=== input-labels-hidden
+@html <label id=l for=h>x</label><input id=h type=hidden><input id=t>
+(function () { return String($('h').labels) + '|' + ids($('t').labels) })
+=== input-labels-live
+@html <input id=a><label id=l for=a>x</label>
+(function () { var a = $('a'), labs = a.labels, r = [labs.length]; var m = document.createElement('label'); m.htmlFor = 'a'; document.body.appendChild(m); r.push(labs.length, a.labels === labs); m.remove(); r.push(labs.length); $('l').htmlFor = 'q'; r.push(labs.length); return r.join() })
+=== input-labels-type-change
+@html <label id=l for=a>x</label><input id=a>
+(function () { var a = $('a'), r = [a.labels.length]; a.type = 'hidden'; r.push(String(a.labels)); a.type = 'text'; r.push(a.labels.length); return r.join() })
+=== labels-api
+@html <label id=l for=a>x</label><input id=a>
+(function () { var ls = $('a').labels; return [ls.length, ls.item(0) === $('l'), ls.item(1), ls[0] === $('l'), ls[1], typeof ls.forEach, Array.prototype.slice.call(ls).length, Object.getPrototypeOf(ls) === Object.getPrototypeOf(document.getElementsByName('x'))].join() })
+=== labels-readonly
+@html <label id=l for=a>x</label><input id=a>
+(function () { var a = $('a'); var d = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'labels'); a.labels = 5; return typeof d.get + ',' + d.set + ',' + (a.labels.length) })
+=== select-labels
+@html <label for=s id=l>x</label><select id=s></select><label id=m>y<button id=b></button></label>
+(function () { return ids($('s').labels) + '|' + ids($('b').labels) })
+=== button-labels
+@html <label id=l for=b>x</label><button id=b></button>
+(function () { return ids($('b').labels) })
+=== label-in-label
+@html <label id=l for=a><label id=m><input id=b></label></label><input id=a>
+(function () { return [ctl($('l')), ctl($('m')), ids($('a').labels), ids($('b').labels)].join('|') })
+=== label-click-none-here
+@html <label id=l for=a>x</label><input id=a>
+(function () { return typeof $('l').click })
+=== non-label
+@html <div id=d for=a></div><input id=a>
+(function () { return ['control', 'htmlFor'].map(function (k) { return k in $('d') }).join() })
+=== brand
+@html <label id=l></label><div id=d></div>
+(function () { var g = Object.getOwnPropertyDescriptor(HTMLLabelElement.prototype, 'control').get; return [err(function () { return g.call($('d')) }), err(function () { return g.call($('l')) })].join() })
+=== wrapper-identity
+@html <label id=l></label>
+(function () { var a = $('l'); return [a === document.getElementsByTagName('label')[0], Object.getPrototypeOf(a) === HTMLLabelElement.prototype, Object.getPrototypeOf(HTMLLabelElement.prototype) === HTMLElement.prototype].join() })

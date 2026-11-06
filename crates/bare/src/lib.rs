@@ -33,6 +33,10 @@ mod browser_nodelist;
 mod browser_select;
 #[cfg(test)]
 mod browser_select_tests;
+mod browser_controls;
+mod browser_textarea;
+#[cfg(test)]
+mod browser_controls_tests;
 mod browser_dataset;
 mod browser_abort;
 mod browser_xhr;

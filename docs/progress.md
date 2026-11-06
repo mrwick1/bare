@@ -695,3 +695,32 @@ Pages and the `DocumentFragment` work need four more insert calls. They now matc
 - Cost: no row of 85 is over +0.5% in `instructions:u` (`tools/js/instr.sh`, minimum of 3) against main 3a60a7d. The worst are `session_load chain 10` +0.21% and `platform_load media 10` +0.20%. `replaceChildren` is one function object on both protos (Chrome has two): `Element.prototype.replaceChildren === DocumentFragment.prototype.replaceChildren` is true.
 - Gaps: `Document.prototype.replaceChildren` is absent. `<template>` markup in `insertAdjacentHTML` is `Unsupported`, as for `innerHTML` (the fragment parser has no template contents). A fragment into a Document node is `Unsupported`. A script put in by a page script runs when that script ends, not at the insert.
 - Not tested: a live login on the staging pages; clippy; `replaceChildren` on a shadow root against Chrome; the effect of the shared function identity on page code.
+
+## Form controls: validation, textarea, labels and reset
+
+Problem: React, Radix and react-hook-form forms need more than the first select work gave. `textarea.value` was a value that script set, with no `defaultValue`, no selection and no typing. `input`, `select` and `textarea` had no `validity`, `validationMessage`, `setCustomValidity` or `labels`. `form.reset()` did not exist. A form submit checked only a few input kinds.
+
+Done: `browser_textarea.rs` is the full `HTMLTextAreaElement` (`defaultValue`, a dirty value flag, `textLength`, `rows`, `cols`, `minLength`, `maxLength` with the `IndexSizeError` rules, `selectionStart`, `selectionEnd`, `selectionDirection`, `setSelectionRange`, `select`, the reflected attributes). `browser_controls.rs` is the constraint validation: `ValidityState` with the 10 flags and `valid`, `willValidate`, `validationMessage` with the Chrome texts, `setCustomValidity`, `checkValidity`, `reportValidity` (fires a trusted `invalid`, draws nothing), `form.checkValidity`, and the rules of the value sanitization algorithm. It also holds `labels` (a live `NodeList`), `HTMLLabelElement` (`control`, `htmlFor`, `form`) and `form.reset()` with the reset steps of input, select and textarea and the `reset` event. A reset button resets its form. A submit now checks the same constraints (`pattern`, `step`, `min`, `max`, `minlength`, `maxlength`, select and textarea) and sends the API value of a textarea and the selectedness of a select. The window edits a textarea (typing, Enter, Backspace, Delete, `maxlength`, caret by click) and draws its lines.
+
+Results: 4 topic files compare 182 cases with headless Chrome 155 (`validity` 83, `textarea` 37, `labels` 33, `reset` 29; `node tools/ui/chrome_topic.mjs TOPIC`). 5 Rust tests cover the sanitization, the step arithmetic, the e-mail and URL checks and the window. `cargo test --workspace` passes. Cost: 124 `instructions:u` rows against main 3a60a7d, none worse than +0.5% (worst `select_load churn 10` +0.420%, best `selection_load short 10` -0.481%); see [resources.md](resources.md#form-controls-validation-textarea-labels-and-reset).
+
+Not built, on purpose: `select[i] = option`, `select.options[i] = option` and `= null`. The engine's host-indexed objects have a read side only (`IndexedSource` has `indexed_len` and `indexed_item`, both `&self`), so a write cannot reach the host. The fix needs a write method in `crates/js`; this change does not touch the engine. `onreset` and `oninvalid` handler properties are absent (`addEventListener` works). Two checked radios of one group in the markup both read as checked until a script or a reset checks one (Chrome clears the first when the parser inserts the second). The window does not wrap or scroll a textarea, and Up, Down, Home and End do not move by line.
+
+Lazy members: the new members of `HTMLInputElement.prototype` and `HTMLButtonElement.prototype` (`validity`, `willValidate`, `validationMessage`, `setCustomValidity`, `labels`, `required`) are made when the first `input` or `button` wrapper is made, and `form.reset` when the first `form` wrapper is made, and the functions are shared with the select and textarea prototypes. A page without a control pays nothing. The deviation: `Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'validity')` is `undefined` until the page has touched an `input`. `ValidityState` and `HTMLLabelElement` are lazy globals installed last.
+
+On main 52d5d5a, with no local change to the engine, all ten live routes render, and no route logs a console error. The login now settles too; on 58864f0 it ended at the time budget. One run each, real clock, on a machine that ran parallel builds:
+
+| Route | Result | Time |
+| --- | --- | --- |
+| `/` | overview, 62 rows | 6.6 s |
+| `/calls` | "0 calls today", 2 rows | 14.6 s |
+| `/agents` | "33 agents" | 6.1 s |
+| `/journeys` | "6 journeys" | 8.1 s |
+| `/results` | "This agent has no journey yet" | 5.8 s |
+| `/clients` | "Clients" | 4.9 s |
+| `/disputes?tab=open` | "Disputes" | 5.7 s |
+| `/agents/new` | "Create agent", "Setup", 3 rows | 4.8 s |
+| `/calls?live=1` | "0 live calls" | 14.7 s |
+| `/journeys?status=paused` | "3 journeys, paused" | 9.0 s |
+
+The `DocumentFragment` constructor (#182) fixed `/results` and `/agents/new`. The `/results` text is an empty state of the app. It was not compared with Chrome on the same account (to verify). `/calls` took 34.7 s on 58864f0 and 14.6 s now; one run each, so the cause of the change is not known. The runs only load and render pages. No click, form submit or data change was tested yet.

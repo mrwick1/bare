@@ -394,6 +394,8 @@ pub struct Dom {
     pub(crate) web: crate::browser_web::WebHost,
     /// `HTMLAnchorElement`, `HTMLAreaElement` and `HTMLTemplateElement` (`browser_elements.rs`).
     pub(crate) els: crate::browser_elements::Els,
+    /// Constraint validation, `labels` and `form.reset()` (`browser_controls.rs`).
+    pub(crate) ctl: crate::browser_controls::CtlHost,
 }
 
 impl Host for Dom {
@@ -430,6 +432,7 @@ impl Host for Dom {
         crate::browser_xhr::roots(self, out);
         crate::browser_web::roots(self, out);
         crate::browser_elements::roots(self, out);
+        crate::browser_controls::roots(self, out);
         self.resize_roots(out);
         self.frame_roots(out);
         self.idle_roots(out);
@@ -501,6 +504,7 @@ impl Host for Dom {
         crate::browser_select::prune(self, live);
         crate::browser_dataset::prune(self, live);
         crate::browser_web::prune(self, live);
+        crate::browser_controls::prune(self, live);
         let mut guard = self.st.borrow_mut();
         let st = &mut *guard;
         st.by_obj.retain(|&o, t| matches!(t, Target::Window) || live(o));
@@ -664,12 +668,10 @@ impl Dom {
                         Ns::Svg => p.svg,
                         Ns::MathMl => p.element,
                         _ => match doc.atom_str(name) {
-                            "input" => p.input,
                             "iframe" => p.iframe,
                             "link" => p.link,
-                            "form" => p.form,
-                            "button" => p.button,
                             "a" | "area" | "template" => crate::browser_elements::proto(self, it, doc.atom_str(name))?,
+                            t @ ("input" | "form" | "button" | "label") => crate::browser_controls::proto_for(self, it, t)?,
                             "script" => self.scripts.proto.get().copied().unwrap_or(p.html),
                             t @ ("select" | "option" | "optgroup" | "textarea") => crate::browser_select::proto_for(self, it, t)?,
                             _ => p.html,
@@ -965,7 +967,8 @@ impl Dom {
         crate::browser_select::install(self, it)?;
         // Last: a new host function earlier in this list moves the id of every one after it.
         crate::browser_elements::install(self, it)?;
-        nd::install_late(self, it)
+        nd::install_late(self, it)?;
+        crate::browser_controls::install(self, it)
     }
 
     pub(crate) fn define_accessor(&self, it: &mut Interp<'_>, o: ObjId, key: PropertyKey, get: ObjId, set: Option<ObjId>) -> R<()> {
@@ -1245,6 +1248,7 @@ impl Browser {
             abort: Default::default(),
             web: Default::default(),
             els: Default::default(),
+            ctl: Default::default(),
         });
         it.set_host(dom.clone())?;
         it.heap.set_indexed_source(dom.clone());

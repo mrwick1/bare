@@ -412,7 +412,10 @@ impl Builder<'_> {
                     }
                 }
                 FragmentKind::Text { start, end } => {
-                    self.text(&g, start as usize, end as usize);
+                    // The host draws the text of a textarea that it hosts (the value, not the text children).
+                    if self.list.hosted.is_empty() || !self.doc.parent(g.node).is_some_and(|p| self.list.hosted.iter().any(|h| h.0 == p)) {
+                        self.text(&g, start as usize, end as usize);
+                    }
                     j += 1;
                 }
                 FragmentKind::Marker { number } => {
@@ -767,8 +770,15 @@ impl Builder<'_> {
                 };
                 (text, argb(style.color(Property::TextColor)))
             }
-            // The text of a textarea is its child, and layout places it. Only the placeholder is ours.
-            Control::TextArea if self.doc.children(f.node).next().is_none() => (get(a.placeholder).to_string(), 0xff75_7575),
+            // The text of a textarea is its child, and layout places it. Only the placeholder is ours. A hosted textarea
+            // has its text drawn by the host: the placeholder shows when that value is empty.
+            Control::TextArea => {
+                let hosted = self.list.hosted.iter().find(|h| h.0 == f.node).map(|h| h.1);
+                if hosted == Some(true) || (hosted.is_none() && self.doc.children(f.node).next().is_some()) {
+                    return;
+                }
+                (get(a.placeholder).to_string(), 0xff75_7575)
+            }
             _ => return,
         };
         if value.is_empty() || color >> 24 == 0 {
