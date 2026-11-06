@@ -89,10 +89,36 @@ use bare_js::heap::{Heap, HeapLimits, PropertyDescriptor};
 use bare_js::value::{ObjId, PropertyKey, Value};
 use std::cell::{OnceCell, RefCell};
 use std::collections::{HashMap, VecDeque};
+use std::hash::{BuildHasherDefault, Hasher};
 use std::rc::Rc;
 use std::time::Instant;
 
 pub(crate) type R<T> = Result<T, Error>;
+
+/// A multiply hash for maps whose keys the engine numbers (`ObjId`, `NodeId`). SipHash costs about 60 instructions for one
+/// key and these maps are read at each host property access. The page cannot choose these numbers.
+#[derive(Default)]
+pub(crate) struct IdHash(u64);
+impl IdHash {
+    fn add(&mut self, x: u64) {
+        self.0 = (self.0.rotate_left(5) ^ x).wrapping_mul(0x517c_c1b7_2722_0a95);
+    }
+}
+impl Hasher for IdHash {
+    fn write(&mut self, b: &[u8]) {
+        b.iter().for_each(|&x| self.add(x as u64));
+    }
+    fn write_u32(&mut self, x: u32) {
+        self.add(x as u64);
+    }
+    fn write_u64(&mut self, x: u64) {
+        self.add(x);
+    }
+    fn finish(&self) -> u64 {
+        self.0.rotate_left(26) // the multiply leaves the best bits on top; hashbrown reads the low ones
+    }
+}
+pub(crate) type IdMap<K, V> = HashMap<K, V, BuildHasherDefault<IdHash>>;
 /// A host method: the DOM, the interpreter, `this`, the arguments.
 pub(crate) type H = fn(&Dom, &mut Interp<'_>, Value, &[Value]) -> R<Value>;
 
@@ -220,8 +246,8 @@ pub(crate) struct Input {
 
 #[derive(Default)]
 pub(crate) struct State {
-    pub by_node: HashMap<NodeId, ObjId>,
-    pub by_obj: HashMap<ObjId, Target>,
+    pub by_node: IdMap<NodeId, ObjId>,
+    pub by_obj: IdMap<ObjId, Target>,
     pub listeners: HashMap<Target, Vec<Listener>>,
     pub n_listeners: usize,
     pub next_id: u64,
