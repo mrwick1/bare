@@ -495,7 +495,8 @@ fn preceding(doc: &Document, root: NodeId, n: NodeId) -> Option<NodeId> {
     if n == root {
         return None;
     }
-    Some(doc.prev_sibling(n).map_or_else(|| doc.parent(n).expect("inside root"), |p| last_inclusive(doc, p)))
+    // A node that left the tree (a reference node that a removal did not move) has no parent: nothing precedes it.
+    doc.prev_sibling(n).map_or_else(|| doc.parent(n), |p| Some(last_inclusive(doc, p)))
 }
 
 impl Walker {

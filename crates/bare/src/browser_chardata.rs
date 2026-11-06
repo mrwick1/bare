@@ -46,7 +46,7 @@ fn out_of_range(d: &Dom, it: &mut Interp<'_>, who: &str, iface: &str, off: u32, 
 }
 
 /// `replaceData(offset, count, data)` on the text of `n`: the live ranges first, then the text.
-fn replace(d: &Dom, it: &mut Interp<'_>, who: &str, n: bare_html::dom::NodeId, text: &str, off: u32, count: u32, data: &str) -> V {
+fn replace(d: &Dom, it: &mut Interp<'_>, who: &str, (n, text): (bare_html::dom::NodeId, &str), off: u32, count: u32, data: &str) -> V {
     let u: Vec<u16> = text.encode_utf16().collect();
     let len = u.len() as u32;
     if off > len {
@@ -80,7 +80,7 @@ pub(crate) fn append_data(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]
     let (n, text) = data_of(d, it, this)?;
     args(it, "appendData", "CharacterData", a, 1)?;
     let data = d.string_arg(it, arg(a, 0))?;
-    replace(d, it, "appendData", n, &text, utf16_len(&text), 0, &data)
+    replace(d, it, "appendData", (n, &text), utf16_len(&text), 0, &data)
 }
 
 pub(crate) fn insert_data(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
@@ -88,14 +88,14 @@ pub(crate) fn insert_data(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]
     args(it, "insertData", "CharacterData", a, 2)?;
     let off = offset(it, a, 0)?;
     let data = d.string_arg(it, arg(a, 1))?;
-    replace(d, it, "insertData", n, &text, off, 0, &data)
+    replace(d, it, "insertData", (n, &text), off, 0, &data)
 }
 
 pub(crate) fn delete_data(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
     let (n, text) = data_of(d, it, this)?;
     args(it, "deleteData", "CharacterData", a, 2)?;
     let (off, count) = (offset(it, a, 0)?, offset(it, a, 1)?);
-    replace(d, it, "deleteData", n, &text, off, count, "")
+    replace(d, it, "deleteData", (n, &text), off, count, "")
 }
 
 pub(crate) fn replace_data(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
@@ -103,7 +103,7 @@ pub(crate) fn replace_data(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value
     args(it, "replaceData", "CharacterData", a, 3)?;
     let (off, count) = (offset(it, a, 0)?, offset(it, a, 1)?);
     let data = d.string_arg(it, arg(a, 2))?;
-    replace(d, it, "replaceData", n, &text, off, count, &data)
+    replace(d, it, "replaceData", (n, &text), off, count, &data)
 }
 
 pub(crate) fn split_text(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {

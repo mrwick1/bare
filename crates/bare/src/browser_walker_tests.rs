@@ -80,3 +80,11 @@ fn a_filter_that_calls_its_own_iterator_throws() {
     assert_eq!(js(&mut b, "var n = document.createNodeIterator(document.body, 1, function () { try { n.nextNode() } catch (e) { return e.name === 'InvalidStateError' ? 1 : 2 } return 1 }); n.nextNode() !== null"), "true");
     assert_eq!(js(&mut b, "var m = document.createNodeIterator(document.body, 1, function () { m.nextNode() }); try { m.nextNode() } catch (e) { e.name }"), "InvalidStateError");
 }
+
+#[test]
+fn an_iterator_whose_reference_node_left_the_tree_goes_back_to_null() {
+    // Chrome keeps the reference node when no node follows the removed one in the root, so the iterator is on a detached node.
+    let mut b = page("<div id=r><p id=a>A</p><p id=b>B</p></div>");
+    js(&mut b, "var n = document.createNodeIterator(document.getElementById('r'), 1); n.nextNode(); n.nextNode(); n.nextNode(); n.previousNode(); document.getElementById('b').remove();");
+    assert_eq!(js(&mut b, "n.referenceNode.id + String(n.pointerBeforeReferenceNode) + String(n.previousNode())"), "btruenull");
+}

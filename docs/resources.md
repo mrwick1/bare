@@ -3600,7 +3600,22 @@ Deviations:
 
 Checks: `tools/fixtures/ui/liverange-cases.txt` (63 cases) and `iterator-cases.txt` (54 cases) match Chrome 155 (`node tools/ui/chrome_topic.mjs liverange iterator`, answers in `chrome-liverange.txt` and `chrome-iterator.txt`). The Rust tests also cover the shared watcher with a `MutationObserver`, the lazy globals, a collect that drops the watcher, the two bounds, a tree of 2,000 children with a range, the recursion error and the methods that the two objects do not share.
 
-COST_PLACEHOLDER
+Cost: `tools/js/instr.sh` method (`instructions:u`, minimum of 3 runs, `glibc.malloc.tcache_count=65535`), main 74b924d against this build, each in its own `CARGO_TARGET_DIR` under `/data/bare-tmp`. 52 rows: `browser_load` (9), `style_load` (15), `sheets_load` (9), `loader_load` (9), `scroll_load`, `eval_load` (8) and startup. No row is over +0.5%. The worst is `browser_load event 100` at +0.347% (8,019,654,660 to 8,047,505,036), then `event 10` +0.337% and `mutation 10` +0.296%. The best is `sheets_load dynamic 100` at -0.200%. The seven new host functions and `createNodeIterator` add a fixed cost at start (about 5.9k instructions each). A first run without the large cache gave `style_load churn 1` at +0.51%; the cache removes that swing (see the section on the glibc allocator), and the same row is +0.18% with it.
+
+Load (`tools/js/range_load.sh`, release, 1 GiB address space cap, one process for each row):
+
+| Case | Scale | Work | Time | CPU | Peak RSS |
+| --- | ---: | --- | ---: | ---: | ---: |
+| live | 1 | 1,000 operations, 20 ranges | 153 ms | 70 ms | 8.6 MiB |
+| live | 10 | 10,000 | 1.5 s | 610 ms | 9.3 MiB |
+| live | 100 | 100,000 | 7.5 s | 5.6 s | 13.3 MiB |
+| iter | 1 | 1,000 items | 44 ms | 20 ms | 8.5 MiB |
+| iter | 10 | 10,000 | 470 ms | 380 ms | 11.7 MiB |
+| iter | 100 | 100,000 (10,000 backward) | 1.4 s | 1.2 s | 17.2 MiB |
+
+`live` checks all 40 points against a model in the script after every 500 operations (inserts, removals, `insertData`, `deleteData`). The time is mostly the model loop in JS. `iter` removes each node that `nextNode` returned, then walks back over a list and clears it under the iterator. The wall time of the first rows is above the CPU time because the perf matrix ran at the same time. A collect traces every wrapper of a node that is in the tree, so a list of 10,000 wrapped nodes makes each collect slow (this was the same before this change).
+
+Not tested: the live staging login on this build; a range over a tree of 100,000 nodes with a page that edits it from many places; `outerHTML` joins of Text nodes under a range; `before`, `after`, `replaceWith` and `insertAdjacentHTML` (not in the host); a `DocumentFragment` root of an iterator; Chrome cases of a filter that recurses.
 
 ## HTTP methods
 
