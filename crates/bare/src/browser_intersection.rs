@@ -25,8 +25,7 @@
 //! - Thresholds are kept as `f32`, as Chrome does (`0.1` reads back `0.10000000149011612`).
 //!
 //! Gates (`Unsupported`, none is faked)
-//! - `trackVisibility: true` (it needs occlusion, opacity and transforms). `position: sticky` on the target or on a box of its chain (sticky is not
-//!   modelled, `browser_scroll.rs`). The gates of the cascade and the layout (a missing sheet, a connected shadow tree).
+//! - `trackVisibility: true` (it needs occlusion, opacity and transforms). The gates of the cascade and the layout (a missing sheet, a connected shadow tree).
 //!
 //! Deviations (on purpose)
 //! - Entries and rectangles are own read-only data properties and plain objects with the eight fields, not prototype getters and `DOMRectReadOnly`.
@@ -414,7 +413,6 @@ fn keyword(styles: &bare_css::cascade::Styles, n: NodeId, p: Property) -> Keywor
 fn container(g: &crate::browser_scroll::Geo, cur: NodeId) -> R<Option<NodeId>> {
     let mut up = g.doc.parent(cur);
     match keyword(g.styles, cur, Property::Position) {
-        Keyword::Sticky => return Err(Dom::gate("IntersectionObserver over position: sticky (it is not modelled)")),
         Keyword::Fixed => return Ok(None),
         Keyword::Absolute => {
             while let Some(a) = up.filter(|&a| matches!(g.doc.data(a), NodeData::Element { .. })) {

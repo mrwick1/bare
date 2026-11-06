@@ -71,6 +71,13 @@ impl Painter {
 
     /// Paint a page into `canvas`. The whole canvas is drawn again: no part of the old picture stays.
     pub fn paint(&mut self, doc: &Document, styles: &Styles, layout: &Layout, canvas: &mut Canvas) {
+        // A sticky box is moved even when the page is not scrolled (`top: 20px` pushes it down): that needs the scroll containers.
+        if styles.each().any(|s| s.get(bare_css::values::Property::Position) == bare_css::values::Value::Keyword(bare_css::values::Keyword::Sticky)) {
+            let areas = bare_layout::scroll::areas(doc, styles, layout);
+            self.build(doc, styles, layout, &areas, (canvas.width, canvas.height));
+            self.draw_view(canvas, Some(&View { scroll: &Scroll::default(), areas: &areas, bars: (false, false) }));
+            return;
+        }
         self.list.build(doc, styles, layout, (canvas.width, canvas.height));
         self.draw(canvas);
     }
@@ -143,7 +150,14 @@ impl Painter {
                         off = (off.0 - sx.round() as i32, off.1 - sy.round() as i32);
                     }
                 }
-                Item::PopScroll => off = offsets.pop().expect("a scroll container is open"),
+                Item::PopScroll | Item::PopSticky => off = offsets.pop().expect("a scroll container or a sticky box is open"),
+                Item::PushSticky(k) => {
+                    offsets.push(off);
+                    if let Some(v) = view {
+                        let (own, _) = v.areas.stuck(k as usize, (v.scroll.x, v.scroll.y), &|n| v.scroll.of(n));
+                        off = (off.0 + own.0.round() as i32, off.1 + own.1.round() as i32);
+                    }
+                }
                 Item::PushFixed => {
                     // A fixed box is cut by the window only, and does not move.
                     offsets.push(off);

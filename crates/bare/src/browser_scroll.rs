@@ -23,7 +23,7 @@
 //!   scrolled. The page's event is sent to the document and bubbles to the window; an element's does not bubble.
 //!
 //! Gates and differences (recorded, none is faked)
-//! - `position: sticky` is not modelled (it scrolls like a normal box). `scroll-behavior`, `scroll-snap` and `overscroll-behavior` are
+//! - `position: sticky` is modelled (`bare_layout::sticky`): the reads below give the stuck place for the offsets of that moment. `scroll-behavior`, `scroll-snap` and `overscroll-behavior` are
 //!   ignored; every scroll is instant (Chrome animates a key scroll, then ends at the same place).
 //! - `scrollWidth` and `scrollHeight` of an element that does not clip are its padding box (its overflow is not counted).
 //! - The keys scroll the page only, not the container that holds the focus. A script `focus()` does not scroll; Tab does.
@@ -211,6 +211,8 @@ impl Geo<'_> {
     /// containers around it taken off. A box in a fixed box does not move with the page. `None`: no box.
     pub fn client_rect(&self, s: &Scroll, n: NodeId) -> Option<Rect> {
         let mut r = border_box(self.layout, n)?;
+        let (sx, sy) = self.stuck(s, n);
+        (r.x, r.y) = (r.x + sx, r.y + sy);
         let (mut dx, mut dy) = (0.0, 0.0);
         let mut fixed = keyword(self.styles, n, Property::Position) == Keyword::Fixed;
         let mut cur = self.doc.parent(n);
@@ -230,9 +232,17 @@ impl Geo<'_> {
         Some(r)
     }
 
+    /// How far `position: sticky` moves `n` from its normal place for these offsets: the offset of the nearest sticky box at or above it, which
+    /// holds the offsets of the sticky boxes above that one. A box in a fixed box is not moved.
+    pub fn stuck(&self, s: &Scroll, n: NodeId) -> (f32, f32) {
+        stuck(self.doc, self.styles, self.areas, s, n)
+    }
+
     /// Scroll the containers around `n` and then the page so that `n` shows: `ax` along the line, `ay` across it.
     pub fn reveal(&self, s: &mut Scroll, n: NodeId, ax: Align, ay: Align) -> bool {
         let Some(mut r) = border_box(self.layout, n) else { return false };
+        let (sx, sy) = self.stuck(s, n);
+        (r.x, r.y) = (r.x + sx, r.y + sy);
         let before = s.clone();
         let mut path = Vec::new();
         let mut cur = self.doc.parent(n);
@@ -293,6 +303,25 @@ fn align(start: f32, len: f32, view0: f32, vlen: f32, how: Align) -> f32 {
     }
 }
 
+/// How far `position: sticky` moves `n` from its normal place for the offsets `s`: the offset of the nearest sticky box at or above it, which
+/// holds the offsets of the sticky boxes above that one. A box in a fixed box is not moved.
+fn stuck(doc: &Document, styles: &Styles, areas: &Areas, s: &Scroll, n: NodeId) -> (f32, f32) {
+    if areas.sticky.is_empty() {
+        return (0.0, 0.0);
+    }
+    let mut cur = Some(n);
+    while let Some(a) = cur {
+        if keyword(styles, a, Property::Position) == Keyword::Fixed {
+            break;
+        }
+        if let Some(k) = areas.sticky_of(a) {
+            return areas.stuck(k, (s.x, s.y), &|c| s.of(c)).1;
+        }
+        cur = doc.parent(a);
+    }
+    (0.0, 0.0)
+}
+
 /// The page bars that `areas` needs when the window is `vp` and the bars are `bars` now.
 fn need_bars(a: &Areas, vp: (f32, f32), bars: (bool, bool)) -> (bool, bool) {
     let want = |k: Keyword, content: f32, avail: f32| match k {
@@ -315,6 +344,9 @@ impl Dom {
             let at = (vp.0 - if bars.0 { BAR } else { 0.0 }, vp.1 - if bars.1 { BAR } else { 0.0 });
             let layout = self.layout_at(it, styles, at)?;
             let areas = scroll::areas(&self.doc.borrow(), styles, &layout);
+            if let Some(why) = areas.gate {
+                return Err(Self::gate(why));
+            }
             let need = need_bars(&areas, vp, bars);
             n += 1;
             if need == bars || n >= 3 {
@@ -338,6 +370,12 @@ impl Dom {
         drop(doc);
         self.store_scroll(s);
         Ok(out)
+    }
+
+    /// `stuck` for the stored offsets: what `offsetTop` and `offsetLeft` add to the place of a box.
+    pub(crate) fn stuck_now(&self, styles: &Styles, areas: &Areas, n: NodeId) -> (f32, f32) {
+        let s = self.scrolling.s.borrow();
+        stuck(&self.doc.borrow(), styles, areas, &s.scroll, n)
     }
 
     /// Keep the new offsets and queue a `scroll` event for each target that moved.

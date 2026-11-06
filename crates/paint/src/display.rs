@@ -71,6 +71,10 @@ pub enum Item {
     /// clip of a box around them cuts them.
     PushFixed,
     PopFixed,
+    /// The items until `PopSticky` are a `position: sticky` box (`Areas::sticky[k]`) and what is in it: they move by the offset that keeps it in view.
+    /// The offset is read when the list is drawn, like a scroll offset.
+    PushSticky(u32),
+    PopSticky,
     /// The scrollbars of the scroll container `node`, drawn in the padding box `r`. The offset is read at draw time.
     Bars { node: NodeId, r: IRect },
     /// A box that waits for its turn in the order of painting. Only in the scratch lists, never in `items`.
@@ -193,7 +197,7 @@ impl DisplayList {
         let view = IRect { x0: 0, y0: 0, x1: view.0 as i32, y1: view.1 as i32 };
         let mut page = Page { controls: [tree.controls.input, tree.controls.select, tree.controls.textarea, tree.controls.button].iter().any(Option::is_some), ..Page::default() };
         for style in styles.each() {
-            page.stack |= matches!(style.get(Property::Opacity), Value::Number(o) if o < 1.0) || matches!(style.get(Property::ZIndex), Value::Number(_));
+            page.stack |= matches!(style.get(Property::Opacity), Value::Number(o) if o < 1.0) || matches!(style.get(Property::ZIndex), Value::Number(_)) || style.get(Property::Position) == Value::Keyword(Keyword::Sticky);
             page.flex |= matches!(style.get(Property::Display), Value::Keyword(Keyword::Flex | Keyword::InlineFlex | Keyword::Grid | Keyword::InlineGrid));
         }
         let mut b = Builder { tree, doc, frags: &layout.fragments, list: self, view, propagated, depth: 0, page, clips: Vec::new(), areas, scrolls: Vec::new() };
@@ -247,6 +251,8 @@ impl Builder<'_> {
         }
         let z = match style.get(Property::ZIndex) {
             Value::Number(n) if style.get(Property::Position) != Value::Keyword(Keyword::Static) || self.item(f.node) => Some(n as i32),
+            // A sticky box is always a stacking context.
+            _ if style.get(Property::Position) == Value::Keyword(Keyword::Sticky) => Some(0),
             _ => None,
         };
         match style.get(Property::Opacity) {
@@ -296,7 +302,15 @@ impl Builder<'_> {
         if fixed {
             self.list.items.push(Item::PushFixed);
         }
+        // A sticky box and what is in it move together (one more offset, read when the list is drawn).
+        let sticky = self.areas.filter(|a| i > 0 && !a.sticky.is_empty() && self.tree.kind(f.node) != Kind::Inline).and_then(|a| a.sticky_of(f.node));
+        if let Some(k) = sticky {
+            self.list.items.push(Item::PushSticky(k as u32));
+        }
         self.context_in(i);
+        if sticky.is_some() {
+            self.list.items.push(Item::PopSticky);
+        }
         if fixed {
             self.list.items.push(Item::PopFixed);
         }

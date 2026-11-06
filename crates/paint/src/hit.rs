@@ -182,7 +182,15 @@ impl Hit<'_> {
                             j = g.end as usize;
                         }
                         Layer::Positioned => {
-                            let at = if self.scrolled.is_some() && g.kind == FragmentKind::Box && self.tree.kind(g.node) != Kind::Inline && self.tree.position(g.node) == Keyword::Fixed { self.window } else { p };
+                            let mut at = if self.scrolled.is_some() && g.kind == FragmentKind::Box && self.tree.kind(g.node) != Kind::Inline && self.tree.position(g.node) == Keyword::Fixed { self.window } else { p };
+                            // A sticky box is drawn moved: the point is in its place when it is moved back.
+                            if let Some((areas, scroll)) = self.scrolled.filter(|(a, _)| !a.sticky.is_empty())
+                                && self.tree.kind(g.node) != Kind::Inline
+                                && let Some(k) = areas.sticky_of(g.node)
+                            {
+                                let (own, _) = areas.stuck(k, (scroll.x, scroll.y), &|n| scroll.of(n));
+                                at = (at.0 - own.0.round(), at.1 - own.1.round());
+                            }
                             offer(&mut best, (Phase::Positioned, j), self.context(j, depth + 1, at));
                             j = g.end as usize;
                         }
@@ -445,5 +453,16 @@ mod tests {
         let s = Scroll { y: 960.0, ..Scroll::default() };
         assert_eq!(p.at_scrolled(&s, 50.0, 60.0), "in");
         assert_eq!(p.at_scrolled(&s, 90.0, 60.0), "s", "on the scrollbar: the container");
+    }
+
+    #[test]
+    fn a_sticky_box_is_hit_where_it_is_drawn() {
+        let p = page("<style>body{margin:0} #t{height:100px} #s{position:sticky;top:10px;height:30px;width:100px} #u{height:900px}</style><div id=t></div><div id=s><i id=k></i></div><div id=u></div>");
+        // At the top of the page the box is at 100..130: its normal place.
+        assert_eq!(p.at_scrolled(&Scroll::default(), 10.0, 110.0), "s");
+        // Scrolled by 200 it sticks at 10..40 in the window: the point (10, 20) is in it, and (10, 110) is the page again.
+        let s = Scroll { y: 200.0, ..Scroll::default() };
+        assert_eq!(p.at_scrolled(&s, 10.0, 20.0), "s");
+        assert_eq!(p.at_scrolled(&s, 10.0, 110.0), "u");
     }
 }
