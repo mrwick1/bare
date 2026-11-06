@@ -43,7 +43,7 @@ use bare_js::eval::Error;
 use bare_js::eval::Interp;
 use bare_js::value::{ObjId, Value};
 use std::cell::{OnceCell, RefCell};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
 type V = R<Value>;
 
@@ -74,8 +74,8 @@ struct Cache {
 
 #[derive(Default)]
 struct State {
-    opt: HashMap<NodeId, Opt>,
-    cache: HashMap<NodeId, Cache>,
+    opt: IdMap<NodeId, Opt>,
+    cache: IdMap<NodeId, Cache>,
 }
 
 #[derive(Clone, Copy)]
