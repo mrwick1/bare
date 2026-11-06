@@ -69,6 +69,7 @@ use crate::browser::*;
 use bare_html::dom::NodeId;
 use bare_js::eval::{Error, Interp, WallClock};
 use bare_js::value::{ObjId, Value};
+use std::cell::Cell;
 use std::collections::{BTreeMap, HashMap, VecDeque};
 
 type V = R<Value>;
@@ -181,6 +182,8 @@ pub(crate) struct Sched {
     limits: SchedLimits,
     /// `Some(t)`: the virtual clock reads `t`. `None`: the monotonic clock.
     virtual_now: Option<f64>,
+    /// The last reading of the monotonic clock (ms). The page has seen no time after it.
+    last_read: Cell<f64>,
     protos: Option<SProtos>,
     tasks: BTreeMap<Key, Task>,
     seq: u64,
@@ -264,7 +267,15 @@ fn to_int32(n: f64) -> i32 {
 impl Dom {
     /// Milliseconds since the time origin, on the clock in use.
     pub(crate) fn now_ms(&self) -> f64 {
-        self.sched.borrow().virtual_now.unwrap_or_else(|| self.start.elapsed().as_secs_f64() * 1000.0)
+        let s = self.sched.borrow();
+        match s.virtual_now {
+            Some(t) => t,
+            None => {
+                let t = self.start.elapsed().as_secs_f64() * 1000.0;
+                s.last_read.set(t);
+                t
+            }
+        }
     }
 
     /// The roots of the scheduler: prototypes, the callbacks and arguments of timers, and the ports with queued tasks.
@@ -998,9 +1009,15 @@ impl Browser {
         self.dom.sched.borrow_mut().virtual_now = Some(now);
     }
 
-    /// Like `use_virtual_clock`, starting at `t` ms. `t` must not be before the current time (time never goes back).
+    /// Like `use_virtual_clock`, starting at `t` ms. `t` must not be before the time the page has seen: the virtual time, or the last
+    /// reading of the monotonic clock. Time never goes back for the page. Real time that passed before its first reading is not a
+    /// reading, so the start does not depend on how long building the page took.
     pub fn use_virtual_clock_at(&mut self, t: f64) -> R<()> {
-        if !t.is_finite() || t < self.dom.now_ms() {
+        let seen = {
+            let s = self.dom.sched.borrow();
+            s.virtual_now.unwrap_or(s.last_read.get())
+        };
+        if !t.is_finite() || t < seen {
             return Err(Error::Unsupported(unsupported("the virtual clock cannot start before the current time")));
         }
         self.dom.sched.borrow_mut().virtual_now = Some(t);

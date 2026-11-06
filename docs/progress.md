@@ -642,3 +642,23 @@ Cost rule: 500 rows (every `*_load` example with a case list at scale 1 and 10, 
 What the profile still shows: the evaluator walks the tree and finds a name through the scope chain (`find_in`, `get_name`: 6%), `options[j]` does two hash lookups (list, then wrapper), and a `.value` read hashes the attribute name (`find_atom`) and interns the result. A slot table for wrappers indexed by `ObjId`, and resolved variable slots, would remove most of this. Both are larger changes in the DOM and the evaluator. They are not made here.
 
 Not tested: wall time (the machine had a load average of 15 to 31, and `cycles:u` of the same binary varied from 8.1 G to 11.7 G), the rows at scale 100, `regexp_load`, `numeric_load`, `wrapper_load`, `sticky_load`, `xhr_load` and `https_load`, and the live staging pages. See [resources.md](resources.md#cost-of-the-select-react-row).
+
+## Virtual clock start
+
+Cause. `use_virtual_clock_at(t)` refused a start that was before the monotonic clock. That clock counts from `Dom::start`. `Browser::new` sets `Dom::start` before it installs the DOM and the scheduler. Each topic test starts its clock at 1000 ms. A build that takes more than 1 s of real time therefore fails with "the virtual clock cannot start before the current time". The `browser_sticky_tests::chrome_cases` failure has this message. How long `Browser::new` takes under load is not measured (to verify).
+
+Test or engine: engine. The test passes a constant. It does not read the real clock. The guard compared that constant with a real clock that the page never read. The start must not depend on machine load, so the engine changes.
+
+Fix. The monotonic clock stores its last reading (`Sched::last_read`). `use_virtual_clock_at` refuses a start before that reading, or before the virtual time once the clock is virtual. Time still never goes back for the page. The cost is one store on each monotonic clock read.
+
+Reproducer. `a_virtual_clock_may_start_at_a_time_the_page_has_not_read` builds two browsers and sleeps 1100 ms. The sleep is the explicit delay. It waits for no event. The unread browser must start at 1000 ms. The read browser, which called `performance.now()` after the sleep, must refuse the same start. On the old code the reproducer failed with the message above.
+
+Other tests. Fourteen call sites start at 1000 ms with the same setup, and the scheduler test helper starts at `T0` (1000 ms). All of them use the same guard, so the engine change covers them. No test changed. The scheduler check that a start before the virtual time fails still passes.
+
+Results. The reproducer failed on the old engine and passes on the new one. `cargo test -p bare --lib`: 861 passed, 0 failed, 5 ignored. Under load, `stress-ng --cpu 2` and the test ran pinned to core 5. 100 pairs of `chrome_cases` and the reproducer gave 200 of 200 passes. The T3 server restarted after pair 92. Pairs 93 to 100 ran again under a new `stress-ng` on core 5. The old engine was not run under load in this session, so the flake itself was not reproduced (to verify).
+
+Cost against origin/main fb36a74 (the base after PR 180), measured with `tools/js/instr.sh` (minimum of 3 runs of `instructions:u`). 54 rows: `browser_load` (6 cases), `observer_load` (2), `loader_load` (3), `style_load` (4) and `scheduler_load` (3), each at 1x, 10x and 100x. The range is -0.057% to +0.035%. No row is over +0.5%. An earlier run against 8c99ede gave -0.068% to +0.146%.
+
+`cargo test --workspace` on the rebased head: 2,447 passed, 0 failed. The stress runs above used the code before the rebase. They were not repeated after it.
+
+Not tested: other allocators; hosts that call `use_virtual_clock_at` from their own code path; the live staging login.
