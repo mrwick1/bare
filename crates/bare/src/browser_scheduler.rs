@@ -32,8 +32,8 @@
 //!   timeout that was set while its own callback ran; 0 if it is a one-shot or the delay is under 16 ms) and `idle` (its last run was
 //!   quiet). `run_task` reads `settle_mark` before a timer or a rendering step and `quiet_since` after it: DOM changes (the
 //!   `revision` and `text_revision` of the document, at most 8), queued fetches, scripts and traversals (no more than before),
-//!   and the scheduler sequence number (no new task but the re-arm). Cost: three counter reads and three borrows for each timer or
-//!   frame. `blocks_settle(limit)` walks the queue in due order up to `limit` and answers at the first task that `Sched::skips` is false for.
+//!   and the count of queued tasks (no new task but the re-arm; the rendering step and a message do not count, they are judged on their
+//!   own and a noisy one makes the timers be judged again). Cost: three counter reads and three borrows for each timer, frame or message. `blocks_settle(limit)` walks the queue in due order up to `limit` and answers at the first task that `Sched::skips` is false for.
 //!   The detection of a re-arm is the identity of the callback object (`Sched::running`), nothing else.
 //!
 //! `queueMicrotask(cb)` queues a real job in the VM microtask queue (`Interp::queue_microtask`). A throw is reported
@@ -187,6 +187,9 @@ pub(crate) struct Sched {
     protos: Option<SProtos>,
     tasks: BTreeMap<Key, Task>,
     seq: u64,
+    /// Tasks queued, but not the rendering step or a message: a timer that asks for a frame or posts a message has not queued work (the
+    /// frame and the message are judged on their own, `follow_up`).
+    work: u64,
     next_timer: u64,
     timers: HashMap<u64, Timer>,
     ports: HashMap<ObjId, Port>,
@@ -322,7 +325,7 @@ impl Dom {
     fn settle_mark(&self) -> Mark {
         let d = self.doc.borrow();
         let queued = self.fetch_queued() + self.scripts_queued() + self.nav.s.borrow().tasks.len();
-        Mark { changes: d.revision() + d.text_revision(), queued, seq: self.sched.borrow().seq }
+        Mark { changes: d.revision() + d.text_revision(), queued, seq: self.sched.borrow().work }
     }
 
     /// Was the run since `mark` quiet? It changed the DOM at most `QUIET_CHANGES` times, queued no fetch, script or
@@ -330,6 +333,16 @@ impl Dom {
     fn quiet_since(&self, m: Mark, own: u64) -> bool {
         let n = self.settle_mark();
         n.changes - m.changes <= QUIET_CHANGES && n.queued <= m.queued && n.seq - m.seq <= own
+    }
+
+    /// Was the frame or the message that a timer set off quiet? A noisy one makes the timers be judged again: the tick that asked for
+    /// it was judged without it (`Sched::work`).
+    fn follow_up(&self, m: Mark) -> bool {
+        let quiet = self.quiet_since(m, 0);
+        if !quiet {
+            self.sched.borrow_mut().timers.values_mut().for_each(|t| t.idle = false);
+        }
+        quiet
     }
 
     // ------------------------------------------------------------ queue
@@ -366,6 +379,7 @@ impl Dom {
         let mut s = self.sched.borrow_mut();
         let seq = s.seq;
         s.seq = seq.checked_add(1).ok_or_else(|| self.lim("task-seq"))?;
+        s.work += !matches!(task, Task::Render | Task::Deliver(_)) as u64;
         let key = (due.to_bits(), seq);
         s.tasks.insert(key, task);
         Ok(key)
@@ -535,8 +549,8 @@ impl Dom {
                 });
                 self.sched.borrow_mut().in_frame = false;
                 r?;
-                // The step queues the next one itself while callbacks wait: that is the only new task a quiet frame makes.
-                let quiet = self.quiet_since(mark, self.frame.queued.get() as u64);
+                // The step queues the next one itself while callbacks wait. That is not counted as work (see `Sched::work`).
+                let quiet = self.follow_up(mark);
                 self.sched.borrow_mut().frame_idle = quiet;
                 Ok(())
             }
@@ -562,14 +576,19 @@ impl Dom {
                 self.abort_timeout_fired(it, o)?;
                 it.host_checkpoint().map(|_| ())
             }),
-            Run::Deliver { port, data } => it.host_scope(|it| {
-                it.charge(1)?;
-                if self.has_message_listener(port) {
-                    let ev = self.new_msg_event(it, data)?;
-                    self.dispatch(it, Target::Obj(port), ev)?;
-                }
-                it.host_checkpoint().map(|_| ())
-            }),
+            Run::Deliver { port, data } => {
+                let mark = self.settle_mark();
+                it.host_scope(|it| {
+                    it.charge(1)?;
+                    if self.has_message_listener(port) {
+                        let ev = self.new_msg_event(it, data)?;
+                        self.dispatch(it, Target::Obj(port), ev)?;
+                    }
+                    it.host_checkpoint().map(|_| ())
+                })?;
+                self.follow_up(mark);
+                Ok(())
+            }
         }
     }
 

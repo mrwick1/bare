@@ -161,6 +161,54 @@ fn a_raf_loop_that_builds_dom_or_starts_work_does_not_settle() {
     });
 }
 
+/// Decision: the rendering step that a timer asks for is judged on its own, as a frame. It is not a task that the timer queued. A
+/// clock that asks for a frame at each tick (an animation of a value) stays a clock, as one that does not. The staging `/calls` page
+/// did this and ran 140 rounds for 35 s.
+#[test]
+fn an_interval_that_asks_for_a_quiet_frame_each_tick_settles() {
+    big(|| {
+        let (s, srv, r, _) = run("<script>var k = 0; setInterval(function () { k++; localStorage.setItem('n', k); requestAnimationFrame(function () { localStorage.setItem('f', k) }) }, 1000)</script>", 5_000);
+        assert!(settled(&r), "{r:?}");
+        assert_eq!(r.pages[0].idle_timers, vec![1000]);
+        assert_eq!(n(&s, &srv, "n"), 1, "one judged tick, then it stops waiting");
+        assert_eq!(n(&s, &srv, "f"), 1, "its frame ran once and was quiet");
+    });
+}
+
+#[test]
+fn an_interval_whose_frame_is_not_quiet_does_not_settle() {
+    big(|| {
+        let (_, _, r, _) = run("<div id=c></div><script>setInterval(function () { requestAnimationFrame(function () { for (var i = 0; i < 20; i++) document.getElementById('c').appendChild(document.createElement('i')) }) }, 1000)</script>", 300);
+        assert!(!settled(&r), "20 changes in the frame: {r:?}");
+        let (_, srv, r, _) = run("<script>setInterval(function () { requestAnimationFrame(function () { fetch('/p') }) }, 1000)</script>", 300);
+        assert!(!settled(&r), "a fetch in the frame: {r:?}");
+        assert!(srv.hits("/p") > 3);
+    });
+}
+
+/// The same for a message: React posts one on a `MessageChannel` at each state change, and an interval that sets state does it at each tick.
+#[test]
+fn an_interval_that_posts_a_quiet_message_each_tick_settles() {
+    big(|| {
+        let (s, srv, r, _) = run("<script>var k = 0, c = new MessageChannel(); c.port1.onmessage = function () { localStorage.setItem('m', k) };
+            setInterval(function () { k++; localStorage.setItem('n', k); c.port2.postMessage(k) }, 1000)</script>", 5_000);
+        assert!(settled(&r), "{r:?}");
+        assert_eq!(r.pages[0].idle_timers, vec![1000]);
+        assert_eq!(n(&s, &srv, "n"), 1);
+        assert_eq!(n(&s, &srv, "m"), 1, "its message ran once");
+    });
+}
+
+#[test]
+fn an_interval_whose_message_is_not_quiet_does_not_settle() {
+    big(|| {
+        let (_, srv, r, _) = run("<script>var c = new MessageChannel(); c.port1.onmessage = function () { fetch('/p') };
+            setInterval(function () { c.port2.postMessage(1) }, 1000)</script>", 300);
+        assert!(!settled(&r), "a fetch in the message: {r:?}");
+        assert!(srv.hits("/p") > 3);
+    });
+}
+
 #[test]
 fn a_frame_asked_for_after_the_settle_is_not_skipped() {
     big(|| {
