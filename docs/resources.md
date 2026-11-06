@@ -4180,7 +4180,7 @@ Not tested: wall time; the rows at scale 100; `getAttribute` in a loop (no profi
 
 Problem: a name was found by a walk up the environment chain, with a scan (or a hash probe above 12 bindings) in each environment. A global name (`var`, a function or a builtin at the top level) went through that walk and then through the hash table of the global object.
 
-Method: `perf record -e instructions:u` of the rows below on main 8e4d450, then the change. Cost rows: `tools/js/instr.sh` (minimum of 3 runs of `instructions:u`, large malloc cache), main 8e4d450 and this change, each in its own `CARGO_TARGET_DIR` under `/data/bare-tmp`, release build.
+Method: `perf record -e instructions:u` of the rows below on main 8e4d450, then the change. Cost rows: `tools/js/instr.sh` (minimum of 3 runs of `instructions:u`, large malloc cache), main 855e8aa and this change, each in its own `CARGO_TARGET_DIR` under `/data/bare-tmp`, release build.
 
 Profile of main (self share of samples): the name functions (`get_name`, `assign_name`, `find_in`, `lookup`) take 6.5% of `select_load react 1000`, 8.3% of `eval_load closures`, 11.7% of `eval_load loop` and 12.1% of `eval_load calls`. `Heap::lookup` and `PropMap::find` (the global object) take 7.3%, 14.0%, 25.3% and 21.1% of the same rows, mostly for global names. `session_load chain` does not use script names in its loop, so lookup is not its cost. Inlining moves a cost from one symbol to another between builds, so compare the totals and not one symbol.
 
@@ -4193,7 +4193,7 @@ What was done:
 
 Ideas from other engines: V8 resolves a name at parse time to a context slot (depth, index) unless `with` or sloppy `eval` is in the way. This is the main idea, and it is taken. QuickJS resolves a name to a closure variable reference at compile time. It is the same idea, with the closure capture list as the chain. SpiderMonkey keeps a `BindingKind` for each name and keeps an uncaptured binding out of the environment object. That needs another environment layout, and it is not done. This engine has no `with` and no `eval`, so a scope is never dynamic. Class bodies are the only barrier.
 
-Instructions (`tools/js/instr.sh`, main 8e4d450 and this change):
+Instructions (`tools/js/instr.sh`, main 855e8aa and this change):
 
 | Row | main | this change | change |
 | --- | ---: | ----------: | -----: |
@@ -4213,7 +4213,7 @@ Self share after the change: name functions 3.7% (`react 1000`), 4.2% (`closures
 
 Peak RSS (program report): `react 1000` 8.9 MiB to 8.7 MiB, `react 10000` 16.7 MiB to 16.5 MiB, `closures 10` 38.0 MiB to 37.9 MiB, `webpack 100` 23.9 MiB to 24.6 MiB (+0.7 MiB), `fib 10` 4.9 MiB to 4.8 MiB, `loop 10` 4.9 MiB to 4.7 MiB. A script keeps one `u32` for each expression and each pattern (a `Box<[u32]>`), and the realm keeps one record for each scope.
 
-Cost rule: 578 rows (every `*_load` example with a case list at scale 1 and 10, as in the earlier cost rows), same method. 576 rows ran. `form_load gates 1` and `gates 10` fail on main as well ("document URL is not configured"), so they have no baseline. Median -10.4%. 536 rows are lower, 514 by more than 0.5%. Two rows are over +0.5%: `scripts_load reject 1` (+0.87%) and `reject 10` (+1.17%). The next worst row is `date_load longstr 10` at +0.17%.
+Cost rule: 578 rows (every `*_load` example with a case list at scale 1 and 10, as in the earlier cost rows), same method, all 578 ran. Median -10.3%. 541 rows are lower, 514 by more than 0.5%. Two rows are over +0.5%: `scripts_load reject 1` (+0.87%) and `reject 10` (+1.17%). The next worst row is `date_load longstr 10` at +0.17%. `form_load gates` is -0.25% (1) and -0.26% (10). The sweep ran twice, on main 8e4d450 and again on main 855e8aa after a rebase, with the same two rows over the limit.
 
 The `reject` rows are heap layout noise, not code. A refused script runs no new code: the count limit stops it before the parse, and a syntax error stops it in the parser. Evidence: (1) one loop turn, counted with `gdb` single steps, is 1,465 instructions on this change and 1,522 on main. (2) A copy of the example, with a few `Vec`s allocated and kept between the setup and the loop, ran the count-limit loop at 87.27 M to 89.65 M on main and 81.42 M to 89.57 M on this change (10 settings), so the same code moves by up to 10% with the start layout. The tcache setting of `instr.sh` does not remove all of this (see [the layout note](#why-an-unrelated-name-moved-a-row)). The loop of this row builds the string `ERR Limit(Scripts)` with `realloc`, and the cost of `realloc` depends on the neighbor blocks.
 
@@ -4223,4 +4223,4 @@ Rejected: a bloom mask for each environment (skip the environments that lack the
 
 Tests: 5 unit tests of the resolver (`eval_scope_tests.rs`: hop counts, indexes, `GLOBAL`, barrier, `arguments`, parameter default against a body `var`, a later script that declares a global `let`, async resume) and 60 `scope_*` cases in `eval-cases.txt` that match Node (TDZ, hoisting, per-iteration bindings, closures in loops, `catch`, `switch`, named function expressions, `typeof` of an undeclared name, generators and async). `cargo test --workspace` passes in a debug build, where each resolved lookup is also compared with the full search. Every `tools/js/*_check.sh` script that ran matches Node (`parse_check.sh` needs the `acorn` package, which is not installed).
 
-Not tested: wall time; the rows at scale 100; `form_load gates` (fails on main); `https_load`; the live staging pages; a script with more than 16,383 nested scopes (the hop count is limited, and a deeper site stays dynamic); `with` and `eval` (the engine rejects both).
+Not tested: wall time; the rows at scale 100; `https_load`; the live staging pages; a script with more than 16,383 nested scopes (the hop count is limited, and a deeper site stays dynamic); `with` and `eval` (the engine rejects both).
