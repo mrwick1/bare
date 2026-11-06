@@ -1,0 +1,38 @@
+get	ok:200	GET /a;;;
+get-body-throws	TypeError	
+head-get-body-throws	TypeError	
+post-empty	ok:200	POST /a;0;;
+post-body	ok:200	POST /a;3;text/plain;charset=UTF-8;abc
+put-empty	ok:200	PUT /a;0;;
+put-body	ok:200	PUT /a;3;text/plain;charset=UTF-8;abc
+put-lower	ok:200	PUT /a;3;text/plain;charset=UTF-8;abc
+patch-empty	ok:200	PATCH /a;;;
+patch-body	ok:200	PATCH /a;7;application/json;{"a":1}
+patch-lower	ok:200	patch /a;3;text/plain;charset=UTF-8;abc
+delete-empty	ok:200	DELETE /a;;;
+delete-lower	ok:200	DELETE /a;;;
+delete-body	ok:200	DELETE /a;3;text/plain;charset=UTF-8;abc
+options-empty	ok:200	OPTIONS /a;;;
+options-body	ok:200	OPTIONS /a;3;text/plain;charset=UTF-8;abc
+head	ok:200:2	HEAD /a;;;
+head-then-get	ok:ok	HEAD /a;;; || GET /b;;;
+head-text	ok:[]	HEAD /a;;;
+no204	ok:204	DELETE /empty;;;
+connect-throws	TypeError	
+trace-throws	TypeError	
+bad-token	TypeError	
+post-301	ok:200	POST /r301;3;text/x;abc || GET /t;;;
+post-302	ok:200	POST /r302;3;text/x;abc || GET /t;;;
+post-303	ok:200	POST /r303;3;text/x;abc || GET /t;;;
+post-307	ok:200	POST /r307;3;text/x;abc || POST /t;3;text/x;abc
+post-308	ok:200	POST /r308;3;text/x;abc || POST /t;3;text/x;abc
+put-301	ok:200	PUT /r301;3;text/x;abc || PUT /t;3;text/x;abc
+put-302	ok:200	PUT /r302;3;text/x;abc || PUT /t;3;text/x;abc
+put-303	ok:200	PUT /r303;3;text/x;abc || GET /t;;;
+put-307	ok:200	PUT /r307;3;text/x;abc || PUT /t;3;text/x;abc
+put-308	ok:200	PUT /r308;3;text/x;abc || PUT /t;3;text/x;abc
+delete-303	ok:200	DELETE /r303;;; || GET /t;;;
+delete-302	ok:200	DELETE /r302;;; || DELETE /t;;;
+patch-303	ok:200	PATCH /r303;3;text/plain;charset=UTF-8;abc || GET /t;;;
+head-303	ok:200	HEAD /r303;;; || HEAD /t;;;
+head-301	ok:200	HEAD /r301;;; || HEAD /t;;;

@@ -16,7 +16,7 @@
 //! - Every redirect is checked against the origin of the request before the next hop opens a socket. A redirect to another
 //!   origin, or from https to http, ends the request with a network error (the promise rejects with `TypeError`), so a
 //!   307/308 can never forward a body or an `Authorization` header elsewhere. `redirect: "error"` is supported,
-//!   `"manual"` is `Unsupported`. 301/302 (POST) and 303 turn the request into a GET without a body.
+//!   `"manual"` is `Unsupported`. 301/302 (POST) and 303 (all but GET and HEAD) turn the request into a GET without a body; 307/308 keep both.
 //! - JS cannot set `Host`, `Content-Length`, `Cookie`, `Origin`, `Referer`, `Connection`, `Transfer-Encoding`, `Accept-Encoding`,
 //!   `Sec-*`, `Proxy-*` and the other forbidden names of the Fetch Standard: they are dropped, as a browser does. `Host` and
 //!   `Content-Length` come from the client. `Set-Cookie` of a response is never put in `response.headers`. There is no cookie
@@ -35,7 +35,7 @@
 //! BYOB readers, `reader.closed` and transfer are `Unsupported`. `new ReadableStream(...)` with a script source is in
 //! `browser_streams.rs`; the stream and reader methods there dispatch on which kind of object `this` is.
 //!
-//! Gates (explicit `Unsupported`, nothing is faked): methods other than GET and POST; `Blob`/`FormData`/`URLSearchParams`/stream
+//! Gates (explicit `Unsupported`, nothing is faked): token methods and a lower-case `patch`; `Blob`/`FormData`/`URLSearchParams`/stream
 //! bodies and `blob()`/`formData()`; `Request.body` and `mode: "no-cors"`; non-empty `integrity`;
 //! `cache: "only-if-cached"`; non-ASCII header values; compressed
 //! responses (`Content-Encoding` other than identity is a network error); subclassing (`class X extends Response`).
@@ -856,11 +856,17 @@ fn make_core(d: &Dom, it: &mut Interp<'_>, input: Value, init: Value) -> R<Core>
     Ok(core)
 }
 
+/// The wire method for a normalized method. A token method (`FOO`) and a lower-case `patch` have no `Method` variant: `Unsupported`.
 fn wire_method(m: &str) -> R<Method> {
     match m {
         "GET" => Ok(Method::Get),
         "POST" => Ok(Method::Post),
-        _ => Err(Error::Unsupported(unsupported("fetch method other than GET and POST"))),
+        "PUT" => Ok(Method::Put),
+        "PATCH" => Ok(Method::Patch),
+        "DELETE" => Ok(Method::Delete),
+        "HEAD" => Ok(Method::Head),
+        "OPTIONS" => Ok(Method::Options),
+        _ => Err(Error::Unsupported(unsupported("fetch method other than GET, POST, PUT, PATCH, DELETE, HEAD and OPTIONS"))),
     }
 }
 
@@ -1553,11 +1559,7 @@ pub(crate) fn queue_xhr(d: &Dom, x: (ObjId, u64), method: &str, url: Url, mut he
             return Err(d.lim("fetch-requests"));
         }
     }
-    let method = match method {
-        "GET" => Method::Get,
-        "POST" => Method::Post,
-        _ => return Err(Error::Unsupported(unsupported("XMLHttpRequest method other than GET and POST"))),
-    };
+    let method = wire_method(method)?;
     policy(d, &lim, &url)?;
     let n = body.as_ref().map_or(0, |b| b.len());
     let mut st = d.fetch.st.borrow_mut();
@@ -1598,10 +1600,7 @@ fn run_one(client: &mut Client, lim: &FetchLimits, task: &Pending, diag: &mut Ve
     let mut redirected = false;
     for hop in 0..=lim.max_redirects {
         let wire: Vec<(&str, &str)> = headers.iter().map(|(n, v)| (n.as_str(), v.as_str())).collect();
-        let bytes: &[u8] = match (&body, method) {
-            (Some(b), Method::Post) => b.as_slice(),
-            _ => &[],
-        };
+        let bytes: &[u8] = body.as_deref().map_or(&[], |b| b.as_slice());
         let req = NetRequest { method, url: &url, headers: &wire, body: bytes };
         let resp = match client.send_once(&req, lim.max_response_body) {
             Ok(r) => r,
@@ -1628,7 +1627,8 @@ fn run_one(client: &mut Client, lim: &FetchLimits, task: &Pending, diag: &mut Ve
             if hop == lim.max_redirects {
                 return Outcome::Failed("too many redirects");
             }
-            if method == Method::Post && matches!(resp.status, 301..=303) {
+            // Fetch standard, "HTTP-redirect fetch": 301/302 turn a POST into a GET; 303 turns all but GET and HEAD into a GET; 307/308 keep both.
+            if (method == Method::Post && matches!(resp.status, 301 | 302)) || (resp.status == 303 && !matches!(method, Method::Get | Method::Head)) {
                 method = Method::Get;
                 body = None;
                 headers.retain(|(n, _)| !["content-type", "content-encoding", "content-language", "content-location"].contains(&n.as_str()));

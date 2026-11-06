@@ -16,7 +16,7 @@
 //!
 //! Gates (`Error::Unsupported`, before anything changes): a synchronous request (`async = false`: the pump is the only place where
 //! the host blocks), `user` and `password` arguments, `responseType = "document"`, a `Document` body, a Blob or FormData body (as for
-//! `fetch`: `Dom::is_web_body`), and the methods `fetch` gates (anything but GET and POST: `bare_net::http::Method` has two). A request
+//! `fetch`: `Dom::is_web_body`), and the methods `fetch` gates (a token method and a lower-case `patch`: `bare_net::http::Method` has seven). A request
 //! to another origin is `Unsupported` (the CORS gate of `fetch`). There is no cookie jar, so `withCredentials` is stored and does nothing.
 //! A response text in a charset other than UTF-8 is `Unsupported` unless every byte is ASCII.
 //!

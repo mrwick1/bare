@@ -88,11 +88,17 @@ struct Cached {
     // Until this time has passed, we use the copy without asking the server.
 }
 
-/// The two methods that the staging login needs.
+/// The methods of the Fetch standard that the client sends. `PATCH` goes on the wire in upper case here: the caller decides the case
+/// rules (the Fetch standard keeps `patch` in lower case, and that is a wire form this enum cannot hold).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Method {
     Get,
     Post,
+    Put,
+    Patch,
+    Delete,
+    Head,
+    Options,
 }
 
 impl Method {
@@ -100,7 +106,18 @@ impl Method {
         match self {
             Method::Get => "GET",
             Method::Post => "POST",
+            Method::Put => "PUT",
+            Method::Patch => "PATCH",
+            Method::Delete => "DELETE",
+            Method::Head => "HEAD",
+            Method::Options => "OPTIONS",
         }
+    }
+
+    /// A method that reads only (RFC 9110 section 9.2.1, minus OPTIONS and TRACE, which we leave out). We may send it again on a new
+    /// connection, and it never invalidates a cached reply.
+    fn safe(self) -> bool {
+        matches!(self, Method::Get | Method::Head)
     }
 }
 
@@ -112,7 +129,7 @@ pub struct Request<'a> {
     pub url: &'a Url,
     /// Extra request headers, like `("Authorization", "Bearer ...")`. Values are never put in an error message.
     pub headers: &'a [(&'a str, &'a str)],
-    /// The body. Only POST has one.
+    /// The body. GET and HEAD have none (`check_request` refuses one).
     pub body: &'a [u8],
 }
 
@@ -178,8 +195,8 @@ pub struct Client {
 
 /// Check a request before any DNS lookup or socket. The messages name no header value and no body byte.
 fn check_request(req: &Request) -> Result<(), Error> {
-    if req.method == Method::Get && !req.body.is_empty() {
-        return Err("a GET request has no body".into());
+    if req.method.safe() && !req.body.is_empty() {
+        return Err("a GET or HEAD request has no body".into());
     }
     for (name, value) in req.headers {
         // A name is a "token": letters, digits and these marks. It cannot hold a space, a colon, CR, LF or NUL.
@@ -308,7 +325,8 @@ impl Client {
             if !current.same_origin(&target) && plan.headers.iter().any(|(n, _)| SECRET_HEADERS.iter().any(|s| n.eq_ignore_ascii_case(s))) {
                 plan.headers = Cow::Owned(plan.headers.iter().filter(|(n, _)| !SECRET_HEADERS.iter().any(|s| n.eq_ignore_ascii_case(s))).copied().collect());
             }
-            if plan.method == Method::Post && matches!(response.status, 301..=303) {
+            // Fetch standard, "HTTP-redirect fetch": 301 and 302 turn a POST into a GET; 303 turns every method but GET and HEAD into a GET.
+            if (plan.method == Method::Post && matches!(response.status, 301 | 302)) || (response.status == 303 && !plan.method.safe()) {
                 plan.method = Method::Get;
                 plan.body = &[];
                 if plan.headers.iter().any(|(n, _)| BODY_HEADERS.iter().any(|s| n.eq_ignore_ascii_case(s))) {
@@ -420,7 +438,7 @@ impl Client {
         // The idle list is keyed by scheme too, so a plain connection never serves https.
         let server = (url.scheme, url.host.clone(), url.port);
         let idle = self.idle.lock().unwrap().remove(&server);
-        let get = plan.method == Method::Get;
+        let get = plan.method.safe();
         let (mut stream, reused) = match idle {
             // `remove` takes the connection out of the list. While we use it, nobody else can.
             Some((stream, since)) if since.elapsed() < MAX_IDLE && (get || alive(&stream)) => (stream, true),
@@ -516,7 +534,7 @@ fn request_head(url: &Url, plan: &Plan, conditions: &str, extra: usize) -> Vec<u
     for (name, value) in plan.headers.iter() {
         let _ = write!(out, "{name}: {value}\r\n");
     }
-    if plan.method == Method::Post {
+    if matches!(plan.method, Method::Post | Method::Put) || !plan.body.is_empty() {
         let _ = write!(out, "Content-Length: {}\r\n", plan.body.len());
         // The exact size of the body, made here from the slice, never from the caller.
     }
@@ -550,7 +568,12 @@ fn send(stream: &mut Stream, url: &Url, plan: &Plan, conditions: &str) -> Result
         };
     }
     stream.flush()?;
-    read_head(stream)
+    let (mut head, leftover) = read_head(stream)?;
+    if plan.method == Method::Head {
+        // A reply to HEAD has the headers of a GET reply, and no body, whatever `Content-Length` says (RFC 9110 section 9.3.2).
+        head.framing = Framing::None;
+    }
+    Ok((head, leftover))
 }
 
 /// Read until the blank line after the headers, and parse what came before it.
@@ -1867,6 +1890,93 @@ mod tests {
             );
             assert_eq!(seen[1], want, "status {code}");
             // The body is sent again from the same slice, and the connection is used again.
+        }
+    }
+
+    fn with<'a>(method: Method, url: &'a Url, body: &'a [u8]) -> Request<'a> {
+        Request { method, url, headers: &[("X-A", "1")], body }
+    }
+
+    #[test]
+    fn each_method_sends_its_exact_bytes() {
+        // (method, body, the wire line, whether Content-Length is sent). Chrome sends the same: a length for POST and PUT even with
+        // no body, a length for any method with a body, none for the rest (tools/fixtures/ui/methods-expected.txt).
+        let cases: [(Method, &[u8], &str, Option<usize>); 11] = [
+            (Method::Put, b"", "PUT", Some(0)),
+            (Method::Put, b"abc", "PUT", Some(3)),
+            (Method::Post, b"", "POST", Some(0)),
+            (Method::Patch, b"", "PATCH", None),
+            (Method::Patch, b"abc", "PATCH", Some(3)),
+            (Method::Delete, b"", "DELETE", None),
+            (Method::Delete, b"abc", "DELETE", Some(3)),
+            (Method::Options, b"", "OPTIONS", None),
+            (Method::Options, b"abc", "OPTIONS", Some(3)),
+            (Method::Head, b"", "HEAD", None),
+            (Method::Get, b"", "GET", None),
+        ];
+        for (method, body, line, length) in cases {
+            let (port, requests) = serve(vec![(vec![OK], false)]);
+            let url = post_url(port, "/r");
+            Client::new().send(&with(method, &url, body)).unwrap();
+            let cl = length.map(|n| format!("Content-Length: {n}\r\n")).unwrap_or_default();
+            let want = format!("{line} /r HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nUser-Agent: bare/0.1\r\nX-A: 1\r\n{cl}\r\n{}", String::from_utf8_lossy(body));
+            assert_eq!(seen(&requests)[0], want, "{line}");
+        }
+    }
+
+    #[test]
+    fn a_get_or_head_with_a_body_is_refused() {
+        for method in [Method::Get, Method::Head] {
+            assert!(Client::new().send(&with(method, &post_url(1, "/"), b"x")).is_err());
+        }
+    }
+
+    #[test]
+    fn a_head_reply_has_no_body_and_the_connection_stays_in_step() {
+        // The server says `Content-Length: 5` and sends no body. One connection only: a second one would never be answered.
+        // The 204 and 304 replies carry a `Content-Length` that must not be read either.
+        let head = "HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\n";
+        let (port, requests) = serve(vec![(
+            vec![head, OK, "HTTP/1.1 204 No Content\r\nContent-Length: 5\r\n\r\n", OK, "HTTP/1.1 304 Not Modified\r\nContent-Length: 5\r\n\r\n", OK, head, OK],
+            false,
+        )]);
+        let url = post_url(port, "/r");
+        let mut client = Client::new();
+        let reply = client.send(&with(Method::Head, &url, b"")).unwrap();
+        assert_eq!((reply.status, reply.body.len(), reply.header("content-length")), (200, 0, Some("5")));
+        assert_eq!(client.get(&url).unwrap().body, b"ok");
+        assert_eq!(client.send(&with(Method::Delete, &url, b"")).unwrap().body, b"");
+        assert_eq!(client.get(&url).unwrap().body, b"ok");
+        assert_eq!(client.send(&with(Method::Put, &url, b"")).unwrap().status, 304);
+        assert_eq!(client.get(&url).unwrap().body, b"ok");
+        // Streaming path.
+        let mut streamed = client.send_stream(&with(Method::Head, &url, b"")).unwrap();
+        let mut rest = Vec::new();
+        streamed.body.read_to_end(&mut rest).unwrap();
+        assert!(rest.is_empty());
+        assert_eq!(client.get(&url).unwrap().body, b"ok");
+        assert_eq!(seen(&requests).len(), 8);
+    }
+
+    #[test]
+    fn every_method_follows_every_redirect_code_like_fetch() {
+        // (method, body) -> the method after 301, 302, 303, 307, 308. Chrome gives the same (tools/fixtures/ui/methods-expected.txt).
+        let want = |m: Method, code: u16| match (m, code) {
+            (Method::Post, 301 | 302) | (Method::Put | Method::Patch | Method::Delete | Method::Options | Method::Post, 303) => Method::Get,
+            (m, _) => m,
+        };
+        for method in [Method::Post, Method::Put, Method::Patch, Method::Delete, Method::Options, Method::Head, Method::Get] {
+            for code in [301, 302, 303, 307, 308] {
+                let (port, requests) = serve(vec![(vec![redirect(code, "/next"), OK], false)]);
+                let body: &[u8] = if method.safe() { b"" } else { b"abc" };
+                Client::new().send(&Request { method, url: &post_url(port, "/old"), headers: &[("Content-Type", "text/x")], body }).unwrap();
+                let second = seen(&requests).remove(1);
+                let after = want(method, code);
+                assert!(second.starts_with(&format!("{} /next ", after.as_str())), "{method:?} {code}: {second}");
+                let kept = after == method && !body.is_empty();
+                assert_eq!(second.ends_with("abc"), kept, "{method:?} {code}: {second}");
+                assert_eq!(second.contains("Content-Type"), after == method, "{method:?} {code}: {second}");
+            }
         }
     }
 

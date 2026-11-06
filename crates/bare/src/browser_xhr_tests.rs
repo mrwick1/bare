@@ -157,7 +157,7 @@ fn what_is_not_supported_is_refused_before_anything_changes() {
             assert_eq!(js(&mut b, src), format!("unsupported:{what}"), "{src}");
         }
         assert_eq!(js(&mut b, "x.readyState"), "0");
-        assert!(js(&mut b, "x.open('PUT', '/echo'); x.send('a')").starts_with("unsupported:"));
+        assert!(js(&mut b, "x.open('FOO', '/echo'); x.send('a')").starts_with("unsupported:"));
         assert!(js(&mut b, "x = new XMLHttpRequest(); x.open('POST', '/echo'); x.send(document)").starts_with("unsupported:"));
         assert!(js(&mut b, "x = new XMLHttpRequest(); x.open('GET', 'http://example.com/'); x.send()").starts_with("unsupported:"));
         assert_eq!(b.pending_fetches(), 0);
@@ -216,5 +216,25 @@ fn a_page_that_leaves_aborts_a_queued_request() {
         assert_eq!(b.pending_fetches(), 0);
         assert_eq!(js(&mut b, "out.join('|')"), "readystatechange:1|loadstart(0/0)|readystatechange:4|abort(0/0)|loadend(0/0)");
         assert!(srv.recs().is_empty());
+    });
+}
+
+#[test]
+fn each_method_runs_and_the_forbidden_ones_are_a_security_error() {
+    big(|| {
+        let srv = server();
+        let mut b = browser(srv.port);
+        assert_eq!(js(&mut b, "var out = []; var done = 0; for (var m of ['PUT', 'PATCH', 'DELETE', 'OPTIONS', 'HEAD', 'put']) { var x = new XMLHttpRequest(); x.open(m, '/echo'); x.onload = (function (x, m) { return function () { out.push(m + ':' + x.status + ':' + x.responseText.length); }; })(x, m); x.send('abc'); }"), "undefined");
+        let mut n = 0;
+        while b.pending_fetches() > 0 && n < 1000 {
+            b.run_network_tasks(100).unwrap();
+            n += 1;
+        }
+        b.drain().unwrap();
+        let wire: Vec<String> = srv.recs().iter().map(|q| format!("{} {}", q.method, String::from_utf8_lossy(&q.body))).collect();
+        assert_eq!(wire, ["PUT abc", "PATCH abc", "DELETE abc", "OPTIONS abc", "HEAD ", "PUT abc"]);
+        for m in ["CONNECT", "trace", "Track"] {
+            assert_eq!(js(&mut b, &format!("x = new XMLHttpRequest(); x.open('{m}', '/echo')")), format!("throw:SecurityError:Failed to execute 'open' on 'XMLHttpRequest': '{m}' HTTP method is unsupported."));
+        }
     });
 }
