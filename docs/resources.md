@@ -3797,3 +3797,31 @@ Load rows (`tools/js/select_load.sh`, release build, 1 GiB address space cap). `
 After each churn round the realm has 2 wrappers (the baseline) and the collector frees all option objects. The `react` rows are the cost of the JS loop (an indexed read and `value` read per option) and not of the select.
 
 Not tested: a select inside a shadow root or an iframe, `form` reset and submit with a select (the form code does not read select state), a select with 100,000 options, `selectedOptions` of a `multiple` select with 10,000 selected options, and the live staging pages after this build.
+
+## Why an unrelated name moved a row
+
+Problem: PR 171 added three names and `observer_load raf 1` and `raf 100` rose by +0.64% and +1.45%, although a frame loop never runs the new code. Hypothesis: the string interner or a property table hashes differently when more names exist at start. The hypothesis is false. The cause is the glibc allocator.
+
+Method: main 7d67152 plus a temporary hook in `Browser::new` that interns N unused names (`zzpad0` to `zzpadN-1`) after the install, N = 0 to 32 (the hook is not in the repository). `perf stat -e instructions:u`, minimum of 3 runs, only runs with a good checksum count. AMD Ryzen 9 5900HX, glibc 2.44, rustc 1.96.0, release.
+
+| Test | Result |
+| --- | --- |
+| Sweep N = 0 to 32, `raf 1`, default | 260.66 M to 266.86 M, a range of 2.38% (-0.93% to +1.43% against N = 0) |
+| Sweep, `raf 100` | 25,477 M to 26,366 M, a range of 3.49% (-0.66% to +2.81%) |
+| Interner probes (counted in a test build) | 23,135 finds and 44,673 probes in the whole run for N = 0, 23,158 and 44,878 for N = 23: a change of 0.5%, about 200 probes of 263 M instructions |
+| Property map hash replaced by a strong finalizer (`fmix64`) | the same up-and-down pattern over N, so it is not hash quality |
+| Allocation count of the loop | 227,841 for every N |
+| Bump allocator (no free) in the example | range 0.16% (237.79 M to 238.18 M), and 9.6% fewer instructions in total |
+| `GLIBC_TUNABLES=glibc.malloc.tcache_count=65535` | `raf 1`: range 0.228%, +0.000% to +0.228% against N = 0; `raf 100`: range 0.222%, -0.008% to +0.214% |
+| `tcache_count=0` | 319 M instructions (+21%) |
+| mimalloc as the global allocator | range 0.12%, 2% fewer instructions, but peak RSS +10% (`raf 1`), +38% (`raf 100`, 19.6 to 27.0 MiB) and +23% (`mo 100`, 17.2 to 21.2 MiB) |
+
+Cause: the glibc thread cache (tcache) keeps at most 7 freed blocks for each size. A loop that frees more than 7 blocks of one size sends the rest to the fast bins and the unsorted bin, where a free can merge blocks and a malloc can sort or split them. The cost of those paths depends on the blocks that lie next to each other, which depends on everything the heap held before, for example the strings interned at start. The `raf` loop makes 455 allocations per frame (the profile shows CSS declaration parsing in the loop; to verify: that each `style.width` set parses the style again), so a small change of the start layout moves the total by up to 3.5%.
+
+What was not the cause: the interner. Its load is at most 0.5 and the mean probe is 0.41 slots for the 481 names of a realm (longest 9). The test `interner_probes_stay_short_for_realm_names_and_padding` keeps these limits for 0 to 1,000 extra names.
+
+Fix for the rule: measure the rows with `tools/js/instr.sh COMMAND [ARGS...]`. It sets `glibc.malloc.tcache_count=65535` and prints the minimum of 3 runs of `instructions:u`. Every block then stays on the fast path, so the instruction count does not depend on the start layout, and an N sweep moves a row by at most 0.23%. Use it for the main build and for the change. Do not use it for memory: `mo 100` peak RSS rises from 17 MiB to 90 MiB with this setting. The product keeps the default glibc settings. The `bare` binary has no env var to set, and an allocator with a bounded cache (mimalloc) costs 10% to 38% more RSS in these rows, so it is not adopted.
+
+Residual noise: 0.15% to 0.23% remains. It is two levels (about +0.03% and about +0.15% to +0.23%) and it follows N without a trend. A bump allocator shows the same two levels, and a different hash function moves the levels but keeps them. It is the luck of where the hot keys fall in a hash table. Treat a change smaller than 0.25% on a long row as noise.
+
+Cost of this change on the existing rows: only test code and a script are new. The release binaries of main 7d67152 and of this change have the same `.text` section for 76 of 77 binaries (the examples of `bare`, `bare-js`, `bare-tls` and `bare-net`, `bare-stress`, `bare-bench`) and the `bare` binary; `https_load` differs and has no code of `bare-js`. `tools/js/instr.sh` gives 251,825,235 and 251,824,476 instructions for `observer_load raf 1` and 1,195,838,256 and 1,195,838,079 for `eval_load loop 1` (main and this change), a change of 0.0003% or less. The worst row is therefore +0.00%.
