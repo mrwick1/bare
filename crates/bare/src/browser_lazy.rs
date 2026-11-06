@@ -47,3 +47,16 @@ macro_rules! lazy_global {
     };
 }
 pub(crate) use lazy_global;
+
+/// `proto[Symbol.toStringTag] = name`, so `Object.prototype.toString` says `[object name]`.
+pub(crate) fn tag(d: &Dom, it: &mut Interp<'_>, proto: ObjId, name: &str) -> R<()> {
+    let g = it.global_object();
+    let (ks, kt) = (d.key(it, "Symbol")?, d.key(it, "toStringTag")?);
+    let sy = it.get_value(Value::Object(g), ks)?;
+    if let Value::Symbol(s) = it.get_value(sy, kt)? {
+        // Not `js_str`: a constant of the setup is not script data, and a small `max_string_bytes` must not stop the browser.
+        let t = Value::String(it.heap.intern_str(name).map_err(|e| it.heap_error(e))?);
+        it.define_data(proto, bare_js::value::PropertyKey::Symbol(s), t, false, false, true)?;
+    }
+    Ok(())
+}

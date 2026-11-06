@@ -104,6 +104,7 @@ pub mod browser_geometry;
 pub mod browser_resize;
 mod browser_element;
 mod browser_frame;
+mod browser_intersection;
 mod browser_lazy;
 mod browser_mutation;
 #[cfg(test)]
@@ -114,7 +115,8 @@ mod browser_raf_tests;
 mod browser_element_tests;
 #[cfg(test)]
 mod browser_mutation_tests;
-mod browser_intersection;
+#[cfg(test)]
+mod browser_intersection_tests;
 #[cfg(test)]
 mod browser_resize_tests;
 #[cfg(test)]

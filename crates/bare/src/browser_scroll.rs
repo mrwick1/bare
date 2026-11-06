@@ -70,6 +70,8 @@ struct Inner {
     pending: Vec<Option<NodeId>>,
     queued: bool,
     key: Option<ScrollKey>,
+    /// Counts the changes of an offset: a key for `IntersectionObserver` (`browser_intersection.rs`).
+    epoch: u64,
 }
 
 #[derive(Default)]
@@ -325,7 +327,7 @@ impl Dom {
 
     /// The page as scrolling sees it now: runs the cascade and the layout, then `f`. `f` may change the offsets: the changes are
     /// stored, and the targets are queued for a `scroll` event.
-    fn with_geo<T>(&self, it: &mut Interp<'_>, f: impl FnOnce(&Geo, &mut Scroll) -> T) -> R<T> {
+    pub(crate) fn with_geo<T>(&self, it: &mut Interp<'_>, f: impl FnOnce(&Geo, &mut Scroll) -> T) -> R<T> {
         let styles = self.cascade_now(it)?;
         let (layout, areas, bars) = self.layout_areas(it, &styles)?;
         let doc = self.doc.borrow();
@@ -351,6 +353,7 @@ impl Dom {
         nodes.sort_by_key(|n| n.index());
         nodes.dedup();
         moved.extend(nodes.into_iter().filter(|&n| old.of(n) != now.of(n)).map(Some));
+        st.epoch += !moved.is_empty() as u64;
         for t in moved {
             if !st.pending.contains(&t) {
                 st.pending.push(t);
@@ -367,6 +370,10 @@ impl Dom {
             drop(doc);
             self.store_scroll(s);
         }
+    }
+
+    pub(crate) fn scroll_epoch(&self) -> u64 {
+        self.scrolling.s.borrow().epoch
     }
 
     /// Should the scheduler queue the `scroll` step now? Marks it queued when it says yes.

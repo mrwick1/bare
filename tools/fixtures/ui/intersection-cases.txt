@@ -1,0 +1,143 @@
+var st = document.createElement('style'); st.textContent = 'html{overflow:hidden}body{margin:0}.b{position:absolute;width:50px;height:50px}'; document.head.appendChild(st);
+var $ = function (i) { return document.getElementById(i) };
+var log = [];
+var R = function (r) { return [r.x, r.y, r.width, r.height].map(function (v) { return Math.round(v * 100) / 100 }).join(',') };
+var E = function (e) { return [e.target.id, e.isIntersecting, Math.round(e.intersectionRatio * 1000) / 1000, 'b' + R(e.boundingClientRect), 'i' + R(e.intersectionRect), e.rootBounds ? 'r' + R(e.rootBounds) : 'r-'].join(' ') };
+var io = function (opts, ids, name) { var o = new IntersectionObserver(function (es) { log.push((name || '') + es.map(E).join(' ; ')) }, opts); ids.forEach(function (i) { o.observe($(i)) }); return o };
+var err = function (f) { try { return String(f()) } catch (e) { return e.name + ': ' + e.message } };
+=== entry-for-an-intersecting-target
+@html <div id=a class=b style="left:10px;top:20px"></div>
+io({}, ['a']); (function () { return log.join(' | ') })
+=== entry-for-a-target-below-the-window
+@html <div id=a class=b style="left:10px;top:500px"></div>
+io({}, ['a']); (function () { return log.join(' | ') })
+=== partial-intersection-ratio
+@html <div id=a class=b style="left:-25px;top:10px"></div>
+io({}, ['a']); (function () { return log.join(' | ') })
+=== edge-adjacent-target-intersects-with-ratio-zero
+@html <div id=a class=b style="left:10px;top:300px"></div><div id=c class=b style="left:-50px;top:10px"></div><div id=d class=b style="left:10px;top:301px"></div>
+io({}, ['a', 'c', 'd']); (function () { return log.join(' | ') })
+=== zero-size-targets
+@html <div id=a style="position:absolute;left:10px;top:10px;width:0;height:0"></div><div id=c style="position:absolute;left:10px;top:400px;width:0;height:0"></div>
+io({}, ['a', 'c']); (function () { return log.join(' | ') })
+=== a-target-larger-than-the-window
+@html <div id=a style="position:absolute;left:0;top:0;width:800px;height:600px"></div>
+io({}, ['a']); (function () { return log.join(' | ') })
+=== thresholds-fire-on-a-new-index-only
+@html <div id=r style="position:absolute;left:0;top:0;width:200px;height:100px;overflow:hidden"><div id=a style="position:absolute;left:0;top:50px;width:50px;height:100px"></div><div style="position:absolute;left:100px;top:0;width:10px;height:300px"></div></div>
+io({ root: $('r'), threshold: [0, 0.25, 0.5, 0.75, 1] }, ['a']); setTimeout(function () { $('r').scrollTop = 75 }, 50); setTimeout(function () { $('r').scrollTop = 70 }, 150); setTimeout(function () { $('r').scrollTop = 0 }, 250); (function () { return log.join(' | ') })
+=== a-threshold-of-one-with-a-partial-target
+@html <div id=a class=b style="left:-25px;top:10px"></div>
+io({ threshold: 1 }, ['a']); (function () { return log.join(' | ') })
+=== an-explicit-root-clips-the-target
+@html <div id=r style="position:absolute;left:20px;top:30px;width:100px;height:100px;overflow:hidden"><div id=a style="margin-left:80px;width:50px;height:50px"></div></div>
+io({ root: $('r') }, ['a']); (function () { return log.join(' | ') })
+=== an-ancestor-with-overflow-clips-the-target
+@html <div style="position:absolute;left:0;top:0;width:100px;height:100px;overflow:hidden"><div id=a style="margin-left:80px;width:50px;height:50px"></div></div><div style="position:absolute;left:200px;top:0;width:100px;height:100px;overflow:hidden"><div id=c style="margin-left:150px;width:50px;height:50px"></div></div>
+io({}, ['a', 'c']); (function () { return log.join(' | ') })
+=== an-absolute-box-escapes-a-static-clip
+@html <div style="overflow:hidden;width:100px;height:100px"><div id=a class=b style="left:150px;top:0"></div></div><div style="position:relative;overflow:hidden;width:100px;height:100px;margin-left:200px"><div id=c class=b style="left:150px;top:0"></div></div>
+io({}, ['a', 'c']); (function () { return log.join(' | ') })
+=== a-fixed-box-ignores-the-clip-of-a-scroller
+@html <div style="width:100px;height:100px;overflow:hidden"><div id=a style="position:fixed;left:150px;top:10px;width:50px;height:50px"></div></div>
+io({}, ['a']); (function () { return log.join(' | ') })
+=== root-margin-in-px-grows-an-explicit-root
+@html <div id=r style="position:absolute;left:100px;top:100px;width:100px;height:100px;overflow:hidden"><div id=a style="position:absolute;left:-60px;top:0;width:50px;height:50px"></div><div id=c style="position:absolute;left:-85px;top:0;width:50px;height:50px"></div></div>
+io({ root: $('r'), rootMargin: '20px' }, ['a', 'c']); (function () { return log.join(' | ') })
+=== root-margin-in-percent-of-an-explicit-root
+@html <div id=r style="position:absolute;left:100px;top:100px;width:200px;height:100px;overflow:hidden"><div id=a style="position:absolute;left:-30px;top:0;width:50px;height:50px"></div><div id=c style="position:absolute;left:-60px;top:0;width:50px;height:50px"></div></div>
+io({ root: $('r'), rootMargin: '10%' }, ['a', 'c']); (function () { return log.join(' | ') })
+=== a-negative-root-margin-shrinks-the-root
+@html <div id=a class=b style="left:0;top:0"></div><div id=c class=b style="left:100px;top:100px"></div>
+io({ rootMargin: '-60px' }, ['a', 'c']); (function () { return log.join(' | ') })
+=== root-margin-with-four-values
+@html <div id=a class=b style="left:10px;top:10px"></div>
+io({ rootMargin: '1px 2px 3px 4px' }, ['a']); (function () { return log.join(' | ') })
+=== root-margin-text
+(function () { return ['0px', '10px 20px', '1px 2px 3px', '1px 2px 3px 4px', '5%', '1.5px', '0', '-0px', '10px  20%', '', ' 3px '].map(function (v) { return err(function () { return new IntersectionObserver(function () {}, { rootMargin: v }).rootMargin }) }).join(' | ') })
+=== root-margin-errors
+(function () { return ['1em', 'abc', '1px 2px 3px 4px 5px', '10', 'px', '10px,20px', '1vw', 'calc(1px)', 'auto'].map(function (v) { return err(function () { return new IntersectionObserver(function () {}, { rootMargin: v }).rootMargin }) }).join(' | ') })
+=== threshold-forms
+(function () { return [undefined, 0.5, [0.5, 0.25], [], [1, 0], 0, '0.5', null, [0.5, 0.5]].map(function (v) { return err(function () { return new IntersectionObserver(function () {}, { threshold: v }).thresholds.join('/') + ':' + Array.isArray(new IntersectionObserver(function () {}, { threshold: v }).thresholds) }) }).join(' | ') })
+=== threshold-errors
+(function () { return [-1, 1.5, NaN, [0, 2], 'x', Infinity, [NaN], {}].map(function (v) { return err(function () { return new IntersectionObserver(function () {}, { threshold: v }).thresholds }) }).join(' | ') })
+=== constructor-errors
+(function () { return [function () { return new IntersectionObserver() }, function () { return new IntersectionObserver(1) }, function () { return new IntersectionObserver(function () {}, { root: 1 }) }, function () { return new IntersectionObserver(function () {}, { root: {} }) }, function () { return new IntersectionObserver(function () {}, 5) }, function () { return new IntersectionObserverEntry() }, function () { return new IntersectionObserver(function () {}, null) }, function () { return new IntersectionObserver(function () {}, { root: null }) instanceof IntersectionObserver }].map(err).join(' | ') })
+=== observe-errors
+(function () { var o = new IntersectionObserver(function () {}); return [function () { o.observe() }, function () { o.observe(1) }, function () { o.observe({}) }, function () { o.observe(document) }, function () { o.unobserve(1) }, function () { IntersectionObserver.prototype.observe.call({}, document.body) }, function () { IntersectionObserver.prototype.takeRecords.call({}) }, function () { IntersectionObserver.prototype.disconnect.call({}) }, function () { return o.observe(document.body) }, function () { return o.unobserve(document.body) }, function () { return o.disconnect() }].map(err).join(' | ') })
+=== interface-shape
+(function () { var p = IntersectionObserver.prototype; return [typeof IntersectionObserver, IntersectionObserver.length, ['observe', 'unobserve', 'disconnect', 'takeRecords'].map(function (n) { return n + ':' + typeof p[n] + p[n].length }).join(), 'root' in p, 'rootMargin' in p, 'thresholds' in p, typeof IntersectionObserverEntry, Object.prototype.toString.call(new IntersectionObserver(function () {})), String(IntersectionObserverEntry.prototype.constructor === IntersectionObserverEntry)].join(' ') })
+=== observer-properties
+@html <div id=r></div>
+(function () { var a = new IntersectionObserver(function () {}), b = new IntersectionObserver(function () {}, { root: $('r'), rootMargin: '4px 8px', threshold: [0.5, 0.1] }); return [a.root, a.rootMargin, a.thresholds.join(), b.root === $('r'), b.rootMargin, b.thresholds.join(), new IntersectionObserver(function () {}, { root: document }).root === document].join(' | ') })
+=== entry-shape-and-callback-arguments
+@html <div id=a class=b style="left:10px;top:20px"></div>
+var seen = []; var o = new IntersectionObserver(function (es, ob) { var e = es[0]; seen.push([this === o, ob === o, arguments.length, Array.isArray(es), es.length, e instanceof IntersectionObserverEntry, e.target === $('a'), typeof e.time, e.time >= 0, typeof e.rootBounds, typeof e.boundingClientRect, e.boundingClientRect.top, e.boundingClientRect.right, e.intersectionRect.bottom, e.isIntersecting, e.intersectionRatio, Object.prototype.toString.call(e)].join()) }); o.observe($('a')); (function () { return seen.join(' | ') })
+=== observing-twice-gives-one-entry
+@html <div id=a class=b style="left:10px;top:20px"></div>
+var o = io({}, ['a']); o.observe($('a')); (function () { return log.join(' | ') })
+=== unobserve-and-disconnect-before-the-first-frame
+@html <div id=a class=b style="left:10px;top:20px"></div><div id=c class=b style="left:100px;top:20px"></div>
+var o = io({}, ['a', 'c']); o.unobserve($('a')); var p = io({}, ['a'], 'p'); p.disconnect(); (function () { return log.join(' | ') })
+=== no-entry-after-disconnect
+@html <div id=r style="position:absolute;left:0;top:0;width:200px;height:100px;overflow:hidden"><div id=a style="position:absolute;left:0;top:50px;width:50px;height:100px"></div><div style="position:absolute;left:100px;top:0;width:10px;height:300px"></div></div>
+var o = io({ root: $('r') }, ['a']); setTimeout(function () { o.disconnect() }, 50); setTimeout(function () { $('r').scrollTop = 150 }, 150); (function () { return log.join(' | ') })
+=== observing-again-after-unobserve-gives-a-new-entry
+@html <div id=a class=b style="left:10px;top:20px"></div>
+var o = io({}, ['a']); setTimeout(function () { o.unobserve($('a')) }, 50); setTimeout(function () { o.observe($('a')) }, 150); (function () { return log.join(' | ') })
+=== take-records
+@html <div id=a class=b style="left:10px;top:20px"></div>
+var r = []; var o = new IntersectionObserver(function () { r.push('cb:' + o.takeRecords().length) }); r.push(Array.isArray(o.takeRecords()) + ':' + o.takeRecords().length); o.observe($('a')); r.push('after observe:' + o.takeRecords().length); (function () { return r.join(' | ') })
+=== a-target-with-display-none
+@html <div id=a class=b style="left:10px;top:20px;display:none"></div>
+io({}, ['a']); setTimeout(function () { $('a').style.display = '' }, 100); (function () { return log.join(' | ') })
+=== a-detached-target
+@html <div id=a class=b style="left:10px;top:20px"></div>
+var e = $('a'); e.parentNode.removeChild(e); io({}, ['a'].slice(0, 0)); var o = new IntersectionObserver(function (es) { log.push(es.map(function (x) { return x.isIntersecting + ' ' + R(x.boundingClientRect) + ' ' + R(x.intersectionRect) }).join(';')) }); o.observe(e); setTimeout(function () { document.body.appendChild(e) }, 100); (function () { return log.join(' | ') })
+=== a-target-that-is-removed
+@html <div id=a class=b style="left:10px;top:20px"></div>
+var e = $('a'); io({}, ['a']); setTimeout(function () { e.parentNode.removeChild(e) }, 100); (function () { return log.join(' | ') })
+=== a-root-that-is-not-an-ancestor
+@html <div id=r style="position:absolute;left:200px;top:0;width:100px;height:100px;overflow:hidden"></div><div id=a class=b style="left:10px;top:20px"></div>
+io({ root: $('r') }, ['a']); (function () { return log.join(' | ') })
+=== many-targets-one-callback-in-observation-order
+@html <div id=a class=b style="left:10px;top:20px"></div><div id=c class=b style="left:100px;top:20px"></div><div id=d class=b style="left:200px;top:500px"></div>
+var n = 0; var o = new IntersectionObserver(function (es) { n++; log.push(es.map(function (e) { return e.target.id }).join()) }); ['d', 'a', 'c'].forEach(function (i) { o.observe($(i)) }); (function () { return n + ' ' + log.join(' | ') })
+=== nested-scrollers
+@html <div id=r style="position:absolute;left:0;top:0;width:200px;height:200px;overflow:hidden"><div style="position:relative;width:100px;height:100px;overflow:hidden"><div id=a style="width:50px;height:150px;margin-left:75px"></div></div></div>
+io({ root: $('r') }, ['a']); (function () { return log.join(' | ') })
+=== a-scrolled-container
+@html <div id=c style="position:absolute;left:0;top:0;width:100px;height:100px;overflow:hidden"><div style="height:100px"></div><div id=a style="height:50px;width:50px"></div></div>
+$('c').scrollTop = 100; io({}, ['a']); (function () { return log.join(' | ') })
+=== explicit-root-with-padding-and-border
+@html <div id=r style="position:absolute;left:20px;top:30px;width:100px;height:100px;padding:10px;border:5px solid;overflow:hidden"><div id=a style="position:absolute;left:0;top:0;width:200px;height:200px"></div></div>
+io({ root: $('r') }, ['a']); (function () { return log.join(' | ') })
+=== explicit-root-without-clipping
+@html <div id=r style="position:absolute;left:20px;top:30px;width:100px;height:100px;border:5px solid"><div id=a style="position:absolute;left:0;top:0;width:200px;height:200px"></div></div>
+io({ root: $('r') }, ['a']); (function () { return log.join(' | ') })
+=== root-margin-on-an-explicit-root
+@html <div id=r style="position:absolute;left:50px;top:50px;width:100px;height:100px;overflow:hidden"><div id=a style="position:absolute;left:-30px;top:0;width:50px;height:50px"></div></div>
+io({ root: $('r'), rootMargin: '10px 40px' }, ['a']); (function () { return log.join(' | ') })
+=== visibility-and-opacity-do-not-matter
+@html <div id=a class=b style="left:10px;top:20px;visibility:hidden;opacity:0"></div>
+io({}, ['a']); (function () { return log.join(' | ') })
+=== entry-time-is-the-time-of-the-frame
+@html <div id=a class=b style="left:10px;top:20px"></div>
+var ts = []; requestAnimationFrame(function (t) { ts.push(t) }); var o = new IntersectionObserver(function (es) { ts.push(es[0].time) }); o.observe($('a')); (function () { return (ts[1] >= ts[0]) + ' ' + (ts[1] - ts[0] < 50) })
+=== entering-by-one-pixel
+@html <div id=a class=b style="left:10px;top:301px"></div>
+io({}, ['a']); setTimeout(function () { $('a').style.top = '299px' }, 100); setTimeout(function () { $('a').style.top = '301px' }, 200); (function () { return log.join(' | ') })
+=== the-document-as-root
+@html <div id=a class=b style="left:10px;top:20px"></div><div id=c class=b style="left:10px;top:500px"></div>
+io({ root: document }, ['a', 'c']); (function () { return log.join(' | ') })
+=== delay-without-track-visibility
+@html <div id=a class=b style="left:10px;top:20px"></div>
+io({ delay: 100 }, ['a']); (function () { return log.join(' | ') })
+=== a-callback-that-throws-does-not-stop-the-others
+@html <div id=a class=b style="left:10px;top:20px"></div>
+var o = new IntersectionObserver(function () { throw new Error('x') }); o.observe($('a')); io({}, ['a'], 'p:'); (function () { return log.length })
+=== a-threshold-above-the-ratio-is-not-intersecting
+@html <div id=a class=b style="left:-25px;top:10px"></div><div id=c class=b style="left:-35px;top:10px"></div><div id=d class=b style="left:-50px;top:10px"></div>
+io({ threshold: 0.5 }, ['a', 'c', 'd']); (function () { return log.join(' | ') })
+=== root-margin-fractions
+(function () { return ['1.9px', '-1.5px', '12.5%', '0.4px', '1e1px', '+3px', '.5px', '-0.5px', '99.99%'].map(function (v) { return err(function () { return new IntersectionObserver(function () {}, { rootMargin: v }).rootMargin }) }).join(' | ') })

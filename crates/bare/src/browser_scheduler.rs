@@ -108,6 +108,8 @@ enum Task {
     Scroll,
     /// `AbortSignal.timeout` (`browser_abort.rs`). The task roots its signal.
     AbortTimeout(ObjId),
+    /// The delivery of `IntersectionObserver` entries (`browser_intersection.rs`). At most one is queued.
+    Notify,
 }
 
 struct Timer {
@@ -200,6 +202,7 @@ enum Run {
     Render,
     Scroll,
     AbortTimeout(ObjId),
+    Notify,
     Nothing,
 }
 
@@ -246,7 +249,7 @@ impl Dom {
         let ports = &s.ports;
         s.tasks.retain(|_, t| match t {
             Task::Deliver(o) => ports.contains_key(o),
-            Task::Timer(_) | Task::Select(_) | Task::SelectionChange(_) | Task::Render | Task::Scroll | Task::AbortTimeout(_) => true,
+            Task::Timer(_) | Task::Select(_) | Task::SelectionChange(_) | Task::Render | Task::Scroll | Task::AbortTimeout(_) | Task::Notify => true,
         });
         s.queued = s.ports.values().map(|p| p.inbox.len()).sum();
         s.queued_bytes = s.ports.values().flat_map(|p| p.inbox.iter().map(|m| m.1)).sum();
@@ -267,6 +270,11 @@ impl Dom {
             self.frame.queued.set(true);
         }
         Ok(())
+    }
+
+    /// Queue the delivery of `IntersectionObserver` entries now (a task after the current one).
+    pub(crate) fn want_notify(&self) -> R<()> {
+        self.schedule(self.now_ms(), Task::Notify).map(|_| ())
     }
 
     fn schedule(&self, due: f64, task: Task) -> R<Key> {
@@ -360,6 +368,7 @@ impl Dom {
                 Run::Render
             }
             Task::Scroll => Run::Scroll,
+            Task::Notify => Run::Notify,
             Task::AbortTimeout(o) => Run::AbortTimeout(o),
             Task::Deliver(port) => match s.ports.get_mut(&port) {
                 Some(p) if p.keys.front() == Some(&key) => {
@@ -410,6 +419,10 @@ impl Dom {
             Run::Render => it.host_scope(|it| {
                 it.charge(1)?;
                 self.frame_run(it)
+            }),
+            Run::Notify => it.host_scope(|it| {
+                it.charge(1)?;
+                self.io_notify(it)
             }),
             Run::Scroll => it.host_scope(|it| {
                 it.charge(1)?;

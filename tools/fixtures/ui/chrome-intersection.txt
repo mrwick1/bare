@@ -1,0 +1,48 @@
+entry-for-an-intersecting-target	a true 1 b10,20,50,50 i10,20,50,50 r0,0,400,300
+entry-for-a-target-below-the-window	a false 0 b10,500,50,50 i0,0,0,0 r0,0,400,300
+partial-intersection-ratio	a true 0.5 b-25,10,50,50 i0,10,25,50 r0,0,400,300
+edge-adjacent-target-intersects-with-ratio-zero	a true 0 b10,300,50,50 i10,300,50,0 r0,0,400,300 ; c true 0 b-50,10,50,50 i0,10,0,50 r0,0,400,300 ; d false 0 b10,301,50,50 i0,0,0,0 r0,0,400,300
+zero-size-targets	a true 1 b10,10,0,0 i10,10,0,0 r0,0,400,300 ; c false 0 b10,400,0,0 i0,0,0,0 r0,0,400,300
+a-target-larger-than-the-window	a true 0.25 b0,0,800,600 i0,0,400,300 r0,0,400,300
+thresholds-fire-on-a-new-index-only	a true 0.5 b0,50,50,100 i0,50,50,50 r0,0,200,100 | a true 0.75 b0,-25,50,100 i0,0,50,75 r0,0,200,100 | a true 0.5 b0,50,50,100 i0,50,50,50 r0,0,200,100
+a-threshold-of-one-with-a-partial-target	a false 0.5 b-25,10,50,50 i0,10,25,50 r0,0,400,300
+an-explicit-root-clips-the-target	a true 0.4 b100,30,50,50 i100,30,20,50 r20,30,100,100
+an-ancestor-with-overflow-clips-the-target	a true 0.4 b80,0,50,50 i80,0,20,50 r0,0,400,300 ; c false 0 b350,0,50,50 i0,0,0,0 r0,0,400,300
+an-absolute-box-escapes-a-static-clip	a true 1 b150,0,50,50 i150,0,50,50 r0,0,400,300 ; c false 0 b350,100,50,50 i0,0,0,0 r0,0,400,300
+a-fixed-box-ignores-the-clip-of-a-scroller	a true 1 b150,10,50,50 i150,10,50,50 r0,0,400,300
+root-margin-in-px-grows-an-explicit-root	a true 0.2 b40,100,50,50 i80,100,10,50 r80,80,140,140 ; c false 0 b15,100,50,50 i0,0,0,0 r80,80,140,140
+root-margin-in-percent-of-an-explicit-root	a true 0.8 b70,100,50,50 i80,100,40,50 r80,90,240,120 ; c true 0.2 b40,100,50,50 i80,100,10,50 r80,90,240,120
+a-negative-root-margin-shrinks-the-root	a false 0 b0,0,50,50 i0,0,0,0 r60,60,280,180 ; c true 1 b100,100,50,50 i100,100,50,50 r60,60,280,180
+root-margin-with-four-values	a true 1 b10,10,50,50 i10,10,50,50 r-4,-1,406,304
+root-margin-text	0px 0px 0px 0px | 10px 20px 10px 20px | 1px 2px 3px 2px | 1px 2px 3px 4px | 5% 5% 5% 5% | 1px 1px 1px 1px | SyntaxError: Failed to construct 'IntersectionObserver': rootMargin must be specified in absolute length units or percent. | 0px 0px 0px 0px | 10px 20% 10px 20% | 0px 0px 0px 0px | 3px 3px 3px 3px
+root-margin-errors	SyntaxError: Failed to construct 'IntersectionObserver': rootMargin must be specified in absolute length units or percent. | SyntaxError: Failed to construct 'IntersectionObserver': rootMargin must be specified in absolute length units or percent. | SyntaxError: Failed to construct 'IntersectionObserver': Extra text found at the end of rootMargin. | SyntaxError: Failed to construct 'IntersectionObserver': rootMargin must be specified in absolute length units or percent. | SyntaxError: Failed to construct 'IntersectionObserver': rootMargin must be specified in absolute length units or percent. | SyntaxError: Failed to construct 'IntersectionObserver': rootMargin must be specified in absolute length units or percent. | SyntaxError: Failed to construct 'IntersectionObserver': rootMargin must be specified in absolute length units or percent. | SyntaxError: Failed to construct 'IntersectionObserver': rootMargin must be specified in absolute length units or percent. | SyntaxError: Failed to construct 'IntersectionObserver': rootMargin must be specified in absolute length units or percent.
+threshold-forms	0:true | 0.5:true | 0.25/0.5:true | 0:true | 0/1:true | 0:true | 0.5:true | 0:true | 0.5/0.5:true
+threshold-errors	RangeError: Failed to construct 'IntersectionObserver': Threshold values must be numbers between 0 and 1 | RangeError: Failed to construct 'IntersectionObserver': Threshold values must be numbers between 0 and 1 | TypeError: Failed to construct 'IntersectionObserver': Failed to read the 'threshold' property from 'IntersectionObserverInit': The provided double value is non-finite. | RangeError: Failed to construct 'IntersectionObserver': Threshold values must be numbers between 0 and 1 | TypeError: Failed to construct 'IntersectionObserver': Failed to read the 'threshold' property from 'IntersectionObserverInit': The provided double value is non-finite. | TypeError: Failed to construct 'IntersectionObserver': Failed to read the 'threshold' property from 'IntersectionObserverInit': The provided double value is non-finite. | TypeError: Failed to construct 'IntersectionObserver': Failed to read the 'threshold' property from 'IntersectionObserverInit': The provided double value is non-finite. | TypeError: Failed to construct 'IntersectionObserver': Failed to read the 'threshold' property from 'IntersectionObserverInit': The provided double value is non-finite.
+constructor-errors	TypeError: Failed to construct 'IntersectionObserver': 1 argument required, but only 0 present. | TypeError: Failed to construct 'IntersectionObserver': parameter 1 is not of type 'Function'. | TypeError: Failed to construct 'IntersectionObserver': Failed to read the 'root' property from 'IntersectionObserverInit': The provided value is not of type '(Document or Element)'. | TypeError: Failed to construct 'IntersectionObserver': Failed to read the 'root' property from 'IntersectionObserverInit': The provided value is not of type '(Document or Element)'. | TypeError: Failed to construct 'IntersectionObserver': The provided value is not of type 'IntersectionObserverInit'. | TypeError: Failed to construct 'IntersectionObserverEntry': Illegal constructor | [object IntersectionObserver] | true
+observe-errors	TypeError: Failed to execute 'observe' on 'IntersectionObserver': 1 argument required, but only 0 present. | TypeError: Failed to execute 'observe' on 'IntersectionObserver': parameter 1 is not of type 'Element'. | TypeError: Failed to execute 'observe' on 'IntersectionObserver': parameter 1 is not of type 'Element'. | TypeError: Failed to execute 'observe' on 'IntersectionObserver': parameter 1 is not of type 'Element'. | TypeError: Failed to execute 'unobserve' on 'IntersectionObserver': parameter 1 is not of type 'Element'. | TypeError: Illegal invocation | TypeError: Illegal invocation | TypeError: Illegal invocation | undefined | undefined | undefined
+interface-shape	function 1 observe:function1,unobserve:function1,disconnect:function0,takeRecords:function0 true true true function [object IntersectionObserver] true
+observer-properties	 | 0px 0px 0px 0px | 0 | true | 4px 8px 4px 8px | 0.10000000149011612,0.5 | true
+entry-shape-and-callback-arguments	true,true,2,true,1,true,true,number,true,object,object,20,60,70,true,1,[object IntersectionObserverEntry]
+observing-twice-gives-one-entry	a true 1 b10,20,50,50 i10,20,50,50 r0,0,400,300
+unobserve-and-disconnect-before-the-first-frame	c true 1 b100,20,50,50 i100,20,50,50 r0,0,400,300
+no-entry-after-disconnect	a true 0.5 b0,50,50,100 i0,50,50,50 r0,0,200,100
+observing-again-after-unobserve-gives-a-new-entry	a true 1 b10,20,50,50 i10,20,50,50 r0,0,400,300 | a true 1 b10,20,50,50 i10,20,50,50 r0,0,400,300
+take-records	true:0 | after observe:0 | cb:0
+a-target-with-display-none	a false 0 b0,0,0,0 i0,0,0,0 r0,0,0,0 | a true 1 b10,20,50,50 i10,20,50,50 r0,0,400,300
+a-detached-target	false 0,0,0,0 0,0,0,0 | true 10,20,50,50 10,20,50,50
+a-target-that-is-removed	a true 1 b10,20,50,50 i10,20,50,50 r0,0,400,300 | a false 0 b0,0,0,0 i0,0,0,0 r0,0,0,0
+a-root-that-is-not-an-ancestor	a false 0 b0,0,0,0 i0,0,0,0 r0,0,0,0
+many-targets-one-callback-in-observation-order	1 d,a,c
+nested-scrollers	a true 0.333 b75,0,50,150 i75,0,25,100 r0,0,200,200
+a-scrolled-container	a true 1 b0,50,50,50 i0,50,50,50 r0,0,400,300
+explicit-root-with-padding-and-border	a true 0.36 b25,35,200,200 i25,35,120,120 r25,35,120,120
+explicit-root-without-clipping	a true 0.276 b25,35,200,200 i25,35,105,105 r20,30,110,110
+root-margin-on-an-explicit-root	a true 1 b20,50,50,50 i20,50,50,50 r10,40,180,120
+visibility-and-opacity-do-not-matter	a true 1 b10,20,50,50 i10,20,50,50 r0,0,400,300
+entry-time-is-the-time-of-the-frame	true true
+entering-by-one-pixel	a false 0 b10,301,50,50 i0,0,0,0 r0,0,400,300 | a true 0.02 b10,299,50,50 i10,299,50,1 r0,0,400,300 | a false 0 b10,301,50,50 i0,0,0,0 r0,0,400,300
+the-document-as-root	a true 1 b10,20,50,50 i10,20,50,50 r0,0,400,300 ; c false 0 b10,500,50,50 i0,0,0,0 r0,0,400,300
+delay-without-track-visibility	a true 1 b10,20,50,50 i10,20,50,50 r0,0,400,300
+a-callback-that-throws-does-not-stop-the-others	1
+a-threshold-above-the-ratio-is-not-intersecting	a true 0.5 b-25,10,50,50 i0,10,25,50 r0,0,400,300 ; c false 0.3 b-35,10,50,50 i0,10,15,50 r0,0,400,300 ; d false 0 b-50,10,50,50 i0,10,0,50 r0,0,400,300
+root-margin-fractions	1px 1px 1px 1px | -2px -2px -2px -2px | 12.5% 12.5% 12.5% 12.5% | 0px 0px 0px 0px | 10px 10px 10px 10px | 3px 3px 3px 3px | 0px 0px 0px 0px | -1px -1px -1px -1px | 99.99% 99.99% 99.99% 99.99%

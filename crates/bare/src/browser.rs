@@ -341,6 +341,7 @@ pub struct Dom {
     pub(crate) frame: crate::browser_frame::Frame,
     /// `MutationObserver` (`browser_mutation.rs`).
     pub(crate) mo: crate::browser_mutation::Mo,
+    pub(crate) io: crate::browser_intersection::Io,
     /// The elements whose `click()` is running (`browser_element.rs`).
     pub(crate) clicking: RefCell<Vec<NodeId>>,
     /// `Element.attributes`, `NamedNodeMap` and `Attr` (`browser_attr.rs`).
@@ -389,6 +390,7 @@ impl Host for Dom {
         self.resize_roots(out);
         self.frame_roots(out);
         self.mo_roots(out);
+        self.io_roots(out);
     }
 
     fn trace(&self, owner: ObjId, out: &mut Vec<Value>) {
@@ -399,6 +401,7 @@ impl Host for Dom {
         crate::browser_computed::trace(self, owner, out);
         self.resize_trace(owner, out);
         self.mo_trace(owner, out);
+        self.io_trace(owner, out);
         at::trace(self, owner, out);
         crate::browser_nodelist::trace(self, owner, out);
         crate::browser_dataset::trace(self, owner, out);
@@ -439,6 +442,7 @@ impl Host for Dom {
         crate::browser_computed::prune(self, live);
         self.resize_prune(live);
         self.mo_prune(live);
+        self.io_prune(live);
         at::prune(self, live);
         crate::browser_nodelist::prune(self, live);
         crate::browser_dataset::prune(self, live);
@@ -881,6 +885,7 @@ impl Dom {
         crate::browser_resize::install(self, it)?;
         crate::browser_frame::install(self, it)?;
         crate::browser_mutation::install(self, it)?;
+        crate::browser_intersection::install(self, it)?;
         crate::browser_handlers::install(self, it)
     }
 
@@ -1141,6 +1146,7 @@ impl Browser {
             resize: Default::default(),
             frame: Default::default(),
             mo: Default::default(),
+            io: Default::default(),
             clicking: Default::default(),
             attr: Default::default(),
             nl: Default::default(),
