@@ -330,7 +330,7 @@ pub fn lines(cx: &mut Cx, block: NodeId, first: NodeId, last: NodeId, width: f32
                 if matches!(event, Event::Open(_)) && b.cx.tree.position(node) == Keyword::Relative {
                     let offset = block::relative_offset(b.cx, tree.style(node), Space { width: b.width, height: None });
                     if offset != (0.0, 0.0) {
-                        b.cx.rel.insert(node.index() as u32, offset);
+                        b.cx.set_rel(node, offset);
                     }
                 }
                 if info.paint || info.edges != (0.0, 0.0) || info.margins != (0.0, 0.0) {

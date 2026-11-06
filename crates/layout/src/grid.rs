@@ -27,10 +27,10 @@
 //! - The tracks of the grid are not cut at 10,000: the items are. A grid has at most 10,000 tracks on each side.
 
 use crate::Cx;
-use crate::block::{self, Kids, MAX_PX, Pos, Sides, Space, border_padding, resolve, widths};
+use crate::block::{Kids, MAX_PX, Sides, Space, border_padding, resolve, widths};
 use crate::boxes::{Child, Kind};
 use crate::fragment::{Fragment, Kind as FragmentKind};
-use crate::{inline, intrinsic};
+use crate::{inline, intrinsic, memo};
 use bare_css::grid::{Areas, Bound, Count, FLOW_COLUMN, FLOW_DENSE, Grid, Line, MAX_TRACKS, Part, Track};
 use bare_css::values::{Keyword, Length, Property, Value};
 use bare_html::dom::NodeId;
@@ -1125,7 +1125,7 @@ fn positions(sizes: &[f32], lead: &[f32], collapsed: &[bool], free: f32, how: Va
 }
 
 /// What the first layout of an item leaves.
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Default)]
 struct Lay {
     /// The fragments of the item: from `frag` to `end`, in the temporary list.
     frag: usize,
@@ -1144,6 +1144,8 @@ struct Lay {
     w: f32,
     ml: f32,
     mr: f32,
+    /// The last layout of the item, for the map of layouts that a run again throws away (`memo.rs`).
+    laid: Option<Box<memo::Laid>>,
 }
 
 fn run_height(rows: &[f32]) -> f32 {
@@ -1202,7 +1204,7 @@ pub(crate) fn layout(cx: &mut Cx, node: NodeId, space: Space, bp: Sides) -> Kids
             }
             let how = align(tree.style(it.node).get(Property::JustifySelf), justify_items);
             let (w, ml, mr, shift) = fit_width(cx, it.node, area_w, how);
-            let done = block::sized(cx, it.node, Space { width: area_w, height: None }, Some((w, ml, mr)), None, Pos::default());
+            let done = cx.lay_item(it.node, Space { width: area_w, height: None }, (w, ml, mr), None, &mut l.laid);
             (l.h, l.mt, l.mb, l.base, l.w, l.ml, l.mr) = (done.height, done.margin_top, done.margin_bottom, done.baseline, w, ml, mr);
             l.x += ml + shift;
         }
@@ -1276,7 +1278,12 @@ pub(crate) fn layout(cx: &mut Cx, node: NodeId, space: Space, bp: Sides) -> Kids
                     cx.number = it.number;
                 }
                 let before = cx.waiting;
-                let done = block::sized(cx, it.node, Space { width: l.area_w, height: Some(area_h) }, Some((l.w, l.ml, l.mr)), tall, Pos::default());
+                // The fragments of the first layout are left dead: that is work (`Cx::work`).
+                cx.work += (l.end as usize - l.frag) as u64;
+                if let Some(laid) = l.laid.take() {
+                    memo::keep(&mut cx.memo, &laid, &cx.out[l.frag..l.end as usize]);
+                }
+                let done = cx.lay_item(it.node, Space { width: l.area_w, height: Some(area_h) }, (l.w, l.ml, l.mr), tall, &mut None);
                 (l.frag, l.end, l.waited, l.h, l.base) = (done.fragment, cx.out.len() as u32, cx.waiting - before, done.height, done.baseline);
             }
             let free = area_h - l.h - t0 - b0;
