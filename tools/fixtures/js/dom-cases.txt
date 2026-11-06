@@ -235,3 +235,165 @@ c.signal.addEventListener('abort', function () { log.push('cleanup'); }, { once:
 t.addEventListener('abort', handler, { signal: c.signal });
 t.dispatchEvent(new Event('abort')); c.abort(); t.dispatchEvent(new Event('abort'));
 (function () { return log.join(); })
+=== sc_primitives
+var vs = [undefined, null, true, false, 0, -0, 1.5, NaN, Infinity, -Infinity, '', 'a\ud800b', 10n, -(2n ** 70n), 2n ** 64n];
+var out = vs.map(function (v) { var c = structuredClone(v); return Object.is(c, v) ? 'same' : 'DIFF:' + String(c); });
+(function () { return out.join(); })
+=== sc_plain_object_array
+var o = { a: 1, b: [1, , 3], c: { d: 'x' }, get g() { return 7; } };
+var c = structuredClone(o);
+(function () { return [c !== o, c.a, Array.isArray(c.b), c.b.length, 1 in c.b, c.b[2], c.c.d, c.c !== o.c, Object.getOwnPropertyDescriptor(c, 'g').value, Object.keys(c).join()].join('|'); })
+=== sc_cycles_and_shared
+var a = { n: 1 }; a.self = a; a.list = [a, a]; var sh = { x: 1 }; a.p = sh; a.q = sh;
+var c = structuredClone(a);
+(function () { return [c.self === c, c.list[0] === c, c.list[1] === c, c.p === c.q, c.p !== sh, c !== a].join(); })
+=== sc_proto_lost
+class K { constructor() { this.x = 1; } m() {} } var k = new K(); k.y = 2;
+var c = structuredClone(k), n = structuredClone(Object.create(null, { z: { value: 1, enumerable: true } }));
+(function () { return [Object.getPrototypeOf(c) === Object.prototype, c.m, c.x, c.y, Object.getPrototypeOf(n) === Object.prototype, n.z].join(); })
+=== sc_symbol_keys_and_nonenumerable_skipped
+var s = Symbol('k'), o = { a: 1 }; o[s] = 2; Object.defineProperty(o, 'h', { value: 3, enumerable: false });
+var c = structuredClone(o);
+(function () { return [Object.getOwnPropertySymbols(c).length, 'h' in c, c.a].join(); })
+=== sc_array_props_and_length
+var a = [1, 2, 3]; a.extra = 'e'; a.length = 6;
+var c = structuredClone(a);
+(function () { return [c.length, c.extra, c.hasOwnProperty(4), Object.keys(c).join()].join('|'); })
+=== sc_date
+var d = new Date(1700000000123), bad = new Date(NaN), c = structuredClone(d), cb = structuredClone(bad);
+(function () { return [c instanceof Date, c !== d, c.getTime(), isNaN(cb.getTime()), Object.prototype.toString.call(c)].join(); })
+=== sc_regexp
+var r = /a\/b(c)/gi; r.lastIndex = 3; var c = structuredClone(r), u = structuredClone(/x/gimsuy);
+(function () { return [c instanceof RegExp, c !== r, c.source, c.flags, c.lastIndex, c.test('A/BC'), u.flags].join(); })
+=== sc_map_set
+var m = new Map([[1, 'a'], ['k', { z: 1 }], [NaN, 2]]), s = new Set([1, 'x', { y: 2 }]);
+var c = structuredClone(m), t = structuredClone(s);
+(function () { return [c instanceof Map, c.size, c.get(1), c.get('k').z, c.get(NaN), c.get('k') !== m.get('k'), t instanceof Set, t.size, t.has('x'), [...t][2].y, [...c.keys()].join()].join(); })
+=== sc_map_object_keys_shared
+var k = { id: 1 }, m = new Map([[k, k]]), holder = { k: k, m: m };
+var c = structuredClone(holder), ck = [...c.m.keys()][0];
+(function () { return [ck === c.k, c.m.get(ck) === ck, ck !== k].join(); })
+=== sc_map_cycle
+var m = new Map(); m.set('self', m); var s = new Set(); s.add(s);
+var c = structuredClone(m), t = structuredClone(s);
+(function () { return [c.get('self') === c, t.has(t)].join(); })
+=== sc_wrappers
+var w = [new Boolean(false), new Number(-0), new String('héllo'), Object(5n), Object(2n ** 80n)];
+var c = structuredClone(w);
+(function () { return [c[0] instanceof Boolean, c[0].valueOf(), Object.is(c[1].valueOf(), -0), c[2] instanceof String, c[2].valueOf(), c[2].length, typeof c[3], c[3].valueOf() === 5n, c[4].valueOf() === 2n ** 80n, c[4] instanceof BigInt].join(); })
+=== sc_wrapper_extra_props_dropped
+var n = new Number(3); n.extra = 1; var s = new String('ab'); s.extra = 2;
+var c = structuredClone([n, s]);
+(function () { return [c[0].extra, c[1].extra].join(); })
+=== sc_arraybuffer
+var b = new Uint8Array([1, 2, 3, 4]).buffer, c = structuredClone(b);
+new Uint8Array(b)[0] = 9;
+(function () { return [c instanceof ArrayBuffer, c !== b, c.byteLength, new Uint8Array(c).join()].join('|'); })
+=== sc_typed_arrays
+var ta = [new Int8Array([-1, 2]), new Uint8Array([3]), new Uint8ClampedArray([300]), new Int16Array([-5]), new Uint16Array([6]), new Int32Array([-7]), new Uint32Array([8]), new Float32Array([1.5]), new Float64Array([NaN, -0]), new BigInt64Array([-9n]), new BigUint64Array([2n ** 63n])];
+var c = structuredClone(ta);
+(function () { return c.map(function (x, i) { return x.constructor.name + ':' + (x.constructor === ta[i].constructor) + ':' + Array.from(x).map(String).join('/'); }).join(); })
+=== sc_view_offsets_and_shared_buffer
+var b = new ArrayBuffer(16), v1 = new Uint8Array(b, 4, 8), v2 = new Uint16Array(b, 2, 3);
+v1[0] = 7; var c = structuredClone({ b: b, v1: v1, v2: v2 });
+c.v1[1] = 5;
+(function () { return [c.v1.buffer === c.b, c.v2.buffer === c.b, c.v1.byteOffset, c.v1.length, c.v2.byteOffset, c.v2.length, c.v1[0], new Uint8Array(c.b)[5], b.byteLength === c.b.byteLength, c.b !== b, new Uint8Array(b)[5]].join(); })
+=== sc_view_alone
+var v = new Uint8Array(new Uint8Array([1, 2, 3, 4, 5, 6]).buffer, 2, 3), c = structuredClone(v);
+(function () { return [c.length, c.byteOffset, c.buffer.byteLength, c.buffer !== v.buffer, Array.from(c).join()].join(); })
+=== sc_dataview
+var dv = new DataView(new ArrayBuffer(8), 2, 4); dv.setUint16(0, 0xABCD); var c = structuredClone(dv);
+(function () { return [c instanceof DataView, c.byteOffset, c.byteLength, c.buffer.byteLength, c.getUint16(0).toString(16), c.buffer !== dv.buffer].join(); })
+=== sc_errors
+var es = [new Error('m'), new TypeError('t'), new RangeError('r'), new ReferenceError('f'), new SyntaxError('s'), new EvalError('e'), new URIError('u')];
+var c = structuredClone(es);
+(function () { return c.map(function (e, i) { return [e.constructor === es[i].constructor, e.name, e.message, Object.getPrototypeOf(e) === Object.getPrototypeOf(es[i]), typeof e.stack].join(':'); }).join('|'); })
+=== sc_error_cause_and_nomessage
+var e = new Error(); Object.defineProperty(e, 'cause', { value: { k: 1 }, writable: true, configurable: true }); var c = structuredClone(e);
+(function () { return [c.hasOwnProperty('message'), c.message, c.cause.k, c.cause !== e.cause, Object.keys(c).length, Object.getOwnPropertyDescriptor(c, 'message') === undefined].join(); })
+=== sc_error_subclass_name
+class MyErr extends Error {} var e = new MyErr('x'); e.name = 'MyErr';
+var c = structuredClone(e), n = new Error('y'); n.name = 'TypeError'; var c2 = structuredClone(n);
+(function () { return [c.name, c.constructor === Error, c.message, c instanceof Error, c2.constructor === TypeError, c2.name].join(); })
+=== sc_error_message_to_string
+var e = new Error('a'); e.message = { toString: function () { return 'conv'; } };
+var c = structuredClone(e);
+(function () { return [typeof c.message, c.message].join(); })
+=== sc_function_fails
+var out = []; [function () {}, [function () {}], { f: () => 1 }, class A {}, Math.max].forEach(function (v) { try { structuredClone(v); out.push('ok'); } catch (e) { out.push(e.name + ':' + e.code + ':' + (e instanceof DOMException)); } });
+(function () { return out.join(); })
+=== sc_symbol_fails
+var out = []; [Symbol('s'), { s: Symbol.iterator }, [Symbol()], Object(Symbol())].forEach(function (v) { try { structuredClone(v); out.push('ok'); } catch (e) { out.push(e.name); } });
+(function () { return out.join(); })
+=== sc_proxy_promise_weak_fail
+var out = []; [new Proxy({}, {}), Promise.resolve(1), new WeakMap(), new WeakSet(), new WeakRef({}), (function* () {})(), [1][Symbol.iterator](), new Map().entries(), new Intl.NumberFormat()].forEach(function (v) { try { structuredClone(v); out.push('ok'); } catch (e) { out.push(e.name); } });
+(function () { return out.join(); })
+=== sc_dom_fails
+var out = []; [document.body, document, window, new Event('x'), new URL('http://a.b/'), new URLSearchParams('a=1'), new EventTarget(), document.createElement('div').classList, new MessageChannel().port1].forEach(function (v) { try { structuredClone(v); out.push('ok'); } catch (e) { out.push(e.name); } });
+(function () { return out.join(); })
+=== sc_nested_failure_in_property
+var out = []; try { structuredClone({ a: { b: [1, { c: function () {} }] } }); } catch (e) { out.push(e.name); }
+try { structuredClone(new Map([[1, function () {}]])); } catch (e) { out.push(e.name); }
+try { structuredClone(new Set([Symbol()])); } catch (e) { out.push(e.name); }
+(function () { return out.join(); })
+=== sc_getter_throws
+var o = { get a() { throw new RangeError('boom'); } }, out;
+try { structuredClone(o); } catch (e) { out = e.name + ':' + e.message; }
+(function () { return out; })
+=== sc_getter_order_and_values
+var log = [], o = { get a() { log.push('a'); return 1; }, b: 2, get c() { log.push('c'); delete this.d; return 3; }, d: 4 };
+var c = structuredClone(o);
+(function () { return [log.join(), Object.keys(c).join(), c.c].join('|'); })
+=== sc_args_missing_and_extra
+var out = [];
+try { structuredClone(); } catch (e) { out.push(e.name); }
+out.push(structuredClone(1, undefined), structuredClone(2, null), structuredClone(3, {}), structuredClone(4, { transfer: [] }), structuredClone(5, { transfer: undefined }));
+['x', 5, true].forEach(function (o) { try { structuredClone(1, o); out.push('ok'); } catch (e) { out.push(e.name); } });
+(function () { return out.join(); })
+=== sc_function_properties
+(function () { return [typeof structuredClone, structuredClone.length, structuredClone.name, typeof window.structuredClone, Object.getOwnPropertyDescriptor(window, 'structuredClone').writable].join(); })
+=== sc_deep_nesting
+var o = {}, c = o; for (var i = 0; i < 200; i++) { c.n = {}; c = c.n; }
+var r = structuredClone(o), depth = 0; while (r.n) { r = r.n; depth++; }
+(function () { return depth; })
+=== sc_sparse_array_and_holes
+var a = new Array(5); a[1] = 'x'; a[4] = undefined; var c = structuredClone(a);
+(function () { return [c.length, 0 in c, 1 in c, 2 in c, 4 in c, c[4]].join(); })
+=== sc_object_with_numeric_keys
+var o = { 2: 'b', 1: 'a', x: 'z', '-1': 'n' }, c = structuredClone(o);
+(function () { return Object.keys(c).join() + '|' + JSON.stringify(c); })
+=== sc_lone_surrogate_key
+var o = {}; o['\ud800'] = 1; var c = structuredClone(o);
+(function () { return Object.keys(c).map(function (k) { return k.charCodeAt(0); }).join(); })
+=== sc_react_query_shape
+var data = { pages: [{ items: [{ id: 1, at: new Date(0), tags: new Set(['a']) }] }], pageParams: [undefined, 1] };
+var c = structuredClone(data);
+(function () { return [c.pages[0].items[0].at.getTime(), c.pages[0].items[0].tags.has('a'), c.pageParams.length, 0 in c.pageParams].join(); })
+=== btoa_basic
+var s = ['', 'f', 'fo', 'foo', 'foob', 'fooba', 'foobar', '\x00\xff\x80', 'Hello, World!', 'éÿ'].map(function (x) { return btoa(x); });
+(function () { return s.join(); })
+=== btoa_coercion
+(function () { return [btoa(1), btoa(null), btoa(undefined), btoa(true), btoa({ toString: function () { return 'abc'; } }), btoa([1, 2])].join(); })
+=== btoa_errors
+var out = []; ['Ā', 'a€b', '😀', 'ÿā'].forEach(function (s) { try { btoa(s); out.push('ok'); } catch (e) { out.push(e.name + ':' + e.code + ':' + (e instanceof DOMException)); } });
+try { btoa(); } catch (e) { out.push(e.name); }
+try { btoa(Symbol()); } catch (e) { out.push(e.name); }
+(function () { return out.join(); })
+=== atob_basic
+var s = ['', 'Zg==', 'Zm8=', 'Zm9v', 'Zm9vYg==', 'Zm9vYmE=', 'Zm9vYmFy', 'AP+A', 'SGVsbG8sIFdvcmxkIQ=='].map(function (x) { return Array.from(atob(x)).map(function (c) { return c.charCodeAt(0); }).join('.'); });
+(function () { return s.join('|'); })
+=== atob_forgiving
+var s = ['Zg', 'Zm8', 'Zg=', ' Zm9v\n\tYg ==', 'Zm9v Yg\f=\r=', 'Zm9vYg', 'Zm9vYmE', 'Z g = =', ' Zg == '].map(function (x) { try { return atob(x); } catch (e) { return 'E:' + e.name; } });
+(function () { return s.join('|'); })
+=== atob_unused_bits_dropped
+(function () { return [atob('Zh=='), atob('Zm9='), atob('Zm/='), atob('Zg=='), atob('Zh') ].map(function (x) { return Array.from(x).map(function (c) { return c.charCodeAt(0); }).join('.'); }).join('|'); })
+=== atob_errors
+var bad = ['Z', 'Zm9vY', '=Zg', 'Zg===', 'Zg=a', 'Zm9v!', 'Zm 9v=a', '-_-_', 'Zm9v=', 'Zm9vYg=', 'ĀAAA', 'Z=', '====', '='];
+var out = bad.map(function (x) { try { return 'ok:' + atob(x).length; } catch (e) { return e.name + ':' + e.code; } });
+try { atob(); } catch (e) { out.push(e.name); }
+(function () { return out.join('|'); })
+=== atob_coercion_and_roundtrip
+var all = ''; for (var i = 0; i < 256; i++) all += String.fromCharCode(i);
+(function () { return [atob(12), atob({ toString: function () { return 'Zm9v'; } }), atob(btoa(all)) === all, btoa(all).length, atob(null).length].join(); })
+=== base64_function_properties
+(function () { return [typeof atob, atob.length, atob.name, btoa.length, btoa.name].join(); })

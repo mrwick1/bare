@@ -402,20 +402,15 @@ fn state_gates_and_clone_errors() {
         assert_eq!(js(&mut b, "try { history.pushState(location, '') } catch (e) { e.name }"), "DataCloneError");
         assert_eq!(js(&mut b, "try { history.pushState(localStorage, '') } catch (e) { e.name }"), "DataCloneError");
         assert_eq!(js(&mut b, "try { history.pushState(new Event('x'), '') } catch (e) { e.name }"), "DataCloneError");
-        // other object kinds are an explicit gate, not copied as a plain object
-        let mut gated = 0;
-        for ctor in ["new Map()", "new Uint8Array(2)", "/re/", "new Error('x')", "Object.create({inherited: 1})", "new (function Foo() { this.a = 1; })()"] {
-            let r = js(&mut b, &format!("history.pushState({{x: {ctor}}}, '')"));
-            if r.starts_with("throw:ReferenceError") {
-                continue; // this realm has no such constructor yet
-            }
-            assert_eq!(r, "unsupported:structured clone of an object that is not a plain object or array", "{ctor}");
-            gated += 1;
-        }
-        assert!(gated >= 4, "{gated}");
+        // other object kinds are cloned by their kind (`structuredClone`), or refused
+        assert_eq!(js(&mut b, "try { history.pushState({p: Promise.resolve(1)}, '') } catch (e) { e.name }"), "DataCloneError");
         let a = b.navigation_stats();
         assert_eq!((a.history_len, a.state_bytes, a.url_generation), (g.history_len, g.state_bytes, g.url_generation), "nothing committed");
         assert_eq!(js(&mut b, "history.length"), "1");
+        for (ctor, want) in [("new Map([[1, 2]])", "Map:1"), ("new Uint8Array(2)", "Uint8Array:2"), ("/re/g", "RegExp:/re/g"), ("new Error('x')", "Error:x"), ("Object.create({inherited: 1})", "Object:undefined"), ("new (function Foo() { this.a = 1; })()", "Object:1")] {
+            let src = format!("history.pushState({{x: {ctor}}}, ''); var v = history.state.x; v.constructor.name + ':' + (v instanceof Map ? v.size : v instanceof Uint8Array ? v.length : v instanceof RegExp ? String(v) : v instanceof Error ? v.message : v.a || v.inherited)");
+            assert_eq!(js(&mut b, &src), want, "{ctor}");
+        }
     });
 }
 
@@ -1116,8 +1111,8 @@ fn byte_views_are_refused_before_their_keys_are_listed() {
         assert_eq!(js(&mut b, "var u = new Uint8Array(1 << 26); u[Symbol.iterator] = undefined; new URLSearchParams(u)"), lim("url-params"));
         plain_view(&mut b, 1 << 26);
         assert_eq!(js(&mut b, "new URLSearchParams(pv)"), lim("url-params"));
-        assert_eq!(js(&mut b, "history.pushState(pv, '')"), "unsupported:structured clone of an object that is not a plain object or array");
-        assert_eq!(js(&mut b, "history.pushState({deep: pv}, '')"), "unsupported:structured clone of an object that is not a plain object or array");
+        assert_eq!(js(&mut b, "history.pushState(pv, '')"), lim("history-state-bytes"));
+        assert_eq!(js(&mut b, "history.pushState({deep: pv}, '')"), lim("history-state-bytes"));
         // a small view is still data, and an enumerable symbol key is a TypeError, not a resource limit
         assert_eq!(js(&mut b, "var s = new Uint8Array(2); s[Symbol.iterator] = undefined; new URLSearchParams(s)"), "throw:TypeError:Cannot convert a Symbol value to a string");
     });

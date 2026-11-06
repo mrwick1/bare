@@ -166,6 +166,17 @@ impl Heap {
         self.bigint_sv(v, &mut buf).map(|a| bigint::to_string_radix(a, 10)).unwrap_or_default()
     }
 
+    /// `(negative, magnitude limbs)` of a BigInt, for a copy that leaves the heap (structured clone). `None` for anything else.
+    pub fn bigint_parts(&self, v: Value) -> Option<(bool, Vec<u64>)> {
+        let mut buf = [0u64; 1];
+        self.bigint_sv(v, &mut buf).ok().map(|a| (a.neg, a.mag.to_vec()))
+    }
+
+    /// The BigInt of `(negative, limbs)` from `bigint_parts`.
+    pub fn bigint_from_parts(&mut self, neg: bool, mag: Vec<u64>) -> R<Value> {
+        self.new_bigint(Int { neg, mag })
+    }
+
     /// Limbs of a BigInt value (an inline value has 0 or 1). 0 for anything else.
     pub fn bigint_limbs(&self, v: Value) -> usize {
         match v {

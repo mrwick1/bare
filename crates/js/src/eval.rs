@@ -3226,6 +3226,7 @@ include!("eval_classes.rs");
 include!("eval_wrapper.rs");
 include!("eval_async.rs");
 include!("eval_generator.rs");
+include!("eval_clone.rs");
 
 #[cfg(test)]
 #[path = "eval_class_tests.rs"]

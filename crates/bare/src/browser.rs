@@ -422,8 +422,8 @@ impl Host for Dom {
         at::prune(self, live);
         crate::browser_nodelist::prune(self, live);
         crate::browser_dataset::prune(self, live);
-        let mut st = self.st.borrow_mut();
-        let st = &mut *st;
+        let mut guard = self.st.borrow_mut();
+        let st = &mut *guard;
         st.by_obj.retain(|&o, t| matches!(t, Target::Window) || live(o));
         st.by_node.retain(|_, &mut o| live(o));
         let (by_node, by_obj) = (&st.by_node, &st.by_obj);
@@ -434,6 +434,7 @@ impl Host for Dom {
         });
         st.n_listeners = st.listeners.values().map(Vec::len).sum();
         st.events.retain(|&o, _| live(o));
+        drop(guard);
         self.sched_prune(live);
         self.fetch.prune(live);
         self.streams.prune(live);
@@ -847,6 +848,7 @@ impl Dom {
         crate::browser_nodelist::install(self, it)?;
         crate::browser_dataset::install(self, it)?;
         crate::browser_abort::install(self, it)?;
+        crate::browser_encoding::install(self, it)?;
         crate::browser_console::install(self, it)?;
         crate::browser_style::install(self, it)?;
         crate::browser_computed::install(self, it)?;

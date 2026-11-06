@@ -32,12 +32,15 @@ mod browser_attr;
 mod browser_nodelist;
 mod browser_dataset;
 mod browser_abort;
+mod browser_encoding;
 #[cfg(test)]
 mod browser_attr_tests;
 #[cfg(test)]
 mod browser_nodelist_tests;
 #[cfg(test)]
 mod browser_dataset_tests;
+#[cfg(test)]
+mod browser_abort_tests;
 pub mod browser_fetch;
 pub mod browser_console;
 #[cfg(test)]
