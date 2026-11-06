@@ -65,19 +65,30 @@ impl Dom {
 
 fn get<const K: u8, const N: usize>(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
     let t = d.handler_owner::<K>(it, this)?;
-    let st = d.st.borrow();
-    Ok(st.listeners.get(&t).and_then(|v| v.iter().find(|l| l.handler && *l.ty == *TYPES[N])).map_or(Value::Null, |l| Value::Object(l.cb)))
+    Ok(handler_get(d, t, TYPES[N]))
 }
 
 fn set<const K: u8, const N: usize>(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
     let t = d.handler_owner::<K>(it, this)?;
-    let cb: Option<ObjId> = match a.first() {
-        Some(Value::Object(o)) => Some(*o),
+    handler_set(d, t, TYPES[N], a.first().copied())?;
+    Ok(Value::Undefined)
+}
+
+/// The value of the handler `on<ty>` of `t`, or `null`.
+pub(crate) fn handler_get(d: &Dom, t: Target, ty: &str) -> Value {
+    let st = d.st.borrow();
+    st.listeners.get(&t).and_then(|v| v.iter().find(|l| l.handler && *l.ty == *ty)).map_or(Value::Null, |l| Value::Object(l.cb))
+}
+
+/// Set the handler `on<ty>` of `t` (see the header for the rules).
+pub(crate) fn handler_set(d: &Dom, t: Target, ty: &str, value: Option<Value>) -> R<()> {
+    let cb: Option<ObjId> = match value {
+        Some(Value::Object(o)) => Some(o),
         _ => None,
     };
     let mut st = d.st.borrow_mut();
     let st = &mut *st;
-    let at = st.listeners.get(&t).and_then(|v| v.iter().position(|l| l.handler && *l.ty == *TYPES[N]));
+    let at = st.listeners.get(&t).and_then(|v| v.iter().position(|l| l.handler && *l.ty == *ty));
     match (at, cb) {
         (Some(i), Some(cb)) => st.listeners.get_mut(&t).expect("found")[i].cb = cb,
         (Some(i), None) => {
@@ -97,12 +108,12 @@ fn set<const K: u8, const N: usize>(d: &Dom, it: &mut Interp<'_>, this: Value, a
             }
             st.next_id += 1;
             let id = st.next_id;
-            st.listeners.entry(t).or_default().push(Listener { id, ty: Rc::from(TYPES[N]), cb, capture: false, once: false, passive: false, handler: true });
+            st.listeners.entry(t).or_default().push(Listener { id, ty: Rc::from(ty), cb, capture: false, once: false, passive: false, handler: true });
             st.n_listeners += 1;
         }
         (None, None) => {}
     }
-    Ok(Value::Undefined)
+    Ok(())
 }
 
 /// `onabort` of `AbortSignal.prototype`, made with the lazy `AbortSignal` (`browser_abort.rs`).

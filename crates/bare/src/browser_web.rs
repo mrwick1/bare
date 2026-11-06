@@ -405,6 +405,12 @@ fn new_blob(d: &Dom, it: &mut Interp<'_>, proto: ObjId, b: BlobData) -> V {
     Ok(Value::Object(o))
 }
 
+/// A new Blob with these bytes and type (the `response` of an `XMLHttpRequest` with `responseType = "blob"`).
+pub(crate) fn blob_from_bytes(d: &Dom, it: &mut Interp<'_>, bytes: Vec<u8>, ty: String) -> V {
+    let m = made(d, it)?;
+    new_blob(d, it, m.blob_p, BlobData { bytes, ty: blob_type(ty), file: None })
+}
+
 fn blob_of(d: &Dom, it: &mut Interp<'_>, this: Value) -> R<ObjId> {
     match this {
         Value::Object(o) if d.web.s.borrow().blobs.contains_key(&o) => Ok(o),

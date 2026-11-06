@@ -32,6 +32,7 @@ mod browser_attr;
 mod browser_nodelist;
 mod browser_dataset;
 mod browser_abort;
+mod browser_xhr;
 mod browser_encoding;
 mod browser_web;
 #[cfg(test)]
@@ -53,6 +54,8 @@ pub mod browser_streams;
 mod browser_streams_tests;
 #[cfg(test)]
 mod browser_fetch_tests;
+#[cfg(test)]
+mod browser_xhr_tests;
 pub mod browser_navigation;
 mod browser_navigation_params;
 mod browser_navigation_state;

@@ -3477,3 +3477,33 @@ Load matrix (`tools/js/observer_load.sh`, 6 processes, 1 GiB address space and 4
 These are single runs on a quiet machine, taken before `init_function` (a run under load 15 took 2.5 times longer for the same instructions). Growth with scale has known causes that are not new. `mo`: removed nodes stay in the DOM arena (200,005 nodes at 100x in `browser_load mutation` too). `raf`: the attribute text buffer never frees, and 1,000,000 `style` writes keep 11.25 MiB (`stats().text_bytes`). A page that writes a style on each frame grows without a bound; this is a follow-up for the DOM text buffer.
 
 Not tested: a page with 10,000 observed targets for `IntersectionObserver` at 100x, `MutationObserver` with `characterData` at 100x, a frame loop with `IntersectionObserver` and `ResizeObserver` together, the live staging login on this build, and `perf` rows for `svg`, `svgparse` and `rel` of `browser_load`.
+## XMLHttpRequest
+
+Problem: pages that call `new XMLHttpRequest()` threw `ReferenceError`. Many libraries still use it for login and API calls.
+
+What runs (`browser_xhr.rs`): the object follows the XHR Standard on the network path of `fetch`. There is no second network stack.
+
+- Request: `send()` calls `queue_xhr` in `browser_fetch.rs`. The queue entry is a `Pending` that names the XHR object and a sequence number. It uses the same origin gate, queue cap, byte caps and body extraction as `fetch`, and `run_network_tasks` runs it with the same client and redirects. The pending entry roots the object. `abort_fetches` (a page that leaves) aborts it with the `abort` events.
+- Events: the reply arrives whole, so `Browser::xhr_deliver` fires the events in three steps, each with a microtask checkpoint after each listener. Step 1: the upload `progress`, `load` and `loadend` (a body and an upload listener), then `readystatechange` at state 2. Step 2: state 3, `readystatechange`, `progress` (only for a body that is not empty). Step 3: state 4, `readystatechange`, `load`, `loadend`. Before each step the request is checked again, so a listener that calls `abort()` or `open()` ends the delivery. An error, an abort or a timeout run the request error steps of the standard. No event object is made when nobody listens.
+- Response: `text` and `""` decode UTF-8 (a BOM is removed). A charset other than UTF-8 is `Unsupported` unless every byte is ASCII. `json` parses at each read, and a parse error gives `null`. `arraybuffer` and `blob` are made once and cached. `getAllResponseHeaders` gives lower case names, sorted, joined with `\r\n`. `set-cookie` is hidden.
+- `ProgressEvent`: `loaded`, `total` and `lengthComputable` live in a side table keyed by the event object.
+- Globals: four lazy accessors, like `AbortSignal`. A realm that never reads them makes no prototype, no function and no object.
+- GC: the side tables are pruned at `collect`. An XHR object keeps its `upload` object and its cached response alive. `Dom::trace` skips the XHR table while no XHR object exists.
+
+Gates (`Unsupported`, before anything changes): `open` with `async = false`, a user name or a password, `responseType = "document"`, a Document body, a Blob or FormData body (as for `fetch`), a method other than GET and POST (`bare_net::http::Method` has two), another origin.
+
+Deviations from Chrome: `timeout` is checked when the reply arrives, because the blocking read cannot be stopped, so a late reply is a `timeout` and not a `load`. `statusText` is the standard phrase of the code and not the phrase of the server (the client drops it). `withCredentials` is stored only, as there is no cookie jar. `fetch` with a URLSearchParams body now sends `application/x-www-form-urlencoded;charset=UTF-8`, as the standard says (this shared code is used by both).
+
+Chrome cases: `tools/ui/chrome_xhr.mjs` starts a local server and runs `tools/fixtures/ui/xhr-cases.txt` in headless Chrome. It records event order, headers, statuses and bodies in `tools/fixtures/ui/xhr-expected.txt`. The 68 cases cover GET text and JSON, POST with a body and a header, 404, a network error, abort in flight, timeout, the four response types, the header format, a redirect, the ready state sequence, `upload` events, handler properties, the constants and error cases. The Rust test `every_recorded_chrome_case_gives_the_same_result` runs the same cases on a Rust server with the same endpoints. All 68 match.
+
+Cost: `perf stat -e instructions:u`, minimum of 3 runs, each binary in its own `CARGO_TARGET_DIR` under `/data/bare-tmp`. Main 665c141 against this build. 27 rows: `fragment_load` (6), `browser_load` (9), `fetch_load` (4), `web_apis_load` (3), `style_load` (2), `loader_load` (3). All are below +0.5%. The worst is `loader_load blocking 1` at +0.322% (17,803,608 to 17,860,935). The best is `fragment_load deep 10` at -0.058%.
+
+Load rows (`tools/js/xhr_load.sh`, release build, 1 GiB address space cap): sequential GETs to a loopback server, one `XMLHttpRequest` per round, a collect every 100 rounds.
+
+| GETs | time | peak RSS | wrappers / events / listeners after collect |
+| ---: | ---: | -------: | ------------------------------------------- |
+| 1 | 0.3 ms | 8.5 MiB | 2 / 0 / 0 (baseline) |
+| 100 | 3.5 ms | 8.8 MiB | 2 / 0 / 0 (baseline) |
+| 1,000 | 31.8 ms | 9.9 MiB | 2 / 0 / 0 (baseline) |
+
+Not tested: a synchronous request (gated), `responseType = "document"` (gated), a response in a charset other than UTF-8, a request to another origin, `HEAD`, `PUT` and `DELETE` (the net layer has GET and POST), a Blob or FormData body (the parallel task has not landed), and the live staging login.
