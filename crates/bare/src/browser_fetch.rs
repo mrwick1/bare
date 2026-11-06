@@ -694,6 +694,7 @@ impl Dom {
                 self.reserve(it, 0, n)?;
                 (it.bytes_of(v).map(<[u8]>::to_vec).unwrap_or_default(), None)
             }
+            Value::Object(_) if self.is_web_body(v) => return Err(Error::Unsupported(unsupported("a Blob or FormData as a body"))),
             Value::Object(_) => {
                 let kg = self.key(it, "getReader")?;
                 let g = it.get_value(v, kg)?;
@@ -863,7 +864,7 @@ fn wire_method(m: &str) -> R<Method> {
 // ---------------------------------------------------------------------------------------------- settle helpers
 
 /// Settle `p` with the outcome of `r`: a value fulfills, a thrown value rejects, any other error is the result.
-fn settle(it: &mut Interp<'_>, p: Value, r: R<Value>) -> R<Value> {
+pub(crate) fn settle(it: &mut Interp<'_>, p: Value, r: R<Value>) -> R<Value> {
     match r {
         Ok(v) => it.host_resolve_promise(p, v)?,
         Err(Error::Throw(v)) => it.host_reject_promise(p, v)?,

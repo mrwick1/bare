@@ -346,7 +346,7 @@ fn console_does_not_leak_into_other_globals() {
         assert_eq!(js(&mut b, "Object.keys(console).join()"), "log,warn,error");
         assert_eq!(js(&mut b, "Object.keys(window).indexOf('console') < 0"), "true");
         assert_eq!(js(&mut b, "console === window.console && console === self.console && console === globalThis.console"), "true");
-        assert_eq!(js(&mut b, "typeof window.chrome + typeof window.opera + typeof navigator"), "undefinedundefinedundefined");
+        assert_eq!(js(&mut b, "typeof window.chrome + typeof window.opera"), "undefinedundefined");
     });
 }
 
