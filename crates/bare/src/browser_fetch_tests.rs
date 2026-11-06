@@ -184,7 +184,6 @@ fn an_unconfigured_browser_refuses_the_network() {
         assert!(js(&mut b, &format!("fetch('http://127.0.0.1:{}/x')", srv.port)).starts_with("unsupported:fetch without"));
         assert_eq!(b.pending_fetches(), 0);
         assert!(b.take_fetch_diagnostics().iter().any(|d| d.contains("no document origin")));
-        std::thread::sleep(Duration::from_millis(50));
         assert_eq!(srv.recs().len(), 0);
         assert_eq!(srv.conns.load(SeqCst), 0);
     });
@@ -197,7 +196,6 @@ fn fetch_only_queues_and_the_network_starts_in_the_driver() {
         let mut b = at(srv.port);
         js(&mut b, "var out = []; fetch('/api/data').then(function (r) { out.push(r.status, r.ok); return r.json(); }).then(function (j) { out.push(j.a[2].b, j.a.length); });");
         b.drain().unwrap();
-        std::thread::sleep(Duration::from_millis(50));
         assert_eq!((b.pending_fetches(), srv.conns.load(SeqCst), srv.recs().len()), (1, 0, 0), "no network before run_network_tasks");
         assert_eq!(js(&mut b, "out.join('|')"), "");
         assert_eq!(b.run_network_tasks(10).unwrap(), 1);
@@ -501,7 +499,6 @@ fn cross_origin_requests_are_a_gate_before_any_socket() {
         b.drain().unwrap();
         assert_eq!(js(&mut b, "out2"), "TypeError");
         assert_eq!(b.pending_fetches(), 0);
-        std::thread::sleep(Duration::from_millis(50));
         assert_eq!((a.conns.load(SeqCst), other.conns.load(SeqCst)), (0, 0));
         let d = b.take_fetch_diagnostics().join("\n");
         assert!(d.contains("cross-origin") && !d.contains("secret") && !d.contains("hunter2") && !d.contains("/x"), "{d}");
@@ -523,6 +520,8 @@ fn a_cross_origin_307_never_forwards_the_body_or_credentials() {
             let d = b.take_fetch_diagnostics().join("\n");
             assert!(d.contains("cross-origin redirect") && !d.contains("steal") && !d.contains("hunter2"), "{d}");
         }
+        // Keep this window. A connection that the browser made may reach the accept queue after `connect` returns (to verify).
+        // No other event shows it.
         std::thread::sleep(Duration::from_millis(50));
         assert!(target.accept().is_err(), "a socket was opened to the other origin");
     });
@@ -579,7 +578,6 @@ fn aborting_queued_requests_rejects_them_and_sends_nothing() {
         assert_eq!(b.abort_fetches().unwrap(), 3);
         assert_eq!(js(&mut b, "out.join()"), "AbortError,AbortError,AbortError");
         assert_eq!((b.pending_fetches(), b.fetch_stats().queued_bytes, b.run_network_tasks(5).unwrap()), (0, 0, 0));
-        std::thread::sleep(Duration::from_millis(50));
         assert_eq!(srv.conns.load(SeqCst), 0);
     });
 }
