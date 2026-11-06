@@ -28,6 +28,14 @@
 //!   `clock when the run started + interval`, even when its callback throws.
 //! - A string callback (it would be `eval`) and any other non-function is `Unsupported`.
 //!
+//! Recurring timers and the settle rule (rule: header of `browser_session.rs`). A `Timer` has `period` (the delay of an interval, or of a
+//!   timeout that was set while its own callback ran; 0 if it is a one-shot or the delay is under 16 ms) and `idle` (its last run was
+//!   quiet). `run_task` reads `settle_mark` before a timer or a rendering step and `quiet_since` after it: DOM changes (the
+//!   `revision` and `text_revision` of the document, at most 8), queued fetches, scripts and traversals (no more than before),
+//!   and the scheduler sequence number (no new task but the re-arm). Cost: three counter reads and three borrows for each timer or
+//!   frame. `blocks_settle(limit)` walks the queue in due order up to `limit` and answers at the first task that `Sched::skips` is false for.
+//!   The detection of a re-arm is the identity of the callback object (`Sched::running`), nothing else.
+//!
 //! `queueMicrotask(cb)` queues a real job in the VM microtask queue (`Interp::queue_microtask`). A throw is reported
 //! (event type `microtask`) and later jobs run. A Limit or Unsupported ends the checkpoint (sticky, as for Promise jobs).
 //!
@@ -92,6 +100,18 @@ impl Default for SchedLimits {
     }
 }
 
+/// A timer is recurring only if its delay is at least one frame. A faster one is a work loop, not a clock or a poll.
+const RECURRING_MIN_MS: u32 = 16;
+/// A run is quiet if it changes at most this many nodes, attributes or texts of the DOM.
+const QUIET_CHANGES: u64 = 8;
+
+/// What a run of a timer or a frame can leave behind: counters read before and after it.
+struct Mark {
+    changes: u64,
+    queued: usize,
+    seq: u64,
+}
+
 /// `(due time as f64 bits, sequence)`. The bits of a non-negative f64 sort like the number.
 type Key = (u64, u64);
 
@@ -120,6 +140,10 @@ struct Timer {
     nesting: u32,
     /// The queued task, or `None` while the callback of an interval runs.
     key: Option<Key>,
+    /// Recurring (see "Settled" below): the delay in ms of an interval, or of a timeout that its own callback armed. 0: a one-shot.
+    period: u32,
+    /// A recurring timer whose last run was quiet. The settle rule skips it.
+    idle: bool,
 }
 
 struct Port {
@@ -167,6 +191,25 @@ pub(crate) struct Sched {
     /// Nesting level of the timer task that runs now (0 outside a timer task).
     nesting: u32,
     halted: Option<Error>,
+    /// The callback of the timer task that runs now. A `setTimeout` with the same function is a re-arm.
+    running: Option<ObjId>,
+    /// The timer that the running callback armed again.
+    rearmed: Option<u64>,
+    /// The rendering step runs now (a `requestAnimationFrame` call inside it is a re-registration).
+    in_frame: bool,
+    /// The last rendering step was quiet and no outside call asked for a frame since.
+    frame_idle: bool,
+}
+
+impl Sched {
+    /// Does the settle rule skip this task? A recurring timer whose last run was quiet, and a rendering step after a quiet one.
+    fn skips(&self, t: &Task) -> bool {
+        match t {
+            Task::Timer(id) => self.timers.get(id).is_some_and(|t| t.idle),
+            Task::Render => self.frame_idle,
+            _ => false,
+        }
+    }
 }
 
 /// What a pump did.
@@ -255,10 +298,32 @@ impl Dom {
         s.queued_bytes = s.ports.values().flat_map(|p| p.inbox.iter().map(|m| m.1)).sum();
     }
 
+    // ------------------------------------------------------------ settle
+
+    fn settle_mark(&self) -> Mark {
+        let d = self.doc.borrow();
+        let queued = self.fetch_queued() + self.scripts_queued() + self.nav.s.borrow().tasks.len();
+        Mark { changes: d.revision() + d.text_revision(), queued, seq: self.sched.borrow().seq }
+    }
+
+    /// Was the run since `mark` quiet? It changed the DOM at most `QUIET_CHANGES` times, queued no fetch, script or
+    /// traversal, and queued no task but `own` (the re-arm of itself).
+    fn quiet_since(&self, m: Mark, own: u64) -> bool {
+        let n = self.settle_mark();
+        n.changes - m.changes <= QUIET_CHANGES && n.queued <= m.queued && n.seq - m.seq <= own
+    }
+
     // ------------------------------------------------------------ queue
 
     /// Queue the rendering step at the next frame of the grid (`browser_frame.rs`) unless one is queued.
     pub(crate) fn want_frame(&self) -> R<()> {
+        {
+            // A frame that someone outside the rendering step asked for was not judged.
+            let mut s = self.sched.borrow_mut();
+            if !s.in_frame {
+                s.frame_idle = false;
+            }
+        }
         if !self.frame.queued.get() {
             let f = crate::browser_frame::FRAME_MS;
             let now = self.now_ms();
@@ -393,7 +458,13 @@ impl Dom {
         match run {
             Run::Nothing => Ok(()),
             Run::Timer { id, cb, args, nesting, repeat } => {
-                self.sched.borrow_mut().nesting = nesting;
+                let mark = self.settle_mark();
+                {
+                    let mut s = self.sched.borrow_mut();
+                    s.nesting = nesting;
+                    s.running = if let Value::Object(o) = cb { Some(o) } else { None };
+                    s.rearmed = None;
+                }
                 let this = Value::Object(*self.global.get().expect("installed"));
                 let r = it.host_scope(|it| {
                     it.charge(1)?;
@@ -404,8 +475,21 @@ impl Dom {
                     }
                     it.host_checkpoint().map(|_| ())
                 });
-                self.sched.borrow_mut().nesting = 0;
+                let rearmed = {
+                    let mut s = self.sched.borrow_mut();
+                    s.nesting = 0;
+                    s.running = None;
+                    s.rearmed.take()
+                };
                 r?;
+                let quiet = self.quiet_since(mark, rearmed.is_some() as u64);
+                let mut s = self.sched.borrow_mut();
+                for i in [repeat.then_some(id), rearmed].into_iter().flatten() {
+                    if let Some(t) = s.timers.get_mut(&i) {
+                        t.idle = t.period > 0 && quiet;
+                    }
+                }
+                drop(s);
                 if repeat {
                     self.requeue_interval(id, nesting + 1)?;
                 }
@@ -416,10 +500,20 @@ impl Dom {
                 self.fire_at_input(it, n, if matches!(run, Run::Select(_)) { "select" } else { "selectionchange" })?;
                 it.host_checkpoint().map(|_| ())
             }),
-            Run::Render => it.host_scope(|it| {
-                it.charge(1)?;
-                self.frame_run(it)
-            }),
+            Run::Render => {
+                let mark = self.settle_mark();
+                self.sched.borrow_mut().in_frame = true;
+                let r = it.host_scope(|it| {
+                    it.charge(1)?;
+                    self.frame_run(it)
+                });
+                self.sched.borrow_mut().in_frame = false;
+                r?;
+                // The step queues the next one itself while callbacks wait: that is the only new task a quiet frame makes.
+                let quiet = self.quiet_since(mark, self.frame.queued.get() as u64);
+                self.sched.borrow_mut().frame_idle = quiet;
+                Ok(())
+            }
             Run::Notify => it.host_scope(|it| {
                 it.charge(1)?;
                 self.io_notify(it)
@@ -667,7 +761,12 @@ fn set_timer(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value], repeat: boo
     let key = d.schedule(now + delay as f64, Task::Timer(id))?;
     let mut s = d.sched.borrow_mut();
     s.next_timer = id;
-    s.timers.insert(id, Timer { cb, args, interval: repeat.then_some(delay), nesting: level, key: Some(key) });
+    let rearm = matches!(cb, Value::Object(o) if s.running == Some(o));
+    let period = if delay >= RECURRING_MIN_MS && (repeat || rearm) { delay } else { 0 };
+    if rearm && period > 0 {
+        s.rearmed = Some(id);
+    }
+    s.timers.insert(id, Timer { cb, args, interval: repeat.then_some(delay), nesting: level, key: Some(key), period, idle: false });
     Ok(Value::Number(id as f64))
 }
 
@@ -916,6 +1015,28 @@ impl Browser {
     /// Due time of the earliest queued task.
     pub fn next_scheduled_due(&self) -> Option<f64> {
         self.dom.next_due()
+    }
+
+    /// Does a queued task due at `limit` ms or before keep the page from being settled? See "Settled" in the header.
+    pub fn blocks_settle(&self, limit: f64) -> bool {
+        let s = self.dom.sched.borrow();
+        s.tasks.iter().take_while(|(k, _)| f64::from_bits(k.0) <= limit).any(|(_, t)| !s.skips(t))
+    }
+
+    /// What the settle rule skips and leaves queued: the period (ms) of each such recurring timer in due order, and whether a quiet
+    /// animation frame loop is queued.
+    pub fn idle_left(&self) -> (Vec<u32>, bool) {
+        let s = self.dom.sched.borrow();
+        let mut timers = Vec::new();
+        let mut frames = false;
+        for t in s.tasks.values() {
+            match t {
+                Task::Timer(id) if s.skips(t) => timers.extend(s.timers.get(id).map(|t| t.period)),
+                Task::Render => frames = s.frame_idle,
+                _ => {}
+            }
+        }
+        (timers, frames)
     }
 
     pub fn sched_stats(&self) -> SchedStats {
