@@ -22,7 +22,8 @@
 //! `FormData`: `append`, `set`, `get`, `getAll`, `has`, `delete`, `entries`, `keys`, `values`, `forEach` and
 //! `[Symbol.iterator]`. A value is a string or a File. Another Blob becomes a File ("blob", or `filename`). A value that
 //! is not a Blob goes through `ToString`. The iterators are live. `new FormData(form)` is `Unsupported`.
-//! A Blob or a FormData as a `fetch` body is `Unsupported` (`Dom::is_web_body`): no multipart writer exists yet.
+//! As a `fetch`, `Request` or `Response` body (`Dom::web_body`): a Blob is its bytes, typed by its `type`; a FormData is
+//! `multipart/form-data` with a new random boundary for each request, written in one buffer.
 //!
 //! GC: the made objects are roots. A form traces its Blobs and an iterator traces its form. Side tables are pruned at `collect`.
 
@@ -102,6 +103,9 @@ pub(crate) struct WebHost {
     /// A form or an iterator was made and has not been pruned. `Dom::trace` runs for every object of a collect, so it skips
     /// `trace` below, with no borrow, while this is false.
     pub(crate) active: Cell<bool>,
+    /// Tests set this to get a fixed multipart boundary.
+    #[cfg(test)]
+    pub(crate) boundary: RefCell<Option<String>>,
 }
 
 pub(crate) fn roots(d: &Dom, out: &mut Vec<Value>) {
@@ -129,9 +133,102 @@ pub(crate) fn prune(d: &Dom, live: &dyn Fn(ObjId) -> bool) {
 }
 
 impl Dom {
-    /// Is `v` a Blob or a FormData of this file? `fetch` refuses them as a body (no multipart writer yet).
-    pub(crate) fn is_web_body(&self, v: Value) -> bool {
-        matches!(v, Value::Object(o) if { let s = self.web.s.borrow(); s.blobs.contains_key(&o) || s.forms.contains_key(&o) })
+    /// A lower bound of the body bytes of `v`, if `v` is a Blob or a FormData of this file. `fetch` reserves it before `web_body` copies.
+    pub(crate) fn web_body_len(&self, v: Value) -> Option<usize> {
+        let Value::Object(o) = v else { return None };
+        let s = self.web.s.borrow();
+        if let Some(b) = s.blobs.get(&o) {
+            return Some(b.bytes.len());
+        }
+        let f = s.forms.get(&o)?;
+        Some(f.list.iter().map(|(n, e)| n.len() + match e { Ent::S(v) => v.len(), Ent::B(b) => s.blobs[b].bytes.len() }).sum())
+    }
+
+    /// "Extract a body" of a Blob or a FormData: its bytes, written once, and the `Content-Type` it implies. A Blob body is its
+    /// bytes, typed by its `type`. A FormData body is `multipart/form-data` (HTML "multipart/form-data encoding algorithm")
+    /// with a new random boundary. A result over `max` bytes is a limit error.
+    pub(crate) fn web_body(&self, it: &mut Interp<'_>, v: Value, max: usize) -> R<(Vec<u8>, Option<String>)> {
+        let Value::Object(o) = v else { unreachable!() };
+        let s = self.web.s.borrow();
+        if let Some(b) = s.blobs.get(&o) {
+            it.charge((b.bytes.len() / 64) as u64)?;
+            return Ok((b.bytes.clone(), Some(b.ty.clone()).filter(|t| !t.is_empty())));
+        }
+        let f = &s.forms[&o];
+        let boundary = self.boundary(it)?;
+        // An upper bound of the size, so that the buffer never grows: a body can be many MB. A name grows 6 times at most, a value 2.
+        let wire = f.list.iter().map(|(n, e)| match e {
+            Ent::S(v) => v.len() * 2,
+            Ent::B(b) => s.blobs[b].bytes.len() + s.blobs[b].file.as_ref().map_or(0, |f| f.0.len() * 3) + 80,
+        } + n.len() * 6 + boundary.len() + 120);
+        let mut out = Vec::with_capacity(wire.sum::<usize>() + boundary.len() + 8);
+        for (name, e) in &f.list {
+            out.extend_from_slice(b"--");
+            out.extend_from_slice(boundary.as_bytes());
+            out.extend_from_slice(b"\r\nContent-Disposition: form-data; name=\"");
+            text(&mut out, name, true, true);
+            out.push(b'"');
+            match e {
+                Ent::S(v) => {
+                    out.extend_from_slice(b"\r\n\r\n");
+                    text(&mut out, v, true, false);
+                }
+                Ent::B(b) => {
+                    let b = &s.blobs[b];
+                    out.extend_from_slice(b"; filename=\"");
+                    text(&mut out, b.file.as_ref().map_or("blob", |f| &f.0), false, true);
+                    out.extend_from_slice(b"\"\r\nContent-Type: ");
+                    out.extend_from_slice(if b.ty.is_empty() { "application/octet-stream" } else { &b.ty }.as_bytes());
+                    out.extend_from_slice(b"\r\n\r\n");
+                    out.extend_from_slice(&b.bytes);
+                }
+            }
+            out.extend_from_slice(b"\r\n");
+            if out.len() > max {
+                return Err(self.lim("fetch-request-body"));
+            }
+        }
+        out.extend_from_slice(b"--");
+        out.extend_from_slice(boundary.as_bytes());
+        out.extend_from_slice(b"--\r\n");
+        it.charge((out.len() / 64) as u64)?;
+        Ok((out, Some(format!("multipart/form-data; boundary={boundary}"))))
+    }
+
+    /// A new boundary for each request, as Chrome makes it: `----WebKitFormBoundary` and 16 letters or digits from the OS source.
+    fn boundary(&self, it: &mut Interp<'_>) -> R<String> {
+        #[cfg(test)]
+        if let Some(b) = self.web.boundary.borrow().clone() {
+            return Ok(b);
+        }
+        let mut r = [0u8; 16];
+        if bare_tls::random::fill(&mut r).is_err() {
+            return Err(random_failed(self, it));
+        }
+        const ALNUM: &[u8; 62] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+        Ok(r.iter().fold(String::from("----WebKitFormBoundary"), |mut s, b| {
+            s.push(ALNUM[*b as usize % 62] as char);
+            s
+        }))
+    }
+}
+
+/// Write `s` for a multipart part. `norm`: a lone CR or LF becomes CRLF. `esc`: `"`, CR and LF become `%22`, `%0D` and `%0A`.
+fn text(out: &mut Vec<u8>, s: &str, norm: bool, esc: bool) {
+    let b = s.as_bytes();
+    let mut i = 0;
+    while i < b.len() {
+        match b[i] {
+            b'\r' | b'\n' if norm => {
+                i += usize::from(b[i] == b'\r' && b.get(i + 1) == Some(&b'\n'));
+                out.extend_from_slice(if esc { b"%0D%0A" } else { b"\r\n" });
+            }
+            b'\r' if esc => out.extend_from_slice(b"%0D"),
+            b'\n' if esc => out.extend_from_slice(b"%0A"),
+            b'"' if esc => out.extend_from_slice(b"%22"),
+            c => out.push(c),
+        }
+        i += 1;
     }
 }
 
@@ -409,6 +506,83 @@ fn new_blob(d: &Dom, it: &mut Interp<'_>, proto: ObjId, b: BlobData) -> V {
 pub(crate) fn blob_from_bytes(d: &Dom, it: &mut Interp<'_>, bytes: Vec<u8>, ty: String) -> V {
     let m = made(d, it)?;
     new_blob(d, it, m.blob_p, BlobData { bytes, ty: blob_type(ty), file: None })
+}
+
+/// The value of `key="..."` in a header line value.
+fn param(v: &str, key: &str) -> Option<String> {
+    let at = v.find(&format!("; {key}=\""))? + key.len() + 4;
+    Some(v[at..v[at..].find('"')? + at].to_string())
+}
+
+/// "Parse a multipart/form-data name" (Fetch): `%22`, `%0D` and `%0A` are `"`, CR and LF.
+fn unescape(s: &str) -> String {
+    s.replace("%22", "\"").replace("%0D", "\r").replace("%0A", "\n")
+}
+
+/// `Some((filename, content type))` for a file.
+type FileInfo = Option<(String, String)>;
+type Part<'a> = (String, FileInfo, &'a [u8]);
+
+/// The parts of a `multipart/form-data` body: name, `Some((filename, content type))` for a file, and the content.
+fn multipart<'a>(b: &'a [u8], boundary: &str) -> Option<Vec<Part<'a>>> {
+    let find = |from: usize, pat: &[u8]| b[from..].windows(pat.len()).position(|w| w == pat).map(|p| p + from);
+    let delim = [b"--".as_slice(), boundary.as_bytes()].concat();
+    let sep = [b"\r\n".as_slice(), &delim].concat();
+    let mut pos = find(0, &delim)? + delim.len();
+    let mut out = Vec::new();
+    while !b[pos..].starts_with(b"--") {
+        pos = find(pos, b"\r\n")? + 2;
+        let hend = if b[pos..].starts_with(b"\r\n") { pos - 2 } else { find(pos, b"\r\n\r\n")? };
+        let head = String::from_utf8_lossy(&b[pos.min(hend)..hend]).into_owned();
+        let end = find(hend + 4, &sep)?;
+        let (mut name, mut file, mut ty) = (None, None, "text/plain".to_string());
+        for line in head.split("\r\n") {
+            let Some((h, v)) = line.split_once(':') else { continue };
+            match h.to_ascii_lowercase().as_str() {
+                "content-disposition" => {
+                    let v = format!("; {}", v.trim());
+                    name = param(&v, "name").map(|n| unescape(&n));
+                    file = param(&v, "filename").map(|n| unescape(&n));
+                }
+                "content-type" => ty = v.trim().to_string(),
+                _ => {}
+            }
+        }
+        out.push((name?, file.map(|f| (f, ty)), &b[hend + 4..end]));
+        pos = end + sep.len();
+    }
+    Some(out)
+}
+
+/// `Body.formData()`: a FormData from an `application/x-www-form-urlencoded` or `multipart/form-data` body, or `None`.
+pub(crate) fn form_from(d: &Dom, it: &mut Interp<'_>, bytes: &[u8], ct: &str) -> R<Option<Value>> {
+    let essence = ct.split(';').next().unwrap_or("").trim().to_ascii_lowercase();
+    let list: Vec<(String, FileInfo, Vec<u8>)> = match essence.as_str() {
+        "application/x-www-form-urlencoded" => crate::browser_navigation_url::form_parse(&String::from_utf8_lossy(bytes)).into_iter().map(|(n, v)| (n, None, v.into_bytes())).collect(),
+        "multipart/form-data" => {
+            let Some(b) = ct.split(';').skip(1).find_map(|p| p.trim().strip_prefix("boundary=")).map(|b| b.trim_matches('"')) else { return Ok(None) };
+            let Some(parts) = multipart(bytes, b) else { return Ok(None) };
+            parts.into_iter().map(|(n, f, c)| (n, f, c.to_vec())).collect()
+        }
+        _ => return Ok(None),
+    };
+    let m = made(d, it)?;
+    room(d, 0)?;
+    let o = d.obj(it, m.form_p)?;
+    d.web.s.borrow_mut().forms.insert(o, Form::default());
+    d.web.active.set(true);
+    for (n, file, data) in list {
+        let e = match file {
+            None => Ent::S(String::from_utf8_lossy(&data).into_owned()),
+            Some((name, ty)) => {
+                let mtime = it.wall_now_ms();
+                let Value::Object(f) = new_blob(d, it, m.file_p, BlobData { bytes: data, ty: blob_type(ty), file: Some((name, mtime)) })? else { unreachable!() };
+                Ent::B(f)
+            }
+        };
+        push(d, o, n, e)?;
+    }
+    Ok(Some(Value::Object(o)))
 }
 
 fn blob_of(d: &Dom, it: &mut Interp<'_>, this: Value) -> R<ObjId> {
