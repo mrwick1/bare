@@ -3242,19 +3242,19 @@ This topic adds five APIs that the staging app uses: `AbortController` and `Abor
 
 What runs: `new AbortController()`, `controller.signal`, `controller.abort(reason)`, `signal.aborted`, `signal.reason`, `signal.throwIfAborted()`, `signal.onabort`, `AbortSignal.abort(reason)`, `AbortSignal.timeout(ms)` and `AbortSignal.any(signals)`. `{signal}` works for `addEventListener` (abort removes the listener) and for `fetch`. A rejected `fetch` carries the reason. A `Request` follows `init.signal`. The default reason is a `DOMException` named `AbortError`, and a timeout gives `TimeoutError`.
 
-Design: a signal is an object in the table of event targets, so listeners, `once`, `capture` and `dispatchEvent` use the one event code. The state of a signal is in `abort.s.sigs`. The abort algorithms are small values (`Remove(target, id)` and `Fetch(promise)`), not closures, so the collector can trace them. `AbortSignal.timeout` uses the scheduler (`Task::AbortTimeout`), so a virtual clock moves it. The collector drops the state of a dead signal. A signal that a pending timeout or fetch holds stays alive. Both globals are lazy accessors, like `Intl`, so a page that never reads them pays nothing.
+Design: a signal is an object in the table of event targets, so listeners, `once`, `capture` and `dispatchEvent` use the one event code. The state of a signal is in `abort.s.sigs`. The abort algorithms are small values (`Remove(target, id)` and `Fetch(promise)`), not closures, so the collector can trace them. `AbortSignal.timeout` uses the scheduler (`Task::AbortTimeout`), so a virtual clock moves it. The collector drops the state of a dead signal. Both globals are lazy accessors, like `Intl`, so a page that never reads them pays nothing.
 
-Gates: a transfer or `structuredClone` of a signal is `DataCloneError`. `AbortSignal.any` of more than the object cap is a `Limit`.
+Gates: `structuredClone` of a signal is `DataCloneError`. `AbortSignal.any` of 100,000 signals ends as a `Limit`.
 
 Checks: 91 cases in `tools/fixtures/js/dom-cases.txt` match headless Chrome (`tools/js/dom_check.sh`, recorder `tools/ui/chrome_cases.mjs`). 36 are structured clone cases, 8 abort, 7 `any`, 7 static, 10 listener, 2 `throwIfAborted`, 2 `onabort`, 9 `atob` and `btoa`, and a few shape cases. Two differences from Chrome are in the fixtures on purpose: Chrome removes a listener that was added again during an abort (bare follows the DOM Standard and keeps it), and the enumerability of some DOM methods differs. 8 unit tests are in `browser_abort_tests.rs`.
 
 ### structuredClone
 
-What runs: plain objects, arrays, `Date`, `RegExp` (with `lastIndex` reset), `Map`, `Set`, the `Error` types (`name`, `message`, `stack` kept, `cause` as an own property), `Boolean`, `Number`, `String` and `BigInt` wrappers, BigInt (inline and heap), `ArrayBuffer`, typed arrays, `DataView`, and cycles and shared references. `history.pushState` and `replaceState` use the same code, so there is one copy.
+What runs: plain objects, arrays, `Date`, `RegExp` (`lastIndex` is 0 in the clone), `Map`, `Set`, the `Error` types (`name`, `message` and `stack` as a string; `cause` as an own property), `Boolean`, `Number`, `String` and `BigInt` wrappers, BigInt (inline and heap), `ArrayBuffer`, typed arrays, `DataView`, and cycles and shared references. `history.pushState` and `replaceState` use the same code, so there is one copy.
 
 Design: two phases in `browser_navigation_state.rs`. The first phase walks the value and builds a tree of `SKind` nodes in Rust, with a memo by `ObjId` for cycles and sharing. It runs no user code except getters, which the engine runs as it reads a property. The second phase builds the objects. A view is built after its buffer. A failure in phase one leaves nothing in the heap. The bounds are 64 MiB, depth 256 and 2^20 nodes for a clone (history keeps its own `NavLimits`). The engine has no Error brand, so an object with `Error.prototype` in its chain is cloned as an Error.
 
-Gates: a transfer list answers `Unsupported("structuredClone with a transfer list")`. A function, a symbol, a DOM node, a proxy, a signal and the `Intl` objects throw `DataCloneError`. `MessagePort.postMessage` of an object is still `Unsupported` (it does not call this code yet). bare lacks `cause` in the Error constructor, so the cases set it with `defineProperty`.
+Gates: a transfer list answers `Unsupported("structuredClone with a transfer list")`. A function, a symbol, a DOM node, a proxy, a signal and an `Intl.Segmenter` throw `DataCloneError`. `MessagePort.postMessage` of an object is still `Unsupported` (it does not call this code yet). bare lacks `cause` in the Error constructor, so the cases set it with `defineProperty`.
 
 Checks: 36 cases (`sc_*`) match Chrome. The history tests changed: byte views and Maps were gates before, and now they clone.
 
@@ -3278,7 +3278,7 @@ Checks: 26 cases in `tools/fixtures/js/segmenter-cases.txt` match Node (`tools/j
 
 What runs: `matchAll(regexp)` for a `RegExp` with the `g` flag, `RegExp.prototype[Symbol.matchAll]`, a string argument (made into a `g` regexp), and the RegExp String Iterator (`next`, the tag `RegExp String Iterator`). A `RegExp` without `g` throws `TypeError`. `lastIndex` of the source is copied and not changed. Empty matches advance by one code point with the `u` flag and one unit without it. The iterator is `IterState::ReStr`, with a lazy prototype that is made on first use.
 
-Gate: a regexp whose `exec` was replaced, and a subclass with its own `Symbol.matchAll` flow that needs the user `exec`, answer `Unsupported`.
+Gate: a regexp whose `exec` was replaced answers `Unsupported("RegExp with a replaced exec method")`. Node runs the replaced `exec`, so this case is not in the Node corpus.
 
 Checks: 27 cases in `tools/fixtures/js/matchall-cases.txt` match Node (`tools/js/matchall_check.sh`). Unit tests are in `eval_batch1_tests.rs`, `eval_builtins_tests.rs` and `eval_interop_tests.rs`. The built-in inventory goes from 117 to 110 of 655 missing.
 
@@ -3298,8 +3298,8 @@ Memory stays flat: the peak RSS grows by about 1 MiB from 1x to 100x for every c
 
 ### Cost of the browser JavaScript APIs
 
-Method: `perf stat -e instructions:u`, minimum of 3 runs, each binary in its own `CARGO_TARGET_DIR`: main 9c5358f against this build. 41 rows: `eval_load` 8, `arrobj_load` 15, `binary_load` 9 and `proxy_load` 8 at scale 10, and the startup of an empty realm (`eval_check -e 0`). All 41 are below +0.5%. The worst is startup at +0.41% (2,967,274 to 2,979,473 instructions, 12 k more). The worst loop row is `arrobj_load repeat` at +0.25%. The best is `eval_load throws` at -0.24%. The other rows are between 0.00% and +0.15%.
+Method: `perf stat -e instructions:u`, minimum of 3 runs, each binary in its own `CARGO_TARGET_DIR`: main 9c5358f against this build. 41 rows: `eval_load` 8, `arrobj_load` 15, `binary_load` 9 and `proxy_load` 8 at scale 10, and the startup of an empty realm (`eval_check -e 0`). All 41 are below +0.5%. The worst is startup at +0.41% (2,967,274 to 2,979,473 instructions, 12 k more). The worst loop row is `arrobj_load repeat` at +0.25%. The best is `eval_load throws` at -0.24%. The other rows are between -0.01% and +0.15%.
 
-The new globals are lazy where the spec allows: `AbortController`, `AbortSignal` and `Intl.Segmenter` cost nothing until they are read. `structuredClone`, `btoa` and `atob` are native functions that the install makes (3 objects), and that is most of the +12 k at startup. `IterState::ReStr` adds a variant and no hot-path branch.
+The new globals are lazy where the spec allows: `AbortController`, `AbortSignal` and `Intl.Segmenter` cost nothing until they are read. `structuredClone`, `btoa` and `atob` are native functions that the install makes. Hypothesis: they are most of the +12 k at startup. Not measured by itself. `IterState::ReStr` adds a variant and no hot-path branch.
 
 Not tested: cycles, rows at scale 1 and 100, `numeric_load`, the dictionary words of CJK and Thai, `MessagePort.postMessage` with a clone, `structuredClone` with a transfer list, `fetch` against a real network with `{signal}`, a build on another machine, and the live staging login.
