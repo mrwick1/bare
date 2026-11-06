@@ -102,6 +102,7 @@ Chrome, Firefox, WebKit, Servo and Ladybird all store a box tree (Chrome: `Layou
 - An absolute box leaves a fragment of zero size at its static position. When its containing block is done, one walk over the fragments of that block finds them and lays the boxes out at the end of its list, as its children. The walk skips the positioned blocks inside: they took their own boxes. So each fragment is walked once (twice if the page has `fixed` boxes, which go to the window). The static fragments go out of the list at the end of layout, in one pass. LayoutNG passes "out-of-flow candidates" up the fragment tree instead, with their offsets. A flat list of fragments makes the walk the simpler way.
 - With no static position that waits, no walk runs: a page with no absolute box pays nothing.
 - `position: relative` changes no layout: the offsets wait in a map, and the last pass moves the blocks. Inline boxes and their text move when their line is written, because their fragments are flat (text is not inside the box fragment).
+- `position: sticky` changes no layout. The box stays at its flow place, and a scroll does not lay out again. The constraints are recorded once in `Areas` (`crates/layout/src/sticky.rs`), and the offset for the scroll of the moment is computed when a geometry read or a paint needs it, as for a scroll offset. A stored offset would need a new layout or a new walk for each scroll step. A page with no sticky box builds no list.
 
 ## Flex
 

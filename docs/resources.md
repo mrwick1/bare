@@ -3658,3 +3658,49 @@ The first build was worse: `flex-cards-percent-height` +19.6%, `grid-dense` +8.0
 Layout output: 3,000 random pages (flex, grid, scroll, position, lists, tables) and 56 stretched shapes of 10 to 17 levels give the same hash of the fragments and the scrollbars on main fb233de and on this build. `memo::tests::the_map_does_not_change_a_layout` lays out 28 shapes with the map and with no map and compares the fragments and the scrollbars. The 18 fixtures of `crates/paint/tests/fixtures`, `tools/fixtures/ui` and `tools/fixtures/staging` painted with `bare --paint --width=400` give the same PNG bytes on main and on this build. `cargo test --workspace`: 2,392 passed, 0 failed, 11 ignored. Clippy: 49 warnings on main and 49 here.
 
 Not tested: the live staging page after hydration (only a static dump was measured), a new run against Chrome (the PNG bytes equal those of main, which are what Chrome was compared with), a page with 100,000 nodes and nested stretched rows, a table inside a stretched item for the count of reruns, and the cost per unit on another machine. The units are not time: 0.06 µs to 1.2 µs each here.
+
+## Position: sticky
+
+Goal: a sticky box stays in view while its scroll container scrolls, and never leaves its containing block. The dashboard uses a sticky header (`top: 0; z-index: 30`) and sticky `th` cells (`top: var(--table-sticky-top, var(--header-h))`).
+
+Design:
+- Layout puts a sticky box in the flow, where a static box would be. A scroll does not change layout, so the sticky offset is not in `Layout`.
+- `scroll::areas` records one `Sticky` for each sticky box (`crates/layout/src/sticky.rs`): its fragment, the sticky box above it, its scroll container, the constraining rectangle, the containing block, its margin and its insets. A second pass (`sticky::finish`) fills the rectangles from the fragments. `Layout.view` gives the size of the page scrollport.
+- `Areas::stuck(k, page_scroll, container_scroll)` gives the offset of one box for the scroll offsets of one moment. Only sticky boxes inside the same scroll container move the constraint. The others cancel out, because the container and the scrollport move together.
+- Per axis, `axis()` solves the bottom edge first, then the top edge against the moved rectangle. The margin box stays inside the containing block, a box never moves against its inset, and the top wins when both cannot hold.
+- Readers: `browser_scroll::stuck` (DOM ancestors, stops at `position: fixed`) is used by `client_rect`, `reveal` and `offset()`. Paint adds `PushSticky(k)`/`PopSticky` to the display list and `draw_view` adds the offset at draw time. `hit.rs` subtracts it. A sticky box is a stacking context (`z-index: auto` counts as 0).
+
+Rules found in Chrome (52 cases):
+- The constraining rectangle is the padding box of the container, minus its scrollbars, minus its padding. A percent inset is of this rectangle.
+- The containing block is the content box of the nearest non-inline ancestor. For a table part it is the content box of the table. For a scroll container it is the whole scrollable overflow.
+- A collapsed table uses half of the table border and no padding.
+- A sticky `thead`, `tr`, `th` and `td` move. The cells move as the cells of the row.
+
+Cases: `top: 0` page header, `th` in a scrolling table container, bottom sticky, percent inset, end of the containing block, nested sticky, `overflow: auto` container, CSS-variable inset, sticky `thead`/`tr`/`td`, left and right, and both insets. Each case reads rects at several scroll offsets in Chrome and in the engine. The pixel test (`the_window_draws_the_stuck_boxes_as_chrome_does`) compares the window with a Chrome screenshot at scroll offsets 0, 40, 380 and 500.
+
+Gaps:
+- A sticky inline box that is not atomic: `Unsupported` (`Areas::gate`, made into `Dom::gate` in `layout_areas`).
+- Transformed ancestor: no gate is needed, the engine has no `transform`.
+- A sticky box inside `position: fixed` is skipped by `areas()` and not moved.
+- Percent padding and margin of the box and of its containing block count as 0 (as in `scroll.rs`). `scroll-padding`, `writing-mode` and the wider edge of a collapsed table border are not modelled.
+
+Cost on the existing rows, main 85492b7 against this change (rebased on fb233de, `crates/layout` and `crates/paint` have no change on that merge), each build in its own `CARGO_TARGET_DIR`, `perf stat -e instructions:u`, minimum of 3. 97 rows: 88 layout cases of `bare-stress run` (default size), `scroll_load 10000 300`, `browser_load` mutation, event and lookup (scale 1), `style_load` setget and shorthand (scale 1), `observer_load` mo and raf (scale 1) and `sheets_load 1 1`. The limit is +0.5%. All 97 meet it. The range is -0.22% to +0.05%. The worst rows:
+
+| row | main | this change | delta |
+| --- | ---: | ---: | ---: |
+| `scroll_load 10000 300` | 25,167.7 M | 25,179.8 M | +0.05% |
+| `layout-table-nested` | 7.126 M | 7.128 M | +0.04% |
+| `layout-grid-spanning-items` | 205.27 M | 205.35 M | +0.04% |
+| `layout-grid-nested` | 231.67 M | 231.76 M | +0.04% |
+| `browser_load mutation 1` | 113.23 M | 113.23 M | +0.00% |
+| `style_load setget 1` | 100.59 M | 100.59 M | +0.00% |
+
+A page with no sticky box does not build a sticky list and draws with the old path. The extra work is one `match` on the position of each box in `areas()` and one scan of the styles in `Painter::paint`. The rows have no sticky box, so this is what they measure.
+
+Load rows (`tools/js/sticky_load.sh`, release): a page with N sticky rows in a scrolling container, the first paint, then 100 scroll steps with a paint, each step checked against the model. Layouts stay at 2 in all rows.
+
+| boxes | first paint | 100 steps (total) | step p50 | peak RSS |
+| ---: | ---: | ---: | ---: | ---: |
+| 1 | 0.8 ms | 8.6 ms | 58 us | 11.7 MiB |
+| 100 | 1.4 ms | 8.0 ms | 71 us | 11.8 MiB |
+| 1,000 | 7.2 ms | 25.4 ms | 240 us (max 1.3 ms) | 12.7 MiB |
