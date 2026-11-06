@@ -137,8 +137,10 @@ requestIdleCallback(function (d) { ds.push(d) });
 var r = [];
 try { requestIdleCallback.call({}, function () {}); r.push('ok') } catch (e) { r.push(e.name) }
 try { cancelIdleCallback.call({}, 1); r.push('ok') } catch (e) { r.push(e.name) }
-try { new IdleDeadline() } catch (e) { r.push(e.name) }
-try { IdleDeadline.prototype.timeRemaining.call({}) } catch (e) { r.push(e.name) }
+requestIdleCallback(function () {
+  try { new IdleDeadline() } catch (e) { r.push(e.name) }
+  try { IdleDeadline.prototype.timeRemaining.call({}) } catch (e) { r.push(e.name) }
+});
 (function () { return r.join(' ') })
 === many-between-frames
 var n = 0;

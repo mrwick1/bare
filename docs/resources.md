@@ -3825,3 +3825,66 @@ Fix for the rule: measure the rows with `tools/js/instr.sh COMMAND [ARGS...]`. I
 Residual noise: 0.15% to 0.23% remains. It is two levels (about +0.03% and about +0.15% to +0.23%) and it follows N without a trend. A bump allocator shows the same two levels, and a different hash function moves the levels but keeps them. It is the luck of where the hot keys fall in a hash table. Treat a change smaller than 0.25% on a long row as noise.
 
 Cost of this change on the existing rows: only test code and a script are new. The release binaries of main 7d67152 and of this change have the same `.text` section for 76 of 77 binaries (the examples of `bare`, `bare-js`, `bare-tls` and `bare-net`, `bare-stress`, `bare-bench`) and the `bare` binary; `https_load` differs and has no code of `bare-js`. `tools/js/instr.sh` gives 251,825,235 and 251,824,476 instructions for `observer_load raf 1` and 1,195,838,256 and 1,195,838,079 for `eval_load loop 1` (main and this change), a change of 0.0003% or less. The worst row is therefore +0.00%.
+
+## requestIdleCallback
+
+Problem: the staging dashboard calls `requestIdleCallback` and `cancelIdleCallback`. They did not exist. Code: `crates/bare/src/browser_idle.rs`. The scheduler header (`browser_scheduler.rs`) says where the idle period sits in the task order.
+
+What runs: `requestIdleCallback(cb, { timeout })` gives a handle (a number from 1, never reused). `cancelIdleCallback(handle)` cancels it. A callback gets a new `IdleDeadline` with `timeRemaining()` and `didTimeout`. A callback that throws is reported (type `idlecallback`) and the others run. A microtask checkpoint follows each callback.
+
+Headless model (the standard leaves the start of an idle period to the browser):
+
+- A request queues one `Task::Idle` at the clock now. The task is an idle period only when no other task is due. It runs after every task that is due at the same time or earlier (timers, messages, `Task::Render`). If a frame is queued, the period starts after that frame, so a rAF callback runs before an idle callback in any call order (Chrome does the same). A frame loop gets a period after each frame, so it cannot starve idle callbacks.
+- The period ends at `min(50 ms, due time of the next task)` on the scheduler clock. A virtual clock does not move while a callback runs, so all callbacks that were queued before the period run. On the monotonic clock the period stops at the deadline and the rest wait.
+- A callback that is added during a period, or left over, runs in the next period. That period starts at the deadline of the last one. So a callback that asks again runs once every 50 ms of the clock at most, and never in a loop of zero time.
+- `{ timeout }` (`ToUint32`; 0 is none) queues a `Task::IdleTimeout` at `now + timeout`. If the callback still waits then, it runs as that task with `didTimeout` true and `timeRemaining()` 0. A callback that ran or was cancelled removes its task, so it does not keep the pump awake.
+- A page that never calls `requestIdleCallback` queues nothing. The pump loop has no new check. The cost is two functions at start.
+
+Gates: none. Bounds: `idle-callbacks` (65,536 live callbacks) and `idle-deadlines` (65,536 `IdleDeadline` objects between collects). `IdleDeadline` is made when the first callback runs, and the global appears then (see the cost section). Before that `typeof IdleDeadline` is `undefined`; in Chrome it is `function`.
+
+Deviations from Chrome: Chrome waits for the end of the page load before the first idle period, so there a short `timeout` can fire before the callback of an earlier request with a longer one. Here the first period comes at once. The fixture sorts that case. The deadline is not shortened by pending input or by a long task.
+
+Checks: 30 cases in `tools/fixtures/ui/idle-cases.txt` match headless Chrome 155 (`tools/ui/chrome_topic.mjs idle`, answers in `chrome-idle.txt`): shape, handles, the deadline object, order against microtasks, timers and rAF (both call orders), cancel (before, from an earlier callback, twice, itself), callbacks added in a period, a throw, bad arguments and options, `timeout`, illegal invocation. 9 Rust tests in `browser_idle_tests.rs` cover what Chrome cannot show: an idle page queues nothing, the 50 ms bound and the timer bound of the deadline, one period every 50 ms for a callback that asks again, a frame loop that does not starve idle callbacks, the timeout task before a late period, no task left after a run or a cancel, a throw, a deadline object after a collect, and the callback bound.
+
+## Element.checkVisibility
+
+Problem: the dashboard calls `element.checkVisibility()`. Code: `browser_element.rs`.
+
+What runs (CSSOM View): `false` when the element is not connected, has no box (it or an ancestor is `display: none`, a `<template>` content, `hidden`), or is in a closed `<details>` (all but the first `summary`, as Chrome's `content-visibility: hidden` slot). `checkOpacity` (or the old `opacityProperty`): `false` when the element or a flat-tree ancestor has computed `opacity` 0. `checkVisibilityCSS` (or `visibilityProperty`): `false` when computed `visibility` is `hidden` or `collapse`. Either name of a pair turns the check on, as in Chrome. `contentVisibilityAuto` is read and has no effect, because no `content-visibility` exists (see the gates). The options are read in the order of the dictionary (sorted by name) with `ToBoolean`. A non-object, non-null options value is `TypeError`. The method uses the computed style of `getComputedStyle`, so it works inside `display: none` subtrees (a hidden element is `false` and needs no second pass).
+
+Gates (`Unsupported`, none is guessed):
+
+- A style sheet or a `style` attribute (of the element or an ancestor) that has `content-visibility`, or `display: contents` (the engine parses neither): a call that would answer `true` is a gate. A call that is `false` for another reason (not connected, `display: none`, opacity, visibility) is still answered. The sheet text is scanned once for each rule set that is built (`Built::odd`), the `style` attributes at each call.
+- An SVG or MathML element. Chrome answers `true` for a `display: none` SVG `g` in a test page, and that answer is not modelled.
+- An `option` or `optgroup`. Chrome answers `false` for an option of a drop-down `select`, and `true` in a list box. The engine does not know which one is drawn.
+
+Checks: 28 cases in `tools/fixtures/ui/visibility-cases.txt` match headless Chrome 155 (`chrome-visibility.txt`): shape, a plain element, detached, removed, `display: none` by a sheet, by attribute, by `hidden`, in a chain, `head`/`style`, each option and its alias, nesting of opacity, inherited `visibility`, the option dictionary (bad types, truthiness, a throwing getter, the second argument), illegal invocation, a toggle of `display` and of a class, a closed `details`, a `template`, off-screen boxes. One Rust test checks the gates.
+
+## HTMLElement.draggable
+
+`draggable` is a getter and setter on `HTMLElement.prototype` (not on `SVGElement`). The values `true` and `false` (ASCII case-insensitive) decide. Any other value, or none, is the auto state: `true` for `img`, and for `a` and `area` with an `href`; else `false`. Chrome returns `true` for `area[href]`; the standard names only `a`, and the code follows Chrome. An `object` with an image is `false` in Chrome, and here. The setter writes the attribute `"true"` or `"false"` from `ToBoolean` of the value. 13 cases in `tools/fixtures/ui/draggable-cases.txt` match headless Chrome (`chrome-draggable.txt`). `a.href = ...` is not an IDL attribute of the host yet (a gap that is not new), so the case sets the attribute.
+
+### Cost of the three APIs
+
+Method: `perf stat -e instructions:u`, minimum of 3 runs, each build in its own `CARGO_TARGET_DIR` under `/data/bare-tmp`. Main 4de178c against this change. 54 rows: `browser_load` (6 cases), `observer_load` (2), `loader_load` (3), `style_load` (4) and `scheduler_load` (3), each at 1x, 10x and 100x. `eval_load` and `eval_check -e 0` were not compared (`crates/js` is not changed). The 12 worst rows:
+
+| Row | main 4de178c | this change | Change |
+| --- | --- | --- | --- |
+| observer_load raf 100 | 25,645,367,484 | 26,017,137,278 | +1.450% |
+| observer_load raf 1 | 262,776,785 | 264,452,767 | +0.638% |
+| loader_load blocking 1 | 16,297,482 | 16,340,680 | +0.265% |
+| loader_load dynamic 1 | 19,297,958 | 19,342,134 | +0.229% |
+| scheduler_load messages 1 | 60,633,362 | 60,750,549 | +0.193% |
+| scheduler_load mixed 1 | 111,931,930 | 112,116,554 | +0.165% |
+| loader_load dynamic 10 | 80,823,194 | 80,953,457 | +0.161% |
+| browser_load event 1 | 89,766,455 | 89,884,960 | +0.132% |
+| scheduler_load messages 10 | 482,407,815 | 482,955,176 | +0.113% |
+| scheduler_load timers 100 | 3,670,443,898 | 3,674,574,114 | +0.113% |
+| loader_load mixed 1 | 18,100,394 | 18,120,584 | +0.112% |
+| browser_load event 100 | 8,025,199,495 | 8,034,138,726 | +0.111% |
+
+**The rule (+0.5% on every row) is not met.** Two rows fail: `observer_load raf 1` (+0.64%) and `raf 100` (+1.45%). The 52 other rows are between -0.78% and +0.27%. The cause is not code that runs in these rows: a frame loop never calls the new code. The cost depends on how many strings the start-up interns. Test on main fb233de: a hook that interns N unused names at start gives `raf 1` of 262.45 M (N=0), 262.07 M (1), 261.61 M (3), 265.73 M (6) and 259.99 M (12) instructions. So the same row moves by -1% to +1.2% with no new work. Hypothesis (not proved): the names change the handles of the strings that the script uses, and so the collisions in the hash index of the global object, which a frame loop reads on every call. The three APIs add six names (`requestIdleCallback`, `cancelIdleCallback`, `draggable`, `get draggable`, `set draggable`, `checkVisibility`).
+
+What was done to lower it: `IdleDeadline` is not a lazy accessor of `window`. That third property made `raf 10` +0.65% and `raf 100` +0.81% in an earlier build; made at the first callback it is +0.11% at 10x. The cost of the rest at start is two functions and four methods.
+
+Not done: a change of the hash or of the sizing of the interner in `crates/js` (out of scope for this change). Not tested: cycles, `eval_load`, a build on another machine, the live staging page.
