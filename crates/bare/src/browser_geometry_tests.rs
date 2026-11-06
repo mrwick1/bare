@@ -385,7 +385,9 @@ fn scroll_containers_nested_in_stretched_rows_stop_with_a_work_limit_in_bounded_
         let mut b = at(&page);
         let start = std::time::Instant::now();
         assert_eq!(js(&mut b, "document.getElementById('t').offsetWidth"), lim("geometry-work"));
-        assert!(start.elapsed().as_secs() < 20, "{:?}", start.elapsed());
+        // The work limit is the proof. This bound only catches a hang, so it is loose. Measured on 2026-11-06 in a debug build:
+        // 4 s alone, 8.4 s with two stress workers on the same core. A 20 s bound failed once at load 54 to 76 (reported, not reproduced).
+        assert!(start.elapsed().as_secs() < 120, "{:?}", start.elapsed());
         assert_eq!(b.geometry_stats().layouts, 0);
     });
 }
