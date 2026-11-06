@@ -5,13 +5,14 @@
 //! order as the picture) -> `Browser::ui_*` (events and default actions: `browser_ui.rs`) -> if the page may look different,
 //! let the session run what the listeners queued (microtasks, fetches, a navigation), drop the old layout and ask for one
 //! frame. A frame cascades and lays out the page again (only when the old layout was dropped), paints it, and draws what
-//! the paint crate does not yet: the text of the `<input>` fields, the selection and the caret.
+//! the paint crate does not yet: the text of the `<input>` and `<textarea>` fields, the selection and the caret.
 //!
 //! The caret is steady (no blink), so an idle window wakes for nothing. Password text is shown as bullets.
 //!
 //! Gaps: timers and animations that are not due at an input event do not wake the window (the window loop has no timer
 //! yet); a file path has no session, so only a URL window is interactive; checkbox and radio boxes and `<input>` button
-//! labels are not drawn (the paint crate draws controls, S4 topic 3); a long value scrolls to keep the caret in view but a
+//! labels are not drawn (the paint crate draws controls, S4 topic 3); a textarea draws the lines that end with a line feed (no wrap, no scroll,
+//! and a click maps to the line under the pointer); a long value scrolls to keep the caret in view but a
 //! click is mapped with the same scroll, so a click right after a scroll can be off by a few pixels at the field edge.
 
 use crate::browser::{Browser, Report};
@@ -109,9 +110,11 @@ struct Field {
     /// What is drawn: the value, or bullets for a password.
     text: String,
     scroll: f32,
+    /// A textarea: the lines of `text` are drawn one under the other from the top of the box.
+    area: bool,
 }
 
-/// The text field geometry of `n`, if it is an `<input>` that has a box.
+/// The text field geometry of `n`, if it is an `<input>` or a `<textarea>` that has a box.
 fn field(f: &Frame, doc: &Document, n: NodeId, text: &str, focus_end: Option<u32>) -> Option<Field> {
     let frag = f.layout.fragments.iter().find(|g| g.node == n && g.kind == Kind::Box)?;
     let style = f.styles.style(n)?;
@@ -122,11 +125,12 @@ fn field(f: &Frame, doc: &Document, n: NodeId, text: &str, focus_end: Option<u32
     let y0 = frag.rect.y + px(Property::BorderTopWidth) + px(Property::PaddingTop);
     let h = (frag.rect.h - px(Property::BorderTopWidth) - px(Property::BorderBottomWidth) - px(Property::PaddingTop) - px(Property::PaddingBottom)).max(0.0);
     let line = m.normal_line_height();
-    let baseline = (y0 + (h - line) / 2.0 + m.ascent).round() as i32;
-    let shown = if input_kind(doc, n) == "password" { "•".repeat(text.chars().count()) } else { text.to_string() };
-    let scroll = focus_end.map_or(0.0, |e| (x_of(&shown, e, &m) - w + 1.0).max(0.0));
+    let area = doc.is_html(n, "textarea");
+    let baseline = if area { (y0 + m.ascent).round() as i32 } else { (y0 + (h - line) / 2.0 + m.ascent).round() as i32 };
+    let shown = if !area && input_kind(doc, n) == "password" { "•".repeat(text.chars().count()) } else { text.to_string() };
+    let scroll = focus_end.filter(|_| !area).map_or(0.0, |e| (x_of(&shown, e, &m) - w + 1.0).max(0.0));
     let clip = IRect { x0: x.floor() as i32, y0: y0.floor() as i32, x1: (x + w).ceil() as i32, y1: (y0 + h).ceil() as i32 };
-    Some(Field { x, baseline, clip, m, color: argb(style.color(Property::TextColor)), text: shown, scroll })
+    Some(Field { x, baseline, clip, m, color: argb(style.color(Property::TextColor)), text: shown, scroll, area })
 }
 
 /// Move the geometry of field `n` to where it is drawn now: the page and the scroll containers around it have offsets, and
@@ -230,7 +234,7 @@ impl Page {
     }
 
     /// The caret offset for a press at `x` in text field `n`.
-    fn caret_at(&mut self, n: NodeId, x: f64) -> Option<u32> {
+    fn caret_at(&mut self, n: NodeId, x: f64, y: f64) -> Option<u32> {
         self.frame_now()?;
         let Page { source, frame, .. } = self;
         let b = source.browser()?;
@@ -241,6 +245,19 @@ impl Page {
         let fr = frame.as_ref()?;
         let mut f = field(fr, &doc, n, &value, focus_end)?;
         place(fr, &doc, &b.scroll(), n, &mut f);
+        if f.area {
+            // The line under the pointer (the last one for a point below the text), then the offset inside it.
+            let line = ((y as f32 - (f.baseline as f32 - f.m.ascent)) / f.m.normal_line_height()).floor().max(0.0) as usize;
+            let (mut start, mut pick) = (0, ("", 0));
+            for (i, t) in f.text.split('\n').enumerate() {
+                pick = (t, start);
+                if i == line {
+                    break;
+                }
+                start += t.encode_utf16().count() as u32 + 1;
+            }
+            return Some(pick.1 + offset_at(pick.0, x as f32 - f.x, &f.m));
+        }
         Some(offset_at(&f.text, x as f32 - f.x + f.scroll, &f.m))
     }
 
@@ -325,7 +342,7 @@ impl Page {
                 self.pointer = Pointer { x, y, buttons, mods: mods(m) };
                 let target = self.hit(x, y);
                 let caret = match target {
-                    Some(n) if pressed && button == 0 && self.browser().is_some_and(|b| b.is_text_input(n)) => self.caret_at(n, x),
+                    Some(n) if pressed && button == 0 && self.browser().is_some_and(|b| b.is_text_input(n)) => self.caret_at(n, x, y),
                     _ => None,
                 };
                 let (p, doc) = (self.pointer, self.doc_id());
@@ -394,7 +411,7 @@ impl Page {
             let doc = b.document();
             let doc = doc.borrow();
             if !*built {
-                *inputs = f.layout.fragments.iter().filter(|g| g.kind == Kind::Box && doc.is_html(g.node, "input") && b.is_text_input(g.node)).map(|g| g.node).collect();
+                *inputs = f.layout.fragments.iter().filter(|g| g.kind == Kind::Box && (doc.is_html(g.node, "input") || doc.is_html(g.node, "textarea")) && b.is_text_input(g.node)).map(|g| g.node).collect();
                 // Paint draws the placeholder of an empty field. The text, the selection and the caret are drawn here.
                 painter.list.hosted.clear();
                 painter.list.hosted.extend(inputs.iter().map(|&n| (n, !b.input_value(n).unwrap_or_default().is_empty())));
@@ -458,7 +475,31 @@ impl Page {
         }
     }
 
+    /// The lines of a textarea, with the selection and the caret on the lines they fall on.
+    fn draw_area(painter: &mut Painter, canvas: &mut Canvas, f: &Field, sel: Option<(u32, u32, &str)>) {
+        let line = f.m.normal_line_height();
+        let mut start = 0;
+        for (i, text) in f.text.split('\n').enumerate() {
+            let end = start + text.encode_utf16().count() as u32;
+            let baseline = f.baseline + (i as f32 * line).round() as i32;
+            let top = (baseline as f32 - f.m.ascent).round() as i32;
+            if let Some((s, e, _)) = sel {
+                let at = |u: u32| (f.x + x_of(text, u - start, &f.m)).round() as i32;
+                if s != e && s <= end && e > start {
+                    canvas.fill(IRect { x0: at(s.max(start)), y0: top, x1: at(e.min(end)), y1: top + line as i32 }.intersect(f.clip), 0xFFB3_D7FF);
+                } else if s == e && (start..=end).contains(&s) {
+                    canvas.fill(IRect { x0: at(s), y0: top, x1: at(s) + 1, y1: top + line as i32 }.intersect(f.clip), f.color);
+                }
+            }
+            bare_paint::text(canvas, &mut painter.glyphs, f.clip, f.x, baseline, f.m.size, f.color, false, text);
+            start = end + 1;
+        }
+    }
+
     fn draw_field(painter: &mut Painter, canvas: &mut Canvas, f: &Field, sel: Option<(u32, u32, &str)>) {
+        if f.area {
+            return Page::draw_area(painter, canvas, f, sel);
+        }
         let x0 = f.x - f.scroll;
         let line = f.m.normal_line_height();
         let top = (f.baseline as f32 - f.m.ascent).round() as i32;

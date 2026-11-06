@@ -26,6 +26,8 @@
 //! Caps: list objects count with `max_wrappers` (with wrappers, `Attr`s and maps). The names that lists hold are capped in
 //! all (`dom-nodelist-names`). Every list costs a table entry until the collector prunes it.
 //!
+//! `Src::Labels` is the list behind `control.labels` (`browser_controls.rs`): the `label` elements of the tree of the control that name it.
+//!
 //! Gates: the lookup is on `Document` only (no `Element.getElementsByName` exists). `getElementsByTagName` and
 //! `getElementsByClassName` are still snapshot arrays. `NodeList` is not returned by `childNodes` or `querySelectorAll`.
 
@@ -43,13 +45,16 @@ type V = R<Value>;
 /// Bytes of list names that are alive at one time.
 const MAX_NAME_BYTES: usize = 1 << 20;
 
-/// What a list holds: the elements with a `name` (`getElementsByName`), or the options of a select (`browser_select.rs`).
+/// What a list holds: the elements with a `name` (`getElementsByName`), the options of a select (`browser_select.rs`), or the labels of
+/// a control (`browser_controls.rs`).
 pub(crate) enum Src {
     Name(Rc<str>),
     /// `select.options`.
     Options(NodeId),
     /// `select.selectedOptions`.
     Selected(NodeId),
+    /// `control.labels` (`browser_controls.rs`).
+    Labels(NodeId),
 }
 
 pub(crate) struct List {
@@ -166,17 +171,18 @@ fn prepare(d: &Dom, it: &mut Interp<'_>, owner: ObjId) -> R<()> {
         let Some(l) = t.lists.get(&owner) else { return Ok(()) };
         (match &l.src {
             Src::Name(n) => Ok(n.clone()),
-            Src::Options(s) => Err((*s, false)),
-            Src::Selected(s) => Err((*s, true)),
+            Src::Options(s) => Err((*s, 0)),
+            Src::Selected(s) => Err((*s, 1)),
+            Src::Labels(c) => Err((*c, 2)),
         }, l.rev, t.cached_ids - l.ids.len())
     };
     let name = match src {
         Ok(n) => n,
-        Err((select, chosen)) => {
+        Err((owner_node, mode)) => {
             if cached == Some(d.doc.borrow().revision()) {
                 return Ok(());
             }
-            let ids = crate::browser_select::list_ids(d, it, select, chosen)?;
+            let ids = if mode == 2 { crate::browser_controls::label_ids(d, it, owner_node)? } else { crate::browser_select::list_ids(d, it, owner_node, mode == 1)? };
             if ids.len() > d.lim.max_results {
                 return Err(d.lim("dom-results"));
             }
@@ -317,8 +323,13 @@ pub(crate) fn select_of(d: &Dom, this: Value) -> Option<NodeId> {
     let Value::Object(o) = this else { return None };
     match d.nl.s.borrow().lists.get(&o)?.src {
         Src::Options(s) | Src::Selected(s) => Some(s),
-        Src::Name(_) => None,
+        Src::Name(_) | Src::Labels(_) => None,
     }
+}
+
+/// The prototype of a plain `NodeList`.
+pub(crate) fn list_proto(d: &Dom) -> ObjId {
+    *d.nl.proto.get().expect("installed")
 }
 
 // ------------------------------------------------------------------------------------ install

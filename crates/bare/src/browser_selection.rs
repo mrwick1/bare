@@ -1,4 +1,4 @@
-//! Text selection of `<input>`: `selectionStart`, `selectionEnd`, `selectionDirection`, `setSelectionRange`, `select`.
+//! Text selection of `<input>` and `<textarea>`: `selectionStart`, `selectionEnd`, `selectionDirection`, `setSelectionRange`, `select`.
 //! Source: HTML Standard, "APIs for the text control selections" (read by hand, not checked in a browser).
 //!
 //! Model
@@ -11,7 +11,9 @@
 //!   of a not-dirty input) is reflected without a hook of its own. The only hooks are in `put_input_value` (a value
 //!   that differs resets the selection, as the `value` setter does in the spec) and in `cloneNode` (the clone does not
 //!   copy the selection; the spec's cloning steps copy value and checkedness only).
-//! - Applies to the input types text, search, tel, url and password (an unknown `type` is text). For the other
+//! - A `<textarea>` has the same state. With none stored it has the caret at 0 with direction `forward`; a `value` that changes puts the
+//!   caret at the end (`forward`); the direction `none` is stored as `forward` (all as in Chrome, `tools/fixtures/ui/textarea-cases.txt`).
+//! - Applies to the input types text, search, tel, url and password (an unknown `type` is text), and to a textarea. For the other
 //!   types the three getters give `null`, `setSelectionRange` and the three setters throw `InvalidStateError`, and
 //!   `select()` returns without effect. The applicability is read when the algorithm runs, after the arguments are
 //!   converted (a conversion may run JS that changes the type or the value).
@@ -40,10 +42,10 @@
 //!   borrowed value once for its UTF-16 length. Each operation measures a value once (a value change that differs
 //!   measures the old and the new). The no-JS driver (`Browser::input_selection`, `type_text`) has no budget; its scan
 //!   is bounded by `max_text_bytes`.
-//! - Namespace seam: `is_html_input` is the only HTML-input test of this file's logic.
+//! - Namespace seam: `text_control` is the only HTML-input test of this file's logic.
 //!
 //! Gates and deviations (on purpose)
-//! - `<textarea>` has no value state in this host, so it has no selection. `setRangeText`, the document-level
+//! - `setRangeText`, the document-level
 //!   `selectionchange` and `onselectionchange` are absent. `document.getSelection`, `Selection` and `Range` are in `browser_range.rs` and are not linked with this selection. A `selectionchange`
 //!   from `setAttribute('value')`, `removeAttribute` or a `type` change that alters what the selection reads is not
 //!   scheduled (only `defaultValue` is).
@@ -54,8 +56,8 @@
 //! - Direction `none` is always available (as on Linux and macOS browsers; the spec allows `forward` instead).
 
 use crate::browser::*;
-use crate::browser_dom::{arg, attr_set, input_el, input_kind};
-use bare_html::dom::{Document, NodeId};
+use crate::browser_dom::{arg, attr_set, input_kind};
+use bare_html::dom::{Document, NodeData, NodeId};
 use bare_js::eval::{Error, Interp};
 use bare_js::value::{Value, to_uint32};
 
@@ -103,18 +105,33 @@ pub(crate) fn scans() -> usize {
     SCANS.with(|c| c.get())
 }
 
-/// The one place that says "this node is an HTML `<input>`". Selection applies to nothing else. The namespace work
-/// replaces this body (an `input` local name in the HTML namespace). `Dom::with_input_value` and `Dom::selection_applies`
-/// both go through it. (`input_el`, `driver_input` and `Dom::input_value_of`'s callers keep their own `input` name
-/// tests; they are outside this file.)
-pub(crate) fn is_html_input(doc: &Document, n: NodeId) -> bool {
-    doc.is_html(n, "input")
+/// The one place that says "this node is an HTML `<input>` or `<textarea>`": `Some(false)` for an HTML `<input>`, `Some(true)` for an HTML
+/// `<textarea>`, else `None` (one compare of the name). Selection applies to nothing else. `Dom::with_input_value` and
+/// `Dom::selection_applies` both go through it. (`input_el`, `driver_input` and `Dom::input_value_of`'s callers keep their own `input`
+/// name tests; they are outside this file.)
+pub(crate) fn text_control(doc: &Document, n: NodeId) -> Option<bool> {
+    match *doc.data(n) {
+        NodeData::Element { name, .. } if !doc.is_foreign(n) => match doc.atom_str(name) {
+            "input" => Some(false),
+            "textarea" => Some(true),
+            _ => None,
+        },
+        _ => None,
+    }
 }
 
-/// The selection a stored state gives in a value of `len` UTF-16 units: clamped, or the caret at the end.
-fn within(stored: Option<Sel>, len: u32) -> Sel {
+/// The caret at the end of `value`, as Chrome has it after a `value` write: the direction of a textarea is `forward`.
+pub(crate) fn caret_end(value: &str, area: bool) -> Sel {
+    let len = utf16_len(value);
+    Sel { start: len, end: len, dir: if area { Dir::Forward } else { Dir::None } }
+}
+
+/// The selection a stored state gives in a value of `len` UTF-16 units: clamped. With none stored an input has the caret at the end
+/// and a textarea has it at the start (Chrome: a textarea starts at 0, `forward`).
+fn within(stored: Option<Sel>, len: u32, area: bool) -> Sel {
     match stored {
         Some(s) => Sel { start: s.start.min(len), end: s.end.min(len), dir: s.dir },
+        None if area => Sel { start: 0, end: 0, dir: Dir::Forward },
         None => Sel { start: len, end: len, dir: Dir::None },
     }
 }
@@ -123,7 +140,15 @@ impl Dom {
     /// True when selection applies to this `<input>` now (the HTML "does not apply" test).
     pub(crate) fn selection_applies(&self, n: NodeId) -> bool {
         let doc = self.doc.borrow();
-        is_html_input(&doc, n) && matches!(input_kind(&doc, n), "text" | "search" | "tel" | "url" | "password")
+        self.applies(&doc, n).is_some()
+    }
+
+    /// `Some(is a textarea)` when selection applies to `n`, else `None`.
+    fn applies(&self, doc: &Document, n: NodeId) -> Option<bool> {
+        match text_control(doc, n)? {
+            true => Some(true),
+            false => matches!(input_kind(doc, n), "text" | "search" | "tel" | "url" | "password").then_some(false),
+        }
     }
 
     /// The selection as JS reads it and the value length in UTF-16 units. `None` when it does not apply.
@@ -131,16 +156,14 @@ impl Dom {
     /// huge value under a small budget fails first. The no-JS driver (`it` is `None`) has no budget to charge: its
     /// scan is bounded by `max_text_bytes`, which caps both a dirty value and an attribute.
     pub(crate) fn effective(&self, it: Option<&mut Interp<'_>>, n: NodeId) -> R<Option<(Sel, u32)>> {
-        if !self.selection_applies(n) {
-            return Ok(None);
-        }
+        let Some(area) = self.applies(&self.doc.borrow(), n) else { return Ok(None) };
         let Some(bytes) = self.with_input_value(n, str::len) else { return Ok(None) };
         if let Some(it) = it {
             it.charge((bytes / 256) as u64)?;
         }
         let Some(len) = self.with_input_value(n, utf16_len) else { return Ok(None) };
         let stored = self.st.borrow().inputs.get(&n).and_then(|i| i.sel);
-        Ok(Some((within(stored, len), len)))
+        Ok(Some((within(stored, len, area), len)))
     }
 
     /// Would the value `new` move the selection of this text control? Used before a value write. Pays for the
@@ -150,8 +173,7 @@ impl Dom {
         if let Some(it) = it {
             it.charge((new.len() / 256) as u64)?;
         }
-        let len = utf16_len(new);
-        Ok(old != Sel { start: len, end: len, dir: Dir::None })
+        Ok(old != caret_end(new, self.doc.borrow().is_html(n, "textarea")))
     }
 
     /// `defaultValue = s`: the `value` attribute. A not-dirty input shows it, so the selection read in it can move
@@ -162,7 +184,7 @@ impl Dom {
         if !dirty && let Some((old, _)) = self.effective(Some(&mut *it), n)? {
             it.charge((s.len() / 256) as u64)?;
             let stored = self.st.borrow().inputs.get(&n).and_then(|i| i.sel);
-            moved = within(stored, utf16_len(s)) != old;
+            moved = within(stored, utf16_len(s), false) != old;
         }
         self.selection_room(n, moved, false)?;
         attr_set(self, it, n, "value", s)?;
@@ -182,6 +204,8 @@ impl Dom {
         let Some((old, len)) = self.effective(Some(it), n)? else { return Ok(()) };
         let (start, end, dir) = f(old);
         let end = end.unwrap_or(0).min(len);
+        // Chrome: a textarea has no direction `none`.
+        let dir = if dir == Dir::None && self.doc.borrow().is_html(n, "textarea") { Dir::Forward } else { dir };
         let new = Sel { start: start.unwrap_or(0).min(end), end, dir };
         let changed = new != old;
         self.selection_room(n, changed, changed)?;
@@ -244,6 +268,13 @@ impl Dom {
         let ev = self.new_event(it, ty, true, false, false, None)?;
         self.dispatch(it, Target::Node(n), ev).map(|_| ())
     }
+}
+
+/// `this` of a selection accessor: an `<input>` or a `<textarea>`.
+fn input_el(d: &Dom, it: &mut Interp<'_>, this: Value) -> R<NodeId> {
+    let n = d.el(it, this)?;
+    let ok = text_control(&d.doc.borrow(), n).is_some();
+    if ok { Ok(n) } else { Err(it.type_error("Illegal invocation")) }
 }
 
 fn with_selection(d: &Dom, it: &mut Interp<'_>, this: Value) -> R<Option<Sel>> {

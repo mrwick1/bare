@@ -38,11 +38,11 @@
 //!   (`requestSubmit`, `submit()`, `HTMLElement.click()` do not exist).
 //! - The form element pointer of the HTML parser (a control that the parser ties to a form that is not its ancestor, after
 //!   `<table><form>`) is not recorded: such a control has the owner that the ancestor rule gives.
-//! - Reset buttons, `label` activation, `a`/`area`/`summary` activation, `popover` and invoker commands, checkbox and radio
+//! - `a`/`area`/`summary` activation, `popover` and invoker commands, checkbox and radio
 //!   toggles: no default action, as everywhere in `browser.rs`. A click at a descendant of a disabled button is dispatched (the
 //!   standard says "on the element"), but the button does not activate.
-//! - `form.elements`, `FormData`, `requestSubmit`, `submit()`, `reset()`, `checkValidity` and the other form attributes
-//!   (`action`, `method`, ...) are absent.
+//! - `form.elements`, `FormData`, `form.action`, `form.method` and the other form attributes are absent. A reset button resets its form
+//!   owner (`browser_controls.rs`).
 
 use crate::browser::*;
 use crate::browser_dom as nd;
@@ -68,7 +68,7 @@ fn tag_is(doc: &Document, n: NodeId, names: &[&str]) -> bool {
 
 /// A button's state: `Some(true)` submit button, `Some(false)` another button, by the standard's "submit button" rule.
 /// Also gives the `type` getter text.
-fn button_state(doc: &Document, n: NodeId) -> (bool, &'static str) {
+pub(crate) fn button_state(doc: &Document, n: NodeId) -> (bool, &'static str) {
     let t = attr(doc, n, "type").unwrap_or("");
     let by = |k: &str| t.eq_ignore_ascii_case(k);
     if by("submit") {
@@ -230,22 +230,32 @@ impl Dom {
 
     /// The activation behavior of `t`, reading its state now.
     pub(crate) fn activate(&self, it: &mut Interp<'_>, t: NodeId) -> R<()> {
-        let submits = {
+        // 0: nothing, 1: submit, 2: reset
+        let act = {
             let doc = self.doc.borrow();
             if tag_is(&doc, t, &["button"]) {
-                button_state(&doc, t).0
+                match button_state(&doc, t) {
+                    (true, _) => 1,
+                    (_, "reset") => 2,
+                    _ => 0,
+                }
             } else if tag_is(&doc, t, &["input"]) {
-                matches!(nd::input_kind(&doc, t), "submit" | "image")
+                match nd::input_kind(&doc, t) {
+                    "submit" | "image" => 1,
+                    "reset" => 2,
+                    _ => 0,
+                }
             } else {
-                false
+                0
             }
         };
-        if !submits || self.is_disabled_control(it, t)? {
+        if act == 0 || self.is_disabled_control(it, t)? {
             return Ok(());
         }
-        match self.form_owner(it, t)? {
-            Some(form) => self.submit_form(it, form, Some(t)),
-            None => Ok(()),
+        match (self.form_owner(it, t)?, act) {
+            (Some(form), 1) => self.submit_form(it, form, Some(t)),
+            (Some(form), _) => self.reset_form(it, form),
+            _ => Ok(()),
         }
     }
 
