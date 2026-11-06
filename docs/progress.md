@@ -657,6 +657,8 @@ Other tests. Fourteen call sites start at 1000 ms with the same setup, and the s
 
 Results. The reproducer failed on the old engine and passes on the new one. `cargo test -p bare --lib`: 861 passed, 0 failed, 5 ignored. Under load, `stress-ng --cpu 2` and the test ran pinned to core 5. 100 pairs of `chrome_cases` and the reproducer gave 200 of 200 passes. The T3 server restarted after pair 92. Pairs 93 to 100 ran again under a new `stress-ng` on core 5. The old engine was not run under load in this session, so the flake itself was not reproduced (to verify).
 
-Cost against origin/main 8c99ede, measured with `tools/js/instr.sh` (minimum of 3 runs of `instructions:u`). 54 rows: `browser_load` (6 cases), `observer_load` (2), `loader_load` (3), `style_load` (4) and `scheduler_load` (3), each at 1x, 10x and 100x. The range is -0.068% to +0.146%. No row is over +0.5%. The worst row is `scheduler_load timers 1` (+0.146%).
+Cost against origin/main fb36a74 (the base after PR 180), measured with `tools/js/instr.sh` (minimum of 3 runs of `instructions:u`). 54 rows: `browser_load` (6 cases), `observer_load` (2), `loader_load` (3), `style_load` (4) and `scheduler_load` (3), each at 1x, 10x and 100x. The range is -0.057% to +0.035%. No row is over +0.5%. An earlier run against 8c99ede gave -0.068% to +0.146%.
 
-Not tested: other allocators; hosts that call `use_virtual_clock_at` from their own code path; the live staging login. `cargo test --workspace` ran before the merge (see the PR).
+`cargo test --workspace` on the rebased head: 2,447 passed, 0 failed. The stress runs above used the code before the rebase. They were not repeated after it.
+
+Not tested: other allocators; hosts that call `use_virtual_clock_at` from their own code path; the live staging login.
