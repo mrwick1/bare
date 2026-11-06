@@ -8,6 +8,7 @@ use bare_js::eval::{Error, EvalLimits};
 use bare_js::heap::HeapLimits;
 
 topic_test!(chrome_cases, "walker", 46);
+topic_test!(iterator_cases, "iterator", 54);
 
 fn page(body: &str) -> Browser {
     Browser::new(tree::parse(&format!("<!doctype html><body>{body}</body>")), BrowserLimits::default(), EvalLimits { max_steps: 50_000_000, ..Default::default() }, HeapLimits::default()).expect("browser")
@@ -41,4 +42,41 @@ fn a_filter_stays_alive_through_the_walker() {
     js(&mut b, "var w = document.createTreeWalker(document.getElementById('r'), 1, (function () { var tag = 'a'; return function (n) { return n.id === tag ? 1 : 3 } })())");
     b.collect(&[]).unwrap();
     assert_eq!(js(&mut b, "w.nextNode().id"), "a");
+}
+
+#[test]
+fn the_iterator_global_is_lazy_and_the_watcher_follows_the_iterators() {
+    let mut b = page("<div id=r><i id=a></i></div>");
+    assert_eq!(js(&mut b, "typeof Object.getOwnPropertyDescriptor(window, 'NodeIterator').get"), "function");
+    assert!(!b.dom.doc.borrow().has_watcher());
+    js(&mut b, "document.createTreeWalker(document.body)");
+    assert!(!b.dom.doc.borrow().has_watcher(), "a TreeWalker needs no watcher");
+    js(&mut b, "var w = document.createNodeIterator(document.body, 1, function (n) { return n.id === 'a' ? 1 : 3 });");
+    assert!(b.dom.doc.borrow().has_watcher());
+    b.collect(&[]).unwrap();
+    assert_eq!(js(&mut b, "w.nextNode().id"), "a");
+    js(&mut b, "w = null;");
+    b.collect(&[]).unwrap();
+    assert!(!b.dom.doc.borrow().has_watcher());
+}
+
+#[test]
+fn a_walker_and_an_iterator_do_not_take_each_others_methods() {
+    let mut b = page("<div id=r></div>");
+    assert_eq!(js(&mut b, "var w = document.createTreeWalker(document.body), n = document.createNodeIterator(document.body); [(function () { try { TreeWalker.prototype.nextNode.call(n) } catch (e) { return e.message } })(), (function () { try { NodeIterator.prototype.nextNode.call(w) } catch (e) { return e.message } })()].join()"), "Illegal invocation,Illegal invocation");
+}
+
+#[test]
+fn the_iterator_bound_is_a_limit() {
+    let mut b = page("");
+    let r = b.run_script("for (var i = 0; i < 70000; i++) document.createNodeIterator(document.body)");
+    assert!(matches!(r, Err(Error::Limit(_))), "{r:?}");
+}
+
+#[test]
+fn a_filter_that_calls_its_own_iterator_throws() {
+    // Known deviation: the standard and bare throw InvalidStateError; Chrome does not check, and a filter that always recurses never ends there.
+    let mut b = page("<div id=r></div>");
+    assert_eq!(js(&mut b, "var n = document.createNodeIterator(document.body, 1, function () { try { n.nextNode() } catch (e) { return e.name === 'InvalidStateError' ? 1 : 2 } return 1 }); n.nextNode() !== null"), "true");
+    assert_eq!(js(&mut b, "var m = document.createNodeIterator(document.body, 1, function () { m.nextNode() }); try { m.nextNode() } catch (e) { e.name }"), "InvalidStateError");
 }

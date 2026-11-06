@@ -1,0 +1,169 @@
+var $ = function (i) { return document.getElementById(i) };
+var nm = function (n) { return n === null ? 'null' : n.nodeType === 3 ? '#' + n.data : n.nodeType === 8 ? '!' + n.data : n.nodeType === 10 ? 'doctype' : n.nodeType === 9 ? 'document' : n.id || n.nodeName };
+var all = function (ni, m, max) { var r = [], n; for (var i = 0; i < (max || 40) && (n = ni[m]()) !== null; i++) r.push(nm(n)); return r.join(' ') };
+var err = function (f) { try { return String(f()) } catch (e) { return e.name + ': ' + e.message } };
+var ni = function (what, f, root) { return document.createNodeIterator(root || $('r'), what, f) };
+var st = function (it) { return nm(it.referenceNode) + (it.pointerBeforeReferenceNode ? '<' : '>') };
+var NF = NodeFilter;
+=== defaults
+@html <div id=r><p id=p1>a<b id=b1>x</b>b</p><!--c--><ul id=u><li id=l1>1</li><li id=l2>2<span id=s>s</span></li></ul><i id=i1></i></div>
+var w = ni(); (function () { return [w.root === $('r'), w.whatToShow, w.filter, w.referenceNode === $('r'), w.pointerBeforeReferenceNode, typeof w.nextNode, typeof w.previousNode, typeof w.detach].join(' ') })
+=== interface-shape
+@html <div id=r><p id=p1>a</p></div>
+var w = ni(); (function () { return [Object.prototype.toString.call(w), w instanceof NodeIterator, typeof NodeIterator, NodeIterator.prototype.constructor === NodeIterator, Object.prototype.hasOwnProperty.call(w, 'root'), err(function () { return new NodeIterator() }), Object.getOwnPropertyNames(NodeIterator.prototype).sort().join()].join(' ') })
+=== document-method-length
+@html <div id=r></div>
+(function () { return [document.createNodeIterator.length, err(function () { return document.createNodeIterator() }), err(function () { return document.createNodeIterator(3) }), err(function () { return document.createNodeIterator(null) }), err(function () { return document.createNodeIterator($('r'), 1, 5) }), err(function () { return document.createNodeIterator($('r'), 1, 'x') })].join(' | ') })
+=== next-node-visits-everything
+@html <div id=r><p id=p1>a<b id=b1>x</b>b</p><!--c--><ul id=u><li id=l1>1</li><li id=l2>2<span id=s>s</span></li></ul><i id=i1></i></div>
+var w = ni(); (function () { return all(w, 'nextNode') + ' ' + st(w) })
+=== previous-node-from-start
+@html <div id=r><p id=p1>a<b id=b1>x</b>b</p><!--c--><ul id=u><li id=l1>1</li><li id=l2>2<span id=s>s</span></li></ul><i id=i1></i></div>
+var w = ni(); (function () { return all(w, 'previousNode') + ' ' + st(w) })
+=== next-then-previous
+@html <div id=r><p id=p1>a<b id=b1>x</b>b</p><!--c--><ul id=u><li id=l1>1</li><li id=l2>2<span id=s>s</span></li></ul><i id=i1></i></div>
+var w = ni(); (function () { var o = []; for (var i = 0; i < 4; i++) { o.push(nm(w.nextNode()) + st(w)) } for (var i = 0; i < 5; i++) { o.push(nm(w.previousNode()) + st(w)) } return o.join(' ') })
+=== previous-then-next
+@html <div id=r><p id=p1>a<b id=b1>x</b>b</p><!--c--><ul id=u><li id=l1>1</li><li id=l2>2<span id=s>s</span></li></ul><i id=i1></i></div>
+var w = ni(); w.nextNode(); w.nextNode(); (function () { var o = []; o.push(nm(w.previousNode()) + st(w)); o.push(nm(w.nextNode()) + st(w)); o.push(nm(w.nextNode()) + st(w)); return o.join(' ') })
+=== walk-to-the-end-and-back
+@html <div id=r><p id=p1>a</p><i id=i1></i></div>
+var w = ni(); (function () { var o = []; for (var i = 0; i < 6; i++) o.push(nm(w.nextNode()) + st(w)); for (var i = 0; i < 6; i++) o.push(nm(w.previousNode()) + st(w)); return o.join(' ') })
+=== elements-only
+@html <div id=r><p id=p1>a<b id=b1>x</b>b</p><!--c--><ul id=u><li id=l1>1</li><li id=l2>2<span id=s>s</span></li></ul><i id=i1></i></div>
+var w = ni(NF.SHOW_ELEMENT); (function () { return all(w, 'nextNode') + ' ' + st(w) })
+=== text-only
+@html <div id=r><p id=p1>a<b id=b1>x</b>b</p><!--c--><ul id=u><li id=l1>1</li><li id=l2>2<span id=s>s</span></li></ul><i id=i1></i></div>
+var w = ni(NF.SHOW_TEXT); (function () { return all(w, 'nextNode') + ' ' + st(w) })
+=== text-and-comment-backwards
+@html <div id=r><p id=p1>a<b id=b1>x</b>b</p><!--c--><ul id=u><li id=l1>1</li><li id=l2>2<span id=s>s</span></li></ul><i id=i1></i></div>
+var w = ni(NF.SHOW_TEXT | NF.SHOW_COMMENT); while (w.nextNode()) {} (function () { return all(w, 'previousNode') + ' ' + st(w) })
+=== show-nothing
+@html <div id=r><p id=p1>a</p></div>
+var w = ni(0); (function () { return all(w, 'nextNode') + '|' + st(w) + '|' + w.whatToShow })
+=== what-to-show-is-uint32
+@html <div id=r><p id=p1>a</p></div>
+(function () { return [ni(-1).whatToShow, ni(4294967297).whatToShow, ni('4').whatToShow, ni(undefined).whatToShow, ni(null).whatToShow, ni(1.9).whatToShow].join() })
+=== filter-function
+@html <div id=r><p id=p1>a<b id=b1>x</b>b</p><ul id=u><li id=l1>1</li><li id=l2>2</li></ul></div>
+var w = ni(NF.SHOW_ELEMENT, function (n) { return n.id.charAt(0) === 'l' ? NF.FILTER_ACCEPT : NF.FILTER_SKIP }); (function () { return all(w, 'nextNode') + ' ' + st(w) })
+=== filter-object
+@html <div id=r><p id=p1>a<b id=b1>x</b>b</p><ul id=u><li id=l1>1</li><li id=l2>2</li></ul></div>
+var o = { acceptNode: function (n) { return n.id === 'b1' ? NF.FILTER_ACCEPT : NF.FILTER_REJECT } }; var w = ni(NF.SHOW_ELEMENT, o); (function () { return all(w, 'nextNode') + ' ' + (w.filter === o) })
+=== reject-does-not-prune
+@html <div id=r><p id=p1>a<b id=b1>x</b>b</p><ul id=u><li id=l1>1</li><li id=l2>2</li></ul></div>
+var w = ni(NF.SHOW_ELEMENT, function (n) { return n.id === 'p1' ? NF.FILTER_REJECT : NF.FILTER_ACCEPT }); (function () { return all(w, 'nextNode') })
+=== filter-this-and-args
+@html <div id=r><p id=p1>a</p></div>
+var seen = []; var o = { acceptNode: function (n) { seen.push((this === o) + ':' + arguments.length + ':' + nm(n)); return 1 } }; var f = function (n) { seen.push((this === undefined || this === window) + ':' + arguments.length); return 1 }; var w = ni(1, o), v = ni(1, f); w.nextNode(); v.nextNode(); (function () { return seen.join(' ') })
+=== filter-return-values
+@html <div id=r><p id=p1>a</p><p id=p2>b</p><p id=p3>c</p><p id=p4>d</p></div>
+var vals = [1, 2, 3, 0, 65537, '1', true, undefined, NaN, null]; var k = 0; var w = ni(1, function (n) { return vals[k++ % vals.length] }); (function () { return all(w, 'nextNode', 5) })
+=== filter-called-in-order-and-lazily
+@html <div id=r><p id=p1>a</p><p id=p2>b</p></div>
+var calls = []; var w = ni(NF.SHOW_ELEMENT, function (n) { calls.push(nm(n)); return 1 }); w.nextNode(); w.nextNode(); w.previousNode(); (function () { return calls.join(' ') })
+=== filter-not-called-for-hidden-types
+@html <div id=r><p id=p1>a</p></div>
+var calls = []; var w = ni(NF.SHOW_ELEMENT, function (n) { calls.push(nm(n)); return 1 }); all(w, 'nextNode'); (function () { return calls.join(' ') })
+=== filter-throw-keeps-state
+@html <div id=r><p id=p1>a</p><p id=p2>b</p></div>
+var k = 0; var w = ni(1, function (n) { if (++k === 2) throw new Error('boom'); return 1 }); w.nextNode(); var before = st(w); (function () { var e = err(function () { return w.nextNode() }); return before + ' ' + e + ' ' + st(w) + ' ' + nm(w.nextNode()) })
+=== filter-not-callable
+@html <div id=r><p id=p1>a</p></div>
+var w = ni(1, {}); (function () { return err(function () { return w.nextNode() }) + ' ' + st(w) })
+=== accept-node-read-each-call
+@html <div id=r><p id=p1>a</p><p id=p2>b</p></div>
+var o = { acceptNode: function () { return 1 } }; var w = ni(1, o); w.nextNode(); o.acceptNode = function () { return 2 }; (function () { return String(w.nextNode()) })
+=== root-is-excluded-from-parents-and-includes-itself
+@html <div id=r><p id=p1>a</p></div><div id=q><p id=p2>b</p></div>
+var w = ni(NF.SHOW_ELEMENT, null, $('q')); (function () { return all(w, 'nextNode') + '|' + all(w, 'previousNode') })
+=== root-leaf
+@html <div id=r><p id=p1>a</p></div>
+var w = ni(NF.SHOW_ALL, null, $('p1')); (function () { return all(w, 'nextNode') + '|' + all(w, 'previousNode') + '|' + st(w) })
+=== root-document
+@html <div id=r><p id=p1>a</p></div>
+var w = document.createNodeIterator(document, NF.SHOW_ELEMENT); (function () { return all(w, 'nextNode') })
+=== root-text-node
+@html <div id=r>hello</div>
+var w = ni(NF.SHOW_ALL, null, $('r').firstChild); (function () { return all(w, 'nextNode') + '|' + all(w, 'previousNode') })
+=== detach-is-a-no-op
+@html <div id=r><p id=p1>a</p><p id=p2>b</p></div>
+var w = ni(1); w.nextNode(); (function () { var d = w.detach(); return String(d) + ' ' + nm(w.nextNode()) + ' ' + nm(w.nextNode()) + ' ' + st(w) })
+=== two-iterators-are-independent
+@html <div id=r><p id=p1>a</p><p id=p2>b</p></div>
+var a = ni(1), b = ni(1); a.nextNode(); a.nextNode(); (function () { return st(a) + ' ' + st(b) + ' ' + nm(b.nextNode()) })
+=== getters-are-read-only-and-on-the-prototype
+@html <div id=r><p id=p1>a</p></div>
+var w = ni(1); w.root = 5; w.referenceNode = 5; w.pointerBeforeReferenceNode = false; w.whatToShow = 0; (function () { var d = Object.getOwnPropertyDescriptor(NodeIterator.prototype, 'referenceNode'); return [nm(w.root), nm(w.referenceNode), w.pointerBeforeReferenceNode, w.whatToShow, typeof d.get, d.set, Object.keys(w).length].join(' ') })
+=== wrong-receiver
+@html <div id=r><p id=p1>a</p></div>
+(function () { return [err(function () { return NodeIterator.prototype.nextNode.call({}) }), err(function () { return NodeIterator.prototype.detach.call({}) }), err(function () { return Object.getOwnPropertyDescriptor(NodeIterator.prototype, 'root').get.call({}) })].join(' | ') })
+=== remove-before-reference-does-nothing
+@html <div id=r><p id=a>A</p><p id=b>B</p><p id=c>C</p></div>
+var w = ni(1); w.nextNode(); w.nextNode(); w.nextNode(); $('a').remove(); (function () { return st(w) + ' ' + all(w, 'previousNode') })
+=== remove-reference-pointer-after-goes-to-previous
+@html <div id=r><p id=a>A</p><p id=b>B</p><p id=c>C</p></div>
+var w = ni(1); w.nextNode(); w.nextNode(); w.nextNode(); $('b').remove(); (function () { var s = st(w); return s + ' ' + nm(w.nextNode()) + ' ' + st(w) })
+=== remove-reference-first-child-goes-to-parent
+@html <div id=r><p id=a><b id=b1>B</b></p><p id=c>C</p></div>
+var w = ni(1); w.nextNode(); w.nextNode(); w.nextNode(); $('b1').remove(); (function () { return st(w) + ' ' + nm(w.nextNode()) })
+=== remove-reference-previous-sibling-deep
+@html <div id=r><p id=a><b id=b1><u id=u1>U</u></b></p><p id=c>C</p></div>
+var w = ni(1); while (nm(w.nextNode()) !== 'c') {} $('c').remove(); (function () { return st(w) })
+=== remove-ancestor-of-reference
+@html <div id=r><p id=a>A</p><p id=b><b id=b1>x</b><b id=b2>y</b></p><p id=c>C</p></div>
+var w = ni(1); while (nm(w.nextNode()) !== 'b2') {} $('b').remove(); (function () { return st(w) + ' ' + nm(w.nextNode()) })
+=== remove-ancestor-pointer-before-goes-to-following
+@html <div id=r><p id=a>A</p><p id=b><b id=b1>x</b><b id=b2>y</b></p><p id=c>C</p></div>
+var w = ni(1); while (nm(w.nextNode()) !== 'b2') {} w.previousNode(); w.previousNode(); w.previousNode(); (function () { var s = st(w); $('b').remove(); return s + ' ' + st(w) + ' ' + nm(w.nextNode()) })
+=== remove-reference-pointer-before-last-in-root
+@html <div id=r><p id=a>A</p><p id=b>B</p></div>
+var w = ni(1); while (w.nextNode()) {} w.previousNode(); (function () { var s = st(w); $('b').remove(); return s + ' ' + st(w) + ' ' + nm(w.nextNode()) + ' ' + st(w) })
+=== remove-reference-pointer-before-with-following
+@html <div id=r><p id=a>A</p><p id=b>B</p><p id=c>C</p></div>
+var w = ni(1); w.nextNode(); w.nextNode(); w.previousNode(); (function () { var s = st(w); $('a').remove(); var t = st(w); w.nextNode(); return s + ' ' + t + ' ' + st(w) })
+=== remove-reference-pointer-before-follow-inside-root-only
+@html <div id=q><div id=r><p id=a>A</p></div><p id=out>O</p></div>
+var w = ni(1, null, $('r')); w.nextNode(); w.nextNode(); w.previousNode(); (function () { var s = st(w); $('a').remove(); return s + ' ' + st(w) + ' ' + nm(w.nextNode()) })
+=== remove-root-does-nothing
+@html <div id=q><div id=r><p id=a>A</p></div></div>
+var w = ni(1, null, $('r')); w.nextNode(); w.nextNode(); (function () { var s = st(w); $('r').remove(); return s + ' ' + st(w) + ' ' + nm(w.nextNode()) + ' ' + nm(w.previousNode()) })
+=== remove-subtree-not-containing-reference
+@html <div id=r><p id=a><b id=b1>x</b></p><p id=c>C</p></div>
+var w = ni(1); while (nm(w.nextNode()) !== 'c') {} $('a').remove(); (function () { return st(w) + ' ' + all(w, 'previousNode') })
+=== remove-text-reference
+@html <div id=r><p id=a>A</p><p id=b>B</p></div>
+var w = ni(NF.SHOW_ALL); while (nm(w.nextNode()) !== '#B') {} $('b').removeChild($('b').firstChild); (function () { return st(w) + ' ' + nm(w.previousNode()) })
+=== remove-all-children-text-content
+@html <div id=r><p id=a>A</p><p id=b>B</p><p id=c>C</p></div>
+var w = ni(1); while (nm(w.nextNode()) !== 'c') {} $('r').textContent = ''; (function () { return st(w) + ' ' + String(w.nextNode()) + ' ' + st(w) })
+=== replace-children-with-inner-html
+@html <div id=r><p id=a>A</p><p id=b>B</p></div>
+var w = ni(1); while (nm(w.nextNode()) !== 'b') {} $('r').innerHTML = '<i id=n1></i><i id=n2></i>'; (function () { return st(w) + ' ' + all(w, 'nextNode') })
+=== move-reference-node
+@html <div id=r><p id=a>A</p><p id=b>B</p><p id=c>C</p></div>
+var w = ni(1); w.nextNode(); w.nextNode(); w.nextNode(); $('r').appendChild($('b')); (function () { return st(w) + ' ' + all(w, 'nextNode') })
+=== move-reference-out-of-root
+@html <div id=r><p id=a>A</p><p id=b>B</p></div><div id=o></div>
+var w = ni(1); w.nextNode(); w.nextNode(); w.nextNode(); $('o').appendChild($('b')); (function () { return st(w) + ' ' + all(w, 'nextNode') + ' ' + all(w, 'previousNode') })
+=== remove-while-filtering
+@html <div id=r><p id=a>A</p><p id=b>B</p><p id=c>C</p></div>
+var w = ni(1, function (n) { if (n.id === 'b') $('b').remove(); return 1 }); w.nextNode(); w.nextNode(); (function () { return st(w) + ' ' + all(w, 'nextNode') })
+=== remove-while-iterating-all
+@html <div id=r><p id=a>A</p><p id=b>B</p><p id=c>C</p><p id=d>D</p></div>
+var w = ni(1); var seen = []; var n; while ((n = w.nextNode())) { seen.push(nm(n)); if (n.id === 'b' || n.id === 'c') n.remove() } (function () { return seen.join(' ') + ' ' + st(w) + ' ' + $('r').childNodes.length })
+=== remove-all-after-use-detached-subtree-text
+@html <div id=r><p id=a>A<b id=b1>x</b></p></div>
+var w = ni(NF.SHOW_TEXT); w.nextNode(); w.nextNode(); (function () { var s = st(w); $('a').remove(); return s + ' ' + st(w) })
+=== several-iterators-get-removal
+@html <div id=r><p id=a>A</p><p id=b>B</p><p id=c>C</p></div>
+var i1 = ni(1), i2 = ni(1), i3 = ni(1); i1.nextNode(); i1.nextNode(); i1.nextNode(); i2.nextNode(); i2.nextNode(); i2.nextNode(); i2.nextNode(); i3.nextNode(); i3.nextNode(); i3.previousNode(); $('b').remove(); (function () { return st(i1) + ' ' + st(i2) + ' ' + st(i3) })
+=== remove-ancestor-of-root
+@html <div id=q><div id=r><p id=a>A</p></div></div>
+var w = ni(1, null, $('r')); w.nextNode(); w.nextNode(); (function () { var s = st(w); $('q').remove(); return s + ' ' + st(w) + ' ' + nm(w.nextNode()) + ' ' + nm(w.previousNode()) })
+=== error-messages
+@html <div id=r><p id=a>A</p></div>
+(function () { return [err(function () { return NodeIterator.prototype.nextNode.call({}) }), err(function () { return document.createNodeIterator.call({}, $('r')) }), err(function () { return ni(1, {}).nextNode() }), err(function () { return ni(1, { acceptNode: 3 }).previousNode() })].join(' | ') })
+=== reference-node-getter-after-detached-subtree
+@html <div id=r><p id=a>A<b id=b1>x</b></p></div>
+var w = ni(1); w.nextNode(); w.nextNode(); w.nextNode(); (function () { var n = w.referenceNode; $('a').remove(); return nm(n) + ' ' + nm(w.referenceNode) + ' ' + (w.root === $('r')) })

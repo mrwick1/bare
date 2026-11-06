@@ -516,6 +516,7 @@ pub(crate) fn set_node_value_text(d: &Dom, it: &mut Interp<'_>, this: Value, a: 
     let s = if matches!(v, Value::Null) { String::new() } else { d.string_arg(it, v)? };
     let mut doc = d.doc.borrow_mut();
     d.room(&doc, 0, s.len())?;
+    d.range_set_data(&doc, n, &s);
     doc.set_text(n, &s);
     Ok(Value::Undefined)
 }
@@ -728,9 +729,10 @@ pub(crate) fn set_text_content(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[V
     let s = if matches!(v, Value::Null | Value::Undefined) { String::new() } else { d.string_arg(it, v)? };
     match d.data(n) {
         NodeData::Element { .. } | NodeData::ShadowRoot => {
-            d.mo_group(Some(n), || {
+            let r = d.mo_group(Some(n), || {
                 let mut doc = d.doc.borrow_mut();
                 d.room(&doc, !s.is_empty() as usize, s.len())?;
+                d.iter_told_all(&doc, n);
                 while let Some(c) = doc.children(n).next() {
                     it.charge(1)?;
                     doc.detach(c);
@@ -740,11 +742,14 @@ pub(crate) fn set_text_content(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[V
                     doc.move_to(t, n, None);
                 }
                 Ok(())
-            })?;
+            });
+            d.iter_told_end();
+            r?;
         }
         NodeData::Text(_) | NodeData::Comment(_) => {
             let mut doc = d.doc.borrow_mut();
             d.room(&doc, 0, s.len())?;
+            d.range_set_data(&doc, n, &s);
             doc.set_text(n, &s);
         }
         NodeData::Document | NodeData::Doctype(_) => {}

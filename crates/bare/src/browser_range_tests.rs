@@ -7,6 +7,7 @@ use bare_js::eval::{Error, EvalLimits};
 use bare_js::heap::HeapLimits;
 
 topic_test!(chrome_cases, "range", 79);
+topic_test!(live_cases, "liverange", 63);
 
 fn page(body: &str) -> Browser {
     Browser::new(tree::parse(&format!("<!doctype html><body>{body}</body>")), BrowserLimits::default(), EvalLimits { max_steps: 50_000_000, ..Default::default() }, HeapLimits::default()).expect("browser")
@@ -56,16 +57,52 @@ fn the_editing_methods_and_the_boxes_are_gates() {
 }
 
 #[test]
-fn a_range_does_not_follow_the_dom_and_never_panics() {
-    // Known gap: Chrome moves the boundary points when the DOM changes. Here a point keeps its node and offset.
+fn a_range_follows_the_dom_and_never_panics() {
     let mut b = page("<p id=p>abcdef</p><i id=i>xyz</i>");
     js(&mut b, "var t = document.getElementById('p').firstChild, r = document.createRange(); r.setStart(t, 1); r.setEnd(t, 5);");
     js(&mut b, "t.data = 'ab'");
-    assert_eq!(js(&mut b, "r.startOffset + ':' + r.endOffset + ':[' + r + ']'"), "1:5:[b]");
+    assert_eq!(js(&mut b, "r.startOffset + ':' + r.endOffset + ':[' + r + ']'"), "0:0:[]");
     js(&mut b, "document.getElementById('p').remove()");
-    assert_eq!(js(&mut b, "(r.startContainer === t) + ':' + r.endOffset + ':[' + r + ']'"), "true:5:[b]");
+    assert_eq!(js(&mut b, "(r.startContainer === document.body) + ':' + r.endOffset + ':[' + r + ']'"), "true:0:[]");
     js(&mut b, "var q = document.createRange(); q.selectNodeContents(document.body); document.body.textContent = ''");
-    assert_eq!(js(&mut b, "q.endOffset + ':[' + q + ']'"), "1:[]");
+    assert_eq!(js(&mut b, "q.endOffset + ':[' + q + ']'"), "0:[]");
+}
+
+#[test]
+fn the_watcher_is_set_for_a_live_range_only() {
+    let mut b = page("<p id=p>abc</p>");
+    assert!(!b.dom.doc.borrow().has_watcher());
+    js(&mut b, "var r = document.createRange();");
+    assert!(b.dom.doc.borrow().has_watcher());
+    // A dead range and its table entry go at a collect, and the watcher goes with them.
+    js(&mut b, "r = null;");
+    b.collect(&[]).unwrap();
+    assert!(!b.dom.doc.borrow().has_watcher());
+    js(&mut b, "document.createRange();");
+    assert!(b.dom.doc.borrow().has_watcher());
+}
+
+#[test]
+fn a_range_and_a_mutation_observer_share_the_watcher() {
+    let mut b = page("<div id=r><p id=a>A</p><p id=b>B</p></div>");
+    js(&mut b, "var log = []; var mo = new MutationObserver(function (rs) { log.push(rs.length) }); mo.observe(document.body, { childList: true, subtree: true });");
+    js(&mut b, "var rg = document.createRange(); rg.setStart(document.getElementById('r'), 1); rg.setEnd(document.getElementById('r'), 2);");
+    js(&mut b, "document.getElementById('a').remove();");
+    assert_eq!(js(&mut b, "rg.startOffset + '-' + rg.endOffset"), "0-1");
+    js(&mut b, "log.push(mo.takeRecords().length); mo.disconnect(); document.getElementById('b').remove();");
+    assert_eq!(js(&mut b, "rg.startOffset + '-' + rg.endOffset"), "0-0");
+    assert_eq!(js(&mut b, "log.join()"), "1");
+    // The observer left: the range still has the watcher.
+    assert!(b.dom.doc.borrow().has_watcher());
+}
+
+#[test]
+fn a_page_with_a_range_changes_a_large_tree_and_keeps_the_points() {
+    let mut b = page("<ul id=u></ul>");
+    js(&mut b, "var u = document.getElementById('u'); for (var i = 0; i < 2000; i++) u.appendChild(document.createElement('li'));");
+    js(&mut b, "var r = document.createRange(); r.setStart(u, 1000); r.setEnd(u, 1500);");
+    js(&mut b, "for (var i = 0; i < 500; i++) u.removeChild(u.firstChild); for (var i = 0; i < 100; i++) u.insertBefore(document.createElement('b'), u.childNodes[600]);");
+    assert_eq!(js(&mut b, "r.startOffset + '-' + r.endOffset"), "500-1100");
 }
 
 #[test]
@@ -98,6 +135,7 @@ fn a_page_that_never_reads_the_globals_makes_no_state() {
     let mut b = page("<p id=p>abc</p>");
     assert_eq!(js(&mut b, "document.getElementById('p').textContent"), "abc");
     assert!(!b.dom.range.is_made());
+    assert!(!b.dom.doc.borrow().has_watcher());
 }
 
 #[test]

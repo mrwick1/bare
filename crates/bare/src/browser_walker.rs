@@ -1,6 +1,6 @@
-//! `NodeFilter`, `TreeWalker` and `document.createTreeWalker`. Source: DOM Standard, "Interface TreeWalker", "Interface NodeFilter" and
-//! "traversal" (the algorithms are written as the standard writes them), then compared with headless Chrome
-//! (`tools/fixtures/ui/walker-cases.txt`).
+//! `NodeFilter`, `TreeWalker`, `NodeIterator`, `document.createTreeWalker` and `document.createNodeIterator`. Source: DOM Standard,
+//! "Interface TreeWalker", "Interface NodeIterator", "Interface NodeFilter" and "traversal" (the algorithms are written as the standard writes
+//! them), then compared with headless Chrome (`tools/fixtures/ui/walker-cases.txt`, `iterator-cases.txt`).
 //!
 //! What is built
 //! - `document.createTreeWalker(root, whatToShow = 0xFFFFFFFF, filter = null)`. `root` is any node; `whatToShow` is `ToUint32`; `filter` is `null`,
@@ -15,20 +15,28 @@
 //!   and the filter is not called for a type that is not shown (that is `FILTER_SKIP`).
 //! - The tree is the live light tree: a filter may change it, and a walk from a removed node goes on in the detached tree.
 //!
+//! - `NodeIterator`: `root`, `referenceNode`, `pointerBeforeReferenceNode`, `whatToShow`, `filter` (read-only prototype getters), `nextNode()`,
+//!   `previousNode()` and `detach()` (no effect). It shares the table and the filter steps of the walker (`Walker::iter`). `FILTER_REJECT` and
+//!   `FILTER_SKIP` are the same for it. The reference and the pointer change when the walk ends, so a throw in a filter leaves them as they were.
+//!   The "pre-removing steps": the document watcher (`Dom::sync_watcher`) tells each iterator of a node about to leave the tree, and an iterator
+//!   whose reference is in that node moves its reference out of it. As in Chrome, a node that is not inside the root of the iterator does nothing
+//!   (the standard would move the reference out of the root when the root is inside the removed node). A page that makes no iterator pays nothing
+//!   at a change.
+//!
 //! Deviations (on purpose)
 //! - `nextNode()` from a detached node with no later node gives `null` (the standard's text would test the same node again, which Chrome does not).
-//! - A walker is a plain object with a table entry here, so `root`, `whatToShow` and `filter` are prototype getters like Chrome's. A `NodeIterator` and
-//!   `document.createNodeIterator` are not built. A `DocumentFragment` root is not possible yet (`createDocumentFragment` does not exist); a shadow root is.
+//! - A walker is a plain object with a table entry here, so `root`, `whatToShow` and `filter` are prototype getters like Chrome's. A `DocumentFragment` root is not possible yet (`createDocumentFragment` does not exist); a shadow root is.
 //!
 //! Bound (`Limit(Host(name))`): `tree-walkers` (live walkers, set free by the collector).
 
 use crate::browser::*;
 use crate::browser_lazy::lazy_global;
-use bare_html::dom::{NodeData, NodeId};
+use bare_html::dom::{Change, Document, NodeData, NodeId};
 use bare_js::eval::Interp;
 use bare_js::value::{ObjId, Value};
 use std::cell::{OnceCell, RefCell};
 use std::collections::HashMap;
+use std::rc::Rc;
 
 type V = R<Value>;
 
@@ -45,21 +53,40 @@ struct Walker {
     cur: NodeId,
     /// A filter of this walker is running.
     active: bool,
+    /// A `NodeIterator`: `cur` is its reference node.
+    iter: bool,
+    /// A `NodeIterator`: the pointer is before the reference node.
+    before: bool,
+    /// A `NodeIterator` that runs a filter: the node it looks at, and whether the pointer is before it. Removals move it too.
+    cand: Option<(NodeId, bool)>,
 }
 
 #[derive(Default)]
-struct State {
+pub(crate) struct State {
     /// The prototype and the two constructors, once made.
     made: Option<(ObjId, ObjId, ObjId)>,
+    /// The prototype and the constructor of `NodeIterator`, once made.
+    made_iter: Option<(ObjId, ObjId)>,
     walkers: HashMap<ObjId, Walker>,
+    /// How many of `walkers` are iterators.
+    iters: usize,
+    /// "Replace all" is running: its iterators were told already.
+    told: bool,
 }
 
 #[derive(Default)]
 pub(crate) struct Walk {
-    st: OnceCell<RefCell<State>>,
+    st: OnceCell<Rc<RefCell<State>>>,
 }
 
-fn state(d: &Dom) -> &RefCell<State> {
+impl Walk {
+    /// The state, when a `NodeIterator` is alive (for the watcher).
+    pub(crate) fn live(&self) -> Option<Rc<RefCell<State>>> {
+        self.st.get().filter(|s| s.borrow().iters > 0).cloned()
+    }
+}
+
+fn state(d: &Dom) -> &Rc<RefCell<State>> {
     d.walk.st.get_or_init(Default::default)
 }
 
@@ -93,7 +120,14 @@ fn bit(d: &Dom, n: NodeId) -> u32 {
 
 fn walker_of(d: &Dom, it: &mut Interp<'_>, this: Value) -> R<ObjId> {
     match this {
-        Value::Object(o) if state(d).borrow().walkers.contains_key(&o) => Ok(o),
+        Value::Object(o) if state(d).borrow().walkers.get(&o).is_some_and(|w| !w.iter) => Ok(o),
+        _ => Err(it.type_error("Illegal invocation")),
+    }
+}
+
+fn iter_of(d: &Dom, it: &mut Interp<'_>, this: Value) -> R<ObjId> {
+    match this {
+        Value::Object(o) if state(d).borrow().walkers.get(&o).is_some_and(|w| w.iter) => Ok(o),
         _ => Err(it.type_error("Illegal invocation")),
     }
 }
@@ -106,8 +140,9 @@ fn filter(d: &Dom, it: &mut Interp<'_>, w: ObjId, method: &str, n: NodeId) -> R<
         let k = &s.walkers[&w];
         (k.active, k.what, k.filter)
     };
+    let iface = if state(d).borrow().walkers[&w].iter { "NodeIterator" } else { "TreeWalker" };
     if active {
-        return Err(d.dom_err(it, "InvalidStateError", &format!("Failed to execute '{method}' on 'TreeWalker': Filter function can't be recursive")));
+        return Err(d.dom_err(it, "InvalidStateError", &format!("Failed to execute '{method}' on '{iface}': Filter function can't be recursive")));
     }
     if what & bit(d, n) == 0 {
         return Ok(SKIP);
@@ -124,7 +159,7 @@ fn filter(d: &Dom, it: &mut Interp<'_>, w: ObjId, method: &str, n: NodeId) -> R<
             let k = d.key(it, "acceptNode")?;
             let g = it.get_value(f, k)?;
             if !it.is_callable_value(g) {
-                return Err(it.type_error(&format!("Failed to execute '{method}' on 'TreeWalker': Failed to execute 'acceptNode' on 'NodeFilter': The provided callback is not callable.")));
+                return Err(it.type_error(&format!("Failed to execute '{method}' on '{iface}': Failed to execute 'acceptNode' on 'NodeFilter': The provided callback is not callable.")));
             }
             (g, f)
         };
@@ -381,15 +416,15 @@ fn ensure(d: &Dom, it: &mut Interp<'_>) -> R<()> {
 lazy_global!(lazy_walker, "TreeWalker", ensure, |d| state(d).borrow().made.expect("made").1);
 lazy_global!(lazy_filter, "NodeFilter", ensure, |d| state(d).borrow().made.expect("made").2);
 
-const CREATE: &str = "Failed to execute 'createTreeWalker' on 'Document'";
-
-fn create_tree_walker(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
+/// `createTreeWalker` and `createNodeIterator`: the same three arguments.
+fn create(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value], iter: bool) -> V {
+    let who = if iter { "createNodeIterator" } else { "createTreeWalker" };
     d.nd(it, this)?;
     let Some(&r) = a.first() else {
-        return Err(it.type_error(&format!("{CREATE}: 1 argument required, but only 0 present.")));
+        return Err(it.type_error(&format!("Failed to execute '{who}' on 'Document': 1 argument required, but only 0 present.")));
     };
     let Some(root) = d.node_of(r) else {
-        return Err(it.type_error(&format!("{CREATE}: parameter 1 is not of type 'Node'.")));
+        return Err(it.type_error(&format!("Failed to execute '{who}' on 'Document': parameter 1 is not of type 'Node'.")));
     };
     let what = match a.get(1).copied().unwrap_or(Value::Undefined) {
         Value::Undefined => 0xFFFF_FFFF,
@@ -398,29 +433,261 @@ fn create_tree_walker(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) ->
     let filter = match a.get(2).copied().unwrap_or(Value::Undefined) {
         Value::Undefined | Value::Null => Value::Null,
         v @ Value::Object(_) => v,
-        _ => return Err(it.type_error(&format!("{CREATE}: parameter 3 is not of type 'Object'."))),
+        _ => return Err(it.type_error(&format!("Failed to execute '{who}' on 'Document': parameter 3 is not of type 'Object'."))),
     };
-    ensure(d, it)?;
+    if iter { ensure_iter(d, it)? } else { ensure(d, it)? }
     if state(d).borrow().walkers.len() >= MAX_WALKERS {
         return Err(d.lim("tree-walkers"));
     }
-    let proto = state(d).borrow().made.expect("made").0;
+    let proto = {
+        let s = state(d).borrow();
+        if iter { s.made_iter.expect("made").0 } else { s.made.expect("made").0 }
+    };
     let w = d.obj(it, proto)?;
-    state(d).borrow_mut().walkers.insert(w, Walker { root, what, filter, cur: root, active: false });
+    let first = {
+        let mut s = state(d).borrow_mut();
+        s.walkers.insert(w, Walker { root, what, filter, cur: root, active: false, iter, before: true, cand: None });
+        s.iters += iter as usize;
+        iter && s.iters == 1
+    };
+    if first {
+        d.sync_watcher();
+    }
     Ok(Value::Object(w))
 }
 
+fn create_tree_walker(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
+    create(d, it, this, a, false)
+}
+
+fn create_node_iterator(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
+    create(d, it, this, a, true)
+}
+
+// ------------------------------------------------------------ NodeIterator
+
+/// The last node of the tree of `n` in tree order: `n` itself, or its last descendant.
+fn last_inclusive(doc: &Document, mut n: NodeId) -> NodeId {
+    while let Some(c) = doc.last_child(n) {
+        n = c;
+    }
+    n
+}
+
+/// The first node after `n` in tree order that is not in `n`, inside `root`.
+fn after_subtree(doc: &Document, root: NodeId, mut n: NodeId) -> Option<NodeId> {
+    while n != root {
+        if let Some(s) = doc.next_sibling(n) {
+            return Some(s);
+        }
+        n = doc.parent(n)?;
+    }
+    None
+}
+
+/// The node after `n` in the tree of `root`, in tree order.
+fn following(doc: &Document, root: NodeId, n: NodeId) -> Option<NodeId> {
+    doc.children(n).next().or_else(|| after_subtree(doc, root, n))
+}
+
+/// The node before `n` in the tree of `root`, in tree order.
+fn preceding(doc: &Document, root: NodeId, n: NodeId) -> Option<NodeId> {
+    if n == root {
+        return None;
+    }
+    Some(doc.prev_sibling(n).map_or_else(|| doc.parent(n).expect("inside root"), |p| last_inclusive(doc, p)))
+}
+
+impl Walker {
+    /// The "pre-removing steps" of the standard, for the node `gone`, which is about to leave `parent`.
+    /// As in Chrome, a pointer before the reference node stays when no node follows `gone` in the root.
+    fn removing(&mut self, doc: &Document, gone: NodeId, parent: NodeId) {
+        let mut up = Some(parent);
+        while up != Some(self.root) {
+            let Some(p) = up else { return };
+            up = doc.parent(p);
+        }
+        let root = self.root;
+        let one = |cur: &mut NodeId, before: &mut bool| {
+            let mut c = Some(*cur);
+            while c != Some(gone) {
+                let Some(n) = c else { return };
+                c = doc.parent(n);
+            }
+            if *before {
+                let Some(n) = after_subtree(doc, root, gone) else { return };
+                *cur = n;
+                return;
+            }
+            *cur = doc.prev_sibling(gone).map_or(parent, |p| last_inclusive(doc, p));
+        };
+        one(&mut self.cur, &mut self.before);
+        if let Some((c, b)) = &mut self.cand {
+            one(c, b);
+        }
+    }
+}
+
+impl State {
+    /// Tell the iterators of a node that is about to leave the tree.
+    pub(crate) fn on_change(&mut self, doc: &Document, ch: Change) {
+        if let (Change::Unlink { parent, node, .. }, false) = (ch, self.told) {
+            for w in self.walkers.values_mut().filter(|w| w.iter) {
+                w.removing(doc, node, parent);
+            }
+        }
+    }
+}
+
+impl Dom {
+    /// As in Chrome, "replace all" tells the iterators about every child of `parent`, with the tree whole, before it removes the first
+    /// (the standard removes one by one). The per-node removals are muted until `iter_told_end`.
+    pub(crate) fn iter_told_all(&self, doc: &Document, parent: NodeId) {
+        let Some(st) = self.walk.live() else { return };
+        let mut s = st.borrow_mut();
+        for c in doc.children(parent) {
+            for w in s.walkers.values_mut().filter(|w| w.iter) {
+                w.removing(doc, c, parent);
+            }
+        }
+        s.told = true;
+    }
+
+    pub(crate) fn iter_told_end(&self) {
+        if let Some(st) = self.walk.st.get() {
+            st.borrow_mut().told = false;
+        }
+    }
+}
+
+/// "Traverse": `next` goes on in tree order, else back.
+fn traverse(d: &Dom, it: &mut Interp<'_>, this: Value, next: bool) -> V {
+    let method = if next { "nextNode" } else { "previousNode" };
+    let w = iter_of(d, it, this)?;
+    let (root, mut node, mut before) = {
+        let s = state(d).borrow();
+        let k = &s.walkers[&w];
+        (k.root, k.cur, k.before)
+    };
+    let mut found = None;
+    let res = loop {
+        if before == next {
+            before = !next;
+        } else {
+            let step = {
+                let doc = d.doc.borrow();
+                if next { following(&doc, root, node) } else { preceding(&doc, root, node) }
+            };
+            let Some(n) = step else { break Ok(Value::Null) };
+            node = n;
+            before = !next;
+        }
+        // A removal during the filter moves the candidate. As in Chrome, the reference node becomes the moved candidate, while the
+        // result stays the node that was found.
+        state(d).borrow_mut().walkers.get_mut(&w).expect("live").cand = Some((node, before));
+        let r = filter(d, it, w, method, node);
+        let cand = state(d).borrow().walkers[&w].cand;
+        match r {
+            Ok(ACCEPT) => {
+                found = cand;
+                break d.wrap(it, node);
+            }
+            Ok(_) => (node, before) = cand.expect("set"),
+            Err(e) => break Err(e),
+        }
+    };
+    let mut s = state(d).borrow_mut();
+    let k = s.walkers.get_mut(&w).expect("live");
+    k.cand = None;
+    if let Some((n, b)) = found {
+        (k.cur, k.before) = (n, b);
+    }
+    res
+}
+
+fn next_iter(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
+    traverse(d, it, this, true)
+}
+
+fn previous_iter(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
+    traverse(d, it, this, false)
+}
+
+fn detach_iter(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
+    iter_of(d, it, this)?;
+    Ok(Value::Undefined)
+}
+
+fn iter_get(d: &Dom, it: &mut Interp<'_>, this: Value, f: fn(&Walker) -> Value) -> V {
+    let w = iter_of(d, it, this)?;
+    let v = f(&state(d).borrow().walkers[&w]);
+    Ok(v)
+}
+
+fn iter_root(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
+    let w = iter_of(d, it, this)?;
+    let n = state(d).borrow().walkers[&w].root;
+    d.wrap(it, n)
+}
+
+fn iter_reference(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
+    let w = iter_of(d, it, this)?;
+    let n = state(d).borrow().walkers[&w].cur;
+    d.wrap(it, n)
+}
+
+fn iter_pointer(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
+    iter_get(d, it, this, |k| Value::Bool(k.before))
+}
+
+fn iter_what(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
+    iter_get(d, it, this, |k| Value::Number(k.what as f64))
+}
+
+fn iter_filter(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
+    iter_get(d, it, this, |k| k.filter)
+}
+
+fn illegal_iterator(_: &Dom, it: &mut Interp<'_>, _: Value, _: &[Value]) -> V {
+    Err(it.type_error("Failed to construct 'NodeIterator': Illegal constructor"))
+}
+
+fn ensure_iter(d: &Dom, it: &mut Interp<'_>) -> R<()> {
+    if state(d).borrow().made_iter.is_some() {
+        return Ok(());
+    }
+    let op = it.object_prototype();
+    let proto = d.obj(it, op)?;
+    let (kc, kp) = (d.key(it, "constructor")?, d.key(it, "prototype")?);
+    let ctor = d.add_fn(it, illegal_iterator, "NodeIterator", 0, true)?;
+    it.define_data(ctor, kp, Value::Object(proto), false, false, false)?;
+    it.define_data(proto, kc, Value::Object(ctor), true, false, true)?;
+    crate::browser_lazy::tag(d, it, proto, "NodeIterator")?;
+    let gets: [(&str, H); 5] = [("root", iter_root), ("referenceNode", iter_reference), ("pointerBeforeReferenceNode", iter_pointer), ("whatToShow", iter_what), ("filter", iter_filter)];
+    for (name, h) in gets {
+        d.def_get(it, proto, name, h, None)?;
+    }
+    for (name, h) in [("nextNode", next_iter as H), ("previousNode", previous_iter), ("detach", detach_iter)] {
+        d.def_method(it, proto, name, 0, h)?;
+    }
+    state(d).borrow_mut().made_iter = Some((proto, ctor));
+    Ok(())
+}
+
+lazy_global!(lazy_iterator, "NodeIterator", ensure_iter, |d| state(d).borrow().made_iter.expect("made").1);
+
 pub(crate) fn install(d: &Dom, it: &mut Interp<'_>) -> R<()> {
     d.def_method(it, d.p().document, "createTreeWalker", 1, create_tree_walker)?;
-    crate::browser_lazy::install(d, it, &[("TreeWalker", lazy_walker as H), ("NodeFilter", lazy_filter)])
+    d.def_method(it, d.p().document, "createNodeIterator", 1, create_node_iterator)?;
+    crate::browser_lazy::install(d, it, &[("TreeWalker", lazy_walker as H), ("NodeFilter", lazy_filter), ("NodeIterator", lazy_iterator)])
 }
 
 impl Dom {
     pub(crate) fn walk_roots(&self, out: &mut Vec<Value>) {
-        if let Some(st) = self.walk.st.get()
-            && let Some((p, c, n)) = st.borrow().made
-        {
-            out.extend([p, c, n].map(Value::Object));
+        if let Some(st) = self.walk.st.get() {
+            let s = st.borrow();
+            let (a, b) = s.made_iter.unzip();
+            out.extend(s.made.into_iter().flat_map(|(p, c, n)| [p, c, n]).chain(a).chain(b).map(Value::Object));
         }
     }
 
@@ -434,7 +701,15 @@ impl Dom {
 
     pub(crate) fn walk_prune(&self, live: &dyn Fn(ObjId) -> bool) {
         if let Some(st) = self.walk.st.get() {
-            st.borrow_mut().walkers.retain(|&o, _| live(o));
+            let mut s = st.borrow_mut();
+            let had = s.iters;
+            s.walkers.retain(|&o, _| live(o));
+            s.iters = s.walkers.values().filter(|w| w.iter).count();
+            let gone = had > 0 && s.iters == 0;
+            drop(s);
+            if gone {
+                self.sync_watcher();
+            }
         }
     }
 }

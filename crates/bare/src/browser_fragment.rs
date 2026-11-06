@@ -302,9 +302,11 @@ fn replace(d: &Dom, it: &mut Interp<'_>, html: &str, n: NodeId, in_frag: bool, t
     match this {
         Some(t) => doc.detach(t),
         None => {
+            d.iter_told_all(&doc, n);
             while let Some(c) = doc.children(n).next() {
                 doc.detach(c);
             }
+            d.iter_told_end();
         }
     }
     let mut path = vec![n];

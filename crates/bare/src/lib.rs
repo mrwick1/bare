@@ -114,6 +114,7 @@ mod browser_idle;
 mod browser_intersection;
 mod browser_walker;
 mod browser_range;
+mod browser_chardata;
 mod browser_lazy;
 mod browser_mutation;
 #[cfg(test)]
