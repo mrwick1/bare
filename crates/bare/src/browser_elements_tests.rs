@@ -14,6 +14,7 @@ use bare_net::http::Client;
 topic_test!(anchor_cases, "anchor", 20);
 topic_test!(template_cases, "template", 23);
 topic_test!(formdata_cases, "formdata", 28);
+topic_test!(fragment_cases, "fragment", 70);
 
 fn big<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {
     std::thread::Builder::new().stack_size(64 << 20).spawn(f).unwrap().join().unwrap()
@@ -154,15 +155,55 @@ fn a_template_is_still_inert_for_styles_and_scripts() {
 
 #[test]
 fn only_a_fragment_without_a_host_can_be_inserted() {
+    let want = "unsupported:inserting a ShadowRoot or DocumentFragment as a node (fragment insertion)";
     let mut b = browser("<template id=t><p>1</p></template><div id=host></div>");
-    assert_eq!(js(&mut b, "var h = document.getElementById('host'), r = h.attachShadow({mode: 'open'}); h.appendChild(r)"), "unsupported:inserting a ShadowRoot or DocumentFragment as a node (fragment insertion)");
+    // a shadow root stays an error, however it is inserted
+    for call in ["h.appendChild(r)", "h.insertBefore(r, null)", "h.append(r)", "h.append('x', r)", "h.appendChild(document.createElement('i')); h.replaceChild(r, h.lastChild)", "h.lastChild.replaceWith(r)"] {
+        assert_eq!(js(&mut b, &format!("var h = document.getElementById('host'); h.innerHTML = ''; var r = h.shadowRoot || h.attachShadow({{mode: 'open'}}); h.appendChild(document.createElement('i')); {call}")), want, "{call}");
+    }
     // a content fragment moves its children, also into a fragment, and a fragment cannot go inside itself or its own child
     assert_eq!(js(&mut b, "var c = document.getElementById('t').content, d = c.cloneNode(true); c.appendChild(d); c.childNodes.length + ',' + d.childNodes.length"), "2,0");
     assert_eq!(js(&mut b, "var c = document.getElementById('t').content; try { c.firstChild.appendChild(c) } catch (e) { e.name }"), "HierarchyRequestError");
-    // a fragment into the document node, and into replaceChild, are still refused
-    let want = "unsupported:inserting a ShadowRoot or DocumentFragment as a node (fragment insertion)";
+    // a fragment into the document node is still refused
     assert_eq!(js(&mut b, "document.appendChild(document.getElementById('t').content.cloneNode(true))"), want);
-    assert_eq!(js(&mut b, "var h = document.getElementById('host'); h.appendChild(document.createElement('i')); h.replaceChild(document.getElementById('t').content.cloneNode(true), h.lastChild)"), want);
+}
+
+#[test]
+fn a_fragment_is_one_kind_of_node_however_it_is_made() {
+    let mut b = browser("<template id=t></template>");
+    // The prototype tag does not need a template or an anchor: the first fragment sets it, and a later one does not set it again.
+    assert_eq!(js(&mut b, "Object.prototype.toString.call(new DocumentFragment()) + Object.prototype.toString.call(document.createDocumentFragment())"), "[object DocumentFragment][object DocumentFragment]");
+    assert_eq!(js(&mut b, "var f = document.createDocumentFragment(); [f instanceof DocumentFragment, f.constructor === DocumentFragment, f.ownerDocument === document, f.cloneNode(true) instanceof DocumentFragment].join()"), "true,true,true,true");
+    // `createDocumentFragment`, `new DocumentFragment` and `before` do not wrap or make anything until called: the realm stays small
+    let mut b = browser("<p id=p></p>");
+    assert_eq!(js(&mut b, "typeof document.createDocumentFragment + typeof document.getElementById('p').before"), "functionfunction");
+    // a fragment that nothing holds is collected with its children
+    let mut b = browser("");
+    js(&mut b, "for (var i = 0; i < 2000; i++) { var f = new DocumentFragment(); f.append(document.createElement('p'), 'x'); f = null }");
+    b.collect(&[]).unwrap();
+    assert!(b.stats().wrappers < 100, "{:?}", b.stats());
+    assert_eq!(js(&mut b, "document.createDocumentFragment().childNodes.length"), "0");
+}
+
+#[test]
+fn a_page_can_use_scripts_of_a_fragment() {
+    // Chrome: a script made by a script and put in a fragment runs once when the fragment goes into the document, in order, with all its siblings in place. (Chrome runs it at the insert; the loader of this browser runs it when the page script ends.)
+    big(|| {
+        let doc = "<div id=host></div><div id=other></div><script>
+            window.out = []; var h = document.getElementById('host'), f = new DocumentFragment();
+            ['a', 'b', 'c'].forEach(function (n) { var s = document.createElement('script'); s.textContent = 'window.out.push(\"' + n + '\" + document.querySelectorAll(\"#host > *\").length)'; f.appendChild(s) });
+            f.append(document.createElement('p'));
+            h.appendChild(f);
+            var s = document.createElement('script'); s.textContent = 'window.out.push(\"x\")'; var g = document.createDocumentFragment(); g.appendChild(s);
+            h.appendChild(g); document.getElementById('other').appendChild(s);
+        </script>";
+        let mut b = Browser::new(tree::parse(doc), BrowserLimits::default(), EvalLimits { max_steps: 5_000_000, ..Default::default() }, HeapLimits::default()).unwrap();
+        b.use_virtual_clock();
+        let r = b.run_page(PageConfig { url: "http://example.test/p/page".into(), client: Client::new(), limits: PageLimits::default(), fetch: None });
+        assert_eq!(r.stop, Stop::Settled, "{r:?}");
+        let v = b.run_script("window.out.join()").unwrap();
+        assert_eq!(b.it.display(v), "a4,b4,c4,x");
+    });
 }
 
 #[test]

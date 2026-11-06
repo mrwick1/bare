@@ -28,7 +28,7 @@
 //! shadow DOM, no style, layout or paint for a shadow tree (the cascade and layout start at the document and never reach it; `getComputedStyle` of
 //! a connected shadow element is Unsupported), no `:host`, `:host()` or `::slotted()` selectors (they are a `SyntaxError`),
 //! no focus in a shadow tree (its elements are not focusable areas) and no script run from a shadow tree (the loader prepares only scripts
-//! whose light ancestors reach the document). `new ShadowRoot()` and `new DocumentFragment()` are illegal constructors.
+//! whose light ancestors reach the document). `new ShadowRoot()` is an illegal constructor. Deviation: Chrome inserts a shadow root like a fragment (its children move); here it is `Unsupported`.
 //!
 //! Events: a path walks the parent links, so an event that is not composed and starts in a shadow tree ends at its root, which is exactly the
 //! standard path. A COMPOSED event whose path would reach a root (the standard continues at the host and retargets `target`) is refused with

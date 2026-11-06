@@ -39,6 +39,7 @@ use std::cell::Cell;
 #[derive(Default)]
 pub(crate) struct Els {
     objs: Cell<Option<[ObjId; 6]>>,
+    tagged: Cell<bool>,
 }
 
 pub(crate) fn roots(d: &Dom, out: &mut Vec<Value>) {
@@ -58,6 +59,16 @@ pub(crate) fn proto(d: &Dom, it: &mut Interp<'_>, tag: &str) -> R<ObjId> {
         "area" => 1,
         _ => 2,
     }])
+}
+
+/// The `Symbol.toStringTag` of `DocumentFragment` and `ShadowRoot`, set once, by the first fragment that a page makes (`content`, `createDocumentFragment`,
+/// `new DocumentFragment()`): a realm with none pays nothing.
+pub(crate) fn tag_fragments(d: &Dom, it: &mut Interp<'_>) -> R<()> {
+    if !d.els.tagged.replace(true) {
+        crate::browser_lazy::tag(d, it, d.p().fragment, "DocumentFragment")?;
+        crate::browser_lazy::tag(d, it, d.p().shadow, "ShadowRoot")?;
+    }
+    Ok(())
 }
 
 fn ensure(d: &Dom, it: &mut Interp<'_>) -> R<()> {
@@ -88,9 +99,7 @@ fn make(d: &Dom, it: &mut Interp<'_>) -> R<[ObjId; 6]> {
         crate::browser_lazy::tag(d, it, proto, name)?;
         (o[i], o[i + 3]) = (proto, f);
     }
-    // The only fragments of a realm without a shadow root come from `content`, so their tag is set here (the shadow root inherits the fragment prototype).
-    crate::browser_lazy::tag(d, it, d.p().fragment, "DocumentFragment")?;
-    crate::browser_lazy::tag(d, it, d.p().shadow, "ShadowRoot")?;
+    tag_fragments(d, it)?;
     members::<false>(d, it, o[0])?;
     members::<true>(d, it, o[1])?;
     d.def_get(it, o[2], "content", content, None)?;

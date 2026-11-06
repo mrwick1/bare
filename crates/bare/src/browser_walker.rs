@@ -25,7 +25,7 @@
 //!
 //! Deviations (on purpose)
 //! - `nextNode()` from a detached node with no later node gives `null` (the standard's text would test the same node again, which Chrome does not).
-//! - A walker is a plain object with a table entry here, so `root`, `whatToShow` and `filter` are prototype getters like Chrome's. A `DocumentFragment` root is not possible yet (`createDocumentFragment` does not exist); a shadow root is.
+//! - A walker is a plain object with a table entry here, so `root`, `whatToShow` and `filter` are prototype getters like Chrome's.
 //!
 //! Bound (`Limit(Host(name))`): `tree-walkers` (live walkers, set free by the collector).
 

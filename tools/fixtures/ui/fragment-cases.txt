@@ -1,0 +1,251 @@
+var $ = function (i) { return document.getElementById(i) };
+var log = [];
+function nm(n) { return n === null ? 'null' : n.nodeType === 1 ? n.tagName.toLowerCase() + (n.id ? '#' + n.id : '') : n.nodeType === 3 ? '"' + n.data + '"' : n.nodeName }
+function list(l) { return '[' + Array.prototype.map.call(l, nm).join(',') + ']' }
+function rec(r) { return r.type + ' ' + nm(r.target) + ' +' + list(r.addedNodes) + ' -' + list(r.removedNodes) + ' p=' + nm(r.previousSibling) + ' n=' + nm(r.nextSibling) }
+var mo = new MutationObserver(function (rs) { rs.forEach(function (r) { log.push(rec(r)) }) });
+var out = function () { return log.join(' | ') };
+function el(t, id) { var e = document.createElement(t); if (id) e.id = id; return e }
+function frag() { var f = document.createDocumentFragment(); for (var i = 0; i < arguments.length; i++) f.appendChild(typeof arguments[i] === 'string' ? el(arguments[i]) : arguments[i]); return f }
+=== ctor-shape
+(function () { var f = new DocumentFragment(), d = Object.getOwnPropertyDescriptor(window, 'DocumentFragment'); return [typeof DocumentFragment, DocumentFragment.name, DocumentFragment.length, f instanceof DocumentFragment, f instanceof Node, f instanceof EventTarget, Object.getPrototypeOf(f) === DocumentFragment.prototype, Object.getPrototypeOf(DocumentFragment.prototype) === Node.prototype, f.constructor === DocumentFragment, Object.prototype.toString.call(f), d.writable, d.configurable].join() })
+=== ctor-node-members
+(function () { var f = new DocumentFragment(); return [f.nodeType, f.nodeName, f.nodeValue, f.childNodes.length, f.firstChild, f.lastChild, f.parentNode, f.parentElement, f.isConnected, f.ownerDocument === document, f.hasChildNodes(), f.textContent, f.children.length, f.childElementCount, f.firstElementChild, f.lastElementChild].join() })
+=== ctor-each-call-makes-a-new-fragment
+(function () { var a = new DocumentFragment(), b = new DocumentFragment(); return [a === b, a.contains(a), a.contains(b)].join() })
+=== ctor-without-new
+(function () { try { DocumentFragment() } catch (e) { return e.name } })
+=== ctor-ignores-arguments
+(function () { var f = new DocumentFragment(1, 'x', {}); return f.nodeType + ',' + f.childNodes.length })
+=== ctor-subclass
+class F extends DocumentFragment { hi() { return 'hi' } }
+(function () { var f = new F(); f.appendChild(el('p')); return [f instanceof F, f instanceof DocumentFragment, f.hi(), f.constructor === F, f.nodeType, f.childNodes.length, Object.prototype.toString.call(f)].join() })
+=== ctor-shadow-root-is-still-illegal
+(function () { try { new ShadowRoot() } catch (e) { return e.name } })
+=== ctor-expando-and-brand
+(function () { var f = new DocumentFragment(); f.x = 5; var g = DocumentFragment.prototype.querySelector.call(f, 'p'); try { DocumentFragment.prototype.querySelector.call({}, 'p') } catch (e) { return [f.x, g, e.name].join() } })
+=== create-document-fragment-shape
+(function () { var f = document.createDocumentFragment(), d = Object.getOwnPropertyDescriptor(Document.prototype, 'createDocumentFragment'); return [typeof document.createDocumentFragment, document.createDocumentFragment.length, document.createDocumentFragment.name, d.writable, d.configurable, f instanceof DocumentFragment, Object.getPrototypeOf(f) === DocumentFragment.prototype, f.nodeType, f.nodeName, f.childNodes.length, f.ownerDocument === document, f.isConnected, Object.prototype.toString.call(f), f === document.createDocumentFragment()].join() })
+=== create-document-fragment-brand
+(function () { try { document.createDocumentFragment.call({}) } catch (e) { return e.name + ':' + e.message } })
+=== create-document-fragment-ignores-arguments
+(function () { return document.createDocumentFragment(1, 'x').childNodes.length })
+=== members-append-and-prepend
+var f = new DocumentFragment(); f.append('a', el('p'), 'b'); f.prepend(el('i'), 'c');
+(function () { return [f.childNodes.length, f.textContent, list(f.childNodes), f.children.length, f.childElementCount, nm(f.firstElementChild), nm(f.lastElementChild)].join() })
+=== members-append-moves-an-attached-node
+@html <div id=a><p id=p>1</p><b id=b>2</b></div>
+var p = $('p'), f = new DocumentFragment(); f.append(p, $('b'));
+(function () { return [$('a').childNodes.length, list(f.childNodes), p.parentNode === f, p.isConnected, p.getRootNode() === f, f.contains(p)].join() })
+=== members-queries
+var f = frag('div', 'span'); f.firstChild.id = 'd'; f.firstChild.className = 'k'; f.lastChild.id = 's'; f.firstChild.appendChild(el('em', 'e'));
+(function () { return [nm(f.querySelector('.k')), nm(f.querySelector('em')), f.querySelectorAll('div, span, em').length, f.querySelector('p'), nm(f.getElementById('s')), nm(f.getElementById('e')), f.getElementById('x'), document.getElementById('e'), f.querySelectorAll('*').length, f.querySelectorAll('p').length].join() })
+=== members-query-does-not-see-the-fragment-itself
+(function () { var f = frag('div'); f.firstChild.appendChild(el('p')); return [nm(f.querySelector('div p')), nm(f.querySelector('div > p'))].join() })
+=== members-text-content
+var f = frag('p', 'b'); f.firstChild.textContent = 'x'; f.lastChild.textContent = 'y';
+(function () { var a = f.textContent; f.textContent = 'new'; return [a, f.childNodes.length, list(f.childNodes), f.textContent].join() })
+=== members-text-content-empty-string-clears
+(function () { var f = frag('p'); f.textContent = ''; return f.childNodes.length })
+=== members-clone
+var f = frag('p', 'b'); f.firstChild.id = 'q'; var c = f.cloneNode(true), s = f.cloneNode(false);
+(function () { return [c.nodeType, c.childNodes.length, c.firstChild !== f.firstChild, c.firstChild.id, s.childNodes.length, f.childNodes.length, c.parentNode, c instanceof DocumentFragment].join() })
+=== append-child-moves-the-children-in-order
+@html <div id=host><u id=old></u></div>
+var f = frag('p', 'b', 'i'), p = f.firstChild, r = $('host').appendChild(f);
+(function () { return [r === f, list($('host').childNodes), f.childNodes.length, f.hasChildNodes(), p.parentNode === $('host'), p.isConnected, f.parentNode, f.firstChild].join() })
+=== append-child-text-and-comment-kids
+@html <div id=host></div>
+var f = new DocumentFragment(); f.append('t1', document.createComment('c'), 't2'); $('host').appendChild(f);
+(function () { return [$('host').childNodes.length, $('host').textContent, $('host').childNodes[1].nodeType, f.childNodes.length].join() })
+=== append-child-empty-fragment
+@html <div id=host><u></u></div>
+var f = new DocumentFragment(), r = $('host').appendChild(f);
+(function () { return [r === f, $('host').childNodes.length, f.childNodes.length].join() })
+=== append-child-fragment-twice
+@html <div id=host></div>
+var f = frag('p', 'b'); $('host').appendChild(f); $('host').appendChild(f);
+(function () { return [$('host').childNodes.length, f.childNodes.length].join() })
+=== append-child-fragment-keeps-the-fragment-usable
+@html <div id=host></div>
+var f = frag('p'); $('host').appendChild(f); f.appendChild(el('b')); f.append('t'); $('host').appendChild(f);
+(function () { return [list($('host').childNodes), f.childNodes.length].join() })
+=== insert-before-a-reference
+@html <div id=host><i id=a></i><i id=b></i></div>
+var f = frag('p', 'b'), r = $('host').insertBefore(f, $('b'));
+(function () { return [r === f, list($('host').childNodes), f.childNodes.length, nm($('host').children[1].previousSibling), nm($('host').children[2].nextSibling)].join() })
+=== insert-before-null-appends
+@html <div id=host><i id=a></i></div>
+$('host').insertBefore(frag('p', 'b'), null);
+(function () { return list($('host').childNodes) })
+=== insert-before-the-first-child
+@html <div id=host><i id=a></i></div>
+$('host').insertBefore(frag('p', 'b'), $('a'));
+(function () { return list($('host').childNodes) + ',' + nm($('host').firstChild.previousSibling) })
+=== insert-before-empty-fragment
+@html <div id=host><i id=a></i></div>
+var f = new DocumentFragment(), r = $('host').insertBefore(f, $('a'));
+(function () { return [r === f, list($('host').childNodes)].join() })
+=== insert-before-a-reference-that-is-not-a-child
+@html <div id=host></div><div id=other><i id=x></i></div>
+var f = frag('p'), e;
+try { $('host').insertBefore(f, $('x')) } catch (x) { e = x.name }
+(function () { return [e, f.childNodes.length, $('host').childNodes.length].join() })
+=== insert-before-a-reference-inside-the-fragment
+@html <div id=host></div>
+var f = frag('p', 'b'), e;
+try { $('host').insertBefore(f, f.firstChild) } catch (x) { e = x.name }
+(function () { return [e, f.childNodes.length, $('host').childNodes.length].join() })
+=== replace-child-with-a-fragment
+@html <div id=host><i id=a></i><u id=old></u><i id=c></i></div>
+var f = frag('p', 'b'), old = $('old'), r = $('host').replaceChild(f, old);
+(function () { return [r === old, list($('host').childNodes), f.childNodes.length, old.parentNode, old.isConnected, nm($('a').nextSibling), nm($('c').previousSibling)].join() })
+=== replace-child-with-an-empty-fragment
+@html <div id=host><i id=a></i><u id=old></u></div>
+var old = $('old'), r = $('host').replaceChild(new DocumentFragment(), old);
+(function () { return [r === old, list($('host').childNodes), old.parentNode].join() })
+=== replace-child-only-child
+@html <div id=host><u id=old></u></div>
+$('host').replaceChild(frag('p', 'b', 'i'), $('old'));
+(function () { return list($('host').childNodes) })
+=== replace-child-with-a-fragment-not-a-child
+@html <div id=host></div><div id=o><u id=x></u></div>
+var f = frag('p'), e;
+try { $('host').replaceChild(f, $('x')) } catch (x) { e = x.name }
+(function () { return [e, f.childNodes.length, $('o').childNodes.length].join() })
+=== replace-child-in-a-fragment
+var f = frag('p', 'b', 'i'), g = frag('u', 'u'), old = f.childNodes[1];
+f.replaceChild(g, old);
+(function () { return [list(f.childNodes), g.childNodes.length, old.parentNode].join() })
+=== append-and-prepend-with-a-fragment
+@html <div id=host><i id=a></i></div>
+$('host').append('t', frag('p', 'b'), el('u')); $('host').prepend(frag('s'), 'x');
+(function () { return list($('host').childNodes) })
+=== append-a-fragment-only
+@html <div id=host><i id=a></i></div>
+$('host').append(frag('p', 'b'));
+(function () { return list($('host').childNodes) })
+=== append-two-fragments-and-an-empty-one
+@html <div id=host></div>
+var e = new DocumentFragment(); $('host').append(frag('p'), e, frag('b'), e);
+(function () { return list($('host').childNodes) })
+=== append-the-same-fragment-twice
+@html <div id=host></div>
+var f = frag('p', 'b'); $('host').append(f, f);
+(function () { return list($('host').childNodes) })
+=== fragment-into-a-fragment
+var f = frag('p'), g = frag('b', 'i'); f.appendChild(g); f.insertBefore(frag('u'), f.firstChild);
+(function () { return [list(f.childNodes), g.childNodes.length].join() })
+=== fragment-into-itself
+(function () { var f = frag('p'), e; try { f.appendChild(f) } catch (x) { e = x.name } return [e, f.childNodes.length].join() })
+=== fragment-into-its-own-child
+(function () { var f = frag('p'), e; try { f.firstChild.appendChild(f) } catch (x) { e = x.name } return [e, f.childNodes.length, f.firstChild.childNodes.length].join() })
+=== fragment-into-text-node
+(function () { var f = frag('p'), t = document.createTextNode('x'), e; try { t.appendChild(f) } catch (x) { e = x.name } return [e, f.childNodes.length].join() })
+=== moving-an-element-of-a-fragment-out
+@html <div id=host></div>
+var f = frag('p', 'b'), b = f.lastChild; $('host').appendChild(b);
+(function () { return [list(f.childNodes), list($('host').childNodes)].join() })
+=== kids-root-follows-the-insert
+@html <div id=host></div>
+var f = frag('p'), p = f.firstChild, before = p.getRootNode() === f; $('host').appendChild(f);
+(function () { return [before, p.getRootNode() === document, p.isConnected, document.body.contains(p)].join() })
+=== kids-are-queryable-after-insert
+@html <div id=host></div>
+var f = new DocumentFragment(); var p = el('p', 'late'); f.appendChild(p); var before = document.getElementById('late'); $('host').appendChild(f);
+(function () { return [before, nm(document.getElementById('late')), $('host').querySelectorAll('p').length].join() })
+=== mutation-append-child-is-one-record
+@html <div id=host><u id=old></u></div>
+mo.observe($('host'), { childList: true }); $('host').appendChild(frag('p', 'b', 'i'));
+out
+=== mutation-insert-before-is-one-record
+@html <div id=host><i id=a></i><i id=b></i></div>
+mo.observe($('host'), { childList: true }); $('host').insertBefore(frag('p', 'b'), $('b'));
+out
+=== mutation-replace-child-is-one-record
+@html <div id=host><i id=a></i><u id=old></u><i id=c></i></div>
+mo.observe($('host'), { childList: true }); $('host').replaceChild(frag('p', 'b'), $('old'));
+out
+=== mutation-replace-child-with-empty-fragment
+@html <div id=host><i id=a></i><u id=old></u><i id=c></i></div>
+mo.observe($('host'), { childList: true }); $('host').replaceChild(new DocumentFragment(), $('old'));
+out
+=== mutation-append-with-a-fragment-is-one-record
+@html <div id=host></div>
+mo.observe($('host'), { childList: true }); $('host').append('t', frag('p', 'b'), el('u'));
+out
+=== mutation-prepend-with-a-fragment-is-one-record
+@html <div id=host><i id=a></i></div>
+mo.observe($('host'), { childList: true }); $('host').prepend(frag('p', 'b'), 'x');
+out
+=== mutation-empty-fragment-no-record
+@html <div id=host></div>
+mo.observe($('host'), { childList: true }); $('host').appendChild(new DocumentFragment());
+out
+=== mutation-the-fragment-itself-is-observed
+@html <div id=host></div>
+var f = frag('p', 'b'); mo.observe(f, { childList: true }); mo.observe($('host'), { childList: true }); $('host').appendChild(f);
+out
+=== mutation-subtree-from-the-fragment
+@html <div id=host></div>
+var f = frag('p'); mo.observe(f, { childList: true, subtree: true }); f.firstChild.appendChild(el('b')); f.appendChild(el('i'));
+out
+=== mutation-subtree-observer-on-host-sees-kids
+@html <div id=host></div>
+var f = frag('p', 'b'); mo.observe($('host'), { childList: true, subtree: true }); $('host').appendChild(f); f.append('x'); $('host').firstChild.appendChild(el('i'));
+out
+=== mutation-moving-from-an-observed-parent
+@html <div id=src><p id=p></p><b id=b></b></div><div id=host></div>
+var f = new DocumentFragment(); f.append($('p'), $('b')); mo.observe($('src'), { childList: true }); mo.observe($('host'), { childList: true });
+$('host').appendChild(f);
+out
+=== layout-sees-inserted-kids
+@html <div id=host></div>
+var f = new DocumentFragment(), p = el('p'); p.textContent = 'x'; f.appendChild(p); $('host').appendChild(f);
+(function () { return [getComputedStyle(p).display, $('host').firstChild === p].join() })
+=== form-controls-in-a-fragment
+@html <form id=f></form>
+var fr = new DocumentFragment(), i = el('input'); i.name = 'a'; i.value = 'v'; fr.appendChild(i); $('f').appendChild(fr);
+(function () { return [new FormData($('f')).get('a'), $('f').querySelectorAll('input').length].join() })
+=== child-node-shape
+(function () { var p = el('p'), t = document.createTextNode('x'), r = []; ['before', 'after', 'replaceWith'].forEach(function (n) { r.push(typeof p[n], p[n].length, typeof t[n], Object.getOwnPropertyDescriptor(Element.prototype, n) === undefined, Object.getOwnPropertyDescriptor(CharacterData.prototype, n) === undefined) }); return r.join() })
+=== child-node-before-with-a-fragment
+@html <div id=host><i id=a></i><i id=b></i></div>
+var r = $('b').before(frag('p', 'b'), 't', el('u'));
+(function () { return [r, list($('host').childNodes)].join() })
+=== child-node-after-with-a-fragment
+@html <div id=host><i id=a></i><i id=b></i></div>
+$('a').after(frag('p', 'b'), 't'); $('b').after(frag('s'));
+(function () { return list($('host').childNodes) })
+=== child-node-replace-with-a-fragment
+@html <div id=host><i id=a></i><u id=old></u><i id=c></i></div>
+var old = $('old'); old.replaceWith(frag('p', 'b'), 't');
+(function () { return [list($('host').childNodes), old.parentNode].join() })
+=== child-node-replace-with-nothing-removes
+@html <div id=host><i id=a></i><u id=old></u></div>
+$('old').replaceWith();
+(function () { return list($('host').childNodes) })
+=== child-node-with-itself-in-the-list
+@html <div id=host><i id=a></i><u id=b></u><i id=c></i></div>
+$('b').before($('a'), $('b')); $('c').after($('c'), 'x'); $('a').replaceWith($('a'), 'y');
+(function () { return list($('host').childNodes) })
+=== child-node-without-a-parent-does-nothing
+(function () { var p = el('p'); p.before('x'); p.after('x'); p.replaceWith('x'); return [p.parentNode, p.childNodes.length].join() })
+=== child-node-in-a-fragment
+var f = frag('p', 'b'); f.firstChild.after(frag('u', 'i')); f.lastChild.before('t');
+(function () { return list(f.childNodes) })
+=== child-node-text-node
+@html <div id=host>x</div>
+$('host').firstChild.after(frag('p')); $('host').firstChild.before(el('b'));
+(function () { return list($('host').childNodes) })
+=== mutation-child-node-replace-with-is-one-record
+@html <div id=host><i id=a></i><u id=old></u><i id=c></i></div>
+mo.observe($('host'), { childList: true }); $('old').replaceWith(frag('p', 'b'), 't');
+out
+=== mutation-child-node-before-is-one-record
+@html <div id=host><i id=a></i><u id=old></u></div>
+mo.observe($('host'), { childList: true }); $('old').before(frag('p', 'b'), 't');
+out
+=== tree-walker-on-a-fragment
+var f = frag('p', 'b'); f.firstChild.appendChild(el('i'));
+(function () { var w = document.createTreeWalker(f, 1), r = [nm(w.root === f ? w.currentNode.firstChild : null)]; while (w.nextNode()) r.push(nm(w.currentNode)); return r.join() })

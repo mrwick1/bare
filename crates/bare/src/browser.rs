@@ -21,6 +21,7 @@
 //! - Globals: `window`, `self`, `globalThis` (the same object), `document`, `Node`, `Element`, `HTMLElement`,
 //!   `HTMLInputElement`, `HTMLIFrameElement` (inert brand only: no `contentWindow`, no nested context, no fetch), `HTMLLinkElement`, `HTMLFormElement`, `HTMLButtonElement`, `CharacterData`, `Text`, `Comment`, `Document`, `DocumentFragment` and `ShadowRoot` (illegal constructors), `EventTarget`, `Event`, `CustomEvent`,
 //!   `SubmitEvent`, `DOMException`.
+//! - `new DocumentFragment()` and `document.createDocumentFragment()` make an empty fragment. A plain fragment (no host) goes in as its children (`Dom::place`): one change group, the fragment is left empty. A shadow root is still `Unsupported`. `before`, `after` and `replaceWith` are on `Element` and `CharacterData`. Installed after every other global (`install_late`).
 //! - `HTMLAnchorElement`, `HTMLAreaElement` and `HTMLTemplateElement` (lazy, `browser_elements.rs`): `href` and the URL parts, `template.content`. `new FormData(form)` reads the form data set.
 //! - Node: `nodeType nodeName nodeValue parentNode parentElement childNodes firstChild lastChild previousSibling
 //!   nextSibling ownerDocument isConnected textContent appendChild insertBefore removeChild replaceChild cloneNode
@@ -49,8 +50,8 @@
 //!   The one live `NodeList` is the result of `document.getElementsByName` (`browser_nodelist.rs`).
 //! - A JS string with a lone surrogate cannot be stored in the UTF-8 document: `Error::Unsupported`. Valid pairs round-trip.
 //! - Namespaces are in `browser_namespace.rs` (read its header): HTML, SVG and MathML elements, attributes in no namespace, XML,
-//!   XMLNS and XLink. Any other namespace is `Unsupported`. Shadow roots are a tree foundation only (`browser_shadow.rs`: read its header for the gates). `new Document()`, `createDocumentFragment`, `new DocumentFragment()`, `insertAdjacentHTML`,
-//!   `style`, `before/after/replaceWith`, layout APIs, `location` and
+//!   XMLNS and XLink. Any other namespace is `Unsupported`. Shadow roots are a tree foundation only (`browser_shadow.rs`: read its header for the gates). `new Document()`, `insertAdjacentHTML`,
+//!   `style`, layout APIs, `location` and
 //!   network are absent. Timers, `queueMicrotask`, `performance.now` and `MessageChannel` are in `browser_scheduler.rs`. `Element.attributes` and `Attr` are in `browser_attr.rs`.
 //! - `addEventListener` option `signal` removes the listener on abort (`browser_abort.rs`). `isTrusted` is always false. Events made by the test driver
 //!   are plain `Event`s (no `MouseEvent`/`InputEvent` fields), except the `submit` of a click activation: a `SubmitEvent`.
@@ -878,7 +879,7 @@ impl Dom {
         let (kp, kc) = (self.key(it, "prototype")?, self.key(it, "constructor")?);
         let mut ctors = Vec::new();
         for (name, proto, ctor) in ifaces {
-            let f = self.add_fn(it, ctor.unwrap_or(illegal_constructor), name, 0, ctor.is_some())?;
+            let f = if name == "DocumentFragment" { self.add_ctor_nt(it, nd::fragment_ctor, name, 0)? } else { self.add_fn(it, ctor.unwrap_or(illegal_constructor), name, 0, ctor.is_some())? };
             it.define_data(f, kp, Value::Object(proto), false, false, false)?;
             it.define_data(proto, kc, Value::Object(f), true, false, true)?;
             let k = self.key(it, name)?;
@@ -920,7 +921,6 @@ impl Dom {
         crate::browser_xhr::install(self, it)?;
         crate::browser_encoding::install(self, it)?;
         crate::browser_web::install(self, it)?;
-        crate::browser_elements::install(self, it)?;
         crate::browser_console::install(self, it)?;
         crate::browser_style::install(self, it)?;
         crate::browser_computed::install(self, it)?;
@@ -935,7 +935,10 @@ impl Dom {
         crate::browser_walker::install(self, it)?;
         crate::browser_range::install(self, it)?;
         crate::browser_handlers::install(self, it)?;
-        crate::browser_select::install(self, it)
+        crate::browser_select::install(self, it)?;
+        // Last: a new host function earlier in this list moves the id of every one after it.
+        crate::browser_elements::install(self, it)?;
+        nd::install_late(self, it)
     }
 
     pub(crate) fn define_accessor(&self, it: &mut Interp<'_>, o: ObjId, key: PropertyKey, get: ObjId, set: Option<ObjId>) -> R<()> {

@@ -30,7 +30,7 @@
 //!   the HTML namespace (an SVG or MathML element).
 //! - Markup: a `template`, `noscript`, `frameset` or `frame` start tag in the value.
 //! - The getter, for a tree that holds an HTML `template` or `noscript` element (their serialization depends on template contents and the scripting flag).
-//! - `insertAdjacentHTML`, `createDocumentFragment`, `Range.createContextualFragment`, `DOMParser` and `document.write` are absent.
+//! - `insertAdjacentHTML`, `Range.createContextualFragment`, `DOMParser` and `document.write` are absent.
 //!
 //! Known deviations: nested `table` and `select` are read by the page rules of the tree builder (no table or select insertion modes). A temporary
 //! text buffer that grew by joining texts counts the wasted bytes against the text cap. Cloning preserves the "already started" flag.

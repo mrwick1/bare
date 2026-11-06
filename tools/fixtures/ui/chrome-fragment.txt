@@ -1,0 +1,70 @@
+ctor-shape	function,DocumentFragment,0,true,true,true,true,true,true,[object DocumentFragment],true,true
+ctor-node-members	11,#document-fragment,,0,,,,,false,true,false,,0,0,,
+ctor-each-call-makes-a-new-fragment	false,true,false
+ctor-without-new	TypeError
+ctor-ignores-arguments	11,0
+ctor-subclass	true,true,hi,true,11,1,[object DocumentFragment]
+ctor-shadow-root-is-still-illegal	TypeError
+ctor-expando-and-brand	5,,TypeError
+create-document-fragment-shape	function,0,createDocumentFragment,true,true,true,true,11,#document-fragment,0,true,false,[object DocumentFragment],false
+create-document-fragment-brand	TypeError:Illegal invocation
+create-document-fragment-ignores-arguments	0
+members-append-and-prepend	5,cab,[i,"c","a",p,"b"],2,2,i,p
+members-append-moves-an-attached-node	0,[p#p,b#b],true,false,true,true
+members-queries	div#d,em#e,3,,span#s,em#e,,,3,0
+members-query-does-not-see-the-fragment-itself	p,p
+members-text-content	xy,1,["new"],new
+members-text-content-empty-string-clears	0
+members-clone	11,2,true,q,0,2,,true
+append-child-moves-the-children-in-order	true,[u#old,p,b,i],0,false,true,true,,
+append-child-text-and-comment-kids	3,t1t2,8,0
+append-child-empty-fragment	true,1,0
+append-child-fragment-twice	2,0
+append-child-fragment-keeps-the-fragment-usable	[p,b,"t"],0
+insert-before-a-reference	true,[i#a,p,b,i#b],0,i#a,i#b
+insert-before-null-appends	[i#a,p,b]
+insert-before-the-first-child	[p,b,i#a],null
+insert-before-empty-fragment	true,[i#a]
+insert-before-a-reference-that-is-not-a-child	NotFoundError,1,0
+insert-before-a-reference-inside-the-fragment	NotFoundError,2,0
+replace-child-with-a-fragment	true,[i#a,p,b,i#c],0,,false,p,b
+replace-child-with-an-empty-fragment	true,[i#a],
+replace-child-only-child	[p,b,i]
+replace-child-with-a-fragment-not-a-child	NotFoundError,1,1
+replace-child-in-a-fragment	[p,u,u,i],0,
+append-and-prepend-with-a-fragment	[s,"x",i#a,"t",p,b,u]
+append-a-fragment-only	[i#a,p,b]
+append-two-fragments-and-an-empty-one	[p,b]
+append-the-same-fragment-twice	[p,b]
+fragment-into-a-fragment	[u,p,b,i],0
+fragment-into-itself	HierarchyRequestError,1
+fragment-into-its-own-child	HierarchyRequestError,1,0
+fragment-into-text-node	HierarchyRequestError,1
+moving-an-element-of-a-fragment-out	[p],[b]
+kids-root-follows-the-insert	true,true,true,true
+kids-are-queryable-after-insert	,p#late,1
+mutation-append-child-is-one-record	childList div#host +[p,b,i] -[] p=u#old n=null
+mutation-insert-before-is-one-record	childList div#host +[p,b] -[] p=i#a n=i#b
+mutation-replace-child-is-one-record	childList div#host +[p,b] -[u#old] p=i#a n=i#c
+mutation-replace-child-with-empty-fragment	childList div#host +[] -[u#old] p=i#a n=i#c
+mutation-append-with-a-fragment-is-one-record	childList div#host +["t",p,b,u] -[] p=null n=null
+mutation-prepend-with-a-fragment-is-one-record	childList div#host +[p,b,"x"] -[] p=null n=i#a
+mutation-empty-fragment-no-record	
+mutation-the-fragment-itself-is-observed	childList #document-fragment +[] -[p,b] p=null n=null | childList div#host +[p,b] -[] p=null n=null
+mutation-subtree-from-the-fragment	childList p +[b] -[] p=null n=null | childList #document-fragment +[i] -[] p=p n=null
+mutation-subtree-observer-on-host-sees-kids	childList div#host +[p,b] -[] p=null n=null | childList p +[i] -[] p=null n=null
+mutation-moving-from-an-observed-parent	childList div#host +[p#p,b#b] -[] p=null n=null
+layout-sees-inserted-kids	block,true
+form-controls-in-a-fragment	v,1
+child-node-shape	function,0,function,false,false,function,0,function,false,false,function,0,function,false,false
+child-node-before-with-a-fragment	,[i#a,p,b,"t",u,i#b]
+child-node-after-with-a-fragment	[i#a,p,b,"t",i#b,s]
+child-node-replace-with-a-fragment	[i#a,p,b,"t",i#c],
+child-node-replace-with-nothing-removes	[i#a]
+child-node-with-itself-in-the-list	[i#a,"y",u#b,i#c,"x"]
+child-node-without-a-parent-does-nothing	,0
+child-node-in-a-fragment	[p,u,i,"t",b]
+child-node-text-node	[b,"x",p]
+mutation-child-node-replace-with-is-one-record	childList div#host +[p,b,"t"] -[u#old] p=i#a n=i#c
+mutation-child-node-before-is-one-record	childList div#host +[p,b,"t"] -[] p=i#a n=u#old
+tree-walker-on-a-fragment	p,p,i,b
