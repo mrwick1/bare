@@ -3490,7 +3490,7 @@ What runs (`browser_xhr.rs`): the object follows the XHR Standard on the network
 - Globals: four lazy accessors, like `AbortSignal`. A realm that never reads them makes no prototype, no function and no object.
 - GC: the side tables are pruned at `collect`. An XHR object keeps its `upload` object and its cached response alive. `Dom::trace` skips the XHR table while no XHR object exists.
 
-Gates (`Unsupported`, before anything changes): `open` with `async = false`, a user name or a password, `responseType = "document"`, a Document body, a Blob or FormData body (as for `fetch`), a method other than GET and POST (`bare_net::http::Method` has two), another origin.
+Gates (`Unsupported`, before anything changes): `open` with `async = false`, a user name or a password, `responseType = "document"`, a Document body, a Blob or FormData body (as for `fetch`), a token method or a lower-case `patch` (`bare_net::http::Method` has seven), another origin.
 
 Deviations from Chrome: `timeout` is checked when the reply arrives, because the blocking read cannot be stopped, so a late reply is a `timeout` and not a `load`. `statusText` is the standard phrase of the code and not the phrase of the server (the client drops it). `withCredentials` is stored only, as there is no cookie jar. `fetch` with a URLSearchParams body now sends `application/x-www-form-urlencoded;charset=UTF-8`, as the standard says (this shared code is used by both).
 
@@ -3526,3 +3526,22 @@ Checks: 79 cases in `tools/fixtures/ui/range-cases.txt` match Chrome 155 (`node 
 Cost: `perf stat -e instructions:u`, minimum of 3 runs, main c376437 (with PR #160) against this build, the same 52 rows as in the observer section. All below +0.5%. The worst is `loader_load mixed 1` at +0.17% (18,035,243 to 18,066,160), then `loader_load dynamic 100` +0.13% and `browser_load event 100` +0.12%. Startup is +54 instructions (2,745,040 to 2,745,094). `HTMLElement` `innerText`, `offsetParent`, `offsetTop`, `offsetLeft` and `click()` already ran from the previous section; `offsetWidth` and `offsetHeight` existed before.
 
 Not tested: the live staging login on this build, a range over a 100,000-node tree, `toString` of a very large range under the step bound, and a perf row that uses ranges at 1x, 10x, 100x (no load example was added for this API).
+
+## HTTP methods
+
+Problem: the staging app uses `method:"PUT"` 28 times, `"DELETE"` 29, `"PATCH"` 5 and `"HEAD"` 4, and `bare_net::http::Method` had `Get` and `Post` only.
+
+What runs: `Method` has `Get`, `Post`, `Put`, `Patch`, `Delete`, `Head` and `Options`. `fetch`, `new Request` and `XMLHttpRequest` use the same `wire_method`, so there is one path.
+
+- Body: PUT, PATCH, DELETE and OPTIONS send their body with `Content-Length`. POST and PUT without a body send `Content-Length: 0`. PATCH, DELETE and OPTIONS without a body send no length. Chrome does the same (the task text said PATCH sends `0`; Chrome and the Fetch Standard do not, and the fixture follows Chrome). A body on GET or HEAD is a `TypeError` in `fetch` and is ignored by `XMLHttpRequest.send`. The client refuses it as well.
+- HEAD: `send` sets the framing of the reply to "no body" whatever `Content-Length` says, in `get`, `send` and `send_stream`. The connection goes back to the idle list, and a GET after it reads right. 204 and 304 had no body before this change. HEAD counts as safe: the client may send it again on a new connection, as GET.
+- Names: `put`, `delete`, `get`, `head`, `options` and `post` become upper case. `patch` stays as written. The error for forbidden `CONNECT`, `TRACE` and `TRACK` was already there (`TypeError` in `fetch`, `SecurityError` in `open`).
+- Redirects: 301 and 302 turn a POST into a GET and drop the body and the body headers. 303 turns every method but GET and HEAD into a GET. 307 and 308 keep the method and the body. The same rule is in `Client::send` and in the `fetch` queue.
+- Gates (`Unsupported`): a token method such as `FOO`, and a lower-case `patch` (the enum cannot hold it, and a wrong wire form is worse than a gate).
+- CORS: there is no CORS and no preflight. Every request to another origin is `Unsupported` before a socket, whatever the method, so a non-simple method needs no preflight in this build. `docs/staging-network.md` does not say if the API host is another origin (open point at the end of that file). If it is, `fetch` needs CORS with a preflight (`OPTIONS` with `Access-Control-Request-Method` and `-Headers`, and a check of `Allow-Origin`, `-Methods`, `-Headers` and `-Credentials`) as a separate topic.
+
+Chrome cases: `tools/ui/chrome_methods.mjs` runs `tools/fixtures/ui/methods-cases.txt` (39 cases) in headless Chrome against a raw TCP server and records the request line, `Content-Length`, `Content-Type` and body of each request in `methods-expected.txt`. The Rust test `the_methods_send_what_chrome_sends` runs the same cases and compares. 38 match; `patch-lower` is the gate above.
+
+Rust tests: `each_method_sends_its_exact_bytes`, `a_head_reply_has_no_body_and_the_connection_stays_in_step`, `every_method_follows_every_redirect_code_like_fetch` (net); the HEAD, forbidden, body-on-GET, cross-origin and Chrome tests (fetch); `each_method_runs_and_the_forbidden_ones_are_a_security_error` (XHR).
+
+Cost: `perf stat -e instructions:u`, minimum of 3 runs, main 71ed495 against this build, each in its own `CARGO_TARGET_DIR` under `/data/bare-tmp`. 23 rows: `fetch_load` (8), `loader_load` (5), `browser_load` (8), `xhr_load` (2). The worst is `loader_load mixed 1` at +0.084% (18,075,497 to 18,090,754). The lowest is `browser_load event 1` at -0.009%. All are below +0.5%.

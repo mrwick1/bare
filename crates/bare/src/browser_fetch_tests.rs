@@ -362,7 +362,8 @@ fn response_constructor_request_and_clone() {
         assert_eq!(js(&mut b, "new Request(a)"), "throw:TypeError:Cannot construct a Request with a Request object that has already been used");
         // Gates.
         for (src, what) in [
-            ("new Request('/x', {method:'PUT'}); fetch(new Request('/x', {method:'PUT'}))", "fetch method other than GET and POST"),
+            ("new Request('/x', {method:'FOO'}); fetch(new Request('/x', {method:'FOO'}))", "fetch method other than GET, POST, PUT, PATCH, DELETE, HEAD and OPTIONS"),
+            ("fetch('/x', {method:'patch'})", "fetch method other than GET, POST, PUT, PATCH, DELETE, HEAD and OPTIONS"),
             ("new Request('/x', {mode:'no-cors'})", "fetch mode: no-cors (opaque responses)"),
             ("new Request('/x', {redirect:'manual'})", "fetch redirect: manual (opaque redirect responses)"),
             ("new Request('/x', {integrity:'sha256-x'})", "fetch option integrity"),
@@ -881,5 +882,91 @@ fn an_async_headers_walk_survives_collection_without_the_source_global() {
         b.collect(&[]).unwrap();
         b.drain().unwrap();
         assert_eq!(js(&mut b, "seen"), "a1b2c3");
+    });
+}
+
+const METHOD_CASES: &str = include_str!("../../../tools/fixtures/ui/methods-cases.txt");
+const METHOD_EXPECTED: &str = include_str!("../../../tools/fixtures/ui/methods-expected.txt");
+
+/// A server for the method cases. `/rNNN` answers NNN with `Location: /t`, `/empty` answers 204, and HEAD gets the length of "ok" and no body.
+fn method_server() -> Srv {
+    serve(|r| {
+        let code = r.path.strip_prefix("/r").and_then(|c| c.parse::<u16>().ok());
+        match (code, r.path.as_str()) {
+            (Some(c), _) => reply(c, &[("Location", "/t")], b""),
+            (_, "/empty") => reply(204, &[], b""),
+            _ if r.method == "HEAD" => Reply { raw: b"HTTP/1.1 200 X\r\nContent-Type: text/plain\r\nContent-Length: 2\r\n\r\n".to_vec(), close: false },
+            _ => reply(200, &[("Content-Type", "text/plain")], b"ok"),
+        }
+    })
+}
+
+#[test]
+fn the_methods_send_what_chrome_sends() {
+    big(|| {
+        let srv = method_server();
+        // A case that needs a token method or a lower-case `patch` on the wire: `Unsupported` here, so no comparison.
+        let skip = ["patch-lower"];
+        let expected: std::collections::HashMap<&str, &str> = METHOD_EXPECTED.lines().filter_map(|l| l.split_once('\t')).collect();
+        let mut bad = Vec::new();
+        for (name, src) in METHOD_CASES.lines().filter(|l| !l.is_empty() && !l.starts_with('#')).filter_map(|l| l.split_once('\t')) {
+            if skip.contains(&name) {
+                continue;
+            }
+            let before = srv.recs().len();
+            let mut b = at(srv.port);
+            let script = format!("var out = []; (function () {{ try {{ return ({src}); }} catch (e) {{ return Promise.reject(e); }} }})().then(function (v) {{ out.push('ok:' + v); }}, function (e) {{ out.push(e.name); }});");
+            let r = go(&mut b, &script);
+            let wire: Vec<String> = srv.recs()[before..]
+                .iter()
+                .map(|q| format!("{};{};{};{}", format!("{} {}", q.method, q.path).trim_end(), q.header("content-length").join(""), q.header("content-type").join(""), String::from_utf8_lossy(&q.body)))
+                .collect();
+            let got = format!("{r}\t{}", wire.join(" || "));
+            let want = expected.get(name).expect(name);
+            if got != *want {
+                bad.push(format!("{name}: got {got:?}, Chrome {want:?}"));
+            }
+        }
+        assert!(bad.is_empty(), "{}", bad.join("\n"));
+    });
+}
+
+#[test]
+fn a_head_reply_has_no_body_and_the_next_request_on_the_connection_reads_right() {
+    big(|| {
+        let srv = method_server();
+        let mut b = at(srv.port);
+        let r = go(&mut b, "var out = []; fetch('/a', {method:'HEAD'}).then(function (r) { out.push(r.status, r.headers.get('content-length')); return r.text(); }).then(function (t) { out.push('[' + t + ']'); return fetch('/b'); }).then(function (r) { return r.text(); }).then(function (t) { out.push(t); });");
+        assert_eq!(r, "200|2|[]|ok");
+        assert_eq!(srv.conns.load(SeqCst), 1, "one connection for both");
+    });
+}
+
+#[test]
+fn a_forbidden_method_is_a_type_error_and_nothing_is_sent() {
+    big(|| {
+        let srv = method_server();
+        let mut b = at(srv.port);
+        for m in ["CONNECT", "connect", "TRACE", "Track"] {
+            assert_eq!(js(&mut b, &format!("new Request('/a', {{method:'{m}'}})")), format!("throw:TypeError:'{m}' HTTP method is unsupported"));
+        }
+        assert_eq!(js(&mut b, "new Request('/a', {method:'GET', body:'x'})"), "throw:TypeError:Request with GET/HEAD method cannot have body.");
+        assert_eq!(js(&mut b, "new Request('/a', {method:'head', body:'x'})"), "throw:TypeError:Request with GET/HEAD method cannot have body.");
+        assert_eq!(b.pending_fetches(), 0);
+        assert!(srv.recs().is_empty());
+    });
+}
+
+#[test]
+fn a_non_simple_cross_origin_request_is_refused_before_any_socket() {
+    // There is no CORS (and so no preflight) yet: every cross-origin request is `Unsupported`, whatever the method.
+    big(|| {
+        let (a, other) = (method_server(), method_server());
+        let mut b = at(a.port);
+        for m in ["PUT", "PATCH", "DELETE", "OPTIONS", "HEAD"] {
+            let r = js(&mut b, &format!("fetch('http://127.0.0.1:{}/x', {{method:'{m}'}})", other.port));
+            assert_eq!(r, "unsupported:fetch to another origin (CORS is not implemented)", "{m}");
+        }
+        assert_eq!((other.conns.load(SeqCst), other.recs().len()), (0, 0));
     });
 }
