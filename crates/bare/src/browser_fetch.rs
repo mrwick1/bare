@@ -361,7 +361,26 @@ struct Wire {
     queued: Option<std::time::Instant>,
 }
 
+/// What `run_one` needs to send a request: borrowed from a `Pending` or from a `Wire`.
+struct Parts<'a> {
+    method: Method,
+    url: &'a Url,
+    headers: &'a [(String, String)],
+    body: Option<&'a [u8]>,
+    redirect: Redirect,
+}
+
+impl Wire {
+    fn parts(&self) -> Parts<'_> {
+        Parts { method: self.method, url: &self.url, headers: &self.headers, body: self.body.as_deref(), redirect: self.redirect }
+    }
+}
+
 impl Pending {
+    fn parts(&self) -> Parts<'_> {
+        Parts { method: self.method, url: &self.url, headers: &self.headers, body: self.body.as_ref().map(|b| b.as_slice()), redirect: self.redirect }
+    }
+
     fn wire(&self) -> Wire {
         Wire { method: self.method, url: dup(&self.url), headers: self.headers.clone(), body: self.body.as_deref().cloned(), redirect: self.redirect, queued: self.queued }
     }
@@ -1661,14 +1680,13 @@ pub(crate) enum Outcome {
     TooBig,
 }
 
-fn run_one(client: &mut Client, lim: &FetchLimits, task: &Wire, diag: &mut Vec<String>) -> Outcome {
-    let first_origin = dup(&task.url);
-    let (mut method, mut url, mut headers, mut body) = (task.method, dup(&task.url), task.headers.clone(), task.body.clone());
+fn run_one(client: &mut Client, lim: &FetchLimits, first: Parts<'_>, diag: &mut Vec<String>) -> Outcome {
+    let first_origin = dup(first.url);
+    let (mut method, mut url, mut headers, mut body) = (first.method, dup(first.url), first.headers.to_vec(), first.body);
     let mut redirected = false;
     for hop in 0..=lim.max_redirects {
         let wire: Vec<(&str, &str)> = headers.iter().map(|(n, v)| (n.as_str(), v.as_str())).collect();
-        let bytes: &[u8] = body.as_deref().unwrap_or(&[]);
-        let req = NetRequest { method, url: &url, headers: &wire, body: bytes };
+        let req = NetRequest { method, url: &url, headers: &wire, body: body.unwrap_or(&[]) };
         let resp = match client.send_once(&req, lim.max_response_body) {
             Ok(r) => r,
             Err(e) if e.to_string() == "the reply is too big" => return Outcome::TooBig,
@@ -1678,7 +1696,7 @@ fn run_one(client: &mut Client, lim: &FetchLimits, task: &Wire, diag: &mut Vec<S
         if matches!(resp.status, 301 | 302 | 303 | 307 | 308)
             && let Some(location) = resp.headers.iter().find(|(n, _)| n == "location").map(|(_, v)| v.clone())
         {
-            if task.redirect == Redirect::Error {
+            if first.redirect == Redirect::Error {
                 return Outcome::Failed("redirect refused (redirect: error)");
             }
             let Ok(target) = url.join(&location) else { return Outcome::Failed("redirect to an invalid URL") };
@@ -1781,17 +1799,19 @@ impl Browser {
 
     /// Start the I/O of the first queued requests on worker threads, so that they run together. They settle in the order of the queue,
     /// as before: only the waiting is shared. At most `MAX_WORKERS` run at once, and the queue is not scanned further.
-    /// A request that is not a GET or a HEAD may change the server. It starts only when all before it are done, and nothing after it
-    /// starts before it is done: the server sees these requests in the order of the script, as before.
+    /// A request that is not a GET or a HEAD may change the server. It runs when all before it are done, on the thread that settles
+    /// it (a worker gains nothing: nothing after it starts before it is done), so the server sees these requests in the order of the script.
     fn start_queued(&self) {
         if self.dom.fetch.st.borrow().queue.len() < 2 {
             // One request alone gains nothing from a worker thread: this thread makes it.
             return;
         }
         let (lim, client) = (self.dom.fl(), self.dom.fetch.client.borrow());
-        for (i, p) in self.dom.fetch.st.borrow_mut().queue.iter_mut().take(MAX_WORKERS).enumerate() {
-            let safe = p.method.safe();
-            if !safe && i > 0 {
+        if !client.parallel_pays() {
+            return;
+        }
+        for p in self.dom.fetch.st.borrow_mut().queue.iter_mut().take(MAX_WORKERS) {
+            if !p.method.safe() {
                 break;
             }
             if p.started.is_none() {
@@ -1801,11 +1821,8 @@ impl Browser {
                         bare_net::trace::wanted(t);
                     }
                     let mut diag = Vec::new();
-                    (run_one(client, &lim, &wire, &mut diag), diag)
+                    (run_one(client, &lim, wire.parts(), &mut diag), diag)
                 }));
-            }
-            if !safe {
-                break;
             }
         }
     }
@@ -1832,11 +1849,11 @@ impl Browser {
                 // A lost worker is a network error.
                 Some(t) => t.wait().unwrap_or((Outcome::Failed("network error"), Vec::new())),
                 None => {
-                    let (mut diag, wire) = (Vec::new(), task.wire());
-                    if let Some(t) = wire.queued {
+                    let mut diag = Vec::new();
+                    if let Some(t) = task.queued {
                         bare_net::trace::wanted(t);
                     }
-                    (run_one(&mut dom.fetch.client.borrow_mut(), &lim, &wire, &mut diag), diag)
+                    (run_one(&mut dom.fetch.client.borrow_mut(), &lim, task.parts(), &mut diag), diag)
                 }
             });
             {

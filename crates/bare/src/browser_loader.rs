@@ -817,24 +817,27 @@ impl Net {
         Net { client, started: HashMap::new() }
     }
 
-    fn key(target: &resources::Target) -> String {
-        format!("{:?} {}", target.expect, target.url)
+    fn key(expect: Expect, url: &Url) -> String {
+        format!("{expect:?} {url}")
     }
 
-    /// Start the download of `target` on a worker thread. Nothing happens when `WINDOW` downloads wait, or this one runs already.
-    fn start(&mut self, target: &resources::Target, lim: &Limits, deadline: Instant, retained: usize) {
-        let key = Net::key(target);
+    /// Start the download of `url` on a worker thread. Nothing happens when `WINDOW` downloads wait, or this one runs already.
+    fn start(&mut self, expect: Expect, url: &Url, lim: &Limits, deadline: Instant, retained: usize) {
+        let key = Net::key(expect, url);
         if self.started.len() >= WINDOW || self.started.contains_key(&key) {
             return;
         }
-        let url = Url { scheme: target.url.scheme, host: target.url.host.clone(), port: target.url.port, path: target.url.path.clone() };
-        let (target, lim) = (resources::Target { expect: target.expect, url }, lim.clone());
+        let url = Url { scheme: url.scheme, host: url.host.clone(), port: url.port, path: url.path.clone() };
+        let (target, lim) = (resources::Target { expect, url }, lim.clone());
         self.started.insert(key, self.client.spawn(move |client| resources::fetch(client, &target, &lim, deadline, retained)));
     }
 
     /// The result for `target`: the download that was started, or a new one that this thread waits for.
     fn fetch(&mut self, target: &resources::Target, lim: &Limits, deadline: Instant, retained: usize) -> Result<resources::Resource, LoadError> {
-        match self.started.remove(&Net::key(target)) {
+        if self.started.is_empty() {
+            return resources::fetch(&mut self.client, target, lim, deadline, retained);
+        }
+        match self.started.remove(&Net::key(target.expect, &target.url)) {
             // The text counts against the total cap now, with what the page keeps now (it was read with the room of the time it started).
             Some(task) => match task.wait() {
                 Some(Ok(r)) if r.text.len() > lim.max_total_bytes.saturating_sub(retained) => Err(LoadError::TotalTooLarge),
@@ -1153,39 +1156,41 @@ impl Run<'_> {
     /// Start the downloads that the page will need, while fewer than `WINDOW` wait: first the files of the parsed document, in its order,
     /// then the dynamic scripts in the queue. A script is taken when it is its turn to run, so the order of the scripts does not change.
     /// Nothing starts that the page would refuse to load, and no more than the fetch budget allows. One download alone gains nothing from
-    /// a worker thread: the page thread makes it when its turn comes.
+    /// a worker thread: the page thread makes it when its turn comes. So does every download while the server has been quick (`Client::parallel_pays`).
     fn prefetch(&mut self) {
-        let lim = self.lim.resources.clone();
+        if !self.net.client.parallel_pays() {
+            return;
+        }
+        let lim = &self.lim.resources;
         let room = WINDOW.saturating_sub(self.net.started.len()).min(lim.max_fetches.saturating_sub(self.res.fetches + self.net.started.len()));
         let allowed = |https_only: bool, u: &Url| !(https_only && u.scheme == bare_url::Scheme::Http);
-        let copy = |u: &Url| Url { scheme: u.scheme, host: u.host.clone(), port: u.port, path: u.path.clone() };
         let mut cursor = self.cursor;
-        let mut todo = Vec::new();
+        let mut todo: Vec<(Expect, &Url)> = Vec::new();
         while cursor < self.disc.targets.len() && todo.len() < room {
             let t = &self.disc.targets[cursor];
             if allowed(self.https_only, &t.url) {
-                todo.push(resources::Target { expect: t.expect, url: copy(&t.url) });
+                todo.push((t.expect, &t.url));
             }
             cursor += 1;
         }
         let preloads = self.dom.scripts.preloads.borrow();
-        for e in self.dom.scripts.external.borrow().iter().take(WINDOW) {
+        let external = self.dom.scripts.external.borrow();
+        for e in external.iter().take(WINDOW) {
             if let Ext::Fetch(_, u) = e && todo.len() < room && allowed(self.https_only, u) && !preloads.has_script(u) {
-                todo.push(resources::Target { expect: Expect::Script, url: copy(u) });
+                todo.push((Expect::Script, u));
             }
         }
-        drop(preloads);
         if todo.len() + self.net.started.len() < 2 {
             return;
         }
         self.cursor = cursor;
         let kept = self.kept();
-        for t in &todo {
+        for (expect, url) in todo {
             let mut lim = lim.clone();
-            if t.expect == Expect::Style {
+            if expect == Expect::Style {
                 lim.max_resource_bytes = lim.max_resource_bytes.min(sheets::MAX_BODY);
             }
-            self.net.start(t, &lim, self.deadline, kept);
+            self.net.start(expect, url, &lim, self.deadline, kept);
         }
     }
 

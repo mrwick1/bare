@@ -74,13 +74,13 @@ impl Default for Clock {
 }
 
 /// A record that starts now (None when tracing is off). It takes the wait of `wanted`.
-pub fn begin(url: &str) -> Option<Box<Rec>> {
+pub fn begin(url: impl FnOnce() -> String) -> Option<Box<Rec>> {
     if !on() {
         return None;
     }
     let now = Instant::now();
     let wait = WANTED.with(|w| w.take()).or(*PAGE.lock().unwrap()).map_or(0, |t| now.saturating_duration_since(t).as_micros() as u64);
-    Some(Box::new(Rec { url: url.to_string(), at: now.duration_since(epoch()).as_micros() as u64, wait, ..Rec::default() }))
+    Some(Box::new(Rec { url: url(), at: now.duration_since(epoch()).as_micros() as u64, wait, ..Rec::default() }))
 }
 
 static PAGE: Mutex<Option<Instant>> = Mutex::new(None);

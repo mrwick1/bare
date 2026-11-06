@@ -454,17 +454,10 @@ impl Client {
     fn start(&mut self, url: &Url, plan: &Plan, conditions: &str) -> Result<(Response, Body), Error> {
         // The idle list is keyed by scheme too, so a plain connection never serves https.
         let server = (url.scheme, url.host.clone(), url.port);
-        let idle = {
-            let mut pool = self.idle.lock().unwrap();
-            let list = pool.get_mut(&server);
-            let last = list.and_then(Vec::pop);
-            if pool.get(&server).is_some_and(Vec::is_empty) {
-                pool.remove(&server);
-            }
-            last
-        };
+        // An empty list stays in the map: the next connection that goes idle needs it, and the map has one key for each server.
+        let idle = self.idle.lock().unwrap().get_mut(&server).and_then(Vec::pop);
         let get = plan.method.safe();
-        let mut rec = trace::begin(&format!("{}://{}:{}{}", url.scheme, url.host, url.port, url.path));
+        let mut rec = trace::begin(|| format!("{}://{}:{}{}", url.scheme, url.host, url.port, url.path));
         let (mut stream, reused) = match idle {
             // `pop` takes the connection out of the list. While we use it, nobody else can.
             Some((stream, since)) if since.elapsed() < MAX_IDLE && (get || alive(&stream)) => (stream, true),
@@ -476,6 +469,7 @@ impl Client {
         };
 
         let mut clock = trace::Clock::new();
+        let mut sent = Instant::now();
         let mut result = send(&mut stream, url, plan, conditions);
         if result.is_err() && reused && get {
             // A reused connection can fail when the server closed it while it was idle.
@@ -484,9 +478,13 @@ impl Client {
             // Never for a POST: the server may have got the request and done what it says, and a second one would do it twice.
             stream = self.connect(url, &mut rec)?;
             clock = trace::Clock::new();
+            sent = Instant::now();
             result = send(&mut stream, url, plan, conditions);
         }
         let (head, leftover) = result?;
+        // The clock of the body starts where the head ended.
+        let head_end = Instant::now();
+        self.note_head(head_end - sent);
         if let Some(r) = &mut rec {
             r.ttfb = clock.lap();
             r.reused = reused;
@@ -502,7 +500,7 @@ impl Client {
             return Err("the reply is too big".into());
         }
         let reusable = !head.response.close && head.framing != Framing::UntilClose;
-        let mut live = Live::new(stream, leftover, head.framing, reusable.then(|| (self.idle.clone(), server)));
+        let mut live = Live::new(stream, leftover, head.framing, reusable.then(|| (self.idle.clone(), server)), head_end);
         live.rec = rec;
         Ok((head.response, Body(Source::Live(Box::new(live)))))
     }
@@ -929,9 +927,9 @@ impl Write for Stream {
 }
 
 impl Live {
-    fn new(stream: Stream, leftover: Vec<u8>, framing: Framing, pool: Option<(Pool, Server)>) -> Live {
+    fn new(stream: Stream, leftover: Vec<u8>, framing: Framing, pool: Option<(Pool, Server)>, start: Instant) -> Live {
         let left = if let Framing::Length(n) = framing { n } else { 0 };
-        Live { stream, buf: leftover, at: 0, framing, left, chunk: Chunk::Size, line: Vec::new(), given: 0, start: Instant::now(), pool, done: false, rec: None }
+        Live { stream, buf: leftover, at: 0, framing, left, chunk: Chunk::Size, line: Vec::new(), given: 0, start, pool, done: false, rec: None }
     }
 
     /// Make sure that there are bytes in `buf[at..]`. When there are none after this, the connection has closed.
@@ -1166,7 +1164,7 @@ mod tests {
             Err(e) => return Err(e.to_string()),
         };
         let mut response = head.response;
-        let mut body = Body(Source::Live(Box::new(Live::new(stream, leftover, head.framing, None))));
+        let mut body = Body(Source::Live(Box::new(Live::new(stream, leftover, head.framing, None, Instant::now()))));
         let mut bytes = Vec::new();
         match body.read_to_end(&mut bytes) {
             Err(e) if e.to_string().contains("stopped answering") => return Ok(None),

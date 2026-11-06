@@ -4,18 +4,29 @@
 //!
 //! - At most `MAX_WORKERS` run at once for a client and all its forks (`Client::fork`). Chrome opens 6 connections for each
 //!   server with HTTP/1.1, and so do we. More jobs wait in a queue, which is not bounded here: the caller bounds what it starts.
-//! - A worker thread ends when the queue is empty. Nothing runs, and no thread is kept, when the page asks for nothing.
+//! - A worker thread waits `PARK` for a job, then ends. A parked worker uses no CPU. A page that asks for files a few at a time
+//!   starts at most `MAX_WORKERS` threads, not one for each file.
 //! - The workers use the connection pool of the client: a connection that a worker is done with serves the next request.
+//! - Callers use workers only after a reply was slow to start (`parallel_pays`): on a fast link the thread costs more than it saves.
 //! - At most `MAX_CONNECTING` connections are set up at once (`Gate`). A burst of new connections to one server loses SYN packets
 //!   on staging, and each lost one costs a retry after about 1 s. Measured there: 6 at once, 2 to 4 were late; 2 at once, none.
 //! - A waiting caller sleeps on a condition variable. Nothing polls.
 
 use crate::http::Client;
 use std::collections::VecDeque;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
+use std::time::Duration;
 
 /// Worker threads at once for one client and its forks.
 pub const MAX_WORKERS: usize = 6;
+
+/// How long a worker with no job waits for one before its thread ends.
+const PARK: Duration = Duration::from_secs(1);
+
+/// A reply that takes this long to start (request sent to the first byte) means that the server is far: files asked together gain by running together.
+/// On a fast link (loopback, a LAN) a worker thread costs more than the round trip that it hides.
+pub const SLOW_HEAD: Duration = Duration::from_millis(10);
 
 /// Connections that may be set up (DNS, TCP and TLS) at once for one client and its forks.
 pub const MAX_CONNECTING: usize = 2;
@@ -25,6 +36,10 @@ type Job = Box<dyn FnOnce(&mut Client) + Send>;
 #[derive(Default)]
 pub struct Workers {
     state: Mutex<State>,
+    /// A parked worker waits on it for a job.
+    wake: Condvar,
+    /// A reply took `SLOW_HEAD` or more to start. Set once, for this client and its forks.
+    slow: AtomicBool,
     pub(crate) connecting: Gate,
 }
 
@@ -59,6 +74,8 @@ impl Drop for Inside<'_> {
 struct State {
     queue: VecDeque<Job>,
     running: usize,
+    /// Workers parked on `wake`.
+    parked: usize,
 }
 
 enum Slot<R> {
@@ -108,6 +125,19 @@ impl<R> Drop for Finish<R> {
 }
 
 impl Client {
+    /// Has a reply been slow to start (`SLOW_HEAD`)? Then running requests together pays. Callers that choose between a worker and
+    /// their own thread read it; `spawn` does not.
+    pub fn parallel_pays(&self) -> bool {
+        self.workers.slow.load(Ordering::Relaxed)
+    }
+
+    /// Note how long a reply took to start.
+    pub(crate) fn note_head(&self, took: Duration) {
+        if took >= SLOW_HEAD && !self.parallel_pays() {
+            self.workers.slow.store(true, Ordering::Relaxed);
+        }
+    }
+
     /// Run `job` on a worker thread, with a client that shares the pool of this one. Jobs start in the order given.
     pub fn spawn<R: Send + 'static>(&self, job: impl FnOnce(&mut Client) -> R + Send + 'static) -> Task<R> {
         let task = Arc::new((Mutex::new(Slot::Waiting), Condvar::new()));
@@ -118,7 +148,9 @@ impl Client {
         });
         let mut st = self.workers.state.lock().unwrap();
         st.queue.push_back(job);
-        if st.running < MAX_WORKERS {
+        if st.parked >= st.queue.len() {
+            self.workers.wake.notify_one();
+        } else if st.running < MAX_WORKERS {
             st.running += 1;
             let mut worker = self.fork();
             // 8 MiB of address space, as the thread of the page: the TLS code needs room. The pages are not used until they are needed.
@@ -135,12 +167,20 @@ impl Client {
     }
 
     fn work(&mut self) {
+        let workers = self.workers.clone();
         loop {
             let job = {
-                let mut st = self.workers.state.lock().unwrap();
-                match st.queue.pop_front() {
-                    Some(job) => job,
-                    None => {
+                let mut st = workers.state.lock().unwrap();
+                loop {
+                    if let Some(job) = st.queue.pop_front() {
+                        break job;
+                    }
+                    // No job: wait a little for the next one, so that a page that asks for files a few at a time does not start a thread for each.
+                    st.parked += 1;
+                    let (guard, timeout) = workers.wake.wait_timeout(st, PARK).unwrap();
+                    st = guard;
+                    st.parked -= 1;
+                    if timeout.timed_out() && st.queue.is_empty() {
                         st.running -= 1;
                         return;
                     }
@@ -182,6 +222,10 @@ mod tests {
 
     /// A server that waits `LATENCY` before each reply. Gives its port and the number of connections it accepted.
     fn slow_server() -> (u16, Arc<AtomicUsize>) {
+        server_after(LATENCY)
+    }
+
+    fn server_after(latency: Duration) -> (u16, Arc<AtomicUsize>) {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
         let accepted = Arc::new(AtomicUsize::new(0));
@@ -202,7 +246,7 @@ mod tests {
                         let at = seen.windows(4).position(|w| w == b"\r\n\r\n").unwrap() + 4;
                         let path = String::from_utf8_lossy(seen[4..].split(|&b| b == b' ').next().unwrap()).to_string();
                         seen.drain(..at);
-                        std::thread::sleep(LATENCY);
+                        std::thread::sleep(latency);
                         let body = format!("body of {path}");
                         if stream.write_all(format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{body}", body.len()).as_bytes()).is_err() {
                             return;
@@ -271,7 +315,25 @@ mod tests {
     }
 
     #[test]
-    fn no_worker_thread_stays_when_the_queue_is_empty() {
+    fn parallel_pays_after_a_slow_reply_and_not_after_a_quick_one() {
+        let mut quick = Client::new();
+        quick.get(&url(server_after(Duration::ZERO).0, "/a")).unwrap();
+        assert!(!quick.parallel_pays());
+        let mut slow = Client::new();
+        slow.get(&url(slow_server().0, "/a")).unwrap();
+        assert!(slow.parallel_pays());
+        assert!(slow.fork().parallel_pays(), "a fork shares it");
+    }
+
+    #[test]
+    fn jobs_that_come_one_by_one_run_on_one_parked_thread() {
+        let client = Client::new();
+        let ids: std::collections::HashSet<_> = (0..5).map(|_| client.spawn(|_| std::thread::current().id()).wait().unwrap()).collect();
+        assert_eq!(ids.len(), 1);
+    }
+
+    #[test]
+    fn no_worker_thread_stays_after_the_park_time_when_the_queue_is_empty() {
         let client = Client::new();
         client.spawn(|_| 1).wait();
         let start = Instant::now();

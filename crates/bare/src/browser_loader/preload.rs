@@ -81,7 +81,7 @@ pub(crate) struct Preloads {
 impl Preloads {
     /// Is there a preload for a script at `url` (taken or not)? Then the script needs no download of its own.
     pub(super) fn has_script(&self, url: &Url) -> bool {
-        self.scripts.contains_key(&url.to_string())
+        !self.scripts.is_empty() && self.scripts.contains_key(&url.to_string())
     }
 
     /// The preloaded text for a script at `url`, once. `Err` is the reason that the preload failed.
