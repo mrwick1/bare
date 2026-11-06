@@ -341,11 +341,14 @@ fn a_limit_or_a_failed_checkpoint_stops_all_js_and_io() {
             let mut b = make(&html, &srv, 100_000, true);
             let r = load(&mut b, &srv, quick());
             assert!(matches!(&r.stop, Stop::Fatal(Fatal::Limit(l)) if l == "Steps"), "{r:?}");
-            assert_eq!(srv.total(), 0, "no I/O after the failure: {body}");
+            // The loader starts the download of /later.js at the start, before any script runs, as a preload scanner does. Nothing is
+            // taken or run after the failure: /x is never asked for, and no script of the page runs after the one that failed.
+            assert_eq!(srv.hits("/x"), 0, "no I/O after the failure: {body}");
             assert_eq!(r.fetches, 0);
             // the VM is poisoned or stopped: the realm is not asked to run more by the driver
+            let asked = srv.total();
             assert_eq!(load(&mut b, &srv, quick()).stop, r.stop);
-            assert_eq!(srv.total(), 0);
+            assert_eq!(srv.total(), asked);
             assert!(r.diagnostics.iter().any(|d| d.starts_with("fatal in ")), "{r:?}");
         }
     });

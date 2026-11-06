@@ -86,7 +86,7 @@ impl Default for SessionLimits {
 pub struct SessionConfig {
     /// The first document (http or https). A fragment is kept for `location.hash`.
     pub url: String,
-    /// Makes the client of a document (document download, script download, `fetch`: three clients each). A test passes
+    /// Makes the client of a document. The document download, the script download and `fetch` share its connections (`Client::fork`). A test passes
     /// a `Client::with_roots` factory.
     pub client: Box<dyn FnMut() -> Client>,
     /// The limits of each document. `max_time`, `max_tasks` and `max_rounds` are cut to what the session has left.
@@ -222,8 +222,8 @@ fn load_document(client: &mut Client, url: &str, body: Option<&Body>, lim: &Sess
             return Err("the time limit passed".into());
         }
         let resp = match body {
-            Some(b) => client.send_once(&Request::post(&cur, &[("Content-Type", b.content_type.as_str())], &b.bytes), lim.max_document_bytes),
-            None => client.send_once(&Request::get(&cur), lim.max_document_bytes),
+            Some(b) => bare_net::trace::blocked(|| client.send_once(&Request::post(&cur, &[("Content-Type", b.content_type.as_str())], &b.bytes), lim.max_document_bytes)),
+            None => bare_net::trace::blocked(|| client.send_once(&Request::get(&cur), lim.max_document_bytes)),
         }
         .map_err(|_| "network error".to_string())?;
         if matches!(resp.status, 301 | 302 | 303 | 307 | 308) {
@@ -364,10 +364,12 @@ impl Session {
                 Some(Next { url, body, how }) => {
                     // The old document ends here: its realm, timers and callbacks are gone before the next load starts.
                     self.browser = None;
-                    let (url, html) = match load_document(&mut (self.cfg.client)(), &url, body.as_ref(), &lim, deadline) {
+                    let mut base = (self.cfg.client)();
+                    let (url, html) = match load_document(&mut base, &url, body.as_ref(), &lim, deadline) {
                         Ok(d) => d,
                         Err(why) => return SessionStop::LoadFailed(why),
                     };
+                    bare_net::trace::mark(|| "document loaded".into(), 0);
                     let scroll = match how {
                         How::Push => {
                             self.hist.truncate(if self.hist.is_empty() { 0 } else { self.at + 1 });
@@ -390,6 +392,7 @@ impl Session {
                         return SessionStop::LoadFailed("the realm could not be made".into());
                     };
                     drop(html);
+                    bare_net::trace::mark(|| "realm made (parse + new)".into(), 0);
                     if let Some((w, h)) = self.cfg.viewport
                         && b.set_viewport(w, h).is_err() {
                         return SessionStop::LoadFailed("the viewport is invalid".into());
@@ -406,8 +409,9 @@ impl Session {
                         b.set_scroll(bare_paint::Scroll { x: scroll.0, y: scroll.1, ..Default::default() });
                     }
                     self.used.documents += 1;
-                    let client = (self.cfg.client)();
-                    let fetch = ((self.cfg.client)(), self.cfg.fetch);
+                    // The document, its scripts and its `fetch` calls share the connections and the TLS roots of one client.
+                    let client = base.fork();
+                    let fetch = (base.fork(), self.cfg.fetch);
                     let r = b.run_page(PageConfig { url, client, limits: page, fetch: Some(fetch) });
                     (b, r)
                 }

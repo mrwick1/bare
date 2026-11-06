@@ -4044,3 +4044,85 @@ Restyle (not changed): `RuleSet::compute` on 1,000 elements makes 41 allocations
 Tests: `cargo test --workspace` passes 2,469 tests, 0 fail (on main 3a60a7d plus this change).
 
 Not tested: wall time on a quiet machine (the load average was 20), a page that has more than 1,024 live style objects with writes in turn (the cache drops all blocks past the count; each write then parses again, as before this change), a `style` attribute longer than 1,024 bytes (never kept), `bare-stress` and `sheets_load` at scale 10 and 100, `form_load gates` and `sheets_load dynamic` (both fail on main fb36a74 too: "document URL is not configured" and "reads differ"), the rows at scale 100 other than those in the table, and the live staging pages.
+
+## Parallel downloads
+
+2026-11-06, archMachine, release, machine load 6 to 20 from other builds. Staging: `https://staging.app.8vox.ai` (RTT about 37 ms, HTTP/1.1 only, nginx). Tools: `BARE_NET_TRACE=1 bare --run URL` (off by default; with it off, a request reads one `OnceLock`) and `node tools/ui/chrome_load_timing.mjs URL 3` (new Chrome profile for each run, cache disabled, one load every 20 s).
+
+### Where the time went (before)
+
+`/login` has 18 requests in bare and 23 in Chrome. Per run of the main build at 4de178c (wall 1.22 s, run 1), in order of share:
+
+| Cause | Time | Share of wall |
+| --- | --- | --- |
+| 16 follow-up requests one at a time: the wait for each reply (about 37 ms each) | 616 ms | 50% |
+| The document and the first style sheet: DNS, server time and one round trip each | 237 ms | 19% |
+| Two connections (the style client opens its own): DNS, TCP, TLS | 165 ms | 13% |
+| Bodies: 584 KB, no `Accept-Encoding` (Chrome reads 264 KB) | 113 ms | 9% |
+| Parse, JS, settle (CPU 80 to 170 ms) | about 90 ms | 7% |
+
+Runs 2 and 3 are within 3 points of these. The first cause is the gap: Chrome sends the 23 requests over 7 to 9 connections together. Hypotheses from the task that the numbers did not support: DNS for each request (DNS is 1 to 2 ms), no keep-alive (16 of 18 requests reused a connection), slow TLS (about 41 ms, one round trip), the scheduler sleeping (`slept_us` is 0 to 30 ms). HTTP/2 does not apply: Chrome reports `http/1.1` for all 69 requests.
+
+### Timing, bare and Chrome (`/login`, cold)
+
+Mean per new connection for DNS, TCP and TLS; mean per request for the reply head (`ttfb`, request sent to first byte) and body. `wall` of Chrome is the `load` event; `cpu` of Chrome is all its processes since the navigation.
+
+| | wall (s), runs | requests | connections | DNS | TCP | TLS | ttfb | body | bytes | CPU (ms) |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| Chrome | 0.61, 0.67, 1.68 | 23 | 7 to 9 | 0 | 35 to 67 ms | 38 to 55 ms | 56 to 62 ms | 5 to 10 ms | 264 KB | 660 to 1700 |
+| bare before (9 runs) | 1.22, 1.25, 1.29, 1.35, 1.44, 1.50, 1.52, 1.88, 1.90 | 18 | 2 | 0.6 to 1.2 ms | 36 to 40 ms | 39 to 46 ms | 47 to 63 ms | 6 to 20 ms | 584 KB | 80 to 180 |
+| bare after (9 runs) | 0.78, 0.78, 0.86, 0.87, 0.90, 1.15, 1.88, 1.89, 1.94 | 18 | 6 | 0.2 to 11 ms | 38 to 40 ms (207 to 210 ms in the 3 runs with a lost SYN) | 41 to 51 ms | 72 to 86 ms | 13 to 20 ms | 584 KB | 90 to 200 |
+
+Median wall: before 1.44 s, after 0.90 s (best 0.78 s against 1.22 s). The 3 slow "after" runs each have one connection with a TCP connect of 1.04 to 1.07 s: a SYN that the server side did not answer, then the kernel retry after 1 s. The 9 "before" runs have none. Before, bare opened 2 connections and never lost a SYN in 9 runs; after, it opens 6 and lost one in 3 of 9 runs. Earlier, in a separate test, 6 new connections at once had 2 to 4 late and 2 at once had none; one of the 3 lost SYNs above happened with the limit of 2 at once, so the limit does not remove it. Hypothesis: the host or a firewall in front of staging limits new connections; not verified. The reply head is slower after (72 to 86 ms against 47 to 63) because 6 replies share one link. The first 6 "after" runs used an earlier build (workers always on, no wait for a job); the last 3 used the final build. Both open the same connections on staging.
+
+### The fix
+
+`crates/net/src/parallel.rs`: `Client::spawn` runs a job on one of at most 6 worker threads and gives a `Task`. `Client::fork` shares the idle connections (up to 6 for each server), the root certificates (read once, not once for each client) and the workers. At most 2 new connections are set up at once. A worker waits 1 s for a job. `Client::parallel_pays` is true after a reply took 10 ms or more to start; callers use workers only then.
+
+The loader (`browser_loader.rs`, `Net`) starts the targets of the parsed document, the dynamic scripts and the style sheets while fewer than 6 wait, and takes each result at the turn of its element. `fetch` and XHR (`browser_fetch.rs`, `start_queued`) start the first 6 queued GET and HEAD requests; another method runs alone, in order. Choices and rejected options: [decisions.md](decisions.md#parallel-downloads).
+
+Latency server (100 ms for each reply, in-process, the tests in `parallel_tests.rs` and `parallel.rs`; serial time is the bound of 100 ms for each request, not measured on the old build):
+
+| Case | Serial | Measured |
+| --- | --- | --- |
+| 12 requests of `Client::spawn` | 1.2 s | 201 ms (2 waves of 6) |
+| page with 12 parsed scripts (document and scripts) | 1.3 s | 403 ms |
+| page with 12 dynamic scripts | 1.3 s | 405 ms |
+| 12 `fetch` calls | 1.3 s | 304 ms |
+| 6 style sheets | 0.7 s | 203 ms |
+
+Script order, `defer`, `async`, load errors at their turn, the byte caps, the fetch budget and the order of POST requests are the same as before: 9 loader tests, 8 net tests.
+
+### Cost on the rows
+
+Method: `tools/js/instr.sh` (large malloc cache, minimum of 3 runs of `instructions:u`), each build in its own `CARGO_TARGET_DIR` under `/data/bare-tmp`. Main 52d5d5a against this change. Main later gained 9f0e00f (inline style code only, no loader, net or scheduler file); the rows were not run again. 59 rows: `fetch_load` (post, bytes, objects, iterate at 1x/10x/100x; upload at 1x/10x), `xhr_load` (1, 10, 100), `session_load` (chain, heavy), `loader_load` (blocking, dynamic, mixed), `scheduler_load` (timers, messages, mixed), `preload_load` (font, style, script, dups) and `sheets_load` (linked, imports), each at 1x/10x/100x. `sheets_load dynamic` fails on main 3a60a7d too (`reads differ: got r want rrrrr`), so it has no row. The range is -0.41% (`fetch_load bytes 100`) to +0.36% (`loader_load mixed 10`). All rows meet the +0.5% rule. The worst five:
+
+| Row | main | this change | change |
+| --- | --- | --- | --- |
+| `loader_load mixed 10` | 62,631,429 | 62,859,175 | +0.36% |
+| `preload_load font 100` | 91,922,614 | 92,161,903 | +0.26% |
+| `scheduler_load messages 100` | 4,529,412,246 | 4,540,871,606 | +0.25% |
+| `preload_load font 10` | 15,260,475 | 15,298,476 | +0.25% |
+| `loader_load dynamic 100` | 651,740,723 | 653,353,490 | +0.25% |
+
+What was needed to get here. A first version, with workers always on, cost +1% to +59% on the loopback loader, preload, sheets and POST rows: a thread, a task and an extra connection for each file that a zero-latency server cannot repay. These changes brought it down: workers only after a slow reply (loader rows to +0.1% to +0.4%); a POST runs on the page thread (it ran on a worker for no gain: `fetch_load post 100` went from +59% to under +0.5%); the worker waits 1 s for a job, so a page starts at most 6 threads; the request path makes no copy of the body, no trace name when tracing is off, one pool lookup, and one clock read less.
+
+### Settle: a timer that starts a frame or a message
+
+The `/calls` page of the staging dashboard (logged in as the staging admin of the vault, a new session for each load, `quiet` 1 s, real clock) took 94 to 146 rounds and 24 to 39 s on main 74b924d (before the rebase; 7 runs; one run before the settle rule ended at the 60 s budget with 247 rounds). The rounds after the first 10 (the load, about 8 s) are small: a `setInterval` of 1000 ms and one or two tasks each. Measured with a local trace of the scheduler (not in the repository): at each tick the interval queues a rendering step (`requestAnimationFrame`, 35 times in one run) and a message (`MessageChannel`, 47 times: React's scheduler). The settle rule judged the tick with "no task queued except its own re-arm", so the tick was never quiet and the page waited for the next tick for ever, until the loads of the page ended. The tick changes the DOM 0 times and queues no fetch.
+
+Fix (`browser_scheduler.rs`): the rendering step and a message do not count as work of the tick (`Sched::work`). They are judged on their own, and a noisy one (more than 8 DOM changes, or a fetch, script or traversal queued) makes all timers be judged again (`follow_up`). Cost: three counter reads and three borrows for each message, as for each timer and frame; the rows above include it (`scheduler_load messages` +0.18% to +0.24%). 4 new tests in `browser_settle_tests.rs` (a clock with a quiet frame or message settles; a noisy frame or a message that fetches does not).
+
+| Build | `/calls` rounds | wall |
+| --- | --- | --- |
+| main 74b924d | 94, 95, 96, 97, 143, 144, 146 | 24.1 to 39.5 s |
+| main plus the scheduler fix only | 13, 15, 15 | 5.8 to 6.6 s |
+| this change (parallel downloads and the scheduler fix) | 10, 10, 11 | 2.3 to 2.9 s |
+
+(The first version of the fix counted only the frame. It still ran 95 rounds in 2 of 3 runs, because the message of the tick also counted. That build is not kept.) The number of rounds depends on timing: 1 run of main, with the trace prints on, settled in 10 rounds after 10.6 s.
+
+### Not tested
+
+HTTP/2 (staging offers none); a server that closes the connection after each reply, with parallel downloads (the code opens a new connection for each; the tests use keep-alive); upload bodies in parallel (POST runs alone); `requestIdleCallback` together with this settle change (an idle callback that a tick requests still counts as work, so such a page does not settle early; it may not settle at all if it asks at each tick; not measured); other routes than `/login` and `/calls`; Windows or macOS.
+
+Follow-ups: send `Accept-Encoding: gzip` and inflate (the bodies are 3.4 times larger than Chrome reads, 113 ms of bodies in the run above); a connect retry on a second address or after 250 ms against the lost SYN (3 of 9 runs, 1 s each); nested `@import` sheets and `<link rel=preload>` lookahead are still one at a time; HTTP/2 for servers that offer it.

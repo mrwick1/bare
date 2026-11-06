@@ -16,7 +16,7 @@
 //!
 //! Comments compare Rust with JavaScript, because you know JS.
 
-use crate::{dns, tcp};
+use crate::{dns, parallel, tcp, trace};
 // JS: like `import * as dns from "./dns"`: other files in this crate.
 use bare_tls::client::{self, ClientStream};
 use bare_tls::trust_store::{self, TrustStore};
@@ -29,7 +29,7 @@ use std::io::{self, ErrorKind, Read, Write};
 // These give us the `read` and `write` functions on a connection.
 // Rust needs this import before you can call them.
 use std::net::{SocketAddr, TcpStream};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 // JS: like a shared reference. `Arc` lets two owners hold one value, and a copy of the `Arc` costs nothing.
 // `SocketAddr` is an IP address plus a port. `TcpStream` is an open connection.
 use std::time::{Duration, Instant};
@@ -73,8 +73,11 @@ type IdleConnection = (Stream, Instant);
 /// plain connection must never serve an `https` request, so the scheme is part of the key.
 type Server = (Scheme, String, u16);
 
-/// The idle connections of a client, by server. A `Body` that is read to the end gives its connection back to it.
-type Pool = Arc<Mutex<HashMap<Server, IdleConnection>>>;
+/// The idle connections of a client, by server, the last one that went idle at the end. A `Body` that is read to the end gives its
+/// connection back to it. A server keeps at most `MAX_IDLE_PER_SERVER`: the number of connections that one page uses at once.
+type Pool = Arc<Mutex<HashMap<Server, Vec<IdleConnection>>>>;
+
+const MAX_IDLE_PER_SERVER: usize = parallel::MAX_WORKERS;
 
 /// A cached reply is found by scheme, host, port and path.
 type CacheKey = (Scheme, String, u16, String);
@@ -116,7 +119,7 @@ impl Method {
 
     /// A method that reads only (RFC 9110 section 9.2.1, minus OPTIONS and TRACE, which we leave out). We may send it again on a new
     /// connection, and it never invalidates a cached reply.
-    fn safe(self) -> bool {
+    pub fn safe(self) -> bool {
         matches!(self, Method::Get | Method::Head)
     }
 }
@@ -181,16 +184,17 @@ pub struct Client {
     // The open connections that wait for a next request.
     // The key is the server: its scheme, host and port. A connection only works for the server
     // it was opened to. The value is the connection and the time it became idle.
-    // Only one connection per server. When a browser needs more at once, it opens more.
-    // Chrome allows 6 for each server.
+    // Up to `MAX_IDLE_PER_SERVER` connections per server: workers (see `parallel.rs`) open more at once, as Chrome does (6).
     cache: HashMap<CacheKey, Cached>,
     // Replies we may use again. The key is the scheme, the host, the port and the path.
     // It lives in memory only. `MAX_CACHE` is the size limit.
     cache_bytes: usize,
     // How many bytes the cache holds, counted with `cache_size`.
-    roots: Option<TrustStore>,
+    roots: Arc<OnceLock<Result<TrustStore, String>>>,
     // The trusted root certificates for https. `open` loads the OS bundle on the first https connection and keeps it.
-    // The roots never come from a peer.
+    // The roots never come from a peer. A fork of the client shares them: the bundle is read once.
+    pub(crate) workers: Arc<parallel::Workers>,
+    // The worker threads of this client and its forks (see `parallel.rs`).
 }
 
 /// Check a request before any DNS lookup or socket. The messages name no header value and no body byte.
@@ -246,7 +250,14 @@ impl Client {
     /// A client that trusts these roots for https, and not the OS bundle. For tests with a private CA.
     /// The roots are the only trust anchors: there is no way to turn the checks off.
     pub fn with_roots(roots: TrustStore) -> Client {
-        Client { roots: Some(roots), ..Client::default() }
+        let client = Client::default();
+        let _ = client.roots.set(Ok(roots));
+        client
+    }
+
+    /// A second client that shares the connections, the root certificates and the worker threads of this one. The reply cache is not shared.
+    pub fn fork(&self) -> Client {
+        Client { idle: self.idle.clone(), roots: self.roots.clone(), workers: self.workers.clone(), ..Client::default() }
     }
 
     /// Fetch a URL. Follow redirects, and use the cache. Any status can come back: a 404 is still a page.
@@ -434,31 +445,51 @@ impl Client {
 
     /// Send a request and read the status and the headers. The body is not read: the `Body` reads it from the
     /// connection when the caller asks. Reuse an idle connection when there is one.
+    /// A new connection, when the gate lets one more be set up (`parallel::MAX_CONNECTING`).
+    fn connect(&self, url: &Url, rec: &mut Option<Box<trace::Rec>>) -> Result<Stream, Error> {
+        let _inside = self.workers.connecting.enter();
+        open(url, &self.roots, rec)
+    }
+
     fn start(&mut self, url: &Url, plan: &Plan, conditions: &str) -> Result<(Response, Body), Error> {
         // The idle list is keyed by scheme too, so a plain connection never serves https.
         let server = (url.scheme, url.host.clone(), url.port);
-        let idle = self.idle.lock().unwrap().remove(&server);
+        // An empty list stays in the map: the next connection that goes idle needs it, and the map has one key for each server.
+        let idle = self.idle.lock().unwrap().get_mut(&server).and_then(Vec::pop);
         let get = plan.method.safe();
+        let mut rec = trace::begin(|| format!("{}://{}:{}{}", url.scheme, url.host, url.port, url.path));
         let (mut stream, reused) = match idle {
-            // `remove` takes the connection out of the list. While we use it, nobody else can.
+            // `pop` takes the connection out of the list. While we use it, nobody else can.
             Some((stream, since)) if since.elapsed() < MAX_IDLE && (get || alive(&stream)) => (stream, true),
             // There is a connection, and it has not been idle for too long. Use it. A POST also needs the
             // server to have kept it: we cannot retry a POST after a write, so we look first.
-            _ => (open(url, &mut self.roots)?, false),
+            _ => (self.connect(url, &mut rec)?, false),
             // `_` means "anything else": no connection, or an old one. Open a new one.
             // An old connection is dropped here, and Rust closes it for us.
         };
 
+        let mut clock = trace::Clock::new();
+        let mut sent = Instant::now();
         let mut result = send(&mut stream, url, plan, conditions);
         if result.is_err() && reused && get {
             // A reused connection can fail when the server closed it while it was idle.
             // We cannot know that before we try. The error is not the page's fault, so we
             // try once more on a new connection. This is safe because GET only reads.
             // Never for a POST: the server may have got the request and done what it says, and a second one would do it twice.
-            stream = open(url, &mut self.roots)?;
+            stream = self.connect(url, &mut rec)?;
+            clock = trace::Clock::new();
+            sent = Instant::now();
             result = send(&mut stream, url, plan, conditions);
         }
         let (head, leftover) = result?;
+        // The clock of the body starts where the head ended.
+        let head_end = Instant::now();
+        self.note_head(head_end - sent);
+        if let Some(r) = &mut rec {
+            r.ttfb = clock.lap();
+            r.reused = reused;
+            r.status = head.response.status;
+        }
         if !get && (200..400).contains(&head.response.status) {
             // RFC 9111 section 4.4: a successful unsafe request invalidates the cached target.
             self.forget(&(url.scheme, url.host.clone(), url.port, url.path.clone()));
@@ -469,7 +500,8 @@ impl Client {
             return Err("the reply is too big".into());
         }
         let reusable = !head.response.close && head.framing != Framing::UntilClose;
-        let live = Live::new(stream, leftover, head.framing, reusable.then(|| (self.idle.clone(), server)));
+        let mut live = Live::new(stream, leftover, head.framing, reusable.then(|| (self.idle.clone(), server)), head_end);
+        live.rec = rec;
         Ok((head.response, Body(Source::Live(Box::new(live)))))
     }
 
@@ -504,20 +536,28 @@ pub struct Streamed {
 /// Open a new connection to the server of this URL. The only place that makes a `Stream`.
 /// `https`: TCP, then a TLS 1.3 handshake with the host name checked against `roots` (loaded from the OS on first use).
 /// The handshake runs under the read and write time limits that `tcp::connect` sets.
-fn open(url: &Url, roots: &mut Option<TrustStore>) -> Result<Stream, Error> {
+fn open(url: &Url, roots: &OnceLock<Result<TrustStore, String>>, rec: &mut Option<Box<trace::Rec>>) -> Result<Stream, Error> {
+    let mut clock = trace::Clock::new();
     let addrs: Vec<SocketAddr> = dns::resolve(&url.host)?.into_iter().map(|ip| SocketAddr::new(ip, url.port)).collect();
+    if let Some(r) = rec {
+        r.dns = clock.lap();
+    }
     // Our own DNS lookup (see `dns.rs`) gives IP addresses. Add the port to each one.
     // JS: `ips.map(ip => ({ ip, port }))`.
     let tcp = tcp::connect(&addrs)?;
     // Open a connection, with time limits (see `tcp.rs`).
+    if let Some(r) = rec {
+        r.tcp = clock.lap();
+    }
     if url.scheme == Scheme::Http {
         return Ok(Stream::Tcp(tcp));
     }
-    let roots = match roots {
-        Some(roots) => roots,
-        None => roots.insert(trust_store::load_system()?.0),
-    };
-    Ok(Stream::Tls(Box::new(client::connect(tcp, &url.host, roots)?)))
+    let roots = roots.get_or_init(|| trust_store::load_system().map(|r| r.0).map_err(|e| e.to_string())).as_ref().map_err(|e| e.clone())?;
+    let tls = client::connect(tcp, &url.host, roots)?;
+    if let Some(r) = rec {
+        r.tls = clock.lap();
+    }
+    Ok(Stream::Tls(Box::new(tls)))
 }
 
 /// The request line, the headers and the blank line. A small body is added to the end by the caller.
@@ -828,6 +868,18 @@ struct Live {
     /// Where to put the connection when the body ends well, if it may be used again.
     pool: Option<(Pool, Server)>,
     done: bool,
+    /// The timing record of this request (only when `BARE_NET_TRACE` is set). It goes out when the body is dropped.
+    rec: Option<Box<trace::Rec>>,
+}
+
+impl Drop for Live {
+    fn drop(&mut self) {
+        if let Some(mut r) = self.rec.take() {
+            r.body = self.start.elapsed().as_micros() as u64;
+            r.bytes = self.given as u64;
+            trace::push(*r);
+        }
+    }
 }
 
 /// A connection. In tests it can also be some bytes in memory: a reply that stops, or a reply that ends.
@@ -875,9 +927,9 @@ impl Write for Stream {
 }
 
 impl Live {
-    fn new(stream: Stream, leftover: Vec<u8>, framing: Framing, pool: Option<(Pool, Server)>) -> Live {
+    fn new(stream: Stream, leftover: Vec<u8>, framing: Framing, pool: Option<(Pool, Server)>, start: Instant) -> Live {
         let left = if let Framing::Length(n) = framing { n } else { 0 };
-        Live { stream, buf: leftover, at: 0, framing, left, chunk: Chunk::Size, line: Vec::new(), given: 0, start: Instant::now(), pool, done: false }
+        Live { stream, buf: leftover, at: 0, framing, left, chunk: Chunk::Size, line: Vec::new(), given: 0, start, pool, done: false, rec: None }
     }
 
     /// Make sure that there are bytes in `buf[at..]`. When there are none after this, the connection has closed.
@@ -914,7 +966,12 @@ impl Live {
             && let Some((pool, server)) = self.pool.take()
         {
             let stream = std::mem::replace(&mut self.stream, Stream::Closed);
-            pool.lock().unwrap().insert(server, (stream, Instant::now()));
+            let mut pool = pool.lock().unwrap();
+            let list = pool.entry(server).or_default();
+            if list.len() == MAX_IDLE_PER_SERVER {
+                list.remove(0);
+            }
+            list.push((stream, Instant::now()));
         }
     }
 
@@ -1107,7 +1164,7 @@ mod tests {
             Err(e) => return Err(e.to_string()),
         };
         let mut response = head.response;
-        let mut body = Body(Source::Live(Box::new(Live::new(stream, leftover, head.framing, None))));
+        let mut body = Body(Source::Live(Box::new(Live::new(stream, leftover, head.framing, None, Instant::now()))));
         let mut bytes = Vec::new();
         match body.read_to_end(&mut bytes) {
             Err(e) if e.to_string().contains("stopped answering") => return Ok(None),
@@ -1464,7 +1521,7 @@ mod tests {
         let (port, wire) = untrusted();
         let mut client = Client::new();
         let plain = TcpStream::connect(idle.local_addr().unwrap()).unwrap();
-        client.idle.lock().unwrap().insert((Scheme::Http, "localhost".to_string(), port), (Stream::Tcp(plain), Instant::now()));
+        client.idle.lock().unwrap().insert((Scheme::Http, "localhost".to_string(), port), vec![(Stream::Tcp(plain), Instant::now())]);
         assert!(client.get(&tls_url(port, "/")).is_err());
         only_a_client_hello(&wire.recv().unwrap());
         let (mut held, _) = idle.accept().unwrap();
@@ -2056,7 +2113,7 @@ mod tests {
         client.get(&post_url(port, "/")).unwrap();
         assert_eq!(client.idle.lock().unwrap().len(), 1);
         // Wait until the client can see the close (no sleep: a loaded machine delays the server thread).
-        while client.idle.lock().unwrap().values().all(|(stream, _)| alive(stream)) {
+        while client.idle.lock().unwrap().values().flatten().all(|(stream, _)| alive(stream)) {
             std::thread::yield_now();
         }
         assert_eq!(client.post(&post_url(port, "/pay"), &[], b"amount=1").unwrap().body, b"ok");
@@ -2142,7 +2199,7 @@ mod tests {
         let (port, requests) = serve(vec![(vec![OK], false)]);
         let mut client = Client::new();
         let stale = TcpStream::connect(dummy.local_addr().unwrap()).unwrap();
-        client.idle.lock().unwrap().insert((Scheme::Https, "127.0.0.1".to_string(), port), (Stream::Tcp(stale), Instant::now()));
+        client.idle.lock().unwrap().insert((Scheme::Https, "127.0.0.1".to_string(), port), vec![(Stream::Tcp(stale), Instant::now())]);
         assert_eq!(client.get(&url(port)).unwrap().body, b"ok");
         assert_eq!(seen(&requests).len(), 1);
         assert!(client.idle.lock().unwrap().contains_key(&(Scheme::Https, "127.0.0.1".to_string(), port)));
