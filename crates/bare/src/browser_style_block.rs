@@ -71,10 +71,10 @@ pub(crate) enum Kind {
     Opaque,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Decl {
-    /// As authored: lowercase except a custom property.
-    pub name: String,
+    /// As authored: lowercase except a custom property. A supported name is the engine's own `&'static str`: no allocation.
+    pub name: Cow<'static, str>,
     /// The text after the `:`, trimmed, without `!important`.
     pub value: String,
     pub important: bool,
@@ -212,17 +212,30 @@ fn texts<'a>(d: &'a Decl, charge: Charge) -> F<Texts<'a>> {
     Ok(list)
 }
 
+thread_local! {
+    /// The output of `parse_declaration` when only its answer matters: one buffer, not one allocation for each call.
+    static SCRATCH: std::cell::RefCell<Vec<Declared>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
 /// A declaration from authored text. A name that is not supported, or a value that the engine refuses, is `Opaque`.
 fn classify(name: &str, value: &str, important: bool) -> Decl {
-    let mk = |kind, mask| Decl { name: name.to_string(), value: value.to_string(), important, kind, mask };
+    let mk = |name: Cow<'static, str>, kind, mask| Decl { name, value: value.to_string(), important, kind, mask };
+    let own = || Cow::Owned(name.to_string());
     if custom(name) {
-        return mk(Kind::Custom, 0);
+        return mk(own(), Kind::Custom, 0);
     }
-    if supported(name) && parse_declaration(name, value, important, &mut Side::default(), &mut Vec::new()) {
-        let kind = if Property::from_name(name).is_some() { Kind::Long } else { Kind::Short };
-        return mk(kind, mask_of(name));
+    let long = Property::from_name(name);
+    let fixed = long.map(Property::name).or_else(|| SHORTHANDS.iter().copied().find(|&s| s == name));
+    match fixed {
+        Some(fixed) if SCRATCH.with_borrow_mut(|out| {
+            out.clear();
+            parse_declaration(name, value, important, &mut Side::default(), out)
+        }) => match long {
+            Some(p) => mk(Cow::Borrowed(fixed), Kind::Long, bit(p)),
+            None => mk(Cow::Borrowed(fixed), Kind::Short, mask_of(name)),
+        },
+        _ => mk(own(), Kind::Opaque, 0),
     }
-    mk(Kind::Opaque, 0)
 }
 
 /// Does a new declaration take every longhand of `e`, or the name of `e`?
@@ -318,7 +331,7 @@ pub(crate) fn length(list: &[Decl]) -> usize {
 pub(crate) fn item(list: &[Decl], i: usize) -> Option<String> {
     list.iter().flat_map(|d| -> Vec<String> {
         match d.kind {
-            Kind::Custom => vec![d.name.clone()],
+            Kind::Custom => vec![d.name.to_string()],
             Kind::Long | Kind::Short => owned(d).map(|p| p.name().to_string()).collect(),
             Kind::Opaque => vec![],
         }
@@ -331,6 +344,9 @@ fn owner(list: &[Decl], p: Property) -> Option<usize> {
 
 /// The `value` of longhand `p` in `d`, from the texts of `d`.
 fn long_text<'a>(d: &'a Decl, p: Property, charge: Charge) -> F<Option<Cow<'a, str>>> {
+    if d.kind == Kind::Long {
+        return Ok(Some(Cow::Borrowed(d.value.as_str())));
+    }
     match texts(d, charge)?.into_iter().find(|(q, _)| *q == p) {
         Some((_, Some(t))) => Ok(Some(t)),
         _ => Err(Fail::Unsupported("a style longhand with no faithful text (CSSStyleDeclaration)")),
@@ -445,7 +461,7 @@ pub(crate) fn priority(list: &[Decl], name: &str) -> bool {
 // ------------------------------------------------------------------------------------------------ writes
 
 /// `setProperty` with a non-empty value. `Ok(false)`: the name, the value or nothing is acceptable, and the list is as it was.
-pub(crate) fn set(list: &mut Vec<Decl>, name: &str, value: &str, important: bool, lim: Lim, charge: Charge) -> F<bool> {
+pub(crate) fn set(list: &mut Vec<Decl>, name: &str, value: &str, important: bool, lim: Lim, probe: &mut String, charge: Charge) -> F<bool> {
     if !custom(name) && !supported(name) {
         return Ok(false);
     }
@@ -454,8 +470,11 @@ pub(crate) fn set(list: &mut Vec<Decl>, name: &str, value: &str, important: bool
     }
     charge(1 + (value.len() / 4) as u64)?;
     // The value must be exactly one declaration: no `;`, no `!important`, nothing cut off.
-    let probe = format!("{name}:{value}");
-    let (parsed, _) = parse_declarations_capped(&probe, 1);
+    probe.clear();
+    for x in [name, ":", value] {
+        probe.push_str(x);
+    }
+    let (parsed, _) = parse_declarations_capped(probe, 1);
     let [one] = &parsed[..] else { return Ok(false) };
     if one.important || one.name != name || one.value != value.trim() {
         return Ok(false);
@@ -518,17 +537,20 @@ fn ident(name: &str, max: usize) -> F<Cow<'_, str>> {
 }
 
 /// Output text with a byte cap that is checked before each piece is added.
-struct Out {
-    s: String,
+struct Out<'a> {
+    s: &'a mut String,
     max: usize,
+    /// Every declaration was written as it is in the list, under its own name: reading the text back gives the same list.
+    exact: bool,
 }
 
-impl Out {
+impl Out<'_> {
     fn decl(&mut self, name: &str, value: &str, important: bool) -> F<()> {
         let tail = if important { " !important;" } else { ";" };
         let rest = usize::from(!self.s.is_empty()).checked_add(2).and_then(|n| n.checked_add(value.len())).and_then(|n| n.checked_add(tail.len())).ok_or(Fail::Bytes)?;
         let room = self.max.checked_sub(self.s.len()).and_then(|n| n.checked_sub(rest)).ok_or(Fail::Bytes)?;
         let name = ident(name, room)?;
+        self.exact &= matches!(name, Cow::Borrowed(_));
         if !self.s.is_empty() {
             self.s.push(' ');
         }
@@ -539,17 +561,27 @@ impl Out {
     }
 }
 
-/// The families that can be written for the longhand `p`, the largest first.
-fn families(p: Property) -> Vec<(&'static str, Join)> {
-    let mut v: Vec<_> = BUILD.iter().filter(|(n, _)| longs(n).contains(&p)).copied().collect();
-    v.sort_by_key(|(n, _)| std::cmp::Reverse(longs(n).len()));
-    v
+/// The families that can be written for the longhand `p`, the largest first. Built once: `BUILD` is fixed.
+fn families(p: Property) -> &'static [(&'static str, Join)] {
+    static TABLE: std::sync::OnceLock<Vec<Vec<(&'static str, Join)>>> = std::sync::OnceLock::new();
+    &TABLE.get_or_init(|| {
+        Property::ALL
+            .iter()
+            .map(|&p| {
+                let mut v: Vec<_> = BUILD.iter().filter(|(n, _)| longs(n).contains(&p)).copied().collect();
+                v.sort_by_key(|(n, _)| std::cmp::Reverse(longs(n).len()));
+                v
+            })
+            .collect()
+    })[p as usize]
 }
 
-/// Serialize the block (CSSOM "serialize a CSS declaration block").
-pub(crate) fn serialize(list: &[Decl], lim: Lim, charge: Charge) -> F<String> {
+/// Serialize the block (CSSOM "serialize a CSS declaration block") into `s`, which is cleared first. `true`: the text
+/// reads back to exactly `list` (see `Out::exact`), so the caller may keep `list` as the parse of `s`.
+pub(crate) fn serialize(list: &[Decl], lim: Lim, s: &mut String, charge: Charge) -> F<bool> {
     charge(1 + list.len() as u64)?;
-    let mut out = Out { s: String::new(), max: lim.bytes };
+    s.clear();
+    let mut out = Out { s, max: lim.bytes, exact: true };
     let mut done = 0u128;
     for d in list {
         match d.kind {
@@ -564,18 +596,20 @@ pub(crate) fn serialize(list: &[Decl], lim: Lim, charge: Charge) -> F<String> {
                         continue;
                     }
                     let mut wrote = false;
-                    for (name, how) in families(p) {
+                    for &(name, how) in families(p) {
                         if mask_of(name) & done != 0 {
                             continue;
                         }
                         if let Some((v, important)) = build(list, name, how, lim.bytes, charge)? {
                             out.decl(name, &v, important)?;
+                            out.exact = false;
                             done |= mask_of(name);
                             wrote = true;
                             break;
                         }
                     }
                     if !wrote {
+                        out.exact &= d.kind == Kind::Long;
                         let t = long_text(d, p, charge)?.unwrap_or_default();
                         if t.is_empty() {
                             return Err(Fail::Unsupported("a longhand of a style shorthand with var() cannot be written alone"));
@@ -587,5 +621,5 @@ pub(crate) fn serialize(list: &[Decl], lim: Lim, charge: Charge) -> F<String> {
             }
         }
     }
-    Ok(out.s)
+    Ok(out.exact)
 }

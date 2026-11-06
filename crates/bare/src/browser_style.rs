@@ -4,6 +4,12 @@
 //!   it into a declaration block (`browser_style_block.rs`, where the model is described), and for a change writes the
 //!   serialized block back with the normal attribute path (`attr_set`: caps, charge, native cache invalidation). So
 //!   `setAttribute("style", ...)`, `cssText`, the named properties and the native selector/cascade code always agree.
+//! - The parse of the last read of an element is kept (`Block`, at most `KEEP_BLOCKS` of at most `KEEP_BYTES` of text). It is valid
+//!   while the attribute holds exactly the text that was parsed, so nothing has to invalidate it: a read compares the text and
+//!   takes the block, or parses. A write keeps the block when the text it wrote reads back to the same list (`serialize`).
+//!   The step charge of the parse is charged again on a hit, so the budget does not depend on the cache. Blink and WebKit keep
+//!   the parsed set as the state and write the attribute text lazily; Servo does the same with its `PropertyDeclarationBlock`.
+//!   Here the text stays the state, because every other part reads the attribute.
 //! - `el.style` is one object for each element while the element wrapper lives (`SameObject`): the wrapper traces the
 //!   declaration and the declaration traces the wrapper. The setter forwards to `cssText` (`[PutForwards=cssText]`).
 //! - Supported properties are exactly the ones `bare_css` understands: `values::Property::ALL` and `values::SHORTHANDS`.
@@ -70,10 +76,26 @@ impl Default for StyleLimits {
     }
 }
 
+/// The most parsed blocks kept, and the longest text kept. Past the count the blocks are dropped all at once.
+const KEEP_BLOCKS: usize = 1024;
+const KEEP_BYTES: usize = 1024;
+
+/// The parse of one `style` attribute text.
+pub(crate) struct Block {
+    /// The attribute text that `list` is the parse of.
+    text: String,
+    pub(crate) list: Vec<Decl>,
+    /// The steps that the parse charged.
+    spent: u64,
+}
+
 /// Counters for tests and the load tool.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct StyleStats {
     pub objects: usize,
+    /// Kept parses of `style` attributes (`Block`), and how many reads found theirs valid.
+    pub blocks: usize,
+    pub hits: usize,
 }
 
 #[derive(Default)]
@@ -82,6 +104,8 @@ struct SState {
     objs: HashMap<ObjId, NodeId>,
     /// element -> its `style` object (`SameObject`).
     by_el: HashMap<NodeId, ObjId>,
+    /// element -> the parse of its `style` attribute at the last call.
+    blocks: HashMap<NodeId, Block>,
 }
 
 #[derive(Default)]
@@ -94,6 +118,9 @@ pub(crate) struct Style {
     pub(crate) cur: Cell<u32>,
     /// Function id of a named getter or setter -> index in `props`.
     pub(crate) fns: RefCell<HashMap<u32, usize>>,
+    /// The text buffer of a call: the probe of `setProperty` and the output of the serializer.
+    buf: RefCell<String>,
+    hits: Cell<usize>,
     /// The supported property names, in CSS form.
     pub(crate) props: OnceCell<Vec<&'static str>>,
 }
@@ -137,7 +164,7 @@ fn eq_important(s: &str) -> bool {
 
 /// The name as the block keeps it: a custom property as written, anything else in lowercase.
 fn key(name: &str) -> Cow<'_, str> {
-    if custom(name) { Cow::Borrowed(name) } else { Cow::Owned(name.to_ascii_lowercase()) }
+    if custom(name) || !name.bytes().any(|b| b.is_ascii_uppercase()) { Cow::Borrowed(name) } else { Cow::Owned(name.to_ascii_lowercase()) }
 }
 
 impl Dom {
@@ -165,27 +192,58 @@ impl Dom {
         parse(text, self.blim(), &mut |n| it.charge(n)).map_err(|f| self.style_fail(f))
     }
 
-    /// The block of the `style` attribute now.
-    fn style_read(&self, it: &mut Interp<'_>, el: NodeId) -> R<Vec<Decl>> {
+    /// The block of the `style` attribute now: the kept one when the text is the same, else a parse. Give it back with
+    /// `style_keep` when it still is the parse of the attribute; a block that is dropped is only parsed again.
+    fn style_read(&self, it: &mut Interp<'_>, el: NodeId) -> R<Block> {
         let doc = self.doc.borrow();
         let text = doc.find_atom("style").and_then(|a| doc.attr(el, a)).unwrap_or("");
-        self.style_parse(it, text)
+        if let Some(b) = self.style.s.borrow_mut().blocks.remove(&el)
+            && b.text == text
+        {
+            it.charge(b.spent)?;
+            self.style.hits.set(self.style.hits.get() + 1);
+            debug_assert!(parse(text, self.blim(), &mut |_| Ok(())).ok().is_some_and(|l| l == b.list), "kept style block is stale");
+            return Ok(b);
+        }
+        let mut spent = 0;
+        let list = parse(text, self.blim(), &mut |n| {
+            spent += n;
+            it.charge(n)
+        })
+        .map_err(|f| self.style_fail(f))?;
+        Ok(Block { text: text.to_string(), list, spent })
     }
 
-    fn style_text(&self, it: &mut Interp<'_>, list: &[Decl]) -> R<String> {
-        serialize(list, self.blim(), &mut |n| it.charge(n)).map_err(|f| self.style_fail(f))
+    fn style_keep(&self, el: NodeId, b: Block) {
+        if b.text.len() > KEEP_BYTES {
+            return;
+        }
+        let mut s = self.style.s.borrow_mut();
+        if s.blocks.len() >= KEEP_BLOCKS {
+            s.blocks.clear();
+        }
+        s.blocks.insert(el, b);
+    }
+
+    /// Serialize into the call buffer (taken out: the caller gives it back with `style.buf.replace`). `true`: see `serialize`.
+    fn style_text(&self, it: &mut Interp<'_>, list: &[Decl], buf: &mut String) -> R<bool> {
+        serialize(list, self.blim(), buf, &mut |n| it.charge(n)).map_err(|f| self.style_fail(f))
     }
 
     /// The update steps: write the serialized block back (skipped when the attribute already has exactly that text).
-    fn style_write(&self, it: &mut Interp<'_>, el: NodeId, list: &[Decl]) -> R<()> {
-        let text = self.style_text(it, list)?;
-        {
-            let doc = self.doc.borrow();
-            if doc.find_atom("style").and_then(|a| doc.attr(el, a)) == Some(text.as_str()) {
-                return Ok(());
-            }
+    fn style_write(&self, it: &mut Interp<'_>, el: NodeId, mut b: Block) -> R<()> {
+        let mut buf = self.style.buf.take();
+        let exact = self.style_text(it, &b.list, &mut buf)?;
+        if buf != b.text {
+            attr_set(self, it, el, "style", &buf)?;
+            b.text.clear();
+            b.text.push_str(&buf);
         }
-        attr_set(self, it, el, "style", &text)
+        self.style.buf.replace(buf);
+        if exact {
+            self.style_keep(el, b);
+        }
+        Ok(())
     }
 
     fn style_set(&self, it: &mut Interp<'_>, el: NodeId, name: &str, value: &str, priority: &str) -> R<()> {
@@ -200,26 +258,34 @@ impl Dom {
         } else {
             return Ok(());
         };
-        let mut list = self.style_read(it, el)?;
-        if !set(&mut list, &name, value, important, self.blim(), &mut |n| it.charge(n)).map_err(|f| self.style_fail(f))? {
+        let mut b = self.style_read(it, el)?;
+        let mut probe = self.style.buf.take();
+        let changed = set(&mut b.list, &name, value, important, self.blim(), &mut probe, &mut |n| it.charge(n)).map_err(|f| self.style_fail(f))?;
+        self.style.buf.replace(probe);
+        if !changed {
+            self.style_keep(el, b);
             return Ok(());
         }
-        self.style_write(it, el, &list)
+        self.style_write(it, el, b)
     }
 
     /// `removeProperty`: the old value of the property (`""` if none).
     fn style_remove(&self, it: &mut Interp<'_>, el: NodeId, name: &str) -> R<String> {
-        let mut list = self.style_read(it, el)?;
-        let (old, changed) = remove(&mut list, &key(name), self.style_lim().max_bytes, &mut |n| it.charge(n)).map_err(|f| self.style_fail(f))?;
+        let mut b = self.style_read(it, el)?;
+        let (old, changed) = remove(&mut b.list, &key(name), self.style_lim().max_bytes, &mut |n| it.charge(n)).map_err(|f| self.style_fail(f))?;
         if changed {
-            self.style_write(it, el, &list)?;
+            self.style_write(it, el, b)?;
+        } else {
+            self.style_keep(el, b);
         }
         Ok(old)
     }
 
     fn style_get(&self, it: &mut Interp<'_>, el: NodeId, name: &str) -> R<Option<String>> {
-        let list = self.style_read(it, el)?;
-        get(&list, &key(name), self.style_lim().max_bytes, &mut |n| it.charge(n)).map_err(|f| self.style_fail(f))
+        let b = self.style_read(it, el)?;
+        let v = get(&b.list, &key(name), self.style_lim().max_bytes, &mut |n| it.charge(n)).map_err(|f| self.style_fail(f))?;
+        self.style_keep(el, b);
+        Ok(v)
     }
 
 /// The element of a `CSSStyleDeclaration` object.
@@ -293,16 +359,23 @@ impl Dom {
     fn style_set_text(&self, it: &mut Interp<'_>, el: NodeId, v: Value) -> R<()> {
         let text = null_empty(self, it, v)?;
         let list = self.style_parse(it, &text)?;
-        let text = self.style_text(it, &list)?;
-        attr_set(self, it, el, "style", &text)
+        let mut buf = self.style.buf.take();
+        self.style_text(it, &list, &mut buf)?;
+        attr_set(self, it, el, "style", &buf)?;
+        self.style.buf.replace(buf);
+        Ok(())
     }
 }
 
 fn css_text(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
     let el = d.style_el(it, this)?;
-    let list = d.style_read(it, el)?;
-    let text = d.style_text(it, &list)?;
-    d.js_str(it, &text)
+    let b = d.style_read(it, el)?;
+    let mut buf = d.style.buf.take();
+    d.style_text(it, &b.list, &mut buf)?;
+    d.style_keep(el, b);
+    let v = d.js_str(it, &buf);
+    d.style.buf.replace(buf);
+    v
 }
 
 fn set_css_text(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
@@ -313,7 +386,10 @@ fn set_css_text(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
 
 fn length(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
     let el = d.style_el(it, this)?;
-    Ok(Value::Number(blk::length(&d.style_read(it, el)?) as f64))
+    let b = d.style_read(it, el)?;
+    let n = blk::length(&b.list);
+    d.style_keep(el, b);
+    Ok(Value::Number(n as f64))
 }
 
 fn parent_rule(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
@@ -325,7 +401,9 @@ fn item(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
     let el = d.style_el(it, this)?;
     required(it, a, 1, "item")?;
     let i = crate::browser_platform_class::to_u32(it, a[0])? as usize;
-    let name = blk::item(&d.style_read(it, el)?, i).unwrap_or_default();
+    let b = d.style_read(it, el)?;
+    let name = blk::item(&b.list, i).unwrap_or_default();
+    d.style_keep(el, b);
     d.js_str(it, &name)
 }
 
@@ -341,7 +419,9 @@ fn get_property_priority(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value])
     let el = d.style_el(it, this)?;
     required(it, a, 1, "getPropertyPriority")?;
     let name = d.string_arg(it, a[0])?;
-    let imp = priority(&d.style_read(it, el)?, &key(&name));
+    let b = d.style_read(it, el)?;
+    let imp = priority(&b.list, &key(&name));
+    d.style_keep(el, b);
     d.js_str(it, if imp { "important" } else { "" })
 }
 
@@ -457,15 +537,19 @@ pub(crate) fn prune(d: &Dom, live: &dyn Fn(ObjId) -> bool) {
     s.objs.retain(|&o, _| live(o));
     let objs = &s.objs;
     s.by_el.retain(|_, o| objs.contains_key(o));
+    let by_el = &s.by_el;
+    s.blocks.retain(|el, _| by_el.contains_key(el));
 }
 
 impl Browser {
     /// Replace the bounds of this module. Call it before scripts run.
     pub fn set_style_limits(&mut self, l: StyleLimits) {
         self.dom.style.lim.set(l);
+        self.dom.style.s.borrow_mut().blocks.clear();
     }
 
     pub fn style_stats(&self) -> StyleStats {
-        StyleStats { objects: self.dom.style.s.borrow().objs.len() }
+        let s = self.dom.style.s.borrow();
+        StyleStats { objects: s.objs.len(), blocks: s.blocks.len(), hits: self.dom.style.hits.get() }
     }
 }
