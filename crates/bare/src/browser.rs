@@ -114,11 +114,124 @@ impl Hasher for IdHash {
     fn write_u64(&mut self, x: u64) {
         self.add(x);
     }
+    fn write_usize(&mut self, x: usize) {
+        self.add(x as u64);
+    }
+    fn write_isize(&mut self, x: isize) {
+        self.add(x as u64);
+    }
     fn finish(&self) -> u64 {
         self.0.rotate_left(26) // the multiply leaves the best bits on top; hashbrown reads the low ones
     }
 }
 pub(crate) type IdMap<K, V> = HashMap<K, V, BuildHasherDefault<IdHash>>;
+
+/// A key that is a slot number of the engine: `ObjId` (its slot is reused, so the whole handle tells a dead object from a new one)
+/// or `NodeId` (the document never reuses one).
+pub(crate) trait SlotKey: Copy + Eq {
+    fn slot(self) -> usize;
+}
+impl SlotKey for ObjId {
+    fn slot(self) -> usize {
+        ObjId::slot(self)
+    }
+}
+impl SlotKey for NodeId {
+    fn slot(self) -> usize {
+        self.index()
+    }
+}
+
+const PAGE_BITS: usize = 5;
+type Page<K, V> = [Option<(K, V)>; 1 << PAGE_BITS];
+
+/// A table indexed by the slot of its key: two loads and one compare, with no hash. The pages hold 32 entries and exist only
+/// where a key lives, so the memory follows the keys that are in use, not the largest slot (a heap of a million objects with
+/// ten wrappers holds ten pages and a directory of 8 bytes for each 32 slots). The entry keeps the whole key, so the entry of a
+/// dead object never answers for the new object of the same slot. The collector's `retain` frees an empty page and the empty end
+/// of the directory. This is the idea of a `ScriptWrappable` field in Blink or an opaque pointer in QuickJS, as a side table,
+/// because the DOM crate and the engine crate must not know each other.
+pub(crate) struct IdTab<K, V> {
+    pages: Vec<Option<Box<Page<K, V>>>>,
+    len: usize,
+}
+impl<K, V> Default for IdTab<K, V> {
+    fn default() -> Self {
+        IdTab { pages: Vec::new(), len: 0 }
+    }
+}
+impl<K: SlotKey, V> IdTab<K, V> {
+    pub fn len(&self) -> usize {
+        self.len
+    }
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+    /// The length of the directory and the number of pages that exist.
+    #[cfg(test)]
+    pub fn size(&self) -> (usize, usize) {
+        (self.pages.len(), self.pages.iter().flatten().count())
+    }
+    pub fn get(&self, k: &K) -> Option<&V> {
+        let s = k.slot();
+        match self.pages.get(s >> PAGE_BITS)? {
+            Some(p) => match &p[s & ((1 << PAGE_BITS) - 1)] {
+                Some((kk, v)) if kk == k => Some(v),
+                _ => None,
+            },
+            None => None,
+        }
+    }
+    pub fn get_mut(&mut self, k: &K) -> Option<&mut V> {
+        let s = k.slot();
+        match self.pages.get_mut(s >> PAGE_BITS)? {
+            Some(p) => match &mut p[s & ((1 << PAGE_BITS) - 1)] {
+                Some((kk, v)) if kk == k => Some(v),
+                _ => None,
+            },
+            None => None,
+        }
+    }
+    pub fn contains_key(&self, k: &K) -> bool {
+        self.get(k).is_some()
+    }
+    /// The entry of `k` is `v` from now on. The old value comes back if `k` had one.
+    pub fn insert(&mut self, k: K, v: V) -> Option<V> {
+        let s = k.slot();
+        if self.pages.len() <= s >> PAGE_BITS {
+            self.pages.resize_with((s >> PAGE_BITS) + 1, || None);
+        }
+        let page = self.pages[s >> PAGE_BITS].get_or_insert_with(|| Box::new([const { None }; 1 << PAGE_BITS]));
+        let old = page[s & ((1 << PAGE_BITS) - 1)].replace((k, v));
+        self.len += old.is_none() as usize;
+        old.filter(|(kk, _)| *kk == k).map(|(_, v)| v)
+    }
+    /// The value of `k`; `v` is stored first if there is none.
+    pub fn get_or_insert(&mut self, k: K, v: V) -> &mut V {
+        if !self.contains_key(&k) {
+            self.insert(k, v);
+        }
+        self.get_mut(&k).expect("just stored")
+    }
+    pub fn retain(&mut self, mut keep: impl FnMut(&K, &mut V) -> bool) {
+        for slot in &mut self.pages {
+            let Some(p) = slot else { continue };
+            for e in p.iter_mut() {
+                if e.as_mut().is_some_and(|(k, v)| !keep(k, v)) {
+                    *e = None;
+                    self.len -= 1;
+                }
+            }
+            if p.iter().all(Option::is_none) {
+                *slot = None;
+            }
+        }
+        while self.pages.last().is_some_and(Option::is_none) {
+            self.pages.pop();
+        }
+        self.pages.shrink_to(self.pages.len() * 2);
+    }
+}
 /// A host method: the DOM, the interpreter, `this`, the arguments.
 pub(crate) type H = fn(&Dom, &mut Interp<'_>, Value, &[Value]) -> R<Value>;
 
@@ -246,13 +359,13 @@ pub(crate) struct Input {
 
 #[derive(Default)]
 pub(crate) struct State {
-    pub by_node: IdMap<NodeId, ObjId>,
-    pub by_obj: IdMap<ObjId, Target>,
-    pub listeners: HashMap<Target, Vec<Listener>>,
+    pub by_node: IdTab<NodeId, ObjId>,
+    pub by_obj: IdTab<ObjId, Target>,
+    pub listeners: IdMap<Target, Vec<Listener>>,
     pub n_listeners: usize,
     pub next_id: u64,
-    pub events: HashMap<ObjId, EventState>,
-    pub inputs: HashMap<NodeId, Input>,
+    pub events: IdMap<ObjId, EventState>,
+    pub inputs: IdMap<NodeId, Input>,
     /// Bytes of the dirty values in `inputs`.
     pub input_bytes: usize,
     pub reports: VecDeque<Report>,
