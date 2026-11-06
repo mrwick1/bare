@@ -30,7 +30,7 @@
 //! Bounds (`Limit(Host(name))`): `mutation-observers`, `mutation-registrations`, `mutation-records` (queued records of all observers).
 
 use crate::browser::*;
-use bare_html::dom::{Atom, Change, Document, NodeId};
+use bare_html::dom::{Atom, Change, Document, NodeId, Watcher};
 use bare_js::eval::{Error, Interp};
 use bare_js::value::{ObjId, Value};
 use std::cell::{Cell, OnceCell, RefCell};
@@ -422,8 +422,7 @@ fn observe(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
     d.mo.armed.set(true);
     d.ensure_notify(it)?;
     if watch {
-        let sh = st.clone();
-        d.doc.borrow_mut().set_watcher(Some(Box::new(move |doc, ch| sh.borrow_mut().on_change(doc, ch))));
+        d.sync_watcher();
     }
     Ok(Value::Undefined)
 }
@@ -514,8 +513,31 @@ impl Dom {
         let mut s = state(self).borrow_mut();
         if s.watching && s.n_regs == 0 {
             s.watching = false;
-            self.doc.borrow_mut().set_watcher(None);
+            drop(s);
+            self.sync_watcher();
         }
+    }
+
+    /// Set the one watcher of the document for what needs it now: the mutation observers, the live ranges and the node iterators. The watcher
+    /// goes when none is left, so a page that uses none pays one `Option` check at a change.
+    pub(crate) fn sync_watcher(&self) {
+        let mo = self.mo.st.get().filter(|s| s.borrow().watching).cloned();
+        let rg = self.range.live();
+        let ni = self.walk.live();
+        let w: Option<Watcher> = (mo.is_some() || rg.is_some() || ni.is_some()).then(|| -> Watcher {
+            Box::new(move |doc, ch| {
+                if let Some(m) = &mo {
+                    m.borrow_mut().on_change(doc, ch);
+                }
+                if let Some(r) = &rg {
+                    r.borrow_mut().on_change(doc, ch);
+                }
+                if let Some(i) = &ni {
+                    i.borrow_mut().on_change(doc, ch);
+                }
+            })
+        });
+        self.doc.borrow_mut().set_watcher(w);
     }
 
     /// Called by `Host::call` after each host call once an observer exists: queue the delivery microtask when a record is waiting.

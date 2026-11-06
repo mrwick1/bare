@@ -19,9 +19,16 @@
 //!   `getBoundingClientRect`, `getClientRects`, `compareBoundaryPoints`, `comparePoint`, `isPointInRange`, `intersectsNode` and the selection
 //!   methods `extend`, `setBaseAndExtent`, `containsNode`, `modify`, `deleteFromDocument`.
 //!
+//! Live ranges (DOM Standard, "live range")
+//! - A range follows the tree. The document watcher (see `Dom::sync_watcher`) tells the ranges of each node linked or unlinked: the "insert" and
+//!   "remove" steps of the standard move the boundary points. The text steps ("replace data", `splitText`, `normalize`) are called by the host
+//!   methods that make them (`Dom::range_data`, `range_split`, `range_merge`). The watcher is set when the first range is made and goes when
+//!   the collector has freed the last one, so a page that makes no range pays nothing at a change. With a range, a change costs one pass over
+//!   the live ranges, and a node removal also the depth of each boundary point.
+//!
 //! Known gaps (on purpose, listed)
-//! - A range does not update when the DOM changes: after `removeChild` or `textContent` a boundary point keeps its node and offset, as if
-//!   nothing happened (the standard moves it). A read through a stale offset is clamped, so it never panics.
+//! - The text that `outerHTML` joins to its neighbours (a Chrome step the standard does not have) moves no range. A read through a stale
+//!   offset is clamped, so it never panics.
 //! - `Selection.toString()` is the text of the Text nodes, as `Range.toString()`. Chrome gives rendered text for a selection (line breaks
 //!   between blocks, no hidden text).
 //! - No caret, no focus, no `selectionchange` event, no selection by mouse, and the selection of `<input>` (`browser_selection.rs`) is not
@@ -31,12 +38,13 @@
 
 use crate::browser::*;
 use crate::browser_lazy::lazy_global;
-use bare_html::dom::{Document, NodeData, NodeId};
+use bare_html::dom::{Change, Document, NodeData, NodeId};
 use bare_js::eval::{Error, Interp};
 use bare_js::value::{to_uint32, ObjId, Value};
 use std::cell::{OnceCell, RefCell};
 use std::cmp::Ordering;
 use std::collections::HashMap;
+use std::rc::Rc;
 
 type V = R<Value>;
 
@@ -51,7 +59,7 @@ struct Rng {
 }
 
 #[derive(Default)]
-struct State {
+pub(crate) struct State {
     /// Range, Selection and AbstractRange: prototype and constructor of each, once made.
     made: Option<[ObjId; 6]>,
     ranges: HashMap<ObjId, Rng>,
@@ -61,7 +69,18 @@ struct State {
 
 #[derive(Default)]
 pub(crate) struct Ranges {
-    st: OnceCell<RefCell<State>>,
+    st: OnceCell<Rc<RefCell<State>>>,
+}
+
+impl Ranges {
+    /// The state, when a range is alive (for the watcher).
+    pub(crate) fn live(&self) -> Option<Rc<RefCell<State>>> {
+        self.st.get().filter(|s| !s.borrow().ranges.is_empty()).cloned()
+    }
+
+    fn any(&self) -> bool {
+        self.st.get().is_some_and(|s| !s.borrow().ranges.is_empty())
+    }
 }
 
 #[cfg(test)]
@@ -71,13 +90,62 @@ impl Ranges {
     }
 }
 
-fn state(d: &Dom) -> &RefCell<State> {
+fn state(d: &Dom) -> &Rc<RefCell<State>> {
     d.range.st.get_or_init(Default::default)
+}
+
+/// Is `n` the node `anc` or inside it?
+fn inside(doc: &Document, mut n: NodeId, anc: NodeId) -> bool {
+    loop {
+        if n == anc {
+            return true;
+        }
+        match doc.parent(n) {
+            Some(p) => n = p,
+            None => return false,
+        }
+    }
+}
+
+impl State {
+    /// The "insert" and "remove" steps of the standard for the live ranges, given the change of the tree.
+    pub(crate) fn on_change(&mut self, doc: &Document, ch: Change) {
+        if self.ranges.is_empty() {
+            return;
+        }
+        match ch {
+            // A node put before another one: the points after its place shift. An append moves nothing.
+            Change::Link { parent, node, next: Some(_), .. } => {
+                let mut at = None;
+                for r in self.ranges.values_mut() {
+                    r.so += (r.sc == parent && r.so > *at.get_or_insert_with(|| index(doc, node))) as u32;
+                    r.eo += (r.ec == parent && r.eo > *at.get_or_insert_with(|| index(doc, node))) as u32;
+                }
+            }
+            // A node to leave: the points in it go to its place in the parent, the points after it shift back.
+            Change::Unlink { parent, node, .. } => {
+                let mut at = None;
+                for r in self.ranges.values_mut() {
+                    if inside(doc, r.sc, node) {
+                        (r.sc, r.so) = (parent, *at.get_or_insert_with(|| index(doc, node)));
+                    } else if r.sc == parent && r.so > *at.get_or_insert_with(|| index(doc, node)) {
+                        r.so -= 1;
+                    }
+                    if inside(doc, r.ec, node) {
+                        (r.ec, r.eo) = (parent, *at.get_or_insert_with(|| index(doc, node)));
+                    } else if r.ec == parent && r.eo > *at.get_or_insert_with(|| index(doc, node)) {
+                        r.eo -= 1;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
 }
 
 // ------------------------------------------------------------ the tree
 
-fn utf16_len(s: &str) -> u32 {
+pub(crate) fn utf16_len(s: &str) -> u32 {
     s.encode_utf16().count().min(u32::MAX as usize) as u32
 }
 
@@ -242,6 +310,9 @@ fn new_range(d: &Dom, it: &mut Interp<'_>, r: Rng) -> V {
     let proto = state(d).borrow().made.expect("made")[0];
     let o = d.obj(it, proto)?;
     set(d, o, r);
+    if state(d).borrow().ranges.len() == 1 {
+        d.sync_watcher();
+    }
     Ok(Value::Object(o))
 }
 
@@ -291,10 +362,12 @@ fn set_start_end(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value], start: 
     if a.len() < 2 {
         return Err(few(it, who, 2, a.len()));
     }
-    let (o, r) = range_of(d, it, this)?;
+    let (o, _) = range_of(d, it, this)?;
     let n = node_arg(d, it, who, a, 0)?;
     let off = offset_arg(it, a[1])?;
     check(d, it, &format!("{who}' on 'Range"), n, off)?;
+    // The offset may have run script that changed the tree: read the points now.
+    let r = range_of(d, it, this)?.1;
     bound(d, o, r, start, n, off);
     Ok(Value::Undefined)
 }
@@ -852,7 +925,67 @@ impl Dom {
 
     pub(crate) fn range_prune(&self, live: &dyn Fn(ObjId) -> bool) {
         if let Some(st) = self.range.st.get() {
-            st.borrow_mut().ranges.retain(|&o, _| live(o));
+            let mut s = st.borrow_mut();
+            let had = !s.ranges.is_empty();
+            s.ranges.retain(|&o, _| live(o));
+            let gone = had && s.ranges.is_empty();
+            drop(s);
+            if gone {
+                self.sync_watcher();
+            }
+        }
+    }
+
+    /// The "replace data" steps for all the text of `node`, which `new` is about to replace (`data = ...`). No range: no work.
+    pub(crate) fn range_set_data(&self, doc: &Document, node: NodeId, new: &str) {
+        if self.range.any()
+            && let NodeData::Text(s) | NodeData::Comment(s) = *doc.data(node)
+        {
+            self.range_data(node, 0, utf16_len(doc.text(s)), utf16_len(new));
+        }
+    }
+
+    /// The "replace data" steps for `count` UTF-16 units at `offset` of the text `node`, replaced by `len` units. Call it before the change.
+    pub(crate) fn range_data(&self, node: NodeId, offset: u32, count: u32, len: u32) {
+        let Some(st) = self.range.st.get() else { return };
+        for r in st.borrow_mut().ranges.values_mut() {
+            for (n, o) in [(r.sc, &mut r.so), (r.ec, &mut r.eo)] {
+                if n == node && *o > offset {
+                    *o = if *o <= offset.saturating_add(count) { offset } else { (*o - count).saturating_add(len) };
+                }
+            }
+        }
+    }
+
+    /// The range steps of `splitText(offset)`: `new` is in the tree after `node`. The points in `node` after `offset` go to `new`, and the points
+    /// of the parent that sat just after `node` move on by one.
+    pub(crate) fn range_split(&self, doc: &Document, node: NodeId, new: NodeId, offset: u32) {
+        let Some(st) = self.range.st.get() else { return };
+        let parent = doc.parent(node);
+        let after = index(doc, node) + 1;
+        for r in st.borrow_mut().ranges.values_mut() {
+            for (n, o) in [(&mut r.sc, &mut r.so), (&mut r.ec, &mut r.eo)] {
+                if *n == node && *o > offset {
+                    (*n, *o) = (new, *o - offset);
+                } else if Some(*n) == parent && *o == after {
+                    *o += 1;
+                }
+            }
+        }
+    }
+
+    /// The range steps of `normalize` for the text node `cur`, which joins `node` after its first `len` units.
+    pub(crate) fn range_merge(&self, doc: &Document, node: NodeId, cur: NodeId, len: u32) {
+        let Some(st) = self.range.st.get() else { return };
+        let (parent, at) = (doc.parent(cur), index(doc, cur));
+        for r in st.borrow_mut().ranges.values_mut() {
+            for (n, o) in [(&mut r.sc, &mut r.so), (&mut r.ec, &mut r.eo)] {
+                if *n == cur {
+                    (*n, *o) = (node, *o + len);
+                } else if Some(*n) == parent && *o == at {
+                    (*n, *o) = (node, len);
+                }
+            }
         }
     }
 }

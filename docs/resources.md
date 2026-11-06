@@ -3449,7 +3449,7 @@ Checks: 48 cases in `intersection-cases.txt` match Chrome. 8 Rust tests run besi
 
 What runs: `document.createTreeWalker(root, whatToShow, filter)`, `TreeWalker` (`root`, `whatToShow`, `filter`, `currentNode`, `parentNode`, `firstChild`, `lastChild`, `previousSibling`, `nextSibling`, `previousNode`, `nextNode`) and `NodeFilter` (the constants). A filter is a function or an object with `acceptNode`, read at each call. A call from inside the filter into the same walker is `InvalidStateError`. A throw in a filter leaves `currentNode` as it was.
 
-Gates and deviations: `NodeIterator` and `createNodeIterator` are not built. A `DocumentFragment` root is not possible yet. `nextNode()` from a detached node with no later node gives `null`, as Chrome does. Bound: `tree-walkers`.
+Gates and deviations: `NodeIterator` is in the next section. A `DocumentFragment` root is not possible yet. `nextNode()` from a detached node with no later node gives `null`, as Chrome does. Bound: `tree-walkers`.
 
 Checks: 46 cases in `walker-cases.txt` match Chrome. 3 Rust tests run besides the Chrome cases.
 
@@ -3570,13 +3570,52 @@ Design (`browser_range.rs`): a range is an object with an entry `{start node, st
 
 Gates (`Unsupported`): `deleteContents`, `extractContents`, `cloneContents`, `insertNode`, `surroundContents`, `createContextualFragment`, `getBoundingClientRect`, `getClientRects`, `compareBoundaryPoints`, `comparePoint`, `isPointInRange`, `intersectsNode`, and on `Selection`: `extend`, `setBaseAndExtent`, `containsNode`, `modify`, `deleteFromDocument`.
 
-Known gaps: a range does not update when the DOM changes. After `removeChild`, `textContent` or a text edit a boundary point keeps its node and offset, and a stale offset is clamped when it is read (a test covers it). `Selection.toString()` is the text of the Text nodes, not rendered text (Chrome adds line breaks between blocks). There is no caret, focus, `selectionchange` event or mouse selection, and the selection of an `<input>` (`browser_selection.rs`) is separate. Cutting a surrogate pair in `toString` gives U+FFFD. `Selection.direction` is `forward` for a range and `none` for a caret (a backward selection cannot be made yet).
+Known gaps: a range follows the DOM since the live range section below. `Selection.toString()` is the text of the Text nodes, not rendered text (Chrome adds line breaks between blocks). There is no caret, focus, `selectionchange` event or mouse selection, and the selection of an `<input>` (`browser_selection.rs`) is separate. Cutting a surrogate pair in `toString` gives U+FFFD. `Selection.direction` is `forward` for a range and `none` for a caret (a backward selection cannot be made yet).
 
-Checks: 79 cases in `tools/fixtures/ui/range-cases.txt` match Chrome 155 (`node tools/ui/chrome_topic.mjs range`, answers in `chrome-range.txt`). Two Chrome cases that depend on live ranges (a text edit under a range) were left out because the host has the gap above. 7 Rust tests cover the lazy globals, the gates, the gap, a collect, the bound, a page that does not use ranges and the UTF-16 cut.
+Checks: 79 cases in `tools/fixtures/ui/range-cases.txt` match Chrome 155 (`node tools/ui/chrome_topic.mjs range`, answers in `chrome-range.txt`). Two Chrome cases that depend on live ranges (a text edit under a range) were left out; the live range section covers them. 7 Rust tests cover the lazy globals, the gates, a collect, the bound, a page that does not use ranges and the UTF-16 cut.
 
 Cost: `perf stat -e instructions:u`, minimum of 3 runs, main c376437 (with PR #160) against this build, the same 52 rows as in the observer section. All below +0.5%. The worst is `loader_load mixed 1` at +0.17% (18,035,243 to 18,066,160), then `loader_load dynamic 100` +0.13% and `browser_load event 100` +0.12%. Startup is +54 instructions (2,745,040 to 2,745,094). `HTMLElement` `innerText`, `offsetParent`, `offsetTop`, `offsetLeft` and `click()` already ran from the previous section; `offsetWidth` and `offsetHeight` existed before.
 
 Not tested: the live staging login on this build, a range over a 100,000-node tree, `toString` of a very large range under the step bound, and a perf row that uses ranges at 1x, 10x, 100x (no load example was added for this API).
+
+## Live ranges, NodeIterator and CharacterData editing
+
+Problem: a `Range` kept its node and offset when the DOM changed, and `NodeIterator` was missing. Editors and focus libraries need both.
+
+What runs:
+- Live ranges. A boundary point follows the DOM Standard steps for: insert (an offset after the new place moves by the count), remove (a point inside the removed node goes to the parent at the old index, and later offsets of the parent go down by one), replace data, `splitText` and `normalize`. The paths are `appendChild`, `insertBefore`, `replaceChild`, `removeChild`, `remove`, `textContent`, `innerHTML`, `outerHTML`, `nodeValue`, `data` and the methods below.
+- `document.createNodeIterator(root, whatToShow, filter)` and `NodeIterator` with `root`, `whatToShow`, `filter`, `referenceNode`, `pointerBeforeReferenceNode`, `nextNode`, `previousNode` and `detach` (a no-op, as in the standard). It uses the filter code of `TreeWalker`. A removal moves the reference node (the pre-removing steps).
+- `CharacterData.substringData`, `appendData`, `insertData`, `deleteData`, `replaceData`, `Text.splitText` and `Node.normalize`. They are the tools that make a text edit, so live ranges need them.
+
+Design: `bare_html::dom::Document` has one watcher slot. `Dom::sync_watcher` (`browser_mutation.rs`) builds one closure for the parts that need it: `MutationObserver`, the live ranges and the `NodeIterator` objects. It installs the closure only while one of them exists, and removes it when the last one goes (a collect prunes dead ranges and iterators). A page with none has no watcher, so a DOM change costs one branch. A range reads the index of a changed node only when a point can be inside it. A text edit calls `Dom::range_data`, `range_split` or `range_merge` before the change; with no range these return at once. The iterator is a `Walker` of `browser_walker.rs` with `cur` as the reference node and a `before` flag.
+
+Deviations:
+- `NodeIterator`: as in Chrome, a pointer before the reference node does not move when no node follows the removed node in the root. `textContent` and `innerHTML` tell the iterators about all the children first, then remove them (the standard removes one by one). A removal during a filter moves the node that the call looks at, and the reference node becomes that moved node, while the call returns the node that it found.
+- A filter that calls its own iterator is `InvalidStateError` (the standard). Chrome does not check, and a filter that always recurses never ends there. This is not in the Chrome cases.
+- `normalize`: an empty Text node only leaves. The standard also moves the points that sit on it, and Chrome does not.
+- `splitText` on a node with no parent still sets the points after the offset to the offset, as the standard does.
+- Offsets are UTF-16 over UTF-8 storage, so a cut in a surrogate pair gives U+FFFD.
+- `outerHTML` on a node that a range touches still joins the Text nodes next to the new nodes without a range step (open).
+- `before`, `after`, `replaceWith` and `insertAdjacentHTML` do not exist in the host, so they have no live range test. `createDocumentFragment` does not exist either.
+
+Checks: `tools/fixtures/ui/liverange-cases.txt` (63 cases) and `iterator-cases.txt` (54 cases) match Chrome 155 (`node tools/ui/chrome_topic.mjs liverange iterator`, answers in `chrome-liverange.txt` and `chrome-iterator.txt`). The Rust tests also cover the shared watcher with a `MutationObserver`, the lazy globals, a collect that drops the watcher, the two bounds, a tree of 2,000 children with a range, the recursion error and the methods that the two objects do not share.
+
+Cost: `tools/js/instr.sh` method (`instructions:u`, minimum of 3 runs, `glibc.malloc.tcache_count=65535`), main 74b924d against this build, each in its own `CARGO_TARGET_DIR` under `/data/bare-tmp`. 52 rows: `browser_load` (9), `style_load` (15), `sheets_load` (9), `loader_load` (9), `scroll_load`, `eval_load` (8) and startup. No row is over +0.5%. The worst is `browser_load event 100` at +0.347% (8,019,654,660 to 8,047,505,036), then `event 10` +0.337% and `mutation 10` +0.296%. The best is `sheets_load dynamic 100` at -0.200%. The seven new host functions and `createNodeIterator` add a fixed cost at start (about 5.9k instructions each). A first run without the large cache gave `style_load churn 1` at +0.51%; the cache removes that swing (see the section on the glibc allocator), and the same row is +0.18% with it.
+
+Load (`tools/js/range_load.sh`, release, 1 GiB address space cap, one process for each row):
+
+| Case | Scale | Work | Time | CPU | Peak RSS |
+| --- | ---: | --- | ---: | ---: | ---: |
+| live | 1 | 1,000 operations, 20 ranges | 153 ms | 70 ms | 8.6 MiB |
+| live | 10 | 10,000 | 1.5 s | 610 ms | 9.3 MiB |
+| live | 100 | 100,000 | 7.5 s | 5.6 s | 13.3 MiB |
+| iter | 1 | 1,000 items | 44 ms | 20 ms | 8.5 MiB |
+| iter | 10 | 10,000 | 470 ms | 380 ms | 11.7 MiB |
+| iter | 100 | 100,000 (10,000 backward) | 1.4 s | 1.2 s | 17.2 MiB |
+
+`live` checks all 40 points against a model in the script after every 500 operations (inserts, removals, `insertData`, `deleteData`). The time is mostly the model loop in JS. `iter` removes each node that `nextNode` returned, then walks back over a list and clears it under the iterator. The wall time of the first rows is above the CPU time because the perf matrix ran at the same time. A collect traces every wrapper of a node that is in the tree, so a list of 10,000 wrapped nodes makes each collect slow (this was the same before this change).
+
+Not tested: the live staging login on this build; a range over a tree of 100,000 nodes with a page that edits it from many places; `outerHTML` joins of Text nodes under a range; `before`, `after`, `replaceWith` and `insertAdjacentHTML` (not in the host); a `DocumentFragment` root of an iterator; Chrome cases of a filter that recurses.
 
 ## HTTP methods
 

@@ -1,0 +1,196 @@
+var $ = function (i) { return document.getElementById(i) };
+var nm = function (n) { return n === null ? 'null' : n.nodeType === 3 ? '#' + n.data : n.nodeType === 8 ? '!' + n.data : n.nodeType === 10 ? 'doctype' : n.nodeType === 9 ? 'document' : n.id || n.nodeName };
+var pt = function (r) { return nm(r.startContainer) + ':' + r.startOffset + '-' + nm(r.endContainer) + ':' + r.endOffset + (r.collapsed ? ' collapsed' : '') };
+var mk = function (t) { var e = document.createElement('i'); e.id = t; return e };
+var err = function (f) { try { return String(f()) } catch (e) { return e.name + ': ' + e.message } };
+var T = function (i, k) { return $(i).childNodes[k || 0] };
+var rg = function (a, ao, b, bo) { var r = document.createRange(); r.setStart(a, ao); r.setEnd(b, bo); return r };
+=== insert-before-start-shifts-both
+@html <div id=r><p id=a>A</p><p id=b>B</p><p id=c>C</p><p id=d>D</p></div>
+var r = rg($('r'), 1, $('r'), 3); $('r').insertBefore(mk('x'), $('a')); (function () { return pt(r) })
+=== insert-at-start-offset-moves-only-end
+@html <div id=r><p id=a>A</p><p id=b>B</p><p id=c>C</p><p id=d>D</p></div>
+var r = rg($('r'), 1, $('r'), 3); $('r').insertBefore(mk('x'), $('b')); (function () { return pt(r) })
+=== insert-inside-range
+@html <div id=r><p id=a>A</p><p id=b>B</p><p id=c>C</p><p id=d>D</p></div>
+var r = rg($('r'), 1, $('r'), 3); $('r').insertBefore(mk('x'), $('c')); (function () { return pt(r) })
+=== insert-at-end-offset
+@html <div id=r><p id=a>A</p><p id=b>B</p><p id=c>C</p><p id=d>D</p></div>
+var r = rg($('r'), 1, $('r'), 3); $('r').insertBefore(mk('x'), $('d')); (function () { return pt(r) })
+=== append-child-leaves-ranges
+@html <div id=r><p id=a>A</p><p id=b>B</p><p id=c>C</p><p id=d>D</p></div>
+var r = rg($('r'), 1, $('r'), 4); $('r').appendChild(mk('x')); (function () { return pt(r) })
+=== insert-in-other-parent
+@html <div id=r><p id=a>A</p><p id=b>B</p></div>
+var r = rg($('r'), 1, $('r'), 2); $('a').appendChild(mk('x')); (function () { return pt(r) })
+=== insert-three-before
+@html <div id=r><p id=a>A</p><p id=b>B</p><p id=c>C</p></div>
+var r = rg($('r'), 1, $('r'), 2); ['x', 'y', 'z'].forEach(function (t) { $('r').insertBefore(mk(t), $('b')) }); (function () { return pt(r) })
+=== prepend-several
+@html <div id=r><p id=a>A</p><p id=b>B</p><p id=c>C</p></div>
+var r = rg($('r'), 1, $('r'), 2); $('r').prepend(mk('x'), mk('y')); (function () { return pt(r) })
+=== remove-earlier-child
+@html <div id=r><p id=a>A</p><p id=b>B</p><p id=c>C</p><p id=d>D</p></div>
+var r = rg($('r'), 2, $('r'), 3); $('a').remove(); (function () { return pt(r) })
+=== remove-child-at-start-offset
+@html <div id=r><p id=a>A</p><p id=b>B</p><p id=c>C</p><p id=d>D</p></div>
+var r = rg($('r'), 1, $('r'), 3); $('b').remove(); (function () { return pt(r) })
+=== remove-child-at-end-offset
+@html <div id=r><p id=a>A</p><p id=b>B</p><p id=c>C</p><p id=d>D</p></div>
+var r = rg($('r'), 1, $('r'), 3); $('c').remove(); (function () { return pt(r) })
+=== remove-later-child
+@html <div id=r><p id=a>A</p><p id=b>B</p><p id=c>C</p><p id=d>D</p></div>
+var r = rg($('r'), 1, $('r'), 3); $('d').remove(); (function () { return pt(r) })
+=== remove-ancestor-of-start
+@html <div id=r><p id=a>A<b id=b1>big</b></p><p id=c>C</p><p id=d>D</p></div>
+var r = rg(T('b1'), 1, T('c'), 1); $('a').remove(); (function () { return pt(r) })
+=== remove-ancestor-of-end
+@html <div id=r><p id=a>A</p><p id=c>C<b id=b1>big</b></p><p id=d>D</p></div>
+var r = rg(T('a'), 0, T('b1'), 2); $('c').remove(); (function () { return pt(r) })
+=== remove-subtree-holding-both
+@html <div id=r><p id=a>A</p><p id=c>C<b id=b1>big</b>x</p><p id=d>D</p></div>
+var r = rg(T('c', 0), 1, T('b1'), 2); $('c').remove(); (function () { return pt(r) + ' ' + r.toString() })
+=== remove-deep-node-inside-range
+@html <div id=r><p id=a>A<b id=b1>big</b>z</p><p id=c>C</p></div>
+var r = rg(T('a', 0), 0, T('c'), 1); $('b1').remove(); (function () { return pt(r) + ' ' + r.toString() })
+=== remove-child-in-the-middle-of-text-siblings
+@html <div id=r><p id=a>A<b id=b1>big</b>z</p></div>
+var r = rg($('a'), 1, $('a'), 3); $('b1').remove(); (function () { return pt(r) })
+=== remove-all-children-text-content
+@html <div id=r><p id=a>A</p><p id=c>C</p></div>
+var r = rg(T('a'), 0, T('c'), 1); $('r').textContent = ''; (function () { return pt(r) })
+=== text-content-replaces-children
+@html <div id=r><p id=a>A</p><p id=c>C</p></div>
+var r = rg($('r'), 1, $('r'), 2); $('r').textContent = 'new'; (function () { return pt(r) })
+=== inner-html-replaces-children
+@html <div id=r><p id=a>A</p><p id=c>C</p></div>
+var r = rg(T('a'), 0, $('r'), 2); $('r').innerHTML = '<u>1</u><u>2</u>'; (function () { return pt(r) })
+=== replace-child
+@html <div id=r><p id=a>A</p><p id=b>B</p><p id=c>C</p></div>
+var r = rg($('r'), 0, $('r'), 3); $('r').replaceChild(mk('x'), $('b')); (function () { return pt(r) })
+=== replace-child-then-insert
+@html <div id=r><p id=a>A</p><p id=b>B</p><p id=c>C</p></div>
+var r = rg(T('b'), 0, T('c'), 1); var y = mk('y'); $('r').replaceChild(mk('x'), $('b')); $('r').insertBefore(y, $('c')); (function () { return pt(r) })
+=== move-node-within-parent
+@html <div id=r><p id=a>A</p><p id=b>B</p><p id=c>C</p><p id=d>D</p></div>
+var r = rg($('r'), 1, $('r'), 3); $('r').appendChild($('a')); (function () { return pt(r) })
+=== move-node-into-range
+@html <div id=r><p id=a>A</p><p id=b>B</p><p id=c>C</p><p id=d>D</p></div>
+var r = rg($('r'), 1, $('r'), 3); $('r').insertBefore($('d'), $('c')); (function () { return pt(r) })
+=== move-node-with-a-boundary-inside
+@html <div id=r><p id=a>A</p><p id=b>B</p><p id=c>C</p></div><div id=q></div>
+var r = rg(T('b'), 0, T('c'), 1); $('q').appendChild($('b')); (function () { return pt(r) })
+=== detached-tree-follows
+@html <div id=r></div>
+var t = document.createElement('div'); t.innerHTML = '<p id=a>A</p><p id=b>B</p><p id=c>C</p>'; var r = rg(t, 1, t, 3); t.removeChild(t.firstChild); (function () { return pt(r) + ' ' + t.childNodes.length })
+=== removed-node-keeps-inner-range
+@html <div id=r><p id=a>A<b id=b1>big</b></p><p id=c>C</p></div>
+var r = rg(T('a', 0), 0, T('b1'), 2); var a = $('a'); a.remove(); (function () { return pt(r) + ' ' + (r.commonAncestorContainer === $('r')) })
+=== set-data-collapses-points
+@html <div id=r><p id=a>abcdef</p></div>
+var t = T('a'); var r = rg(t, 1, t, 5); t.data = 'xy'; (function () { return pt(r) })
+=== set-data-end-of-text
+@html <div id=r><p id=a>abcdef</p></div>
+var t = T('a'); var r = rg(t, 0, t, 6); t.data = 'xyz'; (function () { return pt(r) })
+=== node-value-and-text-content-on-text
+@html <div id=r><p id=a>abcdef</p><p id=b>abcdef</p></div>
+var t = T('a'), u = T('b'); var r = rg(t, 2, t, 4), q = rg(u, 2, u, 4); t.nodeValue = 'q'; u.textContent = 'q'; (function () { return pt(r) + ' ' + pt(q) })
+=== comment-data
+@html <div id=r><!--abcdef--></div>
+var c = T('r'); var r = rg(c, 1, c, 5); c.data = 'xy'; (function () { return pt(r) })
+=== replace-data-inside
+@html <div id=r><p id=a>abcdefgh</p></div>
+var t = T('a'); var r = rg(t, 1, t, 7); t.replaceData(2, 2, 'XYZ'); (function () { return pt(r) + ' ' + t.data })
+=== replace-data-covering-points
+@html <div id=r><p id=a>abcdefgh</p></div>
+var t = T('a'); var r = rg(t, 3, t, 4); t.replaceData(2, 4, 'Z'); (function () { return pt(r) + ' ' + t.data })
+=== replace-data-at-point
+@html <div id=r><p id=a>abcdefgh</p></div>
+var t = T('a'); var r = rg(t, 2, t, 4); t.replaceData(2, 2, 'ZZZ'); (function () { return pt(r) + ' ' + t.data })
+=== insert-data
+@html <div id=r><p id=a>abcdefgh</p></div>
+var t = T('a'); var r = rg(t, 2, t, 5); t.insertData(2, 'XX'); t.insertData(5, 'Y'); t.insertData(8, 'W'); (function () { return pt(r) + ' ' + t.data })
+=== insert-data-before-and-after
+@html <div id=r><p id=a>abcdefgh</p></div>
+var t = T('a'); var r = rg(t, 3, t, 5); t.insertData(0, '123'); (function () { return pt(r) + ' ' + t.data })
+=== delete-data
+@html <div id=r><p id=a>abcdefgh</p></div>
+var t = T('a'); var r = rg(t, 2, t, 6); t.deleteData(1, 3); (function () { return pt(r) + ' ' + t.data })
+=== append-data
+@html <div id=r><p id=a>abcdefgh</p></div>
+var t = T('a'); var r = rg(t, 2, t, 8); t.appendData('ZZ'); (function () { return pt(r) + ' ' + t.data })
+=== replace-data-other-node-untouched
+@html <div id=r><p id=a>abcd</p><p id=b>efgh</p></div>
+var t = T('a'), u = T('b'); var r = rg(t, 1, u, 3); u.replaceData(0, 2, 'Z'); (function () { return pt(r) + ' ' + r })
+=== split-text-points-after-offset
+@html <div id=r><p id=a>abcdefgh</p></div>
+var t = T('a'); var r = rg(t, 1, t, 6); t.splitText(3); (function () { return pt(r) + ' ' + r })
+=== split-text-point-at-offset
+@html <div id=r><p id=a>abcdefgh</p></div>
+var t = T('a'); var r = rg(t, 3, t, 3); t.splitText(3); (function () { return pt(r) })
+=== split-text-at-end
+@html <div id=r><p id=a>abcdefgh</p></div>
+var t = T('a'); var r = rg(t, 2, t, 8); t.splitText(8); (function () { return pt(r) + ' ' + $('a').childNodes.length })
+=== split-text-parent-points
+@html <div id=r><p id=a>abcdefgh<b>x</b></p></div>
+var t = T('a'); var r = rg($('a'), 0, $('a'), 1); var s = rg($('a'), 1, $('a'), 2); t.splitText(3); (function () { return pt(r) + ' | ' + pt(s) })
+=== split-text-no-parent
+@html <div id=r></div>
+var t = document.createTextNode('abcdef'); var r = rg(t, 1, t, 5); var n = t.splitText(2); (function () { return pt(r) + ' ' + nm(n) + ' ' + (n.parentNode === null) })
+=== normalize-merges-texts
+@html <div id=r><p id=a>ab</p></div>
+var p = $('a'); p.appendChild(document.createTextNode('cd')); p.appendChild(document.createTextNode('ef')); var r = rg(p.childNodes[1], 1, p.childNodes[2], 1); p.normalize(); (function () { return pt(r) + ' ' + p.childNodes.length + ' ' + r })
+=== normalize-parent-points
+@html <div id=r><p id=a>ab</p></div>
+var p = $('a'); p.appendChild(document.createTextNode('cd')); p.appendChild(document.createTextNode('ef')); var r = rg(p, 1, p, 2), s = rg(p, 3, p, 3), q = rg(p, 0, p, 1); p.normalize(); (function () { return pt(r) + ' | ' + pt(s) + ' | ' + pt(q) })
+=== normalize-removes-empty-text
+@html <div id=r><p id=a></p></div>
+var p = $('a'); p.appendChild(document.createTextNode('')); p.appendChild(document.createTextNode('xy')); p.appendChild(document.createTextNode('')); var r = rg(p, 2, p, 3); p.normalize(); (function () { return pt(r) + ' ' + p.childNodes.length })
+=== normalize-deep
+@html <div id=r><p id=a>ab<b id=b1>x</b>cd</p></div>
+var p = $('a'); p.appendChild(document.createTextNode('ef')); var bb = $('b1'); bb.appendChild(document.createTextNode('y')); var r = rg(bb.childNodes[1], 1, p.childNodes[3], 1); $('r').normalize(); (function () { return pt(r) + ' ' + p.childNodes.length + bb.childNodes.length })
+=== selection-follows-removal
+@html <div id=r><p id=a>A</p><p id=b>B</p><p id=c>C</p></div>
+var s = getSelection(); s.collapse($('r'), 2); $('a').remove(); (function () { return s.anchorNode.id + ':' + s.anchorOffset + ' ' + s.rangeCount })
+=== selection-follows-text-edit
+@html <div id=r><p id=a>abcdef</p></div>
+var s = getSelection(); s.collapse(T('a'), 4); T('a').deleteData(1, 2); (function () { return s.anchorOffset + ' ' + s.focusOffset })
+=== selection-range-follows-removal
+@html <div id=r><p id=a>A</p><p id=b>B</p><p id=c>C</p></div>
+var s = getSelection(); s.selectAllChildren($('r')); $('b').remove(); (function () { return s.anchorOffset + '-' + s.focusOffset + ' ' + s.rangeCount })
+=== clone-range-is-live-too
+@html <div id=r><p id=a>A</p><p id=b>B</p><p id=c>C</p></div>
+var r = rg($('r'), 1, $('r'), 2); var q = r.cloneRange(); $('a').remove(); (function () { return pt(r) + ' ' + pt(q) })
+=== collapsed-range-moves
+@html <div id=r><p id=a>A</p><p id=b>B</p><p id=c>C</p></div>
+var r = rg($('r'), 2, $('r'), 2); $('r').insertBefore(mk('x'), $('a')); $('b').remove(); (function () { return pt(r) })
+=== select-node-after-removal
+@html <div id=r><p id=a>A</p><p id=b>B</p><p id=c>C</p></div>
+var r = document.createRange(); r.selectNode($('c')); $('a').remove(); (function () { return pt(r) + ' ' + r })
+=== select-node-contents-then-append
+@html <div id=r><p id=a>A</p></div>
+var r = document.createRange(); r.selectNodeContents($('r')); $('r').appendChild(mk('x')); (function () { return pt(r) + ' ' + r.collapsed })
+=== to-string-after-edit
+@html <div id=r><p id=a>Hello world</p></div>
+var t = T('a'); var r = rg(t, 0, t, 5); t.insertData(0, 'Oh, '); (function () { return pt(r) + ' [' + r + ']' })
+=== outer-html-two-nodes
+@html <div id=r><p id=a>A</p><p id=b>B</p></div>
+var r = rg($('r'), 1, $('r'), 2); $('a').outerHTML = '<u>1</u><u>2</u>'; (function () { return pt(r) })
+=== document-body-removal
+@html <div id=r><p id=a>A</p></div>
+var r = rg(T('a'), 0, T('a'), 1); document.body.removeChild($('r')); (function () { return pt(r) })
+=== chardata-methods-and-errors
+@html <div id=r><p id=a>abcdef</p></div>
+var t = T('a'); (function () { return [t.substringData(1, 3), t.substringData(4, 100), err(function () { return t.substringData(7, 1) }), err(function () { return t.replaceData(7, 1, 'x') }), err(function () { return t.insertData(7, 'x') }), err(function () { return t.deleteData(7, 1) }), err(function () { return t.splitText(7) }), err(function () { return t.replaceData(1) }), err(function () { return t.appendData() }), err(function () { return t.splitText() }), err(function () { return t.substringData(1) }), t.data].join(' | ') })
+=== method-shapes
+@html <div id=r><p id=a>abcdef</p><!--c--></div>
+(function () { return [typeof Text.prototype.splitText, typeof Comment.prototype.splitText, typeof CharacterData.prototype.replaceData, typeof Text.prototype.replaceData, Text.prototype.splitText.length, CharacterData.prototype.replaceData.length, CharacterData.prototype.substringData.length, CharacterData.prototype.insertData.length, CharacterData.prototype.appendData.length, CharacterData.prototype.deleteData.length, Node.prototype.normalize.length, Object.prototype.hasOwnProperty.call(CharacterData.prototype, 'replaceData'), Object.prototype.hasOwnProperty.call(Text.prototype, 'splitText'), Object.prototype.hasOwnProperty.call(Node.prototype, 'normalize'), $('a').childNodes[0].splitText(2).nodeType, $('r').normalize()].join() })
+=== split-text-inserts-the-sibling
+@html <div id=r><p id=a>abcdef</p></div>
+var t = T('a'); var n = t.splitText(2); (function () { return [nm(n), nm(t), t.nextSibling === n, n.parentNode === $('a'), $('a').childNodes.length, t.length, n.length].join(' ') })
+=== comment-data-methods
+@html <div id=r><p id=a>abcdef</p><!--abcdef--></div>
+var c = T('r', 1); c.replaceData(1, 2, 'XY'); c.insertData(0, '<'); c.appendData('>'); c.deleteData(2, 1); (function () { return c.data + ' ' + c.length + ' ' + c.substringData(1, 3) })
+=== normalize-no-ranges
+@html <div id=r><p id=a>ab</p></div>
+var p = $('a'); p.appendChild(document.createTextNode('cd')); p.appendChild(document.createTextNode('')); p.appendChild(document.createElement('i')); p.appendChild(document.createTextNode('x')); p.appendChild(document.createTextNode('y')); $('r').normalize(); (function () { return p.childNodes.length + ' ' + nm(p.childNodes[0]) + ' ' + nm(p.childNodes[2]) })

@@ -279,6 +279,7 @@ pub(crate) enum P {
     Button,
     Submit,
     CharData,
+    Text,
     Document,
     Fragment,
     Shadow,
@@ -741,6 +742,7 @@ impl Dom {
             P::Button => ps.button,
             P::Submit => ps.submit,
             P::CharData => ps.chardata,
+            P::Text => ps.text,
             P::Document => ps.document,
             P::Fragment => ps.fragment,
             P::Shadow => ps.shadow,
@@ -807,6 +809,13 @@ impl Dom {
         let mut fixed = vec![et, node, element, html, svg, input, iframe, link, form, button, submit, chardata, text, comment, document, fragment, shadow, event, custom, focus, mouse, pointer, keyboard, inputev, domexc];
 
         // methods and accessors
+        // One buffer for the names "get x" and "set x" (a `format!` for each of the 130 accessors cost 1.5% of the start).
+        let mut nm = String::new();
+        let named = |nm: &mut String, p: &str, n: &str| {
+            nm.clear();
+            nm.push_str(p);
+            nm.push_str(n);
+        };
         for d in DEFS {
             let key = self.key(it, d.name)?;
             for &on in d.on {
@@ -817,12 +826,15 @@ impl Dom {
                         it.define_data(target, key, Value::Object(f), true, false, true)?;
                     }
                     Kind::Get(h) => {
-                        let f = self.add_fn(it, h, &format!("get {}", d.name), 0, false)?;
+                        named(&mut nm, "get ", d.name);
+                        let f = self.add_fn(it, h, &nm, 0, false)?;
                         self.define_accessor(it, target, key, f, None)?;
                     }
                     Kind::Accessor(gh, sh) => {
-                        let f = self.add_fn(it, gh, &format!("get {}", d.name), 0, false)?;
-                        let s = self.add_fn(it, sh, &format!("set {}", d.name), 1, false)?;
+                        named(&mut nm, "get ", d.name);
+                        let f = self.add_fn(it, gh, &nm, 0, false)?;
+                        named(&mut nm, "set ", d.name);
+                        let s = self.add_fn(it, sh, &nm, 1, false)?;
                         self.define_accessor(it, target, key, f, Some(s))?;
                     }
                 }
@@ -1015,6 +1027,13 @@ pub(crate) static DEFS: &[Def] = &[
     Def { on: CHILD, name: "remove", len: 0, kind: M(nd::remove) },
     Def { on: &[CharData], name: "data", len: 0, kind: A(nd::node_value_text, nd::set_node_value_text) },
     Def { on: &[CharData], name: "length", len: 0, kind: G(nd::data_length) },
+    Def { on: &[CharData], name: "substringData", len: 2, kind: M(crate::browser_chardata::substring_data) },
+    Def { on: &[CharData], name: "appendData", len: 1, kind: M(crate::browser_chardata::append_data) },
+    Def { on: &[CharData], name: "insertData", len: 2, kind: M(crate::browser_chardata::insert_data) },
+    Def { on: &[CharData], name: "deleteData", len: 2, kind: M(crate::browser_chardata::delete_data) },
+    Def { on: &[CharData], name: "replaceData", len: 3, kind: M(crate::browser_chardata::replace_data) },
+    Def { on: &[Text], name: "splitText", len: 1, kind: M(crate::browser_chardata::split_text) },
+    Def { on: &[Node], name: "normalize", len: 0, kind: M(crate::browser_chardata::normalize) },
     Def { on: &[Document], name: "createElement", len: 1, kind: M(nd::create_element) },
     Def { on: &[Document], name: "createElementNS", len: 2, kind: M(ns::create_element_ns) },
     Def { on: &[Document], name: "getElementsByName", len: 1, kind: M(crate::browser_nodelist::get_elements_by_name) },

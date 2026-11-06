@@ -930,6 +930,11 @@ impl Document {
         self.watcher = watcher;
     }
 
+    /// Is a watcher set? (For tests of the host: a page that uses none must have none.)
+    pub fn has_watcher(&self) -> bool {
+        self.watcher.is_some()
+    }
+
     fn notify(&mut self, change: Change) {
         if let Some(mut w) = self.watcher.take() {
             w(self, change);

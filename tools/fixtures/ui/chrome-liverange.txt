@@ -1,0 +1,63 @@
+insert-before-start-shifts-both	r:2-r:4
+insert-at-start-offset-moves-only-end	r:1-r:4
+insert-inside-range	r:1-r:4
+insert-at-end-offset	r:1-r:3
+append-child-leaves-ranges	r:1-r:4
+insert-in-other-parent	r:1-r:2
+insert-three-before	r:1-r:5
+prepend-several	r:3-r:4
+remove-earlier-child	r:1-r:2
+remove-child-at-start-offset	r:1-r:2
+remove-child-at-end-offset	r:1-r:2
+remove-later-child	r:1-r:3
+remove-ancestor-of-start	r:0-#C:1
+remove-ancestor-of-end	#A:0-r:1
+remove-subtree-holding-both	r:1-r:1 collapsed 
+remove-deep-node-inside-range	#A:0-#C:1 AzC
+remove-child-in-the-middle-of-text-siblings	a:1-a:2
+remove-all-children-text-content	r:0-r:0 collapsed
+text-content-replaces-children	r:0-r:0 collapsed
+inner-html-replaces-children	r:0-r:0 collapsed
+replace-child	r:0-r:3
+replace-child-then-insert	r:1-#C:1
+move-node-within-parent	r:0-r:2
+move-node-into-range	r:1-r:4
+move-node-with-a-boundary-inside	r:1-#C:1
+detached-tree-follows	DIV:0-DIV:2 2
+removed-node-keeps-inner-range	r:0-r:0 collapsed true
+set-data-collapses-points	#xy:0-#xy:0 collapsed
+set-data-end-of-text	#xyz:0-#xyz:0 collapsed
+node-value-and-text-content-on-text	#q:0-#q:0 collapsed #q:0-#q:0 collapsed
+comment-data	!xy:0-!xy:0 collapsed
+replace-data-inside	#abXYZefgh:1-#abXYZefgh:8 abXYZefgh
+replace-data-covering-points	#abZgh:2-#abZgh:2 collapsed abZgh
+replace-data-at-point	#abZZZefgh:2-#abZZZefgh:2 collapsed abZZZefgh
+insert-data	#abXXcYdeWfgh:2-#abXXcYdeWfgh:8 abXXcYdeWfgh
+insert-data-before-and-after	#123abcdefgh:6-#123abcdefgh:8 123abcdefgh
+delete-data	#aefgh:1-#aefgh:3 aefgh
+append-data	#abcdefghZZ:2-#abcdefghZZ:8 abcdefghZZ
+replace-data-other-node-untouched	#abcd:1-#Zgh:2 bcdZg
+split-text-points-after-offset	#abc:1-#defgh:3 bcdef
+split-text-point-at-offset	#abc:3-#abc:3 collapsed
+split-text-at-end	#abcdefgh:2-#abcdefgh:8 2
+split-text-parent-points	a:0-a:2 | a:2-a:3
+split-text-no-parent	#ab:1-#ab:2 #cdef true
+normalize-merges-texts	#abcdef:3-#abcdef:5 1 de
+normalize-parent-points	#abcdef:2-#abcdef:4 | a:1-a:1 collapsed | a:0-#abcdef:2
+normalize-removes-empty-text	a:1-a:1 collapsed 1
+normalize-deep	#xy:2-#cdef:3 31
+selection-follows-removal	r:1 1
+selection-follows-text-edit	2 2
+selection-range-follows-removal	0-2 1
+clone-range-is-live-too	r:0-r:1 r:0-r:1
+collapsed-range-moves	r:2-r:2 collapsed
+select-node-after-removal	r:1-r:2 C
+select-node-contents-then-append	r:0-r:1 false
+to-string-after-edit	#Oh, Hello world:0-#Oh, Hello world:9 [Oh, Hello]
+outer-html-two-nodes	r:0-r:3
+document-body-removal	BODY:0-BODY:0 collapsed
+chardata-methods-and-errors	bcd | ef | IndexSizeError: Failed to execute 'substringData' on 'CharacterData': The offset 7 is greater than the node's length (6). | IndexSizeError: Failed to execute 'replaceData' on 'CharacterData': The offset 7 is greater than the node's length (6). | IndexSizeError: Failed to execute 'insertData' on 'CharacterData': The offset 7 is greater than the node's length (6). | IndexSizeError: Failed to execute 'deleteData' on 'CharacterData': The offset 7 is greater than the node's length (6). | IndexSizeError: Failed to execute 'splitText' on 'Text': The offset 7 is larger than the Text node's length. | TypeError: Failed to execute 'replaceData' on 'CharacterData': 3 arguments required, but only 1 present. | TypeError: Failed to execute 'appendData' on 'CharacterData': 1 argument required, but only 0 present. | TypeError: Failed to execute 'splitText' on 'Text': 1 argument required, but only 0 present. | TypeError: Failed to execute 'substringData' on 'CharacterData': 2 arguments required, but only 1 present. | abcdef
+method-shapes	function,undefined,function,function,1,3,2,2,1,2,0,true,true,true,3,
+split-text-inserts-the-sibling	#cdef #ab true true 2 2 4
+comment-data-methods	<aYdef> 7 aYd
+normalize-no-ranges	3 #abcd #xy

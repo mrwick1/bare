@@ -1,0 +1,54 @@
+defaults	true 4294967295  true true function function function
+interface-shape	[object NodeIterator] true function true false TypeError: Failed to construct 'NodeIterator': Illegal constructor constructor,detach,filter,nextNode,pointerBeforeReferenceNode,previousNode,referenceNode,root,whatToShow
+document-method-length	1 | TypeError: Failed to execute 'createNodeIterator' on 'Document': 1 argument required, but only 0 present. | TypeError: Failed to execute 'createNodeIterator' on 'Document': parameter 1 is not of type 'Node'. | TypeError: Failed to execute 'createNodeIterator' on 'Document': parameter 1 is not of type 'Node'. | TypeError: Failed to execute 'createNodeIterator' on 'Document': parameter 3 is not of type 'Object'. | TypeError: Failed to execute 'createNodeIterator' on 'Document': parameter 3 is not of type 'Object'.
+next-node-visits-everything	r p1 #a b1 #x #b !c u l1 #1 l2 #2 s #s i1 i1>
+previous-node-from-start	 r<
+next-then-previous	rr> p1p1> #a#a> b1b1> b1b1< #a#a< p1p1< rr< nullr<
+previous-then-next	p1p1< p1p1> #a#a>
+walk-to-the-end-and-back	rr> p1p1> #a#a> i1i1> nulli1> nulli1> i1i1< #a#a< p1p1< rr< nullr< nullr<
+elements-only	r p1 b1 u l1 l2 s i1 i1>
+text-only	#a #x #b #1 #2 #s #s>
+text-and-comment-backwards	#s #2 #1 !c #b #x #a #a<
+show-nothing	|r<|0
+what-to-show-is-uint32	4294967295,1,4,4294967295,0,1
+filter-function	l1 l2 l2>
+filter-object	b1 true
+reject-does-not-prune	r b1 u l1 l2
+filter-this-and-args	true:1:r true:1
+filter-return-values	r p4
+filter-called-in-order-and-lazily	r p1 p1
+filter-not-called-for-hidden-types	r p1
+filter-throw-keeps-state	r> Error: boom r> p1
+filter-not-callable	TypeError: Failed to execute 'nextNode' on 'NodeIterator': Failed to execute 'acceptNode' on 'NodeFilter': The provided callback is not callable. r<
+accept-node-read-each-call	null
+root-is-excluded-from-parents-and-includes-itself	q p2|p2 q
+root-leaf	p1 #a|#a p1|p1<
+root-document	HTML HEAD STYLE BODY r p1
+root-text-node	#hello|#hello
+detach-is-a-no-op	undefined p1 p2 p2>
+two-iterators-are-independent	p1> r< r
+getters-are-read-only-and-on-the-prototype	r r true 1 function  0
+wrong-receiver	TypeError: Illegal invocation | TypeError: Illegal invocation | TypeError: Illegal invocation
+remove-before-reference-does-nothing	b> b r
+remove-reference-pointer-after-goes-to-previous	#A> c c>
+remove-reference-first-child-goes-to-parent	a> c
+remove-reference-previous-sibling-deep	#U>
+remove-ancestor-of-reference	#A> c
+remove-ancestor-pointer-before-goes-to-following	b< c< c
+remove-reference-pointer-before-last-in-root	b< b< b b>
+remove-reference-pointer-before-with-following	a< b< b>
+remove-reference-pointer-before-follow-inside-root-only	a< a< a
+remove-root-does-nothing	a> a> null a
+remove-subtree-not-containing-reference	c> c r
+remove-text-reference	b> b
+remove-all-children-text-content	#B> null #B>
+replace-children-with-inner-html	#A> 
+move-reference-node	#A> c b
+move-reference-out-of-root	#A>  a r
+remove-while-filtering	a> b c
+remove-while-iterating-all	r a b c d d> 2
+remove-all-after-use-detached-subtree-text	#x> r>
+several-iterators-get-removal	#A> c> a<
+remove-ancestor-of-root	a> a> null a
+error-messages	TypeError: Illegal invocation | TypeError: Illegal invocation | TypeError: Failed to execute 'nextNode' on 'NodeIterator': Failed to execute 'acceptNode' on 'NodeFilter': The provided callback is not callable. | null
+reference-node-getter-after-detached-subtree	b1 r true
