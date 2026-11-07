@@ -468,6 +468,7 @@ To follow the standard, add the five names to the first arm of `Builder::in_temp
 - Before an action, the target must be connected, rendered, enabled and on top at the center of its visible part, after a scroll into view if needed. Else the action is refused and nothing is sent. Reason: these are the checks of Playwright. A user cannot click an element that another element covers.
 - Timers run between input events: `App::tick` gives the time of the next task, and the window loop sleeps in `poll` until then at the latest. Reason: S4 topic 6 left this gap, and a real journey needs it (a page loads its data after a timer).
 - A wait runs the due tasks and sleeps until the next one. When no task is queued, nothing can change the page, so the step fails at once. Reason: no fixed sleeps, and a failure needs no full time limit. The network calls run inside the tasks, so no request is in flight between two ticks.
+- Since "Input that does not wait" (below), the driver and the window run a live session. A reply in flight and a next document on its way count as queued work: the tick asks to be called again in 4 ms, so a wait does not fail as idle while the network works.
 - Locators follow Playwright: role and accessible name, label, text, placeholder, CSS. A locator must match one element. Reason: a duplicate target is a test bug. A first-match rule hides it.
 - The output is one JSON object. Secrets are replaced in every text when the JSON is written, so a secret that the driver learns late is also hidden in earlier records. A capture is withheld when a secret is in the text or in a field of the page. Reason: a password field shows dots, but an email field and the page text show their text in the pixels.
 - Network records come from `bare_net::trace` (`enable`, `take`). The list is one for each process, so one driver runs at a time in a process. Reason: it holds the URL without the query, the status and the times already. A second recorder would cost a second hook in the hot path.
@@ -500,6 +501,19 @@ Design:
 12. Shared styles. The cascade cache shares the frame styles (`Rc<Styles>`). The restyle drops the cache entry, which is stale after a change, and then changes the styles in place. When another holder still shares them, the frame gets a full update.
 
 What is not incremental: a resize (the viewport is an input of each block, so all blocks lay out again), a change of a style sheet, a page with a shadow root, a form state change when a rule reads a form pseudo-class, a float above the change in the same formatting context, and the boxes inside flex, grid and table containers (their container lays them out again; the existing `memo.rs` helps inside one layout).
+
+## Input that does not wait
+
+An input event ran the page until it settled (`Session::resume(&[])`): all replies, prefetches and the next document. Each key and each click blocked the window until the page was quiet. On staging a login click took 1.8 to 2.3 s. A browser runs the listeners and the due tasks, then goes back to its event loop. The choices:
+
+- A live session (`SessionConfig::live`) for the window and the control interface (`Page::open_with` sets it). `resume(&[])` is then one turn of an event loop. The headless `Session::run` and `resume` with inputs keep the settle rule when `live` is off, so tests and examples stay deterministic.
+- In a live turn, `fetch` and XHR start every queued request on a worker at once (also one request alone, and on a fast link). A request that is not a GET or a HEAD starts when all requests before it are done. A turn settles only the replies that are in, in the order of the queue. `Task::done` reads the slot of a worker job without a wait.
+- After `load`, a dynamic script that is not downloaded waits in the queue for a later turn. Its download and those of the scripts after it start at once. The scripts run in the order of the queue, as before. The page downloads stay in the document (`Scripts::net`) from one turn to the next.
+- After `load`, a turn stops after a slice of 8 ms of work and never sleeps. The window loop reads the input events and draws a frame between two turns. A single task that runs longer than the slice is not cut.
+- A navigation that the page asks for (a link, a form submit, `location`, a reload from script, a traversal to another document) downloads the next document on a worker. The old document stays on screen and runs nothing until the new one is in. Then a turn parses it and runs it. The old `Browser` is still dropped before the new one is made, so a heap is never held twice. `Page::navigate` (the address bar, the driver `goto` and `reload`) still loads the first document in the call, as Playwright waits for `load`.
+- `Page::tick` asks to be called again at once when work is left, and in 4 ms while a reply or a next document is on its way. A page with no queued task and nothing in flight still gives `None`: no wake, no CPU.
+- A turn does not collect the heap at its end. The rounds collect when the heap asks (`gc_due`). A collect after each turn would cost more than the turn.
+- Not changed: style sheets and preloads that a script adds load inside the turn that finds them. The classic scripts of a new document, up to `load`, run in one turn (the parse is not cut into slices).
 
 ## Open questions
 

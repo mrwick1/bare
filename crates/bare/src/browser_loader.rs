@@ -305,7 +305,7 @@ pub(crate) struct Scripts {
     /// `<link rel=preload>` results and the preloaded script texts. Lives as long as the document.
     preloads: RefCell<preload::Preloads>,
     /// Live: the downloads of the page, kept from one turn to the next (a script that is not in yet waits here).
-    net: RefCell<Option<Net>>,
+    net: RefCell<Option<Box<Net>>>,
 }
 
 impl Dom {
@@ -752,7 +752,7 @@ impl Browser {
         let stop = run.go();
         let Run { mut res, net, .. } = run;
         if live {
-            *dom.scripts.net.borrow_mut() = Some(net);
+            *dom.scripts.net.borrow_mut() = Some(Box::new(net));
         }
         res.css = dom.scripts.sheets.borrow().stats;
         res.preload = dom.scripts.preloads.borrow().stats;
@@ -799,7 +799,7 @@ impl Browser {
         let mut run = Run {
             b: self,
             dom: dom.clone(),
-            net: net.unwrap_or_else(|| Net::new(client)),
+            net: net.map_or_else(|| Net::new(client), |n| *n),
             slice: live.then(|| Instant::now() + SLICE),
             cursor: 0,
             https_only: page.scheme == bare_url::Scheme::Https,
@@ -818,7 +818,7 @@ impl Browser {
         let stop = run.resume(steps).err().unwrap_or(Stop::Settled);
         let Run { mut res, net, .. } = run;
         if live {
-            *dom.scripts.net.borrow_mut() = Some(net);
+            *dom.scripts.net.borrow_mut() = Some(Box::new(net));
         }
         res.css = dom.scripts.sheets.borrow().stats;
         res.preload = dom.scripts.preloads.borrow().stats;
