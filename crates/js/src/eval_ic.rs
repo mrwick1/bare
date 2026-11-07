@@ -41,6 +41,21 @@ impl Interp<'_> {
         IcCounts { reads: s.own_hits + s.slow, own_hits: s.own_hits, first_runs: s.first_runs, entries: s.ics.len() - 2, heap: self.heap.ic_stats() }
     }
 
+    /// `get_prop` at a native site that reads the same few shapes again and again with no entry of its own (option bags, iterator
+    /// results, the holders of a reviver, `Symbol.toPrimitive`): the entry of the heap's stub table (`Heap::get_stub`).
+    fn get_prop_nat(&mut self, v: Value, key: PropertyKey) -> Res<Value> {
+        let Value::Object(o) = v else { return self.get_prop(v, key) };
+        let got = match self.heap.get_stub(o, key) {
+            Ok(g) => g,
+            Err(err) => self.get_miss(o, key, v, err)?,
+        };
+        match got {
+            Get::Value(v) => Ok(v),
+            Get::Accessor { getter: Some(g) } => self.call_fn(Value::Object(g), v, &[]),
+            Get::Accessor { getter: None } => Ok(Value::Undefined),
+        }
+    }
+
     /// `get_prop` at a site in native code with a few entries (`toJSON` in `JSON.stringify`: records, their arrays and their inner
     /// objects). A miss moves the entries down by one and fills the first.
     fn get_prop_ic(&mut self, v: Value, key: PropertyKey, ics: &mut [Ic; 4]) -> Res<Value> {
@@ -74,7 +89,7 @@ impl Interp<'_> {
             self.ics.first_runs += 1;
             self.heap.get(o, key)
         } else if self.heap.ic_refuses(o) {
-            // A receiver that is never cached (a proxy, a named host object, a String wrapper, a dictionary): the plain read.
+            // A receiver that is never cached (a proxy, a named host object, a String wrapper): the plain read.
             self.heap.get_refused(o, key)
         } else {
             if n == 1 {

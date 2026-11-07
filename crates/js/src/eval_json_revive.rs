@@ -81,7 +81,7 @@ impl<'p> Interp<'p> {
         }
         st.nodes += 1;
         let hv = Value::Object(holder);
-        let val = self.get_prop(hv, key)?;
+        let val = self.get_prop_nat(hv, key)?;
         let Value::Object(o) = val else {
             let kv = h!(self, self.heap.key_to_value(key));
             return self.call_fn(st.reviver, hv, &[kv, val]).map(Some);

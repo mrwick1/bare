@@ -756,7 +756,7 @@ impl<'p> Interp<'p> {
 
     /// `ToPrimitive` step 2: `@@toPrimitive`. `None` means use the ordinary `valueOf`/`toString` order.
     fn sc_to_primitive(&mut self, v: Value, hint: Hint) -> Res<Option<Value>> {
-        let m = self.get_prop(v, self.sc.k_to_primitive)?;
+        let m = self.get_prop_nat(v, self.sc.k_to_primitive)?;
         if is_nullish(m) {
             return Ok(None);
         }
@@ -1088,11 +1088,11 @@ impl<'p> Interp<'p> {
                     let t = self.display(r);
                     return Err(self.type_err(&format!("Iterator result {t} is not an object")));
                 }
-                let d = self.get_prop(r, self.sc.k_done)?;
+                let d = self.get_prop_nat(r, self.sc.k_done)?;
                 if self.truthy(d)? {
                     return Ok(None);
                 }
-                Ok(Some(self.get_prop(r, self.k_value)?))
+                Ok(Some(self.get_prop_nat(r, self.k_value)?))
             }
         }
     }

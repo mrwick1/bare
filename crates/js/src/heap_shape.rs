@@ -35,7 +35,7 @@
 //! An `Ic` is plain `Copy` data with no pointer. A handle in it that has died fails the generation check of every handle read. Shapes are
 //! never freed (until step A6), so a shape id in an entry never names another shape.
 use super::*;
-use std::cell::OnceCell;
+use std::cell::{Cell, OnceCell};
 
 // ---------- shapes ----------
 
@@ -117,9 +117,15 @@ pub(super) struct Shapes {
     /// Recent transitions that the `child` entry missed, direct-mapped by `from` and `key`: `(from, key, attrs, to)`. A root has hundreds
     /// of children, and every object literal starts there: without this, most first keys take a probe of the children map.
     recent: Box<[(u32, PropertyKey, u8, u32); RECENT]>,
+    /// Recent answers of `Object::shape_get`, direct-mapped as `recent`: `(shape, key, slot, attrs)`, with `slot == u32::MAX` when the
+    /// shape has no such key. A shape never changes, so an answer stays true. Native code reads with no inline cache (option bags,
+    /// iterator results, a reviver's holders), and most of its reads ask the same few shapes and keys again.
+    found: Box<[Cell<(u32, PropertyKey, u32, u8)>; RECENT]>,
 }
 
 const RECENT: usize = 256;
+/// Entries of `Heap::stubs`. `recent_at` maps to them.
+pub(super) const STUBS: usize = RECENT;
 
 /// The slot of `(from, key)` in `Shapes::recent`.
 #[inline(always)]
@@ -141,7 +147,9 @@ impl Shapes {
             Table { entries: vec![Entry { key: length, slot: 0, attrs: A_W }], index: OnceCell::new() },
         ];
         let recent = Box::new([(0, PropertyKey::Index(0), 0, 0); RECENT]);
-        Shapes { shapes: vec![shape(0, 0), shape(0, 0), shape(1, 1), shape(0, 0), shape(0, 0)], tables, fn_shape: None, recent }
+        // Shape 0 is dictionary mode, which never asks `found`, so the first state never matches.
+        let found = Box::new(std::array::from_fn(|_| Cell::new((0, PropertyKey::Index(0), 0, 0))));
+        Shapes { shapes: vec![shape(0, 0), shape(0, 0), shape(1, 1), shape(0, 0), shape(0, 0)], tables, fn_shape: None, recent, found }
     }
 
     /// How many shapes exist (the sentinel and the three roots included).
@@ -319,7 +327,24 @@ impl Object {
     /// `get_prop` in shape mode. Out of line, as `PropMap::find`: the callers of `Heap::own` stay small enough to inline it.
     #[inline(never)]
     fn shape_get(&self, sh: &Shapes, key: PropertyKey) -> Option<Property> {
-        sh.find(self.shape, key).map(|e| build(e.attrs, &self.slots[e.slot as usize..]))
+        let (shape, k, slot, attrs) = sh.found[recent_at(self.shape, key)].get();
+        if shape == self.shape && k == key {
+            return (slot != u32::MAX).then(|| build(attrs, &self.slots[slot as usize..]));
+        }
+        self.shape_find(sh, key)
+    }
+
+    /// `shape_get` when `found` does not know the pair: the walk of the table, and a new answer in `found`. Out of line, so the hit
+    /// path saves few registers.
+    #[inline(never)]
+    fn shape_find(&self, sh: &Shapes, key: PropertyKey) -> Option<Property> {
+        let c = &sh.found[recent_at(self.shape, key)];
+        let e = sh.find(self.shape, key);
+        c.set(match e {
+            Some(e) => (self.shape, key, e.slot, e.attrs),
+            None => (self.shape, key, u32::MAX, 0),
+        });
+        e.map(|e| build(e.attrs, &self.slots[e.slot as usize..]))
     }
 
     pub(super) fn props<'a>(&'a self, sh: &'a Shapes) -> Props<'a> {
@@ -617,6 +642,11 @@ const IC_OWN_ACC: u8 = 2;
 const IC_PROTO: u8 = 3;
 const IC_PROTO_ACC: u8 = 4;
 const IC_ABSENT: u8 = 5;
+/// An own property of one dictionary receiver (a frozen or sealed object, a template object): `first` is the receiver and `depth` the
+/// position of the key in its `PropMap` (below 256). The key is a string: `epoch` holds its index and `slot` its generation. `shape`
+/// is 0, the shape of every dictionary, with no tag: the inline `ic_own` passes the shape test, finds no slot (a dictionary has none)
+/// and asks `ic_dict_own`. A hit checks the identity and the key at that position, so a delete or a move only misses.
+const IC_DICT: u8 = 6;
 /// Added to the shape of every kind but `IC_OWN`. Shape ids stay below `SHAPE_CAP`, so the tag never makes a real id.
 const SHAPE_TAG: u32 = 1 << 31;
 
@@ -658,10 +688,26 @@ impl Heap {
         if ob.shape != ic.shape {
             return None;
         }
-        let v = *ob.slots.get(ic.slot as usize)?;
+        let Some(&v) = ob.slots.get(ic.slot as usize) else { return self.ic_dict_own(o, ob, ic) };
         #[cfg(debug_assertions)]
         self.ic_verify(o, ic, Get::Value(v));
         Some(v)
+    }
+
+    /// `ic_own` for an `IC_DICT` entry: the data property of the receiver at the entry's position, if it is still the key.
+    #[inline(never)]
+    fn ic_dict_own(&self, o: ObjId, ob: &Object, ic: &Ic) -> Option<Value> {
+        if ic.kind != IC_DICT || o != ic.first {
+            return None;
+        }
+        match ob.dict.as_ref()?.entries.get(ic.depth as usize)? {
+            Some((PropertyKey::String(s), Property::Data { value, .. })) if s.index == ic.epoch && s.gn == ic.slot => {
+                #[cfg(debug_assertions)]
+                self.ic_verify(o, ic, Get::Value(*value));
+                Some(*value)
+            }
+            _ => None,
+        }
     }
 
     /// `o` has the shape that `ic` was filled for (a hit is likely). Picks the entry of a native site with more than one entry.
@@ -674,17 +720,94 @@ impl Heap {
     /// prototype hits (methods) run here.
     #[inline(never)]
     pub fn get_ic(&mut self, o: ObjId, key: PropertyKey, ic: &mut Ic) -> R<Get> {
-        if let Some(g) = self.ic_hit(o, ic) {
+        if let Some(g) = self.ic_hit(o, key, ic) {
             self.ic_stats.chain_hits += 1;
             #[cfg(debug_assertions)]
             self.ic_verify(o, ic, g);
             return Ok(g);
         }
-        // A receiver that is never cached (a proxy, a host object, a dictionary) skips the fill.
+        self.ic_miss(o, key, ic)
+    }
+
+    /// `get` for a read that has no site of its own: native code (option bags, iterator results, the holders of a reviver, symbol
+    /// keys such as `Symbol.toPrimitive`). It uses the entry of `stubs` for the receiver's shape and the key, as a
+    /// site uses its own. Two pairs that map to one entry take turns. An index key, and a key other than a string on a dictionary
+    /// (which has no entry kind for it), is the plain read. A pair that the fill refused keeps an empty entry with the receiver's shape:
+    /// its next reads are the plain read at once (a lazy `prototype`, an exotic receiver or chain). The plain read is always right, so
+    /// a refusal that stops being true costs only speed. Only chosen native sites use it (`Interp::get_prop_nat`): on every read, a
+    /// refused pair (a lazy `prototype`, a new object of a churn loop) costs more than the plain read.
+    #[inline]
+    pub fn get_stub(&mut self, o: ObjId, key: PropertyKey) -> R<Get> {
+        let shape = match self.objects.get(o.index, o.gn) {
+            Some(ob) if matches!(key, PropertyKey::String(_)) || !matches!(key, PropertyKey::Index(_)) && ob.shape != 0 => ob.shape,
+            _ => return self.get(o, key),
+        };
+        let i = recent_at(shape, key);
+        let (k, mut ic) = self.stubs[i];
+        if k == key {
+            if let Some(g) = self.ic_hit(o, key, &ic) {
+                self.ic_stats.chain_hits += 1;
+                #[cfg(debug_assertions)]
+                self.ic_verify(o, &ic, g);
+                return Ok(g);
+            }
+            if ic.kind == IC_EMPTY && ic.shape == shape {
+                return self.get(o, key);
+            }
+        }
+        ic = Ic::EMPTY;
+        let r = self.ic_miss(o, key, &mut ic);
+        if ic.kind == IC_EMPTY {
+            ic.shape = shape;
+        }
+        self.stubs[i] = (key, ic);
+        r
+    }
+
+    /// The miss of `get_ic` and `get_stub`: the plain read, and a new entry in `ic` when the receiver allows one.
+    #[inline(never)]
+    fn ic_miss(&mut self, o: ObjId, key: PropertyKey, ic: &mut Ic) -> R<Get> {
+        // A receiver that is never cached (a proxy, a host object, a String wrapper) skips the fill.
         if self.ic_refuses(o) {
             return self.get_refused(o, key);
         }
+        if self.objects.get(o.index, o.gn).is_some_and(|ob| ob.dict.is_some() && !ob.fast_on_use) {
+            return self.get_dict(o, key, ic);
+        }
         self.ic_fill(o, key, ic)
+    }
+
+    /// `get_ic` for a dictionary receiver: an own key fills an `IC_DICT` entry. Any other key is the plain read, which starts at the
+    /// prototype when the receiver is ordinary, so the own key is searched once.
+    #[cold]
+    #[inline(never)]
+    fn get_dict(&mut self, o: ObjId, key: PropertyKey, ic: &mut Ic) -> R<Get> {
+        *ic = Ic::EMPTY;
+        let ob = self.obj(o)?;
+        let PropertyKey::String(s) = key else { return self.get_refused(o, key) };
+        if ob.exotic != 0 || ob.lazy & (LAZY_PROTO | LAZY_CHAIN | LAZY_HS) != 0 {
+            return self.get_refused(o, key);
+        }
+        self.check_key(key)?;
+        let d = ob.dict.as_ref().expect("a dictionary receiver");
+        if let Some(pos) = d.find(key) {
+            let p = d.entries[pos].expect("find gives a live entry").1;
+            if pos <= u8::MAX as usize {
+                *ic = Ic { shape: 0, slot: s.gn, kind: IC_DICT, depth: pos as u8, first: o, epoch: s.index, ..Ic::EMPTY };
+            }
+            #[cfg(debug_assertions)]
+            {
+                ic.key = Some(key);
+            }
+            self.ic_stats.fill_own += 1;
+            return Ok(get_of(p));
+        }
+        let proto = ob.proto;
+        self.ic_stats.refused += 1;
+        match proto {
+            Some(p) => self.get(p, key),
+            None => Ok(Get::Value(Value::Undefined)),
+        }
     }
 
     /// `get` for a receiver that `ic_refuses`, counted as a refusal.
@@ -693,14 +816,14 @@ impl Heap {
         self.get(o, key)
     }
 
-    /// The cache never fills for `o`: a proxy, a named host object, a String wrapper, or a dictionary that was not made in setup mode.
+    /// The cache never fills for `o`: a proxy, a named host object or a String wrapper. A dictionary fills only `IC_DICT` entries.
     #[inline]
     pub fn ic_refuses(&self, o: ObjId) -> bool {
-        self.objects.get(o.index, o.gn).is_some_and(|ob| ob.exotic > EXOTIC || ob.dict.is_some() && !ob.fast_on_use)
+        self.objects.get(o.index, o.gn).is_some_and(|ob| ob.exotic > EXOTIC)
     }
 
     #[inline(always)]
-    fn ic_hit(&self, o: ObjId, ic: &Ic) -> Option<Get> {
+    fn ic_hit(&self, o: ObjId, key: PropertyKey, ic: &Ic) -> Option<Get> {
         let ob = self.objects.get(o.index, o.gn)?;
         if ob.shape != ic.shape & !SHAPE_TAG {
             return None;
@@ -710,6 +833,15 @@ impl Heap {
             IC_OWN => return ob.slots.get(slot).map(|&v| Get::Value(v)),
             IC_OWN_ACC => return ob.slots.get(slot).map(|&v| Get::Accessor { getter: obj_of(v) }),
             IC_EMPTY => return None,
+            IC_DICT => {
+                if o != ic.first {
+                    return None;
+                }
+                return match ob.dict.as_ref()?.entries.get(ic.depth as usize)? {
+                    Some((k, p)) if *k == key => Some(get_of(*p)),
+                    _ => None,
+                };
+            }
             _ => {}
         }
         if ic.epoch != self.proto_epoch {
@@ -939,10 +1071,140 @@ mod tests {
             assert_eq!(size_of::<Ic>(), 24);
         }
         let mut h = Heap::default();
+        let x = k(&mut h, "x");
         let d = h.new_dict_object(None).unwrap();
         let o = h.new_object(None).unwrap();
         assert!(h.ic_own(d, &Ic::EMPTY).is_none() && h.ic_own(o, &Ic::EMPTY).is_none());
-        assert!(h.ic_hit(d, &Ic::EMPTY).is_none() && h.ic_hit(o, &Ic::EMPTY).is_none());
+        assert!(h.ic_hit(d, x, &Ic::EMPTY).is_none() && h.ic_hit(o, x, &Ic::EMPTY).is_none());
+    }
+
+    #[test]
+    fn a_dictionary_receiver_is_cached_by_identity_and_position() {
+        let mut h = Heap::default();
+        let (x, y) = (k(&mut h, "x"), k(&mut h, "y"));
+        let mk = |h: &mut Heap, a: f64| {
+            let o = h.new_object(None).unwrap();
+            setn(h, o, x, a);
+            setn(h, o, y, a + 1.0);
+            assert!(h.set_integrity(o, true).unwrap());
+            o
+        };
+        let (a, b) = (mk(&mut h, 1.0), mk(&mut h, 10.0));
+        assert!(in_dict(&h, a) && in_dict(&h, b), "freeze is dictionary mode");
+        let (s0, mut ic) = (h.ic_stats(), Ic::EMPTY);
+        assert_eq!(rnum(&mut h, a, y, &mut ic), Some(2.0));
+        assert_eq!(h.ic_own(a, &ic).and_then(num), Some(2.0), "the inline test answers a frozen receiver");
+        assert!(h.ic_own(b, &ic).is_none(), "another dictionary of the same keys is another receiver");
+        assert_eq!(rnum(&mut h, b, y, &mut ic), Some(11.0));
+        assert_eq!(delta(&h, s0), (0, 2, 0, 0));
+        // A dictionary that loses the key misses, and the key at a new position refills.
+        let d = h.new_dict_object(None).unwrap();
+        setn(&mut h, d, x, 1.0);
+        setn(&mut h, d, y, 2.0);
+        let mut ic = Ic::EMPTY;
+        assert_eq!(rnum(&mut h, d, x, &mut ic), Some(1.0));
+        assert!(h.delete(d, x).unwrap());
+        assert!(h.ic_own(d, &ic).is_none());
+        assert_eq!(rnum(&mut h, d, x, &mut ic), None);
+        setn(&mut h, d, x, 3.0);
+        assert_eq!(rnum(&mut h, d, x, &mut ic), Some(3.0));
+        assert_eq!(h.ic_own(d, &ic).and_then(num), Some(3.0));
+        // An accessor of a dictionary receiver is answered by `get_ic`, not by the inline test.
+        let g = h.new_object(None).unwrap();
+        let acc = PropertyDescriptor { get: Some(Some(g)), set: Some(None), enumerable: Some(true), configurable: Some(false), ..Default::default() };
+        assert!(h.define_own_property(d, y, &acc).unwrap());
+        let mut ic = Ic::EMPTY;
+        read(&mut h, d, y, &mut ic);
+        assert!(h.ic_own(d, &ic).is_none());
+        assert!(matches!(read(&mut h, d, y, &mut ic), Get::Accessor { getter: Some(f) } if f == g));
+        // A key on the prototype of a dictionary receiver is the plain read, and fills nothing.
+        let p = h.new_object(None).unwrap();
+        let z = k(&mut h, "z");
+        setn(&mut h, p, z, 5.0);
+        let e = h.new_dict_object(Some(p)).unwrap();
+        let (s0, mut ic) = (h.ic_stats(), Ic::EMPTY);
+        assert_eq!(rnum(&mut h, e, z, &mut ic), Some(5.0));
+        assert_eq!(rnum(&mut h, e, z, &mut ic), Some(5.0));
+        assert_eq!(delta(&h, s0), (0, 0, 2, 0));
+    }
+
+    #[test]
+    fn stub_entries_hit_and_keep_refusals() {
+        let mut h = Heap::default();
+        let (x, y) = (k(&mut h, "x"), k(&mut h, "y"));
+        let p = h.new_object(None).unwrap();
+        setn(&mut h, p, y, 9.0);
+        let (a, b) = (h.new_object(Some(p)).unwrap(), h.new_object(Some(p)).unwrap());
+        setn(&mut h, a, x, 1.0);
+        setn(&mut h, b, x, 2.0);
+        let stub = |h: &mut Heap, o, key| match h.get_stub(o, key).unwrap() {
+            Get::Value(v) => num(v),
+            g => panic!("{g:?}"),
+        };
+        let s0 = h.ic_stats();
+        assert_eq!(stub(&mut h, a, x), Some(1.0));
+        assert_eq!(stub(&mut h, b, x), Some(2.0), "b has the shape of a");
+        assert_eq!(stub(&mut h, a, y), Some(9.0));
+        assert_eq!(stub(&mut h, b, y), Some(9.0));
+        assert_eq!(delta(&h, s0), (2, 2, 0, 0));
+        // A new key on the prototype bumps the epoch: the entry misses and refills.
+        let w = k(&mut h, "w");
+        setn(&mut h, p, w, 0.0);
+        setn(&mut h, p, y, 8.0);
+        assert_eq!(stub(&mut h, a, y), Some(8.0));
+        // A refused pair keeps its refusal: the second read is the plain read with no new fill attempt.
+        let target = h.new_object(None).unwrap();
+        let handler = h.new_object(None).unwrap();
+        let proxy = h.new_proxy(target, handler).unwrap();
+        let s0 = h.ic_stats();
+        assert!(h.get_stub(proxy, x).is_err() && h.get_stub(proxy, x).is_err(), "the proxy answers, as for `get`");
+        assert_eq!(delta(&h, s0), (0, 0, 1, 0));
+        // An index key and a symbol key of a dictionary are the plain read.
+        let d = h.new_dict_object(None).unwrap();
+        let sym = PropertyKey::Symbol(h.new_symbol(None).unwrap());
+        assert_eq!(h.set(d, sym, n(4.0)), Ok(Set::Done));
+        assert_eq!(h.set(d, PropertyKey::Index(3), n(5.0)), Ok(Set::Done));
+        assert_eq!(stub(&mut h, d, sym), Some(4.0));
+        assert_eq!(stub(&mut h, d, PropertyKey::Index(3)), Some(5.0));
+    }
+
+    #[test]
+    fn shape_reads_stay_right_when_answers_share_a_slot_of_found() {
+        // 600 objects of 600 shapes, each read for a present and an absent key twice: more pairs than `found` has slots.
+        let mut h = Heap::default();
+        let keys: Vec<_> = (0..40).map(|i| k(&mut h, &format!("k{i}"))).collect();
+        let mut objs = Vec::new();
+        for i in 0..600usize {
+            let o = h.new_object(None).unwrap();
+            for j in 0..(i % 7 + 1) {
+                setn(&mut h, o, keys[(i + j * 3) % 40], (i * 100 + j) as f64);
+            }
+            objs.push(o);
+        }
+        for _ in 0..2 {
+            for (i, &o) in objs.iter().enumerate() {
+                for j in 0..(i % 7 + 1) {
+                    assert_eq!(getn(&mut h, o, keys[(i + j * 3) % 40]), (i * 100 + j) as f64);
+                }
+                let absent = keys[(i + 1) % 40];
+                if !(0..(i % 7 + 1)).any(|j| (i + j * 3) % 40 == (i + 1) % 40) {
+                    assert!(matches!(h.get(o, absent).unwrap(), Get::Value(Value::Undefined)));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_collection_keeps_the_keys_of_shared_shapes() {
+        let mut h = Heap::default();
+        let x = k(&mut h, "a_key_only_shapes_hold");
+        let (a, b) = (h.new_object(None).unwrap(), h.new_object(None).unwrap());
+        setn(&mut h, a, x, 1.0);
+        setn(&mut h, b, x, 2.0);
+        h.collect(&[Value::Object(a), Value::Object(b)]).unwrap();
+        assert_eq!(keys_text(&mut h, a), ["a_key_only_shapes_hold"]);
+        assert_eq!(keys_text(&mut h, b), ["a_key_only_shapes_hold"]);
+        assert_eq!(getn(&mut h, b, x), 2.0);
     }
 
     #[test]
@@ -1082,7 +1344,7 @@ mod tests {
     }
 
     #[test]
-    fn proxies_numeric_keys_of_views_and_dictionary_receivers_are_never_cached() {
+    fn proxies_and_numeric_keys_of_views_are_never_cached() {
         let mut h = Heap::default();
         let (x, y) = (k(&mut h, "x"), k(&mut h, "y"));
         let target = h.new_object(None).unwrap();

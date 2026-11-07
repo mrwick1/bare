@@ -226,11 +226,11 @@ impl<'p> Interp<'p> {
             GenOut::Item(_, true) => Ok(Some(None)),
             GenOut::Item(v, false) => Ok(Some(Some(v))),
             GenOut::Raw(r) => {
-                let d = self.get_prop(r, self.sc.k_done)?;
+                let d = self.get_prop_nat(r, self.sc.k_done)?;
                 if self.truthy(d)? {
                     return Ok(Some(None));
                 }
-                Ok(Some(Some(self.get_prop(r, self.k_value)?)))
+                Ok(Some(Some(self.get_prop_nat(r, self.k_value)?)))
             }
         }
     }
@@ -287,11 +287,11 @@ impl<'p> Interp<'p> {
                 let t = self.display(r);
                 return Err(self.type_err(&format!("Iterator result {t} is not an object")));
             }
-            let d = self.get_prop(r, self.sc.k_done)?;
+            let d = self.get_prop_nat(r, self.sc.k_done)?;
             if !self.truthy(d)? {
                 return Ok(D::Yield(r, true));
             }
-            let v = self.get_prop(r, self.k_value)?;
+            let v = self.get_prop_nat(r, self.k_value)?;
             Ok(if let GenHow::Return(_) = how { D::Return(v) } else { D::Value(v) })
         })();
         if let Ok(D::Yield(v, raw)) = r {

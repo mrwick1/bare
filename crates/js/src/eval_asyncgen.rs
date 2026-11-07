@@ -409,9 +409,9 @@ impl<'p> Interp<'p> {
     /// AsyncFromSyncIteratorContinuation: settle `p` with the awaited value of the sync result `r`.
     fn afs_continue(&mut self, p: ObjId, r: Value, iter: Value, next: Value, close: bool) -> Res<()> {
         let x = (|| -> Res<()> {
-            let d = self.get_prop(r, self.sc.k_done)?;
+            let d = self.get_prop_nat(r, self.sc.k_done)?;
             let done = self.truthy(d)?;
-            let v = self.get_prop(r, self.k_value)?;
+            let v = self.get_prop_nat(r, self.k_value)?;
             let w = match self.promise_resolve(v) {
                 Ok(Value::Object(w)) => w,
                 Ok(_) => return Err(unsupported("await", Span::default())),
@@ -575,9 +575,9 @@ impl<'p> Interp<'p> {
                 let t = self.display(r);
                 return Err(self.type_err(&format!("Iterator result {t} is not an object")));
             }
-            let d = self.get_prop(r, self.sc.k_done)?;
+            let d = self.get_prop_nat(r, self.sc.k_done)?;
             let done = self.truthy(d)?;
-            Ok((done, self.get_prop(r, self.k_value)?))
+            Ok((done, self.get_prop_nat(r, self.k_value)?))
         })();
         match x {
             Ok((false, v)) => {
@@ -623,11 +623,11 @@ impl<'p> Interp<'p> {
             let t = self.display(r);
             return Err(self.type_err(&format!("Iterator result {t} is not an object")));
         }
-        let d = self.get_prop(r, self.sc.k_done)?;
+        let d = self.get_prop_nat(r, self.sc.k_done)?;
         if self.truthy(d)? {
             return val(Value::Undefined);
         }
-        let v = self.get_prop(r, self.k_value)?;
+        let v = self.get_prop_nat(r, self.k_value)?;
         // A binding error closes the iterator, so the body frame comes first.
         self.of_body(run, s, v, Fr::AOfB { s, lb, base }, true)
     }

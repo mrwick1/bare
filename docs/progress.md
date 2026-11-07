@@ -2307,3 +2307,39 @@ Checks:
 - Not run, because the cost gate fails first: `cargo test --release --workspace`, `tools/js/test262_check.sh`, the `*_check.sh` scripts.
 
 Not tested: a machine other than archMachine; wall time; scale 100 of the load rows; a live page other than the typing page; the workspace tests after the rebase on `16b5c83`.
+
+## A1 and A2 cost rows: third pass (merged)
+
+The branch `t3/js-cost-regression-fixes` is rebased on `65bbf8e`. This pass makes 2 fix attempts on the 23 rows over +0.5% under both allocators.
+
+Changes:
+- A dictionary receiver is cached by identity (`IC_DICT`). The entry holds the object, the position of the key in its `PropMap` (below 256) and the key `StrId`. `ic_own` tests it inline. A frozen or sealed object and a template object hit the cache now. A miss on such a receiver reads with no fill (`Heap::get_dict`).
+- `Shapes::found` keeps the last 256 answers of `shape_get` for each (shape, key) pair, present or absent.
+- Native reads of small objects use `Heap::get_stub` (`get_prop_nat`): 256 cache entries keyed by (shape, key). A refused pair stays refused. The sites: the Intl option reads, `Symbol.toPrimitive`, the iterator result `done` and `value` reads, the generator and async generator result reads, and the JSON reviver. `get_prop` keeps the plain read: a global stub made `arrobj_load arrays` +2.8% and `class_load churn` +1.8%.
+- `Heap::collect` marks the keys of each shape once for each collection, not once for each object. One collection of `revive_load gc`: 411.7 K instructions against 426.3 K on main.
+
+Results (archMachine, against `65bbf8e` from `base-build`):
+- Full cost matrix: 805 rows in 46 s. Mean change: glibc -1.644%, jemalloc +0.545% (9 rows measured). Over under one allocator: 5. Over under both: 4. Failed: 0.
+- Rows that pass now (glibc, scale 1 and 10): `intl_load nf_locale_opts` -15.4% and -15.6%, `intl_load locale` -14.2% and -14.4%, `intl_load make` -12.3% and -15.8%, `intl_load cmp_opts` -8.0% and -8.2%, `tagged_load call` -4.2% and -4.4%, `gen_load delegate` -6.7% and -7.4%, `sc_load toprim` -1.5% and -1.9%, `revive_load gc` -0.9% and -2.0%, `revive_load shallow` -0.5% and -0.7%, `range_load iter` -2.1% and -0.5%, `iterator_load flatmap` 0.0%.
+- `tagged_load call`: one iteration costs 189 instructions less than main. Before this pass it cost 47 more.
+- `keycost.sh`: `#a1` 359.7 M for each key against 411.1 M on main (-12.5%). `#f0` 366.4 M. Load and mount 712.5 M.
+- Peak RSS of `#a1`: 32.2 MiB at 20 keys and 32.8 MiB at 50 keys.
+
+Known regressions (row, glibc, jemalloc, cause):
+- `proxy_load get_trap 10`: +1.380%, +1.196%. A read through a proxy pays `member_ic`, the refusal and the trap cache lookup before the trap call.
+- `sc_load symbol_keys 1`: +0.780%, +0.518%. A symbol key read misses the inline cache. A hit in `Shapes::found` costs about 70 instructions; `PropMap::find` on main cost about 40.
+- `sc_load symbol_keys 10`: +0.705%, +0.663%. The cause is the same.
+- `wrapper_load forin 10000 30000`: +0.591%, +0.573%. Reads and writes of dictionary-mode globals pay 3 to 6 instructions more for the `Box<PropMap>` load.
+
+Attempts that failed:
+- `get_stub` in `get_prop` for all reads: 20 rows over under both allocators.
+- `get_stub` not inlined: one `Intl.NumberFormat` with options costs 629 instructions more than inlined.
+- A narrower lazy `prototype` refusal in `ic_make`: not safe. A lazy function and a function with its `prototype` built can share a shape.
+
+Checks:
+- `cargo test --release --workspace`: all pass. New tests in `heap_shape.rs`: `a_dictionary_receiver_is_cached_by_identity_and_position`, `stub_entries_hit_and_keep_refusals`, `shape_reads_stay_right_when_answers_share_a_slot_of_found`, `a_collection_keeps_the_keys_of_shared_shapes`.
+- `tools/js/test262_check.sh`: gate ok.
+- `tools/js/exec_diff.sh`: 79 runs, 0 differences.
+- All `tools/js/*_check.sh` scripts pass. `parse_check.sh` needs `ACORN=` to name a local `acorn.mjs`.
+
+Not tested: a machine other than archMachine; wall time; scale 100 of the load rows; a live page other than the typing page.

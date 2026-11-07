@@ -93,7 +93,7 @@ impl<'p> Interp<'p> {
     fn intl_get(&mut self, opts: Option<Value>, name: &str) -> Res<Value> {
         let Some(o) = opts else { return Ok(Value::Undefined) };
         let k = self.intl_key(name)?;
-        self.get_prop(o, k)
+        self.get_prop_nat(o, k)
     }
 
     /// GetOption for a boolean: `None` when absent.

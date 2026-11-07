@@ -745,6 +745,8 @@ pub struct Heap {
     /// filled before stops hitting. It saturates: at `u32::MAX` no such entry is filled again.
     proto_epoch: u32,
     ic_stats: IcStats,
+    /// The cache entries of the reads with no site (`get_stub`), direct-mapped by the receiver's shape and the key.
+    stubs: Box<[(PropertyKey, Ic); shape::STUBS]>,
     /// Setup mode (`set_setup`).
     setup: bool,
 }
@@ -785,6 +787,7 @@ impl Heap {
             lazy_on_set: Default::default(),
             proto_epoch: 0,
             ic_stats: IcStats::default(),
+            stubs: Box::new([(PropertyKey::Index(0), Ic::EMPTY); shape::STUBS]),
             setup: false,
         };
         h.length = h.intern_str("length")?;
@@ -2136,6 +2139,8 @@ impl Heap {
         }
         // Work list of dense positions: pop an object, mark everything it points to. No recursion.
         let ol = &objects.live;
+        // The shapes whose keys are marked: most objects share a shape, and its keys are marked once.
+        let mut keyed = vec![false; shapes.len()];
         while let Some(d) = m.gray.pop() {
             let o = &ol[d as usize];
             if let Some(p) = o.proto {
@@ -2157,13 +2162,15 @@ impl Heap {
             }
             match &o.dict {
                 None => {
-                    // Shape mode: the keys of the shape (a shape holds its keys, but does not keep them alive), and every slot. A slot
-                    // of an accessor holds a function or `undefined`, which `value` ignores.
-                    for e in shapes.entries(o.shape) {
-                        match e.key {
-                            PropertyKey::String(s) => m.str(s),
-                            PropertyKey::Symbol(s) => m.sym(s),
-                            PropertyKey::Index(_) => {}
+                    // Shape mode: the keys of the shape (a shape holds its keys, but does not keep them alive), once for each shape,
+                    // and every slot. A slot of an accessor holds a function or `undefined`, which `value` ignores.
+                    if !std::mem::replace(&mut keyed[o.shape as usize], true) {
+                        for e in shapes.entries(o.shape) {
+                            match e.key {
+                                PropertyKey::String(s) => m.str(s),
+                                PropertyKey::Symbol(s) => m.sym(s),
+                                PropertyKey::Index(_) => {}
+                            }
                         }
                     }
                     for &v in &o.slots {
