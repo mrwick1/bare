@@ -1,0 +1,33 @@
+# The staging acceptance journey (8 steps) for bare-drive (crates/drive). The orchestrator runs it; it was not run against staging here.
+# It holds no staging data: the base URL and the search text are --var values, the login is in the --secrets file (EMAIL=, PASSWORD=).
+#   bare-drive --secrets FILE --var BASE=https://HOST --var QUERY=TEXT --out DIR tools/drive/staging-journey.steps
+timeout 30000
+# Step 1: with no session, the root goes to the login page.
+open ${BASE}/
+expect url~"/login"
+expect css="input[name=email]" visible
+# Steps 2 and 3: log in; the overview shows the app and its links.
+type css="input[name=email]" "${EMAIL}"
+type css="input[name=password]" "${PASSWORD}"
+click css="form button[type=submit]"
+expect css="input[name=password]" hidden
+expect css="a[href='/agents']" visible
+shot overview
+# Step 4: follow the Agents link.
+click css="a[href='/agents']"
+expect url~"/agents"
+# Step 5: search, then Enter.
+type placeholder~"search" "${QUERY}\n"
+expect js "Array.prototype.some.call(document.querySelectorAll('a'), function (a) { return a.textContent.indexOf('${QUERY}') >= 0 })"
+shot search
+# Step 6: a reload keeps the session and the search.
+reload
+expect url~"/agents"
+expect js "Array.prototype.some.call(document.querySelectorAll('a'), function (a) { return a.textContent.indexOf('${QUERY}') >= 0 })"
+# Step 7: the account menu, then sign out.
+click role=button name~"account"
+click role=menuitem name~"sign out"
+expect url~"/login"
+# Step 8: a new session cannot open the Agents page.
+open ${BASE}/agents
+expect url~"/login"

@@ -1,0 +1,75 @@
+# Scenarios of tools/fixtures/ui/drive.html for the control interface (bare::control, S5): the events go through the hit test of the window
+# frame and `Page::handle`, as in `bare --window`. `click SEL` = Page::click, `key - KEY` = Page::press (at the focused element),
+# `fill SEL TEXT` = Page::type_text (a click, Control+A, the keys). The log is cleared at `reset`. Chrome: tools/ui/chrome_drive.mjs.
+== click_plain_button
+click #blank
+click #plain
+reset
+click #plain
+== click_text_input
+click #blank
+reset
+click #user
+== click_between_elements
+click #blank
+click #plain
+reset
+click #user
+== mousedown_canceled_keeps_focus
+click #blank
+click #user
+reset
+click #nofocus
+== select_opens_on_pointerdown_and_chooses_on_pointerup
+click #blank
+reset
+click #trigger
+click #i2
+== pointer_capture_in_pointerdown
+click #blank
+reset
+click #cap
+== click_fractional_center
+click #blank
+reset
+click #half
+== fill_replaces_text
+click #blank
+reset
+fill #user ab
+== fill_empty_input
+click #blank
+reset
+fill #q hi
+== fill_textarea_with_a_line_feed
+click #blank
+reset
+fill #ta a\nb
+== fill_empty_clears
+click #blank
+reset
+fill #user 
+== tab_and_shift_tab
+click #blank
+click #user
+reset
+key - Tab
+key - Shift+Tab
+== enter_in_input_submits_form
+click #blank
+click #q
+reset
+key - Enter
+== space_on_focused_button_clicks
+click #blank
+click #plain
+reset
+key - Space
+== keys_open_and_choose_in_the_list
+click #blank
+click #trigger
+key - Escape
+reset
+key - ArrowDown
+key - ArrowDown
+key - Enter

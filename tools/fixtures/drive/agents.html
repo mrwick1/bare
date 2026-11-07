@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<html>
+<head>
+<title>Agents - Fixture</title>
+<style>body { margin: 20px; font: 16px sans-serif; }</style>
+</head>
+<body>
+<main>
+  <h1>Agents</h1>
+  <input id="q" type="search" placeholder="Search agents">
+  <p id="count">3 results</p>
+  <ul id="list"><li>Alpha agent</li><li>Beta agent</li><li>Gamma helper</li></ul>
+</main>
+<script>
+if (!sessionStorage.getItem('token')) location.replace('/login');
+var q = document.getElementById('q');
+// Enter filters the list and puts the query in the URL (history.pushState), as a search page of an app does.
+q.addEventListener('keydown', function (e) {
+  if (e.key !== 'Enter') return;
+  var v = q.value.toLowerCase(), n = 0;
+  Array.prototype.forEach.call(document.querySelectorAll('#list li'), function (li) {
+    var hit = li.textContent.toLowerCase().indexOf(v) >= 0;
+    li.hidden = !hit;
+    if (hit) n++;
+  });
+  document.getElementById('count').textContent = n + ' results';
+  history.pushState(null, '', '/agents?q=' + encodeURIComponent(q.value));
+});
+</script>
+</body>
+</html>

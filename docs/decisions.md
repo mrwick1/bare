@@ -459,6 +459,18 @@ To follow the standard, add the five names to the first arm of `Builder::in_temp
 - The getter gives back what scripts set (not `""`), so code that sets a cookie and reads it back works. A `Set-Cookie` header of a response is not stored. A cookie that the server sets is not in `document.cookie`.
 - Not done, and different from Chrome: no public suffix list (`Domain=co.uk` is accepted on `a.co.uk`); the date parser follows RFC 6265 and Chrome reads a few odd dates differently (`1 Jan 2000 00:00:00:00`); the count is for each host name, not for each registrable domain; a script cannot make an `HttpOnly` cookie, and there is no other way to make one.
 
+## S5 control interface
+
+- The control interface is a Rust API in the engine (`bare::control`): `Page` methods for navigation, queries, actions, time and pixels. The test driver is a separate crate (`crates/drive`, binary `bare-drive`) that uses only that API. Reason: an in-process call costs nothing to set up. A socket needs a protocol, a server loop, a serializer and a second process, and the S5 checks need none of them. A driver call to a window costs 29 us (round trip through the window loop). A click step costs 3 to 81 us more than the same events sent straight to the page.
+- Headless, the driver owns the `Page` on its own thread. With `--window`, the page and its Wayland window run on another thread (`control::Remote`). Each call is a job that the window loop runs in `App::tick`, between input events, and a frame follows it. Reason: one code path for both modes, and the window keeps its own loop. `WebStorage` is not `Send`, so a job opens a new session of the same profile on the window thread.
+- An action makes `bare_window::Event`s and gives them to `Page::handle`, as the Wayland loop does. A click hit-tests the window frame. Reason: S5 must use the input path of the window. No action writes the DOM, a value, the focus or the storage. A `js` check exists for assertions only.
+- Before an action, the target must be connected, rendered, enabled and on top at the center of its visible part, after a scroll into view if needed. Else the action is refused and nothing is sent. Reason: these are the checks of Playwright. A user cannot click an element that another element covers.
+- Timers run between input events: `App::tick` gives the time of the next task, and the window loop sleeps in `poll` until then at the latest. Reason: S4 topic 6 left this gap, and a real journey needs it (a page loads its data after a timer).
+- A wait runs the due tasks and sleeps until the next one. When no task is queued, nothing can change the page, so the step fails at once. Reason: no fixed sleeps, and a failure needs no full time limit. The network calls run inside the tasks, so no request is in flight between two ticks.
+- Locators follow Playwright: role and accessible name, label, text, placeholder, CSS. A locator must match one element. Reason: a duplicate target is a test bug. A first-match rule hides it.
+- The output is one JSON object. Secrets are replaced in every text when the JSON is written, so a secret that the driver learns late is also hidden in earlier records. A capture is withheld when a secret is in the text or in a field of the page. Reason: a password field shows dots, but an email field and the page text show their text in the pixels.
+- Network records come from `bare_net::trace` (`enable`, `take`). The list is one for each process, so one driver runs at a time in a process. Reason: it holds the URL without the query, the status and the times already. A second recorder would cost a second hook in the hot path.
+
 ## Open questions
 
 - A separate process for sensitive sites, for example banking.

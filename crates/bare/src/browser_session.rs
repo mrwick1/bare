@@ -331,6 +331,31 @@ impl Session {
         out
     }
 
+    /// Load `url` as a user does from the address bar (a new history entry), or load the current document again (`None`: reload,
+    /// at the URL that `pushState` left). The old document ends first. This also works after a stop that ended the session, because a
+    /// new document is a new realm; the session budgets stay spent. Same stack rule as `run`.
+    pub fn navigate(&mut self, url: Option<&str>) -> SessionResult {
+        let current = self.browser.as_ref().and_then(|b| b.document_url());
+        if let (Some(h), Some(u)) = (self.hist.get_mut(self.at), &current) {
+            h.url = u.clone();
+            h.scroll = self.browser.as_ref().map_or((0.0, 0.0), |b| (b.scroll().x, b.scroll().y));
+        }
+        let next = match url {
+            Some(u) => Some(Next { url: u.to_string(), body: None, how: How::Push }),
+            None => self.hist.get(self.at).map(|h| Next { url: h.url.clone(), body: None, how: How::Reload }),
+        };
+        let Some(next) = next else {
+            return SessionResult { stop: SessionStop::LoadFailed("there is no document to reload".into()), pages: Vec::new(), urls: Vec::new(), tasks: 0, rounds: 0 };
+        };
+        self.used.ended = None;
+        self.drive(Some(next), &[])
+    }
+
+    /// Why the session cannot go on (`run` and `resume` give this stop and run nothing), or `None`.
+    pub fn ended(&self) -> Option<&SessionStop> {
+        self.used.ended.as_ref()
+    }
+
     fn drive(&mut self, next: Option<Next>, steps: &[Input]) -> SessionResult {
         let start = Instant::now();
         let before = self.used.time;

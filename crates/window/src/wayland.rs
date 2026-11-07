@@ -8,7 +8,8 @@
 //!    frame callback.
 //! 3. The buffer stays busy until `wl_buffer.release`. A buffer of a size that is no longer wanted is destroyed only
 //!    when it is free and a new frame needs its slot. Until the new frame is ready, the old one stays on screen.
-//! 4. The loop sleeps in `poll` on the Wayland socket and on the wake pipe, with no timeout. An idle window uses no CPU.
+//! 4. The loop sleeps in `poll` on the Wayland socket and on the wake pipe. The timeout is the next work of `App::tick` (a page
+//!    timer) or of a key repeat, and none when neither waits. An idle window uses no CPU.
 //!
 //! Input: the seat gives a pointer and a keyboard (smithay-client-toolkit, with xkbcommon for the layout). Their handlers
 //! only queue `Event`s in `State::pending`. The loop hands the queue to `App::event` after the Wayland events of the round
@@ -196,6 +197,9 @@ impl Window {
             self.queue.dispatch_pending(&mut self.state).map_err(|e| Error(format!("wayland: {e}")))?;
             self.state.repeat_due();
             self.state.deliver(app);
+            let mut ctl = Control::default();
+            let next = app.tick(&mut ctl);
+            self.state.obey(ctl);
             // One draw for all the events of this round.
             self.state.maybe_draw(app, &qh);
             if let Some(e) = self.state.error.take() {
@@ -217,8 +221,13 @@ impl Window {
                 PollFd::new(&wl_fd, if flushed { PollFlags::IN } else { PollFlags::IN | PollFlags::OUT }),
                 PollFd::new(&self.wake_rx, PollFlags::IN),
             ];
-            // Sleep until an event, or until the next key repeat when a key is held.
-            let timeout = self.state.repeat.wait(Instant::now()).map(|d| Timespec { tv_sec: d.as_secs() as _, tv_nsec: d.subsec_nanos() as _ });
+            // Sleep until an event, the next key repeat when a key is held, or the next work of the app.
+            let now = Instant::now();
+            let wait = match (self.state.repeat.wait(now), next.map(|t| t.saturating_duration_since(now))) {
+                (Some(a), Some(b)) => Some(a.min(b)),
+                (a, b) => a.or(b),
+            };
+            let timeout = wait.map(|d| Timespec { tv_sec: d.as_secs() as _, tv_nsec: d.subsec_nanos() as _ });
             match poll(&mut fds, timeout.as_ref()) {
                 Ok(_) => {}
                 Err(rustix::io::Errno::INTR) => continue,
@@ -276,14 +285,19 @@ impl State {
         for ev in std::mem::take(&mut self.pending) {
             let mut ctl = Control::default();
             app.event(ev, &mut ctl);
-            if ctl.redraw {
-                self.redraw.request();
-            }
-            self.exit |= ctl.close;
-            if let Some(c) = ctl.cursor {
-                self.cursor = c;
-                self.apply_cursor();
-            }
+            self.obey(ctl);
+        }
+    }
+
+    /// Do what the app asked for in a call.
+    fn obey(&mut self, ctl: Control) {
+        if ctl.redraw {
+            self.redraw.request();
+        }
+        self.exit |= ctl.close;
+        if let Some(c) = ctl.cursor {
+            self.cursor = c;
+            self.apply_cursor();
         }
     }
 
