@@ -145,4 +145,14 @@ fn run(dir: &str, sel: &str, n: usize, virt: bool) {
     if len != n {
         die(format!("the value has {len} chars, not {n}"));
     }
+    // `BC_SCOPE_CHECK=1`: compare the scope data of the code generator with every identifier site that the tree walker resolved.
+    if std::env::var_os("BC_SCOPE_CHECK").is_some()
+        && let Some(b) = s.browser()
+    {
+        let c = b.it.bc_scope_check();
+        println!("scope check: {} sites, {} indexed, {} global or dynamic, {} hops only, {} unresolved, {} in frames, {} static; {} mismatches", c.sites, c.indexed, c.global_or_dynamic, c.hops_only, c.unresolved, c.frame, c.static_checked, c.mismatches.len());
+        if !c.mismatches.is_empty() {
+            die(c.mismatches.join("\n"));
+        }
+    }
 }
