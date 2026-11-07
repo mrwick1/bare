@@ -95,7 +95,8 @@ enum Host {
 }
 
 impl Host {
-    fn open(&mut self, url: &str, size: (u32, u32), window: bool) -> Result<(), String> {
+    /// A headless `open` shares the connections and the HTTP cache of `net` (one browser, a new tab); a window opens a new profile.
+    fn open(&mut self, url: &str, size: (u32, u32), window: bool, net: &bare_net::http::Client) -> Result<(), String> {
         let new = move |url: &str| {
             let mut p = Page::open_with(url, size, None)?;
             p.quiet = true;
@@ -111,7 +112,9 @@ impl Host {
                 Ok(())
             }
             _ => {
-                *self = Host::Local(Box::new(new(url)?));
+                let mut p = Page::open_in(url, size, net)?;
+                p.quiet = true;
+                *self = Host::Local(Box::new(p));
                 Ok(())
             }
         }
@@ -159,6 +162,10 @@ pub struct StepOut {
     pub busy_ms: f64,
     pub waited_ms: f64,
     pub tries: u32,
+    /// CPU time of the page thread in the step (headless only: in a window the page runs on another thread).
+    pub cpu_ms: f64,
+    /// The time that the page thread waited inside a network call in the step.
+    pub net_ms: f64,
     pub note: Option<String>,
 }
 
@@ -178,6 +185,7 @@ pub fn run(steps: &[Step], opt: &Options, red: &mut Redactor) -> Report {
     let _ = bare_net::trace::take();
     let start = Instant::now();
     let mut host = Host::None;
+    let net = bare_net::http::Client::new();
     let mut memo = Memo::default();
     let mut timeout = opt.timeout;
     let mut rep = Report { ok: true, steps: Vec::new(), failure: None, logs: Vec::new(), net: Vec::new(), ms: 0.0, window: opt.window };
@@ -185,6 +193,7 @@ pub fn run(steps: &[Step], opt: &Options, red: &mut Redactor) -> Report {
         let t0 = Instant::now();
         let deadline = t0 + timeout;
         let (mut tries, mut busy, mut waited) = (0u32, Duration::ZERO, Duration::ZERO);
+        let (cpu0, net0) = (thread_cpu_ns(), bare_net::trace::blocked_us());
         let result: Result<Option<String>, Fail> = loop {
             tries += 1;
             let t = Instant::now();
@@ -195,7 +204,7 @@ pub fn run(steps: &[Step], opt: &Options, red: &mut Redactor) -> Report {
                 }
                 Action::Open(url) => {
                     memo.seen.clear();
-                    let opened = host.open(url, opt.size, opt.window).and_then(|_| host.run(|p| p.take_logs()));
+                    let opened = host.open(url, opt.size, opt.window, &net).and_then(|_| host.run(|p| p.take_logs()));
                     busy += t.elapsed();
                     break opened.map(|logs| rep.logs.extend(logs.into_iter().map(|l| (step.line, l)))).map(|_| None).map_err(|e| fail("page", e));
                 }
@@ -251,7 +260,9 @@ pub fn run(steps: &[Step], opt: &Options, red: &mut Redactor) -> Report {
         let ms = |d: Duration| d.as_secs_f64() * 1000.0;
         let ok = result.is_ok();
         let note = result.as_ref().ok().cloned().flatten();
-        rep.steps.push(StepOut { line: step.line, text: step.text.clone(), ok, ms: ms(t0.elapsed()), busy_ms: ms(busy), waited_ms: ms(waited), tries, note });
+        let cpu_ms = thread_cpu_ns().saturating_sub(cpu0) as f64 / 1e6;
+        let net_ms = bare_net::trace::blocked_us().saturating_sub(net0) as f64 / 1000.0;
+        rep.steps.push(StepOut { line: step.line, text: step.text.clone(), ok, ms: ms(t0.elapsed()), busy_ms: ms(busy), waited_ms: ms(waited), tries, cpu_ms, net_ms, note });
         if opt.progress {
             let s = rep.steps.last().expect("pushed");
             let what = match &result {
@@ -277,6 +288,11 @@ pub fn run(steps: &[Step], opt: &Options, red: &mut Redactor) -> Report {
     drop(host);
     rep.ms = start.elapsed().as_secs_f64() * 1000.0;
     rep
+}
+
+/// The CPU time of this thread in nanoseconds, from `/proc/thread-self/schedstat` (0 where it cannot be read).
+fn thread_cpu_ns() -> u64 {
+    std::fs::read_to_string("/proc/thread-self/schedstat").ok().and_then(|s| s.split(' ').next()?.parse().ok()).unwrap_or(0)
 }
 
 fn save(c: &Canvas, dir: &std::path::Path, name: &str) -> String {
@@ -511,13 +527,15 @@ impl Report {
             .iter()
             .map(|x| {
                 format!(
-                    "{{\"line\":{},\"step\":{},\"ok\":{},\"ms\":{:.1},\"busy_ms\":{:.1},\"waited_ms\":{:.1},\"tries\":{}{}}}",
+                    "{{\"line\":{},\"step\":{},\"ok\":{},\"ms\":{:.1},\"busy_ms\":{:.1},\"waited_ms\":{:.1},\"cpu_ms\":{:.1},\"net_ms\":{:.1},\"tries\":{}{}}}",
                     x.line,
                     s(&x.text),
                     x.ok,
                     x.ms,
                     x.busy_ms,
                     x.waited_ms,
+                    x.cpu_ms,
+                    x.net_ms,
                     x.tries,
                     x.note.as_ref().map_or(String::new(), |n| format!(",\"note\":{}", s(n)))
                 )
@@ -532,11 +550,20 @@ impl Report {
             .iter()
             .map(|(line, r)| {
                 format!(
-                    "{{\"line\":{line},\"url\":{},\"status\":{},\"bytes\":{},\"ms\":{:.1}{}}}",
+                    "{{\"line\":{line},\"url\":{},\"status\":{},\"bytes\":{},\"ms\":{:.1},\"at_ms\":{:.1},\"phases_ms\":[{:.1},{:.1},{:.1},{:.1},{:.1},{:.1}],\"reused\":{},\"h2\":{}{}}}",
                     s(&r.url),
                     r.status,
                     r.bytes,
                     (r.wait + r.dns + r.tcp + r.tls + r.ttfb + r.body) as f64 / 1000.0,
+                    r.at as f64 / 1000.0,
+                    r.wait as f64 / 1000.0,
+                    r.dns as f64 / 1000.0,
+                    r.tcp as f64 / 1000.0,
+                    r.tls as f64 / 1000.0,
+                    r.ttfb as f64 / 1000.0,
+                    r.body as f64 / 1000.0,
+                    r.reused,
+                    r.h2,
                     r.error.as_ref().map_or(String::new(), |e| format!(",\"error\":{}", s(e)))
                 )
             })

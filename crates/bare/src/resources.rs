@@ -475,7 +475,7 @@ pub fn fetch(client: &mut http::Client, target: &Target, limits: &Limits, deadli
     let mut redirects = 0;
     let mut streamed = loop {
         if Instant::now() >= deadline { return Err(LoadError::TimedOut); }
-        let streamed = client.send_stream_once(&http::Request::get(&current)).map_err(|e| LoadError::Network(e.to_string()))?;
+        let streamed = client.send_stream_cached(&http::Request::get(&current)).map_err(|e| LoadError::Network(e.to_string()))?;
         if !matches!(streamed.response.status, 301 | 302 | 303 | 307 | 308) { break streamed; }
         if redirects == 20 { return Err(LoadError::Redirect); }
         let Some(location) = streamed.response.header("location") else { break streamed };
@@ -577,6 +577,8 @@ pub fn fetch(client: &mut http::Client, target: &Target, limits: &Limits, deadli
         }
     }
     buf.truncate(filled);
+    // A fresh copy answers the next document of the session (an immutable script of an app) without a request.
+    client.keep(&current, &streamed.response, &buf);
     if buf.capacity() - filled > filled / 8 {
         // Chunked bodies grow by doubling. Give back the unused room: the cap is on the memory that we keep.
         buf.shrink_to_fit();

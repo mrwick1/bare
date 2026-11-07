@@ -303,6 +303,20 @@ impl Page {
     pub fn open_with(url: &str, viewport: (u32, u32), storage: Option<crate::browser_navigation::WebStorage>) -> Result<Page, String> {
         let mut cfg = SessionConfig::new(url);
         cfg.storage = storage;
+        Page::open_cfg(cfg, viewport)
+    }
+
+    /// `open` in a new session with empty storage that shares the connections and the HTTP cache of `net`, as a new tab of one browser
+    /// does. A driver that opens many pages pays no new TLS handshake and no new download of the immutable scripts of an app.
+    pub fn open_in(url: &str, viewport: (u32, u32), net: &bare_net::http::Client) -> Result<Page, String> {
+        let mut cfg = SessionConfig::new(url);
+        let net = net.fork();
+        cfg.client = Box::new(move || net.fork());
+        Page::open_cfg(cfg, viewport)
+    }
+
+    fn open_cfg(mut cfg: SessionConfig, viewport: (u32, u32)) -> Result<Page, String> {
+        let url = cfg.url.clone();
         cfg.viewport = Some((viewport.0 as f32, viewport.1 as f32));
         // A window runs for hours, not for one load: an input event adds a little time and a few tasks each.
         cfg.limits.max_time = Duration::from_secs(7 * 24 * 3600);
