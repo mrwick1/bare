@@ -306,6 +306,11 @@ pub(crate) struct Scripts {
     preloads: RefCell<preload::Preloads>,
     /// Live: the downloads of the page, kept from one turn to the next (a script that is not in yet waits here).
     net: RefCell<Option<Box<Net>>>,
+    /// Live: a document that a page navigation loaded in the background. Its scripts run across turns, and the page takes input between
+    /// them (`Run::split`).
+    pub(crate) split: Cell<bool>,
+    /// Live: where the scripts of a split document stopped, kept for the next turn. `None` once `load` ran.
+    parse: RefCell<Option<Box<Parse>>>,
 }
 
 impl Dom {
@@ -748,12 +753,12 @@ impl Browser {
             async_queue: VecDeque::new(),
             loaded: false,
             probed: false,
+            split: live && dom.scripts.split.get(),
+            step: 0,
+            waiting: false,
         };
         let stop = run.go();
-        let Run { mut res, net, .. } = run;
-        if live {
-            *dom.scripts.net.borrow_mut() = Some(Box::new(net));
-        }
+        let mut res = run.park();
         res.css = dom.scripts.sheets.borrow().stats;
         res.preload = dom.scripts.preloads.borrow().stats;
         dom.scripts.page_spent.set((res.tasks, res.rounds, started.elapsed()));
@@ -796,30 +801,43 @@ impl Browser {
         };
         let live = self.live();
         let net = if live { dom.scripts.net.borrow_mut().take() } else { None };
+        let parse = dom.scripts.parse.borrow_mut().take().map(|p| *p);
+        let split = parse.is_some();
+        let p = parse.unwrap_or_else(|| Parse {
+            disc: resources::Discovery { items: Vec::new(), targets: Vec::new(), base: String::new() },
+            items: Vec::new(),
+            cache: Vec::new(),
+            refs: Vec::new(),
+            retained: 0,
+            cursor: 0,
+            async_queue: VecDeque::new(),
+            step: 0,
+            waiting: false,
+        });
         let mut run = Run {
             b: self,
             dom: dom.clone(),
             net: net.map_or_else(|| Net::new(client), |n| *n),
             slice: live.then(|| Instant::now() + SLICE),
-            cursor: 0,
+            cursor: p.cursor,
             https_only: page.scheme == bare_url::Scheme::Https,
             deadline: deadline_after(limits.max_time),
             lim: limits,
-            cache: Vec::new(),
-            refs: Vec::new(),
-            retained: 0,
+            cache: p.cache,
+            refs: p.refs,
+            retained: p.retained,
             res,
-            disc: resources::Discovery { items: Vec::new(), targets: Vec::new(), base: String::new() },
-            items: Vec::new(),
-            async_queue: VecDeque::new(),
+            disc: p.disc,
+            items: p.items,
+            async_queue: p.async_queue,
             loaded: dom.scripts.ready.get() == 2,
             probed: false,
+            split,
+            step: p.step,
+            waiting: p.waiting,
         };
         let stop = run.resume(steps).err().unwrap_or(Stop::Settled);
-        let Run { mut res, net, .. } = run;
-        if live {
-            *dom.scripts.net.borrow_mut() = Some(Box::new(net));
-        }
+        let mut res = run.park();
         res.css = dom.scripts.sheets.borrow().stats;
         res.preload = dom.scripts.preloads.borrow().stats;
         dom.scripts.page_spent.set((spent.0.saturating_add(res.tasks), spent.1.saturating_add(res.rounds), spent.2.saturating_add(started.elapsed())));
@@ -852,13 +870,18 @@ impl Browser {
         if !s.inline.borrow().is_empty() || self.navigation_stats().pending_tasks > 0 {
             return Some(true);
         }
+        let net = s.net.borrow();
         let script = s.external.borrow().front().map(|e| match e {
             Ext::Fail(_) => true,
-            Ext::Fetch(_, u) => s.net.borrow().as_ref().and_then(|n| n.started.get(&Net::key(Expect::Script, u))).is_none_or(|t| t.done()),
+            Ext::Fetch(_, u) => net.as_ref().and_then(|n| n.started.get(&Net::key(Expect::Script, u))).is_none_or(|t| t.done()),
         });
-        match (self.fetch_ready(), script) {
-            (Some(true), _) | (_, Some(true)) => Some(true),
-            (None, None) => None,
+        // The sheets, preloads and parsed scripts that a turn did not wait for: is one of them in?
+        let waits = net.as_ref().filter(|n| !n.waits.is_empty()).map(|n| n.waits.iter().any(|k| n.started.get(k).is_none_or(|t| t.done())));
+        // A split document goes on at once, unless it stopped for a download.
+        let parse = s.parse.borrow().as_ref().map(|p| !p.waiting || waits.unwrap_or(true));
+        match (self.fetch_ready(), script, waits, parse) {
+            (Some(true), ..) | (_, Some(true), ..) | (.., Some(true), _) | (.., Some(true)) => Some(true),
+            (None, None, None, None) => None,
             _ => Some(false),
         }
     }
@@ -886,6 +909,8 @@ struct Net {
     /// Bytes of the started downloads that are done and not taken. A job that finds them at the total cap does not download, so the
     /// text that waits stays within the cap, plus the `MAX_WORKERS` bodies that are read at once. The result of a file does not change.
     done: Arc<AtomicUsize>,
+    /// Live: the keys in `started` that the last style pass or script step did not wait for (`Run::on_the_way`). A later turn takes them.
+    waits: Vec<String>,
 }
 
 /// Downloads that are started and not taken at once. The workers run `MAX_WORKERS` of them at a time (Chrome opens 6 connections for
@@ -895,7 +920,7 @@ const WINDOW: usize = 32;
 
 impl Net {
     fn new(client: Client) -> Net {
-        Net { client, started: HashMap::new(), direct: HashSet::default(), done: Arc::default() }
+        Net { client, started: HashMap::new(), direct: HashSet::default(), done: Arc::default(), waits: Vec::new() }
     }
 
     fn tag(expect: Expect, url: &Url) -> u64 {
@@ -967,7 +992,7 @@ struct Run<'a> {
     b: &'a mut Browser,
     dom: Rc<Dom>,
     net: Net,
-    /// Live: when the turn gives the thread back. It counts only after `load` (the scripts of the document run in one turn).
+    /// Live: when the turn gives the thread back. It counts after `load`, and before it in a split document (`split`).
     slice: Option<Instant>,
     /// The next target of `disc.targets` that `prefetch` looks at.
     cursor: usize,
@@ -985,6 +1010,26 @@ struct Run<'a> {
     loaded: bool,
     /// `BARE_NET_TRACE` only: the probe of the trace gave true.
     probed: bool,
+    /// Live, a document that a page navigation loaded (`Scripts::split`): its scripts stop at the end of a slice, or at a script that is
+    /// not downloaded, and go on in a later turn. The page takes input between them.
+    split: bool,
+    /// How far `go_inner` is: 0 the start, then each blocking script, `interactive`, each defer script and `DOMContentLoaded`.
+    step: usize,
+    /// The split document stopped for a download (`live_work` then waits for the network).
+    waiting: bool,
+}
+
+/// What a split document keeps from one turn to the next (the fields of `Run` with the same names).
+struct Parse {
+    disc: resources::Discovery,
+    items: Vec<Parsed>,
+    cache: Vec<Option<Result<String, String>>>,
+    refs: Vec<usize>,
+    retained: usize,
+    cursor: usize,
+    async_queue: VecDeque<Parsed>,
+    step: usize,
+    waiting: bool,
 }
 
 type Flow = Result<(), Stop>;
@@ -1215,7 +1260,7 @@ impl Run<'_> {
     /// One queued dynamic external script. Gives false when none is queued.
     fn run_dynamic(&mut self) -> Result<bool, Stop> {
         self.prefetch();
-        if self.slice.is_some() && self.loaded && self.live_wait() {
+        if self.live_now() && self.live_wait() {
             return Ok(false);
         }
         let next = self.dom.scripts.external.borrow_mut().pop_front();
@@ -1266,7 +1311,55 @@ impl Run<'_> {
 
     /// Live: the slice of the turn is used up.
     fn sliced(&self) -> bool {
-        self.loaded && self.slice.is_some_and(|end| Instant::now() >= end)
+        (self.loaded || self.split) && self.slice.is_some_and(|end| Instant::now() >= end)
+    }
+
+    /// Live, after `load` or in a split document: a turn waits for no download.
+    fn live_now(&self) -> bool {
+        self.slice.is_some() && (self.loaded || self.split)
+    }
+
+    /// Live (`live_now`): is the download of `url` still on its way? It starts on a worker if it has not, and the caller goes on without
+    /// it: a later turn takes it. False: take it now. It is in, or it could not start on a worker (then the page thread fetches it, as before).
+    fn on_the_way(&mut self, expect: Expect, url: &Url, cap: usize) -> bool {
+        if !self.live_now() || (self.https_only && url.scheme == bare_url::Scheme::Http) {
+            return false;
+        }
+        let key = Net::key(expect, url);
+        if !self.net.started.contains_key(&key) && self.res.fetches + self.net.started.len() < self.lim.resources.max_fetches {
+            let mut lim = self.lim.resources.clone();
+            lim.max_resource_bytes = lim.max_resource_bytes.min(cap);
+            let kept = self.kept();
+            self.net.start(expect, url, &lim, self.deadline, kept);
+        }
+        let wait = self.net.started.get(&key).is_some_and(|t| !t.done());
+        if wait {
+            self.net.waits.push(key);
+        }
+        wait
+    }
+
+    /// Split: is the parsed external script `p` still on its way? Then the document stops before it for this turn.
+    fn pending(&mut self, p: &Parsed) -> bool {
+        let Source::External(t) = p.source else { return false };
+        if !self.split || self.cache[t].is_some() || self.dom.scripts.preloads.borrow().has_script(&self.disc.targets[t].url) {
+            return false;
+        }
+        let u = &self.disc.targets[t].url;
+        let url = Url { scheme: u.scheme, host: u.host.clone(), port: u.port, path: u.path.clone() };
+        self.on_the_way(Expect::Script, &url, usize::MAX)
+    }
+
+    /// The run ends: keep the downloads (live) and the place of a split document that has not loaded, and give the result.
+    fn park(self) -> PageResult {
+        let Run { dom, res, net, slice, split, loaded, disc, items, cache, refs, retained, cursor, async_queue, step, waiting, .. } = self;
+        if slice.is_some() {
+            *dom.scripts.net.borrow_mut() = Some(Box::new(net));
+        }
+        if split && !loaded {
+            *dom.scripts.parse.borrow_mut() = Some(Box::new(Parse { disc, items, cache, refs, retained, cursor, async_queue, step, waiting }));
+        }
+        res
     }
 
     /// The inputs, one task each, then the rounds. A navigation that an input queued ends the run before the next input.
@@ -1302,7 +1395,7 @@ impl Run<'_> {
             }
             self.after_js()?;
         }
-        let stop = self.rounds().unwrap_err();
+        let stop = if self.split && !self.loaded { self.go_inner() } else { self.rounds() }.unwrap_err();
         // Live: the rounds collect when the heap asks (`gc_due`); a collect after each turn would cost more than the turn.
         if stop == Stop::Settled && self.res.tasks > 0 && self.slice.is_none()
             && let Err(e) = self.b.collect(&[]) {
@@ -1324,7 +1417,8 @@ impl Run<'_> {
     /// Nothing starts that the page would refuse to load, and no more than the fetch budget allows. One download alone gains nothing from
     /// a worker thread: the page thread makes it when its turn comes. So does every download while the server has been quick (`Client::parallel_pays`).
     fn prefetch(&mut self) {
-        if !self.net.client.parallel_pays() {
+        // A split document starts all its downloads at once: its turns wait for none of them.
+        if !self.split && !self.net.client.parallel_pays() {
             return;
         }
         let lim = &self.lim.resources;
@@ -1346,7 +1440,7 @@ impl Run<'_> {
                 todo.push((Expect::Script, u));
             }
         }
-        if todo.len() + self.net.started.len() < 2 {
+        if !self.split && todo.len() + self.net.started.len() < 2 {
             return;
         }
         self.cursor = cursor;
@@ -1360,29 +1454,60 @@ impl Run<'_> {
         }
     }
 
+    /// The scripts of the document up to `DOMContentLoaded`, from `step` on, then the rounds. A split document stops (`Settled`) at the end
+    /// of a slice or before a script that is not downloaded, and a later turn goes on from the same step.
     fn go_inner(&mut self) -> Flow {
-        self.budget()?;
-        self.prefetch();
-        if let Err(e) = self.b.drain() { return Err(self.fatal(e, "initial checkpoint")); }
-        self.feed_styles()?;
         let items = self.items.clone();
-        for p in items.iter().filter(|p| p.timing == Timing::Blocking) {
+        let blocking: Vec<Parsed> = items.iter().filter(|p| p.timing == Timing::Blocking).copied().collect();
+        let defer: Vec<Parsed> = items.iter().filter(|p| p.timing == Timing::Defer).copied().collect();
+        let (nb, nd) = (blocking.len(), defer.len());
+        if self.step == 0 {
+            self.budget()?;
+            self.prefetch();
+            if let Err(e) = self.b.drain() { return Err(self.fatal(e, "initial checkpoint")); }
+            self.feed_styles()?;
+            // Split: a sheet of the parsed document is on its way. The scripts wait for it, the page does not.
+            self.waiting = !self.net.waits.is_empty();
+            if self.waiting {
+                return Err(Stop::Settled);
+            }
+            self.step = 1;
+        }
+        while self.step <= nb {
+            let p = blocking[self.step - 1];
+            self.waiting = self.pending(&p);
+            if self.waiting || self.sliced() {
+                return Err(Stop::Settled);
+            }
             // The page is pre-parsed. A custom element after the script that defined it is upgraded when the parser would reach it.
             self.release_elements(Some(p.node))?;
             self.dom.ce.parsing.set(Some(p.node));
-            self.run_parsed(*p)?;
+            self.step += 1;
+            self.run_parsed(p)?;
         }
-        self.dom.ce.parsing.set(None);
-        self.release_elements(None)?;
-        self.set_ready(1)?;
-        for p in items.iter().filter(|p| p.timing == Timing::Defer) {
-            self.run_parsed(*p)?;
+        if self.step == nb + 1 {
+            self.dom.ce.parsing.set(None);
+            self.release_elements(None)?;
+            self.step += 1;
+            self.set_ready(1)?;
         }
-        let root = self.dom.doc.borrow().root();
-        bare_net::trace::mark(|| "DOMContentLoaded".into(), 0);
-        self.fire(EvTarget::Node(root), "DOMContentLoaded", true)?;
-        self.after_js()?;
-        self.async_queue.extend(items.iter().filter(|p| p.timing == Timing::Async));
+        while self.step <= nb + 1 + nd {
+            let p = defer[self.step - nb - 2];
+            self.waiting = self.pending(&p);
+            if self.waiting || self.sliced() {
+                return Err(Stop::Settled);
+            }
+            self.step += 1;
+            self.run_parsed(p)?;
+        }
+        if self.step == nb + nd + 2 {
+            self.step += 1;
+            let root = self.dom.doc.borrow().root();
+            bare_net::trace::mark(|| "DOMContentLoaded".into(), 0);
+            self.fire(EvTarget::Node(root), "DOMContentLoaded", true)?;
+            self.after_js()?;
+            self.async_queue.extend(items.iter().filter(|p| p.timing == Timing::Async));
+        }
         self.rounds()
     }
 
@@ -1413,7 +1538,7 @@ impl Run<'_> {
             self.budget()?;
             self.feed_if_ran()?;
             let mut did = 0usize;
-            if !self.loaded && self.async_queue.is_empty() && self.dom.scripts.external.borrow().is_empty() {
+            if !self.loaded && self.async_queue.is_empty() && self.dom.scripts.external.borrow().is_empty() && self.net.waits.is_empty() {
                 self.loaded = true;
                 self.set_ready(2)?;
                 bare_net::trace::mark(|| "load".into(), 0);
@@ -1425,7 +1550,12 @@ impl Run<'_> {
                 if self.sliced() {
                     break;
                 }
-                if let Some(p) = self.async_queue.pop_front() {
+                if let Some(p) = self.async_queue.front().copied() {
+                    self.waiting = self.pending(&p);
+                    if self.waiting {
+                        break;
+                    }
+                    self.async_queue.pop_front();
                     self.run_parsed(p)?;
                 } else if !self.run_dynamic()? {
                     break;
@@ -1478,7 +1608,7 @@ impl Run<'_> {
                 continue;
             }
             // Live: never wait. The window loop and the driver call again when a task is due or a reply is in.
-            if self.slice.is_some() && self.loaded {
+            if self.live_now() {
                 return Err(Stop::Settled);
             }
             // Idle: wait for the next task if one that blocks the settle is near, else the page is settled. The wait is

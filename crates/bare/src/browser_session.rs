@@ -425,6 +425,8 @@ impl Session {
                     // The old document ends here: its realm, timers and callbacks are gone before the next load starts.
                     self.browser = None;
                     let mut base = self.fork();
+                    // Live: a document that the page asked for runs its scripts across turns. `navigate` and `run` still wait for `load`.
+                    let split = self.cfg.live && fetched.is_some();
                     let doc = match fetched.take() {
                         Some(d) => d,
                         None => load_document(&mut base, &url, body.as_ref(), &lim, deadline),
@@ -478,6 +480,7 @@ impl Session {
                     let fetch = (base.fork(), self.cfg.fetch);
                     if self.cfg.live {
                         b.dom.fetch.live.set(true);
+                        b.dom.scripts.split.set(split);
                     }
                     let r = b.run_page(PageConfig { url, client, limits: page, fetch: Some(fetch) });
                     (b, r)

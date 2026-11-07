@@ -147,6 +147,8 @@ impl Run<'_> {
         let page = self.b.document_url().and_then(|u| Url::parse(u.split('#').next().unwrap_or("")).ok());
         let Some(page) = page else { return Ok(()) };
         let base = resources::document_base(&self.dom.doc.borrow(), &page).unwrap_or(page);
+        // Live: each pass asks again for the downloads that it waits for, so a link that is gone is not waited for.
+        self.net.waits.clear();
         {
             let mut s = self.dom.scripts.sheets.borrow_mut();
             s.stats.feeds += 1;
@@ -180,8 +182,13 @@ impl Run<'_> {
                 // Discovery errors stop the driver before any later JavaScript or I/O.
                 Err(e) => return Err(fatal_of(e)),
             };
+            let (waits, supplied) = (self.net.waits.len(), self.dom.scripts.sheets.borrow().stats.supplied);
             for raw in missing {
                 self.supply(&raw, &base)?;
+            }
+            // Live: the sheets that are left are on their way. A later turn supplies them.
+            if self.net.waits.len() != waits && self.dom.scripts.sheets.borrow().stats.supplied == supplied {
+                return Ok(());
             }
         }
         Err(limit("css-passes"))
@@ -189,6 +196,7 @@ impl Run<'_> {
 
     /// Fetch and supply the sheet that `raw` names, then tell the `<link>` elements that wait for it.
     pub(super) fn supply(&mut self, raw: &str, base: &Url) -> Flow {
+        let waits = self.net.waits.len();
         let (parts, url, top_ok) = match base.join(raw.trim_matches(WS)) {
             Err(_) => {
                 self.sheet_failed(None, "the URL is not an http(s) URL".into());
@@ -207,6 +215,10 @@ impl Run<'_> {
                 }
             }
         };
+        // Live: the sheet or one of its imports is on its way (`on_the_way`). It is supplied in a later turn.
+        if self.net.waits.len() != waits {
+            return Ok(());
+        }
         self.budget()?;
         if let Err(e) = self.b.set_external_stylesheet(raw, parts) {
             return Err(fatal_of(e));
@@ -221,6 +233,7 @@ impl Run<'_> {
     }
 
     /// The text of `url`: from the cache, or from the network (counted, capped). `Ok(Err)` is a failed sheet, `Err` a stop.
+    /// Live, a sheet that is on its way is `Ok(Err)` too, not cached and not counted: `Net::waits` grows, and the caller looks at it.
     pub(super) fn fetch_sheet(&mut self, url: &Url) -> Result<Fetched, Stop> {
         let key = url.to_string();
         if let Some(c) = self.dom.scripts.sheets.borrow().fetched.get(&key) {
@@ -237,6 +250,9 @@ impl Run<'_> {
         }
         if self.res.fetches >= self.lim.resources.max_fetches {
             return Err(limit("css-fetches"));
+        }
+        if self.on_the_way(Expect::Style, url, MAX_BODY) {
+            return Ok(Err(String::new()));
         }
         self.res.fetches += 1;
         self.dom.forget_quiet();
