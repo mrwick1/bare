@@ -17,8 +17,13 @@
 //! The object goes to dictionary mode for the reasons above like any other.
 //! - the shape table is full (`SHAPE_CAP`): no new shape is made.
 //! The chain of an object is as long as its property count, so the "longer than 1024" rule of the plan can never fire and is not coded.
-//! Shapes are never freed in this step (step A6). A dead key in a shape never matches a live key: a freed handle gets a new
-//! generation.
+//! A dead key in a shape never matches a live key: a freed handle gets a new generation.
+//!
+//! Shape sweep (step A6). A collect frees the shapes that no live object uses, when the shape count has doubled since the last sweep
+//! (and is at least `SWEEP_MIN`). The mark sets the shape of each live object and its parents. The sweep keeps the live shapes in
+//! order with new ids, drops the dead transitions and the table entries past the longest live user, and rewrites the shape of each
+//! live object. Every `Ic` and every literal site shape is then stale: the heap resets its stubs, and the evaluator resets its
+//! entries when `Heap::shape_sweeps` changes.
 //!
 //! Inline caches (step A2). A site (`o.x` in the tree walker, a property instruction in bytecode) keeps an `Ic`: "last time, the receiver had
 //! this shape, and the property was in this slot of the receiver, or of this prototype, or nowhere". `Heap::ic_own` answers an own data hit
@@ -32,8 +37,8 @@
 //! A fill refuses a chain with an exotic object, a dictionary holder, a lazy `prototype` key or an `on*` name of the host: those keep
 //! the plain walk. The contract is in `docs/decisions.md` ("Shapes and inline caches") and the plan is in `docs/engine-plan.md`.
 //!
-//! An `Ic` is plain `Copy` data with no pointer. A handle in it that has died fails the generation check of every handle read. Shapes are
-//! never freed (until step A6), so a shape id in an entry never names another shape.
+//! An `Ic` is plain `Copy` data with no pointer. A handle in it that has died fails the generation check of every handle read. A shape
+//! id in an entry never names another shape: a shape sweep gives new ids, and every entry is reset after it.
 use super::*;
 use std::cell::{Cell, OnceCell};
 
