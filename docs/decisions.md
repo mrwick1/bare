@@ -34,17 +34,17 @@ The candidate parts are in [open-source.md](open-source.md). Parts written befor
 
 The repository is a Cargo workspace. Each browser part is one crate in `crates/`:
 
-| Crate          | Folder            | Contents                    | Uses                   |
-| -------------- | ----------------- | --------------------------- | ---------------------- |
-| `bare-unicode` | `crates/unicode/` | NFC, generated Unicode data | -                      |
-| `bare-url`     | `crates/url/`     | URL parser, IDNA            | `bare-unicode`         |
-| `bare-net`     | `crates/net/`     | DNS, TCP, HTTP              | `bare-url`             |
-| `bare-html`    | `crates/html/`    | encoding, tokenizer, DOM, tree builder | -           |
-| `bare-css`     | `crates/css/`     | tokenizer, parser, selectors, cascade | `bare-html` (from topic 3) |
-| `bare-layout`  | `crates/layout/`  | box tree, text, block and inline layout | `bare-html`, `bare-css` |
-| `bare-paint`   | `crates/paint/`   | display list, pixel buffer, glyphs, PNG capture | `bare-css`, `bare-html`, `bare-layout` |
-| `bare-window`  | `crates/window/`  | window interface, Wayland backend (smithay-client-toolkit) | - |
-| `bare`         | `crates/bare/`    | the app (`main.rs`)         | `bare-net`, `bare-url`, `bare-html`, `bare-paint`, `bare-window` |
+| Crate          | Folder            | Contents                                                   | Uses                                                             |
+| -------------- | ----------------- | ---------------------------------------------------------- | ---------------------------------------------------------------- |
+| `bare-unicode` | `crates/unicode/` | NFC, generated Unicode data                                | -                                                                |
+| `bare-url`     | `crates/url/`     | URL parser, IDNA                                           | `bare-unicode`                                                   |
+| `bare-net`     | `crates/net/`     | DNS, TCP, HTTP                                             | `bare-url`                                                       |
+| `bare-html`    | `crates/html/`    | encoding, tokenizer, DOM, tree builder                     | -                                                                |
+| `bare-css`     | `crates/css/`     | tokenizer, parser, selectors, cascade                      | `bare-html` (from topic 3)                                       |
+| `bare-layout`  | `crates/layout/`  | box tree, text, block and inline layout                    | `bare-html`, `bare-css`                                          |
+| `bare-paint`   | `crates/paint/`   | display list, pixel buffer, glyphs, PNG capture            | `bare-css`, `bare-html`, `bare-layout`                           |
+| `bare-window`  | `crates/window/`  | window interface, Wayland backend (smithay-client-toolkit) | -                                                                |
+| `bare`         | `crates/bare/`    | the app (`main.rs`)                                        | `bare-net`, `bare-url`, `bare-html`, `bare-paint`, `bare-window` |
 
 Why crates, not folders in one crate:
 
@@ -358,6 +358,7 @@ Reason: the profile of `/login` (#186) put 50% of the time in requests that wait
 Own code and not the `h2` crate: the crate needs tokio, adds about 19 crates, a 12 s clean build and +906 KiB stripped (measured on a test crate), and needs a bridge between an async runtime and our blocking TLS stream. Our code adds 78 KiB to the stripped binary. The client is synchronous, so one reader thread for each connection is enough. The Huffman table of HPACK is copied from the `h2` crate (MIT).
 
 Choices:
+
 - The reader waits on the socket with `peek` and takes the TLS stream only for one read. A writer never waits behind a reader that waits for the peer. Lock order is `io`, then `st`.
 - The window is 1 MiB for a stream and 4 MiB for the connection. `WINDOW_UPDATE` follows what the caller read. A slow caller stops the server, and memory stays bounded.
 - Push is off. A frame is at most 16 KiB. A header list is at most 256 KiB, and a block 256 KiB. An oversized list fails its stream, and the HPACK table still takes the block, so the connection stays in step.
@@ -386,16 +387,16 @@ Decision: `Interp::gc_due` is true, at the end of a driver call and in each load
 
 Sweep (`type_load` on `tools/js/typing`, main 3018876 plus the cheaper collect, `instructions:u` of one run, cost of a key from the difference of 50 keys and 0 keys, peak RSS from `getrusage`; the rows with no collect at all cost 410.7 M and 190 MiB at 50 keys):
 
-| Factor | Floor | Instructions for each key | Peak RSS, 20 keys | Peak RSS, 50 keys |
-| -----: | ----: | ------------------------: | ----------------: | ----------------: |
-| 1.50   | 8 MiB  | 417.8 M | 33.1 MiB | 33.1 MiB |
-| 1.50   | 12 MiB | 413.4 M | 36.2 MiB | 36.2 MiB |
-| **1.75** | **8 MiB** | **413.3 M** | **36.3 MiB** | **36.1 MiB** |
-| 1.75   | 12 MiB | 413.4 M | 36.1 MiB | 36.3 MiB |
-| 2.00   | 8 MiB  | 411.0 M | 39.5 MiB | 41.2 MiB |
-| 2.00   | 12 MiB | 411.1 M | 39.0 MiB | 40.7 MiB |
-| 2.50   | 8 MiB  | 408.8 M | 46.3 MiB | 46.6 MiB |
-| 2.50   | 12 MiB | 408.9 M | 47.0 MiB | 46.6 MiB |
+|   Factor |     Floor | Instructions for each key | Peak RSS, 20 keys | Peak RSS, 50 keys |
+| -------: | --------: | ------------------------: | ----------------: | ----------------: |
+|     1.50 |     8 MiB |                   417.8 M |          33.1 MiB |          33.1 MiB |
+|     1.50 |    12 MiB |                   413.4 M |          36.2 MiB |          36.2 MiB |
+| **1.75** | **8 MiB** |               **413.3 M** |      **36.3 MiB** |      **36.1 MiB** |
+|     1.75 |    12 MiB |                   413.4 M |          36.1 MiB |          36.3 MiB |
+|     2.00 |     8 MiB |                   411.0 M |          39.5 MiB |          41.2 MiB |
+|     2.00 |    12 MiB |                   411.1 M |          39.0 MiB |          40.7 MiB |
+|     2.50 |     8 MiB |                   408.8 M |          46.3 MiB |          46.6 MiB |
+|     2.50 |    12 MiB |                   408.9 M |          47.0 MiB |          46.6 MiB |
 
 An earlier sweep on the same page, before the frame slots, gave the same order with 1.25 to 3.0 and floors of 8 to 24 MiB (floor 16 MiB: 42 to 44 MiB; floor 24 MiB: 56 MiB; factor 1.25 with floor 8 MiB: 455 M against 441 M for 1.5).
 
@@ -470,6 +471,35 @@ To follow the standard, add the five names to the first arm of `Builder::in_temp
 - Locators follow Playwright: role and accessible name, label, text, placeholder, CSS. A locator must match one element. Reason: a duplicate target is a test bug. A first-match rule hides it.
 - The output is one JSON object. Secrets are replaced in every text when the JSON is written, so a secret that the driver learns late is also hidden in earlier records. A capture is withheld when a secret is in the text or in a field of the page. Reason: a password field shows dots, but an email field and the page text show their text in the pixels.
 - Network records come from `bare_net::trace` (`enable`, `take`). The list is one for each process, so one driver runs at a time in a process. Reason: it holds the URL without the query, the status and the times already. A second recorder would cost a second hook in the hot path.
+
+## Incremental frames: damage, restyle, layout reuse, culled paint
+
+Goal: after a small change, the window frame costs in proportion to the change, not to the page. Measured before (100,000 lines, p50): a script text write 77 ms, a hover color 22 ms, a checkbox click 16 ms, a click that changes nothing 5.2 ms. Target: under 5 ms for the first three.
+
+What the other engines do:
+
+- Chrome (Blink, LayoutNG). Style: invalidation sets select the elements to restyle ("self", descendant and sibling sets). `:hover` changes recalculate only elements that have an `AffectedBy*` flag (source: `style-invalidation.md` in Blink). Layout: a change sets `NeedsLayout` on the box and on its containing blocks. `BlockNode::Layout` keeps the last layout result with its input constraint space, and reuses it when the space is identical (`operator==`) and the box is not marked for layout (source: `layout_ng.md`). The kept fragment is cloned without its offset. Paint: `PaintController` keeps display items for each client and repaints only invalidated clients (to verify: we did not read this source). Hit testing skips a subtree whose overflow rect does not hold the point (to verify).
+- WebKit. `markContainingBlocksForLayout` sets the dirty bits up the containing blocks. It stops at a layout boundary (`isLayoutBoundary`): the view, a box with layout and size containment, or a box that clips its overflow with a fixed width and height and is not a table part. Layout then starts at that root (source: `RenderObject.cpp`).
+- Servo. Restyle computes `RestyleDamage` from the old and new styles. A repaint-only change skips layout and rebuilds only the stacking and display lists (servo#36978). Layout results are kept on each box (`CacheableLayoutResult` in `LayoutBoxBase`, servo#36082). Undamaged block boxes and their fragments are reused (servo#37751, servo#42687 and later).
+
+The common idea is the same in all three: mark the changed boxes and their ancestors, keep the old result of each clean box with its inputs, and use it again when the inputs are equal. A layout boundary (WebKit) is an early stop of the same walk. The LayoutNG cache is the most general: it needs no special box, and the walk from the root costs only the work of the changed path and one copy of the clean subtrees. Our fragments are one flat list, so a reused subtree is one `memcpy`. We take the LayoutNG design.
+
+Design:
+
+1. Damage log (`bare_html::dom`). The window turns on a log of tree changes. An entry names a node: a link, an unlink, an attribute, a text, or a form state change. The log and the watcher of `set_watcher` share one box (`Hooks`), so `Document` has no new field and a change still checks one `Option`. A new field cost up to +0.27% on the parse and layout rows. A change that the log cannot describe (`touch`, `set_custom_state`, `set_states`, `attach_shadow`, the parser cut) marks the log "full". A full log, or a log with more than 4,096 entries (`MAX_MARKS`), makes the next frame a full update. A change to a `style`, `link` or `base` element, a rule set built again, or a page with a shadow root also gives a full update.
+2. Incremental restyle (`bare_css::cascade`). The style cache of a cascade (`Memo`) and its value tables stay in `Styles` for the window. So the same (parent style, rules) gives the same style number, and two equal numbers mean equal values. `RuleSet` finds, for each user state (hover, active, focus, form), the widest scope that a selector reads it in: the element itself (only the subject compound), its subtree (a compound to the left, through descendant or child combinators), or its siblings (a `+` or `~` on the way). The window restyles these roots: the elements whose hover, active or focus state changed (the symmetric difference of the old and new ancestor chains), the subtree of a linked node, an element with a changed attribute (its subtree), and, when the rules use sibling combinators or structural pseudo-classes, the changed element and its later siblings, each with its subtree (`Scopes::at`). A form state change gives a full update when a rule reads a form pseudo-class. A root in the "self" scope restyles only itself, and its subtree only if its style number changed. The walk starts with the ancestor filter filled from the ancestors of the root. The restyle gives the elements whose style number changed.
+3. Paint or layout. For each changed element, `Change::paint_only` decides. Paint-only changes keep the layout. Any other change marks the element dirty. Dirty bits go up through the flat parents to the root. A text change marks the text node. A link marks the node and its parent. An unlink marks the parent. An attribute change marks the element. A form state change marks nothing: only selectors read it, so a style that changed marks the element.
+4. Layout reuse (`bare_layout`). A layout for the window keeps, for each "stable" block, its inputs and its result: the available width and height, the depth, the list number before and after, the `Done` of `block::sized`, and the counters and the effects (scrollbars, relative offsets) of its subtree. A stable block is the root, or a block child of a stable block in normal block flow. A block in a flex, grid or table container, an inline-block, a float or a positioned box is not stable: its parent lays it out with other inputs. The layout also keeps the fragments as they are before `absolute` (places relative to the parent). In the next layout, `block::children` reuses a child block when all of these are true: the child and its subtree are not dirty, its kept inputs are equal, no float is open in the formatting context before and after it, no list marker waits for a line, no scrollbar pass of an ancestor runs again, and no static position of an absolute box leaves its subtree. Then it copies the kept relative fragments in one `memcpy`, moves their `end` indexes, and gives the kept `Done`. The parent places it as usual. The old fragments of the children are found in order with a cursor over the old children of the parent, so an inserted or removed child does not break the match of the others.
+5. Containment. This design needs no separate boundary. A dirty block lays out again. Its clean children are copied, and its parent places them again. A change stops where a block gives the same `Done`: its siblings and ancestors are copied or placed with the same values. The cost of a change is the dirty path, the clean siblings along it (a copy), and the passes over all fragments that remain (`drop_statics`, `absolute`, the scroll areas, the extents). These passes are simple loops over a flat array.
+6. Extents. After each layout, the window computes an extent for each fragment: the union of the border boxes of the fragments inside it, with room for glyphs around text. A fixed box and a sticky box have an infinite extent (`FREE`), so their ancestors are never skipped. The extents are made on the first band list or hit test after a layout.
+7. Culled display list. The display list holds the page band around the window: the window and one window size on each side. The builder skips a fragment whose extent is outside the band. Inside a box that clips, a fixed box or a sticky box, it skips nothing. The controls and text fields of the frame are found in the same band (`each_in_band`), not in a pass over all fragments. A page with fewer than 4,096 fragments has one list for the whole page: it is cheap, and a scroll never builds it again. When a scroll moves the window out of the band, the next frame builds the list again.
+8. Hit test. The hit test skips a block whose extent does not hold the point. The window keeps the last hit (point, scroll offsets, frame epoch). Each frame update moves the epoch, paint-only updates too. A click (move, press, release at one point) then runs one hit test, unless the frame changed between the events.
+9. Check. With `BARE_CHECK_FRAMES=1` and in the page tests, each frame is compared with a full cascade, layout and paint from nothing (`Page::check_frame`): the pixels, each fragment and the page bars. The property test `random_changes_draw_the_frame_made_from_nothing` runs 400 random changes (text, attributes, links, unlinks, hover, focus, checkboxes, scrolls) on a page with floats, positioned, sticky and fixed boxes, a scroll box and lists. `a_restyle_of_the_picked_roots_equals_a_full_cascade` does the same for the restyle alone.
+10. Preflight walk. Before each layout, a walk of the visible tree counts the fragments and refuses a page over the limits (`browser_geometry.rs`). A window layout keeps the count of each subtree with 64 nodes or more. The next window layout skips each clean subtree and uses its count. A count is valid only for the next window walk.
+11. Memory. A frame update writes the new fragments in the memory of the old frame (`Kept::recycle`), and a full update does the same. The kept fragments before `absolute` are a second copy of the fragment list. At 100,000 lines the RSS after the first paint grows by 6.3 MiB (glibc) to 12.6 MiB (jemalloc).
+12. Shared styles. The cascade cache shares the frame styles (`Rc<Styles>`). The restyle drops the cache entry, which is stale after a change, and then changes the styles in place. When another holder still shares them, the frame gets a full update.
+
+What is not incremental: a resize (the viewport is an input of each block, so all blocks lay out again), a change of a style sheet, a page with a shadow root, a form state change when a rule reads a form pseudo-class, a float above the change in the same formatting context, and the boxes inside flex, grid and table containers (their container lays them out again; the existing `memo.rs` helps inside one layout).
 
 ## Open questions
 

@@ -29,13 +29,17 @@ use bare_css::cascade::Change;
 use bare_css::values::Property;
 use bare_html::dom::{Document, NodeId};
 use bare_layout::font::{self, Metrics};
-use bare_layout::fragment::Kind;
+use bare_layout::fragment::{Fragment, Kind};
 use bare_paint::canvas::{Canvas, IRect};
 use bare_paint::display::argb;
+use bare_paint::display::{each_in_band, extents, ALL};
 use bare_paint::{Painter, Scroll, View};
 use crate::browser_scroll::{Align, Geo};
 use bare_window::{App, Control, Cursor, Event};
 use std::time::{Duration, Instant};
+
+/// The fragments and the page bars of a frame made from nothing.
+type Fresh = (Vec<Fragment>, (bool, bool));
 
 /// Where the page comes from. A session reloads on a link click; a bare browser (tests) does not.
 pub enum Source {
@@ -71,18 +75,34 @@ pub struct Page {
     /// The document and the render key that `frame` was made for, and whether the page may have changed since.
     key: (usize, [u64; 8]),
     stale: bool,
-    /// The renders (cascade and layout) of the page so far, and the cascades that kept the layout.
+    /// The renders (cascade and layout) of the page so far, and the cascades that kept the layout. `kept`: the renders that
+    /// styled and laid out only what changed (`Browser::refresh`); they are in `renders` too.
     pub renders: u64,
     pub restyles: u64,
+    pub kept: u64,
     /// Is the display list of `frame` built, with the control state of now? A scroll draws it again with other offsets and builds nothing.
     built: bool,
     /// Is the display list made from the layout of `frame`? Then a change of the control state only builds it again when the
     /// state that it shows changed.
     listed: bool,
-    /// The `<input>`, `<textarea>` and `<select>` boxes of `frame`, found once for each layout (a pass over all the fragments).
-    controls: Vec<NodeId>,
-    /// The text fields of `frame`, found when its display list was built (a pass over all the fragments).
-    inputs: Vec<NodeId>,
+    /// The `<input>`, `<textarea>` and `<select>` boxes in `band`, with their fragments, found when the list is made.
+    controls: Vec<(NodeId, u32)>,
+    /// The part of the page (page pixels) that the display list holds: the window and one window size around it. A scroll that
+    /// leaves it builds the list again.
+    band: IRect,
+    /// The `extents` of the fragments of `frame`, made when a band list or a hit test first needs them after a layout (then `ext.0`).
+    ext: (bool, Vec<[f32; 4]>),
+    /// Moves each time `frame` may have changed. The last hit test (the point, `epoch`, the offsets and the element) is kept for it.
+    epoch: u64,
+    last_hit: Option<(f64, f64, u64, Scroll, Option<NodeId>)>,
+    /// Check each frame against a frame made from nothing (`check_frame`), and stop at the first difference. Set by
+    /// `BARE_CHECK_FRAMES=1` and by the tests.
+    pub check_frames: bool,
+    /// Below this many fragments (default 4096), the display list holds the whole page, not a band around the window: the list is
+    /// cheap, and a scroll never builds it again. The tests set 0, so that each page tests the band.
+    pub whole: usize,
+    /// The text fields of `frame` in `band`, with their fragments, found when its display list was built.
+    inputs: Vec<(NodeId, u32)>,
     /// Listener errors and render errors, kept for tests. The first of each also goes to stderr, unless `quiet`.
     pub errors: Vec<String>,
     /// Print nothing (a test driver: it reports the errors itself, through its redacting filter).
@@ -137,9 +157,13 @@ struct Field {
     area: bool,
 }
 
-/// The text field geometry of `n`, if it is an `<input>` or a `<textarea>` that has a box.
-fn field(f: &Frame, doc: &Document, n: NodeId, text: &str, focus_end: Option<u32>) -> Option<Field> {
-    let frag = f.layout.fragments.iter().find(|g| g.node == n && g.kind == Kind::Box)?;
+/// The box of `n` in `f`, if it has one.
+fn box_of(f: &Frame, n: NodeId) -> Option<&Fragment> {
+    f.layout.fragments.iter().find(|g| g.node == n && g.kind == Kind::Box)
+}
+
+/// The text field geometry of `n`, an `<input>` or a `<textarea>` with the box `frag`.
+fn field(f: &Frame, doc: &Document, n: NodeId, frag: &Fragment, text: &str, focus_end: Option<u32>) -> Option<Field> {
     let style = f.styles.style(n)?;
     let px = |p| style.px(p).max(0.0);
     let m = Metrics::of(style);
@@ -192,7 +216,7 @@ pub(crate) fn caret_in(b: &mut Browser, fr: &Frame, n: NodeId, x: f64, y: f64) -
     let focus_end = b.input_selection(n).map(|s| s.1);
     let doc = b.document();
     let doc = doc.borrow();
-    let mut f = field(fr, &doc, n, &value, focus_end)?;
+    let mut f = field(fr, &doc, n, box_of(fr, n)?, &value, focus_end)?;
     place(fr, &doc, &b.scroll(), n, &mut f);
     if f.area {
         // The line under the pointer (the last one for a point below the text), then the offset inside it.
@@ -216,7 +240,7 @@ pub(crate) fn point_in(b: &mut Browser, fr: &Frame, n: NodeId, at: u32) -> Optio
     let focus_end = b.input_selection(n).map(|s| s.1);
     let doc = b.document();
     let doc = doc.borrow();
-    let mut f = field(fr, &doc, n, &value, focus_end)?;
+    let mut f = field(fr, &doc, n, box_of(fr, n)?, &value, focus_end)?;
     place(fr, &doc, &b.scroll(), n, &mut f);
     let top = f.baseline as f32 - f.m.ascent;
     let lh = f.m.normal_line_height();
@@ -249,9 +273,16 @@ impl Page {
             stale: false,
             renders: 0,
             restyles: 0,
+            kept: 0,
             built: false,
             listed: false,
             controls: Vec::new(),
+            band: IRect { x0: 0, y0: 0, x1: 0, y1: 0 },
+            ext: (false, Vec::new()),
+            epoch: 0,
+            last_hit: None,
+            check_frames: std::env::var_os("BARE_CHECK_FRAMES").is_some_and(|v| v == "1"),
+            whole: 4096,
             inputs: Vec::new(),
             errors: Vec::new(),
             quiet: false,
@@ -293,16 +324,49 @@ impl Page {
         self.stale = true;
     }
 
-    /// The pixels of a frame made from nothing (a new cascade, layout, display list and glyph cache). The kept frame stays as it was.
-    #[cfg(test)]
-    pub(crate) fn paint_fresh(&mut self) -> Vec<u32> {
+    /// The pixels of a frame made from nothing (a new cascade, layout, display list and glyph cache), and its fragments and page
+    /// bars. The kept frame, and the changes that the document logged for it, stay as they were.
+    pub(crate) fn paint_fresh(&mut self) -> (Vec<u32>, Option<Fresh>) {
         let frame = self.frame.take();
         let painter = std::mem::replace(&mut self.painter, Painter::new());
-        let (key, stale, built, listed, renders, inputs, controls, inside) = (self.key, self.stale, self.built, self.listed, self.renders, self.inputs.clone(), self.controls.clone(), self.inside);
+        let (key, stale, built, listed, renders, inputs, controls, inside, band, ext, moved) =
+            (self.key, self.stale, self.built, self.listed, self.renders, self.inputs.clone(), self.controls.clone(), self.inside, self.band, std::mem::take(&mut self.ext), self.moved);
+        let damage = self.browser().map(|b| b.document().borrow().peek_damage());
         self.inside = false;
+        let check = std::mem::replace(&mut self.check_frames, false);
         let px = self.paint().to_vec();
-        (self.frame, self.painter, self.key, self.stale, self.built, self.listed, self.renders, self.inputs, self.controls, self.inside) = (frame, painter, key, stale, built, listed, renders, inputs, controls, inside);
-        px
+        let fresh = self.frame.take().map(|f| (f.layout.fragments, f.bars));
+        if let (Some(d), Some(b)) = (damage, self.browser()) {
+            b.document().borrow_mut().restore_damage(d);
+        }
+        (self.frame, self.painter, self.key, self.stale, self.built, self.listed, self.renders, self.inputs, self.controls, self.inside, self.band, self.ext, self.check_frames, self.moved) =
+            (frame, painter, key, stale, built, listed, renders, inputs, controls, inside, band, ext, check, moved);
+        (px, fresh)
+    }
+
+    /// Compare the frame of the window with a frame made from nothing: the pixels, the fragments and the page bars. The first
+    /// difference, if any.
+    pub fn check_frame(&mut self) -> Result<(), String> {
+        let px = self.canvas.pixels.clone();
+        let kept = self.frame.as_ref().map(|f| (f.layout.fragments.clone(), f.bars));
+        let (fresh_px, fresh) = self.paint_fresh();
+        if let Some(i) = px.iter().zip(&fresh_px).position(|(a, b)| a != b) {
+            let n = px.iter().zip(&fresh_px).filter(|(a, b)| a != b).count();
+            return Err(format!("{n} pixels differ from a frame made from nothing, the first at {},{}", i % self.canvas.width as usize, i / self.canvas.width as usize));
+        }
+        match (kept, fresh) {
+            (Some((a, ab)), Some((b, bb))) => {
+                if let Some(i) = (0..a.len().max(b.len())).find(|&i| a.get(i) != b.get(i)) {
+                    return Err(format!("fragment {i} of {} differs: {:?} and {:?} made from nothing", a.len(), a.get(i), b.get(i)));
+                }
+                if ab != bb {
+                    return Err(format!("page bars {ab:?} and {bb:?} made from nothing"));
+                }
+                Ok(())
+            }
+            (None, None) => Ok(()),
+            (a, b) => Err(format!("a frame: {}, made from nothing: {}", a.is_some(), b.is_some())),
+        }
     }
 
     /// The layout of the last frame, made now if the page changed. A stale frame with the same render key keeps its layout.
@@ -317,40 +381,32 @@ impl Page {
             let doc = self.doc_id();
             let key = self.browser().map(|b| (doc, b.render_key()));
             if self.frame.is_none() || key != Some(self.key) {
-                // Only the `:hover`, `:active`, focus or form state moved: the tree is the same, so a cascade whose values layout does not read keeps the layout.
-                let user_only = self.frame.is_some() && key.is_some_and(|k| k.0 == self.key.0 && k.1[..4] == self.key.1[..4]);
-                let styles = self.browser().map(|b| b.restyle());
-                let change = match (&styles, &self.frame) {
-                    (Some(Ok(new)), Some(f)) if user_only => f.styles.change(new),
-                    _ => Change::Layout,
+                self.epoch += 1;
+                // The same document, window and sheets: the frame is updated for what changed (`Browser::refresh`).
+                let near = key.is_some_and(|k| k.0 == self.key.0 && k.1[2..4] == self.key.1[2..4]);
+                let Page { source, frame, .. } = self;
+                let quick = match (source.browser(), frame.as_mut()) {
+                    (Some(b), Some(f)) if near => b.refresh(f),
+                    _ => Ok(None),
                 };
-                match (styles, change) {
-                    (Some(Ok(_)), Change::Same) => self.key = key.expect("a browser"),
-                    (Some(Ok(new)), Change::Paint) => {
-                        self.frame.as_mut().expect("kept").styles = new;
-                        self.listed = false;
+                match quick {
+                    Ok(Some(Change::Same)) => self.key = key.expect("a browser"),
+                    Ok(Some(Change::Paint)) => {
                         self.key = key.expect("a browser");
+                        self.listed = false;
                         self.restyles += 1;
                     }
-                    (Some(Ok(new)), _) => {
-                        self.frame = None;
-                        match self.browser().map(|b| b.render_with(new).map(|f| (f, b.render_key()))) {
-                            Some(Ok((f, k))) => {
-                                self.frame = Some(f);
-                                self.listed = false;
-                                self.key = (doc, k);
-                                self.renders += 1;
-                                self.moved = true;
-                            }
-                            Some(Err(e)) => self.note(format!("render: {e:?}")),
-                            None => {}
-                        }
+                    Ok(Some(Change::Layout)) => {
+                        self.key = (doc, self.browser().expect("a browser").render_key());
+                        (self.listed, self.ext.0, self.moved) = (false, false, true);
+                        self.renders += 1;
+                        self.kept += 1;
                     }
-                    (Some(Err(e)), _) => {
+                    Err(e) => {
                         self.frame = None;
                         self.note(format!("render: {e:?}"));
                     }
-                    (None, _) => self.frame = None,
+                    Ok(None) => self.render_all(doc, key),
                 }
             }
         }
@@ -374,6 +430,50 @@ impl Page {
         (ran, wait.map(|ms| Instant::now() + Duration::from_secs_f64(ms / 1000.0)))
     }
 
+    /// A new cascade, and a new layout unless only values that layout does not read changed. `refresh` could not update the frame.
+    fn render_all(&mut self, doc: usize, key: Option<(usize, [u64; 8])>) {
+        // Only the `:hover`, `:active`, focus or form state moved: the tree is the same, so a cascade whose values layout does not read keeps the layout.
+        let user_only = self.frame.is_some() && key.is_some_and(|k| k.0 == self.key.0 && k.1[..4] == self.key.1[..4]);
+        let styles = self.browser().map(|b| b.restyle());
+        let change = match (&styles, &self.frame) {
+            (Some(Ok(new)), Some(f)) if user_only => f.styles.change(new),
+            _ => Change::Layout,
+        };
+        match (styles, change) {
+            (Some(Ok(new)), Change::Same | Change::Paint) => {
+                // The new styles have the same values, or differ only in what layout does not read: the layout stays.
+                let Page { source, frame, .. } = self;
+                if let (Some(b), Some(f)) = (source.browser(), frame.as_mut()) {
+                    b.restyle_frame(f, new);
+                }
+                self.key = key.expect("a browser");
+                if change == Change::Paint {
+                    self.listed = false;
+                    self.restyles += 1;
+                }
+            }
+            (Some(Ok(new)), _) => {
+                let old = self.frame.take();
+                match self.browser().map(|b| b.render_with(new, old).map(|f| (f, b.render_key()))) {
+                    Some(Ok((f, k))) => {
+                        self.frame = Some(f);
+                        (self.listed, self.ext.0) = (false, false);
+                        self.key = (doc, k);
+                        self.renders += 1;
+                        self.moved = true;
+                    }
+                    Some(Err(e)) => self.note(format!("render: {e:?}")),
+                    None => {}
+                }
+            }
+            (Some(Err(e)), _) => {
+                self.frame = None;
+                self.note(format!("render: {e:?}"));
+            }
+            (None, _) => self.frame = None,
+        }
+    }
+
     fn note(&mut self, text: String) {
         if self.errors.is_empty() && !self.quiet {
             eprintln!("bare: {text}");
@@ -381,13 +481,29 @@ impl Page {
         self.errors.push(text);
     }
 
+    /// The element under the window point: one hit test for each point, frame and set of offsets (a click asks three times).
     pub(crate) fn hit(&mut self, x: f64, y: f64) -> Option<NodeId> {
         self.frame_now()?;
-        let doc = self.browser()?.document();
+        let Page { source, frame, ext, epoch, last_hit, .. } = self;
+        let b = source.browser()?;
+        let scroll = b.scroll();
+        if let Some((hx, hy, g, s, n)) = last_hit
+            && (*hx, *hy, *g) == (x, y, *epoch)
+            && *s == *scroll
+        {
+            return *n;
+        }
+        let doc = b.document();
         let doc = doc.borrow();
-        let f = self.frame.as_ref()?;
-        let scroll = self.source.browser()?.scroll();
-        bare_paint::hit::hit_test_scrolled(&doc, &f.styles, &f.layout, &f.areas, &scroll, x as f32, y as f32)
+        let f = frame.as_ref()?;
+        if !ext.0 {
+            extents(&f.styles, &f.layout, &mut ext.1);
+            ext.0 = true;
+        }
+        let ext = &ext.1;
+        let n = bare_paint::hit::hit_test_within(&doc, &f.styles, &f.layout, &f.areas, &scroll, ext, x as f32, y as f32);
+        *last_hit = Some((x, y, *epoch, scroll.clone(), n));
+        n
     }
 
     /// After the boxes moved under a still pointer, Chrome sends a "fake mouse move": `:hover` and the boundary events follow the new
@@ -565,47 +681,63 @@ impl Page {
     pub fn paint(&mut self) -> &[u32] {
         self.rehover();
         self.frame_now();
-        let Page { source, frame, painter, canvas, built, listed, controls, inputs, .. } = self;
+        let Page { source, frame, painter, canvas, built, listed, controls, inputs, band, ext, whole, .. } = self;
         let b = source.browser();
         if let (Some(b), Some(f)) = (b, frame.as_ref()) {
             let focus = b.active_element().ok().flatten();
             let scroll = b.scroll().clone();
             let doc = b.document();
             let doc = doc.borrow();
+            // What the window shows, in page pixels. The list holds a band around it: a scroll that leaves the band builds it again.
+            let (w, h) = (canvas.width as i32, canvas.height as i32);
+            let shown = IRect { x0: scroll.x.round() as i32, y0: scroll.y.round() as i32, x1: scroll.x.round() as i32 + w, y1: scroll.y.round() as i32 + h };
+            if shown.intersect(*band) != shown {
+                (*built, *listed) = (false, false);
+            }
             if !*built {
+                if !ext.0 {
+                    extents(&f.styles, &f.layout, &mut ext.1);
+                    ext.0 = true;
+                }
+                let ext = &ext.1;
                 // The state of the controls that the list shows: paint draws the placeholder of an empty field, the option of a select
                 // and the mark of a checkbox or a radio. The text of a field, the selection and the caret are drawn here.
                 if !*listed {
+                    *band = if f.layout.fragments.len() < *whole { ALL } else { IRect { x0: shown.x0 - w, y0: shown.y0 - h, x1: shown.x1 + w, y1: shown.y1 + h } };
                     controls.clear();
-                    controls.extend(f.layout.fragments.iter().filter(|g| g.kind == Kind::Box && ["input", "textarea", "select"].iter().any(|t| doc.is_html(g.node, t))).map(|g| g.node));
+                    each_in_band(&f.styles, &f.layout, ext, *band, |j, g| {
+                        if g.kind == Kind::Box && ["input", "textarea", "select"].iter().any(|t| doc.is_html(g.node, t)) {
+                            controls.push((g.node, j as u32));
+                        }
+                    });
                 }
                 let (mut chosen, mut ticked) = (Vec::new(), Vec::new());
                 inputs.clear();
-                for &n in controls.iter() {
+                for &(n, j) in controls.iter() {
                     if doc.is_html(n, "select") {
                         chosen.push((n, b.selected_option(n)));
                     } else if b.is_text_input(n) {
-                        inputs.push(n);
+                        inputs.push((n, j));
                     } else if matches!(input_kind(&doc, n), "checkbox" | "radio") {
                         ticked.push((n, b.input_checked(n)));
                     }
                 }
-                let hosted: Vec<_> = inputs.iter().map(|&n| (n, b.input_value(n).is_some_and(|v| !v.is_empty()))).collect();
+                let hosted: Vec<_> = inputs.iter().map(|&(n, _)| (n, b.input_value(n).is_some_and(|v| !v.is_empty()))).collect();
                 let list = &mut painter.list;
                 if !*listed || hosted != list.hosted || chosen != list.chosen || ticked != list.ticked {
                     (list.hosted, list.chosen, list.ticked) = (hosted, chosen, ticked);
-                    painter.build(&doc, &f.styles, &f.layout, &f.areas, (canvas.width, canvas.height));
+                    painter.build_band(&doc, &f.styles, &f.layout, &f.areas, *band, ext);
                     *listed = true;
                 }
                 *built = true;
             }
             painter.draw_view(canvas, Some(&View { scroll: &scroll, areas: &f.areas, bars: f.bars }));
-            for &n in inputs.iter() {
+            for &(n, j) in inputs.iter() {
                 let value = b.input_value(n).unwrap_or_default();
                 let sel = b.input_selection(n);
                 let focused = focus == Some(n);
                 let end = sel.filter(|_| focused).map(|s| if s.2 == "backward" { s.0 } else { s.1 });
-                let Some(mut fld) = field(f, &doc, n, &value, end) else { continue };
+                let Some(mut fld) = field(f, &doc, n, &f.layout.fragments[j as usize], &value, end) else { continue };
                 place(f, &doc, &scroll, n, &mut fld);
                 Page::draw_field(painter, canvas, &fld, sel.filter(|_| focused));
             }
@@ -613,6 +745,11 @@ impl Page {
             canvas.pixels.fill(0xFFFF_FFFF);
         }
         self.first_frame.get_or_insert_with(|| self.started.elapsed());
+        if self.check_frames
+            && let Err(e) = self.check_frame()
+        {
+            panic!("BARE_CHECK_FRAMES: {e}");
+        }
         &self.canvas.pixels
     }
 

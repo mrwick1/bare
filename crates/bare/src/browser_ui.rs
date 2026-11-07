@@ -49,7 +49,8 @@
 use crate::browser::*;
 use crate::browser_dom as nd;
 use crate::browser_selection::Dir;
-use bare_html::dom::{Document, NodeData, NodeId};
+use bare_css::cascade::Change;
+use bare_html::dom::{Document, Mark, NodeData, NodeId};
 use bare_js::eval::Interp;
 use bare_js::value::{ObjId, Value};
 
@@ -1036,30 +1037,122 @@ pub struct Frame {
     pub areas: bare_layout::scroll::Areas,
     /// The page bars: vertical, horizontal. The layout is narrower and shorter by their width.
     pub bars: (bool, bool),
+    /// What `Browser::refresh` needs to update the frame: the rule set build of the styles, and the `:hover`, `:active` and focus
+    /// element chains that they were made with. `None`: only a new frame is right.
+    since: Option<(u64, [Vec<NodeId>; 3])>,
+}
+
+/// The element and its ancestors, for each of `:hover`, `:active` and focus.
+fn chains(doc: &Document) -> [Vec<NodeId>; 3] {
+    let u = doc.user();
+    [u.hover, u.active, u.focus].map(|n| std::iter::successors(n, |&p| doc.parent(p)).filter(|&p| matches!(doc.data(p), NodeData::Element { .. })).collect())
 }
 
 impl Browser {
     /// Cascade and lay out the page now, with the caps of `getComputedStyle` and `offsetWidth` (a linked style sheet that
     /// was not supplied is `Unsupported`, as there).
     pub fn render(&mut self) -> R<Frame> {
-        let styles = self.restyle()?;
-        self.render_with(styles)
-    }
-
-    /// The cascade of `render`, with no layout.
-    pub fn restyle(&mut self) -> R<std::rc::Rc<bare_css::cascade::Styles>> {
-        let dom = self.dom.clone();
-        self.it.host_scope(|it| dom.cascade_now(it))
-    }
-
-    /// The layout of `render` with `styles`, the cascade of the page now (`restyle`).
-    pub fn render_with(&mut self, styles: std::rc::Rc<bare_css::cascade::Styles>) -> R<Frame> {
         let dom = self.dom.clone();
         self.it.host_scope(|it| {
-            let (layout, areas, bars) = dom.layout_areas(it, &styles)?;
+            let styles = dom.cascade_now(it)?;
+            let (layout, areas, bars) = dom.layout_areas(it, &styles, None)?;
             // A page that got shorter (or a box that is not a container now) puts its offsets back in range.
             dom.clamp_scroll(&styles, &layout, &areas, bars);
-            Ok(Frame { styles, layout, areas, bars })
+            Ok(Frame { styles, layout, areas, bars, since: None })
+        })
+    }
+
+    /// The cascade of a window frame, with no layout. It keeps what `refresh` needs, and the document logs its changes from now on.
+    pub fn restyle(&mut self) -> R<std::rc::Rc<bare_css::cascade::Styles>> {
+        let dom = self.dom.clone();
+        let styles = self.it.host_scope(|it| dom.cascade_frame(it))?;
+        let mut doc = dom.doc.borrow_mut();
+        doc.track_damage();
+        doc.take_damage();
+        Ok(styles)
+    }
+
+    /// The window frame with `styles`, the cascade of the page now (`restyle`). Its layout keeps what the next `refresh` can use again.
+    /// The new layout writes in the memory of `old`, the frame that this one replaces.
+    pub fn render_with(&mut self, styles: std::rc::Rc<bare_css::cascade::Styles>, old: Option<Frame>) -> R<Frame> {
+        let dom = self.dom.clone();
+        let since = Some((dom.rule_builds(), chains(&dom.doc.borrow())));
+        let kept = old.and_then(|f| {
+            let mut k = f.layout.kept?;
+            k.recycle(f.layout.fragments);
+            Some(k)
+        });
+        self.it.host_scope(|it| {
+            let (layout, areas, bars) = dom.layout_areas(it, &styles, Some((kept, None)))?;
+            dom.clamp_scroll(&styles, &layout, &areas, bars);
+            Ok(Frame { styles, layout, areas, bars, since })
+        })
+    }
+
+    /// The window frame `f` keeps `styles` (a new `restyle`), with the same layout: the new styles differ from the old ones only in
+    /// what layout does not read. `refresh` can update it after this.
+    pub fn restyle_frame(&mut self, f: &mut Frame, styles: std::rc::Rc<bare_css::cascade::Styles>) {
+        f.styles = styles;
+        f.since = Some((self.dom.rule_builds(), chains(&self.dom.doc.borrow())));
+    }
+
+    /// Update the window frame `f` for the changes since it was made (or last updated), and say what changed: `Same`, `Paint` (styles
+    /// that layout does not read: the layout stays) or `Layout`. Only the elements that the changes can reach are styled again
+    /// (`Dom::restyle_frame`), and layout lays out again only the changed boxes and their ancestors (`bare_layout::layout_kept`).
+    /// `None` when it cannot: `f` is as it was, and the caller makes a new frame. On an error `f` is not usable.
+    pub fn refresh(&mut self, f: &mut Frame) -> R<Option<Change>> {
+        let Some((builds, old)) = f.since.take() else { return Ok(None) };
+        let dom = self.dom.clone();
+        let Some(marks) = dom.doc.borrow_mut().take_damage() else { return Ok(None) };
+        self.it.host_scope(|it| {
+            let new = chains(&dom.doc.borrow());
+            let Some(changed) = dom.restyle_frame(it, &mut f.styles, builds, &marks, &old, &new)? else { return Ok(None) };
+            f.since = Some((builds, new));
+            let doc = dom.doc.borrow();
+            // The boxes that layout must lay out again: the changed ones and all their ancestors.
+            let mut dirty: Vec<bool> = Vec::new();
+            let mut seed = |n: NodeId| {
+                if dirty.is_empty() {
+                    dirty.resize(doc.len(), false);
+                }
+                let mut cur = Some(n);
+                while let Some(c) = cur.filter(|c| !dirty[c.index()]) {
+                    dirty[c.index()] = true;
+                    cur = doc.parent(c);
+                }
+            };
+            for m in &marks {
+                match *m {
+                    // A node that moved inside its parent is laid out again too.
+                    Mark::Link { parent, node } => {
+                        seed(node);
+                        seed(parent);
+                    }
+                    Mark::Unlink { parent, .. } => seed(parent),
+                    Mark::Text { node } => seed(node),
+                    Mark::Attr { el, .. } => seed(el),
+                    // Only selectors read the form state.
+                    Mark::Ui { .. } => {}
+                }
+            }
+            let mut out = Change::Same;
+            for &(n, old) in &changed {
+                match f.styles.change_of(old, n) {
+                    Change::Layout => seed(n),
+                    c => out = out.max(c),
+                }
+            }
+            if dirty.is_empty() {
+                return Ok(Some(out));
+            }
+            drop(doc);
+            let mut kept = f.layout.kept.take();
+            if let Some(k) = &mut kept {
+                k.recycle(std::mem::take(&mut f.layout.fragments));
+            }
+            (f.layout, f.areas, f.bars) = dom.layout_areas(it, &f.styles, Some((kept, Some(&dirty))))?;
+            dom.clamp_scroll(&f.styles, &f.layout, &f.areas, f.bars);
+            Ok(Some(Change::Layout))
         })
     }
 

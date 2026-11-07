@@ -776,6 +776,7 @@ impl Breaker<'_, '_> {
     fn place_static(&mut self, node: NodeId, x: f32) {
         self.cx.fixed |= self.cx.tree.position(node) == Keyword::Fixed;
         self.cx.waiting += 1;
+        self.cx.statics += 1;
         let at = self.cx.out.len() as u32;
         self.cx.out.push(Fragment { rect: Rect { x, y: self.y, w: 0.0, h: 0.0 }, node, kind: FragmentKind::Static, end: at + 1 });
     }

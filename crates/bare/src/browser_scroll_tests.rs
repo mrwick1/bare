@@ -28,7 +28,9 @@ fn page_of(html: &str, w: u32, h: u32) -> Page {
     if !script.is_empty() {
         b.run_script(script).expect("script");
     }
-    Page::new(Source::Browser(Box::new(b)), (w, h))
+    let mut p = Page::new(Source::Browser(Box::new(b)), (w, h));
+    p.whole = 0;
+    p
 }
 
 fn eval(p: &mut Page, src: &str) -> String {

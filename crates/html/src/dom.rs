@@ -236,8 +236,9 @@ pub struct Document {
     // The way back: the host of each shadow root, and whether its mode is open. A host that is not in `shadow_of` has no root.
     template_content: HashMap<u32, NodeId, BuildHasherDefault<Fnv>>,
     // The contents of each HTML `template` that has any, by `NodeId::index` of the template: a fragment node that is not a child of the template.
-    watcher: Option<Watcher>,
-    // The host function that is told of each change (see `set_watcher`). A page with no watcher pays one `Option` check at a change.
+    watcher: Option<Box<Hooks>>,
+    // The host function that is told of each change (see `set_watcher`), and the log of the changes (see `track_damage`). A page
+    // with neither pays one `Option` check at a change.
     custom: HashMap<u32, u32, BuildHasherDefault<Fnv>>,
     // The custom element state of the elements that have one, by `NodeId::index`: the number of the definition, or `PRECUSTOMIZED`, or `FAILED`. See `is_defined`.
     states: HashMap<u32, Vec<Box<str>>, BuildHasherDefault<Fnv>>,
@@ -281,6 +282,50 @@ pub enum Change {
     /// The text of `node` changes. `old` is the value it had.
     Text { node: NodeId, old: Span },
 }
+
+/// A change of the tree in the log of `Document::track_damage`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Mark {
+    /// `node` was put in the children of `parent`.
+    Link { parent: NodeId, node: NodeId },
+    /// `node` left the children of `parent`.
+    Unlink { parent: NodeId, node: NodeId },
+    /// An attribute of `el` was set or removed.
+    Attr { el: NodeId, name: Atom },
+    /// The text of `node` changed.
+    Text { node: NodeId },
+    /// The form state of `el` changed (`set_ui`).
+    Ui { el: NodeId },
+}
+
+/// The log of `Document::track_damage`.
+#[derive(Debug, Default)]
+struct Damage {
+    marks: Vec<Mark>,
+    /// A change that the log does not describe, or too many changes.
+    full: bool,
+}
+
+impl Damage {
+    fn add(&mut self, m: Mark) {
+        if self.marks.len() < MAX_MARKS {
+            self.marks.push(m);
+        } else {
+            self.full = true;
+        }
+    }
+}
+
+/// What a document tells of its changes: the host function of `set_watcher` and the log of `track_damage`. They share one box,
+/// so a change checks one `Option`.
+#[derive(Default)]
+struct Hooks {
+    f: Option<Watcher>,
+    damage: Option<Damage>,
+}
+
+/// The most marks that the log holds. Past it, the host updates all of its view of the page.
+const MAX_MARKS: usize = 4096;
 
 /// What `Document::parse_cut` took out of the tree. Give it to `parse_close`.
 pub struct Cut {
@@ -391,6 +436,7 @@ impl Document {
     /// options of a select) is built again.
     pub fn touch(&mut self) {
         self.revision += 1;
+        self.mark_full();
     }
 
     /// A number that moves at every edit of the text of a node that exists (`set_text`, text that joins a text node). With
@@ -434,6 +480,9 @@ impl Document {
         };
         // `:defined` may match another element now.
         self.revision += u64::from(old != state);
+        if old != state {
+            self.mark_full();
+        }
     }
 
     /// The custom element state of `el`, see `set_custom_state`.
@@ -461,6 +510,7 @@ impl Document {
             self.states.insert(el.index() as u32, states);
         }
         self.revision += 1;
+        self.mark_full();
     }
 
     /// Set the form state of `el` that the host keeps outside the tree (`UI_*` bits; 0 clears it). Selectors read it for `:checked`,
@@ -470,6 +520,7 @@ impl Document {
         if old.unwrap_or(0) != bits {
             self.revision += 1;
             self.ui_revision += 1;
+            self.mark(Mark::Ui { el });
         }
     }
 
@@ -536,6 +587,68 @@ impl Document {
         self.user.focus_visible = visible;
         self.user.revision[2] += 1;
         true
+    }
+
+    /// Log the changes of the tree from now on, for a host that keeps a view of the page and updates only the changed part
+    /// (`take_damage`). A page that is not tracked pays one check at a change.
+    pub fn track_damage(&mut self) {
+        self.watcher.get_or_insert_default().damage.get_or_insert_default();
+    }
+
+    /// The changes since the last call, oldest first, and an empty log after it. `None` when the log is not on, or when a change
+    /// happened that it does not describe (a custom element state, a shadow root, the parser cut, `touch`), or more than
+    /// `MAX_MARKS` changes: then the host must update all of its view.
+    pub fn take_damage(&mut self) -> Option<Vec<Mark>> {
+        let d = self.watcher.as_mut()?.damage.as_mut()?;
+        let marks = std::mem::take(&mut d.marks);
+        if std::mem::take(&mut d.full) { None } else { Some(marks) }
+    }
+
+    /// A copy of the log (for a host test that looks at the page without taking the changes): the marks, and whether it is full.
+    pub fn peek_damage(&self) -> Option<(Vec<Mark>, bool)> {
+        self.watcher.as_ref()?.damage.as_ref().map(|d| (d.marks.clone(), d.full))
+    }
+
+    /// Set the log back to `saved` (from `peek_damage`).
+    pub fn restore_damage(&mut self, saved: Option<(Vec<Mark>, bool)>) {
+        let h = self.watcher.get_or_insert_default();
+        h.damage = saved.map(|(marks, full)| Damage { marks, full });
+        if h.f.is_none() && h.damage.is_none() {
+            self.watcher = None;
+        }
+    }
+
+    /// Log a change that the watcher is not told of. Most changes are logged by `notify`.
+    #[inline(always)]
+    fn mark(&mut self, m: Mark) {
+        if self.watcher.is_some() {
+            self.log(Some(m));
+        }
+    }
+
+    /// A change that the log does not describe.
+    #[inline(always)]
+    fn mark_full(&mut self) {
+        if self.watcher.is_some() {
+            self.log(None);
+        }
+    }
+
+    /// `mark` and `mark_full` when a hook is set: out of line, so the parser and the scripts that run with no hook pay one test.
+    #[cold]
+    #[inline(never)]
+    fn log(&mut self, m: Option<Mark>) {
+        if let Some(d) = self.watcher.as_mut().and_then(|h| h.damage.as_mut()) {
+            match m {
+                Some(m) => d.add(m),
+                None => d.full = true,
+            }
+        }
+    }
+
+    /// Does any element have a shadow root?
+    pub fn has_shadow_roots(&self) -> bool {
+        !self.shadow_of.is_empty()
     }
 
     /// Does any element have a custom element state?
@@ -620,6 +733,7 @@ impl Document {
         self.shadow_host.insert(root.index() as u32, (host, open));
         // The flat tree changed: the light children of the host are not rendered now.
         self.revision += 1;
+        self.mark_full();
         root
     }
 
@@ -879,6 +993,7 @@ impl Document {
         }
         self.places = Default::default();
         self.revision += 1;
+        self.mark_full();
         cut
     }
 
@@ -902,6 +1017,7 @@ impl Document {
         }
         self.places = Default::default();
         self.revision += 1;
+        self.mark_full();
     }
 
     /// Give back what `parse_cut` hid: the children of the element go after the ones it has now, and what followed it after the last child of each
@@ -917,6 +1033,7 @@ impl Document {
         }
         self.places = Default::default();
         self.revision += 1;
+        self.mark_full();
     }
 
     /// Put the linked children `first` to `last` of `parent` after its last child.
@@ -1254,19 +1371,33 @@ impl Document {
     /// sets none pays one check at a change. `Link` is sent after the node is in place, the other three before the change is made, so
     /// the old value is still readable. The watcher must not change this document.
     pub fn set_watcher(&mut self, watcher: Option<Watcher>) {
-        self.watcher = watcher;
+        let h = self.watcher.get_or_insert_default();
+        h.f = watcher;
+        if h.f.is_none() && h.damage.is_none() {
+            self.watcher = None;
+        }
     }
 
     /// Is a watcher set? (For tests of the host: a page that uses none must have none.)
     pub fn has_watcher(&self) -> bool {
-        self.watcher.is_some()
+        self.watcher.as_ref().is_some_and(|h| h.f.is_some())
     }
 
+    /// Log the change (`track_damage`) and tell the watcher of it.
     fn notify(&mut self, change: Change) {
-        if let Some(mut w) = self.watcher.take() {
-            w(self, change);
-            self.watcher = Some(w);
+        let Some(mut h) = self.watcher.take() else { return };
+        if let Some(d) = &mut h.damage {
+            d.add(match change {
+                Change::Link { parent, node, .. } => Mark::Link { parent, node },
+                Change::Unlink { parent, node, .. } => Mark::Unlink { parent, node },
+                Change::Attr { el, name, .. } => Mark::Attr { el, name },
+                Change::Text { node, .. } => Mark::Text { node },
+            });
         }
+        if let Some(f) = &mut h.f {
+            f(self, change);
+        }
+        self.watcher = Some(h);
     }
 
     /// Ask to be told when the attribute `name` of `el` is removed (by any path: `remove_attr`, `remove_attr_atom`). A host
@@ -1395,6 +1526,7 @@ impl Document {
             };
             self.text.push_str(text);
             self.text_revision += 1;
+            self.mark(Mark::Text { node: previous });
             let joined = Span { start: to_u32(start), len: to_u32(self.text.len() - start) };
             self.nodes[previous.index()].data = NodeData::Text(joined);
             return;

@@ -14,6 +14,7 @@ pub mod fragment;
 pub mod grid;
 pub mod inline;
 pub mod intrinsic;
+pub mod keep;
 mod memo;
 pub mod scroll;
 pub mod sticky;
@@ -80,6 +81,13 @@ pub struct Cx<'a> {
     pub(crate) tracks: Option<fragment::Tracks>,
     /// Give every inline box its own fragment, and every `br` a zero-width one (`layout_uncull`).
     pub(crate) uncull: bool,
+    /// The results kept for the next layout, and the ones of the last layout (`keep.rs`). `None` outside the window.
+    pub(crate) keep: Option<keep::Keep<'a>>,
+    /// Is the next `block::sized` for a stable block, and where was it in the last layout (`keep.rs`)?
+    pub(crate) next: keep::Next,
+    /// How many static positions layout wrote so far, and how many offsets and scrollbars it wrote by node (`keep.rs`).
+    pub(crate) statics: u32,
+    pub(crate) sets: u32,
 }
 
 /// A table by `NodeId::index`. The page picks the keys, and it can only slow down its own layout, so the fast hash of `Document` is enough.
@@ -100,23 +108,35 @@ pub fn layout_within(doc: &Document, styles: &Styles, viewport: (f32, f32), budg
 /// `layout_within`, and the used track sizes of the grid container `probe` go in `Layout::tracks` (for the resolved value of
 /// `grid-template-columns`). The kept results of `memo.rs` are off then, so the sizes are those of the last real layout of the container.
 pub fn layout_probing(doc: &Document, styles: &Styles, viewport: (f32, f32), budget: u64, probe: Option<NodeId>) -> Layout {
-    layout_with(doc, styles, viewport, budget, probe, false)
+    layout_with(doc, styles, viewport, budget, probe, false, None)
+}
+
+/// `layout_within` for a window that lays out the same page again and again. The result keeps what the next layout can use again
+/// (`Layout::kept`). Give the `kept` of the last layout and the `dirty` nodes (by `NodeId::index`: the changed nodes and all their
+/// ancestors) to use its results where nothing changed; with `dirty: None` all is laid out again. The fragments are the same as
+/// those of `layout_within`.
+pub fn layout_kept(doc: &Document, styles: &Styles, viewport: (f32, f32), budget: u64, kept: Option<keep::Kept>, dirty: Option<&[bool]>) -> Layout {
+    layout_with(doc, styles, viewport, budget, None, false, Some(keep::Keep::new(kept.unwrap_or_default(), dirty, viewport)))
 }
 
 /// `layout_within`, but no inline box is culled: each has a fragment on each line, even with nothing to paint, and each `br` has
 /// a text fragment of 0 width (`Kind::Text { start: 0, end: 1 }` on the `br`). `getClientRects` reads the place of an empty `span` and of a `br` there.
 pub fn layout_uncull(doc: &Document, styles: &Styles, viewport: (f32, f32), budget: u64) -> Layout {
-    layout_with(doc, styles, viewport, budget, None, true)
+    layout_with(doc, styles, viewport, budget, None, true, None)
 }
 
-fn layout_with(doc: &Document, styles: &Styles, viewport: (f32, f32), budget: u64, probe: Option<NodeId>, uncull: bool) -> Layout {
-    let mut cx = Cx { tree: boxes::Tree::new(doc, styles), out: Vec::with_capacity(doc.len()), depth: 0, marker: None, number: 0, sizes: Fast::default(), measuring: 0, spare: Vec::new(), floats: Default::default(), bars: Fast::default(), again: 0, rel: Fast::default(), fixed: false, waiting: 0, unknown: Default::default(), work: 0, budget, scrolls: 0, items: 0, memo_from: if probe.is_some() { u64::MAX } else { memo::start().min(budget) }, open: 0, fx: Vec::new(), memo: Default::default(), probe, tracks: None, uncull };
+fn layout_with<'a>(doc: &'a Document, styles: &'a Styles, viewport: (f32, f32), budget: u64, probe: Option<NodeId>, uncull: bool, mut keep: Option<keep::Keep<'a>>) -> Layout {
+    let out = keep.as_mut().map_or_else(|| Vec::with_capacity(doc.len()), |k| k.kept.room(doc.len()));
+    let mut cx = Cx { tree: boxes::Tree::new(doc, styles), out, depth: 0, marker: None, number: 0, sizes: Fast::default(), measuring: 0, spare: Vec::new(), floats: Default::default(), bars: Fast::default(), again: 0, rel: Fast::default(), fixed: false, waiting: 0, unknown: Default::default(), work: 0, budget, scrolls: 0, items: 0, memo_from: if probe.is_some() { u64::MAX } else { memo::start().min(budget) }, open: 0, fx: Vec::new(), memo: Default::default(), probe, tracks: None, uncull, keep, next: keep::Next::No, statics: 0, sets: 0 };
     // Most pages make about one fragment for each DOM node: one for each element and each text on one line, none for
     // the `head` and for the spaces between blocks. Room for that many at once saves the copies of a `Vec` that grows.
     let mut height = 0.0;
     if let Some(root) = cx.tree.root() {
         // The root element sits in the window (the "initial containing block"). It makes its own block formatting
         // context, so its margins stay apart from the margins inside it.
+        if let Some(k) = &cx.keep {
+            cx.next = k.root(root);
+        }
         let done = block::block(&mut cx, root, Space { width: viewport.0, height: Some(viewport.1) }, Pos::default());
         let root_box = cx.out[done.fragment].rect;
         cx.out[done.fragment].rect.y = done.margin_top;
@@ -130,7 +150,11 @@ fn layout_with(doc: &Document, styles: &Styles, viewport: (f32, f32), budget: u6
         }
         cx.out[done.fragment].end = cx.out.len() as u32;
     }
-    fragment::drop_statics(&mut cx.out);
+    // A kept result has no static place inside: with none made now, there is none.
+    if cx.statics > 0 {
+        fragment::drop_statics(&mut cx.out);
+    }
+    let kept = cx.keep.take().map(|k| k.finish(&cx.out, &cx.rel, &cx.bars));
     // `position: relative` moves a block with all that is inside it. Inline boxes moved when their line was written.
     if !cx.rel.is_empty() {
         for f in &mut cx.out {
@@ -144,7 +168,7 @@ fn layout_with(doc: &Document, styles: &Styles, viewport: (f32, f32), budget: u6
         }
     }
     fragment::absolute(&mut cx.out);
-    Layout { fragments: cx.out, width: viewport.0, height, view: viewport, bars: cx.bars, work: cx.work, tracks: cx.tracks }
+    Layout { fragments: cx.out, width: viewport.0, height, view: viewport, bars: cx.bars, work: cx.work, tracks: cx.tracks, kept }
 }
 
 /// The fragments as text, one on each line, for tests and for `bare --layout`: the name (with `#id` if the element has

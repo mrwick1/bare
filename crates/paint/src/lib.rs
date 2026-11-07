@@ -90,6 +90,11 @@ impl Painter {
         self.list.build_with(doc, styles, layout, view, Some(areas));
     }
 
+    /// `build` for the part `band` of the page only (page pixels): see `DisplayList::build_band`. `extents` are those of `layout`.
+    pub fn build_band(&mut self, doc: &Document, styles: &Styles, layout: &Layout, areas: &Areas, band: IRect, extents: &[[f32; 4]]) {
+        self.list.build_band(doc, styles, layout, areas, band, extents);
+    }
+
     /// Draw the display list that `paint` made.
     pub fn draw(&mut self, canvas: &mut Canvas) {
         self.draw_view(canvas, None);

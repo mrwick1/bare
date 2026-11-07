@@ -268,6 +268,13 @@ pub fn sized(cx: &mut Cx, node: NodeId, space: Space, forced: Option<(f32, f32, 
 /// collapsed border is half of an edge). A table finds its own in its `Plan`. For both, `height` is a minimum that
 /// `table.rs` takes care of, so here it is `auto`.
 pub(crate) fn sized_with(cx: &mut Cx, node: NodeId, space: Space, forced: Option<(f32, f32, f32)>, tall: Option<f32>, pos: Pos, sides: Option<(Sides, Sides)>) -> Done {
+    // A window layout forgets the result of a block that is not stable (`keep.rs`). `Cx::stable_child` keeps the others.
+    let next = std::mem::take(&mut cx.next);
+    if next == crate::keep::Next::No
+        && let Some(k) = &mut cx.keep
+    {
+        k.forget(node);
+    }
     let style = cx.tree.style(node);
     // A form control that has no size of its own in the style sheet: the size of its content when `auto` (`controls.rs`).
     let control = crate::controls::of(&cx.tree, node);
@@ -355,7 +362,7 @@ pub(crate) fn sized_with(cx: &mut Cx, node: NodeId, space: Space, forced: Option
             cx.depth += 1;
             // Flex, grid and table containers are their own BFC, so `top_open` is false for them.
             let kids = match context(cx, node) {
-                Context::Flow => children(cx, node, inner, top_open, bp.top, bp.left, here, stop),
+                Context::Flow => children(cx, node, inner, top_open, bp.top, bp.left, here, stop, next),
                 Context::Flex => crate::flex::layout(cx, node, inner, bp),
                 Context::Grid => crate::grid::layout(cx, node, inner, bp),
                 Context::Table => crate::table::layout(cx, node, inner, bp, plan.as_ref().expect("a table has a plan")),
@@ -734,7 +741,10 @@ impl Kids {
 /// border and padding. `here`: where the content box starts in the BFC (see `Pos`).
 /// `stop`: stop after the child that ends below this, from the top of the content box (see `sized`).
 #[allow(clippy::too_many_arguments)]
-fn children(cx: &mut Cx, node: NodeId, space: Space, top_open: bool, dy: f32, dx: f32, here: Pos, stop: f32) -> Kids {
+fn children(cx: &mut Cx, node: NodeId, space: Space, top_open: bool, dy: f32, dx: f32, here: Pos, stop: f32, from: crate::keep::Next) -> Kids {
+    // A stable block: its block children are stable too, and may come from the last layout (`keep.rs`).
+    let stable = from != crate::keep::Next::No;
+    let mut cursor = cx.cursor(from);
     let mut kids = Kids { y: 0.0, top: Strut::default(), bottom: Strut::default(), open: top_open, baseline: None, top_y: here.y };
     // `bottom` is the strut that is open now: the margins since the last child that has content.
     let tree = cx.tree;
@@ -774,7 +784,11 @@ fn children(cx: &mut Cx, node: NodeId, space: Space, top_open: bool, dy: f32, dx
                     kids.bottom.merge(done.bottom);
                     continue;
                 }
-                let done = sized(cx, b, space, forced, None, pos);
+                let done = if stable && cx.floats.is_empty() {
+                    cx.stable_child(&mut cursor, b, space, forced, pos)
+                } else {
+                    sized(cx, b, space, forced, None, pos)
+                };
                 kids.bottom.add(done.margin_top);
                 kids.bottom.merge(done.top);
                 if done.through {

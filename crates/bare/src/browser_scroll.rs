@@ -41,6 +41,7 @@ use bare_html::dom::{Document, NodeData, NodeId};
 use bare_js::eval::Interp;
 use bare_js::value::Value;
 use bare_layout::fragment::{Layout, Rect};
+use bare_layout::keep::Kept;
 use bare_layout::scroll::{self, Areas};
 use bare_paint::Scroll;
 use std::cell::{Ref, RefCell};
@@ -343,13 +344,14 @@ fn need_bars(a: &Areas, vp: (f32, f32), bars: (bool, bool)) -> (bool, bool) {
 impl Dom {
     /// One bounded layout of the page with its bars: the layout runs again at the smaller size when a bar appears or goes away.
     /// The bars are remembered, so a page that keeps them is laid out once. Gives the layout, the scroll containers and the bars.
-    pub(crate) fn layout_areas(&self, it: &mut Interp<'_>, styles: &Styles) -> R<(Layout, Areas, (bool, bool))> {
+    /// `keep`: the layout keeps what the next one can use again, and uses what the last one kept (`bare_layout::layout_kept`).
+    pub(crate) fn layout_areas(&self, it: &mut Interp<'_>, styles: &Styles, mut keep: Option<(Option<Kept>, Option<&[bool]>)>) -> R<(Layout, Areas, (bool, bool))> {
         let vp = self.plat.s.borrow().viewport;
         let mut bars = self.scrolling.s.borrow().bars;
         let mut n = 0;
         loop {
             let at = (vp.0 - if bars.0 { BAR } else { 0.0 }, vp.1 - if bars.1 { BAR } else { 0.0 });
-            let layout = self.layout_at(it, styles, at)?;
+            let mut layout = self.layout_at(it, styles, at, keep.take())?;
             let areas = scroll::areas(&self.doc.borrow(), styles, &layout);
             if let Some(why) = areas.gate {
                 return Err(Self::gate(why));
@@ -359,6 +361,10 @@ impl Dom {
             if need == bars || n >= 3 {
                 self.scrolling.s.borrow_mut().bars = bars;
                 return Ok((layout, areas, bars));
+            }
+            // Another size: nothing of this layout can be used again, but the next one keeps what it makes.
+            if let Some(k) = layout.kept.take() {
+                keep = Some((Some(k), None));
             }
             bars = need;
         }
@@ -373,7 +379,7 @@ impl Dom {
     /// `with_geo`, and `f` may run one more layout (`layout_at`).
     pub(crate) fn with_geo_it<T>(&self, it: &mut Interp<'_>, f: impl FnOnce(&Geo, &mut Scroll, &mut Interp<'_>) -> T) -> R<T> {
         let styles = self.cascade_now(it)?;
-        let (layout, areas, bars) = self.layout_areas(it, &styles)?;
+        let (layout, areas, bars) = self.layout_areas(it, &styles, None)?;
         let doc = self.doc.borrow();
         let g = Geo { doc: &doc, styles: &styles, layout: &layout, areas: &areas, window: self.plat.s.borrow().viewport, bars };
         let mut s = self.scrolling.s.borrow().scroll.clone();

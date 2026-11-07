@@ -49,7 +49,8 @@ use bare_css::values::{Keyword, Property, Value as Cv};
 use bare_html::dom::{Children, Document, NodeData, NodeId};
 use bare_js::eval::Interp;
 use bare_js::value::Value;
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
 
 /// Bounds of the geometry module (see the header). Each is checked before native layout starts.
 #[derive(Clone, Copy, Debug)]
@@ -92,6 +93,8 @@ pub(crate) struct Geometry {
     pub(crate) probe: Cell<Option<NodeId>>,
     /// The next layout gives each inline box a fragment (`getClientRects` of an empty `span` and of a `br`, `browser_rects.rs`).
     pub(crate) uncull: Cell<bool>,
+    /// The counts of the last window walk.
+    sums: RefCell<Sums>,
 }
 
 const SLOT: &str = "geometry of a shadow tree with a slot (slot assignment is not built)";
@@ -100,6 +103,7 @@ const CULLED: &str = "geometry of an inline box with no background and no border
 const NOT_LONG: &str = "geometry that is not a finite number that fits a long";
 
 /// What the walk found.
+#[derive(Debug, PartialEq)]
 struct Bound {
     fragments: u64,
     /// Nodes and bytes of text: what the walk looked at.
@@ -140,13 +144,49 @@ fn check_shadow(doc: &Document, host: NodeId) -> Result<(), Refuse> {
     Ok(())
 }
 
+/// What the walk counted in the subtree of one element: what it adds to the totals, the units it gives its parent, and how deep it is.
+#[derive(Clone, Copy)]
+struct Sum {
+    /// The window walk that counted it or used it last.
+    walk: u64,
+    nodes: usize,
+    text: usize,
+    frags: u64,
+    units: u64,
+    depth: usize,
+}
+
+/// The counts of the big subtrees (`BIG` nodes or more) of the last window walk, by `NodeId::index`. The next window walk is told
+/// which nodes changed (the changed nodes and their ancestors): it takes the counts of a big subtree that did not change from
+/// here, and does not walk it. A count is good for the next walk only, so a subtree that was hidden or out of the tree is walked again.
+#[derive(Default)]
+pub(crate) struct Sums {
+    walk: u64,
+    map: HashMap<u32, Sum>,
+    /// The subtrees that were not walked, for tests.
+    used: u64,
+}
+
+const BIG: usize = 64;
+
 /// One walk of the visible tree from the root element, without recursion. Layout reaches the same nodes and no others.
-fn walk(doc: &Document, styles: &Styles, l: &GeometryLimits) -> Result<Bound, Refuse> {
+/// `KEEP`: a window walk, that keeps the counts of the big subtrees in `sums`, and uses them where `dirty` (if any) says no node changed.
+fn walk<const KEEP: bool>(doc: &Document, styles: &Styles, l: &GeometryLimits, sums: Option<&mut Sums>, dirty: Option<&[bool]>) -> Result<Bound, Refuse> {
     let Some(root) = doc.children(doc.root()).find(|&n| matches!(doc.data(n), NodeData::Element { .. })) else {
         return Ok(Bound { fragments: 0, seen: 0 });
     };
     let (mut nodes, mut text, mut frags) = (0usize, 0usize, 0u64);
+    let br = doc.find_atom("br");
     let mut stack: Vec<Frame> = Vec::new();
+    // With `KEEP`, beside `stack`: the element, the totals before it, and the depth of the stack before it and deepest under it.
+    let mut opens: Vec<(NodeId, usize, usize, u64, usize, usize)> = Vec::new();
+    let mut sums = sums.filter(|_| KEEP);
+    if let Some(s) = sums.as_deref_mut() {
+        s.walk += 1;
+        if dirty.is_none() {
+            s.map.clear();
+        }
+    }
     let mut next = Some(root);
     loop {
         // Open `next` (an element), or look at the next child of the open element.
@@ -166,6 +206,15 @@ fn walk(doc: &Document, styles: &Styles, l: &GeometryLimits) -> Result<Bound, Re
                         if frags > l.max_fragments {
                             return Err(Refuse::Limit("geometry-fragments"));
                         }
+                        if KEEP && let Some((el, n0, t0, f0, d0, deep)) = opens.pop() {
+                            if let Some(up) = opens.last_mut() {
+                                up.5 = up.5.max(deep);
+                            }
+                            if nodes - n0 >= BIG && let Some(s) = sums.as_deref_mut() {
+                                let walk = s.walk;
+                                s.map.insert(el.index() as u32, Sum { walk, nodes: nodes - n0, text: text - t0, frags: frags - f0, units, depth: deep - d0 });
+                            }
+                        }
                         continue;
                     }
                 },
@@ -175,6 +224,35 @@ fn walk(doc: &Document, styles: &Styles, l: &GeometryLimits) -> Result<Bound, Re
             NodeData::Element { name, .. } => {
                 let Some(style) = styles.style(node) else { continue };
                 if style.get(Property::Display) == Cv::Keyword(Keyword::None) {
+                    continue;
+                }
+                // A big subtree with no change since the last window walk: its counts, not a walk.
+                if KEEP
+                    && let (Some(d), Some(s)) = (dirty, sums.as_deref_mut())
+                    && !d.get(node.index()).copied().unwrap_or(true)
+                    && let Some(sum) = s.map.get_mut(&(node.index() as u32)).filter(|c| c.walk + 1 == s.walk)
+                {
+                    sum.walk = s.walk;
+                    s.used += 1;
+                    (nodes, text, frags) = (nodes + sum.nodes, text + sum.text, frags + sum.frags);
+                    if let Some(parent) = stack.last_mut() {
+                        parent.units += sum.units;
+                    }
+                    if let Some(up) = opens.last_mut() {
+                        up.5 = up.5.max(stack.len() + sum.depth);
+                    }
+                    if stack.len() + sum.depth > l.max_depth {
+                        return Err(Refuse::Limit("geometry-depth"));
+                    }
+                    if nodes > l.max_nodes {
+                        return Err(Refuse::Limit("geometry-nodes"));
+                    }
+                    if text > l.max_text {
+                        return Err(Refuse::Limit("geometry-text"));
+                    }
+                    if frags > l.max_fragments {
+                        return Err(Refuse::Limit("geometry-fragments"));
+                    }
                     continue;
                 }
                 check_shadow(doc, node)?;
@@ -188,7 +266,12 @@ fn walk(doc: &Document, styles: &Styles, l: &GeometryLimits) -> Result<Bound, Re
                 if style.get(Property::Display) == Cv::Keyword(Keyword::ListItem) {
                     frags += 1;
                 }
-                let inline = style.get(Property::Display) == Cv::Keyword(Keyword::Inline) || Some(name) == doc.find_atom("br");
+                let inline = style.get(Property::Display) == Cv::Keyword(Keyword::Inline) || Some(name) == br;
+                if KEEP {
+                    // The counts before this element: its own node and list marker are in its subtree.
+                    let marker = (style.get(Property::Display) == Cv::Keyword(Keyword::ListItem)) as u64;
+                    opens.push((node, nodes - 1, text, frags - marker, stack.len(), stack.len() + 1));
+                }
                 stack.push(Frame { kids: doc.flat_children(node), units: 0, inline });
             }
             NodeData::Text(span) => {
@@ -218,25 +301,32 @@ impl Dom {
     /// One bounded native layout of the whole page with these styles: the preflight walk refuses or reserves the work first (see the header).
     /// `offsetWidth`, `offsetHeight` and `ResizeObserver` share it.
     pub(crate) fn layout_now(&self, it: &mut Interp<'_>, styles: &Styles) -> R<bare_layout::fragment::Layout> {
-        self.layout_areas(it, styles).map(|(l, _, _)| l)
+        self.layout_areas(it, styles, None).map(|(l, _, _)| l)
     }
 
     /// One bounded native layout at the size `vp` (the window minus the page bars, see `browser_scroll.rs`).
-    pub(crate) fn layout_at(&self, it: &mut Interp<'_>, styles: &Styles, vp: (f32, f32)) -> R<bare_layout::fragment::Layout> {
+    pub(crate) fn layout_at(&self, it: &mut Interp<'_>, styles: &Styles, vp: (f32, f32), keep: Option<(Option<bare_layout::keep::Kept>, Option<&[bool]>)>) -> R<bare_layout::fragment::Layout> {
         let l = self.geometry.lim.get();
         let doc = self.doc.borrow();
         it.charge(doc.len() as u64)?;
-        let bound = match walk(&doc, styles, &l) {
+        let walked = match &keep {
+            Some((_, dirty)) => walk::<true>(&doc, styles, &l, Some(&mut self.geometry.sums.borrow_mut()), *dirty),
+            None => walk::<false>(&doc, styles, &l, None, None),
+        };
+        let bound = match walked {
             Ok(b) => b,
             Err(Refuse::Limit(name)) => return Err(self.lim(name)),
             Err(Refuse::Gate(why)) => return Err(Self::gate(why)),
         };
         // Layout cannot be interrupted, so it counts its own work and stops going deeper at `max_work`.
         it.charge(bound.seen + 1)?;
+        let probe = self.geometry.probe.get();
         let layout = if self.geometry.uncull.get() {
             bare_layout::layout_uncull(&doc, styles, vp, l.max_work)
+        } else if let Some((kept, dirty)) = keep.filter(|_| probe.is_none()) {
+            bare_layout::layout_kept(&doc, styles, vp, l.max_work, kept, dirty)
         } else {
-            bare_layout::layout_probing(&doc, styles, vp, l.max_work, self.geometry.probe.get())
+            bare_layout::layout_probing(&doc, styles, vp, l.max_work, probe)
         };
         if layout.work > l.max_work {
             return Err(self.lim("geometry-work"));
@@ -314,5 +404,89 @@ impl Browser {
 
     pub fn geometry_stats(&self) -> GeometryStats {
         self.dom.geometry.stats.get()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bare_css::cascade::{Origin, RuleSet, UA_CSS};
+
+    /// Random changes of the tree, the text and `display`, each followed by a window walk that is told the changed nodes and their
+    /// ancestors: its counts are those of a walk of the whole tree, and it skips big subtrees.
+    #[test]
+    fn a_walk_with_the_kept_counts_equals_a_full_walk() {
+        let mut seed = 0x9E37_79B9_7F4A_7C15u64;
+        let mut rnd = |n: usize| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            (seed % n as u64) as usize
+        };
+        let l = GeometryLimits { max_nodes: 1 << 20, max_depth: 400, max_text: 1 << 24, max_fragments: 1 << 24, max_work: 1 << 30 };
+        let (mut skipped, mut steps) = (0, 0);
+        for _ in 0..6 {
+            let mut doc = bare_html::tree::parse("<!doctype html><body></body>");
+            let all = |doc: &Document| {
+                let mut out = vec![doc.root()];
+                let mut k = 0;
+                while k < out.len() {
+                    let kids: Vec<_> = doc.children(out[k]).collect();
+                    out.extend(kids);
+                    k += 1;
+                }
+                out.retain(|&n| matches!(doc.data(n), NodeData::Element { .. }));
+                out
+            };
+            for _ in 0..400 {
+                let els = all(&doc);
+                let parent = els[2 + rnd(els.len() - 2)];
+                let el = doc.insert_element(parent, None, ["div", "span", "li", "br"][rnd(4)], &[("class", ["a", "b", "h"][rnd(3)])]);
+                doc.append_text(el, "text");
+            }
+            let mut rules = RuleSet::new((800.0, 600.0));
+            rules.add(&mut doc, UA_CSS, Origin::UserAgent);
+            rules.add(&mut doc, ".h{display:none}.b{display:inline}li{display:list-item}", Origin::Author);
+            let mut styles = rules.compute(&doc);
+            let mut sums = Sums::default();
+            walk::<true>(&doc, &styles, &l, Some(&mut sums), None).ok().expect("a walk");
+            for _ in 0..120 {
+                let els = all(&doc);
+                let pick = els[2 + rnd(els.len() - 2)];
+                let mut touched = vec![pick];
+                match rnd(4) {
+                    0 => doc.set_attr(pick, "class", ["a", "b", "h"][rnd(3)]),
+                    1 => {
+                        let el = doc.insert_element(pick, None, "div", &[("class", "a")]);
+                        doc.append_text(el, "more text");
+                        touched.push(el);
+                    }
+                    2 if doc.parent(pick) != Some(els[0]) => {
+                        touched[0] = doc.parent(pick).expect("a parent");
+                        doc.detach(pick);
+                    }
+                    _ => doc.append_text(pick, "x"),
+                }
+                let new = rules.compute(&doc);
+                let mut dirty = vec![false; doc.len()];
+                let display = |s: &Styles, n: NodeId| (n.index() < s.nodes()).then(|| s.style(n).map(|c| c.get(Property::Display))).flatten();
+                touched.extend(all(&doc).into_iter().filter(|&n| display(&styles, n) != display(&new, n)));
+                for n in touched {
+                    let mut cur = Some(n);
+                    while let Some(c) = cur.filter(|c| !dirty[c.index()]) {
+                        dirty[c.index()] = true;
+                        cur = doc.parent(c);
+                    }
+                }
+                styles = new;
+                let before = sums.used;
+                let kept = walk::<true>(&doc, &styles, &l, Some(&mut sums), Some(&dirty)).ok().expect("a walk");
+                let full = walk::<false>(&doc, &styles, &l, None, None).ok().expect("a walk");
+                assert_eq!(kept, full, "step {steps}");
+                skipped += (sums.used > before) as usize;
+                steps += 1;
+            }
+        }
+        assert!(skipped > steps / 5, "the kept counts were used in {skipped} of {steps} walks");
     }
 }

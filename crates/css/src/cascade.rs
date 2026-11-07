@@ -57,7 +57,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::hash::BuildHasherDefault;
 
-use bare_html::dom::{Atom, Document, Fnv, NodeData, NodeId};
+use bare_html::dom::{Atom, Document, Fnv, Mark, NodeData, NodeId};
 
 use crate::at_rules;
 use crate::calc::Linear;
@@ -125,6 +125,139 @@ pub struct RuleSet {
     other: Vec<u32>,
     /// The user action state that some selector reads (`selector::USES_*`).
     user: u8,
+    /// Where the selectors read each kind of state (`Scopes`).
+    scopes: Scopes,
+}
+
+/// Where a selector reads a state, seen from the element that it styles. The order is the cost of a change of the state.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Scope {
+    /// No selector reads it.
+    #[default]
+    None,
+    /// Only on the element itself (the last compound): a change restyles the element, and its subtree only if its style changes.
+    Own,
+    /// On an ancestor too (a compound to the left, after a space or `>`): a change restyles the subtree of the element.
+    Subtree,
+    /// On a sibling of the element or of an ancestor (after a `+` or `~`): a change restyles the subtree of the parent.
+    Siblings,
+}
+
+/// The widest `Scope` of each kind of state, over all the selectors of a `RuleSet`. A host that restyles a part of the page
+/// (`RuleSet::restyle`) picks the elements to restyle with it.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Scopes {
+    pub hover: Scope,
+    pub active: Scope,
+    pub focus: Scope,
+    /// `:checked` and the other form pseudo-classes. Some read other elements (a `fieldset` above, the radio group).
+    pub form: Scope,
+    /// Ids, classes and attributes (`:link` reads `href`).
+    pub attr: Scope,
+    /// The place among the siblings: `:first-child`, `:nth-child()`, and any `+` or `~`.
+    pub structure: Scope,
+    /// `:empty`: the children of the element.
+    pub empty: Scope,
+}
+
+impl Scopes {
+    /// The roots of `RuleSet::restyle` (element, whole subtree) for one change of the tree. `false`: restyle the whole page.
+    /// A linked node gets its styles. The place of its siblings changes for `:first-child` and `+`, and the parent may stop being
+    /// `:empty`. A form pseudo-class reads the attributes of other elements (a `fieldset`, the radio group), so with one, an
+    /// attribute or form change restyles all.
+    pub fn roots(&self, doc: &Document, mark: Mark, out: &mut Vec<(NodeId, bool)>) -> bool {
+        let children = |parent: NodeId, out: &mut Vec<(NodeId, bool)>| {
+            if self.structure != Scope::None {
+                out.push((parent, true));
+            }
+            Self::at(self.empty, parent, doc, out);
+        };
+        match mark {
+            Mark::Link { parent, node } => {
+                out.push((node, true));
+                children(parent, out);
+            }
+            Mark::Unlink { parent, .. } => children(parent, out),
+            Mark::Text { node } => {
+                if let Some(p) = doc.parent(node) {
+                    Self::at(self.empty, p, doc, out);
+                }
+            }
+            Mark::Attr { el, .. } => {
+                if self.form != Scope::None {
+                    return false;
+                }
+                // The presentational hints of a cell read the table above it: the subtree, also with no selector on attributes.
+                Self::at(self.attr.max(Scope::Subtree), el, doc, out);
+            }
+            Mark::Ui { .. } => return self.form == Scope::None,
+        }
+        true
+    }
+
+    /// The roots for a user state (`:hover`, `:active`, focus) read in `scope` that moved from the element `old[0]` to `new[0]`.
+    /// `old` and `new` are the element and its ancestors (`:hover`, `:active` and `:focus-within` match them): the elements
+    /// in one of them and not in the other change, and so do the two elements themselves (`:focus-visible` can change alone).
+    pub fn user_roots(scope: Scope, old: &[NodeId], new: &[NodeId], doc: &Document, out: &mut Vec<(NodeId, bool)>) {
+        if scope == Scope::None {
+            return;
+        }
+        let ends = old.first().into_iter().chain(new.first());
+        let diff = old.iter().filter(|n| !new.contains(n)).chain(new.iter().filter(|n| !old.contains(n)));
+        for &e in ends.chain(diff) {
+            Self::at(scope, e, doc, out);
+        }
+    }
+
+    /// The roots for a change of the state of `e` that the selectors read in `scope`. After a `+` or `~`, the state of `e`
+    /// reaches only the siblings after it, and their subtrees.
+    fn at(scope: Scope, e: NodeId, doc: &Document, out: &mut Vec<(NodeId, bool)>) {
+        match scope {
+            Scope::None => {}
+            Scope::Own => out.push((e, false)),
+            Scope::Subtree => out.push((e, true)),
+            Scope::Siblings => out.extend(std::iter::successors(Some(e), |&n| doc.next_sibling(n)).map(|n| (n, true))),
+        }
+    }
+
+    fn add(&mut self, selector: &Selector) {
+        use crate::selector::User;
+        fn simples(me: &mut Scopes, list: &[Simple], at: Scope) {
+            for s in list {
+                let slot = match s {
+                    Simple::User(User::Hover) => &mut me.hover,
+                    Simple::User(User::Active) => &mut me.active,
+                    Simple::User(_) => &mut me.focus,
+                    Simple::Form(_) => &mut me.form,
+                    Simple::Id(_) | Simple::Class(_) | Simple::Attr { .. } | Simple::Link => &mut me.attr,
+                    Simple::FirstChild | Simple::LastChild | Simple::OnlyChild | Simple::Nth(_) => &mut me.structure,
+                    Simple::Empty => &mut me.empty,
+                    Simple::Not(args) | Simple::Is(args) => {
+                        for a in args {
+                            simples(me, a, at);
+                        }
+                        continue;
+                    }
+                    _ => continue,
+                };
+                *slot = (*slot).max(at);
+            }
+        }
+        let mut at = Scope::Own;
+        for (i, c) in selector.compounds.iter().enumerate() {
+            if i > 0 {
+                let way = match selector.compounds[i - 1].combinator {
+                    Combinator::Next | Combinator::Later => Scope::Siblings,
+                    _ => Scope::Subtree,
+                };
+                at = at.max(way);
+                if way == Scope::Siblings {
+                    self.structure = Scope::Siblings;
+                }
+            }
+            simples(self, &c.simples, at);
+        }
+    }
 }
 
 impl RuleSet {
@@ -134,13 +267,18 @@ impl RuleSet {
     }
 
     pub fn new(viewport: (f32, f32)) -> RuleSet {
-        RuleSet { viewport, entries: Vec::new(), decls: Vec::new(), side: Side::default(), layers: vec![Layer { parent: 0 }], layer_by_name: HashMap::new(), customs: Vec::new(), by_id: Buckets::default(), by_class: Buckets::default(), by_tag: Buckets::default(), other: Vec::new(), user: 0 }
+        RuleSet { viewport, entries: Vec::new(), decls: Vec::new(), side: Side::default(), layers: vec![Layer { parent: 0 }], layer_by_name: HashMap::new(), customs: Vec::new(), by_id: Buckets::default(), by_class: Buckets::default(), by_tag: Buckets::default(), other: Vec::new(), user: 0, scopes: Scopes::default() }
     }
 
     /// Which user action state (`:hover`, `:active`, the focus pseudo-classes) some rule reads: the bits `selector::USES_*`.
     /// A host that keeps styles must compute them again when one of those states changes.
     pub fn user_flags(&self) -> u8 {
         self.user
+    }
+
+    /// Where the selectors read each kind of state (`Scopes`).
+    pub fn scopes(&self) -> Scopes {
+        self.scopes
     }
 
     /// The number of selectors in the set.
@@ -284,6 +422,7 @@ impl RuleSet {
             // `a:hover` never matches. Keep it out of the index: it only costs time.
         }
         self.user |= crate::selector::user_flags(&selector);
+        self.scopes.add(&selector);
         let index = self.entries.len() as u32;
         // The bucket: an id is the most specific, then a class, then a tag.
         let last = &selector.compounds[0].simples;
@@ -302,7 +441,12 @@ impl RuleSet {
 
     /// Find the style of every element that is shown. The selectors must come from `add` with this same `doc`.
     pub fn compute(&self, doc: &Document) -> Styles {
-        self.walk::<false>(doc, None)
+        self.walk::<false>(doc, None, false)
+    }
+
+    /// `compute`, and the styles keep the cache of the cascade, so that `restyle` can update a part of them later.
+    pub fn compute_kept(&self, doc: &Document) -> Styles {
+        self.walk::<false>(doc, None, true)
     }
 
     /// The same, and the element `want` gets its style too, even inside `display:none` (for `getComputedStyle`: CSSOM gives the
@@ -311,14 +455,14 @@ impl RuleSet {
     /// below changes only at a `display:none` element and on the way from it to `want`.
     /// An element that the walk does not reach (a light child of a shadow host: no slots) still has no style.
     pub fn compute_for(&self, doc: &Document, want: Option<NodeId>) -> Styles {
-        if want.is_some() { self.walk::<true>(doc, want) } else { self.walk::<false>(doc, None) }
+        if want.is_some() { self.walk::<true>(doc, want, false) } else { self.walk::<false>(doc, None, false) }
     }
 
     /// `WANT` is a const so that the walk for layout (`false`) has none of the code for `want`: it is the same machine code as before.
     #[inline(always)]
-    fn walk<const WANT: bool>(&self, doc: &Document, want: Option<NodeId>) -> Styles {
+    fn walk<const WANT: bool>(&self, doc: &Document, want: Option<NodeId>, keep: bool) -> Styles {
         let mut way = Way { want, path: Vec::new(), sorted: Vec::new(), on: false, at: 0 };
-        let mut styles = Styles { styles: vec![ComputedStyle::initial()], of_node: vec![NONE; doc.len()], calcs: Vec::new(), grids: Vec::new(), customs: Vec::new(), spaced: false };
+        let mut styles = Styles { styles: vec![ComputedStyle::initial()], of_node: vec![NONE; doc.len()], calcs: Vec::new(), grids: Vec::new(), customs: Vec::new(), spaced: false, kept: None };
         // Style 0 is the starting style. It is the parent style of the `html` element.
         let mut cx = Cx { viewport: self.viewport, root_font_size: 16.0, layer_order: self.layer_order(), declared: &self.side, inline: RefCell::default(), computed: RefCell::default(), grids: RefCell::default(), customs: RefCell::default() };
         let style_atom = doc.find_atom("style");
@@ -390,10 +534,142 @@ impl RuleSet {
                 child = doc.prev_sibling(c);
             }
         }
-        styles.calcs = cx.computed.take().list;
-        styles.grids = cx.grids.take().list;
-        styles.customs = cx.customs.take().list;
+        let (computed, mut grids, customs) = (cx.computed.take(), cx.grids.take(), cx.customs.take());
+        styles.calcs = computed.list;
+        styles.grids = std::mem::take(&mut grids.list);
+        styles.customs = customs.list;
+        if keep {
+            styles.kept = Some(Box::new(StyleKeep { memo, calcs: computed.index, grids, customs: customs.index, rem: cx.root_font_size, base: styles.styles.len() }));
+        }
         styles
+    }
+
+    /// Compute again the styles of a part of the page, in `styles` from `compute_kept` of this set and this `doc` (the tree may
+    /// have changed since). For each root: `(el, false)` styles `el`, and its subtree only if its style changes; `(el, true)`
+    /// styles its whole subtree. The elements whose style number changed go to `changed`, with the old number (`Styles::changed`).
+    /// A new node gets its style here, as a part of the subtree of a root. Gives `false` when it cannot (the styles keep no
+    /// cache, the font size of the root element changes, the page has a shadow root, or the styles grew too much): then the caller runs
+    /// `compute_kept`; no node has a new style then. Equal style numbers mean equal values, so a style that did not change keeps its number.
+    pub fn restyle(&self, doc: &Document, styles: &mut Styles, roots: &[(NodeId, bool)], changed: &mut Vec<(NodeId, u32)>) -> bool {
+        let html = doc.children(doc.root()).find(|&n| matches!(doc.data(n), NodeData::Element { .. }));
+        let Some(mut k) = styles.kept.take() else { return false };
+        // A style that a restyle makes stays in the list: a page that makes new ones all the time starts again from time to time.
+        if styles.styles.len() > 2 * k.base + 4096 || doc.has_shadow_roots() {
+            return false;
+        }
+        if styles.of_node.len() < doc.len() {
+            styles.of_node.resize(doc.len(), NONE);
+        }
+        let cx = Cx {
+            viewport: self.viewport,
+            root_font_size: k.rem,
+            layer_order: self.layer_order(),
+            declared: &self.side,
+            inline: RefCell::default(),
+            computed: RefCell::new(Computed { list: std::mem::take(&mut styles.calcs), index: std::mem::take(&mut k.calcs) }),
+            grids: RefCell::new({
+                let mut g = std::mem::take(&mut k.grids);
+                g.list = std::mem::take(&mut styles.grids);
+                g
+            }),
+            customs: RefCell::new(Customs { list: std::mem::take(&mut styles.customs), index: std::mem::take(&mut k.customs) }),
+        };
+        let style_atom = doc.find_atom("style");
+        let hints = crate::hints::Hints::new(doc);
+        let mut ok = true;
+        // Parents first: a root inside a subtree that is styled again by an earlier root costs a little more, and is still right.
+        let mut order: Vec<(usize, NodeId, bool)> = roots.iter().map(|&(n, sub)| (std::iter::successors(Some(n), |&p| doc.flat_parent(p)).count(), n, sub)).collect();
+        order.sort_unstable_by_key(|r| (r.0, r.1.index()));
+        let (mut candidates, mut matched): (Vec<u32>, Vec<u32>) = (Vec::new(), Vec::new());
+        let mut stack: Vec<(NodeId, bool)> = Vec::new();
+        'roots: for &(_, root, subtree) in &order {
+            if !matches!(doc.data(root), NodeData::Element { .. }) {
+                continue;
+            }
+            // Only a connected root that is shown: inside `display: none` all styles are `NONE`, and the hidden element has its own.
+            let mut filter = AncestorFilter::new();
+            let mut up = doc.flat_parent(root);
+            while let Some(a) = up {
+                if a == doc.root() {
+                    break;
+                }
+                let s = styles.of_node[a.index()];
+                if s == NONE || styles.styles[s as usize].get(Property::Display) == Value::Keyword(Keyword::None) {
+                    continue 'roots;
+                }
+                element_hashes(doc, a, &mut |h| filter.add(h));
+                up = doc.flat_parent(a);
+            }
+            if up.is_none() {
+                continue;
+            }
+            stack.clear();
+            stack.push((root, false));
+            while let Some((node, leaving)) = stack.pop() {
+                if !matches!(doc.data(node), NodeData::Element { .. }) {
+                    continue;
+                }
+                if leaving {
+                    element_hashes(doc, node, &mut |h| filter.remove(h));
+                    continue;
+                }
+                let parent = doc.flat_parent(node).map_or(0, |p| styles.of_node[p.index()]);
+                let parent = if parent == NONE { 0 } else { parent };
+                self.candidates(doc, node, &mut candidates);
+                matched.clear();
+                for &i in &candidates {
+                    let e = &self.entries[i as usize];
+                    let possible = e.ancestors.iter().take_while(|&&h| h != 0).all(|&h| filter.may_contain(h));
+                    if possible && matches(doc, node, &e.selector) {
+                        matched.push(i);
+                    }
+                }
+                matched.sort_unstable();
+                let inline = style_atom.and_then(|a| doc.attr(node, a));
+                let hint = hints.as_ref().and_then(|h| h.of(doc, node));
+                let id = self.style_of(styles, &mut k.memo, parent, &matched, (inline, hint.as_deref()), &cx);
+                if Some(node) == html && styles.styles[id as usize].px(Property::FontSize) != k.rem {
+                    // `rem` changes: the cache of the cascade does not see it. The root element is the first root, so no node has a new style yet.
+                    ok = false;
+                    break 'roots;
+                }
+                let old = std::mem::replace(&mut styles.of_node[node.index()], id);
+                if old != id {
+                    changed.push((node, old));
+                }
+                if styles.styles[id as usize].get(Property::Display) == Value::Keyword(Keyword::None) {
+                    // Nothing inside has a style now.
+                    if old != NONE && styles.styles[old as usize].get(Property::Display) != Value::Keyword(Keyword::None) {
+                        let mut gone: Vec<NodeId> = doc.children(node).collect();
+                        while let Some(n) = gone.pop() {
+                            if std::mem::replace(&mut styles.of_node[n.index()], NONE) != NONE {
+                                gone.extend(doc.children(n));
+                            }
+                        }
+                    }
+                    continue;
+                }
+                if node == root && !subtree && old == id {
+                    continue;
+                }
+                element_hashes(doc, node, &mut |h| filter.add(h));
+                stack.push((node, true));
+                let mut child = doc.last_child(node);
+                while let Some(c) = child {
+                    stack.push((c, false));
+                    child = doc.prev_sibling(c);
+                }
+            }
+        }
+        styles.calcs = std::mem::take(&mut cx.computed.borrow_mut().list);
+        k.calcs = std::mem::take(&mut cx.computed.borrow_mut().index);
+        let mut g = cx.grids.take();
+        styles.grids = std::mem::take(&mut g.list);
+        k.grids = g;
+        let c = cx.customs.take();
+        (styles.customs, k.customs) = (c.list, c.index);
+        styles.kept = Some(k);
+        ok
     }
 
     /// The rules that may match the element: the ones in the lists for its id, its classes and its tag, and the "other" list.
@@ -825,6 +1101,21 @@ pub struct Styles {
     customs: Vec<var::Set>,
     /// Does any style have a `letter-spacing` or a `word-spacing` that is not 0? Layout and paint read the two only then.
     spaced: bool,
+    /// The cache of the cascade, for `RuleSet::restyle`. Only `RuleSet::compute_kept` keeps it.
+    kept: Option<Box<StyleKeep>>,
+}
+
+/// What `RuleSet::restyle` needs from the cascade that made the styles: the style cache and the indexes of the value lists, so
+/// that the same values get the same numbers.
+struct StyleKeep {
+    memo: Memo,
+    calcs: HashMap<[u32; 2], u32, BuildHasherDefault<Fnv>>,
+    grids: grid::Kept,
+    customs: HashMap<var::Set, u32, BuildHasherDefault<Fnv>>,
+    /// The font size of the root element, for `rem`.
+    rem: f32,
+    /// How many styles the full cascade made.
+    base: usize,
 }
 
 impl Styles {
@@ -863,6 +1154,11 @@ impl Styles {
         self.styles.iter()
     }
 
+    /// How many nodes the styles were made for: the length of the document then.
+    pub fn nodes(&self) -> usize {
+        self.of_node.len()
+    }
+
     /// How many different styles there are. Style 0 (the starting style) is not counted.
     pub fn unique(&self) -> usize {
         self.styles.len() - 1
@@ -888,22 +1184,45 @@ impl Styles {
             if seen[a as usize] == b {
                 continue;
             }
-            let (x, y) = (&self.styles[a as usize].0, &new.styles[b as usize].0);
-            for (i, &p) in Property::ALL.iter().enumerate() {
-                let (u, v) = (x[i], y[i]);
-                let same = match (u, v) {
-                    (Value::Length(Length::Calc(i)), Value::Length(Length::Calc(j))) => self.calcs[i as usize] == new.calcs[j as usize],
-                    (Value::Grid(i), Value::Grid(j)) => self.grids[i as usize] == new.grids[j as usize],
-                    _ => u == v,
-                };
-                if !same {
-                    if !Change::paint_only(p, u, v, y[Property::Display as usize]) {
-                        return Change::Layout;
-                    }
-                    out = Change::Paint;
-                }
+            match self.differ(a, new, b) {
+                Change::Layout => return Change::Layout,
+                Change::Paint => out = Change::Paint,
+                Change::Same => {}
             }
             seen[a as usize] = b;
+        }
+        out
+    }
+
+    /// How the style `old` of these styles differs from the style that `node` has now (after `RuleSet::restyle`). A node that has no
+    /// style before or after changes its layout.
+    pub fn change_of(&self, old: u32, node: NodeId) -> Change {
+        let new = self.of_node.get(node.index()).copied().unwrap_or(NONE);
+        match (old, new) {
+            _ if old == new => Change::Same,
+            (NONE, _) | (_, NONE) => Change::Layout,
+            _ => self.differ(old, self, new),
+        }
+    }
+
+    /// How the style `b` of `new` differs from the style `a` of these styles.
+    #[inline(always)]
+    fn differ(&self, a: u32, new: &Styles, b: u32) -> Change {
+        let (x, y) = (&self.styles[a as usize].0, &new.styles[b as usize].0);
+        let mut out = Change::Same;
+        for (i, &p) in Property::ALL.iter().enumerate() {
+            let (u, v) = (x[i], y[i]);
+            let same = match (u, v) {
+                (Value::Length(Length::Calc(i)), Value::Length(Length::Calc(j))) => self.calcs[i as usize] == new.calcs[j as usize],
+                (Value::Grid(i), Value::Grid(j)) => self.grids[i as usize] == new.grids[j as usize],
+                _ => u == v,
+            };
+            if !same {
+                if !Change::paint_only(p, u, v, y[Property::Display as usize]) {
+                    return Change::Layout;
+                }
+                out = Change::Paint;
+            }
         }
         out
     }
@@ -2205,5 +2524,112 @@ mod tests {
         // The layer `lib` is the one of the first sheet, and the rule with no layer wins.
         assert_eq!(styles.style(by_id(&doc, "p")).unwrap().get(Property::TextColor), blue);
         let _ = red;
+    }
+
+    /// Random changes of the tree and of the user state, each followed by a restyle of the roots that `Scopes` picks: the values
+    /// must be those of a full cascade, and each element whose values changed must be in the changed list (or be hidden now
+    /// under an element in it).
+    #[test]
+    fn a_restyle_of_the_picked_roots_equals_a_full_cascade() {
+        const CSS: &str = ".a{color:red}.b .c{margin-top:3px}.a > .d{padding-left:2px}.e + .f{color:blue}.g ~ .h{font-size:20px}\
+            :hover{color:green}.a:hover .c{color:#123}div:hover > span{margin-left:1px}.e:hover + .f{color:#321}\
+            .k:focus-within{background-color:#eee}:focus .c{font-size:12px}:focus{border-top-color:#9a9}\
+            li:first-child{color:#111}li:nth-child(2n){color:#222}li:last-child{margin-left:4px}:empty{padding-top:1px}.q:empty + div{color:#333}\
+            [data-x]{color:#444}[data-x=y] .c{color:#555}.m{display:none}.n{font-size:2em}";
+        const CLASSES: [&str; 12] = ["a", "b", "c", "d", "e", "f", "g", "h", "k", "q", "m", "n"];
+        const TAGS: [&str; 4] = ["div", "span", "li", "ul"];
+        let mut seed = 0x2545_F491_4F6C_DD1Du64;
+        let mut rnd = |n: usize| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            (seed % n as u64) as usize
+        };
+        let connected = |doc: &Document| {
+            let (mut all, mut k) = (vec![doc.root()], 0);
+            while k < all.len() {
+                let kids: Vec<_> = doc.children(all[k]).collect();
+                all.extend(kids);
+                k += 1;
+            }
+            all.retain(|&n| matches!(doc.data(n), NodeData::Element { .. }));
+            all
+        };
+        let chain = |doc: &Document, n: Option<NodeId>| std::iter::successors(n, |&p| doc.parent(p)).filter(|&p| matches!(doc.data(p), NodeData::Element { .. })).collect::<Vec<_>>();
+        let (mut restyled, mut full_runs) = (0, 0);
+        for round in 0..8 {
+            let mut doc = parse("<!doctype html><body></body>");
+            let body = connected(&doc)[2];
+            for _ in 0..40 {
+                let els = connected(&doc);
+                let parent = els[2 + rnd(els.len() - 2)];
+                let c = CLASSES[rnd(CLASSES.len())];
+                let el = doc.insert_element(parent, None, TAGS[rnd(TAGS.len())], &[("class", c)]);
+                if rnd(2) == 0 {
+                    doc.append_text(el, "x");
+                }
+            }
+            let mut rules = RuleSet::new(VIEW);
+            rules.add(&mut doc, UA_CSS, Origin::UserAgent);
+            rules.add(&mut doc, CSS, Origin::Author);
+            let sc = rules.scopes();
+            let mut st = rules.compute_kept(&doc);
+            doc.track_damage();
+            let mut chains = [Vec::new(), Vec::new()];
+            for step in 0..200 {
+                let els = connected(&doc);
+                let pick = els[2 + rnd(els.len() - 2)];
+                let what = rnd(8);
+                match what {
+                    0 => doc.set_attr(pick, "class", CLASSES[rnd(CLASSES.len())]),
+                    1 => doc.set_attr(pick, "data-x", ["y", "z"][rnd(2)]),
+                    2 => {
+                        let el = doc.insert_element(pick, doc.children(pick).next().filter(|_| rnd(2) == 0), TAGS[rnd(TAGS.len())], &[("class", CLASSES[rnd(CLASSES.len())])]);
+                        doc.append_text(el, "y");
+                    }
+                    3 if pick != body => doc.detach(pick),
+                    4 => match doc.children(pick).find(|&c| matches!(doc.data(c), NodeData::Text(_))) {
+                        Some(t) => doc.set_text(t, ["", "z"][rnd(2)]),
+                        None => doc.append_text(pick, "t"),
+                    },
+                    5 => {
+                        doc.set_hover(Some(pick));
+                    }
+                    6 => {
+                        doc.set_focus((rnd(3) > 0).then_some(pick), rnd(2) == 0);
+                    }
+                    _ => {
+                        doc.set_hover(None);
+                    }
+                }
+                let mut roots = Vec::new();
+                let mut ok = doc.take_damage().is_some_and(|marks| marks.into_iter().all(|m| sc.roots(&doc, m, &mut roots)));
+                let new_chains = [chain(&doc, doc.user().hover), chain(&doc, doc.user().focus)];
+                Scopes::user_roots(sc.hover, &chains[0], &new_chains[0], &doc, &mut roots);
+                Scopes::user_roots(sc.focus, &chains[1], &new_chains[1], &doc, &mut roots);
+                chains = new_chains;
+                let old: Vec<(NodeId, Option<ComputedStyle>)> = connected(&doc).into_iter().filter(|n| n.index() < st.nodes()).map(|n| (n, st.style(n).cloned())).collect();
+                let mut changed = Vec::new();
+                ok = ok && rules.restyle(&doc, &mut st, &roots, &mut changed);
+                if !ok {
+                    full_runs += 1;
+                    st = rules.compute_kept(&doc);
+                    continue;
+                }
+                restyled += 1;
+                let full = rules.compute(&doc);
+                for n in connected(&doc) {
+                    assert_eq!(st.style(n), full.style(n), "round {round} step {step} change {what} at {pick:?}: node {n:?} roots {roots:?}\n{}", full.dump(&doc));
+                }
+                for (n, before) in old {
+                    if before.as_ref() != st.style(n) {
+                        let listed = |e: NodeId| changed.iter().any(|c| c.0 == e);
+                        let hidden_under = st.style(n).is_none() && std::iter::successors(doc.parent(n), |&p| doc.parent(p)).any(listed);
+                        assert!(listed(n) || hidden_under, "round {round} step {step}: {n:?} changed and is not listed");
+                    }
+                }
+            }
+        }
+        assert!(restyled > 1000 && full_runs < 200, "restyled {restyled}, full {full_runs}");
     }
 }

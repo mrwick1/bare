@@ -90,6 +90,7 @@ impl Cx<'_> {
     #[inline(never)]
     pub(crate) fn set_rel(&mut self, node: NodeId, offset: (f32, f32)) {
         self.rel.insert(node.index() as u32, offset);
+        self.sets += 1;
         if self.open > 0 {
             self.fx.push(Effect::Rel(node.index() as u32, offset));
         }
@@ -98,6 +99,7 @@ impl Cx<'_> {
     #[inline(always)]
     pub(crate) fn set_bars(&mut self, node: NodeId, need: (bool, bool)) {
         self.bars.insert(node.index() as u32, need);
+        self.sets += 1;
         if self.open > 0 {
             self.fx.push(Effect::Bars(node.index() as u32, need));
         }

@@ -21,7 +21,9 @@ fn page(html: &str, w: u32, h: u32) -> Page {
     b.use_virtual_clock();
     b.set_viewport(w as f32, h as f32).expect("viewport");
     b.set_document_url("http://localhost/refresh.html").expect("url");
-    Page::new(Source::Browser(Box::new(b)), (w, h))
+    let mut p = Page::new(Source::Browser(Box::new(b)), (w, h));
+    p.whole = 0;
+    p
 }
 
 fn mv(p: &mut Page, x: f64, y: f64) {
@@ -53,12 +55,12 @@ fn js(p: &mut Page, src: &str) -> String {
     out
 }
 
-/// The frame of the window now, checked against a frame made from nothing.
+/// The frame of the window now, checked against a frame made from nothing: the pixels, the fragments and the page bars.
 fn frame(p: &mut Page, step: &str) -> Vec<u32> {
     let px = p.paint().to_vec();
-    let fresh = p.paint_fresh();
-    let diff = px.iter().zip(&fresh).filter(|(a, b)| a != b).count();
-    assert_eq!(diff, 0, "{step}: {diff} pixels differ from a frame made from nothing");
+    if let Err(e) = p.check_frame() {
+        panic!("{step}: {e}");
+    }
     px
 }
 
@@ -268,4 +270,62 @@ fn the_state_follows_the_page_under_a_still_pointer() {
         js(&mut p, "$('f').remove()");
         assert_eq!(frame(&mut p, "removed")[120 * 100 + 50], 0xffffffff, "#w has no focused element now");
     })
+}
+
+/// Random sequences of window events and script changes on a long page with floats, positioned, fixed and sticky boxes, a scroll
+/// container, lists and rules on `:hover`, `:focus`, siblings and `:first-child`. Each frame equals a frame made from nothing
+/// (pixels, fragments and page bars), and most changes style and lay out only what changed.
+#[test]
+fn random_changes_draw_the_frame_made_from_nothing() {
+    big(|| {
+        let mut html = String::from(
+            "<!doctype html><style>body{margin:4px}.l{height:20px}.l:hover{background:#cde}.w{width:120px}.f{float:left;width:30px;height:30px;background:#9c9}\
+             .r{position:relative;left:3px}.a{position:absolute;right:5px;top:40px;width:20px;height:20px;background:#c99}.x{position:fixed;left:0;bottom:0;width:40px;height:10px;background:#99c}\
+             .s{position:sticky;top:0;background:#eee}.box{overflow:auto;height:60px}.big{font-size:20px}.hide{display:none}.l:first-child{color:#a00}.on+.l{color:#0a0}\
+             li{margin-left:20px}.ib{display:inline-block;width:40px}p:focus{background:#fd0}p:hover{padding-left:3px}</style><div class=x></div><div class=s>head</div>",
+        );
+        for i in 0..120 {
+            match i % 12 {
+                0 => html.push_str(&format!("<div class=box id=b{i}><div class=l>in {i}</div><div class=l>in</div><div class=l>in</div><div class=l>in</div></div>")),
+                3 => html.push_str(&format!("<ul><li class=l id=e{i}>item {i}</li><li class=l>item</li></ul>")),
+                5 => html.push_str(&format!("<div class=f id=e{i}></div><div class=l id=t{i}>beside the float {i}</div>")),
+                7 => html.push_str(&format!("<div class=r id=e{i}><span class=ib>ib</span> line {i}<div class=a></div></div>")),
+                9 => html.push_str(&format!("<p tabindex=0 id=e{i}>focus {i}</p>")),
+                _ => html.push_str(&format!("<div class=l id=e{i}>line {i} with some words</div>")),
+            }
+        }
+        let mut p = page(&html, 300, 200);
+        js(&mut p, "var $ = id => document.getElementById(id), n = 0; 0");
+        frame(&mut p, "start");
+        let mut seed = 0x51ED_2701_A3B4_C5D6u64;
+        let mut rnd = |n: u64| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed % n
+        };
+        let (k0, mut sizes) = (p.kept, [(300, 200), (260, 200), (300, 240)].into_iter().cycle());
+        for step in 0..400 {
+            let id = rnd(120);
+            let el = format!("(document.getElementById('e{id}') || document.body.lastElementChild)");
+            match rnd(14) {
+                0 | 1 => drop(js(&mut p, &format!("{el}.firstChild ? ({el}.firstChild.data = 'text ' + (++n)) : ({el}.textContent = 'new'); 0"))),
+                2 => drop(js(&mut p, &format!("{el}.classList.toggle(['big', 'on', 'hide', 'w'][n++ % 4]); 0"))),
+                3 => drop(js(&mut p, &format!("var d = document.createElement('div'); d.className = 'l'; d.textContent = 'added ' + (++n); {el}.after(d); 0"))),
+                4 => drop(js(&mut p, &format!("var e = {el}; if (e.parentNode != document.body || document.body.children.length > 60) e.remove(); 0"))),
+                5 | 6 => mv(&mut p, rnd(300) as f64, rnd(200) as f64),
+                7 => click(&mut p, rnd(300) as f64, rnd(200) as f64),
+                8 => key(&mut p, "Tab", None),
+                9 | 10 => drop(p.handle(Event::Wheel { x: rnd(300) as f64, y: rnd(200) as f64, dx: 0.0, dy: (rnd(800) as f64) - 300.0, mods: NO })),
+                11 => drop(js(&mut p, &format!("{el}.style.height = (10 + n++ % 30) + 'px'; 0"))),
+                12 => drop(js(&mut p, "var b = document.querySelector('.box'); if (b) b.scrollTop = (n++ * 7) % 40; 0")),
+                _ => {
+                    let (w, h) = sizes.next().unwrap();
+                    p.resize(w, h);
+                }
+            }
+            frame(&mut p, &format!("step {step}"));
+        }
+        assert!(p.kept - k0 > 100, "{} of the frames styled and laid out only what changed", p.kept - k0);
+    });
 }

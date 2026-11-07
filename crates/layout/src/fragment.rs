@@ -64,6 +64,8 @@ pub struct Layout {
     pub work: u64,
     /// The used tracks of the grid container that `layout_probing` was asked about. `None` for any other layout.
     pub tracks: Option<Tracks>,
+    /// What the next layout of a window can use again (`crate::layout_kept`). `None` for the other layouts.
+    pub kept: Option<crate::keep::Kept>,
 }
 
 /// The tracks of a grid container after layout, rows (0) and columns (1): their sizes, how many implicit tracks come before the
