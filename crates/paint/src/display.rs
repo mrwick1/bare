@@ -28,7 +28,7 @@
 //!
 //! Gaps, on purpose: `double`, `groove`, `ridge`, `inset` and `outset` borders draw as `solid`. A rounded
 //! box draws its border in one color (with four colors the sides are square), `dashed` and `dotted` borders that are
-//! rounded draw as `solid`, and `overflow` clips to the square padding box, also when the box is rounded. An inline box
+//! rounded draw as `solid` unless the four sides have the same style, width and color, and `overflow` clips to the square padding box, also when the box is rounded. An inline box
 //! cut over two lines draws the borders of all four sides on each piece. `z-index` of an inline box does nothing.
 
 use crate::canvas::{IRect, Shape};
@@ -588,6 +588,16 @@ impl Builder<'_> {
         let left = left.min(w);
         let right = right.min(w - left);
         if let Some(outer) = round
+            && td != Dash::Solid
+            && (td, tc, top) == (rd, rc, right)
+            && (td, tc, top) == (bd, bc, bottom)
+            && (td, tc, top) == (ld, lc, left)
+            && tc >> 24 != 0
+            && self.round_dashes(line, outer, top, tc, td == Dash::Dotted)
+        {
+            return;
+        }
+        if let Some(outer) = round
             && tc == rc
             && rc == bc
             && bc == lc
@@ -622,6 +632,61 @@ impl Builder<'_> {
         if right > 0 {
             side(self, across(rd, IRect { x0: b.x1 - right, ..b }, IRect { x0: b.x1 - right, y0, y1, ..b }), false, right, rc, rd);
         }
+    }
+
+    /// The `dashed` or `dotted` border of a rounded box whose four sides are the same. As in Chrome, the dashes go along the whole
+    /// middle line of the border from the left end of the top side, clockwise, and a dash is cut square to the line. The pattern is
+    /// the one of `dashes`, with the gap chosen to close the loop. A round dot (a `dotted` border from 4 px up) is centered on its
+    /// place, a dash starts there. Gives false (nothing drawn) when the line is too short for one dash.
+    fn round_dashes(&mut self, line: bool, shape: Shape, width: i32, color: u32, dotted: bool) -> bool {
+        let w = width as f32;
+        let dots = dotted && width >= 4;
+        let (r, q) = (shape.r, shape.rad);
+        let h = w / 2.0;
+        let path = outline([r.x0 as f32 + h, r.y0 as f32 + h, r.x1 as f32 - h, r.y1 as f32 - h], q.map(|v| (v - h).max(0.0)));
+        let (dash, gap) = match () {
+            _ if dotted => (w, w),
+            _ if width >= 3 => (2.0 * w, w),
+            _ => (3.0 * w, 2.0 * w),
+        };
+        // Chrome counts the dashes with the length cut to a whole number (`SelectBestDashGap`, for a closed path).
+        let len = path.last().expect("an outline has points")[4].floor();
+        let low = (len / (dash + gap)).floor();
+        if low < 1.0 {
+            return false;
+        }
+        let gap_of = |n: f32| (len - n * dash) / n;
+        let (n, gap) = if gap_of(low + 1.0) <= 0.0 || (gap_of(low) - gap).abs() < (gap_of(low + 1.0) - gap).abs() { (low, gap_of(low)) } else { (low + 1.0, gap_of(low + 1.0)) };
+        let v = self.view;
+        let (vx0, vy0, vx1, vy1) = (v.x0 as f32 - w, v.y0 as f32 - w, v.x1 as f32 + w, v.y1 as f32 + w);
+        for k in 0..n as u32 {
+            let (a, z) = (k as f32 * (dash + gap), k as f32 * (dash + gap) + dash);
+            let at = self.list.points.len() as u32;
+            if dots {
+                let [x, y, ..] = sample(&path, a);
+                if x >= vx0 && x <= vx1 && y >= vy0 && y <= vy1 {
+                    self.list.points.push((x, y));
+                    self.push(line, Item::Stroke { at, n: 1, width: w, color });
+                }
+                continue;
+            }
+            let mut outer = vec![sample(&path, a)];
+            outer.extend(path.iter().filter(|p| p[4] > a && p[4] < z).copied());
+            outer.push(sample(&path, z));
+            // The box of the dash, and a dash outside the canvas is not made.
+            let (mut x0, mut y0, mut x1, mut y1) = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
+            for p in &outer {
+                (x0, y0, x1, y1) = (x0.min(p[0]), y0.min(p[1]), x1.max(p[0]), y1.max(p[1]));
+            }
+            if x1 + w < vx0 || x0 - w > vx1 || y1 + w < vy0 || y0 - w > vy1 {
+                continue;
+            }
+            self.list.points.extend(outer.iter().map(|p| (p[0] - h * p[2], p[1] - h * p[3])));
+            self.list.points.extend(outer.iter().rev().map(|p| (p[0] + h * p[2], p[1] + h * p[3])));
+            let n = self.list.points.len() as u32 - at;
+            self.push(line, Item::Poly { at, n, color });
+        }
+        true
     }
 
     /// A `dashed` or `dotted` side. The dashes are as Chrome sizes them (`StrokeData::SetupPaintDashPathEffect`): a dash is
@@ -926,6 +991,41 @@ fn needs_collapse(s: &str) -> bool {
 fn clips(style: &ComputedStyle) -> bool {
     let hidden = |p| !matches!(style.get(p), Value::Keyword(Keyword::Visible));
     hidden(Property::OverflowX) || hidden(Property::OverflowY)
+}
+
+/// The outline of a rounded rectangle `[x0, y0, x1, y1]` with the corner radii `q` (as `Shape::rad`), clockwise from the left end of the top
+/// side. A point is `[x, y, inward normal x, inward normal y, length of the outline up to it]`. The last point is the first one again.
+fn outline(r: [f32; 4], q: [f32; 8]) -> Vec<[f32; 5]> {
+    use std::f32::consts::{FRAC_PI_2, PI};
+    let [x0, y0, x1, y1] = r;
+    let mut out: Vec<[f32; 5]> = vec![[x0 + q[0], y0, 0.0, 1.0, 0.0]];
+    // The corners (center, radii, angle where the arc starts), clockwise from the top right.
+    let corners = [((x1 - q[2], y0 + q[3]), (q[2], q[3]), -FRAC_PI_2), ((x1 - q[4], y1 - q[5]), (q[4], q[5]), 0.0), ((x0 + q[6], y1 - q[7]), (q[6], q[7]), FRAC_PI_2), ((x0 + q[0], y0 + q[1]), (q[0], q[1]), PI)];
+    for ((cx, cy), (rx, ry), a0) in corners {
+        // A corner with no radius is one point, with the normal of the side that ends there and then of the side that starts.
+        let steps = if rx > 0.0 && ry > 0.0 { (rx.max(ry).ceil() as usize).clamp(2, 64) } else { 1 };
+        for k in 0..=steps {
+            let (s, c) = (a0 + FRAC_PI_2 * k as f32 / steps as f32).sin_cos();
+            let (u, v) = if rx > 0.0 && ry > 0.0 { (c / rx, s / ry) } else { (c, s) };
+            let l = u.hypot(v);
+            out.push([cx + rx * c, cy + ry * s, -u / l, -v / l, 0.0]);
+        }
+    }
+    out.push([x0 + q[0], y0, 0.0, 1.0, 0.0]);
+    let mut len = 0.0;
+    for i in 1..out.len() {
+        len += (out[i][0] - out[i - 1][0]).hypot(out[i][1] - out[i - 1][1]);
+        out[i][4] = len;
+    }
+    out
+}
+
+/// The point of `path` (see `outline`) at length `s` along it.
+fn sample(path: &[[f32; 5]], s: f32) -> [f32; 5] {
+    let i = path.partition_point(|p| p[4] <= s).clamp(1, path.len() - 1);
+    let (a, b) = (path[i - 1], path[i]);
+    let t = if b[4] > a[4] { ((s - a[4]) / (b[4] - a[4])).clamp(0.0, 1.0) } else { 0.0 };
+    [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t, a[3] + (b[3] - a[3]) * t, s]
 }
 
 fn border_box(f: &Fragment) -> IRect {

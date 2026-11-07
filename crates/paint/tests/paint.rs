@@ -570,3 +570,35 @@ fn the_svg_fixture() {
     // Against Chrome 155 at the same font: 1,010 of 320,000 pixels differ, 2 by more than 64 levels (the edge of a curve).
     assert_eq!(c.hash(), 0x733e_1aff_a0f8_b851);
 }
+
+#[test]
+fn a_rounded_dashed_or_dotted_border_follows_the_curve_in_dashes() {
+    // The dashes of a round border, counted along the middle line of the border. Chrome 155 draws 13 dashes on a circle of 80 px with a
+    // 6 px border, 14 round dots on a 8 px one, and the same on the corners of a rounded rectangle.
+    let runs = |style: &str, border: u32| {
+        let c = bare(&format!("<div style='width:80px;height:80px;box-sizing:border-box;border:{border}px {style} #000;border-radius:50%'></div>"));
+        let r = 40.0 - border as f32 / 2.0;
+        let on: Vec<bool> = (0..720).map(|k| {
+            let a = k as f32 * std::f32::consts::PI / 360.0;
+            c.pixel((40.0 + r * a.cos()) as u32, (40.0 + r * a.sin()) as u32) != WHITE
+        }).collect();
+        (on.iter().filter(|&&p| p).count(), (0..720).filter(|&k| on[k] && !on[(k + 719) % 720]).count())
+    };
+    let (ink, dashes) = runs("dashed", 6);
+    assert_eq!(dashes, 13);
+    assert!(ink > 720 / 2 && ink < 720 * 3 / 4, "two thirds of the line has ink: {ink}");
+    assert_eq!(runs("dotted", 8).1, 14);
+    assert_eq!(runs("solid", 6), (720, 0), "a solid border has no gap");
+    // A rounded rectangle: the straight sides have dashes too, and a corner is not a straight cut.
+    let c = bare("<div style='width:120px;height:80px;box-sizing:border-box;border:4px dashed #000;border-radius:30px'></div>");
+    let top: Vec<bool> = (30..90).map(|x| c.pixel(x, 2) != WHITE).collect();
+    assert!(top.contains(&true) && top.contains(&false), "dashes along the top");
+}
+
+#[test]
+fn the_round_borders_fixture() {
+    let c = render(fixture!("roundborders"));
+    // Against Chrome 155 (a picture of 400 by 800): 4,694 of 320,000 pixels differ, 1,239 by more than 64 levels (the ends of the dashes). Before the
+    // dashes followed the curve: 8,042 and 5,752.
+    assert_eq!(c.hash(), 0x84b5_d476_67ed_0167);
+}
