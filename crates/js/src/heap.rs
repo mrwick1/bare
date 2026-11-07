@@ -768,7 +768,7 @@ impl Heap {
             symbols: Slab::new(limits.max_symbols),
             bigs: Slab::new(limits.max_bigs),
             big_table: big::BigTable::new(),
-            interner: Interner { table: vec![0; 16], count: 0 },
+            interner: Interner { table: vec![0; 4096], count: 0 },
             bytes: 0,
             collections: 0,
             gray: Vec::new(),
@@ -917,16 +917,25 @@ impl Heap {
     }
 
     pub fn intern_str(&mut self, s: &str) -> R<StrId> {
-        let units = if s.is_ascii() { s.len() } else { s.encode_utf16().count() };
+        let ascii = s.is_ascii();
+        let units = if ascii { s.len() } else { s.encode_utf16().count() };
         if units > self.limits.max_string_units { return Err(HeapError::Limit(Limit::StringLength)); }
         if string_cost(units) > self.limits.max_bytes { return Err(HeapError::Limit(Limit::Bytes)); }
         // A short string is looked up from a stack buffer: only a new string allocates (V8 `StringTable::LookupKey`).
         if s.len() <= SHORT_UNITS {
             let mut buf = [0u16; SHORT_UNITS];
             let mut n = 0;
-            for u in s.encode_utf16() {
-                buf[n] = u;
-                n += 1;
+            if ascii {
+                // Each byte is one code unit: a plain widening copy, no UTF-8 decoding (the realm interns about 2,000 names).
+                for (d, &b) in buf.iter_mut().zip(s.as_bytes()) {
+                    *d = b as u16;
+                }
+                n = s.len();
+            } else {
+                for u in s.encode_utf16() {
+                    buf[n] = u;
+                    n += 1;
+                }
             }
             return self.intern(std::borrow::Cow::Borrowed(&buf[..n]));
         }

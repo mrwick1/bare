@@ -53,6 +53,9 @@ pub(super) const SHAPE_CAP: usize = 65_536;
 pub(super) const ROOT: u32 = 1;
 pub(super) const ROOT_ARRAY: u32 = 2;
 pub(super) const ROOT_EXOTIC: u32 = 3;
+/// The root of an exotic object whose own part answers only numeric keys (a buffer, a view, a text codec, a host list, a Number,
+/// Boolean or Symbol wrapper). The cache fills for its other keys.
+pub(super) const ROOT_PLAIN: u32 = 4;
 
 /// A table up to this long is searched by a scan; a longer one has a hash index.
 const SCAN_MAX: usize = 8;
@@ -121,7 +124,7 @@ impl Shapes {
             Table { entries: Vec::new(), index: OnceCell::new() },
             Table { entries: vec![Entry { key: length, slot: 0, attrs: A_W }], index: OnceCell::new() },
         ];
-        Shapes { shapes: vec![shape(0, 0), shape(0, 0), shape(1, 1), shape(0, 0)], tables, fn_shape: None }
+        Shapes { shapes: vec![shape(0, 0), shape(0, 0), shape(1, 1), shape(0, 0), shape(0, 0)], tables, fn_shape: None }
     }
 
     /// How many shapes exist (the sentinel and the three roots included).
@@ -640,7 +643,7 @@ impl Heap {
             return Ok(g);
         }
         // A receiver that is never cached (a proxy, a host object, a dictionary) skips the fill.
-        if self.objects.get(o.index, o.gn).is_some_and(|ob| ob.exotic != 0 || ob.dict.is_some() && !ob.fast_on_use) {
+        if self.objects.get(o.index, o.gn).is_some_and(|ob| ob.exotic > EXOTIC || ob.dict.is_some() && !ob.fast_on_use) {
             self.ic_stats.refused += 1;
             return self.get(o, key);
         }
@@ -709,7 +712,13 @@ impl Heap {
             self.make_fast(o);
         }
         let recv = self.obj(o)?;
-        if matches!(key, PropertyKey::Index(_)) || recv.dict.is_some() || recv.exotic != 0 || matches!(self.lazy, Some((_, kp, _)) if kp == key) {
+        if matches!(key, PropertyKey::Index(_)) || recv.dict.is_some() || matches!(self.lazy, Some((_, kp, _)) if kp == key) {
+            return Ok(None);
+        }
+        // A plain exotic object (`ROOT_PLAIN`) is ordinary for a key that is not numeric. The key of a site never changes, so one test
+        // at the fill is enough.
+        let plain = !matches!(key, PropertyKey::String(_)) || !super::binary::canonical_numeric(self, key);
+        if recv.exotic != 0 && !(recv.exotic == EXOTIC && plain) {
             return Ok(None);
         }
         let got = |attrs: u8, v: Value| if attrs & A_ACC != 0 { Get::Accessor { getter: obj_of(v) } } else { Get::Value(v) };
@@ -739,7 +748,7 @@ impl Heap {
                 self.make_fast(c);
             }
             let ob = self.obj(c)?;
-            if depth == u8::MAX || ob.exotic != 0 || on && ob.lazy & LAZY_CHAIN != 0 {
+            if depth == u8::MAX || ob.exotic != 0 && !(ob.exotic == EXOTIC && plain) || on && ob.lazy & LAZY_CHAIN != 0 {
                 return Ok(None);
             }
             depth += 1;
@@ -819,7 +828,7 @@ impl Heap {
         let want = loop {
             let Some(c) = cur else { break Get::Value(Value::Undefined) };
             let ob = self.obj(c).expect("a live chain");
-            assert!(ob.exotic == 0, "a cache hit through an exotic object");
+            assert!(ob.exotic <= EXOTIC, "a cache hit through a named, String or proxy object");
             if let Some(p) = self.own(ob, key) {
                 break get_of(p);
             }
@@ -1024,7 +1033,7 @@ mod tests {
     }
 
     #[test]
-    fn exotic_objects_and_dictionary_receivers_are_never_cached() {
+    fn proxies_numeric_keys_of_views_and_dictionary_receivers_are_never_cached() {
         let mut h = Heap::default();
         let (x, y) = (k(&mut h, "x"), k(&mut h, "y"));
         let target = h.new_object(None).unwrap();
@@ -1036,6 +1045,21 @@ mod tests {
         assert_eq!(h.get_ic(r, x, &mut ic).map(|_| ()), h.get(r, x).map(|_| ()), "the proxy answers, as for `get`");
         assert!(h.get(r, x).is_err());
         assert_eq!(delta(&h, s0), (0, 0, 1, 0));
+        // A view is cached for a named key, not for a canonical numeric string, which its own part answers.
+        let proto = h.new_object(None).unwrap();
+        setn(&mut h, proto, x, 7.0);
+        let buf = h.new_buffer(None, 8).unwrap();
+        let view = h.new_view(Some(proto), buf, 0, 8).unwrap();
+        let (s0, mut ic) = (h.ic_stats(), Ic::EMPTY);
+        assert_eq!(rnum(&mut h, view, x, &mut ic), Some(7.0));
+        assert_eq!(rnum(&mut h, view, x, &mut ic), Some(7.0));
+        assert_eq!(delta(&h, s0), (1, 1, 0, 0));
+        let half = k(&mut h, "1.5");
+        let (s0, mut ic) = (h.ic_stats(), Ic::EMPTY);
+        setn(&mut h, proto, half, 3.0);
+        assert_eq!(rnum(&mut h, view, half, &mut ic), None);
+        assert_eq!(rnum(&mut h, view, half, &mut ic), None);
+        assert_eq!(delta(&h, s0), (0, 0, 2, 1), "the new key of the flagged prototype bumps the epoch");
         // A receiver in dictionary mode.
         let d = h.new_dict_object(None).unwrap();
         setn(&mut h, d, x, 1.0);
@@ -1401,11 +1425,16 @@ mod tests {
         let handler = h.new_object(None).unwrap();
         let px = h.new_proxy(target, handler).unwrap();
         let named = h.new_named(None).unwrap();
+        let text = h.intern_str("ab").unwrap();
+        let sw = h.new_primitive(None, Value::String(text)).unwrap();
         let w = h.new_primitive(None, Value::Number(1.0)).unwrap();
         let buf = h.new_buffer(None, 4).unwrap();
         let idx = h.new_indexed(None).unwrap();
-        for o in [px, named, w, buf, idx] {
+        for o in [px, named, sw] {
             assert_eq!(shape_of(&h, o), ROOT_EXOTIC);
+        }
+        for o in [w, buf, idx] {
+            assert_eq!(shape_of(&h, o), ROOT_PLAIN);
         }
         // a property of one grows the exotic subtree, away from the ordinary roots
         let key = k(&mut h, "own");
@@ -1417,7 +1446,7 @@ mod tests {
         while h.shapes.parent(up) != 0 {
             up = h.shapes.parent(up);
         }
-        assert_eq!(up, ROOT_EXOTIC);
+        assert_eq!(up, ROOT_PLAIN);
         let o = h.new_object(None).unwrap();
         setn(&mut h, o, key, 1.0);
         assert_ne!(shape_of(&h, o), s);

@@ -244,7 +244,7 @@ pub(super) const DEFAULT_BUFFER_CAP: usize = 256 << 20;
 
 /// Is `key` a canonical numeric string that is not an array index (`"-0"`, `"1.5"`, `"NaN"`, `"4294967295"`)?
 /// On a view such a key is an invalid integer index.
-fn canonical_numeric(heap: &Heap, key: PropertyKey) -> bool {
+pub(super) fn canonical_numeric(heap: &Heap, key: PropertyKey) -> bool {
     let PropertyKey::String(s) = key else { return false };
     let Ok(u) = heap.str_units(s) else { return false };
     // Cheap filter: a canonical numeric string starts with a digit, `-`, `I` (Infinity) or `N` (NaN).
@@ -319,11 +319,12 @@ impl Heap {
     /// Allocate the object of an exotic payload. Nothing is allocated when it fails.
     pub(super) fn make_exotic(&mut self, proto: Option<ObjId>, ex: impl FnOnce() -> Exotic) -> R<ObjId> {
         let id = self.alloc_object(proto, false)?;
-        // An exotic object has its own root shape: no ordinary object shares a shape with it, and the cache fill refuses it (step A2).
+        // An exotic object has its own root shape: no ordinary object shares a shape with it (step A2). A kind whose own part answers
+        // only numeric keys (`ROOT_PLAIN`) is cached for other keys. A named object, a String wrapper and a proxy are never cached.
+        let ex = ex();
         let ob = self.objects.get_mut(id.index, id.gn).expect("fresh object");
         ob.exotic = EXOTIC;
-        ob.shape = shape::ROOT_EXOTIC;
-        let ex = ex();
+        ob.shape = if matches!(ex, Exotic::Named | Exotic::Proxy(_) | Exotic::Prim(Value::String(_))) { shape::ROOT_EXOTIC } else { shape::ROOT_PLAIN };
         if let Exotic::Buffer(v) = &ex {
             self.bytes += v.len();
             self.buffer_bytes += v.len();
