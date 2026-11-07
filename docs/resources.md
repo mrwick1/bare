@@ -4435,7 +4435,7 @@ Not tested: wall time; the rows at scale 100; `https_load`; the live staging pag
 
 Problem: after static scope resolution, a call still made an environment and declared each parameter and `var` in it, and each read of a local went through the environment chain. V8 keeps locals in registers and SpiderMonkey keeps a binding that no closure captures out of the environment object.
 
-Method: `perf record -e instructions:u` of the rows below on main and on the change. Cost rows: `tools/js/instr.sh` (minimum of 3 runs of `instructions:u`, large malloc cache), 566 rows (every `*_load` case at scale 1 and 10, except `regexp_load`), release build, each tree in its own `CARGO_TARGET_DIR` under `/data/bare-tmp`. The main tree is 8813927 (built in a separate worktree). A second run of the 566 rows used `LD_PRELOAD=libjemalloc.so.2`. Machine load average was high, so wall time is not a result.
+Method: `perf record -e instructions:u` of the rows below on main and on the change. Cost rows: `tools/js/instr.sh` (minimum of 3 runs of `instructions:u`, large malloc cache), 566 rows (every `*_load` case at scale 1 and 10, except `regexp_load`), release build, each tree in its own `CARGO_TARGET_DIR` under `/data/bare-tmp`. The main tree is b5ddaaf (built in a separate worktree). A second run of the 566 rows used `LD_PRELOAD=libjemalloc.so.2`. Machine load average was high, so wall time is not a result.
 
 Profile of main (self share of samples, by function group; inlining moves cost between symbols, so read the groups, not one symbol): name functions (`get_name`, `assign_name`, `find_in`, `lookup`, the global object lookup) 10.3% of `eval_load calls`, 9.9% of `closures`, 6.2% of `fib`, 5.7% of `webpack`, 10.7% of `select_load react 1000`, 7.2% of `loop`, 3.8% of `session_load chain`. Environment functions (`new_env`, `free_env`, `release`, `env_declare`, `declare_var`, `declare_scope`, `capture`) 6.0% of `calls`, 3.6% of `closures`, 8.6% of `fib`, 2.1% of `webpack`. `loop`, `react` and `chain` run in the top-level script or in host code, so they have none. The environment arena (a free list of environments) is already cheap, so the cost is the work in each call: declaring each binding and reading it through a hop count. Skipping the environment object alone would have saved at most that share.
 
@@ -4445,37 +4445,39 @@ Instructions (`tools/js/instr.sh`, glibc, main and this change):
 
 | Row | main | this change | change |
 | --- | ---: | ----------: | -----: |
-| `eval_load fib 10` | 251,760,582 | 230,553,729 | -8.4% |
-| `eval_load calls 10` | 4,986,131,808 | 4,674,137,045 | -6.3% |
-| `eval_load objects 10` | 2,865,278,132 | 2,818,755,075 | -1.6% |
-| `eval_load closures 10` | 914,849,825 | 904,102,751 | -1.2% |
-| `eval_load webpack 10` | 48,910,772 | 48,345,066 | -1.2% |
-| `eval_load loop 10` | 6,513,908,589 | 6,509,908,874 | -0.06% |
-| `scripts_load few 1` | 17,954,942 | 17,973,464 | +0.10% |
-| `scripts_load few 10` | 146,575,155 | 146,691,326 | +0.08% |
-| `scripts_load many 10` | 78,642,428 | 78,697,324 | +0.07% |
-| `class_load accessors 10` | 2,975,552,217 | 2,979,553,888 | +0.13% |
-| `class_load super 10` | 2,109,457,213 | 2,113,458,778 | +0.19% |
-| `class_load construct 10` | 2,135,257,269 | 2,142,859,146 | +0.36% |
-| `gen_load forof 10` | 355,699,997 | 357,401,329 | +0.48% (worst) |
+| `eval_load fib 10` | 251,158,174 | 229,956,355 | -8.4% |
+| `eval_load calls 10` | 4,985,534,143 | 4,673,538,525 | -6.3% |
+| `eval_load objects 10` | 2,842,596,575 | 2,796,240,862 | -1.6% |
+| `eval_load closures 10` | 836,198,300 | 825,602,464 | -1.3% |
+| `eval_load webpack 10` | 45,722,548 | 45,167,731 | -1.2% |
+| `eval_load loop 10` | 6,513,311,665 | 6,509,314,172 | -0.06% |
+| `scripts_load few 1` | 16,529,989 | 16,537,200 | +0.04% |
+| `scripts_load few 10` | 137,562,701 | 137,691,615 | +0.09% |
+| `scripts_load many 10` | 74,833,645 | 74,884,855 | +0.07% |
+| `class_load accessors 10` | 2,974,943,552 | 2,978,945,733 | +0.13% |
+| `class_load super 10` | 2,108,848,610 | 2,112,852,004 | +0.19% |
+| `class_load construct 10` | 2,134,664,250 | 2,142,262,947 | +0.36% |
+| `gen_load forof 10` | 355,117,634 | 356,819,889 | +0.48% (worst but two) |
+| `numeric_load encodeuri 10000` | 190,281,752 | 191,928,892 | +0.87% (worst, see below) |
+| `numeric_load encodeuri 1000` | 23,914,594 | 24,078,156 | +0.68% |
 
-The best rows are `arrobj_load tosorted 10` (-10.5%), `sort 10` (-9.6%), `proxy_load reactive 10` (-9.6%), `proxy_load array_mapfilter 10` (-7.5%) and `scripts_load cross 10` (-7.5%). The `loop` row runs in the top-level script, which has no frame. The `closures` and `webpack` rows are mostly functions with an inner function. They keep their environment, so they gain about 1%.
+The best rows are `arrobj_load tosorted 10` (-10.6%), `sort 10` (-9.7%), `proxy_load reactive 10` (-9.6%), `proxy_load array_mapfilter 10` (-7.5%) and `scripts_load cross 10` (-7.6%). The `loop` row runs in the top-level script, which has no frame. The `closures` and `webpack` rows are mostly functions with an inner function. They keep their environment, so they gain about 1%.
 
-Cost rule, glibc: 566 rows, 341 lower, 146 lower by more than 0.5%, median -0.019%, none over +0.5%, twelve over +0.3%.
+Cost rule, glibc: 566 rows, 295 lower, 148 lower by more than 0.5%, median -0.008%, two over +0.5% (`numeric_load encodeuri 10000` +0.87% and `1000` +0.68%, see below), seventeen over +0.3%.
 
-Cost rule, jemalloc: 566 rows, 355 lower, 142 lower by more than 0.5%, median -0.021%, none over +0.5%, eleven over +0.3% (worst `gen_load forof 10` +0.47%, `interact_load supercalls 10` +0.41%, `gen_load spread 10` +0.41%).
+Cost rule, jemalloc: 566 rows, 306 lower, 141 lower by more than 0.5%, median -0.010%, none over +0.5%, thirteen over +0.3% (worst `gen_load forof 10` +0.47%, `interact_load supercalls 10` +0.41%, `gen_load spread 10` +0.41%). The two `encodeuri` rows are -0.03% and -0.02%. No row is over +0.5% with both allocators.
 
 The generator and async rows. `gen_load forof` and `spread`, `async_load nested` and `interact_load supercalls` cost +0.3% to +0.5% in every build of this change (10 to 20 instructions for each resume of a generator or an async function). Their loops run no new code. Tests with a scratch build, `gen_load forof 10`, from +0.56%: the frame branch of `find_name_fast` out of the function +0.42% (and `fib 10` loses 2%); the pattern binding as in main +0.45%; `fr_tdz` and the pattern binding out of line, and no frame code unless a frame function exists (`fr_any`) +0.48% (kept: `fib` and `calls` do not change); the code of `eval_statements.rs` as in main +0.56%; the new fields of `Interp`, the scope tables and environment 1 added to main, and nothing else, 0.00%. So no one part costs it. `get_name` is 138 bytes larger and `machine` 435 bytes larger. Hypothesis: inlining and register use in the large functions. To verify: a build of main with the same functions marked `#[inline(never)]`. Not done.
 
-The `numeric_load encodeuri` rows in an earlier build of this change. They were +0.73% (`10000`) and +0.53% (`1000`) with jemalloc and +0.02% with glibc, and in the final build they are -0.18% and -0.12%. The difference was the same for each iteration (153 instructions, at n = 1,000, 10,000 and 1,000,000), it did not depend on the first allocations of the process (a 8 to 1,000 byte block taken at load changed nothing), and a no-op change in `fr_gate` moved it by 0.007%. A small `LD_PRELOAD` library before jemalloc added up the instructions that a thread spends in `malloc`, `calloc`, `realloc`, `free`, `memcpy`, `memmove`, `memcmp` and `bcmp` (read from a `perf_event_open` counter around each call). Calls and instructions were the same on both builds, except `bcmp`: 381,917 calls on both, 33,363,016 and 34,863,269 instructions (the allocator: 60.63 and 60.61 million). Of those calls, 360,036 compare two bytes: one UTF-16 unit (36 for each iteration). A compare of two bytes cost 14 instructions on every call in the main build. In the change it cost 14, 18 or 20, by the low bits of the address of the first argument (the counter read adds 74 to each number). To verify: the caller is `Heap::intern` (its samples are the top symbol on both builds), and the longer path is the page-cross path of the vector load in glibc `bcmp`, for a string box in the last 32 bytes of a 4 KiB page. jemalloc puts the boxes at addresses that depend on all earlier allocations. So these rows move with the address of data, and any change to the setup allocations can move them. A fix that does not depend on addresses (compare short strings inline in `Heap::intern`, which saves about 10 instructions for each compare) is a separate change. It was not made.
+The `numeric_load encodeuri` rows. In one build of this change they were +0.73% (`10000`) and +0.53% (`1000`) with jemalloc and +0.02% with glibc. In the next build they were -0.18% and -0.12% with jemalloc. In the final build (main b5ddaaf) they are +0.87% and +0.68% with glibc and -0.03% and -0.02% with jemalloc. The same count in the final build with glibc: `bcmp` 33,363,312 and 34,563,268 instructions for 381,917 calls, `malloc`, `realloc`, `free` and `memcpy` the same. The difference was the same for each iteration (153 instructions, at n = 1,000, 10,000 and 1,000,000), it did not depend on the first allocations of the process (a 8 to 1,000 byte block taken at load changed nothing), and a no-op change in `fr_gate` moved it by 0.007%. A small `LD_PRELOAD` library before jemalloc added up the instructions that a thread spends in `malloc`, `calloc`, `realloc`, `free`, `memcpy`, `memmove`, `memcmp` and `bcmp` (read from a `perf_event_open` counter around each call). Calls and instructions were the same on both builds, except `bcmp`: 381,917 calls on both, 33,363,016 and 34,863,269 instructions (the allocator: 60.63 and 60.61 million). Of those calls, 360,036 compare two bytes: one UTF-16 unit (36 for each iteration). A compare of two bytes cost 14 instructions on every call in the main build. In the change it cost 14, 18 or 20, by the low bits of the address of the first argument (the counter read adds 74 to each number). To verify: the caller is `Heap::intern` (its samples are the top symbol on both builds), and the longer path is the page-cross path of the vector load in glibc `bcmp`, for a string box in the last 32 bytes of a 4 KiB page. jemalloc puts the boxes at addresses that depend on all earlier allocations. So these rows move with the address of data, and any change to the setup allocations can move them. A fix that does not depend on addresses (compare short strings inline in `Heap::intern`, which saves about 10 instructions for each compare) is a separate change. It was not made.
 
 Order of the work on the rows that were over in the first version, in `few 1`, `few 10`, `many 10` and `class_load` (glibc, change against main): first version +0.70, +0.81, +0.58, +0.50; classification moved to the second call, class members out of the check, flags in the walk +0.43, +0.47, —, +0.23; no `Rc` clone for the leaf nodes of the walk +0.11, +0.09, +0.08, +0.23. Variants tried and dropped: a separate function for the call of a frame function (lost about 1% of the gain of `fib` and `calls`, and `few` was worse); the same `Rc` change in `w_stmt_inner` (`few 10` +0.92%, layout).
 
 Memory (peak RSS, program report, minimum of 7 runs, main and this change, MiB): `scripts_load few 1` 5.6 and 5.6, `few 10` 12.9 and 13.1, `many 1` 5.1 and 5.2, `many 10` 9.4 and 9.5, `class_load accessors 10` 4.6 and 4.6, `super 10` 4.6 and 4.7, `eval_load calls 10` 4.6 and 4.7, `fib 10` 4.6 and 4.7, `closures 10` 37.4 and 37.6, `webpack 10` 6.6 and 6.8. The cause is metadata for each function. `FScope` has 8 bytes more (the flags, the state, the first scope, the template) and `RScope` has 12 bytes more (`frame`, `base`, `func`) for each scope. `peak_live` of `few 10` goes from 8.3 to 8.5 MiB and of `many 10` from 4.4 to 4.5 MiB, with 5,463 and 2,463 functions, so about 38 bytes for each function. The binary text is 13.6 KiB larger. Not cut: merging `frame` into `base` saves 4 bytes for each scope (about 55 KiB for `few 10`), and a code layout change moves the cost rows by more than that gain. These figures are from an earlier build of this change.
 
-Tests: see [progress.md](progress.md#frame-slots-for-leaf-functions). `tools/js/*_check.sh`: see the result in the pull request.
+Tests: see [progress.md](progress.md#frame-slots-for-leaf-functions). 40 of the 41 `tools/js/*_check.sh` scripts match Node (`parse_check.sh` needs the `acorn` package, which is not installed). `cargo test --workspace` passes in a debug build (2,689 tests).
 
-Not tested: wall time (the machine was loaded); the rows at scale 100; `regexp_load` (no evaluator code); `parse_check.sh`; the live staging pages; an inline compare in `Heap::intern` (not made); the cause of the generator rows.
+Not tested: wall time (the machine was loaded); a build of the final tree with a fix for the `bcmp` rows; the rows at scale 100; `regexp_load` (no evaluator code); `parse_check.sh`; the live staging pages; an inline compare in `Heap::intern` (not made); the cause of the generator rows.
 
 ## Cost of one typed key on a React form
 
