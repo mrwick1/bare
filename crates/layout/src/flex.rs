@@ -443,7 +443,7 @@ fn flex(items: &mut [Item], size: f32, gap: f32) {
             it.main = clamped;
         }
         for (it, &v) in items.iter_mut().zip(&violations) {
-            if !it.frozen && (!(total.abs() >= 0.001) || (total > 0.0 && v > 0.0) || (total < 0.0 && v < 0.0)) {
+            if !it.frozen && (total.abs() < 0.001 || total.is_nan() || (total > 0.0 && v > 0.0) || (total < 0.0 && v < 0.0)) {
                 it.frozen = true;
             }
         }
