@@ -23,7 +23,7 @@
 
 use bare_html::dom::{Atom, Document, NodeData, NodeId};
 
-use crate::selector::{AttrTest, Case, Combinator, Compound, Nth, Selector, Simple};
+use crate::selector::{AttrTest, Case, Combinator, Compound, Nth, Selector, Simple, User};
 
 /// Does `selector` match the element `el`? `el` must be an element of `doc`, and the selector must be
 /// parsed for `doc`. For any other node, it gives `false`.
@@ -102,6 +102,20 @@ fn compound_matches(doc: &Document, el: NodeId, simples: &[Simple]) -> bool {
     simples.iter().all(|s| simple_matches(doc, el, s))
 }
 
+/// The user action pseudo-classes. Out of line and cold: they are rare, and a hot call here slows every other simple selector.
+#[cold]
+#[inline(never)]
+fn user_matches(doc: &Document, el: NodeId, u: User) -> bool {
+    let user = doc.user();
+    match u {
+        User::Hover => doc.in_chain(el, user.hover),
+        User::Active => doc.in_chain(el, user.active),
+        User::Focus => user.focus == Some(el),
+        User::FocusWithin => doc.in_chain(el, user.focus),
+        User::FocusVisible => user.focus_visible && user.focus == Some(el),
+    }
+}
+
 fn simple_matches(doc: &Document, el: NodeId, simple: &Simple) -> bool {
     let &NodeData::Element { name, attrs } = doc.data(el) else { return false };
     match simple {
@@ -124,12 +138,8 @@ fn simple_matches(doc: &Document, el: NodeId, simple: &Simple) -> bool {
         Simple::Defined => doc.is_defined(el),
         Simple::State(s) => doc.states(el).iter().any(|t| t == s),
         Simple::Form(f) => crate::form::matches(doc, el, *f),
+        Simple::User(u) => user_matches(doc, el, *u),
         Simple::Never => false,
-        Simple::Hover => doc.user().hover.contains(&el),
-        Simple::Active => doc.user().active.contains(&el),
-        Simple::Focus => doc.user().focus.first() == Some(&el),
-        Simple::FocusWithin => doc.user().focus.contains(&el),
-        Simple::FocusVisible => doc.user().focus_visible && doc.user().focus.first() == Some(&el),
         Simple::Is(args) => args.iter().any(|simples| compound_matches(doc, el, simples)),
         Simple::Not(args) => !args.iter().any(|simples| compound_matches(doc, el, simples)),
     }

@@ -250,16 +250,17 @@ pub struct Document {
     // What the user points at, presses and focuses: the user action pseudo-classes. See `user`.
 }
 
-/// The elements that the user action pseudo-classes match. The host sets them (`Document::set_hover` and the others).
-/// Each chain holds the element and its shadow-including ancestors, the element first.
+/// The elements that the user action pseudo-classes start from. The host sets them (`Document::set_hover` and the others). A set
+/// is O(1): a selector that reads the state walks up from the element (`Document::in_chain`). It costs the same as a scan of a
+/// stored chain, and it follows a node that moved.
 #[derive(Debug, Default, Clone, PartialEq)]
 pub struct UserState {
-    /// `:hover`: the element under the pointer and its ancestors.
-    pub hover: Vec<NodeId>,
-    /// `:active`: the element that the primary button pressed and its ancestors, while the button is down.
-    pub active: Vec<NodeId>,
-    /// `:focus` is the first one, `:focus-within` all of them.
-    pub focus: Vec<NodeId>,
+    /// `:hover`: the element under the pointer. It and its ancestors match.
+    pub hover: Option<NodeId>,
+    /// `:active`: the element that the primary button pressed, while the button is down. It and its ancestors match.
+    pub active: Option<NodeId>,
+    /// `:focus` matches the focused element, `:focus-within` it and its ancestors.
+    pub focus: Option<NodeId>,
     /// `:focus-visible`: the focused element shows a focus ring.
     pub focus_visible: bool,
     /// Moves at each change of `hover`, `active` and the focus pair, in that order. A host that keeps styles checks them.
@@ -492,37 +493,46 @@ impl Document {
         &self.user
     }
 
-    /// The element and its shadow-including ancestors.
-    fn chain(&self, n: Option<NodeId>) -> Vec<NodeId> {
-        std::iter::successors(n, |&c| self.parent_or_host(c)).filter(|&c| matches!(self.nodes[c.index()].data, NodeData::Element { .. })).collect()
+    /// Is `el` the node `from` or one of its shadow-including ancestors?
+    pub fn in_chain(&self, el: NodeId, from: Option<NodeId>) -> bool {
+        let mut cur = from;
+        while let Some(c) = cur {
+            if c == el {
+                return true;
+            }
+            let node = &self.nodes[c.index()];
+            // Only a shadow root has a host: the other nodes with no parent skip the map.
+            cur = node.parent.or_else(|| if matches!(node.data, NodeData::ShadowRoot) { self.shadow_host(c) } else { None });
+        }
+        false
     }
 
     /// The pointer is over `n` now. Gives whether `:hover` matches other elements now.
     pub fn set_hover(&mut self, n: Option<NodeId>) -> bool {
-        if self.user.hover.first().copied() == n {
+        if self.user.hover == n {
             return false;
         }
-        self.user.hover = self.chain(n);
+        self.user.hover = n;
         self.user.revision[0] += 1;
         true
     }
 
     /// The primary button pressed `n` (`None`: it went up). Gives whether `:active` matches other elements now.
     pub fn set_active(&mut self, n: Option<NodeId>) -> bool {
-        if self.user.active.first().copied() == n {
+        if self.user.active == n {
             return false;
         }
-        self.user.active = self.chain(n);
+        self.user.active = n;
         self.user.revision[1] += 1;
         true
     }
 
     /// `n` has the focus now, and `visible` says whether it shows a focus ring. Gives whether a focus pseudo-class matches other elements now.
     pub fn set_focus(&mut self, n: Option<NodeId>, visible: bool) -> bool {
-        if self.user.focus.first().copied() == n && self.user.focus_visible == visible {
+        if self.user.focus == n && self.user.focus_visible == visible {
             return false;
         }
-        self.user.focus = self.chain(n);
+        self.user.focus = n;
         self.user.focus_visible = visible;
         self.user.revision[2] += 1;
         true

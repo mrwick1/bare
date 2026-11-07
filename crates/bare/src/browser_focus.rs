@@ -156,8 +156,9 @@ impl Dom {
         };
         // `:focus-visible` (Chrome): a text field always shows its ring; another element only after a key or a script, not after a press.
         let mut doc = self.doc.borrow_mut();
-        let text = n.is_some_and(|n| doc.is_html(n, "textarea") || (doc.is_html(n, "input") && matches!(crate::browser_dom::input_kind(&doc, n), "text" | "search" | "tel" | "url" | "email" | "password" | "number")));
-        doc.set_focus(n, text || !by_pointer);
+        let text = |n: NodeId| doc.is_html(n, "textarea") || (doc.is_html(n, "input") && matches!(crate::browser_dom::input_kind(&doc, n), "text" | "search" | "tel" | "url" | "email" | "password" | "number"));
+        let visible = !by_pointer || n.is_some_and(text);
+        doc.set_focus(n, visible);
     }
 
     fn epoch(&self) -> u64 {
