@@ -389,7 +389,7 @@ impl<'p> Interp<'p> {
     }
 
     /// Forget the regexps of dead objects and every cached string handle (called by `collect`, before `Heap::collect`).
-    fn ext_prune(&mut self, seen: &FxSet<ObjId>) {
+    fn ext_prune(&mut self, seen: &Seen) {
         self.ext.regexps.retain(|o, _| seen.contains(o));
         self.ext.cache.clear();
     }

@@ -20,7 +20,6 @@ use bare_js::eval::Interp;
 use bare_js::heap::PropertyDescriptor;
 use bare_js::value::{ObjId, PropertyKey, Value};
 use std::cell::{Cell, RefCell};
-use std::collections::HashMap;
 
 type V = R<Value>;
 
@@ -54,8 +53,8 @@ impl Sig {
 
 #[derive(Default)]
 pub(crate) struct Tables {
-    pub(crate) sigs: HashMap<ObjId, Sig>,
-    ctls: HashMap<ObjId, ObjId>,
+    pub(crate) sigs: IdMap<ObjId, Sig>,
+    ctls: IdMap<ObjId, ObjId>,
 }
 
 #[derive(Default)]

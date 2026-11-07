@@ -288,7 +288,7 @@ impl<'p> Interp<'p> {
 
     /// When the mark work is empty: queue the resolve and reject functions of every reached capability promise that are not reached yet.
     /// `true` if it queued any, so the mark must go on. Done here, not for each object, so a realm without capabilities pays nothing.
-    fn caps_trace(&self, seen: &FxSet<ObjId>, work: &mut Vec<Value>) -> bool {
+    fn caps_trace(&self, seen: &Seen, work: &mut Vec<Value>) -> bool {
         let n = work.len();
         for (&o, &(res, rej)) in &self.promise.caps {
             if seen.contains(&o) {
@@ -311,7 +311,7 @@ impl<'p> Interp<'p> {
     }
 
     /// Drop the metadata of promises that `collect` did not reach, and of finished resolving pairs.
-    fn promise_prune(&mut self, seen: &FxSet<ObjId>) {
+    fn promise_prune(&mut self, seen: &Seen) {
         self.promise.map.retain(|o, _| seen.contains(o));
         self.promise.caps.retain(|o, _| seen.contains(o));
         self.promise.reactions = self.promise.map.values().map(|d| d.reactions.len()).sum();

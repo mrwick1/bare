@@ -235,7 +235,7 @@ fn collect_keeps_what_roots_reach_and_frees_the_rest() {
 /// `gc_due` is the host's safe-point question: has the heap grown to half as large again as the previous collect left (past 8 MiB accounted)?
 /// A small heap, a call in progress or a collect that just ran all answer no.
 #[test]
-fn gc_is_due_when_the_heap_has_grown_by_half_since_the_last_collect() {
+fn gc_is_due_when_the_heap_has_grown_by_three_quarters_since_the_last_collect() {
     big(|| {
         let prog = parse_script("var keep = []; function churn(n) { var t = []; for (var i = 0; i < n; i++) t.push({ a: i, b: [i], c: 'x' + i }); return t.length; }", Limits::default()).unwrap();
         let mut it = setup(&prog, EvalLimits { max_steps: u64::MAX / 2, ..Default::default() });
@@ -259,12 +259,12 @@ fn gc_is_due_when_the_heap_has_grown_by_half_since_the_last_collect() {
         it.collect(&[]).unwrap();
         let live = it.heap.used_bytes();
         assert!(live > 5 << 20, "{live}");
-        let limit = (8usize << 20).max(live + live / 2);
+        let limit = (8usize << 20).max(live / 4 * 7);
         while !it.gc_due() {
             it.heap.new_object(None).unwrap();
         }
         let used = it.heap.used_bytes();
-        assert!(used > limit && used < limit + 1000, "due at {used}, the limit is {limit} (1.5 x {live}, or the floor)");
+        assert!(used > limit && used < limit + 1000, "due at {used}, the limit is {limit} (1.75 x {live}, or the floor)");
     });
 }
 

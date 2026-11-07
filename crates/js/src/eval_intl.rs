@@ -301,7 +301,7 @@ impl<'p> Interp<'p> {
         }
     }
 
-    fn intl_prune(&mut self, seen: &FxSet<ObjId>) {
+    fn intl_prune(&mut self, seen: &Seen) {
         self.intl.dtfs.retain(|o, _| seen.contains(o));
         self.intl.nfs.retain(|o, _| seen.contains(o));
         self.intl.colls.retain(|o, _| seen.contains(o));

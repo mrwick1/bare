@@ -306,7 +306,7 @@ impl<'p> Interp<'p> {
     }
 
     /// Drop the entries of dead generator objects. Their environments are freed by `collect`.
-    fn gen_prune(&mut self, seen: &FxSet<ObjId>) {
+    fn gen_prune(&mut self, seen: &Seen) {
         let (mut frames, mut slots) = (0, 0);
         self.aw.gens.retain(|o, g| {
             let keep = seen.contains(o);

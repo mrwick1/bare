@@ -321,13 +321,30 @@ The engine makes no request for the media. Chrome asks the server (a range reque
 
 Consequences: an element that the parser makes with a `src` does not load until the page calls `load()` or `play()` (the tree builder has no hook). `<source>` children are not read. The globals are lazy accessors (`browser_lazy.rs`), so a page without media pays six accessor functions.
 
-## The heap collects when it has grown by half
+## The heap collects when it has grown by three quarters
 
 Problem: no collection ran inside one driver call. Typing 50 keys into the React form took the process to 214 MiB.
 
-Decision: `Interp::gc_due` is true, at the end of a driver call and in each loader round, when the accounted heap is above `max(8 MiB, 1.5 x the heap left by the last collect)`. The numbers follow QuickJS (1.5 x) and SpiderMonkey (low-frequency growth of 150%). Sweep on this page with 30 keys (before the property room change, floor 1 or 4 MiB): factor 2.0 gave a peak RSS of 42.8 MiB and 11 collects, 1.5 gave 35.4 MiB and 19, 1.25 gave 31.2 MiB and 34, 1.1 gave 31.3 MiB and 34. Factor 1.25 saves 4 MiB and makes 79% more collects, so 1.5 is the knee. The floor of 8 MiB was not swept.
+Decision: `Interp::gc_due` is true, at the end of a driver call and in each loader round, when the accounted heap is above `max(8 MiB, 1.75 x the heap left by the last collect)`. The first version used 1.5 (QuickJS and SpiderMonkey use 1.5).
 
-Cost: one key into the page costs +3.6% instructions (443.5 M to 459.4 M; the same under jemalloc). Each collect takes 8 to 11 ms. 27 collects ran in 50 keys, and a key takes 70 to 85 ms. The page falls from 214 MiB to 33 MiB at 50 keys, and it stays flat. The cost is accepted: a page that is typed into for minutes cannot grow without bound, and no `*_load` row is worse than +0.5% with jemalloc.
+Sweep (`type_load` on `tools/js/typing`, main 3018876 plus the cheaper collect, `instructions:u` of one run, cost of a key from the difference of 50 keys and 0 keys, peak RSS from `getrusage`; the rows with no collect at all cost 410.7 M and 190 MiB at 50 keys):
+
+| Factor | Floor | Instructions for each key | Peak RSS, 20 keys | Peak RSS, 50 keys |
+| -----: | ----: | ------------------------: | ----------------: | ----------------: |
+| 1.50   | 8 MiB  | 417.8 M | 33.1 MiB | 33.1 MiB |
+| 1.50   | 12 MiB | 413.4 M | 36.2 MiB | 36.2 MiB |
+| **1.75** | **8 MiB** | **413.3 M** | **36.3 MiB** | **36.1 MiB** |
+| 1.75   | 12 MiB | 413.4 M | 36.1 MiB | 36.3 MiB |
+| 2.00   | 8 MiB  | 411.0 M | 39.5 MiB | 41.2 MiB |
+| 2.00   | 12 MiB | 411.1 M | 39.0 MiB | 40.7 MiB |
+| 2.50   | 8 MiB  | 408.8 M | 46.3 MiB | 46.6 MiB |
+| 2.50   | 12 MiB | 408.9 M | 47.0 MiB | 46.6 MiB |
+
+An earlier sweep on the same page, before the frame slots, gave the same order with 1.25 to 3.0 and floors of 8 to 24 MiB (floor 16 MiB: 42 to 44 MiB; floor 24 MiB: 56 MiB; factor 1.25 with floor 8 MiB: 455 M against 441 M for 1.5).
+
+Why 1.75 and 8 MiB: the live heap of this page is 5.4 to 6.8 MiB, so the factor sets the limit (9.5 to 11.9 MiB) and the floor does not. Factor 1.75 costs 4.5 M instructions for each key less than 1.5 (-1.1%) for 3 MiB of RSS, and keeps the process under 40 MiB. Factor 2.0 saves 2.3 M more (-0.5%) but the peak goes to 41 MiB. The floor stays at 8 MiB: a page with a small live heap must not collect before it has made 8 MiB of garbage, and no floor between 8 and 12 MiB changes the result on this page. The RSS steps are not smooth because a collect happens at whole keys.
+
+Cost: a key now costs 0.6% more than with no collect (413.3 M against 410.7 M). The first version cost 3.6%. The cheaper collect (a slot table for the reached objects, a cheap hash for the host maps that `trace` reads) halved the cost of each collect: 29.1 M to 13.5 M instructions for each key at the same trigger.
 
 Not collected inside a call: the collect needs depth 0 and no statement frames, so a long synchronous script still keeps its garbage until it returns. The event cap and the loader rounds are its collect points.
 

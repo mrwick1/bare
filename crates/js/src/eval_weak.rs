@@ -134,7 +134,7 @@ impl<'p> Interp<'p> {
     }
 
     /// Called when the collector has just marked `o`. Gives the work list the values `o` now makes reachable.
-    fn weak_trace(&self, o: ObjId, seen: &FxSet<ObjId>, pending: &mut FxMap<ObjId, Vec<Value>>, work: &mut Vec<Value>) {
+    fn weak_trace(&self, o: ObjId, seen: &Seen, pending: &mut FxMap<ObjId, Vec<Value>>, work: &mut Vec<Value>) {
         // A reachable registry keeps its callback and the held values of all its cells (also of dead ones).
         if !self.weak.regs.is_empty()
             && let Some(r) = self.weak.regs.get(&o)
@@ -161,7 +161,7 @@ impl<'p> Interp<'p> {
     }
 
     /// Drop unreachable collections and the entries whose key was not marked.
-    fn weak_prune(&mut self, seen: &FxSet<ObjId>) {
+    fn weak_prune(&mut self, seen: &Seen) {
         let w = &mut self.weak;
         w.colls.retain(|o, _| seen.contains(o));
         w.refs.retain(|o, t| {

@@ -159,7 +159,7 @@ pub(crate) struct Built {
 #[derive(Default)]
 pub(crate) struct Computed {
     lim: Cell<ComputedLimits>,
-    objs: RefCell<HashMap<ObjId, NodeId>>,
+    objs: RefCell<IdMap<ObjId, NodeId>>,
     proto: OnceCell<ObjId>,
     fixed: RefCell<Vec<ObjId>>,
     ext: RefCell<HashMap<String, Vec<SheetPart>>>,
