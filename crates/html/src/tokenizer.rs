@@ -170,6 +170,12 @@ impl<'a> Tokens<'a> {
     pub fn mark(&self) -> Mark {
         self.mark
     }
+
+    /// No read token waits to be given out, so `mark` is just after the last token given out. A reader that stops here and starts
+    /// again at `mark` misses no token.
+    pub fn between(&self) -> bool {
+        self.tokens.is_empty()
+    }
 }
 
 /// The states we use. Each one has the same name as a state in the standard.

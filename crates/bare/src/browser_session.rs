@@ -53,7 +53,7 @@
 
 use crate::browser::{Browser, BrowserLimits};
 use crate::browser_fetch::FetchLimits;
-use crate::browser_loader::{Input, PageConfig, PageLimits, PageResult, Stop, deadline_after, label};
+use crate::browser_loader::{Input, PageConfig, PageLimits, PageResult, SLICE, Scan, Stop, deadline_after, label};
 use crate::browser_navigation::{Body, NavLimits, NavigationKind, WebStorage};
 use bare_html::{encoding, tree};
 use bare_js::eval::EvalLimits;
@@ -194,6 +194,44 @@ pub struct Session {
     client: Option<Client>,
     /// Live: the next document, while a worker downloads it. The old document stays until it is in.
     loading: Option<(Next, Task<Result<(String, String), String>>)>,
+    /// Live: the next document after its download, while turns parse it. The old document stays until the parse is done.
+    parsing: Option<Box<Parsing>>,
+}
+
+/// Live: a downloaded document that turns parse in slices (`step`), as a browser does. No script runs before the whole tree is built (the
+/// loader keeps its pre-parsed model), so the tree, the order of the scripts and the events are those of `tree::parse`.
+struct Parsing {
+    next: Next,
+    url: String,
+    html: String,
+    /// Bytes of `html` given to the parser.
+    at: usize,
+    parser: tree::Parser,
+    /// Starts the downloads of the scripts and sheets ahead of the parser.
+    scan: Scan,
+}
+
+/// The text that one parse step feeds. A step costs well under a millisecond, so a turn ends close to the end of its slice.
+const CHUNK: usize = 16 << 10;
+
+impl Parsing {
+    /// Scan ahead for half of the time that is left, then parse until `end`. True: the parser has the whole text.
+    fn step(&mut self, end: Instant) -> bool {
+        let now = Instant::now();
+        self.scan.step(&self.html, now + end.saturating_duration_since(now) / 2);
+        while self.at < self.html.len() {
+            let mut cut = (self.at + CHUNK).min(self.html.len());
+            while !self.html.is_char_boundary(cut) {
+                cut += 1;
+            }
+            self.parser.feed(&self.html[self.at..cut]);
+            self.at = cut;
+            if Instant::now() >= end {
+                break;
+            }
+        }
+        self.at == self.html.len()
+    }
 }
 
 #[derive(Default)]
@@ -284,10 +322,24 @@ fn load_document(client: &mut Client, url: &str, body: Option<&Body>, lim: &Sess
     Err("too many redirects".into())
 }
 
+/// `navigate` and `run` in a live session: the result of one more turn of the document goes into the result of its first.
+fn add_turn(r: &mut PageResult, t: PageResult) {
+    r.tasks += t.tasks;
+    r.rounds += t.rounds;
+    r.scripts_run += t.scripts_run;
+    r.script_throws += t.script_throws;
+    r.load_errors += t.load_errors;
+    r.dropped_diagnostics += t.dropped_diagnostics;
+    r.diagnostics.extend(t.diagnostics);
+    r.intercepted.extend(t.intercepted);
+    (r.stop, r.ready_state, r.fetches, r.bytes, r.css, r.preload) = (t.stop, t.ready_state, t.fetches, t.bytes, t.css, t.preload);
+    (r.idle_timers, r.idle_frames, r.idle_callbacks) = (t.idle_timers, t.idle_frames, t.idle_callbacks);
+}
+
 impl Session {
     pub fn new(mut cfg: SessionConfig) -> Session {
         let store = cfg.storage.take().unwrap_or_default();
-        Session { cfg, store, browser: None, used: Used::default(), hist: Vec::new(), at: 0, client: None, loading: None }
+        Session { cfg, store, browser: None, used: Used::default(), hist: Vec::new(), at: 0, client: None, loading: None, parsing: None }
     }
 
     /// A client that shares the connections of the session.
@@ -317,6 +369,7 @@ impl Session {
     pub fn run(&mut self) -> SessionResult {
         self.used = Used::default();
         self.loading = None;
+        self.parsing = None;
         let first = self.cfg.url.clone();
         self.hist.clear();
         self.at = 0;
@@ -359,11 +412,15 @@ impl Session {
         };
         self.used.ended = None;
         self.loading = None;
+        self.parsing = None;
         self.drive(Some(next), &[])
     }
 
-    /// Live: is a next document on its way (`Some(false)`), or in (`Some(true)`: the next `resume` shows it)?
+    /// Live: is a next document on its way (`Some(false)`), or in (`Some(true)`: the next `resume` parses a slice of it or shows it)?
     pub fn loading(&self) -> Option<bool> {
+        if self.parsing.is_some() {
+            return Some(true);
+        }
         self.loading.as_ref().map(|l| l.1.done())
     }
 
@@ -387,15 +444,35 @@ impl Session {
     fn drive_loop(&mut self, mut next: Option<Next>, mut steps: &[Input], out: &mut SessionResult) -> SessionStop {
         let lim = self.cfg.limits.clone();
         let deadline = deadline_after(lim.max_time.saturating_sub(self.used.time));
-        // Live: the document that a worker downloaded. Until it is in, the old document does not run (its navigation stops each run).
-        let mut fetched = None;
-        if next.is_none() && self.loading.is_some() {
+        // Live: the document that a worker downloaded, parsed in slices. Until it is parsed, the old document does not run (its navigation
+        // stops each run).
+        let (mut fetched, mut scan) = (None, None);
+        if next.is_none() && self.parsing.is_none() && self.loading.is_some() {
             if self.loading.as_ref().is_some_and(|l| !l.1.done()) {
                 return SessionStop::Page(Stop::Settled);
             }
             let (n, task) = self.loading.take().expect("checked");
-            fetched = Some(task.wait().unwrap_or_else(|| Err("network error".into())));
-            next = Some(n);
+            match task.wait().unwrap_or_else(|| Err("network error".into())) {
+                Ok((url, html)) => {
+                    let scan = Url::parse(url.split('#').next().unwrap_or("")).map(|page| Scan::new(self.fork(), page, self.cfg.page.resources.clone(), deadline));
+                    let Ok(scan) = scan else { return SessionStop::LoadFailed("the URL is not an http(s) URL".into()) };
+                    self.parsing = Some(Box::new(Parsing { next: n, url, html, at: 0, parser: tree::Parser::new(), scan }));
+                }
+                Err(why) => {
+                    fetched = Some(Err(why));
+                    next = Some(n);
+                }
+            }
+        }
+        if next.is_none() && self.parsing.is_some() {
+            if !self.parsing.as_mut().expect("checked").step(Instant::now() + SLICE) {
+                return SessionStop::Page(Stop::Settled);
+            }
+            let p = *self.parsing.take().expect("checked");
+            bare_net::trace::mark(|| "document parsed in slices".into(), 0);
+            fetched = Some(Ok((p.url, p.parser.finish())));
+            scan = Some(p.scan);
+            next = Some(p.next);
         }
         loop {
             if next.is_some() && self.used.documents >= lim.max_documents {
@@ -425,13 +502,14 @@ impl Session {
                     // The old document ends here: its realm, timers and callbacks are gone before the next load starts.
                     self.browser = None;
                     let mut base = self.fork();
-                    // Live: a document that the page asked for runs its scripts across turns. `navigate` and `run` still wait for `load`.
-                    let split = self.cfg.live && fetched.is_some();
+                    // Live: a document runs its scripts across turns. One that the page asked for takes input between them; `navigate` and `run`
+                    // run the turns here until `load`.
+                    let wait_load = self.cfg.live && fetched.is_none();
                     let doc = match fetched.take() {
                         Some(d) => d,
-                        None => load_document(&mut base, &url, body.as_ref(), &lim, deadline),
+                        None => load_document(&mut base, &url, body.as_ref(), &lim, deadline).map(|(url, html)| (url, tree::parse(&html))),
                     };
-                    let (url, html) = match doc {
+                    let (url, dom) = match doc {
                         Ok(d) => d,
                         Err(why) => return SessionStop::LoadFailed(why),
                     };
@@ -454,10 +532,9 @@ impl Session {
                             self.hist[i].scroll
                         }
                     };
-                    let Ok(mut b) = Browser::new(tree::parse(&html), self.cfg.browser, self.cfg.eval, self.cfg.heap) else {
+                    let Ok(mut b) = Browser::new(dom, self.cfg.browser, self.cfg.eval, self.cfg.heap) else {
                         return SessionStop::LoadFailed("the realm could not be made".into());
                     };
-                    drop(html);
                     bare_net::trace::mark(|| "realm made (parse + new)".into(), 0);
                     if let Some((w, h)) = self.cfg.viewport
                         && b.set_viewport(w, h).is_err() {
@@ -480,9 +557,23 @@ impl Session {
                     let fetch = (base.fork(), self.cfg.fetch);
                     if self.cfg.live {
                         b.dom.fetch.live.set(true);
-                        b.dom.scripts.split.set(split);
+                        b.dom.scripts.split.set(true);
+                        if let Some(s) = scan.take() {
+                            b.adopt_scan(s);
+                        }
                     }
-                    let r = b.run_page(PageConfig { url, client, limits: page, fetch: Some(fetch) });
+                    let mut r = b.run_page(PageConfig { url, client, limits: page.clone(), fetch: Some(fetch) });
+                    while wait_load && r.stop == Stop::Settled && !b.loaded() {
+                        if Instant::now() >= deadline {
+                            r.stop = Stop::TimeBudget;
+                        } else if b.live_work() == Some(false) {
+                            // Only downloads are left: a worker ends one soon.
+                            std::thread::sleep(Duration::from_millis(1));
+                        } else {
+                            let more = b.resume_page(self.fork(), page.clone(), &[]);
+                            add_turn(&mut r, more);
+                        }
+                    }
                     (b, r)
                 }
             };
@@ -533,6 +624,42 @@ impl Session {
                 self.loading = Some((n, task));
                 return SessionStop::Page(Stop::Settled);
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The saved pages of the repository, each repeated until it is several parse steps long, give the tree of `tree::parse` when turns
+    /// parse them in slices: the cuts fall inside tags, texts and scripts.
+    #[test]
+    fn a_page_parsed_in_slices_gives_the_tree_of_a_one_step_parse() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let mut pages = Vec::new();
+        for dir in ["tools/fixtures/staging", "tools/fixtures/ui", "tools/fixtures/drive", "crates/paint/tests/fixtures"] {
+            for e in std::fs::read_dir(root.join(dir)).unwrap().flatten() {
+                if e.path().extension().is_some_and(|x| x == "html") {
+                    pages.push(std::fs::read_to_string(e.path()).unwrap());
+                }
+            }
+        }
+        assert!(pages.len() >= 10, "{} saved pages", pages.len());
+        for page in pages {
+            let html = page.repeat(3 * CHUNK / page.len() + 2);
+            let mut lim = crate::resources::Limits::default();
+            lim.max_fetches = 0;
+            let scan = Scan::new(Client::new(), Url::parse("http://127.0.0.1:1/").unwrap(), lim, Instant::now());
+            let next = Next { url: String::new(), body: None, how: How::Push };
+            let mut p = Parsing { next, url: String::new(), html: html.clone(), at: 0, parser: tree::Parser::new(), scan };
+            let mut steps = 1;
+            // An end in the past: each step feeds one chunk.
+            while !p.step(Instant::now()) {
+                steps += 1;
+            }
+            assert!(steps >= 3, "{steps} steps");
+            assert!(p.parser.finish().dump() == tree::parse(&html).dump(), "a page parsed in slices gives another tree");
         }
     }
 }

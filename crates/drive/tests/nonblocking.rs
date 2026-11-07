@@ -53,6 +53,15 @@ addEventListener('load', function () { log.push('load'); document.getElementById
 /// script and `load`.
 const ORDER: &str = "1,2,i,3,dcl,a,load";
 
+/// A first document whose inline script adds a slow sheet and a slow preload before `load`, then a slow blocking script.
+const EARLY: &str = r#"<!doctype html><html><head><script>var log = []
+var l = document.createElement('link'); l.rel = 'stylesheet'; l.href = '/slow.css'; l.onload = function () { log.push('css') }
+document.head.appendChild(l)
+var p = document.createElement('link'); p.rel = 'preload'; p.as = 'script'; p.href = '/js?p'; p.onload = function () { log.push('pre') }
+document.head.appendChild(p)
+addEventListener('load', function () { log.push('load'); document.getElementById('log').textContent = log.join(',') })</script>
+<script src="/js?1"></script></head><body><p id="css">css</p><p id="log"></p></body></html>"#;
+
 const NEXT: &str = "<!doctype html><html><body><p id=done>next page</p></body></html>";
 
 fn serve() -> String {
@@ -86,6 +95,7 @@ fn connection(mut s: TcpStream) {
         let (ty, body) = match path.split('?').next().unwrap() {
             "/" => ("text/html", INDEX),
             "/scripts" => ("text/html", SCRIPTS),
+            "/early" => ("text/html", EARLY),
             "/slow.css" => {
                 std::thread::sleep(SLOW);
                 ("text/css", "#css { color: rgb(255, 0, 0) }")
@@ -302,5 +312,21 @@ fn a_preload_added_after_load_does_not_block_the_turn() {
         until(&mut p, |p| text(p, "out") == "preloaded");
         assert!(t.elapsed() >= SLOW);
         assert_eq!(p.tick().1, None);
+    });
+}
+
+#[test]
+fn a_sheet_and_a_preload_added_before_load_download_with_the_scripts() {
+    let origin = serve();
+    big(move || {
+        let t = Instant::now();
+        let mut p = Page::open(&format!("{origin}/early"), (800, 600)).unwrap();
+        let took = t.elapsed();
+        p.quiet = true;
+        // The sheet, the preload and the script are on their way at once: one wait of 500 ms, not three.
+        assert!(took < Duration::from_millis(900), "the open took {took:?}");
+        let log = text(&mut p, "log");
+        assert!(log.ends_with("load") && log.contains("css") && log.contains("pre") && log.contains('1'), "{log}");
+        assert_eq!(color(&mut p, "css"), "rgb(255, 0, 0)");
     });
 }
