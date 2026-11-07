@@ -3249,3 +3249,42 @@ Checks (arjun-e16, base origin/main `fe196d1` from `base-build`):
 - `cargo test --release --workspace --no-fail-fast`: 2,987 passed, 0 failed.
 
 Not tested: live staging (no credentials on this machine); a real Hyprland window (only `cage`); HiDPI; a long run of hours; `bare --window URL` (only `bare-drive --window`, which shares the window code); a compositor that releases a buffer at once; a page whose scripts and objects are as large as the staging app.
+
+## A second round of tree-walker wins: name reads and tests (2026-11-08)
+
+This round follows the next steps of #267: the walk in `get_name` and a fused compare for loop tests.
+
+Depths first. A temporary counter in `find_name_fast` counted the kind of each site that ran (archMachine, base `fe196d1`):
+
+| Site | journey | typing page, 50 keys minus 0 keys |
+| --- | --- | --- |
+| frame slot | 7,224,841 (56%) | 19,738,577 (70%) |
+| environment, 0 hops | 4,595,063 (36%) | 6,951,965 (24%) |
+| environment, 1 hop | 531,243 (4%) | 821,372 (3%) |
+| environment, 2 to 7 hops | 274,484 (2.2%) | 88,138 (0.3%) |
+| global, first runs, other | 194,190 (1.5%) | 115,265 (0.4%) |
+
+So a direct hop or a closure cache of captured environments cannot pay: 98% of the reads walk 0 or 1 parent. The cost is the path of each read. `find_name_fast` tested the frame slot third, and `get_name` indexed the binding a second time after it.
+
+Changes (`crates/js/src/eval.rs`, `eval_scope.rs`, `eval_statements.rs`):
+- `fast_binding` gives the binding of a plain hit at once: a frame slot first, then an environment. `get_name` and `assign_name` read or write it with no second index. Misses go to `find_name`, as before.
+- `pat_frame` takes a resolved frame slot inline. Before, each `let` or `const` in a frame function called `pat_frame_slow`.
+- `test_true` is the test of `if`, `while`, `for`, `do` and `?:`. A comparison (`<`, `>`, `<=`, `>=`, `===`, `!==`) of two numbers gives its boolean at once: no `Value::Bool`, no `binary`, no `truthy`. `!a`, `a && b` and `a || b` as a test give only their truthiness. The step count and the depth check stay the same.
+- `operand` reads a plain name at once, as `link_base` does. It skips the depth check and the dispatch of `eval_expr_inner`. It is used for call arguments, index keys, the right side of a compound assignment, a plain initializer or assigned value, `!`, `return` and the branches of `?:`.
+- Measured and dropped: `operand` in the `Binary` arm of `eval_expr_inner`. It made the typing page 1.3% cheaper, but each node of `eval_expr_inner` cost more (one more saved register and a larger frame). The journey went up 3% and `date_load clock` 3.2% (128 instructions more per call, with the same call counts by uprobes).
+
+Results (archMachine, base origin/main `fe196d1` from `base-build`):
+- Typing page (`type_load`, the method of `keycost.sh`): `#a1` 309.0 M to 292.4 M for each key (-5.4%); `#f0` 315.0 M to 297.9 M (-5.4%). Load and mount 612.9 M to 589.4 M (-3.8%).
+- `tools/js/instr.sh`, `eval_load` scale 1: `loop` 518.5 M to 505.1 M (-2.6%), `calls` 396.9 M to 380.7 M (-4.1%), `fib` 20.3 M to 19.2 M (-5.6%), `closures` -2.2%, `objects` -1.6%.
+- Journey, 3 runs of each build one after the other, all passed. `instructions:u` of the whole process: main 11.51, 11.33, 11.28 G; now 10.75, 10.78, 10.69 G (about -5.6%). CPU of the page thread (sum of `cpu_ms`): main 1,658, 1,626, 1,606 ms; now 1,559, 1,549, 1,574 ms (about -4.3%). A scan of all output files found neither the email nor the password.
+
+Checks (archMachine):
+- `cargo test --release --workspace --no-fail-fast`: 2,986 passed, 0 failed.
+- `tools/js/cost_matrix.sh`, base `fe196d1` from `base-build` (with `-p bare-stress`): 805 rows. Mean change: glibc -0.829%, jemalloc +0.000% (0 rows measured). Over under one allocator: 0. Over under both: 0. Failed: 0. The closest row: `date_load clock 10` +0.43%.
+- `tools/js/test262_check.sh`: gate ok. `tools/js/exec_diff.sh`: 79 runs, 0 differences. All 42 other `tools/js/*_check.sh` scripts pass (`parse_check.sh` with `ACORN` set to Acorn 8.16).
+
+Profiling notes: on this perf, `perf stat -e probe_*` cannot parse uprobe events ("Unable to find event on a PMU"). Count calls with a tracefs `hist` trigger on the probe event instead, and remove the trigger before `perf probe -d`. Sampled profiles of short rows (under 1 s) did not show the +3% of `date_load clock`; only `instr.sh` A/B and the bisection found it.
+
+Next, not done here: `Result<Value, Error>` is returned through memory (`Error` holds a `&'static str` and a span), and the `?` after each node shows as 2 to 3% of `eval_expr_inner` and `link_inner`. A smaller `Error` is a hypothesis, not measured.
+
+Not tested: arjun-e16; the window (`--window`); the debug assertion in `fast_binding` (all tests ran in release); peak RSS of the typing page; the journey after the rebase.

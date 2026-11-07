@@ -149,7 +149,45 @@ impl<'p> Interp<'p> {
         st.push(f);
     }
 
+    /// The test of an `if` or a loop. A comparison of two numbers gives its boolean at once: no `Value::Bool`, no `truthy`.
     fn test_true(&mut self, e: ExprId) -> Res<bool> {
+        use BinaryOp::*;
+        if let ExprKind::Binary { op: op @ (Lt | Gt | Le | Ge | StrictEq | StrictNe), left, right } = self.prog.expr(e).kind {
+            return self.descend(|it| {
+                it.tick()?;
+                let a = it.operand(left)?;
+                let b = it.operand(right)?;
+                if let (Value::Number(x), Value::Number(y)) = (a, b) {
+                    return Ok(match op {
+                        Lt => x < y,
+                        Gt => x > y,
+                        Le => x <= y,
+                        Ge => x >= y,
+                        StrictEq => x == y,
+                        _ => x != y,
+                    });
+                }
+                let t = it.binary(op, a, b)?;
+                it.truthy(t)
+            });
+        }
+        // `!a`, `a && b` and `a || b` as a test: only their truthiness counts, so no value is made.
+        match self.prog.expr(e).kind {
+            ExprKind::Unary { op: UnaryOp::Not, arg } => return self.descend(|it| it.tick().and_then(|_| it.test_true(arg)).map(|t| !t)),
+            ExprKind::Logical { op: LogicalOp::And, left, right } => {
+                return self.descend(|it| {
+                    it.tick()?;
+                    Ok(it.test_true(left)? && it.test_true(right)?)
+                });
+            }
+            ExprKind::Logical { op: LogicalOp::Or, left, right } => {
+                return self.descend(|it| {
+                    it.tick()?;
+                    Ok(it.test_true(left)? || it.test_true(right)?)
+                });
+            }
+            _ => {}
+        }
         let t = self.eval_expr(e)?;
         self.truthy(t)
     }
@@ -168,8 +206,7 @@ impl<'p> Interp<'p> {
                 if top {
                     self.completion = Value::Undefined;
                 }
-                let t = self.eval_expr(test)?;
-                Ok(if self.truthy(t)? {
+                Ok(if self.test_true(test)? {
                     SGo::Stmt(cons)
                 } else if let Some(a) = alt {
                     SGo::Stmt(a)
@@ -370,7 +407,7 @@ impl<'p> Interp<'p> {
             StmtKind::Class(c) => self.exec_class_decl(c)?,
             StmtKind::Return(e) => {
                 let v = match e {
-                    Some(e) => self.eval_expr(e)?,
+                    Some(e) => self.operand(e)?,
                     None => Value::Undefined,
                 };
                 self.ret = v;

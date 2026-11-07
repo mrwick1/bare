@@ -292,6 +292,29 @@ impl<'p> Interp<'p> {
         r
     }
 
+    /// The binding of a plain hit of `find_name_fast`, read once: a frame slot first (56% of the sites that run on the journey, 70%
+    /// on the typing page), then an environment (0 hops: 36% and 24%; 1 hop: 4% and 3%; more: 2.2% and 0.3%). `None`: ask `find_name`.
+    #[inline(always)]
+    fn fast_binding(&mut self, n: u32, site: u32) -> Option<&mut Binding> {
+        let s = self.slots.sites[site as usize];
+        let (e, i) = if s & (UNRES | LOCAL | FRAME) == FRAME {
+            (FRAME_ENV, self.fp + (s & 0xFFFF) as usize)
+        } else if s & LOCAL != 0 {
+            let mut e = self.env;
+            for _ in 0..(s >> 16) & MAX_HOPS {
+                e = self.envs.get(e as usize)?.parent;
+            }
+            (e, (s & 0xFFFF) as usize)
+        } else {
+            return None;
+        };
+        #[cfg(debug_assertions)]
+        if e != FRAME_ENV && self.envs.get(e as usize).and_then(|x| x.bindings.get(i)).is_some_and(|b| b.name == n) {
+            assert_eq!(Some((e, i)), self.lookup(n), "static scope resolution of '{}' differs from the search", self.names[n as usize]);
+        }
+        self.envs.get_mut(e as usize)?.bindings.get_mut(i).filter(|b| b.name == n)
+    }
+
     #[inline(always)]
     fn find_name_fast(&mut self, n: u32, site: u32) -> Option<(u32, usize)> {
         let s = self.slots.sites[site as usize];
@@ -610,6 +633,11 @@ impl<'p> Interp<'p> {
     #[inline(never)]
     fn pat_frame(&mut self, n: u32, site: u32) -> Option<usize> {
         let s = self.slots.sites[site as usize];
+        if s & (UNRES | LOCAL | FRAME) == FRAME {
+            // The resolved slot: the end of `pat_frame_slow`, without its call.
+            debug_assert_eq!(self.envs[FRAME_ENV as usize].bindings[self.fp + (s & 0xFFFF) as usize].name, n);
+            return Some(self.fp + (s & 0xFFFF) as usize);
+        }
         if s & (UNRES | FRAME) == 0 { None } else { self.pat_frame_slow(n, site, s) }
     }
 

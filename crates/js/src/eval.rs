@@ -2592,11 +2592,19 @@ impl<'p> Interp<'p> {
     }
 
     fn get_name(&mut self, n: u32, site: u32) -> Res<Value> {
-        if let Some((e, i)) = self.find_name(n, site) {
+        if let Some(b) = self.fast_binding(n, site) {
+            if b.flags & INIT != 0 {
+                return Ok(b.value);
+            }
+        } else if let Some((e, i)) = self.find_name(n, site) {
             let b = &self.envs[e as usize].bindings[i];
-            return if b.flags & INIT != 0 { Ok(b.value) } else { Err(self.tdz(n)) };
+            if b.flags & INIT != 0 {
+                return Ok(b.value);
+            }
+        } else {
+            return self.get_global(n);
         }
-        self.get_global(n)
+        Err(self.tdz(n))
     }
 
     /// A name that no environment binds: a property of the global object.
@@ -2631,6 +2639,12 @@ impl<'p> Interp<'p> {
     }
 
     fn assign_name(&mut self, n: u32, v: Value, site: u32) -> Res<()> {
+        if let Some(b) = self.fast_binding(n, site)
+            && b.flags & (INIT | MUT) == INIT | MUT
+        {
+            b.value = v;
+            return Ok(());
+        }
         if let Some((e, i)) = self.find_name(n, site) {
             let b = &mut self.envs[e as usize].bindings[i];
             if b.flags & (INIT | MUT) == INIT | MUT {
@@ -2691,7 +2705,7 @@ impl<'p> Interp<'p> {
             ExprKind::Function(fid) if self.prog.func(fid).name.is_none() => self.make_closure(fid, name, true),
             ExprKind::Class(c) if self.prog.class(c).name.is_none() => self.eval_class(c, name),
             ExprKind::Paren(inner) => self.eval_named(inner, name),
-            _ => self.eval_expr(e),
+            _ => self.operand(e),
         }
     }
 
@@ -2708,7 +2722,7 @@ impl<'p> Interp<'p> {
                     out.push(x);
                 }
             } else {
-                out.push(self.eval_expr(a)?);
+                out.push(self.operand(a)?);
             }
         }
         Ok(out)
@@ -2753,7 +2767,7 @@ impl<'p> Interp<'p> {
                 if optional && is_nullish(base) {
                     return Ok(None);
                 }
-                let iv = self.eval_expr(index)?;
+                let iv = self.operand(index)?;
                 if is_nullish(base) {
                     return Err(self.index_nullish_err(base, iv));
                 }
@@ -2826,6 +2840,16 @@ impl<'p> Interp<'p> {
         self.descend(|it| it.eval_expr_inner(e))
     }
 
+    /// `eval_expr(e)`, but a plain name is read at once, as in `link_base`: it skips the depth check and the dispatch of `eval_expr_inner`.
+    #[inline(always)]
+    fn operand(&mut self, e: ExprId) -> Res<Value> {
+        if matches!(self.prog.expr(e).kind, ExprKind::Ident) {
+            self.tick()?;
+            return self.get_name(self.expr_name[e.index()], e.index() as u32);
+        }
+        self.eval_expr(e)
+    }
+
     fn eval_expr_inner(&mut self, e: ExprId) -> Res<Value> {
         self.tick()?;
         let ex = *self.prog.expr(e);
@@ -2852,6 +2876,7 @@ impl<'p> Interp<'p> {
             ExprKind::Unary { op, arg } => self.eval_unary(op, arg),
             ExprKind::Update { op, prefix, arg } => self.eval_update(op, prefix, arg),
             ExprKind::Binary { op, left, right } => {
+                // Not `operand`: inlined here, it made each node of `eval_expr_inner` cost more (journey +3%, `date_load clock` +3%).
                 let a = self.eval_expr(left)?;
                 let b = self.eval_expr(right)?;
                 self.binary(op, a, b)
@@ -2867,8 +2892,7 @@ impl<'p> Interp<'p> {
             }
             ExprKind::Assign { op, target, value } => self.eval_assign(op, target, value),
             ExprKind::Cond { test, cons, alt } => {
-                let t = self.eval_expr(test)?;
-                if self.truthy(t)? { self.eval_expr(cons) } else { self.eval_expr(alt) }
+                if self.test_true(test)? { self.operand(cons) } else { self.operand(alt) }
             }
             ExprKind::Call { .. } | ExprKind::Tagged { .. } | ExprKind::Member { .. } | ExprKind::Index { .. } | ExprKind::PrivateMember { .. } => Ok(self.link(e)?.map_or(Value::Undefined, |p| p.0)),
             ExprKind::Class(c) => self.eval_class(c, None),
@@ -3160,7 +3184,7 @@ impl<'p> Interp<'p> {
                 Ok(Value::Undefined)
             }
             UnaryOp::Not => {
-                let v = self.eval_expr(arg)?;
+                let v = self.operand(arg)?;
                 Ok(Value::Bool(!self.truthy(v)?))
             }
             UnaryOp::Neg => {
@@ -3235,7 +3259,7 @@ impl<'p> Interp<'p> {
             }
             ExprKind::Index { obj, index, .. } => {
                 let base = self.eval_expr(obj)?;
-                let iv = self.eval_expr(index)?;
+                let iv = self.operand(index)?;
                 if is_nullish(base) {
                     let t = self.display(base);
                     let ks = self.coerce_string(iv).map(|s| self.heap.to_string_lossy(s).unwrap_or_default()).unwrap_or_default();
@@ -3298,7 +3322,7 @@ impl<'p> Interp<'p> {
             AssignOp::Assign => self.eval_named(value, name)?,
             AssignOp::Compound(b) => {
                 let old = self.ref_get(&r)?;
-                let rhs = self.eval_expr(value)?;
+                let rhs = self.operand(value)?;
                 self.binary(b, old, rhs)?
             }
             AssignOp::Logical(l) => {
