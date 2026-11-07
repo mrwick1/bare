@@ -9,6 +9,7 @@ use bare_html::tree;
 use bare_js::eval::EvalLimits;
 use bare_js::heap::HeapLimits;
 use bare_net::http::Client;
+use bare_net::parallel::MAX_WORKERS;
 use std::time::{Duration, Instant};
 
 const LATENCY: Duration = Duration::from_millis(100);
@@ -73,6 +74,39 @@ fn a_slow_first_script_does_not_change_the_order() {
 }
 
 #[test]
+fn a_slow_script_does_not_hold_back_the_downloads_after_it() {
+    big(|| {
+        // s1 is the first request: it runs alone and shows that the server is slow. s2 takes 600 ms, the 24 after it 100 ms each.
+        // While the page waits for s2, the 5 other workers download all of them. Before, a file that was done but not taken kept its
+        // place in the window of 6: s8 started only after s2 was taken.
+        let srv = site(|n| if n == 2 { LATENCY * 6 } else { LATENCY });
+        let scripts: String = (1..=26).map(|i| format!("<script src=/s{i}.js></script>")).collect();
+        let (log, r, took) = run(&format!("<body><script>var log = []</script>{scripts}"), &srv);
+        assert_eq!(log, (1..=26).map(|i| format!("s{i}")).collect::<Vec<_>>().join("|"));
+        assert_eq!(r.load_errors, 0);
+        // s1 (100 ms), then s2 (600 ms): the rest is done by then. Before: 4 more waves after s2 (about 1,100 ms).
+        assert!(took < LATENCY * 9, "took {took:?}");
+    });
+}
+
+#[test]
+fn a_page_that_ends_drops_the_downloads_that_have_not_begun() {
+    big(|| {
+        // s1 navigates. When it runs, s2 to s30 are queued for the workers: the 6 that run finish, and the other 23 never start, so
+        // the next document of the session does not wait behind them.
+        let srv = serve(|path| {
+            std::thread::sleep(LATENCY);
+            if path == "/s1.js" { Reply::js("location.assign('/next')") } else { Reply::js("1") }
+        });
+        let scripts: String = (1..=30).map(|i| format!("<script src=/s{i}.js></script>")).collect();
+        let (_, r, _) = run(&format!("<body><script>var log = []</script>{scripts}"), &srv);
+        assert!(matches!(r.stop, Stop::Navigate(_)), "{:?}", r.stop);
+        std::thread::sleep(LATENCY * 8);
+        assert!(srv.total() <= 1 + MAX_WORKERS, "{} requests", srv.total());
+    });
+}
+
+#[test]
 fn defer_and_async_keep_their_rules_when_files_arrive_out_of_order() {
     big(|| {
         let srv = site(|n| Duration::from_millis(250 - 40 * n as u64));
@@ -119,6 +153,21 @@ fn twelve_fetches_run_together_and_settle_in_order() {
         let (log, _, took) = run(html, &site(flat));
         assert_eq!(log, (0..12).map(|i| format!("d{i}")).collect::<Vec<_>>().join("|"));
         assert!(took < LATENCY * 6, "took {took:?}");
+    });
+}
+
+#[test]
+fn a_slow_fetch_does_not_hold_back_the_requests_queued_after_it() {
+    big(|| {
+        // d1 runs alone and shows that the server is slow. d2 takes 600 ms, the 24 after it 100 ms each: they all run while the page
+        // waits for d2. Before, only the first 6 queued requests were started, so the rest began after d2 (about 1,100 ms).
+        let srv = site(|n| if n == 2 { LATENCY * 6 } else { LATENCY });
+        let html = "<body><script>var log = [];
+            for (var i = 1; i <= 26; i++) (function (i) { fetch('/d' + i).then(function (r) { return r.json() }).then(function (j) { log.push('d' + j.n) }) })(i);
+        </script>";
+        let (log, _, took) = run(html, &srv);
+        assert_eq!(log, (1..=26).map(|i| format!("d{i}")).collect::<Vec<_>>().join("|"));
+        assert!(took < LATENCY * 9, "took {took:?}");
     });
 }
 
