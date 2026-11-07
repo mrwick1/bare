@@ -1,7 +1,7 @@
 //! Load test for the JSON.parse, RegExp and String.prototype bindings. One case at one scale per process, so the
 //! peak memory belongs to that run.
 //!
-//!   builtins_load CASE SCALE      CASE: json | scan | replace | split | strings | routes | zero | gc     SCALE: 1, 10, 100
+//!   builtins_load CASE SCALE      CASE: json | agents | agents_rt | agents_dump | scan | replace | split | strings | routes | zero | gc     SCALE: 1, 10, 100
 //!
 //! Each case builds its input in Rust, runs a small script, and compares the full result string with the same
 //! computation done in Rust (the checksum). A wrong result exits with status 1 and prints no timing.
@@ -36,6 +36,52 @@ fn lines(n: usize) -> String {
     (0..n).map(|i| format!("GET /p/{i}/x?q={} {} {}ms\n", i % 97, 200 + i % 5, i % 1000)).collect()
 }
 
+/// `n` agent records with nested objects and arrays, repeated keys, long prompt strings with `\n` and `\"`, non-ASCII
+/// text, integers, decimals, booleans and nulls. Deterministic.
+fn agents(n: usize) -> String {
+    let mut s = String::from("[");
+    let mut r = 7u64;
+    let mut rnd = |m: u64| {
+        r = r.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        (r >> 33) % m
+    };
+    let words = ["the", "agent", "calls", "customer", "about", "payment", "due", "date", "café", "naïve", "résumé", "日本", "status", "account", "verify", "politely"];
+    for i in 0..n {
+        if i > 0 {
+            s.push(',');
+        }
+        let mut prompt = String::new();
+        for k in 0..3900 {
+            prompt += words[rnd(16) as usize];
+            prompt += match k % 40 {
+                39 => "\\n\\n",
+                19 => " \\\"quoted\\\" ",
+                29 => " C:\\\\path\\t",
+                _ => " ",
+            };
+        }
+        s += &format!("{{\"id\":\"agt_{i:06}\",\"name\":\"Agent {i} – collections\",\"description\":null,\"active\":{},\"createdAt\":\"2026-10-{:02}T10:{:02}:00.000Z\",\"version\":{},\"prompt\":\"{prompt}\"", i % 3 != 0, 1 + i % 28, i % 60, 1 + i % 9);
+        s += &format!(",\"config\":{{\"voice\":{{\"id\":\"v{}\",\"speed\":1.25,\"pitch\":-0.5,\"stability\":0.{}}},\"llm\":{{\"model\":\"m-large\",\"temperature\":0.7,\"maxTokens\":{},\"topP\":1}},\"language\":\"en-IN\",\"interruptible\":true,\"silenceMs\":{}}}", i % 7, 1 + rnd(9), 256 + rnd(4000), 500 + rnd(2000));
+        s += ",\"tools\":[";
+        for t in 0..3 + i % 5 {
+            if t > 0 {
+                s.push(',');
+            }
+            s += &format!("{{\"name\":\"tool_{t}\",\"type\":\"webhook\",\"url\":\"https://api.example.test/hooks/{i}/{t}\",\"timeoutMs\":{},\"params\":[{{\"key\":\"amount\",\"required\":true}},{{\"key\":\"note\",\"required\":false}}],\"retry\":null}}", 1000 * (1 + rnd(9)));
+        }
+        s += "],\"variables\":[";
+        for v in 0..12 {
+            if v > 0 {
+                s.push(',');
+            }
+            s += &format!("{{\"key\":\"var_{v}\",\"value\":\"{}\",\"score\":{},\"masked\":{}}}", words[rnd(16) as usize], rnd(100_000) as f64 / 1000.0, v % 4 == 0);
+        }
+        s += &format!("],\"stats\":{{\"calls\":{},\"success\":{},\"avgSec\":{},\"lastCall\":null}}}}", rnd(100000), rnd(50000), rnd(300_000) as f64 / 100.0);
+    }
+    s.push(']');
+    s
+}
+
 fn build(case: &str, scale: usize) -> Case {
     match case {
         "json" => {
@@ -52,6 +98,21 @@ fn build(case: &str, scale: usize) -> Case {
             }
             s.push(']');
             Case { input: s, script: "var a = JSON.parse(INPUT), sum = 0, t = 0; for (var i = 0; i < a.length; i++) { var r = a[i]; sum += r.id + r.name.length + r.tags.length; t += r.tags.length + (r.ok ? 0 : 1) + (r.o.k === null ? 0 : 1); } a.length + ':' + sum + ':' + t".into(), want: format!("string:{n}:{sum}:{tags}") }
+        }
+        "agents" | "agents_rt" | "agents_dump" => {
+            // A synthetic `/api/agents` reply: 40 records, about 1.2 MB. Canonical JSON (no spaces,
+            // only the escapes that JSON.stringify writes), so JSON.stringify(JSON.parse(x)) === x in Node.
+            let input = agents(40);
+            if case == "agents_dump" {
+                print!("{input}");
+                std::process::exit(0);
+            }
+            if case == "agents_rt" {
+                return Case { script: "JSON.stringify(JSON.parse(INPUT)) === INPUT".into(), input, want: "true".into() };
+            }
+            // SCALE parses of the same reply, as a page that loads the list SCALE times.
+            let tools: usize = (0..40).map(|i| 3 + i % 5).sum();
+            Case { input, script: format!("var a, t = 0; for (var r = 0; r < {scale}; r++) {{ a = JSON.parse(INPUT); for (var i = 0; i < a.length; i++) t += a[i].tools.length + a[i].config.voice.speed; }} a.length + ':' + t"), want: format!("string:40:{}", scale as f64 * (tools as f64 + 40.0 * 1.25)) }
         }
         "scan" => {
             let n = 2000 * scale;

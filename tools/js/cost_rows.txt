@@ -114,6 +114,8 @@ examples/browser_load rel 1
 examples/browser_load rel 10
 examples/builtins_load json 1
 examples/builtins_load json 10
+examples/builtins_load agents 1
+examples/builtins_load agents 10
 examples/builtins_load scan 1
 examples/builtins_load scan 10
 examples/builtins_load replace 1

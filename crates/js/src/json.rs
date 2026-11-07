@@ -140,6 +140,7 @@ pub fn parse(heap: &mut Heap, src: &[u16], opts: &JsonOptions, lim: &JsonLimits)
         text_left: lim.max_text_units,
         scratch: Vec::new(),
         num: Vec::new(),
+        keys: [(0, usize::MAX, PropertyKey::Index(0)); 64],
     };
     p.run()
 }
@@ -171,10 +172,29 @@ struct Parser<'h, 's> {
     scratch: Vec<u16>,
     /// Reused ASCII buffer for numbers that need the general float parser.
     num: Vec<u8>,
+    /// Recent short keys without escapes as (start in `src`, length, key), placed by length and first and last unit.
+    /// A repeated key skips the interner (V8 keeps a similar cache in its JSON parser).
+    keys: [(usize, usize, PropertyKey); 64],
 }
 
 fn is_digit(c: u16) -> bool {
     (0x30..=0x39).contains(&c)
+}
+
+/// The first index at or after `i` of a quote, a backslash or a unit below 0x20, or `src.len()`.
+fn plain_end(src: &[u16], mut i: usize) -> usize {
+    const N: usize = 8;
+    // N units per step with no branch inside the step, so the compiler uses vector compares.
+    while let Some(c) = src.get(i..i + N) {
+        if c.iter().fold(false, |a, &u| a | (u == 0x22) | (u == 0x5C) | (u < 0x20)) {
+            break;
+        }
+        i += N;
+    }
+    while i < src.len() && src[i] != 0x22 && src[i] != 0x5C && src[i] >= 0x20 {
+        i += 1;
+    }
+    i
 }
 
 impl Parser<'_, '_> {
@@ -321,10 +341,30 @@ impl Parser<'_, '_> {
         if self.peek() != Some(0x22) {
             return self.unexpected(self.pos);
         }
-        let s = self.string()?;
-        let k = match self.heap.key_from_string(s) {
-            Ok(k) => k,
-            Err(e) => return self.heap_err(e, self.pos),
+        let (src, start) = (self.src, self.pos + 1);
+        let end = plain_end(src, start);
+        let len = end - start;
+        let slot = (src.get(end) == Some(&0x22) && len <= 32).then(|| {
+            let (a, b) = if len == 0 { (0, 0) } else { (src[start] as usize, src[end - 1] as usize) };
+            (len * 7 + a * 31 + b) & 63
+        });
+        let k = match slot.map(|i| self.keys[i]) {
+            Some((at, n, k)) if n == len && src[at..at + n] == src[start..end] => {
+                self.charge_text(len, start)?;
+                self.pos = end + 1;
+                k
+            }
+            _ => {
+                let s = self.string()?;
+                let k = match self.heap.key_from_string(s) {
+                    Ok(k) => k,
+                    Err(e) => return self.heap_err(e, self.pos),
+                };
+                if let Some(i) = slot {
+                    self.keys[i] = (start, len, k);
+                }
+                k
+            }
         };
         self.ws();
         if self.peek() != Some(0x3A) {
@@ -357,10 +397,7 @@ impl Parser<'_, '_> {
     fn string(&mut self) -> Res<StrId> {
         let src = self.src;
         let start = self.pos + 1;
-        let mut i = start;
-        while i < src.len() && src[i] != 0x22 && src[i] != 0x5C && src[i] >= 0x20 {
-            i += 1;
-        }
+        let mut i = plain_end(src, start);
         if i < src.len() && src[i] == 0x22 {
             self.charge_text(i - start, start)?;
             let s = self.intern(Some((start, i)));
@@ -409,9 +446,7 @@ impl Parser<'_, '_> {
                 }
                 _ => {
                     let a = i;
-                    while i < src.len() && src[i] != 0x22 && src[i] != 0x5C && src[i] >= 0x20 {
-                        i += 1;
-                    }
+                    i = plain_end(src, i);
                     self.charge_text(i - a, a)?;
                     self.scratch.extend_from_slice(&src[a..i]);
                 }
@@ -639,6 +674,42 @@ mod tests {
         ] {
             assert_eq!(err(s), syn(k, at), "{s:?}");
         }
+    }
+
+    #[test]
+    fn string_scan_stops_at_every_position() {
+        // The scan reads 8 units per step: put the stop unit at each position across several steps.
+        for n in 0..40 {
+            for at in 0..=n {
+                let (a, b) = ("x".repeat(at), "y".repeat(n - at));
+                assert_eq!(str_of(&format!("\"{a}\\n{b}\"")), u(&format!("{a}\n{b}")), "{n} {at}");
+                assert_eq!(str_of(&format!("\"{a}\"")), u(&a));
+                assert_eq!(err(&format!("\"{a}\u{1}{b}\"")), syn(Syntax::ControlChar, 1 + at));
+                assert_eq!(err(&format!("\"{a}")), syn(Syntax::UnexpectedEnd, 1 + at));
+            }
+        }
+    }
+
+    #[test]
+    fn repeated_keys_give_the_same_properties() {
+        // 100 keys share 64 cache slots; "ab" also comes with an escape; index keys, "" and "__proto__" repeat.
+        let one: Vec<String> = (0..100).map(|i| format!("\"k{i}\":{i}")).collect();
+        let obj = format!("{{{},\"ab\":1,\"a\\u0062\":2,\"7\":3,\"\":4,\"__proto__\":5}}", one.join(","));
+        let (mut h, v) = ok(&format!("[{obj},{obj},{obj}]"));
+        let Value::Object(a) = v else { panic!() };
+        let k2 = h.key_from_str("2").unwrap();
+        let Some(Property::Data { value: o, .. }) = h.get_own_property(a, k2).unwrap() else { panic!() };
+        let mut want: Vec<String> = vec!["7".into()];
+        want.extend((0..100).map(|i| format!("k{i}")));
+        want.extend(["ab", "", "__proto__"].map(String::from));
+        assert_eq!(keys(&mut h, o), want);
+        for i in [0, 63, 64, 99] {
+            assert!(matches!(get(&mut h, o, &format!("k{i}")), Value::Number(n) if n == i as f64));
+        }
+        assert!(matches!(get(&mut h, o, "ab"), Value::Number(n) if n == 2.0));
+        assert!(matches!(get(&mut h, o, "7"), Value::Number(n) if n == 3.0));
+        // A repeated key is charged to the text budget at the same offset as a new one.
+        assert_eq!(run(&mut heap(), r#"[{"ab":1},{"ab":2}]"#, &lim(|l| l.max_text_units = 3)).unwrap_err(), limit(LimitKind::Text, 12));
     }
 
     #[test]
