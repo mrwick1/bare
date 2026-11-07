@@ -163,7 +163,7 @@ A page asks for many files. Each one costs a round trip (about 40 ms to staging)
 - `fetch` and XHR: the first 6 queued requests that are a GET or a HEAD start together. A request with another method runs alone, when all before it are done, on the page thread. The server sees these in the order of the script.
 - No worker is used until a reply took 10 ms or more to start (`Client::parallel_pays`), and not for a single download. On a fast link (loopback, a LAN) a thread costs more than the round trip it hides: without this the loader rows of `resources.md` rose by up to 4% in instructions. The first request of a page is the document, so a remote server marks itself before the first script.
 - Timing is off unless `BARE_NET_TRACE` is set. When it is off, the cost is one read of a `OnceLock` for each request, and no clock read for the trace.
-- HTTP/2 is not used. Staging answers HTTP/1.1 only (Chrome reports `http/1.1` for all 69 requests of three loads; `h2` gets no ALPN, see [staging-network.md](staging-network.md)), so it would change nothing there. It is a follow-up for servers that offer it.
+- HTTP/2 is used when the server picks `h2` in ALPN (see [HTTP/2 is our own code](#http2-is-our-own-code-one-reader-thread-for-each-connection)). Staging answers HTTP/1.1 only (Chrome reports `http/1.1` for all 69 requests of three loads; `h2` gets no ALPN, see [staging-network.md](staging-network.md)), so staging does not change.
 - The request body is copied for a worker (a `Pending` holds values of the realm and cannot leave the thread).
 
 ## Compressed bodies and the connect backup
@@ -264,6 +264,25 @@ Changed on 2026-11-07. A text control (`<input>`, `<textarea>`) never reports th
 Reason: the HTML Standard lets a platform that has no directionless selection use `forward` ("set the selection range", direction `none`). Chrome 155 on Linux has none. Recorded in headless Chrome 155: `selectionDirection` is `forward` for a fresh input, after `setSelectionRange(1, 3)`, after `select()` and after a blur, with or without focus. Before this change bare answered `none` for a control that did not hold the page selection, and put the caret of a fresh input at the end. Tests that were read from the standard by hand now hold the recorded values.
 
 Consequence: the code that told the owner of the page selection apart (`dir_of`, and the `none` branch of `FocusState::sel_owner`) is gone. `sel_owner` stays for one purpose: Chrome sends `selectionchange` to a text control when focus moves the page selection into it.
+
+## HTTP/2 is our own code, one reader thread for each connection
+
+Decided on 2026-11-07. The client offers `h2` and `http/1.1` in ALPN, and speaks HTTP/2 when the server picks it. The code is `crates/net/src/h2.rs` and `hpack.rs`.
+
+Reason: the profile of `/login` (#186) put 50% of the time in requests that wait for each other and 13% in new connections. One connection with many streams removes both when a server offers `h2`. The measured gain on a local server with a round trip is 11% at 40 ms and 17% at 100 ms ([resources.md](resources.md#http2)).
+
+Own code and not the `h2` crate: the crate needs tokio, adds about 19 crates, a 12 s clean build and +906 KiB stripped (measured on a test crate), and needs a bridge between an async runtime and our blocking TLS stream. Our code adds 78 KiB to the stripped binary. The client is synchronous, so one reader thread for each connection is enough. The Huffman table of HPACK is copied from the `h2` crate (MIT).
+
+Choices:
+- The reader waits on the socket with `peek` and takes the TLS stream only for one read. A writer never waits behind a reader that waits for the peer. Lock order is `io`, then `st`.
+- The window is 1 MiB for a stream and 4 MiB for the connection. `WINDOW_UPDATE` follows what the caller read. A slow caller stops the server, and memory stays bounded.
+- Push is off. A frame is at most 16 KiB. A header list is at most 256 KiB, and a block 256 KiB. An oversized list fails its stream, and the HPACK table still takes the block, so the connection stays in step.
+- A stream that the server did not handle (GOAWAY above the last id, REFUSED_STREAM) is marked `Unprocessed` and runs again once on a new connection, for any method. A GET that fails on an old session runs again, as on an old HTTP/1.1 connection. A POST that may have reached the server is never sent twice.
+- There is no PING keepalive. A dead session is found when a request fails.
+- The connect gate (2 at once) is kept. A request that waited at the gate looks for a session again before it dials. The first dial can still race up to the gate: the extra connection serves its own request, and a later one does not replace a session that is usable.
+- The loader keeps its 6 workers and page order. A larger window is a separate change.
+
+Consequence: a server that offers `h2` gets one connection for each origin, not up to 6. `BARE_NET_TRACE` has a `proto` column (`h2` or empty).
 
 ## Open questions
 

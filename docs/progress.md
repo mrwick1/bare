@@ -1102,3 +1102,15 @@ Gaps (Chrome differs):
 - A selection made by the mouse in page text (there is no caret model) sends no `selectionchange`. The "in head noscript" mode with scripting off is not built (`noscript` is an element there). An SVG `template` context is still `Unsupported`. `onselectionchange` and the other handler properties are absent.
 
 Not tested: a live staging login; a mouse or key change of the page selection; a page parsed in chunks that are cut inside a `<noscript>` tag; `template.innerHTML` at the depth cap.
+
+## HTTP/2
+
+`bare` offers `h2` and `http/1.1` in ALPN and speaks HTTP/2 when the server picks it: one connection for each origin, a stream for each request, HPACK, flow control, GOAWAY with a retry of the streams that were not handled, RST_STREAM, push off, and the old caps. The code is our own (`crates/net/src/h2.rs`, `hpack.rs`), because the `h2` crate needs tokio (+906 KiB stripped on a test crate, 12 s clean build). The HTTP/1.1 path is the same for a server that picks `http/1.1`.
+
+Staging offers `http/1.1` only, so `/login` there does not change (peak RSS 28,624 and 28,606 KiB; the wall time moves with the network). On a local Node `http2` server with a delay proxy, a page of 40 assets loads in 728 ms before and 649 ms after at a 40 ms round trip, and in 1,757 ms before and 1,455 ms after at 100 ms (median of 9; 6 connections become 1). At 0 ms there is no change. The loader still starts 6 targets at a time, which bounds the gain.
+
+Tests: 19 against `openssl s_server -alpn h2` driven frame by frame (GOAWAY, RST_STREAM, a flow-control stall at a window of 64 KiB, an `http/1.1`-only server, huge headers, protocol errors), 4 against Node's nghttp2 (our encoder and decoder against an independent peer, 3 MiB down, 1 MiB up, 8 workers on 1 or 2 connections), 10 for HPACK. `cargo test --workspace`: 2,639 tests, 0 failed. Binary: +78,424 B stripped (+0.84%). Rows: 77 `instr.sh` rows, none over +0.5% except `resources_load largechunk 100` at +0.553%, which changes sign between runs and with the allocator. A fix found on the way: a request that waited at the connect gate dialed again; it now looks for a session first (6 connections became 1 or 2 for 8 requests).
+
+Details: [resources.md](resources.md#http2), [decisions.md](decisions.md#http2-is-our-own-code-one-reader-thread-for-each-connection).
+
+Not tested: a real server other than nghttp2 and OpenSSL; staging over HTTP/2; padded frames, `PRIORITY`, an interim `100` reply, trailers and a gzip reply over HTTP/2; a server that sets few concurrent streams; a real network (the proxy is a fixed delay); the `h2` crate's RSS and speed.

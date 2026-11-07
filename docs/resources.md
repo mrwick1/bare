@@ -4262,6 +4262,75 @@ Stress: the 17 new tests ran 50 times (net and page binaries one after the other
 
 Not tested: a real connection refusal (RST) at connect (a parallel change adds a connect retry); HTTP/2; `https` (loopback only); a live server that closes; a server that closes in the middle of a body with workers on; a cap lower than 2.
 
+## HTTP/2
+
+2026-11-07, archMachine, release. Baseline: origin/main e84851f. Each build has its own `CARGO_TARGET_DIR` under `/data/bare-tmp`.
+
+### What it does
+
+`bare-tls` offers `h2` and `http/1.1` in ALPN (`h2` first). When the server picks `h2`, the client opens one HTTP/2 session for the origin (`crates/net/src/h2.rs`, HPACK in `hpack.rs`). Every later request to that origin is a stream on that session. A server that picks `http/1.1`, or sends no ALPN, gets HTTP/1.1 as before. Plain `http://` is always HTTP/1.1.
+
+Parts: SETTINGS (push off, `SETTINGS_ENABLE_PUSH` 0), PING replies, flow control for the connection and for each stream, GOAWAY (a stream above the last id that the server handled runs again on a new connection), RST_STREAM, header size limits, and the existing caps (body, decoded size, timeouts). The page loader and `fetch` need no change: they ask for the same replies, and the worker pool stays (page order is the same).
+
+Windows: 1 MiB for a stream and 4 MiB for the connection. A `WINDOW_UPDATE` goes out when the caller has read the data, not when it arrives. So a slow reader makes the server wait, and memory stays bounded.
+
+Threads: one reader thread for each session. It waits on the socket with `peek`, and takes the TLS stream only for one read. A writer never waits behind a reader that waits for the peer. A session with no open stream and no request for a while ends its thread.
+
+The first requests of a page race to open the connection. The connect gate lets 2 open at once, and a request that waited at the gate looks for a session again before it dials. Test: 8 requests through the worker pool open 1 or 2 connections (without the second look, 6).
+
+### Own code, or the `h2` crate
+
+| | `h2` crate | own code |
+| --- | --- | --- |
+| Needs | tokio and 19 crates (measured on a test crate) | nothing new |
+| Clean build of a test crate that uses it | 12 s | not measured |
+| Stripped size added | +906 KiB (test crate) | +78 KiB in `bare` (see below) |
+| Fit for a blocking client | needs a runtime and a bridge to the blocking TLS stream | one thread for each connection; no runtime |
+
+Peak RSS and speed of the `h2` crate were not measured. The decision is in [decisions.md](decisions.md#http2-is-our-own-code-one-reader-thread-for-each-connection). The Huffman table is copied from the `h2` crate (MIT): see [open-source.md](open-source.md).
+
+### Page load
+
+`/login` is not a good test here, because staging offers `http/1.1` only (`openssl s_client -alpn h2,http/1.1` prints `ALPN protocol: http/1.1`). So the gain was measured on a local Node `http2` server (nghttp2, `tools/net/h2_node_server.mjs`) with a page of 40 scripts and styles (`/login?assets=40`, 2 ms for each asset). A local server has no round trip, so `tools/net/delay_proxy.mjs` sits in front and delays each chunk by the same time in both directions. The client is `crates/bare/examples/page_load_roots.rs` (the session of `bare --run`, with one private root). Wall time is the `wall_us` line of `BARE_NET_TRACE=1`. 9 runs for each build, the two builds in turn.
+
+| Round trip | origin/main median (range) | this change median (range) | Connections |
+| --- | --- | --- | --- |
+| 0 ms | 112.3 ms (99.8 to 115.9) | 112.1 ms (102.2 to 128.2) | 1 and 1 |
+| 40 ms | 728.4 ms (724.5 to 731.2) | 649.2 ms (646.7 to 729.8) | 6 and 1 |
+| 100 ms | 1,756.9 ms (1,651.7 to 1,760.0) | 1,454.6 ms (1,450.1 to 1,531.8) | 6 and 1 |
+
+At 0 ms the loader does not use workers (no reply is slow), so both builds use one connection and the time is the same. With a round trip, HTTP/2 saves the 5 extra handshakes: -79 ms (-11%) at 40 ms and -302 ms (-17%) at 100 ms. The loader bounds the gain, not HTTP/2: it still starts the targets in waves of 6 and takes the results in page order (the trace shows the waves). A larger window would be a separate change.
+
+Staging `/login` (no login), the same 9-run method. The two builds were not on the same base (origin/main 6e66238, and this change on the older 6248fc8), so this shows no gross regression and nothing more: block 1 745 ms against 771 ms (minimum 684 against 696), block 2 771 ms against 903 ms (minimum 716 against 716). The network moves the medians by more than the difference. Not repeated after the rebase.
+
+### Binary and memory
+
+Release builds of origin/main e84851f and this change (rebased on it).
+
+| | origin/main | this change | change |
+| --- | --- | --- | --- |
+| `bare` binary, stripped | 9,387,840 B | 9,466,264 B | +78,424 B (+0.84%) |
+| `bare` binary, not stripped | 11,576,712 B | 11,661,528 B | +84,816 B (+0.73%) |
+| Peak RSS of `bare --run` on staging `/login` (10 runs, median) | 28,624 KiB | 28,606 KiB | -18 KiB (no change) |
+| Peak RSS of `page_load_roots` on the local page at 40 ms (5 runs, typical) | 12,404 KiB | 12,404 KiB | none |
+
+A first comparison used a newer base than the branch and showed +750 KiB. That came from other merged changes, not from this change. The table above uses the same base. The RSS of a long page with large bodies over HTTP/2 was not measured.
+
+### Cost on the rows
+
+`tools/js/instr.sh` (`instructions:u`, minimum of 3), origin/main e84851f against this change, 77 rows: `loader_load` (blocking, dynamic, mixed), `resources_load` (small, large, largechunk, dups), `preload_load` (font, style, script, dups), `sheets_load` (linked, imports), `fetch_load` (post, bytes, objects, iterate), `streams_load` (flow, many, pending, churn), `session_load` (chain, heavy) at 1, 10 and 100, and `https_load` (hs, ka, big, post) at 1 and 10. One row is over +0.5%: `resources_load largechunk 100`, +0.553% (243,522,651 to 244,868,223). Two more runs of it with glibc gave -0.02% and +0.49%, and two with jemalloc gave -0.23% and +0.41%. The sign changes between runs, and the base build alone moved by 0.6% between runs. So this row is noise, not a cost (hypothesis: it is the allocator state; the row sends no https request). The next rows: `https_load hs 10` +0.400% (the handshake sends one more extension and reads the ALPN choice), `preload_load style 10` +0.221%, `https_load hs 1` +0.182%. No other row is over +0.18%.
+
+### Tests
+
+- `crates/net/tests/h2_openssl.rs` (19 tests): a loopback `openssl s_server -alpn h2` that the test drives frame by frame, with a private root. The request and its pseudo-headers; many requests on one connection with answers in any order; the stream limit; PING and unknown frames; GOAWAY (a stream not handled runs on a new connection, a handled one finishes); RST_STREAM; a refused stream; an upload that stops at a window of 64 KiB and goes on when the server opens it; a new initial window; the window that follows the reads; a header list over the limit (the stream fails, the HPACK table stays in step); a block over the limit; PUSH_PROMISE and other protocol errors; `Content-Length` mismatch; HTTP/1 headers and capital letters in a reply; a connection that closes in a body; a server with `http/1.1` only; HEAD and POST replies.
+- `crates/net/tests/h2_node.rs` (4 tests): Node `http2` (nghttp2) as an independent peer. Our encoder (a secret header, a 3,000 byte value, a non-ASCII value, the static table) read by nghttp2; our decoder reads what nghttp2 encodes across a filling table (6 replies, each with a set of headers from the static table); a 3 MiB download (every byte checked) and a 1 MiB upload (SHA-256) with real windows; 8 requests from the worker pool on 1 or 2 connections in under 400 ms (60 ms for each reply, 480 ms if serial). They skip when `node` or `openssl` is missing.
+- `hpack.rs` (10): the examples of RFC 7541 appendix C, the table size, and limits. `hello.rs`, `client.rs`, `client_openssl.rs`: the ALPN offer and choice (an `h2` pick that was not offered is an error).
+- `cargo test --workspace`: 36 suites, 2,639 tests, 0 failed. `cargo clippy` on `bare-net`, `bare-tls` and `bare`: no warning in the new code. The warnings in `dns.rs`, `http.rs` (`Default for Response`, `from_buf`) and `close_pool.rs` were there before.
+
+### Not tested
+
+Staging over HTTP/2 (it offers none). A real server other than nghttp2 and OpenSSL (for example nginx, or a CDN with its own limits). Padded `DATA` and `HEADERS`, `PRIORITY` frames, an interim `100` reply and trailers (the code reads them by the RFC; no test sends them). A gzip reply over HTTP/2 (the decoders are the same as for HTTP/1.1; no HTTP/2 test). A server that never answers a `PING` (the client sends none; a dead session is found when a request fails, and a GET runs again). A server that sets `SETTINGS_MAX_CONCURRENT_STREAMS` below 100 (the first 100 streams are allowed until its SETTINGS frame arrives; a refused stream runs again). Peak RSS and speed of the `h2` crate. A real network round trip (the proxy is a fixed delay on loopback: no loss, no jitter). The RSS of a long page over HTTP/2. Windows and macOS.
+
 ## Dense host tables and cached option names
 
 Method: main f3b07e8 and this change, each in its own `CARGO_TARGET_DIR` under `/data/bare-tmp`, release build, `-j3`. `tools/js/instr.sh` gives the minimum of 3 runs of `instructions:u` (with `glibc.malloc.tcache_count=65535`). AMD Ryzen 9 5900HX, glibc 2.44. The machine was shared and each sweep ran 4 rows at once, so time is not reported. Peak RSS is the maximum of 3 runs of `ru_maxrss`, without the large malloc cache.

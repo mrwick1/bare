@@ -23,7 +23,7 @@ Limits in the tool: one connection at a time, 400 requests, 8 MiB for a body, 30
 - Cipher suites that the server accepts in TLS 1.3: `TLS_AES_128_GCM_SHA256`, `TLS_AES_256_GCM_SHA384`, `TLS_CHACHA20_POLY1305_SHA256`. It rejects `TLS_AES_128_CCM_SHA256` (alert 40). When the client offers all, the server picks `TLS_AES_256_GCM_SHA384`.
 - Key exchange: each of `X25519`, `secp256r1`, `secp384r1`, `secp521r1`, `X448` and `ffdhe2048` worked when it was the only offered group. `X25519MLKEM768` also works and the server picks it when the client offers it first.
 - Server signature in `CertificateVerify`: `ecdsa_secp256r1_sha256` only. When the client offered only `ecdsa_secp384r1_sha384`, `rsa_pss_rsae_sha256` or `ed25519`, the handshake failed (alert 40).
-- ALPN: `http/1.1` is chosen if offered. `h2` offered alone gets no ALPN (the connection still works). The server then speaks HTTP/1.1.
+- ALPN: `http/1.1` is chosen if offered. `h2` offered alone gets no ALPN (the connection still works). The server then speaks HTTP/1.1. Checked again on 2026-11-07: `openssl s_client -alpn h2,http/1.1` prints `ALPN protocol: http/1.1`. So the HTTP/2 client of `bare` uses HTTP/1.1 here.
 - SNI: the server sends the same leaf without SNI (`-noservername`). It does not require SNI. Send it anyway. To verify: whether the server has another default certificate on other names.
 - No OCSP stapling (`OCSP responses: no responses sent`).
 - A minimal hello works. Offer only `TLS_AES_128_GCM_SHA256`, group `X25519`, signature algorithm `ecdsa_secp256r1_sha256`, ALPN `http/1.1`. Result: handshake OK, certificate verified, `Peer signature type: ecdsa_secp256r1_sha256`.

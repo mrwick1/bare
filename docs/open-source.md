@@ -121,6 +121,8 @@ The OFL asks that the license text travels with the font. It is in `data/fonts/O
 
 Adopted on 2026-11-07 for `Content-Encoding` in `crates/net`: flate2 1.1 with the miniz_oxide backend (MIT or Apache-2.0; `png` builds it already) and brotli-decompressor 5 (BSD-3-Clause or MIT; the decoder of the `brotli` crate, without the encoder). They add `alloc-stdlib` and `alloc-no-stdlib` (BSD-3-Clause). zlib-rs and `brotli` were measured and left out. See [resources.md](resources.md#compressed-bodies-and-the-connect-backup).
 
+Copied on 2026-11-07 for HTTP/2 in `crates/net/src/hpack.rs`: the table of the Huffman code of HPACK (RFC 7541 appendix B, 257 entries) from the `h2` crate (hyperium/h2, MIT). The tests check the table against the examples of the RFC. The rest of HTTP/2 is our code. The `h2` crate itself was measured and not used: see [resources.md](resources.md#http2).
+
 | Project | License | Stars | What it gives |
 | --- | --- | ---: | --- |
 | [rustls](https://github.com/rustls/rustls) | Apache-2.0, MIT or ISC | 7,736 | TLS. |
