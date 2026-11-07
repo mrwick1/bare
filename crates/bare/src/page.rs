@@ -111,6 +111,8 @@ pub struct Page {
     woken: bool,
     started: Instant,
     pub first_frame: Option<Duration>,
+    /// The rounds of the window loop that hosts this page for a driver (`control::Remote`), since a job last took them.
+    pub ticks: crate::control::Ticks,
 }
 
 fn mods(m: bare_window::Mods) -> Mods {
@@ -291,6 +293,7 @@ impl Page {
             woken: false,
             started: Instant::now(),
             first_frame: None,
+            ticks: Default::default(),
         }
     }
 
@@ -621,7 +624,9 @@ impl Page {
         }
         // The window thread runs this job: no frame is drawn before the new page is in. The window holds its last frame in its own buffers.
         self.canvas = Canvas::new(0, 0);
+        let ticks = self.ticks;
         *self = make()?;
+        self.ticks = ticks;
         Ok(())
     }
 

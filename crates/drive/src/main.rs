@@ -3,6 +3,9 @@
 //! Runs the steps of the file STEPS (`steps.rs`) and prints the result as JSON on stdout (also `DIR/result.json`). A line for each step
 //! goes to stderr unless `--quiet`. Exit code: 0 all the steps passed, 1 a step failed, 2 a bad argument or step file.
 //!
+//! Ticks: each step, and the whole run, give `ticks`, `tick_max_ms` (the longest), `ticks_over_16` and `ticks_over_50`. A tick is one
+//! stretch of work of the page thread: headless, one call of the driver on the page; in a window, one round of the window loop.
+//!
 //! `--repeat N`: run the steps N times in this process, until one run fails. The output is the result of the last run, and `runs` holds
 //! the time, the RSS, the peak RSS and the live heap (glibc only) after each run, to find memory that a journey leaves behind.
 //!

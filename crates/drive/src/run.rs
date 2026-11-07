@@ -12,7 +12,7 @@
 
 use crate::locate::{self, Locator};
 use crate::steps::{Action, Check, State, Step};
-use bare::control::{Handle, Log, Refusal, Remote};
+use bare::control::{Handle, Log, Refusal, Remote, Ticks};
 use bare::page::Page;
 use bare_paint::canvas::Canvas;
 use std::collections::HashMap;
@@ -132,6 +132,19 @@ impl Host {
             Host::Window(r) => r.call(f),
         }
     }
+
+    /// See `Remote::work_count` (0 here).
+    fn work_count(&self) -> u64 {
+        if let Host::Window(r) = self { r.work_count() } else { 0 }
+    }
+
+    /// Sleep until `until`. In a window, also wake when its loop runs a task of the page after `seen`.
+    fn sleep(&self, seen: u64, until: Instant) {
+        match self {
+            Host::Window(r) => r.wait_work(seen, until),
+            _ => std::thread::sleep(until.saturating_duration_since(Instant::now())),
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -167,10 +180,13 @@ pub struct StepOut {
     pub busy_ms: f64,
     pub waited_ms: f64,
     pub tries: u32,
-    /// CPU time of the page thread in the step (headless only: in a window the page runs on another thread).
+    /// CPU time of the page thread in the step (in a window, the thread of the window loop).
     pub cpu_ms: f64,
     /// The time that the page thread waited inside a network call in the step.
     pub net_ms: f64,
+    /// The ticks of the page thread in the step. Headless: each call of the driver on the page (a try and `Page::tick`, or an `open`).
+    /// In a window: each round of the window loop (the events, the jobs of the driver, `Page::tick` and the draw).
+    pub ticks: Ticks,
     pub note: Option<String>,
 }
 
@@ -182,6 +198,8 @@ pub struct Report {
     pub net: Vec<(usize, bare_net::trace::Rec)>,
     pub ms: f64,
     pub window: bool,
+    /// The ticks of all the steps.
+    pub ticks: Ticks,
 }
 
 /// Run the steps in order until one fails. `red` gets the secrets that the steps type into password fields.
@@ -193,15 +211,17 @@ pub fn run(steps: &[Step], opt: &Options, red: &mut Redactor) -> Report {
     let net = bare_net::http::Client::new();
     let mut memo = Memo::default();
     let mut timeout = opt.timeout;
-    let mut rep = Report { ok: true, steps: Vec::new(), failure: None, logs: Vec::new(), net: Vec::new(), ms: 0.0, window: opt.window };
+    // The CPU time of the window thread at the end of the last step.
+    let mut window_cpu = 0u64;
+    let mut rep = Report { ok: true, steps: Vec::new(), failure: None, logs: Vec::new(), net: Vec::new(), ms: 0.0, window: opt.window, ticks: Ticks::default() };
     for step in steps {
         let t0 = Instant::now();
         let deadline = t0 + timeout;
-        let (mut tries, mut busy, mut waited) = (0u32, Duration::ZERO, Duration::ZERO);
+        let (mut tries, mut busy, mut waited, mut ticks) = (0u32, Duration::ZERO, Duration::ZERO, Ticks::default());
         let (cpu0, net0) = (thread_cpu_ns(), bare_net::trace::blocked_us());
         let result: Result<Option<String>, Fail> = loop {
             tries += 1;
-            let t = Instant::now();
+            let (t, seen) = (Instant::now(), host.work_count());
             let (tried, wait) = match &step.action {
                 Action::Timeout(ms) => {
                     timeout = Duration::from_millis(*ms);
@@ -210,7 +230,11 @@ pub fn run(steps: &[Step], opt: &Options, red: &mut Redactor) -> Report {
                 Action::Open(url) => {
                     memo.seen.clear();
                     let opened = host.open(url, opt.size, opt.window, &net).and_then(|_| host.run(|p| p.take_logs()));
-                    busy += t.elapsed();
+                    let d = t.elapsed();
+                    busy += d;
+                    if !opt.window {
+                        ticks.add(d);
+                    }
                     break opened.map(|logs| rep.logs.extend(logs.into_iter().map(|l| (step.line, l)))).map(|_| None).map_err(|e| fail("page", e));
                 }
                 a => {
@@ -233,7 +257,11 @@ pub fn run(steps: &[Step], opt: &Options, red: &mut Redactor) -> Report {
                     }
                 }
             };
-            busy += t.elapsed();
+            let d = t.elapsed();
+            busy += d;
+            if !opt.window {
+                ticks.add(d);
+            }
             match tried {
                 Try::Done(note) => break Ok(note),
                 Try::Stop(f) => break Err(f),
@@ -249,12 +277,20 @@ pub fn run(steps: &[Step], opt: &Options, red: &mut Redactor) -> Report {
                     if now >= deadline {
                         break Err(Fail { message: format!("{} (time limit {} ms)", f.message, timeout.as_millis()), ..f });
                     }
-                    let sleep = next.min(deadline).saturating_duration_since(now);
-                    std::thread::sleep(sleep);
-                    waited += sleep;
+                    host.sleep(seen, next.min(deadline));
+                    waited += now.elapsed();
                 }
             }
         };
+        // In a window the loop counts its rounds and the page runs on its thread; this call ends the step (its own round counts in the
+        // next step).
+        let mut cpu_ns = thread_cpu_ns().saturating_sub(cpu0);
+        if let (true, Ok((t, c))) = (opt.window, host.run(|p| (std::mem::take(&mut p.ticks), thread_cpu_ns()))) {
+            ticks.merge(t);
+            cpu_ns = c.saturating_sub(window_cpu);
+            window_cpu = c;
+        }
+        rep.ticks.merge(ticks);
         let first = rep.net.len();
         rep.net.extend(bare_net::trace::take().into_iter().map(|r| (step.line, r)));
         // A failed step names the network failures of this step: the page only sees `Failed to fetch`.
@@ -265,16 +301,17 @@ pub fn run(steps: &[Step], opt: &Options, red: &mut Redactor) -> Report {
         let ms = |d: Duration| d.as_secs_f64() * 1000.0;
         let ok = result.is_ok();
         let note = result.as_ref().ok().cloned().flatten();
-        let cpu_ms = thread_cpu_ns().saturating_sub(cpu0) as f64 / 1e6;
+        let cpu_ms = cpu_ns as f64 / 1e6;
         let net_ms = bare_net::trace::blocked_us().saturating_sub(net0) as f64 / 1000.0;
-        rep.steps.push(StepOut { line: step.line, text: step.text.clone(), ok, ms: ms(t0.elapsed()), busy_ms: ms(busy), waited_ms: ms(waited), tries, cpu_ms, net_ms, note });
+        rep.steps.push(StepOut { line: step.line, text: step.text.clone(), ok, ms: ms(t0.elapsed()), busy_ms: ms(busy), waited_ms: ms(waited), tries, cpu_ms, net_ms, ticks, note });
         if opt.progress {
             let s = rep.steps.last().expect("pushed");
             let what = match &result {
                 Ok(_) => "ok".to_string(),
                 Err(f) => format!("FAIL {}: {}", f.kind, f.message),
             };
-            eprintln!("{}", red.clean(&format!("L{} {} {what} ({:.0} ms, {} tries)", s.line, s.text, s.ms, s.tries)));
+            let longest = s.ticks.max.as_secs_f64() * 1000.0;
+            eprintln!("{}", red.clean(&format!("L{} {} {what} ({:.0} ms, {} tries, longest tick {longest:.1} ms)", s.line, s.text, s.ms, s.tries)));
         }
         if let Err(f) = result {
             rep.ok = false;
@@ -523,6 +560,11 @@ fn q(s: &str) -> String {
     out
 }
 
+/// The fields of `t` for a JSON object.
+fn ticks_json(t: &Ticks) -> String {
+    format!("\"ticks\":{},\"tick_max_ms\":{:.1},\"ticks_over_16\":{},\"ticks_over_50\":{}", t.n, t.max.as_secs_f64() * 1000.0, t.over_16, t.over_50)
+}
+
 impl Report {
     /// The result as JSON. Each text goes through `red` here, so a secret learned late is also hidden in the earlier records.
     pub fn json(&self, red: &Redactor) -> String {
@@ -532,7 +574,7 @@ impl Report {
             .iter()
             .map(|x| {
                 format!(
-                    "{{\"line\":{},\"step\":{},\"ok\":{},\"ms\":{:.1},\"busy_ms\":{:.1},\"waited_ms\":{:.1},\"cpu_ms\":{:.1},\"net_ms\":{:.1},\"tries\":{}{}}}",
+                    "{{\"line\":{},\"step\":{},\"ok\":{},\"ms\":{:.1},\"busy_ms\":{:.1},\"waited_ms\":{:.1},\"cpu_ms\":{:.1},\"net_ms\":{:.1},\"tries\":{},{}{}}}",
                     x.line,
                     s(&x.text),
                     x.ok,
@@ -542,6 +584,7 @@ impl Report {
                     x.cpu_ms,
                     x.net_ms,
                     x.tries,
+                    ticks_json(&x.ticks),
                     x.note.as_ref().map_or(String::new(), |n| format!(",\"note\":{}", s(n)))
                 )
             })
@@ -574,10 +617,11 @@ impl Report {
             })
             .collect();
         format!(
-            "{{\"ok\":{},\"window\":{},\"ms\":{:.1},\"steps\":[{}],\"failure\":{},\"console\":[{}],\"network\":[{}]}}",
+            "{{\"ok\":{},\"window\":{},\"ms\":{:.1},{},\"steps\":[{}],\"failure\":{},\"console\":[{}],\"network\":[{}]}}",
             self.ok,
             self.window,
             self.ms,
+            ticks_json(&self.ticks),
             steps.join(","),
             failure,
             logs.join(","),
