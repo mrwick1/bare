@@ -319,7 +319,10 @@ impl Heap {
     /// Allocate the object of an exotic payload. Nothing is allocated when it fails.
     pub(super) fn make_exotic(&mut self, proto: Option<ObjId>, ex: impl FnOnce() -> Exotic) -> R<ObjId> {
         let id = self.alloc_object(proto, false)?;
-        self.objects.get_mut(id.index, id.gn).expect("fresh object").exotic = EXOTIC;
+        // An exotic object has its own root shape: no ordinary object shares a shape with it, and the cache fill refuses it (step A2).
+        let ob = self.objects.get_mut(id.index, id.gn).expect("fresh object");
+        ob.exotic = EXOTIC;
+        ob.shape = shape::ROOT_EXOTIC;
         let ex = ex();
         if let Exotic::Buffer(v) = &ex {
             self.bytes += v.len();
