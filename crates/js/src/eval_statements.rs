@@ -84,7 +84,8 @@ enum SFrame {
 
 enum SStart {
     Stmt(StmtId),
-    List(List<Stmt>),
+    /// A list from item `i`. With `Some(s)`, the statement `s` runs first, then the list.
+    List(List<Stmt>, u32, Option<StmtId>),
 }
 
 impl<'p> Interp<'p> {
@@ -94,8 +95,70 @@ impl<'p> Interp<'p> {
     }
 
     /// Run a function or script body. The caller is already guarded (`call_fn`, `exec_current`).
+    /// The simple statements at its start, and an `if` with a simple branch, run here: no machine run, no frame list and no
+    /// dispatch through `resume` (`return x;` as a body costs a fifth of a small call in `machine`). The first other statement
+    /// and the rest of the list go to `machine`. The steps, the label list and the count of statement frames stay as in `machine`.
     fn exec_list(&mut self, l: List<Stmt>) -> Ex {
-        self.machine(SStart::List(l))
+        self.sf_room()?;
+        let (env0, strict0) = (self.env, self.strict);
+        self.stmt_frames += 1;
+        let mut r = Ok(None);
+        let mut i = 0;
+        while i < l.len() && matches!(r, Ok(None)) {
+            let s = self.list_at(l, i);
+            i += 1;
+            r = self.simple_step(s);
+        }
+        self.stmt_frames -= 1;
+        let r = match r {
+            Ok(None) => Ok(()),
+            Ok(first) => self.machine(SStart::List(l, i as u32, first)),
+            Err(c) => Err(c),
+        };
+        self.env = env0;
+        self.strict = strict0;
+        r
+    }
+
+    /// One statement of `exec_list`, as `enter` runs it. `Some(s)`: `s` needs the machine and did not start.
+    #[inline(always)]
+    fn simple_step(&mut self, s: StmtId) -> Result<Option<StmtId>, Ctl> {
+        let stmt = *self.prog.stmt(s);
+        match stmt.kind {
+            StmtKind::If { test, cons, alt } => {
+                self.tick()?;
+                self.pending_labels.clear();
+                if self.depth == 0 {
+                    self.completion = Value::Undefined;
+                }
+                let b = if self.test_true(test)? { cons } else {
+                    match alt {
+                        Some(a) => a,
+                        None => return Ok(None),
+                    }
+                };
+                let bs = *self.prog.stmt(b);
+                if Self::needs_machine(&bs.kind) {
+                    return Ok(Some(b));
+                }
+                self.tick()?;
+                self.exec_simple(b, &bs, self.depth == 0)?;
+                Ok(None)
+            }
+            k if Self::needs_machine(&k) => Ok(Some(s)),
+            _ => {
+                self.tick()?;
+                self.pending_labels.clear();
+                self.exec_simple(s, &stmt, self.depth == 0)?;
+                Ok(None)
+            }
+        }
+    }
+
+    /// The statements that `enter` does not give to `exec_simple`.
+    #[inline(always)]
+    fn needs_machine(k: &StmtKind) -> bool {
+        matches!(k, StmtKind::If { .. } | StmtKind::Block(_) | StmtKind::While { .. } | StmtKind::DoWhile { .. } | StmtKind::For { .. } | StmtKind::ForIn { .. } | StmtKind::ForOf { .. } | StmtKind::Try { .. } | StmtKind::Switch { .. } | StmtKind::Labeled { .. })
     }
 
     fn machine(&mut self, start: SStart) -> Ex {
@@ -103,8 +166,8 @@ impl<'p> Interp<'p> {
         let mut st = self.sf_pool.pop().unwrap_or_default();
         let mut go = match start {
             SStart::Stmt(s) => SGo::Stmt(s),
-            SStart::List(l) => match self.sf_push(&mut st, SFrame::List { l, i: 0, scope: None }) {
-                Ok(()) => SGo::Done(Ok(())),
+            SStart::List(l, i, first) => match self.sf_push(&mut st, SFrame::List { l, i, scope: None }) {
+                Ok(()) => first.map_or(SGo::Done(Ok(())), SGo::Stmt),
                 Err(e) => SGo::Done(Err(e.into())),
             },
         };
@@ -386,16 +449,16 @@ impl<'p> Interp<'p> {
                 let prog = self.prog.clone();
                 for d in prog.list(decls) {
                     let d = *prog.decl(d);
-                    let name = if let PatKind::Ident = prog.pat(d.target).kind { Some(self.name_str(self.pat_name[d.target.index()])?) } else { None };
+                    let name = if let PatKind::Ident = prog.pat(d.target).kind { Some(self.pat_name[d.target.index()]) } else { None };
                     match (kind, d.init) {
                         (VarKind::Var, None) => {}
                         (VarKind::Var, Some(i)) => {
-                            let v = self.eval_named(i, name)?;
+                            let v = self.eval_named_n(i, name)?;
                             self.bind_pattern(d.target, v, Bind::Assign)?;
                         }
                         (_, init) => {
                             let v = match init {
-                                Some(i) => self.eval_named(i, name)?,
+                                Some(i) => self.eval_named_n(i, name)?,
                                 None => Value::Undefined,
                             };
                             self.bind_pattern(d.target, v, Bind::Init)?;

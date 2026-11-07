@@ -2330,6 +2330,7 @@ Known regressions (row, glibc, jemalloc, cause):
 - `sc_load symbol_keys 1`: +0.780%, +0.518%. A symbol key read misses the inline cache. A hit in `Shapes::found` costs about 70 instructions; `PropMap::find` on main cost about 40.
 - `sc_load symbol_keys 10`: +0.705%, +0.663%. The cause is the same.
 - `wrapper_load forin 10000 30000`: +0.591%, +0.573%. Reads and writes of dictionary-mode globals pay 3 to 6 instructions more for the `Box<PropMap>` load.
+- Status on 2026-11-08 (main `6d57db6` against `65bbf8e`, the base of these rows): all four rows are under the limit. `proxy_load get_trap 10` -9.05% and -8.15%, `sc_load symbol_keys 1` -4.34% and -3.37%, `sc_load symbol_keys 10` -5.46% and -5.37%, `wrapper_load forin 10000 30000` -4.03% and -3.89% (glibc and jemalloc). They are no longer known regressions. The tree-walker rounds of #267 and #269 paid for them. The causes above were not changed.
 
 Attempts that failed:
 - `get_stub` in `get_prop` for all reads: 20 rows over under both allocators.
@@ -3328,3 +3329,30 @@ Checks (arjun-e16):
 Next, not done here: the heavy page peak. A fixed glibc mmap threshold costs time (#268). Paint of only the damaged rectangles would need the buffer age (a copy of the damage of the last frame into the free buffer).
 
 Not tested: a real Hyprland window (only `cage`); a compositor that holds both buffers while idle (then nothing is dropped); HiDPI; live staging (no credentials on this machine); the look of a window during a load (no screenshot: the kept frame rests on the commit that is not made); the cost of the first frame after an idle second (a new buffer and its page faults) in time.
+
+## A third round of tree-walker wins: bodies without the machine (2026-11-08)
+
+This round follows a new profile of the journey and the typing page on main `6d57db6`. Each change was measured alone.
+
+Profile (`perf record -e instructions:u`, frame pointers, self instructions): journey `eval_expr_inner` 9.4%, `link_inner` 7.6%, `machine` 7.4%, `eval_assign` 3.3%, `test_true` 3.1%, `get_name` 2.5%. Typing page: `eval_expr_inner` 13.8%, `link_inner` 11.2%, `machine` 7.0%, `test_true` 5.0%, `eval_assign` 4.6%. `eval_load fib`: `machine` 17.8% and `step_frame` 1.8%. A body `{ return x; }` paid a full machine run: a pooled frame list, a list frame, `resume` and `step_frame` for the `return`.
+
+Changes (`crates/js/src/eval.rs`, `eval_statements.rs`, `eval_classes.rs`):
+- `exec_list` runs the simple statements at the start of a body itself, and an `if` whose branch is a simple statement. The first other statement goes to `machine`, which starts with the rest of the list (`SStart::List` takes a start item and a first statement). The step count, the label list and the count of statement frames stay as in `machine`.
+- `eval_named_n` makes the name string of a binding only for a function, class or parenthesized value. `eval_assign`, `var`, `let` and `const` and pattern defaults made it for every value.
+- `member_target` and `member_ref` read the base of an assignment target with `operand`.
+- Measured and dropped: the same fast path for a block with no lexical declaration (as a statement or as an `if` branch) and for `else if` chains. Typing +0.1%, the journey within its noise.
+
+Results (archMachine, base origin/main `6d57db6` from `base-build`):
+- Typing page (`type_load`, the method of `keycost.sh`): `#a1` 292.4 M to 282.0 M for each key (-3.6%); `#f0` 297.9 M to 287.3 M (-3.6%). Load and mount 589.4 M to 574.1 M (-2.6%).
+- `tools/js/instr.sh`, `eval_load` scale 1: `fib` -8.5%, `calls` -6.6%, `closures` -4.1%, `objects` -2.3%, `loop` -2.1%, `webpack` -0.9%.
+- Journey, 3 runs of each build, all passed. `instructions:u` of the whole process: main 10.77, 10.92, 11.01 G; now 10.51, 10.50, 10.49 G (about -3.5%). CPU of the page thread (sum of `cpu_ms`): main 1,517, 1,545, 1,613 ms; now 1,509, 1,522, 1,515 ms (about -2.5%; the network and the live server move it).
+- Known rows of #246 against their base `65bbf8e`: all under the limit (see the status line in "A1 and A2 cost rows: third pass").
+
+Checks (archMachine, on `6d57db6`):
+- `cargo test --release --workspace --no-fail-fast`: 2,987 passed, 0 failed.
+- `tools/js/cost_matrix.sh`, base `6d57db6` from `base-build` (with `-p bare-stress`): 805 rows. Mean change: glibc -0.990%, jemalloc +0.000% (0 rows measured). Over under one allocator: 0. Over under both: 0. Failed: 0.
+- `tools/js/test262_check.sh`: gate ok. `tools/js/exec_diff.sh`: 79 runs, 0 differences. All 42 other `tools/js/*_check.sh` scripts pass (`parse_check.sh` with `ACORN` set to Acorn 8.16).
+
+Next, not done here: `Res<Value>` is 32 bytes, so each node returns through memory. A 16-byte `Res<Value>` (in two registers) needs an `Error` of 8 bytes, so `Error::Throw` would have to keep its value in the interpreter. That touches about 200 sites in 107 files.
+
+Not tested: arjun-e16; the window (`--window`); peak RSS of the typing page; the journey after the rebase on `89cb318` (no change in `crates/js`).

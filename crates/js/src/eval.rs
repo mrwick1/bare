@@ -2709,6 +2709,18 @@ impl<'p> Interp<'p> {
         }
     }
 
+    /// `eval_named` with the name of the binding `n`. The name string is made only for a value that can take it.
+    #[inline(always)]
+    fn eval_named_n(&mut self, e: ExprId, n: Option<u32>) -> Res<Value> {
+        match (self.prog.expr(e).kind, n) {
+            (ExprKind::Function(_) | ExprKind::Class(_) | ExprKind::Paren(_), Some(n)) => {
+                let s = self.name_str(n)?;
+                self.eval_named(e, Some(s))
+            }
+            _ => self.operand(e),
+        }
+    }
+
     fn eval_args(&mut self, l: List<Expr>) -> Res<Vec<Value>> {
         let mut out = self.arg_pool.pop().unwrap_or_default();
         out.clear();
@@ -3254,11 +3266,11 @@ impl<'p> Interp<'p> {
         let ex = *self.prog.expr(e);
         match ex.kind {
             ExprKind::Member { obj, name, .. } => {
-                let base = self.eval_expr(obj)?;
+                let base = self.operand(obj)?;
                 Ok((base, self.expr_key(e, name)?))
             }
             ExprKind::Index { obj, index, .. } => {
-                let base = self.eval_expr(obj)?;
+                let base = self.operand(obj)?;
                 let iv = self.operand(index)?;
                 if is_nullish(base) {
                     let t = self.display(base);
@@ -3315,11 +3327,11 @@ impl<'p> Interp<'p> {
             _ => return Err(unsupported("assignment target", pat.span)),
         };
         let name = match r {
-            Ref::Name(n, _) => Some(self.name_str(n)?),
+            Ref::Name(n, _) => Some(n),
             _ => None,
         };
         let v = match op {
-            AssignOp::Assign => self.eval_named(value, name)?,
+            AssignOp::Assign => self.eval_named_n(value, name)?,
             AssignOp::Compound(b) => {
                 let old = self.ref_get(&r)?;
                 let rhs = self.operand(value)?;
@@ -3335,7 +3347,7 @@ impl<'p> Interp<'p> {
                 if short {
                     return Ok(old);
                 }
-                self.eval_named(value, name)?
+                self.eval_named_n(value, name)?
             }
         };
         self.ref_put(&r, v)?;
@@ -3385,8 +3397,8 @@ impl<'p> Interp<'p> {
             }
             PatKind::Assign { target, default } => {
                 let v = if matches!(v, Value::Undefined) {
-                    let name = if let PatKind::Ident = self.prog.pat(target).kind { Some(self.name_str(self.pat_name[target.index()])?) } else { None };
-                    self.eval_named(default, name)?
+                    let name = if let PatKind::Ident = self.prog.pat(target).kind { Some(self.pat_name[target.index()]) } else { None };
+                    self.eval_named_n(default, name)?
                 } else {
                     v
                 };
