@@ -648,6 +648,23 @@ pub struct Stats {
     pub buffer_bytes: usize,
 }
 
+/// Capacity bytes of the heap, by part (`Heap::footprint`). `*_used` is the part that holds an entry; the rest of `*_cap` is slack.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Footprint {
+    pub object_slab: usize,
+    pub string_slab: usize,
+    pub interner: usize,
+    pub entries_used: usize,
+    pub entries_cap: usize,
+    pub elems_used: usize,
+    pub elems_cap: usize,
+    pub index_tables: usize,
+    pub string_units: usize,
+    pub objects_with_props: usize,
+    /// Objects, and capacity bytes of their property vectors, by the number of entries: 0, 1, 2, 3, 4, 5 to 8, 9 to 16, 17 to 64, more.
+    pub by_len: [(usize, usize, usize); 9],
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Collected {
     pub objects: usize,
@@ -720,6 +737,31 @@ impl Heap {
 
     pub fn limits(&self) -> HeapLimits {
         self.limits
+    }
+
+    /// Where the memory of the heap is, by capacity (real bytes asked of the allocator, not the accounted `Stats::bytes`). It walks every object, so it is for a load tool, not for a hot path.
+    pub fn footprint(&self) -> Footprint {
+        let mut f = Footprint { object_slab: self.objects.capacity_bytes(), string_slab: self.strings.capacity_bytes(), interner: self.interner.table.capacity() * 4, ..Default::default() };
+        for o in &self.objects.live {
+            f.entries_used += o.props.entries.len() * ENTRY_BYTES;
+            f.entries_cap += o.props.entries.capacity() * ENTRY_BYTES;
+            f.elems_used += o.elems.len() * ELEM_BYTES;
+            f.elems_cap += o.elems.capacity() * ELEM_BYTES;
+            f.index_tables += o.props.index.as_ref().map_or(0, |m| m.capacity() * (std::mem::size_of::<(PropertyKey, u32)>() + 1));
+            f.objects_with_props += (!o.props.entries.is_empty()) as usize;
+            let n = o.props.entries.len();
+            let b = match n { 0..=4 => n, 5..=8 => 5, 9..=16 => 6, 17..=64 => 7, _ => 8 };
+            f.by_len[b].0 += 1;
+            f.by_len[b].1 += n * ENTRY_BYTES;
+            f.by_len[b].2 += o.props.entries.capacity() * ENTRY_BYTES;
+        }
+        f.string_units = self.strings.live.iter().map(|s| s.units.len() * 2).sum();
+        f
+    }
+
+    /// Accounted bytes of the live and the dead objects and strings that a sweep has not freed yet (`Stats::bytes`, with no copy of the rest).
+    pub fn used_bytes(&self) -> usize {
+        self.bytes
     }
 
     pub fn stats(&self) -> Stats {
@@ -1387,8 +1429,21 @@ impl Heap {
     }
 
     /// Like `own_keys`, but without the virtual integer indices of a byte view. For tracing: those hold no references.
-    pub fn stored_keys(&self, o: ObjId) -> R<Vec<PropertyKey>> {
-        self.own_keys_with(o, false)
+    /// The values that the stored properties of `o` point to (elements, data values, accessor functions), pushed on `out`. The same edges as
+    /// `collect` follows, with no key lookup and no copy of the key list: the evaluator's collect pass uses it for each object.
+    pub fn stored_edges(&self, o: ObjId, out: &mut Vec<Value>) -> R<()> {
+        let ob = self.obj(o)?;
+        out.extend(ob.elems.iter().flatten());
+        for (_, p) in ob.props.iter() {
+            match p {
+                Property::Data { value, .. } => out.push(value),
+                Property::Accessor { get, set, .. } => {
+                    out.extend(get.map(Value::Object));
+                    out.extend(set.map(Value::Object));
+                }
+            }
+        }
+        Ok(())
     }
 
     fn own_keys_with(&self, o: ObjId, virt: bool) -> R<Vec<PropertyKey>> {
@@ -1424,6 +1479,14 @@ impl Heap {
         let after = obj_bytes(o);
         self.bytes = self.bytes + after - before;
         r
+    }
+
+    /// Room for `n` more own properties, in one allocation of that size. A vector that grows by push takes 4, 8, 16 entries (40 bytes each): an
+    /// object made from a literal, or a closure, knows how many it will have, so the slack is not made.
+    pub fn reserve_props(&mut self, o: ObjId, n: usize) -> R<()> {
+        self.obj(o)?;
+        self.edit(o, |ob| ob.props.entries.reserve_exact(n));
+        Ok(())
     }
 
     /// The `length` and `name` of a function object that has just been made and has no other property (both read-only,
@@ -2847,6 +2910,59 @@ mod tests {
             }
             live = keep;
         }
+    }
+
+    /// `stored_edges` is what the evaluator's collect pass follows for an object: dense elements, sparse elements, data values and both accessor
+    /// functions. Primitive values are listed too (the caller skips them). A missing getter or setter adds nothing.
+    #[test]
+    fn stored_edges_lists_every_value_a_property_holds() {
+        let mut h = Heap::default();
+        let o = h.new_object(None).unwrap();
+        let (getter, setter, elem, sparse, data) = (h.new_object(None).unwrap(), h.new_object(None).unwrap(), h.new_object(None).unwrap(), h.new_object(None).unwrap(), h.new_object(None).unwrap());
+        let (acc, only_get, dk) = (key(&mut h, "acc"), key(&mut h, "only_get"), key(&mut h, "data"));
+        h.set(o, dk, Value::Object(data)).unwrap();
+        h.define_own_property(o, acc, &PropertyDescriptor { get: Some(Some(getter)), set: Some(Some(setter)), ..Default::default() }).unwrap();
+        h.define_own_property(o, only_get, &PropertyDescriptor { get: Some(Some(getter)), set: Some(None), ..Default::default() }).unwrap();
+        h.set(o, PropertyKey::Index(0), Value::Object(elem)).unwrap();
+        h.define_own_property(o, PropertyKey::Index(5000), &PropertyDescriptor { value: Some(Value::Object(sparse)), ..Default::default() }).unwrap();
+        let mut out = Vec::new();
+        h.stored_edges(o, &mut out).unwrap();
+        let mut got: Vec<ObjId> = out.iter().filter_map(|v| if let Value::Object(x) = v { Some(*x) } else { None }).collect();
+        got.sort_by_key(|x| x.index);
+        let mut want = vec![getter, setter, elem, sparse, data, getter];
+        want.sort_by_key(|x| x.index);
+        assert_eq!(got, want);
+        assert_eq!(out.len(), 6, "no other value is listed");
+        let stale = h.new_object(None).unwrap();
+        h.collect(&[]).unwrap();
+        assert_eq!(h.stored_edges(stale, &mut out), Err(HeapError::Stale));
+    }
+
+    /// An object that gets room for the properties it will have holds no slack; the same object built by push grows to 4.
+    #[test]
+    fn reserved_property_room_leaves_no_slack() {
+        let mut h = Heap::default();
+        let (k, name) = (key(&mut h, "length"), key(&mut h, "name"));
+        let s = h.intern_str("f").unwrap();
+        let o = h.new_object(None).unwrap();
+        h.reserve_props(o, 3).unwrap();
+        h.init_function(o, (k, 0.0), (name, s)).unwrap();
+        let pk = key(&mut h, "prototype");
+        h.set(o, pk, n(1.0)).unwrap();
+        let f = h.footprint();
+        assert_eq!((f.entries_used, f.entries_cap), (3 * ENTRY_BYTES, 3 * ENTRY_BYTES));
+        let p = h.new_object(None).unwrap();
+        h.set(p, k, n(1.0)).unwrap();
+        let f = h.footprint();
+        assert_eq!(f.entries_cap - f.entries_used, 3 * ENTRY_BYTES, "a pushed vector of one entry has room for 4");
+        let stale = h_stale(&mut h);
+        assert_eq!(h.reserve_props(stale, 1), Err(HeapError::Stale));
+    }
+
+    fn h_stale(h: &mut Heap) -> ObjId {
+        let o = h.new_object(None).unwrap();
+        h.collect(&[]).unwrap();
+        o
     }
 
     #[test]

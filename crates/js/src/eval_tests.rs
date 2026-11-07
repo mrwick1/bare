@@ -232,6 +232,42 @@ fn collect_keeps_what_roots_reach_and_frees_the_rest() {
     });
 }
 
+/// `gc_due` is the host's safe-point question: has the heap grown to half as large again as the previous collect left (past 8 MiB accounted)?
+/// A small heap, a call in progress or a collect that just ran all answer no.
+#[test]
+fn gc_is_due_when_the_heap_has_grown_by_half_since_the_last_collect() {
+    big(|| {
+        let prog = parse_script("var keep = []; function churn(n) { var t = []; for (var i = 0; i < n; i++) t.push({ a: i, b: [i], c: 'x' + i }); return t.length; }", Limits::default()).unwrap();
+        let mut it = setup(&prog, EvalLimits { max_steps: u64::MAX / 2, ..Default::default() });
+        it.run().unwrap();
+        assert!(!it.gc_due(), "a new realm is small");
+        let churn = global_get(&mut it, "churn");
+        it.call(churn, Value::Undefined, &[Value::Number(5_000.0)]).unwrap();
+        assert!(!it.gc_due(), "{} bytes are below the floor", it.heap.used_bytes());
+        it.call(churn, Value::Undefined, &[Value::Number(60_000.0)]).unwrap();
+        assert!(it.heap.used_bytes() > 8 << 20, "{}", it.heap.used_bytes());
+        assert!(it.gc_due(), "{} bytes, none live", it.heap.used_bytes());
+        it.collect(&[]).unwrap();
+        assert!(!it.gc_due(), "a collect that frees the garbage ends it");
+        // The live size sets the next limit: keep ~10 MiB alive, and the limit moves above the floor.
+        let keep = global_get(&mut it, "keep");
+        let Value::Object(k) = keep else { panic!() };
+        for i in 0..70_000 {
+            let o = it.heap.new_object(None).unwrap();
+            it.heap.set(k, PropertyKey::Index(i), Value::Object(o)).unwrap();
+        }
+        it.collect(&[]).unwrap();
+        let live = it.heap.used_bytes();
+        assert!(live > 5 << 20, "{live}");
+        let limit = (8usize << 20).max(live + live / 2);
+        while !it.gc_due() {
+            it.heap.new_object(None).unwrap();
+        }
+        let used = it.heap.used_bytes();
+        assert!(used > limit && used < limit + 1000, "due at {used}, the limit is {limit} (1.5 x {live}, or the floor)");
+    });
+}
+
 #[test]
 fn a_value_not_in_roots_is_stale_after_collect() {
     big(|| {

@@ -36,6 +36,14 @@ struct Code {
 }
 
 impl Code {
+    /// Capacity bytes of the caches of this script (not the syntax tree).
+    fn cache_bytes(&self) -> usize {
+        use std::mem::size_of;
+        (self.expr_name.capacity() + self.pat_name.capacity() + self.stmt_label.capacity() + self.func_name.capacity() + self.slots.sites.len()) * 4
+            + (self.expr_str.capacity() + self.prop_str.capacity()) * size_of::<Option<StrId>>()
+            + self.scopes.capacity() * size_of::<FScope>() + self.fflags.capacity() + self.cflags.capacity()
+    }
+
     fn placeholder(prog: &Rc<Program<'static>>) -> Code {
         Code { prog: prog.clone(), expr_name: Vec::new(), pat_name: Vec::new(), stmt_label: Vec::new(), func_name: Vec::new(), expr_str: Vec::new(), prop_str: Vec::new(), scopes: Vec::new(), slots: Slots::default(), fflags: Vec::new(), cflags: Vec::new() }
     }

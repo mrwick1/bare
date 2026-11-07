@@ -206,6 +206,22 @@ fn type_needs_an_editable_field_and_replaces_its_text() {
     });
 }
 
+/// One `drive_type` is one call of the host, so no loader round ends inside it. A handler that makes garbage at each key must not let it pile up:
+/// the heap collects between the keys (`Interp::gc_due`). Before, 40 keys of 20,000 objects each kept every object until the call ended.
+#[test]
+fn typing_collects_the_garbage_of_its_own_keys() {
+    big(|| {
+        let mut b = browser("<input id=a><script>document.getElementById('a').addEventListener('input', function () { var x = []; for (var i = 0; i < 20000; i++) x.push({ a: i, b: [i] }); window.last = x.length; });</script>");
+        let a = node(&mut b, "#a");
+        b.drive_type(a, &"k".repeat(40)).unwrap();
+        let s = b.it.heap.stats();
+        assert!(s.collections >= 2, "the heap collected {} times during the typing", s.collections);
+        assert!(s.live_objects < 400_000, "{} objects are alive after 40 keys (40 x 40,000 made)", s.live_objects);
+        let v = b.run_script("window.last + ':' + document.getElementById('a').value.length").unwrap();
+        assert_eq!(b.it.display(v), "20000:40");
+    });
+}
+
 // ------------------------------------------------------------------------------------------ the session
 
 fn cfg(url: String) -> SessionConfig {

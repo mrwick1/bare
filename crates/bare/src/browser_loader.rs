@@ -1325,7 +1325,7 @@ impl Run<'_> {
                 did += n;
                 self.after_js()?;
             }
-            if self.res.rounds.is_multiple_of(self.lim.collect_every.max(1)) {
+            if self.res.rounds.is_multiple_of(self.lim.collect_every.max(1)) || self.b.it.gc_due() {
                 self.b.collect(&[]).map_err(fatal_of)?;
             }
             if did > 0 {
