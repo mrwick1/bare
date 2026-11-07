@@ -442,6 +442,7 @@ impl<'p> Interp<'p> {
     }
 
     /// Is `f` a function made by `compile_function`?
+    #[inline]
     pub fn is_scoped_function(&self, f: ObjId) -> bool {
         !self.hs.scripts.is_empty() && matches!(self.funcs.get(&f), Some(Callee::Script { script, .. }) if self.hs.scripts.binary_search(script).is_ok())
     }

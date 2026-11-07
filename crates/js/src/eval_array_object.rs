@@ -284,7 +284,7 @@ impl<'p> Interp<'p> {
 
     fn ao_has(&mut self, this: Value, k: PropertyKey) -> Res<bool> {
         Ok(match this {
-            Value::Object(o) => self.o_has_property(o, k)?,
+            Value::Object(o) => self.o_has_plain(o, k)?,
             _ => false,
         })
     }

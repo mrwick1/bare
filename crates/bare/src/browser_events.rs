@@ -155,30 +155,26 @@ impl Dom {
             crate::browser_handlers::sync_path_of(self, &path, ty);
         }
         for &t in path[1..].iter().rev() {
-            self.fire(it, ev, t, 1, true)?;
+            self.fire(it, ev, ty, t, 1, true)?;
         }
-        self.fire(it, ev, target, 2, true)?;
-        self.fire(it, ev, target, 2, false)?;
+        self.fire(it, ev, ty, target, 2, true)?;
+        self.fire(it, ev, ty, target, 2, false)?;
         if bubbles {
             for &t in &path[1..] {
-                self.fire(it, ev, t, 3, false)?;
+                self.fire(it, ev, ty, t, 3, false)?;
             }
         }
         Ok(())
     }
 
     /// The listeners of `t` for this event, capturing or not, one turn.
-    fn fire(&self, it: &mut Interp<'_>, ev: ObjId, t: Target, phase: u8, capture: bool) -> R<()> {
-        let (ty, snapshot) = {
+    fn fire(&self, it: &mut Interp<'_>, ev: ObjId, ty: &str, t: Target, phase: u8, capture: bool) -> R<()> {
+        // Most calls find no listener: they leave before the event is looked up.
+        let snapshot: Vec<Listener> = {
             let st = self.st.borrow();
-            let e = &st.events[&ev];
-            if e.stop {
-                return Ok(());
-            }
-            let list: Vec<Listener> = st.listeners.get(&t).into_iter().flatten().filter(|l| l.capture == capture && *l.ty == *e.ty).cloned().collect();
-            (e.ty.clone(), list)
+            st.listeners.get(&t).into_iter().flatten().filter(|l| l.capture == capture && *l.ty == *ty).cloned().collect()
         };
-        if snapshot.is_empty() {
+        if snapshot.is_empty() || self.st.borrow().events[&ev].stop {
             return Ok(());
         }
         let cur = self.target_value(it, t)?;
@@ -201,7 +197,7 @@ impl Dom {
                 l.handler && !st.hd.raw.is_empty() && st.hd.raw.contains_key(&l.id)
             };
             if raw {
-                match crate::browser_handlers::compile_slot(self, it, t, &ty, l.id)? {
+                match crate::browser_handlers::compile_slot(self, it, t, ty, l.id)? {
                     Value::Object(f) => l.cb = f,
                     _ => continue,
                 }
@@ -216,7 +212,7 @@ impl Dom {
             self.st.borrow_mut().events.get_mut(&ev).expect("event is registered").in_passive = false;
             match r {
                 Ok(_) => {}
-                Err(Error::Throw(v)) => self.report(it, v, &ty, t),
+                Err(Error::Throw(v)) => self.report(it, v, ty, t),
                 Err(e) => return Err(e),
             }
             if self.st.borrow().driver {

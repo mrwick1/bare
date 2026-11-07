@@ -336,6 +336,15 @@ impl<'p> Interp<'p> {
         self.o_define_own_property(o, key, &PropertyDescriptor { value: Some(b), ..*d })
     }
 
+    /// `o_has_property` for a key that is never an `on<x>` name (an array index): it does not ask the host.
+    #[inline(always)]
+    pub(crate) fn o_has_plain(&mut self, o: ObjId, key: PropertyKey) -> Res<bool> {
+        match self.heap.has_property(o, key) {
+            Ok(v) => Ok(v),
+            Err(e) => self.heap_miss(e, |s| s.heap.has_property(o, key), |s| s.o_has_slow(o, key)),
+        }
+    }
+
     #[inline(always)]
     fn o_has_property(&mut self, o: ObjId, key: PropertyKey) -> Res<bool> {
         match self.heap.has_property_lazy(o, key) {
