@@ -2982,3 +2982,79 @@ Checks (archMachine):
 - A scan of all 86 output files of the runs found neither the email nor the password. The driver captured `overview` and `search` only after its check that no secret is on the page.
 
 Not tested: arjun-e16; a real Hyprland window (only `cage` headless); HiDPI; a page with a long tick from a timer alone in a window (none on staging); `keycost.sh` (no change on the typing path).
+
+## Memory of JS code per source byte: the string cache of a site, and an age for the parse cache (S5)
+
+Measured first (archMachine, read-only staging journey `drive-journey.steps`, base origin/main `5e87390`). A temporary print (not in the code) gave the arenas of each parsed tree and the tables of each `Code::new`.
+
+Syntax trees: 60 parses, 2,392,790 B of source, 15,186,400 B of nodes and lists (6.3 B for each source byte; 7.3 B with the owned copy of the source). The arenas have no spare capacity (`into_owned` shrinks them). The 26.5 MiB of #258 is a jemalloc sample of the trees that were alive at the peak before #261, not the tree of one document.
+
+| Arena | Count | Size (B) | Bytes | Share |
+| --- | ---: | ---: | ---: | ---: |
+| `exprs` | 419,043 | 24 | 10,057,032 | 66.2% |
+| `stmts` | 38,807 | 32 | 1,241,824 | 8.2% |
+| `pats` | 52,809 | 20 | 1,056,180 | 7.0% |
+| `props` | 33,635 | 28 | 941,780 | 6.2% |
+| `lists` | 201,227 | 4 | 804,908 | 5.3% |
+| `funcs` | 14,030 | 44 | 617,320 | 4.1% |
+| `decls` | 19,558 | 16 | 312,928 | 2.1% |
+| other 7 arenas | 6,563 | 8-32 | 154,428 | 1.0% |
+
+Expressions by kind: `Ident` 125,913 (30%), `Member` 58,995, `Call` 37,840, `String` 30,941, `Number` 28,632, `Binary` 18,942, `Assign` 13,268, `Unary` 12,705, `Paren` 12,634, `Logical` 12,297. Patterns: `Ident` 44,183 of 52,809. An `Expr` is a 16 B `ExprKind` and an 8 B span. The largest variants (`Call`, `Cond`, `Member`) fill the 16 B with ids, so a `Box` on cold variants does not make it smaller. The tree has no `String` names (names are spans) and no `Option<Box<..>>`. No cheap cut is left in the tree.
+
+Per-script tables (`Code::new` in `eval_scripts.rs`), summed over the 350 scripts that the journey adds to its realms (5,615,564 B of source, with the scripts that each document adds again):
+
+| Table | Entry | Bytes before | Share | Bytes after |
+| --- | --- | ---: | ---: | ---: |
+| `expr_str` (string literal and member name) | 12 B for each expression | 12,050,100 | 50.9% | 0 |
+| `slots.sites` | 4 B for each expression and pattern | 4,531,916 | 19.1% | 4,531,916 |
+| `expr_name` | 4 B for each expression | 4,016,700 | 17.0% | 4,016,700 |
+| `scopes` (`FScope`, 32 B) | for each function, + 1 | 1,094,144 | 4.6% | 1,094,144 |
+| `prop_str` | 12 B for each property | 911,544 | 3.9% | 911,544 |
+| `pat_name`, `stmt_label`, `func_name`, `fflags`, `cflags` | 4 B or 1 B | 1,066,145 | 4.5% | 1,066,145 |
+| total (`Code::cache_bytes`) | | 23,670,549 | | 11,620,449 |
+
+The vectors inside `FScope` are not counted, nor `site_strs` (below), which grows as sites run. That is 4.2 B for each source byte before and 2.1 B after. A run with the change measured 11,615,059 B for its 328 scripts.
+
+Change:
+- `expr_str` held an `Option<StrId>` (12 B) for each expression. Only `String` and `Member` nodes use it (21% of the expressions), and only after they run. Their entry in `slots.sites` is free: only identifier sites use `sites` (the walk sets it in `sc_site` for `Ident` expressions and patterns; `bc_scope` reads only the sites it visited). Now such a site keeps its position + 1 in `site_strs`, a per-script `Vec<StrId>` that grows when a site runs first. The GC roots `site_strs` as it rooted `expr_str`.
+- `site_str` reads `site_strs.get(sites[e] - 1)` with a wrapping subtraction: 0 (not yet) is past the end, so one bounds check covers both cases. A first version with an `if` and no forced inline made 7 rows of string code +0.55% to +0.71% under both allocators (`builtins_load strings`, `intl_load cmp_opts`, `seam_load string_hooks`, `revive_load shallow 10`). `#[inline(always)]` and the single check removed it.
+- Parse cache age: each `Interp::realm` calls `parse_cache::new_realm`. It drops the entries that no realm used in the last `MAX_IDLE` (2) realms. A hit or a parse sets the age of an entry. The journey parses the same 60 scripts as before, so no script parses again.
+- Not done: `prop_str` (0.9 MB) has no free slot to borrow. Lazy tables for each function would touch `call_script`, which another task owns.
+
+Results (archMachine, base origin/main `3313480` from `base-build`, 3 runs of each one after the other):
+
+| Run | Peak PSS main (MiB) | Peak PSS this change (MiB) | Peak PSS this change without the age (MiB) |
+| --- | ---: | ---: | ---: |
+| 1 | 75.9 | 73.4 | 70.7 |
+| 2 | 75.7 | 70.7 | 70.2 |
+| 3 | 75.7 | 70.1 | 71.8 |
+
+- Peak PSS falls by about 4 MiB. The age of the parse cache does not lower the peak: the runs without it are in the same range. At the peak the entries are in use by the current document or the one before. It keeps the cache from holding old scripts in a long session.
+- The 3 runs above (and the CPU table below) used a build before the last fix of `site_str`. A second set of 3 runs of the final build, under a load average of 8 to 11: main 76.5, 75.8, 76.1 MiB; this change 73.2, 70.2, 70.7 MiB.
+- All instructions of the journey (`perf stat -e instructions:u`, final build, 3 runs each): main 12.11, 12.12, 12.22 G; this change 12.15, 11.84, 11.98 G.
+
+CPU of the page thread per step group (`cpu_ms`), ms, 3 runs, load average 3 to 6:
+
+| Steps | main | this change | without the age |
+| --- | --- | --- | --- |
+| 1 open | 116-126 | 117-119 | 107-122 |
+| 2-3 login, overview | 387-405 | 369-394 | 382-400 |
+| 4 agents | 338-370 | 327-357 | 332-361 |
+| 5 search | 303-306 | 292-337 | 293-303 |
+| 6 reload | 262-284 | 269-278 | 266-275 |
+| 7 sign out | 187-202 | 200-211 | 201-204 |
+| 8 agents, no session | 65-70 | 65-71 | 65-71 |
+| total | 1688-1738 | 1666-1760 | 1677-1698 |
+
+Next candidates, not done: `Expr` at 16 B needs an `ExprKind` of 8 B (`Ident`, 30% of the expressions, has only a span). `slots.sites` and `expr_name` could share one word for each expression where the two uses never meet.
+
+Tests: `an_entry_that_no_recent_realm_used_goes` (`parse_cache.rs`). The `site_strs` path is covered by the existing tests of string literals, member reads and the GC.
+
+Checks (archMachine):
+- `tools/js/cost_matrix.sh`, base `3313480` from `base-build`: 805 rows. Mean change: glibc -0.155%, jemalloc +0.000% (0 rows measured). Over under one allocator: 0. Over under both: 0. Failed: 0.
+- `tools/js/test262_check.sh`: gate ok. `tools/js/exec_diff.sh`: 79 runs, 0 differences. All 42 other `tools/js/*_check.sh` scripts pass (`parse_check.sh` with `ACORN` set to Acorn 8.15).
+- `cargo test --release --workspace --no-fail-fast`: 54 binaries, 2,978 passed, 0 failed.
+- Live staging, read only: 23 runs of the journey, all passed. A scan of all output files and `docs/` found neither the email nor the password.
+
+Not tested: `keycost.sh` (no change on the typing path); the size of `site_strs` at the end of a run (it grows with the sites that run; 8 B each); the window (`--window`); arjun-e16; a session with many documents where the age frees memory (the journey has 7 documents).
