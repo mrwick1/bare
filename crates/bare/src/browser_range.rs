@@ -38,6 +38,8 @@
 
 use crate::browser::*;
 use crate::browser_scheduler::Task;
+use crate::browser_chardata::{replace, split_at};
+use crate::browser_dom::{clone_tree, name_of, Op};
 use crate::browser_lazy::lazy_global;
 use bare_html::dom::{Change, Document, NodeData, NodeId};
 use bare_js::eval::{Error, Interp};
@@ -556,6 +558,359 @@ fn range_to_string(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V 
     d.js_str(it, &s)
 }
 
+// ------------------------------------------------------------ compare, point and intersect
+
+/// -1, 0 or 1 for an order.
+fn sign(o: Ordering) -> Value {
+    Value::Number(o as i8 as f64)
+}
+
+fn compare_boundary(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
+    let (_, r) = range_of(d, it, this)?;
+    if a.len() < 2 {
+        return Err(few(it, "compareBoundaryPoints", 2, a.len()));
+    }
+    // `unsigned short`: the number modulo 65536.
+    let how = to_uint32(it.to_js_number(a[0])?) as u16;
+    let src = match a[1] {
+        Value::Object(o) => state(d).borrow().ranges.get(&o).copied(),
+        _ => None,
+    };
+    let Some(src) = src else {
+        return Err(it.type_error("Failed to execute 'compareBoundaryPoints' on 'Range': parameter 2 is not of type 'Range'."));
+    };
+    if how > 3 {
+        return Err(d.dom_err(it, "NotSupportedError", "Failed to execute 'compareBoundaryPoints' on 'Range': The comparison method provided must be one of 'START_TO_START', 'START_TO_END', 'END_TO_END', or 'END_TO_START'."));
+    }
+    let doc = d.doc.borrow();
+    if root_of(&doc, r.sc) != root_of(&doc, src.sc) {
+        drop(doc);
+        return Err(d.dom_err(it, "WrongDocumentError", "Failed to execute 'compareBoundaryPoints' on 'Range': The source range is in a different document than this range."));
+    }
+    let (mine, other) = match how {
+        0 => (r.start(), src.start()),
+        1 => (r.end(), src.start()),
+        2 => (r.end(), src.end()),
+        _ => (r.start(), src.end()),
+    };
+    Ok(sign(position(&doc, mine, other)))
+}
+
+/// The arguments of `comparePoint` and `isPointInRange`: the node and the offset. `Ok(None)`: the node is in another tree.
+fn point_args(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value], who: &str) -> R<(Rng, NodeId, u32)> {
+    let (_, r) = range_of(d, it, this)?;
+    if a.len() < 2 {
+        return Err(few(it, who, 2, a.len()));
+    }
+    let n = node_arg(d, it, who, a, 0)?;
+    Ok((r, n, offset_arg(it, a[1])?))
+}
+
+fn same_tree(d: &Dom, r: Rng, n: NodeId) -> bool {
+    let doc = d.doc.borrow();
+    root_of(&doc, r.sc) == root_of(&doc, n)
+}
+
+/// -1 when the point is before the range, 1 when it is after, else 0.
+fn against(d: &Dom, r: Rng, p: (NodeId, u32)) -> i32 {
+    let doc = d.doc.borrow();
+    if position(&doc, p, r.start()) == Ordering::Less {
+        -1
+    } else if position(&doc, p, r.end()) == Ordering::Greater {
+        1
+    } else {
+        0
+    }
+}
+
+fn compare_point(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
+    let (r, n, off) = point_args(d, it, this, a, "comparePoint")?;
+    if !same_tree(d, r, n) {
+        return Err(d.dom_err(it, "WrongDocumentError", "Failed to execute 'comparePoint' on 'Range': The node provided and the Range are not in the same tree."));
+    }
+    check(d, it, "comparePoint' on 'Range", n, off)?;
+    Ok(Value::Number(against(d, r, (n, off)) as f64))
+}
+
+fn in_range(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
+    let (r, n, off) = point_args(d, it, this, a, "isPointInRange")?;
+    if !same_tree(d, r, n) {
+        return Ok(Value::Bool(false));
+    }
+    check(d, it, "isPointInRange' on 'Range", n, off)?;
+    Ok(Value::Bool(against(d, r, (n, off)) == 0))
+}
+
+fn intersects(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
+    let (_, r) = range_of(d, it, this)?;
+    if a.is_empty() {
+        return Err(few(it, "intersectsNode", 1, 0));
+    }
+    let n = node_arg(d, it, "intersectsNode", a, 0)?;
+    let doc = d.doc.borrow();
+    if root_of(&doc, r.sc) != root_of(&doc, n) {
+        return Ok(Value::Bool(false));
+    }
+    let Some(p) = doc.parent(n) else { return Ok(Value::Bool(true)) };
+    let at = index(&doc, n);
+    Ok(Value::Bool(position(&doc, (p, at), r.end()) == Ordering::Less && position(&doc, (p, at + 1), r.start()) == Ordering::Greater))
+}
+
+// ------------------------------------------------------------ delete, extract, clone, insert, surround
+
+#[derive(Clone, Copy, PartialEq)]
+enum Mode {
+    Delete,
+    Extract,
+    Clone,
+}
+
+/// How deep `cut` may go (it calls itself once for each level of a boundary point). A deeper tree is a limit, not a stack overflow.
+const MAX_CUT_DEPTH: u32 = 4096;
+
+fn text_of(doc: &Document, n: NodeId) -> Option<String> {
+    match *doc.data(n) {
+        NodeData::Text(s) | NodeData::Comment(s) => Some(doc.text(s).to_string()),
+        _ => None,
+    }
+}
+
+/// The "extract" steps of the standard for the Text or Comment `n` (its text is `text`), units `from` to `to`: a clone of that part goes to `frag`
+/// (`Extract`, `Clone`), and the part goes from `n` (`Extract`, `Delete`).
+fn cut_data(d: &Dom, it: &mut Interp<'_>, m: Mode, frag: NodeId, n: NodeId, text: &str, from: u32, to: u32) -> R<()> {
+    if m != Mode::Delete {
+        let c = clone_tree(d, it, n, false)?;
+        let mut doc = d.doc.borrow_mut();
+        doc.set_text(c, &slice16(text, from, to));
+        doc.move_to(c, frag, None);
+    }
+    if m != Mode::Clone {
+        replace(d, it, "replaceData", (n, text), from, to.saturating_sub(from), "")?;
+    }
+    Ok(())
+}
+
+/// The steps "extract a live range" and "clone the contents" of the standard, for the points `r`, into `frag`. `Delete` makes no clones. Gives the
+/// point that the range gets when it is done. The order of the changes is the standard's, and so the order of the records.
+fn cut(d: &Dom, it: &mut Interp<'_>, m: Mode, who: &str, r: Rng, frag: NodeId, depth: u32) -> R<(NodeId, u32)> {
+    it.charge(1)?;
+    if depth > MAX_CUT_DEPTH {
+        return Err(d.lim("dom-depth"));
+    }
+    let (sc, so, ec, eo) = (r.sc, r.so, r.ec, r.eo);
+    if r.start() == r.end() {
+        return Ok((sc, so));
+    }
+    if sc == ec {
+        let t = text_of(&d.doc.borrow(), sc);
+        if let Some(t) = t {
+            cut_data(d, it, m, frag, sc, &t, so, eo)?;
+            return Ok((sc, so));
+        }
+    }
+    let (first, last, contained, new) = {
+        let doc = d.doc.borrow();
+        let (a, b) = (path(&doc, sc), path(&doc, ec));
+        let k = a.iter().zip(&b).take_while(|(x, y)| x == y).count().max(1);
+        let common = a[k - 1];
+        let (first, last) = ((a.len() > k).then(|| a[k]), (b.len() > k).then(|| b[k]));
+        let from = first.map_or(so as usize, |f| index(&doc, f) as usize + 1);
+        let to = last.map_or(eo as usize, |l| index(&doc, l) as usize);
+        let contained: Vec<NodeId> = doc.children(common).skip(from).take(to.saturating_sub(from)).collect();
+        let new = if first.is_none() { (sc, so) } else { (common, index(&doc, a[k]) + 1) };
+        (first, last, contained, new)
+    };
+    it.charge(contained.len() as u64)?;
+    if m != Mode::Delete
+        && let Some(&dt) = contained.iter().find(|&&c| is_doctype(d, c))
+    {
+        let msg = if m == Mode::Extract {
+            format!("Failed to execute '{who}' on 'Range': The Range contains a doctype node.")
+        } else {
+            format!("Failed to execute '{who}' on 'Range': Nodes of type '{}' may not be inserted inside nodes of type '#document-fragment'.", doctype_name(d, dt))
+        };
+        return Err(d.dom_err(it, "HierarchyRequestError", &msg));
+    }
+    // A partly selected node: its shallow clone goes to `frag`, and what the range holds of it goes into the clone.
+    let partial = |it: &mut Interp<'_>, n: NodeId, sub: Rng| -> R<()> {
+        let into = if m == Mode::Delete {
+            frag
+        } else {
+            let c = clone_tree(d, it, n, false)?;
+            d.doc.borrow_mut().move_to(c, frag, None);
+            c
+        };
+        cut(d, it, m, who, sub, into, depth + 1).map(drop)
+    };
+    if let Some(f) = first {
+        let t = text_of(&d.doc.borrow(), f);
+        match t {
+            Some(t) => cut_data(d, it, m, frag, f, &t, so, utf16_len(&t))?,
+            None => {
+                let eo = length(&d.doc.borrow(), f);
+                partial(it, f, Rng { sc, so, ec: f, eo })?
+            }
+        }
+    }
+    for c in contained {
+        match m {
+            Mode::Delete => d.doc.borrow_mut().detach(c),
+            Mode::Extract => d.doc.borrow_mut().move_to(c, frag, None),
+            Mode::Clone => {
+                let cc = clone_tree(d, it, c, true)?;
+                d.doc.borrow_mut().move_to(cc, frag, None);
+            }
+        }
+    }
+    if let Some(l) = last {
+        let t = text_of(&d.doc.borrow(), l);
+        match t {
+            Some(t) => cut_data(d, it, m, frag, l, &t, 0, eo)?,
+            None => partial(it, l, Rng { sc: l, so: 0, ec, eo })?,
+        }
+    }
+    Ok(new)
+}
+
+/// `deleteContents`, `extractContents` and `cloneContents`. The fragment (not for `Delete`) or `undefined`.
+fn cut_range(d: &Dom, it: &mut Interp<'_>, this: Value, m: Mode, who: &str) -> V {
+    let (o, r) = range_of(d, it, this)?;
+    let frag = if m == Mode::Delete { Value::Undefined } else { crate::browser_dom::new_fragment(d, it, None)? };
+    let f = d.node_of(frag).unwrap_or(r.sc);
+    let (n, off) = cut(d, it, m, who, r, f, 0)?;
+    if m != Mode::Clone && r.start() != r.end() {
+        set(d, o, Rng { sc: n, so: off, ec: n, eo: off });
+    }
+    Ok(frag)
+}
+
+fn delete_contents(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
+    cut_range(d, it, this, Mode::Delete, "deleteContents")
+}
+
+fn extract_contents(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
+    cut_range(d, it, this, Mode::Extract, "extractContents")
+}
+
+fn clone_contents(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
+    cut_range(d, it, this, Mode::Clone, "cloneContents")
+}
+
+/// The steps of `insertNode` for the range `o` (`op`: the method for the messages, `insertNode` or `surroundContents`).
+fn insert_into(d: &Dom, it: &mut Interp<'_>, o: ObjId, node: NodeId, op: Op) -> R<()> {
+    let cur = |d: &Dom| state(d).borrow().ranges[&o];
+    let r = cur(d);
+    let (sc, so) = (r.sc, r.so);
+    let (kind, up) = {
+        let doc = d.doc.borrow();
+        (*doc.data(sc), doc.parent(sc))
+    };
+    let bad = |it: &mut Interp<'_>, why: &str| d.refuse(it, op, sc, "HierarchyRequestError", why);
+    if matches!(kind, NodeData::Comment(_)) {
+        let (a, b) = (name_of(&d.doc.borrow(), node), name_of(&d.doc.borrow(), sc));
+        return Err(bad(it, &format!("Nodes of type '{a}' may not be inserted inside nodes of type '{b}'.")));
+    }
+    let text = matches!(kind, NodeData::Text(_));
+    if text && up.is_none() {
+        return Err(bad(it, "This operation would split a text node, but there's no parent into which to insert."));
+    }
+    if node == sc {
+        return Err(bad(it, "Unable to insert a node into a Range starting from the node itself."));
+    }
+    let (parent, mut reference) = match up {
+        Some(p) if text => (p, Some(sc)),
+        _ => (sc, d.doc.borrow().children(sc).nth(so as usize)),
+    };
+    if is_doctype(d, node) && !matches!(d.data(parent), NodeData::Document) {
+        let (a, b) = (name_of(&d.doc.borrow(), node), name_of(&d.doc.borrow(), parent));
+        return Err(d.refuse(it, op, parent, "HierarchyRequestError", &format!("Nodes of type '{a}' may not be inserted inside nodes of type '{b}'.")));
+    }
+    let frag = d.check_insert(it, parent, node, reference, None, op)?;
+    if text {
+        let t = text_of(&d.doc.borrow(), sc).unwrap_or_default();
+        reference = Some(split_at(d, sc, &t, so.min(utf16_len(&t)))?);
+    }
+    if reference == Some(node) {
+        reference = d.doc.borrow().next_sibling(node);
+    }
+    d.insert_valid(it, parent, node, reference, frag, op)?;
+    let r = cur(d);
+    if r.start() == r.end() {
+        let doc = d.doc.borrow();
+        let off = reference.map_or_else(|| length(&doc, parent), |x| index(&doc, x));
+        drop(doc);
+        set(d, o, Rng { ec: parent, eo: off, ..r });
+    }
+    Ok(())
+}
+
+fn insert_node(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
+    let (o, _) = range_of(d, it, this)?;
+    if a.is_empty() {
+        return Err(few(it, "insertNode", 1, 0));
+    }
+    let node = node_arg(d, it, "insertNode", a, 0)?;
+    insert_into(d, it, o, node, Op("insertNode", "Range"))?;
+    Ok(Value::Undefined)
+}
+
+fn surround_contents(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
+    let (o, r) = range_of(d, it, this)?;
+    if a.is_empty() {
+        return Err(few(it, "surroundContents", 1, 0));
+    }
+    let np = node_arg(d, it, "surroundContents", a, 0)?;
+    let op = Op("surroundContents", "Range");
+    let partial = {
+        let doc = d.doc.borrow();
+        let (x, y) = (path(&doc, r.sc), path(&doc, r.ec));
+        let k = x.iter().zip(&y).take_while(|(p, q)| p == q).count();
+        // The nodes below the common ancestor on the two paths are the partly selected ones.
+        x[k..].iter().chain(&y[k..]).any(|&n| !matches!(doc.data(n), NodeData::Text(_)))
+    };
+    if partial {
+        return Err(d.dom_err(it, "InvalidStateError", "Failed to execute 'surroundContents' on 'Range': The Range has partially selected a non-Text node."));
+    }
+    if matches!(d.data(np), NodeData::Document | NodeData::Doctype(_) | NodeData::ShadowRoot) {
+        let name = name_of(&d.doc.borrow(), np);
+        return Err(d.dom_err(it, "InvalidNodeTypeError", &format!("Failed to execute 'surroundContents' on 'Range': The node provided is of type '{name}'.")));
+    }
+    let frag = cut_range(d, it, this, Mode::Extract, "surroundContents")?;
+    let frag = d.node_of(frag).expect("a fragment");
+    if d.doc.borrow().children(np).next().is_some() {
+        let res = d.mo_group(Some(np), || {
+            let mut doc = d.doc.borrow_mut();
+            d.iter_told_all(&doc, np);
+            while let Some(c) = doc.children(np).next() {
+                it.charge(1)?;
+                doc.detach(c);
+            }
+            Ok(())
+        });
+        d.iter_told_end();
+        res?;
+    }
+    insert_into(d, it, o, np, op)?;
+    d.insert_checked(it, np, frag, None, op)?;
+    let (p, i) = {
+        let doc = d.doc.borrow();
+        (doc.parent(np).expect("inserted"), index(&doc, np))
+    };
+    set(d, o, Rng { sc: p, so: i, ec: p, eo: i + 1 });
+    Ok(Value::Undefined)
+}
+
+fn contextual_fragment(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
+    range_of(d, it, this)?;
+    if a.is_empty() {
+        return Err(few(it, "createContextualFragment", 1, 0));
+    }
+    // ToString may run page code that moves the range: the start is read after it.
+    let html = d.string_arg(it, a[0])?;
+    let (_, r) = range_of(d, it, this)?;
+    crate::browser_fragment::contextual_fragment(d, it, r.sc, &html)
+}
+
 fn gate(what: &'static str) -> Error {
     Error::Unsupported(unsupported(what))
 }
@@ -569,18 +924,8 @@ macro_rules! gated {
     )*};
 }
 gated! {
-    delete_contents => "Range.deleteContents",
-    extract_contents => "Range.extractContents",
-    clone_contents => "Range.cloneContents",
-    insert_node => "Range.insertNode",
-    surround_contents => "Range.surroundContents",
-    contextual_fragment => "Range.createContextualFragment",
     bounding_rect => "Range.getBoundingClientRect",
     client_rects => "Range.getClientRects",
-    compare_boundary => "Range.compareBoundaryPoints",
-    compare_point => "Range.comparePoint",
-    in_range => "Range.isPointInRange",
-    intersects => "Range.intersectsNode",
 }
 
 fn illegal_selection(_: &Dom, it: &mut Interp<'_>, _: Value, _: &[Value]) -> V {

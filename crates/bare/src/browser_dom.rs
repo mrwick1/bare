@@ -247,7 +247,7 @@ impl Dom {
     }
 
     /// The error of a refused insert. `op` puts the name of the call in front, as Chrome does: "Failed to execute 'append' on 'Document': ...".
-    fn refuse(&self, it: &mut Interp<'_>, op: Op, parent: NodeId, name: &str, reason: &str) -> Error {
+    pub(crate) fn refuse(&self, it: &mut Interp<'_>, op: Op, parent: NodeId, name: &str, reason: &str) -> Error {
         if op.0.is_empty() {
             return self.dom_err(it, name, reason);
         }
@@ -379,7 +379,7 @@ impl Dom {
     }
 
     /// Check a node insertion (DOM Standard "ensure pre-insertion validity", the parts that apply to this tree). True: `node` is a plain fragment (`is_plain_fragment`).
-    fn check_insert(&self, it: &mut Interp<'_>, parent: NodeId, node: NodeId, before: Option<NodeId>, replacing: Option<NodeId>, op: Op) -> R<bool> {
+    pub(crate) fn check_insert(&self, it: &mut Interp<'_>, parent: NodeId, node: NodeId, before: Option<NodeId>, replacing: Option<NodeId>, op: Op) -> R<bool> {
         #[derive(PartialEq, Clone, Copy)]
         enum K {
             Doc,
@@ -460,7 +460,7 @@ impl Dom {
     /// the caller), so a refusal changes nothing. Several are checked as they go in: each one changes what the next may do. The Document judges all of them
     /// first (`check_doc`), as Chrome does.
     #[allow(clippy::too_many_arguments)]
-    fn place(&self, it: &mut Interp<'_>, parent: NodeId, nodes: &[NodeId], before: Option<NodeId>, old: Option<NodeId>, checked: bool, op: Op) -> R<()> {
+    pub(crate) fn place(&self, it: &mut Interp<'_>, parent: NodeId, nodes: &[NodeId], before: Option<NodeId>, old: Option<NodeId>, checked: bool, op: Op) -> R<()> {
         let one = nodes.len() == 1;
         let in_doc = matches!(self.data(parent), NodeData::Document);
         if in_doc && !checked {
@@ -508,7 +508,13 @@ impl Dom {
     }
 
     pub(crate) fn insert_checked(&self, it: &mut Interp<'_>, parent: NodeId, node: NodeId, before: Option<NodeId>, op: Op) -> R<()> {
-        if self.check_insert(it, parent, node, before, None, op)? {
+        let frag = self.check_insert(it, parent, node, before, None, op)?;
+        self.insert_valid(it, parent, node, before, frag, op)
+    }
+
+    /// The insertion of `insert_checked`, for a node that `check_insert` accepted (`frag`: what it gave).
+    pub(crate) fn insert_valid(&self, it: &mut Interp<'_>, parent: NodeId, node: NodeId, before: Option<NodeId>, frag: bool, op: Op) -> R<()> {
+        if frag {
             return self.place(it, parent, &[node], before, None, true, op);
         }
         let mut doc = self.doc.borrow_mut();
@@ -654,19 +660,21 @@ pub(crate) fn node_type(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) 
     }))
 }
 
+/// `nodeName`.
+pub(crate) fn name_of(doc: &Document, n: NodeId) -> String {
+    match *doc.data(n) {
+        NodeData::Element { .. } => crate::browser_namespace::tag(doc, n),
+        NodeData::Text(_) => "#text".into(),
+        NodeData::Comment(_) => "#comment".into(),
+        NodeData::Document => "#document".into(),
+        NodeData::ShadowRoot => "#document-fragment".into(),
+        NodeData::Doctype(sp) => doc.text(sp).to_string(),
+    }
+}
+
 pub(crate) fn node_name(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
     let n = d.nd(it, this)?;
-    let s = {
-        let doc = d.doc.borrow();
-        match *doc.data(n) {
-            NodeData::Element { .. } => crate::browser_namespace::tag(&doc, n),
-            NodeData::Text(_) => "#text".into(),
-            NodeData::Comment(_) => "#comment".into(),
-            NodeData::Document => "#document".into(),
-            NodeData::ShadowRoot => "#document-fragment".into(),
-            NodeData::Doctype(sp) => doc.text(sp).to_string(),
-        }
-    };
+    let s = name_of(&d.doc.borrow(), n);
     d.js_str(it, &s)
 }
 
@@ -1156,7 +1164,7 @@ pub(crate) fn fragment_ctor(d: &Dom, it: &mut Interp<'_>, _: Value, _: &[Value])
 }
 
 /// An empty fragment of the document. `proto`: the prototype of a subclass.
-fn new_fragment(d: &Dom, it: &mut Interp<'_>, proto: Option<ObjId>) -> V {
+pub(crate) fn new_fragment(d: &Dom, it: &mut Interp<'_>, proto: Option<ObjId>) -> V {
     crate::browser_elements::tag_fragments(d, it)?;
     let n = {
         let mut doc = d.doc.borrow_mut();
@@ -1201,6 +1209,12 @@ pub(crate) fn clone_node(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value])
     if matches!(d.data(n), NodeData::ShadowRoot) && !d.is_plain_fragment(n) {
         return Err(d.dom_err(it, "NotSupportedError", "ShadowRoot nodes are not clonable."));
     }
+    let c = clone_tree(d, it, n, deep)?;
+    d.wrap(it, c)
+}
+
+/// The clone of `n` (and of what it holds, when `deep`): a new tree, not linked. The Document and a shadow root are the caller's to refuse.
+pub(crate) fn clone_tree(d: &Dom, it: &mut Interp<'_>, n: NodeId, deep: bool) -> R<NodeId> {
     // Count first, so a clone that does not fit makes no node at all.
     let (mut count, mut bytes, mut attrs, mut input_bytes) = (1usize, 0usize, 0usize, 0usize);
     {
@@ -1303,7 +1317,7 @@ pub(crate) fn clone_node(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value])
         d.clone_upgrades(&doc, &elements);
         root_clone.expect("one clone")
     };
-    d.wrap(it, root_clone)
+    Ok(root_clone)
 }
 
 // ------------------------------------------------------------------------------------------ Element

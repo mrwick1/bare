@@ -36,7 +36,7 @@
 //! `noscript`: the scripting flag is on for a context in the page (raw text for `noscript`, as in Chrome), and off for a `template` context and
 //! for any context in the contents of a template (an inert document): there `noscript` is an element. An HTML `template` is written with its
 //! contents as children, and `template.innerHTML` reads the contents.
-//! - `Range.createContextualFragment`, `DOMParser` and `document.write` are absent.
+//! - `DOMParser` and `document.write` are absent.
 //!
 //! Known deviations: nested `table` and `select` are read by the page rules of the tree builder (no table or select insertion modes). A temporary
 //! text buffer that grew by joining texts counts the wasted bytes against the text cap. Cloning preserves the "already started" flag.
@@ -210,7 +210,7 @@ pub(crate) fn set_outer_html(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Val
     match parent {
         None => Ok(Value::Undefined),
         Some((_, true, _)) => Err(d.dom_err(it, "NoModificationAllowedError", "Failed to set the 'outerHTML' property on 'Element': This element's parent is of type '#document'.")),
-        Some((p, _, frag)) => replace(d, it, &html, p, frag, Put::Over(n)),
+        Some((p, _, frag)) => replace(d, it, &html, p, frag, Put::Over(n), None),
     }
 }
 
@@ -219,7 +219,7 @@ pub(crate) fn set_inner_html(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Val
     let v = arg(a, 0);
     // ToString may run page code; the target is read after it.
     let html = if matches!(v, Value::Null) { String::new() } else { d.string_arg(it, v)? };
-    replace(d, it, &html, n, false, Put::All)
+    replace(d, it, &html, n, false, Put::All, None)
 }
 
 /// Where the parsed nodes go: instead of all the children of `n`, instead of one child of `n`, or in `n` before a node (None: last), keeping the rest.
@@ -241,7 +241,7 @@ pub(crate) fn insert_adjacent_html(d: &Dom, it: &mut Interp<'_>, this: Value, a:
     let Some((n, before)) = at else {
         return Err(d.dom_err(it, "NoModificationAllowedError", "Failed to execute 'insertAdjacentHTML' on 'Element': The element has no parent."));
     };
-    replace(d, it, &html, n, matches!(d.data(n), NodeData::ShadowRoot), Put::At(before))
+    replace(d, it, &html, n, matches!(d.data(n), NodeData::ShadowRoot), Put::At(before), None)
 }
 
 /// The size of the contents of the templates in the tree under `root`, nested ones too: (nodes, bytes, attributes, height). A template's contents hang
@@ -280,14 +280,16 @@ fn measure_templates(it: &mut Interp<'_>, doc: &Document, root: NodeId) -> R<(us
     Ok((count, bytes, attrs, height))
 }
 
-/// Parse `html` in the context of `n` (`body` when `in_frag`: `n` is a DocumentFragment). `put`: where the nodes go.
-fn replace(d: &Dom, it: &mut Interp<'_>, html: &str, n: NodeId, in_frag: bool, put: Put) -> V {
+/// Parse `html` in the context of `n` (`body` when `in_frag`: `n` is a DocumentFragment). `put`: where the nodes go. `ctx` (`createContextualFragment`): the
+/// context is that node, not `n`, which only holds the result; the scripts of the result are not marked as started, so they run when they go in a page.
+fn replace(d: &Dom, it: &mut Interp<'_>, html: &str, n: NodeId, in_frag: bool, put: Put, ctx: Option<NodeId>) -> V {
+    let c0 = ctx.unwrap_or(n);
     let this = if let Put::Over(t) = put { Some(t) } else { None };
     let all = matches!(put, Put::All);
     let (context, ns, in_form) = {
         let doc = d.doc.borrow();
         let mut in_form = false;
-        let mut cur = if in_frag { None } else { Some(n) };
+        let mut cur = if in_frag { None } else { Some(c0) };
         while let Some(c) = cur {
             it.charge(1)?;
             if doc.is_html(c, "form") {
@@ -296,11 +298,11 @@ fn replace(d: &Dom, it: &mut Interp<'_>, html: &str, n: NodeId, in_frag: bool, p
             }
             cur = doc.parent(c);
         }
-        if in_frag { ("body".to_string(), Ns::Html, false) } else { (doc.element_name(n).to_string(), doc.element_ns(n), in_form) }
+        if in_frag { ("body".to_string(), Ns::Html, false) } else { (doc.element_name(c0).to_string(), doc.element_ns(c0), in_form) }
     };
     // `template.innerHTML = ...` fills the contents of the template. Scripting is off for the template and for the nodes in its contents.
     let tpl_ctx = !in_frag && ns == Ns::Html && context == "template";
-    let scripting = !(tpl_ctx || d.doc.borrow().in_template_content(n));
+    let scripting = !(tpl_ctx || d.doc.borrow().in_template_content(c0));
     // The contents of a template hang one level below it.
     let base = d.depth_of(it, n)? + (all && tpl_ctx) as usize;
     let lim = {
@@ -419,7 +421,7 @@ fn replace(d: &Dom, it: &mut Interp<'_>, html: &str, n: NodeId, in_frag: bool, p
             }
             path.truncate(cd);
             path.push(t);
-            if doc.is_html(t, "script") {
+            if ctx.is_none() && doc.is_html(t, "script") {
                 d.mark_started(t);
             }
             if tpl && let Some(f) = frag.doc.template_content(c) {
@@ -452,4 +454,19 @@ fn join_text(doc: &mut Document, a: NodeId) {
         doc.set_text(a, &s);
         doc.detach(b);
     }
+}
+
+/// `Range.prototype.createContextualFragment(markup)` (DOM Parsing standard): parse `markup` in the context of the start container of the range, into a new
+/// fragment. The context is the start node when it is an element, its parent for a Text or a Comment, and a new `body` when that is not an element or
+/// is `html`. The scripts of the fragment are not marked as started (Chrome runs them when they go in a page). No record, no range moves.
+pub(crate) fn contextual_fragment(d: &Dom, it: &mut Interp<'_>, start: NodeId, html: &str) -> V {
+    let ctx = {
+        let doc = d.doc.borrow();
+        let up = if matches!(doc.data(start), NodeData::Element { .. }) { Some(start) } else if matches!(doc.data(start), NodeData::Text(_) | NodeData::Comment(_)) { doc.parent(start) } else { None };
+        up.filter(|&e| matches!(doc.data(e), NodeData::Element { .. }) && !doc.is_html(e, "html"))
+    };
+    let frag = crate::browser_dom::new_fragment(d, it, None)?;
+    let f = d.node_of(frag).expect("a fragment");
+    replace(d, it, html, f, ctx.is_none(), Put::At(None), Some(ctx.unwrap_or(f)))?;
+    Ok(frag)
 }

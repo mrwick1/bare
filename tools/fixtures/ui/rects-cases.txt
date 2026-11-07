@@ -1,0 +1,162 @@
+var st = document.createElement('style'); st.textContent = "html{overflow:hidden}*{font-family:'Noto Sans Mono' !important}body{margin:0}.n{width:100px}.m{width:60px}"; document.head.appendChild(st);
+var $ = function (i) { return document.getElementById(i) };
+var T = function (i, k) { return $(i).childNodes[k || 0] };
+var R = function (r) { return [r.x, r.y, r.width, r.height].map(function (v) { return Math.round(v * 10) / 10 }).join(',') };
+var L = function (l) { return l.length + ':' + [].map.call(l, R).join(' ') };
+var E = function (ids) { return ids.split(' ').map(function (id) { return id + '=' + L($(id).getClientRects()) }).join(' | ') };
+var B = function (ids) { return ids.split(' ').map(function (id) { return id + '=' + R($(id).getBoundingClientRect()) }).join(' | ') };
+var rg = function (a, ao, b, bo) { var r = document.createRange(); r.setStart(a, ao); r.setEnd(b, bo); return r };
+var G = function (r) { return L(r.getClientRects()) + ' / ' + R(r.getBoundingClientRect()) };
+=== el-block-box
+@html <div id=a style="margin:5px;padding:3px;border:2px solid;width:100px;height:20px"></div><div id=b>text</div><div id=c style="height:0"></div>
+(function () { return E('a b c') + ' ## ' + B('a b c') })
+=== el-no-box
+@html <div id=a style="display:none">x<span id=ai>y</span></div><div style="display:none"><p id=b>x</p></div><p id=c hidden>h</p><div id=d style="display:contents"><span id=e>c</span><p id=f>f</p></div><div id=g></div>
+(function () { return E('a ai b c d e f g') })
+=== el-detached-and-head
+@html <p id=p>x</p>
+(function () { var e = document.createElement('div'); e.textContent = 'abc'; var h = document.head; return [L(e.getClientRects()), L(h.getClientRects()), L(document.querySelector('style').getClientRects()), L($('p').getClientRects()), L(document.documentElement.getClientRects()), L(document.body.getClientRects())].join(' | ') })
+=== el-visibility-and-opacity
+@html <div id=a style="visibility:hidden">abc</div><div id=b style="opacity:0">abc</div><div id=c style="position:absolute;left:-50px;top:200px;width:30px;height:10px"></div><div id=d style="position:fixed;right:0;bottom:0;width:30px;height:10px"></div>
+(function () { return E('a b c d') })
+=== el-inline-one-line
+@html <div class=n>aaa <span id=s>bbb</span> ccc</div>
+(function () { return E('s') + ' ## ' + B('s') })
+=== el-inline-wrapped
+@html <div class=n>aaa bbb ccc ddd eee <span id=s>fff ggg hhh iii jjj kkk lll mmm nnn ooo</span> ppp</div>
+(function () { return E('s') + ' ## ' + B('s') })
+=== el-inline-padding-border-wrapped
+@html <div class=n>aaa bbb ccc ddd eee <span id=s style="padding:3px 5px;border:2px solid;background:#ccc">fff ggg hhh iii jjj kkk lll mmm nnn ooo</span> ppp</div>
+(function () { return E('s') + ' ## ' + B('s') })
+=== el-inline-nested-wrapped
+@html <div class=n>aa <span id=o>bb <span id=i>cc dd ee ff gg hh ii jj</span> kk ll</span> mm</div>
+(function () { return E('o i') + ' ## ' + B('o i') })
+=== el-inline-nested-wrapped-boxed
+@html <div class=n>aa <span id=o style="padding:2px;background:#eee">bb <span id=i style="border:1px solid">cc dd ee ff gg hh ii jj</span> kk ll</span> mm</div>
+(function () { return E('o i') })
+=== el-inline-empty
+@html <div class=n>aa<span id=a></span>bb</div><div class=n id=d><span id=b></span></div><div class=n>aa<span id=c style="padding:0 4px;border:1px solid"></span>bb</div><div class=n>aa <span id=e> </span> bb</div>
+(function () { return E('a b c e') })
+=== el-inline-with-an-image
+@html <div>aa<span id=s>bb<img id=im width=30 height=40 style="display:inline-block">cc</span>dd</div>
+(function () { return E('s im') })
+=== el-inline-with-a-bigger-child
+@html <div>aa<span id=s>bb<b id=b style="font-size:30px">cc</b>dd</span>ee</div>
+(function () { return E('s b') })
+=== el-inline-with-an-inline-block
+@html <div>aa<span id=s>bb<span id=ib style="display:inline-block;width:30px;height:40px;background:#ccc"></span>cc</span>dd</div>
+(function () { return E('s ib') })
+=== el-br
+@html <div class=n>aa<br id=b>bb<br id=c><br id=d>cc</div>
+(function () { return E('b c d') })
+=== el-inline-block-and-controls
+@html <div class=n>aa <span id=a style="display:inline-block;width:20px;height:10px">x</span> <button id=b>go</button> <input id=c value=abc> <textarea id=d></textarea> <select id=e><option>one</option></select> <img id=f width=7 height=9></div>
+(function () { return E('a b c d e f') })
+=== el-inline-containing-a-block
+@html <div class=n>aa <span id=s>bb <div id=d>block</div> cc dd ee ff gg hh</span> tt</div>
+(function () { return E('s d') })
+=== el-table
+@html <table id=t border=1 style="border-collapse:separate"><caption id=cap>cap</caption><colgroup id=cg><col id=co></colgroup><thead id=th><tr id=r0><th id=h>H</th></tr></thead><tbody id=tb><tr id=r1><td id=c1>one</td></tr><tr id=r2><td id=c2>two</td></tr></tbody></table>
+(function () { return E('t cap cg co th r0 h tb r1 c1 r2 c2') })
+=== el-table-collapsed-and-caption-below
+@html <table id=t style="border-collapse:collapse;caption-side:bottom"><caption id=cap>cap</caption><tr id=r1><td id=c1 style="border:3px solid">one</td><td id=c2 style="border:1px solid">two</td></tr></table>
+(function () { return E('t cap r1 c1 c2') })
+=== el-table-cell-text-wrap
+@html <table style="width:80px"><tr><td id=c>aaa bbb ccc ddd <span id=s>eee fff ggg</span></td></tr></table>
+(function () { return E('c s') })
+=== el-flex-and-grid
+@html <div id=f style="display:flex;width:200px"><div id=a style="width:50px">a</div><span id=b>b</span><div id=c style="display:contents"><i id=d>d</i></div></div><div id=g style="display:grid;grid-template-columns:50px 60px"><p id=h>h</p><p id=i>i</p></div>
+(function () { return E('f a b c d g h i') })
+=== el-float-and-positions
+@html <div class=n>aa <span id=a style="float:left;width:20px;height:10px"></span><span id=b style="position:relative;left:5px;top:3px">bb</span> <span id=c style="position:absolute;left:30px;top:50px">cc</span></div>
+(function () { return E('a b c') })
+=== el-list-item
+@html <ul><li id=a>one</li><li id=b style="list-style:none">two</li></ul><ol><li id=c><span id=s>x</span></li></ol>
+(function () { return E('a b c s') })
+=== el-line-height-and-alignment
+@html <div class=n style="line-height:40px;text-align:center">aa <span id=a>bb cc</span></div><div class=n style="text-align:right">aa bb cc <span id=b>dd ee ff gg hh ii</span></div>
+(function () { return E('a b') })
+=== el-white-space-pre
+@html <div style="white-space:pre">aa <span id=s>bb&#10;cc   dd&#10;ee</span></div><div class=n style="white-space:pre-wrap">x <span id=t>y   z   w   v</span></div>
+(function () { return E('s t') })
+=== el-vertical-align
+@html <div>aa<span id=a style="vertical-align:super;font-size:10px">x</span>bb<span id=b style="vertical-align:30px">y</span></div>
+(function () { return E('a b') })
+=== el-scrolled-container
+@html <div id=c style="width:100px;height:50px;overflow:auto"><p id=p style="margin:0;height:200px">aaa <span id=s>bbb</span></p></div>
+$('c').scrollTop = 10; (function () { return E('c p s') })
+=== el-list-api
+@html <div class=n>aaa bbb ccc ddd <span id=s>eee fff ggg hhh</span></div>
+(function () { var l = $('s').getClientRects(), m = Object.getOwnPropertyDescriptor(Element.prototype, 'getClientRects'); return [Object.prototype.toString.call(l), l.length, l[0] === l.item(0), l.item(2) === null, l[2], l.item(-1), typeof l.item, l.item.length, Array.isArray(l), Symbol.iterator in l, $('s').getClientRects() === l, Object.keys(l).join(), Object.prototype.toString.call(l[0]), m.writable, m.enumerable, m.configurable, Element.prototype.getClientRects.length].join(' ') })
+=== el-bounding-rect-of-inline
+@html <div class=n>aaa bbb ccc ddd <span id=s>eee fff ggg hhh</span></div><div>x<span id=t>yy</span>z</div>
+(function () { return B('s t') })
+=== range-one-text
+@html <div class=n id=d>aaa bbb ccc ddd eee fff</div>
+(function () { return [G(rg(T('d'), 1, T('d'), 6)), G(rg(T('d'), 0, T('d'), 3)), G(rg(T('d'), 3, T('d'), 4)), G(rg(T('d'), 0, T('d'), 23))].join(' ## ') })
+=== range-collapsed
+@html <div class=n id=d>aaa bbb ccc ddd eee fff</div><div id=e></div><div id=f>x<span id=s></span>y</div>
+(function () { return [G(rg(T('d'), 2, T('d'), 2)), G(rg(T('d'), 0, T('d'), 0)), G(rg(T('d'), 23, T('d'), 23)), G(rg($('d'), 0, $('d'), 0)), G(rg($('d'), 1, $('d'), 1)), G(rg($('e'), 0, $('e'), 0)), G(rg($('s'), 0, $('s'), 0)), G(rg($('f'), 1, $('f'), 1))].join(' ## ') })
+=== range-across-lines
+@html <div class=n id=d>aaa bbb ccc ddd eee fff ggg hhh</div>
+(function () { return [G(rg(T('d'), 2, T('d'), 18)), G(rg(T('d'), 3, T('d'), 5)), G(rg(T('d'), 4, T('d'), 12)), G(rg(T('d'), 7, T('d'), 8)), G(rg(T('d'), 0, T('d'), 31))].join(' ## ') })
+=== range-two-text-nodes
+@html <div class=n id=d>aaa bbb <b id=b>ccc ddd</b> eee fff</div>
+(function () { return [G(rg(T('d'), 2, T('d', 2), 3)), G(rg(T('b'), 1, T('d', 2), 2)), G(rg(T('d'), 4, T('b'), 2))].join(' ## ') })
+=== range-select-node
+@html <div class=n id=d>aaa <span id=s>bbb ccc ddd</span> eee</div><div id=e>x<img id=im width=10 height=12>y</div>
+(function () { return [G((function () { var r = document.createRange(); r.selectNode($('s')); return r })()), G((function () { var r = document.createRange(); r.selectNode($('d')); return r })()), G((function () { var r = document.createRange(); r.selectNode($('im')); return r })()), G((function () { var r = document.createRange(); r.selectNodeContents($('d')); return r })()), G((function () { var r = document.createRange(); r.selectNodeContents($('s')); return r })())].join(' ## ') })
+=== range-across-blocks
+@html <p id=p1 style="margin:0">aaa <b id=b1>bbb</b> ccc</p><p id=p2 style="margin:0">ddd <i id=i2>eee</i> fff</p>
+(function () { return [G(rg(T('p1'), 2, T('p2', 2), 3)), G(rg(T('p1', 2), 0, T('p2'), 2)), G(rg($('p1'), 1, $('p2'), 1)), G(rg(T('b1'), 1, T('i2'), 2))].join(' ## ') })
+=== range-elements-by-offsets
+@html <div id=d style="width:200px">aa <b id=b>bb</b> cc <i id=i>dd</i> ee<br id=br>ff</div>
+(function () { return [G(rg($('d'), 0, $('d'), 1)), G(rg($('d'), 1, $('d'), 2)), G(rg($('d'), 0, $('d'), 5)), G(rg($('d'), 3, $('d'), 7)), G(rg($('d'), 5, $('d'), 7)), G(rg($('d'), 6, $('d'), 7))].join(' ## ') })
+=== range-white-space-collapsing
+@html <div id=d style="width:300px">aa   bb  <b id=b>  cc</b>   dd  </div>
+(function () { var t = T('d'); return [G(rg(t, 0, t, 5)), G(rg(t, 3, t, 4)), G(rg(t, 2, t, 3)), G(rg(t, 4, t, 6)), G(rg(t, 7, t, 9)), G(rg(t, 5, T('b'), 3)), G(rg(T('d', 2), 0, T('d', 2), 4)), G(rg(T('d', 2), 4, T('d', 2), 7))].join(' ## ') })
+=== range-white-space-pre
+@html <div id=d style="white-space:pre">aa  bb&#10;cc   dd</div>
+(function () { var t = T('d'); return [G(rg(t, 0, t, 4)), G(rg(t, 2, t, 4)), G(rg(t, 3, t, 8)), G(rg(t, 5, t, 6)), G(rg(t, 6, t, 8)), G(rg(t, 7, t, 7))].join(' ## ') })
+=== range-no-box
+@html <div id=a style="display:none">abc</div><div id=b>x</div>
+(function () { var e = document.createElement('p'); e.textContent = 'abc'; return [G(rg(T('a'), 0, T('a'), 2)), G(rg(e.firstChild, 0, e.firstChild, 2)), G(rg($('a'), 0, $('a'), 1)), G(rg(document.head, 0, document.head, 1)), G(rg(T('b'), 0, T('a'), 2))].join(' ## ') })
+=== range-font-sizes
+@html <div id=d>aa <span id=s style="font-size:30px">bbb</span> <small id=sm style="font-size:10px">ccc</small></div>
+(function () { return [G(rg(T('d'), 1, T('d', 2), 1)), G(rg(T('s'), 1, T('s'), 2)), G(rg(T('sm'), 0, T('sm'), 2)), G(rg(T('d'), 0, T('sm'), 3))].join(' ## ') })
+=== range-aligned-text
+@html <div class=n style="text-align:center">aaa bbb ccc ddd</div><div class=n style="text-align:right" id=r>aaa bbb ccc ddd</div>
+(function () { return [G(rg(T('r'), 2, T('r'), 6)), G(rg(T('r'), 0, T('r'), 15))].join(' ## ') })
+=== range-in-boxes
+@html <span id=ib style="display:inline-block;width:50px">aaa bbb ccc</span><table><tr><td id=c>cell text</td></tr></table><div id=f style="display:flex"><span id=fs>flex</span><b id=fb>item</b></div>
+(function () { return [G(rg(T('ib'), 1, T('ib'), 6)), G(rg(T('c'), 2, T('c'), 6)), G(rg(T('fs'), 1, T('fb'), 2))].join(' ## ') })
+=== range-scrolled
+@html <div id=c style="width:100px;height:50px;overflow:auto"><p id=p style="margin:0;height:200px">aaa bbb</p></div>
+$('c').scrollTop = 10; (function () { return G(rg(T('p'), 1, T('p'), 5)) })
+=== range-list-and-shape
+@html <div class=n id=d>aaa bbb ccc ddd</div>
+(function () { var r = rg(T('d'), 1, T('d'), 9), l = r.getClientRects(), b = r.getBoundingClientRect(), p = Object.getOwnPropertyDescriptor(Range.prototype, 'getClientRects'); return [Object.prototype.toString.call(l), l.length, Object.prototype.toString.call(b), Object.keys(b).join(), l[0] === l.item(0), typeof l.item, p.enumerable, Range.prototype.getClientRects.length, Range.prototype.getBoundingClientRect.length].join(' ') })
+=== el-culled-nested-one-line
+@html <div class=n>aa<span id=o>bb<span id=i>cc</span>dd</span>ee</div><div class=n>aa<span id=p><span id=q>x</span></span>bb</div>
+(function () { return E('o i p q') })
+=== el-culled-with-a-boxed-child
+@html <div class=n>aa<span id=o>bb<span id=i style="border:1px solid">cc</span>dd</span>ee</div>
+(function () { return E('o i') })
+=== el-culled-only-an-atomic
+@html <div>aa<span id=s><img id=im width=30 height=40></span>bb</div>
+(function () { return E('s im') })
+=== el-culled-with-a-break
+@html <div class=n>aa<span id=s>bb<br>cc</span>dd</div>
+(function () { return E('s') })
+=== el-culled-two-texts
+@html <div class=n>aa<span id=s>bb<b id=b>x</b><b id=c>y</b>zz</span>dd</div>
+(function () { return E('s b c') })
+=== el-culled-first-line-empty-text
+@html <div class=n>aaa bbb ccc ddd <span id=s>eee<span id=i> fff </span>ggg</span> hhh</div>
+(function () { return E('s i') + ' ## ' + B('s i') })
+=== el-anchor-in-paragraph
+@html <p id=p style="margin:0;width:120px">Lorem ipsum <a id=a href=#>dolor sit amet, consectetur</a> elit.</p>
+(function () { return E('p a') })
+=== el-bounding-rect-of-empty-inline
+@html <div class=n>aa<span id=a></span>bb</div>
+(function () { return B('a') })

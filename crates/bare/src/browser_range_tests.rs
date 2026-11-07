@@ -8,6 +8,8 @@ use bare_js::heap::HeapLimits;
 
 topic_test!(chrome_cases, "range", 79);
 topic_test!(live_cases, "liverange", 63);
+topic_test!(ops_cases, "rangeops", 115);
+topic_test!(rects_cases, "rects", 51);
 
 fn page(body: &str) -> Browser {
     Browser::new(tree::parse(&format!("<!doctype html><body>{body}</body>")), BrowserLimits::default(), EvalLimits { max_steps: 50_000_000, ..Default::default() }, HeapLimits::default()).expect("browser")
@@ -30,25 +32,9 @@ fn the_globals_are_lazy_and_work_when_read() {
 }
 
 #[test]
-fn the_editing_methods_and_the_boxes_are_gates() {
+fn the_selection_methods_that_are_left_are_gates() {
     let mut b = page("<p id=p>abc</p>");
     js(&mut b, "var r = document.createRange(); r.selectNodeContents(document.getElementById('p'))");
-    for (m, what) in [
-        ("deleteContents()", "Range.deleteContents"),
-        ("extractContents()", "Range.extractContents"),
-        ("cloneContents()", "Range.cloneContents"),
-        ("insertNode(document.createElement('i'))", "Range.insertNode"),
-        ("surroundContents(document.createElement('i'))", "Range.surroundContents"),
-        ("createContextualFragment('<i>')", "Range.createContextualFragment"),
-        ("getBoundingClientRect()", "Range.getBoundingClientRect"),
-        ("getClientRects()", "Range.getClientRects"),
-        ("compareBoundaryPoints(0, r)", "Range.compareBoundaryPoints"),
-        ("comparePoint(document.body, 0)", "Range.comparePoint"),
-        ("isPointInRange(document.body, 0)", "Range.isPointInRange"),
-        ("intersectsNode(document.body)", "Range.intersectsNode"),
-    ] {
-        assert_eq!(js(&mut b, &format!("r.{m}")), format!("unsupported:{what}"));
-    }
     for (m, what) in [("extend(document.body, 0)", "Selection.extend"), ("setBaseAndExtent(document.body, 0, document.body, 1)", "Selection.setBaseAndExtent"), ("containsNode(document.body)", "Selection.containsNode"), ("modify('move', 'forward', 'character')", "Selection.modify"), ("deleteFromDocument()", "Selection.deleteFromDocument")] {
         assert_eq!(js(&mut b, &format!("getSelection().{m}")), format!("unsupported:{what}"));
     }
