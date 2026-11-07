@@ -1012,3 +1012,5 @@ Deviations and gaps:
 - A shadow root into the Document node, and a shadow root as a fragment, stay `Unsupported`. `document.implementation.createDocumentType`, `DocumentType.before/after/remove` and `document.forms` are absent, so the cases do not use them.
 
 Not tested: a live staging login; scripts inserted into a Document through the loader; the effect of the shared function identity on page code; the cost of distinct function objects (not measured again); the `bare-layout` suite; `template.innerHTML` as a setter.
+
+On main 84c87aa, the live create flow reaches the agent configure page. After "Create agent", `/agents/<id>/configure` renders the tabs (Prompt, Voice, Variables, Knowledge, Call flow and more), the prompt sections and the toast `Agent "<name>" created successfully`. `compareDocumentPosition` (#201) removed the crash. The same run then deleted the test agent through More actions, Delete and the typed confirm. `/agents` shows 33 agents again, and the agent page shows its not-found state. Typing is still slow: 54 characters took about 5 s. Most of that time is evaluator work (#200).
