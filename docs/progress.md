@@ -1967,3 +1967,44 @@ Changes to the first guess of the step file:
 The credentials came from the vault into a mode 600 file in `/dev/shm`, removed after the run. A scan of all output files (JSON, logs, screenshots) found neither the email nor the password.
 
 Not done: S5 topic 4 (local fixture app with invalid credentials, expiry and logout), topic 6 (repeated runs, retention). Only one run of each mode.
+
+## JSON.parse: string scan and key cache
+
+Measured on 2026-11-07, archMachine, release, against main f49daad. The page load section above gives 175 ms "from the 1.16 MB `/api/agents` reply to the data on screen" on `/agents`. That time includes the React render, not only JSON.parse. This change measures JSON.parse alone on a synthetic reply of the same size.
+
+Fixture: `builtins_load agents` (in `crates/js/examples/builtins_load.rs`). It has 40 agent records in 1,230,629 bytes, with nested objects and arrays, repeated keys, long prompt strings with `\n`, `\"` and `\\`, non-ASCII text, integers, decimals, booleans and nulls. It has no staging data. The text is canonical JSON, so `JSON.stringify(JSON.parse(x)) === x` in Node 22. `agents_rt` checks the same in bare. `agents_dump` prints the text. `SCALE` is the number of parses of the same text. The rows `builtins_load agents 1` and `agents 10` are in `tools/js/cost_rows.txt`.
+
+Result, one parse of the fixture:
+
+| | Instructions | Time |
+| --- | --- | --- |
+| bare before | 21.6 M | 2.0 to 2.2 ms (scale 100), 2.9 to 3.3 ms (first parse) |
+| bare after | 15.0 M (-31%) | 1.72 to 1.83 ms (scale 100), 2.6 to 3.2 ms (first parse) |
+| Node 22.18 | - | 2.75 ms (first parse), 1.36 to 1.53 ms (best of 30) |
+
+Instructions per parse are `(agents 10 - agents 1) / 9` from `tools/js/instr.sh`. Time is `run_ms` of the example, 3 to 5 runs each.
+
+Changes (`crates/js/src/json.rs`):
+- String scan. `plain_end` tests 8 code units in each step with no branch in the step, so the compiler uses SSE2 compares. Then it finds the stop unit one unit at a time. Before the key cache, a parse cost 15.4 M instructions with steps of 8 units, 15.6 M with 16, 17.1 M with 32, and 18.1 M with 16 units and a bit mask of the stop units. Before, the scan tested one unit at a time.
+- Key cache. A repeated short key (at most 32 units, no escape) skips the interner and `key_from_string`. The cache has 64 slots, placed by the length and the first and last unit. A hit compares the source units. The text budget is charged at the same offset as before. The cache is made only after 64 values: the first version made it for each parse, and `adapter_load codec` (many small texts) rose by 1.2% to 1.4% and `fetch_load post 10` by 0.55%. The cache gives about 0.5 M instructions of the 6.6 M saved a parse.
+
+Not changed, with the reason:
+- Strings stay UTF-16 in the heap, so there is no byte scan and no UTF-8 path to remove. `parse_utf8` has no caller in the evaluator.
+- There was no reviver cost to remove: the reviver walk runs only when the reviver is callable.
+- Numbers already had a fast path for integers of 15 digits or fewer. The fixture has about 1,000 numbers, so a decimal fast path does not change the result.
+- Objects are not built with their final shape. That needs a heap API, and the heap belongs to the shapes work (A1/A2).
+- `json_parse` copies the input units out of the heap (2.4 MB here), because the parser needs `&mut Heap` and the source at the same time. Removing the copy needs a heap API.
+
+Remaining cost outside `json.rs` (to do in the heap and driver work):
+- `Heap::intern` takes 14% of a parse: each string is hashed and copied into the heap.
+- `Response.json()` and `text()` make a JS string from the body first. `Heap::intern_str` on the 1.23 MB text takes 3.6 ms, more than the parse. It counts and converts the text to UTF-16 in two passes, then hashes it. `String::from_utf8_lossy` on the body takes 0.75 ms. So `Response.json()` on this fixture takes about 7 ms.
+
+Checks:
+- Node: 4,000 generated texts (escapes at each offset of the 8-unit steps, keys that share cache slots, `__proto__`, index keys, lone surrogates, numbers, 724 broken texts), compared through `eval_check` and `eval_oracle.mjs`. 0 differences. The fixture round trip is equal in bare and Node.
+- `revive_check.sh` (52), `stringify_check.sh` (57) and `builtins_check.sh` (90) match Node.
+- test262: `tools/fixtures/js/test262-subset.txt` has no `built-ins/JSON` directory. The 166 tests of `test/built-ins/JSON` were run with the base and the new runner: 134 pass, 30 fail and 2 skip in both, with the same result for each test. `tools/js/test262_check.sh`: gate ok. `tools/js/exec_diff.sh`: 79 runs, 0 differences.
+- 2 new unit tests: `string_scan_stops_at_every_position` and `repeated_keys_give_the_same_properties`. Each fails when its part of the change is broken (a scan step that misses `\`, a cache hit that does not compare the units).
+- `cargo test --release --workspace` passes. After the rebase on origin/main 60769f9 (no change in `crates/js`), the `bare-js` tests pass (752).
+- `tools/js/cost_matrix.sh`, 803 rows, base f49daad: no row is over +0.5% under both allocators. Mean change: glibc +0.003%. Highest rows: `resources_load small 1` +1.19% under glibc and -0.07% under jemalloc (noise), `numeric_load encodeuri` +0.28%, `adapter_load codec 10` +0.24%. Lowest: `builtins_load json` -0.25% to -0.27%. The 2 `agents` rows have no base (new rows).
+
+Not tested: the live staging `/agents` route; `Response.json()` on a real network reply; `tools/js/json_load.rs`, because it does not compile on main (since the heap uses `bigint`, `text` and `eval`; not caused by this change); arjun-e16; an aarch64 build (macOS).
