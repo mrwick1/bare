@@ -368,7 +368,8 @@ pub(crate) fn submit_event_ctor(d: &Dom, it: &mut Interp<'_>, _: Value, a: &[Val
         }
         _ => return Err(it.type_error("The event initializer is not an object.")),
     }
-    let e = d.new_event_proto(it, &ty, bubbles, cancelable, composed, d.p().submit)?;
+    let proto = it.host_proto_from_new_target(d.p().submit)?;
+    let e = d.new_event_proto(it, &ty, bubbles, cancelable, composed, proto)?;
     let mut st = d.st.borrow_mut();
     let ev = st.events.get_mut(&e).expect("just made");
     ev.related = submitter;

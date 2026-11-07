@@ -96,30 +96,30 @@ fn reflect_is_a_genuine_object_with_the_full_api() {
 }
 
 #[test]
-fn natives_whose_subclass_plumbing_is_missing_stay_honest_gates() {
+fn native_constructors_take_the_new_target_prototype() {
     big(|| {
         for ctor in ["Map", "Set", "WeakMap", "WeakSet", "Promise", "AggregateError", "ArrayBuffer", "Uint8Array", "TextEncoder", "TextDecoder"] {
             let mut it = realm();
             out(&mut it, "function G() {}");
-            let r = out(&mut it, &format!("Reflect.construct({ctor}, [], G)"));
-            assert!(r.starts_with("unsupported:subclassing"), "{ctor}: {r}");
-            // the class form was already a gate, and stays one
-            let r = out(&mut it, &format!("class S extends {ctor} {{}} new S()"));
-            assert!(r.starts_with("unsupported:subclassing"), "{ctor}: {r}");
-            // the same constructor as new.target is a plain `new`
-            let args = match ctor {
+            let arg = match ctor {
                 "Promise" => "function () {}",
                 "ArrayBuffer" | "Uint8Array" => "2",
                 "AggregateError" => "[]",
                 _ => "",
             };
+            let r = out(&mut it, &format!("var o = Reflect.construct({ctor}, [{arg}], G); [o instanceof G, Object.getPrototypeOf(o) === G.prototype].join()"));
+            assert_eq!(r, "true,true", "{ctor}");
+            let r = out(&mut it, &format!("class S extends {ctor} {{}} var s = new S({arg}); [s instanceof S, s instanceof {ctor}].join()"));
+            assert_eq!(r, "true,true", "{ctor}");
+            // the same constructor as new.target is a plain `new`
+            let args = arg;
             let r = out(&mut it, &format!("typeof Reflect.construct({ctor}, [{args}], {ctor})"));
             assert_eq!(r, "object", "{ctor}");
             // a bound function whose target is the same constructor is `new.target === target` only through the target
             let r = out(&mut it, &format!("var B = {ctor}.bind(null); typeof Reflect.construct(B, [{args}])"));
             assert_eq!(r, "object", "{ctor} bound");
-            let r = out(&mut it, &format!("Reflect.construct(B, [{args}], G)"));
-            assert!(r.starts_with("unsupported:subclassing"), "{ctor} bound with new.target: {r}");
+            let r = out(&mut it, &format!("Object.getPrototypeOf(Reflect.construct(B, [{args}], G)) === G.prototype"));
+            assert_eq!(r, "true", "{ctor} bound with new.target");
         }
     });
 }

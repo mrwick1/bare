@@ -200,14 +200,12 @@ fn async_class_methods_run_and_unsupported_positions_are_found_before_any_effect
 }
 
 #[test]
-fn subclassing_promise_and_host_constructors_is_refused_not_mis_branded() {
+fn subclassing_promise_gives_a_branded_subclass_instance() {
     big(|| {
         let mut it = realm(lim());
-        // defining the class is fine. Constructing it needs `new.target` in the parent, which Promise and a host constructor do not take.
         assert_eq!(out(&mut it, "class P extends Promise {} var made = 0; function mk() { var p = new P(function () {}); made = 1; return p; } typeof P"), "function");
-        assert_eq!(out(&mut it, "mk()"), "unsupported:subclassing Promise (new.target is not passed to the constructor)");
-        assert_eq!(out(&mut it, "made + ',' + (Promise.resolve(1) instanceof Promise)"), "0,true");
-        assert_eq!(out(&mut it, "class Q extends Promise { constructor(f) { super(f); } } try { new Q(function () {}); } catch (e) { 'caught' }"), "unsupported:subclassing Promise (new.target is not passed to the constructor)");
+        assert_eq!(out(&mut it, "var p = mk(); [p instanceof P, p instanceof Promise, made].join()"), "true,true,1");
+        assert_eq!(out(&mut it, "class Q extends Promise { constructor(f) { super(f); } } new Q(function () {}).then(function () {}) instanceof Q"), "true");
         assert_eq!(it.cur, 0);
         // a plain `new Promise` and an async method still work afterwards
         assert_eq!(out(&mut it, "var ok = []; new Promise(function (r) { r(1); }).then(function (v) { ok.push(v); }); class A { async m() { await 0; ok.push('m'); } } new A().m(); 0"), "0");
@@ -427,7 +425,7 @@ fn a_limit_or_gate_in_an_async_iteration_closes_nothing_and_runs_no_more_js() {
     // an Unsupported gate in the body
     big(move || {
         let mut it = realm(lim());
-        out(&mut it, &format!("{setup} (async function () {{ for (var x of it) {{ await null; Promise.resolve.call(function () {{}}, 1); }} }})(); 0"));
+        out(&mut it, &format!("{setup} (async function () {{ for (var x of it) {{ await null; var r = /a/; r.exec = function () {{ return null; }}; 'a'.match(r); }} }})(); 0"));
         assert!(matches!(it.drain_microtasks(), Err(Error::Unsupported(_))));
         assert_eq!(out(&mut it, "log.length"), "0");
     });

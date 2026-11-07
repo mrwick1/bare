@@ -187,8 +187,8 @@ fn focus_event_constructor_and_synthetic_dispatch() {
         assert_eq!(js(&mut b, "Object.getPrototypeOf(FocusEvent.prototype) === Event.prototype && Event.prototype.relatedTarget === undefined"), "true");
         // dispatchEvent of a synthetic focus event runs listeners only: no focus change, no fake trusted action.
         assert_eq!(js(&mut b, "var n = 0; $('b').addEventListener('focus', function (e) { n++; log.push(e.isTrusted + ':' + (e.relatedTarget === $('a'))); }); $('b').dispatchEvent(new FocusEvent('focus', {relatedTarget: $('a')})); $('b').dispatchEvent(new Event('focusin')); n + '|' + log.join() + '|' + active()"), "1|false:true|BODY");
-        // Subclassing stays gated.
-        assert_eq!(js(&mut b, "class MyFocus extends FocusEvent {}; new MyFocus('x')"), "unsupported:subclassing a host constructor (new.target is not passed to the constructor)");
+        // A subclass gets its own prototype.
+        assert_eq!(js(&mut b, "class MyFocus extends FocusEvent {}; var mf = new MyFocus('x'); [mf instanceof MyFocus, mf instanceof FocusEvent, mf.type].join()"), "true,true,x");
         assert_eq!(js(&mut b, "typeof $('a').focus + typeof FocusEvent + (new Event('x') instanceof FocusEvent)"), "functionfunctionfalse");
     });
 }

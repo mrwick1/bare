@@ -193,6 +193,18 @@ Follow-ups of [Parallel downloads](#parallel-downloads). The numbers are in [res
 - If `with` or a direct `eval` is added, the first walk must open a barrier for the code that they can reach.
 - Reason: a bundle reads outer variables through a chain of closures, and every read searched each environment on the way. See [resources.md](resources.md#cost-of-identifier-lookup).
 
+## Subclassing built-in constructors
+
+- A built-in object is a plain heap object plus a side table keyed by its id (`colls`, `weak.colls`, `date.times`, `promise.map`, the buffer and view kinds). So a subclass instance needs only the right prototype. No constructor makes a hidden "subclass" object.
+- `construct_nt_inner` (Construct with a different `new.target`) puts `new.target` in `cls.native_nt` before it calls the native constructor. The constructor takes it first (`native_nt.take()`), so a nested construct inside an argument conversion cannot see it. `nt_proto` reads `prototype` of `new.target` before the object exists. `nt_patch` sets it after, for the constructors that make the object in a helper (`Promise`, typed arrays, `DataView`, `TextDecoder`). `Date` passes the prototype to `date_new`.
+- A host constructor opts in with `add_ctor_nt` and reads `host_proto_from_new_target(default)`. A plain `new F` passes no `new.target`, so the host constructor gets `default` and runs no property read. This is exact because the `prototype` of a host constructor is read-only. The `default` must be that `prototype`. The read cost about 1% on rows that make events.
+- `NewPromiseCapability` for a constructor other than `Promise` runs the constructor with an executor that keeps `resolve` and `reject` in a holder object. A side table `caps` maps the new promise to the two functions. The mark phase queues them once, at the end, for each reached promise in the table. A per-object check cost +0.8% on every GC row, so it is not there. The intrinsic `Promise` never uses the table. Its resolving pair is the old direct path, so a plain `Promise.resolve(x)` allocates no function.
+- A custom capability in the combinators uses the pair id `u64::MAX`. The "already resolved" flag then lives in the user functions, not in `done_pairs`.
+- `species_ctor` replaces the old gate for `then` and `finally`. The species constructor of an array, a typed array, an `ArrayBuffer` and a `Promise` is read once, with the V8 messages. A species that is the intrinsic constructor takes the old fast path.
+- The brand of an error object is not stored. `Object.prototype.toString` tests an own `stack` and `Error.prototype` in the chain. Reason: no extra field for each error, and the tag matches V8 for the cases of the corpus. It is a heuristic, listed in progress.md.
+- Not done: custom elements (no `customElements` yet); `Request`, `Response`, `Headers` and `URL` (each constructor must read `new.target`, one change for each); `extends Function` and `extends Symbol`. No target page needs them yet.
+- Cost rule for this change: no `instructions:u` row worse than +0.5% against c66c8a5. The worst row is +0.41%. See [progress.md](progress.md#class-x-extends-built-in).
+
 ## Code style
 
 - Plain code. No clever tricks.

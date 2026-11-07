@@ -608,16 +608,20 @@ fn decoder_label_scans_consume_steps() {
 // ---------------------------------------------------------------- iterables, species and subclass gates
 
 #[test]
-fn custom_species_is_an_explicit_gate_and_the_default_is_not() {
+fn custom_species_is_constructed_and_checked_and_the_default_is_not() {
     let g = |src: &str| run(src);
-    let ab = "unsupported:ArrayBuffer species constructor other than ArrayBuffer";
-    let ta = "unsupported:typed array species constructor other than the intrinsic class";
-    assert_eq!(g("var b = new ArrayBuffer(2); b.constructor = {[Symbol.species]: function(n) { return new ArrayBuffer(n); }}; b.slice(0)"), ab);
-    assert_eq!(g("var u = new Uint8Array(2); u.constructor = {[Symbol.species]: function(n) { return new Uint8Array(n); }}; u.subarray(0)"), ta);
-    assert_eq!(g("var u = new Uint8Array(2); u.constructor = {[Symbol.species]: function(n) { return new Uint8Array(n); }}; u.slice(0)"), ta);
-    // another intrinsic as the species is also not the default: the type would be wrong, so it is a gate
-    assert_eq!(g("var u = new Uint8Array(2); u.constructor = {[Symbol.species]: ArrayBuffer}; u.slice(0)"), ta);
-    assert_eq!(g("var b = new ArrayBuffer(2); b.constructor = {[Symbol.species]: Uint8Array}; b.slice(0)"), ab);
+    assert_eq!(g("var b = new ArrayBuffer(2); b.constructor = {[Symbol.species]: function(n) { return new ArrayBuffer(n); }}; b.slice(0).byteLength"), "number:2");
+    assert_eq!(g("var u = new Uint8Array(2); u.constructor = {[Symbol.species]: function(n) { return new Uint8Array(n); }}; [u.slice(0).length, u.slice(0) instanceof Uint8Array].join()"), "string:2,true");
+    assert_eq!(g("var u = new Uint8Array(4); u.constructor = {[Symbol.species]: function(b, o, l) { return new Uint8Array(b, o, l); }}; var s = u.subarray(1); [s.length, s.byteOffset].join()"), "string:3,1");
+    assert_eq!(g("var b = new ArrayBuffer(4); new Uint8Array(b).set([1,2,3,4]); b.constructor = {[Symbol.species]: function(n) { return new ArrayBuffer(n + 1); }}; var r = b.slice(1); [r.byteLength, new Uint8Array(r).join()].join()"), "string:4,2,3,4,0");
+    assert_eq!(g("var u = new Uint8Array([1,2,3]); u.constructor = {[Symbol.species]: function(n) { return new Uint16Array(n); }}; var r = u.slice(1); [r.length, r.join(), r instanceof Uint16Array].join()"), "string:2,2,3,true");
+    assert_eq!(g("var u = new Uint8Array(2); u.constructor = {[Symbol.species]: Int8Array}; u.slice(0) instanceof Int8Array"), "boolean:true");
+    // the result is checked as in V8
+    assert_eq!(g("var b = new ArrayBuffer(2); b.constructor = {[Symbol.species]: function(n) { return b; }}; b.slice(0)"), "throw:TypeError:ArrayBuffer subclass returned this from species constructor");
+    assert_eq!(g("var b = new ArrayBuffer(4); b.constructor = {[Symbol.species]: function(n) { return new ArrayBuffer(1); }}; b.slice(0)"), "throw:TypeError:Derived ArrayBuffer constructor created a buffer which was too small");
+    assert_eq!(g("var b = new ArrayBuffer(2); b.constructor = {[Symbol.species]: Uint8Array}; b.slice(0)"), "throw:TypeError:Method ArrayBuffer.prototype.slice called on incompatible receiver [object Uint8Array]");
+    assert_eq!(g("var u = new Uint8Array([1,2,3]); u.constructor = {[Symbol.species]: function(n) { return new Uint8Array(1); }}; u.map(function (x) { return x })"), "throw:TypeError:Derived TypedArray constructor created an array which was too small");
+    assert_eq!(g("var u = new Uint8Array([1,2,3]); u.constructor = {[Symbol.species]: function(n) { return new BigInt64Array(n); }}; u.slice(0)"), "throw:TypeError:Cannot mix BigInt and other types, use explicit conversions");
     // not a constructor at all: the ordinary TypeError, as in a browser
     assert_eq!(g("var b = new ArrayBuffer(2); b.constructor = {[Symbol.species]: {}}; b.slice(0)"), "throw:TypeError:object.constructor[Symbol.species] is not a constructor");
     // the default species ends in the right type
@@ -628,20 +632,17 @@ fn custom_species_is_an_explicit_gate_and_the_default_is_not() {
 }
 
 #[test]
-fn subclassing_a_binary_or_collection_native_is_refused_when_constructed() {
+fn subclassing_a_binary_or_collection_native_gives_a_branded_subclass_instance() {
     let g = |src: &str| run(src);
     for (name, args) in [("Uint8Array", "2"), ("ArrayBuffer", "2"), ("TextEncoder", ""), ("TextDecoder", ""), ("Map", ""), ("Set", "")] {
-        // declaring the class works; constructing it is the explicit gate
         assert_eq!(g(&format!("class A extends {name} {{}} typeof A")), "string:function", "{name}");
-        assert_eq!(
-            g(&format!("class A extends {name} {{ constructor() {{ super({args}); }} }} new A()")),
-            "unsupported:subclassing a native constructor (new.target is not passed to the constructor)",
-            "{name}"
-        );
-        assert_eq!(g(&format!("class A extends {name} {{}} new A({args})")), "unsupported:subclassing a native constructor (new.target is not passed to the constructor)", "{name}");
+        let want = "string:true,true,true";
+        assert_eq!(g(&format!("class A extends {name} {{ constructor() {{ super({args}); }} }} var a = new A(); [a instanceof A, a instanceof {name}, Object.getPrototypeOf(a) === A.prototype].join()")), want, "{name}");
+        assert_eq!(g(&format!("class A extends {name} {{}} var a = new A({args}); [a instanceof A, a instanceof {name}, Object.getPrototypeOf(a) === A.prototype].join()")), want, "{name}");
+        assert_eq!(g(&format!("function F() {{}} var a = Reflect.construct({name}, [{args}], F); Object.getPrototypeOf(a) === F.prototype")), "boolean:true", "{name}");
     }
-    // the abstract %TypedArray% is not a usable parent either: it throws when constructed, as in a browser
-    assert_eq!(g("var T = Object.getPrototypeOf(Uint8Array); class A extends T {} new A()"), "unsupported:subclassing a native constructor (new.target is not passed to the constructor)");
+    // the abstract %TypedArray% is not a usable parent: it throws when constructed, as in a browser
+    assert_eq!(g("var T = Object.getPrototypeOf(Uint8Array); class A extends T {} try { new A() } catch (e) { e.name + ': ' + e.message }"), "string:TypeError: Abstract class TypedArray not directly constructable");
     // no fake brand: the plain constructors are untouched
     assert_eq!(g("Object.prototype.toString.call(new Uint8Array(1)) + new Map().size"), "string:[object Uint8Array]0");
 }

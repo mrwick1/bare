@@ -122,7 +122,8 @@ impl<'p> Interp<'p> {
     }
 
     /// GetPrototypeFromConstructor for the host constructor that is running: `Get(newTarget, "prototype")`, or `default`
-    /// when that is not an object (and when the function was not given a `new.target`). Read it when the constructor makes
+    /// when that is not an object. A plain `new F` (and `Reflect.construct(F, args, F)`) passes no `new.target`: it gets `default`, which must
+    /// be the read-only `prototype` of `F`, so it costs no property read. Read it when the constructor makes
     /// its object, after it converted its arguments. It may run a getter, so hold no host borrow.
     pub fn host_proto_from_new_target(&mut self, default: ObjId) -> Result<ObjId, Error> {
         match self.host_nt {

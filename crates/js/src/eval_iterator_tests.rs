@@ -233,14 +233,14 @@ fn iterator_constructor_and_gates() {
         let mut it = realm();
         assert_eq!(out(&mut it, "try { new Iterator(); } catch (e) { e.message }"), "string:Abstract class Iterator not directly constructable");
         assert_eq!(out(&mut it, "class C extends Iterator { next() { return { done: true }; } } var c = new C(); (c instanceof Iterator) + ':' + c.toArray().length"), "string:true:0");
-        // a static of Promise on a user constructor is a gate. Promise.withResolvers follows the existing gate
+        // a static of Promise on a user constructor runs it as a capability executor
         let mut it = realm();
-        assert!(out(&mut it, "function F(ex) { ex(function () {}, function () {}); } try { Promise.withResolvers.call(F); } catch (e) { 'caught' }").starts_with("unsupported:"));
-        // subclassing WeakRef or FinalizationRegistry is a gate, like the other native collections
+        assert_eq!(out(&mut it, "function F(ex) { ex(function () {}, function () {}); } var w = Promise.withResolvers.call(F); [typeof w.resolve, w.promise instanceof F].join()"), "string:function,true");
+        // WeakRef and FinalizationRegistry take the prototype of the new target
         let mut it = realm();
-        assert!(out(&mut it, "class W extends WeakRef {} try { new W({}); } catch (e) { 'caught' }").starts_with("unsupported:"));
+        assert_eq!(out(&mut it, "class W extends WeakRef {} var o = {}; var w = new W(o); [w instanceof W, w.deref() === o].join()"), "string:true,true");
         let mut it = realm();
-        assert!(out(&mut it, "class W extends FinalizationRegistry {} try { new W(function () {}); } catch (e) { 'caught' }").starts_with("unsupported:"));
+        assert_eq!(out(&mut it, "class W extends FinalizationRegistry {} new W(function () {}) instanceof W"), "boolean:true");
         // a non-registered Symbol as a weak target is a gate too (WeakMap, WeakSet and WeakRef agree)
         let mut it = realm();
         assert!(out(&mut it, "try { new WeakRef(Symbol('s')); } catch (e) { 'caught' }").starts_with("unsupported:"));

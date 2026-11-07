@@ -1114,3 +1114,31 @@ Tests: 19 against `openssl s_server -alpn h2` driven frame by frame (GOAWAY, RST
 Details: [resources.md](resources.md#http2), [decisions.md](decisions.md#http2-is-our-own-code-one-reader-thread-for-each-connection).
 
 Not tested: a real server other than nghttp2 and OpenSSL; staging over HTTP/2; padded frames, `PRIORITY`, an interim `100` reply, trailers and a gzip reply over HTTP/2; a server that sets few concurrent streams; a real network (the proxy is a fixed delay); the `h2` crate's RSS and speed.
+
+## `class X extends <built-in>`
+
+Problem: `class X extends Map {}` stopped with `Unsupported("subclassing a native constructor")`. Radix `@radix-ui/react-collection` 1.1.2 and later uses `class OrderedDict extends Map`, so a page that loads it could not run.
+
+Now these built-ins can be extended, and `Reflect.construct(Builtin, args, NewTarget)` works for them: `Map`, `Set`, `WeakMap`, `WeakSet`, `WeakRef`, `FinalizationRegistry`, `Array`, `Error`, the native errors, `AggregateError`, `Promise`, `RegExp`, `Date`, `ArrayBuffer`, `DataView`, all typed arrays, `Boolean`, `Number`, `String`, `Object`, `Event`, `CustomEvent`, `FocusEvent`, `SubmitEvent`, the mouse, pointer, keyboard and input events, `EventTarget` and `AbortController`.
+
+- The prototype chain, `instanceof`, internal slots, `toString` tags and static inheritance follow the standard. The constructor of a `Map` subclass calls the overridden `set` for each entry.
+- `length` of an `Array` subclass is exotic. `map`, `filter`, `slice`, `splice` and `concat` read `Symbol.species`. `Array.from` and `Array.of` accept a custom `this`.
+- An error made by a subclass has `stack`, `message` and `cause`.
+- `then`, `catch`, `finally`, `Promise.resolve`, `reject`, `withResolvers`, `all`, `allSettled`, `race` and `any` use `NewPromiseCapability` for a constructor other than `Promise`. `then` of a subclass returns the subclass. An `async` function still returns a plain `Promise`.
+- `slice` of an `ArrayBuffer` subclass and the species of a typed array follow the standard, with the V8 error messages.
+
+Checks:
+
+- 128 sync cases (`tools/fixtures/js/subclass-cases.txt`) and 11 Promise cases (`subclass-promise-cases.txt`) match Node. `tools/js/subclass_check.sh` re-runs Node. The Radix `OrderedDict extends Map` code (private `#keys`, an overridden `set`, `insert`) is one of the cases.
+- The other `tools/js/*_check.sh` comparisons that run offline still match. `parse_check.sh` did not run: it needs the acorn module.
+- Rust: each corpus is a test (`subclass_corpus_matches_node` in `eval_class_tests.rs` and `eval_promise_tests.rs`). `browser_tests.rs` has one new test of `Event`, `CustomEvent`, `EventTarget` and `AbortController` subclasses. Gate tests that expected "subclassing …" now expect the Node result. `cargo test --release --workspace` passes.
+
+Cost: 482 `*_load` rows at scale 1 and 10, with the `tools/js/instr.sh` method (minimum of 3 runs of `instructions:u`), base c66c8a5 against this change. Median -0.01%, worst +0.41% (`promise_load finally 10`; +0.37% at scale 1). No row is over +0.5%.
+
+- The first run had 31 rows over the limit. 10 were `promise_load` and `async_load` rows at +15% to +27%: every `Promise.resolve` of a plain value made two resolving functions. 4 were `streams_load flow` and `scheduler_load mixed` rows at +4% to +7%.
+- Fixes: the intrinsic `Promise` keeps its direct path. The mark phase queues the functions of a custom capability once at the end, not for each object (that cost +0.8% on the `gc` rows). `Date` takes the prototype at creation, not with a second call (+0.5% on the `date_load` rows). A plain `new` of a host constructor reads no `prototype`; it is read-only, so the default is exact (the `focus`, `abort` and `event` rows were about +1%).
+- A jemalloc run (`LD_PRELOAD=/usr/lib/libjemalloc.so.2`) of the rows near the limit agrees: `finally` +0.42%, `date_load` within 0.05%.
+
+Still gated, in this order of use: custom elements (`customElements` does not exist, so `class X extends HTMLElement` stays out); `Request`, `Response`, `Headers` and `URL` (host constructors that do not read `new.target`); `extends Symbol` and `extends Function`; the `Intl` constructors; `flat` and `flatMap` of an `Array` subclass with a species other than `Array`; an own `exec` on a `RegExp` subclass. Known differences: V8 builds the header of `stack` lazily and bare does not; an error object is known by an own `stack` and `Error.prototype` in its chain, not by a hidden slot; a typed array reads the `prototype` of `new.target` after it converts its arguments; a throw of a user `resolve` function inside a reaction job is dropped, as a failed job is.
+
+Not tested: a page that loads Radix `react-collection` 1.1.2 or later (the pattern ran, no live page or bundle); `test262` (the repo has none); `tools/js/dom_check.sh` and `browser_check.sh` (they need headless Chrome); `adapter_check.sh` and `fetch_check.sh` (not run); the rows `wrapper_load`, `numeric_load`, `regexp_load`, `handler_load` and `xhr_load`; `dataset_load` (one case), `select_load` and `sticky_load` (by hand, within ±0.2%); scale 100; wall time; a machine other than this one.

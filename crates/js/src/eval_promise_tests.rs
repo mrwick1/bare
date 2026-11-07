@@ -50,7 +50,16 @@ fn run_case(src: &str) -> String {
 
 #[test]
 fn corpus_matches_node() {
-    let (cases, expected) = (include_str!("../../../tools/fixtures/js/promise-cases.txt"), include_str!("../../../tools/fixtures/js/promise-cases.expected"));
+    check_corpus(include_str!("../../../tools/fixtures/js/promise-cases.txt"), include_str!("../../../tools/fixtures/js/promise-cases.expected"), 60);
+}
+
+/// `class X extends Promise` (`tools/js/subclass_check.sh`).
+#[test]
+fn subclass_corpus_matches_node() {
+    check_corpus(include_str!("../../../tools/fixtures/js/subclass-promise-cases.txt"), include_str!("../../../tools/fixtures/js/subclass-promise-cases.expected"), 10);
+}
+
+fn check_corpus(cases: &'static str, expected: &'static str, min: usize) {
     big(move || {
         let mut list: Vec<(&str, Vec<&str>)> = Vec::new();
         for line in cases.lines() {
@@ -62,7 +71,7 @@ fn corpus_matches_node() {
         }
         let want: Vec<&str> = expected.lines().collect();
         assert_eq!(list.len(), want.len());
-        assert!(list.len() >= 60);
+        assert!(list.len() >= min);
         let mut bad = Vec::new();
         for ((name, lines), w) in list.iter().zip(want) {
             let got = format!("{name}\t{}", run_case(lines.join("\n").trim_end_matches('\n')));
@@ -105,7 +114,7 @@ fn out_text(it: &mut Interp) -> String {
 #[test]
 fn gates_are_explicit_unsupported_not_silent() {
     let src = "Promise.resolve.call(function () {}, 1)";
-    assert_eq!(run_case(src), "unsupported:Promise static method on a constructor other than Promise", "{src}");
+    assert_eq!(run_case(src), "throw:TypeError:Promise resolve or reject function is not callable", "{src}");
     // an async shape that is not supported is found before anything runs
     for src in ["async function f(o) { return (await o)?.x; }", "var f = async () => { for (var k in await 1) {} };"] {
         let prog = parse_script(src, Limits::default()).unwrap();

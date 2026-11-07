@@ -87,15 +87,18 @@ fn outcome_node_format(src: &str) -> String {
 }
 
 #[test]
-fn gates_are_explicit_not_silent() {
-    let gate = |src: &str, what: &str| assert_eq!(run(src), format!("unsupported:{what}"), "{src}");
-    gate("var a=[1]; a.constructor={[Symbol.species]: function F(){}}; a.map(function(x){return x})", "Array species constructor (subclass or custom constructor)");
-    gate("var a=[1]; a.constructor={[Symbol.species]: function F(){}}; a.filter(function(x){return x})", "Array species constructor (subclass or custom constructor)");
-    gate("var a=[1]; a.constructor={[Symbol.species]: function F(){}}; a.slice()", "Array species constructor (subclass or custom constructor)");
-    gate("var a=[1]; a.constructor={[Symbol.species]: function F(){}}; a.splice(0)", "Array species constructor (subclass or custom constructor)");
-    gate("var a=[1]; a.constructor={[Symbol.species]: function F(){}}; a.concat()", "Array species constructor (subclass or custom constructor)");
-    gate("function F(){} Array.from.call(F, [1])", "Array.from with a non-Array this");
-    gate("function F(){} Array.of.call(F, 1)", "Array.of with a non-Array this");
+fn species_and_from_receivers_run_a_custom_constructor() {
+    let t = |src: &str, want: &str| assert_eq!(run(src), format!("string:{want}"), "{src}");
+    let pre = "var a=[1,2]; function F(n){ this.n = n } a.constructor={[Symbol.species]: F};";
+    t(&format!("{pre} var r = a.map(function(x){{return x+1}}); [r instanceof F, r.n, r[1], r.length].join()"), "true,2,3,");
+    t(&format!("{pre} var r = a.filter(function(x){{return x>1}}); [r instanceof F, r.n, r[0], r.length].join()"), "true,0,2,");
+    t(&format!("{pre} var r = a.slice(); [r instanceof F, r.n, r[1], r.length].join()"), "true,2,2,2");
+    t(&format!("{pre} var r = a.splice(0); [r instanceof F, r.n, r[1], r.length].join()"), "true,2,2,2");
+    t(&format!("{pre} var r = a.concat([3]); [r instanceof F, r.n, r[2], r.length].join()"), "true,0,3,3");
+    t("function F(){ } var r = Array.from.call(F, [1,2]); [r instanceof F, r[1], r.length].join()", "true,2,2");
+    t("function F(n){ this.n = n } var r = Array.of.call(F, 5, 6); [r instanceof F, r.n, r[1], r.length].join()", "true,2,6,2");
+    t("var a=[1]; function C(){ this.k=1 } C[Symbol.species]=function G(){ this.g=1 }; a.constructor=C; var r=a.slice(); [r instanceof C, r.g, r.k, r[0]].join()", "false,1,,1");
+    assert!(run("var a=[1]; a.constructor={[Symbol.species]: {}}; a.map(function(x){return x})").starts_with("throw:TypeError"));
     // The things that are not gates: an `Array` constructor, a non-callable `constructor`, `undefined`.
     assert_eq!(run("var a=[1,2]; a.constructor={}; a.map(function(x){return x}).length"), "number:2");
     assert_eq!(run("var a=[1,2]; a.constructor=undefined; a.slice().length"), "number:2");

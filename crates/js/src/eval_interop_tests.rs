@@ -113,24 +113,17 @@ fn run(src: &str) -> String {
 #[test]
 fn custom_hooks_that_are_out_of_scope_are_explicit_gates() {
     let gate = |src: &str, what: &str| assert_eq!(run(src), format!("unsupported:{what}"), "{src}");
-    let species = "Array species constructor (subclass or custom constructor)";
-    gate("var a=[1]; a.constructor={[Symbol.species]: function F(){}}; a.map(function(x){return x})", species);
-    gate("var a=[1]; a.constructor={[Symbol.species]: function F(){}}; a.concat()", species);
-    gate("var a=[1]; function C(){} C[Symbol.species]=function G(){}; a.constructor=C; a.slice()", species);
-    gate("var a=[1]; function C(){} Object.defineProperty(C, Symbol.species, {get(){ return function H(){}; }}); a.constructor=C; a.filter(function(){return true})", species);
-    gate("var p=Promise.resolve(1); p.constructor={[Symbol.species]: function F(){}}; p.then(function(){})", "Promise species constructor other than Promise");
-    gate("var p=Promise.resolve(1); p.constructor={[Symbol.species]: function F(){}}; p.finally(function(){})", "Promise species constructor other than Promise");
     gate("new RegExp({[Symbol.match]: true, source: 'a', flags: ''})", "RegExp constructor with a regexp-like object (Symbol.match)");
     gate("var r=/a/; r.exec=function(){ return null; }; 'a'.match(r)", "RegExp with a replaced exec method");
     gate("var r=/a/; r.exec=function(){ return null; }; 'a'.replace(r, 'b')", "RegExp with a replaced exec method");
     gate("var r=/a/; r.exec=function(){ return null; }; 'a'.split(r)", "RegExp with a replaced exec method");
-    gate("function F(){} Array.from.call(F, new Set([1]))", "Array.from with a non-Array this");
     // What is not a gate: no species, a null species, the intrinsic, and ordinary iterables.
     assert_eq!(run("var a=[1,2]; a.constructor={}; a.map(function(x){return x}).length"), "ok:2");
     assert_eq!(run("var a=[1,2]; a.constructor=function F(){}; a.slice().length"), "ok:2");
     assert_eq!(run("var a=[1,2]; a.constructor={[Symbol.species]: null}; a.filter(function(){return true}).length"), "ok:2");
     assert_eq!(run("var a=[1,2]; a.constructor={[Symbol.species]: Array}; a.concat([3]).length"), "ok:3");
     assert_eq!(run("Array.from(new Map([[1,2]])).length"), "ok:1");
+    assert_eq!(run("function F(){} var r = Array.from.call(F, new Set([1])); [r instanceof F, r.length].join()"), "ok:true,1");
     // `'x'.search` is bound since batch 1: it finds the match at index 0. matchAll exists: it returns the iterator.
     assert_eq!(run("try { 'x'.search(/x/) } catch (e) { e.name }"), "ok:0");
     assert_eq!(run("typeof 'x'.matchAll(/x/g).next().value.index"), "ok:number");

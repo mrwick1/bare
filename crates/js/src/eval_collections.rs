@@ -230,7 +230,8 @@ impl Interp<'_> {
                 if !is_new {
                     return Err(self.type_err(&format!("Constructor {} requires 'new'", if is_map { "Map" } else { "Set" })));
                 }
-                let proto = if is_map { self.sc.map_proto } else { self.sc.set_proto };
+                let nt = self.cls.native_nt.take();
+                let proto = self.nt_proto(nt, if is_map { self.sc.map_proto } else { self.sc.set_proto })?;
                 let o = self.coll_new(is_map, proto)?;
                 if !is_nullish(a0) {
                     self.coll_fill(o, is_map, a0)?;

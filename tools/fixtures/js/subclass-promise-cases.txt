@@ -1,0 +1,45 @@
+# bare-js Promise-subclass cases, in the format of promise-cases.txt (`pre ## post`). Node is the oracle.
+=== then_runs
+var log = []; function L(x) { log.push(String(x)); }
+class P extends Promise {} P.resolve(1).then((v) => { L(v); return v + 1; }).then((v) => L(v)); L("sync");
+(function () { return log.join("|"); })
+=== executor_throws
+var log = []; function L(x) { log.push(String(x)); }
+class P extends Promise {} new P(() => { throw new Error("e"); }).catch((e) => L(e.message));
+(function () { return log.join("|"); })
+=== await_subclass
+var log = []; function L(x) { log.push(String(x)); }
+class P extends Promise {} (async () => { L(await P.resolve(3)); L("after"); })(); L("sync");
+(function () { return log.join("|"); })
+=== resolve_with_subclass
+var log = []; function L(x) { log.push(String(x)); }
+class P extends Promise {} Promise.resolve(P.resolve(4)).then((v) => L(v)); Promise.resolve().then(() => L("a")).then(() => L("b")).then(() => L("c"));
+(function () { return log.join("|"); })
+=== subclass_then_order
+var log = []; function L(x) { log.push(String(x)); }
+class P extends Promise {} P.resolve().then(() => L(1)).then(() => L(2)); Promise.resolve().then(() => L("a")).then(() => L("b"));
+(function () { return log.join("|"); })
+=== subclass_all
+var log = []; function L(x) { log.push(String(x)); }
+class P extends Promise {} P.all([1, P.resolve(2)]).then((v) => L(v.join())); P.race([3]).then(L); P.allSettled([Promise.reject(1)]).then((r) => L(r[0].status)); P.any([Promise.reject(1), 5]).then(L);
+(function () { return log.join("|"); })
+=== subclass_finally
+var log = []; function L(x) { log.push(String(x)); }
+class P extends Promise {} P.resolve(1).finally(() => L("f")).then((v) => L(v)); P.reject(2).finally(() => L("g")).catch((v) => L(v));
+(function () { return log.join("|"); })
+=== subclass_constructor_calls
+var log = []; function L(x) { log.push(String(x)); }
+class P extends Promise { constructor(ex) { L("new"); super(ex); } } var p = P.resolve(1); p.then(() => {}); p.catch(() => {}); P.all([1]);
+(function () { return log.join("|"); })
+=== species_override_then
+var log = []; function L(x) { log.push(String(x)); }
+class P extends Promise { static get [Symbol.species]() { return Promise; } } var t = P.resolve(1).then(() => L("x")); L(t instanceof P); L(t.constructor === Promise);
+(function () { return log.join("|"); })
+=== custom_then_in_subclass
+var log = []; function L(x) { log.push(String(x)); }
+class P extends Promise { then(a, b) { L("then"); return super.then(a, b); } } P.resolve(1).then((v) => L(v)); (async () => { await P.resolve(2); L("awaited"); })();
+(function () { return log.join("|"); })
+=== unhandled_ordering_non_promise_ctor
+var log = []; function L(x) { log.push(String(x)); }
+function C(ex) { L("C"); ex(() => L("res"), () => L("rej")); } C.resolve = Promise.resolve; C.resolve(1);
+(function () { return log.join("|"); })

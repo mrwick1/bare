@@ -316,7 +316,8 @@ pub(crate) fn focus_event_ctor(d: &Dom, it: &mut Interp<'_>, _: Value, a: &[Valu
         }
         _ => return Err(it.type_error("The event initializer is not an object.")),
     }
-    let e = d.new_event_proto(it, &ty, bubbles, cancelable, composed, d.p().focus)?;
+    let proto = it.host_proto_from_new_target(d.p().focus)?;
+    let e = d.new_event_proto(it, &ty, bubbles, cancelable, composed, proto)?;
     {
         let mut st = d.st.borrow_mut();
         let event = st.events.get_mut(&e).expect("just made");

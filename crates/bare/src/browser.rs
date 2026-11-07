@@ -912,7 +912,7 @@ impl Dom {
         it.host_function(id, name, len, ctor)
     }
 
-    /// A constructor that takes a different `new.target` (only `URLSearchParams`: it reads it with `host_proto_from_new_target`).
+    /// A constructor that takes a different `new.target`: it reads it with `host_proto_from_new_target`.
     pub(crate) fn add_ctor_nt(&self, it: &mut Interp<'_>, h: H, name: &str, len: u32) -> R<ObjId> {
         let id = self.handlers.borrow().len() as u32;
         self.handlers.borrow_mut().push((h, true));
@@ -1028,7 +1028,10 @@ impl Dom {
         let (kp, kc) = (self.key(it, "prototype")?, self.key(it, "constructor")?);
         let mut ctors = Vec::new();
         for (name, proto, ctor) in ifaces {
-            let f = if name == "DocumentFragment" { self.add_ctor_nt(it, nd::fragment_ctor, name, 0)? } else { self.add_fn(it, ctor.unwrap_or(illegal_constructor), name, u32::from(ctor.is_some() && name != "EventTarget"), ctor.is_some())? };
+            let f = match if name == "DocumentFragment" { Some(nd::fragment_ctor as H) } else { ctor } {
+                Some(h) => self.add_ctor_nt(it, h, name, u32::from(name != "EventTarget" && name != "DocumentFragment"))?,
+                None => self.add_fn(it, illegal_constructor, name, 0, false)?,
+            };
             it.define_data(f, kp, Value::Object(proto), false, false, false)?;
             it.define_data(proto, kc, Value::Object(f), true, false, true)?;
             let k = self.key(it, name)?;
