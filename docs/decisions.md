@@ -296,6 +296,16 @@ Choices:
 
 Consequence: a server that offers `h2` gets one connection for each origin, not up to 6. `BARE_NET_TRACE` has a `proto` column (`h2` or empty).
 
+## Media elements act as a browser with no media format
+
+Changed on 2026-11-07. `<audio>`, `<video>` and `new Audio(src)` exist (`HTMLMediaElement`, `HTMLAudioElement`, `HTMLVideoElement`, `Audio`, `TimeRanges`, `MediaError`). This engine has no decoder and no audio output, so it never plays. It acts as a browser that supports no format. `canPlayType()` gives `""`. Every source fails with `MEDIA_ERR_SRC_NOT_SUPPORTED` (code 4). `play()` rejects with `NotSupportedError`. `readyState` stays 0 and `duration` stays `NaN`. The events and their order follow Chrome 155 for a source it cannot play (recorded, 77 cases).
+
+Reason: a live React page calls `new Audio(url)` and went down with `ReferenceError: Audio is not defined`. A page must see the same API and handle the same failure as in a browser that cannot play the file. The engine never fakes a result: it does not say `probably`, it does not fire `canplay` and it does not move `currentTime`.
+
+The engine makes no request for the media. Chrome asks the server (a range request) and the events depend on the answer. Here the load fails at once with the text `MEDIA_ELEMENT_ERROR: Format error`, and `progress` and `suspend` never fire for a source that Chrome could fetch. A decoder is needed before a request has a use. The page cannot tell the failure of a fetch from the failure of a format.
+
+Consequences: an element that the parser makes with a `src` does not load until the page calls `load()` or `play()` (the tree builder has no hook). `<source>` children are not read. The globals are lazy accessors (`browser_lazy.rs`), so a page without media pays six accessor functions.
+
 ## Open questions
 
 - A separate process for sensitive sites, for example banking.
