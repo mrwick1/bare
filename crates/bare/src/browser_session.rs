@@ -20,7 +20,7 @@
 //!
 //! Document load: GET, redirects followed here one by one (`Client::send_once`: a redirect is checked before any socket
 //! opens): at most `max_redirects`, http or https only, no downgrade from https to http. The status must be 2xx (a
-//! 404 page is not run), `Content-Type` `text/html` (XML/XHTML is unsupported), no `Content-Encoding`, at most
+//! 404 page is not run), `Content-Type` `text/html` (XML/XHTML is unsupported), no `Content-Encoding` that `bare_net` cannot undo, at most
 //! `max_document_bytes`. The text is decoded by `bare_html::encoding`. A form `POST` sends its body once; a 301, 302 or 303
 //! redirect of it is a `GET` without the body, a 307 or 308 is refused (a body is never sent twice). Gates: no cookies
 //! (the client has none); no `Referer`; a failed load ends the session (the old page stays gone, as a browser error page would).
@@ -255,7 +255,7 @@ fn load_document(client: &mut Client, url: &str, body: Option<&Body>, lim: &Sess
         if !is_html(ct) {
             return Err("the content type is not HTML".into());
         }
-        if resp.header("content-encoding").is_some_and(|e| !e.trim().eq_ignore_ascii_case("identity")) {
+        if resp.encoded() {
             return Err("the content encoding is not supported".into());
         }
         let text = encoding::decode(&resp.body, ct);

@@ -459,12 +459,25 @@ fn json_uses_the_intrinsic_parse() {
 }
 
 #[test]
+fn a_gzip_body_is_decoded_and_its_headers_stay() {
+    big(|| {
+        let srv = serve(|r| match r.path.as_str() {
+            "/gz" => reply(200, &[("Content-Type", "application/json"), ("Content-Encoding", "gzip")], b"\x1f\x8b\x08\x00\x00\x00\x00\x00\x02\xff\xab\x56\x4a\xaf\x52\xb2\x52\x4a\x49\x4d\xce\x4f\x49\x4d\x51\xaa\x05\x00\xc6\x8d\x73\x29\x10\x00\x00\x00"),
+            _ => reply(200, &[("Content-Encoding", "gzip")], b"not gzip"),
+        });
+        let mut b = at(srv.port);
+        let src = "var out = []; fetch('/gz').then(function (r) { out.push(r.headers.get('content-encoding'), r.headers.get('content-length')); return r.json(); }).then(function (j) { out.push(j.gz); }); fetch('/bad').then(function (r) { out.push('ok'); }, function (e) { out.push(e.name); });";
+        assert_eq!(go(&mut b, src), "gzip|36|decoded|TypeError");
+    });
+}
+
+#[test]
 fn failures_are_type_errors_with_fixed_text_and_clean_diagnostics() {
     big(|| {
         let srv = serve(|r| match r.path.as_str() {
             p if p.starts_with("/truncated") => Reply { raw: b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\nshort".to_vec(), close: true },
             p if p.starts_with("/garbage") => Reply { raw: b"not http\r\n\r\n".to_vec(), close: true },
-            p if p.starts_with("/gzip") => reply(200, &[("Content-Encoding", "gzip")], b"\x1f\x8b"),
+            p if p.starts_with("/gzip") => reply(200, &[("Content-Encoding", "zstd")], b"\x1f\x8b"),
             p if p.starts_with("/loop") => reply(302, &[("Location", "/loop?token=SECRET-QUERY")], b""),
             p if p.starts_with("/chunk") => Reply { raw: b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\nzz\r\n".to_vec(), close: true },
             p if p.starts_with("/err") => reply(302, &[("Location", "/ok")], b""),

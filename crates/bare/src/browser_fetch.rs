@@ -44,7 +44,7 @@
 //! Gates (explicit `Unsupported`, nothing is faked): token methods and a lower-case `patch`; stream bodies;
 //! `Request.body` and `mode: "no-cors"`; non-empty `integrity`;
 //! `cache: "only-if-cached"`; non-ASCII header values; compressed
-//! responses (`Content-Encoding` other than identity is a network error); subclassing (`class X extends Response`).
+//! responses (a `Content-Encoding` that `bare_net` cannot undo is a network error; gzip, deflate and br are undone, and the headers stay); subclassing (`class X extends Response`).
 //! Headers iteration: `keys`, `values`, `entries` and `[Symbol.iterator]` (the same function as `entries`) make live iterators. Each
 //! `next` sorts and combines the list again and takes the entry at its index, so a header added or deleted during the loop shows. They
 //! inherit from `%IteratorPrototype%`. A `HeadersInit` with `Symbol.iterator` (read once) is a sequence of pairs read with the engine's own
@@ -1722,7 +1722,7 @@ fn run_one(client: &mut Client, lim: &FetchLimits, first: Parts<'_>, diag: &mut 
             redirected = true;
             continue;
         }
-        if resp.headers.iter().any(|(n, v)| n == "content-encoding" && !v.trim().eq_ignore_ascii_case("identity")) {
+        if resp.encoded() {
             diag.push(format!("blocked: compressed response from {} (not supported)", origin(&url)));
             return Outcome::Failed("compressed response");
         }

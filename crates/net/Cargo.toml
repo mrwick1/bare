@@ -8,3 +8,6 @@ license.workspace = true
 [dependencies]
 bare-url = { path = "../url" }
 bare-tls = { path = "../tls" }
+# `flate2` (gzip, deflate) takes its pure Rust `miniz_oxide` backend, which `png` in `bare-paint` already builds. `brotli-decompressor` only decodes.
+flate2 = "1.1"
+brotli-decompressor = "5"
