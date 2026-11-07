@@ -238,6 +238,7 @@ impl Run<'_> {
             return Err(limit("css-fetches"));
         }
         self.res.fetches += 1;
+        self.dom.forget_quiet();
         self.dom.scripts.sheets.borrow_mut().stats.fetches += 1;
         let mut lim = self.lim.resources.clone();
         lim.max_resource_bytes = lim.max_resource_bytes.min(MAX_BODY);

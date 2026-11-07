@@ -790,3 +790,19 @@ A name is now found by the scope that holds it, and not by a search of the envir
 Results against main 855e8aa (`tools/js/instr.sh`): `eval_load loop 10` -45.9%, `calls` -37.3%, `closures` -21.8%, `fib` -9.5%, `webpack` -9.1%, `select_load react 1000` -5.8%, `session_load chain 10` +0.03%. Peak RSS is the same (`react 10000` 16.7 MiB to 16.5 MiB; `webpack 100` +0.7 MiB). Of 578 rows, 541 are lower (median -10.3%), and 2 are over +0.5%: `scripts_load reject 1` (+0.87%) and `reject 10` (+1.17%). Those two run no new code. With jemalloc they are -0.14% and -0.03%. A copy of the example with allocations added after the setup moves the same loop between 81.4 M and 89.6 M instructions, so the cause is heap layout and not the change. `cargo test --workspace` passes. 60 new `scope_*` cases and 5 resolver tests cover TDZ, hoisting, per-iteration bindings, closures, `catch`, `switch`, named function expressions, `typeof` of an undeclared name, generators and async. See [resources.md](resources.md#cost-of-identifier-lookup).
 
 Not tested: wall time; the rows at scale 100; `parse_check.sh` (needs `acorn`); the live staging pages.
+
+Not covered here: a preload fetch (`preload.rs`) or a `fetch` from a frame step was judged as before. This is closed in [Idle callbacks and the settle rule](#idle-callbacks-and-the-settle-rule).
+
+## Idle callbacks and the settle rule
+
+Open item from PR #186: a page that asks for a new idle callback in each idle callback (or in each timer tick) never settled. Also `Run::Idle` set no verdict.
+
+Change: an idle period that ran callbacks gets a verdict, with the same quiet rule as a frame (at most 8 DOM changes, no new fetch, script, traversal or task). A quiet verdict makes the queued `Task::Idle` and `Task::IdleTimeout` be skipped by `blocks_settle`. A request from outside the chain takes the verdict back. `Task::Idle` and `Task::IdleTimeout` no longer count in `Sched::work`. `PageResult::idle_callbacks` records the callbacks that wait in a skipped chain.
+
+Second change: the driver calls `forget_quiet` when it sends a style sheet or a preload request. A timer, a frame or an idle callback that adds a `<link rel=preload>` each run is no longer judged quiet before the fetch.
+
+Tests (`browser_settle_tests.rs`, 10 new): quiet self-re-request settles (1 run); 20 nodes per run does not settle; a one-shot callback that fetches finishes before the settle; callbacks with `timeout`; a timer that asks for an idle callback settles, and one whose callbacks work does not; a timer, a frame and an idle chain that add a preload each run. The three preload tests fail without `forget_quiet`. `cargo test -p bare`: 928 passed.
+
+Cost: `tools/js/instr.sh` (`instructions:u`, minimum of 3, large malloc cache), origin/main 855e8aa against this change, release, each in its own `CARGO_TARGET_DIR` under `/data/bare-tmp`. 30 rows at scale 1 and 10: `scheduler_load` (3), `observer_load` (mo, raf), `loader_load` (3), `preload_load` (4), `sheets_load` (linked, imports) and `session_load chain`. No row is over +0.5%. The worst is `preload_load script 10` at +0.120%; `scheduler_load mixed 10` is +0.010% and `observer_load raf 1` +0.014%. The best is `preload_load dups 1` at -0.282%. Not measured: `browser_load`, `style_load`, `form_load`, `sheets_load dynamic`, `eval_load` (the change touches no code that they run).
+
+Not tested: the real clock with an idle chain; an idle chain that is judged noisy after a quiet verdict inside one settle window; `<img>` (the loader fetches no image).
