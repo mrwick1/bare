@@ -46,10 +46,11 @@ impl Interp<'_> {
     }
 
     /// After a shape sweep (step A6) the live shapes have new ids, so every entry and every literal site shape is stale: reset them.
-    /// A literal site runs its first run again. A table of entries of the bytecode code (step B3) must be reset here too.
+    /// A literal site runs its first run again. The entries of the bytecode code (step B3) are reset too.
     #[inline(never)]
     fn reset_caches(&mut self) {
         self.ics.ics.fill(Ic::EMPTY);
+        self.bc_reset();
         self.px.ics = [[Ic::EMPTY; 4]; 13];
         fn literals(prog: &Program<'_>, names: &mut [u32]) {
             for (n, ex) in names.iter_mut().zip(&prog.exprs) {

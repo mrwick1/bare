@@ -92,6 +92,19 @@ impl<'p> Interp<'p> {
         }
     }
 
+    /// Empty the inline caches and the global cells of all compiled code (`reset_caches`, after a shape sweep). A cell holds a
+    /// position, not a shape id, but a sweep can change the global object, so it learns again too.
+    pub(super) fn bc_reset(&self) {
+        for s in &self.bc.codes {
+            for c in s.iter() {
+                if let BcSlot::Byte(c) = c {
+                    c.code.ics.iter().for_each(|ic| ic.set(Ic::EMPTY));
+                    c.cells.iter().for_each(|cell| cell.1.set(u32::MAX));
+                }
+            }
+        }
+    }
+
     /// Compile `code` into a `Compiled` (verify it and make its constants).
     fn bc_finish(&mut self, r: G<crate::bc::Code>) -> Option<Rc<Compiled>> {
         // The loop reads only narrow words: code with a wide form stays on the tree walker.
@@ -103,7 +116,19 @@ impl<'p> Interp<'p> {
             }
         };
         let mut kv = Vec::with_capacity(code.consts.len());
+        let mut cells = Vec::with_capacity(code.consts.len());
         for k in &code.consts {
+            let key = match k {
+                Const::Name(n) => match self.name_key(*n) {
+                    Ok(key) => key,
+                    Err(_) => {
+                        self.bc.stats.fallbacks += 1;
+                        return None;
+                    }
+                },
+                _ => PropertyKey::Index(0),
+            };
+            cells.push((key, std::cell::Cell::new(u32::MAX)));
             kv.push(match k {
                 Const::Number(n) => Value::Number(*n),
                 Const::String(u) => match self.heap.intern_vec(u.to_vec()) {
@@ -117,7 +142,7 @@ impl<'p> Interp<'p> {
             });
         }
         self.bc.stats.compiled += 1;
-        Some(Rc::new(Compiled { code, kv: kv.into() }))
+        Some(Rc::new(Compiled { code, kv: kv.into(), cells: cells.into() }))
     }
 
     /// The code of function `fid` of the current script (`script`), compiled when the mode says so. `None`: the tree walker runs it.
@@ -288,24 +313,33 @@ impl<'p> Interp<'p> {
 
     /// `GetGlobal`: environment 0 (a lexical name of another script), then the global object.
     #[inline(never)]
-    fn bc_get_global(&mut self, n: u32) -> Res<Value> {
+    fn bc_get_global(&mut self, n: u32, cell: &(PropertyKey, std::cell::Cell<u32>)) -> Res<Value> {
         if !self.envs[0].bindings.is_empty()
             && let Some(i) = self.find_in(0, n)
         {
             let b = self.envs[0].bindings[i];
             return if b.flags & INIT != 0 { Ok(b.value) } else { Err(self.tdz(n)) };
         }
-        self.get_global(n)
+        let v = self.get_global(n)?;
+        self.bc_learn(cell);
+        Ok(v)
+    }
+
+    /// Keep the position of a global property in its cell, after a slow path.
+    fn bc_learn(&mut self, cell: &(PropertyKey, std::cell::Cell<u32>)) {
+        cell.1.set(self.heap.own_pos(self.global, cell.0).unwrap_or(u32::MAX));
     }
 
     #[inline(never)]
-    fn bc_set_global(&mut self, n: u32, v: Value) -> Res<()> {
+    fn bc_set_global(&mut self, n: u32, v: Value, cell: &(PropertyKey, std::cell::Cell<u32>)) -> Res<()> {
         if !self.envs[0].bindings.is_empty()
             && let Some(i) = self.find_in(0, n)
         {
             return self.bc_assign(0, i, v);
         }
-        self.assign_global(n, v)
+        self.assign_global(n, v)?;
+        self.bc_learn(cell);
+        Ok(())
     }
 
     fn bc_assign(&mut self, e: u32, i: usize, v: Value) -> Res<()> {
@@ -628,8 +662,22 @@ impl<'p> Interp<'p> {
                         tri!(at, self.copy_env());
                     }
                 }
-                GET_GLOBAL => regs[a] = tri!(at, self.bc_get_global(name!(bx))),
-                SET_GLOBAL => tri!(at, self.bc_set_global(name!(bx), regs[a])),
+                // A cell hit is what `get_global` and `assign_global` find first. A lexical binding of environment 0 shadows the cells.
+                GET_GLOBAL => {
+                    let cell = &c.cells[bx as usize];
+                    let hit = if self.envs[0].bindings.is_empty() { self.heap.cell_get(self.global, cell.1.get(), cell.0) } else { None };
+                    regs[a] = match hit {
+                        Some(v) => v,
+                        None => tri!(at, self.bc_get_global(name!(bx), cell)),
+                    };
+                }
+                SET_GLOBAL => {
+                    let cell = &c.cells[bx as usize];
+                    let v = regs[a];
+                    if !(self.envs[0].bindings.is_empty() && self.heap.cell_set(self.global, cell.1.get(), cell.0, v)) {
+                        tri!(at, self.bc_set_global(name!(bx), v, cell));
+                    }
+                }
                 TYPEOF_GLOBAL => regs[a] = tri!(at, self.bc_typeof_name(name!(bx), false)),
                 GET_NAME => regs[a] = tri!(at, self.bc_get_name(name!(bx))),
                 SET_NAME => tri!(at, self.bc_set_name(name!(bx), regs[a])),
