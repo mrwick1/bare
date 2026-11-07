@@ -1953,7 +1953,7 @@ On 2026-11-07, main 3d80147, `bare-drive` ran the 8 steps of the acceptance jour
 
 | Run | Result | Steps | Total |
 | --- | --- | --- | --- |
-| Headless | ok, exit 0 | 25 | about 10 s |
+| Headless (before the two `q=` checks) | ok, exit 0 | 25 | 10.0 s |
 | Window (`--window`) | ok, exit 0 | 27 | 9.2 s |
 
 Step times in the window run: open `/` 767 ms, log in (submit) 1,982 ms, Agents link 1,043 ms, search with Enter 1,484 ms, reload 1,563 ms, account menu 268 ms, sign out 428 ms, open `/agents` without a session 663 ms. The token is in `sessionStorage` after login. Sign out removes it (`sessionStorage.length` is 0).
