@@ -1,0 +1,13 @@
+# The test262 directories (below test/) that tools/js/test262_check.sh runs, with all their subdirectories.
+# The commit that the checkout must be at is the next line.
+# commit e4fbf57745c6aae3d1f12f181ecef78b1665d812
+language
+built-ins/Object
+built-ins/Array
+built-ins/Function
+built-ins/Reflect
+built-ins/Proxy
+built-ins/Promise
+built-ins/Map
+built-ins/Set
+built-ins/Symbol

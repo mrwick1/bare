@@ -1547,3 +1547,63 @@ Cost rows (`tools/js/instr.sh`, minimum of 3, release, 566 rows of `bare-js` and
 Tests: `cargo test --workspace` debug 2,734 passed, 0 failed. Release 2,733 passed and 1 failed: `a_request_over_the_stream_limit_waits_for_a_slot` (`bare-net`, a timing test seen to fail beside other builds before). It passed 3 times in a row when run alone. 4 new tests in `obj_tab.rs` (insert and replace, a reused slot, `retain` with the index in step, 20,000 random operations against a `HashMap`). 38 of the 41 `tools/js/*_check.sh` match Node. `number_check` and `intl_check` differ from Node in one or a few cases where Node reports `limit` for a very large matrix case. The output of the base build is the same bytes, and both match `number-cases.expected` and `intl-cases.expected`. `parse_check.sh` needs `acorn` and does not start.
 
 Not tested: the rows at scale 100; `parse_check.sh`; wall time; the live staging pages; a function table with more than about 100 K object slots in use.
+
+## Gates and baselines (engine plan, step T0)
+
+Five tools check the engine work that the engine plan describes (shapes with inline caches, and a bytecode interpreter). Each tool is a gate that every later step must pass. No engine code changed.
+
+Tools:
+- `tools/js/cost_matrix.sh BASE_DIR NEW_DIR` (gate G3). It runs the rows of `tools/js/cost_rows.txt` on two built trees with `tools/js/instr.sh` (minimum of 3 runs of `instructions:u`), under glibc with the tcache tunable and under jemalloc. It prints the rows that are over +0.5% under both allocators and exits with 1 for them. It also lists the rows that are over under one allocator only. `-g REGEX` runs a subset, `-a` prints the whole table, `-o FILE` keeps the raw numbers, `-j JOBS` sets the parallel jobs. Each row job runs inside `heavy`, so the machine keeps its job limit. `BASE_DIR` can be the output of `base-build`. `JEMALLOC` and `BARE_TMP` come from the environment (defaults for archMachine, with the arjun-e16 paths as the second choice).
+- `tools/js/typing/keycost.sh OUTDIR` (gate G4). It builds the typing page when it is missing. It prints the M instructions for each key (50 keys minus 0 keys, divided by 50) for `#a1` and `#f0`, the load and mount cost, and the peak RSS at 20 and 50 keys (`ru_maxrss` of the child, with no tunable and no `MEM=1`). `BARE_JS_EXEC` passes through to `type_load`.
+- `tools/js/test262_check.sh` and `crates/js/examples/test262_run.rs` (gate G5). See the next list.
+- `tools/js/exec_diff.sh` (gate G6). It runs the 40 runner and fixture pairs of the `*_check.sh` scripts, and the 38 `eval_load`, `gen_load`, `async_load`, `class_load` and `proxy_load` rows at scale 1, under `BARE_JS_EXEC=tree`, `auto` and `byte`. It compares the output and the exit status. Until step B3 the engine ignores the variable, so the three modes are one engine: 78 runs, 0 differences. A test with a fake runner that prints the mode showed that the script finds a difference. `parse-cases.txt` and `numeric-cases.txt` are not in it (the parser and `numeric_oracle.mjs` read them).
+
+Cost rows (`tools/js/cost_rows.txt`): 803 rows. They are every `*_load` example of `bare-js` and `bare` at scale 1 and 10 (the cases come from the `tools/js/*_load.sh` scripts; `numeric_load` and `wrapper_load` use 1,000 and 10,000 with the Node checksums), `recursion_load`, `lex_load`, `stack_load` and the loopback loads that have no script, and the 88 layout cases of `bare-stress run` at the default size and at 10 times that size. All of them exit with 0 on main 8f837af. Five rows are left out because one binary gives counts that differ by more than 0.25% between two runs (loopback server threads): `scheduler_load timers 1`, `preload_load font 10`, `preload_load dups 10`, `resources_load largechunk 1` and `10`. `type_load` is in `keycost.sh`.
+
+Stability of the counts (main 8f837af against itself, 808 rows at that time, 4 jobs): the largest difference between two runs of one binary is 0.18% under glibc and 0.24% under jemalloc for the 803 kept rows (the five left-out rows gave up to 1.1%). The rows run in parallel give the same counts as rows run one at a time: 124 rows compared with 1 job against 4 jobs differ by at most 0.07% under glibc and 0.52% under jemalloc (`session_load chain 1`, a short row). The rule needs both allocators, so these cannot fail a build alone.
+
+Runtime of the cost matrix on archMachine (load average 16 to 80 from other agents): 803 rows in 600 s with 4 jobs. One job needs 3.4 s for each row, so about 45 minutes. A subset of 16 rows (`-g eval_load`) takes 20 s.
+
+Typing page (main 8f837af, `tools/js/typing/keycost.sh`, build of `type_load` with `--release`):
+
+| Item | Value |
+| --- | ---: |
+| `#a1`, M instructions for each key | 414.3 |
+| `#f0`, M instructions for each key | 422.2 |
+| Load and mount, 0 keys | 779.9 M |
+| Peak RSS, 20 keys | 36.1 to 36.6 MiB |
+| Peak RSS, 50 keys | 36.4 to 36.7 MiB |
+
+The instruction counts repeat to 0.1 M. The RSS changes by 0.5 MiB between runs. The plan says 414 M (it matches) and 36.1 MiB at 50 keys (this method gives up to 0.6 MiB more). The budget is 40 MiB.
+
+test262:
+- Checkout: `tc39/test262` at `e4fbf57745c6aae3d1f12f181ecef78b1665d812` (2026-11-06), cloned with `--depth 1` to `/data/bare-tmp/test262`. It is 265 MB: 227 MB of `test`, 25 MB of `.git`. It holds 54,084 test files. It is not in the repository. The pin is in `tools/fixtures/js/test262-subset.txt`, and the script stops when the checkout is at another commit.
+- Runner: `test262_run` reads `flags` (`onlyStrict`, `noStrict`, `raw`, `module`, `async`), `includes`, `features` and `negative` with a small reader (no YAML crate). It loads `assert.js`, `sta.js`, `doneprintHandle.js` for async tests, and the included files. A test with no flag runs sloppy and strict and must pass both. The step budget (20 M) is the timeout, so it does not depend on the machine. `print` and a small `$262` (`global`, `gc`, `agent` empty) are non-enumerable globals. A process that dies or hangs fails only its test, and the script goes on (tested with a fake runner that dies and hangs).
+- Skipped (`tools/fixtures/js/test262-skip.txt`): `module` tests (the runner loads no modules) and the features `cross-realm`, `IsHTMLDDA`, `SharedArrayBuffer`, `Atomics`, `ShadowRealm`, `Temporal`, `tail-call-optimization`, `host-gc-required`, the module-loading features, the harness files `atomicsHelper.js`, `detachArrayBuffer.js` and `tcoHelper.js`, and the sources that use `$262.agent`, `createRealm`, `detachArrayBuffer`, `evalScript` or `IsHTMLDDA`. A feature that bare-js builds only in part (async generators, `for await`, `with`, `eval`) is not skipped: its tests fail, so a later gain shows as newly passing and a later loss is caught.
+- Gate: the script exits with 1 when a directory has fewer passing tests than `tools/fixtures/js/test262-baseline.txt` (574 directories, each with pass, fail and skip), or when a baseline directory is missing. It prints the directories with more passing tests, and with `-p` an earlier `results.txt` it prints the single tests that changed. `-u` writes a new baseline. A test that went from pass to fail while another went from fail to pass in the same directory is not seen by the count; `-p` shows it.
+- Run time: 26 to 63 s for the whole subset with 3 jobs (the machine was busy). Two runs gave identical results.
+
+Baseline (pass, fail, skip; 22,305 pass, 8,460 fail and 1,951 skip in all):
+
+| Group | Pass | Fail | Skip |
+| --- | ---: | ---: | ---: |
+| `language/expressions` | 7,056 | 3,031 | 1,069 |
+| `language/statements` | 5,522 | 3,838 | 39 |
+| `language/literals` | 340 | 196 | 0 |
+| `language/eval-code` | 12 | 330 | 5 |
+| `language/arguments-object` | 166 | 97 | 0 |
+| `language/identifiers` | 135 | 133 | 0 |
+| `language` (all others) | 964 | 152 | 747 |
+| `built-ins/Object` | 3,355 | 54 | 2 |
+| `built-ins/Array` | 2,853 | 214 | 16 |
+| `built-ins/Promise` | 622 | 109 | 1 |
+| `built-ins/Set` | 382 | 0 | 1 |
+| `built-ins/Proxy` | 262 | 11 | 38 |
+| `built-ins/Function` | 230 | 266 | 13 |
+| `built-ins/Map` | 178 | 25 | 1 |
+| `built-ins/Reflect` | 152 | 1 | 0 |
+| `built-ins/Symbol` | 76 | 3 | 19 |
+
+The most common reasons for a failure: async generators are not supported (4,504 at the first run, before the module features were skipped), a non-ASCII character outside a string (965), `eval` is not defined (532), `for await` (390), the `Function` constructor (329), `with` (269). The per-directory numbers are in the baseline file.
+
+Not tested: the cost matrix with two different builds (both trees were the same build, so only the zero case and the noise were measured); `cost_matrix.sh` and `test262_check.sh` on arjun-e16 (only the paths are parametrized); the jemalloc column on a machine with a different jemalloc; `exec_diff.sh` with a real switch (the engine ignores `BARE_JS_EXEC` until B3); `test262_run` with `BARE_JS_EXEC`; test262 directories outside the subset, `intl402`, `annexB` and `staging`; wall time of the typing page; a test262 run on a quiet machine.
