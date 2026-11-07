@@ -2353,12 +2353,14 @@ impl<'p> Interp<'p> {
 
     fn expr_key(&mut self, e: ExprId, name: Span) -> Res<PropertyKey> {
         if let Some(s) = self.expr_str[e.index()] {
-            return Ok(h!(self, self.heap.key_from_string(s)));
+            // A name after a dot is an identifier name: it never starts with a digit, so it is never an array index. The string is
+            // rooted by `expr_str`, so it is never stale.
+            return Ok(PropertyKey::String(s));
         }
         let n = self.prog.name(name);
         let s = h!(self, self.heap.intern_str(&n));
         self.expr_str[e.index()] = Some(s);
-        Ok(h!(self, self.heap.key_from_string(s)))
+        Ok(PropertyKey::String(s))
     }
 
     fn prop_key(&mut self, pid: Id<Prop>, key: Key) -> Res<PropertyKey> {
@@ -2531,6 +2533,15 @@ impl<'p> Interp<'p> {
         self.descend(|it| it.link_inner(e))
     }
 
+    /// `link(e)`, but a plain name is read at once: `link` of a name goes through `link_inner` and then `eval_expr_inner` (same one step).
+    fn link_base(&mut self, e: ExprId) -> Res<Option<(Value, Value)>> {
+        if matches!(self.prog.expr(e).kind, ExprKind::Ident) {
+            self.tick()?;
+            return Ok(Some((self.get_name(self.expr_name[e.index()], e.index() as u32)?, Value::Undefined)));
+        }
+        self.link(e)
+    }
+
     fn link_inner(&mut self, e: ExprId) -> Res<Option<(Value, Value)>> {
         let prog = self.prog.clone();
         let ex = *prog.expr(e);
@@ -2539,7 +2550,7 @@ impl<'p> Interp<'p> {
             ExprKind::Call { callee, .. } if self.cls.super_used && is_super(&prog, callee) => self.super_call(e),
             ExprKind::PrivateMember { .. } => self.link_private(e),
             ExprKind::Member { obj, name, optional } => {
-                let Some((base, _)) = self.link(obj)? else { return Ok(None) };
+                let Some((base, _)) = self.link_base(obj)? else { return Ok(None) };
                 if optional && is_nullish(base) {
                     return Ok(None);
                 }
@@ -2547,7 +2558,7 @@ impl<'p> Interp<'p> {
                 Ok(Some((self.get_prop(base, key)?, base)))
             }
             ExprKind::Index { obj, index, optional } => {
-                let Some((base, _)) = self.link(obj)? else { return Ok(None) };
+                let Some((base, _)) = self.link_base(obj)? else { return Ok(None) };
                 if optional && is_nullish(base) {
                     return Ok(None);
                 }
@@ -2559,7 +2570,7 @@ impl<'p> Interp<'p> {
                 Ok(Some((self.get_prop(base, key)?, base)))
             }
             ExprKind::Call { callee, args, optional } => {
-                let Some((f, this)) = self.link(callee)? else { return Ok(None) };
+                let Some((f, this)) = self.link_base(callee)? else { return Ok(None) };
                 if optional && is_nullish(f) {
                     return Ok(None);
                 }
