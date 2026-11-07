@@ -198,8 +198,8 @@ pub(crate) struct Sched {
     work: u64,
     next_timer: u64,
     timers: HashMap<u64, Timer>,
-    ports: HashMap<ObjId, Port>,
-    msg_events: HashMap<ObjId, MsgEvent>,
+    ports: IdMap<ObjId, Port>,
+    msg_events: IdMap<ObjId, MsgEvent>,
     queued: usize,
     queued_bytes: usize,
     /// Queued `Task::Select`.

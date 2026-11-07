@@ -101,7 +101,7 @@ pub struct StyleStats {
 #[derive(Default)]
 struct SState {
     /// `CSSStyleDeclaration` object -> its element.
-    objs: HashMap<ObjId, NodeId>,
+    objs: IdMap<ObjId, NodeId>,
     /// element -> its `style` object (`SameObject`).
     by_el: HashMap<NodeId, ObjId>,
     /// element -> the parse of its `style` attribute at the last call.

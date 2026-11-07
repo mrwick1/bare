@@ -172,7 +172,7 @@ impl<'p> Interp<'p> {
         out.extend(self.date.times.keys().map(|&o| Value::Object(o)));
     }
 
-    fn date_prune(&mut self, seen: &FxSet<ObjId>) {
+    fn date_prune(&mut self, seen: &Seen) {
         self.date.times.retain(|o, _| seen.contains(o));
         if self.date.times.capacity() > 64 && self.date.times.len() * 4 < self.date.times.capacity() {
             self.date.times.shrink_to_fit();

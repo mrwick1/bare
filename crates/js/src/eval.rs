@@ -214,8 +214,8 @@ pub struct EvalStats {
 
 // ------------------------------------------------------------------ small internals
 
-/// `Interp::gc_due`: collect when the accounted heap is half as large again as what the previous collect left, and more than this many
-/// bytes. QuickJS (1.5 x the allocated size) and SpiderMonkey (low-frequency growth of 150%) use the same factor.
+/// `Interp::gc_due`: collect when the accounted heap is 1.75 times what the previous collect left, and more than this many bytes.
+/// QuickJS (1.5 x) and SpiderMonkey (150%) use 1.5. A sweep on the React typing page chose 1.75 (docs/decisions.md).
 const GC_MIN_BYTES: usize = 8 << 20;
 
 /// Capacity to keep in a table of `len` entries after a collect: twice the live entries, or the live entries plus
@@ -249,6 +249,19 @@ impl Hasher for Fx {
 }
 type FxMap<K, V> = HashMap<K, V, BuildHasherDefault<Fx>>;
 type FxSet<K> = HashSet<K, BuildHasherDefault<Fx>>;
+
+/// The objects a collect pass has reached: for each heap slot, the generation of the handle that reached it, plus one (0 is unreached).
+/// A set of handles cost a hash for each insert and each test of the prune pass; this costs one load. A handle of an older generation
+/// of the slot is not in the set.
+struct Seen(Vec<u64>);
+impl Seen {
+    fn insert(&mut self, o: ObjId) -> bool {
+        std::mem::replace(&mut self.0[o.slot()], o.gn as u64 + 1) != o.gn as u64 + 1
+    }
+    fn contains(&self, o: &ObjId) -> bool {
+        self.0[o.slot()] == o.gn as u64 + 1
+    }
+}
 
 /// Statement control flow. Errors travel in `Err` too.
 enum Ctl {
@@ -912,7 +925,7 @@ impl<'p> Interp<'p> {
         if self.depth != 0 || self.stmt_frames != 0 {
             return Err(unsupported("collect during a call", Span::default()));
         }
-        let mut seen: FxSet<ObjId> = FxSet::default();
+        let mut seen = Seen(vec![0; self.heap.object_slots()]);
         let mut env_seen = vec![false; self.envs.len()];
         env_seen[FRAME_ENV as usize] = true;
         let mut work: Vec<Value> = vec![Value::Object(self.global), Value::Object(self.object_proto), Value::Object(self.function_proto), Value::Object(self.array_proto), self.ret, self.completion];
@@ -1033,11 +1046,11 @@ impl<'p> Interp<'p> {
         Ok(r)
     }
 
-    /// Has the heap grown to 1.5 times what the previous collect left (and past `GC_MIN_BYTES`), at a point where a collect can run?
+    /// Has the heap grown to 1.75 times what the previous collect left (and past `GC_MIN_BYTES`), at a point where a collect can run?
     /// The driver asks at each safe point (between tasks, after each key or click), so garbage cannot pile up while one call of the host
     /// runs many events. QuickJS and SpiderMonkey use the same rule: a limit that is a factor of the live size after the last collect.
     pub fn gc_due(&self) -> bool {
-        self.depth == 0 && self.stmt_frames == 0 && self.heap.used_bytes() > GC_MIN_BYTES.max(self.gc_live + self.gc_live / 2)
+        self.depth == 0 && self.stmt_frames == 0 && self.heap.used_bytes() > GC_MIN_BYTES.max(self.gc_live / 4 * 7)
     }
 
     /// Give back the capacity of the side tables after a burst died, by the rule of `Slab::trim` (see `trim_to`).

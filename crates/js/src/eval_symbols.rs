@@ -426,7 +426,7 @@ impl<'p> Interp<'p> {
         }
     }
 
-    fn sc_prune(&mut self, seen: &FxSet<ObjId>) {
+    fn sc_prune(&mut self, seen: &Seen) {
         self.sc.colls.retain(|o, _| seen.contains(o));
         self.sc.iters.retain(|o, _| seen.contains(o));
         self.sc.helpers.retain(|o, _| seen.contains(o));

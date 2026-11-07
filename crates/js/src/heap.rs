@@ -764,6 +764,11 @@ impl Heap {
         self.bytes
     }
 
+    /// The number of object slots (live and free): every handle's `slot()` is below it.
+    pub fn object_slots(&self) -> usize {
+        self.objects.meta.len()
+    }
+
     pub fn stats(&self) -> Stats {
         Stats {
             live_objects: self.objects.live.len(),

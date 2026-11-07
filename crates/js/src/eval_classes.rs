@@ -242,7 +242,7 @@ impl<'p> Interp<'p> {
     }
 
     /// Forget the state of objects the walk did not reach (they are about to be freed).
-    fn cls_prune(&mut self, seen: &FxSet<ObjId>) {
+    fn cls_prune(&mut self, seen: &Seen) {
         self.cls.classes.retain(|o, _| seen.contains(o));
         let mut dropped = 0;
         self.cls.privs.retain(|o, v| {
