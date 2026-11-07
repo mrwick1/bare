@@ -7,6 +7,11 @@
 //!   finds at that point: a driver means this element. The pointer then stays there, so the next click sends `pointerout` and `mouseout` to this
 //!   element. A `pointerdown` or `mousedown` that a listener cancels has the effects of Chrome (no focus change, no mouse events), and a disabled
 //!   control gets only the pointer events.
+//!   In a text field the press puts the caret where the layout says (`caret_at`; a fresh field has its caret at 0, so a click without it would
+//!   type at the start).
+//! - `drive_text_down(node, at, nth)`, `drive_text_move(node, at)`, `drive_text_up(node, at)`: the pointer at the boundary `at` of the text of a
+//!   field. A press (`nth` 1, 2, 3: a click, a double click, a triple click), a move with the button down and a release. They give a click, a
+//!   word or line selection and a drag selection (`tools/fixtures/ui/sel-steps.txt`). The caller moves the clock between them.
 //! - `drive_key(node, spec)`: the element is focused first (when it is not), then the key goes down and up. `spec` is `Enter`, `Tab`, `Space`,
 //!   `a`, `A`, an arrow key and so on, with modifiers in front (`Shift+Tab`, `Control+a`). A modifier key makes its own `keydown` first and
 //!   its `keyup` last. The default actions are the ones of `browser_ui.rs`.
@@ -110,6 +115,59 @@ impl Browser {
         }
     }
 
+    /// The caret offset of a press at (`x`, `y`) in a text field, from the layout. `None` for another node or when the page cannot be laid out.
+    fn caret_at(&mut self, node: NodeId, x: f64, y: f64) -> Option<u32> {
+        if !self.is_text_input(node) {
+            return None;
+        }
+        let frame = self.render().ok()?;
+        crate::page::caret_in(self, &frame, node, x, y)
+    }
+
+    /// The window point of the boundary `at` of the text of a field, or its center when it has no layout.
+    fn text_point(&mut self, node: NodeId, at: u32) -> R<(f64, f64)> {
+        if let Ok(frame) = self.render()
+            && let Some(p) = crate::page::point_in(self, &frame, node, at)
+        {
+            return Ok(p);
+        }
+        self.box_center(node)
+    }
+
+    /// The button goes down in text field `node` at the boundary `at` of its text. `nth` is the number of the press in a row
+    /// (1: a click, 2: a double click, 3: a triple click). The caller moves the clock between the presses.
+    pub fn drive_text_down(&mut self, node: NodeId, at: u32, nth: u32) -> R<UiOutcome> {
+        let (x, y) = self.text_point(node, at)?;
+        if nth <= 1 {
+            self.dom.st.borrow_mut().ui.last = None;
+        }
+        let up = Pointer { x, y, ..Pointer::default() };
+        let caret = self.caret_at(node, x, y);
+        let mut out = self.ui_pointer_move(Some(node), up)?;
+        out.add(self.ui_pointer_button(Some(node), Pointer { buttons: 1, ..up }, 0, true, caret)?);
+        Ok(out)
+    }
+
+    /// The pointer moves to the boundary `at` of the text of `node`, with the button down: the selection of the press follows.
+    pub fn drive_text_move(&mut self, node: NodeId, at: u32) -> R<UiOutcome> {
+        let (x, y) = self.text_point(node, at)?;
+        let p = Pointer { x, y, buttons: 1, ..Pointer::default() };
+        let mut out = self.ui_pointer_move(Some(node), p)?;
+        if let Some(c) = self.caret_at(node, x, y) {
+            out.add(self.ui_drag_select(c)?);
+        }
+        Ok(out)
+    }
+
+    /// The button goes up in text field `node` at the boundary `at` of its text.
+    pub fn drive_text_up(&mut self, node: NodeId, at: u32) -> R<UiOutcome> {
+        let (x, y) = self.text_point(node, at)?;
+        let up = Pointer { x, y, ..Pointer::default() };
+        let mut out = self.ui_pointer_move(Some(node), up)?;
+        out.add(self.ui_pointer_button(Some(node), up, 0, false, None)?);
+        Ok(out)
+    }
+
     /// A user click on `node`. See the header.
     pub fn drive_click(&mut self, node: NodeId) -> R<UiOutcome> {
         let (x, y) = self.box_center(node)?;
@@ -117,8 +175,9 @@ impl Browser {
         self.dom.st.borrow_mut().ui.last = None;
         let up = Pointer { x, y, ..Pointer::default() };
         let down = Pointer { buttons: 1, ..up };
+        let caret = self.caret_at(node, x, y);
         let mut out = self.ui_pointer_move(Some(node), up)?;
-        out.add(self.ui_pointer_button(Some(node), down, 0, true, None)?);
+        out.add(self.ui_pointer_button(Some(node), down, 0, true, caret)?);
         out.add(self.ui_pointer_button(Some(node), up, 0, false, None)?);
         out.add(self.settle_hover(up)?);
         Ok(out)

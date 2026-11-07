@@ -1,0 +1,55 @@
+var $ = function (i) { return document.getElementById(i) };
+var sel = function (t) { return t.selectionStart + ',' + t.selectionEnd + ',' + t.selectionDirection };
+=== fresh-markup
+@html <input id=i value="hello world"><textarea id=t>abc</textarea><input id=e value="x">
+(function () { return [sel($('i')), sel($('t')), sel(document.createElement('input')), sel(document.createElement('textarea'))].join('|') })
+=== created-attr
+(function () { var x = document.createElement('input'); x.setAttribute('value', 'abc'); var a = sel(x); x.value = 'abcd'; var b = sel(x); x.value = 'abcd'; var c = sel(x); x.setSelectionRange(1, 2); x.value = 'abcd'; var d = sel(x); x.value = 'zz'; return [a, b, c, d, sel(x)].join('|') })
+=== default-value-clean
+@html <input id=i value="hello world">
+(function () { var i = $('i'); i.defaultValue = 'qq'; var a = sel(i) + i.value; i.setSelectionRange(1, 1); i.defaultValue = 'q'; return a + '|' + sel(i) + i.value })
+=== default-value-dirty
+@html <input id=i value="hello world">
+(function () { var i = $('i'); i.value = 'abc'; i.defaultValue = 'q'; return sel(i) + i.value })
+=== direction-none
+@html <input id=i value="hello world">
+(function () { var i = $('i'), r = []; i.setSelectionRange(1, 3, 'none'); r.push(sel(i)); i.setSelectionRange(1, 3, 'backward'); r.push(sel(i)); i.setSelectionRange(1, 3, 'bogus'); r.push(sel(i)); i.selectionDirection = 'backward'; r.push(sel(i)); i.selectionDirection = 'none'; r.push(sel(i)); i.select(); r.push(sel(i)); return r.join('|') })
+=== direction-caret
+@html <input id=i value="hello world">
+(function () { var i = $('i'), r = []; i.setSelectionRange(2, 2, 'backward'); r.push(sel(i)); i.setSelectionRange(1, 3, 'backward'); i.selectionStart = 3; r.push(sel(i)); i.selectionEnd = 1; r.push(sel(i)); return r.join('|') })
+=== reset-input
+@html <form id=f><input id=i value="hello world"></form>
+(function () { var i = $('i'); i.value = 'abc'; i.setSelectionRange(1, 2); $('f').reset(); var a = sel(i) + i.value; i.value = 'zz'; i.setSelectionRange(0, 0); $('f').reset(); return a + '|' + sel(i) + i.value })
+=== reset-textarea
+@html <form id=f><textarea id=t>abc</textarea></form>
+(function () { var t = $('t'); t.value = 'abcdef'; t.setSelectionRange(1, 2); $('f').reset(); return sel(t) + t.value })
+=== value-null
+@html <input id=i value="hello world">
+(function () { var i = $('i'); i.setSelectionRange(1, 3); i.value = null; return sel(i) + '[' + i.value + ']' })
+=== value-same-keeps
+@html <input id=i value="hello world">
+(function () { var i = $('i'); i.value = 'abc'; i.setSelectionRange(1, 2); i.value = 'abc'; return sel(i) })
+=== value-shorter-clamps
+@html <input id=i value="hello world">
+(function () { var i = $('i'); i.value = 'abcdef'; i.setSelectionRange(4, 6); i.defaultValue = 'zz'; return sel(i) + i.value })
+=== clone
+@html <input id=i value="hello world">
+(function () { var i = $('i'); i.setSelectionRange(2, 4, 'backward'); var c = i.cloneNode(); return sel(c) + '|' + sel(i) })
+=== focus-keeps
+@html <input id=i value="hello world"><input id=j value="xyz">
+(function () { var i = $('i'), j = $('j'), r = []; i.focus(); r.push(sel(i)); i.setSelectionRange(2, 4); j.focus(); i.focus(); r.push(sel(i)); r.push(sel(j)); return r.join('|') })
+=== textarea-fresh-select
+@html <textarea id=t>abc def</textarea>
+(function () { var t = $('t'); t.select(); var a = sel(t); t.value = 'xx'; var b = sel(t); t.defaultValue = 'yyyy'; return [a, b, sel(t)].join('|') })
+=== clamp-on-read
+@html <input id=i value="hello world">
+(function () { var i = $('i'); i.setSelectionRange(8, 11); i.value = 'abc'; var a = sel(i); i.value = 'abcdefghijkl'; return a + '|' + sel(i) })
+=== password-and-others
+@html <input id=a type=password value=abc><input id=b type=search value=abc><input id=c type=tel value=abc><input id=d type=url value=abc>
+(function () { return ['a', 'b', 'c', 'd'].map(function (k) { return sel($(k)) }).join('|') })
+=== reset-untouched
+@html <form id=f><input id=i value="hello"><textarea id=t>abc</textarea><input id=j value="hello"></form>
+(function () { $('j').setSelectionRange(2, 2); $('f').reset(); return [sel($('i')), sel($('t')), sel($('j'))].join('|') })
+=== reset-untouched-after-reset
+@html <form id=f><input id=i value="hello"><textarea id=t>abc</textarea></form>
+(function () { $('f').reset(); var a = [sel($('i')), sel($('t'))].join('|'); $('i').setAttribute('value', 'hello world'); $('t').textContent = 'abcdef'; return a + '|' + sel($('i')) + '|' + sel($('t')) })

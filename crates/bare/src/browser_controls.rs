@@ -773,15 +773,16 @@ impl Dom {
         {
             let mut st = self.st.borrow_mut();
             let old = st.inputs.get_mut(&n).map_or(0, |i| {
-                (i.checked, i.sel, i.typed, i.edited) = (None, None, false, None);
-                i.value.take().map_or(0, |v| v.len())
+                (i.checked, i.typed, i.edited) = (None, false, None);
+                // Chrome: a dirty value that goes back to the default puts the caret at the end; a control that was not dirty keeps its selection.
+                i.value.take().map_or(0, |v| {
+                    i.sel = Some(crate::browser_selection::END);
+                    v.len()
+                })
             });
             st.input_bytes -= old;
         }
-        if tag == Some("textarea") {
-            let end = self.with_input_value(n, |v| crate::browser_selection::caret_end(v, true)).expect("a textarea");
-            self.st.borrow_mut().inputs.entry(n).or_default().sel = Some(end);
-        } else if kind == "radio" && self.input_checked(n) {
+        if kind == "radio" && self.input_checked(n) {
             for o in self.radio_group(it, n)? {
                 self.st.borrow_mut().inputs.entry(o).or_default().checked = Some(false);
             }

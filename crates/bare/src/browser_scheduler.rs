@@ -420,17 +420,30 @@ impl Dom {
         Ok(())
     }
 
-    /// Queue what a selection change needs, after `selection_room` said yes. The `selectionchange` task comes first
-    /// (the selection changes before HTML queues `select`). Selection API "schedule a selectionchange event": nothing
-    /// when this input has a task pending; else set the flag and queue.
-    pub(crate) fn queue_selection_tasks(&self, n: NodeId, change: bool, select: bool) -> R<()> {
+    /// Queue what a selection change needs, after `selection_room` said yes. Selection API "schedule a selectionchange event": nothing
+    /// when this input has a task pending; else set the flag and queue. Chrome 155 (`tools/fixtures/ui/chrome-sel.txt`): a change by script
+    /// queues `selectionchange` now and `select` for the next frame, where it runs before the callbacks of `requestAnimationFrame` (Chrome
+    /// puts the event in the queue of the frame). A change by the user (`user`) queues `select` now, before `selectionchange`.
+    pub(crate) fn queue_selection_tasks(&self, n: NodeId, change: bool, select: bool, user: bool) -> R<()> {
+        // A key's `select` goes before `selectionchange`; the one of a press or a drag in a text field goes after it (Chrome).
+        let after = user && self.st.borrow().ui.sel_drag.is_some();
+        if select && user && !after {
+            self.schedule(self.now_ms(), Task::Select(n))?;
+            self.sched.borrow_mut().selects += 1;
+        }
         if change && !self.st.borrow().inputs.get(&n).is_some_and(|i| i.sc_pending) {
             self.schedule(self.now_ms(), Task::SelectionChange(n))?;
             self.sched.borrow_mut().changes += 1;
             self.st.borrow_mut().inputs.entry(n).or_default().sc_pending = true;
         }
-        if select {
+        if select && after {
             self.schedule(self.now_ms(), Task::Select(n))?;
+            self.sched.borrow_mut().selects += 1;
+        }
+        if select && !user {
+            self.want_frame()?;
+            // Just before the frame of the grid, so the task runs before the rendering step even if that was queued earlier.
+            self.schedule(self.frame.due.get() - 1e-6, Task::Select(n))?;
             self.sched.borrow_mut().selects += 1;
         }
         Ok(())

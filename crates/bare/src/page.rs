@@ -163,6 +163,55 @@ fn place(f: &Frame, doc: &Document, scroll: &Scroll, n: NodeId, fld: &mut Field)
     fld.clip = clip.map_or(moved, |k| moved.intersect(k));
 }
 
+/// The caret offset for a press at (`x`, `y`) in text field `n`, on the layout `fr`.
+pub(crate) fn caret_in(b: &mut Browser, fr: &Frame, n: NodeId, x: f64, y: f64) -> Option<u32> {
+    let value = b.input_value(n)?;
+    let focus_end = b.input_selection(n).map(|s| s.1);
+    let doc = b.document();
+    let doc = doc.borrow();
+    let mut f = field(fr, &doc, n, &value, focus_end)?;
+    place(fr, &doc, &b.scroll(), n, &mut f);
+    if f.area {
+        // The line under the pointer (the last one for a point below the text), then the offset inside it.
+        let line = ((y as f32 - (f.baseline as f32 - f.m.ascent)) / f.m.normal_line_height()).floor().max(0.0) as usize;
+        let (mut start, mut pick) = (0, ("", 0));
+        for (i, t) in f.text.split('\n').enumerate() {
+            pick = (t, start);
+            if i == line {
+                break;
+            }
+            start += t.encode_utf16().count() as u32 + 1;
+        }
+        return Some(pick.1 + offset_at(pick.0, x as f32 - f.x, &f.m));
+    }
+    Some(offset_at(&f.text, x as f32 - f.x + f.scroll, &f.m))
+}
+
+/// The window point of the boundary `at` of the text of field `n`, on the layout `fr`: the inverse of `caret_in`.
+pub(crate) fn point_in(b: &mut Browser, fr: &Frame, n: NodeId, at: u32) -> Option<(f64, f64)> {
+    let value = b.input_value(n)?;
+    let focus_end = b.input_selection(n).map(|s| s.1);
+    let doc = b.document();
+    let doc = doc.borrow();
+    let mut f = field(fr, &doc, n, &value, focus_end)?;
+    place(fr, &doc, &b.scroll(), n, &mut f);
+    let top = f.baseline as f32 - f.m.ascent;
+    let lh = f.m.normal_line_height();
+    if f.area {
+        let (mut line, mut start) = (0, 0);
+        for t in f.text.split('\n') {
+            let end = start + t.encode_utf16().count() as u32;
+            if at <= end {
+                return Some(((f.x + x_of(t, at - start, &f.m)) as f64, (top + (line as f32 + 0.5) * lh) as f64));
+            }
+            line += 1;
+            start = end + 1;
+        }
+        return None;
+    }
+    Some(((f.x - f.scroll + x_of(&f.text, at, &f.m)) as f64, (top + lh / 2.0) as f64))
+}
+
 impl Page {
     pub fn new(source: Source, viewport: (u32, u32)) -> Page {
         Page {
@@ -237,28 +286,7 @@ impl Page {
     fn caret_at(&mut self, n: NodeId, x: f64, y: f64) -> Option<u32> {
         self.frame_now()?;
         let Page { source, frame, .. } = self;
-        let b = source.browser()?;
-        let value = b.input_value(n)?;
-        let focus_end = b.input_selection(n).map(|s| s.1);
-        let doc = b.document();
-        let doc = doc.borrow();
-        let fr = frame.as_ref()?;
-        let mut f = field(fr, &doc, n, &value, focus_end)?;
-        place(fr, &doc, &b.scroll(), n, &mut f);
-        if f.area {
-            // The line under the pointer (the last one for a point below the text), then the offset inside it.
-            let line = ((y as f32 - (f.baseline as f32 - f.m.ascent)) / f.m.normal_line_height()).floor().max(0.0) as usize;
-            let (mut start, mut pick) = (0, ("", 0));
-            for (i, t) in f.text.split('\n').enumerate() {
-                pick = (t, start);
-                if i == line {
-                    break;
-                }
-                start += t.encode_utf16().count() as u32 + 1;
-            }
-            return Some(pick.1 + offset_at(pick.0, x as f32 - f.x, &f.m));
-        }
-        Some(offset_at(&f.text, x as f32 - f.x + f.scroll, &f.m))
+        caret_in(source.browser()?, frame.as_ref()?, n, x, y)
     }
 
     /// Which document is the page now? A node of an old one means nothing after a navigation.
@@ -335,6 +363,14 @@ impl Page {
                 let r = self.browser().map(|b| b.ui_pointer_move(target, p));
                 if let Some(r) = r {
                     h.redraw = self.after(r);
+                }
+                // A drag that started in a text field selects text, also outside the field.
+                if buttons & 1 != 0
+                    && let Some(n) = self.browser().and_then(|b| b.selecting())
+                    && let Some(c) = self.caret_at(n, x, y)
+                    && let Some(r) = self.browser().map(|b| b.ui_drag_select(c))
+                {
+                    h.redraw |= self.after(r);
                 }
                 h.cursor = Some(if self.doc_id() == doc { self.cursor_over(target) } else { Cursor::Default });
             }

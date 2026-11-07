@@ -1,0 +1,248 @@
+# Scenarios of tools/fixtures/ui/sel.html: the `select` and `selectionchange` events of text controls, and who owns the selection. Same step words as react-steps.txt. Each runs on a fresh page. Chrome sends `select` at the next frame and `selectionchange` as a task, and which comes first depends on the timing, so the scenarios that have both in one turn end with `~`: the test compares their lines in any order.
+== set_range
+eval - $('i').setSelectionRange(1, 3)
+== set_range_twice
+eval - $('i').setSelectionRange(1, 3)
+reset
+eval - $('i').setSelectionRange(1, 3)
+== set_range_direction_only
+eval - $('i').setSelectionRange(1, 3)
+reset
+eval - $('i').setSelectionRange(1, 3, 'backward')
+== set_range_focused
+eval - $('i').focus()
+reset
+eval - $('i').setSelectionRange(1, 3)
+== select_call~
+eval - $('i').select()
+== select_call_focused
+eval - $('i').focus()
+reset
+eval - $('i').select()
+== selection_start_setter
+eval - $('i').selectionStart = 2
+== selection_end_setter
+eval - $('i').selectionEnd = 2
+== selection_direction_setter
+eval - $('i').setSelectionRange(1, 3)
+reset
+eval - $('i').selectionDirection = 'backward'
+== value_setter
+eval - $('i').value = 'abc'
+== value_setter_focused
+eval - $('i').focus()
+reset
+eval - $('i').value = 'abc'
+== value_setter_same
+eval - $('i').focus()
+reset
+eval - $('i').value = 'hello world'
+== two_calls_one_task~
+eval - $('i').setSelectionRange(1, 3); $('i').setSelectionRange(2, 4)
+== two_inputs~
+eval - $('i').setSelectionRange(1, 3); $('t').setSelectionRange(1, 2)
+== set_range_textarea
+eval - $('t').setSelectionRange(1, 3)
+== select_textarea~
+eval - $('t').select()
+== set_range_email
+eval - try { $('e').setSelectionRange(1, 3) } catch (e) { window.__log.push(e.name) }
+== focus_input
+eval - $('i').focus()
+== focus_textarea
+eval - $('t').focus()
+== focus_second_input
+eval - $('i').focus()
+reset
+eval - $('t').focus()
+== focus_button
+eval - $('i').focus()
+reset
+eval - $('b').focus()
+== blur_input
+eval - $('i').focus()
+reset
+eval - $('i').blur()
+== type_one_char
+eval - $('i').focus(); $('i').select()
+reset
+key - x
+== type_in_textarea
+eval - $('t').focus(); $('t').select()
+reset
+key - x
+key - y
+== key_arrow_left
+eval - $('i').focus()
+reset
+key - ArrowLeft
+== key_arrow_left_from_range
+eval - $('i').focus(); $('i').setSelectionRange(2, 5)
+reset
+key - ArrowLeft
+== key_shift_arrow_right
+eval - $('i').focus(); $('i').setSelectionRange(2, 2)
+reset
+key - Shift+ArrowRight
+== key_home
+eval - $('i').focus(); $('i').setSelectionRange(5, 5)
+reset
+key - Home
+== key_end
+eval - $('i').focus()
+reset
+key - End
+== key_ctrl_a
+eval - $('i').focus()
+reset
+key - Control+a
+== key_backspace_caret
+eval - $('i').focus(); $('i').setSelectionRange(3, 3)
+reset
+key - Backspace
+== key_backspace_range
+eval - $('i').focus(); $('i').setSelectionRange(2, 5)
+reset
+key - Backspace
+== key_arrow_at_start
+eval - $('i').focus(); $('i').setSelectionRange(0, 0)
+reset
+key - ArrowLeft
+== set_range_listener_changes~
+eval - $('i').addEventListener('selectionchange', function () { $('i').setSelectionRange(0, 1) })
+eval - $('i').setSelectionRange(2, 3)
+== select_listener_calls_select
+eval - $('i').addEventListener('select', function () { if (!window.__again) { window.__again = 1; $('i').setSelectionRange(0, 2) } })
+eval - $('i').setSelectionRange(2, 3)
+== click_input
+click #i
+== click_input_then_button
+click #i
+reset
+click #b
+== script_select_then_button_focus
+eval - $('i').focus(); $('i').select()
+reset
+eval - $('b').focus()
+eval - L('i')
+== detached_input
+eval - var x = document.createElement('input'); x.value = 'abc'; x.setSelectionRange(1, 2)
+== detached_then_attached
+eval - var x = document.createElement('input'); x.value = 'abc'; x.setSelectionRange(1, 2); document.body.appendChild(x)
+== removed_before_task
+eval - $('i').setSelectionRange(1, 3); $('i').remove()
+== click_div_then_focus_input
+click #i
+click #d
+reset
+eval - $('i').focus()
+== button_focus_keeps_owner
+eval - $('i').focus()
+eval - $('b').focus()
+reset
+eval - $('i').focus()
+== focus_other_and_back
+eval - $('i').focus()
+eval - $('t').focus()
+reset
+eval - $('i').focus()
+== select_with_other_focused~
+eval - $('t').focus()
+reset
+eval - $('i').select()
+== key_shift_home
+eval - $('i').focus(); $('i').setSelectionRange(5, 5)
+reset
+key - Shift+Home
+== key_shift_arrow_in_textarea
+eval - $('t').focus(); $('t').setSelectionRange(2, 2)
+reset
+key - Shift+ArrowLeft
+== key_arrow_right_from_range
+eval - $('i').focus(); $('i').setSelectionRange(2, 5)
+reset
+key - ArrowRight
+== type_replaces_range
+eval - $('i').focus(); $('i').setSelectionRange(2, 5)
+reset
+key - z
+== focus_disabled_select~
+eval - $('i').disabled = true; $('i').select()
+== script_set_range_unfocused_then_type
+eval - $('i').setSelectionRange(2, 4)
+reset
+eval - $('i').focus()
+reset
+key - q
+# Mouse selection. Offsets are UTF-16 boundaries of the text; `dblclick #i 7` is a double click in the middle of character 7. `eval - L('i')` reads the state.
+== mouse_click_boundary
+clickat #i 4
+eval - L('i')
+== mouse_click_start
+clickat #i 0
+eval - L('i')
+== mouse_click_second_then_first
+clickat #i 4
+clickat #t 2
+eval - L('t')
+eval - L('i')
+== mouse_drag_forward
+drag #i 2 7
+eval - L('i')
+== mouse_drag_backward
+drag #i 7 2
+eval - L('i')
+== mouse_drag_to_start
+drag #i 5 0
+eval - L('i')
+== mouse_drag_events~
+eval - $('i').focus()
+reset
+drag #i 2 7
+== mouse_drag_backward_events~
+eval - $('i').focus()
+reset
+drag #i 7 2
+== mouse_drag_textarea
+drag #t 1 5
+eval - L('t')
+== mouse_drag_then_type
+drag #i 2 7
+key - X
+eval - L('i')
+== mouse_drag_then_shift_arrow
+drag #i 2 7
+key - Shift+ArrowLeft
+eval - L('i')
+== mouse_drag_backward_then_shift_arrow
+drag #i 7 2
+key - Shift+ArrowLeft
+eval - L('i')
+== mouse_dblclick_word
+dblclick #i 1
+eval - L('i')
+== mouse_dblclick_second_word
+dblclick #i 8
+eval - L('i')
+== mouse_dblclick_space
+dblclick #i 5
+eval - L('i')
+== mouse_dblclick_textarea
+dblclick #t 5
+eval - L('t')
+== mouse_dblclick_events~
+eval - $('i').focus()
+reset
+dblclick #i 1
+== mouse_tripleclick
+tripleclick #i 1
+eval - L('i')
+== mouse_click_in_button_keeps_selection
+drag #i 2 7
+click #b
+eval - L('i')
+== mouse_click_div_drops_owner
+drag #i 2 7
+click #d
+reset
+eval - $('i').focus()

@@ -1,0 +1,70 @@
+1arg-fresh	ok|XYhello world|0,0,forward
+1arg-range	ok|heXYZo world|2,5,forward
+1arg-caret	ok|helXYZlo world|3,3,forward
+1arg-backward	ok|heXYZ world|2,5,forward
+1arg-after-value	ok|abcX|3,3,forward
+1arg-empty-string	ok|heo world|2,2,forward
+1arg-number-arg	ok|he12o world|2,4,forward
+1arg-null	ok|henullo world|2,6,forward
+1arg-undefined	ok|heundefinedo world|2,11,forward
+4arg-select	ok|hXYZlo world|1,4,forward
+4arg-start	ok|hXYZlo world|1,1,forward
+4arg-end	ok|hXYZlo world|4,4,forward
+4arg-preserve	ok|hXYZlo world|1,5,forward
+3arg-default-mode	ok|hXYZlo world|9,11,forward
+preserve-before	ok|hXYZlo world|9,11,forward
+preserve-inside	ok|hXYZlo world|1,6,forward
+preserve-after	ok|hXYZlo world|0,1,forward
+preserve-spanning	ok|heXo world|0,9,forward
+preserve-shrink	ok|he world|2,5,forward
+preserve-at-edges	ok|hXYZlo world|1,4,forward
+preserve-backward	ok|hXYZlo world|9,11,forward
+select-backward	ok|hXYZlo world|1,4,forward
+start-gt-length	ok|hello worldX|2,4,forward
+end-gt-length	ok|heX|2,3,forward
+end-gt-length-select	ok|heX|2,3,forward
+end-gt-length-end	ok|heX|3,3,forward
+empty-range	ok|hellXo world|5,5,forward
+insert-at-end	ok|hello world!|11,12,forward
+negative-end	ok|X|0,0,forward
+fraction	ok|hXlo world|0,0,forward
+numeric-strings	ok|hXlo world|0,0,forward
+surrogates	ok|aXb|1,2,forward
+surrogate-split	ok|a�Xb|3,3,forward
+textarea-1arg	ok|aXYc def|1,3,forward
+textarea-fresh-1arg	ok|XYabc def|0,0,forward
+textarea-4arg	ok|aXYc def|1,3,forward
+textarea-lines	ok|abc\n def|5,5,forward
+textarea-after-value	ok|qXY|1,1,forward
+type-email	InvalidStateError:Failed to execute 'setRangeText' on 'HTMLInputElement': The input element's type ('email') does not support selection.|InvalidStateError:Failed to execute 'setRangeText' on 'HTMLInputElement': The input element's type ('email') does not support selection.
+type-number	InvalidStateError:Failed to execute 'setRangeText' on 'HTMLInputElement': The input element's type ('number') does not support selection.|InvalidStateError:Failed to execute 'setRangeText' on 'HTMLInputElement': The input element's type ('number') does not support selection.
+type-checkbox	InvalidStateError:Failed to execute 'setRangeText' on 'HTMLInputElement': The input element's type ('checkbox') does not support selection.|InvalidStateError:Failed to execute 'setRangeText' on 'HTMLInputElement': The input element's type ('checkbox') does not support selection.
+type-date	InvalidStateError:Failed to execute 'setRangeText' on 'HTMLInputElement': The input element's type ('date') does not support selection.|InvalidStateError:Failed to execute 'setRangeText' on 'HTMLInputElement': The input element's type ('date') does not support selection.
+type-hidden	InvalidStateError:Failed to execute 'setRangeText' on 'HTMLInputElement': The input element's type ('hidden') does not support selection.|InvalidStateError:Failed to execute 'setRangeText' on 'HTMLInputElement': The input element's type ('hidden') does not support selection.
+type-range	InvalidStateError:Failed to execute 'setRangeText' on 'HTMLInputElement': The input element's type ('range') does not support selection.|InvalidStateError:Failed to execute 'setRangeText' on 'HTMLInputElement': The input element's type ('range') does not support selection.
+type-color	InvalidStateError:Failed to execute 'setRangeText' on 'HTMLInputElement': The input element's type ('color') does not support selection.|InvalidStateError:Failed to execute 'setRangeText' on 'HTMLInputElement': The input element's type ('color') does not support selection.
+type-file	InvalidStateError:Failed to execute 'setRangeText' on 'HTMLInputElement': The input element's type ('file') does not support selection.|InvalidStateError:Failed to execute 'setRangeText' on 'HTMLInputElement': The input element's type ('file') does not support selection.
+type-submit	InvalidStateError:Failed to execute 'setRangeText' on 'HTMLInputElement': The input element's type ('submit') does not support selection.|InvalidStateError:Failed to execute 'setRangeText' on 'HTMLInputElement': The input element's type ('submit') does not support selection.
+type-text	1X345|1,2,forward
+type-search	1X345|1,2,forward
+type-tel	1X345|1,2,forward
+type-url	1X345|1,2,forward
+type-password	1X345|1,2,forward
+errors	IndexSizeError:Failed to execute 'setRangeText' on 'HTMLInputElement': The provided start value (5) is larger than the provided end value (2).~IndexSizeError:Failed to execute 'setRangeText' on 'HTMLInputElement': The provided start value (5) is larger than the provided end value (2).~IndexSizeError:Failed to execute 'setRangeText' on 'HTMLInputElement': The provided start value (4294967295) is larger than the provided end value (2).~TypeError:Failed to execute 'setRangeText' on 'HTMLInputElement': The provided value 'bogus' is not a valid enum value of type SelectionMode.~TypeError:Failed to execute 'setRangeText' on 'HTMLInputElement': The provided value 'null' is not a valid enum value of type SelectionMode.~ok undefined~TypeError:Failed to execute 'setRangeText' on 'HTMLInputElement': Overload resolution failed.~TypeError:Failed to execute 'setRangeText' on 'HTMLInputElement': 1 argument required, but only 0 present.~TypeError:Failed to execute 'setRangeText' on 'HTMLInputElement': The provided value 'SELECT' is not a valid enum value of type SelectionMode.~hXllo world
+errors-textarea	IndexSizeError:Failed to execute 'setRangeText' on 'HTMLTextAreaElement': The provided start value (5) is larger than the provided end value (2).~TypeError:Failed to execute 'setRangeText' on 'HTMLTextAreaElement': The provided value 'bogus' is not a valid enum value of type SelectionMode.~TypeError:Failed to execute 'setRangeText' on 'HTMLTextAreaElement': 1 argument required, but only 0 present.~abc def
+error-keeps-state	hello world|2,4,forward
+shape	1|1|false|true|true|function|undefined|false|TypeError:Illegal invocation|TypeError:Illegal invocation|TypeError:Illegal invocation
+conversion-order	s,st,en,m,s2,st2,en2,m2,InvalidStateError
+conversion-throws	RangeError:boom|hello world|2,4,forward
+type-changes-in-conversion	InvalidStateError:Failed to execute 'setRangeText' on 'HTMLInputElement': The input element's type ('email') does not support selection.|hello world
+value-changes-in-conversion	aXdef|1,2,forward
+no-input-event	|Qello world
+value-dirty-default	Zello world|k|k
+then-set-range	Q world|0,1,forward
+selection-events	selectionchange:0,0,forward,select:0,0,forward,select:0,0,forward,select:0,0,forward
+selection-events-unchanged	selectionchange:3,3,forward,select:3,3,forward
+selection-events-select-mode	selectionchange:0,1,forward,select:0,1,forward
+selection-events-textarea	selectionchange:0,1,forward,select:0,1,forward
+selection-events-throw	
+value-attr-unchanged	hello world|hello world
+validity	LONGERbc|false

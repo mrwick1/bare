@@ -7,7 +7,8 @@
 //! strings and indexes near the ends. `short` values are 0 to 9 UTF-16 units with surrogate pairs. `long` values are
 //! about 4000 units. The checksum is a rolling hash of the selection that JS reads after every operation, and of the
 //! target of every `select` event in order. A separate Rust model of the HTML algorithm (it shares no code with the
-//! host) gives the expected values, the expected number of `select` and coalesced `selectionchange` tasks, and the native state of each input,
+//! host) gives the expected values, the expected number of `select` and coalesced `selectionchange` tasks (and of frames, which carry the
+//! `select` of a script change), and the native state of each input,
 //! which is compared with `Browser::input_selection` after every batch (no JS read). Batches of 500 run through
 //! a pump of at most 256 tasks and a `collect`. At the end no task, event or wrapper of a batch is left.
 
@@ -48,7 +49,7 @@ const PUMP: usize = 256;
 const INPUTS: usize = 64;
 const P: u64 = 1000003;
 
-/// The model: the selection as `(start, end, dir)`, dir 0 none, 1 forward, 2 backward.
+/// The model: the selection as `(start, end, dir)`, dir 1 forward (also what `none` and any other string give, as in Chrome), 2 backward.
 #[derive(Clone, Copy)]
 struct M {
     val: usize,
@@ -60,9 +61,11 @@ struct M {
 
 impl M {
     /// "Set the selection range". True when the range or the direction changed (a `select` task).
-    fn set(&mut self, start: u32, end: u32, d: u8) -> bool {
+    fn set(&mut self, start: u32, end: u32, d: u8, focused: bool) -> bool {
         let end = end.min(self.len);
         let start = start.min(end);
+        // The caret of the focused control has no direction (Chrome).
+        let d = if start == end && focused { 1 } else { d };
         let changed = (start, end, d) != (self.s, self.e, self.d);
         (self.s, self.e, self.d) = (start, end, d);
         changed
@@ -139,16 +142,19 @@ fn exec(name: &str, scale: usize) {
     );
     let nodes: Vec<_> = (0..INPUTS).map(|i| b.query(&format!("body > input:nth-child({})", i + 1)).unwrap_or_else(|e| die(format!("query {e:?}"))).unwrap_or_else(|| die("no input".into()))).collect();
     // every input starts with the empty value: that is `vals[0]` in `short`, and none of the `long` values
-    let mut model = vec![M { val: if name == "short" { 0 } else { usize::MAX }, len: 0, s: 0, e: 0, d: 0 }; INPUTS];
+    let mut model = vec![M { val: if name == "short" { 0 } else { usize::MAX }, len: 0, s: 0, e: 0, d: 1 }; INPUTS];
+    // `select()` focuses the input. The input that holds the page selection gets a `selectionchange` when another one takes it.
+    let mut focus: Option<usize> = None;
+    let mut owner: Option<usize> = None;
     let fixed: [(&str, u32); 10] = [("0", 0), ("1", 1), ("3", 3), ("7", 7), ("1.9", 1), ("-1", u32::MAX), ("NaN", 0), ("Infinity", 0), ("4294967299", 3), ("'2'", 2)];
-    let dirs: [(&str, u8); 5] = [("'forward'", 1), ("'backward'", 2), ("'none'", 0), ("'x'", 0), ("undefined", 0)];
+    let dirs: [(&str, u8); 5] = [("'forward'", 1), ("'backward'", 2), ("'none'", 1), ("'x'", 1), ("undefined", 1)];
     let mut rng = 0x9E3779B97F4A7C15u64;
     let mut next = move || {
         rng = rng.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
         (rng >> 33) as usize
     };
     let n = 1000 * scale;
-    let (mut exp_h, mut exp_h2, mut exp_ev, mut exp_sc) = (0u64, 0u64, 0u64, 0u64);
+    let (mut exp_h, mut exp_h2, mut exp_ev, mut exp_sc, mut exp_frames) = (0u64, 0u64, 0u64, 0u64, 0u64);
     let (mut pumps, mut tasks, mut max_queue) = (0usize, 0usize, 0usize);
     let cpu0 = cpu_ms();
     let t = Instant::now();
@@ -176,24 +182,39 @@ fn exec(name: &str, scale: usize) {
             let (ds, dv) = dirs[next() % dirs.len()];
             let v = next() % vals.len();
             let changed = match k {
-                0 => m.set(av, bv, dv),
+                0 => m.set(av, bv, dv, focus == Some(i)),
                 1 => {
                     let e = m.e.max(av);
                     let d = m.d;
-                    m.set(av, e, d)
+                    m.set(av, e, d, focus == Some(i))
                 }
                 2 => {
                     let (s, d) = (m.s, m.d);
-                    m.set(s, bv, d)
+                    m.set(s, bv, d, focus == Some(i))
                 }
-                3 => m.set(0, u32::MAX, 0),
+                3 => {
+                    if focus != Some(i) {
+                        focus = Some(i);
+                        if owner != Some(i) {
+                            owner = Some(i);
+                            if !pending[i] {
+                                pending[i] = true;
+                                exp_sc += 1;
+                            }
+                        }
+                        if m.s == m.e {
+                            m.d = 1;
+                        }
+                    }
+                    m.set(0, u32::MAX, 1, true)
+                }
                 4 => {
-                    // the value setter: a different value moves the caret to the end and clears the direction
+                    // the value setter: a different value moves the caret to the end (forward)
                     let mut moved = false;
                     if v != m.val {
                         (m.val, m.len) = (v, lens[v]);
-                        moved = (m.s, m.e, m.d) != (m.len, m.len, 0);
-                        (m.s, m.e, m.d) = (m.len, m.len, 0);
+                        moved = (m.s, m.e, m.d) != (m.len, m.len, 1);
+                        (m.s, m.e, m.d) = (m.len, m.len, 1);
                     }
                     if moved && !pending[i] {
                         pending[i] = true;
@@ -203,7 +224,7 @@ fn exec(name: &str, scale: usize) {
                 }
                 _ => {
                     let (s, e) = (m.s, m.e);
-                    m.set(s, e, dv)
+                    m.set(s, e, dv, focus == Some(i))
                 }
             };
             exp_h = (exp_h * 31 + m.s as u64 * 7 + m.e as u64 * 3 + m.d as u64) % P;
@@ -229,12 +250,14 @@ fn exec(name: &str, scale: usize) {
             }
         }
         exp_ev += order.len() as u64;
+        // the `select` tasks wait for the next frame: one frame task for the batch
+        exp_frames += u64::from(!order.is_empty());
         for i in &order {
             exp_h2 = (exp_h2 * 31 + i) % P;
         }
         max_queue = max_queue.max(b.sched_stats().tasks);
         loop {
-            let p = b.advance_time(0.0, PUMP).unwrap_or_else(|e| die(format!("pump: {e:?}")));
+            let p = b.advance_time(20.0, PUMP).unwrap_or_else(|e| die(format!("pump: {e:?}")));
             pumps += 1;
             tasks += p.ran;
             b.collect(&[]).unwrap_or_else(|e| die(format!("collect: {e:?}")));
@@ -247,8 +270,8 @@ fn exec(name: &str, scale: usize) {
     if got != format!("{exp_ev},{exp_h2}") {
         die(format!("events: {got} != {exp_ev},{exp_h2}"));
     }
-    if tasks as u64 != exp_ev + exp_sc {
-        die(format!("tasks run {tasks} != expected select tasks {exp_ev} + selectionchange tasks {exp_sc}"));
+    if tasks as u64 != exp_ev + exp_sc + exp_frames {
+        die(format!("tasks run {tasks} != expected select tasks {exp_ev} + selectionchange tasks {exp_sc} + frames {exp_frames}"));
     }
     b.collect(&[]).unwrap_or_else(|e| die(format!("collect: {e:?}")));
     let (s, st) = (b.sched_stats(), b.stats());

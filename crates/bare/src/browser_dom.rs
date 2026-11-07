@@ -568,25 +568,33 @@ impl Dom {
     /// moves the selection of a text control, schedules its `selectionchange`. `it` is the JS caller that pays for
     /// the scans; the test driver has none (see `Dom::selection_after_value`).
     pub(crate) fn put_input_value(&self, it: Option<&mut Interp<'_>>, n: NodeId, v: String) -> R<()> {
-        let area = self.doc.borrow().is_html(n, "textarea");
         let changed = self.with_input_value(n, |old| old != v) != Some(false);
         let moved = if changed { self.selection_after_value(it, n, &v)? } else { false };
+        self.value_room(n, v.len())?;
+        self.selection_room(n, moved, false)?; // every cap is checked before the first write
+        self.queue_selection_tasks(n, moved, false, false)?;
+        self.write_value(n, v, changed)
+    }
+
+    /// The bytes that all dirty values hold stay under `max_text_bytes` when the value of `n` has `len` bytes.
+    pub(crate) fn value_room(&self, n: NodeId, len: usize) -> R<()> {
         let old = self.st.borrow().inputs.get(&n).and_then(|i| i.value.as_ref()).map_or(0, String::len);
-        if self.st.borrow().input_bytes - old + v.len() > self.lim.max_text_bytes {
+        if self.st.borrow().input_bytes - old + len > self.lim.max_text_bytes {
             return Err(self.lim("dom-input-bytes"));
         }
-        self.selection_room(n, moved, false)?; // every cap is checked before the first write
-        self.queue_selection_tasks(n, moved, false)?;
-        {
-            let mut st = self.st.borrow_mut();
-            st.input_bytes = st.input_bytes - old + v.len();
-            let i = st.inputs.entry(n).or_default();
-            // A changed value puts the caret at the end (HTML: setting `value`). An input keeps that as `None`; a textarea stores it.
-            let end = if changed && area { Some(crate::browser_selection::caret_end(&v, true)) } else { None };
-            i.value = Some(v);
-            if changed {
-                i.sel = end;
-            }
+        Ok(())
+    }
+
+    /// Store the dirty value of a text control. `reset_caret`: a changed value puts the caret at the end (HTML: setting `value`).
+    pub(crate) fn write_value(&self, n: NodeId, v: String, reset_caret: bool) -> R<()> {
+        self.value_room(n, v.len())?;
+        let mut st = self.st.borrow_mut();
+        let old = st.inputs.get(&n).and_then(|i| i.value.as_ref()).map_or(0, String::len);
+        st.input_bytes = st.input_bytes - old + v.len();
+        let i = st.inputs.entry(n).or_default();
+        i.value = Some(v);
+        if reset_caret {
+            i.sel = Some(crate::browser_selection::END);
         }
         Ok(())
     }

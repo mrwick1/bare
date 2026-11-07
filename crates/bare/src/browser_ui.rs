@@ -25,7 +25,8 @@
 //!
 //! Default actions (only for window input; `Browser::click` keeps its older rules, see `browser_form.rs`)
 //! - A press focuses the nearest focusable ancestor, or blurs when there is none. In a text field it puts the caret where
-//!   the caller says.
+//!   the caller says; a move with the button down then extends the selection (`drag_select`), a second press selects the word and a third the
+//!   value (`word_at`, `line_at`). Two presses count as a double click only when they are within 500 ms and 5px.
 //! - A click toggles a checkbox before the click event runs (a listener sees the new state) and undoes it when the click is
 //!   canceled; otherwise `input` and `change` follow. A radio does the same and clears the others of its group (same `name`
 //!   and form owner). A click on a label focuses and clicks its control. A click on `a[href]` starts a navigation
@@ -132,8 +133,8 @@ pub(crate) struct PointerData {
 pub(crate) struct UiState {
     hover: Option<NodeId>,
     down: Option<NodeId>,
-    /// The last press: node, time and the count of fast presses in a row (`detail`).
-    pub(crate) last: Option<(NodeId, f64, u32)>,
+    /// The last press: node, time, the count of fast presses in a row (`detail`) and the point. A press more than 5px away starts a new count.
+    pub(crate) last: Option<(NodeId, f64, u32, (f64, f64))>,
     /// True while a window event runs: the events that the host makes (focus, `submit`) are then trusted.
     pub active: bool,
     /// Raised by each listener that runs and by each window event that can change what the page shows.
@@ -150,6 +151,8 @@ pub(crate) struct UiState {
     pub(crate) held: u16,
     /// A listener canceled `pointerdown`: the mouse events of this press are not sent (Chrome), the `click` still is.
     nomouse: bool,
+    /// A drag that selects text: the text field and the offset where the press fell (the anchor).
+    pub(crate) sel_drag: Option<(NodeId, u32)>,
 }
 
 // ------------------------------------------------------------------------------------------ getters
@@ -476,6 +479,9 @@ impl Dom {
 
     pub(crate) fn ui_button(&self, it: &mut Interp<'_>, target: Option<NodeId>, p: &Pointer, button: u8, pressed: bool, caret: Option<u32>) -> R<()> {
         self.st.borrow_mut().ui.held = p.buttons;
+        if !pressed && button == 0 {
+            self.st.borrow_mut().ui.sel_drag = None;
+        }
         let held = self.st.borrow().ui.capture;
         let Some(t) = held.or(target) else {
             if !pressed {
@@ -489,11 +495,11 @@ impl Dom {
         if pressed {
             let now = self.now_ms();
             let count = match self.st.borrow().ui.last {
-                Some((n, at, c)) if n == t && now - at < 500.0 && button == 0 => c + 1,
+                Some((n, at, c, (x, y))) if n == t && now - at < 500.0 && button == 0 && (p.x - x).abs() <= 5.0 && (p.y - y).abs() <= 5.0 => c + 1,
                 _ => 1,
             };
             if button == 0 {
-                self.st.borrow_mut().ui.last = Some((t, now, count));
+                self.st.borrow_mut().ui.last = Some((t, now, count, (p.x, p.y)));
             }
             self.st.borrow_mut().ui.down = Some(t);
             self.capture_events(it, p, b)?;
@@ -505,7 +511,7 @@ impl Dom {
             // The mouse events of a press go to the holder of the capture, if a listener of `pointerdown` set one.
             let t = self.st.borrow().ui.capture.unwrap_or(t);
             if self.mouse_ev(it, t, "mousedown", p, b, p.buttons, count, None)? && button == 0 {
-                self.focus_by_press(it, t, caret)?;
+                self.focus_by_press(it, t, caret, count)?;
             }
         } else {
             let down = self.st.borrow_mut().ui.down.take();
@@ -541,7 +547,7 @@ impl Dom {
     }
 
     /// The focus change of a press: the nearest focusable ancestor gets focus, or the page loses it.
-    fn focus_by_press(&self, it: &mut Interp<'_>, t: NodeId, caret: Option<u32>) -> R<()> {
+    fn focus_by_press(&self, it: &mut Interp<'_>, t: NodeId, caret: Option<u32>, count: u32) -> R<()> {
         let mut to = None;
         for n in self.chain(Some(t)) {
             if self.focusable(it, n)? {
@@ -551,13 +557,44 @@ impl Dom {
         }
         self.commit_if_edited(it, to)?;
         self.move_focus(it, to)?;
+        // A press that focuses a control without text keeps the selection owner, and Chrome sends `select` again to a range there.
+        let owner = self.st.borrow().focus.sel_owner;
+        if let Some(f) = to.filter(|&f| !self.selection_applies(f))
+            && let Some(o) = owner.filter(|&o| o != f)
+            && let Some((sel, _)) = self.effective(Some(it), o)?
+            && sel.start != sel.end
+        {
+            self.queue_selection_tasks(o, false, true, true)?;
+        }
+        if to.is_none() {
+            // The press puts the page selection in the document, out of any control.
+            self.st.borrow_mut().focus.sel_owner = None;
+        }
         if let (Some(f), Some(c)) = (to, caret)
             && self.selection_applies(f)
             && self.current_focus(it)? == Some(f)
         {
-            self.set_selection_range(it, f, Some(c), Some(c), Dir::None)?;
+            self.set_user_selection(it, f, Some(c), Some(c), Dir::Forward)?;
+            self.st.borrow_mut().ui.sel_drag = Some((f, c));
+            // Two presses select the word at the caret, three the whole value (the line in a textarea).
+            if count >= 2 {
+                let value = self.input_value_of(f).unwrap_or_default();
+                let (a, b) = if count == 2 { word_at(&value, c) } else { line_at(&value, c, is_tag(&self.doc.borrow(), f, "textarea")) };
+                self.set_user_selection(it, f, Some(a), Some(b), Dir::Forward)?;
+            }
         }
         Ok(())
+    }
+
+    /// The pointer moved with the button down after a press in a text field: the selection runs from the press to `caret`.
+    pub(crate) fn drag_select(&self, it: &mut Interp<'_>, caret: u32) -> R<()> {
+        let Some((f, anchor)) = self.st.borrow().ui.sel_drag else { return Ok(()) };
+        if self.current_focus(it)? != Some(f) {
+            self.st.borrow_mut().ui.sel_drag = None;
+            return Ok(());
+        }
+        let dir = if caret < anchor { Dir::Backward } else { Dir::Forward };
+        self.set_user_selection(it, f, Some(anchor.min(caret)), Some(anchor.max(caret)), dir)
     }
 
     /// A field that the user edited gets its `change` event when focus leaves it (`to` is the new focus).
@@ -775,7 +812,7 @@ impl Dom {
             }
             "a" | "A" if m.ctrl && !m.alt && focus.is_some_and(|f| self.selection_applies(f)) => {
                 let f = focus.expect("checked");
-                self.set_selection_range(it, f, Some(0), Some(u32::MAX), Dir::None)?;
+                self.set_user_selection(it, f, Some(0), Some(u32::MAX), Dir::Forward)?;
             }
             " " if edit.is_none() && !m.ctrl && !m.alt && !m.meta => {
                 if !self.key_ev(it, t, "keypress", k)? {
@@ -862,7 +899,7 @@ impl Dom {
         let focus = match key {
             _ if !extend && sel.start != sel.end && (left || right) => {
                 let c = if left { sel.start } else { sel.end };
-                return self.set_selection_range(it, n, Some(c), Some(c), Dir::None);
+                return self.set_user_selection(it, n, Some(c), Some(c), Dir::Forward);
             }
             "ArrowLeft" => prev_off(&value, focus),
             "ArrowRight" => next_off(&value, focus),
@@ -870,10 +907,10 @@ impl Dom {
             _ => len,
         };
         if !extend {
-            return self.set_selection_range(it, n, Some(focus), Some(focus), Dir::None);
+            return self.set_user_selection(it, n, Some(focus), Some(focus), Dir::Forward);
         }
         let dir = if focus < anchor { Dir::Backward } else { Dir::Forward };
-        self.set_selection_range(it, n, Some(anchor.min(focus)), Some(anchor.max(focus)), dir)
+        self.set_user_selection(it, n, Some(anchor.min(focus)), Some(anchor.max(focus)), dir)
     }
 
     /// Implicit submission: a click on the default button of the form of field `n`.
@@ -945,7 +982,7 @@ impl Dom {
         self.commit_if_edited(it, Some(next))?;
         self.move_focus(it, Some(next))?;
         if self.current_focus(it)? == Some(next) && self.selection_applies(next) {
-            self.set_selection_range(it, next, Some(0), Some(u32::MAX), Dir::None)?;
+            self.set_user_selection(it, next, Some(0), Some(u32::MAX), Dir::Forward)?;
         }
         Ok(())
     }
@@ -1039,6 +1076,16 @@ impl Browser {
         self.ui_call(always, |d, it| d.ui_key(it, &k, down))
     }
 
+    /// The text field whose text a drag with the button down selects now, if any.
+    pub fn selecting(&self) -> Option<NodeId> {
+        self.dom.st.borrow().ui.sel_drag.map(|d| d.0)
+    }
+
+    /// The pointer moved to `caret` of the text field that `selecting` gave, with the button down.
+    pub fn ui_drag_select(&mut self, caret: u32) -> R<UiOutcome> {
+        self.ui_call(true, |d, it| d.drag_select(it, caret))
+    }
+
     /// Is `node` an `<input>` that takes text and that the user can edit?
     pub fn is_text_input(&self, node: NodeId) -> bool {
         self.dom.editable(node)
@@ -1049,4 +1096,44 @@ impl Browser {
         let dom = self.dom.clone();
         self.it.host_scope(|it| dom.tab_order(it))
     }
+}
+
+/// Where a double click at offset `c` of `text` selects (UTF-16 offsets): the run of letters, digits and `_`, or the run of spaces,
+/// that holds the character after `c` (the one before it at the end). Any other character stands alone (Chrome).
+fn word_at(text: &str, c: u32) -> (u32, u32) {
+    let (mut cs, mut u) = (Vec::new(), 0);
+    for ch in text.chars() {
+        cs.push((u, ch));
+        u += ch.len_utf16() as u32;
+    }
+    let class = |ch: char| match ch {
+        '\n' => 0,
+        ch if ch.is_alphanumeric() || ch == '_' => 1,
+        ch if ch.is_whitespace() => 2,
+        _ => 0,
+    };
+    let Some(i) = cs.iter().position(|&(s, ch)| s + ch.len_utf16() as u32 > c).or(cs.len().checked_sub(1)) else { return (0, 0) };
+    let k = class(cs[i].1);
+    let (mut a, mut b) = (i, i + 1);
+    if k != 0 {
+        while a > 0 && class(cs[a - 1].1) == k {
+            a -= 1;
+        }
+        while b < cs.len() && class(cs[b].1) == k {
+            b += 1;
+        }
+    }
+    (cs[a].0, cs.get(b).map_or(u, |x| x.0))
+}
+
+/// Where a triple click at offset `c` selects: the whole value, or the line of a textarea.
+fn line_at(text: &str, c: u32, area: bool) -> (u32, u32) {
+    let u: Vec<u16> = text.encode_utf16().collect();
+    if !area {
+        return (0, u.len() as u32);
+    }
+    let c = (c as usize).min(u.len());
+    let a = u[..c].iter().rposition(|&x| x == 10).map_or(0, |i| i + 1);
+    let b = u[c..].iter().position(|&x| x == 10).map_or(u.len(), |i| c + i);
+    (a as u32, b as u32)
 }

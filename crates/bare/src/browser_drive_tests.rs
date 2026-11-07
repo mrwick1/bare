@@ -17,6 +17,9 @@ const STEPS: &str = include_str!("../../../tools/fixtures/ui/drive-steps.txt");
 const CHROME: &str = include_str!("../../../tools/fixtures/ui/chrome-drive.txt");
 const REACT: &str = include_str!("../../../tools/fixtures/ui/react.html");
 const REACT_STEPS: &str = include_str!("../../../tools/fixtures/ui/react-steps.txt");
+const SEL: &str = include_str!("../../../tools/fixtures/ui/sel.html");
+const SEL_STEPS: &str = include_str!("../../../tools/fixtures/ui/sel-steps.txt");
+const SEL_CHROME: &str = include_str!("../../../tools/fixtures/ui/chrome-sel.txt");
 const REACT_CHROME: &str = include_str!("../../../tools/fixtures/ui/chrome-react.txt");
 
 fn big<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {
@@ -64,6 +67,26 @@ fn scenario(page: &str, steps: &[&str]) -> String {
                 let n = node(&mut b, sel);
                 b.drive_type(n, &text.replace("\\n", "\n")).unwrap();
             }
+            // Mouse steps on the text of a field (`tools/ui/chrome_drive.mjs`): the clock moves between the presses, as the time of a real hand does.
+            "clickat" | "dblclick" | "tripleclick" => {
+                let n = node(&mut b, sel);
+                let at: u32 = text.parse().unwrap();
+                for nth in 1..=match verb { "clickat" => 1, "dblclick" => 2, _ => 3 } {
+                    b.drive_text_down(n, at, nth).unwrap();
+                    b.advance_time(40.0, 10_000).unwrap();
+                    b.drive_text_up(n, at).unwrap();
+                    b.advance_time(40.0, 10_000).unwrap();
+                }
+            }
+            "drag" => {
+                let n = node(&mut b, sel);
+                let (from, to) = text.split_once(' ').unwrap();
+                b.drive_text_down(n, from.parse().unwrap(), 1).unwrap();
+                b.advance_time(60.0, 10_000).unwrap();
+                b.drive_text_move(n, to.parse().unwrap()).unwrap();
+                b.advance_time(60.0, 10_000).unwrap();
+                b.drive_text_up(n, to.parse().unwrap()).unwrap();
+            }
             _ => panic!("bad step {step}"),
         }
         b.advance_time(300.0, 10_000).unwrap();
@@ -95,9 +118,14 @@ fn compare(page: &str, steps_src: &str, chrome_src: &str) -> usize {
     let mut bad = Vec::new();
     for (name, s) in names.iter().zip(&steps) {
         let got = scenario(page, s);
-        let got: Vec<&str> = got.lines().collect();
-        let want = chrome.get(*name).unwrap_or_else(|| panic!("no Chrome log for {name}"));
-        if &got != want {
+        let mut got: Vec<&str> = got.lines().collect();
+        let mut want = chrome.get(*name).unwrap_or_else(|| panic!("no Chrome log for {name}")).clone();
+        // A name that ends with `~` has events whose order Chrome does not fix (see `sel-steps.txt`).
+        if name.ends_with('~') {
+            got.sort();
+            want.sort();
+        }
+        if got != want {
             let i = got.iter().zip(want.iter()).position(|(a, b)| a != b).unwrap_or(got.len().min(want.len()));
             bad.push(format!("{name}: line {i}\n  chrome {:?}\n  bare   {:?}\n  ({} chrome lines, {} bare lines)", want.get(i), got.get(i), want.len(), got.len()));
         }
@@ -114,6 +142,11 @@ fn scenarios_log_what_chrome_logs() {
 #[test]
 fn typing_in_react_controlled_fields_gives_what_chrome_gives() {
     big(|| assert_eq!(compare(REACT, REACT_STEPS, REACT_CHROME), 23));
+}
+
+#[test]
+fn selection_events_of_text_controls_give_what_chrome_gives() {
+    big(|| assert_eq!(compare(SEL, SEL_STEPS, SEL_CHROME), 71));
 }
 
 // ------------------------------------------------------------------------------------------ the tracker of React

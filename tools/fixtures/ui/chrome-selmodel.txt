@@ -1,0 +1,18 @@
+fresh-markup	0,0,forward|0,0,forward|0,0,forward|0,0,forward
+created-attr	0,0,forward|4,4,forward|4,4,forward|1,2,forward|2,2,forward
+default-value-clean	0,0,forwardqq|1,1,forwardq
+default-value-dirty	3,3,forwardabc
+direction-none	1,3,forward|1,3,backward|1,3,forward|1,3,backward|1,3,forward|0,11,forward
+direction-caret	2,2,backward|3,3,backward|1,1,backward
+reset-input	11,11,forwardhello world|11,11,forwardhello world
+reset-textarea	3,3,forwardabc
+value-null	0,0,forward[]
+value-same-keeps	1,2,forward
+value-shorter-clamps	4,6,forwardabcdef
+clone	0,0,forward|2,4,backward
+focus-keeps	0,0,forward|2,4,forward|0,0,forward
+textarea-fresh-select	0,7,forward|2,2,forward|2,2,forward
+clamp-on-read	3,3,forward|12,12,forward
+password-and-others	0,0,forward|0,0,forward|0,0,forward|0,0,forward
+reset-untouched	0,0,forward|0,0,forward|2,2,forward
+reset-untouched-after-reset	0,0,forward|0,0,forward|0,0,forward|0,0,forward
