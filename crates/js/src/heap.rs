@@ -411,6 +411,8 @@ fn obj_bytes(o: &Object) -> usize {
 struct Str {
     units: Box<[u16]>,
     hash: u32,
+    /// The first unit is a digit, so the string may be an array index. Read without a jump to `units`, a separate block that is often cold.
+    digit: bool,
 }
 
 struct Symbol {
@@ -772,8 +774,8 @@ impl Heap {
             PropertyKey::Index(_) => Err(HeapError::InvalidKey),
             PropertyKey::Symbol(s) => self.sym(s).map(drop),
             PropertyKey::String(s) => {
-                let u = &self.str(s)?.units;
-                if u.first().is_some_and(|c| (0x30..=0x39).contains(c)) && parse_index(u).is_some() {
+                let st = self.str(s)?;
+                if st.digit && parse_index(&st.units).is_some() {
                     return Err(HeapError::InvalidKey);
                 }
                 Ok(())
@@ -826,7 +828,7 @@ impl Heap {
         }
         self.charge(cost)?;
         if !self.strings.can_alloc() { return Err(HeapError::Limit(Limit::Strings)); }
-        let s = Str { units: units.into_owned().into_boxed_slice(), hash };
+        let s = Str { digit: units.first().is_some_and(|c| (0x30..=0x39).contains(c)), units: units.into_owned().into_boxed_slice(), hash };
         if (self.interner.count + 1) * 2 > self.interner.table.len() {
             // Grow before the insert so the load stays at most 0.5 and a probe always ends.
             let size = self.interner.table.len() * 2;
@@ -927,7 +929,8 @@ impl Heap {
 
     /// The key for a string: `Index` for a canonical array index, else `String`.
     pub fn key_from_string(&self, s: StrId) -> R<PropertyKey> {
-        Ok(match parse_index(&self.str(s)?.units) {
+        let st = self.str(s)?;
+        Ok(match if st.digit { parse_index(&st.units) } else { None } {
             Some(i) => PropertyKey::Index(i),
             None => PropertyKey::String(s),
         })
@@ -1932,6 +1935,22 @@ mod tests {
             assert!(result.is_ok());
             assert!(result.unwrap().is_err());
         }
+    }
+
+    #[test]
+    fn keys_that_start_with_a_digit_are_told_from_index_keys() {
+        let mut h = Heap::default();
+        for (text, index) in [("0", Some(0)), ("7", Some(7)), ("4294967294", Some(u32::MAX - 1)), ("01", None), ("1a", None), ("4294967295", None), ("a1", None), ("", None), ("\u{0663}", None)] {
+            let s = h.intern_str(text).unwrap();
+            let want = index.map_or(PropertyKey::String(s), PropertyKey::Index);
+            assert_eq!(h.key_from_string(s).unwrap(), want, "{text:?}");
+        }
+        // A string key that spells an index is refused, as before.
+        let o = h.new_object(None).unwrap();
+        let five = h.intern_str("5").unwrap();
+        assert_eq!(h.get(o, PropertyKey::String(five)).err(), Some(HeapError::InvalidKey));
+        let one_a = h.intern_str("1a").unwrap();
+        assert!(matches!(h.get(o, PropertyKey::String(one_a)), Ok(Get::Value(Value::Undefined))));
     }
 
     #[test]

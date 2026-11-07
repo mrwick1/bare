@@ -1,0 +1,8 @@
+body { font: 14px sans-serif; margin: 8px; }
+.row { display: flex; flex-direction: column; margin: 4px 0; padding: 2px 4px; border: 1px solid #ddd; }
+.row.ok { border-color: #4a4; } .row.bad { border-color: #c44; }
+.lbl { font-weight: bold; color: #333; } .inp { width: 300px; padding: 3px; border: 1px solid #999; }
+.inp:focus { outline: 2px solid #36f; } .err { color: #c00; } .count { color: #666; } .count.warn { color: #c60; }
+.progress { height: 20px; border: 1px solid #333; position: relative; } .bar { background: #8c8; height: 100%; }
+.choices { display: flex; gap: 8px; } .trg, .chk, .sw, .rad { border: 1px solid #666; min-width: 20px; min-height: 20px; }
+.summary { margin: 8px 0; }

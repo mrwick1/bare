@@ -938,3 +938,36 @@ Gaps that this flow found:
 - `/agents/<id>/configure` shows the app error screen: `TypeError: t.compareDocumentPosition is not a function`. The host has no `Node.compareDocumentPosition`.
 - Typing is slow: about 90 to 190 ms for each key on this form. Chrome takes a few ms. The cause is not known yet (to verify).
 - The driver click does not hit-test. A click reached the Next button while the modal voice dialog was still open. Chrome sends that click to the top element at the point.
+
+## Cost of one typed key on a React form
+
+Problem: on a live Next.js 14 and React 19 wizard (about 60 controls, Radix parts, a character counter), `Input::Type` took 90 to 190 ms for each key (9.8 s for 55 characters in one textarea, 3.6 s for 22 in an `<input>`). Chrome takes a few ms.
+
+Repro (offline, `tools/js/typing/`): a production React 19 bundle of a controlled form. 60 inputs, 2 textareas with counters, a progress bar and a total that re-render for each key, and Radix select, checkbox, switch, radio group, tabs and accordion. The Radix versions are those of a Next.js 14 page. The bundle is 307 KB, so it is not in the repository: `tools/js/typing/build.sh OUTDIR` makes it. `crates/bare/examples/type_load.rs` loads it from loopback and types into a field with `Input::Type`. `tools/ui/chrome_type.mjs` types the same text into the same page in headless Chrome.
+
+Where the time goes (checked with `perf record -e instructions:u`, main 71b5a0a, 20 keys into the first textarea):
+
+- It is CPU, not waiting. A 20 key `Input::Type` is 3 tasks and 2 rounds, and wall time equals CPU time. The settle `quiet` window never sleeps (the page has no timer, and React 19 uses a message channel). The virtual clock gives the same time.
+- 92% of the instructions are in the JS evaluator (`eval_expr_inner` 15%, `link_inner` 9%, `machine` 8%, `Heap::lookup` and `PropMap::find` 14%, `get_name` 3%). 7% is libc and hash tables. All host code together (events, style, layout, selection, value tracker, observers) is 0.12%.
+- One key is 1.46 M evaluator steps and 457 M instructions, about 310 instructions for each step. That is half of the 840 M instructions that loading and mounting the page cost.
+- React does the right amount of work: one render of each component for each key (counted in the page: App 1, Field 60, Area 2, Progress 1, Summary 1, Choice 1). The cost is the work itself. The form keeps its state in one object, so every field re-renders.
+- Steps for each key, by what the page contains: 1 field 59 K, 10 fields 128 K, 60 plain fields 508 K (about 7.6 K steps for each field), the full page without the Radix `Label` 1.31 M, the full page without the select, checkbox, switch and radio group 1.02 M, the full page 1.46 M. So a Radix `Label` costs 2.6 K steps for each field (156 K in all), and the four controls cost 440 K steps together.
+- Chrome on the same page: 3.9 ms for each key into the textarea (100 keys) and 4.2 ms into an input (50 keys), with one CDP round trip for each key. bare takes 65 to 75 ms (best of 5, 30 keys, load average 12), the same order as the live page (90 to 180 ms). The gap is the cost of a tree-walking evaluator against a JIT, not a driver or host path.
+
+Changes (general, in `crates/js`; all three cut the work of each property read):
+
+- `heap.rs`: a string records if its first unit is a digit (`Str::digit`, in the padding of the record, so no new bytes). `key_from_string` and `check_key` read the flag first and skip the read of the code units, a separate block, for every string that cannot be an index.
+- `eval.rs` `expr_key`: the name after a dot is an identifier name, so its key is `PropertyKey::String` with no check. The string is rooted by `expr_str`, so it cannot be stale.
+- `eval.rs` `link_base`: the object of `a.b`, `a[b]` and the callee of `f(x)` is read at once when it is a plain name. Before, it went through `link`, `link_inner` and `eval_expr` (two dispatches for the same one step).
+
+Rejected, measured: a table of positions by key (a hint for `PropMap::find`) gave -1.4% on this page and no gain with a bigger table, for 8 KiB for each heap, so it is not in. A check for `Call`, `Member` and `Index` before the copy of the expression in `eval_expr_inner` made the page 1.3% worse (code layout).
+
+Result (`tools/js/instr.sh`, minimum of 3 runs of `instructions:u`, main 71b5a0a against this change, `type_load`, difference of a run with 50 keys and a run with 0): first textarea 457.3 M to 435.6 M for each key (-4.7%), first input 465.7 M to 443.5 M (-4.8%), load and mount 840 M to 811 M (-3.4%). Best wall of 5 runs, 30 keys: 73 ms to 70 ms for each key (the machine had a load average of 12, so wall time is not exact).
+
+Cost rule: 494 rows (every `*_load` example with a case list, at scale 1 and 10, except `dataset_load`, `select_load`, `handler_load`, `xhr_load`, `sticky_load`, `wrapper_load`, `numeric_load` and `regexp_load`). Median -1.09%. 375 rows are lower by more than 0.5%. None is worse than +0.5%; the worst is `builtins_load split` at +0.34% (1 and 10). Best: `binary_load scanarr` -5.0%, `reflect_load construct_args 10` -4.9%, `date_load iso` -4.5%. Also run: `select_load react 1000` -4.0%, `react 10` -2.7%, `value 10` -1.2%, `churn 10` -0.7%; `dataset_load` read, write and keys at 1000 and 10: -0.6% to -1.3%.
+
+Tests: `heap::tests::keys_that_start_with_a_digit_are_told_from_index_keys` (the flag against `key_from_string` and `check_key` for `0`, `7`, the largest index, `01`, `1a`, the first non-index number, `a1`, the empty string and a non-ASCII digit). The `bare` and `bare-js` suites pass.
+
+What is left: 92% of the cost of a key is the evaluator, about 310 instructions for each step. A larger gain needs a lower cost for each step (frame slots for calls and variables, a cheaper result type, fewer re-dispatches of the same node) or fewer steps (compile to a form that does not walk the tree). Both are work in the evaluator, not in the host. A page that keeps its state in one object, as this one does, re-renders every field for each key, in Chrome too.
+
+Not tested: the live Next.js page (the repro is a React 19 form with the same parts, not its code); the Radix `react-collection` of 2024 and later (`class extends Map`: bare stops with `subclassing a native constructor`, so a page that uses it cannot run); a page with React Server Components; the cost of a key in a field that sits in a long list; the rows `wrapper_load`, `numeric_load`, `regexp_load`, `handler_load`, `xhr_load`, `sticky_load`; scale 100; a quiet machine for wall time.

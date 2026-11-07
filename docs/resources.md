@@ -4330,3 +4330,23 @@ Rejected: a bloom mask for each environment (skip the environments that lack the
 Tests: 5 unit tests of the resolver (`eval_scope_tests.rs`: hop counts, indexes, `GLOBAL`, barrier, `arguments`, parameter default against a body `var`, a later script that declares a global `let`, async resume) and 60 `scope_*` cases in `eval-cases.txt` that match Node (TDZ, hoisting, per-iteration bindings, closures in loops, `catch`, `switch`, named function expressions, `typeof` of an undeclared name, generators and async). `cargo test --workspace` passes in a debug build, where each resolved lookup is also compared with the full search. Every `tools/js/*_check.sh` script that ran matches Node (`parse_check.sh` needs the `acorn` package, which is not installed).
 
 Not tested: wall time; the rows at scale 100; `https_load`; the live staging pages; a script with more than 16,383 nested scopes (the hop count is limited, and a deeper site stays dynamic); `with` and `eval` (the engine rejects both).
+
+## Cost of one typed key on a React form
+
+Summary and profile: [progress.md](progress.md#cost-of-one-typed-key-on-a-react-form). This section keeps the method and the numbers.
+
+Method: `tools/js/typing/build.sh OUT` makes the page (React 19.3.1, Radix versions of a Next.js 14 page, 60 inputs, 2 textareas). `type_load OUT '#a1' N` loads it from loopback and types N characters with one `Input::Type`. The cost of a key is the difference of two runs, N = 50 and N = 0, divided by 50 (`tools/js/instr.sh`, minimum of 3 runs of `instructions:u`). `perf record -e instructions:u -F 20000` gave the profile. A build with `RUSTFLAGS="-C force-frame-pointers=yes -g"` and `--call-graph fp` gave the callers (not the host frames: none is above 0.1%).
+
+| Row                        |  Main 71b5a0a | This change | Change |
+| -------------------------- | ------------: | ----------: | -----: |
+| load and mount (N = 0)     |   840,127,494 | 811,225,356 |  -3.4% |
+| one key into `#a1`         |   457,261,464 | 435,573,372 |  -4.7% |
+| one key into `#f0`         |   465,713,514 | 443,490,853 |  -4.8% |
+
+Evaluator steps for one key: 1,462,857 (the same on both builds, so the change lowers the cost of a step, 313 to 298 instructions, and not the number of steps).
+
+Memory: peak RSS of the run with 20 keys is 106 MiB on both builds (3 runs each, 105.7 to 106.4 MiB). `Str` keeps 24 bytes: the flag is in the padding after `hash`. A table of positions by key (rejected) would have cost 8 KiB for each heap.
+
+Cost rule: 494 rows, median -1.09%, none above +0.5% (worst `builtins_load split` +0.34%), 375 below -0.5%. The `*_load` rows of both example crates ran at scale 1 and 10 with the case lists of `tools/js/*_load.sh`. No row needed the jemalloc cross-check.
+
+Peak RSS of this page is high for a 60 field form (106 MiB). It was not looked at here.
