@@ -126,6 +126,17 @@ struct Stream {
     no_body: bool,
 }
 
+impl Stream {
+    /// Tell the server about the bytes that the caller read and the padding that we dropped, once they are half of a window.
+    fn credit(&mut self, id: u32, out: &mut Vec<u8>) {
+        if !self.remote_done && self.unacked >= STREAM_WINDOW / 2 {
+            window_update(out, id, self.unacked);
+            self.recv += self.unacked as i64;
+            self.unacked = 0;
+        }
+    }
+}
+
 struct State {
     streams: HashMap<u32, Stream>,
     next_id: u32,
@@ -240,8 +251,10 @@ impl State {
 
     /// End a stream with an error of ours: tell the server, and keep the reason for the caller.
     fn reset_stream(&mut self, id: u32, code: u32, why: &'static str, out: &mut Vec<u8>) {
+        // A stream with both ends done has its whole body: a late fault of the server does not take it away.
         if let Some(s) = self.streams.get_mut(&id)
             && s.reset.is_none()
+            && !s.closed
         {
             s.reset = Some(Reset::Local(why));
             frame(out, RST_STREAM, 0, id, &code.to_be_bytes());
@@ -474,11 +487,7 @@ impl Read for Body {
                 let n = s.data.read(out)?;
                 s.unacked += n as u32;
                 let mut update = Vec::new();
-                if !s.remote_done && s.unacked >= STREAM_WINDOW / 2 {
-                    window_update(&mut update, self.id, s.unacked);
-                    s.recv += s.unacked as i64;
-                    s.unacked = 0;
-                }
+                s.credit(self.id, &mut update);
                 st.conn_unacked += n as u32;
                 st.credit(&mut update);
                 drop(st);
@@ -664,7 +673,12 @@ impl Reader {
             PRIORITY => match (id, p.len()) {
                 (0, _) => conn_error(PROTOCOL_ERROR, "PRIORITY on stream 0"),
                 (_, 5) => Ok(()),
-                _ => conn_error(FRAME_SIZE_ERROR, "PRIORITY is not 5 bytes"),
+                // A stream error (section 6.3). A stream we do not know needs no answer.
+                _ => {
+                    lock(&sh.st).reset_stream(id, FRAME_SIZE_ERROR, "PRIORITY is not 5 bytes", &mut out);
+                    sh.cv.notify_all();
+                    Ok(())
+                }
             },
             RST_STREAM => self.rst_stream(sh, id, p),
             SETTINGS => self.settings(sh, flags, id, p, &mut out),
@@ -736,6 +750,8 @@ impl Reader {
                 s.data.extend(data);
                 s.unacked += overhead;
                 s.remote_done = end;
+                // Padding alone can fill a window: with no data to read, nothing else would give it back.
+                s.credit(id, out);
                 kept = true;
                 None
             };
@@ -848,6 +864,8 @@ impl Reader {
                         }
                     }
                 }
+            } else if status.is_some() {
+                Some("a pseudo header in the trailers")
             } else if !end_stream {
                 Some("trailers that do not end the stream")
             } else {
