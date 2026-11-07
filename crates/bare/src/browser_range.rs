@@ -15,9 +15,7 @@
 //!   A range whose root is not the document is not added, and `collapse` of such a node does nothing (the standard).
 //!
 //! Gates (`Error::Unsupported`, none is faked)
-//! - `deleteContents`, `extractContents`, `cloneContents`, `insertNode`, `surroundContents`, `createContextualFragment`,
-//!   `getBoundingClientRect`, `getClientRects`, `compareBoundaryPoints`, `comparePoint`, `isPointInRange`, `intersectsNode` and the selection
-//!   methods `extend`, `setBaseAndExtent`, `containsNode`, `modify`, `deleteFromDocument`.
+//! - The selection methods `extend`, `setBaseAndExtent`, `containsNode`, `modify` and `deleteFromDocument`.
 //!
 //! Live ranges (DOM Standard, "live range")
 //! - A range follows the tree. The document watcher (see `Dom::sync_watcher`) tells the ranges of each node linked or unlinked: the "insert" and
@@ -65,6 +63,8 @@ struct Rng {
 pub(crate) struct State {
     /// Range, Selection and AbstractRange: prototype and constructor of each, once made.
     made: Option<[ObjId; 6]>,
+    /// The method `item` that each list of rectangles holds (`browser_rects.rs`), once made.
+    rect_item: Option<ObjId>,
     ranges: HashMap<ObjId, Rng>,
     /// The selection object and its range.
     sel: Option<(ObjId, Option<ObjId>)>,
@@ -915,19 +915,6 @@ fn gate(what: &'static str) -> Error {
     Error::Unsupported(unsupported(what))
 }
 
-macro_rules! gated {
-    ($($f:ident => $what:literal),* $(,)?) => {$(
-        fn $f(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-            range_of(d, it, this)?;
-            Err(gate($what))
-        }
-    )*};
-}
-gated! {
-    bounding_rect => "Range.getBoundingClientRect",
-    client_rects => "Range.getClientRects",
-}
-
 fn illegal_selection(_: &Dom, it: &mut Interp<'_>, _: Value, _: &[Value]) -> V {
     Err(it.type_error("Failed to construct 'Selection': Illegal constructor"))
 }
@@ -1218,8 +1205,8 @@ fn ensure(d: &Dom, it: &mut Interp<'_>) -> R<()> {
         ("insertNode", 1, insert_node),
         ("surroundContents", 1, surround_contents),
         ("createContextualFragment", 1, contextual_fragment),
-        ("getBoundingClientRect", 0, bounding_rect),
-        ("getClientRects", 0, client_rects),
+        ("getBoundingClientRect", 0, crate::browser_rects::range_bounding_rect),
+        ("getClientRects", 0, crate::browser_rects::range_client_rects),
         ("compareBoundaryPoints", 2, compare_boundary),
         ("comparePoint", 2, compare_point),
         ("isPointInRange", 2, in_range),
@@ -1269,11 +1256,26 @@ pub(crate) fn install(d: &Dom, it: &mut Interp<'_>) -> R<()> {
     crate::browser_lazy::install(d, it, &[("Range", lazy_range as H), ("Selection", lazy_selection), ("AbstractRange", lazy_abstract)])
 }
 
+/// The boundary points of a range: start container and offset, end container and offset.
+pub(crate) fn bounds(d: &Dom, it: &mut Interp<'_>, this: Value) -> R<(NodeId, u32, NodeId, u32)> {
+    let (_, r) = range_of(d, it, this)?;
+    Ok((r.sc, r.so, r.ec, r.eo))
+}
+
 impl Dom {
+    pub(crate) fn range_rect_item(&self) -> Option<ObjId> {
+        self.range.st.get().and_then(|s| s.borrow().rect_item)
+    }
+
+    pub(crate) fn set_range_rect_item(&self, f: ObjId) {
+        state(self).borrow_mut().rect_item = Some(f);
+    }
+
     pub(crate) fn range_roots(&self, out: &mut Vec<Value>) {
         if let Some(st) = self.range.st.get() {
             let s = st.borrow();
             out.extend(s.made.iter().flatten().copied().map(Value::Object));
+            out.extend(s.rect_item.map(Value::Object));
             out.extend(s.sel.map(|(o, _)| Value::Object(o)));
         }
     }

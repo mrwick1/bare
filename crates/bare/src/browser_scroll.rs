@@ -211,8 +211,15 @@ impl Geo<'_> {
     /// containers around it taken off. A box in a fixed box does not move with the page. `None`: no box.
     pub fn client_rect(&self, s: &Scroll, n: NodeId) -> Option<Rect> {
         let mut r = border_box(self.layout, n)?;
+        let (dx, dy) = self.shift(s, n);
+        (r.x, r.y) = (r.x + dx, r.y + dy);
+        Some(r)
+    }
+
+    /// How far a box or a piece of text of `n` moves from its place in the layout to its place in the window: the sticky offset, minus the
+    /// offsets of the page and of the containers around it. A box in a fixed box does not move with the page.
+    pub fn shift(&self, s: &Scroll, n: NodeId) -> (f32, f32) {
         let (sx, sy) = self.stuck(s, n);
-        (r.x, r.y) = (r.x + sx, r.y + sy);
         let (mut dx, mut dy) = (0.0, 0.0);
         let mut fixed = keyword(self.styles, n, Property::Position) == Keyword::Fixed;
         let mut cur = self.doc.parent(n);
@@ -227,9 +234,7 @@ impl Geo<'_> {
         if !fixed {
             (dx, dy) = (dx + s.x.round(), dy + s.y.round());
         }
-        r.x -= dx;
-        r.y -= dy;
-        Some(r)
+        (sx - dx, sy - dy)
     }
 
     /// How far `position: sticky` moves `n` from its normal place for these offsets: the offset of the nearest sticky box at or above it, which
@@ -360,13 +365,18 @@ impl Dom {
     /// The page as scrolling sees it now: runs the cascade and the layout, then `f`. `f` may change the offsets: the changes are
     /// stored, and the targets are queued for a `scroll` event.
     pub(crate) fn with_geo<T>(&self, it: &mut Interp<'_>, f: impl FnOnce(&Geo, &mut Scroll) -> T) -> R<T> {
+        self.with_geo_it(it, |g, s, _| f(g, s))
+    }
+
+    /// `with_geo`, and `f` may run one more layout (`layout_at`).
+    pub(crate) fn with_geo_it<T>(&self, it: &mut Interp<'_>, f: impl FnOnce(&Geo, &mut Scroll, &mut Interp<'_>) -> T) -> R<T> {
         let styles = self.cascade_now(it)?;
         let (layout, areas, bars) = self.layout_areas(it, &styles)?;
         let doc = self.doc.borrow();
         let g = Geo { doc: &doc, styles: &styles, layout: &layout, areas: &areas, window: self.plat.s.borrow().viewport, bars };
         let mut s = self.scrolling.s.borrow().scroll.clone();
         g.clamp(&mut s);
-        let out = f(&g, &mut s);
+        let out = f(&g, &mut s, it);
         drop(doc);
         self.store_scroll(s);
         Ok(out)
@@ -627,19 +637,13 @@ size_get!(client_left, 5);
 
 fn bounding_rect(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
     let el = d.el(it, this)?;
-    let r = if d.in_document(it, el)? {
-        d.with_geo(it, |g, s| g.client_rect(s, el))?
-    } else {
-        None
+    let r = if d.in_document(it, el)? { d.with_geo(it, |g, s| g.client_rect(s, el))? } else { None };
+    // No box fragment: an inline box that layout culled (or no box at all, which is empty).
+    let r = match r {
+        Some(r) => r,
+        None => crate::browser_rects::element_bounding(d, it, el)?,
     };
-    let r = r.unwrap_or(Rect { x: 0.0, y: 0.0, w: 0.0, h: 0.0 });
-    let rect = d.obj(it, it.object_prototype())?;
-    let (x, y, w, h) = (r.x as f64, r.y as f64, r.w as f64, r.h as f64);
-    for (name, v) in [("x", x), ("y", y), ("width", w), ("height", h), ("top", y), ("right", x + w), ("bottom", y + h), ("left", x)] {
-        let k = d.key(it, name)?;
-        it.define_data(rect, k, Value::Number(v), true, true, true)?;
-    }
-    Ok(Value::Object(rect))
+    crate::browser_rects::rect_object(d, it, r)
 }
 
 fn align_word(it: &mut Interp<'_>, o: Value, name: &str, default: Align) -> Align {

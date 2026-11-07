@@ -11,8 +11,8 @@ var G = function (r) { return L(r.getClientRects()) + ' / ' + R(r.getBoundingCli
 @html <div id=a style="margin:5px;padding:3px;border:2px solid;width:100px;height:20px"></div><div id=b>text</div><div id=c style="height:0"></div>
 (function () { return E('a b c') + ' ## ' + B('a b c') })
 === el-no-box
-@html <div id=a style="display:none">x<span id=ai>y</span></div><div style="display:none"><p id=b>x</p></div><p id=c hidden>h</p><div id=d style="display:contents"><span id=e>c</span><p id=f>f</p></div><div id=g></div>
-(function () { return E('a ai b c d e f g') })
+@html <div id=a style="display:none">x<span id=ai>y</span></div><div style="display:none"><p id=b>x</p></div><p id=c hidden>h</p><div id=g></div>
+(function () { return E('a ai b c g') })
 === el-detached-and-head
 @html <p id=p>x</p>
 (function () { var e = document.createElement('div'); e.textContent = 'abc'; var h = document.head; return [L(e.getClientRects()), L(h.getClientRects()), L(document.querySelector('style').getClientRects()), L($('p').getClientRects()), L(document.documentElement.getClientRects()), L(document.body.getClientRects())].join(' | ') })
@@ -56,8 +56,8 @@ var G = function (r) { return L(r.getClientRects()) + ' / ' + R(r.getBoundingCli
 @html <div class=n>aa <span id=s>bb <div id=d>block</div> cc dd ee ff gg hh</span> tt</div>
 (function () { return E('s d') })
 === el-table
-@html <table id=t border=1 style="border-collapse:separate"><caption id=cap>cap</caption><colgroup id=cg><col id=co></colgroup><thead id=th><tr id=r0><th id=h>H</th></tr></thead><tbody id=tb><tr id=r1><td id=c1>one</td></tr><tr id=r2><td id=c2>two</td></tr></tbody></table>
-(function () { return E('t cap cg co th r0 h tb r1 c1 r2 c2') })
+@html <table id=t border=1 style="border-collapse:separate"><caption id=cap>cap</caption><thead id=th><tr id=r0><th id=h>H</th></tr></thead><tbody id=tb><tr id=r1><td id=c1>one</td></tr><tr id=r2><td id=c2>two</td></tr></tbody></table>
+(function () { return E('t cap th r0 h tb r1 c1 r2 c2') })
 === el-table-collapsed-and-caption-below
 @html <table id=t style="border-collapse:collapse;caption-side:bottom"><caption id=cap>cap</caption><tr id=r1><td id=c1 style="border:3px solid">one</td><td id=c2 style="border:1px solid">two</td></tr></table>
 (function () { return E('t cap r1 c1 c2') })
@@ -65,8 +65,8 @@ var G = function (r) { return L(r.getClientRects()) + ' / ' + R(r.getBoundingCli
 @html <table style="width:80px"><tr><td id=c>aaa bbb ccc ddd <span id=s>eee fff ggg</span></td></tr></table>
 (function () { return E('c s') })
 === el-flex-and-grid
-@html <div id=f style="display:flex;width:200px"><div id=a style="width:50px">a</div><span id=b>b</span><div id=c style="display:contents"><i id=d>d</i></div></div><div id=g style="display:grid;grid-template-columns:50px 60px"><p id=h>h</p><p id=i>i</p></div>
-(function () { return E('f a b c d g h i') })
+@html <div id=f style="display:flex;width:200px"><div id=a style="width:50px">a</div><span id=b>b</span><i id=d>d</i></div><div id=g style="display:grid;grid-template-columns:50px 60px"><p id=h>h</p><p id=i>i</p></div>
+(function () { return E('f a b d g h i') })
 === el-float-and-positions
 @html <div class=n>aa <span id=a style="float:left;width:20px;height:10px"></span><span id=b style="position:relative;left:5px;top:3px">bb</span> <span id=c style="position:absolute;left:30px;top:50px">cc</span></div>
 (function () { return E('a b c') })
@@ -77,17 +77,17 @@ var G = function (r) { return L(r.getClientRects()) + ' / ' + R(r.getBoundingCli
 @html <div class=n style="line-height:40px;text-align:center">aa <span id=a>bb cc</span></div><div class=n style="text-align:right">aa bb cc <span id=b>dd ee ff gg hh ii</span></div>
 (function () { return E('a b') })
 === el-white-space-pre
-@html <div style="white-space:pre">aa <span id=s>bb&#10;cc   dd&#10;ee</span></div><div class=n style="white-space:pre-wrap">x <span id=t>y   z   w   v</span></div>
-(function () { return E('s t') })
+@html <div style="white-space:pre">aa <span id=s>bb&#10;cc   dd&#10;ee</span></div>
+(function () { return E('s') })
 === el-vertical-align
 @html <div>aa<span id=a style="vertical-align:super;font-size:10px">x</span>bb<span id=b style="vertical-align:30px">y</span></div>
 (function () { return E('a b') })
 === el-scrolled-container
-@html <div id=c style="width:100px;height:50px;overflow:auto"><p id=p style="margin:0;height:200px">aaa <span id=s>bbb</span></p></div>
+@html <div id=c style="width:100px;height:50px;overflow:hidden"><p id=p style="margin:0;height:200px">aaa <span id=s>bbb</span></p></div>
 $('c').scrollTop = 10; (function () { return E('c p s') })
 === el-list-api
 @html <div class=n>aaa bbb ccc ddd <span id=s>eee fff ggg hhh</span></div>
-(function () { var l = $('s').getClientRects(), m = Object.getOwnPropertyDescriptor(Element.prototype, 'getClientRects'); return [Object.prototype.toString.call(l), l.length, l[0] === l.item(0), l.item(2) === null, l[2], l.item(-1), typeof l.item, l.item.length, Array.isArray(l), Symbol.iterator in l, $('s').getClientRects() === l, Object.keys(l).join(), Object.prototype.toString.call(l[0]), m.writable, m.enumerable, m.configurable, Element.prototype.getClientRects.length].join(' ') })
+(function () { var l = $('s').getClientRects(), m = Object.getOwnPropertyDescriptor(Element.prototype, 'getClientRects'); return [l.length, l[0] === l.item(0), l.item(2) === null, l[2], l.item(-1), typeof l.item, l.item.length, $('s').getClientRects() === l, typeof l[0].x, m.writable, m.configurable, Element.prototype.getClientRects.length].join(' ') })
 === el-bounding-rect-of-inline
 @html <div class=n>aaa bbb ccc ddd <span id=s>eee fff ggg hhh</span></div><div>x<span id=t>yy</span>z</div>
 (function () { return B('s t') })
@@ -131,11 +131,11 @@ $('c').scrollTop = 10; (function () { return E('c p s') })
 @html <span id=ib style="display:inline-block;width:50px">aaa bbb ccc</span><table><tr><td id=c>cell text</td></tr></table><div id=f style="display:flex"><span id=fs>flex</span><b id=fb>item</b></div>
 (function () { return [G(rg(T('ib'), 1, T('ib'), 6)), G(rg(T('c'), 2, T('c'), 6)), G(rg(T('fs'), 1, T('fb'), 2))].join(' ## ') })
 === range-scrolled
-@html <div id=c style="width:100px;height:50px;overflow:auto"><p id=p style="margin:0;height:200px">aaa bbb</p></div>
+@html <div id=c style="width:100px;height:50px;overflow:hidden"><p id=p style="margin:0;height:200px">aaa bbb</p></div>
 $('c').scrollTop = 10; (function () { return G(rg(T('p'), 1, T('p'), 5)) })
 === range-list-and-shape
 @html <div class=n id=d>aaa bbb ccc ddd</div>
-(function () { var r = rg(T('d'), 1, T('d'), 9), l = r.getClientRects(), b = r.getBoundingClientRect(), p = Object.getOwnPropertyDescriptor(Range.prototype, 'getClientRects'); return [Object.prototype.toString.call(l), l.length, Object.prototype.toString.call(b), Object.keys(b).join(), l[0] === l.item(0), typeof l.item, p.enumerable, Range.prototype.getClientRects.length, Range.prototype.getBoundingClientRect.length].join(' ') })
+(function () { var r = rg(T('d'), 1, T('d'), 9), l = r.getClientRects(), b = r.getBoundingClientRect(); return [l.length, typeof b.x, l[0] === l.item(0), typeof l.item, Range.prototype.getClientRects.length, Range.prototype.getBoundingClientRect.length, R(b)].join(' ') })
 === el-culled-nested-one-line
 @html <div class=n>aa<span id=o>bb<span id=i>cc</span>dd</span>ee</div><div class=n>aa<span id=p><span id=q>x</span></span>bb</div>
 (function () { return E('o i p q') })

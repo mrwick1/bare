@@ -334,7 +334,7 @@ fn inline_box(cx: &Cx, node: NodeId, width: f32) -> Inline {
     let positioned = cx.tree.position(node) != Keyword::Static;
     // A box with `vertical-align` moves its content: it stays in the line.
     let raised = !matches!(style.get(Property::VerticalAlign), Value::Keyword(Keyword::Baseline));
-    let culled = !paint && flat && same_font && !positioned && !raised;
+    let culled = !paint && flat && same_font && !positioned && !raised && !cx.uncull;
     // A culled box has no use for the numbers.
     let (above, below) = if culled { (0.0, 0.0) } else { reach_of(&m, line_height) };
     Inline { margins, edges, above, below, paint, positioned, raised, culled }
@@ -465,7 +465,10 @@ pub fn lines(cx: &mut Cx, block: NodeId, first: NodeId, last: NodeId, width: f32
                     b.statics.push(node);
                 }
             }
-            Event::Break(_) => {
+            Event::Break(node) => {
+                if b.cx.uncull {
+                    b.add_text(node, 0, 1, 0.0);
+                }
                 b.commit();
                 b.content = true;
                 b.finish();
@@ -557,7 +560,7 @@ impl Breaker<'_, '_> {
                 (0.0, self.aligned.len() as u32 - 1, info.above, info.below)
             }
         };
-        self.open.push(Open { node, x0: x, paint: info.paint || info.positioned, order: self.opened, above, below, align: al, shift, root });
+        self.open.push(Open { node, x0: x, paint: info.paint || info.positioned || self.cx.uncull, order: self.opened, above, below, align: al, shift, root });
         self.opened += 1;
     }
 
