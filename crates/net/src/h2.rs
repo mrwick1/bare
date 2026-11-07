@@ -10,7 +10,7 @@
 //!
 //! Lock order: `io`, then `st`. The reader never takes `io` while it holds `st`.
 
-use crate::hpack;
+use crate::{hpack, trace};
 use bare_tls::client::ClientStream;
 use std::collections::{HashMap, VecDeque};
 use std::error::Error as StdError;
@@ -345,7 +345,7 @@ impl Conn {
             break id;
         };
         // From here, dropping the `Body` cleans up the stream, on every way out.
-        let mut reply = Body { conn: self.clone(), id, declared: None, given: 0, max: max_body };
+        let mut reply = Body { conn: self.clone(), id, declared: None, given: 0, max: max_body, start: Instant::now(), rec: None };
         let mut sent = 0;
         while sent < body.len() {
             let take = {
@@ -420,6 +420,9 @@ pub struct Body {
     pub declared: Option<usize>,
     given: usize,
     max: usize,
+    pub start: Instant,
+    /// The timing record of this request (only when `BARE_NET_TRACE` is set). It goes out when the body is dropped.
+    pub rec: Option<Box<trace::Rec>>,
 }
 
 impl Read for Body {
@@ -478,6 +481,11 @@ impl Reset {
 
 impl Drop for Body {
     fn drop(&mut self) {
+        if let Some(mut r) = self.rec.take() {
+            r.body = self.start.elapsed().as_micros() as u64;
+            r.bytes = self.given as u64;
+            trace::push(*r);
+        }
         let sh = &self.conn.sh;
         let mut out = Vec::new();
         {

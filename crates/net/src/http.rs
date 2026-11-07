@@ -482,7 +482,7 @@ impl Client {
         let headers = h2_headers(url, plan, conditions, &authority, &length);
         let mut clock = trace::Clock::new();
         let sent = Instant::now();
-        let (head, body) = conn.request(&headers, plan.body, plan.method == Method::Head, MAX_REPLY, sent + MAX_TIME)?;
+        let (head, mut body) = conn.request(&headers, plan.body, plan.method == Method::Head, MAX_REPLY, sent + MAX_TIME)?;
         self.note_head(sent.elapsed());
         if let Some(r) = rec {
             r.ttfb = clock.lap();
@@ -498,6 +498,9 @@ impl Client {
             return Err("the reply is too big".into());
         }
         let undo = response.header("content-encoding").and_then(encoding::codings).filter(|c| !c.is_empty()).filter(|_| !matches!(body.declared, Some(0)));
+        // The clock of the body starts where the head ended.
+        body.start = Instant::now();
+        body.rec = rec.take();
         let mut live = Body(Source::H2(Box::new(body)));
         if let Some(codings) = undo {
             live = Body(Source::Decoded(Box::new(encoding::Decoded::new(live, codings))));
