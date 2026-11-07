@@ -19,7 +19,7 @@ use std::time::Duration;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 // Give up on one address after 10 seconds. Without a limit, Linux waits about 2 minutes.
 const READ_TIMEOUT: Duration = Duration::from_secs(30);
-// Give up if the server sends nothing for 30 seconds.
+// Give up if the server sends nothing for 30 seconds. `BARE_NET_READ_TIMEOUT_MS` changes it (a test of a stalled server must not wait 30 s).
 const NEXT_TRY_DELAY: Duration = Duration::from_millis(250);
 // How long one try may run alone before we start the next one.
 
@@ -27,12 +27,18 @@ const NEXT_TRY_DELAY: Duration = Duration::from_millis(250);
 pub fn connect(addrs: &[SocketAddr]) -> io::Result<TcpStream> {
     let stream = race(&order(addrs), NEXT_TRY_DELAY, |addr| TcpStream::connect_timeout(&addr, CONNECT_TIMEOUT))?;
     // Each try is one real connection, with its own 10-second limit.
-    stream.set_read_timeout(Some(READ_TIMEOUT))?;
-    stream.set_write_timeout(Some(READ_TIMEOUT))?;
+    let limit = read_timeout();
+    stream.set_read_timeout(Some(limit))?;
+    stream.set_write_timeout(Some(limit))?;
     // From now on, a read or write that waits longer than 30 seconds gives an error.
     // Send each write at once (no Nagle). Else the first request on a TLS connection waits for the ACK of the client Finished.
     stream.set_nodelay(true)?;
     Ok(stream)
+}
+
+fn read_timeout() -> Duration {
+    static LIMIT: std::sync::OnceLock<Duration> = std::sync::OnceLock::new();
+    *LIMIT.get_or_init(|| std::env::var("BARE_NET_READ_TIMEOUT_MS").ok().and_then(|v| v.parse().ok()).map_or(READ_TIMEOUT, Duration::from_millis))
 }
 
 /// Put IPv6 first, then switch between IPv6 and IPv4: [v6, v4, v6, v4, ...].

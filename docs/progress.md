@@ -2131,3 +2131,44 @@ Checks:
 Gaps: a resize, a style sheet change, a page with a shadow root, and a form state change on a page with a form pseudo-class rule still get a full update. Each window layout keeps a second copy of the fragments, so RSS after the first paint at 100,000 lines grows by 6.3 MiB (glibc) to 12.6 MiB (jemalloc).
 
 Not tested: a live `bare --window` run on a hyprcage screen, a page that scrolls sideways past the band, HiDPI, the live staging site, archMachine and macOS.
+
+## Network failure causes and the memory of repeated journeys (S5 findings of PR #242)
+
+On 2026-11-07, archMachine, release builds. Two findings of the S5 live runs (topic 6) are fixed.
+
+### The cause of a network failure
+
+In 1 of 55 live runs, each fetch failed with "network error" for about 58 s, and the result could not show why. `run_one` in `browser_fetch.rs` dropped the error. Now the error keeps its kind and its text from `bare-net` to the result.
+
+- `bare_net::cause::describe` gives `kind: text`. Kinds: `dns`, `connect refused`, `connect timeout`, `connect failed`, `tls` (any TLS error, also an alert or a record error that comes through a read), `h2 goaway`, `body cap`, `read timeout`, `reset`, `closed early`, `protocol`, `io`. DNS and connect errors have no type of their own, so `open` marks them (`cause::Phase`). The text of the error is not changed.
+- `Rec` (the timing record, `trace.rs`) has `error`. A try that fails now leaves a record (before, only a try with a body left one): `attempt` pushes it with the cause. A body that fails to read (reset, timeout, early close, cap) gets the cause in its own record. The record exists only while tracing is on, as before.
+- `fetch` and `XMLHttpRequest`: `Outcome::Net(cause)`. The note for diagnostics is `failed: network error (ORIGIN): KIND: TEXT`. It has no path and no query. The page still gets `TypeError: Failed to fetch`, and XHR still gets `error`.
+- `bare-drive`: each `network` entry has `error` when it failed. A failed step adds `(network failures: URL: KIND: TEXT; ...)` to its message, at most 3, and the URL has no query values. The notes are in `console` with level `fetch`.
+- `BARE_NET_READ_TIMEOUT_MS` sets the read limit (30 s by default), so that a test of a silent server does not wait 30 s.
+
+Tests (`crates/drive/tests/net_failures.rs`, loopback, each runs `bare-drive`): a refused connection gives `connect refused`; a reset after 10 of 1,000 body bytes gives `reset`; a server that goes silent gives `read timeout` (limit 300 ms); a TLS handshake that gets text gives `tls`. For the first three, the page text is `TypeError: Failed to fetch`, the record and the note have the kind, and the note has no path. `cause::tests::each_failure_has_its_kind` checks all kinds, with a DNS and a connect-timeout error that a unit test can make.
+
+Limits: a body cap on a body with `Content-Encoding` is not in the record (the record is in the raw body that the decoder holds). The loader (documents, scripts, styles) still shows the fixed label "network error" in its diagnostics, but its failed tries have records with the cause now. A cause in a TLS test is checked for the document load (`https`), not for a fetch: there is no TLS server in the test crates.
+
+### RSS grows across repeated journeys
+
+Cause: glibc gives each thread its own malloc arena. The worker threads of a page read bodies, free them in their own arena, and end after 1 s. The page thread cannot use that free memory. `bare-drive --repeat 10`, live staging, same binary, RSS after each run (MiB):
+
+| `MALLOC_ARENA_MAX` | run 1 | run 3 | run 5 | run 10 | Mean time of a run |
+| --- | --- | --- | --- | --- | --- |
+| not set (before) | 97 | 111 | 112 | 120 | 8.62 s |
+| 1 | 93 | 103 | 104 | 108 | 8.44 s |
+| 2 | 92 | 104 | 104 | 105 | 8.61 s |
+| 4 | 94 | 103 | 111 | 113 | 8.36 s |
+
+Also measured: `malloc_trim(0)` after each run. RSS after the trim is 27 to 46 MiB, but the peak RSS stays at 119 MiB: it does not lower the memory that a page needs while it runs, and it costs a walk over all arenas. Not taken.
+
+Choice: `mallopt(M_ARENA_MAX, 2)` at the start of `bare` and `bare-drive` (`bare_net::parallel::limit_malloc_arenas`). It is 8 lines, uses no new crate (`extern "C"`, as `mallinfo2` in the driver), and works only on Linux with glibc. One arena is for the page thread and one for all workers. A set `MALLOC_ARENA_MAX` wins. 1 arena has the same RSS, but then the page thread and the workers share one lock; 2 keeps them apart.
+
+After the change, `--repeat 15` on live staging, RSS per run (MiB): 93, 103, 104, 106, 106, 106, 106, 108, 108, 108, 108, 108, 108, 91, 106. Peak 107 MiB (before: 121 MiB at run 15, 120 MiB at run 10). The time of a run: mean 8.34 s (before 8.62 s; the network noise is about 3%, so this is no gain, and there is no loss). Fixture app (`tools/fixtures/drive`), `--repeat 300`, median of runs 11 to 300: 14.3 ms with the change and 14.3 ms with `MALLOC_ARENA_MAX=64`; RSS 21 MiB at the end (25 MiB before, in one run).
+
+Cost: `tools/js/cost_matrix.sh`, origin/main 65bbf8e against this change, 805 rows. No row is over +0.5% under glibc, so none is over under both allocators (the jemalloc runs happen only for a row that is over under glibc, so they ran for no row). Mean change: glibc -0.001%. No example and no `bare-stress` row calls the changed code.
+
+Tests: `cargo test --release --workspace`, 2,887 passed, 0 failed, 12 ignored (after the rebase on 65bbf8e).
+
+Not tested: a DNS failure through the driver (a unit test makes the error; no resolver fault was made); a TLS failure on a `fetch` (the test uses the document load); an HTTP/2 GOAWAY on a live connection (the kind comes from the text of the error, checked in a unit test); the `bare` binary with `--window` under the arena limit; musl or macOS (the limit is Linux and glibc only); more than 15 runs on staging; arjun-e16; `tools/js/cost_matrix.sh` with jemalloc on every row.

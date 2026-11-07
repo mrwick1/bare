@@ -734,7 +734,7 @@ impl Browser {
         let (status, url, headers, body) = match outcome {
             Outcome::TooBig => return Err(dom.lim("fetch-response-body")),
             _ if late => return self.step(|it| dom.request_error(it, x, "timeout")),
-            Outcome::Failed(_) => return self.step(|it| dom.request_error(it, x, "error")),
+            Outcome::Failed(_) | Outcome::Net(_) => return self.step(|it| dom.request_error(it, x, "error")),
             Outcome::Done { status, url, headers, body, .. } => (status, url, headers, body),
         };
         {

@@ -14,6 +14,7 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 fn main() {
+    bare_net::parallel::limit_malloc_arenas();
     let stack = if cfg!(debug_assertions) { 64 << 20 } else { 8 << 20 };
     let code = std::thread::Builder::new().stack_size(stack).spawn(drive).expect("a thread").join().unwrap_or(1);
     std::process::exit(code);

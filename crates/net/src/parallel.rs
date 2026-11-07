@@ -21,6 +21,22 @@ use std::time::Duration;
 /// Worker threads at once for one client and its forks.
 pub const MAX_WORKERS: usize = 6;
 
+/// Give glibc two malloc arenas, not up to 8 for each core. Each worker thread of a page took an arena of its own, and the memory
+/// that it freed there stayed in it: the page thread could not use it, and the next worker took a new arena. In 15 runs of one journey
+/// in one process, RSS went from 96 to 121 MiB while the live heap stayed under 2 MiB. With two arenas (the page thread's and one shared
+/// by the workers) it stays at about 105 MiB, and a run takes the same time. Call it first in `main`, before a thread starts. A set
+/// `MALLOC_ARENA_MAX` wins, so a measurement can choose another count. Other targets: nothing.
+pub fn limit_malloc_arenas() {
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    if std::env::var_os("MALLOC_ARENA_MAX").is_none() {
+        unsafe extern "C" {
+            fn mallopt(param: i32, value: i32) -> i32;
+        }
+        // SAFETY: glibc; `M_ARENA_MAX` is -8. It sets a limit and touches no memory.
+        unsafe { mallopt(-8, 2) };
+    }
+}
+
 /// How long a worker with no job waits for one before its thread ends.
 const PARK: Duration = Duration::from_secs(1);
 
