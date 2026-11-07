@@ -641,8 +641,8 @@ fn computed_names_are_sorted_and_include_live_custom_properties() {
 
 #[test]
 fn styles_are_reused_until_the_document_changes() {
-    let mut b = at("<!doctype html><html><head><style>.w { width: 50px } p:empty { display: none } x-a:defined { color: green }</style></head>\
-        <body><div id=a style='width: 10px'>t</div><p id=p></p><x-a id=x></x-a></body></html>");
+    let mut b = at("<!doctype html><html><head><style>.w { width: 50px } p:empty { display: none } x-a:defined { color: green } input:focus { color: red }</style></head>\
+        <body><div id=a style='width: 10px'>t</div><p id=p></p><x-a id=x></x-a><input id=i></body></html>");
     let n = |b: &mut Browser, s: &str| (js(b, s), b.computed_stats().computes);
     js(&mut b, "var a = document.getElementById('a'), p = document.getElementById('p'), x = document.getElementById('x'); 0");
     assert_eq!(n(&mut b, "a.getBoundingClientRect().width + a.getBoundingClientRect().width + getComputedStyle(a).width"), ("2010px".into(), 1));
@@ -651,7 +651,10 @@ fn styles_are_reused_until_the_document_changes() {
     assert_eq!(n(&mut b, "p.appendChild(document.createTextNode('')); getComputedStyle(p).display"), ("none".into(), 3));
     assert_eq!(n(&mut b, "p.firstChild.data = 'q'; getComputedStyle(p).display"), ("block".into(), 4));
     assert_eq!(n(&mut b, "getComputedStyle(p).display"), ("block".into(), 4));
+    // The focus moves no tree counter.
+    assert_eq!(n(&mut b, "var i = document.getElementById('i'); getComputedStyle(i).color"), ("rgb(0, 0, 0)".into(), 4));
+    assert_eq!(n(&mut b, "i.focus(); getComputedStyle(i).color"), ("rgb(255, 0, 0)".into(), 5));
     // A custom element that is defined matches `:defined`, and no tree counter moves.
-    assert_eq!(n(&mut b, "getComputedStyle(x).color"), ("rgb(0, 0, 0)".into(), 4));
-    assert_eq!(n(&mut b, "customElements.define('x-a', class extends HTMLElement {}); getComputedStyle(x).color"), ("rgb(0, 128, 0)".into(), 5));
+    assert_eq!(n(&mut b, "getComputedStyle(x).color"), ("rgb(0, 0, 0)".into(), 5));
+    assert_eq!(n(&mut b, "customElements.define('x-a', class extends HTMLElement {}); getComputedStyle(x).color"), ("rgb(0, 128, 0)".into(), 6));
 }

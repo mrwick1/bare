@@ -6,7 +6,8 @@
 //!   the current classes, `id`, `dir`, `style` attributes, `<style>` text, `<link>` elements and viewport. No snapshot is kept
 //!   and no computed value is stored as JS data. The parsed `RuleSet` is cached while its inputs (the sheet texts, the layers and
 //!   the viewport) are equal to the inputs of the last build. The last cascade of that `RuleSet` is cached too, while the document
-//!   counters (`revision`, `text_revision`, length) are the same and no element has custom element state (see `cascade_for`).
+//!   counters (`revision`, `text_revision`, length, user state revisions) are the same and no element has custom element state
+//!   (see `cascade_for`).
 //! - Author sheets: `<style>` text comes from the document. A `<link rel=stylesheet href>` has no text here: the embedder supplies it
 //!   with `Browser::set_external_stylesheet(href, parts)`, keyed by the exact `href` attribute text (`@import` of an inline `<style>`:
 //!   keyed by the exact url text). `parts` are the flattened sheets in cascade order, imports first (what `main.rs` `add_sheet` does).
@@ -154,8 +155,9 @@ pub(crate) struct Built {
     vp: (f32, f32),
     pub(crate) key: Vec<(Option<String>, String)>,
     rules: RuleSet,
-    /// The last cascade of these rules, and its key: `revision`, `text_revision` and length of the document, and `want`.
-    last: Option<((u64, u64, usize, Option<NodeId>), Rc<Styles>)>,
+    /// The last cascade of these rules, and its key: `revision`, `text_revision`, length and user state revisions of the
+    /// document, and `want`.
+    last: Option<((u64, u64, usize, [u64; 3], Option<NodeId>), Rc<Styles>)>,
     /// Does a sheet use what the engine does not model (`content-visibility`, `display: contents`)? Read by `checkVisibility` only.
     pub(crate) odd: OnceCell<bool>,
 }
@@ -443,9 +445,10 @@ impl Dom {
         }
         it.charge(work)?;
         // The cascade reads only the tree, the attributes, the text, the `set_ui` and `set_states` state (they move
-        // `revision`) and the custom element state. `attach_shadow` adds a node, so the length moves. A custom element state
-        // change moves no counter, so the cascade is kept and used only while no element has custom element state.
-        let key = (doc.revision(), doc.text_revision(), doc.len(), want);
+        // `revision`), the hover, active and focus state (`UserState::revision`) and the custom element state. `attach_shadow`
+        // adds a node, so the length moves. A custom element state change moves no counter, so the cascade is kept and used
+        // only while no element has custom element state.
+        let key = (doc.revision(), doc.text_revision(), doc.len(), doc.user().revision, want);
         if let Some((k, styles)) = &built.last
             && *k == key
             && !doc.has_custom()
