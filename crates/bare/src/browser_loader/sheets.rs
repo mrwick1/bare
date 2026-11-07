@@ -200,7 +200,6 @@ impl Run<'_> {
                     Err(_) => (Vec::new(), key, false),
                     Ok((final_url, text)) => {
                         let mut parts = Vec::new();
-                        self.warm_imports(&final_url, &text)?;
                         let mut state = Flat { path: vec![key.clone(), final_url.to_string()], refs: 0, bytes: 0 };
                         self.flatten(&final_url, &text, None, 0, &mut state, &mut parts)?;
                         (parts, key, true)
@@ -280,6 +279,9 @@ impl Run<'_> {
     fn flatten(&mut self, url: &Url, text: &str, layer: Option<String>, depth: usize, st: &mut Flat, parts: &mut Vec<SheetPart>) -> Flow {
         let has_import = text.as_bytes().windows(7).any(|w| w.eq_ignore_ascii_case(b"@import"));
         if has_import {
+            if depth == 0 {
+                self.warm_imports(url, text)?;
+            }
             let vp = self.dom.plat.s.borrow().viewport;
             let imports = cascade::imports(&mut self.dom.doc.borrow_mut(), text, vp);
             if !imports.is_empty() && depth >= MAX_IMPORT_DEPTH {
@@ -325,7 +327,7 @@ impl Run<'_> {
     /// limit) finds each one there. A URL that is cached or queued is not asked again, so a cycle ends here. A failure is cached.
     fn warm_imports(&mut self, url: &Url, text: &str) -> Flow {
         let has = |t: &str| t.as_bytes().windows(7).any(|w| w.eq_ignore_ascii_case(b"@import"));
-        if !has(text) || !self.net.client.parallel_pays() {
+        if !self.net.client.parallel_pays() {
             return Ok(());
         }
         let vp = self.dom.plat.s.borrow().viewport;
