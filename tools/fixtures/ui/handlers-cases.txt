@@ -1,0 +1,232 @@
+var HN = "onabort onbeforeinput onbeforematch onbeforetoggle onblur oncancel oncanplay oncanplaythrough onchange onclick onclose oncommand oncontentvisibilityautostatechange oncontextlost oncontextmenu oncontextrestored oncuechange ondblclick ondrag ondragend ondragenter ondragleave ondragover ondragstart ondrop ondurationchange onemptied onended onerror onfocus onformdata oninput oninvalid onkeydown onkeypress onkeyup onload onloadeddata onloadedmetadata onloadstart onmousedown onmouseenter onmouseleave onmousemove onmouseout onmouseover onmouseup onmousewheel onpause onplay onplaying onprogress onratechange onreset onresize onscroll onscrollend onsecuritypolicyviolation onseeked onseeking onselect onslotchange onstalled onsubmit onsuspend ontimeupdate ontoggle onvolumechange onwaiting onwebkitanimationend onwebkitanimationiteration onwebkitanimationstart onwebkittransitionend onwheel onauxclick ongotpointercapture onlostpointercapture onpointerdown onpointermove onpointerup onpointercancel onpointerover onpointerout onpointerenter onpointerleave onselectstart onselectionchange onanimationcancel onanimationend onanimationiteration onanimationstart ontransitionrun ontransitionstart ontransitionend ontransitioncancel onbeforexrselect oncopy oncut onpaste onscrollsnapchange onscrollsnapchanging onpointerrawupdate".split(" ");
+var DN = "onreadystatechange onpointerlockchange onpointerlockerror onbeforecopy onbeforecut onbeforepaste onfreeze onprerenderingchange onresume onsearch onvisibilitychange onfullscreenchange onfullscreenerror onwebkitfullscreenchange onwebkitfullscreenerror onabort onbeforeinput onbeforematch onbeforetoggle onblur oncancel oncanplay oncanplaythrough onchange onclick onclose oncommand oncontentvisibilityautostatechange oncontextlost oncontextmenu oncontextrestored oncuechange ondblclick ondrag ondragend ondragenter ondragleave ondragover ondragstart ondrop ondurationchange onemptied onended onerror onfocus onformdata oninput oninvalid onkeydown onkeypress onkeyup onload onloadeddata onloadedmetadata onloadstart onmousedown onmouseenter onmouseleave onmousemove onmouseout onmouseover onmouseup onmousewheel onpause onplay onplaying onprogress onratechange onreset onresize onscroll onscrollend onsecuritypolicyviolation onseeked onseeking onselect onslotchange onstalled onsubmit onsuspend ontimeupdate ontoggle onvolumechange onwaiting onwebkitanimationend onwebkitanimationiteration onwebkitanimationstart onwebkittransitionend onwheel onauxclick ongotpointercapture onlostpointercapture onpointerdown onpointermove onpointerup onpointercancel onpointerover onpointerout onpointerenter onpointerleave onselectstart onselectionchange onanimationcancel onanimationend onanimationiteration onanimationstart ontransitionrun ontransitionstart ontransitionend ontransitioncancel onbeforexrselect oncopy oncut onpaste onpointerrawupdate onscrollsnapchange onscrollsnapchanging".split(" ");
+var WN = "onpagereveal onsearch onappinstalled onbeforeinstallprompt onabort onbeforeinput onbeforematch onbeforetoggle onblur oncancel oncanplay oncanplaythrough onchange onclick onclose oncommand oncontentvisibilityautostatechange oncontextlost oncontextmenu oncontextrestored oncuechange ondblclick ondrag ondragend ondragenter ondragleave ondragover ondragstart ondrop ondurationchange onemptied onended onerror onfocus onformdata oninput oninvalid onkeydown onkeypress onkeyup onload onloadeddata onloadedmetadata onloadstart onmousedown onmouseenter onmouseleave onmousemove onmouseout onmouseover onmouseup onmousewheel onpause onplay onplaying onprogress onratechange onreset onresize onscroll onscrollend onsecuritypolicyviolation onseeked onseeking onselect onslotchange onstalled onsubmit onsuspend ontimeupdate ontoggle onvolumechange onwaiting onwebkitanimationend onwebkitanimationiteration onwebkitanimationstart onwebkittransitionend onwheel onauxclick ongotpointercapture onlostpointercapture onpointerdown onpointermove onpointerup onpointercancel onpointerover onpointerout onpointerenter onpointerleave onselectstart onselectionchange onanimationcancel onanimationend onanimationiteration onanimationstart ontransitionrun ontransitionstart ontransitionend ontransitioncancel onbeforexrselect onafterprint onbeforeprint onbeforeunload onhashchange onlanguagechange onmessage onmessageerror onoffline ononline onpagehide onpageshow onpopstate onrejectionhandled onstorage onunhandledrejection onunload ondevicemotion ondeviceorientation ondeviceorientationabsolute onpointerrawupdate onpageswap onscrollsnapchange onscrollsnapchanging ongamepadconnected ongamepaddisconnected".split(" ");
+var BN = "onblur onerror onfocus onload onresize onscroll onafterprint onbeforeprint onbeforeunload onhashchange onlanguagechange onmessage onmessageerror onoffline ononline onpagehide onpageshow onpopstate onrejectionhandled onstorage onunhandledrejection onunload ongamepadconnected ongamepaddisconnected".split(" ");
+var log = [];
+var $ = function (i) { return document.getElementById(i) };
+var out = function () { return log.join('|') };
+function lost(o, names) { return names.filter(function (n) { return !(n in o) }).join(',') }
+function ev(type, init) { return new Event(type, init || { bubbles: true, cancelable: true }) }
+=== shape-names-per-interface
+(function () { var d = document.createElement('div'), s = document.createElementNS('http://www.w3.org/2000/svg', 'svg'); return ['H:' + lost(d, HN), 'S:' + lost(s, HN), 'P:' + lost(HTMLElement.prototype, HN), 'SP:' + lost(SVGElement.prototype, HN), 'D:' + lost(document, DN), 'DP:' + lost(Document.prototype, DN), 'W:' + lost(window, WN), 'B:' + lost(document.body, BN), 'BP:' + lost(HTMLBodyElement.prototype, BN)].join(' ') })
+=== shape-names-absent-where-they-do-not-belong
+(function () { var d = document.createElement('div'), t = document.createTextNode('x'); return [('onhashchange' in d), ('onhashchange' in document), ('onhashchange' in document.body), ('onclick' in t), ('onclick' in Node.prototype), ('onclick' in Element.prototype), ('onclick' in EventTarget.prototype), ('onclick' in new EventTarget()), ('onfoo' in d), ('oncopy' in window), ('oncopy' in d), ('onreadystatechange' in d), ('onreadystatechange' in document), ('onvisibilitychange' in d), ('onvisibilitychange' in document), ('onmessage' in d), ('onmessage' in window), ('onmessage' in document.body), ('onerror' in d), ('onerror' in document)].join() })
+=== shape-descriptors
+(function () { var r = []; [[HTMLElement.prototype, 'onclick'], [SVGElement.prototype, 'oninput'], [Document.prototype, 'onkeydown'], [window, 'onload'], [HTMLBodyElement.prototype, 'onhashchange']].forEach(function (p) { var g = Object.getOwnPropertyDescriptor(p[0], p[1]); r.push(g ? [typeof g.get, typeof g.set, g.enumerable, g.configurable, g.get.name, g.set.name, g.get.length, g.set.length].join('/') : 'none') }); return r.join(' ') })
+=== shape-other-interfaces
+(function () { var x = new XMLHttpRequest(), c = new MessageChannel(), m = matchMedia('(min-width: 1px)'), s = new AbortController().signal, r = []; ['onreadystatechange', 'onloadstart', 'onprogress', 'onabort', 'onerror', 'onload', 'ontimeout', 'onloadend'].forEach(function (n) { r.push(n + ':' + (n in x) + ':' + x[n]) }); r.push('upload:' + ('onload' in x.upload) + ':' + x.upload.onload); r.push('port:' + ('onmessage' in c.port1) + ':' + c.port1.onmessage); r.push('mql:' + ('onchange' in m) + ':' + m.onchange); r.push('signal:' + ('onabort' in s) + ':' + s.onabort); var sc = document.createElement('script'); r.push('script:' + sc.onload + ':' + sc.onerror); return r.join(' ') })
+=== default-null-and-name-shape
+@html <div id=a></div>
+(function () { var a = $('a'); return [a.onclick, document.onclick, window.onclick, a.onfoo, typeof a.onclick, typeof document.onload, typeof window.onerror].join() })
+=== set-function-reads-back-same
+@html <div id=a></div>
+(function () { var a = $('a'), f = function () {}, g = function () {}; a.onclick = f; var r = [a.onclick === f, a.onclick === a.onclick]; a.onclick = g; r.push(a.onclick === g); document.onclick = f; window.onclick = g; r.push(document.onclick === f, window.onclick === g, window.onclick === document.onclick); return r.join() })
+=== set-non-callable-values
+@html <div id=a></div>
+(function () { var a = $('a'), r = []; [undefined, null, 0, 1, 'str', true, Symbol('s'), {}, [], { call: 1 }].forEach(function (v) { a.onclick = function () {}; a.onclick = v; var g = a.onclick; r.push(typeof g + ':' + (g === v || (g === null && v === undefined))) }); return r.join(' ') })
+=== set-non-callable-object-is-skipped-at-dispatch
+@html <div id=a></div>
+(function () { var a = $('a'), o = {}; a.addEventListener('click', function () { log.push('L') }); a.onclick = o; a.dispatchEvent(ev('click')); log.push(a.onclick === o); a.onclick = function () { log.push('H') }; a.dispatchEvent(ev('click')); return out() })
+=== this-event-and-arguments
+@html <div id=p><div id=a></div></div>
+(function () { var a = $('a'), p = $('p'); a.onclick = function (e) { log.push('a:' + (this === a) + ':' + arguments.length + ':' + (e.target === a) + ':' + (e.currentTarget === a) + ':' + e.eventPhase + ':' + (e instanceof Event)) }; p.onclick = function (e) { log.push('p:' + (this === p) + ':' + (e.target === a) + ':' + e.eventPhase) }; document.onclick = function () { log.push('d:' + (this === document)) }; window.onclick = function () { log.push('w:' + (this === window)) }; a.dispatchEvent(ev('click')); return out() })
+=== order-with-add-event-listener
+@html <div id=a></div>
+(function () { var a = $('a'); a.addEventListener('click', function () { log.push('L1') }); a.onclick = function () { log.push('H') }; a.addEventListener('click', function () { log.push('L2') }); a.addEventListener('click', function () { log.push('C') }, true); a.dispatchEvent(ev('click')); return out() })
+=== replace-keeps-position
+@html <div id=a></div>
+(function () { var a = $('a'); a.addEventListener('click', function () { log.push('L1') }); a.onclick = function () { log.push('H1') }; a.addEventListener('click', function () { log.push('L2') }); a.onclick = function () { log.push('H2') }; a.dispatchEvent(ev('click')); return out() })
+=== null-removes-and-set-again-moves-to-end
+@html <div id=a></div>
+(function () { var a = $('a'); a.addEventListener('click', function () { log.push('L1') }); a.onclick = function () { log.push('H1') }; a.addEventListener('click', function () { log.push('L2') }); a.onclick = null; a.onclick = function () { log.push('H2') }; a.dispatchEvent(ev('click')); return out() })
+=== handler-replaced-during-dispatch-is-seen
+@html <div id=a></div>
+(function () { var a = $('a'); a.addEventListener('click', function () { a.onclick = function () { log.push('new') } }); a.onclick = function () { log.push('old') }; a.addEventListener('click', function () { log.push('L2') }); a.dispatchEvent(ev('click')); return out() })
+=== handler-removed-during-dispatch-is-skipped
+@html <div id=a></div>
+(function () { var a = $('a'); a.onclick = function () { log.push('H') }; a.addEventListener('click', function () { a.onclick = null; log.push('L1') }); a.dispatchEvent(ev('click')); a.dispatchEvent(ev('click')); return out() })
+=== handler-vs-same-listener-function
+@html <div id=a></div>
+(function () { var a = $('a'), f = function () { log.push('f') }; a.addEventListener('click', f); a.onclick = f; a.dispatchEvent(ev('click')); a.removeEventListener('click', f); a.dispatchEvent(ev('click')); return out() })
+=== return-false-cancels
+@html <div id=a></div>
+(function () { var a = $('a'), r = []; [false, 0, '', null, undefined, true, 'x', NaN].forEach(function (v) { a.onclick = function () { return v }; var e = ev('click'); a.dispatchEvent(e); r.push(String(v) + ':' + e.defaultPrevented) }); a.onclick = function () { return false }; var e = ev('click', { bubbles: true }); a.dispatchEvent(e); r.push('noncancelable:' + e.defaultPrevented); return r.join(' ') })
+=== return-false-does-not-stop-propagation
+@html <div id=p><div id=a></div></div>
+(function () { var a = $('a'); a.onclick = function () { log.push('a'); return false }; $('p').onclick = function () { log.push('p') }; a.addEventListener('click', function () { log.push('L') }); var e = ev('click'); a.dispatchEvent(e); log.push(e.defaultPrevented); return out() })
+=== return-false-in-passive-listener-context
+@html <div id=a></div>
+(function () { var a = $('a'); a.addEventListener('click', function () { log.push('L') }, { passive: true }); a.onclick = function () { return false }; var e = ev('click'); a.dispatchEvent(e); return out() + e.defaultPrevented })
+=== throwing-handler-does-not-stop-dispatch
+@html <div id=a></div>
+(function () { var a = $('a'); window.addEventListener('error', function () { log.push('err') }); a.onclick = function () { log.push('H'); throw new Error('x') }; a.addEventListener('click', function () { log.push('L') }); a.dispatchEvent(ev('click')); return out() })
+=== markup-attribute-basic
+@html <button id=b onclick="log.push('a:' + this.id + ':' + event.type + ':' + arguments.length + ':' + (event.currentTarget === this))">x</button>
+(function () { $('b').click(); return out() })
+=== markup-attribute-getter-text
+@html <button id=b onclick="log.push(1)">x</button>
+(function () { var f = $('b').onclick; return [typeof f, f.name, f.length, f === $('b').onclick, Object.getPrototypeOf(f) === Function.prototype].join(' ') })
+=== markup-attribute-function-per-element
+@html <button id=a onclick="log.push(1)">x</button><button id=b onclick="log.push(1)">x</button>
+(function () { return [$('a').onclick === $('b').onclick, typeof $('a').onclick, typeof $('b').onclick].join() })
+=== markup-attribute-set-attribute-replaces
+@html <button id=b onclick="log.push('markup')">x</button>
+(function () { var b = $('b'); b.setAttribute('onclick', "log.push('set')"); b.click(); b.setAttribute('onclick', "log.push('set2')"); b.click(); return out() })
+=== markup-attribute-overridden-by-property-then-attribute
+@html <button id=b onclick="log.push('markup')">x</button>
+(function () { var b = $('b'); b.onclick = function () { log.push('prop') }; b.click(); b.setAttribute('onclick', "log.push('attr')"); b.click(); b.onclick = function () { log.push('prop2') }; b.click(); return out() })
+=== markup-attribute-remove-clears
+@html <button id=a onclick="log.push('a')">x</button><button id=b onclick="log.push('b')">x</button>
+(function () { var a = $('a'), b = $('b'); a.removeAttribute('onclick'); a.click(); b.onclick = function () { log.push('prop') }; b.removeAttribute('onclick'); b.click(); return [out(), a.onclick, b.onclick, a.hasAttribute('onclick')].join(' ') })
+=== markup-attribute-property-null-keeps-attribute
+@html <button id=a onclick="log.push('a')">x</button>
+(function () { var a = $('a'); a.onclick = null; a.click(); return [out(), a.onclick, a.getAttribute('onclick')].join(' ') })
+=== markup-attribute-read-before-and-after-property-null
+@html <button id=a onclick="log.push('a')">x</button>
+(function () { var a = $('a'), t = typeof a.onclick; a.onclick = null; var u = typeof a.onclick; a.click(); a.setAttribute('onclick', "log.push('b')"); a.click(); return [t, u, out()].join(' ') })
+=== markup-attribute-order-with-listeners
+@html <button id=a onclick="log.push('H')">x</button>
+(function () { var a = $('a'); a.addEventListener('click', function () { log.push('L1') }); a.addEventListener('click', function () { log.push('L2') }); a.click(); return out() })
+=== markup-set-attribute-after-listener
+@html <button id=a>x</button>
+(function () { var a = $('a'); a.addEventListener('click', function () { log.push('L1') }); a.setAttribute('onclick', "log.push('H')"); a.addEventListener('click', function () { log.push('L2') }); a.click(); return out() })
+=== markup-attribute-created-element
+(function () { var a = document.createElement('button'); a.setAttribute('onclick', "log.push('made:' + this.nodeName)"); a.click(); document.body.appendChild(a); a.click(); return out() })
+=== markup-attribute-on-bubbled-parent
+@html <div id=p onclick="log.push('p:' + this.id + ':' + event.target.id + ':' + event.eventPhase)"><span id=c>x</span></div>
+(function () { $('c').dispatchEvent(ev('click')); return out() })
+=== markup-scope-form-field-by-name
+@html <form id=f><input name=foo value=v1><input name=bar value=v2><button id=b type=button onclick="log.push(foo.value + ':' + bar.value + ':' + (form === this.form))">x</button></form>
+(function () { $('b').click(); return out() })
+=== markup-scope-form-owner-wins-over-document
+@html <form id=f><input name=body value=ft><button id=b type=button onclick="log.push(typeof body === 'object' && body.value !== undefined ? body.value : 'doc')">x</button></form><div id=d onclick="log.push(typeof body === 'object' && body.value !== undefined ? body.value : 'doc')"></div>
+(function () { $('b').click(); $('d').click(); return out() })
+=== markup-scope-element-then-document
+@html <div id=a class=T onclick="log.push([id, tagName, className, typeof getElementById, typeof createElement, typeof querySelector, typeof body].join(':'))"></div>
+(function () { $('a').click(); return out() })
+=== markup-scope-global-and-locals
+@html <div id=a onclick="var local = 5; gv = gv + local; log.push(gv + ':' + typeof local + ':' + (typeof undeclared))"></div>
+(function () { window.gv = 1; $('a').click(); $('a').click(); return out() + ':' + typeof local + ':' + gv })
+=== markup-scope-assign-to-element-property
+@html <div id=a onclick="className = 'set'; id2 = 1"></div>
+(function () { $('a').click(); return [$('a').className, window.id2, typeof window.className].join() })
+=== markup-scope-this-of-document-method
+@html <div id=a onclick="log.push(getElementById('a').id + ':' + (typeof querySelector('div')))"></div><input id=i onclick="focus(); log.push(document.activeElement.id)"><form id=f onclick="log.push(typeof reset)"></form>
+(function () { $('a').click(); $('i').click(); $('f').click(); return out() })
+=== markup-use-strict-body
+@html <div id=a onclick="'use strict'; log.push(typeof this + ':' + (function () { return this === undefined })())"></div>
+(function () { $('a').click(); return out() })
+=== markup-return-false-cancels
+@html <a id=a href="#x" onclick="return false"></a><a id=b href="#y" onclick="return true"></a>
+(function () { var r = []; ['a', 'b'].forEach(function (i) { var e = ev('click'); $(i).dispatchEvent(e); r.push(i + ':' + e.defaultPrevented) }); return r.join(' ') })
+=== markup-unknown-attribute-is-inert
+@html <div id=a onfoo="log.push('foo')" onclickx="log.push('x')"></div>
+(function () { $('a').dispatchEvent(ev('foo')); $('a').dispatchEvent(ev('clickx')); return out() + ':' + $('a').onfoo + ':' + $('a').onclickx })
+=== markup-empty-attribute
+@html <div id=a onclick=""></div>
+(function () { var f = $('a').onclick; return typeof f })
+=== markup-svg-uses-evt
+@html <svg id=s onclick="log.push(typeof evt + ':' + this.nodeName)"></svg>
+(function () { var s = document.getElementById('s'); s.dispatchEvent(ev('click')); return out() })
+=== compile-error-leaves-null-and-reports-on-first-use
+@html <div id=a onclick="if ("></div>
+(function () { var a = $('a'); window.addEventListener('error', function (e) { log.push('err:' + e.error.name + ':' + (e.target === window) + ':' + (e instanceof ErrorEvent)) }); log.push('before'); var f = a.onclick; log.push(String(f)); log.push(String(a.onclick)); a.dispatchEvent(ev('click')); log.push(a.getAttribute('onclick')); return out() })
+=== compile-error-at-dispatch
+@html <div id=a onclick="if ("></div>
+(function () { var a = $('a'); window.addEventListener('error', function (e) { log.push('err:' + e.error.name) }); a.addEventListener('click', function () { log.push('L') }); a.dispatchEvent(ev('click')); a.dispatchEvent(ev('click')); return out() })
+=== compile-error-then-set-attribute-recovers
+@html <div id=a onclick="if ("></div>
+(function () { var a = $('a'); window.addEventListener('error', function () { log.push('err') }); a.onclick; a.setAttribute('onclick', "log.push('ok')"); a.dispatchEvent(ev('click')); return out() })
+=== compile-is-lazy-and-once
+@html <div id=a onclick="log.push('A')"></div>
+(function () { var a = $('a'); a.setAttribute('onclick', "log.push('B')"); a.setAttribute('onclick', "log.push('C')"); a.dispatchEvent(ev('click')); return out() })
+=== runtime-error-in-markup-handler-reports
+@html <div id=a onclick="throw new TypeError('boom')"></div>
+(function () { var a = $('a'); window.addEventListener('error', function (e) { log.push('err:' + e.error.name + ':' + e.error.message + ':' + e.message.indexOf('Uncaught TypeError: boom')) }); a.addEventListener('click', function () { log.push('L') }); a.dispatchEvent(ev('click')); return out() })
+=== window-onerror-receives-five-arguments
+(function () { window.onerror = function (m, s, l, c, e) { log.push([arguments.length, typeof m, m, typeof s, typeof l, typeof c, e && e.message].join(':')); return true }; var x = new Error('thrown'); var ev2 = new ErrorEvent('error', { message: 'msg', filename: 'file.js', lineno: 7, colno: 9, error: x, cancelable: true }); window.dispatchEvent(ev2); log.push(ev2.defaultPrevented); return out() })
+=== window-onerror-true-cancels-only-on-window
+(function () { var r = []; window.onerror = function () { return true }; var e1 = new ErrorEvent('error', { cancelable: true }); window.dispatchEvent(e1); r.push('win-true:' + e1.defaultPrevented); window.onerror = function () { return false }; var e2 = new ErrorEvent('error', { cancelable: true }); window.dispatchEvent(e2); r.push('win-false:' + e2.defaultPrevented); var d = document.createElement('div'); d.onerror = function () { return true }; var e3 = new ErrorEvent('error', { cancelable: true }); d.dispatchEvent(e3); r.push('el-true:' + e3.defaultPrevented); d.onerror = function () { return false }; var e4 = new ErrorEvent('error', { cancelable: true }); d.dispatchEvent(e4); r.push('el-false:' + e4.defaultPrevented); return r.join(' ') })
+=== window-onerror-with-a-plain-event-gets-no-fields
+(function () { window.onerror = function (m, s, l, c, e) { log.push([arguments.length, typeof m, m instanceof Event, s, l, c, e].join(':')) }; window.dispatchEvent(ev('error')); document.body.onerror = function () { log.push('body:' + arguments.length) }; window.dispatchEvent(ev('error')); return out() })
+=== window-onerror-on-uncaught-handler-exception
+@html <div id=a onclick="throw new RangeError('rr')"></div>
+(function () { window.onerror = function (m, s, l, c, e) { log.push([typeof m, m.indexOf('Uncaught RangeError: rr'), typeof s, typeof l, typeof c, e.name].join(':')); return true }; $('a').click(); return out() })
+=== error-event-shape
+(function () { var e = new ErrorEvent('error', { message: 'm', filename: 'f', lineno: 1, colno: 2, error: 3 }), d = new ErrorEvent('x'); return [e.message, e.filename, e.lineno, e.colno, e.error, e.type, e.bubbles, e.cancelable, d.message === '', d.filename === '', d.lineno, d.colno, d.error, e instanceof Event, ErrorEvent.length, Object.prototype.toString.call(e)].join() })
+=== body-attribute-reflects-to-window
+(function () { var b = document.body; b.setAttribute('onload', "log.push('bl:' + (this === window) + ':' + event.type)"); var r = [typeof window.onload, typeof b.onload, window.onload === b.onload]; window.dispatchEvent(ev('load')); return r.join() + ' ' + out() })
+=== body-property-reflects-to-window
+(function () { var b = document.body, f = function () { log.push('f:' + (this === window)) }; b.onblur = f; var r = [window.onblur === f, b.onblur === f]; window.dispatchEvent(ev('blur')); b.dispatchEvent(ev('blur')); b.onblur = null; r.push(window.onblur); return r.join() + ' ' + out() })
+=== body-click-is-not-reflected
+(function () { var b = document.body, f = function () { log.push('click') }; b.onclick = f; var r = [window.onclick, b.onclick === f].join(); b.dispatchEvent(ev('click')); return r + ' ' + out() })
+=== body-window-handlers-and-element-handlers-share-the-slot
+(function () { var b = document.body; window.onresize = function () { log.push('w') }; var r = [typeof b.onresize]; b.onresize = function () { log.push('b') }; r.push(window.onresize === b.onresize); window.dispatchEvent(ev('resize')); b.dispatchEvent(ev('resize')); return r.join() + ' ' + out() })
+=== body-several-attributes
+(function () { var b = document.body; b.setAttribute('onload', "log.push('markup-load')"); b.setAttribute('onhashchange', "log.push('hc')"); b.setAttribute('onclick', "log.push('c')"); var r = [typeof window.onload, typeof window.onhashchange, typeof window.onclick, typeof b.onclick]; window.dispatchEvent(ev('load')); window.dispatchEvent(ev('hashchange')); b.click(); return r.join() + ' ' + out() })
+=== body-remove-attribute-clears-window-handler
+(function () { var b = document.body; b.setAttribute('onpageshow', "log.push('ps')"); var t = typeof window.onpageshow; b.removeAttribute('onpageshow'); window.dispatchEvent(ev('pageshow')); return [t, window.onpageshow, out()].join(' ') })
+=== body-attribute-window-handler-scope-is-document
+(function () { var b = document.body; b.setAttribute('onpopstate', "log.push([typeof getElementById, typeof tagName, this === window].join(':'))"); window.dispatchEvent(ev('popstate')); return out() })
+=== window-event-handlers
+(function () { var names = ['hashchange', 'popstate', 'message', 'storage', 'pagehide', 'pageshow', 'online', 'offline', 'unload', 'resize', 'scroll', 'focus', 'blur', 'load', 'languagechange', 'afterprint', 'beforeprint', 'messageerror', 'unhandledrejection', 'rejectionhandled']; names.forEach(function (n) { window['on' + n] = function (e) { log.push(n + ':' + (this === window) + ':' + e.type) } }); names.forEach(function (n) { window.dispatchEvent(ev(n)) }); return out() })
+=== window-handler-does-not-see-element-events
+@html <div id=a></div>
+(function () { window.onhashchange = function () { log.push('w') }; $('a').dispatchEvent(ev('hashchange', { bubbles: true })); window.onclick = function () { log.push('click') }; $('a').dispatchEvent(ev('click')); return out() })
+=== beforeunload-return-values
+(function () { var r = []; [undefined, false, true, 'text', null, 0, ''].forEach(function (v) { window.onbeforeunload = function () { return v }; var e = ev('beforeunload'); window.dispatchEvent(e); r.push(String(v) + ':' + e.defaultPrevented) }); return r.join(' ') })
+=== beforeunload-on-body-and-element
+(function () { var r = []; document.body.onbeforeunload = function () { return 'x' }; var e = ev('beforeunload'); window.dispatchEvent(e); r.push(e.defaultPrevented); var d = document.createElement('div'); r.push('onbeforeunload' in d); return r.join() })
+=== document-handlers
+(function () { var names = ['visibilitychange', 'readystatechange', 'selectionchange', 'fullscreenchange', 'fullscreenerror', 'pointerlockchange', 'freeze', 'resume', 'copy', 'cut', 'paste', 'keydown']; names.forEach(function (n) { document['on' + n] = function (e) { log.push(n + ':' + (this === document) + ':' + e.type) } }); names.forEach(function (n) { document.dispatchEvent(ev(n)) }); return out() })
+=== document-handler-bubbles-from-elements
+@html <div id=a></div>
+(function () { document.onvisibilitychange = function () { log.push('doc') }; document.onselectionchange = function () { log.push('sel') }; $('a').dispatchEvent(ev('selectionchange', { bubbles: true })); $('a').dispatchEvent(ev('visibilitychange', { bubbles: true })); return out() })
+=== html-element-assorted-handlers
+@html <input id=i><div id=d></div>
+(function () { var names = ['focus', 'blur', 'keydown', 'keyup', 'keypress', 'pointerdown', 'pointerup', 'mousedown', 'mouseup', 'mousemove', 'dblclick', 'contextmenu', 'wheel', 'scroll', 'select', 'submit', 'reset', 'invalid', 'toggle', 'drag', 'drop', 'load', 'error', 'animationend', 'transitionend', 'auxclick', 'beforeinput', 'input', 'change', 'copy', 'paste', 'selectstart', 'selectionchange', 'cancel', 'close', 'canplay', 'play', 'pause', 'ended', 'resize', 'slotchange', 'scrollend', 'formdata', 'securitypolicyviolation']; var d = $('d'); names.forEach(function (n) { d['on' + n] = function (e) { log.push(n + ':' + (this === d) + ':' + (e && e.type) + ':' + arguments.length) } }); names.forEach(function (n) { d.dispatchEvent(ev(n)) }); return out() })
+=== bare-global-handler-names
+(function () { var r = [typeof onload, typeof onclick, typeof onhashchange, onerror === null]; onclick = function () { log.push('bare:' + (this === window)) }; window.dispatchEvent(ev('click')); r.push(window.onclick === onclick); return r.join() + ' ' + out() })
+=== in-operator-and-hasOwnProperty
+(function () { var d = document.createElement('div'); return [('onclick' in d), d.hasOwnProperty('onclick'), HTMLElement.prototype.hasOwnProperty('onclick'), Document.prototype.hasOwnProperty('onclick'), window.hasOwnProperty('onclick'), ('on' + 'click') in d, Object.getOwnPropertyNames(HTMLElement.prototype).indexOf('onclick') >= 0, Object.keys(window).indexOf('onclick') >= 0].join() })
+=== computed-key-access
+@html <div id=a></div>
+(function () { var a = $('a'), k = 'on' + 'click'; a[k] = function () { log.push('c') }; a.dispatchEvent(ev('click')); log.push(typeof a[k], k in a, Object.getOwnPropertyDescriptor(a, k) === undefined); return out() })
+=== expando-with-on-prefix-is-not-a-handler
+@html <div id=a></div>
+(function () { var a = $('a'); a.onfoo = 1; a.onFoo = 2; a.ONCLICK = function () { log.push('upper') }; a.dispatchEvent(ev('foo')); a.dispatchEvent(ev('click')); return [a.onfoo, a.onFoo, out(), Object.getOwnPropertyNames(a).join()].join(' ') })
+=== handler-sees-capture-listener-first-and-bubbling-order
+@html <div id=p><div id=a></div></div>
+(function () { var a = $('a'), p = $('p'); p.onclick = function () { log.push('p-h') }; p.addEventListener('click', function () { log.push('p-cap') }, true); p.addEventListener('click', function () { log.push('p-bub') }); a.onclick = function () { log.push('a-h') }; a.dispatchEvent(ev('click')); return out() })
+=== handler-and-stop-immediate
+@html <div id=a></div>
+(function () { var a = $('a'); a.onclick = function (e) { log.push('H'); e.stopImmediatePropagation() }; a.addEventListener('click', function () { log.push('L') }); a.dispatchEvent(ev('click')); return out() })
+=== form-onsubmit-return-false
+@html <form id=f onsubmit="log.push('sub:' + this.id + ':' + event.type); return false"><button id=b type=submit>x</button></form>
+(function () { var e = ev('submit'); var ok = $('f').dispatchEvent(e); return out() + ':' + ok + ':' + e.defaultPrevented })
+=== form-oninput-and-onchange-markup
+@html <form id=f oninput="log.push('fi:' + event.target.name)" onchange="log.push('fc:' + event.target.name)"><input name=q></form>
+(function () { var q = document.getElementsByName('q')[0]; q.dispatchEvent(ev('input')); q.dispatchEvent(ev('change')); return out() })
+=== attribute-case-is-insensitive-in-html
+@html <div id=a ONCLICK="log.push('upper')"></div>
+(function () { var a = $('a'); a.click(); return [typeof a.onclick, out(), a.getAttribute('onclick')].join(' ') })
+=== set-attribute-name-case
+@html <div id=a></div>
+(function () { var a = $('a'); a.setAttribute('ONCLICK', "log.push('U')"); a.click(); return [typeof a.onclick, out()].join(' ') })
+=== set-attribute-node-and-remove-named-item
+@html <div id=a></div>
+(function () { var a = $('a'); var at = document.createAttribute('onclick'); at.value = "log.push('node')"; a.setAttributeNode(at); a.click(); a.attributes.removeNamedItem('onclick'); a.click(); return out() })
+=== clone-node-copies-attribute-handler-not-property
+@html <div id=a onclick="log.push('markup')"></div>
+(function () { var a = $('a'); a.addEventListener('click', function () { log.push('L') }); var c = a.cloneNode(true); c.id = 'c'; document.body.appendChild(c); c.click(); var p = document.createElement('div'); p.onclick = function () { log.push('prop') }; var pc = p.cloneNode(); pc.click(); return out() })
+=== inner-html-attribute-handler
+@html <div id=a></div>
+(function () { var a = $('a'); a.innerHTML = '<button id=x onclick="log.push(\'ih:\' + this.id)">x</button>'; $('x').click(); return out() })
+=== element-moved-between-parents-keeps-handler
+@html <div id=a onclick="log.push('a-h')"></div><div id=b></div>
+(function () { var a = $('a'); $('b').appendChild(a); a.click(); return out() })
+=== handler-on-detached-element
+(function () { var d = document.createElement('div'); d.onclick = function () { log.push('detached') }; d.setAttribute('onmouseover', "log.push('attr')"); d.dispatchEvent(ev('click')); d.dispatchEvent(ev('mouseover')); return out() })
+=== handler-called-directly
+@html <div id=a onclick="log.push(this === window ? 'win' : this.id)"></div>
+(function () { var h = $('a').onclick; h(); h.call($('a')); h.call(window); return out() })

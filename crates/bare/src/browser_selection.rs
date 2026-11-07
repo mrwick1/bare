@@ -313,6 +313,7 @@ impl Dom {
     /// Nothing is made when no listener is on the event path. A control that is not in the document gets its event too (Chrome), and so do
     /// the nodes above it; the window is on the path only when the node is in the document.
     fn fire_selection_event(&self, it: &mut Interp<'_>, n: NodeId, ty: &str, bubbles: bool) -> R<()> {
+        crate::browser_handlers::sync_path(self, n, ty);
         let listens = {
             let (doc, st) = (self.doc.borrow(), self.st.borrow());
             let on = |t: Target| st.listeners.get(&t).is_some_and(|v| v.iter().any(|l| &*l.ty == ty));

@@ -224,7 +224,7 @@ impl<'p> Interp<'p> {
         let redeclared = |it: &mut Self, n: u32| it.mk_err(4, &format!("Identifier '{}' has already been declared", it.names[n as usize]));
         for &n in &lex {
             let key = self.name_key(n)?;
-            if self.find_in(0, n).is_some() || is_restricted(h!(self, self.heap.get_own_property(self.global, key))) {
+            if self.find_in(0, n).is_some() || is_restricted(hx!(self, self.heap.get_own_property(self.global, key))) {
                 return Err(redeclared(self, n));
             }
         }
@@ -236,7 +236,7 @@ impl<'p> Interp<'p> {
             if i < funcs.len() {
                 // CanDeclareGlobalFunction: an existing non-configurable property must be a writable, enumerable data property
                 let key = self.name_key(n)?;
-                match h!(self, self.heap.get_own_property(self.global, key)) {
+                match hx!(self, self.heap.get_own_property(self.global, key)) {
                     Some(Property::Data { writable: true, enumerable: true, .. }) | None => {}
                     Some(Property::Data { configurable: true, .. } | Property::Accessor { configurable: true, .. }) => {}
                     Some(_) => return Err(self.type_err(&format!("Cannot redefine property: {}", self.names[n as usize]))),
@@ -256,7 +256,7 @@ impl<'p> Interp<'p> {
         for i in 0..self.scopes[n].vars.len() {
             let name = self.scopes[n].vars[i];
             let key = self.name_key(name)?;
-            if !h!(self, self.heap.has_own_property(self.global, key)) {
+            if !hx!(self, self.heap.has_own_property(self.global, key)) {
                 let d = PropertyDescriptor { value: Some(Value::Undefined), writable: Some(true), enumerable: Some(true), configurable: Some(false), ..Default::default() };
                 h!(self, self.heap.define_own_property(self.global, key, &d));
             }

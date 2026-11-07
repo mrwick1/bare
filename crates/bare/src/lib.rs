@@ -8,6 +8,7 @@ mod browser_dom;
 mod browser_fragment;
 mod browser_shadow;
 mod browser_events;
+mod browser_error_event;
 mod browser_handlers;
 #[cfg(test)]
 mod browser_handler_tests;

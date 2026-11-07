@@ -1,0 +1,82 @@
+shape-names-per-interface	H: S: P: SP: D: DP: W: B: BP:
+shape-names-absent-where-they-do-not-belong	false,false,true,false,false,false,false,false,false,false,true,false,true,false,true,false,true,true,true,true
+shape-descriptors	function/function/true/true/get onclick/set onclick/0/1 function/function/true/true/get oninput/set oninput/0/1 function/function/true/true/get onkeydown/set onkeydown/0/1 function/function/true/true/get onload/set onload/0/1 function/function/true/true/get onhashchange/set onhashchange/0/1
+shape-other-interfaces	onreadystatechange:true:null onloadstart:true:null onprogress:true:null onabort:true:null onerror:true:null onload:true:null ontimeout:true:null onloadend:true:null upload:true:null port:true:null mql:true:null signal:true:null script:null:null
+default-null-and-name-shape	,,,,object,object,object
+set-function-reads-back-same	true,true,true,true,true,false
+set-non-callable-values	object:true object:true object:false object:false object:false object:false object:false object:true object:true object:true
+set-non-callable-object-is-skipped-at-dispatch	L|true|L|H
+this-event-and-arguments	a:true:1:true:true:2:true|p:true:true:3|d:true|w:true
+order-with-add-event-listener	C|L1|H|L2
+replace-keeps-position	L1|H2|L2
+null-removes-and-set-again-moves-to-end	L1|L2|H2
+handler-replaced-during-dispatch-is-seen	new|L2
+handler-removed-during-dispatch-is-skipped	H|L1|L1
+handler-vs-same-listener-function	f|f|f
+return-false-cancels	false:true 0:false :false null:false undefined:false true:false x:false NaN:false noncancelable:false
+return-false-does-not-stop-propagation	a|L|p|true
+return-false-in-passive-listener-context	Ltrue
+throwing-handler-does-not-stop-dispatch	H|err|L
+markup-attribute-basic	a:b:click:1:true
+markup-attribute-getter-text	function onclick 1 true true
+markup-attribute-function-per-element	false,function,function
+markup-attribute-set-attribute-replaces	set|set2
+markup-attribute-overridden-by-property-then-attribute	prop|attr|prop2
+markup-attribute-remove-clears	   false
+markup-attribute-property-null-keeps-attribute	  log.push('a')
+markup-attribute-read-before-and-after-property-null	function object b
+markup-attribute-order-with-listeners	H|L1|L2
+markup-set-attribute-after-listener	L1|H|L2
+markup-attribute-created-element	made:BUTTON|made:BUTTON
+markup-attribute-on-bubbled-parent	p:p:c:3
+markup-scope-form-field-by-name	v1:v2:true
+markup-scope-form-owner-wins-over-document	ft|doc
+markup-scope-element-then-document	a:DIV:T:function:function:function:object
+markup-scope-global-and-locals	6:number:undefined|11:number:undefined:undefined:11
+markup-scope-assign-to-element-property	set,1,undefined
+markup-scope-this-of-document-method	a:object|i|function
+markup-use-strict-body	object:true
+markup-return-false-cancels	a:true b:false
+markup-unknown-attribute-is-inert	:undefined:undefined
+markup-empty-attribute	function
+markup-svg-uses-evt	object:svg
+compile-error-leaves-null-and-reports-on-first-use	before|err:SyntaxError:true:true|null|null|if (
+compile-error-at-dispatch	err:SyntaxError|L|L
+compile-error-then-set-attribute-recovers	err|ok
+compile-is-lazy-and-once	C
+runtime-error-in-markup-handler-reports	err:TypeError:boom:0|L
+window-onerror-receives-five-arguments	5:string:msg:string:number:number:thrown|true
+window-onerror-true-cancels-only-on-window	win-true:true win-false:false el-true:false el-false:true
+window-onerror-with-a-plain-event-gets-no-fields	1:object:true::::|body:1
+window-onerror-on-uncaught-handler-exception	string:0:string:number:number:RangeError
+error-event-shape	m,f,1,2,3,error,false,false,true,true,0,0,,true,1,[object ErrorEvent]
+body-attribute-reflects-to-window	function,function,true bl:true:load
+body-property-reflects-to-window	true,true, f:true|f:true
+body-click-is-not-reflected	,true click
+body-window-handlers-and-element-handlers-share-the-slot	function,true b|b
+body-several-attributes	function,function,object,function markup-load|hc|c
+body-remove-attribute-clears-window-handler	function  
+body-attribute-window-handler-scope-is-document	undefined:undefined:true
+window-event-handlers	hashchange:true:hashchange|popstate:true:popstate|message:true:message|storage:true:storage|pagehide:true:pagehide|pageshow:true:pageshow|online:true:online|offline:true:offline|unload:true:unload|resize:true:resize|scroll:true:scroll|focus:true:focus|blur:true:blur|load:true:load|languagechange:true:languagechange|afterprint:true:afterprint|beforeprint:true:beforeprint|messageerror:true:messageerror|unhandledrejection:true:unhandledrejection|rejectionhandled:true:rejectionhandled
+window-handler-does-not-see-element-events	w|click
+beforeunload-return-values	undefined:false false:false true:false text:false null:false 0:false :false
+beforeunload-on-body-and-element	false,false
+document-handlers	visibilitychange:true:visibilitychange|readystatechange:true:readystatechange|selectionchange:true:selectionchange|fullscreenchange:true:fullscreenchange|fullscreenerror:true:fullscreenerror|pointerlockchange:true:pointerlockchange|freeze:true:freeze|resume:true:resume|copy:true:copy|cut:true:cut|paste:true:paste|keydown:true:keydown
+document-handler-bubbles-from-elements	sel|doc
+html-element-assorted-handlers	focus:true:focus:1|blur:true:blur:1|keydown:true:keydown:1|keyup:true:keyup:1|keypress:true:keypress:1|pointerdown:true:pointerdown:1|pointerup:true:pointerup:1|mousedown:true:mousedown:1|mouseup:true:mouseup:1|mousemove:true:mousemove:1|dblclick:true:dblclick:1|contextmenu:true:contextmenu:1|wheel:true:wheel:1|scroll:true:scroll:1|select:true:select:1|submit:true:submit:1|reset:true:reset:1|invalid:true:invalid:1|toggle:true:toggle:1|drag:true:drag:1|drop:true:drop:1|load:true:load:1|error:true:error:1|animationend:true:animationend:1|transitionend:true:transitionend:1|auxclick:true:auxclick:1|beforeinput:true:beforeinput:1|input:true:input:1|change:true:change:1|copy:true:copy:1|paste:true:paste:1|selectstart:true:selectstart:1|selectionchange:true:selectionchange:1|cancel:true:cancel:1|close:true:close:1|canplay:true:canplay:1|play:true:play:1|pause:true:pause:1|ended:true:ended:1|resize:true:resize:1|slotchange:true:slotchange:1|scrollend:true:scrollend:1|formdata:true:formdata:1|securitypolicyviolation:true:securitypolicyviolation:1
+bare-global-handler-names	object,object,object,true,true bare:true
+in-operator-and-hasOwnProperty	true,false,true,true,true,true,true,true
+computed-key-access	c|function|true|true
+expando-with-on-prefix-is-not-a-handler	1 2  onfoo,onFoo,ONCLICK
+handler-sees-capture-listener-first-and-bubbling-order	p-cap|a-h|p-h|p-bub
+handler-and-stop-immediate	H
+form-onsubmit-return-false	sub:f:submit:false:true
+form-oninput-and-onchange-markup	fi:q|fc:q
+attribute-case-is-insensitive-in-html	function upper log.push('upper')
+set-attribute-name-case	function U
+set-attribute-node-and-remove-named-item	node
+clone-node-copies-attribute-handler-not-property	markup
+inner-html-attribute-handler	ih:x
+element-moved-between-parents-keeps-handler	a-h
+handler-on-detached-element	detached|attr
+handler-called-directly	win|a|win

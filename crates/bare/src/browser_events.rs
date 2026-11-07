@@ -70,6 +70,7 @@ impl Dom {
         }
         let o = self.obj(it, proto)?;
         let e = EventState {
+            err: false,
             ty: Rc::from(ty),
             bubbles,
             cancelable,
@@ -118,6 +119,7 @@ impl Dom {
 
     fn dispatch_inner(&self, it: &mut Interp<'_>, target: Target, ev: ObjId, ty: &str) -> R<()> {
         let mut path = vec![target];
+        let mut quiet = false;
         if let Target::Node(n) = target {
             let doc = self.doc.borrow();
             let mut cur = n;
@@ -137,6 +139,7 @@ impl Dom {
             if doc.shadow_host(cur).is_some() && self.st.borrow().events[&ev].composed {
                 return Err(Error::Unsupported(unsupported("dispatch of a composed event across a shadow root (retargeting is not implemented)")));
             }
+            quiet = !doc.has_on_name();
         }
         let tv = self.target_value(it, target)?;
         let bubbles = {
@@ -146,6 +149,11 @@ impl Dom {
             e.path = path.clone();
             e.bubbles
         };
+        // Content attributes `on<type>`: make the slots of the path up to date once, when the document has such a name (a change made by a
+        // listener of this dispatch is seen by the next dispatch).
+        if !quiet {
+            crate::browser_handlers::sync_path_of(self, &path, ty);
+        }
         for &t in path[1..].iter().rev() {
             self.fire(it, ev, t, 1, true)?;
         }
@@ -180,7 +188,7 @@ impl Dom {
             (e.phase, e.current) = (phase, cur);
         }
         for mut l in snapshot {
-            {
+            let raw = {
                 let st = self.st.borrow();
                 if st.events[&ev].stop_imm {
                     break;
@@ -190,6 +198,13 @@ impl Dom {
                     Some(x) => l.cb = x.cb,
                     None => continue,
                 }
+                l.handler && !st.hd.raw.is_empty() && st.hd.raw.contains_key(&l.id)
+            };
+            if raw {
+                match crate::browser_handlers::compile_slot(self, it, t, &ty, l.id)? {
+                    Value::Object(f) => l.cb = f,
+                    _ => continue,
+                }
             }
             if l.once {
                 self.remove_listener(t, l.id);
@@ -197,7 +212,7 @@ impl Dom {
             self.st.borrow_mut().events.get_mut(&ev).expect("event is registered").in_passive = l.passive;
             it.charge(1)?;
             self.st.borrow_mut().ui.epoch += 1;
-            let r = if l.handler { self.call_handler(it, &l, cur, ev) } else { self.call_listener(it, &l, cur, Value::Object(ev)) };
+            let r = if l.handler { self.call_handler(it, t, &l, cur, ev) } else { self.call_listener(it, &l, cur, Value::Object(ev)) };
             self.st.borrow_mut().events.get_mut(&ev).expect("event is registered").in_passive = false;
             match r {
                 Ok(_) => {}
@@ -226,13 +241,43 @@ impl Dom {
 
     /// HTML "event handler processing algorithm": a value that is not callable is skipped without an error, `this` is
     /// the current target, and a return value of `false` sets the canceled flag (as `preventDefault` would).
-    fn call_handler(&self, it: &mut Interp<'_>, l: &Listener, this: Value, ev: ObjId) -> V {
+    /// Two cases differ: the `error` handler of `window` for an `ErrorEvent` gets `(message, filename, lineno, colno, error)` and `true`
+    /// cancels; code of a content attribute looks its names up in the element, its form owner and the document first.
+    fn call_handler(&self, it: &mut Interp<'_>, t: Target, l: &Listener, this: Value, ev: ObjId) -> V {
         let cb = Value::Object(l.cb);
         if !it.is_callable_value(cb) {
             return Ok(Value::Undefined);
         }
+        if (matches!(t, Target::Window) && &*l.ty == "error") || it.is_scoped_function(l.cb) {
+            return self.call_handler_special(it, t, l, this, ev);
+        }
         let r = it.call(cb, this, &[Value::Object(ev)])?;
-        if matches!(r, Value::Bool(false)) {
+        if matches!(r, Value::Bool(false)) && !(matches!(t, Target::Window) && &*l.ty == "beforeunload") {
+            let mut st = self.st.borrow_mut();
+            let e = st.events.get_mut(&ev).expect("event is registered");
+            e.canceled |= e.cancelable && !e.in_passive;
+        }
+        Ok(r)
+    }
+
+    /// `call_handler` for the `error` handler of `window` or code of a content attribute.
+    #[inline(never)]
+    fn call_handler_special(&self, it: &mut Interp<'_>, t: Target, l: &Listener, this: Value, ev: ObjId) -> V {
+        let cb = Value::Object(l.cb);
+        let win_err = matches!(t, Target::Window) && &*l.ty == "error" && self.st.borrow().events[&ev].err;
+        let scope = if it.is_scoped_function(l.cb) { crate::browser_handlers::scope_of(self, it, t)? } else { Vec::new() };
+        let mut args = [Value::Object(ev); 5];
+        let n = if win_err {
+            for (i, name) in ["message", "filename", "lineno", "colno", "error"].into_iter().enumerate() {
+                let k = self.key(it, name)?;
+                args[i] = it.get_value(Value::Object(ev), k)?;
+            }
+            5
+        } else {
+            1
+        };
+        let r = if scope.is_empty() { it.call(cb, this, &args[..n])? } else { it.call_scoped(cb, this, &args[..n], &scope)? };
+        if matches!(r, Value::Bool(b) if b == win_err) && !(matches!(t, Target::Window) && &*l.ty == "beforeunload") {
             let mut st = self.st.borrow_mut();
             let e = st.events.get_mut(&ev).expect("event is registered");
             e.canceled |= e.cancelable && !e.in_passive;
@@ -255,11 +300,34 @@ impl Dom {
 
     /// Keep the text of a listener exception. It reads data properties only, so no JS runs.
     pub(crate) fn report(&self, it: &mut Interp<'_>, thrown: Value, ty: &str, t: Target) {
+        let message = self.error_text(it, thrown);
+        self.window_error(it, thrown, &message);
         if self.lim.max_reports == 0 {
             let mut st = self.st.borrow_mut();
             st.dropped_reports = st.dropped_reports.saturating_add(1);
             return;
         }
+        self.record_report(t, ty, message);
+    }
+
+    /// An uncaught exception: the `error` event of `window` (HTML "report an exception"), when something listens. An exception in it is not reported again.
+    fn window_error(&self, it: &mut Interp<'_>, thrown: Value, text: &str) {
+        crate::browser_handlers::sync(self, Target::Window, "error");
+        {
+            let st = self.st.borrow();
+            if st.hd.in_error || !st.listeners.get(&Target::Window).is_some_and(|v| v.iter().any(|l| &*l.ty == "error")) {
+                return;
+            }
+        }
+        self.st.borrow_mut().hd.in_error = true;
+        let message = format!("Uncaught {text}");
+        let fields = crate::browser_error_event::Fields { message: &message, filename: "", lineno: 0, colno: 0, error: thrown };
+        let _ = crate::browser_error_event::build(self, it, "error", [false, true, false], fields).and_then(|ev| self.dispatch(it, Target::Window, ev));
+        self.st.borrow_mut().hd.in_error = false;
+    }
+
+    /// `name: message` of an error object, or the text of the thrown value. It reads data properties only, so no JS runs.
+    fn error_text(&self, it: &mut Interp<'_>, thrown: Value) -> String {
         let cap = self.lim.max_string_bytes.min(4096);
         let append = |out: &mut String, units: &[u16]| {
             for c in char::decode_utf16(units.iter().copied()) {
@@ -287,6 +355,10 @@ impl Dom {
             Value::Symbol(_) => append(&mut message, &[83, 121, 109, 98, 111, 108]),
             v => append(&mut message, &it.display(v).encode_utf16().collect::<Vec<_>>()),
         }
+        message
+    }
+
+    fn record_report(&self, t: Target, ty: &str, message: String) {
         let target = match t {
             Target::Window => "window".to_string(),
             Target::Obj(_) => "object".to_string(),
@@ -395,6 +467,7 @@ pub(crate) fn add_event_listener(d: &Dom, it: &mut Interp<'_>, this: Value, a: &
     {
         return Ok(Value::Undefined);
     }
+    crate::browser_handlers::sync_all(d, t);
     let mut guard = d.st.borrow_mut();
     let st = &mut *guard;
     let list = st.listeners.entry(t).or_default();

@@ -308,6 +308,8 @@ pub(crate) struct Listener {
 }
 
 pub(crate) struct EventState {
+    /// An `ErrorEvent` (`browser_error_event.rs`).
+    pub err: bool,
     pub ty: Rc<str>,
     pub bubbles: bool,
     pub cancelable: bool,
@@ -380,6 +382,8 @@ pub(crate) struct State {
     pub focus: crate::browser_focus::FocusState,
     /// Pointer state and counters of the window input (`browser_ui.rs`).
     pub ui: crate::browser_ui::UiState,
+    /// Event handler properties and attributes (`browser_handlers.rs`).
+    pub hd: crate::browser_handlers::Hd,
 }
 
 #[derive(Clone, Copy)]
@@ -512,6 +516,8 @@ pub struct Dom {
     pub(crate) els: crate::browser_elements::Els,
     /// `HTMLMediaElement` and its kin (`browser_media.rs`).
     pub(crate) media: crate::browser_media::Media,
+    /// `HTMLBodyElement`, `HTMLFrameSetElement` and `ErrorEvent` (`browser_handlers.rs`).
+    pub(crate) hh: crate::browser_handlers::Hh,
     /// Constraint validation, `labels` and `form.reset()` (`browser_controls.rs`).
     pub(crate) ctl: crate::browser_controls::CtlHost,
     /// Custom elements (`browser_custom.rs`).
@@ -553,6 +559,7 @@ impl Host for Dom {
         crate::browser_web::roots(self, out);
         crate::browser_elements::roots(self, out);
         crate::browser_media::roots(self, out);
+        crate::browser_handlers::roots(self, out);
         crate::browser_controls::roots(self, out);
         self.resize_roots(out);
         self.frame_roots(out);
@@ -653,6 +660,9 @@ impl Host for Dom {
     }
 
     fn fill_indexed(&self, it: &mut Interp<'_>, owner: ObjId, index: u32) -> R<()> {
+        if (bare_js::heap::LAZY_ALL..u32::MAX).contains(&index) {
+            return crate::browser_handlers::lazy(self, it, owner, index == bare_js::heap::LAZY_ALL);
+        }
         if crate::browser_nodelist::fill(self, it, owner, index)? || crate::browser_dataset::fill(self, it, owner)? {
             return Ok(());
         }
@@ -797,6 +807,7 @@ impl Dom {
                             t @ ("audio" | "video") => crate::browser_media::proto(self, it, n, t)?,
                             t @ ("input" | "form" | "button" | "label") => crate::browser_controls::proto_for(self, it, t)?,
                             "script" => self.scripts.proto.get().copied().unwrap_or(p.html),
+                            t @ ("body" | "frameset") => crate::browser_handlers::body_proto(self, it, usize::from(t == "frameset"))?[0],
                             t @ ("select" | "option" | "optgroup" | "textarea") => crate::browser_select::proto_for(self, it, t)?,
                             _ => p.html,
                         },
@@ -1098,6 +1109,7 @@ impl Dom {
         crate::browser_walker::install(self, it)?;
         crate::browser_range::install(self, it)?;
         crate::browser_handlers::install(self, it)?;
+        crate::browser_error_event::install(self, it)?;
         crate::browser_select::install(self, it)?;
         // Last: a new host function earlier in this list moves the id of every one after it.
         crate::browser_elements::install(self, it)?;
@@ -1394,6 +1406,7 @@ impl Browser {
             web: Default::default(),
             els: Default::default(),
             media: Default::default(),
+            hh: Default::default(),
             ctl: Default::default(),
             ce: Default::default(),
         });

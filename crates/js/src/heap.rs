@@ -67,6 +67,17 @@ impl Default for HeapLimits {
     }
 }
 
+const LAZY_PROTO: u8 = 1;
+const LAZY_ONS: u8 = 2;
+/// A chain of `lookup` that reaches this object asks the host for an `on<x>` name here (`Heap::set_lazy_chain`).
+const LAZY_CHAIN: u8 = 4;
+/// Set on the global object while `call_scoped` runs: the position hints of `own_data_at` and `set_own_data_at` fail, so a name takes the slow path.
+const LAZY_HS: u8 = 8;
+
+/// `HeapError::NeedsHost::index` of a name of a `set_lazy_on` object, and of all its names.
+pub const LAZY_ON: u32 = u32::MAX - 1;
+pub const LAZY_ALL: u32 = u32::MAX - 2;
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Limit {
     Objects,
@@ -371,8 +382,9 @@ struct Object {
     /// `heap_binary.rs`. `EXOTIC_NAMED`: also an object whose string-keyed own properties are answered by the host
     /// (`Heap::new_named`). `EXOTIC_STR`: a String wrapper (`Heap::new_primitive`). One byte, so the object stays within its size budget below.
     exotic: u8,
-    /// A function whose own `prototype` holds a placeholder: the object is made on first use (`Heap::unlazy`).
-    lazy_proto: bool,
+    /// Bit 1: a function whose own `prototype` holds a placeholder (`LAZY_PROTO`). Bit 2: the host defines the `on*` accessors of this object
+    /// on demand (`LAZY_ONS`, `Heap::set_lazy_on`).
+    lazy: u8,
     /// Dense index properties that are plain data (writable, enumerable, configurable).
     /// `None` is a hole. An index lives here or in `props`, never in both.
     elems: Vec<Option<Value>>,
@@ -698,6 +710,11 @@ pub struct Heap {
     /// `Object.prototype` and the keys `prototype` and `constructor`, for lazy function prototypes. `None`: no
     /// object is lazy.
     lazy: Option<(ObjId, PropertyKey, PropertyKey)>,
+    /// `(object, name)` pairs of `on*` names the host was asked for, and the key of the last ask (`Heap::set_lazy_on`).
+    lazy_asked: std::cell::RefCell<std::collections::HashSet<(u32, u32, u32)>>,
+    lazy_key: std::cell::Cell<Option<PropertyKey>>,
+    /// Some object has `LAZY_ONS`.
+    lazy_on_set: std::cell::Cell<bool>,
 }
 
 impl Default for Heap {
@@ -730,6 +747,9 @@ impl Heap {
             indexed: None,
             named: Box::default(),
             lazy: None,
+            lazy_asked: Default::default(),
+            lazy_key: Default::default(),
+            lazy_on_set: Default::default(),
         };
         h.length = h.intern_str("length")?;
         Ok(h)
@@ -1107,7 +1127,7 @@ impl Heap {
             let len = PropertyKey::String(self.length);
             props.set(len, Property::Data { value: Value::Number(0.0), writable: true, enumerable: false, configurable: false });
         }
-        let o = Object { proto, extensible: true, is_array, exotic: 0, lazy_proto: false, elems: Vec::new(), props };
+        let o = Object { proto, extensible: true, is_array, exotic: 0, lazy: 0, elems: Vec::new(), props };
         let cost = obj_bytes(&o);
         self.charge(cost)?;
         let (index, gn) = self.objects.alloc(o, Limit::Objects)?;
@@ -1213,7 +1233,7 @@ impl Heap {
         self.charge(ENTRY_BYTES)?;
         self.edit(f, |ob| {
             ob.props.set(kp, Property::Data { value: Value::Undefined, writable: true, enumerable: false, configurable: false });
-            ob.lazy_proto = true;
+            ob.lazy |= LAZY_PROTO;
         });
         Ok(())
     }
@@ -1223,7 +1243,38 @@ impl Heap {
     /// `in`, `delete` (never allowed: not configurable) and tracing do not need the object.
     #[inline]
     fn is_lazy(&self, ob: &Object, key: PropertyKey) -> bool {
-        ob.lazy_proto && matches!(self.lazy, Some((_, kp, _)) if kp == key)
+        ob.lazy & LAZY_PROTO != 0 && matches!(self.lazy, Some((_, kp, _)) if kp == key)
+    }
+
+    /// The step of `lookup` at an object with a flag of `LAZY_PROTO` or `LAZY_CHAIN` (the test of the loop is one flag byte, as for the lazy
+    /// `prototype`): make the prototype object, or ask the host for an `on<x>` name that it has not been asked for.
+    #[inline(never)]
+    fn lazy_step(&mut self, o: ObjId, key: PropertyKey) -> R<()> {
+        let ob = self.obj(o)?;
+        if self.is_lazy(ob, key) {
+            return self.unlazy(o);
+        }
+        match key {
+            PropertyKey::String(s) if ob.lazy & LAZY_CHAIN != 0 && self.on_name(s) => self.lazy_ask_name(o, s, key),
+            _ => Ok(()),
+        }
+    }
+
+    /// The same for `get_own_property`, with `LAZY_ONS`: the object itself is asked.
+    #[inline(never)]
+    fn lazy_own(&mut self, o: ObjId, key: PropertyKey) -> R<()> {
+        let ob = self.obj(o)?;
+        if self.is_lazy(ob, key) {
+            return self.unlazy(o);
+        }
+        match key {
+            PropertyKey::String(s) if ob.lazy & LAZY_ONS != 0 && self.on_name(s) => self.lazy_ask_name(o, s, key),
+            _ => Ok(()),
+        }
+    }
+
+    fn on_name(&self, s: StrId) -> bool {
+        self.str(s).is_ok_and(|st| st.units.len() >= 3 && st.units[0] == b'o' as u16 && st.units[1] == b'n' as u16)
     }
 
     /// Make the prototype object of the lazy function `o`. Call only when `is_lazy` is true.
@@ -1234,7 +1285,7 @@ impl Heap {
         let d = PropertyDescriptor { value: Some(Value::Object(o)), writable: Some(true), enumerable: Some(false), configurable: Some(true), ..Default::default() };
         self.define_own_property(p, kc, &d)?;
         self.edit(o, |ob| {
-            ob.lazy_proto = false;
+            ob.lazy &= !LAZY_PROTO;
             if let Some(Property::Data { value, writable, enumerable, configurable }) = ob.props.get(kp) {
                 debug_assert!(matches!(value, Value::Undefined));
                 ob.props.set(kp, Property::Data { value: Value::Object(p), writable, enumerable, configurable });
@@ -1243,12 +1294,77 @@ impl Heap {
         Ok(())
     }
 
+    /// Let the host define the `on*` properties of `o` when they are first used. A miss of an `on<x>` string key on `o` (a read, `in`,
+    /// a write, an own-property query) answers `NeedsHost { owner: o, index: LAZY_ON }` once per name; `Object.keys` and the like answer
+    /// `LAZY_ALL` once. The host reads the name with `lazy_on_key`, defines the accessor if it has one, and `clear_lazy_on` after `LAZY_ALL`.
+    pub fn set_lazy_on(&mut self, o: ObjId) -> R<()> {
+        self.obj(o)?;
+        self.edit(o, |ob| ob.lazy |= LAZY_ONS);
+        Ok(())
+    }
+
+    /// A `lookup` or `in` that reaches `o` without a hit and asks for an `on<x>` name asks the host here (`NeedsHost { owner: o, index: LAZY_ON }`),
+    /// once per name. Use it on one object that the chains of all the objects the host serves end in (`EventTarget.prototype`).
+    pub fn set_lazy_chain(&mut self, o: ObjId) -> R<()> {
+        self.obj(o)?;
+        self.edit(o, |ob| ob.lazy |= LAZY_CHAIN);
+        self.lazy_on_set.set(true);
+        Ok(())
+    }
+
+    /// `call_scoped` runs: make the position hints of `o` (the global object) fail, or stop doing so.
+    pub fn set_hscope(&mut self, o: ObjId, on: bool) {
+        if self.obj(o).is_ok() {
+            self.edit(o, |ob| ob.lazy = if on { ob.lazy | LAZY_HS } else { ob.lazy & !LAZY_HS });
+        }
+    }
+
+    /// The host defined every name of `o`: stop asking.
+    pub fn clear_lazy_on(&mut self, o: ObjId) {
+        if self.obj(o).is_ok() {
+            self.edit(o, |ob| ob.lazy &= !LAZY_ONS);
+        }
+    }
+
+    /// The text of the name of the last `LAZY_ON` ask.
+    pub fn lazy_on_key(&self) -> Option<String> {
+        match self.lazy_key.get()? {
+            PropertyKey::String(s) => self.to_string_lossy(s).ok(),
+            _ => None,
+        }
+    }
+
+    /// `has_property` that asks the host about an `on<x>` name when it has found nothing: the loop of `has_property` stays as it is.
+    pub fn has_property_lazy(&self, o: ObjId, key: PropertyKey) -> R<bool> {
+        let has = self.has_property(o, key)?;
+        if !has && self.lazy_on_set.get() {
+            let mut cur = Some(o);
+            while let Some(c) = cur {
+                let ob = self.obj(c)?;
+                if ob.lazy & LAZY_CHAIN != 0 && let PropertyKey::String(s) = key && self.on_name(s) {
+                    self.lazy_ask_name(c, s, key)?;
+                }
+                cur = ob.proto;
+            }
+        }
+        Ok(has)
+    }
+
+    #[cold]
+    fn lazy_ask_name(&self, o: ObjId, s: StrId, key: PropertyKey) -> R<()> {
+        if !self.lazy_asked.borrow_mut().insert((o.index, s.index, s.gn)) {
+            return Ok(());
+        }
+        self.lazy_key.set(Some(key));
+        Err(HeapError::NeedsHost { owner: o, index: LAZY_ON })
+    }
+
     /// `Object.getOwnPropertyDescriptor`.
     pub fn get_own_property(&mut self, o: ObjId, key: PropertyKey) -> R<Option<Property>> {
         self.check_key(key)?;
         let mut ob = self.obj(o)?;
-        if self.is_lazy(ob, key) {
-            self.unlazy(o)?;
+        if ob.lazy & (LAZY_PROTO | LAZY_ONS) != 0 {
+            self.lazy_own(o, key)?;
             ob = self.obj(o)?;
         }
         if ob.exotic != 0 {
@@ -1305,8 +1421,8 @@ impl Heap {
         let mut cur = Some(o);
         while let Some(c) = cur {
             let mut obj = self.obj(c)?;
-            if self.is_lazy(obj, key) {
-                self.unlazy(c)?;
+            if obj.lazy & (LAZY_PROTO | LAZY_CHAIN) != 0 {
+                self.lazy_step(c, key)?;
                 obj = self.obj(c)?;
             }
             if obj.exotic != 0 {
@@ -1335,7 +1451,7 @@ impl Heap {
     pub fn own_data_at(&self, o: ObjId, hint: u32, key: PropertyKey) -> Option<Value> {
         let ob = self.obj(o).ok()?;
         match ob.props.entries.get(hint as usize) {
-            Some(Some((k, Property::Data { value, .. }))) if *k == key && ob.exotic == 0 && !ob.lazy_proto => Some(*value),
+            Some(Some((k, Property::Data { value, .. }))) if *k == key && ob.exotic == 0 && ob.lazy & (LAZY_PROTO | LAZY_HS) == 0 => Some(*value),
             _ => None,
         }
     }
@@ -1347,7 +1463,7 @@ impl Heap {
             return false;
         }
         let Some(ob) = self.objects.get_mut(o.index, o.gn) else { return false };
-        if ob.exotic != 0 || ob.lazy_proto {
+        if ob.exotic != 0 || ob.lazy & (LAZY_PROTO | LAZY_HS) != 0 {
             return false;
         }
         match ob.props.entries.get_mut(hint as usize) {
@@ -1412,8 +1528,12 @@ impl Heap {
     /// `Reflect.ownKeys`: array indices ascending, then strings in creation order, then symbols
     /// in creation order. An array's `length` is the first string.
     pub fn own_keys(&mut self, o: ObjId) -> R<Vec<PropertyKey>> {
+        let ob = self.obj(o)?;
+        let (lazy, ex) = (ob.lazy, ob.exotic);
+        if lazy & LAZY_ONS != 0 && self.lazy_asked.borrow_mut().insert((o.index, u32::MAX, 0)) {
+            return Err(HeapError::NeedsHost { owner: o, index: LAZY_ALL });
+        }
         let rest = self.own_keys_with(o, true)?;
-        let ex = self.obj(o)?.exotic;
         if ex == EXOTIC_PROXY {
             return Err(HeapError::Proxy(o));
         }
