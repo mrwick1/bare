@@ -1810,3 +1810,31 @@ Cost: no code of this change runs, so no row may move. `tools/js/cost_matrix.sh`
 Tests: `cargo test --workspace` debug and release on 3033911, 2,813 passed and 0 failed in each. After the rebase on ccceff4, `cargo test -p bare-js --lib` (744 passed) and the typing page check (0 differences) ran again. In the first release run, `h2_node_edge` (added by PR #229) failed once in `a_post_after_a_graceful_idle_close_runs_on_a_new_connection`. It passed in the next full run and in 3 runs alone. `test262_check.sh` gives `gate: ok`. 39 of the 40 `tools/js/*_check.sh` that start match Node. `intl_check.sh` gives 15 differences (`matrix_*`) with Node 22.23.2 on arjun-e16. The output of origin/main is the same, byte for byte, so the cause is the ICU data of that Node. `parse_check.sh` needs `acorn` and does not start.
 
 Not tested: the binding index of sites that run once on the typing page (the walker learns no index for them; their scope and static hop count are compared); sites in event handler attributes (`compile_function`); the rows at scale 100; `parse_check.sh`.
+
+## Differences from Chrome on full pages: form pseudo-classes, `letter-spacing`, rounded dashes, anonymous items, huge flex factors
+
+A diff of two full staging pages against Chrome 155 (PR #221) listed five causes. This change fixes all five. Every fix has a failing test first and a Chrome 155 fixture (`tools/ui/chrome_topic.mjs`) or a paint diff against Chrome. No staging text is in the repository.
+
+Change:
+- Form pseudo-classes (`crates/css/src/form.rs`): `:disabled`, `:enabled`, `:required`, `:optional`, `:read-only`, `:read-write`, `:placeholder-shown`, `:checked`, `:default` and `:indeterminate`. A disabled `fieldset` disables its controls, except those in its first `legend`. A disabled `optgroup` disables its options. The host keeps the checked, value and indeterminate state of a control outside the tree. `Document::ui` mirrors that state in 5 bits, so selectors can read it. `set_ui` moves `revision` when the bits change, so the style is computed again after an attribute or property change. 29 Chrome cases: `tools/fixtures/ui/chrome-formstate.txt`.
+- `letter-spacing` and `word-spacing`: layout (line breaking, intrinsic widths, `getClientRects`), paint and `getComputedStyle` (`normal` reads `0px` for `word-spacing`). 18 Chrome cases: `chrome-letterspace.txt`.
+- Rounded boxes with a dashed or dotted border (four equal sides) draw the dashes along the curve. Paint diff of a synthetic fixture against Chrome: 8,042 pixels before, 4,694 after.
+- Anonymous grid and flex items (text runs) take `align-self`, `justify-self` and the container alignment like element items. The baseline of a grid container with a text item is right when the item is aligned. 24 Chrome cases: `chrome-anonalign.txt`.
+- `flex: 1e39 0 0` no longer hangs. The sum of flex factors is an `f64`. `bare-stress fuzz layout` seeds 22 and 26 end now. A regression test has a time limit. 7 Chrome cases: `chrome-flexhuge.txt`.
+
+Result, full page against Chrome 155 (1280 x 800 window, `Noto Sans Mono` forced, `crates/paint/examples/diff.rs`), main ccceff4 against this change:
+- Page 1: 28,487 pixels differ (5,052 by more than 64 levels), then 26,225 (1,846).
+- Page 2: 33,395 pixels differ (9,225 by more than 64 levels), then 31,948 (3,914).
+
+Cost: `tools/js/cost_matrix.sh`, all 803 rows, main ccceff4 against this change. No row is over +0.5% under both allocators. Mean change: glibc about 0.00%, jemalloc about -0.03%. Three rows are over +0.5% under one allocator only: `form_load gates 1` and `gates 10` (+0.70% glibc, -0.02% and +0.06% jemalloc) and `sticky_load 100 100` (+0.54% glibc, +0.36% jemalloc). The first build had four rows over the limit under both allocators. Three fixes removed them: `Styles::spaced` (one flag for each unique style) keeps the spacing code off the line breaker for pages with no spacing, the spaced path is a cold function, and the cascade walks a bit mask of the winning properties. Adding two properties also costs more per-realm `CSSStyleDeclaration` accessors, so `install` reuses one name buffer.
+
+Tests: `cargo test --release --workspace`, 2,831 passed and 0 failed (after the rebase on b496946).
+
+Gaps, still different from Chrome:
+- The form pseudo-classes ignore the `form` attribute and `contenteditable` inside a shadow tree.
+- `:checked` and `:default` for an `option` do not see a selectedness that a script changed.
+- Dashes follow the curve only when the four sides have the same style, colour and width. Other rounded borders use the old drawing.
+- The placeholder text of the staging pages still differs from Chrome. The effect of `letter-spacing` on placeholder text is not tested.
+- The cause of the rest of the diff of both pages is not analysed in this change.
+
+Not tested: the `form` attribute; rounded dashes with four different sides; `bare-stress fuzz layout` beyond seeds 22 and 26 (the unit test covers the hang); the window (`--window`) and wasm builds; the cost matrix on main b496946 (the rebase brings JS code only, no change in css, layout or paint files; the matrix ran on ccceff4).
