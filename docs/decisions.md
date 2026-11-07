@@ -366,6 +366,13 @@ To follow the standard, add the five names to the first arm of `Builder::in_temp
 - Nothing runs before the first `define`: lazy globals, one `Cell` read per host call, no watcher work. Reason: the cost rule (no row over +0.5%). Result: worst row +0.542% on a row that is noise, all others under +0.45%. See [progress.md](progress.md#custom-elements).
 - The page is parsed before its scripts run. A definition upgrades the elements that exist, with a parse-progress emulation for the elements after a blocking script. Reason: an incremental parser is a larger change and no target page needs it. The constructor of a parser-created element sees its children (Chrome: it does not).
 
+## SVG is a box that paint fills, and a hint hides what is inside
+
+- An `<svg>` is an atomic inline box, and its shapes have no box (`display: none` from a presentational hint, so the layout code does not change). Paint reads the shapes from the tree and draws them as polygons in the box. Reason: layout needs only the size, and a shape box would need a second kind of box with no use outside paint.
+- `fill` and `stroke` are properties of the cascade, so a class rule, an inherited value and `currentcolor` work as in Chrome. The other stroke values are read from the attributes. Reason: each property costs about 24,000 instructions at start and 0.4% on a row of styles, so only the two that pages set with CSS were added.
+- The hint is built only when the page has an element that is not HTML. Reason: the sheet of the browser names `svg`, so the atom is on every page.
+- `compute` starts from the initial values and reads only the properties with a winner. Reason: the three new properties cost more than the rule allows with the old loop. Result: cascade rows -12% to -16%.
+
 ## Open questions
 
 - A separate process for sensitive sites, for example banking.
