@@ -15,6 +15,9 @@ use std::time::Duration;
 const PAGE: &str = include_str!("../../../tools/fixtures/ui/drive.html");
 const STEPS: &str = include_str!("../../../tools/fixtures/ui/drive-steps.txt");
 const CHROME: &str = include_str!("../../../tools/fixtures/ui/chrome-drive.txt");
+const REACT: &str = include_str!("../../../tools/fixtures/ui/react.html");
+const REACT_STEPS: &str = include_str!("../../../tools/fixtures/ui/react-steps.txt");
+const REACT_CHROME: &str = include_str!("../../../tools/fixtures/ui/chrome-react.txt");
 
 fn big<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {
     std::thread::Builder::new().stack_size(64 << 20).spawn(f).unwrap().join().unwrap()
@@ -41,13 +44,14 @@ fn node(b: &mut Browser, sel: &str) -> bare_html::dom::NodeId {
 }
 
 /// The log of one scenario.
-fn scenario(steps: &[&str]) -> String {
-    let mut b = browser(PAGE);
+fn scenario(page: &str, steps: &[&str]) -> String {
+    let mut b = browser(page);
     for step in steps {
         let mut p = step.splitn(3, ' ');
         let (verb, sel, text) = (p.next().unwrap(), p.next().unwrap_or(""), p.next().unwrap_or(""));
         match verb {
             "reset" => drop(b.run_script("window.__log.length = 0").unwrap()),
+            "eval" => drop(b.run_script(text).unwrap()),
             "click" => {
                 let n = node(&mut b, sel);
                 b.drive_click(n).unwrap();
@@ -67,41 +71,49 @@ fn scenario(steps: &[&str]) -> String {
     log(&mut b)
 }
 
+/// Run every scenario of `steps` on `page` and compare each log with the Chrome one. Gives the number of scenarios.
+fn compare(page: &str, steps_src: &str, chrome_src: &str) -> usize {
+    let mut chrome = std::collections::HashMap::new();
+    let mut cur = String::new();
+    for l in chrome_src.lines() {
+        if let Some(n) = l.strip_prefix("== ") {
+            cur = n.into();
+            chrome.insert(cur.clone(), Vec::new());
+        } else {
+            chrome.get_mut(&cur).unwrap().push(l);
+        }
+    }
+    let (mut names, mut steps): (Vec<&str>, Vec<Vec<&str>>) = (vec![], vec![]);
+    for l in steps_src.lines().filter(|l| !l.starts_with('#') && !l.is_empty()) {
+        if let Some(n) = l.strip_prefix("== ") {
+            names.push(n);
+            steps.push(vec![]);
+        } else {
+            steps.last_mut().unwrap().push(l);
+        }
+    }
+    let mut bad = Vec::new();
+    for (name, s) in names.iter().zip(&steps) {
+        let got = scenario(page, s);
+        let got: Vec<&str> = got.lines().collect();
+        let want = chrome.get(*name).unwrap_or_else(|| panic!("no Chrome log for {name}"));
+        if &got != want {
+            let i = got.iter().zip(want.iter()).position(|(a, b)| a != b).unwrap_or(got.len().min(want.len()));
+            bad.push(format!("{name}: line {i}\n  chrome {:?}\n  bare   {:?}\n  ({} chrome lines, {} bare lines)", want.get(i), got.get(i), want.len(), got.len()));
+        }
+    }
+    assert!(bad.is_empty(), "{} of {} scenarios differ:\n{}", bad.len(), names.len(), bad.join("\n"));
+    names.len()
+}
+
 #[test]
 fn scenarios_log_what_chrome_logs() {
-    big(|| {
-        let mut chrome = std::collections::HashMap::new();
-        let mut cur = String::new();
-        for l in CHROME.lines() {
-            if let Some(n) = l.strip_prefix("== ") {
-                cur = n.into();
-                chrome.insert(cur.clone(), Vec::new());
-            } else {
-                chrome.get_mut(&cur).unwrap().push(l);
-            }
-        }
-        let (mut names, mut steps): (Vec<&str>, Vec<Vec<&str>>) = (vec![], vec![]);
-        for l in STEPS.lines().filter(|l| !l.starts_with('#') && !l.is_empty()) {
-            if let Some(n) = l.strip_prefix("== ") {
-                names.push(n);
-                steps.push(vec![]);
-            } else {
-                steps.last_mut().unwrap().push(l);
-            }
-        }
-        let mut bad = Vec::new();
-        for (name, s) in names.iter().zip(&steps) {
-            let got = scenario(s);
-            let got: Vec<&str> = got.lines().collect();
-            let want = chrome.get(*name).unwrap_or_else(|| panic!("no Chrome log for {name}"));
-            if &got != want {
-                let i = got.iter().zip(want.iter()).position(|(a, b)| a != b).unwrap_or(got.len().min(want.len()));
-                bad.push(format!("{name}: line {i}\n  chrome {:?}\n  bare   {:?}\n  ({} chrome lines, {} bare lines)", want.get(i), got.get(i), want.len(), got.len()));
-            }
-        }
-        assert_eq!(names.len(), 25);
-        assert!(bad.is_empty(), "{} of {} scenarios differ:\n{}", bad.len(), names.len(), bad.join("\n"));
-    });
+    big(|| assert_eq!(compare(PAGE, STEPS, CHROME), 25));
+}
+
+#[test]
+fn typing_in_react_controlled_fields_gives_what_chrome_gives() {
+    big(|| assert_eq!(compare(REACT, REACT_STEPS, REACT_CHROME), 23));
 }
 
 // ------------------------------------------------------------------------------------------ the tracker of React

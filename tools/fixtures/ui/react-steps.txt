@@ -1,0 +1,151 @@
+# Scenarios of tools/fixtures/ui/react.html: typing into controlled fields. Same step words as drive-steps.txt, and `eval - JS` runs a script in the page. Each runs on a fresh page.
+== textarea
+type #ta abc
+== textarea_lines
+type #ta a\nb
+== textarea_replace
+type #ta abc
+type #ta xy
+== textarea_caret_in_the_middle
+type #ta abc
+key - ArrowLeft
+key - ArrowLeft
+key - X
+== textarea_backspace
+type #ta abc
+key - Backspace
+key - ArrowLeft
+key - Backspace
+== textarea_clear
+type #ta abc
+type #ta 
+== text
+type #tx abc
+== text_caret_in_the_middle
+type #tx abc
+key - ArrowLeft
+key - X
+== email
+type #em a@b
+== search
+type #se abc
+== url
+type #ur http
+== tel
+type #te 123
+== password
+type #pw abc
+== number
+type #nu 123
+== number_replace
+type #nu 123
+type #nu 45
+== textarea_selection_after_keys
+type #ta abc
+eval - L('ta')
+key - ArrowLeft
+eval - L('ta')
+key - Home
+eval - L('ta')
+key - Shift+ArrowRight
+eval - L('ta')
+key - End
+eval - L('ta')
+key - Shift+ArrowLeft
+eval - L('ta')
+key - ArrowLeft
+eval - L('ta')
+== textarea_selection_after_writes
+type #ta abc
+eval - var e = document.getElementById('ta'); e.setSelectionRange(1, 2); L('ta')
+eval - e.defaultValue = 'zz'; L('ta')
+eval - e.value = e.value; L('ta')
+eval - e.value = 'abc'; L('ta')
+eval - e.setSelectionRange(1, 2, 'backward'); e.value = 'abcd'; L('ta')
+eval - e.setSelectionRange(1, 1); L('ta')
+eval - e.select(); L('ta')
+eval - e.defaultValue = 'q'; L('ta')
+eval - e.setSelectionRange(2, 3); e.value = 'abcd'; L('ta')
+eval - e.selectionStart = 1; L('ta')
+eval - e.selectionEnd = 0; L('ta')
+eval - e.selectionDirection = 'backward'; L('ta')
+== text_selection_after_keys
+type #tx abc
+eval - L('tx')
+key - ArrowLeft
+eval - L('tx')
+key - Home
+eval - L('tx')
+key - Shift+ArrowRight
+eval - L('tx')
+key - End
+eval - L('tx')
+key - Shift+ArrowLeft
+eval - L('tx')
+key - ArrowLeft
+eval - L('tx')
+== text_selection_after_writes
+type #tx abc
+eval - var e = document.getElementById('tx'); e.setSelectionRange(1, 2); L('tx')
+eval - e.defaultValue = 'zz'; L('tx')
+eval - e.value = e.value; L('tx')
+eval - e.value = 'abc'; L('tx')
+eval - e.setSelectionRange(1, 2, 'backward'); e.value = 'abcd'; L('tx')
+eval - e.setSelectionRange(1, 1); L('tx')
+eval - e.select(); L('tx')
+eval - e.defaultValue = 'q'; L('tx')
+eval - e.setSelectionRange(2, 3); e.value = 'abcd'; L('tx')
+eval - e.selectionStart = 1; L('tx')
+eval - e.selectionEnd = 0; L('tx')
+eval - e.selectionDirection = 'backward'; L('tx')
+== password_selection_after_keys
+type #pw abc
+eval - L('pw')
+key - ArrowLeft
+eval - L('pw')
+key - Home
+eval - L('pw')
+key - Shift+ArrowRight
+eval - L('pw')
+key - End
+eval - L('pw')
+key - Shift+ArrowLeft
+eval - L('pw')
+key - ArrowLeft
+eval - L('pw')
+== password_selection_after_writes
+type #pw abc
+eval - var e = document.getElementById('pw'); e.setSelectionRange(1, 2); L('pw')
+eval - e.defaultValue = 'zz'; L('pw')
+eval - e.value = e.value; L('pw')
+eval - e.value = 'abc'; L('pw')
+eval - e.setSelectionRange(1, 2, 'backward'); e.value = 'abcd'; L('pw')
+eval - e.setSelectionRange(1, 1); L('pw')
+eval - e.select(); L('pw')
+eval - e.defaultValue = 'q'; L('pw')
+eval - e.setSelectionRange(2, 3); e.value = 'abcd'; L('pw')
+eval - e.selectionStart = 1; L('pw')
+eval - e.selectionEnd = 0; L('pw')
+eval - e.selectionDirection = 'backward'; L('pw')
+== textarea_selection_blurred
+type #ta abc
+eval - var e = document.getElementById('ta'); e.blur(); L('ta')
+eval - e.setSelectionRange(1, 2); L('ta')
+eval - e.setSelectionRange(1, 1); L('ta')
+eval - e.setSelectionRange(0, 2, 'backward'); L('ta')
+eval - e.value = 'xy'; L('ta')
+eval - e.select(); L('ta')
+eval - e.focus(); L('ta')
+eval - e.blur(); e.setSelectionRange(1, 1, 'none'); L('ta')
+eval - e.focus(); L('ta')
+== text_selection_blurred
+type #tx abc
+eval - var e = document.getElementById('tx'); e.blur(); L('tx')
+eval - e.setSelectionRange(1, 2); L('tx')
+eval - e.setSelectionRange(1, 1); L('tx')
+eval - e.setSelectionRange(0, 2, 'backward'); L('tx')
+eval - e.value = 'xy'; L('tx')
+eval - e.select(); L('tx')
+eval - e.focus(); L('tx')
+eval - e.blur(); e.setSelectionRange(1, 1, 'none'); L('tx')
+eval - e.focus(); L('tx')

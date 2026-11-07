@@ -58,6 +58,9 @@ const MAX_DEPTH: u8 = 16;
 #[derive(Default)]
 pub(crate) struct FocusState {
     pub node: Option<NodeId>,
+    /// The element focused last. Chrome keeps the page selection in it after a blur, and a text control that holds the page selection never
+    /// has the direction `none` (`browser_selection.rs`).
+    pub sel_owner: Option<NodeId>,
     /// Raised at each change of the focused element. A transition that sees a new value stops.
     pub epoch: u64,
     depth: u8,
@@ -146,6 +149,7 @@ impl Dom {
     fn set_focus(&self, n: Option<NodeId>) {
         let mut st = self.st.borrow_mut();
         st.focus.node = n;
+        st.focus.sel_owner = n.or(st.focus.sel_owner);
         st.focus.epoch += 1;
     }
 

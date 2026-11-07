@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<html>
+<head>
+<style>
+body { margin: 0; }
+input, textarea { display: block; width: 200px; }
+</style>
+</head>
+<body>
+<!-- Controlled fields of React 19, reduced. On each change React calls onChange, sets the state, renders and then restores the controlled state
+     with updateInput / updateTextarea (react-dom, ReactDOMInput.js and ReactDOMTextarea.js): `value` is written only when it differs, and
+     `defaultValue` is written when it differs (an input not at all while it is a number field with focus). -->
+<textarea id="ta"></textarea>
+<input id="tx" type="text">
+<input id="em" type="email">
+<input id="se" type="search">
+<input id="ur" type="url">
+<input id="te" type="tel">
+<input id="pw" type="password">
+<input id="nu" type="number">
+<script>
+window.__log = [];
+var sel = function (e) { return e.selectionStart + ',' + e.selectionEnd + ',' + e.selectionDirection };
+// `eval - L('ta')` in a scenario logs the state of a field.
+var L = function (id) { var e = document.getElementById(id); window.__log.push('@' + id + ' ' + JSON.stringify(e.value) + ' ' + JSON.stringify(e.defaultValue) + ' ' + sel(e)) };
+[].forEach.call(document.querySelectorAll('input,textarea'), function (el) {
+  var d = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(el), 'value'), last = '';
+  Object.defineProperty(el, 'value', { configurable: true, get: function () { return d.get.call(this) }, set: function (v) { last = '' + v; d.set.call(this, v) } });
+  el.addEventListener('input', function () {
+    var now = d.get.call(el);
+    if (now === last) return;
+    last = now;
+    var state = now;
+    if (el.value !== state) el.value = state;
+    if (el.type !== 'number' || document.activeElement !== el) { if (el.defaultValue !== state) el.defaultValue = state }
+    window.__log.push(el.id + ' ' + JSON.stringify(el.value) + ' ' + JSON.stringify(el.defaultValue) + ' ' + sel(el));
+  });
+});
+</script>
+</body>
+</html>

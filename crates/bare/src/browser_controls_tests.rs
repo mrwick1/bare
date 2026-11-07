@@ -4,6 +4,6 @@
 use crate::browser_topic_tests::topic_test;
 
 topic_test!(chrome_validity, "validity", 83);
-topic_test!(chrome_textarea, "textarea", 37);
+topic_test!(chrome_textarea, "textarea", 38);
 topic_test!(chrome_labels, "labels", 33);
 topic_test!(chrome_reset, "reset", 29);
