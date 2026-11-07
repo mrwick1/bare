@@ -1,0 +1,126 @@
+cmp-constants-on-node-and-prototype	DISCONNECTED=11010010 PRECEDING=22010010 FOLLOWING=44010010 CONTAINS=88010010 CONTAINED_BY=1616010010 IMPLEMENTATION_SPECIFIC=3232010010 false 8
+cmp-method-shape	function,1,compareDocumentPosition,true,true,false,false,true
+cmp-self	0,0,0
+cmp-parent-and-child	20/10
+cmp-grandparent	20/10
+cmp-siblings	4/2 4/2 2/4
+cmp-cousins	4/2 4/2 4/2
+cmp-uncle-and-nephew	4/2
+cmp-text-and-element	4/2 4/2 4/2 4/2 20/10 4/2
+cmp-comment	4/2 10/20 8
+cmp-document-and-element	20/10 20/10 20/10 20/10
+cmp-doctype-and-html	4/2 4/2 4/2
+cmp-head-and-body-children	4/2 20/10 20/10
+cmp-moved-node	2/4 10/20 4/2
+cmp-two-detached-elements-flags	1,1,32,32,0,1,1,0,true,true
+cmp-two-detached-elements-opposite	true,true,true,33,33
+cmp-two-detached-creation-order	37,35,37,35,37
+cmp-detached-and-connected	1,1,32,32,true
+cmp-detached-subtree-contains	20/10 20/10 20/10
+cmp-detached-subtree-siblings	4/2 20/10
+cmp-detached-subtrees-disconnected	1,1,32,32,true
+cmp-removed-node	1,1,true,0
+cmp-text-detached	1,1,true
+cmp-fragment-and-children	20/10 4/2 20/10
+cmp-fragment-and-document	1,1,true
+cmp-document-and-detached	1,1,true
+cmp-template-content	1,1,true,20/10,4/2,1
+cmp-shadow-host-and-child	37,35,33,33,20/10
+cmp-shadow-and-light-tree	37,35,37,35,33,33
+cmp-two-shadow-trees	1,1,32,true,1
+cmp-shadow-siblings	4/2 20/10
+cmp-attr-and-own-element	20,10
+cmp-attr-self	0,true
+cmp-attr-and-attr-same-element	36,34,36,34,36,34
+cmp-attr-and-child-of-owner	4,2
+cmp-attr-and-parent-of-owner	10,20
+cmp-attr-and-preceding-element	2,4,4,2
+cmp-attr-and-attr-different-elements	4,2
+cmp-attr-nested-elements-attrs	4,2
+cmp-attr-and-document	10,20
+cmp-attr-and-text-in-owner	4,2
+cmp-attr-detached-element	10,20,1,1,true
+cmp-attr-never-attached	1,1,32,32,true,0
+cmp-attr-two-never-attached	1,1,32,true
+cmp-attr-removed-after-get	1,32,1
+cmp-attr-new-attribute-order	36,34
+cmp-no-argument	TypeError:Failed to execute 'compareDocumentPosition' on 'Node': 1 argument required, but only 0 present.
+cmp-null-argument	TypeError:Failed to execute 'compareDocumentPosition' on 'Node': parameter 1 is not of type 'Node'.
+cmp-undefined-argument	TypeError:Failed to execute 'compareDocumentPosition' on 'Node': parameter 1 is not of type 'Node'.
+cmp-non-node-arguments	TypeError:Failed to execute 'compareDocumentPosition' on 'Node': parameter 1 is not of type 'Node'. | TypeError:Failed to execute 'compareDocumentPosition' on 'Node': parameter 1 is not of type 'Node'. | TypeError:Failed to execute 'compareDocumentPosition' on 'Node': parameter 1 is not of type 'Node'. | TypeError:Failed to execute 'compareDocumentPosition' on 'Node': parameter 1 is not of type 'Node'. | TypeError:Failed to execute 'compareDocumentPosition' on 'Node': parameter 1 is not of type 'Node'. | TypeError:Failed to execute 'compareDocumentPosition' on 'Node': parameter 1 is not of type 'Node'. | TypeError:Failed to execute 'compareDocumentPosition' on 'Node': parameter 1 is not of type 'Node'. | TypeError:Failed to execute 'compareDocumentPosition' on 'Node': parameter 1 is not of type 'Node'.
+cmp-illegal-invocation	TypeError:Illegal invocation | TypeError:Illegal invocation | TypeError:Illegal invocation | TypeError:Illegal invocation | TypeError:Illegal invocation | TypeError:Illegal invocation | TypeError:Illegal invocation
+cmp-extra-arguments-are-ignored	4,4
+cmp-react-pattern	true,true,false,true
+cmp-sort-by-position	abcd
+cmp-deep-tree	20,10,20,10
+cmp-wide-tree	4,2,4,20
+same-node-shape	function,1,isSameNode,true,true,false
+same-node-results	true,false,false,false,true,false
+same-node-arguments	TypeError:Failed to execute 'isSameNode' on 'Node': 1 argument required, but only 0 present. | false | TypeError:Failed to execute 'isSameNode' on 'Node': parameter 1 is not of type 'Node'. | TypeError:Failed to execute 'isSameNode' on 'Node': parameter 1 is not of type 'Node'. | TypeError:Failed to execute 'isSameNode' on 'Node': parameter 1 is not of type 'Node'. | TypeError:Failed to execute 'isSameNode' on 'Node': parameter 1 is not of type 'Node'.
+same-node-illegal-invocation	TypeError:Illegal invocation | TypeError:Illegal invocation | TypeError:Illegal invocation | TypeError:Illegal invocation | TypeError:Illegal invocation
+same-node-attr	true,true,false,false,false
+equal-shape	function,1,isEqualNode,true,true,false
+equal-same-and-null	true,false,true,true
+equal-arguments	TypeError:Failed to execute 'isEqualNode' on 'Node': 1 argument required, but only 0 present. | false | TypeError:Failed to execute 'isEqualNode' on 'Node': parameter 1 is not of type 'Node'. | TypeError:Failed to execute 'isEqualNode' on 'Node': parameter 1 is not of type 'Node'. | TypeError:Failed to execute 'isEqualNode' on 'Node': parameter 1 is not of type 'Node'. | TypeError:Failed to execute 'isEqualNode' on 'Node': parameter 1 is not of type 'Node'.
+equal-illegal-invocation	TypeError:Illegal invocation | TypeError:Illegal invocation | TypeError:Illegal invocation | TypeError:Illegal invocation | TypeError:Illegal invocation
+equal-clones-deep	true,false,true
+equal-different-tags	true,false
+equal-attribute-order-is-ignored	true
+equal-attribute-differences	false,false,false,true,false
+equal-attribute-namespace	true,false,true
+equal-text-and-comment	true,false,false,true,false,true
+equal-children	true,false,false,false,true,false,true,false
+equal-split-text-is-not-equal	false,true,,,true
+equal-namespace-and-prefix	true,false,false,false,true,false
+equal-node-types	false,false,true,false,false,true,true
+equal-fragments	true,false,true,false
+equal-document-and-clone	true,true,false
+equal-template	false,false,true,false
+equal-template-contents-are-not-compared	true,false
+equal-shadow-root-is-not-compared	false,false
+equal-attr-nodes	true,true,false,false,false,false,false
+equal-attr-namespace	true,true,false
+equal-deep-tree	true,false
+contains-basics	true,true,false,false,false,true,true,false
+contains-arguments	TypeError:Failed to execute 'contains' on 'Node': 1 argument required, but only 0 present. | false | TypeError:Failed to execute 'contains' on 'Node': parameter 1 is not of type 'Node'. | TypeError:Failed to execute 'contains' on 'Node': parameter 1 is not of type 'Node'. | TypeError:Failed to execute 'contains' on 'Node': parameter 1 is not of type 'Node'. | TypeError:Failed to execute 'contains' on 'Node': parameter 1 is not of type 'Node'.
+contains-illegal-invocation	TypeError:Illegal invocation | TypeError:Illegal invocation | TypeError:Illegal invocation | TypeError:Illegal invocation | TypeError:Illegal invocation
+contains-shadow-and-template	false,true,false,false,true,false,true
+contains-attr	false,false,true,false,false
+root-node-basics	true,true,true,true,true,true,true
+root-node-shadow	true,true,true,true,true,true
+root-node-detached-host	true,true,true
+root-node-options	true | true | true | true | true | TypeError:Failed to execute 'getRootNode' on 'Node': The provided value is not of type 'GetRootNodeOptions'. | TypeError:Failed to execute 'getRootNode' on 'Node': The provided value is not of type 'GetRootNodeOptions'. | TypeError:Failed to execute 'getRootNode' on 'Node': The provided value is not of type 'GetRootNodeOptions'.
+root-node-template	true,true,true
+root-node-attr	true,true,true
+connected-basics	true,true,false,true,true,false,false
+connected-moves	false,true,false
+connected-shadow	true,true,false,false,true
+connected-template	false,false,true
+connected-attr	false,false,false
+owner-document-basics	true,,true,true,true,true,true
+owner-document-shadow-and-template	true,true
+owner-document-attr	true,true
+owner-document-shape	function,,true,true,get ownerDocument
+lookup-shapes	lookupNamespaceURI,function,1,lookupNamespaceURI,true,true,false lookupPrefix,function,1,lookupPrefix,true,true,false isDefaultNamespace,function,1,isDefaultNamespace,true,true,false
+lookup-html-element	http://www.w3.org/1999/xhtml,http://www.w3.org/1999/xhtml,,http://www.w3.org/XML/1998/namespace,http://www.w3.org/2000/xmlns/,http://www.w3.org/1999/xhtml,,,,,true,false,false,false
+lookup-arguments	lookupNamespaceURI:TypeError:Failed to execute 'lookupNamespaceURI' on 'Node': 1 argument required, but only 0 present. | lookupNamespaceURI:http://www.w3.org/1999/xhtml | lookupNamespaceURI:http://www.w3.org/1999/xhtml | lookupNamespaceURI:null | lookupNamespaceURI:null | lookupNamespaceURI:http://www.w3.org/XML/1998/namespace | lookupPrefix:TypeError:Failed to execute 'lookupPrefix' on 'Node': 1 argument required, but only 0 present. | lookupPrefix:null | lookupPrefix:null | lookupPrefix:null | lookupPrefix:null | lookupPrefix:null | isDefaultNamespace:TypeError:Failed to execute 'isDefaultNamespace' on 'Node': 1 argument required, but only 0 present. | isDefaultNamespace:false | isDefaultNamespace:false | isDefaultNamespace:false | isDefaultNamespace:false | isDefaultNamespace:false
+lookup-illegal-invocation	TypeError:Illegal invocation | TypeError:Illegal invocation | TypeError:Illegal invocation | TypeError:Illegal invocation | TypeError:Illegal invocation | TypeError:Illegal invocation | TypeError:Illegal invocation | TypeError:Illegal invocation | TypeError:Illegal invocation | TypeError:Illegal invocation | TypeError:Illegal invocation | TypeError:Illegal invocation
+lookup-svg-in-html	http://www.w3.org/2000/svg,http://www.w3.org/2000/svg,,,,true,false,true,false
+lookup-prefixed-element	http://www.w3.org/2000/svg,,,s,s,http://www.w3.org/2000/svg,http://www.w3.org/2000/svg,false,true
+lookup-xmlns-attributes	urn:foo,http://www.w3.org/1999/xhtml,urn:foo,http://www.w3.org/1999/xhtml,foo,foo,,false,false,true,
+lookup-xmlns-attribute-without-namespace	,http://www.w3.org/1999/xhtml,,false
+lookup-xmlns-empty-value	http://www.w3.org/2000/svg,,true
+lookup-xmlns-value-wins-over-parent	urn:a,urn:b,foo,foo
+lookup-prefix-skips-shadowed-declarations	foo,foo,foo
+lookup-xml-prefixes	http://www.w3.org/XML/1998/namespace,http://www.w3.org/2000/xmlns/,,,false
+lookup-document	http://www.w3.org/1999/xhtml,,,,true,false
+lookup-document-without-element	,,false,true
+lookup-doctype-and-fragment	,,false,true,,,false,true
+lookup-text-and-comment	http://www.w3.org/1999/xhtml,,true,http://www.w3.org/1999/xhtml,,true,,,false
+lookup-text-in-prefixed-parent	http://www.w3.org/2000/svg,,s,false
+lookup-fragment-child	http://www.w3.org/1999/xhtml,,
+lookup-shadow-root	,,false,http://www.w3.org/1999/xhtml
+lookup-attr	http://www.w3.org/1999/xhtml,,true,,,false,true
+lookup-attr-of-prefixed-element	http://www.w3.org/2000/svg,s,false
+lookup-string-coercion	,,false,,,false,,,false,,,false,http://www.w3.org/XML/1998/namespace,,false
+lookup-deep-chain	urn:deep,foo,true

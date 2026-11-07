@@ -1,0 +1,319 @@
+var $ = function (i) { return document.getElementById(i) };
+var js = JSON.stringify;
+var cmp = function (a, b) { return a.compareDocumentPosition(b) };
+var pair = function (a, b) { return [a.compareDocumentPosition(b), b.compareDocumentPosition(a)].join('/') };
+=== cmp-constants-on-node-and-prototype
+(function () { var n = ['DISCONNECTED', 'PRECEDING', 'FOLLOWING', 'CONTAINS', 'CONTAINED_BY', 'IMPLEMENTATION_SPECIFIC'], o = []; n.forEach(function (k) { var key = 'DOCUMENT_POSITION_' + k, d = Object.getOwnPropertyDescriptor(Node, key), p = Object.getOwnPropertyDescriptor(Node.prototype, key); o.push(k + '=' + Node[key] + Node.prototype[key] + [d.writable, d.enumerable, d.configurable, p.writable, p.enumerable, p.configurable].map(Number).join('')) }); return o.join(' ') + ' ' + Element.prototype.hasOwnProperty('DOCUMENT_POSITION_FOLLOWING') + ' ' + document.body.DOCUMENT_POSITION_CONTAINS })
+=== cmp-method-shape
+(function () { var d = Object.getOwnPropertyDescriptor(Node.prototype, 'compareDocumentPosition'); return [typeof d.value, d.value.length, d.value.name, d.writable, d.configurable, Element.prototype.hasOwnProperty('compareDocumentPosition'), Text.prototype.hasOwnProperty('compareDocumentPosition'), document.compareDocumentPosition === Node.prototype.compareDocumentPosition].join() })
+=== cmp-self
+@html <div id=a></div>
+(function () { return [cmp($('a'), $('a')), cmp(document, document), cmp($('a').firstChild || document, $('a').firstChild || document)].join() })
+=== cmp-parent-and-child
+@html <div id=a><p id=b></p></div>
+(function () { return pair($('a'), $('b')) })
+=== cmp-grandparent
+@html <div id=a><div><p id=b></p></div></div>
+(function () { return pair($('a'), $('b')) })
+=== cmp-siblings
+@html <p id=a></p><p id=b></p><p id=c></p>
+(function () { return [pair($('a'), $('b')), pair($('a'), $('c')), pair($('c'), $('b'))].join(' ') })
+=== cmp-cousins
+@html <div><p id=a><i id=x></i></p></div><div><p id=b><i id=y></i></p></div>
+(function () { return [pair($('x'), $('y')), pair($('a'), $('y')), pair($('x'), $('b'))].join(' ') })
+=== cmp-uncle-and-nephew
+@html <div id=u></div><div><p><i id=n></i></p></div>
+(function () { return pair($('u'), $('n')) })
+=== cmp-text-and-element
+@html <div id=a>t1<b id=b>t2</b>t3</div>
+(function () { var a = $('a'), b = $('b'); var t1 = a.firstChild, t2 = b.firstChild, t3 = a.lastChild; return [pair(t1, t2), pair(t2, t3), pair(t1, b), pair(b, t3), pair(a, t2), pair(t1, t3)].join(' ') })
+=== cmp-comment
+@html <div id=a><!--c--><p id=b></p></div>
+(function () { var c = $('a').firstChild; return [pair(c, $('b')), pair(c, $('a')), c.nodeType].join(' ') })
+=== cmp-document-and-element
+@html <div id=a></div>
+(function () { return [pair(document, $('a')), pair(document, document.documentElement), pair(document, document.body), pair(document, document.doctype)].join(' ') })
+=== cmp-doctype-and-html
+(function () { return [pair(document.doctype, document.documentElement), pair(document.doctype, document.body), pair(document.head, document.body)].join(' ') })
+=== cmp-head-and-body-children
+@html <p id=a></p>
+(function () { return [pair(document.head, $('a')), pair(document.body, $('a')), pair(document.documentElement, $('a'))].join(' ') })
+=== cmp-moved-node
+@html <div id=a></div><div id=b></div><p id=p></p>
+(function () { var before = pair($('p'), $('a')); $('a').appendChild($('p')); return before + ' ' + pair($('p'), $('a')) + ' ' + pair($('p'), $('b')) })
+=== cmp-two-detached-elements-flags
+(function () { var a = document.createElement('div'), b = document.createElement('div'); var x = cmp(a, b), y = cmp(b, a); return [x & 1, y & 1, x & 32, y & 32, (x & 2) ? 1 : 0, (x & 4) ? 1 : 0, (y & 2) ? 1 : 0, (y & 4) ? 1 : 0, cmp(a, b) === x, cmp(a, b) === cmp(a, b)].join() })
+=== cmp-two-detached-elements-opposite
+(function () { var a = document.createElement('div'), b = document.createElement('p'); var x = cmp(a, b), y = cmp(b, a); return [(x & 6) !== (y & 6), (x & 6) === 2 || (x & 6) === 4, (y & 6) === 2 || (y & 6) === 4, x & ~6, y & ~6].join() })
+=== cmp-two-detached-creation-order
+(function () { var a = document.createElement('div'), b = document.createElement('div'), c = document.createElement('div'); return [cmp(a, b), cmp(b, a), cmp(a, c), cmp(c, b), cmp(b, c)].join() })
+=== cmp-detached-and-connected
+@html <p id=a></p>
+(function () { var e = document.createElement('div'); var x = cmp($('a'), e), y = cmp(e, $('a')); return [x & 1, y & 1, x & 32, y & 32, (x & 6) !== (y & 6)].join() })
+=== cmp-detached-subtree-contains
+(function () { var a = document.createElement('div'), b = document.createElement('p'), c = document.createElement('i'); a.appendChild(b); b.appendChild(c); return [pair(a, b), pair(a, c), pair(b, c)].join(' ') })
+=== cmp-detached-subtree-siblings
+(function () { var r = document.createElement('div'), a = document.createElement('p'), b = document.createElement('p'); r.appendChild(a); r.appendChild(b); return [pair(a, b), pair(r, a)].join(' ') })
+=== cmp-detached-subtrees-disconnected
+(function () { var r1 = document.createElement('div'), a = document.createElement('p'), r2 = document.createElement('div'), b = document.createElement('p'); r1.appendChild(a); r2.appendChild(b); var x = cmp(a, b), y = cmp(b, a); return [x & 1, y & 1, x & 32, y & 32, (x & 6) !== (y & 6)].join() })
+=== cmp-removed-node
+@html <div id=a><p id=b></p></div>
+(function () { var a = $('a'), b = $('b'); a.removeChild(b); var x = cmp(a, b), y = cmp(b, a); return [x & 1, y & 1, (x & 6) !== (y & 6), cmp(a, a)].join() })
+=== cmp-text-detached
+(function () { var a = document.createTextNode('a'), b = document.createTextNode('b'); var x = cmp(a, b), y = cmp(b, a); return [x & 1, y & 1, (x & 6) !== (y & 6)].join() })
+=== cmp-fragment-and-children
+(function () { var f = document.createDocumentFragment(), a = document.createElement('p'), b = document.createElement('p'); f.appendChild(a); f.appendChild(b); return [pair(f, a), pair(a, b), pair(f, b)].join(' ') })
+=== cmp-fragment-and-document
+(function () { var f = document.createDocumentFragment(); var x = cmp(f, document), y = cmp(document, f); return [x & 1, y & 1, (x & 6) !== (y & 6)].join() })
+=== cmp-document-and-detached
+(function () { var e = document.createElement('p'); var x = cmp(document, e), y = cmp(e, document); return [x & 1, y & 1, (x & 6) !== (y & 6)].join() })
+=== cmp-template-content
+@html <template id=t><p id=p>a</p><b>b</b></template><div id=d></div>
+(function () { var t = $('t'), c = t.content; var x = cmp(t, c), y = cmp(c, t); return [x & 1, y & 1, (x & 6) !== (y & 6), pair(c, c.firstChild), pair(c.firstChild, c.lastChild), cmp(t, c.firstChild) & 1].join() })
+=== cmp-shadow-host-and-child
+@html <div id=h></div>
+(function () { var h = $('h'), s = h.attachShadow({ mode: 'open' }), p = document.createElement('p'); s.appendChild(p); var x = cmp(h, p), y = cmp(p, h); return [x, y, cmp(h, s) & 33, cmp(s, h) & 33, pair(s, p)].join() })
+=== cmp-shadow-and-light-tree
+@html <div id=h><span id=l></span></div><i id=o></i>
+(function () { var h = $('h'), s = h.attachShadow({ mode: 'open' }), p = document.createElement('p'); s.appendChild(p); return [cmp($('l'), p), cmp(p, $('l')), cmp($('o'), p), cmp(p, $('o')), cmp(document, p) & 33, cmp(p, document) & 33].join() })
+=== cmp-two-shadow-trees
+@html <div id=a></div><div id=b></div>
+(function () { var s1 = $('a').attachShadow({ mode: 'open' }), s2 = $('b').attachShadow({ mode: 'open' }), p = document.createElement('p'), q = document.createElement('p'); s1.appendChild(p); s2.appendChild(q); var x = cmp(p, q), y = cmp(q, p); return [x & 1, y & 1, x & 32, (x & 6) !== (y & 6), cmp(s1, s2) & 1].join() })
+=== cmp-shadow-siblings
+@html <div id=a></div>
+(function () { var s = $('a').attachShadow({ mode: 'open' }), p = document.createElement('p'), q = document.createElement('p'); s.appendChild(p); s.appendChild(q); return [pair(p, q), pair(s, q)].join(' ') })
+=== cmp-attr-and-own-element
+@html <div id=a class=c title=t></div>
+(function () { var e = $('a'), at = e.getAttributeNode('class'); return [e.compareDocumentPosition(at), at.compareDocumentPosition(e)].join() })
+=== cmp-attr-self
+@html <div id=a class=c></div>
+(function () { var at = $('a').getAttributeNode('id'); return [at.compareDocumentPosition(at), $('a').getAttributeNode('id') === at].join() })
+=== cmp-attr-and-attr-same-element
+@html <div id=a class=c title=t></div>
+(function () { var e = $('a'), i = e.getAttributeNode('id'), c = e.getAttributeNode('class'), t = e.getAttributeNode('title'); return [i.compareDocumentPosition(c), c.compareDocumentPosition(i), i.compareDocumentPosition(t), t.compareDocumentPosition(i), c.compareDocumentPosition(t), t.compareDocumentPosition(c)].join() })
+=== cmp-attr-and-child-of-owner
+@html <div id=a class=c><p id=b></p></div>
+(function () { var at = $('a').getAttributeNode('class'), b = $('b'); return [at.compareDocumentPosition(b), b.compareDocumentPosition(at)].join() })
+=== cmp-attr-and-parent-of-owner
+@html <section id=s><div id=a class=c></div></section>
+(function () { var at = $('a').getAttributeNode('class'), s = $('s'); return [at.compareDocumentPosition(s), s.compareDocumentPosition(at)].join() })
+=== cmp-attr-and-preceding-element
+@html <p id=p></p><div id=a class=c></div><i id=n></i>
+(function () { var at = $('a').getAttributeNode('class'); return [at.compareDocumentPosition($('p')), $('p').compareDocumentPosition(at), at.compareDocumentPosition($('n')), $('n').compareDocumentPosition(at)].join() })
+=== cmp-attr-and-attr-different-elements
+@html <p id=p class=x></p><div id=a class=c></div>
+(function () { var x = $('p').getAttributeNode('class'), c = $('a').getAttributeNode('class'); return [x.compareDocumentPosition(c), c.compareDocumentPosition(x)].join() })
+=== cmp-attr-nested-elements-attrs
+@html <div id=a class=c><p id=b class=d></p></div>
+(function () { var x = $('a').getAttributeNode('class'), c = $('b').getAttributeNode('class'); return [x.compareDocumentPosition(c), c.compareDocumentPosition(x)].join() })
+=== cmp-attr-and-document
+@html <div id=a class=c></div>
+(function () { var x = $('a').getAttributeNode('class'); return [x.compareDocumentPosition(document), document.compareDocumentPosition(x)].join() })
+=== cmp-attr-and-text-in-owner
+@html <div id=a class=c>text</div>
+(function () { var x = $('a').getAttributeNode('class'), t = $('a').firstChild; return [x.compareDocumentPosition(t), t.compareDocumentPosition(x)].join() })
+=== cmp-attr-detached-element
+(function () { var e = document.createElement('div'); e.setAttribute('class', 'c'); var at = e.getAttributeNode('class'); var o = document.createElement('p'); var x = at.compareDocumentPosition(o), y = o.compareDocumentPosition(at); return [at.compareDocumentPosition(e), e.compareDocumentPosition(at), x & 1, y & 1, (x & 6) !== (y & 6)].join() })
+=== cmp-attr-never-attached
+(function () { var at = document.createAttribute('x'), e = document.createElement('p'); var x = at.compareDocumentPosition(e), y = e.compareDocumentPosition(at); return [x & 1, y & 1, x & 32, y & 32, (x & 6) !== (y & 6), at.compareDocumentPosition(at)].join() })
+=== cmp-attr-two-never-attached
+(function () { var a = document.createAttribute('x'), b = document.createAttribute('y'); var x = a.compareDocumentPosition(b), y = b.compareDocumentPosition(a); return [x & 1, y & 1, x & 32, (x & 6) !== (y & 6)].join() })
+=== cmp-attr-removed-after-get
+@html <div id=a class=c></div>
+(function () { var e = $('a'), at = e.getAttributeNode('class'); e.removeAttribute('class'); var x = at.compareDocumentPosition(e); return [x & 1, x & 32, e.compareDocumentPosition(at) & 1].join() })
+=== cmp-attr-new-attribute-order
+@html <div id=a class=c></div>
+(function () { var e = $('a'), i = e.getAttributeNode('id'); e.setAttribute('title', 't'); var t = e.getAttributeNode('title'); return [i.compareDocumentPosition(t), t.compareDocumentPosition(i)].join() })
+=== cmp-no-argument
+(function () { try { document.body.compareDocumentPosition(); return 'no throw' } catch (e) { return e.name + ':' + e.message } })
+=== cmp-null-argument
+(function () { try { document.body.compareDocumentPosition(null); return 'no throw' } catch (e) { return e.name + ':' + e.message } })
+=== cmp-undefined-argument
+(function () { try { document.body.compareDocumentPosition(undefined); return 'no throw' } catch (e) { return e.name + ':' + e.message } })
+=== cmp-non-node-arguments
+(function () { var o = []; [{}, 1, 'a', true, window, document.body.classList, [], function () {}].forEach(function (v) { try { document.body.compareDocumentPosition(v); o.push('no throw') } catch (e) { o.push(e.name + ':' + e.message) } }); return o.join(' | ') })
+=== cmp-illegal-invocation
+(function () { var f = Node.prototype.compareDocumentPosition, o = []; [undefined, null, {}, 1, 'a', window, document.body.classList].forEach(function (v) { try { f.call(v, document.body); o.push('no throw') } catch (e) { o.push(e.name + ':' + e.message) } }); return o.join(' | ') })
+=== cmp-extra-arguments-are-ignored
+@html <p id=a></p><p id=b></p>
+(function () { return cmp($('a'), $('b')) + ',' + $('a').compareDocumentPosition($('b'), 5, {}) })
+=== cmp-react-pattern
+@html <div id=a></div><div id=b></div>
+(function () { var a = $('a'), b = $('b'); return [!!(a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING), !!(b.compareDocumentPosition(a) & Node.DOCUMENT_POSITION_PRECEDING), !!(a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_PRECEDING), !!(document.body.compareDocumentPosition(a) & Node.DOCUMENT_POSITION_CONTAINED_BY)].join() })
+=== cmp-sort-by-position
+@html <p id=a></p><p id=b></p><p id=c></p><p id=d></p>
+(function () { var l = [$('c'), $('a'), $('d'), $('b')]; l.sort(function (x, y) { return x.compareDocumentPosition(y) & 4 ? -1 : 1 }); return l.map(function (e) { return e.id }).join('') })
+=== cmp-deep-tree
+(function () { var r = document.createElement('div'), c = r, k = []; for (var i = 0; i < 200; i++) { var n = document.createElement('div'); c.appendChild(n); k.push(n); c = n } return [cmp(r, c), cmp(c, r), cmp(k[10], k[150]), cmp(k[150], k[10])].join() })
+=== cmp-wide-tree
+(function () { var r = document.createElement('div'), k = []; for (var i = 0; i < 300; i++) { var n = document.createElement('i'); r.appendChild(n); k.push(n) } return [cmp(k[0], k[299]), cmp(k[299], k[0]), cmp(k[100], k[101]), cmp(r, k[250])].join() })
+=== same-node-shape
+(function () { var d = Object.getOwnPropertyDescriptor(Node.prototype, 'isSameNode'); return [typeof d.value, d.value.length, d.value.name, d.writable, d.configurable, Element.prototype.hasOwnProperty('isSameNode')].join() })
+=== same-node-results
+@html <p id=a></p><p id=b></p>
+(function () { var a = $('a'); return [a.isSameNode(a), a.isSameNode($('b')), a.isSameNode(null), a.isSameNode(a.cloneNode()), document.isSameNode(document), a.isSameNode(a.getAttributeNode('id') || document)].join() })
+=== same-node-arguments
+(function () { var o = []; [[], [undefined], [{}], [1], ['a'], [window]].forEach(function (a) { try { o.push(document.body.isSameNode.apply(document.body, a)) } catch (e) { o.push(e.name + ':' + e.message) } }); return o.join(' | ') })
+=== same-node-illegal-invocation
+(function () { var o = []; [undefined, null, {}, 1, window].forEach(function (v) { try { o.push(Node.prototype.isSameNode.call(v, document.body)) } catch (e) { o.push(e.name + ':' + e.message) } }); return o.join(' | ') })
+=== same-node-attr
+@html <p id=a class=c></p>
+(function () { var e = $('a'), at = e.getAttributeNode('class'); return [at.isSameNode(at), at.isSameNode(e.getAttributeNode('class')), at.isSameNode(e.getAttributeNode('id')), e.isSameNode(at), at.isSameNode(null)].join() })
+=== equal-shape
+(function () { var d = Object.getOwnPropertyDescriptor(Node.prototype, 'isEqualNode'); return [typeof d.value, d.value.length, d.value.name, d.writable, d.configurable, Element.prototype.hasOwnProperty('isEqualNode')].join() })
+=== equal-same-and-null
+@html <p id=a></p>
+(function () { var a = $('a'); return [a.isEqualNode(a), a.isEqualNode(null), a.isEqualNode(a.cloneNode(true)), document.isEqualNode(document)].join() })
+=== equal-arguments
+(function () { var o = []; [[], [undefined], [{}], [1], ['a'], [window]].forEach(function (a) { try { o.push(document.body.isEqualNode.apply(document.body, a)) } catch (e) { o.push(e.name + ':' + e.message) } }); return o.join(' | ') })
+=== equal-illegal-invocation
+(function () { var o = []; [undefined, null, {}, 1, window].forEach(function (v) { try { o.push(Node.prototype.isEqualNode.call(v, document.body)) } catch (e) { o.push(e.name + ':' + e.message) } }); return o.join(' | ') })
+=== equal-clones-deep
+@html <div id=a class="x y" data-k=1><p>t<b>u</b><!--c--></p><i></i></div>
+(function () { var a = $('a'); return [a.isEqualNode(a.cloneNode(true)), a.isEqualNode(a.cloneNode(false)), a.cloneNode(false).isEqualNode(a.cloneNode(false))].join() })
+=== equal-different-tags
+(function () { return [document.createElement('p').isEqualNode(document.createElement('p')), document.createElement('p').isEqualNode(document.createElement('div'))].join() })
+=== equal-attribute-order-is-ignored
+(function () { var a = document.createElement('p'), b = document.createElement('p'); a.setAttribute('x', '1'); a.setAttribute('y', '2'); b.setAttribute('y', '2'); b.setAttribute('x', '1'); return a.isEqualNode(b) })
+=== equal-attribute-differences
+(function () { var m = function (f) { var a = document.createElement('p'), b = document.createElement('p'); f(a, b); return a.isEqualNode(b) }; return [m(function (a, b) { a.setAttribute('x', '1') }), m(function (a, b) { a.setAttribute('x', '1'); b.setAttribute('x', '2') }), m(function (a, b) { a.setAttribute('x', '1'); b.setAttribute('y', '1') }), m(function (a, b) { a.setAttribute('x', ''); b.setAttribute('x', '') }), m(function (a, b) { a.setAttribute('x', '1'); a.setAttribute('y', '1'); b.setAttribute('x', '1') })].join() })
+=== equal-attribute-namespace
+(function () { var X = 'http://www.w3.org/1999/xlink'; var m = function (f) { var a = document.createElementNS('http://www.w3.org/2000/svg', 'a'), b = document.createElementNS('http://www.w3.org/2000/svg', 'a'); f(a, b); return a.isEqualNode(b) }; return [m(function (a, b) { a.setAttributeNS(X, 'xlink:href', '#a'); b.setAttributeNS(X, 'xlink:href', '#a') }), m(function (a, b) { a.setAttributeNS(X, 'xlink:href', '#a'); b.setAttribute('xlink:href', '#a') }), m(function (a, b) { a.setAttributeNS(X, 'xlink:href', '#a'); b.setAttributeNS(X, 'x:href', '#a') })].join() })
+=== equal-text-and-comment
+(function () { var t = function (s) { return document.createTextNode(s) }, c = function (s) { return document.createComment(s) }; return [t('a').isEqualNode(t('a')), t('a').isEqualNode(t('b')), t('a').isEqualNode(c('a')), c('a').isEqualNode(c('a')), c('a').isEqualNode(c('b')), t('').isEqualNode(t(''))].join() })
+=== equal-children
+(function () { var m = function (h1, h2) { var a = document.createElement('div'), b = document.createElement('div'); a.innerHTML = h1; b.innerHTML = h2; return a.isEqualNode(b) }; return [m('<p>a</p>', '<p>a</p>'), m('<p>a</p>', '<p>b</p>'), m('<p>a</p>', '<p>a</p><i></i>'), m('<p></p><i></i>', '<i></i><p></p>'), m('a<!--x-->', 'a<!--x-->'), m('a<!--x-->', 'a<!--y-->'), m('', ''), m('ab', 'a')].join() })
+=== equal-split-text-is-not-equal
+(function () { var a = document.createElement('div'), b = document.createElement('div'); a.appendChild(document.createTextNode('ab')); b.appendChild(document.createTextNode('a')); b.appendChild(document.createTextNode('b')); return [a.isEqualNode(b), a.textContent === b.textContent, a.normalize(), b.normalize(), a.isEqualNode(b)].join() })
+=== equal-namespace-and-prefix
+(function () { var S = 'http://www.w3.org/2000/svg', M = 'http://www.w3.org/1998/Math/MathML'; return [document.createElementNS(S, 'a').isEqualNode(document.createElementNS(S, 'a')), document.createElementNS(S, 'a').isEqualNode(document.createElement('a')), document.createElementNS(S, 'a').isEqualNode(document.createElementNS(M, 'a')), document.createElementNS(S, 's:a').isEqualNode(document.createElementNS(S, 'a')), document.createElementNS(S, 's:a').isEqualNode(document.createElementNS(S, 's:a')), document.createElementNS(S, 's:a').isEqualNode(document.createElementNS(S, 't:a'))].join() })
+=== equal-node-types
+@html <p id=a>t</p>
+(function () { var a = $('a'), t = a.firstChild, f = document.createDocumentFragment(); return [a.isEqualNode(t), t.isEqualNode(a), f.isEqualNode(document.createDocumentFragment()), f.isEqualNode(a), document.isEqualNode(f), document.doctype.isEqualNode(document.doctype), document.doctype.isEqualNode(document.doctype.cloneNode())].join() })
+=== equal-fragments
+(function () { var m = function (h1, h2) { var a = document.createDocumentFragment(), b = document.createDocumentFragment(); var x = document.createElement('div'), y = document.createElement('div'); x.innerHTML = h1; y.innerHTML = h2; while (x.firstChild) a.appendChild(x.firstChild); while (y.firstChild) b.appendChild(y.firstChild); return a.isEqualNode(b) }; return [m('<p>a</p>', '<p>a</p>'), m('<p>a</p>', '<p>b</p>'), m('', ''), m('a', '')].join() })
+=== equal-document-and-clone
+(function () { return [document.isEqualNode(document), document.documentElement.isEqualNode(document.documentElement.cloneNode(true)), document.body.isEqualNode(document.head)].join() })
+=== equal-template
+@html <template id=a><p>x</p></template><template id=b><p>x</p></template><template id=c><p>y</p></template>
+(function () { return [$('a').isEqualNode($('b')), $('a').isEqualNode($('c')), $('a').isEqualNode($('a').cloneNode(true)), $('a').isEqualNode($('c').cloneNode(true))].join() })
+=== equal-template-contents-are-not-compared
+@html <div id=d><template><p>x</p></template><template><p>y</p></template></div>
+(function () { var d = $('d'); return [d.firstChild.isEqualNode(d.lastChild), d.firstChild.content.isEqualNode(d.lastChild.content)].join() })
+=== equal-shadow-root-is-not-compared
+@html <div id=a></div><div id=b></div>
+(function () { var s = $('a').attachShadow({ mode: 'open' }); s.appendChild(document.createElement('p')); return [$('a').isEqualNode($('b')), s.isEqualNode(document.createDocumentFragment())].join() })
+=== equal-attr-nodes
+@html <p id=a class=c></p><p id=b class=c></p><p id=d class=e></p>
+(function () { var x = $('a').getAttributeNode('class'), y = $('b').getAttributeNode('class'), z = $('d').getAttributeNode('class'), w = $('a').getAttributeNode('id'); return [x.isEqualNode(x), x.isEqualNode(y), x.isEqualNode(z), x.isEqualNode(w), x.isEqualNode($('a')), $('a').isEqualNode(x), x.isEqualNode(null)].join() })
+=== equal-attr-namespace
+(function () { var X = 'http://www.w3.org/1999/xlink'; var a = document.createAttributeNS(X, 'xlink:href'), b = document.createAttributeNS(X, 'xlink:href'), c = document.createAttributeNS(X, 'x:href'), d = document.createAttribute('href'); a.value = b.value = c.value = d.value = 'v'; return [a.isEqualNode(b), a.isEqualNode(c), a.isEqualNode(d)].join() })
+=== equal-deep-tree
+(function () { var mk = function (n) { var r = document.createElement('div'), c = r; for (var i = 0; i < n; i++) { var e = document.createElement('div'); c.appendChild(e); c = e } c.textContent = 'x'; return r }; return [mk(100).isEqualNode(mk(100)), mk(100).isEqualNode(mk(99))].join() })
+=== contains-basics
+@html <div id=a><p id=b><i id=c></i></p></div><div id=d></div>
+(function () { return [$('a').contains($('c')), $('a').contains($('a')), $('c').contains($('a')), $('a').contains($('d')), $('a').contains(null), document.contains($('c')), document.contains(document), $('a').contains($('c').firstChild)].join() })
+=== contains-arguments
+(function () { var o = []; [[], [undefined], [{}], [1], ['a'], [window]].forEach(function (a) { try { o.push(document.body.contains.apply(document.body, a)) } catch (e) { o.push(e.name + ':' + e.message) } }); return o.join(' | ') })
+=== contains-illegal-invocation
+(function () { var o = []; [undefined, null, {}, 1, window].forEach(function (v) { try { o.push(Node.prototype.contains.call(v, document.body)) } catch (e) { o.push(e.name + ':' + e.message) } }); return o.join(' | ') })
+=== contains-shadow-and-template
+@html <div id=h></div><template id=t><p id=p></p></template>
+(function () { var h = $('h'), s = h.attachShadow({ mode: 'open' }), p = document.createElement('p'); s.appendChild(p); var t = $('t'); return [h.contains(p), s.contains(p), document.contains(p), t.contains(t.content.firstChild), t.content.contains(t.content.firstChild), h.contains(s), s.contains(s)].join() })
+=== contains-attr
+@html <div id=a class=c></div>
+(function () { var at = $('a').getAttributeNode('class'); return [$('a').contains(at), document.contains(at), at.contains(at), at.contains($('a')), at.contains(null)].join() })
+=== root-node-basics
+@html <div id=a><p id=b></p></div>
+(function () { var e = document.createElement('div'), c = document.createElement('p'); e.appendChild(c); var f = document.createDocumentFragment(); var t = document.createTextNode('x'); f.appendChild(t); return [$('b').getRootNode() === document, document.getRootNode() === document, c.getRootNode() === e, e.getRootNode() === e, t.getRootNode() === f, f.getRootNode() === f, document.doctype.getRootNode() === document].join() })
+=== root-node-shadow
+@html <div id=h></div>
+(function () { var h = $('h'), s = h.attachShadow({ mode: 'open' }), p = document.createElement('p'); s.appendChild(p); return [p.getRootNode() === s, p.getRootNode({ composed: false }) === s, p.getRootNode({ composed: true }) === document, s.getRootNode() === s, s.getRootNode({ composed: true }) === document, h.getRootNode({ composed: true }) === document].join() })
+=== root-node-detached-host
+(function () { var h = document.createElement('div'), s = h.attachShadow({ mode: 'open' }), p = document.createElement('p'); s.appendChild(p); return [p.getRootNode({ composed: true }) === h, p.getRootNode() === s, s.getRootNode({ composed: true }) === h].join() })
+=== root-node-options
+@html <div id=a></div>
+(function () { var o = []; [undefined, null, {}, { composed: 1 }, { composed: '' }, 1, 'a', true].forEach(function (v) { try { o.push($('a').getRootNode(v) === document) } catch (e) { o.push(e.name + ':' + e.message) } }); return o.join(' | ') })
+=== root-node-template
+@html <template id=t><p id=p></p></template>
+(function () { var c = $('t').content, p = c.firstChild; return [p.getRootNode() === c, p.getRootNode({ composed: true }) === c, c.getRootNode() === c].join() })
+=== root-node-attr
+@html <div id=a class=c></div>
+(function () { var at = $('a').getAttributeNode('class'), x = document.createAttribute('q'); return [at.getRootNode() === at, x.getRootNode() === x, at.getRootNode({ composed: true }) === at].join() })
+=== connected-basics
+@html <div id=a><p id=b></p></div>
+(function () { var e = document.createElement('div'); return [$('b').isConnected, document.isConnected, e.isConnected, document.doctype.isConnected, $('b').firstChild === null, document.createTextNode('x').isConnected, document.createDocumentFragment().isConnected].join() })
+=== connected-moves
+@html <div id=a></div>
+(function () { var e = document.createElement('p'); var o = [e.isConnected]; $('a').appendChild(e); o.push(e.isConnected); $('a').removeChild(e); o.push(e.isConnected); return o.join() })
+=== connected-shadow
+@html <div id=h></div>
+(function () { var h = $('h'), s = h.attachShadow({ mode: 'open' }), p = document.createElement('p'); s.appendChild(p); var d = document.createElement('div'), s2 = d.attachShadow({ mode: 'open' }), q = document.createElement('p'); s2.appendChild(q); return [p.isConnected, s.isConnected, q.isConnected, s2.isConnected, h.isConnected].join() })
+=== connected-template
+@html <template id=t><p id=p></p></template>
+(function () { var c = $('t').content; return [c.isConnected, c.firstChild.isConnected, $('t').isConnected].join() })
+=== connected-attr
+@html <div id=a class=c></div>
+(function () { var at = $('a').getAttributeNode('class'); var e = document.createElement('p'); e.setAttribute('x', '1'); return [at.isConnected, e.getAttributeNode('x').isConnected, document.createAttribute('q').isConnected].join() })
+=== owner-document-basics
+@html <div id=a>t</div>
+(function () { var f = document.createDocumentFragment(), e = document.createElement('p'); return [$('a').ownerDocument === document, document.ownerDocument, e.ownerDocument === document, f.ownerDocument === document, $('a').firstChild.ownerDocument === document, document.doctype.ownerDocument === document, document.createComment('c').ownerDocument === document].join() })
+=== owner-document-shadow-and-template
+@html <div id=h></div><template id=t><p></p></template>
+(function () { var s = $('h').attachShadow({ mode: 'open' }); return [s.ownerDocument === document, $('t').ownerDocument === document].join() })
+=== owner-document-attr
+@html <div id=a class=c></div>
+(function () { var at = $('a').getAttributeNode('class'); return [at.ownerDocument === document, document.createAttribute('q').ownerDocument === document].join() })
+=== owner-document-shape
+(function () { var d = Object.getOwnPropertyDescriptor(Node.prototype, 'ownerDocument'); return [typeof d.get, d.set, d.enumerable, d.configurable, d.get.name].join() })
+=== lookup-shapes
+(function () { return ['lookupNamespaceURI', 'lookupPrefix', 'isDefaultNamespace'].map(function (k) { var d = Object.getOwnPropertyDescriptor(Node.prototype, k); return [k, typeof d.value, d.value.length, d.value.name, d.writable, d.configurable, Element.prototype.hasOwnProperty(k)].join() }).join(' ') })
+=== lookup-html-element
+@html <div id=a></div>
+(function () { var e = $('a'), H = 'http://www.w3.org/1999/xhtml'; return [e.lookupNamespaceURI(null), e.lookupNamespaceURI(''), e.lookupNamespaceURI('x'), e.lookupNamespaceURI('xml'), e.lookupNamespaceURI('xmlns'), e.lookupNamespaceURI(undefined), e.lookupPrefix(H), e.lookupPrefix(null), e.lookupPrefix(''), e.lookupPrefix('x'), e.isDefaultNamespace(H), e.isDefaultNamespace(null), e.isDefaultNamespace(''), e.isDefaultNamespace('x')].join() })
+=== lookup-arguments
+(function () { var o = []; ['lookupNamespaceURI', 'lookupPrefix', 'isDefaultNamespace'].forEach(function (k) { [[], [undefined], [null], [1], [{}], [{ toString: function () { return 'xml' } }]].forEach(function (a) { try { o.push(k + ':' + document.body[k].apply(document.body, a)) } catch (e) { o.push(k + ':' + e.name + ':' + e.message) } }) }); return o.join(' | ') })
+=== lookup-illegal-invocation
+(function () { var o = []; ['lookupNamespaceURI', 'lookupPrefix', 'isDefaultNamespace'].forEach(function (k) { [undefined, null, {}, window].forEach(function (v) { try { o.push(Node.prototype[k].call(v, null)) } catch (e) { o.push(e.name + ':' + e.message) } }) }); return o.join(' | ') })
+=== lookup-svg-in-html
+@html <svg id=s><rect id=r></rect></svg>
+(function () { var S = 'http://www.w3.org/2000/svg', H = 'http://www.w3.org/1999/xhtml'; var s = $('s'), r = $('r'); return [s.lookupNamespaceURI(null), r.lookupNamespaceURI(null), s.lookupPrefix(S), s.lookupPrefix(H), document.body.lookupPrefix(S), s.isDefaultNamespace(S), s.isDefaultNamespace(H), r.isDefaultNamespace(S), document.body.isDefaultNamespace(S)].join() })
+=== lookup-prefixed-element
+(function () { var S = 'http://www.w3.org/2000/svg'; var e = document.createElementNS(S, 's:rect'), c = document.createElementNS(S, 'circle'); e.appendChild(c); return [e.lookupNamespaceURI('s'), e.lookupNamespaceURI(null), e.lookupNamespaceURI('t'), e.lookupPrefix(S), c.lookupPrefix(S), c.lookupNamespaceURI('s'), c.lookupNamespaceURI(null), e.isDefaultNamespace(S), c.isDefaultNamespace(S)].join() })
+=== lookup-xmlns-attributes
+(function () { var N = 'http://www.w3.org/2000/xmlns/'; var a = document.createElement('div'), b = document.createElement('p'); a.setAttributeNS(N, 'xmlns:foo', 'urn:foo'); a.setAttributeNS(N, 'xmlns', 'urn:def'); a.appendChild(b); return [a.lookupNamespaceURI('foo'), a.lookupNamespaceURI(null), b.lookupNamespaceURI('foo'), b.lookupNamespaceURI(null), a.lookupPrefix('urn:foo'), b.lookupPrefix('urn:foo'), a.lookupPrefix('urn:def'), a.isDefaultNamespace('urn:def'), b.isDefaultNamespace('urn:def'), a.isDefaultNamespace('http://www.w3.org/1999/xhtml'), a.lookupNamespaceURI('bar')].join() })
+=== lookup-xmlns-attribute-without-namespace
+(function () { var a = document.createElement('div'); a.setAttribute('xmlns:foo', 'urn:foo'); a.setAttribute('xmlns', 'urn:def'); return [a.lookupNamespaceURI('foo'), a.lookupNamespaceURI(null), a.lookupPrefix('urn:foo'), a.isDefaultNamespace('urn:def')].join() })
+=== lookup-xmlns-empty-value
+(function () { var N = 'http://www.w3.org/2000/xmlns/'; var a = document.createElementNS('http://www.w3.org/2000/svg', 'g'); a.setAttributeNS(N, 'xmlns', ''); a.setAttributeNS(N, 'xmlns:foo', ''); return [a.lookupNamespaceURI(null), a.lookupNamespaceURI('foo'), a.isDefaultNamespace('http://www.w3.org/2000/svg')].join() })
+=== lookup-xmlns-value-wins-over-parent
+(function () { var N = 'http://www.w3.org/2000/xmlns/'; var a = document.createElementNS('http://www.w3.org/2000/svg', 'g'), b = document.createElementNS('http://www.w3.org/2000/svg', 'g'); a.setAttributeNS(N, 'xmlns:foo', 'urn:a'); b.setAttributeNS(N, 'xmlns:foo', 'urn:b'); a.appendChild(b); return [a.lookupNamespaceURI('foo'), b.lookupNamespaceURI('foo'), b.lookupPrefix('urn:a'), b.lookupPrefix('urn:b')].join() })
+=== lookup-prefix-skips-shadowed-declarations
+(function () { var N = 'http://www.w3.org/2000/xmlns/'; var a = document.createElementNS('http://www.w3.org/2000/svg', 'g'), b = document.createElementNS('http://www.w3.org/2000/svg', 'g'); a.setAttributeNS(N, 'xmlns:foo', 'urn:a'); b.setAttributeNS(N, 'xmlns:foo', 'urn:b'); a.appendChild(b); return [b.lookupPrefix('urn:a'), b.lookupPrefix('urn:b'), a.lookupPrefix('urn:a')].join() })
+=== lookup-xml-prefixes
+(function () { var e = document.createElement('div'), X = 'http://www.w3.org/XML/1998/namespace', N = 'http://www.w3.org/2000/xmlns/'; return [e.lookupNamespaceURI('xml'), e.lookupNamespaceURI('xmlns'), e.lookupPrefix(X), e.lookupPrefix(N), e.isDefaultNamespace(X)].join() })
+=== lookup-document
+(function () { var X = 'http://www.w3.org/1999/xhtml'; return [document.lookupNamespaceURI(null), document.lookupNamespaceURI('x'), document.lookupPrefix(X), document.lookupPrefix(null), document.isDefaultNamespace(X), document.isDefaultNamespace('u')].join() })
+=== lookup-document-without-element
+(function () { var e = document.documentElement; document.removeChild(e); var o = [document.lookupNamespaceURI(null), document.lookupPrefix('http://www.w3.org/1999/xhtml'), document.isDefaultNamespace('http://www.w3.org/1999/xhtml'), document.isDefaultNamespace(null)]; document.appendChild(e); return o.join() })
+=== lookup-doctype-and-fragment
+(function () { var f = document.createDocumentFragment(), X = 'http://www.w3.org/1999/xhtml'; return [document.doctype.lookupNamespaceURI(null), document.doctype.lookupPrefix(X), document.doctype.isDefaultNamespace(X), document.doctype.isDefaultNamespace(null), f.lookupNamespaceURI(null), f.lookupPrefix(X), f.isDefaultNamespace(X), f.isDefaultNamespace(null)].join() })
+=== lookup-text-and-comment
+@html <div id=a>t<!--c--></div>
+(function () { var X = 'http://www.w3.org/1999/xhtml', t = $('a').firstChild, c = $('a').lastChild, d = document.createTextNode('x'); return [t.lookupNamespaceURI(null), t.lookupPrefix(X), t.isDefaultNamespace(X), c.lookupNamespaceURI(null), c.lookupPrefix(X), c.isDefaultNamespace(X), d.lookupNamespaceURI(null), d.lookupPrefix(X), d.isDefaultNamespace(X)].join() })
+=== lookup-text-in-prefixed-parent
+(function () { var S = 'http://www.w3.org/2000/svg', e = document.createElementNS(S, 's:text'), t = document.createTextNode('x'); e.appendChild(t); return [t.lookupNamespaceURI('s'), t.lookupNamespaceURI(null), t.lookupPrefix(S), t.isDefaultNamespace(S)].join() })
+=== lookup-fragment-child
+(function () { var f = document.createDocumentFragment(), e = document.createElement('p'); f.appendChild(e); return [e.lookupNamespaceURI(null), f.lookupNamespaceURI(null), e.parentElement].join() })
+=== lookup-shadow-root
+@html <div id=h></div>
+(function () { var s = $('h').attachShadow({ mode: 'open' }), p = document.createElement('p'); s.appendChild(p); return [s.lookupNamespaceURI(null), s.lookupPrefix('http://www.w3.org/1999/xhtml'), s.isDefaultNamespace('http://www.w3.org/1999/xhtml'), p.lookupNamespaceURI(null)].join() })
+=== lookup-attr
+@html <div id=a class=c></div>
+(function () { var X = 'http://www.w3.org/1999/xhtml', at = $('a').getAttributeNode('class'), q = document.createAttribute('q'); return [at.lookupNamespaceURI(null), at.lookupPrefix(X), at.isDefaultNamespace(X), q.lookupNamespaceURI(null), q.lookupPrefix(X), q.isDefaultNamespace(X), q.isDefaultNamespace(null)].join() })
+=== lookup-attr-of-prefixed-element
+(function () { var S = 'http://www.w3.org/2000/svg', e = document.createElementNS(S, 's:rect'); e.setAttribute('x', '1'); var at = e.getAttributeNode('x'); return [at.lookupNamespaceURI('s'), at.lookupPrefix(S), at.isDefaultNamespace(S)].join() })
+=== lookup-string-coercion
+(function () { var e = document.createElement('div'), o = []; [0, false, 'null', 'undefined', { toString: function () { return 'xml' } }].forEach(function (v) { o.push(e.lookupNamespaceURI(v)); o.push(e.lookupPrefix(v)); o.push(e.isDefaultNamespace(v)) }); return o.join() })
+=== lookup-deep-chain
+(function () { var N = 'http://www.w3.org/2000/xmlns/', S = 'http://www.w3.org/2000/svg'; var r = document.createElementNS(S, 'g'), c = r; r.setAttributeNS(N, 'xmlns:foo', 'urn:deep'); for (var i = 0; i < 100; i++) { var e = document.createElementNS(S, 'g'); c.appendChild(e); c = e } return [c.lookupNamespaceURI('foo'), c.lookupPrefix('urn:deep'), c.isDefaultNamespace(S)].join() })

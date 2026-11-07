@@ -222,3 +222,28 @@ fn attributes_are_their_own_root_and_convert_options() {
     let mut b = browser();
     assert_eq!(js(&mut b, "var e = document.getElementById('p'); e.setAttribute('x', 'v'); var a = e.getAttributeNode('x'), reads = 0; var opts = {get composed() { reads++; e.removeAttributeNode(a); return true; }}; [a.getRootNode() === a, a.getRootNode(opts) === a, a.getRootNode() === a, reads, a.ownerElement === null].join()"), "true,true,true,1,true");
 }
+
+#[test]
+fn the_depth_cap_and_the_step_budget_stop_the_position_walk() {
+    let mut b = browser_with(&deep_page(8), BrowserLimits { max_tree_depth: 10, ..Default::default() }, 5_000_000);
+    assert_eq!(js(&mut b, "document.getElementById('deep').compareDocumentPosition(document.body); globalThis.hit = 1; 'after'"), lim("dom-depth"));
+    assert_eq!(js(&mut b, "typeof hit"), "undefined");
+    big(|| {
+        let src = "var x = document.getElementById('deep'); x.compareDocumentPosition(document.body); globalThis.hit = 1; 'after'";
+        let mut probe = browser_with(&deep_page(300), BrowserLimits::default(), 5_000_000);
+        let before = probe.it.stats().steps;
+        js(&mut probe, "var x = document.getElementById('deep'); 0");
+        let lookup = probe.it.stats().steps - before;
+        let mut b = browser_with(&deep_page(300), BrowserLimits::default(), lookup + 100);
+        assert_eq!(js(&mut b, src), format!("limit:{:?}", LimitKind::Steps));
+        assert_eq!(js(&mut b, "typeof hit"), "undefined");
+    });
+}
+
+#[test]
+fn a_deep_tree_is_compared_for_equality_without_the_native_stack() {
+    big(|| {
+        let mut b = browser_with(&deep_page(2000), BrowserLimits { max_tree_depth: 100_000, ..Default::default() }, 50_000_000);
+        assert_eq!(js(&mut b, "var d = document.body; d.isEqualNode(d.cloneNode(true))"), "true");
+    });
+}
