@@ -75,6 +75,7 @@ mod browser_xhr_tests;
 pub mod browser_navigation;
 mod browser_navigation_params;
 mod browser_navigation_state;
+mod browser_cookie;
 mod browser_navigation_storage;
 mod browser_navigation_url;
 #[cfg(test)]
@@ -172,6 +173,10 @@ mod browser_valign_tests;
 mod browser_aspect_tests;
 #[cfg(test)]
 mod browser_cssfix_tests;
+#[cfg(test)]
+mod browser_storage_tests;
+#[cfg(test)]
+mod browser_cookie_tests;
 #[cfg(test)]
 mod browser_svg_tests;
 #[cfg(test)]

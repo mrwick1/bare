@@ -1,0 +1,122 @@
+@url https://a.test/
+localStorage.clear(); sessionStorage.clear();
+var S = localStorage;
+var j = function (x) { return JSON.stringify(x) };
+var ks = function (o) { return j(Object.keys(o).sort()) };
+var gn = function (o) { return j(Object.getOwnPropertyNames(o).sort()) };
+var errn = function (f) { try { f(); return 'no error' } catch (e) { return e.name } };
+var gi = function (k) { return Storage.prototype.getItem.call(S, k) };
+var err = function (f) { try { return String(f()) } catch (e) { return e.name + ': ' + e.message } };
+var forin = function (o) { var r = []; for (var k in o) r.push(k); return r.join() };
+=== keys-values-entries-and-json
+S.setItem('b', '1'); S.setItem('a', '2'); S.setItem('10', '3'); S.setItem('2', '4'); S.setItem('', '5');
+(function () { return [ks(S), j(Object.getOwnPropertyNames(S).sort()), j(Object.values(S).sort()), j(Object.entries(S).sort()), forin(S).split(',').sort().join(), j(S).length, S.length, Object.keys(sessionStorage).length].join(' ') })
+=== for-in-order-with-one-name
+S.setItem('only', '1');
+(function () { return forin(S) })
+=== for-in-of-an-empty-storage
+(function () { return forin(S) + '|' + Object.keys(S).length + '|' + j(S) })
+=== session-storage-has-names-too
+sessionStorage.setItem('t', 'v'); sessionStorage.u = 'w';
+(function () { return [ks(sessionStorage), sessionStorage.t, sessionStorage.u, sessionStorage.length, j(sessionStorage).length, Object.keys(S).length].join(' ') })
+=== read-by-property-and-brackets
+S.setItem('a', 'x'); S.setItem('b c', 'y'); S.setItem('1', 'n');
+(function () { return [S.a, S['b c'], S[1], S['1'], S.zzz, typeof S.zzz, 'a' in S, 'zzz' in S, S.hasOwnProperty('a'), S.hasOwnProperty('zzz'), Object.prototype.hasOwnProperty.call(S, '1'), Object.hasOwn(S, 'b c')].join(' ') })
+=== write-by-property-is-setitem
+S.a = 1; S['b c'] = null; S.u = undefined; S[2] = {}; S.o = [1, 2];
+(function () { return [ks(S), S.getItem('a'), typeof S.a, S.getItem('b c'), S.getItem('u'), S.getItem('2'), S.getItem('o'), S.length].join(' ') })
+=== write-returns-the-value-and-chains
+(function () { var r = (S.a = 5); var q = (S.b = S.c = 'x'); return [r, typeof r, q, ks(S)].join(' ') })
+=== compound-assignment
+S.a = '1';
+(function () { S.a += 'x'; var r = [S.a]; S.a = 5; S.a++; r.push(S.a, typeof S.a); return r.join(' ') })
+=== write-with-tostring-and-throw
+var o = { toString: function () { throw new RangeError('boom') } };
+(function () { return [err(function () { S.k = o }), S.length, err(function () { S.k = { toString: function () { return 'ok' } }; return S.k })].join(' | ') })
+=== write-a-symbol-value
+(function () { return [err(function () { S.k = Symbol() }), err(function () { S[Symbol()] = 1; return 'sym key ok' }), S.length].join(' | ') })
+=== delete-by-property
+S.setItem('a', '1'); S.setItem('b', '2');
+(function () { var r = [delete S.a, delete S.zzz, delete S['b'], S.length, ks(S), S.getItem('a')]; return r.join(' ') })
+=== delete-strict-results
+S.setItem('a', '1');
+(function () { 'use strict'; return [delete S.a, delete S.nothing, delete S.length, delete S.getItem, typeof S.getItem, delete S[Symbol.iterator]].join(' ') })
+=== own-property-descriptor-of-a-name
+S.setItem('a', 'x');
+(function () { return [j(Object.getOwnPropertyDescriptor(S, 'a')), Object.getOwnPropertyDescriptor(S, 'nothing'), j(Object.getOwnPropertyDescriptor(S, 'getItem')), j(Object.getOwnPropertyDescriptors(S))].join(' ') })
+=== names-hidden-by-the-prototype-chain
+S.setItem('getItem', 'g'); S.setItem('length', '7'); S.setItem('constructor', 'c'); S.setItem('toString', 't'); S.setItem('zzz', 'z');
+(function () { return [typeof S.getItem, S.length, typeof S.constructor, S.constructor === Storage, typeof S.toString, S.zzz, j(Object.getOwnPropertyNames(S).sort()), j(Reflect.ownKeys(S).sort()), j(S), 'getItem' in S, S.hasOwnProperty('getItem'), S.hasOwnProperty('length'), S.hasOwnProperty('zzz'), j(Object.getOwnPropertyDescriptor(S, 'getItem')), j(Object.getOwnPropertyDescriptor(S, 'length')), j(Object.values(S)), j(Object.entries(S)), j(Object.assign({}, S)), gi('getItem'), gi('length'), S.propertyIsEnumerable('zzz'), S.propertyIsEnumerable('getItem')].join(' ') })
+=== write-to-a-name-of-the-prototype-makes-an-own-property
+(function () { S.getItem = 'x'; S.key = 5; S.toString = 'q'; return [typeof S.getItem, S.getItem, S.key, S.toString, Storage.prototype.getItem.call(S, 'getItem'), S.length, Object.prototype.hasOwnProperty.call(S, 'getItem'), j(Object.getOwnPropertyDescriptor(S, 'key')), j(Object.getOwnPropertyNames(S).sort()), j(S), typeof Storage.prototype.getItem].join(' ') })
+=== write-to-an-accessor-of-the-prototype
+(function () { return [err(function () { S.length = 99; return 'sloppy ok ' + S.length }), errn(function () { 'use strict'; S.length = 3 }), S.length, gi('length')].join(' | ') })
+=== expando-then-item-with-the-same-name
+(function () { S.getItem = 'ex'; Storage.prototype.setItem.call(S, 'getItem', 'it'); return [S.getItem, gi('getItem'), Object.getOwnPropertyNames(S).join(), S.length, delete S.getItem, typeof S.getItem, gi('getItem')].join(' ') })
+=== delete-a-hidden-name
+S.setItem('getItem', 'g'); S.setItem('length', '1');
+(function () { return [delete S.getItem, delete S.length, S.length, typeof S.getItem, gi('getItem'), gi('length')].join(' ') })
+=== define-property-data
+(function () { var r = [err(function () { return Object.defineProperty(S, 'a', { value: 5 }) === S }), S.a, S.length, j(Object.getOwnPropertyDescriptor(S, 'a'))]; r.push(err(function () { return Object.defineProperty(S, 'b', { value: 'v', writable: false, enumerable: false, configurable: false }) === S }), j(Object.getOwnPropertyDescriptor(S, 'b')), ks(S)); return r.join(' | ') })
+=== define-property-accessor-throws
+(function () { return [err(function () { return Object.defineProperty(S, 'acc', { get: function () { return 1 } }) }), err(function () { return Object.defineProperty(S, 'acc', { set: function () {} }) }), S.length, S.acc].join(' | ') })
+=== define-property-on-a-hidden-name
+(function () { return [err(function () { return Object.defineProperty(S, 'getItem', { value: 5 }) === S }), typeof S.getItem, S.getItem, S.length, gi('getItem'), j(Object.getOwnPropertyDescriptor(S, 'getItem'))].join(' | ') })
+=== symbols-are-ordinary-properties
+(function () { var s = Symbol('s'); Object.defineProperty(S, s, { value: 1, configurable: true }); S[Symbol.toPrimitive] = 3; S[Symbol.for('q')] = 'sym'; return [S[s], S.length, Object.getOwnPropertySymbols(S).length, typeof S[Symbol.toPrimitive], typeof S[Symbol.for('q')], ks(S)].join(' ') })
+=== reflect-set-with-other-receiver
+S.setItem('a', '1');
+(function () { var r = {}; var ok = Reflect.set(S, 'a', 'two', r); var ok2 = Reflect.set(S, 'fresh', 'x'); return [ok, ok2, S.a, j(r), S.fresh, S.length].join(' ') })
+=== storage-as-a-prototype
+S.setItem('a', '1');
+(function () { var c = Object.create(S); c.b = 'x'; c.a = 'over'; return [c.a, c.b, j(Object.keys(c).sort()), j(Object.getOwnPropertyNames(c).sort()), gi('b'), gi('a'), S.length, 'a' in c, c.hasOwnProperty('a')].join(' ') })
+=== numeric-keys
+(function () { S[1] = 'one'; S[1.5] = 'frac'; S[-1] = 'neg'; return [S[1], S['1'], S.getItem('1'), S.getItem('1.5'), S.getItem('-1'), S.length, ks(S), 1 in S, 2 in S, delete S[1], S.length].join(' ') })
+=== numeric-name-stays-visible-over-the-chain
+(function () { Object.prototype[5] = 'proto5'; var r = [S[5]]; S[5] = 'own'; r.push(S[5], gi('5'), ks(S), Object.prototype.hasOwnProperty.call(S, '5')); delete Object.prototype[5]; r.push(S[5]); return r.join(' ') })
+=== lone-surrogates-through-properties
+(function () { S['k\ud800'] = 'v\udc00x'; var k = Object.keys(S)[0], v = S[k]; return [k.length, k.charCodeAt(1), v.length, v.charCodeAt(0), v.charCodeAt(1), gi(k) === v, S.key(0) === k, k in S, Object.getOwnPropertyNames(S)[0] === k, Object.values(S)[0] === v].join(' ') })
+=== extensibility-is-refused
+(function () { var r = [Object.isExtensible(S), Object.isFrozen(S), Object.isSealed(S), Reflect.preventExtensions(S), Object.isExtensible(S)]; S.setItem('a', '1'); r.push(err(function () { return Object.preventExtensions(S) === S }), Reflect.preventExtensions(S), Object.isExtensible(S), Object.isFrozen(S)); return r.join(' ') })
+=== freeze-and-seal-throw
+(function () { var e = [err(function () { return Object.freeze(S) === S }), err(function () { return Object.seal(S) === S })]; S.setItem('a', '1'); e.push(err(function () { return Object.freeze(S) === S }), err(function () { return Object.seal(S) === S }), Object.isExtensible(S)); return e.join(' | ') })
+=== brand-and-interface-object
+(function () { return [Object.getPrototypeOf(S) === Storage.prototype, Object.getPrototypeOf(sessionStorage) === Storage.prototype, S.__proto__ === Storage.prototype, Object.prototype.toString.call(S), String(S), Object.prototype.toString.call(Storage.prototype), S instanceof Storage, S === sessionStorage, Storage.length, Storage.name, typeof Storage].join(' | ') })
+=== prototype-shape
+(function () { return Reflect.ownKeys(Storage.prototype).map(function (k) { var d = Object.getOwnPropertyDescriptor(Storage.prototype, k); return String(k) + ':' + (d.get ? 'acc' : 'data') + (d.enumerable ? 'E' : 'e') + (d.configurable ? 'C' : 'c') + (d.writable ? 'W' : 'w') }).join(' ') + ' ' + [Storage.prototype.getItem.length, Storage.prototype.setItem.length, Storage.prototype.key.length, Storage.prototype.clear.length, Storage.prototype.removeItem.length, Object.getOwnPropertyDescriptor(Storage.prototype, 'length').get.name].join() })
+=== dunder-proto-as-an-item
+(function () { S.setItem('__proto__', 'p'); return [gi('__proto__'), Object.getPrototypeOf(S) === Storage.prototype, typeof S.__proto__, gn(S), S.length].join(' ') })
+=== items-named-like-object-methods
+S.setItem('hasOwnProperty', 'h'); S.setItem('valueOf', 'v'); S.setItem('isPrototypeOf', 'i');
+(function () { return [typeof S.hasOwnProperty, typeof S.valueOf, typeof S.isPrototypeOf, S.length, err(function () { return S.hasOwnProperty('x') }), err(function () { return String(S) })].join(' | ') })
+=== object-assign-and-spread
+S.setItem('a', '1'); S.b = '2';
+(function () { var t = Object.assign({}, S); var u = { ...S }; return [j(t), j(u), j(Object.fromEntries(Object.entries(S))), Object.assign(S, { c: 3 }) === S, S.length, S.c].join(' ') })
+=== for-in-skips-a-name-removed-in-the-loop
+S.setItem('a', '1'); S.setItem('b', '2');
+(function () { var r = [], n = 0; for (var k in S) { if (k === 'a' || k === 'b') { n++; r.push(k); S.removeItem(k === 'a' ? 'b' : 'a'); } } return r.length + ' ' + n + ' ' + S.length })
+=== for-in-sees-the-prototype
+S.setItem('a', '1');
+(function () { var r = forin(S); Storage.prototype.extra = 1; var r2 = forin(S); delete Storage.prototype.extra; return [r, r2].join(' ') })
+=== clear-and-remove-are-live
+S.setItem('a', '1'); S.setItem('b', '2');
+(function () { var r = [S.a, S.b]; S.removeItem('a'); r.push(S.a, S.b, 'a' in S); S.clear(); r.push(S.b, 'b' in S, Object.keys(S).length); return r.join(' ') })
+=== in-operator
+S.setItem('a', '1');
+(function () { return ['a' in S, 'length' in S, 'getItem' in S, 'toString' in S, 'nothing' in S, 1 in S, Symbol.iterator in S, Reflect.has(S, 'a'), Reflect.ownKeys(S).join()].join(' ') })
+=== method-this-checks
+S.setItem('a', '1');
+(function () { var g = S.getItem; return [g.call(sessionStorage, 'a'), err(function () { return Storage.prototype.getItem.call({}, 'a') }), Object.getOwnPropertyDescriptor(Storage.prototype, 'length').get.call(S), errn(function () { return new Storage() }), errn(function () { return Storage() })].join(' | ') })
+=== item-added-to-the-prototype-hides-the-name
+S.setItem('late', 'L');
+(function () { var r = [S.late, ks(S)]; Storage.prototype.late = 'proto'; r.push(S.late, gn(S), 'late' in S, S.hasOwnProperty('late'), j(Object.getOwnPropertyDescriptor(S, 'late'))); delete Storage.prototype.late; r.push(S.late, ks(S)); return r.join(' ') })
+=== write-to-a-name-of-an-object-prototype-property
+(function () { Object.prototype.hid = 'p'; S.setItem('hid', 'item'); var r = [S.hid, gn(S), 'hid' in S]; S.hid = 'w'; r.push(S.hid, gi('hid'), Object.prototype.hasOwnProperty.call(S, 'hid')); delete Object.prototype.hid; r.push(S.hid); return r.join(' ') })
+=== inherited-readonly-name-write-is-dropped
+(function () { S.setItem('p', '1'); Object.defineProperty(Storage.prototype, 'ro', { value: 'r', writable: false, configurable: true }); S.ro = 'mine'; var r = [S.ro, gi('ro'), ks(S), errn(function () { 'use strict'; S.ro = 'again' })]; delete Storage.prototype.ro; return r.join(' ') })
+=== inherited-setter-runs
+(function () { var log = []; Object.defineProperty(Storage.prototype, 'acc', { get: function () { return 'g' }, set: function (v) { log.push(v) }, configurable: true }); S.acc = 'val'; var r = [S.acc, log.join(), gi('acc'), S.length]; delete Storage.prototype.acc; return r.join(' ') })
+=== quota
+(function () { var big = new Array(1048577).join('x'); var r = []; for (var i = 1; i <= 5; i++) { try { S.setItem('b' + i, big); r.push('ok' + i) } catch (e) { r.push(e.name + ':' + e.message + ':' + e.code) } } try { S.b6 = big; r.push('ok6') } catch (e) { r.push(e.name + ':' + e.message) } r.push(S.length); return r.join(' | ') })
+=== argument-errors
+(function () { return [err(function () { return S.getItem() }), err(function () { return S.setItem('a') }), err(function () { return S.key() }), err(function () { return S.removeItem() }), S.key(0), S.key(-1), S.key('x')].join(' | ') })

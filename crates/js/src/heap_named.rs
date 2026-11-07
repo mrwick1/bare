@@ -30,9 +30,11 @@
 //! `[[Delete]]` of an unsupported name is `true` with no change. Named properties come first in `own_keys` and are enumerable.
 //! `Object.freeze` and `Object.seal` of an object that has names return `false` (the same rule as a byte view with bytes).
 //!
-//! Not done: `[LegacyOverrideBuiltIns]` is always on (an own name hides the prototype chain). An interface without it (a named
-//! property that must not hide a prototype property) needs a visibility check on the chain. `[[PreventExtensions]]` is not
-//! forced to `false`. `peek_own_property` gives a placeholder `undefined` value for a name (its callers read only the flags).
+//! `[LegacyOverrideBuiltIns]` is the default: an own name hides the prototype chain. An interface without it (`Storage`) makes its objects with
+//! `new_named_open` and answers `false` in `NamedSource::named_masking`. For such an object a string name that is an ordinary property of
+//! the object or of its chain is not a name (`named_hidden`): reads, writes, defines and deletes of it follow the ordinary rules. The
+//! object refuses `preventExtensions`, `seal` and `freeze` (`named_open`). Not done: `peek_own_property` gives a placeholder `undefined`
+//! value for a name (its callers read only the flags).
 //!
 //! `Proxy` is built (`heap_proxy.rs`). It does not use the request slot: a proxy is another exotic flag (`EXOTIC_PROXY`) tested at the
 //! same points, and each internal method answers `HeapError::Proxy(p)` and changes nothing. The evaluator runs the trap, checks the
@@ -51,11 +53,19 @@ pub trait NamedSource {
     fn named_has(&self, owner: ObjId, key: &[u16]) -> R<bool>;
     /// The value of the property `key` of `owner` now. `Ok(None)`: there is none. The heap calls it only right after `named_has`
     /// answered `true` for the same key, so a host that charges for a long scan has charged already and must not charge again.
-    fn named_get(&self, owner: ObjId, key: &[u16]) -> R<Option<String>>;
+    fn named_get(&self, owner: ObjId, key: &[u16]) -> R<Option<Vec<u16>>>;
     /// How many names `owner` has now (cheap: no list). The evaluator charges it before `named_keys` runs.
     fn named_len(&self, owner: ObjId) -> R<usize>;
     /// The names of `owner` now, in the host's order.
-    fn named_keys(&self, owner: ObjId) -> R<Vec<String>>;
+    fn named_keys(&self, owner: ObjId) -> R<Vec<Vec<u16>>>;
+    /// Does a name hide the properties of the prototype chain (`[LegacyOverrideBuiltIns]`)? Asked only for objects of `new_named_open`; `false` (`Storage`): a string name
+    /// is not an own property of `owner` when `owner` or its chain has an ordinary property of that name. A write, a define and
+    /// a delete of such a name follow the ordinary rules and make or change an ordinary property. A name that is an array
+    /// index never hides. The names stay in `named_keys` (so in `Reflect.ownKeys`). An object with `false` refuses
+    /// `preventExtensions`, `seal` and `freeze` (`named_open`).
+    fn named_masking(&self, _owner: ObjId) -> bool {
+        true
+    }
 }
 
 /// What a write asks of the host.
@@ -80,6 +90,8 @@ pub(super) struct NamedState {
     src: Option<std::rc::Rc<dyn NamedSource>>,
     req: Option<NamedRequest>,
     done: Option<(ObjId, PropertyKey, bool)>,
+    /// `new_named_open` made an object. Until then no object asks `named_masking`.
+    open: bool,
 }
 
 impl Heap {
@@ -88,6 +100,12 @@ impl Heap {
         let id = self.make_exotic(proto, || Exotic::Named)?;
         self.objects.get_mut(id.index, id.gn).expect("fresh object").exotic = EXOTIC_NAMED;
         Ok(id)
+    }
+
+    /// `new_named` for an object whose names do not hide its prototype chain (`NamedSource::named_masking` gives `false` for it).
+    pub fn new_named_open(&mut self, proto: Option<ObjId>) -> R<ObjId> {
+        self.named.open = true;
+        self.new_named(proto)
     }
 
     /// Install the host that answers for every `new_named` object of this heap. The heap owns the `Rc` (see `set_indexed_source`).
@@ -112,7 +130,7 @@ impl Heap {
     /// a data property whose value is a placeholder. `None`: not a name, the ordinary rules apply.
     pub(super) fn named_exists(&self, o: ObjId, key: PropertyKey) -> R<Option<Option<Property>>> {
         let Some(units) = self.key_units(key)? else { return Ok(None) };
-        if !self.named_source()?.named_has(o, &units)? {
+        if self.named_hidden(o, key)? || !self.named_source()?.named_has(o, &units)? {
             return Ok(None);
         }
         Ok(Some(Some(Property::Data { value: Value::Undefined, writable: true, enumerable: true, configurable: true })))
@@ -142,7 +160,7 @@ impl Heap {
         }
         let Some(units) = self.key_units(key)? else { return Ok(r) };
         let Some(text) = self.named_source()?.named_get(o, &units)? else { return Ok(r) };
-        let value = Value::String(self.intern_str(&text)?);
+        let value = Value::String(self.intern_units(&text)?);
         Ok(Some(Property::Data { value, writable: true, enumerable: true, configurable: true }))
     }
 
@@ -154,7 +172,37 @@ impl Heap {
     pub(super) fn named_keys(&mut self, o: ObjId) -> R<Vec<PropertyKey>> {
         let src = self.named_source()?;
         self.charge(src.named_len(o)?.saturating_mul(std::mem::size_of::<PropertyKey>()))?;
-        src.named_keys(o)?.iter().map(|k| self.key_from_str(k)).collect()
+        src.named_keys(o)?.iter().map(|k| self.intern_units(k).and_then(|s| self.key_from_string(s))).collect()
+    }
+
+    /// Is the string name `key` hidden on `o` (see `NamedSource::named_masking`)? Then the ordinary rules apply to it.
+    #[inline]
+    pub(super) fn named_hidden(&self, o: ObjId, key: PropertyKey) -> R<bool> {
+        if !self.named.open {
+            return Ok(false);
+        }
+        self.named_hidden_open(o, key)
+    }
+
+    #[inline(never)]
+    fn named_hidden_open(&self, o: ObjId, key: PropertyKey) -> R<bool> {
+        if !matches!(key, PropertyKey::String(_)) || self.named.src.as_ref().is_none_or(|s| s.named_masking(o)) {
+            return Ok(false);
+        }
+        let ob = self.obj(o)?;
+        if self.own(ob, key).is_some() {
+            return Ok(true);
+        }
+        match ob.proto {
+            Some(p) => self.has_property(p, key),
+            None => Ok(false),
+        }
+    }
+
+    /// Is `o` a host named object that refuses `preventExtensions`, `seal` and `freeze` (`named_masking` is `false`)?
+    #[inline]
+    pub fn named_open(&self, o: ObjId) -> bool {
+        self.named.open && matches!(self.obj(o), Ok(ob) if ob.exotic == EXOTIC_NAMED) && self.named.src.as_ref().is_some_and(|s| !s.named_masking(o))
     }
 
     /// Ask the host to write. The first call stores the request and answers `NeedsNamed`; the call after the evaluator
@@ -174,7 +222,7 @@ impl Heap {
             return Ok(Some(ok));
         }
         let Some(units) = self.key_units(key)? else { return Ok(None) };
-        if !self.named_source()?.named_has(o, &units)? {
+        if !self.named_source()?.named_has(o, &units)? || self.named_hidden(o, key)? {
             return Ok(None);
         }
         self.named_write(o, key, NamedOp::Delete).map(Some)

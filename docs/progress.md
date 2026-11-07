@@ -14,13 +14,15 @@ The module numbers below remain stable for existing code and benchmark reference
 | 2   | HTML tokenizer and DOM tree                            | done        |
 | 3   | CSS parser and style cascade                           | done        |
 | 4   | Layout (box model, text flow)                          | in progress |
-| 5   | Window (Wayland) and paint, bitmap font                | planned     |
-| 6   | Input and navigation (links, scroll)                   | planned     |
+| 5   | Window (Wayland) and paint, bitmap font                | mostly built |
+| 6   | Input and navigation (links, scroll)                   | mostly built |
 | 7   | HTTPS (TLS 1.3 and crypto, by hand)                    | staging ready |
 | 8   | Tabs and event loop (one engine, a task queue per tab) | planned     |
 | 9   | JavaScript (interpreter, no JIT)                       | in progress |
 | 10  | Tab isolation and memory accounting (heap per tab)     | planned     |
 | 11  | Resource guard (watchdog, freeze, discard, reload)     | planned     |
+
+Modules 5 and 6 are built through S4 topics 1 to 5: paint, the Wayland window, drawing, hit testing and input, and scrolling and navigation. What remains is S4 topic 6 (redraw after changes, and the staging journey by visible input) and S5 (test automation).
 
 ## Voicebot staging plan
 
@@ -49,28 +51,35 @@ Use a dedicated staging account. Read credentials from the vault at run time. Do
 
 ### Journey status
 
-Status on 2026-11-05, main bd26c75. The work is in S3 topic 6. All runs are headless, through the session driver. S4 topics 1 (paint and pixel capture) and 2 (Wayland window) are built. The other S4 topics are not started.
+Status on 2026-11-07, main 5dd8c70. All runs are headless, through the session driver, against live staging. S4 topics 1 to 5 are built. S4 topic 6 and S5 remain.
 
 | Step | Status |
 | --- | --- |
-| 1. Redirect to login | Passes. The cached and live login pages load and show the form. |
-| 2. Log in | Passes. The live staging login stores the token and goes to `/`. |
-| 3. Overview and its data | Blocked. The page settles with 42 scripts and no throws, then reports `ReferenceError: parseFloat is not defined`. |
-| 4. Agents data | Not verified. |
-| 5. Search `Score800` | Not verified. |
-| 6. Reload keeps the session | Not verified. |
-| 7. Sign out removes the token | Not verified. |
-| 8. Agents without a session redirects | Not verified. |
+| 1. Redirect to login | Passes. `/` without a session goes to `/login`. |
+| 2. Log in | Passes. The login stores the token and goes to `/`. |
+| 3. Overview and its data | Passes. The Overview shows "Needs me 8" and 47 table rows. |
+| 4. Agents data | Passes. The Agents link goes to `/agents`, which shows "33 agents". |
+| 5. Search `Score800` | Passes. Typing `Score800` and Enter goes to `/agents?q=Score800` and shows 1 match. |
+| 6. Reload keeps the session | Passes. The reload keeps `/agents?q=Score800` and the match. |
+| 7. Sign out removes the token | Passes. "Sign out" goes to `/login`. `sessionStorage` has 1 key (`token`) before and 0 after. |
+| 8. Agents without a session redirects | Passes. `/agents` without a session goes to `/login`. |
 
-Known gates before step 3, in order: `parseFloat`, `Number.prototype.toLocaleString` with `en-IN`, `localeCompare`, async generators and `TypedArray.from`. Hypothesis: more gates appear after these, because each fix so far exposed the next gate.
+Each step took 0.3 s to 3.6 s. The old list of gates (`parseFloat`, `Number.prototype.toLocaleString` with `en-IN`, `localeCompare`, async generators and `TypedArray.from`) is resolved: no gate stopped this run.
+
+The run showed two gaps that no step needed:
+
+- `Object.keys(sessionStorage)` gave `[]` while `sessionStorage.length` was 1.
+- `document.cookie` was `undefined`.
+
+Both are fixed in [Storage named properties and `document.cookie`](#storage-named-properties-and-documentcookie). The live site was not run again after the fix.
 
 Work that remains before the planned E2E:
 
-- S3 exit: steps 1 to 8 pass at the DOM level. Agents data appears in the DOM, and search updates it.
+- S3 exit: met. Steps 1 to 8 pass at the DOM level (table above).
 - S4: software paint, a Wayland window, hit testing and pointer and keyboard input. A user completes the journey in the `bare` window.
 - S5: the selector-based driver from S3 is a start. S5 actions must use real hit testing and input dispatch, so S5 needs S4. S5 also needs a local fixture app and an unattended staging run.
 
-Not planned yet: a headless run of steps 1 to 8 through the current driver when S3 closes. It would prove the engine before paint work. The plan does not count it as the E2E.
+The headless run of steps 1 to 8 through the current driver is done (table above). The plan does not count it as the E2E.
 
 ### Work through each topic
 
@@ -1875,3 +1884,16 @@ Not done:
 - `Function.prototype.toString` of a script function gives `[object ...]` for every kind of function. This is older than this change.
 
 Not tested: a live page that uses async generators; `dom_check.sh` and `browser_check.sh` (they need Chrome); the load rows at scale 100; a machine other than arjun-e16; deep recursion of async generators beyond the unit tests; a page with many suspended generators and many queued requests at once.
+
+## Storage named properties and `document.cookie`
+
+The headless journey of 2026-11-07 showed two gaps (see "Journey status"): `Object.keys(sessionStorage)` was `[]` while `length` was 1, and `document.cookie` was `undefined`. Both are fixed. The reasons and the choices are in [decisions.md](decisions.md#storage-objects-have-named-properties-and-are-made-on-the-first-read) and [decisions.md](decisions.md#cookies-a-jar-for-scripts-only).
+
+- Storage: `localStorage` and `sessionStorage` are host named objects whose names do not hide the prototype chain. They are made on the first read of the `window` accessor. The engine has `Heap::new_named_open` and `NamedSource::named_masking` for this, and `named_get` and `named_keys` give UTF-16 in a `Vec`. `tools/fixtures/ui/storage-cases.txt` has 45 cases and `chrome-storage.txt` has the answers of headless Chrome 155. All 45 match. The old test `storage_keeps_utf16_and_is_not_a_property_bag` conflicted with Chrome and was changed (`decisions.md`).
+- Cookies: an in-memory jar for scripts only, `crates/bare/src/browser_cookie.rs`. A shared HTTP jar was not built: it needs changes in `bare-net`, `fetch` and XHR, and a public suffix list. `tools/fixtures/ui/cookie-cases.txt` has 19 cases and `chrome-cookie.txt` has the answers of Chrome. All 19 match. 7 unit tests cover dates, default paths, replace and expiry, scope, domain rules, control characters and prefixes, and the size and count limits.
+- The fixture runner gives each case a real `https://a.test/` origin (`@url`): `tools/ui/chrome_cdp.mjs` answers that URL through CDP `Fetch`, and `chrome_topic.mjs` clears the cookies of Chrome between cases.
+- Tests on archMachine, debug: `cargo test --workspace` passes (`bare` 1,046 passed and 6 ignored, `bare-js` 750 passed and 1 ignored).
+- Cost: `tools/js/cost_matrix.sh` over all 803 rows, against main 088d316, both allocators, `instr.sh` minimum of 3. No row is over +0.5% under either allocator. Mean change: glibc -0.015%, jemalloc -0.021%. The worst row is `focus_load focus 10` at +0.47% (glibc) and +0.08% (jemalloc). The `navigation_load storage` rows fall by 6.0% to 9.6%, because a method call on a named object now skips the store.
+- The first version failed the cost rule. It made both Storage objects at start, so `Heap::has_exotics` was true on every page. Browser rows rose by 1% to 2% (`range_load live`, `session_load heavy`, `observer_load raf`, `web_apis_load matchall`) although the heap had 2 more objects. The `dataset_load keys` rows rose by 7% (a hash set in `own_keys`, then boxed slices from the dataset) and the `write` rows by 1.3% (a call to the host on each write). After the fixes (lazy objects, `Vec` results, no set when there are no ordinary keys, a heap flag that skips the prototype checks until an open named object exists) no row is over.
+
+Not tested: the live staging site after the change (not allowed in this task); Chrome rows other than the 64 cases above; `tools/js/test262_check.sh` and `tools/js/exec_diff.sh` (the change touches only host named objects, and test262 has none); a `Set-Cookie` header of a response and a `Cookie` header of a request (not built); a page that reads `localStorage` on the full default quota; a machine other than archMachine.

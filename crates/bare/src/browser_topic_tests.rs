@@ -14,15 +14,22 @@ pub(crate) struct Case {
     pub html: String,
     pub css: String,
     pub script: String,
+    /// The document URL (`@url` in the prelude), or empty for a document with none.
+    pub url: String,
 }
 
 pub(crate) fn parse(cases: &str) -> Vec<Case> {
     let mut out: Vec<Case> = Vec::new();
     let mut pre = String::new();
+    let mut url = String::new();
     for line in cases.lines() {
         if let Some(n) = line.strip_prefix("=== ") {
-            out.push(Case { name: n.trim().into(), html: String::new(), css: String::new(), script: pre.clone() });
+            out.push(Case { name: n.trim().into(), html: String::new(), css: String::new(), script: pre.clone(), url: url.clone() });
         } else if out.is_empty() {
+            if let Some(u) = line.strip_prefix("@url ") {
+                url = u.trim().into();
+                continue;
+            }
             pre += line;
             pre += "\n";
         } else if let Some(k) = out.last_mut() {
@@ -48,6 +55,9 @@ pub(crate) fn run(k: &Case) -> String {
     let html = format!("<!doctype html><html><head><style>{}</style></head><body>{}</body></html>", k.css, k.html);
     let mut b = Browser::new(tree::parse(&html), BrowserLimits::default(), EvalLimits { max_steps: 50_000_000, ..Default::default() }, HeapLimits::default()).expect("browser");
     b.use_virtual_clock_at(1000.0).unwrap();
+    if !k.url.is_empty() {
+        b.set_document_url(&k.url).unwrap();
+    }
     b.set_viewport(400.0, 300.0).unwrap();
     let out = (|| -> Result<String, Error> {
         let reader = b.run_script(&k.script)?;

@@ -242,6 +242,9 @@ impl<'p> Interp<'p> {
     }
 
     fn o_prevent_extensions(&mut self, o: ObjId) -> Res<bool> {
+        if self.heap.named_open(o) {
+            return Ok(false);
+        }
         match self.heap.prevent_extensions(o) {
             Ok(()) => Ok(true),
             Err(HeapError::Proxy(p)) => self.px_prevent_extensions(p),

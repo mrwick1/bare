@@ -19,8 +19,8 @@
 //!   `"manual"` is `Unsupported`. 301/302 (POST) and 303 (all but GET and HEAD) turn the request into a GET without a body; 307/308 keep both.
 //! - JS cannot set `Host`, `Content-Length`, `Cookie`, `Origin`, `Referer`, `Connection`, `Transfer-Encoding`, `Accept-Encoding`,
 //!   `Sec-*`, `Proxy-*` and the other forbidden names of the Fetch Standard: they are dropped, as a browser does. `Host` and
-//!   `Content-Length` come from the client. `Set-Cookie` of a response is never put in `response.headers`. There is no cookie
-//!   jar, so `credentials` changes nothing and no `Cookie`, `Origin`, `Referer` is ever sent.
+//!   `Content-Length` come from the client. `Set-Cookie` of a response is never put in `response.headers`. There is no jar
+//!   for HTTP (`document.cookie` has its own, `browser_cookie.rs`), so `credentials` changes nothing and no `Cookie`, `Origin`, `Referer` is ever sent.
 //! - A failed network request rejects with `TypeError: Failed to fetch`. Errors and diagnostics never hold a header value, a
 //!   body byte, a path or a query. [`Browser::take_fetch_diagnostics`] gives fixed labels and the origin.
 //!

@@ -1078,7 +1078,7 @@ The document must configure networking. When navigation has a document URL, fetc
 
 The browser library binds URL, URLSearchParams, location, history, localStorage and sessionStorage. URL records reuse bare-url and keep fragments separately. A document URL must be configured explicitly. URL parsing refuses unsupported schemes, IDNA, user info, backslashes and unsupported path forms. No network or disk stores supply origins or tokens.
 
-WebStorage keeps UTF-16 keys and values per origin. A shared store preserves a session across new Browser instances. new_session shares local data and starts empty session data. Quotas check before writes. This does not persist across process restarts. Named storage properties and storage events are absent.
+WebStorage keeps UTF-16 keys and values per origin. A shared store preserves a session across new Browser instances. new_session shares local data and starts empty session data. Quotas check before writes. This does not persist across process restarts. Storage events are absent. Named storage properties exist since 2026-11-07 (see progress.md, "Storage named properties and `document.cookie`").
 
 History clones plain objects and arrays, including cycles, sparse arrays, undefined and lone surrogates. Native state and cached materializations participate in collection. Depth is capped at128 even when the caller raises its configured limit. State nodes, bytes, history entries and queues have separate caps. Full navigation produces a NavigationRequest for the loader. It does not load a document. The embedder must create a fresh Browser for a new document realm; setting its URL alone does not replace its JavaScript state.
 
@@ -1088,7 +1088,7 @@ Five regressions failed before their fixes: a failed empty checkpoint allowed an
 
 All1,150 workspace tests and162 release tests for bare pass. Clippy reports only existing warnings. The Node URL oracle matches333 ungated cases and reports35 explicit gates. It does not establish history, location or storage behavior in a real browser. All12 bounded release load rows pass under1 GiB address space and45 seconds per process. Samples ran with concurrent builds; no speed improvement is claimed. At100x, URL takes1503 ms, history915 ms, storage481 ms and routing729 ms. Peak RSS ranges from6.3 to10.3 MiB. URL/params/iterator wrappers and pending queues return to zero after collection. History retains50 entries. Routing retains4.9 MiB for5003 scripts.
 
-Reproduce with tools/js/navigation_check.sh and tools/js/navigation_load.sh with an output path. Not tested: Chrome, actual staging, authentication, storage at the full default quota, other platforms or hard OOM. baseURI does not read base elements. PopStateEvent and HashChangeEvent classes, onpopstate and storage named properties remain absent or gated. Iterable URLSearchParams is integrated below. Fragment event behavior has structural tests only. The CLI page loader and unified driver remain separate work.
+Reproduce with tools/js/navigation_check.sh and tools/js/navigation_load.sh with an output path. Not tested: Chrome, actual staging, authentication, storage at the full default quota, other platforms or hard OOM. baseURI does not read base elements. PopStateEvent and HashChangeEvent classes and onpopstate remain absent or gated. Iterable URLSearchParams is integrated below. Fragment event behavior has structural tests only. The CLI page loader and unified driver remain separate work.
 
 
 ## Unified language and byte protocols

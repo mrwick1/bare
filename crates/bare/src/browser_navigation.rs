@@ -186,14 +186,15 @@ pub(crate) struct NavObjs {
     pub iter: ObjId,
     pub location: ObjId,
     pub history: ObjId,
-    pub local: ObjId,
-    pub session: ObjId,
+    pub storage_proto: ObjId,
 }
 
 #[derive(Default)]
 pub(crate) struct Nav {
     pub s: RefCell<NavState>,
     pub p: OnceCell<NavObjs>,
+    /// `localStorage` and `sessionStorage`, made on the first read of each (`sto::area_get`).
+    pub areas: [Cell<Option<ObjId>>; 2],
     pub lim: Cell<NavLimits>,
 }
 
@@ -235,7 +236,7 @@ impl Dom {
     pub(crate) fn is_host_object(&self, o: ObjId) -> bool {
         let n = self.nav.s.borrow();
         let st = self.st.borrow();
-        st.by_obj.contains_key(&o) || self.is_abort_controller(o) || self.is_platform_object(o) || st.events.contains_key(&o) || n.urls.contains_key(&o) || n.params.contains_key(&o) || n.iters.contains_key(&o) || self.nav.p.get().is_some_and(|p| [p.location, p.history, p.local, p.session].contains(&o))
+        st.by_obj.contains_key(&o) || self.is_abort_controller(o) || self.is_platform_object(o) || st.events.contains_key(&o) || n.urls.contains_key(&o) || n.params.contains_key(&o) || n.iters.contains_key(&o) || self.nav.p.get().is_some_and(|p| [p.location, p.history].contains(&o)) || self.storage_area(o).is_some()
     }
 
     pub(crate) fn cur_rec(&self) -> R<Rec> {
@@ -639,14 +640,8 @@ pub(crate) fn install(d: &Dom, it: &mut Interp<'_>) -> R<()> {
         protos.push(d.obj(it, op)?);
     }
     let (url, params, iter, loc_proto, hist_proto, storage_proto) = (protos[0], protos[1], protos[2], protos[3], protos[4], protos[5]);
-    let (location, history, local, session) = (d.obj(it, loc_proto)?, d.obj(it, hist_proto)?, d.obj(it, storage_proto)?, d.obj(it, storage_proto)?);
-    // Named property access is not modeled: a write like `localStorage.x = 1` must not look like storage.
-    for o in [local, session] {
-        if let Err(e) = it.heap.prevent_extensions(o) {
-            return Err(it.heap_error(e));
-        }
-    }
-    let _ = d.nav.p.set(NavObjs { url, params, iter, location, history, local, session });
+    let (location, history) = (d.obj(it, loc_proto)?, d.obj(it, hist_proto)?);
+    let _ = d.nav.p.set(NavObjs { url, params, iter, location, history, storage_proto });
 
     // URL
     parts!(d, it, url, url_get_h, url_set_h, [
@@ -701,17 +696,20 @@ pub(crate) fn install(d: &Dom, it: &mut Interp<'_>) -> R<()> {
     def_acc(d, it, hist_proto, "scrollRestoration", hist_scroll, Some(hist_set_scroll))?;
 
     // Storage
-    def_fn(d, it, storage_proto, "getItem", 1, sto::get_item)?;
-    def_fn(d, it, storage_proto, "setItem", 2, sto::set_item)?;
-    def_fn(d, it, storage_proto, "removeItem", 1, sto::remove_item)?;
-    def_fn(d, it, storage_proto, "clear", 0, sto::clear)?;
-    def_fn(d, it, storage_proto, "key", 1, sto::key)?;
+    // The order of Chrome (a `for in` over a `Storage` lists them so).
     def_acc(d, it, storage_proto, "length", sto::length, None)?;
+    for (name, len, h) in [("clear", 0, sto::clear as H), ("getItem", 1, sto::get_item), ("key", 1, sto::key), ("removeItem", 1, sto::remove_item), ("setItem", 2, sto::set_item)] {
+        // WebIDL operations are enumerable (a `for in` over a `Storage` lists them).
+        let f = def_fn(d, it, storage_proto, name, len, h)?;
+        let k = d.key(it, name)?;
+        it.define_data(storage_proto, k, Value::Object(f), true, true, true)?;
+    }
 
     // document and window
     let p = d.p();
     def_acc(d, it, p.document, "URL", doc_url, None)?;
     def_acc(d, it, p.document, "documentURI", doc_url, None)?;
+    def_acc(d, it, p.document, "cookie", crate::browser_cookie::doc_cookie_get, Some(crate::browser_cookie::doc_cookie_set))?;
     def_acc(d, it, p.node, "baseURI", doc_url, None)?;
     def_acc(d, it, p.document, "location", loc_obj, Some(win_set_location))?;
     def_acc(d, it, g, "location", loc_obj, Some(win_set_location))?;
@@ -719,18 +717,19 @@ pub(crate) fn install(d: &Dom, it: &mut Interp<'_>) -> R<()> {
 
     // constructors and globals
     let (kp, kc) = (d.key(it, "prototype")?, d.key(it, "constructor")?);
-    let mut fixed = vec![url, params, iter, loc_proto, hist_proto, storage_proto, location, history, local, session];
+    let mut fixed = vec![url, params, iter, loc_proto, hist_proto, storage_proto, location, history];
     let ifaces: [(&str, ObjId, H, bool); 5] = [
         ("URL", url, pr::url_ctor, true),
         ("URLSearchParams", params, pr::params_ctor, true),
         ("Location", loc_proto, illegal, false),
         ("History", hist_proto, illegal, false),
-        ("Storage", storage_proto, illegal, false),
+        ("Storage", storage_proto, illegal, true),
     ];
     for (name, proto, h, ctor) in ifaces {
         let f = match name {
             "URL" => d.add_ctor_nt(it, h, name, 1)?,
             "URLSearchParams" => d.add_ctor_nt(it, h, name, 0)?,
+            "Storage" => d.add_fn(it, h, name, 0, ctor)?,
             _ => d.add_fn(it, h, name, 1, ctor)?,
         };
         it.define_data(f, kp, Value::Object(proto), false, false, false)?;
@@ -742,10 +741,19 @@ pub(crate) fn install(d: &Dom, it: &mut Interp<'_>) -> R<()> {
         }
         fixed.push(f);
     }
-    for (name, v) in [("history", history), ("localStorage", local), ("sessionStorage", session)] {
-        let k = d.key(it, name)?;
-        it.define_data(g, k, Value::Object(v), true, true, true)?;
+    // `Storage.prototype[Symbol.toStringTag]` is "Storage".
+    let (ks, kt) = (d.key(it, "Symbol")?, d.key(it, "toStringTag")?);
+    let sy = it.get_value(Value::Object(g), ks)?;
+    if let Value::Symbol(sym) = it.get_value(sy, kt)? {
+        let tag = Value::String(it.heap.intern_str("Storage").map_err(|e| it.heap_error(e))?);
+        it.define_data(storage_proto, bare_js::value::PropertyKey::Symbol(sym), tag, false, false, true)?;
     }
+    let k = d.key(it, "history")?;
+    it.define_data(g, k, Value::Object(history), true, true, true)?;
+    // The two areas are host named objects (`localStorage.x` is `getItem('x')`). Each is made on its first read: a page that reads
+    // neither keeps `Heap::has_exotics` false, and every property write skips the exotic checks.
+    def_acc(d, it, g, "localStorage", |d, it, _, _| sto::area_get(d, it, false), None)?;
+    def_acc(d, it, g, "sessionStorage", |d, it, _, _| sto::area_get(d, it, true), None)?;
     d.fixed.borrow_mut().extend(fixed);
     Ok(())
 }

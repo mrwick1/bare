@@ -841,7 +841,7 @@ impl Heap {
     /// inherits from) handles the key. `None`: the ordinary algorithm runs.
     pub(super) fn exotic_set(&mut self, o: ObjId, key: PropertyKey, value: Value) -> R<Option<Set>> {
         // A proxy needs no check here: it is no view, has no prototype, so this returns `None` and `lookup` meets it next.
-        if self.obj(o)?.exotic == EXOTIC_NAMED && !matches!(key, PropertyKey::Symbol(_)) {
+        if self.obj(o)?.exotic == EXOTIC_NAMED && !matches!(key, PropertyKey::Symbol(_)) && !self.named_hidden(o, key)? {
             return Ok(Some(if self.named_write(o, key, NamedOp::Set(value))? { Set::Done } else { Set::Rejected }));
         }
         if let Some(r) = self.view_index(o, key) {

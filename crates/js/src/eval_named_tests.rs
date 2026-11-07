@@ -17,6 +17,8 @@ struct X {
     pairs: RefCell<Vec<(String, String)>>,
     /// Calls of `named_write` (a repeat that does not call the host again must not count).
     writes: Cell<usize>,
+    /// `named_masking` is `false` (the `Storage` rules: the prototype chain wins).
+    open: Cell<bool>,
 }
 
 fn text(units: &[u16]) -> String {
@@ -28,21 +30,24 @@ impl NamedSource for X {
         let k = text(key);
         Ok(self.owner.get() == Some(owner) && self.pairs.try_borrow().map_err(|_| HeapError::HostUnavailable)?.iter().any(|(n, _)| *n == k))
     }
-    fn named_get(&self, owner: ObjId, key: &[u16]) -> Result<Option<String>, HeapError> {
+    fn named_get(&self, owner: ObjId, key: &[u16]) -> Result<Option<Vec<u16>>, HeapError> {
         let k = text(key);
         if self.owner.get() != Some(owner) {
             return Ok(None);
         }
-        Ok(self.pairs.try_borrow().map_err(|_| HeapError::HostUnavailable)?.iter().find(|(n, _)| *n == k).map(|(_, v)| v.clone()))
+        Ok(self.pairs.try_borrow().map_err(|_| HeapError::HostUnavailable)?.iter().find(|(n, _)| *n == k).map(|(_, v)| v.encode_utf16().collect()))
     }
     fn named_len(&self, owner: ObjId) -> Result<usize, HeapError> {
         Ok(if self.owner.get() == Some(owner) { self.pairs.try_borrow().map_err(|_| HeapError::HostUnavailable)?.len() } else { 0 })
     }
-    fn named_keys(&self, owner: ObjId) -> Result<Vec<String>, HeapError> {
+    fn named_keys(&self, owner: ObjId) -> Result<Vec<Vec<u16>>, HeapError> {
         if self.owner.get() != Some(owner) {
             return Ok(Vec::new());
         }
-        Ok(self.pairs.try_borrow().map_err(|_| HeapError::HostUnavailable)?.iter().map(|(n, _)| n.clone()).collect())
+        Ok(self.pairs.try_borrow().map_err(|_| HeapError::HostUnavailable)?.iter().map(|(n, _)| n.encode_utf16().collect()).collect())
+    }
+    fn named_masking(&self, _: ObjId) -> bool {
+        !self.open.get()
     }
 }
 
@@ -53,7 +58,7 @@ impl Host for X {
             // make(proto?): the named object
             0 => {
                 let proto = match n(0) { Value::Object(o) => o, _ => it.object_prototype() };
-                let o = it.heap.new_named(Some(proto)).unwrap();
+                let o = if self.open.get() { it.heap.new_named_open(Some(proto)) } else { it.heap.new_named(Some(proto)) }.unwrap();
                 self.owner.set(Some(o));
                 Ok(Value::Object(o))
             }
@@ -70,6 +75,11 @@ impl Host for X {
             }
             // writes()
             2 => Ok(Value::Number(self.writes.get() as f64)),
+            // open(): the object stops hiding the prototype chain
+            3 => {
+                self.open.set(true);
+                Ok(Value::Undefined)
+            }
             _ => unreachable!(),
         }
     }
@@ -119,7 +129,7 @@ fn setup() -> (Interp<'static>, Rc<X>) {
     it.set_host(x.clone()).unwrap();
     it.heap.set_named_source(x.clone());
     let g = it.global_object();
-    for (i, name) in ["make", "put", "writes"].iter().enumerate() {
+    for (i, name) in ["make", "put", "writes", "open"].iter().enumerate() {
         let f = it.host_function(i as u32, name, 0, false).unwrap();
         let k = it.heap.key_from_str(name).unwrap();
         it.define_data(g, k, Value::Object(f), true, false, true).unwrap();
@@ -148,6 +158,34 @@ fn reads_are_live_and_cover_every_read_path() {
         assert_eq!(out(&mut it, "var s = { ...m }; s.a + s.z + Object.assign({}, m).b"), "XZ2");
         assert_eq!(out(&mut it, "JSON.stringify(Object.getOwnPropertyDescriptor(m, 'b'))"), "{\"value\":\"2\",\"writable\":true,\"enumerable\":true,\"configurable\":true}");
         assert_eq!(out(&mut it, "String(Object.getOwnPropertyDescriptor(m, 'q'))"), "undefined");
+    });
+}
+
+#[test]
+fn an_open_object_lets_the_prototype_chain_win_and_refuses_integrity_levels() {
+    big(|| {
+        let (mut it, x) = setup();
+        assert_eq!(out(&mut it, "open(); var p = { m: function () { return 'method'; } }; var m = make(); Object.setPrototypeOf(m, p); put('m', 'item'); put('z', 'zed'); [typeof m.m, m.z, 'm' in m, m.hasOwnProperty('m'), String(Object.getOwnPropertyDescriptor(m, 'm')), Object.keys(m).join(), Reflect.ownKeys(m).join()].join('|')"), "function|zed|true|false|undefined|z|m,z");
+        // A write, a define and a delete of a hidden name are ordinary: they make and remove an own property, and the host sees nothing.
+        let w0 = x.writes.get();
+        assert_eq!(out(&mut it, "m.m = 5; var a = [m.m, m.hasOwnProperty('m'), Reflect.ownKeys(m).join()]; delete m.m; a.push(typeof m.m, delete m.m); Object.defineProperty(m, 'm', { value: 6 }); a.push(m.m, Reflect.ownKeys(m).join()); a.join('|')"), "5|true|m,z|function|true|6|m,z");
+        assert_eq!(x.writes.get(), w0, "no request for a hidden name");
+        // A name that no chain property hides is still a request.
+        assert_eq!(out(&mut it, "m.q = 1; m.q + Object.keys(m).join()"), "1z,q");
+        // Index names never hide; a name added to the chain later hides at once.
+        assert_eq!(out(&mut it, "p[9] = 'p9'; m[9] = 'own9'; var b = [m[9], Object.keys(m).join()]; p.q = 'late'; b.push(m.q, m.hasOwnProperty('q'), Reflect.ownKeys(m).join()); b.join('|')"), "own9|z,q,9|late|false|m,z,q,9");
+        // The Standard's `[[PreventExtensions]]` of a legacy platform object is `false`, even with no name. `seal` and `freeze` follow.
+        assert_eq!(out(&mut it, "[Reflect.preventExtensions(m), Object.isExtensible(m), Object.isFrozen(m), Object.isSealed(m)].join()"), "false,true,false,false");
+        assert_eq!(out(&mut it, "var e = []; for (var f of [Object.preventExtensions, Object.seal, Object.freeze]) { try { f(m); e.push('no') } catch (x) { e.push(x.name + ':' + x.message) } } e.join('|')"), "TypeError:Cannot prevent extensions|TypeError:Cannot seal|TypeError:Cannot freeze");
+    });
+}
+
+#[test]
+fn a_name_may_hold_a_lone_surrogate() {
+    big(|| {
+        let (mut it, _) = setup();
+        // `put` goes through `text`, which is lossy, so the host here stores U+FFFD. The heap side keeps the units it is given.
+        assert_eq!(out(&mut it, "var m = make(); put('k\\ud800', 'v'); Object.keys(m)[0].length + ',' + m['k\\ufffd']"), "2,v");
     });
 }
 
@@ -279,9 +317,9 @@ fn heap_without_a_source_and_host_without_named_write_fail_loudly() {
         struct Bare;
         impl NamedSource for Bare {
             fn named_has(&self, _: ObjId, _: &[u16]) -> Result<bool, HeapError> { Ok(false) }
-            fn named_get(&self, _: ObjId, _: &[u16]) -> Result<Option<String>, HeapError> { Ok(None) }
+            fn named_get(&self, _: ObjId, _: &[u16]) -> Result<Option<Vec<u16>>, HeapError> { Ok(None) }
             fn named_len(&self, _: ObjId) -> Result<usize, HeapError> { Ok(0) }
-            fn named_keys(&self, _: ObjId) -> Result<Vec<String>, HeapError> { Ok(Vec::new()) }
+            fn named_keys(&self, _: ObjId) -> Result<Vec<Vec<u16>>, HeapError> { Ok(Vec::new()) }
         }
         impl Host for Bare {
             fn call(&self, it: &mut Interp<'_>, _: u32, _: Value, _: &[Value], _: bool) -> Result<Value, Error> {
