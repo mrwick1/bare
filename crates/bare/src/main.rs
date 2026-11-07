@@ -28,7 +28,7 @@ use bare::resources;
 
 fn main() {
     // The program starts here.
-    bare_net::parallel::limit_malloc_arenas();
+    bare_net::parallel::limit_malloc_arenas(std::env::args().any(|a| a == "--window"));
 
     let args: Vec<String> = std::env::args().skip(1).collect();
     // All the words after the program name. JS: `process.argv.slice(2)`.
