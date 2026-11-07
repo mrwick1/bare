@@ -3,6 +3,7 @@
 pub mod ast;
 pub mod lex;
 pub mod parse;
+pub mod parse_cache;
 pub mod value;
 pub mod date;
 pub mod tz;

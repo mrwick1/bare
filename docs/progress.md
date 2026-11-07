@@ -2842,3 +2842,49 @@ Results (archMachine, glibc, live heap peak of a counting allocator):
 Found while measuring: a navigation into a page with a big JS heap peaks about 2.5 MB higher than an `open` of the same page (the transient buffer of `Heap::stored_edges` in a collect). It is the same with a trivial first page, so the old page does not cause it. Not changed.
 
 Not tested: the staging journey in a window (no live run); the look of the window during a load (no screenshot: the claim that the window shows its last buffer rests on the window thread being blocked in the job); a real desktop compositor (only `cage` headless); a navigation that fails to load in a window (the page stays with no document, as before); the cost of the new backdrop allocation in a scrolled frame with a window-size layer (not measured in time, only by the matrix, which has no such row); a machine other than archMachine.
+
+## A parse cache shared by the documents of one thread (S5)
+
+Each document parsed its scripts again, also the `/_next/static` chunks from the shared HTTP cache (#251, #257). `bare_js::parse_cache` now keeps the parse result of a script for every realm of one thread. A browser session runs its documents on one thread, so they share it.
+
+Design:
+- Key: a multiply hash of the source bytes, and the kind (`Classic` or `Module`). A hit also compares the bytes, so a hash collision is a miss. The parser has no module goal yet, so only `Classic` has a caller.
+- Value: the owned `Program` behind an `Rc`, or the first parse error with its span. `Code::new` takes the same `Rc`. The cache does not copy the tree: a document and the cache hold one copy.
+- Errors: `add_script` maps a cached error as before, so a syntax error is a new `SyntaxError` of the realm each time.
+- Node limit: a realm parses with `max_nodes` set to the room it has left. `parse_script_used` also gives `used`, the count of nodes and list entries made before the end or the error. The count only grows and is checked before each step. A parse with `max_nodes >= used` gives the stored result. With less room the result is `Limit(Nodes)`. A stored `Limit(Nodes)` is only valid up to the room it had; more room parses again. Other limits are the defaults or the cache is skipped.
+- Atoms: the tree holds no heap values (names are byte ranges of its source). Each realm interns the names when it walks the tree. Measured with a frame pointer build on the journey: `walk_program` is 250 M instructions, of which `intern_name` and `name_in` are about 55 M (0.4% of the journey). `Heap::intern` has no samples under `walk_program`; its 1.1% comes from code that runs. A shared atom table would save at most the 55 M and needs string ids that are valid in many heaps. Re-intern on load stays.
+- Memory: at most 32 MiB (`MAX_BYTES`) of source and tree per thread; the oldest entries go first. Sources under 512 bytes are not kept: a short `eval` or `Function` text parses faster than an entry costs.
+- `parse_script` keeps its old body (an inlined helper with a count out-parameter). A first version returned a tuple and cost about 250 instructions more for each parse. That made `scripts_load many 10` +0.78% and `scripts_load reject 10` +1.6%.
+
+Results (archMachine, read-only staging journey `drive-journey.steps`, base origin/main `2edceef` from `base-build` against this change on it; one `perf record -e instructions:u -c 200000` run of each, and 3 runs of each one after the other for CPU and PSS, load average 3 to 6):
+- All instructions: 10.74 G to 10.34 G (-3.7%).
+- Parse and lex (`bare_js::parse::*` and `bare_js::lex::*`, self): 666 M to 297 M (-55%). The rest is the first parse of each script. `parse_cache::parse` itself (hash and compare): about 2 M.
+- The journey makes 60 entries, about 16.9 MB of source and tree, with 46 hits or more (a debug print, not in the code).
+- Peak PSS: 73.7, 74.4, 73.9 MiB to 77.2, 75.8, 75.8 MiB (about +2.3 MiB). The cache keeps the trees of scripts that the next document does not use, after #258 drops the old page.
+
+CPU of the page thread per step group (`cpu_ms`), ms, 3 runs:
+
+| Steps | main | now |
+| --- | --- | --- |
+| 1 open | 106-123 | 104-118 |
+| 2-3 login, overview | 392-400 | 368-415 |
+| 4 agents | 339-362 | 344-361 |
+| 5 search | 291-319 | 302-324 |
+| 6 reload | 277-300 | 248-274 |
+| 7 sign out | 211-219 | 203-216 |
+| 8 agents, no session | 76-86 | 66-72 |
+| total | 1734-1773 | 1680-1755 |
+
+The reload (6) and the last open (8) parse nothing new and drop by 10 to 30 ms. The other steps are inside the spread of 3 runs.
+
+Next step, not done here: drop the syntax tree of top-level code that ran once. Hypothesis: it is not cheap now. A `Program` is one set of arenas for the whole script, functions included, so the top level cannot be freed alone. With the cache the tree also stays while an entry holds it. A split of the arenas per function would be needed first.
+
+Tests (`crates/js/src/parse_cache.rs`): the same source parses once and a changed one again; two realms run one parse of the same script (and both throw for a syntax error); a syntax error is kept with its span; the node room gives the result of a fresh parse (rooms around `used`, for a good and a bad source); a module and a classic script with the same bytes are two entries; short sources are not kept and the cache stays under its cap.
+
+Checks (archMachine):
+- `cargo test --release --workspace --no-fail-fast` on `9adfe95`: 50 test binaries, 2,966 passed, 0 failed. The rebase on `2edceef` brought no change in `crates/js`.
+- `tools/js/cost_matrix.sh`, base `9adfe95` from `base-build`: 805 rows. Mean change: glibc +0.006%, jemalloc +0.000% (0 rows measured). Over under one allocator: 0. Over under both: 0. Failed: 0.
+- `tools/js/test262_check.sh`: gate ok. `tools/js/exec_diff.sh`: 79 runs, 0 differences. All 42 other `tools/js/*_check.sh` scripts pass (`parse_check.sh` with `ACORN=` set).
+- Live staging, read only: 13 runs of the journey, all passed.
+
+Not tested: `keycost.sh` (no change on the typing path); a session of the control interface (one thread each, so one cache each, not measured); the window (`--window`); a script of more than 32 MiB of tree; a page with many distinct large `eval` texts.
