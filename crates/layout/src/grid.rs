@@ -19,7 +19,8 @@
 //! - The intrinsic widths of an item are measured only if it is in a track that needs them.
 //!
 //! Known gaps (see `docs/decisions.md`):
-//! - `baseline` alignment is `start`, `last baseline` is `end`. There is no subgrid and no masonry.
+//! - Baseline alignment on the block axis shares a baseline for each row (`join`). On the inline axis, `baseline` is `start` and `last baseline`
+//!   is `end`. A `percent` height that lays an item out again does not change its group. There is no subgrid and no masonry.
 //! - Names of lines work in the track lists and in the areas. `span name` counts as `span 1` if the name is not found, and
 //!   finds the name only when the start line is known.
 //! - An absolute child sits at the start of the content box, and not in the grid area that its lines name.
@@ -178,8 +179,9 @@ fn auto_count(parts: &[Part], avail: Option<f32>, gap: f32) -> usize {
 }
 
 /// How an item sits in its area on one axis.
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, PartialEq, Default)]
 enum Align {
+    #[default]
     Stretch,
     Start,
     End,
@@ -1159,6 +1161,8 @@ struct Lay {
     /// its row: 1 for the first baseline, 2 for the last one, else 0. `asc`: the distance from its top margin edge to the baseline.
     kind: u8,
     asc: f32,
+    /// `align-self` on the block axis.
+    how: Align,
     /// The border box, from the content box of the container: left edge, and the width of the area.
     x: f32,
     area_w: f32,
@@ -1175,11 +1179,36 @@ struct Lay {
 fn baseline_of(cx: &Cx, it: &Item, l: &Lay, first: bool) -> f32 {
     let boxed = it.run.is_none();
     let b = if first {
-        block::first_baseline(cx, it.node, boxed, &cx.out, l.frag, l.end as usize, l.base, l.h)
+        block::first_baseline(cx, it.node, boxed, &cx.out, l.frag, l.end as usize, l.base, l.h, u32::MAX)
     } else {
-        l.base.map(|b| if boxed && cx.tree.scrolls(it.node) { b.min(l.h) } else { b })
+        l.base.map(|b| block::clamp_scroller(cx, it.node, boxed, b, l.h))
     };
     b.unwrap_or(l.h)
+}
+
+/// The baselines of the items of one kind in a row: the biggest distance from the top margin edge to the baseline, and from it to
+/// the bottom margin edge.
+type Groups = Vec<[(f32, f32); 2]>;
+
+fn group(groups: &Groups, it: &Item, l: &Lay) -> (f32, f32) {
+    groups[if l.kind == 1 { it.area[0].0 } else { it.area[0].1 - 1 } as usize][l.kind as usize - 1]
+}
+
+/// An item that is aligned by baseline joins the group of its row, unless it has an auto margin on top or at the bottom.
+#[inline(never)]
+fn join(cx: &Cx, it: &Item, l: &mut Lay, style: &bare_css::cascade::ComputedStyle, area_w: f32, groups: &mut Groups, rows: usize) {
+    if it.run.is_none() && [Property::MarginTop, Property::MarginBottom].iter().any(|&p| resolve(cx, style.get(p), Some(area_w)).is_none()) {
+        return;
+    }
+    l.kind = if l.how == Align::First { 1 } else { 2 };
+    l.asc = l.mt + baseline_of(cx, it, l, l.kind == 1);
+    if groups.is_empty() {
+        groups.resize(rows, [(0.0, 0.0); 2]);
+    }
+    let h = l.h + l.mt + l.mb;
+    let k = l.kind as usize - 1;
+    let at = if l.kind == 1 { it.area[0].0 } else { it.area[0].1 - 1 } as usize;
+    groups[at][k] = (groups[at][k].0.max(l.asc), groups[at][k].1.max(h - l.asc));
 }
 
 fn run_height(rows: &[f32]) -> f32 {
@@ -1224,7 +1253,7 @@ pub(crate) fn layout(cx: &mut Cx, node: NodeId, space: Space, bp: Sides) -> Kids
     let mut lays = vec![Lay::default(); g.items.len()];
     // The baseline groups: for each row, the biggest distance from the top margin edge to the shared baseline and from it to the
     // bottom margin edge, for the first baselines and for the last ones. Empty if no item is aligned by baseline.
-    let mut groups: Vec<[[f32; 2]; 2]> = Vec::new();
+    let mut groups = Groups::new();
     for (it, l) in g.items.iter_mut().zip(lays.iter_mut()) {
         let (s, e) = (it.area[1].0 as usize, it.area[1].1 as usize);
         let area_w = col_at[e - 1] + cols[e - 1] - col_at[s];
@@ -1232,6 +1261,7 @@ pub(crate) fn layout(cx: &mut Cx, node: NodeId, space: Space, bp: Sides) -> Kids
         l.area_w = area_w;
         l.x = col_at[s];
         l.frag = cx.out.len();
+        let style = tree.style(it.node);
         if let Some((first, last)) = it.run {
             let lines = inline::lines(cx, node, first, last, area_w, (0.0, 0.0));
             l.h = lines.height;
@@ -1240,7 +1270,7 @@ pub(crate) fn layout(cx: &mut Cx, node: NodeId, space: Space, bp: Sides) -> Kids
             if tree.kind(it.node) == Kind::ListItem {
                 cx.number = it.number;
             }
-            let how = align(tree.style(it.node).get(Property::JustifySelf), justify_items);
+            let how = align(style.get(Property::JustifySelf), justify_items);
             let (w, ml, mr, shift) = fit_width(cx, it.node, area_w, how);
             let done = cx.lay_item(it.node, Space { width: area_w, height: None }, (w, ml, mr), None, &mut l.laid);
             (l.h, l.mt, l.mb, l.base, l.w, l.ml, l.mr) = (done.height, done.margin_top, done.margin_bottom, done.baseline, w, ml, mr);
@@ -1252,22 +1282,18 @@ pub(crate) fn layout(cx: &mut Cx, node: NodeId, space: Space, bp: Sides) -> Kids
         // An item that scrolls has no automatic minimum height.
         let least = if it.run.is_none() && matches!(tree.overflow(it.node).1, Keyword::Hidden | Keyword::Scroll | Keyword::Auto) { 0.0 } else { h };
         it.contrib[0] = [h, h, least];
-        let how = if it.run.is_some() { align_items } else { align_y(tree.style(it.node).get(Property::AlignSelf), align_items) };
-        if matches!(how, Align::First | Align::Last) && (it.run.is_some() || [Property::MarginTop, Property::MarginBottom].iter().all(|&p| resolve(cx, tree.style(it.node).get(p), Some(area_w)).is_some())) {
-            l.kind = if how == Align::First { 1 } else { 2 };
-            l.asc = l.mt + baseline_of(cx, it, l, l.kind == 1);
-            if groups.is_empty() {
-                groups.resize(g.lead[0].len(), [[0.0; 2]; 2]);
-            }
-            let gr = &mut groups[if l.kind == 1 { it.area[0].0 } else { it.area[0].1 - 1 } as usize];
-            gr[l.kind as usize - 1] = [gr[l.kind as usize - 1][0].max(l.asc), gr[l.kind as usize - 1][1].max(h - l.asc)];
+        l.how = if it.run.is_some() { align_items } else { align_y(style.get(Property::AlignSelf), align_items) };
+        if matches!(l.how, Align::First | Align::Last) {
+            join(cx, it, l, style, area_w, &mut groups, g.lead[0].len());
         }
     }
-    // An item aligned by baseline asks for the room that its group needs: its own size and the shift to the shared baseline.
-    for (it, l) in g.items.iter_mut().zip(&lays).filter(|(_, l)| l.kind != 0) {
-        let [a, d] = groups[if l.kind == 1 { it.area[0].0 } else { it.area[0].1 - 1 } as usize][l.kind as usize - 1];
-        let extra = if l.kind == 1 { a - l.asc } else { d - (it.contrib[0][0] - l.asc) };
-        it.contrib[0] = it.contrib[0].map(|c| c + extra);
+    if !groups.is_empty() {
+        // An item aligned by baseline asks for the room that its group needs: its own size and the shift to the shared baseline.
+        for (it, l) in g.items.iter_mut().zip(&lays).filter(|(_, l)| l.kind != 0) {
+            let outer = it.contrib[0][0];
+            let extra = if l.kind == 1 { group(&groups, it, l).0 - l.asc } else { group(&groups, it, l).1 - (outer - l.asc) };
+            it.contrib[0] = it.contrib[0].map(|c| c + extra);
+        }
     }
 
     // 3. The rows. With no height, each row is as high as its items; a `min-height` that is more makes the room known.
@@ -1303,12 +1329,12 @@ pub(crate) fn layout(cx: &mut Cx, node: NodeId, space: Space, bp: Sides) -> Kids
         let off = if l.kind == 0 {
             0.0
         } else {
-            let [a, d] = groups[if l.kind == 1 { r0 } else { r1 - 1 }][l.kind as usize - 1];
+            let (a, d) = group(&groups, it, l);
             if l.kind == 1 { a - l.asc } else { area_h - d - l.asc }
         };
         if it.run.is_none() {
             let style = tree.style(it.node);
-            let how = align_y(style.get(Property::AlignSelf), align_items);
+            let how = l.how;
             let (border, padding) = border_padding(cx, style, l.area_w);
             let bpv = border.vertical() + padding.vertical();
             let margin = |cx: &Cx, p| resolve(cx, style.get(p), Some(l.area_w));
@@ -1369,7 +1395,11 @@ pub(crate) fn layout(cx: &mut Cx, node: NodeId, space: Space, bp: Sides) -> Kids
             best = Some((key.0, key.1, i, y));
         }
     }
-    let baseline = best.map(|(_, _, i, y)| y + baseline_of(cx, &g.items[i], &lays[i], lays[i].kind != 2));
+    // The shared baseline of the item, else its first baseline, read from a few fragments.
+    let baseline = best.map(|(_, _, i, y)| {
+        let (it, l) = (&g.items[i], &lays[i]);
+        y + if l.kind != 0 { l.asc - l.mt } else { block::first_baseline(cx, it.node, it.run.is_none(), &cx.out, l.frag, l.end as usize, l.base, l.h, block::PEEK).unwrap_or(0.0) }
+    });
 
     // 5. The live fragments go to the page, in the order of the items. The first layout of an item that was laid out again is left.
     let tmp = std::mem::replace(&mut cx.out, real);

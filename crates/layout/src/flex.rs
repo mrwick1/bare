@@ -369,9 +369,9 @@ pub(crate) fn layout(cx: &mut Cx, node: NodeId, space: Space, bp: Sides) -> Kids
         }
         let end = if in_place { it.to } else { cx.out.len() };
         if first.contains(&i) && (by_baseline.is_none() && i == first.start || by_baseline == Some(i - first.start)) {
-            // The shared baseline, if the item is aligned by baseline; else its first one (the container has no more). An item with no
-            // baseline gives its bottom border edge (CSS Flexbox 1, section 8.5).
-            let b = if it.align == K::LastBaseline && by_baseline.is_some() { it.baseline } else { it.first.or_else(|| first_of(cx, it, &cx.out, base, end)) };
+            // The shared baseline, if the item is aligned by baseline; else its first one, read from a few fragments. An
+            // item with no baseline gives its bottom border edge (CSS Flexbox 1, section 8.5).
+            let b = if it.align == K::LastBaseline && by_baseline.is_some() { it.baseline } else { it.first.or_else(|| first_of(cx, it, &cx.out, base, end, block::PEEK)) };
             baseline = Some(y + b.unwrap_or(if row { it.cross } else { it.main + it.bp_main }));
         }
         fragment::shift(&mut cx.out[..end], base, bp.left + x, bp.top + y);
@@ -582,7 +582,7 @@ fn lay(cx: &mut Cx, container: NodeId, it: &mut Item, space: Space, w: f32, tall
         let lines = inline::lines(cx, container, it.node, last, w, (0.0, 0.0));
         (it.cross, it.baseline, it.content) = (lines.height, lines.baseline, lines.height);
         if it.align == K::Baseline {
-            it.first = first_of(cx, it, &cx.out, it.from, cx.out.len());
+            it.first = first_of(cx, it, &cx.out, it.from, cx.out.len(), u32::MAX);
         }
     } else {
         cx.number = it.number;
@@ -590,9 +590,9 @@ fn lay(cx: &mut Cx, container: NodeId, it: &mut Item, space: Space, w: f32, tall
         let done = cx.lay_item(it.node, space, (w, 0.0, 0.0), tall, &mut it.laid);
         cx.out[done.fragment].rect.x = 0.0;
         // A scroll container keeps the baseline of its content, but not below its bottom edge.
-        (it.cross, it.baseline, it.content) = (done.height, done.baseline.map(|b| if cx.tree.scrolls(it.node) { b.min(done.height) } else { b }), done.content);
+        (it.cross, it.baseline, it.content) = (done.height, done.baseline.map(|b| block::clamp_scroller(cx, it.node, true, b, done.height)), done.content);
         if it.align == K::Baseline {
-            it.first = first_of(cx, it, &cx.out, it.from, cx.out.len());
+            it.first = first_of(cx, it, &cx.out, it.from, cx.out.len(), u32::MAX);
         }
         let tree = cx.tree;
         it.rigid = cx.unknown.get() == unknown
@@ -605,9 +605,9 @@ fn lay(cx: &mut Cx, container: NodeId, it: &mut Item, space: Space, w: f32, tall
     it.waits = cx.waiting - waiting;
 }
 
-/// The baseline of the first line of an item laid out in `out[at..end]` (`block::first_baseline`).
-fn first_of(cx: &Cx, it: &Item, out: &[Fragment], at: usize, end: usize) -> Option<f32> {
-    block::first_baseline(cx, it.node, it.last.is_none(), out, at, end, it.baseline, it.cross)
+/// The baseline of the first line of an item laid out in `out[at..end]` (`block::first_baseline`), read from `limit` fragments.
+fn first_of(cx: &Cx, it: &Item, out: &[Fragment], at: usize, end: usize, limit: u32) -> Option<f32> {
+    block::first_baseline(cx, it.node, it.last.is_none(), out, at, end, it.baseline, it.cross, limit)
 }
 
 /// Give a laid-out item a new content height: only its box changes if its content does not depend on it, else it is

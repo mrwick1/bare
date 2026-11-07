@@ -193,16 +193,26 @@ pub fn context(cx: &Cx, node: NodeId) -> Context {
     }
 }
 
+/// The most fragments that a container reads to find the first baseline of the item that gives its own baseline. An item with more
+/// gives its last baseline: the read must not cost more than the layout of a small container.
+pub(crate) const PEEK: u32 = 8;
+
 /// The baseline of the first line of a flex or grid item laid out in `out[at..end]`, from the top of its border box. `last` is the
-/// baseline of its last line (`Done::baseline`). A flex, grid or table container gives its own baseline. A scroll container
-/// keeps the baseline of its content, but not below its bottom edge (`height` is its border box).
+/// baseline of its last line (`Done::baseline`), and the answer if the item has more than `limit` fragments. A flex, grid or table
+/// container gives its own baseline. A scroll container keeps the baseline of its content, but not below its bottom edge
+/// (`height` is its border box).
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn first_baseline(cx: &Cx, node: NodeId, boxed: bool, out: &[crate::fragment::Fragment], at: usize, end: usize, last: Option<f32>, height: f32) -> Option<f32> {
-    if boxed && context(cx, node) != Context::Flow {
-        return last;
-    }
-    let found = crate::fragment::first_baseline(&cx.tree, out, at, end, boxed).or(last);
-    found.map(|b| if boxed && cx.tree.scrolls(node) { b.min(height) } else { b })
+pub(crate) fn first_baseline(cx: &Cx, node: NodeId, boxed: bool, out: &[fragment::Fragment], at: usize, end: usize, last: Option<f32>, height: f32, limit: u32) -> Option<f32> {
+    // One line of text and nothing else: its first baseline is its last one. So is that of a container, and of an item that is
+    // too big to read.
+    let single = boxed && end == at + 2 && matches!(out[at + 1].kind, fragment::Kind::Text { .. });
+    let found = if single || end - at > limit as usize || boxed && context(cx, node) != Context::Flow { last } else { fragment::first_baseline(&cx.tree, out, at, end, boxed).or(last) };
+    found.map(|b| clamp_scroller(cx, node, boxed, b, height))
+}
+
+/// The baseline of a scroll container is not below its bottom edge (`height`). Only a baseline below it asks if it scrolls.
+pub(crate) fn clamp_scroller(cx: &Cx, node: NodeId, boxed: bool, b: f32, height: f32) -> f32 {
+    if b > height && boxed && cx.tree.scrolls(node) { height } else { b }
 }
 
 /// What the parent needs from a child block.

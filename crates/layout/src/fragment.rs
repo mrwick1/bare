@@ -125,21 +125,21 @@ pub fn shift(fragments: &mut [Fragment], from: usize, dx: f32, dy: f32) {
 /// or from the top of the run of lines that starts there. `None` with no text. A block gives the baseline of its last line
 /// (`block::Done::baseline`): this is for the first one.
 pub(crate) fn first_baseline(tree: &crate::boxes::Tree, out: &[Fragment], at: usize, end: usize, boxed: bool) -> Option<f32> {
-    let mut open: Vec<(u32, f32)> = Vec::new();
-    let mut i = at;
-    while i < end {
-        while open.last().is_some_and(|o| o.0 as usize <= i) {
-            open.pop();
+    // The fragments are in preorder with rects relative to the parent: walk down the first branch with text.
+    fn find(tree: &crate::boxes::Tree, out: &[Fragment], mut i: usize, end: usize, y: f32) -> Option<f32> {
+        while i < end {
+            let f = &out[i];
+            if let Kind::Text { .. } = f.kind {
+                return Some(y + f.rect.y + crate::font::Metrics::of(tree.style(f.node)).ascent);
+            }
+            if f.end as usize > i + 1
+                && let Some(b) = find(tree, out, i + 1, f.end as usize, y + f.rect.y)
+            {
+                return Some(b);
+            }
+            i = f.end as usize;
         }
-        let f = &out[i];
-        let y = open.last().map_or(0.0, |o| o.1) + if boxed && i == at { 0.0 } else { f.rect.y };
-        if let Kind::Text { .. } = f.kind {
-            return Some(y + crate::font::Metrics::of(tree.style(f.node)).ascent);
-        }
-        if f.end as usize > i + 1 {
-            open.push((f.end, y));
-        }
-        i += 1;
+        None
     }
-    None
+    find(tree, out, at + boxed as usize, end, 0.0)
 }
