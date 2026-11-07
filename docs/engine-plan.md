@@ -264,6 +264,7 @@ Skip as separate work, because B replaces the code: `num_lit` caching (4.9 M), t
 - Data: for each function: the scopes in order, for each binding the (hops, index), flags (let, const, TDZ, function name), uses of `this`, `arguments`, `new.target`, `super`, the class barrier, and whether the function has a loop or a call (the same flags as `FL_*`).
 - Check: a test walks every identifier site of the `eval-cases` corpus and the typing bundle and compares (hops, index) with what the tree walker resolves. They must be equal for every site.
 - Parallel: yes, with A1 to A4 (new file).
+- Done: `bc_scope.rs`. The corpora and the typing page give 0 differences. See docs/progress.md, "Scope data for the code generator".
 
 **B2. Code generator, core subset, with a verifier.** Size L. Depends on B1.
 - Files: `crates/js/src/bc_gen.rs`, `bc_gen_expr.rs`, `bc_gen_stmt.rs` (new), `bc_verify.rs` (new: register bounds, jump targets, handler ranges), `bc_tests.rs` (golden disassembly).
