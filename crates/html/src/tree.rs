@@ -323,15 +323,23 @@ impl Builder {
     /// The input is over: close the tree and give it.
     fn done(mut self) -> Document {
         self.finish();
+        self.fill_templates();
+        self.doc.shrink_to_fit();
+        // A `Vec` that grows keeps spare room (up to twice as much). The page is read, so give the room back.
+        self.doc
+    }
+
+    /// Move the children of each `template` into its contents.
+    fn fill_templates(&mut self) {
+        if self.templates.is_empty() {
+            return;
+        }
         for t in std::mem::take(&mut self.templates) {
             if self.doc.children(t).next().is_some() {
                 let contents = self.doc.make_template_content(t);
                 self.doc.move_children(t, contents);
             }
         }
-        self.doc.shrink_to_fit();
-        // A `Vec` that grows keeps spare room (up to twice as much). The page is read, so give the room back.
-        self.doc
     }
 
     // ---- Small helpers ----
@@ -991,9 +999,14 @@ impl Builder {
                 self.skip_newline = true;
             }
             "form" => {
-                if self.form.is_none() {
+                // Inside a template the form element pointer is neither read nor set.
+                let in_template = self.open.iter().any(|&n| self.is(n, &["template"]));
+                if in_template || self.form.is_none() {
                     self.close_p();
-                    self.form = Some(self.insert_element(name, &attrs, true));
+                    let f = self.insert_element(name, &attrs, true);
+                    if !in_template {
+                        self.form = Some(f);
+                    }
                 }
             }
             "li" => {
@@ -1852,6 +1865,19 @@ mod tests {
         let doc = parser.finish();
         assert!(doc.dump().contains("done"));
         assert!(start.elapsed().as_secs() < 2);
+    }
+
+    #[test]
+    fn a_form_in_a_template_is_not_read_by_the_form_pointer() {
+        let doc = parse("<body><form id=one><template><form id=in></form></template></form><form id=two></form>");
+        let html = doc.children(doc.root()).find(|&c| doc.element_name(c) == "html").unwrap();
+        let body = doc.children(html).last().unwrap();
+        let form = doc.children(body).next().unwrap();
+        // The second page form is ignored (the pointer is on the first). The form in the template is kept, and it does not take the pointer.
+        assert_eq!(doc.children(body).count(), 1);
+        let tpl = doc.children(form).next().unwrap();
+        let contents = doc.template_content(tpl).expect("contents");
+        assert_eq!(doc.children(contents).map(|c| doc.element_name(c)).collect::<Vec<_>>(), ["form"]);
     }
 
     #[test]

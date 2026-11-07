@@ -17,6 +17,8 @@ topic_test!(formdata_cases, "formdata", 28);
 topic_test!(fragment_cases, "fragment", 75);
 topic_test!(insert_cases, "insert", 63);
 topic_test!(nodecmp_cases, "nodecmp", 126);
+topic_test!(docnode_cases, "docnode", 179);
+topic_test!(tplhtml_cases, "tplhtml", 46);
 
 fn big<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {
     std::thread::Builder::new().stack_size(64 << 20).spawn(f).unwrap().join().unwrap()
@@ -166,8 +168,9 @@ fn only_a_fragment_without_a_host_can_be_inserted() {
     // a content fragment moves its children, also into a fragment, and a fragment cannot go inside itself or its own child
     assert_eq!(js(&mut b, "var c = document.getElementById('t').content, d = c.cloneNode(true); c.appendChild(d); c.childNodes.length + ',' + d.childNodes.length"), "2,0");
     assert_eq!(js(&mut b, "var c = document.getElementById('t').content; try { c.firstChild.appendChild(c) } catch (e) { e.name }"), "HierarchyRequestError");
-    // a fragment into the document node is still refused
-    assert_eq!(js(&mut b, "document.appendChild(document.getElementById('t').content.cloneNode(true))"), want);
+    // a fragment goes into the document node under the Document rules (the page has a root element, so one more element is refused); a shadow root does not
+    assert_eq!(js(&mut b, "document.appendChild(document.getElementById('t').content.cloneNode(true))"), "throw:HierarchyRequestError:Failed to execute 'appendChild' on 'Node': Only one element on document allowed.");
+    assert_eq!(js(&mut b, "document.appendChild(document.getElementById('host').shadowRoot)"), want);
 }
 
 #[test]

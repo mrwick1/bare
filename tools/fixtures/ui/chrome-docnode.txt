@@ -1,0 +1,179 @@
+doc-replace-children-shape	function,0,true,true,function,0,function,0
+doc-replace-children-nothing	[],[],,
+doc-replace-children-one-element	throw:HierarchyRequestError:Failed to execute 'replaceChildren' on 'Document': Only one element on document allowed.
+doc-replace-children-doctype-element	throw:HierarchyRequestError:Failed to execute 'replaceChildren' on 'Document': Can't insert a doctype after the root element.
+doc-replace-children-element-doctype	HierarchyRequestError:Failed to execute 'replaceChildren' on 'Document': Only one element on document allowed.,[<!doctype>,html]
+doc-replace-children-two-elements	HierarchyRequestError:Failed to execute 'replaceChildren' on 'Document': Only one element on document allowed.,[<!doctype>,html]
+doc-replace-children-two-doctypes	HierarchyRequestError:Failed to execute 'replaceChildren' on 'Document': Can't insert a doctype after the root element.,[<!doctype>,html]
+doc-replace-children-text	HierarchyRequestError:Failed to execute 'replaceChildren' on 'Document': Only one element on document allowed.,[<!doctype>,html]
+doc-replace-children-text-node	HierarchyRequestError:Failed to execute 'replaceChildren' on 'Document': Nodes of type '#text' may not be inserted inside nodes of type '#document'.,[<!doctype>,html]
+doc-replace-children-comments	throw:HierarchyRequestError:Failed to execute 'replaceChildren' on 'Document': Only one element on document allowed.
+doc-replace-children-empty-string	HierarchyRequestError:Failed to execute 'replaceChildren' on 'Document': Nodes of type '#text' may not be inserted inside nodes of type '#document'.,[<!doctype>,html]
+doc-replace-children-the-document	HierarchyRequestError:Failed to execute 'replaceChildren' on 'Document': Nodes of type '#document' may not be inserted inside nodes of type '#document'.,[<!doctype>,html]
+doc-replace-children-keeps-its-children-on-error	HierarchyRequestError:Failed to execute 'replaceChildren' on 'Document': Only one element on document allowed.,true,[<!doctype>,html]
+doc-replace-children-moves-from-the-tree	throw:HierarchyRequestError:Failed to execute 'replaceChildren' on 'Document': Only one element on document allowed.
+doc-replace-children-with-its-own-element	throw:HierarchyRequestError:Failed to execute 'replaceChildren' on 'Document': Only one element on document allowed.
+doc-replace-children-with-its-own-doctype-and-element	throw:HierarchyRequestError:Failed to execute 'replaceChildren' on 'Document': Can't insert a doctype after the root element.
+doc-replace-children-fragment-one-element	throw:HierarchyRequestError:Failed to execute 'replaceChildren' on 'Document': Only one element on document allowed.
+doc-replace-children-fragment-two-elements	HierarchyRequestError:Failed to execute 'replaceChildren' on 'Document': Only one element on document allowed.,[<!doctype>,html]
+doc-replace-children-fragment-text	HierarchyRequestError:Failed to execute 'replaceChildren' on 'Document': Only one element on document allowed.,[<!doctype>,html]
+doc-replace-children-fragment-comment-and-element	throw:HierarchyRequestError:Failed to execute 'replaceChildren' on 'Document': Only one element on document allowed.
+doc-replace-children-fragment-empty	[]
+doc-replace-children-fragment-and-element	HierarchyRequestError:Failed to execute 'replaceChildren' on 'Document': Only one element on document allowed.,[<!doctype>,html]
+doc-replace-children-fragment-then-doctype	HierarchyRequestError:Failed to execute 'replaceChildren' on 'Document': Only one element on document allowed.,[<!doctype>,html]
+doc-replace-children-doctype-then-fragment	HierarchyRequestError:Failed to execute 'replaceChildren' on 'Document': Can't insert a doctype after the root element.,[<!doctype>,html]
+doc-replace-children-record	throw:HierarchyRequestError:Failed to execute 'replaceChildren' on 'Document': Only one element on document allowed.
+doc-replace-children-record-nothing-to-do	
+doc-replace-children-record-error	
+doc-append-element-with-one-present	HierarchyRequestError:Failed to execute 'append' on 'Document': Only one element on document allowed.,[<!doctype>,html]
+doc-append-after-removing	[<!doctype>,a,<!--c-->],true
+doc-append-text	HierarchyRequestError:Failed to execute 'append' on 'Document': Nodes of type '#text' may not be inserted inside nodes of type '#document'.,[<!doctype>]
+doc-append-doctype-after-element	HierarchyRequestError:Failed to execute 'append' on 'Document': Can't insert a doctype after the root element.,[html]
+doc-append-doctype-when-none	[<!doctype>,a]
+doc-append-fragment	[<!doctype>,a],0
+doc-append-fragment-two	HierarchyRequestError:Failed to execute 'append' on 'Document': Only one element on document allowed.,[<!doctype>]
+doc-append-nothing	[<!doctype>,html]
+doc-prepend-element-with-one-present	HierarchyRequestError:Failed to execute 'prepend' on 'Document': Can't insert an element before a doctype.,[<!doctype>,html]
+doc-prepend-before-removed-element	throw:HierarchyRequestError:Failed to execute 'prepend' on 'Document': Can't insert an element before a doctype.
+doc-prepend-comment-before-doctype	[<!--c-->,<!doctype>,html]
+doc-prepend-doctype-when-present	HierarchyRequestError:Failed to execute 'prepend' on 'Document': Only one doctype on document allowed.,[<!doctype>,html]
+doc-prepend-doctype-replacing-it	[<!doctype>,html]
+doc-prepend-fragment	throw:HierarchyRequestError:Failed to execute 'prepend' on 'Document': Can't insert an element before a doctype.
+doc-prepend-text	HierarchyRequestError:Failed to execute 'prepend' on 'Document': Nodes of type '#text' may not be inserted inside nodes of type '#document'.,[<!doctype>,html]
+doc-append-child-fragment	[<!doctype>,a],true,0
+doc-append-child-fragment-two	HierarchyRequestError:Failed to execute 'appendChild' on 'Node': Only one element on document allowed.,[<!doctype>],2
+doc-append-child-fragment-with-element-present	HierarchyRequestError:Failed to execute 'appendChild' on 'Node': Only one element on document allowed.,[<!doctype>,html],1
+doc-append-child-fragment-text	HierarchyRequestError:Failed to execute 'appendChild' on 'Node': Nodes of type '#text' may not be inserted inside nodes of type '#document'.,[<!doctype>],1
+doc-append-child-fragment-empty	[<!doctype>,html]
+doc-insert-before-fragment-end	[<!doctype>,a]
+doc-insert-before-fragment-before-doctype	HierarchyRequestError:Failed to execute 'insertBefore' on 'Node': Can't insert an element before a doctype.,[<!doctype>]
+doc-insert-before-fragment-before-comment	[<!doctype>,a,<!--c-->]
+doc-insert-before-fragment-element-after-doctype	HierarchyRequestError:Failed to execute 'insertBefore' on 'Node': Can't insert an element before a doctype.,[<!doctype>,html]
+doc-insert-before-fragment-not-a-child	NotFoundError:Failed to execute 'insertBefore' on 'Node': The node before which the new node is to be inserted is not a child of this node.,[<!doctype>],1
+doc-insert-before-fragment-two-before-nothing	HierarchyRequestError:Failed to execute 'insertBefore' on 'Node': Only one element on document allowed.,[<!doctype>]
+doc-replace-child-fragment-for-element	[<!doctype>,a],true,,0
+doc-replace-child-fragment-two-for-element	HierarchyRequestError:Failed to execute 'replaceChild' on 'Node': Only one element on document allowed.,[<!doctype>,html],true,2
+doc-replace-child-fragment-text-for-element	HierarchyRequestError:Failed to execute 'replaceChild' on 'Node': Nodes of type '#text' may not be inserted inside nodes of type '#document'.,[<!doctype>,html]
+doc-replace-child-fragment-for-doctype	HierarchyRequestError:Failed to execute 'replaceChild' on 'Node': Only one element on document allowed.,[<!doctype>,html],1
+doc-replace-child-fragment-for-comment	[<!doctype>,a]
+doc-replace-child-fragment-element-over-comment-before-doctype	HierarchyRequestError:Failed to execute 'replaceChild' on 'Node': Can't insert an element before a doctype.,[<!--c-->,<!doctype>]
+doc-replace-child-element-for-doctype	HierarchyRequestError:Failed to execute 'replaceChild' on 'Node': Only one element on document allowed.,[<!doctype>,html]
+doc-fragment-record	childList #document +[a,<!--c-->] -[] p=<!doctype> n=null
+doc-fragment-is-a-template-content	[<!doctype>,a#n],0
+doc-fragment-ancestor-check	HierarchyRequestError:Failed to execute 'appendChild' on 'Node': The new child element contains the parent.,[<!doctype>,html]
+doc-replace-children-cleared-one-element	[section#s],true,,true
+doc-replace-children-cleared-doctype-element	[<!doctype>,section#s],true,true
+doc-replace-children-cleared-element-doctype	HierarchyRequestError:Failed to execute 'replaceChildren' on 'Document': Can't insert a doctype after the root element.,[]
+doc-replace-children-cleared-two-elements	HierarchyRequestError:Failed to execute 'replaceChildren' on 'Document': Only one element on document allowed.,[]
+doc-replace-children-cleared-two-doctypes	HierarchyRequestError:Failed to execute 'replaceChildren' on 'Document': Only one doctype on document allowed.,[]
+doc-replace-children-cleared-text	HierarchyRequestError:Failed to execute 'replaceChildren' on 'Document': Nodes of type '#text' may not be inserted inside nodes of type '#document'.,[]
+doc-replace-children-cleared-text-node	HierarchyRequestError:Failed to execute 'replaceChildren' on 'Document': Nodes of type '#text' may not be inserted inside nodes of type '#document'.,[]
+doc-replace-children-cleared-comments	[<!--c-->,a,<!--d-->],true
+doc-replace-children-cleared-empty-string	HierarchyRequestError:Failed to execute 'replaceChildren' on 'Document': Nodes of type '#text' may not be inserted inside nodes of type '#document'.,[]
+doc-replace-children-cleared-the-document	HierarchyRequestError:Failed to execute 'replaceChildren' on 'Document': Nodes of type '#document' may not be inserted inside nodes of type '#document'.,[]
+doc-replace-children-cleared-fragment-one-element	[section],0
+doc-replace-children-cleared-fragment-two-elements	HierarchyRequestError:Failed to execute 'replaceChildren' on 'Document': Only one element on document allowed.,[]
+doc-replace-children-cleared-fragment-text	HierarchyRequestError:Failed to execute 'replaceChildren' on 'Document': Nodes of type '#text' may not be inserted inside nodes of type '#document'.,[]
+doc-replace-children-cleared-fragment-comment-and-element	[<!--c-->,a],0
+doc-replace-children-cleared-fragment-empty	[]
+doc-replace-children-cleared-fragment-and-element	HierarchyRequestError:Failed to execute 'replaceChildren' on 'Document': Only one element on document allowed.,[]
+doc-replace-children-cleared-fragment-then-doctype	HierarchyRequestError:Failed to execute 'replaceChildren' on 'Document': Can't insert a doctype after the root element.,[]
+doc-replace-children-cleared-doctype-then-fragment	ok,[<!doctype>,a]
+doc-replace-children-cleared-one-element-record	childList #document +[a#n,<!--c-->] -[] p=null n=null
+doc-replace-children-cleared-two-elements-text-first	HierarchyRequestError:Failed to execute 'replaceChildren' on 'Document': Nodes of type '#text' may not be inserted inside nodes of type '#document'.,[]
+doc-replace-children-cleared-doctype-twice	HierarchyRequestError:Failed to execute 'replaceChildren' on 'Document': Only one doctype on document allowed.,[]
+doc-replace-children-cleared-element-twice	HierarchyRequestError:Failed to execute 'replaceChildren' on 'Document': Only one element on document allowed.,[]
+doc-replace-children-cleared-element-then-doctype	HierarchyRequestError:Failed to execute 'replaceChildren' on 'Document': Can't insert a doctype after the root element.,[]
+doc-replace-children-cleared-fragment-two-elements	HierarchyRequestError:Failed to execute 'replaceChildren' on 'Document': Only one element on document allowed.,[]
+doc-replace-children-cleared-fragments-two	HierarchyRequestError:Failed to execute 'replaceChildren' on 'Document': Only one element on document allowed.,[]
+doc-replace-children-cleared-mixed-fragment-doctype	ok,[<!doctype>,a,<!--c-->]
+doc-replace-children-cleared-moves-from-the-tree	[q],true,1
+doc-replace-children-cleared-own-element	[html],true
+doc-replace-children-cleared-then-text-error-keeps-first	HierarchyRequestError:Failed to execute 'replaceChildren' on 'Document': Nodes of type '#text' may not be inserted inside nodes of type '#document'.,[<!--keep-->]
+doc-replace-children-cleared-error-keeps-children	HierarchyRequestError:Failed to execute 'replaceChildren' on 'Document': Only one element on document allowed.,[<!--keep-->]
+doc-replace-children-order-type-before-ancestor	HierarchyRequestError:Failed to execute 'replaceChildren' on 'Document': Nodes of type '#document' may not be inserted inside nodes of type '#document'.
+doc-replace-children-order-first-bad-node-wins	HierarchyRequestError:Failed to execute 'replaceChildren' on 'Document': Nodes of type '#text' may not be inserted inside nodes of type '#document'.,[]
+doc-replace-children-order-argument-conversion-first	Error:conv,[]
+doc-replace-children-order-node-conversion-then-check	HierarchyRequestError:Failed to execute 'replaceChildren' on 'Document': Nodes of type '#text' may not be inserted inside nodes of type '#document'.,[]
+doc-append-two-elements	HierarchyRequestError:Failed to execute 'append' on 'Document': Only one element on document allowed.,[]
+doc-append-two-doctypes	HierarchyRequestError:Failed to execute 'append' on 'Document': Only one doctype on document allowed.,[]
+doc-append-element-then-doctype	HierarchyRequestError:Failed to execute 'append' on 'Document': Can't insert a doctype after the root element.,[]
+doc-append-doctype-then-element	[<!doctype>,a]
+doc-append-text-and-element	HierarchyRequestError:Failed to execute 'append' on 'Document': Nodes of type '#text' may not be inserted inside nodes of type '#document'.,[]
+doc-append-element-into-doctype-only	[<!doctype>,a]
+doc-append-comment-doctype-element	[<!--c-->,<!doctype>,<!--e-->,a,<!--f-->]
+doc-append-record-group	childList #document +[<!doctype>,a,<!--f-->] -[] p=null n=null
+doc-append-the-document	HierarchyRequestError:Failed to execute 'append' on 'Document': Nodes of type '#document' may not be inserted inside nodes of type '#document'.,[<!doctype>,html]
+doc-prepend-two-elements	HierarchyRequestError:Failed to execute 'prepend' on 'Document': Only one element on document allowed.,[]
+doc-prepend-element-before-doctype-present	HierarchyRequestError:Failed to execute 'prepend' on 'Document': Can't insert an element before a doctype.,[<!doctype>]
+doc-prepend-doctype-before-element	[<!doctype>,a]
+doc-prepend-doctype-element-before-comment	[<!doctype>,a,<!--c-->]
+doc-prepend-fragment-before-doctype	HierarchyRequestError:Failed to execute 'prepend' on 'Document': Can't insert an element before a doctype.,[<!doctype>]
+doc-prepend-moves-own-first-child	throw:HierarchyRequestError:Failed to execute 'prepend' on 'Document': Only one doctype on document allowed.
+doc-insert-before-text-bad-ref	NotFoundError:Failed to execute 'insertBefore' on 'Node': The node before which the new node is to be inserted is not a child of this node.,[<!doctype>,html]
+doc-insert-before-element-bad-ref	NotFoundError:Failed to execute 'insertBefore' on 'Node': The node before which the new node is to be inserted is not a child of this node.,[]
+doc-insert-before-fragment-text-bad-ref	NotFoundError:Failed to execute 'insertBefore' on 'Node': The node before which the new node is to be inserted is not a child of this node.,[]
+doc-insert-before-fragment-two-bad-ref	NotFoundError:Failed to execute 'insertBefore' on 'Node': The node before which the new node is to be inserted is not a child of this node.,[]
+doc-insert-before-the-document-bad-ref	NotFoundError:Failed to execute 'insertBefore' on 'Node': The node before which the new node is to be inserted is not a child of this node.,[<!doctype>,html]
+doc-insert-before-fragment-doctype-ref-comment-order	HierarchyRequestError:Failed to execute 'insertBefore' on 'Node': Can't insert an element before a doctype.,[<!--c-->,<!doctype>]
+doc-insert-before-fragment-doctype-after-element	HierarchyRequestError:Failed to execute 'insertBefore' on 'Node': Can't insert a doctype after the root element.,[e,<!--c-->]
+doc-insert-before-doctype-before-element	[<!doctype>,e]
+doc-replace-child-doctype-for-doctype	[<!doctype>,html],true,
+doc-replace-child-element-for-element	[<!doctype>,n],true,
+doc-replace-child-comment-for-element	[<!doctype>,<!--n-->]
+doc-replace-child-text-for-comment	HierarchyRequestError:Failed to execute 'replaceChild' on 'Node': Nodes of type '#text' may not be inserted inside nodes of type '#document'.,[<!--c-->]
+doc-replace-child-doctype-for-element	HierarchyRequestError:Failed to execute 'replaceChild' on 'Node': Only one doctype on document allowed.,[<!doctype>,html]
+doc-replace-child-doctype-for-comment-after-element	HierarchyRequestError:Failed to execute 'replaceChild' on 'Node': Can't insert a doctype after the root element.,[html,<!--c-->]
+doc-replace-child-element-for-comment-before-doctype	HierarchyRequestError:Failed to execute 'replaceChild' on 'Node': Can't insert an element before a doctype.,[<!--c-->,<!doctype>]
+doc-replace-child-fragment-element-for-comment-after-doctype	[<!doctype>,a]
+doc-replace-child-fragment-for-doctype-with-element-present	HierarchyRequestError:Failed to execute 'replaceChild' on 'Node': Only one element on document allowed.,[<!doctype>,x],1
+doc-replace-child-fragment-for-doctype-no-element	[a],0
+doc-replace-child-fragment-two-for-comment	HierarchyRequestError:Failed to execute 'replaceChild' on 'Node': Only one element on document allowed.,[<!--c-->],2
+doc-replace-child-not-a-child	NotFoundError:Failed to execute 'replaceChild' on 'Node': The node to be replaced is not a child of this node.,[<!doctype>,html]
+doc-replace-child-fragment-record	childList #document +[a] -[<!--c-->] p=null n=null
+doc-element-before-on-the-root	HierarchyRequestError:Failed to execute 'before' on 'Element': Only one element on document allowed.,[<!doctype>,html]
+doc-element-before-on-the-root-comment	[<!doctype>,<!--c-->,html]
+doc-element-after-on-the-root-doctype	HierarchyRequestError:Failed to execute 'after' on 'Element': Can't insert a doctype after the root element.,[<!doctype>,html]
+doc-element-replace-with-on-the-root	[<!doctype>,a]
+doc-element-replace-with-two-on-the-root	HierarchyRequestError:Failed to execute 'replaceWith' on 'Element': Only one element on document allowed.,[<!doctype>,html]
+doc-element-replace-with-comments-on-the-root	[<!doctype>,<!--a-->,<!--b-->]
+doc-element-replace-with-text-on-the-root	HierarchyRequestError:Failed to execute 'replaceWith' on 'Element': Nodes of type '#text' may not be inserted inside nodes of type '#document'.,[<!doctype>,html]
+doc-comment-replace-with-element	[a,<!--d-->]
+doc-insert-adjacent-element-into-root-before	HierarchyRequestError:Failed to execute 'insertAdjacentElement' on 'Element': Only one element on document allowed.,[<!doctype>,html]
+doc-insert-adjacent-text-after-root	HierarchyRequestError:Failed to execute 'insertAdjacentText' on 'Element': Nodes of type '#text' may not be inserted inside nodes of type '#document'.,[<!doctype>,html]
+doc-dom-parser-free-ancestor-check	HierarchyRequestError:Failed to execute 'appendChild' on 'Node': The new child element contains the parent.
+doc-element-append-child-document	HierarchyRequestError:Failed to execute 'appendChild' on 'Node': Nodes of type '#document' may not be inserted inside nodes of type 'P'.
+doc-fragment-append-child-document	HierarchyRequestError:Failed to execute 'appendChild' on 'Node': Nodes of type '#document' may not be inserted inside nodes of type '#document-fragment'.
+doc-append-child-element-when-present	HierarchyRequestError:Failed to execute 'appendChild' on 'Node': Only one element on document allowed.
+doc-append-child-doctype-when-present	HierarchyRequestError:Failed to execute 'appendChild' on 'Node': Can't insert a doctype after the root element.
+doc-append-child-doctype-after-element	HierarchyRequestError:Failed to execute 'appendChild' on 'Node': Can't insert a doctype after the root element.
+doc-append-child-text	HierarchyRequestError:Failed to execute 'appendChild' on 'Node': Nodes of type '#text' may not be inserted inside nodes of type '#document'.
+doc-append-child-the-document	HierarchyRequestError:Failed to execute 'appendChild' on 'Node': Nodes of type '#document' may not be inserted inside nodes of type '#document'.
+doc-append-child-comment	[<!doctype>,html,<!--c-->]
+doc-insert-before-element-before-doctype	HierarchyRequestError:Failed to execute 'insertBefore' on 'Node': Can't insert an element before a doctype.,[<!doctype>]
+doc-insert-before-same-node	throw:HierarchyRequestError:Failed to execute 'insertBefore' on 'Node': Only one element on document allowed.
+doc-insert-before-element-moves-root-before-doctype	HierarchyRequestError:Failed to execute 'insertBefore' on 'Node': Can't insert an element before a doctype.,[<!doctype>,html]
+doc-replace-children-cleared-two-elements-then-text	HierarchyRequestError:Failed to execute 'replaceChildren' on 'Document': Nodes of type '#text' may not be inserted inside nodes of type '#document'.,[]
+doc-replace-children-cleared-text-then-two-elements	HierarchyRequestError:Failed to execute 'replaceChildren' on 'Document': Nodes of type '#text' may not be inserted inside nodes of type '#document'.,[]
+doc-append-two-doctypes-then-text	HierarchyRequestError:Failed to execute 'append' on 'Document': Nodes of type '#text' may not be inserted inside nodes of type '#document'.,[]
+doc-append-element-then-text-then-doctype	HierarchyRequestError:Failed to execute 'append' on 'Document': Nodes of type '#text' may not be inserted inside nodes of type '#document'.,[]
+doc-multi-append-element-then-text-present	HierarchyRequestError:Failed to execute 'append' on 'Document': Only one element on document allowed.,[<!doctype>,html]
+doc-multi-prepend-element-then-text-present	HierarchyRequestError:Failed to execute 'prepend' on 'Document': Can't insert an element before a doctype.,[<!doctype>,html]
+doc-multi-append-fragment-element-text-present	HierarchyRequestError:Failed to execute 'append' on 'Document': Only one element on document allowed.,[<!doctype>,html]
+doc-multi-append-two-elements-then-text-cleared	HierarchyRequestError:Failed to execute 'append' on 'Document': Nodes of type '#text' may not be inserted inside nodes of type '#document'.,[]
+doc-multi-append-own-nodes	HierarchyRequestError:Failed to execute 'append' on 'Document': Can't insert a doctype after the root element.
+doc-multi-append-own-nodes-in-order	ok,[<!doctype>,html],true,true
+doc-multi-prepend-own-nodes	ok,[<!doctype>,html]
+doc-multi-replace-children-own-nodes-in-order	ok,[<!doctype>,html],true,true
+doc-multi-replace-children-own-nodes-reversed-state	HierarchyRequestError:Failed to execute 'replaceChildren' on 'Document': Can't insert a doctype after the root element.
+doc-multi-replace-children-own-node-and-comment	ok,[html,<!--c-->]
+doc-multi-replace-children-new-element-and-own-element	HierarchyRequestError:Failed to execute 'replaceChildren' on 'Document': Only one element on document allowed.
+doc-multi-after-root-element-then-text	HierarchyRequestError:Failed to execute 'after' on 'Element': Only one element on document allowed.,[<!doctype>,html]
+doc-multi-replace-with-element-and-text	HierarchyRequestError:Failed to execute 'replaceWith' on 'Element': Only one element on document allowed.,[<!doctype>,html]
+doc-multi-replace-with-own-doctype	HierarchyRequestError:Failed to execute 'replaceWith' on 'Element': Can't insert a doctype after the root element.
+doc-multi-replace-with-two-elements-one-is-self	HierarchyRequestError:Failed to execute 'replaceWith' on 'Element': Only one element on document allowed.
+doc-multi-before-root-comment-and-element	HierarchyRequestError:Failed to execute 'before' on 'Element': Only one element on document allowed.,[<!doctype>,html]
+doc-multi-before-root-doctype-and-comment	ok,[<!doctype>,<!--c-->,html]
+doc-append-child-fragment-element-text-present	HierarchyRequestError:Failed to execute 'appendChild' on 'Node': Nodes of type '#text' may not be inserted inside nodes of type '#document'.,[<!doctype>,html],2
+doc-append-child-fragment-text-element-present	HierarchyRequestError:Failed to execute 'appendChild' on 'Node': Nodes of type '#text' may not be inserted inside nodes of type '#document'.,[<!doctype>,html],2
+doc-replace-children-fragment-text-then-element-present	HierarchyRequestError:Failed to execute 'replaceChildren' on 'Document': Nodes of type '#text' may not be inserted inside nodes of type '#document'.,[<!doctype>,html]

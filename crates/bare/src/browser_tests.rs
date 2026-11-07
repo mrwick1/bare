@@ -162,15 +162,15 @@ fn hierarchy_errors_and_descriptors() {
     big(|| {
         let mut b = browser();
         js(&mut b, "var a = document.getElementById('a'); var s = document.getElementById('s'); var p = a.firstElementChild;");
-        assert_eq!(js(&mut b, "s.appendChild(a)"), "throw:HierarchyRequestError:The new child element contains the parent.");
-        assert_eq!(js(&mut b, "a.appendChild(a)"), "throw:HierarchyRequestError:The new child element contains the parent.");
-        assert_eq!(js(&mut b, "p.insertBefore(document.createElement('x'), s)"), "throw:NotFoundError:The node before which the new node is to be inserted is not a child of this node.");
+        assert_eq!(js(&mut b, "s.appendChild(a)"), "throw:HierarchyRequestError:Failed to execute 'appendChild' on 'Node': The new child element contains the parent.");
+        assert_eq!(js(&mut b, "a.appendChild(a)"), "throw:HierarchyRequestError:Failed to execute 'appendChild' on 'Node': The new child element contains the parent.");
+        assert_eq!(js(&mut b, "p.insertBefore(document.createElement('x'), s)"), "throw:NotFoundError:Failed to execute 'insertBefore' on 'Node': The node before which the new node is to be inserted is not a child of this node.");
         assert_eq!(js(&mut b, "a.removeChild(document.body)"), "throw:NotFoundError:The node to be removed is not a child of this node.");
         assert_eq!(js(&mut b, "a.appendChild({})"), "throw:TypeError:parameter 1 is not of type 'Node'");
-        assert_eq!(js(&mut b, "document.appendChild(document.createElement('html'))"), "throw:HierarchyRequestError:This document cannot take that child here.");
-        assert_eq!(js(&mut b, "document.appendChild(document.createTextNode('x'))"), "throw:HierarchyRequestError:This node type cannot be a child of this node.");
-        assert_eq!(js(&mut b, "a.appendChild(document)"), "throw:HierarchyRequestError:A Document cannot be inserted.");
-        assert_eq!(js(&mut b, "document.createTextNode('t').appendChild(document.createElement('x'))"), "throw:HierarchyRequestError:This node type does not support this method.");
+        assert_eq!(js(&mut b, "document.appendChild(document.createElement('html'))"), "throw:HierarchyRequestError:Failed to execute 'appendChild' on 'Node': Only one element on document allowed.");
+        assert_eq!(js(&mut b, "document.appendChild(document.createTextNode('x'))"), "throw:HierarchyRequestError:Failed to execute 'appendChild' on 'Node': Nodes of type '#text' may not be inserted inside nodes of type '#document'.");
+        assert_eq!(js(&mut b, "a.appendChild(document)"), "throw:HierarchyRequestError:Failed to execute 'appendChild' on 'Node': The new child element contains the parent.");
+        assert_eq!(js(&mut b, "document.createTextNode('t').appendChild(document.createElement('x'))"), "throw:HierarchyRequestError:Failed to execute 'appendChild' on 'Node': This node type does not support this method.");
         // nothing changed after the failures
         assert_eq!(js(&mut b, "a.childNodes.length + ',' + document.childNodes.length"), "3,2");
         // accessor properties: a getter with the wrong `this` is a TypeError, and the flags are as in the IDL

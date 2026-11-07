@@ -1,0 +1,46 @@
+tpl-inner-html-set	1,TEMPLATE,0,2,B,y,true,<template id="t"><b>x</b>y</template>
+tpl-inner-html-set-empty	0,0,<template></template>
+tpl-inner-html-set-nested	1,P,TEMPLATE,0,I,<template><p>a<template><i>n</i></template></p></template>
+tpl-inner-html-set-attrs	a,x y,1&2,<template id="a" class="x y" data-k="1&amp;2"><u>t</u></template>,<template id="a" class="x y" data-k="1&amp;2"><u>t</u></template>
+tpl-inner-html-set-with-siblings	5,a<template>1</template><b></b><template><i></i></template>c,0,2
+tpl-inner-html-set-in-svg-is-not-a-template	template,0,false,<svg><template></template></svg><b></b>
+tpl-inner-html-set-script-inside	SCRIPT,,<template><script>window.ran = 1</script></template>,window.ran = 1
+tpl-inner-html-set-style-inside	<template><style>a>b{}</style><p>1 &lt; 2</p></template>
+tpl-inner-html-set-form-inside	FORM,n,1
+tpl-inner-html-set-clone-deep	<template><p>a</p></template>,1,true,0
+tpl-inner-html-set-removes-old-content	,1,<template><i></i></template>
+tpl-inner-html-set-record	childList div#d +[template] -[] p=null n=null
+tpl-inner-html-set-content-is-not-searched	,,2,,in
+tpl-inner-html-set-fragment-moves	<b>1</b><i>2</i>,<template></template>
+tpl-inner-html-set-tr-in-template-body	2,<template><p>a</p><p>b</p></template>
+tpl-inner-html-set-unclosed	B,<template><b>x</b></template>
+tpl-inner-html-set-stray-end-tag	<b></b>
+tpl-inner-html-set-uppercase	TEMPLATE,<template><b>x</b></template>
+tpl-inner-html-set-comment-and-text-inside	3,<template><!--c-->t<b></b></template>
+tpl-outer-html-set	1,TEMPLATE,B,<template><b>x</b></template>
+tpl-outer-html-set-with-text-neighbours	3,ax<template>y</template>zb
+tpl-outer-html-set-on-a-template	,1,<template><i></i></template>
+tpl-outer-html-set-in-fragment-parent	1,TEMPLATE,1
+tpl-insert-adjacent-html-beforeend	B,<template><b>x</b></template>
+tpl-insert-adjacent-html-afterbegin	3,1,<template><b>x</b></template>t<i></i>
+tpl-insert-adjacent-html-beforebegin	TEMPLATE,B,<template><b>x</b></template><i id="i"></i>
+tpl-insert-adjacent-html-afterend	TEMPLATE,1,<i id="i"></i><template><b>x</b></template>
+tpl-insert-adjacent-html-record	childList div#d +[template] -[] p=null n=null
+tpl-insert-adjacent-html-nested	U,<template><template><template><u></u></template></template></template>
+tpl-get-inner-html-of-div	<template id="t"><b>x</b></template>,<div id="d"><template id="t"><b>x</b></template></div>
+tpl-get-inner-html-of-parsed-page-nested	<template><p>a<template><i>n</i>m</template>b</p></template>after
+tpl-get-outer-html-of-template	<template id="t" class="k"><b>x</b></template>
+tpl-get-inner-html-of-template	<b>x</b>y<!--c-->
+tpl-get-inner-html-of-empty-template	"",<template id="t"></template>
+tpl-get-inner-html-of-nested-template	<template><b>x</b></template><i></i>,<template id="t"><template><b>x</b></template><i></i></template>
+tpl-get-created-template-with-content	<template><b></b>&lt;&amp;&gt;</template>,<template><b></b>&lt;&amp;&gt;</template>,<b></b>&lt;&amp;&gt;
+tpl-get-created-template-own-children-are-not-written	<template><b></b></template>,<b></b>,<template><b></b></template>
+tpl-get-created-template-own-children-only	"",<template></template>
+tpl-get-template-with-no-content-made	<template></template>,""
+tpl-get-template-inside-other-tags	<li><template><span a="1">x</span></template></li><li></li>
+tpl-get-template-in-svg	<template></template>,0
+tpl-get-template-content-with-script	<template id="t"><script>1 < 2</script><style>a > b {}</style></template>
+tpl-get-round-trip	true,<template><p class="a">1</p><template><b></b></template></template>
+tpl-get-after-content-edit	<template id="t"><b>new</b><i></i></template>
+tpl-get-after-content-is-emptied	<template id="t"></template>
+tpl-get-body-inner-html	true
