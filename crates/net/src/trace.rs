@@ -34,6 +34,8 @@ pub struct Rec {
     pub bytes: u64,
     pub reused: bool,
     pub status: u16,
+    /// The reply came over HTTP/2.
+    pub h2: bool,
 }
 
 thread_local! {
@@ -134,9 +136,9 @@ pub fn dump() {
     }
     let mut recs = std::mem::take(&mut *RECS.lock().unwrap());
     recs.sort_by_key(|r| r.at);
-    eprintln!("net\tat_us\twait_us\tdns_us\ttcp_us\ttls_us\tttfb_us\tbody_us\tbytes\treused\tstatus\turl");
+    eprintln!("net\tat_us\twait_us\tdns_us\ttcp_us\ttls_us\tttfb_us\tbody_us\tbytes\treused\tstatus\tproto\turl");
     for r in recs {
-        eprintln!("net\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}", r.at, r.wait, r.dns, r.tcp, r.tls, r.ttfb, r.body, r.bytes, r.reused as u8, r.status, r.url);
+        eprintln!("net\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}", r.at, r.wait, r.dns, r.tcp, r.tls, r.ttfb, r.body, r.bytes, r.reused as u8, r.status, if r.h2 { "h2" } else { "h1" }, r.url);
     }
     for (at, us, name) in std::mem::take(&mut *MARKS.lock().unwrap()) {
         eprintln!("mark\t{at}\t{us}\t{name}");

@@ -445,6 +445,12 @@ impl<T: Read + Write> RecordLayer<T> {
         }
     }
 
+    /// True when the bytes that the socket already gave hold a whole next record: `read_record` will not block.
+    pub fn has_record(&self) -> bool {
+        let (at, unread) = (self.pos + self.pending, self.end - self.pos - self.pending);
+        unread >= HEADER_LEN && unread >= HEADER_LEN + u16::from_be_bytes([self.rbuf[at + 3], self.rbuf[at + 4]]) as usize
+    }
+
     /// Makes sure `rbuf[pos..end]` has at least `need` bytes (`need <= MAX_WIRE`).
     fn fill(&mut self, need: usize) -> Result<(), Error> {
         if self.end - self.pos >= need {

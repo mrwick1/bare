@@ -663,6 +663,25 @@ impl<T: Read + Write> ClientStream<T> {
         &self.rl.get_ref().io
     }
 
+    /// True when a `read` would give bytes without waiting for the transport: plaintext is left, or a whole record is buffered.
+    /// For a caller that waits on the transport (`get_ref`) before it takes a lock on this stream.
+    pub fn has_buffered(&self) -> bool {
+        self.pending_pos < self.pending.len() || self.rl.has_record()
+    }
+
+    /// Like `read`, with one difference: `Ok(None)` when the records that came held no application data (a session ticket)
+    /// and the next one is not all here. A reader that shares the stream with a writer gives the stream back then, and
+    /// waits on the transport, so it never holds the stream while it waits for the peer.
+    pub fn read_ready(&mut self, out: &mut [u8]) -> io::Result<Option<usize>> {
+        if self.state == State::Failed {
+            return Err(failed());
+        }
+        if out.is_empty() {
+            return Ok(Some(0));
+        }
+        self.read_inner(out, false).map_err(|e| self.fail(e).into())
+    }
+
     /// True when the stream is open and holds no unread plaintext or half a handshake message.
     /// A caller that keeps the connection idle must check this first. It cannot know whether
     /// the peer has sent more bytes: for that, look at the transport (`get_ref`) too.
@@ -715,17 +734,22 @@ impl<T: Read + Write> ClientStream<T> {
         Ok(())
     }
 
-    fn read_inner(&mut self, out: &mut [u8]) -> Result<usize, Error> {
+    /// `wait` false: give `None`, instead of waiting for the socket, when only handshake records came (a session ticket) and no
+    /// whole record is buffered. `Some(0)` is the end of the stream.
+    fn read_inner(&mut self, out: &mut [u8], wait: bool) -> Result<Option<usize>, Error> {
         let mut records = 0;
         loop {
             if self.pending_pos < self.pending.len() {
                 let n = out.len().min(self.pending.len() - self.pending_pos);
                 out[..n].copy_from_slice(&self.pending[self.pending_pos..self.pending_pos + n]);
                 self.pending_pos += n;
-                return Ok(n);
+                return Ok(Some(n));
             }
             if self.state == State::PeerClosed {
-                return Ok(0);
+                return Ok(Some(0));
+            }
+            if !wait && records > 0 && !self.rl.has_record() {
+                return Ok(None);
             }
             // Bound work before returning to the caller's elapsed-time checks. Empty application
             // records and session tickets must not keep one Read call inside TLS indefinitely.
@@ -746,7 +770,7 @@ impl<T: Read + Write> ClientStream<T> {
                         self.pending_pos = 0;
                     }
                     if n > 0 {
-                        return Ok(n);
+                        return Ok(Some(n));
                     }
                 }
                 Record::Handshake(d) => {
@@ -758,7 +782,7 @@ impl<T: Read + Write> ClientStream<T> {
                         return Err(Error::Record(record::Error::Truncated));
                     }
                     self.state = State::PeerClosed;
-                    return Ok(0);
+                    return Ok(Some(0));
                 }
             }
         }
@@ -778,7 +802,7 @@ impl<T: Read + Write> Read for ClientStream<T> {
         if out.is_empty() {
             return Ok(0);
         }
-        self.read_inner(out).map_err(|e| self.fail(e).into())
+        self.read_inner(out, true).map(|n| n.unwrap_or(0)).map_err(|e| self.fail(e).into())
     }
 }
 

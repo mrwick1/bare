@@ -16,7 +16,7 @@
 //!
 //! Comments compare Rust with JavaScript, because you know JS.
 
-use crate::{dns, encoding, parallel, tcp, trace};
+use crate::{dns, encoding, h2, parallel, tcp, trace};
 // JS: like `import * as dns from "./dns"`: other files in this crate.
 use bare_tls::client::{self, ClientStream};
 use bare_tls::trust_store::{self, TrustStore};
@@ -78,6 +78,9 @@ type Server = (Scheme, String, u16);
 type Pool = Arc<Mutex<HashMap<Server, Vec<IdleConnection>>>>;
 
 const MAX_IDLE_PER_SERVER: usize = parallel::MAX_WORKERS;
+
+/// The HTTP/2 session of each server that has one. A session takes many requests at once, so it is never taken out of the map.
+type Sessions = Arc<Mutex<HashMap<Server, Arc<h2::Conn>>>>;
 
 /// A cached reply is found by scheme, host, port and path.
 type CacheKey = (Scheme, String, u16, String);
@@ -181,6 +184,8 @@ const INLINE_BODY: usize = 16 * 1024;
 pub struct Client {
     // JS: like a class with a private field.
     idle: Pool,
+    // The HTTP/2 sessions, by server (see `h2.rs`). A fork shares them.
+    sessions: Sessions,
     // The open connections that wait for a next request.
     // The key is the server: its scheme, host and port. A connection only works for the server
     // it was opened to. The value is the connection and the time it became idle.
@@ -257,7 +262,7 @@ impl Client {
 
     /// A second client that shares the connections, the root certificates and the worker threads of this one. The reply cache is not shared.
     pub fn fork(&self) -> Client {
-        Client { idle: self.idle.clone(), roots: self.roots.clone(), workers: self.workers.clone(), ..Client::default() }
+        Client { idle: self.idle.clone(), sessions: self.sessions.clone(), roots: self.roots.clone(), workers: self.workers.clone(), ..Client::default() }
     }
 
     /// Fetch a URL. Follow redirects, and use the cache. Any status can come back: a 404 is still a page.
@@ -451,19 +456,87 @@ impl Client {
         open(url, &self.roots, rec)
     }
 
+    /// A new connection, and a session of its own when the server chose `h2`: the session goes in the map for the next request,
+    /// unless the map has a good one already (two requests raced to connect). The first request uses its own.
+    fn dial(&self, url: &Url, server: &Server, rec: &mut Option<Box<trace::Rec>>) -> Result<Dialed, Error> {
+        Ok(match self.connect(url, rec)? {
+            Stream::Tls(tls) if tls.alpn_h2() => {
+                let conn = h2::Conn::start(*tls)?;
+                let mut sessions = self.sessions.lock().unwrap();
+                match sessions.get(server) {
+                    Some(old) if old.usable() => {}
+                    _ => {
+                        sessions.insert(server.clone(), conn.clone());
+                    }
+                }
+                Dialed::H2(conn)
+            }
+            stream => Dialed::H1(stream),
+        })
+    }
+
+    /// One request on an HTTP/2 session. `Unprocessed` says that the server did nothing with it.
+    fn h2_start(&mut self, conn: &Arc<h2::Conn>, url: &Url, plan: &Plan, conditions: &str, rec: &mut Option<Box<trace::Rec>>, reused: bool) -> Result<(Response, Body), Error> {
+        let (authority, length) = (host_header(url), plan.body.len().to_string());
+        let headers = h2_headers(url, plan, conditions, &authority, &length);
+        let mut clock = trace::Clock::new();
+        let sent = Instant::now();
+        let (head, body) = conn.request(&headers, plan.body, plan.method == Method::Head, MAX_REPLY, sent + MAX_TIME)?;
+        self.note_head(sent.elapsed());
+        if let Some(r) = rec {
+            r.ttfb = clock.lap();
+            r.reused = reused;
+            r.status = head.status;
+            r.h2 = true;
+        }
+        if !plan.method.safe() && (200..400).contains(&head.status) {
+            self.forget(&(url.scheme, url.host.clone(), url.port, url.path.clone()));
+        }
+        let response = Response { status: head.status, headers: head.headers, body: Vec::new(), close: false };
+        if body.declared.is_some_and(|n| n > MAX_REPLY) {
+            return Err("the reply is too big".into());
+        }
+        let undo = response.header("content-encoding").and_then(encoding::codings).filter(|c| !c.is_empty()).filter(|_| !matches!(body.declared, Some(0)));
+        let mut live = Body(Source::H2(Box::new(body)));
+        if let Some(codings) = undo {
+            live = Body(Source::Decoded(Box::new(encoding::Decoded::new(live, codings))));
+        }
+        Ok((response, live))
+    }
+
     fn start(&mut self, url: &Url, plan: &Plan, conditions: &str) -> Result<(Response, Body), Error> {
+        match self.attempt(url, plan, conditions) {
+            // The server did not start the request (`GOAWAY`, a refused stream): any method may run again, once, on a new connection.
+            Err(e) if e.is::<h2::Unprocessed>() => self.attempt(url, plan, conditions),
+            result => result,
+        }
+    }
+
+    fn attempt(&mut self, url: &Url, plan: &Plan, conditions: &str) -> Result<(Response, Body), Error> {
         // The idle list is keyed by scheme too, so a plain connection never serves https.
         let server = (url.scheme, url.host.clone(), url.port);
         // An empty list stays in the map: the next connection that goes idle needs it, and the map has one key for each server.
         let idle = self.idle.lock().unwrap().get_mut(&server).and_then(Vec::pop);
         let get = plan.method.safe();
         let mut rec = trace::begin(|| format!("{}://{}:{}{}", url.scheme, url.host, url.port, url.path));
+        let session = if url.scheme == Scheme::Https { self.sessions.lock().unwrap().get(&server).filter(|c| c.usable()).cloned() } else { None };
+        if let Some(conn) = session {
+            // A session takes one more request at once: no idle connection and no new one. A request that the server did not start, or a GET
+            // that failed on an old session (as on an old connection), runs again below on a new connection.
+            match self.h2_start(&conn, url, plan, conditions, &mut rec, true) {
+                Err(e) if e.is::<h2::Unprocessed>() || get => {}
+                result => return result,
+            }
+        }
         let (mut stream, reused) = match idle {
             // `pop` takes the connection out of the list. While we use it, nobody else can.
             Some((stream, since)) if since.elapsed() < MAX_IDLE && (get || alive(&stream)) => (stream, true),
             // There is a connection, and it has not been idle for too long. Use it. A POST also needs the
             // server to have kept it: we cannot retry a POST after a write, so we look first.
-            _ => (self.connect(url, &mut rec)?, false),
+            _ => match self.dial(url, &server, &mut rec)? {
+                Dialed::H1(stream) => (stream, false),
+                Dialed::H2(conn) => return self.h2_start(&conn, url, plan, conditions, &mut rec, false),
+            },
             // `_` means "anything else": no connection, or an old one. Open a new one.
             // An old connection is dropped here, and Rust closes it for us.
         };
@@ -476,7 +549,10 @@ impl Client {
             // We cannot know that before we try. The error is not the page's fault, so we
             // try once more on a new connection. This is safe because GET only reads.
             // Never for a POST: the server may have got the request and done what it says, and a second one would do it twice.
-            stream = self.connect(url, &mut rec)?;
+            stream = match self.dial(url, &server, &mut rec)? {
+                Dialed::H1(stream) => stream,
+                Dialed::H2(conn) => return self.h2_start(&conn, url, plan, conditions, &mut rec, false),
+            };
             clock = trace::Clock::new();
             sent = Instant::now();
             result = send(&mut stream, url, plan, conditions);
@@ -532,6 +608,12 @@ impl Client {
     }
 }
 
+/// A new connection: plain or TLS with HTTP/1.1, or an HTTP/2 session.
+enum Dialed {
+    H1(Stream),
+    H2(Arc<h2::Conn>),
+}
+
 /// A reply with a body that is still on the connection.
 pub struct Streamed {
     pub response: Arc<Response>,
@@ -558,7 +640,7 @@ fn open(url: &Url, roots: &OnceLock<Result<TrustStore, String>>, rec: &mut Optio
         return Ok(Stream::Tcp(tcp));
     }
     let roots = roots.get_or_init(|| trust_store::load_system().map(|r| r.0).map_err(|e| e.to_string())).as_ref().map_err(|e| e.clone())?;
-    let tls = client::connect(tcp, &url.host, roots)?;
+    let tls = client::connect_h2(tcp, &url.host, roots)?;
     if let Some(r) = rec {
         r.tls = clock.lap();
     }
@@ -570,6 +652,25 @@ fn open(url: &Url, roots: &OnceLock<Result<TrustStore, String>>, rec: &mut Optio
 fn loopback(host: &str) -> bool {
     // The URL parser gives an IPv4 host as digits and dots, and an IPv6 host in its short form. `parse::<IpAddr>` would cost about 380 instructions for each request.
     host == "localhost" || host == "::1" || host.strip_prefix("127.").is_some_and(|rest| rest.bytes().all(|b| b.is_ascii_digit() || b == b'.'))
+}
+
+/// The headers of an HTTP/2 request: the four pseudo headers first, then what `request_head` writes for HTTP/1.1, with no `Host`.
+/// `authority` is `host_header(url)`, and `length` is the length of the body in digits.
+fn h2_headers<'a>(url: &'a Url, plan: &'a Plan, conditions: &'a str, authority: &'a str, length: &'a str) -> Vec<(&'a str, &'a str)> {
+    let mut headers = vec![(":method", plan.method.as_str()), (":scheme", "https"), (":authority", authority), (":path", url.path.as_str())];
+    if !plan.headers.iter().any(|(n, _)| n.eq_ignore_ascii_case("user-agent")) {
+        headers.push(("user-agent", "bare/0.1"));
+    }
+    if !loopback(&url.host) && !plan.headers.iter().any(|(n, _)| n.eq_ignore_ascii_case("accept-encoding")) {
+        headers.push(("accept-encoding", "gzip, deflate, br"));
+    }
+    headers.extend(plan.headers.iter().copied());
+    if matches!(plan.method, Method::Post | Method::Put) || !plan.body.is_empty() {
+        headers.push(("content-length", length));
+    }
+    // `conditions` is `Name: value\r\n` for each header.
+    headers.extend(conditions.split("\r\n").filter_map(|line| line.split_once(": ")));
+    headers
 }
 
 /// The request line, the headers and the blank line. A small body is added to the end by the caller.
@@ -857,6 +958,8 @@ enum Source {
     Memory(Arc<Response>, usize),
     /// A reply that comes from a server now.
     Live(Box<Live>),
+    /// A reply on an HTTP/2 stream (see `h2.rs`).
+    H2(Box<h2::Body>),
     /// The same, with a `Content-Encoding` that is undone as it is read (see `encoding.rs`).
     Decoded(Box<encoding::Decoded>),
 }
@@ -1085,6 +1188,7 @@ impl Read for Body {
             }
             Source::Live(live) => live,
             Source::Decoded(decoded) => return decoded.read(out),
+            Source::H2(stream) => return stream.read(out),
         };
         if live.done || out.is_empty() {
             return Ok(0);
@@ -1154,6 +1258,7 @@ impl Body {
                 _ => 0,
             },
             Source::Memory(response, _) => response.body.len(),
+            Source::H2(stream) => stream.declared.unwrap_or(0).min(MAX_REPLY),
             // The length on the wire is not the length of the decoded body.
             Source::Decoded(_) => 0,
         }
@@ -1233,6 +1338,32 @@ mod tests {
             assert_eq!(lower.matches("accept-encoding").count(), 1);
             assert!(head.contains("\r\naccept-ENCODING: identity\r\n"));
         }
+    }
+
+    #[test]
+    fn the_headers_of_an_h2_request_have_the_pseudo_headers_first_and_no_host() {
+        let url = Url::parse("https://example.com:8443/a/b?q=1").unwrap();
+        let plan = Plan { method: Method::Post, headers: Cow::Owned(vec![("X-Token", "t")]), body: b"abc" };
+        let h = h2_headers(&url, &plan, "If-None-Match: \"v1\"\r\nIf-Modified-Since: yesterday\r\n", "example.com:8443", "3");
+        assert_eq!(
+            h,
+            [
+                (":method", "POST"),
+                (":scheme", "https"),
+                (":authority", "example.com:8443"),
+                (":path", "/a/b?q=1"),
+                ("user-agent", "bare/0.1"),
+                ("accept-encoding", "gzip, deflate, br"),
+                ("X-Token", "t"),
+                ("content-length", "3"),
+                ("If-None-Match", "\"v1\""),
+                ("If-Modified-Since", "yesterday"),
+            ]
+        );
+        // A header of the caller replaces the default. A GET has no content-length. A loopback host asks for no coding.
+        let url = Url::parse("https://localhost/").unwrap();
+        let plan = Plan { method: Method::Get, headers: Cow::Owned(vec![("User-Agent", "mine")]), body: b"" };
+        assert_eq!(h2_headers(&url, &plan, "", "localhost", "0")[4..], [("User-Agent", "mine")]);
     }
 
     #[test]
