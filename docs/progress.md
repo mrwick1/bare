@@ -2405,3 +2405,26 @@ Checks (archMachine):
 - Live staging, `bare-drive` with the masked runner, read only, `drive-journey.steps`, 1 run: exit 0, 5,289 ms for the whole journey (#243: 5,301 to 7,134 ms in 3 runs). A scan of all output files found neither the email nor the password.
 
 Not tested: the window (`--window`); arjun-e16; a split document with module scripts (they stop the page, as before); a sheet with a slow `@import` chain; HiDPI. Not changed: the HTML parse of a new document is one step, and a document that is not split (`Page::navigate`, `Session::run`) loads the sheets that a script adds before `load` inside the turn.
+
+## Code generator and verifier (step B2 of the engine plan)
+
+Change:
+- `crates/js/src/bc_gen.rs`, `bc_gen_expr.rs` and `bc_gen_stmt.rs` (new): `Interp::bc_compile(fid)` compiles one function of the core subset to a `Code`. It uses the scope data of step B1 (`bc_walk`, `bc_binds`, `bc_resolve`), so the code keeps the environment layout of the tree walker. An unsupported node gives a reason, and the function stays on the tree walker. No code of this change runs in the engine. The loop comes in step B3.
+- `crates/js/src/bc_verify.rs` (new): `verify(code)` checks the operands, the jump and handler targets, the inline caches, the source positions and the environment depth on every path.
+- `crates/js/src/bc.rs`: new ops `PushEnv`, `PopEnv`, `DeclEnv`, `CopyEnv`, `GetName`, `SetName`, `TypeofName`, `ToKey` and `ClosureName`. `Handler` has a `depth`. The operand letter `-` marks an unused operand, and `s` a scope. See docs/decisions.md, "Bytecode".
+- `Interp::bc_gen_check()` (hidden) compiles and verifies every function of every script. `type_load` runs it with `BC_GEN_CHECK=1` and fails on a verifier error.
+- `crates/js/src/intl.rs`: `Tokens::next` finds `{` with a closure, not with `str::find(char)`. The cost of `find(char)` depends on the codegen unit of `intl.rs`. The new modules moved `intl.rs` to another unit, `CharSearcher::next_match` was no longer inlined, and `intl_load format` rose by 0.85% to 0.98%. Both builds with `codegen-units=1` gave -0.002% on the 20 `intl_load` rows, so the code of the generator did not cause it. A byte search (`bytes().position`) fixed `format` (-2.7%) but moved the lexer to another unit: `lex_load small` rose by 2.7% with the same source. The closure keeps the lexer code the same as on main.
+- The plan names `bc_tests.rs` for the golden tests. They are in `bc_gen_tests.rs`, because they run scripts and need the private items of `eval`.
+
+Check:
+- Golden disassembly: 67 programs in `tools/fixtures/js/bc-golden.txt` (`BC_BLESS=1` writes the file again). The listings were read by hand.
+- Corpora (`eval`, `statements`, `class`, `subclass`, `generator`, `iterator`, `async`, `tagged`, `arrobj`): 2,143 functions, 1,726 compile (80.5%), 15,318 words, 0 verifier errors. Top reasons: generator or async function 208, `super` 86, private name 27, class 23, `for-in` or `for-of` 14.
+- Typing page (`type_load`, `#a1`, 20 keys): 1,531 functions, 1,330 compile (86.9%), 60,287 words, 0 verifier errors. Top reasons: destructuring 88, label 29, spread 23, optional chain 19, `for-in` or `for-of` 18.
+- Property test: 1,500 random strict programs of the subset (nested functions, blocks, loops, `switch`, `try`, `catch`, `finally`, `break`, `continue` and `return` across them). All 4,150 functions compile and verify (68,130 words).
+- The verifier rejects broken code: a `PopEnv` at depth 0, a path past the end, two depths at one word, a jump into a wide instruction, a register, constant or argument register out of range, a name operand that is a number, an unused inline cache, an unused operand that is not 0, and a bad handler.
+
+Cost: `tools/js/cost_matrix.sh`, origin/main 853489d against this change (after the last rebase), 805 rows, on arjun-e16. No row is over +0.5%. 635 rows are lower. The worst row is `console_load format 10` (+0.42% under glibc). `intl_load format 10` is -0.80%, `eval_load fib 10` -0.37%, `lex_load small 10` 0.000%. An earlier full run against 5dd8c70 (803 rows, glibc and jemalloc) gave no row over +0.5% under either allocator.
+
+Tests: `cargo test --workspace --release` on 853489d plus this change: 2,931 passed, 0 failed. On 5dd8c70 (before the rebase): `cargo test --workspace` debug and release, 2,835 passed in each; `test262_check.sh` 22,539 passed, as the baseline (`gate: ok`); 39 of the 40 `tools/js/*_check.sh` that start match Node, and `intl_check.sh` gives the same 15 differences as main (the ICU data of Node 22 on arjun-e16).
+
+Not tested: no generated code runs (step B3), so the code is checked by the verifier and by reading the golden listings, not by execution; script bodies; test262 and the `*_check.sh` scripts after the last rebase; `parse_check.sh` (needs `acorn`); the rows at scale 100.
