@@ -2813,3 +2813,32 @@ Results (archMachine, 50 loops each):
 - Full cost matrix (805 rows): mean change glibc -0.001%, jemalloc +0.000%. Over under one allocator: 0. Over under both: 0. Failed: 0.
 
 Not tested: a window on a real desktop compositor; a resize of the window during an `open`; the loops on arjun-e16.
+
+## Window pages: one document at a time, and no second canvas
+
+#258 made the headless `open` drop the old page first. Two gaps were left. Both are closed here.
+
+1. Window mode built the new page before it dropped the old one. The driver `open` in a window ran `*p = new(...)` on the window thread, so both documents were alive at the peak. A navigation inside a window page (a link, the address bar, `reload`) dropped the old `Browser` in `Session`, but the `Frame` of the old document (styles, layout, display list, the lists of controls) stayed in `Page` while the next document loaded.
+2. The peak of the reload was the paint with "two canvases" (9.1 MiB). The second one is not a canvas. It is `Painter::saved`, the copy of the pixels behind an open layer (`opacity` under 1). A layer the size of the window copies the whole window into it. `saved.clear()` kept the capacity (5.2 MiB for a 4.1 MiB window, because the vector doubles), so the copy stayed after each draw. A test page with one `opacity: .9` box of 1280x800 kept 5,243,657 B after the draw.
+
+Change:
+- `Painter::draw_view` shrinks `saved` to 64 KiB after the draw. The same page keeps 66,313 B. The display list stays, so a scroll still draws without a new build. The draw clears the whole canvas as before, so nothing flickers. A page with a large layer now allocates the backdrop again in each draw.
+- `Page::release_frame` drops the frame and the display list and keeps the pixels of the canvas. `Page::navigate` calls it before `Session::navigate`. `Page::settle` calls it when the next document is in (`Session::loading() == Some(true)`) and `resume` is about to build it. The old document and the old frame are gone before the new one is parsed. The old pixels stay in the canvas, and the window shows its last buffer, until the first paint of the new page.
+- `Page::replace` is the window `open`: it ends the document (`Session::end_document`), drops the frame and the canvas, then builds the new page. The window thread runs this job, so no frame is drawn before the new page is in. The window holds the old frame in its own buffers. If the new page fails to load, no document is left. This is the same as the headless `open`.
+
+Results (archMachine, glibc, live heap peak of a counting allocator):
+
+| Case | Before | After |
+| --- | ---: | ---: |
+| `bare-drive --window` (in `cage`), 1 `open` | 34,682,563 B | 34,682,563 B |
+| `bare-drive --window` (in `cage`), 2 `open` steps | 65,591,947 B | 34,682,563 B |
+| Painter after a draw with a layer of the window size | 5,243,657 B | 66,313 B |
+
+- Page level, `crates/bare/tests/window_memory.rs`: the peak of a heavy page (about 30 MB) loaded after a wide page (a frame of about 3.4 MB) must stay within 1 MiB of the peak after a small page. It was 3.3 to 4.1 MB over before the change, for `replace`, `navigate` and a link click. A fourth test reads the heap when the server gets the request for the next document: 7.5 MB before (canvas 4.1 MB), under 5.7 MB after.
+- New tests: `a_second_window_open_does_not_hold_two_pages_at_once` (in `cage`, with `a_second_open_does_not_hold_two_pages_at_once`), `a_window_open_does_not_hold_two_pages_at_once`, `a_navigation_does_not_keep_the_frame_of_the_old_document`, `a_link_does_not_keep_the_frame_of_the_old_document`, `the_old_document_and_its_frame_are_gone_when_the_next_one_is_requested`, `a_window_size_layer_leaves_no_copy_of_the_window_behind`. Each one fails without the change.
+- Full cost matrix (805 rows, base origin/main `9adfe95`): mean change glibc +0.000%, jemalloc +0.000% (0 rows measured). Over under one allocator: 0. Over under both: 0. Failed: 0.
+- `cargo test --release --workspace --no-fail-fast`: 53 binaries, 2,967 passed, 0 failed.
+
+Found while measuring: a navigation into a page with a big JS heap peaks about 2.5 MB higher than an `open` of the same page (the transient buffer of `Heap::stored_edges` in a collect). It is the same with a trivial first page, so the old page does not cause it. Not changed.
+
+Not tested: the staging journey in a window (no live run); a real desktop compositor (only `cage` headless); a navigation that fails to load in a window (the page stays with no document, as before); the cost of the new backdrop allocation in a scrolled frame with a window-size layer (not measured in time, only by the matrix, which has no such row); a machine other than archMachine.
