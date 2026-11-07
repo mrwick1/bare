@@ -1,6 +1,7 @@
 # The staging acceptance journey (8 steps) for bare-drive (crates/drive). It passed on staging on 2026-11-07, headless and in a window.
 # It holds no staging data: the base URL and the search text are --var values, the login is in the --secrets file (EMAIL=, PASSWORD=).
 #   bare-drive --secrets FILE --var BASE=https://HOST --var QUERY=TEXT --out DIR tools/drive/staging-journey.steps
+# `cargo test -p bare-drive` also runs this file against the local fixture app (crates/drive/tests/fixture_journey.rs). Keep both passing.
 timeout 30000
 # Step 1: with no session, the root goes to the login page.
 open ${BASE}/

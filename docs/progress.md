@@ -2008,3 +2008,101 @@ Checks:
 - `tools/js/cost_matrix.sh`, 803 rows, base f49daad: no row is over +0.5% under both allocators. Mean change: glibc +0.003%. Highest rows: `resources_load small 1` +1.19% under glibc and -0.07% under jemalloc (noise), `numeric_load encodeuri` +0.28%, `adapter_load codec 10` +0.24%. Lowest: `builtins_load json` -0.25% to -0.27%. The 2 `agents` rows have no base (new rows).
 
 Not tested: the live staging `/agents` route; `Response.json()` on a real network reply; `tools/js/json_load.rs`, because it does not compile on main (since the heap uses `bigint`, `text` and `eval`; not caused by this change); arjun-e16; an aarch64 build (macOS).
+
+## S5 topics 4 and 6: local fixture journey, live reliability and retention
+
+On 2026-11-07, branch build f8bd32f (on main 60769f9), S5 topic 4 and S5 topic 6 are done.
+
+### Topic 4: the local app fixture
+
+`tools/fixtures/drive/app.html` is a synthetic app with the login model of the staging app. A test server on loopback (`crates/drive/tests/common`, `serve_app`) gives the same page for each path. The script of the page draws the route (client-side navigation with `history.pushState` and `popstate`).
+
+- The login form sends a POST to `/api/login`. A good login gives a token. The app keeps the token in `sessionStorage`.
+- Each path but `/login` goes to `/login` when there is no token.
+- `/agents` gets its list from `/api/agents?q=` with `Authorization: Bearer`. Enter in the search box puts the text in `?q=` and gets the list again.
+- The account menu has "Sign out". Sign out clears `sessionStorage` and goes to `/login`.
+- A 401 from the data API clears `sessionStorage` and shows "Your session expired. Sign in again." on the login page.
+- Expiry is deterministic: a session of the second synthetic user (`BRIEF_EMAIL`) ends after one data request. The next request gets a 401.
+
+`crates/drive/tests/fixture_journey.rs` runs the binary `bare-drive` headless, as the live job does. It is part of `cargo test`. The 6 tests take 0.1 s together.
+
+| Test | Step file | Checks |
+| --- | --- | --- |
+| Full journey | `tools/drive/staging-journey.steps`, unchanged | Exit 0. One login (200). Three list requests with the token (200). |
+| Wrong password | `tools/fixtures/drive/invalid-login.steps` | Error text shown, URL stays `/login`, `sessionStorage` empty, login 401, no list request. |
+| Expired session | `tools/fixtures/drive/expiry.steps` | List 200, then 401. The app goes to `/login` with the notice and an empty `sessionStorage`. |
+| Sign out | `tools/fixtures/drive/logout.steps` | After sign out, `goto /agents?q=` and `reload` in the same session stay on `/login`. |
+| Deliberate failure | the staging file with a search text that matches nothing | Exit 1. `result.json` equals stdout. The failure names the line, kind `expect` and "the page is idle". `fail-L22.png` is a PNG. |
+| Repeat | the staging file, `--repeat 3` | Three passed runs, each with its memory figures. |
+
+Each test checks that no email, password or token is in stdout, stderr or `result.json`.
+
+### `bare-drive --repeat N`
+
+`--repeat N` runs the steps N times in one process and stops at the first failed run. The JSON gets `runs`: for each run, `ok`, `ms`, `rss_kib`, `peak_rss_kib` (`VmHWM`) and `heap_kib`. `heap_kib` is the glibc heap in use (`mallinfo2`: `uordblks` plus `hblkhd`). The list of runs is allocated before the first run, so it does not grow the heap between runs. Each JSON also has `runs` for a single run, so the peak RSS of each process is in its result.
+
+### A retention fault and its fix
+
+The first repeat of the fixture journey showed a leak. The heap grew from 175 KiB to 4,876 KiB in 500 runs (9.6 KiB for each run), and the run time grew from 22 ms to 28 ms. The cause: the driver turns on `bare_net::trace` and reads the records with `trace::take`. `take` cleared the request records but not the timeline marks (`MARKS`). Each page load adds marks, so they stayed in the process. Now `take` clears the marks too. The unit test `trace::tests::take_clears_the_marks` fails without the fix and passes with it.
+
+After the fix, the fixture journey 1,000 times in one process:
+
+| Run | Time | RSS | Heap |
+| --- | --- | --- | --- |
+| 50 | 24.3 ms | 22,152 KiB | 363 KiB |
+| 400 | 19.5 ms | 22,204 KiB | 404 KiB |
+| 1,000 | 20.6 ms | 22,364 KiB | 439 KiB |
+
+The heap grows by 58 B for each run between runs 400 and 1,000, and the rate goes down. A file with only `open` grows by 37 B for each run in the same range. RSS stays level.
+
+### Topic 6: live staging runs
+
+All runs used `/data/bare-tmp/run_drive.sh` with the binary of f8bd32f, on 2026-11-07 between 12:43 and 12:56 UTC. The staging build was the same in all runs: the agents page chunk is `page-a38229a14ae4b674.js`. The records show no other staging version. The journey only reads data: it logs in, opens pages, searches and signs out.
+
+| Mode | Runs | Passed | Total median | Total p90 | Peak RSS median | Peak RSS max |
+| --- | --- | --- | --- | --- | --- | --- |
+| Headless, one process for each run | 20 | 20 | 10.0 s | 11.0 s | 99.4 MiB | 100.6 MiB |
+| Window (`--window`, hyprcage screen), one process for each run | 5 | 5 | 9.2 s | 11.3 s | 104.0 MiB | 104.6 MiB |
+| Headless, `--repeat 15`, first try | 5 | 4 | 9.0 s | | | 112.7 MiB |
+| Headless, `--repeat 15`, second try | 15 | 15 | 9.2 s | 10.2 s | | 120.8 MiB |
+| Headless, `--repeat 10`, `MALLOC_ARENA_MAX=1` | 10 | 10 | 9.2 s | 9.9 s | | 105.8 MiB |
+
+Each passed run has 27 steps. The total fastest and slowest headless runs were 9.2 s and 13.8 s.
+
+Step times of the 20 headless runs (median, p90). With 5 runs, the window p90 is the slowest run.
+
+| Step | Headless | Window |
+| --- | --- | --- |
+| `open /` | 794, 850 ms | 770, 825 ms |
+| Type the email | 247, 366 ms | 185, 196 ms |
+| Type the password | 587, 791 ms | 426, 448 ms |
+| Submit the login | 2,171, 2,446 ms | 2,132, 2,173 ms |
+| Agents link | 1,094, 1,378 ms | 1,031, 1,135 ms |
+| Search with Enter | 1,686, 2,090 ms | 1,564, 1,667 ms |
+| Reload | 1,662, 1,749 ms | 1,569, 1,620 ms |
+| Account menu | 315, 364 ms | 254, 284 ms |
+| Sign out | 440, 487 ms | 400, 410 ms |
+| `open /agents` without a session | 772, 908 ms | 698, 2,465 ms |
+
+One failure in 55 live runs: run 5 of the first `--repeat 15` process. Each fetch to staging in the Agents step and the search step failed with "network error", and no request record was made. The Agents step took 48 s and the search step 10 s. Then the check of the search result failed, with a capture and the JSON. The next 35 runs (15 in one process, 20 in separate processes) had no network error. The fetch client belongs to each page (`dom.fetch.client`), so no connection stays from an earlier run. Only the DNS cache is for the whole process. Hypothesis: a short network or staging fault. To verify: `run_one` in `browser_fetch.rs` drops the socket error, so the console shows only "network error". The cause cannot be read from the result.
+
+Retention on staging: the live heap after each run stays between 1.2 and 1.7 MiB in 15 runs (2.1 MiB with one arena). RSS grows from 96.4 MiB to 120.8 MiB in 15 runs, and the rate goes down. With `MALLOC_ARENA_MAX=1`, RSS stops at 105.8 MiB from run 4. So the growth is free memory that glibc keeps in its thread arenas, not data that bare keeps.
+
+The credentials came from the vault into a mode 600 file in `/dev/shm`. The runner removed it after each run. A scan of all output files found no email, password, `"token":` or `Bearer` value.
+
+### How to run the live suite
+
+The live suite is an explicit job. `cargo test` never opens staging. Run it on archMachine when a change touches the driver, the loader, the network or the staging journey:
+
+```sh
+cargo build --release -p bare-drive
+# One run; the result is OUT/stdout.json, the failure capture is OUT/fail-L<line>.png.
+/data/bare-tmp/run_drive.sh OUT tools/drive/staging-journey.steps --quiet
+# Retention: N runs in one process; read "runs" in OUT/stdout.json.
+/data/bare-tmp/run_drive.sh OUT tools/drive/staging-journey.steps --quiet --repeat 15
+# Window: launch the same command with --window on a hyprcage screen (app_launch), then destroy the screen.
+```
+
+`run_drive.sh` uses the binary in `/data/bare-tmp/live-target`. To test a branch, copy the script and change only the binary path. Exit code 0 means a pass, 1 a failed step, 2 a bad step file.
+
+Not tested: the fixture journey in a window (the fixture tests run headless only), the live suite on arjun-e16, a run with jemalloc, a staging session that expires by time (the fixture expires by request count).
