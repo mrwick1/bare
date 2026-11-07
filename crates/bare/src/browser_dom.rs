@@ -762,7 +762,7 @@ pub(crate) fn owner_document(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Val
     if matches!(d.data(n), NodeData::Document) {
         return Ok(Value::Null);
     }
-    let root = d.doc.borrow().root();
+    let root = if d.in_inert(n) { crate::browser_custom::template_document(d) } else { d.doc.borrow().root() };
     d.wrap(it, root)
 }
 
@@ -1209,12 +1209,13 @@ pub(crate) fn clone_node(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value])
     if matches!(d.data(n), NodeData::ShadowRoot) && !d.is_plain_fragment(n) {
         return Err(d.dom_err(it, "NotSupportedError", "ShadowRoot nodes are not clonable."));
     }
-    let c = clone_tree(d, it, n, deep)?;
+    let c = clone_tree(d, it, n, deep, false)?;
     d.wrap(it, c)
 }
 
 /// The clone of `n` (and of what it holds, when `deep`): a new tree, not linked. The Document and a shadow root are the caller's to refuse.
-pub(crate) fn clone_tree(d: &Dom, it: &mut Interp<'_>, n: NodeId, deep: bool) -> R<NodeId> {
+/// `import`: the clone belongs to the document even when `n` is in the inert tree of a template (`importNode`).
+pub(crate) fn clone_tree(d: &Dom, it: &mut Interp<'_>, n: NodeId, deep: bool, import: bool) -> R<NodeId> {
     // Count first, so a clone that does not fit makes no node at all.
     let (mut count, mut bytes, mut attrs, mut input_bytes) = (1usize, 0usize, 0usize, 0usize);
     {
@@ -1264,7 +1265,7 @@ pub(crate) fn clone_tree(d: &Dom, it: &mut Interp<'_>, n: NodeId, deep: bool) ->
         let mut doc = d.doc.borrow_mut();
         let mut root_clone = None;
         // The clone of an element that has a definition is upgraded, unless the source is in the inert tree of a template.
-        let ce = d.ce.on.get() && !doc.in_template_content(n);
+        let ce = d.ce.on.get() && (import || !doc.in_template_content(n));
         let mut elements = Vec::new();
         let mut stack: Vec<(NodeId, Option<NodeId>)> = vec![(n, None)];
         let mut st = d.st.borrow_mut();
@@ -1662,7 +1663,10 @@ pub(crate) fn doctype(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) ->
 }
 
 pub(crate) fn default_view(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    d.nd(it, this)?;
+    let n = d.nd(it, this)?;
+    if n != d.doc.borrow().root() {
+        return Ok(Value::Null);
+    }
     Ok(Value::Object(*d.global.get().expect("installed")))
 }
 

@@ -185,8 +185,19 @@ fn serialize(d: &Dom, it: &mut Interp<'_>, doc: &Document, n: NodeId, outer: boo
     }
 }
 
+/// The target of `innerHTML`: an element, or a shadow root (the context of its parse is the host).
+fn inner_target(d: &Dom, it: &mut Interp<'_>, this: Value) -> R<(NodeId, Option<NodeId>)> {
+    let n = d.nd(it, this)?;
+    let doc = d.doc.borrow();
+    match (doc.data(n), doc.shadow_host(n)) {
+        (NodeData::Element { .. }, _) => Ok((n, None)),
+        (NodeData::ShadowRoot, Some(h)) => Ok((n, Some(h))),
+        _ => Err(it.type_error("Illegal invocation")),
+    }
+}
+
 pub(crate) fn inner_html(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    let n = d.el(it, this)?;
+    let (n, _) = inner_target(d, it, this)?;
     let s = serialize(d, it, &d.doc.borrow(), n, false)?;
     d.js_str(it, &s)
 }
@@ -215,11 +226,11 @@ pub(crate) fn set_outer_html(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Val
 }
 
 pub(crate) fn set_inner_html(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
-    let n = d.el(it, this)?;
+    let (n, ctx) = inner_target(d, it, this)?;
     let v = arg(a, 0);
     // ToString may run page code; the target is read after it.
     let html = if matches!(v, Value::Null) { String::new() } else { d.string_arg(it, v)? };
-    replace(d, it, &html, n, false, Put::All, None)
+    replace(d, it, &html, n, false, Put::All, ctx)
 }
 
 /// Where the parsed nodes go: instead of all the children of `n`, instead of one child of `n`, or in `n` before a node (None: last), keeping the rest.

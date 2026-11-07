@@ -240,6 +240,8 @@ pub struct Document {
     // The host function that is told of each change (see `set_watcher`). A page with no watcher pays one `Option` check at a change.
     custom: HashMap<u32, u32, BuildHasherDefault<Fnv>>,
     // The custom element state of the elements that have one, by `NodeId::index`: the number of the definition, or `PRECUSTOMIZED`, or `FAILED`. See `is_defined`.
+    states: HashMap<u32, Vec<Box<str>>, BuildHasherDefault<Fnv>>,
+    // The custom states (`ElementInternals.states`) of the elements that have any, in the order they were added. See `has_state`.
 }
 
 /// A change of the tree that `Document::set_watcher` reports, before the document answers a later read. `prev` and `next` are the
@@ -255,6 +257,16 @@ pub enum Change {
     Attr { el: NodeId, name: Atom, old: Option<Span>, new: Option<Span> },
     /// The text of `node` changes. `old` is the value it had.
     Text { node: NodeId, old: Span },
+}
+
+/// What `Document::parse_cut` took out of the tree. Give it to `parse_close`.
+pub struct Cut {
+    el: NodeId,
+    parent: Option<NodeId>,
+    attrs: Option<AttrList>,
+    kids: Option<(NodeId, NodeId)>,
+    /// For each ancestor: the first and last of the children that follow.
+    tails: Vec<(NodeId, NodeId, NodeId)>,
 }
 
 /// A host function for `Document::set_watcher`. It gets the document as it is at the call and must not run script.
@@ -331,6 +343,7 @@ impl Document {
             template_content: HashMap::default(),
             watcher: None,
             custom: HashMap::default(),
+            states: HashMap::default(),
             on_name: false,
         };
         // The order matters: it must match `Atom::ID` and `Atom::CLASS`.
@@ -404,6 +417,24 @@ impl Document {
         self.custom.get(&(el.index() as u32)).copied()
     }
 
+    /// The custom states of `el` (`ElementInternals.states`), in the order they were added.
+    pub fn states(&self, el: NodeId) -> &[Box<str>] {
+        if self.states.is_empty() {
+            return &[];
+        }
+        self.states.get(&(el.index() as u32)).map_or(&[], |v| v)
+    }
+
+    /// Replace the custom states of `el`. A rule with `:state()` may match another element now, so `revision` moves.
+    pub fn set_states(&mut self, el: NodeId, states: Vec<Box<str>>) {
+        if states.is_empty() {
+            self.states.remove(&(el.index() as u32));
+        } else {
+            self.states.insert(el.index() as u32, states);
+        }
+        self.revision += 1;
+    }
+
     /// Does any element have a custom element state?
     pub fn has_custom(&self) -> bool {
         !self.custom.is_empty()
@@ -427,6 +458,11 @@ impl Document {
     /// A new fragment node: the top of a tree with no host (JS: `document.createDocumentFragment()`).
     pub fn create_fragment(&mut self) -> NodeId {
         self.new_node(NodeData::ShadowRoot)
+    }
+
+    /// A new `Document` node that is not the top of this tree: the host uses it for the inert document that owns the contents of the templates. It has no children.
+    pub fn create_document(&mut self) -> NodeId {
+        self.new_node(NodeData::Document)
     }
 
     /// True when some `template` of this document has contents.
@@ -701,6 +737,92 @@ impl Document {
         }
         let n = &mut self.nodes[node.index()];
         (n.parent, n.prev, n.next) = (None, None, None);
+    }
+
+    /// The view of the tree that a parser has while it makes the element `el`: `el` has no parent, no children and no attributes, and nothing
+    /// that follows `el` in the tree exists yet. Nothing is reported to the watcher. `parse_open` puts `el` back at the end of its parent and
+    /// `parse_close` gives back everything else. The host uses it to run the constructor of a custom element that the parser would make.
+    pub fn parse_cut(&mut self, el: NodeId) -> Cut {
+        let mut cut = Cut { el, attrs: None, kids: None, tails: Vec::new(), parent: self.nodes[el.index()].parent };
+        if let NodeData::Element { name, attrs } = self.nodes[el.index()].data {
+            cut.attrs = Some(attrs);
+            self.nodes[el.index()].data = NodeData::Element { name, attrs: AttrList { start: to_u32(self.attrs.len()), len: 0 } };
+        }
+        let n = &mut self.nodes[el.index()];
+        if let (Some(f), Some(l)) = (n.first_child, n.last_child) {
+            cut.kids = Some((f, l));
+            (n.first_child, n.last_child) = (None, None);
+        }
+        let mut cur = el;
+        while let Some(p) = self.nodes[cur.index()].parent {
+            // The first step takes `el` out of `p`; every other step keeps the ancestor and hides what follows it.
+            let tail = if cur == el { self.nodes[el.index()].next } else { self.nodes[cur.index()].next };
+            let before = if cur == el { self.nodes[el.index()].prev } else { Some(cur) };
+            if let (Some(first), Some(last)) = (tail, self.nodes[p.index()].last_child) {
+                cut.tails.push((p, first, last));
+            }
+            match before {
+                Some(b) => self.nodes[b.index()].next = None,
+                None => self.nodes[p.index()].first_child = None,
+            }
+            self.nodes[p.index()].last_child = before;
+            if cur == el {
+                let n = &mut self.nodes[el.index()];
+                (n.parent, n.prev, n.next) = (None, None, None);
+            }
+            cur = p;
+        }
+        self.places = Default::default();
+        self.revision += 1;
+        cut
+    }
+
+    /// Put the element of `cut` back as the last child of its parent, with its attributes (the parser has made the start tag).
+    pub fn parse_open(&mut self, cut: &Cut) {
+        let el = cut.el;
+        // A constructor that added children is refused (the element is made again, without them).
+        (self.nodes[el.index()].first_child, self.nodes[el.index()].last_child) = (None, None);
+        if let (Some(attrs), NodeData::Element { name, .. }) = (cut.attrs, self.nodes[el.index()].data) {
+            self.nodes[el.index()].data = NodeData::Element { name, attrs };
+        }
+        if let Some(p) = cut.parent {
+            let last = self.nodes[p.index()].last_child;
+            let n = &mut self.nodes[el.index()];
+            (n.parent, n.prev, n.next) = (Some(p), last, None);
+            match last {
+                Some(l) => self.nodes[l.index()].next = Some(el),
+                None => self.nodes[p.index()].first_child = Some(el),
+            }
+            self.nodes[p.index()].last_child = Some(el);
+        }
+        self.places = Default::default();
+        self.revision += 1;
+    }
+
+    /// Give back what `parse_cut` hid: the children of the element go after the ones it has now, and what followed it after the last child of each
+    /// ancestor. A node that left the tree while it was hidden (a script that held it) is not put back.
+    pub fn parse_close(&mut self, cut: Cut) {
+        if let Some((f, l)) = cut.kids.filter(|&(f, l)| self.nodes[f.index()].parent == Some(cut.el) && self.nodes[l.index()].parent == Some(cut.el)) {
+            self.append_chain(cut.el, f, l);
+        }
+        for (p, f, l) in cut.tails {
+            if self.nodes[f.index()].parent == Some(p) && self.nodes[l.index()].parent == Some(p) {
+                self.append_chain(p, f, l);
+            }
+        }
+        self.places = Default::default();
+        self.revision += 1;
+    }
+
+    /// Put the linked children `first` to `last` of `parent` after its last child.
+    fn append_chain(&mut self, parent: NodeId, first: NodeId, last: NodeId) {
+        let at = self.nodes[parent.index()].last_child;
+        self.nodes[first.index()].prev = at;
+        match at {
+            Some(a) => self.nodes[a.index()].next = Some(first),
+            None => self.nodes[parent.index()].first_child = Some(first),
+        }
+        self.nodes[parent.index()].last_child = Some(last);
     }
 
     /// Move `node` (with its children) to be a child of `parent`, just before `before`, or at the end for `None`.

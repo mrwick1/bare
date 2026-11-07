@@ -134,7 +134,7 @@ impl Dom {
     /// stored owner always equals this, except the parser's form element pointer, which is not recorded).
     pub(crate) fn form_owner(&self, it: &mut Interp<'_>, n: NodeId) -> R<Option<NodeId>> {
         let doc = self.doc.borrow();
-        if !tag_is(&doc, n, &["button", "fieldset", "input", "object", "output", "select", "textarea"]) {
+        if !tag_is(&doc, n, &["button", "fieldset", "input", "object", "output", "select", "textarea"]) && !self.is_face(n) {
             return Ok(None);
         }
         let (mut nearest, mut top) = (None, n);
@@ -167,7 +167,7 @@ impl Dom {
     /// Is the form control `n` disabled (HTML "disabled")? Not a form control: false.
     pub(crate) fn is_disabled_control(&self, it: &mut Interp<'_>, n: NodeId) -> R<bool> {
         let doc = self.doc.borrow();
-        if !tag_is(&doc, n, &["button", "input", "select", "textarea"]) {
+        if !tag_is(&doc, n, &["button", "input", "select", "textarea"]) && !self.is_face(n) {
             return Ok(false);
         }
         if attr(&doc, n, "disabled").is_some() {

@@ -1,5 +1,5 @@
-//! Tests of `browser_custom`: custom elements. The Chrome cases first (`tools/fixtures/ui/custom-cases.txt`, 42 cases, and
-//! `custom-page-cases.txt`, 4 cases whose scripts run while the page loads), then what Chrome cannot show here: the cost of a page that
+//! Tests of `browser_custom`: custom elements. The Chrome cases first (`tools/fixtures/ui/custom-cases.txt`, 49 cases, `custom-form-cases.txt`, 19 cases, and
+//! `custom-page-cases.txt`, 15 cases whose scripts run while the page loads), then what Chrome cannot show here: the cost of a page that
 //! defines nothing, exceptions of callbacks, failed constructors and the collector.
 
 use crate::browser::*;
@@ -11,7 +11,8 @@ use bare_js::heap::HeapLimits;
 use bare_js::value::Value;
 use bare_net::http::Client;
 
-topic_test!(chrome_cases, "custom", 42);
+topic_test!(chrome_cases, "custom", 49);
+topic_test!(chrome_form_cases, "custom-form", 20);
 
 fn big<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {
     std::thread::Builder::new().stack_size(64 << 20).spawn(f).unwrap().join().unwrap()
@@ -50,7 +51,7 @@ fn chrome_page_cases() {
     let (cases, chrome) = (include_str!("../../../tools/fixtures/ui/custom-page-cases.txt"), include_str!("../../../tools/fixtures/ui/chrome-custom-page.txt"));
     let chrome: std::collections::HashMap<&str, &str> = chrome.lines().filter_map(|l| l.split_once('\t')).collect();
     let cases = parse(cases);
-    assert_eq!(cases.len(), 4);
+    assert_eq!(cases.len(), 16);
     let bad: Vec<String> = big(move || {
         let chrome: std::collections::HashMap<String, String> = chrome.iter().map(|(a, b)| (a.to_string(), b.to_string())).collect();
         cases.iter().filter_map(|k| {
@@ -105,7 +106,7 @@ fn a_constructor_that_throws_fails_the_upgrade_and_is_reported() {
 fn create_element_with_a_bad_constructor_reports_and_still_makes_an_element() {
     let mut b = page("");
     js(&mut b, "customElements.define('x-a', class extends HTMLElement { constructor() { super(); this.setAttribute('q', '1') } })");
-    assert_eq!(js(&mut b, "var e = document.createElement('x-a'); e.localName + ' ' + e.attributes.length + ' ' + (e.constructor === HTMLElement)"), "x-a 0 true");
+    assert_eq!(js(&mut b, "var e = document.createElement('x-a'); e.localName + ' ' + e.attributes.length + ' ' + (e.constructor === HTMLUnknownElement)"), "x-a 0 true");
     let r = b.take_reports();
     assert_eq!(r.len(), 1, "{r:?}");
     assert!(r[0].message.starts_with("NotSupportedError"), "{r:?}");
@@ -124,6 +125,56 @@ fn definitions_and_elements_survive_a_collection() {
     b.collect(&[]).unwrap();
     assert_eq!(js(&mut b, "p.firstChild.setAttribute('a', '3'); log.join()"), "ctor,a1,c,a2,a3");
     assert_eq!(js(&mut b, "Object.getPrototypeOf(p.firstChild) === customElements.get('x-a').prototype"), "true");
+}
+
+#[test]
+fn form_values_internals_and_states_survive_a_collection() {
+    let mut b = page("<form id=f><x-f name=n></x-f><x-f name=m></x-f></form>");
+    js(&mut b, "customElements.define('x-f', class extends HTMLElement { static get formAssociated() { return true } constructor() { super(); this.i = this.attachInternals() } })");
+    js(&mut b, "var fm = document.getElementById('f'), x = fm.children; x[0].i.setFormValue(new File(['a'], 'a.txt')); var d = new FormData(); d.append('k', 'v'); x[1].i.setFormValue(d); x[0].i.states.add('s')");
+    b.collect(&[]).unwrap();
+    b.collect(&[]).unwrap();
+    assert_eq!(js(&mut b, "Array.from(new FormData(fm)).map(function (e) { return e[0] + '=' + (typeof e[1] === 'string' ? e[1] : e[1].name) }).join()"), "n=a.txt,k=v");
+    assert_eq!(js(&mut b, "x[0].i.states.has('s') + ' ' + x[0].matches(':state(s)') + ' ' + (x[0].i.states === x[0].i.states)"), "true true true");
+}
+
+/// A page with Lit (`BARE_LIT_JS`: a classic bundle that defines `my-counter`; `BARE_LIT_PRE`: a script to run before it), run by hand: `BARE_LIT_JS=... cargo test -p bare lit_page -- --ignored --nocapture`.
+#[test]
+#[ignore]
+fn lit_page() {
+    let js_src = std::fs::read_to_string(std::env::var("BARE_LIT_JS").expect("BARE_LIT_JS")).expect("bundle");
+    let pre = std::env::var("BARE_LIT_PRE").unwrap_or_default();
+    let html = format!("<!doctype html><html><head></head><body><my-counter id=c></my-counter><script>{pre}</script><script>try {{ {js_src}\n}} catch (e) {{ window.__err = e.name + ': ' + e.message + '\\n' + e.stack }}</script></body></html>");
+    let mut b = Browser::new(tree::parse(&html), BrowserLimits::default(), EvalLimits { max_steps: 200_000_000, ..Default::default() }, HeapLimits::default()).expect("browser");
+    b.use_virtual_clock();
+    let r = b.run_page(PageConfig { url: "http://example.test/p".into(), client: Client::new(), limits: PageLimits::default(), fetch: None });
+    eprintln!("{r:?}");
+    for q in [
+        "String(window.__lit)",
+        "String(window.__err)",
+        "var c = document.getElementById('c'); String(c.constructor.name) + ' ' + (c.shadowRoot && c.shadowRoot.mode)",
+        "c.shadowRoot ? c.shadowRoot.innerHTML : 'no shadow root'",
+        "c.shadowRoot ? String(c.shadowRoot.adoptedStyleSheets && c.shadowRoot.adoptedStyleSheets.length) + ' ' + c.shadowRoot.querySelectorAll('style').length : ''",
+        "String(c.count) + ' ' + String(c.isUpdatePending) + ' ' + String(c.hasUpdated)",
+        "c.shadowRoot.querySelector('button').click(); String(c.count)",
+        "c.shadowRoot.querySelector('button').dispatchEvent(new MouseEvent('click', { bubbles: true })); String(c.count)",
+        "c.setAttribute('count', '5'); c.updateComplete.then(function () { window.__after3 = c.count + '|' + c.shadowRoot.querySelector('button').textContent }); 1",
+        "String(window.__after3)",
+        "var e2 = document.createElement('my-counter'); document.body.appendChild(e2); e2.updateComplete.then(function () { window.__after4 = e2.shadowRoot.innerHTML.length }); 1",
+        "String(window.__after4)",
+        "var cc = document.getElementById('c'); cc.remove(); document.body.appendChild(cc); String(cc.isConnected)",
+        "String(Object.keys(window).filter(function (k) { return /lit|Lit/.test(k) }).join()) + ' ' + String(window.litHtmlVersions) + ' ' + String(window.litElementVersions) + ' ' + String(window.reactiveElementVersions)",
+
+        "c.updateComplete.then(function () { window.__after = c.shadowRoot.querySelector('button').textContent }); 1",
+        "String(window.__after)",
+        "c.label = 'taps'; 1",
+        "c.updateComplete.then(function () { window.__after2 = c.shadowRoot.querySelector('button').textContent }); 1",
+        "String(window.__after2)",
+    ] {
+        let v = b.run_script(q).map(|v| b.it.display(v));
+        let _ = b.drain();
+        eprintln!("{q}\n  => {v:?}");
+    }
 }
 
 #[test]

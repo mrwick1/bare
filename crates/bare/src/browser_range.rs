@@ -680,7 +680,7 @@ fn text_of(doc: &Document, n: NodeId) -> Option<String> {
 #[allow(clippy::too_many_arguments)]
 fn cut_data(d: &Dom, it: &mut Interp<'_>, m: Mode, frag: NodeId, n: NodeId, text: &str, from: u32, to: u32) -> R<()> {
     if m != Mode::Delete {
-        let c = clone_tree(d, it, n, false)?;
+        let c = clone_tree(d, it, n, false, false)?;
         let mut doc = d.doc.borrow_mut();
         doc.set_text(c, &slice16(text, from, to));
         doc.move_to(c, frag, None);
@@ -737,7 +737,7 @@ fn cut(d: &Dom, it: &mut Interp<'_>, m: Mode, who: &str, r: Rng, frag: NodeId, d
         let into = if m == Mode::Delete {
             frag
         } else {
-            let c = clone_tree(d, it, n, false)?;
+            let c = clone_tree(d, it, n, false, false)?;
             d.doc.borrow_mut().move_to(c, frag, None);
             c
         };
@@ -758,7 +758,7 @@ fn cut(d: &Dom, it: &mut Interp<'_>, m: Mode, who: &str, r: Rng, frag: NodeId, d
             Mode::Delete => d.doc.borrow_mut().detach(c),
             Mode::Extract => d.doc.borrow_mut().move_to(c, frag, None),
             Mode::Clone => {
-                let cc = clone_tree(d, it, c, true)?;
+                let cc = clone_tree(d, it, c, true, false)?;
                 d.doc.borrow_mut().move_to(cc, frag, None);
             }
         }

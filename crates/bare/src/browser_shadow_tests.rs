@@ -123,7 +123,7 @@ fn shadow_root_object_shape_open_mode() {
           root.delegatesFocus, root.clonable, root.serializable, root.slotAssignment, typeof root.remove, typeof root.innerHTML, typeof root.getElementById,
           typeof root.querySelector, typeof root.children, root.childElementCount, root.firstElementChild, root.lastElementChild].join()",
     );
-    assert_eq!(out, "true,true,true,true,false,true,11,#document-fragment,,open,true,true,false,true,false,false,false,named,undefined,undefined,function,function,object,0,,");
+    assert_eq!(out, "true,true,true,true,false,true,11,#document-fragment,,open,true,true,false,true,false,false,false,named,undefined,string,function,function,object,0,,");
 }
 
 #[test]

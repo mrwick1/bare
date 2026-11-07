@@ -20,17 +20,22 @@
 //! no definition for `new.target` is an illegal constructor; a definition with an empty construction stack makes a new element; with one
 //! entry it takes that element (an upgrade) and marks the entry as constructed.
 //!
+//! Parse time. The page is parsed before any script runs, so a defined element that the parser reaches is made by `parse_construct`: the tree is cut
+//! (`Document::parse_cut`) so the constructor sees what the parser has, the element with no attributes, no children and no parent, in a document that
+//! stops before it. Then the attributes and the element go back, the reactions run, and the children and the later nodes come back.
+//!
+//! `HTMLUnknownElement` is the interface of an element that has no known name and is not a custom name (`is_unknown`), and of an element whose
+//! constructor failed (`CeSt::unk`). The contents of a `template` belong to an inert `Document` node (`Ce.tpl`); `adoptedCallback` runs when an element
+//! enters or leaves it, and for `adoptNode`. Form-associated elements are in `browser_face.rs`.
+//!
 //! Deviations from Chrome (each is a decision, not a gap that was not seen):
-//! - The page is parsed before any script runs, so the parser never calls a constructor. A definition upgrades the elements that are in
-//!   the document at that time, in tree order (the constructor sees the children and `isConnected` true). Chrome runs the constructor of a
-//!   parser-created element while it parses (no children, `isConnected` false), when the definition came first.
-//! - No `HTMLUnknownElement`: a failed `createElement` gives a plain `HTMLElement` with the state "failed".
+//! - A script that holds a wrapper of a node that the parse cut hides can reach it, and a hidden node that a constructor detaches is not put back.
 //! - Only the interfaces that bare has can be extended: `HTMLButtonElement` and the like. `extends: 'div'` defines, but `new` of it is an
 //!   illegal constructor (bare has no `HTMLDivElement`).
 //! - The `is` value of an element made by `createElement(name, { is })` is kept (`CeSt::is`). Any other element reads its `is` attribute
 //!   when it needs one, so `setAttribute('is', ...)` after creation upgrades at the next insertion (Chrome never does).
-//! - `adoptedCallback` and `connectedMoveCallback` are read at `define` and never called (one document, no `moveBefore`).
-//! - No `new CustomElementRegistry()`, `initialize` or scoped registries, no `formAssociated`, no `disabledFeatures`.
+//! - `connectedMoveCallback` is read and checked and never called (no `moveBefore`).
+//! - No `new CustomElementRegistry()`, `initialize` or scoped registries.
 //! - The `outerHTML` of an element made with `is` does not show the `is` value.
 
 use crate::browser::*;
@@ -51,7 +56,11 @@ const MAX_DEFS: usize = 1 << 16;
 /// The place of each callback in `Def::cb`.
 const CONNECTED: usize = 0;
 const DISCONNECTED: usize = 1;
+const ADOPTED: usize = 2;
 const ATTRIBUTE: usize = 3;
+const FORM_ASSOCIATED: usize = 4;
+const FORM_RESET: usize = 5;
+const FORM_DISABLED: usize = 6;
 
 /// The interfaces that have a constructor for custom elements, in the order of `html_ctor::<K>`.
 const IFACES: [&str; 15] = [
@@ -67,8 +76,35 @@ pub(crate) const HANDLERS: [H; 15] = [
 /// The HTML elements whose interface is `HTMLElement` itself (Chrome 155).
 const PLAIN: &str = "abbr acronym address article aside b basefont bdi bdo big center cite code dd dfn dt em figcaption figure footer header hgroup i kbd main mark nav nobr noembed noframes noscript plaintext rb rp rt rtc ruby s samp search section small strike strong sub summary sup tt u var wbr";
 
-/// Every HTML element name that has an interface other than `HTMLUnknownElement` (Chrome 155). `define` with `extends` checks it.
-const KNOWN: &str = "a abbr acronym address area article aside audio b base basefont bdi bdo big blockquote body br button canvas caption center cite code col colgroup data datalist dd del details dfn dialog dir div dl dt em embed fieldset figcaption figure font footer form frame frameset h1 h2 h3 h4 h5 h6 head header hgroup hr html i iframe img input ins kbd label legend li link listing main map mark marquee menu meta meter nav nobr noembed noframes noscript object ol optgroup option output p param picture plaintext pre progress q rb rp rt rtc ruby s samp script search section select selectedcontent slot small source span strike strong style sub summary sup table tbody td template textarea tfoot th thead time title tr track tt u ul var video wbr xmp";
+
+/// Every HTML element name that has an interface other than `HTMLUnknownElement` (Chrome 155), sorted. `define` with `extends` checks it, and so does the
+/// prototype of a new wrapper (`is_unknown`).
+/// `KNOWN` and `is_known`, from one list. The `match` is a switch on the length and the bytes: a wrapper of a plain element pays no search.
+macro_rules! known {
+    ($($s:literal),* $(,)?) => {
+        const KNOWN: [&str; [$($s),*].len()] = [$($s),*];
+        #[inline]
+        fn is_known(n: &str) -> bool {
+            matches!(n, $($s)|*)
+        }
+    };
+}
+
+known! {
+    "a", "abbr", "acronym", "address", "area", "article", "aside", "audio", "b", "base", "basefont", "bdi", "bdo", "big", "blockquote", "body", "br",
+    "button", "canvas", "caption", "center", "cite", "code", "col", "colgroup", "data", "datalist", "dd", "del", "details", "dfn", "dialog", "dir",
+    "div", "dl", "dt", "em", "embed", "fieldset", "figcaption", "figure", "font", "footer", "form", "frame", "frameset", "h1", "h2", "h3", "h4", "h5",
+    "h6", "head", "header", "hgroup", "hr", "html", "i", "iframe", "img", "input", "ins", "kbd", "label", "legend", "li", "link", "listing", "main",
+    "map", "mark", "marquee", "menu", "meta", "meter", "nav", "nobr", "noembed", "noframes", "noscript", "object", "ol", "optgroup", "option",
+    "output", "p", "param", "picture", "plaintext", "pre", "progress", "q", "rb", "rp", "rt", "rtc", "ruby", "s", "samp", "script", "search",
+    "section", "select", "selectedcontent", "slot", "small", "source", "span", "strike", "strong", "style", "sub", "summary", "sup", "table", "tbody",
+    "td", "template", "textarea", "tfoot", "th", "thead", "time", "title", "tr", "track", "tt", "u", "ul", "var", "video", "wbr", "xmp"
+}
+
+/// Is `n`, an HTML element name, an `HTMLUnknownElement`? Not when it has an interface of its own, nor when it is a valid custom element name.
+pub(crate) fn is_unknown(n: &str) -> bool {
+    !is_known(n) && !(n.contains('-') && valid_custom_name(n))
+}
 
 /// The index in `IFACES` of the interface of the HTML element `local`, or `usize::MAX` when bare has none for it.
 fn iface_of(local: &str) -> usize {
@@ -99,9 +135,13 @@ struct Def {
     ext: Option<Box<str>>,
     ctor: ObjId,
     proto: ObjId,
-    /// `connectedCallback`, `disconnectedCallback`, `adoptedCallback`, `attributeChangedCallback`; `Undefined` when absent.
-    cb: [Value; 4],
+    /// `connectedCallback`, `disconnectedCallback`, `adoptedCallback`, `attributeChangedCallback`, then (for a form-associated definition)
+    /// `formAssociatedCallback`, `formResetCallback`, `formDisabledCallback` and `formStateRestoreCallback`; `Undefined` when absent.
+    cb: [Value; 8],
     obs: Box<[Box<str>]>,
+    /// `static formAssociated`, and whether `static disabledFeatures` has `internals`.
+    form: bool,
+    no_internals: bool,
     /// The construction stack: the element an upgrade runs for, or `None` once the constructor took it.
     stack: Vec<Option<NodeId>>,
 }
@@ -110,7 +150,14 @@ enum Reaction {
     Upgrade(u32),
     Connected,
     Disconnected,
+    /// The element changed document: `true` for the inert document of the template contents, `false` for the document.
+    Adopted(bool),
     Attr(Box<AttrArgs>),
+    /// A form-associated element: find its form owner and `disabled` state now, and call the callbacks for what changed (`form_check`).
+    FormCheck,
+    /// `formAssociatedCallback` with the owner that the element has after it left a tree (`Face::owner` is already that).
+    FormAssoc(Option<NodeId>),
+    FormReset,
 }
 
 struct AttrArgs {
@@ -143,6 +190,15 @@ pub(crate) struct CeSt {
     held: Vec<NodeId>,
     /// The `is` value of the elements made by `createElement(name, { is })`.
     is: HashMap<u32, Box<str>>,
+    /// The elements whose constructor failed when the parser or `createElement` made them: they are `HTMLUnknownElement`.
+    unk: std::collections::HashSet<u32>,
+    /// The custom elements that a script moved into the contents of a template: their owner document is the inert one, also while they are out.
+    inert: std::collections::HashSet<u32>,
+    /// The state of the form-associated elements by `NodeId::index`, and the element of each `ElementInternals` and `CustomStateSet` (`browser_face.rs`).
+    pub(crate) face: HashMap<u32, crate::browser_face::Face>,
+    pub(crate) ints: HashMap<ObjId, (NodeId, bool)>,
+    /// Some definition is form-associated: a tree change can move a form owner.
+    has_face: bool,
     /// The promise of `whenDefined` for each name that is not defined yet.
     when: HashMap<Box<str>, Value>,
     flush: Option<ObjId>,
@@ -156,6 +212,12 @@ pub(crate) struct Ce {
     pub(crate) on: Cell<bool>,
     /// The parser-blocking script that runs now while the page loads (see `release`).
     pub(crate) parsing: Cell<Option<NodeId>>,
+    /// The prototype and the constructor of `HTMLUnknownElement`, once made.
+    unk: OnceCell<[ObjId; 2]>,
+    /// The prototypes and constructors of `ElementInternals` and `CustomStateSet`, once made.
+    pub(crate) int: OnceCell<[ObjId; 4]>,
+    /// The inert document that owns the contents of the templates (a `Document` node outside the tree), once needed.
+    tpl: Cell<Option<NodeId>>,
     st: OnceCell<Rc<RefCell<CeSt>>>,
 }
 
@@ -166,7 +228,7 @@ impl Ce {
     }
 }
 
-fn st(d: &Dom) -> &Rc<RefCell<CeSt>> {
+pub(crate) fn st(d: &Dom) -> &Rc<RefCell<CeSt>> {
     d.ce.st.get_or_init(Default::default)
 }
 
@@ -243,43 +305,77 @@ impl CeSt {
     pub(crate) fn on_change(&mut self, doc: &Document, ch: Change) {
         match ch {
             Change::Link { parent, node, .. } => {
-                if !connected(doc, parent) {
+                let conn = connected(doc, parent);
+                // The document that owns `node` after the change: the inert one for the contents of a template.
+                let inert = doc.in_template_content(parent);
+                if !conn && !inert && self.inert.is_empty() && !self.has_face {
                     return;
                 }
                 let mut els = Vec::new();
                 each_element(doc, node, |e| els.push(e));
+                let forms = self.has_face && els.iter().any(|&e| doc.is_html(e, "form"));
                 for e in els {
                     match doc.custom_state(e) {
                         Some(s) if s < PRECUSTOMIZED => {
-                            if !matches!(self.defs[s as usize].cb[CONNECTED], Value::Undefined) {
+                            if self.defs[s as usize].form {
+                                self.enqueue(e, Reaction::FormCheck);
+                            }
+                            // "Adopt": the owner document changes when the element enters or leaves the contents of a template.
+                            if inert != self.inert.contains(&(e.index() as u32)) {
+                                if inert { self.inert.insert(e.index() as u32) } else { self.inert.remove(&(e.index() as u32)) };
+                                if !matches!(self.defs[s as usize].cb[ADOPTED], Value::Undefined) {
+                                    self.enqueue(e, Reaction::Adopted(inert));
+                                }
+                            }
+                            if conn && !matches!(self.defs[s as usize].cb[CONNECTED], Value::Undefined) {
                                 self.enqueue(e, Reaction::Connected);
                             }
                         }
                         Some(_) => {}
-                        None => {
+                        None if conn => {
                             if let Some(i) = self.def_of(doc, e) {
                                 self.enqueue(e, Reaction::Upgrade(i));
                             }
                         }
+                        None => {}
                     }
+                }
+                if forms {
+                    self.check_explicit(doc);
                 }
             }
             Change::Unlink { parent, node, .. } => {
-                if !doc.has_custom() || !connected(doc, parent) {
+                let conn = connected(doc, parent);
+                if !doc.has_custom() || (!conn && !self.has_face) {
                     return;
                 }
                 let mut els = Vec::new();
                 each_element(doc, node, |e| els.push(e));
+                let forms = self.has_face && els.iter().any(|&e| doc.is_html(e, "form"));
                 for e in els {
-                    if let Some(s) = doc.custom_state(e)
-                        && s < PRECUSTOMIZED
-                        && !matches!(self.defs[s as usize].cb[DISCONNECTED], Value::Undefined)
-                    {
+                    let Some(s) = doc.custom_state(e).filter(|&s| s < PRECUSTOMIZED) else { continue };
+                    if conn && !matches!(self.defs[s as usize].cb[DISCONNECTED], Value::Undefined) {
                         self.enqueue(e, Reaction::Disconnected);
                     }
+                    if self.defs[s as usize].form {
+                        // The owner after the change is the nearest form inside the removed tree. The rest is read when the reaction runs.
+                        let owner = crate::browser_face::owner_within(doc, e, node);
+                        let f = self.face.entry(e.index() as u32).or_insert_with(|| crate::browser_face::Face::new(e));
+                        if f.owner.is_some() && f.owner != owner {
+                            f.owner = owner;
+                            self.enqueue(e, Reaction::FormAssoc(owner));
+                        }
+                        self.enqueue(e, Reaction::FormCheck);
+                    }
+                }
+                if forms {
+                    self.check_explicit(doc);
                 }
             }
             Change::Attr { el, name, old, new } => {
+                if self.has_face {
+                    self.attr_face(doc, el, doc.attr_local(name));
+                }
                 let Some(s) = doc.custom_state(el) else { return };
                 if s >= PRECUSTOMIZED {
                     return;
@@ -293,6 +389,44 @@ impl CeSt {
                 self.enqueue(el, Reaction::Attr(Box::new(args)));
             }
             Change::Text { .. } => {}
+        }
+    }
+
+    /// A form-associated element, `el`, needs a new check.
+    fn check_face(&mut self, doc: &Document, e: NodeId) {
+        if let Some(s) = doc.custom_state(e).filter(|&s| s < PRECUSTOMIZED)
+            && self.defs[s as usize].form
+            && !self.queues.get(&(e.index() as u32)).is_some_and(|q| q.iter().any(|r| matches!(r, Reaction::FormCheck)))
+        {
+            self.enqueue(e, Reaction::FormCheck);
+        }
+    }
+
+    /// A form came into the tree or left it: the elements that name their form with `form=` can have another owner.
+    fn check_explicit(&mut self, doc: &Document) {
+        let Some(form) = doc.find_atom("form") else { return };
+        let els: Vec<NodeId> = self.face.values().map(|f| f.el).filter(|&e| doc.attr(e, form).is_some()).collect();
+        for e in els {
+            self.check_face(doc, e);
+        }
+    }
+
+    /// The attribute `local` of `el` changed: `form` and `disabled` of a form-associated element, `disabled` of a `fieldset` (its form-associated
+    /// descendants), `id` of a `form` (the elements with a `form=` attribute).
+    fn attr_face(&mut self, doc: &Document, el: NodeId, local: &str) {
+        match local {
+            "form" | "disabled" => {
+                self.check_face(doc, el);
+                if local == "disabled" && doc.is_html(el, "fieldset") {
+                    let mut els = Vec::new();
+                    each_element(doc, el, |e| els.push(e));
+                    for e in els {
+                        self.check_face(doc, e);
+                    }
+                }
+            }
+            "id" if doc.is_html(el, "form") => self.check_explicit(doc),
+            _ => {}
         }
     }
 
@@ -382,7 +516,11 @@ impl Dom {
             Reaction::Upgrade(i) => return self.upgrade(it, el, i),
             Reaction::Connected => (CONNECTED, None),
             Reaction::Disconnected => (DISCONNECTED, None),
+            Reaction::Adopted(to) => return self.react_adopted(it, el, to),
             Reaction::Attr(a) => (ATTRIBUTE, Some(a)),
+            Reaction::FormCheck => return self.form_check(it, el),
+            Reaction::FormAssoc(o) => return self.form_assoc(it, el, o),
+            Reaction::FormReset => (FORM_RESET, None),
         };
         let Some(s) = self.doc.borrow().custom_state(el).filter(|&s| s < PRECUSTOMIZED) else { return Ok(()) };
         let f = st(self).borrow().defs[s as usize].cb[slot];
@@ -404,8 +542,95 @@ impl Dom {
         self.guarded(it, el, |it| it.call(f, this, &argv).map(|_| ()))
     }
 
+    /// Is `n` a form-associated custom element (also while its constructor runs)?
+    #[inline]
+    pub(crate) fn is_face(&self, n: NodeId) -> bool {
+        self.ce.on.get() && self.is_face_slow(n)
+    }
+
+    fn is_face_slow(&self, n: NodeId) -> bool {
+        let (doc, s) = (self.doc.borrow(), st(self).borrow());
+        match doc.custom_state(n) {
+            Some(i) if i < PRECUSTOMIZED => s.defs[i as usize].form,
+            Some(PRECUSTOMIZED) => s.def_of(&doc, n).is_some_and(|i| s.defs[i as usize].form),
+            _ => false,
+        }
+    }
+
+    /// Does the element `n` have a definition (it is custom, or a constructor runs for it)? Gives whether `disabledFeatures` has `internals`.
+    pub(crate) fn ce_def(&self, n: NodeId) -> Option<bool> {
+        if !self.ce.on.get() {
+            return None;
+        }
+        let (doc, s) = (self.doc.borrow(), st(self).borrow());
+        let i = match doc.custom_state(n) {
+            Some(i) if i < PRECUSTOMIZED => i,
+            Some(PRECUSTOMIZED) => s.def_of(&doc, n)?,
+            _ => return None,
+        };
+        Some(s.defs[i as usize].no_internals)
+    }
+
+    /// Call the callback `slot` of the custom element `el` when its definition has one.
+    fn form_cb(&self, it: &mut Interp<'_>, el: NodeId, slot: usize, args: &[Value]) -> R<()> {
+        let Some(s) = self.doc.borrow().custom_state(el).filter(|&s| s < PRECUSTOMIZED) else { return Ok(()) };
+        let f = st(self).borrow().defs[s as usize].cb[slot];
+        if matches!(f, Value::Undefined) {
+            return Ok(());
+        }
+        let this = self.wrap(it, el)?;
+        self.guarded(it, el, |it| it.call(f, this, args).map(|_| ()))
+    }
+
+    fn form_assoc(&self, it: &mut Interp<'_>, el: NodeId, owner: Option<NodeId>) -> R<()> {
+        let form = self.wrap_opt(it, owner)?;
+        self.form_cb(it, el, FORM_ASSOCIATED, &[form])
+    }
+
+    /// `formAssociatedCallback` and `formDisabledCallback` for what changed since the last check of `el`.
+    fn form_check(&self, it: &mut Interp<'_>, el: NodeId) -> R<()> {
+        if !self.is_face(el) {
+            return Ok(());
+        }
+        let (owner, disabled) = (self.form_owner(it, el)?, self.is_disabled_control(it, el)?);
+        let (assoc, dis) = {
+            let mut s = st(self).borrow_mut();
+            let f = s.face.entry(el.index() as u32).or_insert_with(|| crate::browser_face::Face::new(el));
+            (std::mem::replace(&mut f.owner, owner) != owner, std::mem::replace(&mut f.disabled, disabled) != disabled)
+        };
+        if assoc {
+            self.form_assoc(it, el, owner)?;
+        }
+        if dis {
+            self.form_cb(it, el, FORM_DISABLED, &[Value::Bool(disabled)])?;
+        }
+        Ok(())
+    }
+
+    /// `form.reset()` reaches the form-associated element `el`.
+    pub(crate) fn ce_form_reset(&self, el: NodeId) {
+        let mut s = st(self).borrow_mut();
+        if let Some(i) = self.doc.borrow().custom_state(el).filter(|&i| i < PRECUSTOMIZED)
+            && !matches!(s.defs[i as usize].cb[FORM_RESET], Value::Undefined)
+        {
+            s.enqueue(el, Reaction::FormReset);
+        }
+    }
+
+    /// `adoptedCallback(oldDocument, newDocument)`.
+    fn react_adopted(&self, it: &mut Interp<'_>, el: NodeId, to_inert: bool) -> R<()> {
+        let Some(s) = self.doc.borrow().custom_state(el).filter(|&s| s < PRECUSTOMIZED) else { return Ok(()) };
+        let f = st(self).borrow().defs[s as usize].cb[ADOPTED];
+        let tpl = template_document(self);
+        let main = self.doc.borrow().root();
+        let (old, new) = if to_inert { (main, tpl) } else { (tpl, main) };
+        let argv = [self.wrap(it, old)?, self.wrap(it, new)?];
+        let this = self.wrap(it, el)?;
+        self.guarded(it, el, |it| it.call(f, this, &argv).map(|_| ()))
+    }
+
     /// Run `f`. An exception is reported (the page goes on, as a listener that throws); any other error ends the run.
-    fn guarded(&self, it: &mut Interp<'_>, el: NodeId, f: impl FnOnce(&mut Interp<'_>) -> R<()>) -> R<()> {
+    pub(crate) fn guarded(&self, it: &mut Interp<'_>, el: NodeId, f: impl FnOnce(&mut Interp<'_>) -> R<()>) -> R<()> {
         match f(it) {
             Err(Error::Throw(v)) => {
                 self.report(it, v, "custom-element", Target::Node(el));
@@ -424,20 +649,8 @@ impl Dom {
         let ctor = {
             let (mut doc, mut s) = (self.doc.borrow_mut(), st(self).borrow_mut());
             doc.set_custom_state(el, Some(FAILED));
-            let (mut reactions, conn) = (Vec::new(), connected(&doc, el));
-            let def = &s.defs[idx as usize];
-            if !matches!(def.cb[ATTRIBUTE], Value::Undefined) && !def.obs.is_empty() {
-                let NodeData::Element { attrs, .. } = *doc.data(el) else { unreachable!("only elements are upgraded") };
-                for a in doc.attrs(attrs) {
-                    let local = doc.attr_local(a.name);
-                    if def.obs.iter().any(|o| &**o == local) {
-                        reactions.push(Reaction::Attr(Box::new(AttrArgs { name: local.into(), old: None, new: Some(doc.text(a.value).into()), ns: doc.attr_ns(a.name).map(Ns::uri) })));
-                    }
-                }
-            }
-            if conn && !matches!(def.cb[CONNECTED], Value::Undefined) {
-                reactions.push(Reaction::Connected);
-            }
+            let conn = connected(&doc, el);
+            let reactions = initial_reactions(&doc, &s.defs[idx as usize], el, conn);
             for r in reactions {
                 s.enqueue(el, r);
             }
@@ -475,14 +688,13 @@ impl Dom {
         }
     }
 
-    /// The parser reaches the script `upto` (`None`: the end of the page): upgrade the held elements before it, in tree order, as the parser
-    /// would have made them. The loader calls it before each parser-blocking script.
+    /// The parser reaches the script `upto` (`None`: the end of the page): make the held elements before it, in tree order, as the parser would have
+    /// made them (`parse_construct`). The loader calls it before each parser-blocking script.
     pub(crate) fn ce_release(&self, it: &mut Interp<'_>, upto: Option<NodeId>) -> R<()> {
         if self.ce.st.get().is_none_or(|s| s.borrow().held.is_empty()) {
             return Ok(());
         }
-        st(self).borrow_mut().stack.push(Vec::new());
-        {
+        let found = {
             let (doc, mut s) = (self.doc.borrow(), st(self).borrow_mut());
             let held: std::collections::HashSet<NodeId> = s.held.iter().copied().collect();
             let mut found = Vec::new();
@@ -495,13 +707,66 @@ impl Dom {
             });
             let gone: std::collections::HashSet<NodeId> = found.iter().copied().collect();
             s.held.retain(|e| !gone.contains(e));
-            for e in found {
-                if doc.custom_state(e).is_none() && connected(&doc, e) && let Some(i) = s.def_of(&doc, e) {
-                    s.enqueue(e, Reaction::Upgrade(i));
+            found
+        };
+        for e in found {
+            self.parse_construct(it, e)?;
+        }
+        Ok(())
+    }
+
+    /// "Create an element for a token" with the synchronous custom elements flag, for the held element `el` that has a definition. The tree is
+    /// already built, so `el` is taken out of it (`Document::parse_cut`): the constructor sees what the parser has when it calls it, an element with
+    /// no attributes, no children and no parent, in a document that stops before it. Then the parser adds the attributes and inserts the element,
+    /// and the reactions run (`attributeChangedCallback`, `connectedCallback`) while the element has no children yet. Its children come back last.
+    fn parse_construct(&self, it: &mut Interp<'_>, el: NodeId) -> R<()> {
+        let found = {
+            let (doc, s) = (self.doc.borrow(), st(self).borrow());
+            if doc.custom_state(el).is_some() || !connected(&doc, el) { None } else { s.def_of(&doc, el).map(|i| (i, s.defs[i as usize].ctor, doc.element_name(el).to_string())) }
+        };
+        let Some((idx, ctor, name)) = found else { return Ok(()) };
+        let wrapper = self.wrap(it, el)?;
+        let cut = self.doc.borrow_mut().parse_cut(el);
+        {
+            let mut s = st(self).borrow_mut();
+            s.stack.push(Vec::new());
+            s.defs[idx as usize].stack.push(Some(el));
+            self.doc.borrow_mut().set_custom_state(el, Some(PRECUSTOMIZED));
+        }
+        let r = self.construct_checked(it, ctor, wrapper).and_then(|()| check_result(self, it, wrapper, &name).map(drop));
+        st(self).borrow_mut().defs[idx as usize].stack.pop();
+        let r = match r {
+            Err(Error::Throw(e)) => Err(e),
+            Err(e) => {
+                st(self).borrow_mut().stack.pop();
+                self.doc.borrow_mut().parse_close(cut);
+                return Err(e);
+            }
+            Ok(()) => Ok(()),
+        };
+        self.doc.borrow_mut().parse_open(&cut);
+        match r {
+            Ok(()) => {
+                let mut s = st(self).borrow_mut();
+                let mut doc = self.doc.borrow_mut();
+                doc.set_custom_state(el, Some(idx));
+                for r in initial_reactions(&doc, &s.defs[idx as usize], el, true) {
+                    s.enqueue(el, r);
                 }
             }
+            Err(e) => {
+                self.make_unknown(it, el, wrapper)?;
+                let gone = st(self).borrow_mut().queues.remove(&(el.index() as u32));
+                if let Some(q) = gone {
+                    st(self).borrow_mut().pending -= q.len();
+                }
+                self.report(it, e, "custom-element", Target::Node(el));
+            }
         }
-        self.ce_pop(it)
+        // The constructor was the only script on the stack: its microtask checkpoint comes before the reactions.
+        let r = it.drain_microtasks().map(drop).and_then(|()| self.ce_pop(it));
+        self.doc.borrow_mut().parse_close(cut);
+        r
     }
 
     /// Where the next element goes in the top element queue. See `fragment_upgrades`.
@@ -541,6 +806,7 @@ impl Dom {
     pub(crate) fn ce_proto(&self, doc: &Document, n: NodeId, natural: ObjId) -> ObjId {
         match (doc.custom_state(n), self.ce.st.get()) {
             (Some(s), Some(st)) if s < PRECUSTOMIZED => st.borrow().defs[s as usize].proto,
+            (Some(FAILED), Some(st)) if st.borrow().unk.contains(&(n.index() as u32)) => self.ce.unk.get().map_or(natural, |u| u[0]),
             _ => natural,
         }
     }
@@ -555,6 +821,12 @@ impl Dom {
         out.extend(s.when.values().copied());
         out.extend(s.flush.map(Value::Object));
         out.extend(s.reg.iter().flatten().copied().map(Value::Object));
+        out.extend(self.ce.unk.get().into_iter().flatten().copied().map(Value::Object));
+        out.extend(self.ce.int.get().into_iter().flatten().copied().map(Value::Object));
+        out.extend(s.ints.keys().copied().map(Value::Object));
+        for f in s.face.values() {
+            f.roots(out);
+        }
     }
 }
 
@@ -618,6 +890,7 @@ pub(crate) fn interface_ctor(d: &Dom, it: &mut Interp<'_>, name: &str, new_ok: b
 pub(crate) fn needs_new(it: &mut Interp<'_>, h: H) -> Error {
     match HANDLERS.iter().position(|&x| x as usize == h as usize) {
         Some(k) => it.type_error(&format!("Failed to construct '{}': Please use the 'new' operator, this DOM object constructor cannot be called as a function.", IFACES[k])),
+        None if h as usize == unknown_ctor as *const () as usize => it.type_error("Illegal constructor"),
         None => it.type_error("Failed to construct: please use the 'new' operator"),
     }
 }
@@ -654,12 +927,91 @@ pub(crate) fn create(d: &Dom, it: &mut Interp<'_>, name: &str, options: Value) -
             // "Failed": report the exception and make an element that no constructor will run for.
             let v = make_element(d, it, name)?;
             let n = d.node_of(v).expect("an element");
-            d.doc.borrow_mut().set_custom_state(n, Some(FAILED));
+            d.make_unknown(it, n, v)?;
             d.report(it, e, "custom-element", Target::Node(n));
             Ok(v)
         }
         Err(e) => Err(e),
     }
+}
+
+/// The inert document that owns the contents of the templates, made by the first need.
+pub(crate) fn template_document(d: &Dom) -> NodeId {
+    d.ce.tpl.get().unwrap_or_else(|| {
+        let n = d.doc.borrow_mut().create_document();
+        d.ce.tpl.set(Some(n));
+        n
+    })
+}
+
+impl Dom {
+    /// Does the inert document own `n`: is it in the contents of a template, or was it moved out of them by a script (a custom element)?
+    pub(crate) fn in_inert(&self, n: NodeId) -> bool {
+        self.doc.borrow().in_template_content(n) || (self.ce.on.get() && st(self).borrow().inert.contains(&(n.index() as u32)))
+    }
+
+    /// The element `n` (wrapper `v`) failed to construct: the state "failed", and its interface is `HTMLUnknownElement`.
+    fn make_unknown(&self, it: &mut Interp<'_>, n: NodeId, v: Value) -> R<()> {
+        self.doc.borrow_mut().set_custom_state(n, Some(FAILED));
+        st(self).borrow_mut().unk.insert(n.index() as u32);
+        let (Value::Object(w), proto) = (v, unknown_proto(self, it)?) else { unreachable!("a wrapper is an object") };
+        it.heap.set_prototype_of(w, Some(proto)).map_err(|e| it.heap_error(e))?;
+        Ok(())
+    }
+}
+
+/// The prototype of `HTMLUnknownElement`, made by the first element that needs it.
+pub(crate) fn unknown_proto(d: &Dom, it: &mut Interp<'_>) -> R<ObjId> {
+    if let Some(u) = d.ce.unk.get() {
+        return Ok(u[0]);
+    }
+    let (kp, kc) = (d.key(it, "prototype")?, d.key(it, "constructor")?);
+    let proto = d.obj(it, d.p().html)?;
+    let f = d.add_fn(it, unknown_ctor, "HTMLUnknownElement", 0, true)?;
+    it.define_data(f, kp, Value::Object(proto), false, false, false)?;
+    it.define_data(proto, kc, Value::Object(f), true, false, true)?;
+    crate::browser_lazy::tag(d, it, proto, "HTMLUnknownElement")?;
+    // Like every HTML interface, its constructor inherits from `HTMLElement`.
+    let g = it.global_object();
+    let k = d.key(it, "HTMLElement")?;
+    if let Value::Object(h) = it.get_value(Value::Object(g), k)? {
+        it.heap.set_prototype_of(f, Some(h)).map_err(|e| it.heap_error(e))?;
+    }
+    let _ = d.ce.unk.set([proto, f]);
+    Ok(proto)
+}
+
+/// `new HTMLUnknownElement()` is an error (a call without `new` is one too: see `needs_new`).
+fn unknown_ctor(_: &Dom, it: &mut Interp<'_>, _: Value, _: &[Value]) -> V {
+    Err(it.type_error("Failed to construct 'HTMLUnknownElement': Illegal constructor"))
+}
+
+fn ensure_unknown(d: &Dom, it: &mut Interp<'_>) -> R<()> {
+    unknown_proto(d, it).map(|_| ())
+}
+
+crate::browser_lazy::lazy_global!(lazy_unknown, "HTMLUnknownElement", ensure_unknown, |d| d.ce.unk.get().expect("made")[1]);
+
+/// The reactions of a new custom element, in the order of the standard: `attributeChangedCallback` for each observed attribute that it has, then
+/// `connectedCallback` when it is connected.
+fn initial_reactions(doc: &Document, def: &Def, el: NodeId, conn: bool) -> Vec<Reaction> {
+    let mut reactions = Vec::new();
+    if !matches!(def.cb[ATTRIBUTE], Value::Undefined) && !def.obs.is_empty() {
+        let NodeData::Element { attrs, .. } = *doc.data(el) else { unreachable!("only elements are upgraded") };
+        for a in doc.attrs(attrs) {
+            let local = doc.attr_local(a.name);
+            if def.obs.iter().any(|o| &**o == local) {
+                reactions.push(Reaction::Attr(Box::new(AttrArgs { name: local.into(), old: None, new: Some(doc.text(a.value).into()), ns: doc.attr_ns(a.name).map(Ns::uri) })));
+            }
+        }
+    }
+    if conn && !matches!(def.cb[CONNECTED], Value::Undefined) {
+        reactions.push(Reaction::Connected);
+    }
+    if def.form {
+        reactions.push(Reaction::FormCheck);
+    }
+    reactions
 }
 
 /// The checks of the standard on what the constructor gave.
@@ -714,6 +1066,7 @@ fn define(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
     d.ce.on.set(true);
     st(d).borrow_mut().stack.push(Vec::new());
     d.sync_watcher();
+    d.def_method(it, d.p().html, "attachInternals", 0, crate::browser_face::attach_internals)?;
     let r = define_in(d, it, this, a);
     let q = d.ce_pop(it);
     r.and_then(|v| q.map(|()| v))
@@ -766,7 +1119,7 @@ fn define_in(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
         if valid_custom_name(e) {
             return Err(reg_dom_err(d, it, "NotSupportedError", "define", &format!("\"{e}\" is a valid custom element name")));
         }
-        if !KNOWN.split(' ').any(|k| k == e) {
+        if KNOWN.binary_search(&e.as_str()).is_err() {
             return Err(reg_dom_err(d, it, "NotSupportedError", "define", &format!("\"{e}\" is an HTMLUnknownElement")));
         }
     }
@@ -775,7 +1128,7 @@ fn define_in(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
     }
     let read = read_definition(d, it, ctor);
     st(d).borrow_mut().defining = false;
-    let (proto, cb, obs) = read?;
+    let (proto, cb, obs, form, no_internals) = read?;
 
     let idx = {
         let mut s = st(d).borrow_mut();
@@ -783,7 +1136,8 @@ fn define_in(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
         s.has_ext |= ext.is_some();
         s.by_name.insert(name.as_str().into(), idx);
         s.by_ctor.insert(ctor_obj, idx);
-        s.defs.push(Def { name: name.as_str().into(), ext: ext.map(Into::into), ctor: ctor_obj, proto, cb, obs, stack: Vec::new() });
+        s.has_face |= form;
+        s.defs.push(Def { name: name.as_str().into(), ext: ext.map(Into::into), ctor: ctor_obj, proto, cb, obs, form, no_internals, stack: Vec::new() });
         idx
     };
     // The upgrade candidates: the elements of the document (and its shadow trees) that have this definition, in tree order.
@@ -816,49 +1170,75 @@ fn define_in(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
     Ok(Value::Undefined)
 }
 
-type Read = (ObjId, [Value; 4], Box<[Box<str>]>);
+/// The prototype, the callbacks, the observed attributes, `formAssociated` and "`disabledFeatures` has `internals`".
+type Read = (ObjId, [Value; 8], Box<[Box<str>]>, bool, bool);
 
-/// The prototype, the callbacks and the observed attributes of a constructor, in the order of the standard (and Chrome 155).
+/// The callback `n` of `proto`: `Undefined` when absent, an error when it is not a function.
+fn callback(d: &Dom, it: &mut Interp<'_>, proto: ObjId, n: &str) -> V {
+    let k = d.key(it, n)?;
+    let v = it.get_value(Value::Object(proto), k)?;
+    if !matches!(v, Value::Undefined) && !it.is_callable_value(v) {
+        return Err(reg_err(it, "define", &format!("\"{n}\" is not a function")));
+    }
+    Ok(v)
+}
+
+/// A `sequence<DOMString>` that `v` holds: `observedAttributes` and `disabledFeatures`.
+fn strings(d: &Dom, it: &mut Interp<'_>, v: Value) -> R<Vec<Box<str>>> {
+    let mut out: Vec<Box<str>> = Vec::new();
+    if matches!(v, Value::Undefined) {
+        return Ok(out);
+    }
+    let iter = if matches!(v, Value::Object(_)) { it.host_iter_open(v)? } else { None };
+    let Some(mut iter) = iter else { return Err(reg_err(it, "define", "The provided value cannot be converted to a sequence.")) };
+    loop {
+        it.charge(1)?;
+        match it.host_iter_next(&mut iter)? {
+            Some(v) => match d.string_arg(it, v) {
+                Ok(s) => out.push(s.into()),
+                Err(e) => return Err(it.host_iter_fail(&mut iter, e)),
+            },
+            None => break,
+        }
+        if out.len() > d.lim.max_names {
+            return Err(d.lim("custom-observed-attributes"));
+        }
+    }
+    Ok(out)
+}
+
+/// What `define` reads from a constructor, in the order of the standard (and Chrome 155).
 fn read_definition(d: &Dom, it: &mut Interp<'_>, ctor: Value) -> R<Read> {
     let kp = d.key(it, "prototype")?;
     let Value::Object(proto) = it.get_value(ctor, kp)? else { return Err(reg_err(it, "define", "constructor prototype is not an object")) };
-    let mut cb = [Value::Undefined; 4];
+    let mut cb = [Value::Undefined; 8];
     // `connectedMoveCallback` is read and checked as Chrome does; it is never called (no `moveBefore`).
     for (slot, n) in [Some(CONNECTED), Some(DISCONNECTED), None, Some(2), Some(ATTRIBUTE)].into_iter().zip(["connectedCallback", "disconnectedCallback", "connectedMoveCallback", "adoptedCallback", "attributeChangedCallback"]) {
-        let k = d.key(it, n)?;
-        let v = it.get_value(Value::Object(proto), k)?;
-        if matches!(v, Value::Undefined) {
-            continue;
-        }
-        if !it.is_callable_value(v) {
-            return Err(reg_err(it, "define", &format!("\"{n}\" is not a function")));
-        }
+        let v = callback(d, it, proto, n)?;
         if let Some(i) = slot {
             cb[i] = v;
         }
     }
-    let mut obs: Vec<Box<str>> = Vec::new();
+    let mut obs = Vec::new();
     if !matches!(cb[ATTRIBUTE], Value::Undefined) {
         let ko = d.key(it, "observedAttributes")?;
         let v = it.get_value(ctor, ko)?;
-        if !matches!(v, Value::Undefined) {
-            let Some(mut iter) = it.host_iter_open(v)? else { return Err(reg_err(it, "define", "The provided value cannot be converted to a sequence.")) };
-            loop {
-                it.charge(1)?;
-                match it.host_iter_next(&mut iter)? {
-                    Some(v) => match d.string_arg(it, v) {
-                        Ok(s) => obs.push(s.into()),
-                        Err(e) => return Err(it.host_iter_fail(&mut iter, e)),
-                    },
-                    None => break,
-                }
-                if obs.len() > d.lim.max_names {
-                    return Err(d.lim("custom-observed-attributes"));
-                }
-            }
-        }
+        obs = strings(d, it, v)?;
     }
-    Ok((proto, cb, obs.into()))
+    let kd = d.key(it, "disabledFeatures")?;
+    let v = it.get_value(ctor, kd)?;
+    let no_internals = strings(d, it, v)?.iter().any(|f| &**f == "internals");
+    let kf = d.key(it, "formAssociated")?;
+    let v = it.get_value(ctor, kf)?;
+    let form = it.to_js_bool(v)?;
+    if form {
+        for (slot, n) in [FORM_ASSOCIATED, FORM_RESET, FORM_DISABLED, 7].into_iter().zip(["formAssociatedCallback", "formResetCallback", "formDisabledCallback", "formStateRestoreCallback"]) {
+            cb[slot] = callback(d, it, proto, n)?;
+        }
+        // Chrome reads `toolFillCallback` too. It is never called.
+        callback(d, it, proto, "toolFillCallback")?;
+    }
+    Ok((proto, cb, obs.into(), form, no_internals))
 }
 
 fn get(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
@@ -944,6 +1324,54 @@ fn upgrade(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
     Ok(Value::Undefined)
 }
 
+// ------------------------------------------------------------------------------------------ importNode, adoptNode
+
+/// The node argument of `importNode` and `adoptNode` (`m`): the count and type checks of WebIDL, then the refusal of a document and a shadow root.
+fn move_arg(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value], m: &str, what: &str) -> R<NodeId> {
+    d.nd(it, this)?;
+    if a.is_empty() {
+        return Err(it.type_error(&format!("Failed to execute '{m}' on 'Document': 1 argument required, but only 0 present.")));
+    }
+    let Some(n) = d.node_of(a[0]) else { return Err(it.type_error(&format!("Failed to execute '{m}' on 'Document': parameter 1 is not of type 'Node'."))) };
+    match d.data(n) {
+        NodeData::Document if m == "adoptNode" => Err(d.dom_err(it, "NotSupportedError", "Failed to execute 'adoptNode' on 'Document': The node provided is of type '#document', which may not be adopted.")),
+        NodeData::Document => Err(d.dom_err(it, "NotSupportedError", &format!("Failed to execute '{m}' on 'Document': The node provided is a document, which may not be {what}."))),
+        NodeData::ShadowRoot if d.doc.borrow().shadow_host(n).is_some() => {
+            let kind = if m == "adoptNode" { "HierarchyRequestError" } else { "NotSupportedError" };
+            Err(d.dom_err(it, kind, &format!("Failed to execute '{m}' on 'Document': The node provided is a shadow root, which may not be {what}.")))
+        }
+        _ => Ok(n),
+    }
+}
+
+/// `document.importNode(node, deep)`: a clone that belongs to the document (its custom elements are upgraded, also when `node` is in a template).
+fn import_node(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
+    let n = move_arg(d, it, this, a, "importNode", "imported")?;
+    let deep = it.to_js_bool(arg(a, 1))?;
+    let c = crate::browser_dom::clone_tree(d, it, n, deep, true)?;
+    d.wrap(it, c)
+}
+
+/// `document.adoptNode(node)`: `node` leaves its parent and belongs to the document. A custom element that came from the contents of a template gets
+/// `adoptedCallback`.
+fn adopt_node(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
+    let n = move_arg(d, it, this, a, "adoptNode", "adopted")?;
+    d.doc.borrow_mut().detach(n);
+    if d.ce.on.get() {
+        let mut s = st(d).borrow_mut();
+        let doc = d.doc.borrow();
+        let mut els = Vec::new();
+        each_element(&doc, n, |e| els.push(e));
+        it.charge(els.len() as u64)?;
+        for e in els {
+            if let Some(c) = doc.custom_state(e).filter(|&c| c < PRECUSTOMIZED) && s.inert.remove(&(e.index() as u32)) && !matches!(s.defs[c as usize].cb[ADOPTED], Value::Undefined) {
+                s.enqueue(e, Reaction::Adopted(false));
+            }
+        }
+    }
+    Ok(a[0])
+}
+
 // ------------------------------------------------------------------------------------------ install
 
 /// Make the prototype, the constructor and the registry (the first read of `customElements` or `CustomElementRegistry`).
@@ -994,12 +1422,14 @@ crate::browser_lazy::lazy_global!(lazy_registry, "CustomElementRegistry", ensure
 
 /// Install last: a new host function earlier in the list of `Dom::install` moves the id of each one after it.
 pub(crate) fn install(d: &Dom, it: &mut Interp<'_>) -> R<()> {
-    crate::browser_lazy::install(d, it, &[("CustomElementRegistry", lazy_registry as H)])?;
+    crate::browser_lazy::install(d, it, &&[&[("CustomElementRegistry", lazy_registry as H), ("HTMLUnknownElement", lazy_unknown)], &crate::browser_face::LAZY[..]].concat())?;
     // As in Chrome, `customElements` stays an accessor of `window` with no setter.
     let g = *d.global.get().expect("installed");
     let key = d.key(it, "customElements")?;
     let f = d.add_fn(it, customelements, "get customElements", 0, false)?;
     d.define_accessor(it, g, key, f, None)?;
     d.def_method(it, d.p().element, "toggleAttribute", 1, crate::browser_dom::toggle_attribute)?;
+    d.def_method(it, d.p().document, "importNode", 1, import_node)?;
+    d.def_method(it, d.p().document, "adoptNode", 1, adopt_node)?;
     Ok(())
 }
