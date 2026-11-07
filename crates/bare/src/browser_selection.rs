@@ -11,6 +11,8 @@
 //!   of a not-dirty input) is reflected without a hook of its own. The only hooks are in `put_input_value` (a value
 //!   that differs resets the selection, as the `value` setter does in the spec) and in `cloneNode` (the clone does not
 //!   copy the selection; the spec's cloning steps copy value and checkedness only).
+//! - A text control that holds the page selection never has the direction `none`. It is the last focused one, also after a blur
+//!   (`FocusState::sel_owner`; Chrome 155, `tools/fixtures/ui/react-steps.txt`). Its caret is `forward`. Focusing a button drops it.
 //! - A `<textarea>` has the same state. With none stored it has the caret at 0 with direction `forward`; a `value` that changes puts the
 //!   caret at the end (`forward`); the direction `none` is stored as `forward` (all as in Chrome, `tools/fixtures/ui/textarea-cases.txt`).
 //! - Applies to the input types text, search, tel, url and password (an unknown `type` is text), and to a textarea. For the other
@@ -120,19 +122,28 @@ pub(crate) fn text_control(doc: &Document, n: NodeId) -> Option<bool> {
     }
 }
 
-/// The caret at the end of `value`, as Chrome has it after a `value` write: the direction of a textarea is `forward`.
-pub(crate) fn caret_end(value: &str, area: bool) -> Sel {
+/// The caret at the end of `value`, as Chrome has it after a `value` write. `forward`: the direction is `forward`, not `none`.
+pub(crate) fn caret_end(value: &str, forward: bool) -> Sel {
     let len = utf16_len(value);
-    Sel { start: len, end: len, dir: if area { Dir::Forward } else { Dir::None } }
+    Sel { start: len, end: len, dir: if forward { Dir::Forward } else { Dir::None } }
+}
+
+/// The direction Chrome reports. A textarea, and a control that holds the page selection (`owned`: it was focused last), has no
+/// direction `none`, and a caret of the latter is always `forward`.
+fn dir_of(dir: Dir, collapsed: bool, area: bool, owned: bool) -> Dir {
+    if dir == Dir::None && (area || owned) || owned && collapsed { Dir::Forward } else { dir }
 }
 
 /// The selection a stored state gives in a value of `len` UTF-16 units: clamped. With none stored an input has the caret at the end
 /// and a textarea has it at the start (Chrome: a textarea starts at 0, `forward`).
-fn within(stored: Option<Sel>, len: u32, area: bool) -> Sel {
+fn within(stored: Option<Sel>, len: u32, area: bool, owned: bool) -> Sel {
     match stored {
-        Some(s) => Sel { start: s.start.min(len), end: s.end.min(len), dir: s.dir },
+        Some(s) => {
+            let (start, end) = (s.start.min(len), s.end.min(len));
+            Sel { start, end, dir: dir_of(s.dir, start == end, area, owned) }
+        }
         None if area => Sel { start: 0, end: 0, dir: Dir::Forward },
-        None => Sel { start: len, end: len, dir: Dir::None },
+        None => Sel { start: len, end: len, dir: if owned { Dir::Forward } else { Dir::None } },
     }
 }
 
@@ -151,6 +162,12 @@ impl Dom {
         }
     }
 
+    /// The stored selection of `n`, and whether `n` holds the page selection (it was focused last).
+    fn stored_sel(&self, n: NodeId) -> (Option<Sel>, bool) {
+        let st = self.st.borrow();
+        (st.inputs.get(&n).and_then(|i| i.sel), st.focus.sel_owner == Some(n))
+    }
+
     /// The selection as JS reads it and the value length in UTF-16 units. `None` when it does not apply.
     /// The value is borrowed, never copied. A JS caller (`it`) pays `bytes / 256` steps before the one scan, so a
     /// huge value under a small budget fails first. The no-JS driver (`it` is `None`) has no budget to charge: its
@@ -162,8 +179,8 @@ impl Dom {
             it.charge((bytes / 256) as u64)?;
         }
         let Some(len) = self.with_input_value(n, utf16_len) else { return Ok(None) };
-        let stored = self.st.borrow().inputs.get(&n).and_then(|i| i.sel);
-        Ok(Some((within(stored, len, area), len)))
+        let (stored, owned) = self.stored_sel(n);
+        Ok(Some((within(stored, len, area, owned), len)))
     }
 
     /// The range that typing replaces. A field that selection does not apply to (`email`, `number`) still has one inside, kept only
@@ -173,7 +190,7 @@ impl Dom {
             return Ok(Some(s));
         }
         let Some(len) = self.with_input_value(n, utf16_len) else { return Ok(None) };
-        Ok(Some(within(self.st.borrow().inputs.get(&n).and_then(|i| i.sel), len, false)))
+        Ok(Some(within(self.stored_sel(n).0, len, false, false)))
     }
 
     /// Put the caret at `at` (UTF-16 units) in a field, or select all its text when `at` is `None`. Works for the fields of `edit_sel`.
@@ -192,7 +209,7 @@ impl Dom {
         if let Some(it) = it {
             it.charge((new.len() / 256) as u64)?;
         }
-        Ok(old != caret_end(new, self.doc.borrow().is_html(n, "textarea")))
+        Ok(old != caret_end(new, self.doc.borrow().is_html(n, "textarea") || self.stored_sel(n).1))
     }
 
     /// `defaultValue = s`: the `value` attribute. A not-dirty input shows it, so the selection read in it can move
@@ -202,8 +219,8 @@ impl Dom {
         let mut moved = false;
         if !dirty && let Some((old, _)) = self.effective(Some(&mut *it), n)? {
             it.charge((s.len() / 256) as u64)?;
-            let stored = self.st.borrow().inputs.get(&n).and_then(|i| i.sel);
-            moved = within(stored, utf16_len(s), false) != old;
+            let (stored, owned) = self.stored_sel(n);
+            moved = within(stored, utf16_len(s), false, owned) != old;
         }
         self.selection_room(n, moved, false)?;
         attr_set(self, it, n, "value", s)?;
@@ -223,9 +240,9 @@ impl Dom {
         let Some((old, len)) = self.effective(Some(it), n)? else { return Ok(()) };
         let (start, end, dir) = f(old);
         let end = end.unwrap_or(0).min(len);
-        // Chrome: a textarea has no direction `none`.
-        let dir = if dir == Dir::None && self.doc.borrow().is_html(n, "textarea") { Dir::Forward } else { dir };
-        let new = Sel { start: start.unwrap_or(0).min(end), end, dir };
+        let start = start.unwrap_or(0).min(end);
+        let dir = dir_of(dir, start == end, self.doc.borrow().is_html(n, "textarea"), self.stored_sel(n).1);
+        let new = Sel { start, end, dir };
         let changed = new != old;
         self.selection_room(n, changed, changed)?;
         self.queue_selection_tasks(n, changed, changed)?;

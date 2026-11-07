@@ -68,8 +68,8 @@ fn set_default_value(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> 
     let s = d.string_arg(it, arg(a, 0))?;
     let v = d.js_str(it, &s)?;
     crate::browser_dom::set_text_content(d, it, this, &[v])?;
-    if let Some(i) = d.st.borrow_mut().inputs.get_mut(&n) {
-        i.sel = None; // Chrome: the caret goes back to 0
+    if let Some(i) = d.st.borrow_mut().inputs.get_mut(&n).filter(|i| i.value.is_none()) {
+        i.sel = None; // Chrome: the caret goes back to 0, unless the value is dirty and stays
     }
     Ok(Value::Undefined)
 }

@@ -1,14 +1,14 @@
 // Record what headless Chrome logs for the driver scenarios of tools/fixtures/ui/drive-steps.txt on tools/fixtures/ui/drive.html.
-// Usage: node tools/ui/chrome_drive.mjs tools/fixtures/ui/chrome-drive.txt
+// Usage: node tools/ui/chrome_drive.mjs OUT [STEPS PAGE]  (defaults: drive-steps.txt on drive.html; `react-steps.txt react.html` is the React field page)
 // A step is what `Input::Click`, `Input::Key` and `Input::Type` do in bare, sent through the input pipeline of a device
 // (`Input.dispatchMouseEvent`, `Input.dispatchKeyEvent`). The bare test is `crates/bare/src/browser_drive_tests.rs`.
 import { readFileSync, writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { open, sleep } from './chrome_cdp.mjs';
 
-const page = resolve(import.meta.dirname, '../fixtures/ui/drive.html');
+const page = resolve(import.meta.dirname, '../fixtures/ui', process.argv[4] ?? 'drive.html');
 const scenarios = [];
-for (const line of readFileSync(resolve(import.meta.dirname, '../fixtures/ui/drive-steps.txt'), 'utf8').split('\n')) {
+for (const line of readFileSync(resolve(import.meta.dirname, '../fixtures/ui', process.argv[3] ?? 'drive-steps.txt'), 'utf8').split('\n')) {
   if (line.startsWith('#') || line === '') continue;
   if (line.startsWith('== ')) scenarios.push({ name: line.slice(3), steps: [] });
   else scenarios.at(-1).steps.push(line);
@@ -60,6 +60,7 @@ const run = async (step) => {
   const [verb, sel, ...rest] = step.split(' ');
   const text = rest.join(' ');
   if (verb === 'reset') { await sleep(100); await c.eval('window.__log.length = 0'); }
+  else if (verb === 'eval') await c.eval(text);
   else if (verb === 'click') await click(sel);
   else if (verb === 'key') {
     if (sel !== '-') await c.eval(`document.querySelector(${JSON.stringify(sel)}).focus()`);

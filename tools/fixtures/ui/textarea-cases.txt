@@ -82,6 +82,9 @@ var sel = function (t) { return t.selectionStart + ',' + t.selectionEnd + ',' + 
 === selection-default-value-change
 @html <textarea id=t>abc</textarea>
 (function () { var t = $('t'), r = [sel(t)]; t.defaultValue = 'longer text'; r.push(sel(t)); t.setSelectionRange(1, 2); t.defaultValue = 'zz'; r.push(sel(t)); return r.join('|') })
+=== selection-default-value-dirty
+@html <textarea id=t>abc</textarea>
+(function () { var t = $('t'), r = []; t.value = 'hello'; t.setSelectionRange(1, 3); t.defaultValue = 'zz'; r.push(sel(t), t.value); t.value = 'hello'; r.push(sel(t)); t.value = 'x'; r.push(sel(t)); return r.join('|') })
 === selection-surrogate
 @html <textarea id=t></textarea>
 (function () { var t = $('t'); t.value = 'a😀b'; t.setSelectionRange(2, 3); return sel(t) + '|' + t.textLength })

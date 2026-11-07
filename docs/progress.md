@@ -858,3 +858,28 @@ Deviations from Chrome (on purpose or not done):
 - The hover settle runs once, at the end of a click. Chrome also does it after a key or a timer.
 
 Not tested: `contenteditable`; a real React 19 or Radix app (the fixture is a reduction of the Select, and the tracker is a copy of the React technique); the live staging run of the new inputs; a double click, a right click, a touch pointer, a drag, a wheel; IME and `compositionstart`; the load of 10,000 typed characters (the cost of one `input` event per character); the hover settle after a key.
+
+## Typing in a React-controlled textarea, and the selection direction
+
+Problem: on a live React 19 page (Next.js 14), `Input::Type` on a controlled `<textarea>` gave the value reversed. Each character went in at position 0. An `<input>` on the same page was right.
+
+Cause (checked, not assumed): React 19 writes `node.defaultValue = value` after each change (`updateTextarea` in `ReactDOMTextarea`). The setter of `HTMLTextAreaElement.defaultValue` in bare cleared the stored selection every time. A textarea with no stored selection has its caret at 0. The next character went in at 0. Chrome 155 does not move the caret of a textarea with a dirty value when `defaultValue` is set. Only a textarea that is not dirty shows the new text, and only then the caret goes back to 0.
+
+Second difference, found by the same fixture: Chrome never gives the direction `none` for a text control that holds the page selection. After typing in an `<input>`, `selectionDirection` is `forward` in Chrome and was `none` in bare. A caret of such a control is always `forward`. After a blur the control keeps the page selection until another element is focused.
+
+Changes:
+
+- `browser_textarea.rs`: `defaultValue = s` clears the stored selection only when the value is not dirty.
+- `browser_focus.rs`: `FocusState::sel_owner` is the element focused last (a blur does not clear it).
+- `browser_selection.rs`: `dir_of` gives the direction. The owner of the page selection and a textarea have no `none`, and the caret of the owner is `forward`. `within`, `update_selection`, `set_value_attr` and `selection_after_value` use it. Deviation: focusing a button also moves the owner, so a text control loses it. In Chrome the selection stays there until a click or a script changes it.
+- Test driver: the `eval - JS` step runs a script in the page (`browser_drive_tests.rs`, `tools/ui/chrome_drive.mjs`). `chrome_drive.mjs OUT [STEPS PAGE]` takes other steps and page files.
+
+Tests (all compared with headless Chrome 155, real key events through `Input.dispatchKeyEvent`):
+
+- `tools/fixtures/ui/react.html` copies the update steps of React 19 for a controlled `textarea` and the `input` types text, email, search, url, tel, password and number (a tracker of the last set value, `value` written only when it differs, `defaultValue` written when it differs, not for a focused number field). `react-steps.txt` has 23 scenarios: typing, replacing, line breaks, Backspace, a caret in the middle, clearing, and the selection after keys (arrows, Home, End, Shift+arrows), after writes (`setSelectionRange`, `select()`, `value` the same or different, `defaultValue`, the three selection setters) and after a blur, for a textarea, a text input and a password input. `chrome-react.txt` is the Chrome log. The test `typing_in_react_controlled_fields_gives_what_chrome_gives` failed before the fix (12 of 15 first scenarios differed) and passes now.
+- `textarea-cases.txt`: the new case `selection-default-value-dirty` (38 cases, all equal to Chrome).
+- `cargo test --workspace` passes (the `bare` suite has 942 tests).
+
+Perf (`tools/js/instr.sh`, minimum of 3 runs of `instructions:u`, release, main 98e5586 against this change, scale 1 and 10 of `form_load`, `focus_load`, `select_load`, `selection_load`, `browser_load` and `attr_load`): the worst row is `form_load gates` at +0.537% (scale 1) and +0.564% (scale 10). With jemalloc (`LD_PRELOAD=/usr/lib/libjemalloc.so.2`) the same row is -0.000% and -0.009%, so the difference is the layout of the glibc heap and not the code. The next worst row is `selection_load short 10` at +0.171%. All the other rows are within 0.1%.
+
+Not tested: the live React 19 page itself (the fixture is a copy of the update steps); `dataset_load` and `session_load` rows; a click or a mouse selection into a field and then a read of the direction; the direction after a selection of the document (`getSelection`) takes the page selection away from a control (bare does not link them); `setRangeText` (absent); a textarea that wraps long lines; IME; `contenteditable`.
