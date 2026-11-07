@@ -160,3 +160,36 @@ $('c').scrollTop = 10; (function () { return G(rg(T('p'), 1, T('p'), 5)) })
 === el-bounding-rect-of-empty-inline
 @html <div class=n>aa<span id=a></span>bb</div>
 (function () { return B('a') })
+=== wpt-rects-matrix
+@html <div id=root class=n>aaa <b id=b1>bbb ccc</b> ddd<br>eee <span id=s1>fff <i id=i1>ggg</i> hhh</span> iii <img id=im width=20 height=10> jjj</div><div id=r2 style="white-space:pre">kk  ll&#10;mm</div>
+var PTS = [['0', 0], ['0', 2], ['0', 4], ['1', 0], ['1.0', 0], ['1.0', 4], ['1.0', 7], ['2', 0], ['2', 2], ['3', 0], ['4', 2], ['5', 1], ['5.0', 2], ['5.1', 0], ['5.1.0', 1], ['5.2', 3], ['5', 3], ['6', 3], ['7', 0], ['', 5], ['', 2], ['8', 1], ['8', 3]];
+var at = function (root, path) { return path === '' ? root : path.split('.').reduce(function (n, i) { return n.childNodes[+i] }, root) };
+var fnv = function (h, s) { for (var i = 0; i < s.length; i++) { h = Math.imul(h ^ s.charCodeAt(i), 16777619) >>> 0 } return h };
+(function () {
+  var root = $('root'), h = 2166136261, n = 0, zero = 0, lists = 0;
+  for (var i = 0; i < PTS.length; i++) for (var j = 0; j < PTS.length; j++) {
+    var r = document.createRange(), a = PTS[i], b = PTS[j];
+    r.setStart(at(root, a[0]), a[1]); r.setEnd(at(root, b[0]), b[1]);
+    var s = G(r); h = fnv(h, s); n++; lists += r.getClientRects().length;
+  }
+  var p = $('r2').firstChild, q = document.createRange(), t = [];
+  for (var k = 0; k <= p.length; k++) for (var m = k; m <= p.length; m++) { q.setStart(p, k); q.setEnd(p, m); t.push(G(q)) }
+  return n + ' ' + lists + ' ' + h + ' ' + fnv(2166136261, t.join('|'));
+})
+=== wpt-rects-matrix-mixed
+@html <div id=root class=n style="text-align:right">aa <span id=s1 style="padding:0 3px;background:#ccc">bb cc <em id=e1>dd</em></span> <small style="font-size:10px">ee</small> <span id=ib style="display:inline-block;width:40px">ff gg hh</span> <span id=em>x</span>ii <big style="font-size:30px">jj</big> kk</div>
+var PTS = [['0', 1], ['0', 3], ['1', 0], ['1.0', 2], ['1.0', 6], ['1.1', 0], ['1.1.0', 1], ['1', 2], ['2', 1], ['3.0', 1], ['3', 1], ['4', 0], ['5', 0], ['5.0', 3], ['5.0', 8], ['5', 1], ['7', 0], ['8', 1], ['8', 3], ['9.0', 1], ['9', 1], ['10', 2], ['', 0], ['', 11], ['', 5]];
+var at = function (root, path) { return path === '' ? root : path.split('.').reduce(function (n, i) { return n.childNodes[+i] }, root) };
+var fnv = function (h, s) { for (var i = 0; i < s.length; i++) { h = Math.imul(h ^ s.charCodeAt(i), 16777619) >>> 0 } return h };
+(function () {
+  var root = $('root'), h = 2166136261, n = 0, lists = 0;
+  for (var i = 0; i < PTS.length; i++) for (var j = 0; j < PTS.length; j++) {
+    var r = document.createRange(), a = PTS[i], b = PTS[j];
+    r.setStart(at(root, a[0]), a[1]); r.setEnd(at(root, b[0]), b[1]);
+    h = fnv(h, G(r)); n++; lists += r.getClientRects().length;
+  }
+  return n + ' ' + lists + ' ' + h + ' ' + E('s1 e1 ib em') + ' ## ' + B('s1 em');
+})
+=== range-br-and-empty-span
+@html <div id=d class=n>aa<br id=br>bb<span id=e></span>cc</div>
+(function () { var d = $('d'), r = document.createRange(); r.selectNodeContents(d); var q = document.createRange(); q.setStart(T('d'), 1); q.setEnd(T('d', 4), 1); return G(r) + ' ## ' + G(q) + ' ## ' + E('br e') })

@@ -113,3 +113,4 @@ ctx-argument-conversion	TypeError: Failed to execute 'createContextualFragment' 
 ctx-script-flags	true,data:,,1
 ctx-records	true
 ctx-uses-start-container-only	["x"<i>y</i>]
+wpt-cut-matrix	400 507665953 1740562181 1201453034 [<p id="p1">!</p><!---->]|p1:2-!c1:0 ## [<p id="p1">!</p><!---->]|root:1-root:1 collapsed|<p id="p1">Hello <b id="b1">big <i id="i1">bad</i> world</b></p><!--c1--><ul id="u"><li id="l1">one</li><li id="l2">two<span id="s2">2</span></li></ul>tail ## root:1-root:1 collapsed|<p id="p1">Hello <b id="b1">big <i id="i1">bad</i> world</b></p><!--c1--><ul id="u"><li id="l1">one</li><li id="l2">two<span id="s2">2</span></li></ul>tail

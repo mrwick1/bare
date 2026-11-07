@@ -74,8 +74,11 @@ impl<'a> Idx<'a> {
     }
 }
 
-/// The answer needs the layout that keeps every inline box.
-struct Need;
+/// Why a pass stops: it needs the layout that keeps every inline box, or it met an element that has no layout.
+enum Need {
+    Plain,
+    Foreign,
+}
 type Rs = Result<Vec<Rect>, Need>;
 
 struct Pass<'a> {
@@ -114,6 +117,9 @@ impl<'a> Pass<'a> {
 
     /// The rectangles of an element.
     fn element(&self, el: NodeId) -> Rs {
+        if self.doc().is_foreign(el) {
+            return Err(Need::Foreign);
+        }
         let boxes: Vec<Rect> = self.main.boxes(el).map(|f| self.at(f, el)).collect();
         if !boxes.is_empty() {
             return Ok(boxes);
@@ -130,7 +136,7 @@ impl<'a> Pass<'a> {
 
     /// A `br` or an empty inline: from the layout that keeps every inline box.
     fn leaf(&self, el: NodeId, br: bool) -> Rs {
-        let plain = self.plain.as_ref().ok_or(Need)?;
+        let plain = self.plain.as_ref().ok_or(Need::Plain)?;
         if br {
             return Ok(plain.of(el).map(|(_, f)| self.at(f, el)).take(1).collect());
         }
@@ -337,8 +343,8 @@ fn range(p: &Pass, (sc, so, ec, eo): (NodeId, u32, NodeId, u32)) -> Rs {
         skip(doc, sc)
     };
     let stop = if data_node(doc, ec) { skip(doc, ec) } else { child(ec, eo).or_else(|| skip(doc, ec)) };
-    // The elements that hold the end are partly in the range.
-    let mut partly = HashSet::new();
+    // The elements that hold the end are partly in the range. So is the start container, when the range starts in an element with no child there.
+    let mut partly = HashSet::from([sc]);
     let mut up = Some(ec);
     while let Some(n) = up {
         partly.insert(n);
@@ -390,14 +396,18 @@ fn with_pass(d: &Dom, it: &mut Interp<'_>, g: &Geo, s: &Scroll, f: impl Fn(&Pass
     fn pass<'a>(g: &'a Geo<'a>, s: &'a Scroll, plain: Option<&'a Layout>) -> Pass<'a> {
         Pass { g, s, tree: Tree::new(g.doc, g.styles), main: Idx::new(g.layout), plain: plain.map(Idx::new) }
     }
-    if let Ok(v) = f(&pass(g, s, None)) {
-        return Ok(v);
+    match f(&pass(g, s, None)) {
+        Ok(v) => return Ok(v),
+        Err(Need::Foreign) => return Err(gate(FOREIGN)),
+        Err(Need::Plain) => {}
     }
     d.geometry.uncull.set(true);
     let plain = d.layout_at(it, g.styles, g.view());
     d.geometry.uncull.set(false);
-    Ok(f(&pass(g, s, Some(&plain?))).unwrap_or_default())
+    f(&pass(g, s, Some(&plain?))).or_else(|n| if matches!(n, Need::Foreign) { Err(gate(FOREIGN)) } else { Ok(Vec::new()) })
 }
+
+const FOREIGN: &str = "getClientRects of an SVG or MathML element (SVG has no layout)";
 
 fn gate(what: &'static str) -> Error {
     Error::Unsupported(unsupported(what))
@@ -459,7 +469,7 @@ pub(crate) fn element_rects(d: &Dom, it: &mut Interp<'_>, el: NodeId) -> R<Vec<R
     {
         let doc = d.doc.borrow();
         if doc.is_foreign(el) {
-            return Err(gate("getClientRects of an SVG or MathML element (SVG has no layout)"));
+            return Err(gate(FOREIGN));
         }
         if matches!(doc.element_name(el), "col" | "colgroup") {
             return Err(gate("getClientRects of a col or colgroup (layout makes no box for a column)"));
@@ -499,7 +509,7 @@ fn range_rects(d: &Dom, it: &mut Interp<'_>, this: Value) -> R<Vec<Rect>> {
         let mut n = Some(b.0);
         while let Some(x) = n.filter(|&x| x != doc.root()) {
             if doc.is_foreign(x) {
-                return Err(gate("a range of an SVG or MathML element (SVG has no layout)"));
+                return Err(gate(FOREIGN));
             }
             n = doc.parent(x);
         }

@@ -13,8 +13,8 @@ use std::time::Duration;
 
 topic_test!(chrome_cases, "range", 79);
 topic_test!(live_cases, "liverange", 63);
-topic_test!(ops_cases, "rangeops", 115);
-topic_test!(rects_cases, "rects", 51);
+topic_test!(ops_cases, "rangeops", 116);
+topic_test!(rects_cases, "rects", 54);
 
 fn page(body: &str) -> Browser {
     Browser::new(tree::parse(&format!("<!doctype html><body>{body}</body>")), BrowserLimits::default(), EvalLimits { max_steps: 50_000_000, ..Default::default() }, HeapLimits::default()).expect("browser")
@@ -213,4 +213,51 @@ fn a_range_cut_in_a_very_deep_tree_is_a_limit_not_a_stack_overflow() {
         .join()
         .unwrap();
     assert!(r == "done" || r.contains("Limit") || r.contains("limit"), "{r}");
+}
+
+fn laid(body: &str) -> Browser {
+    let mut b = page(body);
+    b.set_viewport(400.0, 300.0).expect("viewport");
+    b
+}
+
+#[test]
+fn a_page_that_reads_no_rectangles_makes_no_list_state_and_one_read_makes_it() {
+    let mut b = laid("<p id=p>abc <b id=b>def</b></p>");
+    assert_eq!(js(&mut b, "document.getElementById('p').getBoundingClientRect().width > 0"), "true");
+    assert!(!b.dom.range.is_made());
+    assert!(!b.dom.geometry.uncull.get());
+    assert_eq!(js(&mut b, "document.getElementById('b').getClientRects().length"), "1");
+    assert_eq!(js(&mut b, "document.getElementById('p').getClientRects().item(0) === document.getElementById('p').getClientRects()[0]"), "false");
+    // One `item` function for the realm: the lists share it.
+    assert_eq!(js(&mut b, "var a = document.getElementById('p').getClientRects(), c = document.getElementById('b').getClientRects(); a.item === c.item"), "true");
+}
+
+#[test]
+fn rectangles_of_detached_nodes_and_ranges_are_empty() {
+    let mut b = laid("<p id=p>abc</p>");
+    assert_eq!(js(&mut b, "var e = document.createElement('div'); e.textContent = 'x'; var r = document.createRange(); r.selectNodeContents(e); [e.getClientRects().length, r.getClientRects().length, JSON.stringify(r.getBoundingClientRect())].join()"), r#"0,0,{"x":0,"y":0,"width":0,"height":0,"top":0,"right":0,"bottom":0,"left":0}"#);
+}
+
+#[test]
+fn rectangles_of_svg_and_columns_are_gates() {
+    let mut b = laid("<svg id=v><rect id=r width=10 height=10></rect></svg><table><colgroup id=cg><col id=co></colgroup><tr><td>a</td></tr></table><p id=ok>x</p>");
+    assert_eq!(js(&mut b, "document.getElementById('v').getClientRects()"), "unsupported:getClientRects of an SVG or MathML element (SVG has no layout)");
+    assert_eq!(js(&mut b, "document.getElementById('r').getClientRects()"), "unsupported:getClientRects of an SVG or MathML element (SVG has no layout)");
+    assert_eq!(js(&mut b, "document.getElementById('co').getClientRects()"), "unsupported:getClientRects of a col or colgroup (layout makes no box for a column)");
+    assert_eq!(js(&mut b, "document.getElementById('cg').getClientRects()"), "unsupported:getClientRects of a col or colgroup (layout makes no box for a column)");
+    assert_eq!(js(&mut b, "var r = document.createRange(); r.selectNode(document.getElementById('v')); r.getClientRects()"), "unsupported:getClientRects of an SVG or MathML element (SVG has no layout)");
+    // The gate leaves nothing behind: the next read is a normal one, and the layout flag is off.
+    assert!(!b.dom.geometry.uncull.get());
+    assert_eq!(js(&mut b, "document.getElementById('ok').getClientRects().length"), "1");
+}
+
+#[test]
+fn a_br_and_an_empty_span_in_a_range_use_the_second_layout_and_leave_the_flag_off() {
+    let mut b = laid("<div id=d>aa<br id=br>bb<span id=e></span>cc</div>");
+    assert_eq!(js(&mut b, "var d = document.getElementById('d'), r = document.createRange(); r.selectNodeContents(d); r.getClientRects().length"), "5");
+    assert!(!b.dom.geometry.uncull.get());
+    // The second layout is only for the read: the page layout has no box for the empty span.
+    assert_eq!(js(&mut b, "document.getElementById('d').getBoundingClientRect().height"), "44");
+    assert_eq!(js(&mut b, "document.getElementById('e').getClientRects().length"), "1");
 }

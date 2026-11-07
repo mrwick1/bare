@@ -352,3 +352,26 @@ mo.observe($('r'), OPT); var r = rg($('p1'), 0, $('p1'), 1), f = r.createContext
 === ctx-uses-start-container-only
 @html <div id=r><p id=p1>Hello</p><table id=t><tr><td>a</td></tr></table></div>
 var r = rg($('p1'), 0, $('t'), 1), f = r.createContextualFragment('<td>x</td><i>y</i>'); (function () { return D(f) })
+=== wpt-cut-matrix
+@html <div id=root><p id=p1>Hello <b id=b1>big <i id=i1>bad</i> world</b>!</p><!--c1--><ul id=u><li id=l1>one</li><li id=l2>two<span id=s2>2</span></li></ul>tail</div>
+var PTS = [['', 0], ['', 2], ['', 4], ['0', 0], ['0', 2], ['0', 3], ['0.0', 0], ['0.0', 3], ['0.0', 6], ['0.1', 1], ['0.1.0', 2], ['0.1.1.0', 1], ['0.1.2', 3], ['1', 0], ['1', 2], ['2', 1], ['2.0.0', 1], ['2.1', 1], ['2.1.1.0', 0], ['3', 2]];
+var at = function (root, path) { return path === '' ? root : path.split('.').reduce(function (n, i) { return n.childNodes[+i] }, root) };
+var fnv = function (h, s) { for (var i = 0; i < s.length; i++) { h = Math.imul(h ^ s.charCodeAt(i), 16777619) >>> 0 } return h };
+(function () {
+  var html = $('root').innerHTML, hs = [2166136261, 2166136261, 2166136261], n = 0, samples = [];
+  for (var i = 0; i < PTS.length; i++) for (var j = 0; j < PTS.length; j++) {
+    for (var op = 0; op < 3; op++) {
+      var root = $('root'); root.innerHTML = html;
+      var r = document.createRange(), a = PTS[i], b = PTS[j];
+      r.setStart(at(root, a[0]), a[1]); r.setEnd(at(root, b[0]), b[1]);
+      var out;
+      if (op === 0) out = D(r.cloneContents()) + '|' + pt(r);
+      else if (op === 1) out = D(r.extractContents()) + '|' + pt(r) + '|' + root.innerHTML;
+      else { r.deleteContents(); out = pt(r) + '|' + root.innerHTML }
+      hs[op] = fnv(hs[op], out);
+      if (i === 4 && j === 13) samples.push(out);
+    }
+    n++;
+  }
+  return n + ' ' + hs.join(' ') + ' ' + samples.join(' ## ');
+})
