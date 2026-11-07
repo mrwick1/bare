@@ -17,6 +17,8 @@ use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicUsize, Ordering::Relaxed};
 use std::time::Instant;
 use test_server::{Reply, serve};
+#[path = "../../js/examples/common/exec.rs"]
+mod exec;
 
 /// Live and peak bytes that the program asked the allocator for (the allocator's own slack is not counted: see the RSS).
 struct Counting;
@@ -119,6 +121,7 @@ fn run(dir: &str, sel: &str, n: usize, virt: bool) {
     let mut cfg = SessionConfig::new(&server.url("/"));
     cfg.virtual_clock = virt;
     cfg.eval.max_steps = u64::MAX / 2;
+    cfg.eval.exec = exec::mode();
     let t = Instant::now();
     let mut s = Session::new(cfg);
     let r = s.run();

@@ -142,11 +142,12 @@ impl Gen<'_, '_> {
                 self.expr(alt, dst)?;
                 self.patch(end)
             }
-            ExprKind::Call { callee, args, optional: false } => self.call(callee, args, dst),
+            ExprKind::Call { callee, args, optional: false } => self.call(e, callee, args, dst),
             ExprKind::New { callee, args } => {
                 let b = self.reg()?;
                 self.expr(callee, b)?;
                 let n = self.args(args)?;
+                self.code.calls.push((self.here() as u32, e.index() as u32));
                 self.emit(Op::New, dst, b, n)?;
                 self.free(b);
                 Ok(())
@@ -380,7 +381,7 @@ impl Gen<'_, '_> {
     }
 
     /// `f(...)`: the callee in `b`, `this` in `b + 1` (the base of a member callee, in parentheses too), the arguments after.
-    fn call(&mut self, callee: ExprId, args: List<Expr>, dst: u32) -> G<()> {
+    fn call(&mut self, e: ExprId, callee: ExprId, args: List<Expr>, dst: u32) -> G<()> {
         let b = self.reg()?;
         let this = self.reg()?;
         let mut c = callee;
@@ -409,6 +410,7 @@ impl Gen<'_, '_> {
             }
         }
         let n = self.args(args)?;
+        self.code.calls.push((self.here() as u32, e.index() as u32));
         self.emit(Op::Call, dst, b, n)?;
         self.free(b);
         Ok(())

@@ -300,7 +300,7 @@ impl<'p> Interp<'p> {
             }
         }
         let r = match self.declare_scope(prog.body, true) {
-            Ok(()) => self.exec_list(prog.body),
+            Ok(()) => self.bc_script().unwrap_or_else(|| self.exec_list(prog.body)),
             Err(e) => Err(Ctl::Err(e)),
         };
         self.env = 0;

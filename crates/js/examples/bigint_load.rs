@@ -21,6 +21,8 @@ use bare_js::heap::Heap;
 use bare_js::parse::{parse_script, Limits};
 use bare_js::value::Value;
 use std::time::Instant;
+#[path = "common/exec.rs"]
+mod exec;
 
 fn die(msg: String) -> ! {
     eprintln!("FAIL: {msg}");
@@ -94,6 +96,7 @@ fn run_case(case: String, scale: usize) {
     let t0 = Instant::now();
     let prog = parse_script(&src, Limits::default()).unwrap_or_else(|e| die(format!("parse {e}")));
     let mut it = Interp::new(&prog, Heap::default(), EvalLimits { max_steps: 4_000_000_000, ..Default::default() }).unwrap_or_else(|e| die(format!("setup {e:?}")));
+    exec::set(&mut it);
     let t_setup = t0.elapsed();
     let t1 = Instant::now();
     let result = it.run().unwrap_or_else(|e| die(format!("run {e:?}")));

@@ -9,6 +9,8 @@ use bare_js::eval::*;
 use bare_js::heap::Heap;
 use bare_js::parse::{parse_script, Limits};
 use bare_js::value::Value;
+#[path = "common/exec.rs"]
+mod exec;
 
 fn esc(s: &str) -> String {
     s.replace('\\', "\\\\").replace('\n', "\\n").replace('\r', "\\r").replace('\t', "\\t")
@@ -33,6 +35,7 @@ fn run(src: &str) -> String {
         Ok(i) => i,
         Err(e) => return format!("setup-error:{e:?}"),
     };
+    exec::set(&mut it);
     let reader = match it.run() {
         Ok(v) => v,
         Err(e) => return fail(&mut it, e),

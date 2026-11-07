@@ -13,6 +13,19 @@ impl Gen<'_, '_> {
 
     fn stmt_inner(&mut self, s: StmtId, st: Stmt) -> G<()> {
         let prog = self.prog.clone();
+        if let Some(c) = self.compl {
+            match st.kind {
+                StmtKind::Expr(e) | StmtKind::Directive(e) => {
+                    let r = self.reg()?;
+                    self.expr(e, r)?;
+                    self.emit(Op::Mov, c, r, 0)?;
+                    self.free(r);
+                    return Ok(());
+                }
+                StmtKind::If { .. } | StmtKind::While { .. } | StmtKind::DoWhile { .. } | StmtKind::For { .. } | StmtKind::Try { .. } | StmtKind::Switch { .. } => self.emit(Op::LoadUndef, c, 0, 0)?,
+                _ => {}
+            }
+        }
         match st.kind {
             StmtKind::Expr(e) => {
                 let r = self.reg()?;

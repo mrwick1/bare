@@ -13,6 +13,8 @@ use bare_js::heap::{Heap, HeapLimits};
 use bare_js::parse::{parse_script, Limits};
 use bare_js::value::Value;
 use std::time::Instant;
+#[path = "common/exec.rs"]
+mod exec;
 
 fn proc_kib(field: &str) -> u64 {
     std::fs::read_to_string("/proc/self/status").ok().and_then(|s| s.lines().find(|l| l.starts_with(field)).and_then(|l| l.split_whitespace().nth(1)?.parse().ok())).unwrap_or(0)
@@ -204,6 +206,7 @@ fn run(case: &str, scale: usize) {
     let prog = parse_script(src, Limits::default()).expect("parse");
     let parse = t0.elapsed();
     let mut it = Interp::new(&prog, heap, EvalLimits { max_steps: 20_000_000_000, ..Default::default() }).expect("setup");
+    exec::set(&mut it);
     if !c.input.is_empty() {
         let units: Vec<u16> = c.input.encode_utf16().collect();
         let s = it.heap.intern_vec(units).expect("input");
