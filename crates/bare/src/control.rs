@@ -1,6 +1,7 @@
 //! The local control interface (S5): a test driver acts on a [`Page`] through the paths of the window, and nothing else.
 //!
-//! - Navigation: `Page::open_with` (a new session: a new profile, or the storage of an earlier one), `navigate` (the address bar) and
+//! - Navigation: `Page::open_with` (a new session: a new profile, or the storage of an earlier one), `Page::open_in` (a new session that
+//!   shares the connections and the HTTP cache of a client), `navigate` (the address bar) and
 //!   `navigate(None)` (reload). They use the session loader of `--run` and `--window`.
 //! - Queries: `query_all` (CSS selectors, the native matcher of `querySelectorAll`), `inspect` (read the DOM and the frame of the
 //!   window), and the state reads `connected`, `disabled`, `value`, `checked`, `focused`. A driver uses them to find elements and to
@@ -514,17 +515,19 @@ impl App for Hosted {
 }
 
 impl Remote {
-    /// Load `url` in a new session (a new profile) and show it in a window of `size`. Returns when the first frame is drawn. The storage
-    /// is not `Send`: a job opens a page of the same profile with `Page::open_with(url, size, page.storage())` on the window thread.
-    pub fn open(url: &str, size: (u32, u32)) -> Result<Remote, String> {
+    /// Load `url` in a new session with empty storage and show it in a window of `size`. The session shares the connections and the HTTP
+    /// cache of `net` (`Page::open_in`): a job that opens another page with `Page::open_in(url, size, &net)` on the window thread keeps
+    /// them. Returns when the first frame is drawn. The storage is not `Send`: a job opens a page of the same profile with
+    /// `Page::open_with(url, size, page.storage())` on the window thread.
+    pub fn open(url: &str, size: (u32, u32), net: &bare_net::http::Client) -> Result<Remote, String> {
         let (ready_tx, ready_rx) = mpsc::channel();
-        let url = url.to_string();
+        let (url, net) = (url.to_string(), net.fork());
         let stack = if cfg!(debug_assertions) { 64 << 20 } else { 8 << 20 };
         let thread = std::thread::Builder::new()
             .stack_size(stack)
             .spawn(move || {
                 let fail = |e: String, r: &mpsc::Sender<Result<_, String>>| drop(r.send(Err(e)));
-                let mut page = match Page::open_with(&url, size, None) {
+                let mut page = match Page::open_in(&url, size, &net) {
                     Ok(p) => p,
                     Err(e) => return fail(e, &ready_tx),
                 };

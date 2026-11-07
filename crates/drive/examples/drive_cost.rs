@@ -76,7 +76,7 @@ fn main() {
             assert!(rep.ok);
             println!("wait for a 2 s timer: {:.0} ms, {} tries, CPU {:.0} ms (the page load included)", rep.steps[1].ms, rep.steps[1].tries, cpu_ms() - c0);
             if window {
-                let r = bare::control::Remote::open(&format!("{origin}/buttons?n=100"), (800, 600)).unwrap();
+                let r = bare::control::Remote::open(&format!("{origin}/buttons?n=100"), (800, 600), &bare_net::http::Client::new()).unwrap();
                 std::thread::sleep(Duration::from_secs(3));
                 let c0 = cpu_ms();
                 std::thread::sleep(Duration::from_secs(5));

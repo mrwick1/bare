@@ -110,23 +110,51 @@ impl Cache {
         }
     }
 
-    /// Store a reply. The cache is emptied when the reply does not fit, and a reply over `MAX_CACHE` is not kept.
+    /// Store a reply. The cache is emptied when the reply does not fit. A reply over `MAX_CACHE` is not kept, and it leaves the rest.
     fn put(&mut self, key: CacheKey, response: Arc<Response>, fresh_for: Duration) {
         self.forget(&key);
-        if self.bytes + cache_size(&response) > MAX_CACHE {
+        let size = cache_size(&response);
+        if size > MAX_CACHE {
+            return;
+        }
+        if self.bytes + size > MAX_CACHE {
             self.map.clear();
             self.bytes = 0;
         }
-        if cache_size(&response) <= MAX_CACHE {
-            self.bytes += cache_size(&response);
-            self.map.insert(key, Cached { response, stored: Instant::now(), fresh_for });
-        }
+        self.bytes += size;
+        self.map.insert(key, Cached { response, stored: Instant::now(), fresh_for });
     }
 
-    /// The stored reply while it is fresh.
-    fn fresh(&self, key: &CacheKey) -> Option<Arc<Response>> {
-        self.map.get(key).filter(|c| c.stored.elapsed() < c.fresh_for).map(|c| c.response.clone())
+    /// The server answered 304 to a question about the stored reply: it is right. Its headers replace the stored ones of the same name
+    /// (RFC 9111 section 4.3.4), the reply is fresh again, and the stored reply comes back with its body. `None`: it is not stored (any more).
+    fn revalidated(&mut self, key: &CacheKey, not_modified: &Response) -> Option<Arc<Response>> {
+        let cached = self.map.get_mut(key)?;
+        let news: Vec<_> = not_modified.headers.iter().filter(|(n, _)| !matches!(n.as_str(), "content-length" | "content-encoding" | "transfer-encoding" | "connection" | "keep-alive")).collect();
+        // The stored `Age` is old. Only the one of the 304 counts.
+        let stored = Arc::make_mut(&mut cached.response);
+        stored.headers.retain(|(n, _)| n != "age" && !news.iter().any(|(m, _)| m == n));
+        stored.headers.extend(news.into_iter().cloned());
+        cached.stored = Instant::now();
+        cached.fresh_for = freshness(stored).unwrap_or(Duration::ZERO);
+        Some(cached.response.clone())
     }
+}
+
+/// The questions that ask a server whether a stored reply changed: `If-None-Match` for an `ETag`, `If-Modified-Since` for a date.
+fn questions(stored: &Response) -> String {
+    let mut out = String::new();
+    if let Some(etag) = stored.header("etag") {
+        out += &format!("If-None-Match: {etag}\r\n");
+    }
+    if let Some(date) = stored.header("last-modified") {
+        out += &format!("If-Modified-Since: {date}\r\n");
+    }
+    out
+}
+
+/// May the server be asked later whether this reply changed?
+fn has_validator(response: &Response) -> bool {
+    response.header("etag").is_some() || response.header("last-modified").is_some()
 }
 
 /// The methods of the Fetch standard that the client sends. `PATCH` goes on the wire in upper case here: the caller decides the case
@@ -354,16 +382,16 @@ impl Client {
         Ok(Streamed { response, body: body.expect("a streamed hop has a body") })
     }
 
-    /// Store a streamed reply that `send_stream_cached` gave, with its whole body as the caller read it. Only a 200 that stays fresh
-    /// for a while is kept (no `no-store`, no `Vary` but `Accept-Encoding`): this path never asks the server whether a stale copy
-    /// changed. The body is copied only when it is kept. A reply that came from the cache is not stored again.
+    /// Store a streamed reply that `send_stream_cached` gave, with its whole body as the caller read it. Only a 200 is kept, as `get` does:
+    /// no `no-store`, no `Vary` but `Accept-Encoding`, and fresh for a while or with an `ETag` or `Last-Modified` to ask about when it
+    /// is stale. The body is copied only when it is kept. A reply that came from the cache is not stored again.
     pub fn keep(&mut self, url: &Url, response: &Arc<Response>, body: &[u8]) {
-        // With no `Cache-Control`, a reply is never fresh: most replies stop here.
-        if response.status != 200 || response.header("cache-control").is_none() {
+        // With no `Cache-Control` and no validator, a reply is never fresh and cannot be asked about: most replies stop here.
+        if response.status != 200 || (response.header("cache-control").is_none() && !has_validator(response)) {
             return;
         }
         let fresh_for = match freshness(response) {
-            Some(f) if vary_ok(response) && !f.is_zero() => f,
+            Some(f) if vary_ok(response) && (!f.is_zero() || has_validator(response)) => f,
             _ => return,
         };
         let key = (url.scheme, url.host.clone(), url.port, url.path.clone());
@@ -442,33 +470,23 @@ impl Client {
                 // Still fresh: use the copy. No request at all.
             }
             // Stale. The copy may still be right, so we ask the server: "has it changed?"
-            if let Some(etag) = cached.response.header("etag") {
-                conditions += &format!("If-None-Match: {etag}\r\n");
-                // An ETag is a label for one version of the page, like a version number.
-            }
-            if let Some(date) = cached.response.header("last-modified") {
-                conditions += &format!("If-Modified-Since: {date}\r\n");
-                // The same question with a date: "changed since then?"
-            }
+            conditions = questions(&cached.response);
         }
 
         let response = Arc::new(self.fetch(url, plan, &conditions)?);
 
-        if response.status == 304 {
-            // "Not Modified": our copy is still right. The reply has no body.
-            if let Some(cached) = self.cache.lock().unwrap().map.get_mut(&key) {
-                cached.stored = Instant::now();
-                cached.fresh_for = freshness(&response).unwrap_or(Duration::ZERO);
-                // The copy is fresh again. The 304 may give a new `max-age`.
-                return Ok(cached.response.clone());
-            }
+        if response.status == 304
+            && let Some(stored) = self.cache.lock().unwrap().revalidated(&key, &response)
+        {
+            // "Not Modified": our copy is still right. The reply has no body. The 304 may give a new `max-age`.
+            return Ok(stored);
         }
 
         match freshness(&response) {
             Some(fresh_for)
                 if response.status == 200
                     && vary_ok(&response)
-                    && (!fresh_for.is_zero() || response.header("etag").is_some() || response.header("last-modified").is_some()) =>
+                    && (!fresh_for.is_zero() || has_validator(&response)) =>
             {
                 // We keep a reply only if all of these are true:
                 // - It is a 200 and the server did not say `no-store`.
@@ -651,22 +669,41 @@ impl Client {
         }))
     }
 
-    /// One hop of `send_stream`: a fresh copy from the cache, or a reply from the server whose body is still on the connection.
+    /// One hop of `send_stream`: a fresh copy from the cache, or a reply from the server whose body is still on the connection. A stale
+    /// copy is asked about (`If-None-Match`, `If-Modified-Since`): on a 304 the stored body answers, with the headers of the 304.
     fn hop_stream(&mut self, url: &Url, plan: &Plan) -> Result<(Arc<Response>, Option<Body>), Error> {
+        let memory = |response: Arc<Response>| (response.clone(), Some(Body(Source::Memory(response, 0))));
         // An empty cache needs no key: most requests of a page that sends no `max-age` pay one lock and no allocation.
-        let fresh = if plan.cacheable() {
+        let mut stale = None;
+        if plan.cacheable() {
             let cache = self.cache.lock().unwrap();
-            if cache.map.is_empty() { None } else { cache.fresh(&(url.scheme, url.host.clone(), url.port, url.path.clone())) }
-        } else {
-            None
-        };
-        Ok(match fresh {
-            Some(response) => (response.clone(), Some(Body(Source::Memory(response, 0)))),
-            None => {
-                let (response, body) = self.start(url, plan, "")?;
-                (Arc::new(response), Some(body))
+            if !cache.map.is_empty() {
+                let key = (url.scheme, url.host.clone(), url.port, url.path.clone());
+                match cache.map.get(&key) {
+                    Some(c) if c.stored.elapsed() < c.fresh_for => return Ok(memory(c.response.clone())),
+                    Some(c) => stale = Some((key, questions(&c.response))),
+                    None => {}
+                }
             }
-        })
+        }
+        let Some((key, ask)) = stale else {
+            let (response, body) = self.start(url, plan, "")?;
+            return Ok((Arc::new(response), Some(body)));
+        };
+        let (response, mut body) = self.start(url, plan, &ask)?;
+        if response.status == 304 {
+            // No body follows a 304: read the end of it, so that the connection can go back to the pool.
+            let _ = io::copy(&mut body, &mut io::sink());
+            if let Some(stored) = self.cache.lock().unwrap().revalidated(&key, &response) {
+                return Ok(memory(stored));
+            }
+            // Another fork dropped the copy meanwhile: ask again, with no question.
+            let (response, body) = self.start(url, plan, "")?;
+            return Ok((Arc::new(response), Some(body)));
+        }
+        // A new reply. The old copy is out of date; `keep` stores the new one if it can.
+        self.cache.lock().unwrap().forget(&key);
+        Ok((Arc::new(response), Some(body)))
     }
 
     /// Fetch a URL, and give the body as a `Body` that reads from the connection while the caller reads. The caller can
@@ -1919,6 +1956,97 @@ mod tests {
         s.body.read_to_end(&mut body).unwrap();
         assert_eq!(body, b"b");
         assert_eq!(requests.try_iter().count(), 2);
+    }
+
+    /// Read a streamed reply to its end, give it to `keep`, and return the body and the reply.
+    fn stream_kept(client: &mut Client, u: &Url) -> (Vec<u8>, Arc<Response>) {
+        let mut s = client.send_stream_cached(&Request::get(u)).unwrap();
+        let mut body = Vec::new();
+        s.body.read_to_end(&mut body).unwrap();
+        client.keep(u, &s.response, &body);
+        (body, s.response)
+    }
+
+    /// A stale script with an `ETag` and a `Last-Modified` is asked about with a conditional request. A 304 gives the stored body,
+    /// and its headers replace the stored ones (a new `max-age`), so the next use is fresh and sends nothing.
+    #[test]
+    fn a_stale_stream_copy_is_revalidated_and_a_304_keeps_the_body() {
+        let first = page("Cache-Control: max-age=0\r\nETag: \"v1\"\r\nLast-Modified: Mon, 01 Jan 2024 00:00:00 GMT\r\n", "script");
+        let not_modified = "HTTP/1.1 304 Not Modified\r\nETag: \"v1\"\r\nCache-Control: max-age=3600\r\n\r\n";
+        let (port, requests) = serve(vec![(vec![first, not_modified], false)]);
+        let (mut client, u) = (Client::new(), url(port));
+        assert_eq!(stream_kept(&mut client, &u).0, b"script");
+        let (body, response) = stream_kept(&mut client.fork(), &u);
+        assert_eq!((body.as_slice(), response.status, response.header("cache-control")), (b"script".as_slice(), 200, Some("max-age=3600")));
+        let seen = seen(&requests);
+        assert_eq!(seen.len(), 2);
+        assert!(!seen[0].contains("If-None-Match"));
+        assert!(seen[1].contains("If-None-Match: \"v1\"\r\n") && seen[1].contains("If-Modified-Since: Mon, 01 Jan 2024 00:00:00 GMT\r\n"), "{}", seen[1]);
+        // The 304 made the copy fresh for an hour: no third request.
+        assert_eq!(stream_kept(&mut client, &u).0, b"script");
+        assert_eq!(requests.try_iter().count(), 0);
+    }
+
+    /// A 200 after a conditional request is a new copy: it replaces the stored one, and the next question names its `ETag`.
+    #[test]
+    fn a_changed_stream_copy_replaces_the_stored_one() {
+        let (port, requests) = serve(vec![(vec![page("ETag: \"v1\"\r\n", "a"), page("ETag: \"v2\"\r\n", "b"), "HTTP/1.1 304 Not Modified\r\n\r\n"], false)]);
+        let (mut client, u) = (Client::new(), url(port));
+        assert_eq!(stream_kept(&mut client, &u).0, b"a");
+        assert_eq!(stream_kept(&mut client, &u).0, b"b");
+        assert_eq!(stream_kept(&mut client, &u).0, b"b");
+        let seen = seen(&requests);
+        assert!(seen[1].contains("If-None-Match: \"v1\"\r\n") && seen[2].contains("If-None-Match: \"v2\"\r\n"), "{seen:?}");
+    }
+
+    /// A stale copy with no validator cannot be asked about: it is requested whole, and a reply that is not cacheable removes it.
+    #[test]
+    fn a_stream_reply_that_cannot_be_kept_removes_the_stale_copy() {
+        let (port, requests) = serve(vec![(vec![page("ETag: \"v1\"\r\n", "a"), page("Cache-Control: no-store\r\n", "b"), page("", "c")], false)]);
+        let (mut client, u) = (Client::new(), url(port));
+        assert_eq!(stream_kept(&mut client, &u).0, b"a");
+        assert_eq!(stream_kept(&mut client, &u).0, b"b");
+        assert_eq!(stream_kept(&mut client, &u).0, b"c");
+        assert!(!seen(&requests)[2].contains("If-None-Match"));
+    }
+
+    /// The 304 of a whole-body request updates the headers of the stored copy too (RFC 9111 section 4.3.4).
+    #[test]
+    fn a_304_updates_the_stored_headers_of_a_whole_reply() {
+        let first = page("Cache-Control: max-age=0\r\nETag: \"v1\"\r\n", "a");
+        let (port, requests) = serve(vec![(vec![first, "HTTP/1.1 304 Not Modified\r\nETag: \"v1\"\r\nCache-Control: max-age=3600\r\n\r\n"], false)]);
+        let (mut client, u) = (Client::new(), url(port));
+        client.get(&u).unwrap();
+        let again = client.get(&u).unwrap();
+        assert_eq!((again.body.as_slice(), again.header("cache-control")), (b"a".as_slice(), Some("max-age=3600")));
+        assert_eq!(client.get(&u).unwrap().header("cache-control"), Some("max-age=3600"));
+        assert_eq!(requests.try_iter().count(), 2);
+    }
+
+    /// The cache holds `MAX_CACHE` at most. A reply that does not fit empties it, and an evicted reply is freed.
+    #[test]
+    fn the_cache_stays_under_its_cap_and_frees_what_it_drops() {
+        let key = |n: usize| (Scheme::Http, "h".to_string(), 80, format!("/{n}"));
+        let reply = |n: usize| Arc::new(Response { status: 200, body: vec![0; n], ..Response::default() });
+        let mut cache = Cache::default();
+        let first = reply(MAX_CACHE / 2);
+        let weak = Arc::downgrade(&first);
+        cache.put(key(1), first, Duration::from_secs(60));
+        cache.put(key(2), reply(MAX_CACHE / 4), Duration::from_secs(60));
+        assert!(cache.bytes <= MAX_CACHE && cache.map.len() == 2);
+        assert!(weak.upgrade().is_some());
+        // 1/2 + 1/4 + 1/2 does not fit: the cache empties and holds the new reply alone. Nothing else holds the first one.
+        cache.put(key(3), reply(MAX_CACHE / 2), Duration::from_secs(60));
+        assert_eq!((cache.map.len(), cache.bytes), (1, MAX_CACHE / 2 + 512));
+        assert!(weak.upgrade().is_none(), "the evicted reply is still in memory");
+        // A reply over the cap is not kept, and it does not empty the cache.
+        cache.put(key(4), reply(MAX_CACHE), Duration::from_secs(60));
+        assert_eq!((cache.map.len(), cache.bytes), (1, MAX_CACHE / 2 + 512));
+        // The same key twice counts once.
+        cache.put(key(3), reply(10), Duration::from_secs(60));
+        assert_eq!((cache.map.len(), cache.bytes), (1, 10 + 512));
+        cache.forget(&key(3));
+        assert_eq!((cache.map.len(), cache.bytes), (0, 0));
     }
 
     #[test]

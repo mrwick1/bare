@@ -95,26 +95,24 @@ enum Host {
 }
 
 impl Host {
-    /// A headless `open` shares the connections and the HTTP cache of `net` (one browser, a new tab); a window opens a new profile.
+    /// An `open` is a new tab of one browser, in a window too: empty storage, and the connections and the HTTP cache of `net`.
     fn open(&mut self, url: &str, size: (u32, u32), window: bool, net: &bare_net::http::Client) -> Result<(), String> {
-        let new = move |url: &str| {
-            let mut p = Page::open_with(url, size, None)?;
+        let new = move |url: &str, net: &bare_net::http::Client| {
+            let mut p = Page::open_in(url, size, net)?;
             p.quiet = true;
             Ok::<_, String>(p)
         };
         match self {
             Host::Window(r) => {
-                let url = url.to_string();
-                r.call(move |p| new(&url).map(|n| *p = n))?
+                let (url, net) = (url.to_string(), net.fork());
+                r.call(move |p| new(&url, &net).map(|n| *p = n))?
             }
             _ if window => {
-                *self = Host::Window(Remote::open(url, size)?);
+                *self = Host::Window(Remote::open(url, size, net)?);
                 Ok(())
             }
             _ => {
-                let mut p = Page::open_in(url, size, net)?;
-                p.quiet = true;
-                *self = Host::Local(Box::new(p));
+                *self = Host::Local(Box::new(new(url, net)?));
                 Ok(())
             }
         }

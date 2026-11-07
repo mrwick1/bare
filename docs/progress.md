@@ -2520,3 +2520,23 @@ Checks (archMachine):
 - Live staging, read only, 5 runs: all passed. A scan of all output files found neither the email nor the password.
 
 Not tested: the window (`--window` still opens a new profile on `open`); arjun-e16; a stale cached script (the streamed path never revalidates: a copy that is not fresh is downloaded again); memory growth of the shared cache over many journeys (the limit is `MAX_CACHE`, 64 MiB; this journey caches 57 static files of 696 KB on the wire; the decoded size in memory was not measured); CPU split of the Chrome steps.
+
+## A window keeps the client and the cache, and a stale copy is asked about (S5)
+
+PR #251 left two gaps. This change closes both.
+
+1. A window `open` (the control interface and `bare-drive --window`) started a new profile: a new network client, an empty cache and new connections. `Remote::open` now takes a client, and both `Remote::open` and the window `open` job use `Page::open_in`. An `open` in a window is a new tab of one browser, as in the headless run: empty storage (the rule of #251), and the connections and the HTTP cache of the run. A navigation inside a window page (`Page::navigate`, a link) already went through the one client of its session, so it needed no change; a test now holds it.
+2. A stored script or sheet that was not fresh was downloaded again in full. `hop_stream` (behind `send_stream_cached`) now sends `If-None-Match` and `If-Modified-Since` for a stale copy. On a 304 the stored body answers. `Cache::revalidated` replaces the stored headers by those of the 304 (not `Content-Length`, `Content-Encoding`, `Transfer-Encoding`, `Connection`, `Keep-Alive`; the stored `Age` goes), and the copy is fresh again for the `max-age` it now has. `load` (whole replies) uses the same function: before, a 304 made the copy fresh but kept the old headers. `keep` now also stores a 200 that is not fresh but has an `ETag` or a `Last-Modified`. A reply that is not a 304 removes the stale copy, and `keep` stores the new one if it can.
+
+Cache size (64 MiB, `MAX_CACHE`): the count `bytes` is right after replace, forget and clear (tests). One bug: a reply over the cap emptied the cache and was then not stored. `Cache::put` now refuses it first and leaves the rest. An evicted reply is freed when no reader holds it (a test holds a `Weak` to it). The policy is unchanged: when a new reply does not fit, the cache is emptied.
+
+Tests (the first four of the net tests and the window test failed before the change):
+- `bare-net`: `a_stale_stream_copy_is_revalidated_and_a_304_keeps_the_body` (a loopback server counts requests and answers 304: two requests, the second has both conditions, the third is fresh), `a_changed_stream_copy_replaces_the_stored_one`, `a_304_updates_the_stored_headers_of_a_whole_reply`, `the_cache_stays_under_its_cap_and_frees_what_it_drops`, `a_stream_reply_that_cannot_be_kept_removes_the_stale_copy`.
+- `crates/drive/tests/cache.rs`: `open`, `reload`, `open` with an immutable script and a stale script with an `ETag`: 1 download of the first, 1 download and 2 304s of the second, at most 2 connections. The same in a window: the test runs itself inside `cage` with the headless wlroots backend (it does not touch the desktop) and is skipped with a message when `cage` is missing. Before the change it failed with 2 downloads of the immutable script. `a_navigation_in_a_window_page_keeps_the_connections_and_the_cache` passed before the change too.
+
+Checks (arjun-e16):
+- `cargo test --release --workspace`: 49 test binaries, 2,946 passed, 0 failed.
+- `tools/js/cost_matrix.sh`, base origin/main `973b5d0` from `base-build` (`bare-stress` from its own `base-build` call): 805 rows. Mean change: glibc +0.001%, jemalloc +0.000%. Over under one allocator: 0. Over under both: 0. Failed: 0. No row of the known regressions got worse.
+- This change touches no file in `crates/js`: the JS gates (`test262_check.sh`, `exec_diff.sh`, `keycost.sh`) were not run.
+
+Not tested: a window on a real compositor (only `cage` headless); the staging journey in a window; a server that sends a 304 with a body or with `Vary`; a heuristic freshness for a reply with an `ETag` and no `Cache-Control` (it is asked about every time); memory of the shared cache over a long run (the decoded size of the cached files was not measured); a 304 for the main document (documents still go through `send_once`, which skips the cache); two windows in one process.
