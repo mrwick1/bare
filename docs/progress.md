@@ -2753,3 +2753,43 @@ Checks (archMachine, base origin/main `c4e38c2` from `base-build`):
 - Live staging, read only: 11 runs of the journey (4 frame pointer, 3 of main, 3 of this change, 1 with uprobes), all passed.
 
 Not tested: a machine other than archMachine; the window (`--window`); a page with many streams, `URL` or `classList` objects (the tables are larger there, but the change only alters the hash).
+
+## Peak memory of the staging journey: who owns it, and one `open` at a time
+
+Peak PSS of `bare-drive` on the read-only staging journey, split by owner (archMachine, glibc, `M_ARENA_MAX` 2). Sources: `/proc/PID/smaps` at the PSS peak, and a jemalloc heap profile (`prof:true`, `lg_prof_sample:16`, a dump every 16 MiB allocated) of the same journey. The jemalloc rows give the live bytes at the largest dump. They do not add up to the glibc PSS exactly, because the two runs peak at slightly different points.
+
+| Owner | MiB at the peak, main | Source |
+| --- | ---: | --- |
+| `bare-drive` file pages (text 7.0, read-only data 1.4, relocations 0.7) | 9.1 | smaps |
+| Shared libraries (libc, libm, libxkbcommon, ld.so) | 0.2 | smaps |
+| Anonymous memory (malloc arenas and `[heap]`) | 80.4 | smaps |
+| - JS code: syntax tree (`Program::into_owned`) 26.5, per-script tables (`Code::new` in `add_script`) 13.9, other 1.5 | 41.9 | jemalloc |
+| - JS heap: objects 8.9, `ObjTab` 3.4, interned strings 3.0, environments 2.3, shapes and properties 11.6 | 29.2 | jemalloc |
+| - Paint (one 4.0 MiB canvas) | 4.1 | jemalloc |
+| - Style (rule sets, selectors, declarations) | 3.0 | jemalloc |
+| - HTTP cache (`Client::keep`, the decoded body only) | 2.5 | jemalloc |
+| - TLS and network buffers | 1.0 | jemalloc |
+| - DOM and layout | 0.2 | jemalloc |
+| Thread stacks (8 threads; the page thread touches 1.1 of 8 MiB) | 1.1 | smaps |
+
+- The anonymous memory (80.4 MiB) and the live heap of the profile (82 MiB) are close. So glibc arena slack is small at the peak (hypothesis: not measured under glibc).
+- The DOM row is small because its allocations sit under inlined frames of other owners (hypothesis).
+- The HTTP cache keeps one decoded copy of each body. It is not a candidate.
+- JS code is the largest owner. One document of the journey parses about 2.1 MB of source into about 15 MB of syntax tree (7 B for each source byte) and about 10 MB of per-script tables (`expr_name`, `expr_str`, `slots`). This is the next candidate. It needs a change to the tree or to the tables.
+
+The peak came at the last step (`open ${BASE}/agents`, at 4.9 s of 5.0 s). `Host::open` built the new page before it dropped the old one, so the old document (about 60 MiB) and the new login page were alive together. Now a local `open` drops the old page first. A failed `open` leaves no page: the run stops at that step in both versions.
+
+Results (archMachine, against `c4e38c2` from `base-build`):
+
+| Run | Peak PSS main (MiB) | Peak PSS this change (MiB) | Journey main (ms) | Journey this change (ms) |
+| --- | ---: | ---: | ---: | ---: |
+| 1 | 90.4 | 74.7 | 5475 | 4565 |
+| 2 | 89.2 | 74.1 | 4943 | 4229 |
+| 3 | 89.1 | 78.4 | 5054 | 4200 |
+
+- The peak moves to the reload of the Agents page (3.0 to 3.9 s). The jemalloc profile at the new peak: JS code 30.5 MiB, JS heap 28.0 MiB, paint 9.1 MiB (two canvases), HTTP cache 2.5 MiB, style 2.2 MiB.
+- New test: `a_second_open_does_not_hold_two_pages_at_once` (a counting allocator; the live heap peak with two `open` steps was 62.7 MB against 31.7 MB for one before the change).
+- Full cost matrix (805 rows): mean change glibc -0.000%, jemalloc +0.047% (2 rows measured). Over under one allocator: 2 (`resources_load small 1` and `10`, glibc only). Over under both: 0. Failed: 0. The change is in `bare-drive` only, which no row runs.
+- `cargo test --release --workspace --no-fail-fast`: 50 binaries, 2,960 passed, 0 failed.
+
+Not tested: the window path (`--window`): `Remote` still builds the new page before it drops the old one; a machine other than archMachine; more than 3 runs of each build.

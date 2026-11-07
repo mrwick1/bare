@@ -112,6 +112,8 @@ impl Host {
                 Ok(())
             }
             _ => {
+                // The old page ends first, so the two pages do not share the peak of memory. A failed open leaves no page.
+                *self = Host::None;
                 *self = Host::Local(Box::new(new(url, net)?));
                 Ok(())
             }
