@@ -1927,7 +1927,9 @@ impl<'p> Interp<'p> {
         let f = *prog.func(fid);
         self.capture();
         let self_binding = is_expr && f.name.is_some() && f.kind == FuncKind::Normal;
-        let o = self.new_func_object(Callee::Script { script: self.cur as u32, fid, env: self.env, self_binding })?;
+        if self.funcs.len() >= self.limits.max_functions {
+            return Err(Error::Limit(LimitKind::Functions));
+        }
         let nstr = match (f.name.is_some(), name) {
             (true, _) => self.name_str(self.func_name[fid.index()])?,
             (false, Some(s)) => s,
@@ -1940,21 +1942,26 @@ impl<'p> Interp<'p> {
             }
             len += 1;
         }
-        // `length`, `name`, and the `prototype` that a generator or a plain function gets: one allocation of the size.
-        if f.is_generator() || (f.kind == FuncKind::Normal && !f.is_async()) {
-            h!(self, self.heap.reserve_props(o, 3));
-        }
-        h!(self, self.heap.init_function(o, (self.k_length, len as f64), (self.k_name, nstr)));
+        // The object starts in the preset function shape: `length`, `name`, and for a plain function the `prototype`, which waits (most
+        // functions never use it: 98.6% on the staging login). A generator gets its `prototype` next: room for 3 slots.
+        let plain = f.kind == FuncKind::Normal && !f.is_async() && !f.is_generator();
+        let cap = if plain || f.is_generator() { 3 } else { 2 };
+        // The object gets its prototype now: a later change of prototype would send it to dictionary mode.
+        let proto = if f.mode == FuncMode::AsyncGen {
+            self.ag_intr()?.fn_proto
+        } else if f.is_generator() {
+            self.gen_intr()?.fn_proto
+        } else if f.is_async() {
+            self.async_fn_proto()?
+        } else {
+            self.function_proto
+        };
+        let o = h!(self, self.heap.new_function(Some(proto), (self.k_length, len as f64), (self.k_name, nstr), plain, cap));
+        self.funcs.insert(o, Callee::Script { script: self.cur as u32, fid, env: self.env, self_binding });
         if f.mode == FuncMode::AsyncGen {
             self.ag_function(o)?;
         } else if f.is_generator() {
             self.gen_function(o)?;
-        } else if f.kind == FuncKind::Normal && !f.is_async() {
-            // Most functions never use their prototype (98.6% on the staging login), so the object waits.
-            h!(self, self.heap.add_lazy_prototype(o));
-        } else if f.is_async() {
-            let p = self.async_fn_proto()?;
-            h!(self, self.heap.set_prototype_of(o, Some(p)));
         }
         Ok(Value::Object(o))
     }
@@ -2828,7 +2835,7 @@ impl<'p> Interp<'p> {
             ExprKind::RegExp => self.ext_eval_regexp(e),
             ExprKind::Template(t) => self.eval_template(t),
             ExprKind::Array(l) => self.eval_array(l),
-            ExprKind::Object(l) => self.eval_object(l),
+            ExprKind::Object(l) => self.eval_object(e, l),
             ExprKind::Function(fid) => self.make_closure(fid, None, true),
             ExprKind::Unary { op, arg } => self.eval_unary(op, arg),
             ExprKind::Update { op, prefix, arg } => self.eval_update(op, prefix, arg),
@@ -2961,15 +2968,52 @@ impl<'p> Interp<'p> {
         Ok(last)
     }
 
-    fn eval_object(&mut self, l: List<Prop>) -> Res<Value> {
+    /// An object literal. Its node keeps a number in `expr_name` (free for this node, as for a member site in `eval_ic.rs`): 0 when it has
+    /// not run, 1 when it has no preset shape, else the final shape of its object. A literal of named keys only (no computed key, spread,
+    /// accessor, `__proto__:`, index or duplicate key) gives the same shape every time, so the next run evaluates the values and makes the
+    /// object in that shape at once (`object_shaped`). `{}` needs no entry.
+    fn eval_object(&mut self, e: ExprId, l: List<Prop>) -> Res<Value> {
+        if l.len() == 0 {
+            return Ok(Value::Object(h!(self, self.heap.new_object(Some(self.object_proto)))));
+        }
+        let site = self.expr_name[e.index()];
+        if site > 1 {
+            return self.object_shaped(l, site);
+        }
         let prog = self.prog.clone();
         let o = h!(self, self.heap.new_object(Some(self.object_proto)));
-        if prog.list(l).len() > 0 {
-            h!(self, self.heap.reserve_props(o, prog.list(l).len()));
-        }
+        h!(self, self.heap.reserve_props(o, l.len()));
         for pid in prog.list(l) {
             self.object_prop(o, pid, None)?;
         }
+        if site == 0 {
+            let named = prog.list(l).all(|pid| {
+                let p = prog.prop(pid);
+                matches!(p.kind, PropKind::Init | PropKind::Shorthand | PropKind::Method) && !matches!(p.key, Key::Computed(_))
+            });
+            let shape = if named { self.heap.literal_shape(o, l.len()) } else { None };
+            self.expr_name[e.index()] = shape.unwrap_or(1);
+        }
+        Ok(Value::Object(o))
+    }
+
+    /// An object literal whose site keeps the final `shape`: the values in key order, then the object in that shape.
+    #[inline(never)]
+    fn object_shaped(&mut self, l: List<Prop>, shape: u32) -> Res<Value> {
+        let prog = self.prog.clone();
+        let mut slots = Vec::with_capacity(l.len());
+        for pid in prog.list(l) {
+            let p = *prog.prop(pid);
+            let name = match self.prop_str[pid.index()] {
+                Some(s) => s,
+                None => {
+                    let k = self.prop_key(pid, p.key)?;
+                    self.key_str(k)?
+                }
+            };
+            slots.push(self.eval_named(p.value, Some(name))?);
+        }
+        let o = h!(self, self.heap.new_object_with_shape(Some(self.object_proto), shape, slots));
         Ok(Value::Object(o))
     }
 

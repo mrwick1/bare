@@ -2540,3 +2540,29 @@ Checks (arjun-e16):
 - This change touches no file in `crates/js`: the JS gates (`test262_check.sh`, `exec_diff.sh`, `keycost.sh`) were not run.
 
 Not tested: a window on a real compositor (only `cage` headless); the staging journey in a window; a server that sends a 304 with a body or with `Vary`; a heuristic freshness for a reply with an `ETag` and no `Cache-Control` (it is asked about every time); memory of the shared cache over a long run (the decoded size of the cached files was not measured); a 304 for the main document (documents still go through `send_once`, which skips the cache); two windows in one process.
+
+## Literal and closure shapes (step A4 of the engine plan)
+
+Change:
+- An object literal site keeps the final shape of its object in `expr_name` of its node (free for this node, as for a member site): 0 when it has not run, 1 when it has no preset shape, else the shape. The table costs no new bytes.
+- A site gets a shape on its first run when all its keys are named (no computed key, spread, getter or setter) and the object has exactly one writable, enumerable, configurable data slot for each key, from the ordinary root (`Shapes::is_literal`). Then the site has no `__proto__:`, index key or duplicate key, and every run gives the same shape. Later runs evaluate the values in key order and make the object at once (`Heap::new_object_with_shape(proto, shape, slots)`): no transition, no `define_own_property` for each key. `{}` needs no entry.
+- A closure starts in a preset function shape (`Heap::new_function`): `length`, `name` and, for a plain function, the lazy `prototype` (`Shapes::fn_shape` keeps both shapes). A generator, an async function and an async generator get their prototype at creation, so no `setPrototypeOf` follows.
+- `new_array` already started from the array root shape (A1). Class instances: no change. `class_load churn` spends its time on private slots (`add_slot`, `run_fields`), and its instances have no public property.
+
+Results (archMachine, against `71cba92` from `base-build`):
+- `keycost.sh`: `#a1` 334.9 M for each key against 341.5 M on main (-6.6 M, -1.9%). `#f0` 341.7 M against 348.2 M. Load and mount 651.4 M against 663.9 M. Peak RSS of `#a1`: 32.5 MiB at 20 keys and 33.0 MiB at 50 keys.
+- The define path on the typing page (perf samples of 50 keys): `define_own_property` 1.00% to 0.73%, `ordinary_define` 0.22% to 0.11%.
+- Full cost matrix (805 rows): mean change glibc -0.476%, jemalloc 0.000% (0 rows measured). Over under one allocator: 0. Over under both: 0. Failed: 0.
+- Rows: `gen_load iterobj 10` -17.7%, `session_load heavy 10` -8.2%, `weak_load closures 10` -4.8%, `async_load closures 10` -3.5%, `eval_load closures 10` -2.4%. `eval_load objects 10` +0.003% and `class_load churn 10` 0.000%: they make no literal and few closures. The known rows from #246 do not get worse: `proxy_load get_trap 10` 0.00%, `sc_load symbol_keys 1` and `10` +0.01% and 0.00%, `wrapper_load forin 10000 30000` -0.88%.
+
+Fix attempts (first full matrix: 1 row over under both, `session_load chain 10` +1.14%, and about +18 K for each realm on small rows):
+- The first-run rule for literal sites and no handle checks in `new_function`: no change. A first-run rule also made `weak_load churn 10` (`w.set({}, i)`) +0.52%, so it was removed.
+- `Shapes::fn_shape` inline always: fixed. `Object::init_fn` (every native function of a realm) calls it, and out of line it cost about 60 K instructions for each realm.
+
+Checks:
+- `cargo test --release --workspace --no-fail-fast` after the rebase on `abc82ab`: 2,946 passed, 2 failed under load, and both pass alone: `dns::tests::falls_back_to_tcp` (the TCP bind on the port of a new UDP socket) and `a_window_open_keeps_the_connections_and_the_cache` (from #252). Neither is in `bare-js`. New tests: `programs_with_literals_and_closures_match_node` (8 programs, output from Node 22: computed keys, `__proto__` in its four forms, spread, getters and setters, duplicate keys, one site with different key sets, function names and later changes, and a lazy `prototype` that is read, written, redefined and deleted) and `a_literal_shape_makes_the_same_object_and_a_function_starts_in_the_preset_shape`.
+- `tools/js/test262_check.sh`: gate ok, 27,182 pass.
+- `tools/js/exec_diff.sh`: 79 runs, 0 differences.
+- All 43 `tools/js/*_check.sh` scripts pass (`parse_check.sh` with `ACORN=` set).
+
+Not tested: a machine other than archMachine; wall time; scale 100 of the load rows; a live page other than the typing page; the bytecode paths (not changed); the debug build (the `debug_assert` in `new_object_with_shape`).
