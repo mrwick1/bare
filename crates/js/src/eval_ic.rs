@@ -14,11 +14,13 @@ struct IcState {
     own_hits: u64,
     slow: u64,
     first_runs: u64,
+    /// Member writes that hit an `IC_STORE` entry inline (`member_put`).
+    store_hits: u64,
 }
 
 impl Default for IcState {
     fn default() -> Self {
-        IcState { ics: vec![Ic::EMPTY; 2], own_hits: 0, slow: 0, first_runs: 0 }
+        IcState { ics: vec![Ic::EMPTY; 2], own_hits: 0, slow: 0, first_runs: 0, store_hits: 0 }
     }
 }
 
@@ -30,6 +32,8 @@ pub struct IcCounts {
     pub own_hits: u64,
     pub first_runs: u64,
     pub entries: usize,
+    /// Member writes through a site entry that hit inline (a store to an own writable data property).
+    pub store_hits: u64,
     /// The counters of the heap: hits of the other kinds, fills, refusals and epoch bumps.
     pub heap: IcStats,
 }
@@ -38,7 +42,7 @@ impl Interp<'_> {
     /// The counters of the member read caches.
     pub fn ic_counts(&self) -> IcCounts {
         let s = &self.ics;
-        IcCounts { reads: s.own_hits + s.slow, own_hits: s.own_hits, first_runs: s.first_runs, entries: s.ics.len() - 2, heap: self.heap.ic_stats() }
+        IcCounts { reads: s.own_hits + s.slow, own_hits: s.own_hits, first_runs: s.first_runs, entries: s.ics.len() - 2, store_hits: s.store_hits, heap: self.heap.ic_stats() }
     }
 
     /// `get_prop` at a native site that reads the same few shapes again and again with no entry of its own (option bags, iterator
@@ -111,5 +115,64 @@ impl Interp<'_> {
             Get::Accessor { getter: Some(g) } => self.call_fn(Value::Object(g), base, &[]),
             Get::Accessor { getter: None } => Ok(Value::Undefined),
         }
+    }
+
+    /// A read of `base.name` at the member site `e`, as the `Member` arm of `link_inner` does it (the read of an update or of a
+    /// compound assignment). Out of line, so `ref_get` stays small for names.
+    #[inline(never)]
+    fn member_get(&mut self, e: ExprId, base: Value) -> Res<Value> {
+        let ExprKind::Member { name, .. } = self.prog.expr(e).kind else { unreachable!("a member site") };
+        if let Value::Object(o) = base {
+            if let Some(v) = self.heap.ic_own(o, &self.ics.ics[self.expr_name[e.index()] as usize]) {
+                self.ics.own_hits += 1;
+                return Ok(v);
+            }
+            return self.member_ic(e, name, o, base);
+        }
+        let key = self.expr_key(e, name)?;
+        self.get_prop(base, key)
+    }
+
+    /// `base.name = v` at the member site `e`: the inline store hit, else `member_put_ic`. Out of line, so `ref_put` stays small for
+    /// names.
+    #[inline(never)]
+    fn member_put(&mut self, e: ExprId, base: Value, v: Value) -> Res<()> {
+        if let Value::Object(o) = base
+            && self.heap.ic_store(o, &self.ics.ics[self.expr_name[e.index()] as usize], v)
+        {
+            self.ics.store_hits += 1;
+            return Ok(());
+        }
+        self.member_put_ic(e, base, v)
+    }
+
+    /// The write of `member_put` when the inline store hit failed: an add hit, a fill, or the plain write (a first run, a primitive
+    /// base, a receiver that is never cached, an index key of a view).
+    #[inline(never)]
+    fn member_put_ic(&mut self, e: ExprId, base: Value, v: Value) -> Res<()> {
+        let ExprKind::Member { name, .. } = self.prog.expr(e).kind else { unreachable!("a member site") };
+        let key = self.expr_key(e, name)?;
+        let Value::Object(o) = base else { return self.put_prop(base, key, v) };
+        let mut n = self.expr_name[e.index()] as usize;
+        if n == 0 {
+            self.expr_name[e.index()] = 1;
+            return self.put_prop(base, key, v);
+        }
+        if self.ics.ics[n].is_mega() || self.heap.ic_refuses(o) || self.heap.has_exotics() && self.heap.is_view_index_key(o, key) {
+            return self.put_prop(base, key, v);
+        }
+        if n == 1 {
+            n = self.ics.ics.len();
+            self.ics.ics.push(Ic::EMPTY);
+            self.expr_name[e.index()] = n as u32;
+        }
+        let mut ic = self.ics.ics[n];
+        let r = self.heap.set_ic(o, key, v, &mut ic);
+        self.ics.ics[n] = ic;
+        let r = match r {
+            Ok(r) => r,
+            Err(err) => self.set_miss(o, key, v, base, err)?,
+        };
+        self.put_done(base, key, v, r)
     }
 }

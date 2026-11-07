@@ -518,6 +518,8 @@ enum Ref {
     /// A name and its site (see `eval_scope.rs`).
     Name(u32, u32),
     Prop(Value, PropertyKey),
+    /// `base.name` at the member node: reads and writes go through the entry of the site (`member_get`, `member_put`).
+    Site(Value, ExprId),
     /// `base.#name`: the name object, the `#name` id and the binding flags.
     Priv(Value, ObjId, u32, u8),
     /// `super[key]` with this value of `this`.
@@ -2446,11 +2448,22 @@ impl<'p> Interp<'p> {
         {
             v = self.ta_conv(self.heap.view_type(o).unwrap_or(Elem::U8), v)?;
         }
-        match base {
-            Value::Object(o) => match match self.heap.set(o, key, v) {
+        let r = match base {
+            Value::Object(o) => match self.heap.set(o, key, v) {
                 Ok(r) => r,
                 Err(e) => self.set_miss(o, key, v, base, e)?,
-            } {
+            },
+            _ => Set::Done,
+        };
+        self.put_done(base, key, v, r)
+    }
+
+    /// The end of `put_prop` for the result `r` of the write of `v` to `base[key]`: the error of a rejected write in strict code, a
+    /// setter call, or the error of a write to a primitive. Always inline: `put_prop` runs it for every index write.
+    #[inline(always)]
+    fn put_done(&mut self, base: Value, key: PropertyKey, v: Value, r: Set) -> Res<()> {
+        match base {
+            Value::Object(_) => match r {
                 Set::Done => Ok(()),
                 Set::Rejected if self.strict => {
                     let k = self.key_text(key);
@@ -3172,6 +3185,7 @@ impl<'p> Interp<'p> {
         match *r {
             Ref::Name(n, site) => self.get_name(n, site),
             Ref::Prop(b, k) => self.get_prop(b, k),
+            Ref::Site(b, e) => self.member_get(e, b),
             Ref::Priv(b, pn, n, fl) => self.priv_get(b, pn, n, fl),
             Ref::Super(this, k) => self.super_get(this, k),
         }
@@ -3181,6 +3195,7 @@ impl<'p> Interp<'p> {
         match *r {
             Ref::Name(n, site) => self.assign_name(n, v, site),
             Ref::Prop(b, k) => self.put_prop(b, k, v),
+            Ref::Site(b, e) => self.member_put(e, b, v),
             Ref::Priv(b, pn, n, fl) => self.priv_put(b, pn, n, fl, v),
             Ref::Super(this, k) => self.super_set(this, k, v),
         }

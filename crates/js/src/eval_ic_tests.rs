@@ -146,3 +146,131 @@ fn a_collect_between_runs_keeps_the_entries_right() {
         assert_eq!(run(&mut it, src), "5000");
     });
 }
+
+/// Member writes through site entries (step A3): stores, adds and the cases that must miss. The expected texts come from Node 22.
+const WRITE_CASES: &[(&str, &str, &str)] = &[
+    ("readonly", r#"var p = {}; Object.defineProperty(p, 'x', { value: 1, writable: false });
+var out = [];
+function wr(o, v) { o.x = v; return o.x; }
+for (var i = 0; i < 4; i++) { var o = Object.create(p); out.push(wr(o, i), Object.keys(o).length); }
+var q = { x: 0 }; for (var i = 0; i < 4; i++) { if (i == 2) Object.defineProperty(q, 'x', { writable: false }); out.push(wr(q, i + 10)); }
+function swr(o, v) { 'use strict'; o.x = v; }
+try { for (var i = 0; i < 3; i++) swr(Object.create(p), i); } catch (e) { out.push(e.constructor.name); }
+out.join()"#, r#"1,0,1,0,1,0,1,0,10,11,11,11,TypeError"#),
+    ("setter_chain", r#"var log = [], p = {}, out = [];
+function wr(o, v) { o.y = v; }
+for (var i = 0; i < 6; i++) {
+  if (i == 3) Object.defineProperty(p, 'y', { set(v) { log.push(v); }, configurable: true });
+  var o = Object.create(p); wr(o, i); out.push(Object.keys(o).join('') || '-');
+}
+for (var i = 0; i < 3; i++) { if (i == 1) Object.defineProperty(Object.prototype, 'z', { set(v) { log.push('z' + v); }, configurable: true }); var o = {}; o.z = i; out.push(Object.keys(o).length); }
+delete Object.prototype.z;
+out.join() + '|' + log.join()"#, r#"y,y,y,-,-,-,1,0,0|3,4,5,z1,z2"#),
+    ("nonext", r#"var out = [];
+function add(o, v) { o.k = v; return o.k; }
+for (var i = 0; i < 6; i++) { var o = { a: 1 }; if (i >= 3) Object.preventExtensions(o); out.push(add(o, i)); }
+function st(o, v) { o.a = v; return o.a; }
+var o = { a: 0 }; for (var i = 0; i < 4; i++) { if (i == 2) Object.preventExtensions(o); out.push(st(o, i)); }
+function sadd(o) { 'use strict'; o.k = 1; }
+try { for (var i = 0; i < 4; i++) { var o = { a: 1 }; if (i == 3) Object.preventExtensions(o); sadd(o); } } catch (e) { out.push(e.constructor.name); }
+out.join()"#, r#"0,1,2,,,,0,1,2,3,TypeError"#),
+    ("frozen_sealed", r#"var out = [];
+function st(o, v) { o.a = v; return o.a; }
+function add(o, v) { o.b = v; return o.b; }
+var f = { a: 1 }, s = { a: 1 };
+for (var i = 0; i < 5; i++) {
+  if (i == 2) { Object.freeze(f); Object.seal(s); }
+  out.push(st(f, i), st(s, i), add({ a: 0 }, i), add(Object.isFrozen(f) ? f : {a:0}, i));
+}
+out.join()"#, r#"0,0,0,0,1,1,1,1,1,2,2,,1,3,3,,1,4,4,"#),
+    ("define_on_cached", r#"var out = [];
+function st(o, v) { o.x = v; return o.x; }
+var a = { x: 0 }, b = { x: 0 };
+for (var i = 0; i < 6; i++) {
+  if (i == 3) Object.defineProperty(a, 'x', { get() { return 'g'; }, set(v) { out.push('set' + v); }, configurable: true });
+  out.push(st(a, i), st(b, i));
+}
+var c = { x: 0 }, d = { x: 0 };
+for (var i = 0; i < 4; i++) { if (i == 2) Object.defineProperty(c, 'x', { enumerable: false }); out.push(st(c, i), st(d, i), Object.keys(c).length); }
+out.join()"#, r#"0,0,1,1,2,2,set3,g,3,set4,g,4,set5,g,5,0,0,1,1,1,1,2,2,0,3,3,0"#),
+    ("array_length", r#"var out = [];
+function setlen(a, n) { a.length = n; return a.length + ':' + a.join('.'); }
+var a = [1, 2, 3, 4, 5, 6];
+for (var i = 5; i >= 0; i -= 2) out.push(setlen(a, i));
+var b = [1, 2]; Object.defineProperty(b, 'length', { writable: false });
+for (var i = 0; i < 3; i++) out.push(setlen(b, i));
+function tag(x, v) { x.tag = v; return x.tag; }
+for (var i = 0; i < 4; i++) out.push(tag([i], i), tag({}, i), tag(function () {}, i));
+out.join()"#, r#"5:1.2.3.4.5,3:1.2.3,1:1,2:1.2,2:1.2,2:1.2,0,0,0,1,1,1,2,2,2,3,3,3"#),
+    ("proxies", r#"var log = [], out = [];
+function wr(o, v) { o.x = v; }
+var t = {}, px = new Proxy(t, { set(tt, k, v, r) { log.push(k + v); tt[k] = v * 10; return true; } });
+for (var i = 0; i < 4; i++) wr(px, i);
+out.push(t.x);
+for (var i = 0; i < 4; i++) { var r = Object.create(px); wr(r, i); out.push(Object.keys(r).length); }
+var plain = Object.create(new Proxy({}, {}));
+for (var i = 0; i < 3; i++) { var r = Object.create(new Proxy({}, {})); wr(r, i); out.push(r.x); }
+out.join() + '|' + log.join()"#, r#"30,0,0,0,0,0,1,2|x0,x1,x2,x3,x0,x1,x2,x3"#),
+    ("constructors", r#"function P(i) { this.a = i; this.b = i * 2; this.c = 'c' + i; }
+var all = []; for (var i = 0; i < 20; i++) all.push(new P(i));
+class Q { constructor(i) { this.x = i; this.y = [i]; } }
+var qs = []; for (var i = 0; i < 10; i++) qs.push(new Q(i));
+var s = 0; for (var o of all) s += o.a + o.b; for (var q of qs) s += q.x + q.y[0];
+[s, Object.keys(all[7]).join(), JSON.stringify(all[19]), JSON.stringify(qs[3])].join('|')"#, r#"660|a,b,c|{"a":19,"b":38,"c":"c19"}|{"x":3,"y":[3]}"#),
+    ("update_compound", r#"var o = { n: 0, s: '' }, out = [];
+for (var i = 0; i < 10; i++) { o.n++; o.s += i; ++o.n; o.n -= 1; }
+out.push(o.n, o.s);
+function C() {} C.prototype.count = 5;
+var cs = []; for (var i = 0; i < 4; i++) { var c = new C(); c.count++; c.count += 2; cs.push(c.count, Object.keys(c).join()); }
+out.push(cs.join(' '), C.prototype.count);
+var g = { v: 1 }; for (var i = 0; i < 4; i++) { g.v ||= 9; g.w ??= i; g.v &&= g.v + 1; }
+out.push(g.v, g.w);
+var big = { b: 1n }; for (var i = 0; i < 3; i++) big.b++;
+out.push(String(big.b));
+out.join()"#, r#"10,0123456789,8 count 8 count 8 count 8 count,5,5,0,4"#),
+    ("proto_swap", r#"var log = [], out = [];
+var p1 = {}, p2 = { set q(v) { log.push(v); } };
+function wr(o, v) { o.q = v; }
+for (var i = 0; i < 6; i++) { var o = Object.create(p1); if (i >= 3) Object.setPrototypeOf(o, p2); wr(o, i); out.push(o.hasOwnProperty('q')); }
+var r = Object.create(p1); wr(r, 1); wr(r, 2);
+Object.setPrototypeOf(p1, p2);
+for (var i = 0; i < 3; i++) wr(Object.create(p1), 'x' + i);
+out.join() + '|' + log.join()"#, r#"true,true,true,false,false,false|3,4,5,x0,x1,x2"#),
+    ("key_order", r#"var out = [];
+function mk(k1, k2) { var o = {}; o.a = 1; o[k1] = 2; o.b = 3; o[k2] = 4; return Object.keys(o).join(''); }
+for (var i = 0; i < 5; i++) out.push(mk(i % 2 ? 'x' : 'y', 'z'));
+function del(o) { o.t = 1; delete o.t; o.t = 2; o.u = 3; return Object.keys(o).join('') + o.t; }
+for (var i = 0; i < 4; i++) out.push(del({ s: 0 }));
+out.join()"#, r#"aybz,axbz,aybz,axbz,aybz,stu2,stu2,stu2,stu2"#),
+];
+
+#[test]
+fn programs_that_write_members_match_node() {
+    big(|| {
+        let mut bad = Vec::new();
+        for &(name, src, want) in WRITE_CASES {
+            let mut it = Interp::realm(Heap::default(), EvalLimits::default()).unwrap();
+            let got = run(&mut it, src);
+            if got != want {
+                bad.push(format!("{name}: node {want}, bare {got}"));
+            }
+        }
+        assert!(bad.is_empty(), "{}", bad.join("\n"));
+    });
+}
+
+#[test]
+fn the_counters_show_store_and_add_hits() {
+    big(|| {
+        let mut it = Interp::realm(Heap::default(), EvalLimits::default()).unwrap();
+        let before = it.ic_counts();
+        let src = "function P(i) { this.a = i; this.b = i; } var o = { n: 0 }, s = 0; for (var i = 0; i < 100; i++) { o.n = i; s += new P(i).b; } s + o.n";
+        assert_eq!(run(&mut it, src), "5049");
+        let c = it.ic_counts();
+        // Three write sites, 100 writes each: one first run and one fill for each site, the other 98 hit.
+        assert_eq!(c.store_hits - before.store_hits, 98, "o.n");
+        assert_eq!(c.heap.add_hits - before.heap.add_hits, 2 * 98, "this.a and this.b");
+        assert_eq!(c.heap.fill_store - before.heap.fill_store, 1);
+        assert_eq!(c.heap.fill_add - before.heap.fill_add, 2);
+    });
+}

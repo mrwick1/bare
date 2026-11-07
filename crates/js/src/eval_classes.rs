@@ -859,6 +859,10 @@ impl<'p> Interp<'p> {
                 Ok(Ref::Super(this, key))
             }
             ExprKind::Paren(i) => self.member_target(i),
+            ExprKind::Member { obj, .. } => {
+                let base = self.eval_expr(obj)?;
+                Ok(Ref::Site(base, me))
+            }
             _ => {
                 let (b, k) = self.member_ref(me)?;
                 Ok(Ref::Prop(b, k))
