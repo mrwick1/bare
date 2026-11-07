@@ -644,11 +644,17 @@ fn open(url: &Url, roots: &OnceLock<Result<TrustStore, String>>, rec: &mut Optio
         return Ok(Stream::Tcp(tcp));
     }
     let roots = roots.get_or_init(|| trust_store::load_system().map(|r| r.0).map_err(|e| e.to_string())).as_ref().map_err(|e| e.clone())?;
-    let tls = client::connect_h2(tcp, &url.host, roots)?;
+    let tls = if h1_only() { client::connect(tcp, &url.host, roots)? } else { client::connect_h2(tcp, &url.host, roots)? };
     if let Some(r) = rec {
         r.tls = clock.lap();
     }
     Ok(Stream::Tls(Box::new(tls)))
+}
+
+/// `BARE_NET_H1` (any value) offers `http/1.1` only, so a run over HTTP/1.1 and one over HTTP/2 can be compared on one server.
+fn h1_only() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("BARE_NET_H1").is_some())
 }
 
 /// A host that is this machine. A compressed body costs the CPU of both ends and saves no byte on a loopback link, so we do not ask for one
