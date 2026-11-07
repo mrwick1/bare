@@ -17,11 +17,14 @@
 //! - The insertion mode. The standard has about 20 modes, like "before head", "in body" and "in table".
 //!   Each mode says what to do with each kind of token. We use a few modes. For tables we look at the
 //!   stack instead of keeping modes: if the current node is a `tr`, we are "in a row".
+//!   A `<template>` is the one place where a table mode has no element to show it: `<template><tr>` is "in table body" with no `tbody` open.
+//!   So the builder has the standard's "in template" mode and its stack of template insertion modes (`Builder::tmpl`), and the table rules
+//!   read the top of that stack when the nearest table or template is a template.
 //!
 //! The standard says that every page, however broken, gives a tree. No error stops the builder.
 //!
 //! Left out (known gaps):
-//! - `<select>` modes, framesets, and the "in head noscript" mode (fragment parsing for `innerHTML` is in `tree/fragment.rs` and gates these). The scripting flag is on: `<noscript>` has raw text. Foreign content (SVG and MathML) is cut down: see `foreign.rs`.
+//! - `<select>` modes, framesets (and so the frameset-ok flag), and the "in head noscript" mode (fragment parsing for `innerHTML` is in `tree/fragment.rs` and gates these). The scripting flag is on: `<noscript>` has raw text. Foreign content (SVG and MathML) is cut down: see `foreign.rs`.
 //! - Quirks mode, and merging the attributes of a second `<html>` or `<body>` tag.
 //!
 //! Comments compare Rust with JavaScript, because you know JS.
@@ -30,6 +33,8 @@ mod foreign;
 mod fragment;
 #[cfg(test)]
 mod context_tests;
+#[cfg(test)]
+mod html5lib_tests;
 
 pub use fragment::{Fragment, FragmentError, FragmentLimits, context_gate, parse_fragment};
 use crate::dom::{Document, NodeData, NodeId, Ns};
@@ -123,6 +128,31 @@ enum Mode {
     // Inside `<title>`, `<script>`, `<style>` and the like. We only add text, until the end tag.
     AfterBody,
     AfterAfterBody,
+    /// Right after `<template>`, and again when the current node is a template whose insertion mode is "in template".
+    InTemplate,
+    /// The current node is a template whose insertion mode is "in column group" (`<template><col>`). Only `col` can follow.
+    InTemplateColGroup,
+}
+
+/// An entry of the stack of template insertion modes. The standard keeps the mode that a template was switched to by its first content tag.
+/// Only the modes that the template itself can be in are here. The other modes (cell, caption...) are shown by the stack of open elements.
+#[derive(Clone, Copy, PartialEq)]
+enum Tm {
+    Template,
+    Table,
+    ColGroup,
+    TableBody,
+    Row,
+    Body,
+}
+
+/// The insertion mode to use while the current node is a template with this template insertion mode.
+fn mode_for(tm: Tm) -> Mode {
+    match tm {
+        Tm::Template => Mode::InTemplate,
+        Tm::ColGroup => Mode::InTemplateColGroup,
+        _ => Mode::InBody,
+    }
 }
 
 /// Elements that close an open `<p>` when they start.
@@ -303,6 +333,8 @@ struct Builder {
     // The `template` elements, in tree order. `done` moves the children of each into its contents.
     scripting: bool,
     // The scripting flag. True for a page (this browser runs scripts): `noscript` has raw text. A fragment for a context in an inert document has it false.
+    tmpl: Vec<Tm>,
+    // The stack of template insertion modes: one entry for each open `template`, and one at the bottom for the context of a fragment that is a `template`.
 }
 
 impl Builder {
@@ -320,6 +352,7 @@ impl Builder {
             raw: None,
             templates: Vec::new(),
             scripting: true,
+            tmpl: Vec::new(),
         }
     }
 
@@ -378,18 +411,27 @@ impl Builder {
     /// a table goes in front of the table instead.
     fn place(&self) -> (NodeId, Option<NodeId>) {
         let current = self.current();
-        if self.foster
-            && self.is(current, TABLE_PARTS)
-            && let Some(i) = self.open.iter().rposition(|&n| self.is(n, &["table"]))
-        {
-            // `rposition` finds the last table on the stack: the one we are in.
-            let table = self.open[i];
-            return match self.doc.parent(table) {
-                Some(parent) => (parent, Some(table)),
-                None => (self.open[i - 1], None),
-            };
+        if self.foster && self.is(current, TABLE_PARTS) {
+            return self.foster_target();
         }
         (current, None)
+    }
+
+    /// The place for a node that is moved out of a table part. `rposition` finds the last table or template on the stack: the one we are in.
+    /// A template that is nearer than the table keeps the node. With neither (a fragment whose context is a template), the node goes in the root of the fragment.
+    #[cold]
+    #[inline(never)]
+    fn foster_target(&self) -> (NodeId, Option<NodeId>) {
+        let names: &[&str] = if self.tmpl.is_empty() { &["table"] } else { &["table", "template"] };
+        let Some(i) = self.open.iter().rposition(|&n| self.is(n, names)) else { return (self.open[0], None) };
+        let table = self.open[i];
+        if !self.tmpl.is_empty() && self.is(table, &["template"]) {
+            return (table, None);
+        }
+        match self.doc.parent(table) {
+            Some(parent) => (parent, Some(table)),
+            None => (self.open[i - 1], None),
+        }
     }
 
     /// Add an element. `push` says if it also goes on the stack. Void elements (`br`, `img`) do not.
@@ -651,7 +693,7 @@ impl Builder {
                 last = copy;
             }
             // The node that we carry goes to the common ancestor. In a table, it goes before the table (foster parenting).
-            let (parent, before) = if self.is(common, TABLE_PARTS) { self.foster_place(common) } else { (common, None) };
+            let (parent, before) = if self.is(common, TABLE_PARTS) { self.foster_place() } else { (common, None) };
             self.doc.move_to(last, parent, before);
             // A copy of the formatting element takes all the children of the block, and goes in the block.
             let copy = self.doc.clone_element(fe);
@@ -672,14 +714,16 @@ impl Builder {
     }
 
     /// Where a node goes when its parent would be a table part: before the table, or inside the element above the table
-    /// when the table has no parent. `part` is on the stack.
-    fn foster_place(&self, part: NodeId) -> (NodeId, Option<NodeId>) {
-        match self.open.iter().rposition(|&n| self.is(n, &["table"])) {
+    /// when the table has no parent. A template that is nearer than the table keeps the node. With neither, it goes in the root.
+    fn foster_place(&self) -> (NodeId, Option<NodeId>) {
+        let names: &[&str] = if self.tmpl.is_empty() { &["table"] } else { &["table", "template"] };
+        match self.open.iter().rposition(|&n| self.is(n, names)) {
+            Some(i) if !self.tmpl.is_empty() && self.is(self.open[i], &["template"]) => (self.open[i], None),
             Some(i) => match self.doc.parent(self.open[i]) {
                 Some(parent) => (parent, Some(self.open[i])),
                 None => (self.open[i.saturating_sub(1)], None),
             },
-            None => (part, None),
+            None => (self.open[0], None),
         }
     }
 
@@ -724,6 +768,7 @@ impl Builder {
             Mode::Text => self.in_text(token),
             Mode::AfterBody => self.after_body(token),
             Mode::AfterAfterBody => self.after_after_body(token),
+            Mode::InTemplate | Mode::InTemplateColGroup => self.in_template_modes(token),
         }
     }
 
@@ -733,7 +778,11 @@ impl Builder {
             self.open.pop();
             self.mode = self.text_return;
         }
-        if !matches!(self.mode, Mode::InBody | Mode::AfterBody | Mode::AfterAfterBody) {
+        // End of input in "in template": close each open template, then read the end again in the mode that is left.
+        while !self.tmpl.is_empty() && self.open.iter().any(|&n| self.is(n, &["template"])) {
+            self.template_end();
+        }
+        if matches!(self.mode, Mode::Initial | Mode::BeforeHtml | Mode::BeforeHead | Mode::InHead | Mode::AfterHead) {
             self.process(Token::StartTag { name: "body".into(), attrs: vec![], self_closing: false });
             // A `<body>` start tag makes every missing part, in order.
         }
@@ -806,9 +855,147 @@ impl Builder {
             }
             "title" | "style" | "script" | "noframes" => self.raw_text_element(name, attrs),
             "noscript" if self.scripting => self.raw_text_element(name, attrs),
+            "template" => self.template_start(attrs),
             _ => return false,
         }
         true
+    }
+
+    /// `<template>` in the head rules (also used by "in body", "in table", "after head"). The element and a marker go in, and the template has its own insertion mode.
+    #[cold]
+    #[inline(never)]
+    fn template_start(&mut self, attrs: &[Attr<'_>]) {
+        self.insert_marked("template", attrs);
+        self.tmpl.push(Tm::Template);
+        self.mode = Mode::InTemplate;
+    }
+
+    /// `</template>`. Nothing happens when no template is open. The markers of the list of active formatting elements go with the elements that own them,
+    /// but the standard clears the list only up to the last marker, so a cell that was still open leaves the marker of the template behind.
+    #[cold]
+    #[inline(never)]
+    fn template_end(&mut self) {
+        if !self.open.iter().any(|&n| self.is(n, &["template"])) {
+            return;
+        }
+        self.sync_afe();
+        self.pop_until(&["template"]);
+        self.open.markers_left = self.open.markers_left.min(1);
+        self.tmpl.pop();
+        self.reset_mode();
+    }
+
+    /// The standard's "reset the insertion mode appropriately", for the modes that we have: the first open element from the top that names a mode gives it.
+    /// The table, cell and select modes show in the stack, so for them the mode is "in body".
+    #[cold]
+    #[inline(never)]
+    fn reset_mode(&mut self) {
+        for &n in self.open.iter().rev() {
+            if self.is(n, &["template"]) {
+                self.mode = mode_for(*self.tmpl.last().unwrap_or(&Tm::Body));
+            } else if self.is(n, &["head"]) {
+                self.mode = Mode::InHead;
+            } else if self.is(n, &["html"]) {
+                // The root of a page has a head by now. The root of a fragment has none: it takes the mode of a template context.
+                self.mode = if self.head.is_some() { Mode::AfterHead } else { self.tmpl.last().map_or(Mode::InBody, |&t| mode_for(t)) };
+            } else if self.is(n, &["select", "td", "th", "tr", "tbody", "thead", "tfoot", "caption", "colgroup", "table", "body"]) {
+                self.mode = Mode::InBody;
+            } else {
+                continue;
+            }
+            return;
+        }
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn in_template_modes(&mut self, token: Token) {
+        if self.mode == Mode::InTemplate {
+            self.in_template(token);
+        } else {
+            self.in_template_colgroup(token);
+        }
+    }
+
+    /// The mode of "in template": the first tag in a template says what the template holds. Its template insertion mode is then that table part (or the body).
+    fn in_template(&mut self, token: Token) {
+        let tm = match &token {
+            Token::Text(_) | Token::Comment(_) | Token::Doctype(_) => return self.in_body(token),
+            Token::EndTag { name } => {
+                if name == "template" {
+                    self.template_end();
+                }
+                return;
+            }
+            Token::StartTag { name, .. } => match &**name {
+                // The standard also lists `base`, `basefont`, `bgsound`, `noframes` and `title` here. Chrome 155 does not keep "in template" for them:
+                // a `<td>` after `<template><title>t</title>` is dropped, as after any other content tag. We do as Chrome does.
+                "link" | "meta" | "script" | "style" | "template" => return self.in_body(token),
+                "caption" | "colgroup" | "tbody" | "tfoot" | "thead" => Tm::Table,
+                "col" => Tm::ColGroup,
+                "tr" => Tm::TableBody,
+                "td" | "th" => Tm::Row,
+                _ => Tm::Body,
+            },
+        };
+        if let Some(top) = self.tmpl.last_mut() {
+            *top = tm;
+        }
+        self.mode = mode_for(tm);
+        self.process(token);
+    }
+
+    /// "In column group", for a template: spaces, comments, `col` and the template tags. Anything else is ignored, because the current node is not a `colgroup`.
+    fn in_template_colgroup(&mut self, token: Token) {
+        match token {
+            Token::Text(text) => {
+                let (spaces, _) = split_spaces(&text);
+                if !spaces.is_empty() {
+                    self.insert_text(spaces);
+                }
+            }
+            Token::Comment(text) => self.insert_comment(&text),
+            Token::StartTag { name, attrs, .. } if name == "col" => {
+                self.insert_element("col", &attrs, false);
+            }
+            Token::StartTag { ref name, .. } if name == "template" => self.in_body(token),
+            Token::EndTag { name } if name == "template" => self.template_end(),
+            _ => {}
+        }
+    }
+
+    /// A `table` or `form` start tag when the current node is a template in a table mode. A template has no table to end, so `table` is ignored.
+    /// The form rule of the table modes: the standard ignores the tag when a template is open. Chrome 155 adds an empty `form`
+    /// (and does not set the form element pointer, as a form in a template never does). We do as Chrome does.
+    #[cold]
+    #[inline(never)]
+    fn template_table_tag(&mut self, token: Token) {
+        if let Token::StartTag { name, attrs, .. } = token
+            && name == "form"
+        {
+            self.insert_element("form", &attrs, false);
+        }
+    }
+
+    /// The template insertion mode, when the current node is a template (or the root of a fragment whose context is a template).
+    fn tpl_level(&self) -> Option<Tm> {
+        let top = *self.tmpl.last()?;
+        (self.open.len() == 1 || self.is(self.current(), &["template"])).then_some(top)
+    }
+
+    /// Do the table rules apply to a table part tag? They do when the nearest table or template is a table, or a template in a table mode.
+    /// A template that holds other content (or a page with no table) ignores the tag.
+    fn table_rules(&self) -> bool {
+        if self.tmpl.is_empty() {
+            return self.open.iter().any(|&n| self.is(n, &["table"]));
+        }
+        let tpl = |this: &Builder| matches!(this.tmpl.last(), Some(Tm::Table | Tm::TableBody | Tm::Row));
+        for &n in self.open.iter().rev() {
+            if self.is(n, &["table", "template"]) {
+                return self.is(n, &["table"]) || tpl(self);
+            }
+        }
+        tpl(self)
     }
 
     /// Add an element whose content is raw text. Go to `Text` mode until its end tag.
@@ -873,7 +1060,7 @@ impl Builder {
                 self.mode = Mode::InBody;
             }
             Token::StartTag { name, attrs, self_closing } => {
-                if matches!(&*name, "base" | "basefont" | "bgsound" | "link" | "meta" | "title" | "style" | "script" | "noframes") {
+                if matches!(&*name, "base" | "basefont" | "bgsound" | "link" | "meta" | "title" | "style" | "script" | "noframes" | "template") {
                     // A head element after the head has ended. It still goes into the head.
                     let head = self.head.expect("the head exists in this mode");
                     self.open.push(head, false);
@@ -918,15 +1105,26 @@ impl Builder {
         let in_table_part = self.is(current, TABLE_PARTS);
         match token {
             Token::StartTag { name, attrs, .. } if is_table_structure(&name) => {
-                if self.open.iter().any(|&n| self.is(n, &["table"])) {
+                if self.table_rules() {
                     self.table_start(&name, &attrs);
                 }
-                // Without a table, these tags are ignored.
+                // Without a table (or a template in a table mode), these tags are ignored.
             }
             Token::EndTag { name } if is_table_structure(&name) || name == "table" => self.table_end(&name),
+            Token::StartTag { ref name, .. } if !self.tmpl.is_empty() && matches!(&**name, "table" | "form") && self.tpl_level().is_some_and(|t| matches!(t, Tm::Table | Tm::TableBody | Tm::Row)) => {
+                self.template_table_tag(token);
+            }
             Token::StartTag { name, attrs, self_closing } if name == "table" && in_table_part => {
-                self.pop_until(&["table"]);
                 // A table in a table part ends the table that we are in. Then the new one starts.
+                // In a template with no table the parts close, and the tag is then ignored (see above).
+                match self.open.iter().rposition(|&n| self.is(n, &["table", "template"])) {
+                    Some(i) if self.is(self.open[i], &["table"]) => self.open.truncate(i),
+                    _ => {
+                        while self.is(self.current(), TABLE_PARTS) {
+                            self.open.pop();
+                        }
+                    }
+                }
                 self.process(Token::StartTag { name, attrs, self_closing });
             }
             Token::StartTag { ref name, .. } if in_table_part && name == "form" => {}
@@ -980,9 +1178,9 @@ impl Builder {
                 self.reconstruct_afe();
                 self.insert_foreign(if name == "svg" { Ns::Svg } else { Ns::MathMl }, name, &attrs, self_closing);
             }
-            "html" | "body" | "head" => {}
-            // A second `<html>` or `<body>` is ignored. The standard merges their attributes. We do not yet.
-            "base" | "basefont" | "bgsound" | "link" | "meta" | "title" | "style" | "script" | "noframes" => {
+            "html" | "body" | "head" | "frame" => {}
+            // A second `<html>` or `<body>` is ignored. The standard merges their attributes. We do not yet. A `<frame>` outside a frameset is ignored.
+            "base" | "basefont" | "bgsound" | "link" | "meta" | "title" | "style" | "script" | "noframes" | "template" => {
                 self.head_tag(name, &attrs);
             }
             _ if CLOSES_P.contains(&name) => {
@@ -1004,7 +1202,7 @@ impl Builder {
             }
             "form" => {
                 // Inside a template the form element pointer is neither read nor set.
-                let in_template = self.open.iter().any(|&n| self.is(n, &["template"]));
+                let in_template = !self.tmpl.is_empty() && self.open.iter().any(|&n| self.is(n, &["template"]));
                 if in_template || self.form.is_none() {
                     self.close_p();
                     let f = self.insert_element(name, &attrs, true);
@@ -1165,8 +1363,9 @@ impl Builder {
                 }
             }
             "form" => {
-                let form = self.form.take();
-                if form.is_some() && self.in_scope(&["form"], &[]) {
+                // With a template open the form element pointer is not used: the end tag closes a form that is in scope.
+                let has_form = (!self.tmpl.is_empty() && self.open.iter().any(|&n| self.is(n, &["template"]))) || self.form.take().is_some();
+                if has_form && self.in_scope(&["form"], &[]) {
                     self.close_implied("");
                     self.pop_until(&["form"]);
                 }
@@ -1209,6 +1408,8 @@ impl Builder {
                     self.any_other_end(name);
                 }
             }
+            // `template` is here, not an arm of its own: one more name in the `match` made every end tag slower (+0.8% of `bare-bench parse`).
+            _ if name == "template" => self.template_end(),
             _ => self.any_other_end(name),
         }
     }
@@ -1237,7 +1438,19 @@ impl Builder {
     fn table_start(&mut self, name: &str, attrs: &[Attr<'_>]) {
         loop {
             let current = self.name(self.current());
-            match (current.as_str(), name) {
+            let mut current = current.as_str();
+            // A template (or the root of a fragment of a template) acts as the table part that its insertion mode names. It is never closed.
+            let mut border = false;
+            if matches!(current, "template" | "html") {
+                border = true;
+                current = match self.tmpl.last() {
+                    Some(Tm::Table) => "table",
+                    Some(Tm::TableBody) => "tbody",
+                    Some(Tm::Row) => "tr",
+                    _ => return,
+                };
+            }
+            match (current, name) {
                 ("table", "caption" | "colgroup" | "tbody" | "thead" | "tfoot") => {
                     if name == "caption" {
                         self.insert_marked(name, attrs);
@@ -1268,6 +1481,8 @@ impl Builder {
                     self.insert_marked(name, attrs);
                     return;
                 }
+                _ if border => return,
+                // The tag does not fit in this template mode (a `caption` in a row): it is ignored.
                 _ => {
                     self.open.pop();
                     // The current node is in the way: an open cell, row, caption, or content inside one. Close it.
@@ -1657,7 +1872,8 @@ mod tests {
             "<", ">", "/", "<table>", "<tr>", "<td>", "<th>", "<tbody>", "<caption>", "<colgroup>", "<col>", "</table>", "</td>", "</tr>", "</tbody>", "<p>",
             "</p>", "<div>", "</div>", "<li>", "<ul>", "</ul>", "<a>", "<b>", "</b>", "<h1>", "<form>", "</form>", "<select>", "<option>", "<script>", "</script>",
             "<title>", "</title>", "<body>", "</body>", "<html>", "</html>", "<head>", "</head>", "<br>", "</br>", "<pre>", "<textarea>", "<!--", "-->", "x", " ", "\n",
-            "</a>", "<i>", "</i>", "<nobr>", "</nobr>", "<object>", "</object>", "<marquee>", "<button>", "<em>", "</em>", "<b class=x>",
+            "</a>", "<i>", "</i>", "<nobr>", "</nobr>", "<object>", "</object>", "<marquee>", "<button>", "<em>", "</em>", "<b class=x>", "<template>", "</template>",
+            "<col>", "<colgroup>", "</colgroup>", "<thead>", "<tfoot>", "</caption>", "<svg>", "</svg>", "<frame>",
         ];
         let mut seed: u32 = 99;
         for _ in 0..4000 {
@@ -1890,11 +2106,97 @@ mod tests {
         let html = doc.children(doc.root()).find(|&c| doc.element_name(c) == "html").unwrap();
         let body = doc.children(html).last().unwrap();
         let form = doc.children(body).next().unwrap();
-        // The second page form is ignored (the pointer is on the first). The form in the template is kept, and it does not take the pointer.
-        assert_eq!(doc.children(body).count(), 1);
+        // The form in the template is kept, and it does not take the pointer. So the end tag after the template closes the first form,
+        // and the second form is its sibling (Chrome 155: `form#one(1),form#two(0)`, case `fr-form-pointer` in `tplmodes-cases.txt`).
+        assert_eq!(doc.children(body).count(), 2);
         let tpl = doc.children(form).next().unwrap();
         let contents = doc.template_content(tpl).expect("contents");
         assert_eq!(doc.children(contents).map(|c| doc.element_name(c)).collect::<Vec<_>>(), ["form"]);
+    }
+
+    /// The tree of a page body, with the contents of each template under a `content` line (the html5lib format).
+    fn tpl(page: &str) -> String {
+        let full = parse(&format!("<body>{page}")).dump_with_contents();
+        full.strip_prefix(&expect(&["<html>", "  <head>", "  <body>"])).expect("a body after an empty head").to_string()
+    }
+
+    #[test]
+    fn a_template_keeps_table_parts_that_have_no_table() {
+        let row = in_body(&["<template>", "  content", "    <tr>", "      <td>", "        \"a\""]);
+        assert_eq!(tpl("<template><tr><td>a</td></tr></template>"), row);
+        assert_eq!(tpl("<template><tr><td>a"), row);
+        // the first tag says what the template holds: a `td` start gets no `tr`, and the next `tr` is ignored because no row is open
+        assert_eq!(tpl("<template><td>a</td><tr><td>b"), in_body(&["<template>", "  content", "    <td>", "      \"a\"", "    <td>", "      \"b\""]));
+        // after `caption` the template is in table mode: a `tr` gets a `tbody`, and a `table` is ignored
+        assert_eq!(
+            tpl("<template><caption>c</caption><table><tr><td>x"),
+            in_body(&["<template>", "  content", "    <caption>", "      \"c\"", "    <tbody>", "      <tr>", "        <td>", "          \"x\""])
+        );
+        // after other content a `tr` is ignored, and a table is a table
+        assert_eq!(tpl("<template><div><tr><td>x"), in_body(&["<template>", "  content", "    <div>", "      \"x\""]));
+        assert_eq!(tpl("<template><table><tr><td>x"), in_body(&["<template>", "  content", "    <table>", "      <tbody>", "        <tr>", "          <td>", "            \"x\""]));
+    }
+
+    #[test]
+    fn a_template_in_a_table_is_not_part_of_the_table() {
+        // the `tr` goes into the template, and the text in the row goes to the end of the template, not before the table
+        assert_eq!(
+            tpl("<table><template><tr>x<td>y</td></tr></template></table>"),
+            in_body(&["<table>", "  <template>", "    content", "      <tr>", "        <td>", "          \"y\"", "      \"x\""])
+        );
+        // a `td` in a cell of the table reaches the table rules of the template, not the table that holds it
+        assert_eq!(
+            tpl("<table><tr><td><template><tr><td>q</td></tr></template>"),
+            in_body(&["<table>", "  <tbody>", "    <tr>", "      <td>", "        <template>", "          content", "            <tr>", "              <td>", "                \"q\""])
+        );
+    }
+
+    #[test]
+    fn a_column_group_in_a_template_takes_only_columns() {
+        assert_eq!(tpl("<template><col><div>x</div><col>y"), in_body(&["<template>", "  content", "    <col>", "    <col>"]));
+        assert_eq!(tpl("<template><col> <!--c--></template>"), in_body(&["<template>", "  content", "    <col>", "    \" \"", "    <!-- c -->"]));
+    }
+
+    #[test]
+    fn the_end_of_the_input_closes_the_templates() {
+        // only a template in the head: the body is still made, and the template stays in the head
+        assert_eq!(parse("<template>x").dump_with_contents(), expect(&["<html>", "  <head>", "    <template>", "      content", "        \"x\"", "  <body>"]));
+        assert_eq!(parse("<template><template><td>a").dump_with_contents(), parse("<template><template><td>a</td></template></template>").dump_with_contents());
+        // after the head, a template still goes into the head
+        assert_eq!(
+            parse("<head></head><template>x</template><p>").dump_with_contents(),
+            expect(&["<html>", "  <head>", "    <template>", "      content", "        \"x\"", "  <body>", "    <p>"])
+        );
+    }
+
+    #[test]
+    fn a_template_has_its_own_marker_in_the_list_of_formatting_elements() {
+        // the `i` of the template is not opened again after it, and the `b` outside is
+        assert_eq!(
+            tpl("<b>1<template><i>2</template>3"),
+            in_body(&["<b>", "  \"1\"", "  <template>", "    content", "      <i>", "        \"2\"", "  \"3\""])
+        );
+        assert_eq!(tpl("<p><i>x<template></p>y</template>z"), in_body(&["<p>", "  <i>", "    \"x\"", "    <template>", "      content", "        \"y\"", "    \"z\""]));
+    }
+
+    #[test]
+    fn the_end_tag_of_a_form_in_a_template_closes_the_form() {
+        assert_eq!(tpl("<template><form>a</form>b"), in_body(&["<template>", "  content", "    <form>", "      \"a\"", "    \"b\""]));
+        // in a table mode a form is empty (Chrome 155; the standard ignores it)
+        assert_eq!(tpl("<template><tr></tr><form><b>x"), in_body(&["<template>", "  content", "    <tr>", "    <form>", "    <b>", "      \"x\""]));
+    }
+
+    #[test]
+    fn a_plaintext_in_a_template_ends_only_with_the_input() {
+        // html5lib tests18.dat, test 36
+        assert_eq!(
+            tree("<!doctype html><template><plaintext>a</template>b"),
+            "| <!DOCTYPE html>\n| <html>\n|   <head>\n|     <template>\n|   <body>\n"
+        );
+        assert_eq!(
+            parse("<!doctype html><template><plaintext>a</template>b").dump_with_contents(),
+            "| <!DOCTYPE html>\n| <html>\n|   <head>\n|     <template>\n|       content\n|         <plaintext>\n|           \"a</template>b\"\n|   <body>\n"
+        );
     }
 
     #[test]

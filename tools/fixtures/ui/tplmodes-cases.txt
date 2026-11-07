@@ -1,0 +1,340 @@
+var $ = function (i) { return document.getElementById(i) };
+function ser(n) { return n.nodeType === 3 ? JSON.stringify(n.data) : n.nodeType === 8 ? '<!--' + n.data + '-->' : n.localName + (n.localName === 'template' && n.namespaceURI === 'http://www.w3.org/1999/xhtml' ? '{' + kids(n.content) + '}' : '') + (n.firstChild ? '(' + kids(n) + ')' : '') }
+function kids(p) { return Array.prototype.map.call(p.childNodes, ser).join(',') }
+function put(m) { var t = $('t'); t.innerHTML = m; return kids(t.content) }
+=== tm-tr-direct
+@html <template id=t><tr><td>a</td></tr></template>
+(function () { return kids($('t').content) })
+=== tm-td-direct
+@html <template id=t><td>a</td><td>b</td></template>
+(function () { return kids($('t').content) })
+=== tm-th-direct
+@html <template id=t><th>a</th></template>
+(function () { return kids($('t').content) })
+=== tm-tr-then-td
+@html <template id=t><tr></tr><td>x</td></template>
+(function () { return kids($('t').content) })
+=== tm-tr-then-tr
+@html <template id=t><tr><td>a</td></tr><tr><td>b</td></tr></template>
+(function () { return kids($('t').content) })
+=== tm-tbody-tr
+@html <template id=t><tbody><tr><td>x</td></tr></tbody></template>
+(function () { return kids($('t').content) })
+=== tm-thead-tfoot
+@html <template id=t><thead><tr><th>h</th></tr></thead><tfoot><tr><td>f</td></tr></tfoot></template>
+(function () { return kids($('t').content) })
+=== tm-caption-then-tr
+@html <template id=t><caption>c</caption><tr><td>x</td></tr></template>
+(function () { return kids($('t').content) })
+=== tm-colgroup-then-tr
+@html <template id=t><colgroup><col></colgroup><tr><td>x</td></tr></template>
+(function () { return kids($('t').content) })
+=== tm-col-direct
+@html <template id=t><col><col></template>
+(function () { return kids($('t').content) })
+=== tm-col-then-div
+@html <template id=t><col><div>x</div></template>
+(function () { return kids($('t').content) })
+=== tm-col-text
+@html <template id=t><col>Hello</template>
+(function () { return kids($('t').content) })
+=== tm-col-spaces
+@html <template id=t><col> <col> </template>
+(function () { return kids($('t').content) })
+=== tm-col-then-colgroup
+@html <template id=t><col><colgroup></template>
+(function () { return kids($('t').content) })
+=== tm-div-then-tr
+@html <template id=t><div><tr><td>x</td></tr></div></template>
+(function () { return kids($('t').content) })
+=== tm-td-then-tr
+@html <template id=t><td>a</td><tr><td>b</td></tr></template>
+(function () { return kids($('t').content) })
+=== tm-td-then-td
+@html <template id=t><td>a</td><td>b</td></template>
+(function () { return kids($('t').content) })
+=== tm-td-open-then-tr
+@html <template id=t><td>a<tr><td>b</template>
+(function () { return kids($('t').content) })
+=== tm-tr-then-caption
+@html <template id=t><tr></tr><caption>c</caption><tr></tr></template>
+(function () { return kids($('t').content) })
+=== tm-tr-then-tbody
+@html <template id=t><tr></tr><tbody><tr></tr></template>
+(function () { return kids($('t').content) })
+=== tm-tbody-then-caption
+@html <template id=t><thead></thead><caption></caption><tbody></tbody></template>
+(function () { return kids($('t').content) })
+=== tm-td-then-end-tr
+@html <template id=t><td></td></tr><td></td></template>
+(function () { return kids($('t').content) })
+=== tm-td-then-end-table
+@html <template id=t><td></td></table><td></td></template>
+(function () { return kids($('t').content) })
+=== tm-tr-then-div-then-td
+@html <template id=t><tr><div></div><td>x</td></tr></template>
+(function () { return kids($('t').content) })
+=== tm-tr-div-inside
+@html <template id=t><tr><div>a</div></tr></template>
+(function () { return kids($('t').content) })
+=== tm-tr-text
+@html <template id=t><tr>x<td>y</td></tr></template>
+(function () { return kids($('t').content) })
+=== tm-text-then-tr
+@html <template id=t>x<tr><td>y</td></tr></template>
+(function () { return kids($('t').content) })
+=== tm-comment-then-tr
+@html <template id=t><!--c--><tr><td>y</td></tr></template>
+(function () { return kids($('t').content) })
+=== tm-table-first
+@html <template id=t><table><tr><td>x</td></tr></table></template>
+(function () { return kids($('t').content) })
+=== tm-table-after-tr
+@html <template id=t><tr></tr><table><tr><td>x</td></tr></table></template>
+(function () { return kids($('t').content) })
+=== tm-table-after-caption
+@html <template id=t><caption></caption><table><tr><td>x</td></tr></table></template>
+(function () { return kids($('t').content) })
+=== tm-table-after-td
+@html <template id=t><td>a</td><table><tr><td>x</td></tr></table></template>
+(function () { return kids($('t').content) })
+=== tm-tr-then-tr-in-cell-table
+@html <template id=t><tr><td><table><tr><td>x</td></tr></table></td></tr></template>
+(function () { return kids($('t').content) })
+=== tm-script-then-td
+@html <template id=t><script>1</script><td>y</td></template>
+(function () { return kids($('t').content) })
+=== tm-style-meta-link
+@html <template id=t><style>a{}</style><meta><link><td>1</td></template>
+(function () { return kids($('t').content) })
+=== tm-title-base
+@html <template id=t><title>t</title><base><tr></tr></template>
+(function () { return kids($('t').content) })
+=== tm-nested-then-td
+@html <template id=t><template><tr></tr></template><td>y</td></template>
+(function () { return kids($('t').content) })
+=== tm-nested-then-tr-after-tr
+@html <template id=t><tr></tr><template></template><td></td></template>
+(function () { return kids($('t').content) })
+=== tm-nested-deep
+@html <template id=t><template><template><tr><td>x</td></tr></template></template></template>
+(function () { return kids($('t').content) })
+=== tm-nested-b-template
+@html <template id=t><template><b><template></template></template>text</template>
+(function () { return kids($('t').content) })
+=== tm-form-after-tr
+@html <template id=t><tr></tr><form><div>x</div></form></template>
+(function () { return kids($('t').content) })
+=== tm-form-body
+@html <template id=t><form><input><div>a</div></form></template>
+(function () { return kids($('t').content) })
+=== tm-form-then-div
+@html <template id=t><form></form><div>after</div></template>
+(function () { return kids($('t').content) })
+=== tm-form-in-form
+@html <template id=t><form><form><p>x</p></form></form></template>
+(function () { return kids($('t').content) })
+=== tm-hidden-input-in-tr
+@html <template id=t><tr><input type=hidden><td>x</td></tr></template>
+(function () { return kids($('t').content) })
+=== tm-end-p-first
+@html <template id=t></p><div>x</div></template>
+(function () { return kids($('t').content) })
+=== tm-end-p-in-body
+@html <template id=t><div></p></div></template>
+(function () { return kids($('t').content) })
+=== tm-end-br
+@html <template id=t></br></template>
+(function () { return kids($('t').content) })
+=== tm-html-tag
+@html <template id=t><html a=b><span>x</span></template>
+(function () { return kids($('t').content) + '|' + document.documentElement.getAttribute('a') })
+=== tm-body-tag
+@html <template id=t><body a=b><span>x</span></template>
+(function () { return kids($('t').content) + '|' + document.body.getAttribute('a') })
+=== tm-head-tag
+@html <template id=t><head><span>x</span></template>
+(function () { return kids($('t').content) })
+=== tm-frame-tag
+@html <template id=t><frame></frame><b>x</b></template>
+(function () { return kids($('t').content) })
+=== tm-option-select
+@html <template id=t><select><option>a<option>b</select></template>
+(function () { return kids($('t').content) })
+=== tm-select-then-tr
+@html <template id=t><select><option>a</select><tr><td>x</td></tr></template>
+(function () { return kids($('t').content) })
+=== tm-svg
+@html <template id=t><svg><template><i></i></template></svg></template>
+(function () { return kids($('t').content) })
+=== tm-svg-td
+@html <template id=t><svg><td></td></svg><td>x</td></template>
+(function () { return kids($('t').content) })
+=== tm-plaintext
+@html <template id=t><plaintext>a</template>b</template>
+(function () { return kids($('t').content) })
+=== tm-textarea-title
+@html <template id=t><textarea>a<b></textarea><title>x<b></title></template>
+(function () { return kids($('t').content) })
+=== tm-eof
+@html <template id=t><div>x<b>y
+(function () { return kids($('t').content) })
+=== tm-eof-in-tr
+@html <template id=t><tr><td>a<b>b
+(function () { return kids($('t').content) })
+=== tm-eof-script
+@html <template id=t><script>x
+(function () { return kids($('t').content) })
+=== tm-eof-nested
+@html <template id=t><template><td>a
+(function () { return kids($('t').content) })
+=== tm-afe-marker
+@html <b id=b><template id=t><i>1</template>2</b>
+(function () { return $('b').innerHTML })
+=== tm-afe-after
+@html <a href=x id=b><template id=t><a>1</template>2</a>3
+(function () { return $('b').innerHTML + '|' + document.body.childNodes.length })
+=== tm-afe-reopen
+@html <p><b>x<template id=t><td>y</template>z</p>
+(function () { return $('t').parentNode.parentNode.innerHTML + '|' + document.body.innerHTML.length })
+=== tm-afe-no-reopen-inside
+@html <p><b><template id=t>q<td>y</td></template>z</b></p>
+(function () { return document.body.innerHTML })
+=== tm-in-table-text
+@html <table><template id=t><tr>x<td>y</td></tr></template></table>
+(function () { return kids($('t').content) })
+=== tm-in-table-parent
+@html <table id=tb><template id=t><tr><td>a</td></tr></template><tr><td>b</td></tr></table>
+(function () { return document.body.innerHTML })
+=== tm-in-table-div
+@html <table id=tb><template id=t><tr><div>d</div></tr></template></table>
+(function () { return document.body.innerHTML })
+=== tm-in-thead-template
+@html <table><thead><template id=t><td>x</td></template></thead></table>
+(function () { return document.body.innerHTML })
+=== tm-in-tr-template
+@html <table><tr><template id=t><td>x</td></template></tr></table>
+(function () { return document.body.innerHTML })
+=== tm-in-colgroup-template
+@html <table><colgroup><template id=t><col></template></colgroup></table>
+(function () { return document.body.innerHTML })
+=== tm-in-div-template-tr
+@html <div><template id=t></div><tr><td>Foo</td></tr></template>
+(function () { return document.body.innerHTML })
+=== tm-in-cell-template
+@html <table><tr><td><template id=t><tr><td>q</td></tr></template></td></tr></table>
+(function () { return document.body.innerHTML })
+=== tm-after-template-table-part
+@html <template id=t></template><tr><td>z</td></tr>
+(function () { return document.body.innerHTML })
+=== tm-in-select-template
+@html <select><template id=t><option>a</option></template><option>b</option></select>
+(function () { return document.body.innerHTML })
+=== tm-two-templates
+@html <template id=t><tr></tr></template><template><td></td></template>
+(function () { return document.body.innerHTML })
+=== tm-in-p
+@html <p>a<template id=t><div>x</div></template>b
+(function () { return document.body.innerHTML })
+=== tm-in-button-heading
+@html <h1>a<template id=t><h2>x</h2></template><h3>b
+(function () { return document.body.innerHTML })
+=== tm-li-in-template
+@html <ul><li>a<template id=t><li>b</template><li>c</ul>
+(function () { return document.body.innerHTML })
+=== tm-dd-in-template
+@html <dl><dt>a<template id=t><dd>b</template><dd>c</dl>
+(function () { return document.body.innerHTML })
+=== tm-scope-p
+@html <p><template id=t></p></template>x
+(function () { return document.body.innerHTML })
+=== tm-end-in-cell-template
+@html <table><tr><td><template id=t></td></template>y</td></tr></table>
+(function () { return document.body.innerHTML })
+=== fr-tr
+@html <template id=t></template>
+(function () { return put('<tr><td>a</td></tr>') })
+=== fr-td
+@html <template id=t></template>
+(function () { return put('<td>a</td><td>b</td>') })
+=== fr-tr-td-mixed
+@html <template id=t></template>
+(function () { return put('<tr></tr><td>x</td>') })
+=== fr-td-then-tr
+@html <template id=t></template>
+(function () { return put('<td>x</td><tr><td>y</td></tr>') })
+=== fr-caption-tr
+@html <template id=t></template>
+(function () { return put('<caption>c</caption><tr><td>x</td></tr>') })
+=== fr-colgroup-tr
+@html <template id=t></template>
+(function () { return put('<colgroup><col></colgroup><tr><td>x</td></tr>') })
+=== fr-col
+@html <template id=t></template>
+(function () { return put('<col><col>') })
+=== fr-col-div
+@html <template id=t></template>
+(function () { return put('<col><div>x</div>') })
+=== fr-col-text
+@html <template id=t></template>
+(function () { return put('<col>Hello') })
+=== fr-tbody
+@html <template id=t></template>
+(function () { return put('<tbody><tr><td>a</td></tr></tbody>') })
+=== fr-div-tr
+@html <template id=t></template>
+(function () { return put('<div><tr>x</tr></div>') })
+=== fr-text-tr
+@html <template id=t></template>
+(function () { return put('x<tr>y') })
+=== fr-nested
+@html <template id=t></template>
+(function () { return put('<template><tr></tr></template><td>x</td>') })
+=== fr-nested-end
+@html <template id=t></template>
+(function () { return put('<tr></tr><template></template><td>x</td>') })
+=== fr-form
+@html <template id=t></template>
+(function () { return put('<form><div>a</div></form><p>b') })
+=== fr-form-after-tr
+@html <template id=t></template>
+(function () { return put('<tr></tr><form><div>a</div></form>') })
+=== fr-table-after-tr
+@html <template id=t></template>
+(function () { return put('<tr></tr><table><tr><td>x</td></tr></table>') })
+=== fr-table-first
+@html <template id=t></template>
+(function () { return put('<table><tr><td>x</td></tr></table>') })
+=== fr-end-template
+@html <template id=t></template>
+(function () { return put('<tr><td>a</td></tr></template><td>b</td>') })
+=== fr-end-p
+@html <template id=t></template>
+(function () { return put('</p><b>x</b>') })
+=== fr-script-td
+@html <template id=t></template>
+(function () { return put('<script>1</script><td>x</td>') })
+=== fr-p-end-td
+@html <template id=t></template>
+(function () { return put('<p>a</p><td>x</td>') })
+=== fr-select
+@html <template id=t></template>
+(function () { return put('<select><option>a</select><tr><td>x</td></tr>') })
+=== fr-div-control
+@html <div id=t></div>
+(function () { var t = $('t'); t.innerHTML = '<tr><td>a</td></tr>'; return kids(t) })
+=== fr-insert-adjacent
+@html <template id=t></template>
+(function () { var t = $('t'); t.insertAdjacentHTML('beforeend', '<tr><td>a</td></tr>'); return kids(t) + '|' + kids(t.content) })
+=== fr-outer-html-in-div
+@html <div id=d><template id=t></template></div>
+(function () { var d = $('d'); d.innerHTML = '<template id=u><tr><td>q</td></tr></template>'; return kids($('u').content) })
+=== fr-get-inner-html
+@html <template id=t></template>
+(function () { var t = $('t'); t.innerHTML = '<tr><td>a</td></tr><td>b</td>'; return t.innerHTML })
+=== fr-form-pointer
+@html <form id=one><template><form id=in></form></template></form><form id=two></form>
+(function () { return Array.prototype.map.call(document.body.children, function (c) { return c.localName + '#' + c.id + '(' + c.children.length + ')' }).join() })
+=== fr-form-end-in-template
+@html <template id=t><form id=f>a</form>b</template>
+(function () { return kids($('t').content) })

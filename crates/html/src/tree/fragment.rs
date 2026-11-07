@@ -7,8 +7,7 @@
 //! Supported contexts: an HTML element that the "in body" rules read: `div`, `span`, `body`, `head`, `p`, `ul`, `a`, `button`, `script`, `style`,
 //! `textarea`, `title`, `xmp`, `iframe`, `noembed`, `noframes`, `plaintext`, `template`, `noscript`, and every element that is not in the gate list.
 //! When the context is in a `form`, `in_form` is true: the form element pointer is set, so a nested `<form>` start tag is ignored.
-//! `template` is read like `div`: the builder has no "in template" insertion mode, so a `tr` or `td` start tag is ignored, as it is in a page.
-//! The host puts the result in the contents of the template.
+//! A `template` context starts in the "in template" mode, so `<tr>` and `<td>` keep their tags. The host puts the result in the contents of the template.
 //!
 //! The scripting flag (`scripting`) is true when the context is in the document of the page. Then a `noscript` start tag, and the context
 //! `noscript`, have raw text. It is false for a context that is a `template` or in the contents of one (an inert document): `noscript` is an element.
@@ -24,7 +23,7 @@
 //! by its own size (a start tag, a text, or the copies of formatting elements, which are bounded by the nodes that exist). The input has its own cap.
 //! `tick` is called after each token with the work it did, so the host can charge a step budget; it can stop the parse.
 
-use super::{Builder, Mode, Token};
+use super::{Builder, Mode, Tm, Token};
 use crate::dom::{Document, NodeId, Ns};
 use crate::tokenizer::{Mark, Tokens};
 
@@ -100,6 +99,11 @@ pub fn parse_fragment(
     let mut b = Builder::new();
     let root = b.insert_element("html", &[], true);
     b.mode = Mode::InBody;
+    if context == "template" {
+        // The context is a template: its insertion mode is on the stack of template insertion modes, and the mode is "in template".
+        b.tmpl.push(Tm::Template);
+        b.mode = Mode::InTemplate;
+    }
     b.scripting = scripting;
     if in_form {
         b.form = Some(root);
@@ -234,6 +238,22 @@ mod tests {
         assert_eq!((kids.len(), f.doc.element_name(kids[0])), (2, "b"));
         assert!(f.doc.template_content(kids[1]).is_some());
         assert!(f.doc.template_content(top[1]).is_none());
+    }
+
+    #[test]
+    fn a_template_context_keeps_table_parts() {
+        let t = |input: &str| {
+            let f = parse(input, "template").unwrap();
+            f.doc.dump_with_contents().lines().skip(1).map(|l| format!("| {}\n", &l[4..])).collect::<String>()
+        };
+        assert_eq!(t("<tr><td>a</td></tr>"), "| <tr>\n|   <td>\n|     \"a\"\n");
+        assert_eq!(t("<td>a</td><tr><td>b"), "| <td>\n|   \"a\"\n| <td>\n|   \"b\"\n");
+        assert_eq!(t("<col><div>x"), "| <col>\n");
+        // the text in a row goes to the end of the fragment, as the standard says when there is no table
+        assert_eq!(t("x<tr>y"), "| \"x\"\n| <tr>\n| \"y\"\n");
+        assert_eq!(t("<tr><td>a</td></tr></template><td>b"), "| <tr>\n|   <td>\n|     \"a\"\n| <tr>\n|   <td>\n|     \"b\"\n");
+        // a `div` context still drops them
+        assert_eq!(tree("<tr><td>a</td></tr>", "div"), "| \"a\"\n");
     }
 
     #[test]
