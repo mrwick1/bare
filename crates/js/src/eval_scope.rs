@@ -71,8 +71,8 @@ enum RKind {
     Switch(StmtId),
     /// The `let`/`const` declaration of a `for`, `for-in` or `for-of`.
     ForVar(StmtId),
-    /// A `catch` clause: its parameter, and the `try` statement.
-    Catch(Option<PatId>, StmtId),
+    /// A `catch` clause: the `try` statement (`catch_param` gives the parameter).
+    Catch(StmtId),
 }
 
 struct RScope {
@@ -83,7 +83,7 @@ struct RScope {
     start: u32,
     len: u32,
     /// A scope of a function with frame slots (`fr_layout`): it makes no environment, and its names are in the frame from slot `base`.
-    frame: bool,
+    /// `NONE` for any other scope.
     base: u32,
     /// The function that the scope is in (an index of `Interp::scopes`; the script for a scope outside functions).
     func: u32,
@@ -111,7 +111,7 @@ impl<'p> Interp<'p> {
     /// Open a scope in the walk. Give the result to `sc_end`.
     fn sc_begin(&mut self, kind: RKind) -> u32 {
         let saved = self.sc_cur;
-        self.sc_all.push(RScope { parent: saved, kind, start: NONE, len: 0, frame: false, base: 0, func: self.sc_fn as u32 });
+        self.sc_all.push(RScope { parent: saved, kind, start: NONE, len: 0, base: NONE, func: self.sc_fn as u32 });
         self.sc_cur = self.sc_all.len() as u32 - 1;
         saved
     }
@@ -206,8 +206,8 @@ impl<'p> Interp<'p> {
                     }
                 }
             }
-            RKind::Catch(p, _) => {
-                if let Some(p) = p {
+            RKind::Catch(s) => {
+                if let Some(p) = self.catch_param(s) {
                     self.pat_idents(p, out);
                 }
             }
@@ -240,6 +240,14 @@ impl<'p> Interp<'p> {
         if v.len() > 16 { v.binary_search(&n).is_ok() } else { v.contains(&n) }
     }
 
+    /// The parameter of the `catch` clause of the `try` statement `s`.
+    fn catch_param(&self, s: StmtId) -> Option<PatId> {
+        match self.prog.stmt(s).kind {
+            StmtKind::Try { handler: Some(h), .. } => self.prog.catch(h).param,
+            _ => None,
+        }
+    }
+
     /// The frame slot of the name `n` in the frame scope `s`.
     fn sc_slot(&self, s: u32, n: u32) -> Option<u32> {
         let sc = &self.sc_all[s as usize];
@@ -254,7 +262,7 @@ impl<'p> Interp<'p> {
             if matches!(self.sc_all[scope as usize].kind, RKind::Barrier) {
                 return 0;
             }
-            let frame = self.sc_all[scope as usize].frame;
+            let frame = self.sc_all[scope as usize].base != NONE;
             if frame {
                 if let Some(slot) = self.sc_slot(scope, n) {
                     return FRAME | slot;
@@ -317,14 +325,14 @@ impl<'p> Interp<'p> {
             let scope = (s & !(UNRES | SEEN)) - 1;
             // A site in a function with frame slots has no environment to search, so it resolves at its first run. While no
             // function has a frame (`fr_any`), no scope is a frame scope, and the first run of a site is a search, as before.
-            if s & SEEN == 0 && !(self.fr_any && self.sc_all[scope as usize].frame) {
+            if s & SEEN == 0 && !(self.fr_any && self.sc_all[scope as usize].base != NONE) {
                 self.slots.sites[site as usize] = s | SEEN;
                 return self.lookup(n);
             }
             // The first call of a function that may get its frame (`FR_WAIT`) resolves nothing: a site can run twice in one call
             // (`typeof x` reads its site twice), and a resolution for an environment would not suit the frame.
             let sc = &self.sc_all[scope as usize];
-            if !sc.frame && self.scopes[sc.func as usize].fr == FR_WAIT {
+            if sc.base == NONE && self.scopes[sc.func as usize].fr == FR_WAIT {
                 return self.lookup(n);
             }
             s = self.sc_resolve(n, scope);
@@ -459,8 +467,8 @@ impl<'p> Interp<'p> {
                     }
                 }
             }
-            RKind::Catch(p, _) => {
-                if let Some(p) = p {
+            RKind::Catch(s) => {
+                if let Some(p) = self.catch_param(s) {
                     self.fr_put(p, INIT | MUT, out, names);
                 }
             }
@@ -482,7 +490,7 @@ impl<'p> Interp<'p> {
     fn fr_leaf(&self, fid: FuncId) -> bool {
         let f = self.prog.func(fid);
         let fsd = &self.scopes[fid.index()];
-        let is_expr = matches!(self.sc_all[fsd.sc_lo as usize].kind, RKind::Fn(_, true));
+        let is_expr = matches!(self.sc_all[fsd.lo as usize].kind, RKind::Fn(_, true));
         fsd.fl & FL_NOFR == 0
             && !fsd.uses_args
             && (f.kind == FuncKind::Arrow || fsd.fl & FL_THIS == 0)
@@ -516,7 +524,7 @@ impl<'p> Interp<'p> {
     fn fr_layout(&mut self, fid: FuncId) -> bool {
         let me = fid.index();
         self.scopes[me].fr = FR_ENV;
-        let lo = self.scopes[me].sc_lo as usize;
+        let lo = self.scopes[me].lo as usize;
         // `func` is an index in the function table of one script. The scopes of the next script follow the last function, and its root can have the same index.
         let hi = lo + self.sc_all[lo..].iter().take_while(|r| r.func as usize == me && !matches!(r.kind, RKind::Root)).count();
         let prog = self.prog.clone();
@@ -542,16 +550,16 @@ impl<'p> Interp<'p> {
                 self.sc_pool.extend(pool[base as usize..end as usize].iter().map(|b| b.name));
                 let (rel, len) = (base - first as u32, end - base);
                 let sc = &mut self.sc_all[s];
-                (sc.start, sc.len, sc.base, sc.frame) = (start, len, rel, true);
+                (sc.start, sc.len, sc.base) = (start, len, rel);
                 match sc.kind {
                     RKind::Block(st) | RKind::Switch(st) | RKind::ForVar(st) => self.stmt_label[st.index()] = FR_MARK | rel << 12 | len,
-                    RKind::Catch(_, st) => self.stmt_label[st.index()] = FR_MARK,
+                    RKind::Catch(st) => self.stmt_label[st.index()] = FR_MARK,
                     RKind::Fn(..) | RKind::Root | RKind::Barrier => {}
                 }
                 base = end;
             }
             let fsd = &mut self.scopes[me];
-            (fsd.fr, fsd.fr_off, fsd.fr_len) = (FR_ON, first as u32, (pool.len() - first) as u32);
+            (fsd.fr, fsd.lo, fsd.fr_len) = (FR_ON, first as u32, (pool.len() - first) as u8);
             self.fr_any = true;
         } else {
             pool.truncate(first);
@@ -570,7 +578,7 @@ impl<'p> Interp<'p> {
         let base = self.envs[FRAME_ENV as usize].bindings.len();
         let bs = &mut self.envs[FRAME_ENV as usize].bindings;
         let fsd = &self.scopes[fid.index()];
-        bs.extend_from_slice(&self.fr_pool[fsd.fr_off as usize..(fsd.fr_off + fsd.fr_len) as usize]);
+        bs.extend_from_slice(&self.fr_pool[fsd.lo as usize..fsd.lo as usize + fsd.fr_len as usize]);
         for (i, b) in bs[base..base + f.params.len()].iter_mut().enumerate() {
             b.value = args.get(i).copied().unwrap_or(Value::Undefined);
         }
@@ -609,7 +617,7 @@ impl<'p> Interp<'p> {
         if s & UNRES != 0 {
             let scope = (s & !(UNRES | SEEN)) - 1;
             let sc = &self.sc_all[scope as usize];
-            if !sc.frame {
+            if sc.base == NONE {
                 // A function that may get its frame (before its decision) must keep its sites unmarked.
                 if self.scopes[sc.func as usize].fr == FR_ENV {
                     self.slots.sites[site as usize] = NOFRAME;

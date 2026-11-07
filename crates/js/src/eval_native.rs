@@ -334,7 +334,7 @@ impl<'p> Interp<'p> {
         let cap = self.heap.limits().max_string_units;
         let size: usize = match n {
             Nat::EncodeUri => char::decode_utf16(units.iter().copied())
-                .map(|c| c.map_or(3, |c| if c.is_ascii_alphanumeric() || "-_.!~*'()".contains(c) || URI_RESERVED.contains(c) { 1 } else { 3 * c.len_utf8() }))
+                .map(|c| c.map_or(3, |c| if c.is_ascii_alphanumeric() || c.is_ascii() && ("-_.!~*'()".contains(c) || URI_RESERVED.contains(c)) { 1 } else { 3 * c.len_utf8() }))
                 .fold(0, usize::saturating_add),
             Nat::Escape => units.iter().map(|&u| escape_size(u)).fold(0, usize::saturating_add),
             _ => 0,
