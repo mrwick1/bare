@@ -52,6 +52,8 @@ pub struct Rec {
     pub status: u16,
     /// The reply came over HTTP/2.
     pub h2: bool,
+    /// Why the request failed (`cause::describe`), when it did. A record of a failed try has no status.
+    pub error: Option<String>,
 }
 
 thread_local! {

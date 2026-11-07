@@ -16,7 +16,7 @@
 //!
 //! Comments compare Rust with JavaScript, because you know JS.
 
-use crate::{dns, encoding, h2, parallel, tcp, trace};
+use crate::{cause, dns, encoding, h2, parallel, tcp, trace};
 // JS: like `import * as dns from "./dns"`: other files in this crate.
 use bare_tls::client::{self, ClientStream};
 use bare_tls::trust_store::{self, TrustStore};
@@ -291,11 +291,13 @@ impl Client {
         let plan = Plan { method: req.method, headers: Cow::Borrowed(req.headers), body: req.body };
         let (mut response, mut body) = self.start(req.url, &plan, "")?;
         if body.size_hint() > max_body {
+            body.note(&io::Error::new(ErrorKind::InvalidData, "the reply is too big"));
             return Err("the reply is too big".into());
         }
         let mut bytes = Vec::with_capacity(body.size_hint());
         (&mut body).take((max_body as u64).saturating_add(1)).read_to_end(&mut bytes)?;
         if bytes.len() > max_body {
+            body.note(&io::Error::new(ErrorKind::InvalidData, "the reply is too big"));
             return Err("the reply is too big".into());
         }
         response.body = bytes;
@@ -516,18 +518,28 @@ impl Client {
         }
     }
 
+    /// One try. A try that fails leaves a record with its cause (only when tracing is on): no body exists to carry it.
     fn attempt(&mut self, url: &Url, plan: &Plan, conditions: &str) -> Result<(Response, Body), Error> {
+        let mut rec = trace::begin(|| format!("{}://{}:{}{}", url.scheme, url.host, url.port, url.path));
+        let result = self.attempt_on(url, plan, conditions, &mut rec);
+        if let (Err(e), Some(mut r)) = (&result, rec) {
+            r.error = Some(cause::describe(&**e));
+            trace::push(*r);
+        }
+        result
+    }
+
+    fn attempt_on(&mut self, url: &Url, plan: &Plan, conditions: &str, rec: &mut Option<Box<trace::Rec>>) -> Result<(Response, Body), Error> {
         // The idle list is keyed by scheme too, so a plain connection never serves https.
         let server = (url.scheme, url.host.clone(), url.port);
         // An empty list stays in the map: the next connection that goes idle needs it, and the map has one key for each server.
         let idle = self.idle.lock().unwrap().get_mut(&server).and_then(Vec::pop);
         let get = plan.method.safe();
-        let mut rec = trace::begin(|| format!("{}://{}:{}{}", url.scheme, url.host, url.port, url.path));
         let session = if url.scheme == Scheme::Https { self.sessions.lock().unwrap().get(&server).filter(|c| c.usable()).cloned() } else { None };
         if let Some(conn) = session {
             // A session takes one more request at once: no idle connection and no new one. A request that the server did not start, or a GET
             // that failed on an old session (as on an old connection), runs again below on a new connection.
-            match self.h2_start(&conn, url, plan, conditions, &mut rec, true) {
+            match self.h2_start(&conn, url, plan, conditions, rec, true) {
                 Err(e) if e.is::<h2::Unprocessed>() || get => {}
                 result => return result,
             }
@@ -537,9 +549,9 @@ impl Client {
             Some((stream, since)) if since.elapsed() < MAX_IDLE && (get || alive(&stream)) => (stream, true),
             // There is a connection, and it has not been idle for too long. Use it. A POST also needs the
             // server to have kept it: we cannot retry a POST after a write, so we look first.
-            _ => match self.dial(url, &server, &mut rec)? {
+            _ => match self.dial(url, &server, rec)? {
                 Dialed::H1(stream) => (stream, false),
-                Dialed::H2(conn) => return self.h2_start(&conn, url, plan, conditions, &mut rec, false),
+                Dialed::H2(conn) => return self.h2_start(&conn, url, plan, conditions, rec, false),
             },
             // `_` means "anything else": no connection, or an old one. Open a new one.
             // An old connection is dropped here, and Rust closes it for us.
@@ -553,9 +565,9 @@ impl Client {
             // We cannot know that before we try. The error is not the page's fault, so we
             // try once more on a new connection. This is safe because GET only reads.
             // Never for a POST: the server may have got the request and done what it says, and a second one would do it twice.
-            stream = match self.dial(url, &server, &mut rec)? {
+            stream = match self.dial(url, &server, rec)? {
                 Dialed::H1(stream) => stream,
-                Dialed::H2(conn) => return self.h2_start(&conn, url, plan, conditions, &mut rec, false),
+                Dialed::H2(conn) => return self.h2_start(&conn, url, plan, conditions, rec, false),
             };
             clock = trace::Clock::new();
             sent = Instant::now();
@@ -565,7 +577,7 @@ impl Client {
         // The clock of the body starts where the head ended.
         let head_end = Instant::now();
         self.note_head(head_end - sent);
-        if let Some(r) = &mut rec {
+        if let Some(r) = rec {
             r.ttfb = clock.lap();
             r.reused = reused;
             r.status = head.response.status;
@@ -582,7 +594,7 @@ impl Client {
         let reusable = !head.response.close && head.framing != Framing::UntilClose;
         let undo = if head.framing == Framing::None { None } else { head.response.header("content-encoding").and_then(encoding::codings).filter(|c| !c.is_empty()) };
         let mut live = Live::new(stream, leftover, head.framing, reusable.then(|| (self.idle.clone(), server)), head_end);
-        live.rec = rec;
+        live.rec = rec.take();
         let live = Body(Source::Live(Box::new(live)));
         Ok((head.response, match undo {
             Some(codings) => Body(Source::Decoded(Box::new(encoding::Decoded::new(live, codings)))),
@@ -629,13 +641,13 @@ pub struct Streamed {
 /// The handshake runs under the read and write time limits that `tcp::connect` sets.
 fn open(url: &Url, roots: &OnceLock<Result<TrustStore, String>>, rec: &mut Option<Box<trace::Rec>>) -> Result<Stream, Error> {
     let mut clock = trace::Clock::new();
-    let addrs: Vec<SocketAddr> = dns::resolve(&url.host)?.into_iter().map(|ip| SocketAddr::new(ip, url.port)).collect();
+    let addrs: Vec<SocketAddr> = dns::resolve(&url.host).map_err(|e| cause::Phase("dns", e.into()))?.into_iter().map(|ip| SocketAddr::new(ip, url.port)).collect();
     if let Some(r) = rec {
         r.dns = clock.lap();
     }
     // Our own DNS lookup (see `dns.rs`) gives IP addresses. Add the port to each one.
     // JS: `ips.map(ip => ({ ip, port }))`.
-    let tcp = tcp::connect(&addrs)?;
+    let tcp = tcp::connect(&addrs).map_err(|e| cause::Phase("connect", e.into()))?;
     // Open a connection, with time limits (see `tcp.rs`).
     if let Some(r) = rec {
         r.tcp = clock.lap();
@@ -1189,6 +1201,28 @@ impl Live {
 
 impl Read for Body {
     fn read(&mut self, out: &mut [u8]) -> io::Result<usize> {
+        let r = self.read_body(out);
+        if let Err(e) = &r {
+            self.note(e);
+        }
+        r
+    }
+}
+
+impl Body {
+    /// Keep the cause of a failed read in the timing record (only when tracing is on). A body that is decoded has its record inside, and its raw body notes the error.
+    fn note(&mut self, e: &(dyn std::error::Error + 'static)) {
+        let rec = match &mut self.0 {
+            Source::Live(live) => &mut live.rec,
+            Source::H2(stream) => &mut stream.rec,
+            _ => return,
+        };
+        if let Some(r) = rec {
+            r.error.get_or_insert_with(|| cause::describe(e));
+        }
+    }
+
+    fn read_body(&mut self, out: &mut [u8]) -> io::Result<usize> {
         let live = match &mut self.0 {
             Source::Memory(response, at) => {
                 let n = out.len().min(response.body.len() - *at);

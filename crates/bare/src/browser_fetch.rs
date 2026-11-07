@@ -1703,6 +1703,8 @@ pub(crate) enum Outcome {
     Done { status: u16, url: Url, redirected: bool, headers: Vec<(String, String)>, body: Vec<u8> },
     /// A network error or a policy stop. The label holds no header value, path or query.
     Failed(&'static str),
+    /// A network error, with its cause (`bare_net::cause::describe`). The text goes to diagnostics only: the page sees `Failed to fetch`.
+    Net(String),
     /// The reply is bigger than the cap: a resource error, not a JS error.
     TooBig,
 }
@@ -1717,7 +1719,7 @@ fn run_one(client: &mut Client, lim: &FetchLimits, first: Parts<'_>, diag: &mut 
         let resp = match client.send_once(&req, lim.max_response_body) {
             Ok(r) => r,
             Err(e) if e.to_string() == "the reply is too big" => return Outcome::TooBig,
-            Err(_) => return Outcome::Failed("network error"),
+            Err(e) => return Outcome::Net(bare_net::cause::describe(&*e)),
         };
         let resp = unwrap_arc(resp);
         if matches!(resp.status, 301 | 302 | 303 | 307 | 308)
@@ -1764,7 +1766,7 @@ fn unwrap_arc(a: std::sync::Arc<bare_net::http::Response>) -> bare_net::http::Re
 
 fn finish(d: &Dom, it: &mut Interp<'_>, promise: Value, outcome: Outcome) -> R<()> {
     let r = match outcome {
-        Outcome::Failed(_) => {
+        Outcome::Failed(_) | Outcome::Net(_) => {
             let e = it.type_error("Failed to fetch");
             Err(e)
         }
@@ -1892,7 +1894,7 @@ impl Browser {
                     out
                 }
                 // A lost worker is a network error.
-                Some(None) => (Outcome::Failed("network error"), Vec::new()),
+                Some(None) => (Outcome::Net("worker lost: the thread of the request ended".into()), Vec::new()),
                 Some(Some(None)) | None => {
                     let mut diag = Vec::new();
                     if let Some(t) = task.queued {
@@ -1903,9 +1905,10 @@ impl Browser {
             });
             {
                 let mut st = dom.fetch.st.borrow_mut();
-                if let Outcome::Failed(label) = &outcome {
-                    let text = format!("failed: {label} ({})", origin(&task.url));
-                    st.diag(&lim, text);
+                match &outcome {
+                    Outcome::Failed(label) => st.diag(&lim, format!("failed: {label} ({})", origin(&task.url))),
+                    Outcome::Net(cause) => st.diag(&lim, format!("failed: network error ({}): {cause}", origin(&task.url))),
+                    _ => {}
                 }
                 for t in diag {
                     st.diag(&lim, t);
@@ -1957,7 +1960,7 @@ impl Browser {
         Ok(n)
     }
 
-    /// Fixed-label notes about requests that were blocked or failed (origin only, never a path, query, header or body). Clears them.
+    /// Notes about requests that were blocked or failed (origin only, never a path, query, header or body; a network error adds its cause: kind and error text). Clears them.
     pub fn take_fetch_diagnostics(&mut self) -> Vec<String> {
         self.dom.fetch.st.borrow_mut().diag.drain(..).collect()
     }

@@ -241,7 +241,13 @@ pub fn run(steps: &[Step], opt: &Options, red: &mut Redactor) -> Report {
                 }
             }
         };
+        let first = rep.net.len();
         rep.net.extend(bare_net::trace::take().into_iter().map(|r| (step.line, r)));
+        // A failed step names the network failures of this step: the page only sees `Failed to fetch`.
+        let result = result.map_err(|f| {
+            let causes: Vec<String> = rep.net[first..].iter().filter_map(|(_, r)| Some(format!("{}: {}", safe_url(&r.url), r.error.as_ref()?))).take(3).collect();
+            if causes.is_empty() { f } else { Fail { message: format!("{} (network failures: {})", f.message, causes.join("; ")), ..f } }
+        });
         let ms = |d: Duration| d.as_secs_f64() * 1000.0;
         let ok = result.is_ok();
         let note = result.as_ref().ok().cloned().flatten();
@@ -526,11 +532,12 @@ impl Report {
             .iter()
             .map(|(line, r)| {
                 format!(
-                    "{{\"line\":{line},\"url\":{},\"status\":{},\"bytes\":{},\"ms\":{:.1}}}",
+                    "{{\"line\":{line},\"url\":{},\"status\":{},\"bytes\":{},\"ms\":{:.1}{}}}",
                     s(&r.url),
                     r.status,
                     r.bytes,
-                    (r.wait + r.dns + r.tcp + r.tls + r.ttfb + r.body) as f64 / 1000.0
+                    (r.wait + r.dns + r.tcp + r.tls + r.ttfb + r.body) as f64 / 1000.0,
+                    r.error.as_ref().map_or(String::new(), |e| format!(",\"error\":{}", s(e)))
                 )
             })
             .collect();
