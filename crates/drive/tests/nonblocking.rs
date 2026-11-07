@@ -45,7 +45,9 @@ const SCRIPTS: &str = r#"<!doctype html><html><body><button id="b">B</button> <p
 <script>var log = []
 document.getElementById('b').addEventListener('click', function () { document.getElementById('n').textContent = 'clicked' })
 document.addEventListener('DOMContentLoaded', function () { log.push('dcl') })
-addEventListener('load', function () { log.push('load'); document.getElementById('log').textContent = log.join(',') })</script>
+addEventListener('load', function () {
+  log.push('load'); var e = document.getElementById('log'); e.textContent = log.join(','); e.dataset.n = sessionStorage.n = (Number(sessionStorage.n) || 0) + 1
+})</script>
 <script src="/js?1"></script><script defer src="/js?3"></script><script src="/js?2"></script><script async src="/js?a"></script><script>log.push('i')</script>
 </body></html>"#;
 
@@ -61,6 +63,16 @@ var p = document.createElement('link'); p.rel = 'preload'; p.as = 'script'; p.hr
 document.head.appendChild(p)
 addEventListener('load', function () { log.push('load'); document.getElementById('log').textContent = log.join(',') })</script>
 <script src="/js?1"></script></head><body><p id="css">css</p><p id="log"></p></body></html>"#;
+
+/// Each input event arms a timer of 0 ms. Keys sent in one tick give `i1,i2,i3,t1,t2,t3`; one key in each tick lets the timers run between.
+const TYPE: &str = r#"<!doctype html><html><body><input id="q"><p id="log"></p><script>var log = [], q = document.getElementById('q')
+q.addEventListener('input', function () {
+  var n = q.value.length; log.push('i' + n)
+  setTimeout(function () { log.push('t' + n); document.getElementById('log').textContent = log.join(',') }, 0)
+})</script></body></html>"#;
+
+/// A red page, served after 500 ms.
+const RED: &str = "<!doctype html><html><body style='background: rgb(255, 0, 0)'><p id=red>red</p></body></html>";
 
 const NEXT: &str = "<!doctype html><html><body><p id=done>next page</p></body></html>";
 
@@ -96,6 +108,7 @@ fn connection(mut s: TcpStream) {
             "/" => ("text/html", INDEX),
             "/scripts" => ("text/html", SCRIPTS),
             "/early" => ("text/html", EARLY),
+            "/type" => ("text/html", TYPE),
             "/slow.css" => {
                 std::thread::sleep(SLOW);
                 ("text/css", "#css { color: rgb(255, 0, 0) }")
@@ -104,6 +117,10 @@ fn connection(mut s: TcpStream) {
                 std::thread::sleep(SLOW);
                 js = format!("log.push('{}')", path.split('?').nth(1).unwrap_or(""));
                 ("text/javascript", js.as_str())
+            }
+            "/red" => {
+                std::thread::sleep(SLOW);
+                ("text/html", RED)
             }
             "/next" => {
                 std::thread::sleep(SLOW);
@@ -156,6 +173,7 @@ fn a_click_that_starts_a_slow_fetch_returns_at_once() {
     let origin = serve();
     big(move || {
         let mut p = Page::open(&format!("{origin}/"), (800, 600)).unwrap();
+        p.wait_load(std::time::Duration::from_secs(10)).unwrap();
         p.quiet = true;
         let (load, count) = (one(&mut p, "#load"), one(&mut p, "#count"));
         let t = Instant::now();
@@ -178,6 +196,7 @@ fn typing_does_not_wait_for_the_fetch_of_each_key() {
     let origin = serve();
     big(move || {
         let mut p = Page::open(&format!("{origin}/"), (800, 600)).unwrap();
+        p.wait_load(std::time::Duration::from_secs(10)).unwrap();
         p.quiet = true;
         let q = one(&mut p, "#q");
         let t = Instant::now();
@@ -194,6 +213,7 @@ fn a_link_loads_the_next_document_in_the_background() {
     let origin = serve();
     big(move || {
         let mut p = Page::open(&format!("{origin}/"), (800, 600)).unwrap();
+        p.wait_load(std::time::Duration::from_secs(10)).unwrap();
         p.quiet = true;
         let (go, doc) = (one(&mut p, "#go"), p.generation());
         let t = Instant::now();
@@ -233,6 +253,7 @@ fn a_style_sheet_added_after_load_does_not_block_the_turn() {
     let origin = serve();
     big(move || {
         let mut p = Page::open(&format!("{origin}/"), (800, 600)).unwrap();
+        p.wait_load(std::time::Duration::from_secs(10)).unwrap();
         p.quiet = true;
         let (sheet, count) = (one(&mut p, "#sheet"), one(&mut p, "#count"));
         let before = color(&mut p, "css");
@@ -257,6 +278,7 @@ fn a_new_document_runs_its_slow_scripts_across_ticks_and_takes_input_between_the
     let origin = serve();
     big(move || {
         let mut p = Page::open(&format!("{origin}/"), (800, 600)).unwrap();
+        p.wait_load(std::time::Duration::from_secs(10)).unwrap();
         p.quiet = true;
         let (go, doc) = (one(&mut p, "#scripts"), p.generation());
         p.click(go).unwrap();
@@ -302,6 +324,7 @@ fn a_preload_added_after_load_does_not_block_the_turn() {
     let origin = serve();
     big(move || {
         let mut p = Page::open(&format!("{origin}/"), (800, 600)).unwrap();
+        p.wait_load(std::time::Duration::from_secs(10)).unwrap();
         p.quiet = true;
         let pre = one(&mut p, "#pre");
         let t = Instant::now();
@@ -321,6 +344,7 @@ fn a_sheet_and_a_preload_added_before_load_download_with_the_scripts() {
     big(move || {
         let t = Instant::now();
         let mut p = Page::open(&format!("{origin}/early"), (800, 600)).unwrap();
+        p.wait_load(std::time::Duration::from_secs(10)).unwrap();
         let took = t.elapsed();
         p.quiet = true;
         // The sheet, the preload and the script are on their way at once: one wait of 500 ms, not three.
@@ -329,4 +353,113 @@ fn a_sheet_and_a_preload_added_before_load_download_with_the_scripts() {
         assert!(log.ends_with("load") && log.contains("css") && log.contains("pre") && log.contains('1'), "{log}");
         assert_eq!(color(&mut p, "css"), "rgb(255, 0, 0)");
     });
+}
+
+/// The steps that load a document, the slow scripts of `/scripts` and a check after each. The `n` of the log counts the loads of the session.
+fn loads(origin: String, window: bool) -> bare_drive::run::Report {
+    let done = |n: u32| format!("expect js \"document.getElementById('log').textContent === '{ORDER}' && document.getElementById('log').dataset.n === '{n}'\"\n");
+    let src = format!("open ${{ORIGIN}}/scripts\n{}goto ${{ORIGIN}}/scripts\n{}reload\n{}", done(1), done(2), done(3));
+    let steps = parse(&src, &HashMap::from([("ORIGIN".to_string(), origin)])).unwrap();
+    let opt = Options { size: (800, 600), timeout: Duration::from_secs(5), out: None, window, progress: false };
+    run(&steps, &opt, &mut Redactor::default())
+}
+
+/// `open`, `goto` and `reload` return at once. The download, the parse and the slow scripts run in the ticks of the next step, and its
+/// `expect` passes once the document is in. In a window, the first `open` also makes the window, so only `goto` and `reload` are timed.
+fn check_loads(rep: &bare_drive::run::Report, window: bool) {
+    assert!(rep.ok, "{:?}", rep.failure.as_ref().map(|f| &f.1.message));
+    let ms: Vec<f64> = rep.steps.iter().map(|s| s.ms).collect();
+    let timed: &[usize] = if window { &[2, 4] } else { &[0, 2, 4] };
+    for &i in timed {
+        assert!(ms[i] < 50.0, "step {} took {:.1} ms: {ms:?}", rep.steps[i].text, ms[i]);
+    }
+    for i in [1, 3, 5] {
+        assert!(ms[i] >= 400.0, "the expect waited for the scripts: {ms:?}");
+    }
+}
+
+#[test]
+fn a_driver_open_goto_and_reload_return_at_once() {
+    let origin = serve();
+    let rep = big(move || loads(origin, false));
+    check_loads(&rep, false);
+}
+
+/// A window needs a Wayland compositor: the test runs itself again inside `cage` with the headless backend, and the inner run writes `ok`
+/// to the file that the outer run names (as in `window_wait.rs`).
+#[test]
+fn a_window_goto_and_reload_return_at_once() {
+    let name = "a_window_goto_and_reload_return_at_once";
+    if let Some(done) = std::env::var_os("BARE_CAGE_DONE") {
+        let origin = serve();
+        let rep = big(move || loads(origin, true));
+        check_loads(&rep, true);
+        std::fs::write(done, "ok").unwrap();
+        return;
+    }
+    let done = std::env::temp_dir().join(format!("bare-cage-loads-{}", std::process::id()));
+    let _ = std::fs::remove_file(&done);
+    let runtime = std::env::var_os("XDG_RUNTIME_DIR").unwrap_or_else(|| std::env::temp_dir().into_os_string());
+    let status = std::process::Command::new("cage")
+        .arg("--")
+        .arg(std::env::current_exe().unwrap())
+        .args(["--exact", name, "--nocapture"])
+        .env_remove("WAYLAND_DISPLAY")
+        .env("XDG_RUNTIME_DIR", runtime)
+        .env("WLR_BACKENDS", "headless")
+        .env("WLR_LIBINPUT_NO_DEVICES", "1")
+        .env("WLR_RENDERER", "pixman")
+        .env("BARE_CAGE_DONE", &done)
+        .status();
+    let Ok(status) = status else {
+        eprintln!("cage is not installed: the window test did not run");
+        return;
+    };
+    let result = std::fs::read_to_string(&done).ok();
+    let _ = std::fs::remove_file(&done);
+    assert!(result.as_deref() == Some("ok"), "the run in cage failed ({status})");
+}
+
+/// The window paints the old frame until the next document is in: after an address bar navigation (`navigate`) and after a window
+/// `open` (`reopen_in`). Both return at once.
+#[test]
+fn the_window_keeps_the_old_frame_until_the_next_document_is_in() {
+    const W: u32 = 200;
+    const H: u32 = 100;
+    let origin = serve();
+    big(move || {
+        let (red, white) = (0xFFFF_0000u32, 0xFFFF_FFFFu32);
+        let px = |p: &mut Page| p.capture().pixels[(10 * W + 10) as usize];
+        let mut p = Page::open(&format!("{origin}/red"), (W, H)).unwrap();
+        p.wait_load(std::time::Duration::from_secs(10)).unwrap();
+        p.quiet = true;
+        until(&mut p, |p| p.browser().is_some());
+        assert_eq!(px(&mut p), red);
+        let t = Instant::now();
+        p.navigate(Some(&format!("{origin}/next"))).unwrap();
+        assert!(t.elapsed() < Duration::from_millis(50), "the navigation took {:?}", t.elapsed());
+        assert_eq!(px(&mut p), red, "the old frame went before the next document was in");
+        until(&mut p, |p| p.url().is_some_and(|u| u.ends_with("/next")));
+        assert_eq!(px(&mut p), white);
+        let t = Instant::now();
+        p.reopen_in(&format!("{origin}/red"), &bare_net::http::Client::new()).unwrap();
+        assert!(t.elapsed() < Duration::from_millis(50), "the open took {:?}", t.elapsed());
+        assert_eq!(px(&mut p), white, "the old frame went before the next document was in");
+        until(&mut p, |p| p.browser().is_some());
+        assert_eq!(px(&mut p), red);
+    });
+}
+
+/// The driver types one key in each tick, as a person does: the tasks of the page run between two keys.
+#[test]
+fn a_driver_type_step_sends_one_key_in_each_tick() {
+    let origin = serve();
+    let rep = big(move || {
+        let src = "open ${ORIGIN}/type\ntype css=\"#q\" \"abc\"\nexpect js \"document.getElementById('log').textContent === 'i1,t1,i2,t2,i3,t3'\"\n";
+        let steps = parse(src, &HashMap::from([("ORIGIN".to_string(), origin)])).unwrap();
+        let opt = Options { size: (800, 600), timeout: Duration::from_secs(5), out: None, window: false, progress: false };
+        run(&steps, &opt, &mut Redactor::default())
+    });
+    assert!(rep.ok, "{:?}", rep.failure.as_ref().map(|f| &f.1.message));
+    assert!(rep.steps[1].ticks.n >= 3, "{:?}", rep.steps[1].ticks);
 }

@@ -1,7 +1,7 @@
 //! A window shows the old frame until the new page has its first paint. It keeps only the pixels of it, not the old document or
 //! the layout of it: the old document and the new one never share the heap. A counting allocator gives the peak of the live heap.
 //! The first page has a large frame and few objects, the second has many objects and a small frame. So the peak of the second
-//! page shows what the first one left. The tests call the `Page` methods that the window thread runs: `replace` for the `open` of
+//! page shows what the first one left. The tests call the `Page` methods that the window thread runs: `reopen_in` for the `open` of
 //! the driver, `navigate` for the address bar and the driver, and a click on a link for a navigation that the page asks for.
 
 use bare::page::Page;
@@ -89,6 +89,7 @@ fn on_big_stack<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T 
 
 fn open(url: &str) -> Page {
     let mut p = Page::open(url, SIZE).unwrap();
+    p.wait_load(Duration::from_secs(20)).unwrap();
     p.quiet = true;
     p
 }
@@ -124,14 +125,17 @@ fn assert_leaves_nothing(go: fn(&mut Page, &str)) {
 #[test]
 fn a_window_open_does_not_hold_two_pages_at_once() {
     assert_leaves_nothing(|p, base| {
-        let url = format!("{base}/heavy");
-        p.replace(|| Ok(open(&url))).unwrap();
+        p.reopen_in(&format!("{base}/heavy"), &bare_net::http::Client::new()).unwrap();
+        p.wait_load(Duration::from_secs(20)).unwrap();
     });
 }
 
 #[test]
 fn a_navigation_does_not_keep_the_frame_of_the_old_document() {
-    assert_leaves_nothing(|p, base| p.navigate(Some(&format!("{base}/heavy"))).unwrap());
+    assert_leaves_nothing(|p, base| {
+        p.navigate(Some(&format!("{base}/heavy"))).unwrap();
+        p.wait_load(Duration::from_secs(20)).unwrap();
+    });
 }
 
 #[test]
@@ -159,6 +163,7 @@ fn the_old_document_and_its_frame_are_gone_when_the_next_one_is_requested() {
         let mut p = open(&format!("{base}/"));
         p.paint();
         p.navigate(Some(&format!("{base}/light"))).unwrap();
+        p.wait_load(Duration::from_secs(20)).unwrap();
         // What is left: the canvas of the window, the client and its cache, and the session. Not the tree, the styles or the layout.
         let left = AT_LIGHT.load(Relaxed) - before;
         assert!(left < PIXELS + (3 << 19), "{left} B are alive when the next document is requested; the canvas is {PIXELS} B");

@@ -138,6 +138,7 @@ fn enter_in_a_field_submits_and_an_invalid_field_does_not() {
             _ => Reply::new(404, Some("text/plain"), "no"),
         });
         let mut p = Page::open(&srv.url("/"), (400, 300)).expect("page");
+        p.wait_load(std::time::Duration::from_secs(10)).unwrap();
         click_at(&mut p, 20.0, 20.0);
         // Empty and required: no request, and the field keeps the focus.
         press(&mut p, "Enter", "Enter", Some("\r"), NO);
@@ -208,6 +209,7 @@ fn a_form_post_sends_its_body_once_and_back_does_not_resend_it() {
             _ => Reply::new(404, Some("text/plain"), "no"),
         });
         let mut p = Page::open(&srv.url("/"), (400, 300)).expect("page");
+        p.wait_load(std::time::Duration::from_secs(10)).unwrap();
         click_at(&mut p, 20.0, 110.0);
         idle(&mut p);
         let sent: Vec<String> = srv.heads.lock().unwrap().iter().filter(|h| h.starts_with("post /post")).cloned().collect();
@@ -235,6 +237,7 @@ fn back_and_forward_move_along_the_documents_and_restore_the_scroll() {
             _ => Reply::new(404, Some("text/plain"), "no"),
         });
         let mut p = Page::open(&srv.url("/"), (400, 300)).expect("page");
+        p.wait_load(std::time::Duration::from_secs(10)).unwrap();
         p.handle(Event::Wheel { x: 100.0, y: 100.0, dx: 0.0, dy: 300.0, mods: NO });
         assert_eq!(eval(&mut p, "scrollY"), "300");
         click_at(&mut p, 5.0, 8.0); // the fixed link

@@ -3078,3 +3078,90 @@ B3 built the VM loop (`bc_vm.rs`), the `BARE_JS_EXEC=byte` switch and global cel
 - `loop` runs 18 ops per iteration at about 73 instructions each. 3x needs about 1,095 instructions per iteration, against 1,320 now. A build without bounds checks reached only 2.76x.
 - Hypothesis, not measured: 3x needs true property cells in the heap, or fused ops in the code generator (compare-and-jump, constant operands).
 - Not run on the branch: the cost matrix, `cargo test --workspace`, test262.
+
+## Open, goto and reload return at once (S5)
+
+#263 found the worst tick of the staging journey: the first `open ${BASE}/`, 590 to 710 ms. About 56 ms of it was CPU. The rest was `Session::run` waiting for `load` in one call while 39 files downloaded. In a window, a later `open` or `reload` blocked the window for 80 to 190 ms. A link click already returned at once (#243, #247, #262).
+
+Change:
+- `crates/bare/src/browser_session.rs`: a live `Session::run` and `Session::navigate` download the document on a worker and return at once (`Session::start`). This is the path of a link: the turns of `resume` parse the document in slices and run its scripts across turns. `navigate` ends the old document first, so a heap is never held twice (the rule of #258 stays). `resume` accepts a session whose first document is on its way. The loop that ran the turns until `load` inside the call is gone. Headless `Session::run` and `navigate` with `live` off keep the settle rule.
+- `crates/bare/src/page.rs`: `Page::open`, `open_with` and `open_in` return a page with no document yet. `Page::wait_load` runs the ticks until `load`, for a caller that needs a loaded page (the tests, `drive_cost`). `Page::reopen_in` is the window `open`: it keeps the canvas of the old page, so the window never holds two canvases. It replaces `Page::replace`. While a document is on its way, `paint` keeps the pixels of the old page. A new window paints white until its first document is in.
+- `crates/bare/src/control.rs`: a query on a page with no document says why (`no document yet: it is loading`, or `the document did not load: <reason>`).
+- `crates/drive/src/run.rs`: `open`, `goto` and `reload` return at once. A locator, an `expect js`, `url` or `title` waits for the document. A step whose document did not load fails at once with kind `page`. A failed step names the network failures since the last `open`, `goto` or `reload`, because the document loads in the ticks of later steps.
+- `type`: one key in each tick (`Page::type_start`, `type_char`). The tasks of the page run between two keys. `Page::type_text` is unchanged for other callers.
+- The window binary (`bare --window URL`) opens its window before the page loads. A failed first load prints `bare: page: ...` and leaves a white window. Before, it exited with an error.
+- Console lines of the first document now belong to the step whose ticks ran its scripts, not to the `open` step.
+
+Tests (written first; each new test failed on main):
+- `crates/drive/tests/nonblocking.rs`, `a_driver_open_goto_and_reload_return_at_once`: `/scripts` has slow scripts of 500 ms. Main: `open`, `goto` and `reload` took 506, 503 and 502 ms. Now: under 1 ms each. Each `expect` after them waits about 500 ms and passes once the new document has fired `load` (a load counter in `sessionStorage` tells the documents apart).
+- `a_window_goto_and_reload_return_at_once`: the same steps in `cage`. `goto` and `reload` take under 1 ms.
+- `the_window_keeps_the_old_frame_until_the_next_document_is_in`: a red page, then `navigate` to a slow page, then `reopen_in` of the red page. Each call returns in under 50 ms (main: 501 ms). `capture` shows the old pixels until the next document is in.
+- `a_driver_type_step_sends_one_key_in_each_tick`: each input event arms a timer of 0 ms. The log is `i1,t1,i2,t2,i3,t3`. This test was not run against main. Hypothesis: main gives `i1,i2,i3,t1,t2,t3`, because `type_text` sends all keys in one call.
+- Changed tests: callers that need a loaded page call `wait_load` (`nonblocking`, `chunked`, `idle`, `cache`, `window_memory`, `browser_submit_tests`). `fixture_app`: the failed `goto` now fails in the next step, and the console lines of the first document are on line 3.
+
+Live staging, read only, `drive-journey.steps` with the masked runner, archMachine. Base: origin/main `f92f517` from `base-build`. Headless: 5 runs of each, interleaved. Window: 8 runs of each in `cage` (headless wlroots backend), interleaved. All runs passed. Times are the sum of the steps of each group (`shot` steps not counted), in ms. The tick columns give the median and the maximum of the longest tick, and the counts over 16 ms and over 50 ms summed over the runs.
+
+Headless, base:
+
+| Step | ms, median (min-max) | CPU ms, median | longest tick ms, median (max) | ticks > 16 ms | ticks > 50 ms |
+| --- | --- | --- | --- | --- | --- |
+| 1 open | 941 (706-1696) | 120 | 827 (1091) | 9 | 5 |
+| 2-3 login, overview | 1114 (765-1117) | 349 | 151 (180) | 25 | 10 |
+| 4 agents | 587 (546-1120) | 424 | 85 (120) | 32 | 11 |
+| 5 search | 788 (603-1447) | 333 | 94 (128) | 26 | 10 |
+| 6 reload | 905 (633-2690) | 318 | 125 (251) | 37 | 8 |
+| 7 sign out | 339 (309-405) | 237 | 116 (128) | 16 | 10 |
+| 8 agents, no session | 165 (155-523) | 72 | 91 (270) | 8 | 5 |
+| total | 4861 (4178-8490) | 1862 | 827 (1091) | 153 | 59 |
+
+Headless, now:
+
+| Step | ms, median (min-max) | CPU ms, median | longest tick ms, median (max) | ticks > 16 ms | ticks > 50 ms |
+| --- | --- | --- | --- | --- | --- |
+| 1 open | 938 (770-1822) | 116 | 24 (30) | 10 | 0 |
+| 2-3 login, overview | 927 (754-1895) | 387 | 28 (96) | 17 | 1 |
+| 4 agents | 624 (573-999) | 429 | 83 (101) | 34 | 10 |
+| 5 search | 661 (553-1980) | 306 | 76 (96) | 25 | 5 |
+| 6 reload | 846 (704-4621) | 296 | 45 (70) | 40 | 1 |
+| 7 sign out | 381 (300-521) | 238 | 103 (136) | 17 | 10 |
+| 8 agents, no session | 182 (148-440) | 71 | 22 (24) | 8 | 0 |
+| total | 4890 (3854-9510) | 1782 | 103 (136) | 151 | 27 |
+
+Window, base:
+
+| Step | ms, median (min-max) | CPU ms, median | longest tick ms, median (max) | ticks > 16 ms | ticks > 50 ms |
+| --- | --- | --- | --- | --- | --- |
+| 1 open | 698 (656-817) | 117 | 585 (712) | 14 | 8 |
+| 2-3 login, overview | 986 (775-1190) | 405 | 125 (130) | 47 | 24 |
+| 4 agents | 548 (515-568) | 418 | 75 (76) | 64 | 18 |
+| 5 search | 581 (489-643) | 371 | 109 (116) | 43 | 16 |
+| 6 reload | 639 (541-693) | 348 | 101 (105) | 48 | 19 |
+| 7 sign out | 288 (280-350) | 225 | 98 (126) | 24 | 17 |
+| 8 agents, no session | 150 (140-160) | 73 | 88 (95) | 16 | 8 |
+| total | 3887 (3712-4142) | 1955 | 585 (712) | 256 | 110 |
+
+Window, now:
+
+| Step | ms, median (min-max) | CPU ms, median | longest tick ms, median (max) | ticks > 16 ms | ticks > 50 ms |
+| --- | --- | --- | --- | --- | --- |
+| 1 open | 698 (660-851) | 143 | 24 (26) | 17 | 0 |
+| 2-3 login, overview | 848 (793-1175) | 416 | 113 (122) | 27 | 8 |
+| 4 agents | 556 (522-708) | 427 | 75 (112) | 66 | 19 |
+| 5 search | 592 (548-701) | 380 | 110 (121) | 41 | 10 |
+| 6 reload | 613 (542-661) | 345 | 62 (88) | 55 | 14 |
+| 7 sign out | 291 (271-297) | 228 | 95 (102) | 24 | 16 |
+| 8 agents, no session | 151 (139-161) | 72 | 23 (24) | 15 | 0 |
+| total | 3782 (3584-4275) | 2014 | 113 (122) | 245 | 67 |
+
+- The longest tick of the journey: 827 to 103 ms headless, 585 to 113 ms in a window (medians). The ticks over 50 ms: 59 to 27 headless, 110 to 67 in a window.
+- The `open` steps take 1 to 10 ms now. Their time goes to the next step, so the journey time does not change: the medians are inside the spread of the runs. Staging was noisy: a first window batch of 5 runs had reload groups from 560 to 2,834 ms in both builds, and a second batch of 5 had 609 to 1,063 ms.
+- The `type` steps of the login had one tick of 100 to 175 ms. In one headless run, the longest tick of the three `type` steps was 16, 20 and 24 ms.
+- Left over 50 ms: the ticks that run the scripts of a new document after a link (`expect url~"/agents"`, 75 to 100 ms), the two clicks of sign out (95 to 136 ms) and `shot` (not counted above; 110 to 130 ms: the capture and the PNG).
+- Peak PSS, headless: 74.0 to 76.3 MiB before, 74.7 to 76.0 MiB now. Window: 81.0 to 84.0 MiB (median 82.6) before, 82.5 to 86.1 MiB (median 84.1) now. A first version kept the old canvas in `replace` and also made a new one. It peaked about 2 MiB higher in a window, and `reopen_in` fixed that. The rest of the window difference, about 1.5 MiB, builds up after the reload. Not explained. Hypothesis: allocator retention from the frames that the window draws while a document loads and after each typed key. Not measured.
+- A scan of all 339 output files found neither the email nor the password.
+
+Checks (archMachine):
+- `cargo test --release --workspace --no-fail-fast`: 57 test binaries, 2,985 passed, 0 failed.
+- `tools/js/cost_matrix.sh`, base origin/main `f92f517` from `base-build`: 805 rows in 99 s. Mean change: glibc -0.012%, jemalloc +0.000% (0 rows measured). Over under one allocator: 0. Over under both: 0. Failed: 0.
+
+Not tested: arjun-e16; a real Hyprland window (only `cage` headless); a resize of the window while a document loads; `reload` while the first document is still on its way (it fails with "there is no document to reload"); `bare --window` with a URL that fails to load (by reading the code, it leaves a white window); `keycost.sh` (`Page::type_text` did not change; the driver path did); HiDPI.

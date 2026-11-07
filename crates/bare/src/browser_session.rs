@@ -107,7 +107,8 @@ pub struct SessionConfig {
     /// The window and the control interface: `resume(&[])` is one turn of an event loop, not a run to the settle. It waits for no
     /// reply (`fetch`, XHR and dynamic scripts start on workers and settle in a later turn when they are in), stops after a slice of
     /// work once the page has loaded, and a navigation that the page asks for downloads the next document on a worker while the old
-    /// one stays. See `docs/decisions.md` ("Input that does not wait").
+    /// one stays. `run` and `navigate` also return at once: the document downloads on a worker, and the turns of `resume` load it.
+    /// See `docs/decisions.md` ("Input that does not wait").
     pub live: bool,
 }
 
@@ -322,20 +323,6 @@ fn load_document(client: &mut Client, url: &str, body: Option<&Body>, lim: &Sess
     Err("too many redirects".into())
 }
 
-/// `navigate` and `run` in a live session: the result of one more turn of the document goes into the result of its first.
-fn add_turn(r: &mut PageResult, t: PageResult) {
-    r.tasks += t.tasks;
-    r.rounds += t.rounds;
-    r.scripts_run += t.scripts_run;
-    r.script_throws += t.script_throws;
-    r.load_errors += t.load_errors;
-    r.dropped_diagnostics += t.dropped_diagnostics;
-    r.diagnostics.extend(t.diagnostics);
-    r.intercepted.extend(t.intercepted);
-    (r.stop, r.ready_state, r.fetches, r.bytes, r.css, r.preload) = (t.stop, t.ready_state, t.fetches, t.bytes, t.css, t.preload);
-    (r.idle_timers, r.idle_frames, r.idle_callbacks) = (t.idle_timers, t.idle_frames, t.idle_callbacks);
-}
-
 impl Session {
     pub fn new(mut cfg: SessionConfig) -> Session {
         let store = cfg.storage.take().unwrap_or_default();
@@ -373,7 +360,20 @@ impl Session {
         let first = self.cfg.url.clone();
         self.hist.clear();
         self.at = 0;
-        self.drive(Some(Next { url: first, body: None, how: How::Push }), &[])
+        let next = Next { url: first, body: None, how: How::Push };
+        if self.cfg.live {
+            return self.start(next);
+        }
+        self.drive(Some(next), &[])
+    }
+
+    /// Live: download `next` on a worker and return at once. The turns of `resume` parse the document and run it, as after a link.
+    fn start(&mut self, next: Next) -> SessionResult {
+        let (url, body, lim) = (next.url.clone(), next.body.clone(), self.cfg.limits.clone());
+        let deadline = deadline_after(lim.max_time.saturating_sub(self.used.time));
+        let task = self.fork().spawn(move |c| load_document(c, &url, body.as_ref(), &lim, deadline));
+        self.loading = Some((next, task));
+        SessionResult { stop: SessionStop::Page(Stop::Settled), pages: Vec::new(), urls: Vec::new(), tasks: 0, rounds: 0 }
     }
 
     /// Go on with the settled document of the last `run` or `resume`: take `steps` through `Browser::click`, `type_text`
@@ -386,7 +386,7 @@ impl Session {
         let mut out = SessionResult { stop: SessionStop::Page(Stop::Settled), pages: Vec::new(), urls: Vec::new(), tasks: 0, rounds: 0 };
         if let Some(stop) = &self.used.ended {
             out.stop = stop.clone();
-        } else if self.browser.is_none() {
+        } else if self.browser.is_none() && self.loading.is_none() && self.parsing.is_none() {
             out.stop = SessionStop::LoadFailed("there is no document to resume".into());
         } else {
             return self.drive(None, steps);
@@ -396,7 +396,8 @@ impl Session {
 
     /// Load `url` as a user does from the address bar (a new history entry), or load the current document again (`None`: reload,
     /// at the URL that `pushState` left). The old document ends first. This also works after a stop that ended the session, because a
-    /// new document is a new realm; the session budgets stay spent. Same stack rule as `run`.
+    /// new document is a new realm; the session budgets stay spent. Same stack rule as `run`. Live: the old document ends, the next
+    /// one downloads on a worker and the call returns at once (`start`); until it is in, the session has no document.
     pub fn navigate(&mut self, url: Option<&str>) -> SessionResult {
         let current = self.browser.as_ref().and_then(|b| b.document_url());
         if let (Some(h), Some(u)) = (self.hist.get_mut(self.at), &current) {
@@ -413,6 +414,11 @@ impl Session {
         self.used.ended = None;
         self.loading = None;
         self.parsing = None;
+        if self.cfg.live {
+            // The old document ends now, so a heap is never held twice.
+            self.browser = None;
+            return self.start(next);
+        }
         self.drive(Some(next), &[])
     }
 
@@ -509,9 +515,6 @@ impl Session {
                     // The old document ends here: its realm, timers and callbacks are gone before the next load starts.
                     self.browser = None;
                     let mut base = self.fork();
-                    // Live: a document runs its scripts across turns. One that the page asked for takes input between them; `navigate` and `run`
-                    // run the turns here until `load`.
-                    let wait_load = self.cfg.live && fetched.is_none();
                     let doc = match fetched.take() {
                         Some(d) => d,
                         None => load_document(&mut base, &url, body.as_ref(), &lim, deadline).map(|(url, html)| (url, tree::parse(&html))),
@@ -569,18 +572,8 @@ impl Session {
                             b.adopt_scan(s);
                         }
                     }
-                    let mut r = b.run_page(PageConfig { url, client, limits: page.clone(), fetch: Some(fetch) });
-                    while wait_load && r.stop == Stop::Settled && !b.loaded() {
-                        if Instant::now() >= deadline {
-                            r.stop = Stop::TimeBudget;
-                        } else if b.live_work() == Some(false) {
-                            // Only downloads are left: a worker ends one soon.
-                            std::thread::sleep(Duration::from_millis(1));
-                        } else {
-                            let more = b.resume_page(self.fork(), page.clone(), &[]);
-                            add_turn(&mut r, more);
-                        }
-                    }
+                    // Live: the document runs its scripts across turns and takes input between them.
+                    let r = b.run_page(PageConfig { url, client, limits: page.clone(), fetch: Some(fetch) });
                     (b, r)
                 }
             };
@@ -624,12 +617,8 @@ impl Session {
                 }
             };
             // Live: the next document downloads on a worker, and the turn ends. The old document stays on screen until it is in.
-            if self.cfg.live && next.is_some() {
-                let n = next.take().expect("checked");
-                let (url, body, lim) = (n.url.clone(), n.body.clone(), lim.clone());
-                let task = self.fork().spawn(move |c| load_document(c, &url, body.as_ref(), &lim, deadline));
-                self.loading = Some((n, task));
-                return SessionStop::Page(Stop::Settled);
+            if self.cfg.live && let Some(n) = next.take() {
+                return self.start(n).stop;
             }
         }
     }

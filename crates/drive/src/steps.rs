@@ -6,7 +6,7 @@
 //! goto URL                    the address bar of the session
 //! reload
 //! click LOC
-//! type LOC "text"             click the field, select its text, type (a line feed is Enter); "" clears it
+//! type LOC "text"             click the field, select its text, type one key in each tick (a line feed is Enter); "" clears it
 //! press KEY                   at the focused element: Enter, Tab, Escape, a, Shift+Tab, Control+a
 //! scroll LOC|page DY          the wheel over the element (or the middle of the window), DY CSS pixels down
 //! expect LOC STATE            visible hidden enabled disabled checked unchecked focused | count N | text="x" | value~"x"
@@ -17,6 +17,8 @@
 //! shot NAME                   a PNG of the window: OUT/NAME.png
 //! timeout MS                  the time limit of each later step (default 10000)
 //! ```
+//!
+//! `open`, `goto` and `reload` return at once; the later steps wait for the document.
 //!
 //! LOC is `css="..."`, `role=NAME` with an optional `name="..."` or `name~"..."`, `label=`, `text=` or `placeholder=` (see `locate.rs`).
 

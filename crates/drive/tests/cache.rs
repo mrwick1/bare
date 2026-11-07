@@ -111,8 +111,11 @@ fn a_navigation_in_a_window_page_keeps_the_connections_and_the_cache() {
         .stack_size(64 << 20)
         .spawn(move || {
             let mut page = bare::page::Page::open(&format!("{origin}/"), (800, 600)).unwrap();
+            page.wait_load(std::time::Duration::from_secs(10)).unwrap();
             page.navigate(Some(&format!("{origin}/"))).unwrap();
+            page.wait_load(std::time::Duration::from_secs(10)).unwrap();
             page.navigate(None).unwrap();
+            page.wait_load(std::time::Duration::from_secs(10)).unwrap();
         })
         .unwrap()
         .join()

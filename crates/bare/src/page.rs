@@ -265,11 +265,15 @@ pub(crate) fn point_in(b: &mut Browser, fr: &Frame, n: NodeId, at: u32) -> Optio
 
 impl Page {
     pub fn new(source: Source, viewport: (u32, u32)) -> Page {
+        Page::with_canvas(source, Canvas::new(viewport.0.max(1), viewport.1.max(1)))
+    }
+
+    fn with_canvas(source: Source, canvas: Canvas) -> Page {
         Page {
             source,
             frame: None,
             painter: Painter::new(),
-            canvas: Canvas::new(viewport.0.max(1), viewport.1.max(1)),
+            canvas,
             pointer: Pointer::default(),
             inside: false,
             moved: false,
@@ -297,7 +301,8 @@ impl Page {
         }
     }
 
-    /// Load `url` in a session (it runs the scripts and settles). Run it on a thread with a big stack: the VM recurses.
+    /// Load `url` in a live session. It returns at once with no document: the ticks download it, parse it and run its scripts
+    /// (`wait_load` runs them until `load`). Run it on a thread with a big stack: the VM recurses.
     pub fn open(url: &str, viewport: (u32, u32)) -> Result<Page, String> {
         Page::open_with(url, viewport, None)
     }
@@ -312,13 +317,37 @@ impl Page {
     /// `open` in a new session with empty storage that shares the connections and the HTTP cache of `net`, as a new tab of one browser
     /// does. A driver that opens many pages pays no new TLS handshake and no new download of the immutable scripts of an app.
     pub fn open_in(url: &str, viewport: (u32, u32), net: &bare_net::http::Client) -> Result<Page, String> {
+        Page::open_cfg(Page::config_in(url, net), viewport)
+    }
+
+    fn config_in(url: &str, net: &bare_net::http::Client) -> SessionConfig {
         let mut cfg = SessionConfig::new(url);
         let net = net.fork();
         cfg.client = Box::new(move || net.fork());
-        Page::open_cfg(cfg, viewport)
+        cfg
     }
 
-    fn open_cfg(mut cfg: SessionConfig, viewport: (u32, u32)) -> Result<Page, String> {
+    /// `open_in` in this window, as the `open` of a driver: the old document ends first, and the call returns at once. The canvas keeps
+    /// the pixels of the old page until the first frame of the new one, so the window never holds two canvases. If the new session
+    /// cannot start, no document is left.
+    pub fn reopen_in(&mut self, url: &str, net: &bare_net::http::Client) -> Result<(), String> {
+        self.release_frame();
+        if let Source::Session(s) = &mut self.source {
+            s.end_document();
+        }
+        let s = Page::live_session(Page::config_in(url, net), self.viewport())?;
+        let canvas = std::mem::replace(&mut self.canvas, Canvas::new(0, 0));
+        let (ticks, woken, quiet) = (self.ticks, self.woken, self.quiet);
+        *self = Page::with_canvas(Source::Session(Box::new(s)), canvas);
+        (self.ticks, self.woken, self.quiet) = (ticks, woken, quiet);
+        Ok(())
+    }
+
+    fn open_cfg(cfg: SessionConfig, viewport: (u32, u32)) -> Result<Page, String> {
+        Ok(Page::new(Source::Session(Box::new(Page::live_session(cfg, viewport)?)), viewport))
+    }
+
+    fn live_session(mut cfg: SessionConfig, viewport: (u32, u32)) -> Result<Session, String> {
         let url = cfg.url.clone();
         cfg.viewport = Some((viewport.0 as f32, viewport.1 as f32));
         // A window runs for hours, not for one load: an input event adds a little time and a few tasks each.
@@ -334,7 +363,54 @@ impl Page {
         if let SessionStop::LoadFailed(why) = s.run().stop {
             return Err(format!("{url}: {why}"));
         }
-        Ok(Page::new(Source::Session(Box::new(s)), viewport))
+        Ok(s)
+    }
+
+    /// Run the ticks until the document is in and has fired `load`, as the old blocking `open` did. `Err`: the load failed, the page
+    /// stopped, or `limit` passed.
+    pub fn wait_load(&mut self, limit: Duration) -> Result<(), String> {
+        let end = Instant::now() + limit;
+        loop {
+            let loaded = match &mut self.source {
+                Source::Session(s) => s.loading().is_none() && s.browser().is_some_and(|b| b.loaded()),
+                Source::Browser(_) => true,
+            };
+            if loaded {
+                return Ok(());
+            }
+            let (ran, next) = self.tick();
+            if ran {
+                continue;
+            }
+            let Some(next) = next.filter(|&n| n < end) else {
+                return Err(if Instant::now() < end && next.is_none() { self.no_document() } else { "the time limit passed before load".into() });
+            };
+            std::thread::sleep(next.saturating_duration_since(Instant::now()));
+        }
+    }
+
+    /// Why the last document did not load, if it did not. The ticks of a live session load it after `open` and `navigate`.
+    pub fn load_error(&self) -> Option<&str> {
+        match &self.source {
+            Source::Session(s) => match s.ended() {
+                Some(SessionStop::LoadFailed(why)) => Some(why),
+                _ => None,
+            },
+            Source::Browser(_) => None,
+        }
+    }
+
+    /// Why the page has no document (or no loaded one): the load failed, the document is on its way, or the page stopped.
+    pub fn no_document(&self) -> String {
+        match &self.source {
+            Source::Session(s) => match s.ended() {
+                Some(SessionStop::LoadFailed(why)) => format!("the document did not load: {why}"),
+                Some(stop) => format!("the page stopped: {stop:?}"),
+                None if s.loading().is_some() => "no document yet: it is loading".into(),
+                None => "no document".into(),
+            },
+            Source::Browser(_) => "no document".into(),
+        }
     }
 
     pub fn browser(&mut self) -> Option<&mut Browser> {
@@ -615,21 +691,6 @@ impl Page {
         (self.built, self.listed, self.controls, self.inputs, self.ext, self.last_hit, self.key) = (false, false, Vec::new(), Vec::new(), (false, Vec::new()), None, (0, [0; 8]));
     }
 
-    /// Replace this page by the page that `make` builds (a new tab in the window). The old document ends first. If `make` fails, no document
-    /// is left.
-    pub fn replace(&mut self, make: impl FnOnce() -> Result<Page, String>) -> Result<(), String> {
-        self.release_frame();
-        if let Source::Session(s) = &mut self.source {
-            s.end_document();
-        }
-        // The window thread runs this job: no frame is drawn before the new page is in. The window holds its last frame in its own buffers.
-        self.canvas = Canvas::new(0, 0);
-        let ticks = self.ticks;
-        *self = make()?;
-        self.ticks = ticks;
-        Ok(())
-    }
-
     /// Run what a listener queued, then forget the layout. A link click ends the document: the session loads the next.
     pub(crate) fn settle(&mut self) {
         // A next document that is in replaces the old one in this call: the frame of the old one goes first.
@@ -818,7 +879,8 @@ impl Page {
                 place(f, &doc, &scroll, n, &mut fld);
                 Page::draw_field(painter, canvas, &fld, sel.filter(|_| focused));
             }
-        } else {
+        } else if !matches!(source, Source::Session(s) if s.loading().is_some()) {
+            // A next document on its way: the canvas keeps the last frame of the old one.
             canvas.pixels.fill(0xFFFF_FFFF);
         }
         self.first_frame.get_or_insert_with(|| self.started.elapsed());
