@@ -816,8 +816,10 @@ fn define_in(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
     Ok(Value::Undefined)
 }
 
+type Read = (ObjId, [Value; 4], Box<[Box<str>]>);
+
 /// The prototype, the callbacks and the observed attributes of a constructor, in the order of the standard (and Chrome 155).
-fn read_definition(d: &Dom, it: &mut Interp<'_>, ctor: Value) -> R<(ObjId, [Value; 4], Box<[Box<str>]>)> {
+fn read_definition(d: &Dom, it: &mut Interp<'_>, ctor: Value) -> R<Read> {
     let kp = d.key(it, "prototype")?;
     let Value::Object(proto) = it.get_value(ctor, kp)? else { return Err(reg_err(it, "define", "constructor prototype is not an object")) };
     let mut cb = [Value::Undefined; 4];
