@@ -11,3 +11,6 @@ bare-tls = { path = "../tls" }
 # `flate2` (gzip, deflate) takes its pure Rust `miniz_oxide` backend, which `png` in `bare-paint` already builds. `brotli-decompressor` only decodes.
 flate2 = "1.1"
 brotli-decompressor = "5"
+# The whole-body path (`encoding::inflate`) calls `miniz_oxide` and checks the gzip CRC with `crc32fast`; `flate2` builds both already.
+miniz_oxide = "0.9"
+crc32fast = "1"

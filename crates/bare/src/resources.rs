@@ -536,27 +536,44 @@ pub fn fetch(client: &mut http::Client, target: &Target, limits: &Limits, deadli
     // about 4 times its size on the wire (gzip of text: 3 to 5): start there, so that it does not grow by doubling.
     // The room is zeroed pages that no byte has touched, and `shrink_to_fit` below gives back what is left.
     let scale = if coding.is_some() { 4 } else { 1 };
-    let mut buf = vec![0u8; declared.map_or(16 * 1024, |d| d.saturating_mul(scale).saturating_add(1)).min(cap.saturating_add(1))];
-    let mut filled = 0;
-    loop {
-        if Instant::now() >= deadline {
-            return Err(LoadError::TimedOut);
-        }
-        if filled == buf.len() {
-            buf.resize(buf.len().saturating_mul(2).min(cap.saturating_add(1)), 0);
-        }
-        let n = match streamed.body.read(&mut buf[filled..]) {
-            Ok(0) => break,
-            Ok(n) => n,
-            Err(e) if e.kind() == ErrorKind::UnexpectedEof => return Err(LoadError::Truncated),
-            Err(e) => return Err(LoadError::Read(e.kind())),
-        };
-        filled += n;
-        if filled > cap {
-            return Err(LoadError::TooLarge);
-        }
-        if filled > room {
-            return Err(LoadError::TotalTooLarge);
+    // A gzip or deflate body is decoded in one step into a buffer of its final size (`Body::decoded_whole`): no 32 KiB window for each
+    // download, and no growth by doubling. Any other body (identity, br, a list of codings) is read as it comes, below.
+    let whole = streamed.body.decoded_whole(cap.saturating_add(1), deadline).transpose().map_err(|e| match e.kind() {
+        ErrorKind::UnexpectedEof => LoadError::Truncated,
+        ErrorKind::TimedOut => LoadError::TimedOut,
+        ErrorKind::FileTooLarge => LoadError::TooLarge,
+        kind => LoadError::Read(kind),
+    })?;
+    let streaming = whole.is_none();
+    let mut buf = whole.unwrap_or_else(|| vec![0u8; declared.map_or(16 * 1024, |d| d.saturating_mul(scale).saturating_add(1)).min(cap.saturating_add(1))]);
+    let mut filled = if streaming { 0 } else { buf.len() };
+    if filled > cap {
+        return Err(LoadError::TooLarge);
+    }
+    if filled > room {
+        return Err(LoadError::TotalTooLarge);
+    }
+    if streaming {
+        loop {
+            if Instant::now() >= deadline {
+                return Err(LoadError::TimedOut);
+            }
+            if filled == buf.len() {
+                buf.resize(buf.len().saturating_mul(2).min(cap.saturating_add(1)), 0);
+            }
+            let n = match streamed.body.read(&mut buf[filled..]) {
+                Ok(0) => break,
+                Ok(n) => n,
+                Err(e) if e.kind() == ErrorKind::UnexpectedEof => return Err(LoadError::Truncated),
+                Err(e) => return Err(LoadError::Read(e.kind())),
+            };
+            filled += n;
+            if filled > cap {
+                return Err(LoadError::TooLarge);
+            }
+            if filled > room {
+                return Err(LoadError::TotalTooLarge);
+            }
         }
     }
     buf.truncate(filled);
@@ -912,6 +929,58 @@ mod tests {
         // A bad gzip body is a read error, never source text.
         assert!(matches!(loaded.results[3], Err(LoadError::Read(_))), "{:?}", loaded.results[3]);
         assert!(matches!(loaded.results[4], Err(LoadError::Encoding(_))));
+    }
+
+    /// A gzip stream made of stored blocks (no compression), with the right CRC-32.
+    fn gzip_stored(data: &[u8]) -> Vec<u8> {
+        let mut out = vec![0x1f, 0x8b, 8, 0, 0, 0, 0, 0, 0, 0xff];
+        let blocks: Vec<&[u8]> = if data.is_empty() { vec![data] } else { data.chunks(60000).collect() };
+        for (i, block) in blocks.iter().enumerate() {
+            let len = block.len() as u16;
+            out.push(u8::from(i + 1 == blocks.len()));
+            out.extend_from_slice(&[len as u8, (len >> 8) as u8, !len as u8, (!len >> 8) as u8]);
+            out.extend_from_slice(block);
+        }
+        let mut crc = !0u32;
+        for &b in data {
+            crc ^= u32::from(b);
+            for _ in 0..8 {
+                crc = if crc & 1 == 1 { crc >> 1 ^ 0xedb8_8320 } else { crc >> 1 };
+            }
+        }
+        out.extend_from_slice(&(!crc).to_le_bytes());
+        out.extend_from_slice(&(data.len() as u32).to_le_bytes());
+        out
+    }
+
+    #[test]
+    fn a_gzip_body_obeys_the_caps_in_every_framing_and_a_cut_one_is_truncated() {
+        let cap = 1000;
+        // Chunked: a `Content-Length` of the wire size would be refused first when it is over the cap, and stored blocks are longer than their data.
+        let shapes = |n: usize| Shape::Chunked(if n % 2 == 0 { 7 } else { 500 });
+        let server = serve(move |path| {
+            let n: usize = path[1..].parse().unwrap();
+            let mut packed = gzip_stored(&vec![b'x'; if n < 2 { cap } else { cap + 1 }]);
+            if n == 4 {
+                packed.truncate(packed.len() - 10);
+            }
+            Reply::js(packed).header("Content-Encoding", "gzip").shaped(shapes(n))
+        });
+        let html: String = (0..5).map(|n| format!("<script src=/{n}></script>")).collect();
+        let (_, _, loaded) = load_html(&server, &html, &limits(cap, 1 << 20));
+        for n in 0..2 {
+            assert_eq!(loaded.results[n].as_ref().unwrap().text.len(), cap, "exact cap, shape {n}");
+        }
+        for n in 2..4 {
+            assert_eq!(loaded.results[n].as_ref().unwrap_err(), &LoadError::TooLarge, "cap + 1, shape {n}");
+        }
+        assert_eq!(loaded.results[4].as_ref().unwrap_err(), &LoadError::Truncated);
+        assert_eq!(loaded.retained, 2 * cap);
+        // The room for all resources is on the decoded size.
+        let server = serve(|path| Reply::js(gzip_stored(&vec![b'x'; if path == "/dir/c.js" { 1 } else { 400 }])).header("Content-Encoding", "gzip").shaped(Shape::Chunked(50)));
+        let (_, _, loaded) = load_html(&server, "<script src=a.js></script><script src=b.js></script><script src=c.js></script>", &limits(500, 800));
+        assert!(loaded.results[0].is_ok() && loaded.results[1].is_ok());
+        assert_eq!(loaded.results[2].as_ref().unwrap_err(), &LoadError::TotalTooLarge);
     }
 
     #[test]

@@ -986,3 +986,12 @@ Tests: `tools/fixtures/ui/nodecmp-cases.txt` has 126 cases and `chrome-nodecmp.t
 Known differences: the methods are not enumerable (all host methods are not; Chrome has them enumerable). `Element.DOCUMENT_POSITION_FOLLOWING` is `undefined` because the interface objects do not inherit from `Node`. `Node.ATTRIBUTE_NODE` and the other legacy node constants are not defined. The `ownerDocument` of the contents of a `template` is the page document (Chrome gives an inert document). A doctype has no public or system id, so two doctypes are equal when their names are. A cloned `Document` is still `NotSupportedError`.
 
 Not tested: the live staging page `/agents/<id>/configure` (no run against the real server); wall time; the `bare-layout` suite; clippy; the rows at scale 100.
+
+
+## Peak RSS of the decoders
+
+The +800 KiB of peak RSS in the compressed bodies change had no known cause. The live heap is the same in both builds (a counting allocator). The gap is in the heaps of the 6 worker threads (884 to 896 KiB before, 1,396 to 1,472 KiB after, from `smaps`), which keep the memory of the streaming decoders and of the growing body buffers.
+
+The loader now reads a gzip or deflate body whole and decodes it in one call (`Body::decoded_whole`): no window, the output size from the gzip trailer, the CRC-32 checked. Peak RSS of `/login` (two blocks of 5 runs, median): before #196 28,084 and 28,000 KiB, #196 29,028 and 28,920 KiB, #196 with the fix 28,512 and 28,584 KiB. About half of the gap is gone. The rest is not explained. Instruction rows: no row over +0.5% except `resources_load small`, which runs a server in the process and moves by about 1% between runs. Details: [resources.md](resources.md#peak-rss-of-the-decoders).
+
+Not tested: a compressed body near the 128 MiB cap on this path; the speed of the whole-body decode on its own.
