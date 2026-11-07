@@ -1767,7 +1767,7 @@ Done:
 - An own `exec` on a `RegExp` subclass in `match`, `matchAll`, `replace`, `search`, `split` and `test`. `RegExp[Symbol.species]` exists now.
 
 Changes that a page can see:
-- A host constructor reads `new.target.prototype` before it converts its arguments (Chrome order). `URLSearchParams`, `Blob`, `File` and `FormData` read it after before. Their unit tests were changed.
+- A host constructor reads `new.target.prototype` before it converts its arguments (Chrome order). `URLSearchParams`, `Blob`, `File` and `FormData` read it after the arguments before. Their unit tests were changed.
 - A non-object `prototype` gives `Object.prototype` for a host constructor (Chrome). It gave the intrinsic prototype before.
 - `Response.length` is 0, as in Chrome (it was 1).
 
