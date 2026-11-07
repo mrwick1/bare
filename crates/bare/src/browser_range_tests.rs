@@ -1,10 +1,15 @@
 //! Tests of `browser_range`: `Range` and `Selection`. The Chrome cases first, then the gates, the known gaps and the collector.
 
 use crate::browser::*;
+use crate::browser_fetch::{FetchConfig, FetchLimits};
+use crate::browser_loader::*;
 use crate::browser_topic_tests::topic_test;
+use crate::resources::test_server::{Reply, serve};
 use bare_html::tree;
 use bare_js::eval::{Error, EvalLimits};
 use bare_js::heap::HeapLimits;
+use bare_net::http::Client;
+use std::time::Duration;
 
 topic_test!(chrome_cases, "range", 79);
 topic_test!(live_cases, "liverange", 63);
@@ -129,4 +134,83 @@ fn a_utf16_cut_inside_a_pair_gives_the_replacement_character() {
     // Known deviation: Chrome keeps the lone surrogate, the host text is UTF-8.
     let mut b = page("<p id=p>a\u{1F600}b</p>");
     assert_eq!(js(&mut b, "var t = document.getElementById('p').firstChild, r = document.createRange(); r.setStart(t, 2); r.setEnd(t, 4); r.toString().length + ':' + r.toString().charCodeAt(0)"), "2:65533");
+}
+
+/// Run `html` as a page (its scripts run) and give `log.join()` and the result of the run.
+fn run_page(html: &str) -> (String, PageResult) {
+    let srv = serve(|_| Reply::new(404, Some("text/plain"), "no"));
+    let mut b = Browser::new(tree::parse(html), BrowserLimits::default(), EvalLimits { max_steps: 5_000_000, ..Default::default() }, HeapLimits::default()).expect("browser");
+    b.use_virtual_clock();
+    b.configure_fetch(FetchConfig { base_url: Some(srv.url("/page.html")), client: Client::new(), limits: FetchLimits::default() }).unwrap();
+    let r = b.run_page(PageConfig { url: srv.url("/page.html"), client: Client::new(), limits: PageLimits { quiet: Duration::from_millis(100), ..Default::default() }, fetch: None });
+    let v = b.run_script("log.join()").unwrap();
+    (b.it.display(v), r)
+}
+
+#[test]
+fn scripts_of_a_contextual_fragment_run_when_they_go_in_a_page_as_in_chrome() {
+    // The counts are the answers of Chrome 155: each script runs once, when it goes into the page, however it goes in; a clone keeps that; `innerHTML`
+    // makes inert scripts. (Chrome runs a script at once. This host runs it when the script that put it in is done, as for every inline script.)
+    let html = r#"<!doctype html><head><script>var log = []; var c = [0, 0, 0, 0, 0, 0, 0];</script></head><body><div id=r><p id=p1>Hello</p></div><script>
+        var p = document.getElementById('p1'), r = document.getElementById('r');
+        var frag = function (m) { var g = document.createRange(); g.setStart(p, 0); g.setEnd(p, 1); return g.createContextualFragment(m) };
+        var js = function (i) { return '<script>c[' + i + ']++<\/script>' };
+        var f = frag(js(0) + '<i>a</i>'); log.push('before' + c[0]); r.appendChild(f); log.push('after' + c[0]);
+        var g = frag(js(1)), s = g.firstChild; r.appendChild(g); s.remove(); r.appendChild(s);
+        r.appendChild(frag('<div>' + js(2) + '</div>'));
+        r.appendChild(frag(js(3)).firstChild.cloneNode(true));
+        var q = document.createRange(); q.setStart(p, 0); q.insertNode(frag(js(4)));
+        var d = document.createElement('div'); d.innerHTML = js(5); r.appendChild(d);
+        var e = document.createElement('script'); e.textContent = 'c[6]++'; var z = document.createRange(); z.setStart(p.lastChild, 2); z.insertNode(e);
+        </script><script>log.push(c.join(''))</script></body>"#;
+    let (log, res) = run_page(html);
+    assert_eq!(log, "before0,after0,1111101", "{res:?}");
+}
+
+#[test]
+fn a_contextual_fragment_in_a_table_select_or_foreign_context_is_a_gate() {
+    // The tree builder has no table or select insertion modes and no foreign adjusted-node rules (`bare_html::tree::fragment`): nothing is faked.
+    let mut b = page("<table id=t><tbody id=tb><tr id=tr><td id=td>a</td></tr></tbody></table><select id=s></select><svg id=v></svg><p id=ok>x</p>");
+    for (id, what) in [
+        ("t", "fragment context: table insertion modes"),
+        ("tb", "fragment context: table insertion modes"),
+        ("tr", "fragment context: table insertion modes"),
+        ("td", "fragment context: table insertion modes"),
+        ("s", "fragment context: select insertion mode"),
+        ("v", "fragment context: an element that is not in the HTML namespace"),
+    ] {
+        let src = format!("var r = document.createRange(); r.selectNodeContents(document.getElementById('{id}')); r.createContextualFragment('<td>x</td>')");
+        assert_eq!(js(&mut b, &src), format!("unsupported:{what}"), "{id}");
+    }
+    // A text in a table cell has the cell as context; a document or an `html` start has the body.
+    assert_eq!(js(&mut b, "var r = document.createRange(); r.setStart(document.getElementById('td').firstChild, 0); r.createContextualFragment('x')"), "unsupported:fragment context: table insertion modes");
+    assert_eq!(js(&mut b, "var r = document.createRange(); r.setStart(document.documentElement, 0); r.createContextualFragment('<td>x</td><i>y</i>').childNodes.length"), "2");
+}
+
+#[test]
+fn the_range_methods_never_leave_a_stale_state_after_an_error() {
+    // An error from insertNode or surroundContents does not undo the steps before it (the standard has no rollback): the range and the tree show them.
+    let mut b = page("<div id=r><p id=p1>Hello <b id=b1>big</b> world</p></div>");
+    js(&mut b, "var p = document.getElementById('p1'), r = document.createRange(); r.setStart(p.firstChild, 1); r.setEnd(p.firstChild, 4);");
+    assert_eq!(js(&mut b, "try { r.surroundContents(document.createTextNode('x')) } catch (e) { e.name }"), "HierarchyRequestError");
+    assert_eq!(js(&mut b, "p.outerHTML"), "<p id=\"p1\">Hxo <b id=\"b1\">big</b> world</p>");
+}
+
+#[test]
+fn a_range_cut_in_a_very_deep_tree_is_a_limit_not_a_stack_overflow() {
+    let n = 6000;
+    let page = format!("<!doctype html><body><div id=top>{}x{}</div>", "<div>".repeat(n), "</div>".repeat(n));
+    let r = std::thread::Builder::new()
+        .stack_size(8 << 20)
+        .spawn(move || {
+            let limits = BrowserLimits { max_tree_depth: 100_000, max_nodes: 1 << 20, ..Default::default() };
+            let mut b = Browser::new(tree::parse(&page), limits, EvalLimits { max_steps: 200_000_000, ..Default::default() }, HeapLimits::default()).expect("browser");
+            // The start is the text in the deepest div; the end is after the top div: each level on the start path is a partly selected node.
+            js(&mut b, "var t = document.getElementById('top'), x = t; while (x.firstChild && x.firstChild.nodeType === 1) x = x.firstChild; var r = document.createRange(); r.setStart(x.firstChild, 0); r.setEnd(document.body, 1);");
+            js(&mut b, "try { r.deleteContents(); 'done' } catch (e) { 'threw' }")
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+    assert!(r == "done" || r.contains("Limit") || r.contains("limit"), "{r}");
 }
