@@ -284,9 +284,6 @@ fn measure_templates(it: &mut Interp<'_>, doc: &Document, root: NodeId) -> R<(us
 fn replace(d: &Dom, it: &mut Interp<'_>, html: &str, n: NodeId, in_frag: bool, put: Put) -> V {
     let this = if let Put::Over(t) = put { Some(t) } else { None };
     let all = matches!(put, Put::All);
-    // `template.innerHTML = ...` fills the contents of the template. Scripting is off for the template and for the nodes in its contents.
-    let tpl_ctx = !in_frag && d.doc.borrow().is_html(n, "template");
-    let scripting = !(tpl_ctx || d.doc.borrow().in_template_content(n));
     let (context, ns, in_form) = {
         let doc = d.doc.borrow();
         let mut in_form = false;
@@ -301,6 +298,9 @@ fn replace(d: &Dom, it: &mut Interp<'_>, html: &str, n: NodeId, in_frag: bool, p
         }
         if in_frag { ("body".to_string(), Ns::Html, false) } else { (doc.element_name(n).to_string(), doc.element_ns(n), in_form) }
     };
+    // `template.innerHTML = ...` fills the contents of the template. Scripting is off for the template and for the nodes in its contents.
+    let tpl_ctx = !in_frag && ns == Ns::Html && context == "template";
+    let scripting = !(tpl_ctx || d.doc.borrow().in_template_content(n));
     // The contents of a template hang one level below it.
     let base = d.depth_of(it, n)? + (all && tpl_ctx) as usize;
     let lim = {
