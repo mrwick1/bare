@@ -151,7 +151,7 @@ impl<'p> Interp<'p> {
 
     fn w_class(&mut self, c: ClassId, fs: usize, ac: usize) -> Res<()> {
         let sc = self.sc_begin(RKind::Barrier);
-        self.scopes[fs].nofr = true;
+        self.fl |= FL_NOFR;
         self.sc_class += 1;
         let r = self.descend(|it| it.w_class_inner(c, fs, ac));
         self.sc_class -= 1;

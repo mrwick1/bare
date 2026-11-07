@@ -380,6 +380,8 @@ pub enum FuncMode {
     Async,
     /// `function*` or a `*` method. Async generators are not supported.
     Generator,
+    /// A plain function that always keeps its environment: a class member (the parser sets it). Its call checks nothing for frame slots.
+    Env,
 }
 
 impl Func {
@@ -393,7 +395,7 @@ impl Func {
 
     /// An ordinary `function` (not an arrow, method, async function or generator): `new` can call it.
     pub fn is_plain_ctor(&self) -> bool {
-        self.kind == FuncKind::Normal && self.mode == FuncMode::Plain
+        self.kind == FuncKind::Normal && matches!(self.mode, FuncMode::Plain | FuncMode::Env)
     }
 }
 

@@ -47,6 +47,12 @@ const FRAME: u32 = 1 << 27;
 const NOFRAME: u32 = 1 << 26;
 /// The environment that holds the frames (`Interp::new`).
 const FRAME_ENV: u32 = 1;
+/// What the first walk saw in a function (`FScope::fl`). `FL_NOFR`: something that keeps the function out of frame slots: an inner
+/// function or class, `new.target`, `super` or `delete name`. `FL_THIS`: it names `this`. `FL_EAGER`: it has a loop or a call, so
+/// one call can be long or recursive.
+const FL_NOFR: u8 = 1;
+const FL_THIS: u8 = 2;
+const FL_EAGER: u8 = 4;
 /// The most frame slots of one function. A larger one keeps its environment.
 const FR_MAX: usize = 255;
 /// In `stmt_label`: a block, a `switch` or a loop head with `let` or `const` in frame slots: `FR_MARK | base << 12 | len`. A `try`
@@ -78,9 +84,9 @@ struct RScope {
     len: u32,
     /// A scope of a function with frame slots (`fr_layout`): it makes no environment, and its names are in the frame from slot `base`.
     frame: bool,
-    /// A scope of a function that gets its frame at its second call (`FScope::eager`): its sites are not resolved before.
-    pend: bool,
     base: u32,
+    /// The function that the scope is in (an index of `Interp::scopes`; the script for a scope outside functions).
+    func: u32,
 }
 
 /// Slots of the identifier sites of one script. The scopes that they refer to are in `Interp::sc_all`.
@@ -105,7 +111,7 @@ impl<'p> Interp<'p> {
     /// Open a scope in the walk. Give the result to `sc_end`.
     fn sc_begin(&mut self, kind: RKind) -> u32 {
         let saved = self.sc_cur;
-        self.sc_all.push(RScope { parent: saved, kind, start: NONE, len: 0, frame: false, pend: false, base: 0 });
+        self.sc_all.push(RScope { parent: saved, kind, start: NONE, len: 0, frame: false, base: 0, func: self.sc_fn as u32 });
         self.sc_cur = self.sc_all.len() as u32 - 1;
         saved
     }
@@ -309,11 +315,16 @@ impl<'p> Interp<'p> {
     fn find_name_slow(&mut self, n: u32, site: u32, mut s: u32) -> Option<(u32, usize)> {
         if s & UNRES != 0 {
             let scope = (s & !(UNRES | SEEN)) - 1;
-            // A site in a function with frame slots has no environment to search, so it resolves at its first run.
-            // The first run of a site is a search. A site of a function that waits for its frame stays so (`RScope::pend`).
-            let sc = &self.sc_all[scope as usize];
-            if s & SEEN == 0 && !sc.frame || sc.pend {
+            // A site in a function with frame slots has no environment to search, so it resolves at its first run. While no
+            // function has a frame (`fr_any`), no scope is a frame scope, and the first run of a site is a search, as before.
+            if s & SEEN == 0 && !(self.fr_any && self.sc_all[scope as usize].frame) {
                 self.slots.sites[site as usize] = s | SEEN;
+                return self.lookup(n);
+            }
+            // The first call of a function that may get its frame (`FR_WAIT`) resolves nothing: a site can run twice in one call
+            // (`typeof x` reads its site twice), and a resolution for an environment would not suit the frame.
+            let sc = &self.sc_all[scope as usize];
+            if !sc.frame && self.scopes[sc.func as usize].fr == FR_WAIT {
                 return self.lookup(n);
             }
             s = self.sc_resolve(n, scope);
@@ -351,21 +362,17 @@ impl<'p> Interp<'p> {
     }
 }
 
-/// The state of a function for frame slots (`FScope::fr`). `FR_ENV`: always an environment. A function that may have frame slots
-/// and has a loop or a call (`FScope::eager`: one call can be long or recursive) starts in `FR_WAIT`: its first call builds the
-/// frame. Another one starts in `FR_NEW`: its first call (`FR_FIRST`) runs in an environment, with its sites not resolved
-/// (`RScope::pend`), and the next call builds the frame. So a function that runs once pays no layout. `FR_ON`: frame slots.
+/// The state of a function for frame slots (`FScope::fr`). `FR_ENV`: always an environment (a class member, an async function or
+/// a generator, a function in a class body, or a function that the decision below refused). The first walk gives any other
+/// function `FR_EAGER` if it has a loop or a call (`FScope::eager`: one call can be long or recursive) or `FR_NEW`. The first
+/// walk decides nothing else. The first call of an `FR_NEW` function sets `FR_WAIT` and runs in an environment, with its sites
+/// not resolved (they run once). The first call of an `FR_EAGER` function and the next call of an `FR_WAIT` function decide
+/// (`fr_gate`). So a function that is never called pays nothing, and one that runs once pays one store. `FR_ON`: frame slots.
 const FR_ENV: u8 = 0;
 const FR_NEW: u8 = 1;
-const FR_FIRST: u8 = 2;
+const FR_EAGER: u8 = 2;
 const FR_WAIT: u8 = 3;
 const FR_ON: u8 = 4;
-
-/// How `call_script` runs a function that may have frame slots.
-enum Gate {
-    Env,
-    Frame,
-}
 
 // ---- Frame slots
 //
@@ -381,7 +388,9 @@ enum Gate {
 //
 // When: a function with a loop or a call (`FScope::eager`) gets its frame at its first call: one call can be long or recursive.
 // A function with neither gets it at its second call, so a function that runs once pays no layout. Its first call keeps an
-// environment, and `RScope::pend` keeps its sites unresolved, so no site meets the frame layout resolved for an environment.
+// environment, and a site of it resolves nothing during that call (`find_name_slow`, `pat_frame_slow`), so no site meets the frame
+// layout resolved for an environment. The one other way to run a site twice is a second call of the function while the first
+// runs (a getter that calls back): `fr_gate` sees the first call on the call stack and keeps the environment for good.
 //
 // The layout (`fr_layout`) gives each name of each scope of the function a slot (parameters first, then the `var`s of the
 // function, then its `let` and `const`, then the scopes inside in source order) and builds the template of the frame: the
@@ -467,39 +476,37 @@ impl<'p> Interp<'p> {
         out.truncate(w);
     }
 
-    /// The state of a function for frame slots, at the end of its walk (`lo`: its first scope). A class member, a constructor, an
-    /// async function, a generator, a function with a parameter pattern and a named function expression (it binds its own name)
-    /// keep their environment.
-    fn fr_state(&mut self, fid: FuncId, lo: u32, is_expr: bool) {
+    /// Whether a function may have frame slots. A class member, a constructor, an async function, a generator, a function with a
+    /// parameter pattern and a named function expression (it binds its own name) keep their environment. The first walk saw the
+    /// rest (`FScope`). A function in a class body keeps its environment too: the end of its walk set `FR_ENV`.
+    fn fr_leaf(&self, fid: FuncId) -> bool {
         let f = self.prog.func(fid);
-        let hi = self.sc_all.len() as u32;
-        let fsd = &mut self.scopes[fid.index()];
-        fsd.sc_lo = lo;
-        fsd.sc_hi = hi;
-        let cand = !fsd.nofr
+        let fsd = &self.scopes[fid.index()];
+        let is_expr = matches!(self.sc_all[fsd.sc_lo as usize].kind, RKind::Fn(_, true));
+        fsd.fl & FL_NOFR == 0
             && !fsd.uses_args
-            && (f.kind == FuncKind::Arrow || !fsd.uses_this)
+            && (f.kind == FuncKind::Arrow || fsd.fl & FL_THIS == 0)
             && matches!(f.kind, FuncKind::Normal | FuncKind::Arrow | FuncKind::Method | FuncKind::Getter | FuncKind::Setter)
             && !f.is_async()
             && !f.is_generator()
             && f.simple_params
             && !(is_expr && f.name.is_some() && f.kind == FuncKind::Normal)
-            && self.sc_class == 0;
-        if cand {
-            if fsd.eager {
-                fsd.fr = FR_WAIT;
-            } else {
-                fsd.fr = FR_NEW;
-                self.sc_all[lo as usize..hi as usize].iter_mut().for_each(|r| r.pend = true);
-            }
-        }
     }
 
-    /// A call of a function with state `FR_FIRST` or `FR_WAIT`: how to run it.
+    /// A call of a function with state `FR_EAGER` or `FR_WAIT`: `true` if it runs in a frame. Decided once. The state `FR_ENV` stays
+    /// if the function is not a leaf, or its frame cannot be made.
     #[cold]
-    fn fr_gate(&mut self, fid: FuncId) -> Gate {
-        // The first call still runs (a recursive call, or a getter that calls back): it keeps its environment.
-        if self.scopes[fid.index()].fr == FR_FIRST || !self.fr_layout(fid) { Gate::Env } else { Gate::Frame }
+    fn fr_gate(&mut self, fid: FuncId) -> bool {
+        let me = fid.index();
+        // The first call has not returned (a recursive call, or a getter that calls back): its sites resolve for an environment,
+        // so this function keeps its environment.
+        let cur = self.cur as u32;
+        let running = self.scopes[me].fr == FR_WAIT && self.stk.frames.iter().any(|f| f.script == cur && matches!(f.at, Where::Func(x) if x == fid));
+        if running || !self.fr_leaf(fid) {
+            self.scopes[me].fr = FR_ENV;
+            return false;
+        }
+        self.fr_layout(fid)
     }
 
     /// Give the scopes of a function that may have frame slots their slots, and build the template of its frame in `fr_pool`.
@@ -509,16 +516,14 @@ impl<'p> Interp<'p> {
     fn fr_layout(&mut self, fid: FuncId) -> bool {
         let me = fid.index();
         self.scopes[me].fr = FR_ENV;
-        let (lo, hi) = (self.scopes[me].sc_lo as usize, self.scopes[me].sc_hi as usize);
+        let lo = self.scopes[me].sc_lo as usize;
+        let hi = lo + self.sc_all[lo..].iter().take_while(|r| r.func as usize == me).count();
         let prog = self.prog.clone();
         let f = *prog.func(fid);
         let mut pool = std::mem::take(&mut self.fr_pool);
         let mut names = std::mem::take(&mut self.fr_names);
         let first = pool.len();
         let mut ok = true;
-        for r in &mut self.sc_all[lo..hi] {
-            r.pend = false;
-        }
         for s in lo..hi {
             self.fr_binds(self.sc_all[s].kind, &mut pool, &mut names);
             if pool.len() - first > FR_MAX {
@@ -546,6 +551,7 @@ impl<'p> Interp<'p> {
             }
             let fsd = &mut self.scopes[me];
             (fsd.fr, fsd.fr_off, fsd.fr_len) = (FR_ON, first as u32, (pool.len() - first) as u32);
+            self.fr_any = true;
         } else {
             pool.truncate(first);
         }
@@ -556,6 +562,7 @@ impl<'p> Interp<'p> {
     }
 
     /// Call a function with frame slots: no environment, the variables in a new frame. The caller selected the script of `fid`.
+    #[inline(never)]
     fn call_frame(&mut self, fid: FuncId, cenv: u32, new: bool, args: &[Value], saved: (u32, bool, usize)) -> Res<Value> {
         let (saved_env, saved_strict, saved_script) = saved;
         let f = *self.prog.func(fid);
@@ -602,7 +609,8 @@ impl<'p> Interp<'p> {
             let scope = (s & !(UNRES | SEEN)) - 1;
             let sc = &self.sc_all[scope as usize];
             if !sc.frame {
-                if !sc.pend {
+                // A function that may get its frame (before its decision) must keep its sites unmarked.
+                if self.scopes[sc.func as usize].fr == FR_ENV {
                     self.slots.sites[site as usize] = NOFRAME;
                 }
                 return None;

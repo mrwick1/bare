@@ -301,3 +301,12 @@ fn a_call_that_comes_back_into_a_function_during_its_first_call_still_works() {
                [f(1), f(1), f(2), f(0)].join()";
     assert_eq!(run_one(src), "6,6,8,2");
 }
+
+#[test]
+fn a_site_that_runs_twice_in_the_first_call_does_not_resolve_for_the_environment() {
+    // `typeof v` reads its site twice in one call, `v += 1` and `v++` read and write it, and a function without a loop or a call
+    // gets its frame at the second call.
+    assert_eq!(run_one("function r(v) { var t = typeof v; v += 1; v++; return t + v; } [r(1), r(2), r(3), r(4)].join()"), "number3,number4,number5,number6");
+    assert_eq!(run_one("function r(v) { let t = typeof v; { let u = typeof t; v = u + v; } return v; } [r(1), r(2), r(3)].join()"), "string1,string2,string3");
+    assert_eq!(run_one("function r(v) { return typeof v; } [r(1), r('a'), r(null), r(undefined)].join()"), "number,string,object,undefined");
+}
