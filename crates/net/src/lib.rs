@@ -3,6 +3,8 @@
 pub mod dns;
 mod encoding;
 // `pub mod` makes the module visible to other crates: `bare_net::dns`.
+mod h2;
+mod hpack;
 pub mod http;
 pub mod parallel;
 pub mod tcp;

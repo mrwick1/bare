@@ -171,3 +171,26 @@ fn http11_alpn_is_negotiated_and_a_server_with_no_common_alpn_aborts() {
         Ok(_) => panic!("connected to a server with no common ALPN"),
     }
 }
+
+#[test]
+fn h2_is_negotiated_when_offered_and_the_server_picks_it() {
+    need_openssl!();
+    let pki = Pki::new();
+    pki.leaf("good", "localhost", None);
+    // The server knows both and prefers h2 (the -alpn list is in order of preference).
+    let srv = Server::start(&pki, "good", &["-WWW", "-alpn", "h2,http/1.1"], false);
+    let c = client::connect_h2(dial(srv.port), "localhost", &roots(&pki)).unwrap();
+    assert!(c.alpn_h2() && !c.alpn_http11());
+    drop(c); // `s_server` serves one connection at a time
+    // The same server with a client that does not offer h2 gets http/1.1.
+    let c = client::connect(dial(srv.port), "localhost", &roots(&pki)).unwrap();
+    assert!(c.alpn_http11() && !c.alpn_h2());
+    // A server that only knows http/1.1: the client that offers h2 falls back to it.
+    let srv = Server::start(&pki, "good", &["-WWW", "-alpn", "http/1.1"], false);
+    let c = client::connect_h2(dial(srv.port), "localhost", &roots(&pki)).unwrap();
+    assert!(c.alpn_http11() && !c.alpn_h2());
+    // A server with no ALPN at all: neither flag, and the caller speaks HTTP/1.1.
+    let srv = Server::start(&pki, "good", &["-WWW"], false);
+    let c = client::connect_h2(dial(srv.port), "localhost", &roots(&pki)).unwrap();
+    assert!(!c.alpn_http11() && !c.alpn_h2());
+}

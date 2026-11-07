@@ -88,7 +88,7 @@ pub fn client_hello() -> Vec<u8> {
     let public = x25519::public_key(r[..32].try_into().unwrap());
     let mut ch = [0u8; hello::MAX_CLIENT_HELLO_LEN];
     let n = hello::encode_client_hello(
-        &ClientHelloParams { random: r[32..64].try_into().unwrap(), session_id: &r[64..], x25519_public: &public, server_name: HOST.as_bytes() },
+        &ClientHelloParams { random: r[32..64].try_into().unwrap(), session_id: &r[64..], x25519_public: &public, server_name: HOST.as_bytes(), alpn_h2: false },
         &mut ch,
     )
     .unwrap();
