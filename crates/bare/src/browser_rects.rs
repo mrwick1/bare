@@ -253,7 +253,7 @@ impl<'a> Pass<'a> {
         let (mut units, mut prev) = (0, false);
         for c in text[s..o].chars() {
             let sp = is_space(c);
-            if !(collapse && sp) || !prev {
+            if !(collapse && sp && prev) {
                 units += font::width_of(c);
             }
             prev = sp;
@@ -270,7 +270,7 @@ impl<'a> Pass<'a> {
         let Some(style) = self.g.styles.style(parent) else { return Vec::new() };
         let (ws, m) = (WhiteSpace::of(style), Metrics::of(style));
         let frags: Vec<&Fragment> = self.main.of(t).map(|(_, f)| f).filter(|f| matches!(f.kind, Frag::Text { .. })).collect();
-        let shown = |from: usize, to: usize| text[from..to].char_indices().any(|(i, c)| !(ws.collapse && is_space(c)) || !text[..from + i].chars().next_back().is_some_and(is_space));
+        let shown = |from: usize, to: usize| text[from..to].char_indices().any(|(i, c)| !(ws.collapse && is_space(c) && text[..from + i].chars().next_back().is_some_and(is_space)));
         let x_at = |f: &Fragment, s: usize, o: usize| self.x_at(t, text, f, s, o, m);
         let piece = |f: &Fragment, x0: f32, x1: f32| {
             let r = self.at(f, t);

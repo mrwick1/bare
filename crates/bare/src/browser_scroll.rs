@@ -4,6 +4,8 @@
 //! - Layout never changes for a scroll. `bare_layout::scroll::areas` finds the containers and their content size once per layout
 //!   (`Frame::areas`). The offsets live here (`Dom::scrolling`, a `bare_paint::Scroll`): the page, and one pair per container.
 //!   Paint and hit testing add them (`bare-paint`). A scroll step is: change an offset, draw the display list again.
+//! - The rectangles of `getBoundingClientRect` come from `Geo::client_rect`. For a culled inline (no box fragment) they come from
+//!   `browser_rects` (`getClientRects` is there too), which moves them with `Geo::shift`.
 //! - The page bars. The window has a vertical bar when the page is taller than the window and a horizontal one when it is wider
 //!   (`overflow: scroll` always, `hidden` never). A bar takes 15 px of the layout width or height, so the layout runs again at the
 //!   smaller size. The state is kept (`Dom::layout_areas`): a page that does not change its bars is laid out once.

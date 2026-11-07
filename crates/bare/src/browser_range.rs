@@ -677,6 +677,7 @@ fn text_of(doc: &Document, n: NodeId) -> Option<String> {
 
 /// The "extract" steps of the standard for the Text or Comment `n` (its text is `text`), units `from` to `to`: a clone of that part goes to `frag`
 /// (`Extract`, `Clone`), and the part goes from `n` (`Extract`, `Delete`).
+#[allow(clippy::too_many_arguments)]
 fn cut_data(d: &Dom, it: &mut Interp<'_>, m: Mode, frag: NodeId, n: NodeId, text: &str, from: u32, to: u32) -> R<()> {
     if m != Mode::Delete {
         let c = clone_tree(d, it, n, false)?;

@@ -547,7 +547,7 @@ Cost of these four topics, against main d6d9b92: 84 rows (52 browser and engine 
 `XMLHttpRequest`, `XMLHttpRequestUpload`, `XMLHttpRequestEventTarget` and `ProgressEvent` now run, on the network path of `fetch`. `send()` puts the request in the queue of `fetch`, so the same origin rule, the same queue and byte caps, the same body code and the same redirect rules apply. There is no second network stack. It supports `open`, `setRequestHeader`, `send` with a string, URLSearchParams, ArrayBuffer or a view, `abort`, `readyState` and the constants, `status`, `statusText`, `responseURL`, `getResponseHeader`, `getAllResponseHeaders` (lower case, sorted), `responseType` (`""`, `text`, `json`, `arraybuffer`, `blob`), `response`, `responseText`, `timeout`, `withCredentials`, `overrideMimeType`, the eight events as `ProgressEvent` on the object and on `upload`, and the `on*` handlers. Gates: a synchronous request, a user name or password, `responseType = "document"`, a Document, Blob or FormData body, a token method, a lower-case `patch`, and another origin. `timeout` is checked when the reply arrives. 68 cases in `tools/fixtures/ui/xhr-cases.txt` match headless Chrome (event order, headers, statuses, bodies). 5 more Rust tests cover the lazy globals, the gates, a timeout, a page that leaves and the GC. Against main d6e9466 all 27 rows measured are below +0.5% in instructions (worst `loader_load blocking 1`, +0.322%). Load rows (`tools/js/xhr_load.sh`): 1, 100 and 1,000 sequential GETs take 0.3 ms, 3.5 ms and 31.8 ms, peak RSS 8.5, 8.8 and 9.9 MiB, and the live wrapper, event and listener counts return to the baseline. See [resources.md](resources.md#xmlhttprequest).
 
 
-`document.createRange()`, `Range`, `AbstractRange`, `getSelection()`, `document.getSelection()` and `Selection` now run. Ranges hold boundary points and apply the standard's rules for the order and the tree. The editing methods (`deleteContents`, `extractContents`, `cloneContents`, `insertNode`, `surroundContents`), the boxes (`getBoundingClientRect`, `getClientRects`) and a few selection methods (`extend`, `setBaseAndExtent`, `containsNode`, `modify`, `deleteFromDocument`) are gates. 79 Chrome cases match. A range follows DOM changes since the live range entry below. `HTMLElement` `innerText`, `offsetTop`, `offsetLeft`, `offsetParent` and `click()` were added with the observers; `offsetWidth` and `offsetHeight` already existed. Against main c376437 no row of 52 is over +0.5% (worst `loader_load mixed 1`, +0.17%). See [resources.md](resources.md#range-and-selection).
+`document.createRange()`, `Range`, `AbstractRange`, `getSelection()`, `document.getSelection()` and `Selection` now run. Ranges hold boundary points and apply the standard's rules for the order and the tree. The editing methods and the boxes were gates here and were built later (section "Range operations, `getClientRects` and range rectangles"). A few selection methods (`extend`, `setBaseAndExtent`, `containsNode`, `modify`, `deleteFromDocument`) are gates. 79 Chrome cases match. A range follows DOM changes since the live range entry below. `HTMLElement` `innerText`, `offsetTop`, `offsetLeft`, `offsetParent` and `click()` were added with the observers; `offsetWidth` and `offsetHeight` already existed. Against main c376437 no row of 52 is over +0.5% (worst `loader_load mixed 1`, +0.17%). See [resources.md](resources.md#range-and-selection).
 
 `fetch`, `new Request` and `XMLHttpRequest` now send PUT, PATCH, DELETE, HEAD and OPTIONS (`bare_net::http::Method` had GET and POST). The client sends a body with `Content-Length` for any method but GET and HEAD, and `Content-Length: 0` for a POST or PUT without a body, as Chrome does. A reply to HEAD has no body, and the keep-alive connection serves the next request. 303 turns all methods but GET and HEAD into GET, 301 and 302 turn only POST into GET, and 307 and 308 keep method and body. A body on GET or HEAD is a `TypeError` in `fetch` and is ignored in XHR. `CONNECT`, `TRACE` and `TRACK` throw `TypeError` (`fetch`) or `SecurityError` (XHR). Gates: a token method and a lower-case `patch`. There is still no CORS, so a cross-origin request of any method is `Unsupported` and no preflight exists. 39 cases in `tools/fixtures/ui/methods-cases.txt` were recorded from headless Chrome and 38 match (the other is the `patch` gate). Against main 71ed495 all 23 rows measured are below +0.5% in instructions (worst `loader_load mixed 1`, +0.084%). See [resources.md](resources.md#http-methods).
 
@@ -1329,7 +1329,7 @@ Gaps (Chrome differs):
 - A `top` or `bottom` box that has a shifted child that is not culled sits differently in Chrome. The case was left out of the fixture.
 - Grid `align-items: baseline` is not built (it was not before).
 - The `ex` unit is not exact, so the fixtures use `em`.
-- `getClientRects` is not built. `getBoundingClientRect` of a culled span is 0, 0.
+- `getClientRects` was built later; see "Range operations, `getClientRects` and range rectangles". `getBoundingClientRect` of a culled span is now the union of its content rectangles.
 - The bottom UA margin of a checkbox is 3px now. A line with a checkbox is taller, as in Chrome; the radio margin did not change.
 
 Not tested: fonts other than Noto Sans Mono; `vertical-align` on table cells with the new baseline rules in a page with `rowspan` (only the first-row rule was checked); `vertical-align` on `inline-table`; a line with more than 1,000 `top` or `bottom` boxes; RTL text; `writing-mode`; a live staging page; the memory cost (only instructions were measured).
@@ -1418,3 +1418,47 @@ Cost (`tools/js/instr.sh`, minimum of 3, glibc, origin/main 2187790 against this
 Tests: `cargo test --workspace --no-fail-fast` on the rebased tree (2187790) 2,720 passed, 0 failed. An earlier run on e164721 had `bare-net` `a_request_over_the_stream_limit_waits_for_a_slot` fail once, in a run beside other builds. It passed in the next runs and in 3 runs alone (timing, in code that this change does not touch). 40 of the 41 `tools/js/*_check.sh` match Node (`number_check` 22 cases, `eval_check` 380, `generator_check` 50, `async_check` 105, `class_check` 107). `parse_check.sh` needs `acorn` and fails to start.
 
 Not tested: the rows at scale 100; `parse_check.sh`; the live staging pages; wall time; `codegen-units=1` on the whole workspace (only 5 examples); other allocators than glibc and jemalloc; memory of the `bare` examples (only `scripts_load`).
+
+## Range operations, `getClientRects` and range rectangles
+
+The DOM Standard Range operations and the CSSOM View rectangles are built to the numbers of Chrome 155. Before, these methods were gates. Host code is in `browser_range.rs`, `browser_rects.rs` (new), `browser_scroll.rs`, `browser_geometry.rs`, `browser_fragment.rs`. Layout changed in `crates/layout/src/lib.rs` and `inline.rs`.
+
+Change:
+- Compare: `compareBoundaryPoints`, `comparePoint`, `isPointInRange`, `intersectsNode`, with the `WrongDocumentError`, `NotSupportedError`, `InvalidNodeTypeError` and `IndexSizeError` cases.
+- Edit: `deleteContents`, `extractContents`, `cloneContents`, `insertNode` and `surroundContents` follow the standard steps. Live ranges move, mutation records are queued, and the `HierarchyRequestError` and `InvalidStateError` cases are thrown before any change.
+- `createContextualFragment` reuses the fragment parser of `innerHTML`. A script in the fragment runs after the inserting script ends, not at once.
+- `Element.getClientRects`: one rectangle for each box fragment, for each line of an inline box. An element with no box gives an empty list.
+- Culled inline boxes (a `span` with nothing to paint) have no fragment. They get the rectangles of their content: one for each run of text and atomic boxes on a line, and the rectangles of child elements in between (the Chrome rule). An empty inline, a `br` and a `pre` newline have no fragment either. For these the layout runs a second time with every inline box kept (`bare_layout::layout_uncull`). The second layout runs only when a read needs it, and the flag is off again at once.
+- `Range.getClientRects` and `Range.getBoundingClientRect` follow `Range::GetBorderAndTextQuads`: elements the range holds whole give their rectangles, and each Text node gives the rectangles of its part. A part with no shown letter gives a rectangle of 0 width.
+- `getBoundingClientRect` of an element with no fragment is the union of the rectangles that are not empty (the culled span gave 0, 0 before).
+- The list is an `Array` with an own `item` that is not enumerable. One `item` function exists for each realm. A page that reads no rectangle makes no state for the list.
+
+Check:
+- `tools/fixtures/ui/rangeops-cases.txt`: 116 cases, `chrome-rangeops.txt`. One case, `wpt-cut-matrix`, cuts 400 ranges with clone, extract and delete and compares a hash of each result.
+- `tools/fixtures/ui/rects-cases.txt`: 54 cases, `chrome-rects.txt`. `wpt-rects-matrix` reads 529 ranges and all substrings of a text. `wpt-rects-matrix-mixed` and `range-br-and-empty-span` cover mixed fonts, a `br` and an empty span. All cases match Chrome with a 0.1 px tolerance.
+- 8 new Rust tests in `browser_range_tests.rs`: script timing of a contextual fragment, its table, select and foreign gates, no stale state after an error, a deep tree (a limit, not a stack overflow), a page that reads no rectangle, detached nodes, SVG and columns as gates, and the second layout with its flag off again.
+- `cargo test -p bare --lib`: 1017 passed, 0 failed, 5 ignored. `cargo test -p bare-layout`: 140 passed. Clippy gives no warning in the new code.
+
+Cost (`tools/js/instr.sh`, `instructions:u`, minimum of 3, release, origin/main 2187790 against this change, each in its own `CARGO_TARGET_DIR`): 264 rows. They are 176 `bare-stress` layout rows (base and 10 times), `geometry_load`, `scroll_load`, `sticky_load`, and the `fragment`, `selection`, `range`, `focus`, `form`, `browser`, `style`, `attr`, `observer`, `nodelist`, `loader` and `select` loads at scale 1 and 10 (`select` at 100 and 1,000). No row is over +0.5%.
+
+| row | main | this change | change |
+| --- | ---: | ----------: | -----: |
+| `browser_load svg 1` | 168,803,561 | 169,263,878 | +0.273% |
+| `style_load shorthand 10` | 1,363,617,678 | 1,367,168,095 | +0.260% |
+| `observer_load raf 10` | 1,468,545,425 | 1,472,255,393 | +0.253% |
+| `observer_load raf 1` | 153,564,736 | 153,938,672 | +0.244% |
+| `form_load gates 10` (best) | 1,375,589,064 | 1,371,578,177 | -0.292% |
+
+No jemalloc cross-check was needed. The cause of the small rise on host rows was not isolated.
+
+Gaps (Chrome differs):
+- The rectangles are plain objects, not `DOMRect`. The list is an `Array` (`Array.isArray` is true), with no `DOMRectList` global and no `toStringTag`. The methods are not enumerable.
+- Fragment contexts of `createContextualFragment` that are a `table`, `select` or `svg` element are gates.
+- `getClientRects` of an SVG or MathML element, or of a `col` or `colgroup`, is a gate. A range that holds a `col` or `colgroup` gives no rectangle for it.
+- `display: contents` is not a value of the CSS engine, so the element has a box here and none in Chrome. `getBoundingClientRect` of it is not 0.
+- An empty span at a soft wrap goes to the start of the next line. Chrome keeps it at the end of the previous line.
+- A `pre-wrap` line that ends in spaces gives one rectangle here, two in Chrome.
+- A tab counts as one letter. A `text-transform` that changes the number of letters is not measured as Chrome does. The margin of an atomic box in a culled span is ignored.
+- `document.implementation` is absent, so a test that makes a second document cannot run.
+
+Not tested: a real editor or a library that calls these methods (ProseMirror, Slate); ranges over `iframe` documents; a range over a 100,000-node tree; vertical writing modes; RTL text; `transform` on an ancestor of a range; fonts other than Noto Sans Mono; the memory cost (only instructions were measured); the live staging login.
