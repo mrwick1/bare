@@ -971,6 +971,7 @@ Tests: `heap::tests::keys_that_start_with_a_digit_are_told_from_index_keys` (the
 What is left: 92% of the cost of a key is the evaluator, about 310 instructions for each step. A larger gain needs a lower cost for each step (frame slots for calls and variables, a cheaper result type, fewer re-dispatches of the same node) or fewer steps (compile to a form that does not walk the tree). Both are work in the evaluator, not in the host. A page that keeps its state in one object, as this one does, re-renders every field for each key, in Chrome too.
 
 Not tested: the live Next.js page (the repro is a React 19 form with the same parts, not its code); the Radix `react-collection` of 2024 and later (`class extends Map`: bare stops with `subclassing a native constructor`, so a page that uses it cannot run); a page with React Server Components; the cost of a key in a field that sits in a long list; the rows `wrapper_load`, `numeric_load`, `regexp_load`, `handler_load`, `xhr_load`, `sticky_load`; scale 100; a quiet machine for wall time.
+
 ## `Node.compareDocumentPosition` and the other node comparisons
 
 Problem: the staging page `/agents/<id>/configure` (React 19 and Radix) stopped with `TypeError: t.compareDocumentPosition is not a function`. `Node.prototype` had no `compareDocumentPosition`, `isSameNode`, `isEqualNode`, `lookupNamespaceURI`, `lookupPrefix` or `isDefaultNamespace`, and no `Node.DOCUMENT_POSITION_*` constants.
