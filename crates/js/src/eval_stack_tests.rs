@@ -212,7 +212,7 @@ fn many_errors_keep_the_cost_and_the_frames_flat() {
 fn failed_constructor_environment_does_not_mark_the_next_call_as_new() {
     big(|| {
         let mut it = realm(lim());
-        it.run_script("function C() {} function ordinary() { return Error('later').stack; }").unwrap();
+        it.run_script("function C() { this.x = 1; } function ordinary() { return Error('later').stack; }").unwrap();
         let cap = it.limits.max_envs;
         it.limits.max_envs = 0;
         assert_eq!(out(&mut it, "new C()"), "limit:Envs");

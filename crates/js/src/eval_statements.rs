@@ -66,6 +66,8 @@ struct STry {
     /// Completion of the block or the catch while the finalizer runs.
     pending: Option<Ex>,
     saved_ret: Value,
+    /// The `catch` binds in frame slots: it makes no environment.
+    frame: bool,
 }
 
 enum SFrame {
@@ -182,6 +184,13 @@ impl<'p> Interp<'p> {
                     return Ok(SGo::Done(Ok(())));
                 }
                 self.sf_room()?;
+                let mark = self.stmt_label[s.index()];
+                if mark != 0 {
+                    // In a function with frame slots: no environment, only the TDZ again (`eval_scope.rs`).
+                    self.fr_tdz(mark);
+                    self.sf_put(st, SFrame::List { l, i: 0, scope: None });
+                    return Ok(SGo::Done(Ok(())));
+                }
                 let saved = self.env;
                 let env = self.new_env(saved, false)?;
                 self.env = env;
@@ -235,11 +244,16 @@ impl<'p> Interp<'p> {
                         if let StmtKind::Var { kind, decls } = vs.kind
                             && kind != VarKind::Var
                         {
-                            let env = self.new_env(self.env, false)?;
-                            self.env = env;
-                            per_iter = true;
-                            for d in prog.list(decls) {
-                                self.declare_pat_lexical(prog.decl(d).target, if kind == VarKind::Let { MUT } else { 0 });
+                            let mark = self.stmt_label[v.index()];
+                            if mark != 0 {
+                                self.fr_tdz(mark);
+                            } else {
+                                let env = self.new_env(self.env, false)?;
+                                self.env = env;
+                                per_iter = true;
+                                for d in prog.list(decls) {
+                                    self.declare_pat_lexical(prog.decl(d).target, if kind == VarKind::Let { MUT } else { 0 });
+                                }
                             }
                         }
                         self.tick()?;
@@ -268,7 +282,7 @@ impl<'p> Interp<'p> {
                 if top {
                     self.completion = Value::Undefined;
                 }
-                let t = STry { handler, finalizer, env: self.env, strict: self.strict, phase: SPhase::Block, catch_env: None, pending: None, saved_ret: Value::Undefined };
+                let t = STry { handler, finalizer, env: self.env, strict: self.strict, phase: SPhase::Block, catch_env: None, pending: None, saved_ret: Value::Undefined, frame: self.stmt_label[s.index()] != 0 };
                 self.sf_push(st, SFrame::Try(t))?;
                 Ok(SGo::Stmt(block))
             }
@@ -279,14 +293,17 @@ impl<'p> Interp<'p> {
                 }
                 let d = self.eval_expr(disc)?;
                 let any_lex = prog.list(cases).any(|c| self.has_lexical(prog.case(c).body));
+                let mark = if any_lex { self.stmt_label[s.index()] } else { 0 };
                 self.sf_room()?;
                 let saved = self.env;
-                let env = if any_lex { Some(self.new_env(saved, false)?) } else { None };
+                let env = if any_lex && mark == 0 { Some(self.new_env(saved, false)?) } else { None };
                 if let Some(e) = env {
                     self.env = e;
                 }
                 self.sf_put(st, SFrame::Switch { cases, next: 0, saved, env, labels });
-                if any_lex {
+                if mark != 0 {
+                    self.fr_tdz(mark);
+                } else if any_lex {
                     for c in prog.list(cases) {
                         self.declare_scope(prog.case(c).body, false)?;
                     }
@@ -577,9 +594,11 @@ impl<'p> Interp<'p> {
     }
 
     fn catch_enter(&mut self, t: &mut STry, c: Catch, v: Value) -> Ex {
-        let env = self.new_env(t.env, false)?;
-        t.catch_env = Some(env);
-        self.env = env;
+        if !t.frame {
+            let env = self.new_env(t.env, false)?;
+            t.catch_env = Some(env);
+            self.env = env;
+        }
         if let Some(p) = c.param {
             self.bind_pattern(p, v, Bind::Declare)?;
         }

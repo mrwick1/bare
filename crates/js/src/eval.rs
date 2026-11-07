@@ -367,6 +367,7 @@ const INIT: u8 = 1;
 const MUT: u8 = 2;
 const SELF: u8 = 4;
 
+#[derive(Clone, Copy)]
 struct Binding {
     name: u32,
     flags: u8,
@@ -452,6 +453,21 @@ enum Callee {
 struct FScope {
     vars: Vec<u32>,
     uses_args: bool,
+    /// The first walk saw something that keeps the function out of frame slots (see `eval_scope.rs`): an inner function or class,
+    /// `new.target`, `super` or `delete name`. `uses_this`: the function names `this`.
+    nofr: bool,
+    uses_this: bool,
+    /// The function has a loop or a call, so one call can be long or recursive: it gets its frame at the first call. Other
+    /// functions get it at the second call, so that a function that runs once pays nothing.
+    eager: bool,
+    /// The state of the function for frame slots: `FR_ENV` and the others (see `eval_scope.rs`).
+    fr: u8,
+    /// The scopes of this function in `Interp::sc_all`: `sc_lo..sc_hi`.
+    sc_lo: u32,
+    sc_hi: u32,
+    /// The template of the frame, as a call starts: `Interp::fr_pool[fr_off..fr_off + fr_len]` (see `fr_layout`). Valid in `FR_ON`.
+    fr_off: u32,
+    fr_len: u32,
 }
 
 const TYPE_ERROR: usize = 1;
@@ -543,6 +559,15 @@ pub struct Interp<'p> {
     sc_pool: Vec<u32>,
     sc_cur: u32,
     sc_fn_expr: bool,
+    /// The function (an index of `scopes`) and the number of class bodies that the first walk is in.
+    sc_fn: usize,
+    sc_class: u32,
+    /// Where the frame of the running function starts in `envs[FRAME_ENV].bindings` (see `eval_scope.rs`).
+    fp: usize,
+    /// The frame templates of all functions, and the scratch of `fr_layout`.
+    fr_pool: Vec<Binding>,
+    fr_names: Vec<u32>,
+    fr_ends: Vec<u32>,
     // environments and functions
     envs: Vec<Env>,
     free_envs: Vec<u32>,
@@ -713,6 +738,12 @@ impl<'p> Interp<'p> {
             sc_pool: Vec::new(),
             sc_cur: NONE,
             sc_fn_expr: false,
+            sc_fn: 0,
+            sc_class: 0,
+            fp: 0,
+            fr_pool: Vec::new(),
+            fr_names: Vec::new(),
+            fr_ends: Vec::new(),
             envs: Vec::new(),
             free_envs: Vec::new(),
             gc_allocs: 0,
@@ -767,6 +798,9 @@ impl<'p> Interp<'p> {
         h!(it, it.heap.set_lazy_prototype(it.object_proto, it.k_prototype, it.k_constructor));
         // The global lexical environment: id 0, never freed.
         it.envs.push(Env { parent: NONE, bindings: Vec::new(), index: None, this: Some(Value::Object(global)), captured: true, live: true, var_scope: true });
+        // Environment 1 holds the frames of functions that keep their variables in slots (`eval_scope.rs`). It is never freed
+        // and no closure reaches it, and it is empty while no call runs. It is not counted in `live_envs`.
+        it.envs.push(Env { parent: NONE, bindings: Vec::new(), index: None, this: None, captured: true, live: true, var_scope: true });
         it.live_envs = 1;
         Ok(it)
     }
@@ -880,6 +914,7 @@ impl<'p> Interp<'p> {
         }
         let mut seen: FxSet<ObjId> = FxSet::default();
         let mut env_seen = vec![false; self.envs.len()];
+        env_seen[FRAME_ENV as usize] = true;
         let mut work: Vec<Value> = vec![Value::Object(self.global), Value::Object(self.object_proto), Value::Object(self.function_proto), Value::Object(self.array_proto), self.ret, self.completion];
         work.extend(self.error_protos.iter().map(|&o| Value::Object(o)));
         self.ext_roots(&mut work);
@@ -1189,6 +1224,8 @@ impl<'p> Interp<'p> {
         let top = self.scopes.len() - 1;
         self.cur_strict = prog.strict;
         self.sc_cur = NONE;
+        self.sc_fn = top;
+        self.sc_class = 0;
         self.sc_begin(RKind::Root);
         for s in prog.list(prog.body) {
             self.w_stmt(s, top, usize::MAX, false)?;
@@ -1217,6 +1254,9 @@ impl<'p> Interp<'p> {
         let args_scope = if f.kind == FuncKind::Arrow { outer_args } else { me };
         let is_expr = std::mem::take(&mut self.sc_fn_expr);
         let sc = self.sc_begin(RKind::Fn(fid, is_expr));
+        let lo = self.sc_cur;
+        let parent = std::mem::replace(&mut self.sc_fn, me);
+        self.scopes[parent].nofr = true;
         for p in prog.list(f.params) {
             self.w_pat(p, me, args_scope)?;
         }
@@ -1229,6 +1269,8 @@ impl<'p> Interp<'p> {
             Body::Expr(e) => self.w_expr(e, me, args_scope)?,
         }
         self.sc_end(sc);
+        self.sc_fn = parent;
+        self.fr_state(fid, lo, is_expr);
         self.cur_strict = saved;
         self.cls.cur = saved_cur;
         Ok(())
@@ -1342,6 +1384,7 @@ impl<'p> Interp<'p> {
                 }
             }
             StmtKind::For { init, test, update, body } => {
+                self.scopes[fs].eager = true;
                 let sc = self.sc_lexical_var(if let ForInit::Var(v) = init { Some(v) } else { None });
                 match init {
                     ForInit::None => {}
@@ -1356,6 +1399,7 @@ impl<'p> Interp<'p> {
             }
             StmtKind::ForIn { left, right, body } | StmtKind::ForOf { left, right, body, is_await: false } => {
                 // The right side runs before the iteration environment exists.
+                self.scopes[fs].eager = true;
                 self.w_expr(right, fs, ac)?;
                 let sc = self.sc_lexical_var(if let ForLeft::Var(v) = left { Some(v) } else { None });
                 match left {
@@ -1367,6 +1411,7 @@ impl<'p> Interp<'p> {
             }
             StmtKind::ForOf { .. } => return Err(unsupported("for await", st.span)),
             StmtKind::While { test, body } | StmtKind::DoWhile { body, test } => {
+                self.scopes[fs].eager = true;
                 self.w_expr(test, fs, ac)?;
                 self.w_stmt(body, fs, ac, true)?;
             }
@@ -1379,7 +1424,7 @@ impl<'p> Interp<'p> {
                 self.w_stmt(block, fs, ac, true)?;
                 if let Some(c) = handler {
                     let c = *prog.catch(c);
-                    let sc = self.sc_begin(RKind::Catch(c.param));
+                    let sc = self.sc_begin(RKind::Catch(c.param, s));
                     if let Some(p) = c.param {
                         self.w_pat(p, fs, ac)?;
                     }
@@ -1438,7 +1483,23 @@ impl<'p> Interp<'p> {
                     self.scopes[ac].uses_args = true;
                 }
             }
-            ExprKind::This => self.cls_w_this(e, ac),
+            ExprKind::This => {
+                self.scopes[fs].uses_this = true;
+                self.cls_w_this(e, ac)
+            }
+            ExprKind::NewTarget | ExprKind::Super => {
+                self.scopes[fs].nofr = true;
+                match ex.kind {
+                    ExprKind::Super => self.cls_w_super(ex.span)?,
+                    _ => self.cls_w_new_target(ex.span, ac)?,
+                }
+            }
+            ExprKind::Unary { op: UnaryOp::Delete, arg } => {
+                if matches!(prog.expr(arg).kind, ExprKind::Ident | ExprKind::Paren(_)) {
+                    self.scopes[fs].nofr = true;
+                }
+                self.w_expr(arg, fs, ac)?
+            }
             ExprKind::Null | ExprKind::Bool(_) | ExprKind::Number(_) | ExprKind::String | ExprKind::Hole | ExprKind::BigInt => {}
             ExprKind::RegExp => self.ext_walk_regexp(e, ex.span)?,
             ExprKind::Template(t) => {
@@ -1448,6 +1509,7 @@ impl<'p> Interp<'p> {
                 }
             }
             ExprKind::Tagged { tag, quasi } => {
+                self.scopes[fs].eager = true;
                 self.w_expr(tag, fs, ac)?;
                 let t = *prog.template(quasi);
                 for x in prog.template_exprs(&t) {
@@ -1488,6 +1550,7 @@ impl<'p> Interp<'p> {
                 }
             }
             ExprKind::Call { callee, args, .. } | ExprKind::New { callee, args } => {
+                self.scopes[fs].eager = true;
                 self.w_expr(callee, fs, ac)?;
                 for x in prog.list(args) {
                     self.w_expr(x, fs, ac)?;
@@ -1506,8 +1569,6 @@ impl<'p> Interp<'p> {
                 self.cls_w_private(e, name);
                 self.w_expr(right, fs, ac)?;
             }
-            ExprKind::Super => self.cls_w_super(ex.span)?,
-            ExprKind::NewTarget => self.cls_w_new_target(ex.span, ac)?,
             ExprKind::Await(a) => {
                 if !self.aw_expr(e) {
                     return Err(unsupported("await in this position", ex.span));
@@ -1667,7 +1728,7 @@ impl<'p> Interp<'p> {
 
     fn free_env(&mut self, i: u32) {
         let e = &mut self.envs[i as usize];
-        if !e.live || i == 0 {
+        if !e.live || i <= FRAME_ENV {
             return;
         }
         e.live = false;
@@ -2033,19 +2094,41 @@ impl<'p> Interp<'p> {
 
     fn call_script(&mut self, (script, fid): (u32, FuncId), fobj: ObjId, cenv: u32, self_binding: bool, this: Value, args: &[Value]) -> Res<Value> {
         let new = std::mem::take(&mut self.stk.new);
-        if self.func_of(script, fid).is_async() {
-            return self.call_async((script, fid), fobj, cenv, self_binding, this, args);
-        }
-        if self.func_of(script, fid).is_generator() {
-            return self.call_generator((script, fid), fobj, cenv, self_binding, this, args);
+        match self.func_of(script, fid).mode {
+            FuncMode::Plain => {}
+            FuncMode::Async => return self.call_async((script, fid), fobj, cenv, self_binding, this, args),
+            FuncMode::Generator => return self.call_generator((script, fid), fobj, cenv, self_binding, this, args),
         }
         let (saved_env, saved_strict) = (self.env, self.strict);
-        let env = self.new_env(cenv, true)?;
-        self.env = env;
         // The callee runs on its own script code. The caller's code comes back on every exit.
         let saved_script = self.cur;
         self.select(script as usize);
+        let fs = &self.scopes[fid.index()];
+        let mut first = false;
+        match fs.fr {
+            FR_ENV => {}
+            FR_ON => return self.call_frame(fid, cenv, new, args, (saved_env, saved_strict, saved_script)),
+            FR_NEW => {
+                self.scopes[fid.index()].fr = FR_FIRST;
+                first = true;
+            }
+            _ => match self.fr_gate(fid) {
+                Gate::Frame => return self.call_frame(fid, cenv, new, args, (saved_env, saved_strict, saved_script)),
+                Gate::Env => {}
+            },
+        }
+        let env = match self.new_env(cenv, true) {
+            Ok(e) => e,
+            Err(e) => {
+                self.select(saved_script);
+                return Err(e);
+            }
+        };
+        self.env = env;
         let r = self.in_frame(script, Where::Func(fid), new, |it| it.call_body(fobj, fid, env, self_binding, this, args));
+        if first {
+            self.scopes[fid.index()].fr = FR_WAIT;
+        }
         self.select(saved_script);
         self.env = saved_env;
         self.strict = saved_strict;
@@ -2055,7 +2138,7 @@ impl<'p> Interp<'p> {
 
     fn call_body(&mut self, fobj: ObjId, fid: FuncId, env: u32, self_binding: bool, this: Value, args: &[Value]) -> Res<Value> {
         self.bind_call(fobj, fid, env, self_binding, this, args)?;
-        self.run_body(fid)
+        self.run_body(fid, false)
     }
 
     /// Bind `this`, the parameters, `arguments` and the `var`s of a call into its environment.
@@ -2111,13 +2194,15 @@ impl<'p> Interp<'p> {
         Ok(())
     }
 
-    fn run_body(&mut self, fid: FuncId) -> Res<Value> {
-        let prog = self.prog.clone();
-        let f = *prog.func(fid);
+    /// Run the body of a call. `frame`: the variables are in frame slots, so there is nothing to declare.
+    fn run_body(&mut self, fid: FuncId, frame: bool) -> Res<Value> {
+        let f = *self.prog.func(fid);
         match f.body {
             Body::Expr(e) => self.eval_expr(e),
             Body::Block(l) => {
-                self.declare_scope(l, true)?;
+                if !frame {
+                    self.declare_scope(l, true)?;
+                }
                 match self.exec_list(l) {
                     Ok(()) => Ok(Value::Undefined),
                     Err(Ctl::Return) => Ok(std::mem::replace(&mut self.ret, Value::Undefined)),
@@ -3103,10 +3188,19 @@ impl<'p> Interp<'p> {
                 match mode {
                     Bind::Assign => self.assign_name(n, v, self.pat_site(p.index())),
                     Bind::Declare => {
-                        self.env_declare(self.env, n, INIT | MUT, v);
+                        match self.pat_frame(n, self.pat_site(p.index())) {
+                            Some(i) => self.envs[FRAME_ENV as usize].bindings[i].value = v,
+                            None => self.env_declare(self.env, n, INIT | MUT, v),
+                        }
                         Ok(())
                     }
                     Bind::Init => {
+                        if let Some(i) = self.pat_frame(n, self.pat_site(p.index())) {
+                            let b = &mut self.envs[FRAME_ENV as usize].bindings[i];
+                            b.flags |= INIT;
+                            b.value = v;
+                            return Ok(());
+                        }
                         match self.find_in(self.env, n) {
                             Some(i) => {
                                 let b = &mut self.envs[self.env as usize].bindings[i];
@@ -3335,6 +3429,8 @@ impl<'p> Interp<'p> {
         let rv = self.eval_expr(right)?;
         let outer = self.env;
         let mut lexical: Option<(PatId, VarKind)> = None;
+        // In a function with frame slots (`eval_scope.rs`): no environment for an iteration, only the TDZ again.
+        let mut mark = 0;
         let target = match left {
             ForLeft::Pat(p) => p,
             ForLeft::Var(v) => {
@@ -3343,13 +3439,17 @@ impl<'p> Interp<'p> {
                 let Some(d) = d else { return Err(unsupported("for left", Span::default()).into()) };
                 if kind != VarKind::Var {
                     lexical = Some((d.target, kind));
+                    mark = self.stmt_label[v.index()];
                 }
                 d.target
             }
         };
         let mut cur_env: Option<u32> = None;
         let mut step = |me: &mut Self, v: Value| -> Result<bool, Ctl> {
-            if let Some((p, kind)) = lexical {
+            if mark != 0 {
+                me.fr_tdz(mark);
+                me.bind_pattern(target, v, Bind::Init)?;
+            } else if let Some((p, kind)) = lexical {
                 if let Some(e) = cur_env.take() {
                     me.env = outer;
                     me.release(e);
