@@ -148,6 +148,8 @@ pub struct Server {
     leaf: String,
     extra: Vec<String>,
     scripted: bool,
+    /// The end of `send_detached`: its writer holds `stdin` open until this drops.
+    hold: Option<std::sync::mpsc::Sender<()>>,
 }
 
 impl Drop for Server {
@@ -177,7 +179,7 @@ impl Server {
     pub fn try_start(pki: &Pki, leaf: &str, extra: &[&str], scripted: bool, port: u16) -> Result<Server, String> {
         let extra: Vec<String> = extra.iter().map(|s| s.to_string()).collect();
         let (child, stdin, out, err) = Self::spawn(&pki.dir, leaf, &extra, scripted, port)?;
-        Ok(Server { child, stdin, out, err, seen: Vec::new(), port, dir: pki.dir.clone(), leaf: leaf.to_string(), extra, scripted })
+        Ok(Server { child, stdin, out, err, seen: Vec::new(), port, dir: pki.dir.clone(), leaf: leaf.to_string(), extra, scripted, hold: None })
     }
 
     fn spawn(dir: &PathBuf, leaf: &str, extra: &[String], scripted: bool, port: u16) -> Result<Spawned, String> {
@@ -325,6 +327,18 @@ impl Server {
                 Err(RecvTimeoutError::Timeout) | Err(RecvTimeoutError::Disconnected) => return std::mem::take(&mut self.seen),
             }
         }
+    }
+
+    /// Send bytes to the client from another thread, for more than `s_server` takes before it closes the connection: `send` would block. The
+    /// writer ends when `s_server` is gone. It keeps `stdin` open: `s_server` that sees its end closes the connection. No later `send` is possible.
+    pub fn send_detached(&mut self, bytes: Vec<u8>) {
+        let mut s = self.stdin.take().unwrap();
+        let (hold, wait) = channel::<()>();
+        self.hold = Some(hold);
+        std::thread::spawn(move || {
+            let _ = s.write_all(&bytes).and_then(|_| s.flush());
+            let _ = wait.recv();
+        });
     }
 
     /// Send bytes to the client (one TLS record each time, at most).

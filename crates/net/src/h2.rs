@@ -17,6 +17,7 @@ use std::error::Error as StdError;
 use std::fmt;
 use std::io::{self, ErrorKind, Read, Write};
 use std::net::{Shutdown, TcpStream};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -36,6 +37,8 @@ const MAX_BLOCK: usize = 256 * 1024;
 const SILENCE: Duration = Duration::from_secs(30);
 /// Until the server says its own limit (RFC 9113 section 6.5.2 allows any; browsers assume 100).
 const FIRST_MAX_STREAMS: u32 = 100;
+/// How long the reader reads after it sent `GOAWAY` for a connection error (`Shared::linger`).
+const LINGER: Duration = Duration::from_secs(5);
 const MAX_ID: u32 = (1 << 31) - 1;
 
 const DATA: u8 = 0;
@@ -145,6 +148,8 @@ struct Shared {
     sock: TcpStream,
     st: Mutex<State>,
     cv: Condvar,
+    /// The reader is in `linger`: only it may close the socket now (a close with unread bytes sends a reset).
+    lingering: AtomicBool,
 }
 
 /// A connection to one origin. Share it with `Arc`. The last owner closes it.
@@ -189,11 +194,35 @@ impl Shared {
 
     /// End the connection: every waiter sees the error, and the reader wakes up and leaves.
     fn die(&self, kind: ErrorKind, why: &str) {
+        self.fail(kind, why);
+        if !self.lingering.load(Ordering::Acquire) {
+            let _ = self.sock.shutdown(Shutdown::Both);
+        }
+    }
+
+    /// Every waiter sees the error. The socket stays open.
+    fn fail(&self, kind: ErrorKind, why: &str) {
         let mut st = lock(&self.st);
         st.dead.get_or_insert((kind, why.to_string()));
         drop(st);
-        let _ = self.sock.shutdown(Shutdown::Both);
         self.cv.notify_all();
+    }
+
+    /// End after a `GOAWAY` for a connection error. Closing a socket that holds unread bytes sends a TCP reset, and the peer may drop the
+    /// `GOAWAY` that it has not read yet. So send the end of our side, read what the peer still sends until it closes (at most `LINGER`), then close.
+    fn linger(&self) {
+        let _ = self.sock.shutdown(Shutdown::Write);
+        let end = Instant::now() + LINGER;
+        let mut sink = [0u8; 16 * 1024];
+        while Instant::now() < end {
+            match (&self.sock).read(&mut sink) {
+                Ok(0) => break,
+                Ok(_) => {}
+                Err(e) if matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut | ErrorKind::Interrupted) => {}
+                Err(_) => break,
+            }
+        }
+        let _ = self.sock.shutdown(Shutdown::Both);
     }
 }
 
@@ -256,7 +285,7 @@ impl Conn {
             goaway: None,
             dead: None,
         };
-        let sh = Arc::new(Shared { io: Mutex::new(tls), sock, st: Mutex::new(st), cv: Condvar::new() });
+        let sh = Arc::new(Shared { io: Mutex::new(tls), sock, st: Mutex::new(st), cv: Condvar::new(), lingering: AtomicBool::new(false) });
         sh.write(&hello)?;
         let reader = sh.clone();
         thread::Builder::new().name("h2".into()).stack_size(256 * 1024).spawn(move || run(&reader))?;
@@ -403,6 +432,9 @@ impl Conn {
 impl Drop for Conn {
     fn drop(&mut self) {
         let sh = &self.sh;
+        if sh.lingering.load(Ordering::Acquire) {
+            return;
+        }
         if let Ok(mut io) = sh.io.try_lock() {
             let mut out = Vec::new();
             frame(&mut out, GOAWAY, 0, 0, &[0, 0, 0, 0, 0, 0, 0, NO_ERROR as u8]);
@@ -547,7 +579,9 @@ fn run(sh: &Shared) {
             payload[4..].copy_from_slice(&code.to_be_bytes());
             frame(&mut out, GOAWAY, 0, 0, &payload);
             let _ = sh.write(&out);
-            sh.die(ErrorKind::InvalidData, why);
+            sh.lingering.store(true, Ordering::Release);
+            sh.fail(ErrorKind::InvalidData, why);
+            sh.linger();
         }
         Err(Stop::Io(e)) => sh.die(e.kind(), &format!("the connection ended: {e}")),
         Err(Stop::Done) | Ok(()) => sh.die(ErrorKind::ConnectionAborted, "the connection is closed"),
