@@ -74,6 +74,8 @@ pub type Handler = Arc<dyn Fn(&str) -> Reply + Send + Sync>;
 pub struct Server {
     pub port: u16,
     pub heads: Arc<Mutex<Vec<String>>>,
+    /// Connections accepted.
+    pub accepted: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 impl Server {
@@ -90,6 +92,10 @@ impl Server {
     pub fn total(&self) -> usize {
         self.heads.lock().unwrap().len()
     }
+
+    pub fn connections(&self) -> usize {
+        self.accepted.load(std::sync::atomic::Ordering::SeqCst)
+    }
 }
 
 /// Start a server on a free port. One thread for each connection. The threads end when the client closes.
@@ -98,13 +104,16 @@ pub fn serve(handler: impl Fn(&str) -> Reply + Send + Sync + 'static) -> Server 
     let port = listener.local_addr().unwrap().port();
     let heads = Arc::new(Mutex::new(Vec::new()));
     let (handler, log) = (Arc::new(handler) as Handler, heads.clone());
+    let accepted = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let count = accepted.clone();
     std::thread::spawn(move || {
         for stream in listener.incoming().flatten() {
+            count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             let (handler, log) = (handler.clone(), log.clone());
             std::thread::spawn(move || connection(stream, handler, log));
         }
     });
-    Server { port, heads }
+    Server { port, heads, accepted }
 }
 
 fn connection(mut stream: TcpStream, handler: Handler, log: Arc<Mutex<Vec<String>>>) {
