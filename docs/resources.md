@@ -4640,3 +4640,52 @@ S5 topics 1 to 3: `bare::control` and `bare-drive` (`crates/drive`). Measured wi
 
 - The live staging site. The orchestrator runs `tools/drive/staging-journey.steps`.
 - RSS over repeated journeys (S5 topic 6).
+
+## Incremental frames
+
+`refresh_load LINES` (`crates/bare/examples/refresh_load.rs`), release, arjun-e16, 2026-11-07. Base: main 16b5c83. New: this change. Each number is the p50 of 50 changes in ms, one run each.
+
+| Change | 1,000 base | 1,000 new | 10,000 base | 10,000 new | 100,000 base | 100,000 new |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Click on a line (no change) | 0.27 | 0.23 | 0.68 | 0.22 | 4.87 | 0.23 |
+| Click in the text field | 0.27 | 0.23 | 0.68 | 0.22 | 4.90 | 0.23 |
+| Typed letter | 0.24 | 0.23 | 0.28 | 0.22 | 0.77 | 0.23 |
+| Checkbox click | 0.39 | 0.34 | 1.70 | 0.23 | 15.09 | 0.25 |
+| Hover color (`a:hover`) | 0.44 | 0.35 | 2.21 | 0.24 | 20.16 | 0.26 |
+| Script text write | 0.98 | 0.39 | 7.32 | 0.45 | 71.42 | 2.96 |
+| Resize by 20 px (full layout) | 1.04 | 1.06 | 7.03 | 5.96 | 67.55 | 57.77 |
+| First paint | 2.0 | 1.9 | 14.4 | 13.2 | 117.5 | 110.0 |
+
+- Max at 100,000 lines: the text write 85.3 to 4.4 ms, the checkbox 29.9 to 1.6 ms, the hover 21.8 to 0.3 ms.
+- The text write at 100,000 lines made 200,199 allocations (27.1 MiB) and now makes 112 (0.6 MiB). A resize allocates 20.7 MiB, not 28.2 MiB: a full layout writes in the memory of the old frame.
+- The resize at 1,000 lines is within the noise: an earlier run of the same build gave 1.04 to 0.95 ms.
+- The text write at 100,000 lines still has passes over all fragments: the scroll areas, the extents, the copy of the kept fragments and `absolute`. They take most of its 3 ms.
+
+### Memory
+
+RSS at 100,000 lines, in MiB:
+
+| | glibc base | glibc new | jemalloc base | jemalloc new |
+| --- | ---: | ---: | ---: | ---: |
+| After the first paint | 51.3 | 57.6 | 68.5 | 81.1 |
+| After the changes | 70.8 | 87.9 | 70.2 | 90.2 |
+| Peak | 70.8 | 87.9 | 89.2 | 98.3 |
+
+The window keeps the fragments before `absolute` for the next layout. This is a second copy of the fragment list. The extents add 16 bytes for each fragment.
+
+### Cost rule
+
+`tools/js/cost_matrix.sh`, 805 rows, base main 16b5c83: no row over +0.5% under both allocators. Mean change under glibc: -0.038%. Highest rows: `bare-stress run position-many-absolute 20000` +0.335%, `position-many-absolute 2000` +0.327%, `position-nested-relative 300` +0.321%. Lowest rows: `scroll_load 10000 300` -35.4%, `scroll_load 1000 300` -3.7%, `bare-stress run inline-pre-lines 200000` -1.1%.
+
+The first full run had 13 rows over the limit:
+- 12 `bare-stress` layout rows, +0.51% to +0.57%. The rows parse, cascade and lay out a page. `perf stat` on `block-wide 20000` with one crate from main at a time gave the parts: `bare-layout` +359 k instructions, `bare-html` +320 k, `bare-css` +5 k. Three fixes:
+  - `Cx::stable_child` now does the keep work around `block::sized`, out of line. `sized_with` only tests `cx.next`. Layout then cost +99 k.
+  - The damage log was a new `Document` field. That field alone cost +200 k with empty mark functions. The cause is not known; hypothesis: the new field layout changes the code of hot `Document` reads. The log now shares one box with the watcher (`Hooks`), so `Document` has no new field. Most marks come from `notify`, behind the check that was already there.
+  - After the fixes, `block-wide 20000` is +0.25%.
+- `sticky_load 100 100`, +2.1%. Each scroll out of the band built the list again, and main builds it once. A page with fewer than 4,096 fragments now has one list for the whole page (`Page::whole`). The tests set 0, so that they test the band.
+
+### Not tested
+
+- A live `bare --window` run on a hyprcage screen. The page tests drive `Page::handle` and `Page::paint`, as the window does.
+- A page that scrolls sideways past the band.
+- HiDPI, archMachine and macOS.

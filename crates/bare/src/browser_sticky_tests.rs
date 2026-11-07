@@ -33,6 +33,7 @@ fn the_window_draws_the_stuck_boxes_as_chrome_does() {
         .stack_size(64 << 20)
         .spawn(|| {
             let mut p = Page::new(Source::Browser(Box::new(browser(HTML, 200.0, 150.0))), (200, 150));
+            p.whole = 0;
             let mut shots = 0;
             let mut y = 0;
             for line in CHROME.lines() {
@@ -78,6 +79,7 @@ fn a_wheel_scroll_moves_the_sticky_box_and_does_not_lay_out_again() {
         .spawn(|| {
             let html = "<!doctype html><style>body{margin:0}#a{position:sticky;top:10px;height:20px;background:#f00}#u{height:2000px}</style><div style='height:100px'></div><div id=a></div><div id=u></div>";
             let mut p = Page::new(Source::Browser(Box::new(browser(html, 200.0, 150.0))), (200, 150));
+            p.whole = 0;
             assert_eq!(p.paint()[110 * 200 + 50], 0xFFFF_0000, "at its normal place");
             let layouts = p.browser().unwrap().geometry_stats().layouts;
             for _ in 0..3 {

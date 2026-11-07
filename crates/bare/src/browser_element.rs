@@ -221,7 +221,7 @@ fn offset(d: &Dom, it: &mut Interp<'_>, el: NodeId) -> R<Option<Offset>> {
         return Ok(Some(Offset { parent: None, top: 0, left: 0 }));
     }
     drop(doc);
-    let (layout, areas, _) = d.layout_areas(it, &styles)?;
+    let (layout, areas, _) = d.layout_areas(it, &styles, None)?;
     let Some(r) = one_box(&layout, el)? else {
         let doc = d.doc.borrow();
         return match bare_layout::boxes::Tree::new(&doc, &styles).kind(el) {

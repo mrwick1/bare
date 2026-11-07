@@ -1424,6 +1424,7 @@ pub(crate) fn layout(cx: &mut Cx, node: NodeId, space: Space, bp: Sides) -> Kids
     for &n in &g.statics {
         cx.fixed |= tree.position(n) == Keyword::Fixed;
         cx.waiting += 1;
+        cx.statics += 1;
         let at = cx.out.len() as u32;
         cx.out.push(Fragment { rect: crate::fragment::Rect { x: bp.left, y: bp.top, w: 0.0, h: 0.0 }, node: n, kind: FragmentKind::Static, end: at + 1 });
     }

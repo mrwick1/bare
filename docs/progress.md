@@ -2106,3 +2106,28 @@ cargo build --release -p bare-drive
 `run_drive.sh` uses the binary in `/data/bare-tmp/live-target`. To test a branch, copy the script and change only the binary path. Exit code 0 means a pass, 1 a failed step, 2 a bad step file.
 
 Not tested: the fixture journey in a window (the fixture tests run headless only), the live suite on arjun-e16, a run with jemalloc, a staging session that expires by time (the fixture expires by request count).
+
+## Incremental frames
+
+Measured on 2026-11-07, arjun-e16, release, against main 16b5c83. A small change in the window now costs in proportion to the change, not to the page. The design and the comparison with LayoutNG, WebKit and Servo are in [decisions.md](decisions.md#incremental-frames-damage-restyle-layout-reuse-culled-paint). The numbers are in [resources.md](resources.md#incremental-frames).
+
+What changed:
+- The document logs its changes (`Document::track_damage`). The log shares one box with the watcher, so a change still checks one `Option`.
+- The window restyles only the elements that a change can reach (`RuleSet::restyle`, `Scopes`). This includes `:hover`, `:active` and focus moves.
+- Layout lays out again only the changed boxes and their ancestors. It copies the kept fragments of the clean stable blocks (`bare_layout::layout_kept`, `keep.rs`).
+- The display list holds a band around the window on a page of 4,096 fragments or more. Paint and the hit test skip each subtree whose extent misses the band or the point.
+- A click runs one hit test, not three: the window keeps the last hit for each point, frame and set of scroll offsets.
+- The preflight walk before a window layout uses the kept counts of large clean subtrees.
+
+Result at 100,000 lines (p50): a script text write 71.4 ms to 2.96 ms, a hover color 20.2 ms to 0.26 ms, a checkbox click 15.1 ms to 0.25 ms. A resize is still a full layout: 67.6 ms to 57.8 ms.
+
+Checks:
+- `Page::check_frame` compares each frame with a frame made from nothing: the pixels, each fragment and the page bars. The page tests and `BARE_CHECK_FRAMES=1` turn it on. The #235 tests, the 200-change test and the Chrome fixture pass with it. `refresh_load` at 1,000 and 10,000 lines passes it at every step.
+- The new property test `random_changes_draw_the_frame_made_from_nothing` runs 400 random changes and checks each frame. More than 100 of its frames use the incremental layout.
+- `a_restyle_of_the_picked_roots_equals_a_full_cascade` and `a_walk_with_the_kept_counts_equals_a_full_walk` compare the restyle and the walk with full runs.
+- `cargo test --release --workspace`: 2,875 passed and 0 failed.
+- `tools/js/cost_matrix.sh`, 805 rows, main 16b5c83: no row over +0.5% under both allocators. The first full run had 13 rows over the limit. The fixes are in resources.md.
+
+Gaps: a resize, a style sheet change, a page with a shadow root, and a form state change on a page with a form pseudo-class rule still get a full update. Each window layout keeps a second copy of the fragments, so RSS after the first paint at 100,000 lines grows by 6.3 MiB (glibc) to 12.6 MiB (jemalloc).
+
+Not tested: a live `bare --window` run on a hyprcage screen, a page that scrolls sideways past the band, HiDPI, the live staging site, archMachine and macOS.

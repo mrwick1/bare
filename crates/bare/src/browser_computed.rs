@@ -78,9 +78,9 @@ use crate::browser_platform::{V, arg};
 use crate::browser_style::{current, keys_of};
 use crate::browser_style_block::{self as blk, Fail, Lim, custom};
 use crate::browser_used::{Ctx, calc_text, flow_text, grid_text};
-use bare_css::cascade::{self, ComputedStyle, Origin, RuleSet, Source, Styles, UA_CSS};
+use bare_css::cascade::{self, ComputedStyle, Origin, RuleSet, Scopes, Source, Styles, UA_CSS};
 use bare_css::values::{Keyword, Length, Property, SHORTHANDS, Value as Cv, shorthand_longhands};
-use bare_html::dom::{NodeData, NodeId};
+use bare_html::dom::{Mark, NodeData, NodeId};
 use bare_js::eval::{Error, Interp, LimitKind};
 use bare_js::value::{ObjId, Value};
 use std::cell::{Cell, OnceCell, RefCell};
@@ -151,13 +151,16 @@ pub struct ComputedStats {
     pub computes: u64,
 }
 
+/// The key of `Built::last`.
+type LastKey = (u64, u64, usize, [u64; 3], Option<NodeId>);
+
 pub(crate) struct Built {
     vp: (f32, f32),
     pub(crate) key: Vec<(Option<String>, String)>,
     rules: RuleSet,
     /// The last cascade of these rules, and its key: `revision`, `text_revision`, length and user state revisions of the
-    /// document, and `want`.
-    last: Option<((u64, u64, usize, [u64; 3], Option<NodeId>), Rc<Styles>)>,
+    /// document, and `want`. The flag tells that it keeps what `restyle_frame` needs (`RuleSet::compute_kept`).
+    last: Option<(LastKey, bool, Rc<Styles>)>,
     /// Does a sheet use what the engine does not model (`content-visibility`, `display: contents`)? Read by `checkVisibility` only.
     pub(crate) odd: OnceCell<bool>,
 }
@@ -404,8 +407,17 @@ impl Dom {
         self.cascade_for(it, None)
     }
 
+    /// `cascade_now` for a window frame: the styles keep what `restyle_frame` needs (`RuleSet::compute_kept`).
+    pub(crate) fn cascade_frame(&self, it: &mut Interp<'_>) -> R<Rc<Styles>> {
+        self.cascade_with(it, None, true)
+    }
+
     /// The same, and `want` is styled even inside `display:none` (`RuleSet::compute_for`).
     fn cascade_for(&self, it: &mut Interp<'_>, want: Option<NodeId>) -> R<Rc<Styles>> {
+        self.cascade_with(it, want, false)
+    }
+
+    fn cascade_with(&self, it: &mut Interp<'_>, want: Option<NodeId>, keep: bool) -> R<Rc<Styles>> {
         let l = self.computed.lim.get();
         let vp = self.plat.s.borrow().viewport;
         if self.doc.borrow().len() > l.max_nodes {
@@ -449,8 +461,9 @@ impl Dom {
         // adds a node, so the length moves. A custom element state change moves no counter, so the cascade is kept and used
         // only while no element has custom element state.
         let key = (doc.revision(), doc.text_revision(), doc.len(), doc.user().revision, want);
-        if let Some((k, styles)) = &built.last
+        if let Some((k, kept, styles)) = &built.last
             && *k == key
+            && (*kept || !keep)
             && !doc.has_custom()
         {
             return Ok(styles.clone());
@@ -458,9 +471,71 @@ impl Dom {
         drop(doc);
         let doc = self.doc.borrow();
         self.computed.computes.set(self.computed.computes.get() + 1);
-        let styles = Rc::new(built.rules.compute_for(&doc, want));
-        built.last = (!doc.has_custom()).then(|| (key, styles.clone()));
+        let styles = Rc::new(if keep { built.rules.compute_kept(&doc) } else { built.rules.compute_for(&doc, want) });
+        built.last = (!doc.has_custom()).then(|| (key, keep, styles.clone()));
         Ok(styles)
+    }
+
+    /// How many times the rule set was built. Styles from one build can be updated with the rules of the same build only.
+    pub(crate) fn rule_builds(&self) -> u64 {
+        self.computed.builds.get()
+    }
+
+    /// Update `styles` (from `cascade_frame` of rule build `builds`) for the changes `marks` of the tree and for the user state that
+    /// moved from the element chains `old` to `new` (`:hover`, `:active`, focus: each element and its ancestors). Gives the elements
+    /// whose style changed, with their old style number (`RuleSet::restyle`). `None` when only a new cascade is right: the rules were
+    /// built again, a change touched a `<style>`, `<link>` or `<base>` element, or the rules read what changed in a way that
+    /// `Scopes` does not bound, or `styles` is shared. Then `styles` is as it was, except for new styles at its end that no node uses.
+    pub(crate) fn restyle_frame(&self, it: &mut Interp<'_>, styles: &mut Rc<Styles>, builds: u64, marks: &[Mark], old: &[Vec<NodeId>; 3], new: &[Vec<NodeId>; 3]) -> R<Option<Vec<(NodeId, u32)>>> {
+        let vp = self.plat.s.borrow().viewport;
+        let mut cache = self.computed.cache.borrow_mut();
+        let Some(built) = cache.as_mut().filter(|b| b.vp == vp && self.computed.builds.get() == builds) else { return Ok(None) };
+        // The kept last cascade is this one, from before the changes: it does not match the document now.
+        if built.last.as_ref().is_some_and(|l| Rc::ptr_eq(&l.2, styles)) {
+            built.last = None;
+        }
+        let Some(styles) = Rc::get_mut(styles) else { return Ok(None) };
+        let doc = self.doc.borrow();
+        if doc.len() > self.computed.lim.get().max_nodes {
+            return Err(self.lim("computed-nodes"));
+        }
+        let sheets = ["style", "link", "base"].map(|n| doc.find_atom(n));
+        let sheet = |n: NodeId| matches!(*doc.data(n), NodeData::Element { name, .. } if sheets.contains(&Some(name)));
+        let scopes = built.rules.scopes();
+        let mut roots = Vec::new();
+        for &m in marks {
+            let touched = match m {
+                Mark::Link { parent, node } | Mark::Unlink { parent, node } => {
+                    sheet(parent) || {
+                        let mut stack = vec![node];
+                        let mut found = false;
+                        while let Some(n) = stack.pop() {
+                            it.charge(1)?;
+                            found |= sheet(n);
+                            stack.extend(doc.children(n));
+                        }
+                        found
+                    }
+                }
+                Mark::Text { node } => doc.parent(node).is_some_and(sheet),
+                Mark::Attr { el, .. } => sheet(el),
+                Mark::Ui { .. } => false,
+            };
+            if touched || !scopes.roots(&doc, m, &mut roots) {
+                return Ok(None);
+            }
+        }
+        Scopes::user_roots(scopes.hover, &old[0], &new[0], &doc, &mut roots);
+        Scopes::user_roots(scopes.active, &old[1], &new[1], &doc, &mut roots);
+        Scopes::user_roots(scopes.focus, &old[2], &new[2], &doc, &mut roots);
+        it.charge(roots.len() as u64 + 1)?;
+        let mut changed = Vec::new();
+        if !built.rules.restyle(&doc, styles, &roots, &mut changed) {
+            return Ok(None);
+        }
+        // What a full cascade charges for each node, for each node whose style changed.
+        it.charge((changed.len() as u64).saturating_mul(built.rules.len() as u64 + 1))?;
+        Ok(Some(changed))
     }
 
     /// The style of `el` now, or `None` when the element is not connected (an empty declaration).

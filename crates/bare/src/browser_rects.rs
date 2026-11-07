@@ -410,7 +410,7 @@ fn with_pass(d: &Dom, it: &mut Interp<'_>, g: &Geo, s: &Scroll, f: impl Fn(&Pass
         Err(Need::Plain) => {}
     }
     d.geometry.uncull.set(true);
-    let plain = d.layout_at(it, g.styles, g.view());
+    let plain = d.layout_at(it, g.styles, g.view(), None);
     d.geometry.uncull.set(false);
     f(&pass(g, s, Some(&plain?))).or_else(|n| if matches!(n, Need::Foreign) { Err(gate(FOREIGN)) } else { Ok(Vec::new()) })
 }

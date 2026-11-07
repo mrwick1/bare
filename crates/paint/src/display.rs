@@ -173,6 +173,17 @@ impl DisplayList {
     /// not left out. The items of a scroll container sit between `PushScroll` and `PopScroll`, a fixed box between
     /// `PushFixed` and `PopFixed`, so that a scroll draws the same list again with another offset.
     pub fn build_with(&mut self, doc: &Document, styles: &Styles, layout: &Layout, view: (u32, u32), areas: Option<&Areas>) {
+        self.make(doc, styles, layout, IRect { x0: 0, y0: 0, x1: view.0 as i32, y1: view.1 as i32 }, areas, None);
+    }
+
+    /// Like `build_with`, but the list holds only the boxes whose `extents` meet `band` (page pixels), and all of a box that clips,
+    /// a fixed box and a sticky box that it holds. A window that shows a part of a long page builds the part around the
+    /// window, and builds again when a scroll leaves it: the cost is that of the part, not of the page.
+    pub fn build_band(&mut self, doc: &Document, styles: &Styles, layout: &Layout, areas: &Areas, band: IRect, extents: &[[f32; 4]]) {
+        self.make(doc, styles, layout, band, Some(areas), Some(extents));
+    }
+
+    fn make(&mut self, doc: &Document, styles: &Styles, layout: &Layout, view: IRect, areas: Option<&Areas>, ext: Option<&[[f32; 4]]>) {
         self.items.clear();
         self.chain.clear();
         self.text.clear();
@@ -204,14 +215,69 @@ impl DisplayList {
             // A translucent canvas color mixes with white. With alpha 255 the mix is the color itself.
             self.background = crate::canvas::blend(argb(canvas), 0xffff_ffff, canvas.a as u32);
         }
-        let view = IRect { x0: 0, y0: 0, x1: view.0 as i32, y1: view.1 as i32 };
         let mut page = Page { controls: [tree.controls.input, tree.controls.select, tree.controls.textarea, tree.controls.button].iter().any(Option::is_some), ..Page::default() };
         for style in styles.each() {
             page.stack |= matches!(style.get(Property::Opacity), Value::Number(o) if o < 1.0) || matches!(style.get(Property::ZIndex), Value::Number(_)) || style.get(Property::Position) == Value::Keyword(Keyword::Sticky);
             page.flex |= matches!(style.get(Property::Display), Value::Keyword(Keyword::Flex | Keyword::InlineFlex | Keyword::Grid | Keyword::InlineGrid));
         }
-        let mut b = Builder { tree, doc, frags: &layout.fragments, list: self, view, propagated, depth: 0, page, svg: if doc.has_foreign() { doc.find_atom("svg") } else { None }, clips: Vec::new(), areas, scrolls: Vec::new() };
+        let mut b = Builder { tree, doc, frags: &layout.fragments, list: self, view, propagated, depth: 0, page, svg: if doc.has_foreign() { doc.find_atom("svg") } else { None }, clips: Vec::new(), areas, scrolls: Vec::new(), ext };
         b.context(0);
+    }
+}
+
+/// No bounds: a box that moves with the window or with scrolling, and the boxes around it.
+const FREE: [f32; 4] = [f32::NEG_INFINITY, f32::NEG_INFINITY, f32::INFINITY, f32::INFINITY];
+/// The view inside a box that clips, a fixed box or a sticky box: nothing is left out for its place.
+pub const ALL: IRect = IRect { x0: i32::MIN / 2, y0: i32::MIN / 2, x1: i32::MAX / 2, y1: i32::MAX / 2 };
+
+/// For each fragment, the box `[x0, y0, x1, y1]` (page pixels) of it and of all the fragments inside it: all that it paints, and
+/// all the points that hit it or a box inside it. A fixed or sticky box moves when the page scrolls: it and the boxes around it
+/// get `FREE` bounds. For `DisplayList::build_band` and `hit::hit_test_within`. One pass over the fragments, from the last, into `out`.
+pub fn extents(styles: &Styles, layout: &Layout, out: &mut Vec<[f32; 4]>) {
+    let frags = &layout.fragments;
+    let moves = |s: &ComputedStyle| matches!(s.get(Property::Position), Value::Keyword(Keyword::Fixed | Keyword::Sticky));
+    let any = styles.each().any(moves);
+    out.clear();
+    out.resize(frags.len(), [0.0; 4]);
+    for i in (0..frags.len()).rev() {
+        let f = &frags[i];
+        let r = f.rect;
+        let mut e = [r.x, r.y, r.x + r.w, r.y + r.h];
+        if any && f.kind == FragmentKind::Box && styles.style(f.node).is_some_and(moves) {
+            e = FREE;
+        } else {
+            let mut c = i + 1;
+            while c < f.end as usize {
+                let k = out[c];
+                e = [e[0].min(k[0]), e[1].min(k[1]), e[2].max(k[2]), e[3].max(k[3])];
+                c = frags[c].end as usize;
+            }
+        }
+        out[i] = e;
+    }
+}
+
+/// Do the bounds `e` (from `extents`) meet the view `v`?
+fn meets(e: [f32; 4], v: IRect) -> bool {
+    e[0] <= v.x1 as f32 && e[2] >= v.x0 as f32 && e[1] <= v.y1 as f32 && e[3] >= v.y0 as f32
+}
+
+/// The fragments that `DisplayList::build_band` can draw for `band`: the ones whose `extents` meet it, and all of a box that clips,
+/// a fixed box and a sticky box among them. A host that sets the state of the controls before `build_band` reads these.
+pub fn each_in_band(styles: &Styles, layout: &Layout, ext: &[[f32; 4]], band: IRect, mut f: impl FnMut(usize, &Fragment)) {
+    let frags = &layout.fragments;
+    let (mut j, mut all_to) = (0, 0);
+    while j < frags.len() {
+        let g = &frags[j];
+        if j >= all_to && !meets(ext[j], band) {
+            j = g.end as usize;
+            continue;
+        }
+        if j >= all_to && g.kind == FragmentKind::Box && let Some(s) = styles.style(g.node) && (clips(s) || matches!(s.get(Property::Position), Value::Keyword(Keyword::Fixed | Keyword::Sticky))) {
+            all_to = g.end as usize;
+        }
+        f(j, g);
+        j += 1;
     }
 }
 
@@ -239,6 +305,9 @@ struct Builder<'a> {
     areas: Option<&'a Areas>,
     /// The scroll containers that are open now, the inner last, with their padding boxes.
     scrolls: Vec<(NodeId, IRect)>,
+    /// The `extents` of the fragments, for a list of a band (`build_band`): a box whose bounds miss the view is left out with all
+    /// that it holds.
+    ext: Option<&'a [[f32; 4]]>,
 }
 
 impl Builder<'_> {
@@ -319,7 +388,13 @@ impl Builder<'_> {
         if let Some(k) = sticky {
             self.list.items.push(Item::PushSticky(k as u32));
         }
+        // In a band, the place of a fixed or sticky box is not a place on the page: all of it goes in the list.
+        let saved = self.view;
+        if self.ext.is_some() && (fixed || sticky.is_some()) {
+            self.view = ALL;
+        }
         self.context_in(i);
+        self.view = saved;
         if sticky.is_some() {
             self.list.items.push(Item::PopSticky);
         }
@@ -386,6 +461,12 @@ impl Builder<'_> {
         let mut j = i + 1;
         while j < end {
             let g = self.frags[j];
+            if let Some(e) = self.ext
+                && !meets(e[j], self.view)
+            {
+                j = g.end as usize;
+                continue;
+            }
             match g.kind {
                 FragmentKind::Box => {
                     let style = self.tree.style(g.node);

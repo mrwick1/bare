@@ -63,7 +63,7 @@ type Point = (f32, f32);
 
 /// The topmost element at `(x, y)` in page coordinates. `None` when the page has no layout.
 pub fn hit_test(doc: &Document, styles: &Styles, layout: &Layout, x: f32, y: f32) -> Option<NodeId> {
-    hit(doc, styles, layout, None, (x, y), (x, y)).first().copied()
+    hit(doc, styles, layout, None, (x, y), (x, y), None).first().copied()
 }
 
 /// The topmost element at the window point `(x, y)` of a page that is scrolled by `scroll`.
@@ -71,13 +71,20 @@ pub fn hit_test_scrolled(doc: &Document, styles: &Styles, layout: &Layout, areas
     hits_scrolled(doc, styles, layout, areas, scroll, x, y).first().copied()
 }
 
+/// `hit_test_scrolled` that skips each box whose `extents` (`display::extents` of this layout) do not hold the point, with all that
+/// it holds: the cost is that of the boxes around the point, not of the page.
+#[allow(clippy::too_many_arguments)]
+pub fn hit_test_within(doc: &Document, styles: &Styles, layout: &Layout, areas: &Areas, scroll: &Scroll, ext: &[[f32; 4]], x: f32, y: f32) -> Option<NodeId> {
+    hit(doc, styles, layout, Some((areas, scroll)), (x + scroll.x.round(), y + scroll.y.round()), (x, y), Some(ext)).first().copied()
+}
+
 /// All the elements at the window point `(x, y)`, the topmost first and the root last (`document.elementsFromPoint`, before the
 /// retargeting of shadow trees). Empty when the page has no layout.
 pub fn hits_scrolled(doc: &Document, styles: &Styles, layout: &Layout, areas: &Areas, scroll: &Scroll, x: f32, y: f32) -> Vec<NodeId> {
-    hit(doc, styles, layout, Some((areas, scroll)), (x + scroll.x.round(), y + scroll.y.round()), (x, y))
+    hit(doc, styles, layout, Some((areas, scroll)), (x + scroll.x.round(), y + scroll.y.round()), (x, y), None)
 }
 
-fn hit(doc: &Document, styles: &Styles, layout: &Layout, scrolled: Option<(&Areas, &Scroll)>, page: Point, window: Point) -> Vec<NodeId> {
+fn hit(doc: &Document, styles: &Styles, layout: &Layout, scrolled: Option<(&Areas, &Scroll)>, page: Point, window: Point, ext: Option<&[[f32; 4]]>) -> Vec<NodeId> {
     let tree = Tree::new(doc, styles);
     let Some(root) = tree.root() else { return Vec::new() };
     let frags = &layout.fragments;
@@ -93,7 +100,7 @@ fn hit(doc: &Document, styles: &Styles, layout: &Layout, scrolled: Option<(&Area
             break;
         }
     }
-    let h = Hit { tree, doc, frags, scrolled, window, stacks, flex };
+    let h = Hit { tree, doc, frags, scrolled, window, stacks, flex, ext };
     // From the bottom to the top, as painted.
     let mut painted = Vec::with_capacity(8);
     h.context(0, 0, page, true, &mut painted, &mut Vec::new());
@@ -121,6 +128,8 @@ struct Hit<'a> {
     stacks: bool,
     /// Some box is a flex or grid container.
     flex: bool,
+    /// The `extents` of the fragments, if the caller has them: a box whose bounds do not hold the point is skipped with what it holds.
+    ext: Option<&'a [[f32; 4]]>,
 }
 
 /// A box of a stacking context with a `z-index` other than 0, on its way up to the context: where it is, and its point.
@@ -247,6 +256,13 @@ impl Hit<'_> {
         let mut j = i + 1;
         while j < end {
             let g = self.frags[j];
+            // Bounds that do not hold the point: nothing in them is hit. A fixed box (that the window point hits) has none.
+            if let Some(e) = self.ext
+                && !(p.0 >= e[j][0] && p.0 <= e[j][2] && p.1 >= e[j][1] && p.1 <= e[j][3])
+            {
+                j = g.end as usize;
+                continue;
+            }
             match g.kind {
                 FragmentKind::Box => {
                     let style = self.tree.style(g.node);

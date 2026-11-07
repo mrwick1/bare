@@ -83,7 +83,7 @@ impl Dom {
             return Ok(None);
         }
         self.geometry.probe.set(tracks.then_some(el));
-        let r = self.layout_areas(it, &s.styles);
+        let r = self.layout_areas(it, &s.styles, None);
         self.geometry.probe.set(None);
         let (layout, areas, _) = r?;
         Ok(Some(Used { layout, areas }))
