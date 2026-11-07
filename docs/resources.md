@@ -4431,6 +4431,66 @@ Tests: 5 unit tests of the resolver (`eval_scope_tests.rs`: hop counts, indexes,
 
 Not tested: wall time; the rows at scale 100; `https_load`; the live staging pages; a script with more than 16,383 nested scopes (the hop count is limited, and a deeper site stays dynamic); `with` and `eval` (the engine rejects both).
 
+## Cost of frame slots
+
+Problem: after static scope resolution, a call still made an environment and declared each parameter and `var` in it, and each read of a local went through the environment chain. V8 keeps locals in registers and SpiderMonkey keeps a binding that no closure captures out of the environment object.
+
+Method: `perf record -e instructions:u` of the rows below on main c66c8a5 and on the change. Cost rows: `tools/js/instr.sh` (minimum of 3 runs of `instructions:u`, large malloc cache), 564 rows (every `*_load` case at scale 1 and 10 of the earlier cost rows, except `regexp_load`), release build, each tree in its own `CARGO_TARGET_DIR` under `/data/bare-tmp`. Machine load average was 11 to 13, so wall time is not a result.
+
+Profile of main (self share of samples, by function group; inlining moves cost between symbols, so read the groups, not one symbol): name functions (`get_name`, `assign_name`, `find_in`, `lookup`, the global object lookup) 10.3% of `eval_load calls`, 9.9% of `closures`, 6.2% of `fib`, 5.7% of `webpack`, 10.7% of `select_load react 1000`, 7.2% of `loop`, 3.8% of `session_load chain`. Environment functions (`new_env`, `free_env`, `release`, `env_declare`, `declare_var`, `declare_scope`, `capture`) 6.0% of `calls`, 3.6% of `closures`, 8.6% of `fib`, 2.1% of `webpack`. `loop`, `react` and `chain` run in the top-level script or in host code, so they have none. The environment arena (a free list of environments) is already cheap, so the cost is the work in each call: declaring each binding and reading it through a hop count. Skipping the environment object alone would have saved at most that share.
+
+What was done (see [decisions.md](decisions.md#frame-slots)): a function with no inner function or class keeps its variables in a frame in environment 1. A site in it resolves to a slot. The first call of a function with a loop or a call builds the frame template, and the second call of any other function does. A call copies the template, stores the arguments and runs.
+
+Instructions (`tools/js/instr.sh`, main c66c8a5 and this change):
+
+| Row | main | this change | change |
+| --- | ---: | ----------: | -----: |
+| `eval_load fib 10` | 251,762,507 | 230,555,800 | -8.4% |
+| `eval_load calls 10` | 4,986,133,458 | 4,674,139,977 | -6.3% |
+| `eval_load objects 10` | 2,864,939,663 | 2,818,574,846 | -1.6% |
+| `eval_load closures 10` | 915,051,614 | 904,354,975 | -1.2% |
+| `eval_load webpack 10` | 48,927,072 | 48,422,706 | -1.0% |
+| `eval_load loop 10` | 6,513,910,522 | 6,509,911,222 | -0.06% |
+| `eval_load throws 10` | 2,188,550,426 | 2,191,217,031 | +0.12% |
+| `eval_load concat 10` | 7,557,845 | 7,556,458 | -0.02% |
+| `select_load react 10` | 27,676,814 | 27,224,072 | -1.6% |
+| `select_load react 1000` | 1,325,125,100 | 1,323,619,516 | -0.11% |
+| `session_load chain 10` | 57,929,997 | 57,961,994 | +0.06% |
+| `arrobj_load tosorted 10` | 793,281,244 | 709,888,255 | -10.5% |
+| `arrobj_load sort 10` | 869,552,618 | 786,160,944 | -9.6% |
+| `proxy_load reactive 10` | 289,055,536 | 261,445,748 | -9.6% |
+| `proxy_load array_mapfilter 10` | 1,565,895,226 | 1,448,003,473 | -7.5% |
+| `scripts_load cross 10` | 907,235,342 | 838,790,591 | -7.5% |
+
+The `loop` row runs in the top-level script, which has no frame. The `closures` and `webpack` rows are mostly functions with an inner function. They keep their environment, so they gain 1%. Self share after the change: environment functions 3.0% (`calls`), 2.6% (`closures`), 4.0% (`fib`), 0.5% (`webpack`); name functions 8.8%, 9.4%, 8.6%, 6.8%.
+
+Peak RSS (program report, minimum of 7 runs): +0.1 to +0.2 MiB on each row (`fib 10` 4.7 to 4.8 MiB, `calls 10` 4.7 to 4.8, `closures 10` 37.6 to 37.8, `webpack 10` 6.6 to 6.8, `react 1000` 8.7 to 8.9). The live heap is the same (0.3 MiB for `fib 1`), and `fib 1` makes 79 allocations instead of 97. The binary is 16 KiB larger. I did not find the cause of the 0.1 to 0.2 MiB.
+
+Cost rule: of 564 rows, 320 are lower and 143 are lower by more than 0.5%. Median -0.01%. Eight rows are over +0.5% with glibc:
+
+| Row | glibc | jemalloc |
+| --- | ---: | ---: |
+| `scripts_load few 1` | +0.70% (17,961,600 to 18,086,858) | +0.57% (21,246,057 to 21,368,075) |
+| `scripts_load few 10` | +0.81% (146,601,456 to 147,795,991) | +0.80% (147,766,525 to 148,948,734) |
+| `scripts_load many 10` | +0.58% (78,654,995 to 79,108,454) | +0.47% (79,457,923 to 79,829,802) |
+| `numeric_load encodeuri 1000` | +0.52% (23,955,196 to 24,080,691) | +0.02% (29,091,260 to 29,096,362) |
+| `numeric_load encodeuri 10000` | +0.65% (190,680,221 to 191,914,965) | +0.02% (211,340,110 to 211,374,467) |
+| `class_load accessors 1` | +0.50% (300,132,224 to 301,634,062) | +0.49% |
+| `class_load accessors 10` | +0.50% (2,975,553,857 to 2,990,556,567) | +0.50% |
+| `class_load super 10` | +0.50% (2,109,459,772 to 2,120,061,908) | +0.50% |
+
+`numeric_load encodeuri` runs a native function, and with jemalloc it is +0.02%, so it is allocator layout (`realloc` is the symbol that moves). `scripts_load many 10` is under the limit with jemalloc. `scripts_load few` is over with both allocators, so the rule is not met and the change was not merged. `class_load` is at the limit (about +0.50%) with both allocators.
+
+Cause of the rows: each function of `few` is defined once and called once, so it pays and gets nothing. Measured on a script of 1,000 functions (`eval_check` on one case): a function that is never called costs +86 instructions (the walk), and one that is called once costs +260 (the call adds +175). A function that is called twice costs +376. A function that is called many times gains. The `class_load` rows call class members, which keep their environment, so they pay the check of the call state (about 10 instructions for each call, measured as +0.55% before two small savings in the same path: one `func_of` read for the async and generator tests and no `Rc` clone in `run_body`).
+
+What was tried to lower the cost of `few`, with the change in `few 1` (main 18,064,000): frame at the first call for every function +1.36%; no allocation in the layout (the template in one pool) +1.36% from +4.77%; frame at the second call with the state set at the end of the walk +0.69%; the state computed at the first call and a `hold` count in place of a flag in each scope +0.77%. Removing the check in `call_script` took off about 0.15% to 0.5%, and the walk work about 0.12%. About 0.4% stays with all the new logic removed. I could not find its cause (it is the same with no frame function). Hypothesis: code generation changes (inlining) across `eval.rs`.
+
+Rejected: a frame decision at the second call with a reset of the sites of the function (the scope of a resolved site is not kept, so it cannot be done without a re-walk). A frame decision at the first call only (+1.4% on `few`).
+
+Tests: see [progress.md](progress.md#frame-slots-for-leaf-functions). Every `tools/js/*_check.sh` that ran before passes (39 of 40; `parse_check.sh` needs `acorn`).
+
+Not tested: wall time (load average 11 to 13: `fib 10` 29 ms and `calls 10` 463 to 470 ms on both trees, no result); the rows at scale 100; `regexp_load` (no evaluator code); `parse_check.sh`; the live staging pages; the cause of the +0.1 to +0.2 MiB peak RSS.
+
 ## Cost of one typed key on a React form
 
 Summary and profile: [progress.md](progress.md#cost-of-one-typed-key-on-a-react-form). This section keeps the method and the numbers.

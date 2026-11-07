@@ -192,7 +192,7 @@ Follow-ups of [Parallel downloads](#parallel-downloads). The numbers are in [res
 - A class is a barrier. A site behind a barrier, and a site named `arguments`, use the full search.
 - A stored index is a hint. A name check guards it, and a miss runs the full search. A wrong hop count is the only unsafe error, so a debug build checks every resolved lookup against the full search.
 - A name that no scope declares goes to the global object. A per-name hint holds the position of its property, and a key check guards it.
-- Not done: frame slots for variables that no closure captures. That needs a different environment layout, and the profile does not show it as the next cost.
+- Frame slots for variables that no closure captures: done for leaf functions only. See [Frame slots](#frame-slots).
 - If `with` or a direct `eval` is added, the first walk must open a barrier for the code that they can reach.
 - Reason: a bundle reads outer variables through a chain of closures, and every read searched each environment on the way. See [resources.md](resources.md#cost-of-identifier-lookup).
 
@@ -207,6 +207,15 @@ Follow-ups of [Parallel downloads](#parallel-downloads). The numbers are in [res
 - The brand of an error object is not stored. `Object.prototype.toString` tests an own `stack` and `Error.prototype` in the chain. Reason: no extra field for each error, and the tag matches V8 for the cases of the corpus. It is a heuristic, listed in progress.md.
 - Not done: custom elements (no `customElements` yet); `Request`, `Response`, `Headers` and `URL` (each constructor must read `new.target`, one change for each); `extends Function` and `extends Symbol`. No target page needs them yet.
 - Cost rule for this change: no `instructions:u` row worse than +0.5% against c66c8a5. The worst row is +0.41%. See [progress.md](progress.md#class-x-extends-built-in).
+
+## Frame slots
+
+- A function that has no inner function and no class keeps its variables in a frame, not in an environment. A frame is a run of bindings at the end of the bindings of environment 1, from `Interp::fp`. A call makes no environment. A block, a loop head, a `switch` or a `catch` inside the function makes none either. A `let` or `const` goes back to its TDZ each time its block is entered. V8 keeps such variables in registers and SpiderMonkey in frame slots.
+- A function keeps its environment when it has an inner function or class, `arguments`, `this` (an arrow function may use it: it reads the one of its closure), `new.target`, `super` or `delete name`. It also keeps it when it is a class member, a constructor, an async function, a generator, a named function expression, has a parameter pattern or default, repeats a parameter name, or has more than 255 names. A generator or an async function must keep its variables across a suspension. This engine has no `eval` and no `with`, so no code can name a local by a string.
+- Frame slots are for leaf functions only. A function with an inner function keeps its environment, because a closure reads the variables of its parent through the environment chain. Not done: a capture analysis that gives a frame to a function whose names no closure reads.
+- A function with a loop or a call gets its frame at its first call: one call can be long, or recursive. Another function gets it at its second call. Its first call runs in an environment, and no site of it is resolved during that call (`hold`). So a function that runs once pays no layout. The cost is one state byte and one check for each call.
+- Not done: no environment for a block of a function that has an inner function. The profile shows the environment arena at 0.5% to 8.6% of the rows (see [resources.md](resources.md#cost-of-frame-slots)). The cost of a call is binding setup and name access, and a block environment is not among the top ones.
+- Rule status: two rows of the cost rule are over +0.5% with both allocators (`scripts_load few`), and three rows of `class_load` are at +0.50%. See [resources.md](resources.md#cost-of-frame-slots). The change was not merged for that reason.
 
 ## Code style
 

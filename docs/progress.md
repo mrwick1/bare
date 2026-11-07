@@ -791,6 +791,18 @@ Results against main 855e8aa (`tools/js/instr.sh`): `eval_load loop 10` -45.9%, 
 
 Not tested: wall time; the rows at scale 100; `parse_check.sh` (needs `acorn`); the live staging pages.
 
+## Frame slots for leaf functions
+
+A function with no inner function or class now keeps its variables in a frame (a run of bindings in environment 1), not in an environment object. A call, a block, a loop head, a `switch` and a `catch` of such a function make no environment. A function with a loop or a call gets its frame at its first call. A function with neither gets it at its second call, so a function that runs once pays no layout. Generators, async functions, class members, functions with an inner function, `arguments`, `this`, `new.target`, `super`, `delete name` or a parameter pattern keep their environment. See [decisions.md](decisions.md#frame-slots).
+
+Results against main c66c8a5 (`tools/js/instr.sh`, minimum of 3): `eval_load fib 10` -8.4%, `calls 10` -6.3%, `objects 10` -1.6%, `closures 10` -1.2%, `webpack 10` -1.0%, `loop 10` -0.1%, `select_load react 1000` -0.1%, `session_load chain 10` +0.06%. The best rows are `arrobj_load tosorted 10` (-10.5%) and `sort 10` (-9.6%), `proxy_load reactive 10` (-9.6%) and `scripts_load cross 10` (-7.5%): a callback that is a leaf function. Of 564 rows, 143 are lower by more than 0.5%. Peak RSS is +0.1 to +0.2 MiB on every row, and the live heap is the same.
+
+Cost rule: not met. Two rows are over +0.5% with both allocators: `scripts_load few 1` (+0.70% glibc, +0.57% jemalloc) and `few 10` (+0.81%, +0.80%). Each function in that row is defined and called once, so it pays the walk and the call check and gets nothing back. Three `class_load` rows (`accessors`, `super`) are at +0.50%. Class members keep their environment, so they pay the call check only. The PR is open and not merged. See [resources.md](resources.md#cost-of-frame-slots).
+
+Tests: 8 new tests in `eval_scope_tests.rs` (which functions get a frame, when, generators and async functions that resume between leaf calls, `eval` and `with` names, sloppy `arguments`, throw and limit inside nested frames, a call that comes back into a function during its first call) and 114 `frame_*` cases in `eval-cases.txt` that match Node. `cargo test --workspace` passes in a debug build (2,578 tests), with each resolved lookup compared to the full search.
+
+Not tested: wall time under a quiet machine (load average 11 to 13); the rows at scale 100; `parse_check.sh` (needs `acorn`); `regexp_load` (it runs no evaluator code); the live staging pages; deep recursion in a frame function against the stack limit (the frame is on the heap, but the Rust stack use of a call is the same as before).
+
 ## Idle callbacks and the settle rule
 
 Open item from PR #186: a page that asks for a new idle callback in each idle callback (or in each timer tick) never settled. Also `Run::Idle` set no verdict.
