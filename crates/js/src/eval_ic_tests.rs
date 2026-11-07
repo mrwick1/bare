@@ -274,3 +274,104 @@ fn the_counters_show_store_and_add_hits() {
         assert_eq!(c.heap.fill_add - before.heap.fill_add, 2);
     });
 }
+
+/// Object literals, closures and the lazy `prototype` (step A4): each program runs every literal and closure site more than once, so the
+/// later runs take the preset shapes. The output is from Node 22.
+const LITERAL_CASES: &[(&str, &str, &str)] = &[
+("computed keys", r#"var out = [], s = Symbol("s");
+function f(k) { return { a: 1, [k]: 2, b: 3 }; }
+var ks = ["x", "a", "0", s, "b", "x", 7];
+for (var i = 0; i < ks.length; i++) { var o = f(ks[i]); out.push(Object.keys(o).join("") + ":" + o.a + o.b + (o[ks[i]])); }
+out.join()"#, r#"axb:132,ab:232,0ab:132,ab:132,ab:133,axb:132,7ab:132"#),
+("__proto__ in a literal", r#"var out = [], P = { p: 1 };
+function f(p) { return { __proto__: p, x: 1 }; }
+function g(p) { return { ["__proto__"]: p, x: 1 }; }
+function h(__proto__) { return { __proto__, x: 1 }; }
+function q(p) { return { "__proto__": p, x: 1 }; }
+for (var i = 0; i < 3; i++) {
+  var a = f(i == 1 ? null : P), b = g(P), c = h(P), d = q(5);
+  out.push([Object.getPrototypeOf(a) === P, Object.getPrototypeOf(a) === null, a.p, Object.keys(a).join(""),
+    Object.getPrototypeOf(b) === Object.prototype, Object.keys(b).join(""), b.__proto__ === P,
+    Object.keys(c).join(""), Object.getPrototypeOf(c) === Object.prototype, Object.getPrototypeOf(d) === Object.prototype, Object.keys(d).join("")].join(" "));
+}
+out.join("|")"#, r#"true false 1 x true __proto__x true __proto__x true true x|false true  x true __proto__x true __proto__x true true x|true false 1 x true __proto__x true __proto__x true true x"#),
+("spread", r#"var out = [];
+function f(src) { return { a: 1, ...src, b: 2 }; }
+var srcs = [{}, { c: 3 }, { a: 9 }, { b: 8, d: 4 }, null, "xy", [5]];
+for (var i = 0; i < srcs.length; i++) { var o = f(srcs[i]); out.push(Object.keys(o).map(k => k + o[k]).join("")); }
+out.join()"#, r#"a1b2,a1c3b2,a9b2,a1b2d4,a1b2,0x1ya1b2,05a1b2"#),
+("getters and setters", r#"var out = [];
+function f(v) { var box = v; return { get a() { return box; }, set a(x) { box = x * 2; }, b: v, get c() { return this.b + 1; } }; }
+for (var i = 0; i < 4; i++) {
+  var o = f(i); o.a = i + 1;
+  var d = Object.getOwnPropertyDescriptor(o, "a");
+  out.push(Object.keys(o).join("") + o.a + o.c + typeof d.get + typeof d.set + d.enumerable + d.configurable);
+}
+out.join()"#, r#"abc21functionfunctiontruetrue,abc42functionfunctiontruetrue,abc63functionfunctiontruetrue,abc84functionfunctiontruetrue"#),
+("duplicate keys", r#"var out = [];
+function f(i) { return { a: 1, b: i, a: 3 }; }
+function g(i) { return { a: i, get a() { return 7; } }; }
+function h(i) { return { get a() { return 7; }, a: i }; }
+function m(i) { return { a: 1, a() { return i; } }; }
+for (var i = 0; i < 3; i++) {
+  var o = f(i), p = g(i), q = h(i), r = m(i);
+  out.push(Object.keys(o).join("") + o.a + o.b + p.a + q.a + typeof Object.getOwnPropertyDescriptor(q, "a").value + r.a() + r.a.name);
+}
+out.join()"#, r#"ab3070number0a,ab3171number1a,ab3272number2a"#),
+("one site, different key sets", r#"var out = [];
+function f(k, v) { return { x: v, [k]: v, y: v }; }
+function n(i) { return { 1: i, b: i, "2": i, c: i }; }
+for (var i = 0; i < 6; i++) {
+  var o = f(i % 2 ? "x" : "z" + (i % 3), i), q = n(i);
+  out.push(Object.keys(o).join("") + JSON.stringify(q));
+}
+out.join("|")"#, r#"xz0y{"1":0,"2":0,"b":0,"c":0}|xy{"1":1,"2":1,"b":1,"c":1}|xz2y{"1":2,"2":2,"b":2,"c":2}|xy{"1":3,"2":3,"b":3,"c":3}|xz1y{"1":4,"2":4,"b":4,"c":4}|xy{"1":5,"2":5,"b":5,"c":5}"#),
+("values, names and later changes", r#"var out = [];
+function f(i) { return { f: function () {}, g: () => 1, h() {}, C: class {}, n: i, s: "v" + i }; }
+for (var i = 0; i < 3; i++) {
+  var o = f(i);
+  out.push([o.f.name, o.g.name, o.h.name, o.C.name, o.n, o.s, Object.keys(o).join("")].join(" "));
+  o.extra = 1; delete o.f; o.n = 99; Object.freeze(o);
+}
+var t = 0;
+function thr(i) { return { a: i, b: (function () { if (i == 2) throw new Error("x" + i); return i; })(), c: 3 }; }
+for (var i = 0; i < 4; i++) { try { var o = thr(i); t += o.a + o.b + o.c; } catch (e) { out.push(e.message); } }
+out.push(t);
+var objs = []; for (var i = 0; i < 3; i++) objs.push({ p: i, q: { r: i, s: [i] } });
+objs[0].p = "w"; out.push(JSON.stringify(objs));
+out.join("|")"#, r#"f g h C 0 v0 fghCns|f g h C 1 v1 fghCns|f g h C 2 v2 fghCns|x2|17|[{"p":"w","q":{"r":0,"s":[0]}},{"p":1,"q":{"r":1,"s":[1]}},{"p":2,"q":{"r":2,"s":[2]}}]"#),
+("the lazy prototype of a function", r#""use strict"; var out = [];
+function mk() { return function F(a, b) { this.a = a; }; }
+for (var i = 0; i < 3; i++) {
+  var f = mk();
+  out.push(Object.getOwnPropertyNames(f).join(",") + " " + ("prototype" in f) + " " + Object.keys(f).length + " " + f.length + f.name);
+  var d = Object.getOwnPropertyDescriptor(f, "prototype");
+  if (i == 0) { out.push(typeof d.value + d.writable + d.enumerable + d.configurable + (d.value.constructor === f) + Object.keys(d.value).length); }
+  if (i == 1) { var np = { k: 1 }; f.prototype = np; out.push((new f(1).k) + "" + (Object.getPrototypeOf(new f(2)) === np)); }
+  if (i == 2) { try { delete f.prototype; out.push("deleted"); } catch (e) { out.push(e.constructor.name + (typeof f.prototype)); } }
+  var g = mk(); var x = new g(5); out.push(x.a + "" + (Object.getPrototypeOf(x) === g.prototype) + (g.prototype.constructor === g));
+  var h = mk(); out.push(String(Reflect.deleteProperty(h, "prototype")) + Object.getOwnPropertyNames(h).join(","));
+  var k = mk(); Object.defineProperty(k, "prototype", { value: 3 }); out.push(k.prototype + "" + Object.getOwnPropertyDescriptor(k, "prototype").writable);
+  var z = mk(); Object.defineProperty(z, "name", { value: "Z" }); z.prototype.q = 4; out.push(z.name + new z().q + Object.getOwnPropertyNames(z).join(","));
+}
+var arrow = () => 1, am = async function () {}, gen = function* () {}, meth = { m() {} }.m, ag = async function* () {};
+out.push(["prototype" in arrow, "prototype" in am, Object.getPrototypeOf(am) === Object.getPrototypeOf(async function () {}),
+  typeof gen.prototype, Object.getPrototypeOf(gen.prototype) === Object.getPrototypeOf(function* () {}).prototype, "prototype" in meth, typeof ag.prototype,
+  Object.getOwnPropertyNames(gen).join(","), Object.getOwnPropertyNames(am).join(","), Object.getOwnPropertyNames(ag).join(",")].join(" "));
+out.join("|")"#, r#"length,name,prototype true 0 2F|objecttruefalsefalsetrue0|5truetrue|falselength,name,prototype|3true|Z4length,name,prototype|length,name,prototype true 0 2F|1true|5truetrue|falselength,name,prototype|3true|Z4length,name,prototype|length,name,prototype true 0 2F|TypeErrorobject|5truetrue|falselength,name,prototype|3true|Z4length,name,prototype|false false true object true false object length,name,prototype length,name length,name,prototype"#),
+];
+
+#[test]
+fn programs_with_literals_and_closures_match_node() {
+    big(|| {
+        let mut bad = Vec::new();
+        for &(name, src, want) in LITERAL_CASES {
+            let mut it = Interp::realm(Heap::default(), EvalLimits::default()).unwrap();
+            let got = run(&mut it, src);
+            if got != want {
+                bad.push(format!("{name}: node {want}, bare {got}"));
+            }
+        }
+        assert!(bad.is_empty(), "{}", bad.join("\n"));
+    });
+}

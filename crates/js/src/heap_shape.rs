@@ -114,6 +114,8 @@ pub(super) struct Shapes {
     tables: Vec<Table>,
     /// The keys and the shape of `Object::init_fn`.
     fn_shape: Option<((PropertyKey, PropertyKey), u32)>,
+    /// `fn_shape` with a lazy `prototype` added last (`Heap::new_function`): the shape of most closures.
+    fn_lazy: Option<((PropertyKey, PropertyKey, PropertyKey), u32)>,
     /// Recent transitions that the `child` entry missed, direct-mapped by `from` and `key`: `(from, key, attrs, to)`. A root has hundreds
     /// of children, and every object literal starts there: without this, most first keys take a probe of the children map.
     recent: Box<[(u32, PropertyKey, u8, u32); RECENT]>,
@@ -149,7 +151,7 @@ impl Shapes {
         let recent = Box::new([(0, PropertyKey::Index(0), 0, 0); RECENT]);
         // Shape 0 is dictionary mode, which never asks `found`, so the first state never matches.
         let found = Box::new(std::array::from_fn(|_| Cell::new((0, PropertyKey::Index(0), 0, 0))));
-        Shapes { shapes: vec![shape(0, 0), shape(0, 0), shape(1, 1), shape(0, 0), shape(0, 0)], tables, fn_shape: None, recent, found }
+        Shapes { shapes: vec![shape(0, 0), shape(0, 0), shape(1, 1), shape(0, 0), shape(0, 0)], tables, fn_shape: None, fn_lazy: None, recent, found }
     }
 
     /// How many shapes exist (the sentinel and the three roots included).
@@ -261,6 +263,43 @@ impl Shapes {
     pub(super) fn has_child(&self, from: u32, key: PropertyKey, attrs: u8) -> bool {
         let s = &self.shapes[from as usize];
         s.child.2 != 0 && s.child.0 == key && s.child.1 == attrs || s.children.as_ref().is_some_and(|m| m.contains_key(&(key, attrs)))
+    }
+
+    /// The shape of a function with the read-only, configurable `length` and `name` (`keys`), and with a writable `prototype` (`proto`:
+    /// not enumerable, not configurable) when given. Both are kept: a realm makes thousands of functions with these keys. `None`: the
+    /// shape table is full.
+    #[inline(always)]
+    pub(super) fn fn_shape(&mut self, keys: (PropertyKey, PropertyKey), proto: Option<PropertyKey>) -> Option<u32> {
+        let base = match self.fn_shape {
+            Some((k, s)) if k == keys => s,
+            _ => {
+                let s = self.add(ROOT, keys.0, A_C).and_then(|s| self.add(s, keys.1, A_C))?;
+                self.fn_shape = Some((keys, s));
+                s
+            }
+        };
+        let Some(kp) = proto else { return Some(base) };
+        match self.fn_lazy {
+            Some((k, s)) if k == (keys.0, keys.1, kp) => Some(s),
+            _ => {
+                let s = self.add(base, kp, A_W)?;
+                self.fn_lazy = Some(((keys.0, keys.1, kp), s));
+                Some(s)
+            }
+        }
+    }
+
+    /// `shape` holds `n` writable, enumerable, configurable data properties in slots `0..n`, from the root of ordinary objects: the shape
+    /// that an object literal with `n` named keys gives.
+    pub(super) fn is_literal(&self, shape: u32, n: usize) -> bool {
+        let s = &self.shapes[shape as usize];
+        shape != 0 && s.count as usize == n && s.nslots as usize == n && self.entries(shape).iter().all(|e| e.attrs == A_W | A_E | A_C) && {
+            let mut r = shape;
+            while self.shapes[r as usize].parent != 0 {
+                r = self.shapes[r as usize].parent;
+            }
+            r == ROOT
+        }
     }
 
     pub(super) fn count(&self, shape: u32) -> usize {
@@ -453,14 +492,7 @@ impl Object {
     /// Give an object of the root shape the two read-only, configurable data properties `keys` (`Heap::init_function`). The shape of the
     /// pair is kept: a realm makes hundreds of functions, and each skips two transition lookups. `false`: the shape table is full.
     pub(super) fn init_fn(&mut self, sh: &mut Shapes, keys: (PropertyKey, PropertyKey), v: [Value; 2]) -> bool {
-        let shape = match sh.fn_shape {
-            Some((k, s)) if k == keys => s,
-            _ => {
-                let Some(s) = sh.add(ROOT, keys.0, A_C).and_then(|s| sh.add(s, keys.1, A_C)) else { return false };
-                sh.fn_shape = Some((keys, s));
-                s
-            }
-        };
+        let Some(shape) = sh.fn_shape(keys, None) else { return false };
         self.shape = shape;
         self.slots.extend(v);
         true
@@ -708,6 +740,72 @@ pub struct IcStats {
     pub add_hits: u64,
     pub fill_store: u64,
     pub fill_add: u64,
+}
+
+// ---------- preset shapes (step A4) ----------
+
+impl Heap {
+    /// A new ordinary object that starts in `shape` with the values `slots`: an object literal whose site knows its final shape skips the
+    /// transition and the define of each key. `shape` must be an object literal shape of `slots.len()` keys (`Heap::literal_shape`).
+    pub(crate) fn new_object_with_shape(&mut self, proto: Option<ObjId>, shape: u32, slots: Vec<Value>) -> R<ObjId> {
+        if shape as usize >= self.shapes.len() || shape == 0 || self.shapes.entries(shape).len() != slots.len() {
+            return Err(HeapError::NeedsExecution("new_object_with_shape: the slots do not match the shape"));
+        }
+        debug_assert!(self.shapes.is_literal(shape, slots.len()));
+        for &v in &slots {
+            self.check_value(v)?;
+        }
+        let extra = slots.len() * SLOT_BYTES;
+        self.charge(extra)?;
+        let o = self.alloc_object(proto, false)?;
+        let ob = self.objects.get_mut(o.index, o.gn).expect("just made");
+        (ob.shape, ob.slots) = (shape, slots);
+        self.bytes += extra;
+        Ok(o)
+    }
+
+    /// The shape of `o` when it is an object literal shape of `n` keys (see `Shapes::is_literal`) and `o` has nothing else: its site can
+    /// make the next object with `new_object_with_shape`. `None`: the object is in dictionary mode, has elements, or has other keys.
+    pub(crate) fn literal_shape(&self, o: ObjId, n: usize) -> Option<u32> {
+        let ob = self.objects.get(o.index, o.gn)?;
+        let ok = ob.dict.is_none() && ob.elems.is_empty() && ob.exotic == 0 && ob.lazy == 0 && ob.extensible && self.shapes.is_literal(ob.shape, n);
+        ok.then_some(ob.shape)
+    }
+
+    /// A new function object with the read-only, configurable `length` and `name`, and a lazy `prototype` when `lazy_proto` is set (as
+    /// `init_function` and `add_lazy_prototype` give, in one step): it starts in the preset function shape. `cap` slots are reserved. As
+    /// in `init_function`, the keys and the name are the caller's live handles: they are not checked.
+    pub(crate) fn new_function(&mut self, proto: Option<ObjId>, length: (PropertyKey, f64), name: (PropertyKey, StrId), lazy_proto: bool, cap: usize) -> R<ObjId> {
+        let kp = match (lazy_proto, self.lazy) {
+            (false, _) => None,
+            (true, Some((_, kp, _))) => Some(kp),
+            (true, None) => return Err(HeapError::NeedsExecution("set_lazy_prototype first")),
+        };
+        let Some(shape) = self.shapes.fn_shape((length.0, name.0), kp) else {
+            let o = self.new_object(proto)?;
+            self.reserve_props(o, cap)?;
+            self.init_function(o, length, name)?;
+            if lazy_proto {
+                self.add_lazy_prototype(o)?;
+            }
+            return Ok(o);
+        };
+        let mut slots = Vec::with_capacity(cap.max(2 + lazy_proto as usize));
+        slots.extend([Value::Number(length.1), Value::String(name.1)]);
+        if lazy_proto {
+            slots.push(Value::Undefined);
+        }
+        let extra = slots.len() * SLOT_BYTES;
+        self.charge(extra)?;
+        let o = self.alloc_object(proto, false)?;
+        let ob = self.objects.get_mut(o.index, o.gn).expect("just made");
+        (ob.shape, ob.slots) = (shape, slots);
+        if lazy_proto {
+            ob.lazy |= LAZY_PROTO;
+        }
+        self.bytes += extra;
+        Ok(o)
+    }
 }
 
 impl Heap {
@@ -1707,6 +1805,46 @@ mod tests {
     }
     fn attrs(v: f64, w: bool, e: bool, c: bool) -> PropertyDescriptor {
         PropertyDescriptor { value: Some(n(v)), writable: Some(w), enumerable: Some(e), configurable: Some(c), ..Default::default() }
+    }
+
+    #[test]
+    fn a_literal_shape_makes_the_same_object_and_a_function_starts_in_the_preset_shape() {
+        let mut h = Heap::default();
+        let (a, b) = (k(&mut h, "a"), k(&mut h, "b"));
+        let o = h.new_object(None).unwrap();
+        def(&mut h, o, a, attrs(1.0, true, true, true));
+        def(&mut h, o, b, attrs(2.0, true, true, true));
+        let s = h.literal_shape(o, 2).unwrap();
+        assert_eq!(h.literal_shape(o, 3), None);
+        let p = h.new_object_with_shape(None, s, vec![n(5.0), n(6.0)]).unwrap();
+        assert_eq!((shape_of(&h, p), getn(&mut h, p, a), getn(&mut h, p, b)), (s, 5.0, 6.0));
+        assert_eq!(keys_text(&mut h, p), ["a", "b"]);
+        setn(&mut h, p, a, 7.0);
+        assert_eq!((getn(&mut h, p, a), getn(&mut h, o, a)), (7.0, 1.0));
+        assert!(h.new_object_with_shape(None, s, vec![n(5.0)]).is_err());
+        // A read-only key, a key on an array, or a dictionary object is not a literal shape.
+        let q = h.new_object(None).unwrap();
+        def(&mut h, q, a, attrs(1.0, false, true, true));
+        assert_eq!(h.literal_shape(q, 1), None);
+        let arr = h.new_array(None).unwrap();
+        def(&mut h, arr, a, attrs(1.0, true, true, true));
+        assert_eq!(h.literal_shape(arr, 1), None);
+        h.prevent_extensions(o).unwrap();
+        assert_eq!(h.literal_shape(o, 2), None);
+
+        let op = h.new_object(None).unwrap();
+        let (kl, kn, kp, kc) = (k(&mut h, "length"), k(&mut h, "name"), k(&mut h, "prototype"), k(&mut h, "constructor"));
+        h.set_lazy_prototype(op, kp, kc).unwrap();
+        let name = h.intern_str("f").unwrap();
+        let f = h.new_function(None, (kl, 2.0), (kn, name), true, 3).unwrap();
+        let g = h.new_function(None, (kl, 0.0), (kn, name), true, 3).unwrap();
+        assert_eq!(shape_of(&h, f), shape_of(&h, g));
+        assert_eq!(keys_text(&mut h, f), ["length", "name", "prototype"]);
+        assert_eq!(getn(&mut h, f, kl), 2.0);
+        let Get::Value(Value::Object(pr)) = h.get(f, kp).unwrap() else { panic!("prototype") };
+        assert!(matches!(h.get(pr, kc).unwrap(), Get::Value(Value::Object(c)) if c == f));
+        let m = h.new_function(None, (kl, 0.0), (kn, name), false, 2).unwrap();
+        assert_eq!(keys_text(&mut h, m), ["length", "name"]);
     }
 
     #[test]
