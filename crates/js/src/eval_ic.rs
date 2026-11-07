@@ -73,6 +73,9 @@ impl Interp<'_> {
             self.expr_name[e.index()] = 1;
             self.ics.first_runs += 1;
             self.heap.get(o, key)
+        } else if self.heap.ic_refuses(o) {
+            // A receiver that is never cached (a proxy, a named host object, a String wrapper, a dictionary): the plain read.
+            self.heap.get_refused(o, key)
         } else {
             if n == 1 {
                 n = self.ics.ics.len();

@@ -2269,34 +2269,24 @@ impl<'p> Interp<'p> {
         }
         let prog = self.prog.clone();
         let t = *prog.template(t);
-        let strings = h!(self, self.heap.new_array(Some(self.array_proto)));
-        let raw = h!(self, self.heap.new_array(Some(self.array_proto)));
-        let mut u = Vec::new();
-        for (i, q) in prog.template_quasis(&t).enumerate() {
+        let (mut cooked, mut raws, mut u) = (Vec::new(), Vec::new(), Vec::new());
+        for q in prog.template_quasis(&t) {
             let q = prog.quasi_node(q);
-            let k = PropertyKey::Index(i as u32);
             u.clear();
-            let cooked = if q.bad_escape {
+            cooked.push(if q.bad_escape {
                 Value::Undefined
             } else {
                 let _ = prog.quasi(q, false, &mut u);
                 Value::String(h!(self, self.heap.intern_vec(std::mem::take(&mut u))))
-            };
-            self.def(strings, k, cooked, false, true, false)?;
+            });
             u.clear();
             let _ = prog.quasi(q, true, &mut u);
-            let r = h!(self, self.heap.intern_vec(std::mem::take(&mut u)));
-            self.def(raw, k, Value::String(r), false, true, false)?;
+            raws.push(Value::String(h!(self, self.heap.intern_vec(std::mem::take(&mut u)))));
         }
-        for a in [strings, raw] {
-            let d = PropertyDescriptor { writable: Some(false), ..Default::default() };
-            hxw!(self, self.heap.define_own_property(a, self.k_length, &d));
-        }
-        h!(self, self.heap.prevent_extensions(raw));
-        let d = PropertyDescriptor { value: Some(Value::Object(raw)), writable: Some(false), enumerable: Some(false), configurable: Some(false), ..Default::default() };
+        // Both arrays are frozen, and `strings.raw` is a frozen data property.
+        let raw = h!(self, self.heap.new_frozen_array(Some(self.array_proto), &raws, None));
         let rk = PropertyKey::String(h!(self, self.heap.intern_str("raw")));
-        hxw!(self, self.heap.define_own_property(strings, rk, &d));
-        h!(self, self.heap.prevent_extensions(strings));
+        let strings = h!(self, self.heap.new_frozen_array(Some(self.array_proto), &cooked, Some((rk, Value::Object(raw)))));
         self.tpl_objs.insert(site, strings);
         Ok(Value::Object(strings))
     }

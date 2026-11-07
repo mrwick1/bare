@@ -1208,6 +1208,33 @@ impl Heap {
         self.alloc_object(proto, true)
     }
 
+    /// A frozen array of `items`, with one more named property `extra` (not enumerable) when given: a template object (`GetTemplateObject`,
+    /// section 13.2.8.4). It is built in dictionary mode at once, as `set_integrity` would leave it, without the shape and slot steps.
+    pub fn new_frozen_array(&mut self, proto: Option<ObjId>, items: &[Value], extra: Option<(PropertyKey, Value)>) -> R<ObjId> {
+        for &v in items.iter().chain(extra.as_ref().map(|e| &e.1)) {
+            self.check_value(v)?;
+        }
+        if let Some((k, _)) = extra {
+            self.check_key(k)?;
+        }
+        let n = items.len() + 1 + extra.is_some() as usize;
+        self.charge(std::mem::size_of::<PropMap>() + n * (ENTRY_BYTES + INDEX_ENTRY_BYTES))?;
+        let o = self.alloc_object(proto, true)?;
+        let length = PropertyKey::String(self.length);
+        self.edit(o, |ob| {
+            let p = |value, enumerable| Property::Data { value, writable: false, enumerable, configurable: false };
+            let mut m = PropMap::new();
+            m.entries.reserve_exact(n);
+            m.entries.push(Some((length, p(Value::Number(items.len() as f64), false))));
+            m.entries.extend(items.iter().enumerate().map(|(i, &v)| Some((PropertyKey::Index(i as u32), p(v, true)))));
+            m.entries.extend(extra.map(|(k, v)| Some((k, p(v, false)))));
+            (m.live, m.index_keys) = (n as u32, items.len() as u32);
+            m.rebuild_index();
+            (ob.slots, ob.shape, ob.extensible, ob.dict) = (Vec::new(), 0, false, Some(Box::new(m)));
+        });
+        Ok(o)
+    }
+
     /// `IsArray` of an object that is not a proxy. A proxy is `Err(Proxy)`: the answer is the one of its target.
     pub fn is_array(&self, o: ObjId) -> R<bool> {
         let ob = self.obj(o)?;
@@ -1671,13 +1698,11 @@ impl Heap {
         let mut idx: Vec<u32> = ob.elems.iter().enumerate().filter(|(_, v)| v.is_some()).map(|(i, _)| i as u32).collect();
         let sparse = ob.index_keys() > 0;
         let (mut strs, mut syms) = (Vec::new(), Vec::new());
-        for (k, _) in ob.props(&self.shapes) {
-            match k {
-                PropertyKey::Index(i) => idx.push(i),
-                PropertyKey::String(_) => strs.push(k),
-                PropertyKey::Symbol(_) => syms.push(k),
-            }
-        }
+        ob.each_key(&self.shapes, |k| match k {
+            PropertyKey::Index(i) => idx.push(i),
+            PropertyKey::String(_) => strs.push(k),
+            PropertyKey::Symbol(_) => syms.push(k),
+        });
         if sparse {
             idx.sort_unstable();
         }
@@ -1736,6 +1761,9 @@ impl Heap {
     /// Errors: stale handles, a descriptor mixing data and accessor fields, an invalid array
     /// length, or a size limit.
     pub fn define_own_property(&mut self, o: ObjId, key: PropertyKey, d: &PropertyDescriptor) -> R<bool> {
+        if !self.setup && let Some(r) = self.add_data_fast(o, key, d)? {
+            return Ok(r);
+        }
         let mut obj = self.obj(o)?;
         self.check_key(key)?;
         if self.is_lazy(obj, key) {
@@ -1785,6 +1813,33 @@ impl Heap {
             self.edit_with(o, |ob, sh| ob.set_length(sh, Some(i + 1), None));
         }
         Ok(true)
+    }
+
+    /// The common define: a full data descriptor for a new named key of an ordinary object in shape mode (object literals, `JSON.parse`,
+    /// a new key by assignment). One key search and one transition, with no `Property` built. `None`: any other case, for the general path.
+    #[inline]
+    fn add_data_fast(&mut self, o: ObjId, key: PropertyKey, d: &PropertyDescriptor) -> R<Option<bool>> {
+        let (Some(v), Some(w), Some(e), Some(c), None, None) = (d.value, d.writable, d.enumerable, d.configurable, d.get, d.set) else { return Ok(None) };
+        if matches!(key, PropertyKey::Index(_)) || self.setup {
+            return Ok(None);
+        }
+        let Some(ob) = self.objects.get(o.index, o.gn) else { return Ok(None) };
+        if ob.exotic != 0 || ob.lazy != 0 || ob.dict.is_some() || !ob.extensible || ob.is_array || ob.ic_chain || ob.slots.len() >= shape::MAX_PROPS {
+            return Ok(None);
+        }
+        if self.shapes.find(ob.shape, key).is_some() {
+            return Ok(None);
+        }
+        self.check_key(key)?;
+        self.check_value(v)?;
+        let attrs = w as u8 * shape::A_W | e as u8 * shape::A_E | c as u8 * shape::A_C;
+        let Some(next) = self.shapes.add(ob.shape, key, attrs) else { return Ok(None) };
+        self.charge(SLOT_BYTES)?;
+        let ob = self.objects.get_mut(o.index, o.gn).expect("checked above");
+        ob.shape = next;
+        ob.slots.push(v);
+        self.bytes += SLOT_BYTES;
+        Ok(Some(true))
     }
 
     fn array_len(&self, o: &Object) -> (u32, bool) {
@@ -2704,6 +2759,20 @@ mod tests {
         // A huge length costs no memory: it is only a number.
         assert!(h.define_own_property(a, len, &PropertyDescriptor { value: Some(n(0.0)), ..Default::default() }).unwrap());
         assert_eq!(names(&mut h, a), ["length", "4294967295"]);
+    }
+
+    #[test]
+    fn frozen_array_is_built_frozen_in_order() {
+        let mut h = Heap::default();
+        let raw = key(&mut h, "raw");
+        let a = h.new_frozen_array(None, &[n(1.0), n(2.0)], Some((raw, n(3.0)))).unwrap();
+        assert!(h.test_integrity(a, true).unwrap() && h.is_array(a).unwrap());
+        assert_eq!(h.array_length(a).unwrap(), Some(2));
+        let len = key(&mut h, "length");
+        assert_eq!(h.own_keys(a).unwrap(), vec![PropertyKey::Index(0), PropertyKey::Index(1), len, raw]);
+        assert!(matches!(h.get_own_property(a, PropertyKey::Index(1)).unwrap(), Some(Property::Data { value: Value::Number(2.0), writable: false, enumerable: true, configurable: false })));
+        assert!(matches!(h.get_own_property(a, raw).unwrap(), Some(Property::Data { writable: false, enumerable: false, configurable: false, .. })));
+        assert!(!h.define_own_property(a, PropertyKey::Index(2), &locked(true, true, true, 0.0)).unwrap());
     }
 
     #[test]

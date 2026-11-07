@@ -114,6 +114,22 @@ pub(super) struct Shapes {
     tables: Vec<Table>,
     /// The keys and the shape of `Object::init_fn`.
     fn_shape: Option<((PropertyKey, PropertyKey), u32)>,
+    /// Recent transitions that the `child` entry missed, direct-mapped by `from` and `key`: `(from, key, attrs, to)`. A root has hundreds
+    /// of children, and every object literal starts there: without this, most first keys take a probe of the children map.
+    recent: Box<[(u32, PropertyKey, u8, u32); RECENT]>,
+}
+
+const RECENT: usize = 256;
+
+/// The slot of `(from, key)` in `Shapes::recent`.
+#[inline(always)]
+fn recent_at(from: u32, key: PropertyKey) -> usize {
+    let k = match key {
+        PropertyKey::Index(i) => i,
+        PropertyKey::String(s) => s.index,
+        PropertyKey::Symbol(s) => !s.index,
+    };
+    ((k ^ from.rotate_left(16)).wrapping_mul(0x9e37_79b9) >> 24) as usize
 }
 
 impl Shapes {
@@ -124,7 +140,8 @@ impl Shapes {
             Table { entries: Vec::new(), index: OnceCell::new() },
             Table { entries: vec![Entry { key: length, slot: 0, attrs: A_W }], index: OnceCell::new() },
         ];
-        Shapes { shapes: vec![shape(0, 0), shape(0, 0), shape(1, 1), shape(0, 0), shape(0, 0)], tables, fn_shape: None }
+        let recent = Box::new([(0, PropertyKey::Index(0), 0, 0); RECENT]);
+        Shapes { shapes: vec![shape(0, 0), shape(0, 0), shape(1, 1), shape(0, 0), shape(0, 0)], tables, fn_shape: None, recent }
     }
 
     /// How many shapes exist (the sentinel and the three roots included).
@@ -170,13 +187,25 @@ impl Shapes {
 
     /// The shape that `from` has after `key` is added with `attrs`. `None`: the object goes to dictionary mode (it would have more than
     /// `MAX_PROPS` properties, or the shape table is full).
-    #[inline]
+    #[inline(always)]
     pub(super) fn add(&mut self, from: u32, key: PropertyKey, attrs: u8) -> Option<u32> {
         let s = &self.shapes[from as usize];
         if s.child.2 != 0 && s.child.0 == key && s.child.1 == attrs {
             return Some(s.child.2);
         }
-        self.add_slow(from, key, attrs)
+        self.add_miss(from, key, attrs)
+    }
+
+    /// `add` when the first child is another key: the recent transitions, then the children map or a new shape.
+    #[inline(never)]
+    fn add_miss(&mut self, from: u32, key: PropertyKey, attrs: u8) -> Option<u32> {
+        let r = &self.recent[recent_at(from, key)];
+        if r.0 == from && r.1 == key && r.2 == attrs && r.3 != 0 {
+            return Some(r.3);
+        }
+        let to = self.add_slow(from, key, attrs)?;
+        self.recent[recent_at(from, key)] = (from, key, attrs, to);
+        Some(to)
     }
 
     #[inline(never)]
@@ -297,6 +326,15 @@ impl Object {
         match &self.dict {
             Some(d) => Props::Dict(d.entries.iter()),
             None => Props::Shape(sh.entries(self.shape).iter(), &self.slots),
+        }
+    }
+
+    /// Run `f` on each own named key in order. Cheaper than `props` when only the keys are needed: no property is built.
+    #[inline]
+    pub(super) fn each_key(&self, sh: &Shapes, mut f: impl FnMut(PropertyKey)) {
+        match &self.dict {
+            Some(d) => d.entries.iter().flatten().for_each(|(k, _)| f(*k)),
+            None => sh.entries(self.shape).iter().for_each(|e| f(e.key)),
         }
     }
 
@@ -643,11 +681,22 @@ impl Heap {
             return Ok(g);
         }
         // A receiver that is never cached (a proxy, a host object, a dictionary) skips the fill.
-        if self.objects.get(o.index, o.gn).is_some_and(|ob| ob.exotic > EXOTIC || ob.dict.is_some() && !ob.fast_on_use) {
-            self.ic_stats.refused += 1;
-            return self.get(o, key);
+        if self.ic_refuses(o) {
+            return self.get_refused(o, key);
         }
         self.ic_fill(o, key, ic)
+    }
+
+    /// `get` for a receiver that `ic_refuses`, counted as a refusal.
+    pub fn get_refused(&mut self, o: ObjId, key: PropertyKey) -> R<Get> {
+        self.ic_stats.refused += 1;
+        self.get(o, key)
+    }
+
+    /// The cache never fills for `o`: a proxy, a named host object, a String wrapper, or a dictionary that was not made in setup mode.
+    #[inline]
+    pub fn ic_refuses(&self, o: ObjId) -> bool {
+        self.objects.get(o.index, o.gn).is_some_and(|ob| ob.exotic > EXOTIC || ob.dict.is_some() && !ob.fast_on_use)
     }
 
     #[inline(always)]
