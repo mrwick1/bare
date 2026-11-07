@@ -1,0 +1,117 @@
+# Scenarios of tools/fixtures/ui/drive.html for the driver inputs. `==` starts a scenario. Each runs on a fresh page.
+# `click SEL` = Input::Click, `key SEL KEY` = Input::Key (SEL `-` is the focused element), `type SEL TEXT` = Input::Type (`\n` is a line feed).
+# The log is cleared at `reset`: only what follows it is compared. Every scenario first clicks the blank area, so that the pointer has a place.
+== click_plain_button
+click #blank
+click #plain
+reset
+click #plain
+== click_disabled_button
+click #blank
+reset
+click #off
+== click_text_input
+click #blank
+reset
+click #user
+== click_between_elements
+click #blank
+click #plain
+reset
+click #user
+== mousedown_canceled_keeps_focus
+click #blank
+click #user
+reset
+click #nofocus
+== select_opens_on_pointerdown
+click #blank
+reset
+click #trigger
+== select_open_then_pick_with_pointerup
+click #blank
+click #trigger
+reset
+click #i2
+== select_opens_on_enter
+click #blank
+reset
+key #trigger Enter
+== select_opens_on_space
+click #blank
+reset
+key #trigger Space
+== select_opens_on_arrow_down
+click #blank
+reset
+key #trigger ArrowDown
+== select_pick_with_enter
+click #blank
+key #trigger ArrowDown
+reset
+key - ArrowDown
+key - Enter
+== select_escape_closes
+click #blank
+key #trigger ArrowDown
+reset
+key - Escape
+== key_on_focused_input
+click #blank
+click #user
+reset
+key - a
+== key_shift_letter
+click #blank
+click #user
+reset
+key - Shift+A
+== key_backspace_and_arrows
+click #blank
+click #user
+reset
+key - Backspace
+key - ArrowLeft
+== tab_order
+click #blank
+key #user Tab
+reset
+key - Tab
+key - Shift+Tab
+== enter_on_button_clicks
+click #blank
+reset
+key #plain Enter
+== space_on_button_clicks_on_keyup
+click #blank
+reset
+key #plain Space
+== enter_in_input_submits_form
+click #blank
+click #q
+reset
+key - Enter
+== type_into_input_replaces
+click #blank
+reset
+type #user ab
+== type_into_empty_input
+click #blank
+reset
+type #q hi
+== type_into_textarea
+click #blank
+reset
+type #ta a\nb
+== type_empty_clears
+click #blank
+reset
+type #user 
+== pointer_capture_in_pointerdown
+click #blank
+reset
+click #cap
+== click_fractional_center
+click #blank
+reset
+click #half

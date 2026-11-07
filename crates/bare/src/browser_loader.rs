@@ -174,15 +174,21 @@ pub enum Stop {
     NoTarget(usize),
 }
 
-/// One input of [`crate::browser_session::Session::resume`]: a selector (first match, as `querySelector`) and the existing
-/// `Browser` primitive that acts on it. No default action runs (see `browser.rs`), except that `Click` at a submit button
-/// dispatches `submit` at its form owner behind the gates of `browser_form.rs` (a gate ends the run with `Fatal::Unsupported`).
+/// One input of [`crate::browser_session::Session::resume`]: a selector (first match, as `querySelector`) and what to do with
+/// the element. `Click`, `Type` and `Key` act like a user (`browser_drive.rs`): the events, the focus changes and the default
+/// actions of Chrome, so a React or Radix page sees what it sees in a browser. `Submit` stays the dispatch-only call of `browser.rs`.
 #[derive(Clone, Copy, Debug)]
 pub enum Input<'a> {
+    /// Move the pointer to the center of the element, press the left button and release it.
     Click(&'a str),
-    /// A text-like `<input>` and the text: sets its value, then fires `input`.
+    /// A text `<input>` or a `<textarea>` and the text: focus it, replace its text, one key press for each character.
+    /// Another element is `Fatal::Unsupported`.
     Type(&'a str, &'a str),
+    /// `submit` at a form, dispatch only.
     Submit(&'a str),
+    /// A key (`Enter`, `Shift+Tab`, `a`, ...) pressed and released. The selector `""` or `"-"` means the focused element,
+    /// any other selector is focused first.
+    Key(&'a str, &'a str),
 }
 
 /// The request of [`Stop::Navigate`]. `Debug` prints the kind and `origin + path` only: a query, a fragment or a
@@ -1122,17 +1128,23 @@ impl Run<'_> {
         self.feed_styles()?;
         for (i, step) in steps.iter().enumerate() {
             self.budget()?;
-            let sel = match *step { Input::Click(s) | Input::Type(s, _) | Input::Submit(s) => s };
-            let node = match self.b.query(sel) {
-                Ok(Some(n)) => n,
-                Ok(None) | Err(Error::Throw(_)) => return Err(Stop::NoTarget(i)),
-                Err(e) => return Err(self.fatal(e, "input selector")),
+            let sel = match *step { Input::Click(s) | Input::Type(s, _) | Input::Submit(s) | Input::Key(s, _) => s };
+            let node = if matches!(step, Input::Key(..)) && matches!(sel, "" | "-") {
+                None
+            } else {
+                match self.b.query(sel) {
+                    Ok(Some(n)) => Some(n),
+                    Ok(None) | Err(Error::Throw(_)) => return Err(Stop::NoTarget(i)),
+                    Err(e) => return Err(self.fatal(e, "input selector")),
+                }
             };
             self.res.tasks += 1;
-            let r = match *step {
-                Input::Click(_) => self.b.click(node),
-                Input::Type(_, t) => self.b.type_text(node, t),
-                Input::Submit(_) => self.b.submit(node),
+            let r = match (*step, node) {
+                (Input::Click(_), Some(n)) => self.b.drive_click(n).map(drop),
+                (Input::Type(_, t), Some(n)) => self.b.drive_type(n, t).map(drop),
+                (Input::Submit(_), Some(n)) => self.b.submit(n).map(drop),
+                (Input::Key(_, k), n) => self.b.drive_key(n, k).map(drop),
+                _ => unreachable!("only a key has no element"),
             };
             if let Err(e) = r {
                 return Err(self.fatal(e, "input"));

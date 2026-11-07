@@ -1,0 +1,111 @@
+var $ = function (i) { return document.getElementById(i) };
+var err = function (f) { try { var v = f(); return 'ok ' + String(v) } catch (e) { return e.name + ': ' + e.message } };
+var J = function (o, ks) { return ks.map(function (k) { return k + '=' + o[k] }).join() };
+var MODS = ['ctrlKey', 'shiftKey', 'altKey', 'metaKey'];
+var MOUSE = ['detail', 'screenX', 'screenY', 'clientX', 'clientY', 'pageX', 'pageY', 'x', 'y', 'movementX', 'movementY', 'button', 'buttons', 'relatedTarget'].concat(MODS);
+var POINTER = ['pointerId', 'width', 'height', 'pressure', 'tangentialPressure', 'tiltX', 'tiltY', 'twist', 'pointerType', 'isPrimary'];
+var KEY = ['key', 'code', 'location', 'repeat', 'isComposing', 'keyCode', 'charCode', 'which'].concat(MODS);
+=== mouse-interface
+(function () { var e = new MouseEvent('click'); return [typeof MouseEvent, MouseEvent.length, e instanceof Event, e instanceof MouseEvent, e.constructor === MouseEvent, e.type, e.bubbles, e.cancelable, e.composed, e.isTrusted, e.view, e.eventPhase].join() })
+=== mouse-defaults
+(function () { return J(new MouseEvent('click'), MOUSE) })
+=== mouse-init
+@html <b id=b></b>
+(function () { var e = new MouseEvent('mousedown', { bubbles: true, cancelable: true, composed: true, detail: 2, screenX: 11, screenY: 12, clientX: 13, clientY: 14, movementX: 3, movementY: 4, button: 2, buttons: 5, ctrlKey: true, shiftKey: true, altKey: true, metaKey: true, relatedTarget: $('b'), view: window }); return [J(e, MOUSE.filter(function (k) { return k !== 'relatedTarget' })), e.relatedTarget === $('b'), e.bubbles, e.cancelable, e.composed, e.view === window].join('|') })
+=== mouse-fraction
+(function () { var e = new MouseEvent('click', { clientX: 10.7, clientY: -3.2, screenX: 5.5, screenY: 6.5, movementX: 1.5 }); return J(e, ['clientX', 'clientY', 'screenX', 'screenY', 'pageX', 'pageY', 'x', 'y', 'movementX']) })
+=== mouse-coerce
+(function () { var e = new MouseEvent('click', { clientX: '7', detail: '3', button: '1', buttons: 9.9, ctrlKey: 1, shiftKey: 'x', altKey: 0, metaKey: '' }); return J(e, ['clientX', 'detail', 'button', 'buttons'].concat(MODS)) })
+=== mouse-no-args
+(function () { return err(function () { return new MouseEvent() }) })
+=== mouse-bad-init
+(function () { return err(function () { return new MouseEvent('click', 5) }) })
+=== mouse-bad-related
+(function () { return err(function () { return new MouseEvent('click', { relatedTarget: {} }) }) })
+=== mouse-bad-view
+(function () { return err(function () { return new MouseEvent('click', { view: {} }) }) + '|' + err(function () { return new MouseEvent('click', { view: null }).view }) })
+=== mouse-type-coerce
+(function () { return [new MouseEvent(5).type, new MouseEvent(null).type, new MouseEvent(undefined).type].join() })
+=== mouse-modifier-state
+(function () { var e = new MouseEvent('click', { ctrlKey: true, shiftKey: true, modifierAltGraph: true, modifierCapsLock: true, modifierNumLock: true, modifierFn: true }); return ['Control', 'Shift', 'Alt', 'Meta', 'AltGraph', 'CapsLock', 'NumLock', 'Fn', 'ScrollLock', 'OS', 'Bogus', ''].map(function (k) { return k + '=' + e.getModifierState(k) }).join() + '|' + err(function () { return e.getModifierState() }) })
+=== mouse-getters-on-event
+(function () { var d = Object.getOwnPropertyDescriptor(MouseEvent.prototype, 'clientX'); return err(function () { return d.get.call(new Event('x')) }) + '|' + typeof d.get + '|' + (d.set === undefined) + '|' + d.enumerable + '|' + d.configurable })
+=== mouse-dispatch
+@html <p id=p style="position:absolute;left:10px;top:20px;width:100px;height:50px;margin:0;padding:0"></p>
+(function () { var r = []; var p = $('p'); p.addEventListener('click', function (e) { r.push(J(e, ['clientX', 'clientY', 'pageX', 'pageY', 'offsetX', 'offsetY', 'isTrusted'].map(String)), e.target.id, e.eventPhase, e.defaultPrevented) }); p.dispatchEvent(new MouseEvent('click', { clientX: 30, clientY: 40, bubbles: true })); return r.join('|') })
+=== mouse-dispatch-bubbles
+@html <div id=d><p id=p>x</p></div>
+(function () { var r = []; ['click'].forEach(function (t) { document.addEventListener(t, function (e) { r.push('doc:' + e.target.id + ':' + e.ctrlKey) }); $('d').addEventListener(t, function (e) { r.push('d:' + e.currentTarget.id) }) }); $('p').dispatchEvent(new MouseEvent('click', { bubbles: true, ctrlKey: true })); $('p').dispatchEvent(new MouseEvent('click', { ctrlKey: true })); return r.join() })
+=== mouse-prevent-default
+(function () { var e = new MouseEvent('click', { cancelable: true }); e.preventDefault(); var f = new MouseEvent('click'); f.preventDefault(); return [e.defaultPrevented, f.defaultPrevented].join() })
+=== pointer-interface
+(function () { var e = new PointerEvent('pointerdown'); return [typeof PointerEvent, PointerEvent.length, e instanceof Event, e instanceof MouseEvent, e instanceof PointerEvent, e.constructor === PointerEvent, PointerEvent.prototype instanceof MouseEvent].join() })
+=== pointer-defaults
+(function () { var e = new PointerEvent('pointerdown'); return J(e, POINTER.concat(['button', 'buttons', 'detail', 'clientX', 'screenX', 'pageX', 'x'])) })
+=== pointer-init
+(function () { var e = new PointerEvent('pointerdown', { bubbles: true, pointerId: 7, width: 20, height: 30, pressure: 0.5, tangentialPressure: 0.25, tiltX: 10, tiltY: -20, twist: 90, pointerType: 'pen', isPrimary: true, button: 0, buttons: 1, clientX: 3, clientY: 4, ctrlKey: true }); return J(e, POINTER.concat(['button', 'buttons', 'clientX', 'clientY', 'ctrlKey', 'bubbles'])) })
+=== pointer-init-mouse-like
+(function () { var e = new PointerEvent('pointerdown', { pointerId: 1, pointerType: 'mouse', isPrimary: true, button: 0, ctrlKey: false, buttons: 1 }); return [e.button === 0 && e.ctrlKey === false && e.pointerType === 'mouse', e.pointerId, e.isPrimary].join() })
+=== pointer-fraction
+(function () { var e = new PointerEvent('pointermove', { clientX: 10.5, clientY: 20.25, width: 2.5, pressure: 2 }); return J(e, ['clientX', 'clientY', 'pageX', 'x', 'y', 'width', 'pressure']) })
+=== pointer-bad-type
+(function () { return new PointerEvent('x', { pointerType: 5 }).pointerType + '|' + new PointerEvent('x', { pointerType: 'bogus' }).pointerType })
+=== pointer-coalesced
+(function () { var e = new PointerEvent('pointermove'); return [typeof e.getCoalescedEvents, e.getCoalescedEvents().length, typeof e.getPredictedEvents, e.getPredictedEvents().length].join() })
+=== pointer-capture-errors
+@html <p id=p>x</p>
+(function () { new PointerEvent('x'); var p = $('p'); var d = document.createElement('p'); return [err(function () { return p.setPointerCapture(999) }), err(function () { return p.releasePointerCapture(999) }), err(function () { return p.hasPointerCapture(999) }), err(function () { return d.setPointerCapture(999) }), err(function () { return p.setPointerCapture() }), err(function () { return p.hasPointerCapture() }), err(function () { return p.setPointerCapture('a') })].join('|') })
+=== pointer-capture-api
+@html <p id=p>x</p>
+(function () { new PointerEvent('x'); var p = $('p'); return [typeof p.setPointerCapture, typeof p.releasePointerCapture, typeof p.hasPointerCapture, p.setPointerCapture.length, 'setPointerCapture' in Element.prototype, Element.prototype.hasOwnProperty('hasPointerCapture'), document.setPointerCapture].join() })
+=== pointer-capture-synthetic
+@html <p id=p>x</p>
+(function () { new PointerEvent('x'); var p = $('p'); var r = []; p.addEventListener('gotpointercapture', function (e) { r.push('got:' + e.pointerId + ':' + e.constructor.name) }); p.addEventListener('lostpointercapture', function (e) { r.push('lost:' + e.pointerId) }); r.push(err(function () { return p.setPointerCapture(1) })); r.push(p.hasPointerCapture(1)); return function () { return r.join('|') } })()
+=== keyboard-interface
+(function () { var e = new KeyboardEvent('keydown'); return [typeof KeyboardEvent, KeyboardEvent.length, e instanceof Event, e instanceof KeyboardEvent, e.constructor === KeyboardEvent, e.bubbles, e.cancelable, e.composed].join() })
+=== keyboard-defaults
+(function () { return J(new KeyboardEvent('keydown'), KEY) })
+=== keyboard-init
+(function () { var e = new KeyboardEvent('keydown', { bubbles: true, cancelable: true, key: 'a', code: 'KeyA', location: 1, repeat: true, isComposing: true, keyCode: 65, charCode: 97, ctrlKey: true, shiftKey: true, altKey: true, metaKey: true, detail: 4 }); return J(e, KEY.concat(['detail', 'bubbles', 'cancelable'])) })
+=== keyboard-which-init
+(function () { var a = new KeyboardEvent('keydown', { which: 13 }); var b = new KeyboardEvent('keydown', { keyCode: 13 }); var c = new KeyboardEvent('keypress', { charCode: 13 }); return [a.which, a.keyCode, b.which, b.keyCode, c.which, c.charCode, c.keyCode].join() })
+=== keyboard-constants
+(function () { new KeyboardEvent('k'); return [KeyboardEvent.DOM_KEY_LOCATION_STANDARD, KeyboardEvent.DOM_KEY_LOCATION_LEFT, KeyboardEvent.DOM_KEY_LOCATION_RIGHT, KeyboardEvent.DOM_KEY_LOCATION_NUMPAD, new KeyboardEvent('k').DOM_KEY_LOCATION_RIGHT].join() })
+=== keyboard-modifier-state
+(function () { var e = new KeyboardEvent('keydown', { shiftKey: true, modifierCapsLock: true }); return ['Shift', 'Control', 'CapsLock', 'NumLock'].map(function (k) { return k + '=' + e.getModifierState(k) }).join() })
+=== keyboard-coerce
+(function () { var e = new KeyboardEvent('keydown', { key: 5, code: null, location: '2', repeat: 'yes' }); return J(e, ['key', 'code', 'location', 'repeat']) })
+=== keyboard-bad-init
+(function () { return err(function () { return new KeyboardEvent() }) + '|' + err(function () { return new KeyboardEvent('x', 'y') }) })
+=== keyboard-dispatch
+@html <input id=i>
+(function () { var r = []; var i = $('i'); i.addEventListener('keydown', function (e) { r.push(e.key, e.code, e.isTrusted, e.target.id) }); document.addEventListener('keydown', function (e) { r.push('doc') }); i.dispatchEvent(new KeyboardEvent('keydown', { key: 'x', bubbles: true })); return r.join() })
+=== keyboard-dispatch-does-not-type
+@html <input id=i><textarea id=t></textarea>
+(function () { var i = $('i'); i.focus(); i.dispatchEvent(new KeyboardEvent('keydown', { key: 'a', bubbles: true })); i.dispatchEvent(new KeyboardEvent('keypress', { key: 'a', charCode: 97, bubbles: true })); i.dispatchEvent(new InputEvent('input', { data: 'a', inputType: 'insertText', bubbles: true })); return JSON.stringify(i.value) })
+=== keyboard-getters-on-event
+(function () { var d = Object.getOwnPropertyDescriptor(KeyboardEvent.prototype, 'key'); return err(function () { return d.get.call(new Event('x')) }) })
+=== input-interface
+(function () { var e = new InputEvent('input'); return [typeof InputEvent, InputEvent.length, e instanceof Event, e instanceof InputEvent, e.constructor === InputEvent, e.bubbles, e.cancelable, e.composed].join() })
+=== input-defaults
+(function () { var e = new InputEvent('input'); return [e.data, e.inputType === '', e.isComposing, e.dataTransfer, e.detail, typeof e.getTargetRanges, e.getTargetRanges().length].join() })
+=== input-init
+(function () { var e = new InputEvent('beforeinput', { bubbles: true, cancelable: true, composed: true, data: 'x', inputType: 'insertText', isComposing: true, detail: 2 }); return [e.data, e.inputType, e.isComposing, e.bubbles, e.cancelable, e.composed, e.detail].join() })
+=== input-data-coerce
+(function () { return [new InputEvent('i', { data: 5 }).data, new InputEvent('i', { data: null }).data, new InputEvent('i', { data: undefined }).data, new InputEvent('i', { data: '' }).data, new InputEvent('i', { inputType: 5 }).inputType, new InputEvent('i', { inputType: null }).inputType].join() })
+=== input-dispatch
+@html <input id=i>
+(function () { var r = []; var i = $('i'); i.addEventListener('input', function (e) { r.push(e.data, e.inputType, e.isTrusted, e.constructor.name, e.target.id) }); i.dispatchEvent(new InputEvent('input', { data: 'q', inputType: 'insertText' })); return r.join() })
+=== input-bad
+(function () { return err(function () { return new InputEvent() })  })
+=== input-getters-on-event
+(function () { var d = Object.getOwnPropertyDescriptor(InputEvent.prototype, 'data'); return err(function () { return d.get.call(new Event('x')) }) })
+=== react-like-mouse-copy
+(function () { var e = new PointerEvent('pointerdown', { button: 0, buttons: 1, pointerType: 'mouse', clientX: 4, clientY: 5, bubbles: true }); var names = ['screenX', 'screenY', 'clientX', 'clientY', 'pageX', 'pageY', 'ctrlKey', 'shiftKey', 'altKey', 'metaKey', 'getModifierState', 'button', 'buttons', 'relatedTarget', 'movementX', 'movementY', 'pointerId', 'width', 'height', 'pressure', 'tangentialPressure', 'tiltX', 'tiltY', 'twist', 'pointerType', 'isPrimary']; return names.map(function (n) { return n + ':' + typeof e[n] }).join() })
+=== pointer-capture-detached
+(function () { new PointerEvent('x'); var d = document.createElement('p'); return [err(function () { return d.setPointerCapture(1) }), err(function () { return d.hasPointerCapture(1) }), err(function () { return d.releasePointerCapture(1) })].join('|') })
+=== pointer-capture-release-not-captured
+@html <p id=p>x</p>
+(function () { new PointerEvent('x'); return err(function () { return $('p').releasePointerCapture(1) }) })
+=== input-type-known
+(function () { var t = ['insertText', 'insertReplacementText', 'insertLineBreak', 'insertParagraph', 'insertOrderedList', 'insertUnorderedList', 'insertHorizontalRule', 'insertFromYank', 'insertFromDrop', 'insertFromPaste', 'insertFromPasteAsQuotation', 'insertTranspose', 'insertCompositionText', 'insertLink', 'deleteWordBackward', 'deleteWordForward', 'deleteSoftLineBackward', 'deleteSoftLineForward', 'deleteEntireSoftLine', 'deleteHardLineBackward', 'deleteHardLineForward', 'deleteByDrag', 'deleteByCut', 'deleteContent', 'deleteContentBackward', 'deleteContentForward', 'historyUndo', 'historyRedo', 'formatBold', 'formatItalic', 'formatUnderline', 'formatStrikeThrough', 'formatSuperscript', 'formatSubscript', 'formatJustifyFull', 'formatJustifyCenter', 'formatJustifyRight', 'formatJustifyLeft', 'formatIndent', 'formatOutdent', 'formatRemove', 'formatSetBlockTextDirection', 'formatSetInlineTextDirection', 'formatBackColor', 'formatFontColor', 'formatFontName', 'bogus', 'InsertText', ' insertText']; return t.filter(function (x) { return new InputEvent('i', { inputType: x }).inputType === x }).join() })

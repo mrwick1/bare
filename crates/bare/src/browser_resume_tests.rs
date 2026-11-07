@@ -60,10 +60,10 @@ fn input_and_submit_queue_real_fetches_promises_and_timers_in_the_same_realm() {
         let r = s.resume(&[Input::Type("#q", "hi"), Input::Submit("#f")]);
         assert_eq!(r.stop, SessionStop::Page(Stop::Settled), "{r:?}");
         assert_eq!((r.pages.len(), r.urls.len()), (1, 1));
-        assert_eq!(get(&s, &srv, "typed").as_deref(), Some("echo:hi"));
+        assert_eq!(get(&s, &srv, "typed").as_deref(), Some("echo:h,hi"), "one input event for each character");
         assert_eq!(get(&s, &srv, "micro").as_deref(), Some("same"));
         assert_eq!(get(&s, &srv, "timer").as_deref(), Some("sent"));
-        assert_eq!((srv.hits("/"), srv.hits("/echo-hi"), srv.hits("/sub")), (1, 1, 1), "no reload, one fetch each");
+        assert_eq!((srv.hits("/"), srv.hits("/echo-hi"), srv.hits("/sub")), (1, 2, 1), "no reload, one fetch for each character and one for the submit");
         let b = s.browser().unwrap();
         let q = b.query("#q").unwrap().unwrap();
         assert_eq!(b.input_value(q).as_deref(), Some("hi"), "the value stayed: the same DOM");

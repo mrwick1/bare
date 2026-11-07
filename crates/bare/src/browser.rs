@@ -53,8 +53,9 @@
 //!   XMLNS and XLink. Any other namespace is `Unsupported`. Shadow roots are a tree foundation only (`browser_shadow.rs`: read its header for the gates). `new Document()`,
 //!   `style`, layout APIs, `location` and
 //!   network are absent. Timers, `queueMicrotask`, `performance.now` and `MessageChannel` are in `browser_scheduler.rs`. `Element.attributes` and `Attr` are in `browser_attr.rs`.
-//! - `addEventListener` option `signal` removes the listener on abort (`browser_abort.rs`). `isTrusted` is always false. Events made by the test driver
-//!   are plain `Event`s (no `MouseEvent`/`InputEvent` fields), except the `submit` of a click activation: a `SubmitEvent`.
+//! - `addEventListener` option `signal` removes the listener on abort (`browser_abort.rs`). `isTrusted` is false, except for the events of the window and of the
+//!   user-like driver inputs (`browser_ui.rs`, `browser_drive.rs`). The events of `Browser::click`, `type_text` and `dispatch` are plain `Event`s
+//!   (no `MouseEvent`/`InputEvent` fields), except the `submit` of a click activation: a `SubmitEvent`.
 //! - `XMLHttpRequest`, its upload object and `ProgressEvent` are in `browser_xhr.rs` (read its header for the gates). Their events are trusted.
 //! - Focus (`browser_focus.rs`): `focus()`, `blur()`, `document.activeElement`, `FocusEvent`. Read its header.
 //! - Default actions are NOT implemented: no link navigation, no form validation or native form navigation, no checkbox toggle or
@@ -1012,16 +1013,16 @@ impl Dom {
             ("CustomEvent", custom, Some(ev::custom_event_ctor as H)),
             ("FocusEvent", focus, Some(crate::browser_focus::focus_event_ctor as H)),
             ("SubmitEvent", submit, Some(crate::browser_form::submit_event_ctor as H)),
-            ("MouseEvent", mouse, None),
-            ("PointerEvent", pointer, None),
-            ("KeyboardEvent", keyboard, None),
-            ("InputEvent", inputev, None),
+            ("MouseEvent", mouse, Some(crate::browser_uievent::ctor::<0> as H)),
+            ("PointerEvent", pointer, Some(crate::browser_uievent::ctor::<1> as H)),
+            ("KeyboardEvent", keyboard, Some(crate::browser_uievent::ctor::<2> as H)),
+            ("InputEvent", inputev, Some(crate::browser_uievent::ctor::<3> as H)),
             ("DOMException", domexc, None),
         ];
         let (kp, kc) = (self.key(it, "prototype")?, self.key(it, "constructor")?);
         let mut ctors = Vec::new();
         for (name, proto, ctor) in ifaces {
-            let f = if name == "DocumentFragment" { self.add_ctor_nt(it, nd::fragment_ctor, name, 0)? } else { self.add_fn(it, ctor.unwrap_or(illegal_constructor), name, 0, ctor.is_some())? };
+            let f = if name == "DocumentFragment" { self.add_ctor_nt(it, nd::fragment_ctor, name, 0)? } else { self.add_fn(it, ctor.unwrap_or(illegal_constructor), name, u32::from(ctor.is_some() && name != "EventTarget"), ctor.is_some())? };
             it.define_data(f, kp, Value::Object(proto), false, false, false)?;
             it.define_data(proto, kc, Value::Object(f), true, false, true)?;
             let k = self.key(it, name)?;
@@ -1253,10 +1254,10 @@ pub(crate) static DEFS: &[Def] = &[
     Def { on: &[Focus], name: "relatedTarget", len: 0, kind: G(crate::browser_focus::related_target) },
     Def { on: &[Mouse], name: "clientX", len: 0, kind: G(ui::client_x) },
     Def { on: &[Mouse], name: "clientY", len: 0, kind: G(ui::client_y) },
-    Def { on: &[Mouse], name: "screenX", len: 0, kind: G(ui::client_x) },
-    Def { on: &[Mouse], name: "screenY", len: 0, kind: G(ui::client_y) },
-    Def { on: &[Mouse], name: "pageX", len: 0, kind: G(ui::client_x) },
-    Def { on: &[Mouse], name: "pageY", len: 0, kind: G(ui::client_y) },
+    Def { on: &[Mouse], name: "screenX", len: 0, kind: G(ui::screen_x) },
+    Def { on: &[Mouse], name: "screenY", len: 0, kind: G(ui::screen_y) },
+    Def { on: &[Mouse], name: "pageX", len: 0, kind: G(ui::page_x) },
+    Def { on: &[Mouse], name: "pageY", len: 0, kind: G(ui::page_y) },
     Def { on: &[Mouse], name: "x", len: 0, kind: G(ui::client_x) },
     Def { on: &[Mouse], name: "y", len: 0, kind: G(ui::client_y) },
     Def { on: &[Mouse], name: "button", len: 0, kind: G(ui::button) },

@@ -1,0 +1,91 @@
+<!DOCTYPE html>
+<html>
+<head>
+<style>
+body { margin: 0; font-size: 16px; }
+.c { position: absolute; left: 10px; width: 200px; height: 30px; box-sizing: border-box; margin: 0; padding: 0; }
+.item { height: 30px; box-sizing: border-box; }
+</style>
+</head>
+<body>
+<!-- A Radix Select, reduced: the trigger opens on pointerdown (mouse, button 0, no ctrl) and on Enter, Space and ArrowDown; an item
+     is chosen by pointerup (mouse) or Enter. -->
+<button id="trigger" class="c" style="top:10px" type="button" role="combobox" aria-expanded="false">Pick</button>
+<div id="content" role="listbox" hidden style="position:absolute; left:10px; top:50px; width:200px">
+  <div class="item" id="i1" role="option" tabindex="-1" data-value="apple">Apple</div>
+  <div class="item" id="i2" role="option" tabindex="-1" data-value="banana">Banana</div>
+  <div class="item" id="i3" role="option" tabindex="-1" data-value="cherry">Cherry</div>
+</div>
+<button id="plain" class="c" style="top:150px" type="button">Plain</button>
+<button id="off" class="c" style="top:190px" type="button" disabled>Off</button>
+<input id="user" class="c" style="top:230px" type="text" value="old">
+<textarea id="ta" class="c" style="top:270px; height:60px"></textarea>
+<form id="f" action="/none" style="margin:0" novalidate>
+  <input id="q" class="c" style="top:340px" type="text" value="">
+  <button id="go" class="c" style="top:380px" type="submit">Go</button>
+</form>
+<button id="nofocus" class="c" style="top:430px" type="button">Nofocus</button>
+<div id="cap" class="c" style="top:470px; background:#ccc"></div>
+<button id="half" type="button" style="position:absolute; left:10px; top:640.5px; width:201px; height:31px; margin:0; padding:0; box-sizing:border-box">Half</button>
+<div id="blank" style="position:absolute; left:10px; top:520px; width:100px; height:100px"></div>
+<script>
+window.__log = [];
+var types = ['pointerover','pointerenter','pointerdown','pointermove','pointerup','pointerout','pointerleave','gotpointercapture','lostpointercapture',
+  'mouseover','mouseenter','mousemove','mousedown','mouseup','mouseout','mouseleave','click','dblclick','auxclick',
+  'focus','blur','focusin','focusout','keydown','keypress','keyup','beforeinput','input','change','submit'];
+function id(t) { return t === window ? 'window' : t === document ? 'document' : (t.id || t.nodeName.toLowerCase()); }
+types.forEach(function (t) {
+  window.addEventListener(t, function (e) {
+    var p = [];
+    if (/^(pointer|mouse|click|dblclick|auxclick|gotpointer|lostpointer)/.test(t)) {
+      p.push('x=' + e.clientX, 'y=' + e.clientY, 'button=' + e.button, 'buttons=' + e.buttons, 'detail=' + e.detail);
+      if (e.relatedTarget !== undefined) p.push('related=' + (e.relatedTarget ? id(e.relatedTarget) : 'null'));
+      if (/pointer/.test(t)) p.push('ptype=' + e.pointerType, 'pid=' + e.pointerId, 'primary=' + e.isPrimary, 'w=' + e.width, 'h=' + e.height, 'pressure=' + e.pressure);
+    } else if (/^key/.test(t)) {
+      p.push('key=' + JSON.stringify(e.key), 'code=' + e.code, 'repeat=' + e.repeat, 'shift=' + e.shiftKey, 'ctrl=' + e.ctrlKey, 'keyCode=' + e.keyCode, 'charCode=' + e.charCode, 'location=' + e.location);
+    } else if (t === 'beforeinput' || t === 'input') {
+      p.push('data=' + JSON.stringify(e.data), 'inputType=' + e.inputType, 'composing=' + e.isComposing);
+    } else if (/^focus|^blur/.test(t)) {
+      p.push('related=' + (e.relatedTarget ? id(e.relatedTarget) : 'null'));
+    }
+    p.push('bubbles=' + e.bubbles, 'cancelable=' + e.cancelable, 'trusted=' + e.isTrusted, 'ctor=' + e.constructor.name);
+    window.__log.push(t + ' @' + id(e.target) + ' ' + p.join(' '));
+  }, true);
+});
+// Chrome sends `enter` and `leave` events only to elements that have a listener for them, so put one on every element.
+['pointerenter','pointerleave','mouseenter','mouseleave'].forEach(function (t) {
+  Array.prototype.forEach.call(document.querySelectorAll('*'), function (el) { el.addEventListener(t, function () {}); });
+});
+function app(s) { window.__log.push('app ' + s); }
+document.getElementById('f').addEventListener('submit', function (e) { app('submit'); e.preventDefault(); });
+
+var trigger = document.getElementById('trigger'), content = document.getElementById('content'), items = Array.prototype.slice.call(content.children), ptype = '';
+function open() { content.hidden = false; trigger.setAttribute('aria-expanded', 'true'); app('open'); items[0].focus(); }
+function close() { content.hidden = true; trigger.setAttribute('aria-expanded', 'false'); trigger.focus(); }
+function choose(item) { app('choose ' + item.getAttribute('data-value')); close(); }
+trigger.addEventListener('pointerdown', function (e) {
+  var t = e.target;
+  if (t.hasPointerCapture(e.pointerId)) t.releasePointerCapture(e.pointerId);
+  if (e.button === 0 && e.ctrlKey === false && e.pointerType === 'mouse') { open(); e.preventDefault(); }
+});
+trigger.addEventListener('keydown', function (e) {
+  if (['Enter', ' ', 'ArrowDown', 'ArrowUp'].indexOf(e.key) >= 0) { open(); e.preventDefault(); }
+});
+items.forEach(function (item, i) {
+  item.addEventListener('pointerdown', function (e) { ptype = e.pointerType; });
+  item.addEventListener('pointerup', function () { if (ptype === 'mouse') choose(item); });
+  item.addEventListener('click', function () { if (ptype !== 'mouse') choose(item); });
+  item.addEventListener('keydown', function (e) {
+    if (e.key === 'Enter' || e.key === ' ') { choose(item); e.preventDefault(); }
+    else if (e.key === 'ArrowDown') { items[Math.min(i + 1, items.length - 1)].focus(); e.preventDefault(); }
+    else if (e.key === 'ArrowUp') { items[Math.max(i - 1, 0)].focus(); e.preventDefault(); }
+    else if (e.key === 'Escape') { close(); }
+  });
+});
+document.getElementById('nofocus').addEventListener('mousedown', function (e) { e.preventDefault(); });
+var cap = document.getElementById('cap');
+cap.addEventListener('pointerdown', function (e) { cap.setPointerCapture(e.pointerId); app('has ' + cap.hasPointerCapture(e.pointerId)); });
+cap.addEventListener('pointerup', function (e) { app('up has ' + cap.hasPointerCapture(e.pointerId)); });
+</script>
+</body>
+</html>

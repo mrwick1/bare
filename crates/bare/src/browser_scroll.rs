@@ -719,6 +719,14 @@ pub(crate) fn install(d: &Dom, it: &mut Interp<'_>) -> R<()> {
 
 // ---------------------------------------------------------------------------------------------- driver API
 
+impl Dom {
+    /// The offsets of the page (`scrollX`, `scrollY`).
+    pub(crate) fn page_offset(&self) -> (f64, f64) {
+        let s = self.scrolling.s.borrow();
+        (s.scroll.x as f64, s.scroll.y as f64)
+    }
+}
+
 impl Browser {
     /// The offsets of the page and of the scroll containers.
     pub fn scroll(&self) -> Ref<'_, Scroll> {
