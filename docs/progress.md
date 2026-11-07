@@ -3356,3 +3356,39 @@ Checks (archMachine, on `6d57db6`):
 Next, not done here: `Res<Value>` is 32 bytes, so each node returns through memory. A 16-byte `Res<Value>` (in two registers) needs an `Error` of 8 bytes, so `Error::Throw` would have to keep its value in the interpreter. That touches about 200 sites in 107 files.
 
 Not tested: arjun-e16; the window (`--window`); peak RSS of the typing page; the journey after the rebase on `89cb318` (no change in `crates/js`).
+
+## A 16-byte expression result: measured, not done (2026-11-08)
+
+#271 proposed a 16-byte `Res<Value>` so that each node of the tree walker returns its result in two registers. That needs the thrown value out of `Error` (about 200 sites in 107 files). Two prototypes measured the gain first. Base: origin/main `d41c789` from `base-build`. Machine: archMachine. Compiler: rustc 1.96.0.
+
+Layout and ABI (checked with `size_of` and in the assembly):
+- `Result<Value, Box<Error>>` is 16 bytes. The tag of `Value` holds the error case (tag 9), and the box sits at offset 8.
+- A 16-byte enum does not come back in registers. The Rust ABI returns it through a hidden pointer (`%rdi`), the same as the 32-byte `Res<Value>`. This holds for `Value` alone too. In a test program, only a two-scalar layout such as `(u64, u64)` or `(MaybeUninit<u64>, MaybeUninit<u64>)` came back in `rax:rdx`.
+- So a smaller `Error` alone gives a 16-byte result in memory. The callee stores the tag and the payload, and the caller loads them, as now. The instruction count stays the same. Only a result type with two scalar fields uses registers. That needs a new representation of `Value` in every result, not only a smaller `Error`.
+
+Prototypes (`crates/js/src/eval.rs` only, not merged):
+- P1: `eval_expr`, `operand` and `eval_expr_inner` return `Result<Value, Box<Error>>` (16 bytes, through memory). Each arm that calls a function with a `Res<Value>` result converts it.
+- P2: P1, and `eval_expr_inner` returns the result as `(MaybeUninit<u64>, MaybeUninit<u64>)`. The assembly shows `rax:rdx` at each call site.
+
+Results (`tools/js/instr.sh`, minimum of 3 runs):
+
+| Row | Base | P1 | P2 |
+| --- | --- | --- | --- |
+| `eval_load loop 1` | 494.3 M | 526.9 M (+6.6%) | 550.1 M (+11.3%) |
+| `eval_load calls 1` | 355.6 M | 374.4 M (+5.3%) | 383.7 M (+7.9%) |
+| `eval_load fib 1` | 17.5 M | 18.1 M (+3.3%) | 18.6 M (+6.3%) |
+| `eval_load closures 1` | 69.3 M | 70.7 M (+2.0%) | 71.2 M (+2.7%) |
+| `eval_load objects 1` | 245.0 M | 250.7 M (+2.3%) | 252.7 M (+3.1%) |
+| `eval_load webpack 1` | 6.7 M | 6.7 M (+0.7%) | 6.7 M (+0.8%) |
+| `eval_load throws 1` | 197.7 M | 201.2 M (+1.8%) | 202.5 M (+2.5%) |
+| Typing `#a1`, each key | 282.0 M | 292.4 M (+3.7%) | 294.1 M (+4.3%) |
+| Typing `#f0`, each key | 287.3 M | 298.0 M (+3.7%) | 299.8 M (+4.3%) |
+| Load and mount | 574.1 M | 590.2 M | 592.0 M |
+
+- Typing uses the method of `keycost.sh` on the built `type_load` binaries (page `/data/bare-tmp/w2-typing`).
+- Journey (`run_bare_mem2.sh`, `instructions:u` of `bare-drive` under `perf stat`, all runs passed): base 10.76, 10.46, 10.51 G; P1 10.91, 10.93, 10.96 G (about +3%). Sum of `cpu_ms`: base 1,565, 1,529, 1,549 ms; P1 1,624, 1,620, 1,610 ms. P2 was not run on the journey.
+- Why the prototypes cost more: each arm converts a 32-byte result to the 16-byte one (a tag test and a copy). P2 also builds the result on the stack and loads it into `rax:rdx`. `eval_expr_inner` grew from 554 to 804 lines of assembly.
+
+Decision: no refactor. The task needed a gain of 3% or more on typing or on the journey. Both prototypes cost more. The full refactor would remove the conversions, but its 16-byte enum result would still go through memory and save no instructions. Register results need `Value` as two scalars in every result type. That is a larger change, and these numbers do not support it.
+
+Not tested: arjun-e16; P2 on the journey; a full refactor (the estimate above comes from the ABI and the prototypes, not from a build).
