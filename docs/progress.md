@@ -2428,3 +2428,34 @@ Cost: `tools/js/cost_matrix.sh`, origin/main 853489d against this change (after 
 Tests: `cargo test --workspace --release` on 853489d plus this change: 2,931 passed, 0 failed. On 5dd8c70 (before the rebase): `cargo test --workspace` debug and release, 2,835 passed in each; `test262_check.sh` 22,539 passed, as the baseline (`gate: ok`); 39 of the 40 `tools/js/*_check.sh` that start match Node, and `intl_check.sh` gives the same 15 differences as main (the ICU data of Node 22 on arjun-e16).
 
 Not tested: no generated code runs (step B3), so the code is checked by the verifier and by reading the golden listings, not by execution; script bodies; test262 and the `*_check.sh` scripts after the last rebase; `parse_check.sh` (needs `acorn`); the rows at scale 100.
+
+## Member write caches (step A3 of the engine plan)
+
+Change:
+- `IC_STORE`: an own writable data property. A read fill makes it in place of `IC_OWN` when the receiver is ordinary, not lazy, and the key is not the `length` of an array. A read treats it as `IC_OWN`. A write hits with one shape compare and one store (`Heap::ic_store`, inline). The read and the write of `o.x++` and `o.x += 1` share one entry.
+- `IC_ADD`: a write that adds a key to a receiver of shape S. The entry holds S' (the shape after the add), the first prototype, the chain depth and the epoch. A hit checks the shape, the prototype, the epoch, `extensible`, `lazy` and `ic_chain`, then pushes the slot and sets S' (`Heap::set_ic`, out of line). This entry is the transition cache of the plan: S to S' for each site. No global table is added.
+- `set_fill` (the miss): the plain `set`, then an entry only when the write was a store to an own writable data property, or the plain transition (one more slot, the key added last to S with all attributes, checked with `Shapes::added`). It refuses index keys, exotic, lazy, dictionary and setup-mode receivers, and chains with an exotic object, a setter, a read-only property, a lazy name or an `on*` name of a `LAZY_CHAIN` object. The walked prototypes get `ic_chain`, as in a read fill.
+- `IC_MEGA`: a write site that missed 16 times (the counter is in the padding of `Ic`, which stays 24 bytes) takes the plain `set` with no fill. Without it, `reflect_load construct_fn 10` (one site, two prototypes, one shape) was +8.8%.
+- `eval.rs`: `member_target` gives `Ref::Site(base, node)` for `o.name`. `ref_get` and `ref_put` call `member_get` and `member_put`, both out of line, so the `Name` arms stay small. `member_put_ic` keeps the first-run rule of reads: a site that runs once gets no entry. `put_prop` ends in `put_done` (inline always).
+- Freeze, seal and attribute changes still send an object to dictionary mode (shape 0), so they miss the entries. `Object.preventExtensions` keeps the shape: the add hit tests `extensible`.
+- `type_load` with `MEM=1` prints a member write cache line.
+
+Results (archMachine, against `fd12c1c` from `base-build`):
+- `keycost.sh`: `#a1` 342.3 M for each key against 359.7 M on main (-17.4 M, -4.8%). `#f0` 349.1 M. Load and mount 665.1 M against 712.5 M (-6.6%). Peak RSS of `#a1`: 32.4 MiB at 20 keys and 33.0 MiB at 50 keys.
+- Member write caches after 50 keys (`MEM=1`): 1,753,276 store hits, 39,458 add hits, 261 store fills and 112 add fills.
+- Full cost matrix (805 rows): mean change glibc -0.128%, jemalloc +0.362% (4 rows measured). Over under one allocator: 4. Over under both: 0. Failed: 0.
+- Rows of the plan: `class_load construct 10` -6.3%, `eval_load objects 10` -0.02%, `handler_load 10` +0.02%. The known rows from #246 do not change: `proxy_load get_trap 10` 0.00%, `sc_load symbol_keys 1` and `10` 0.00% and -0.02%, `wrapper_load forin 10000 30000` -0.02%.
+
+Fix attempts (first full matrix: 103 rows over under both):
+- `Ref::Site` held the name span too, and `member_get` and `member_put` were inline. Loops with no member write (`numeric_load empty`) paid about 48 instructions for each iteration. A smaller `Ref::Site` and out-of-line site paths removed it.
+- `IC_MEGA` for sites that refill (alternating prototypes, setters on the chain): `class_load accessors` +3.3% to +0.6%, `reflect_load construct_fn 10` +8.8% to +0.9%. A test of `IC_MEGA` before the refusal checks: +0.6% to under +0.5%.
+- `put_done` as its own call cost `a[i] = v` writes about 1%: `arrobj_load fill`, `lastindexof`, `eval_load objects`. Inline always fixed it.
+
+Checks:
+- `cargo test --release --workspace`: 2,925 passed, 0 failed. New tests: `programs_that_write_members_match_node` (11 programs, output from Node 22: read-only properties on the chain and own, setters on the chain and on `Object.prototype`, `preventExtensions`, freeze and seal, `Object.defineProperty` on a cached shape, array `length` writes, proxies as receiver and in the chain, constructors, update and compound operators, prototype swaps, key order) and `the_counters_show_store_and_add_hits`.
+- `cargo test -p bare-js --lib` in debug for the cache tests (every store and add hit is checked against the plain walk by `ic_verify_set`): 24 passed.
+- `tools/js/test262_check.sh`: gate ok, 27,182 pass.
+- `tools/js/exec_diff.sh`: 79 runs, 0 differences.
+- All 43 `tools/js/*_check.sh` scripts pass (`parse_check.sh` with `ACORN=` set).
+
+Not tested: a machine other than archMachine; wall time; scale 100 of the load rows; a live page other than the typing page; the bytecode interpreter (it keeps its own entries); the full debug test suite.

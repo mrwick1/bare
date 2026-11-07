@@ -80,6 +80,10 @@ fn mem(s: &mut Session, what: &str) {
             "  member caches {what}: {} reads, own hits {:.1}%, other hits {:.1}%, first runs {:.1}%, fills {:.1}% ({} own, {} proto, {} absent), refused {:.1}%, {} entries ({:.2} MiB), {} epoch bumps",
             c.reads, pct(c.own_hits), pct(c.heap.chain_hits), pct(c.first_runs), pct(fills), c.heap.fill_own, c.heap.fill_proto, c.heap.fill_absent, pct(c.heap.refused), c.entries, m(c.entries * std::mem::size_of::<bare_js::heap::Ic>()), c.heap.epoch_bumps,
         );
+        eprintln!(
+            "  member write caches {what}: {} store hits, {} add hits, fills {} store and {} add (refusals of writes are in the refused count above)",
+            c.store_hits, c.heap.add_hits, c.heap.fill_store, c.heap.fill_add,
+        );
     }
     let mib = |b: usize| b as f64 / 1048576.0;
     let (heap, ev) = s.browser().map_or(Default::default(), |b| (b.it.heap.stats(), b.it.stats()));

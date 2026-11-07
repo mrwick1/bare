@@ -193,6 +193,14 @@ impl Shapes {
         t.probe(key, n)
     }
 
+    /// `to` is `from` with `key` added last with `attrs`, in the next slot.
+    pub(super) fn added(&self, from: u32, to: u32, key: PropertyKey, attrs: u8) -> bool {
+        let (f, t) = (&self.shapes[from as usize], &self.shapes[to as usize]);
+        t.parent == from
+            && t.nslots == f.nslots + 1
+            && self.entries(to).last().is_some_and(|e| e.key == key && e.attrs == attrs && e.slot == f.nslots as u32)
+    }
+
     /// The shape that `from` has after `key` is added with `attrs`. `None`: the object goes to dictionary mode (it would have more than
     /// `MAX_PROPS` properties, or the shape table is full).
     #[inline(always)]
@@ -632,6 +640,8 @@ pub struct Ic {
     first: ObjId,
     /// `Heap::proto_epoch` at fill time (prototype and absent kinds).
     epoch: u32,
+    /// Write misses of the site so far (`set_fill`). Past `MISS_MAX` the site is `IC_MEGA`. It sits in padding.
+    misses: u8,
     #[cfg(debug_assertions)]
     key: Option<PropertyKey>,
 }
@@ -647,10 +657,26 @@ const IC_ABSENT: u8 = 5;
 /// is 0, the shape of every dictionary, with no tag: the inline `ic_own` passes the shape test, finds no slot (a dictionary has none)
 /// and asks `ic_dict_own`. A hit checks the identity and the key at that position, so a delete or a move only misses.
 const IC_DICT: u8 = 6;
+/// `IC_OWN` that is also writable data: a write hits too (`ic_store`). A read treats it as `IC_OWN`. Never an array's `length`.
+const IC_STORE: u8 = 7;
+/// A write that adds `key` to a receiver of shape S (in `shape`, tagged): `slot` holds the shape S' after the add, whose last slot is
+/// the new value. As for `IC_ABSENT`, `first`, `depth` and the epoch say that the chain has no setter and no read-only property for
+/// `key`. A read never hits it.
+const IC_ADD: u8 = 8;
+/// A write site that missed `MISS_MAX` times (many shapes or prototypes, a setter, a refused receiver): every write is the plain `set`,
+/// with no fill. A read never hits it.
+const IC_MEGA: u8 = 9;
+const MISS_MAX: u8 = 16;
 /// Added to the shape of every kind but `IC_OWN`. Shape ids stay below `SHAPE_CAP`, so the tag never makes a real id.
 const SHAPE_TAG: u32 = 1 << 31;
 
 impl Ic {
+    /// A write site that missed too often: its writes take the plain `set`.
+    #[inline]
+    pub fn is_mega(&self) -> bool {
+        self.kind == IC_MEGA
+    }
+
     /// The entry of a site that has not run, or that a fill refused. It never hits.
     pub const EMPTY: Ic = Ic {
         shape: u32::MAX,
@@ -659,6 +685,7 @@ impl Ic {
         depth: 0,
         first: ObjId { index: 0, gn: 0 },
         epoch: 0,
+        misses: 0,
         #[cfg(debug_assertions)]
         key: None,
     };
@@ -677,6 +704,10 @@ pub struct IcStats {
     pub refused: u64,
     /// Bumps of `proto_epoch`.
     pub epoch_bumps: u64,
+    /// Writes: add hits in `set_ic`, and fills of store and add entries. The evaluator counts the store hits.
+    pub add_hits: u64,
+    pub fill_store: u64,
+    pub fill_add: u64,
 }
 
 impl Heap {
@@ -830,9 +861,9 @@ impl Heap {
         }
         let slot = ic.slot as usize;
         match ic.kind {
-            IC_OWN => return ob.slots.get(slot).map(|&v| Get::Value(v)),
+            IC_OWN | IC_STORE => return ob.slots.get(slot).map(|&v| Get::Value(v)),
             IC_OWN_ACC => return ob.slots.get(slot).map(|&v| Get::Accessor { getter: obj_of(v) }),
-            IC_EMPTY => return None,
+            IC_EMPTY | IC_ADD | IC_MEGA => return None,
             IC_DICT => {
                 if o != ic.first {
                     return None;
@@ -913,6 +944,8 @@ impl Heap {
             if attrs & A_ACC != 0 {
                 ic.kind = IC_OWN_ACC;
                 ic.shape |= SHAPE_TAG;
+            } else if attrs & A_W != 0 && recv.exotic == 0 && recv.lazy == 0 && !(recv.is_array && key == PropertyKey::String(self.length)) {
+                ic.kind = IC_STORE;
             }
             let g = got(attrs, recv.slots[slot as usize]);
             self.ic_stats.fill_own += 1;
@@ -1023,10 +1056,173 @@ impl Heap {
         assert!(same, "inline cache hit {hit:?} but the walk gives {want:?} ({ic:?})");
     }
 
-    /// `set`, and it fills `ic` for the next write. `ic` is not filled yet (step A3).
+    /// The store hit: `o[key] = v` when `ic` is an `IC_STORE` entry for the shape of `o` (an own writable data property). One handle
+    /// check, one compare, a kind test and one store. `false`: the caller runs `set_ic`.
+    #[inline(always)]
+    pub fn ic_store(&mut self, o: ObjId, ic: &Ic, v: Value) -> bool {
+        if ic.kind != IC_STORE || self.check_value(v).is_err() {
+            return false;
+        }
+        let Some(ob) = self.objects.get_mut(o.index, o.gn) else { return false };
+        if ob.shape != ic.shape {
+            return false;
+        }
+        let Some(slot) = ob.slots.get_mut(ic.slot as usize) else { return false };
+        *slot = v;
+        #[cfg(debug_assertions)]
+        self.ic_verify_set(o, ic);
+        true
+    }
+
+    /// `set` through `ic`: an add hit (the shape transition of the entry), else the plain write, which fills `ic` for the next write.
+    /// The caller tried `ic_store` first. Never calls a setter: it returns it, as `set` does.
+    #[inline(never)]
+    pub fn set_ic(&mut self, o: ObjId, key: PropertyKey, value: Value, ic: &mut Ic) -> R<Set> {
+        if ic.kind == IC_ADD && self.ic_add(o, ic, value)? {
+            self.ic_stats.add_hits += 1;
+            return Ok(Set::Done);
+        }
+        if ic.kind == IC_MEGA {
+            return self.set(o, key, value);
+        }
+        self.set_fill(o, key, value, ic)
+    }
+
+    /// The add hit: `o` has the shape S of the entry, the same prototype and no change on the chain (the epoch), and it can take a new
+    /// key. The new key goes to the end of the slots and the shape becomes S' (in `slot`), as `add_data_fast` does it.
+    #[inline(always)]
+    fn ic_add(&mut self, o: ObjId, ic: &Ic, v: Value) -> R<bool> {
+        let Some(ob) = self.objects.get(o.index, o.gn) else { return Ok(false) };
+        if ob.shape != ic.shape & !SHAPE_TAG || !ob.extensible || ob.lazy != 0 || ob.ic_chain || ic.epoch != self.proto_epoch {
+            return Ok(false);
+        }
+        if if ic.depth == 0 { ob.proto.is_some() } else { ob.proto != Some(ic.first) } {
+            return Ok(false);
+        }
+        #[cfg(debug_assertions)]
+        self.ic_verify_set(o, ic);
+        self.check_value(v)?;
+        self.charge(SLOT_BYTES)?;
+        let ob = self.objects.get_mut(o.index, o.gn).expect("checked above");
+        ob.shape = ic.slot;
+        ob.slots.push(v);
+        self.bytes += SLOT_BYTES;
+        Ok(true)
+    }
+
+    /// The miss of `set_ic`: the plain `set`, and an entry when the write was a store to an own writable data property or a plain add
+    /// of a new key to an ordinary object in shape mode, with no exotic object, lazy name, setter or read-only property on the chain.
     #[cold]
-    pub fn set_ic(&mut self, o: ObjId, key: PropertyKey, value: Value, _ic: &mut Ic) -> R<Set> {
-        self.set(o, key, value)
+    #[inline(never)]
+    fn set_fill(&mut self, o: ObjId, key: PropertyKey, value: Value, ic: &mut Ic) -> R<Set> {
+        let misses = ic.misses + 1;
+        *ic = Ic { misses, ..Ic::EMPTY };
+        if misses >= MISS_MAX {
+            ic.kind = IC_MEGA;
+            return self.set(o, key, value);
+        }
+        let Some(ob) = self.objects.get(o.index, o.gn) else { return self.set(o, key, value) };
+        let length = PropertyKey::String(self.length);
+        if matches!(key, PropertyKey::Index(_))
+            || ob.exotic != 0
+            || ob.lazy != 0
+            || ob.dict.is_some()
+            || ob.fast_on_use
+            || self.setup
+            || ob.is_array && key == length
+            || matches!(self.lazy, Some((_, kp, _)) if kp == key)
+        {
+            self.ic_stats.refused += 1;
+            return self.set(o, key, value);
+        }
+        let (shape, nslots) = (ob.shape, ob.slots.len());
+        let mut new = Ic { shape, misses, ..Ic::EMPTY };
+        #[cfg(debug_assertions)]
+        {
+            new.key = Some(key);
+        }
+        if let Some(&Entry { slot, attrs, .. }) = self.shapes.find(shape, key) {
+            let r = self.set(o, key, value)?;
+            if attrs & (A_W | A_ACC) == A_W {
+                new.slot = slot;
+                new.kind = IC_STORE;
+                *ic = new;
+                self.ic_stats.fill_store += 1;
+            }
+            return Ok(r);
+        }
+        // A new own key: the chain must hold no setter and no read-only property for it, and stay so (the epoch).
+        let first = ob.proto;
+        let ok = ob.extensible && !ob.ic_chain && self.proto_epoch != u32::MAX;
+        let on = matches!(key, PropertyKey::String(s) if self.on_name(s));
+        let (mut cur, mut depth) = (if ok { first } else { None }, 0u8);
+        let mut ok = ok;
+        while let Some(c) = cur {
+            if self.obj(c)?.fast_on_use {
+                self.make_fast(c);
+            }
+            let ob = self.obj(c)?;
+            if depth == u8::MAX || ob.exotic != 0 || on && ob.lazy & LAZY_CHAIN != 0 || self.is_lazy(ob, key) {
+                ok = false;
+                break;
+            }
+            depth += 1;
+            if let Some(p) = self.own(ob, key) {
+                ok = matches!(p, Property::Data { writable: true, .. });
+                break;
+            }
+            cur = ob.proto;
+        }
+        let r = self.set(o, key, value)?;
+        if !ok || !matches!(r, Set::Done) {
+            self.ic_stats.refused += 1;
+            return Ok(r);
+        }
+        // The write must have been the plain transition: one more slot, the key added to S with all attributes.
+        let ob = self.obj(o)?;
+        if ob.dict.is_some() || ob.slots.len() != nslots + 1 || !self.shapes.added(shape, ob.shape, key, A_W | A_E | A_C) {
+            self.ic_stats.refused += 1;
+            return Ok(r);
+        }
+        new.slot = ob.shape;
+        let mut cur = first;
+        for _ in 0..depth {
+            let c = cur.expect("walked above");
+            let ob = self.objects.get_mut(c.index, c.gn).expect("walked above");
+            ob.ic_chain = true;
+            cur = ob.proto;
+        }
+        new.shape |= SHAPE_TAG;
+        new.kind = IC_ADD;
+        new.depth = depth;
+        new.first = first.unwrap_or(new.first);
+        new.epoch = self.proto_epoch;
+        *ic = new;
+        self.ic_stats.fill_add += 1;
+        Ok(r)
+    }
+
+    /// Debug builds: a store or add hit must be a write that `set` would make in the same way. Checked before the write.
+    #[cfg(debug_assertions)]
+    fn ic_verify_set(&self, o: ObjId, ic: &Ic) {
+        let key = ic.key.expect("a filled entry has its key");
+        let ob = self.obj(o).expect("a live receiver");
+        assert!(ob.exotic == 0 && ob.dict.is_none() && !(ob.is_array && key == PropertyKey::String(self.length)), "{ic:?}");
+        if ic.kind == IC_STORE {
+            assert!(matches!(self.own(ob, key), Some(Property::Data { writable: true, .. })), "store hit on {key:?}: {ic:?}");
+            return;
+        }
+        assert!(ob.extensible && self.own(ob, key).is_none(), "add hit on {key:?}: {ic:?}");
+        let mut cur = ob.proto;
+        while let Some(c) = cur {
+            let p = self.obj(c).expect("a live chain");
+            assert!(p.exotic == 0, "an add hit through an exotic prototype");
+            match self.own(p, key) {
+                Some(Property::Data { writable: true, .. }) => break,
+                Some(p) => panic!("add hit, but the chain has {p:?} for {key:?}"),
+                None => cur = p.proto,
+            }
+        }
     }
 }
 
