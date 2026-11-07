@@ -406,7 +406,9 @@ impl<'p> Interp<'p> {
 
     /// `RegExp.prototype[@@search]` on a builtin regexp: the index of the first match, with `lastIndex` kept.
     fn re_search(&mut self, r: ObjId, s: StrId) -> Res<Value> {
-        self.gate_exec(r)?;
+        if self.user_exec(r)? {
+            return self.re_search_g(r, s);
+        }
         let (rv, k) = (Value::Object(r), self.ext.k_last_index);
         let prev = self.get_prop(rv, k)?;
         if !prev.same_value(Value::Number(0.0)) {
@@ -458,7 +460,9 @@ impl<'p> Interp<'p> {
 
     /// `RegExp.prototype[@@matchAll]` on a builtin regexp: the iterator over a copy of `r`.
     fn re_match_all(&mut self, r: ObjId, s: StrId) -> Res<Value> {
-        self.gate_exec(r)?;
+        if self.user_exec(r)? {
+            return self.re_match_all_g(r, s);
+        }
         let (re, src, fl) = {
             let d = &self.ext.regexps[&r];
             (d.re.clone(), d.source, d.flags)
@@ -469,23 +473,25 @@ impl<'p> Interp<'p> {
         let f = re.flags();
         let m = self.make_regexp(re, src, fl)?;
         self.set_last_index(m, li)?;
-        let proto = match self.sc.re_iter_proto {
-            Some(p) => p,
-            None => {
-                let p = h!(self, self.heap.new_object(Some(self.sc.iter_proto)));
-                self.sc_method(p, "next", ScFn::ReIterNext, 0)?;
-                self.sc_tag(p, "RegExp String Iterator")?;
-                self.sc.re_iter_proto = Some(p);
-                p
-            }
-        };
-        self.sc_track_iter(proto, IterState::ReStr { re: m, s, global: f.global, done: false })
+        let proto = self.re_iter_proto()?;
+        self.sc_track_iter(proto, IterState::ReStr { re: m, s, global: f.global, unicode: f.unicode, done: false })
+    }
+
+    fn re_iter_proto(&mut self) -> Res<ObjId> {
+        if let Some(p) = self.sc.re_iter_proto {
+            return Ok(p);
+        }
+        let p = h!(self, self.heap.new_object(Some(self.sc.iter_proto)));
+        self.sc_method(p, "next", ScFn::ReIterNext, 0)?;
+        self.sc_tag(p, "RegExp String Iterator")?;
+        self.sc.re_iter_proto = Some(p);
+        Ok(p)
     }
 
     /// `next` of a RegExp String Iterator.
     fn re_iter_next(&mut self, this: Value) -> Res<Value> {
         let Value::Object(o) = this else { return Err(self.type_err("next method called on incompatible receiver")) };
-        let Some(&IterState::ReStr { re, s, global, done, .. }) = self.sc.iters.get(&o) else { return Err(self.type_err("next method called on incompatible receiver")) };
+        let Some(&IterState::ReStr { re, s, global, unicode, done }) = self.sc.iters.get(&o) else { return Err(self.type_err("next method called on incompatible receiver")) };
         let finish = |me: &mut Self| {
             if let Some(IterState::ReStr { done, .. }) = me.sc.iters.get_mut(&o) {
                 *done = true;
@@ -494,7 +500,9 @@ impl<'p> Interp<'p> {
         if done {
             return self.sc_iter_result(Value::Undefined, true);
         }
-        self.gate_exec(re)?;
+        if self.regexp_of(Value::Object(re)).is_none() || self.user_exec(re)? {
+            return self.re_iter_next_g(o, re, s, global, unicode);
+        }
         let Some(m) = self.re_exec_raw(re, s)? else {
             finish(self);
             return self.sc_iter_result(Value::Undefined, true);

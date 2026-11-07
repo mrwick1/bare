@@ -158,6 +158,42 @@ impl<'p> Interp<'p> {
         Ok(id)
     }
 
+    /// CreateDynamicFunction: `Function(p1, p2, body)`, and the same for the generator and async kinds. `kind`: 0 normal, 1 generator, 2 async.
+    /// The text is a script of one function declaration, which is parsed and walked but not run, so no global changes. The closure
+    /// has the global environment. The parameters and the body must parse alone, so a comment or a brace cannot reach across.
+    fn dynamic_function(&mut self, kind: u8, args: &[Value]) -> Res<Value> {
+        let (head, last) = (["function", "function*", "async function"][kind as usize], args.len().saturating_sub(1));
+        let mut params = String::new();
+        for (i, &a) in args[..last].iter().enumerate() {
+            let s = self.coerce_string(a)?;
+            params.push_str(&if i > 0 { format!(",{}", h!(self, self.heap.to_string_lossy(s))) } else { h!(self, self.heap.to_string_lossy(s)) });
+        }
+        let body = match args.last() {
+            Some(&b) => {
+                let s = self.coerce_string(b)?;
+                h!(self, self.heap.to_string_lossy(s))
+            }
+            None => String::new(),
+        };
+        for part in [format!("{head} anonymous({params}\n) {{\n}}"), format!("{head} anonymous(\n) {{\n{body}\n}}")] {
+            if let Err(e) = crate::parse::parse_script(&part, Default::default()) {
+                return Err(if e.kind == crate::parse::ErrorKind::Unsupported { unsupported(e.msg, Span::default()) } else { self.mk_err(4, e.msg) });
+            }
+        }
+        let id = self.add_script(&format!("{head} anonymous({params}\n) {{\n{body}\n}}"))?;
+        let prog = self.scripts[id].prog.clone();
+        let mut stmts = prog.list(prog.body);
+        let (Some(st), None) = (stmts.next(), stmts.next()) else { return Err(self.mk_err(4, "Unexpected token '}'")) };
+        let StmtKind::Function(fid) = prog.stmt(st).kind else { return Err(self.mk_err(4, "Unexpected token '}'")) };
+        let (old, env) = (self.cur, self.env);
+        self.select(id);
+        self.env = 0;
+        let f = self.make_closure(fid, None, false);
+        self.env = env;
+        self.select(old);
+        f
+    }
+
     /// Make script `id` the current one: its code and caches go into the `Interp` fields.
     fn select(&mut self, id: usize) {
         if id == self.cur {

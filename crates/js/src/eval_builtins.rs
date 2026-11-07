@@ -452,6 +452,7 @@ impl<'p> Interp<'p> {
         self.def(rp, self.k_constructor, Value::Object(c), true, false, true)?;
         at(self, g, "RegExp", Value::Object(c))?;
         self.ext.regexp_ctor = Some(c);
+        self.sc_getter(c, self.wk_key(WK_SPECIES), "get [Symbol.species]", ScFn::Species)?;
         self.ext.exec_fn = Some(self.method(rp, "exec", Nat::Ext(Bi::ReExec), 1)?);
         self.method(rp, "test", Nat::Ext(Bi::ReTest), 1)?;
         self.method(rp, "toString", Nat::Ext(Bi::ReToString), 0)?;
@@ -625,7 +626,9 @@ impl<'p> Interp<'p> {
             Bi::ReTest => {
                 let r = self.this_regexp(this, "test")?;
                 let s = self.coerce_string(a0)?;
-                self.gate_exec(r)?;
+                if self.user_exec(r)? {
+                    return self.re_test_g(r, s);
+                }
                 Ok(Value::Bool(self.re_exec_raw(r, s)?.is_some()))
             }
             Bi::ReToString => {
@@ -764,8 +767,7 @@ impl<'p> Interp<'p> {
                 let s = self.coerce_string(a0)?;
                 let limv = arg(args, 1);
                 let lim = if matches!(limv, Value::Undefined) { u32::MAX } else { to_uint32(self.coerce_number(limv)?) };
-                self.gate_exec(r)?;
-                self.split_regexp(r, s, lim)
+                self.re_split(r, s, lim)
             }
             Bi::StrConcat => {
                 let s = self.this_str(this, "concat")?;
@@ -801,7 +803,9 @@ impl<'p> Interp<'p> {
 
     /// `String.prototype.match` on a builtin regexp.
     fn re_match(&mut self, r: ObjId, s: StrId) -> Res<Value> {
-        self.gate_exec(r)?;
+        if self.user_exec(r)? {
+            return self.re_match_g(r, s);
+        }
         let flags = self.ext.regexps[&r].re.flags();
         if !flags.global {
             return match self.re_exec_raw(r, s)? {
@@ -825,7 +829,9 @@ impl<'p> Interp<'p> {
     /// `String.prototype.replace` on a builtin regexp. `rv` is the replacement (`func` when it is callable).
     fn re_replace(&mut self, r: ObjId, s: StrId, func: Option<Value>, rv: Value) -> Res<Value> {
         let tpl = if func.is_none() { Some(self.coerce_string(rv)?) } else { None };
-        self.gate_exec(r)?;
+        if self.user_exec(r)? {
+            return self.re_replace_g(r, s, func, tpl);
+        }
         let flags = self.ext.regexps[&r].re.flags();
         let ml = if flags.global {
             self.collect_matches(r, s, true)?
@@ -927,8 +933,7 @@ impl<'p> Interp<'p> {
         match hook {
             Hook::Done(v) => return Ok(v),
             Hook::Builtin(r) => {
-                self.gate_exec(r)?;
-                return self.split_regexp(r, s, lim);
+                return self.re_split(r, s, lim);
             }
             Hook::Absent => {}
         }
@@ -1290,14 +1295,12 @@ impl<'p> Interp<'p> {
         })
     }
 
-    /// A user `exec` is not run: it is `Unsupported`. A missing or non-callable `exec` is the built-in.
-    fn gate_exec(&mut self, r: ObjId) -> Res<()> {
-        let e = self.get_prop(Value::Object(r), self.ext.k_exec)?;
-        match (e, self.ext.exec_fn) {
-            (Value::Object(a), Some(b)) if a == b => Ok(()),
-            _ if self.is_callable(e) => Err(unsupported("RegExp with a replaced exec method", Span::default())),
-            _ => Ok(()),
+    /// `RegExp.prototype[@@split]` on a builtin regexp.
+    fn re_split(&mut self, r: ObjId, s: StrId, lim: u32) -> Res<Value> {
+        if self.user_exec(r)? {
+            return self.re_split_g(r, s, lim);
         }
+        self.split_regexp(r, s, lim)
     }
 
     fn set_last_index(&mut self, r: ObjId, n: f64) -> Res<()> {

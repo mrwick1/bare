@@ -106,14 +106,16 @@ impl<'p> Interp<'p> {
         let (a0, a1) = (arg(args, 0), arg(args, 1));
         match f {
             IntlFn::SegCtor => {
+                let nt = self.cls.native_nt.take();
                 if !is_new {
                     return Err(self.type_err("Constructor Intl.Segmenter requires 'new'"));
                 }
                 if self.intl_formatters() >= self.sc.limits.max_formatters {
                     return Err(Error::Limit(LimitKind::Sc(ScLimit::Formatters)));
                 }
+                let proto = self.nt_proto(nt, self.intl.seg_proto)?;
                 let s = self.intl_seg_create(a0, a1)?;
-                let o = h!(self, self.heap.new_object(Some(self.intl.seg_proto)));
+                let o = h!(self, self.heap.new_object(Some(proto)));
                 self.intl.segs.insert(o, s);
                 Ok(Value::Object(o))
             }

@@ -225,8 +225,8 @@ impl Dom {
 
 // ------------------------------------------------------------------------------------ methods
 
-fn illegal(_: &Dom, it: &mut Interp<'_>, _: Value, _: &[Value]) -> V {
-    Err(it.type_error("Illegal constructor"))
+fn signal_illegal(_: &Dom, it: &mut Interp<'_>, _: Value, _: &[Value]) -> V {
+    Err(it.type_error("Failed to construct 'AbortSignal': Illegal constructor"))
 }
 
 fn aborted(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
@@ -388,7 +388,7 @@ fn make(d: &Dom, it: &mut Interp<'_>) -> R<()> {
     let (op, et) = (it.object_prototype(), d.p().et);
     let (sp, cp) = (d.obj(it, et)?, d.obj(it, op)?);
     let (kp, kc) = (d.key(it, "prototype")?, d.key(it, "constructor")?);
-    let sc = d.add_fn(it, illegal, "AbortSignal", 0, true)?;
+    let sc = d.add_ctor_nt(it, signal_illegal, "AbortSignal", 0)?;
     let cc = d.add_ctor_nt(it, controller_ctor, "AbortController", 0)?;
     for (f, proto, tag) in [(sc, sp, "AbortSignal"), (cc, cp, "AbortController")] {
         it.define_data(f, kp, Value::Object(proto), false, false, false)?;

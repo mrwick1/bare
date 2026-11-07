@@ -336,7 +336,13 @@ impl<'p> Interp<'p> {
 
     /// ArraySpeciesCreate. `constructor` and then `constructor[@@species]` are read, so getters run in order.
     /// The intrinsic `Array` and an `undefined` or `null` species give a plain array. Any other constructor is called with `len`.
+    #[inline(always)]
     fn ao_species(&mut self, this: Value, len: u64) -> Res<ObjId> {
+        Ok(self.ao_species_new(this, len)?.0)
+    }
+
+    /// Like `ao_species`. The flag is true for a new plain array, false for the result of a species constructor.
+    fn ao_species_new(&mut self, this: Value, len: u64) -> Res<(ObjId, bool)> {
         if let Value::Object(o) = this
             && self.o_is_array(o)?
         {
@@ -349,12 +355,12 @@ impl<'p> Interp<'p> {
             }
             match c {
                 Value::Object(co) if Some(co) == self.ao.array_ctor => {}
-                Value::Object(co) if self.is_constructor(co) => return self.ao_construct(c, &[Value::Number(len as f64)]),
+                Value::Object(co) if self.is_constructor(co) => return Ok((self.ao_construct(c, &[Value::Number(len as f64)])?, false)),
                 Value::Undefined => {}
                 _ => return Err(self.type_err("object.constructor[Symbol.species] is not a constructor")),
             }
         }
-        self.ao_new_array(len)
+        Ok((self.ao_new_array(len)?, true))
     }
 
     fn ao_construct(&mut self, c: Value, args: &[Value]) -> Res<ObjId> {

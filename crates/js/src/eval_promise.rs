@@ -467,12 +467,17 @@ impl<'p> Interp<'p> {
     /// `SpeciesConstructor(this, %Promise%)`: `None` for the default (the intrinsic `Promise`).
     /// `constructor` must be undefined or an object. Its `@@species` must be undefined, null or a constructor.
     fn species_ctor(&mut self, this: Value) -> Res<Option<Value>> {
+        self.species_ctor_of(this, self.promise.ctor)
+    }
+
+    /// SpeciesConstructor with the intrinsic constructor `default`: `None` when the result is `default`.
+    fn species_ctor_of(&mut self, this: Value, default: Option<ObjId>) -> Res<Option<Value>> {
         let c = self.get_prop(this, self.k_constructor)?;
         match c {
             Value::Undefined => Ok(None),
             Value::Object(_) => match self.get_prop(c, self.wk_key(WK_SPECIES))? {
                 Value::Undefined | Value::Null => Ok(None),
-                Value::Object(s) if Some(s) == self.promise.ctor => Ok(None),
+                Value::Object(s) if Some(s) == default => Ok(None),
                 s @ Value::Object(so) if self.is_constructor(so) => Ok(Some(s)),
                 _ => Err(self.type_err("object.constructor[Symbol.species] is not a constructor")),
             },

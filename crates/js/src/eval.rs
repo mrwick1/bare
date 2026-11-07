@@ -412,7 +412,8 @@ enum Nat {
     FnCall,
     FnApply,
     FnBind,
-    FnCtor,
+    /// `Function` (0), `GeneratorFunction` (1) and `AsyncFunction` (2).
+    FnCtor(u8),
     ArrayCtor,
     ArrayIsArray,
     ArrPush,
@@ -1663,7 +1664,7 @@ impl<'p> Interp<'p> {
         self.def(g, k, Value::Object(g), true, false, true)?;
         let (op, fp, ap) = (self.object_proto, self.function_proto, self.array_proto);
         // constructors: name, native, length, prototype
-        let ctors: [(&str, Nat, u32, ObjId); 3] = [("Object", Nat::ObjectCtor, 1, op), ("Function", Nat::FnCtor, 1, fp), ("Array", Nat::ArrayCtor, 1, ap)];
+        let ctors: [(&str, Nat, u32, ObjId); 3] = [("Object", Nat::ObjectCtor, 1, op), ("Function", Nat::FnCtor(0), 1, fp), ("Array", Nat::ArrayCtor, 1, ap)];
         let mut made = Vec::new();
         for (name, n, len, proto) in ctors {
             let c = self.native(n, name, len)?;
@@ -1674,6 +1675,7 @@ impl<'p> Interp<'p> {
             made.push(c);
         }
         let (oc, ac) = (made[0], made[2]);
+        self.aw.fn_ctor = Some(made[1]);
         self.method(oc, "keys", Nat::ObjectKeys, 1)?;
         self.method(oc, "defineProperty", Nat::ObjectDefineProperty, 3)?;
         self.method(oc, "getOwnPropertyDescriptor", Nat::ObjectGetOwnPropertyDescriptor, 2)?;
@@ -1945,6 +1947,9 @@ impl<'p> Interp<'p> {
         } else if f.kind == FuncKind::Normal && !f.is_async() {
             // Most functions never use their prototype (98.6% on the staging login), so the object waits.
             h!(self, self.heap.add_lazy_prototype(o));
+        } else if f.is_async() {
+            let p = self.async_fn_proto()?;
+            h!(self, self.heap.set_prototype_of(o, Some(p)));
         }
         Ok(Value::Object(o))
     }
@@ -2081,7 +2086,8 @@ impl<'p> Interp<'p> {
             return self.construct_low(f, args, callee);
         }
         let not_ctor = |s: &mut Self| {
-            let d = s.src_text(callee);
+            // `Symbol` has [[Construct]] (a class may extend it) and refuses it with its own message.
+            let d = if matches!(f, Value::Object(o) if matches!(s.funcs.get(&o), Some(Callee::Native(Nat::Sc(ScFn::SymbolCtor))))) { "Symbol".to_string() } else { s.src_text(callee) };
             Err(s.type_err(&format!("{d} is not a constructor")))
         };
         let Value::Object(o) = f else { return not_ctor(self) };
@@ -2103,7 +2109,7 @@ impl<'p> Interp<'p> {
             Some(&Callee::Proxy { ctor: true }) => D::X,
             Some(&Callee::Host { id, ctor: true, .. }) => D::H(id),
             Some(&Callee::Script { script, fid, env, self_binding }) if self.func_of(script, fid).is_plain_ctor() => D::S(script, fid, env, self_binding),
-            Some(&Callee::Native(n)) if matches!(n, Nat::ObjectCtor | Nat::FnCtor | Nat::ArrayCtor | Nat::ErrorCtor(_) | Nat::StringFn | Nat::NumberFn | Nat::BooleanFn | Nat::Ext(Bi::RegExpCtor) | Nat::Sc(ScFn::IterCtor) | Nat::Px(PxFn::Ctor)) || matches!(n, Nat::Bin(b) if b.ctor_name().is_some() || b == BinFn::TaCtor) || matches!(n, Nat::Sc(f) if f.is_ctor()) || n == Nat::Date(DateFn::Ctor) || matches!(n, Nat::Intl(f) if f.is_ctor()) => D::N(n),
+            Some(&Callee::Native(n)) if matches!(n, Nat::ObjectCtor | Nat::FnCtor(_) | Nat::ArrayCtor | Nat::ErrorCtor(_) | Nat::StringFn | Nat::NumberFn | Nat::BooleanFn | Nat::Ext(Bi::RegExpCtor) | Nat::Sc(ScFn::IterCtor) | Nat::Px(PxFn::Ctor)) || matches!(n, Nat::Bin(b) if b.ctor_name().is_some() || b == BinFn::TaCtor) || matches!(n, Nat::Sc(f) if f.is_ctor()) || n == Nat::Date(DateFn::Ctor) || matches!(n, Nat::Intl(f) if f.is_ctor()) => D::N(n),
             Some(Callee::Bound { target, args, .. }) => D::B(*target, args.clone()),
             Some(&Callee::Promise(pf @ (PFn::Ctor | PFn::AggErrCtor))) => D::P(pf),
             _ => return not_ctor(self),
@@ -3619,6 +3625,7 @@ include!("eval_scope.rs");
 include!("eval_stack.rs");
 include!("eval_builtins.rs");
 include!("eval_string_more.rs");
+include!("eval_regexp_exec.rs");
 include!("eval_json_stringify.rs");
 include!("eval_json_revive.rs");
 include!("eval_host.rs");

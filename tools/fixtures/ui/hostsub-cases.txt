@@ -1,0 +1,128 @@
+var log = [];
+function T(f) { try { var v = f(); return typeof v === 'string' ? JSON.stringify(v) : String(v) } catch (e) { return 'throws ' + e.name + ': ' + e.message } }
+function P(o, C, D) { return [o instanceof C, o instanceof D, Object.getPrototypeOf(o) === C.prototype, Object.getPrototypeOf(C) === D, Object.getPrototypeOf(C.prototype) === D.prototype, o.constructor === C].join() }
+function ntp(get) { var nt = function () {}.bind(); Object.defineProperty(nt, 'prototype', { get: get, configurable: true }); return nt }
+function N(f) { try { var v = f(); return String(v) } catch (e) { return 'throws ' + e.name } }
+function out() { return log.join('\n') }
+=== hs-headers-basic
+class H extends Headers { hi() { return this.get('a') } } var h = new H({ a: '1', b: '2' }); log.push(P(h, H, Headers), h.hi(), [...h].join('|'), h.has('b'), H.name, H.length, Headers.length); out
+=== hs-headers-methods
+class H extends Headers { append(k, v) { log.push('append ' + k); return super.append(k, v) } } var h = new H([['a', '1'], ['b', '2']]); h.append('c', '3'); h.set('d', '4'); h.delete('a'); log.push([...h.keys()].join(), h.get('c')); out
+=== hs-headers-ctor-override
+class H extends Headers { constructor(x) { super(x); this.tag = 7 } } var h = new H({ a: 1 }); log.push(h.tag, h.get('a')); out
+=== hs-headers-no-new
+class H extends Headers {} log.push(T(function () { return H() })); out
+=== hs-headers-reflect
+function F() {} F.prototype = Object.create(Headers.prototype); F.prototype.hi = function () { return 'hi' }; var h = Reflect.construct(Headers, [{ a: '1' }], F); log.push(Object.getPrototypeOf(h) === F.prototype, h.hi(), h.get('a'), h instanceof Headers); out
+=== hs-headers-nt-proto-not-object
+function F() {} F.prototype = 5; var h = Reflect.construct(Headers, [{ a: '1' }], F); log.push(Object.getPrototypeOf(h) === Headers.prototype, h.get('a')); out
+=== hs-headers-brand
+class H extends Headers {} log.push(T(function () { return Headers.prototype.get.call(Object.create(H.prototype), 'a') }), T(function () { return Headers.prototype.get.call({}, 'a') })); out
+=== hs-headers-order
+var nt = ntp(function () { log.push('proto'); return Headers.prototype }); var init = { get a() { log.push('init'); return '1' } }; Reflect.construct(Headers, [init], nt); out
+=== hs-headers-order-error
+var nt = ntp(function () { log.push('proto'); return Headers.prototype }); log.push(N(function () { return Reflect.construct(Headers, [null], nt) })); out
+=== hs-headers-nested
+class A extends Headers {} class B extends A { constructor(i) { super(i); this.b = 1 } } var h = new B({ x: 'y' }); log.push(P(h, B, A), h instanceof Headers, h.get('x'), h.b); out
+=== hs-headers-iter
+class H extends Headers {} var h = new H({ b: '2', a: '1' }); log.push([...h].join('|'), [...h.entries()].length, h[Symbol.iterator] === H.prototype.entries); h.forEach(function (v, k) { log.push(k + v) }); out
+=== hs-request-basic
+class R extends Request { hi() { return this.method + this.url } } var r = new R('http://x.test/a', { method: 'POST', body: 'b' }); log.push(P(r, R, Request), r.hi(), r.headers instanceof Headers, R.name, R.length, Request.length); out
+=== hs-request-clone
+class R extends Request {} var r = new R('http://x.test/a'); var c = r.clone(); log.push(c instanceof Request, Object.getPrototypeOf(c) === Request.prototype, Object.getPrototypeOf(c) === R.prototype, c.url); out
+=== hs-request-body
+class R extends Request {} var r = new R('http://x.test/a', { method: 'POST', body: 'payload' }); r.text().then(function (t) { log.push('text ' + t, r.bodyUsed) }); out
+=== hs-request-from-request
+class R extends Request {} var a = new Request('http://x.test/a', { method: 'PUT' }); var r = new R(a); log.push(P(r, R, Request), r.method, r.url); out
+=== hs-request-no-new
+class R extends Request {} log.push(T(function () { return R('http://x.test/') })); out
+=== hs-request-missing-arg
+class R extends Request {} log.push(T(function () { return new R() })); out
+=== hs-request-reflect
+function F() {} F.prototype = Object.create(Request.prototype); var r = Reflect.construct(Request, ['http://x.test/q'], F); log.push(Object.getPrototypeOf(r) === F.prototype, r.url, r instanceof Request); out
+=== hs-request-nt-proto-not-object
+function F() {} F.prototype = null; var r = Reflect.construct(Request, ['http://x.test/q'], F); log.push(Object.getPrototypeOf(r) === Request.prototype, r.url); out
+=== hs-request-brand
+class R extends Request {} log.push(T(function () { return Object.getOwnPropertyDescriptor(Request.prototype, 'url').get.call(Object.create(R.prototype)) })); out
+=== hs-request-order
+var nt = ntp(function () { log.push('proto'); return Request.prototype }); var init = { get method() { log.push('init'); return 'POST' } }; Reflect.construct(Request, ['http://x.test/q', init], nt); out
+=== hs-request-order-error
+var nt = ntp(function () { log.push('proto'); return Request.prototype }); log.push(T(function () { return Reflect.construct(Request, [], nt) })); out
+=== hs-request-nested
+class A extends Request {} class B extends A { constructor(u) { super(u); this.b = 1 } } var r = new B('http://x.test/z'); log.push(P(r, B, A), r.url, r.b); out
+=== hs-response-basic
+class R extends Response { hi() { return this.status + this.statusText } } var r = new R('body', { status: 201, statusText: 'made' }); log.push(P(r, R, Response), r.hi(), r.ok, r.headers instanceof Headers, R.name, R.length, Response.length); out
+=== hs-response-body
+class R extends Response {} var r = new R('payload'); r.text().then(function (t) { log.push('text ' + t, r.bodyUsed) }); out
+=== hs-response-clone
+class R extends Response {} var r = new R('x'); var c = r.clone(); log.push(c instanceof Response, Object.getPrototypeOf(c) === Response.prototype, Object.getPrototypeOf(c) === R.prototype); out
+=== hs-response-no-new
+class R extends Response {} log.push(T(function () { return R('x') })); out
+=== hs-response-bad-status
+class R extends Response {} log.push(N(function () { return new R('x', { status: 99 }) }), N(function () { return new R('x', { status: 204 }) })); out
+=== hs-response-reflect
+function F() {} F.prototype = Object.create(Response.prototype); var r = Reflect.construct(Response, ['b', { status: 202 }], F); log.push(Object.getPrototypeOf(r) === F.prototype, r.status, r instanceof Response); out
+=== hs-response-nt-proto-not-object
+function F() {} F.prototype = 'x'; var r = Reflect.construct(Response, [], F); log.push(Object.getPrototypeOf(r) === Response.prototype, r.status); out
+=== hs-response-brand
+class R extends Response {} log.push(T(function () { return Object.getOwnPropertyDescriptor(Response.prototype, 'status').get.call(Object.create(R.prototype)) })); out
+=== hs-response-order
+var nt = ntp(function () { log.push('proto'); return Response.prototype }); var init = { get status() { log.push('init'); return 200 } }; Reflect.construct(Response, ['b', init], nt); out
+=== hs-response-order-error
+var nt = ntp(function () { log.push('proto'); return Response.prototype }); log.push(N(function () { return Reflect.construct(Response, ['b', { status: 1 }], nt) })); out
+=== hs-response-nested
+class A extends Response {} class B extends A { constructor(b) { super(b, { status: 203 }); this.b = 1 } } var r = new B('q'); log.push(P(r, B, A), r.status, r.b); out
+=== hs-url-basic
+class U extends URL { get path2() { return this.pathname + this.search } } var u = new U('http://a.test:81/p/q?x=1#h'); log.push(P(u, U, URL), u.path2, u.href, u.host, u.hash, String(u), JSON.stringify(u), U.name, U.length, URL.length); out
+=== hs-url-base
+class U extends URL {} var u = new U('../z', 'http://a.test/b/c/d'); log.push(u.href, u instanceof U); out
+=== hs-url-search-params
+class U extends URL {} var u = new U('http://a.test/?x=1'); u.searchParams.append('y', '2'); log.push(u.href, u.searchParams instanceof URLSearchParams, u.searchParams === u.searchParams); out
+=== hs-url-setters
+class U extends URL {} var u = new U('http://a.test/'); u.pathname = '/n'; u.search = 'k=v'; u.hash = 'z'; u.port = '8080'; log.push(u.href); out
+=== hs-url-invalid
+class U extends URL {} log.push(N(function () { return new U('not a url') }), N(function () { return new U() })); out
+=== hs-url-no-new
+class U extends URL {} log.push(T(function () { return U('http://a.test/') })); out
+=== hs-url-reflect
+function F() {} F.prototype = Object.create(URL.prototype); var u = Reflect.construct(URL, ['http://a.test/r'], F); log.push(Object.getPrototypeOf(u) === F.prototype, u.href, u instanceof URL); out
+=== hs-url-nt-proto-not-object
+function F() {} F.prototype = 1; var u = Reflect.construct(URL, ['http://a.test/r'], F); log.push(Object.getPrototypeOf(u) === URL.prototype, u.pathname); out
+=== hs-url-brand
+class U extends URL {} log.push(T(function () { return Object.getOwnPropertyDescriptor(URL.prototype, 'href').get.call(Object.create(U.prototype)) })); out
+=== hs-url-order
+var nt = ntp(function () { log.push('proto'); return URL.prototype }); var url = { toString: function () { log.push('url'); return 'http://a.test/' } }; Reflect.construct(URL, [url], nt); out
+=== hs-url-order-error
+var nt = ntp(function () { log.push('proto'); return URL.prototype }); log.push(T(function () { return Reflect.construct(URL, ['bad'], nt) })); out
+=== hs-url-nested
+class A extends URL {} class B extends A { constructor(u) { super(u); this.b = 1 } } var u = new B('http://a.test/n'); log.push(P(u, B, A), u.pathname, u.b); out
+=== hs-usp-order
+var nt = ntp(function () { log.push('proto'); return URLSearchParams.prototype }); var init = { toString: function () { log.push('init'); return 'a=1' } }; Reflect.construct(URLSearchParams, [init], nt); out
+=== hs-usp-basic
+class S extends URLSearchParams { hi() { return this.get('a') } } var s = new S('a=1&b=2'); log.push(P(s, S, URLSearchParams), s.hi(), String(s), s.size); out
+=== hs-formdata-basic
+class F extends FormData { hi() { return this.get('a') } } var f = new F(); f.append('a', '1'); log.push(P(f, F, FormData), f.hi(), [...f.keys()].join(), Object.prototype.toString.call(f)); out
+=== hs-formdata-order
+var nt = ntp(function () { log.push('proto'); return FormData.prototype }); var form = document.createElement('form'); Reflect.construct(FormData, [form], nt); log.push(T(function () { return Reflect.construct(FormData, [{}], nt) })); out
+=== hs-blob-basic
+class B extends Blob { hi() { return this.size } } var b = new B(['abc'], { type: 'text/x' }); log.push(P(b, B, Blob), b.hi(), b.type, Object.prototype.toString.call(b)); out
+=== hs-blob-slice
+class B extends Blob {} var b = new B(['abcdef']); var s = b.slice(1, 3); log.push(s instanceof B, Object.getPrototypeOf(s) === Blob.prototype, s.size); out
+=== hs-blob-order
+var nt = ntp(function () { log.push('proto'); return Blob.prototype }); var part = { toString: function () { log.push('part'); return 'x' } }; Reflect.construct(Blob, [[part]], nt); out
+=== hs-file-basic
+class F extends File { hi() { return this.name } } var f = new F(['abc'], 'n.txt', { type: 'text/x', lastModified: 5 }); log.push(P(f, F, File), f.hi(), f.size, f.type, f.lastModified, f instanceof Blob, Object.prototype.toString.call(f)); out
+=== hs-file-order
+var nt = ntp(function () { log.push('proto'); return File.prototype }); var part = { toString: function () { log.push('part'); return 'x' } }; Reflect.construct(File, [[part], 'n'], nt); out
+=== hs-abortcontroller-basic
+class C extends AbortController { hi() { return this.signal.aborted } } var c = new C(); log.push(P(c, C, AbortController), c.hi(), c.signal instanceof AbortSignal, Object.prototype.toString.call(c)); c.abort('r'); log.push(c.signal.aborted, c.signal.reason); out
+=== hs-abortsignal-illegal
+class S extends AbortSignal {} log.push(T(function () { return new S() }), T(function () { return new AbortSignal() }), T(function () { return S() })); out
+=== hs-abortsignal-statics
+class S extends AbortSignal {} var a = S.abort('x'); log.push(Object.getPrototypeOf(a) === AbortSignal.prototype, a.aborted, a.reason, S.abort === AbortSignal.abort, typeof S.timeout, typeof S.any); out
+=== hs-abortsignal-reflect
+function F() {} F.prototype = Object.create(AbortSignal.prototype); log.push(T(function () { return Reflect.construct(AbortSignal, [], F) })); out
+=== hs-abortsignal-instance-of-subclass-controller
+var c = new AbortController(); class S extends AbortSignal {} log.push(c.signal instanceof AbortSignal, c.signal instanceof S, Object.getPrototypeOf(S) === AbortSignal); out
+=== hs-usp-nt-proto-not-object
+function F() {} F.prototype = 5; var s = Reflect.construct(URLSearchParams, ['a=1'], F); log.push(Object.getPrototypeOf(s) === Object.prototype, Object.getPrototypeOf(s) === URLSearchParams.prototype, URLSearchParams.prototype.get.call(s, 'a')); out

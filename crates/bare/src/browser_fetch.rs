@@ -518,7 +518,12 @@ impl Dom {
     }
 
     fn add_obj(&self, it: &mut Interp<'_>, p: Pr, f: F) -> R<ObjId> {
-        let o = self.obj(it, self.fproto(p))?;
+        self.add_obj_in(it, self.fproto(p), f)
+    }
+
+    /// Like `add_obj` with the prototype `proto` (a subclass instance).
+    fn add_obj_in(&self, it: &mut Interp<'_>, proto: ObjId, f: F) -> R<ObjId> {
+        let o = self.obj(it, proto)?;
         let mut st = self.fetch.st.borrow_mut();
         match &f {
             F::Request(r) => st.retained += r.c.body.len(),
@@ -531,8 +536,12 @@ impl Dom {
     }
 
     fn headers_obj(&self, it: &mut Interp<'_>, list: HeaderList) -> R<ObjId> {
+        self.headers_obj_in(it, self.fproto(Pr::Headers), list)
+    }
+
+    fn headers_obj_in(&self, it: &mut Interp<'_>, proto: ObjId, list: HeaderList) -> R<ObjId> {
         self.reserve(it, 1, 0)?;
-        self.add_obj(it, Pr::Headers, F::Headers(list))
+        self.add_obj_in(it, proto, F::Headers(list))
     }
 
     fn herr(&self, it: &mut Interp<'_>, e: HErr) -> Error {
@@ -976,13 +985,14 @@ fn thrown_value(e: Error) -> R<Value> {
 // ---------------------------------------------------------------------------------------------- Headers methods
 
 fn headers_ctor(d: &Dom, it: &mut Interp<'_>, _: Value, a: &[Value]) -> R<Value> {
+    let proto = it.host_proto_from_new_target(d.fproto(Pr::Headers))?;
     let mut list = HeaderList::new(Guard::None);
     let init = a.first().copied().unwrap_or(Value::Undefined);
     if matches!(init, Value::Null) {
         return Err(it.type_error("Failed to construct 'Headers': The provided value is not of type 'HeadersInit'"));
     }
     d.fill(it, &mut list, init)?;
-    Ok(Value::Object(d.headers_obj(it, list)?))
+    Ok(Value::Object(d.headers_obj_in(it, proto, list)?))
 }
 
 fn arg(a: &[Value], i: usize) -> Value {
@@ -1104,7 +1114,7 @@ fn common(st: &mut FetchState, o: ObjId) -> Option<&mut Common> {
     }
 }
 
-fn new_request_obj(d: &Dom, it: &mut Interp<'_>, core: Core) -> R<ObjId> {
+fn new_request_obj(d: &Dom, it: &mut Interp<'_>, core: Core, proto: ObjId) -> R<ObjId> {
     let n = core.body.as_ref().map_or(0, |b| b.len());
     d.reserve(it, 2, n)?;
     let h = d.headers_obj(it, core.headers)?;
@@ -1112,15 +1122,16 @@ fn new_request_obj(d: &Dom, it: &mut Interp<'_>, core: Core) -> R<ObjId> {
         Some(s) => Some(d.follow_signal(it, s)?),
         None => None,
     };
-    d.add_obj(it, Pr::Request, F::Request(ReqData { c: Common { headers: h, body: Body::new(core.body) }, method: core.method, url: core.url, redirect: core.redirect, credentials: core.credentials, mode: core.mode, signal }))
+    d.add_obj_in(it, proto, F::Request(ReqData { c: Common { headers: h, body: Body::new(core.body) }, method: core.method, url: core.url, redirect: core.redirect, credentials: core.credentials, mode: core.mode, signal }))
 }
 
 fn request_ctor(d: &Dom, it: &mut Interp<'_>, _: Value, a: &[Value]) -> R<Value> {
+    let proto = it.host_proto_from_new_target(d.fproto(Pr::Request))?;
     if a.is_empty() {
         return Err(it.type_error("Failed to construct 'Request': 1 argument required, but only 0 present."));
     }
     let core = make_core(d, it, arg(a, 0), arg(a, 1))?;
-    Ok(Value::Object(new_request_obj(d, it, core)?))
+    Ok(Value::Object(new_request_obj(d, it, core, proto)?))
 }
 
 fn status_null_body(s: u16) -> bool {
@@ -1128,6 +1139,7 @@ fn status_null_body(s: u16) -> bool {
 }
 
 fn response_ctor(d: &Dom, it: &mut Interp<'_>, _: Value, a: &[Value]) -> R<Value> {
+    let proto = it.host_proto_from_new_target(d.fproto(Pr::Response))?;
     let lim = d.fl();
     let init = arg(a, 1);
     let (mut status, mut text, mut list) = (200u16, String::new(), HeaderList::new(Guard::Response));
@@ -1168,7 +1180,7 @@ fn response_ctor(d: &Dom, it: &mut Interp<'_>, _: Value, a: &[Value]) -> R<Value
     d.reserve(it, 2, body.as_ref().map_or(0, |b| b.len()))?;
     let h = d.headers_obj(it, list)?;
     let r = RespData { c: Common { headers: h, body: Body::new(body) }, status, status_text: text, url: String::new(), redirected: false, ty: "default", stream: None };
-    Ok(Value::Object(d.add_obj(it, Pr::Response, F::Response(r))?))
+    Ok(Value::Object(d.add_obj_in(it, proto, F::Response(r))?))
 }
 
 fn with_req<T>(d: &Dom, it: &mut Interp<'_>, this: Value, f: impl FnOnce(&ReqData) -> T) -> R<T> {
@@ -1224,7 +1236,7 @@ fn req_clone(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> R<Value>
     }
     let mut headers = d.list_of(hdr);
     headers.guard = Guard::Request;
-    Ok(Value::Object(new_request_obj(d, it, Core { method, url, headers, body, redirect, credentials, mode, signal })?))
+    Ok(Value::Object(new_request_obj(d, it, Core { method, url, headers, body, redirect, credentials, mode, signal }, d.fproto(Pr::Request))?))
 }
 fn req_signal(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> R<Value> {
     let o = d.brand(it, this)?;
@@ -2029,7 +2041,9 @@ pub(crate) fn install(d: &Dom, it: &mut Interp<'_>) -> R<()> {
         ("ReadableStreamDefaultReader", Reader, illegal, false),
     ];
     for (name, p, h, ctor) in ifaces {
-        let f = d.add_fn(it, h, name, if name == "Headers" || name == "ReadableStream" { 0 } else { 1 }, ctor)?;
+        let len = if matches!(name, "Headers" | "Response" | "ReadableStream") { 0 } else { 1 };
+        // These three read `new.target`, so a class may extend them.
+        let f = if matches!(p, Headers | Request | Response) { d.add_ctor_nt(it, h, name, len)? } else { d.add_fn(it, h, name, len, ctor)? };
         let proto = protos[p as usize];
         it.define_data(f, kp, Value::Object(proto), false, false, false)?;
         it.define_data(proto, kc, Value::Object(f), true, false, true)?;

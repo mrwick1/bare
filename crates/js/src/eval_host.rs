@@ -121,13 +121,14 @@ impl<'p> Interp<'p> {
         r
     }
 
-    /// GetPrototypeFromConstructor for the host constructor that is running: `Get(newTarget, "prototype")`, or `default`
-    /// when that is not an object. A plain `new F` (and `Reflect.construct(F, args, F)`) passes no `new.target`: it gets `default`, which must
-    /// be the read-only `prototype` of `F`, so it costs no property read. Read it when the constructor makes
-    /// its object, after it converted its arguments. It may run a getter, so hold no host borrow.
+    /// GetPrototypeFromConstructor for the host constructor that is running: `Get(newTarget, "prototype")`. When that is not an
+    /// object the result is `Object.prototype`, as in Chrome (a V8 API object has no intrinsic default prototype). A plain `new F` (and
+    /// `Reflect.construct(F, args, F)`) passes no `new.target`: it gets `default`, which must be the read-only `prototype` of `F`, so
+    /// it costs no property read. Chrome reads it before it converts the arguments, so read it first. It may run a getter, so hold
+    /// no host borrow.
     pub fn host_proto_from_new_target(&mut self, default: ObjId) -> Result<ObjId, Error> {
         match self.host_nt {
-            Some(nt) => self.proto_from_ctor_or(nt, default),
+            Some(nt) => self.proto_from_ctor_or(nt, self.object_proto),
             None => Ok(default),
         }
     }

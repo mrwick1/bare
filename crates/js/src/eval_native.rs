@@ -173,7 +173,16 @@ impl<'p> Interp<'p> {
                 self.def(b, self.k_name, Value::String(nm), false, false, true)?;
                 Ok(Value::Object(b))
             }
-            Nat::FnCtor => Err(unsupported("Function constructor (dynamic code)", Span::default())),
+            Nat::FnCtor(kind) => {
+                let nt = self.cls.native_nt.take();
+                let default = match kind {
+                    1 => self.gen_intr()?.fn_proto,
+                    2 => self.async_fn_proto()?,
+                    _ => self.function_proto,
+                };
+                let f = self.dynamic_function(kind, args)?;
+                self.nt_patch(nt, default, f)
+            }
             Nat::ArrayCtor => self.array_ctor(args, self.array_proto),
             Nat::ArrayIsArray => Ok(Value::Bool(matches!(a0, Value::Object(o) if self.o_is_array(o)?))),
             Nat::ArrPush => {

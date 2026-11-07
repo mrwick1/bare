@@ -1,0 +1,61 @@
+hs-headers-basic	true,true,true,true,true,true\n1\na,1|b,2\ntrue\nH\n0\n0
+hs-headers-methods	append c\nb,c,d\n3
+hs-headers-ctor-override	7\n1
+hs-headers-no-new	throws TypeError: Class constructor H cannot be invoked without 'new'
+hs-headers-reflect	true\nhi\n1\ntrue
+hs-headers-nt-proto-not-object	throw:TypeError:h.get is not a function
+hs-headers-brand	throws TypeError: Illegal invocation\nthrows TypeError: Illegal invocation
+hs-headers-order	proto\ninit
+hs-headers-order-error	proto\nthrows TypeError
+hs-headers-nested	true,true,true,true,true,true\ntrue\ny\n1
+hs-headers-iter	a,1|b,2\n2\ntrue\na1\nb2
+hs-request-basic	true,true,true,true,true,true\nPOSThttp://x.test/a\ntrue\nR\n0\n1
+hs-request-clone	true\ntrue\nfalse\nhttp://x.test/a
+hs-request-body	text payload\ntrue
+hs-request-from-request	true,true,true,true,true,true\nPUT\nhttp://x.test/a
+hs-request-no-new	throws TypeError: Class constructor R cannot be invoked without 'new'
+hs-request-missing-arg	throws TypeError: Failed to construct 'Request': 1 argument required, but only 0 present.
+hs-request-reflect	true\nhttp://x.test/q\ntrue
+hs-request-nt-proto-not-object	false\n
+hs-request-brand	throws TypeError: Illegal invocation
+hs-request-order	proto\ninit
+hs-request-order-error	proto\nthrows TypeError: Failed to construct 'Request': 1 argument required, but only 0 present.
+hs-request-nested	true,true,true,true,true,true\nhttp://x.test/z\n1
+hs-response-basic	true,true,true,true,true,true\n201made\ntrue\ntrue\nR\n0\n0
+hs-response-body	text payload\ntrue
+hs-response-clone	true\ntrue\nfalse
+hs-response-no-new	throws TypeError: Class constructor R cannot be invoked without 'new'
+hs-response-bad-status	throws RangeError\nthrows TypeError
+hs-response-reflect	true\n202\ntrue
+hs-response-nt-proto-not-object	false\n
+hs-response-brand	throws TypeError: Illegal invocation
+hs-response-order	proto\ninit
+hs-response-order-error	proto\nthrows RangeError
+hs-response-nested	true,true,true,true,true,true\n203\n1
+hs-url-basic	true,true,true,true,true,true\n/p/q?x=1\nhttp://a.test:81/p/q?x=1#h\na.test:81\n#h\nhttp://a.test:81/p/q?x=1#h\n"http://a.test:81/p/q?x=1#h"\nU\n0\n1
+hs-url-base	http://a.test/b/z\ntrue
+hs-url-search-params	http://a.test/?x=1&y=2\ntrue\ntrue
+hs-url-setters	http://a.test:8080/n?k=v#z
+hs-url-invalid	throws TypeError\nthrows TypeError
+hs-url-no-new	throws TypeError: Class constructor U cannot be invoked without 'new'
+hs-url-reflect	true\nhttp://a.test/r\ntrue
+hs-url-nt-proto-not-object	false\n
+hs-url-brand	throws TypeError: Illegal invocation
+hs-url-order	proto\nurl
+hs-url-order-error	proto\nthrows TypeError: Failed to construct 'URL': Invalid URL
+hs-url-nested	true,true,true,true,true,true\n/n\n1
+hs-usp-order	proto
+hs-usp-basic	true,true,true,true,true,true\n1\na=1&b=2\n2
+hs-formdata-basic	true,true,true,true,true,true\n1\na\n[object FormData]
+hs-formdata-order	proto\nproto\nthrows TypeError: Failed to construct 'FormData': parameter 1 is not of type 'HTMLFormElement'.
+hs-blob-basic	true,true,true,true,true,true\n3\ntext/x\n[object Blob]
+hs-blob-slice	false\ntrue\n2
+hs-blob-order	proto\npart
+hs-file-basic	true,true,true,true,true,true\nn.txt\n3\ntext/x\n5\ntrue\n[object File]
+hs-file-order	proto\npart
+hs-abortcontroller-basic	true,true,true,true,true,true\nfalse\ntrue\n[object AbortController]\ntrue\nr
+hs-abortsignal-illegal	throws TypeError: Failed to construct 'AbortSignal': Illegal constructor\nthrows TypeError: Failed to construct 'AbortSignal': Illegal constructor\nthrows TypeError: Class constructor S cannot be invoked without 'new'
+hs-abortsignal-statics	true\ntrue\nx\ntrue\nfunction\nfunction
+hs-abortsignal-reflect	throws TypeError: Failed to construct 'AbortSignal': Illegal constructor
+hs-abortsignal-instance-of-subclass-controller	true\nfalse\ntrue
+hs-usp-nt-proto-not-object	true\nfalse\n1

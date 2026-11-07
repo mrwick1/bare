@@ -287,3 +287,229 @@ class M extends Map { constructor(...a) { super(...a); } } new M([[1, 2], [3, 4]
 class M extends Map {} var a = new M(), b = new M(); a.set(1, 1); [a.size, b.size].join()
 === class_extends_native_gc_pressure
 class M extends Map {} var n = 0; for (var i = 0; i < 2000; i++) { var m = new M([[i, i]]); n += m.get(i); } n
+=== fn_basic
+class F extends Function {} var f = new F("a", "return a + 1"); [f(2), f instanceof F, f instanceof Function, Object.getPrototypeOf(f) === F.prototype, typeof f, f.length, f.name, f.constructor === F].join()
+=== fn_method_and_this
+class F extends Function { hi() { return 7; } } var f = new F("return this.x"); [f.hi(), f.call({x: 4}), f.bind({x: 5})()].join()
+=== fn_ctor_super
+class F extends Function { constructor() { super("a", "b", "return a * b"); this.tag = 9; } } var f = new F(); [f(3, 4), f.tag, f.length].join()
+=== fn_no_new
+class F extends Function {} try { F("return 3") } catch (e) { e.name + ": " + e.message }
+=== fn_body_global
+class F extends Function {} var f = new F("return typeof this + typeof F"); f()
+=== fn_proto_chain
+class F extends Function {} var f = new F(""); [Object.getPrototypeOf(F) === Function, Object.getPrototypeOf(F.prototype) === Function.prototype, Object.prototype.toString.call(f)].join()
+=== fn_is_constructor
+class F extends Function {} var f = new F("this.a = 1"); var o = new f(); [o.a, o instanceof f, Object.getPrototypeOf(o) === f.prototype].join()
+=== fn_reflect_construct
+function G() {} G.prototype = Object.create(Function.prototype); G.prototype.hi = function () { return 3; }; var f = Reflect.construct(Function, ["return 5"], G); [f(), f.hi(), Object.getPrototypeOf(f) === G.prototype].join()
+=== fn_nt_prototype_not_object
+function G() {} G.prototype = 5; var f = Reflect.construct(Function, ["return 5"], G); [f(), Object.getPrototypeOf(f) === Function.prototype].join()
+=== fn_syntax_error
+class F extends Function {} try { new F("return +") } catch (e) { e.name }
+=== fn_own_props
+class F extends Function {} var f = new F("a", "return a"); Object.getOwnPropertyNames(f).filter(function (k) { return k !== "arguments" && k !== "caller"; }).sort().join()
+=== fn_call_apply
+class F extends Function {} var f = new F("a", "b", "return a + b"); [f.call(null, 1, 2), f.apply(null, [3, 4]), Function.prototype.call.call(f, null, 5, 6)].join()
+=== fn_afn_basic
+var AF = Object.getPrototypeOf(async function () {}).constructor; class A extends AF {} var f = new A("return 1"); [f instanceof A, f instanceof AF, Object.prototype.toString.call(f), f() instanceof Promise, Object.getPrototypeOf(A) === AF].join()
+=== fn_afn_await
+var AF = Object.getPrototypeOf(async function () {}).constructor; class A extends AF { hi() { return 2; } } var f = new A("x", "return await x"); [f.hi(), Object.getPrototypeOf(f) === A.prototype, f.constructor === A].join()
+=== fn_gfn_basic
+var GF = Object.getPrototypeOf(function* () {}).constructor; class G extends GF {} var f = new G("yield 1; yield 2"); [f instanceof G, f instanceof GF, Object.prototype.toString.call(f), [...f()].join("")].join()
+=== fn_gfn_proto
+var GF = Object.getPrototypeOf(function* () {}).constructor; class G extends GF {} var f = new G("yield 1"); var it = f(); [Object.getPrototypeOf(it) === f.prototype, typeof f.prototype, Object.getPrototypeOf(f) === G.prototype].join()
+=== fn_afn_reflect
+var AF = Object.getPrototypeOf(async function () {}).constructor; function G() {} G.prototype = Object.create(AF.prototype); var f = Reflect.construct(AF, ["return 1"], G); [Object.getPrototypeOf(f) === G.prototype, f() instanceof Promise].join()
+=== sym_extends_new
+class S extends Symbol {} try { new S() } catch (e) { e.name + ": " + e.message }
+=== sym_extends_call
+class S extends Symbol {} try { S("a") } catch (e) { e.name + ": " + e.message }
+=== sym_extends_def
+class S extends Symbol {} [typeof S, Object.getPrototypeOf(S) === Symbol, Object.getPrototypeOf(S.prototype) === Symbol.prototype, S.for === Symbol.for, S.iterator === Symbol.iterator].join()
+=== sym_extends_ctor_args
+class S extends Symbol { constructor() { super("x"); } } try { new S() } catch (e) { e.name + ": " + e.message }
+=== sym_reflect_construct
+try { Reflect.construct(Symbol, [], Object) } catch (e) { e.name + ": " + e.message }
+=== sym_new
+try { new Symbol() } catch (e) { e.name + ": " + e.message }
+=== sym_extends_static
+class S extends Symbol {} Symbol.keyFor(S.for("k")) + "," + S.keyFor(Symbol.for("j"))
+=== sym_reflect_construct_self
+try { Reflect.construct(Symbol, ["a"], Symbol) } catch (e) { e.name + ": " + e.message }
+=== flat_species_basic
+class B extends Array {} class A extends Array { static get [Symbol.species]() { return B; } } var a = A.from([[1], [2, [3]]]); var r = a.flat(); [r instanceof B, r instanceof A, r.join(), Array.isArray(r)].join()
+=== flat_species_plain
+class A extends Array {} var a = A.from([[1], [2]]); var r = a.flat(); [r instanceof A, r.length, r.join()].join()
+=== flat_species_depth
+class B extends Array {} class A extends Array { static get [Symbol.species]() { return B; } } var r = A.from([1, [2, [3, [4]]]]).flat(Infinity); [r instanceof B, r.join()].join()
+=== flatmap_species_basic
+class B extends Array {} class A extends Array { static get [Symbol.species]() { return B; } } var r = A.from([1, 2]).flatMap(function (x) { return [x, x * 2]; }); [r instanceof B, r.join()].join()
+=== flatmap_species_plain
+class A extends Array {} var r = A.from([1, 2]).flatMap(function (x) { return [x, x]; }); [r instanceof A, r.length, r.join()].join()
+=== flat_species_undefined
+class A extends Array { static get [Symbol.species]() { return undefined; } } var r = A.from([[1], [2]]).flat(); [r instanceof A, Object.getPrototypeOf(r) === Array.prototype, r.join()].join()
+=== flat_species_null
+class A extends Array { static get [Symbol.species]() { return null; } } var r = A.from([[1], [2]]).flatMap(function (x) { return x; }); [Object.getPrototypeOf(r) === Array.prototype, r.join()].join()
+=== flat_species_not_ctor
+class A extends Array { static get [Symbol.species]() { return 5; } } try { A.from([[1]]).flat() } catch (e) { e.name + ": " + e.message }
+=== flat_species_ctor_args
+var args; function C(n) { args = [arguments.length, n]; var a = []; Object.setPrototypeOf(a, C.prototype); return a; } C.prototype = Object.create(Array.prototype); var a = [[1], [2]]; a.constructor = { [Symbol.species]: C }; var r = a.flat(); [args.join(), r instanceof C, r.join()].join()
+=== flat_species_via_constructor
+var a = [1, [2]]; a.constructor = undefined; var r = a.flat(); [Array.isArray(r), r.join()].join()
+=== flatmap_species_ctor_args
+var args; function C(n) { args = [arguments.length, n]; return Object.setPrototypeOf([], C.prototype); } C.prototype = Object.create(Array.prototype); var a = [1, 2]; a.constructor = { [Symbol.species]: C }; var r = a.flatMap(function (x) { return [x]; }); [args.join(), r instanceof C, r.join()].join()
+=== flat_species_defines
+var log = []; class B extends Array { constructor(n) { super(n); log.push("new"); } } class A extends Array { static get [Symbol.species]() { return B; } } var r = A.from([[1], 2]).flat(); [log.join(), r.length, r[0], r[1]].join()
+=== flatmap_species_prefilled
+var a = [1, 2]; a.constructor = function () {}; a.constructor[Symbol.species] = function (n) { return [9, 9, 9, 9]; }; var r = a.flatMap(function (x) { return [x]; }); r.join()
+=== flat_species_frozen
+var a = [[1]]; a.constructor = function () {}; a.constructor[Symbol.species] = function (n) { return Object.freeze([]); }; try { a.flat() } catch (e) { e.name }
+=== flat_species_species_getter_once
+var n = 0; class A extends Array { static get [Symbol.species]() { n++; return Array; } } A.from([[1], [2]]).flat(); A.from([[1], [2]]).flatMap(function (x) { return x; }); n
+=== re_exec_own_test
+class R extends RegExp { exec(s) { return null; } } [new R("a").test("a"), /a/.test("a")].join()
+=== re_exec_own_match
+class R extends RegExp { exec(s) { return null; } } "abc".match(new R("b")) === null
+=== re_exec_calls
+var log = []; class R extends RegExp { exec(s) { log.push(s); return super.exec(s); } } var r = new R("b"); r.test("abc"); "abc".match(r); "abc".replace(r, "x"); "abc".search(r); log.join()
+=== re_exec_replace
+class R extends RegExp { exec(s) { var m = super.exec(s); if (m) m[0] = m[0].toUpperCase(); return m; } } "abc".replace(new R("b"), "[$&]")
+=== re_exec_replace_g
+class R extends RegExp { exec(s) { var m = super.exec(s); if (m) m[0] = "<" + m[0] + ">"; return m; } } "abab".replace(new R("b", "g"), "$&")
+=== re_exec_split
+var log = []; class R extends RegExp { exec(s) { log.push(this.lastIndex); return super.exec(s); } } var r = new R(","); "a,b,c".split(r).join("|") + "/" + log.length
+=== re_exec_matchall
+var log = []; class R extends RegExp { exec(s) { log.push(1); return super.exec(s); } } var r = new R("a", "g"); var all = [..."aXaXa".matchAll(r)]; [all.length, log.length].join()
+=== re_exec_match_g
+var n = 0; class R extends RegExp { exec(s) { n++; return super.exec(s); } } var m = "aXaXa".match(new R("a", "g")); [m.join(), n].join()
+=== re_exec_fake_result
+class R extends RegExp { exec(s) { return { index: 0, length: 1, 0: "zz" }; } } var m = "abc".replace(new R("b"), "[$&]"); m
+=== re_exec_returns_non_object
+class R extends RegExp { exec(s) { return 5; } } try { new R("a").test("a") } catch (e) { e.name + ": " + e.message }
+=== re_exec_not_callable
+var r = /a/; r.exec = 5; r.test("xa")
+=== re_exec_own_prop
+var r = /a/; r.exec = function (s) { return null; }; [r.test("a"), "a".match(r)].join()
+=== re_exec_proto_patch
+var old = RegExp.prototype.exec; var n = 0; RegExp.prototype.exec = function (s) { n++; return old.call(this, s); }; try { /b/.test("abc"); "abc".replace(/b/, "x"); "abc".match(/b/g); } finally { RegExp.prototype.exec = old; } n
+=== re_exec_proto_patch_split
+var old = RegExp.prototype.exec; var n = 0; RegExp.prototype.exec = function (s) { n++; return old.call(this, s); }; try { "a,b".split(/,/); } finally { RegExp.prototype.exec = old; } n > 0
+=== re_exec_search
+class R extends RegExp { exec(s) { return { index: 7 }; } } "abc".search(new R("b"))
+=== re_exec_lastindex_g
+class R extends RegExp { exec(s) { if (this.lastIndex > 0) return null; this.lastIndex = 1; return Object.assign(["q"], { index: 0 }); } } var r = new R("a", "g"); "zz".replace(r, "[$&]")
+=== re_exec_symbol_methods
+class R extends RegExp { exec(s) { return null; } } var r = new R("a"); [r[Symbol.match]("a"), r[Symbol.search]("a"), r[Symbol.replace]("a", "b"), r[Symbol.split]("a").join()].join("|")
+=== re_exec_sticky_unicode_species
+class R extends RegExp { exec(s) { return super.exec(s); } } var r = new R("a", "y"); "aab".split(r).join("|")
+=== intl_nf_basic
+class N extends Intl.NumberFormat {} var n = new N("en-US"); [n instanceof N, n instanceof Intl.NumberFormat, Object.getPrototypeOf(n) === N.prototype, n.format(1234.5), Object.prototype.toString.call(n), n.resolvedOptions().locale].join()
+=== intl_nf_override
+class N extends Intl.NumberFormat { format2(x) { return "<" + this.format(x) + ">"; } } new N("en-US", { style: "percent" }).format2(0.5)
+=== intl_nf_super_ctor
+class N extends Intl.NumberFormat { constructor(l) { super(l, { maximumFractionDigits: 0 }); this.t = 1; } } var n = new N("en-US"); [n.format(2.6), n.t].join()
+=== intl_nf_static
+class N extends Intl.NumberFormat {} [N.supportedLocalesOf("en-US").join(), Object.getPrototypeOf(N) === Intl.NumberFormat, N.name, N.length].join()
+=== intl_nf_call
+class N extends Intl.NumberFormat {} try { N("en-US") } catch (e) { e.name + ": " + e.message }
+=== intl_nf_parts
+class N extends Intl.NumberFormat {} new N("en-US").formatToParts(1.5).map(function (p) { return p.type; }).join()
+=== intl_nf_reflect
+function G() {} G.prototype = Object.create(Intl.NumberFormat.prototype); var n = Reflect.construct(Intl.NumberFormat, ["en-US"], G); [Object.getPrototypeOf(n) === G.prototype, n.format(3)].join()
+=== intl_nf_brand
+class N extends Intl.NumberFormat {} try { Intl.NumberFormat.prototype.format; Object.getOwnPropertyDescriptor(Intl.NumberFormat.prototype, "format").get.call(Object.create(N.prototype)) } catch (e) { e.name }
+=== intl_dtf_basic
+class D extends Intl.DateTimeFormat {} var d = new D("en-US", { timeZone: "UTC" }); [d instanceof D, d instanceof Intl.DateTimeFormat, Object.getPrototypeOf(d) === D.prototype, d.format(0), Object.prototype.toString.call(d), d.resolvedOptions().timeZone].join()
+=== intl_dtf_super
+class D extends Intl.DateTimeFormat { constructor() { super("en-US", { timeZone: "UTC", year: "numeric" }); this.t = 2; } hi() { return this.format(0); } } var d = new D(); [d.hi(), d.t].join()
+=== intl_dtf_call
+class D extends Intl.DateTimeFormat {} try { D("en-US") } catch (e) { e.name + ": " + e.message }
+=== intl_dtf_static
+class D extends Intl.DateTimeFormat {} [D.supportedLocalesOf("en-US").join(), Object.getPrototypeOf(D) === Intl.DateTimeFormat].join()
+=== intl_dtf_reflect
+function G() {} G.prototype = Object.create(Intl.DateTimeFormat.prototype); var d = Reflect.construct(Intl.DateTimeFormat, ["en-US", { timeZone: "UTC" }], G); [Object.getPrototypeOf(d) === G.prototype, d.format(0)].join()
+=== intl_dtf_parts
+class D extends Intl.DateTimeFormat {} new D("en-US", { timeZone: "UTC" }).formatToParts(0).map(function (p) { return p.type; }).join()
+=== intl_coll_basic
+class C extends Intl.Collator {} var c = new C("en"); [c instanceof C, c instanceof Intl.Collator, Object.getPrototypeOf(c) === C.prototype, c.compare("a", "b"), ["b", "a"].sort(c.compare).join(), Object.prototype.toString.call(c)].join()
+=== intl_coll_super
+class C extends Intl.Collator { constructor() { super("en", { numeric: true }); } } ["a10", "a2"].sort(new C().compare).join()
+=== intl_coll_call
+class C extends Intl.Collator {} try { C("en") } catch (e) { e.name + ": " + e.message }
+=== intl_coll_reflect
+function G() {} G.prototype = Object.create(Intl.Collator.prototype); var c = Reflect.construct(Intl.Collator, ["en"], G); [Object.getPrototypeOf(c) === G.prototype, c.compare("b", "a")].join()
+=== intl_pr_basic
+class P extends Intl.PluralRules {} var p = new P("en"); [p instanceof P, p instanceof Intl.PluralRules, Object.getPrototypeOf(p) === P.prototype, p.select(1), p.select(2), Object.prototype.toString.call(p)].join()
+=== intl_pr_call
+class P extends Intl.PluralRules {} try { P("en") } catch (e) { e.name + ": " + e.message }
+=== intl_pr_super
+class P extends Intl.PluralRules { constructor() { super("en", { type: "ordinal" }); } } var p = new P(); [p.select(1), p.select(2), p.select(3), p.select(4)].join()
+=== intl_pr_reflect
+function G() {} G.prototype = Object.create(Intl.PluralRules.prototype); var p = Reflect.construct(Intl.PluralRules, ["en"], G); [Object.getPrototypeOf(p) === G.prototype, p.select(1)].join()
+=== intl_seg_basic
+class S extends Intl.Segmenter {} var s = new S("en", { granularity: "word" }); [s instanceof S, s instanceof Intl.Segmenter, Object.getPrototypeOf(s) === S.prototype, [...s.segment("a b")].map(function (x) { return x.segment; }).join("|"), Object.prototype.toString.call(s)].join()
+=== intl_seg_call
+class S extends Intl.Segmenter {} try { S("en") } catch (e) { e.name + ": " + e.message }
+=== intl_seg_reflect
+function G() {} G.prototype = Object.create(Intl.Segmenter.prototype); var s = Reflect.construct(Intl.Segmenter, ["en"], G); [Object.getPrototypeOf(s) === G.prototype, s.resolvedOptions().granularity].join()
+=== intl_nt_proto_getter_once
+var n = 0; var F = new Proxy(function () {}, { get(t, k) { if (k === "prototype") n++; return Reflect.get(t, k); } }); Reflect.construct(Intl.NumberFormat, [], F); Reflect.construct(Intl.DateTimeFormat, [], F); Reflect.construct(Intl.Collator, [], F); Reflect.construct(Intl.PluralRules, [], F); Reflect.construct(Intl.Segmenter, [], F); n
+=== intl_nt_proto_not_object
+function G() {} G.prototype = 5; var n = Reflect.construct(Intl.NumberFormat, ["en"], G); [Object.getPrototypeOf(n) === Intl.NumberFormat.prototype, n.format(1)].join()
+=== intl_nf_options_before_proto
+var log = []; var F = new Proxy(function () {}, { get(t, k) { if (k === "prototype") log.push("proto"); return Reflect.get(t, k); } }); var opts = { get style() { log.push("style"); return "decimal"; } }; Reflect.construct(Intl.NumberFormat, ["en", opts], F); log[0]
+=== intl_dtf_options_before_proto
+var log = []; var F = new Proxy(function () {}, { get(t, k) { if (k === "prototype") log.push("proto"); return Reflect.get(t, k); } }); var opts = { get timeZone() { log.push("tz"); return "UTC"; } }; Reflect.construct(Intl.DateTimeFormat, ["en", opts], F); log[0]
+=== intl_coll_options_before_proto
+var log = []; var F = new Proxy(function () {}, { get(t, k) { if (k === "prototype") log.push("proto"); return Reflect.get(t, k); } }); var opts = { get numeric() { log.push("num"); return true; } }; Reflect.construct(Intl.Collator, ["en", opts], F); log[0]
+=== intl_pr_options_before_proto
+var log = []; var F = new Proxy(function () {}, { get(t, k) { if (k === "prototype") log.push("proto"); return Reflect.get(t, k); } }); var opts = { get type() { log.push("type"); return "cardinal"; } }; Reflect.construct(Intl.PluralRules, ["en", opts], F); log[0]
+=== intl_seg_options_before_proto
+var log = []; var F = new Proxy(function () {}, { get(t, k) { if (k === "prototype") log.push("proto"); return Reflect.get(t, k); } }); var opts = { get granularity() { log.push("g"); return "word"; } }; Reflect.construct(Intl.Segmenter, ["en", opts], F); log[0]
+=== re_species_getter
+class R extends RegExp {} [RegExp[Symbol.species] === RegExp, R[Symbol.species] === R, typeof Object.getOwnPropertyDescriptor(RegExp, Symbol.species).get, Object.getOwnPropertyDescriptor(RegExp, Symbol.species).get.name].join()
+=== re_split_species_ctor
+var log = []; class R extends RegExp { constructor(p, f) { super(p, f); log.push(String(f)); } exec(s) { return super.exec(s); } } var r = new R(",", "g"); log.length = 0; "a,b".split(r); log.join("|")
+=== re_matchall_species_ctor
+var log = []; class R extends RegExp { constructor(p, f) { super(p, f); log.push(String(f)); } exec(s) { return super.exec(s); } } var r = new R("a", "g"); log.length = 0; var it = "aa".matchAll(r); [...it]; log.join("|")
+=== re_exec_unicode_advance
+class R extends RegExp { exec(s) { return super.exec(s); } } "\u{1F600}".replace(new R("", "gu"), "-") + "|" + "\u{1F600}".replace(new R("", "g"), "-").length
+=== re_exec_replace_fn_args
+class R extends RegExp { exec(s) { var m = super.exec(s); return m; } } var seen; "xaby".replace(new R("(a)(b)"), function () { seen = [].slice.call(arguments); return "!"; }); seen.join("|")
+=== re_exec_replace_template
+class R extends RegExp { exec(s) { var m = super.exec(s); return m; } } "xaby".replace(new R("(a)(b)"), "[$2$1|$&|$`|$'|$$|$3|$0|$01|$10]")
+=== re_exec_fake_captures
+class R extends RegExp { exec(s) { return Object.assign(["ab", "a", undefined], { index: 1, input: s }); } } "xaby".replace(new R("q"), "[$1|$2|$3]")
+=== re_exec_fake_index_clamp
+class R extends RegExp { exec(s) { return Object.assign(["ab"], { index: 99 }); } } "xaby".replace(new R("q"), "[$&]")
+=== re_exec_fake_index_negative
+class R extends RegExp { exec(s) { return Object.assign(["ab"], { index: -5 }); } } "xaby".replace(new R("q"), "[$&]")
+=== re_exec_matchall_non_global_iter
+class R extends RegExp { exec(s) { return super.exec(s); } } var it = new R("a")[Symbol.matchAll]("aa"); [...it].length
+=== re_exec_matchall_iter_tag
+class R extends RegExp { exec(s) { return super.exec(s); } } var it = new R("a", "g")[Symbol.matchAll]("aa"); Object.prototype.toString.call(it) + [it.next().done, it.next().done, it.next().done].join()
+=== re_exec_split_limit
+class R extends RegExp { exec(s) { return super.exec(s); } } "a,b,c,d".split(new R(","), 2).join("|") + "/" + "a,b,c".split(new R("(,)"), 3).join("|")
+=== re_exec_split_empty_string
+class R extends RegExp { exec(s) { return super.exec(s); } } ["".split(new R("")).length, "".split(new R("a")).length].join()
+=== re_exec_split_empty_pattern
+class R extends RegExp { exec(s) { return super.exec(s); } } "abc".split(new R("")).join("|")
+=== re_exec_test_global_lastindex
+class R extends RegExp { exec(s) { return super.exec(s); } } var r = new R("a", "g"); [r.test("aa"), r.lastIndex, r.test("aa"), r.lastIndex, r.test("aa"), r.lastIndex].join()
+=== re_exec_search_restores_lastindex
+class R extends RegExp { exec(s) { return super.exec(s); } } var r = new R("b", "g"); r.lastIndex = 2; var i = "abc".search(r); i + "," + r.lastIndex
+=== re_exec_own_prop_matchall
+var r = /a/g; r.exec = function (s) { return null; }; [..."aa".matchAll(r)].length
+=== re_exec_own_prop_split
+var r = /,/; r.exec = function (s) { return null; }; "a,b".split(r).join("|")
+=== re_exec_own_prop_replace
+var r = /a/g; r.exec = function (s) { return null; }; "aa".replace(r, "x")
+=== re_exec_exec_getter_once
+var n = 0; var r = /a/; Object.defineProperty(r, "exec", { get() { n++; return RegExp.prototype.exec; } }); r.test("a"); "a".replace(r, "x"); "a".match(r); n
+=== re_exec_species_not_ctor
+var r = /a/; r.constructor = { [Symbol.species]: 5 }; r.exec = function (s) { return null; }; try { "a".split(r) } catch (e) { e.name + ": " + e.message }
+=== re_exec_returns_undefined
+class R extends RegExp { exec(s) { } } try { new R("a").test("a") } catch (e) { e.name }
+=== re_exec_match_empty_global
+class R extends RegExp { exec(s) { return super.exec(s); } } "abc".match(new R("", "g")).length + "," + "abc".replace(new R("", "g"), "-")

@@ -65,6 +65,7 @@ impl<'p> Interp<'p> {
         let proto = h!(self, self.heap.new_object(Some(self.sc.iter_proto)));
         self.def(fn_proto, self.k_prototype, Value::Object(proto), false, false, true)?;
         self.sc_tag(fn_proto, "GeneratorFunction")?;
+        self.fn_ctor_of(1, fn_proto)?;
         self.def(proto, self.k_constructor, Value::Object(fn_proto), false, false, true)?;
         let next = self.sc_method(proto, "next", ScFn::GenNext, 1)?;
         self.sc_method(proto, "return", ScFn::GenReturn, 1)?;
@@ -73,6 +74,26 @@ impl<'p> Interp<'p> {
         let g = GenIntr { fn_proto, proto, next };
         self.aw.gen_intr = Some(g);
         Ok(g)
+    }
+
+    /// `%AsyncFunction.prototype%`: the prototype of every async function. The first async function makes it.
+    fn async_fn_proto(&mut self) -> Res<ObjId> {
+        if let Some(p) = self.aw.afn_proto {
+            return Ok(p);
+        }
+        let p = h!(self, self.heap.new_object(Some(self.function_proto)));
+        self.sc_tag(p, "AsyncFunction")?;
+        self.fn_ctor_of(2, p)?;
+        self.aw.afn_proto = Some(p);
+        Ok(p)
+    }
+
+    /// The constructor `GeneratorFunction` (kind 1) or `AsyncFunction` (kind 2) for the prototype `proto`.
+    fn fn_ctor_of(&mut self, kind: u8, proto: ObjId) -> Res<()> {
+        let c = self.native(Nat::FnCtor(kind), if kind == 1 { "GeneratorFunction" } else { "AsyncFunction" }, 1)?;
+        h!(self, self.heap.set_prototype_of(c, self.aw.fn_ctor));
+        self.def(c, self.k_prototype, Value::Object(proto), false, false, false)?;
+        self.def(proto, self.k_constructor, Value::Object(c), false, false, true)
     }
 
     /// A new generator function object `o`: its prototype and its own `prototype` object (no `constructor`).
@@ -293,6 +314,7 @@ impl<'p> Interp<'p> {
         if let Some(g) = self.aw.gen_intr {
             work.extend([g.fn_proto, g.proto, g.next].map(Value::Object));
         }
+        work.extend(self.aw.fn_ctor.into_iter().chain(self.aw.afn_proto).map(Value::Object));
     }
 
     /// A reached generator object keeps its suspended run.

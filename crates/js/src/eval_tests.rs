@@ -107,7 +107,7 @@ fn unsupported_is_found_before_anything_runs() {
 fn missing_builtins_are_reference_errors_not_silent() {
     assert_eq!(run_case("typeof Atomics + typeof WeakRefs"), "string:undefinedundefined");
     assert_eq!(run_case("Atomics.load"), "throw:ReferenceError:Atomics is not defined");
-    assert_eq!(run_case("Function('return 1')"), "other:Unsupported(Unsupported { what: \"Function constructor (dynamic code)\", span: Span { start: 0, end: 0 } })");
+    assert_eq!(run_case("Function('return 1')()"), "number:1");
 }
 
 fn limit_of(src: &str, limits: EvalLimits, heap: HeapLimits) -> LimitKind {

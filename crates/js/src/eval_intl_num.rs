@@ -454,6 +454,7 @@ impl<'p> Interp<'p> {
         let (a0, a1) = (arg(args, 0), arg(args, 1));
         match f {
             IntlFn::NfCtor | IntlFn::CollCtor | IntlFn::PrCtor => {
+                let nt = self.cls.native_nt.take();
                 if f == IntlFn::PrCtor && !is_new {
                     return Err(self.type_err("Constructor Intl.PluralRules requires 'new'"));
                 }
@@ -462,20 +463,23 @@ impl<'p> Interp<'p> {
                 }
                 match f {
                     IntlFn::NfCtor => {
+                        let proto = self.nt_proto(nt, self.intl.nf_proto)?;
                         let nf = self.intl_nf_create(a0, a1, "Intl.NumberFormat")?;
-                        let o = h!(self, self.heap.new_object(Some(self.intl.nf_proto)));
+                        let o = h!(self, self.heap.new_object(Some(proto)));
                         self.intl.nfs.insert(o, IntlNf { f: nf, bound: None });
                         Ok(Value::Object(o))
                     }
                     IntlFn::CollCtor => {
+                        let proto = self.nt_proto(nt, self.intl.coll_proto)?;
                         let c = self.intl_coll_create(a0, a1, "Intl.Collator")?;
-                        let o = h!(self, self.heap.new_object(Some(self.intl.coll_proto)));
+                        let o = h!(self, self.heap.new_object(Some(proto)));
                         self.intl.colls.insert(o, c);
                         Ok(Value::Object(o))
                     }
                     _ => {
+                        let proto = self.nt_proto(nt, self.intl.pr_proto)?;
                         let p = self.intl_pr_create(a0, a1)?;
-                        let o = h!(self, self.heap.new_object(Some(self.intl.pr_proto)));
+                        let o = h!(self, self.heap.new_object(Some(proto)));
                         self.intl.prs.insert(o, p);
                         Ok(Value::Object(o))
                     }

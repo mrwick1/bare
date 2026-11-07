@@ -678,23 +678,23 @@ fn options(d: &Dom, it: &mut Interp<'_>, v: Value, who: &str, file: bool) -> R<(
 }
 
 fn blob_ctor(d: &Dom, it: &mut Interp<'_>, _: Value, a: &[Value]) -> V {
+    let intrinsic = d.web.s.borrow().made.expect("made").blob_p;
+    let proto = it.host_proto_from_new_target(intrinsic)?;
     let bytes = match arg(a, 0) {
         Value::Undefined => Vec::new(),
         v => parts(d, it, v, "Blob")?,
     };
     let (ty, _) = options(d, it, arg(a, 1), "Blob", false)?;
-    let intrinsic = d.web.s.borrow().made.expect("made").blob_p;
-    let proto = it.host_proto_from_new_target(intrinsic)?;
     new_blob(d, it, proto, BlobData { bytes, ty, file: None })
 }
 
 fn file_ctor(d: &Dom, it: &mut Interp<'_>, _: Value, a: &[Value]) -> V {
+    let intrinsic = d.web.s.borrow().made.expect("made").file_p;
+    let proto = it.host_proto_from_new_target(intrinsic)?;
     need(it, a, 2, "construct 'File")?;
     let bytes = parts(d, it, a[0], "File")?;
     let name = usv(d, it, a[1])?;
     let (ty, modified) = options(d, it, arg(a, 2), "File", true)?;
-    let intrinsic = d.web.s.borrow().made.expect("made").file_p;
-    let proto = it.host_proto_from_new_target(intrinsic)?;
     let modified = modified.unwrap_or_else(|| it.wall_now_ms());
     new_blob(d, it, proto, BlobData { bytes, ty, file: Some((name, modified)) })
 }
@@ -756,6 +756,8 @@ fn cost(n: &str, e: &Ent) -> usize {
 }
 
 fn form_ctor(d: &Dom, it: &mut Interp<'_>, _: Value, a: &[Value]) -> V {
+    let intrinsic = d.web.s.borrow().made.expect("made").form_p;
+    let proto = it.host_proto_from_new_target(intrinsic)?;
     let form = match arg(a, 0) {
         Value::Undefined => None,
         v => match d.node_of(v).filter(|&n| d.doc.borrow().is_html(n, "form")) {
@@ -763,8 +765,6 @@ fn form_ctor(d: &Dom, it: &mut Interp<'_>, _: Value, a: &[Value]) -> V {
             None => return Err(it.type_error("Failed to construct 'FormData': parameter 1 is not of type 'HTMLFormElement'.")),
         },
     };
-    let intrinsic = d.web.s.borrow().made.expect("made").form_p;
-    let proto = it.host_proto_from_new_target(intrinsic)?;
     room(d, 0)?;
     // The entries first: the form walk can fail, and then no FormData exists.
     let list = match form {

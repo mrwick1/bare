@@ -702,11 +702,13 @@ impl<'p> Interp<'p> {
                 Ok(Value::Object(self.intl_make()?))
             }
             IntlFn::DtfCtor => {
+                let nt = self.cls.native_nt.take();
                 if self.intl_formatters() >= self.sc.limits.max_formatters {
                     return Err(Error::Limit(LimitKind::Sc(ScLimit::Formatters)));
                 }
+                let proto = self.nt_proto(nt, self.intl.proto)?;
                 let d = self.intl_create(a0, a1, 0, 1)?;
-                let o = h!(self, self.heap.new_object(Some(self.intl.proto)));
+                let o = h!(self, self.heap.new_object(Some(proto)));
                 self.intl.dtfs.insert(o, d);
                 Ok(Value::Object(o))
             }

@@ -302,14 +302,9 @@ impl<'p> Interp<'p> {
     }
 
     /// Keep in sync with the cases of `construct_inner`.
-    /// A native constructor that builds a branded object (the byte classes, Map, Set, Date, Intl).
-    fn native_no_nt(n: Nat) -> bool {
+    /// A native constructor that builds a branded object (the byte classes, Map, Set, Date, Intl). Each reads `native_nt` first.
+    fn native_branded(n: Nat) -> bool {
         matches!(n, Nat::Bin(b) if b.ctor_name().is_some() || b == BinFn::TaCtor) || matches!(n, Nat::Sc(f) if f.is_ctor()) || n == Nat::Date(DateFn::Ctor) || matches!(n, Nat::Intl(f) if f.is_ctor())
-    }
-
-    /// A branded native constructor that reads `native_nt` (all of them except Intl).
-    fn native_takes_nt(n: Nat) -> bool {
-        Self::native_no_nt(n) && !matches!(n, Nat::Intl(_))
     }
 
     /// GetPrototypeFromConstructor for a native constructor. `nt` is `native_nt.take()`, read first in the constructor.
@@ -342,7 +337,7 @@ impl<'p> Interp<'p> {
             match self.funcs.get(&o) {
                 Some(Callee::Class) => return true,
                 Some(&Callee::Script { script, fid, .. }) => return self.func_of(script, fid).is_plain_ctor(),
-                Some(&Callee::Native(n)) => return matches!(n, Nat::ObjectCtor | Nat::FnCtor | Nat::ArrayCtor | Nat::ErrorCtor(_) | Nat::StringFn | Nat::NumberFn | Nat::BooleanFn | Nat::Ext(Bi::RegExpCtor) | Nat::Sc(ScFn::IterCtor)) || Self::native_no_nt(n),
+                Some(&Callee::Native(n)) => return matches!(n, Nat::ObjectCtor | Nat::FnCtor(_) | Nat::ArrayCtor | Nat::ErrorCtor(_) | Nat::StringFn | Nat::NumberFn | Nat::BooleanFn | Nat::Ext(Bi::RegExpCtor) | Nat::Sc(ScFn::IterCtor | ScFn::SymbolCtor)) || Self::native_branded(n),
                 Some(&Callee::Host { ctor, .. }) => return ctor,
                 Some(&Callee::Promise(pf)) => return matches!(pf, PFn::Ctor | PFn::AggErrCtor),
                 Some(&Callee::Bound { target, .. }) => o = target,
@@ -386,7 +381,7 @@ impl<'p> Interp<'p> {
             Class,
             Host(u32),
             Script(u32, FuncId, u32, bool),
-            /// A constructor that cannot take a different `new.target` yet (an Intl or a host constructor).
+            /// A host constructor that does not read `new.target` yet (it did not opt in with `add_ctor_nt`).
             NoNt(&'static str),
             Native(Nat),
             Promise(PFn),
@@ -397,12 +392,12 @@ impl<'p> Interp<'p> {
             Some(Callee::Class) => D::Class,
             Some(&Callee::Host { id, ctor: true, nt: true }) => D::Host(id),
             Some(&Callee::Script { script, fid, env, self_binding }) if self.func_of(script, fid).is_plain_ctor() => D::Script(script, fid, env, self_binding),
-            Some(&Callee::Native(n)) if matches!(n, Nat::ObjectCtor | Nat::FnCtor | Nat::ArrayCtor | Nat::ErrorCtor(_) | Nat::StringFn | Nat::NumberFn | Nat::BooleanFn | Nat::Ext(Bi::RegExpCtor) | Nat::Sc(ScFn::IterCtor) | Nat::Px(PxFn::Ctor)) || Self::native_takes_nt(n) => D::Native(n),
-            Some(&Callee::Native(n)) if Self::native_no_nt(n) => D::NoNt("subclassing an Intl constructor (new.target is not passed to the constructor)"),
+            Some(&Callee::Native(n)) if matches!(n, Nat::ObjectCtor | Nat::FnCtor(_) | Nat::ArrayCtor | Nat::ErrorCtor(_) | Nat::StringFn | Nat::NumberFn | Nat::BooleanFn | Nat::Ext(Bi::RegExpCtor) | Nat::Sc(ScFn::IterCtor) | Nat::Px(PxFn::Ctor)) || Self::native_branded(n) => D::Native(n),
             Some(&Callee::Promise(pf @ (PFn::Ctor | PFn::AggErrCtor))) => D::Promise(pf),
             Some(&Callee::Host { ctor: true, nt: false, .. }) => D::NoNt("subclassing a host constructor (new.target is not passed to the constructor)"),
             Some(Callee::Bound { target, args, .. }) => D::Bound(*target, args.clone()),
             Some(&Callee::Proxy { ctor: true }) => D::Proxy,
+            Some(&Callee::Native(Nat::Sc(ScFn::SymbolCtor))) => return Err(self.type_err("Symbol is not a constructor")),
             _ => {
                 let d = self.src_text(callee);
                 return Err(self.type_err(&format!("{d} is not a constructor")));

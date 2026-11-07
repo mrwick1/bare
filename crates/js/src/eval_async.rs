@@ -221,6 +221,10 @@ struct AsyncState {
     /// Generator objects (`eval_generator.rs`).
     gens: FxMap<ObjId, Gen>,
     gen_intr: Option<GenIntr>,
+    /// The `Function` constructor, the prototype of `GeneratorFunction` and `AsyncFunction`.
+    fn_ctor: Option<ObjId>,
+    /// `%AsyncFunction.prototype%`, made by the first async function.
+    afn_proto: Option<ObjId>,
 }
 
 fn nx(n: Next) -> Res<Step> {
