@@ -719,7 +719,7 @@ impl Reader {
     }
 
     fn headers(&mut self, sh: &Shared, flags: u8, id: u32, p: &[u8], out: &mut Vec<u8>) -> Result<(), Stop> {
-        if id == 0 || id % 2 == 0 {
+        if id == 0 || id.is_multiple_of(2) {
             return conn_error(PROTOCOL_ERROR, "HEADERS on a stream that the server may not open");
         }
         let mut payload = Self::unpad(flags, p)?;
@@ -863,7 +863,7 @@ impl Reader {
         if flags & ACK != 0 {
             return if p.is_empty() { Ok(()) } else { conn_error(FRAME_SIZE_ERROR, "SETTINGS ACK with a payload") };
         }
-        if p.len() % 6 != 0 {
+        if !p.len().is_multiple_of(6) {
             return conn_error(FRAME_SIZE_ERROR, "SETTINGS is not a multiple of 6 bytes");
         }
         let mut st = lock(&sh.st);

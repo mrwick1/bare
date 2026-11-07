@@ -227,7 +227,7 @@ fn get_string(block: &[u8], at: &mut usize, out: &mut Vec<u8>) -> Result<(), Err
     let raw = block.get(*at..*at + len).ok_or(Error("a string is longer than the block"))?;
     *at += len;
     out.clear();
-    if huffman { huffman_decode(raw, out) } else { Ok(out.extend_from_slice(raw)) }
+    if huffman { huffman_decode(raw, out) } else { out.extend_from_slice(raw); Ok(()) }
 }
 
 impl Decoder {
