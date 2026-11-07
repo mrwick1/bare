@@ -1030,7 +1030,7 @@ pub struct UiOutcome {
 
 /// The style and the layout of the page at one time: what a frame paints and what hit testing reads.
 pub struct Frame {
-    pub styles: bare_css::cascade::Styles,
+    pub styles: std::rc::Rc<bare_css::cascade::Styles>,
     pub layout: bare_layout::fragment::Layout,
     /// The scroll containers and the size of the page content.
     pub areas: bare_layout::scroll::Areas,

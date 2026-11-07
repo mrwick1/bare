@@ -452,7 +452,8 @@ fn rule_set_is_reused_until_an_input_changes() {
     b.set_external_stylesheet("a.css", vec![part("#a { color: red }")]).unwrap();
     b.set_external_stylesheet("b.css", vec![]).unwrap();
     js(&mut b, "var cs = getComputedStyle(document.getElementById('a')); cs.color; cs.display; cs.direction; 0");
-    assert_eq!((b.computed_stats().builds, b.computed_stats().computes), (1, 3));
+    // The document does not change between the reads: one cascade.
+    assert_eq!((b.computed_stats().builds, b.computed_stats().computes), (1, 1));
     // Class and attribute changes do not rebuild the rules.
     js(&mut b, "document.getElementById('a').className = 'q'; cs.color; 0");
     assert_eq!(b.computed_stats().builds, 1);
@@ -636,4 +637,21 @@ fn computed_names_are_sorted_and_include_live_custom_properties() {
     let mut b = at("<body><p id=p style='--z: red; --a: blue'>x</p>");
     let count = bare_css::values::Property::COUNT;
     assert_eq!(js(&mut b, &format!("var cs=getComputedStyle(document.getElementById('p')); var names=[]; for(var i=0;i<{count};i++) names.push(cs.item(i)); [names.join()===names.slice().sort().join(),cs.length==={count}+2,cs.item({count}).slice(0,2)==='--'].join()")), "true,true,true");
+}
+
+#[test]
+fn styles_are_reused_until_the_document_changes() {
+    let mut b = at("<!doctype html><html><head><style>.w { width: 50px } p:empty { display: none } x-a:defined { color: green }</style></head>\
+        <body><div id=a style='width: 10px'>t</div><p id=p></p><x-a id=x></x-a></body></html>");
+    let n = |b: &mut Browser, s: &str| (js(b, s), b.computed_stats().computes);
+    js(&mut b, "var a = document.getElementById('a'), p = document.getElementById('p'), x = document.getElementById('x'); 0");
+    assert_eq!(n(&mut b, "a.getBoundingClientRect().width + a.getBoundingClientRect().width + getComputedStyle(a).width"), ("2010px".into(), 1));
+    // An attribute, a tree change and a text edit each give a new cascade.
+    assert_eq!(n(&mut b, "a.className = 'w'; a.removeAttribute('style'); a.getBoundingClientRect().width"), ("50".into(), 2));
+    assert_eq!(n(&mut b, "p.appendChild(document.createTextNode('')); getComputedStyle(p).display"), ("none".into(), 3));
+    assert_eq!(n(&mut b, "p.firstChild.data = 'q'; getComputedStyle(p).display"), ("block".into(), 4));
+    assert_eq!(n(&mut b, "getComputedStyle(p).display"), ("block".into(), 4));
+    // A custom element that is defined matches `:defined`, and no tree counter moves.
+    assert_eq!(n(&mut b, "getComputedStyle(x).color"), ("rgb(0, 0, 0)".into(), 4));
+    assert_eq!(n(&mut b, "customElements.define('x-a', class extends HTMLElement {}); getComputedStyle(x).color"), ("rgb(0, 128, 0)".into(), 5));
 }

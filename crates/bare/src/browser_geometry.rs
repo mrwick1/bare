@@ -3,8 +3,9 @@
 //! How it works
 //! - Every read runs the whole path again: the cascade of `browser_computed.rs` (`Dom::cascade_now`: the same sheets, gates and caps, so a
 //!   linked sheet that is not supplied is `Unsupported`), then `bare_layout::layout` with the current viewport, then the answer from the
-//!   fragments. Nothing is cached and nothing is stored on the element or in JS data, so a held element sees the current classes, `id`,
-//!   `style` attributes, `<style>` text, supplied sheets, viewport, tree and text. (`Document::revision` ignores text changes, so it cannot key a cache.)
+//!   fragments. The layout is not cached. The cascade is used again only while the document counters and the sheets are the same
+//!   (`Dom::cascade_for`). Nothing is stored on the element or in JS data, so a held element sees the current classes, `id`,
+//!   `style` attributes, `<style>` text, supplied sheets, viewport, tree and text.
 //! - CSSOM View (`offsetWidth`, `offsetHeight`): "if the element does not have any associated box return zero", else the width (height) of the
 //!   axis-aligned bounding box of the border boxes of all fragments of the principal box, ignoring transforms. Here: the union of all `Kind::Box`
 //!   fragments of the element. An element with no fragment is zero: a detached or not connected element, `display:none` (and everything below it,
