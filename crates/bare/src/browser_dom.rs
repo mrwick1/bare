@@ -13,6 +13,13 @@ use bare_js::value::{ObjId, Value};
 
 type V = R<Value>;
 
+/// The call that inserts, for the text of a refusal: the method and the interface that Chrome names ("" for the interface: the kind of the parent).
+/// An empty method gives the reason alone.
+#[derive(Clone, Copy)]
+pub(crate) struct Op(pub &'static str, pub &'static str);
+
+pub(crate) const NO_OP: Op = Op("", "");
+
 pub(crate) fn arg(a: &[Value], i: usize) -> Value {
     a.get(i).copied().unwrap_or(Value::Undefined)
 }
@@ -239,8 +246,140 @@ impl Dom {
         Ok(out)
     }
 
+    /// The error of a refused insert. `op` puts the name of the call in front, as Chrome does: "Failed to execute 'append' on 'Document': ...".
+    fn refuse(&self, it: &mut Interp<'_>, op: Op, parent: NodeId, name: &str, reason: &str) -> Error {
+        if op.0.is_empty() {
+            return self.dom_err(it, name, reason);
+        }
+        let iface = match (op.1, self.data(parent)) {
+            ("", NodeData::Document) => "Document",
+            ("", NodeData::ShadowRoot) => "DocumentFragment",
+            ("", _) => "Element",
+            (i, _) => i,
+        };
+        self.dom_err(it, name, &format!("Failed to execute '{}' on '{iface}': {reason}", op.0))
+    }
+
+    /// The Document rules of Chrome (`Document::CanAcceptChild`) for `nodes` going in before `before` (None: last), in place of `old`: one element child, one
+    /// doctype, the doctype before the element. A fragment counts as its children. Chrome judges in two steps, and so does this: each item alone against
+    /// the children as they are, in order (the first refusal wins, so a text after a bad element is not reported); then, when there are several items,
+    /// all of them together, one after the other. With several nodes in the list, the ones that are children now do not count: Chrome has moved them out.
+    /// Deviation: Chrome has moved them out (and has emptied a fragment) even when it refuses. Here a refusal changes nothing.
+    fn check_doc(&self, it: &mut Interp<'_>, parent: NodeId, nodes: &[NodeId], before: Option<NodeId>, old: Option<NodeId>, op: Op) -> R<()> {
+        let bad: Option<String> = {
+            let doc = self.doc.borrow();
+            if let ([n], Some(o)) = (nodes, old)
+                && std::mem::discriminant(doc.data(*n)) == std::mem::discriminant(doc.data(o))
+            {
+                return Ok(());
+            }
+            let mut items = Vec::new();
+            for &n in nodes {
+                if matches!(doc.data(n), NodeData::ShadowRoot) {
+                    if doc.shadow_host(n).is_some() {
+                        return Err(Error::Unsupported(unsupported("inserting a ShadowRoot or DocumentFragment as a node (fragment insertion)")));
+                    }
+                    it.charge(1 + doc.children(n).count() as u64)?;
+                    items.extend(doc.children(n));
+                } else {
+                    items.push(n);
+                }
+            }
+            // The children now: doctypes, elements, and whether one comes after the reference point. `old` is skipped.
+            let mut scan = |old: Option<NodeId>| -> R<(u32, u32, bool, bool)> {
+                let (mut docs, mut els, mut doc_after, mut el_after, mut seen) = (0u32, 0u32, false, false, false);
+                for c in doc.children(parent) {
+                    it.charge(1)?;
+                    if Some(c) == old {
+                        seen = true;
+                        continue;
+                    }
+                    if nodes.len() > 1 && nodes.contains(&c) {
+                        continue;
+                    }
+                    seen |= Some(c) == before;
+                    match doc.data(c) {
+                        NodeData::Doctype(_) => (docs, doc_after) = (docs + 1, seen),
+                        NodeData::Element { .. } => (els, el_after) = (els + 1, seen),
+                        _ => {}
+                    }
+                }
+                Ok((docs, els, doc_after, el_after))
+            };
+            // The first step of `replaceWith` with several nodes does not know the node it replaces.
+            let first = if op.0 == "replaceWith" && nodes.len() > 1 { None } else { old };
+            let (docs1, els1, doc_after1, el_after1) = scan(first)?;
+            let (docs, mut els, doc_after, el_after) = if first == old { (docs1, els1, doc_after1, el_after1) } else { scan(old)? };
+            let mut docs = docs;
+            // One item against the counts so far, which it changes.
+            let step = |n: NodeId, docs: &mut u32, els: &mut u32, doc_after: bool, el_after: bool| -> Option<&'static str> {
+                match doc.data(n) {
+                    NodeData::Document => Some("Nodes of type '#document' may not be inserted inside nodes of type '#document'."),
+                    NodeData::Text(_) => Some("Nodes of type '#text' may not be inserted inside nodes of type '#document'."),
+                    NodeData::Doctype(_) => {
+                        *docs += 1;
+                        if *els > 0 && !el_after {
+                            Some("Can't insert a doctype after the root element.")
+                        } else if *docs > 1 {
+                            Some("Only one doctype on document allowed.")
+                        } else {
+                            None
+                        }
+                    }
+                    NodeData::Element { .. } => {
+                        *els += 1;
+                        if doc_after {
+                            Some("Can't insert an element before a doctype.")
+                        } else if *els > 1 {
+                            Some("Only one element on document allowed.")
+                        } else {
+                            None
+                        }
+                    }
+                    _ => None,
+                }
+            };
+            // `appendChild(fragment)` and its kin judge a fragment as one node: a text in it is refused before any count. The other calls take the items one by one.
+            let whole = op.1 == "Node" && matches!(nodes, [n] if matches!(doc.data(*n), NodeData::ShadowRoot));
+            let mut bad = None;
+            for &n in &items {
+                it.charge(1)?;
+                let (mut d, mut e) = (docs1, els1);
+                if !whole || matches!(doc.data(n), NodeData::Text(_)) {
+                    bad = step(n, &mut d, &mut e, doc_after1, el_after1);
+                }
+                if bad.is_some() {
+                    break;
+                }
+            }
+            if bad.is_none() && (items.len() > 1 || whole) {
+                for &n in &items {
+                    it.charge(1)?;
+                    bad = step(n, &mut docs, &mut els, doc_after, el_after);
+                    if bad.is_some() {
+                        break;
+                    }
+                }
+            }
+            bad.map(String::from)
+        };
+        match bad {
+            Some(r) => Err(self.refuse(it, op, parent, "HierarchyRequestError", &r)),
+            None => Ok(()),
+        }
+    }
+
+    /// The depth cap for `node` (and what it holds) as a child of `parent`.
+    fn check_depth(&self, it: &mut Interp<'_>, parent: NodeId, node: NodeId) -> R<()> {
+        let height = if self.doc.borrow().children(node).next().is_some() || self.doc.borrow().shadow_root(node).is_some() { self.height_of(it, node)? } else { 0 };
+        if self.depth_of(it, parent)? + 1 + height > self.lim.max_tree_depth {
+            return Err(self.lim("dom-depth"));
+        }
+        Ok(())
+    }
+
     /// Check a node insertion (DOM Standard "ensure pre-insertion validity", the parts that apply to this tree). True: `node` is a plain fragment (`is_plain_fragment`).
-    fn check_insert(&self, it: &mut Interp<'_>, parent: NodeId, node: NodeId, before: Option<NodeId>, replacing: Option<NodeId>) -> R<bool> {
+    fn check_insert(&self, it: &mut Interp<'_>, parent: NodeId, node: NodeId, before: Option<NodeId>, replacing: Option<NodeId>, op: Op) -> R<bool> {
         #[derive(PartialEq, Clone, Copy)]
         enum K {
             Doc,
@@ -260,10 +399,18 @@ impl Dom {
         };
         let (pk, nk) = (kind(parent), kind(node));
         if !matches!(pk, K::Doc | K::El | K::Frag) {
-            return Err(self.dom_err(it, "HierarchyRequestError", "This node type does not support this method."));
+            return Err(self.refuse(it, op, parent, "HierarchyRequestError", "This node type does not support this method."));
         }
-        if nk == K::Doc {
-            return Err(self.dom_err(it, "HierarchyRequestError", "A Document cannot be inserted."));
+        if let Some(b) = before
+            && pk == K::Doc
+            && self.doc.borrow().parent(b) != Some(parent)
+        {
+            return Err(self.refuse(it, op, parent, "NotFoundError", "The node before which the new node is to be inserted is not a child of this node."));
+        }
+        if pk == K::Doc {
+            self.check_doc(it, parent, &[node], before, replacing, op)?;
+            self.check_depth(it, parent, node)?;
+            return Ok(nk == K::Frag);
         }
         {
             // `node` must not be `parent` or one of its host-including ancestors (a root leads to its host).
@@ -273,69 +420,56 @@ impl Dom {
                 it.charge(1)?;
                 if c == node {
                     drop(doc);
-                    return Err(self.dom_err(it, "HierarchyRequestError", "The new child element contains the parent."));
+                    return Err(self.refuse(it, op, parent, "HierarchyRequestError", "The new child element contains the parent."));
                 }
                 cur = doc.parent_or_host(c);
             }
         }
+        if nk == K::Doc {
+            let name = if pk == K::Frag { "#document-fragment".to_string() } else { crate::browser_namespace::tag(&self.doc.borrow(), parent) };
+            return Err(self.refuse(it, op, parent, "HierarchyRequestError", &format!("Nodes of type '#document' may not be inserted inside nodes of type '{name}'.")));
+        }
         if let Some(b) = before
             && self.doc.borrow().parent(b) != Some(parent)
         {
-            return Err(self.dom_err(it, "NotFoundError", "The node before which the new node is to be inserted is not a child of this node."));
+            return Err(self.refuse(it, op, parent, "NotFoundError", "The node before which the new node is to be inserted is not a child of this node."));
         }
-        if (nk == K::Text && pk == K::Doc) || (nk == K::Doctype && pk != K::Doc) {
-            return Err(self.dom_err(it, "HierarchyRequestError", "This node type cannot be a child of this node."));
-        }
-        if pk == K::Doc && matches!(nk, K::El | K::Doctype) {
-            let mut bad = false;
-            {
-                let doc = self.doc.borrow();
-                let mut at_or_after = false;
-                for c in doc.children(parent) {
-                    it.charge(1)?;
-                    at_or_after |= Some(c) == before;
-                    if c == node || Some(c) == replacing {
-                        continue;
-                    }
-                    let ck = kind(c);
-                    bad |= match nk {
-                        K::El => ck == K::El || (ck == K::Doctype && at_or_after),
-                        _ => ck == K::Doctype || (ck == K::El && !at_or_after),
-                    };
-                }
-            }
-            if bad {
-                return Err(self.dom_err(it, "HierarchyRequestError", "This document cannot take that child here."));
-            }
+        if nk == K::Doctype {
+            return Err(self.refuse(it, op, parent, "HierarchyRequestError", "This node type cannot be a child of this node."));
         }
         let frag = nk == K::Frag && self.is_plain_fragment(node);
-        if nk == K::Frag && (pk == K::Doc || !frag) {
-            // The standard inserts the children of a fragment. Done by `place` for a fragment with no host into an element or a fragment. Else refuse, before anything changes.
+        if nk == K::Frag && !frag {
+            // The standard inserts the children of a fragment. Done by `place` for a fragment with no host. Else refuse, before anything changes.
             return Err(Error::Unsupported(unsupported("inserting a ShadowRoot or DocumentFragment as a node (fragment insertion)")));
         }
-        let height = if self.doc.borrow().children(node).next().is_some() || self.doc.borrow().shadow_root(node).is_some() { self.height_of(it, node)? } else { 0 };
-        if self.depth_of(it, parent)? + 1 + height > self.lim.max_tree_depth {
-            return Err(self.lim("dom-depth"));
-        }
+        self.check_depth(it, parent, node)?;
         Ok(frag)
     }
 
     /// `append`, `prepend`, `before`, `after`, `replaceWith` and `replaceChild` with more than one node: the standard makes one fragment of the nodes and
     /// inserts it, so the changes are one group (one `MutationObserver` record) and the inserted scripts run after all nodes are in. `old` leaves in the same
     /// group. One plain node is `insert_checked`.
-    fn insert_many(&self, it: &mut Interp<'_>, parent: NodeId, nodes: &[NodeId], before: Option<NodeId>, old: Option<NodeId>) -> R<()> {
+    fn insert_many(&self, it: &mut Interp<'_>, parent: NodeId, nodes: &[NodeId], before: Option<NodeId>, old: Option<NodeId>, op: Op) -> R<()> {
         if let ([n], None) = (nodes, old) {
-            return self.insert_checked(it, parent, *n, before);
+            return self.insert_checked(it, parent, *n, before, op);
         }
-        self.place(it, parent, nodes, before, old, false)
+        self.place(it, parent, nodes, before, old, false, op)
     }
 
     /// Move `nodes` in, before `before`, as one change group; a plain fragment gives its children and stays empty. One node is checked first (`checked`: by
-    /// the caller), so a refusal changes nothing. Several are checked as they go in: each one changes what the next may do.
-    fn place(&self, it: &mut Interp<'_>, parent: NodeId, nodes: &[NodeId], before: Option<NodeId>, old: Option<NodeId>, checked: bool) -> R<()> {
+    /// the caller), so a refusal changes nothing. Several are checked as they go in: each one changes what the next may do. The Document judges all of them
+    /// first (`check_doc`), as Chrome does.
+    #[allow(clippy::too_many_arguments)]
+    fn place(&self, it: &mut Interp<'_>, parent: NodeId, nodes: &[NodeId], before: Option<NodeId>, old: Option<NodeId>, checked: bool, op: Op) -> R<()> {
         let one = nodes.len() == 1;
-        if one && !checked {
-            self.check_insert(it, parent, nodes[0], old.or(before), old)?;
+        let in_doc = matches!(self.data(parent), NodeData::Document);
+        if in_doc && !checked {
+            self.check_doc(it, parent, nodes, before, old, op)?;
+            for &n in nodes {
+                self.check_depth(it, parent, n)?;
+            }
+        } else if one && !checked {
+            self.check_insert(it, parent, nodes[0], old.or(before), old, op)?;
         }
         let mut moved = Vec::new();
         self.mo_group(None, || {
@@ -343,7 +477,7 @@ impl Dom {
                 self.doc.borrow_mut().detach(o);
             }
             for &n in nodes {
-                let frag = if one { self.is_plain_fragment(n) } else { self.check_insert(it, parent, n, before, None)? };
+                let frag = if one || in_doc { self.is_plain_fragment(n) } else { self.check_insert(it, parent, n, before, None, op)? };
                 let kids: Vec<NodeId>;
                 let items = if frag {
                     kids = self.doc.borrow().children(n).collect();
@@ -373,9 +507,9 @@ impl Dom {
         matches!(doc.data(n), NodeData::ShadowRoot) && doc.shadow_host(n).is_none()
     }
 
-    pub(crate) fn insert_checked(&self, it: &mut Interp<'_>, parent: NodeId, node: NodeId, before: Option<NodeId>) -> R<()> {
-        if self.check_insert(it, parent, node, before, None)? {
-            return self.place(it, parent, &[node], before, None, true);
+    pub(crate) fn insert_checked(&self, it: &mut Interp<'_>, parent: NodeId, node: NodeId, before: Option<NodeId>, op: Op) -> R<()> {
+        if self.check_insert(it, parent, node, before, None, op)? {
+            return self.place(it, parent, &[node], before, None, true, op);
         }
         let mut doc = self.doc.borrow_mut();
         let before = if before == Some(node) { doc.next_sibling(node) } else { before };
@@ -789,7 +923,7 @@ pub(crate) fn set_text_content(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[V
 pub(crate) fn append_child(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
     let parent = d.nd(it, this)?;
     let node = d.arg_node(it, a, 0)?;
-    d.insert_checked(it, parent, node, None)?;
+    d.insert_checked(it, parent, node, None, Op("appendChild", "Node"))?;
     Ok(arg(a, 0))
 }
 
@@ -797,7 +931,7 @@ pub(crate) fn insert_before(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Valu
     let parent = d.nd(it, this)?;
     let node = d.arg_node(it, a, 0)?;
     let before = d.opt_node(it, a, 1)?;
-    d.insert_checked(it, parent, node, before)?;
+    d.insert_checked(it, parent, node, before, Op("insertBefore", "Node"))?;
     Ok(arg(a, 0))
 }
 
@@ -816,20 +950,20 @@ pub(crate) fn replace_child(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Valu
     let new = d.arg_node(it, a, 0)?;
     let old = d.arg_node(it, a, 1)?;
     if d.doc.borrow().parent(old) != Some(parent) {
-        return Err(d.dom_err(it, "NotFoundError", "The node to be replaced is not a child of this node."));
+        return Err(d.refuse(it, Op("replaceChild", "Node"), parent, "NotFoundError", "The node to be replaced is not a child of this node."));
     }
     if new == old {
         return Ok(arg(a, 1));
     }
     let before = d.doc.borrow().next_sibling(old);
-    d.insert_many(it, parent, &[new], before, Some(old))?;
+    d.insert_many(it, parent, &[new], before, Some(old), Op("replaceChild", "Node"))?;
     Ok(arg(a, 1))
 }
 
 pub(crate) fn append(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
     let parent = d.nd(it, this)?;
     let nodes = d.nodes_from(it, a)?;
-    d.insert_many(it, parent, &nodes, None, None)?;
+    d.insert_many(it, parent, &nodes, None, None, Op("append", ""))?;
     Ok(Value::Undefined)
 }
 
@@ -845,7 +979,7 @@ pub(crate) fn prepend(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) ->
         }
         c
     };
-    d.insert_many(it, parent, &nodes, first, None)?;
+    d.insert_many(it, parent, &nodes, first, None, Op("prepend", ""))?;
     Ok(Value::Undefined)
 }
 
@@ -885,7 +1019,12 @@ fn child_node(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value], how: u8) -
             skip(it, doc.next_sibling(me))?
         }
     };
-    d.insert_many(it, parent, &nodes, before, old)?;
+    let iface = match d.data(me) {
+        NodeData::Element { .. } => "Element",
+        NodeData::Doctype(_) => "DocumentType",
+        _ => "CharacterData",
+    };
+    d.insert_many(it, parent, &nodes, before, old, Op(["before", "after", "replaceWith"][how as usize], iface))?;
     Ok(Value::Undefined)
 }
 
@@ -894,8 +1033,16 @@ fn child_node(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value], how: u8) -
 fn replace_children(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
     let parent = d.nd(it, this)?;
     let nodes = d.nodes_from(it, a)?;
-    for &n in &nodes {
-        d.check_insert(it, parent, n, None, None)?;
+    let op = Op("replaceChildren", "");
+    if matches!(d.data(parent), NodeData::Document) {
+        d.check_doc(it, parent, &nodes, None, None, op)?;
+        for &n in &nodes {
+            d.check_depth(it, parent, n)?;
+        }
+    } else {
+        for &n in &nodes {
+            d.check_insert(it, parent, n, None, None, op)?;
+        }
     }
     let mut moved = Vec::new();
     let r = d.mo_group(Some(parent), || {
@@ -962,7 +1109,7 @@ fn insert_adjacent_element(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value
     };
     let pos = adjacent_pos(d, it, NAME, &ps)?;
     let Some((parent, before)) = adjacent_place(d, me, pos) else { return Ok(Value::Null) };
-    d.insert_checked(it, parent, node, before)?;
+    d.insert_checked(it, parent, node, before, Op(NAME, "Element"))?;
     Ok(a[1])
 }
 
@@ -978,7 +1125,7 @@ fn insert_adjacent_text(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) 
         d.room(&doc, 1, s.len())?;
         doc.create_text(&s)
     };
-    d.insert_checked(it, parent, t, before)?;
+    d.insert_checked(it, parent, t, before, Op(NAME, "Element"))?;
     Ok(Value::Undefined)
 }
 
@@ -1019,10 +1166,11 @@ pub(crate) fn install_late(d: &Dom, it: &mut Interp<'_>) -> R<()> {
         let k = d.key(it, name)?;
         it.define_data(d.p().chardata, k, Value::Object(f), true, false, true)?;
     }
-    // `replaceChildren` is one function object on Element and DocumentFragment (a deviation, for the cost of a realm: Chrome has two).
+    // `replaceChildren` is one function object on Element, DocumentFragment and Document (a deviation, for the cost of a realm: Chrome has two).
     let f = d.def_method(it, d.p().element, "replaceChildren", 0, replace_children)?;
     let k = d.key(it, "replaceChildren")?;
     it.define_data(d.p().fragment, k, Value::Object(f), true, false, true)?;
+    it.define_data(d.p().document, k, Value::Object(f), true, false, true)?;
     d.def_method(it, d.p().element, "insertAdjacentElement", 2, insert_adjacent_element)?;
     d.def_method(it, d.p().element, "insertAdjacentText", 2, insert_adjacent_text)?;
     d.def_method(it, d.p().element, "insertAdjacentHTML", 2, crate::browser_fragment::insert_adjacent_html)?;

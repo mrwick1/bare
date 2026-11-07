@@ -391,6 +391,12 @@ impl Document {
         self.new_node(NodeData::ShadowRoot)
     }
 
+    /// True when some `template` of this document has contents.
+    #[inline(never)]
+    pub fn has_template_content(&self) -> bool {
+        !self.template_content.is_empty()
+    }
+
     /// The contents of the HTML `template` `tpl`, if it has any yet. A page with no template contents pays one `is_empty` check.
     #[inline]
     pub fn template_content(&self, tpl: NodeId) -> Option<NodeId> {
@@ -428,7 +434,7 @@ impl Document {
     /// The parent of this node in the flat tree, the tree that is rendered (Blink `FlatTreeTraversal::Parent`). A child of a shadow root has
     /// the host as its parent. A light child of a host has no parent: slot assignment is not built, so no slot takes it, and it is not
     /// rendered. A page with no shadow root pays one `is_empty` check.
-    #[inline(always)]
+    #[inline(never)]
     pub fn flat_parent(&self, id: NodeId) -> Option<NodeId> {
         let parent = self.parent(id)?;
         if self.shadow_of.is_empty() {

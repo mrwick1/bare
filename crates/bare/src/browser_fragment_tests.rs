@@ -179,7 +179,7 @@ fn unsupported_contexts_fail_before_any_change() {
 
 #[test]
 fn markup_the_tree_builder_cannot_read_correctly_is_refused_before_any_change() {
-    for html in ["<p>a</p><template><b></b></template>", "<noscript><p>x</p></noscript>", "<frameset><frame></frameset>", "<div><template>"] {
+    for html in ["<p>a</p><noscript><b></b></noscript>", "<noscript><p>x</p></noscript>", "<frameset><frame></frameset>", "<div><noscript>"] {
         let mut b = browser();
         let r = js(&mut b, &format!("var e = document.getElementById('a'); e.innerHTML = '{html}'"));
         assert!(r.starts_with("other:Unsupported"), "{html}: {r}");
@@ -191,12 +191,29 @@ fn markup_the_tree_builder_cannot_read_correctly_is_refused_before_any_change() 
 }
 
 #[test]
-fn getter_refuses_template_and_noscript_in_the_tree() {
+fn getter_refuses_noscript_in_the_tree_and_writes_the_contents_of_a_template() {
     let mut b = browser();
-    for name in ["template", "noscript"] {
-        let r = js(&mut b, &format!("var q = document.createElement('div'); q.appendChild(document.createElement('{name}')); q.innerHTML"));
-        assert!(r.starts_with("other:Unsupported"), "{name}: {r}");
-    }
+    let r = js(&mut b, "var q = document.createElement('div'); q.appendChild(document.createElement('noscript')); q.innerHTML");
+    assert!(r.starts_with("other:Unsupported"), "{r}");
+    // A template is written with its contents. Its own children (added with appendChild) are not written.
+    assert_eq!(js(&mut b, "var t = document.createElement('template'); t.appendChild(document.createElement('p')); t.content.appendChild(document.createElement('b')); var q = document.createElement('div'); q.appendChild(t); q.innerHTML"), "<template><b></b></template>");
+}
+
+#[test]
+fn template_markup_fills_the_contents_and_counts_against_the_caps() {
+    let mut b = browser();
+    assert_eq!(js(&mut b, "var d = document.createElement('div'); d.innerHTML = '<template><p>a</p><template><i></i></template></template>'; var t = d.firstChild; [t.childNodes.length, t.content.firstChild.tagName, t.content.lastChild.content.firstChild.tagName, d.innerHTML].join()"), "0,P,I,<template><p>a</p><template><i></i></template></template>");
+    // Every node of the contents counts: 1 template, 1 content fragment, 40 elements.
+    let mut b = browser_with(PAGE, BrowserLimits { max_nodes: 30, ..Default::default() }, 5_000_000);
+    assert_eq!(js(&mut b, &format!("{REP}var d = document.createElement('div'); d.innerHTML = 'k'; var k = d.firstChild; d.innerHTML = '<template>' + rep('<i></i>', 40) + '</template>'")), lim("dom-nodes"));
+    assert_eq!(js(&mut b, "[d.firstChild === k, d.childNodes.length].join()"), "true,1");
+    // The contents hang one level below the template: a template at depth 3 (under `#a`) with a div inside is depth 5 of 5.
+    let mut b = browser_with(PAGE, BrowserLimits { max_tree_depth: 5, ..Default::default() }, 5_000_000);
+    assert_eq!(js(&mut b, "var a = document.getElementById('a'); a.innerHTML = '<template><div></div></template>'; a.firstChild.content.firstChild.tagName"), "DIV");
+    assert_eq!(js(&mut b, "a.innerHTML = '<template><div><div></div></div></template>'"), lim("dom-depth"));
+    // The scripts of the contents never run, and the nodes are those of the one arena.
+    let mut b = browser();
+    assert_eq!(js(&mut b, "var a = document.getElementById('a'); window.ran = 0; a.innerHTML = '<template><script>window.ran = 1<\\/script></template>'; a.firstChild.content.firstChild.tagName + window.ran"), "SCRIPT0");
 }
 
 // ---------------------------------------------------------------------------------------------- replacement
@@ -482,7 +499,7 @@ fn outer_html_setter_gates_what_the_parser_does_not_build() {
     // The tree is unchanged after a gate.
     js(&mut b, "var p = document.createElement('table'), e = document.createElement('p'); p.appendChild(e); e.outerHTML = 'x'");
     assert_eq!(js(&mut b, "[p.firstChild === e, e.parentNode === p].join()"), "true,true");
-    assert!(js(&mut b, "var d = document.createElement('div'); d.innerHTML = '<a></a>'; d.firstChild.outerHTML = '<template></template>'").starts_with("other:Unsupported"));
+    assert!(js(&mut b, "var d = document.createElement('div'); d.innerHTML = '<a></a>'; d.firstChild.outerHTML = '<noscript></noscript>'").starts_with("other:Unsupported"));
     assert!(js(&mut b, "document.createElement('noscript').outerHTML").starts_with("other:Unsupported"));
 }
 

@@ -11,7 +11,7 @@
 //! Gates (`Unsupported`, nothing is parsed): the contexts `table`, `thead`, `tbody`, `tfoot`, `tr`, `td`, `th`, `caption`, `colgroup`, `col`, `select`,
 //! `template`, `html`, `frameset`, `frame`, and `noscript` (the standard needs table insertion modes, the select mode, template contents, the before-head
 //! and frameset modes, and the scripting flag, which this builder does not have); and every context that is not in the HTML namespace (SVG and MathML
-//! context elements need the adjusted current node of the foreign rules to be the context element). A start tag `template`, `noscript`, `frameset` or
+//! context elements need the adjusted current node of the foreign rules to be the context element). A start tag `noscript`, `frameset` or
 //! `frame` in the input is gated the same way, because the builder would make a tree that a browser does not make. Nested `table` and `select`
 //! are read by the page rules (see the known gaps of the tree builder): the same tree as for a page.
 //!
@@ -69,7 +69,6 @@ pub fn context_gate(name: &str) -> Option<&'static str> {
 /// The reason why this start tag in a fragment is not supported, if it is not.
 fn tag_gate(name: &str) -> Option<&'static str> {
     Some(match name {
-        "template" => "template element in a fragment (no template contents)",
         "noscript" => "noscript element in a fragment (depends on the scripting flag)",
         "frameset" | "frame" => "frameset in a fragment",
         _ => return None,
@@ -140,6 +139,7 @@ pub fn parse_fragment(
         }
     }
     b.finish();
+    b.fill_templates();
     Ok(Fragment { doc: b.doc, root })
 }
 
@@ -196,10 +196,23 @@ mod tests {
         }
         assert!(matches!(parse_fragment("x", "g", Ns::Svg, false, &BIG, &mut |_| true), Err(FragmentError::Unsupported(_))));
         assert!(matches!(parse_fragment("x", "mi", Ns::MathMl, false, &BIG, &mut |_| true), Err(FragmentError::Unsupported(_))));
-        for html in ["<template>", "a<noscript>", "<frameset>", "<frame>", "<div><TEMPLATE>"] {
+        for html in ["a<noscript>", "<frameset>", "<frame>"] {
             assert!(matches!(parse(html, "div"), Err(FragmentError::Unsupported(_))), "{html}");
         }
         assert!(parse("&lt;template&gt;<!--<noscript>--><style><template></style>", "div").is_ok());
+    }
+
+    #[test]
+    fn the_children_of_a_template_go_into_its_contents() {
+        let f = parse("<template><b>x</b><template><i></i></template></template><template></template>", "div").unwrap();
+        let top: Vec<_> = f.doc.children(f.root).collect();
+        assert_eq!(top.len(), 2);
+        assert!(f.doc.children(top[0]).next().is_none());
+        let c = f.doc.template_content(top[0]).expect("contents");
+        let kids: Vec<_> = f.doc.children(c).collect();
+        assert_eq!((kids.len(), f.doc.element_name(kids[0])), (2, "b"));
+        assert!(f.doc.template_content(kids[1]).is_some());
+        assert!(f.doc.template_content(top[1]).is_none());
     }
 
     #[test]

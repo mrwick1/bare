@@ -741,7 +741,7 @@ fn add_to(d: &Dom, it: &mut Interp<'_>, s: NodeId, a: &[Value], on: &str) -> V {
     if before == Some(el) {
         return Ok(Value::Undefined);
     }
-    d.insert_checked(it, s, el, before)?;
+    d.insert_checked(it, s, el, before, crate::browser_dom::NO_OP)?;
     Ok(Value::Undefined)
 }
 

@@ -1,0 +1,178 @@
+var $ = function (i) { return document.getElementById(i) };
+var log = [];
+function nm(n) { return n === null ? 'null' : n === undefined ? 'undefined' : n.nodeType === 1 ? n.tagName.toLowerCase() + (n.id ? '#' + n.id : '') : n.nodeType === 3 ? '"' + n.data + '"' : n.nodeType === 8 ? '<!--' + n.data + '-->' : n.nodeName }
+function list(l) { return '[' + Array.prototype.map.call(l, nm).join(',') + ']' }
+function rec(r) { return r.type + ' ' + nm(r.target) + ' +' + list(r.addedNodes) + ' -' + list(r.removedNodes) + ' p=' + nm(r.previousSibling) + ' n=' + nm(r.nextSibling) }
+var mo = new MutationObserver(function (rs) { rs.forEach(function (r) { log.push(rec(r)) }) });
+var out = function () { return log.join(' | ') };
+function el(t, id) { var e = document.createElement(t); if (id) e.id = id; return e }
+function errm(f) { try { return f() } catch (e) { return e.name + ':' + e.message } }
+=== tpl-inner-html-set
+@html <div id=d></div>
+var d = $('d'); d.innerHTML = '<template id=t><b>x</b>y</template>';
+(function () { var t = d.firstChild; return [d.childNodes.length, t.tagName, t.childNodes.length, t.content.childNodes.length, t.content.firstChild.tagName, t.content.lastChild.data, t.content.firstChild.parentNode === t.content, d.innerHTML].join() })
+=== tpl-inner-html-set-empty
+@html <div id=d></div>
+var d = $('d'); d.innerHTML = '<template></template>';
+(function () { var t = d.firstChild; return [t.childNodes.length, t.content.childNodes.length, d.innerHTML].join() })
+=== tpl-inner-html-set-nested
+@html <div id=d></div>
+var d = $('d'); d.innerHTML = '<template><p>a<template><i>n</i></template></p></template>';
+(function () { var t = d.firstChild, p = t.content.firstChild, u = p.lastChild; return [t.content.childNodes.length, p.tagName, u.tagName, u.childNodes.length, u.content.firstChild.tagName, d.innerHTML].join() })
+=== tpl-inner-html-set-attrs
+@html <div id=d></div>
+var d = $('d'); d.innerHTML = '<template id=a class="x y" data-k="1&amp;2"><u>t</u></template>';
+(function () { var t = d.firstChild; return [t.id, t.className, t.dataset.k, d.innerHTML, t.outerHTML].join() })
+=== tpl-inner-html-set-with-siblings
+@html <div id=d></div>
+var d = $('d'); d.innerHTML = 'a<template>1</template><b></b><template><i></i></template>c';
+(function () { return [d.childNodes.length, d.innerHTML, d.querySelectorAll('i').length, d.getElementsByTagName('template').length].join() })
+=== tpl-inner-html-set-in-svg-is-not-a-template
+@html <div id=d></div>
+var d = $('d'); d.innerHTML = '<svg><template><b></b></template></svg>';
+(function () { var t = d.firstChild.firstChild; return [t.tagName, t.childNodes.length, t instanceof HTMLTemplateElement, d.innerHTML].join() })
+=== tpl-inner-html-set-script-inside
+@html <div id=d></div>
+var d = $('d'); d.innerHTML = '<template><script>window.ran = 1<\/script></template>';
+(function () { var t = d.firstChild; return [t.content.firstChild.tagName, window.ran, d.innerHTML, t.content.firstChild.textContent].join() })
+=== tpl-inner-html-set-style-inside
+@html <div id=d></div>
+var d = $('d'); d.innerHTML = '<template><style>a>b{}</style><p>1 &lt; 2</p></template>';
+(function () { return [d.innerHTML].join() })
+=== tpl-inner-html-set-form-inside
+@html <form id=f><div id=d></div></form>
+var d = $('d'); d.innerHTML = '<template><form id=g><input name=n></form></template>';
+(function () { var t = d.firstChild; return [t.content.firstChild.tagName, t.content.querySelector('input').name, document.querySelectorAll('form').length].join() })
+=== tpl-inner-html-set-clone-deep
+@html <div id=d></div>
+var d = $('d'); d.innerHTML = '<template><p>a</p></template>'; var c = d.cloneNode(true), s = d.cloneNode(false);
+(function () { return [c.innerHTML, c.firstChild.content.childNodes.length, c.firstChild.content !== d.firstChild.content, s.childNodes.length].join() })
+=== tpl-inner-html-set-removes-old-content
+@html <div id=d><template id=old><b></b></template></div>
+var d = $('d'), old = $('old'); d.innerHTML = '<template><i></i></template>';
+(function () { return [old.parentNode, old.content.childNodes.length, d.innerHTML].join() })
+=== tpl-inner-html-set-record
+@html <div id=d></div>
+mo.observe(d = $('d'), { childList: true, subtree: true }); d.innerHTML = '<template><b></b></template>';
+(function () { return out() })
+=== tpl-inner-html-set-content-is-not-searched
+@html <div id=d></div>
+var d = $('d'); d.innerHTML = '<template><b id=in></b></template><span></span>';
+(function () { return [document.getElementById('in'), d.querySelector('b'), d.children.length, d.textContent, d.firstChild.content.querySelector('b').id].join() })
+=== tpl-inner-html-set-fragment-moves
+@html <div id=d></div><div id=e></div>
+var d = $('d'); d.innerHTML = '<template><b>1</b><i>2</i></template>'; $('e').appendChild(d.firstChild.content);
+(function () { return [$('e').innerHTML, d.innerHTML].join() })
+=== tpl-inner-html-set-tr-in-template-body
+@html <div id=d></div>
+var d = $('d'); d.innerHTML = '<template><p>a<p>b</template>';
+(function () { return [d.firstChild.content.childNodes.length, d.innerHTML].join() })
+=== tpl-inner-html-set-unclosed
+@html <div id=d></div>
+var d = $('d'); d.innerHTML = '<template><b>x';
+(function () { return [d.firstChild.content.firstChild.tagName, d.innerHTML].join() })
+=== tpl-inner-html-set-stray-end-tag
+@html <div id=d></div>
+var d = $('d'); d.innerHTML = '</template><b></b>';
+(function () { return [d.innerHTML].join() })
+=== tpl-inner-html-set-uppercase
+@html <div id=d></div>
+var d = $('d'); d.innerHTML = '<TEMPLATE><B>x</B></TEMPLATE>';
+(function () { return [d.firstChild.tagName, d.innerHTML].join() })
+=== tpl-inner-html-set-comment-and-text-inside
+@html <div id=d></div>
+var d = $('d'); d.innerHTML = '<template><!--c-->t<b></b></template>';
+(function () { return [d.firstChild.content.childNodes.length, d.innerHTML].join() })
+=== tpl-outer-html-set
+@html <div id=d><p id=p></p></div>
+var p = $('p'); p.outerHTML = '<template><b>x</b></template>';
+(function () { var t = $('d').firstChild; return [$('d').childNodes.length, t.tagName, t.content.firstChild.tagName, $('d').innerHTML].join() })
+=== tpl-outer-html-set-with-text-neighbours
+@html <div id=d>a<p id=p></p>b</div>
+$('p').outerHTML = 'x<template>y</template>z';
+(function () { return [$('d').childNodes.length, $('d').innerHTML].join() })
+=== tpl-outer-html-set-on-a-template
+@html <div id=d><template id=t><b></b></template></div>
+var t = $('t'); t.outerHTML = '<template><i></i></template>';
+(function () { return [t.parentNode, t.content.childNodes.length, $('d').innerHTML].join() })
+=== tpl-outer-html-set-in-fragment-parent
+@html <div id=d></div>
+var f = document.createDocumentFragment(), p = el('p'); f.appendChild(p); p.outerHTML = '<template><b></b></template>';
+(function () { return [f.childNodes.length, f.firstChild.tagName, f.firstChild.content.childNodes.length].join() })
+=== tpl-insert-adjacent-html-beforeend
+@html <div id=d></div>
+$('d').insertAdjacentHTML('beforeend', '<template><b>x</b></template>');
+(function () { return [$('d').firstChild.content.firstChild.tagName, $('d').innerHTML].join() })
+=== tpl-insert-adjacent-html-afterbegin
+@html <div id=d><i></i></div>
+$('d').insertAdjacentHTML('afterbegin', '<template><b>x</b></template>t');
+(function () { return [$('d').childNodes.length, $('d').firstChild.content.childNodes.length, $('d').innerHTML].join() })
+=== tpl-insert-adjacent-html-beforebegin
+@html <div id=d><i id=i></i></div>
+$('i').insertAdjacentHTML('beforebegin', '<template><b>x</b></template>');
+(function () { return [$('d').firstChild.tagName, $('d').firstChild.content.firstChild.tagName, $('d').innerHTML].join() })
+=== tpl-insert-adjacent-html-afterend
+@html <div id=d><i id=i></i></div>
+$('i').insertAdjacentHTML('afterend', '<template><b>x</b></template>');
+(function () { return [$('d').lastChild.tagName, $('d').lastChild.content.childNodes.length, $('d').innerHTML].join() })
+=== tpl-insert-adjacent-html-record
+@html <div id=d></div>
+mo.observe($('d'), { childList: true, subtree: true }); $('d').insertAdjacentHTML('beforeend', '<template><b>x</b></template>');
+(function () { return out() })
+=== tpl-insert-adjacent-html-nested
+@html <div id=d></div>
+$('d').insertAdjacentHTML('beforeend', '<template><template><template><u></u></template></template></template>');
+(function () { var t = $('d').firstChild; return [t.content.firstChild.content.firstChild.content.firstChild.tagName, $('d').innerHTML].join() })
+=== tpl-get-inner-html-of-div
+@html <div id=d><template id=t><b>x</b></template></div>
+(function () { return [$('d').innerHTML, $('d').outerHTML].join() })
+=== tpl-get-inner-html-of-parsed-page-nested
+@html <div id=d><template><p>a<template><i>n</i>m</template>b</p></template>after</div>
+(function () { return [$('d').innerHTML].join() })
+=== tpl-get-outer-html-of-template
+@html <template id=t class=k><b>x</b></template>
+(function () { return [$('t').outerHTML].join() })
+=== tpl-get-inner-html-of-template
+@html <template id=t class=k><b>x</b>y<!--c--></template>
+(function () { return [$('t').innerHTML].join() })
+=== tpl-get-inner-html-of-empty-template
+@html <template id=t></template>
+(function () { return [JSON.stringify($('t').innerHTML), $('t').outerHTML].join() })
+=== tpl-get-inner-html-of-nested-template
+@html <template id=t><template><b>x</b></template><i></i></template>
+(function () { return [$('t').innerHTML, $('t').outerHTML].join() })
+=== tpl-get-created-template-with-content
+var t = el('template'); t.content.appendChild(el('b')); t.content.appendChild(document.createTextNode('<&>'));
+(function () { var d = el('div'); d.appendChild(t); return [d.innerHTML, t.outerHTML, t.innerHTML].join() })
+=== tpl-get-created-template-own-children-are-not-written
+var t = el('template'); t.appendChild(el('p')); t.content.appendChild(el('b'));
+(function () { var d = el('div'); d.appendChild(t); return [d.innerHTML, t.innerHTML, t.outerHTML].join() })
+=== tpl-get-created-template-own-children-only
+var t = el('template'); t.appendChild(el('p'));
+(function () { return [JSON.stringify(t.innerHTML), t.outerHTML].join() })
+=== tpl-get-template-with-no-content-made
+var t = el('template');
+(function () { return [t.outerHTML, JSON.stringify(t.innerHTML)].join() })
+=== tpl-get-template-inside-other-tags
+@html <ul id=u><li><template><span a="1">x</span></template></li><li></li></ul>
+(function () { return [$('u').innerHTML].join() })
+=== tpl-get-template-in-svg
+@html <svg id=s><template><b></b></template></svg>
+(function () { return [$('s').innerHTML, document.getElementById('s').firstChild.childNodes.length].join() })
+=== tpl-get-template-content-with-script
+@html <template id=t><script>1 < 2</script><style>a > b {}</style></template>
+(function () { return [$('t').outerHTML].join() })
+=== tpl-get-round-trip
+@html <div id=d></div>
+var d = $('d'); d.innerHTML = '<template><p class=a>1</p><template><b></b></template></template>'; var a = d.innerHTML; d.innerHTML = a;
+(function () { return [a === d.innerHTML, a].join() })
+=== tpl-get-after-content-edit
+@html <div id=d><template id=t><b></b></template></div>
+$('t').content.firstChild.textContent = 'new'; $('t').content.appendChild(el('i'));
+(function () { return [$('d').innerHTML].join() })
+=== tpl-get-after-content-is-emptied
+@html <div id=d><template id=t><b></b></template></div>
+$('t').content.replaceChildren();
+(function () { return [$('d').innerHTML].join() })
+=== tpl-get-body-inner-html
+(function () { var t = el('template'); t.content.appendChild(el('b')); document.body.appendChild(t); return document.body.innerHTML.indexOf('<template><b></b></template>') >= 0 })

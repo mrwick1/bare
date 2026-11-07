@@ -1,0 +1,568 @@
+var log = [];
+function nm(n) { return n === null ? 'null' : n === undefined ? 'undefined' : n.nodeType === 1 ? n.tagName.toLowerCase() + (n.id ? '#' + n.id : '') : n.nodeType === 3 ? '"' + n.data + '"' : n.nodeType === 8 ? '<!--' + n.data + '-->' : n.nodeType === 10 ? '<!doctype>' : n.nodeName }
+function list(l) { return '[' + Array.prototype.map.call(l, nm).join(',') + ']' }
+function rec(r) { return r.type + ' ' + nm(r.target) + ' +' + list(r.addedNodes) + ' -' + list(r.removedNodes) + ' p=' + nm(r.previousSibling) + ' n=' + nm(r.nextSibling) }
+var mo = new MutationObserver(function (rs) { rs.forEach(function (r) { log.push(rec(r)) }) });
+function el(t, id) { var e = document.createElement(t); if (id) e.id = id; return e }
+var DT = document.doctype;
+function dt() { return DT.cloneNode() }
+function frag() { var f = document.createDocumentFragment(); for (var i = 0; i < arguments.length; i++) f.appendChild(typeof arguments[i] === 'string' ? el(arguments[i]) : arguments[i]); return f }
+function errm(f) { try { f(); return 'ok' } catch (e) { return e.name + ':' + e.message } }
+var out = function () { return log.join(' | ') };
+function clear() { document.replaceChildren() }
+function kids() { return list(document.childNodes) }
+=== doc-replace-children-shape
+(function () { var d = Object.getOwnPropertyDescriptor(Document.prototype, 'replaceChildren'); return [typeof document.replaceChildren, document.replaceChildren.length, d.writable, d.configurable, typeof document.append, document.append.length, typeof document.prepend, document.prepend.length].join() })
+=== doc-replace-children-nothing
+document.replaceChildren(); var r = kids();
+(function () { return [r, kids(), document.documentElement, document.doctype].join() })
+=== doc-replace-children-one-element
+var e = el('section', 's'); document.replaceChildren(e);
+(function () { return [kids(), document.documentElement === e, document.doctype, e.parentNode === document].join() })
+=== doc-replace-children-doctype-element
+var e = el('section', 's'), t = dt('x'); document.replaceChildren(t, e);
+(function () { return [kids(), document.doctype === t, document.documentElement === e].join() })
+=== doc-replace-children-element-doctype
+var e = el('section', 's'), t = dt('x'), r = errm(function () { document.replaceChildren(e, t) });
+(function () { return [r, kids()].join() })
+=== doc-replace-children-two-elements
+var r = errm(function () { document.replaceChildren(el('a'), el('b')) });
+(function () { return [r, kids()].join() })
+=== doc-replace-children-two-doctypes
+var r = errm(function () { document.replaceChildren(dt('a'), dt('b')) });
+(function () { return [r, kids()].join() })
+=== doc-replace-children-text
+var r = errm(function () { document.replaceChildren(el('a'), 'hi') });
+(function () { return [r, kids()].join() })
+=== doc-replace-children-text-node
+var r = errm(function () { document.replaceChildren(document.createTextNode('hi')) });
+(function () { return [r, kids()].join() })
+=== doc-replace-children-comments
+var c = document.createComment('c'), e = el('a'); document.replaceChildren(c, e, document.createComment('d'));
+(function () { return [kids(), c.parentNode === document].join() })
+=== doc-replace-children-empty-string
+var r = errm(function () { document.replaceChildren('') });
+(function () { return [r, kids()].join() })
+=== doc-replace-children-the-document
+var r = errm(function () { document.replaceChildren(document) });
+(function () { return [r, kids()].join() })
+=== doc-replace-children-keeps-its-children-on-error
+var old = document.documentElement, r = errm(function () { document.replaceChildren(el('a'), el('b')) });
+(function () { return [r, document.documentElement === old, kids()].join() })
+=== doc-replace-children-moves-from-the-tree
+var b = document.body, p = el('p', 'p'); b.appendChild(p); document.replaceChildren(p);
+(function () { return [kids(), p.parentNode === document, b.childNodes.length, b.parentNode].join() })
+=== doc-replace-children-with-its-own-element
+var h = document.documentElement; document.replaceChildren(h);
+(function () { return [kids(), h.parentNode === document].join() })
+=== doc-replace-children-with-its-own-doctype-and-element
+var t = document.doctype, h = document.documentElement; document.replaceChildren(h, t === null ? el('x') : t);
+(function () { return [kids()].join() })
+=== doc-replace-children-fragment-one-element
+var f = frag('section'); document.replaceChildren(f);
+(function () { return [kids(), f.childNodes.length].join() })
+=== doc-replace-children-fragment-two-elements
+var f = frag('a', 'b'), r = errm(function () { document.replaceChildren(f) });
+(function () { return [r, kids()].join() })
+=== doc-replace-children-fragment-text
+var f = frag('a'); f.appendChild(document.createTextNode('t')); var r = errm(function () { document.replaceChildren(f) });
+(function () { return [r, kids()].join() })
+=== doc-replace-children-fragment-comment-and-element
+var f = frag('a'); f.insertBefore(document.createComment('c'), f.firstChild); document.replaceChildren(f);
+(function () { return [kids(), f.childNodes.length].join() })
+=== doc-replace-children-fragment-empty
+var f = frag(); document.replaceChildren(f);
+(function () { return [kids()].join() })
+=== doc-replace-children-fragment-and-element
+var r = errm(function () { document.replaceChildren(frag('a'), el('b')) });
+(function () { return [r, kids()].join() })
+=== doc-replace-children-fragment-then-doctype
+var r = errm(function () { document.replaceChildren(frag('a'), dt('x')) });
+(function () { return [r, kids()].join() })
+=== doc-replace-children-doctype-then-fragment
+var r = errm(function () { document.replaceChildren(dt('x'), frag('a')) });
+(function () { return [r, kids()].join() })
+=== doc-replace-children-record
+mo.observe(document, { childList: true }); var old = document.documentElement; document.replaceChildren(el('a', 'n'), document.createComment('c'));
+(function () { return out() })
+=== doc-replace-children-record-nothing-to-do
+document.replaceChildren(); mo.observe(document, { childList: true }); document.replaceChildren();
+(function () { return out() })
+=== doc-replace-children-record-error
+mo.observe(document, { childList: true }); errm(function () { document.replaceChildren(el('a'), el('b')) });
+(function () { return out() })
+=== doc-append-element-with-one-present
+var r = errm(function () { document.append(el('a')) });
+(function () { return [r, kids()].join() })
+=== doc-append-after-removing
+document.removeChild(document.documentElement); var e = el('a'); document.append(e, 'x'.length ? document.createComment('c') : null);
+(function () { return [kids(), document.documentElement === e].join() })
+=== doc-append-text
+document.removeChild(document.documentElement); var r = errm(function () { document.append('x') });
+(function () { return [r, kids()].join() })
+=== doc-append-doctype-after-element
+document.doctype && document.removeChild(document.doctype); var r = errm(function () { document.append(dt('x')) });
+(function () { return [r, kids()].join() })
+=== doc-append-doctype-when-none
+document.doctype && document.removeChild(document.doctype); document.removeChild(document.documentElement); document.append(dt('x'), el('a'));
+(function () { return [kids()].join() })
+=== doc-append-fragment
+document.removeChild(document.documentElement); var f = frag('a'); document.append(f);
+(function () { return [kids(), f.childNodes.length].join() })
+=== doc-append-fragment-two
+document.removeChild(document.documentElement); var f = frag('a', 'b'), r = errm(function () { document.append(f) });
+(function () { return [r, kids()].join() })
+=== doc-append-nothing
+document.append();
+(function () { return [kids()].join() })
+=== doc-prepend-element-with-one-present
+var r = errm(function () { document.prepend(el('a')) });
+(function () { return [r, kids()].join() })
+=== doc-prepend-before-removed-element
+document.removeChild(document.documentElement); document.prepend(el('a'), document.createComment('c'));
+(function () { return [kids()].join() })
+=== doc-prepend-comment-before-doctype
+document.prepend(document.createComment('c'));
+(function () { return [kids()].join() })
+=== doc-prepend-doctype-when-present
+var r = errm(function () { document.prepend(dt('x')) });
+(function () { return [r, kids()].join() })
+=== doc-prepend-doctype-replacing-it
+document.removeChild(document.doctype); document.prepend(dt('x'));
+(function () { return [kids()].join() })
+=== doc-prepend-fragment
+document.removeChild(document.documentElement); var f = frag('a'); document.prepend(f, document.createComment('c'));
+(function () { return [kids(), f.childNodes.length].join() })
+=== doc-prepend-text
+var r = errm(function () { document.prepend('x') });
+(function () { return [r, kids()].join() })
+=== doc-append-child-fragment
+document.removeChild(document.documentElement); var f = frag('a'), r = document.appendChild(f);
+(function () { return [kids(), r === f, f.childNodes.length].join() })
+=== doc-append-child-fragment-two
+document.removeChild(document.documentElement); var f = frag('a', 'b'), r = errm(function () { document.appendChild(f) });
+(function () { return [r, kids(), f.childNodes.length].join() })
+=== doc-append-child-fragment-with-element-present
+var f = frag('a'), r = errm(function () { document.appendChild(f) });
+(function () { return [r, kids(), f.childNodes.length].join() })
+=== doc-append-child-fragment-text
+document.removeChild(document.documentElement); var f = frag(); f.appendChild(document.createTextNode('t')); var r = errm(function () { document.appendChild(f) });
+(function () { return [r, kids(), f.childNodes.length].join() })
+=== doc-append-child-fragment-empty
+var f = frag(); document.appendChild(f);
+(function () { return [kids()].join() })
+=== doc-insert-before-fragment-end
+document.removeChild(document.documentElement); var f = frag('a'); document.insertBefore(f, null);
+(function () { return [kids()].join() })
+=== doc-insert-before-fragment-before-doctype
+document.removeChild(document.documentElement); var f = frag('a'), r = errm(function () { document.insertBefore(f, document.doctype) });
+(function () { return [r, kids()].join() })
+=== doc-insert-before-fragment-before-comment
+document.removeChild(document.documentElement); var c = document.createComment('c'); document.appendChild(c); var f = frag('a'); document.insertBefore(f, c);
+(function () { return [kids()].join() })
+=== doc-insert-before-fragment-element-after-doctype
+var r = errm(function () { document.insertBefore(frag('a'), document.doctype) });
+(function () { return [r, kids()].join() })
+=== doc-insert-before-fragment-not-a-child
+document.removeChild(document.documentElement); var f = frag('a'), r = errm(function () { document.insertBefore(f, el('z')) });
+(function () { return [r, kids(), f.childNodes.length].join() })
+=== doc-insert-before-fragment-two-before-nothing
+document.removeChild(document.documentElement); var f = frag('a', 'b'), r = errm(function () { document.insertBefore(f, null) });
+(function () { return [r, kids()].join() })
+=== doc-replace-child-fragment-for-element
+var h = document.documentElement, f = frag('a'); var r = document.replaceChild(f, h);
+(function () { return [kids(), r === h, h.parentNode, f.childNodes.length].join() })
+=== doc-replace-child-fragment-two-for-element
+var h = document.documentElement, f = frag('a', 'b'), r = errm(function () { document.replaceChild(f, h) });
+(function () { return [r, kids(), h.parentNode === document, f.childNodes.length].join() })
+=== doc-replace-child-fragment-text-for-element
+var h = document.documentElement, f = frag(); f.appendChild(document.createTextNode('t')); var r = errm(function () { document.replaceChild(f, h) });
+(function () { return [r, kids()].join() })
+=== doc-replace-child-fragment-for-doctype
+var t = document.doctype, f = frag('a'), r = errm(function () { document.replaceChild(f, t) });
+(function () { return [r, kids(), f.childNodes.length].join() })
+=== doc-replace-child-fragment-for-comment
+document.removeChild(document.documentElement); var c = document.createComment('c'); document.appendChild(c); var f = frag('a'); document.replaceChild(f, c);
+(function () { return [kids()].join() })
+=== doc-replace-child-fragment-element-over-comment-before-doctype
+var c = document.createComment('c'); document.insertBefore(c, document.doctype); document.removeChild(document.documentElement); var r = errm(function () { document.replaceChild(frag('a'), c) });
+(function () { return [r, kids()].join() })
+=== doc-replace-child-element-for-doctype
+var r = errm(function () { document.replaceChild(el('a'), document.doctype) });
+(function () { return [r, kids()].join() })
+=== doc-fragment-record
+document.removeChild(document.documentElement); mo.observe(document, { childList: true }); var f = frag('a'); f.appendChild(document.createComment('c')); document.appendChild(f);
+(function () { return out() })
+=== doc-fragment-is-a-template-content
+var t = document.createElement('template'); t.content.appendChild(el('a', 'n')); document.removeChild(document.documentElement); document.appendChild(t.content);
+(function () { return [kids(), t.content.childNodes.length].join() })
+=== doc-fragment-ancestor-check
+var h = document.documentElement, f = frag(); var r = errm(function () { h.appendChild(document) });
+(function () { return [r, kids()].join() })
+
+=== doc-replace-children-cleared-one-element
+clear();
+var e = el('section', 's'); document.replaceChildren(e);
+(function () { return [kids(), document.documentElement === e, document.doctype, e.parentNode === document].join() })
+=== doc-replace-children-cleared-doctype-element
+clear();
+var e = el('section', 's'), t = dt('x'); document.replaceChildren(t, e);
+(function () { return [kids(), document.doctype === t, document.documentElement === e].join() })
+=== doc-replace-children-cleared-element-doctype
+clear();
+var e = el('section', 's'), t = dt('x'), r = errm(function () { document.replaceChildren(e, t) });
+(function () { return [r, kids()].join() })
+=== doc-replace-children-cleared-two-elements
+clear();
+var r = errm(function () { document.replaceChildren(el('a'), el('b')) });
+(function () { return [r, kids()].join() })
+=== doc-replace-children-cleared-two-doctypes
+clear();
+var r = errm(function () { document.replaceChildren(dt('a'), dt('b')) });
+(function () { return [r, kids()].join() })
+=== doc-replace-children-cleared-text
+clear();
+var r = errm(function () { document.replaceChildren(el('a'), 'hi') });
+(function () { return [r, kids()].join() })
+=== doc-replace-children-cleared-text-node
+clear();
+var r = errm(function () { document.replaceChildren(document.createTextNode('hi')) });
+(function () { return [r, kids()].join() })
+=== doc-replace-children-cleared-comments
+clear();
+var c = document.createComment('c'), e = el('a'); document.replaceChildren(c, e, document.createComment('d'));
+(function () { return [kids(), c.parentNode === document].join() })
+=== doc-replace-children-cleared-empty-string
+clear();
+var r = errm(function () { document.replaceChildren('') });
+(function () { return [r, kids()].join() })
+=== doc-replace-children-cleared-the-document
+clear();
+var r = errm(function () { document.replaceChildren(document) });
+(function () { return [r, kids()].join() })
+=== doc-replace-children-cleared-fragment-one-element
+clear();
+var f = frag('section'); document.replaceChildren(f);
+(function () { return [kids(), f.childNodes.length].join() })
+=== doc-replace-children-cleared-fragment-two-elements
+clear();
+var f = frag('a', 'b'), r = errm(function () { document.replaceChildren(f) });
+(function () { return [r, kids()].join() })
+=== doc-replace-children-cleared-fragment-text
+clear();
+var f = frag('a'); f.appendChild(document.createTextNode('t')); var r = errm(function () { document.replaceChildren(f) });
+(function () { return [r, kids()].join() })
+=== doc-replace-children-cleared-fragment-comment-and-element
+clear();
+var f = frag('a'); f.insertBefore(document.createComment('c'), f.firstChild); document.replaceChildren(f);
+(function () { return [kids(), f.childNodes.length].join() })
+=== doc-replace-children-cleared-fragment-empty
+clear();
+var f = frag(); document.replaceChildren(f);
+(function () { return [kids()].join() })
+=== doc-replace-children-cleared-fragment-and-element
+clear();
+var r = errm(function () { document.replaceChildren(frag('a'), el('b')) });
+(function () { return [r, kids()].join() })
+=== doc-replace-children-cleared-fragment-then-doctype
+clear();
+var r = errm(function () { document.replaceChildren(frag('a'), dt('x')) });
+(function () { return [r, kids()].join() })
+=== doc-replace-children-cleared-doctype-then-fragment
+clear();
+var r = errm(function () { document.replaceChildren(dt('x'), frag('a')) });
+(function () { return [r, kids()].join() })
+=== doc-replace-children-cleared-one-element-record
+clear(); mo.observe(document, { childList: true }); document.replaceChildren(el('a', 'n'), document.createComment('c'));
+(function () { return out() })
+=== doc-replace-children-cleared-two-elements-text-first
+clear(); var r = errm(function () { document.replaceChildren('x', el('a')) });
+(function () { return [r, kids()].join() })
+=== doc-replace-children-cleared-doctype-twice
+clear(); var r = errm(function () { document.replaceChildren(dt('a'), dt('b')) });
+(function () { return [r, kids()].join() })
+=== doc-replace-children-cleared-element-twice
+clear(); var r = errm(function () { document.replaceChildren(el('a'), el('b')) });
+(function () { return [r, kids()].join() })
+=== doc-replace-children-cleared-element-then-doctype
+clear(); var r = errm(function () { document.replaceChildren(el('a'), dt('b')) });
+(function () { return [r, kids()].join() })
+=== doc-replace-children-cleared-fragment-two-elements
+clear(); var r = errm(function () { document.replaceChildren(frag('a', 'b')) });
+(function () { return [r, kids()].join() })
+=== doc-replace-children-cleared-fragments-two
+clear(); var r = errm(function () { document.replaceChildren(frag('a'), frag('b')) });
+(function () { return [r, kids()].join() })
+=== doc-replace-children-cleared-mixed-fragment-doctype
+clear(); var r = errm(function () { document.replaceChildren(dt('x'), frag('a'), document.createComment('c')) });
+(function () { return [r, kids()].join() })
+=== doc-replace-children-cleared-moves-from-the-tree
+var b = document.body, p = el('p', 'p'); b.appendChild(p); clear(); var q = el('q'); b.appendChild(q); document.replaceChildren(q);
+(function () { return [kids(), q.parentNode === document, b.childNodes.length].join() })
+=== doc-replace-children-cleared-own-element
+var h = document.documentElement; clear(); document.replaceChildren(h);
+(function () { return [kids(), h.parentNode === document].join() })
+=== doc-replace-children-cleared-then-text-error-keeps-first
+clear(); document.append(document.createComment('keep')); var r = errm(function () { document.replaceChildren(el('a'), 'x') });
+(function () { return [r, kids()].join() })
+=== doc-replace-children-cleared-error-keeps-children
+clear(); document.append(document.createComment('keep')); var r = errm(function () { document.replaceChildren(el('a'), el('b')) });
+(function () { return [r, kids()].join() })
+=== doc-replace-children-order-type-before-ancestor
+var r = errm(function () { document.replaceChildren(document.documentElement, document) });
+(function () { return [r].join() })
+=== doc-replace-children-order-first-bad-node-wins
+clear(); var r = errm(function () { document.replaceChildren(document.createTextNode('t'), el('a'), el('b')) });
+(function () { return [r, kids()].join() })
+=== doc-replace-children-order-argument-conversion-first
+clear(); var r = errm(function () { document.replaceChildren(el('a'), { toString: function () { throw new Error('conv') } }, el('b')) });
+(function () { return [r, kids()].join() })
+=== doc-replace-children-order-node-conversion-then-check
+clear(); var r = errm(function () { document.replaceChildren({ toString: function () { return 'x' } }) });
+(function () { return [r, kids()].join() })
+=== doc-append-two-elements
+clear(); var r = errm(function () { document.append(el('a'), el('b')) });
+(function () { return [r, kids()].join() })
+=== doc-append-two-doctypes
+clear(); var r = errm(function () { document.append(dt('a'), dt('b')) });
+(function () { return [r, kids()].join() })
+=== doc-append-element-then-doctype
+clear(); var r = errm(function () { document.append(el('a'), dt('b')) });
+(function () { return [r, kids()].join() })
+=== doc-append-doctype-then-element
+clear(); document.append(dt('b'), el('a'));
+(function () { return [kids()].join() })
+=== doc-append-text-and-element
+clear(); var r = errm(function () { document.append(el('a'), 'x') });
+(function () { return [r, kids()].join() })
+=== doc-append-element-into-doctype-only
+clear(); document.append(dt('b')); document.append(el('a'));
+(function () { return [kids()].join() })
+=== doc-append-comment-doctype-element
+clear(); document.append(document.createComment('c'), dt('d'), document.createComment('e'), el('a'), document.createComment('f'));
+(function () { return [kids()].join() })
+=== doc-append-record-group
+clear(); mo.observe(document, { childList: true }); document.append(dt('d'), el('a'), document.createComment('f'));
+(function () { return out() })
+=== doc-append-the-document
+var r = errm(function () { document.append(document) });
+(function () { return [r, kids()].join() })
+=== doc-prepend-two-elements
+clear(); var r = errm(function () { document.prepend(el('a'), el('b')) });
+(function () { return [r, kids()].join() })
+=== doc-prepend-element-before-doctype-present
+clear(); document.append(dt('b')); var r = errm(function () { document.prepend(el('a')) });
+(function () { return [r, kids()].join() })
+=== doc-prepend-doctype-before-element
+clear(); document.append(el('a')); document.prepend(dt('b'));
+(function () { return [kids()].join() })
+=== doc-prepend-doctype-element-before-comment
+clear(); document.append(document.createComment('c')); document.prepend(dt('b'), el('a'));
+(function () { return [kids()].join() })
+=== doc-prepend-fragment-before-doctype
+clear(); document.append(dt('b')); var r = errm(function () { document.prepend(frag('a')) });
+(function () { return [r, kids()].join() })
+=== doc-prepend-moves-own-first-child
+var t = document.doctype; document.prepend(t);
+(function () { return [kids()].join() })
+=== doc-insert-before-text-bad-ref
+var r = errm(function () { document.insertBefore(document.createTextNode('t'), el('z')) });
+(function () { return [r, kids()].join() })
+=== doc-insert-before-element-bad-ref
+clear(); var r = errm(function () { document.insertBefore(el('a'), el('z')) });
+(function () { return [r, kids()].join() })
+=== doc-insert-before-fragment-text-bad-ref
+clear(); var f = frag(); f.appendChild(document.createTextNode('t')); var r = errm(function () { document.insertBefore(f, el('z')) });
+(function () { return [r, kids()].join() })
+=== doc-insert-before-fragment-two-bad-ref
+clear(); var r = errm(function () { document.insertBefore(frag('a', 'b'), el('z')) });
+(function () { return [r, kids()].join() })
+=== doc-insert-before-the-document-bad-ref
+var r = errm(function () { document.insertBefore(document, el('z')) });
+(function () { return [r, kids()].join() })
+=== doc-insert-before-fragment-doctype-ref-comment-order
+clear(); var c = document.createComment('c'), t = dt('t'); document.append(c, t); var r = errm(function () { document.insertBefore(frag('a'), t) });
+(function () { return [r, kids()].join() })
+=== doc-insert-before-fragment-doctype-after-element
+clear(); var e = el('e'), c = document.createComment('c'); document.append(e, c); var r = errm(function () { document.insertBefore(dt('d'), c) });
+(function () { return [r, kids()].join() })
+=== doc-insert-before-doctype-before-element
+clear(); var e = el('e'); document.append(e); document.insertBefore(dt('d'), e);
+(function () { return [kids()].join() })
+=== doc-replace-child-doctype-for-doctype
+var old = document.doctype, n = dt('n'), r = document.replaceChild(n, old);
+(function () { return [kids(), r === old, old.parentNode].join() })
+=== doc-replace-child-element-for-element
+var old = document.documentElement, n = el('n'), r = document.replaceChild(n, old);
+(function () { return [kids(), r === old, old.parentNode].join() })
+=== doc-replace-child-comment-for-element
+var old = document.documentElement, n = document.createComment('n'), r = document.replaceChild(n, old);
+(function () { return [kids()].join() })
+=== doc-replace-child-text-for-comment
+clear(); var c = document.createComment('c'); document.append(c); var r = errm(function () { document.replaceChild(document.createTextNode('t'), c) });
+(function () { return [r, kids()].join() })
+=== doc-replace-child-doctype-for-element
+var r = errm(function () { document.replaceChild(dt('d'), document.documentElement) });
+(function () { return [r, kids()].join() })
+=== doc-replace-child-doctype-for-comment-after-element
+var c = document.createComment('c'); document.append(c); document.removeChild(document.doctype); var r = errm(function () { document.replaceChild(dt('d'), c) });
+(function () { return [r, kids()].join() })
+=== doc-replace-child-element-for-comment-before-doctype
+clear(); var c = document.createComment('c'); document.append(c, dt('d')); var r = errm(function () { document.replaceChild(el('a'), c) });
+(function () { return [r, kids()].join() })
+=== doc-replace-child-fragment-element-for-comment-after-doctype
+clear(); var c = document.createComment('c'); document.append(dt('d'), c); document.replaceChild(frag('a'), c);
+(function () { return [kids()].join() })
+=== doc-replace-child-fragment-for-doctype-with-element-present
+clear(); var t = dt('d'); document.append(t, el('x')); var f = frag('a'), r = errm(function () { document.replaceChild(f, t) });
+(function () { return [r, kids(), f.childNodes.length].join() })
+=== doc-replace-child-fragment-for-doctype-no-element
+clear(); var t = dt('d'); document.append(t); var f = frag('a'); document.replaceChild(f, t);
+(function () { return [kids(), f.childNodes.length].join() })
+=== doc-replace-child-fragment-two-for-comment
+clear(); var c = document.createComment('c'); document.append(c); var f = frag('a', 'b'), r = errm(function () { document.replaceChild(f, c) });
+(function () { return [r, kids(), f.childNodes.length].join() })
+=== doc-replace-child-not-a-child
+var r = errm(function () { document.replaceChild(el('a'), el('b')) });
+(function () { return [r, kids()].join() })
+=== doc-replace-child-fragment-record
+clear(); var c = document.createComment('c'); document.append(c); mo.observe(document, { childList: true }); document.replaceChild(frag('a'), c);
+(function () { return out() })
+=== doc-element-before-on-the-root
+var h = document.documentElement; var r = errm(function () { h.before(el('x')) });
+(function () { return [r, kids()].join() })
+=== doc-element-before-on-the-root-comment
+var h = document.documentElement; h.before(document.createComment('c'));
+(function () { return [kids()].join() })
+=== doc-element-after-on-the-root-doctype
+var h = document.documentElement; var r = errm(function () { h.after(dt('x')) });
+(function () { return [r, kids()].join() })
+=== doc-element-replace-with-on-the-root
+var h = document.documentElement; h.replaceWith(frag('a'));
+(function () { return [kids()].join() })
+=== doc-element-replace-with-two-on-the-root
+var h = document.documentElement; var r = errm(function () { h.replaceWith(el('a'), el('b')) });
+(function () { return [r, kids()].join() })
+=== doc-element-replace-with-comments-on-the-root
+var h = document.documentElement; h.replaceWith(document.createComment('a'), document.createComment('b'));
+(function () { return [kids()].join() })
+=== doc-element-replace-with-text-on-the-root
+var h = document.documentElement; var r = errm(function () { h.replaceWith('x') });
+(function () { return [r, kids()].join() })
+=== doc-comment-replace-with-element
+clear(); var c = document.createComment('c'); document.append(c); c.replaceWith(el('a'), document.createComment('d'));
+(function () { return [kids()].join() })
+=== doc-insert-adjacent-element-into-root-before
+var h = document.documentElement; var r = errm(function () { h.insertAdjacentElement('beforebegin', el('a')) });
+(function () { return [r, kids()].join() })
+=== doc-insert-adjacent-text-after-root
+var h = document.documentElement; var r = errm(function () { h.insertAdjacentText('afterend', 'x') });
+(function () { return [r, kids()].join() })
+=== doc-dom-parser-free-ancestor-check
+var r = errm(function () { document.documentElement.appendChild(document) });
+(function () { return [r].join() })
+=== doc-element-append-child-document
+var r = errm(function () { el('p').appendChild(document) });
+(function () { return [r].join() })
+=== doc-fragment-append-child-document
+var r = errm(function () { frag().appendChild(document) });
+(function () { return [r].join() })
+=== doc-append-child-element-when-present
+var r = errm(function () { document.appendChild(el('a')) });
+(function () { return [r].join() })
+=== doc-append-child-doctype-when-present
+var r = errm(function () { document.appendChild(dt('a')) });
+(function () { return [r].join() })
+=== doc-append-child-doctype-after-element
+document.removeChild(document.doctype); var r = errm(function () { document.appendChild(dt('a')) });
+(function () { return [r].join() })
+=== doc-append-child-text
+var r = errm(function () { document.appendChild(document.createTextNode('t')) });
+(function () { return [r].join() })
+=== doc-append-child-the-document
+var r = errm(function () { document.appendChild(document) });
+(function () { return [r].join() })
+=== doc-append-child-comment
+var c = document.createComment('c'); document.appendChild(c);
+(function () { return [kids()].join() })
+=== doc-insert-before-element-before-doctype
+clear(); var t = dt('t'); document.append(t); var r = errm(function () { document.insertBefore(el('a'), t) });
+(function () { return [r, kids()].join() })
+=== doc-insert-before-same-node
+var h = document.documentElement; document.insertBefore(h, h);
+(function () { return [kids()].join() })
+=== doc-insert-before-element-moves-root-before-doctype
+var h = document.documentElement; var r = errm(function () { document.insertBefore(h, document.doctype) });
+(function () { return [r, kids()].join() })
+=== doc-replace-children-cleared-two-elements-then-text
+clear(); var r = errm(function () { document.replaceChildren(el('a'), el('b'), 'x') });
+(function () { return [r, kids()].join() })
+=== doc-replace-children-cleared-text-then-two-elements
+clear(); var r = errm(function () { document.replaceChildren('x', el('a'), el('b')) });
+(function () { return [r, kids()].join() })
+=== doc-append-two-doctypes-then-text
+clear(); var r = errm(function () { document.append(dt('a'), dt('b'), 'x') });
+(function () { return [r, kids()].join() })
+=== doc-append-element-then-text-then-doctype
+clear(); var r = errm(function () { document.append(el('a'), 'x', dt('b')) });
+(function () { return [r, kids()].join() })
+=== doc-multi-append-element-then-text-present
+var r = errm(function () { document.append(el('a'), 'hi') });
+(function () { return [r, kids()].join() })
+=== doc-multi-prepend-element-then-text-present
+var r = errm(function () { document.prepend(el('a'), 'hi') });
+(function () { return [r, kids()].join() })
+=== doc-multi-append-fragment-element-text-present
+var f = frag('a'); f.appendChild(document.createTextNode('t')); var r = errm(function () { document.append(f) });
+(function () { return [r, kids()].join() })
+=== doc-multi-append-two-elements-then-text-cleared
+clear(); var r = errm(function () { document.append(el('a'), el('b'), 'x') });
+(function () { return [r, kids()].join() })
+=== doc-multi-append-own-nodes
+var t = document.doctype, h = document.documentElement; var r = errm(function () { document.append(h, t) });
+(function () { return [r].join() })
+=== doc-multi-append-own-nodes-in-order
+var t = document.doctype, h = document.documentElement; var r = errm(function () { document.append(t, h) });
+(function () { return [r, kids(), h.parentNode === document, t.parentNode === document].join() })
+=== doc-multi-prepend-own-nodes
+var t = document.doctype, h = document.documentElement; var r = errm(function () { document.prepend(t, h) });
+(function () { return [r, kids()].join() })
+=== doc-multi-replace-children-own-nodes-in-order
+var t = document.doctype, h = document.documentElement; var r = errm(function () { document.replaceChildren(t, h) });
+(function () { return [r, kids(), h.parentNode === document, t.parentNode === document].join() })
+=== doc-multi-replace-children-own-nodes-reversed-state
+var t = document.doctype, h = document.documentElement; var r = errm(function () { document.replaceChildren(h, t) });
+(function () { return [r].join() })
+=== doc-multi-replace-children-own-node-and-comment
+var h = document.documentElement; var r = errm(function () { document.replaceChildren(h, document.createComment('c')) });
+(function () { return [r, kids()].join() })
+=== doc-multi-replace-children-new-element-and-own-element
+var h = document.documentElement; var r = errm(function () { document.replaceChildren(el('a'), h) });
+(function () { return [r].join() })
+=== doc-multi-after-root-element-then-text
+var h = document.documentElement; var r = errm(function () { h.after(el('a'), 'hi') });
+(function () { return [r, kids()].join() })
+=== doc-multi-replace-with-element-and-text
+var h = document.documentElement; var r = errm(function () { h.replaceWith(el('a'), 'hi') });
+(function () { return [r, kids()].join() })
+=== doc-multi-replace-with-own-doctype
+var h = document.documentElement, t = document.doctype; var r = errm(function () { h.replaceWith(t, document.createComment('c')) });
+(function () { return [r].join() })
+=== doc-multi-replace-with-two-elements-one-is-self
+var h = document.documentElement; var r = errm(function () { h.replaceWith(h, el('a')) });
+(function () { return [r].join() })
+=== doc-multi-before-root-comment-and-element
+var h = document.documentElement; var r = errm(function () { h.before(document.createComment('c'), el('a')) });
+(function () { return [r, kids()].join() })
+=== doc-multi-before-root-doctype-and-comment
+var h = document.documentElement, t = document.doctype; var r = errm(function () { h.before(t, document.createComment('c')) });
+(function () { return [r, kids()].join() })
+=== doc-append-child-fragment-element-text-present
+var f = frag('a'); f.appendChild(document.createTextNode('t')); var r = errm(function () { document.appendChild(f) });
+(function () { return [r, kids(), f.childNodes.length].join() })
+=== doc-append-child-fragment-text-element-present
+var f = frag(); f.appendChild(document.createTextNode('t')); f.appendChild(el('a')); var r = errm(function () { document.appendChild(f) });
+(function () { return [r, kids(), f.childNodes.length].join() })
+=== doc-replace-children-fragment-text-then-element-present
+var f = frag(); f.appendChild(document.createTextNode('t')); f.appendChild(el('a')); var r = errm(function () { document.replaceChildren(f) });
+(function () { return [r, kids()].join() })

@@ -28,8 +28,8 @@
 //! Gates (`Error::Unsupported`, before anything changes; nothing is faked with another context):
 //! - Contexts: `table thead tbody tfoot tr td th caption colgroup col select template html frameset frame noscript`, and any element that is not in
 //!   the HTML namespace (an SVG or MathML element).
-//! - Markup: a `template`, `noscript`, `frameset` or `frame` start tag in the value.
-//! - The getter, for a tree that holds an HTML `template` or `noscript` element (their serialization depends on template contents and the scripting flag).
+//! - Markup: a `noscript`, `frameset` or `frame` start tag in the value. A `template` start tag is read as the page parser reads it: its children go into its contents.
+//! - The getter, for a tree that holds an HTML `noscript` element (its serialization depends on the scripting flag). An HTML `template` is written with its contents as children, and `template.innerHTML` reads the contents.
 //! - `Range.createContextualFragment`, `DOMParser` and `document.write` are absent.
 //!
 //! Known deviations: nested `table` and `select` are read by the page rules of the tree builder (no table or select insertion modes). A temporary
@@ -98,7 +98,10 @@ fn attr_name(doc: &Document, name: bare_html::dom::Atom) -> String {
 /// The children of `n` as HTML text, or `n` itself when `outer`. Walks with the parent links, so the depth is not a limit.
 fn serialize(d: &Dom, it: &mut Interp<'_>, doc: &Document, n: NodeId, outer: bool) -> R<String> {
     let mut out = String::new();
-    let Some(mut node) = (if outer { Some(n) } else { doc.children(n).next() }) else { return Ok(out) };
+    // The children of a `template` are its contents. `tpls` holds the templates that are open, to close them on the way up.
+    let mut tpls = Vec::new();
+    let n_kids = if !outer && doc.is_html(n, "template") { doc.template_content(n) } else { Some(n) };
+    let Some(mut node) = (if outer { Some(n) } else { n_kids.and_then(|k| doc.children(k).next()) }) else { return Ok(out) };
     loop {
         it.charge(1)?;
         let mut open = false;
@@ -118,8 +121,8 @@ fn serialize(d: &Dom, it: &mut Interp<'_>, doc: &Document, n: NodeId, outer: boo
             NodeData::Element { name, attrs } => {
                 let tag = doc.atom_str(name);
                 let html = !doc.is_foreign(node);
-                if html && matches!(tag, "template" | "noscript") {
-                    return Err(Error::Unsupported(unsupported("serializing a tree with a template or noscript element (template contents and the scripting flag)")));
+                if html && tag == "noscript" {
+                    return Err(Error::Unsupported(unsupported("serializing a tree with a noscript element (the scripting flag)")));
                 }
                 put(d, &mut out, "<")?;
                 put(d, &mut out, tag)?;
@@ -133,7 +136,12 @@ fn serialize(d: &Dom, it: &mut Interp<'_>, doc: &Document, n: NodeId, outer: boo
                 }
                 put(d, &mut out, ">")?;
                 if !(html && VOID.contains(&tag)) {
-                    if let Some(first) = doc.children(node).next() {
+                    let tpl = html && tag == "template";
+                    let holder = if tpl { doc.template_content(node) } else { Some(node) };
+                    if let Some(first) = holder.and_then(|h| doc.children(h).next()) {
+                        if tpl {
+                            tpls.push(node);
+                        }
                         node = first;
                         open = true;
                     } else {
@@ -156,9 +164,13 @@ fn serialize(d: &Dom, it: &mut Interp<'_>, doc: &Document, n: NodeId, outer: boo
                 node = s;
                 break;
             }
-            let Some(p) = doc.parent(node) else { return Ok(out) };
-            if p == n && !outer {
+            let Some(mut p) = doc.parent(node) else { return Ok(out) };
+            if Some(p) == n_kids && !outer {
                 return Ok(out);
+            }
+            // The parent is the contents of an open template: close the template.
+            if matches!(doc.data(p), NodeData::ShadowRoot) {
+                p = tpls.pop().expect("an open template");
             }
             put(d, &mut out, "</")?;
             put(d, &mut out, doc.element_name(p))?;
@@ -227,6 +239,42 @@ pub(crate) fn insert_adjacent_html(d: &Dom, it: &mut Interp<'_>, this: Value, a:
     replace(d, it, &html, n, matches!(d.data(n), NodeData::ShadowRoot), Put::At(before))
 }
 
+/// The size of the contents of the templates in the tree under `root`, nested ones too: (nodes, bytes, attributes, height). A template's contents hang
+/// one level below it. The tree of `root` itself is measured by the caller.
+#[cold]
+fn measure_templates(it: &mut Interp<'_>, doc: &Document, root: NodeId) -> R<(usize, usize, usize, usize)> {
+    let (mut count, mut bytes, mut attrs, mut height) = (0usize, 0usize, 0usize, 0usize);
+    let mut jobs = vec![(root, 0usize)];
+    while let Some((top, below)) = jobs.pop() {
+        let (mut cur, mut depth) = (top, 0usize);
+        while let Some((c, cd)) = next_in(doc, top, cur, depth) {
+            (cur, depth) = (c, cd);
+            let own = top != root;
+            if own {
+                it.charge(1)?;
+                count += 1;
+                height = height.max(below + cd);
+            }
+            match *doc.data(c) {
+                NodeData::Text(sp) | NodeData::Comment(sp) if own => bytes += doc.text(sp).len(),
+                NodeData::Element { attrs: list, .. } => {
+                    if own {
+                        let list = doc.attrs(list);
+                        attrs += list.len();
+                        bytes += list.iter().map(|x| doc.text(x.value).len()).sum::<usize>();
+                    }
+                    if let Some(f) = doc.template_content(c) {
+                        count += 1;
+                        jobs.push((f, below + cd));
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    Ok((count, bytes, attrs, height))
+}
+
 /// Parse `html` in the context of `n` (`body` when `in_frag`: `n` is a DocumentFragment). `put`: where the nodes go.
 fn replace(d: &Dom, it: &mut Interp<'_>, html: &str, n: NodeId, in_frag: bool, put: Put) -> V {
     let this = if let Put::Over(t) = put { Some(t) } else { None };
@@ -274,6 +322,7 @@ fn replace(d: &Dom, it: &mut Interp<'_>, html: &str, n: NodeId, in_frag: bool, p
         Err(FragmentError::Stopped) => return Err(stop.expect("the budget error")),
     };
 
+    let tpl = frag.doc.has_template_content();
     // Measure the result and check it against this browser's caps, before anything changes.
     let (mut count, mut bytes, mut attrs, mut height) = (0usize, 0usize, 0usize, 0usize);
     {
@@ -293,6 +342,10 @@ fn replace(d: &Dom, it: &mut Interp<'_>, html: &str, n: NodeId, in_frag: bool, p
                 _ => {}
             }
         }
+    }
+    if tpl {
+        let m = measure_templates(it, &frag.doc, frag.root)?;
+        (count, bytes, attrs, height) = (count + m.0, bytes + m.1, attrs + m.2, height.max(m.3));
     }
     let old = {
         let doc = d.doc.borrow();
@@ -336,17 +389,27 @@ fn replace(d: &Dom, it: &mut Interp<'_>, html: &str, n: NodeId, in_frag: bool, p
             d.iter_told_end();
         }
     }
-    let mut path = vec![n];
-    let (mut cur, mut depth) = (frag.root, 0usize);
-    while let Some((c, cd)) = next_in(&frag.doc, frag.root, cur, depth) {
-        (cur, depth) = (c, cd);
-        let t = doc.import_node(&frag.doc, c).expect("a node of the fragment");
-        doc.move_to(t, path[cd - 1], if cd == 1 { before } else { None });
-        path.truncate(cd);
-        path.push(t);
-        if doc.is_html(t, "script") {
-            d.mark_started(t);
+    // Each job copies a tree of the parsed fragment under a node: the fragment itself, then the contents of each template.
+    let mut jobs = Vec::new();
+    let (mut src, mut dst, mut first) = (frag.root, n, before);
+    loop {
+        let mut path = vec![dst];
+        let (mut cur, mut depth) = (src, 0usize);
+        while let Some((c, cd)) = next_in(&frag.doc, src, cur, depth) {
+            (cur, depth) = (c, cd);
+            let t = doc.import_node(&frag.doc, c).expect("a node of the fragment");
+            doc.move_to(t, path[cd - 1], if cd == 1 { first } else { None });
+            path.truncate(cd);
+            path.push(t);
+            if doc.is_html(t, "script") {
+                d.mark_started(t);
+            }
+            if tpl && let Some(f) = frag.doc.template_content(c) {
+                jobs.push((f, doc.make_template_content(t)));
+            }
         }
+        let Some(j) = jobs.pop() else { break };
+        (src, dst, first) = (j.0, j.1, None);
     }
     // As in Chrome, the text before and after the new nodes joins them. The DOM Parsing standard does not say it.
     if this.is_some() {
