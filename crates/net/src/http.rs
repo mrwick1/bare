@@ -450,16 +450,17 @@ impl Client {
 
     /// Send a request and read the status and the headers. The body is not read: the `Body` reads it from the
     /// connection when the caller asks. Reuse an idle connection when there is one.
-    /// A new connection, when the gate lets one more be set up (`parallel::MAX_CONNECTING`).
-    fn connect(&self, url: &Url, rec: &mut Option<Box<trace::Rec>>) -> Result<Stream, Error> {
-        let _inside = self.workers.connecting.enter();
-        open(url, &self.roots, rec)
-    }
-
-    /// A new connection, and a session of its own when the server chose `h2`: the session goes in the map for the next request,
-    /// unless the map has a good one already (two requests raced to connect). The first request uses its own.
+    /// A new connection, and a session of its own when the server chose `h2`: the session goes in the map for the next request.
+    /// The gate lets only `parallel::MAX_CONNECTING` connections open at once. A request that waited at the gate looks again for a session,
+    /// because one that was dialed meanwhile serves it: this is why a page of 40 assets opens one connection, not six.
     fn dial(&self, url: &Url, server: &Server, rec: &mut Option<Box<trace::Rec>>) -> Result<Dialed, Error> {
-        Ok(match self.connect(url, rec)? {
+        let _inside = self.workers.connecting.enter();
+        if url.scheme == Scheme::Https
+            && let Some(conn) = self.sessions.lock().unwrap().get(server).filter(|c| c.usable())
+        {
+            return Ok(Dialed::H2(conn.clone()));
+        }
+        Ok(match open(url, &self.roots, rec)? {
             Stream::Tls(tls) if tls.alpn_h2() => {
                 let conn = h2::Conn::start(*tls)?;
                 let mut sessions = self.sessions.lock().unwrap();
