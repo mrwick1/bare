@@ -53,8 +53,9 @@ struct Item {
     margins: [Option<f32>; 4],
     /// The cross size of the border box, once laid out.
     cross: f32,
-    /// The baseline, from the top of the border box.
+    /// The baseline of its last line, and of its first line (only for an item aligned by baseline), from the top of the border box.
     baseline: Option<f32>,
+    first: Option<f32>,
     /// The height of its content alone, once laid out (`Done::content`).
     content: f32,
     align: K,
@@ -87,6 +88,18 @@ impl Item {
     fn outer_cross(&self) -> f32 {
         self.cross + self.margin(2) + self.margin(3)
     }
+
+    /// An item aligned by baseline, with no auto margin on the cross axis, shares a baseline with the others of its kind: gives the
+    /// kind (0 first, 1 last) and the distance from its cross-start margin edge to the baseline. A column item has its baseline on
+    /// its cross-start edge, as in Chrome.
+    fn shares(&self, row: bool) -> Option<(usize, f32)> {
+        if !matches!(self.align, K::Baseline | K::LastBaseline) || self.margins[2].is_none() || self.margins[3].is_none() {
+            return None;
+        }
+        let last = self.align == K::LastBaseline;
+        let b = if !row { 0.0 } else { (if last { self.baseline } else { self.first }).unwrap_or(self.cross) };
+        Some((last as usize, self.margin(2) + b))
+    }
 }
 
 /// One line of items: the items `start..end` (in `order`), and its cross size and place.
@@ -95,8 +108,10 @@ struct Line {
     end: usize,
     cross: f32,
     at: f32,
-    /// The biggest distance from the cross-start margin edge to the baseline, of the items aligned by baseline.
-    ascent: f32,
+    /// The items aligned by their first baseline (0) and by their last one (1) share a baseline each: the biggest distance from the
+    /// cross-start margin edge to it, and from it to the cross-end margin edge.
+    above: [f32; 2],
+    below: [f32; 2],
 }
 
 fn keyword(style: &ComputedStyle, p: P) -> K {
@@ -193,14 +208,14 @@ pub(crate) fn layout(cx: &mut Cx, node: NodeId, space: Space, bp: Sides) -> Kids
     for (i, it) in items.iter().enumerate() {
         let size = it.outer(it.hypo);
         if i > start && used + main_gap + size > limit + 0.01 {
-            lines.push(Line { start, end: i, cross: 0.0, at: 0.0, ascent: 0.0 });
+            lines.push(Line { start, end: i, cross: 0.0, at: 0.0, above: [0.0; 2], below: [0.0; 2] });
             (start, used) = (i, size);
         } else {
             used += if i > start { main_gap + size } else { size };
         }
     }
     if start < items.len() {
-        lines.push(Line { start, end: items.len(), cross: 0.0, at: 0.0, ascent: 0.0 });
+        lines.push(Line { start, end: items.len(), cross: 0.0, at: 0.0, above: [0.0; 2], below: [0.0; 2] });
     }
     let main_size = main_size.unwrap_or_else(|| {
         let longest = lines.iter().map(|l| sum(&items[l.start..l.end], main_gap, |it| it.outer(it.hypo))).fold(0.0, f32::max);
@@ -225,18 +240,17 @@ pub(crate) fn layout(cx: &mut Cx, node: NodeId, space: Space, bp: Sides) -> Kids
     let single = !wrap;
     let cross_size = if row { space.height } else { Some(space.width) };
     for line in &mut lines {
-        let (mut big, mut ascent, mut descent) = (0.0f32, 0.0f32, 0.0f32);
+        let (mut big, mut above, mut below) = (0.0f32, [0.0f32; 2], [0.0f32; 2]);
         for it in &items[line.start..line.end] {
-            if row && it.align == K::Baseline && it.margins[2].is_some() && it.margins[3].is_some() {
-                let a = it.margin(2) + it.baseline.unwrap_or(it.cross);
-                ascent = ascent.max(a);
-                descent = descent.max(it.outer_cross() - a);
+            if let Some((k, a)) = it.shares(row) {
+                above[k] = above[k].max(a);
+                below[k] = below[k].max(it.outer_cross() - a);
             } else {
                 big = big.max(it.outer_cross());
             }
         }
-        line.ascent = ascent;
-        line.cross = big.max(ascent + descent);
+        (line.above, line.below) = (above, below);
+        line.cross = big.max(above[0] + below[0]).max(above[1] + below[1]);
         if single {
             line.cross = match cross_size {
                 Some(c) => c,
@@ -251,7 +265,7 @@ pub(crate) fn layout(cx: &mut Cx, node: NodeId, space: Space, bp: Sides) -> Kids
     let free = if single { 0.0 } else { cross_size.map_or(0.0, |c| c - total) };
     let (mut offset, mut between) = (0.0, cross_gap);
     match align_content {
-        K::Normal | K::Stretch if free > 0.0 => {
+        K::Normal | K::Stretch | K::LastBaseline if free > 0.0 => {
             for line in &mut lines {
                 line.cross += free / n as f32;
             }
@@ -304,18 +318,24 @@ pub(crate) fn layout(cx: &mut Cx, node: NodeId, space: Space, bp: Sides) -> Kids
                 }
             }
             let free = line.cross - it.outer_cross();
-            let y = match (it.margins[2], it.margins[3]) {
-                (None, None) => free.max(0.0) / 2.0,
-                (None, Some(_)) => free.max(0.0),
-                (Some(_), None) => 0.0,
-                _ => match it.align {
-                    K::Baseline if row => line.ascent - it.margin(2) - it.baseline.unwrap_or(it.cross),
-                    K::Center => free / 2.0,
-                    K::FlexEnd | K::LastBaseline => free,
-                    K::End | K::SelfEnd if !wrap_reverse => free,
-                    K::Start | K::SelfStart if wrap_reverse => free,
-                    _ => 0.0,
-                },
+            let y = if let Some((k, a)) = it.shares(row) {
+                // The baselines are shared: the first ones at the cross-start of the line, the last ones at its cross-end. With
+                // `wrap-reverse` the start is at the bottom of the page, and the items keep their order from the top.
+                let top = if (k == 0) != wrap_reverse { line.above[k] - a } else { line.cross - line.below[k] - a };
+                if wrap_reverse { free - top } else { top }
+            } else {
+                match (it.margins[2], it.margins[3]) {
+                    (None, None) => free.max(0.0) / 2.0,
+                    (None, Some(_)) => free.max(0.0),
+                    (Some(_), None) => 0.0,
+                    _ => match it.align {
+                        K::Center => free / 2.0,
+                        K::FlexEnd => free,
+                        K::End | K::SelfEnd if !wrap_reverse => free,
+                        K::Start | K::SelfStart if wrap_reverse => free,
+                        _ => 0.0,
+                    },
+                }
             };
             for m in 2..4 {
                 it.margins[m] = Some(it.margin(m));
@@ -329,7 +349,7 @@ pub(crate) fn layout(cx: &mut Cx, node: NodeId, space: Space, bp: Sides) -> Kids
     // was laid out again: then they are written again, in `order`.
     let mut baseline = None;
     let first = lines.first().map_or(0..0, |l| l.start..l.end);
-    let by_baseline = items[first.clone()].iter().position(|it| it.align == K::Baseline);
+    let by_baseline = if row { items[first.clone()].iter().position(|it| it.shares(true).is_some()) } else { None };
     let mut at = begin;
     let in_place = items.iter().all(|it| {
         let ok = it.moved.is_none() && it.from == at;
@@ -339,10 +359,6 @@ pub(crate) fn layout(cx: &mut Cx, node: NodeId, space: Space, bp: Sides) -> Kids
     let old = if in_place { Vec::new() } else { cx.out.split_off(begin) };
     for (i, it) in items.iter_mut().enumerate() {
         let (x, y) = if row { (it.at.0 + it.margin(0), it.at.1 + it.margin(2)) } else { (it.at.1 + it.margin(2), it.at.0 + it.margin(0)) };
-        if first.contains(&i) && (by_baseline.is_none() && i == first.start || by_baseline == Some(i - first.start)) {
-            // An item with no baseline gives its bottom border edge (CSS Flexbox 1, section 8.5).
-            baseline = Some(y + it.baseline.unwrap_or(if row { it.cross } else { it.main + it.bp_main }));
-        }
         let base = if in_place { it.from } else { cx.out.len() };
         if !in_place {
             let (list, from) = match &it.moved {
@@ -352,6 +368,12 @@ pub(crate) fn layout(cx: &mut Cx, node: NodeId, space: Space, bp: Sides) -> Kids
             cx.out.extend(list.iter().map(|f| Fragment { end: f.end - from as u32 + base as u32, ..*f }));
         }
         let end = if in_place { it.to } else { cx.out.len() };
+        if first.contains(&i) && (by_baseline.is_none() && i == first.start || by_baseline == Some(i - first.start)) {
+            // The shared baseline, if the item is aligned by baseline; else its first one, read from a few fragments. An
+            // item with no baseline gives its bottom border edge (CSS Flexbox 1, section 8.5).
+            let b = if it.align == K::LastBaseline && by_baseline.is_some() { it.baseline } else { it.first.or_else(|| first_of(cx, it, &cx.out, base, end, block::PEEK)) };
+            baseline = Some(y + b.unwrap_or(if row { it.cross } else { it.main + it.bp_main }));
+        }
         fragment::shift(&mut cx.out[..end], base, bp.left + x, bp.top + y);
     }
     cx.marker = marker;
@@ -461,6 +483,7 @@ fn item(cx: &mut Cx, container: NodeId, node: NodeId, last: Option<NodeId>, spac
         margins: [Some(0.0); 4],
         cross: 0.0,
         baseline: None,
+        first: None,
         content: 0.0,
         align: align_items,
         width: space.width,
@@ -558,12 +581,19 @@ fn lay(cx: &mut Cx, container: NodeId, it: &mut Item, space: Space, w: f32, tall
     if let Some(last) = it.last {
         let lines = inline::lines(cx, container, it.node, last, w, (0.0, 0.0));
         (it.cross, it.baseline, it.content) = (lines.height, lines.baseline, lines.height);
+        if it.align == K::Baseline {
+            it.first = first_of(cx, it, &cx.out, it.from, cx.out.len(), u32::MAX);
+        }
     } else {
         cx.number = it.number;
         // The margins are placed by the container: the box starts at 0.
         let done = cx.lay_item(it.node, space, (w, 0.0, 0.0), tall, &mut it.laid);
         cx.out[done.fragment].rect.x = 0.0;
-        (it.cross, it.baseline, it.content) = (done.height, done.baseline.filter(|_| !cx.tree.scrolls(it.node)), done.content);
+        // A scroll container keeps the baseline of its content, but not below its bottom edge.
+        (it.cross, it.baseline, it.content) = (done.height, done.baseline.map(|b| block::clamp_scroller(cx, it.node, true, b, done.height)), done.content);
+        if it.align == K::Baseline {
+            it.first = first_of(cx, it, &cx.out, it.from, cx.out.len(), u32::MAX);
+        }
         let tree = cx.tree;
         it.rigid = cx.unknown.get() == unknown
             && block::context(cx, it.node) == block::Context::Flow
@@ -573,6 +603,11 @@ fn lay(cx: &mut Cx, container: NodeId, it: &mut Item, space: Space, w: f32, tall
     }
     it.to = cx.out.len();
     it.waits = cx.waiting - waiting;
+}
+
+/// The baseline of the first line of an item laid out in `out[at..end]` (`block::first_baseline`), read from `limit` fragments.
+fn first_of(cx: &Cx, it: &Item, out: &[Fragment], at: usize, end: usize, limit: u32) -> Option<f32> {
+    block::first_baseline(cx, it.node, it.last.is_none(), out, at, end, it.baseline, it.cross, limit)
 }
 
 /// Give a laid-out item a new content height: only its box changes if its content does not depend on it, else it is

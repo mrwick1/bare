@@ -173,3 +173,48 @@ var Y = function (ids) { return ids.split(' ').map(function (id) { var r = $(id)
 === table-cell-baseline-with-shifted-text
 @html <table style="border-spacing:0"><tr><td id=a style="padding:0">a<span style="vertical-align:20px">b</span></td><td id=b style="padding:0;vertical-align:baseline">x<span style="font-size:30px">y</span></td></tr></table>
 (function () { return Y('a b') })
+=== top-box-with-a-shifted-child
+@html <div id=a><span id=aa>a</span><span id=as style="vertical-align:top;line-height:50px"><span id=ac style="font-size:30px;vertical-align:super">b</span></span></div>
+(function () { return Y('a aa as ac') })
+=== top-box-with-a-length-child
+@html <div id=a><span id=aa>a</span><span id=as style="vertical-align:top"><span id=ac style="font-size:30px;vertical-align:10px">b</span></span></div><div id=b><span id=ba>a</span><span id=bs style="vertical-align:top;line-height:50px">x<span id=bc style="vertical-align:-8px">b</span>y</span></div>
+(function () { return Y('a aa as ac b ba bs bc') })
+=== bottom-box-with-a-shifted-child
+@html <div id=a><span id=aa>a</span><span id=as style="vertical-align:bottom;line-height:50px"><span id=ac style="font-size:30px;vertical-align:sub">b</span></span></div><div id=b><span id=ba>a</span><span id=bs style="vertical-align:bottom"><span id=bc style="font-size:20px;vertical-align:text-top">b</span>c</span></div>
+(function () { return Y('a aa as ac b ba bs bc') })
+=== top-box-with-a-shifted-child-and-text
+@html <div id=a><span id=aa>aaa</span><span id=as style="vertical-align:top;background:#ccc">xx<span id=ac style="font-size:10px;vertical-align:super">b</span>yy<span id=ad style="font-size:40px;vertical-align:sub">c</span></span>zz</div>
+(function () { return Y('a aa as ac ad') })
+=== top-box-with-a-shifted-child-with-padding
+@html <div id=a><span id=aa>a</span><span id=as style="vertical-align:top;padding:5px 0;background:#ccc"><span id=ac style="vertical-align:super;padding:4px 0;background:#aaa">b</span></span></div>
+(function () { return Y('a aa as ac') })
+=== nested-top-in-a-shifted-box
+@html <div id=a><span id=aa>a</span><span id=as style="vertical-align:super;line-height:40px"><span id=ac style="vertical-align:top;line-height:60px">b</span>c</span></div>
+(function () { return Y('a aa as ac') })
+=== top-box-with-a-shifted-inline-block
+@html <div id=a><span id=aa>a</span><span id=as style="vertical-align:top;line-height:50px"><span id=ac class=b style="height:30px;vertical-align:10px">b</span></span></div>
+(function () { return Y('a aa as ac') })
+=== top-box-with-a-big-child-and-line-height
+@html <div id=a><span id=aa>a</span><span id=as style="vertical-align:top;line-height:60px"><span id=ac style="font-size:30px;line-height:normal">b</span></span></div><div id=b><span id=ba>a</span><span id=bs style="vertical-align:bottom"><span id=bc style="font-size:30px">b</span></span></div>
+(function () { return Y('a aa as ac b ba bs bc') })
+=== top-box-with-a-culled-child
+@html <div id=a><span id=aa>a</span><span id=as style="vertical-align:top;line-height:60px">x<b>b</b></span></div>
+(function () { return Y('a aa as') })
+=== top-box-two-levels-of-shifts
+@html <div id=a><span id=aa>a</span><span id=as style="vertical-align:top;font-size:10px"><span id=ac style="font-size:30px;vertical-align:5px"><span id=ad style="font-size:20px;vertical-align:7px">b</span></span></span></div>
+(function () { return Y('a aa as ac ad') })
+=== top-box-in-a-shifted-box
+@html <div id=a><span id=aa>a</span><span id=as style="vertical-align:5px;font-size:30px"><span id=ac style="vertical-align:top;font-size:10px">b</span></span></div><div id=b><span id=ba>a</span><span id=bs style="vertical-align:5px;font-size:30px"><span id=bc style="vertical-align:top;font-size:20px;line-height:50px">b<span id=bd style="vertical-align:3px;font-size:30px">c</span></span></span></div>
+(function () { return Y('a aa as ac b ba bs bc bd') })
+=== top-box-with-a-shifted-child-over-two-lines
+@html <div id=a style="width:120px">aa <span id=as style="vertical-align:top;line-height:40px;background:#ccc">bbbb cccc <span id=ac style="vertical-align:super;font-size:24px;line-height:normal;background:#aaa">dd ee ff gg</span> hh</span> ii</div>
+(function () { return Y('a as ac') })
+=== bottom-box-with-a-shifted-child-over-two-lines
+@html <div id=a style="width:120px">aa <span id=as style="vertical-align:bottom;line-height:40px;background:#ccc">bbbb cccc <span id=ac style="vertical-align:sub;font-size:24px;line-height:normal;background:#aaa">dd ee ff gg</span> hh</span> ii</div>
+(function () { return Y('a as ac') })
+=== ex-unit-is-the-x-height
+@html <div id=a style="height:10ex"></div><div id=b style="height:3ex;font-size:13px"></div><div id=c style="font-size:20px"><div id=d style="height:2.5ex;font-size:3ex"></div></div><div id=e style="height:calc(2ex + 1px);font-size:11px"></div><div id=f style="height:5ex;font-size:100px"></div><div id=g style="height:1ex;font-size:125px"></div>
+(function () { return 'a b c d e f g'.split(' ').map(function (i) { return Math.round($(i).getBoundingClientRect().height * 10) / 10 }).join(' ') })
+=== ex-unit-in-padding-and-vertical-align
+@html <div id=a style="padding-top:4ex;font-size:31.25px"><span id=s style="vertical-align:2ex">x</span></div>
+(function () { return Y('a s') })

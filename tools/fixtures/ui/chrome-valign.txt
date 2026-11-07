@@ -55,3 +55,18 @@ atomic-after-a-break-in-a-shifted-box	0,81 0,72 36,30
 image-in-a-paragraph-of-lines	0,89 0,40 52,10
 list-item-with-an-image	0,45 0,40
 table-cell-baseline-with-shifted-text	0,42 0,42
+top-box-with-a-shifted-child	0,61.33 25.33,22 25.33,22 4,41
+top-box-with-a-length-child	0,47 25,22 25,22 0,41 47,58 53,22 61,22 69,22
+bottom-box-with-a-shifted-child	0,50.81 15.63,22 14.81,22 4,41 50.81,27 50.81,22 50.81,22 50.81,27
+top-box-with-a-shifted-child-and-text	0,55 21.81,22 21.81,22 21.48,14 0,55
+top-box-with-a-shifted-child-with-padding	0,28.33 6.33,22 1.33,32 -4,30
+nested-top-in-a-shifted-box	0,60 15.33,22 9,22 12.67,22
+top-box-with-a-shifted-inline-block	0,60 0,22 24,22 0,30
+top-box-with-a-big-child-and-line-height	0,60 15,22 19,22 4,41 60,41 75,22 75,22 60,41
+top-box-with-a-culled-child	0,60 0,22 19,22
+top-box-two-levels-of-shifts	0,42 20,22 26,14 0,41 4,27
+top-box-in-a-shifted-box	0,42 20,22 0,41 -5,14 42,57 69,22 49,41 55,27 41,41
+top-box-with-a-shifted-child-over-two-lines	0,132.66 9,114.66 40,79.33
+bottom-box-with-a-shifted-child-over-two-lines	0,120 9,102 44.19,73
+ex-unit-is-the-x-height	85.8 20.9 43.1 43.1 12.8 268 67
+ex-unit-in-padding-and-vertical-align	0,142.5 67,42
