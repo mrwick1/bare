@@ -388,7 +388,7 @@ Known gaps of module 4:
 
 ## Known gaps
 
-- HTTP: `Transfer-Encoding` codes other than `chunked` (for example `gzip`) are not supported. No `Accept-Encoding`, so no compression.
+- HTTP: `Transfer-Encoding` codes other than `chunked` (for example `gzip`) are not supported. Compression is done: see "Compressed bodies and the connect backup".
 - HTTP: HTTP/2 and HTTP/3 are not built. They move to after module 7, because browsers use them only over TLS. HTTP/3 also needs QUIC.
 - HTTP: one idle connection for each server. No pool of several at once, no parallel requests.
 - HTTP cache: no `Expires`, no heuristic freshness (both need HTTP date parsing), and no 301 caching.
@@ -883,3 +883,15 @@ Tests (all compared with headless Chrome 155, real key events through `Input.dis
 Perf (`tools/js/instr.sh`, minimum of 3 runs of `instructions:u`, release, main 98e5586 against this change, scale 1 and 10 of `form_load`, `focus_load`, `select_load`, `selection_load`, `browser_load` and `attr_load`): the worst row is `form_load gates` at +0.537% (scale 1) and +0.564% (scale 10). With jemalloc (`LD_PRELOAD=/usr/lib/libjemalloc.so.2`) the same row is -0.000% and -0.009%, so the difference is the layout of the glibc heap and not the code. The next worst row is `selection_load short 10` at +0.171%. All the other rows are within 0.1%.
 
 Not tested: the live React 19 page itself (the fixture is a copy of the update steps); `dataset_load` and `session_load` rows; a click or a mouse selection into a field and then a read of the direction; the direction after a selection of the document (`getSelection`) takes the page selection away from a control (bare does not link them); `setRangeText` (absent); a textarea that wraps long lines; IME; `contenteditable`.
+
+## Compressed bodies and the connect backup
+
+The client now sends `Accept-Encoding` (`gzip, deflate`, plus `br` over https) and decodes the body while it reads (follow-up of #186). The decoded size has the 128 MiB cap, so a zip bomb stops at the limit, and a bad body is an error. `fetch` shows decoded bytes and keeps the `content-encoding` header. An unknown coding such as `zstd` is still refused. A loopback host gets no `Accept-Encoding`.
+
+A connect that is not done after 250 ms starts a second socket to the same address. The first one to finish wins. The 1 s stall that staging showed in 2 to 5 of 9 runs was a lost SYN (confirmed with `BARE_NET_TRACE` and `tcpdump`); a stalled connect now costs 0.28 to 0.31 s.
+
+Numbers (`/login`, 9 interleaved pairs): wire bytes 584,441 to 162,595 (-72%). Median wall 1.74 s to 0.91 s in a window with 5 stalls in each build, and 0.80 s to 0.79 s in a window with 2. Binary +284,520 B (+2.6%), peak RSS +800 KiB (+2.9%). Cost rows (81): median +0.03%, worst +0.33% when run again alone (+0.76% in the full run). Details: [resources.md](resources.md#compressed-bodies-and-the-connect-backup).
+
+Tests: 12 in `encoding.rs` (gzip, deflate zlib and raw, br, chunked with gzip cut at any place, a list of codings, a bad or cut body, an empty body, an unknown coding, bytes after the stream end, a bomb past the cap, the `Vary` cache rule), 4 in `tcp.rs` (the backup, including a listener whose queue drops the first SYN), and tests in `http.rs`, `resources.rs` (more than 5 codings is an error), `browser_fetch_tests.rs`, `browser_session.rs` and `sheets_tests.rs`.
+
+Not tested: br against a real server; HTTP/2; zstd; XHR `progress` `total` on a compressed body (wire length, per spec); a host with IPv6 and IPv4; Windows and macOS; a 128 MiB decoded `fetch`; the network windows ran under machine load 12 to 18.

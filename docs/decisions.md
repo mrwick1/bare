@@ -166,6 +166,22 @@ A page asks for many files. Each one costs a round trip (about 40 ms to staging)
 - HTTP/2 is not used. Staging answers HTTP/1.1 only (Chrome reports `http/1.1` for all 69 requests of three loads; `h2` gets no ALPN, see [staging-network.md](staging-network.md)), so it would change nothing there. It is a follow-up for servers that offer it.
 - The request body is copied for a worker (a `Pending` holds values of the realm and cannot leave the thread).
 
+## Compressed bodies and the connect backup
+
+Follow-ups of [Parallel downloads](#parallel-downloads). The numbers are in [resources.md](resources.md#compressed-bodies-and-the-connect-backup). The choices:
+
+- The client asks for `gzip, deflate` and, over https only, `br` (as Chrome does). The decoder is a chain of `Read` stages over the body, built on the first read. A body is never held whole for decoding.
+- Fetch rules: codings are undone from the last to the first, at most 5. Headers stay as sent, so `content-encoding` and `content-length` are visible to a script, and `fetch` shows the decoded bytes. A coding that the client does not know (`zstd`) is passed through unchanged, and `Response::encoded()` is true. The callers (loader, session, `fetch`) refuse such a body with an error, as before.
+- The decoded size has the cap of the wire size (`MAX_REPLY`, 128 MiB), and the caller caps apply to decoded bytes. A body that grows past the cap is an error, so a zip bomb stops at the limit. A bad gzip, deflate or br body is an error. A body with no content (HEAD, 204, 304) is not decoded.
+- When the decoder ends, the client drains the raw body. That checks the framing and returns the connection to the pool. A connection that is not drained is not reused.
+- `deflate` can be a zlib stream or a raw stream. The first 2 bytes decide.
+- The client sends no `Accept-Encoding` to a loopback host (`localhost`, `127.x.x.x`, `::1`). It saves no byte there and costs both ends CPU, and the loopback rows rose up to 2.15% in instructions when it was sent. A header that the caller sets wins. `IpAddr::parse` was too slow for this check (about 380 instructions for each request), so a string test is used.
+- `Vary: Accept-Encoding` alone no longer blocks the client cache. The client sends the same `Accept-Encoding` for every request to a host unless the caller sets one, so the key does not differ in practice.
+- Crates: flate2 with miniz_oxide (already built for `png`; zlib-rs is 19% faster, but the gain for 687 KB is 0.4 ms) and brotli-decompressor (no encoder). zstd is not added: its decoder is C or slower pure Rust, and servers answer gzip and br.
+- Connect backup: a connect that is not done 250 ms after the first SYN starts a second socket to the same address (as the backup connect job of Chrome). The first socket to finish wins and the other is closed. A failed connect (a refusal) starts no backup. The `Gate` of 2 new connections is not changed, because the backup runs inside the same `connect` call. The staging stall was a lost SYN: the kernel retry comes at 1 s; the backup connects at about 285 ms.
+- Happy Eyeballs between IPv6 and IPv4 already existed in `tcp.rs` (interleaved addresses, 250 ms). Staging has one IPv4 address.
+- XHR `progress`: `total` stays the wire `Content-Length` and `loaded` counts decoded bytes, as the spec says.
+
 ## Identifier lookup
 
 - A name is resolved by the scope it is in, not by a search of the environment chain. The first walk of a script records the static scopes (script, function, block with lexical declarations, `for`/`for-in`/`for-of` with `let` or `const`, `catch`, `switch` with lexical declarations) and the scope of each identifier site. The second run of a site stores the number of environments to go up and the index of the binding. The first run uses the full search, so code that runs once pays nothing.

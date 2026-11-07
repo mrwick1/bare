@@ -4141,7 +4141,70 @@ Not tested: a server with many imports that closes the connection after each rep
 
 HTTP/2 (staging offers none); a server that closes the connection after each reply, with parallel downloads (the code opens a new connection for each; the tests use keep-alive); upload bodies in parallel (POST runs alone); `requestIdleCallback` together with this settle change (an idle callback that a tick requests still counts as work, so such a page does not settle early; it may not settle at all if it asks at each tick; not measured); other routes than `/login` and `/calls`; Windows or macOS.
 
-Follow-ups: send `Accept-Encoding: gzip` and inflate (the bodies are 3.4 times larger than Chrome reads, 113 ms of bodies in the run above); a connect retry on a second address or after 250 ms against the lost SYN (3 of 9 runs, 1 s each); `<link rel=preload>` lookahead is still one at a time (nested `@import` sheets: see the next section); HTTP/2 for servers that offer it.
+Follow-ups: `Accept-Encoding` and the connect backup are done (see [Compressed bodies and the connect backup](#compressed-bodies-and-the-connect-backup)); `<link rel=preload>` lookahead is still one at a time (nested `@import` sheets: see the next section); HTTP/2 for servers that offer it.
+
+## Compressed bodies and the connect backup
+
+2026-11-07, archMachine, release. Baseline: origin/main 9bb8a04. Each build has its own `CARGO_TARGET_DIR` under `/data/bare-tmp`. Staging: `https://staging.app.8vox.ai/login` (no login). Machine load was 12 to 18 from other builds. Choices: [decisions.md](decisions.md#compressed-bodies-and-the-connect-backup).
+
+### Cause of the 1 s stall (confirmed)
+
+`BARE_NET_TRACE=1` shows `max_tcp_ms` of 1,036 to 1,078 ms in the slow runs, and 36 to 47 ms in the others. `sudo -n tcpdump -i any` on port 443, started for the test runs only, shows the cause. In the capture of the base build, 3 of 90 connections sent a second SYN, 1.002 s to 1.060 s after the first one. The SYN-ACK came 36 to 45 ms after the second SYN, and none came for the first. The capture of the next window (4 of 113 connections) is the same: retransmits at 1.004 s to 1.037 s. The kernel waits 1 s for the first SYN retransmit (`TCP_TIMEOUT_INIT`). The capture is on the client side. It cannot tell a lost SYN from a lost SYN-ACK, or from a server that held the SYN. Both cost the same 1 s.
+
+### Wall time and bytes (`/login`, 9 interleaved pairs, 3 s between runs)
+
+| Window | Build | Median wall | Min | Max | Runs with a connect over 200 ms |
+| --- | --- | --- | --- | --- | --- |
+| 1 | base | 1,739 ms | 694 ms | 1,870 ms | 5 of 9 (1,036 to 1,048 ms) |
+| 1 | new | 910 ms | 719 ms | 1,272 ms | 5 of 9 (283 to 293 ms) |
+| 2 | base | 802 ms | 755 ms | 1,955 ms | 2 of 9 (1,052 and 1,078 ms) |
+| 2 | new | 785 ms | 703 ms | 1,058 ms | 2 of 9 (285 and 312 ms) |
+
+Both builds met the same number of slow connects in a window: that is network luck, not the build. The build changes the cost of one: 1.04 s before, 0.28 to 0.31 s after (250 ms, then one connect of about 35 ms). The difference of the medians in window 1 is mostly this. Window 2 had few stalls, and the medians are 802 ms and 785 ms, within noise. The gain from smaller bodies alone is small on this link.
+
+Wire bytes of the 18 requests (`BARE_NET_TRACE`): 584,441 before, 162,595 after (-72%). Chrome reads 264 KB for its 23 requests. Staging answers `gzip`. Same request count (18) and connection count (6) in both builds.
+
+### Lost-SYN test
+
+`a_lost_syn_is_retried_after_250_ms_not_1_s` in `crates/net/src/tcp.rs`. Method: the test listener calls `listen(fd, 0)` and fills its accept queue. Linux then drops the next SYN, and the client kernel retries at 1 s. The first connect finishes at about 1 s. With the backup, the second socket gets in after the queue has room and the connect finishes at about 250 ms. The test fails if it takes 1 s.
+
+### Codec choice (687 KB of inflated text, release, same machine)
+
+| Crate | Inflate | Compile (clean) | Binary of the bench |
+| --- | --- | --- | --- |
+| flate2 with miniz_oxide | 2.13 ms | 2.4 s | 415,768 B |
+| flate2 with zlib-rs | 1.72 ms | 4.9 s | 424,368 B |
+| brotli-decompressor 5 | 3.1 ms | 5.1 s | 553,040 B |
+| brotli 8 (with the encoder) | 3.1 ms | 9.5 s | 553,040 B |
+
+Picked: flate2 with miniz_oxide (the `png` crate already builds it; zlib-rs is 19% faster but a body of 687 KB is 0.4 ms apart, far below one round trip) and brotli-decompressor (the same decoder as `brotli`, without the encoder, so 4 s less compile). zstd: not added. Its decoder is C (`zstd`) or slower pure Rust (`ruzstd`), and servers answer gzip and br. `zstd` stays an unknown coding: the caller gets an error. New crates in `Cargo.lock`: brotli-decompressor, alloc-stdlib, alloc-no-stdlib (BSD-3-Clause or MIT).
+
+### Cost on the rows
+
+Method: `tools/js/instr.sh` (large malloc cache, minimum of 3 runs of `instructions:u`), base against new, 81 rows: `fetch_load` (14), `xhr_load` (4), `session_load` (6), `loader_load` (9), `scheduler_load` (9), `preload_load` (12), `sheets_load` (6), `streams_load` (5), `resources_load` (12) and `https_load` (4).
+
+| Version of the change | Worst rows |
+| --- | --- |
+| `Accept-Encoding` always sent | `https_load ka 1` +2.15%, `resources_load small 1` +1.35%, `small 10` +1.02%, `preload_load font 100` +0.91% (6 rows over +0.5%) |
+| Not sent to loopback, `IpAddr::parse` | `resources_load small 1` +0.73%, `small 100` +0.73%, `small 10` +0.60% (3 rows over +0.5%) |
+| Not sent to loopback, string check | before the rebase: worst `resources_load small 1` +0.36% (no row over +0.5%) |
+| Same, after the rebase on 9bb8a04 | median +0.03%, range -0.12% to +0.76%. Two rows over +0.5% in the full run: `resources_load small 1` (+0.76%, 6,267,877 to 6,315,309) and `largechunk 1` (+0.55%). Run again alone, twice each: `small 1` 6,271,089 / 6,267,495 against 6,290,218 / 6,287,989 (+0.31% to +0.33%), `largechunk 1` 3,472,644 / 3,472,362 against 3,479,585 / 3,475,507 (+0.09% to +0.20%) |
+
+The cause of the loopback cost: the in-process test server scans the request head byte by byte, so a longer head shows up in the client row, and `IpAddr::parse` cost about 380 instructions for each request. A loopback host gets no `Accept-Encoding`: the header saves no byte there and costs both ends CPU. A string test replaces the parse. The two rows that crossed +0.5% did so in one full run and not in the repeat. Their repeat cost is +0.1% to +0.33%. Rows with one request have the fewest instructions, so a fixed difference gives the largest percentage there.
+
+### Binary and memory
+
+| | base | new | change |
+| --- | --- | --- | --- |
+| `bare` release binary (not stripped) | 11,070,248 B | 11,354,768 B | +284,520 B (+2.6%) |
+| `.text` | 6,037,767 B | 6,134,983 B | +97,216 B (+1.6%) |
+| Peak RSS of `bare --run` on `/login` (5 runs, median) | 27,848 KiB | 28,648 KiB | +800 KiB (+2.9%) |
+
+Runs of the RSS: base 27,720 to 27,976 KiB, new 28,636 to 28,884 KiB, so the gap is not noise. The cause is not fully known. Each decode holds a window and its tables, and 6 workers can decode at once. Cutting the `BufReader` from 32 KiB to 8 KiB and starting the buffer at 4 times the wire length recovered about 0.4 MiB. Hypothesis: the rest is decoder state on the workers, not leaked memory. To verify: a heap profile.
+
+### Not tested
+
+br against a real server (only a fixture made with the `brotli` CLI, and the bench on real data; staging answers gzip only). HTTP/2. zstd (not implemented). XHR `progress` `total` (it is the wire `Content-Length`, as the spec says, so `loaded` can pass `total` on a compressed body). A server-side capture to tell a lost SYN from a lost SYN-ACK. A host with IPv6 and IPv4 (the backup with two addresses is tested with fake attempts only). Windows and macOS. A decoded body of 128 MiB in `fetch` (the vector can double, as for an uncompressed body). Multi-member gzip and trailing bytes beyond the unit tests. Chrome wall time again. The network windows ran under machine load 12 to 18.
 
 ## Dense host tables and cached option names
 
