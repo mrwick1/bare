@@ -107,7 +107,10 @@ impl Host {
             // calls `resize` only when the window size changes.
             Host::Window(r) => {
                 let (url, net) = (url.to_string(), net.fork());
-                r.call(move |p| new(&url, p.viewport(), &net).map(|n| *p = n))?
+                r.call(move |p| {
+                    let size = p.viewport();
+                    p.replace(|| new(&url, size, &net))
+                })?
             }
             _ if window => {
                 *self = Host::Window(Remote::open(url, size, net)?);

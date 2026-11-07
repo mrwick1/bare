@@ -190,7 +190,12 @@ impl Page {
 
     /// Load `url` as the address bar does, or the current document again (`None`). Gives the reason when no document runs after it.
     pub fn navigate(&mut self, url: Option<&str>) -> Result<(), String> {
-        let Source::Session(s) = &mut self.source else { return Err("a page without a session cannot navigate".into()) };
+        if !matches!(self.source, Source::Session(_)) {
+            return Err("a page without a session cannot navigate".into());
+        }
+        // The old document ends in `Session::navigate`: its frame goes first, the pixels stay.
+        self.release_frame();
+        let Source::Session(s) = &mut self.source else { unreachable!("checked") };
         let stop = s.navigate(url).stop;
         self.touched();
         match stop {

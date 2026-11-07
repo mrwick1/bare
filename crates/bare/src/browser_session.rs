@@ -362,6 +362,12 @@ impl Session {
         self.drive(Some(next), &[])
     }
 
+    /// End the document now, and forget the next one that is on its way. Its realm is dropped; the history and the storage stay.
+    pub fn end_document(&mut self) {
+        self.browser = None;
+        self.loading = None;
+    }
+
     /// Live: is a next document on its way (`Some(false)`), or in (`Some(true)`: the next `resume` shows it)?
     pub fn loading(&self) -> Option<bool> {
         self.loading.as_ref().map(|l| l.1.done())

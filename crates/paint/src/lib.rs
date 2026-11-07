@@ -51,6 +51,9 @@ pub struct View<'a> {
     pub bars: (bool, bool),
 }
 
+/// The pixels of the layer backdrop that a `Painter` keeps between two draws (64 KiB).
+const KEPT_BACKDROP: usize = 16 << 10;
+
 /// Draws pages. Keep one for many frames: the buffers and the glyph cache stay, so the next paint allocates nothing.
 #[derive(Default)]
 pub struct Painter {
@@ -199,6 +202,8 @@ impl Painter {
                 Item::Later(_) => unreachable!("`Later` stays in the scratch lists"),
             }
         }
+        // The backdrop of a layer is as large as the layer, up to the window. Keep a small buffer for the next frame, not a window.
+        saved.shrink_to(KEPT_BACKDROP);
         if let Some(v) = view {
             let (w, h) = (canvas.width as i32, canvas.height as i32);
             let all = canvas.bounds();
