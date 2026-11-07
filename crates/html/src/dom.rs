@@ -406,6 +406,19 @@ impl Document {
         self.template_content.get(&(tpl.index() as u32)).copied()
     }
 
+    /// Is `n` in the tree of the contents of a `template`? That tree belongs to an inert document, which has no scripting. A page with no template contents pays one `is_empty` check.
+    #[inline]
+    pub fn in_template_content(&self, n: NodeId) -> bool {
+        if self.template_content.is_empty() {
+            return false;
+        }
+        let mut top = n;
+        while let Some(p) = self.parent(top) {
+            top = p;
+        }
+        self.template_content.values().any(|&c| c == top)
+    }
+
     /// The contents of the HTML `template` `tpl`; an empty fragment is made if it has none. The caller checked that `tpl` is an HTML `template`.
     pub fn make_template_content(&mut self, tpl: NodeId) -> NodeId {
         if let Some(c) = self.template_content(tpl) {

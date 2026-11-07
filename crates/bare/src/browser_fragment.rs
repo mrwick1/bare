@@ -21,15 +21,21 @@
 //! text node before or after the result joins its neighbour.
 //!
 //! Getter: the fragment serialization algorithm for the children of the element, iterative (no recursion, any depth), capped by `max_string_bytes`.
-//! Text is escaped (`&`, no-break space, `<`, `>`) except in `style`, `script`, `xmp`, `iframe`, `noembed`, `noframes` and `plaintext`. An attribute
+//! Text is escaped (`&`, no-break space, `<`, `>`) except in `style`, `script`, `xmp`, `iframe`, `noembed`, `noframes`, `plaintext` and `noscript`
+//! (scripting is on, so its text is raw; in the contents of a `template`, an inert document, it is escaped). An attribute
 //! value is escaped (`&`, no-break space, `"`, `<`, `>`; the last two follow the current standard and are to verify against a browser). The void
 //! elements have no end tag and no children. An attribute in a namespace is written `xml:`, `xmlns:` or `xlink:` plus the local name.
 //!
 //! Gates (`Error::Unsupported`, before anything changes; nothing is faked with another context):
-//! - Contexts: `table thead tbody tfoot tr td th caption colgroup col select template html frameset frame noscript`, and any element that is not in
+//! - Contexts: `table thead tbody tfoot tr td th caption colgroup col select html frameset frame`, and any element that is not in
 //!   the HTML namespace (an SVG or MathML element).
-//! - Markup: a `noscript`, `frameset` or `frame` start tag in the value. A `template` start tag is read as the page parser reads it: its children go into its contents.
-//! - The getter, for a tree that holds an HTML `noscript` element (its serialization depends on the scripting flag). An HTML `template` is written with its contents as children, and `template.innerHTML` reads the contents.
+//! - Markup: a `frameset` or `frame` start tag in the value. A `template` start tag is read as the page parser reads it: its children go into its contents.
+//!
+//! `template`: the context `template.innerHTML = ...` parses like `div` and puts the nodes in the contents of the template (made when needed), not in
+//! its children; `insertAdjacentHTML` on a template puts them in its children. The builder has no "in template" mode, so `tr` and `td` are dropped (a page is the same).
+//! `noscript`: the scripting flag is on for a context in the page (raw text for `noscript`, as in Chrome), and off for a `template` context and
+//! for any context in the contents of a template (an inert document): there `noscript` is an element. An HTML `template` is written with its
+//! contents as children, and `template.innerHTML` reads the contents.
 //! - `Range.createContextualFragment`, `DOMParser` and `document.write` are absent.
 //!
 //! Known deviations: nested `table` and `select` are read by the page rules of the tree builder (no table or select insertion modes). A temporary
@@ -45,7 +51,7 @@ use bare_js::value::Value;
 type V = R<Value>;
 
 /// Elements whose text is written as it is.
-const RAW_PARENTS: &[&str] = &["style", "script", "xmp", "iframe", "noembed", "noframes", "plaintext"];
+const RAW_PARENTS: &[&str] = &["style", "script", "xmp", "iframe", "noembed", "noframes", "plaintext", "noscript"];
 
 /// Elements that have no end tag and no children when written.
 const VOID: &[&str] = &["area", "base", "basefont", "bgsound", "br", "col", "embed", "frame", "hr", "img", "input", "keygen", "link", "meta", "param", "source", "track", "wbr"];
@@ -100,6 +106,8 @@ fn serialize(d: &Dom, it: &mut Interp<'_>, doc: &Document, n: NodeId, outer: boo
     let mut out = String::new();
     // The children of a `template` are its contents. `tpls` holds the templates that are open, to close them on the way up.
     let mut tpls = Vec::new();
+    // A `noscript` has raw text when scripting is on, and the contents of a template are in an inert document: there it is escaped.
+    let inert = |tpls: &Vec<NodeId>| !tpls.is_empty() || (!outer && doc.is_html(n, "template")) || doc.in_template_content(n);
     let n_kids = if !outer && doc.is_html(n, "template") { doc.template_content(n) } else { Some(n) };
     let Some(mut node) = (if outer { Some(n) } else { n_kids.and_then(|k| doc.children(k).next()) }) else { return Ok(out) };
     loop {
@@ -108,7 +116,7 @@ fn serialize(d: &Dom, it: &mut Interp<'_>, doc: &Document, n: NodeId, outer: boo
         match *doc.data(node) {
             NodeData::Text(sp) => {
                 it.charge(doc.text(sp).len() as u64 / 16 + 1)?;
-                let raw = doc.parent(node).is_some_and(|p| !doc.is_foreign(p) && RAW_PARENTS.contains(&doc.element_name(p)));
+                let raw = doc.parent(node).is_some_and(|p| !doc.is_foreign(p) && RAW_PARENTS.contains(&doc.element_name(p)) && (doc.element_name(p) != "noscript" || !inert(&tpls)));
                 if raw { put(d, &mut out, doc.text(sp))? } else { escape(d, &mut out, doc.text(sp), false)? }
             }
             NodeData::Comment(sp) => {
@@ -121,9 +129,6 @@ fn serialize(d: &Dom, it: &mut Interp<'_>, doc: &Document, n: NodeId, outer: boo
             NodeData::Element { name, attrs } => {
                 let tag = doc.atom_str(name);
                 let html = !doc.is_foreign(node);
-                if html && tag == "noscript" {
-                    return Err(Error::Unsupported(unsupported("serializing a tree with a noscript element (the scripting flag)")));
-                }
                 put(d, &mut out, "<")?;
                 put(d, &mut out, tag)?;
                 for a in doc.attrs(attrs) {
@@ -279,6 +284,9 @@ fn measure_templates(it: &mut Interp<'_>, doc: &Document, root: NodeId) -> R<(us
 fn replace(d: &Dom, it: &mut Interp<'_>, html: &str, n: NodeId, in_frag: bool, put: Put) -> V {
     let this = if let Put::Over(t) = put { Some(t) } else { None };
     let all = matches!(put, Put::All);
+    // `template.innerHTML = ...` fills the contents of the template. Scripting is off for the template and for the nodes in its contents.
+    let tpl_ctx = !in_frag && d.doc.borrow().is_html(n, "template");
+    let scripting = !(tpl_ctx || d.doc.borrow().in_template_content(n));
     let (context, ns, in_form) = {
         let doc = d.doc.borrow();
         let mut in_form = false;
@@ -293,7 +301,8 @@ fn replace(d: &Dom, it: &mut Interp<'_>, html: &str, n: NodeId, in_frag: bool, p
         }
         if in_frag { ("body".to_string(), Ns::Html, false) } else { (doc.element_name(n).to_string(), doc.element_ns(n), in_form) }
     };
-    let base = d.depth_of(it, n)?;
+    // The contents of a template hang one level below it.
+    let base = d.depth_of(it, n)? + (all && tpl_ctx) as usize;
     let lim = {
         let doc = d.doc.borrow();
         FragmentLimits {
@@ -308,7 +317,7 @@ fn replace(d: &Dom, it: &mut Interp<'_>, html: &str, n: NodeId, in_frag: bool, p
     // The parse is native code that cannot be stopped from outside: the input is charged first, and each token's nodes as they are made.
     it.charge(html.len() as u64 / 16 + 1)?;
     let mut stop = None;
-    let parsed = parse_fragment(html, &context, ns, in_form, &lim, &mut |units| match it.charge(units) {
+    let parsed = parse_fragment(html, &context, ns, in_form, scripting, &lim, &mut |units| match it.charge(units) {
         Ok(()) => true,
         Err(e) => {
             stop = Some(e);
@@ -350,7 +359,8 @@ fn replace(d: &Dom, it: &mut Interp<'_>, html: &str, n: NodeId, in_frag: bool, p
     let old = {
         let doc = d.doc.borrow();
         let mut old = 0u64;
-        for _ in doc.children(n).take(if all { usize::MAX } else { 0 }) {
+        let holder = if all && tpl_ctx { doc.template_content(n) } else { Some(n) };
+        for _ in holder.into_iter().flat_map(|h| doc.children(h)).take(if all { usize::MAX } else { 0 }) {
             it.charge(1)?;
             old += 1;
         }
@@ -372,8 +382,10 @@ fn replace(d: &Dom, it: &mut Interp<'_>, html: &str, n: NodeId, in_frag: bool, p
     it.charge(old + count as u64)?;
 
     // Commit. Nothing below runs page code or can fail.
-    d.mo_group(if all { Some(n) } else { None }, || {
+    let group = if all && tpl_ctx { d.doc.borrow().template_content(n) } else { all.then_some(n) };
+    d.mo_group(group, || {
     let mut doc = d.doc.borrow_mut();
+    let n = if all && tpl_ctx { doc.make_template_content(n) } else { n };
     let (prev, before) = match put {
         Put::At(b) => (None, b),
         _ => this.map_or((None, None), |t| (doc.prev_sibling(t), doc.next_sibling(t))),

@@ -125,6 +125,8 @@ pub(crate) enum Task {
     Select(NodeId),
     /// `selectionchange` event of a text control (`browser_selection.rs`).
     SelectionChange(NodeId),
+    /// `selectionchange` event at the document, for the Range and Selection API (`browser_range.rs`). At most one is queued.
+    DocSelectionChange,
     /// The rendering step: `ResizeObserver` delivery (`browser_resize.rs`). At most one is queued.
     Render,
     /// The `scroll` events of a change of an offset (`browser_scroll.rs`). At most one is queued.
@@ -259,6 +261,7 @@ enum Run {
     Deliver { port: ObjId, data: Value },
     Select(NodeId),
     SelectionChange(NodeId),
+    DocSelectionChange,
     Render,
     Scroll,
     AbortTimeout(ObjId),
@@ -319,7 +322,7 @@ impl Dom {
         let ports = &s.ports;
         s.tasks.retain(|_, t| match t {
             Task::Deliver(o) => ports.contains_key(o),
-            Task::Timer(_) | Task::Select(_) | Task::SelectionChange(_) | Task::Render | Task::Scroll | Task::AbortTimeout(_) | Task::Notify | Task::Idle | Task::IdleTimeout(_) => true,
+            Task::Timer(_) | Task::Select(_) | Task::SelectionChange(_) | Task::DocSelectionChange | Task::Render | Task::Scroll | Task::AbortTimeout(_) | Task::Notify | Task::Idle | Task::IdleTimeout(_) => true,
         });
         s.queued = s.ports.values().map(|p| p.inbox.len()).sum();
         s.queued_bytes = s.ports.values().flat_map(|p| p.inbox.iter().map(|m| m.1)).sum();
@@ -501,6 +504,10 @@ impl Dom {
                 }
                 Run::SelectionChange(n)
             }
+            Task::DocSelectionChange => {
+                self.range_task_done();
+                Run::DocSelectionChange
+            }
             Task::Render => {
                 self.frame.queued.set(false);
                 Run::Render
@@ -573,6 +580,11 @@ impl Dom {
             Run::Select(n) | Run::SelectionChange(n) => it.host_scope(|it| {
                 it.charge(1)?;
                 self.fire_at_input(it, n, if matches!(run, Run::Select(_)) { "select" } else { "selectionchange" })?;
+                it.host_checkpoint().map(|_| ())
+            }),
+            Run::DocSelectionChange => it.host_scope(|it| {
+                it.charge(1)?;
+                self.fire_at_document(it, "selectionchange")?;
                 it.host_checkpoint().map(|_| ())
             }),
             Run::Render => {

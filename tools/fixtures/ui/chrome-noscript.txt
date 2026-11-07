@@ -1,0 +1,38 @@
+set-inner-html-is-raw-text	1,NOSCRIPT,"<p>a</p><!--c-->",<p>a</p><!--c-->
+entities-stay-raw	"&amp;<b>&lt;</b>" <noscript>&amp;<b>&lt;</b></noscript>
+unclosed-runs-to-the-end	1,"<p>a<b>c"
+siblings-after-the-end-tag	"x",noscript,u,"z" "<i>1</i>"
+empty	0,<noscript></noscript>
+attributes	a b "<p>" <noscript id="n" class="a b"><p></noscript>
+getter-roundtrip	<noscript><p>a &amp; b</p></noscript>
+getter-escapes-nothing-in-text	a<b&c>d e"f | <noscript>a<b&c>d e"f</noscript>
+getter-element-child-is-written	<p>x&lt;y</p> | <noscript><p>x&lt;y</p></noscript>
+getter-text-and-element-mixed	1<2<b>3&lt;4</b>5&6
+getter-in-parent	<noscript><i>&</noscript>
+getter-comment-child	<!--c--><x>
+getter-nested-noscript	<noscript><a>&</noscript><b>
+getter-in-template-content	<noscript>&lt;i&gt;&amp;</noscript> | &lt;i&gt;&amp; | <noscript>&lt;i&gt;&amp;</noscript>
+context-set-inner-html	"<p>x&amp;</p>" <p>x&amp;</p>
+context-set-text-with-end-tag	"a</noscript><b>c"
+context-created-noscript	"<p>x</p>"
+context-in-template-content	p
+div-context-in-template-content	noscript p
+insert-adjacent-beforeend	noscript "<b>1</b>"
+insert-adjacent-afterbegin-and-around	noscript,div,noscript "<b>1</b>" "2<i>" "</p>3"
+insert-adjacent-in-noscript-context	"<b>","<p>x</p>"
+outer-html-set	noscript "<p>x</p>"
+outer-html-set-on-noscript	b,noscript "2"
+outer-html-getter	<noscript id="s">a<b>&amp;</noscript> | <noscript id="s">a<b>&amp;</noscript> | <div id="d"><noscript id="s">a<b>&amp;</noscript></div>
+in-page-markup	"<p>page</p><img src=x>" 1 true
+in-page-markup-query	0 0 0  <p class=q>page</p>
+in-page-unclosed-eats-the-rest	"<p>a</p><div id=late>b</div></body></html>" false
+in-p-keeps-the-paragraph-open	"a",noscript,"c" true
+in-table-is-fostered	noscript,table tbody
+in-svg-is-an-element	http://www.w3.org/2000/svg  svg,p
+style-inside-is-text	"<style>a{}</style>"
+noscript-in-noscript-text	noscript,"yz" "<noscript>x"
+clone	"<p>c</p>" <noscript id="n"><p>c</p></noscript>
+inside-template-markup	"<p>a</p>" <template id="t"><noscript>&lt;p&gt;a&lt;/p&gt;</noscript></template>
+created-text-node-then-inner-html-read	<noscript><b></noscript> <b>
+textarea-and-title-inside-noscript	"<textarea>a</textarea><title>t</title>"
+script-inside-noscript-is-text	"<script>window.ran=1</script>" 

@@ -1,0 +1,155 @@
+var $ = function (i) { return document.getElementById(i) };
+function kids(n) { return Array.prototype.map.call(n.childNodes, function (c) { return c.nodeType === 3 ? '"' + c.data + '"' : c.nodeType === 8 ? '<!--' + c.data + '-->' : c.nodeName.toLowerCase() + (c.id ? '#' + c.id : '') }).join(',') }
+var log = [];
+function nm(n) { return n === null ? 'null' : n.nodeType === 1 ? n.tagName.toLowerCase() + (n.id ? '#' + n.id : '') : n.nodeType === 3 ? '"' + n.data + '"' : n.nodeName }
+function list(l) { return '[' + Array.prototype.map.call(l, nm).join(',') + ']' }
+function rec(r) { return r.type + ' ' + nm(r.target) + ' +' + list(r.addedNodes) + ' -' + list(r.removedNodes) }
+var mo = new MutationObserver(function (rs) { rs.forEach(function (r) { log.push(rec(r)) }) });
+=== set-puts-the-markup-in-the-contents
+@html <template id=t></template>
+var t = $('t'); t.innerHTML = '<b>x</b>y';
+(function () { return [t.childNodes.length, t.content.childNodes.length, kids(t.content), t.innerHTML].join(' ') })
+=== set-replaces-the-contents
+@html <template id=t><i>old</i><u>old</u></template>
+var t = $('t'), c = t.content, old = c.firstChild; t.innerHTML = '<b>new</b>';
+(function () { return [t.content === c, kids(c), old.parentNode === null, t.innerHTML].join(' ') })
+=== set-empty-clears-the-contents
+@html <template id=t><i>old</i></template>
+var t = $('t'); t.innerHTML = '';
+(function () { return [t.content.childNodes.length, t.innerHTML === ''].join(' ') })
+=== set-null-clears-the-contents
+@html <template id=t><i>old</i></template>
+var t = $('t'); t.innerHTML = null;
+(function () { return [t.content.childNodes.length, '[' + t.innerHTML + ']'].join(' ') })
+=== set-leaves-own-children-alone
+@html <template id=t></template>
+var t = $('t'); t.appendChild(document.createElement('s')); t.innerHTML = '<b>x</b>';
+(function () { return [kids(t), kids(t.content), t.innerHTML].join(' ') })
+=== set-on-created-template
+@html <div id=d></div>
+var t = document.createElement('template'); t.innerHTML = '<p id=p>a</p><!--c-->';
+(function () { return [kids(t), kids(t.content), t.innerHTML].join(' ') })
+=== set-nested-template
+@html <template id=t></template>
+var t = $('t'); t.innerHTML = '<p>a<template id=n><i>n</i></template></p>';
+(function () { var n = t.content.querySelector('#n'); return [kids(t.content), kids(n), kids(n.content), t.innerHTML].join(' ') })
+=== set-attributes-and-entities
+@html <template id=t></template>
+var t = $('t'); t.innerHTML = '<a href="x&amp;y" data-k=1>1 &lt; 2 &amp; 3</a>';
+(function () { var a = t.content.firstChild; return [a.getAttribute('href'), a.textContent, t.innerHTML].join(' ') })
+=== set-scripts-stay-inert
+@html <template id=t></template>
+var t = $('t'); t.innerHTML = '<script>window.ran = 1<\/script><img src=x onerror="window.ran=2">';
+(function () { return [window.ran, kids(t.content), t.content.firstChild.textContent].join(' ') })
+=== set-style-and-textarea
+@html <template id=t></template>
+var t = $('t'); t.innerHTML = '<style>a>b{}</style><textarea>&lt;</textarea><title>x</title>';
+(function () { return [kids(t.content), t.content.childNodes[0].textContent, t.content.childNodes[1].value, t.innerHTML].join(' ') })
+=== set-comment-and-text
+@html <template id=t></template>
+var t = $('t'); t.innerHTML = 'a<!--b-->c';
+(function () { return [kids(t.content), t.innerHTML].join(' ') })
+=== set-html-body-head-tags-are-ignored
+@html <template id=t></template>
+var t = $('t'); t.innerHTML = '<html><head><body class=z>x</body></html>';
+(function () { return [kids(t.content), t.innerHTML].join(' ') })
+=== set-option
+@html <template id=t></template>
+var t = $('t'); t.innerHTML = '<option>a</option><option>b</option>';
+(function () { return [kids(t.content), t.innerHTML].join(' ') })
+=== set-form-in-template
+@html <template id=t></template>
+var t = $('t'); t.innerHTML = '<form id=f1><form id=f2></form></form>';
+(function () { return [kids(t.content), t.innerHTML].join(' ') })
+=== set-form-pointer-from-an-ancestor-form
+@html <form id=o><template id=t></template></form>
+var t = $('t'); t.innerHTML = '<form id=f1></form><p>x</p>';
+(function () { return [kids(t.content), t.innerHTML].join(' ') })
+=== set-formatting-recovery
+@html <template id=t></template>
+var t = $('t'); t.innerHTML = '<b><i>x</b>y</i>z<p>1<p>2';
+(function () { return [kids(t.content), t.innerHTML].join(' ') })
+=== set-svg
+@html <template id=t></template>
+var t = $('t'); t.innerHTML = '<svg><circle r=1 /></svg><math><mi>x</mi></math>';
+(function () { return [kids(t.content), t.content.firstChild.namespaceURI, t.innerHTML].join(' ') })
+=== set-mutation-records-go-to-the-contents
+@html <template id=t><i>old</i></template>
+var t = $('t'); mo.observe(t.content, { childList: true }); mo.observe(t, { childList: true, subtree: true }); t.innerHTML = '<b>1</b><u>2</u>';
+(function () { return log.join(' | ') })
+=== set-mutation-observer-on-the-template-sees-nothing
+@html <template id=t><i>old</i></template>
+var t = $('t'); mo.observe(t, { childList: true, subtree: true }); t.innerHTML = '<b>1</b>';
+(function () { return log.length + ':' + log.join(' | ') })
+=== set-twice
+@html <template id=t></template>
+var t = $('t'); t.innerHTML = '<a></a>'; var a = t.content.firstChild; t.innerHTML = '<b></b>';
+(function () { return [kids(t.content), a.parentNode, t.innerHTML].join(' ') })
+=== set-then-clone
+@html <template id=t></template>
+var t = $('t'); t.innerHTML = '<p>x</p>'; var c = t.cloneNode(true);
+(function () { return [kids(c.content), c.innerHTML, c.content !== t.content].join(' ') })
+=== set-then-import
+@html <template id=t></template><div id=d></div>
+var t = $('t'); t.innerHTML = '<p id=in>x</p>'; $('d').appendChild(t.content.cloneNode(true));
+(function () { return [kids($('d')), $('in') !== null, $('d').innerHTML].join(' ') })
+=== set-then-append-the-contents
+@html <template id=t></template><div id=d></div>
+var t = $('t'); t.innerHTML = '<p>x</p><q>y</q>'; $('d').appendChild(t.content);
+(function () { return [kids($('d')), kids(t.content), t.innerHTML === ''].join(' ') })
+=== get-after-direct-content-edit
+@html <template id=t></template>
+var t = $('t'); t.content.appendChild(document.createElement('hr')); t.content.appendChild(document.createTextNode('<&>'));
+(function () { return t.innerHTML })
+=== set-in-a-template-in-the-contents
+@html <template id=o><template id=i></template></template>
+var i = $('o').content.firstChild; i.innerHTML = '<b>1</b>';
+(function () { return [kids(i), kids(i.content), $('o').innerHTML].join(' ') })
+=== set-of-a-template-with-noscript
+@html <template id=t></template>
+var t = $('t'); t.innerHTML = '<noscript><p>x</p></noscript>';
+(function () { var n = t.content.firstChild; return [kids(n), t.innerHTML].join(' | ') })
+=== insert-adjacent-beforeend-on-a-template
+@html <template id=t></template>
+var t = $('t'); t.insertAdjacentHTML('beforeend', '<b>x</b>');
+(function () { return [kids(t), kids(t.content), t.innerHTML].join(' ') })
+=== insert-adjacent-afterbegin-on-a-template
+@html <template id=t><i>old</i></template>
+var t = $('t'); t.insertAdjacentHTML('afterbegin', '<b>x</b>');
+(function () { return [kids(t), kids(t.content), t.innerHTML].join(' ') })
+=== insert-adjacent-beforebegin-of-a-template
+@html <div id=d><template id=t></template></div>
+var t = $('t'); t.insertAdjacentHTML('beforebegin', '<b>x</b>');
+(function () { return [kids($('d')), kids(t.content)].join(' ') })
+=== outer-html-set-of-a-child-of-the-contents
+@html <template id=t><p id=p>old</p></template>
+var t = $('t'); t.content.firstChild.outerHTML = '<b>x</b><u>y</u>';
+(function () { return [kids(t.content), t.innerHTML].join(' ') })
+=== outer-html-set-of-a-template
+@html <div id=d><template id=t><p>old</p></template></div>
+var t = $('t'); t.outerHTML = '<template id=u><b>x</b></template>';
+(function () { var u = $('u'); return [kids($('d')), kids(u.content), $('d').innerHTML].join(' ') })
+=== outer-html-set-in-a-template-in-body-context
+@html <template id=t><p id=p>old</p></template>
+var t = $('t'); t.content.firstChild.outerHTML = '<tr><td>x</td></tr>';
+(function () { return [kids(t.content), t.innerHTML].join(' ') })
+=== set-div-in-the-contents
+@html <template id=t><div id=n></div></template>
+var n = $('t').content.firstChild; n.innerHTML = '<b>1</b>';
+(function () { return [kids(n), $('t').innerHTML].join(' ') })
+=== set-too-deep-reads-the-template-depth
+@html <template id=t></template>
+var t = $('t'); t.innerHTML = '<div><div><div>x</div></div></div>';
+(function () { return [t.content.querySelectorAll('div').length, t.content.querySelector('div div div').textContent].join(' ') })
+=== set-returns-undefined-and-getter-is-a-string
+@html <template id=t></template>
+var t = $('t'); var r = (t.innerHTML = '<p>1</p>');
+(function () { return [typeof r, typeof t.innerHTML, t.innerHTML === r].join(' ') })
+=== insert-adjacent-noscript-on-a-template
+@html <template id=t></template>
+var t = $('t'); t.insertAdjacentHTML('beforeend', '<noscript><p>x</p></noscript>');
+(function () { return [kids(t), kids(t.firstChild)].join(' ') })
+=== outer-html-noscript-in-the-contents
+@html <template id=t><p id=p>old</p></template>
+var t = $('t'); t.content.firstChild.outerHTML = '<noscript><p>x</p></noscript>';
+(function () { return [kids(t.content), kids(t.content.firstChild)].join(' ') })

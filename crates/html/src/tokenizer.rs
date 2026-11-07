@@ -792,6 +792,8 @@ pub(crate) fn raw_text_kind(name: &str) -> Option<(bool, &'static str)> {
         "iframe" => (false, "iframe"),
         "noembed" => (false, "noembed"),
         "noframes" => (false, "noframes"),
+        // Scripting is enabled (this browser runs scripts), so the content of `noscript` is raw text, as in Chrome.
+        "noscript" => (false, "noscript"),
         "script" => (false, "script"),
         "plaintext" => (false, "plaintext"),
         // RAWTEXT and script data: no references at all.

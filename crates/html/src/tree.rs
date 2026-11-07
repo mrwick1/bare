@@ -21,7 +21,7 @@
 //! The standard says that every page, however broken, gives a tree. No error stops the builder.
 //!
 //! Left out (known gaps):
-//! - `<template>`, `<select>` modes, framesets and `<noscript>` (fragment parsing for `innerHTML` is in `tree/fragment.rs` and gates these). Foreign content (SVG and MathML) is cut down: see `foreign.rs`.
+//! - `<select>` modes, framesets, and the "in head noscript" mode (fragment parsing for `innerHTML` is in `tree/fragment.rs` and gates these). The scripting flag is on: `<noscript>` has raw text. Foreign content (SVG and MathML) is cut down: see `foreign.rs`.
 //! - Quirks mode, and merging the attributes of a second `<html>` or `<body>` tag.
 //!
 //! Comments compare Rust with JavaScript, because you know JS.
@@ -301,6 +301,8 @@ struct Builder {
     // Set when we made an HTML element with raw text or RCDATA: `drive` tells the tokenizer, and clears it.
     templates: Vec<NodeId>,
     // The `template` elements, in tree order. `done` moves the children of each into its contents.
+    scripting: bool,
+    // The scripting flag. True for a page (this browser runs scripts): `noscript` has raw text. A fragment for a context in an inert document has it false.
 }
 
 impl Builder {
@@ -317,6 +319,7 @@ impl Builder {
             foster: false,
             raw: None,
             templates: Vec::new(),
+            scripting: true,
         }
     }
 
@@ -802,6 +805,7 @@ impl Builder {
                 self.insert_element(name, attrs, false);
             }
             "title" | "style" | "script" | "noframes" => self.raw_text_element(name, attrs),
+            "noscript" if self.scripting => self.raw_text_element(name, attrs),
             _ => return false,
         }
         true
@@ -1095,6 +1099,7 @@ impl Builder {
                 self.raw_text_element(name, &attrs);
             }
             "iframe" | "noembed" => self.raw_text_element(name, &attrs),
+            "noscript" if self.scripting => self.raw_text_element(name, &attrs),
             "plaintext" => {
                 self.close_p();
                 self.reconstruct_afe();
@@ -1865,6 +1870,18 @@ mod tests {
         let doc = parser.finish();
         assert!(doc.dump().contains("done"));
         assert!(start.elapsed().as_secs() < 2);
+    }
+
+    #[test]
+    fn noscript_has_raw_text_in_the_head_and_the_body() {
+        // The scripting flag is on (headless Chrome 155 gives the same trees).
+        let doc = parse("<!doctype html><html><head><noscript><link rel=stylesheet href=x><b>q</b></noscript><title>t</title></head><body><noscript><p>a</p></noscript><p>after");
+        let dump = doc.dump();
+        assert!(dump.contains("<noscript>\n|       \"<link rel=stylesheet href=x><b>q</b>\"\n|     <title>"), "{dump}");
+        assert!(dump.contains("<noscript>\n|       \"<p>a</p>\"\n|     <p>\n|       \"after\""), "{dump}");
+        // an unclosed one runs to the end of the input
+        let doc = parse("<body><noscript><p>a<div>b");
+        assert!(doc.dump().contains("\"<p>a<div>b\""));
     }
 
     #[test]

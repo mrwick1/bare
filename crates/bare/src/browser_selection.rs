@@ -51,8 +51,9 @@
 //! - Namespace seam: `text_control` is the only HTML-input test of this file's logic.
 //!
 //! Gaps (none is faked)
-//! - The document-level `selectionchange` and `onselectionchange` are absent. `document.getSelection`, `Selection` and `Range` are in
-//!   `browser_range.rs` and are not linked with this selection.
+//! - The document-level `selectionchange` of the Range and Selection API is in `browser_range.rs`. That selection is not linked with this one:
+//!   Chrome sends a text control's change only to the control (it bubbles), and `getSelection()` while a control has a selection differs.
+//!   `onselectionchange` (and every other event handler property) is absent.
 //! - A `type` change keeps the stored selection (Chrome resets it). `setAttribute('value')` clamps the selection when read (Chrome does not
 //!   clamp it). The `value` of `date`, `color` and `file` inputs is not sanitized as in Chrome, so `setRangeText` on them differs.
 //! - A drag that goes on after the pointer left the window, a drag by word or line after a double or triple click, and a drag that starts in
@@ -299,9 +300,19 @@ impl Dom {
     }
 
     /// Fire `select` or `selectionchange` (both bubble, neither is cancelable) at the input when its task runs.
-    /// Nothing is made when no listener is on the event path.
     pub(crate) fn fire_at_input(&self, it: &mut Interp<'_>, n: NodeId, ty: &str) -> R<()> {
-        // Chrome sends nothing to a control that is not in the document when the event is due.
+        self.fire_selection_event(it, n, ty, true)
+    }
+
+    /// Fire `selectionchange` at the document (it does not bubble), for a change of the Range and Selection API.
+    pub(crate) fn fire_at_document(&self, it: &mut Interp<'_>, ty: &str) -> R<()> {
+        let root = self.doc.borrow().root();
+        self.fire_selection_event(it, root, ty, false)
+    }
+
+    /// Nothing is made when no listener is on the event path. A control that is not in the document gets its event too (Chrome), and so do
+    /// the nodes above it; the window is on the path only when the node is in the document.
+    fn fire_selection_event(&self, it: &mut Interp<'_>, n: NodeId, ty: &str, bubbles: bool) -> R<()> {
         let listens = {
             let (doc, st) = (self.doc.borrow(), self.st.borrow());
             let on = |t: Target| st.listeners.get(&t).is_some_and(|v| v.iter().any(|l| &*l.ty == ty));
@@ -312,12 +323,12 @@ impl Dom {
                 cur = p;
                 found |= on(Target::Node(cur));
             }
-            cur == doc.root() && (found || on(Target::Window))
+            found || (cur == doc.root() && on(Target::Window))
         };
         if !listens {
             return Ok(());
         }
-        let ev = self.new_event(it, ty, true, false, false, None)?;
+        let ev = self.new_event(it, ty, bubbles, false, false, None)?;
         self.st.borrow_mut().events.get_mut(&ev).expect("just made").trusted = true;
         self.dispatch(it, Target::Node(n), ev).map(|_| ())
     }
