@@ -38,6 +38,7 @@ const WINDOW_UPDATE: u8 = 8;
 const CONTINUATION: u8 = 9;
 const END_STREAM: u8 = 1;
 const END_HEADERS: u8 = 4;
+const ACK: u8 = 1;
 
 /// The scripted server: the frames that the client sent, and the frames that the test sends.
 struct Peer {
@@ -139,6 +140,13 @@ impl Peer {
         assert_eq!((ty, id), (SETTINGS, 0));
         self.send(&settings(ours));
         p.chunks(6).map(|c| (u16::from_be_bytes([c[0], c[1]]), u32::from_be_bytes([c[2], c[3], c[4], c[5]]))).collect()
+    }
+
+    /// The client has applied our SETTINGS: it sends the ACK only after it did. A request that starts earlier may use the old limits.
+    #[track_caller]
+    fn acked(&mut self) {
+        let (flags, ..) = self.next(SETTINGS);
+        assert_eq!(flags, ACK, "not the ACK of our SETTINGS");
     }
 
     /// The next request: its HEADERS (and CONTINUATION) decoded.
@@ -272,6 +280,9 @@ fn a_request_over_the_stream_limit_waits_for_a_slot() {
     let t1 = spawn(client, get(u1));
     peer.open(&[(3, 1)]);
     let r1 = peer.request();
+    // The second request must find the limit of 1. Without the ACK, the reader may not have applied our SETTINGS yet, and a client may
+    // send up to its default limit until it has (RFC 9113, 6.5.2).
+    peer.acked();
     let t2 = spawn(c2, get(u2));
     // One stream at a time: the second HEADERS is not sent while the first stream is open.
     none_of(&mut peer, HEADERS, 300);
@@ -439,10 +450,11 @@ fn the_window_of_the_client_follows_what_the_caller_reads() {
     need_openssl!();
     let (_pki, mut peer, client) = setup("h2");
     let u = url(&peer, "/big");
+    let (go, wait) = std::sync::mpsc::channel::<()>();
     let t = spawn(client, move |c| {
         let mut s = c.get_stream(&u).map_err(|e| e.to_string())?;
-        // The caller waits before it reads anything.
-        std::thread::sleep(Duration::from_millis(600));
+        // The caller reads nothing until the test says so. A fixed sleep ends too soon on a loaded machine.
+        let _ = wait.recv();
         let mut all = Vec::new();
         s.body.read_to_end(&mut all).map_err(|e| e.to_string())?;
         Ok::<_, String>(all.len())
@@ -464,6 +476,7 @@ fn the_window_of_the_client_follows_what_the_caller_reads() {
         at += 9 + len;
     }
     // The caller reads. Now the updates come, and the server sends the rest.
+    go.send(()).unwrap();
     let mut credit = 0u64;
     let end = std::time::Instant::now() + Duration::from_secs(10);
     let mut sent = 64 * 16384u64;
@@ -551,6 +564,28 @@ fn a_header_block_over_the_block_limit_ends_the_connection() {
         wire.extend(frame(CONTINUATION, 0, r.id, &[0u8; 16_000]));
     }
     peer.send(&wire);
+    let (_, id, p) = peer.next(GOAWAY);
+    assert_eq!(id, 0);
+    assert_eq!(u32::from_be_bytes(p[4..8].try_into().unwrap()), 11, "ENHANCE_YOUR_CALM");
+    assert!(t.join().unwrap().1.is_err());
+}
+
+/// The client stops at its block limit while the server still sends. The server must get the `GOAWAY`: a client that closes a socket with
+/// unread bytes sends a TCP reset, and the server drops what it has not read (the `GOAWAY`) when the reset comes. It is a race, so the
+/// flood is far over the socket buffers: with no linger in the client, the reset comes while most of it is still on the way.
+#[test]
+fn a_connection_error_while_the_server_still_sends_still_delivers_goaway() {
+    need_openssl!();
+    let (_pki, mut peer, client) = setup("h2");
+    let t = spawn(client, get(url(&peer, "/flood")));
+    peer.open(&[]);
+    let r = peer.request();
+    let mut wire = frame(HEADERS, 0, r.id, &[0u8; 16_000]);
+    for _ in 0..100 {
+        wire.extend(frame(CONTINUATION, 0, r.id, &[0u8; 16_000]));
+    }
+    // `s_server` stops reading its input when the client ends its side, so the send must not wait for it.
+    peer.srv.send_detached(wire);
     let (_, id, p) = peer.next(GOAWAY);
     assert_eq!(id, 0);
     assert_eq!(u32::from_be_bytes(p[4..8].try_into().unwrap()), 11, "ENHANCE_YOUR_CALM");
