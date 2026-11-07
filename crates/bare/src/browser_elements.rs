@@ -146,7 +146,7 @@ enum Url {
 }
 
 /// The base URL: the loader's (it follows `<base>`), else the document URL.
-fn base(d: &Dom) -> Option<Rec> {
+pub(crate) fn base(d: &Dom) -> Option<Rec> {
     match d.scripts.base.borrow().as_deref().filter(|b| !b.is_empty()) {
         Some(b) => parse(b, None).ok(),
         None => d.cur_rec().ok(),

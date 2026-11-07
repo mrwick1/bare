@@ -14,7 +14,9 @@ const dir = mkdtempSync(join(process.env.BARE_TMP ?? tmpdir(), 'chrome-topic-'))
 const blank = join(dir, 'blank.html');
 writeFileSync(blank, '<!doctype html><body></body>');
 // BARE_BARS=1 keeps the 15 px scrollbars of the Linux theme (the default hides them), for cases that read the room of a scroll container.
-const c = await open(blank, 400, 300, { bars: process.env.BARE_BARS === '1' });
+// BARE_MEDIA=1 is for the media cases (`BARE_MEDIA=1 node tools/ui/chrome_topic.mjs media`). Headless Chrome with no audio device hangs on `play()`
+// unless it is muted, and `play()` needs a user gesture unless the policy is off.
+const c = await open(blank, 400, 300, { bars: process.env.BARE_BARS === '1', args: process.env.BARE_MEDIA === '1' ? ['--mute-audio', '--autoplay-policy=no-user-gesture-required'] : [] });
 await c.eval(`window.__run = async (html, css, src) => {
   const f = document.createElement('iframe');
   f.style.cssText = 'position:absolute;left:0;top:0;width:400px;height:300px;border:0';

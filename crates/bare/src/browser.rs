@@ -509,6 +509,8 @@ pub struct Dom {
     pub(crate) web: crate::browser_web::WebHost,
     /// `HTMLAnchorElement`, `HTMLAreaElement` and `HTMLTemplateElement` (`browser_elements.rs`).
     pub(crate) els: crate::browser_elements::Els,
+    /// `HTMLMediaElement` and its kin (`browser_media.rs`).
+    pub(crate) media: crate::browser_media::Media,
     /// Constraint validation, `labels` and `form.reset()` (`browser_controls.rs`).
     pub(crate) ctl: crate::browser_controls::CtlHost,
 }
@@ -547,6 +549,7 @@ impl Host for Dom {
         crate::browser_xhr::roots(self, out);
         crate::browser_web::roots(self, out);
         crate::browser_elements::roots(self, out);
+        crate::browser_media::roots(self, out);
         crate::browser_controls::roots(self, out);
         self.resize_roots(out);
         self.frame_roots(out);
@@ -659,6 +662,7 @@ impl Host for Dom {
 
 fn domexc_codes(name: &str) -> u32 {
     match name {
+        "IndexSizeError" => 1,
         "HierarchyRequestError" => 3,
         "InvalidCharacterError" => 5,
         "NoModificationAllowedError" => 7,
@@ -786,6 +790,7 @@ impl Dom {
                             "iframe" => p.iframe,
                             "link" => p.link,
                             "a" | "area" | "template" => crate::browser_elements::proto(self, it, doc.atom_str(name))?,
+                            t @ ("audio" | "video") => crate::browser_media::proto(self, it, n, t)?,
                             t @ ("input" | "form" | "button" | "label") => crate::browser_controls::proto_for(self, it, t)?,
                             "script" => self.scripts.proto.get().copied().unwrap_or(p.html),
                             t @ ("select" | "option" | "optgroup" | "textarea") => crate::browser_select::proto_for(self, it, t)?,
@@ -1091,7 +1096,8 @@ impl Dom {
         // Last: a new host function earlier in this list moves the id of every one after it.
         crate::browser_elements::install(self, it)?;
         nd::install_late(self, it)?;
-        crate::browser_controls::install(self, it)
+        crate::browser_controls::install(self, it)?;
+        crate::browser_media::install(self, it)
     }
 
     pub(crate) fn define_accessor(&self, it: &mut Interp<'_>, o: ObjId, key: PropertyKey, get: ObjId, set: Option<ObjId>) -> R<()> {
@@ -1380,6 +1386,7 @@ impl Browser {
             abort: Default::default(),
             web: Default::default(),
             els: Default::default(),
+            media: Default::default(),
             ctl: Default::default(),
         });
         it.set_host(dom.clone())?;
