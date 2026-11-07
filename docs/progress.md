@@ -1946,3 +1946,24 @@ Checks:
 - `tools/js/cost_matrix.sh`, all 803 rows, base origin/main 088d316 against this change, glibc and jemalloc. No row is over +0.5% under either allocator. Mean change: glibc -0.03% and jemalloc -0.02% (rows a to l and `bare-stress`), glibc -0.34% and jemalloc -0.30% (rows m to z). The 78 rows of the loader, fetch, session, scheduler, sheets, geometry, scroll, style and observer examples: glibc -1.60%, jemalloc -1.38%.
 
 Not tested: other staging routes; a cold DNS cache; a link with packet loss; HTTP/2 servers with the window of 32; a page with custom elements on the cascade path (the cache is off there); `dom_check.sh` and `browser_check.sh`; arjun-e16; Chrome on the same flows with the CPU throttled to match the load.
+
+## Staging journey through `bare-drive` (S4 exit, S5 topic 5 first run)
+
+On 2026-11-07, main 3d80147, `bare-drive` ran the 8 steps of the acceptance journey on live staging through the real hit test and input path (`bare::control`). The run passed headless and in a Wayland window on a hyprcage screen. This is the first pass through visible input, so it closes the S4 exit check. The step file is `tools/drive/staging-journey.steps`.
+
+| Run | Result | Steps | Total |
+| --- | --- | --- | --- |
+| Headless | ok, exit 0 | 25 | about 10 s |
+| Window (`--window`) | ok, exit 0 | 27 | 9.2 s |
+
+Step times in the window run: open `/` 767 ms, log in (submit) 1,982 ms, Agents link 1,043 ms, search with Enter 1,484 ms, reload 1,563 ms, account menu 268 ms, sign out 428 ms, open `/agents` without a session 663 ms. The token is in `sessionStorage` after login. Sign out removes it (`sessionStorage.length` is 0).
+
+Changes to the first guess of the step file:
+
+- The page has two Agents links (desktop and mobile navigation). The CSS locator `a[href='/agents']` matched both and failed as `duplicate`. `role=link name="Agents"` matches one.
+- The search box has no placeholder. The step uses `input[type=search]`.
+- The file now checks the token after login and after sign out, and the `q=` query after the search and after the reload.
+
+The credentials came from the vault into a mode 600 file in `/dev/shm`, removed after the run. A scan of all output files (JSON, logs, screenshots) found neither the email nor the password.
+
+Not done: S5 topic 4 (local fixture app with invalid credentials, expiry and logout), topic 6 (repeated runs, retention). Only one run of each mode.
