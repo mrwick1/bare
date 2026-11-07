@@ -27,7 +27,8 @@
 // `eval` is in the way. QuickJS resolves it to a closure variable reference at compile time. SpiderMonkey keeps a
 // `BindingKind` for each name, and it keeps a binding that no closure captures out of the environment object. This
 // engine has neither `with` nor `eval`, and its environments are an arena (`envs`), so the hop count and the slot index
-// are enough. Frame slots for variables that no closure captures need a different environment layout: not done.
+// are enough. A function that has no inner function or class keeps its variables in a frame, not in an environment (see
+// "Frame slots" below). A function with an inner function or class keeps its environment: not done.
 //
 // If `with` or a direct `eval` is ever added, the first walk must open a `Barrier` for the code that it can reach.
 // Today the walk rejects `with` and the engine has no `eval`, so no scope is dynamic.
@@ -40,6 +41,23 @@ const LOCAL: u32 = 1 << 30;
 const MAX_HOPS: u32 = 0x3FFF;
 /// A site whose name no scope of the script declares.
 const GLOBAL: u32 = 1 << 29;
+/// A site in a function with frame slots, and the slot of its binding: `FRAME | slot`. The slot is relative to `Interp::fp`.
+const FRAME: u32 = 1 << 27;
+/// A pattern site of a `let`, `const` or `catch` parameter that is not in a function with frame slots.
+const NOFRAME: u32 = 1 << 26;
+/// The environment that holds the frames (`Interp::new`).
+const FRAME_ENV: u32 = 1;
+/// What the first walk saw in a function (`FScope::fl`). `FL_NOFR`: something that keeps the function out of frame slots: an inner
+/// function or class, `new.target`, `super` or `delete name`. `FL_THIS`: it names `this`. `FL_EAGER`: it has a loop or a call, so
+/// one call can be long or recursive.
+const FL_NOFR: u8 = 1;
+const FL_THIS: u8 = 2;
+const FL_EAGER: u8 = 4;
+/// The most frame slots of one function. A larger one keeps its environment.
+const FR_MAX: usize = 255;
+/// In `stmt_label`: a block, a `switch` or a loop head with `let` or `const` in frame slots: `FR_MARK | base << 12 | len`. A `try`
+/// whose `catch` is in frame slots: `FR_MARK`. No other statement uses `stmt_label` at these places.
+const FR_MARK: u32 = 1 << 31;
 
 #[derive(Clone, Copy)]
 enum RKind {
@@ -53,8 +71,8 @@ enum RKind {
     Switch(StmtId),
     /// The `let`/`const` declaration of a `for`, `for-in` or `for-of`.
     ForVar(StmtId),
-    /// A `catch` clause: its parameter.
-    Catch(Option<PatId>),
+    /// A `catch` clause: its parameter, and the `try` statement.
+    Catch(Option<PatId>, StmtId),
 }
 
 struct RScope {
@@ -64,6 +82,11 @@ struct RScope {
     /// Sorted when there are more than 16.
     start: u32,
     len: u32,
+    /// A scope of a function with frame slots (`fr_layout`): it makes no environment, and its names are in the frame from slot `base`.
+    frame: bool,
+    base: u32,
+    /// The function that the scope is in (an index of `Interp::scopes`; the script for a scope outside functions).
+    func: u32,
 }
 
 /// Slots of the identifier sites of one script. The scopes that they refer to are in `Interp::sc_all`.
@@ -88,7 +111,7 @@ impl<'p> Interp<'p> {
     /// Open a scope in the walk. Give the result to `sc_end`.
     fn sc_begin(&mut self, kind: RKind) -> u32 {
         let saved = self.sc_cur;
-        self.sc_all.push(RScope { parent: saved, kind, start: NONE, len: 0 });
+        self.sc_all.push(RScope { parent: saved, kind, start: NONE, len: 0, frame: false, base: 0, func: self.sc_fn as u32 });
         self.sc_cur = self.sc_all.len() as u32 - 1;
         saved
     }
@@ -183,7 +206,7 @@ impl<'p> Interp<'p> {
                     }
                 }
             }
-            RKind::Catch(p) => {
+            RKind::Catch(p, _) => {
                 if let Some(p) = p {
                     self.pat_idents(p, out);
                 }
@@ -217,7 +240,13 @@ impl<'p> Interp<'p> {
         if v.len() > 16 { v.binary_search(&n).is_ok() } else { v.contains(&n) }
     }
 
-    /// Resolve the name `n` of a site in `scope`, once.
+    /// The frame slot of the name `n` in the frame scope `s`.
+    fn sc_slot(&self, s: u32, n: u32) -> Option<u32> {
+        let sc = &self.sc_all[s as usize];
+        self.sc_pool[sc.start as usize..(sc.start + sc.len) as usize].iter().position(|&x| x == n).map(|i| sc.base + i as u32)
+    }
+
+    /// Resolve the name `n` of a site in `scope`, once. A frame scope makes no environment, so it adds no hop.
     #[cold]
     fn sc_resolve(&mut self, n: u32, mut scope: u32) -> u32 {
         let mut hops = 0;
@@ -225,14 +254,19 @@ impl<'p> Interp<'p> {
             if matches!(self.sc_all[scope as usize].kind, RKind::Barrier) {
                 return 0;
             }
-            if self.sc_declares(scope, n) {
+            let frame = self.sc_all[scope as usize].frame;
+            if frame {
+                if let Some(slot) = self.sc_slot(scope, n) {
+                    return FRAME | slot;
+                }
+            } else if self.sc_declares(scope, n) {
                 return if hops < MAX_HOPS { LOCAL | hops << 16 | 0xFFFF } else { 0 };
             }
             let p = self.sc_all[scope as usize].parent;
             if p == NONE {
                 return GLOBAL;
             }
-            hops += 1;
+            hops += !frame as u32;
             scope = p;
         }
     }
@@ -241,8 +275,11 @@ impl<'p> Interp<'p> {
     #[inline(always)]
     fn find_name(&mut self, n: u32, site: u32) -> Option<(u32, usize)> {
         let r = self.find_name_fast(n, site);
+        // A frame slot is in no environment of the chain, so the search cannot show it.
         #[cfg(debug_assertions)]
-        assert_eq!(r, self.lookup(n), "static scope resolution of '{}' differs from the search", self.names[n as usize]);
+        if r.is_none_or(|(e, _)| e != FRAME_ENV) {
+            assert_eq!(r, self.lookup(n), "static scope resolution of '{}' differs from the search", self.names[n as usize]);
+        }
         r
     }
 
@@ -264,6 +301,11 @@ impl<'p> Interp<'p> {
             }
         } else if s == GLOBAL && self.envs[0].bindings.is_empty() {
             return None;
+        } else if s & (UNRES | FRAME) == FRAME {
+            let i = self.fp + (s & 0xFFFF) as usize;
+            if self.envs[FRAME_ENV as usize].bindings.get(i).is_some_and(|b| b.name == n) {
+                return Some((FRAME_ENV, i));
+            }
         }
         self.find_name_slow(n, site, s)
     }
@@ -272,11 +314,24 @@ impl<'p> Interp<'p> {
     #[inline(never)]
     fn find_name_slow(&mut self, n: u32, site: u32, mut s: u32) -> Option<(u32, usize)> {
         if s & UNRES != 0 {
-            if s & SEEN == 0 {
+            let scope = (s & !(UNRES | SEEN)) - 1;
+            // A site in a function with frame slots has no environment to search, so it resolves at its first run. While no
+            // function has a frame (`fr_any`), no scope is a frame scope, and the first run of a site is a search, as before.
+            if s & SEEN == 0 && !(self.fr_any && self.sc_all[scope as usize].frame) {
                 self.slots.sites[site as usize] = s | SEEN;
                 return self.lookup(n);
             }
-            s = self.sc_resolve(n, (s & !(UNRES | SEEN)) - 1);
+            // The first call of a function that may get its frame (`FR_WAIT`) resolves nothing: a site can run twice in one call
+            // (`typeof x` reads its site twice), and a resolution for an environment would not suit the frame.
+            let sc = &self.sc_all[scope as usize];
+            if !sc.frame && self.scopes[sc.func as usize].fr == FR_WAIT {
+                return self.lookup(n);
+            }
+            s = self.sc_resolve(n, scope);
+        }
+        if s & (LOCAL | FRAME) == FRAME {
+            self.slots.sites[site as usize] = s;
+            return Some((FRAME_ENV, self.fp + (s & 0xFFFF) as usize));
         }
         let mut found = None;
         if s == GLOBAL {
@@ -304,5 +359,269 @@ impl<'p> Interp<'p> {
         }
         self.slots.sites[site as usize] = s;
         found.or_else(|| self.lookup(n))
+    }
+}
+
+/// The state of a function for frame slots (`FScope::fr`). `FR_ENV`: always an environment (a class member, an async function or
+/// a generator, a function in a class body, or a function that the decision below refused). The first walk gives any other
+/// function `FR_EAGER` if it has a loop or a call (`FScope::eager`: one call can be long or recursive) or `FR_NEW`. The first
+/// walk decides nothing else. The first call of an `FR_NEW` function sets `FR_WAIT` and runs in an environment, with its sites
+/// not resolved (they run once). The first call of an `FR_EAGER` function and the next call of an `FR_WAIT` function decide
+/// (`fr_gate`). So a function that is never called pays nothing, and one that runs once pays one store. `FR_ON`: frame slots.
+const FR_ENV: u8 = 0;
+const FR_NEW: u8 = 1;
+const FR_EAGER: u8 = 2;
+const FR_WAIT: u8 = 3;
+const FR_ON: u8 = 4;
+
+// ---- Frame slots
+//
+// A function that no closure can reach into keeps its variables in a frame: a run of `Binding`s at the end of
+// `envs[FRAME_ENV].bindings`, from `Interp::fp`. It makes no environment for the call, and none for a block, a loop head, a
+// `switch` or a `catch` inside it. V8 keeps such locals in registers and SpiderMonkey in frame slots.
+//
+// Which functions: the first walk leaves a function a frame candidate when nothing in it can capture or name its scope: no inner function or
+// class (so no closure can read a variable of it), no `arguments`, no `new.target`, no `super`, no `delete name`, no `this`
+// (an arrow function may use `this`: it reads the one of its closure), and it is a plain synchronous function with simple
+// parameters. Async functions and generators keep their environment because their variables must survive a suspension.
+// This engine has no `eval` and no `with`, so no code can name a local by a string.
+//
+// When: a function with a loop or a call (`FScope::eager`) gets its frame at its first call: one call can be long or recursive.
+// A function with neither gets it at its second call, so a function that runs once pays no layout. Its first call keeps an
+// environment, and a site of it resolves nothing during that call (`find_name_slow`, `pat_frame_slow`), so no site meets the frame
+// layout resolved for an environment. The one other way to run a site twice is a second call of the function while the first
+// runs (a getter that calls back): `fr_gate` sees the first call on the call stack and keeps the environment for good.
+//
+// The layout (`fr_layout`) gives each name of each scope of the function a slot (parameters first, then the `var`s of the
+// function, then its `let` and `const`, then the scopes inside in source order) and builds the template of the frame: the
+// name and flags of each slot. A call copies the template (a `let` or `const` starts without `INIT`: its TDZ), stores the
+// arguments in the first slots and runs. A scope inside the function has `RScope::frame`, and its sites resolve at their first
+// run to `FRAME | slot`. A lookup from a frame scope to a name outside it adds no hop for the scopes of the function.
+//
+// A block, loop head or `switch` with lexical names puts its slots in the TDZ again each time it is entered (`fr_tdz`), as a new
+// environment would. No per-iteration copy is needed: no closure can see an earlier iteration.
+//
+// The values of a frame are not GC roots by themselves: `collect` needs no running call, and a frame exists only during a call.
+// Environment 1 is a live environment, so `roots` (for a host that asks while a call runs) includes them.
+
+impl<'p> Interp<'p> {
+    /// Append the names of pattern `p` as bindings with `flags`.
+    fn fr_put(&self, p: PatId, flags: u8, out: &mut Vec<Binding>, names: &mut Vec<u32>) {
+        names.clear();
+        self.pat_idents(p, names);
+        out.extend(names.iter().map(|&name| Binding { name, flags, value: Value::Undefined }));
+    }
+
+    /// Append the `let` and `const` names of a statement list. A `let` has no `INIT` (TDZ) and is `MUT`, a `const` has neither.
+    fn fr_lex(&self, l: List<Stmt>, out: &mut Vec<Binding>, names: &mut Vec<u32>) {
+        for s in self.prog.list(l) {
+            if let StmtKind::Var { kind, decls } = self.prog.stmt(s).kind
+                && kind != VarKind::Var
+            {
+                for d in self.prog.list(decls) {
+                    self.fr_put(self.prog.decl(d).target, if kind == VarKind::Let { MUT } else { 0 }, out, names);
+                }
+            }
+        }
+    }
+
+    /// The bindings that a scope of a frame function declares, in slot order. A repeated name is dropped.
+    fn fr_binds(&self, kind: RKind, out: &mut Vec<Binding>, names: &mut Vec<u32>) {
+        let prog = &self.prog;
+        let base = out.len();
+        match kind {
+            RKind::Fn(fid, _) => {
+                let f = *prog.func(fid);
+                for p in prog.list(f.params) {
+                    self.fr_put(p, INIT | MUT, out, names);
+                }
+                out.extend(self.scopes[fid.index()].vars.iter().map(|&name| Binding { name, flags: INIT | MUT, value: Value::Undefined }));
+                if let Body::Block(l) = f.body {
+                    self.fr_lex(l, out, names);
+                }
+            }
+            RKind::Block(s) => {
+                if let StmtKind::Block(l) = prog.stmt(s).kind {
+                    self.fr_lex(l, out, names);
+                }
+            }
+            RKind::Switch(s) => {
+                if let StmtKind::Switch { cases, .. } = prog.stmt(s).kind {
+                    for c in prog.list(cases) {
+                        self.fr_lex(prog.case(c).body, out, names);
+                    }
+                }
+            }
+            RKind::ForVar(s) => {
+                if let StmtKind::Var { kind, decls } = prog.stmt(s).kind {
+                    for d in prog.list(decls) {
+                        self.fr_put(prog.decl(d).target, if kind == VarKind::Let { MUT } else { 0 }, out, names);
+                    }
+                }
+            }
+            RKind::Catch(p, _) => {
+                if let Some(p) = p {
+                    self.fr_put(p, INIT | MUT, out, names);
+                }
+            }
+            RKind::Root | RKind::Barrier => {}
+        }
+        let mut w = base;
+        for r in base..out.len() {
+            if !out[base..w].iter().any(|b| b.name == out[r].name) {
+                out[w] = out[r];
+                w += 1;
+            }
+        }
+        out.truncate(w);
+    }
+
+    /// Whether a function may have frame slots. A class member, a constructor, an async function, a generator, a function with a
+    /// parameter pattern and a named function expression (it binds its own name) keep their environment. The first walk saw the
+    /// rest (`FScope`). A function in a class body keeps its environment too: the end of its walk set `FR_ENV`.
+    fn fr_leaf(&self, fid: FuncId) -> bool {
+        let f = self.prog.func(fid);
+        let fsd = &self.scopes[fid.index()];
+        let is_expr = matches!(self.sc_all[fsd.sc_lo as usize].kind, RKind::Fn(_, true));
+        fsd.fl & FL_NOFR == 0
+            && !fsd.uses_args
+            && (f.kind == FuncKind::Arrow || fsd.fl & FL_THIS == 0)
+            && matches!(f.kind, FuncKind::Normal | FuncKind::Arrow | FuncKind::Method | FuncKind::Getter | FuncKind::Setter)
+            && !f.is_async()
+            && !f.is_generator()
+            && f.simple_params
+            && !(is_expr && f.name.is_some() && f.kind == FuncKind::Normal)
+    }
+
+    /// A call of a function with state `FR_EAGER` or `FR_WAIT`: `true` if it runs in a frame. Decided once. The state `FR_ENV` stays
+    /// if the function is not a leaf, or its frame cannot be made.
+    #[cold]
+    fn fr_gate(&mut self, fid: FuncId) -> bool {
+        let me = fid.index();
+        // The first call has not returned (a recursive call, or a getter that calls back): its sites resolve for an environment,
+        // so this function keeps its environment.
+        let cur = self.cur as u32;
+        let running = self.scopes[me].fr == FR_WAIT && self.stk.frames.iter().any(|f| f.script == cur && matches!(f.at, Where::Func(x) if x == fid));
+        if running || !self.fr_leaf(fid) {
+            self.scopes[me].fr = FR_ENV;
+            return false;
+        }
+        self.fr_layout(fid)
+    }
+
+    /// Give the scopes of a function that may have frame slots their slots, and build the template of its frame in `fr_pool`.
+    /// `false`: the function keeps its environment (too many slots, or a repeated parameter name). Decided once. It makes no allocation
+    /// once the pools are big enough: this runs once for each function, and many functions run once.
+    #[cold]
+    fn fr_layout(&mut self, fid: FuncId) -> bool {
+        let me = fid.index();
+        self.scopes[me].fr = FR_ENV;
+        let lo = self.scopes[me].sc_lo as usize;
+        // `func` is an index in the function table of one script. The scopes of the next script follow the last function, and its root can have the same index.
+        let hi = lo + self.sc_all[lo..].iter().take_while(|r| r.func as usize == me && !matches!(r.kind, RKind::Root)).count();
+        let prog = self.prog.clone();
+        let f = *prog.func(fid);
+        let mut pool = std::mem::take(&mut self.fr_pool);
+        let mut names = std::mem::take(&mut self.fr_names);
+        let first = pool.len();
+        let mut ok = true;
+        for s in lo..hi {
+            self.fr_binds(self.sc_all[s].kind, &mut pool, &mut names);
+            if pool.len() - first > FR_MAX {
+                ok = false;
+                break;
+            }
+            self.fr_ends.push(pool.len() as u32);
+        }
+        // The arguments go to the first slots, so the parameter names must be distinct.
+        ok = ok && prog.list(f.params).enumerate().all(|(i, p)| pool.get(first + i).is_some_and(|b| b.name == self.pat_name[p.index()]));
+        if ok {
+            let mut base = first as u32;
+            for (s, &end) in (lo..hi).zip(&self.fr_ends) {
+                let start = self.sc_pool.len() as u32;
+                self.sc_pool.extend(pool[base as usize..end as usize].iter().map(|b| b.name));
+                let (rel, len) = (base - first as u32, end - base);
+                let sc = &mut self.sc_all[s];
+                (sc.start, sc.len, sc.base, sc.frame) = (start, len, rel, true);
+                match sc.kind {
+                    RKind::Block(st) | RKind::Switch(st) | RKind::ForVar(st) => self.stmt_label[st.index()] = FR_MARK | rel << 12 | len,
+                    RKind::Catch(_, st) => self.stmt_label[st.index()] = FR_MARK,
+                    RKind::Fn(..) | RKind::Root | RKind::Barrier => {}
+                }
+                base = end;
+            }
+            let fsd = &mut self.scopes[me];
+            (fsd.fr, fsd.fr_off, fsd.fr_len) = (FR_ON, first as u32, (pool.len() - first) as u32);
+            self.fr_any = true;
+        } else {
+            pool.truncate(first);
+        }
+        self.fr_ends.clear();
+        self.fr_pool = pool;
+        self.fr_names = names;
+        ok
+    }
+
+    /// Call a function with frame slots: no environment, the variables in a new frame. The caller selected the script of `fid`.
+    #[inline(never)]
+    fn call_frame(&mut self, fid: FuncId, cenv: u32, new: bool, args: &[Value], saved: (u32, bool, usize)) -> Res<Value> {
+        let (saved_env, saved_strict, saved_script) = saved;
+        let f = *self.prog.func(fid);
+        let base = self.envs[FRAME_ENV as usize].bindings.len();
+        let bs = &mut self.envs[FRAME_ENV as usize].bindings;
+        let fsd = &self.scopes[fid.index()];
+        bs.extend_from_slice(&self.fr_pool[fsd.fr_off as usize..(fsd.fr_off + fsd.fr_len) as usize]);
+        for (i, b) in bs[base..base + f.params.len()].iter_mut().enumerate() {
+            b.value = args.get(i).copied().unwrap_or(Value::Undefined);
+        }
+        let saved_fp = std::mem::replace(&mut self.fp, base);
+        self.env = cenv;
+        self.strict = f.strict;
+        let script = self.cur as u32;
+        let r = self.in_frame(script, Where::Func(fid), new, |it| it.run_body(fid, true));
+        self.envs[FRAME_ENV as usize].bindings.truncate(base);
+        self.fp = saved_fp;
+        self.select(saved_script);
+        self.env = saved_env;
+        self.strict = saved_strict;
+        r
+    }
+
+    /// A block, loop head or `switch` with `let` or `const` in frame slots starts: the slots are in their TDZ.
+    #[inline(never)]
+    fn fr_tdz(&mut self, mark: u32) {
+        let b = self.fp + (mark >> 12 & 0xFFF) as usize;
+        for x in &mut self.envs[FRAME_ENV as usize].bindings[b..b + (mark & 0xFFF) as usize] {
+            x.flags &= !INIT;
+        }
+    }
+
+    /// The frame slot (an index in `envs[FRAME_ENV].bindings`) of the name of the pattern site `site`, if it is in a function with
+    /// frame slots. For `let`, `const` and `catch` names, which are declared and not searched.
+    #[inline(never)]
+    fn pat_frame(&mut self, n: u32, site: u32) -> Option<usize> {
+        let s = self.slots.sites[site as usize];
+        if s & (UNRES | FRAME) == 0 { None } else { self.pat_frame_slow(n, site, s) }
+    }
+
+    #[inline(never)]
+    fn pat_frame_slow(&mut self, n: u32, site: u32, mut s: u32) -> Option<usize> {
+        if s & UNRES != 0 {
+            let scope = (s & !(UNRES | SEEN)) - 1;
+            let sc = &self.sc_all[scope as usize];
+            if !sc.frame {
+                // A function that may get its frame (before its decision) must keep its sites unmarked.
+                if self.scopes[sc.func as usize].fr == FR_ENV {
+                    self.slots.sites[site as usize] = NOFRAME;
+                }
+                return None;
+            }
+            s = self.sc_resolve(n, scope);
+            self.slots.sites[site as usize] = s;
+        }
+        debug_assert!(s & (LOCAL | FRAME) == FRAME, "a declared name of a frame scope has a slot");
+        let i = self.fp + (s & 0xFFFF) as usize;
+        debug_assert_eq!(self.envs[FRAME_ENV as usize].bindings[i].name, n);
+        Some(i)
     }
 }

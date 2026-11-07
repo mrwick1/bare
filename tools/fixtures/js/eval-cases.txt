@@ -533,3 +533,231 @@ function mk(x) { return function () { return x } } var f1 = mk(1), f2 = mk(2); [
 var fs = []; for (let i = 0; i < 2; i++) { switch (i) { case 0: let t = "a" + i; fs.push(() => t); break; default: let u = "b" + i; fs.push(() => u) } } fs.map(f => f()).join()
 === scope_label_and_block_function
 function f() { l: { let q = 1; break l } return typeof q } f()
+=== frame_params_and_vars
+function f(a, b) { var c = a + b; var d; return [a, b, c, d].join() } f(1, 2) + "|" + f(1)
+=== frame_param_and_var_same_name
+function f(a) { var a; var a = a + 1; return a } f(5) + "," + f()
+=== frame_param_assigned
+function f(a, b) { a = a + 1; b += a; return [a, b].join() } f(1, 2)
+=== frame_extra_and_missing_args
+function f(a, b, c) { return [typeof a, typeof b, typeof c].join() } f(1) + "|" + f(1, 2, 3, 4, 5)
+=== frame_recursion_isolated
+function f(n) { var local = n * 2; if (n > 0) f(n - 1); return local } f(4) + "," + f(0)
+=== frame_mutual_recursion
+function ev(n) { var r = n === 0 ? true : od(n - 1); return r } function od(n) { var r = n === 0 ? false : ev(n - 1); return r } [ev(10), od(7), ev(3)].join()
+=== frame_tdz_read
+function f() { try { x; return "no" } catch (e) { return e.name } let x = 1 } f()
+=== frame_tdz_assign
+function f() { try { x = 2; return "no" } catch (e) { return e.name } let x = 1 } f()
+=== frame_tdz_typeof
+function f() { try { return typeof x } catch (e) { return e.name } let x = 1 } f()
+=== frame_tdz_reset_on_block_reentry
+function f() { var out = []; for (var i = 0; i < 3; i++) { try { out.push(y) } catch (e) { out.push(e.name) } let y = i } return out.join() } f()
+=== frame_tdz_reset_in_while
+function f() { var out = [], i = 0; while (i < 3) { { try { out.push(z) } catch (e) { out.push("T") } const z = i; out.push(z) } i++ } return out.join() } f()
+=== frame_tdz_in_initializer
+function f() { try { let a = a + 1; return "no" } catch (e) { return e.name } } f()
+=== frame_const_assign
+function f() { const k = 1; try { k = 2 } catch (e) { return e.name + k } } f()
+=== frame_const_in_loop_body
+function f() { var s = 0; for (var i = 0; i < 3; i++) { const c = i * 2; s += c } return s } f()
+=== frame_const_update
+function f() { const k = 1; try { k++ } catch (e) { return e.name + k } } f()
+=== frame_let_shadow_blocks
+function f() { let a = 1; { let a = 2; { let a = 3 } a += 10 } return a } function g() { let a = 1; { let a = 2; { let a = 3; a++ } a += 10; if (a != 12) return "bad" } return a } f() + "," + g()
+=== frame_let_shadow_param
+function f(a) { { let a = 5; a++ } return a } f(1)
+=== frame_for_let_loop
+function f() { var s = 0; for (let i = 0; i < 5; i++) { let j = i * i; s += j } return s } f()
+=== frame_for_let_nested
+function f() { var s = ""; for (let i = 0; i < 3; i++) for (let j = 0; j < 3; j++) { if (j > i) break; s += i + "" + j + " " } return s } f()
+=== frame_for_let_same_name_as_outer
+function f() { var i = "outer"; for (let i = 0; i < 2; i++) {} return i } f()
+=== frame_for_in_let
+function f(o) { var s = ""; for (let k in o) { let v = o[k]; s += k + v } return s } f({ a: 1, b: 2 })
+=== frame_for_of_let_const
+function f(a) { var s = 0; for (const x of a) { s += x } for (let y of a) { y++; s += y } return s } f([1, 2, 3])
+=== frame_for_of_destructure
+function f(a) { var s = ""; for (const [k, v] of a) { s += k + v } for (var { p, q } of [{ p: 1, q: 2 }]) { s += p + q } return s } f([["a", 1], ["b", 2]])
+=== frame_for_in_var_leaks
+function f(o) { for (var k in o) {} return k } f({ a: 1, b: 2 })
+=== frame_for_of_default_tdz
+function f() { try { for (let [a = b, b] of [[undefined, 1]]) {} return "no" } catch (e) { return e.name } } f()
+=== frame_switch_lexical
+function f(x) { switch (x) { case 1: let a = "one"; return a; case 2: { let a = "two"; return a } default: const b = "d"; return b } } f(1) + f(2) + f(3)
+=== frame_switch_lexical_tdz
+function f(x) { try { switch (x) { case 0: let a = 1; break; case 1: return a } } catch (e) { return e.name } return "none" } f(1) + "," + f(0)
+=== frame_switch_fallthrough_locals
+function f(x) { var r = []; switch (x) { case 1: r.push("a"); case 2: { let t = "b"; r.push(t) } case 3: r.push("c"); break; default: r.push("d") } return r.join("") } f(1) + f(2) + f(3) + f(9)
+=== frame_catch_param_scope
+function f() { var e = "outer"; try { throw "inner" } catch (e) { var seen = e } return e + "," + seen } f()
+=== frame_catch_var_same_name
+function f() { try { throw 1 } catch (e) { var e = 2; return e } } function g() { var r; try { throw 1 } catch (e) { var e = 2 } return typeof e + "," + r } f() + "," + g()
+=== frame_catch_destructure
+function f() { try { throw { m: "x", n: [1, 2] } } catch ({ m, n: [a, b] }) { return m + a + b } } f()
+=== frame_catch_no_param
+function f() { var r = 0; try { throw 1 } catch { r = 5 } return r } f()
+=== frame_catch_block_lexical
+function f() { try { throw 1 } catch (e) { let t = e + 1; { let u = t + 1; return u } } } f()
+=== frame_nested_try_catch_finally
+function f() { var log = []; try { try { throw "a" } catch (e) { log.push(e); throw "b" } finally { log.push("f1") } } catch (e) { log.push(e) } finally { log.push("f2") } return log.join() } f()
+=== frame_finally_return_overrides
+function f() { var x = 1; try { return x } finally { x = 2 } } function g() { try { return "t" } finally { return "f" } } f() + g()
+=== frame_finally_locals_after_break
+function f() { var s = ""; for (var i = 0; i < 3; i++) { try { if (i == 1) continue; s += i } finally { s += "f" + i } } return s } f()
+=== frame_catch_rethrow_in_loop
+function f() { var c = 0; for (let i = 0; i < 4; i++) { try { if (i % 2) throw i; c += 10 } catch (e) { c += e } } return c } f()
+=== frame_label_break_block
+function f() { var r = ""; a: { let x = 1; b: { let y = 2; r += x + y; break a } r += "never" } return r } f()
+=== frame_label_continue_nested_loops
+function f() { var s = ""; outer: for (let i = 0; i < 3; i++) { for (let j = 0; j < 3; j++) { let k = i * 10 + j; if (j == 1) continue outer; s += k + "," } } return s } f()
+=== frame_label_break_loop_with_lets
+function f() { var n = 0; out: while (true) { let a = n; for (const b of [1, 2, 3]) { let c = a + b; n = c; if (c > 5) break out } } return n } f()
+=== frame_break_out_of_block_scope
+function f() { var r = []; for (var i = 0; i < 3; i++) { let a = i; if (i == 1) break; { let b = a + 1; r.push(b) } } return r.join() + "|" + i } f()
+=== frame_do_while_locals
+function f() { var i = 0, s = 0; do { let t = i * 2; s += t; i++ } while (i < 4); return s } f()
+=== frame_destructuring_declarations
+function f(o) { let { a, b: [c, d = 4] } = o; const [x, , y = 9, ...rest] = [1, 2, undefined, 4, 5]; return [a, c, d, x, y, rest.join("")].join() } f({ a: 1, b: [2] })
+=== frame_destructuring_assignment
+function f() { var a, b; [a, b] = [1, 2]; [a, b] = [b, a]; ({ a, b } = { a: a * 10, b: b * 10 }); return a + "," + b } f()
+=== frame_compound_and_update
+function f(n) { var a = n; a += 2; a *= 3; a -= 1; a++; ++a; a--; var b = a++ + ++a; return a + "," + b } f(1)
+=== frame_logical_assign
+function f() { var a = null, b = 0, c = 1; a ??= 5; b ||= 6; c &&= 7; return [a, b, c].join() } f()
+=== frame_closure_free_function_reads_outer
+var g1 = 10; function f(a) { var l = a + g1; return l } function outer() { var o = 5; return function (p) { var q = p + o; return q } } f(1) + "," + outer()(2)
+=== frame_leaf_reads_enclosing_function_vars
+function outer() { var o = 5, w = 7; function leaf(p) { var q = p + o; return q + w } return leaf(1) + leaf(2) } outer()
+=== frame_leaf_writes_enclosing_function_vars
+function outer() { var c = 0; function bump(n) { var t = n * 2; c += t; return c } bump(1); bump(2); return c } outer()
+=== frame_leaf_in_block_scope_of_caller
+function outer() { var r = []; for (let i = 0; i < 3; i++) { let k = i * 2; var leaf = function (p) { var q = p + 1; return q }; r.push(leaf(k)) } return r.join() } outer()
+=== frame_leaf_arrow_reads_this_and_outer
+var o = { v: 3, m() { var a = (x) => { var y = x + this.v; return y }; return a(1) } }; o.m()
+=== frame_arrow_expression_body
+var add = (a, b) => a + b; var sq = (n) => { let m = n * n; return m }; add(1, 2) + sq(4)
+=== frame_leaf_called_by_native
+function dbl(x, i) { var r = x * 2 + i; return r } [1, 2, 3].map(dbl).join()
+=== frame_leaf_sort_comparator
+function cmp(a, b) { var d = a - b; return d } [5, 1, 4, 2].sort(cmp).join()
+=== frame_leaf_throws_through_callers
+function inner(n) { var t = n; if (t > 2) throw new Error("e" + t); return t } function mid(n) { var r = inner(n); return r } function top() { var out = []; for (var i = 1; i < 5; i++) { try { out.push(mid(i)) } catch (e) { out.push(e.message) } } return out.join() } top()
+=== frame_leaf_throw_restores_frame
+function bad() { var a = 1; var b = 2; throw "x" } function good(n) { var a = n; return a } function f() { var keep = "k"; try { bad() } catch (e) {} var z = good(7); return keep + z } f()
+=== frame_error_stack_names_leaf
+function leaf() { var a = 1; return new Error("m").stack } function f() { var s = leaf(); return s.indexOf("leaf") >= 0 } f()
+=== frame_error_from_frame_in_catch_loop
+function thrower(i) { var t = i; if (t % 2) throw new RangeError("r" + t); return t } function f() { var m = []; for (let i = 0; i < 5; i++) { try { m.push(thrower(i)) } catch (e) { m.push(e.name + e.message) } } return m.join() } f()
+=== frame_bound_and_applied
+function f(a, b) { var s = a + b + (this === undefined ? 0 : 0); return s } f.call(null, 1, 2) + f.apply(null, [3, 4]) + f.bind(null, 5)(6)
+=== frame_new_on_plain_function
+function P(a) { var b = a; } var p = new P(1); typeof p + (p instanceof P)
+=== frame_new_returns_object
+function P(a) { var o = { v: a }; return o } new P(4).v
+=== frame_function_length_and_name
+function f(a, b, c) { var x; return x } f.length + f.name
+=== frame_many_locals
+function f() { var a = 1, b = 2, c = 3, d = 4, e = 5, f = 6, g = 7, h = 8, i = 9, j = 10, k = 11, l = 12, m = 13, n = 14, o = 15, p = 16, q = 17, r = 18, s = 19, t = 20; return a + b + c + d + e + f + g + h + i + j + k + l + m + n + o + p + q + r + s + t } f()
+=== frame_many_lets_in_blocks
+function f() { let a = 1; { let b = 2; { let c = 3; { let d = 4; { let e = 5; return a + b + c + d + e } } } } } f()
+=== frame_stale_slot_not_leaked_to_next_call
+function f(x) { if (x) { var a = "set"; } return typeof a } f(true) + f(false)
+=== frame_uninit_var_is_undefined
+function f() { return typeof v + (v === undefined) ; var v = 1 } f()
+=== frame_function_scope_hoisting
+function f() { var r = typeof a; var a = 1; return r + typeof a } f()
+=== frame_var_in_nested_blocks_and_loops
+function f() { for (var i = 0; i < 2; i++) { if (i) { var late = "L" } } return typeof late + i } f()
+=== frame_conditional_and_ternary_locals
+function f(a) { var r = a ? (function () { return 1 })() : 0; return r } f(1) + f(0)
+=== frame_string_building_locals
+function f(n) { var s = ""; for (var i = 0; i < n; i++) { let c = String.fromCharCode(97 + i); s += c } return s } f(5)
+=== frame_object_array_locals
+function f() { var o = { a: 1 }, a = [1, 2, 3]; o.b = a.length; a.push(o.a); return JSON.stringify([o, a]) } f()
+=== frame_unused_params_and_vars
+function f(a, b, c) { var d, e; return 1 } f()
+=== frame_param_default_stays_correct
+var x = "outer"; function f(a = x) { var x = "inner"; return a + x } f()
+=== frame_rest_param_stays_correct
+function f(a, ...r) { var n = r.length; return a + n } f(1, 2, 3)
+=== frame_destructured_param_stays_correct
+function f({ a, b }, [c]) { var s = a + b + c; return s } f({ a: 1, b: 2 }, [3])
+=== frame_duplicate_params_sloppy
+function f(a, a) { var r = a; return r } f(1, 2)
+=== frame_arguments_object_function
+function f(a) { var n = arguments.length; var s = arguments[0] + arguments[1]; return n + "," + s + "," + a } f(1, 2)
+=== frame_arguments_in_arrow_uses_outer
+function f(a) { var g = () => arguments[0]; return g() } f(7)
+=== frame_this_in_plain_function
+var o = { v: 4, get() { var t = this.v; return t } }; o.get()
+=== frame_this_sloppy_global
+function f() { var t = this; return typeof t } f()
+=== frame_named_function_expression_self
+var f = function fact(n) { var r = n <= 1 ? 1 : n * fact(n - 1); return r }; f(5)
+=== frame_named_function_expression_assign_self
+var f = function g() { var before = typeof g; g = 1; return before + typeof g }; f()
+=== frame_typeof_undeclared_in_leaf
+function f() { var local = 1; return typeof nope + typeof local } f()
+=== frame_global_write_from_leaf
+function f() { var local = 2; gw = local * 2; return gw } f() + gw
+=== frame_undeclared_read_throws
+function f() { var l = 1; try { return nope + l } catch (e) { return e.name } } f()
+=== frame_delete_identifier
+var gd = 1; function f() { var local = 2; return [delete local, delete gd, typeof local, typeof gd].join() } f()
+=== frame_strict_assign_to_undeclared
+function f() { "use strict"; var l = 1; try { undeclared1 = l } catch (e) { return e.name } } f()
+=== frame_strict_function
+function f(a) { "use strict"; var b = a + 1; return b } f(1)
+=== frame_function_called_in_its_own_default_loop
+function f(n) { var acc = 0; for (var i = 0; i < n; i++) { acc += g(i) } return acc } function g(k) { var t = k * k; return t } f(5)
+=== frame_call_inside_expression_keeps_locals
+function id(x) { var y = x; return y } function f() { var a = 1, b = 2; var s = id(a) + id(b) * id(3); return [a, b, s].join() } f()
+=== frame_leaf_after_closure_maker_same_names
+function mk(a) { var b = a; return function () { return a + b } } function leaf(a) { var b = a * 2; return b } var c = mk(1); leaf(10) + "," + c()
+=== frame_generator_locals_survive_yields
+function* g(n) { var a = n; let b = 1; for (let i = 0; i < 3; i++) { var t = leaf(i); yield a + b + t; a++; b *= 2 } } function leaf(k) { var q = k * 100; return q } Array.from(g(1)).join()
+=== frame_generator_interleaved
+function* g(id) { var local = id; for (let i = 0; i < 3; i++) { yield local + ":" + i; local += 10 } } var a = g(1), b = g(2); var out = []; for (var k = 0; k < 3; k++) { out.push(a.next().value, b.next().value) } out.join()
+=== frame_generator_return_and_throw_locals
+function* g() { var s = "start"; try { yield s; s = "mid"; yield s } finally { s = "fin" } } var it = g(); var a = it.next().value; var r = it.return("r"); [a, JSON.stringify(r)].join()
+=== frame_generator_calls_leaf_with_locals
+function lf(x) { var y = x + 1; return y } function* g() { var a = lf(1); yield a; var b = lf(a); yield b } var it = g(); [it.next().value, it.next().value].join()
+=== frame_closure_in_for_let_per_iteration
+function f() { var fs = []; for (let i = 0; i < 3; i++) { fs.push(function () { return i }) } return fs.map(function (g) { return g() }).join() } f()
+=== frame_closure_in_for_var_shared
+function f() { var fs = []; for (var i = 0; i < 3; i++) { fs.push(function () { return i }) } return fs.map(function (g) { return g() }).join() } f()
+=== frame_closure_in_loop_body_let
+function f() { var fs = []; for (var i = 0; i < 3; i++) { let k = i * 2; fs.push(() => k) } return fs.map(g => g()).join() } f()
+=== frame_closure_for_of_let
+function f() { var fs = []; for (let x of [1, 2, 3]) { fs.push(() => x) } return fs.map(g => g()).join() } f()
+=== frame_closure_for_in_let
+function f() { var fs = []; for (let k in { a: 1, b: 2 }) { fs.push(() => k) } return fs.map(g => g()).join() } f()
+=== frame_closure_captures_catch_param
+function f() { var fs = []; for (var i = 0; i < 2; i++) { try { throw i } catch (e) { fs.push(() => e) } } return fs.map(g => g()).join() } f()
+=== frame_closure_captures_switch_let
+function f() { var fs = []; for (var i = 0; i < 2; i++) { switch (i) { case 0: let a = "x"; fs.push(() => a); break; default: let b = "y"; fs.push(() => b) } } return fs.map(g => g()).join() } f()
+=== frame_closure_updates_loop_var_after_call
+function f() { var fs = []; for (let i = 0; i < 3; i++) { fs.push(() => i++) } return fs.map(g => g()).join() } f()
+=== frame_closure_mutates_captured_after_leaf_calls
+function leaf(a) { var b = a + 1; return b } function f() { var c = 0; var inc = function () { c += leaf(c); return c }; inc(); inc(); return c } f()
+=== frame_closure_and_leaf_mixed_in_one_loop
+function leaf(a) { var b = a * 2; return b } function f() { var fs = [], s = 0; for (let i = 0; i < 3; i++) { s += leaf(i); fs.push(() => i + leaf(i)) } return s + "," + fs.map(g => g()).join() } f()
+=== frame_sort_with_leaf_and_stateful_locals
+function mk() { var calls = 0; return { cmp: function (a, b) { calls++; var d = a - b; return d }, n: function () { return calls } } } var m = mk(); [3, 1, 2].sort(m.cmp); m.n() > 0
+=== frame_deep_recursion_leaf
+function sum(n) { var r = n; if (n > 0) r += sum(n - 1); return r } sum(60)
+=== frame_ackermann_like_locals
+function ack(m, n) { var r; if (m == 0) r = n + 1; else if (n == 0) r = ack(m - 1, 1); else { var t = ack(m, n - 1); r = ack(m - 1, t) } return r } ack(2, 3)
+=== frame_call_leaf_from_getter_and_setter
+var cnt = 0; function bump(k) { var r = cnt + k; cnt = r; return r } var o = { get g() { return bump(1) }, set s(v) { bump(v) } }; o.g; o.s = 5; o.g + "," + cnt
+=== frame_leaf_in_class_method_context
+class A { m(x) { var y = x * 2; { let z = y + 1; return z } } static s(a) { var b = a; return b } } new A().m(2) + A.s(7)
+=== frame_class_field_and_ctor_locals
+class B { f = 3; constructor(a) { var t = a + this.f; this.t = t } } new B(1).t
+=== frame_leaf_label_with_switch
+function f(x) { var r = ""; l: switch (x) { case 1: { let a = "a"; r += a; break l } case 2: r += "b" } return r } f(1) + f(2)
+=== frame_try_in_for_of_with_let
+function f(a) { var out = []; for (let x of a) { try { let y = x * 2; if (y > 4) throw y; out.push(y) } catch (e) { out.push("c" + e) } finally { out.push("f") } } return out.join() } f([1, 2, 3])
+=== frame_complex_function_mix
+function f(items) { var total = 0, names = []; for (let i = 0; i < items.length; i++) { const it = items[i]; let { n, q = 1 } = it; switch (n) { case "a": total += q; break; case "b": { let d = q * 2; total += d; break } default: names.push(n) } } return total + "|" + names.join() } f([{ n: "a" }, { n: "b", q: 3 }, { n: "c" }])

@@ -2925,6 +2925,10 @@ impl<'a> Parser<'a> {
             }
             let fstart = self.tok.start;
             let f = self.parse_function_rest(fstart, None, fkind, is_async, is_gen)?;
+            let fm = &mut self.p.funcs[f.index()].mode;
+            if *fm == FuncMode::Plain {
+                *fm = FuncMode::Env;
+            }
             let kind = match fkind {
                 FuncKind::Getter => ElemKind::Getter(f),
                 FuncKind::Setter => ElemKind::Setter(f),
