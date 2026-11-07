@@ -23,8 +23,9 @@ pub fn enable() -> bool {
     on()
 }
 
-/// The records so far, oldest first. Clears them.
+/// The records so far, oldest first. Clears them and the marks (a driver that runs for a long time reads only the records).
 pub fn take() -> Vec<Rec> {
+    MARKS.lock().unwrap().clear();
     let mut recs = std::mem::take(&mut *RECS.lock().unwrap());
     recs.sort_by_key(|r| r.at);
     recs
@@ -175,4 +176,17 @@ pub fn dump() {
         eprintln!("mark\t{at}\t{us}\t{name}");
     }
     eprintln!("blocked_us\t{}\nslept_us\t{}", BLOCKED.swap(0, Ordering::Relaxed), SLEPT.swap(0, Ordering::Relaxed));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A driver calls `take` after each step for hours: the marks must not pile up (S5 retention, 9.6 KiB for each journey).
+    #[test]
+    fn take_clears_the_marks() {
+        MARKS.lock().unwrap().push((0, 0, "a".into()));
+        let _ = take();
+        assert!(MARKS.lock().unwrap().is_empty());
+    }
 }

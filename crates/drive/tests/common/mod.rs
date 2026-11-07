@@ -1,5 +1,6 @@
 //! The server of the fixture app (`tools/fixtures/drive`): the pages, a login API with one synthetic user, and a data API that needs
-//! the token of the login. Loopback only; one thread for each connection, keep-alive.
+//! the token of the login (`serve`). The single-page app (`app.html`, `serve_app`) has the login model of the staging app. Loopback only;
+//! one thread for each connection, keep-alive.
 #![allow(dead_code)]
 
 use std::io::{Read, Write};
@@ -9,20 +10,34 @@ use std::path::PathBuf;
 pub const EMAIL: &str = "fixture.user@example.test";
 pub const PASSWORD: &str = "fixture pass 7!";
 const TOKEN: &str = "fixture-token-1";
+/// A second user of the app: a session of this user ends after one data request (the API then answers 401, as for an expired token).
+pub const BRIEF_EMAIL: &str = "brief.user@example.test";
 
-/// Start the server on a free port. Gives its origin (`http://127.0.0.1:PORT`).
+/// What a route gives: the method, the target (path and query), the body and the `Authorization` header.
+type Route = fn(&str, &str, &str, Option<&str>) -> (u16, &'static str, Vec<u8>);
+
+/// Start the server of the pages on a free port. Gives its origin (`http://127.0.0.1:PORT`).
 pub fn serve() -> String {
+    serve_with(pages)
+}
+
+/// Start the server of the single-page app on a free port. Gives its origin.
+pub fn serve_app() -> String {
+    serve_with(app)
+}
+
+fn serve_with(route: Route) -> String {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
     std::thread::spawn(move || {
         for s in listener.incoming().flatten() {
-            std::thread::spawn(move || connection(s));
+            std::thread::spawn(move || connection(s, route));
         }
     });
     format!("http://127.0.0.1:{port}")
 }
 
-fn connection(mut s: TcpStream) {
+fn connection(mut s: TcpStream, route: Route) {
     s.set_nodelay(true).ok();
     let (mut seen, mut piece) = (Vec::new(), [0u8; 4096]);
     loop {
@@ -49,15 +64,19 @@ fn connection(mut s: TcpStream) {
         seen.drain(..want);
         let mut words = head.split_whitespace();
         let (method, target) = (words.next().unwrap_or(""), words.next().unwrap_or("/"));
-        let path = target.split('?').next().unwrap_or("/");
-        let (status, kind, out) = match (path, target.split_once("?n=")) {
-            ("/buttons", Some((_, n))) => (200, "text/html", buttons(n.parse().unwrap_or(1))),
-            _ => reply(method, path, &body, header("authorization").as_deref()),
-        };
+        let (status, kind, out) = route(method, target, &body, header("authorization").as_deref());
         let head = format!("HTTP/1.1 {status} X\r\nContent-Type: {kind}\r\nContent-Length: {}\r\nCache-Control: no-store\r\n\r\n", out.len());
         if s.write_all(head.as_bytes()).and_then(|_| s.write_all(&out)).is_err() {
             return;
         }
+    }
+}
+
+fn pages(method: &str, target: &str, body: &str, auth: Option<&str>) -> (u16, &'static str, Vec<u8>) {
+    let path = target.split('?').next().unwrap_or("/");
+    match (path, target.split_once("?n=")) {
+        ("/buttons", Some((_, n))) => (200, "text/html", buttons(n.parse().unwrap_or(1))),
+        _ => reply(method, path, body, auth),
     }
 }
 
@@ -86,6 +105,39 @@ fn reply(method: &str, path: &str, body: &str, auth: Option<&str>) -> (u16, &'st
         }
         ("GET", "/api/stats") if auth == Some(&format!("Bearer {TOKEN}")) => (200, JSON, b"{\"items\":[\"Calls: 12\",\"Agents: 3\",\"Minutes: 40\"]}".to_vec()),
         ("GET", "/api/stats") => (401, JSON, b"{}".to_vec()),
+        _ => (404, "text/plain", b"not found".to_vec()),
+    }
+}
+
+/// The live tokens of the app and the data requests that each has left.
+static SESSIONS: std::sync::Mutex<Vec<(String, u32)>> = std::sync::Mutex::new(Vec::new());
+
+const AGENTS: [&str; 4] = ["Alpha agent", "Beta agent", "Beta helper", "Gamma agent"];
+
+fn app(method: &str, target: &str, body: &str, auth: Option<&str>) -> (u16, &'static str, Vec<u8>) {
+    const JSON: &str = "application/json";
+    let (path, query) = target.split_once('?').unwrap_or((target, ""));
+    match (method, path) {
+        ("POST", "/api/login") => {
+            let uses = [(EMAIL, u32::MAX), (BRIEF_EMAIL, 1)].into_iter().find(|(e, _)| body == format!("{{\"email\":\"{e}\",\"password\":\"{PASSWORD}\"}}"));
+            let Some((_, uses)) = uses else { return (401, JSON, b"{\"error\":\"invalid\"}".to_vec()) };
+            let mut all = SESSIONS.lock().unwrap();
+            let token = format!("app-token-{}", all.len() + 1);
+            all.push((token.clone(), uses));
+            (200, JSON, format!("{{\"token\":\"{token}\"}}").into_bytes())
+        }
+        ("GET", "/api/agents") => {
+            let mut all = SESSIONS.lock().unwrap();
+            let live = all.iter_mut().find(|(t, n)| *n > 0 && auth == Some(&format!("Bearer {t}")));
+            let Some((_, left)) = live else { return (401, JSON, b"{\"error\":\"expired\"}".to_vec()) };
+            *left -= 1;
+            // The query is `q=` and a URL-encoded text; the tests search for plain words.
+            let q = query.strip_prefix("q=").unwrap_or("").to_lowercase();
+            let list: Vec<String> =
+                AGENTS.iter().enumerate().filter(|(_, a)| a.to_lowercase().contains(&q)).map(|(i, a)| format!("{{\"id\":{i},\"name\":\"{a}\"}}")).collect();
+            (200, JSON, format!("{{\"agents\":[{}]}}", list.join(",")).into_bytes())
+        }
+        ("GET", _) if !path.starts_with("/api/") => (200, "text/html; charset=utf-8", page("app")),
         _ => (404, "text/plain", b"not found".to_vec()),
     }
 }

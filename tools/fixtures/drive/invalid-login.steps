@@ -1,0 +1,10 @@
+# The fixture app (app.html): a wrong password shows an error, keeps the login page and stores no token.
+open ${BASE}/
+expect url~"/login"
+type css="input[name=email]" "${EMAIL}"
+type css="input[name=password]" "not the password"
+click css="form button[type=submit]"
+expect role=alert text="Wrong email or password"
+expect url~"/login"
+expect js "sessionStorage.length === 0"
+expect role=link name="Agents" hidden

@@ -1,0 +1,16 @@
+# The fixture app (app.html): after sign out, the same session cannot open a page of the app again.
+open ${BASE}/agents
+expect url~"/login"
+type css="input[name=email]" "${EMAIL}"
+type css="input[name=password]" "${PASSWORD}"
+click css="form button[type=submit]"
+click role=link name="Agents"
+expect css="#list a" count 4
+click role=button name~"account"
+click role=menuitem name~"sign out"
+expect url~"/login"
+goto ${BASE}/agents?q=${QUERY}
+expect url~"/login"
+expect js "sessionStorage.length === 0"
+reload
+expect url~"/login"
