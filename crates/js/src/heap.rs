@@ -1172,6 +1172,14 @@ impl Heap {
         self.alloc_object(proto, false)
     }
 
+    /// A new ordinary object that keeps its properties in a dictionary from the start. For the global object: its names are read through
+    /// position hints (`own_pos`), and a hint into a dictionary is one load, where a hint into a shape takes three (V8 does this too).
+    pub fn new_dict_object(&mut self, proto: Option<ObjId>) -> R<ObjId> {
+        let o = self.alloc_object(proto, false)?;
+        self.edit_with(o, |ob, sh| ob.to_dict(sh));
+        Ok(o)
+    }
+
     /// A new empty array with the exotic `length`.
     pub fn new_array(&mut self, proto: Option<ObjId>) -> R<ObjId> {
         self.alloc_object(proto, true)
@@ -1244,6 +1252,7 @@ impl Heap {
         Ok(())
     }
 
+    #[inline]
     fn own(&self, o: &Object, key: PropertyKey) -> Option<Property> {
         if let PropertyKey::Index(i) = key
             && let Some(Some(v)) = o.elems.get(i as usize) {
@@ -1760,7 +1769,11 @@ impl Heap {
             _ => 0,
         };
         self.charge(extra)?;
-        self.edit_with(o, |ob, sh| ob.store(sh, key, new));
+        if cur.is_none() && !matches!(key, PropertyKey::Index(_)) {
+            self.edit_with(o, |ob, sh| ob.add_prop(sh, key, new));
+        } else {
+            self.edit_with(o, |ob, sh| ob.store(sh, key, new));
+        }
         Ok(true)
     }
 
@@ -2149,7 +2162,7 @@ impl Object {
             } else if d.entries.len() + 1 > INDEX_AT {
                 (d.live as usize + 1) * INDEX_ENTRY_BYTES
             } else { 0 },
-            None if matches!(key, PropertyKey::Index(_)) || sh.count(self.shape) >= shape::MAX_PROPS => {
+            None if matches!(key, PropertyKey::Index(_)) || self.slots.len() >= shape::MAX_PROPS && sh.count(self.shape) >= shape::MAX_PROPS => {
                 (sh.count(self.shape) + 1) * (ENTRY_BYTES + INDEX_ENTRY_BYTES)
             }
             None => SLOT_BYTES * (1 + matches!(p, Property::Accessor { .. }) as usize),

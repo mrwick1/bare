@@ -708,7 +708,7 @@ impl<'p> Interp<'p> {
         let object_proto = e!(heap.new_object(None));
         let function_proto = e!(heap.new_object(Some(object_proto)));
         let array_proto = e!(heap.new_array(Some(object_proto)));
-        let global = e!(heap.new_object(Some(object_proto)));
+        let global = e!(heap.new_dict_object(Some(object_proto)));
         let mut error_protos = [object_proto; 7];
         for p in error_protos.iter_mut() {
             *p = e!(heap.new_object(Some(object_proto)));

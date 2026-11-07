@@ -28,6 +28,7 @@
 //! An `Ic` is plain `Copy` data with no pointer. In JS terms it is a small note that a call site keeps: "last time `o.x` had this
 //! shape, the value was in this slot". A handle in it that has died fails the generation check of every handle read.
 use super::*;
+use std::cell::OnceCell;
 
 // ---------- shapes ----------
 
@@ -61,26 +62,23 @@ pub(super) struct Entry {
 /// after them. The table is copied when a second branch starts.
 struct Table {
     entries: Vec<Entry>,
-    index: Option<Box<KeyMap>>,
+    /// Key to position, made at the first probe of a table of more than `SCAN_MAX` entries: most tables (the builtins at start) are never probed.
+    index: OnceCell<Box<KeyMap>>,
 }
 
 impl Table {
     /// The entry of `key` among the first `n` of a table with a hash index.
     #[inline(never)]
     fn probe(&self, key: PropertyKey, n: usize) -> Option<&Entry> {
-        let p = *self.index.as_ref()?.get(&key)? as usize;
+        let index = self.index.get_or_init(|| Box::new(self.entries.iter().enumerate().map(|(i, e)| (e.key, i as u32)).collect()));
+        let p = *index.get(&key)? as usize;
         if p < n { Some(&self.entries[p]) } else { None }
     }
 
     fn push(&mut self, e: Entry) {
         self.entries.push(e);
-        let n = self.entries.len();
-        match &mut self.index {
-            Some(m) => {
-                m.insert(e.key, n as u32 - 1);
-            }
-            None if n > SCAN_MAX => self.index = Some(Box::new(self.entries.iter().enumerate().map(|(i, e)| (e.key, i as u32)).collect())),
-            None => {}
+        if let Some(m) = self.index.get_mut() {
+            m.insert(e.key, self.entries.len() as u32 - 1);
         }
     }
 }
@@ -111,8 +109,8 @@ impl Shapes {
         let none = (PropertyKey::Index(0), 0, 0);
         let shape = |count, table| Shape { parent: 0, count, nslots: count, table, child: none, children: None };
         let tables = vec![
-            Table { entries: Vec::new(), index: None },
-            Table { entries: vec![Entry { key: length, slot: 0, attrs: A_W }], index: None },
+            Table { entries: Vec::new(), index: OnceCell::new() },
+            Table { entries: vec![Entry { key: length, slot: 0, attrs: A_W }], index: OnceCell::new() },
         ];
         Shapes { shapes: vec![shape(0, 0), shape(0, 0), shape(1, 1), shape(0, 0)], tables }
     }
@@ -128,7 +126,7 @@ impl Shapes {
         self.shapes.capacity() * size_of::<Shape>()
             + self.shapes.iter().filter_map(|s| s.children.as_ref()).map(|m| m.capacity() * (size_of::<((PropertyKey, u8), u32)>() + 1)).sum::<usize>()
             + self.tables.capacity() * size_of::<Table>()
-            + self.tables.iter().map(|t| t.entries.capacity() * size_of::<Entry>() + t.index.as_ref().map_or(0, |m| m.capacity() * (size_of::<(PropertyKey, u32)>() + 1))).sum::<usize>()
+            + self.tables.iter().map(|t| t.entries.capacity() * size_of::<Entry>() + t.index.get().map_or(0, |m| m.capacity() * (size_of::<(PropertyKey, u32)>() + 1))).sum::<usize>()
     }
 
     /// The properties of `shape` in order.
@@ -147,7 +145,7 @@ impl Shapes {
     }
 
     /// The entry of `key` in `shape`. One walk: the scan of a short table is inline, a hash probe is a call.
-    #[inline]
+    #[inline(always)]
     pub(super) fn find(&self, shape: u32, key: PropertyKey) -> Option<&Entry> {
         let s = &self.shapes[shape as usize];
         let t = &self.tables[s.table as usize];
@@ -185,7 +183,7 @@ impl Shapes {
             s.table
         } else {
             let t = &self.tables[s.table as usize];
-            let mut copy = Table { entries: Vec::with_capacity(count as usize + 1), index: None };
+            let mut copy = Table { entries: Vec::with_capacity(count as usize + 1), index: OnceCell::new() };
             t.entries[..count as usize].iter().for_each(|&e| copy.push(e));
             self.tables.push(copy);
             self.tables.len() as u32 - 1
@@ -224,7 +222,7 @@ pub(super) fn attrs_of(p: &Property) -> u8 {
 }
 
 /// The property that `attrs` and the slots (from the first slot of the property on) describe.
-#[inline]
+#[inline(always)]
 fn build(attrs: u8, slots: &[Value]) -> Property {
     let (enumerable, configurable) = (attrs & A_E != 0, attrs & A_C != 0);
     if attrs & A_ACC != 0 {
@@ -253,7 +251,7 @@ impl Iterator for Props<'_> {
 
 impl Object {
     /// The own named property `key` (an index key only if it is in `dict`; `elems` is the caller's business).
-    #[inline]
+    #[inline(always)]
     pub(super) fn get_prop(&self, sh: &Shapes, key: PropertyKey) -> Option<Property> {
         match &self.dict {
             Some(d) => d.get(key),
@@ -311,21 +309,30 @@ impl Object {
                 }
                 return;
             }
-            Some(_) => {}
-            None if !matches!(key, PropertyKey::Index(_)) => {
-                if let Some(next) = sh.add(self.shape, key, attrs) {
-                    self.shape = next;
-                    match p {
-                        Property::Data { value, .. } => self.slots.push(value),
-                        Property::Accessor { get, set, .. } => {
-                            self.slots.push(get.map_or(Value::Undefined, Value::Object));
-                            self.slots.push(set.map_or(Value::Undefined, Value::Object));
-                        }
-                    }
-                    return;
-                }
+            Some(_) => {
+                self.to_dict(sh);
+                return self.dict.as_mut().unwrap().set(key, p);
             }
             None => {}
+        }
+        self.add_prop(sh, key, p);
+    }
+
+    /// Add the own named property `key`, which the object does not have (the caller has looked).
+    #[inline]
+    pub(super) fn add_prop(&mut self, sh: &mut Shapes, key: PropertyKey, p: Property) {
+        if self.dict.is_none() && !matches!(key, PropertyKey::Index(_))
+            && let Some(next) = sh.add(self.shape, key, attrs_of(&p))
+        {
+            self.shape = next;
+            match p {
+                Property::Data { value, .. } => self.slots.push(value),
+                Property::Accessor { get, set, .. } => {
+                    self.slots.push(get.map_or(Value::Undefined, Value::Object));
+                    self.slots.push(set.map_or(Value::Undefined, Value::Object));
+                }
+            }
+            return;
         }
         self.to_dict(sh);
         self.dict.as_mut().unwrap().set(key, p);

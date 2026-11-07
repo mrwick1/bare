@@ -68,11 +68,11 @@ fn mem(s: &mut Session, what: &str) {
         let f = b.it.heap.footprint();
         let m = |b: usize| b as f64 / 1048576.0;
         eprintln!(
-            "  footprint {what}: object slab {:.2}, property entries {:.2} used of {:.2} ({} objects), elements {:.2} of {:.2}, index tables {:.2}, string units {:.2}, string slab {:.2}, interner {:.2} MiB",
-            m(f.object_slab), m(f.entries_used), m(f.entries_cap), f.objects_with_props, m(f.elems_used), m(f.elems_cap), m(f.index_tables), m(f.string_units), m(f.string_slab), m(f.interner),
+            "  footprint {what}: object slab {:.2}, property slots {:.2} used of {:.2}, dictionary entries {:.2} used of {:.2} ({} dictionary objects), {} objects with properties, elements {:.2} of {:.2}, index tables {:.2}, shapes {:.2} ({} shapes), string units {:.2}, string slab {:.2}, interner {:.2} MiB",
+            m(f.object_slab), m(f.slots_used), m(f.slots_cap), m(f.entries_used), m(f.entries_cap), f.dict_objects, f.objects_with_props, m(f.elems_used), m(f.elems_cap), m(f.index_tables), m(f.shape_bytes), f.shapes, m(f.string_units), m(f.string_slab), m(f.interner),
         );
         let by: Vec<String> = f.by_len.iter().zip(["0", "1", "2", "3", "4", "5-8", "9-16", "17-64", "65+"]).map(|(&(n, u, c), l)| format!("{l}: {n} objs {:.2}/{:.2}", m(u), m(c))).collect();
-        eprintln!("  entries by count ({what}, used/cap MiB): {}", by.join("; "));
+        eprintln!("  properties by count ({what}, used/cap MiB of slots or entries): {}", by.join("; "));
     }
     let mib = |b: usize| b as f64 / 1048576.0;
     let (heap, ev) = s.browser().map_or(Default::default(), |b| (b.it.heap.stats(), b.it.stats()));
