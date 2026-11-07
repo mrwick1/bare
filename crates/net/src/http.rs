@@ -358,11 +358,15 @@ impl Client {
     /// for a while is kept (no `no-store`, no `Vary` but `Accept-Encoding`): this path never asks the server whether a stale copy
     /// changed. The body is copied only when it is kept. A reply that came from the cache is not stored again.
     pub fn keep(&mut self, url: &Url, response: &Arc<Response>, body: &[u8]) {
-        let key = (url.scheme, url.host.clone(), url.port, url.path.clone());
+        // With no `Cache-Control`, a reply is never fresh: most replies stop here.
+        if response.status != 200 || response.header("cache-control").is_none() {
+            return;
+        }
         let fresh_for = match freshness(response) {
-            Some(f) if response.status == 200 && vary_ok(response) && !f.is_zero() => f,
+            Some(f) if vary_ok(response) && !f.is_zero() => f,
             _ => return,
         };
+        let key = (url.scheme, url.host.clone(), url.port, url.path.clone());
         let mut cache = self.cache.lock().unwrap();
         if cache.map.get(&key).is_some_and(|c| Arc::ptr_eq(&c.response, response)) {
             return;
@@ -649,8 +653,13 @@ impl Client {
 
     /// One hop of `send_stream`: a fresh copy from the cache, or a reply from the server whose body is still on the connection.
     fn hop_stream(&mut self, url: &Url, plan: &Plan) -> Result<(Arc<Response>, Option<Body>), Error> {
-        let key = (url.scheme, url.host.clone(), url.port, url.path.clone());
-        let fresh = if plan.cacheable() { self.cache.lock().unwrap().fresh(&key) } else { None };
+        // An empty cache needs no key: most requests of a page that sends no `max-age` pay one lock and no allocation.
+        let fresh = if plan.cacheable() {
+            let cache = self.cache.lock().unwrap();
+            if cache.map.is_empty() { None } else { cache.fresh(&(url.scheme, url.host.clone(), url.port, url.path.clone())) }
+        } else {
+            None
+        };
         Ok(match fresh {
             Some(response) => (response.clone(), Some(Body(Source::Memory(response, 0)))),
             None => {
