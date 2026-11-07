@@ -68,6 +68,7 @@ fn run_loop(p: &mut Page, rx: &mpsc::Receiver<()>, span: Duration) -> (u32, bool
 
 fn open(origin: &str) -> (Page, mpsc::Receiver<()>) {
     let mut p = Page::open(&format!("{origin}/"), (800, 600)).unwrap();
+    p.wait_load(std::time::Duration::from_secs(10)).unwrap();
     p.quiet = true;
     let (tx, rx) = mpsc::channel();
     let tx = std::sync::Mutex::new(tx);

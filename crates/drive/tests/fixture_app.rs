@@ -130,7 +130,8 @@ fn each_failure_kind_is_named() {
         ("expect css=\"#vanish\" visible\nclick role=button name=\"Remove\"\nclick css=\"#vanish\"", "detached", "matched button#vanish before; it left the document"),
         ("expect css=\"#log\" text=\"nope\"", "expect", "its text is \"missing 404\""),
         ("click css=\"p[\"", "not_found", "the selector is not valid"),
-        ("goto http://127.0.0.1:1/x", "page", "the document did not load"),
+        // `goto` returns at once; the next step fails when the load fails.
+        ("goto http://127.0.0.1:1/x\nexpect css=\"#log\" visible", "page", "the document did not load"),
     ];
     for (steps, want, msg) in cases {
         let (k, m, rep) = kind(&origin, steps);
@@ -158,8 +159,8 @@ expect role=button name="Under" hidden
     let (line, f, _) = rep.failure.clone().expect("the hidden check fails");
     assert_eq!((line, f.kind), (8, "expect"), "{json}");
     assert!(rep.steps[1].waited_ms > 100.0 && rep.steps[2].waited_ms > 0.0, "{json}");
-    // The console and the network of the page are in the result.
-    assert!(json.contains(r#"{"line":2,"level":"error","text":"fixture console error"}"#) && json.contains(r#"{"line":2,"level":"log","text":"fixture log 42"}"#), "{json}");
+    // The console and the network of the page are in the result. `open` returns at once: the scripts run in the ticks of the next step.
+    assert!(json.contains(r#"{"line":3,"level":"error","text":"fixture console error"}"#) && json.contains(r#"{"line":3,"level":"log","text":"fixture log 42"}"#), "{json}");
     assert!(rep.net.iter().any(|(_, r)| r.url.ends_with("/missing.json") && r.status == 404), "{json}");
 }
 

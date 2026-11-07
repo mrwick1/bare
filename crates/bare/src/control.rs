@@ -188,7 +188,8 @@ impl Page {
         }
     }
 
-    /// Load `url` as the address bar does, or the current document again (`None`). Gives the reason when no document runs after it.
+    /// Load `url` as the address bar does, or the current document again (`None`). It returns at once: the old document ends, the ticks
+    /// load the next one, and the window shows the old pixels until then. `Err`: the page has no session.
     pub fn navigate(&mut self, url: Option<&str>) -> Result<(), String> {
         if !matches!(self.source, Source::Session(_)) {
             return Err("a page without a session cannot navigate".into());
@@ -208,7 +209,10 @@ impl Page {
     /// The elements that match `selector` now.
     pub fn query_all(&mut self, selector: &str) -> Result<Vec<Handle>, String> {
         let doc = self.doc_id();
-        let b = self.browser().ok_or("no document")?;
+        if self.browser().is_none() {
+            return Err(self.no_document());
+        }
+        let b = self.browser().expect("checked");
         match b.query_all(selector) {
             Ok(list) => Ok(list.into_iter().map(|node| Handle { doc, node }).collect()),
             Err(bare_js::eval::Error::Throw(_)) => Err(format!("the selector is not valid: {selector}")),
@@ -353,7 +357,7 @@ impl Page {
 
     /// Settle what a frame of the window settles: the hover of a still pointer after the boxes moved under it (Chrome's fake mouse move).
     /// The window does it before each frame; a driver with no window does it after each action.
-    fn after_action(&mut self) {
+    pub fn after_action(&mut self) {
         self.rehover();
     }
 
@@ -375,6 +379,17 @@ impl Page {
     /// Type `text` into a field as a user does: click it, select its text with Control+A (so the new text replaces it), then press one key
     /// for each character (a line feed is Enter). Empty text clears the field with Backspace.
     pub fn type_text(&mut self, h: Handle, text: &str) -> Result<(), Refusal> {
+        self.type_start(h, text.is_empty())?;
+        for c in text.chars() {
+            self.type_char(c);
+        }
+        self.after_action();
+        Ok(())
+    }
+
+    /// The start of `type_text`: the checks, the click and the select all. `clear` also deletes the old text. A driver then sends one
+    /// `type_char` in each tick, as a person types.
+    pub fn type_start(&mut self, h: Handle, clear: bool) -> Result<(), Refusal> {
         self.visible_box(h)?;
         if self.disabled(h) {
             return Err(Refusal::Disabled);
@@ -388,19 +403,20 @@ impl Page {
         }
         if self.value(h).is_some_and(|v| !v.is_empty()) {
             self.press("Control+a").expect("a known key");
-            if text.is_empty() {
+            if clear {
                 self.press("Backspace").expect("a known key");
             }
         }
-        for c in text.chars() {
-            let mut buf = [0u8; 4];
-            let spec = if c == '\n' { "Enter" } else { c.encode_utf8(&mut buf) };
-            for e in key_events(spec).expect("one character is a key") {
-                self.handle(e);
-            }
-        }
-        self.after_action();
         Ok(())
+    }
+
+    /// The key events of one character at the focused element (a line feed is Enter).
+    pub fn type_char(&mut self, c: char) {
+        let mut buf = [0u8; 4];
+        let spec = if c == '\n' { "Enter" } else { c.encode_utf8(&mut buf) };
+        for e in key_events(spec).expect("one character is a key") {
+            self.handle(e);
+        }
     }
 
     /// Press a key at the focused element (see `key_events` for the spec). `Err` for a name that is not a key.

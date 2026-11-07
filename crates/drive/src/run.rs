@@ -2,6 +2,9 @@
 //! the page that are due (`Page::tick`) and sleeps until the next one, so a step waits for a condition and never for a fixed time. When
 //! no task is queued and no reply or document is on its way, nothing can change the page, so the step fails at once.
 //!
+//! `open`, `goto` and `reload` return at once, as a link click does: the old document ends, and the ticks of the next steps download,
+//! parse and run the new one. Until it is in, the page has no document, so a locator or an `expect` waits.
+//!
 //! Failure kinds: `not_found`, `duplicate` (a locator must match one element), `hidden`, `disabled`, `covered`, `detached` (it matched,
 //! then left the document), `not_editable`, `no_focus`, `expect` (a check was false), `page` (a load failed, the page stopped or has no
 //! layout). `duplicate`, `not_editable`, `no_focus` and a failed load fail at once; the others wait.
@@ -97,20 +100,12 @@ enum Host {
 impl Host {
     /// An `open` is a new tab of one browser, in a window too: empty storage, and the connections and the HTTP cache of `net`.
     fn open(&mut self, url: &str, size: (u32, u32), window: bool, net: &bare_net::http::Client) -> Result<(), String> {
-        let new = |url: &str, size: (u32, u32), net: &bare_net::http::Client| {
-            let mut p = Page::open_in(url, size, net)?;
-            p.quiet = true;
-            Ok::<_, String>(p)
-        };
         match self {
             // The new page takes the size of the window, not `size`: the compositor can have resized the window, and the window loop
             // calls `resize` only when the window size changes.
             Host::Window(r) => {
                 let (url, net) = (url.to_string(), net.fork());
-                r.call(move |p| {
-                    let size = p.viewport();
-                    p.replace(|| new(&url, size, &net))
-                })?
+                r.call(move |p| p.reopen_in(&url, &net))?
             }
             _ if window => {
                 *self = Host::Window(Remote::open(url, size, net)?);
@@ -119,7 +114,9 @@ impl Host {
             _ => {
                 // The old page ends first, so the two pages do not share the peak of memory. A failed open leaves no page.
                 *self = Host::None;
-                *self = Host::Local(Box::new(new(url, size, net)?));
+                let mut p = Page::open_in(url, size, net)?;
+                p.quiet = true;
+                *self = Host::Local(Box::new(p));
                 Ok(())
             }
         }
@@ -159,6 +156,8 @@ fn fail(kind: &'static str, message: impl Into<String>) -> Fail {
 
 enum Try {
     Done(Option<String>),
+    /// Not done: try again at once (the next key of a `type`).
+    More,
     Again(Fail),
     Stop(Fail),
 }
@@ -170,6 +169,9 @@ struct Memo {
     seen: HashMap<String, Handle>,
     /// The texts typed into password fields since the last step.
     typed: Vec<String>,
+    /// The keys of the `type` step of now that are not sent yet, the last first. One goes in each try, so the tasks of the page run
+    /// between two keys.
+    keys: Option<Vec<char>>,
 }
 
 pub struct StepOut {
@@ -213,12 +215,17 @@ pub fn run(steps: &[Step], opt: &Options, red: &mut Redactor) -> Report {
     let mut timeout = opt.timeout;
     // The CPU time of the window thread at the end of the last step.
     let mut window_cpu = 0u64;
+    // The first network record of the last step that loaded a document: the ticks of later steps load it.
+    let mut nav_first = 0;
     let mut rep = Report { ok: true, steps: Vec::new(), failure: None, logs: Vec::new(), net: Vec::new(), ms: 0.0, window: opt.window, ticks: Ticks::default() };
     for step in steps {
         let t0 = Instant::now();
         let deadline = t0 + timeout;
         let (mut tries, mut busy, mut waited, mut ticks) = (0u32, Duration::ZERO, Duration::ZERO, Ticks::default());
         let (cpu0, net0) = (thread_cpu_ns(), bare_net::trace::blocked_us());
+        if matches!(step.action, Action::Open(_) | Action::Goto(_) | Action::Reload) {
+            nav_first = rep.net.len();
+        }
         let result: Result<Option<String>, Fail> = loop {
             tries += 1;
             let (t, seen) = (Instant::now(), host.work_count());
@@ -241,8 +248,12 @@ pub fn run(steps: &[Step], opt: &Options, red: &mut Redactor) -> Report {
                     let (a, mut m) = (a.clone(), std::mem::take(&mut memo));
                     let (out, ws) = (opt.out.clone(), red.clone());
                     match host.run(move |p| {
-                        let tried = attempt(p, &mut m, &a, out.as_ref(), &ws);
+                        let mut tried = attempt(p, &mut m, &a, out.as_ref(), &ws);
                         let wait = p.tick();
+                        // The document of the last `open`, `goto` or `reload` did not load: no later try can pass.
+                        if let (Try::Again(_), Some(why)) = (&tried, p.load_error()) {
+                            tried = Try::Stop(fail("page", format!("the document did not load: {why}")));
+                        }
                         (m, tried, wait, p.take_logs())
                     }) {
                         Ok((m, tried, wait, logs)) => {
@@ -264,6 +275,7 @@ pub fn run(steps: &[Step], opt: &Options, red: &mut Redactor) -> Report {
             }
             match tried {
                 Try::Done(note) => break Ok(note),
+                Try::More => {}
                 Try::Stop(f) => break Err(f),
                 Try::Again(f) => {
                     let now = Instant::now();
@@ -293,9 +305,10 @@ pub fn run(steps: &[Step], opt: &Options, red: &mut Redactor) -> Report {
         rep.ticks.merge(ticks);
         let first = rep.net.len();
         rep.net.extend(bare_net::trace::take().into_iter().map(|r| (step.line, r)));
-        // A failed step names the network failures of this step: the page only sees `Failed to fetch`.
+        // A failed step names the network failures of this step, and of the document that loads since the last `open`, `goto` or
+        // `reload`: the page only sees `Failed to fetch`.
         let result = result.map_err(|f| {
-            let causes: Vec<String> = rep.net[first..].iter().filter_map(|(_, r)| Some(format!("{}: {}", safe_url(&r.url), r.error.as_ref()?))).take(3).collect();
+            let causes: Vec<String> = rep.net[first.min(nav_first)..].iter().filter_map(|(_, r)| Some(format!("{}: {}", safe_url(&r.url), r.error.as_ref()?))).take(3).collect();
             if causes.is_empty() { f } else { Fail { message: format!("{} (network failures: {})", f.message, causes.join("; ")), ..f } }
         });
         let ms = |d: Duration| d.as_secs_f64() * 1000.0;
@@ -428,11 +441,23 @@ fn attempt(p: &mut Page, m: &mut Memo, a: &Action, out: Option<&PathBuf>, red: &
                 p.click(h).map_err(|r| refused(p, h, r))?;
             }
             Action::Type(loc, text) => {
-                let h = one(p, m, loc)?;
-                if p.is_password(h) {
-                    m.typed.push(text.clone());
+                if m.keys.is_none() {
+                    let h = one(p, m, loc)?;
+                    if p.is_password(h) {
+                        m.typed.push(text.clone());
+                    }
+                    p.type_start(h, text.is_empty()).map_err(|r| refused(p, h, r))?;
+                    m.keys = Some(text.chars().rev().collect());
                 }
-                p.type_text(h, text).map_err(|r| refused(p, h, r))?;
+                let keys = m.keys.as_mut().expect("set");
+                if let Some(c) = keys.pop() {
+                    p.type_char(c);
+                }
+                if !keys.is_empty() {
+                    return Err(Try::More);
+                }
+                m.keys = None;
+                p.after_action();
             }
             Action::Press(key) => p.press(key).map_err(|e| Try::Stop(fail("not_found", e)))?,
             Action::Scroll(loc, dy) => {
@@ -475,7 +500,10 @@ fn check(p: &mut Page, m: &mut Memo, c: &Check) -> Result<(), Try> {
             }
         }
         Check::Js(code) => {
-            let b = p.browser().ok_or_else(|| Try::Again(fail("page", "no document")))?;
+            if p.browser().is_none() {
+                return Err(Try::Again(fail("page", p.no_document())));
+            }
+            let b = p.browser().expect("checked");
             let r = b.run_script(&format!("!!({code}\n)"));
             p.touched();
             match r {

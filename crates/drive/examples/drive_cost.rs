@@ -52,6 +52,7 @@ fn main() {
                 let role = median(rep.steps[N + 1..].iter().map(|s| s.ms * 1000.0).collect());
                 // Direct: the same three events at the same point, straight to the page, as the Wayland loop gives them.
                 let mut p = Page::open(&url, (800, 600)).unwrap();
+                p.wait_load(std::time::Duration::from_secs(10)).unwrap();
                 p.quiet = true;
                 let h = p.query_all(&format!("#b{target}")).unwrap()[0];
                 let (x, y) = p.actionable(h).unwrap();

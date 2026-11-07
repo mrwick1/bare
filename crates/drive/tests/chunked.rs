@@ -126,6 +126,7 @@ fn a_big_document_parses_across_ticks_and_takes_input_during_the_parse() {
     let (origin, seen) = serve();
     let (worst, parse_ticks, clicked, log, js2_before_up) = run_big(move || {
         let mut p = Page::open(&format!("{origin}/"), (800, 600)).unwrap();
+        p.wait_load(std::time::Duration::from_secs(10)).unwrap();
         p.quiet = true;
         let doc = p.generation();
         click(&mut p, "#big");
@@ -164,6 +165,7 @@ fn a_chunked_parse_gives_the_order_and_the_dom_of_a_one_step_parse() {
     let o2 = origin.clone();
     let (live_log, live_dom) = run_big(move || {
         let mut p = Page::open(&format!("{o2}/"), (800, 600)).unwrap();
+        p.wait_load(std::time::Duration::from_secs(10)).unwrap();
         p.quiet = true;
         click(&mut p, "#big");
         let (t, mut worst) = (Instant::now(), Duration::ZERO);
