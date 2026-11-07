@@ -3058,3 +3058,23 @@ Checks (archMachine):
 - Live staging, read only: 23 runs of the journey, all passed. A scan of all output files and `docs/` found neither the email nor the password.
 
 Not tested: `keycost.sh` (no change on the typing path); the size of `site_strs` at the end of a run (it grows with the sites that run; 8 B each); the window (`--window`); arjun-e16; a session with many documents where the age frees memory (the journey has 7 documents).
+
+## B3: the bytecode VM loop stops at the R1 gate (2026-11-08)
+
+B3 built the VM loop (`bc_vm.rs`), the `BARE_JS_EXEC=byte` switch and global cells on arjun-e16. The branch is `t3/engine-b3` at `5d5fd0a`, rebased on #253 and #255. It is not merged. R1 needs `byte` to be 3x better than `tree` on `eval_load loop 10`. After one round on globals it reached 2.49x. Arjun chose to stop the bytecode lane if that round missed 3x. The tree walker stays the only executor. Engine work now follows profiles of the tree walker.
+
+`instructions:u`, scale 10, arjun-e16:
+
+| case | tree | byte | ratio |
+|---|---|---|---|
+| loop (globals) | 6,575,151,887 | 2,645,187,628 | 2.49x |
+| loopfn (locals) | 5,933,168,482 | 1,869,210,160 | 3.17x |
+| calls | 4,656,374,431 | 2,758,424,699 | 1.69x |
+| fib | 225,441,988 | 157,197,614 | 1.43x |
+| closures | 779,028,956 | 569,166,583 | 1.37x |
+
+- First round: 2.14x. The loop no longer decodes wide forms, and each frame has its own registers from a pool. A per-name inline cache for globals made `loop` worse (4.92 G), because the global object is in dictionary mode (62 entries).
+- Second round: global cells. Each name constant keeps the position of its binding in the global dictionary. Every access hits, but a cell access still costs about 55 instructions more than `GetEnv`.
+- `loop` runs 18 ops per iteration at about 73 instructions each. 3x needs about 1,095 instructions per iteration, against 1,320 now. A build without bounds checks reached only 2.76x.
+- Hypothesis, not measured: 3x needs true property cells in the heap, or fused ops in the code generator (compare-and-jump, constant operands).
+- Not run on the branch: the cost matrix, `cargo test --workspace`, test262.
