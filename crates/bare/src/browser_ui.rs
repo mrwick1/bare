@@ -1043,9 +1043,10 @@ pub struct Frame {
 }
 
 /// The element and its ancestors, for each of `:hover`, `:active` and focus.
-fn chains(doc: &Document) -> [Vec<NodeId>; 3] {
+pub(crate) fn chains(doc: &Document) -> [Vec<NodeId>; 3] {
     let u = doc.user();
-    [u.hover, u.active, u.focus].map(|n| std::iter::successors(n, |&p| doc.parent(p)).filter(|&p| matches!(doc.data(p), NodeData::Element { .. })).collect())
+    // The shadow-including ancestors: `:hover` and `:focus-within` match a host (`Document::in_chain`).
+    [u.hover, u.active, u.focus].map(|n| std::iter::successors(n, |&p| doc.parent(p).or_else(|| doc.shadow_host(p))).filter(|&p| matches!(doc.data(p), NodeData::Element { .. })).collect())
 }
 
 impl Browser {
@@ -1067,8 +1068,7 @@ impl Browser {
         let dom = self.dom.clone();
         let styles = self.it.host_scope(|it| dom.cascade_frame(it))?;
         let mut doc = dom.doc.borrow_mut();
-        doc.track_damage();
-        doc.take_damage();
+        doc.track_damage(bare_html::dom::DAMAGE_FRAME);
         Ok(styles)
     }
 
@@ -1103,7 +1103,7 @@ impl Browser {
     pub fn refresh(&mut self, f: &mut Frame) -> R<Option<Change>> {
         let Some((builds, old)) = f.since.take() else { return Ok(None) };
         let dom = self.dom.clone();
-        let Some(marks) = dom.doc.borrow_mut().take_damage() else { return Ok(None) };
+        let Some(marks) = dom.doc.borrow_mut().take_damage(bare_html::dom::DAMAGE_FRAME) else { return Ok(None) };
         self.it.host_scope(|it| {
             let new = chains(&dom.doc.borrow());
             let Some(changed) = dom.restyle_frame(it, &mut f.styles, builds, &marks, &old, &new)? else { return Ok(None) };
