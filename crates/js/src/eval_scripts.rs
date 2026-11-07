@@ -77,6 +77,7 @@ impl<'p> Interp<'p> {
     pub fn realm(heap: Heap, limits: EvalLimits) -> Result<Interp<'p>, Error> {
         let empty = crate::parse::parse_script("", Default::default()).map_err(|_| unsupported("empty script", Span::default()))?;
         let mut it = Self::with_code(Rc::new(empty.into_owned()), heap, limits)?;
+        it.heap.set_setup(true);
         it.install_builtins()?;
         it.install_sc()?;
         it.install_ext()?;
@@ -87,6 +88,7 @@ impl<'p> Interp<'p> {
         it.install_date()?;
         it.install_intl()?;
         it.install_bigint()?;
+        it.heap.set_setup(false);
         Ok(it)
     }
 

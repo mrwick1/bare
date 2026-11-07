@@ -73,6 +73,13 @@ fn mem(s: &mut Session, what: &str) {
         );
         let by: Vec<String> = f.by_len.iter().zip(["0", "1", "2", "3", "4", "5-8", "9-16", "17-64", "65+"]).map(|(&(n, u, c), l)| format!("{l}: {n} objs {:.2}/{:.2}", m(u), m(c))).collect();
         eprintln!("  properties by count ({what}, used/cap MiB of slots or entries): {}", by.join("; "));
+        let c = b.it.ic_counts();
+        let pct = |n: u64| if c.reads == 0 { 0.0 } else { n as f64 * 100.0 / c.reads as f64 };
+        let fills = c.heap.fill_own + c.heap.fill_proto + c.heap.fill_absent;
+        eprintln!(
+            "  member caches {what}: {} reads, own hits {:.1}%, other hits {:.1}%, first runs {:.1}%, fills {:.1}% ({} own, {} proto, {} absent), refused {:.1}%, {} entries ({:.2} MiB), {} epoch bumps",
+            c.reads, pct(c.own_hits), pct(c.heap.chain_hits), pct(c.first_runs), pct(fills), c.heap.fill_own, c.heap.fill_proto, c.heap.fill_absent, pct(c.heap.refused), c.entries, m(c.entries * std::mem::size_of::<bare_js::heap::Ic>()), c.heap.epoch_bumps,
+        );
     }
     let mib = |b: usize| b as f64 / 1048576.0;
     let (heap, ev) = s.browser().map_or(Default::default(), |b| (b.it.heap.stats(), b.it.stats()));
