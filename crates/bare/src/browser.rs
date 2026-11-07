@@ -676,7 +676,10 @@ impl Host for Dom {
     }
 
     fn named_write(&self, it: &mut Interp<'_>, req: bare_js::heap::NamedRequest) -> R<bool> {
-        crate::browser_dataset::write(self, it, req)
+        match crate::browser_navigation_storage::write(self, it, req)? {
+            Some(r) => Ok(r),
+            None => crate::browser_dataset::write(self, it, req),
+        }
     }
 }
 

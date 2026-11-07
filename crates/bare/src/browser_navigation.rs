@@ -639,13 +639,12 @@ pub(crate) fn install(d: &Dom, it: &mut Interp<'_>) -> R<()> {
         protos.push(d.obj(it, op)?);
     }
     let (url, params, iter, loc_proto, hist_proto, storage_proto) = (protos[0], protos[1], protos[2], protos[3], protos[4], protos[5]);
-    let (location, history, local, session) = (d.obj(it, loc_proto)?, d.obj(it, hist_proto)?, d.obj(it, storage_proto)?, d.obj(it, storage_proto)?);
-    // Named property access is not modeled: a write like `localStorage.x = 1` must not look like storage.
-    for o in [local, session] {
-        if let Err(e) = it.heap.prevent_extensions(o) {
-            return Err(it.heap_error(e));
-        }
-    }
+    let (location, history) = (d.obj(it, loc_proto)?, d.obj(it, hist_proto)?);
+    // The two areas are host named objects: `localStorage.x` is `getItem('x')` (`browser_navigation_storage.rs`).
+    let (local, session) = match (it.heap.new_named(Some(storage_proto)), it.heap.new_named(Some(storage_proto))) {
+        (Ok(l), Ok(s)) => (l, s),
+        (Err(e), _) | (_, Err(e)) => return Err(it.heap_error(e)),
+    };
     let _ = d.nav.p.set(NavObjs { url, params, iter, location, history, local, session });
 
     // URL
@@ -701,17 +700,20 @@ pub(crate) fn install(d: &Dom, it: &mut Interp<'_>) -> R<()> {
     def_acc(d, it, hist_proto, "scrollRestoration", hist_scroll, Some(hist_set_scroll))?;
 
     // Storage
-    def_fn(d, it, storage_proto, "getItem", 1, sto::get_item)?;
-    def_fn(d, it, storage_proto, "setItem", 2, sto::set_item)?;
-    def_fn(d, it, storage_proto, "removeItem", 1, sto::remove_item)?;
-    def_fn(d, it, storage_proto, "clear", 0, sto::clear)?;
-    def_fn(d, it, storage_proto, "key", 1, sto::key)?;
+    // The order of Chrome (a `for in` over a `Storage` lists them so).
     def_acc(d, it, storage_proto, "length", sto::length, None)?;
+    for (name, len, h) in [("clear", 0, sto::clear as H), ("getItem", 1, sto::get_item), ("key", 1, sto::key), ("removeItem", 1, sto::remove_item), ("setItem", 2, sto::set_item)] {
+        // WebIDL operations are enumerable (a `for in` over a `Storage` lists them).
+        let f = def_fn(d, it, storage_proto, name, len, h)?;
+        let k = d.key(it, name)?;
+        it.define_data(storage_proto, k, Value::Object(f), true, true, true)?;
+    }
 
     // document and window
     let p = d.p();
     def_acc(d, it, p.document, "URL", doc_url, None)?;
     def_acc(d, it, p.document, "documentURI", doc_url, None)?;
+    def_acc(d, it, p.document, "cookie", crate::browser_cookie::doc_cookie_get, Some(crate::browser_cookie::doc_cookie_set))?;
     def_acc(d, it, p.node, "baseURI", doc_url, None)?;
     def_acc(d, it, p.document, "location", loc_obj, Some(win_set_location))?;
     def_acc(d, it, g, "location", loc_obj, Some(win_set_location))?;
@@ -725,12 +727,13 @@ pub(crate) fn install(d: &Dom, it: &mut Interp<'_>) -> R<()> {
         ("URLSearchParams", params, pr::params_ctor, true),
         ("Location", loc_proto, illegal, false),
         ("History", hist_proto, illegal, false),
-        ("Storage", storage_proto, illegal, false),
+        ("Storage", storage_proto, illegal, true),
     ];
     for (name, proto, h, ctor) in ifaces {
         let f = match name {
             "URL" => d.add_ctor_nt(it, h, name, 1)?,
             "URLSearchParams" => d.add_ctor_nt(it, h, name, 0)?,
+            "Storage" => d.add_fn(it, h, name, 0, ctor)?,
             _ => d.add_fn(it, h, name, 1, ctor)?,
         };
         it.define_data(f, kp, Value::Object(proto), false, false, false)?;
@@ -741,6 +744,13 @@ pub(crate) fn install(d: &Dom, it: &mut Interp<'_>) -> R<()> {
             def_fn(d, it, f, "canParse", 1, pr::url_can_parse)?;
         }
         fixed.push(f);
+    }
+    // `Storage.prototype[Symbol.toStringTag]` is "Storage".
+    let (ks, kt) = (d.key(it, "Symbol")?, d.key(it, "toStringTag")?);
+    let sy = it.get_value(Value::Object(g), ks)?;
+    if let Value::Symbol(sym) = it.get_value(sy, kt)? {
+        let tag = Value::String(it.heap.intern_str("Storage").map_err(|e| it.heap_error(e))?);
+        it.define_data(storage_proto, bare_js::value::PropertyKey::Symbol(sym), tag, false, false, true)?;
     }
     for (name, v) in [("history", history), ("localStorage", local), ("sessionStorage", session)] {
         let k = d.key(it, name)?;

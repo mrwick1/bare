@@ -1,0 +1,45 @@
+keys-values-entries-and-json	["","10","2","a","b"] ["","10","2","a","b"] ["1","2","3","4","5"] [["","5"],["10","3"],["2","4"],["a","2"],["b","1"]] ,10,2,a,b,clear,getItem,key,length,removeItem,setItem 41 5 0
+for-in-order-with-one-name	only,length,clear,getItem,key,removeItem,setItem
+for-in-of-an-empty-storage	length,clear,getItem,key,removeItem,setItem|0|{}
+session-storage-has-names-too	["t","u"] v w 2 17 0
+read-by-property-and-brackets	x y n n  undefined true false true false true true
+write-by-property-is-setitem	["2","a","b c","o","u"] 1 string null undefined [object Object] 1,2 5
+write-returns-the-value-and-chains	5 number x ["a","b","c"]
+compound-assignment	1x 6 string
+write-with-tostring-and-throw	RangeError: boom | 0 | ok
+write-a-symbol-value	TypeError: Failed to set a named property 'k' on 'Storage': Cannot convert a Symbol value to a string | sym key ok | 0
+delete-by-property	true true true 0 [] 
+delete-strict-results	true true true true function true
+own-property-descriptor-of-a-name	{"value":"x","writable":true,"enumerable":true,"configurable":true}   {"a":{"value":"x","writable":true,"enumerable":true,"configurable":true}}
+names-hidden-by-the-prototype-chain	function 5 function true function z ["constructor","getItem","length","toString","zzz"] ["constructor","getItem","length","toString","zzz"] {"zzz":"z"} true false false true   ["z"] [["zzz","z"]] {"zzz":"z"} g 7 true false
+write-to-a-name-of-the-prototype-makes-an-own-property	string x 5 q  0 true {"value":5,"writable":true,"enumerable":true,"configurable":true} ["getItem","key","toString"] {"getItem":"x","key":5,"toString":"q"} function
+write-to-an-accessor-of-the-prototype	sloppy ok 0 | TypeError | 0 | 
+expando-then-item-with-the-same-name	ex it getItem 1 true function it
+delete-a-hidden-name	true true 2 function g 1
+define-property-data	true | 5 | 1 | {"value":"5","writable":true,"enumerable":true,"configurable":true} | true | {"value":"v","writable":true,"enumerable":true,"configurable":true} | ["a","b"]
+define-property-accessor-throws	TypeError: Failed to set a named property 'acc' on 'Storage': Accessor properties are not allowed. | TypeError: Failed to set a named property 'acc' on 'Storage': Accessor properties are not allowed. | 0 | 
+define-property-on-a-hidden-name	true | number | 5 | 0 |  | {"value":5,"writable":false,"enumerable":false,"configurable":false}
+symbols-are-ordinary-properties	1 0 3 number string []
+reflect-set-with-other-receiver	true true 1 {"a":"two"} x 2
+storage-as-a-prototype	over x ["a","b"] ["a","b"]  1 1 true true
+numeric-keys	one one one frac neg 3 ["-1","1","1.5"] true false true 2
+numeric-name-stays-visible-over-the-chain	proto5 own own ["5"] true own
+lone-surrogates-through-properties	2 55296 3 118 56320 true true true true true
+extensibility-is-refused	true false false false true TypeError: Cannot prevent extensions false true false
+freeze-and-seal-throw	TypeError: Cannot freeze | TypeError: Cannot seal | TypeError: Cannot freeze | TypeError: Cannot seal | true
+brand-and-interface-object	true | true | true | [object Storage] | [object Storage] | [object Storage] | true | false | 0 | Storage | function
+prototype-shape	length:accECw clear:dataECW getItem:dataECW key:dataECW removeItem:dataECW setItem:dataECW constructor:dataeCW Symbol(Symbol.toStringTag):dataeCw 1,2,1,0,1,get length
+dunder-proto-as-an-item	p true object ["__proto__"] 1
+items-named-like-object-methods	function | function | function | 3 | false | [object Storage]
+object-assign-and-spread	{"a":"1","b":"2"} {"a":"1","b":"2"} {"a":"1","b":"2"} true 3 3
+for-in-skips-a-name-removed-in-the-loop	1 1 1
+for-in-sees-the-prototype	a,length,clear,getItem,key,removeItem,setItem a,length,clear,getItem,key,removeItem,setItem,extra
+clear-and-remove-are-live	1 2  2 false  false 0
+in-operator	true true true true false false false true a
+method-this-checks	 | TypeError: Illegal invocation | 1 | TypeError | TypeError
+item-added-to-the-prototype-hides-the-name	L ["late"] proto ["late"] true false  L ["late"]
+write-to-a-name-of-an-object-prototype-property	p ["hid"] true w item true w
+inherited-readonly-name-write-is-dropped	r  ["p"] TypeError
+inherited-setter-runs	g val  0
+quota	ok1 | ok2 | ok3 | ok4 | QuotaExceededError:Failed to execute 'setItem' on 'Storage': Setting the value of 'b5' exceeded the quota.:22 | QuotaExceededError:Failed to set a named property 'b6' on 'Storage': Setting the value of 'b6' exceeded the quota. | 4
+argument-errors	TypeError: Failed to execute 'getItem' on 'Storage': 1 argument required, but only 0 present. | TypeError: Failed to execute 'setItem' on 'Storage': 2 arguments required, but only 1 present. | TypeError: Failed to execute 'key' on 'Storage': 1 argument required, but only 0 present. | TypeError: Failed to execute 'removeItem' on 'Storage': 1 argument required, but only 0 present. |  |  | 

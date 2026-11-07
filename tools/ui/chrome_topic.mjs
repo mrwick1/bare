@@ -1,6 +1,6 @@
 // Run the cases of tools/fixtures/ui/<topic>-cases.txt in headless Chrome and write tools/fixtures/ui/chrome-<topic>.txt (`name<TAB>result`).
 // Usage: node tools/ui/chrome_topic.mjs raf mutation intersection walker range element   (computed: BARE_BARS=1 node ...)
-// Lines before the first case are a prelude that every script starts with. A case is `=== name`, then optional lines `@html MARKUP` (the body) and `@css RULES`, then a script. The last expression of the script is
+// Lines before the first case are a prelude that every script starts with (`@url URL` there sets the document URL of the bare test and is ignored here). A case is `=== name`, then optional lines `@html MARKUP` (the body) and `@css RULES`, then a script. The last expression of the script is
 // a reader function. The case runs in a fresh 400x300 iframe (own realm, standards mode, no scrollbars). After the script the page waits
 // 400 ms for frames and timers, then the reader runs and its result is turned into a string. A throw gives `throw:Name:message`.
 // The bare test (`crates/bare/src/browser_topic_tests.rs`) runs the same cases on the same markup and compares.
@@ -16,7 +16,9 @@ writeFileSync(blank, '<!doctype html><body></body>');
 // BARE_BARS=1 keeps the 15 px scrollbars of the Linux theme (the default hides them), for cases that read the room of a scroll container.
 // BARE_MEDIA=1 is for the media cases (`BARE_MEDIA=1 node tools/ui/chrome_topic.mjs media`). Headless Chrome with no audio device hangs on `play()`
 // unless it is muted, and `play()` needs a user gesture unless the policy is off.
-const c = await open(blank, 400, 300, { bars: process.env.BARE_BARS === '1', args: process.env.BARE_MEDIA === '1' ? ['--mute-audio', '--autoplay-policy=no-user-gesture-required'] : [] });
+// A topic with `@url URL` in its prelude runs on that page (answered with a blank page by the helper, so the origin is real).
+const topicUrl = (t) => readFileSync(`tools/fixtures/ui/${t}-cases.txt`, 'utf8').split('\n').find((l) => l.startsWith('@url '))?.slice(5).trim() ?? '';
+const c = await open(blank, 400, 300, { url: topicUrl(process.argv[2]), bars: process.env.BARE_BARS === '1', args: process.env.BARE_MEDIA === '1' ? ['--mute-audio', '--autoplay-policy=no-user-gesture-required'] : [] });
 await c.eval(`window.__run = async (html, css, src) => {
   const f = document.createElement('iframe');
   f.style.cssText = 'position:absolute;left:0;top:0;width:400px;height:300px;border:0';
@@ -38,13 +40,14 @@ for (const topic of process.argv.slice(2)) {
   const cases = [], pre = [];
   for (const line of readFileSync(`tools/fixtures/ui/${topic}-cases.txt`, 'utf8').split('\n')) {
     if (line.startsWith('=== ')) cases.push({ name: line.slice(4).trim(), html: '', css: '', lines: [...pre] });
-    else if (!cases.length) pre.push(line);
+    else if (!cases.length) { if (!line.startsWith('@url ')) pre.push(line); }
     else if (line.startsWith('@html ')) cases.at(-1).html += line.slice(6);
     else if (line.startsWith('@css ')) cases.at(-1).css += line.slice(5);
     else cases.at(-1).lines.push(line);
   }
   const out = [];
   for (const k of cases) {
+    await c.send('Network.clearBrowserCookies');
     const r = await c.eval(`__run(${JSON.stringify(k.html)}, ${JSON.stringify(k.css)}, ${JSON.stringify(k.lines.join('\n').replace(/\n+$/, ''))})`);
     out.push(`${k.name}\t${esc(r)}`);
   }

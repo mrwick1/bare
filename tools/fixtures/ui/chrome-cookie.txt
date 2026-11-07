@@ -1,0 +1,19 @@
+plain-and-replace	a=1 | a=1; b=2 | b=2; a=3 | b=2; a=3 | a=3; b=5 | a=3; b=5
+getter-is-a-string	string 3 a=1 -1 get,set,enumerable,configurable
+no-equal-sign-and-empty-name	v | novalue | novalue; sp=v w | novalue; sp=v w | novalue; sp=v w | novalue; sp=v w | novalue; sp=v w; w=7
+value-with-equal-signs-and-quotes	k=a=b=c | k=a=b=c; l="quoted value" | k=a=b=c; l="quoted value"; m= | k=a=b=c; l="quoted value"; m=; n=a b
+non-string-values	ts=1 | ts=1; undefined | ts=1; null | ts=1; 5
+control-characters-reject-the-cookie	a=1 | a=1 | a=1 | a=1 | a=1 | a=1 | a=1; w=7
+max-age-and-expires	 |  | c=1 | c=1; d=1 | c=1; d=1; e=1 | c=1; d=1; e=1 | c=1; d=1; e=1; g=1 | c=1; d=1; e=1; g=1; h=1 | c=1; d=1; e=1; g=1; h=1; i=1 | c=1; d=1; e=1; g=1; h=1; i=1; j=1 | d=1; e=1; g=1; h=1; i=1; j=1 | d=1; e=1; h=1; i=1; j=1
+delete-by-path	a=1 | a=1; b=2 | a=1; b=2 | a=1; b=2 | b=2 | 
+expires-date-formats	DROPPED Sat, 01 Jan 2000 00:00:00 GMT\nDROPPED Sat, 1 Jan 2000 0:0:0 GMT\nDROPPED Sat Jan  1 00:00:00 2000\nDROPPED 01 Jan 2000 00:00:00\nDROPPED Jan 1 2000 00:00:00\nDROPPED Saturday, 01-Jan-00 00:00:00 GMT\nDROPPED Sat, 01-Jan-2000 00:00:00 GMT\nDROPPED 1 JAN 2000 00:00:00\nDROPPED 1 Janx 2000 00:00:00\nDROPPED 1 Jan 2000 00:00:00 +0100\nDROPPED x 1 Jan 2000 00:00:00 1\nDROPPED 1,Jan,2000,00:00:00\nDROPPED 1 Jan 99 00:00:00\nDROPPED 1 Jan 70 00:00:00\nDROPPED 1 Jan 1600 00:00:00\nDROPPED 1 Jan 1000 00:00:00\nDROPPED 2000 Jan 1 00:00:00\nDROPPED 1 Jan 2000 23:59:59\nKEPT    2000-01-01\nKEPT    1 Jan 2000 24:00:00\nKEPT    1 Jan 2000 23:60:00\nKEPT    1 Jan 2000 23:59:60\nKEPT    32 Jan 2000 00:00:00\nKEPT    31 Feb 2000 00:00:00\nKEPT    0 Jan 2000 00:00:00\nKEPT    1 Foo 2000 00:00:00\nKEPT    1 Jan 2000 00:00\nKEPT    1 Jan 2000\nKEPT    Jan 2000 00:00:00\nKEPT    1 Jan 10000 00:00:00\nKEPT    1 Jan 69 00:00:00
+domain-attribute	 | f=1 | f=1; g=1 | f=1; g=1 | f=1; g=1 | f=1; g=1 | f=1; g=1 | f=1; g=1 | f=1; g=1; m=1 | f=1; g=1; m=1; n=1 | f=1; g=1; m=1; n=1 | f=1; g=1; m=1; n=1; q=1
+path-attribute	a=1 | a=1; b=1 | a=1; b=1 | a=1; b=1; d=1 | a=1; b=1; d=1; e=1 | a=1; b=1; d=1; e=1 | a=1; b=1; d=1; e=1; g=1
+http-only-and-same-site	 |  |  | d=1 | d=1; e=1 | d=1; e=1; f=1 | d=1; e=1; f=1; g=1 | d=1; e=1; f=1; g=1; h=1 | d=1; e=1; f=1; g=1; h=1; i=1
+secure-and-prefixes	a=1 | a=1 | a=1; __Secure-c=1 | a=1; __Secure-c=1; __Host-d=1 | a=1; __Secure-c=1; __Host-d=1 | a=1; __Secure-c=1; __Host-d=1 | a=1; __Secure-c=1; __Host-d=1 | a=1; __Secure-c=1; __Host-d=1 | a=1; __Secure-c=1; __Host-d=1 | a=1; __Secure-c=1; __Host-d=1
+size-limits	name4096:0 value4096-no-name:4096 name+value4096:8195 name+value4097:8195 name+value4097b:8195 4096
+attribute-size-limit	 | b=1 | b=1; c=1 | b=1; c=1; d=1
+many-cookies-for-one-domain	169 k31 k199
+many-cookies-with-rewrites	152 k31 k180,k5,k181
+path-order-and-match	p1=a | p1=a | p1=a; p5=e | p1=a; p5=e
+cookie-enabled-and-case-of-attribute-names	true a=1

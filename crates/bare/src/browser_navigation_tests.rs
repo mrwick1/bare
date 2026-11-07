@@ -605,16 +605,17 @@ fn storage_basics_and_coercion() {
 }
 
 #[test]
-fn storage_keeps_utf16_and_is_not_a_property_bag() {
+fn storage_keeps_utf16_and_has_named_properties() {
     big(|| {
         let mut b = at("https://a.test/");
         assert_eq!(js(&mut b, "localStorage.setItem('k\\ud83d\\ude00', 'v\\ud800'); localStorage.setItem('\\udc00', '\\u0000x'); var k = localStorage.key(0), v = localStorage.getItem(k);
             [k.length, k.charCodeAt(1), v.length, v.charCodeAt(1), localStorage.getItem('\\udc00').length, localStorage.getItem('\\udc00').charCodeAt(0), localStorage.getItem('k\\ud83d')].join()"),
             "3,55357,2,55296,2,0,");
         assert_eq!(b.storage().get_item(false, "https://a.test", "k\u{1F600}").as_deref(), Some("v\u{FFFD}"));
-        // `localStorage.x = 1` is NOT storage access: it is dropped, and the store never sees it
-        assert_eq!(js(&mut b, "localStorage.length = 99; localStorage.token = 'p'; var r = [localStorage.token, localStorage.length, localStorage.getItem('token'), Object.keys(localStorage).length].join(); r"), ",2,,0");
-        assert_eq!(js(&mut b, "'use strict'; try { localStorage.token = 'p'; 'no error' } catch (e) { e.name }"), "TypeError");
+        // `localStorage.x = 1` is `setItem` (Chrome 155 does the same; `tools/fixtures/ui/storage-cases.txt`). `length` is the accessor of the
+        // prototype, so a write to it follows the ordinary rules: dropped in a sloppy script, a `TypeError` in a strict one.
+        assert_eq!(js(&mut b, "localStorage.length = 99; localStorage.token = 'p'; var r = [localStorage.token, localStorage.length, localStorage.getItem('token'), Object.keys(localStorage).length].join(); r"), "p,3,p,3");
+        assert_eq!(js(&mut b, "'use strict'; try { localStorage.length = 1; 'no error' } catch (e) { e.name }"), "TypeError");
     });
 }
 

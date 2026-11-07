@@ -9,7 +9,7 @@ import { join, resolve } from 'node:path';
 
 export const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-export async function open(file, width, height, { bars = false, args = [] } = {}) {
+export async function open(file, width, height, { bars = false, args = [], url = '' } = {}) {
   const dir = mkdtempSync(join(process.env.BARE_TMP ?? tmpdir(), 'chrome-cdp-'));
   const port = 9400 + Math.floor(Math.random() * 400);
   const flags = ['--headless=new', '--no-sandbox', '--disable-gpu', '--force-device-scale-factor=1', `--window-size=${width},${height}`, `--user-data-dir=${dir}`, `--remote-debugging-port=${port}`, ...args];
@@ -24,11 +24,22 @@ export async function open(file, width, height, { bars = false, args = [] } = {}
   await new Promise((r) => (ws.onopen = r));
   let n = 0;
   const waiting = new Map();
-  ws.onmessage = (m) => { const d = JSON.parse(m.data); if (d.id && waiting.has(d.id)) { waiting.get(d.id)(d); waiting.delete(d.id); } };
+  // With `url` (for example `https://a.test/`), the page is that URL: the request is answered here with the blank page, so the origin is real (cookies, secure context) and no network is used.
+  ws.onmessage = (m) => {
+    const d = JSON.parse(m.data);
+    if (d.id && waiting.has(d.id)) { waiting.get(d.id)(d); waiting.delete(d.id); }
+    else if (d.method === 'Fetch.requestPaused') {
+      const ok = url && d.params.request.url === url;
+      ws.send(JSON.stringify(ok
+        ? { id: ++n, method: 'Fetch.fulfillRequest', params: { requestId: d.params.requestId, responseCode: 200, responseHeaders: [{ name: 'Content-Type', value: 'text/html' }], body: Buffer.from('<!doctype html><body></body>').toString('base64') } }
+        : { id: ++n, method: 'Fetch.failRequest', params: { requestId: d.params.requestId, errorReason: 'Failed' } }));
+    }
+  };
   const send = (method, params = {}) => new Promise((r) => { const id = ++n; waiting.set(id, r); ws.send(JSON.stringify({ id, method, params })); });
   await send('Page.enable');
   await send('Emulation.setDeviceMetricsOverride', { width, height, deviceScaleFactor: 1, mobile: false });
-  await send('Page.navigate', { url: 'file://' + resolve(file) });
+  if (url) await send('Fetch.enable', { patterns: [{ urlPattern: '*' }] });
+  await send('Page.navigate', { url: url || 'file://' + resolve(file) });
   await sleep(800);
   await send('Emulation.setFocusEmulationEnabled', { enabled: true });
   const c = {

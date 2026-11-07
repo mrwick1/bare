@@ -1,0 +1,42 @@
+@url https://a.test/
+var d = document;
+var o = function (f) { var r = []; f(function (s) { d.cookie = s; r.push(d.cookie) }); return r.join(' | ') };
+=== plain-and-replace
+(function () { return o(function (t) { t('a=1'); t('b=2; Path=/'); t('a=3'); t('c=4; Path=/x'); t('b=5; Path=/'); t('d=1; Max-Age=0') }) })
+=== getter-is-a-string
+d.cookie = 'a=1';
+(function () { return typeof d.cookie + ' ' + d.cookie.length + ' ' + d.cookie + ' ' + Object.getOwnPropertyNames(d).indexOf('cookie') + ' ' + Object.keys(Object.getOwnPropertyDescriptor(Document.prototype, 'cookie')).join() })
+=== no-equal-sign-and-empty-name
+(function () { return o(function (t) { t('=v'); t('novalue'); t(' sp = v w ; Secure'); t('='); t('  '); t(''); t('w=\t7\t') }) })
+=== value-with-equal-signs-and-quotes
+(function () { return o(function (t) { t('k=a=b=c'); t('l="quoted value"'); t('m=; Path=/'); t('n=a b') }) })
+=== non-string-values
+(function () { return o(function (t) { t({ toString: function () { return 'ts=1' } }); t(undefined); t(null); t(5) }) })
+=== control-characters-reject-the-cookie
+(function () { return o(function (t) { t('a=1'); t('s=1\nt=2'); t('u=1;\u0000 v=2'); t('x=1\r'); t('y=1\u007f'); t('z=1\u0001'); t('w=\t7\t') }) })
+=== max-age-and-expires
+(function () { return o(function (t) { t('a=1; Max-Age=0'); t('b=1; Max-Age=-5'); t('c=1; Max-Age=100'); t('d=1; Max-Age=abc'); t('e=1; Max-Age=1.5'); t('f=1; Expires=Thu, 01 Jan 1970 00:00:01 GMT'); t('g=1; Expires=Fri, 31 Dec 9999 23:59:59 GMT'); t('h=1; Expires=garbage'); t('i=1; MAX-AGE=100; EXPIRES=Thu, 01 Jan 1970 00:00:01 GMT'); t('j=1; Max-Age=100; Expires=Thu, 01 Jan 1970 00:00:01 GMT'); t('c=; Max-Age=0'); t('g=; Expires=Thu, 01 Jan 1970 00:00:00 GMT') }) })
+=== delete-by-path
+(function () { return o(function (t) { t('a=1'); t('b=2; Path=/'); t('c=3; Path=/x'); t('a=; Max-Age=0; Path=/x'); t('a=; Max-Age=0'); t('b=; Max-Age=0; Path=/') }) })
+=== expires-date-formats
+(function () { var r = []; ['Sat, 01 Jan 2000 00:00:00 GMT', 'Sat, 1 Jan 2000 0:0:0 GMT', 'Sat Jan  1 00:00:00 2000', '01 Jan 2000 00:00:00', 'Jan 1 2000 00:00:00', 'Saturday, 01-Jan-00 00:00:00 GMT', 'Sat, 01-Jan-2000 00:00:00 GMT', '1 JAN 2000 00:00:00', '1 Janx 2000 00:00:00', '1 Jan 2000 00:00:00 +0100', 'x 1 Jan 2000 00:00:00 1', '1,Jan,2000,00:00:00', '1 Jan 99 00:00:00', '1 Jan 70 00:00:00', '1 Jan 1600 00:00:00', '1 Jan 1000 00:00:00', '2000 Jan 1 00:00:00', '1 Jan 2000 23:59:59', '2000-01-01', '1 Jan 2000 24:00:00', '1 Jan 2000 23:60:00', '1 Jan 2000 23:59:60', '32 Jan 2000 00:00:00', '31 Feb 2000 00:00:00', '0 Jan 2000 00:00:00', '1 Foo 2000 00:00:00', '1 Jan 2000 00:00', '1 Jan 2000', 'Jan 2000 00:00:00', '1 Jan 10000 00:00:00', '1 Jan 69 00:00:00'].forEach(function (c) { d.cookie = 'k=1; Expires=' + c; r.push((d.cookie.indexOf('k=') >= 0 ? 'KEPT    ' : 'DROPPED ') + c); d.cookie = 'k=; Max-Age=0' }); return r.join('\n') })
+=== domain-attribute
+(function () { return o(function (t) { t('e=1; Domain=test'); t('f=1; Domain=a.test'); t('g=1; Domain=.a.test'); t('h=1; Domain=b.test'); t('i=1; Domain=sub.a.test'); t('j=1; Domain=.test'); t('k=1; Domain=co.uk'); t('l=1; Domain=1.2.3.4'); t('m=1; domain=A.TEST'); t('n=1; DOMAIN='); t('p=1; Domain=..a.test'); t('q=1; Domain= a.test ') }) })
+=== path-attribute
+(function () { return o(function (t) { t('a=1; Path=relative'); t('b=1; Path='); t('c=1; Path=/x'); t('d=1; Path=/'); t('e=1; Path=/;'); t('f=1; Path=' + '/' + new Array(1024).join('y')); t('g=1; Path=/' + new Array(1026).join('y')) }) })
+=== http-only-and-same-site
+(function () { return o(function (t) { t('a=1; HttpOnly'); t('b=1; httponly'); t('c=1; SameSite=None'); t('d=1; SameSite=None; Secure'); t('e=1; Secure; SameSite=None'); t('f=1; SameSite=Strict'); t('g=1; SameSite=Lax'); t('h=1; SameSite=bogus'); t('i=1; SameSite') }) })
+=== secure-and-prefixes
+(function () { return o(function (t) { t('a=1; Secure'); t('__Secure-b=1'); t('__Secure-c=1; Secure'); t('__Host-d=1; Secure; Path=/'); t('__Host-e=1; Secure; Path=/x'); t('__Host-f=1; Secure; Domain=a.test; Path=/'); t('__Host-g=1; Path=/'); t('__host-h=1; Secure; Path=/x'); t('__secure-i=1'); t('__Host-j=1; Secure') }) })
+=== size-limits
+(function () { var big = function (n) { return new Array(n + 1).join('x') }; var r = []; [['name4096', big(4096) + '=1'], ['value4096-no-name', big(4096)], ['name+value4096', 'p=' + big(4095)], ['name+value4097', 'q=' + big(4096)], ['name+value4097b', 'rr=' + big(4095)]].forEach(function (c) { d.cookie = c[1]; r.push(c[0] + ':' + d.cookie.length) }); d.cookie = 'p=; Max-Age=0'; d.cookie = big(4096) + '=; Max-Age=0'; r.push(d.cookie.length); return r.join(' ') })
+=== attribute-size-limit
+(function () { var big = function (n) { return new Array(n + 1).join('y') }; return o(function (t) { t('a=1; Path=/' + big(1023)); t('b=1; Path=/' + big(1024)); t('c=1; Domain=' + big(1030) + '.a.test'); t('d=1; Foo=' + big(2000)) }).replace(/y{20,}/g, 'Y') })
+=== many-cookies-for-one-domain
+(function () { for (var i = 0; i < 200; i++) d.cookie = 'k' + i + '=v'; var n = d.cookie.split('; ').map(function (c) { return c.split('=')[0] }); return n.length + ' ' + n[0] + ' ' + n[n.length - 1] })
+=== many-cookies-with-rewrites
+(function () { for (var i = 0; i < 181; i++) d.cookie = 'k' + i + '=v'; d.cookie = 'k5=v2'; d.cookie = 'k181=v'; var n = d.cookie.split('; ').map(function (c) { return c.split('=')[0] }); return n.length + ' ' + n[0] + ' ' + n.slice(-3).join() })
+=== path-order-and-match
+(function () { return o(function (t) { t('p1=a; Path=/'); t('p2=b; Path=/dir'); t('p5=e'); t('p6=f; Path=/dirx') }) })
+=== cookie-enabled-and-case-of-attribute-names
+(function () { return navigator.cookieEnabled + ' ' + o(function (t) { t('a=1; PATH=/; SECURE; SAMESITE=Lax; max-AGE=50') }) })

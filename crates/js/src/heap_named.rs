@@ -51,11 +51,19 @@ pub trait NamedSource {
     fn named_has(&self, owner: ObjId, key: &[u16]) -> R<bool>;
     /// The value of the property `key` of `owner` now. `Ok(None)`: there is none. The heap calls it only right after `named_has`
     /// answered `true` for the same key, so a host that charges for a long scan has charged already and must not charge again.
-    fn named_get(&self, owner: ObjId, key: &[u16]) -> R<Option<String>>;
+    fn named_get(&self, owner: ObjId, key: &[u16]) -> R<Option<Box<[u16]>>>;
     /// How many names `owner` has now (cheap: no list). The evaluator charges it before `named_keys` runs.
     fn named_len(&self, owner: ObjId) -> R<usize>;
     /// The names of `owner` now, in the host's order.
-    fn named_keys(&self, owner: ObjId) -> R<Vec<String>>;
+    fn named_keys(&self, owner: ObjId) -> R<Vec<Box<[u16]>>>;
+    /// Does a name hide the properties of the prototype chain (`[LegacyOverrideBuiltIns]`)? `false` (`Storage`): a string name
+    /// is not an own property of `owner` when `owner` or its chain has an ordinary property of that name. A write, a define and
+    /// a delete of such a name follow the ordinary rules and make or change an ordinary property. A name that is an array
+    /// index never hides. The names stay in `named_keys` (so in `Reflect.ownKeys`). An object with `false` refuses
+    /// `preventExtensions`, `seal` and `freeze` (`named_open`).
+    fn named_masking(&self, _owner: ObjId) -> bool {
+        true
+    }
 }
 
 /// What a write asks of the host.
@@ -112,7 +120,7 @@ impl Heap {
     /// a data property whose value is a placeholder. `None`: not a name, the ordinary rules apply.
     pub(super) fn named_exists(&self, o: ObjId, key: PropertyKey) -> R<Option<Option<Property>>> {
         let Some(units) = self.key_units(key)? else { return Ok(None) };
-        if !self.named_source()?.named_has(o, &units)? {
+        if !self.named_source()?.named_has(o, &units)? || self.named_hidden(o, key)? {
             return Ok(None);
         }
         Ok(Some(Some(Property::Data { value: Value::Undefined, writable: true, enumerable: true, configurable: true })))
@@ -142,7 +150,7 @@ impl Heap {
         }
         let Some(units) = self.key_units(key)? else { return Ok(r) };
         let Some(text) = self.named_source()?.named_get(o, &units)? else { return Ok(r) };
-        let value = Value::String(self.intern_str(&text)?);
+        let value = Value::String(self.intern_units(&text)?);
         Ok(Some(Property::Data { value, writable: true, enumerable: true, configurable: true }))
     }
 
@@ -154,7 +162,27 @@ impl Heap {
     pub(super) fn named_keys(&mut self, o: ObjId) -> R<Vec<PropertyKey>> {
         let src = self.named_source()?;
         self.charge(src.named_len(o)?.saturating_mul(std::mem::size_of::<PropertyKey>()))?;
-        src.named_keys(o)?.iter().map(|k| self.key_from_str(k)).collect()
+        src.named_keys(o)?.iter().map(|k| self.intern_units(k).and_then(|s| self.key_from_string(s))).collect()
+    }
+
+    /// Is the string name `key` hidden on `o` (see `NamedSource::named_masking`)? Then the ordinary rules apply to it.
+    pub(super) fn named_hidden(&self, o: ObjId, key: PropertyKey) -> R<bool> {
+        if !matches!(key, PropertyKey::String(_)) || self.named.src.as_ref().is_none_or(|s| s.named_masking(o)) {
+            return Ok(false);
+        }
+        let ob = self.obj(o)?;
+        if self.own(ob, key).is_some() {
+            return Ok(true);
+        }
+        match ob.proto {
+            Some(p) => self.has_property(p, key),
+            None => Ok(false),
+        }
+    }
+
+    /// Is `o` a host named object that refuses `preventExtensions`, `seal` and `freeze` (`named_masking` is `false`)?
+    pub fn named_open(&self, o: ObjId) -> bool {
+        matches!(self.obj(o), Ok(ob) if ob.exotic == EXOTIC_NAMED) && self.named.src.as_ref().is_some_and(|s| !s.named_masking(o))
     }
 
     /// Ask the host to write. The first call stores the request and answers `NeedsNamed`; the call after the evaluator
@@ -174,7 +202,7 @@ impl Heap {
             return Ok(Some(ok));
         }
         let Some(units) = self.key_units(key)? else { return Ok(None) };
-        if !self.named_source()?.named_has(o, &units)? {
+        if !self.named_source()?.named_has(o, &units)? || self.named_hidden(o, key)? {
             return Ok(None);
         }
         self.named_write(o, key, NamedOp::Delete).map(Some)

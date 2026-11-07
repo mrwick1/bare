@@ -97,7 +97,7 @@ impl<'p> Interp<'p> {
                 if let Value::Object(o) = a0
                     && !self.o_prevent_extensions(o)?
                 {
-                    return Err(self.type_err("'preventExtensions' on proxy: trap returned falsish"));
+                    return Err(self.type_err(if self.heap.named_open(o) { "Cannot prevent extensions" } else { "'preventExtensions' on proxy: trap returned falsish" }));
                 }
                 Ok(a0)
             }
@@ -477,7 +477,11 @@ impl<'p> Interp<'p> {
         let slots = hx!(self, self.heap.own_key_slots(o)) as u64;
         self.ao_reserve(slots / 8)?;
         if !hx!(self, self.heap.set_integrity(o, frozen), self.px_set_integrity(o, frozen)?) {
-            return Err(self.type_err("Cannot freeze array buffer views with elements"));
+            return Err(self.type_err(match (self.heap.named_open(o), frozen) {
+                (true, true) => "Cannot freeze",
+                (true, false) => "Cannot seal",
+                _ => "Cannot freeze array buffer views with elements",
+            }));
         }
         self.spend(slots / 8 + 1)?;
         Ok(v)

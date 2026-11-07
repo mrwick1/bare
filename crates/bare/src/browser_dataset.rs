@@ -154,6 +154,9 @@ impl Dom {
 
 impl NamedSource for Dom {
     fn named_has(&self, owner: ObjId, key: &[u16]) -> Result<bool, HeapError> {
+        if let Some(session) = self.storage_area(owner) {
+            return self.storage_get(session, key).map(|v| v.is_some());
+        }
         let Some(el) = self.dataset_el(owner)? else { return Ok(false) };
         let doc = self.doc.try_borrow().map_err(|_| HeapError::HostUnavailable)?;
         self.dataset_gate(owner, doc.attr_count(el))?;
@@ -161,15 +164,21 @@ impl NamedSource for Dom {
         Ok(doc.attrs(attrs).iter().any(|a| matches(doc.atom_str(a.name), key)))
     }
 
-    fn named_get(&self, owner: ObjId, key: &[u16]) -> Result<Option<String>, HeapError> {
+    fn named_get(&self, owner: ObjId, key: &[u16]) -> Result<Option<Box<[u16]>>, HeapError> {
+        if let Some(session) = self.storage_area(owner) {
+            return self.storage_get(session, key);
+        }
         let Some(el) = self.dataset_el(owner)? else { return Ok(None) };
         let doc = self.doc.try_borrow().map_err(|_| HeapError::HostUnavailable)?;
         // No gate: the heap calls this right after `named_has`, and that call paid for the scan.
         let NodeData::Element { attrs, .. } = *doc.data(el) else { return Ok(None) };
-        Ok(doc.attrs(attrs).iter().find(|a| matches(doc.atom_str(a.name), key)).map(|a| doc.text(a.value).to_string()))
+        Ok(doc.attrs(attrs).iter().find(|a| matches(doc.atom_str(a.name), key)).map(|a| doc.text(a.value).encode_utf16().collect()))
     }
 
     fn named_len(&self, owner: ObjId) -> Result<usize, HeapError> {
+        if let Some(session) = self.storage_area(owner) {
+            return self.storage_len(session);
+        }
         let Some(el) = self.dataset_el(owner)? else { return Ok(0) };
         let doc = self.doc.try_borrow().map_err(|_| HeapError::HostUnavailable)?;
         self.dataset_gate(owner, doc.attr_count(el))?;
@@ -178,11 +187,19 @@ impl NamedSource for Dom {
     }
 
     /// No gate here: the heap calls `named_len` first, and that call paid for the scan.
-    fn named_keys(&self, owner: ObjId) -> Result<Vec<String>, HeapError> {
+    fn named_keys(&self, owner: ObjId) -> Result<Vec<Box<[u16]>>, HeapError> {
+        if let Some(session) = self.storage_area(owner) {
+            return self.storage_keys(session);
+        }
         let Some(el) = self.dataset_el(owner)? else { return Ok(Vec::new()) };
         let doc = self.doc.try_borrow().map_err(|_| HeapError::HostUnavailable)?;
         let NodeData::Element { attrs, .. } = *doc.data(el) else { return Ok(Vec::new()) };
-        Ok(doc.attrs(attrs).iter().filter_map(|a| prop_of(doc.atom_str(a.name))).collect())
+        Ok(doc.attrs(attrs).iter().filter_map(|a| prop_of(doc.atom_str(a.name))).map(|p| p.encode_utf16().collect()).collect())
+    }
+
+    /// `Storage` names do not hide the prototype chain: its methods win.
+    fn named_masking(&self, owner: ObjId) -> bool {
+        self.storage_area(owner).is_none()
     }
 }
 
