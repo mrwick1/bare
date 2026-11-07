@@ -244,6 +244,27 @@ pub struct Document {
     // The custom states (`ElementInternals.states`) of the elements that have any, in the order they were added. See `has_state`.
     ui: HashMap<u32, u8, BuildHasherDefault<Fnv>>,
     // The form state of the controls that a host keeps outside the tree, by `NodeId::index`: `UI_*` bits. See `set_ui`.
+    ui_revision: u64,
+    // The changes of `ui`, also counted in `revision`. See `ui_revision`.
+    user: UserState,
+    // What the user points at, presses and focuses: the user action pseudo-classes. See `user`.
+}
+
+/// The elements that the user action pseudo-classes start from. The host sets them (`Document::set_hover` and the others). A set
+/// is O(1): a selector that reads the state walks up from the element (`Document::in_chain`). It costs the same as a scan of a
+/// stored chain, and it follows a node that moved.
+#[derive(Debug, Default, Clone, PartialEq)]
+pub struct UserState {
+    /// `:hover`: the element under the pointer. It and its ancestors match.
+    pub hover: Option<NodeId>,
+    /// `:active`: the element that the primary button pressed, while the button is down. It and its ancestors match.
+    pub active: Option<NodeId>,
+    /// `:focus` matches the focused element, `:focus-within` it and its ancestors.
+    pub focus: Option<NodeId>,
+    /// `:focus-visible`: the focused element shows a focus ring.
+    pub focus_visible: bool,
+    /// Moves at each change of `hover`, `active` and the focus pair, in that order. A host that keeps styles checks them.
+    pub revision: [u64; 3],
 }
 
 /// A change of the tree that `Document::set_watcher` reports, before the document answers a later read. `prev` and `next` are the
@@ -347,6 +368,8 @@ impl Document {
             custom: HashMap::default(),
             states: HashMap::default(),
             ui: HashMap::default(),
+            ui_revision: 0,
+            user: UserState::default(),
             on_name: false,
         };
         // The order matters: it must match `Atom::ID` and `Atom::CLASS`.
@@ -357,7 +380,7 @@ impl Document {
 
     /// A number that moves at every public change that can alter the answer of a tree query: a node is linked into or
     /// detached from the tree (the parser, `insert_*`, `move_to`, `move_children`, `detach`), an attribute is set or removed
-    /// (any name, any value), or an element gets a namespace. A host that caches the nodes of a query keeps the number from
+    /// (any name, any value), an element gets a namespace, a custom element state or a shadow root. A host that caches the nodes of a query keeps the number from
     /// when it built the list, and builds it again when the number is not the same. Changes that cannot alter a query leave it
     /// alone: a new node with no parent, a text edit, a new name, a new span. It only grows, and it is not a count of changes.
     pub fn revision(&self) -> u64 {
@@ -405,10 +428,12 @@ impl Document {
     /// Set the custom element state of `el` (`None`: no state, the "undefined" state of an element with a valid name). The value is a
     /// definition number (the state "custom"), `PRECUSTOMIZED` or `FAILED`. The host numbers the definitions.
     pub fn set_custom_state(&mut self, el: NodeId, state: Option<u32>) {
-        match state {
+        let old = match state {
             Some(s) => self.custom.insert(el.index() as u32, s),
             None => self.custom.remove(&(el.index() as u32)),
         };
+        // `:defined` may match another element now.
+        self.revision += u64::from(old != state);
     }
 
     /// The custom element state of `el`, see `set_custom_state`.
@@ -444,7 +469,14 @@ impl Document {
         let old = if bits == 0 { self.ui.remove(&(el.index() as u32)) } else { self.ui.insert(el.index() as u32, bits) };
         if old.unwrap_or(0) != bits {
             self.revision += 1;
+            self.ui_revision += 1;
         }
+    }
+
+    /// The changes of the form state (`set_ui`). They are in `revision` too: a host that keeps a layout takes them out, because only a
+    /// rule with a form pseudo-class reads them.
+    pub fn ui_revision(&self) -> u64 {
+        self.ui_revision
     }
 
     /// The `UI_*` bits of `el`, see `set_ui`.
@@ -454,6 +486,56 @@ impl Document {
             return 0;
         }
         self.ui.get(&(el.index() as u32)).copied().unwrap_or(0)
+    }
+
+    /// What the user points at, presses and focuses (see `UserState`).
+    pub fn user(&self) -> &UserState {
+        &self.user
+    }
+
+    /// Is `el` the node `from` or one of its shadow-including ancestors?
+    pub fn in_chain(&self, el: NodeId, from: Option<NodeId>) -> bool {
+        let mut cur = from;
+        while let Some(c) = cur {
+            if c == el {
+                return true;
+            }
+            let node = &self.nodes[c.index()];
+            // Only a shadow root has a host: the other nodes with no parent skip the map.
+            cur = node.parent.or_else(|| if matches!(node.data, NodeData::ShadowRoot) { self.shadow_host(c) } else { None });
+        }
+        false
+    }
+
+    /// The pointer is over `n` now. Gives whether `:hover` matches other elements now.
+    pub fn set_hover(&mut self, n: Option<NodeId>) -> bool {
+        if self.user.hover == n {
+            return false;
+        }
+        self.user.hover = n;
+        self.user.revision[0] += 1;
+        true
+    }
+
+    /// The primary button pressed `n` (`None`: it went up). Gives whether `:active` matches other elements now.
+    pub fn set_active(&mut self, n: Option<NodeId>) -> bool {
+        if self.user.active == n {
+            return false;
+        }
+        self.user.active = n;
+        self.user.revision[1] += 1;
+        true
+    }
+
+    /// `n` has the focus now, and `visible` says whether it shows a focus ring. Gives whether a focus pseudo-class matches other elements now.
+    pub fn set_focus(&mut self, n: Option<NodeId>, visible: bool) -> bool {
+        if self.user.focus == n && self.user.focus_visible == visible {
+            return false;
+        }
+        self.user.focus = n;
+        self.user.focus_visible = visible;
+        self.user.revision[2] += 1;
+        true
     }
 
     /// Does any element have a custom element state?
@@ -536,6 +618,8 @@ impl Document {
         let root = self.new_node(NodeData::ShadowRoot);
         self.shadow_of.insert(host.index() as u32, root);
         self.shadow_host.insert(root.index() as u32, (host, open));
+        // The flat tree changed: the light children of the host are not rendered now.
+        self.revision += 1;
         root
     }
 

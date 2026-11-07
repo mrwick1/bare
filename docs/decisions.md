@@ -433,6 +433,14 @@ To follow the standard, add the five names to the first arm of `Builder::in_temp
 - The hint is built only when the page has an element that is not HTML. Reason: the sheet of the browser names `svg`, so the atom is on every page.
 - `compute` starts from the initial values and reads only the properties with a winner. Reason: the three new properties cost more than the rule allows with the old loop. Result: cascade rows -12% to -16%.
 
+## The window keeps a frame until its render key moves
+
+- A window frame (cascade, layout, scroll areas) is made again only when its render key moves. The key holds the tree revision, the text revision, the window size, the sheet generation, and the hover, active, focus and form-state revisions that the rules read. Reason: a full update is simple and correct, and the plan says to measure it before invalidation. Most input (a click with no change, typing, a scroll) moves no part of the key.
+- When only the user or form state moved, the window runs the cascade and compares the two style sets (`Styles::change`). Colors and other paint-only values keep the layout. A change of size or display lays out again. Reason: a `:hover` color on a page of 100,000 lines then costs 28 ms instead of about 100 ms. No incremental cascade or dirty region was built.
+- The document stores the hovered, pressed and focused elements, not their ancestor chains. A selector walks up from the element. Reason: a stored chain made each focus move cost about 350 instructions (`focus_load` +1.0% to +1.35%). The walk costs the same as a scan of the chain.
+- The user action pseudo-classes are one `Simple::User` variant, matched by a `#[cold]` function. Reason: five inline arms in `simple_matches` cost deep-tree rows up to +0.7%, because they changed the code of the hot loop.
+- The form state of `Document::set_ui` also moves `revision` (for the selector caches). The render key takes it out of the tree part, and puts it back only when a rule has a form pseudo-class. Reason: a checkbox click or the first letter in a field must not lay out a page with no `:checked` or `:placeholder-shown` rule.
+
 ## Open questions
 
 - A separate process for sensitive sites, for example banking.

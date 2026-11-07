@@ -3,9 +3,13 @@
 //!
 //! Flow of one input event (`Page::handle`): hit test the point on the current layout (`bare_paint::hit`, the same paint
 //! order as the picture) -> `Browser::ui_*` (events and default actions: `browser_ui.rs`) -> if the page may look different,
-//! let the session run what the listeners queued (microtasks, fetches, a navigation), drop the old layout and ask for one
-//! frame. A frame cascades and lays out the page again (only when the old layout was dropped), paints it, and draws what
-//! the paint crate does not yet: the text of the `<input>` and `<textarea>` fields, the selection and the caret.
+//! let the session run what the listeners queued (microtasks, fetches, a navigation), mark the frame stale and ask for one
+//! frame. A stale frame cascades and lays out the page again only when its render key moved (`Browser::render_key`: the
+//! tree, its text, the window size, the sheets, and the `:hover`, `:active` and focus state that the rules read). When only
+//! the user action state moved, the new cascade is compared with the old one (`Styles::change`): the same values keep the
+//! frame, and a change of colors and the like keeps the layout and builds the display list again. A stale frame with the same
+//! key builds the display list again only when the values, checkboxes and selects that it shows changed. A frame then paints, and draws what the paint crate does not yet: the text of the `<input>` and
+//! `<textarea>` fields, the selection and the caret.
 //!
 //! The caret is steady (no blink), so an idle window wakes for nothing. Password text is shown as bullets.
 //!
@@ -19,6 +23,7 @@ use crate::browser::{Browser, Report};
 use crate::browser_dom::input_kind;
 use crate::browser_session::{Session, SessionConfig, SessionStop};
 use crate::browser_ui::{Frame, KeyInput, Mods, Pointer, UiOutcome};
+use bare_css::cascade::Change;
 use bare_css::values::Property;
 use bare_html::dom::{Document, NodeId};
 use bare_layout::font::{self, Metrics};
@@ -58,8 +63,22 @@ pub struct Page {
     painter: Painter,
     canvas: Canvas,
     pointer: Pointer,
-    /// Is the display list of `frame` built? A scroll draws it again with other offsets and builds nothing.
+    /// Is the pointer in the window, and did the boxes move under it since it last moved?
+    inside: bool,
+    moved: bool,
+    /// The document and the render key that `frame` was made for, and whether the page may have changed since.
+    key: (usize, [u64; 8]),
+    stale: bool,
+    /// The renders (cascade and layout) of the page so far, and the cascades that kept the layout.
+    pub renders: u64,
+    pub restyles: u64,
+    /// Is the display list of `frame` built, with the control state of now? A scroll draws it again with other offsets and builds nothing.
     built: bool,
+    /// Is the display list made from the layout of `frame`? Then a change of the control state only builds it again when the
+    /// state that it shows changed.
+    listed: bool,
+    /// The `<input>`, `<textarea>` and `<select>` boxes of `frame`, found once for each layout (a pass over all the fragments).
+    controls: Vec<NodeId>,
     /// The text fields of `frame`, found when its display list was built (a pass over all the fragments).
     inputs: Vec<NodeId>,
     /// Listener errors and render errors, kept for tests. The first of each also goes to stderr.
@@ -220,7 +239,15 @@ impl Page {
             painter: Painter::new(),
             canvas: Canvas::new(viewport.0.max(1), viewport.1.max(1)),
             pointer: Pointer::default(),
+            inside: false,
+            moved: false,
+            key: (0, [0; 8]),
+            stale: false,
+            renders: 0,
+            restyles: 0,
             built: false,
+            listed: false,
+            controls: Vec::new(),
             inputs: Vec::new(),
             errors: Vec::new(),
             started: Instant::now(),
@@ -250,17 +277,70 @@ impl Page {
         self.source.browser()
     }
 
-    /// The layout of the last frame, made now if the page changed.
+    /// The page changed outside the window events (a driver ran a script): the next frame checks the render key.
+    pub fn touched(&mut self) {
+        self.stale = true;
+    }
+
+    /// The pixels of a frame made from nothing (a new cascade, layout, display list and glyph cache). The kept frame stays as it was.
+    #[cfg(test)]
+    pub(crate) fn paint_fresh(&mut self) -> Vec<u32> {
+        let frame = self.frame.take();
+        let painter = std::mem::replace(&mut self.painter, Painter::new());
+        let (key, stale, built, listed, renders, inputs, controls, inside) = (self.key, self.stale, self.built, self.listed, self.renders, self.inputs.clone(), self.controls.clone(), self.inside);
+        self.inside = false;
+        let px = self.paint().to_vec();
+        (self.frame, self.painter, self.key, self.stale, self.built, self.listed, self.renders, self.inputs, self.controls, self.inside) = (frame, painter, key, stale, built, listed, renders, inputs, controls, inside);
+        px
+    }
+
+    /// The layout of the last frame, made now if the page changed. A stale frame with the same render key keeps its layout.
     pub fn frame_now(&mut self) -> Option<&Frame> {
-        if self.frame.is_none() {
-            let r = self.browser().map(|b| b.render());
-            match r {
-                Some(Ok(f)) => {
-                    self.frame = Some(f);
-                    self.built = false;
+        if self.frame.is_none() || self.stale {
+            self.stale = false;
+            self.built = false;
+            // The focus fixup rule: a focused element that left the document or became inert gives the focus to the viewport (`:focus-within`).
+            if let Some(b) = self.browser() {
+                let _ = b.active_element();
+            }
+            let doc = self.doc_id();
+            let key = self.browser().map(|b| (doc, b.render_key()));
+            if self.frame.is_none() || key != Some(self.key) {
+                // Only the `:hover`, `:active`, focus or form state moved: the tree is the same, so a cascade whose values layout does not read keeps the layout.
+                let user_only = self.frame.is_some() && key.is_some_and(|k| k.0 == self.key.0 && k.1[..4] == self.key.1[..4]);
+                let styles = self.browser().map(|b| b.restyle());
+                let change = match (&styles, &self.frame) {
+                    (Some(Ok(new)), Some(f)) if user_only => f.styles.change(new),
+                    _ => Change::Layout,
+                };
+                match (styles, change) {
+                    (Some(Ok(_)), Change::Same) => self.key = key.expect("a browser"),
+                    (Some(Ok(new)), Change::Paint) => {
+                        self.frame.as_mut().expect("kept").styles = new;
+                        self.listed = false;
+                        self.key = key.expect("a browser");
+                        self.restyles += 1;
+                    }
+                    (Some(Ok(new)), _) => {
+                        self.frame = None;
+                        match self.browser().map(|b| b.render_with(new).map(|f| (f, b.render_key()))) {
+                            Some(Ok((f, k))) => {
+                                self.frame = Some(f);
+                                self.listed = false;
+                                self.key = (doc, k);
+                                self.renders += 1;
+                                self.moved = true;
+                            }
+                            Some(Err(e)) => self.note(format!("render: {e:?}")),
+                            None => {}
+                        }
+                    }
+                    (Some(Err(e)), _) => {
+                        self.frame = None;
+                        self.note(format!("render: {e:?}"));
+                    }
+                    (None, _) => self.frame = None,
                 }
-                Some(Err(e)) => self.note(format!("render: {e:?}")),
-                None => {}
             }
         }
         self.frame.as_ref()
@@ -280,6 +360,21 @@ impl Page {
         let f = self.frame.as_ref()?;
         let scroll = self.source.browser()?.scroll();
         bare_paint::hit::hit_test_scrolled(&doc, &f.styles, &f.layout, &f.areas, &scroll, x as f32, y as f32)
+    }
+
+    /// After the boxes moved under a still pointer, Chrome sends a "fake mouse move": `:hover` and the boundary events follow the new
+    /// layout. Once for each frame, so a listener that changes the page again cannot loop.
+    fn rehover(&mut self) {
+        self.frame_now();
+        if !(self.inside && self.moved) {
+            return;
+        }
+        self.moved = false;
+        let p = self.pointer;
+        let to = self.hit(p.x, p.y);
+        if let Some(r) = self.browser().map(|b| b.ui_pointer_settle(to, p)) {
+            self.after(r);
+        }
     }
 
     /// The caret offset for a press at `x` in text field `n`.
@@ -331,7 +426,7 @@ impl Page {
         if let Some(f) = fatal {
             self.note(format!("page: {f}"));
         }
-        self.frame = None;
+        self.stale = true;
     }
 
     fn after(&mut self, r: Result<UiOutcome, bare_js::eval::Error>) -> bool {
@@ -359,6 +454,7 @@ impl Page {
             Event::PointerMove { x, y, buttons, mods: m } => {
                 self.pointer = Pointer { x, y, buttons, mods: mods(m) };
                 let target = self.hit(x, y);
+                (self.inside, self.moved) = (true, false);
                 let (p, doc) = (self.pointer, self.doc_id());
                 let r = self.browser().map(|b| b.ui_pointer_move(target, p));
                 if let Some(r) = r {
@@ -394,6 +490,7 @@ impl Page {
                 h.cursor = Some(if self.doc_id() == doc { self.cursor_over(target) } else { Cursor::Default });
             }
             Event::PointerLeave => {
+                self.inside = false;
                 let p = self.pointer;
                 let r = self.browser().map(|b| b.ui_pointer_leave(p));
                 if let Some(r) = r {
@@ -438,8 +535,9 @@ impl Page {
 
     /// Paint the page into the canvas, then the fields. The display list is built once for a frame; a scroll draws it again.
     pub fn paint(&mut self) -> &[u32] {
+        self.rehover();
         self.frame_now();
-        let Page { source, frame, painter, canvas, built, inputs, .. } = self;
+        let Page { source, frame, painter, canvas, built, listed, controls, inputs, .. } = self;
         let b = source.browser();
         if let (Some(b), Some(f)) = (b, frame.as_ref()) {
             let focus = b.active_element().ok().flatten();
@@ -447,13 +545,30 @@ impl Page {
             let doc = b.document();
             let doc = doc.borrow();
             if !*built {
-                *inputs = f.layout.fragments.iter().filter(|g| g.kind == Kind::Box && (doc.is_html(g.node, "input") || doc.is_html(g.node, "textarea")) && b.is_text_input(g.node)).map(|g| g.node).collect();
-                // Paint draws the placeholder of an empty field. The text, the selection and the caret are drawn here.
-                painter.list.hosted.clear();
-                painter.list.hosted.extend(inputs.iter().map(|&n| (n, !b.input_value(n).unwrap_or_default().is_empty())));
-                painter.list.chosen.clear();
-                painter.list.chosen.extend(f.layout.fragments.iter().filter(|g| g.kind == Kind::Box && doc.is_html(g.node, "select")).map(|g| (g.node, b.selected_option(g.node))));
-                painter.build(&doc, &f.styles, &f.layout, &f.areas, (canvas.width, canvas.height));
+                // The state of the controls that the list shows: paint draws the placeholder of an empty field, the option of a select
+                // and the mark of a checkbox or a radio. The text of a field, the selection and the caret are drawn here.
+                if !*listed {
+                    controls.clear();
+                    controls.extend(f.layout.fragments.iter().filter(|g| g.kind == Kind::Box && ["input", "textarea", "select"].iter().any(|t| doc.is_html(g.node, t))).map(|g| g.node));
+                }
+                let (mut chosen, mut ticked) = (Vec::new(), Vec::new());
+                inputs.clear();
+                for &n in controls.iter() {
+                    if doc.is_html(n, "select") {
+                        chosen.push((n, b.selected_option(n)));
+                    } else if b.is_text_input(n) {
+                        inputs.push(n);
+                    } else if matches!(input_kind(&doc, n), "checkbox" | "radio") {
+                        ticked.push((n, b.input_checked(n)));
+                    }
+                }
+                let hosted: Vec<_> = inputs.iter().map(|&n| (n, b.input_value(n).is_some_and(|v| !v.is_empty()))).collect();
+                let list = &mut painter.list;
+                if !*listed || hosted != list.hosted || chosen != list.chosen || ticked != list.ticked {
+                    (list.hosted, list.chosen, list.ticked) = (hosted, chosen, ticked);
+                    painter.build(&doc, &f.styles, &f.layout, &f.areas, (canvas.width, canvas.height));
+                    *listed = true;
+                }
                 *built = true;
             }
             painter.draw_view(canvas, Some(&View { scroll: &scroll, areas: &f.areas, bars: f.bars }));
@@ -486,6 +601,7 @@ impl Page {
         };
         if moved {
             b.set_scroll(s);
+            self.moved = true;
         }
         moved
     }
@@ -558,7 +674,8 @@ impl App for Page {
         if let Some(Err(e)) = r {
             self.note(format!("viewport: {e:?}"));
         }
-        self.frame = None;
+        // The window size is in the render key: the next frame cascades (`@media`, `vw`) and lays out again.
+        self.settle();
     }
 
     fn frame(&mut self, _: &mut Control) -> &[u32] {

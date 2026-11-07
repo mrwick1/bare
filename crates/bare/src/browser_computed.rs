@@ -388,6 +388,11 @@ impl Dom {
         Ok(true)
     }
 
+    /// The user action state (`bare_css::selector::USES_*`) that the rules of the last cascade read. All of it before the first cascade.
+    pub(crate) fn user_rules(&self) -> u8 {
+        self.computed.cache.borrow().as_ref().map_or(u8::MAX, |b| b.rules.user_flags())
+    }
+
     /// The styles of the whole document now (the cascade of one read). Charged and capped as described in the header.
     pub(crate) fn cascade_now(&self, it: &mut Interp<'_>) -> R<Styles> {
         self.cascade_for(it, None)

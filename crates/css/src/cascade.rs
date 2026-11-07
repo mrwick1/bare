@@ -47,7 +47,7 @@
 //! Left out:
 //! - `@media`, `@supports`, `@import` and other at-rules: the rules inside are not used. (A style sheet for `print` would apply, too,
 //!   if the app gave it. The app skips `<style media>` and `<link media>` that do not say `all` or `screen`.)
-//! - `:visited`, `:hover`: they never match, see `selector.rs`.
+//! - `:visited`: it never matches, see `selector.rs`. `:hover`, `:active` and the focus pseudo-classes match the state in `Document::user`.
 //! - `larger` and `smaller` are 1.2 and 1/1.2 of the parent size. Chrome uses a table of sizes for the keywords.
 //! - The parent of a `display: none` element does not change anything: the style is not shared with it.
 //!
@@ -123,6 +123,8 @@ pub struct RuleSet {
     by_tag: Buckets<Atom>,
     /// The rules that have no id, no class and no tag in the last part: `*`, `[href]`, `:first-child`.
     other: Vec<u32>,
+    /// The user action state that some selector reads (`selector::USES_*`).
+    user: u8,
 }
 
 impl RuleSet {
@@ -132,7 +134,13 @@ impl RuleSet {
     }
 
     pub fn new(viewport: (f32, f32)) -> RuleSet {
-        RuleSet { viewport, entries: Vec::new(), decls: Vec::new(), side: Side::default(), layers: vec![Layer { parent: 0 }], layer_by_name: HashMap::new(), customs: Vec::new(), by_id: Buckets::default(), by_class: Buckets::default(), by_tag: Buckets::default(), other: Vec::new() }
+        RuleSet { viewport, entries: Vec::new(), decls: Vec::new(), side: Side::default(), layers: vec![Layer { parent: 0 }], layer_by_name: HashMap::new(), customs: Vec::new(), by_id: Buckets::default(), by_class: Buckets::default(), by_tag: Buckets::default(), other: Vec::new(), user: 0 }
+    }
+
+    /// Which user action state (`:hover`, `:active`, the focus pseudo-classes) some rule reads: the bits `selector::USES_*`.
+    /// A host that keeps styles must compute them again when one of those states changes.
+    pub fn user_flags(&self) -> u8 {
+        self.user
     }
 
     /// The number of selectors in the set.
@@ -275,6 +283,7 @@ impl RuleSet {
             return;
             // `a:hover` never matches. Keep it out of the index: it only costs time.
         }
+        self.user |= crate::selector::user_flags(&selector);
         let index = self.entries.len() as u32;
         // The bucket: an id is the most specific, then a class, then a tag.
         let last = &selector.compounds[0].simples;
@@ -859,6 +868,46 @@ impl Styles {
         self.styles.len() - 1
     }
 
+    /// How the cascade `new` of the same tree differs from this one, for a host that keeps a layout. `Same`: every node has the same
+    /// values. `Paint`: only values that layout does not read differ (`Change::paint_only`). `Layout`: any other difference. The
+    /// custom property sets are not compared: layout and paint do not read them.
+    pub fn change(&self, new: &Styles) -> Change {
+        if self.of_node.len() != new.of_node.len() {
+            return Change::Layout;
+        }
+        // The style of `new` that each style of `self` was last found equal to: most nodes share styles, so most need no compare.
+        let mut seen = vec![NONE; self.styles.len()];
+        let mut out = Change::Same;
+        for (&a, &b) in self.of_node.iter().zip(&new.of_node) {
+            if a == NONE || b == NONE {
+                if a != b {
+                    return Change::Layout;
+                }
+                continue;
+            }
+            if seen[a as usize] == b {
+                continue;
+            }
+            let (x, y) = (&self.styles[a as usize].0, &new.styles[b as usize].0);
+            for (i, &p) in Property::ALL.iter().enumerate() {
+                let (u, v) = (x[i], y[i]);
+                let same = match (u, v) {
+                    (Value::Length(Length::Calc(i)), Value::Length(Length::Calc(j))) => self.calcs[i as usize] == new.calcs[j as usize],
+                    (Value::Grid(i), Value::Grid(j)) => self.grids[i as usize] == new.grids[j as usize],
+                    _ => u == v,
+                };
+                if !same {
+                    if !Change::paint_only(p, u, v, y[Property::Display as usize]) {
+                        return Change::Layout;
+                    }
+                    out = Change::Paint;
+                }
+            }
+            seen[a as usize] = b;
+        }
+        out
+    }
+
     /// The tree of elements, one line for each, with the properties that are not at the starting value.
     /// An element that is not shown has `(not shown)`.
     pub fn dump(&self, doc: &Document) -> String {
@@ -896,6 +945,28 @@ impl Styles {
         }
         out.push_str(&format!("# {} different styles for {shown} elements with a style\n", self.unique()));
         out
+    }
+}
+
+/// How two cascades of one tree differ (`Styles::change`). The order is the cost: a later one needs more work.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Change {
+    Same,
+    Paint,
+    Layout,
+}
+
+impl Change {
+    /// Layout does not read `p` when it goes from `a` to `b` on an element with `display`: colors, decoration, opacity, `z-index`,
+    /// `visibility`, `pointer-events`, SVG paint and corner radii. Inline layout reads whether the background of a `display: inline` box is transparent.
+    pub fn paint_only(p: Property, a: Value, b: Value, display: Value) -> bool {
+        use Property::*;
+        match p {
+            TextColor | BorderTopColor | BorderRightColor | BorderBottomColor | BorderLeftColor | TextDecoration | Opacity | ZIndex | Visibility | PointerEvents | Fill | Stroke
+            | BorderTopLeftRadius | BorderTopRightRadius | BorderBottomRightRadius | BorderBottomLeftRadius => true,
+            BackgroundColor => display != Value::Keyword(Keyword::Inline) || matches!((a, b), (Value::Color(x), Value::Color(y)) if (x.a == 0) == (y.a == 0)),
+            _ => false,
+        }
     }
 }
 
@@ -1412,6 +1483,31 @@ mod tests {
 
     fn px(v: f32) -> Value {
         Value::Length(Length::Px(v))
+    }
+
+    /// `Styles::change` after a hover: no matching rule is `Same`, a color is `Paint`, a size is `Layout`, and the background of a
+    /// `display: inline` box is `Layout` only when it goes to or from transparent (inline layout makes a fragment for a painted box).
+    #[test]
+    fn a_hover_change_is_same_paint_or_layout() {
+        let html = "<div id=a>a <span id=s>s</span></div><div id=b>b</div>";
+        let change = |sheet: &str, id: &str| {
+            let (mut doc, before) = styles(html, &[sheet]);
+            let n = by_id(&doc, id);
+            doc.set_hover(Some(n));
+            let mut rules = RuleSet::new(VIEW);
+            rules.add(&mut doc, UA_CSS, Origin::UserAgent);
+            rules.add(&mut doc, sheet, Origin::Author);
+            assert_eq!(rules.user_flags(), if sheet.contains(":hover") { crate::selector::USES_HOVER } else { 0 });
+            before.change(&rules.compute(&doc))
+        };
+        assert_eq!(change("#a:hover { color: red }", "b"), Change::Same);
+        assert_eq!(change("#a:hover { color: red; background: #eee; border-color: blue }", "a"), Change::Paint);
+        assert_eq!(change("#a:hover { opacity: 0.5; z-index: 2; visibility: hidden }", "a"), Change::Paint);
+        assert_eq!(change("#a:hover { padding-left: 1px }", "a"), Change::Layout);
+        assert_eq!(change("#a:hover > span { font-weight: bold }", "a"), Change::Layout);
+        assert_eq!(change("span:hover { background: #eee }", "s"), Change::Layout);
+        assert_eq!(change("span { background: #fff } span:hover { background: #eee }", "s"), Change::Paint);
+        assert_eq!(change("div { color: red }", "a"), Change::Same);
     }
 
     #[test]

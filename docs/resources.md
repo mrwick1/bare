@@ -2342,7 +2342,7 @@ S4 topic 2. The crate is `bare-window` (`crates/window/`). Date: 2026-11-05. Mac
 - Close: `xdg_toplevel.close` or `Control::close` ends the loop. The buffers and the window are dropped, and the socket is flushed before it closes.
 - HiDPI: not done. Paint draws one canvas pixel for each CSS pixel and has no device pixel ratio. A buffer scale of 2 with a canvas of the same size would show the page at half size. So the buffer scale stays 1, and a compositor with a scale above 1 enlarges the picture (a blurry window). A sharp window needs a scale in paint (rectangles, glyph size, snapping) and in layout (`vw`, media queries): that is a topic of its own. `OutputState` is bound, so a later topic can read `scale_factor` and `wp_fractional_scale` without a change to the connection code.
 - Input: not here. S4 topic 4 added it: see "Window input" below. The toolkit now has the `xkbcommon` feature.
-- Style is computed once, at load. A resize runs layout and paint only. A `@media` rule or a `vw` length does not follow a resize until S4 topic 6.
+- Style is computed once, at load. A resize runs layout and paint only. A `@media` rule or a `vw` length does not follow a resize until S4 topic 6. (Fixed in S4 topic 6: a resize runs the cascade again. See "Window refresh".)
 
 ### Crate choice
 
@@ -2649,7 +2649,7 @@ Release build, archMachine. In-process, through `Page::handle` and `Page::paint`
 ### Gaps
 
 - `<textarea>` cannot be edited: the browser has no value state for it (`browser_selection.rs`). `contenteditable`, clipboard keys, Ctrl+Left and Ctrl+Right, IME and `composition` events, `maxlength`, number filtering, `contextmenu`, drag selection and double-click word selection are absent.
-- `:hover`, `:focus` and `:active` do not match. The cascade has no input state. Checkbox and radio boxes, `<input type=submit>` labels and the placeholder are not drawn (the paint crate draws controls in topic 3). Until then the demo fixtures give fields explicit borders. Topic 3 may paint the text of fields itself: then the field text in `page.rs` must go.
+- `:hover`, `:focus` and `:active` do not match. The cascade has no input state. (Fixed in S4 topic 6. See "Window refresh".) Checkbox and radio boxes, `<input type=submit>` labels and the placeholder are not drawn (the paint crate draws controls in topic 3). Until then the demo fixtures give fields explicit borders. Topic 3 may paint the text of fields itself: then the field text in `page.rs` must go.
 - Timers and animations that are not due at an input event do not run: the window loop has no timer and `Waker` is not used. A navigation or a `fetch` that a listener starts runs inside `Session::resume` and blocks the loop until it settles.
 - A link click starts a navigation, and a form submit now validates and navigates (topic 5). `<base>`, `target`, `download` and `<summary>` toggling are not done.
 - Radios are all Tab stops (HTML tabs into the checked radio of a group only). Scrolling came in topic 5 (see "Scrolling").
@@ -2863,7 +2863,7 @@ Release build, archMachine, through `Page::handle` and `Page::paint` in a window
 - Before the fix, the same step took 1.3 ms and 3.3 ms. A profile showed two passes over all the fragments for each step: the hit test of the wheel, and the search for the text fields in `Page::paint`. The window now skips the hit test when the page has no container, and finds the fields once for each built list. The 6 allocations of a step are the copy of the offsets and the event lists.
 - The time of a step still grows with the page (0.34 ms to 0.87 ms for 10 times more lines): the draw walks the whole display list and skips what is out of view item by item. A list that is indexed by position would remove that. It was not built, because a step is under 1 ms at 100,000 lines.
 - Keys did a new layout twice for each key (the key down and the key up) before the fix. A test (`a_scroll_key_does_not_lay_out_again`) checks that they do not now.
-- A click costs a new frame: the pointer button and the key down always report a change (`ui_call(true, ...)`, from topic 4), so the next paint runs the cascade and the layout again. On 10,000 lines that is 13.8 ms, on 100,000 lines 145 ms (200 layouts for 100 clicks). It is not a scroll cost, and it was not changed. Fix: report a change only when a listener ran or a default action changed a node.
+- A click costs a new frame: the pointer button and the key down always report a change (`ui_call(true, ...)`, from topic 4), so the next paint runs the cascade and the layout again. On 10,000 lines that is 13.8 ms, on 100,000 lines 145 ms (200 layouts for 100 clicks). It is not a scroll cost, and it was not changed. Fix: report a change only when a listener ran or a default action changed a node. (Fixed in S4 topic 6: a frame is made again only when its render key moves. `scroll_load` clicks now cost 84% fewer instructions at 10,000 lines. See "Window refresh".)
 
 ### Gaps
 
@@ -2875,6 +2875,59 @@ Release build, archMachine, through `Page::handle` and `Page::paint` in a window
 - A window title shows the first URL only (it does not follow a navigation).
 - The live staging login was not run on this build.
 
+
+## Window refresh
+
+S4 topic 6. `bare --window` makes its frame again after a change of the DOM, a form value, the focus, the window size or the `:hover` and `:active` state. The window never shows an old frame. The update is a full page update: no incremental cascade, no incremental layout and no dirty regions.
+
+### Design
+
+- Render key (`Browser::render_key`): the tree revision without the form-state changes, the text revision, the window size, the sheet generation, and the hover, active, focus and form-state revisions. A user or form revision is in the key only when a rule reads it (`RuleSet::user_flags`, from `selector::user_flags`). The window (`Page::frame_now`) keeps its frame while the key is the same, so a click with no change, typing and a scroll lay out nothing.
+- When only the user or form part moved, the window runs the cascade and compares the old and new styles (`Styles::change`, `Same`, `Paint` or `Layout`). Text and border colors, `text-decoration`, `opacity`, `z-index`, `visibility`, `pointer-events`, `fill`, `stroke` and radii are paint-only. A background color is paint-only, except on an inline box when it goes to or from transparent. Then a `Paint` change keeps the layout and builds the display list again.
+- The display list is built again only after a new layout, or when the control state that it shows (field text, chosen option, checkedness) changed.
+- User state (`Document::user`): the hovered, pressed and focused elements, and whether the focus shows a ring. `:hover`, `:active`, `:focus`, `:focus-within` and `:focus-visible` match it. A selector walks up from the element (`Document::in_chain`, shadow-including). The ring heuristic is Chrome's: a text field always shows it, another element shows it unless the last input was a pointer press.
+- After a layout, the window hit-tests the pointer again and sends the boundary events (Chrome's "fake mouse move"), once for each frame. A focused element that left the document gives up the focus before the key is read (the focus fixup rule).
+- A resize runs the cascade again (`@media`, `vw`), in the session window and in the static `--window FILE.html` window.
+
+### Checks
+
+- `page_tests.rs`, 5 tests. Each frame is compared with a frame made from nothing (a new cascade, layout, display list and glyph cache): 0 pixels may differ.
+- `each_change_draws_the_pixels_of_chrome`: 12 steps of `tools/fixtures/ui/refresh-pixels.html` (hover, leave, click focus, Tab, press, release, two script changes, blur, resize to 140 px and back) against headless Chrome 155 (`tools/ui/chrome_refresh_pixels.mjs`, `chrome-refresh-pixels.txt`). All pixels are equal. The page has no text.
+- `repeated_changes_leave_no_stale_output`: 200 rounds of text, class, node, hover, focus, typing and resize changes. The last frame equals `bare --paint` of the final DOM.
+- `a_change_that_the_layout_does_not_read_keeps_the_layout`, `form_state_changes_are_drawn` and `the_state_follows_the_page_under_a_still_pointer` count the layouts and the cascades of each change.
+- Each guard has a mutation check. A user key of 0, a reused stale frame, no control state in the list, `paint_only` always true, no hover re-check, no focus fixup and no form part in the key each make a test fail.
+- A live run on a hyprcage screen (800 x 600): a local form page, hover, a click in a field, typing, a checkbox click and two button clicks that add nodes. The last screenshot equals `bare --paint` of the final DOM in all 480,000 pixels. The window used 0 CPU ticks in 5 s idle. RSS was 17 MB.
+
+### Measurements
+
+`crates/bare/examples/refresh_load.rs`, 800 x 600 window, a form over N lines of text, p50 of each change from the event to the painted frame.
+
+| Change | 1,000 lines | 10,000 lines | 100,000 lines |
+| --- | ---: | ---: | ---: |
+| Click on a line, listener changes nothing | 0.35 ms | 0.95 ms | 6.9 ms |
+| Click in the text field | 0.35 ms | 0.96 ms | 7.0 ms |
+| A letter typed | 0.30 ms | 0.37 ms | 1.1 ms |
+| Checkbox click | 0.51 ms | 2.3 ms | 20.7 ms |
+| Pointer onto and off a link with `a:hover` (color) | 0.60 ms | 3.0 ms | 28 ms |
+| Button click, listener writes the status text | 1.42 ms | 10.6 ms | 104 ms |
+| Resize by 20 px | 1.51 ms | 10.2 ms | 99 ms |
+
+- Before, a click on 100,000 lines took 145 ms (`scroll_load`). Now it takes 6.9 ms with no layout: 3 hit tests of about 1.9 ms each.
+- A hover color cascades and keeps the layout: 28 ms at 100,000 lines, against about 100 ms for a full frame. A full frame at 100,000 lines is about 10 ms of cascade and 69 ms of layout.
+- A checkbox click builds the display list again: about 15 ms of its 20.7 ms at 100,000 lines.
+- Allocations: 55 to 145 for a change that does not lay out. Idle CPU in 3 s after the changes: 0 ms at every scale. RSS at 100,000 lines: 70 MB after the changes.
+- `tools/js/cost_matrix.sh`, all 803 rows, main 5dd8c70 against this change: no row is over +0.5% under both allocators. Largest growth: `sheets_load dynamic 10` +0.43% / +0.45%. `scroll_load 10000 300` -84%, `scroll_load 1000 300` -46%.
+- Two first builds broke the rule. Five inline match arms for the user pseudo-classes made deep-tree stress rows +0.5% to +0.7%: one `#[cold]` arm fixed it. A stored ancestor chain made `focus_load` +1.0% to +1.35%: the O(1) setters fixed it (now +0.14% to +0.26%).
+
+### Gaps
+
+- The layout is not incremental. A text change or a resize on 100,000 lines lays out the whole page (about 100 ms).
+- The hit test walks all the fragments (about 1.9 ms at 100,000 lines). A click does three.
+- No `outline` property and no focus ring of the browser sheet. A focused field looks different from Chrome. The Chrome fixture uses `:focus { outline: none }`.
+- Timers do not run between input events in the window.
+- `ResizeObserver` and `IntersectionObserver` keys do not include the user state.
+- No hover re-check after a scroll.
+- `:visited`, `:target`, `:valid` and `:invalid` still never match.
 
 ## Pending style sheets
 

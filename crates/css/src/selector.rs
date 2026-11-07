@@ -42,8 +42,8 @@
 //!   `::before` and `::after`, which make boxes.
 //! - Namespaces (`svg|a`).
 //! - The form pseudo-classes (`:disabled`, `:checked`, ...) are in `form.rs`.
-//! - Dynamic pseudo-classes (`:hover`, `:focus`, `:active`, `:visited`) are valid, but they never match,
-//!   because a page that is only shown has no pointer and no focus.
+//! - `:visited`, `:target`, `:valid` and `:invalid` are valid, but they never match. The user action pseudo-classes (`:hover`,
+//!   `:active`, `:focus`, `:focus-within`, `:focus-visible`) match what the host stored in the document (`Document::user`).
 //!
 //! Comments compare Rust with JavaScript, because you know JS.
 
@@ -114,12 +114,53 @@ pub enum Simple {
     State(Box<str>),
     /// `:disabled`, `:checked` and the other form pseudo-classes. See `form.rs`.
     Form(crate::form::Form),
-    /// `:hover` and friends. Never true.
+    /// `:visited` and friends. Never true.
     Never,
+    /// `:hover` and the other user action pseudo-classes. One variant: an arm for each in `simple_matches` slows every other test.
+    User(User),
     /// `:not(.a, b)`: true when none of the compounds match. Each one is a list of simple selectors.
     Not(Vec<Vec<Simple>>),
     /// `:is(.a, b)` and `:where(.a, b)`: true when one of the compounds matches. They match the same. Only the specificity differs.
     Is(Vec<Vec<Simple>>),
+}
+
+/// The bits of `user_flags`: which user action state a selector reads.
+/// A user action pseudo-class. It matches what the host stored in `Document::user`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum User {
+    /// `:hover`: the element under the pointer, or one of its ancestors.
+    Hover,
+    /// `:active`: the element that the primary button holds down, or one of its ancestors.
+    Active,
+    /// `:focus`
+    Focus,
+    /// `:focus-within`: the focused element or one of its ancestors.
+    FocusWithin,
+    /// `:focus-visible`: the focused element, when it shows a focus ring.
+    FocusVisible,
+}
+
+pub const USES_HOVER: u8 = 1;
+pub const USES_ACTIVE: u8 = 2;
+pub const USES_FOCUS: u8 = 4;
+/// `:checked`, `:placeholder-shown` and the other form pseudo-classes, which read `Document::ui`.
+pub const USES_FORM: u8 = 8;
+
+/// Which user action or form state the selector reads (`USES_*`), also inside `:not()` and `:is()`.
+pub fn user_flags(selector: &Selector) -> u8 {
+    fn of(simples: &[Simple]) -> u8 {
+        simples.iter().fold(0, |f, s| {
+            f | match s {
+                Simple::User(User::Hover) => USES_HOVER,
+                Simple::User(User::Active) => USES_ACTIVE,
+                Simple::User(_) => USES_FOCUS,
+                Simple::Form(_) => USES_FORM,
+                Simple::Not(args) | Simple::Is(args) => args.iter().fold(0, |f, a| f | of(a)),
+                _ => 0,
+            }
+        })
+    }
+    selector.compounds.iter().fold(0, |f, c| f | of(&c.simples))
 }
 
 /// `:nth-child(an+b)`: the place of the element among its siblings (the first is 1) must be `a*n + b` for some `n >= 0`.
@@ -401,7 +442,12 @@ impl Parser<'_, '_> {
                     "indeterminate" => Simple::Form(Form::Indeterminate),
                     "first-of-type" => Simple::Nth(Nth { a: 0, b: 1, from_end: false, of_type: true }),
                     "last-of-type" => Simple::Nth(Nth { a: 0, b: 1, from_end: true, of_type: true }),
-                    "hover" | "active" | "focus" | "focus-within" | "focus-visible" | "visited" | "target" | "invalid" | "valid" => Simple::Never,
+                    "hover" => Simple::User(User::Hover),
+                    "active" => Simple::User(User::Active),
+                    "focus" => Simple::User(User::Focus),
+                    "focus-within" => Simple::User(User::FocusWithin),
+                    "focus-visible" => Simple::User(User::FocusVisible),
+                    "visited" | "target" | "invalid" | "valid" => Simple::Never,
                     _ => return None,
                 })
             }
@@ -656,7 +702,8 @@ mod tests {
         assert_eq!(simple(":root"), Simple::Root);
         assert_eq!(simple(":empty"), Simple::Empty);
         assert_eq!(simple(":link"), Simple::Link);
-        assert_eq!(simple(":hover"), Simple::Never);
+        assert_eq!(simple(":hover"), Simple::User(User::Hover));
+        assert_eq!(simple(":visited"), Simple::Never);
         assert_eq!(simple(":is(.a, #b)"), Simple::Is(vec![vec![Simple::Class("a".into())], vec![Simple::Id("b".into())]]));
         assert_eq!(simple(":not(.a, #b)"), Simple::Not(vec![vec![Simple::Class("a".into())], vec![Simple::Id("b".into())]]));
     }
