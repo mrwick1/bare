@@ -237,6 +237,8 @@ pub struct PageResult {
     pub idle_timers: Vec<u32>,
     /// Only when `stop` is `Settled`: a quiet `requestAnimationFrame` loop was left running.
     pub idle_frames: bool,
+    /// Only when `stop` is `Settled`: live `requestIdleCallback` callbacks of a quiet idle chain that the settle rule skipped.
+    pub idle_callbacks: usize,
 }
 
 // ---------------------------------------------------------------------------------------------- host state
@@ -632,7 +634,7 @@ impl Browser {
     /// It never panics on page input and never returns an `Err`: the result says why it stopped.
     pub fn run_page(&mut self, cfg: PageConfig) -> PageResult {
         let dom = self.dom.clone();
-        let mut res = PageResult { stop: Stop::Settled, ready_state: "loading", scripts_run: 0, script_throws: 0, load_errors: 0, tasks: 0, rounds: 0, fetches: 0, bytes: 0, css: CssStats::default(), preload: PreloadStats::default(), diagnostics: Vec::new(), dropped_diagnostics: 0, idle_timers: Vec::new(), idle_frames: false };
+        let mut res = PageResult { stop: Stop::Settled, ready_state: "loading", scripts_run: 0, script_throws: 0, load_errors: 0, tasks: 0, rounds: 0, fetches: 0, bytes: 0, css: CssStats::default(), preload: PreloadStats::default(), diagnostics: Vec::new(), dropped_diagnostics: 0, idle_timers: Vec::new(), idle_frames: false, idle_callbacks: 0 };
         let prior = dom.scripts.fatal.borrow().clone();
         if let Some(f) = prior {
             res.stop = Stop::Fatal(f);
@@ -724,7 +726,7 @@ impl Browser {
             *dom.scripts.fatal.borrow_mut() = Some(f.clone());
         }
         if stop == Stop::Settled {
-            (res.idle_timers, res.idle_frames) = self.idle_left();
+            (res.idle_timers, res.idle_frames, res.idle_callbacks) = self.idle_left();
         }
         res.stop = stop;
         res.ready_state = ["loading", "interactive", "complete"][dom.scripts.ready.get() as usize];
@@ -745,7 +747,7 @@ impl Browser {
         limits.max_rounds = limits.max_rounds.min(caps.1.saturating_sub(spent.1));
         limits.max_time = limits.max_time.min(caps.2.saturating_sub(spent.2));
         let started = Instant::now();
-        let mut res = PageResult { stop: Stop::Settled, ready_state: "loading", scripts_run: 0, script_throws: 0, load_errors: 0, tasks: 0, rounds: 0, fetches, bytes, css: dom.scripts.sheets.borrow().stats, preload: dom.scripts.preloads.borrow().stats, diagnostics: Vec::new(), dropped_diagnostics: 0, idle_timers: Vec::new(), idle_frames: false };
+        let mut res = PageResult { stop: Stop::Settled, ready_state: "loading", scripts_run: 0, script_throws: 0, load_errors: 0, tasks: 0, rounds: 0, fetches, bytes, css: dom.scripts.sheets.borrow().stats, preload: dom.scripts.preloads.borrow().stats, diagnostics: Vec::new(), dropped_diagnostics: 0, idle_timers: Vec::new(), idle_frames: false, idle_callbacks: 0 };
         let prior = dom.scripts.fatal.borrow().clone();
         if let Some(f) = prior {
             res.stop = Stop::Fatal(f);
@@ -783,7 +785,7 @@ impl Browser {
             *dom.scripts.fatal.borrow_mut() = Some(f.clone());
         }
         if stop == Stop::Settled {
-            (res.idle_timers, res.idle_frames) = self.idle_left();
+            (res.idle_timers, res.idle_frames, res.idle_callbacks) = self.idle_left();
         }
         res.stop = stop;
         res.ready_state = ["loading", "interactive", "complete"][dom.scripts.ready.get() as usize];

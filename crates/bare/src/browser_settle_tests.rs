@@ -283,3 +283,106 @@ fn a_timer_that_adds_a_style_sheet_each_run_is_not_quiet_while_it_does() {
         assert_eq!(n(&s, &srv, "n"), 4);
     });
 }
+
+/// The idle callback rule: a chain whose last run was quiet does not block, a chain that works does, a first callback always runs.
+#[test]
+fn a_quiet_idle_chain_settles_and_is_reported() {
+    big(|| {
+        let (s, srv, r, _) = run("<script>var k = 0; function f() { k++; localStorage.setItem('n', k); requestIdleCallback(f) } requestIdleCallback(f)</script>", 5_000);
+        assert!(settled(&r), "{r:?}");
+        assert_eq!(r.pages[0].idle_callbacks, 1);
+        assert_eq!(n(&s, &srv, "n"), 1, "one run gave the verdict");
+    });
+}
+
+#[test]
+fn an_idle_chain_that_adds_nodes_each_run_does_not_settle() {
+    big(|| {
+        let (_, _, r, _) = run("<script>function f() { for (var i = 0; i < 20; i++) document.body.appendChild(document.createElement('p')); requestIdleCallback(f) } requestIdleCallback(f)</script>", 300);
+        assert!(!settled(&r), "{r:?}");
+    });
+}
+
+#[test]
+fn a_one_shot_idle_callback_that_fetches_finishes_before_the_page_settles() {
+    big(|| {
+        let (s, srv, r, _) = run("<script>requestIdleCallback(function () { fetch('/p').then(function (r) { return r.text() }).then(function (t) { localStorage.setItem('got', t); localStorage.setItem('d', '1') }) })</script>", 5_000);
+        assert!(settled(&r), "{r:?}");
+        assert_eq!(n(&s, &srv, "d"), 1);
+        assert_eq!(s.storage().get_item(false, &srv.url(""), "got").as_deref(), Some("poll"));
+    });
+}
+
+#[test]
+fn an_idle_callback_with_a_timeout_runs_before_the_page_settles() {
+    big(|| {
+        let (s, srv, r, _) = run("<script>localStorage.setItem('a', '0'); requestIdleCallback(function () { localStorage.setItem('a', '1') }, { timeout: 5000 });
+            var k = 0; function f() { k++; localStorage.setItem('n', k); requestIdleCallback(f, { timeout: 4000 }) } requestIdleCallback(f, { timeout: 4000 })</script>", 5_000);
+        assert!(settled(&r), "{r:?}");
+        assert_eq!(n(&s, &srv, "a"), 1);
+        assert_eq!(n(&s, &srv, "n"), 1);
+        assert_eq!(r.pages[0].idle_callbacks, 1);
+    });
+}
+
+#[test]
+fn a_timer_that_asks_for_an_idle_callback_each_tick_settles() {
+    big(|| {
+        let (s, srv, r, _) = run("<script>var k = 0; setInterval(function () { requestIdleCallback(function () { k++; localStorage.setItem('n', k) }) }, 1000)</script>", 5_000);
+        assert!(settled(&r), "{r:?}");
+        assert_eq!(r.pages[0].idle_timers, vec![1000]);
+        assert!(n(&s, &srv, "n") >= 1);
+    });
+}
+
+#[test]
+fn a_timer_whose_idle_callbacks_do_work_does_not_settle() {
+    big(|| {
+        let (_, _, r, _) = run("<script>setInterval(function () { requestIdleCallback(function () { for (var i = 0; i < 20; i++) document.body.appendChild(document.createElement('p')) }) }, 1000)</script>", 300);
+        assert!(!settled(&r), "{r:?}");
+    });
+}
+
+/// A fetch that the driver makes for a link a callback added (preload) is work of that callback, in a timer, a frame and an idle chain.
+fn link_chain(start: &str) -> String {
+    format!("<script>var k = 0; function step() {{ k++; localStorage.setItem('n', k); if (k <= 3) {{ var l = document.createElement('link'); l.rel = 'preload'; l.as = 'font'; l.href = '/f' + k + '.woff2'; document.head.appendChild(l) }} {start} }} step()</script>")
+}
+
+fn chain(body: String) -> (Session, Server) {
+    let body: &'static str = Box::leak(body.into_boxed_str());
+    let srv = serve(move |path| match path {
+        "/" => Reply::new(200, Some("text/html; charset=utf-8"), body),
+        _ => Reply::new(200, Some("font/woff2"), "x"),
+    });
+    let mut c = cfg(srv.url("/"));
+    c.limits.max_tasks = 5_000;
+    c.limits.max_rounds = 5_000;
+    let mut s = Session::new(c);
+    let r = s.run();
+    assert!(settled(&r), "{r:?}");
+    (s, srv)
+}
+
+#[test]
+fn a_timer_that_adds_a_preload_each_run_is_not_quiet_while_it_does() {
+    big(|| {
+        let (s, srv) = chain(link_chain("setTimeout(step, 400)"));
+        assert_eq!(n(&s, &srv, "n"), 4);
+    });
+}
+
+#[test]
+fn a_frame_that_adds_a_preload_each_run_is_not_quiet_while_it_does() {
+    big(|| {
+        let (s, srv) = chain(link_chain("requestAnimationFrame(step)"));
+        assert_eq!(n(&s, &srv, "n"), 4);
+    });
+}
+
+#[test]
+fn an_idle_chain_that_adds_a_preload_each_run_is_not_quiet_while_it_does() {
+    big(|| {
+        let (s, srv) = chain(link_chain("requestIdleCallback(step)"));
+        assert_eq!(n(&s, &srv, "n"), 4);
+    });
+}

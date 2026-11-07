@@ -211,6 +211,10 @@ pub(crate) struct Sched {
     in_frame: bool,
     /// The last rendering step was quiet and no outside call asked for a frame since.
     frame_idle: bool,
+    /// The last idle period was quiet and no outside request since (`browser_idle.rs`).
+    idle_quiet: bool,
+    /// An idle callback runs now (a request inside it is the chain asking again).
+    pub(crate) in_idle: bool,
 }
 
 impl Sched {
@@ -219,6 +223,7 @@ impl Sched {
         match t {
             Task::Timer(id) => self.timers.get(id).is_some_and(|t| t.idle),
             Task::Render => self.frame_idle,
+            Task::Idle | Task::IdleTimeout(_) => self.idle_quiet,
             _ => false,
         }
     }
@@ -350,7 +355,16 @@ impl Dom {
     pub(crate) fn forget_quiet(&self) {
         let mut s = self.sched.borrow_mut();
         s.frame_idle = false;
+        s.idle_quiet = false;
         s.timers.values_mut().for_each(|t| t.idle = false);
+    }
+
+    /// An idle callback was requested: from outside the idle chain the verdict is taken back.
+    pub(crate) fn idle_asked(&self) {
+        let mut s = self.sched.borrow_mut();
+        if !s.in_idle {
+            s.idle_quiet = false;
+        }
     }
 
     // ------------------------------------------------------------ queue
@@ -387,7 +401,7 @@ impl Dom {
         let mut s = self.sched.borrow_mut();
         let seq = s.seq;
         s.seq = seq.checked_add(1).ok_or_else(|| self.lim("task-seq"))?;
-        s.work += !matches!(task, Task::Render | Task::Deliver(_)) as u64;
+        s.work += !matches!(task, Task::Render | Task::Deliver(_) | Task::Idle | Task::IdleTimeout(_)) as u64;
         let key = (due.to_bits(), seq);
         s.tasks.insert(key, task);
         Ok(key)
@@ -562,14 +576,24 @@ impl Dom {
                 self.sched.borrow_mut().frame_idle = quiet;
                 Ok(())
             }
-            Run::Idle => it.host_scope(|it| {
-                it.charge(1)?;
-                self.idle_run(it)
-            }),
-            Run::IdleTimeout(id) => it.host_scope(|it| {
-                it.charge(1)?;
-                self.idle_timeout(it, id)
-            }),
+            Run::Idle | Run::IdleTimeout(_) => {
+                let mark = self.settle_mark();
+                self.sched.borrow_mut().in_idle = true;
+                let r = it.host_scope(|it| {
+                    it.charge(1)?;
+                    match run {
+                        Run::IdleTimeout(id) => self.idle_timeout(it, id),
+                        _ => self.idle_run(it),
+                    }
+                });
+                self.sched.borrow_mut().in_idle = false;
+                // A period that only moved behind a task or the frame ran nothing and has no verdict.
+                if r? {
+                    let quiet = self.follow_up(mark);
+                    self.sched.borrow_mut().idle_quiet = quiet;
+                }
+                Ok(())
+            }
             Run::Notify => it.host_scope(|it| {
                 it.charge(1)?;
                 self.io_notify(it)
@@ -1092,18 +1116,20 @@ impl Browser {
 
     /// What the settle rule skips and leaves queued: the period (ms) of each such recurring timer in due order, and whether a quiet
     /// animation frame loop is queued.
-    pub fn idle_left(&self) -> (Vec<u32>, bool) {
+    pub fn idle_left(&self) -> (Vec<u32>, bool, usize) {
         let s = self.dom.sched.borrow();
         let mut timers = Vec::new();
         let mut frames = false;
+        let mut idle = 0;
         for t in s.tasks.values() {
             match t {
                 Task::Timer(id) if s.skips(t) => timers.extend(s.timers.get(id).map(|t| t.period)),
                 Task::Render => frames = s.frame_idle,
+                Task::Idle if s.skips(t) => idle = self.dom.idle_count(),
                 _ => {}
             }
         }
-        (timers, frames)
+        (timers, frames, idle)
     }
 
     pub fn sched_stats(&self) -> SchedStats {

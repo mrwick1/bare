@@ -233,6 +233,7 @@ impl Run<'_> {
         let kept = self.kept();
         let sent = self.res.fetches;
         let r = download(&mut self.net, self.https_only, &self.lim, self.deadline, kept, &mut self.res, &target);
+        self.dom.forget_quiet();
         let mut p = self.dom.scripts.preloads.borrow_mut();
         p.stats.fetches += (self.res.fetches != sent) as usize;
         let ok = r.is_ok();

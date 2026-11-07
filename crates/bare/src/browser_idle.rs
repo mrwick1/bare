@@ -86,6 +86,7 @@ fn request(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
         }
         return Err(e);
     }
+    d.idle_asked();
     i.next.set(id);
     i.cbs.borrow_mut().insert(id, (cb, key));
     Ok(Value::Number(id as f64))
@@ -171,6 +172,10 @@ impl Dom {
     }
 
     /// Queue the next idle period at `due` unless one is queued.
+    pub(crate) fn idle_count(&self) -> usize {
+        self.idle.cbs.borrow().len()
+    }
+
     fn idle_queue(&self, due: f64) -> R<()> {
         if !self.idle.queued.get() {
             self.schedule(due, Task::Idle)?;
@@ -198,20 +203,21 @@ impl Dom {
     }
 
     /// `Task::Idle`: see the header.
-    pub(crate) fn idle_run(&self, it: &mut Interp<'_>) -> R<()> {
+    /// True when a period ran callbacks.
+    pub(crate) fn idle_run(&self, it: &mut Interp<'_>) -> R<bool> {
         let i = &self.idle;
         i.queued.set(false);
         if i.cbs.borrow().is_empty() {
-            return Ok(());
+            return Ok(false);
         }
         let now = self.now_ms();
         let next = self.next_due();
         if next.is_some_and(|t| t <= now) {
-            return self.idle_queue(now);
+            return self.idle_queue(now).map(|_| false);
         }
         if !i.deferred.get() && self.frame.queued.get() {
             i.deferred.set(true);
-            return self.idle_queue(self.frame.due.get());
+            return self.idle_queue(self.frame.due.get()).map(|_| false);
         }
         i.deferred.set(false);
         // A request during the period waits for the next one: the period counts as queued until it ends.
@@ -237,15 +243,15 @@ impl Dom {
         if !i.cbs.borrow().is_empty() {
             self.idle_queue(end.max(self.now_ms()))?;
         }
-        Ok(())
+        Ok(true)
     }
 
     /// `Task::IdleTimeout`: the callback runs now if it still waits.
-    pub(crate) fn idle_timeout(&self, it: &mut Interp<'_>, id: u32) -> R<()> {
+    pub(crate) fn idle_timeout(&self, it: &mut Interp<'_>, id: u32) -> R<bool> {
         let gone = self.idle.cbs.borrow_mut().remove(&id);
         match gone {
-            Some((cb, _)) => self.idle_call(it, cb, self.now_ms(), true),
-            None => Ok(()),
+            Some((cb, _)) => self.idle_call(it, cb, self.now_ms(), true).map(|_| true),
+            None => Ok(false),
         }
     }
 }
