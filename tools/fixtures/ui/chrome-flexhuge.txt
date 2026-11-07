@@ -1,0 +1,7 @@
+grow-over-f32-one-item	0,300 true
+grow-over-f32-two-items	0,150 150,150
+grow-over-f32-against-one	0,280.8 280.8,19.2
+grow-long-digits	0,280.8
+grow-max-float-twice	0,100 100,100 200,100
+shrink-over-f32	0,60 60,240
+wrap-column-grow-over-f32	0,271.2 290.4,9.6 290.4,9.6

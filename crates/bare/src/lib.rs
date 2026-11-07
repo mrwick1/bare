@@ -169,6 +169,8 @@ mod browser_valign_tests;
 #[cfg(test)]
 mod browser_aspect_tests;
 #[cfg(test)]
+mod browser_cssfix_tests;
+#[cfg(test)]
 mod browser_svg_tests;
 #[cfg(test)]
 mod browser_walker_tests;

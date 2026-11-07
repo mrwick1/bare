@@ -1,0 +1,24 @@
+var st = document.createElement('style'); st.textContent = "html{overflow:hidden}*{font-family:'Noto Sans Mono' !important}body{margin:0}.f{display:flex;width:300px}.f>*{margin:0}"; document.head.appendChild(st);
+var $ = function (i) { return document.getElementById(i) };
+var W = function (ids) { return ids.split(' ').map(function (id) { var r = $(id).getBoundingClientRect(); return [r.x, r.width].map(function (v) { return Math.round(v * 10) / 10 }).join(',') }).join(' ') };
+=== grow-over-f32-one-item
+@html <div class=f><p id=a style="flex:1e39 0 0">aa bb</p></div>
+(function () { return W('a') + ' ' + (getComputedStyle($('a')).flexGrow > 1e38) })
+=== grow-over-f32-two-items
+@html <div class=f><p id=a style="flex:1e39 0 0">aa</p><p id=b style="flex:1e39 0 0">bb</p></div>
+(function () { return W('a b') })
+=== grow-over-f32-against-one
+@html <div class=f><p id=a style="flex:1e39 0 0">aa</p><p id=b style="flex:1 0 0">bb</p></div>
+(function () { return W('a b') })
+=== grow-long-digits
+@html <div class=f><p id=a style="flex:1000000000000000000000000000000000000000 0 0;min-width:0">aa bb</p>cc</div>
+(function () { return W('a') })
+=== grow-max-float-twice
+@html <div class=f><p id=a style="flex:3.4e38 0 0">aa</p><p id=b style="flex:3.4e38 0 0">bb</p><p id=c style="flex:3.4e38 0 0">cc</p></div>
+(function () { return W('a b c') })
+=== shrink-over-f32
+@html <div class=f><p id=a style="flex:0 1e39 100px">aa</p><p id=b style="flex:0 1e39 400px">bb</p></div>
+(function () { return W('a b') })
+=== wrap-column-grow-over-f32
+@html <div class=f style="flex-wrap:wrap;height:40px;align-content:space-between"><p id=a style="flex:1e39 0 0;min-width:0">aa bb</p>cc<div id=d style="display:inline-flex;flex-direction:column-reverse"><b id=e style="flex:2;height:50%">x</b></div></div>
+(function () { return W('a d e') })
