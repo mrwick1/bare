@@ -3,4 +3,4 @@
 
 use crate::browser_topic_tests::topic_test;
 
-topic_test!(chrome_cases, "valign", 57);
+topic_test!(chrome_cases, "valign", 72);

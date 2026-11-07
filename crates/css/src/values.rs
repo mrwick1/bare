@@ -31,7 +31,7 @@
 //!   To add one, add a line in `properties!` and a case in `longhand`.
 //! - `font-family`, `background-image`, `box-shadow`: later, when something needs them.
 //! - `border-radius` takes one radius for each corner (a circle). The part after a `/` is read and dropped.
-//! - Approximations that we know: `ex` and `ch` are half an `em` (the real value needs the font). In `background`,
+//! - Approximations that we know: `ch` is half an `em` (the real value needs the font; `ex` is 0.536 em, the x-height of the one font). In `background`,
 //!   only the color is used, and the other parts are checked a little and ignored. In `text-decoration`, only the line kind is used.
 //!   `list-style-type` takes only the five words that we draw, and Chrome takes any word (a name of a counter style).
 //!   In `font-size`, `larger` and `smaller` are kept as keywords for the cascade.
@@ -481,7 +481,10 @@ pub(crate) fn length(value: f32, unit: &str) -> Option<Length> {
         px(96.0 / 25.4)
     } else if is("q") {
         px(96.0 / 101.6)
-    } else if is("ex") || is("ch") {
+    } else if is("ex") {
+        // The x-height of Noto Sans Mono, the one font (`OS/2` `sxHeight` 536 of 1000).
+        Some(Length::Em(value * 0.536))
+    } else if is("ch") {
         Some(Length::Em(value * 0.5))
     } else {
         Option::None

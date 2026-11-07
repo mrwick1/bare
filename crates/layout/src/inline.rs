@@ -212,6 +212,8 @@ struct Aligned {
     bottom: bool,
     above: f32,
     below: f32,
+    /// How far the shifted box that it is in lifts it (0 for a box that is not in one).
+    shift: f32,
 }
 
 /// The line breaker. JS: an object with the state of the line that is being filled.
@@ -531,6 +533,19 @@ impl Breaker<'_, '_> {
         *b = b.max(below);
     }
 
+    /// A box reaches `above` and `below` its baseline, which is `shift` above the baseline of the line. In a `top` or `bottom`
+    /// box (`root`) the reach counts in the box and, as in Chrome, on the line too: the text sits lower under a tall or
+    /// raised inline box in it. Not for a culled box or an atomic inline (`line` is false): they do not.
+    #[inline(always)]
+    fn reach_in(&mut self, root: u32, above: f32, below: f32, shift: f32, line: bool) {
+        let Some(r) = self.aligned.get(root as usize) else { return self.reach(NONE, above + shift, below - shift) };
+        let rel = shift - r.shift;
+        self.reach(root, above + rel, below - rel);
+        if line {
+            self.reach(NONE, above + shift, below - shift);
+        }
+    }
+
     /// Text goes on the line next, at the place of the innermost open box. Only a change of place is kept: text with no
     /// `vertical-align` around it keeps no list.
     fn mark(&mut self) {
@@ -550,14 +565,18 @@ impl Breaker<'_, '_> {
         let (shift, root, above, below) = match al {
             Align::Shift(s) => {
                 let s = shift + s;
-                self.reach(root, info.above + s, info.below - s);
-                let (above, below) = self.open.last().map_or((info.above + s, info.below - s), |o| (o.above.max(info.above + s), o.below.max(info.below - s)));
+                self.reach_in(root, info.above, info.below, s, !info.culled);
+                // What is in a `top` or `bottom` box starts afresh: the box itself reaches in its own entry.
+                let (above, below) = match self.open.last() {
+                    Some(o) if !matches!(o.align, Align::Top | Align::Bottom) => (o.above.max(info.above + s), o.below.max(info.below - s)),
+                    _ => (info.above + s, info.below - s),
+                };
                 (s, root, above, below)
             }
             _ => {
-                self.aligned.push(Aligned { bottom: al == Align::Bottom, above: info.above, below: info.below });
+                self.aligned.push(Aligned { bottom: al == Align::Bottom, above: info.above, below: info.below, shift });
                 self.rooted += 1;
-                (0.0, self.aligned.len() as u32 - 1, info.above, info.below)
+                (shift, self.aligned.len() as u32 - 1, info.above, info.below)
             }
         };
         self.open.push(Open { node, x0: x, paint: info.paint || info.positioned || self.cx.uncull, order: self.opened, above, below, align: al, shift, root });
@@ -572,10 +591,10 @@ impl Breaker<'_, '_> {
             Align::Shift(s) => {
                 let (shift, root) = self.open.last().map_or((0.0, NONE), |o| (o.shift, o.root));
                 (a.shift, a.root) = (shift + s, root);
-                self.reach(root, above + a.shift, below - a.shift);
+                self.reach_in(root, above, below, a.shift, false);
             }
             al => {
-                self.aligned.push(Aligned { bottom: al == Align::Bottom, above, below });
+                self.aligned.push(Aligned { bottom: al == Align::Bottom, above, below, shift: 0.0 });
                 a.root = self.aligned.len() as u32 - 1;
             }
         }
@@ -693,12 +712,16 @@ impl Breaker<'_, '_> {
             (self.above, self.below) = self.strut;
             let mut root = NONE;
             for i in 0..self.open.len() {
-                let o = &self.open[i];
-                if let Align::Top | Align::Bottom = o.align {
+                let (above, below, align, shift) = {
+                    let o = &self.open[i];
+                    (o.above, o.below, o.align, o.shift)
+                };
+                if let Align::Top | Align::Bottom = align {
                     root = self.aligned.len() as u32;
-                    self.aligned.push(Aligned { bottom: o.align == Align::Bottom, above: o.above, below: o.below });
+                    self.aligned.push(Aligned { bottom: align == Align::Bottom, above, below, shift });
+                } else if root != NONE {
+                    self.reach(NONE, above, below);
                 }
-                let (above, below) = (o.above, o.below);
                 self.open[i].root = root;
                 self.reach(root, above, below);
             }
