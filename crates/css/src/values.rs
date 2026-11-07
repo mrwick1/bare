@@ -920,7 +920,7 @@ fn longhand(property: Property, part: Part) -> Option<Value> {
         },
         TableLayout => one_of(part, &[K::Auto, K::Fixed]),
         CaptionSide => one_of(part, &[K::Top, K::Bottom]),
-        // Only `baseline`, `top`, `middle` and `bottom` do something (in table cells). The others are read and act as `baseline`.
+        // A table cell reads `baseline`, `top`, `middle` and `bottom` (the others act as `baseline`). An inline box and an atomic inline read all of them (`layout/src/inline.rs`).
         VerticalAlign => match part {
             Part::Keyword(k @ (K::Baseline | K::Top | K::Middle | K::Bottom | K::Sub | K::Super | K::TextTop | K::TextBottom)) => Some(Value::Keyword(k)),
             _ => length(part).map(Value::Length),

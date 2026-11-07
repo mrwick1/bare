@@ -1,0 +1,57 @@
+keywords-same-font	0,37.19 15.19,22 4.67,22 12.72,22 11,22 11,22 6,22 0,22 11,22
+keywords-small-children-in-a-big-parent	0,44.39 30.39,14 11.34,14 18.42,14 0,14 29,14
+keywords-big-children-in-a-small-parent	0,34 0,34 34,37 34,34 71,34 71,34 105,34 105,34 139,34 139,34
+text-top-and-line-height-of-the-parent	0,49 18,22 49,49 58,22
+text-top-and-line-height-of-the-child	0,40 9,22 40,40 49,22
+middle-and-line-height	0,40 9,22 40,41.72 50.72,22
+percent-of-the-line-height	0,49.5 5,22 49.5,71 68.5,22 120.5,44 142.5,22
+sub-with-its-own-font-and-line-height	0,60 9,41
+numeric-line-height-with-a-fraction	0,25.42 0,18 25.42,21 46.42,25 71.42,48 71.42,15
+lengths-up-and-down	0,27 0,22 27,32 37,22 59,54 59,22 113,22 113,22 135,56 135,27
+line-height-one-strut	0,22.33 -3,22 22.33,30 16.33,41 52.33,5 31.33,41
+top-and-bottom-big-font	0,41 0,22 0,41 41,41 60,22 41,41
+top-and-bottom-big-line-height	0,80 0,22 29,22 80,80 80,22 109,22 119,22
+top-and-bottom-small-in-a-tall-line	0,50 14,22 0,14 36,14
+two-tops-and-a-bottom	0,70 48,22 19,22 4,22 24,22 70,70 118,22 94,22 89,22
+top-box-with-a-bottom-child	0,50 0,22 14,22 4,41
+top-and-bottom-with-padding-and-border	0,22 0,22 -9,34 22,22 22,22 15,34
+nested-shifts	0,41 10.81,22 0,41 41,42 41,41 57,14
+three-levels-of-shifts	0,33.98 1.66,27 0,19 7.8,14
+shifted-box-with-text-around-it	0,24.52 0,14 10.52,14
+shifted-box-over-two-lines	0,96.98 0,91.66 74.98,22
+shifted-box-over-two-lines-with-a-bottom-box	0,102 9,62 80,22
+shifted-text-moves-the-line-height-of-each-line	0,106 0,22 62,22
+image-heights-on-the-baseline	0,85 70,10 50,30 0,80
+image-keywords	0,50 0,50 50,50 50,50 100,50 100,50 150,50 150,50 200,50 200,50 250,50.81 250,50 300.81,61.33 300.81,50 362.14,66 362.14,50 428.14,50 428.14,50 478.14,75 478.14,50
+image-with-margins	0,53 7,30 53,48 60,30 101,48 108,30
+image-in-a-small-font	0,14 6,5 14,40 44,5
+image-and-text-in-a-bigger-span	0,41 0,41 22,10
+inline-block-with-text	0,50 0,50 50,50 50,50 100,44 100,30
+inline-block-without-text	0,55 0,50 55,64 55,50 119,64 119,59
+inline-block-overflow-hidden	0,35 0,30 35,35 35,30 70,35 70,30 105,44 105,30 149,35 149,30
+inline-block-with-padding-and-border	0,41 0,41 41,73 45,63
+inline-block-with-own-line-height-and-font	0,50 0,50 50,22 56,14 72,40 81,22
+inline-block-keywords	0,40 0,40 40,40 40,40 80,40 80,40 120,40 120,40 160,40 160,40 200,44.19 204.19,40 244.19,40 244.19,40
+inline-block-percent-uses-its-own-line-height	0,71 0,40 71,60 81,40
+inline-block-in-a-shifted-span	0,22.33 0,14 0,20 22.33,65 65.33,22 22.33,60
+nested-inline-blocks	0,60 0,60 0,20
+empty-inline-block-in-an-empty-line	0,25 0,20 25,22 42,0
+inline-block-with-a-float-and-text-inside	0,50 0,50 0,10
+inline-block-with-block-children	0,37 0,37 0,22 22,15 37,37 37,37 37,15 52,22
+inline-flex-baseline	0,50 0,50 50,50 50,50 100,55 100,50 155,57 162,50 162,10 172,22
+inline-flex-items-with-different-baselines	0,41 0,41 0,41 15,22 41,41 41,41 41,41 41,41 82,41 82,41 82,41 91.5,22
+inline-flex-with-an-image-and-overflow	0,50 0,50 50,50 50,50 50,40
+inline-grid-baseline	0,50 0,50 50,50 50,50 100,55 100,50 155,41 155,41 155,41 155,41 196,50 196,50
+inline-table-baseline	0,45 45,45 90,40 130,40 170,40 210,62 272,45 317,45
+button-and-text	0,24 0,24 24,41 39,24 65,60 65,60 125,47 125,47
+button-with-content	0,47 0,47 3,41 47,46 47,46 93,38 93,36 96,30 131,42 131,42
+input-and-text	0,24 0,24 24,41 39,24 65,56 65,56 121,24 121,24 145,41 163,20
+select-textarea-checkbox-radio	0,23 1,22 23,47 23,42 70,22 74,13 92,22 96,13 114,22.22 120.22,13 136.22,22 145.22,13
+controls-with-vertical-align	0,24.72 0.72,24 24.72,24 24.72,24 48.72,56 48.72,56 104.72,28.33 104.72,24 133.05,22 133.05,22
+controls-in-a-big-line	0,40 9,24 9,24 40,32 45,24
+line-height-normal-and-numeric-lines	0,40 6,27 40,32 41,27 72,36 69,41
+two-lines-with-different-shifts	0,126 22,22 104,22
+atomic-after-a-break-in-a-shifted-box	0,81 0,72 36,30
+image-in-a-paragraph-of-lines	0,89 0,40 52,10
+list-item-with-an-image	0,45 0,40
+table-cell-baseline-with-shifted-text	0,42 0,42

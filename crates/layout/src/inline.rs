@@ -14,8 +14,14 @@
 //!
 //! The height of a line: each inline box on the line (and the block itself, the "strut") has a font and a
 //! `line-height`. The extra space of the line height, beyond the font's ascent and descent, is split in half above and
-//! below the letters ("half-leading"). All boxes sit on one baseline, and the line is as tall as what sticks out the
+//! below the letters ("half-leading"). The boxes sit on one baseline, and the line is as tall as what sticks out the
 //! most above and below it. A `<span>` with a bigger font makes its line taller.
+//!
+//! `vertical-align` moves a box off the baseline (`Align`): its content goes up or down by a shift, and the shifts of
+//! boxes inside each other add up. A box with `top` or `bottom` (with what is inside it) waits until the height of the
+//! line is known, and then it goes to the top or the bottom of the line (CSS 2.1, 10.8.1). The text keeps no shift of its
+//! own: an `Item::Place` in the line at each change of place is enough, and a line with no `vertical-align`
+//! has none.
 //!
 //! A line is kept in `Line` until it is full, and only then its fragments are written: their heights and their place
 //! for `text-align` are known only at the end. An inline box that goes over two lines makes one fragment on each line.
@@ -130,10 +136,12 @@ enum Item {
     Close { x: f32 },
     /// An atomic inline, already laid out. In a `Box`, so that the other items stay small.
     Atomic(Box<Atomic>),
+    /// The text after it sits at this place (`vertical-align`), as for `Open`. Only on a line that has a change of place.
+    Place { shift: f32, root: u32 },
 }
 
 /// An atomic inline: its fragments (relative to it), the size of its margin box, and its baseline from the top of the
-/// margin box.
+/// margin box. `align`: its `vertical-align`. `shift` and `root`: where its baseline is, as for `Open`.
 struct Atomic {
     fragments: Vec<Fragment>,
     x: f32,
@@ -142,6 +150,9 @@ struct Atomic {
     baseline: f32,
     margin_left: f32,
     margin_top: f32,
+    align: Align,
+    shift: f32,
+    root: u32,
 }
 
 impl Item {
@@ -149,6 +160,7 @@ impl Item {
         match self {
             Item::Text { x, .. } | Item::Open { x, .. } | Item::Close { x, .. } => *x += dx,
             Item::Atomic(a) => a.x += dx,
+            Item::Place { .. } => {}
         }
     }
 }
@@ -159,13 +171,15 @@ struct Inline {
     /// The left and right margins, and the left and right border and padding.
     margins: (f32, f32),
     edges: (f32, f32),
-    /// How far its font and `line-height` reach above and below the baseline.
+    /// How far its font and `line-height` reach above and below the baseline (0 for a culled box).
     above: f32,
     below: f32,
     /// It has a background or a border: it needs a fragment.
     paint: bool,
     /// It has a `position`: it needs a fragment too, to be a place that `top` and `left` move.
     positioned: bool,
+    /// It has a `vertical-align` other than `baseline`.
+    raised: bool,
     /// Culled: no fragment, no item, nothing. Most `<b>`, `<i>` and `<a>` are culled: they have nothing to paint, no
     /// margin, border or padding, and the same font as their parent, so they change nothing on the line. Chrome does
     /// the same ("culled inlines", `LayoutInline::ShouldCreateBoxFragment`). It saves a fragment for each line that
@@ -181,7 +195,21 @@ struct Open {
     paint: bool,
     /// The order in which the boxes opened: the fragments of the outer ones come first, so paint draws them first.
     order: u32,
-    /// The most that this box and the open boxes around it reach above and below the baseline.
+    /// The most that this box and the open boxes around it reach above and below the baseline (of the line, or of the
+    /// `top` or `bottom` box around it: `root`).
+    above: f32,
+    below: f32,
+    /// `vertical-align`. `shift`: how far its baseline is above the baseline of its root. `root`: the `top` or `bottom` box
+    /// that it is in (an index in `Breaker::aligned`: this box itself if it is one), or `NONE` for the line.
+    align: Align,
+    shift: f32,
+    root: u32,
+}
+
+/// A `top` or `bottom` box on the line: how far it reaches above and below its own baseline. It is placed when the height
+/// of the line is known.
+struct Aligned {
+    bottom: bool,
     above: f32,
     below: f32,
 }
@@ -207,11 +235,16 @@ struct Breaker<'c, 'a> {
     /// The inline boxes that are open now (not culled), outer first. A stack: a box closes before the box around it.
     open: Vec<Open>,
     opened: u32,
-    /// The pieces of inline boxes that closed on this line and need a fragment: (order, node, x0, x1).
-    segments: Vec<(u32, NodeId, f32, f32)>,
+    /// The pieces of inline boxes that closed on this line and need a fragment: (order, node, x0, x1), and (`shift`, `root`).
+    segments: Vec<(u32, NodeId, f32, f32, f32, u32)>,
     /// How far the boxes on this line reach above and below the baseline.
     above: f32,
     below: f32,
+    /// The `top` and `bottom` boxes on this line, how many of them are open now, and where the text that was added last sits:
+    /// (`shift`, `root`). A change of it goes in `line` as an `Item::Place`.
+    aligned: Vec<Aligned>,
+    rooted: u32,
+    place: (f32, u32),
     /// The same for the block itself, the "strut": as if each line started with a letter in the block's font.
     strut: (f32, f32),
     /// The top of the line, from the top of the first line.
@@ -232,12 +265,54 @@ struct Breaker<'c, 'a> {
 }
 
 /// How far the font and the `line-height` of a box reach above and below the baseline. The extra space of the line
-/// height beyond the font's ascent and descent is split in half above and below ("half-leading").
+/// height beyond the font's ascent and descent is split in half above and below ("half-leading"). As in Chrome, the line
+/// height is cut to 1/64 px and the half above is a whole number of pixels (rounded down), so the rest goes below.
 fn reach(cx: &Cx, node: NodeId) -> (f32, f32) {
     let style = cx.tree.style(node);
     let m = Metrics::of(style);
-    let half = (m.line_height(style) - (m.ascent + m.descent)) / 2.0;
-    (m.ascent + half, m.descent + half)
+    reach_of(&m, m.line_height(style))
+}
+
+fn reach_of(m: &Metrics, line_height: f32) -> (f32, f32) {
+    let leading = font::lu(line_height) - (m.ascent + m.descent);
+    let up = font::floor(leading / 2.0);
+    (m.ascent + up, m.descent + leading - up)
+}
+
+/// No `top` or `bottom` box.
+const NONE: u32 = u32::MAX;
+
+/// Where a box sits on its line (`vertical-align`): `Shift` is how far its baseline is above the baseline of its parent.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Align {
+    Shift(f32),
+    Top,
+    Bottom,
+}
+
+/// The `vertical-align` of an inline box or an atomic inline. `above` and `below`: how far the box reaches above and below
+/// its own baseline, with its half-leading (for an atomic inline: its margin box). The numbers are those of Chrome:
+/// `sub` and `super` use the font size of the parent, `middle` its x-height, `text-top` and `text-bottom` its font.
+fn align(cx: &Cx, node: NodeId, above: f32, below: f32) -> Align {
+    let style = cx.tree.style(node);
+    let v = style.get(Property::VerticalAlign);
+    if matches!(v, Value::Keyword(Keyword::Baseline)) {
+        return Align::Shift(0.0);
+    }
+    let parent = || Metrics::of(cx.tree.style(cx.tree.doc.flat_parent(node).expect("an inline box has a parent")));
+    let size = |m: &Metrics| (m.size * 64.0).floor() as i32;
+    Align::Shift(match v {
+        Value::Keyword(Keyword::Top) => return Align::Top,
+        Value::Keyword(Keyword::Bottom) => return Align::Bottom,
+        Value::Keyword(Keyword::Sub) => -((size(&parent()) / 5 + 64) as f32 / 64.0),
+        Value::Keyword(Keyword::Super) => (size(&parent()) / 3 + 64) as f32 / 64.0,
+        Value::Keyword(Keyword::Middle) => parent().half_x_height() - (above - below) / 2.0,
+        Value::Keyword(Keyword::TextTop) => parent().ascent - above,
+        Value::Keyword(Keyword::TextBottom) => below - parent().descent,
+        // A length, and a percent of the line height of the box itself.
+        Value::Length(_) => font::lu(resolve(cx, v, Some(font::lu(Metrics::of(style).line_height(style)))).unwrap_or(0.0)),
+        _ => 0.0,
+    })
 }
 
 /// What an inline box needs on a line. `width`: the width of the block, for percent margins and padding.
@@ -247,13 +322,22 @@ fn inline_box(cx: &Cx, node: NodeId, width: f32) -> Inline {
     let margin = |p| resolve(cx, style.get(p), Some(width)).unwrap_or(0.0);
     let margins = (margin(Property::MarginLeft), margin(Property::MarginRight));
     let edges = (border.left + padding.left, border.right + padding.right);
-    let (above, below) = reach(cx, node);
+    let m = Metrics::of(style);
+    let line_height = m.line_height(style);
     let paint = style.color(Property::BackgroundColor).a != 0 || border.horizontal() + border.vertical() != 0.0;
     let parent = cx.tree.doc.flat_parent(node).expect("an inline box has a parent");
-    let same_font = reach(cx, parent) == (above, below);
+    let parent_style = cx.tree.style(parent);
+    let parent_metrics = Metrics::of(parent_style);
+    // The same font and line height as the parent reach the same: no need to work out how far.
+    let same_font = m == parent_metrics && line_height == parent_metrics.line_height(parent_style);
     let flat = margins == (0.0, 0.0) && edges == (0.0, 0.0) && padding.vertical() == 0.0;
     let positioned = cx.tree.position(node) != Keyword::Static;
-    Inline { margins, edges, above, below, paint, positioned, culled: !paint && flat && same_font && !positioned }
+    // A box with `vertical-align` moves its content: it stays in the line.
+    let raised = !matches!(style.get(Property::VerticalAlign), Value::Keyword(Keyword::Baseline));
+    let culled = !paint && flat && same_font && !positioned && !raised;
+    // A culled box has no use for the numbers.
+    let (above, below) = if culled { (0.0, 0.0) } else { reach_of(&m, line_height) };
+    Inline { margins, edges, above, below, paint, positioned, raised, culled }
 }
 
 /// Lay out the run `first..=last` of the children of `block` in lines `width` pixels wide. The fragments are relative to
@@ -277,6 +361,9 @@ pub fn lines(cx: &mut Cx, block: NodeId, first: NodeId, last: NodeId, width: f32
         segments: Vec::new(),
         above: strut.0,
         below: strut.1,
+        aligned: Vec::new(),
+        rooted: 0,
+        place: (0.0, NONE),
         strut,
         y: 0.0,
         any: false,
@@ -424,10 +511,71 @@ impl Breaker<'_, '_> {
             *e = end;
             *pw += w;
         } else {
+            self.mark();
             self.line.push(Item::Text { node, start, end, x: self.x, w });
         }
         self.trail = Some((self.line.len() - 1, start, w));
         self.x += w;
+    }
+
+    /// A box reaches `above` and `below` its baseline, which is `root`'s: the line (`NONE`) or a `top` or `bottom` box.
+    fn reach(&mut self, root: u32, above: f32, below: f32) {
+        let (a, b) = match self.aligned.get_mut(root as usize) {
+            Some(r) => (&mut r.above, &mut r.below),
+            None => (&mut self.above, &mut self.below),
+        };
+        *a = a.max(above);
+        *b = b.max(below);
+    }
+
+    /// Text goes on the line next, at the place of the innermost open box. Only a change of place is kept: text with no
+    /// `vertical-align` around it keeps no list.
+    fn mark(&mut self) {
+        let place = self.open.last().map_or((0.0, NONE), |o| (o.shift, o.root));
+        if place != self.place {
+            self.line.push(Item::Place { shift: place.0, root: place.1 });
+            self.place = place;
+        }
+    }
+
+    /// An inline box opens on this line: where it sits, and how far it and the boxes in it reach.
+    #[inline(always)]
+    fn open_box(&mut self, node: NodeId, x: f32) {
+        let info = inline_box(self.cx, node, self.width);
+        let al = if info.raised { align(self.cx, node, info.above, info.below) } else { Align::Shift(0.0) };
+        let (shift, root) = self.open.last().map_or((0.0, NONE), |o| (o.shift, o.root));
+        let (shift, root, above, below) = match al {
+            Align::Shift(s) => {
+                let s = shift + s;
+                self.reach(root, info.above + s, info.below - s);
+                let (above, below) = self.open.last().map_or((info.above + s, info.below - s), |o| (o.above.max(info.above + s), o.below.max(info.below - s)));
+                (s, root, above, below)
+            }
+            _ => {
+                self.aligned.push(Aligned { bottom: al == Align::Bottom, above: info.above, below: info.below });
+                self.rooted += 1;
+                (0.0, self.aligned.len() as u32 - 1, info.above, info.below)
+            }
+        };
+        self.open.push(Open { node, x0: x, paint: info.paint || info.positioned, order: self.opened, above, below, align: al, shift, root });
+        self.opened += 1;
+    }
+
+    /// An atomic inline goes on the line: where it sits, and how far it reaches.
+    #[inline(never)]
+    fn place_atomic(&mut self, a: &mut Atomic) {
+        let (above, below) = (a.baseline, a.h - a.baseline);
+        match a.align {
+            Align::Shift(s) => {
+                let (shift, root) = self.open.last().map_or((0.0, NONE), |o| (o.shift, o.root));
+                (a.shift, a.root) = (shift + s, root);
+                self.reach(root, above + a.shift, below - a.shift);
+            }
+            al => {
+                self.aligned.push(Aligned { bottom: al == Align::Bottom, above, below });
+                a.root = self.aligned.len() as u32 - 1;
+            }
+        }
     }
 
     /// A break opportunity: put the unit that waits on this line, or on a new line if it does not fit.
@@ -468,23 +616,28 @@ impl Breaker<'_, '_> {
                     }
                 }
                 Item::Open { node, x } => {
-                    let info = inline_box(self.cx, node, self.width);
-                    let (above, below) = self.open.last().map_or((info.above, info.below), |o| (o.above.max(info.above), o.below.max(info.below)));
-                    self.open.push(Open { node, x0: x, paint: info.paint || info.positioned, order: self.opened, above, below });
-                    self.opened += 1;
-                    self.above = self.above.max(info.above);
-                    self.below = self.below.max(info.below);
+                    self.open_box(node, x);
                     continue;
                 }
                 Item::Close { x, .. } => {
-                    if let Some(o) = self.open.pop()
-                        && o.paint
-                    {
-                        self.segments.push((o.order, o.node, o.x0, x));
+                    if let Some(o) = self.open.pop() {
+                        self.rooted -= matches!(o.align, Align::Top | Align::Bottom) as u32;
+                        if o.paint {
+                            self.segments.push((o.order, o.node, o.x0, x, o.shift, o.root));
+                        }
                     }
                     continue;
                 }
-                Item::Atomic(_) => {}
+                // On the baseline of the line, with no box around it: only the height of the line changes.
+                Item::Atomic(ref mut a) if self.open.is_empty() && a.align == Align::Shift(0.0) => {
+                    self.above = self.above.max(a.baseline);
+                    self.below = self.below.max(a.h - a.baseline);
+                }
+                Item::Atomic(ref mut a) => self.place_atomic(a),
+                Item::Place { .. } => {}
+            }
+            if matches!(item, Item::Text { .. }) {
+                self.mark();
             }
             self.line.push(item);
         }
@@ -526,9 +679,27 @@ impl Breaker<'_, '_> {
         for o in &mut self.open {
             o.x0 = 0.0;
         }
-        let (a, b) = self.open.last().map_or((0.0, 0.0), |o| (o.above, o.below));
-        self.above = self.strut.0.max(a);
-        self.below = self.strut.1.max(b);
+        self.aligned.clear();
+        self.place = (0.0, NONE);
+        if self.rooted == 0 {
+            let (a, b) = self.open.last().map_or((0.0, 0.0), |o| (o.above, o.below));
+            self.above = self.strut.0.max(a);
+            self.below = self.strut.1.max(b);
+        } else {
+            // A `top` or `bottom` box is open: it is on this line again, and what is inside it with it.
+            (self.above, self.below) = self.strut;
+            let mut root = NONE;
+            for i in 0..self.open.len() {
+                let o = &self.open[i];
+                if let Align::Top | Align::Bottom = o.align {
+                    root = self.aligned.len() as u32;
+                    self.aligned.push(Aligned { bottom: o.align == Align::Bottom, above: o.above, below: o.below });
+                }
+                let (above, below) = (o.above, o.below);
+                self.open[i].root = root;
+                self.reach(root, above, below);
+            }
+        }
         for (node, left, item) in std::mem::take(&mut self.deferred) {
             self.float(node, left, item);
         }
@@ -578,17 +749,34 @@ impl Breaker<'_, '_> {
         // The pieces of the boxes that are still open, up to the end of the line.
         let line_end = self.x;
         for o in self.open.iter().filter(|o| o.paint) {
-            self.segments.push((o.order, o.node, o.x0, line_end));
+            self.segments.push((o.order, o.node, o.x0, line_end, o.shift, o.root));
         }
         self.segments.sort_unstable_by_key(|s| s.0);
         let (mut above, mut below) = (self.above, self.below);
-        for item in &self.line {
-            if let Item::Atomic(a) = item {
-                above = above.max(a.baseline);
-                below = below.max(a.h - a.baseline);
+        // The `top` and `bottom` boxes go last, the tallest first: the line grows below the baseline for a `top` box and
+        // above it for a `bottom` box, as in Chrome. The boxes do not change the baseline for the others.
+        if !self.aligned.is_empty() {
+            let mut order: Vec<usize> = (0..self.aligned.len()).collect();
+            let height = |i: usize| self.aligned[i].above + self.aligned[i].below;
+            order.sort_by(|&i, &j| height(j).total_cmp(&height(i)));
+            for i in order {
+                let h = height(i);
+                if self.aligned[i].bottom {
+                    above = above.max(h - below);
+                } else {
+                    below = below.max(h - above);
+                }
             }
         }
         let baseline = above;
+        // The baseline of a box in `root`: of the line, or of the `top` or `bottom` box.
+        let at_root = |root: u32| match self.aligned.get(root as usize) {
+            None => baseline,
+            Some(a) if a.bottom => above + below - a.below,
+            Some(a) => a.above,
+        };
+        // How far up the text sits from the top of the line, until the next `Item::Place`.
+        let mut lift = baseline;
 
         // `text-align`: move the whole line.
         let free = (self.avail - self.x).max(0.0);
@@ -605,11 +793,11 @@ impl Breaker<'_, '_> {
         }
         // The fragments: the inline boxes first (paint draws their background under the text), then the content.
         let y = self.y;
-        for &(_, node, x0, x1) in &self.segments {
+        for &(_, node, x0, x1, shift, root) in &self.segments {
             let style = tree.style(node);
             let m = Metrics::of(style);
             let (border, padding) = border_padding(self.cx, style, self.width);
-            let top = baseline - m.ascent - border.top - padding.top;
+            let top = at_root(root) - shift - m.ascent - border.top - padding.top;
             let h = m.ascent + m.descent + border.vertical() + padding.vertical();
             let at = self.cx.out.len() as u32;
             let (rx, ry) = moved(self.cx, self.block, node);
@@ -620,26 +808,27 @@ impl Breaker<'_, '_> {
         }
         for item in self.line.drain(..) {
             match item {
+                Item::Place { shift, root } => lift = at_root(root) - shift,
                 Item::Text { node, start, end, x, w } if end > start => {
                     let m = Metrics::of(tree.style(node));
                     let at = self.cx.out.len() as u32;
                     let (rx, ry) = moved(self.cx, self.block, tree.doc.flat_parent(node).expect("a text node has a parent"));
                     self.cx.out.push(Fragment {
-                        rect: Rect { x: dx + x + rx, y: y + baseline - m.ascent + ry, w, h: m.ascent + m.descent },
+                        rect: Rect { x: dx + x + rx, y: y + lift - m.ascent + ry, w, h: m.ascent + m.descent },
                         node,
                         kind: FragmentKind::Text { start, end },
                         end: at + 1,
                     });
                 }
                 Item::Atomic(a) => {
-                    let Atomic { mut fragments, x, baseline: b, margin_left, margin_top, .. } = *a;
+                    let Atomic { mut fragments, x, baseline: b, margin_left, margin_top, shift, root, .. } = *a;
                     let base = self.cx.out.len() as u32;
                     for f in &mut fragments {
                         f.end += base;
                     }
                     let (rx, ry) = moved(self.cx, self.block, tree.doc.flat_parent(fragments[0].node).expect("an inline-block has a parent"));
                     fragments[0].rect.x = dx + x + margin_left + rx;
-                    fragments[0].rect.y = y + baseline - b + margin_top + ry;
+                    fragments[0].rect.y = y + at_root(root) - shift - b + margin_top + ry;
                     self.cx.out.append(&mut fragments);
                     self.cx.spare.push(fragments);
                 }
@@ -712,11 +901,14 @@ fn atomic(cx: &mut Cx, node: NodeId, cb: f32) -> Atomic {
     cx.marker = marker;
     let fragments = std::mem::replace(&mut cx.out, saved);
     let h = done.margin_top + done.height + done.margin_bottom;
-    // The baseline is the last line inside. With no line, or in a scroll container, the bottom of the margin box (CSS 2.1, 10.8.1).
-    let baseline = done.baseline.filter(|_| !cx.tree.scrolls(node)).map_or(h, |b| done.margin_top + b);
+    // The baseline is the last line inside. With no line, or in a scroll container, the bottom of the margin box (CSS 2.1,
+    // 10.8.1). An `inline-flex` or `inline-grid` takes its baseline from its items, scroll container or not, as Chrome does.
+    let items = || matches!(style.get(Property::Display), Value::Keyword(Keyword::InlineFlex | Keyword::InlineGrid));
+    let baseline = done.baseline.filter(|_| !cx.tree.scrolls(node) || items()).map_or(h, |b| done.margin_top + b);
     // The width can grow by a scrollbar in layout: the fragment has the final one.
     let width = fragments[done.fragment].rect.w - bp;
-    Atomic { fragments, x: 0.0, w: ml + width + bp + mr, h, baseline, margin_left: ml, margin_top: done.margin_top }
+    let align = if matches!(style.get(Property::VerticalAlign), Value::Keyword(Keyword::Baseline)) { Align::Shift(0.0) } else { align(cx, node, baseline, h - baseline) };
+    Atomic { fragments, x: 0.0, w: ml + width + bp + mr, h, baseline, margin_left: ml, margin_top: done.margin_top, align, shift: 0.0, root: NONE }
 }
 
 /// How far the inline boxes with `position: relative` around `node` (and `node` itself) move it, up to `block`.
@@ -833,6 +1025,33 @@ mod tests {
         assert_eq!(rect("<div style='width:50px'><span id=s style='display:inline-block'>aaa bbb</span></div>", "", "s"), Rect { x: 8.0, y: 8.0, w: 50.0, h: 44.0 });
         // An inline-block is one unit: it goes to the next line as a whole.
         assert_eq!(rect("<div style='width:50px'>aaa<span id=s style='display:inline-block'>bbb</span></div>", "", "s").y, 30.0);
+    }
+
+    #[test]
+    fn half_leading_above_is_rounded_down() {
+        // Chrome: line-height 25 at 16px has 3 more than the font: 1 above and 2 below. The line height is cut to 1/64 px.
+        assert_eq!(rect("<div style='line-height:25px'><span id=s style='background:red'>a</span></div>", "", "s").y, 8.0 + 1.0);
+        assert_eq!(rect("<div id=d style='font-size:13.3333px;line-height:1.5'>a</div>", "", "d").h, 19.984375);
+    }
+
+    #[test]
+    fn vertical_align_moves_a_box_and_the_line() {
+        // Numbers from Chrome 155 (`tools/fixtures/ui/valign-cases.txt`). `super` of 16px is 16 / 3 + 1 = 6.328125 up, in 1/64 px.
+        let html = "<div id=d>a<span id=s style='vertical-align:super;background:red'>b</span><span id=t style='vertical-align:50%;background:red'>c</span></div>";
+        assert_eq!((rect(html, "", "d").h, rect(html, "", "s").y - 8.0, rect(html, "", "t").y - 8.0), (28.0 + 5.0, 28.0 - 17.0 - 6.328125, 0.0));
+    }
+
+    #[test]
+    fn top_and_bottom_wait_for_the_line_height() {
+        // The tallest goes first: the `bottom` box of 90 makes 85 above the baseline, and the `top` box of 60 adds nothing.
+        let html = "<div id=d><span id=a style='background:red'>a</span><span style='vertical-align:top;line-height:60px'>b</span><span style='vertical-align:bottom;line-height:90px'>c</span></div>";
+        assert_eq!((rect(html, "", "d").h, rect(html, "", "a").y - 8.0), (90.0, 85.0 - 17.0));
+    }
+
+    #[test]
+    fn a_box_with_vertical_align_is_not_culled() {
+        let (_, out) = run("<p>a<b style='vertical-align:super'>b</b></p>", "");
+        assert!(out.fragments.iter().any(|f| f.kind == Kind::Box));
     }
 
     #[test]

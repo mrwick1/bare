@@ -43,7 +43,7 @@ impl Metrics {
     /// Chrome rounds the ascent and the descent to whole pixels (`SimpleFontData`), so we do too.
     pub fn new(size: f32) -> Metrics {
         let size = size.clamp(0.0, MAX_SIZE);
-        Metrics { size, ascent: (size * 1.069).round(), descent: (size * 0.293).round() }
+        Metrics { size, ascent: round(size * 1.069), descent: round(size * 0.293) }
     }
 
     pub fn of(style: &ComputedStyle) -> Metrics {
@@ -53,6 +53,12 @@ impl Metrics {
     /// Pixels for a width in tenths of an em.
     pub fn px(&self, units: Units) -> f32 {
         units as f32 * self.size / 10.0
+    }
+
+    /// Half the x-height (`0.536` em in Noto Sans Mono) as Chrome keeps it: the height in 1/64 px, rounded, and halved in
+    /// whole 1/64 px (`vertical-align: middle`).
+    pub fn half_x_height(&self) -> f32 {
+        ((round(self.size * 0.536 * 64.0) as i32) / 2) as f32 / 64.0
     }
 
     /// The height of a line for `line-height: normal`: the ascent and the descent (the font has no extra gap).
@@ -70,6 +76,23 @@ impl Metrics {
         };
         px.clamp(0.0, crate::block::MAX_PX)
     }
+}
+
+/// `f32::round` for a length that is not negative. Like `floor`, the method is a call into the C library.
+pub fn round(x: f32) -> f32 {
+    let t = x as i64 as f32;
+    if x - t >= 0.5 { t + 1.0 } else { t }
+}
+
+/// `f32::floor` for lengths. The plain method is a call into the C library on a build without SSE4.1, and a line calls it often.
+pub fn floor(x: f32) -> f32 {
+    let t = x as i64 as f32;
+    if t > x { t - 1.0 } else { t }
+}
+
+/// A length cut down to 1/64 px, as Chrome's `LayoutUnit` does for line heights and `vertical-align`.
+pub fn lu(px: f32) -> f32 {
+    floor(px * 64.0) / 64.0
 }
 
 /// The width of one letter. An accent that sits on the letter before it is 0. Zero-width spaces and joiners are 0.
