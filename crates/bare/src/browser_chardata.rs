@@ -46,7 +46,7 @@ fn out_of_range(d: &Dom, it: &mut Interp<'_>, who: &str, iface: &str, off: u32, 
 }
 
 /// `replaceData(offset, count, data)` on the text of `n`: the live ranges first, then the text.
-fn replace(d: &Dom, it: &mut Interp<'_>, who: &str, (n, text): (bare_html::dom::NodeId, &str), off: u32, count: u32, data: &str) -> V {
+pub(crate) fn replace(d: &Dom, it: &mut Interp<'_>, who: &str, (n, text): (bare_html::dom::NodeId, &str), off: u32, count: u32, data: &str) -> V {
     let u: Vec<u16> = text.encode_utf16().collect();
     let len = u.len() as u32;
     if off > len {
@@ -110,26 +110,31 @@ pub(crate) fn split_text(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value])
     let (n, text) = data_of(d, it, this)?;
     args(it, "splitText", "Text", a, 1)?;
     let off = offset(it, a, 0)?;
-    let u: Vec<u16> = text.encode_utf16().collect();
-    if off as usize > u.len() {
-        return Err(out_of_range(d, it, "splitText", "Text", off, u.len() as u32));
+    if off > utf16_len(&text) {
+        return Err(out_of_range(d, it, "splitText", "Text", off, utf16_len(&text)));
     }
-    let (head, tail) = (String::from_utf16_lossy(&u[..off as usize]), String::from_utf16_lossy(&u[off as usize..]));
-    let new = {
-        let mut doc = d.doc.borrow_mut();
-        d.room(&doc, 1, text.len() + 3)?;
-        let new = doc.create_text(&tail);
-        if let Some(p) = doc.parent(n) {
-            let next = doc.next_sibling(n);
-            doc.move_to(new, p, next);
-            d.range_split(&doc, n, new, off);
-        }
-        // The points that stay after `offset` (no parent: all of them) go to `offset`.
-        d.range_data(n, off, u.len() as u32 - off, 0);
-        doc.set_text(n, &head);
-        new
-    };
+    let new = split_at(d, n, &text, off)?;
     d.wrap(it, new)
+}
+
+/// Split the text node `n` (its text is `text`) at `off` UTF-16 units, which are in range. The order is Chrome's: the data of `n` first (one record),
+/// then the new node in (another one). The live ranges follow as the standard says.
+pub(crate) fn split_at(d: &Dom, n: bare_html::dom::NodeId, text: &str, off: u32) -> R<bare_html::dom::NodeId> {
+    let u: Vec<u16> = text.encode_utf16().collect();
+    let (head, tail) = (String::from_utf16_lossy(&u[..off as usize]), String::from_utf16_lossy(&u[off as usize..]));
+    let mut doc = d.doc.borrow_mut();
+    d.room(&doc, 1, text.len() + 3)?;
+    let new = doc.create_text(&tail);
+    doc.set_text(n, &head);
+    if let Some(p) = doc.parent(n) {
+        let next = doc.next_sibling(n);
+        doc.move_to(new, p, next);
+        d.range_split(&doc, n, new, off);
+    } else {
+        // No parent: the points that stay after `offset` go to `offset`.
+        d.range_data(n, off, u.len() as u32 - off, 0);
+    }
+    Ok(new)
 }
 
 /// `Node.normalize()`: the runs of Text nodes below `this` become one node each, and the empty ones go.

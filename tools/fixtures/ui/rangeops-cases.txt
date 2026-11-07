@@ -1,0 +1,377 @@
+var $ = function (i) { return document.getElementById(i) };
+var nm = function (n) { return n === null ? 'null' : n.nodeType === 3 ? '#' + n.data : n.nodeType === 8 ? '!' + n.data : n.nodeType === 10 ? 'doctype' : n.nodeType === 9 ? 'document' : n.nodeType === 11 ? 'fragment' : n.id || n.nodeName };
+var pt = function (r) { return nm(r.startContainer) + ':' + r.startOffset + '-' + nm(r.endContainer) + ':' + r.endOffset + (r.collapsed ? ' collapsed' : '') };
+var err = function (f) { try { var v = f(); return 'ok ' + String(v) } catch (e) { return e.name + ': ' + e.message } };
+var T = function (i, k) { return $(i).childNodes[k || 0] };
+var D = function (n) { return n === null ? 'null' : n.nodeType === 1 ? n.outerHTML : n.nodeType === 3 ? '"' + n.data + '"' : n.nodeType === 8 ? '<!--' + n.data + '-->' : n.nodeType === 11 ? '[' + [].map.call(n.childNodes, D).join('') + ']' : n.nodeName };
+var rg = function (a, ao, b, bo) { var r = document.createRange(); r.setStart(a, ao); r.setEnd(b, bo); return r };
+var mk = function (t) { var e = document.createElement(t || 'u'); e.id = 'n'; e.textContent = 'N'; return e };
+var log = [];
+var rnm = function (n) { return n === null ? 'null' : n.nodeType === 1 ? n.tagName.toLowerCase() + (n.id ? '#' + n.id : '') : n.nodeType === 3 ? '"' + n.data + '"' : n.nodeType === 11 ? 'fragment' : n.nodeName };
+var rl = function (l) { return '[' + [].map.call(l, rnm).join(',') + ']' };
+var rec = function (r) { var s = r.type + ' ' + rnm(r.target); if (r.type === 'childList') s += ' +' + rl(r.addedNodes) + ' -' + rl(r.removedNodes) + ' p=' + rnm(r.previousSibling) + ' n=' + rnm(r.nextSibling); if (r.type === 'characterData') s += ' old=' + r.oldValue; return s };
+var mo = new MutationObserver(function (rs) { rs.forEach(function (r) { log.push(rec(r)) }) });
+var OPT = { childList: true, subtree: true, characterData: true, characterDataOldValue: true };
+var out = function () { return log.join(' | ') };
+var sets = function () { return [rg(T('p1'), 1, T('p1'), 4), rg(T('p1'), 2, T('p1'), 3), rg($('r'), 0, $('r'), 2), rg(T('p2'), 0, T('p2'), 6), rg($('b1'), 0, $('b1'), 1), rg(T('p1'), 3, T('p1'), 3), rg($('r'), 1, $('r'), 1), rg(T('b1'), 1, T('p2'), 3)] };
+=== compare-matrix
+@html <div id=r><p id=p1>Hello <b id=b1>big</b> world</p><p id=p2>Second</p><!--c--><span id=s></span></div>
+var s = sets(); (function () { var o = []; for (var i = 0; i < s.length; i++) { var row = []; for (var j = 0; j < s.length; j++) for (var h = 0; h < 4; h++) row.push(s[i].compareBoundaryPoints(h, s[j])); o.push(row.join('')) } return o.join(' ') })
+=== compare-how-values
+@html <div id=r><p id=p1>Hello <b id=b1>big</b> world</p><p id=p2>Second</p><!--c--><span id=s></span></div>
+var a = rg(T('p1'), 1, T('p1'), 4), b = rg(T('p1'), 2, T('p1'), 3); (function () { return [err(function () { return a.compareBoundaryPoints(4, b) }), err(function () { return a.compareBoundaryPoints(-1, b) }), err(function () { return a.compareBoundaryPoints('2', b) }), err(function () { return a.compareBoundaryPoints(65536, b) }), err(function () { return a.compareBoundaryPoints(65539, b) }), err(function () { return a.compareBoundaryPoints(undefined, b) }), err(function () { return a.compareBoundaryPoints(1.9, b) }), err(function () { return a.compareBoundaryPoints(NaN, b) }), err(function () { return a.compareBoundaryPoints(5, b) })].join(' | ') })
+=== compare-argument-errors
+@html <div id=r><p id=p1>Hello <b id=b1>big</b> world</p></div>
+var a = rg(T('p1'), 1, T('p1'), 4); (function () { return [err(function () { return a.compareBoundaryPoints() }), err(function () { return a.compareBoundaryPoints(0) }), err(function () { return a.compareBoundaryPoints(0, {}) }), err(function () { return a.compareBoundaryPoints(0, null) }), err(function () { return a.compareBoundaryPoints(0, $('r')) }), err(function () { return Range.prototype.compareBoundaryPoints.call({}, 0, a) })].join(' | ') })
+=== compare-different-roots
+@html <div id=r><p id=p1>Hello</p></div>
+var a = rg(T('p1'), 1, T('p1'), 4), e = document.createElement('div'); e.innerHTML = 'abc'; var b = rg(e.firstChild, 0, e.firstChild, 1); (function () { return [err(function () { return a.compareBoundaryPoints(0, b) }), err(function () { return b.compareBoundaryPoints(2, a) }), err(function () { return a.compareBoundaryPoints(4, b) })].join(' | ') })
+=== compare-document-ranges
+@html <div id=r><p id=p1>Hello</p></div>
+var a = rg(document, 0, document, 2), b = rg(document.body, 0, document.body, 1), c = rg(document.documentElement, 1, document.documentElement, 2); (function () { var o = []; [a, b, c].forEach(function (x) { [a, b, c].forEach(function (y) { for (var h = 0; h < 4; h++) o.push(x.compareBoundaryPoints(h, y)) }) }); return o.join('') })
+=== comparepoint-matrix
+@html <div id=r><p id=p1>Hello <b id=b1>big</b> world</p><p id=p2>Second</p><!--c--><span id=s></span></div>
+var a = rg(T('p1'), 1, T('p1'), 4), b = rg($('r'), 1, $('r'), 2), c = rg(T('b1'), 1, T('p2'), 3), n = rg(T('p1'), 3, T('p1'), 3); (function () { var pts = [[T('p1'), 0], [T('p1'), 1], [T('p1'), 2], [T('p1'), 4], [T('p1'), 6], [$('p1'), 0], [$('p1'), 1], [$('p1'), 3], [$('r'), 0], [$('r'), 1], [$('r'), 2], [$('r'), 4], [$('b1'), 0], [T('b1'), 1], [T('p2'), 3], [T('p2'), 6], [document, 0], [document, 1], [document.body, 0], [T('r', 2), 0], [T('r', 2), 1], [$('s'), 0]]; return [a, b, c, n].map(function (r) { return pts.map(function (p) { return r.comparePoint(p[0], p[1]) }).join('') }).join(' ') })
+=== comparepoint-errors
+@html <div id=r><p id=p1>Hello <b id=b1>big</b> world</p><!--c--></div>
+var a = rg(T('p1'), 1, T('p1'), 4), e = document.createElement('div'), dt = document.doctype.cloneNode(); (function () { return [err(function () { return a.comparePoint(e, 0) }), err(function () { return a.comparePoint(document.doctype, 0) }), err(function () { return a.comparePoint(document.doctype, 1) }), err(function () { return a.comparePoint(dt, 0) }), err(function () { return a.comparePoint(T('p1'), 7) }), err(function () { return a.comparePoint($('p1'), 4) }), err(function () { return a.comparePoint(T('r', 1), 2) }), err(function () { return a.comparePoint(T('r', 1), 1) }), err(function () { return a.comparePoint(document, 3) }), err(function () { return a.comparePoint(e, 5) }), err(function () { return a.comparePoint(T('p1'), 4294967296) }), err(function () { return a.comparePoint(T('p1'), -1) })].join(' | ') })
+=== comparepoint-arguments
+@html <div id=r><p id=p1>Hello</p></div>
+var a = rg(T('p1'), 1, T('p1'), 4); (function () { return [err(function () { return a.comparePoint() }), err(function () { return a.comparePoint(T('p1')) }), err(function () { return a.comparePoint(1, 0) }), err(function () { return a.comparePoint(null, 0) }), err(function () { return a.comparePoint(T('p1'), undefined) }), err(function () { return a.comparePoint(T('p1'), '2') }), err(function () { return a.comparePoint(T('p1'), NaN) }), err(function () { return a.comparePoint(T('p1'), 4.9) })].join(' | ') })
+=== ispointinrange-matrix
+@html <div id=r><p id=p1>Hello <b id=b1>big</b> world</p><p id=p2>Second</p><!--c--><span id=s></span></div>
+var a = rg(T('p1'), 1, T('p1'), 4), b = rg($('r'), 1, $('r'), 2), c = rg(T('b1'), 1, T('p2'), 3), n = rg(T('p1'), 3, T('p1'), 3); (function () { var pts = [[T('p1'), 0], [T('p1'), 1], [T('p1'), 2], [T('p1'), 4], [T('p1'), 6], [$('p1'), 0], [$('p1'), 1], [$('p1'), 3], [$('r'), 0], [$('r'), 1], [$('r'), 2], [$('r'), 4], [$('b1'), 0], [T('b1'), 1], [T('p2'), 3], [T('p2'), 6], [document, 0], [document, 1], [document.body, 0], [T('r', 2), 0], [T('r', 2), 1], [$('s'), 0]]; return [a, b, c, n].map(function (r) { return pts.map(function (p) { return err(function () { return r.isPointInRange(p[0], p[1]) }).replace('ok ', '')[0] }).join('') }).join(' ') })
+=== ispointinrange-errors
+@html <div id=r><p id=p1>Hello <b id=b1>big</b> world</p><!--c--></div>
+var a = rg(T('p1'), 1, T('p1'), 4), e = document.createElement('div'), dt = document.doctype.cloneNode(); (function () { return [err(function () { return a.isPointInRange(e, 0) }), err(function () { return a.isPointInRange(document.doctype, 0) }), err(function () { return a.isPointInRange(dt, 0) }), err(function () { return a.isPointInRange(T('p1'), 7) }), err(function () { return a.isPointInRange(e, 9) }), err(function () { return a.isPointInRange() }), err(function () { return a.isPointInRange(T('p1')) }), err(function () { return a.isPointInRange(2, 0) }), err(function () { return a.isPointInRange(T('p1'), 2) }), err(function () { return Range.prototype.isPointInRange.call(1, T('p1'), 2) })].join(' | ') })
+=== intersects-matrix
+@html <div id=r><p id=p1>Hello <b id=b1>big</b> world</p><p id=p2>Second</p><!--c--><span id=s></span></div>
+var s = sets(); (function () { var ns = [T('p1'), $('p1'), $('b1'), T('b1'), $('p2'), T('p2'), T('r', 2), $('s'), $('r'), document.body, document.documentElement, document]; return s.map(function (r) { return ns.map(function (n) { return r.intersectsNode(n) ? 1 : 0 }).join('') }).join(' ') })
+=== intersects-detached-and-errors
+@html <div id=r><p id=p1>Hello <b id=b1>big</b> world</p></div>
+var a = rg(T('p1'), 1, T('p1'), 4), e = document.createElement('div'), x = rg(e, 0, e, 0), dt = document.doctype.cloneNode(); (function () { return [a.intersectsNode(e), x.intersectsNode(e), x.intersectsNode($('r')), a.intersectsNode(dt), a.intersectsNode(document.doctype), err(function () { return a.intersectsNode() }), err(function () { return a.intersectsNode(null) }), err(function () { return a.intersectsNode('x') }), err(function () { return Range.prototype.intersectsNode.call(null, e) })].join(' | ') })
+=== intersects-document-range
+@html <div id=r><p id=p1>Hello</p></div>
+var a = rg(document, 0, document, 1), b = rg(document, 1, document, 2); (function () { return [a.intersectsNode(document.doctype), a.intersectsNode(document.documentElement), b.intersectsNode(document.doctype), b.intersectsNode(document.documentElement), b.intersectsNode(document.body), a.intersectsNode(document)].join() })
+=== shape-of-the-new-methods
+(function () { var p = Range.prototype, o = []; ['compareBoundaryPoints', 'comparePoint', 'isPointInRange', 'intersectsNode', 'deleteContents', 'extractContents', 'cloneContents', 'insertNode', 'surroundContents', 'createContextualFragment', 'getClientRects', 'getBoundingClientRect'].forEach(function (n) { var d = Object.getOwnPropertyDescriptor(p, n); o.push(n + ':' + p[n].length + ':' + p[n].name + ':' + d.writable + d.configurable) }); return o.join(' ') })
+=== delete-in-one-text
+@html <div id=r><p id=p1>Hello <b id=b1>big</b> world</p><p id=p2>Second</p><!--c--><span id=s></span></div>
+var r = rg(T('p1'), 1, T('p1'), 4); r.deleteContents(); (function () { return [D($('p1')), pt(r)].join(' ') })
+=== delete-whole-text
+@html <div id=r><p id=p1>Hello <b id=b1>big</b> world</p><p id=p2>Second</p></div>
+var r = rg(T('p1'), 0, T('p1'), 6); r.deleteContents(); (function () { return [D($('p1')), pt(r), $('p1').childNodes.length].join(' ') })
+=== delete-collapsed-is-a-no-op
+@html <div id=r><p id=p1>Hello <b id=b1>big</b> world</p></div>
+mo.observe($('r'), OPT); var r = rg(T('p1'), 2, T('p1'), 2); r.deleteContents(); r = rg($('r'), 1, $('r'), 1); r.deleteContents(); (function () { return [D($('r')), pt(r), out()].join(' ') })
+=== delete-in-a-comment
+@html <div id=r><p id=p1>Hello</p><!--comment--></div>
+var c = T('r', 1), r = rg(c, 2, c, 5); r.deleteContents(); (function () { return [D($('r')), pt(r)].join(' ') })
+=== delete-element-children
+@html <div id=r><p id=p1>Hello <b id=b1>big</b> world</p><p id=p2>Second</p><!--c--><span id=s></span></div>
+var r = rg($('r'), 1, $('r'), 3); r.deleteContents(); (function () { return [D($('r')), pt(r)].join(' ') })
+=== delete-across-text-and-elements
+@html <div id=r><p id=p1>Hello <b id=b1>big</b> world</p><p id=p2>Second</p><!--c--><span id=s></span></div>
+var r = rg(T('p1'), 2, T('p2'), 3); r.deleteContents(); (function () { return [D($('r')), pt(r)].join(' ') })
+=== delete-start-in-an-ancestor
+@html <div id=r><p id=p1>Hello <b id=b1>big</b> world</p><p id=p2>Second</p><!--c--><span id=s></span></div>
+var r = rg($('r'), 0, T('p2'), 3); r.deleteContents(); (function () { return [D($('r')), pt(r)].join(' ') })
+=== delete-end-in-an-ancestor
+@html <div id=r><p id=p1>Hello <b id=b1>big</b> world</p><p id=p2>Second</p><!--c--><span id=s></span></div>
+var r = rg(T('p1'), 2, $('r'), 3); r.deleteContents(); (function () { return [D($('r')), pt(r)].join(' ') })
+=== delete-start-in-a-deep-element
+@html <div id=r><p id=p1>Hello <b id=b1>big</b> world</p><p id=p2>Second</p><!--c--><span id=s></span></div>
+var r = rg(T('b1'), 1, T('p2'), 3); r.deleteContents(); (function () { return [D($('r')), pt(r)].join(' ') })
+=== delete-contents-of-the-body
+@html <div id=r><p id=p1>Hello <b id=b1>big</b> world</p><p id=p2>Second</p></div>
+var r = document.createRange(); r.selectNodeContents(document.body); r.deleteContents(); (function () { return [document.body.innerHTML, pt(r)].join(' ') })
+=== delete-document-range
+@html <div id=r><p id=p1>Hello</p></div>
+var r = rg(document, 0, document, 2); r.deleteContents(); (function () { return [document.childNodes.length, pt(r)].join(' ') })
+=== delete-moves-other-ranges
+@html <div id=r><p id=p1>Hello <b id=b1>big</b> world</p><p id=p2>Second</p><!--c--><span id=s></span></div>
+var r = rg(T('p1'), 2, T('p2'), 3), a = rg(T('b1'), 0, T('b1'), 2), b = rg($('r'), 1, $('r'), 4), c = rg(T('p2'), 1, T('p2'), 5), d = rg(T('p1'), 5, T('p1'), 6), e = rg($('p1'), 0, $('p1'), 3); r.deleteContents(); (function () { return [pt(r), pt(a), pt(b), pt(c), pt(d), pt(e)].join(' | ') })
+=== delete-with-surrogate-pairs
+@html <div id=r><p id=p1>a&#x1F600;b&#x1F601;c</p></div>
+var r = rg(T('p1'), 1, T('p1'), 3); r.deleteContents(); (function () { return [D($('p1')), T('p1').length, pt(r)].join(' ') })
+=== delete-in-a-detached-tree
+(function () { var e = document.createElement('div'); e.innerHTML = 'ab<i>cd</i>ef'; var r = rg(e.firstChild, 1, e.lastChild, 1); r.deleteContents(); return [e.innerHTML, pt(r)].join(' ') })
+=== delete-records
+@html <div id=r><p id=p1>Hello <b id=b1>big</b> world</p><p id=p2>Second</p><!--c--><span id=s></span></div>
+mo.observe($('r'), OPT); var r = rg(T('p1'), 2, T('p2'), 3); r.deleteContents(); out
+=== delete-records-element-children
+@html <div id=r><p id=p1>Hello <b id=b1>big</b> world</p><p id=p2>Second</p><!--c--><span id=s></span></div>
+mo.observe($('r'), OPT); var r = rg($('r'), 0, $('r'), 3); r.deleteContents(); out
+=== delete-records-one-text
+@html <div id=r><p id=p1>Hello <b id=b1>big</b> world</p></div>
+mo.observe($('r'), OPT); var r = rg(T('p1'), 1, T('p1'), 4); r.deleteContents(); out
+=== extract-in-one-text
+@html <div id=r><p id=p1>Hello <b id=b1>big</b> world</p><p id=p2>Second</p><!--c--><span id=s></span></div>
+var r = rg(T('p1'), 1, T('p1'), 4), f = r.extractContents(); (function () { return [D($('p1')), D(f), pt(r), f.ownerDocument === document, f.nodeType, f.parentNode].join(' ') })
+=== extract-collapsed
+@html <div id=r><p id=p1>Hello <b id=b1>big</b> world</p></div>
+var r = rg(T('p1'), 2, T('p1'), 2), f = r.extractContents(); (function () { return [D($('p1')), D(f), pt(r)].join(' ') })
+=== extract-in-a-comment
+@html <div id=r><p id=p1>Hello</p><!--comment--></div>
+var c = T('r', 1), r = rg(c, 2, c, 5), f = r.extractContents(); (function () { return [D($('r')), D(f), pt(r)].join(' ') })
+=== extract-element-children
+@html <div id=r><p id=p1>Hello <b id=b1>big</b> world</p><p id=p2>Second</p><!--c--><span id=s></span></div>
+var p2 = $('p2'), r = rg($('r'), 1, $('r'), 3), f = r.extractContents(); (function () { return [D($('r')), D(f), pt(r), f.firstChild === p2].join(' ') })
+=== extract-across-text-and-elements
+@html <div id=r><p id=p1>Hello <b id=b1>big</b> world</p><p id=p2>Second</p><!--c--><span id=s></span></div>
+var r = rg(T('p1'), 2, T('p2'), 3), f = r.extractContents(); (function () { return [D($('r')), D(f), pt(r)].join(' ') })
+=== extract-start-in-a-deep-element
+@html <div id=r><p id=p1>Hello <b id=b1>big</b> world</p><p id=p2>Second</p><!--c--><span id=s></span></div>
+var r = rg(T('b1'), 1, T('p2'), 3), f = r.extractContents(); (function () { return [D($('r')), D(f), pt(r)].join(' ') })
+=== extract-start-in-an-ancestor
+@html <div id=r><p id=p1>Hello <b id=b1>big</b> world</p><p id=p2>Second</p><!--c--><span id=s></span></div>
+var r = rg($('r'), 0, T('p2'), 3), f = r.extractContents(); (function () { return [D($('r')), D(f), pt(r)].join(' ') })
+=== extract-end-in-an-ancestor
+@html <div id=r><p id=p1>Hello <b id=b1>big</b> world</p><p id=p2>Second</p><!--c--><span id=s></span></div>
+var r = rg(T('p1'), 2, $('r'), 3), f = r.extractContents(); (function () { return [D($('r')), D(f), pt(r)].join(' ') })
+=== extract-nested-partial
+@html <div id=r><p id=p1>Hello <b id=b1>big<i id=i1>deep</i>er</b> world</p><p id=p2>S<u id=u2>econ</u>d</p></div>
+var r = rg(T('i1'), 2, T('u2'), 2), f = r.extractContents(); (function () { return [D($('r')), D(f), pt(r)].join(' ') })
+=== extract-document-range-doctype
+@html <div id=r><p id=p1>Hello</p></div>
+(function () { var r = rg(document, 0, document, 2); return [err(function () { return r.extractContents() }), document.childNodes.length, pt(r)].join(' | ') })
+=== extract-contained-doctype-nested
+@html <div id=r><p id=p1>Hello</p></div>
+(function () { var r = rg(document, 0, document.body, 1); return [err(function () { return r.extractContents() }), document.childNodes.length, pt(r)].join(' | ') })
+=== extract-moves-other-ranges
+@html <div id=r><p id=p1>Hello <b id=b1>big</b> world</p><p id=p2>Second</p><!--c--><span id=s></span></div>
+var r = rg(T('p1'), 2, T('p2'), 3), a = rg(T('b1'), 0, T('b1'), 2), b = rg($('r'), 1, $('r'), 4), c = rg(T('p2'), 1, T('p2'), 5), d = rg(T('p1'), 5, T('p1'), 6), f = r.extractContents(); (function () { return [pt(r), pt(a), pt(b), pt(c), pt(d)].join(' | ') })
+=== extract-element-moves-inner-range
+@html <div id=r><p id=p1>Hello <b id=b1>big</b> world</p><p id=p2>Second</p><!--c--><span id=s></span></div>
+var a = rg(T('p2'), 1, T('p2'), 4), r = rg($('r'), 1, $('r'), 2), f = r.extractContents(); (function () { return [pt(a), pt(r), D(f)].join(' | ') })
+=== extract-records
+@html <div id=r><p id=p1>Hello <b id=b1>big</b> world</p><p id=p2>Second</p><!--c--><span id=s></span></div>
+mo.observe($('r'), OPT); var r = rg(T('p1'), 2, T('p2'), 3), f = r.extractContents(); out
+=== extract-records-element-children
+@html <div id=r><p id=p1>Hello <b id=b1>big</b> world</p><p id=p2>Second</p><!--c--><span id=s></span></div>
+mo.observe($('r'), OPT); var r = rg($('r'), 0, $('r'), 3), f = r.extractContents(); out
+=== extract-records-one-text
+@html <div id=r><p id=p1>Hello <b id=b1>big</b> world</p></div>
+mo.observe($('r'), OPT); var r = rg(T('p1'), 1, T('p1'), 4), f = r.extractContents(); out
+=== extract-with-surrogate-pairs
+@html <div id=r><p id=p1>a&#x1F600;b&#x1F601;c</p></div>
+var r = rg(T('p1'), 1, T('p1'), 3), f = r.extractContents(); (function () { return [D($('p1')), D(f), pt(r)].join(' ') })
+=== clone-in-one-text
+@html <div id=r><p id=p1>Hello <b id=b1>big</b> world</p><p id=p2>Second</p><!--c--><span id=s></span></div>
+var r = rg(T('p1'), 1, T('p1'), 4), f = r.cloneContents(); (function () { return [D($('p1')), D(f), pt(r), f.ownerDocument === document, f.nodeType].join(' ') })
+=== clone-collapsed
+@html <div id=r><p id=p1>Hello <b id=b1>big</b> world</p></div>
+var r = rg(T('p1'), 2, T('p1'), 2), f = r.cloneContents(); (function () { return [D($('p1')), D(f), pt(r)].join(' ') })
+=== clone-in-a-comment
+@html <div id=r><p id=p1>Hello</p><!--comment--></div>
+var c = T('r', 1), r = rg(c, 2, c, 5), f = r.cloneContents(); (function () { return [D($('r')), D(f), pt(r)].join(' ') })
+=== clone-element-children
+@html <div id=r><p id=p1>Hello <b id=b1>big</b> world</p><p id=p2>Second</p><!--c--><span id=s></span></div>
+var p2 = $('p2'), r = rg($('r'), 1, $('r'), 3), f = r.cloneContents(); (function () { return [D($('r')), D(f), pt(r), f.firstChild === p2, f.firstChild.isEqualNode(p2)].join(' ') })
+=== clone-across-text-and-elements
+@html <div id=r><p id=p1>Hello <b id=b1>big</b> world</p><p id=p2>Second</p><!--c--><span id=s></span></div>
+var r = rg(T('p1'), 2, T('p2'), 3), f = r.cloneContents(); (function () { return [D($('r')), D(f), pt(r)].join(' ') })
+=== clone-start-in-a-deep-element
+@html <div id=r><p id=p1>Hello <b id=b1>big</b> world</p><p id=p2>Second</p><!--c--><span id=s></span></div>
+var r = rg(T('b1'), 1, T('p2'), 3), f = r.cloneContents(); (function () { return [D($('r')), D(f), pt(r)].join(' ') })
+=== clone-start-in-an-ancestor
+@html <div id=r><p id=p1>Hello <b id=b1>big</b> world</p><p id=p2>Second</p><!--c--><span id=s></span></div>
+var r = rg($('r'), 0, T('p2'), 3), f = r.cloneContents(); (function () { return [D($('r')), D(f), pt(r)].join(' ') })
+=== clone-end-in-an-ancestor
+@html <div id=r><p id=p1>Hello <b id=b1>big</b> world</p><p id=p2>Second</p><!--c--><span id=s></span></div>
+var r = rg(T('p1'), 2, $('r'), 3), f = r.cloneContents(); (function () { return [D($('r')), D(f), pt(r)].join(' ') })
+=== clone-nested-partial
+@html <div id=r><p id=p1>Hello <b id=b1>big<i id=i1>deep</i>er</b> world</p><p id=p2>S<u id=u2>econ</u>d</p></div>
+var r = rg(T('i1'), 2, T('u2'), 2), f = r.cloneContents(); (function () { return [D($('r')), D(f), pt(r)].join(' ') })
+=== clone-document-range-doctype
+@html <div id=r><p id=p1>Hello</p></div>
+(function () { var r = rg(document, 0, document, 2); return [err(function () { return r.cloneContents() }), document.childNodes.length, pt(r)].join(' | ') })
+=== clone-keeps-other-ranges-and-records
+@html <div id=r><p id=p1>Hello <b id=b1>big</b> world</p><p id=p2>Second</p></div>
+mo.observe($('r'), OPT); var a = rg(T('p2'), 1, T('p2'), 4), r = rg(T('p1'), 2, T('p2'), 3), f = r.cloneContents(); (function () { return [pt(a), pt(r), out() === ''].join(' | ') })
+=== clone-with-surrogate-pairs
+@html <div id=r><p id=p1>a&#x1F600;b&#x1F601;c</p></div>
+var r = rg(T('p1'), 1, T('p1'), 3), f = r.cloneContents(); (function () { return [D($('p1')), D(f), f.firstChild.length].join(' ') })
+=== clone-copies-attributes-and-form-state
+@html <div id=r><input id=i value=a><p id=p1 class=c data-x=1>Hello <b id=b1>big</b></p></div>
+$('i').value = 'typed'; var r = rg($('r'), 0, $('r'), 2), f = r.cloneContents(); (function () { return [D(f), f.firstChild.value].join(' ') })
+=== insert-in-the-middle-of-a-text
+@html <div id=r><p id=p1>Hello <b id=b1>big</b> world</p><p id=p2>Second</p></div>
+var r = rg(T('p1'), 3, T('p1'), 3); r.insertNode(mk()); (function () { return [D($('p1')), pt(r), $('p1').childNodes.length].join(' ') })
+=== insert-in-the-middle-of-a-text-noncollapsed
+@html <div id=r><p id=p1>Hello <b id=b1>big</b> world</p><p id=p2>Second</p></div>
+var r = rg(T('p1'), 1, T('p1'), 4); r.insertNode(mk()); (function () { return [D($('p1')), pt(r)].join(' ') })
+=== insert-at-the-start-of-a-text
+@html <div id=r><p id=p1>Hello <b id=b1>big</b> world</p></div>
+var r = rg(T('p1'), 0, T('p1'), 2); r.insertNode(mk()); (function () { return [D($('p1')), pt(r)].join(' ') })
+=== insert-at-the-end-of-a-text
+@html <div id=r><p id=p1>Hello <b id=b1>big</b> world</p></div>
+var r = rg(T('p1'), 6, T('p1'), 6); r.insertNode(mk()); (function () { return [D($('p1')), pt(r)].join(' ') })
+=== insert-in-an-element-at-an-offset
+@html <div id=r><p id=p1>Hello <b id=b1>big</b> world</p><p id=p2>Second</p></div>
+var r = rg($('r'), 1, $('r'), 1); r.insertNode(mk()); (function () { return [D($('r')), pt(r)].join(' ') })
+=== insert-in-an-element-noncollapsed
+@html <div id=r><p id=p1>Hello <b id=b1>big</b> world</p><p id=p2>Second</p></div>
+var r = rg($('r'), 0, $('r'), 1); r.insertNode(mk()); (function () { return [D($('r')), pt(r)].join(' ') })
+=== insert-at-the-end-of-an-element
+@html <div id=r><p id=p1>Hello <b id=b1>big</b> world</p><p id=p2>Second</p></div>
+var r = rg($('r'), 2, $('r'), 2); r.insertNode(mk()); (function () { return [D($('r')), pt(r)].join(' ') })
+=== insert-a-fragment
+@html <div id=r><p id=p1>Hello <b id=b1>big</b> world</p><p id=p2>Second</p></div>
+var f = document.createDocumentFragment(); f.appendChild(mk('i')); f.appendChild(document.createTextNode('two')); var r = rg(T('p1'), 3, T('p1'), 3); r.insertNode(f); (function () { return [D($('p1')), pt(r), f.childNodes.length].join(' ') })
+=== insert-a-fragment-in-an-element
+@html <div id=r><p id=p1>Hello <b id=b1>big</b> world</p><p id=p2>Second</p></div>
+var f = document.createDocumentFragment(); f.appendChild(mk('i')); f.appendChild(document.createTextNode('two')); var r = rg($('r'), 1, $('r'), 1); r.insertNode(f); (function () { return [D($('r')), pt(r)].join(' ') })
+=== insert-an-empty-fragment
+@html <div id=r><p id=p1>Hello <b id=b1>big</b> world</p><p id=p2>Second</p></div>
+var f = document.createDocumentFragment(), r = rg(T('p1'), 3, T('p1'), 3); r.insertNode(f); (function () { return [D($('p1')), pt(r)].join(' ') })
+=== insert-a-text-node
+@html <div id=r><p id=p1>Hello <b id=b1>big</b> world</p></div>
+var r = rg(T('p1'), 3, T('p1'), 3); r.insertNode(document.createTextNode('XY')); (function () { return [D($('p1')), pt(r), $('p1').childNodes.length].join(' ') })
+=== insert-the-node-at-the-reference
+@html <div id=r><p id=p1>Hello <b id=b1>big</b> world</p><p id=p2>Second</p></div>
+var r = rg($('r'), 1, $('r'), 1); r.insertNode($('p2')); (function () { return [D($('r')), pt(r)].join(' ') })
+=== insert-an-existing-node
+@html <div id=r><p id=p1>Hello <b id=b1>big</b> world</p><p id=p2>Second</p></div>
+var r = rg(T('p1'), 3, T('p1'), 3); r.insertNode($('p2')); (function () { return [D($('r')), pt(r)].join(' ') })
+=== insert-an-earlier-node-later
+@html <div id=r><p id=p1>Hello <b id=b1>big</b> world</p><p id=p2>Second</p></div>
+var r = rg($('r'), 2, $('r'), 2); r.insertNode($('p1')); (function () { return [D($('r')), pt(r)].join(' ') })
+=== insert-in-a-comment
+@html <div id=r><p id=p1>Hello</p><!--comment--></div>
+var c = T('r', 1), r = rg(c, 2, c, 3); (function () { return [err(function () { return r.insertNode(mk()) }), D($('r')), pt(r)].join(' | ') })
+=== insert-in-a-text-with-no-parent
+(function () { var t = document.createTextNode('abc'), r = rg(t, 1, t, 2); return [err(function () { return r.insertNode(mk()) }), t.data, pt(r)].join(' | ') })
+=== insert-in-a-comment-with-no-parent
+(function () { var t = document.createComment('abc'), r = rg(t, 1, t, 2); return [err(function () { return r.insertNode(mk()) }), pt(r)].join(' | ') })
+=== insert-an-ancestor
+@html <div id=r><p id=p1>Hello <b id=b1>big</b> world</p></div>
+var r = rg(T('b1'), 1, T('b1'), 2); (function () { return [err(function () { return r.insertNode($('r')) }), err(function () { return r.insertNode($('b1')) }), err(function () { return r.insertNode($('p1')) }), D($('r')), pt(r)].join(' | ') })
+=== insert-a-document-or-doctype
+@html <div id=r><p id=p1>Hello</p></div>
+var r = rg(T('p1'), 1, T('p1'), 2); (function () { return [err(function () { return r.insertNode(document) }), err(function () { return r.insertNode(document.doctype) }), D($('r'))].join(' | ') })
+=== insert-in-the-document
+@html <div id=r><p id=p1>Hello</p></div>
+var r = rg(document, 2, document, 2); (function () { return [err(function () { return r.insertNode(mk()) }), err(function () { return r.insertNode(document.createComment('c')) }), err(function () { return r.insertNode(document.createTextNode('t')) }), document.childNodes.length, pt(r)].join(' | ') })
+=== insert-arguments
+@html <div id=r><p id=p1>Hello</p></div>
+var r = rg(T('p1'), 1, T('p1'), 2); (function () { return [err(function () { return r.insertNode() }), err(function () { return r.insertNode(null) }), err(function () { return r.insertNode('x') }), D($('r'))].join(' | ') })
+=== insert-moves-other-ranges
+@html <div id=r><p id=p1>Hello <b id=b1>big</b> world</p><p id=p2>Second</p></div>
+var r = rg(T('p1'), 3, T('p1'), 3), a = rg(T('p1'), 1, T('p1'), 6), b = rg($('p1'), 0, $('p1'), 3), c = rg($('r'), 0, $('r'), 2), d = rg(T('p1'), 3, T('p1'), 5); r.insertNode(mk()); (function () { return [pt(r), pt(a), pt(b), pt(c), pt(d)].join(' | ') })
+=== insert-records
+@html <div id=r><p id=p1>Hello <b id=b1>big</b> world</p><p id=p2>Second</p></div>
+mo.observe($('r'), OPT); var r = rg(T('p1'), 3, T('p1'), 3); r.insertNode(mk()); out
+=== insert-records-fragment
+@html <div id=r><p id=p1>Hello <b id=b1>big</b> world</p><p id=p2>Second</p></div>
+mo.observe($('r'), OPT); var f = document.createDocumentFragment(); f.appendChild(mk('i')); f.appendChild(document.createTextNode('two')); var r = rg($('r'), 1, $('r'), 1); r.insertNode(f); out
+=== insert-records-existing-node
+@html <div id=r><p id=p1>Hello <b id=b1>big</b> world</p><p id=p2>Second</p></div>
+mo.observe($('r'), OPT); var r = rg($('r'), 0, $('r'), 0); r.insertNode($('p2')); out
+=== surround-in-a-text
+@html <div id=r><p id=p1>Hello <b id=b1>big</b> world</p><p id=p2>Second</p></div>
+var r = rg(T('p1'), 1, T('p1'), 4), u = mk(); r.surroundContents(u); (function () { return [D($('p1')), pt(r), nm(u.parentNode)].join(' ') })
+=== surround-removes-the-children-of-the-new-parent
+@html <div id=r><p id=p1>Hello <b id=b1>big</b> world</p><p id=p2>Second</p></div>
+var r = rg(T('p1'), 1, T('p1'), 4), u = mk(); u.appendChild(document.createElement('s')); r.surroundContents(u); (function () { return [D($('p1')), pt(r)].join(' ') })
+=== surround-elements
+@html <div id=r><p id=p1>Hello <b id=b1>big</b> world</p><p id=p2>Second</p><!--c--></div>
+var r = rg($('r'), 1, $('r'), 3), u = mk('section'); r.surroundContents(u); (function () { return [D($('r')), pt(r)].join(' ') })
+=== surround-collapsed
+@html <div id=r><p id=p1>Hello <b id=b1>big</b> world</p><p id=p2>Second</p></div>
+var r = rg(T('p1'), 2, T('p1'), 2), u = mk(); r.surroundContents(u); (function () { return [D($('p1')), pt(r)].join(' ') })
+=== surround-a-partial-element
+@html <div id=r><p id=p1>Hello <b id=b1>big</b> world</p><p id=p2>Second</p></div>
+var r = rg(T('p1'), 2, T('p2'), 3), u = mk(); (function () { return [err(function () { return r.surroundContents(u) }), D($('r')), pt(r), u.parentNode].join(' | ') })
+=== surround-partial-in-a-sibling-text
+@html <div id=r><p id=p1>Hello <b id=b1>big</b> world</p><p id=p2>Second</p></div>
+var r = rg(T('p1'), 2, T('b1'), 1), u = mk(); (function () { return [err(function () { return r.surroundContents(u) }), D($('r')), pt(r)].join(' | ') })
+=== surround-in-a-comment
+@html <div id=r><p id=p1>Hello</p><!--comment--></div>
+var c = T('r', 1), r = rg(c, 2, c, 5), u = mk(); (function () { return [err(function () { return r.surroundContents(u) }), D($('r')), pt(r)].join(' | ') })
+=== surround-with-a-bad-parent
+@html <div id=r><p id=p1>Hello <b id=b1>big</b> world</p></div>
+var r = rg(T('p1'), 1, T('p1'), 4); (function () { return [err(function () { return r.surroundContents(document) }), err(function () { return r.surroundContents(document.doctype) }), err(function () { return r.surroundContents(document.createDocumentFragment()) }), err(function () { return r.surroundContents() }), err(function () { return r.surroundContents(null) }), D($('p1')), pt(r)].join(' | ') })
+=== surround-with-a-bad-parent-over-a-partial-range
+@html <div id=r><p id=p1>Hello <b id=b1>big</b> world</p><p id=p2>Second</p></div>
+var r = rg(T('p1'), 2, T('p2'), 3); (function () { return [err(function () { return r.surroundContents(document) }), err(function () { return r.surroundContents(document.createDocumentFragment()) })].join(' | ') })
+=== surround-with-an-ancestor
+@html <div id=r><p id=p1>Hello <b id=b1>big</b> world</p></div>
+var r = rg(T('b1'), 0, T('b1'), 2); (function () { return [err(function () { return r.surroundContents($('p1')) }), D($('r')), pt(r)].join(' | ') })
+=== surround-with-a-text-node
+@html <div id=r><p id=p1>Hello <b id=b1>big</b> world</p></div>
+var r = rg(T('p1'), 1, T('p1'), 4); (function () { return [err(function () { return r.surroundContents(document.createTextNode('x')) }), D($('p1')), pt(r)].join(' | ') })
+=== surround-records
+@html <div id=r><p id=p1>Hello <b id=b1>big</b> world</p><p id=p2>Second</p></div>
+mo.observe($('r'), OPT); var r = rg(T('p1'), 1, T('p1'), 4), u = mk(); r.surroundContents(u); out
+=== surround-records-elements
+@html <div id=r><p id=p1>Hello <b id=b1>big</b> world</p><p id=p2>Second</p><!--c--></div>
+mo.observe($('r'), OPT); var r = rg($('r'), 0, $('r'), 2), u = mk('section'); r.surroundContents(u); out
+=== surround-moves-other-ranges
+@html <div id=r><p id=p1>Hello <b id=b1>big</b> world</p><p id=p2>Second</p></div>
+var r = rg(T('p1'), 1, T('p1'), 4), a = rg(T('p1'), 2, T('p1'), 3), b = rg(T('p1'), 5, T('p1'), 6), u = mk(); r.surroundContents(u); (function () { return [pt(r), pt(a), pt(b)].join(' | ') })
+=== ctx-in-an-element
+@html <div id=r><p id=p1>Hello <b id=b1>big</b> world</p></div>
+var r = rg($('p1'), 0, $('p1'), 1), f = r.createContextualFragment('<i id=x>a</i>b<!--c-->'); (function () { return [D(f), f.ownerDocument === document, f.parentNode, D($('r')), pt(r)].join(' ') })
+=== ctx-start-in-a-text
+@html <div id=r><p id=p1>Hello <b id=b1>big</b> world</p></div>
+var r = rg(T('p1'), 1, T('p1'), 2), f = r.createContextualFragment('<td>x</td><i>y</i>'); (function () { return D(f) })
+=== ctx-start-in-a-comment
+@html <div id=r><p id=p1>Hello</p><!--c--></div>
+var c = T('r', 1), r = rg(c, 0, c, 1), f = r.createContextualFragment('<td>x</td><p>y'); (function () { return D(f) })
+=== ctx-template
+@html <template id=t><i>a</i></template>
+var r = rg($('t'), 0, $('t'), 0), f = r.createContextualFragment('<tr><td>x</td></tr>'); (function () { return D(f) })
+=== ctx-document-uses-body
+@html <div id=r><p id=p1>Hello</p></div>
+var r = rg(document, 0, document, 1), f = r.createContextualFragment('<td>x</td><i>y</i><body>b'); (function () { return D(f) })
+=== ctx-html-element-uses-body
+@html <div id=r><p id=p1>Hello</p></div>
+var r = rg(document.documentElement, 0, document.documentElement, 1), f = r.createContextualFragment('<head></head><i>y</i><body>b</body>'); (function () { return D(f) })
+=== ctx-body-element
+@html <div id=r><p id=p1>Hello</p></div>
+var r = rg(document.body, 0, document.body, 1), f = r.createContextualFragment('<head></head><i>y</i><body>b</body>'); (function () { return D(f) })
+=== ctx-head-element
+@html <div id=r><p id=p1>Hello</p></div>
+var r = rg(document.head, 0, document.head, 0), f = r.createContextualFragment('<title>t</title><div>d</div><meta>'); (function () { return D(f) })
+=== ctx-in-a-detached-element
+(function () { var e = document.createElement('ul'); e.innerHTML = '<li>a</li>'; var r = rg(e, 0, e, 1), f = r.createContextualFragment('<li>x</li><td>y</td>'); return D(f) })
+=== ctx-detached-text
+(function () { var t = document.createTextNode('abc'), r = rg(t, 1, t, 2); return err(function () { return D(r.createContextualFragment('<td>x</td><i>y</i>')) }) })
+=== ctx-detached-fragment-start
+(function () { var f0 = document.createDocumentFragment(), e = document.createElement('p'); f0.appendChild(e); var r = rg(f0, 0, f0, 1); return err(function () { return D(r.createContextualFragment('<td>x</td><i>y</i>')) }) })
+=== ctx-argument-conversion
+@html <div id=r><p id=p1>Hello</p></div>
+var r = rg($('p1'), 0, $('p1'), 1); (function () { return [err(function () { return D(r.createContextualFragment()) }), err(function () { return D(r.createContextualFragment(null)) }), err(function () { return D(r.createContextualFragment(undefined)) }), err(function () { return D(r.createContextualFragment(12)) }), err(function () { return D(r.createContextualFragment('')) }), err(function () { return D(r.createContextualFragment({ toString: function () { return '<b>o</b>' } })) })].join(' | ') })
+=== ctx-script-flags
+@html <div id=r><p id=p1>Hello</p></div>
+var r = rg($('p1'), 0, $('p1'), 1), f = r.createContextualFragment('<script async src="data:,">1<\/script>'); (function () { var s = f.firstChild; return [s.async, s.src, s.textContent].join() })
+=== ctx-records
+@html <div id=r><p id=p1>Hello</p></div>
+mo.observe($('r'), OPT); var r = rg($('p1'), 0, $('p1'), 1), f = r.createContextualFragment('<i>a</i><b>c</b>'); (function () { return out() === '' })
+=== ctx-uses-start-container-only
+@html <div id=r><p id=p1>Hello</p><table id=t><tr><td>a</td></tr></table></div>
+var r = rg($('p1'), 0, $('t'), 1), f = r.createContextualFragment('<td>x</td><i>y</i>'); (function () { return D(f) })
+=== wpt-cut-matrix
+@html <div id=root><p id=p1>Hello <b id=b1>big <i id=i1>bad</i> world</b>!</p><!--c1--><ul id=u><li id=l1>one</li><li id=l2>two<span id=s2>2</span></li></ul>tail</div>
+var PTS = [['', 0], ['', 2], ['', 4], ['0', 0], ['0', 2], ['0', 3], ['0.0', 0], ['0.0', 3], ['0.0', 6], ['0.1', 1], ['0.1.0', 2], ['0.1.1.0', 1], ['0.1.2', 3], ['1', 0], ['1', 2], ['2', 1], ['2.0.0', 1], ['2.1', 1], ['2.1.1.0', 0], ['3', 2]];
+var at = function (root, path) { return path === '' ? root : path.split('.').reduce(function (n, i) { return n.childNodes[+i] }, root) };
+var fnv = function (h, s) { for (var i = 0; i < s.length; i++) { h = Math.imul(h ^ s.charCodeAt(i), 16777619) >>> 0 } return h };
+(function () {
+  var html = $('root').innerHTML, hs = [2166136261, 2166136261, 2166136261], n = 0, samples = [];
+  for (var i = 0; i < PTS.length; i++) for (var j = 0; j < PTS.length; j++) {
+    for (var op = 0; op < 3; op++) {
+      var root = $('root'); root.innerHTML = html;
+      var r = document.createRange(), a = PTS[i], b = PTS[j];
+      r.setStart(at(root, a[0]), a[1]); r.setEnd(at(root, b[0]), b[1]);
+      var out;
+      if (op === 0) out = D(r.cloneContents()) + '|' + pt(r);
+      else if (op === 1) out = D(r.extractContents()) + '|' + pt(r) + '|' + root.innerHTML;
+      else { r.deleteContents(); out = pt(r) + '|' + root.innerHTML }
+      hs[op] = fnv(hs[op], out);
+      if (i === 4 && j === 13) samples.push(out);
+    }
+    n++;
+  }
+  return n + ' ' + hs.join(' ') + ' ' + samples.join(' ## ');
+})

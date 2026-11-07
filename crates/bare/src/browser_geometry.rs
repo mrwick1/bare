@@ -89,6 +89,8 @@ pub(crate) struct Geometry {
     stats: Cell<GeometryStats>,
     /// The grid container whose used tracks the next layout keeps (`getComputedStyle`, `browser_used.rs`).
     pub(crate) probe: Cell<Option<NodeId>>,
+    /// The next layout gives each inline box a fragment (`getClientRects` of an empty `span` and of a `br`, `browser_rects.rs`).
+    pub(crate) uncull: Cell<bool>,
 }
 
 const SLOT: &str = "geometry of a shadow tree with a slot (slot assignment is not built)";
@@ -230,7 +232,11 @@ impl Dom {
         };
         // Layout cannot be interrupted, so it counts its own work and stops going deeper at `max_work`.
         it.charge(bound.seen + 1)?;
-        let layout = bare_layout::layout_probing(&doc, styles, vp, l.max_work, self.geometry.probe.get());
+        let layout = if self.geometry.uncull.get() {
+            bare_layout::layout_uncull(&doc, styles, vp, l.max_work)
+        } else {
+            bare_layout::layout_probing(&doc, styles, vp, l.max_work, self.geometry.probe.get())
+        };
         if layout.work > l.max_work {
             return Err(self.lim("geometry-work"));
         }

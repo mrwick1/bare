@@ -1,0 +1,116 @@
+compare-matrix	010-1-111-111-1-1-1-1-1-1-1-1-1-1-111-1-1-1-1-1-1-1-1-1 11-1-1010-111-1-1-1-1-1-1-1-1-1-1-100-1-1-1-1-1-1-1-1-1 -111-1-111-1010-1-111-1-111-1-111-1-111-1-111-1 1111111111-1-1010-1111111111111111-1 1111111111-1-1-1-1-1-1010-11111-1-1-1-1-11-1-1 11-1-1110011-1-1-1-1-1-1-1-1-1-10000-1-1-1-1-1-1-1-1 1111111111-1-1-1-1-1-111111111000011-1-1 1111111111-1-1-11-1-1111-11111-111-1010-1
+compare-how-values	NotSupportedError: Failed to execute 'compareBoundaryPoints' on 'Range': The comparison method provided must be one of 'START_TO_START', 'START_TO_END', 'END_TO_END', or 'END_TO_START'. | NotSupportedError: Failed to execute 'compareBoundaryPoints' on 'Range': The comparison method provided must be one of 'START_TO_START', 'START_TO_END', 'END_TO_END', or 'END_TO_START'. | ok 1 | ok -1 | ok -1 | ok -1 | ok 1 | ok -1 | NotSupportedError: Failed to execute 'compareBoundaryPoints' on 'Range': The comparison method provided must be one of 'START_TO_START', 'START_TO_END', 'END_TO_END', or 'END_TO_START'.
+compare-argument-errors	TypeError: Failed to execute 'compareBoundaryPoints' on 'Range': 2 arguments required, but only 0 present. | TypeError: Failed to execute 'compareBoundaryPoints' on 'Range': 2 arguments required, but only 1 present. | TypeError: Failed to execute 'compareBoundaryPoints' on 'Range': parameter 2 is not of type 'Range'. | TypeError: Failed to execute 'compareBoundaryPoints' on 'Range': parameter 2 is not of type 'Range'. | TypeError: Failed to execute 'compareBoundaryPoints' on 'Range': parameter 2 is not of type 'Range'. | TypeError: Illegal invocation
+compare-different-roots	WrongDocumentError: Failed to execute 'compareBoundaryPoints' on 'Range': The source range is in a different document than this range. | WrongDocumentError: Failed to execute 'compareBoundaryPoints' on 'Range': The source range is in a different document than this range. | NotSupportedError: Failed to execute 'compareBoundaryPoints' on 'Range': The comparison method provided must be one of 'START_TO_START', 'START_TO_END', 'END_TO_END', or 'END_TO_START'.
+compare-document-ranges	010-1-111-1-111-111-1-1010-111-1-111-1-1-111-1010-1
+comparepoint-matrix	-10001-111-11111111-1-1-1111 -1-1-1-1-1-1-1-1-1001-1-100-1-1-1111 -1-1-1-1-1-1-10-1011-1001-1-1-1111 -1-1-111-111-11111111-1-1-1111
+comparepoint-errors	WrongDocumentError: Failed to execute 'comparePoint' on 'Range': The node provided and the Range are not in the same tree. | InvalidNodeTypeError: Failed to execute 'comparePoint' on 'Range': The node provided is of type 'html'. | InvalidNodeTypeError: Failed to execute 'comparePoint' on 'Range': The node provided is of type 'html'. | WrongDocumentError: Failed to execute 'comparePoint' on 'Range': The node provided and the Range are not in the same tree. | IndexSizeError: Failed to execute 'comparePoint' on 'Range': The offset 7 is larger than the node's length (6). | IndexSizeError: Failed to execute 'comparePoint' on 'Range': There is no child at offset 4. | IndexSizeError: Failed to execute 'comparePoint' on 'Range': The offset 2 is larger than the node's length (1). | ok 1 | IndexSizeError: Failed to execute 'comparePoint' on 'Range': There is no child at offset 3. | WrongDocumentError: Failed to execute 'comparePoint' on 'Range': The node provided and the Range are not in the same tree. | ok -1 | IndexSizeError: Failed to execute 'comparePoint' on 'Range': The offset 4294967295 is larger than the node's length (6).
+comparepoint-arguments	TypeError: Failed to execute 'comparePoint' on 'Range': 2 arguments required, but only 0 present. | TypeError: Failed to execute 'comparePoint' on 'Range': 2 arguments required, but only 1 present. | TypeError: Failed to execute 'comparePoint' on 'Range': parameter 1 is not of type 'Node'. | TypeError: Failed to execute 'comparePoint' on 'Range': parameter 1 is not of type 'Node'. | ok -1 | ok 0 | ok -1 | ok 0
+ispointinrange-matrix	ftttffffffffffffffffff fffffffffttfffttffffff ffffffftftfffttfffffff ffffffffffffffffffffff
+ispointinrange-errors	ok false | InvalidNodeTypeError: Failed to execute 'isPointInRange' on 'Range': The node provided is of type 'html'. | ok false | IndexSizeError: Failed to execute 'isPointInRange' on 'Range': The offset 7 is larger than the node's length (6). | ok false | TypeError: Failed to execute 'isPointInRange' on 'Range': 2 arguments required, but only 0 present. | TypeError: Failed to execute 'isPointInRange' on 'Range': 2 arguments required, but only 1 present. | TypeError: Failed to execute 'isPointInRange' on 'Range': parameter 1 is not of type 'Node'. | ok true | TypeError: Illegal invocation
+intersects-matrix	110000001111 110000001111 111111001111 000011001111 011100001111 110000001111 000000001111 011111001111
+intersects-detached-and-errors	false | true | false | false | false | TypeError: Failed to execute 'intersectsNode' on 'Range': 1 argument required, but only 0 present. | TypeError: Failed to execute 'intersectsNode' on 'Range': parameter 1 is not of type 'Node'. | TypeError: Failed to execute 'intersectsNode' on 'Range': parameter 1 is not of type 'Node'. | TypeError: Illegal invocation
+intersects-document-range	true,false,false,true,true,true
+shape-of-the-new-methods	compareBoundaryPoints:2:compareBoundaryPoints:truetrue comparePoint:2:comparePoint:truetrue isPointInRange:2:isPointInRange:truetrue intersectsNode:1:intersectsNode:truetrue deleteContents:0:deleteContents:truetrue extractContents:0:extractContents:truetrue cloneContents:0:cloneContents:truetrue insertNode:1:insertNode:truetrue surroundContents:1:surroundContents:truetrue createContextualFragment:1:createContextualFragment:truetrue getClientRects:0:getClientRects:truetrue getBoundingClientRect:0:getBoundingClientRect:truetrue
+delete-in-one-text	<p id="p1">Ho <b id="b1">big</b> world</p> #Ho :1-#Ho :1 collapsed
+delete-whole-text	<p id="p1"><b id="b1">big</b> world</p> #:0-#:0 collapsed 3
+delete-collapsed-is-a-no-op	<div id="r"><p id="p1">Hello <b id="b1">big</b> world</p></div> r:1-r:1 collapsed 
+delete-in-a-comment	<div id="r"><p id="p1">Hello</p><!--cont--></div> !cont:2-!cont:2 collapsed
+delete-element-children	<div id="r"><p id="p1">Hello <b id="b1">big</b> world</p><span id="s"></span></div> r:1-r:1 collapsed
+delete-across-text-and-elements	<div id="r"><p id="p1">He</p><p id="p2">ond</p><!--c--><span id="s"></span></div> r:1-r:1 collapsed
+delete-start-in-an-ancestor	<div id="r"><p id="p2">ond</p><!--c--><span id="s"></span></div> r:0-r:0 collapsed
+delete-end-in-an-ancestor	<div id="r"><p id="p1">He</p><span id="s"></span></div> r:1-r:1 collapsed
+delete-start-in-a-deep-element	<div id="r"><p id="p1">Hello <b id="b1">b</b></p><p id="p2">ond</p><!--c--><span id="s"></span></div> r:1-r:1 collapsed
+delete-contents-of-the-body	 BODY:0-BODY:0 collapsed
+delete-document-range	0 document:0-document:0 collapsed
+delete-moves-other-ranges	r:1-r:1 collapsed | p1:1-p1:1 collapsed | r:1-r:4 | #ond:0-#ond:2 | #He:2-#He:2 collapsed | p1:0-p1:1
+delete-with-surrogate-pairs	<p id="p1">ab😁c</p> 5 #ab😁c:1-#ab😁c:1 collapsed
+delete-in-a-detached-tree	af DIV:1-DIV:1 collapsed
+delete-records	characterData "He" old=Hello  | childList p#p1 +[] -[b#b1] p="He" n=" world" | childList p#p1 +[] -[" world"] p="He" n=null | characterData "ond" old=Second
+delete-records-element-children	childList div#r +[] -[p#p1] p=null n=p#p2 | childList div#r +[] -[p#p2] p=null n=#comment | childList div#r +[] -[#comment] p=null n=span#s
+delete-records-one-text	characterData "Ho " old=Hello 
+extract-in-one-text	<p id="p1">Ho <b id="b1">big</b> world</p> ["ell"] #Ho :1-#Ho :1 collapsed true 11 
+extract-collapsed	<p id="p1">Hello <b id="b1">big</b> world</p> [] #Hello :2-#Hello :2 collapsed
+extract-in-a-comment	<div id="r"><p id="p1">Hello</p><!--cont--></div> [<!--mme-->] !cont:2-!cont:2 collapsed
+extract-element-children	<div id="r"><p id="p1">Hello <b id="b1">big</b> world</p><span id="s"></span></div> [<p id="p2">Second</p><!--c-->] r:1-r:1 collapsed true
+extract-across-text-and-elements	<div id="r"><p id="p1">He</p><p id="p2">ond</p><!--c--><span id="s"></span></div> [<p id="p1">llo <b id="b1">big</b> world</p><p id="p2">Sec</p>] r:1-r:1 collapsed
+extract-start-in-a-deep-element	<div id="r"><p id="p1">Hello <b id="b1">b</b></p><p id="p2">ond</p><!--c--><span id="s"></span></div> [<p id="p1"><b id="b1">ig</b> world</p><p id="p2">Sec</p>] r:1-r:1 collapsed
+extract-start-in-an-ancestor	<div id="r"><p id="p2">ond</p><!--c--><span id="s"></span></div> [<p id="p1">Hello <b id="b1">big</b> world</p><p id="p2">Sec</p>] r:0-r:0 collapsed
+extract-end-in-an-ancestor	<div id="r"><p id="p1">He</p><span id="s"></span></div> [<p id="p1">llo <b id="b1">big</b> world</p><p id="p2">Second</p><!--c-->] r:1-r:1 collapsed
+extract-nested-partial	<div id="r"><p id="p1">Hello <b id="b1">big<i id="i1">de</i></b></p><p id="p2"><u id="u2">on</u>d</p></div> [<p id="p1"><b id="b1"><i id="i1">ep</i>er</b> world</p><p id="p2">S<u id="u2">ec</u></p>] r:1-r:1 collapsed
+extract-document-range-doctype	HierarchyRequestError: Failed to execute 'extractContents' on 'Range': The Range contains a doctype node. | 2 | document:0-document:2
+extract-contained-doctype-nested	HierarchyRequestError: Failed to execute 'extractContents' on 'Range': The Range contains a doctype node. | 2 | document:0-BODY:1
+extract-moves-other-ranges	r:1-r:1 collapsed | p1:1-p1:1 collapsed | r:1-r:4 | #ond:0-#ond:2 | #He:2-#He:2 collapsed
+extract-element-moves-inner-range	r:1-r:1 collapsed | r:1-r:1 collapsed | [<p id="p2">Second</p>]
+extract-records	characterData "He" old=Hello  | childList p#p1 +[] -[b#b1] p="He" n=" world" | childList p#p1 +[] -[" world"] p="He" n=null | characterData "ond" old=Second
+extract-records-element-children	childList div#r +[] -[p#p1] p=null n=p#p2 | childList div#r +[] -[p#p2] p=null n=#comment | childList div#r +[] -[#comment] p=null n=span#s
+extract-records-one-text	characterData "Ho " old=Hello 
+extract-with-surrogate-pairs	<p id="p1">ab😁c</p> ["😀"] #ab😁c:1-#ab😁c:1 collapsed
+clone-in-one-text	<p id="p1">Hello <b id="b1">big</b> world</p> ["ell"] #Hello :1-#Hello :4 true 11
+clone-collapsed	<p id="p1">Hello <b id="b1">big</b> world</p> [] #Hello :2-#Hello :2 collapsed
+clone-in-a-comment	<div id="r"><p id="p1">Hello</p><!--comment--></div> [<!--mme-->] !comment:2-!comment:5
+clone-element-children	<div id="r"><p id="p1">Hello <b id="b1">big</b> world</p><p id="p2">Second</p><!--c--><span id="s"></span></div> [<p id="p2">Second</p><!--c-->] r:1-r:3 false true
+clone-across-text-and-elements	<div id="r"><p id="p1">Hello <b id="b1">big</b> world</p><p id="p2">Second</p><!--c--><span id="s"></span></div> [<p id="p1">llo <b id="b1">big</b> world</p><p id="p2">Sec</p>] #Hello :2-#Second:3
+clone-start-in-a-deep-element	<div id="r"><p id="p1">Hello <b id="b1">big</b> world</p><p id="p2">Second</p><!--c--><span id="s"></span></div> [<p id="p1"><b id="b1">ig</b> world</p><p id="p2">Sec</p>] #big:1-#Second:3
+clone-start-in-an-ancestor	<div id="r"><p id="p1">Hello <b id="b1">big</b> world</p><p id="p2">Second</p><!--c--><span id="s"></span></div> [<p id="p1">Hello <b id="b1">big</b> world</p><p id="p2">Sec</p>] r:0-#Second:3
+clone-end-in-an-ancestor	<div id="r"><p id="p1">Hello <b id="b1">big</b> world</p><p id="p2">Second</p><!--c--><span id="s"></span></div> [<p id="p1">llo <b id="b1">big</b> world</p><p id="p2">Second</p><!--c-->] #Hello :2-r:3
+clone-nested-partial	<div id="r"><p id="p1">Hello <b id="b1">big<i id="i1">deep</i>er</b> world</p><p id="p2">S<u id="u2">econ</u>d</p></div> [<p id="p1"><b id="b1"><i id="i1">ep</i>er</b> world</p><p id="p2">S<u id="u2">ec</u></p>] #deep:2-#econ:2
+clone-document-range-doctype	HierarchyRequestError: Failed to execute 'cloneContents' on 'Range': Nodes of type 'html' may not be inserted inside nodes of type '#document-fragment'. | 2 | document:0-document:2
+clone-keeps-other-ranges-and-records	#Second:1-#Second:4 | #Hello :2-#Second:3 | true
+clone-with-surrogate-pairs	<p id="p1">a😀b😁c</p> ["😀"] 2
+clone-copies-attributes-and-form-state	[<input id="i" value="a"><p id="p1" class="c" data-x="1">Hello <b id="b1">big</b></p>] typed
+insert-in-the-middle-of-a-text	<p id="p1">Hel<u id="n">N</u>lo <b id="b1">big</b> world</p> #Hel:3-p1:2 5
+insert-in-the-middle-of-a-text-noncollapsed	<p id="p1">H<u id="n">N</u>ello <b id="b1">big</b> world</p> #H:1-#ello :3
+insert-at-the-start-of-a-text	<p id="p1"><u id="n">N</u>Hello <b id="b1">big</b> world</p> #:0-#Hello :2
+insert-at-the-end-of-a-text	<p id="p1">Hello <u id="n">N</u><b id="b1">big</b> world</p> #Hello :6-p1:2
+insert-in-an-element-at-an-offset	<div id="r"><p id="p1">Hello <b id="b1">big</b> world</p><u id="n">N</u><p id="p2">Second</p></div> r:1-r:2
+insert-in-an-element-noncollapsed	<div id="r"><u id="n">N</u><p id="p1">Hello <b id="b1">big</b> world</p><p id="p2">Second</p></div> r:0-r:2
+insert-at-the-end-of-an-element	<div id="r"><p id="p1">Hello <b id="b1">big</b> world</p><p id="p2">Second</p><u id="n">N</u></div> r:2-r:3
+insert-a-fragment	<p id="p1">Hel<i id="n">N</i>twolo <b id="b1">big</b> world</p> #Hel:3-p1:3 0
+insert-a-fragment-in-an-element	<div id="r"><p id="p1">Hello <b id="b1">big</b> world</p><i id="n">N</i>two<p id="p2">Second</p></div> r:1-r:3
+insert-an-empty-fragment	<p id="p1">Hello <b id="b1">big</b> world</p> #Hel:3-p1:1
+insert-a-text-node	<p id="p1">HelXYlo <b id="b1">big</b> world</p> #Hel:3-p1:2 5
+insert-the-node-at-the-reference	<div id="r"><p id="p1">Hello <b id="b1">big</b> world</p><p id="p2">Second</p></div> r:1-r:2
+insert-an-existing-node	<div id="r"><p id="p1">Hel<p id="p2">Second</p>lo <b id="b1">big</b> world</p></div> #Hel:3-p1:2
+insert-an-earlier-node-later	<div id="r"><p id="p2">Second</p><p id="p1">Hello <b id="b1">big</b> world</p></div> r:1-r:2
+insert-in-a-comment	HierarchyRequestError: Failed to execute 'insertNode' on 'Range': Nodes of type 'U' may not be inserted inside nodes of type '#comment'. | <div id="r"><p id="p1">Hello</p><!--comment--></div> | !comment:2-!comment:3
+insert-in-a-text-with-no-parent	HierarchyRequestError: Failed to execute 'insertNode' on 'Range': This operation would split a text node, but there's no parent into which to insert. | abc | #abc:1-#abc:2
+insert-in-a-comment-with-no-parent	HierarchyRequestError: Failed to execute 'insertNode' on 'Range': Nodes of type 'U' may not be inserted inside nodes of type '#comment'. | !abc:1-!abc:2
+insert-an-ancestor	HierarchyRequestError: Failed to execute 'insertNode' on 'Range': The new child element contains the parent. | HierarchyRequestError: Failed to execute 'insertNode' on 'Range': The new child element contains the parent. | HierarchyRequestError: Failed to execute 'insertNode' on 'Range': The new child element contains the parent. | <div id="r"><p id="p1">Hello <b id="b1">big</b> world</p></div> | #big:1-#big:2
+insert-a-document-or-doctype	HierarchyRequestError: Failed to execute 'insertNode' on 'Range': The new child element contains the parent. | HierarchyRequestError: Failed to execute 'insertNode' on 'Range': Nodes of type 'html' may not be inserted inside nodes of type 'P'. | <div id="r"><p id="p1">Hello</p></div>
+insert-in-the-document	HierarchyRequestError: Failed to execute 'insertNode' on 'Range': Only one element on document allowed. | ok undefined | HierarchyRequestError: Failed to execute 'insertNode' on 'Range': Nodes of type '#text' may not be inserted inside nodes of type '#document'. | 3 | document:2-document:3
+insert-arguments	TypeError: Failed to execute 'insertNode' on 'Range': 1 argument required, but only 0 present. | TypeError: Failed to execute 'insertNode' on 'Range': parameter 1 is not of type 'Node'. | TypeError: Failed to execute 'insertNode' on 'Range': parameter 1 is not of type 'Node'. | <div id="r"><p id="p1">Hello</p></div>
+insert-moves-other-ranges	#Hel:3-p1:2 | #Hel:1-#lo :3 | p1:0-p1:5 | r:0-r:2 | #Hel:3-#lo :2
+insert-records	characterData "Hel" old=Hello  | childList p#p1 +["lo "] -[] p="Hel" n=b#b1 | childList p#p1 +[u#n] -[] p="Hel" n="lo "
+insert-records-fragment	childList div#r +[i#n,"two"] -[] p=p#p1 n=p#p2
+insert-records-existing-node	childList div#r +[] -[p#p2] p=p#p1 n=null | childList div#r +[p#p2] -[] p=null n=p#p1
+surround-in-a-text	<p id="p1">H<u id="n">ell</u>o <b id="b1">big</b> world</p> p1:1-p1:2 p1
+surround-removes-the-children-of-the-new-parent	<p id="p1">H<u id="n">ell</u>o <b id="b1">big</b> world</p> p1:1-p1:2
+surround-elements	<div id="r"><p id="p1">Hello <b id="b1">big</b> world</p><section id="n"><p id="p2">Second</p><!--c--></section></div> r:1-r:2
+surround-collapsed	<p id="p1">He<u id="n"></u>llo <b id="b1">big</b> world</p> p1:1-p1:2
+surround-a-partial-element	InvalidStateError: Failed to execute 'surroundContents' on 'Range': The Range has partially selected a non-Text node. | <div id="r"><p id="p1">Hello <b id="b1">big</b> world</p><p id="p2">Second</p></div> | #Hello :2-#Second:3 | 
+surround-partial-in-a-sibling-text	InvalidStateError: Failed to execute 'surroundContents' on 'Range': The Range has partially selected a non-Text node. | <div id="r"><p id="p1">Hello <b id="b1">big</b> world</p><p id="p2">Second</p></div> | #Hello :2-#big:1
+surround-in-a-comment	HierarchyRequestError: Failed to execute 'surroundContents' on 'Range': Nodes of type 'U' may not be inserted inside nodes of type '#comment'. | <div id="r"><p id="p1">Hello</p><!--cont--></div> | !cont:2-!cont:2 collapsed
+surround-with-a-bad-parent	InvalidNodeTypeError: Failed to execute 'surroundContents' on 'Range': The node provided is of type '#document'. | InvalidNodeTypeError: Failed to execute 'surroundContents' on 'Range': The node provided is of type 'html'. | InvalidNodeTypeError: Failed to execute 'surroundContents' on 'Range': The node provided is of type '#document-fragment'. | TypeError: Failed to execute 'surroundContents' on 'Range': 1 argument required, but only 0 present. | TypeError: Failed to execute 'surroundContents' on 'Range': parameter 1 is not of type 'Node'. | <p id="p1">Hello <b id="b1">big</b> world</p> | #Hello :1-#Hello :4
+surround-with-a-bad-parent-over-a-partial-range	InvalidStateError: Failed to execute 'surroundContents' on 'Range': The Range has partially selected a non-Text node. | InvalidStateError: Failed to execute 'surroundContents' on 'Range': The Range has partially selected a non-Text node.
+surround-with-an-ancestor	HierarchyRequestError: Failed to execute 'surroundContents' on 'Range': Unable to insert a node into a Range starting from the node itself. | <div id="r"><p id="p1"></p></div> | p1:0-p1:0 collapsed
+surround-with-a-text-node	HierarchyRequestError: Failed to execute 'surroundContents' on 'Range': This node type does not support this method. | <p id="p1">Hxo <b id="b1">big</b> world</p> | #H:1-p1:2
+surround-records	characterData "H" old=Hello  | characterData "H" old=Ho  | childList p#p1 +["o "] -[] p="H" n=b#b1 | childList p#p1 +[u#n] -[] p="H" n="o " | childList u#n +["ell"] -[] p=null n=null
+surround-records-elements	childList div#r +[] -[p#p1] p=null n=p#p2 | childList div#r +[] -[p#p2] p=null n=#comment | childList div#r +[section#n] -[] p=null n=#comment | childList section#n +[p#p1,p#p2] -[] p=null n=null
+surround-moves-other-ranges	p1:1-p1:2 | #H:1-#H:1 collapsed | #o :1-#o :2
+ctx-in-an-element	[<i id="x">a</i>"b"<!--c-->] true  <div id="r"><p id="p1">Hello <b id="b1">big</b> world</p></div> p1:0-p1:1
+ctx-start-in-a-text	["x"<i>y</i>]
+ctx-start-in-a-comment	["x"<p>y</p>]
+ctx-template	[<tr><td>x</td></tr>]
+ctx-document-uses-body	["x"<i>y</i>"b"]
+ctx-html-element-uses-body	[<i>y</i>"b"]
+ctx-body-element	[<i>y</i>"b"]
+ctx-head-element	[<title>t</title><div>d</div><meta>]
+ctx-in-a-detached-element	[<li>x</li>"y"]
+ctx-detached-text	ok ["x"<i>y</i>]
+ctx-detached-fragment-start	ok ["x"<i>y</i>]
+ctx-argument-conversion	TypeError: Failed to execute 'createContextualFragment' on 'Range': 1 argument required, but only 0 present. | ok ["null"] | ok ["undefined"] | ok ["12"] | ok [] | ok [<b>o</b>]
+ctx-script-flags	true,data:,,1
+ctx-records	true
+ctx-uses-start-container-only	["x"<i>y</i>]
+wpt-cut-matrix	400 507665953 1740562181 1201453034 [<p id="p1">!</p><!---->]|p1:2-!c1:0 ## [<p id="p1">!</p><!---->]|root:1-root:1 collapsed|<p id="p1">Hello <b id="b1">big <i id="i1">bad</i> world</b></p><!--c1--><ul id="u"><li id="l1">one</li><li id="l2">two<span id="s2">2</span></li></ul>tail ## root:1-root:1 collapsed|<p id="p1">Hello <b id="b1">big <i id="i1">bad</i> world</b></p><!--c1--><ul id="u"><li id="l1">one</li><li id="l2">two<span id="s2">2</span></li></ul>tail

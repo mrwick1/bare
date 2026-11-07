@@ -78,6 +78,8 @@ pub struct Cx<'a> {
     /// The grid container whose track sizes the caller wants (`layout_probing`), and what its last layout found.
     pub(crate) probe: Option<NodeId>,
     pub(crate) tracks: Option<fragment::Tracks>,
+    /// Give every inline box its own fragment, and every `br` a zero-width one (`layout_uncull`).
+    pub(crate) uncull: bool,
 }
 
 /// A table by `NodeId::index`. The page picks the keys, and it can only slow down its own layout, so the fast hash of `Document` is enough.
@@ -98,7 +100,17 @@ pub fn layout_within(doc: &Document, styles: &Styles, viewport: (f32, f32), budg
 /// `layout_within`, and the used track sizes of the grid container `probe` go in `Layout::tracks` (for the resolved value of
 /// `grid-template-columns`). The kept results of `memo.rs` are off then, so the sizes are those of the last real layout of the container.
 pub fn layout_probing(doc: &Document, styles: &Styles, viewport: (f32, f32), budget: u64, probe: Option<NodeId>) -> Layout {
-    let mut cx = Cx { tree: boxes::Tree::new(doc, styles), out: Vec::with_capacity(doc.len()), depth: 0, marker: None, number: 0, sizes: Fast::default(), measuring: 0, spare: Vec::new(), floats: Default::default(), bars: Fast::default(), again: 0, rel: Fast::default(), fixed: false, waiting: 0, unknown: Default::default(), work: 0, budget, scrolls: 0, items: 0, memo_from: if probe.is_some() { u64::MAX } else { memo::start().min(budget) }, open: 0, fx: Vec::new(), memo: Default::default(), probe, tracks: None };
+    layout_with(doc, styles, viewport, budget, probe, false)
+}
+
+/// `layout_within`, but no inline box is culled: each has a fragment on each line, even with nothing to paint, and each `br` has
+/// a text fragment of 0 width (`Kind::Text { start: 0, end: 1 }` on the `br`). `getClientRects` reads the place of an empty `span` and of a `br` there.
+pub fn layout_uncull(doc: &Document, styles: &Styles, viewport: (f32, f32), budget: u64) -> Layout {
+    layout_with(doc, styles, viewport, budget, None, true)
+}
+
+fn layout_with(doc: &Document, styles: &Styles, viewport: (f32, f32), budget: u64, probe: Option<NodeId>, uncull: bool) -> Layout {
+    let mut cx = Cx { tree: boxes::Tree::new(doc, styles), out: Vec::with_capacity(doc.len()), depth: 0, marker: None, number: 0, sizes: Fast::default(), measuring: 0, spare: Vec::new(), floats: Default::default(), bars: Fast::default(), again: 0, rel: Fast::default(), fixed: false, waiting: 0, unknown: Default::default(), work: 0, budget, scrolls: 0, items: 0, memo_from: if probe.is_some() { u64::MAX } else { memo::start().min(budget) }, open: 0, fx: Vec::new(), memo: Default::default(), probe, tracks: None, uncull };
     // Most pages make about one fragment for each DOM node: one for each element and each text on one line, none for
     // the `head` and for the spaces between blocks. Room for that many at once saves the copies of a `Vec` that grows.
     let mut height = 0.0;

@@ -1101,6 +1101,7 @@ impl Dom {
         crate::browser_geometry::install(self, it)?;
         crate::browser_element::install(self, it)?;
         crate::browser_scroll::install(self, it)?;
+        crate::browser_rects::install(self, it)?;
         crate::browser_resize::install(self, it)?;
         crate::browser_frame::install(self, it)?;
         crate::browser_idle::install(self, it)?;
