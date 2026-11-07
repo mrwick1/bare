@@ -32,6 +32,8 @@
 //! - `Browser::submit` and `Input::Submit` stay the dispatch-only driver call of `browser.rs`: no activation, no validation.
 //!
 //! Deviations (on purpose)
+//! - `Input::Click` of a session no longer calls `Browser::click`: it is the user click of `browser_drive.rs` (pointer events, mouse events, focus,
+//!   `MouseEvent` click). `Browser::click` is kept for the unit tests: it is the dispatch-only click described here.
 //! - The driver's `click` is a plain `Event` (there is no `MouseEvent`); the driver marks the activation itself, so a script's
 //!   `dispatchEvent(new Event('click'))` never activates. `isTrusted` stays false.
 //! - The `firing submission events` guard of a form is not kept: nothing can start a second submit inside a submit listener

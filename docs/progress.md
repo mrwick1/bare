@@ -808,3 +808,53 @@ Not tested: the real clock with an idle chain; an idle chain that is judged nois
 ## Nested `@import` sheets download in parallel
 
 The `@import` tree of a style sheet now loads on the same parallel workers as other files (follow-up of #186). After a slow reply, `warm_imports` reads the tree breadth first and fills the sheet cache; `flatten` keeps the cascade order, layers, media, cycle cut and limits. A 19-sheet tree at 100 ms per reply went from 1,922 ms to 508 ms. The order matches headless Chrome on six cases (`tools/fixtures/ui/imports-chrome.txt`). Cost and what is not tested: [resources.md](resources.md#nested-import-sheets-in-parallel).
+
+Not covered: a preload fetch (`preload.rs`) or a `fetch` from a frame step is judged as before. Only the supply of a style sheet clears the verdicts.
+
+## User-like driver input, and the UI event constructors
+
+Problem: a driver must operate a React 19 and Radix UI app like a user in Chrome. A Radix Select opens on `pointerdown`, closes on `pointerup`, checks `event.pointerType` and calls `hasPointerCapture`. The old `Input::Click` sent one plain `Event`, and `new MouseEvent(...)` threw. Task: add the constructors and members, a Chrome-order click, key input, and typing in a `<textarea>`.
+
+Chrome facts that were recorded from headless Chrome 155 (`tools/ui/chrome_drive.mjs`, `tools/fixtures/ui/drive-steps.txt` on `drive.html`, a Radix-Select-like page):
+
+- A disabled button gets `pointerdown` and `pointerup`. It gets no mouse event and no `click`.
+- A canceled `pointerdown` skips `mousedown` and `mouseup`. The `click` still comes. A canceled `mousedown` skips the focus change only.
+- `MouseEvent` floors its coordinates. `PointerEvent` keeps the fraction. The `click` is a `PointerEvent` with floored coordinates (110.5 gives 110).
+- `pressure` is 0.5 while a button is down, else 0.
+- Pointer capture: `gotpointercapture` comes after `mousedown` and before `pointerup`. `lostpointercapture` comes after `mouseup` and before `click`. Both carry the fields of the event that caused them.
+- After a click that hides the element under the pointer, Chrome sends boundary events (`pointerout`, `pointerleave`, `pointerover`, and the mouse ones) to the element now under the pointer. It sends no move.
+- When the focused element is hidden and script then focuses another element, Chrome sends `blur` and `focusout` to the hidden one, with `relatedTarget` set to the new one.
+- `keyup` goes to the element that has focus after the `keydown`. A Shift key from a keyboard has `location` 1.
+
+Changes:
+
+- `browser_uievent.rs` (new): `new MouseEvent`, `PointerEvent`, `KeyboardEvent` and `InputEvent`, with all their init members, the getters (`screenX`, `pageX`, `offsetX`, `movementX`, `getModifierState`, `charCode`, the constants, the `PointerEvent` sizes), `getCoalescedEvents`, `setPointerCapture`, `hasPointerCapture` and `releasePointerCapture`. The members are defined on the first constructor call or the first event of the window or of the driver (`ensure_ui_ext`), so a page that does not use them pays nothing. 47 cases match Chrome (`uievent-cases.txt`).
+- `browser_ui.rs`: the window events use the same `Ui` record. Added the pointer capture steps, a disabled control that gets only pointer events, a canceled `pointerdown` that skips `mouseup`, `movementX`, `keyCode`, `charCode` and `location`, and `ui_settle` (the boundary events after a change of the page).
+- `browser_drive.rs` (new): `drive_click`, `drive_key` and `drive_type`. A click moves the pointer to the center of the border box, presses and releases the left button, and then settles the hover. The events go to the selected element, not to a hit test result. A click is always `detail` 1.
+- `Input::Key(selector, key)` is new. The selector `""` or `"-"` means the focused element. Another selector is focused first. A key is `Enter`, `Space`, `Tab`, `ArrowDown`, `a`, `A`, or one with modifiers: `Shift+Tab`, `Control+a`.
+- Typing in a field without a selection API (`email`, `number`) now edits (`edit_sel`, `select_text` in `browser_selection.rs`). Before, window typing did nothing there.
+- `browser_focus.rs`: a focus move from an element that is still connected, but hidden or disabled, sends `blur` and `focusout` to it (Chrome). A removed element still gets none.
+
+Migration (decision): `Input::Click` and `Input::Type` of `Session::resume` now use the user-like calls. `Browser::click`, `Browser::type_text` and `Input::Submit` keep the old dispatch-only behavior, because the unit tests and the form gates use them. What changes for a caller:
+
+- `Input::Click` sends the full pointer and mouse sequence, moves focus, and sends a `MouseEvent`/`PointerEvent` click. A disabled control gets no click, as before.
+- `Input::Type` focuses the field, selects its text, then presses each character: one `input` event for each character, not one for the whole text. It still replaces the value. An empty text clears a non-empty field with Backspace. A line feed is Enter (a line break in a textarea). A target that is not an editable `<input>` or `<textarea>` is still `Fatal::Unsupported`. `contenteditable` is not built.
+- One test changed for the new rule: `browser_resume_tests` now expects two `input` events for "hi" (`seen=h,hi`). Two tests changed for Chrome: a disabled button now gets `pointerdown` and `pointerup`, and `new MouseEvent('click')` is legal and not trusted.
+
+Tests:
+
+- `browser_uievent_tests`: 47 cases against Chrome.
+- `browser_drive_tests`: 25 scenarios against the Chrome log (click on a plain, disabled, text, canceled and captured target; the Select opened by pointer, Enter, Space and ArrowDown; picking by `pointerup` and Enter; Escape; Tab and Shift+Tab; Enter and Space on a button; Enter in a form; typing in an input and a textarea). Also: a React-style value tracker sees one change for each typed character and none for a value set by script; `Input::Key` and `Input::Click` in a session; the errors (`NoTarget`, `Unsupported`).
+- The full `bare` suite: 936 passed, 0 failed, 5 ignored (the load tests).
+
+Perf (`tools/js/instr.sh`, minimum of 3 runs of `instructions:u`, release, main 9bb8a04 against this change on top of it, 176 rows of the `bare` examples at scale 1 and 10, handler, sticky, xhr, dataset and select rows included): the worst is `resources_load small 10` at +0.53%. That row is noisy: three more runs gave 57.3M to 58.5M for main and 57.3M to 58.1M for this change. Every other row is within +0.5%. `crates/js` is not changed. A first run on an older base gave +0.21% at worst.
+
+Deviations from Chrome (on purpose or not done):
+
+- `offsetX` is measured from the border box, Chrome measures from the padding edge.
+- Before the first constructor call or event, `'hasPointerCapture' in Element.prototype` is false (lazy members).
+- `UIEvent`, `WheelEvent` and `initMouseEvent` are not built.
+- No scroll into view before a click. No modifier keys on a click. Left button only. No double click from the driver.
+- The hover settle runs once, at the end of a click. Chrome also does it after a key or a timer.
+
+Not tested: `contenteditable`; a real React 19 or Radix app (the fixture is a reduction of the Select, and the tracker is a copy of the React technique); the live staging run of the new inputs; a double click, a right click, a touch pointer, a drag, a wheel; IME and `compositionstart`; the load of 10,000 typed characters (the cost of one `input` event per character); the hover settle after a key.

@@ -39,8 +39,11 @@
 //! Gaps (none is faked): `contenteditable`;
 //! clipboard keys; Ctrl+Left/Right word moves; IME and `compositionstart`; `readonly` is honored but
 //! `type=number` does not filter text; `contextmenu`; `:hover`/`:focus` styling; radio groups in the Tab order (every
-//! radio is a stop); `<summary>` toggling; `<label>` click coordinates of the second click; `new MouseEvent(...)`
-//! and the other four constructors (illegal, as events are made by the window only).
+//! radio is a stop); `<summary>` toggling; `<label>` click coordinates of the second click; `UIEvent` and `WheelEvent`.
+//!
+//! The four constructors (`new MouseEvent(...)` and the others) are in `browser_uievent.rs`. The user-like driver inputs (`Input::Click`,
+//! `Input::Type`, `Input::Key`) call this file through `browser_drive.rs`. A canceled `pointerdown` also skips the `mouseup`. A disabled
+//! control gets the pointer events and no mouse event. Pointer capture retargets the moves and the release to its holder.
 
 use crate::browser::*;
 use crate::browser_dom as nd;
@@ -79,20 +82,49 @@ pub struct KeyInput {
     pub mods: Mods,
 }
 
-/// The fields of the events that the window makes.
+/// The fields of the events that the window makes, and of the events that `new MouseEvent(...)` and the like make.
 #[derive(Clone, Default)]
 pub(crate) struct Ui {
     pub x: f64,
     pub y: f64,
+    pub screen: (f64, f64),
+    pub page: (f64, f64),
+    pub movement: (f64, f64),
     pub button: i16,
     pub buttons: u16,
-    pub detail: u32,
+    pub detail: i32,
     pub mods: Mods,
+    /// The other modifier keys (`modifierCapsLock` and the like), a bit for each name of `uievent::EXTRA_MODS`.
+    pub extra: u16,
     pub key: String,
     pub code: String,
     pub repeat: bool,
+    pub location: u32,
+    pub composing: bool,
+    pub key_code: u32,
+    pub char_code: u32,
     pub data: Option<String>,
     pub input_type: String,
+    /// A `PointerEvent` made by script. `None`: the mouse of the window (`PointerData::MOUSE`).
+    pub pointer: Option<Box<PointerData>>,
+    /// Coordinates keep their fraction (a `PointerEvent`); a `MouseEvent` floors them, as Chrome does.
+    pub frac: bool,
+    /// `view` is the window.
+    pub view: bool,
+}
+
+/// The members of a `PointerEvent` that a `MouseEvent` lacks.
+#[derive(Clone)]
+pub(crate) struct PointerData {
+    pub id: i32,
+    pub width: f64,
+    pub height: f64,
+    pub pressure: f64,
+    pub tangential: f64,
+    pub tilt: (i32, i32),
+    pub twist: i32,
+    pub kind: String,
+    pub primary: bool,
 }
 
 /// State between window events.
@@ -101,16 +133,28 @@ pub(crate) struct UiState {
     hover: Option<NodeId>,
     down: Option<NodeId>,
     /// The last press: node, time and the count of fast presses in a row (`detail`).
-    last: Option<(NodeId, f64, u32)>,
+    pub(crate) last: Option<(NodeId, f64, u32)>,
     /// True while a window event runs: the events that the host makes (focus, `submit`) are then trusted.
     pub active: bool,
     /// Raised by each listener that runs and by each window event that can change what the page shows.
     pub epoch: u64,
+    /// The extra members of the four interfaces are defined (`browser_uievent.rs`).
+    pub ext: bool,
+    /// The last pointer position, and the move since it (`movementX`).
+    pub(crate) last_pos: Option<(f64, f64)>,
+    mv: (f64, f64),
+    /// Pointer capture (Pointer Events 3): the element that asked for it (pending), and the one that got `gotpointercapture`.
+    pub(crate) capture: Option<NodeId>,
+    pub(crate) captured: Option<NodeId>,
+    /// The buttons held, for `setPointerCapture` (it does nothing while none is down).
+    pub(crate) held: u16,
+    /// A listener canceled `pointerdown`: the mouse events of this press are not sent (Chrome), the `click` still is.
+    nomouse: bool,
 }
 
 // ------------------------------------------------------------------------------------------ getters
 
-fn with_ui<T>(d: &Dom, it: &mut Interp<'_>, this: Value, f: impl FnOnce(&EventState, &Ui) -> T) -> R<T> {
+pub(crate) fn with_ui<T>(d: &Dom, it: &mut Interp<'_>, this: Value, f: impl FnOnce(&EventState, &Ui) -> T) -> R<T> {
     let o = d.event_of(it, this)?;
     let st = d.st.borrow();
     let e = &st.events[&o];
@@ -138,29 +182,43 @@ macro_rules! flag {
     };
 }
 
-num!(client_x, |u| u.x.floor());
-num!(client_y, |u| u.y.floor());
+/// A coordinate as the event shows it: a `MouseEvent` floors it, a `PointerEvent` keeps the fraction.
+pub(crate) fn coord(v: f64, frac: bool) -> f64 {
+    if frac { v } else { v.floor() }
+}
+
+num!(client_x, |u| coord(u.x, u.frac));
+num!(client_y, |u| coord(u.y, u.frac));
+num!(screen_x, |u| coord(u.screen.0, u.frac));
+num!(screen_y, |u| coord(u.screen.1, u.frac));
+num!(page_x, |u| coord(u.page.0, u.frac));
+num!(page_y, |u| coord(u.page.1, u.frac));
 num!(button, |u| u.button);
 num!(buttons, |u| u.buttons);
 num!(detail, |u| u.detail);
-num!(pointer_id, |_u| 1);
-num!(location, |_u| 0);
-num!(key_code, |u| key_code_of(&u.key, &u.code));
+num!(pointer_id, |u| u.pointer.as_ref().map_or(PointerData::MOUSE.id, |p| p.id));
+num!(location, |u| u.location);
+num!(key_code, |u| u.key_code);
 flag!(shift, |u| u.mods.shift);
 flag!(ctrl, |u| u.mods.ctrl);
 flag!(alt, |u| u.mods.alt);
 flag!(meta, |u| u.mods.meta);
 flag!(repeat, |u| u.repeat);
-flag!(is_primary, |_u| true);
-flag!(is_composing, |_u| false);
+flag!(is_primary, |u| u.pointer.as_ref().map_or(PointerData::MOUSE.primary, |p| p.primary));
+flag!(is_composing, |u| u.composing);
+
+impl PointerData {
+    /// The mouse of the window: pointer 1, always primary. The pressure is the one of a button that is down.
+    pub(crate) const MOUSE: PointerData = PointerData { id: 1, width: 1.0, height: 1.0, pressure: 0.0, tangential: 0.0, tilt: (0, 0), twist: 0, kind: String::new(), primary: true };
+}
 
 pub(crate) fn related(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
     with_ui(d, it, this, |e, _| e.related)
 }
 
 pub(crate) fn pointer_type(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
-    with_ui(d, it, this, |_, _| ())?;
-    d.js_str(it, "mouse")
+    let k = with_ui(d, it, this, |_, u| u.pointer.as_ref().map_or("mouse".to_string(), |p| p.kind.clone()))?;
+    d.js_str(it, &k)
 }
 
 fn text_of(d: &Dom, it: &mut Interp<'_>, this: Value, f: impl FnOnce(&Ui) -> String) -> V {
@@ -195,6 +253,7 @@ fn key_code_of(key: &str, code: &str) -> u32 {
         "Enter" => 13,
         "Shift" => 16,
         "Control" => 17,
+        "Meta" => 91,
         "Alt" => 18,
         "Escape" => 27,
         " " => 32,
@@ -265,7 +324,10 @@ impl Dom {
 
     /// A `Ui` event at `target`. Gives whether it was not canceled.
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn fire_ui(&self, it: &mut Interp<'_>, target: NodeId, ty: &str, proto: ObjId, bubbles: bool, cancelable: bool, ui: Ui, related: Option<NodeId>) -> R<bool> {
+    pub(crate) fn fire_ui(&self, it: &mut Interp<'_>, target: NodeId, ty: &str, proto: ObjId, bubbles: bool, cancelable: bool, mut ui: Ui, related: Option<NodeId>) -> R<bool> {
+        self.ensure_ui_ext(it)?;
+        let sc = self.page_offset();
+        (ui.screen, ui.page, ui.view) = ((ui.x, ui.y), (ui.x + sc.0, ui.y + sc.1), true);
         let ev = self.new_event_proto(it, ty, bubbles, cancelable, true, proto)?;
         let rel = match related {
             Some(r) => self.wrap(it, r)?,
@@ -287,7 +349,8 @@ impl Dom {
         let pointer = ty.starts_with("pointer") || matches!(ty, "click" | "auxclick");
         let enter_leave = ty.ends_with("enter") || ty.ends_with("leave");
         let proto = if pointer { self.p().pointer } else { self.p().mouse };
-        let ui = Ui { x: p.x, y: p.y, button, buttons, detail, mods: p.mods, ..Ui::default() };
+        let movement = if ty.ends_with("move") { self.st.borrow().ui.mv } else { (0.0, 0.0) };
+        let ui = Ui { x: p.x, y: p.y, button, buttons, detail: detail as i32, mods: p.mods, movement, frac: ty.contains("pointer"), ..Ui::default() };
         self.fire_ui(it, target, ty, proto, !enter_leave, !enter_leave, ui, related)
     }
 
@@ -320,31 +383,78 @@ impl Dom {
     // ------------------------------------------------------------------ pointer
 
     pub(crate) fn ui_move(&self, it: &mut Interp<'_>, to: Option<NodeId>, p: &Pointer) -> R<()> {
-        let old = std::mem::replace(&mut self.st.borrow_mut().ui.hover, to);
-        if old != to {
-            let (oc, nc) = (self.chain(old), self.chain(to));
-            for (out, over, leave, enter, move_button) in [("pointerout", "pointerover", "pointerleave", "pointerenter", -1), ("mouseout", "mouseover", "mouseleave", "mouseenter", 0)] {
-                if let Some(o) = old {
-                    self.mouse_ev(it, o, out, p, move_button, p.buttons, 0, to)?;
-                }
-                for &n in oc.iter().filter(|n| !nc.contains(n)) {
-                    if self.has_listener(n, leave) {
-                        self.mouse_ev(it, n, leave, p, move_button, p.buttons, 0, to)?;
-                    }
-                }
-                if let Some(n) = to {
-                    self.mouse_ev(it, n, over, p, move_button, p.buttons, 0, old)?;
-                }
-                for &n in nc.iter().rev().filter(|n| !oc.contains(n)) {
-                    if self.has_listener(n, enter) {
-                        self.mouse_ev(it, n, enter, p, move_button, p.buttons, 0, old)?;
-                    }
-                }
-            }
+        let (captured, old) = {
+            let mut st = self.st.borrow_mut();
+            let last = st.ui.last_pos.replace((p.x, p.y));
+            st.ui.mv = last.map_or((0.0, 0.0), |l| (p.x - l.0, p.y - l.1));
+            (st.ui.capture, st.ui.hover)
+        };
+        self.capture_events(it, p, -1)?;
+        // A captured pointer has no boundary events: the moves go to the element that holds it.
+        let to = if captured.is_some() { captured } else { to };
+        if captured.is_none() {
+            self.st.borrow_mut().ui.hover = to;
+        }
+        if old != to && captured.is_none() {
+            self.pointer_boundary(it, old, to, p)?;
         }
         if let Some(t) = to {
             self.mouse_ev(it, t, "pointermove", p, -1, p.buttons, 0, None)?;
             self.mouse_ev(it, t, "mousemove", p, 0, p.buttons, 0, None)?;
+        }
+        Ok(())
+    }
+
+    /// The boundary events of a pointer that went from `old` to `to`, for the pointer and then the mouse: out, leave, over, enter.
+    fn pointer_boundary(&self, it: &mut Interp<'_>, old: Option<NodeId>, to: Option<NodeId>, p: &Pointer) -> R<()> {
+        let (oc, nc) = (self.chain(old), self.chain(to));
+        for (out, over, leave, enter, move_button) in [("pointerout", "pointerover", "pointerleave", "pointerenter", -1), ("mouseout", "mouseover", "mouseleave", "mouseenter", 0)] {
+            if let Some(o) = old {
+                self.mouse_ev(it, o, out, p, move_button, p.buttons, 0, to)?;
+            }
+            for &n in oc.iter().filter(|n| !nc.contains(n)) {
+                if self.has_listener(n, leave) {
+                    self.mouse_ev(it, n, leave, p, move_button, p.buttons, 0, to)?;
+                }
+            }
+            if let Some(n) = to {
+                self.mouse_ev(it, n, over, p, move_button, p.buttons, 0, old)?;
+            }
+            for &n in nc.iter().rev().filter(|n| !oc.contains(n)) {
+                if self.has_listener(n, enter) {
+                    self.mouse_ev(it, n, enter, p, move_button, p.buttons, 0, old)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// The pointer did not move, but the page under it changed: Chrome sends the boundary events (no move) to what is under it now.
+    pub(crate) fn ui_settle(&self, it: &mut Interp<'_>, to: Option<NodeId>, p: &Pointer) -> R<()> {
+        let old = self.st.borrow().ui.hover;
+        if old == to || self.st.borrow().ui.capture.is_some() {
+            return Ok(());
+        }
+        self.st.borrow_mut().ui.hover = to;
+        self.pointer_boundary(it, old, to, p)
+    }
+
+    /// The pointer capture steps (Pointer Events 3, "process pending pointer capture"): `lostpointercapture` at the old holder and
+    /// `gotpointercapture` at the new one, before the next pointer event. They carry the fields of that event (`button`).
+    fn capture_events(&self, it: &mut Interp<'_>, p: &Pointer, button: i16) -> R<()> {
+        let (want, have) = {
+            let st = self.st.borrow();
+            (st.ui.capture, st.ui.captured)
+        };
+        if want == have {
+            return Ok(());
+        }
+        self.st.borrow_mut().ui.captured = want;
+        for (ty, n) in [("lostpointercapture", have), ("gotpointercapture", want)] {
+            if let Some(n) = n {
+                let ui = Ui { x: p.x, y: p.y, button, buttons: p.buttons, mods: p.mods, frac: true, ..Ui::default() };
+                self.fire_ui(it, n, ty, self.p().pointer, true, false, ui, None)?;
+            }
         }
         Ok(())
     }
@@ -365,15 +475,16 @@ impl Dom {
     }
 
     pub(crate) fn ui_button(&self, it: &mut Interp<'_>, target: Option<NodeId>, p: &Pointer, button: u8, pressed: bool, caret: Option<u32>) -> R<()> {
-        let Some(t) = target else {
+        self.st.borrow_mut().ui.held = p.buttons;
+        let held = self.st.borrow().ui.capture;
+        let Some(t) = held.or(target) else {
             if !pressed {
                 self.st.borrow_mut().ui.down = None;
             }
             return Ok(());
         };
-        if self.is_disabled_control(it, t)? {
-            return Ok(());
-        }
+        // A disabled control gets the pointer events and none of the mouse events (Chrome).
+        let disabled = self.is_disabled_control(it, t)?;
         let b = button as i16;
         if pressed {
             let now = self.now_ms();
@@ -385,22 +496,38 @@ impl Dom {
                 self.st.borrow_mut().ui.last = Some((t, now, count));
             }
             self.st.borrow_mut().ui.down = Some(t);
-            if !self.mouse_ev(it, t, "pointerdown", p, b, p.buttons, 0, None)? {
+            self.capture_events(it, p, b)?;
+            let go = self.mouse_ev(it, t, "pointerdown", p, b, p.buttons, 0, None)?;
+            self.st.borrow_mut().ui.nomouse = !go;
+            if !go || disabled {
                 return Ok(());
             }
+            // The mouse events of a press go to the holder of the capture, if a listener of `pointerdown` set one.
+            let t = self.st.borrow().ui.capture.unwrap_or(t);
             if self.mouse_ev(it, t, "mousedown", p, b, p.buttons, count, None)? && button == 0 {
                 self.focus_by_press(it, t, caret)?;
             }
         } else {
             let down = self.st.borrow_mut().ui.down.take();
             let count = self.st.borrow().ui.last.map_or(1, |l| l.2);
+            self.capture_events(it, p, b)?;
             self.mouse_ev(it, t, "pointerup", p, b, p.buttons, 0, None)?;
-            self.mouse_ev(it, t, "mouseup", p, b, p.buttons, count, None)?;
+            if disabled {
+                self.st.borrow_mut().ui.capture = None;
+                return self.capture_events(it, p, b);
+            }
+            let t = self.st.borrow().ui.capture.unwrap_or(t);
+            if !std::mem::take(&mut self.st.borrow_mut().ui.nomouse) {
+                self.mouse_ev(it, t, "mouseup", p, b, p.buttons, count, None)?;
+            }
+            // After the pointer went up, the capture ends (`lostpointercapture`), before the `click`.
+            self.st.borrow_mut().ui.capture = None;
+            self.capture_events(it, p, b)?;
             let Some(d) = down else { return Ok(()) };
             // The click goes to the nearest common inclusive ancestor of the press and the release.
             let up = self.chain(Some(t));
             let Some(c) = self.chain(Some(d)).into_iter().find(|n| up.contains(n)) else { return Ok(()) };
-            let ui = Ui { x: p.x, y: p.y, button: b, buttons: p.buttons, detail: count, mods: p.mods, ..Ui::default() };
+            let ui = Ui { x: p.x, y: p.y, button: b, buttons: p.buttons, detail: count as i32, mods: p.mods, ..Ui::default() };
             if button == 0 {
                 self.user_click(it, c, Some(ui))?;
                 if count == 2 {
@@ -546,7 +673,16 @@ impl Dom {
     // ------------------------------------------------------------------ keyboard
 
     fn key_ev(&self, it: &mut Interp<'_>, target: NodeId, ty: &str, k: &KeyInput) -> R<bool> {
-        let ui = Ui { key: k.key.clone(), code: k.code.clone(), repeat: k.repeat, mods: k.mods, ..Ui::default() };
+        // keyCode: the legacy code of the key. A `keypress` carries the character instead (`charCode`, and `keyCode` the same).
+        let char_code = if ty == "keypress" { k.text.as_deref().and_then(|t| t.chars().next()).map_or(13, |c| c as u32) } else { 0 };
+        let key_code = if ty == "keypress" { char_code } else { key_code_of(&k.key, &k.code) };
+        let location = match k.code.as_str() {
+            c if c.ends_with("Left") && c.len() > 4 && !c.starts_with("Arrow") => 1,
+            c if c.ends_with("Right") && c.len() > 5 && !c.starts_with("Arrow") => 2,
+            c if c.starts_with("Numpad") => 3,
+            _ => 0,
+        };
+        let ui = Ui { key: k.key.clone(), code: k.code.clone(), repeat: k.repeat, mods: k.mods, location, key_code, char_code, ..Ui::default() };
         self.fire_ui(it, target, ty, self.p().keyboard, true, true, ui, None)
     }
 
@@ -669,7 +805,7 @@ impl Dom {
 
     /// Change the value of field `n` as `kind` says, with the events of Chrome.
     fn edit(&self, it: &mut Interp<'_>, n: NodeId, kind: &str, text: Option<&str>) -> R<()> {
-        let Some((sel, _)) = self.effective(None, n)? else { return Ok(()) };
+        let Some(sel) = self.edit_sel(n)? else { return Ok(()) };
         let value = self.input_value_of(n).unwrap_or_default();
         let (from, to) = match kind {
             _ if sel.start != sel.end => (sel.start, sel.end),
@@ -712,7 +848,7 @@ impl Dom {
             i.edited.get_or_insert(value);
             i.typed = true;
         }
-        self.set_selection_range(it, n, Some(caret), Some(caret), Dir::None)?;
+        self.select_text(it, n, Some(caret))?;
         self.input_ev(it, n, "input", kind, if text.is_empty() || kind == "insertLineBreak" { None } else { Some(text) })?;
         Ok(())
     }
@@ -857,7 +993,7 @@ impl Browser {
         })
     }
 
-    fn ui_call(&mut self, always: bool, f: impl FnOnce(&Dom, &mut Interp<'_>) -> R<()>) -> R<UiOutcome> {
+    pub(crate) fn ui_call(&mut self, always: bool, f: impl FnOnce(&Dom, &mut Interp<'_>) -> R<()>) -> R<UiOutcome> {
         let before = self.dom.st.borrow().ui.epoch;
         self.dom.st.borrow_mut().ui.active = true;
         let r = self.driven(f);

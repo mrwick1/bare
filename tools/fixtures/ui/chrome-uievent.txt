@@ -1,0 +1,47 @@
+mouse-interface	function,1,true,true,true,click,false,false,false,false,,0
+mouse-defaults	detail=0,screenX=0,screenY=0,clientX=0,clientY=0,pageX=0,pageY=0,x=0,y=0,movementX=0,movementY=0,button=0,buttons=0,relatedTarget=null,ctrlKey=false,shiftKey=false,altKey=false,metaKey=false
+mouse-init	detail=2,screenX=11,screenY=12,clientX=13,clientY=14,pageX=13,pageY=14,x=13,y=14,movementX=3,movementY=4,button=2,buttons=5,ctrlKey=true,shiftKey=true,altKey=true,metaKey=true|true|true|true|true|true
+mouse-fraction	clientX=10,clientY=-4,screenX=5,screenY=6,pageX=10,pageY=-4,x=10,y=-4,movementX=1
+mouse-coerce	clientX=7,detail=3,button=1,buttons=9,ctrlKey=true,shiftKey=true,altKey=false,metaKey=false
+mouse-no-args	TypeError: Failed to construct 'MouseEvent': 1 argument required, but only 0 present.
+mouse-bad-init	TypeError: Failed to construct 'MouseEvent': The provided value is not of type 'MouseEventInit'.
+mouse-bad-related	TypeError: Failed to construct 'MouseEvent': Failed to read the 'relatedTarget' property from 'MouseEventInit': Failed to convert value to 'EventTarget'.
+mouse-bad-view	TypeError: Failed to construct 'MouseEvent': Failed to read the 'view' property from 'UIEventInit': Failed to convert value to 'Window'.|ok null
+mouse-type-coerce	5,null,undefined
+mouse-modifier-state	Control=true,Shift=true,Alt=false,Meta=false,AltGraph=true,CapsLock=true,NumLock=true,Fn=true,ScrollLock=false,OS=false,Bogus=false,=false|TypeError: Failed to execute 'getModifierState' on 'MouseEvent': 1 argument required, but only 0 present.
+mouse-getters-on-event	TypeError: Illegal invocation|function|true|true|true
+mouse-dispatch	clientX=30,clientY=40,pageX=30,pageY=40,offsetX=20,offsetY=20,isTrusted=false|p|2|false
+mouse-dispatch-bubbles	d:d,doc:p:true
+mouse-prevent-default	true,false
+pointer-interface	function,1,true,true,true,true,true
+pointer-defaults	pointerId=0,width=1,height=1,pressure=0,tangentialPressure=0,tiltX=0,tiltY=0,twist=0,pointerType=,isPrimary=false,button=0,buttons=0,detail=0,clientX=0,screenX=0,pageX=0,x=0
+pointer-init	pointerId=7,width=20,height=30,pressure=0.5,tangentialPressure=0.25,tiltX=10,tiltY=-20,twist=90,pointerType=pen,isPrimary=true,button=0,buttons=1,clientX=3,clientY=4,ctrlKey=true,bubbles=true
+pointer-init-mouse-like	true,1,true
+pointer-fraction	clientX=10.5,clientY=20.25,pageX=10.5,x=10.5,y=20.25,width=2.5,pressure=2
+pointer-bad-type	5|bogus
+pointer-coalesced	function,0,function,0
+pointer-capture-errors	NotFoundError: Failed to execute 'setPointerCapture' on 'Element': No active pointer with the given id is found.|NotFoundError: Failed to execute 'releasePointerCapture' on 'Element': No active pointer with the given id is found.|ok false|NotFoundError: Failed to execute 'setPointerCapture' on 'Element': No active pointer with the given id is found.|TypeError: Failed to execute 'setPointerCapture' on 'Element': 1 argument required, but only 0 present.|TypeError: Failed to execute 'hasPointerCapture' on 'Element': 1 argument required, but only 0 present.|NotFoundError: Failed to execute 'setPointerCapture' on 'Element': No active pointer with the given id is found.
+pointer-capture-api	function,function,function,1,true,true,
+pointer-capture-synthetic	ok undefined|false
+keyboard-interface	function,1,true,true,true,false,false,false
+keyboard-defaults	key=,code=,location=0,repeat=false,isComposing=false,keyCode=0,charCode=0,which=0,ctrlKey=false,shiftKey=false,altKey=false,metaKey=false
+keyboard-init	key=a,code=KeyA,location=1,repeat=true,isComposing=true,keyCode=65,charCode=97,which=65,ctrlKey=true,shiftKey=true,altKey=true,metaKey=true,detail=4,bubbles=true,cancelable=true
+keyboard-which-init	0,0,13,13,0,13,0
+keyboard-constants	0,1,2,3,2
+keyboard-modifier-state	Shift=true,Control=false,CapsLock=true,NumLock=false
+keyboard-coerce	key=5,code=null,location=2,repeat=true
+keyboard-bad-init	TypeError: Failed to construct 'KeyboardEvent': 1 argument required, but only 0 present.|TypeError: Failed to construct 'KeyboardEvent': The provided value is not of type 'KeyboardEventInit'.
+keyboard-dispatch	x,,false,i,doc
+keyboard-dispatch-does-not-type	""
+keyboard-getters-on-event	TypeError: Illegal invocation
+input-interface	function,1,true,true,true,false,false,false
+input-defaults	,true,false,,0,function,0
+input-init	x,insertText,true,true,true,true,2
+input-data-coerce	5,,,,,
+input-dispatch	q,insertText,false,InputEvent,i
+input-bad	TypeError: Failed to construct 'InputEvent': 1 argument required, but only 0 present.
+input-getters-on-event	TypeError: Illegal invocation
+react-like-mouse-copy	screenX:number,screenY:number,clientX:number,clientY:number,pageX:number,pageY:number,ctrlKey:boolean,shiftKey:boolean,altKey:boolean,metaKey:boolean,getModifierState:function,button:number,buttons:number,relatedTarget:object,movementX:number,movementY:number,pointerId:number,width:number,height:number,pressure:number,tangentialPressure:number,tiltX:number,tiltY:number,twist:number,pointerType:string,isPrimary:boolean
+pointer-capture-detached	InvalidStateError: Failed to execute 'setPointerCapture' on 'Element': InvalidStateError|ok false|ok undefined
+pointer-capture-release-not-captured	ok undefined
+input-type-known	insertText,insertReplacementText,insertLineBreak,insertParagraph,insertOrderedList,insertUnorderedList,insertHorizontalRule,insertFromYank,insertFromDrop,insertFromPaste,insertTranspose,insertCompositionText,insertLink,deleteWordBackward,deleteWordForward,deleteSoftLineBackward,deleteSoftLineForward,deleteHardLineBackward,deleteHardLineForward,deleteByDrag,deleteByCut,deleteContentBackward,deleteContentForward,historyUndo,historyRedo,formatBold,formatItalic,formatUnderline,formatStrikeThrough,formatSuperscript,formatSubscript,formatJustifyFull,formatJustifyCenter,formatJustifyRight,formatJustifyLeft,formatIndent,formatOutdent,formatRemove,formatSetBlockTextDirection

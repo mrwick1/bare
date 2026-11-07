@@ -469,9 +469,10 @@ fn enter_submits_a_form_with_one_field_and_no_button() {
 fn a_disabled_button_is_not_clicked() {
     big(|| {
         let mut d = Driver::new(r#"<body><button id="b" disabled style="position:absolute;left:0;top:0;width:100px;height:20px">x</button></body>"#);
-        d.js("window.n = 0; ['pointerdown','mousedown','click'].forEach(function (t) { document.addEventListener(t, function () { window.n++; }, true); });");
+        d.js("window.n = []; ['pointerdown','mousedown','mouseup','click','pointerup'].forEach(function (t) { document.addEventListener(t, function () { window.n.push(t); }, true); });");
         d.click((10.0, 10.0));
-        assert_eq!(d.js("window.n"), "0");
+        // Chrome: the pointer events reach a disabled control, the mouse events and the click do not.
+        assert_eq!(d.js("window.n.join()"), "pointerdown,pointerup");
     });
 }
 
@@ -486,10 +487,10 @@ fn window_events_are_trusted_and_script_events_are_not() {
 }
 
 #[test]
-fn script_cannot_construct_a_window_event() {
+fn script_can_construct_a_window_event_but_it_is_not_trusted() {
     big(|| {
         let mut d = Driver::new(FORM);
-        assert_eq!(d.js("try { new MouseEvent('click'); 'made' } catch (e) { e.name }"), "TypeError");
+        assert_eq!(d.js("try { new MouseEvent('click').isTrusted } catch (e) { e.name }"), "false");
         assert_eq!(d.js("Object.getPrototypeOf(PointerEvent.prototype) === MouseEvent.prototype"), "true");
     });
 }

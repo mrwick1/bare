@@ -166,6 +166,25 @@ impl Dom {
         Ok(Some((within(stored, len, area), len)))
     }
 
+    /// The range that typing replaces. A field that selection does not apply to (`email`, `number`) still has one inside, kept only
+    /// here: the caret at the end, or all of the text after `select_text`. `None`: not a field that the user can edit.
+    pub(crate) fn edit_sel(&self, n: NodeId) -> R<Option<Sel>> {
+        if let Some((s, _)) = self.effective(None, n)? {
+            return Ok(Some(s));
+        }
+        let Some(len) = self.with_input_value(n, utf16_len) else { return Ok(None) };
+        Ok(Some(within(self.st.borrow().inputs.get(&n).and_then(|i| i.sel), len, false)))
+    }
+
+    /// Put the caret at `at` (UTF-16 units) in a field, or select all its text when `at` is `None`. Works for the fields of `edit_sel`.
+    pub(crate) fn select_text(&self, it: &mut Interp<'_>, n: NodeId, at: Option<u32>) -> R<()> {
+        if self.selection_applies(n) {
+            return self.set_selection_range(it, n, Some(at.unwrap_or(0)), Some(at.unwrap_or(u32::MAX)), Dir::None);
+        }
+        self.st.borrow_mut().inputs.entry(n).or_default().sel = Some(Sel { start: at.unwrap_or(0), end: at.unwrap_or(u32::MAX), dir: Dir::None });
+        Ok(())
+    }
+
     /// Would the value `new` move the selection of this text control? Used before a value write. Pays for the
     /// scan of the old value and of `new` (see `effective`). False when selection does not apply.
     pub(crate) fn selection_after_value(&self, mut it: Option<&mut Interp<'_>>, n: NodeId, new: &str) -> R<bool> {

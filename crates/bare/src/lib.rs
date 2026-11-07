@@ -17,6 +17,8 @@ mod browser_submit;
 #[cfg(test)]
 mod browser_submit_tests;
 pub mod browser_ui;
+mod browser_drive;
+mod browser_uievent;
 pub mod page;
 #[cfg(test)]
 mod browser_ui_tests;
@@ -125,6 +127,10 @@ mod browser_lazy;
 mod browser_mutation;
 #[cfg(test)]
 mod browser_topic_tests;
+#[cfg(test)]
+mod browser_drive_tests;
+#[cfg(test)]
+mod browser_uievent_tests;
 #[cfg(test)]
 mod browser_raf_tests;
 #[cfg(test)]

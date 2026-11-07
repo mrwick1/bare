@@ -20,7 +20,7 @@
 //!
 //! Focus fixup (HTML "focus fixup rule"): when the focused element is no longer a focusable area (removed from the
 //! document, disabled, `hidden`, `inert`, ...), the focused area is the viewport and `activeElement` is the body. No
-//! `blur` or `focusout` is fired. The check runs when the focus state is read (`activeElement`, `focus`, `blur`, the
+//! `blur` or `focusout` is fired. (Only the move of focus that follows, while the element is still connected, sends them to it: Chrome does.) The check runs when the focus state is read (`activeElement`, `focus`, `blur`, the
 //! driver), not at each mutation: an element that was disabled and enabled again with no read in between stays focused.
 //!
 //! Focusable area policy (explicit, from the DOM and the UA stylesheet facts that exist here). An element is a
@@ -194,7 +194,13 @@ impl Dom {
     }
 
     fn move_focus_inner(&self, it: &mut Interp<'_>, to: Option<NodeId>) -> R<()> {
-        let old = self.current_focus(it)?;
+        // An element that is still connected but cannot take focus now (hidden, disabled) still gets its `blur` (Chrome 155, checked with
+        // `tools/fixtures/ui/drive.html`): the fixup rule does not run before this move. A removed element does not (see the fixup above).
+        let raw = self.st.borrow().focus.node;
+        let old = match raw {
+            Some(n) if self.is_connected_node(it, n)? => raw,
+            _ => self.current_focus(it)?,
+        };
         if old == to {
             return Ok(());
         }
