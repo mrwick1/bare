@@ -357,7 +357,11 @@ fn show_interactive(url: &str, viewport: (f32, f32)) -> i32 {
             }
         };
         let config = bare_window::Config { title: format!("bare: {url}"), app_id: "bare".into(), size };
-        match bare_window::Window::open(&config).and_then(|w| w.run(&mut page)) {
+        let opened = bare_window::Window::open(&config).inspect(|w| {
+            let waker = w.waker();
+            page.wake_on_done(move || waker.wake());
+        });
+        match opened.and_then(|w| w.run(&mut page)) {
             Ok(stats) => {
                 if std::env::var_os("BARE_WINDOW_STATS").is_some() {
                     eprintln!("{stats:?}, first frame {:?}", page.first_frame);

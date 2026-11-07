@@ -535,6 +535,8 @@ impl Remote {
                     Err(e) => return fail(format!("window: {e}"), &ready_tx),
                 };
                 let (tx, rx) = mpsc::channel();
+                let waker = window.waker();
+                page.wake_on_done(move || waker.wake());
                 let mut host = Hosted { page, rx, ready: Some(ready_tx.clone()), jobs: Some((tx, window.waker())) };
                 if let Err(e) = window.run(&mut host) {
                     fail(format!("window: {e}"), &ready_tx);
