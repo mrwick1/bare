@@ -2343,3 +2343,43 @@ Checks:
 - All `tools/js/*_check.sh` scripts pass. `parse_check.sh` needs `ACORN=` to name a local `acorn.mjs`.
 
 Not tested: a machine other than archMachine; wall time; scale 100 of the load rows; a live page other than the typing page.
+
+## Input that does not wait for the network (S5)
+
+On 2026-11-07, `Page::after` ran the page to the settle after each input event. A key or a click blocked until all replies and the link prefetches were done. The window and `bare-drive` now run a live session: an input runs its listeners, the microtasks and the due tasks, and returns. Replies, timers, dynamic scripts and the next document go on in `Page::tick`, in slices of 8 ms. The choices are in [decisions.md](decisions.md#input-that-does-not-wait).
+
+Changes:
+- `crates/net/src/parallel.rs`: `Task::done`.
+- `crates/bare/src/browser_fetch.rs`: live mode. Each queued request starts on a worker at once. A turn settles only the replies that are in.
+- `crates/bare/src/browser_loader.rs`: the downloads of the page stay from one turn to the next. After `load`, a dynamic script that is not in waits in the queue, and a turn stops after 8 ms of work and never sleeps.
+- `crates/bare/src/browser_session.rs`: `SessionConfig::live`, and the next document downloads on a worker while the old one stays.
+- `crates/bare/src/page.rs`: `Page::tick` runs one turn and asks to be called again at once (work left) or in 4 ms (a reply or a document in flight).
+
+Tests (each failed before the change): `crates/drive/tests/nonblocking.rs`, against a loopback server that answers after 500 ms.
+- A click that starts the slow fetch returned in 501 ms; now under 50 ms. A second click is handled before the reply, and the text arrives later through `tick`. After that the page is idle (`tick` gives `None`).
+- Typing 20 characters with a fetch in each `input` listener took 10.0 s; now under 500 ms, and the 20 replies arrive later.
+- A link to a document that takes 500 ms: the click returns under 50 ms, the old document stays until the new one is in.
+- A driver journey: the click steps take under 50 ms, and the `expect` on the fetched text waits for the reply.
+- `browser_submit_tests`: three tests now tick until the page is idle after a submit, a link or a traversal, because the next document loads in the background.
+
+Live staging, `bare-drive` with the masked runner, read only, `tools/drive` flow `drive-journey.steps`. Load average 2.4 to 6.0. Times in ms, the sum of the steps of each group (`shot` steps are not counted). Chrome: 3 runs of an earlier measurement.
+
+| Group | bare before (2 runs) | bare after (3 runs) | bare after, `--window` (1 run) | Chrome (3 runs) |
+| --- | --- | --- | --- | --- |
+| open `/` to login | 761-793 | 765-795 | 723 | 1020-1027 |
+| login (type, submit, form gone) | 2394-3642 | 906-1355 | 1061 | 627-734 |
+| overview data | 25-31 | 119-361 | 175 | 56-69 |
+| agents | 960-1068 | 667-1075 | 842 | 355-396 |
+| search | 1291-1579 | 616-910 | 675 | 394-422 |
+| reload | 1549-1625 | 995-1363 | 909 | 656-844 |
+| sign out | 578-703 | 390-596 | 520 | 197 |
+| agents without session | 713-753 | 758-804 | 666 | 248 |
+| total | 8344-10201 | 5301-7134 | 5620 | 3100-3700 |
+
+The submit click went from 1801 ms to 14 to 21 ms. The time moved to the `expect` steps after it, which pass when the data is on screen and not when the prefetches end. "overview data" grew because the prefetch work of the login now runs during that step and not inside the click. All runs passed (exit 0). A scan of all output files found neither the email nor the password.
+
+Checks:
+- `cargo test --release --workspace`: 44 test binaries, 2,875 passed, 0 failed.
+- `tools/js/cost_matrix.sh`, 805 rows, base origin/main 16b5c83. Mean change: glibc -0.002%. Two rows are over +0.5% under both allocators: `dataset_load keys 10000 50` (+0.55%, +0.53%) and `dataset_load keys 1000 50` (+0.52%, +0.51%). The counts are the same on each run (4 runs: 395.47 M base, 397.47 M new). The example runs only `run_script` on one `Browser`. It does not run the loader, `fetch` or the session. The machine code of its hot functions (`browser_dataset::matches`, `named_has`, `fill`) is the same in both binaries, but `matches` runs more often. Hypothesis: a cache in the JS engine whose hits depend on the code addresses of the binary. Boxing the kept downloads (`Box<Net>`) did not change the counts. After two attempts the rows still failed. Arjun approved the merge on 2026-11-07 with both rows listed here as a code-layout effect, not as a cost of this change.
+
+Not tested: a page that adds style sheets or preloads after `load` (they still load inside the turn); a slow document with many classic scripts (they run in one turn); HiDPI; arjun-e16; idle CPU of the window measured with a clock (only `tick` giving `None` is tested); a long-poll or streaming request (the window wakes every 4 ms while it is in flight).

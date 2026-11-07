@@ -105,6 +105,11 @@ enum Slot<R> {
 pub struct Task<R>(Arc<(Mutex<Slot<R>>, Condvar)>);
 
 impl<R> Task<R> {
+    /// Has the job ended (with a result, or lost)? Then `wait` does not block.
+    pub fn done(&self) -> bool {
+        !matches!(*self.0.0.lock().unwrap(), Slot::Waiting)
+    }
+
     /// Wait for the result. `None` when the job was lost (it panicked, or no thread could start).
     pub fn wait(self) -> Option<R> {
         let (slot, ready) = &*self.0;

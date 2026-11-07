@@ -308,6 +308,8 @@ impl Page {
         cfg.limits.max_rounds = usize::MAX;
         // Wait for no timer that is not due: the window cannot sleep inside an event.
         cfg.page.quiet = Duration::ZERO;
+        // An input event or a tick is one turn of the event loop: it waits for no reply and no next document.
+        cfg.live = true;
         let mut s = Session::new(cfg);
         if let SessionStop::LoadFailed(why) = s.run().stop {
             return Err(format!("{url}: {why}"));
@@ -416,18 +418,33 @@ impl Page {
     /// Run the tasks that are due now (timers, animation frames, and the `fetch` calls and navigations that they start), as a browser
     /// does between input events. Gives whether a task ran (the next frame checks the render key then) and when the next task is due.
     /// `None`: no task is queued, or the page stopped for good (a fatal error), so only an input event can change it.
+    /// A live page (a session) runs one slice of work in a tick, and a reply or a next document that is on its way is queued work: the
+    /// tick asks to be called again in `POLL`.
     pub fn tick(&mut self) -> (bool, Option<Instant>) {
-        let stopped = match &self.source {
-            Source::Session(s) => s.ended().is_some(),
-            Source::Browser(b) => b.sched_stats().halted,
-        };
-        let Some(b) = self.browser().filter(|_| !stopped) else { return (false, None) };
-        let ran = b.next_scheduled_due().is_some_and(|d| d <= b.now()) || b.pending_fetches() > 0;
+        let ran = self.work().0;
         if ran {
             self.settle();
         }
-        let wait = self.browser().and_then(|b| b.next_scheduled_due().map(|d| (d - b.now()).max(0.0)));
-        (ran, wait.map(|ms| Instant::now() + Duration::from_secs_f64(ms / 1000.0)))
+        let (now, next) = self.work();
+        (ran, if now { Some(Instant::now()) } else { next })
+    }
+
+    /// Can a tick do something now, and when is the next task due (or the next look at the network)?
+    fn work(&mut self) -> (bool, Option<Instant>) {
+        const POLL: Duration = Duration::from_millis(4);
+        let (stopped, loading) = match &self.source {
+            Source::Session(s) => (s.ended().is_some(), s.loading()),
+            Source::Browser(b) => (b.sched_stats().halted, None),
+        };
+        if let Some(done) = loading {
+            return (done, Some(Instant::now() + POLL));
+        }
+        let Some(b) = self.browser().filter(|_| !stopped) else { return (false, None) };
+        let (due, now) = (b.next_scheduled_due(), b.now());
+        let net = if b.live() { b.live_work() } else { (b.pending_fetches() > 0).then_some(true) };
+        let at = due.map(|d| Instant::now() + Duration::from_secs_f64((d - now).max(0.0) / 1000.0));
+        let at = if net == Some(false) { Some(at.map_or(Instant::now() + POLL, |a| a.min(Instant::now() + POLL))) } else { at };
+        (due.is_some_and(|d| d <= now) || net == Some(true), at)
     }
 
     /// A new cascade, and a new layout unless only values that layout does not read changed. `refresh` could not update the frame.

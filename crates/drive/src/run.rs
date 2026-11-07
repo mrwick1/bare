@@ -1,6 +1,6 @@
 //! Run the steps. Each step is tried, and tried again until it passes or its time limit ends: between tries the driver runs the tasks of
 //! the page that are due (`Page::tick`) and sleeps until the next one, so a step waits for a condition and never for a fixed time. When
-//! no task is queued, nothing can change the page (the network calls run inside the tasks), so the step fails at once.
+//! no task is queued and no reply or document is on its way, nothing can change the page, so the step fails at once.
 //!
 //! Failure kinds: `not_found`, `duplicate` (a locator must match one element), `hidden`, `disabled`, `covered`, `detached` (it matched,
 //! then left the document), `not_editable`, `no_focus`, `expect` (a check was false), `page` (a load failed, the page stopped or has no

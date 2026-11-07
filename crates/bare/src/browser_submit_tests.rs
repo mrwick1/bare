@@ -57,6 +57,20 @@ fn eval(p: &mut Page, src: &str) -> String {
     b.it.display(v)
 }
 
+/// Run the page until nothing is queued: a navigation that an input starts loads its document in later ticks (`SessionConfig::live`).
+fn idle(p: &mut Page) {
+    let end = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        let (ran, next) = p.tick();
+        assert!(std::time::Instant::now() < end, "the page did not become idle");
+        match next {
+            None if !ran => return,
+            Some(at) if !ran => std::thread::sleep(at.saturating_duration_since(std::time::Instant::now())),
+            _ => {}
+        }
+    }
+}
+
 const FIELD: &str = "position:absolute;left:10px;top:10px;width:100px;height:20px";
 
 #[test]
@@ -131,6 +145,7 @@ fn enter_in_a_field_submits_and_an_invalid_field_does_not() {
         assert_eq!(eval(&mut p, "document.activeElement.id"), "q");
         type_text(&mut p, "hi");
         press(&mut p, "Enter", "Enter", Some("\r"), NO);
+        idle(&mut p);
         assert_eq!(srv.hits("/s?q=hi"), 1);
         assert!(eval(&mut p, "location.href").ends_with("/s?q=hi"));
         assert!(p.paint().iter().any(|&c| c != 0xFFFF_FFFF), "the new document is drawn");
@@ -194,15 +209,18 @@ fn a_form_post_sends_its_body_once_and_back_does_not_resend_it() {
         });
         let mut p = Page::open(&srv.url("/"), (400, 300)).expect("page");
         click_at(&mut p, 20.0, 110.0);
+        idle(&mut p);
         let sent: Vec<String> = srv.heads.lock().unwrap().iter().filter(|h| h.starts_with("post /post")).cloned().collect();
         assert_eq!(sent.len(), 1, "one POST");
         assert!(sent[0].contains("content-type: application/x-www-form-urlencoded") && sent[0].ends_with("q=x%26y&go=ok"), "{}", sent[0]);
         assert!(eval(&mut p, "location.pathname").ends_with("/post"));
         // Back loads the first page again with a GET. Forward would resend the POST: nothing happens.
         press(&mut p, "ArrowLeft", "ArrowLeft", None, Mods { alt: true, ..NO });
+        idle(&mut p);
         assert_eq!(eval(&mut p, "location.pathname"), "/");
         assert_eq!(srv.hits("/"), 2);
         press(&mut p, "ArrowRight", "ArrowRight", None, Mods { alt: true, ..NO });
+        idle(&mut p);
         assert_eq!(eval(&mut p, "location.pathname"), "/");
         assert_eq!(srv.heads.lock().unwrap().iter().filter(|h| h.starts_with("post /post")).count(), 1, "the body is never sent twice");
     });
@@ -220,19 +238,23 @@ fn back_and_forward_move_along_the_documents_and_restore_the_scroll() {
         p.handle(Event::Wheel { x: 100.0, y: 100.0, dx: 0.0, dy: 300.0, mods: NO });
         assert_eq!(eval(&mut p, "scrollY"), "300");
         click_at(&mut p, 5.0, 8.0); // the fixed link
+        idle(&mut p);
         assert_eq!(eval(&mut p, "location.pathname"), "/b");
         // The back button of the mouse, then the forward one.
         for (button, want) in [(3u8, "/"), (4, "/b")] {
             for pressed in [true, false] {
                 p.handle(Event::PointerButton { x: 5.0, y: 5.0, button, buttons: if pressed { 8 } else { 0 }, pressed, mods: NO });
             }
+            idle(&mut p);
             assert_eq!(eval(&mut p, "location.pathname"), want);
         }
         p.handle(Event::Key { key: "ArrowLeft".into(), code: "ArrowLeft", pressed: true, repeat: false, text: None, mods: Mods { alt: true, ..NO } });
+        idle(&mut p);
         assert_eq!(eval(&mut p, "location.pathname + ',' + scrollY"), "/,300", "the scroll of the first page came back");
         assert_eq!((srv.hits("/"), srv.hits("/b")), (3, 2));
         // Before the first document there is nothing: the page stays.
         press(&mut p, "ArrowLeft", "ArrowLeft", None, Mods { alt: true, ..NO });
+        idle(&mut p);
         assert_eq!(eval(&mut p, "location.pathname"), "/");
     });
 }

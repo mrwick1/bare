@@ -304,6 +304,8 @@ pub(crate) struct Scripts {
     sheets: RefCell<sheets::Sheets>,
     /// `<link rel=preload>` results and the preloaded script texts. Lives as long as the document.
     preloads: RefCell<preload::Preloads>,
+    /// Live: the downloads of the page, kept from one turn to the next (a script that is not in yet waits here).
+    net: RefCell<Option<Box<Net>>>,
 }
 
 impl Dom {
@@ -727,10 +729,12 @@ impl Browser {
         let started = Instant::now();
         bare_net::trace::page_start();
         let deadline = deadline_after(cfg.limits.max_time);
+        let live = self.live();
         let mut run = Run {
             b: self,
             dom: dom.clone(),
             net: Net::new(cfg.client),
+            slice: live.then(|| Instant::now() + SLICE),
             cursor: 0,
             https_only: page.scheme == bare_url::Scheme::Https,
             lim: cfg.limits,
@@ -746,7 +750,10 @@ impl Browser {
             probed: false,
         };
         let stop = run.go();
-        let mut res = run.res;
+        let Run { mut res, net, .. } = run;
+        if live {
+            *dom.scripts.net.borrow_mut() = Some(Box::new(net));
+        }
         res.css = dom.scripts.sheets.borrow().stats;
         res.preload = dom.scripts.preloads.borrow().stats;
         dom.scripts.page_spent.set((res.tasks, res.rounds, started.elapsed()));
@@ -787,10 +794,13 @@ impl Browser {
             res.stop = Stop::Fatal(Fatal::Setup("resume needs a page that ran".into()));
             return res;
         };
+        let live = self.live();
+        let net = if live { dom.scripts.net.borrow_mut().take() } else { None };
         let mut run = Run {
             b: self,
             dom: dom.clone(),
-            net: Net::new(client),
+            net: net.map_or_else(|| Net::new(client), |n| *n),
+            slice: live.then(|| Instant::now() + SLICE),
             cursor: 0,
             https_only: page.scheme == bare_url::Scheme::Https,
             deadline: deadline_after(limits.max_time),
@@ -806,7 +816,10 @@ impl Browser {
             probed: false,
         };
         let stop = run.resume(steps).err().unwrap_or(Stop::Settled);
-        let mut res = run.res;
+        let Run { mut res, net, .. } = run;
+        if live {
+            *dom.scripts.net.borrow_mut() = Some(Box::new(net));
+        }
         res.css = dom.scripts.sheets.borrow().stats;
         res.preload = dom.scripts.preloads.borrow().stats;
         dom.scripts.page_spent.set((spent.0.saturating_add(res.tasks), spent.1.saturating_add(res.rounds), spent.2.saturating_add(started.elapsed())));
@@ -820,6 +833,34 @@ impl Browser {
         res.stop = stop;
         res.ready_state = ["loading", "interactive", "complete"][dom.scripts.ready.get() as usize];
         res
+    }
+}
+
+/// The most work that one live turn does before it gives the thread back (to the input events and the frame), once the page has loaded.
+const SLICE: Duration = Duration::from_millis(8);
+
+impl Browser {
+    /// Is the page live (`Session` with `live`)? Then a turn waits for no reply.
+    pub(crate) fn live(&self) -> bool {
+        self.dom.fetch.live.get()
+    }
+
+    /// Live: can a turn do something now (`Some(true)`: a reply or a script is in, a queued request has not started, a script or a
+    /// traversal task waits), or does the page wait for the network only (`Some(false)`)? `None`: nothing waits but the timers.
+    pub(crate) fn live_work(&self) -> Option<bool> {
+        let s = &self.dom.scripts;
+        if !s.inline.borrow().is_empty() || self.navigation_stats().pending_tasks > 0 {
+            return Some(true);
+        }
+        let script = s.external.borrow().front().map(|e| match e {
+            Ext::Fail(_) => true,
+            Ext::Fetch(_, u) => s.net.borrow().as_ref().and_then(|n| n.started.get(&Net::key(Expect::Script, u))).is_none_or(|t| t.done()),
+        });
+        match (self.fetch_ready(), script) {
+            (Some(true), _) | (_, Some(true)) => Some(true),
+            (None, None) => None,
+            _ => Some(false),
+        }
     }
 }
 
@@ -926,6 +967,8 @@ struct Run<'a> {
     b: &'a mut Browser,
     dom: Rc<Dom>,
     net: Net,
+    /// Live: when the turn gives the thread back. It counts only after `load` (the scripts of the document run in one turn).
+    slice: Option<Instant>,
     /// The next target of `disc.targets` that `prefetch` looks at.
     cursor: usize,
     https_only: bool,
@@ -1172,6 +1215,9 @@ impl Run<'_> {
     /// One queued dynamic external script. Gives false when none is queued.
     fn run_dynamic(&mut self) -> Result<bool, Stop> {
         self.prefetch();
+        if self.slice.is_some() && self.loaded && self.live_wait() {
+            return Ok(false);
+        }
         let next = self.dom.scripts.external.borrow_mut().pop_front();
         let Some(next) = next else { return Ok(false) };
         self.budget()?;
@@ -1195,6 +1241,32 @@ impl Run<'_> {
             }
         }
         Ok(true)
+    }
+
+    /// Live, after `load`: start the downloads of the queued dynamic scripts, and say whether the first one is still on its way. Then it
+    /// waits in the queue for a later turn, and the scripts after it too (they run in the order of the queue).
+    fn live_wait(&mut self) -> bool {
+        let kept = self.kept();
+        let first = {
+            let (ext, pre) = (self.dom.scripts.external.borrow(), self.dom.scripts.preloads.borrow());
+            let mut room = self.lim.resources.max_fetches.saturating_sub(self.res.fetches);
+            for e in ext.iter().take(WINDOW) {
+                if let Ext::Fetch(_, u) = e && room > 0 && !pre.has_script(u) && !(self.https_only && u.scheme == bare_url::Scheme::Http) {
+                    room -= 1;
+                    self.net.start(Expect::Script, u, &self.lim.resources, self.deadline, kept);
+                }
+            }
+            match ext.front() {
+                Some(Ext::Fetch(_, u)) => Some(Net::key(Expect::Script, u)),
+                _ => None,
+            }
+        };
+        first.is_some_and(|k| self.net.started.get(&k).is_some_and(|t| !t.done()))
+    }
+
+    /// Live: the slice of the turn is used up.
+    fn sliced(&self) -> bool {
+        self.loaded && self.slice.is_some_and(|end| Instant::now() >= end)
     }
 
     /// The inputs, one task each, then the rounds. A navigation that an input queued ends the run before the next input.
@@ -1231,7 +1303,8 @@ impl Run<'_> {
             self.after_js()?;
         }
         let stop = self.rounds().unwrap_err();
-        if stop == Stop::Settled && self.res.tasks > 0
+        // Live: the rounds collect when the heap asks (`gc_due`); a collect after each turn would cost more than the turn.
+        if stop == Stop::Settled && self.res.tasks > 0 && self.slice.is_none()
             && let Err(e) = self.b.collect(&[]) {
             return Err(self.fatal(e, "collect"));
         }
@@ -1333,6 +1406,9 @@ impl Run<'_> {
             if self.res.rounds >= self.lim.max_rounds {
                 return Err(Stop::RoundBudget);
             }
+            if self.sliced() {
+                return Err(Stop::Settled);
+            }
             self.res.rounds += 1;
             self.budget()?;
             self.feed_if_ran()?;
@@ -1346,6 +1422,9 @@ impl Run<'_> {
                 did += 1;
             }
             for _ in 0..batch {
+                if self.sliced() {
+                    break;
+                }
                 if let Some(p) = self.async_queue.pop_front() {
                     self.run_parsed(p)?;
                 } else if !self.run_dynamic()? {
@@ -1354,7 +1433,7 @@ impl Run<'_> {
                 did += 1;
             }
             for _ in 0..batch {
-                if self.b.pending_fetches() == 0 {
+                if self.b.pending_fetches() == 0 || self.sliced() {
                     break;
                 }
                 self.budget()?;
@@ -1367,6 +1446,9 @@ impl Run<'_> {
                 }
             }
             for _ in 0..batch {
+                if self.sliced() {
+                    break;
+                }
                 self.budget()?;
                 let pump = self.b.run_scheduled_tasks(1).map_err(fatal_of)?;
                 if pump.ran == 0 {
@@ -1394,6 +1476,10 @@ impl Run<'_> {
                     self.probe();
                 }
                 continue;
+            }
+            // Live: never wait. The window loop and the driver call again when a task is due or a reply is in.
+            if self.slice.is_some() && self.loaded {
+                return Err(Stop::Settled);
             }
             // Idle: wait for the next task if one that blocks the settle is near, else the page is settled. The wait is
             // for the next task of any kind, so a recurring timer that the rule skips still runs on time on the way.

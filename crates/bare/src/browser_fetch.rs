@@ -423,11 +423,14 @@ pub(crate) struct Fetch {
     protos: OnceCell<[ObjId; 6]>,
     fixed: RefCell<Vec<ObjId>>,
     pub(crate) json_parse: Cell<Option<Value>>,
+    /// Live (the window and the control interface): each request starts on a worker at once, and `run_network_tasks` takes only the
+    /// replies that are in. Off: a request that is not in is waited for (a test or a headless run settles the page).
+    pub(crate) live: Cell<bool>,
 }
 
 impl Default for Fetch {
     fn default() -> Fetch {
-        Fetch { st: RefCell::default(), lim: Cell::new(FetchLimits::default()), client: RefCell::new(Client::new()), protos: OnceCell::new(), fixed: RefCell::default(), json_parse: Cell::new(None) }
+        Fetch { st: RefCell::default(), lim: Cell::new(FetchLimits::default()), client: RefCell::new(Client::new()), protos: OnceCell::new(), fixed: RefCell::default(), json_parse: Cell::new(None), live: Cell::new(false) }
     }
 }
 
@@ -1815,6 +1818,13 @@ impl Browser {
         self.dom.fetch.st.borrow().queue.len()
     }
 
+    /// Can the first queued request settle now without a wait? `None`: none is queued. `Some(false)`: its reply is not in yet.
+    /// A request that has not started counts as ready: its turn starts it.
+    pub(crate) fn fetch_ready(&self) -> Option<bool> {
+        let st = self.dom.fetch.st.borrow();
+        st.queue.front().map(|p| p.started.as_ref().is_none_or(|t| t.done()))
+    }
+
     /// Run up to `max` queued requests, oldest first. Each one does its blocking I/O, settles its promise and runs a microtask
     /// checkpoint, so a callback may queue the next request: it runs in this call if `max` allows. Returns how many ran.
     /// A `Limit` ends the call (the VM is then unusable, as for any other limit).
@@ -1832,19 +1842,21 @@ impl Browser {
     /// turn hold `max_retained` bytes; the page thread sends it at its turn. So the result does not change, only the time.
     /// A request that is not a GET or a HEAD may change the server. It runs when all before it are done, on the thread that settles
     /// it (a worker gains nothing: nothing after it starts before it is done), so the server sees these requests in the order of the script.
+    /// Live: every queued request starts at once, also one alone; a request that is not a GET or a HEAD starts when it is first.
     fn start_queued(&self) {
-        if self.dom.fetch.st.borrow().queue.len() < 2 {
+        let live = self.dom.fetch.live.get();
+        if !live && self.dom.fetch.st.borrow().queue.len() < 2 {
             // One request alone gains nothing from a worker thread: this thread makes it.
             return;
         }
         let (lim, client) = (self.dom.fl(), self.dom.fetch.client.borrow());
-        if !client.parallel_pays() {
+        if !live && !client.parallel_pays() {
             return;
         }
         let mut st = self.dom.fetch.st.borrow_mut();
         let st = &mut *st;
-        for p in st.queue.iter_mut().take(AHEAD) {
-            if !p.method.safe() {
+        for (i, p) in st.queue.iter_mut().take(AHEAD).enumerate() {
+            if !p.method.safe() && !(live && i == 0) {
                 break;
             }
             if p.started.is_none() {
@@ -1875,6 +1887,9 @@ impl Browser {
         while n < max {
             let lim = dom.fl();
             self.start_queued();
+            if dom.fetch.live.get() && self.fetch_ready() == Some(false) {
+                break;
+            }
             let Some(mut task) = ({
                 let mut st = dom.fetch.st.borrow_mut();
                 let t = st.queue.pop_front();
