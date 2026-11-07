@@ -59,6 +59,7 @@ use bare_html::{encoding, tree};
 use bare_js::eval::EvalLimits;
 use bare_js::heap::HeapLimits;
 use bare_net::http::{Client, Request};
+use bare_net::parallel::Task;
 use bare_url::Url;
 use std::time::{Duration, Instant};
 
@@ -103,6 +104,11 @@ pub struct SessionConfig {
     pub virtual_clock: bool,
     /// The storage to start from (a session that goes on). `None`: an empty one.
     pub storage: Option<WebStorage>,
+    /// The window and the control interface: `resume(&[])` is one turn of an event loop, not a run to the settle. It waits for no
+    /// reply (`fetch`, XHR and dynamic scripts start on workers and settle in a later turn when they are in), stops after a slice of
+    /// work once the page has loaded, and a navigation that the page asks for downloads the next document on a worker while the old
+    /// one stays. See `docs/decisions.md` ("Input that does not wait").
+    pub live: bool,
 }
 
 impl SessionConfig {
@@ -119,6 +125,7 @@ impl SessionConfig {
             viewport: None,
             virtual_clock: false,
             storage: None,
+            live: false,
         }
     }
 }
@@ -185,6 +192,8 @@ pub struct Session {
     /// The first client that `cfg.client` made. Each document and each `resume` gets a fork: they share the connections, as the
     /// sockets of a browser outlive a navigation.
     client: Option<Client>,
+    /// Live: the next document, while a worker downloads it. The old document stays until it is in.
+    loading: Option<(Next, Task<Result<(String, String), String>>)>,
 }
 
 #[derive(Default)]
@@ -278,7 +287,7 @@ fn load_document(client: &mut Client, url: &str, body: Option<&Body>, lim: &Sess
 impl Session {
     pub fn new(mut cfg: SessionConfig) -> Session {
         let store = cfg.storage.take().unwrap_or_default();
-        Session { cfg, store, browser: None, used: Used::default(), hist: Vec::new(), at: 0, client: None }
+        Session { cfg, store, browser: None, used: Used::default(), hist: Vec::new(), at: 0, client: None, loading: None }
     }
 
     /// A client that shares the connections of the session.
@@ -307,6 +316,7 @@ impl Session {
     /// starts a new run with new budgets.
     pub fn run(&mut self) -> SessionResult {
         self.used = Used::default();
+        self.loading = None;
         let first = self.cfg.url.clone();
         self.hist.clear();
         self.at = 0;
@@ -348,7 +358,13 @@ impl Session {
             return SessionResult { stop: SessionStop::LoadFailed("there is no document to reload".into()), pages: Vec::new(), urls: Vec::new(), tasks: 0, rounds: 0 };
         };
         self.used.ended = None;
+        self.loading = None;
         self.drive(Some(next), &[])
+    }
+
+    /// Live: is a next document on its way (`Some(false)`), or in (`Some(true)`: the next `resume` shows it)?
+    pub fn loading(&self) -> Option<bool> {
+        self.loading.as_ref().map(|l| l.1.done())
     }
 
     /// Why the session cannot go on (`run` and `resume` give this stop and run nothing), or `None`.
@@ -371,6 +387,16 @@ impl Session {
     fn drive_loop(&mut self, mut next: Option<Next>, mut steps: &[Input], out: &mut SessionResult) -> SessionStop {
         let lim = self.cfg.limits.clone();
         let deadline = deadline_after(lim.max_time.saturating_sub(self.used.time));
+        // Live: the document that a worker downloaded. Until it is in, the old document does not run (its navigation stops each run).
+        let mut fetched = None;
+        if next.is_none() && self.loading.is_some() {
+            if self.loading.as_ref().is_some_and(|l| !l.1.done()) {
+                return SessionStop::Page(Stop::Settled);
+            }
+            let (n, task) = self.loading.take().expect("checked");
+            fetched = Some(task.wait().unwrap_or_else(|| Err("network error".into())));
+            next = Some(n);
+        }
         loop {
             if next.is_some() && self.used.documents >= lim.max_documents {
                 return SessionStop::DocumentLimit;
@@ -399,7 +425,11 @@ impl Session {
                     // The old document ends here: its realm, timers and callbacks are gone before the next load starts.
                     self.browser = None;
                     let mut base = self.fork();
-                    let (url, html) = match load_document(&mut base, &url, body.as_ref(), &lim, deadline) {
+                    let doc = match fetched.take() {
+                        Some(d) => d,
+                        None => load_document(&mut base, &url, body.as_ref(), &lim, deadline),
+                    };
+                    let (url, html) = match doc {
                         Ok(d) => d,
                         Err(why) => return SessionStop::LoadFailed(why),
                     };
@@ -446,6 +476,9 @@ impl Session {
                     // The document, its scripts and its `fetch` calls share the connections and the TLS roots of one client.
                     let client = base.fork();
                     let fetch = (base.fork(), self.cfg.fetch);
+                    if self.cfg.live {
+                        b.dom.fetch.live.set(true);
+                    }
                     let r = b.run_page(PageConfig { url, client, limits: page, fetch: Some(fetch) });
                     (b, r)
                 }
@@ -489,6 +522,14 @@ impl Session {
                     }
                 }
             };
+            // Live: the next document downloads on a worker, and the turn ends. The old document stays on screen until it is in.
+            if self.cfg.live && next.is_some() {
+                let n = next.take().expect("checked");
+                let (url, body, lim) = (n.url.clone(), n.body.clone(), lim.clone());
+                let task = self.fork().spawn(move |c| load_document(c, &url, body.as_ref(), &lim, deadline));
+                self.loading = Some((n, task));
+                return SessionStop::Page(Stop::Settled);
+            }
         }
     }
 }
