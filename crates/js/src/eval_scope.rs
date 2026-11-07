@@ -93,7 +93,7 @@ struct RScope {
 #[derive(Default)]
 struct Slots {
     /// One word for each expression, then one for each pattern: 0, `UNRES | scope + 1` or a resolved slot. A string literal or
-    /// member name site holds a position in `Interp::site_strs` instead.
+    /// member name site holds a position in `Interp::site_strs` instead. A number literal holds its value + 1 (`number_literal`).
     sites: Box<[u32]>,
 }
 

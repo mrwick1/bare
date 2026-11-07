@@ -2206,8 +2206,7 @@ impl<'p> Interp<'p> {
 
     /// Bind `this`, the parameters, `arguments` and the `var`s of a call into its environment.
     fn bind_call(&mut self, fobj: ObjId, fid: FuncId, env: u32, self_binding: bool, this: Value, args: &[Value]) -> Res<()> {
-        let prog = self.prog.clone();
-        let f = *prog.func(fid);
+        let f = *self.prog.func(fid);
         self.strict = f.strict;
         if self.cls.fflags[fid.index()] != 0 {
             self.cls_frame(env, fid, fobj);
@@ -2226,11 +2225,12 @@ impl<'p> Interp<'p> {
             self.env_declare(env, n, INIT | SELF, Value::Object(fobj));
         }
         if f.simple_params {
-            for (i, p) in prog.list(f.params).enumerate() {
-                let n = self.pat_name[p.index()];
+            for i in 0..f.params.len() {
+                let n = self.pat_name[self.list_at(f.params, i).index()];
                 self.env_declare(env, n, INIT | MUT, args.get(i).copied().unwrap_or(Value::Undefined));
             }
         } else {
+            let prog = self.prog.clone();
             for (i, p) in prog.list(f.params).enumerate() {
                 if let PatKind::Rest(t) = prog.pat(p).kind {
                     let rest = args.get(i..).unwrap_or(&[]).to_vec();
@@ -2368,6 +2368,10 @@ impl<'p> Interp<'p> {
     }
 
     fn truthy(&self, v: Value) -> Res<bool> {
+        // A comparison gives a boolean, and a boolean needs no heap check.
+        if let Value::Bool(b) = v {
+            return Ok(b);
+        }
         self.heap.to_boolean(v).map_err(Error::Heap)
     }
 
@@ -2692,11 +2696,11 @@ impl<'p> Interp<'p> {
     }
 
     fn eval_args(&mut self, l: List<Expr>) -> Res<Vec<Value>> {
-        let prog = self.prog.clone();
         let mut out = self.arg_pool.pop().unwrap_or_default();
         out.clear();
-        for a in prog.list(l) {
-            if let ExprKind::Spread(inner) = prog.expr(a).kind {
+        for i in 0..l.len() {
+            let a = self.list_at(l, i);
+            if let ExprKind::Spread(inner) = self.prog.expr(a).kind {
                 let v = self.eval_expr(inner)?;
                 let mut it = self.iter_start(v, inner)?;
                 while let Some(x) = self.iter_next(&mut it)? {
@@ -2724,11 +2728,10 @@ impl<'p> Interp<'p> {
     }
 
     fn link_inner(&mut self, e: ExprId) -> Res<Option<(Value, Value)>> {
-        let prog = self.prog.clone();
-        let ex = *prog.expr(e);
+        let ex = *self.prog.expr(e);
         match ex.kind {
-            ExprKind::Member { obj, .. } | ExprKind::Index { obj, .. } if self.cls.super_used && is_super(&prog, obj) => self.super_link(e),
-            ExprKind::Call { callee, .. } if self.cls.super_used && is_super(&prog, callee) => self.super_call(e),
+            ExprKind::Member { obj, .. } | ExprKind::Index { obj, .. } if self.cls.super_used && is_super(&self.prog, obj) => self.super_link(e),
+            ExprKind::Call { callee, .. } if self.cls.super_used && is_super(&self.prog, callee) => self.super_call(e),
             ExprKind::PrivateMember { .. } => self.link_private(e),
             ExprKind::Member { obj, name, optional } => {
                 let Some((base, _)) = self.link_base(obj)? else { return Ok(None) };
@@ -2825,15 +2828,17 @@ impl<'p> Interp<'p> {
 
     fn eval_expr_inner(&mut self, e: ExprId) -> Res<Value> {
         self.tick()?;
-        let prog = self.prog.clone();
-        let ex = *prog.expr(e);
+        let ex = *self.prog.expr(e);
         match ex.kind {
             ExprKind::Ident => self.get_name(self.expr_name[e.index()], e.index() as u32),
             ExprKind::This if self.expr_name[e.index()] == 0 => Ok(self.lookup_this()),
             ExprKind::This => self.this_binding(),
             ExprKind::Null => Ok(Value::Null),
             ExprKind::Bool(b) => Ok(Value::Bool(b)),
-            ExprKind::Number(base) => Ok(Value::Number(self.num_lit(ex.span, base))),
+            ExprKind::Number(base) => match self.slots.sites[e.index()] {
+                0 => Ok(Value::Number(self.number_literal(e, ex.span, base))),
+                c => Ok(Value::Number((c - 1) as f64)),
+            },
             ExprKind::BigInt => self.big_literal(ex.span),
             ExprKind::String => match self.site_str(e) {
                 Some(s) => Ok(Value::String(s)),
@@ -2888,6 +2893,16 @@ impl<'p> Interp<'p> {
         let s = h!(self, self.heap.intern_vec(u));
         self.set_site_str(e, s);
         Ok(Value::String(s))
+    }
+
+    /// The first run of a number literal site. A whole number below `u32::MAX` is kept in its site word as the number + 1.
+    #[inline(never)]
+    fn number_literal(&mut self, e: ExprId, span: Span, base: NumBase) -> f64 {
+        let n = self.num_lit(span, base);
+        if n.fract() == 0.0 && (0.0..u32::MAX as f64).contains(&n) {
+            self.slots.sites[e.index()] = n as u32 + 1;
+        }
+        n
     }
 
     /// The cached string of a string literal or member name site `e` (see `site_strs`).
@@ -2979,10 +2994,9 @@ impl<'p> Interp<'p> {
 
     #[inline(never)]
     fn eval_seq(&mut self, l: List<Expr>) -> Res<Value> {
-        let prog = self.prog.clone();
         let mut last = Value::Undefined;
-        for x in prog.list(l) {
-            last = self.eval_expr(x)?;
+        for i in 0..l.len() {
+            last = self.eval_expr(self.list_at(l, i))?;
         }
         Ok(last)
     }
@@ -3265,8 +3279,7 @@ impl<'p> Interp<'p> {
     }
 
     fn eval_assign(&mut self, op: AssignOp, target: PatId, value: ExprId) -> Res<Value> {
-        let prog = self.prog.clone();
-        let pat = *prog.pat(target);
+        let pat = *self.prog.pat(target);
         let r = match pat.kind {
             PatKind::Ident => Ref::Name(self.pat_name[target.index()], self.pat_site(target.index())),
             PatKind::Member(me) => self.member_target(me)?,
@@ -3310,8 +3323,7 @@ impl<'p> Interp<'p> {
     }
 
     fn bind_pattern_inner(&mut self, p: PatId, v: Value, mode: Bind) -> Res<()> {
-        let prog = self.prog.clone();
-        let pat = *prog.pat(p);
+        let pat = *self.prog.pat(p);
         match pat.kind {
             PatKind::Ident => {
                 let n = self.pat_name[p.index()];
@@ -3349,7 +3361,7 @@ impl<'p> Interp<'p> {
             }
             PatKind::Assign { target, default } => {
                 let v = if matches!(v, Value::Undefined) {
-                    let name = if let PatKind::Ident = prog.pat(target).kind { Some(self.name_str(self.pat_name[target.index()])?) } else { None };
+                    let name = if let PatKind::Ident = self.prog.pat(target).kind { Some(self.name_str(self.pat_name[target.index()])?) } else { None };
                     self.eval_named(default, name)?
                 } else {
                     v
@@ -3362,6 +3374,7 @@ impl<'p> Interp<'p> {
                     let t = self.display(v);
                     return Err(self.type_err(&format!("Cannot destructure '{t}' as it is {t}.")));
                 }
+                let prog = self.prog.clone();
                 let mut used = Vec::new();
                 for q in prog.list(l) {
                     let pp = *prog.pat_prop(q);
