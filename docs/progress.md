@@ -2167,4 +2167,8 @@ Choice: `mallopt(M_ARENA_MAX, 2)` at the start of `bare` and `bare-drive` (`bare
 
 After the change, `--repeat 15` on live staging, RSS per run (MiB): 93, 103, 104, 106, 106, 106, 106, 108, 108, 108, 108, 108, 108, 91, 106. Peak 107 MiB (before: 121 MiB at run 15, 120 MiB at run 10). The time of a run: mean 8.34 s (before 8.62 s; the network noise is about 3%, so this is no gain, and there is no loss). Fixture app (`tools/fixtures/drive`), `--repeat 300`, median of runs 11 to 300: 14.3 ms with the change and 14.3 ms with `MALLOC_ARENA_MAX=64`; RSS 21 MiB at the end (25 MiB before, in one run).
 
-Cost matrix: the change touches `bare-net` and the two `main` functions, and no example or `bare-stress` row calls them. See the numbers below.
+Cost: `tools/js/cost_matrix.sh`, origin/main 65bbf8e against this change, 805 rows. No row is over +0.5% under glibc, so none is over under both allocators (the jemalloc runs happen only for a row that is over under glibc, so they ran for no row). Mean change: glibc -0.001%. No example and no `bare-stress` row calls the changed code.
+
+Tests: `cargo test --release --workspace`, 2,887 passed, 0 failed, 12 ignored (after the rebase on 65bbf8e).
+
+Not tested: a DNS failure through the driver (a unit test makes the error; no resolver fault was made); a TLS failure on a `fetch` (the test uses the document load); an HTTP/2 GOAWAY on a live connection (the kind comes from the text of the error, checked in a unit test); the `bare` binary with `--window` under the arena limit; musl or macOS (the limit is Linux and glibc only); more than 15 runs on staging; arjun-e16; `tools/js/cost_matrix.sh` with jemalloc on every row.
