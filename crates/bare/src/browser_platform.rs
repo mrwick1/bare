@@ -39,7 +39,6 @@ use bare_js::eval::{Error, Interp};
 use bare_js::value::{ObjId, PropertyKey, Value};
 use bare_html::dom::NodeId;
 use std::cell::{Cell, OnceCell, RefCell};
-use std::collections::HashMap;
 use std::rc::Rc;
 
 pub(crate) type V = R<Value>;
@@ -101,19 +100,19 @@ pub(crate) struct TokIter {
 
 pub(crate) struct PState {
     pub viewport: (f32, f32),
-    pub mql: HashMap<ObjId, Mql>,
+    pub mql: IdMap<ObjId, Mql>,
     pub seq: u64,
     /// `DOMTokenList` object -> its element.
-    pub lists: HashMap<ObjId, NodeId>,
+    pub lists: IdMap<ObjId, NodeId>,
     /// element -> its `classList` object (`SameObject`).
-    pub by_el: HashMap<NodeId, ObjId>,
-    pub iters: HashMap<ObjId, TokIter>,
+    pub by_el: IdMap<NodeId, ObjId>,
+    pub iters: IdMap<ObjId, TokIter>,
     pub halted: Option<Error>,
 }
 
 impl Default for PState {
     fn default() -> Self {
-        PState { viewport: (1280.0, 800.0), mql: HashMap::new(), seq: 0, lists: HashMap::new(), by_el: HashMap::new(), iters: HashMap::new(), halted: None }
+        PState { viewport: (1280.0, 800.0), mql: IdMap::default(), seq: 0, lists: IdMap::default(), by_el: IdMap::default(), iters: IdMap::default(), halted: None }
     }
 }
 

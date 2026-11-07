@@ -46,7 +46,7 @@ use crate::browser_navigation_url::{self as nu, Part, Rec, UErr};
 use bare_js::eval::{Error, Interp};
 use bare_js::value::{ObjId, Value};
 use std::cell::{Cell, OnceCell, RefCell};
-use std::collections::{HashMap, VecDeque};
+use std::collections::VecDeque;
 use std::rc::Rc;
 
 /// Bounds of the navigation module. Each is checked before the thing grows (`Limit(Host(name))`).
@@ -167,9 +167,9 @@ pub(crate) struct NavState {
     pub generation: u64,
     pub tasks: VecDeque<Task>,
     pub requests: VecDeque<NavigationRequest>,
-    pub urls: HashMap<ObjId, pr::UrlObj>,
-    pub params: HashMap<ObjId, pr::ParamsObj>,
-    pub iters: HashMap<ObjId, pr::IterObj>,
+    pub urls: IdMap<ObjId, pr::UrlObj>,
+    pub params: IdMap<ObjId, pr::ParamsObj>,
+    pub iters: IdMap<ObjId, pr::IterObj>,
     pub param_bytes: usize,
     pub state_bytes: usize,
     pub store: WebStorage,

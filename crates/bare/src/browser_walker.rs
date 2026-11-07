@@ -35,7 +35,6 @@ use bare_html::dom::{Change, Document, NodeData, NodeId};
 use bare_js::eval::Interp;
 use bare_js::value::{ObjId, Value};
 use std::cell::{OnceCell, RefCell};
-use std::collections::HashMap;
 use std::rc::Rc;
 
 type V = R<Value>;
@@ -67,7 +66,7 @@ pub(crate) struct State {
     made: Option<(ObjId, ObjId, ObjId)>,
     /// The prototype and the constructor of `NodeIterator`, once made.
     made_iter: Option<(ObjId, ObjId)>,
-    walkers: HashMap<ObjId, Walker>,
+    walkers: IdMap<ObjId, Walker>,
     /// How many of `walkers` are iterators.
     iters: usize,
     /// "Replace all" is running: its iterators were told already.

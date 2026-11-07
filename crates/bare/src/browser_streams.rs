@@ -30,12 +30,12 @@
 //!
 //! Node oracle for the semantics: `tools/js/streams_oracle.mjs` over `tools/fixtures/js/streams-cases.txt`.
 
-use crate::browser::{Browser, Dom, R, illegal_constructor, unsupported};
+use crate::browser::{Browser, Dom, IdMap, R, illegal_constructor, unsupported};
 use bare_js::eval::Error;
 use bare_js::eval::Interp;
 use bare_js::value::{ObjId, Value};
 use std::cell::{Cell, OnceCell, RefCell};
-use std::collections::{HashMap, VecDeque};
+use std::collections::VecDeque;
 
 /// Hard bounds of the stream layer. Each is checked before the thing grows.
 #[derive(Clone, Copy, Debug)]
@@ -112,9 +112,9 @@ struct Rdr {
 
 #[derive(Default)]
 struct State {
-    streams: HashMap<ObjId, Stream>,
-    ctls: HashMap<ObjId, Ctl>,
-    readers: HashMap<ObjId, Rdr>,
+    streams: IdMap<ObjId, Stream>,
+    ctls: IdMap<ObjId, Ctl>,
+    readers: IdMap<ObjId, Rdr>,
     queued_bytes: usize,
     callbacks: u64,
     fatal: Option<Error>,

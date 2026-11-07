@@ -33,7 +33,6 @@ use bare_js::eval::{Error, Interp};
 use bare_js::heap::{Elem, PropertyDescriptor};
 use bare_js::value::{ObjId, PropertyKey, Value};
 use std::cell::{Cell, RefCell};
-use std::collections::HashMap;
 use std::fmt::Write;
 
 /// The user agent string, and the major version that `userAgentData.brands` reports. The only place of both.
@@ -90,9 +89,9 @@ struct Made {
 #[derive(Default)]
 struct WState {
     made: Option<Made>,
-    blobs: HashMap<ObjId, BlobData>,
-    forms: HashMap<ObjId, Form>,
-    iters: HashMap<ObjId, IterObj>,
+    blobs: IdMap<ObjId, BlobData>,
+    forms: IdMap<ObjId, Form>,
+    iters: IdMap<ObjId, IterObj>,
     /// Bytes of all Blobs and of the names and strings of all forms.
     bytes: usize,
 }

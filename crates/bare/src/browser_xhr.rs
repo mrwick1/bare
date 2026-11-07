@@ -35,7 +35,7 @@ use bare_js::heap::PropertyDescriptor;
 use bare_js::value::{ObjId, PropertyKey, Value};
 use bare_url::Url;
 use std::cell::{Cell, RefCell};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::rc::Rc;
 
 type V = R<Value>;
@@ -111,10 +111,10 @@ struct Made {
 #[derive(Default)]
 struct Tables {
     made: Option<Made>,
-    objs: HashMap<ObjId, Xhr>,
+    objs: IdMap<ObjId, Xhr>,
     ups: HashSet<ObjId>,
     /// `(loaded, total, lengthComputable)` of a `ProgressEvent`.
-    prog: HashMap<ObjId, (f64, f64, bool)>,
+    prog: IdMap<ObjId, (f64, f64, bool)>,
 }
 
 #[derive(Default)]
