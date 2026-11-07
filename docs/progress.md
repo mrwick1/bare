@@ -1838,3 +1838,38 @@ Gaps, still different from Chrome:
 - The cause of the rest of the diff of both pages is not analysed in this change.
 
 Not tested: the `form` attribute; rounded dashes with four different sides; `bare-stress fuzz layout` beyond seeds 22 and 26 (the unit test covers the hang); the window (`--window`) and wasm builds; the cost matrix on main b496946 (the rebase brings JS code only, no change in css, layout or paint files; the matrix ran on ccceff4).
+
+## Async generators and `for await`
+
+Added on 2026-11-07. Async generators were the largest group of test262 failures (about 4,500 tests), and `for await` was the fourth (about 390). Both run now. The decisions are in `docs/decisions.md` ("Async generators and `for await`").
+
+Change:
+- Parser: `async function*` declarations and expressions, and `async *m(){}` in objects and classes (static ones too). `FuncMode::AsyncGen`. The four "async generators are not supported" errors are gone.
+- `crates/js/src/eval_asyncgen.rs` (new): the generator object and its request queue (`next`, `return`, `throw`), `%AsyncGeneratorFunction%`, `%AsyncGeneratorPrototype%`, `%AsyncIteratorPrototype%` with `[Symbol.asyncIterator]`, the async-from-sync iterator, async `yield*` and `for await`.
+- `eval_async.rs`: new frames for `yield`, `return`, `yield*` and `for await`. `for await` and `yield` in an async generator no longer stop the preflight.
+- `new Function` path: `AsyncGeneratorFunction` is `Nat::FnCtor(3)`. It makes an async generator from source text, with or without `new`.
+- `tools/fixtures/js/asyncgen-cases.txt` (new): 64 cases, each with the order of microtasks. `tools/js/asyncgen_check.sh` compares them with Node. The Rust test `asyncgen_corpus_matches_node` reads the stored Node output.
+- `tools/fixtures/js/test262-subset.txt`: adds `built-ins/AsyncGeneratorFunction`, `AsyncGeneratorPrototype`, `AsyncFromSyncIteratorPrototype` and `AsyncIteratorPrototype`.
+- `tools/js/exec_diff.sh` runs the new fixture.
+
+Checks:
+- `tools/js/test262_check.sh`, gate ok. On the old subset, pass 22,539 to 27,072 (+4,533), fail 8,226 to 3,693. No test went from pass to fail (checked test by test, not only by directory). The four new directories: 110 pass, 10 fail, 2 skip. Total with them: 27,182 pass, 3,703 fail, 1,953 skip. The baseline file is updated.
+- Largest gains: `statements/for-await-of` +1,185, `statements/class` +1,030, `expressions/class` +1,029, `expressions/async-generator` +604, `statements/async-generator` +293, `expressions/object` +289.
+- Async generator and `for await` failures left (291 tests): non-ASCII characters outside a string (172), early errors that are not reported (77), `yield` in a `for await` binding pattern (13), `Function.prototype.toString` of a script function (10), a parameter default that reads its own parameter (8), `with` (6), other (5). All 172 non-ASCII failures are in `class/elements`, where 818 other tests fail for the same cause. The parameter default case fails for plain functions and generators too. 66 tests in `built-ins/Array/fromAsync` fail: `Array.fromAsync` does not exist.
+- `asyncgen_check.sh`: 64 cases match Node 22.23.2. `async`, `generator`, `promise`, `iterator`, `statements`, `class`, `subclass`, `eval`, `sc` and the other `tools/js/*_check.sh` that need no Chrome match Node. `intl_check.sh` gives 12 differences in `matrix_*`. The output of origin/main is the same, byte for byte (ICU data of that Node).
+- `parse_check.sh` with Acorn: 2,207 cases match. Three cases were marked unsupported and are accepted now. Their trees match Acorn.
+- `exec_diff.sh`: 79 runs, 0 differences.
+- `cargo test --release --workspace`: 2,835 passed, 0 failed (after the rebase on 5dd8c70). New tests: the corpus, the async-from-sync rules that Node 22 does not have, the queue order, and the collection of unreachable suspended generators.
+- Cost: `tools/js/cost_matrix.sh`, all 803 rows, origin/main 5dd8c70 against this change, glibc and jemalloc, on arjun-e16. No row is over +0.5% under both allocators. Mean change: glibc -0.004%, jemalloc +0.007% (examples), about 0.00% (`bare-stress`). One row is over under jemalloc only: `loader_load dynamic 1` (+0.77% jemalloc, +0.04% glibc). The async, generator and interact rows are -0.25% on average. The first build had 21 rows over the limit under both allocators (up to +0.88%, `async_load nested 10`): the new frames had grown the machine loop `drive`. They now go through cold functions (see decisions.md).
+- `tools/js/typing/keycost.sh`: `#a1` 410.8 M to 410.8 M for each key, `#f0` 418.6 M to 418.7 M. Peak RSS at 50 keys 38.1 MiB to 36.8 MiB.
+
+Differences from Node 22 (on purpose):
+- The async-from-sync iterator follows the current specification. A rejected value closes the sync iterator. A missing `throw` closes it and rejects with a `TypeError`. Node 22 does neither. test262 checks the specification.
+
+Not done:
+- `Array.fromAsync`. It needs its own promise state machine in Rust.
+- `Symbol.asyncDispose` on `%AsyncIteratorPrototype%` (9 tests).
+- `yield` or `await` in a `for await` binding pattern (`unsupported: await in a for-of binding`).
+- `Function.prototype.toString` of a script function gives `[object ...]` for every kind of function. This is older than this change.
+
+Not tested: a live page that uses async generators; `dom_check.sh` and `browser_check.sh` (they need Chrome); the load rows at scale 100; a machine other than arjun-e16; deep recursion of async generators beyond the unit tests; a page with many suspended generators and many queued requests at once.

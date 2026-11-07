@@ -221,7 +221,18 @@ Follow-ups of [Parallel downloads](#parallel-downloads). The numbers are in [res
 - The Intl constructors read `new.target` and use the plain `new` path at no extra cost.
 - A RegExp subclass with its own `exec` runs the generic algorithms of the specification (RegExpExec, `lastIndex` and `flags` read as properties, a species-built splitter and matcher). The builtin fast paths stay exact only while `exec` is the intrinsic, so every `RegExp` row pays one check (`user_exec`), not a property read per call. `RegExp[Symbol.species]` exists now.
 - `flat` and `flatMap` build the result with `ArraySpeciesCreate`. An array whose species is the intrinsic keeps the old path.
-- Not done: `AsyncGeneratorFunction` (the parser has no async generators); `Function.prototype.toString` source text of a dynamic function; own `arguments` and `caller` of a dynamic function; a Proxy as a species result (no trap dispatch); the V8 reads of the `global` and `unicode` getters in `replace` and `match`; lone surrogates in a dynamic function body; `this_regexp` still needs a real RegExp receiver.
+- Done later (2026-11-07): `AsyncGeneratorFunction`, also through `Nat::FnCtor(3)`. See "Async generators and `for await`".
+- Not done: `Function.prototype.toString` source text of a dynamic function; own `arguments` and `caller` of a dynamic function; a Proxy as a species result (no trap dispatch); the V8 reads of the `global` and `unicode` getters in `replace` and `match`; lone surrogates in a dynamic function body; `this_regexp` still needs a real RegExp receiver.
+
+## Async generators and `for await`
+
+- Async generators run on the async machine (`eval_async.rs`), as generators and async functions do. A `Run` has an `agen` flag. A generator object maps to an `AGen` in `aw.agens`: the state (`Start`, `Yield`, `Running`, `Draining`, `Done`) and the queue of requests. A request is the resume kind (`GenHow`) and its promise. The queue, the drain and the await of a `return` follow AsyncGeneratorEnqueue, AsyncGeneratorResumeNext, AsyncGeneratorDrainQueue and AsyncGeneratorAwaitReturn.
+- `yield v` awaits `v` (frame `AYield`), and `return v` awaits `v` (frame `ARet`). The preflight marks every `return` with a value in an async generator, so these returns run on the machine.
+- A `for await` and an async `yield*` keep the iteration in an `It` slot, as `for-of` does. `It.i = 1` marks a sync iterator that runs through the async-from-sync iterator. That iterator is not an object: its `next`, `return` and `throw` call the sync method and await the value. A rejection of the value closes the sync iterator, and a missing `throw` closes it and rejects with a `TypeError`. That is the current specification and test262. Node 22 does neither.
+- Async `yield*` with `return`: when the inner iterator has no `return`, the value is awaited. When the result of `return` is done, its value is not awaited again. Node 22 does both, and the specification awaits the done value. We follow Node 22 for the done value, because the corpus checks the order of microtasks against Node.
+- The new frames are handled in the cold functions `ag_deliver`, `ag_unwind`, `ag_yield` and `aof_start`. Inline, they cost up to +0.9% in `drive` on the async and generator rows, because `drive` grew. Out of line, those rows are 0.25% faster than main on average.
+- A reached generator object traces its suspended run and the values and promises of its queue. A generator that no code can reach is collected with its run. A running generator that awaits is held by the activation of the await, as an async function is.
+- Not done: `Array.fromAsync` (it needs its own promise state machine; 66 test262 tests); `Symbol.asyncDispose`; `yield` or `await` inside a `for await` binding pattern (the preflight gives "await in a for-of binding").
 
 ## Frame slots
 
