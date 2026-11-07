@@ -55,7 +55,7 @@ struct BlobData {
     file: Option<(String, f64)>,
 }
 
-enum Ent {
+pub(crate) enum Ent {
     S(String),
     B(ObjId),
 }
@@ -776,7 +776,7 @@ fn form_ctor(d: &Dom, it: &mut Interp<'_>, _: Value, a: &[Value]) -> V {
     d.web.active.set(true);
     for (n, v) in list {
         let e = match v {
-            Some(v) => Ent::S(v),
+            Some(e) => e,
             None => {
                 // A file input with no file: an empty File with no name.
                 let fp = d.web.s.borrow().made.expect("made").file_p;
@@ -787,6 +787,18 @@ fn form_ctor(d: &Dom, it: &mut Interp<'_>, _: Value, a: &[Value]) -> V {
         push(d, o, n, e)?;
     }
     Ok(Value::Object(o))
+}
+
+/// The entries of the FormData object `v`, a copy. `None` when `v` is not a FormData.
+pub(crate) fn form_entries(d: &Dom, v: Value) -> Option<Vec<(String, Ent)>> {
+    let Value::Object(o) = v else { return None };
+    Some(d.web.s.borrow().forms.get(&o)?.list.iter().map(|(n, e)| (n.clone(), clone_ent(e))).collect())
+}
+
+/// The name of the File object `v`. `None` when `v` is not a File.
+pub(crate) fn file_name(d: &Dom, v: Value) -> Option<String> {
+    let Value::Object(o) = v else { return None };
+    Some(d.web.s.borrow().blobs.get(&o)?.file.as_ref()?.0.clone())
 }
 
 fn form_of(d: &Dom, it: &mut Interp<'_>, this: Value) -> R<ObjId> {
@@ -897,7 +909,7 @@ fn ent_value(d: &Dom, it: &mut Interp<'_>, e: &Ent) -> V {
     }
 }
 
-fn clone_ent(e: &Ent) -> Ent {
+pub(crate) fn clone_ent(e: &Ent) -> Ent {
     match e {
         Ent::S(v) => Ent::S(v.clone()),
         Ent::B(o) => Ent::B(*o),

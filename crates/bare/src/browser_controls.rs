@@ -333,6 +333,7 @@ impl Dom {
                 Some("textarea") => has(&doc, n, "readonly"),
                 Some("button") => !crate::browser_form::button_state(&doc, n).0,
                 Some(_) => false,
+                None if self.is_face(n) => has(&doc, n, "readonly"),
                 None => true,
             };
             if barred {
@@ -354,6 +355,9 @@ impl Dom {
     }
 
     fn verdict(&self, it: &mut Interp<'_>, n: NodeId) -> R<Verdict> {
+        if let Some((flags, msg)) = self.face_verdict(n) {
+            return Ok(Verdict { flags, msg });
+        }
         let mut v = Verdict { flags: 0, msg: String::new() };
         let (tag, kind, required) = {
             let doc = self.doc.borrow();
@@ -471,8 +475,13 @@ fn will_validate(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
 
 fn validation_message(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
     let n = control(d, it, this)?;
-    let m = if d.will_validate(it, n)? { d.verdict(it, n)?.msg } else { String::new() };
+    let m = message_of(d, it, n)?;
     d.js_str(it, &m)
+}
+
+/// The `validationMessage` of `n`.
+pub(crate) fn message_of(d: &Dom, it: &mut Interp<'_>, n: NodeId) -> R<String> {
+    Ok(if d.will_validate(it, n)? { d.verdict(it, n)?.msg } else { String::new() })
 }
 
 fn set_custom_validity(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
@@ -498,6 +507,11 @@ fn set_custom_validity(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -
 
 fn validity(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
     let n = control(d, it, this)?;
+    validity_of(d, it, n)
+}
+
+/// The `ValidityState` of `n`.
+pub(crate) fn validity_of(d: &Dom, it: &mut Interp<'_>, n: NodeId) -> V {
     let cached = d.ctl.st.borrow().state.get(&n).copied();
     if let Some(o) = cached {
         return Ok(Value::Object(o));
@@ -549,8 +563,18 @@ fn made_validity(d: &Dom, it: &mut Interp<'_>) -> R<[ObjId; 2]> {
 
 /// The constructor `name` (illegal to call) of `proto`, with the `toStringTag`.
 fn interface(d: &Dom, it: &mut Interp<'_>, proto: ObjId, name: &str) -> R<ObjId> {
-    let (kp, kc) = (d.key(it, "prototype")?, d.key(it, "constructor")?);
     let f = crate::browser_custom::interface_ctor(d, it, name, true)?;
+    link(d, it, proto, name, f)
+}
+
+/// The same with the constructor function `h`.
+pub(crate) fn interface_with(d: &Dom, it: &mut Interp<'_>, proto: ObjId, name: &str, h: H) -> R<ObjId> {
+    let f = d.add_fn(it, h, name, 0, true)?;
+    link(d, it, proto, name, f)
+}
+
+fn link(d: &Dom, it: &mut Interp<'_>, proto: ObjId, name: &str, f: ObjId) -> R<ObjId> {
+    let (kp, kc) = (d.key(it, "prototype")?, d.key(it, "constructor")?);
     it.define_data(f, kp, Value::Object(proto), false, false, false)?;
     it.define_data(proto, kc, Value::Object(f), true, false, true)?;
     crate::browser_lazy::tag(d, it, proto, name)?;
@@ -559,7 +583,12 @@ fn interface(d: &Dom, it: &mut Interp<'_>, proto: ObjId, name: &str) -> R<ObjId>
 
 fn labels(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
     let n = control(d, it, this)?;
-    if !labelable(&d.doc.borrow(), n) {
+    labels_of(d, it, n)
+}
+
+/// The `labels` of `n`: `null` when it is not labelable.
+pub(crate) fn labels_of(d: &Dom, it: &mut Interp<'_>, n: NodeId) -> V {
+    if !labelable(d, &d.doc.borrow(), n) {
         return Ok(Value::Null);
     }
     let cached = d.ctl.st.borrow().labels.get(&n).copied();
@@ -652,8 +681,8 @@ pub(crate) fn proto_for(d: &Dom, it: &mut Interp<'_>, tag: &str) -> R<ObjId> {
 // ------------------------------------------------------------------------------------------ label
 
 /// Is `n` a labelable element?
-fn labelable(doc: &Document, n: NodeId) -> bool {
-    ["button", "select", "textarea", "meter", "output", "progress"].iter().any(|t| doc.is_html(n, t)) || (doc.is_html(n, "input") && input_kind(doc, n) != "hidden")
+fn labelable(d: &Dom, doc: &Document, n: NodeId) -> bool {
+    ["button", "select", "textarea", "meter", "output", "progress"].iter().any(|t| doc.is_html(n, t)) || (doc.is_html(n, "input") && input_kind(doc, n) != "hidden") || d.is_face(n)
 }
 
 fn root_of(doc: &Document, it: &mut Interp<'_>, n: NodeId) -> R<NodeId> {
@@ -677,7 +706,7 @@ impl Dom {
                 it.charge(1)?;
                 (cur, depth) = (c, d);
                 if doc.attr(c, Atom::ID) == Some(id) {
-                    return Ok(labelable(&doc, c).then_some(c));
+                    return Ok(labelable(self, &doc, c).then_some(c));
                 }
             }
             return Ok(None);
@@ -686,7 +715,7 @@ impl Dom {
         while let Some((c, d)) = crate::browser_dom::next_in(&doc, label, cur, depth) {
             it.charge(1)?;
             (cur, depth) = (c, d);
-            if labelable(&doc, c) {
+            if labelable(self, &doc, c) {
                 return Ok(Some(c));
             }
         }
@@ -800,7 +829,11 @@ impl Dom {
             self.st.borrow_mut().events.get_mut(&e).expect("just made").trusted = true;
             if self.dispatch(it, Target::Node(form), e)? {
                 for n in self.owned_controls(it, form)? {
-                    self.reset_control(it, n)?;
+                    if self.is_face(n) {
+                        self.ce_form_reset(n);
+                    } else {
+                        self.reset_control(it, n)?;
+                    }
                 }
             }
             Ok(())

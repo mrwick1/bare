@@ -149,10 +149,10 @@ fn template_content_survives_collection_with_its_expandos() {
 }
 
 #[test]
-fn template_content_belongs_to_the_one_document_arena() {
-    // Deviation from Chrome: the content has no inert document of its own, so `ownerDocument` is `document`.
+fn template_content_belongs_to_the_inert_document() {
+    // As in Chrome: the content is owned by a document of its own. The nodes stay in the one arena.
     let mut b = browser("<template id=t><p>x</p></template>");
-    assert_eq!(js(&mut b, "var c = document.getElementById('t').content; [c.ownerDocument === document, c.firstChild.ownerDocument === document].join()"), "true,true");
+    assert_eq!(js(&mut b, "var c = document.getElementById('t').content; [c.ownerDocument === document, c.firstChild.ownerDocument === c.ownerDocument, c.ownerDocument.defaultView].join()"), "false,true,");
 }
 
 #[test]

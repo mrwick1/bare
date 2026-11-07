@@ -131,6 +131,7 @@ mod browser_chardata;
 mod browser_lazy;
 mod browser_mutation;
 mod browser_custom;
+mod browser_face;
 #[cfg(test)]
 mod browser_custom_tests;
 #[cfg(test)]

@@ -32,6 +32,7 @@ use crate::browser::*;
 use crate::browser_dom as nd;
 use bare_html::dom::{Document, NodeData, NodeId};
 use bare_js::eval::{Error, Interp};
+use crate::browser_web::Ent;
 use bare_js::value::Value;
 
 type V = R<Value>;
@@ -134,7 +135,7 @@ impl Dom {
             while let Some((c, d)) = nd::next_in(&doc, root, cur, depth) {
                 it.charge(1)?;
                 (cur, depth) = (c, d);
-                if tag_is(&doc, c, &["button", "input", "select", "textarea"]) {
+                if tag_is(&doc, c, &["button", "input", "select", "textarea"]) || self.is_face(c) {
                     all.push(c);
                 }
             }
@@ -149,7 +150,7 @@ impl Dom {
     }
 
     /// The entry list of `form` for `submitter` (HTML "constructing the entry list"). A file input has one entry with no value: an empty file.
-    pub(crate) fn entry_list(&self, it: &mut Interp<'_>, form: NodeId, submitter: Option<NodeId>) -> R<Vec<(String, Option<String>)>> {
+    pub(crate) fn entry_list(&self, it: &mut Interp<'_>, form: NodeId, submitter: Option<NodeId>) -> R<Vec<(String, Option<Ent>)>> {
         let mut out = Vec::new();
         for n in self.owned_controls(it, form)? {
             if self.is_disabled_control(it, n)? {
@@ -158,6 +159,12 @@ impl Dom {
             let (name, tag, kind) = {
                 let doc = self.doc.borrow();
                 let name = attr(&doc, n, "name").unwrap_or("").to_string();
+                drop(doc);
+                if let Some(e) = self.face_entries(n, &name) {
+                    out.extend(e);
+                    continue;
+                }
+                let doc = self.doc.borrow();
                 let tag = ["button", "input", "select", "textarea"].into_iter().find(|t| tag_is(&doc, n, &[t])).unwrap_or("input");
                 (name, tag, if tag == "input" { nd::input_kind(&doc, n) } else { "" })
             };
@@ -168,36 +175,36 @@ impl Dom {
             match (tag, kind) {
                 ("button", _) => {
                     if Some(n) == submitter {
-                        out.push((name, Some(attr_value())));
+                        out.push((name, Some(Ent::S(attr_value()))));
                     }
                 }
                 ("input", "submit") => {
                     if Some(n) == submitter {
-                        out.push((name, Some(attr_value())));
+                        out.push((name, Some(Ent::S(attr_value()))));
                     }
                 }
                 ("input", "image") => {
                     if Some(n) == submitter {
                         let p = if name.is_empty() { String::new() } else { format!("{name}.") };
-                        out.push((format!("{p}x"), Some("0".into())));
-                        out.push((format!("{p}y"), Some("0".into())));
+                        out.push((format!("{p}x"), Some(Ent::S("0".into()))));
+                        out.push((format!("{p}y"), Some(Ent::S("0".into()))));
                     }
                 }
                 ("input", "file") => out.push((name, None)),
                 ("input", "reset" | "button") => {}
                 ("input", "checkbox" | "radio") => {
                     if self.input_checked(n) {
-                        out.push((name, Some(self.input_value_of(n).unwrap_or_else(|| "on".into()))));
+                        out.push((name, Some(Ent::S(self.input_value_of(n).unwrap_or_else(|| "on".into())))));
                     }
                 }
-                ("input", _) => out.push((name, Some(self.input_value_of(n).map(|v| single_line(&v)).unwrap_or_default()))),
-                ("textarea", _) => out.push((name, Some(self.input_value_of(n).unwrap_or_default()))),
+                ("input", _) => out.push((name, Some(Ent::S(self.input_value_of(n).map(|v| single_line(&v)).unwrap_or_default())))),
+                ("textarea", _) => out.push((name, Some(Ent::S(self.input_value_of(n).unwrap_or_default())))),
                 _ => {
                     // A `<select>`: its selected options that are not disabled.
                     for o in crate::browser_select::list_ids(self, it, n, true)? {
                         let doc = self.doc.borrow();
                         if !crate::browser_select::is_disabled(&doc, o) {
-                            out.push((name.clone(), Some(crate::browser_select::value_of(&doc, o))));
+                            out.push((name.clone(), Some(Ent::S(crate::browser_select::value_of(&doc, o)))));
                         }
                     }
                 }
@@ -286,7 +293,15 @@ impl Dom {
         if post && !(enc.is_empty() || enc == "application/x-www-form-urlencoded") {
             return Err(Error::Unsupported(unsupported("form POST with an enctype other than application/x-www-form-urlencoded")));
         }
-        let entries: Vec<(String, String)> = self.entry_list(it, form, submitter)?.into_iter().filter_map(|(n, v)| Some((n, v?))).collect();
+        let entries: Vec<(String, String)> = self
+            .entry_list(it, form, submitter)?
+            .into_iter()
+            .filter_map(|(n, v)| match v? {
+                Ent::S(v) => Some((n, v)),
+                // A file value sends its name.
+                Ent::B(f) => Some((n, crate::browser_web::file_name(self, Value::Object(f))?)),
+            })
+            .collect();
         it.charge(entries.len() as u64 + 1)?;
         self.submit_navigation(it, action.trim(), post, &encode_entries(&entries))
     }
@@ -346,6 +361,11 @@ pub(crate) fn form_report_validity(d: &Dom, it: &mut Interp<'_>, this: Value, _:
 
 fn control_validity(d: &Dom, it: &mut Interp<'_>, this: Value, focus: bool) -> V {
     let n = crate::browser_controls::control(d, it, this)?;
+    report_one(d, it, n, focus)
+}
+
+/// `checkValidity()` and `reportValidity()` of the one element `n`.
+pub(crate) fn report_one(d: &Dom, it: &mut Interp<'_>, n: NodeId, focus: bool) -> V {
     let bad = if d.is_invalid(it, n)? { vec![n] } else { vec![] };
     Ok(Value::Bool(d.report_invalid(it, &bad, focus)?))
 }

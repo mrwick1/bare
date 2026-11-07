@@ -2,3 +2,15 @@ define-then-parse	defined | ctor | attr a1 a 1 | connected a1 | ctor | attr a2 b
 parse-then-define-inline	ctor | attr a1 a 1 | connected a1 | ctor | connected a2 | defined
 define-between-elements	ctor | connected a1 | defined | ctor | connected a2 | second script | ctor | connected a3
 when-defined-in-script	ctor | defined | when loading | dcl
+parse-ctor-state	ctor ch=0 at=0 conn=false par=null prev=null id=null  | attr id ch=0 | attr a ch=0 | connected ch=0 at=2 par=BODY
+parse-ctor-order-nested	defined | ctor a next=null | connected a true | ctor b next=null | connected b true | ctor a next=null | connected a true | ctor b next=null | connected b true | script
+parse-ctor-throws	onerror Uncaught Error: boom | onerror Uncaught Error: boom / [object HTMLUnknownElement] true c 1 2 false
+parse-ctor-adds-attribute	onerror / [object HTMLUnknownElement] null a1
+parse-ctor-adds-child	onerror / [object HTMLUnknownElement] 1
+parse-ctor-microtask	end of script | script micro | ctor | micro | attr | connected | next script
+parse-ctor-shadow	ctor 0 | connected 1 0 1 <b>s</b>
+parse-ctor-builtin	ctor ch=0 at=0 is=null type=submit | connected x-b 0 true 
+parse-ctor-in-template-and-fragment	-- | ctor ch=1 conn=true at=2 | connected | -- | ctor ch=0 conn=false at=1 | connected
+parse-ctor-late-define	ctor ch=1 at=2 conn=true | connected | ctor ch=0 at=0 conn=false | connected
+parse-ctor-sees-document	ctor 0 1 loading | ctor 1 3 loading
+face-parse-and-upgrade	ctor  form=null | assoc a1 f1 | ctor  form=null | assoc a2 f1 | disabled a2 true | ctor b1 form=null | assoc b1 f1 | FormData 0

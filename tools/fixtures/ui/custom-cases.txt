@@ -643,3 +643,150 @@ var res = [];
   document.body.innerHTML = '';
   return out;
 })()
+=== unknown-element
+@html <foo id=f1></foo><x-b id=b1></x-b><div id=d1></div><annotation-xml id=ax></annotation-xml><font-face id=ff></font-face><image id=im></image><svg><foo id=sf></foo></svg>
+(function () {
+  var r = [], t = function (e) { return [e instanceof HTMLUnknownElement, e instanceof HTMLElement, e instanceof HTMLUnknownElement ? Object.prototype.toString.call(e) + e.constructor.name : ''].join(' ') };
+  r.push(t($('f1')), t($('b1')), t($('d1')), t($('ax')), t($('ff')), t($('im')), $('sf') instanceof HTMLUnknownElement);
+  r.push(t(document.createElement('foo')), t(document.createElement('FOO')), t(document.createElement('x-a')), t(document.createElement('annotation-xml')), t(document.createElement('a-')), t(document.createElement('foo', { is: 'x-a' })));
+  r.push(t(document.createElementNS('http://www.w3.org/1999/xhtml', 'foo')), t(document.createElementNS('http://www.w3.org/1999/xhtml', 'x-a')), t(document.createElementNS('http://www.w3.org/2000/svg', 'foo')));
+  var d = document.createElement('div'); d.innerHTML = '<foo id=i1></foo><x-c></x-c><span></span>';
+  r.push(Array.from(d.children).map(t).join(' ; '));
+  r.push(Object.getPrototypeOf(document.createElement('foo')) === HTMLUnknownElement.prototype, Object.getPrototypeOf(HTMLUnknownElement.prototype) === HTMLElement.prototype, Object.getPrototypeOf(HTMLUnknownElement) === HTMLElement);
+  r.push(HTMLUnknownElement.name, HTMLUnknownElement.length, typeof HTMLUnknownElement, HTMLUnknownElement.prototype.constructor === HTMLUnknownElement, Object.prototype.toString.call(HTMLUnknownElement.prototype));
+  r.push(err(function () { new HTMLUnknownElement() }), err(function () { HTMLUnknownElement() }));
+  r.push(Object.getOwnPropertyNames(HTMLUnknownElement.prototype).join());
+  var names = 'a abbr acronym address applet area article aside audio b base basefont bdi bdo bgsound big blink blockquote body br button canvas caption center cite code col colgroup command content data datalist dd del details dfn dialog dir div dl dt element em embed fieldset figcaption figure font footer form frame frameset h1 h2 h3 h4 h5 h6 head header hgroup hr html i iframe image img input ins isindex kbd keygen label legend li link listing main map mark marquee math menu menuitem meta meter multicol nav nextid nobr noembed noframes noscript object ol optgroup option output p param picture plaintext pre progress q rb rp rt rtc ruby s samp script search section select selectedcontent shadow slot small source spacer span strike strong style sub summary sup svg table tbody td template textarea tfoot th thead time title tr track tt u ul var video wbr xmp foo bar x'.split(' ');
+  r.push(names.filter(function (n) { return document.createElement(n) instanceof HTMLUnknownElement }).join(' '));
+  return r.join('\n');
+})
+=== unknown-element-define-extends-and-failure
+@html <foo id=f1></foo>
+(function () {
+  var r = [];
+  customElements.define('x-t', class extends HTMLElement { constructor() { super(); throw new Error('boom') } });
+  var e = document.createElement('x-t');
+  r.push(Object.prototype.toString.call(e), e instanceof HTMLUnknownElement, e.localName, e.constructor.name);
+  customElements.define('x-u', class extends HTMLElement { constructor() { super(); this.setAttribute('a', '1') } });
+  var u = document.createElement('x-u');
+  r.push(Object.prototype.toString.call(u), u instanceof HTMLUnknownElement);
+  customElements.define('x-v', class extends HTMLElement { constructor() { super(); this.appendChild(document.createElement('i')) } });
+  r.push(String(document.createElement('x-v') instanceof HTMLUnknownElement));
+  // an upgrade that fails keeps the element as it was
+  var d = document.createElement('div'); d.innerHTML = '<x-w></x-w>';
+  customElements.define('x-w', class extends HTMLElement { constructor() { super(); throw new Error('boom') } });
+  customElements.upgrade(d);
+  r.push(Object.prototype.toString.call(d.firstChild), d.firstChild instanceof HTMLUnknownElement);
+  return r.join('\n');
+})
+=== import-node
+@html <template id=t><x-a id=ta><i>in</i></x-a></template><div id=host></div>
+(function () {
+  var r = [];
+  r.push(typeof document.importNode, document.importNode.length);
+  var t = $('t');
+  var c = document.importNode(t.content, true);
+  r.push(c.nodeType, c.childNodes.length, c.firstChild.localName, c.firstChild.ownerDocument === document);
+  def('x-a');
+  r.push(out());
+  var c2 = document.importNode(t.content, true);
+  r.push(out());
+  $('host').appendChild(c2);
+  r.push(out());
+  r.push(document.importNode(t.content.firstChild, false).childNodes.length);
+  r.push(err(function () { document.importNode(document) }), err(function () { document.importNode() }), err(function () { document.importNode(5) }));
+  r.push(err(function () { return document.importNode(document.createElement('x-a')).localName }));
+  return r.join('\n');
+})
+=== adopt-node
+@html <div id=host><x-a id=a1></x-a></div><p id=p>t</p>
+(function () {
+  var r = [];
+  r.push(typeof document.adoptNode, document.adoptNode.length);
+  def('x-a');
+  L('--');
+  var a = $('a1');
+  r.push(document.adoptNode(a) === a, a.parentNode, a.isConnected, a.ownerDocument === document);
+  L('--');
+  document.body.appendChild(a);
+  r.push(err(function () { document.adoptNode(document) }), err(function () { document.adoptNode() }), err(function () { document.adoptNode(5) }));
+  var sr = $('host').attachShadow({ mode: 'open' });
+  r.push(err(function () { document.adoptNode(sr) }));
+  var pp = $('p');
+  r.push(document.adoptNode(pp) === pp, pp.parentNode);
+  r.push(out());
+  return r.join('\n');
+})
+=== adopted-template-content
+@html <template id=t></template><div id=host></div>
+(function () {
+  var r = [], t = $('t');
+  var A = class extends HTMLElement {
+    adoptedCallback(o, n) { L('adopted ' + nm(this) + ' old=' + (o === document) + ' new=' + (n === document) + ' ' + (n && n.nodeType) + ' ' + (o && o.nodeType)) }
+    connectedCallback() { L('connected ' + nm(this)) }
+    disconnectedCallback() { L('disconnected ' + nm(this)) }
+  };
+  customElements.define('x-a', A);
+  var a = document.createElement('x-a'); a.id = 'a1';
+  $('host').appendChild(a);
+  L('--move into content');
+  t.content.appendChild(a);
+  var td = t.content.ownerDocument;
+  r.push(td === document, a.ownerDocument === td, td.nodeType, td.defaultView, td.ownerDocument, td.documentElement === null, a.isConnected);
+  L('--move to document');
+  document.body.appendChild(a);
+  r.push(a.ownerDocument === document);
+  L('--move into content again');
+  t.content.appendChild(a);
+  L('--remove from content');
+  a.remove();
+  r.push(a.ownerDocument === td);
+  L('--back');
+  $('host').appendChild(a);
+  L('--clone in content');
+  var c = a.cloneNode(true);
+  t.content.appendChild(c);
+  L('--importNode');
+  var i = document.importNode(c, true);
+  $('host').appendChild(i);
+  r.push(td === t.content.ownerDocument, new (customElements.get('x-a'))().ownerDocument === document);
+  r.push(out());
+  return r.join('\n');
+})
+=== adopted-nested-and-order
+@html <div id=host><x-a id=a1><x-b id=b1></x-b><x-a id=a2></x-a></x-a></div><template id=t></template>
+(function () {
+  var r = [];
+  var mk = function (n) { return class extends HTMLElement { adoptedCallback(o, nw) { L('adopted ' + nm(this)) } connectedCallback() { L('connected ' + nm(this)) } disconnectedCallback() { L('disconnected ' + nm(this)) } } };
+  customElements.define('x-a', mk());
+  customElements.define('x-b', mk());
+  L('--');
+  var a1 = $('a1');
+  $('t').content.appendChild(a1);
+  L('--');
+  document.body.appendChild(a1);
+  L('--');
+  var f = document.createDocumentFragment();
+  f.appendChild(a1);
+  L('--frag');
+  $('t').content.appendChild(f);
+  L('--replace');
+  $('host').appendChild(document.createElement('x-a'));
+  $('host').replaceChild($('t').content.firstChild, $('host').firstChild);
+  return out();
+})
+=== adopted-no-callback
+@html <template id=t></template><div id=host></div>
+(function () {
+  def('x-a');
+  var a = document.createElement('x-a'); a.id = 'a1';
+  $('host').appendChild(a);
+  L('--');
+  document.adoptNode(a);
+  L('--');
+  $('host').appendChild(a);
+  var b = document.createElement('x-a'); b.id = 'b1';
+  $('t').content.appendChild(b);
+  $('host').appendChild(b);
+  return out();
+})

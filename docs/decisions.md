@@ -379,6 +379,13 @@ To follow the standard, add the five names to the first arm of `Builder::in_temp
 - Nothing runs before the first `define`: lazy globals, one `Cell` read per host call, no watcher work. Reason: the cost rule (no row over +0.5%). Result: worst row +0.542% on a row that is noise, all others under +0.45%. See [progress.md](progress.md#custom-elements).
 - The page is parsed before its scripts run. A definition upgrades the elements that exist, with a parse-progress emulation for the elements after a blocking script. Reason: an incremental parser is a larger change and no target page needs it. The constructor of a parser-created element sees its children (Chrome: it does not).
 
+## Custom element constructors run at parse time by cutting the tree
+
+- The page is still parsed before any script runs. For a defined element that the parser "reaches" (`ce_release`), the tree is cut: the element loses its attributes, its children and its parent link, and every later node in each ancestor is hidden, with silent pointer operations (`Document::parse_cut`). The constructor runs on that tree, the element goes back with its attributes, the reactions run, and the rest comes back (`parse_close`). Reason: an incremental parser is a large change, and the cut gives a constructor the same view that Chrome gives it. Cost: O(depth) for each custom element, and nothing for a page with none.
+- Known limit: a script that holds a wrapper of a hidden node can reach it, and a hidden node that the constructor detaches is not put back.
+- The contents of a template belong to a second `Document` node of the same arena (`Ce.tpl`), made on first use. Reason: `adoptedCallback` and `ownerDocument` need two owners, and a second arena would copy every node operation.
+- A form-associated element has no stored form owner. A reaction reads it from the tree and compares it with the last value told. Reason: the owner depends on the tree, an id and a `fieldset`, and the watcher cannot read the tree while a change is in progress.
+
 ## SVG is a box that paint fills, and a hint hides what is inside
 
 - An `<svg>` is an atomic inline box, and its shapes have no box (`display: none` from a presentational hint, so the layout code does not change). Paint reads the shapes from the tree and draws them as polygons in the box. Reason: layout needs only the size, and a shape box would need a second kind of box with no use outside paint.

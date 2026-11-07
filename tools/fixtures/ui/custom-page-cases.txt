@@ -11,3 +11,39 @@ var out = function () { return log.join(' | ') };
 === when-defined-in-script
 @html <script>var log = [], L = function (s) { log.push(s) }; customElements.whenDefined('x-a').then(function () { L('when ' + document.readyState) }); document.addEventListener('DOMContentLoaded', function () { L('dcl') })</script><x-a id=a1></x-a><script>customElements.define('x-a', class extends HTMLElement { constructor() { super(); L('ctor') } }); L('defined')</script>
 (function () { return out() })
+=== parse-ctor-state
+@html <script>var log = [], L = function (s) { log.push(s) }; customElements.define('x-a', class extends HTMLElement { constructor() { super(); L('ctor ch=' + this.childNodes.length + ' at=' + this.attributes.length + ' conn=' + this.isConnected + ' par=' + (this.parentNode && this.parentNode.nodeName) + ' prev=' + this.previousSibling + ' id=' + this.getAttribute('id') + ' ' + this.id) } connectedCallback() { L('connected ch=' + this.childNodes.length + ' at=' + this.attributes.length + ' par=' + this.parentNode.nodeName) } attributeChangedCallback(n, o, v) { L('attr ' + n + ' ch=' + this.childNodes.length) } static get observedAttributes() { return ['a', 'id'] } });</script><x-a id=a1 a=1><b>t</b>text</x-a><p>after</p>
+(function () { return out() })
+=== parse-ctor-order-nested
+@html <script>var log = [], L = function (s) { log.push(s) }; var mk = function (n) { return class extends HTMLElement { constructor() { super(); L('ctor ' + n + ' next=' + (this.nextSibling && this.nextSibling.nodeName)) } connectedCallback() { L('connected ' + n + ' ' + this.isConnected) } disconnectedCallback() { L('disconnected ' + n) } } }; customElements.define('x-a', mk('a')); customElements.define('x-b', mk('b')); L('defined')</script><x-a><x-b></x-b><x-a></x-a></x-a><x-b></x-b><script>L('script')</script>
+(function () { return out() })
+=== parse-ctor-throws
+@html <script>var log = [], L = function (s) { log.push(s) }; window.onerror = function (m) { L('onerror ' + m); return true }; customElements.define('x-a', class extends HTMLElement { constructor() { super(); throw new Error('boom') } connectedCallback() { L('connected') } });</script><x-a id=a1 class=c><i>t</i></x-a><x-a id=a2></x-a>
+(function () { var a = document.getElementById('a1'); customElements.upgrade(a); return out() + ' / ' + Object.prototype.toString.call(a) + ' ' + (a instanceof HTMLUnknownElement) + ' ' + a.className + ' ' + a.childNodes.length + ' ' + document.body.querySelectorAll(':defined').length + ' ' + a.matches(':defined') })
+=== parse-ctor-adds-attribute
+@html <script>var log = [], L = function (s) { log.push(s) }; window.onerror = function (m) { L('onerror'); return true }; customElements.define('x-a', class extends HTMLElement { constructor() { super(); this.setAttribute('z', '1') } });</script><x-a id=a1></x-a>
+(function () { var a = document.getElementById('a1'); return out() + ' / ' + Object.prototype.toString.call(a) + ' ' + a.getAttribute('z') + ' ' + a.id })
+=== parse-ctor-adds-child
+@html <script>var log = [], L = function (s) { log.push(s) }; window.onerror = function (m) { L('onerror'); return true }; customElements.define('x-a', class extends HTMLElement { constructor() { super(); this.appendChild(document.createElement('i')) } });</script><x-a id=a1>text</x-a>
+(function () { var a = document.getElementById('a1'); return out() + ' / ' + Object.prototype.toString.call(a) + ' ' + a.childNodes.length })
+=== parse-ctor-microtask
+@html <script>var log = [], L = function (s) { log.push(s) }; customElements.define('x-a', class extends HTMLElement { constructor() { super(); L('ctor'); Promise.resolve().then(function () { L('micro') }) } connectedCallback() { L('connected') } attributeChangedCallback() { L('attr') } static get observedAttributes() { return ['id'] } }); Promise.resolve().then(function () { L('script micro') }); L('end of script')</script><x-a id=a1></x-a><script>L('next script')</script>
+(function () { return out() })
+=== parse-ctor-shadow
+@html <script>var log = [], L = function (s) { log.push(s) }; customElements.define('x-a', class extends HTMLElement { constructor() { super(); var r = this.attachShadow({ mode: 'open' }); r.innerHTML = '<b>s</b>'; L('ctor ' + this.childNodes.length) } connectedCallback() { L('connected ' + this.shadowRoot.childNodes.length + ' ' + this.childNodes.length) } });</script><x-a id=a1><i>light</i></x-a>
+(function () { var a = document.getElementById('a1'); return out() + ' ' + a.childNodes.length + ' ' + a.shadowRoot.innerHTML })
+=== parse-ctor-builtin
+@html <script>var log = [], L = function (s) { log.push(s) }; customElements.define('x-b', class extends HTMLButtonElement { constructor() { super(); L('ctor ch=' + this.childNodes.length + ' at=' + this.attributes.length + ' is=' + this.getAttribute('is') + ' type=' + this.type) } connectedCallback() { L('connected ' + this.getAttribute('is') + ' ' + this.childNodes.length) } }, { extends: 'button' });</script><button is=x-b id=b1 type=submit>go</button><button id=b2>plain</button>
+(function () { return out() + ' ' + (document.getElementById('b1') instanceof HTMLButtonElement) + ' ' + Object.getPrototypeOf(document.getElementById('b1')).constructor.name })
+=== parse-ctor-in-template-and-fragment
+@html <script>var log = [], L = function (s) { log.push(s) }; customElements.define('x-a', class extends HTMLElement { constructor() { super(); L('ctor ch=' + this.childNodes.length + ' conn=' + this.isConnected + ' at=' + this.attributes.length) } connectedCallback() { L('connected') } });</script><template id=t><x-a id=in-t></x-a></template><div id=host></div>
+(function () { var h = document.getElementById('host'); L('--'); h.innerHTML = '<x-a id=i1 a=1><b>t</b></x-a>'; L('--'); h.appendChild(document.importNode(document.getElementById('t').content, true)); return out() })
+=== parse-ctor-late-define
+@html <x-a id=a1 a=1><b>t</b></x-a><script>var log = [], L = function (s) { log.push(s) }; customElements.define('x-a', class extends HTMLElement { constructor() { super(); L('ctor ch=' + this.childNodes.length + ' at=' + this.attributes.length + ' conn=' + this.isConnected) } connectedCallback() { L('connected') } });</script><x-a id=a2 a=1><b>t</b></x-a>
+(function () { return out() })
+=== parse-ctor-sees-document
+@html <script>var log = [], L = function (s) { log.push(s) }; customElements.define('x-a', class extends HTMLElement { constructor() { super(); L('ctor ' + document.querySelectorAll('x-a').length + ' ' + document.body.children.length + ' ' + document.readyState) } });</script><x-a></x-a><i></i><x-a></x-a><i></i>
+(function () { return out() })
+=== face-parse-and-upgrade
+@html <script>var log = [], L = function (s) { log.push(s) }; var F = function (n) { customElements.define(n, class extends HTMLElement { static get formAssociated() { return true } constructor() { super(); this.i = this.attachInternals(); L('ctor ' + this.id + ' form=' + this.i.form) } formAssociatedCallback(f) { L('assoc ' + this.id + ' ' + (f && f.id)) } formDisabledCallback(d) { L('disabled ' + this.id + ' ' + d) } }) }; F('x-a')</script><form id=f1><x-a id=a1 name=n></x-a><fieldset disabled><x-a id=a2></x-a></fieldset></form><x-b id=b1 form=f1></x-b><script>F('x-b'); L('FormData ' + Array.from(new FormData(document.getElementById('f1'))).length)</script>
+(function () { return out() })

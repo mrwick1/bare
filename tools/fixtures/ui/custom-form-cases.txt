@@ -1,0 +1,294 @@
+var log = [];
+var L = function (s) { log.push(s) };
+var out = function () { return log.join(' | ') };
+var $ = function (i) { return document.getElementById(i) };
+var nm = function (e) { return e ? e.localName + (e.id ? '#' + e.id : '') : String(e) };
+var ename = function (f) { try { return String(f()) } catch (e) { return e.name } };
+var err = function (f) { try { return String(f()) } catch (e) { return e.name + ': ' + e.message } };
+var F = function (name, extra) {
+  var C = class extends HTMLElement {
+    static get formAssociated() { return true }
+    constructor() { super(); this.i = this.attachInternals() }
+    formAssociatedCallback(f) { L('assoc ' + nm(this) + ' ' + nm(f)) }
+    formResetCallback() { L('reset ' + nm(this)) }
+    formDisabledCallback(d) { L('disabled ' + nm(this) + ' ' + d) }
+    formStateRestoreCallback(s, m) { L('restore ' + nm(this) + ' ' + s + ' ' + m) }
+  };
+  customElements.define(name, C);
+  return C;
+};
+=== face-shape
+(function () {
+  customElements.define('x-f', class extends HTMLElement { static get formAssociated() { return true } });
+  customElements.define('x-n', class extends HTMLElement {});
+  var f = document.createElement('x-f'), n = document.createElement('x-n'), i = f.attachInternals(), r = [];
+  r.push(typeof ElementInternals, Object.prototype.toString.call(i), i instanceof ElementInternals, i.shadowRoot, i.form, i.labels.length, i.willValidate, i.validationMessage, i.validity.valid, i.states instanceof CustomStateSet, i.states.size, i.role);
+  r.push(err(function () { f.attachInternals() }));
+  r.push(err(function () { document.createElement('div').attachInternals() }));
+  r.push(err(function () { document.createElement('x-u').attachInternals() }));
+  r.push(err(function () { return n.attachInternals().form }));
+  r.push(err(function () { return n.attachInternals().setFormValue('a') }));
+  r.push(err(function () { var j = document.createElement('x-n').attachInternals(); return j.willValidate }));
+  r.push(err(function () { return document.createElement('x-n').attachInternals().labels }));
+  r.push(err(function () { return document.createElement('x-n').attachInternals().validity }));
+  r.push(err(function () { return document.createElement('x-n').attachInternals().validationMessage }));
+  r.push(err(function () { new ElementInternals() }));
+  r.push(err(function () { return ElementInternals.prototype.form }));
+  r.push(Object.getOwnPropertyNames(ElementInternals.prototype).filter(function (n) { return !/^aria/.test(n) }).sort().join());
+  r.push(Object.getOwnPropertyNames(CustomStateSet.prototype).sort().join());
+  return r.join('\n');
+})
+=== face-define-reads
+(function () {
+  var order = [];
+  var P = new Proxy({}, { get: function (t, k) { order.push(String(k)); return undefined }, has: function (t, k) { return false } });
+  var C = function () {};
+  C.prototype = P;
+  Object.defineProperty(C, 'observedAttributes', { get: function () { order.push('observedAttributes'); return [] } });
+  Object.defineProperty(C, 'formAssociated', { get: function () { order.push('formAssociated'); return true } });
+  Object.defineProperty(C, 'disabledFeatures', { get: function () { order.push('disabledFeatures'); return [] } });
+  Object.defineProperty(C, 'prototype', { value: P });
+  customElements.define('x-d', C);
+  return order.join(' ');
+})
+=== face-owner
+@html <form id=f1><x-f id=a></x-f></form><form id=f2></form><x-f id=b form=f1></x-f>
+(function () {
+  F('x-f');
+  var a = $('a'), b = $('b'), r = [];
+  r.push(nm(a.i.form), nm(b.i.form));
+  a.setAttribute('form', 'f2');
+  r.push(nm(a.i.form));
+  $('f2').appendChild(a);
+  r.push(nm(a.i.form));
+  a.removeAttribute('form');
+  r.push(nm(a.i.form));
+  b.remove();
+  r.push(nm(b.i.form));
+  r.push(out());
+  return r.join(' / ');
+})
+=== face-owner-before-define
+@html <form id=f1><x-f id=a></x-f><x-f id=b form=f1></x-f></form>
+(function () {
+  F('x-f');
+  var r = [out(), nm($('a').i.form), nm($('b').i.form)];
+  return r.join(' / ');
+})
+=== face-formdata
+@html <form id=f1><input name=i value=iv><x-f id=a name=n1></x-f><x-f id=b></x-f><x-f id=c name=n3></x-f><x-f id=d name=n4></x-f></form>
+(function () {
+  F('x-f');
+  var a = $('a'), b = $('b'), c = $('c'), d = $('d'), f = $('f1'), r = [];
+  var show = function () { return Array.from(new FormData(f)).map(function (e) { return e[0] + '=' + (typeof e[1] === 'string' ? e[1] : '[' + e[1].constructor.name + ':' + e[1].name + ']') }).join('&') };
+  r.push(show());
+  a.i.setFormValue('av'); b.i.setFormValue('bv'); c.i.setFormValue('cv', 'cs');
+  r.push(show());
+  var fd = new FormData(); fd.append('p', '1'); fd.append('q', '2');
+  d.i.setFormValue(fd);
+  r.push(show());
+  d.i.setFormValue(new File(['x'], 'f.txt'));
+  r.push(show());
+  a.i.setFormValue(null);
+  r.push(show());
+  a.i.setFormValue('again'); a.setAttribute('name', 'renamed');
+  r.push(show());
+  a.setAttribute('disabled', '');
+  r.push(show());
+  a.removeAttribute('disabled');
+  a.i.setFormValue('');
+  r.push(show());
+  a.i.setFormValue(undefined);
+  r.push(show());
+  r.push(err(function () { a.i.setFormValue(5) }));
+  r.push(err(function () { a.i.setFormValue() }));
+  r.push(show());
+  return r.join('\n');
+})
+=== face-submit
+@html <form id=f1 onsubmit="return false"><x-f id=a name=n1></x-f><input name=i value=iv></form>
+(function () {
+  F('x-f');
+  var f = $('f1'), r = [];
+  $('a').i.setFormValue('sv');
+  f.addEventListener('submit', function (e) { e.preventDefault(); L('submit ' + Array.from(new FormData(f)).map(function (e) { return e.join('=') }).join('&')) });
+  f.requestSubmit();
+  return out();
+})
+=== face-validity
+@html <form id=f1><x-f id=a name=n></x-f><x-f id=b></x-f></form>
+(function () {
+  F('x-f');
+  var a = $('a'), b = $('b'), r = [], f = $('f1'), i = a.i;
+  i.setValidity({ valueMissing: true }, 'need it');
+  r.push(i.validity.valid, i.validity.valueMissing, i.validationMessage, i.willValidate, i.checkValidity !== undefined);
+  var ev = [];
+  a.addEventListener('invalid', function (e) { ev.push('invalid ' + e.bubbles + ' ' + e.cancelable + ' ' + (e.target === a)) });
+  r.push(i.checkValidity(), i.reportValidity(), ev.join());
+  r.push(f.checkValidity(), f.reportValidity());
+  i.setValidity({ valueMissing: true, customError: true }, 'two');
+  r.push(i.validity.valueMissing, i.validity.customError, i.validationMessage, i.validity.valid);
+  i.setValidity({});
+  r.push(i.validity.valid, JSON.stringify(i.validationMessage));
+  r.push(err(function () { i.setValidity({ typeMismatch: true }) }));
+  r.push(err(function () { i.setValidity({ typeMismatch: true }, '') }));
+  r.push(err(function () { i.setValidity({ typeMismatch: true }, 'm', document.body) }));
+  r.push(err(function () { i.setValidity({ typeMismatch: true }, 'm', a) }));
+  r.push(i.validationMessage);
+  r.push(err(function () { i.setValidity() }));
+  i.setValidity({ tooLong: true, tooShort: true, rangeUnderflow: true, rangeOverflow: true, stepMismatch: true, badInput: true, patternMismatch: true }, 'x');
+  r.push(['valueMissing', 'typeMismatch', 'patternMismatch', 'tooLong', 'tooShort', 'rangeUnderflow', 'rangeOverflow', 'stepMismatch', 'badInput', 'customError', 'valid'].map(function (k) { return i.validity[k] }).join());
+  i.setValidity({});
+  r.push(i.validity === i.validity, Object.prototype.toString.call(i.validity));
+  return r.join('\n');
+})
+=== face-will-validate
+@html <form id=f1><x-f id=a name=n></x-f></form><fieldset disabled><x-f id=b></x-f></fieldset><datalist><x-f id=c></x-f></datalist>
+(function () {
+  F('x-f');
+  var a = $('a'), r = [];
+  r.push(a.i.willValidate, $('b').i.willValidate, $('c').i.willValidate);
+  a.setAttribute('disabled', '');
+  r.push(a.i.willValidate);
+  a.removeAttribute('disabled');
+  a.setAttribute('readonly', '');
+  r.push(a.i.willValidate);
+  r.push(document.createElement('x-f').i.willValidate);
+  return r.join(' ');
+})
+=== face-disabled
+@html <fieldset id=fs><legend><x-f id=l></x-f></legend><x-f id=a></x-f></fieldset><x-f id=b disabled></x-f>
+(function () {
+  F('x-f');
+  var r = [];
+  r.push(out());
+  $('fs').setAttribute('disabled', '');
+  r.push(out());
+  $('b').removeAttribute('disabled');
+  $('fs').removeAttribute('disabled');
+  r.push(out());
+  return r.join(' / ');
+})
+=== face-reset
+@html <form id=f1><x-f id=a></x-f><input id=i value=x><x-f id=b></x-f></form><x-f id=c></x-f>
+(function () {
+  F('x-f');
+  $('f1').reset();
+  L('after');
+  document.createElement('form').reset();
+  return out();
+})
+=== face-labels
+@html <label id=l1 for=a>one</label><label id=l2>two<x-f id=b></x-f></label><x-f id=a></x-f><label id=l3 for=a>three</label>
+(function () {
+  F('x-f');
+  var a = $('a'), b = $('b'), r = [];
+  r.push(a.i.labels.length, Array.from(a.i.labels).map(nm).join(), b.i.labels.length, a.i.labels === a.i.labels, Object.prototype.toString.call(a.i.labels));
+  r.push(nm($('l1').control), nm($('l2').control));
+  return r.join(' ');
+})
+=== face-states
+@html <x-f id=a></x-f>
+(function () {
+  F('x-f');
+  var a = $('a'), s = a.i.states, r = [];
+  r.push(s.add('foo') === s, s.has('foo'), s.size, a.matches(':state(foo)'), a.matches(':state(bar)'));
+  s.add('--legacy');
+  r.push(a.matches(':state(--legacy)'), ename(function () { return a.matches(':--legacy') }));
+  r.push(Array.from(s).join(), s.delete('foo'), s.delete('foo'), a.matches(':state(foo)'), s.size);
+  s.clear();
+  r.push(s.size, a.matches(':state(--legacy)'));
+  s.add('x'); s.add('y');
+  r.push(Array.from(s.keys()).join(), Array.from(s.values()).join(), Array.from(s.entries()).map(function (e) { return e.join('=') }).join(), typeof s.forEach);
+  var seen = []; s.forEach(function (v, k, o) { seen.push(v + k + (o === s)) });
+  r.push(seen.join());
+  r.push(document.querySelectorAll(':state(x)').length, document.querySelector('x-f:state(y)') === a);
+  r.push(err(function () { s.add() }));
+  r.push(ename(function () { a.matches(':state()') }));
+  r.push(ename(function () { a.matches(':state(a b)') }));
+  return r.join('\n');
+})
+=== face-role-and-shadow
+@html <x-f id=a></x-f>
+(function () {
+  F('x-f');
+  var a = $('a'), i = a.i, r = [];
+  r.push(i.role === null);
+  i.role = 'switch';
+  r.push(i.role, a.getAttribute('role'));
+  i.role = null;
+  r.push(i.role === null);
+  var sr = a.attachShadow({ mode: 'closed' });
+  r.push(i.shadowRoot === sr, a.shadowRoot);
+  return r.join(' ');
+})
+=== face-define-reads-plain
+(function () {
+  var order = [];
+  var P = new Proxy({}, { get: function (t, k) { order.push(String(k)); return undefined }, has: function (t, k) { return false } });
+  var C = function () {};
+  Object.defineProperty(C, 'formAssociated', { get: function () { order.push('formAssociated'); return false } });
+  Object.defineProperty(C, 'disabledFeatures', { get: function () { order.push('disabledFeatures'); return undefined } });
+  Object.defineProperty(C, 'prototype', { value: P });
+  customElements.define('x-d', C);
+  return order.join(' ');
+})
+=== face-disabled-features
+(function () {
+  customElements.define('x-d', class extends HTMLElement { static get formAssociated() { return true } static get disabledFeatures() { return ['internals'] } });
+  var r = [];
+  r.push(err(function () { customElements.define('x-e', class extends HTMLElement { static get disabledFeatures() { return 'internals' } }) }));
+  r.push(err(function () { customElements.define('x-g', class extends HTMLElement { static get disabledFeatures() { return ['shadow', 'x', 'internals'] } }) }));
+  r.push(err(function () { return document.createElement('x-d').attachInternals() }));
+  r.push(err(function () { return document.createElement('x-g').attachInternals() }));
+  r.push(err(function () { return document.createElement('x-d').attachShadow({ mode: 'open' }).mode }));
+  return r.join('\n');
+})
+=== face-clone-and-upgrade
+@html <form id=f1><x-f id=a name=n></x-f></form>
+(function () {
+  var f = $('f1'), a = $('a');
+  F('x-f');
+  var c = f.cloneNode(true);
+  document.body.appendChild(c);
+  var r = [out(), nm(c.querySelector('x-f').i.form), c.querySelector('x-f').i.form === c];
+  return r.join(' / ');
+})
+=== face-ctor-shape
+@html <form id=f1></form>
+(function () {
+  var C = F('x-f');
+  var a = new C();
+  var r = [nm(a.i.form), a.i.willValidate, a.isConnected];
+  $('f1').appendChild(a);
+  r.push(nm(a.i.form), out());
+  r.push(C.formAssociated, customElements.get('x-f') === C);
+  return r.join(' ');
+})
+=== face-no-callbacks
+@html <form id=f1><x-g id=a name=n></x-g></form>
+(function () {
+  customElements.define('x-g', class extends HTMLElement { static get formAssociated() { return true } constructor() { super(); this.i = this.attachInternals() } });
+  var a = $('a'), r = [];
+  a.i.setFormValue('v');
+  r.push(Array.from(new FormData($('f1'))).join(), nm(a.i.form));
+  $('f1').reset();
+  return r.join(' ');
+})
+=== face-not-formassociated-in-form
+@html <form id=f1><x-n id=a name=n></x-n></form>
+(function () {
+  customElements.define('x-n', class extends HTMLElement { constructor() { super(); this.i = this.attachInternals() } });
+  var a = $('a'), r = [];
+  r.push(Array.from(new FormData($('f1'))).join(), nm(a.closest('form')));
+  r.push(err(function () { a.i.setFormValue('x') }), err(function () { return a.i.form }), err(function () { a.i.setValidity({}) }), err(function () { return a.i.willValidate }), err(function () { return a.i.checkValidity() }));
+  return r.join('\n');
+})
+=== face-form-callback-throws
+@html <form id=f1><x-f id=a></x-f></form>
+(function () {
+  customElements.define('x-f', class extends HTMLElement { static get formAssociated() { return true } formAssociatedCallback(f) { L('assoc') ; throw new Error('boom') } formResetCallback() { L('reset') } });
+  var fm = $('f1');
+  fm.reset();
+  return out();
+})

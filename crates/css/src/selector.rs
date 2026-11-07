@@ -108,6 +108,8 @@ pub enum Simple {
     Link,
     /// `:defined`: every element, except a custom element that no constructor has run for (`Document::is_defined`).
     Defined,
+    /// `:state(name)`: a custom element with that custom state (`Document::states`).
+    State(Box<str>),
     /// `:hover` and friends. Never true.
     Never,
     /// `:not(.a, b)`: true when none of the compounds match. Each one is a list of simple selectors.
@@ -416,6 +418,13 @@ impl Parser<'_, '_> {
                     }
                 }
                 Some(if kind == "not" { Simple::Not(args) } else { Simple::Is(args) })
+            }
+            Token::Function(name) if name.eq_ignore_ascii_case("state") => {
+                counts[1] += 1;
+                self.skip_space();
+                let Token::Ident(state) = self.tokens.next()? else { return None };
+                self.skip_space();
+                (self.tokens.next()? == Token::CloseParen).then(|| Simple::State(state.as_ref().into()))
             }
             Token::Function(name) => {
                 let (from_end, of_type) = match &*name.to_ascii_lowercase() {
