@@ -67,6 +67,8 @@ struct Sj {
     plist: Option<Rc<Vec<PropertyKey>>>,
     gap: Vec<u16>,
     k_to_json: PropertyKey,
+    /// The cache of the `toJSON` read (`Interp::get_prop_ic`).
+    to_json_ic: [Ic; 4],
     nodes: u64,
     written: usize,
     charged: usize,
@@ -167,7 +169,7 @@ impl<'p> Interp<'p> {
     fn json_stringify(&mut self, value: Value, replacer: Value, space: Value) -> Res<Value> {
         let lim = self.ext.bl.stringify;
         let k_to_json = h!(self, self.heap.key_from_str("toJSON"));
-        let mut st = Sj { out: Vec::new(), stack: Vec::new(), active: FxSet::default(), replacer: None, plist: None, gap: Vec::new(), k_to_json, nodes: 0, written: 0, charged: 0, lim };
+        let mut st = Sj { out: Vec::new(), stack: Vec::new(), active: FxSet::default(), replacer: None, plist: None, gap: Vec::new(), k_to_json, to_json_ic: [Ic::EMPTY; 4], nodes: 0, written: 0, charged: 0, lim };
         if let Value::Object(o) = replacer {
             if self.is_callable(replacer) {
                 st.replacer = Some(replacer);
@@ -293,7 +295,7 @@ impl<'p> Interp<'p> {
         }
         let mut key_v = None;
         if matches!(v, Value::Object(_) | Value::BigInt(_) | Value::BigHeap(_)) {
-            let f = self.get_prop(v, st.k_to_json)?;
+            let f = self.get_prop_ic(v, st.k_to_json, &mut st.to_json_ic)?;
             if self.is_callable(f) {
                 let kv = *key_v.insert(h!(self, self.heap.key_to_value(key)));
                 v = self.call_fn(f, v, &[kv])?;

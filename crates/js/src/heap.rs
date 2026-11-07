@@ -149,7 +149,7 @@ mod prim;
 mod proxy;
 #[path = "heap_shape.rs"]
 mod shape;
-pub use shape::Ic;
+pub use shape::{Ic, IcStats};
 use shape::Shapes;
 
 // ---------- property model ----------
@@ -391,6 +391,11 @@ struct Object {
     /// Bit 1: a function whose own `prototype` holds a placeholder (`LAZY_PROTO`). Bit 2: the host defines the `on*` accessors of this object
     /// on demand (`LAZY_ONS`, `Heap::set_lazy_on`).
     lazy: u8,
+    /// An inline cache fill walked over this object as a prototype (`heap_shape.rs`). A change of its keys, its attributes or its
+    /// prototype bumps `Heap::proto_epoch`.
+    ic_chain: bool,
+    /// A dictionary made in setup mode (`Heap::set_setup`). The first cache fill that walks it gives it shapes.
+    fast_on_use: bool,
     /// Dense index properties that are plain data (writable, enumerable, configurable).
     /// `None` is a hole. An index lives here or in `dict`, never in both.
     elems: Vec<Option<Value>>,
@@ -736,6 +741,12 @@ pub struct Heap {
     lazy_key: std::cell::Cell<Option<PropertyKey>>,
     /// Some object has `LAZY_ONS`.
     lazy_on_set: std::cell::Cell<bool>,
+    /// Bumped when an object with `ic_chain` changes its keys, its attributes or its prototype: every prototype and absent cache entry
+    /// filled before stops hitting. It saturates: at `u32::MAX` no such entry is filled again.
+    proto_epoch: u32,
+    ic_stats: IcStats,
+    /// Setup mode (`set_setup`).
+    setup: bool,
 }
 
 impl Default for Heap {
@@ -772,6 +783,9 @@ impl Heap {
             lazy_asked: Default::default(),
             lazy_key: Default::default(),
             lazy_on_set: Default::default(),
+            proto_epoch: 0,
+            ic_stats: IcStats::default(),
+            setup: false,
         };
         h.length = h.intern_str("length")?;
         h.shapes = Shapes::new(PropertyKey::String(h.length));
@@ -1159,7 +1173,7 @@ impl Heap {
         if !self.objects.can_alloc() { return Err(HeapError::Limit(Limit::Objects)); }
         // An array starts with its `length` in slot 0: the array root shape names it.
         let (shape, slots) = if is_array { (shape::ROOT_ARRAY, vec![Value::Number(0.0)]) } else { (shape::ROOT, Vec::new()) };
-        let o = Object { proto, shape, extensible: true, is_array, exotic: 0, lazy: 0, elems: Vec::new(), slots, dict: None };
+        let o = Object { proto, shape, extensible: true, is_array, exotic: 0, lazy: 0, ic_chain: false, fast_on_use: false, elems: Vec::new(), slots, dict: None };
         let cost = obj_bytes(&o);
         self.charge(cost)?;
         let (index, gn) = self.objects.alloc(o, Limit::Objects)?;
@@ -1229,6 +1243,7 @@ impl Heap {
             p = self.obj(x)?.proto;
         }
         // A new prototype sends the object to dictionary mode: a cache that names its shape must not outlive a change of chain.
+        self.chain_changed(o);
         self.edit_with(o, |ob, sh| {
             ob.to_dict(sh);
             ob.proto = proto;
@@ -1276,6 +1291,7 @@ impl Heap {
         let Some((_, kp, _)) = self.lazy else { return Err(HeapError::NeedsExecution("set_lazy_prototype first")) };
         let ob = self.obj(f)?;
         self.charge(ob.prop_cost())?;
+        self.chain_changed(f);
         self.edit_with(f, |ob, sh| {
             ob.set_prop(sh, kp, Property::Data { value: Value::Undefined, writable: true, enumerable: false, configurable: false });
             ob.lazy |= LAZY_PROTO;
@@ -1545,6 +1561,15 @@ impl Heap {
             Some((_, Property::Accessor { set: Some(s), .. })) => return Ok(Set::Setter(s)),
             Some((_, Property::Accessor { set: None, .. })) => return Ok(Set::Rejected),
             Some((_, Property::Data { writable: false, .. })) => return Ok(Set::Rejected),
+            // An own writable data property of an ordinary object: only its value changes, so the steps below (which find the key
+            // three more times) are not needed. Array `length` and index keys keep their own rules.
+            Some((h, _)) if h == o && !matches!(key, PropertyKey::Index(_)) => {
+                let length = PropertyKey::String(self.length);
+                let ob = self.objects.get_mut(o.index, o.gn).expect("lookup checked it");
+                if ob.exotic == 0 && ob.lazy == 0 && !(ob.is_array && key == length) && ob.set_value(&self.shapes, key, value) {
+                    return Ok(Set::Done);
+                }
+            }
             _ => {}
         }
         // Writable data property found (maybe on a prototype), or nothing: act on the receiver.
@@ -1572,6 +1597,7 @@ impl Heap {
         if !p.configurable() {
             return Ok(false);
         }
+        self.chain_changed(o);
         self.edit_with(o, |ob, sh| ob.remove(sh, key));
         Ok(true)
     }
@@ -1688,8 +1714,11 @@ impl Heap {
         let data = |value| Property::Data { value, writable: false, enumerable: false, configurable: true };
         self.edit_with(o, |ob, sh| {
             ob.reserve_props(2);
-            ob.set_prop(sh, length.0, data(Value::Number(length.1)));
-            ob.set_prop(sh, name.0, data(Value::String(name.1)));
+            // A fresh object has no key to find first. Any other object takes the general path.
+            if !(ob.shape == shape::ROOT && ob.init_fn(sh, (length.0, name.0), [Value::Number(length.1), Value::String(name.1)])) {
+                ob.set_prop(sh, length.0, data(Value::Number(length.1)));
+                ob.set_prop(sh, name.0, data(Value::String(name.1)));
+            }
         });
         Ok(())
     }
@@ -1773,8 +1802,21 @@ impl Heap {
             _ => 0,
         };
         self.charge(extra)?;
+        // Setup mode: a key that would make a new shape sends the object to a dictionary. Most objects of the realm (prototypes,
+        // namespaces) share no shape with another object, and most of them are never used. The first cache fill that walks one gives
+        // it shapes (`Heap::make_fast`).
+        let to_dict = self.setup && obj.dict.is_none() && obj.exotic == 0 && !self.shapes.has_child(obj.shape, key, shape::attrs_of(&new));
+        if obj.ic_chain && cur.map(|c| shape::attrs_of(&c)) != Some(shape::attrs_of(&new)) {
+            self.chain_changed(o);
+        }
         if cur.is_none() && !matches!(key, PropertyKey::Index(_)) {
-            self.edit_with(o, |ob, sh| ob.add_prop(sh, key, new));
+            self.edit_with(o, |ob, sh| {
+                if to_dict {
+                    ob.to_dict(sh);
+                    ob.fast_on_use = true;
+                }
+                ob.add_prop(sh, key, new)
+            });
         } else {
             self.edit_with(o, |ob, sh| ob.store(sh, key, new));
         }
@@ -1828,6 +1870,7 @@ impl Heap {
             floor.is_some()
         });
         if !new_writable {
+            self.chain_changed(o);
             self.edit_with(o, |ob, sh| ob.set_length(sh, None, Some(false)));
         }
         Ok(!blocked)
@@ -1958,6 +2001,7 @@ impl Heap {
         let moved = ob.elems.iter().flatten().count();
         let named = ob.dict.as_ref().map_or_else(|| self.shapes.count(ob.shape), |d| d.live as usize);
         self.charge((moved + if ob.dict.is_some() { 0 } else { named }) * (ENTRY_BYTES + INDEX_ENTRY_BYTES))?;
+        self.chain_changed(o);
         self.edit_with(o, |ob, sh| {
             ob.extensible = false;
             if moved + named == 0 {

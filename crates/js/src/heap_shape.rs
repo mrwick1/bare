@@ -20,13 +20,20 @@
 //! Shapes are never freed in this step (step A6). A dead key in a shape never matches a live key: a freed handle gets a new
 //! generation.
 //!
-//! The inline cache is the API of step A0 and nothing more. No cache is filled yet: `ic_own` never hits, and `get_ic` and `set_ic`
-//! run the plain `get` and `set`. The evaluator and the bytecode interpreter can call them now. The real cache (step A2) changes
-//! only this file and `heap.rs`. The contract is in `docs/decisions.md` ("Shapes and inline caches") and the plan is in
-//! `docs/engine-plan.md`.
+//! Inline caches (step A2). A site (`o.x` in the tree walker, a property instruction in bytecode) keeps an `Ic`: "last time, the receiver had
+//! this shape, and the property was in this slot of the receiver, or of this prototype, or nowhere". `Heap::ic_own` answers an own data hit
+//! inline: one handle check, one compare, one load. `Heap::get_ic` answers the other kinds out of line, and on a miss it walks the chain
+//! as `lookup` does and fills the entry.
 //!
-//! An `Ic` is plain `Copy` data with no pointer. In JS terms it is a small note that a call site keeps: "last time `o.x` had this
-//! shape, the value was in this slot". A handle in it that has died fails the generation check of every handle read.
+//! A prototype hit needs more than the shape of the receiver: two objects with one shape can have different prototypes, and the
+//! prototypes can change. So the entry keeps the receiver's prototype at fill time (`first`) and `Heap::proto_epoch`. Each prototype
+//! that a fill walks over gets the flag `ic_chain`. A change of the keys, the attributes or the prototype of a flagged object bumps the
+//! epoch, and every prototype and absent entry stops hitting. A change of a value needs nothing: the hit reads the value from the holder.
+//! A fill refuses a chain with an exotic object, a dictionary holder, a lazy `prototype` key or an `on*` name of the host: those keep
+//! the plain walk. The contract is in `docs/decisions.md` ("Shapes and inline caches") and the plan is in `docs/engine-plan.md`.
+//!
+//! An `Ic` is plain `Copy` data with no pointer. A handle in it that has died fails the generation check of every handle read. Shapes are
+//! never freed (until step A6), so a shape id in an entry never names another shape.
 use super::*;
 use std::cell::OnceCell;
 
@@ -102,6 +109,8 @@ pub(super) struct Shape {
 pub(super) struct Shapes {
     shapes: Vec<Shape>,
     tables: Vec<Table>,
+    /// The keys and the shape of `Object::init_fn`.
+    fn_shape: Option<((PropertyKey, PropertyKey), u32)>,
 }
 
 impl Shapes {
@@ -112,7 +121,7 @@ impl Shapes {
             Table { entries: Vec::new(), index: OnceCell::new() },
             Table { entries: vec![Entry { key: length, slot: 0, attrs: A_W }], index: OnceCell::new() },
         ];
-        Shapes { shapes: vec![shape(0, 0), shape(0, 0), shape(1, 1), shape(0, 0)], tables }
+        Shapes { shapes: vec![shape(0, 0), shape(0, 0), shape(1, 1), shape(0, 0)], tables, fn_shape: None }
     }
 
     /// How many shapes exist (the sentinel and the three roots included).
@@ -200,12 +209,26 @@ impl Shapes {
         Some(id)
     }
 
+    /// `add` of `key` with `attrs` to `from` finds a shape that exists.
+    pub(super) fn has_child(&self, from: u32, key: PropertyKey, attrs: u8) -> bool {
+        let s = &self.shapes[from as usize];
+        s.child.2 != 0 && s.child.0 == key && s.child.1 == attrs || s.children.as_ref().is_some_and(|m| m.contains_key(&(key, attrs)))
+    }
+
     pub(super) fn count(&self, shape: u32) -> usize {
         self.shapes[shape as usize].count as usize
     }
 
     pub(super) fn parent(&self, shape: u32) -> u32 {
         self.shapes[shape as usize].parent
+    }
+}
+
+/// What a read of the property `p` gives.
+fn get_of(p: Property) -> Get {
+    match p {
+        Property::Data { value, .. } => Get::Value(value),
+        Property::Accessor { get, .. } => Get::Accessor { getter: get },
     }
 }
 
@@ -255,9 +278,16 @@ impl Object {
     pub(super) fn get_prop(&self, sh: &Shapes, key: PropertyKey) -> Option<Property> {
         match &self.dict {
             Some(d) => d.get(key),
-            None if matches!(key, PropertyKey::Index(_)) => None,
-            None => sh.find(self.shape, key).map(|e| build(e.attrs, &self.slots[e.slot as usize..])),
+            // Each property of a shape has a slot: no slot, no property, and the shape is not read.
+            None if matches!(key, PropertyKey::Index(_)) || self.slots.is_empty() => None,
+            None => self.shape_get(sh, key),
         }
+    }
+
+    /// `get_prop` in shape mode. Out of line, as `PropMap::find`: the callers of `Heap::own` stay small enough to inline it.
+    #[inline(never)]
+    fn shape_get(&self, sh: &Shapes, key: PropertyKey) -> Option<Property> {
+        sh.find(self.shape, key).map(|e| build(e.attrs, &self.slots[e.slot as usize..]))
     }
 
     pub(super) fn props<'a>(&'a self, sh: &'a Shapes) -> Props<'a> {
@@ -290,6 +320,34 @@ impl Object {
         self.dict = Some(Box::new(m));
     }
 
+    /// Leave dictionary mode: the properties get shapes and slots, in their order. `false` (no change) when the dictionary holds an index
+    /// key, too many properties, an array `length` that is read-only, or when the shape table is full.
+    pub(super) fn to_shapes(&mut self, sh: &mut Shapes) -> bool {
+        let Some(d) = &self.dict else { return true };
+        if d.index_keys > 0 || d.live as usize > MAX_PROPS {
+            return false;
+        }
+        let mut props = d.iter();
+        let (mut shape, mut slots) = (ROOT, Vec::with_capacity(d.live as usize));
+        if self.is_array {
+            let Some((_, Property::Data { value, writable: true, .. })) = props.next() else { return false };
+            (shape, slots) = (ROOT_ARRAY, vec![value]);
+        }
+        for (k, p) in props {
+            let Some(next) = sh.add(shape, k, attrs_of(&p)) else { return false };
+            shape = next;
+            match p {
+                Property::Data { value, .. } => slots.push(value),
+                Property::Accessor { get, set, .. } => {
+                    slots.push(get.map_or(Value::Undefined, Value::Object));
+                    slots.push(set.map_or(Value::Undefined, Value::Object));
+                }
+            }
+        }
+        (self.shape, self.slots, self.dict) = (shape, slots, None);
+        true
+    }
+
     /// Write the own named property `key`: add it, or replace it. A change of attributes, an index key, or a full shape table
     /// sends the object to dictionary mode.
     pub(super) fn set_prop(&mut self, sh: &mut Shapes, key: PropertyKey, p: Property) {
@@ -318,10 +376,29 @@ impl Object {
         self.add_prop(sh, key, p);
     }
 
+    /// Give an object of the root shape the two read-only, configurable data properties `keys` (`Heap::init_function`). The shape of the
+    /// pair is kept: a realm makes hundreds of functions, and each skips two transition lookups. `false`: the shape table is full.
+    pub(super) fn init_fn(&mut self, sh: &mut Shapes, keys: (PropertyKey, PropertyKey), v: [Value; 2]) -> bool {
+        let shape = match sh.fn_shape {
+            Some((k, s)) if k == keys => s,
+            _ => {
+                let Some(s) = sh.add(ROOT, keys.0, A_C).and_then(|s| sh.add(s, keys.1, A_C)) else { return false };
+                sh.fn_shape = Some((keys, s));
+                s
+            }
+        };
+        self.shape = shape;
+        self.slots.extend(v);
+        true
+    }
+
     /// Add the own named property `key`, which the object does not have (the caller has looked).
     #[inline]
     pub(super) fn add_prop(&mut self, sh: &mut Shapes, key: PropertyKey, p: Property) {
-        if self.dict.is_none() && !matches!(key, PropertyKey::Index(_))
+        if let Some(d) = &mut self.dict {
+            return d.set(key, p);
+        }
+        if !matches!(key, PropertyKey::Index(_))
             && let Some(next) = sh.add(self.shape, key, attrs_of(&p))
         {
             self.shape = next;
@@ -338,21 +415,55 @@ impl Object {
         self.dict.as_mut().unwrap().set(key, p);
     }
 
-    /// Remove the own named property `key`. Only the last property added leaves shape mode intact.
+    /// Remove the own named property `key`. The last key, or any key of an object of at most `SCAN_MAX` properties, keeps shape
+    /// mode: the shape before `key` takes the later keys again, so objects that drop the same key share the new shapes (a reviver
+    /// that drops a key of each record). Another key of a larger object sends it to dictionary mode.
     pub(super) fn remove_prop(&mut self, sh: &mut Shapes, key: PropertyKey) -> bool {
         if let Some(d) = &mut self.dict {
             return d.remove(key);
         }
         let Some(pos) = sh.pos(self.shape, key) else { return false };
-        let parent = sh.parent(self.shape);
-        if pos + 1 == sh.count(self.shape) {
-            self.slots.truncate(sh.entries(self.shape)[pos].slot as usize);
-            self.shape = parent;
-        } else {
-            self.to_dict(sh);
-            self.dict.as_mut().unwrap().remove(key);
+        let n = sh.count(self.shape);
+        let gone = sh.entries(self.shape)[pos];
+        let mut base = sh.parent(self.shape);
+        if n <= SCAN_MAX || pos + 1 == n {
+            // Slots follow the order of the keys, so the later values only move down by the width of the removed one.
+            let mut later = [gone; SCAN_MAX];
+            later[..n - pos - 1].copy_from_slice(&sh.entries(self.shape)[pos + 1..]);
+            for _ in pos + 1..n {
+                base = sh.parent(base);
+            }
+            if let Some(next) = later[..n - pos - 1].iter().try_fold(base, |s, e| sh.add(s, e.key, e.attrs)) {
+                let w = 1 + (gone.attrs & A_ACC != 0) as usize;
+                self.slots.drain(gone.slot as usize..gone.slot as usize + w);
+                self.shape = next;
+                return true;
+            }
         }
+        self.to_dict(sh);
+        self.dict.as_mut().unwrap().remove(key);
         true
+    }
+
+    /// Change the value of the own data property `key`. `false`: no such property (an accessor, or not there).
+    #[inline]
+    pub(super) fn set_value(&mut self, sh: &Shapes, key: PropertyKey, v: Value) -> bool {
+        match &mut self.dict {
+            Some(d) => match d.find(key).map(|p| &mut d.entries[p]) {
+                Some(Some((_, Property::Data { value, .. }))) => {
+                    *value = v;
+                    true
+                }
+                _ => false,
+            },
+            None => match sh.find(self.shape, key) {
+                Some(e) if e.attrs & A_ACC == 0 => {
+                    self.slots[e.slot as usize] = v;
+                    true
+                }
+                _ => false,
+            },
+        }
     }
 
     /// Change the value of the data property at position `pos` (the hint of `own_pos`) if it is `key` and `writable` allows. `false`: not
@@ -436,44 +547,293 @@ impl Object {
     }
 }
 
-/// One inline cache entry. 24 bytes. A site that has no entry holds `Ic::EMPTY`.
+/// One inline cache entry: 24 bytes in a release build (a debug build also keeps the key, to check every hit). A site that has no
+/// entry holds `Ic::EMPTY`.
+///
+/// Kinds. `IC_OWN`: a data property of the receiver, in `slot`. `IC_OWN_ACC`: an accessor of the receiver (getter in `slot`). `IC_PROTO`
+/// and `IC_PROTO_ACC`: the property is on the prototype at `depth` (1 is the receiver's prototype). `IC_ABSENT`: no object of the chain
+/// has the key, and the chain has `depth` prototypes. The last three hold the receiver's first prototype in `first` and the epoch.
 #[derive(Clone, Copy, Debug)]
-#[allow(dead_code)] // the fields are written and read from step A2
 pub struct Ic {
-    /// The shape of the receiver that filled the entry.
+    /// The shape of the receiver that filled the entry. Kinds other than `IC_OWN` add `SHAPE_TAG`, so the inline `ic_own` needs one
+    /// compare. `EMPTY` holds `u32::MAX`, which no shape has.
     shape: u32,
-    /// The slot of the property in the receiver (own hit) or in the holder (prototype hit).
+    /// The first slot of the property, in the receiver (own kinds) or in the holder (prototype kinds).
     slot: u32,
-    /// `IC_EMPTY`, `IC_OWN`, `IC_PROTO` or `IC_ABSENT`.
     kind: u8,
-    /// The object that has the property, for a prototype hit.
-    holder: ObjId,
-    /// `Heap::proto_epoch` when the entry was filled, for a prototype hit and an absent hit.
+    depth: u8,
+    /// The prototype of the receiver at fill time (prototype and absent kinds with `depth` > 0).
+    first: ObjId,
+    /// `Heap::proto_epoch` at fill time (prototype and absent kinds).
     epoch: u32,
+    #[cfg(debug_assertions)]
+    key: Option<PropertyKey>,
 }
 
-#[allow(dead_code)] // used from step A2
 const IC_EMPTY: u8 = 0;
+const IC_OWN: u8 = 1;
+const IC_OWN_ACC: u8 = 2;
+const IC_PROTO: u8 = 3;
+const IC_PROTO_ACC: u8 = 4;
+const IC_ABSENT: u8 = 5;
+/// Added to the shape of every kind but `IC_OWN`. Shape ids stay below `SHAPE_CAP`, so the tag never makes a real id.
+const SHAPE_TAG: u32 = 1 << 31;
 
 impl Ic {
-    /// The entry of a site that has not run, or that missed. It never hits.
-    pub const EMPTY: Ic = Ic { shape: 0, slot: 0, kind: IC_EMPTY, holder: ObjId { index: 0, gn: 0 }, epoch: 0 };
+    /// The entry of a site that has not run, or that a fill refused. It never hits.
+    pub const EMPTY: Ic = Ic {
+        shape: u32::MAX,
+        slot: 0,
+        kind: IC_EMPTY,
+        depth: 0,
+        first: ObjId { index: 0, gn: 0 },
+        epoch: 0,
+        #[cfg(debug_assertions)]
+        key: None,
+    };
+}
+
+/// Counters of the cache (`Heap::ic_stats`). The evaluator counts the inline own hits itself.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct IcStats {
+    /// Hits in `get_ic`: an own accessor, a prototype or an absent key (and own data when the caller did not try `ic_own`).
+    pub chain_hits: u64,
+    /// Fills by the kind they made.
+    pub fill_own: u64,
+    pub fill_proto: u64,
+    pub fill_absent: u64,
+    /// Misses that could not fill: a dictionary or exotic object, a lazy name, an index key, a long chain.
+    pub refused: u64,
+    /// Bumps of `proto_epoch`.
+    pub epoch_bumps: u64,
 }
 
 impl Heap {
-    /// The value of an own data property of `o` when `ic` hits, else `None`. The caller runs `get_ic` on `None`. Always `None` now.
+    /// The value of an own data property of `o` when `ic` hits, else `None`. The caller runs `get_ic` on `None`. One handle check,
+    /// one compare and one load.
     #[inline(always)]
-    pub fn ic_own(&self, _o: ObjId, _ic: &Ic) -> Option<Value> {
-        None
+    pub fn ic_own(&self, o: ObjId, ic: &Ic) -> Option<Value> {
+        let ob = self.objects.get(o.index, o.gn)?;
+        if ob.shape != ic.shape {
+            return None;
+        }
+        let v = *ob.slots.get(ic.slot as usize)?;
+        #[cfg(debug_assertions)]
+        self.ic_verify(o, ic, Get::Value(v));
+        Some(v)
     }
 
-    /// `get`, and it fills `ic` for the next read. Out of line: it runs only on a miss. `ic` is not filled yet.
+    /// `o` has the shape that `ic` was filled for (a hit is likely). Picks the entry of a native site with more than one entry.
+    #[inline]
+    pub fn ic_shape_is(&self, o: ObjId, ic: &Ic) -> bool {
+        self.objects.get(o.index, o.gn).is_some_and(|ob| ob.shape == ic.shape & !SHAPE_TAG)
+    }
+
+    /// `get`, through `ic`: a hit of any kind, else the plain walk, which fills `ic` for the next read. Out of line, not cold: the
+    /// prototype hits (methods) run here.
+    #[inline(never)]
+    pub fn get_ic(&mut self, o: ObjId, key: PropertyKey, ic: &mut Ic) -> R<Get> {
+        if let Some(g) = self.ic_hit(o, ic) {
+            self.ic_stats.chain_hits += 1;
+            #[cfg(debug_assertions)]
+            self.ic_verify(o, ic, g);
+            return Ok(g);
+        }
+        // A receiver that is never cached (a proxy, a host object, a dictionary) skips the fill.
+        if self.objects.get(o.index, o.gn).is_some_and(|ob| ob.exotic != 0 || ob.dict.is_some() && !ob.fast_on_use) {
+            self.ic_stats.refused += 1;
+            return self.get(o, key);
+        }
+        self.ic_fill(o, key, ic)
+    }
+
+    #[inline(always)]
+    fn ic_hit(&self, o: ObjId, ic: &Ic) -> Option<Get> {
+        let ob = self.objects.get(o.index, o.gn)?;
+        if ob.shape != ic.shape & !SHAPE_TAG {
+            return None;
+        }
+        let slot = ic.slot as usize;
+        match ic.kind {
+            IC_OWN => return ob.slots.get(slot).map(|&v| Get::Value(v)),
+            IC_OWN_ACC => return ob.slots.get(slot).map(|&v| Get::Accessor { getter: obj_of(v) }),
+            IC_EMPTY => return None,
+            _ => {}
+        }
+        if ic.epoch != self.proto_epoch {
+            return None;
+        }
+        if ic.depth == 0 {
+            return ob.proto.is_none().then_some(Get::Value(Value::Undefined));
+        }
+        if ob.proto != Some(ic.first) {
+            return None;
+        }
+        if ic.kind == IC_ABSENT {
+            return Some(Get::Value(Value::Undefined));
+        }
+        // The epoch says that no object of the chain changed its prototype or its keys since the fill, so the holder is `depth - 1` steps on.
+        let mut h = self.objects.get(ic.first.index, ic.first.gn)?;
+        for _ in 1..ic.depth {
+            let p = h.proto?;
+            h = self.objects.get(p.index, p.gn)?;
+        }
+        if let Some(d) = &h.dict {
+            return d.entries.get(slot)?.map(|(_, p)| get_of(p));
+        }
+        let v = *h.slots.get(slot)?;
+        Some(if ic.kind == IC_PROTO { Get::Value(v) } else { Get::Accessor { getter: obj_of(v) } })
+    }
+
+    /// The miss: the plain walk, and a new entry when the chain allows one. The walk is `lookup` for an ordinary chain. Any chain that
+    /// `lookup` treats in a special way (an exotic object, a lazy name, a host ask) runs `get` and fills nothing.
     #[cold]
-    pub fn get_ic(&mut self, o: ObjId, key: PropertyKey, _ic: &mut Ic) -> R<Get> {
-        self.get(o, key)
+    #[inline(never)]
+    fn ic_fill(&mut self, o: ObjId, key: PropertyKey, ic: &mut Ic) -> R<Get> {
+        *ic = Ic::EMPTY;
+        match self.ic_make(o, key)? {
+            Some((new, g)) => {
+                *ic = new;
+                Ok(g)
+            }
+            None => {
+                self.ic_stats.refused += 1;
+                self.get(o, key)
+            }
+        }
     }
 
-    /// `set`, and it fills `ic` for the next write. `ic` is not filled yet.
+    fn ic_make(&mut self, o: ObjId, key: PropertyKey) -> R<Option<(Ic, Get)>> {
+        self.check_key(key)?;
+        if self.obj(o)?.fast_on_use {
+            self.make_fast(o);
+        }
+        let recv = self.obj(o)?;
+        if matches!(key, PropertyKey::Index(_)) || recv.dict.is_some() || recv.exotic != 0 || matches!(self.lazy, Some((_, kp, _)) if kp == key) {
+            return Ok(None);
+        }
+        let got = |attrs: u8, v: Value| if attrs & A_ACC != 0 { Get::Accessor { getter: obj_of(v) } } else { Get::Value(v) };
+        let mut ic = Ic { shape: recv.shape, kind: IC_OWN, ..Ic::EMPTY };
+        #[cfg(debug_assertions)]
+        {
+            ic.key = Some(key);
+        }
+        if let Some(&Entry { slot, attrs, .. }) = self.shapes.find(recv.shape, key) {
+            ic.slot = slot;
+            if attrs & A_ACC != 0 {
+                ic.kind = IC_OWN_ACC;
+                ic.shape |= SHAPE_TAG;
+            }
+            let g = got(attrs, recv.slots[slot as usize]);
+            self.ic_stats.fill_own += 1;
+            return Ok(Some((ic, g)));
+        }
+        if self.proto_epoch == u32::MAX {
+            return Ok(None);
+        }
+        let on = matches!(key, PropertyKey::String(s) if self.on_name(s));
+        let first = recv.proto;
+        let (mut cur, mut depth, mut found) = (first, 0u8, None);
+        while let Some(c) = cur {
+            if self.obj(c)?.fast_on_use {
+                self.make_fast(c);
+            }
+            let ob = self.obj(c)?;
+            if depth == u8::MAX || ob.exotic != 0 || on && ob.lazy & LAZY_CHAIN != 0 {
+                return Ok(None);
+            }
+            depth += 1;
+            if let Some(p) = self.own(ob, key) {
+                // A dictionary holder (a prototype with more than `MAX_PROPS` keys, or one that changed attributes) is read at its entry
+                // position: a delete or a new key moves positions, and both bump the epoch.
+                let slot = match &ob.dict {
+                    Some(d) => d.find(key).expect("own found it") as u32,
+                    None => self.shapes.find(ob.shape, key).expect("own found it").slot,
+                };
+                found = Some((slot, p));
+                break;
+            }
+            cur = ob.proto;
+        }
+        // Flag the walked prototypes: a later change of their keys or of their prototype bumps the epoch.
+        let mut cur = first;
+        for _ in 0..depth {
+            let c = cur.expect("walked above");
+            let ob = self.objects.get_mut(c.index, c.gn).expect("walked above");
+            ob.ic_chain = true;
+            cur = ob.proto;
+        }
+        ic.shape |= SHAPE_TAG;
+        ic.depth = depth;
+        ic.first = first.unwrap_or(ic.first);
+        ic.epoch = self.proto_epoch;
+        Ok(Some(match found {
+            Some((slot, p)) => {
+                ic.slot = slot;
+                ic.kind = if matches!(p, Property::Accessor { .. }) { IC_PROTO_ACC } else { IC_PROTO };
+                self.ic_stats.fill_proto += 1;
+                (ic, get_of(p))
+            }
+            None => {
+                ic.kind = IC_ABSENT;
+                self.ic_stats.fill_absent += 1;
+                (ic, Get::Value(Value::Undefined))
+            }
+        }))
+    }
+
+    /// Setup mode: while it is on, an object that would make a new shape for a new key goes to a dictionary instead (`fast_on_use`).
+    /// `Interp::realm` turns it on while it installs the builtins. A host can use it while it installs its own objects.
+    pub fn set_setup(&mut self, on: bool) {
+        self.setup = on;
+    }
+
+    /// Give shapes to a dictionary of setup mode. Its keys and their order stay, so no cache entry changes.
+    #[cold]
+    fn make_fast(&mut self, o: ObjId) {
+        self.edit_with(o, |ob, sh| {
+            ob.fast_on_use = false;
+            ob.to_shapes(sh);
+        });
+    }
+
+    /// A key, an attribute or the prototype of `o` changes. If a fill walked over `o`, every prototype and absent entry stops hitting.
+    #[inline]
+    pub(super) fn chain_changed(&mut self, o: ObjId) {
+        if self.objects.get(o.index, o.gn).is_some_and(|ob| ob.ic_chain) {
+            self.proto_epoch = self.proto_epoch.saturating_add(1);
+            self.ic_stats.epoch_bumps += 1;
+        }
+    }
+
+    /// The counters of the cache.
+    pub fn ic_stats(&self) -> IcStats {
+        self.ic_stats
+    }
+
+    /// Debug builds: a hit must give what the plain walk gives. A wrong cache is a silent wrong answer, so this panics.
+    #[cfg(debug_assertions)]
+    fn ic_verify(&self, o: ObjId, ic: &Ic, hit: Get) {
+        let key = ic.key.expect("a filled entry has its key");
+        let mut cur = Some(o);
+        let want = loop {
+            let Some(c) = cur else { break Get::Value(Value::Undefined) };
+            let ob = self.obj(c).expect("a live chain");
+            assert!(ob.exotic == 0, "a cache hit through an exotic object");
+            if let Some(p) = self.own(ob, key) {
+                break get_of(p);
+            }
+            cur = ob.proto;
+        };
+        let same = match (hit, want) {
+            (Get::Value(a), Get::Value(b)) => a.same_value(b),
+            (Get::Accessor { getter: a }, Get::Accessor { getter: b }) => a == b,
+            _ => false,
+        };
+        assert!(same, "inline cache hit {hit:?} but the walk gives {want:?} ({ic:?})");
+    }
+
+    /// `set`, and it fills `ic` for the next write. `ic` is not filled yet (step A3).
     #[cold]
     pub fn set_ic(&mut self, o: ObjId, key: PropertyKey, value: Value, _ic: &mut Ic) -> R<Set> {
         self.set(o, key, value)
@@ -484,19 +844,294 @@ impl Heap {
 mod tests {
     use super::*;
 
+    // ----- inline caches (step A2) -----
+
+    /// One read through a site entry, as the evaluator does it: the inline own hit, then `get_ic`. It must equal the plain `get`.
+    fn read(h: &mut Heap, o: ObjId, key: PropertyKey, ic: &mut Ic) -> Get {
+        let g = match h.ic_own(o, ic) {
+            Some(v) => Get::Value(v),
+            None => h.get_ic(o, key, ic).unwrap(),
+        };
+        let want = h.get(o, key).unwrap();
+        let same = match (g, want) {
+            (Get::Value(a), Get::Value(b)) => a.same_value(b),
+            (Get::Accessor { getter: a }, Get::Accessor { getter: b }) => a == b,
+            _ => false,
+        };
+        assert!(same, "{g:?} against {want:?}");
+        g
+    }
+    fn rnum(h: &mut Heap, o: ObjId, key: PropertyKey, ic: &mut Ic) -> Option<f64> {
+        match read(h, o, key, ic) {
+            Get::Value(Value::Number(x)) => Some(x),
+            Get::Value(Value::Undefined) => None,
+            g => panic!("{g:?}"),
+        }
+    }
+    /// The counters that changed since `before`: (chain hits, fills, refusals, epoch bumps).
+    fn delta(h: &Heap, before: IcStats) -> (u64, u64, u64, u64) {
+        let a = h.ic_stats();
+        let fills = |s: IcStats| s.fill_own + s.fill_proto + s.fill_absent;
+        (a.chain_hits - before.chain_hits, fills(a) - fills(before), a.refused - before.refused, a.epoch_bumps - before.epoch_bumps)
+    }
+
     #[test]
-    fn the_stub_never_hits_and_runs_the_plain_path() {
-        assert_eq!(size_of::<Ic>(), 24);
-        let mut h = Heap::new(HeapLimits::default()).unwrap();
+    fn an_entry_is_24_bytes_and_the_empty_entry_never_hits() {
+        if !cfg!(debug_assertions) {
+            assert_eq!(size_of::<Ic>(), 24);
+        }
+        let mut h = Heap::default();
+        let d = h.new_dict_object(None).unwrap();
         let o = h.new_object(None).unwrap();
-        let k = PropertyKey::String(h.intern_str("x").unwrap());
+        assert!(h.ic_own(d, &Ic::EMPTY).is_none() && h.ic_own(o, &Ic::EMPTY).is_none());
+        assert!(h.ic_hit(d, &Ic::EMPTY).is_none() && h.ic_hit(o, &Ic::EMPTY).is_none());
+    }
+
+    #[test]
+    fn an_own_hit_needs_the_same_shape_and_another_shape_refills() {
+        let mut h = Heap::default();
+        let (x, y) = (k(&mut h, "x"), k(&mut h, "y"));
+        let (a, b, c) = (h.new_object(None).unwrap(), h.new_object(None).unwrap(), h.new_object(None).unwrap());
+        setn(&mut h, a, x, 1.0);
+        setn(&mut h, b, x, 2.0);
+        setn(&mut h, c, y, 0.0);
+        setn(&mut h, c, x, 3.0);
         let mut ic = Ic::EMPTY;
+        assert_eq!(rnum(&mut h, a, x, &mut ic), Some(1.0));
+        assert_eq!(h.ic_own(b, &ic).and_then(num), Some(2.0), "b has the shape of a");
+        assert!(h.ic_own(c, &ic).is_none(), "c has another shape");
+        assert_eq!(rnum(&mut h, c, x, &mut ic), Some(3.0));
+        assert_eq!(h.ic_own(c, &ic).and_then(num), Some(3.0));
+        setn(&mut h, c, x, 4.0);
+        assert_eq!(h.ic_own(c, &ic).and_then(num), Some(4.0), "a value change keeps the shape");
+    }
+
+    #[test]
+    fn shadowing_on_the_receiver_a_middle_prototype_and_the_holder() {
+        let mut h = Heap::default();
+        let x = k(&mut h, "x");
+        let holder = h.new_object(None).unwrap();
+        let mid = h.new_object(Some(holder)).unwrap();
+        let r = h.new_object(Some(mid)).unwrap();
+        setn(&mut h, holder, x, 1.0);
+        let mut ic = Ic::EMPTY;
+        let s0 = h.ic_stats();
+        assert_eq!(rnum(&mut h, r, x, &mut ic), Some(1.0));
+        assert_eq!(rnum(&mut h, r, x, &mut ic), Some(1.0));
+        assert_eq!(delta(&h, s0), (1, 1, 0, 0), "one fill, then a prototype hit");
+        // A value change on the holder needs no invalidation.
+        setn(&mut h, holder, x, 2.0);
+        let s0 = h.ic_stats();
+        assert_eq!(rnum(&mut h, r, x, &mut ic), Some(2.0));
+        assert_eq!(delta(&h, s0), (1, 0, 0, 0));
+        // The same key on the middle prototype: the epoch moves, the entry refills at depth 1.
+        setn(&mut h, mid, x, 3.0);
+        let s0 = h.ic_stats();
+        assert_eq!(rnum(&mut h, r, x, &mut ic), Some(3.0));
+        assert_eq!(rnum(&mut h, r, x, &mut ic), Some(3.0));
+        assert_eq!(delta(&h, s0), (1, 1, 0, 0));
+        assert_eq!(h.ic_stats().epoch_bumps, 1);
+        // On the receiver: its shape changes.
+        setn(&mut h, r, x, 4.0);
+        assert_eq!(rnum(&mut h, r, x, &mut ic), Some(4.0));
+        assert_eq!(h.ic_own(r, &ic).and_then(num), Some(4.0));
+        // Delete on the holder (a flagged object): the epoch moves. Delete on the receiver: its shape goes back.
+        let mut ic2 = Ic::EMPTY;
+        let r2 = h.new_object(Some(holder)).unwrap();
+        assert_eq!(rnum(&mut h, r2, x, &mut ic2), Some(2.0));
+        assert!(h.delete(holder, x).unwrap());
+        assert_eq!(rnum(&mut h, r2, x, &mut ic2), None);
+        assert!(h.delete(r, x).unwrap());
+        assert_eq!(rnum(&mut h, r, x, &mut ic), Some(3.0));
+    }
+
+    #[test]
+    fn an_absent_key_hits_until_a_prototype_gets_it() {
+        let mut h = Heap::default();
+        let (x, y) = (k(&mut h, "x"), k(&mut h, "y"));
+        let p = h.new_object(None).unwrap();
+        let r = h.new_object(Some(p)).unwrap();
+        let bare = h.new_object(None).unwrap();
+        setn(&mut h, r, y, 0.0);
+        setn(&mut h, bare, y, 0.0);
+        let mut ic = Ic::EMPTY;
+        assert_eq!(rnum(&mut h, r, x, &mut ic), None);
+        let s0 = h.ic_stats();
+        assert_eq!(rnum(&mut h, r, x, &mut ic), None);
+        assert_eq!(delta(&h, s0), (1, 0, 0, 0));
+        assert_eq!(rnum(&mut h, bare, x, &mut ic), None, "the same shape with no prototype misses and refills");
+        assert_eq!(rnum(&mut h, r, x, &mut ic), None);
+        setn(&mut h, p, x, 5.0);
+        assert_eq!(rnum(&mut h, r, x, &mut ic), Some(5.0));
+        // A chain with no prototype: the entry holds depth 0.
+        let mut ic0 = Ic::EMPTY;
+        assert_eq!(rnum(&mut h, bare, x, &mut ic0), None);
+        let s0 = h.ic_stats();
+        assert_eq!(rnum(&mut h, bare, x, &mut ic0), None);
+        assert_eq!(delta(&h, s0), (1, 0, 0, 0));
+    }
+
+    #[test]
+    fn prototype_replacement_and_two_prototypes_with_one_shape() {
+        let mut h = Heap::default();
+        let x = k(&mut h, "x");
+        let (p1, p2, p3) = (h.new_object(None).unwrap(), h.new_object(None).unwrap(), h.new_object(None).unwrap());
+        setn(&mut h, p1, x, 1.0);
+        setn(&mut h, p2, x, 2.0);
+        let mid = h.new_object(Some(p1)).unwrap();
+        let (a, b) = (h.new_object(Some(mid)).unwrap(), h.new_object(Some(p2)).unwrap());
+        let mut ic = Ic::EMPTY;
+        assert_eq!(rnum(&mut h, a, x, &mut ic), Some(1.0));
+        assert_eq!(rnum(&mut h, b, x, &mut ic), Some(2.0), "same shape, another prototype: a miss");
+        assert_eq!(rnum(&mut h, a, x, &mut ic), Some(1.0));
+        // The prototype of a flagged middle object changes.
+        assert!(h.set_prototype_of(mid, Some(p2)).unwrap());
+        assert_eq!(rnum(&mut h, a, x, &mut ic), Some(2.0));
+        assert!(h.set_prototype_of(mid, Some(p3)).unwrap());
+        assert_eq!(rnum(&mut h, a, x, &mut ic), None);
+        // The prototype of the receiver changes: it goes to dictionary mode and is never cached.
+        assert!(h.set_prototype_of(a, Some(p1)).unwrap());
+        let s0 = h.ic_stats();
+        assert_eq!(rnum(&mut h, a, x, &mut ic), Some(1.0));
+        assert_eq!(rnum(&mut h, a, x, &mut ic), Some(1.0));
+        assert_eq!(delta(&h, s0), (0, 0, 2, 0));
+    }
+
+    #[test]
+    fn a_getter_turned_into_a_data_property_and_back() {
+        let mut h = Heap::default();
+        let x = k(&mut h, "x");
+        let (g, g2) = (h.new_object(None).unwrap(), h.new_object(None).unwrap());
+        let p = h.new_object(None).unwrap();
+        let r = h.new_object(Some(p)).unwrap();
+        let acc = |f| PropertyDescriptor { get: Some(Some(f)), configurable: Some(true), ..Default::default() };
+        assert!(def(&mut h, p, x, acc(g)));
+        let mut ic = Ic::EMPTY;
+        assert!(matches!(read(&mut h, r, x, &mut ic), Get::Accessor { getter: Some(f) } if f == g));
+        assert!(matches!(read(&mut h, r, x, &mut ic), Get::Accessor { getter: Some(f) } if f == g));
+        // Another getter with the same attributes: read from the holder at hit time.
+        assert!(def(&mut h, p, x, acc(g2)));
+        assert!(matches!(read(&mut h, r, x, &mut ic), Get::Accessor { getter: Some(f) } if f == g2));
+        assert!(def(&mut h, p, x, attrs(7.0, true, true, true)));
+        assert_eq!(rnum(&mut h, r, x, &mut ic), Some(7.0));
+        // An own accessor hits in `get_ic`, never in the inline own test.
+        let o = h.new_object(None).unwrap();
+        assert!(def(&mut h, o, x, acc(g)));
+        let mut ic = Ic::EMPTY;
+        read(&mut h, o, x, &mut ic);
         assert!(h.ic_own(o, &ic).is_none());
-        assert_eq!(h.set_ic(o, k, Value::Number(7.0), &mut ic), Ok(Set::Done));
-        assert!(h.ic_own(o, &ic).is_none());
-        assert!(matches!(h.get_ic(o, k, &mut ic), Ok(Get::Value(Value::Number(n))) if n == 7.0));
-        let missing = PropertyKey::String(h.intern_str("y").unwrap());
-        assert!(matches!(h.get_ic(o, missing, &mut ic), Ok(Get::Value(Value::Undefined))));
+        assert!(matches!(read(&mut h, o, x, &mut ic), Get::Accessor { getter: Some(f) } if f == g));
+    }
+
+    #[test]
+    fn exotic_objects_and_dictionary_receivers_are_never_cached() {
+        let mut h = Heap::default();
+        let (x, y) = (k(&mut h, "x"), k(&mut h, "y"));
+        let target = h.new_object(None).unwrap();
+        let handler = h.new_object(None).unwrap();
+        let proxy = h.new_proxy(target, handler).unwrap();
+        let r = h.new_object(Some(proxy)).unwrap();
+        let mut ic = Ic::EMPTY;
+        let s0 = h.ic_stats();
+        assert_eq!(h.get_ic(r, x, &mut ic).map(|_| ()), h.get(r, x).map(|_| ()), "the proxy answers, as for `get`");
+        assert!(h.get(r, x).is_err());
+        assert_eq!(delta(&h, s0), (0, 0, 1, 0));
+        // A receiver in dictionary mode.
+        let d = h.new_dict_object(None).unwrap();
+        setn(&mut h, d, x, 1.0);
+        setn(&mut h, d, y, 2.0);
+        assert!(h.delete(d, x).unwrap());
+        assert!(in_dict(&h, d));
+        let mut ic = Ic::EMPTY;
+        assert_eq!(rnum(&mut h, d, y, &mut ic), Some(2.0));
+        assert_eq!(rnum(&mut h, d, y, &mut ic), Some(2.0));
+        // A holder in dictionary mode is read at its entry position: a value write shows, a delete bumps the epoch.
+        let r2 = h.new_object(Some(d)).unwrap();
+        let mut ic = Ic::EMPTY;
+        let s0 = h.ic_stats();
+        assert_eq!(rnum(&mut h, r2, y, &mut ic), Some(2.0));
+        assert_eq!(rnum(&mut h, r2, y, &mut ic), Some(2.0));
+        assert_eq!(delta(&h, s0), (1, 1, 0, 0));
+        setn(&mut h, d, y, 5.0);
+        assert_eq!(rnum(&mut h, r2, y, &mut ic), Some(5.0));
+        assert!(h.delete(d, y).unwrap());
+        assert_eq!(rnum(&mut h, r2, y, &mut ic), None);
+        assert_eq!(delta(&h, s0), (2, 2, 0, 1));
+        // An index key (a site has one key, so it has its own entry).
+        let (s0, mut ic) = (h.ic_stats(), Ic::EMPTY);
+        let i = PropertyKey::Index(0);
+        assert_eq!(h.define_own_property(r2, i, &PropertyDescriptor::data(n(9.0))), Ok(true));
+        assert_eq!(rnum(&mut h, r2, i, &mut ic), Some(9.0));
+        assert_eq!(delta(&h, s0), (0, 0, 1, 0));
+    }
+
+    #[test]
+    fn a_collect_that_frees_the_holder_and_reuses_its_slot() {
+        let mut h = Heap::default();
+        let x = k(&mut h, "x");
+        let p = h.new_object(None).unwrap();
+        setn(&mut h, p, x, 1.0);
+        let r = h.new_object(Some(p)).unwrap();
+        let mut ic = Ic::EMPTY;
+        assert_eq!(rnum(&mut h, r, x, &mut ic), Some(1.0));
+        h.collect(&[Value::String(match x { PropertyKey::String(s) => s, _ => unreachable!() })]).unwrap();
+        assert!(h.obj(p).is_err() && h.obj(r).is_err());
+        assert!(matches!(h.get_ic(r, x, &mut ic), Err(HeapError::Stale)), "a dead receiver is an error, as for `get`");
+        // New objects in the freed slots: the same shapes, but new generations.
+        let q = h.new_object(None).unwrap();
+        setn(&mut h, q, x, 2.0);
+        let r2 = h.new_object(Some(q)).unwrap();
+        assert_eq!(rnum(&mut h, r2, x, &mut ic), Some(2.0));
+    }
+
+    #[test]
+    fn polymorphic_sites_with_2_and_5_shapes_read_the_right_values() {
+        let mut h = Heap::default();
+        let ks: Vec<PropertyKey> = (0..5).map(|i| k(&mut h, &format!("k{i}"))).collect();
+        let x = k(&mut h, "x");
+        let p = h.new_object(None).unwrap();
+        for n_shapes in [2, 5] {
+            let objs: Vec<ObjId> = (0..n_shapes)
+                .map(|i| {
+                    let o = h.new_object(Some(p)).unwrap();
+                    setn(&mut h, o, ks[i], 0.0);
+                    setn(&mut h, o, x, i as f64);
+                    o
+                })
+                .collect();
+            let mut ic = Ic::EMPTY;
+            for round in 0..20 {
+                for (i, &o) in objs.iter().enumerate() {
+                    assert_eq!(rnum(&mut h, o, x, &mut ic), Some(i as f64), "round {round}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_saturated_epoch_fills_only_own_entries() {
+        let mut h = Heap::default();
+        let x = k(&mut h, "x");
+        let p = h.new_object(None).unwrap();
+        setn(&mut h, p, x, 1.0);
+        let r = h.new_object(Some(p)).unwrap();
+        let mut ic = Ic::EMPTY;
+        assert_eq!(rnum(&mut h, r, x, &mut ic), Some(1.0));
+        h.proto_epoch = u32::MAX - 1;
+        let u = k(&mut h, "unused");
+        setn(&mut h, p, u, 0.0);
+        assert_eq!(h.proto_epoch, u32::MAX);
+        let s0 = h.ic_stats();
+        assert_eq!(rnum(&mut h, r, x, &mut ic), Some(1.0));
+        assert_eq!(rnum(&mut h, r, x, &mut ic), Some(1.0));
+        assert_eq!(delta(&h, s0), (0, 0, 2, 0));
+        setn(&mut h, p, x, 3.0);
+        assert_eq!(h.proto_epoch, u32::MAX, "it does not wrap");
+        let o = h.new_object(None).unwrap();
+        setn(&mut h, o, x, 4.0);
+        let mut ic = Ic::EMPTY;
+        assert_eq!(rnum(&mut h, o, x, &mut ic), Some(4.0));
+        assert_eq!(h.ic_own(o, &ic).and_then(num), Some(4.0));
     }
 
     // ----- shapes (step A1) -----
@@ -643,19 +1278,54 @@ mod tests {
         setn(&mut h, o, b, 3.0);
         assert_eq!(shape_of(&h, o), two);
         assert_eq!(getn(&mut h, o, b), 3.0);
-        // Deleting the first of two: dictionary mode, order of the rest kept, re-add goes last.
+        // Deleting the first of two: the object takes the shape of an object with only `b`, and a re-add goes last.
         assert!(h.delete(o, a).unwrap());
-        assert!(in_dict(&h, o));
-        assert_eq!(shape_of(&h, o), 0);
-        assert_eq!(keys_text(&mut h, o), ["b"]);
+        let q = h.new_object(None).unwrap();
+        setn(&mut h, q, b, 0.0);
+        assert!(!in_dict(&h, o));
+        assert_eq!(shape_of(&h, o), shape_of(&h, q));
+        assert_eq!((keys_text(&mut h, o), getn(&mut h, o, b)), (vec!["b".to_string()], 3.0));
         setn(&mut h, o, a, 4.0);
         assert_eq!(keys_text(&mut h, o), ["b", "a"]);
+        assert_eq!((getn(&mut h, o, a), getn(&mut h, o, b)), (4.0, 3.0));
         // Deleting a missing key, or the only property, is fine and a non-configurable property stays.
         let p = h.new_object(None).unwrap();
         assert!(h.delete(p, a).unwrap());
         assert!(def(&mut h, p, a, attrs(1.0, true, true, false)));
         assert!(!h.delete(p, a).unwrap());
         assert!(!in_dict(&h, p));
+    }
+
+    #[test]
+    fn deleting_a_middle_key_moves_the_later_values_down_and_keeps_accessors() {
+        let mut h = Heap::default();
+        let (a, g, c, d) = (k(&mut h, "a"), k(&mut h, "g"), k(&mut h, "c"), k(&mut h, "d"));
+        let getter = h.new_object(None).unwrap();
+        let mk = |h: &mut Heap| {
+            let o = h.new_object(None).unwrap();
+            setn(h, o, a, 1.0);
+            assert!(def(h, o, g, PropertyDescriptor { get: Some(Some(getter)), enumerable: Some(true), configurable: Some(true), ..Default::default() }));
+            setn(h, o, c, 3.0);
+            setn(h, o, d, 4.0);
+            o
+        };
+        // The accessor (two slots) goes: `c` and `d` move down by two.
+        let o = mk(&mut h);
+        assert!(h.delete(o, g).unwrap());
+        assert!(!in_dict(&h, o));
+        assert_eq!(h.obj(o).unwrap().slots.len(), 3);
+        assert_eq!(keys_text(&mut h, o), ["a", "c", "d"]);
+        assert_eq!((getn(&mut h, o, a), getn(&mut h, o, c), getn(&mut h, o, d)), (1.0, 3.0, 4.0));
+        // A data key before the accessor goes: the accessor moves down by one and keeps its getter.
+        let p = mk(&mut h);
+        assert!(h.delete(p, a).unwrap());
+        assert_eq!(keys_text(&mut h, p), ["g", "c", "d"]);
+        assert!(matches!(h.get_own_property(p, g).unwrap(), Some(Property::Accessor { get: Some(x), .. }) if x == getter));
+        assert_eq!((getn(&mut h, p, c), getn(&mut h, p, d)), (3.0, 4.0));
+        // Two objects that drop the same key share the new shape.
+        let q = mk(&mut h);
+        assert!(h.delete(q, a).unwrap());
+        assert_eq!(shape_of(&h, p), shape_of(&h, q));
     }
 
     #[test]
@@ -668,10 +1338,15 @@ mod tests {
             setn(h, o, b, 2.0);
             o
         };
-        // 1. delete a property that is not the last
+        // 1. delete a property that is not the last, of an object with more than SCAN_MAX properties
         let o = mk(&mut h);
+        for i in 0..SCAN_MAX {
+            let key = k(&mut h, &format!("q{i}"));
+            setn(&mut h, o, key, 0.0);
+        }
         h.delete(o, a).unwrap();
         assert!(in_dict(&h, o));
+        assert_eq!(getn(&mut h, o, b), 2.0);
         // 2. change an attribute of an existing property
         let o = mk(&mut h);
         assert!(def(&mut h, o, a, PropertyDescriptor { enumerable: Some(false), ..Default::default() }));
@@ -861,7 +1536,7 @@ mod tests {
         assert!(out.iter().any(|v| matches!(v, Value::Object(x) if *x == inner)));
         assert!(out.iter().any(|v| matches!(v, Value::Object(x) if *x == g)));
         // a dictionary object traces the same way
-        let d = h.new_object(None).unwrap();
+        let d = h.new_dict_object(None).unwrap();
         let (a, b) = (k(&mut h, "da"), k(&mut h, "db"));
         h.set(d, a, Value::Object(inner)).unwrap();
         setn(&mut h, d, b, 1.0);
@@ -889,6 +1564,9 @@ mod tests {
         assert_eq!((f.slots_used - base.slots_used, f.slots_cap - base.slots_cap), (3 * SLOT_BYTES, 3 * SLOT_BYTES));
         assert_eq!(f.entries_used, base.entries_used);
         assert!(f.shapes >= 4 && f.shape_bytes > 0);
+        // A new prototype sends `o` to a dictionary, where a delete leaves a hole.
+        let pr = h.new_object(None).unwrap();
+        h.set_prototype_of(o, Some(pr)).unwrap();
         h.delete(o, a).unwrap();
         let g = h.footprint();
         assert_eq!(g.dict_objects, base.dict_objects + 1);
@@ -930,7 +1608,9 @@ mod tests {
         let ap = h.own_pos(o, acc).unwrap();
         assert!(h.own_data_at(o, ap, acc).is_none());
         assert!(!h.set_own_data_at(o, ap, acc, n(1.0)));
-        // the same after a move to dictionary mode: positions are kept
+        // the same after a move to dictionary mode (a new prototype) and a delete: positions are kept
+        let pr = h.new_object(None).unwrap();
+        h.set_prototype_of(o, Some(pr)).unwrap();
         h.delete(o, a).unwrap();
         assert!(in_dict(&h, o));
         let pos2 = h.own_pos(o, b).unwrap();

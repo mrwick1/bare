@@ -669,6 +669,7 @@ impl<'p> Interp<'p> {
         Self::check_code_limits(prog, &limits)?;
         let mut it = Self::with_code(Rc::new(prog.clone().into_owned()), heap, limits)?;
         it.in_call(|it| it.walk_program())?;
+        it.heap.set_setup(true);
         it.install_builtins()?;
         it.install_sc()?;
         it.install_ext()?;
@@ -679,6 +680,7 @@ impl<'p> Interp<'p> {
         it.install_date()?;
         it.install_intl()?;
         it.install_bigint()?;
+        it.heap.set_setup(false);
         Ok(it)
     }
 
@@ -2716,6 +2718,13 @@ impl<'p> Interp<'p> {
                 if optional && is_nullish(base) {
                     return Ok(None);
                 }
+                if let Value::Object(o) = base {
+                    if let Some(v) = self.heap.ic_own(o, &self.ics.ics[self.expr_name[e.index()] as usize]) {
+                        self.ics.own_hits += 1;
+                        return Ok(Some((v, base)));
+                    }
+                    return Ok(Some((self.member_ic(e, name, o, base)?, base)));
+                }
                 let key = self.expr_key(e, name)?;
                 Ok(Some((self.get_prop(base, key)?, base)))
             }
@@ -3801,3 +3810,7 @@ mod recursion_tests;
 #[cfg(test)]
 #[path = "eval_statements_tests.rs"]
 mod statements_tests;
+
+#[cfg(test)]
+#[path = "eval_ic_tests.rs"]
+mod ic_tests;
