@@ -214,10 +214,9 @@ pub struct EvalStats {
 
 // ------------------------------------------------------------------ small internals
 
-/// `Interp::gc_due`: collect when the accounted heap is more than this many times the live size after the previous collect, and
-/// more than this many bytes.
-const GC_GROWTH: usize = 2;
-const GC_MIN_BYTES: usize = 4 << 20;
+/// `Interp::gc_due`: collect when the accounted heap is half as large again as what the previous collect left, and more than this many
+/// bytes. QuickJS (1.5 x the allocated size) and SpiderMonkey (low-frequency growth of 150%) use the same factor.
+const GC_MIN_BYTES: usize = 8 << 20;
 
 /// Capacity to keep in a table of `len` entries after a collect: twice the live entries, or the live entries plus
 /// `since` (what the program made since the previous collect), so steady churn does not shrink and regrow every
@@ -966,17 +965,7 @@ impl<'p> Interp<'p> {
             self.cls_trace(o, &mut work, &mut env_work);
             self.async_promise_trace(o, &mut work, &mut env_work, &mut act_seen);
             self.gen_trace(o, &mut work, &mut env_work);
-            let keys = h!(self, self.heap.stored_keys(o));
-            for k in keys {
-                match hx!(self, self.heap.peek_own_property(o, k)) {
-                    Some(Property::Data { value, .. }) => work.push(value),
-                    Some(Property::Accessor { get, set, .. }) => {
-                        work.extend(get.map(Value::Object));
-                        work.extend(set.map(Value::Object));
-                    }
-                    None => {}
-                }
-            }
+            h!(self, self.heap.stored_edges(o, &mut work));
             if let Some(p) = h!(self, self.heap.stored_prototype(o)) {
                 work.push(Value::Object(p));
             }
@@ -1009,11 +998,11 @@ impl<'p> Interp<'p> {
         Ok(r)
     }
 
-    /// Has the heap grown to `GC_GROWTH` times what the previous collect left (and past `GC_MIN_BYTES`), at a point where a collect can run?
+    /// Has the heap grown to 1.5 times what the previous collect left (and past `GC_MIN_BYTES`), at a point where a collect can run?
     /// The driver asks at each safe point (between tasks, after each key or click), so garbage cannot pile up while one call of the host
     /// runs many events. QuickJS and SpiderMonkey use the same rule: a limit that is a factor of the live size after the last collect.
     pub fn gc_due(&self) -> bool {
-        self.depth == 0 && self.stmt_frames == 0 && self.heap.used_bytes() > GC_MIN_BYTES.max(GC_GROWTH * self.gc_live)
+        self.depth == 0 && self.stmt_frames == 0 && self.heap.used_bytes() > GC_MIN_BYTES.max(self.gc_live + self.gc_live / 2)
     }
 
     /// Give back the capacity of the side tables after a burst died, by the rule of `Slab::trim` (see `trim_to`).

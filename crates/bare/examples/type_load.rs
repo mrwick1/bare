@@ -56,8 +56,12 @@ fn status_kib(key: &str) -> u64 {
     s.lines().find_map(|l| l.strip_prefix(key)).and_then(|v| v.trim().trim_end_matches("kB").trim().parse().ok()).unwrap_or(0)
 }
 
-/// One line of memory: RSS and peak RSS of the process, live and peak bytes of the allocator, and the JS heap.
+/// Where the memory is (only with `MEM=1`): RSS and peak RSS of the process, live and peak bytes of the allocator, the JS heap by part, the
+/// syntax trees and their caches, the environments and the function table.
 fn mem(s: &mut Session, what: &str) {
+    if std::env::var_os("MEM").is_none() {
+        return;
+    }
     if let Some(b) = s.browser() {
         let (e, m) = (b.it.stats(), |b: usize| b as f64 / 1048576.0);
         eprintln!("  interpreter {what}: syntax trees {:.2} (with source), their caches {:.2}, environments {:.2}, function table {:.2} MiB", m(e.ast_bytes), m(e.script_cache_bytes), m(e.env_bytes), m(e.func_bytes));
@@ -67,13 +71,15 @@ fn mem(s: &mut Session, what: &str) {
             "  footprint {what}: object slab {:.2}, property entries {:.2} used of {:.2} ({} objects), elements {:.2} of {:.2}, index tables {:.2}, string units {:.2}, string slab {:.2}, interner {:.2} MiB",
             m(f.object_slab), m(f.entries_used), m(f.entries_cap), f.objects_with_props, m(f.elems_used), m(f.elems_cap), m(f.index_tables), m(f.string_units), m(f.string_slab), m(f.interner),
         );
+        let by: Vec<String> = f.by_len.iter().zip(["0", "1", "2", "3", "4", "5-8", "9-16", "17-64", "65+"]).map(|(&(n, u, c), l)| format!("{l}: {n} objs {:.2}/{:.2}", m(u), m(c))).collect();
+        eprintln!("  entries by count ({what}, used/cap MiB): {}", by.join("; "));
     }
     let mib = |b: usize| b as f64 / 1048576.0;
     let (heap, ev) = s.browser().map_or(Default::default(), |b| (b.it.heap.stats(), b.it.stats()));
     eprintln!(
-        "mem {what}: rss {:.1} peak {:.1} MiB; alloc live {:.1} peak {:.1} MiB; js heap {:.1} MiB accounted ({} objects, {} strings), slabs {:.1} MiB; envs {}/{}, functions {}, scripts {} ({:.1} MiB source, {} nodes)",
+        "mem {what}: rss {:.1} peak {:.1} MiB; alloc live {:.1} peak {:.1} MiB; js heap {:.1} MiB accounted ({} objects, {} strings), slabs {:.1} MiB; envs {}/{}, functions {}, scripts {} ({:.1} MiB source, {} nodes), {} collections",
         status_kib("VmRSS:") as f64 / 1024.0, status_kib("VmHWM:") as f64 / 1024.0, mib(LIVE.load(Relaxed)), mib(PEAK.load(Relaxed)),
-        mib(heap.bytes), heap.live_objects, heap.live_strings, mib(heap.slab_capacity_bytes), ev.live_envs, ev.env_slots, ev.functions, ev.scripts, mib(ev.script_source), ev.script_nodes,
+        mib(heap.bytes), heap.live_objects, heap.live_strings, mib(heap.slab_capacity_bytes), ev.live_envs, ev.env_slots, ev.functions, ev.scripts, mib(ev.script_source), ev.script_nodes, heap.collections,
     );
 }
 
@@ -107,10 +113,13 @@ fn run(dir: &str, sel: &str, n: usize, virt: bool) {
     let r = s.run();
     let load = t.elapsed();
     mem(&mut s, "after load");
-    if let Some(b) = s.browser() {
+    if std::env::var_os("MEM").is_some() {
+        let b = s.browser().expect("browser");
+        let t = Instant::now();
         let _ = b.collect(&[]);
+        eprintln!("collect: {:.2} ms", t.elapsed().as_secs_f64() * 1000.0);
+        mem(&mut s, "after load + collect");
     }
-    mem(&mut s, "after load + collect");
     if r.stop != SessionStop::Page(Stop::Settled) {
         die(format!("load stopped: {:?}", r.stop));
     }
@@ -120,12 +129,6 @@ fn run(dir: &str, sel: &str, n: usize, virt: bool) {
     let r = if n == 0 { None } else { Some(s.resume(&[Input::Type(sel, &text)])) };
     let typed = t.elapsed();
     mem(&mut s, "after typing");
-    if let Some(b) = s.browser() {
-        let t = Instant::now();
-        let _ = b.collect(&[]);
-        eprintln!("collect: {:.2} ms, {} collections in all", t.elapsed().as_secs_f64() * 1000.0, b.it.heap.stats().collections);
-    }
-    mem(&mut s, "after typing + collect");
     if let Some(r) = &r
         && r.stop != SessionStop::Page(Stop::Settled) {
         die(format!("typing stopped: {:?}", r.stop));

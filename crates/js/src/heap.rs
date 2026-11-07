@@ -661,6 +661,8 @@ pub struct Footprint {
     pub index_tables: usize,
     pub string_units: usize,
     pub objects_with_props: usize,
+    /// Objects, and capacity bytes of their property vectors, by the number of entries: 0, 1, 2, 3, 4, 5 to 8, 9 to 16, 17 to 64, more.
+    pub by_len: [(usize, usize, usize); 9],
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -747,6 +749,11 @@ impl Heap {
             f.elems_cap += o.elems.capacity() * ELEM_BYTES;
             f.index_tables += o.props.index.as_ref().map_or(0, |m| m.capacity() * (std::mem::size_of::<(PropertyKey, u32)>() + 1));
             f.objects_with_props += (!o.props.entries.is_empty()) as usize;
+            let n = o.props.entries.len();
+            let b = match n { 0..=4 => n, 5..=8 => 5, 9..=16 => 6, 17..=64 => 7, _ => 8 };
+            f.by_len[b].0 += 1;
+            f.by_len[b].1 += n * ENTRY_BYTES;
+            f.by_len[b].2 += o.props.entries.capacity() * ENTRY_BYTES;
         }
         f.string_units = self.strings.live.iter().map(|s| s.units.len() * 2).sum();
         f
@@ -1422,8 +1429,21 @@ impl Heap {
     }
 
     /// Like `own_keys`, but without the virtual integer indices of a byte view. For tracing: those hold no references.
-    pub fn stored_keys(&self, o: ObjId) -> R<Vec<PropertyKey>> {
-        self.own_keys_with(o, false)
+    /// The values that the stored properties of `o` point to (elements, data values, accessor functions), pushed on `out`. The same edges as
+    /// `collect` follows, with no key lookup and no copy of the key list: the evaluator's collect pass uses it for each object.
+    pub fn stored_edges(&self, o: ObjId, out: &mut Vec<Value>) -> R<()> {
+        let ob = self.obj(o)?;
+        out.extend(ob.elems.iter().flatten());
+        for (_, p) in ob.props.iter() {
+            match p {
+                Property::Data { value, .. } => out.push(value),
+                Property::Accessor { get, set, .. } => {
+                    out.extend(get.map(Value::Object));
+                    out.extend(set.map(Value::Object));
+                }
+            }
+        }
+        Ok(())
     }
 
     fn own_keys_with(&self, o: ObjId, virt: bool) -> R<Vec<PropertyKey>> {
@@ -2882,6 +2902,32 @@ mod tests {
             }
             live = keep;
         }
+    }
+
+    /// `stored_edges` is what the evaluator's collect pass follows for an object: dense elements, sparse elements, data values and both accessor
+    /// functions. Primitive values are listed too (the caller skips them). A missing getter or setter adds nothing.
+    #[test]
+    fn stored_edges_lists_every_value_a_property_holds() {
+        let mut h = Heap::default();
+        let o = h.new_object(None).unwrap();
+        let (getter, setter, elem, sparse, data) = (h.new_object(None).unwrap(), h.new_object(None).unwrap(), h.new_object(None).unwrap(), h.new_object(None).unwrap(), h.new_object(None).unwrap());
+        let (acc, only_get, dk) = (key(&mut h, "acc"), key(&mut h, "only_get"), key(&mut h, "data"));
+        h.set(o, dk, Value::Object(data)).unwrap();
+        h.define_own_property(o, acc, &PropertyDescriptor { get: Some(Some(getter)), set: Some(Some(setter)), ..Default::default() }).unwrap();
+        h.define_own_property(o, only_get, &PropertyDescriptor { get: Some(Some(getter)), set: Some(None), ..Default::default() }).unwrap();
+        h.set(o, PropertyKey::Index(0), Value::Object(elem)).unwrap();
+        h.define_own_property(o, PropertyKey::Index(5000), &PropertyDescriptor { value: Some(Value::Object(sparse)), ..Default::default() }).unwrap();
+        let mut out = Vec::new();
+        h.stored_edges(o, &mut out).unwrap();
+        let mut got: Vec<ObjId> = out.iter().filter_map(|v| if let Value::Object(x) = v { Some(*x) } else { None }).collect();
+        got.sort_by_key(|x| x.index);
+        let mut want = vec![getter, setter, elem, sparse, data, getter];
+        want.sort_by_key(|x| x.index);
+        assert_eq!(got, want);
+        assert_eq!(out.len(), 6, "no other value is listed");
+        let stale = h.new_object(None).unwrap();
+        h.collect(&[]).unwrap();
+        assert_eq!(h.stored_edges(stale, &mut out), Err(HeapError::Stale));
     }
 
     #[test]
