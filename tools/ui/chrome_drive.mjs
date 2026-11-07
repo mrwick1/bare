@@ -1,5 +1,6 @@
 // Record what headless Chrome logs for the driver scenarios of tools/fixtures/ui/drive-steps.txt on tools/fixtures/ui/drive.html.
 // Usage: node tools/ui/chrome_drive.mjs OUT [STEPS PAGE]  (defaults: drive-steps.txt on drive.html; `react-steps.txt react.html` is the React field page)
+// Mouse steps on a text control: `clickat SEL K` (the boundary K of its text), `dblclick SEL K` and `tripleclick SEL K` (the boundary K, two and three presses), `drag SEL A B` (boundary A to boundary B).
 // A step is what `Input::Click`, `Input::Key` and `Input::Type` do in bare, sent through the input pipeline of a device
 // (`Input.dispatchMouseEvent`, `Input.dispatchKeyEvent`). The bare test is `crates/bare/src/browser_drive_tests.rs`.
 import { readFileSync, writeFileSync } from 'node:fs';
@@ -56,12 +57,43 @@ const click = async (sel) => {
   await c.mouse('mouseReleased', x, y, { button: 'left', buttons: 0, clickCount: 1 });
   await sleep(100);
 };
+// The point of a text control at the boundary `a` of its text, or the middle between the boundaries `a` and `b`.
+const textPoint = async (sel, a, b) => c.eval(`(function () {
+  var e = document.querySelector(${JSON.stringify(sel)}), cs = getComputedStyle(e), cv = document.createElement('canvas').getContext('2d'), r = e.getBoundingClientRect();
+  cv.font = cs.font;
+  var w = function (n) { return cv.measureText(e.value.slice(0, n)).width };
+  var top = r.top + parseFloat(cs.borderTopWidth) + parseFloat(cs.paddingTop);
+  return [r.left + parseFloat(cs.borderLeftWidth) + parseFloat(cs.paddingLeft) + (w(${a}) + w(${b})) / 2, e.tagName === 'TEXTAREA' ? top + 8 : r.top + r.height / 2];
+})()`);
+const pressAt = async (x, y, n) => {
+  await c.mouse('mousePressed', x, y, { button: 'left', buttons: 1, clickCount: n, force: 0.5 });
+  await sleep(40);
+  await c.mouse('mouseReleased', x, y, { button: 'left', buttons: 0, clickCount: n });
+  await sleep(40);
+};
 const run = async (step) => {
   const [verb, sel, ...rest] = step.split(' ');
   const text = rest.join(' ');
   if (verb === 'reset') { await sleep(100); await c.eval('window.__log.length = 0'); }
   else if (verb === 'eval') await c.eval(text);
   else if (verb === 'click') await click(sel);
+  else if (verb === 'clickat' || verb === 'dblclick' || verb === 'tripleclick') {
+    const k = +text, [x, y] = await textPoint(sel, k, k);
+    await c.mouse('mouseMoved', x, y);
+    await sleep(120);
+    for (let n = 1; n <= (verb === 'clickat' ? 1 : verb === 'dblclick' ? 2 : 3); n++) await pressAt(x, y, n);
+    await sleep(100);
+  } else if (verb === 'drag') {
+    const [a, b] = text.split(' ').map(Number), [x0, y] = await textPoint(sel, a, a), [x1] = await textPoint(sel, b, b);
+    await c.mouse('mouseMoved', x0, y);
+    await sleep(120);
+    await c.mouse('mousePressed', x0, y, { button: 'left', buttons: 1, clickCount: 1, force: 0.5 });
+    await sleep(60);
+    await c.mouse('mouseMoved', x1, y, { button: 'left', buttons: 1 });
+    await sleep(60);
+    await c.mouse('mouseReleased', x1, y, { button: 'left', buttons: 0, clickCount: 1 });
+    await sleep(100);
+  }
   else if (verb === 'key') {
     if (sel !== '-') await c.eval(`document.querySelector(${JSON.stringify(sel)}).focus()`);
     await sleep(50);

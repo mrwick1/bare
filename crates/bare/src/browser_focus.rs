@@ -58,8 +58,9 @@ const MAX_DEPTH: u8 = 16;
 #[derive(Default)]
 pub(crate) struct FocusState {
     pub node: Option<NodeId>,
-    /// The element focused last. Chrome keeps the page selection in it after a blur, and a text control that holds the page selection never
-    /// has the direction `none` (`browser_selection.rs`).
+    /// The text control that holds the page selection: the last one that took focus. A blur and the focus of another kind of element leave it
+    /// there; a press on the page takes it away. Chrome sends `selectionchange` to a control that takes the page selection
+    /// (`Dom::focus_selection`, `tools/fixtures/ui/chrome-sel.txt`).
     pub sel_owner: Option<NodeId>,
     /// Raised at each change of the focused element. A transition that sees a new value stops.
     pub epoch: u64,
@@ -149,7 +150,6 @@ impl Dom {
     fn set_focus(&self, n: Option<NodeId>) {
         let mut st = self.st.borrow_mut();
         st.focus.node = n;
-        st.focus.sel_owner = n.or(st.focus.sel_owner);
         st.focus.epoch += 1;
     }
 
@@ -225,6 +225,7 @@ impl Dom {
             return Ok(());
         }
         self.set_focus(Some(b));
+        self.focus_selection(b)?;
         let e = self.epoch();
         self.fire_focus(it, b, "focus", false, old)?;
         if self.current_focus(it)? == Some(b) && self.epoch() == e {

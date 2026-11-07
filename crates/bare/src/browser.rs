@@ -1220,6 +1220,7 @@ pub(crate) static DEFS: &[Def] = &[
     Def { on: &[Input], name: "selectionDirection", len: 0, kind: A(sel::selection_direction, sel::set_selection_direction) },
     Def { on: &[Input], name: "setSelectionRange", len: 2, kind: M(sel::set_selection_range_method) },
     Def { on: &[Input], name: "select", len: 0, kind: M(sel::select_method) },
+    Def { on: &[Input], name: "setRangeText", len: 1, kind: M(sel::set_range_text_input) },
     Def { on: &[Input], name: "type", len: 0, kind: A(nd::input_type, nd::set_input_type) },
     Def { on: &[Input], name: "defaultValue", len: 0, kind: A(nd::default_value, nd::set_default_value) },
     Def { on: &[Input], name: "defaultChecked", len: 0, kind: A(nd::default_checked, nd::set_default_checked) },

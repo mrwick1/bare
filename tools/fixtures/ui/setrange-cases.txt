@@ -1,0 +1,214 @@
+var $ = function (i) { return document.getElementById(i) };
+var sel = function (t) { return t.selectionStart + ',' + t.selectionEnd + ',' + t.selectionDirection };
+var err = function (f) { try { var v = f(); return 'ok ' + String(v) } catch (e) { return e.name + ':' + e.message } };
+var log = [];
+=== 1arg-fresh
+@html <input id=i value="hello world">
+(function () { var i = $('i'), t = $('t'); ; var r = (function(){ i.setRangeText('XY'); return 'ok' })(); return [r, i.value, sel(i)].join('|') })
+=== 1arg-range
+@html <input id=i value="hello world">
+(function () { var i = $('i'), t = $('t'); i.setSelectionRange(2, 4); var r = (function(){ i.setRangeText('XYZ'); return 'ok' })(); return [r, i.value, sel(i)].join('|') })
+=== 1arg-caret
+@html <input id=i value="hello world">
+(function () { var i = $('i'), t = $('t'); i.setSelectionRange(3, 3); var r = (function(){ i.setRangeText('XYZ'); return 'ok' })(); return [r, i.value, sel(i)].join('|') })
+=== 1arg-backward
+@html <input id=i value="hello world">
+(function () { var i = $('i'), t = $('t'); i.setSelectionRange(2, 5, 'backward'); var r = (function(){ i.setRangeText('XYZ'); return 'ok' })(); return [r, i.value, sel(i)].join('|') })
+=== 1arg-after-value
+@html <input id=i value="hello world">
+(function () { var i = $('i'), t = $('t'); i.value = 'abc'; var r = (function(){ i.setRangeText('X'); return 'ok' })(); return [r, i.value, sel(i)].join('|') })
+=== 1arg-empty-string
+@html <input id=i value="hello world">
+(function () { var i = $('i'), t = $('t'); i.setSelectionRange(2, 4); var r = (function(){ i.setRangeText(''); return 'ok' })(); return [r, i.value, sel(i)].join('|') })
+=== 1arg-number-arg
+@html <input id=i value="hello world">
+(function () { var i = $('i'), t = $('t'); i.setSelectionRange(2, 4); var r = (function(){ i.setRangeText(12); return 'ok' })(); return [r, i.value, sel(i)].join('|') })
+=== 1arg-null
+@html <input id=i value="hello world">
+(function () { var i = $('i'), t = $('t'); i.setSelectionRange(2, 4); var r = (function(){ i.setRangeText(null); return 'ok' })(); return [r, i.value, sel(i)].join('|') })
+=== 1arg-undefined
+@html <input id=i value="hello world">
+(function () { var i = $('i'), t = $('t'); i.setSelectionRange(2, 4); var r = (function(){ i.setRangeText(undefined); return 'ok' })(); return [r, i.value, sel(i)].join('|') })
+=== 4arg-select
+@html <input id=i value="hello world">
+(function () { var i = $('i'), t = $('t'); i.setSelectionRange(2, 4); var r = (function(){ i.setRangeText('XYZ', 1, 3, 'select'); return 'ok' })(); return [r, i.value, sel(i)].join('|') })
+=== 4arg-start
+@html <input id=i value="hello world">
+(function () { var i = $('i'), t = $('t'); i.setSelectionRange(2, 4); var r = (function(){ i.setRangeText('XYZ', 1, 3, 'start'); return 'ok' })(); return [r, i.value, sel(i)].join('|') })
+=== 4arg-end
+@html <input id=i value="hello world">
+(function () { var i = $('i'), t = $('t'); i.setSelectionRange(2, 4); var r = (function(){ i.setRangeText('XYZ', 1, 3, 'end'); return 'ok' })(); return [r, i.value, sel(i)].join('|') })
+=== 4arg-preserve
+@html <input id=i value="hello world">
+(function () { var i = $('i'), t = $('t'); i.setSelectionRange(2, 4); var r = (function(){ i.setRangeText('XYZ', 1, 3, 'preserve'); return 'ok' })(); return [r, i.value, sel(i)].join('|') })
+=== 3arg-default-mode
+@html <input id=i value="hello world">
+(function () { var i = $('i'), t = $('t'); i.setSelectionRange(8, 10); var r = (function(){ i.setRangeText('XYZ', 1, 3); return 'ok' })(); return [r, i.value, sel(i)].join('|') })
+=== preserve-before
+@html <input id=i value="hello world">
+(function () { var i = $('i'), t = $('t'); i.setSelectionRange(8, 10); var r = (function(){ i.setRangeText('XYZ', 1, 3, 'preserve'); return 'ok' })(); return [r, i.value, sel(i)].join('|') })
+=== preserve-inside
+@html <input id=i value="hello world">
+(function () { var i = $('i'), t = $('t'); i.setSelectionRange(2, 5); var r = (function(){ i.setRangeText('XYZ', 1, 3, 'preserve'); return 'ok' })(); return [r, i.value, sel(i)].join('|') })
+=== preserve-after
+@html <input id=i value="hello world">
+(function () { var i = $('i'), t = $('t'); i.setSelectionRange(0, 1); var r = (function(){ i.setRangeText('XYZ', 1, 3, 'preserve'); return 'ok' })(); return [r, i.value, sel(i)].join('|') })
+=== preserve-spanning
+@html <input id=i value="hello world">
+(function () { var i = $('i'), t = $('t'); i.setSelectionRange(0, 10); var r = (function(){ i.setRangeText('X', 2, 4, 'preserve'); return 'ok' })(); return [r, i.value, sel(i)].join('|') })
+=== preserve-shrink
+@html <input id=i value="hello world">
+(function () { var i = $('i'), t = $('t'); i.setSelectionRange(2, 8); var r = (function(){ i.setRangeText('', 2, 5, 'preserve'); return 'ok' })(); return [r, i.value, sel(i)].join('|') })
+=== preserve-at-edges
+@html <input id=i value="hello world">
+(function () { var i = $('i'), t = $('t'); i.setSelectionRange(1, 3); var r = (function(){ i.setRangeText('XYZ', 1, 3, 'preserve'); return 'ok' })(); return [r, i.value, sel(i)].join('|') })
+=== preserve-backward
+@html <input id=i value="hello world">
+(function () { var i = $('i'), t = $('t'); i.setSelectionRange(8, 10, 'backward'); var r = (function(){ i.setRangeText('XYZ', 1, 3, 'preserve'); return 'ok' })(); return [r, i.value, sel(i)].join('|') })
+=== select-backward
+@html <input id=i value="hello world">
+(function () { var i = $('i'), t = $('t'); i.setSelectionRange(8, 10, 'backward'); var r = (function(){ i.setRangeText('XYZ', 1, 3, 'select'); return 'ok' })(); return [r, i.value, sel(i)].join('|') })
+=== start-gt-length
+@html <input id=i value="hello world">
+(function () { var i = $('i'), t = $('t'); i.setSelectionRange(2, 4); var r = (function(){ i.setRangeText('X', 50, 60); return 'ok' })(); return [r, i.value, sel(i)].join('|') })
+=== end-gt-length
+@html <input id=i value="hello world">
+(function () { var i = $('i'), t = $('t'); i.setSelectionRange(2, 4); var r = (function(){ i.setRangeText('X', 2, 60); return 'ok' })(); return [r, i.value, sel(i)].join('|') })
+=== end-gt-length-select
+@html <input id=i value="hello world">
+(function () { var i = $('i'), t = $('t'); ; var r = (function(){ i.setRangeText('X', 2, 60, 'select'); return 'ok' })(); return [r, i.value, sel(i)].join('|') })
+=== end-gt-length-end
+@html <input id=i value="hello world">
+(function () { var i = $('i'), t = $('t'); ; var r = (function(){ i.setRangeText('X', 2, 60, 'end'); return 'ok' })(); return [r, i.value, sel(i)].join('|') })
+=== empty-range
+@html <input id=i value="hello world">
+(function () { var i = $('i'), t = $('t'); i.setSelectionRange(0, 0); var r = (function(){ i.setRangeText('X', 4, 4, 'end'); return 'ok' })(); return [r, i.value, sel(i)].join('|') })
+=== insert-at-end
+@html <input id=i value="hello world">
+(function () { var i = $('i'), t = $('t'); ; var r = (function(){ i.setRangeText('!', 11, 11, 'select'); return 'ok' })(); return [r, i.value, sel(i)].join('|') })
+=== negative-end
+@html <input id=i value="hello world">
+(function () { var i = $('i'), t = $('t'); ; var r = (function(){ i.setRangeText('X', 0, -1); return 'ok' })(); return [r, i.value, sel(i)].join('|') })
+=== fraction
+@html <input id=i value="hello world">
+(function () { var i = $('i'), t = $('t'); ; var r = (function(){ i.setRangeText('X', 1.9, 3.9); return 'ok' })(); return [r, i.value, sel(i)].join('|') })
+=== numeric-strings
+@html <input id=i value="hello world">
+(function () { var i = $('i'), t = $('t'); ; var r = (function(){ i.setRangeText('X', '1', '3'); return 'ok' })(); return [r, i.value, sel(i)].join('|') })
+=== surrogates
+@html <input id=i value="hello world">
+(function () { var i = $('i'), t = $('t'); i.value = 'a\ud83d\ude00b'; i.setSelectionRange(1, 3); var r = (function(){ i.setRangeText('X'); return 'ok' })(); return [r, i.value, sel(i)].join('|') })
+=== surrogate-split
+@html <input id=i value="hello world">
+(function () { var i = $('i'), t = $('t'); i.value = 'a\ud83d\ude00b'; var r = (function(){ i.setRangeText('X', 2, 3, 'end'); return 'ok' })(); return [r, i.value, sel(i)].join('|') })
+=== textarea-1arg
+@html <textarea id=t>abc def</textarea>
+(function () { var i = $('i'), t = $('t'); t.setSelectionRange(1, 2); i = t; var r = (function(){ t.setRangeText('XY'); return 'ok' })(); return [r, i.value, sel(i)].join('|') })
+=== textarea-fresh-1arg
+@html <textarea id=t>abc def</textarea>
+(function () { var i = $('i'), t = $('t'); i = t; var r = (function(){ i.setRangeText('XY'); return 'ok' })(); return [r, i.value, sel(i)].join('|') })
+=== textarea-4arg
+@html <textarea id=t>abc def</textarea>
+(function () { var i = $('i'), t = $('t'); i = t; var r = (function(){ i.setRangeText('XY', 1, 2, 'select'); return 'ok' })(); return [r, i.value, sel(i)].join('|') })
+=== textarea-lines
+@html <textarea id=t>abc def</textarea>
+(function () { var i = $('i'), t = $('t'); i = t; var r = (function(){ i.setRangeText('\r\n', 3, 3, 'end'); return 'ok' })(); return [r, i.value, sel(i)].join('|') })
+=== textarea-after-value
+@html <textarea id=t>abc def</textarea>
+(function () { var i = $('i'), t = $('t'); t.value = 'q'; i = t; var r = (function(){ i.setRangeText('XY'); return 'ok' })(); return [r, i.value, sel(i)].join('|') })
+=== type-email
+@html <input id=i type=email value="1">
+(function () { var i = $('i'); return err(function () { return i.setRangeText('X') }) + '|' + err(function () { return i.setRangeText('X', 0, 1, 'select') }) })
+=== type-number
+@html <input id=i type=number value="1">
+(function () { var i = $('i'); return err(function () { return i.setRangeText('X') }) + '|' + err(function () { return i.setRangeText('X', 0, 1, 'select') }) })
+=== type-checkbox
+@html <input id=i type=checkbox value="1">
+(function () { var i = $('i'); return err(function () { return i.setRangeText('X') }) + '|' + err(function () { return i.setRangeText('X', 0, 1, 'select') }) })
+=== type-date
+@html <input id=i type=date value="1">
+(function () { var i = $('i'); return err(function () { return i.setRangeText('X') }) + '|' + err(function () { return i.setRangeText('X', 0, 1, 'select') }) })
+=== type-hidden
+@html <input id=i type=hidden value="1">
+(function () { var i = $('i'); return err(function () { return i.setRangeText('X') }) + '|' + err(function () { return i.setRangeText('X', 0, 1, 'select') }) })
+=== type-range
+@html <input id=i type=range value="1">
+(function () { var i = $('i'); return err(function () { return i.setRangeText('X') }) + '|' + err(function () { return i.setRangeText('X', 0, 1, 'select') }) })
+=== type-color
+@html <input id=i type=color value="1">
+(function () { var i = $('i'); return err(function () { return i.setRangeText('X') }) + '|' + err(function () { return i.setRangeText('X', 0, 1, 'select') }) })
+=== type-file
+@html <input id=i type=file value="1">
+(function () { var i = $('i'); return err(function () { return i.setRangeText('X') }) + '|' + err(function () { return i.setRangeText('X', 0, 1, 'select') }) })
+=== type-submit
+@html <input id=i type=submit value="1">
+(function () { var i = $('i'); return err(function () { return i.setRangeText('X') }) + '|' + err(function () { return i.setRangeText('X', 0, 1, 'select') }) })
+=== type-text
+@html <input id=i type=text value="12345">
+(function () { var i = $('i'); i.setRangeText('X', 1, 2, 'select'); return i.value + '|' + sel(i) })
+=== type-search
+@html <input id=i type=search value="12345">
+(function () { var i = $('i'); i.setRangeText('X', 1, 2, 'select'); return i.value + '|' + sel(i) })
+=== type-tel
+@html <input id=i type=tel value="12345">
+(function () { var i = $('i'); i.setRangeText('X', 1, 2, 'select'); return i.value + '|' + sel(i) })
+=== type-url
+@html <input id=i type=url value="12345">
+(function () { var i = $('i'); i.setRangeText('X', 1, 2, 'select'); return i.value + '|' + sel(i) })
+=== type-password
+@html <input id=i type=password value="12345">
+(function () { var i = $('i'); i.setRangeText('X', 1, 2, 'select'); return i.value + '|' + sel(i) })
+=== errors
+@html <input id=i value="hello world">
+(function () { var i = $('i'); return [err(function () { return i.setRangeText('X', 5, 2) }), err(function () { return i.setRangeText('X', 5, 2, 'select') }), err(function () { return i.setRangeText('X', -1, 2) }), err(function () { return i.setRangeText('X', 1, 2, 'bogus') }), err(function () { return i.setRangeText('X', 1, 2, null) }), err(function () { return i.setRangeText('X', 1, 2, undefined) }), err(function () { return i.setRangeText('X', 1) }), err(function () { return i.setRangeText() }), err(function () { return i.setRangeText('X', 1, 2, 'SELECT') }), i.value].join('~') })
+=== errors-textarea
+@html <textarea id=t>abc def</textarea>
+(function () { var t = $('t'); return [err(function () { return t.setRangeText('X', 5, 2) }), err(function () { return t.setRangeText('X', 1, 2, 'bogus') }), err(function () { return t.setRangeText() }), t.value].join('~') })
+=== error-keeps-state
+@html <input id=i value="hello world">
+(function () { var i = $('i'); i.setSelectionRange(2, 4); err(function () { return i.setRangeText('X', 5, 2) }); return i.value + '|' + sel(i) })
+=== shape
+@html <input id=i value="hello world">
+(function () { var i = $('i'), t = document.createElement('textarea'); var d = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'setRangeText'); return [i.setRangeText.length, t.setRangeText.length, HTMLInputElement.prototype.setRangeText === HTMLTextAreaElement.prototype.setRangeText, d.writable, d.configurable, typeof d.value, String(i.setRangeText('x')), 'setRangeText' in HTMLElement.prototype, err(function () { return HTMLInputElement.prototype.setRangeText.call(document.body, 'x') }), err(function () { return HTMLInputElement.prototype.setRangeText.call(t, 'x') }), err(function () { return HTMLTextAreaElement.prototype.setRangeText.call(i, 'x') })].join('|') })
+=== conversion-order
+@html <input id=i value="hello world">
+(function () { var i = $('i'), l = []; var o = function (n, v) { return { valueOf: function () { l.push(n); return v }, toString: function () { l.push(n); return String(v) } } }; try { i.setRangeText(o('s', 'a'), o('st', 1), o('en', 2), o('m', 'end')) } catch (e) { l.push(e.name) } try { i.type = 'email'; i.setRangeText(o('s2', 'a'), o('st2', 1), o('en2', 2), o('m2', 'end')) } catch (e) { l.push(e.name) } return l.join() })
+=== conversion-throws
+@html <input id=i value="hello world">
+(function () { var i = $('i'); i.setSelectionRange(2, 4); var r = err(function () { return i.setRangeText('X', { valueOf: function () { throw new RangeError('boom') } }, 3) }); return r + '|' + i.value + '|' + sel(i) })
+=== type-changes-in-conversion
+@html <input id=i value="hello world">
+(function () { var i = $('i'); var r = err(function () { return i.setRangeText('X', { valueOf: function () { i.type = 'email'; return 1 } }, 3) }); return r + '|' + i.value })
+=== value-changes-in-conversion
+@html <input id=i value="hello world">
+(function () { var i = $('i'); i.setRangeText('X', { valueOf: function () { i.value = 'abcdef'; return 1 } }, 3, 'select'); return i.value + '|' + sel(i) })
+=== no-input-event
+@html <input id=i value="hello world">
+(function () { var i = $('i'), l = []; ['input', 'beforeinput', 'change', 'keydown'].forEach(function (t) { i.addEventListener(t, function () { l.push(t) }) }); i.setRangeText('Q', 0, 1, 'end'); i.focus(); i.blur(); return l.join() + '|' + i.value })
+=== value-dirty-default
+@html <input id=i value="hello world">
+(function () { var i = $('i'); i.setRangeText('Z', 0, 1); i.defaultValue = 'k'; return [i.value, i.defaultValue, i.getAttribute('value')].join('|') })
+=== then-set-range
+@html <input id=i value="hello world">
+(function () { var i = $('i'); i.setSelectionRange(1, 3); i.setRangeText('abc', 0, 5, 'select'); i.setRangeText('Q'); return i.value + '|' + sel(i) })
+=== selection-events
+@html <input id=i value="hello world">
+(function () { var i = $('i'), l = []; ['select', 'selectionchange'].forEach(function (t) { i.addEventListener(t, function () { l.push(t + ':' + sel(i)) }) }); i.setSelectionRange(2, 4); i.setRangeText('XYZ'); i.setRangeText('Q', 0, 0, 'start'); i.setRangeText('Q', 0, 0, 'preserve'); window.__r = l; return function () { return l.join() } })()
+=== selection-events-unchanged
+@html <input id=i value="hello world">
+(function () { var i = $('i'), l = []; i.setSelectionRange(3, 3); ['select', 'selectionchange'].forEach(function (t) { i.addEventListener(t, function () { l.push(t + ':' + sel(i)) }) }); setTimeout(function () { i.setRangeText('XYZ'); i.setRangeText('', 3, 6, 'preserve') }, 100); return function () { return l.join() } })()
+=== selection-events-select-mode
+@html <input id=i value="hello world">
+(function () { var i = $('i'), l = []; ['select', 'selectionchange'].forEach(function (t) { i.addEventListener(t, function () { l.push(t + ':' + sel(i)) }) }); i.setRangeText('Q', 0, 3, 'select'); return function () { return l.join() } })()
+=== selection-events-textarea
+@html <textarea id=t>abc def</textarea>
+(function () { var t = $('t'), l = []; ['select', 'selectionchange'].forEach(function (k) { t.addEventListener(k, function () { l.push(k + ':' + sel(t)) }) }); t.setRangeText('Q', 0, 3, 'select'); return function () { return l.join() } })()
+=== selection-events-throw
+@html <input id=i value="hello world">
+(function () { var i = $('i'), l = []; ['select', 'selectionchange'].forEach(function (k) { i.addEventListener(k, function () { l.push(k) }) }); try { i.setRangeText('X', 5, 2) } catch (e) {} return function () { return l.join() } })()
+=== value-attr-unchanged
+@html <input id=i value="hello world">
+(function () { var i = $('i'); i.setRangeText('Q', 0, 1); return i.getAttribute('value') + '|' + i.defaultValue })
+=== validity
+@html <input id=i maxlength=3 value=abc>
+(function () { var i = $('i'); i.setRangeText('LONGER', 0, 1); return i.value + '|' + i.validity.tooLong })

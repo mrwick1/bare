@@ -206,5 +206,6 @@ pub(crate) fn install(d: &Dom, it: &mut Interp<'_>, proto: ObjId) -> R<()> {
     }
     d.def_method(it, proto, "setSelectionRange", 2, sel::set_selection_range_method)?;
     d.def_method(it, proto, "select", 0, sel::select_method)?;
+    d.def_method(it, proto, "setRangeText", 1, sel::set_range_text_area)?;
     crate::browser_controls::decorate(d, it, proto, true)
 }

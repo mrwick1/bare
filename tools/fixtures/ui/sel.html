@@ -1,0 +1,30 @@
+<!DOCTYPE html>
+<html>
+<head>
+<style>
+body { margin: 0; font: 16px monospace; }
+input, textarea { display: block; width: 200px; box-sizing: border-box; margin: 0; padding: 0; border: 1px solid; }
+</style>
+</head>
+<body>
+<!-- Text controls with a log of the events of the selection: `select` and `selectionchange` (type, target, bubbles, trusted for these two, the state at the time),
+     and of the events of editing. `eval - L('i')` logs the state of a field. -->
+<input id="i" value="hello world">
+<textarea id="t">abc def</textarea>
+<input id="e" type="email" value="a@b.c">
+<button id="b">b</button>
+<div id="d">plain text</div>
+<script>
+window.__log = [];
+var sel = function (e) { return e.selectionStart + ',' + e.selectionEnd + ',' + e.selectionDirection };
+var $ = function (id) { return document.getElementById(id) };
+var L = function (id) { var e = $(id); window.__log.push('@' + id + ' ' + JSON.stringify(e.value) + ' ' + sel(e)) };
+['select', 'selectionchange', 'input', 'beforeinput', 'change', 'focus', 'blur', 'keydown'].forEach(function (type) {
+  document.addEventListener(type, function (e) {
+    var t = e.target, s = t.selectionStart !== undefined ? ' ' + sel(t) : '';
+    window.__log.push(type + ' @' + (t.id || t.nodeName) + ' b=' + e.bubbles + (/^select/.test(type) ? ' t=' + e.isTrusted : '') + s + (type === 'keydown' ? ' ' + e.key : ''));
+  }, true);
+});
+</script>
+</body>
+</html>

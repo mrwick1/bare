@@ -257,6 +257,14 @@ For each topic: implement, run huge load tests, then optimize CPU time and RAM u
 
 Browser conventions do not define the internal architecture. Standards and reference-browser tests check observable behavior. Choose algorithms, data layout and ownership from measurements in `bare`.
 
+## Text control selection follows Chrome on Linux
+
+Changed on 2026-11-07. A text control (`<input>`, `<textarea>`) never reports the selection direction `none`. The direction `none` is stored and read as `forward`. A control whose caret was never set has the caret at 0, like a textarea. A `value` write that differs puts the caret at the end.
+
+Reason: the HTML Standard lets a platform that has no directionless selection use `forward` ("set the selection range", direction `none`). Chrome 155 on Linux has none. Recorded in headless Chrome 155: `selectionDirection` is `forward` for a fresh input, after `setSelectionRange(1, 3)`, after `select()` and after a blur, with or without focus. Before this change bare answered `none` for a control that did not hold the page selection, and put the caret of a fresh input at the end. Tests that were read from the standard by hand now hold the recorded values.
+
+Consequence: the code that told the owner of the page selection apart (`dir_of`, and the `none` branch of `FocusState::sel_owner`) is gone. `sel_owner` stays for one purpose: Chrome sends `selectionchange` to a text control when focus moves the page selection into it.
+
 ## Open questions
 
 - A separate process for sensitive sites, for example banking.
