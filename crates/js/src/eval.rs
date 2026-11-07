@@ -1830,8 +1830,11 @@ impl<'p> Interp<'p> {
             }
             len += 1;
         }
-        self.def(o, self.k_length, Value::Number(len as f64), false, false, true)?;
-        self.def(o, self.k_name, Value::String(nstr), false, false, true)?;
+        // `length`, `name`, and the `prototype` that a generator or a plain function gets: one allocation of the size.
+        if f.is_generator() || (f.kind == FuncKind::Normal && !f.is_async()) {
+            h!(self, self.heap.reserve_props(o, 3));
+        }
+        h!(self, self.heap.init_function(o, (self.k_length, len as f64), (self.k_name, nstr)));
         if f.is_generator() {
             self.gen_function(o)?;
         } else if f.kind == FuncKind::Normal && !f.is_async() {
@@ -2811,6 +2814,9 @@ impl<'p> Interp<'p> {
     fn eval_object(&mut self, l: List<Prop>) -> Res<Value> {
         let prog = self.prog.clone();
         let o = h!(self, self.heap.new_object(Some(self.object_proto)));
+        if prog.list(l).len() > 0 {
+            h!(self, self.heap.reserve_props(o, prog.list(l).len()));
+        }
         for pid in prog.list(l) {
             self.object_prop(o, pid, None)?;
         }

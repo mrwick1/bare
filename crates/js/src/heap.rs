@@ -1481,6 +1481,14 @@ impl Heap {
         r
     }
 
+    /// Room for `n` more own properties, in one allocation of that size. A vector that grows by push takes 4, 8, 16 entries (40 bytes each): an
+    /// object made from a literal, or a closure, knows how many it will have, so the slack is not made.
+    pub fn reserve_props(&mut self, o: ObjId, n: usize) -> R<()> {
+        self.obj(o)?;
+        self.edit(o, |ob| ob.props.entries.reserve_exact(n));
+        Ok(())
+    }
+
     /// The `length` and `name` of a function object that has just been made and has no other property (both read-only,
     /// not enumerable, configurable). The same result as two `define_own_property` calls, in one step: a realm makes
     /// hundreds of host functions at start, and each saved check shows in the start-up cost.
@@ -2928,6 +2936,33 @@ mod tests {
         let stale = h.new_object(None).unwrap();
         h.collect(&[]).unwrap();
         assert_eq!(h.stored_edges(stale, &mut out), Err(HeapError::Stale));
+    }
+
+    /// An object that gets room for the properties it will have holds no slack; the same object built by push grows to 4.
+    #[test]
+    fn reserved_property_room_leaves_no_slack() {
+        let mut h = Heap::default();
+        let (k, name) = (key(&mut h, "length"), key(&mut h, "name"));
+        let s = h.intern_str("f").unwrap();
+        let o = h.new_object(None).unwrap();
+        h.reserve_props(o, 3).unwrap();
+        h.init_function(o, (k, 0.0), (name, s)).unwrap();
+        let pk = key(&mut h, "prototype");
+        h.set(o, pk, n(1.0)).unwrap();
+        let f = h.footprint();
+        assert_eq!((f.entries_used, f.entries_cap), (3 * ENTRY_BYTES, 3 * ENTRY_BYTES));
+        let p = h.new_object(None).unwrap();
+        h.set(p, k, n(1.0)).unwrap();
+        let f = h.footprint();
+        assert_eq!(f.entries_cap - f.entries_used, 3 * ENTRY_BYTES, "a pushed vector of one entry has room for 4");
+        let stale = h_stale(&mut h);
+        assert_eq!(h.reserve_props(stale, 1), Err(HeapError::Stale));
+    }
+
+    fn h_stale(h: &mut Heap) -> ObjId {
+        let o = h.new_object(None).unwrap();
+        h.collect(&[]).unwrap();
+        o
     }
 
     #[test]
