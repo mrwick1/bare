@@ -29,6 +29,7 @@ struct Code {
     expr_str: Vec<Option<StrId>>,
     prop_str: Vec<Option<StrId>>,
     scopes: Vec<FScope>,
+    slots: Slots,
     /// Class walk flags (see `eval_classes.rs`): per function and per class of this script.
     fflags: Vec<u8>,
     cflags: Vec<u8>,
@@ -36,7 +37,7 @@ struct Code {
 
 impl Code {
     fn placeholder(prog: &Rc<Program<'static>>) -> Code {
-        Code { prog: prog.clone(), expr_name: Vec::new(), pat_name: Vec::new(), stmt_label: Vec::new(), func_name: Vec::new(), expr_str: Vec::new(), prop_str: Vec::new(), scopes: Vec::new(), fflags: Vec::new(), cflags: Vec::new() }
+        Code { prog: prog.clone(), expr_name: Vec::new(), pat_name: Vec::new(), stmt_label: Vec::new(), func_name: Vec::new(), expr_str: Vec::new(), prop_str: Vec::new(), scopes: Vec::new(), slots: Slots::default(), fflags: Vec::new(), cflags: Vec::new() }
     }
 
     /// Empty caches sized for the tree.
@@ -50,6 +51,7 @@ impl Code {
             expr_str: vec![None; st.exprs],
             prop_str: vec![None; st.props],
             scopes: (0..=st.funcs).map(|_| FScope::default()).collect(),
+            slots: Slots::new(&st),
             fflags: vec![0; st.funcs],
             cflags: vec![0; st.classes],
             prog,
@@ -126,7 +128,7 @@ impl<'p> Interp<'p> {
         if nodes > node_room {
             return Err(Error::Limit(LimitKind::ScriptNodes));
         }
-        let (id, old, names_mark) = (self.scripts.len(), self.cur, self.names.len());
+        let (id, old, names_mark, sc_mark) = (self.scripts.len(), self.cur, self.names.len(), self.sc_all.len());
         self.scripts.push(Code::new(Rc::new(parsed.into_owned())));
         self.select(id);
         let r = self.in_call(|it| it.walk_program());
@@ -138,6 +140,8 @@ impl<'p> Interp<'p> {
                 self.name_map.remove(&n);
             }
             self.name_strs.truncate(names_mark);
+            self.name_gpos.truncate(names_mark);
+            self.sc_all.truncate(sc_mark);
             self.async_forget(id);
             return Err(e);
         }
@@ -160,6 +164,7 @@ impl<'p> Interp<'p> {
         std::mem::swap(&mut self.expr_str, &mut c.expr_str);
         std::mem::swap(&mut self.prop_str, &mut c.prop_str);
         std::mem::swap(&mut self.scopes, &mut c.scopes);
+        std::mem::swap(&mut self.slots, &mut c.slots);
         std::mem::swap(&mut self.cls.fflags, &mut c.fflags);
         std::mem::swap(&mut self.cls.cflags, &mut c.cflags);
         // slot `cur` held the placeholder and slot `id` now holds the old current code: exchange them

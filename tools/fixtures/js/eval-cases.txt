@@ -413,3 +413,123 @@ for (;;) {} // @limit
 var i = 0; do { i++; } while (true); // @limit
 === infinite_try_is_limit
 var i = 0; for (;;) { try { i++; } catch (e) { } } // @limit
+=== scope_tdz_read
+var r; try { x; let x = 1; } catch (e) { r = e.name + ":" + e.message } r
+=== scope_tdz_closure
+function f() { return y } var r; try { f() } catch (e) { r = e.name } let y = 2; r + f()
+=== scope_tdz_typeof
+var r; try { typeof z; let z; } catch (e) { r = e.name } r
+=== scope_tdz_assign
+var r; try { w = 1; let w; } catch (e) { r = e.name } r
+=== scope_tdz_switch
+var r; try { switch (2) { case 1: let a = 1; break; case 2: a = 2 } } catch (e) { r = e.name } r
+=== scope_const_assign
+const c = 1; var r; try { c = 2 } catch (e) { r = e.name } r + c
+=== scope_const_inner
+function f() { const k = 1; { const k = 2; try { k = 3 } catch (e) { return e.name + k } } } f()
+=== scope_hoist_function_var
+function f() { var a = typeof g, b = typeof h; function g() {} var h = 1; return a + b } f()
+=== scope_hoist_block_function
+function w() { var a = typeof q; { function q() { return 2 } } return a + q() } w()
+=== scope_hoist_top_block_function
+{ function tq() { return 3 } } typeof tq + tq()
+=== scope_let_loop_closures
+var fs = []; for (let i = 0; i < 3; i++) fs.push(() => i); fs.map(f => f()).join()
+=== scope_var_loop_closures
+var fs = []; for (var i = 0; i < 3; i++) fs.push(() => i); fs.map(f => f()).join()
+=== scope_let_loop_body_mutation
+var fs = []; for (let i = 0; i < 4; i++) { fs.push(() => i++); } [fs[0](), fs[0](), fs[1](), fs[3]()].join()
+=== scope_for_of_const_closures
+var fs = []; for (const v of [7, 8, 9]) fs.push(() => v); fs.map(f => f()).join()
+=== scope_for_in_let_closures
+var fs = []; for (let k in { a: 1, b: 2 }) fs.push(() => k); fs.map(f => f()).join()
+=== scope_shadow_levels
+var x = "g"; function f() { var x = "f"; { let x = "b"; { const x = "bb"; return (() => x)() + x } } } f() + x
+=== scope_shadow_inner_reads_outer
+var x = 1; function f() { var r = x; { let x = 2; r += x } return r + x } f()
+=== scope_param_default_outer
+var y = "outer"; function f(a = y) { var y = "inner"; return a + y } f() + "|" + f()
+=== scope_param_default_param
+function f(a, b = a + 1) { var a; return a + b } f(1)
+=== scope_many_bindings
+function f() { var a1=1,a2=2,a3=3,a4=4,a5=5,a6=6,a7=7,a8=8,a9=9,a10=10,a11=11,a12=12,a13=13,a14=14,a15=15; return function() { return a1 + a8 + a13 + a15 + a2 } } f()()
+=== scope_many_bindings_shadow
+function f() { var a1=1,a2=2,a3=3,a4=4,a5=5,a6=6,a7=7,a8=8,a9=9,a10=10,a11=11,a12=12,a13=13,a14=14,a15=15; return function(a8) { var a2 = 20; return a1 + a8 + a13 + a15 + a2 } } f()(100)
+=== scope_generator_blocks
+function* g() { let a = 1; yield a; { let b = a + 1; yield b; } const c = a + 10; yield c; for (let i = 0; i < 2; i++) yield i + 100 } [...g()].join()
+=== scope_generator_closure
+function* g() { let n = 0; while (n < 3) { let m = n; yield () => m + n; n++ } } [...g()].map(f => f()).join()
+=== scope_typeof_undeclared
+typeof nope1 + typeof (nope2) + (function () { return typeof nope3 })()
+=== scope_typeof_declared
+function f() { var a; let b = 1; return typeof a + typeof b + typeof f + typeof undefined } f()
+=== scope_named_function_expression
+var f = function g(n) { return n ? g(n - 1) + 1 : 0 }; f(3) + typeof g
+=== scope_named_function_param_shadow
+var f = function g(g) { return g }; f(5)
+=== scope_named_function_var_shadow
+var f = function g() { var g = 7; return g }; f()
+=== scope_named_function_assign
+var f = function g() { g = 1; return typeof g }; f()
+=== scope_catch_param
+var e = "g"; try { throw "c" } catch (e) { var r = e } e + r
+=== scope_catch_var_same_name
+function f() { try { throw 1 } catch (e) { var e = 2 } return typeof e } f()
+=== scope_catch_destructure
+try { throw { a: 1, b: [2, 3] } } catch ({ a, b: [c, d] }) { var r = a + c + d } r
+=== scope_catch_closure
+var fs = []; for (var i = 0; i < 2; i++) { try { throw i } catch (e) { fs.push(() => e) } } fs.map(f => f()).join()
+=== scope_switch_lexical
+var r; switch (1) { case 1: let a = 5; r = a; break; case 2: let b = 1 } r
+=== scope_switch_function
+function f(x) { switch (x) { case 1: function h() { return "h1" } return h(); default: return typeof h } } f(1) + f(2)
+=== scope_class_closure_outer
+let n = 1; class A { m() { return () => n + A.k } static k = 2 } new A().m()()
+=== scope_class_expression_name
+const C = class D { m() { return D } }; new C().m() === C
+=== scope_class_name_shadow
+class A { m() { let A = 5; return A } } new A().m()
+=== scope_class_field_outer
+var v = 4; class A { f = v + 1; g = () => v + 2 } var a = new A(); a.f + a.g()
+=== scope_class_nested_function
+function mk() { var base = 10; class B { add(x) { return function () { return base + x } } } return new B().add(5)() } mk()
+=== scope_arguments_arrow
+function f() { return (() => arguments.length + arguments[0])() } f(5, 6)
+=== scope_arguments_var
+function f() { var arguments = 4; return arguments } f(1)
+=== scope_implicit_global
+function f() { zz = 3 } f(); zz
+=== scope_strict_undeclared_assign
+"use strict"; function f() { qq = 1 } var r; try { f() } catch (e) { r = e.name } r
+=== scope_global_var_function
+var gv = 1; function gf() { return gv + 1 } gv = 5; gf()
+=== scope_global_let_function
+let gl = 1; function gf() { return gl + 1 } gl = 5; gf()
+=== scope_global_let_in_block
+let gl = 1; { let gl2 = 2; { function inner() { return gl + gl2 } gl = 10; var r = inner() } } r
+=== scope_global_shadow_by_param
+var s = "g"; function f(s) { return s } f("p") + s
+=== scope_closure_counter
+function make() { var n = 0; return function () { return ++n } } var a = make(), b = make(); a(); a(); [a(), b()].join()
+=== scope_deep_chain
+function a() { var x = 1; return function () { var y = 2; return function () { var z = 3; return function () { return x + y + z } } } } a()()()()
+=== scope_deep_chain_assign
+function a() { var x = 1; return function () { return function () { return function () { x += 5; return x } } } } var f = a()()(); f() + f()
+=== scope_update_and_compound
+function f() { var a = 1; { let b = 2; a += b; b++; a *= b } return a } f()
+=== scope_recursion_locals
+function f(n) { var l = n; return n ? l + f(n - 1) : 0 } f(5)
+=== scope_var_in_blocks
+function f() { { var a = 1 } if (true) { var b = 2 } for (var c = 3; c < 4; c++) {} return a + b + c } f()
+=== scope_destructuring_assign
+var a, b; function f() { [a, b] = [1, 2]; ({ a: b, b: a } = { a: 5, b: 6 }); return a + "," + b } f()
+=== scope_destructuring_decl_assign
+function f() { var { a, b: [c] } = { a: 1, b: [2] }; { let a = 10; var d = a } return a + c + d } f()
+=== scope_method_closures
+var o = { v: 1, get g() { return this.v + w }, m() { return w + 1 } }; var w = 2; o.g + o.m()
+=== scope_same_function_two_chains
+function mk(x) { return function () { return x } } var f1 = mk(1), f2 = mk(2); [f1(), f2(), f1()].join()
+=== scope_closure_over_switch_and_loop
+var fs = []; for (let i = 0; i < 2; i++) { switch (i) { case 0: let t = "a" + i; fs.push(() => t); break; default: let u = "b" + i; fs.push(() => u) } } fs.map(f => f()).join()
+=== scope_label_and_block_function
+function f() { l: { let q = 1; break l } return typeof q } f()

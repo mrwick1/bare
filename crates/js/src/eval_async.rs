@@ -1201,7 +1201,7 @@ impl<'p> Interp<'p> {
             AssignOp::Assign => self.ask(run, e, np, base, value),
             AssignOp::Compound(_) | AssignOp::Logical(_) => {
                 let r = match self.prog.pat(target).kind {
-                    PatKind::Ident => Ref::Name(self.pat_name[target.index()]),
+                    PatKind::Ident => Ref::Name(self.pat_name[target.index()], self.pat_site(target.index())),
                     PatKind::Member(_) if member => self.assign_ref(run, target, b)?,
                     _ => return Err(unsupported("assignment target", self.prog.pat(target).span)),
                 };
@@ -1466,7 +1466,7 @@ impl<'p> Interp<'p> {
                     self.strunc(run, b);
                     return val(v);
                 }
-                let r = if member { self.assign_ref(run, target, b)? } else { Ref::Name(self.pat_name[target.index()]) };
+                let r = if member { self.assign_ref(run, target, b)? } else { Ref::Name(self.pat_name[target.index()], self.pat_site(target.index())) };
                 let res = match op {
                     AssignOp::Compound(bop) => {
                         let old = sval(run, b + if member { 2 } else { 0 });

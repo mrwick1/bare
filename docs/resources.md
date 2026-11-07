@@ -4175,3 +4175,54 @@ Memory rule: the table grows with the pages that hold a key. The directory holds
 How the engines avoid the map (from memory, to verify against their sources): Blink's `ScriptWrappable` holds the wrapper handle for the main world, and the V8 object holds the C++ pointer in an internal field (other worlds use a map, `DOMDataStore`). Servo's `Reflector` is a field of each DOM struct, and the JS object keeps the struct pointer in a reserved slot (`DOM_OBJECT_SLOT`). QuickJS stores an opaque pointer in `JSObject` (`JS_SetOpaque`, `JS_GetOpaque`). This change took none of them, because the node lives in `bare_html` and the object in `bare_js`: a field in either would cost every object or every node, and neither crate may name the other. A side table indexed by slot has the same shape (an index and a compare). Its extra cost is one dependent load. If a later profile shows that load, put one `u32` host word in the heap `Object` (its size is asserted at most 80 bytes; the padding was not checked).
 
 Not tested: wall time; the rows at scale 100; `getAttribute` in a loop (no profiled row has it); a page with more than 100,000 wrappers; the live staging pages on this build.
+
+## Cost of identifier lookup
+
+Problem: a name was found by a walk up the environment chain, with a scan (or a hash probe above 12 bindings) in each environment. A global name (`var`, a function or a builtin at the top level) went through that walk and then through the hash table of the global object.
+
+Method: `perf record -e instructions:u` of the rows below on main 8e4d450, then the change. Cost rows: `tools/js/instr.sh` (minimum of 3 runs of `instructions:u`, large malloc cache), main 855e8aa and this change, each in its own `CARGO_TARGET_DIR` under `/data/bare-tmp`, release build.
+
+Profile of main (self share of samples): the name functions (`get_name`, `assign_name`, `find_in`, `lookup`) take 6.5% of `select_load react 1000`, 8.3% of `eval_load closures`, 11.7% of `eval_load loop` and 12.1% of `eval_load calls`. `Heap::lookup` and `PropMap::find` (the global object) take 7.3%, 14.0%, 25.3% and 21.1% of the same rows, mostly for global names. `session_load chain` does not use script names in its loop, so lookup is not its cost. Inlining moves a cost from one symbol to another between builds, so compare the totals and not one symbol.
+
+What was done:
+
+- Static scope resolution (`eval_scope.rs`). The first walk records the scopes that make an environment at run time and the scope of each identifier site. The second run of a site works out how many environments to go up and keeps it with the index of the binding. Later runs go up that many parents and check the name at the index. A miss runs the full search. The first run of a site uses the full search, so code that runs once (a script of a page) pays no resolution. A class is a barrier, and `arguments` stays dynamic.
+- A name that no scope declares is a global. Only environment 0 (a `let` of a script) and the global object can hold it. When environment 0 is empty the site goes straight to the global object.
+- The global object keeps a position hint for each name (`name_gpos`). A read or a write checks the key at that position and skips the hash lookup. The hint is learned at the second use of a name.
+- In a debug build every resolved lookup is compared with the full search (`assert_eq!`). All tests in `cargo test --workspace` ran with it.
+
+Ideas from other engines: V8 resolves a name at parse time to a context slot (depth, index) unless `with` or sloppy `eval` is in the way. This is the main idea, and it is taken. QuickJS resolves a name to a closure variable reference at compile time. It is the same idea, with the closure capture list as the chain. SpiderMonkey keeps a `BindingKind` for each name and keeps an uncaptured binding out of the environment object. That needs another environment layout, and it is not done. This engine has no `with` and no `eval`, so a scope is never dynamic. Class bodies are the only barrier.
+
+Instructions (`tools/js/instr.sh`, main 855e8aa and this change):
+
+| Row | main | this change | change |
+| --- | ---: | ----------: | -----: |
+| `eval_load loop 10` | 12,041,920,975 | 6,513,924,767 | -45.9% |
+| `eval_load calls 10` | 8,086,141,767 | 5,072,148,278 | -37.3% |
+| `eval_load throws 10` | 3,019,568,162 | 2,198,511,759 | -27.2% |
+| `eval_load objects 10` | 3,928,108,480 | 2,898,154,546 | -26.2% |
+| `eval_load closures 10` | 1,190,557,099 | 931,266,480 | -21.8% |
+| `eval_load fib 10` | 287,149,766 | 259,752,099 | -9.5% |
+| `eval_load webpack 10` | 54,991,976 | 50,003,609 | -9.1% |
+| `select_load react 1000` | 1,465,951,493 | 1,380,581,819 | -5.8% |
+| `select_load react 10` | 30,030,399 | 28,443,481 | -5.3% |
+| `session_load chain 10` | 58,033,374 | 58,051,995 | +0.03% |
+| `session_load chain 1` | 7,194,520 | 7,199,826 | +0.07% |
+
+Self share after the change: name functions 3.7% (`react 1000`), 4.2% (`closures`), 9.9% (`loop`) and 9.1% (`calls`); `Heap::lookup` and `PropMap::find` 8.5%, 5.2%, 0% and 0%. The `react` row falls by 5.8% only, because its loop is mostly host code (wrappers, the option list). `session_load chain` has no change: the script names it reads are few.
+
+Peak RSS (program report): `react 1000` 8.9 MiB to 8.7 MiB, `react 10000` 16.7 MiB to 16.5 MiB, `closures 10` 38.0 MiB to 37.9 MiB, `webpack 100` 23.9 MiB to 24.6 MiB (+0.7 MiB), `fib 10` 4.9 MiB to 4.8 MiB, `loop 10` 4.9 MiB to 4.7 MiB. A script keeps one `u32` for each expression and each pattern (a `Box<[u32]>`), and the realm keeps one record for each scope.
+
+Cost rule: 578 rows (every `*_load` example with a case list at scale 1 and 10, as in the earlier cost rows), same method, all 578 ran. Median -10.3%. 541 rows are lower, 514 by more than 0.5%. Two rows are over +0.5%: `scripts_load reject 1` (+0.87%) and `reject 10` (+1.17%). The next worst row is `date_load longstr 10` at +0.17%. `form_load gates` is -0.25% (1) and -0.26% (10). The sweep ran twice, on main 8e4d450 and again on main 855e8aa after a rebase, with the same two rows over the limit.
+
+Second check with another allocator (jemalloc 5 through `LD_PRELOAD=/usr/lib/libjemalloc.so.2`, minimum of 3 runs of `instructions:u`, main 3a8cc29 against this change): `scripts_load reject 1` 30,570,687 to 30,526,960 (-0.14%) and `reject 10` 219,812,998 to 219,740,185 (-0.03%). Both rows are lower with jemalloc, so the rise under glibc comes from heap layout. Arjun measured the same independently (-0.14% and -0.03%, PR 190). The code of main 855e8aa and 3a8cc29 is the same in `crates` and `tools`, and the other rows were measured again on 3a8cc29 (`eval_load`, `scripts_load`, `select_load react` and `session_load` rows: no change from the table above).
+
+The `reject` rows are heap layout noise, not code. A refused script runs no new code: the count limit stops it before the parse, and a syntax error stops it in the parser. Evidence: (1) one loop turn, counted with `gdb` single steps, is 1,465 instructions on this change and 1,522 on main. (2) A copy of the example, with a few `Vec`s allocated and kept between the setup and the loop, ran the count-limit loop at 87.27 M to 89.65 M on main and 81.42 M to 89.57 M on this change (10 settings), so the same code moves by up to 10% with the start layout. The tcache setting of `instr.sh` does not remove all of this (see [the layout note](#why-an-unrelated-name-moved-a-row)). The loop of this row builds the string `ERR Limit(Scripts)` with `realloc`, and the cost of `realloc` depends on the neighbor blocks.
+
+First versions, kept for the record (instruction change on main fb36a74 for `scripts_load many 10`, `few 10` and `iterator_load generic 10`): v1 resolved at the first run and held the scopes and names in several allocations for each script: `many` +7.0%, `few` +3.0%, `generic` +3.4%. Resolving at the second run, one pool for the names and moving the scopes to the interpreter (so a script holds one allocation and `select` swaps 2 words) gave -0.7%, -2.4% and -0.3%. `generic` calls closures across scripts, and every call swaps the code of a script, so the words of a script counted there.
+
+Rejected: a bloom mask for each environment (skip the environments that lack the name) made the `react` row 1.2% worse.
+
+Tests: 5 unit tests of the resolver (`eval_scope_tests.rs`: hop counts, indexes, `GLOBAL`, barrier, `arguments`, parameter default against a body `var`, a later script that declares a global `let`, async resume) and 60 `scope_*` cases in `eval-cases.txt` that match Node (TDZ, hoisting, per-iteration bindings, closures in loops, `catch`, `switch`, named function expressions, `typeof` of an undeclared name, generators and async). `cargo test --workspace` passes in a debug build, where each resolved lookup is also compared with the full search. Every `tools/js/*_check.sh` script that ran matches Node (`parse_check.sh` needs the `acorn` package, which is not installed).
+
+Not tested: wall time; the rows at scale 100; `https_load`; the live staging pages; a script with more than 16,383 nested scopes (the hop count is limited, and a deeper site stays dynamic); `with` and `eval` (the engine rejects both).
