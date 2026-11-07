@@ -868,23 +868,7 @@ fn run_layout(cx: &mut Cx, parent: NodeId, first: NodeId, last: NodeId, width: f
 
 /// The baseline of the first line inside the fragment `at`, from the top of its border box. `None` with no line.
 fn first_baseline(cx: &Cx, at: usize, end: usize) -> Option<f32> {
-    let mut open: Vec<(u32, f32)> = Vec::new();
-    let mut i = at;
-    while i < end {
-        while open.last().is_some_and(|o| o.0 as usize <= i) {
-            open.pop();
-        }
-        let f = &cx.out[i];
-        let y = open.last().map_or(0.0, |o| o.1) + if i == at { 0.0 } else { f.rect.y };
-        if let fragment::Kind::Text { .. } = f.kind {
-            return Some(y + crate::font::Metrics::of(cx.tree.style(f.node)).ascent);
-        }
-        if f.end as usize > i + 1 {
-            open.push((f.end, y));
-        }
-        i += 1;
-    }
-    None
+    fragment::first_baseline(&cx.tree, &cx.out, at, end, true)
 }
 
 /// Where the content of a cell sits in its rows.

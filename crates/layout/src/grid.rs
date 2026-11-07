@@ -27,7 +27,7 @@
 //! - The tracks of the grid are not cut at 10,000: the items are. A grid has at most 10,000 tracks on each side.
 
 use crate::Cx;
-use crate::block::{Kids, MAX_PX, Sides, Space, border_padding, resolve, widths};
+use crate::block::{self, Kids, MAX_PX, Sides, Space, border_padding, resolve, widths};
 use crate::boxes::{Child, Kind};
 use crate::fragment::{Fragment, Kind as FragmentKind};
 use crate::{inline, intrinsic, memo};
@@ -184,6 +184,9 @@ enum Align {
     Start,
     End,
     Center,
+    /// Aligned by the first or the last baseline: only on the block axis, and with `Start` or `End` as the fallback.
+    First,
+    Last,
 }
 
 fn align(v: Value, fallback: Align) -> Align {
@@ -193,6 +196,15 @@ fn align(v: Value, fallback: Align) -> Align {
         Value::Keyword(Keyword::Center) => Align::Center,
         Value::Keyword(Keyword::Stretch | Keyword::Normal) => Align::Stretch,
         _ => fallback,
+    }
+}
+
+/// `align` for the block axis, where `baseline` and `last baseline` are baseline alignment.
+fn align_y(v: Value, fallback: Align) -> Align {
+    match v {
+        Value::Keyword(Keyword::Baseline) => Align::First,
+        Value::Keyword(Keyword::LastBaseline) => Align::Last,
+        _ => align(v, fallback),
     }
 }
 
@@ -1071,9 +1083,9 @@ fn fit_width(cx: &mut Cx, node: NodeId, area_w: f32, how: Align) -> (f32, f32, f
 /// How much of the free room goes before the box.
 fn shift_of(how: Align) -> f32 {
     match how {
-        Align::Stretch | Align::Start => 0.0,
+        Align::Stretch | Align::Start | Align::First => 0.0,
         Align::Center => 0.5,
-        Align::End => 1.0,
+        Align::End | Align::Last => 1.0,
     }
 }
 
@@ -1143,6 +1155,10 @@ struct Lay {
     mt: f32,
     mb: f32,
     base: Option<f32>,
+    /// An item aligned by baseline, with no auto margin on top or at the bottom, shares a baseline with the others of its kind in
+    /// its row: 1 for the first baseline, 2 for the last one, else 0. `asc`: the distance from its top margin edge to the baseline.
+    kind: u8,
+    asc: f32,
     /// The border box, from the content box of the container: left edge, and the width of the area.
     x: f32,
     area_w: f32,
@@ -1152,6 +1168,18 @@ struct Lay {
     mr: f32,
     /// The last layout of the item, for the map of layouts that a run again throws away (`memo.rs`).
     laid: Option<Box<memo::Laid>>,
+}
+
+/// The baseline of an item laid out in the temporary list, from the top of its border box: the first one, or the last one. An
+/// item with no baseline gives its bottom border edge.
+fn baseline_of(cx: &Cx, it: &Item, l: &Lay, first: bool) -> f32 {
+    let boxed = it.run.is_none();
+    let b = if first {
+        block::first_baseline(cx, it.node, boxed, &cx.out, l.frag, l.end as usize, l.base, l.h)
+    } else {
+        l.base.map(|b| if boxed && cx.tree.scrolls(it.node) { b.min(l.h) } else { b })
+    };
+    b.unwrap_or(l.h)
 }
 
 fn run_height(rows: &[f32]) -> f32 {
@@ -1175,8 +1203,9 @@ pub(crate) fn layout(cx: &mut Cx, node: NodeId, space: Space, bp: Sides) -> Kids
     let style = tree.style(node);
     let mut g = setup(cx, node, [space.height, Some(space.width)]);
     let (justify, align_content) = (style.get(Property::JustifyContent), style.get(Property::AlignContent));
-    let stretches = |v: Value| matches!(v, Value::Keyword(Keyword::Normal | Keyword::Stretch));
-    let (justify_items, align_items) = (align(style.get(Property::JustifyItems), Align::Stretch), align(style.get(Property::AlignItems), Align::Stretch));
+    // `last baseline` of `align-content` and `justify-content` is `stretch` in Chrome.
+    let stretches = |v: Value| matches!(v, Value::Keyword(Keyword::Normal | Keyword::Stretch | Keyword::LastBaseline));
+    let (justify_items, align_items) = (align(style.get(Property::JustifyItems), Align::Stretch), align_y(style.get(Property::AlignItems), Align::Stretch));
 
     // 1. The columns.
     for it in g.items.iter_mut() {
@@ -1193,6 +1222,9 @@ pub(crate) fn layout(cx: &mut Cx, node: NodeId, space: Space, bp: Sides) -> Kids
     tmp.clear();
     let real = std::mem::replace(&mut cx.out, tmp);
     let mut lays = vec![Lay::default(); g.items.len()];
+    // The baseline groups: for each row, the biggest distance from the top margin edge to the shared baseline and from it to the
+    // bottom margin edge, for the first baselines and for the last ones. Empty if no item is aligned by baseline.
+    let mut groups: Vec<[[f32; 2]; 2]> = Vec::new();
     for (it, l) in g.items.iter_mut().zip(lays.iter_mut()) {
         let (s, e) = (it.area[1].0 as usize, it.area[1].1 as usize);
         let area_w = col_at[e - 1] + cols[e - 1] - col_at[s];
@@ -1220,6 +1252,22 @@ pub(crate) fn layout(cx: &mut Cx, node: NodeId, space: Space, bp: Sides) -> Kids
         // An item that scrolls has no automatic minimum height.
         let least = if it.run.is_none() && matches!(tree.overflow(it.node).1, Keyword::Hidden | Keyword::Scroll | Keyword::Auto) { 0.0 } else { h };
         it.contrib[0] = [h, h, least];
+        let how = if it.run.is_some() { align_items } else { align_y(tree.style(it.node).get(Property::AlignSelf), align_items) };
+        if matches!(how, Align::First | Align::Last) && (it.run.is_some() || [Property::MarginTop, Property::MarginBottom].iter().all(|&p| resolve(cx, tree.style(it.node).get(p), Some(area_w)).is_some())) {
+            l.kind = if how == Align::First { 1 } else { 2 };
+            l.asc = l.mt + baseline_of(cx, it, l, l.kind == 1);
+            if groups.is_empty() {
+                groups.resize(g.lead[0].len(), [[0.0; 2]; 2]);
+            }
+            let gr = &mut groups[if l.kind == 1 { it.area[0].0 } else { it.area[0].1 - 1 } as usize];
+            gr[l.kind as usize - 1] = [gr[l.kind as usize - 1][0].max(l.asc), gr[l.kind as usize - 1][1].max(h - l.asc)];
+        }
+    }
+    // An item aligned by baseline asks for the room that its group needs: its own size and the shift to the shared baseline.
+    for (it, l) in g.items.iter_mut().zip(&lays).filter(|(_, l)| l.kind != 0) {
+        let [a, d] = groups[if l.kind == 1 { it.area[0].0 } else { it.area[0].1 - 1 } as usize][l.kind as usize - 1];
+        let extra = if l.kind == 1 { a - l.asc } else { d - (it.contrib[0][0] - l.asc) };
+        it.contrib[0] = it.contrib[0].map(|c| c + extra);
     }
 
     // 3. The rows. With no height, each row is as high as its items; a `min-height` that is more makes the room known.
@@ -1245,15 +1293,22 @@ pub(crate) fn layout(cx: &mut Cx, node: NodeId, space: Space, bp: Sides) -> Kids
     let row_at = positions(&rows, &g.lead[0], &g.collapsed[0], free, align_content);
 
     // 4. Each item in its area. An item that stretches, and has boxes inside, is laid out again at its height.
-    let mut baseline: Option<(u32, f32)> = None;
-    for (it, l) in g.items.iter().zip(lays.iter_mut()) {
+    // The item that gives the baseline of the container: in the first row, one aligned by baseline, else the first.
+    let mut best: Option<(u32, bool, usize, f32)> = None;
+    for (i, (it, l)) in g.items.iter().zip(lays.iter_mut()).enumerate() {
         let (r0, r1) = (it.area[0].0 as usize, it.area[0].1 as usize);
         let y0 = row_at[r0];
         let area_h = row_at[r1 - 1] + rows[r1 - 1] - y0;
         let mut y = y0;
+        let off = if l.kind == 0 {
+            0.0
+        } else {
+            let [a, d] = groups[if l.kind == 1 { r0 } else { r1 - 1 }][l.kind as usize - 1];
+            if l.kind == 1 { a - l.asc } else { area_h - d - l.asc }
+        };
         if it.run.is_none() {
             let style = tree.style(it.node);
-            let how = align(style.get(Property::AlignSelf), align_items);
+            let how = align_y(style.get(Property::AlignSelf), align_items);
             let (border, padding) = border_padding(cx, style, l.area_w);
             let bpv = border.vertical() + padding.vertical();
             let margin = |cx: &Cx, p| resolve(cx, style.get(p), Some(l.area_w));
@@ -1300,20 +1355,21 @@ pub(crate) fn layout(cx: &mut Cx, node: NodeId, space: Space, bp: Sides) -> Kids
                 (None, None) => (free.max(0.0) / 2.0, 0.0),
                 (None, Some(_)) => (free.max(0.0), 0.0),
                 (Some(_), None) => (t0, 0.0),
-                (Some(_), Some(_)) => (t0, free * shift_of(how)),
+                (Some(_), Some(_)) => (t0, if l.kind != 0 { off } else { free * shift_of(how) }),
             };
             y = y0 + top + shift;
             cx.out[l.frag].rect.x = bp.left + l.x;
             cx.out[l.frag].rect.y = bp.top + y;
         } else {
+            y += off;
             shift_range(&mut cx.out, l.frag, l.end as usize, bp.left + l.x, bp.top + y);
         }
-        if let Some(b) = l.base
-            && baseline.is_none_or(|(r, _)| (r0 as u32) < r)
-        {
-            baseline = Some((r0 as u32, y + b));
+        let key = (r0 as u32, l.kind == 0);
+        if (l.base.is_some() || l.kind != 0) && best.is_none_or(|(r, n, ..)| key < (r, n)) {
+            best = Some((key.0, key.1, i, y));
         }
     }
+    let baseline = best.map(|(_, _, i, y)| y + baseline_of(cx, &g.items[i], &lays[i], lays[i].kind != 2));
 
     // 5. The live fragments go to the page, in the order of the items. The first layout of an item that was laid out again is left.
     let tmp = std::mem::replace(&mut cx.out, real);
@@ -1332,7 +1388,7 @@ pub(crate) fn layout(cx: &mut Cx, node: NodeId, space: Space, bp: Sides) -> Kids
         let at = cx.out.len() as u32;
         cx.out.push(Fragment { rect: crate::fragment::Rect { x: bp.left, y: bp.top, w: 0.0, h: 0.0 }, node: n, kind: FragmentKind::Static, end: at + 1 });
     }
-    Kids::of(total, baseline.map(|(_, b)| b))
+    Kids::of(total, baseline)
 }
 
 /// The min-content and max-content widths of the content box of a grid container.

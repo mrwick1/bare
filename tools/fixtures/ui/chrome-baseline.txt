@@ -1,0 +1,70 @@
+flex-mixed-sizes-padding-and-border	0,0,400,45 0,21,6,14 6,0,18,41 24,4,26,41
+flex-last-baseline-single-lines	0,0,400,45 0,21,6,14 6,0,18,41 24,4,26,41
+flex-last-baseline-wrapped-text	0,0,400,57 0,23,30,28 30,16,18,41 48,0,50,54
+flex-first-baseline-wrapped-text	0,0,400,65 0,21,30,28 30,0,18,41 48,11,50,54
+flex-first-and-last-groups-in-one-line	0,0,400,70 0,10,30,28 30,29,18,41 48,0,50,54 98,0,50,68
+flex-items-with-no-text	0,43 23,20 0,40 20,20
+flex-items-with-no-text-last-baseline	0,43 23,20 0,40 20,20
+flex-wrap-each-line-has-its-own-baseline	0,0,100,68 0,21,50,14 50,0,50,41 0,41,50,27 50,46,50,20
+flex-wrap-last-baseline	0,0,100,68 0,21,50,14 50,0,50,41 0,41,50,27 50,46,50,20
+flex-wrap-align-content-space-around	0,0,100,200 0,54,50,14 50,33,50,41 0,140,50,27 50,145,50,20
+flex-wrap-reverse-baseline	0,0,100,150 0,130,50,14 50,109,50,41 0,41,50,27
+flex-wrap-reverse-last-baseline	0,0,100,150 0,89,50,14 50,68,50,41 0,0,50,27
+flex-column-baseline-is-the-start-edge	0,0,200,55 0,0,50,14 0,14,80,41
+flex-column-last-baseline	0,0,200,55 120,0,50,14 120,14,80,41
+flex-fixed-height-first-and-last	0,0,400,100 0,21,6,14 6,0,18,41 0,100,400,100 0,180,6,14 6,159,18,41
+flex-lone-baseline-item-falls-back-to-start-or-end	0,0,400,100 0,0,6,14 6,29.5,18,41 0,100,400,100 0,186,6,14 6,129.5,18,41
+flex-baseline-with-margins-and-auto-margins	0,0,400,51 0,21,6,14 6,0,18,41 24,12,12,27
+flex-last-baseline-with-margins	0,0,400,51 0,21,6,14 6,0,18,41
+flex-inline-flex-on-the-text-baseline	0,47 11,27 21,14 11,27 0,41 11,36 21,14 11,36 0,41
+flex-inline-flex-last-baseline-wrapped-text	0,54 0,54 23,28 0,54 31,22
+flex-inline-flex-wrapped-first-item-on-the-text-baseline	0,60 6,54 6,54 6,54 0,22
+flex-row-reverse-baseline	0,0,400,41 394,21,6,14 376,0,18,41
+flex-scroll-container-items-keep-their-baseline	0,0,400,41 0,21,6,14 6,0,18,41 24,12,12,20
+flex-nested-block-baseline	0,0,400,48 0,8,6,34 6,0,18,48
+flex-baseline-and-stretch-items-in-one-line	0,100 21,14 0,41 0,100
+flex-item-that-is-a-flex-container	0,0,400,56 0,0,6,50 0,36,6,14 6,15,18,41
+flex-wrap-mixed-first-and-last-in-lines	0,0,100,68 0,0,50,14 50,0,50,41 0,41,50,27 50,41,50,20
+flex-align-content-baseline-is-start	0,0,100,100 0,0,50,22 50,0,50,22 0,22,50,22 0,100,100,100 0,100,50,50 50,100,50,50 0,150,50,50
+flex-baseline-in-an-orthogonal-free-line-with-gap	0,0,100,81 0,21,40,14 43,0,40,41 0,54,40,27 43,56,40,23
+grid-mixed-baseline	0,0,400,45 0,21,60,14 60,0,60,41 120,4,60,41
+grid-last-baseline	0,0,400,45 0,21,60,14 60,0,60,41 120,4,60,41
+grid-first-baseline-multiline	0,0,400,65 0,21,30,28 30,0,18,41 48,11,50,54
+grid-last-baseline-multiline	0,0,400,57 0,23,30,28 30,16,18,41 48,0,50,54
+grid-two-rows	0,0,400,68 0,21,60,14 60,0,60,41 0,41,60,27 60,46,60,20
+grid-mixed-self	0,0,400,41 0,21,40,14 40,0,40,41 80,0,40,27 120,21,40,20
+grid-first-and-last-same-row	0,0,400,70 0,10,50,14 50,29,50,41 100,0,50,54 150,0,50,68
+grid-empty-items	0,0,400,43 0,23,40,20 40,0,40,40 80,20,40,20
+grid-empty-last	0,0,400,43 0,23,40,20 40,0,40,40 80,20,40,20
+grid-spanning-rows	0,0,400,61 0,21,50,14 50,0,50,41 100,11,50,27 50,41,50,20 100,44,50,17
+grid-spanning-columns	0,0,400,41 0,21,60,14 60,0,30,41 90,11,30,27
+grid-spanning-rows-last	0,0,400,61 0,46,50,14 50,0,50,41 100,11,50,27 50,41,50,20 100,44,50,17
+grid-fixed-rows	0,0,400,100 0,21,50,14 50,0,50,41 0,100,400,100 0,180,50,14 50,159,50,41
+grid-lone	0,0,400,100 0,0,50,14 50,29.5,50,41 0,100,400,100 0,186,50,14 50,129.5,50,41
+grid-margins	0,0,400,51 0,21,50,14 50,0,50,41 100,12,50,27
+grid-last-margins	0,0,400,51 0,21,50,14 50,0,50,41
+grid-align-content	0,0,400,200 0,100.5,50,14 50,79.5,50,41 0,200,400,200 0,221,50,14 50,200,50,41
+grid-inline-grid	0,47 11,27 21,14 11,27 0,41 11,36 21,14 11,36 0,41
+grid-inline-grid-multiline	0,54 0,54 23,28 0,54 31,22
+grid-justify-baseline	0,0,400,22 0,0,30,22 100,0,50,22 0,22,400,22 70,22,30,22 150,22,50,22 0,44,400,22 0,44,30,22 100,44,50,22
+grid-justify-self-baseline	0,0,400,22 0,0,30,22 150,0,50,22
+grid-overflow	0,0,400,41 0,21,60,14 60,0,60,41 120,12,60,20
+grid-nested-block	0,0,400,48 0,8,60,34 60,0,60,48
+grid-stretch-neighbor	0,0,400,100 0,21,40,14 40,0,40,41 80,0,40,100
+grid-nested-flex-item	0,0,400,56 0,0,50,50 0,36,6,14 50,15,50,41
+grid-order-dense	0,0,400,55 0,41,50,14 0,0,50,41 50,11,50,27
+grid-gap-and-explicit-rows	0,0,400,106 0,21,50,14 55,0,50,41 0,46,50,27 55,51,50,20
+grid-height-set-items	0,0,400,81 0,21,50,60 50,0,50,20
+grid-text-items	0,0,400,41 50,0,50,41 100,11,50,27
+grid-single-row-auto-fits-different-groups	0,0,400,41 0,27,50,14 50,0,50,41 100,7,50,27
+grid-grid-in-flex-baseline	0,0,400,41 0,2,40,36 0,21,20,14 20,2,20,36 40,0,18,41
+grid-align-content-baseline-is-start-and-last-is-end	0,0,400,100 0,0,50,22 0,22,50,22 0,100,400,100 0,100,50,50 0,150,50,50
+grid-inline-grid-wrapped-first-item-on-the-text-baseline	0,60 6,54 6,54 6,54 0,22
+grid-fractional-font-sizes	0,0,400,38 0,12.5,60,21.5 60,0,60,38 120,19,60,14
+grid-column-flow-gives-one-item-to-each-row	0,0,400,68 0,10,203,14 0,27,203,41 203,0,197,27 203,43,197,20
+grid-spanning-item-taller-than-its-rows	0,0,400,121 0,21,50,100 50,0,50,41 50,67.5,50,27
+grid-last-baseline-spanning-item-taller-than-its-rows	0,0,400,151 0,51,50,100 50,0,50,41 50,41,50,27
+grid-baseline-rows-stretch-with-a-tall-container	0,0,400,200 0,21,50,14 50,0,50,41 0,107,50,27 50,112,50,20 0,200,400,200 0,287,50,14 50,266,50,41 0,373,50,27 50,378,50,20
+grid-baseline-item-with-an-auto-height-block-child-and-a-border	0,0,400,59 0,11,60,48 60,0,60,46
+flex-justify-content-baseline	0,0,400,22 0,0,50,22 50,0,50,22 0,22,400,22 0,22,50,22 50,22,50,22 0,44,400,22 0,44,50,22 50,44,50,22
+grid-justify-content-baseline	0,0,400,22 0,0,50,22 50,0,50,22 0,22,400,22 0,22,50,22 50,22,50,22

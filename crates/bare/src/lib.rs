@@ -160,6 +160,8 @@ mod browser_intersection_tests;
 #[cfg(test)]
 mod browser_sticky_tests;
 #[cfg(test)]
+mod browser_baseline_tests;
+#[cfg(test)]
 mod browser_valign_tests;
 #[cfg(test)]
 mod browser_walker_tests;

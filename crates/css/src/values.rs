@@ -550,7 +550,7 @@ fn expand(name: &str, parts: &Parts, emit: &mut dyn FnMut(Property, Value)) -> b
             _ => false,
         },
         // `first baseline`, `last baseline`, `safe center`: two words for one value.
-        "align-items" | "align-self" | "align-content" | "justify-content" if slice.len() == 2 => {
+        "align-items" | "align-self" | "align-content" | "justify-content" | "justify-items" | "justify-self" if slice.len() == 2 => {
             let Some(property) = Property::from_name(name) else { return false };
             let value = match *slice {
                 [Part::Keyword(Keyword::First), Part::Keyword(Keyword::Baseline)] => Part::Keyword(Keyword::Baseline),

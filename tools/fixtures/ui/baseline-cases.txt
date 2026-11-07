@@ -1,0 +1,214 @@
+var st = document.createElement('style'); st.textContent = "html{overflow:hidden}*{font-family:'Noto Sans Mono' !important}body{margin:0}.f{display:flex}.g{display:grid}.f>*,.g>*{background:#ddd}span[id]{background:#eee}"; document.head.appendChild(st);
+var $ = function (i) { return document.getElementById(i) };
+var V = function (ids) { return ids.split(' ').map(function (id) { var r = $(id).getBoundingClientRect(); return [r.y, r.height].map(function (v) { return Math.round(v * 100) / 100 }).join(',') }).join(' ') };
+var R = function (ids) { return ids.split(' ').map(function (id) { var r = $(id).getBoundingClientRect(); return [r.x, r.y, r.width, r.height].map(function (v) { return Math.round(v * 100) / 100 }).join(',') }).join(' ') };
+=== flex-mixed-sizes-padding-and-border
+@html <div id=c class=f style="align-items:baseline"><div id=a style="font-size:10px">a</div><div id=b style="font-size:30px">b</div><div id=d style="font-size:20px;padding:5px;border:2px solid">d</div></div>
+(function () { return R('c a b d') })
+=== flex-last-baseline-single-lines
+@html <div id=c class=f style="align-items:last baseline"><div id=a style="font-size:10px">a</div><div id=b style="font-size:30px">b</div><div id=d style="font-size:20px;padding:5px;border:2px solid">d</div></div>
+(function () { return R('c a b d') })
+=== flex-last-baseline-wrapped-text
+@html <div id=c class=f style="align-items:last baseline"><div id=a style="font-size:10px;width:30px">aa aa aa</div><div id=b style="font-size:30px">b</div><div id=d style="font-size:20px;width:50px">dd dd</div></div>
+(function () { return R('c a b d') })
+=== flex-first-baseline-wrapped-text
+@html <div id=c class=f style="align-items:first baseline"><div id=a style="font-size:10px;width:30px">aa aa aa</div><div id=b style="font-size:30px">b</div><div id=d style="font-size:20px;width:50px">dd dd</div></div>
+(function () { return R('c a b d') })
+=== flex-first-and-last-groups-in-one-line
+@html <div id=c class=f><div id=a style="font-size:10px;width:30px;align-self:first baseline">aa aa aa</div><div id=b style="font-size:30px;align-self:last baseline">b</div><div id=d style="font-size:20px;width:50px;align-self:baseline">dd dd</div><div id=e style="font-size:25px;width:50px;align-self:last baseline">ee ee</div></div>
+(function () { return R('c a b d e') })
+=== flex-items-with-no-text
+@html <div id=c class=f style="align-items:baseline"><div id=a style="height:20px">x</div><div id=b style="height:40px"></div><div id=d style="height:10px;padding:3px;border:2px solid"></div></div>
+(function () { return V('c a b d') })
+=== flex-items-with-no-text-last-baseline
+@html <div id=c class=f style="align-items:last baseline"><div id=a style="height:20px">x</div><div id=b style="height:40px"></div><div id=d style="height:10px;padding:3px;border:2px solid"></div></div>
+(function () { return V('c a b d') })
+=== flex-wrap-each-line-has-its-own-baseline
+@html <div id=c class=f style="align-items:baseline;flex-wrap:wrap;width:100px"><div id=a style="font-size:10px;width:50px">a</div><div id=b style="font-size:30px;width:50px">b</div><div id=d style="font-size:20px;width:50px">d</div><div id=e style="font-size:15px;width:50px">e</div></div>
+(function () { return R('c a b d e') })
+=== flex-wrap-last-baseline
+@html <div id=c class=f style="align-items:last baseline;flex-wrap:wrap;width:100px"><div id=a style="font-size:10px;width:50px">a</div><div id=b style="font-size:30px;width:50px">b</div><div id=d style="font-size:20px;width:50px">d</div><div id=e style="font-size:15px;width:50px">e</div></div>
+(function () { return R('c a b d e') })
+=== flex-wrap-align-content-space-around
+@html <div id=c class=f style="align-items:baseline;flex-wrap:wrap;width:100px;height:200px;align-content:space-around"><div id=a style="font-size:10px;width:50px">a</div><div id=b style="font-size:30px;width:50px">b</div><div id=d style="font-size:20px;width:50px">d</div><div id=e style="font-size:15px;width:50px">e</div></div>
+(function () { return R('c a b d e') })
+=== flex-wrap-reverse-baseline
+@html <div id=c class=f style="align-items:baseline;flex-wrap:wrap-reverse;width:100px;height:150px"><div id=a style="font-size:10px;width:50px">a</div><div id=b style="font-size:30px;width:50px">b</div><div id=d style="font-size:20px;width:50px">d</div></div>
+(function () { return R('c a b d') })
+=== flex-wrap-reverse-last-baseline
+@html <div id=c class=f style="align-items:last baseline;flex-wrap:wrap-reverse;width:100px;height:150px"><div id=a style="font-size:10px;width:50px">a</div><div id=b style="font-size:30px;width:50px">b</div><div id=d style="font-size:20px;width:50px">d</div></div>
+(function () { return R('c a b d') })
+=== flex-column-baseline-is-the-start-edge
+@html <div id=c class=f style="flex-direction:column;align-items:baseline;width:200px"><div id=a style="font-size:10px;width:50px">a</div><div id=b style="font-size:30px;width:80px">b</div></div>
+(function () { return R('c a b') })
+=== flex-column-last-baseline
+@html <div id=c class=f style="flex-direction:column;align-items:last baseline;width:200px"><div id=a style="font-size:10px;width:50px">a</div><div id=b style="font-size:30px;width:80px">b</div></div>
+(function () { return R('c a b') })
+=== flex-fixed-height-first-and-last
+@html <div id=c class=f style="align-items:baseline;height:100px"><div id=a style="font-size:10px">a</div><div id=b style="font-size:30px">b</div></div><div id=e class=f style="align-items:last baseline;height:100px"><div id=g style="font-size:10px">a</div><div id=h style="font-size:30px">b</div></div>
+(function () { return R('c a b e g h') })
+=== flex-lone-baseline-item-falls-back-to-start-or-end
+@html <div id=c class=f style="align-items:center;height:100px"><div id=a style="font-size:10px;align-self:baseline">a</div><div id=b style="font-size:30px">b</div></div><div id=e class=f style="align-items:center;height:100px"><div id=g style="font-size:10px;align-self:last baseline">a</div><div id=h style="font-size:30px">b</div></div>
+(function () { return R('c a b e g h') })
+=== flex-baseline-with-margins-and-auto-margins
+@html <div id=c class=f style="align-items:baseline"><div id=a style="font-size:10px;margin-top:20px">a</div><div id=b style="font-size:30px;margin-bottom:10px">b</div><div id=d style="font-size:20px;margin:auto 0">d</div></div>
+(function () { return R('c a b d') })
+=== flex-last-baseline-with-margins
+@html <div id=c class=f style="align-items:last baseline"><div id=a style="font-size:10px;margin-top:20px;margin-bottom:7px">a</div><div id=b style="font-size:30px;margin-bottom:10px">b</div></div>
+(function () { return R('c a b') })
+=== flex-inline-flex-on-the-text-baseline
+@html <div id=p style="font-size:30px">x<div id=c class=f style="display:inline-flex;align-items:baseline"><div id=a style="font-size:10px">a</div><div id=b style="font-size:20px">b</div></div><span id=t>y</span><div id=e style="display:inline-flex;align-items:last baseline"><div id=g style="font-size:10px">a</div><div id=h style="font-size:20px;padding-bottom:9px">b</div></div><span id=u>z</span></div>
+(function () { return V('p c a b t e g h u') })
+=== flex-inline-flex-last-baseline-wrapped-text
+@html <div id=p>x<div id=c class=f style="display:inline-flex;align-items:last baseline;width:60px"><div id=a style="font-size:10px">aa aa aa</div><div id=b style="font-size:20px">b b</div></div><span id=t>y</span></div>
+(function () { return V('p c a b t') })
+=== flex-inline-flex-wrapped-first-item-on-the-text-baseline
+@html <div id=p>x<div id=c class=f style="display:inline-flex;width:60px"><div id=a style="font-size:10px">aa aa aa</div><div id=b style="font-size:20px">b b</div></div><span id=t>y</span></div>
+(function () { return V('p c a b t') })
+=== flex-row-reverse-baseline
+@html <div id=c class=f style="flex-direction:row-reverse;align-items:baseline"><div id=a style="font-size:10px">a</div><div id=b style="font-size:30px">b</div></div>
+(function () { return R('c a b') })
+=== flex-scroll-container-items-keep-their-baseline
+@html <div id=c class=f style="align-items:baseline"><div id=a style="font-size:10px;overflow:hidden">a</div><div id=b style="font-size:30px">b</div><div id=d style="font-size:20px;overflow:auto;height:20px">d</div></div>
+(function () { return R('c a b d') })
+=== flex-nested-block-baseline
+@html <div id=c class=f style="align-items:baseline"><div id=a style="font-size:10px"><div style="padding-top:20px">a</div></div><div id=b style="font-size:30px"><p style="margin:7px 0 0">b</p></div></div>
+(function () { return R('c a b') })
+=== flex-baseline-and-stretch-items-in-one-line
+@html <div id=c class=f style="align-items:stretch;height:100px"><div id=a style="font-size:10px;align-self:baseline">a</div><div id=b style="font-size:30px;align-self:baseline">b</div><div id=d>d</div></div>
+(function () { return V('c a b d') })
+=== flex-item-that-is-a-flex-container
+@html <div id=c class=f style="align-items:baseline"><div id=a class=f style="font-size:10px;align-items:flex-end;height:50px"><div id=a1>a</div></div><div id=b style="font-size:30px">b</div></div>
+(function () { return R('c a a1 b') })
+=== flex-wrap-mixed-first-and-last-in-lines
+@html <div id=c class=f style="flex-wrap:wrap;width:100px;align-items:baseline"><div id=a style="font-size:10px;width:50px">a</div><div id=b style="font-size:30px;width:50px;align-self:last baseline">b</div><div id=d style="font-size:20px;width:50px;align-self:last baseline">d</div><div id=e style="font-size:15px;width:50px">e</div></div>
+(function () { return R('c a b d e') })
+=== flex-align-content-baseline-is-start
+@html <div id=c class=f style="flex-wrap:wrap;width:100px;height:100px;align-content:baseline"><div id=a style="width:50px">a</div><div id=b style="width:50px">b</div><div id=d style="width:50px">d</div></div><div id=e class=f style="flex-wrap:wrap;width:100px;height:100px;align-content:last baseline"><div id=g style="width:50px">a</div><div id=h style="width:50px">b</div><div id=i style="width:50px">d</div></div>
+(function () { return R('c a b d e g h i') })
+=== flex-baseline-in-an-orthogonal-free-line-with-gap
+@html <div id=c class=f style="align-items:baseline;flex-wrap:wrap;width:100px;row-gap:7px;column-gap:3px"><div id=a style="font-size:10px;width:40px">a</div><div id=b style="font-size:30px;width:40px">b</div><div id=d style="font-size:20px;width:40px;margin-top:6px">d</div><div id=e style="font-size:15px;width:40px;border-top:3px solid">e</div></div>
+(function () { return R('c a b d e') })
+=== grid-mixed-baseline
+@html <div id=c class=g style="grid-template-columns:repeat(3,60px);align-items:baseline"><div id=a style="font-size:10px">a</div><div id=b style="font-size:30px">b</div><div id=d style="font-size:20px;padding:5px;border:2px solid">d</div></div>
+(function () { return R('c a b d') })
+=== grid-last-baseline
+@html <div id=c class=g style="grid-template-columns:repeat(3,60px);align-items:last baseline"><div id=a style="font-size:10px">a</div><div id=b style="font-size:30px">b</div><div id=d style="font-size:20px;padding:5px;border:2px solid">d</div></div>
+(function () { return R('c a b d') })
+=== grid-first-baseline-multiline
+@html <div id=c class=g style="grid-template-columns:30px 18px 50px;align-items:first baseline"><div id=a style="font-size:10px">aa aa aa</div><div id=b style="font-size:30px">b</div><div id=d style="font-size:20px">dd dd</div></div>
+(function () { return R('c a b d') })
+=== grid-last-baseline-multiline
+@html <div id=c class=g style="grid-template-columns:30px 18px 50px;align-items:last baseline"><div id=a style="font-size:10px">aa aa aa</div><div id=b style="font-size:30px">b</div><div id=d style="font-size:20px">dd dd</div></div>
+(function () { return R('c a b d') })
+=== grid-two-rows
+@html <div id=c class=g style="grid-template-columns:60px 60px;align-items:baseline"><div id=a style="font-size:10px">a</div><div id=b style="font-size:30px">b</div><div id=d style="font-size:20px">d</div><div id=e style="font-size:15px">e</div></div>
+(function () { return R('c a b d e') })
+=== grid-mixed-self
+@html <div id=c class=g style="grid-template-columns:repeat(4,40px);align-items:start"><div id=a style="font-size:10px;align-self:baseline">a</div><div id=b style="font-size:30px;align-self:baseline">b</div><div id=d style="font-size:20px">d</div><div id=e style="font-size:15px;align-self:last baseline">e</div></div>
+(function () { return R('c a b d e') })
+=== grid-first-and-last-same-row
+@html <div id=c class=g style="grid-template-columns:repeat(4,50px)"><div id=a style="font-size:10px;align-self:first baseline">aa aa aa</div><div id=b style="font-size:30px;align-self:last baseline">b</div><div id=d style="font-size:20px;align-self:baseline">dd dd</div><div id=e style="font-size:25px;align-self:last baseline">ee ee</div></div>
+(function () { return R('c a b d e') })
+=== grid-empty-items
+@html <div id=c class=g style="grid-template-columns:repeat(3,40px);align-items:baseline"><div id=a style="height:20px">x</div><div id=b style="height:40px"></div><div id=d style="height:10px;padding:3px;border:2px solid"></div></div>
+(function () { return R('c a b d') })
+=== grid-empty-last
+@html <div id=c class=g style="grid-template-columns:repeat(3,40px);align-items:last baseline"><div id=a style="height:20px">x</div><div id=b style="height:40px"></div><div id=d style="height:10px;padding:3px;border:2px solid"></div></div>
+(function () { return R('c a b d') })
+=== grid-spanning-rows
+@html <div id=c class=g style="grid-template-columns:repeat(3,50px);align-items:baseline"><div id=a style="font-size:10px;grid-row:1 / span 2">a</div><div id=b style="font-size:30px">b</div><div id=d style="font-size:20px">d</div><div id=e style="font-size:15px;grid-column:2;grid-row:2">e</div><div id=f style="font-size:12px;grid-column:3;grid-row:2">f</div></div>
+(function () { return R('c a b d e f') })
+=== grid-spanning-columns
+@html <div id=c class=g style="grid-template-columns:repeat(4,30px);align-items:baseline"><div id=a style="font-size:10px;grid-column:span 2">a</div><div id=b style="font-size:30px">b</div><div id=d style="font-size:20px">d</div></div>
+(function () { return R('c a b d') })
+=== grid-spanning-rows-last
+@html <div id=c class=g style="grid-template-columns:repeat(3,50px);align-items:last baseline"><div id=a style="font-size:10px;grid-row:1 / span 2">a</div><div id=b style="font-size:30px">b</div><div id=d style="font-size:20px">d</div><div id=e style="font-size:15px;grid-column:2;grid-row:2">e</div><div id=f style="font-size:12px;grid-column:3;grid-row:2">f</div></div>
+(function () { return R('c a b d e f') })
+=== grid-fixed-rows
+@html <div id=c class=g style="grid-template-columns:repeat(2,50px);grid-template-rows:100px;align-items:baseline"><div id=a style="font-size:10px">a</div><div id=b style="font-size:30px">b</div></div><div id=e class=g style="grid-template-columns:repeat(2,50px);grid-template-rows:100px;align-items:last baseline"><div id=g style="font-size:10px">a</div><div id=h style="font-size:30px">b</div></div>
+(function () { return R('c a b e g h') })
+=== grid-lone
+@html <div id=c class=g style="grid-template-columns:repeat(2,50px);grid-template-rows:100px;align-items:center"><div id=a style="font-size:10px;align-self:baseline">a</div><div id=b style="font-size:30px">b</div></div><div id=e class=g style="grid-template-columns:repeat(2,50px);grid-template-rows:100px;align-items:center"><div id=g style="font-size:10px;align-self:last baseline">a</div><div id=h style="font-size:30px">b</div></div>
+(function () { return R('c a b e g h') })
+=== grid-margins
+@html <div id=c class=g style="grid-template-columns:repeat(3,50px);align-items:baseline"><div id=a style="font-size:10px;margin-top:20px">a</div><div id=b style="font-size:30px;margin-bottom:10px">b</div><div id=d style="font-size:20px;margin:auto 0">d</div></div>
+(function () { return R('c a b d') })
+=== grid-last-margins
+@html <div id=c class=g style="grid-template-columns:repeat(3,50px);align-items:last baseline"><div id=a style="font-size:10px;margin-top:20px;margin-bottom:7px">a</div><div id=b style="font-size:30px;margin-bottom:10px">b</div></div>
+(function () { return R('c a b') })
+=== grid-align-content
+@html <div id=c class=g style="grid-template-columns:repeat(2,50px);height:200px;align-items:baseline;align-content:center"><div id=a style="font-size:10px">a</div><div id=b style="font-size:30px">b</div></div><div id=e class=g style="grid-template-columns:repeat(2,50px);height:200px;align-items:baseline"><div id=g style="font-size:10px">a</div><div id=h style="font-size:30px">b</div></div>
+(function () { return R('c a b e g h') })
+=== grid-inline-grid
+@html <div id=p style="font-size:30px">x<div id=c class=g style="display:inline-grid;grid-template-columns:20px 20px;align-items:baseline"><div id=a style="font-size:10px">a</div><div id=b style="font-size:20px">b</div></div><span id=t>y</span><div id=e style="display:inline-grid;grid-template-columns:20px 20px;align-items:last baseline"><div id=g style="font-size:10px">a</div><div id=h style="font-size:20px;padding-bottom:9px">b</div></div><span id=u>z</span></div>
+(function () { return V('p c a b t e g h u') })
+=== grid-inline-grid-multiline
+@html <div id=p>x<div id=c class=g style="display:inline-grid;grid-template-columns:34px 26px;align-items:last baseline"><div id=a style="font-size:10px">aa aa aa</div><div id=b style="font-size:20px">b b</div></div><span id=t>y</span></div>
+(function () { return V('p c a b t') })
+=== grid-justify-baseline
+@html <div id=c class=g style="grid-template-columns:100px 100px;justify-items:baseline"><div id=a style="width:30px">a</div><div id=b style="width:50px">b</div></div><div id=e class=g style="grid-template-columns:100px 100px;justify-items:last baseline"><div id=g style="width:30px">a</div><div id=h style="width:50px">b</div></div><div id=i class=g style="grid-template-columns:100px 100px;justify-items:first baseline"><div id=j style="width:30px">a</div><div id=k style="width:50px">b</div></div>
+(function () { return R('c a b e g h i j k') })
+=== grid-justify-self-baseline
+@html <div id=c class=g style="grid-template-columns:100px 100px"><div id=a style="width:30px;justify-self:baseline">a</div><div id=b style="width:50px;justify-self:last baseline">b</div></div>
+(function () { return R('c a b') })
+=== grid-overflow
+@html <div id=c class=g style="grid-template-columns:repeat(3,60px);align-items:baseline"><div id=a style="font-size:10px;overflow:hidden">a</div><div id=b style="font-size:30px">b</div><div id=d style="font-size:20px;overflow:auto;height:20px">d</div></div>
+(function () { return R('c a b d') })
+=== grid-nested-block
+@html <div id=c class=g style="grid-template-columns:repeat(2,60px);align-items:baseline"><div id=a style="font-size:10px"><div style="padding-top:20px">a</div></div><div id=b style="font-size:30px"><p style="margin:7px 0 0">b</p></div></div>
+(function () { return R('c a b') })
+=== grid-stretch-neighbor
+@html <div id=c class=g style="grid-template-columns:repeat(3,40px);grid-template-rows:100px"><div id=a style="font-size:10px;align-self:baseline">a</div><div id=b style="font-size:30px;align-self:baseline">b</div><div id=d>d</div></div>
+(function () { return R('c a b d') })
+=== grid-nested-flex-item
+@html <div id=c class=g style="grid-template-columns:repeat(2,50px);align-items:baseline"><div id=a class=f style="font-size:10px;align-items:flex-end;height:50px"><div id=a1>a</div></div><div id=b style="font-size:30px">b</div></div>
+(function () { return R('c a a1 b') })
+=== grid-order-dense
+@html <div id=c class=g style="grid-template-columns:repeat(2,50px);align-items:baseline"><div id=a style="font-size:10px;order:3">a</div><div id=b style="font-size:30px;order:1">b</div><div id=d style="font-size:20px;order:2">d</div></div>
+(function () { return R('c a b d') })
+=== grid-gap-and-explicit-rows
+@html <div id=c class=g style="grid-template-columns:repeat(2,50px);grid-template-rows:auto 60px;gap:5px;align-items:baseline"><div id=a style="font-size:10px">a</div><div id=b style="font-size:30px">b</div><div id=d style="font-size:20px">d</div><div id=e style="font-size:15px">e</div></div>
+(function () { return R('c a b d e') })
+=== grid-height-set-items
+@html <div id=c class=g style="grid-template-columns:repeat(2,50px);align-items:baseline"><div id=a style="font-size:10px;height:60px">a</div><div id=b style="font-size:30px;height:20px">b</div></div>
+(function () { return R('c a b') })
+=== grid-text-items
+@html <div id=c class=g style="grid-template-columns:repeat(3,50px);align-items:baseline">xx<div id=b style="font-size:30px">b</div><div id=d style="font-size:20px">d</div></div>
+(function () { return R('c b d') })
+=== grid-single-row-auto-fits-different-groups
+@html <div id=c class=g style="grid-template-columns:repeat(3,50px);align-items:baseline"><div id=a style="font-size:10px;align-self:end">a</div><div id=b style="font-size:30px">b</div><div id=d style="font-size:20px;align-self:center">d</div></div>
+(function () { return R('c a b d') })
+=== grid-grid-in-flex-baseline
+@html <div id=c class=f style="align-items:baseline"><div id=a class=g style="font-size:10px;grid-template-columns:20px 20px;align-items:baseline"><div id=a1>a</div><div id=a2 style="font-size:20px;padding-top:9px">b</div></div><div id=b style="font-size:30px">b</div></div>
+(function () { return R('c a a1 a2 b') })
+=== grid-align-content-baseline-is-start-and-last-is-end
+@html <div id=c class=g style="grid-template-columns:50px;height:100px;align-content:baseline"><div id=a>a</div><div id=b>b</div></div><div id=e class=g style="grid-template-columns:50px;height:100px;align-content:last baseline"><div id=g>a</div><div id=h>b</div></div>
+(function () { return R('c a b e g h') })
+=== grid-inline-grid-wrapped-first-item-on-the-text-baseline
+@html <div id=p>x<div id=c class=g style="display:inline-grid;grid-template-columns:34px 26px"><div id=a style="font-size:10px">aa aa aa</div><div id=b style="font-size:20px">b b</div></div><span id=t>y</span></div>
+(function () { return V('p c a b t') })
+=== grid-fractional-font-sizes
+@html <div id=c class=g style="grid-template-columns:repeat(3,60px);align-items:baseline"><div id=a style="font-size:13.3px;padding-top:3.5px">a</div><div id=b style="font-size:27.7px">b</div><div id=d style="font-size:9.1px;border-top:1.5px solid">d</div></div>
+(function () { return R('c a b d') })
+=== grid-column-flow-gives-one-item-to-each-row
+@html <div id=c class=g style="grid-auto-flow:column;grid-template-rows:repeat(2,auto);align-items:baseline"><div id=a style="font-size:10px">a</div><div id=b style="font-size:30px">b</div><div id=d style="font-size:20px">d</div><div id=e style="font-size:15px">e</div></div>
+(function () { return R('c a b d e') })
+=== grid-spanning-item-taller-than-its-rows
+@html <div id=c class=g style="grid-template-columns:repeat(2,50px);align-items:baseline"><div id=a style="font-size:10px;grid-row:1 / span 2;height:100px">a</div><div id=b style="font-size:30px">b</div><div id=d style="font-size:20px;grid-column:2">d</div></div>
+(function () { return R('c a b d') })
+=== grid-last-baseline-spanning-item-taller-than-its-rows
+@html <div id=c class=g style="grid-template-columns:repeat(2,50px);align-items:last baseline"><div id=a style="font-size:10px;grid-row:1 / span 2;height:100px">a</div><div id=b style="font-size:30px">b</div><div id=d style="font-size:20px;grid-column:2">d</div></div>
+(function () { return R('c a b d') })
+=== grid-baseline-rows-stretch-with-a-tall-container
+@html <div id=c class=g style="grid-template-columns:repeat(2,50px);height:200px;align-items:baseline;align-content:stretch"><div id=a style="font-size:10px">a</div><div id=b style="font-size:30px">b</div><div id=d style="font-size:20px">d</div><div id=e style="font-size:15px">e</div></div><div id=f class=g style="grid-template-columns:repeat(2,50px);height:200px;align-items:last baseline;align-content:stretch"><div id=h style="font-size:10px">a</div><div id=i style="font-size:30px">b</div><div id=j style="font-size:20px">d</div><div id=k style="font-size:15px">e</div></div>
+(function () { return R('c a b d e f h i j k') })
+=== grid-baseline-item-with-an-auto-height-block-child-and-a-border
+@html <div id=c class=g style="grid-template-columns:repeat(2,60px);align-items:baseline"><div id=a style="border:4px solid;padding:6px"><div style="font-size:10px">a<br>a</div></div><div id=b style="font-size:30px;border-bottom:5px solid">b</div></div>
+(function () { return R('c a b') })
+=== flex-justify-content-baseline
+@html <div id=c class=f style="justify-content:baseline"><div id=a style="width:50px">a</div><div id=b style="width:50px">b</div></div><div id=e class=f style="justify-content:last baseline"><div id=g style="width:50px">a</div><div id=h style="width:50px">b</div></div><div id=i class=f style="justify-content:first baseline"><div id=j style="width:50px">a</div><div id=k style="width:50px">b</div></div>
+(function () { return R('c a b e g h i j k') })
+=== grid-justify-content-baseline
+@html <div id=c class=g style="grid-template-columns:50px 50px;justify-content:baseline"><div id=a>a</div><div id=b>b</div></div><div id=e class=g style="grid-template-columns:50px 50px;justify-content:last baseline"><div id=g>a</div><div id=h>b</div></div>
+(function () { return R('c a b e g h') })

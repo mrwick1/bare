@@ -193,6 +193,18 @@ pub fn context(cx: &Cx, node: NodeId) -> Context {
     }
 }
 
+/// The baseline of the first line of a flex or grid item laid out in `out[at..end]`, from the top of its border box. `last` is the
+/// baseline of its last line (`Done::baseline`). A flex, grid or table container gives its own baseline. A scroll container
+/// keeps the baseline of its content, but not below its bottom edge (`height` is its border box).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn first_baseline(cx: &Cx, node: NodeId, boxed: bool, out: &[crate::fragment::Fragment], at: usize, end: usize, last: Option<f32>, height: f32) -> Option<f32> {
+    if boxed && context(cx, node) != Context::Flow {
+        return last;
+    }
+    let found = crate::fragment::first_baseline(&cx.tree, out, at, end, boxed).or(last);
+    found.map(|b| if boxed && cx.tree.scrolls(node) { b.min(height) } else { b })
+}
+
 /// What the parent needs from a child block.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Done {
