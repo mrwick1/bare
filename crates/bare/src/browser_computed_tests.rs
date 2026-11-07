@@ -640,6 +640,17 @@ fn computed_names_are_sorted_and_include_live_custom_properties() {
 }
 
 #[test]
+fn reads_of_a_hidden_element_keep_both_cascades() {
+    let mut b = at("<!doctype html><html><head><style>.h { display: none }</style></head><body><div class=h><p id=p>t</p></div><p id=q>u</p></body></html>");
+    let n = |b: &mut Browser, s: &str| (js(b, s), b.computed_stats().computes);
+    // The first read of a hidden element styles the page, then the way down to it: two cascades.
+    assert_eq!(n(&mut b, "var p = document.getElementById('p'), q = document.getElementById('q'); getComputedStyle(p).display"), ("block".into(), 2));
+    // With no change, more reads of it and of a shown element use both again. Main did two more cascades for each read of `p`.
+    assert_eq!(n(&mut b, "getComputedStyle(p).display + getComputedStyle(q).display + getComputedStyle(p).color"), ("blockblockrgb(0, 0, 0)".into(), 2));
+    assert_eq!(n(&mut b, "q.className = 'h'; getComputedStyle(q).display + getComputedStyle(p).display"), ("noneblock".into(), 4));
+}
+
+#[test]
 fn styles_are_reused_until_the_document_changes() {
     let mut b = at("<!doctype html><html><head><style>.w { width: 50px } p:empty { display: none } x-a:defined { color: green } input:focus { color: red }</style></head>\
         <body><div id=a style='width: 10px'>t</div><p id=p></p><x-a id=x></x-a><input id=i></body></html>");
