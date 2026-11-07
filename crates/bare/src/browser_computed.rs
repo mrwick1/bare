@@ -215,7 +215,9 @@ pub(crate) fn num(n: f32) -> String {
     if v == 0.0 {
         return "0".into();
     }
-    let s = format!("{v:.*}", (5 - v.abs().log10().floor() as i32).clamp(0, 30) as usize);
+    // The exponent after rounding to 6 digits (`log10` would link libm, and cost startup).
+    let exp: i32 = format!("{v:.5e}").rsplit_once('e').and_then(|(_, e)| e.parse().ok()).unwrap_or(0);
+    let s = format!("{v:.*}", (5 - exp).clamp(0, 30) as usize);
     if s.contains('.') { s.trim_end_matches('0').trim_end_matches('.').into() } else { s }
 }
 
