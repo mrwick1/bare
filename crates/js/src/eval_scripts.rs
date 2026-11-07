@@ -120,7 +120,7 @@ impl<'p> Interp<'p> {
         }
         let node_room = self.limits.max_script_nodes.saturating_sub(self.script_nodes);
         let pl = crate::parse::Limits { max_source: per_script_source, max_nodes: node_room.min(u32::MAX as usize) as u32, ..Default::default() };
-        let parsed = match crate::parse::parse_script(source, pl) {
+        let parsed = match crate::parse_cache::parse(crate::parse_cache::Kind::Classic, source, pl) {
             Ok(p) => p,
             Err(e) => {
                 use crate::parse::{ErrorKind as K, LimitKind as L};
@@ -139,7 +139,7 @@ impl<'p> Interp<'p> {
             return Err(Error::Limit(LimitKind::ScriptNodes));
         }
         let (id, old, names_mark, sc_mark) = (self.scripts.len(), self.cur, self.names.len(), self.sc_all.len());
-        self.scripts.push(Code::new(Rc::new(parsed.into_owned())));
+        self.scripts.push(Code::new(parsed));
         self.select(id);
         let r = self.in_call(|it| it.walk_program());
         self.select(old);

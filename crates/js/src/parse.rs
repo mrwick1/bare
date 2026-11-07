@@ -145,7 +145,20 @@ fn lex_err(e: lex::Error) -> Error {
 }
 
 /// Parse `source` as a script (not a module). Borrows `source`; the [`Program`] owns its nodes.
-pub fn parse_script(source: &str, mut limits: Limits) -> Result<Program<'_>, Error> {
+pub fn parse_script(source: &str, limits: Limits) -> Result<Program<'_>, Error> {
+    parse_counted(source, limits, &mut 0)
+}
+
+/// [`parse_script`], and the count of nodes plus list entries made before the end or the error. The parse cache uses the count:
+/// the same source with a `max_nodes` of at least that count gives the same result.
+pub fn parse_script_used(source: &str, limits: Limits) -> (Result<Program<'_>, Error>, u32) {
+    let mut used = 0;
+    let r = parse_counted(source, limits, &mut used);
+    (r, used)
+}
+
+#[inline(always)]
+fn parse_counted<'a>(source: &'a str, mut limits: Limits, used: &mut u32) -> Result<Program<'a>, Error> {
     limits.max_depth = limits.max_depth.min(HARD_MAX_DEPTH);
     if source.len() > limits.max_source {
         let at = limits.max_source.min(u32::MAX as usize) as u32;
@@ -179,7 +192,9 @@ pub fn parse_script(source: &str, mut limits: Limits) -> Result<Program<'_>, Err
         for_await_head: false,
         await_pos: 0,
     };
-    p.parse_program()?;
+    let r = p.parse_program();
+    *used = p.used;
+    r?;
     Ok(p.p)
 }
 
