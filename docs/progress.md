@@ -2888,3 +2888,40 @@ Checks (archMachine):
 - Live staging, read only: 13 runs of the journey, all passed.
 
 Not tested: `keycost.sh` (no change on the typing path); a session of the control interface (one thread each, so one cache each, not measured); the window (`--window`); a script of more than 32 MiB of tree; a page with many distinct large `eval` texts.
+
+## A new document parsed in slices (S5)
+
+PR #243 and #247 left one long step in a live turn: the HTML parse of a new document (`tree::parse`). A second gap: in a document that was not split, a sheet or a preload that a script added before `load` loaded inside the turn. The choices are in [decisions.md](decisions.md#input-that-does-not-wait). The loader keeps its pre-parsed model (asked and confirmed): a parser-blocking script does not pause the parser, and scripts still see the whole tree.
+
+Changes:
+- `crates/bare/src/browser_session.rs`: `Parsing`. A turn scans ahead for half of its slice, then feeds the parser 16 KB at a time until the slice of 8 ms ends. The old document stays until the tree is done. Every live document is split; `navigate` and `run` run its turns until `load` (`add_turn`).
+- `crates/bare/src/browser_loader/scan.rs`: the scan. It starts the downloads of the classic scripts and the `stylesheet` links on workers. `run_page` takes them (`adopt_scan`).
+- `crates/bare/src/browser_loader.rs`: a split document runs the sheet and preload pass before it waits for the next parsed script, so a sheet that a script added starts at once.
+- `crates/html/src/tokenizer.rs`: `Tokens::between`.
+
+Tests (written first; each failed on main):
+- `crates/drive/tests/chunked.rs`, a document of 2 MB (40,000 rows, 160,000 elements) behind a link, scripts of 300 ms. Main: 0 parse ticks (the parse ran in one tick), longest tick 42 ms. Now: 4 parse ticks, longest tick 11.2 ms. A click on the old document during the parse returns in 16.6 ms and runs its listener. The script in the middle of the document starts downloading before the parse ends. The order is `i1,1,2,i2,rs:interactive,3,dcl,a,rs:complete,load`, the same as a headless `Session::run`, and the DOM dump is equal.
+- `browser_session::tests`: each saved page of the repository (`tools/fixtures`, `crates/paint/tests/fixtures`), repeated to 3 chunks or more and parsed one chunk for each step, gives the tree of `tree::parse`.
+- `crates/drive/tests/nonblocking.rs`, `a_sheet_and_a_preload_added_before_load_download_with_the_scripts`: `Page::open` of a page whose inline script adds a slow sheet and a slow preload, then a slow script. Main: 1,503 ms (three waits of 500 ms). Now: under 900 ms (one wait). The sheet applies before `load`.
+
+Checks (archMachine):
+- `cargo test --release --workspace`: 51 test binaries, 2,964 passed, 0 failed.
+- `tools/js/cost_matrix.sh`, base origin/main `9adfe95` from `base-build`: 805 rows in 64 s. Mean change: glibc +0.001%, jemalloc +0.530% (2 rows measured). Over under one allocator: 0. Over under both: 2: `dataset_load keys 10000 50` (+0.551%, +0.547%) and `dataset_load keys 1000 50` (+0.522%, +0.513%). These are the two rows of #243, with the same size. That example runs `run_script` on one `Browser` and runs none of the changed code. Hypothesis: the same code-layout effect. No fix was tried.
+- Arjun approved the merge on 2026-11-08 with both `dataset_load keys` rows. They are the same rows and size as in #243, a code-layout effect: the example runs none of the changed code. Both rows are now a standing known regression: a later change fails on them only when it makes them worse than on main.
+- Live staging, `bare-drive` with the masked runner, read only, `drive-journey.steps`, 2 runs each, all passed. Base: origin/main `2edceef`. Times in ms, the sum of the steps of each group (`shot` steps not counted):
+
+| Group | before | after |
+| --- | --- | --- |
+| open `/` to login | 875, 1196 | 708, 822 |
+| login | 904, 627 | 964, 803 |
+| overview data | 86, 82 | 86, 85 |
+| agents | 560, 540 | 555, 542 |
+| search | 711, 587 | 700, 570 |
+| reload | 684, 1062 | 690, 784 |
+| sign out | 315, 293 | 303, 291 |
+| agents without session | 165, 165 | 171, 163 |
+| total | 4300, 4552 | 4177, 4060 |
+
+A scan of all output files found neither the email nor the password. The staging documents are small, so their parse was already short. The driver does not record the time of each tick, so the longest tick of the journey was not measured.
+
+Not tested: the window (`--window`); arjun-e16; the longest tick of the staging journey; a document with a `<base href>` after its scripts (their early downloads are not used); a single token larger than a slice (a 4 MB inline script is fed in one step); HiDPI.

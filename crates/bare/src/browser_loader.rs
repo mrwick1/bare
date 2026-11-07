@@ -94,11 +94,13 @@ mod preload_tests;
 mod parallel_tests;
 #[cfg(test)]
 mod close_tests;
+mod scan;
 mod sheets;
 #[cfg(test)]
 mod sheets_tests;
 pub use preload::PreloadStats;
 pub use sheets::CssStats;
+pub(crate) use scan::Scan;
 
 type V = R<Value>;
 
@@ -738,7 +740,8 @@ impl Browser {
         let mut run = Run {
             b: self,
             dom: dom.clone(),
-            net: Net::new(cfg.client),
+            // Live: the downloads that the scan of the document started while the session parsed it (`adopt_scan`).
+            net: dom.scripts.net.borrow_mut().take().filter(|_| live).map_or_else(|| Net::new(cfg.client), |n| *n),
             slice: live.then(|| Instant::now() + SLICE),
             cursor: 0,
             https_only: page.scheme == bare_url::Scheme::Https,
@@ -855,12 +858,17 @@ impl Browser {
 }
 
 /// The most work that one live turn does before it gives the thread back (to the input events and the frame), once the page has loaded.
-const SLICE: Duration = Duration::from_millis(8);
+pub(crate) const SLICE: Duration = Duration::from_millis(8);
 
 impl Browser {
     /// Is the page live (`Session` with `live`)? Then a turn waits for no reply.
     pub(crate) fn live(&self) -> bool {
         self.dom.fetch.live.get()
+    }
+
+    /// Has `load` run?
+    pub(crate) fn loaded(&self) -> bool {
+        self.dom.scripts.ready.get() == 2
     }
 
     /// Live: can a turn do something now (`Some(true)`: a reply or a script is in, a queued request has not started, a script or a
@@ -1475,6 +1483,8 @@ impl Run<'_> {
         }
         while self.step <= nb {
             let p = blocking[self.step - 1];
+            // The sheets and preloads that the last script added start before the document waits.
+            self.feed_if_ran()?;
             self.waiting = self.pending(&p);
             if self.waiting || self.sliced() {
                 return Err(Stop::Settled);
@@ -1493,6 +1503,8 @@ impl Run<'_> {
         }
         while self.step <= nb + 1 + nd {
             let p = defer[self.step - nb - 2];
+            // The sheets and preloads that the last script added start before the document waits.
+            self.feed_if_ran()?;
             self.waiting = self.pending(&p);
             if self.waiting || self.sliced() {
                 return Err(Stop::Settled);
