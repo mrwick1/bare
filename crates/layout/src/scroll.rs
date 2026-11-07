@@ -64,6 +64,9 @@ pub struct Areas {
     pub page_overflow: (Keyword, Keyword),
     /// The boxes with `position: sticky`, in the order of the fragments (`sticky.rs`). Empty for most pages.
     pub sticky: Vec<Sticky>,
+    /// The fragments of the `position: fixed` boxes that no other fixed box holds, in order. A hit test uses them to know that a clipped
+    /// box still has something that no clip cuts.
+    pub fixed: Vec<u32>,
     pub(crate) sticky_index: HashMap<u32, u32>,
     /// Why this page cannot be scrolled right: a sticky box that is not modelled (the host makes it `Unsupported`).
     pub gate: Option<&'static str>,
@@ -99,7 +102,7 @@ pub fn page_overflow(doc: &Document, styles: &Styles) -> (Keyword, Keyword) {
 pub fn areas(doc: &Document, styles: &Styles, layout: &Layout) -> Areas {
     let tree = Tree::new(doc, styles);
     let frags = &layout.fragments;
-    let mut out = Areas { list: Vec::new(), index: HashMap::new(), page: (layout.width, layout.height), page_overflow: page_overflow(doc, styles), sticky: Vec::new(), sticky_index: HashMap::new(), gate: None };
+    let mut out = Areas { list: Vec::new(), index: HashMap::new(), page: (layout.width, layout.height), page_overflow: page_overflow(doc, styles), sticky: Vec::new(), fixed: Vec::new(), sticky_index: HashMap::new(), gate: None };
     // The sticky boxes that are open: (their end, their place in `out.sticky`).
     let mut sticks: Vec<(u32, u32)> = Vec::new();
     // The open containers: where they end, their place in `out.list`, the corner that their content reaches, and the padding
@@ -122,6 +125,7 @@ pub fn areas(doc: &Document, styles: &Styles, layout: &Layout) -> Areas {
         if f.kind == Kind::Box && i > 0 {
             match tree.position(f.node) {
                 Keyword::Fixed if tree.kind(f.node) != crate::boxes::Kind::Inline => {
+                    out.fixed.push(i as u32);
                     i = f.end as usize;
                     continue;
                 }

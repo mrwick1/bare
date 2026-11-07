@@ -2,11 +2,14 @@
 //! `browser_ui.rs`, so a page sees the events, the focus changes and the default actions that Chrome makes (the order was recorded from
 //! headless Chrome 155: `tools/ui/chrome_drive.mjs`, `tools/fixtures/ui/drive-steps.txt`).
 //!
-//! - `drive_click(node)`: the pointer moves to the center of the border box of `node` (`getBoundingClientRect`; (0, 0) when the element has no
-//!   box or the page cannot be laid out yet), presses the left button and releases it. The events go to `node` itself, not to what a hit test
-//!   finds at that point: a driver means this element. The pointer then stays there, so the next click sends `pointerout` and `mouseout` to this
-//!   element. A `pointerdown` or `mousedown` that a listener cancels has the effects of Chrome (no focus change, no mouse events), and a disabled
-//!   control gets only the pointer events.
+//! - `drive_click(node)`: the page scrolls so that `node` shows (only if needed: Chrome's `DOM.scrollIntoViewIfNeeded`). The pointer moves to the
+//!   center of the part of the border box of `node` that is in the window ((0, 0) when the element has no box or the page cannot be laid out yet:
+//!   then the events go to `node`). The events go to the top element at that point (`elementsFromPoint`: `z-index`, overlays, `pointer-events`,
+//!   `visibility`), as for a user, and not to `node`. When that element is not `node` or a child of it, `UiOutcome::intercepted` says what it
+//!   was (`Input::Click` puts it in `PageResult::intercepted`). A hit inside a shadow tree goes to its outermost host (events do not cross a
+//!   shadow root here). The pointer then stays there, so the next click sends `pointerout` and `mouseout` to that element. A `pointerdown` or
+//!   `mousedown` that a listener cancels has the effects of Chrome (no focus change, no mouse events), and a disabled control gets only the
+//!   pointer events. The `scroll` events of the reveal come with the next scheduler turn.
 //!   In a text field the press puts the caret where the layout says (`caret_at`; a fresh field has its caret at 0, so a click without it would
 //!   type at the start).
 //! - `drive_text_down(node, at, nth)`, `drive_text_move(node, at)`, `drive_text_up(node, at)`: the pointer at the boundary `at` of the text of a
@@ -19,10 +22,10 @@
 //!   character as a key: `keydown`, `keypress`, `beforeinput`, the change of the value, `input`, `keyup`. A line feed is the Enter key.
 //!   Empty text clears a field with Backspace. Works for a text `<input>` and for a `<textarea>`. A `contenteditable` element is not built.
 //!
-//! Gaps: no hover settle (Chrome sends `pointerover` to the element under the pointer after a layout change, here the next move does);
-//! no scroll into view; no modifier keys on a click; the left button only.
+//! Gaps: the hover settle after a click only; no modifier keys on a click; the left button only.
 
 use crate::browser::*;
+use crate::browser_scroll::Align;
 use crate::browser_ui::{KeyInput, Mods, Pointer, UiOutcome};
 use bare_html::dom::NodeId;
 use bare_js::eval::Error;
@@ -31,6 +34,7 @@ impl UiOutcome {
     fn add(&mut self, o: UiOutcome) {
         self.reports.extend(o.reports);
         self.changed |= o.changed;
+        self.intercepted = self.intercepted.take().or(o.intercepted);
     }
 }
 
@@ -98,19 +102,29 @@ fn parse(spec: &str) -> Option<(Vec<KeyInput>, KeyInput)> {
 }
 
 impl Browser {
-    /// The center of the border box of `node` in window coordinates. `(0, 0)` when it has none, or when the page cannot be laid out yet
-    /// (a style sheet that was not supplied): the click still happens, as it did before layout was used.
-    fn box_center(&mut self, node: NodeId) -> R<(f64, f64)> {
+    /// Where a user clicks on `node`, and the element that is on top there. The page scrolls so that `node` shows (if needed, as Chrome's
+    /// `DOM.scrollIntoViewIfNeeded`), and the point is the center of the part of the border box that is in the window. `(0, 0)` and no
+    /// element when `node` has no box, or when the page cannot be laid out yet (a style sheet that was not supplied): the click still
+    /// happens, at `node`, as it did before layout was used. A hit inside a shadow tree is its outermost host: the events do not cross a shadow root here.
+    fn click_point(&mut self, node: NodeId) -> R<((f64, f64), Option<NodeId>)> {
         let dom = self.dom.clone();
         let r = self.it.host_scope(|it| {
             if !dom.in_document(it, node)? {
                 return Ok(None);
             }
-            dom.with_geo(it, |g, s| g.client_rect(s, node))
+            dom.with_geo(it, |g, s| {
+                g.reveal(s, node, Align::IfNeeded, Align::IfNeeded);
+                let r = g.client_rect(s, node)?;
+                let (w, h) = g.view();
+                let (x0, y0, x1, y1) = (r.x.max(0.0), r.y.max(0.0), (r.x + r.w).min(w), (r.y + r.h).min(h));
+                let (x, y) = if x0 < x1 && y0 < y1 { ((x0 + x1) / 2.0, (y0 + y1) / 2.0) } else { (r.x + r.w / 2.0, r.y + r.h / 2.0) };
+                let top = bare_paint::hit::hits_scrolled(g.doc, g.styles, g.layout, g.areas, s, x, y).first().map(|&n| crate::browser_point::retarget(g.doc, n, &[g.doc.root()]));
+                Some(((x as f64, y as f64), top))
+            })
         });
         match r {
-            Ok(Some(r)) => Ok(((r.x + r.w / 2.0) as f64, (r.y + r.h / 2.0) as f64)),
-            Ok(None) | Err(Error::Unsupported(_)) => Ok((0.0, 0.0)),
+            Ok(Some(p)) => Ok(p),
+            Ok(_) | Err(Error::Unsupported(_)) => Ok(((0.0, 0.0), None)),
             Err(e) => Err(e),
         }
     }
@@ -131,7 +145,7 @@ impl Browser {
         {
             return Ok(p);
         }
-        self.box_center(node)
+        Ok(self.click_point(node)?.0)
     }
 
     /// The button goes down in text field `node` at the boundary `at` of its text. `nth` is the number of the press in a row
@@ -168,17 +182,47 @@ impl Browser {
         Ok(out)
     }
 
+    /// `tag#id.class.class` of an element, at most 80 characters.
+    fn describe(&self, n: NodeId) -> String {
+        let doc = self.document();
+        let doc = doc.borrow();
+        let mut out = doc.element_name(n).to_ascii_lowercase();
+        if let Some(id) = doc.attr(n, bare_html::dom::Atom::ID).filter(|i| !i.is_empty()) {
+            out.push('#');
+            out.push_str(id);
+        }
+        for c in doc.find_atom("class").and_then(|a| doc.attr(n, a)).unwrap_or("").split_ascii_whitespace() {
+            out.push('.');
+            out.push_str(c);
+        }
+        out.chars().take(80).collect()
+    }
+
     /// A user click on `node`. See the header.
     pub fn drive_click(&mut self, node: NodeId) -> R<UiOutcome> {
-        let (x, y) = self.box_center(node)?;
+        let ((x, y), top) = self.click_point(node)?;
+        let hit = top.unwrap_or(node);
+        let doc = self.document();
+        let (intercepted, mut cur) = (top.is_some(), Some(hit));
+        let covered = intercepted && {
+            let doc = doc.borrow();
+            while let Some(c) = cur.filter(|&c| c != node) {
+                cur = doc.parent(c);
+            }
+            cur.is_none()
+        };
+        let mut out = UiOutcome::default();
+        if covered {
+            out.intercepted = Some((self.describe(hit), (x.round() as i32, y.round() as i32)));
+        }
         // A driver click is one click: two in a row at one element are not a double click.
         self.dom.st.borrow_mut().ui.last = None;
         let up = Pointer { x, y, ..Pointer::default() };
         let down = Pointer { buttons: 1, ..up };
-        let caret = self.caret_at(node, x, y);
-        let mut out = self.ui_pointer_move(Some(node), up)?;
-        out.add(self.ui_pointer_button(Some(node), down, 0, true, caret)?);
-        out.add(self.ui_pointer_button(Some(node), up, 0, false, None)?);
+        let caret = self.caret_at(hit, x, y);
+        out.add(self.ui_pointer_move(Some(hit), up)?);
+        out.add(self.ui_pointer_button(Some(hit), down, 0, true, caret)?);
+        out.add(self.ui_pointer_button(Some(hit), up, 0, false, None)?);
         out.add(self.settle_hover(up)?);
         Ok(out)
     }

@@ -1,5 +1,5 @@
 // Record what headless Chrome logs for the driver scenarios of tools/fixtures/ui/drive-steps.txt on tools/fixtures/ui/drive.html.
-// Usage: node tools/ui/chrome_drive.mjs OUT [STEPS PAGE]  (defaults: drive-steps.txt on drive.html; `react-steps.txt react.html` is the React field page)
+// Usage: node tools/ui/chrome_drive.mjs OUT [STEPS PAGE]  (defaults: drive-steps.txt on drive.html; `react-steps.txt react.html` is the React field page; `modal-steps.txt modal.html` the Radix-like modal)
 // Mouse steps on a text control: `clickat SEL K` (the boundary K of its text), `dblclick SEL K` and `tripleclick SEL K` (the boundary K, two and three presses), `drag SEL A B` (boundary A to boundary B).
 // A step is what `Input::Click`, `Input::Key` and `Input::Type` do in bare, sent through the input pipeline of a device
 // (`Input.dispatchMouseEvent`, `Input.dispatchKeyEvent`). The bare test is `crates/bare/src/browser_drive_tests.rs`.
@@ -47,7 +47,14 @@ const press = async (spec) => {
   }
   await sleep(60);
 };
-const center = async (sel) => c.eval(`(function () { var r = document.querySelector(${JSON.stringify(sel)}).getBoundingClientRect(); return [r.x + r.width / 2, r.y + r.height / 2] })()`);
+// A click scrolls the element into view as `DOM.scrollIntoViewIfNeeded` does (centered when none of it shows), then aims at the center of the part of its
+// border box that is in the window (the window without the bars). The mouse goes to that point: Chrome sends the events to the top element there.
+const center = async (sel) => c.eval(`(function () {
+  var e = document.querySelector(${JSON.stringify(sel)}); e.scrollIntoViewIfNeeded(true);
+  var r = e.getBoundingClientRect(), v = document.documentElement;
+  var x0 = Math.max(0, r.left), x1 = Math.min(v.clientWidth, r.right), y0 = Math.max(0, r.top), y1 = Math.min(v.clientHeight, r.bottom);
+  return x0 < x1 && y0 < y1 ? [(x0 + x1) / 2, (y0 + y1) / 2] : [r.x + r.width / 2, r.y + r.height / 2];
+})()`);
 const click = async (sel) => {
   const [x, y] = await center(sel);
   await c.mouse('mouseMoved', x, y);

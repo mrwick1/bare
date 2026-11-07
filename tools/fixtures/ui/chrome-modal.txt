@@ -1,0 +1,223 @@
+== covered_by_overlay
+pointerout @ok x=290 y=35 buttons=0 related=overlay
+pointerleave @ok x=290 y=35 buttons=0 related=overlay
+pointerleave @dlg x=290 y=35 buttons=0 related=overlay
+pointerover @overlay x=290 y=35 buttons=0 related=ok
+pointerenter @overlay x=290 y=35 buttons=0 related=ok
+mouseout @ok x=290 y=35 buttons=0 related=overlay
+mouseleave @ok x=290 y=35 buttons=0 related=overlay
+mouseleave @dlg x=290 y=35 buttons=0 related=overlay
+mouseover @overlay x=290 y=35 buttons=0 related=ok
+mouseenter @overlay x=290 y=35 buttons=0 related=ok
+pointermove @overlay x=290 y=35 buttons=0 related=null
+mousemove @overlay x=290 y=35 buttons=0 related=null
+pointerdown @overlay x=290 y=35 buttons=1 related=null
+mousedown @overlay x=290 y=35 buttons=1 related=null
+blur @ok 
+pointerup @overlay x=290 y=35 buttons=0 related=null
+mouseup @overlay x=290 y=35 buttons=0 related=null
+click @overlay x=290 y=35 buttons=0 related=null
+app closed
+pointerout @overlay x=290 y=35 buttons=0 related=next
+pointerleave @overlay x=290 y=35 buttons=0 related=next
+pointerover @next x=290 y=35 buttons=0 related=overlay
+pointerenter @page x=290 y=35 buttons=0 related=overlay
+pointerenter @next x=290 y=35 buttons=0 related=overlay
+mouseout @overlay x=290 y=35 buttons=0 related=next
+mouseleave @overlay x=290 y=35 buttons=0 related=next
+mouseover @next x=290 y=35 buttons=0 related=overlay
+mouseenter @page x=290 y=35 buttons=0 related=overlay
+mouseenter @next x=290 y=35 buttons=0 related=overlay
+== covered_then_dismissed
+pointermove @next x=290 y=35 buttons=0 related=null
+mousemove @next x=290 y=35 buttons=0 related=null
+pointerdown @next x=290 y=35 buttons=1 related=null
+mousedown @next x=290 y=35 buttons=1 related=null
+focus @next 
+pointerup @next x=290 y=35 buttons=0 related=null
+mouseup @next x=290 y=35 buttons=0 related=null
+click @next x=290 y=35 buttons=0 related=null
+app click next
+== dialog_button
+pointerout @ok x=170 y=175 buttons=0 related=cancel
+pointerleave @ok x=170 y=175 buttons=0 related=cancel
+pointerover @cancel x=170 y=175 buttons=0 related=ok
+pointerenter @cancel x=170 y=175 buttons=0 related=ok
+mouseout @ok x=170 y=175 buttons=0 related=cancel
+mouseleave @ok x=170 y=175 buttons=0 related=cancel
+mouseover @cancel x=170 y=175 buttons=0 related=ok
+mouseenter @cancel x=170 y=175 buttons=0 related=ok
+pointermove @cancel x=170 y=175 buttons=0 related=null
+mousemove @cancel x=170 y=175 buttons=0 related=null
+pointerdown @cancel x=170 y=175 buttons=1 related=null
+mousedown @cancel x=170 y=175 buttons=1 related=null
+blur @ok 
+focus @cancel 
+pointerup @cancel x=170 y=175 buttons=0 related=null
+mouseup @cancel x=170 y=175 buttons=0 related=null
+click @cancel x=170 y=175 buttons=0 related=null
+app click cancel
+== page_button_under_dialog
+pointerout @ok x=70 y=35 buttons=0 related=overlay
+pointerleave @ok x=70 y=35 buttons=0 related=overlay
+pointerleave @dlg x=70 y=35 buttons=0 related=overlay
+pointerover @overlay x=70 y=35 buttons=0 related=ok
+pointerenter @overlay x=70 y=35 buttons=0 related=ok
+mouseout @ok x=70 y=35 buttons=0 related=overlay
+mouseleave @ok x=70 y=35 buttons=0 related=overlay
+mouseleave @dlg x=70 y=35 buttons=0 related=overlay
+mouseover @overlay x=70 y=35 buttons=0 related=ok
+mouseenter @overlay x=70 y=35 buttons=0 related=ok
+pointermove @overlay x=70 y=35 buttons=0 related=null
+mousemove @overlay x=70 y=35 buttons=0 related=null
+pointerdown @overlay x=70 y=35 buttons=1 related=null
+mousedown @overlay x=70 y=35 buttons=1 related=null
+blur @ok 
+pointerup @overlay x=70 y=35 buttons=0 related=null
+mouseup @overlay x=70 y=35 buttons=0 related=null
+click @overlay x=70 y=35 buttons=0 related=null
+app closed
+pointerout @overlay x=70 y=35 buttons=0 related=other
+pointerleave @overlay x=70 y=35 buttons=0 related=other
+pointerover @other x=70 y=35 buttons=0 related=overlay
+pointerenter @page x=70 y=35 buttons=0 related=overlay
+pointerenter @other x=70 y=35 buttons=0 related=overlay
+mouseout @overlay x=70 y=35 buttons=0 related=other
+mouseleave @overlay x=70 y=35 buttons=0 related=other
+mouseover @other x=70 y=35 buttons=0 related=overlay
+mouseenter @page x=70 y=35 buttons=0 related=overlay
+mouseenter @other x=70 y=35 buttons=0 related=overlay
+== pointer_events_none_target
+pointerout @blank x=70 y=415 buttons=0 related=under2
+pointerleave @blank x=70 y=415 buttons=0 related=under2
+pointerover @under2 x=70 y=415 buttons=0 related=blank
+pointerenter @page x=70 y=415 buttons=0 related=blank
+pointerenter @under2 x=70 y=415 buttons=0 related=blank
+mouseout @blank x=70 y=415 buttons=0 related=under2
+mouseleave @blank x=70 y=415 buttons=0 related=under2
+mouseover @under2 x=70 y=415 buttons=0 related=blank
+mouseenter @page x=70 y=415 buttons=0 related=blank
+mouseenter @under2 x=70 y=415 buttons=0 related=blank
+pointermove @under2 x=70 y=415 buttons=0 related=null
+mousemove @under2 x=70 y=415 buttons=0 related=null
+pointerdown @under2 x=70 y=415 buttons=1 related=null
+mousedown @under2 x=70 y=415 buttons=1 related=null
+pointerup @under2 x=70 y=415 buttons=0 related=null
+mouseup @under2 x=70 y=415 buttons=0 related=null
+click @under2 x=70 y=415 buttons=0 related=null
+app click under2
+== visibility_hidden_target
+pointerout @blank x=210 y=415 buttons=0 related=under
+pointerleave @blank x=210 y=415 buttons=0 related=under
+pointerover @under x=210 y=415 buttons=0 related=blank
+pointerenter @page x=210 y=415 buttons=0 related=blank
+pointerenter @under x=210 y=415 buttons=0 related=blank
+mouseout @blank x=210 y=415 buttons=0 related=under
+mouseleave @blank x=210 y=415 buttons=0 related=under
+mouseover @under x=210 y=415 buttons=0 related=blank
+mouseenter @page x=210 y=415 buttons=0 related=blank
+mouseenter @under x=210 y=415 buttons=0 related=blank
+pointermove @under x=210 y=415 buttons=0 related=null
+mousemove @under x=210 y=415 buttons=0 related=null
+pointerdown @under x=210 y=415 buttons=1 related=null
+mousedown @under x=210 y=415 buttons=1 related=null
+pointerup @under x=210 y=415 buttons=0 related=null
+mouseup @under x=210 y=415 buttons=0 related=null
+click @under x=210 y=415 buttons=0 related=null
+app click under
+== page_buttons_without_modal
+pointerout @blank x=290 y=35 buttons=0 related=next
+pointerleave @blank x=290 y=35 buttons=0 related=next
+pointerover @next x=290 y=35 buttons=0 related=blank
+pointerenter @page x=290 y=35 buttons=0 related=blank
+pointerenter @next x=290 y=35 buttons=0 related=blank
+mouseout @blank x=290 y=35 buttons=0 related=next
+mouseleave @blank x=290 y=35 buttons=0 related=next
+mouseover @next x=290 y=35 buttons=0 related=blank
+mouseenter @page x=290 y=35 buttons=0 related=blank
+mouseenter @next x=290 y=35 buttons=0 related=blank
+pointermove @next x=290 y=35 buttons=0 related=null
+mousemove @next x=290 y=35 buttons=0 related=null
+pointerdown @next x=290 y=35 buttons=1 related=null
+mousedown @next x=290 y=35 buttons=1 related=null
+focus @next 
+pointerup @next x=290 y=35 buttons=0 related=null
+mouseup @next x=290 y=35 buttons=0 related=null
+click @next x=290 y=35 buttons=0 related=null
+app click next
+pointerout @next x=70 y=35 buttons=0 related=other
+pointerleave @next x=70 y=35 buttons=0 related=other
+pointerover @other x=70 y=35 buttons=0 related=next
+pointerenter @other x=70 y=35 buttons=0 related=next
+mouseout @next x=70 y=35 buttons=0 related=other
+mouseleave @next x=70 y=35 buttons=0 related=other
+mouseover @other x=70 y=35 buttons=0 related=next
+mouseenter @other x=70 y=35 buttons=0 related=next
+pointermove @other x=70 y=35 buttons=0 related=null
+mousemove @other x=70 y=35 buttons=0 related=null
+pointerdown @other x=70 y=35 buttons=1 related=null
+mousedown @other x=70 y=35 buttons=1 related=null
+blur @next 
+focus @other 
+pointerup @other x=70 y=35 buttons=0 related=null
+mouseup @other x=70 y=35 buttons=0 related=null
+click @other x=70 y=35 buttons=0 related=null
+app click other
+== z_index_stack
+pointerout @blank x=60 y=470 buttons=0 related=z3
+pointerleave @blank x=60 y=470 buttons=0 related=z3
+pointerover @z3 x=60 y=470 buttons=0 related=blank
+pointerenter @page x=60 y=470 buttons=0 related=blank
+pointerenter @stack x=60 y=470 buttons=0 related=blank
+pointerenter @z3 x=60 y=470 buttons=0 related=blank
+mouseout @blank x=60 y=470 buttons=0 related=z3
+mouseleave @blank x=60 y=470 buttons=0 related=z3
+mouseover @z3 x=60 y=470 buttons=0 related=blank
+mouseenter @page x=60 y=470 buttons=0 related=blank
+mouseenter @stack x=60 y=470 buttons=0 related=blank
+mouseenter @z3 x=60 y=470 buttons=0 related=blank
+pointermove @z3 x=60 y=470 buttons=0 related=null
+mousemove @z3 x=60 y=470 buttons=0 related=null
+pointerdown @z3 x=60 y=470 buttons=1 related=null
+mousedown @z3 x=60 y=470 buttons=1 related=null
+pointerup @z3 x=60 y=470 buttons=0 related=null
+mouseup @z3 x=60 y=470 buttons=0 related=null
+click @z3 x=60 y=470 buttons=0 related=null
+app click z3
+pointermove @z3 x=100 y=490 buttons=0 related=null
+mousemove @z3 x=100 y=490 buttons=0 related=null
+pointerdown @z3 x=100 y=490 buttons=1 related=null
+mousedown @z3 x=100 y=490 buttons=1 related=null
+pointerup @z3 x=100 y=490 buttons=0 related=null
+mouseup @z3 x=100 y=490 buttons=0 related=null
+click @z3 x=100 y=490 buttons=0 related=null
+app click z3
+pointermove @z3 x=80 y=480 buttons=0 related=null
+mousemove @z3 x=80 y=480 buttons=0 related=null
+pointerdown @z3 x=80 y=480 buttons=1 related=null
+mousedown @z3 x=80 y=480 buttons=1 related=null
+pointerup @z3 x=80 y=480 buttons=0 related=null
+mouseup @z3 x=80 y=480 buttons=0 related=null
+click @z3 x=80 y=480 buttons=0 related=null
+app click z3
+== scroll_into_view_then_click
+pointerout @blank x=80 y=550 buttons=0 related=far
+pointerleave @blank x=80 y=550 buttons=0 related=far
+pointerover @far x=80 y=550 buttons=0 related=blank
+pointerenter @scroller x=80 y=550 buttons=0 related=blank
+pointerenter @tall x=80 y=550 buttons=0 related=blank
+pointerenter @far x=80 y=550 buttons=0 related=blank
+mouseout @blank x=80 y=550 buttons=0 related=far
+mouseleave @blank x=80 y=550 buttons=0 related=far
+mouseover @far x=80 y=550 buttons=0 related=blank
+mouseenter @scroller x=80 y=550 buttons=0 related=blank
+mouseenter @tall x=80 y=550 buttons=0 related=blank
+mouseenter @far x=80 y=550 buttons=0 related=blank
+pointermove @far x=80 y=550 buttons=0 related=null
+mousemove @far x=80 y=550 buttons=0 related=null
+pointerdown @far x=80 y=550 buttons=1 related=null
+mousedown @far x=80 y=550 buttons=1 related=null
+focus @far 
+pointerup @far x=80 y=550 buttons=0 related=null
+mouseup @far x=80 y=550 buttons=0 related=null
+click @far x=80 y=550 buttons=0 related=null

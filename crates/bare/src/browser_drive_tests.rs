@@ -15,6 +15,9 @@ use std::time::Duration;
 const PAGE: &str = include_str!("../../../tools/fixtures/ui/drive.html");
 const STEPS: &str = include_str!("../../../tools/fixtures/ui/drive-steps.txt");
 const CHROME: &str = include_str!("../../../tools/fixtures/ui/chrome-drive.txt");
+const MODAL: &str = include_str!("../../../tools/fixtures/ui/modal.html");
+const MODAL_STEPS: &str = include_str!("../../../tools/fixtures/ui/modal-steps.txt");
+const MODAL_CHROME: &str = include_str!("../../../tools/fixtures/ui/chrome-modal.txt");
 const REACT: &str = include_str!("../../../tools/fixtures/ui/react.html");
 const REACT_STEPS: &str = include_str!("../../../tools/fixtures/ui/react-steps.txt");
 const SEL: &str = include_str!("../../../tools/fixtures/ui/sel.html");
@@ -140,6 +143,11 @@ fn scenarios_log_what_chrome_logs() {
 }
 
 #[test]
+fn clicks_go_to_the_top_element_as_in_chrome() {
+    big(|| assert_eq!(compare(MODAL, MODAL_STEPS, MODAL_CHROME), 9));
+}
+
+#[test]
 fn typing_in_react_controlled_fields_gives_what_chrome_gives() {
     big(|| assert_eq!(compare(REACT, REACT_STEPS, REACT_CHROME), 23));
 }
@@ -233,5 +241,52 @@ fn input_key_and_click_act_like_a_user_in_a_session() {
         assert_eq!(r.stop, SessionStop::Page(Stop::NoTarget(0)));
         let r = s.resume(&[Input::Key("#b", "Hyper")]);
         assert!(matches!(r.stop, SessionStop::Page(Stop::Fatal(Fatal::Unsupported(_)))), "{r:?}");
+    });
+}
+
+// ------------------------------------------------------------------------------------------ the report of a click that was intercepted
+
+/// A Radix-like modal: the overlay covers `#next`, and a click on the overlay closes the dialog. The first `Click("#next")` reaches the overlay
+/// (the dialog closes and the page gets its pointer events back), the second reaches the button.
+const COVERED: &str = "<style>body{margin:0} #next{position:absolute;left:10px;top:10px;width:80px;height:30px}
+    #ov{position:fixed;left:0;top:0;right:0;bottom:0;pointer-events:auto;z-index:5} .k{position:absolute;left:200px;top:10px;width:80px;height:30px} #in{display:block;width:20px;height:20px}</style>
+    <button id=next>Next</button><button id=k class=k><span id=in></span></button><div id=ov class='fixed inset-0'></div><script>
+    document.body.style.pointerEvents = 'none';
+    var n = function (k) { localStorage.setItem(k, '' + (+(localStorage.getItem(k) || 0) + 1)) };
+    document.getElementById('next').addEventListener('click', function () { n('next') });
+    document.getElementById('k').addEventListener('click', function () { n('k') });
+    document.getElementById('ov').addEventListener('click', function () { n('ov'); this.hidden = true; document.body.style.pointerEvents = '' });
+    </script>";
+
+#[test]
+fn a_click_that_another_element_covers_goes_there_and_the_result_says_so() {
+    big(|| {
+        let srv = serve(move |_| Reply::new(200, Some("text/html; charset=utf-8"), COVERED));
+        let mut s = Session::new(cfg(srv.url("/")));
+        s.run();
+        let get = |s: &Session, k: &str| s.storage().get_item(false, &srv.url(""), k);
+        let r = s.resume(&[Input::Click("#next"), Input::Click("#next"), Input::Click("#k"), Input::Click("#in")]);
+        assert_eq!(r.stop, SessionStop::Page(Stop::Settled), "{r:?}");
+        assert_eq!(get(&s, "ov").as_deref(), Some("1"), "the first click went to the overlay");
+        assert_eq!(get(&s, "next").as_deref(), Some("1"), "the second click reached the button");
+        assert_eq!(get(&s, "k").as_deref(), Some("2"), "a click on the button and on a child of it reach the button");
+        let hits = &r.pages[0].intercepted;
+        assert_eq!(hits.len(), 1, "{hits:?}");
+        assert_eq!((hits[0].step, hits[0].target.as_str(), hits[0].hit.as_str()), (0, "#next", "div#ov.fixed.inset-0"));
+        assert_eq!(hits[0].at, (50, 25), "the center of the button");
+    });
+}
+
+#[test]
+fn a_click_on_a_target_with_no_box_is_not_a_hit_test() {
+    big(|| {
+        let page = "<style>#h{display:none}</style><button id=h>h</button><script>document.getElementById('h').addEventListener('click', function () { localStorage.setItem('h', 'yes') })</script>";
+        let srv = serve(move |_| Reply::new(200, Some("text/html; charset=utf-8"), page));
+        let mut s = Session::new(cfg(srv.url("/")));
+        s.run();
+        let r = s.resume(&[Input::Click("#h")]);
+        assert_eq!(r.stop, SessionStop::Page(Stop::Settled), "{r:?}");
+        assert!(r.pages[0].intercepted.is_empty());
+        assert_eq!(s.storage().get_item(false, &srv.url(""), "h").as_deref(), Some("yes"), "as before: an element with no box still gets its click");
     });
 }

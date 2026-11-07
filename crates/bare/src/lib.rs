@@ -18,6 +18,7 @@ mod browser_submit;
 mod browser_submit_tests;
 pub mod browser_ui;
 mod browser_drive;
+mod browser_point;
 mod browser_uievent;
 pub mod page;
 #[cfg(test)]
@@ -104,7 +105,7 @@ mod browser_scheduler_tests;
 mod browser_date_tests;
 pub mod resources;
 mod browser_loader;
-pub use browser_loader::{CssStats, Fatal, Input, NavStop, PageConfig, PageLimits, PageResult, Stop};
+pub use browser_loader::{CssStats, Fatal, Input, Intercept, NavStop, PageConfig, PageLimits, PageResult, Stop};
 pub mod browser_session;
 #[cfg(test)]
 mod browser_session_tests;
@@ -131,6 +132,8 @@ mod browser_mutation;
 mod browser_topic_tests;
 #[cfg(test)]
 mod browser_drive_tests;
+#[cfg(test)]
+mod browser_point_tests;
 #[cfg(test)]
 mod browser_uievent_tests;
 #[cfg(test)]

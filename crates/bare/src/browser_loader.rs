@@ -181,7 +181,9 @@ pub enum Stop {
 /// actions of Chrome, so a React or Radix page sees what it sees in a browser. `Submit` stays the dispatch-only call of `browser.rs`.
 #[derive(Clone, Copy, Debug)]
 pub enum Input<'a> {
-    /// Move the pointer to the center of the element, press the left button and release it.
+    /// Scroll the element into view if needed, move the pointer to the center of its visible part, press the left button and release it. The
+    /// events go to the top element at that point, as for a user. When that is not the element or a child of it, the click is listed in
+    /// [`PageResult::intercepted`].
     Click(&'a str),
     /// A text `<input>` or a `<textarea>` and the text: focus it, replace its text, one key press for each character.
     /// Another element is `Fatal::Unsupported`.
@@ -247,6 +249,22 @@ pub struct PageResult {
     pub idle_frames: bool,
     /// Only when `stop` is `Settled`: live `requestIdleCallback` callbacks of a quiet idle chain that the settle rule skipped.
     pub idle_callbacks: usize,
+    /// The `Input::Click` steps that did not reach the selected element: another element was on top at the center of it.
+    pub intercepted: Vec<Intercept>,
+}
+
+/// A click that a user would make on another element than the selected one (an overlay, a modal, a `pointer-events: none` page).
+/// The events went to that element, as in Chrome.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Intercept {
+    /// The index of the step in the `resume` call.
+    pub step: usize,
+    /// The selector of the step.
+    pub target: String,
+    /// The element that got the click: `tag#id.class`, at most 80 characters.
+    pub hit: String,
+    /// The point of the click, in window pixels.
+    pub at: (i32, i32),
 }
 
 // ---------------------------------------------------------------------------------------------- host state
@@ -642,7 +660,7 @@ impl Browser {
     /// It never panics on page input and never returns an `Err`: the result says why it stopped.
     pub fn run_page(&mut self, cfg: PageConfig) -> PageResult {
         let dom = self.dom.clone();
-        let mut res = PageResult { stop: Stop::Settled, ready_state: "loading", scripts_run: 0, script_throws: 0, load_errors: 0, tasks: 0, rounds: 0, fetches: 0, bytes: 0, css: CssStats::default(), preload: PreloadStats::default(), diagnostics: Vec::new(), dropped_diagnostics: 0, idle_timers: Vec::new(), idle_frames: false, idle_callbacks: 0 };
+        let mut res = PageResult { stop: Stop::Settled, ready_state: "loading", scripts_run: 0, script_throws: 0, load_errors: 0, tasks: 0, rounds: 0, fetches: 0, bytes: 0, css: CssStats::default(), preload: PreloadStats::default(), diagnostics: Vec::new(), dropped_diagnostics: 0, idle_timers: Vec::new(), idle_frames: false, idle_callbacks: 0, intercepted: Vec::new() };
         let prior = dom.scripts.fatal.borrow().clone();
         if let Some(f) = prior {
             res.stop = Stop::Fatal(f);
@@ -755,7 +773,7 @@ impl Browser {
         limits.max_rounds = limits.max_rounds.min(caps.1.saturating_sub(spent.1));
         limits.max_time = limits.max_time.min(caps.2.saturating_sub(spent.2));
         let started = Instant::now();
-        let mut res = PageResult { stop: Stop::Settled, ready_state: "loading", scripts_run: 0, script_throws: 0, load_errors: 0, tasks: 0, rounds: 0, fetches, bytes, css: dom.scripts.sheets.borrow().stats, preload: dom.scripts.preloads.borrow().stats, diagnostics: Vec::new(), dropped_diagnostics: 0, idle_timers: Vec::new(), idle_frames: false, idle_callbacks: 0 };
+        let mut res = PageResult { stop: Stop::Settled, ready_state: "loading", scripts_run: 0, script_throws: 0, load_errors: 0, tasks: 0, rounds: 0, fetches, bytes, css: dom.scripts.sheets.borrow().stats, preload: dom.scripts.preloads.borrow().stats, diagnostics: Vec::new(), dropped_diagnostics: 0, idle_timers: Vec::new(), idle_frames: false, idle_callbacks: 0, intercepted: Vec::new() };
         let prior = dom.scripts.fatal.borrow().clone();
         if let Some(f) = prior {
             res.stop = Stop::Fatal(f);
@@ -1157,7 +1175,11 @@ impl Run<'_> {
             };
             self.res.tasks += 1;
             let r = match (*step, node) {
-                (Input::Click(_), Some(n)) => self.b.drive_click(n).map(drop),
+                (Input::Click(_), Some(n)) => self.b.drive_click(n).map(|o| {
+                    if let Some((hit, at)) = o.intercepted {
+                        self.res.intercepted.push(Intercept { step: i, target: sel.to_string(), hit, at });
+                    }
+                }),
                 (Input::Type(_, t), Some(n)) => self.b.drive_type(n, t).map(drop),
                 (Input::Submit(_), Some(n)) => self.b.submit(n).map(drop),
                 (Input::Key(_, k), n) => self.b.drive_key(n, k).map(drop),

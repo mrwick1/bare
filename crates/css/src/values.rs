@@ -166,6 +166,7 @@ properties! {
     BorderBottomRightRadius => "border-bottom-right-radius",
     BorderBottomLeftRadius => "border-bottom-left-radius",
     Appearance => "appearance",
+    PointerEvents => "pointer-events",
 }
 
 /// A length or a percent. The fixed units are already `Px`.
@@ -248,6 +249,8 @@ keywords! {
     Super => "super", TextTop => "text-top", TextBottom => "text-bottom", Ltr => "ltr",
     Rtl => "rtl", Button => "button", Checkbox => "checkbox", Radio => "radio",
     Textfield => "textfield", Textarea => "textarea", Menulist => "menulist",
+    All => "all", Painted => "painted", Fill => "fill", Stroke => "stroke", VisiblePainted => "visiblepainted",
+    VisibleFill => "visiblefill", VisibleStroke => "visiblestroke",
 }
 
 /// The value of one property. It does not say which property: a `Declared` has that.
@@ -936,6 +939,7 @@ fn longhand(property: Property, part: Part) -> Option<Value> {
         },
         BorderTopLeftRadius | BorderTopRightRadius | BorderBottomRightRadius | BorderBottomLeftRadius => positive(part).map(Value::Length),
         Appearance => one_of(part, &[K::None, K::Auto, K::Button, K::Checkbox, K::Radio, K::Textfield, K::Textarea, K::Menulist]),
+        PointerEvents => one_of(part, &[K::Auto, K::None, K::Visible, K::VisiblePainted, K::VisibleFill, K::VisibleStroke, K::Painted, K::Fill, K::Stroke, K::All]),
         Top | Right | Bottom | Left => match part {
             Part::Keyword(K::Auto) => Some(Value::Keyword(K::Auto)),
             _ => length(part).map(Value::Length),

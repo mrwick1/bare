@@ -1,0 +1,161 @@
+// Cases of document.elementFromPoint and elementsFromPoint (hit testing). Recorded with BARE_BARS=1 node tools/ui/chrome_topic.mjs point.
+// Every case uses boxes with a size in px and no text, so that the engine font does not matter. The window is 400 x 300.
+// The engine has no transforms, so there is no case for them (Chrome would hit the moved box).
+function id(e) { return e ? (e.id || e.tagName.toLowerCase()) : 'null' }
+function at(pts) { return pts.map(function (p) { return id(document.elementFromPoint(p[0], p[1])) }).join(' ') }
+function all(pts) { return pts.map(function (p) { return document.elementsFromPoint(p[0], p[1]).map(id).join('>') }).join(' | ') }
+=== shape
+(function () { var d = Object.getOwnPropertyDescriptor(Document.prototype, 'elementFromPoint'), e = Object.getOwnPropertyDescriptor(Document.prototype, 'elementsFromPoint'); return [typeof d.value, d.value.length, d.value.name, typeof e.value, e.value.length, e.value.name, Array.isArray(document.elementsFromPoint(1, 1))].join(' ') })
+=== arguments
+@css body{margin:0} #a{width:100px;height:100px}
+@html <div id=a></div>
+(function () { var r = []; function t(f) { try { r.push(id(f())) } catch (e) { r.push(e.name + ':' + e.message) } } t(function () { return document.elementFromPoint() }); t(function () { return document.elementFromPoint(1) }); t(function () { return document.elementFromPoint(NaN, 1) }); t(function () { return document.elementFromPoint(1, Infinity) }); t(function () { return document.elementFromPoint('5', '5') }); t(function () { return document.elementFromPoint(5.9, 99.9) }); t(function () { return document.elementFromPoint(null, null) }); t(function () { return document.elementFromPoint({ valueOf: function () { return 7 } }, 7) }); try { document.elementsFromPoint() } catch (e) { r.push(e.name + ':' + e.message) } return r.join(' / ') })
+=== blocks-and-root
+@css body{margin:0} #a{height:50px;background:red} #b{height:30px;margin-top:20px;width:200px} #c{height:40px;width:100px;margin-left:50px}
+@html <div id=a></div><div id=b></div><div id=c></div>
+(function () { return at([[10, 10], [399, 49], [10, 50], [10, 60], [250, 80], [10, 80], [199, 80], [200, 80], [60, 120], [49, 120], [150, 120], [10, 200], [390, 290]]) })
+=== window-edges
+@css body{margin:0} #a{width:400px;height:300px}
+@html <div id=a></div>
+(function () { return at([[0, 0], [399, 299], [399.5, 299.5], [399.99, 299.99], [400, 299], [399, 300], [400, 300], [-0.01, 5], [5, -0.01], [-1, -1], [1000, 1000], [0.5, 0.5]]) })
+=== outside-the-body
+@css html{background:#eee} body{margin:20px;height:100px;width:100px}
+@html <div id=a style="height:20px"></div>
+(function () { return at([[5, 5], [19, 19], [20, 20], [30, 30], [119, 119], [120, 120], [200, 200], [399, 299]]) })
+=== list-all
+@css body{margin:0} #a{height:100px;width:200px} #b{height:50px;width:100px}
+@html <div id=a><div id=b></div></div>
+(function () { return all([[10, 10], [150, 10], [250, 10], [10, 150], [399, 299]]) })
+=== z-index-stack
+@css body{margin:0} div{position:absolute;width:100px;height:100px} #a{left:0;top:0;z-index:3} #b{left:50px;top:0;z-index:1} #c{left:100px;top:0;z-index:2} #d{left:0;top:50px} #e{left:50px;top:50px;z-index:-1} #f{left:100px;top:50px;z-index:0}
+@html <div id=a></div><div id=b></div><div id=c></div><div id=d></div><div id=e></div><div id=f></div>
+(function () { return at([[10, 10], [60, 10], [110, 10], [60, 40], [10, 60], [60, 60], [110, 60], [160, 60], [210, 60], [160, 140], [10, 140], [260, 10]]) })
+=== z-index-stack-all
+@css body{margin:0} div{position:absolute;width:100px;height:100px} #a{left:0;top:0;z-index:3} #b{left:50px;top:0;z-index:1} #c{left:100px;top:0;z-index:2} #d{left:0;top:50px} #e{left:50px;top:50px;z-index:-1}
+@html <div id=a></div><div id=b></div><div id=c></div><div id=d></div><div id=e></div>
+(function () { return all([[60, 10], [110, 60], [60, 60], [10, 60], [250, 250]]) })
+=== nested-contexts
+@css body{margin:0} div{position:absolute;width:100px;height:100px} #p1{left:0;top:0;z-index:1} #c1{left:0;top:0;z-index:100;width:150px;height:60px} #p2{left:0;top:0;z-index:2;height:80px;width:120px} #c2{left:0;top:0;z-index:-5;width:20px;height:20px}
+@html <div id=p1><div id=c1></div></div><div id=p2><div id=c2></div></div>
+(function () { return at([[10, 10], [10, 70], [110, 70], [130, 30], [130, 90], [149, 59]]) })
+=== auto-z-hoists
+@css body{margin:0} div{position:absolute;width:100px;height:100px} #a{left:0;top:0} #a1{left:10px;top:10px;width:50px;height:50px;z-index:5} #b{left:30px;top:30px;z-index:1}
+@html <div id=a><div id=a1></div></div><div id=b></div>
+(function () { return at([[40, 40], [20, 20], [90, 90], [5, 5], [80, 80]]) })
+=== negative-z-behind-parent-block
+@css body{margin:0} #p{height:100px;width:100px;background:red} #n{position:absolute;left:0;top:0;width:50px;height:50px;z-index:-1}
+@html <div id=p><div id=n></div></div>
+(function () { return at([[10, 10], [75, 75]]) + ' ' + all([[10, 10]]) })
+=== negative-z-in-context
+@css body{margin:0} #p{position:relative;z-index:0;height:100px;width:100px} #n{position:absolute;left:0;top:0;width:50px;height:50px;z-index:-1}
+@html <div id=p><div id=n></div></div>
+(function () { return at([[10, 10], [75, 75]]) + ' ' + all([[10, 10]]) })
+=== layers
+@css body{margin:0} div{width:100px;height:100px} #blk{height:200px;width:300px} #fl{float:left;width:60px;height:60px} #ib{display:inline-block} #rel{position:relative;left:0;top:0;width:40px;height:40px}
+@html <div id=blk><div id=fl></div><div id=ib></div><div id=rel></div></div>
+(function () { return at([[10, 10], [10, 70], [70, 10], [170, 10], [170, 120], [100, 190], [10, 190]]) + ' ' + all([[10, 10], [70, 10]]) })
+=== flex-items
+@css body{margin:0} #f{display:flex;width:300px;height:100px} #f div{width:100px;height:100px;margin-right:-30px} #a{z-index:2} #b{position:relative} #c{z-index:1;position:relative}
+@html <div id=f><div id=a></div><div id=b></div><div id=c></div></div>
+(function () { return at([[95, 10], [165, 10], [10, 10], [250, 10], [300, 50]]) })
+=== opacity
+@css body{margin:0} div{width:100px;height:100px} #a{position:absolute;left:0;top:0;opacity:0} #b{position:absolute;left:50px;top:0;opacity:0.5} #c{position:absolute;left:100px;top:0}
+@html <div id=a></div><div id=b></div><div id=c></div>
+(function () { return at([[10, 10], [60, 10], [110, 10], [160, 10], [210, 10]]) })
+=== visibility
+@css body{margin:0} #h{visibility:hidden;width:200px;height:100px} #v{visibility:visible;width:50px;height:50px} #u{height:50px;width:150px}
+@html <div id=h><div id=v></div></div><div id=u style="visibility:hidden"></div><div id=w style="width:100px;height:40px;visibility:collapse"></div>
+(function () { return at([[10, 10], [100, 10], [100, 120], [10, 160], [10, 200]]) + ' ' + all([[10, 10], [100, 10]]) })
+=== display-none
+@css body{margin:0} #a{width:100px;height:100px} #n{display:none;width:200px;height:200px}
+@html <div id=a></div><div id=n></div><div id=b style="width:200px;height:50px"></div>
+(function () { return at([[10, 10], [150, 10], [10, 120]]) })
+=== pointer-events-none
+@css body{margin:0} div{width:100px;height:100px} #a{position:absolute;left:0;top:0} #b{position:absolute;left:0;top:0;pointer-events:none} #c{position:absolute;left:150px;top:0;pointer-events:none}
+@html <div id=a></div><div id=b></div><div id=c></div>
+(function () { return at([[10, 10], [160, 10], [260, 10]]) + ' ' + all([[10, 10], [160, 10]]) })
+=== pointer-events-nesting
+@css body{margin:0} #p{pointer-events:none;width:300px;height:200px} #k{pointer-events:auto;width:100px;height:100px} #g{width:40px;height:40px} #q{pointer-events:none;width:30px;height:30px} #r{pointer-events:auto;width:20px;height:20px} #s{width:150px;height:50px;pointer-events:all}
+@html <div id=p><div id=k><div id=g></div><div id=q><div id=r></div></div></div><div id=s></div></div>
+(function () { return at([[10, 10], [10, 50], [10, 130], [50, 120], [150, 10], [250, 150], [200, 110], [10, 70], [10, 190]]) + ' ' + all([[10, 10], [10, 50], [10, 130], [250, 150]]) })
+=== pointer-events-values
+@css body{margin:0} div{width:100px;height:50px} #a{pointer-events:visiblePainted} #b{pointer-events:stroke} #c{pointer-events:inherit} #d{pointer-events:initial} #e{pointer-events:bogus} #w{pointer-events:none}
+@html <div id=w><div id=a></div><div id=b></div><div id=c></div><div id=d></div><div id=e></div></div>
+(function () { return at([[10, 10], [10, 60], [10, 110], [10, 160], [10, 210]]) + ' ' + ['a', 'c', 'd', 'e', 'w'].map(function (i) { return getComputedStyle(document.getElementById(i)).pointerEvents }).join(',') })
+=== pointer-events-root
+@css body{margin:0} #a{width:100px;height:100px}
+@html <div id=a></div>
+(function () { var r = []; document.body.style.pointerEvents = 'none'; r.push(at([[10, 10], [200, 200]])); document.documentElement.style.pointerEvents = 'none'; r.push(at([[10, 10], [200, 200]])); r.push(all([[10, 10]])); document.getElementById('a').style.pointerEvents = 'auto'; r.push(at([[10, 10], [200, 200]])); r.push(all([[10, 10]])); return r.join(' / ') })
+=== radix-modal
+@css body{margin:0;pointer-events:none} #page{width:400px;height:300px} #next{position:absolute;left:300px;top:250px;width:80px;height:30px} #other{position:absolute;left:20px;top:20px;width:80px;height:30px} #overlay{position:fixed;left:0;top:0;right:0;bottom:0;pointer-events:auto;z-index:50} #dlg{position:fixed;left:100px;top:60px;width:200px;height:150px;z-index:50;pointer-events:auto} #ok{position:absolute;left:10px;top:100px;width:60px;height:30px} #title{width:200px;height:40px}
+@html <div id=page><button id=other></button><button id=next></button></div><div id=overlay></div><div id=dlg><div id=title></div><button id=ok></button></div>
+(function () { return at([[310, 260], [30, 30], [200, 100], [120, 170], [10, 280], [399, 299], [150, 80]]) + ' ' + all([[310, 260], [120, 170]]) })
+=== radix-modal-body-hidden
+@css html{overflow:hidden} body{margin:0;pointer-events:none;overflow:hidden;height:50px} #next{position:absolute;left:300px;top:250px;width:80px;height:30px} #overlay{position:fixed;left:0;top:0;right:0;bottom:0;pointer-events:auto;z-index:50} #dlg{position:fixed;left:100px;top:60px;width:200px;height:150px;z-index:51;pointer-events:auto} #ok{position:absolute;left:10px;top:100px;width:60px;height:30px}
+@html <button id=next></button><div id=overlay></div><div id=dlg><button id=ok></button></div>
+(function () { return at([[310, 260], [120, 170], [10, 10], [10, 280], [399, 299]]) })
+=== overlay-without-pointer-events-reset
+@css body{margin:0;pointer-events:none} #btn{position:absolute;left:0;top:0;width:100px;height:100px;pointer-events:auto} #ov{position:fixed;left:0;top:0;width:400px;height:300px}
+@html <button id=btn></button><div id=ov></div>
+(function () { return at([[10, 10], [200, 200]]) + ' ' + all([[10, 10]]) })
+=== overflow-clip
+@css body{margin:0} #c{overflow:hidden;width:100px;height:80px;margin-left:50px;margin-top:20px} #big{width:300px;height:300px} #o{position:absolute;left:0;top:0;width:200px;height:40px}
+@html <div id=c><div id=big></div></div><div id=o style="left:0;top:150px"></div>
+(function () { return at([[60, 30], [149, 30], [150, 30], [60, 99], [60, 100], [40, 30], [160, 120], [60, 160]]) })
+=== overflow-abs-in-relative-clip
+@css body{margin:0} #c{position:relative;overflow:hidden;width:100px;height:60px;margin:20px} #in{position:absolute;left:50px;top:30px;width:200px;height:200px}
+@html <div id=c><div id=in></div></div>
+(function () { return at([[60, 60], [110, 60], [60, 90], [60, 150], [130, 100]]) })
+=== overflow-z-child-clip
+@css body{margin:0} #c{overflow:hidden;width:100px;height:60px;margin:20px} #z{position:relative;z-index:3;width:300px;height:300px} #b{position:absolute;left:0;top:0;width:400px;height:300px;z-index:1}
+@html <div id=c><div id=z></div></div><div id=b></div>
+(function () { return at([[30, 30], [110, 30], [30, 90], [30, 200], [200, 200]]) })
+=== scroll-container
+@css body{margin:0} #s{overflow:auto;width:150px;height:100px;margin:10px} .i{height:40px;width:100px} #foot{height:200px;width:50px}
+@html <div id=s><div class=i id=i1></div><div class=i id=i2></div><div class=i id=i3></div><div class=i id=i4></div><div id=foot></div></div>
+(function () { var r = []; r.push(at([[20, 20], [20, 60], [20, 100], [20, 115], [20, 125], [150, 50], [100, 50]])); document.getElementById('s').scrollTop = 70; r.push(at([[20, 20], [20, 60], [20, 100], [20, 115], [20, 125], [100, 50]])); document.getElementById('s').scrollTop = 1000; r.push(at([[20, 20], [20, 100], [20, 115]])); return r.join(' / ') })
+=== scroll-container-bars
+@css body{margin:0} #s{overflow:scroll;width:150px;height:100px;margin:10px} #in{height:300px;width:300px}
+@html <div id=s><div id=in></div></div>
+(function () { return at([[20, 20], [140, 50], [100, 100], [146, 50], [60, 106], [60, 60], [159, 109], [160, 110]]) })
+=== scroll-container-nested
+@css body{margin:0} #o{overflow:auto;width:200px;height:150px} #m{overflow:auto;width:150px;height:100px;margin-top:20px} #in{height:400px;width:100px} #pad{height:100px;width:50px}
+@html <div id=o><div id=pad></div><div id=m><div id=in></div></div><div id=pad2 style="height:300px"></div></div>
+(function () { var r = []; r.push(at([[20, 50], [20, 130], [20, 160]])); document.getElementById('o').scrollTop = 80; r.push(at([[20, 10], [20, 50], [20, 130], [20, 140]])); document.getElementById('m').scrollTop = 60; r.push(at([[20, 50], [20, 90]])); return r.join(' / ') })
+=== window-scrolled
+@css body{margin:0} .b{height:100px;width:200px} #end{height:100px}
+@html <div class=b id=b1></div><div class=b id=b2></div><div class=b id=b3></div><div class=b id=b4></div><div class=b id=b5></div><div class=b id=b6></div><div class=b id=b7></div><div class=b id=b8></div><div id=end></div>
+(function () { var r = []; r.push(at([[10, 10], [10, 250], [10, 290], [300, 10], [388, 100]])); window.scrollTo(0, 250); r.push(at([[10, 10], [10, 40], [10, 60], [10, 250], [10, 290]])); window.scrollTo(0, 5000); r.push(at([[10, 10], [10, 290]])); r.push(window.scrollY); return r.join(' / ') })
+=== fixed-when-scrolled
+@css body{margin:0} #t{height:900px;width:300px} #f{position:fixed;left:10px;top:10px;width:50px;height:50px} #g{position:fixed;right:0;bottom:0;width:30px;height:30px;z-index:-1}
+@html <div id=t></div><div id=f></div><div id=g></div>
+(function () { var r = [at([[20, 20], [380, 280], [200, 200]])]; window.scrollTo(0, 500); r.push(at([[20, 20], [380, 280], [200, 200], [70, 20]])); return r.join(' / ') })
+=== fixed-in-clip
+@css body{margin:0} #c{overflow:hidden;width:100px;height:60px;margin:20px} #f{position:fixed;left:200px;top:100px;width:100px;height:100px}
+@html <div id=c><div id=f></div></div>
+(function () { var r = [at([[250, 150], [50, 50], [150, 50]])]; return r.join(' / ') })
+=== sticky
+@css body{margin:0} #t{height:100px} #s{position:sticky;top:10px;height:30px;width:100px} #u{height:900px}
+@html <div id=t></div><div id=s></div><div id=u></div>
+(function () { var r = [at([[10, 110], [10, 20], [10, 150]])]; window.scrollTo(0, 200); r.push(at([[10, 20], [10, 110], [10, 50], [10, 5]])); return r.join(' / ') })
+=== inline-and-text
+@css body{margin:0} #p{width:300px;height:100px} #ib{display:inline-block;width:60px;height:30px} #sp{display:inline-block;width:40px;height:30px} #in2{width:20px;height:20px}
+@html <div id=p><span id=ib><div id=in2></div></span><span id=sp></span></div>
+(function () { return at([[10, 10], [30, 10], [50, 25], [70, 40], [100, 20], [100, 60], [200, 40]]) })
+=== table-cells
+@css body{margin:0} table{border-collapse:collapse} td{padding:0;width:100px;height:40px;border:0}
+@html <table id=t><tr id=r1><td id=c1></td><td id=c2></td></tr><tr id=r2><td id=c3></td><td id=c4></td></tr></table>
+(function () { return at([[10, 10], [110, 10], [10, 50], [110, 50], [250, 10], [10, 100]]) })
+=== shadow-root
+@css body{margin:0} #h{width:200px;height:100px} #o{width:200px;height:50px}
+@html <div id=h></div><div id=o></div>
+var sr = document.getElementById('h').attachShadow({ mode: 'open' }); var i1 = document.createElement('div'), i2 = document.createElement('div'); i1.id = 'in'; i1.style.cssText = 'width:100px;height:60px'; i2.id = 'deep'; i2.style.cssText = 'width:30px;height:30px'; i1.appendChild(i2); sr.appendChild(i1);
+(function () { var r = [at([[10, 10], [50, 50], [150, 50], [10, 120]])]; r.push(id(sr.elementFromPoint(10, 10)), id(sr.elementFromPoint(50, 50)), id(sr.elementFromPoint(150, 50)), id(sr.elementFromPoint(10, 120))); r.push(all([[10, 10], [50, 50]])); r.push(sr.elementsFromPoint(10, 10).map(id).join('>')); r.push(sr.elementsFromPoint(150, 50).map(id).join('>')); return r.join(' / ') })
+=== after-script-change
+@css body{margin:0} #a{position:absolute;left:0;top:0;width:100px;height:100px} #b{position:absolute;left:50px;top:0;width:100px;height:100px;display:none}
+@html <div id=a></div><div id=b></div>
+(function () { var r = [at([[60, 10]])]; document.getElementById('b').style.display = 'block'; r.push(at([[60, 10]])); document.getElementById('b').style.zIndex = '-1'; r.push(at([[60, 10]])); document.getElementById('a').style.pointerEvents = 'none'; r.push(at([[60, 10]])); document.getElementById('b').remove(); r.push(at([[60, 10]])); return r.join(' ') })
+=== grid-items
+@css body{margin:0} #g{display:grid;grid-template-columns:100px 100px;grid-template-rows:50px 50px;width:200px} #g div{} #a{grid-column:1/3;grid-row:1;z-index:1;position:relative} #b{grid-column:2;grid-row:1/3} #c{grid-column:1;grid-row:2}
+@html <div id=g><div id=a></div><div id=b></div><div id=c></div></div>
+(function () { return at([[10, 10], [150, 25], [150, 75], [10, 75], [250, 10]]) })
