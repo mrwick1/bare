@@ -341,7 +341,7 @@ mod tests {
         let tasks: Vec<_> = (0..6).map(|i| client.spawn(move |c| get(c, port, &format!("/{i}")))).collect();
         tasks.into_iter().for_each(|t| drop(t.wait()));
         assert_eq!(accepted.load(Ordering::SeqCst), 6);
-        // A fork has its own cache and the same pool: the next request needs no new connection.
+        // A fork shares the cache and the pool: the next request needs no new connection.
         let mut fork = client.fork();
         assert_eq!(get(&mut fork, port, "/x"), "body of /x");
         assert_eq!(accepted.load(Ordering::SeqCst), 6);

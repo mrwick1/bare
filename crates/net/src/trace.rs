@@ -156,6 +156,11 @@ pub fn blocked<T>(f: impl FnOnce() -> T) -> T {
     out
 }
 
+/// The time counted by `blocked` so far, in microseconds (it is not cleared).
+pub fn blocked_us() -> u64 {
+    BLOCKED.load(Ordering::Relaxed)
+}
+
 /// Count a sleep of the main thread (it waited for a timer).
 pub fn slept(d: Duration) {
     if on() {

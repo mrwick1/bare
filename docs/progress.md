@@ -2476,3 +2476,47 @@ Checks (arjun-e16):
 - `tools/js/cost_matrix.sh`, base origin/main `eedd0aa` from `base-build`: 805 rows. Mean change: glibc +0.001%, jemalloc +0.000%. Over under one allocator: 0. Over under both: 0. Failed: 0.
 
 Not tested: a long run (hours) of RSS in the window; a request that streams a body in many parts; a wake that is lost (only the 1 s backstop covers it); two windows in one process (the hook is global); HiDPI; the staging journey in the window.
+
+## Where the time of the staging journey goes (S5)
+
+On 2026-11-07, main 853489d, the 8-step read-only journey (`drive-journey.steps`) took 5.4 s to 8.2 s in `bare-drive` and 3.0 s to 3.5 s in Chrome. The goal: only the network limits the journey. The driver result now records, for each step, `cpu_ms` (CPU time of the page thread, from `/proc/thread-self/schedstat`) and `net_ms` (time inside a blocking network call). For each request it records `at_ms`, the phases (queue wait, DNS, TCP, TLS, time to the first byte, body), `reused` and `h2`.
+
+Network facts:
+- The staging server (nginx) speaks HTTP/1.1 only. `curl --http2` gets 1.1, and no `Alt-Svc` header is sent. Chrome also uses HTTP/1.1 here, with 6 connections. bare uses up to 6 workers on 6 connections. The parallelism is the same. HTTP/2 is not a cause.
+- The `/_next/static` chunks have `Cache-Control: public, max-age=31536000, immutable`. bare downloaded them again for each document: scripts and style sheets went through `send_stream_once`, which skips the cache, and each fork of a client had an empty cache. Chrome takes them from its cache.
+- `open` made a new client. Step 8 paid 6 new TCP and TLS handshakes and 34 downloads. Chrome navigates in the same tab with its connections and its cache.
+
+Profile of the page thread, `perf record` with DWARF call graphs over the whole journey (5.1 s), self time: JS evaluation and heap 53% (`eval_expr_inner` 8.9%, `machine` 5.3%, `link_inner` 5.0%, plus hashing), CSS cascade, matching and variables 10%, JS parse and lex 3.6%, layout under 1%, paint under 0.1%, `Heap::intern_str` 0.14% (about 4 ms). The driver polls every 4 ms while a reply is in flight, so it adds at most 4 ms to each `expect`.
+
+Per step, in ms. "bare before" is 6 runs of 853489d (load average 5 to 10). "bare after" is 5 runs of this change. CPU and the request counts come from one run each (before: main with the counters only; after: the last run, load average 7). "Other" is the step time minus the CPU: network wait, polling and sleep. Chrome: 2 runs of `chrome_journey.mjs` on the same machine.
+
+| Step | bare before | bare after | after: CPU / other | requests before / after | Chrome |
+| --- | --- | --- | --- | --- | --- |
+| 1 open `/` to login | 707-937 | 687-932 | 127 / 590 | 42 / 42 | 836-953 |
+| 2 login | 898-1773 | 782-1336 | 482 / 399 | 5 / 5 | 474-564 |
+| 3 overview data | 133-586 | 125-524 | 133 / 1 | 0 / 0 | 52-54 |
+| 4 agents | 732-1197 | 642-1146 | 545 / 97 | 41 / 41 | 311-419 |
+| 5 search | 601-1075 | 650-974 | 447 / 214 | 14 / 14 | 380-383 |
+| 6 reload | 1024-1615 | 581-1152 | 383 / 216 | 53 / 11 | 413-724 |
+| 7 sign out | 388-989 | 400-512 | 357 / 43 | 16 / 3 | 152-253 |
+| 8 agents without session | 636-749 | 172-190 | 90 / 82 | 37 / 2 | 242-246 |
+| total | 5419-8230 | 4206-6646 | 2564 / 1642 | 208 / 118 | 2971-3488 |
+
+Reading the table:
+- The CPU of the page thread is 2.6 s of the 4.2 s after the change. Most of it is JS evaluation: typing (10 ms of CPU for each character, a React render for each `input` event), the click handlers and the route changes. It is the largest remaining cause. It is in `crates/js/src/eval.rs`, which another task (A3) changes now, so it is not changed here.
+- After the change, the network waits of steps 6 and 8 are a few requests. Step 1 is network bound: a cold start with 6 new connections and 42 downloads, as in Chrome.
+- The run-to-run spread comes from the machine load: with a load average of 9, the CPU of the same journey went from 2.7 s to 5.0 s.
+
+Changes:
+- `crates/net/src/http.rs`: a client and its forks share one cache (`Cache`, behind `Arc<Mutex>`). `send_stream_cached` gives a fresh copy from the cache. `keep` stores a streamed 200 that stays fresh (no `no-store`, no `Vary` other than `Accept-Encoding`). An empty cache costs one lock and no allocation for each request.
+- `crates/bare/src/resources.rs`: scripts and style sheets use `send_stream_cached` and `keep`.
+- `crates/bare/src/page.rs`: `Page::open_in` opens a new session with empty storage that shares the connections and the cache of a client.
+- `crates/drive/src/run.rs`: a headless `open` uses `Page::open_in` with one client for the run, as a new tab of one browser. A window run still opens a new profile. The counters above.
+
+Checks (archMachine):
+- `crates/drive/tests/cache.rs`: `open`, `reload`, `open` of a page with an immutable script downloads the script once (main: 3 times) on at most 2 connections. `bare-net` `a_kept_stream_answers_a_fork_without_a_request`: a fork reads what another fork kept; a `no-cache` reply is not kept.
+- `cargo test --release --workspace`: 47 test binaries, 2,933 passed, 0 failed.
+- `tools/js/cost_matrix.sh`, 805 rows, base origin/main eedd0aa (`bare-stress` from its own `base-build`): mean change glibc +0.002%, 0 rows over. The first version built the cache key for each request and was over on `resources_load small 1` and `10` (+2.2%, +2.5%) and `loader_load dynamic 10` (+0.7%). It now skips the key when the cache is empty or the reply has no `Cache-Control`.
+- Live staging, read only, 5 runs: all passed. A scan of all output files found neither the email nor the password.
+
+Not tested: the window (`--window` still opens a new profile on `open`); arjun-e16; a stale cached script (the streamed path never revalidates: a copy that is not fresh is downloaded again); memory growth of the shared cache over many journeys (the limit is `MAX_CACHE`, 64 MiB; this journey caches 57 static files of 696 KB on the wire; the decoded size in memory was not measured); CPU split of the Chrome steps.
