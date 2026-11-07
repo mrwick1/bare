@@ -205,9 +205,19 @@ pub struct EvalStats {
     pub scripts: usize,
     pub script_source: usize,
     pub script_nodes: usize,
+    /// Capacity bytes (see `Interp::stats`): syntax trees, the caches that go with them, environments, the function table.
+    pub ast_bytes: usize,
+    pub script_cache_bytes: usize,
+    pub env_bytes: usize,
+    pub func_bytes: usize,
 }
 
 // ------------------------------------------------------------------ small internals
+
+/// `Interp::gc_due`: collect when the accounted heap is more than this many times the live size after the previous collect, and
+/// more than this many bytes.
+const GC_GROWTH: usize = 2;
+const GC_MIN_BYTES: usize = 4 << 20;
 
 /// Capacity to keep in a table of `len` entries after a collect: twice the live entries, or the live entries plus
 /// `since` (what the program made since the previous collect), so steady churn does not shrink and regrow every
@@ -539,6 +549,8 @@ pub struct Interp<'p> {
     free_envs: Vec<u32>,
     /// Heap object allocations at the end of the previous `collect` (see `trim_tables`).
     gc_allocs: u64,
+    /// Accounted heap bytes at the end of the previous `collect` (see `gc_due`).
+    gc_live: usize,
     live_envs: usize,
     funcs: FxMap<ObjId, Callee>,
     // run state
@@ -705,6 +717,7 @@ impl<'p> Interp<'p> {
             envs: Vec::new(),
             free_envs: Vec::new(),
             gc_allocs: 0,
+            gc_live: 0,
             live_envs: 0,
             funcs: FxMap::default(),
             env: 0,
@@ -769,7 +782,12 @@ impl<'p> Interp<'p> {
     }
 
     pub fn stats(&self) -> EvalStats {
-        EvalStats { steps: self.steps, live_envs: self.live_envs, env_slots: self.envs.len(), functions: self.funcs.len(), scripts: self.scripts.len(), script_source: self.script_source, script_nodes: self.script_nodes }
+        use std::mem::size_of;
+        let ast_bytes = self.scripts.iter().map(|c| c.prog.stats().bytes + c.prog.source.len()).sum();
+        let script_cache_bytes = self.scripts.iter().map(|c| c.cache_bytes()).sum();
+        let env_bytes = self.envs.capacity() * size_of::<Env>() + self.envs.iter().map(|e| e.bindings.capacity() * size_of::<Binding>() + e.index.as_ref().map_or(0, |m| m.capacity() * 9)).sum::<usize>();
+        let func_bytes = self.funcs.capacity() * (size_of::<(ObjId, Callee)>() + 1);
+        EvalStats { steps: self.steps, live_envs: self.live_envs, env_slots: self.envs.len(), functions: self.funcs.len(), scripts: self.scripts.len(), script_source: self.script_source, script_nodes: self.script_nodes, ast_bytes, script_cache_bytes, env_bytes, func_bytes }
     }
 
     /// Run the script once. Returns its completion value (see the module comment). A second call is
@@ -987,7 +1005,15 @@ impl<'p> Interp<'p> {
         roots.extend_from_slice(&host_vals);
         let r = h!(self, self.heap.collect(&roots));
         self.gc_allocs = self.heap.stats().total_object_allocs;
+        self.gc_live = self.heap.used_bytes();
         Ok(r)
+    }
+
+    /// Has the heap grown to `GC_GROWTH` times what the previous collect left (and past `GC_MIN_BYTES`), at a point where a collect can run?
+    /// The driver asks at each safe point (between tasks, after each key or click), so garbage cannot pile up while one call of the host
+    /// runs many events. QuickJS and SpiderMonkey use the same rule: a limit that is a factor of the live size after the last collect.
+    pub fn gc_due(&self) -> bool {
+        self.depth == 0 && self.stmt_frames == 0 && self.heap.used_bytes() > GC_MIN_BYTES.max(GC_GROWTH * self.gc_live)
     }
 
     /// Give back the capacity of the side tables after a burst died, by the rule of `Slab::trim` (see `trim_to`).

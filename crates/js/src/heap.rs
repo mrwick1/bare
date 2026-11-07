@@ -648,6 +648,21 @@ pub struct Stats {
     pub buffer_bytes: usize,
 }
 
+/// Capacity bytes of the heap, by part (`Heap::footprint`). `*_used` is the part that holds an entry; the rest of `*_cap` is slack.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Footprint {
+    pub object_slab: usize,
+    pub string_slab: usize,
+    pub interner: usize,
+    pub entries_used: usize,
+    pub entries_cap: usize,
+    pub elems_used: usize,
+    pub elems_cap: usize,
+    pub index_tables: usize,
+    pub string_units: usize,
+    pub objects_with_props: usize,
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Collected {
     pub objects: usize,
@@ -720,6 +735,26 @@ impl Heap {
 
     pub fn limits(&self) -> HeapLimits {
         self.limits
+    }
+
+    /// Where the memory of the heap is, by capacity (real bytes asked of the allocator, not the accounted `Stats::bytes`). It walks every object, so it is for a load tool, not for a hot path.
+    pub fn footprint(&self) -> Footprint {
+        let mut f = Footprint { object_slab: self.objects.capacity_bytes(), string_slab: self.strings.capacity_bytes(), interner: self.interner.table.capacity() * 4, ..Default::default() };
+        for o in &self.objects.live {
+            f.entries_used += o.props.entries.len() * ENTRY_BYTES;
+            f.entries_cap += o.props.entries.capacity() * ENTRY_BYTES;
+            f.elems_used += o.elems.len() * ELEM_BYTES;
+            f.elems_cap += o.elems.capacity() * ELEM_BYTES;
+            f.index_tables += o.props.index.as_ref().map_or(0, |m| m.capacity() * (std::mem::size_of::<(PropertyKey, u32)>() + 1));
+            f.objects_with_props += (!o.props.entries.is_empty()) as usize;
+        }
+        f.string_units = self.strings.live.iter().map(|s| s.units.len() * 2).sum();
+        f
+    }
+
+    /// Accounted bytes of the live and the dead objects and strings that a sweep has not freed yet (`Stats::bytes`, with no copy of the rest).
+    pub fn used_bytes(&self) -> usize {
+        self.bytes
     }
 
     pub fn stats(&self) -> Stats {
