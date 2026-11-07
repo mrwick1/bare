@@ -306,6 +306,16 @@ The engine makes no request for the media. Chrome asks the server (a range reque
 
 Consequences: an element that the parser makes with a `src` does not load until the page calls `load()` or `play()` (the tree builder has no hook). `<source>` children are not read. The globals are lazy accessors (`browser_lazy.rs`), so a page without media pays six accessor functions.
 
+## The heap collects when it has grown by half
+
+Problem: no collection ran inside one driver call. Typing 50 keys into the React form took the process to 214 MiB.
+
+Decision: `Interp::gc_due` is true, at the end of a driver call and in each loader round, when the accounted heap is above `max(8 MiB, 1.5 x the heap left by the last collect)`. The numbers follow QuickJS (1.5 x) and SpiderMonkey (low-frequency growth of 150%). Sweep on this page with 30 keys (before the property room change, floor 1 or 4 MiB): factor 2.0 gave a peak RSS of 42.8 MiB and 11 collects, 1.5 gave 35.4 MiB and 19, 1.25 gave 31.2 MiB and 34, 1.1 gave 31.3 MiB and 34. Factor 1.25 saves 4 MiB and makes 79% more collects, so 1.5 is the knee. The floor of 8 MiB was not swept.
+
+Cost: one key into the page costs +3.6% instructions (443.5 M to 459.4 M; the same under jemalloc). Each collect takes 8 to 11 ms. 27 collects ran in 50 keys, and a key takes 70 to 85 ms. The page falls from 214 MiB to 33 MiB at 50 keys, and it stays flat. The cost is accepted: a page that is typed into for minutes cannot grow without bound, and no `*_load` row is worse than +0.5% with jemalloc.
+
+Not collected inside a call: the collect needs depth 0 and no statement frames, so a long synchronous script still keeps its garbage until it returns. The event cap and the loader rounds are its collect points.
+
 ## Open questions
 
 - A separate process for sensitive sites, for example banking.

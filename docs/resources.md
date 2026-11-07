@@ -4449,4 +4449,45 @@ Memory: peak RSS of the run with 20 keys is 106 MiB on both builds (3 runs each,
 
 Cost rule: 494 rows, median -1.09%, none above +0.5% (worst `builtins_load split` +0.34%), 375 below -0.5%. The `*_load` rows of both example crates ran at scale 1 and 10 with the case lists of `tools/js/*_load.sh`. No row needed the jemalloc cross-check.
 
-Peak RSS of this page is high for a 60 field form (106 MiB). It was not looked at here.
+### Memory of this page
+
+Problem: the page peaked at 106 MiB RSS with 20 keys and at 214 MiB with 50 keys. Measured with `crates/bare/examples/type_load.rs` (set `MEM=1` for the parts), the release build, peak RSS from `getrusage` of the child.
+
+Cause: no collection ran inside one `Input::Type` driver call. A key makes about 3.5 MiB of garbage (a React render of 60 fields), so the heap grew with each key and was freed only after the call.
+
+Chrome for the same page (headless, `Runtime.getHeapUsage` after a forced collect, `Memory.getDOMCounters`): JS heap 2.1 MiB after load and 2.9 MiB after 50 keys, 526 DOM nodes. The renderer RSS cannot be read alone: other Chrome processes ran on the machine.
+
+| Peak RSS (MiB)   | Main before | This change |
+| ---------------- | ----------: | ----------: |
+| load (0 keys)    |        27.4 |        26.4 |
+| 20 keys          |       104.1 |        33.2 |
+| 50 keys          |       214.2 |        32.9 |
+
+Where the memory goes after load and one collect (allocator live 15.2 MiB, peak 18.2 MiB, RSS 27.7 MiB):
+
+| Part                                                    |   MiB |
+| ------------------------------------------------------- | ----: |
+| syntax trees (131,379 nodes) with the 0.3 MiB of source |  2.74 |
+| caches of the syntax trees (`Code::cache_bytes`)        |  1.57 |
+| environments (2,860)                                    |  0.76 |
+| function table (6,765 functions)                        |  0.78 |
+| object slab (14,114 objects with properties)            |  2.96 |
+| property entries, used 3.09 of capacity                 |  4.08 |
+| index tables of large property maps                     |  0.68 |
+| strings, interner                                       |  0.43 |
+| DOM, style, layout, host tables (the remainder)         |  ~1.2 |
+
+Accounted JS heap: 7.8 MiB (24,331 objects) after load, 5.4 MiB (14,259) after load and a collect, 6.8 MiB (17,203) after 50 keys. RSS minus allocator live is 11.7 MiB. Hypothesis: binary pages, thread stacks and free allocator space; not split further.
+
+Changes, in the order of their effect:
+
+- Collect by growth. `Interp::gc_due` is true at a safe point (the end of a driver call, each loader round) when the accounted heap is above `max(8 MiB, 1.5 x the heap after the previous collect)`. QuickJS collects at 1.5 x the size left by the last collect. SpiderMonkey grows its heap by a factor of 1.5 at low frequency. V8 scavenges a young generation often and marks the old generation in steps. The idea taken is the QuickJS rule: one number, no generations. The cost is one collect for each 2.7 MiB of garbage, 8 to 11 ms each (27 collects in 50 keys).
+- A cheaper collect pass. `Heap::stored_edges` lists the values an object holds in one pass. It replaces a lookup for each key. The collect of this page went from 20.9 to 8.5 ms.
+- Exact room for properties. A property vector that grows by push takes 4 entries (40 bytes each) at the first push. `make_closure` reserves 3 for `length`, `name` and `prototype`, and `eval_object` reserves the literal's property count. V8 gives a literal its final map and its size at once.
+- Not done: `Object` shrink (80 bytes), shapes (hidden classes), lazy parse of function bodies. Each one is large and the heap is no longer the cost of this page.
+
+Cost (`tools/js/instr.sh`, minimum of 3, instructions:u, main before this change against this change): load 811,635,118 to 809,419,477 (-0.3%). One key into `#a1`, from the difference of 50 keys and 0 keys: 443.5 M to 459.4 M (+3.6%). jemalloc gives the same: +3.6% for 50 keys. The extra is the collects. The decision is in decisions.md.
+
+Cost rule: 494 rows at scale 1 and 10, median -2.38%, 335 below -0.5%. Five rows are above +0.5% with glibc: `session_load heavy 10` +0.54%, `iterator_load generic 1` +0.54%, `iterator_load generic 10` +0.61%, `gen_load iterobj 10` +0.96% and `date_load parse 10` +1.27%. With `LD_PRELOAD=libjemalloc.so.2` they are +0.36%, +0.22%, +0.21%, +0.29% and -0.09%. They come from the state of the glibc heap, not from the change. The first version of the property room (also for arrays and for empty literals) cost +1.2% to +1.7% on `builtins_load scan` and `weak_load churn` under jemalloc. It was removed.
+
+Peak RSS of the `*_load` rows (one run each, scale 10): 22 of 494 rows grow by more than 0.5% and 33 shrink by more than 0.5%. The largest drops: `binary_load scanarr` 51.4 to 37.1 MiB, `iterator_load generic` 32.9 to 23.8, `gen_load iterobj` 33.1 to 24.2, `arrobj_load lastindexof` 27.1 to 19.9. The largest rise: `sc_load next_loop` 12.4 to 12.8 MiB (+0.4 MiB, the work lists of the collect).

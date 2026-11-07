@@ -1171,3 +1171,16 @@ Deviations from Chrome:
 
 Not tested: a live React page that plays a sample (no run against the real server); a source that Chrome can play with a real decoder; `<source>` children; the parser load of `<audio src>`; any audio output; `MediaSource`, `MediaStream`, text tracks and `captureStream` (absent); the other `bare-js`, `bare-net` and `bare-stress` rows (only the rows listed above were measured); the whole workspace after the rebase (only `bare`).
 
+
+
+## Memory of the React typing page
+
+Problem: the page of `tools/js/typing` (60 inputs, 2 textareas, Radix controls) peaked at 106 MiB RSS with 20 keys and 214 MiB with 50 keys.
+
+Result: 33.2 MiB with 20 keys and 32.9 MiB with 50 keys. The load peak went from 27.4 to 26.4 MiB. The numbers, the breakdown of the live heap and the comparison with Chrome are in [resources.md](resources.md#memory-of-this-page). The decision is in [decisions.md](decisions.md#the-heap-collects-when-it-has-grown-by-half).
+
+Changes: `Interp::gc_due` (collect at the end of a driver call and in each loader round when the heap has grown by half), `Heap::stored_edges` (a collect pass 2.5 times cheaper), `Heap::reserve_props` for closures and object literals, and the `MEM=1` report of `type_load`.
+
+Tests: `gc_is_due_when_the_heap_has_grown_by_half_since_the_last_collect`, `typing_collects_the_garbage_of_its_own_keys`, `stored_edges_lists_every_value_a_property_holds` and `reserved_property_room_leaves_no_slack`. `cargo test --workspace` passes.
+
+Not tested: a page where one synchronous script makes the garbage (the collect waits for depth 0); a machine other than this one; scale 100; the floor of 8 MiB (no sweep); the `type_load` rows of the cost matrix (they need a directory argument, so the matrix cannot run them; the cost of a key was measured by hand); the effect on RSS of a real browser window (paint buffers, fonts).
