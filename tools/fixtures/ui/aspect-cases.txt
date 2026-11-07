@@ -1,0 +1,33 @@
+var st = document.createElement('style'); st.textContent = "html{overflow:hidden}*{font-family:'Noto Sans Mono' !important}body{margin:0}.b{background:#ccc}"; document.head.appendChild(st);
+var $ = function (i) { return document.getElementById(i) };
+var S = function (ids) { return ids.split(' ').map(function (id) { var r = $(id).getBoundingClientRect(); return [r.width, r.height].map(function (v) { return Math.round(v * 100) / 100 }).join(',') }).join(' ') };
+=== block-fills-the-width
+@html <div id=a style="aspect-ratio:5/2"></div><div id=b style="aspect-ratio:2"></div><div id=c style="aspect-ratio:16 / 9;width:160px"></div><div id=d style="aspect-ratio:1.5;width:90px"></div>
+(function () { return S('a b c d') })
+=== content-box-and-border-box
+@html <div id=a style="aspect-ratio:2;width:100px;padding:10px;border:1px solid"></div><div id=b style="aspect-ratio:2;width:100px;padding:10px;border:1px solid;box-sizing:border-box"></div><div id=c style="aspect-ratio:1;padding:20px;box-sizing:border-box;width:50%"></div>
+(function () { return S('a b c') })
+=== height-and-no-ratio-values
+@html <div id=a style="aspect-ratio:2;width:100px;height:30px"></div><div id=b style="aspect-ratio:auto;width:100px"></div><div id=c style="aspect-ratio:0 / 1;width:100px"></div><div id=d style="aspect-ratio:1 / 0;width:100px"></div><div id=e style="aspect-ratio:-1;width:100px"></div><div id=f style="aspect-ratio:2;aspect-ratio:x;width:100px"></div>
+(function () { return S('a b c d e f') })
+=== auto-with-a-ratio
+@html <div id=a style="aspect-ratio:auto 4/1;width:100px"></div><div id=b style="aspect-ratio:4 / 1 auto;width:100px"></div><div id=c style="aspect-ratio:auto 3;width:90px"></div>
+(function () { return S('a b c') })
+=== min-and-max-height
+@html <div id=a style="aspect-ratio:2;width:100px;min-height:80px"></div><div id=b style="aspect-ratio:2;width:100px;max-height:20px"></div><div id=c style="aspect-ratio:2;width:100px;min-height:10px;max-height:30px"></div>
+(function () { return S('a b c') })
+=== content-taller-than-the-ratio
+@html <div id=a style="aspect-ratio:10;width:100px">x<br>y<br>z</div><div id=b style="aspect-ratio:10;width:100px;overflow:hidden">x<br>y<br>z</div><div id=c style="aspect-ratio:10;width:100px;min-height:0">x<br>y<br>z</div><div id=d style="aspect-ratio:10;width:100px;overflow:auto">x<br>y<br>z</div>
+(function () { return S('a b c d') })
+=== percent-height-child
+@html <div id=a style="aspect-ratio:2;width:100px"><div id=b style="height:50%"></div></div>
+(function () { return S('a b') })
+=== absolute-and-inline-block
+@html <div style="position:relative;height:100px"><div id=a style="position:absolute;left:10px;width:60px;aspect-ratio:3"></div><div id=b style="position:absolute;left:0;right:0;top:50px;aspect-ratio:8"></div></div><span id=d style="display:inline-block;width:80px;aspect-ratio:2"></span>
+(function () { return S('a b d') })
+=== grid-and-flex-items
+@html <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;width:300px"><div><div id=a style="aspect-ratio:5/2"></div></div><div><div id=b style="aspect-ratio:1"></div></div></div><div style="display:flex;align-items:flex-start;width:300px"><div id=c style="flex:1;aspect-ratio:3"></div><div id=d style="width:60px;aspect-ratio:2"></div></div><div style="display:flex;flex-direction:column;width:120px"><div id=e style="aspect-ratio:4"></div></div>
+(function () { return S('a b c d e') })
+=== a-nested-absolute-card
+@html <div id=a style="position:relative;aspect-ratio:5/2;width:200px"><div id=b style="position:absolute;inset:0;border:1px solid"></div><span id=c style="position:absolute;left:14px;top:14px;width:10px;height:10px"></span></div>
+(function () { return S('a b c') })

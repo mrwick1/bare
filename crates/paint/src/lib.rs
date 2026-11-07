@@ -14,6 +14,7 @@ pub mod display;
 pub mod glyphs;
 pub mod hit;
 pub mod png;
+pub mod svg;
 
 use bare_css::cascade::Styles;
 use bare_html::dom::Document;
@@ -122,6 +123,7 @@ impl Painter {
                         canvas.stroke(&pts, width, color, clip);
                     }
                 }
+                Item::Poly { at: from, n, color } => canvas.fill_poly_at(&list.points[from as usize..(from + n) as usize], off, color, clip),
                 Item::PushLayer { r, alpha } => {
                     let r = at(r).intersect(clip).intersect(bounds);
                     layers.push((r, alpha, saved.len()));

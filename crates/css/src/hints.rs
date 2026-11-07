@@ -5,12 +5,18 @@
 //! the browser's sheet. `of` gives the declarations as text, like a `style=""` attribute, and the cascade reads them
 //! the same way. A cell reads `cellpadding` and `border` of the table around it (the table, and up to three levels
 //! above the cell: `td`, `tr`, `tbody`). `<img width height>` gives its size. Only elements of a page that has a `<table>` are looked at.
+//! An `<svg>` gives its size (`width`, `height`, `viewBox`), and the shapes of an SVG give `fill` and `stroke`: only elements of a page that has an `<svg>` are looked at.
 
 use bare_html::dom::{Atom, Document, NodeData, NodeId};
 
 /// The atoms of the names that a page can have. A name that the page never uses has no atom, so nothing matches it.
 pub struct Hints {
-    table: Atom,
+    table: Option<Atom>,
+    svg: Option<Atom>,
+    shapes: [Option<Atom>; 8],
+    view_box: Option<Atom>,
+    fill: Option<Atom>,
+    stroke: Option<Atom>,
     td: Option<Atom>,
     th: Option<Atom>,
     tr: Option<Atom>,
@@ -28,11 +34,21 @@ pub struct Hints {
 }
 
 impl Hints {
-    /// `None` for a page with no `<table>`: no element has a hint.
+    /// `None` for a page with no `<table>` and no `<svg>`: no element has a hint.
     pub fn new(doc: &Document) -> Option<Hints> {
         let a = |n| doc.find_atom(n);
+        // The sheet of the browser has a selector `svg`, so its atom is there on every page: look for an element that is not in HTML.
+        let (table, svg) = (a("table"), if doc.has_foreign() { a("svg") } else { None });
+        if table.is_none() && svg.is_none() {
+            return None;
+        }
         Some(Hints {
-            table: a("table")?,
+            table,
+            svg,
+            shapes: ["g", "path", "line", "polyline", "polygon", "rect", "circle", "ellipse"].map(|n| svg.and_then(|_| a(n))),
+            view_box: svg.and_then(|_| a("viewBox")),
+            fill: svg.and_then(|_| a("fill")),
+            stroke: svg.and_then(|_| a("stroke")),
             td: a("td"),
             th: a("th"),
             tr: a("tr"),
@@ -76,7 +92,15 @@ impl Hints {
                 out.push_str(&format!("vertical-align:{v};"));
             }
         };
-        if name == self.table {
+        // The shapes of an SVG have no box: paint draws them from their attributes. A `g` keeps a style, for the shapes in it, and has nothing to show.
+        // Only the children of an `svg` or a `g` need the hint: a box with `display: none` gets no style for its children.
+        let hidden = self.svg.is_some() && Some(name) != self.shapes[0] && doc.parent(node).is_some_and(|p| matches!(*doc.data(p), NodeData::Element { name: n, .. } if Some(n) == self.svg || Some(n) == self.shapes[0]));
+        if Some(name) == self.svg {
+            self.svg_size(doc, node, &mut out);
+            self.paint(doc, node, &mut out);
+        } else if self.svg.is_some() && self.shapes.contains(&Some(name)) {
+            self.paint(doc, node, &mut out);
+        } else if Some(name) == self.table {
             size(&mut out, "width", attr(self.width, node));
             size(&mut out, "height", attr(self.height, node));
             if let Some(v) = attr(self.spacing, node).and_then(number) {
@@ -104,7 +128,7 @@ impl Hints {
                 out.push_str("white-space:nowrap;");
             }
             // The table is the grandparent or the great-grandparent: `td` in `tr` in `table`, or in `tbody` in `table`.
-            let table = std::iter::successors(doc.parent(node), |&n| doc.parent(n)).take(3).find(|&n| matches!(*doc.data(n), NodeData::Element { name, .. } if name == self.table));
+            let table = std::iter::successors(doc.parent(node), |&n| doc.parent(n)).take(3).find(|&n| matches!(*doc.data(n), NodeData::Element { name, .. } if Some(name) == self.table));
             if let Some(t) = table {
                 if let Some(d) = attr(self.padding, t).and_then(dimension) {
                     out.push_str(&format!("padding:{d};"));
@@ -123,7 +147,46 @@ impl Hints {
             size(&mut out, "width", attr(self.width, node));
             size(&mut out, "height", attr(self.height, node));
         }
+        if hidden {
+            out.push_str("display:none;");
+        }
         (!out.is_empty()).then_some(out)
+    }
+}
+
+impl Hints {
+    /// The size of an `<svg>` from `width`, `height` and `viewBox` (SVG 2, "sizing"): 300 by 150 with no attribute, the width of the container with a `viewBox` alone. A missing side comes
+    /// from the other side and the ratio of the `viewBox`, so the box has that ratio. A `%` side is of the containing block.
+    fn svg_size(&self, doc: &Document, node: NodeId, out: &mut String) {
+        let attr = |n: Option<Atom>| n.and_then(|n| doc.attr(node, n));
+        let (w, h) = (attr(self.width).and_then(dimension), attr(self.height).and_then(dimension));
+        let ratio = attr(self.view_box).and_then(|v| {
+            let mut n = v.split(|c: char| c == ',' || c.is_whitespace()).filter(|t| !t.is_empty()).map(|t| t.parse::<f32>().ok());
+            let (_, _, w, h) = (n.next()??, n.next()??, n.next()??, n.next()??);
+            (n.next().is_none() && w > 0.0 && h > 0.0).then_some((w, h))
+        });
+        match (w, h, ratio) {
+            (Some(w), Some(h), _) => out.push_str(&format!("width:{w};height:{h};")),
+            (Some(w), None, Some(_)) => out.push_str(&format!("width:{w};")),
+            (None, Some(h), Some((vw, vh))) if h.ends_with("px") => {
+                let px: f32 = h.trim_end_matches("px").parse().unwrap_or(0.0);
+                out.push_str(&format!("width:{}px;height:{h};", px * vw / vh));
+            }
+            (None, None, Some(_)) => out.push_str("width:100%;"),
+            (w, h, _) => out.push_str(&format!("width:{};height:{};", w.as_deref().unwrap_or("300px"), h.as_deref().unwrap_or("150px"))),
+        }
+        if let Some((vw, vh)) = ratio {
+            out.push_str(&format!("aspect-ratio:{vw}/{vh};"));
+        }
+    }
+
+    /// `fill` and `stroke` as attributes. A value that is not a color or `none` is dropped by the parser of the declaration.
+    fn paint(&self, doc: &Document, node: NodeId, out: &mut String) {
+        for (name, property) in [(self.fill, "fill"), (self.stroke, "stroke")] {
+            if let Some(v) = name.and_then(|n| doc.attr(node, n)).filter(|v| !v.contains([';', '{', '}', '!'])) {
+                out.push_str(&format!("{property}:{v};"));
+            }
+        }
     }
 }
 
@@ -182,6 +245,28 @@ mod tests {
         // A table inside a cell: the cells inside read their own table.
         let html = "<table cellpadding=9><tr><td><table><tr><td id=c>x</table></table>";
         assert_eq!(hint(html, "c"), None);
+    }
+
+    #[test]
+    fn an_svg_gets_its_size_and_paint_from_attributes() {
+        let h = |html: &str| hint(html, "s").unwrap_or_default();
+        assert_eq!(h("<svg id=s width=24 height=24 viewBox='0 0 24 24' fill=none stroke=currentColor>"), "width:24px;height:24px;aspect-ratio:24/24;fill:none;stroke:currentColor;");
+        // No attribute: 300 by 150. A viewBox alone: the width of the box. One side and a viewBox: the other side follows the ratio.
+        assert_eq!(h("<svg id=s>"), "width:300px;height:150px;");
+        assert_eq!(h("<svg id=s viewBox='0 0 20 10'>"), "width:100%;aspect-ratio:20/10;");
+        assert_eq!(h("<svg id=s viewBox='0,0,20,10' width=40>"), "width:40px;aspect-ratio:20/10;");
+        assert_eq!(h("<svg id=s viewBox='0 0 20 10' height=40>"), "width:80px;height:40px;aspect-ratio:20/10;");
+        // A view box with a zero side, or with text in it, is no ratio.
+        assert_eq!(h("<svg id=s viewBox='0 0 0 10' width=60>"), "width:60px;height:150px;");
+        assert_eq!(h("<svg id=s viewBox='0 0 x 10' width=60>"), "width:60px;height:150px;");
+        // The shapes give `fill` and `stroke`. A value that could end the declaration is dropped.
+        assert_eq!(h("<svg><path id=s fill=red stroke=#00f d='M0 0'>"), "fill:red;stroke:#00f;display:none;");
+        assert_eq!(h("<svg><path id=s fill='red;width:5px'>"), "display:none;");
+        // Children of an `svg` or a `g` have no box, except a `g`.
+        assert_eq!(h("<svg><g id=s fill=red>"), "fill:red;");
+        assert_eq!(h("<svg><g><text id=s>"), "display:none;");
+        // A page with no `<table>` and no `<svg>` has no hints.
+        assert!(Hints::new(&parse("<p id=s>")).is_none());
     }
 
     #[test]

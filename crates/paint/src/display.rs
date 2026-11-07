@@ -57,6 +57,8 @@ pub enum Item {
     Ring { shape: u32, color: u32 },
     /// A line of `width` pixels through `n` points from `DisplayList::points[at]`. One point is a dot.
     Stroke { at: u32, n: u32, width: f32, color: u32 },
+    /// The polygons in `DisplayList::points[at..at + n]` (contours apart by a NaN point), filled: a shape of an `<svg>`.
+    Poly { at: u32, n: u32, color: u32 },
     /// Draw nothing outside `IRect` (and outside the clips before it) until the matching `PopClip`.
     PushClip(IRect),
     PopClip,
@@ -203,7 +205,7 @@ impl DisplayList {
             page.stack |= matches!(style.get(Property::Opacity), Value::Number(o) if o < 1.0) || matches!(style.get(Property::ZIndex), Value::Number(_)) || style.get(Property::Position) == Value::Keyword(Keyword::Sticky);
             page.flex |= matches!(style.get(Property::Display), Value::Keyword(Keyword::Flex | Keyword::InlineFlex | Keyword::Grid | Keyword::InlineGrid));
         }
-        let mut b = Builder { tree, doc, frags: &layout.fragments, list: self, view, propagated, depth: 0, page, clips: Vec::new(), areas, scrolls: Vec::new() };
+        let mut b = Builder { tree, doc, frags: &layout.fragments, list: self, view, propagated, depth: 0, page, svg: if doc.has_foreign() { doc.find_atom("svg") } else { None }, clips: Vec::new(), areas, scrolls: Vec::new() };
         b.context(0);
     }
 }
@@ -224,6 +226,8 @@ struct Builder<'a> {
     propagated: NodeId,
     depth: usize,
     page: Page,
+    /// The atom of `svg`, if the page has one: the box of that element draws its shapes (`svg.rs`).
+    svg: Option<bare_html::dom::Atom>,
     /// The clips that are open now (the same as the ones of `Painter::draw`).
     clips: Vec<IRect>,
     /// The scroll containers of the page, if it scrolls.
@@ -346,6 +350,9 @@ impl Builder<'_> {
         }
         let clip = if i > 0 && clips(style) { Some(padding_box(&f, style)) } else { None };
         self.decor(&f, style, false);
+        if self.svg.is_some() {
+            self.svg_of(&f, style, i);
+        }
         // A box that clips, with its inside outside the canvas, has nothing more to show.
         let outer_view = self.view;
         if let Some(c) = clip {
@@ -674,6 +681,30 @@ impl Builder<'_> {
         self.list.shapes.push(s);
         self.list.shapes.push(s.inset(width, width, width, width));
         self.list.items.push(Item::Ring { shape, color });
+    }
+
+    /// The shapes of the box, if it is an `<svg>` that shows. Not inline: it runs for each box of a page that has an `<svg>`.
+    #[inline(never)]
+    fn svg_of(&mut self, f: &Fragment, style: &ComputedStyle, i: usize) {
+        if i > 0 && matches!(self.doc.data(f.node), NodeData::Element { name, .. } if Some(*name) == self.svg) && style.get(Property::Visibility) == Value::Keyword(Keyword::Visible) {
+            self.svg(f);
+        }
+    }
+
+    /// The shapes of an `<svg>`, clipped to its box.
+    fn svg(&mut self, f: &Fragment) {
+        let b = border_box(f);
+        if b.intersect(self.view).is_empty() {
+            return;
+        }
+        let (doc, styles, list) = (self.doc, self.tree.styles, &mut *self.list);
+        list.items.push(Item::PushClip(b));
+        crate::svg::draw(doc, styles, f.node, (b.x0 as f32, b.y0 as f32, (b.x1 - b.x0) as f32, (b.y1 - b.y0) as f32), &mut |pts, color| {
+            let at = list.points.len() as u32;
+            list.points.extend_from_slice(pts);
+            list.items.push(Item::Poly { at, n: pts.len() as u32, color });
+        });
+        list.items.push(Item::PopClip);
     }
 
     fn stroke(&mut self, points: &[(f32, f32)], width: f32, color: u32) {

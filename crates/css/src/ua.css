@@ -19,7 +19,7 @@ tfoot { display: table-footer-group }
 tr { display: table-row; vertical-align: inherit }
 thead, tbody, tfoot { vertical-align: middle }
 td, th { display: table-cell; vertical-align: inherit; padding: 1px; border-color: gray }
-button, input, select, textarea, img, video, canvas, iframe { display: inline-block }
+button, input, select, textarea, img, video, canvas, iframe, svg { display: inline-block }
 input[type=hidden i] { display: none }
 option, optgroup { display: none }
 

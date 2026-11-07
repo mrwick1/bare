@@ -515,3 +515,44 @@ fn symbols_outside_the_latin_subset_are_drawn() {
     }
     assert_eq!((clips, layers), (0, 0));
 }
+
+/// Pixels from headless Chrome 155 for `fixtures/svg-pixels.html`: ten 20 by 20 pictures side by side.
+#[test]
+fn svg_shapes_have_chromes_pixels() {
+    let c = render(fixture!("svg-pixels"));
+    let (red, blue, black) = (rgb(0xcc, 0, 0), rgb(0, 0, 0xcc), rgb(0, 0, 0));
+    // A rect fills its box, to the pixel.
+    assert_eq!([c.pixel(3, 3), c.pixel(4, 4), c.pixel(15, 15), c.pixel(16, 16)], [WHITE, red, red, WHITE]);
+    // A rect at x 4.5 covers half of the first and of the last pixel.
+    assert_eq!([c.pixel(24, 10), c.pixel(25, 10), c.pixel(35, 10), c.pixel(36, 10)], [rgb(0x7f, 0x7f, 0xe5), blue, rgb(0x7f, 0x7f, 0xe5), WHITE]);
+    // A butt line of width 2 from 2 to 18 at y 10: rows 9 and 10, pixels 2 to 17. A square cap adds one pixel at each end.
+    assert_eq!([c.pixel(41, 10), c.pixel(42, 9), c.pixel(42, 10), c.pixel(57, 10), c.pixel(58, 10), c.pixel(50, 8), c.pixel(50, 11)], [WHITE, blue, blue, blue, WHITE, WHITE, WHITE]);
+    assert_eq!([c.pixel(59, 10), c.pixel(61, 9), c.pixel(62, 9), c.pixel(77, 10)], [WHITE, blue, blue, blue]);
+    // A viewBox of 20 by 10 in 40 by 20 doubles the shapes.
+    assert_eq!([c.pixel(118, 19), c.pixel(119, 19), c.pixel(120, 5)], [red, red, WHITE]);
+    // A rule of the style sheet beats the attribute `fill`, and a `g` gives its `fill` to the shapes in it.
+    assert_eq!([c.pixel(143, 3), c.pixel(155, 12)], [rgb(0, 0xaa, 0), blue]);
+    assert_eq!([c.pixel(170, 10), c.pixel(160, 0)], [red, WHITE]);
+    // `stroke="currentColor"`: the color of the text, black here. A `fill="none"` shape has no inside.
+    assert_eq!([c.pixel(210, 1), c.pixel(210, 2), c.pixel(210, 3), c.pixel(210, 10)], [black, black, WHITE, WHITE]);
+    // The picture ends at the box of the `<svg>`: nothing below its 20 rows.
+    assert_eq!(c.pixel(10, 20), WHITE);
+}
+
+#[test]
+fn an_svg_draws_only_inside_its_box_and_hidden_ones_draw_nothing() {
+    let c = bare("<svg width=10 height=10><rect x=-5 y=-5 width=30 height=30 fill=red /></svg><svg width=10 height=10 style='visibility:hidden'><rect width=10 height=10 fill=red /></svg><svg width=10 height=10 style='display:none'><rect width=10 height=10 fill=red /></svg>");
+    // One red square of 10 by 10 at x 0: the rect that sticks out is cut, the hidden svg draws nothing and the `none` one has no box.
+    let b = ink(&c, 0, 0, 100, 100, WHITE).expect("the red square");
+    assert_eq!((b.0, b.2, b.3 - b.1), (0, 10, 10));
+    assert_eq!(ink(&c, 0, b.1, 10, b.3, rgb(255, 0, 0)), None, "all of it is red");
+}
+
+#[test]
+fn the_svg_fixture() {
+    let c = render(fixture!("svg"));
+    // The first icon: a chevron of 2 px strokes in the color of the text (#123), with round ends, in a box of 24 px at (8, 8).
+    assert!(ink(&c, 8, 8, 32, 32, WHITE).is_some());
+    // Against Chrome 155 at the same font: 1,010 of 320,000 pixels differ, 2 by more than 64 levels (the edge of a curve).
+    assert_eq!(c.hash(), 0x733e_1aff_a0f8_b851);
+}

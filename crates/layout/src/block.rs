@@ -298,6 +298,12 @@ pub(crate) fn sized_with(cx: &mut Cx, node: NodeId, space: Space, forced: Option
     let border_box = style.get(Property::BoxSizing) == Value::Keyword(Keyword::BorderBox);
     let content = |v: f32| if border_box { (v - bp.vertical()).max(0.0) } else { v };
     let height = tall.or_else(|| if plan.is_some() || sides.is_some() { None } else { resolve(cx, style.get(Property::Height), space.height).map(content) }).or(own.map(|s| s.1));
+    // `aspect-ratio` with an `auto` height: the height comes from the width, for the content box or the border box (CSS Sizing 4).
+    let by_ratio = match style.get(Property::AspectRatio) {
+        Value::Number(r) if height.is_none() && plan.is_none() && sides.is_none() => Some(content((width + if border_box { bp.horizontal() } else { 0.0 }) / r)),
+        _ => None,
+    };
+    let height = height.or(by_ratio);
     let min = resolve(cx, style.get(Property::MinHeight), space.height).map_or(0.0, content);
     let max = resolve(cx, style.get(Property::MaxHeight), space.height).map(content);
     let clamp = |h: f32| max.map_or(h, |m| h.min(m)).max(min);
@@ -420,7 +426,15 @@ pub(crate) fn sized_with(cx: &mut Cx, node: NodeId, space: Space, forced: Option
     done.content = content_height;
     // A scrollbar at the bottom is inside the height, if the box has one. Else the box grows by it.
     let natural = content_height;
-    let content_height = clamp(height.unwrap_or(content_height + gy));
+    let content_height = match by_ratio {
+        None => clamp(height.unwrap_or(content_height + gy)),
+        // A box with a ratio and `min-height: auto` is as tall as its content, unless it clips it. A flex item in a column takes its base size from `done.content`.
+        Some(r) => {
+            let grows = oy == Keyword::Visible && ox == Keyword::Visible && style.get(Property::MinHeight) == Value::Keyword(Keyword::Auto);
+            done.content = clamp(if grows { r.max(content_height + gy) } else { height.unwrap_or(content_height + gy) });
+            done.content
+        }
+    };
     // Chrome centers the content of a `<button>` in its height.
     if control == Some(crate::controls::Control::Button) && content_height > natural + gy {
         let dy = (content_height - gy - natural) / 2.0;

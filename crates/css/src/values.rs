@@ -167,6 +167,9 @@ properties! {
     BorderBottomLeftRadius => "border-bottom-left-radius",
     Appearance => "appearance",
     PointerEvents => "pointer-events",
+    AspectRatio => "aspect-ratio",
+    Fill => "fill",
+    Stroke => "stroke",
 }
 
 /// A length or a percent. The fixed units are already `Px`.
@@ -586,6 +589,21 @@ fn expand(name: &str, parts: &Parts, emit: &mut dyn FnMut(Property, Value)) -> b
             let end = slice.iter().position(|p| matches!(p, Part::Slash)).unwrap_or(slice.len());
             sides(&slice[..end], [BorderTopLeftRadius, BorderTopRightRadius, BorderBottomRightRadius, BorderBottomLeftRadius], emit)
         }
+        // `auto`, `<w> / <h>` or both words. The value is `auto` or the ratio as a number. A ratio with a 0 is `auto` (CSS Sizing 4).
+        "aspect-ratio" => {
+            let ratio = match *slice {
+                [Part::Keyword(Keyword::Auto), ref rest @ ..] | [ref rest @ .., Part::Keyword(Keyword::Auto)] if !rest.is_empty() => rest,
+                ref all => all,
+            };
+            let value = match *ratio {
+                [Part::Keyword(Keyword::Auto)] => 0.0,
+                [Part::Number { value: w, .. }] if w >= 0.0 => w,
+                [Part::Number { value: w, .. }, Part::Slash, Part::Number { value: h, .. }] if w >= 0.0 && h >= 0.0 => if h == 0.0 { 0.0 } else { w / h },
+                _ => return false,
+            };
+            emit(AspectRatio, if value > 0.0 && value.is_finite() { Value::Number(value) } else { Value::Keyword(Keyword::Auto) });
+            true
+        }
         "background" => background(slice, emit),
         "font" => font(slice, emit),
         "list-style" => match slice {
@@ -910,6 +928,14 @@ fn longhand(property: Property, part: Part) -> Option<Value> {
         AlignSelf => one_of(part, &[K::Auto, K::Normal, K::Stretch, K::FlexStart, K::FlexEnd, K::Center, K::Baseline, K::LastBaseline, K::Start, K::End, K::SelfStart, K::SelfEnd]),
         JustifyItems => one_of(part, &[K::Normal, K::Stretch, K::FlexStart, K::FlexEnd, K::Center, K::Baseline, K::LastBaseline, K::Start, K::End, K::SelfStart, K::SelfEnd, K::Left, K::Right]),
         JustifySelf => one_of(part, &[K::Auto, K::Normal, K::Stretch, K::FlexStart, K::FlexEnd, K::Center, K::Baseline, K::LastBaseline, K::Start, K::End, K::SelfStart, K::SelfEnd, K::Left, K::Right]),
+        // A ratio has more than one part: `expand` reads it.
+        AspectRatio => Option::None,
+        // The paint of an SVG shape: a color or `none`. A paint server (`url(#a)`) is not built, so it is not good.
+        Fill | Stroke => match part {
+            Part::Color(c) => Some(Value::Color(c)),
+            Part::Keyword(k @ (K::None | K::CurrentColor)) => Some(Value::Keyword(k)),
+            _ => Option::None,
+        },
         // These are read as text (`grid.rs`), and never come here.
         GridTemplateColumns | GridTemplateRows | GridTemplateAreas | GridAutoColumns | GridAutoRows | GridAutoFlow | GridRowStart | GridRowEnd | GridColumnStart | GridColumnEnd => Option::None,
         RowGap | ColumnGap => match part {
@@ -1184,6 +1210,14 @@ mod tests {
         assert_eq!(parse("justify-content", "safe center"), vec![(JustifyContent, k(K::Center))]);
         assert_eq!(parse("order", "-2"), vec![(Order, n(-2.0))]);
         assert_eq!(parse("order", "1.5"), vec![]);
+        assert_eq!(parse("aspect-ratio", "5 / 2"), vec![(AspectRatio, n(2.5))]);
+        assert_eq!(parse("aspect-ratio", "auto 4/1"), vec![(AspectRatio, n(4.0))]);
+        assert_eq!(parse("aspect-ratio", "2 auto"), vec![(AspectRatio, n(2.0))]);
+        assert_eq!(parse("aspect-ratio", "auto"), vec![(AspectRatio, k(K::Auto))]);
+        assert_eq!(parse("aspect-ratio", "0 / 1"), vec![(AspectRatio, k(K::Auto))]);
+        assert_eq!(parse("aspect-ratio", "1 / 0"), vec![(AspectRatio, k(K::Auto))]);
+        assert_eq!(parse("aspect-ratio", "-1"), vec![]);
+        assert_eq!(parse("aspect-ratio", "1 / 2 / 3"), vec![]);
         assert_eq!(parse("align-self", "space-between"), vec![]);
     }
 

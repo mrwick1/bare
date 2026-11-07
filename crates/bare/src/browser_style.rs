@@ -144,14 +144,15 @@ fn camel(css: &str) -> String {
 
 /// The IDL attribute names of one property.
 pub(crate) fn keys_of(css: &str) -> Vec<String> {
+    // At most 3 names, so that no push grows the list: this runs for every property when a page starts.
+    let mut keys = Vec::with_capacity(3);
     let camel = camel(css);
-    let mut keys = vec![camel.clone()];
+    let webkit = css.starts_with("-webkit-").then(|| format!("w{}", &camel[1..]));
+    keys.push(camel);
     if css.contains('-') {
         keys.push(css.to_string());
     }
-    if css.starts_with("-webkit-") {
-        keys.push(format!("w{}", &camel[1..]));
-    }
+    keys.extend(webkit);
     if css == "float" {
         keys.push("cssFloat".to_string());
     }
