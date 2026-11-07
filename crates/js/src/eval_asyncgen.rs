@@ -226,6 +226,7 @@ impl<'p> Interp<'p> {
     }
 
     /// The end of a machine run of an async generator (from `async_finish`).
+    #[inline(never)]
     fn ag_after(&mut self, mut run: Run, mut r: Res<Out>) -> Res<()> {
         let g = run.result;
         loop {
@@ -427,6 +428,99 @@ impl<'p> Interp<'p> {
         }
     }
 
+    // ---- the machine frames, kept out of the hot `deliver` and `unwind` of `eval_async.rs`
+
+    /// `yield` (`delegate` false) or `yield*` of the value `v` in an async generator. A plain `yield` awaits `v` first.
+    #[inline(never)]
+    fn ag_yield(&mut self, run: &mut Run, delegate: bool, base: u32, v: Value) -> Res<Step> {
+        if delegate {
+            let it = self.aiter_open(v)?;
+            self.spush(run, Slot::It(it))?;
+            return self.adeleg_send(run, base, GenHow::Next(Value::Undefined));
+        }
+        self.fpush(run, Fr::AYield)?;
+        self.await_value(v)
+    }
+
+    /// The value `v` reached the frame `fr` of an async generator or a `for await`.
+    #[inline(never)]
+    fn ag_deliver(&mut self, run: &mut Run, fr: Fr, v: Value) -> Res<Step> {
+        let not_object = |it: &mut Self| {
+            let t = it.display(v);
+            Err(it.type_err(&format!("Iterator result {t} is not an object")))
+        };
+        match fr {
+            Fr::Deleg { base } => self.adeleg_send(run, base, GenHow::Next(v)),
+            Fr::Ret => {
+                self.fpush(run, Fr::ARet)?;
+                self.await_value(v)
+            }
+            Fr::AYield => Ok(Step::Out(Out::Yield(v, false))),
+            Fr::ARet => nx(Next::Abr(Abr::Return(v))),
+            Fr::ADeleg { base, ret } => self.adeleg_result(run, base, ret, v),
+            Fr::ADelegClose { base } => {
+                self.strunc(run, base as usize);
+                if !matches!(v, Value::Object(_)) {
+                    return not_object(self);
+                }
+                Err(self.type_err("The iterator does not provide a 'throw' method"))
+            }
+            Fr::AOfN { s, lb, base } => self.aof_result(run, s, lb, base, v),
+            Fr::AOfB { s, lb, base } => self.aof_next(run, s, lb, base),
+            Fr::AClose { kind, label, base } => {
+                let held = if kind >= 3 { sval(run, base as usize) } else { Value::Undefined };
+                self.strunc(run, base as usize);
+                if kind == 4 {
+                    return nx(Next::Abr(Abr::Throw(held)));
+                }
+                if !matches!(v, Value::Object(_)) {
+                    return not_object(self);
+                }
+                match kind {
+                    0 => val(Value::Undefined),
+                    1 => nx(Next::Abr(Abr::Break(label))),
+                    2 => nx(Next::Abr(Abr::Continue(label))),
+                    _ => nx(Next::Abr(Abr::Return(held))),
+                }
+            }
+            _ => Err(unsupported("async machine", Span::default())),
+        }
+    }
+
+    /// The completion `abr` unwinds through the frame `fr` of an async generator or a `for await`. `None`: go on.
+    #[inline(never)]
+    fn ag_unwind(&mut self, run: &mut Run, fr: Fr, abr: Abr) -> Res<Option<Step>> {
+        match fr {
+            Fr::Deleg { base } => match abr {
+                Abr::Throw(v) => return self.adeleg_send(run, base, GenHow::Throw(v)).map(Some),
+                Abr::Return(v) => return self.adeleg_send(run, base, GenHow::Return(v)).map(Some),
+                _ => self.strunc(run, base as usize),
+            },
+            Fr::ADeleg { base, .. } | Fr::ADelegClose { base } => self.strunc(run, base as usize),
+            Fr::AOfB { s, lb, base } => {
+                if matches!(abr, Abr::Continue(l) if lb.has(l)) {
+                    return self.aof_next(run, s, lb, base).map(Some);
+                }
+                if let Some(step) = self.aof_close(run, lb, base, abr)? {
+                    return Ok(Some(step));
+                }
+                if matches!(abr, Abr::Break(l) if lb.has(l)) {
+                    return val(Value::Undefined).map(Some);
+                }
+            }
+            Fr::AClose { kind, base, .. } => {
+                // The await of the result of `return` failed: a throw that closed the loop wins.
+                let held = if kind >= 3 { sval(run, base as usize) } else { Value::Undefined };
+                self.strunc(run, base as usize);
+                if kind == 4 {
+                    return nx(Next::Abr(Abr::Throw(held))).map(Some);
+                }
+            }
+            _ => {}
+        }
+        Ok(None)
+    }
+
     // ---- async yield*
 
     /// Send the received value or completion `how` to the inner iteration of an async `yield*` (slot `base`).
@@ -504,7 +598,17 @@ impl<'p> Interp<'p> {
 
     // ---- for await
 
-    /// Call `next` of the `for await` iteration in slot `base` and await its result.
+    /// Start a `for await` over the value `v` of its right side.
+    #[inline(never)]
+    fn aof_start(&mut self, run: &mut Run, s: StmtId, lb: Lbl, v: Value) -> Res<Step> {
+        let (outer, base) = (self.env, run.slots.len() as u32);
+        let it = self.aiter_open(v)?;
+        self.spush(run, Slot::It(it))?;
+        self.fpush(run, Fr::OfScope { outer, cur: NONE, base })?;
+        self.aof_next(run, s, lb, base)
+    }
+
+        /// Call `next` of the `for await` iteration in slot `base` and await its result.
     fn aof_next(&mut self, run: &mut Run, s: StmtId, lb: Lbl, base: u32) -> Res<Step> {
         self.tick()?;
         let Slot::It(it) = run.slots[base as usize] else { return Err(unsupported("for await", Span::default())) };

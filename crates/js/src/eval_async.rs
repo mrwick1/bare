@@ -1065,10 +1065,7 @@ impl<'p> Interp<'p> {
         match ex.kind {
             ExprKind::Paren(i) => nx(Next::Eval(i)),
             ExprKind::Await(a) | ExprKind::Unary { arg: a, .. } | ExprKind::Yield { arg: Some(a), .. } => self.ask(run, e, 0, base, a),
-            ExprKind::Yield { arg: None, .. } if run.agen => {
-                self.fpush(run, Fr::AYield)?;
-                Ok(Step::Out(Out::Ready(Value::Undefined)))
-            }
+            ExprKind::Yield { arg: None, .. } if run.agen => self.ag_yield(run, false, 0, Value::Undefined),
             ExprKind::Yield { arg: None, .. } => Ok(Step::Out(Out::Yield(Value::Undefined, false))),
             ExprKind::Binary { left, .. } | ExprKind::Logical { left, .. } => self.ask(run, e, 0, base, left),
             ExprKind::Cond { test, .. } => self.ask(run, e, 0, base, test),
@@ -1291,16 +1288,8 @@ impl<'p> Interp<'p> {
         let b = base as usize;
         match ex.kind {
             ExprKind::Await(_) => self.await_value(v),
-            ExprKind::Yield { delegate: false, .. } if run.agen => {
-                self.fpush(run, Fr::AYield)?;
-                self.await_value(v)
-            }
+            ExprKind::Yield { delegate, .. } if run.agen => self.ag_yield(run, delegate, base, v),
             ExprKind::Yield { delegate: false, .. } => Ok(Step::Out(Out::Yield(v, false))),
-            ExprKind::Yield { delegate: true, .. } if run.agen => {
-                let it = self.aiter_open(v)?;
-                self.spush(run, Slot::It(it))?;
-                self.adeleg_send(run, base, GenHow::Next(Value::Undefined))
-            }
             ExprKind::Yield { delegate: true, .. } => {
                 let it = self.iter_start_val(v)?;
                 self.spush(run, Slot::It(it))?;
@@ -1870,43 +1859,10 @@ impl<'p> Interp<'p> {
                 r => r,
             },
             Fr::Discard => val(Value::Undefined),
-            Fr::Deleg { base } if run.agen => self.adeleg_send(run, base, GenHow::Next(v)),
+            Fr::Deleg { .. } | Fr::Ret if run.agen => self.ag_deliver(run, fr, v),
             Fr::Deleg { base } => self.deleg_step(run, base, GenHow::Next(v)),
-            Fr::Ret if run.agen => {
-                self.fpush(run, Fr::ARet)?;
-                self.await_value(v)
-            }
             Fr::Ret => nx(Next::Abr(Abr::Return(v))),
-            Fr::AYield => Ok(Step::Out(Out::Yield(v, false))),
-            Fr::ARet => nx(Next::Abr(Abr::Return(v))),
-            Fr::ADeleg { base, ret } => self.adeleg_result(run, base, ret, v),
-            Fr::ADelegClose { base } => {
-                self.strunc(run, base as usize);
-                if !matches!(v, Value::Object(_)) {
-                    let t = self.display(v);
-                    return Err(self.type_err(&format!("Iterator result {t} is not an object")));
-                }
-                Err(self.type_err("The iterator does not provide a 'throw' method"))
-            }
-            Fr::AOfN { s, lb, base } => self.aof_result(run, s, lb, base, v),
-            Fr::AOfB { s, lb, base } => self.aof_next(run, s, lb, base),
-            Fr::AClose { kind, label, base } => {
-                let held = if kind >= 3 { sval(run, base as usize) } else { Value::Undefined };
-                self.strunc(run, base as usize);
-                if kind == 4 {
-                    return nx(Next::Abr(Abr::Throw(held)));
-                }
-                if !matches!(v, Value::Object(_)) {
-                    let t = self.display(v);
-                    return Err(self.type_err(&format!("Iterator result {t} is not an object")));
-                }
-                match kind {
-                    0 => val(Value::Undefined),
-                    1 => nx(Next::Abr(Abr::Break(label))),
-                    2 => nx(Next::Abr(Abr::Continue(label))),
-                    _ => nx(Next::Abr(Abr::Return(held))),
-                }
-            }
+            Fr::AYield | Fr::ARet | Fr::ADeleg { .. } | Fr::ADelegClose { .. } | Fr::AOfN { .. } | Fr::AOfB { .. } | Fr::AClose { .. } => self.ag_deliver(run, fr, v),
             Fr::Thr => nx(Next::Abr(Abr::Throw(v))),
             Fr::List { l, i } => self.list_from(run, l, i as usize),
             Fr::Scope { saved, env } => {
@@ -1970,11 +1926,13 @@ impl<'p> Interp<'p> {
                 let (_, _, right) = self.of_target(s)?;
                 let outer = self.env;
                 let base = run.slots.len() as u32;
-                let is_await = matches!(self.prog.stmt(s).kind, StmtKind::ForOf { is_await: true, .. });
-                let it = if is_await { self.aiter_open(v)? } else { self.iter_start(v, right)? };
+                if matches!(self.prog.stmt(s).kind, StmtKind::ForOf { is_await: true, .. }) {
+                    return self.aof_start(run, s, lb, v);
+                }
+                let it = self.iter_start(v, right)?;
                 self.spush(run, Slot::It(it))?;
                 self.fpush(run, Fr::OfScope { outer, cur: NONE, base })?;
-                if is_await { self.aof_next(run, s, lb, base) } else { self.of_iter(run, s, lb, base) }
+                self.of_iter(run, s, lb, base)
             }
             Fr::OfScope { outer, cur, base } => {
                 self.env = outer;
@@ -2136,29 +2094,14 @@ impl<'p> Interp<'p> {
                     }
                 }
                 Fr::Fin { base, .. } => self.strunc(run, base as usize),
-                Fr::Deleg { base } if run.agen => match abr {
-                    Abr::Throw(v) => return self.adeleg_send(run, base, GenHow::Throw(v)),
-                    Abr::Return(v) => return self.adeleg_send(run, base, GenHow::Return(v)),
-                    _ => self.strunc(run, base as usize),
-                },
-                Fr::ADeleg { base, .. } | Fr::ADelegClose { base } => self.strunc(run, base as usize),
-                Fr::AOfB { s, lb, base } => {
-                    if matches!(abr, Abr::Continue(l) if lb.has(l)) {
-                        return self.aof_next(run, s, lb, base);
-                    }
-                    if let Some(step) = self.aof_close(run, lb, base, abr)? {
+                Fr::Deleg { .. } if run.agen => {
+                    if let Some(step) = self.ag_unwind(run, fr, abr)? {
                         return Ok(step);
                     }
-                    if matches!(abr, Abr::Break(l) if lb.has(l)) {
-                        return val(Value::Undefined);
-                    }
                 }
-                Fr::AClose { kind, base, .. } => {
-                    // The await of the result of `return` failed: a throw that closed the loop wins.
-                    let held = if kind >= 3 { sval(run, base as usize) } else { Value::Undefined };
-                    self.strunc(run, base as usize);
-                    if kind == 4 {
-                        return nx(Next::Abr(Abr::Throw(held)));
+                Fr::ADeleg { .. } | Fr::ADelegClose { .. } | Fr::AOfB { .. } | Fr::AClose { .. } => {
+                    if let Some(step) = self.ag_unwind(run, fr, abr)? {
+                        return Ok(step);
                     }
                 }
                 Fr::Deleg { base } => match abr {
