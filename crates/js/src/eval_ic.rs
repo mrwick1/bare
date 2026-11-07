@@ -45,6 +45,25 @@ impl Interp<'_> {
         IcCounts { reads: s.own_hits + s.slow, own_hits: s.own_hits, first_runs: s.first_runs, entries: s.ics.len() - 2, store_hits: s.store_hits, heap: self.heap.ic_stats() }
     }
 
+    /// After a shape sweep (step A6) the live shapes have new ids, so every entry and every literal site shape is stale: reset them.
+    /// A literal site runs its first run again. A table of entries of the bytecode code (step B3) must be reset here too.
+    #[inline(never)]
+    fn reset_caches(&mut self) {
+        self.ics.ics.fill(Ic::EMPTY);
+        self.px.ics = [[Ic::EMPTY; 4]; 13];
+        fn literals(prog: &Program<'_>, names: &mut [u32]) {
+            for (n, ex) in names.iter_mut().zip(&prog.exprs) {
+                if *n > 1 && matches!(ex.kind, ExprKind::Object(_)) {
+                    *n = 0;
+                }
+            }
+        }
+        literals(&self.prog, &mut self.expr_name);
+        for c in &mut self.scripts {
+            literals(&c.prog, &mut c.expr_name);
+        }
+    }
+
     /// `get_prop` at a native site that reads the same few shapes again and again with no entry of its own (option bags, iterator
     /// results, the holders of a reviver, `Symbol.toPrimitive`): the entry of the heap's stub table (`Heap::get_stub`).
     fn get_prop_nat(&mut self, v: Value, key: PropertyKey) -> Res<Value> {
