@@ -517,7 +517,8 @@ impl<'p> Interp<'p> {
         let me = fid.index();
         self.scopes[me].fr = FR_ENV;
         let lo = self.scopes[me].sc_lo as usize;
-        let hi = lo + self.sc_all[lo..].iter().take_while(|r| r.func as usize == me).count();
+        // `func` is an index in the function table of one script. The scopes of the next script follow the last function, and its root can have the same index.
+        let hi = lo + self.sc_all[lo..].iter().take_while(|r| r.func as usize == me && !matches!(r.kind, RKind::Root)).count();
         let prog = self.prog.clone();
         let f = *prog.func(fid);
         let mut pool = std::mem::take(&mut self.fr_pool);

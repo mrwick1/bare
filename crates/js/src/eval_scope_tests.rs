@@ -303,6 +303,23 @@ fn a_call_that_comes_back_into_a_function_during_its_first_call_still_works() {
 }
 
 #[test]
+fn the_scopes_of_the_last_function_of_a_script_end_where_the_next_script_starts() {
+    // `f` is the last thing that script 1 walks, and script 2 has no function but has blocks. The scopes of script 2 have the same function
+    // index as `f`, and they follow the scopes of `f` in `sc_all`: the layout of `f` must not take them.
+    big(|| {
+        let mut it = Interp::realm(Heap::default(), EvalLimits::default()).unwrap();
+        for (src, want) in [
+            ("function f(a) { return a * 2 }", "undefined"),
+            ("{ let a = 1; { let b = 2; { let c = 3; c } } }", "3"),
+            ("[f(1), f(2), f(3)].join()", "2,4,6"),
+        ] {
+            let r = it.run_script(src);
+            assert_eq!(show(&mut it, r), want, "{src}");
+        }
+    });
+}
+
+#[test]
 fn a_site_that_runs_twice_in_the_first_call_does_not_resolve_for_the_environment() {
     // `typeof v` reads its site twice in one call, `v += 1` and `v++` read and write it, and a function without a loop or a call
     // gets its frame at the second call.
