@@ -358,6 +358,7 @@ impl Dom {
     }
 
     fn has_listener(&self, n: NodeId, ty: &str) -> bool {
+        crate::browser_handlers::sync(self, Target::Node(n), ty);
         self.st.borrow().listeners.get(&Target::Node(n)).is_some_and(|v| v.iter().any(|l| *l.ty == *ty))
     }
 

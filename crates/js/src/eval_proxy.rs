@@ -338,9 +338,9 @@ impl<'p> Interp<'p> {
 
     #[inline(always)]
     fn o_has_property(&mut self, o: ObjId, key: PropertyKey) -> Res<bool> {
-        match self.heap.has_property(o, key) {
+        match self.heap.has_property_lazy(o, key) {
             Ok(v) => Ok(v),
-            Err(e) => self.heap_miss(e, |s| s.heap.has_property(o, key), |s| s.o_has_slow(o, key)),
+            Err(e) => self.heap_miss(e, |s| s.heap.has_property_lazy(o, key), |s| s.o_has_slow(o, key)),
         }
     }
 

@@ -1362,3 +1362,43 @@ Deviations from Chrome (also in the header of `browser_custom.rs`):
 Cost: `tools/js/instr.sh` method (`instructions:u`, minimum of 3, large malloc cache), release, origin/main 3018876 against this change, each in its own `CARGO_TARGET_DIR`. 178 rows of the `bare` examples at scale 1 and 10, and 28 rows of `class_load` and `eval_load` of `bare_js`. The `bare_js` rows are within -0.011% and +0.008%. One `bare` row is over +0.5%: `resources_load largechunk 10` (+0.542%). It runs no custom element code, and three more runs per side overlap (26.66 M to 26.80 M for main, 26.70 M to 26.80 M for this change), so it is noise. The next rows are `style_load shown 10` (+0.446%), `observer_load raf 10` (+0.399%) and `raf 1` (+0.380%). With jemalloc the same rows are +0.265%, +0.384% and +0.371%. 14 of 178 rows are over +0.25%. Hypothesis: the small rise comes from the `Cell` read in `Host::call` and the check in `wrap`; it was not isolated.
 
 Not tested: a real Web Components library (Lit, Stencil) or a live page; `formAssociated` elements and `ElementInternals`; `attachShadow` inside a constructor with a real page; custom elements inside an iframe document; the two limits (no test reaches 65,536 definitions or 1,048,576 reactions); `tools/js/*_check.sh` (they need Chrome or Node modules); `type_load`; `scroll_load`.
+
+## Event handlers: `on*` properties and content attributes
+
+The HTML Standard "event handlers" are built to the numbers of Chrome 155. `crates/bare/src/browser_handlers.rs` (host), `browser_error_event.rs`, `browser_events.rs`, and the heap and evaluator of `crates/js` changed.
+
+Change:
+- Properties: all `GlobalEventHandlers` names are accessors on `HTMLElement.prototype` (102), `SVGElement.prototype`, `Document.prototype` (117) and the global object (125). The 24 window names are also on `<body>` and `<frameset>`, and they read and write the handler of `window`. A handler is one listener slot. A replace keeps the position. `null` removes it.
+- Lazy accessors: nothing is defined at start. A miss of an `on<name>` key reaches `EventTarget.prototype` and asks the host once per name (`Heap::set_lazy_chain`, `lazy_ask_name`). The owners ask for their own queries (`set_lazy_on`). The host then defines that name on all owners that have it. `Object.keys` asks once per owner for all names.
+- Content attributes: `onclick="..."` and `setAttribute`. The document name table only grows, so the host scans the names added since the last scan for `on<known name>` (`Hd::atoms`). `Document::has_on_name` is one flag: a page with no `on*` name pays one flag test per dispatch and per accessor call. A slot compiles when it is read or when its turn comes (`Interp::compile_function`). A removed attribute clears the slot. A compile error gives a window `error` event and a null handler.
+- Scope: element, form owner, document, then the globals (`Interp::call_scoped`). `event` is the parameter (`evt` on SVG). `this` is the element. A window handler has no scope object.
+- Dispatch: `false` cancels, except for `beforeunload`. The window `error` handler gets 5 arguments for an `ErrorEvent`, and `true` cancels. `ErrorEvent` is a new lazy interface. `Dom::report` makes it for an uncaught exception.
+- Other interfaces: `AbortSignal.onabort` is kept; `MediaQueryList.onchange` and `MessagePort.onmessage` keep their own code.
+
+Check:
+- `tools/fixtures/ui/handlers-cases.txt`: 82 cases compared with headless Chrome 155 (`chrome-handlers.txt`, `node tools/ui/chrome_topic.mjs handlers`). The test `chrome_cases` runs them.
+- 23 handler tests in `browser_handler_tests.rs`, 4 engine tests in `eval_scripts_tests.rs`. `cargo test --workspace --release`: 2704 passed, 0 failed.
+
+Cost (`tools/js/instr.sh`, `instructions:u`, minimum of 3, origin/main e164721 against this change, release, each in its own `CARGO_TARGET_DIR`): 72 rows of the `browser_load`, `handler_load`, `form_load`, `focus_load`, `loader_load`, `selection_load`, `scheduler_load`, `platform_load`, `observer_load`, `attr_load`, `fragment_load`, `nodelist_load` and `web_apis_load` examples at scale 1 and 10. The change is -0.33% to +0.70%.
+
+| row | main | this change | change |
+| --- | ---: | ----------: | -----: |
+| `handler_load 1` | 40,341,153 | 40,625,207 | +0.70% |
+| `handler_load 1` (jemalloc) | 43,786,928 | 44,075,017 | +0.66% |
+| `handler_load 10` | 421,077,798 | 423,442,422 | +0.56% |
+| `handler_load 10` (jemalloc) | 426,783,606 | 429,069,820 | +0.54% |
+
+- Two rows are over the +0.5% limit, both `handler_load`. They call the `oninput` and `onchange` accessors about 700 times per 1000 operations, and each call now finds its name from the function id and tests the attribute flag. The cost is about 230 instructions per operation and it is not heap noise (jemalloc agrees). All other rows are at most +0.45%.
+- Earlier builds were worse. A per-level flag test in `Heap::lookup`, in `has_property` and in `get_global` cost 0.2% to 0.7% on engine rows. Each hook was moved to a place the hot loops do not run: the lazy test of `lookup` is the existing `prototype` flag byte, the scope check of `get_global` sits after the fast path, and the ask hangs on one object (`EventTarget.prototype`).
+- A profile with `perf` cannot resolve a change under 0.2%, so the steps above were found by experiments with `instr.sh`.
+
+Gaps (Chrome differs):
+- `hasOwnProperty('onclick')` on an owner has no ask when nothing else asked for that name first.
+- `Function.prototype.toString` of a compiled handler has no source. `Event.returnValue` and the `Event` toStringTag are not built.
+- An attribute change made by a listener during a dispatch reaches the next dispatch, not the current one.
+- A global `let` or `const` wins over the scope object. A function that runs after the handler returned does not see the scope. A handler function moved to another element runs with the scope of the element that dispatches.
+- The parser does not merge the attributes of a second `<body>` tag. `HTMLElement.title`, `form.elements` and named form members are not built, so `form.foo` in a handler scope has no match.
+- No `MathMLElement`. The 8 names of `Element.prototype` (`onsearch`, `onfullscreenchange`, ...) are not defined. `MessagePort.onmessageerror` is missing. No `on*` on `FileReader`, `WebSocket`, `Animation`, `Worker`, `EventSource`, `BroadcastChannel`, `Notification`, `ScreenOrientation`, `VisualViewport`, `FontFaceSet`, `TextTrack`, `IDBRequest`, `Performance` and `MediaRecorder` (they do not exist here or have their own code).
+- `lineno` and `colno` of an `ErrorEvent` are 0, and `filename` is empty. The earlier note that "no event handler property exists" (selection section) is out of date.
+
+Not tested: pages from the real web with many handler attributes; memory (RSS) of a page that sets many handlers; handlers on `<frameset>` pages (no frameset parser); `beforeunload` return values (no page leaves); the rows at scale 100; other machines.

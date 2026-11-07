@@ -3,10 +3,13 @@
 //! ("callback function types", "nullable types" with `[LegacyTreatNonObjectAsNull]`), read by hand. Nothing was compared with Chrome.
 
 use crate::browser::*;
+use crate::browser_topic_tests::topic_test;
 use bare_html::tree;
 use bare_js::eval::{Error, EvalLimits, LimitKind};
 use bare_js::heap::HeapLimits;
 use bare_js::value::Value;
+
+topic_test!(chrome_cases, "handlers", 82);
 
 const PAGE: &str = "<!doctype html><html><body><div id=d><input id=i type=text></div><svg id=s></svg><math id=m></math></body></html>";
 
@@ -333,4 +336,67 @@ fn replacing_or_deleting_the_global_interfaces_does_not_remove_the_accessors() {
         b.collect(&[]).unwrap();
         assert_eq!(js(&mut b, "log = []; i.dispatchEvent(new Event('input')); log.join()"), "h");
     });
+}
+
+fn page(html: &str) -> Browser {
+    Browser::new(tree::parse(html), BrowserLimits::default(), EvalLimits { max_steps: 5_000_000, ..Default::default() }, HeapLimits::default()).expect("browser")
+}
+
+fn run(b: &mut Browser, src: &str) -> String {
+    let r = b.run_script(src);
+    show(b, r)
+}
+
+#[test]
+fn body_attribute_in_the_page_is_the_window_handler() {
+    let mut b = page("<!doctype html><html><body onload=\"log.push('load:' + (this === window) + ':' + event.type)\" onresize=\"log.push('rs')\"><p id=p onclick=\"log.push('p')\">x</p></body></html>");
+    assert_eq!(run(&mut b, "var log = []; [typeof window.onload, typeof document.body.onresize, window.onload === document.body.onload].join()"), "function,function,true");
+    assert_eq!(run(&mut b, "window.dispatchEvent(new Event('load')); window.dispatchEvent(new Event('resize')); document.getElementById('p').click(); log.join('|')"), "load:true:load|rs|p");
+}
+
+#[test]
+fn an_attribute_cannot_close_the_function() {
+    let mut b = page("<!doctype html><body><div id=a></div></body>");
+    let r = run(
+        &mut b,
+        "var log = []; window.addEventListener('error', function (e) { log.push(e.error.name) }); var a = document.getElementById('a');
+         a.setAttribute('onclick', \"}); window.hacked = 1; (function () {\"); a.click();
+         a.setAttribute('onclick', \"}, function () { window.hacked = 2\"); a.click(); log.join() + ':' + typeof window.hacked",
+    );
+    assert_eq!(r, "SyntaxError,SyntaxError:undefined");
+}
+
+#[test]
+fn the_accessors_are_made_by_use() {
+    let mut b = page("<!doctype html><body><div id=a></div></body>");
+    // Nothing is defined until a name is asked for: one name costs eight host functions (getter and setter on window, document, HTML elements and SVG elements).
+    run(&mut b, "document.getElementById('a')");
+    let n0 = b.dom.handlers.borrow().len();
+    assert_eq!(run(&mut b, "typeof document.getElementById('a').onclick"), "object");
+    assert_eq!(b.dom.handlers.borrow().len() - n0, 8);
+    assert_eq!(run(&mut b, "document.getElementById('a').onclick = function () {}; typeof document.getElementById('a').onclick"), "function");
+    assert_eq!(b.dom.handlers.borrow().len() - n0, 8);
+    assert_eq!(run(&mut b, "var d = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'onclick'); typeof d.get + typeof d.set + d.enumerable + d.configurable"), "functionfunctiontruetrue");
+    assert_eq!(b.dom.handlers.borrow().len() - n0, 8);
+    // The whole list on demand.
+    assert_eq!(run(&mut b, "Object.keys(window).filter(function (n) { return /^on/.test(n) }).length > 100"), "true");
+    // A name that is not a handler stays an expando.
+    assert_eq!(run(&mut b, "var a = document.getElementById('a'); a.onfoo = 5; a.onfoo + ':' + ('onfoo' in a) + ':' + a.hasOwnProperty('onfoo')"), "5:true:true");
+}
+
+#[test]
+fn many_elements_share_one_parsed_attribute() {
+    let mut html = String::from("<!doctype html><body>");
+    for i in 0..300 {
+        html += &format!("<button id=b{i} onclick=\"log.push({i})\">x</button>");
+    }
+    let mut b = page(&html);
+    assert_eq!(run(&mut b, "var log = []; for (var i = 0; i < 300; i++) document.getElementById('b' + i).click(); log.length + ':' + log[299]"), "300:299");
+}
+
+#[test]
+fn handler_scope_only_reaches_the_handler_code() {
+    let mut b = page("<!doctype html><body><form id=f><input name=n value=1><button id=b type=button onclick=\"outside()\">x</button></form></body>");
+    let r = run(&mut b, "var log = []; function outside() { try { log.push(typeof n) } catch (e) { log.push('x') } } document.getElementById('b').click(); log.join()");
+    assert_eq!(r, "undefined");
 }

@@ -528,6 +528,8 @@ pub struct Interp<'p> {
     prog: Rc<Program<'static>>,
     cur: usize,
     scripts: Vec<Code>,
+    /// Event handler attributes (`compile_function`): the objects that come before the global object in name lookups, while one runs.
+    hs: Box<HScope>,
     script_source: usize,
     script_nodes: usize,
     _p: PhantomData<&'p ()>,
@@ -717,6 +719,7 @@ impl<'p> Interp<'p> {
         let mut it = Interp {
             cur: 0,
             scripts: vec![Code::placeholder(&prog)],
+            hs: Box::default(),
             script_source: prog.source.len(),
             script_nodes: stats.nodes() + stats.list_items,
             _p: PhantomData,
@@ -866,6 +869,7 @@ impl<'p> Interp<'p> {
         let mut v = vec![Value::Object(self.global), Value::Object(self.object_proto), Value::Object(self.function_proto), Value::Object(self.array_proto), self.ret, self.completion];
         v.extend(self.error_protos.iter().map(|&o| Value::Object(o)));
         v.extend(self.host_nt.map(Value::Object));
+        v.extend(self.hs.scope.iter().map(|&o| Value::Object(o)));
         self.ext_roots(&mut v);
         for k in [self.k_length, self.k_name, self.k_message, self.k_prototype, self.k_constructor, self.k_to_string, self.k_value_of, self.k_proto, self.k_value, self.k_writable, self.k_enumerable, self.k_configurable, self.k_get, self.k_set, self.k_stack] {
             if let PropertyKey::String(s) = k {
@@ -2562,6 +2566,10 @@ impl<'p> Interp<'p> {
         {
             return Ok(v);
         }
+        // `call_scoped` makes the hint above fail, so this check is not on the fast path.
+        if !self.hs.scope.is_empty() && let Some(o) = self.hscope_find(n)? {
+            return self.hscope_get(o, n);
+        }
         let key = self.name_key(n)?;
         match hx!(self, self.heap.lookup(self.global, key)) {
             Some((holder, Property::Data { value, .. })) => {
@@ -2613,6 +2621,10 @@ impl<'p> Interp<'p> {
             && self.heap.set_own_data_at(self.global, self.name_gpos[n as usize], PropertyKey::String(s), v)
         {
             return Ok(());
+        }
+        if !self.hs.scope.is_empty() && let Some(o) = self.hscope_find(n)? {
+            let key = self.name_key(n)?;
+            return self.put_prop(Value::Object(o), key, v);
         }
         let key = self.name_key(n)?;
         if self.strict && !hx!(self, self.heap.has_property(self.global, key)) {
@@ -3025,7 +3037,7 @@ impl<'p> Interp<'p> {
                     let n = self.expr_name[a.index()];
                     if self.find_name(n, a.index() as u32).is_none() {
                         let key = self.name_key(n)?;
-                        if !hx!(self, self.heap.has_property(self.global, key)) {
+                        if !hx!(self, self.heap.has_property_lazy(self.global, key)) && (self.hs.scope.is_empty() || self.hscope_find(n)?.is_none()) {
                             let s = h!(self, self.heap.intern_str("undefined"));
                             return Ok(Value::String(s));
                         }

@@ -296,3 +296,79 @@ fn per_script_lexer_source_cap_is_a_limit() {
         assert_eq!(it.stats().scripts, 1);
     });
 }
+
+fn call_scoped(it: &mut Interp, f: ObjId, this: Value, args: &[Value], scope: &[ObjId]) -> String {
+    let r = it.call_scoped(Value::Object(f), this, args, scope);
+    show(it, r)
+}
+
+fn global(it: &mut Interp, name: &str) -> ObjId {
+    match it.run_script(name) {
+        Ok(Value::Object(o)) => o,
+        other => panic!("not an object: {other:?}"),
+    }
+}
+
+#[test]
+fn compile_function_makes_a_named_function_of_the_global_environment() {
+    big(|| {
+        let mut it = realm(limits());
+        out(&mut it, "var g = 7; var seen;");
+        let f = it.compile_function("onclick", "event, extra", "seen = [typeof event, typeof extra, this === undefined, g].join(); return event + 1").unwrap();
+        assert_eq!(call_scoped(&mut it, f, Value::Undefined, &[Value::Number(1.0)], &[]), "2");
+        assert_eq!(out(&mut it, "seen"), "number,undefined,false,7");
+        let names = out(&mut it, "typeof onclick");
+        assert_eq!(names, "undefined");
+        let o = Value::Object(f);
+        assert_eq!(it.get_str(o, "name"), "onclick");
+        assert_eq!(it.get_str(o, "length"), "2");
+        // The same text makes a new function over the same code.
+        let before = it.stats().scripts;
+        let f2 = it.compile_function("onclick", "event, extra", "seen = [typeof event, typeof extra, this === undefined, g].join(); return event + 1").unwrap();
+        assert_ne!(f, f2);
+        assert_eq!(it.stats().scripts, before);
+    });
+}
+
+#[test]
+fn compile_function_refuses_a_body_that_closes_the_function() {
+    big(|| {
+        let mut it = realm(limits());
+        for body in ["}); globalThis.bad = 1; (function () {", "}, function () { globalThis.bad = 2", "} } {"] {
+            match it.compile_function("onclick", "event", body) {
+                Err(Error::Throw(v)) => assert_eq!(it.get_str(v, "name"), "SyntaxError", "{body}"),
+                other => panic!("{body}: {other:?}"),
+            }
+        }
+        assert_eq!(out(&mut it, "typeof bad"), "undefined");
+    });
+}
+
+#[test]
+fn compile_function_works_in_the_middle_of_a_call() {
+    big(|| {
+        let mut it = realm(limits());
+        // A native call stack is active when the host compiles (the host runs inside a script call).
+        let f = it.compile_function("a", "", "return 1").unwrap();
+        out(&mut it, "var outer = function (cb) { return cb() + 1 }");
+        let outer = global(&mut it, "outer");
+        let r = it.call(Value::Object(outer), Value::Undefined, &[Value::Object(f)]);
+        assert_eq!(show(&mut it, r), "2");
+    });
+}
+
+#[test]
+fn call_scoped_looks_names_up_in_the_scope_first_for_handler_code_only() {
+    big(|| {
+        let mut it = realm(limits());
+        out(&mut it, "var holder = { v: 1, get g() { return this === holder }, m() { return this === holder }, set w(x) { this.v = x } }; var v = 'global'; var other = { v: 'other' };
+                      function plain() { return typeof v + (typeof m) }");
+        let (holder, other) = (global(&mut it, "holder"), global(&mut it, "other"));
+        let f = it.compile_function("h", "event", "w = 5; return [v, g, m(), typeof nope, typeof m, plain()].join()").unwrap();
+        assert_eq!(call_scoped(&mut it, f, Value::Undefined, &[], &[holder, other]), "5,true,true,undefined,function,stringundefined");
+        assert_eq!(out(&mut it, "holder.v"), "5");
+        // Outside call_scoped the global is used.
+        let g = it.compile_function("h", "", "return typeof g + v").unwrap();
+        assert_eq!(call_scoped(&mut it, g, Value::Undefined, &[], &[]), "undefinedglobal");
+    });
+}

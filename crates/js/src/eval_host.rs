@@ -358,3 +358,121 @@ impl<'p> Interp<'p> {
         self.herr(e)
     }
 }
+
+// ------------------------------------------------------------------------------------------ event handler attributes
+
+/// The state of `compile_function` and of `call_scoped`.
+#[derive(Default)]
+struct HScope {
+    /// The objects a name is looked up in before the global object, innermost first, while `call_scoped` runs.
+    scope: Vec<ObjId>,
+    /// The ids of the scripts that `compile_function` made, ascending. Only their code sees `scope`.
+    scripts: Vec<u32>,
+    /// Source text to script id: the same attribute text on many elements parses once.
+    cache: HashMap<String, u32>,
+}
+
+impl<'p> Interp<'p> {
+    /// HTML "internal raw uncompiled handler" compile: `function NAME(PARAMS) {\nBODY\n}` as a function of the global environment. A
+    /// body that does not parse alone (`}` that closes the function early) is a `SyntaxError`, as in a browser. Each call makes a new
+    /// function; the parsed code is shared. Callable during a call. The code stays until the realm ends (`max_scripts` bounds it).
+    pub fn compile_function(&mut self, name: &str, params: &str, body: &str) -> Result<ObjId, Error> {
+        let src = format!("(function {name}({params}) {{\n{body}\n}})");
+        let id = match self.hs.cache.get(&src) {
+            Some(&i) => i as usize,
+            None => {
+                let id = self.add_script(&src)?;
+                let old = self.cur;
+                self.select(id);
+                let prog = self.prog.clone();
+                let one = prog.list(prog.body).collect::<Vec<_>>();
+                let fid = match one.as_slice() {
+                    [s] => match prog.stmt(*s).kind {
+                        StmtKind::Expr(e) => match prog.expr(e).kind {
+                            ExprKind::Paren(i) => match prog.expr(i).kind {
+                                ExprKind::Function(f) => Some(f),
+                                _ => None,
+                            },
+                            _ => None,
+                        },
+                        _ => None,
+                    },
+                    _ => None,
+                };
+                self.select(old);
+                if fid.is_none() {
+                    return Err(self.mk_err(4, "Unexpected token '}'"));
+                }
+                self.hs.scripts.push(id as u32);
+                self.hs.cache.insert(src, id as u32);
+                id
+            }
+        };
+        let (old, env, strict) = (self.cur, self.env, self.strict);
+        self.select(id);
+        let prog = self.prog.clone();
+        let fid = match prog.expr(match prog.expr(match prog.stmt(prog.list(prog.body).next().expect("checked")).kind {
+            StmtKind::Expr(e) => e,
+            _ => unreachable!("checked"),
+        }).kind { ExprKind::Paren(i) => i, _ => unreachable!("checked") }).kind {
+            ExprKind::Function(f) => f,
+            _ => unreachable!("checked"),
+        };
+        self.env = 0;
+        self.strict = prog.strict;
+        let r = self.make_closure(fid, None, false);
+        self.select(old);
+        (self.env, self.strict) = (env, strict);
+        match r? {
+            Value::Object(o) => Ok(o),
+            _ => Err(unsupported("compile_function", Span::default())),
+        }
+    }
+
+    /// `call(f, this, args)` while the names of the code made by `compile_function` are looked up in `scope` first (innermost first), as in
+    /// a `with` statement chain. A method found there is called with its holder as `this`. Deviations: a global `let` or `const`
+    /// wins over `scope`; `Symbol.unscopables` is not read; a function that outlives the call does not see `scope`.
+    pub fn call_scoped(&mut self, f: Value, this: Value, args: &[Value], scope: &[ObjId]) -> Result<Value, Error> {
+        let prev = std::mem::replace(&mut self.hs.scope, scope.to_vec());
+        self.heap.set_hscope(self.global, !scope.is_empty());
+        let r = self.call(f, this, args);
+        self.hs.scope = prev;
+        self.heap.set_hscope(self.global, !self.hs.scope.is_empty());
+        r
+    }
+
+    /// Is `f` a function made by `compile_function`?
+    pub fn is_scoped_function(&self, f: ObjId) -> bool {
+        !self.hs.scripts.is_empty() && matches!(self.funcs.get(&f), Some(Callee::Script { script, .. }) if self.hs.scripts.binary_search(script).is_ok())
+    }
+
+    /// The first object of the handler scope that has the name `n`, when the running code is code of an event handler attribute.
+    #[cold]
+    #[inline(never)]
+    fn hscope_find(&mut self, n: u32) -> Res<Option<ObjId>> {
+        if self.hs.scripts.binary_search(&(self.cur as u32)).is_err() {
+            return Ok(None);
+        }
+        let key = self.name_key(n)?;
+        for i in 0..self.hs.scope.len() {
+            let o = self.hs.scope[i];
+            if hx!(self, self.heap.has_property(o, key)) {
+                return Ok(Some(o));
+            }
+        }
+        Ok(None)
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn hscope_get(&mut self, o: ObjId, n: u32) -> Res<Value> {
+        let key = self.name_key(n)?;
+        let v = self.get_prop(Value::Object(o), key)?;
+        if let Value::Object(f) = v
+            && self.is_callable(v)
+        {
+            return Ok(Value::Object(self.new_func_object(Callee::Bound { target: f, this: Value::Object(o), args: Vec::new() })?));
+        }
+        Ok(v)
+    }
+}

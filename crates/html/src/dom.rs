@@ -187,6 +187,10 @@ struct Node {
     data: NodeData,
 }
 
+fn is_on_name(name: &str) -> bool {
+    name.len() > 2 && name.as_bytes()[..2].eq_ignore_ascii_case(b"on")
+}
+
 /// A whole tree. It owns all of its nodes.
 pub struct Document {
     nodes: Vec<Node>,
@@ -195,6 +199,8 @@ pub struct Document {
     // The name table: the text for each atom.
     atoms: HashMap<Box<str>, Atom, BuildHasherDefault<Fnv>>,
     // The way back: from a name to its atom. A page has few different names, so the second copy is small.
+    on_name: bool,
+    // Has the name table ever had a name that starts with `on`? See `has_on_name`.
     attrs: Vec<Attr>,
     // The attributes of all elements. Each element has a run of them, one after the other.
     text: String,
@@ -325,6 +331,7 @@ impl Document {
             template_content: HashMap::default(),
             watcher: None,
             custom: HashMap::default(),
+            on_name: false,
         };
         // The order matters: it must match `Atom::ID` and `Atom::CLASS`.
         doc.intern("id");
@@ -560,6 +567,19 @@ impl Document {
         self.names.len()
     }
 
+    /// Has the name table ever had a name that starts with `on` (an event handler attribute may exist)? It never goes back to false.
+    #[inline]
+    pub fn has_on_name(&self) -> bool {
+        self.on_name
+    }
+
+    /// The atom of the `i`-th name of the table (`i < name_count()`). Names are never removed, so the atoms from an earlier
+    /// `name_count()` up are the names added since.
+    pub fn atom_at(&self, i: usize) -> Atom {
+        assert!(i < self.names.len());
+        Atom(i as u32)
+    }
+
     /// The number of nodes, with the top node.
     pub fn len(&self) -> usize {
         self.nodes.len()
@@ -617,6 +637,7 @@ impl Document {
             return atom;
         }
         let atom = Atom(u32::try_from(self.names.len()).expect("more than 4 billion names"));
+        self.on_name |= is_on_name(name);
         self.names.push(name.into());
         self.atoms.insert(name.into(), atom);
         atom
@@ -815,6 +836,7 @@ impl Document {
             return atom;
         }
         let atom = Atom(u32::try_from(self.names.len()).expect("more than 4 billion names"));
+        self.on_name |= is_on_name(qname);
         self.names.push(qname.into());
         self.ns_atoms.insert((ns, qname.into()), atom);
         self.atom_ns.insert(atom.0, ns);
