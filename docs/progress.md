@@ -2172,3 +2172,31 @@ Cost: `tools/js/cost_matrix.sh`, origin/main 65bbf8e against this change, 805 ro
 Tests: `cargo test --release --workspace`, 2,887 passed, 0 failed, 12 ignored (after the rebase on 65bbf8e).
 
 Not tested: a DNS failure through the driver (a unit test makes the error; no resolver fault was made); a TLS failure on a `fetch` (the test uses the document load); an HTTP/2 GOAWAY on a live connection (the kind comes from the text of the error, checked in a unit test); the `bare` binary with `--window` under the arena limit; musl or macOS (the limit is Linux and glibc only); more than 15 runs on staging; arjun-e16; `tools/js/cost_matrix.sh` with jemalloc on every row.
+
+## Shapes with no cache (step A1 of the engine plan): not merged
+
+Status: the code is on branch `t3/heap-object-shapes`. It is not merged. The cost gate fails, and the plan says A1 then merges stacked on A2 (one merge unit).
+
+Change:
+- `Object` is `{ proto, shape, flags, elems, slots, dict }` (80 bytes, asserted by a test). Named properties of an ordinary object are values in `slots`; their keys and attributes are in the shape. An accessor uses 2 slots. An array keeps `length` in slot 0 of `ROOT_ARRAY`.
+- `heap_shape.rs`: the transition tree (`Shapes`), a single-entry `child` cache in each shape, key tables shared along a chain (a second branch copies its part), a scan up to 8 entries, a hash index above 8 (made at the first probe), and dictionary mode (`shape` 0, a `PropMap`).
+- Dictionary triggers: delete of a property that is not the last one added, any change of attributes (freeze, seal, data to accessor, read-only array `length`), `setPrototypeOf` to another prototype, the 129th property, an index key that is not dense, a full shape table (65,536).
+- `own_pos`, `own_data_at` and `set_own_data_at` work on shape slots and on dictionary objects.
+- Deviation from the plan: an exotic object has its own root shape (`ROOT_EXOTIC`), not dictionary mode. A dictionary for each wrapper cost 48 bytes and broke the wrapper-cost test (144 bytes against 120). A2 must not fill a cache for an exotic object.
+- Deviation from the plan: the global object is made in dictionary mode (`Heap::new_dict_object`). Its names are read through position hints. A hint into a shape needs about 3 dependent loads and about 35 more instructions.
+- The 1024-chain-length trigger of the plan cannot fire: the chain length is the property count, and the 129th property triggers first.
+- `crates/bare/examples/type_load.rs`: the `MEM=1` footprint line counts slots, dictionary entries, dictionary objects and shapes.
+
+Checks that pass:
+- `cargo test -p bare-js --lib`, debug: 745 passed. New tests: shape sharing, key order, attributes, accessors in 2 slots, delete and re-add, every dictionary trigger, exotic roots, arrays with `length` in slot 0, tables over 8 keys, the shape cap, GC trace of slots, footprint, position hints, and a property test (100,000 random define, delete, set, freeze, `setPrototypeOf` and `defineProperty` operations on 6 objects, compared with a `PropMap` model after each one). The property test found one bug: `set_integrity` skipped a dictionary object that had no dense elements.
+- Memory (`type_load` with `MEM=1`, after load, before any collect). Before: property entries 4.47 MiB used of 5.84, index tables 0.77 MiB. After: property slots 1.51 MiB used of 1.88, dictionary entries 0.06 MiB, shapes 0.33 MiB (2,843 shapes), index tables 0.01 MiB. Alloc live after load: 17.0 MiB to 12.6 MiB. Collections on the typing page: 9 to 6.
+- Peak RSS of `keycost.sh`: 31.8 MiB at 20 keys and 32.3 MiB at 50 keys. Main: 36.6 MiB at 50 keys.
+
+Checks that fail:
+- `keycost.sh`: `#a1` 424.8 M for each key against 411.1 M on main (+3.3%). `#f0` 432.9 M. Load and mount 794 M against 774 M. The budget is +-0.5%.
+- Cost matrix subset against a base build of `1859e0e`, glibc and jemalloc: `arrobj_load objects 1` +2.46% and +1.51%, `eval_load closures 10` +1.04% and +0.98%. Others: `loop 10` +0.43%, `calls 10` +0.35%, `fib 10` +0.18%, `objects 10` -0.15%, `arrobj_load objects 10` -0.68% and -0.80%. `arrobj_load objects 1` is mostly start-up: the realm makes about 1,000 shapes that are never shared.
+- Heap-level benchmark (instructions for each operation, main against A1 after the fixes below): create 3 properties +8.9%, literal with 3 properties +3.1%, read 3 +5.1%, read 10 +19%, read through the prototype +17%, write 3 +8.0%, 100-element array -17%, 997-key dictionary +4.2%, collect +8.1%. The read of a table over 8 keys costs one more indirection (shapes, tables, entries, slots) and a copy of the property out of the slots. A cache (A2) removes that walk. A cache-less shape cannot match a flat scan of a 3-entry `PropMap` in instructions.
+
+Fixes tried: `find` and `get_prop` inline; position-hint paths for shapes out of line; the global object in a dictionary (typing page 444.9 M to 437.0 M to 424.8 M for each key together with the next items); one lookup on the add path (`add_prop`); a cheaper `add_cost`; a lazy hash index. They cut the create rows from +29% to +9%.
+
+Not run: the full cost matrix, `test262_check.sh`, the `*_check.sh` scripts against Node, `cargo test --workspace`, release tests (the gate fails first, so they would not decide the merge).
