@@ -2560,7 +2560,7 @@ Fix attempts (first full matrix: 1 row over under both, `session_load chain 10` 
 - `Shapes::fn_shape` inline always: fixed. `Object::init_fn` (every native function of a realm) calls it, and out of line it cost about 60 K instructions for each realm.
 
 Checks:
-- `cargo test --release --workspace`: 2,935 passed, 0 failed (before the last fix). `cargo test --release -p bare-js` on the final code: 793 passed. New tests: `programs_with_literals_and_closures_match_node` (8 programs, output from Node 22: computed keys, `__proto__` in its four forms, spread, getters and setters, duplicate keys, one site with different key sets, function names and later changes, and a lazy `prototype` that is read, written, redefined and deleted) and `a_literal_shape_makes_the_same_object_and_a_function_starts_in_the_preset_shape`.
+- `cargo test --release --workspace` after the rebase on `973b5d0`: 2,940 passed, 0 failed. New tests: `programs_with_literals_and_closures_match_node` (8 programs, output from Node 22: computed keys, `__proto__` in its four forms, spread, getters and setters, duplicate keys, one site with different key sets, function names and later changes, and a lazy `prototype` that is read, written, redefined and deleted) and `a_literal_shape_makes_the_same_object_and_a_function_starts_in_the_preset_shape`.
 - `tools/js/test262_check.sh`: gate ok, 27,182 pass.
 - `tools/js/exec_diff.sh`: 79 runs, 0 differences.
 - All 43 `tools/js/*_check.sh` scripts pass (`parse_check.sh` with `ACORN=` set).
