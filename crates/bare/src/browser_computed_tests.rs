@@ -642,30 +642,46 @@ fn computed_names_are_sorted_and_include_live_custom_properties() {
 #[test]
 fn reads_of_a_hidden_element_keep_both_cascades() {
     let mut b = at("<!doctype html><html><head><style>.h { display: none }</style></head><body><div class=h><p id=p>t</p></div><p id=q>u</p></body></html>");
-    let n = |b: &mut Browser, s: &str| (js(b, s), b.computed_stats().computes);
-    // The first read of a hidden element styles the page, then the way down to it: two cascades.
-    assert_eq!(n(&mut b, "var p = document.getElementById('p'), q = document.getElementById('q'); getComputedStyle(p).display"), ("block".into(), 2));
-    // With no change, more reads of it and of a shown element use both again. Main did two more cascades for each read of `p`.
-    assert_eq!(n(&mut b, "getComputedStyle(p).display + getComputedStyle(q).display + getComputedStyle(p).color"), ("blockblockrgb(0, 0, 0)".into(), 2));
-    assert_eq!(n(&mut b, "q.className = 'h'; getComputedStyle(q).display + getComputedStyle(p).display"), ("noneblock".into(), 4));
+    // The value, the full cascades and the partial ones (`ComputedStats::restyles`).
+    let n = |b: &mut Browser, s: &str| (js(b, s), b.computed_stats().computes, b.computed_stats().restyles);
+    // The first read of a hidden element styles the page, then only the way down to it.
+    assert_eq!(n(&mut b, "var p = document.getElementById('p'), q = document.getElementById('q'); getComputedStyle(p).display"), ("block".into(), 1, 1));
+    // With no change, more reads of it and of a shown element use the cascade again. Main did two more cascades for each read of `p`.
+    assert_eq!(n(&mut b, "getComputedStyle(p).display + getComputedStyle(q).display + getComputedStyle(p).color"), ("blockblockrgb(0, 0, 0)".into(), 1, 3));
+    // A class change restyles `q` only.
+    assert_eq!(n(&mut b, "q.className = 'h'; getComputedStyle(q).display + getComputedStyle(p).display"), ("noneblock".into(), 1, 5));
+}
+
+#[test]
+fn a_data_state_toggle_needs_no_full_cascade() {
+    // A form pseudo-class in the sheet, as in Tailwind (`disabled:`). Before, any attribute change gave a full cascade then.
+    let mut b = at("<!doctype html><html><head><style>button:disabled { opacity: .5 } [data-state=open] { color: red }</style></head>\
+        <body><form><button id=t data-state=closed>x</button></form></body></html>");
+    let n = |b: &mut Browser, s: &str| (js(b, s), b.computed_stats().computes, b.computed_stats().restyles);
+    assert_eq!(n(&mut b, "var t = document.getElementById('t'); getComputedStyle(t).color"), ("rgb(0, 0, 0)".into(), 1, 0));
+    assert_eq!(n(&mut b, "t.dataset.state = 'open'; getComputedStyle(t).color"), ("rgb(255, 0, 0)".into(), 1, 1));
+    assert_eq!(n(&mut b, "t.disabled = true; getComputedStyle(t).opacity"), ("0.5".into(), 1, 2));
+    // The type of a button can change the default button of its form, another element: a full cascade.
+    assert_eq!(n(&mut b, "t.type = 'reset'; getComputedStyle(t).color"), ("rgb(255, 0, 0)".into(), 2, 2));
 }
 
 #[test]
 fn styles_are_reused_until_the_document_changes() {
     let mut b = at("<!doctype html><html><head><style>.w { width: 50px } p:empty { display: none } x-a:defined { color: green } input:focus { color: red }</style></head>\
         <body><div id=a style='width: 10px'>t</div><p id=p></p><x-a id=x></x-a><input id=i></body></html>");
-    let n = |b: &mut Browser, s: &str| (js(b, s), b.computed_stats().computes);
+    // The value, the full cascades and the partial ones (`ComputedStats::restyles`).
+    let n = |b: &mut Browser, s: &str| (js(b, s), b.computed_stats().computes, b.computed_stats().restyles);
     js(&mut b, "var a = document.getElementById('a'), p = document.getElementById('p'), x = document.getElementById('x'); 0");
-    assert_eq!(n(&mut b, "a.getBoundingClientRect().width + a.getBoundingClientRect().width + getComputedStyle(a).width"), ("2010px".into(), 1));
-    // An attribute, a tree change and a text edit each give a new cascade.
-    assert_eq!(n(&mut b, "a.className = 'w'; a.removeAttribute('style'); a.getBoundingClientRect().width"), ("50".into(), 2));
-    assert_eq!(n(&mut b, "p.appendChild(document.createTextNode('')); getComputedStyle(p).display"), ("none".into(), 3));
-    assert_eq!(n(&mut b, "p.firstChild.data = 'q'; getComputedStyle(p).display"), ("block".into(), 4));
-    assert_eq!(n(&mut b, "getComputedStyle(p).display"), ("block".into(), 4));
+    assert_eq!(n(&mut b, "a.getBoundingClientRect().width + a.getBoundingClientRect().width + getComputedStyle(a).width"), ("2010px".into(), 1, 0));
+    // An attribute, a tree change and a text edit each restyle the elements that they reach.
+    assert_eq!(n(&mut b, "a.className = 'w'; a.removeAttribute('style'); a.getBoundingClientRect().width"), ("50".into(), 1, 1));
+    assert_eq!(n(&mut b, "p.appendChild(document.createTextNode('')); getComputedStyle(p).display"), ("none".into(), 1, 2));
+    assert_eq!(n(&mut b, "p.firstChild.data = 'q'; getComputedStyle(p).display"), ("block".into(), 1, 3));
+    assert_eq!(n(&mut b, "getComputedStyle(p).display"), ("block".into(), 1, 3));
     // The focus moves no tree counter.
-    assert_eq!(n(&mut b, "var i = document.getElementById('i'); getComputedStyle(i).color"), ("rgb(0, 0, 0)".into(), 4));
-    assert_eq!(n(&mut b, "i.focus(); getComputedStyle(i).color"), ("rgb(255, 0, 0)".into(), 5));
+    assert_eq!(n(&mut b, "var i = document.getElementById('i'); getComputedStyle(i).color"), ("rgb(0, 0, 0)".into(), 1, 3));
+    assert_eq!(n(&mut b, "i.focus(); getComputedStyle(i).color"), ("rgb(255, 0, 0)".into(), 1, 4));
     // A custom element that is defined matches `:defined`, and no tree counter moves.
-    assert_eq!(n(&mut b, "getComputedStyle(x).color"), ("rgb(0, 0, 0)".into(), 5));
-    assert_eq!(n(&mut b, "customElements.define('x-a', class extends HTMLElement {}); getComputedStyle(x).color"), ("rgb(0, 128, 0)".into(), 6));
+    assert_eq!(n(&mut b, "getComputedStyle(x).color"), ("rgb(0, 0, 0)".into(), 1, 4));
+    assert_eq!(n(&mut b, "customElements.define('x-a', class extends HTMLElement {}); getComputedStyle(x).color"), ("rgb(0, 128, 0)".into(), 2, 4));
 }

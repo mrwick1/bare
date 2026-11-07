@@ -290,31 +290,67 @@ pub enum Mark {
     Link { parent: NodeId, node: NodeId },
     /// `node` left the children of `parent`.
     Unlink { parent: NodeId, node: NodeId },
-    /// An attribute of `el` was set or removed.
-    Attr { el: NodeId, name: Atom },
+    /// An attribute of `el` was set or removed. `old` is the value before, `None` when there was none. The text buffer only
+    /// grows, so `Document::text(old)` stays readable.
+    Attr { el: NodeId, name: Atom, old: Option<Span> },
     /// The text of `node` changed.
     Text { node: NodeId },
     /// The form state of `el` changed (`set_ui`).
     Ui { el: NodeId },
 }
 
-/// The log of `Document::track_damage`.
-#[derive(Debug, Default)]
+/// The readers of the log of `Document::track_damage`: the window frame, and the styles of `getComputedStyle` and the geometry reads.
+pub const DAMAGE_FRAME: usize = 0;
+pub const DAMAGE_STYLE: usize = 1;
+
+/// The log of `Document::track_damage`. Each reader reads from its own place, so two readers see every mark.
+#[derive(Debug, Default, Clone)]
 struct Damage {
     marks: Vec<Mark>,
-    /// A change that the log does not describe, or too many changes.
-    full: bool,
+    /// The number of the first mark of `marks`, counted from the first mark of the document.
+    start: u64,
+    /// For each reader: the number of the first mark that it did not read. `None`: the reader is off, or it lost marks.
+    at: [Option<u64>; 2],
 }
 
 impl Damage {
     fn add(&mut self, m: Mark) {
-        if self.marks.len() < MAX_MARKS {
-            self.marks.push(m);
-        } else {
-            self.full = true;
+        if self.at == [None, None] {
+            return;
         }
+        if self.marks.len() >= MAX_MARKS {
+            // The reader that is the most behind loses its place. The other one keeps its marks.
+            let low = self.at.iter().flatten().min().copied();
+            for a in &mut self.at {
+                if *a == low {
+                    *a = None;
+                }
+            }
+            self.trim();
+            if self.at == [None, None] {
+                return;
+            }
+        }
+        self.marks.push(m);
+    }
+
+    /// A change that the log does not describe, or too many changes: every reader must update all of its view.
+    fn lose(&mut self) {
+        self.start += self.marks.len() as u64;
+        self.marks.clear();
+        self.at = [None, None];
+    }
+
+    /// Drop the marks that every reader has read.
+    fn trim(&mut self) {
+        let low = self.at.iter().flatten().min().map_or(self.marks.len(), |&a| (a - self.start) as usize);
+        self.marks.drain(..low);
+        self.start += low as u64;
     }
 }
+
+/// A copy of the log, from `Document::peek_damage`.
+pub struct SavedDamage(Option<Damage>);
 
 /// What a document tells of its changes: the host function of `set_watcher` and the log of `track_damage`. They share one box,
 /// so a change checks one `Option`.
@@ -591,28 +627,34 @@ impl Document {
 
     /// Log the changes of the tree from now on, for a host that keeps a view of the page and updates only the changed part
     /// (`take_damage`). A page that is not tracked pays one check at a change.
-    pub fn track_damage(&mut self) {
-        self.watcher.get_or_insert_default().damage.get_or_insert_default();
+    /// `reader` (`DAMAGE_FRAME`, `DAMAGE_STYLE`) reads from now on.
+    pub fn track_damage(&mut self, reader: usize) {
+        let d = self.watcher.get_or_insert_default().damage.get_or_insert_default();
+        d.at[reader] = Some(d.start + d.marks.len() as u64);
+        d.trim();
     }
 
-    /// The changes since the last call, oldest first, and an empty log after it. `None` when the log is not on, or when a change
-    /// happened that it does not describe (a custom element state, a shadow root, the parser cut, `touch`), or more than
-    /// `MAX_MARKS` changes: then the host must update all of its view.
-    pub fn take_damage(&mut self) -> Option<Vec<Mark>> {
+    /// The changes since the last call of `reader`, oldest first. `None` when the reader is off, or when a change happened that
+    /// the log does not describe (a custom element state, a shadow root, the parser cut, `touch`), or more than `MAX_MARKS`
+    /// changes: then the host must update all of its view, and call `track_damage` again.
+    pub fn take_damage(&mut self, reader: usize) -> Option<Vec<Mark>> {
         let d = self.watcher.as_mut()?.damage.as_mut()?;
-        let marks = std::mem::take(&mut d.marks);
-        if std::mem::take(&mut d.full) { None } else { Some(marks) }
+        let from = (d.at[reader]? - d.start) as usize;
+        let marks = d.marks[from..].to_vec();
+        d.at[reader] = Some(d.start + d.marks.len() as u64);
+        d.trim();
+        Some(marks)
     }
 
-    /// A copy of the log (for a host test that looks at the page without taking the changes): the marks, and whether it is full.
-    pub fn peek_damage(&self) -> Option<(Vec<Mark>, bool)> {
-        self.watcher.as_ref()?.damage.as_ref().map(|d| (d.marks.clone(), d.full))
+    /// A copy of the log (for a host test that looks at the page without taking the changes).
+    pub fn peek_damage(&self) -> SavedDamage {
+        SavedDamage(self.watcher.as_ref().and_then(|h| h.damage.clone()))
     }
 
     /// Set the log back to `saved` (from `peek_damage`).
-    pub fn restore_damage(&mut self, saved: Option<(Vec<Mark>, bool)>) {
+    pub fn restore_damage(&mut self, saved: SavedDamage) {
         let h = self.watcher.get_or_insert_default();
-        h.damage = saved.map(|(marks, full)| Damage { marks, full });
+        h.damage = saved.0;
         if h.f.is_none() && h.damage.is_none() {
             self.watcher = None;
         }
@@ -641,7 +683,7 @@ impl Document {
         if let Some(d) = self.watcher.as_mut().and_then(|h| h.damage.as_mut()) {
             match m {
                 Some(m) => d.add(m),
-                None => d.full = true,
+                None => d.lose(),
             }
         }
     }
@@ -1390,7 +1432,7 @@ impl Document {
             d.add(match change {
                 Change::Link { parent, node, .. } => Mark::Link { parent, node },
                 Change::Unlink { parent, node, .. } => Mark::Unlink { parent, node },
-                Change::Attr { el, name, .. } => Mark::Attr { el, name },
+                Change::Attr { el, name, old, .. } => Mark::Attr { el, name, old },
                 Change::Text { node, .. } => Mark::Text { node },
             });
         }
@@ -1636,6 +1678,35 @@ mod tests {
     fn text_of(doc: &Document, id: NodeId) -> &str {
         let NodeData::Text(span) = doc.data(id) else { panic!("not text") };
         doc.text(*span)
+    }
+
+    #[test]
+    fn two_readers_of_the_damage_log_see_every_mark() {
+        let mut doc = crate::tree::parse("<p id=a class=x>t</p>");
+        let p = doc.children(doc.children(doc.root()).last().unwrap()).last().and_then(|b| doc.children(b).next()).unwrap();
+        doc.track_damage(DAMAGE_FRAME);
+        doc.set_attr(p, "class", "y");
+        doc.track_damage(DAMAGE_STYLE);
+        doc.set_attr(p, "class", "z");
+        // The old value comes with the mark.
+        let old = |doc: &Document, m: &Mark| match *m {
+            Mark::Attr { old, .. } => old.map(|s| doc.text(s).to_string()),
+            _ => None,
+        };
+        let frame = doc.take_damage(DAMAGE_FRAME).unwrap();
+        assert_eq!(frame.iter().map(|m| old(&doc, m)).collect::<Vec<_>>(), [Some("x".into()), Some("y".into())]);
+        let style = doc.take_damage(DAMAGE_STYLE).unwrap();
+        assert_eq!(style.iter().map(|m| old(&doc, m)).collect::<Vec<_>>(), [Some("y".into())]);
+        assert_eq!(doc.take_damage(DAMAGE_FRAME).unwrap().len(), 0);
+        // A reader that does not read loses its place when the log is full. The other one keeps every mark.
+        for i in 0..MAX_MARKS + 10 {
+            doc.set_attr(p, "data-n", &i.to_string());
+            if i % 100 == 0 {
+                assert_eq!(doc.take_damage(DAMAGE_FRAME).map(|m| m.len()), Some(if i == 0 { 1 } else { 100 }));
+            }
+        }
+        assert!(doc.take_damage(DAMAGE_STYLE).is_none());
+        assert_eq!(doc.take_damage(DAMAGE_FRAME).map(|m| m.len()), Some(MAX_MARKS + 10 - 4101));
     }
 
     #[test]

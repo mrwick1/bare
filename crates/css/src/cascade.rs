@@ -130,7 +130,82 @@ pub struct RuleSet {
     user: u8,
     /// Where the selectors read each kind of state (`Scopes`).
     scopes: Scopes,
+    /// Where the selectors read each class, id and attribute (`Reach`).
+    reach: Reach,
 }
+
+/// The invalidation sets: for each class, id and attribute name that a selector reads, the widest `Scope` where it reads it.
+/// A change of `class` restyles only what the added and removed classes reach (`RuleSet::roots`). Blink and Stylo keep the
+/// same sets; theirs also keep the selectors on the right of the name, to restyle fewer descendants.
+#[derive(Default)]
+struct Reach {
+    class: HashMap<Box<str>, Scope, BuildHasherDefault<Fnv>>,
+    id: HashMap<Box<str>, Scope, BuildHasherDefault<Fnv>>,
+    attr: HashMap<Atom, Scope, BuildHasherDefault<Fnv>>,
+    /// `:link` and `:any-link` read `href`.
+    link: Scope,
+}
+
+impl Reach {
+    fn add(&mut self, selector: &Selector) {
+        fn simples(me: &mut Reach, list: &[Simple], at: Scope) {
+            for s in list {
+                let slot = match s {
+                    Simple::Id(id) => me.id.entry(id.clone()).or_default(),
+                    Simple::Class(class) => me.class.entry(class.clone()).or_default(),
+                    Simple::Attr { name, .. } => me.attr.entry(*name).or_default(),
+                    Simple::Link => &mut me.link,
+                    Simple::Not(args) | Simple::Is(args) => {
+                        for a in args {
+                            simples(me, a, at);
+                        }
+                        continue;
+                    }
+                    _ => continue,
+                };
+                *slot = (*slot).max(at);
+            }
+        }
+        let mut at = Scope::Own;
+        for (i, c) in selector.compounds.iter().enumerate() {
+            if i > 0 {
+                at = at.max(match selector.compounds[i - 1].combinator {
+                    Combinator::Next | Combinator::Later => Scope::Siblings,
+                    _ => Scope::Subtree,
+                });
+            }
+            simples(self, &c.simples, at);
+        }
+    }
+}
+
+/// Which elements a change of the attribute `name` of `el` can move in or out of a form pseudo-class (`form.rs`). `Scope::None`:
+/// none. `Own`: `el` only. `Subtree`: `el` and the elements inside it. `None`: others too (the radio group, the default button of a
+/// form, the options of a `select`).
+fn form_reach(doc: &Document, el: NodeId, name: &str) -> Option<Scope> {
+    let is = |tags: &[&str]| tags.iter().any(|t| doc.is_html(el, t));
+    Some(match name {
+        // `:read-write` of the elements inside reads it.
+        "contenteditable" => Scope::Subtree,
+        _ if !is(&["button", "fieldset", "input", "optgroup", "option", "progress", "select", "textarea"]) => Scope::None,
+        "value" | "placeholder" | "required" | "readonly" => Scope::Own,
+        "disabled" if is(&["option", "optgroup"]) => return None,
+        "disabled" if is(&["fieldset"]) => Scope::Subtree,
+        "disabled" => Scope::Own,
+        // The options of a `select`.
+        "multiple" | "size" => Scope::Subtree,
+        "name" if radio(doc, el) => return None,
+        "type" | "checked" | "selected" => return None,
+        _ => Scope::None,
+    })
+}
+
+/// Is `el` a radio button? Its checkedness and its `name` move its group in or out of `:indeterminate`.
+fn radio(doc: &Document, el: NodeId) -> bool {
+    doc.is_html(el, "input") && doc.find_atom("type").and_then(|t| doc.attr(el, t)).is_some_and(|t| t.trim().eq_ignore_ascii_case("radio"))
+}
+/// The attributes that presentational hints read (`hints.rs`). A cell reads the table above it, so they reach the subtree.
+const HINT_ATTRS: [&str; 11] = ["align", "border", "cellpadding", "cellspacing", "fill", "height", "nowrap", "stroke", "valign", "viewBox", "width"];
 
 /// Where a selector reads a state, seen from the element that it styles. The order is the cost of a change of the state.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
@@ -164,40 +239,6 @@ pub struct Scopes {
 }
 
 impl Scopes {
-    /// The roots of `RuleSet::restyle` (element, whole subtree) for one change of the tree. `false`: restyle the whole page.
-    /// A linked node gets its styles. The place of its siblings changes for `:first-child` and `+`, and the parent may stop being
-    /// `:empty`. A form pseudo-class reads the attributes of other elements (a `fieldset`, the radio group), so with one, an
-    /// attribute or form change restyles all.
-    pub fn roots(&self, doc: &Document, mark: Mark, out: &mut Vec<(NodeId, bool)>) -> bool {
-        let children = |parent: NodeId, out: &mut Vec<(NodeId, bool)>| {
-            if self.structure != Scope::None {
-                out.push((parent, true));
-            }
-            Self::at(self.empty, parent, doc, out);
-        };
-        match mark {
-            Mark::Link { parent, node } => {
-                out.push((node, true));
-                children(parent, out);
-            }
-            Mark::Unlink { parent, .. } => children(parent, out),
-            Mark::Text { node } => {
-                if let Some(p) = doc.parent(node) {
-                    Self::at(self.empty, p, doc, out);
-                }
-            }
-            Mark::Attr { el, .. } => {
-                if self.form != Scope::None {
-                    return false;
-                }
-                // The presentational hints of a cell read the table above it: the subtree, also with no selector on attributes.
-                Self::at(self.attr.max(Scope::Subtree), el, doc, out);
-            }
-            Mark::Ui { .. } => return self.form == Scope::None,
-        }
-        true
-    }
-
     /// The roots for a user state (`:hover`, `:active`, focus) read in `scope` that moved from the element `old[0]` to `new[0]`.
     /// `old` and `new` are the element and its ancestors (`:hover`, `:active` and `:focus-within` match them): the elements
     /// in one of them and not in the other change, and so do the two elements themselves (`:focus-visible` can change alone).
@@ -214,7 +255,7 @@ impl Scopes {
 
     /// The roots for a change of the state of `e` that the selectors read in `scope`. After a `+` or `~`, the state of `e`
     /// reaches only the siblings after it, and their subtrees.
-    fn at(scope: Scope, e: NodeId, doc: &Document, out: &mut Vec<(NodeId, bool)>) {
+    pub(crate) fn at(scope: Scope, e: NodeId, doc: &Document, out: &mut Vec<(NodeId, bool)>) {
         match scope {
             Scope::None => {}
             Scope::Own => out.push((e, false)),
@@ -270,7 +311,7 @@ impl RuleSet {
     }
 
     pub fn new(viewport: (f32, f32)) -> RuleSet {
-        RuleSet { viewport, entries: Vec::new(), decls: Vec::new(), side: Side::default(), layers: vec![Layer { parent: 0 }], layer_by_name: HashMap::new(), customs: Vec::new(), by_id: Buckets::default(), by_class: Buckets::default(), by_tag: Buckets::default(), by_attr: Buckets::default(), other: Vec::new(), user: 0, scopes: Scopes::default() }
+        RuleSet { viewport, entries: Vec::new(), decls: Vec::new(), side: Side::default(), layers: vec![Layer { parent: 0 }], layer_by_name: HashMap::new(), customs: Vec::new(), by_id: Buckets::default(), by_class: Buckets::default(), by_tag: Buckets::default(), by_attr: Buckets::default(), other: Vec::new(), user: 0, scopes: Scopes::default(), reach: Reach::default() }
     }
 
     /// Which user action state (`:hover`, `:active`, the focus pseudo-classes) some rule reads: the bits `selector::USES_*`.
@@ -282,6 +323,88 @@ impl RuleSet {
     /// Where the selectors read each kind of state (`Scopes`).
     pub fn scopes(&self) -> Scopes {
         self.scopes
+    }
+
+    /// The roots of `restyle` (element, whole subtree) for one change of the tree. `false`: restyle the whole page.
+    /// A linked node gets its styles. The place of its siblings changes for `:first-child` and `+`, and the parent may stop being
+    /// `:empty`. An attribute change restyles what the selectors that read it reach (`Reach`): for `class`, the classes that
+    /// were added or removed. A form pseudo-class reads the attributes of other elements (a `fieldset`, the radio group), so with
+    /// one, a change of the form state or of an attribute that it reads restyles all.
+    pub fn roots(&self, doc: &Document, mark: Mark, out: &mut Vec<(NodeId, bool)>) -> bool {
+        let sc = &self.scopes;
+        let children = |parent: NodeId, out: &mut Vec<(NodeId, bool)>| {
+            if sc.structure != Scope::None {
+                out.push((parent, true));
+            }
+            Scopes::at(sc.empty, parent, doc, out);
+        };
+        match mark {
+            Mark::Link { parent, node } => {
+                out.push((node, true));
+                children(parent, out);
+            }
+            Mark::Unlink { parent, .. } => children(parent, out),
+            Mark::Text { node } => {
+                if let Some(p) = doc.parent(node) {
+                    Scopes::at(sc.empty, p, doc, out);
+                }
+            }
+            Mark::Attr { el, name, old } => {
+                let (old, new) = (old.map(|s| doc.text(s)), doc.attr(el, name));
+                if old == new {
+                    // Set to the value that it had: nothing changed.
+                    return true;
+                }
+                let named = |list: &[&str]| list.iter().any(|&n| doc.find_atom(n) == Some(name));
+                let r = &self.reach;
+                let mut scope = r.attr.get(&name).copied().unwrap_or_default();
+                if sc.form != Scope::None {
+                    // The elements whose form state changes, and then what the selectors that read it reach from them.
+                    match form_reach(doc, el, doc.atom_str(name)) {
+                        Some(Scope::None) => {}
+                        Some(Scope::Own) => scope = scope.max(sc.form),
+                        // After a `+` or `~`, the siblings of the elements inside are inside too.
+                        Some(Scope::Subtree) => scope = scope.max(sc.form.max(Scope::Subtree)),
+                        // An element that is not in the document reaches no other element: linking it restyles its subtree.
+                        _ => return !Self::connected(doc, el),
+                    }
+                }
+                if named(&["style"]) {
+                    scope = scope.max(Scope::Own);
+                } else if named(&HINT_ATTRS) {
+                    scope = scope.max(Scope::Subtree);
+                } else if named(&["href"]) {
+                    scope = scope.max(r.link);
+                }
+                let (old, new) = (old.unwrap_or(""), new.unwrap_or(""));
+                if name == Atom::CLASS {
+                    // Only the classes that were added or removed.
+                    let (old, new) = (|| old.split_ascii_whitespace(), || new.split_ascii_whitespace());
+                    for c in old().filter(|c| !new().any(|n| n == *c)).chain(new().filter(|c| !old().any(|o| o == *c))) {
+                        scope = scope.max(r.class.get(c).copied().unwrap_or_default());
+                    }
+                } else if name == Atom::ID && old != new {
+                    for id in [old, new] {
+                        scope = scope.max(r.id.get(id).copied().unwrap_or_default());
+                    }
+                }
+                Scopes::at(scope, el, doc, out);
+            }
+            Mark::Ui { el } if sc.form != Scope::None => {
+                // The checkedness of a radio button moves its group in or out of `:indeterminate`.
+                if radio(doc, el) {
+                    return !Self::connected(doc, el);
+                }
+                Scopes::at(sc.form, el, doc, out);
+            }
+            Mark::Ui { .. } => {}
+        }
+        true
+    }
+
+    /// Is `el` in the document (also through a shadow root)?
+    fn connected(doc: &Document, el: NodeId) -> bool {
+        std::iter::successors(Some(el), |&n| doc.parent(n).or_else(|| doc.shadow_host(n))).last() == Some(doc.root())
     }
 
     /// The number of selectors in the set.
@@ -426,6 +549,7 @@ impl RuleSet {
         }
         self.user |= crate::selector::user_flags(&selector);
         self.scopes.add(&selector);
+        self.reach.add(&selector);
         let index = self.entries.len() as u32;
         // The bucket: an id is the most specific, then a class, then an attribute, then a tag. An attribute comes before a tag:
         // `input[type=checkbox]` is in the list of `type`, and few elements have a `type`; most elements are a `div`.
@@ -555,33 +679,19 @@ impl RuleSet {
     /// have changed since). For each root: `(el, false)` styles `el`, and its subtree only if its style changes; `(el, true)`
     /// styles its whole subtree. The elements whose style number changed go to `changed`, with the old number (`Styles::changed`).
     /// A new node gets its style here, as a part of the subtree of a root. Gives `false` when it cannot (the styles keep no
-    /// cache, the font size of the root element changes, the page has a shadow root, or the styles grew too much): then the caller runs
+    /// cache, the font size of the root element changes, or the styles grew too much): then the caller runs
     /// `compute_kept`; no node has a new style then. Equal style numbers mean equal values, so a style that did not change keeps its number.
     pub fn restyle(&self, doc: &Document, styles: &mut Styles, roots: &[(NodeId, bool)], changed: &mut Vec<(NodeId, u32)>) -> bool {
         let html = doc.children(doc.root()).find(|&n| matches!(doc.data(n), NodeData::Element { .. }));
         let Some(mut k) = styles.kept.take() else { return false };
         // A style that a restyle makes stays in the list: a page that makes new ones all the time starts again from time to time.
-        if styles.styles.len() > 2 * k.base + 4096 || doc.has_shadow_roots() {
+        if styles.styles.len() > 2 * k.base + 4096 {
             return false;
         }
         if styles.of_node.len() < doc.len() {
             styles.of_node.resize(doc.len(), NONE);
         }
-        let cx = Cx {
-            viewport: self.viewport,
-            root_font_size: k.rem,
-            layer_order: self.layer_order(),
-            declared: &self.side,
-            inline: RefCell::default(),
-            computed: RefCell::new(Computed { list: std::mem::take(&mut styles.calcs), index: std::mem::take(&mut k.calcs) }),
-            grids: RefCell::new({
-                let mut g = std::mem::take(&mut k.grids);
-                g.list = std::mem::take(&mut styles.grids);
-                g
-            }),
-            customs: RefCell::new(Customs { list: std::mem::take(&mut styles.customs), index: std::mem::take(&mut k.customs) }),
-            merges: RefCell::default(),
-        };
+        let cx = self.kept_cx(styles, &mut k);
         let style_atom = doc.find_atom("style");
         let hints = crate::hints::Hints::new(doc);
         let mut ok = true;
@@ -589,13 +699,16 @@ impl RuleSet {
         let mut order: Vec<(usize, NodeId, bool)> = roots.iter().map(|&(n, sub)| (std::iter::successors(Some(n), |&p| doc.flat_parent(p)).count(), n, sub)).collect();
         order.sort_unstable_by_key(|r| (r.0, r.1.index()));
         let (mut candidates, mut matched): (Vec<u32>, Vec<u32>) = (Vec::new(), Vec::new());
-        let mut stack: Vec<(NodeId, bool)> = Vec::new();
+        // As in `walk`: the flat tree, and only the browser's rules in a shadow tree. The third value says the node is in one.
+        let mut stack: Vec<(NodeId, bool, bool)> = Vec::new();
+        let in_shadow = |n: NodeId| doc.has_shadow_roots() && doc.parent(n).is_some_and(|p| doc.shadow_host(p).is_some());
         'roots: for &(_, root, subtree) in &order {
             if !matches!(doc.data(root), NodeData::Element { .. }) {
                 continue;
             }
             // Only a connected root that is shown: inside `display: none` all styles are `NONE`, and the hidden element has its own.
             let mut filter = AncestorFilter::new();
+            let mut shadow = in_shadow(root);
             let mut up = doc.flat_parent(root);
             while let Some(a) = up {
                 if a == doc.root() {
@@ -606,14 +719,15 @@ impl RuleSet {
                     continue 'roots;
                 }
                 element_hashes(doc, a, &mut |h| filter.add(h));
+                shadow |= in_shadow(a);
                 up = doc.flat_parent(a);
             }
             if up.is_none() {
                 continue;
             }
             stack.clear();
-            stack.push((root, false));
-            while let Some((node, leaving)) = stack.pop() {
+            stack.push((root, false, shadow));
+            while let Some((node, leaving, shadow)) = stack.pop() {
                 if !matches!(doc.data(node), NodeData::Element { .. }) {
                     continue;
                 }
@@ -624,6 +738,9 @@ impl RuleSet {
                 let parent = doc.flat_parent(node).map_or(0, |p| styles.of_node[p.index()]);
                 let parent = if parent == NONE { 0 } else { parent };
                 self.candidates(doc, node, &mut candidates);
+                if shadow {
+                    candidates.retain(|&i| self.entries[i as usize].origin == Origin::UserAgent);
+                }
                 matched.clear();
                 for &i in &candidates {
                     let e = &self.entries[i as usize];
@@ -648,10 +765,10 @@ impl RuleSet {
                 if styles.styles[id as usize].get(Property::Display) == Value::Keyword(Keyword::None) {
                     // Nothing inside has a style now.
                     if old != NONE && styles.styles[old as usize].get(Property::Display) != Value::Keyword(Keyword::None) {
-                        let mut gone: Vec<NodeId> = doc.children(node).collect();
+                        let mut gone: Vec<NodeId> = doc.flat_children(node).collect();
                         while let Some(n) = gone.pop() {
                             if std::mem::replace(&mut styles.of_node[n.index()], NONE) != NONE {
-                                gone.extend(doc.children(n));
+                                gone.extend(doc.flat_children(n));
                             }
                         }
                     }
@@ -661,23 +778,106 @@ impl RuleSet {
                     continue;
                 }
                 element_hashes(doc, node, &mut |h| filter.add(h));
-                stack.push((node, true));
-                let mut child = doc.last_child(node);
+                stack.push((node, true, shadow));
+                let host = doc.shadow_root(node);
+                let mut child = doc.last_child(host.unwrap_or(node));
                 while let Some(c) = child {
-                    stack.push((c, false));
+                    stack.push((c, false, shadow || host.is_some()));
                     child = doc.prev_sibling(c);
                 }
             }
         }
-        styles.calcs = std::mem::take(&mut cx.computed.borrow_mut().list);
-        k.calcs = std::mem::take(&mut cx.computed.borrow_mut().index);
+        Self::put_back(cx, styles, k);
+        ok
+    }
+
+    /// A `Cx` that adds to the value lists of `styles` and to the indexes of `k`, so that equal values keep their numbers.
+    fn kept_cx(&self, styles: &mut Styles, k: &mut StyleKeep) -> Cx<'_> {
+        Cx {
+            viewport: self.viewport,
+            root_font_size: k.rem,
+            layer_order: self.layer_order(),
+            declared: &self.side,
+            inline: RefCell::default(),
+            computed: RefCell::new(Computed { list: std::mem::take(&mut styles.calcs), index: std::mem::take(&mut k.calcs) }),
+            grids: RefCell::new({
+                let mut g = std::mem::take(&mut k.grids);
+                g.list = std::mem::take(&mut styles.grids);
+                g
+            }),
+            customs: RefCell::new(Customs { list: std::mem::take(&mut styles.customs), index: std::mem::take(&mut k.customs) }),
+            merges: RefCell::default(),
+        }
+    }
+
+    /// Give the lists of `kept_cx` back to `styles` and `k`.
+    fn put_back(cx: Cx<'_>, styles: &mut Styles, mut k: Box<StyleKeep>) {
+        let c = cx.computed.take();
+        (styles.calcs, k.calcs) = (c.list, c.index);
         let mut g = cx.grids.take();
         styles.grids = std::mem::take(&mut g.list);
         k.grids = g;
         let c = cx.customs.take();
         (styles.customs, k.customs) = (c.list, c.index);
         styles.kept = Some(k);
-        ok
+    }
+
+    /// The style of `want`, an element inside `display: none`, from `styles` of `compute_kept` (or `restyle`) of this `doc`: the
+    /// values that `compute_for(doc, Some(want))` gives. The elements on the way from the hidden ancestor down to `want` get
+    /// their styles at the end of the list, and no node points to them, so `styles` still describe the page. The cost is the depth
+    /// of `want`, not the size of the page. `None` when it cannot: the styles keep no cache or grew too much, the root element
+    /// is hidden (`rem`), or `want` is not on a way that the walk takes (a light child of a shadow host). Then use `compute_for`.
+    pub fn style_hidden(&self, doc: &Document, styles: &mut Styles, want: NodeId) -> Option<ComputedStyle> {
+        let mut path: Vec<NodeId> = std::iter::successors(Some(want), |&n| doc.flat_parent(n)).collect();
+        if path.pop() != Some(doc.root()) || path.is_empty() {
+            return None;
+        }
+        path.reverse();
+        let hidden = |id: u32| styles.styles[id as usize].get(Property::Display) == Value::Keyword(Keyword::None);
+        // The first element with no style. The one above it is `display: none`.
+        let first = path.iter().position(|n| styles.of_node[n.index()] == NONE)?;
+        if first == 0 || hidden(styles.of_node[path[0].index()]) || !hidden(styles.of_node[path[first - 1].index()]) {
+            return None;
+        }
+        let mut k = styles.kept.take()?;
+        if styles.styles.len() > 2 * k.base + 4096 {
+            styles.kept = Some(k);
+            return None;
+        }
+        let in_shadow = |n: NodeId| doc.has_shadow_roots() && doc.parent(n).is_some_and(|p| doc.shadow_host(p).is_some());
+        let mut filter = AncestorFilter::new();
+        let mut shadow = false;
+        for &a in &path[..first] {
+            element_hashes(doc, a, &mut |h| filter.add(h));
+            shadow |= in_shadow(a);
+        }
+        let cx = self.kept_cx(styles, &mut k);
+        let style_atom = doc.find_atom("style");
+        let hints = crate::hints::Hints::new(doc);
+        let (mut candidates, mut matched): (Vec<u32>, Vec<u32>) = (Vec::new(), Vec::new());
+        let mut parent = styles.of_node[path[first - 1].index()];
+        for &node in &path[first..] {
+            shadow |= in_shadow(node);
+            self.candidates(doc, node, &mut candidates);
+            if shadow {
+                candidates.retain(|&i| self.entries[i as usize].origin == Origin::UserAgent);
+            }
+            matched.clear();
+            for &i in &candidates {
+                let e = &self.entries[i as usize];
+                let possible = e.ancestors.iter().take_while(|&&h| h != 0).all(|&h| filter.may_contain(h));
+                if possible && matches(doc, node, &e.selector) {
+                    matched.push(i);
+                }
+            }
+            matched.sort_unstable();
+            let inline = style_atom.and_then(|a| doc.attr(node, a));
+            let hint = hints.as_ref().and_then(|h| h.of(doc, node));
+            parent = self.style_of(styles, &mut k.memo, parent, &matched, (inline, hint.as_deref()), &cx);
+            element_hashes(doc, node, &mut |h| filter.add(h));
+        }
+        Self::put_back(cx, styles, k);
+        Some(styles.styles[parent as usize].clone())
     }
 
     /// The rules that may match the element: the ones in the lists for its id, its classes, its attributes and its tag, and the "other" list.
@@ -1802,6 +2002,7 @@ fn walk(doc: &Document, f: &mut dyn FnMut(NodeId)) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bare_html::dom::DAMAGE_FRAME;
     use bare_html::tree::parse;
 
     const VIEW: (f32, f32) = (1000.0, 500.0);
@@ -2569,8 +2770,10 @@ mod tests {
             :hover{color:green}.a:hover .c{color:#123}div:hover > span{margin-left:1px}.e:hover + .f{color:#321}\
             .k:focus-within{background-color:#eee}:focus .c{font-size:12px}:focus{border-top-color:#9a9}\
             li:first-child{color:#111}li:nth-child(2n){color:#222}li:last-child{margin-left:4px}:empty{padding-top:1px}.q:empty + div{color:#333}\
-            [data-x]{color:#444}[data-x=y] .c{color:#555}.m{display:none}.n{font-size:2em}";
-        const CLASSES: [&str; 12] = ["a", "b", "c", "d", "e", "f", "g", "h", "k", "q", "m", "n"];
+            [data-x]{color:#444}[data-x=y] .c{color:#555}.m{display:none}.n{font-size:2em}\
+            #i1 .c{color:#666}#i2{color:#777}#i1 ~ .h{margin-top:7px}[data-state=open] + .f{margin-left:9px}\
+            .e:not([data-state]) .c{padding-top:5px}.p .q.r{color:#888}";
+        const CLASSES: [&str; 14] = ["a", "b", "c", "d", "e", "f", "g", "h", "k", "q", "m", "n", "p", "r"];
         const TAGS: [&str; 4] = ["div", "span", "li", "ul"];
         let mut seed = 0x2545_F491_4F6C_DD1Du64;
         let mut rnd = |n: usize| {
@@ -2582,14 +2785,14 @@ mod tests {
         let connected = |doc: &Document| {
             let (mut all, mut k) = (vec![doc.root()], 0);
             while k < all.len() {
-                let kids: Vec<_> = doc.children(all[k]).collect();
+                let kids: Vec<_> = doc.children(all[k]).chain(doc.shadow_root(all[k]).into_iter().flat_map(|r| doc.children(r))).collect();
                 all.extend(kids);
                 k += 1;
             }
             all.retain(|&n| matches!(doc.data(n), NodeData::Element { .. }));
             all
         };
-        let chain = |doc: &Document, n: Option<NodeId>| std::iter::successors(n, |&p| doc.parent(p)).filter(|&p| matches!(doc.data(p), NodeData::Element { .. })).collect::<Vec<_>>();
+        let chain = |doc: &Document, n: Option<NodeId>| std::iter::successors(n, |&p| doc.parent(p).or_else(|| doc.shadow_host(p))).filter(|&p| matches!(doc.data(p), NodeData::Element { .. })).collect::<Vec<_>>();
         let (mut restyled, mut full_runs) = (0, 0);
         for round in 0..8 {
             let mut doc = parse("<!doctype html><body></body>");
@@ -2603,18 +2806,33 @@ mod tests {
                     doc.append_text(el, "x");
                 }
             }
+            if round % 2 == 1 {
+                // A shadow tree: only the browser's rules match in it, and it inherits from its host.
+                let host = connected(&doc)[4];
+                let root = doc.attach_shadow(host, true);
+                let el = doc.insert_element(root, None, "div", &[("class", "c")]);
+                doc.insert_element(el, None, "span", &[("class", "a")]);
+            }
             let mut rules = RuleSet::new(VIEW);
             rules.add(&mut doc, UA_CSS, Origin::UserAgent);
             rules.add(&mut doc, CSS, Origin::Author);
             let sc = rules.scopes();
             let mut st = rules.compute_kept(&doc);
-            doc.track_damage();
+            doc.track_damage(DAMAGE_FRAME);
             let mut chains = [Vec::new(), Vec::new()];
             for step in 0..200 {
                 let els = connected(&doc);
                 let pick = els[2 + rnd(els.len() - 2)];
-                let what = rnd(8);
+                let what = rnd(12);
                 match what {
+                    8 => {
+                        let two = format!("{} {}", CLASSES[rnd(CLASSES.len())], CLASSES[rnd(CLASSES.len())]);
+                        doc.set_attr(pick, "class", &two);
+                    }
+                    9 => doc.set_attr(pick, "id", ["i1", "i2", "i3"][rnd(3)]),
+                    10 if rnd(3) == 0 => drop(doc.remove_attr(pick, "data-state")),
+                    10 => doc.set_attr(pick, "data-state", ["open", "closed"][rnd(2)]),
+                    11 => doc.set_attr(pick, "style", ["color:#abc", "font-size:30px", ""][rnd(3)]),
                     0 => doc.set_attr(pick, "class", CLASSES[rnd(CLASSES.len())]),
                     1 => doc.set_attr(pick, "data-x", ["y", "z"][rnd(2)]),
                     2 => {
@@ -2637,7 +2855,7 @@ mod tests {
                     }
                 }
                 let mut roots = Vec::new();
-                let mut ok = doc.take_damage().is_some_and(|marks| marks.into_iter().all(|m| sc.roots(&doc, m, &mut roots)));
+                let mut ok = doc.take_damage(DAMAGE_FRAME).is_some_and(|marks| marks.into_iter().all(|m| rules.roots(&doc, m, &mut roots)));
                 let new_chains = [chain(&doc, doc.user().hover), chain(&doc, doc.user().focus)];
                 Scopes::user_roots(sc.hover, &chains[0], &new_chains[0], &doc, &mut roots);
                 Scopes::user_roots(sc.focus, &chains[1], &new_chains[1], &doc, &mut roots);
@@ -2658,13 +2876,135 @@ mod tests {
                 for (n, before) in old {
                     if before.as_ref() != st.style(n) {
                         let listed = |e: NodeId| changed.iter().any(|c| c.0 == e);
-                        let hidden_under = st.style(n).is_none() && std::iter::successors(doc.parent(n), |&p| doc.parent(p)).any(listed);
+                        let hidden_under = st.style(n).is_none() && std::iter::successors(doc.parent(n), |&p| doc.parent(p).or_else(|| doc.shadow_host(p))).any(listed);
                         assert!(listed(n) || hidden_under, "round {round} step {step}: {n:?} changed and is not listed");
                     }
                 }
             }
         }
         assert!(restyled > 1000 && full_runs < 200, "restyled {restyled}, full {full_runs}");
+    }
+
+    /// A `data-state` toggle on one element restyles that element and the elements that its selectors reach, not the whole
+    /// document, also with a form pseudo-class in the sheet (Tailwind has `disabled:`; before, any attribute change restyled all).
+    #[test]
+    fn a_data_state_toggle_restyles_only_what_it_reaches() {
+        let items: String = (0..50).map(|i| format!("<li class=item>{i}</li>")).collect();
+        let html = format!("<div><button id=t data-state=closed class='a b'>x<span id=icon></span></button><p id=next>n</p></div><ul>{items}</ul>");
+        let css = "input:disabled { opacity: .5 } [data-state=open] { color: red } [data-state=open] > span { margin-left: 2px } \
+            .only { color: blue } [data-side=top] ~ p { padding-top: 1px } .item { color: green }";
+        let mut doc = parse(&html);
+        let mut rules = RuleSet::new(VIEW);
+        rules.add(&mut doc, UA_CSS, Origin::UserAgent);
+        rules.add(&mut doc, css, Origin::Author);
+        let mut st = rules.compute_kept(&doc);
+        doc.track_damage(DAMAGE_FRAME);
+        let (t, icon, next) = (by_id(&doc, "t"), by_id(&doc, "icon"), by_id(&doc, "next"));
+        let step = |doc: &mut Document, st: &mut Styles, change: &dyn Fn(&mut Document)| {
+            change(doc);
+            let mut roots = Vec::new();
+            assert!(doc.take_damage(DAMAGE_FRAME).unwrap().into_iter().all(|m| rules.roots(doc, m, &mut roots)));
+            let mut changed = Vec::new();
+            assert!(rules.restyle(doc, st, &roots, &mut changed));
+            let full = rules.compute(doc);
+            assert_eq!(st.dump(doc).lines().filter(|l| !l.starts_with('#')).collect::<Vec<_>>(), full.dump(doc).lines().filter(|l| !l.starts_with('#')).collect::<Vec<_>>());
+            let mut changed: Vec<NodeId> = changed.into_iter().map(|c| c.0).collect();
+            changed.sort_unstable_by_key(|n| n.index());
+            (roots, changed)
+        };
+        // `[data-state=open] > span` reads it on a parent: the button and its subtree. The list is not styled again.
+        assert_eq!(step(&mut doc, &mut st, &|d| d.set_attr(t, "data-state", "open")), (vec![(t, true)], vec![t, icon]));
+        assert_eq!(step(&mut doc, &mut st, &|d| d.set_attr(t, "data-state", "closed")), (vec![(t, true)], vec![t, icon]));
+        // Set to the same value: nothing.
+        assert_eq!(step(&mut doc, &mut st, &|d| d.set_attr(t, "data-state", "closed")), (vec![], vec![]));
+        // `~` reads it on an earlier sibling: the element and the siblings after it.
+        assert_eq!(step(&mut doc, &mut st, &|d| d.set_attr(t, "data-side", "top")), (vec![(t, true), (next, true)], vec![next]));
+        // A class that only the last compound reads: the element, and its subtree only because its style changed (`color` is inherited).
+        // A class that no selector reads: nothing.
+        assert_eq!(step(&mut doc, &mut st, &|d| d.set_attr(t, "class", "a b only")), (vec![(t, false)], vec![t, icon]));
+        assert_eq!(step(&mut doc, &mut st, &|d| d.set_attr(t, "class", "b only c")), (vec![], vec![]));
+        // An attribute that no selector reads: nothing.
+        assert_eq!(step(&mut doc, &mut st, &|d| d.set_attr(t, "aria-expanded", "true")), (vec![], vec![]));
+    }
+
+    /// Random changes of the attributes and the state that the form pseudo-classes read, each followed by a restyle of the roots
+    /// that `RuleSet::roots` picks: the values must be those of a full cascade.
+    #[test]
+    fn form_changes_restyle_like_a_full_cascade() {
+        const CSS: &str = "input:disabled{color:red}fieldset:disabled .c{color:blue}:placeholder-shown{margin-top:1px}:read-write{padding-top:2px}\
+            input:checked + .c{color:green}:indeterminate{margin-left:3px}:default{padding-left:4px}option:checked{color:#123}\
+            :required{font-size:20px}.c:enabled ~ .c{margin-right:5px}[data-state=open]{color:#456}";
+        const TAGS: [&str; 9] = ["div", "input", "fieldset", "form", "select", "option", "button", "textarea", "span"];
+        const ATTRS: [(&str, &[&str]); 13] = [
+            ("disabled", &[""]),
+            ("value", &["", "v"]),
+            ("placeholder", &["p"]),
+            ("readonly", &[""]),
+            ("required", &[""]),
+            ("type", &["radio", "checkbox", "text", "submit", "button"]),
+            ("checked", &[""]),
+            ("name", &["a", "b"]),
+            ("contenteditable", &["true", "false"]),
+            ("selected", &[""]),
+            ("multiple", &[""]),
+            ("size", &["1", "3"]),
+            ("data-state", &["open", "closed"]),
+        ];
+        let mut seed = 0x9E37_79B9_7F4A_7C15u64;
+        let mut rnd = |n: usize| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            (seed % n as u64) as usize
+        };
+        let elements = |doc: &Document| {
+            let (mut all, mut k) = (vec![doc.root()], 0);
+            while k < all.len() {
+                let kids: Vec<_> = doc.children(all[k]).collect();
+                all.extend(kids);
+                k += 1;
+            }
+            all.retain(|&n| matches!(doc.data(n), NodeData::Element { .. }));
+            all
+        };
+        let (mut restyled, mut full_runs) = (0, 0);
+        for round in 0..6 {
+            let mut doc = parse("<!doctype html><body></body>");
+            for _ in 0..40 {
+                let els = elements(&doc);
+                let parent = els[2 + rnd(els.len() - 2)];
+                doc.insert_element(parent, None, TAGS[rnd(TAGS.len())], &[("class", "c")]);
+            }
+            let mut rules = RuleSet::new(VIEW);
+            rules.add(&mut doc, UA_CSS, Origin::UserAgent);
+            rules.add(&mut doc, CSS, Origin::Author);
+            let mut st = rules.compute_kept(&doc);
+            doc.track_damage(DAMAGE_FRAME);
+            for step in 0..300 {
+                let els = elements(&doc);
+                let pick = els[2 + rnd(els.len() - 2)];
+                let (name, values) = ATTRS[rnd(ATTRS.len())];
+                match rnd(4) {
+                    0 => drop(doc.remove_attr(pick, name)),
+                    1 => doc.set_ui(pick, rnd(32) as u8),
+                    _ => doc.set_attr(pick, name, values[rnd(values.len())]),
+                }
+                let mut roots = Vec::new();
+                let mut changed = Vec::new();
+                let ok = doc.take_damage(DAMAGE_FRAME).is_some_and(|marks| marks.into_iter().all(|m| rules.roots(&doc, m, &mut roots)));
+                if !(ok && rules.restyle(&doc, &mut st, &roots, &mut changed)) {
+                    full_runs += 1;
+                    st = rules.compute_kept(&doc);
+                    continue;
+                }
+                restyled += 1;
+                let full = rules.compute(&doc);
+                for n in elements(&doc) {
+                    assert_eq!(st.style(n), full.style(n), "round {round} step {step} {name} at {pick:?}: node {n:?} roots {roots:?}");
+                }
+            }
+        }
+        assert!(restyled > 900, "restyled {restyled}, full {full_runs}");
     }
 
     #[test]
