@@ -28,7 +28,7 @@
 // - A string with a digit that is not ISO and not the `toUTCString` form (`Jan 1 2020`, `2020-1-1`, `+0100`) is Unsupported. A string with no
 //   digit is NaN.
 // - A subclass (`class extends Date`, `Reflect.construct(Date, [], X)`) is refused with `Unsupported` when constructed: the constructor
-//   has no `new.target` yet (`native_no_nt`), so a brand with a patched prototype would be wrong.
+//   has no `new.target` yet (`native_branded`), so a brand with a patched prototype would be wrong.
 //
 // Clock: `Date.now()` and `new Date()` read the wall clock of the realm (`WallClock`). The default is the system clock
 // (`SystemTime`). It can go backward (an NTP step), and a script may see that. It is not `performance.now()`, which is

@@ -728,7 +728,11 @@ pub(crate) fn install(d: &Dom, it: &mut Interp<'_>) -> R<()> {
         ("Storage", storage_proto, illegal, false),
     ];
     for (name, proto, h, ctor) in ifaces {
-        let f = if name == "URLSearchParams" { d.add_ctor_nt(it, h, name, 0)? } else { d.add_fn(it, h, name, 1, ctor)? };
+        let f = match name {
+            "URL" => d.add_ctor_nt(it, h, name, 1)?,
+            "URLSearchParams" => d.add_ctor_nt(it, h, name, 0)?,
+            _ => d.add_fn(it, h, name, 1, ctor)?,
+        };
         it.define_data(f, kp, Value::Object(proto), false, false, false)?;
         it.define_data(proto, kc, Value::Object(f), true, false, true)?;
         let k = d.key(it, name)?;

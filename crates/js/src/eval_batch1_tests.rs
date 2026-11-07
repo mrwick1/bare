@@ -109,8 +109,9 @@ fn match_all_is_a_function_and_the_regexp_method_too() {
 }
 
 #[test]
-fn match_all_gates_a_replaced_exec_and_charges_its_scans() {
-    assert_eq!(unsupported_of("var r = /a/g; r.exec = function () { return null; }; 'a'.matchAll(r)"), "RegExp with a replaced exec method");
+fn match_all_runs_a_replaced_exec_and_charges_its_scans() {
+    // The matcher is a new regexp (species), so an own `exec` of the original is not used.
+    assert_eq!(run("var r = /a/g; r.exec = function () { return null; }; [...'a'.matchAll(r)].length"), "number:1");
     assert_eq!(limit("var n = 0; for (var m of ('a'.repeat(1 << 16)).matchAll(/(?:)/g)) n++; n", 200_000), LimitKind::Steps);
 }
 

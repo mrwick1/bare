@@ -1,13 +1,17 @@
-//! `URLSearchParams` subclassing: `new.target` reaches the host constructor, and only this one. Order follows Web IDL:
-//! the init is converted first (overload resolution), then `Get(newTarget, "prototype")`, then the object is made.
-//! Node builds `URLSearchParams` as a JS class and reads the prototype first, so getter order is checked against the
-//! specification text, not against Node. Each test runs on a big stack.
+//! `URLSearchParams` subclassing: `new.target` reaches the host constructor. Chrome reads `Get(newTarget, "prototype")`
+//! first, then converts the init, then makes the object; a non-object prototype gives `Object.prototype`. The other
+//! constructors that take `new.target` (Headers, Request, Response, URL, Blob, File, FormData, AbortController,
+//! AbortSignal) are in the Chrome fixture `hostsub`. Each test runs on a big stack.
 
 use crate::browser::*;
+use crate::browser_topic_tests::topic_test;
 use bare_html::tree;
 use bare_js::eval::{Error, EvalLimits, LimitKind, PromiseLimits};
 use bare_js::heap::HeapLimits;
 use bare_js::value::Value;
+
+// Chrome 155 answers for `class X extends` a host constructor (Headers, Request, Response, URL, Blob, File, FormData, AbortController, AbortSignal).
+topic_test!(hostsub_cases, "hostsub", 61);
 
 fn big<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {
     std::thread::Builder::new().stack_size(64 << 20).spawn(f).unwrap().join().unwrap()
@@ -80,9 +84,9 @@ fn reflect_construct_with_a_different_new_target() {
         let mut b = at();
         js(&mut b, "function G() {} var P = {tag: 'P'}; G.prototype = P;");
         assert_eq!(js(&mut b, "var r = Reflect.construct(URLSearchParams, ['a=1'], G); [Object.getPrototypeOf(r) === P, URLSearchParams.prototype.get.call(r, 'a')].join()"), "true,1");
-        // not an object: the intrinsic prototype
+        // not an object: `Object.prototype`, as in Chrome (a host object has no intrinsic default for another realm's `new.target`)
         for v in ["1", "'s'", "undefined", "null", "true"] {
-            assert_eq!(js(&mut b, &format!("G.prototype = {v}; var r = Reflect.construct(URLSearchParams, ['a=1'], G); Object.getPrototypeOf(r) === URLSearchParams.prototype && r.get('a')")), "1", "{v}");
+            assert_eq!(js(&mut b, &format!("G.prototype = {v}; var r = Reflect.construct(URLSearchParams, ['a=1'], G); Object.getPrototypeOf(r) === Object.prototype && URLSearchParams.prototype.get.call(r, 'a')")), "1", "{v}");
         }
         // a prototype with no brand parent still holds native state
         assert_eq!(js(&mut b, "G.prototype = Object.prototype; var r = Reflect.construct(URLSearchParams, ['a=1'], G); typeof r.get + URLSearchParams.prototype.toString.call(r)"), "undefineda=1");
@@ -102,19 +106,19 @@ fn malformed_new_target_is_refused_before_the_host_runs() {
 }
 
 #[test]
-fn init_is_converted_before_the_prototype_is_read() {
+fn prototype_is_read_before_the_init_is_converted() {
     big(|| {
         let mut b = at();
         js(&mut b, NT);
         js(&mut b, "var log = []; var nt = mkNt(function () { log.push('proto'); return mkP(1); });");
-        // record getters, an iterable, and a USVString conversion all run first
-        assert_eq!(js(&mut b, "var rec = {get a() { log.push('init'); return '1'; }}; var r = Reflect.construct(URLSearchParams, [rec], nt); log.join() + '|' + r.get('a') + Object.getPrototypeOf(r).tag"), "init,proto|11");
-        assert_eq!(js(&mut b, "log = []; var it = {[Symbol.iterator]() { log.push('iter'); var i = 0; return {next() { log.push('next'); return i++ ? {done: true} : {done: false, value: ['k', 'v']}; }}; }}; var r = Reflect.construct(URLSearchParams, [it], nt); log.join() + '|' + r.get('k')"), "iter,next,next,proto|v");
-        assert_eq!(js(&mut b, "log = []; Reflect.construct(URLSearchParams, [{a: {toString() { log.push('str'); return '1'; }}}], nt); log.join()"), "str,proto");
-        // a throwing init getter: the prototype is never read
-        assert_eq!(js(&mut b, "log = []; try { Reflect.construct(URLSearchParams, [{get a() { throw new RangeError('init'); }}], nt) } catch (e) { e.message + '|' + log.length }"), "init|0");
-        // a bad pair is a TypeError, also before the prototype
-        assert_eq!(js(&mut b, "log = []; try { Reflect.construct(URLSearchParams, [[['only']]], nt) } catch (e) { e.name + '|' + log.length }"), "TypeError|0");
+        // Chrome reads `new.target.prototype` first; the record getters, an iterable and a USVString conversion run after it
+        assert_eq!(js(&mut b, "var rec = {get a() { log.push('init'); return '1'; }}; var r = Reflect.construct(URLSearchParams, [rec], nt); log.join() + '|' + r.get('a') + Object.getPrototypeOf(r).tag"), "proto,init|11");
+        assert_eq!(js(&mut b, "log = []; var it = {[Symbol.iterator]() { log.push('iter'); var i = 0; return {next() { log.push('next'); return i++ ? {done: true} : {done: false, value: ['k', 'v']}; }}; }}; var r = Reflect.construct(URLSearchParams, [it], nt); log.join() + '|' + r.get('k')"), "proto,iter,next,next|v");
+        assert_eq!(js(&mut b, "log = []; Reflect.construct(URLSearchParams, [{a: {toString() { log.push('str'); return '1'; }}}], nt); log.join()"), "proto,str");
+        // a throwing init getter: the prototype was read already
+        assert_eq!(js(&mut b, "log = []; try { Reflect.construct(URLSearchParams, [{get a() { throw new RangeError('init'); }}], nt) } catch (e) { e.message + '|' + log.length }"), "init|1");
+        // a bad pair is a TypeError, after the prototype read
+        assert_eq!(js(&mut b, "log = []; try { Reflect.construct(URLSearchParams, [[['only']]], nt) } catch (e) { e.name + '|' + log.length }"), "TypeError|1");
         b.collect(&[]).unwrap();
         assert_eq!(b.navigation_stats().params, 1, "only `r` (the last good one) lives: no failed construction leaves a params object");
     });
@@ -163,11 +167,11 @@ fn other_host_constructors_stay_gated() {
     big(|| {
         let mut b = at();
         let gate = "unsupported:subclassing a host constructor (new.target is not passed to the constructor)";
-        for (name, args) in [("URL", "'http://a.test/'"), ("Headers", ""), ("Request", "'http://a.test/'"), ("Response", "")] {
+        for (name, args) in [("Range", ""), ("MutationObserver", "function () {}")] {
             assert_eq!(js(&mut b, &format!("class X extends {name} {{}}; new X({args})")), gate, "{name}");
             assert_eq!(js(&mut b, &format!("function G() {{}} Reflect.construct({name}, [{args}], G)")), gate, "Reflect {name}");
         }
-        assert_eq!(js(&mut b, "typeof new Event('x') + typeof new URL('http://a.test/')"), "objectobject");
+        assert_eq!(js(&mut b, "typeof new Event('x') + typeof new Range()"), "objectobject");
     });
 }
 
@@ -182,7 +186,7 @@ fn limits_and_failures_leave_no_new_target_behind() {
         assert_eq!(js(&mut b, "try { Reflect.construct(URLSearchParams, [], ntD) } catch (e) { 'caught' }"), format!("limit:{:?}", LimitKind::CallDepth));
         assert_eq!(js(&mut b, "var p = new L('a=1'); [Object.getPrototypeOf(p) === L.prototype, Object.getPrototypeOf(new URLSearchParams()) === URLSearchParams.prototype].join()"), "true,true");
         // an Unsupported gate inside the getter, then a clean construction
-        assert_eq!(js(&mut b, "class E extends URL {}; var ntU = mkNt(function () { new E('http://a.test/'); return {}; }); Reflect.construct(URLSearchParams, [], ntU)"), "unsupported:subclassing a host constructor (new.target is not passed to the constructor)");
+        assert_eq!(js(&mut b, "class E extends Range {}; var ntU = mkNt(function () { new E(); return {}; }); Reflect.construct(URLSearchParams, [], ntU)"), "unsupported:subclassing a host constructor (new.target is not passed to the constructor)");
         assert_eq!(js(&mut b, "Object.getPrototypeOf(new L()) === L.prototype && Object.getPrototypeOf(new URLSearchParams()) === URLSearchParams.prototype"), "true");
         // a step limit inside the getter
         let mut s = mk(EvalLimits { max_steps: 3_000, ..Default::default() });

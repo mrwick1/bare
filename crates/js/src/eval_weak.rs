@@ -10,7 +10,7 @@
 //   reachability from a key, so `set` and `add` of one stop with `Unsupported`, which script cannot catch. A registered
 //   symbol is a TypeError, as in the spec. `has`, `get` and `delete` of any symbol are `undefined` or `false`: none is stored.
 // - A subclass (`class extends WeakMap`) is refused with `Unsupported` when constructed, like Map and Set: the constructor
-//   has no `new.target` yet (`ScFn::is_ctor`, `native_no_nt`).
+//   has no `new.target` yet (`ScFn::is_ctor`, `native_branded`).
 // - `WeakRef` and `FinalizationRegistry` hold a non-registered Symbol as a target or token only through the same
 //   gate (`Unsupported`): bare does not collect symbols by reachability.
 //

@@ -126,3 +126,116 @@ class_extends_native_extends_in_expr	number:2
 class_extends_native_arguments_spread	number:2
 class_extends_native_instances_independent	string:1,0
 class_extends_native_gc_pressure	number:1999000
+fn_basic	string:3,true,true,true,function,1,anonymous,true
+fn_method_and_this	string:7,4,5
+fn_ctor_super	string:12,9,2
+fn_no_new	string:TypeError: Class constructor F cannot be invoked without 'new'
+fn_body_global	string:objectfunction
+fn_proto_chain	string:true,true,[object Function]
+fn_is_constructor	string:1,true,true
+fn_reflect_construct	string:5,3,true
+fn_nt_prototype_not_object	string:5,true
+fn_syntax_error	string:SyntaxError
+fn_own_props	string:length,name,prototype
+fn_call_apply	string:3,7,11
+fn_afn_basic	string:true,true,[object AsyncFunction],true,true
+fn_afn_await	string:2,true,true
+fn_gfn_basic	string:true,true,[object GeneratorFunction],12
+fn_gfn_proto	string:true,object,true
+fn_afn_reflect	string:true,true
+sym_extends_new	string:TypeError: Symbol is not a constructor
+sym_extends_call	string:TypeError: Class constructor S cannot be invoked without 'new'
+sym_extends_def	string:function,true,true,true,true
+sym_extends_ctor_args	string:TypeError: Symbol is not a constructor
+sym_reflect_construct	string:TypeError: Symbol is not a constructor
+sym_new	string:TypeError: Symbol is not a constructor
+sym_extends_static	string:k,j
+sym_reflect_construct_self	string:TypeError: Symbol is not a constructor
+flat_species_basic	string:true,false,1,2,3,true
+flat_species_plain	string:true,2,1,2
+flat_species_depth	string:true,1,2,3,4
+flatmap_species_basic	string:true,1,2,2,4
+flatmap_species_plain	string:true,4,1,1,2,2
+flat_species_undefined	string:false,true,1,2
+flat_species_null	string:true,1,2
+flat_species_not_ctor	string:TypeError: object.constructor[Symbol.species] is not a constructor
+flat_species_ctor_args	string:1,0,true,1,2
+flat_species_via_constructor	string:true,1,2
+flatmap_species_ctor_args	string:1,0,true,1,2
+flat_species_defines	string:new,2,1,2
+flatmap_species_prefilled	string:1,2,9,9
+flat_species_frozen	string:TypeError
+flat_species_species_getter_once	number:2
+re_exec_own_test	string:false,true
+re_exec_own_match	boolean:true
+re_exec_calls	string:abc,abc,abc,abc
+re_exec_replace	string:a[B]c
+re_exec_replace_g	string:a<b>
+re_exec_split	string:a|b|c/5
+re_exec_matchall	string:3,4
+re_exec_match_g	string:a,a,a,4
+re_exec_fake_result	string:[zz]c
+re_exec_returns_non_object	string:TypeError: RegExp exec method returned something other than an Object or null
+re_exec_not_callable	boolean:true
+re_exec_own_prop	string:false,
+re_exec_proto_patch	number:4
+re_exec_proto_patch_split	boolean:true
+re_exec_search	number:7
+re_exec_lastindex_g	string:[q]z
+re_exec_symbol_methods	string:|-1|a|a
+re_exec_sticky_unicode_species	string:||b
+intl_nf_basic	string:true,true,true,1,234.5,[object Intl.NumberFormat],en-US
+intl_nf_override	string:<50%>
+intl_nf_super_ctor	string:3,1
+intl_nf_static	string:en-US,true,N,0
+intl_nf_call	string:TypeError: Class constructor N cannot be invoked without 'new'
+intl_nf_parts	string:integer,decimal,fraction
+intl_nf_reflect	string:true,3
+intl_nf_brand	string:TypeError
+intl_dtf_basic	string:true,true,true,1/1/1970,[object Intl.DateTimeFormat],UTC
+intl_dtf_super	string:1970,2
+intl_dtf_call	string:TypeError: Class constructor D cannot be invoked without 'new'
+intl_dtf_static	string:en-US,true
+intl_dtf_reflect	string:true,1/1/1970
+intl_dtf_parts	string:month,literal,day,literal,year
+intl_coll_basic	string:true,true,true,-1,a,b,[object Intl.Collator]
+intl_coll_super	string:a2,a10
+intl_coll_call	string:TypeError: Class constructor C cannot be invoked without 'new'
+intl_coll_reflect	string:true,1
+intl_pr_basic	string:true,true,true,one,other,[object Intl.PluralRules]
+intl_pr_call	string:TypeError: Class constructor P cannot be invoked without 'new'
+intl_pr_super	string:one,two,few,other
+intl_pr_reflect	string:true,one
+intl_seg_basic	string:true,true,true,a| |b,[object Intl.Segmenter]
+intl_seg_call	string:TypeError: Class constructor S cannot be invoked without 'new'
+intl_seg_reflect	string:true,grapheme
+intl_nt_proto_getter_once	number:5
+intl_nt_proto_not_object	string:true,1
+intl_nf_options_before_proto	string:proto
+intl_dtf_options_before_proto	string:proto
+intl_coll_options_before_proto	string:proto
+intl_pr_options_before_proto	string:proto
+intl_seg_options_before_proto	string:proto
+re_species_getter	string:true,true,function,get [Symbol.species]
+re_split_species_ctor	string:gy
+re_matchall_species_ctor	string:g
+re_exec_unicode_advance	string:-😀-|5
+re_exec_replace_fn_args	string:ab|a|b|1|xaby
+re_exec_replace_template	string:x[ba|ab|x|y|$|$3|$0|a|a0]y
+re_exec_fake_captures	string:x[a||$3]y
+re_exec_fake_index_clamp	string:xaby[ab]
+re_exec_fake_index_negative	string:[ab]by
+re_exec_matchall_non_global_iter	number:1
+re_exec_matchall_iter_tag	string:[object RegExp String Iterator]false,false,true
+re_exec_split_limit	string:a|b/a|,|b
+re_exec_split_empty_string	string:0,1
+re_exec_split_empty_pattern	string:a|b|c
+re_exec_test_global_lastindex	string:true,1,true,2,false,0
+re_exec_search_restores_lastindex	string:1,2
+re_exec_own_prop_matchall	number:2
+re_exec_own_prop_split	string:a|b
+re_exec_own_prop_replace	string:aa
+re_exec_exec_getter_once	number:3
+re_exec_species_not_ctor	string:TypeError: object.constructor[Symbol.species] is not a constructor
+re_exec_returns_undefined	string:TypeError
+re_exec_match_empty_global	string:4,-a-b-c-

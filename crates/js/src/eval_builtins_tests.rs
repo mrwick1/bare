@@ -115,9 +115,10 @@ fn gates_are_explicit_unsupported() {
     assert_eq!(unsupported_of("new RegExp('(?<=a)b')"), "lookbehind");
     assert_eq!(unsupported_of("new RegExp('a', 'v')"), "regexp flag v");
     assert_eq!(unsupported_of("RegExp('(?<x>a)')"), "named group");
-    assert_eq!(unsupported_of("var r = /a/; r.exec = function () { return null; }; r.test('a')"), "RegExp with a replaced exec method");
-    assert_eq!(unsupported_of("var r = /a/g; r.exec = function () { return null; }; 'a'.replace(r, 'b')"), "RegExp with a replaced exec method");
-    assert_eq!(unsupported_of("var r = /a/; r.exec = function () { return null; }; 'a'.split(r)"), "RegExp with a replaced exec method");
+    // A replaced exec is not a gate: the generic algorithms call it.
+    assert_eq!(run("var r = /a/; r.exec = function () { return null; }; r.test('a')"), "boolean:false");
+    assert_eq!(run("var r = /a/g; r.exec = function () { return null; }; 'a'.replace(r, 'b')"), "string:a");
+    assert_eq!(run("var r = /a/; r.exec = function () { return null; }; 'a'.split(r).length"), "number:2");
     // A non-callable exec is ignored, as in the spec.
     assert_eq!(run("var r = /a/; r.exec = 5; r.test('a')"), "boolean:true");
     // The absent methods stay absent (no silent stand-in). `replaceAll`, `search`, `matchAll` and `repeat` exist.

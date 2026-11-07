@@ -99,8 +99,8 @@ fn only_the_opted_in_host_constructor_takes_a_different_new_target() {
         assert_eq!(out(&mut it, "class Q extends Plain {}; new Q()"), GATE);
         assert_eq!(out(&mut it, "function G2() {} Reflect.construct(Plain, [], G2)"), GATE);
         assert_eq!(out(&mut it, "typeof new Plain() + typeof Reflect.construct(Plain, [], Plain)"), "objectobject");
-        // a non-object prototype falls back to the default
-        assert_eq!(out(&mut it, "G.prototype = 3; Object.getPrototypeOf(Reflect.construct(NtCtor, [], G)) === Array.prototype"), "true");
+        // a non-object prototype falls back to `Object.prototype`, as in Chrome
+        assert_eq!(out(&mut it, "G.prototype = 3; Object.getPrototypeOf(Reflect.construct(NtCtor, [], G)) === Object.prototype"), "true");
         // malformed new.target never reaches the host
         for nt in ["{}", "undefined", "null", "1", "() => 1", "async function () {}", "probe"] {
             assert_eq!(out(&mut it, &format!("try {{ Reflect.construct(NtCtor, [], {nt}) }} catch (e) {{ e.name }}")), "TypeError", "{nt}");

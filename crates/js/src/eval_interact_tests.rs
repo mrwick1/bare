@@ -425,7 +425,7 @@ fn a_limit_or_gate_in_an_async_iteration_closes_nothing_and_runs_no_more_js() {
     // an Unsupported gate in the body
     big(move || {
         let mut it = realm(lim());
-        out(&mut it, &format!("{setup} (async function () {{ for (var x of it) {{ await null; var r = /a/; r.exec = function () {{ return null; }}; 'a'.match(r); }} }})(); 0"));
+        out(&mut it, &format!("{setup} (async function () {{ for (var x of it) {{ await null; 'a'.normalize('NFKC'); }} }})(); 0"));
         assert!(matches!(it.drain_microtasks(), Err(Error::Unsupported(_))));
         assert_eq!(out(&mut it, "log.length"), "0");
     });

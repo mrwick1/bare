@@ -134,10 +134,10 @@ fn commit_params(d: &Dom, sp: ObjId) -> R<()> {
     Ok(())
 }
 
-fn new_url(d: &Dom, it: &mut Interp<'_>, rec: Rec) -> R<ObjId> {
+fn new_url(d: &Dom, it: &mut Interp<'_>, rec: Rec, proto: ObjId) -> R<ObjId> {
     room(d)?;
     fit(d, &rec)?;
-    let o = d.obj(it, d.nav.p.get().expect("installed").url)?;
+    let o = d.obj(it, proto)?;
     d.nav.s.borrow_mut().urls.insert(o, UrlObj { rec, sp: None });
     Ok(o)
 }
@@ -167,6 +167,7 @@ fn url_id(d: &Dom, it: &mut Interp<'_>, this: Value) -> R<ObjId> {
 }
 
 pub(crate) fn url_ctor(d: &Dom, it: &mut Interp<'_>, _: Value, a: &[Value]) -> R<Value> {
+    let proto = it.host_proto_from_new_target(d.nav.p.get().expect("installed").url)?;
     need(it, a, 1, "construct 'URL'")?;
     let s = usv(d, it, a[0])?;
     let base = match arg(a, 1) {
@@ -179,7 +180,7 @@ pub(crate) fn url_ctor(d: &Dom, it: &mut Interp<'_>, _: Value, a: &[Value]) -> R
         None => None,
     };
     let rec = nu::parse(&s, base.as_ref()).map_err(|e| uerr(d, it, e, msg, false))?;
-    Ok(Value::Object(new_url(d, it, rec)?))
+    Ok(Value::Object(new_url(d, it, rec, proto)?))
 }
 
 pub(crate) fn url_can_parse(d: &Dom, it: &mut Interp<'_>, _: Value, a: &[Value]) -> R<Value> {
@@ -395,6 +396,8 @@ fn init_from_object(d: &Dom, it: &mut Interp<'_>, o: ObjId) -> R<Vec<(String, St
 }
 
 pub(crate) fn params_ctor(d: &Dom, it: &mut Interp<'_>, _: Value, a: &[Value]) -> R<Value> {
+    // Chrome reads `Get(newTarget, "prototype")` before it converts the init.
+    let proto = it.host_proto_from_new_target(d.nav.p.get().expect("installed").params)?;
     let list = match arg(a, 0) {
         Value::Undefined => Vec::new(),
         Value::Object(o) => init_from_object(d, it, o)?,
@@ -403,9 +406,6 @@ pub(crate) fn params_ctor(d: &Dom, it: &mut Interp<'_>, _: Value, a: &[Value]) -
             form_parse(s.strip_prefix('?').unwrap_or(&s))
         }
     };
-    // Web IDL: the init is converted first (overload resolution), then `Get(newTarget, "prototype")`, then the object is made.
-    let intrinsic = d.nav.p.get().expect("installed").params;
-    let proto = it.host_proto_from_new_target(intrinsic)?;
     Ok(Value::Object(new_params_in(d, it, list, None, proto)?))
 }
 

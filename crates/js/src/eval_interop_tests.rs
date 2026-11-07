@@ -114,9 +114,10 @@ fn run(src: &str) -> String {
 fn custom_hooks_that_are_out_of_scope_are_explicit_gates() {
     let gate = |src: &str, what: &str| assert_eq!(run(src), format!("unsupported:{what}"), "{src}");
     gate("new RegExp({[Symbol.match]: true, source: 'a', flags: ''})", "RegExp constructor with a regexp-like object (Symbol.match)");
-    gate("var r=/a/; r.exec=function(){ return null; }; 'a'.match(r)", "RegExp with a replaced exec method");
-    gate("var r=/a/; r.exec=function(){ return null; }; 'a'.replace(r, 'b')", "RegExp with a replaced exec method");
-    gate("var r=/a/; r.exec=function(){ return null; }; 'a'.split(r)", "RegExp with a replaced exec method");
+    // A replaced exec is not a gate: the generic algorithms call it.
+    assert_eq!(run("var r=/a/; r.exec=function(){ return null; }; 'a'.match(r)"), "ok:null");
+    assert_eq!(run("var r=/a/; r.exec=function(){ return null; }; 'a'.replace(r, 'b')"), "ok:a");
+    assert_eq!(run("var r=/a/; r.exec=function(){ return null; }; 'a'.split(r).length"), "ok:2");
     // What is not a gate: no species, a null species, the intrinsic, and ordinary iterables.
     assert_eq!(run("var a=[1,2]; a.constructor={}; a.map(function(x){return x}).length"), "ok:2");
     assert_eq!(run("var a=[1,2]; a.constructor=function F(){}; a.slice().length"), "ok:2");

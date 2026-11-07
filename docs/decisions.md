@@ -207,8 +207,21 @@ Follow-ups of [Parallel downloads](#parallel-downloads). The numbers are in [res
 - A custom capability in the combinators uses the pair id `u64::MAX`. The "already resolved" flag then lives in the user functions, not in `done_pairs`.
 - `species_ctor` replaces the old gate for `then` and `finally`. The species constructor of an array, a typed array, an `ArrayBuffer` and a `Promise` is read once, with the V8 messages. A species that is the intrinsic constructor takes the old fast path.
 - The brand of an error object is not stored. `Object.prototype.toString` tests an own `stack` and `Error.prototype` in the chain. Reason: no extra field for each error, and the tag matches V8 for the cases of the corpus. It is a heuristic, listed in progress.md.
-- Not done: `Request`, `Response`, `Headers` and `URL` (each constructor must read `new.target`, one change for each); `extends Function` and `extends Symbol`. No target page needs them yet.
+- Done later (2026-11-07): `Request`, `Response`, `Headers`, `URL`, `Blob`, `File`, `FormData`, `AbortSignal`, `Function`, `Symbol`, the `Intl` constructors, `flat` and `flatMap`, and an own `exec` on a `RegExp` subclass. See the next section.
 - Cost rule for this change: no `instructions:u` row worse than +0.5% against c66c8a5. The worst row is +0.41%. See [progress.md](progress.md#class-x-extends-built-in).
+
+## Native subclass conformance
+
+- A host constructor reads `Get(new.target, "prototype")` first, before it converts its arguments. Chrome does the same, and a getter on `prototype` shows the order. This replaces the old order (arguments first) of `URLSearchParams`, `Blob`, `File` and `FormData`.
+- When `prototype` of `new.target` is not an object, a host constructor gives `Object.prototype`. Chrome does that (a V8 API object has no intrinsic default prototype). A JS built-in constructor still takes the intrinsic prototype of its own kind, as the specification says.
+- Headers, Request, Response and URL opt in with `add_ctor_nt`. An internal object of the same kind (`Request.clone()`, `fetch()` results, `url.searchParams`) takes the intrinsic prototype, not the one of the subclass. Chrome does the same.
+- `AbortSignal` opts in only to throw `Failed to construct 'AbortSignal': Illegal constructor` after the prototype read, as Chrome does.
+- `Function`, `AsyncFunction` and `GeneratorFunction` share `Nat::FnCtor(kind)`. The source is parsed as a one-declaration script, walked without being run, and closed over the global environment. The default prototype of `AsyncFunction` is a lazy intrinsic (`async_fn_proto`), as `gen_intr` is for generators.
+- `Symbol` is a constructor for `new.target` purposes only, so `class X extends Symbol {}` is legal and `new X` throws `Symbol is not a constructor`, as Node does.
+- The Intl constructors read `new.target` and use the plain `new` path at no extra cost.
+- A RegExp subclass with its own `exec` runs the generic algorithms of the specification (RegExpExec, `lastIndex` and `flags` read as properties, a species-built splitter and matcher). The builtin fast paths stay exact only while `exec` is the intrinsic, so every `RegExp` row pays one check (`user_exec`), not a property read per call. `RegExp[Symbol.species]` exists now.
+- `flat` and `flatMap` build the result with `ArraySpeciesCreate`. An array whose species is the intrinsic keeps the old path.
+- Not done: `AsyncGeneratorFunction` (the parser has no async generators); `Function.prototype.toString` source text of a dynamic function; own `arguments` and `caller` of a dynamic function; a Proxy as a species result (no trap dispatch); the V8 reads of the `global` and `unicode` getters in `replace` and `match`; lone surrogates in a dynamic function body; `this_regexp` still needs a real RegExp receiver.
 
 ## Frame slots
 

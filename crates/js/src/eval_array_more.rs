@@ -347,7 +347,7 @@ impl<'p> Interp<'p> {
             None if matches!(depth_arg, Value::Undefined) => 1.0,
             None => self.ao_int(depth_arg)?.max(0.0),
         };
-        let a = self.ao_species(this, 0)?;
+        let (a, plain) = self.ao_species_new(this, 0)?;
         let mut out: Vec<Option<Value>> = Vec::new();
         let mut fast = false;
         if let (Value::Object(o), None) = (this, mapper)
@@ -366,9 +366,19 @@ impl<'p> Interp<'p> {
         if !fast {
             self.ao_flatten(&mut out, this, len, depth, mapper)?;
         }
-        let n = out.len() as u64;
-        if !h!(self, self.heap.fill_array(a, out, n as u32)) {
-            return Err(unsupported("array result", Span::default()));
+        if plain {
+            let n = out.len() as u32;
+            if !h!(self, self.heap.fill_array(a, out, n)) {
+                return Err(unsupported("array result", Span::default()));
+            }
+        } else {
+            // A species result may be a proxy, a filled or a frozen array: CreateDataPropertyOrThrow for each element.
+            for (i, v) in out.into_iter().enumerate() {
+                if let Some(v) = v {
+                    let k = self.index_key(i as u64)?;
+                    self.ao_create(a, k, v)?;
+                }
+            }
         }
         Ok(Value::Object(a))
     }

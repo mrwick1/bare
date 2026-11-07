@@ -119,7 +119,7 @@ enum IterState {
     Array { src: Value, i: u64, what: IterWhat, done: bool },
     Str { s: StrId, i: usize, done: bool },
     /// A RegExp String Iterator (`eval_string_more.rs`): the matcher (a copy of the regexp), the string, `g`.
-    ReStr { re: ObjId, s: StrId, global: bool, done: bool },
+    ReStr { re: ObjId, s: StrId, global: bool, unicode: bool, done: bool },
 }
 
 /// How a started iteration steps. `Plain` is an array-like (by index) or a string (by code point).
