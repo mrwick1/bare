@@ -749,6 +749,10 @@ pub struct Heap {
     stubs: Box<[(PropertyKey, Ic); shape::STUBS]>,
     /// Setup mode (`set_setup`).
     setup: bool,
+    /// A collect frees dead shapes when the shape count reaches this: twice the count after the last shape sweep (step A6).
+    shape_sweep_at: usize,
+    /// Shape sweeps so far. A sweep gives the live shapes new ids, so the evaluator resets its caches when this changes.
+    shape_sweeps: u64,
 }
 
 impl Default for Heap {
@@ -789,6 +793,8 @@ impl Heap {
             ic_stats: IcStats::default(),
             stubs: Box::new([(PropertyKey::Index(0), Ic::EMPTY); shape::STUBS]),
             setup: false,
+            shape_sweep_at: shape::SWEEP_MIN,
+            shape_sweeps: 0,
         };
         h.length = h.intern_str("length")?;
         h.shapes = Shapes::new(PropertyKey::String(h.length));
@@ -2115,6 +2121,7 @@ impl Heap {
             self.check_value(r)?;
         }
         self.collections += 1;
+        let sweep = self.shapes.len() >= self.shape_sweep_at;
         let Heap { objects, shapes, strings, symbols, bigs, gray, length, exotics, .. } = self;
         for sl in [&mut strings.marks, &mut symbols.marks] {
             sl.clear();
@@ -2172,6 +2179,9 @@ impl Heap {
                                 PropertyKey::Index(_) => {}
                             }
                         }
+                        if sweep {
+                            shapes.mark_parents(o.shape, &mut keyed);
+                        }
                     }
                     for &v in &o.slots {
                         m.value(v);
@@ -2204,6 +2214,9 @@ impl Heap {
         };
         bigs.sweep(|b| freed_bytes += big::big_bytes(b));
         self.bytes -= freed_bytes;
+        if sweep {
+            self.sweep_shapes(&mut keyed);
+        }
         self.prune_exotics();
         // The interner is weak: rebuild it from the strings that survived.
         self.interner.rebuild(&self.strings);

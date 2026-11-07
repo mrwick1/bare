@@ -375,3 +375,62 @@ fn programs_with_literals_and_closures_match_node() {
         assert!(bad.is_empty(), "{}", bad.join("\n"));
     });
 }
+
+/// The RSS of this process in KiB, from `/proc/self/status` (0 where it is missing).
+fn rss_kib() -> u64 {
+    let s = std::fs::read_to_string("/proc/self/status").unwrap_or_default();
+    s.lines().find_map(|l| l.strip_prefix("VmRSS:")).and_then(|v| v.trim().trim_end_matches("kB").trim().parse().ok()).unwrap_or(0)
+}
+
+/// Step A6: 1 M objects with distinct key sets, with a collect after each 10,000. The shapes of dead objects are freed, so the shape
+/// table stays small, and new objects still get shapes (the table never fills).
+#[test]
+fn a_soak_of_objects_with_distinct_key_sets_keeps_the_shape_table_small() {
+    big(|| {
+        let mut it = Interp::realm(Heap::default(), EvalLimits::default()).unwrap();
+        run(&mut it, "var n = 0; function mk(m) { var s = 0; for (var i = 0; i < m; i++) { var o = {}; o['k' + (n++)] = i; o.v = 1; s += o.v; } return s; }");
+        let (mut rss10, mut most) = (0, 0);
+        for round in 0..100 {
+            let before = it.heap.footprint().shapes;
+            assert_eq!(run(&mut it, "mk(10000)"), "10000");
+            let made = it.heap.footprint().shapes - before;
+            assert!(made >= 19_000, "round {round}: only {made} new shapes");
+            it.collect(&[]).unwrap();
+            most = most.max(it.heap.footprint().shapes);
+            if round == 10 {
+                rss10 = rss_kib();
+            }
+        }
+        eprintln!("soak: shapes after collect at most {most}, RSS {rss10} KiB at round 10, {} KiB at round 100", rss_kib());
+        assert!(most < 10_000, "{most} shapes after a collect");
+    });
+}
+
+/// Step A6: a collect that sweeps the shapes while every kind of entry is filled (own, prototype and absent reads, stores, adds, a
+/// literal site, the traps of a proxy handler). The entries are reset, the sites give the same results and fill again.
+#[test]
+fn a_shape_sweep_with_live_caches_resets_them_and_the_sites_stay_right() {
+    big(|| {
+        let mut it = Interp::realm(Heap::default(), EvalLimits::default()).unwrap();
+        let src = r#"function Pt(v) { this.v = v; }
+Pt.prototype.get = function () { return this.v; };
+function rd(o) { return o.v + o.get() + (o.none === undefined ? 0 : 100); }
+function wr(o, x) { o.v = x; return o.v; }
+function lit(i) { return { a: i, b: i + 1 }; }
+var px = new Proxy({}, { get(t, k) { return k === 'q' ? 7 : undefined; } });
+function run() { var s = 0; for (var i = 0; i < 5; i++) { var o = new Pt(i); s += rd(o) + wr(o, i * 2); var l = lit(i); s += l.a + l.b + Object.keys(l).length + px.q; } return s; }
+var n = 0; function churn(m) { for (var i = 0; i < m; i++) { var o = {}; o['c' + (n++)] = i; } }
+run() + run() + run()"#;
+        assert_eq!(run(&mut it, src), "330");
+        assert_eq!(run(&mut it, "churn(10000)"), "undefined");
+        let sweeps = it.heap.shape_sweeps();
+        it.collect(&[]).unwrap();
+        assert_eq!(it.heap.shape_sweeps(), sweeps + 1, "the collect sweeps the shapes");
+        assert_eq!(run(&mut it, "run()"), "110");
+        let before = it.ic_counts();
+        assert_eq!(run(&mut it, "run() + '' + Object.keys(lit(3)).join() + lit(3).b"), "110a,b4");
+        let c = it.ic_counts();
+        assert!(c.own_hits > before.own_hits && c.store_hits > before.store_hits, "the entries fill again");
+        assert!(c.heap.add_hits > before.heap.add_hits && c.heap.chain_hits > before.heap.chain_hits);
+    });
+}

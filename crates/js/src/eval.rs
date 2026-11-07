@@ -1059,7 +1059,11 @@ impl<'p> Interp<'p> {
         let mut roots = self.roots();
         roots.extend_from_slice(extra);
         roots.extend_from_slice(&host_vals);
+        let sweeps = self.heap.shape_sweeps();
         let r = h!(self, self.heap.collect(&roots));
+        if self.heap.shape_sweeps() != sweeps {
+            self.reset_caches();
+        }
         self.gc_allocs = self.heap.stats().total_object_allocs;
         self.gc_live = self.heap.used_bytes();
         Ok(r)

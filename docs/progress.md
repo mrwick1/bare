@@ -2615,3 +2615,32 @@ Checks (archMachine, base origin/main `5dbaabda3f` from `base-build`):
 - Live staging, read only: 18 runs of the two final builds and 4 runs of instrumented builds, all passed. A scan of the output files and the saved pages found neither the email nor the password.
 
 Not tested: a machine other than archMachine; the window (`--window`); a sheet with `@layer` or `!important` custom properties on the live journey (the unit tests of the cascade cover them); memory of the second `Styles` of `Built`.
+
+## Shape sweep in `collect` (step A6 of the engine plan)
+
+Before this step, A1 to A4 freed no shape. The collect marked the keys of each live shape once (`keyed`), but the shape table only grew. At 65,536 shapes (`SHAPE_CAP`) every new key set went to dictionary mode until the realm ended.
+
+Change:
+- `Heap::collect` sweeps the shapes when the shape count is at least `shape_sweep_at`. That is twice the count after the last sweep, at least `SWEEP_MIN` (8,192) and at most `SHAPE_CAP`. A realm makes about 2,800 shapes, so most pages never sweep.
+- Mark: the `keyed` table of the collect is the shape mark. In a sweep, the first visit of a shape also marks its parents (`Shapes::mark_parents`). The roots, the dictionary sentinel and the preset function shapes always stay.
+- Sweep (`Shapes::sweep`): the live shapes keep their order and get new ids. Dead children leave the `child` entry and the children map. A table that no live shape uses is dropped. A table that a dead shape extended is cut to its longest live user, and its hash index is dropped. `recent` and `found` are cleared. Each live object gets its new shape id. The vectors shrink to twice their length.
+- Reset: the heap resets its stub entries. `Interp::collect` compares `Heap::shape_sweeps` before and after and calls `reset_caches`: every tree walker entry (read, store, add and mega), the proxy trap entries, and every object literal site that holds a shape (set to 0, so it runs its first run again). The bytecode code holds no entry yet. Step B3 must add its entries to `reset_caches`.
+
+Results (archMachine, against `5dbaabd` from `base-build`):
+- Soak (`a_soak_of_objects_with_distinct_key_sets_keeps_the_shape_table_small`): 1 M objects with distinct key sets, a collect after each 10,000. This branch with the sweep turned off in a local edit (main has no sweep; the test on main fails at round 3 before RSS is read): 65,536 shapes after round 3, RSS 21.0 MiB at round 10 and 21.1 MiB at round 100, and every later object in dictionary mode. With the sweep: at most 20 shapes after a collect, RSS 12.2 MiB at round 10 and 12.6 MiB at round 100.
+- Typing page (`#a1`, 50 keys): 334.98 M for each key on both (-1.8 K). Shapes: 2,540 after load, 2,597 after typing. No sweep runs, so the collect pays one branch for each new shape.
+- Full cost matrix (805 rows): mean change glibc -0.012%, jemalloc 0.000% (0 rows measured). Over under one allocator: 0. Over under both: 0. Failed: 0.
+
+Inline cache miss rate of the typing page (A2 counters, `MEM=1`, `#a1`, 50 keys, load included):
+- 6,832,856 member reads. Own hits 89.2%, other hits 6.9%, first runs 0.0%. Misses (fills and refusals): 259,507, 3.80%. Fills: 99,795 own, 29,485 proto, 122,673 absent.
+- The 5 worst sites (misses, from a counter for each site that is not in the branch): React `n.ref` in `Tr` 35,636; `t.props.ref` in `el` 30,192; `t.key` in the element factory 29,950; `h.$$typeof` in the child reconciler 16,474; `h.type` in the child reconciler 15,956. Together 49% of the misses. Each site sees two shapes and alternates between an own and an absent entry.
+- The rate is under 10%, so step A7 (polymorphic caches) does not go ahead.
+
+Checks:
+- New tests: `a_shape_sweep_frees_dead_shapes_and_keeps_the_live_ones_and_their_parents` (heap: parents with no object, a copied table, a cut table, the same keys reach the same shape, no second sweep with no growth), `a_shape_sweep_with_live_caches_resets_them_and_the_sites_stay_right` (own, prototype and absent reads, stores, adds, a literal site and proxy traps across a sweep; the entries fill again) and the soak test.
+- `cargo test --release --workspace --no-fail-fast` on `c876c1e` plus this change: 2,955 passed, 0 failed.
+- `tools/js/test262_check.sh`: gate ok, 27,182 pass.
+- `tools/js/exec_diff.sh`: 79 runs, 0 differences.
+- All 42 other `tools/js/*_check.sh` scripts pass (`parse_check.sh` with `ACORN=` set).
+
+Not tested: a machine other than archMachine; wall time; scale 100 of the load rows; a live page that sweeps (none of the measured pages reaches 8,192 shapes); the debug build (`ic_verify` across a sweep); the bytecode paths (no entries yet).

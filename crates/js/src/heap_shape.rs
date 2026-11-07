@@ -17,8 +17,13 @@
 //! The object goes to dictionary mode for the reasons above like any other.
 //! - the shape table is full (`SHAPE_CAP`): no new shape is made.
 //! The chain of an object is as long as its property count, so the "longer than 1024" rule of the plan can never fire and is not coded.
-//! Shapes are never freed in this step (step A6). A dead key in a shape never matches a live key: a freed handle gets a new
-//! generation.
+//! A dead key in a shape never matches a live key: a freed handle gets a new generation.
+//!
+//! Shape sweep (step A6). A collect frees the shapes that no live object uses, when the shape count has doubled since the last sweep
+//! (and is at least `SWEEP_MIN`). The mark sets the shape of each live object and its parents. The sweep keeps the live shapes in
+//! order with new ids, drops the dead transitions and the table entries past the longest live user, and rewrites the shape of each
+//! live object. Every `Ic` and every literal site shape is then stale: the heap resets its stubs, and the evaluator resets its
+//! entries when `Heap::shape_sweeps` changes.
 //!
 //! Inline caches (step A2). A site (`o.x` in the tree walker, a property instruction in bytecode) keeps an `Ic`: "last time, the receiver had
 //! this shape, and the property was in this slot of the receiver, or of this prototype, or nowhere". `Heap::ic_own` answers an own data hit
@@ -32,8 +37,8 @@
 //! A fill refuses a chain with an exotic object, a dictionary holder, a lazy `prototype` key or an `on*` name of the host: those keep
 //! the plain walk. The contract is in `docs/decisions.md` ("Shapes and inline caches") and the plan is in `docs/engine-plan.md`.
 //!
-//! An `Ic` is plain `Copy` data with no pointer. A handle in it that has died fails the generation check of every handle read. Shapes are
-//! never freed (until step A6), so a shape id in an entry never names another shape.
+//! An `Ic` is plain `Copy` data with no pointer. A handle in it that has died fails the generation check of every handle read. A shape
+//! id in an entry never names another shape: a shape sweep gives new ids, and every entry is reset after it.
 use super::*;
 use std::cell::{Cell, OnceCell};
 
@@ -300,6 +305,86 @@ impl Shapes {
             }
             r == ROOT
         }
+    }
+
+    /// Mark the parents of `shape` in `live` (step A6). A parent's keys are a prefix of its child's, so the caller marked them already.
+    #[inline(never)]
+    pub(super) fn mark_parents(&self, shape: u32, live: &mut [bool]) {
+        let mut p = self.shapes[shape as usize].parent;
+        while p != 0 && !std::mem::replace(&mut live[p as usize], true) {
+            p = self.shapes[p as usize].parent;
+        }
+    }
+
+    /// Free the shapes that `live` does not mark, and the tables and transitions that only they used (step A6). The other shapes keep
+    /// their order and get new ids: the result maps an old id to the new one (`u32::MAX` for a freed shape). The roots, the dictionary
+    /// sentinel and the preset function shapes stay. The recent transitions and answers are cleared. Every cache that holds a shape id
+    /// must be reset after this.
+    pub(super) fn sweep(&mut self, live: &mut [bool]) -> Vec<u32> {
+        live[..=ROOT_PLAIN as usize].fill(true);
+        for s in [self.fn_shape.map(|f| f.1), self.fn_lazy.map(|f| f.1)].into_iter().flatten() {
+            live[s as usize] = true;
+            self.mark_parents(s, live);
+        }
+        let mut remap = vec![u32::MAX; self.shapes.len()];
+        // For each table: 1 + the most entries that a live shape uses, or 0 when no live shape uses it.
+        let mut used = vec![0u32; self.tables.len()];
+        let mut next = 0;
+        for (i, s) in self.shapes.iter().enumerate() {
+            if live[i] {
+                remap[i] = next;
+                next += 1;
+                let u = &mut used[s.table as usize];
+                *u = (*u).max(s.count as u32 + 1);
+            }
+        }
+        let mut tmap = vec![u32::MAX; self.tables.len()];
+        let mut t = 0;
+        let mut i = 0;
+        self.tables.retain_mut(|tb| {
+            let n = used[i];
+            i += 1;
+            if n == 0 {
+                return false;
+            }
+            if tb.entries.len() > n as usize - 1 {
+                // The positions of the index past the cut would name the keys that a branch adds later.
+                tb.entries.truncate(n as usize - 1);
+                tb.entries.shrink_to_fit();
+                tb.index = OnceCell::new();
+            }
+            tmap[i - 1] = t;
+            t += 1;
+            true
+        });
+        let mut i = 0;
+        self.shapes.retain_mut(|s| {
+            i += 1;
+            if !live[i - 1] {
+                return false;
+            }
+            s.parent = remap[s.parent as usize];
+            s.table = tmap[s.table as usize];
+            if s.child.2 != 0 {
+                let c = remap[s.child.2 as usize];
+                s.child = if c == u32::MAX { (PropertyKey::Index(0), 0, 0) } else { (s.child.0, s.child.1, c) };
+            }
+            if let Some(m) = &mut s.children {
+                m.retain(|_, c| remap[*c as usize] != u32::MAX);
+                m.values_mut().for_each(|c| *c = remap[*c as usize]);
+                if m.is_empty() {
+                    s.children = None;
+                }
+            }
+            true
+        });
+        self.shapes.shrink_to(2 * self.shapes.len());
+        self.tables.shrink_to(2 * self.tables.len());
+        self.fn_shape = self.fn_shape.map(|(k, s)| (k, remap[s as usize]));
+        self.fn_lazy = self.fn_lazy.map(|(k, s)| (k, remap[s as usize]));
+        self.recent.fill((0, PropertyKey::Index(0), 0, 0));
+        self.found.iter().for_each(|c| c.set((0, PropertyKey::Index(0), 0, 0)));
+        remap
     }
 
     pub(super) fn count(&self, shape: u32) -> usize {
@@ -740,6 +825,32 @@ pub struct IcStats {
     pub add_hits: u64,
     pub fill_store: u64,
     pub fill_add: u64,
+}
+
+// ---------- shape sweep (step A6) ----------
+
+/// The least shape count at which a collect sweeps the shapes. A realm makes about 2,800.
+pub(super) const SWEEP_MIN: usize = 8192;
+
+impl Heap {
+    /// The second half of a shape sweep in `collect`, after the objects are swept: free the unmarked shapes, give the live objects the
+    /// new ids, and reset the stub entries. The evaluator resets its own entries when `shape_sweeps` changes.
+    #[inline(never)]
+    pub(super) fn sweep_shapes(&mut self, live: &mut [bool]) {
+        let remap = self.shapes.sweep(live);
+        for o in &mut self.objects.live {
+            o.shape = remap[o.shape as usize];
+        }
+        self.stubs.fill((PropertyKey::Index(0), Ic::EMPTY));
+        self.shape_sweeps += 1;
+        // A full table sweeps at the next collect, even when most shapes live.
+        self.shape_sweep_at = (2 * self.shapes.len()).clamp(SWEEP_MIN, SHAPE_CAP);
+    }
+
+    /// Shape sweeps so far. After a sweep, every `Ic` and every shape id kept outside the heap is stale and must be reset.
+    pub fn shape_sweeps(&self) -> u64 {
+        self.shape_sweeps
+    }
 }
 
 // ---------- preset shapes (step A4) ----------
@@ -1499,6 +1610,45 @@ mod tests {
         assert_eq!(keys_text(&mut h, a), ["a_key_only_shapes_hold"]);
         assert_eq!(keys_text(&mut h, b), ["a_key_only_shapes_hold"]);
         assert_eq!(getn(&mut h, b, x), 2.0);
+    }
+
+    #[test]
+    fn a_shape_sweep_frees_dead_shapes_and_keeps_the_live_ones_and_their_parents() {
+        let mut h = Heap::default();
+        let p: Vec<_> = (0..4).map(|i| k(&mut h, &format!("p{i}"))).collect();
+        let obj = |h: &mut Heap, keys: &[usize]| {
+            let o = h.new_object(None).unwrap();
+            keys.iter().for_each(|&i| setn(h, o, p[i], i as f64));
+            o
+        };
+        // `keep` has no object for its parents. `branch` copies the start of its table. `dead` adds a key at the tip of that table.
+        let keep = obj(&mut h, &[0, 1, 2]);
+        let branch = obj(&mut h, &[0, 3]);
+        obj(&mut h, &[0, 1, 2, 3]);
+        for i in 0..SWEEP_MIN {
+            let z = k(&mut h, &format!("z{i}"));
+            setn(&mut h, keep, z, 0.0);
+            assert!(h.delete(keep, z).unwrap());
+        }
+        let sweeps = h.shape_sweeps();
+        h.collect(&[Value::Object(keep), Value::Object(branch)]).unwrap();
+        assert_eq!(h.shape_sweeps(), sweeps + 1);
+        // The sentinel, the 4 roots, p0, p0 p1, p0 p1 p2 and p0 p3.
+        assert_eq!(h.shapes.len(), 9);
+        assert_eq!(keys_text(&mut h, keep), ["p0", "p1", "p2"]);
+        assert_eq!(keys_text(&mut h, branch), ["p0", "p3"]);
+        assert_eq!((getn(&mut h, keep, p[2]), getn(&mut h, branch, p[3])), (2.0, 3.0));
+        // The parents live: the same keys reach the same shape, with no new one.
+        let again = obj(&mut h, &[0, 1, 2]);
+        assert_eq!((shape_of(&h, again), h.shapes.len()), (shape_of(&h, keep), 9));
+        // The dead shape and its table entry are gone: p3 after p0 p1 p2 makes a new shape at the tip of the cut table.
+        setn(&mut h, again, p[3], 3.0);
+        assert_eq!(h.shapes.len(), 10);
+        assert_eq!(keys_text(&mut h, again), ["p0", "p1", "p2", "p3"]);
+        assert_eq!(getn(&mut h, again, p[3]), 3.0);
+        // No growth since the sweep: the next collect does not sweep.
+        h.collect(&[Value::Object(keep)]).unwrap();
+        assert_eq!(h.shape_sweeps(), sweeps + 1);
     }
 
     #[test]
