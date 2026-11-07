@@ -9,7 +9,7 @@ use bare_js::eval::{Error, EvalLimits, LimitKind};
 use bare_js::heap::HeapLimits;
 use bare_js::value::Value;
 
-topic_test!(chrome_cases, "computed", 96);
+topic_test!(chrome_cases, "computed", 107);
 
 const PAGE: &str = "<!doctype html><html id=h><head><style>.r { direction: rtl } #c { color: red }</style></head><body id=b><div id=a class=x><p id=p>t</p></div><span id=s dir=rtl><i id=i></i></span></body></html>";
 
@@ -174,10 +174,10 @@ fn writes_are_no_modification_allowed() {
 
 #[test]
 fn used_values_that_layout_does_not_keep_are_gated_and_layout_limits_end_the_read() {
-    // A percent padding of a grid item needs the grid area, and an auto margin of a flex item needs the free space of its line.
-    let mut b = at("<body style='margin:0'><div style='display:grid;width:200px'><i id=g style='display:block;padding-left:10%'></i></div><div style='display:flex'><i id=f style='display:block;margin-left:auto'></i></div></body>");
+    // A percent padding of a grid item needs the grid area, and an auto margin of an item of a wrapping flex container needs the free space of its line.
+    let mut b = at("<body style='margin:0'><div style='display:grid;width:200px'><i id=g style='display:block;padding-left:10%'></i></div><div style='display:flex;flex-wrap:wrap'><i id=f style='display:block;margin-left:auto'></i></div></body>");
     assert_eq!(js(&mut b, "getComputedStyle(document.getElementById('g')).paddingLeft"), "unsupported:a percent padding or margin of a grid item (the grid area is not kept)");
-    assert_eq!(js(&mut b, "getComputedStyle(document.getElementById('f')).marginLeft"), "unsupported:an auto margin of a flex or grid item (the free space of its line is not kept)");
+    assert_eq!(js(&mut b, "getComputedStyle(document.getElementById('f')).marginLeft"), "unsupported:an auto margin of a grid item or of an item of a wrapping flex container (the free space of its line is not kept)");
     // A px value needs no layout, so it is never gated.
     let mut b = at("<body style='margin:0'><div style='display:grid;width:200px'><i id=g style='display:block;padding-left:10px;margin-left:5px'></i></div></body>");
     assert_eq!(js(&mut b, "var g = getComputedStyle(document.getElementById('g')); g.paddingLeft + g.marginLeft + g.width"), "10px5px185px");
@@ -186,6 +186,21 @@ fn used_values_that_layout_does_not_keep_are_gated_and_layout_limits_end_the_rea
     b.set_geometry_limits(crate::browser_geometry::GeometryLimits { max_nodes: 20, ..Default::default() });
     assert_eq!(js(&mut b, "getComputedStyle(document.getElementById('t')).width"), lim("geometry-nodes"));
     assert_eq!(js(&mut b, "getComputedStyle(document.getElementById('t')).display"), "block");
+}
+
+/// What floating-ui reads when a Radix Select opens (`getComputedStyle` of the trigger and its ancestors): no read may stop the page.
+#[test]
+fn the_reads_of_a_floating_popper_do_not_stop() {
+    let mut b = at("<body style='margin:0'><div id=sc style='overflow:auto;height:100px;width:300px;position:relative'><div style='padding:5%;display:flex'><button id=t type=button style='position:relative;margin:auto 0 0 10%;width:50%;border:2px solid;box-sizing:border-box'>x</button></div></div><div id=pop style='position:fixed;left:0;top:0;transform:none'></div></body>");
+    let all = "['width','height','marginTop','marginLeft','paddingLeft','paddingTop','top','left','right','bottom','position','overflow','overflowX','overflowY','direction','display','boxSizing','borderTopWidth','borderLeftWidth','transform','translate','perspective','containerType','backdropFilter','filter','willChange','contain'].map(function (k) { return k + '=' + cs[k]; }).join()";
+    for id in ["t", "sc", "pop"] {
+        js(&mut b, &format!("var cs = getComputedStyle(document.getElementById('{id}')); 0"));
+        let r = js(&mut b, all);
+        assert!(!r.starts_with("unsupported") && !r.starts_with("limit"), "{id}: {r}");
+        assert!(!r.contains("undefined") || r.contains("transform=undefined"), "{id}: {r}");
+    }
+    js(&mut b, "var cs = getComputedStyle(document.getElementById('t')); 0");
+    assert_eq!(js(&mut b, "cs.getPropertyValue('width') + ' ' + cs.getPropertyValue('transform') + '|' + cs.getPropertyValue('will-change') + '|' + cs.position"), "135px ||relative");
 }
 
 #[test]

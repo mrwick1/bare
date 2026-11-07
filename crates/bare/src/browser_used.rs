@@ -13,7 +13,8 @@
 //!   `box-sizing` is `border-box`.
 //! - Margins: `auto` is 0 for a float, an inline-block, and a vertical margin of a block. A horizontal one of a block takes the free space
 //!   (half each when both are `auto`), only when it is more than 0. An absolute box does the same when `left` and `right` (or `top` and
-//!   `bottom`) are both set.
+//!   `bottom`) are both set. An item of a flex container with one line: in the main axis the free space of the line goes in equal parts to
+//!   all the auto margins of the line, in the cross axis it goes to the auto margins of the item (`Ctx::flex_margin`).
 //! - Insets (`top`, `right`, `bottom`, `left`): `relative` and `sticky` give a percent in pixels; `relative` gives `auto` as 0 or as the minus of the opposite
 //!   side, `sticky` keeps `auto`. `absolute` and `fixed` give `auto` as the distance from the edge of the containing block (its padding
 //!   box less the scrollbars; the window for `fixed` and for an absolute box with no positioned ancestor).
@@ -22,8 +23,8 @@
 //!   (`bare_layout::layout_probing`). A grid with no track is `none`. Every other element keeps the computed list.
 //!
 //! Gates (`Error::Unsupported`)
-//! - A percent padding or margin of a grid item (the grid area is not kept), an `auto` margin of a flex or grid item (the free space of the
-//!   line is not kept), and a containing block that is an inline box.
+//! - A percent padding or margin of a grid item (the grid area is not kept), an `auto` margin of a grid item or of an item of a wrapping flex
+//!   container (the free space of the line is not kept), and a containing block that is an inline box.
 //!
 //! Known differences from Chrome (not gated, the engine does not keep the data)
 //! - `text-decoration-style`, `-color` and `-thickness`, and a second line of `text-decoration`, are dropped by the parser. A read gives the
@@ -43,7 +44,7 @@ use bare_layout::fragment::{Layout, Rect};
 use bare_layout::scroll::Areas;
 
 const GRID_ITEM: &str = "a percent padding or margin of a grid item (the grid area is not kept)";
-const FLEX_MARGIN: &str = "an auto margin of a flex or grid item (the free space of its line is not kept)";
+const FLEX_MARGIN: &str = "an auto margin of a grid item or of an item of a wrapping flex container (the free space of its line is not kept)";
 const INLINE_CB: &str = "the containing block is an inline box";
 
 /// A layout and its scroll containers, for one read.
@@ -298,15 +299,56 @@ impl<'a> Ctx<'a> {
             return self.share(n, i, lo, hi, room - a - b - size);
         }
         let parent = self.doc.flat_parent(n);
-        if self.tree.is_flex_or_grid(parent) {
-            return Err(FLEX_MARGIN);
+        if let Some(p) = parent.filter(|&p| self.tree.is_flex_or_grid(Some(p))) {
+            return self.flex_margin(n, i, p);
         }
         let block = matches!(self.tree.style(n).get(Property::Display), Cv::Keyword(Keyword::Block | Keyword::ListItem | Keyword::Table | Keyword::FlowRoot | Keyword::Flex | Keyword::Grid));
-        if i % 2 == 0 || !block {
+        if i.is_multiple_of(2) || !block {
             return Ok(0.0);
         }
         let room = self.cb_rect(n)?.w - r.w;
         self.share(n, i, lo, hi, room)
+    }
+
+    /// The used auto margin `i` of `n`, an item of the flex container `p` (CSS Flexbox 9.5, 8.1). A single line only: in the main axis the
+    /// free space of the line goes in equal parts to all the auto margins of the line, in the cross axis the free space of the line goes
+    /// to the margins of the item (the line is as big as the content box of the container).
+    fn flex_margin(&self, n: NodeId, i: usize, p: NodeId) -> G<f32> {
+        let ps = self.tree.style(p);
+        let flex = matches!(ps.get(Property::Display), Cv::Keyword(Keyword::Flex | Keyword::InlineFlex));
+        if !flex || ps.get(Property::FlexWrap) != Cv::Keyword(Keyword::Nowrap) {
+            return Err(FLEX_MARGIN);
+        }
+        let row = !matches!(ps.get(Property::FlexDirection), Cv::Keyword(Keyword::Column | Keyword::ColumnReverse));
+        let wide = i % 2 == 1;
+        let (lo, hi) = if wide { (3, 1) } else { (0, 2) };
+        let c = self.content_box(p)?;
+        let room = if wide { c.w } else { c.h };
+        // The size of an item on this axis with its margins that are set, and how many of its margins are auto.
+        let outer = |m: NodeId| -> G<(f32, usize)> {
+            let r = self.border_box(m).ok_or(FLEX_MARGIN)?;
+            let (a, b) = (self.margin_spec(m, lo)?, self.margin_spec(m, hi)?);
+            Ok(((if wide { r.w } else { r.h }) + a.unwrap_or(0.0) + b.unwrap_or(0.0), usize::from(a.is_none()) + usize::from(b.is_none())))
+        };
+        if wide != row {
+            let (size, _) = outer(n)?;
+            let own = self.margin_spec(n, if i == lo { hi } else { lo })?.unwrap_or(0.0);
+            return self.share(n, i, lo, hi, room - (size - own));
+        }
+        let (mut used, mut autos) = (0.0, 0);
+        for k in self.doc.flat_children(p) {
+            match self.doc.data(k) {
+                NodeData::Text(_) if !self.tree.is_collapsible_space(k) => return Err(FLEX_MARGIN),
+                NodeData::Element { .. } if !matches!(self.tree.kind(k), Kind::None | Kind::OutOfFlow) => {
+                    let (s, a) = outer(k)?;
+                    used += s;
+                    autos += a;
+                }
+                _ => {}
+            }
+        }
+        let free = room - used;
+        Ok(if free <= 0.0 || autos == 0 { 0.0 } else { lu(free / autos as f32) })
     }
 
     /// The part of `room` (the width less the box and the offsets) that the auto margin `i` takes, `lo` and `hi` being the two sides of its axis.

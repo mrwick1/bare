@@ -94,3 +94,14 @@ calc-with-a-percent-keeps-its-text	calc(100% - 20px) calc(50% + 10px) calc(10% +
 calc-without-a-percent-is-pixels	15px 6px 12px 3px
 calc-percent-in-a-hidden-subtree	calc(100% - 32px) calc(50% + 1px)
 shorthands-from-the-used-longhands	38.3906px 0px 19.1875px
+flex-auto-margin-takes-the-free-width	200px 0px | 0px 0px
+flex-auto-margins-on-both-sides-split-the-free-width	125px 125px
+flex-auto-margins-of-two-items-share-the-free-width	0px 90px | 90px 20px
+flex-auto-margin-in-a-reversed-row	190px 0px | 0px 0px
+flex-auto-margin-in-a-column	75px 0px | 0px 75px
+flex-auto-margin-in-the-cross-axis	70px 0px | 35px 35px | 0px 70px
+flex-auto-margin-with-a-fixed-margin-in-the-cross-axis	60px 10px
+flex-auto-margin-with-no-free-space-is-zero	0px 50px | 0px 50px
+flex-auto-margin-beside-a-growing-item	0px 250px | 0px 50px
+flex-auto-margin-in-an-inline-flex-with-a-button	240px 0px 60px
+flex-auto-margin-with-a-percent-margin-beside	30px | 170px

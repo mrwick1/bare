@@ -46,7 +46,7 @@
 //!   `auto` and percent `margin-*`, percent `padding-*`, the offsets of a positioned box, grid track lists, a numeric `line-height`
 //!   (in px). The read runs the geometry layout, so `GeometryLimits` apply (`geometry-*`, never catchable). A value that needs no
 //!   layout (a px length, an element that is not rendered, a non-atomic inline box) is the computed value and costs no layout. Gated:
-//!   a percent padding or margin of a grid item, an auto margin of a flex or grid item, and a box whose containing block is an inline box.
+//!   a percent padding or margin of a grid item, an auto margin of a grid item or of an item of a wrapping flex container, and a box whose containing block is an inline box.
 //! - Page-level or per-read? A gate stays a page-level `Unsupported` (fatal), not an empty string or a throw: this module and the other
 //!   host modules say that a gate is never faked, and an empty string or a throw would let a script go on with a value that Chrome
 //!   does not give. `docs/decisions.md` has no rule that says otherwise.
@@ -543,7 +543,6 @@ impl Dom {
         for &p in longs {
             text.push_str(&format!("{}:{};", p.name(), s.text(p, ctx.as_ref()).map_err(Self::gate)?));
         }
-        drop(ctx);
         drop(doc);
         let lim = Lim { bytes: 64 << 10, decls: 256 };
         let fail = |f: Fail| match f {

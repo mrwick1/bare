@@ -288,3 +288,36 @@ var G = function (ids, ps) { return ids.split(' ').map(function (id) { var cs = 
 === shorthands-from-the-used-longhands
 @html <div id=a style="margin:10% 0;padding:5%;height:10px"></div>
 (function () { return G('a', 'margin padding') })
+=== flex-auto-margin-takes-the-free-width
+@html <div style="display:flex;width:300px"><div id=a style="width:50px;height:10px;margin-left:auto"></div><div id=b style="width:50px;height:10px"></div></div>
+(function () { return G('a b', 'margin-left margin-right') })
+=== flex-auto-margins-on-both-sides-split-the-free-width
+@html <div style="display:flex;width:300px"><div id=a style="width:50px;height:10px;margin:0 auto"></div></div>
+(function () { return G('a', 'margin-left margin-right') })
+=== flex-auto-margins-of-two-items-share-the-free-width
+@html <div style="display:flex;width:300px"><div id=a style="width:50px;height:10px;margin-right:auto"></div><div id=b style="width:50px;height:10px;margin-left:auto;margin-right:20px"></div></div>
+(function () { return G('a b', 'margin-left margin-right') })
+=== flex-auto-margin-in-a-reversed-row
+@html <div style="display:flex;flex-direction:row-reverse;width:300px"><div id=a style="width:50px;height:10px;margin-left:auto"></div><div id=b style="width:60px;height:10px"></div></div>
+(function () { return G('a b', 'margin-left margin-right') })
+=== flex-auto-margin-in-a-column
+@html <div style="display:flex;flex-direction:column;height:200px;width:100px"><div id=a style="height:30px;margin-top:auto"></div><div id=b style="height:20px;margin-bottom:auto"></div></div>
+(function () { return G('a b', 'margin-top margin-bottom') })
+=== flex-auto-margin-in-the-cross-axis
+@html <div style="display:flex;height:100px;width:200px"><div id=a style="width:20px;height:30px;margin-top:auto"></div><div id=b style="width:20px;height:30px;margin:auto 0"></div><div id=c style="width:20px;height:30px;margin-bottom:auto"></div></div>
+(function () { return G('a b c', 'margin-top margin-bottom') })
+=== flex-auto-margin-with-a-fixed-margin-in-the-cross-axis
+@html <div style="display:flex;height:100px;width:200px"><div id=a style="width:20px;height:30px;margin-top:auto;margin-bottom:10px"></div></div>
+(function () { return G('a', 'margin-top margin-bottom') })
+=== flex-auto-margin-with-no-free-space-is-zero
+@html <div style="display:flex;width:100px"><div id=a style="width:80px;height:10px;margin-left:auto"></div><div id=b style="width:80px;height:10px"></div></div>
+(function () { return G('a b', 'margin-left width') })
+=== flex-auto-margin-beside-a-growing-item
+@html <div style="display:flex;width:300px"><div id=a style="flex:1;height:10px"></div><div id=b style="width:50px;height:10px;margin-left:auto"></div></div>
+(function () { return G('a b', 'margin-left width') })
+=== flex-auto-margin-in-an-inline-flex-with-a-button
+@html <div id=c style="display:inline-flex;width:300px;padding:5px"><button id=a style="margin-left:auto;width:60px">x</button></div>
+(function () { return G('a', 'margin-left margin-right width') })
+=== flex-auto-margin-with-a-percent-margin-beside
+@html <div style="display:flex;width:300px"><div id=a style="width:50px;height:10px;margin-left:10%"></div><div id=b style="width:50px;height:10px;margin-left:auto"></div></div>
+(function () { return G('a b', 'margin-left') })
