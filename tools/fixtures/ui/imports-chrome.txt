@@ -1,0 +1,6 @@
+tree-6x2-in-import-order	e0=rtl,e1=rtl,e2=rtl,e3=rtl,e4=rtl,e5=rtl,e6=rtl,e7=rtl,e8=rtl,e9=rtl,e10=rtl,e11=rtl,e12=rtl,e13=rtl,e14=rtl,e15=rtl,e16=rtl,e17=rtl
+cycle-is-cut	p=rtl
+failed-import-is-ignored	a=ltr,b=rtl
+layer-loses-to-unlayered	a=ltr,b=rtl
+media-condition	a=ltr,b=rtl
+chain-at-the-depth-limit	p=rtl,q=rtl

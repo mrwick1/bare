@@ -48,7 +48,8 @@ use crate::resources::{self, Expect, LoadError};
 use bare_css::cascade;
 use bare_html::dom::{NodeData, NodeId};
 use bare_url::{Scheme, Url};
-use std::collections::{HashMap, HashSet};
+use bare_net::parallel::MAX_WORKERS;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::rc::Rc;
 
 /// `@import` goes this deep (`main.rs` too). A deeper import is `Fatal::Limit("css-import-depth")`, not a silent cut.
@@ -199,6 +200,7 @@ impl Run<'_> {
                     Err(_) => (Vec::new(), key, false),
                     Ok((final_url, text)) => {
                         let mut parts = Vec::new();
+                        self.warm_imports(&final_url, &text)?;
                         let mut state = Flat { path: vec![key.clone(), final_url.to_string()], refs: 0, bytes: 0 };
                         self.flatten(&final_url, &text, None, 0, &mut state, &mut parts)?;
                         (parts, key, true)
@@ -314,6 +316,49 @@ impl Run<'_> {
             return Err(limit("css-flat-bytes"));
         }
         parts.push(SheetPart { text: text.to_string(), layer });
+        Ok(())
+    }
+
+    /// Download the `@import` tree of the sheet `text` at `url` before `flatten` reads it, once the server is slow (`Client::parallel_pays`).
+    /// Breadth first: up to `WINDOW` sheets of the queue download together, and the imports of a sheet join the queue when its text is
+    /// taken. The texts land in the `fetched` cache, so `flatten` (which keeps the import order, the layers, the cycle cut and the depth
+    /// limit) finds each one there. A URL that is cached or queued is not asked again, so a cycle ends here. A failure is cached.
+    fn warm_imports(&mut self, url: &Url, text: &str) -> Flow {
+        let has = |t: &str| t.as_bytes().windows(7).any(|w| w.eq_ignore_ascii_case(b"@import"));
+        if !has(text) || !self.net.client.parallel_pays() {
+            return Ok(());
+        }
+        let vp = self.dom.plat.s.borrow().viewport;
+        let mut lim = self.lim.resources.clone();
+        lim.max_resource_bytes = lim.max_resource_bytes.min(MAX_BODY);
+        let (mut queue, mut seen, mut refs) = (VecDeque::new(), HashSet::new(), 0);
+        let mut enqueue = |run: &mut Self, base: &Url, text: &str, depth: usize, queue: &mut VecDeque<(Url, usize)>| {
+            if depth >= MAX_IMPORT_DEPTH || !has(text) {
+                return;
+            }
+            for imp in cascade::imports(&mut run.dom.doc.borrow_mut(), text, vp) {
+                refs += 1;
+                if let Ok(child) = base.join(imp.href.trim_matches(WS))
+                    && refs <= MAX_IMPORT_REFS
+                    && !run.dom.scripts.sheets.borrow().fetched.contains_key(&child.to_string())
+                    && seen.insert(child.to_string())
+                {
+                    queue.push_back((child, depth + 1));
+                }
+            }
+        };
+        enqueue(self, url, text, 0, &mut queue);
+        while let Some((child, depth)) = queue.pop_front() {
+            let kept = self.kept();
+            for u in std::iter::once(&child).chain(queue.iter().map(|(u, _)| u)).take(MAX_WORKERS) {
+                if !(self.https_only && u.scheme == Scheme::Http) && self.res.fetches + self.net.started.len() < lim.max_fetches {
+                    self.net.start(Expect::Style, u, &lim, self.deadline, kept);
+                }
+            }
+            if let Ok((final_url, body)) = self.fetch_sheet(&child)? {
+                enqueue(self, &final_url, &body, depth, &mut queue);
+            }
+        }
         Ok(())
     }
 

@@ -1,0 +1,134 @@
+=== tree-6x2-in-import-order
+@file /page.html
+<link rel=stylesheet href=/t.css><p id=e0></p><p id=e1></p><p id=e2></p><p id=e3></p><p id=e4></p><p id=e5></p><p id=e6></p><p id=e7></p><p id=e8></p><p id=e9></p><p id=e10></p><p id=e11></p><p id=e12></p><p id=e13></p><p id=e14></p><p id=e15></p><p id=e16></p><p id=e17></p>
+@file /t.css
+@import '/g0.css';@import '/g1.css';@import '/g2.css';@import '/g3.css';@import '/g4.css';@import '/g5.css';
+#e17{direction:rtl}
+@file /g0_0.css
+
+#e0{direction:ltr}
+@file /g0_1.css
+
+#e0{direction:rtl}
+#e1{direction:ltr}
+@file /g0.css
+@import '/g0_0.css';@import '/g0_1.css';
+#e1{direction:rtl}
+#e2{direction:ltr}
+@file /g1_0.css
+
+#e2{direction:rtl}
+#e3{direction:ltr}
+@file /g1_1.css
+
+#e3{direction:rtl}
+#e4{direction:ltr}
+@file /g1.css
+@import '/g1_0.css';@import '/g1_1.css';
+#e4{direction:rtl}
+#e5{direction:ltr}
+@file /g2_0.css
+
+#e5{direction:rtl}
+#e6{direction:ltr}
+@file /g2_1.css
+
+#e6{direction:rtl}
+#e7{direction:ltr}
+@file /g2.css
+@import '/g2_0.css';@import '/g2_1.css';
+#e7{direction:rtl}
+#e8{direction:ltr}
+@file /g3_0.css
+
+#e8{direction:rtl}
+#e9{direction:ltr}
+@file /g3_1.css
+
+#e9{direction:rtl}
+#e10{direction:ltr}
+@file /g3.css
+@import '/g3_0.css';@import '/g3_1.css';
+#e10{direction:rtl}
+#e11{direction:ltr}
+@file /g4_0.css
+
+#e11{direction:rtl}
+#e12{direction:ltr}
+@file /g4_1.css
+
+#e12{direction:rtl}
+#e13{direction:ltr}
+@file /g4.css
+@import '/g4_0.css';@import '/g4_1.css';
+#e13{direction:rtl}
+#e14{direction:ltr}
+@file /g5_0.css
+
+#e14{direction:rtl}
+#e15{direction:ltr}
+@file /g5_1.css
+
+#e15{direction:rtl}
+#e16{direction:ltr}
+@file /g5.css
+@import '/g5_0.css';@import '/g5_1.css';
+#e16{direction:rtl}
+#e17{direction:ltr}
+@read e0 e1 e2 e3 e4 e5 e6 e7 e8 e9 e10 e11 e12 e13 e14 e15 e16 e17
+=== cycle-is-cut
+@file /page.html
+<link rel=stylesheet href=/a.css><p id=p></p>
+@file /a.css
+@import '/b.css'; #p{direction:rtl}
+@file /b.css
+@import '/a.css'; #p{direction:ltr}
+@read p
+=== failed-import-is-ignored
+@file /page.html
+<link rel=stylesheet href=/t.css><p id=a></p><p id=b></p>
+@file /t.css
+@import '/missing.css'; @import '/ok.css'; #a{direction:ltr}
+@file /ok.css
+#a{direction:rtl} #b{direction:rtl}
+@read a b
+=== layer-loses-to-unlayered
+@file /page.html
+<link rel=stylesheet href=/t.css><p id=a></p><p id=b></p>
+@file /t.css
+@import '/l.css' layer(x); #a{direction:ltr}
+@file /l.css
+#a{direction:rtl} #b{direction:rtl}
+@read a b
+=== media-condition
+@file /page.html
+<link rel=stylesheet href=/t.css><p id=a></p><p id=b></p>
+@file /t.css
+@import '/m.css' (min-width:99999px); @import '/n.css' (min-width:1px);
+@file /m.css
+#a{direction:rtl}
+@file /n.css
+#b{direction:rtl}
+@read a b
+=== chain-at-the-depth-limit
+@file /page.html
+<link rel=stylesheet href=/d0.css><p id=p></p><p id=q></p>
+@file /d0.css
+@import '/d1.css'; #p{direction:rtl}
+@file /d1.css
+@import '/d2.css'; #p{direction:ltr}
+@file /d2.css
+@import '/d3.css'; #p{direction:rtl}
+@file /d3.css
+@import '/d4.css'; #p{direction:ltr}
+@file /d4.css
+@import '/d5.css'; #p{direction:rtl}
+@file /d5.css
+@import '/d6.css'; #p{direction:ltr}
+@file /d6.css
+@import '/d7.css'; #p{direction:rtl}
+@file /d7.css
+@import '/d8.css'; #p{direction:ltr}
+@file /d8.css
+#q{direction:rtl} #p{direction:rtl}
+@read p q
