@@ -67,7 +67,13 @@ pub struct Page {
     pub(crate) source: Source,
     pub(crate) frame: Option<Frame>,
     painter: Painter,
-    pub(crate) canvas: Canvas,
+    /// The size of the window, or the viewport of a headless page.
+    size: (u32, u32),
+    /// The pixels of a headless page (`paint`), made at its first paint. A window page draws into the buffer of the window
+    /// (`App::frame`) and keeps none: this stays empty unless a capture or `check_frames` asks for one.
+    pub(crate) canvas: Canvas<'static>,
+    /// Does the page draw into a window (`App::frame` ran)?
+    pub(crate) windowed: bool,
     pointer: Pointer,
     /// Is the pointer in the window, and did the boxes move under it since it last moved?
     inside: bool,
@@ -265,15 +271,17 @@ pub(crate) fn point_in(b: &mut Browser, fr: &Frame, n: NodeId, at: u32) -> Optio
 
 impl Page {
     pub fn new(source: Source, viewport: (u32, u32)) -> Page {
-        Page::with_canvas(source, Canvas::new(viewport.0.max(1), viewport.1.max(1)))
+        Page::with_canvas(source, (viewport.0.max(1), viewport.1.max(1)), Canvas::new(0, 0))
     }
 
-    fn with_canvas(source: Source, canvas: Canvas) -> Page {
+    fn with_canvas(source: Source, size: (u32, u32), canvas: Canvas<'static>) -> Page {
         Page {
             source,
             frame: None,
             painter: Painter::new(),
+            size,
             canvas,
+            windowed: false,
             pointer: Pointer::default(),
             inside: false,
             moved: false,
@@ -327,8 +335,8 @@ impl Page {
         cfg
     }
 
-    /// `open_in` in this window, as the `open` of a driver: the old document ends first, and the call returns at once. The canvas keeps
-    /// the pixels of the old page until the first frame of the new one, so the window never holds two canvases. If the new session
+    /// `open_in` in this window, as the `open` of a driver: the old document ends first, and the call returns at once. The window (or the
+    /// canvas of a headless page) keeps the pixels of the old page until the first frame of the new one. If the new session
     /// cannot start, no document is left.
     pub fn reopen_in(&mut self, url: &str, net: &bare_net::http::Client) -> Result<(), String> {
         self.release_frame();
@@ -337,9 +345,9 @@ impl Page {
         }
         let s = Page::live_session(Page::config_in(url, net), self.viewport())?;
         let canvas = std::mem::replace(&mut self.canvas, Canvas::new(0, 0));
-        let (ticks, woken, quiet) = (self.ticks, self.woken, self.quiet);
-        *self = Page::with_canvas(Source::Session(Box::new(s)), canvas);
-        (self.ticks, self.woken, self.quiet) = (ticks, woken, quiet);
+        let (ticks, woken, quiet, windowed) = (self.ticks, self.woken, self.quiet, self.windowed);
+        *self = Page::with_canvas(Source::Session(Box::new(s)), self.size, canvas);
+        (self.ticks, self.woken, self.quiet, self.windowed) = (ticks, woken, quiet, windowed);
         Ok(())
     }
 
@@ -445,12 +453,17 @@ impl Page {
     /// Compare the frame of the window with a frame made from nothing: the pixels, the fragments and the page bars. The first
     /// difference, if any.
     pub fn check_frame(&mut self) -> Result<(), String> {
-        let px = self.canvas.pixels.clone();
+        let px = self.canvas.pixels.to_vec();
+        self.check_pixels(&px)
+    }
+
+    /// `check_frame` for the pixels `px` of the frame.
+    fn check_pixels(&mut self, px: &[u32]) -> Result<(), String> {
         let kept = self.frame.as_ref().map(|f| (f.layout.fragments.clone(), f.bars));
         let (fresh_px, fresh) = self.paint_fresh();
         if let Some(i) = px.iter().zip(&fresh_px).position(|(a, b)| a != b) {
             let n = px.iter().zip(&fresh_px).filter(|(a, b)| a != b).count();
-            return Err(format!("{n} pixels differ from a frame made from nothing, the first at {},{}", i % self.canvas.width as usize, i / self.canvas.width as usize));
+            return Err(format!("{n} pixels differ from a frame made from nothing, the first at {},{}", i % self.size.0 as usize, i / self.size.0 as usize));
         }
         match (kept, fresh) {
             (Some((a, ab)), Some((b, bb))) => {
@@ -467,9 +480,9 @@ impl Page {
         }
     }
 
-    /// The size of the canvas: the viewport given at the open, or the window size after a `resize`.
+    /// The size of the frame: the viewport given at the open, or the window size after a `resize`.
     pub fn viewport(&self) -> (u32, u32) {
-        (self.canvas.width, self.canvas.height)
+        self.size
     }
 
     /// The layout of the last frame, made now if the page changed. A stale frame with the same render key keeps its layout.
@@ -683,8 +696,8 @@ impl Page {
         Cursor::Default
     }
 
-    /// The document is about to end. Drop the frame (styles, layout, display list) that was made for it. Keep the pixels of the
-    /// canvas: they show the old page until the new one has its first paint. Then the old document and the new one never share the heap.
+    /// The document is about to end. Drop the frame (styles, layout, display list) that was made for it. The pixels of the
+    /// old page stay on screen (or in the canvas) until the new one has its first paint. Then the old document and the new one never share the heap.
     pub(crate) fn release_frame(&mut self) {
         self.frame = None;
         self.painter.list = Default::default();
@@ -815,11 +828,24 @@ impl Page {
         h
     }
 
-    /// Paint the page into the canvas, then the fields. The display list is built once for a frame; a scroll draws it again.
+    /// Paint the page into its own canvas (headless). The canvas keeps the last frame while the next document is on its way.
     pub fn paint(&mut self) -> &[u32] {
+        let mut canvas = std::mem::replace(&mut self.canvas, Canvas::new(0, 0));
+        if (canvas.width, canvas.height) != self.size {
+            canvas = Canvas::new(self.size.0, self.size.1);
+        }
+        self.paint_into(&mut canvas);
+        self.canvas = canvas;
+        &self.canvas.pixels
+    }
+
+    /// Paint the page into `canvas` (of the size of the page), then the fields. The display list is built once for a frame; a scroll
+    /// draws it again. All of the canvas is drawn. `false`: a next document is on its way, and nothing was drawn (the last frame stays).
+    pub(crate) fn paint_into(&mut self, canvas: &mut Canvas) -> bool {
         self.rehover();
         self.frame_now();
-        let Page { source, frame, painter, canvas, built, listed, controls, inputs, band, ext, whole, .. } = self;
+        let mut drew = true;
+        let Page { source, frame, painter, built, listed, controls, inputs, band, ext, whole, .. } = self;
         let b = source.browser();
         if let (Some(b), Some(f)) = (b, frame.as_ref()) {
             let focus = b.active_element().ok().flatten();
@@ -880,28 +906,31 @@ impl Page {
                 Page::draw_field(painter, canvas, &fld, sel.filter(|_| focused));
             }
         } else if !matches!(source, Source::Session(s) if s.loading().is_some()) {
-            // A next document on its way: the canvas keeps the last frame of the old one.
             canvas.pixels.fill(0xFFFF_FFFF);
+        } else {
+            // A next document on its way: the last frame of the old one stays.
+            drew = false;
         }
         self.first_frame.get_or_insert_with(|| self.started.elapsed());
-        if self.check_frames
-            && let Err(e) = self.check_frame()
+        if drew
+            && self.check_frames
+            && let Err(e) = self.check_pixels(&canvas.pixels)
         {
             panic!("BARE_CHECK_FRAMES: {e}");
         }
-        &self.canvas.pixels
+        drew
     }
 
     /// Run `f` on the page geometry and a copy of the offsets; keep the offsets when it says that it moved something.
     pub(crate) fn scroll_with(&mut self, f: impl FnOnce(&Geo, &mut Scroll) -> bool) -> bool {
         self.frame_now();
-        let Page { source, frame, canvas, .. } = self;
+        let Page { source, frame, size, .. } = self;
         let (Some(b), Some(fr)) = (source.browser(), frame.as_ref()) else { return false };
         let mut s = b.scroll().clone();
         let moved = {
             let doc = b.document();
             let doc = doc.borrow();
-            f(&Geo { doc: &doc, styles: &fr.styles, layout: &fr.layout, areas: &fr.areas, window: (canvas.width as f32, canvas.height as f32), bars: fr.bars }, &mut s)
+            f(&Geo { doc: &doc, styles: &fr.styles, layout: &fr.layout, areas: &fr.areas, window: (size.0 as f32, size.1 as f32), bars: fr.bars }, &mut s)
         };
         if moved {
             b.set_scroll(s);
@@ -973,7 +1002,7 @@ impl Page {
 
 impl App for Page {
     fn resize(&mut self, width: u32, height: u32) {
-        self.canvas = Canvas::new(width, height);
+        self.size = (width, height);
         let r = self.browser().map(|b| b.set_viewport(width as f32, height as f32));
         if let Some(Err(e)) = r {
             self.note(format!("viewport: {e:?}"));
@@ -982,8 +1011,9 @@ impl App for Page {
         self.settle();
     }
 
-    fn frame(&mut self, _: &mut Control) -> &[u32] {
-        self.paint()
+    fn frame(&mut self, _: &mut Control, out: &mut [u32]) -> bool {
+        self.windowed = true;
+        self.paint_into(&mut Canvas::over(self.size.0, self.size.1, out))
     }
 
     fn tick(&mut self, ctl: &mut Control) -> Option<Instant> {

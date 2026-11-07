@@ -3288,3 +3288,43 @@ Profiling notes: on this perf, `perf stat -e probe_*` cannot parse uprobe events
 Next, not done here: `Result<Value, Error>` is returned through memory (`Error` holds a `&'static str` and a span), and the `?` after each node shows as 2 to 3% of `eval_expr_inner` and `link_inner`. A smaller `Error` is a hypothesis, not measured.
 
 Not tested: arjun-e16; the window (`--window`); the debug assertion in `fast_binding` (all tests ran in release); peak RSS of the typing page; the journey after the rebase.
+
+## Paint straight into the shared-memory buffer (S5)
+
+#268 left two costs of a window: the canvas (3.5 MiB at 1280x720), from which each frame was copied, and the second `wl_shm` buffer (3.5 MiB). This change removes the canvas and drops the free buffer when the window is idle.
+
+The premise "paint only the damaged regions" did not hold: #244 made the restyle, the layout and the display list incremental, but `Painter::draw_view` fills and draws the whole canvas on each frame. So the free buffer needs no copy of the damage of the last frame (no buffer age): each frame draws all of it. The one case that drew nothing is a page that waits for its next document. It keeps the old frame.
+
+Change:
+- `Canvas` has a lifetime. Its pixels are `Pixels::Own(Vec<u32>)` (headless, captures) or `Pixels::Lent(&mut [u32])` (`Canvas::over`, the buffer of a window). Both deref to `[u32]`.
+- `App::frame(ctl, out) -> bool` draws into `out`, the free buffer of the window. `false` keeps the frame on screen: the window commits nothing. With no frame of this size on screen, the window shows `out` filled white, as the new canvas of a resize did.
+- `Page::paint_into` draws into a given canvas. `Page::paint` (headless) keeps its own canvas, made at the first paint. A window page keeps none. `capture` in a window frees the canvas that it paints.
+- The window drops its free buffer 1 s (`IDLE`) after the last frame. The compositor holds the other one, the frame on screen. The next frame makes the buffer again. The loop wakes once for the drop.
+
+Tests (written first):
+- `a_window_frame_paints_into_the_buffer_of_the_window` (`crates/bare/tests/window_memory.rs`, counting allocator): the heap peak from the open to the first frame must be 3/4 of a canvas lower in a window than headless. With the old copy path: 9,081,982 B in a window, 4,988,576 B headless, failed. Now it passes.
+- `frames_in_two_window_buffers_equal_the_headless_canvas` (`page_tests.rs`): two buffers that start as garbage take turns. After each of 10 changes (hover, click, typed keys, script changes, a wheel, a resize), the buffer equals the canvas of a headless page with the same changes. A draw that skips the background fill on an old buffer fails at step 1 (6,331 pixels).
+- `window_lifecycle`: `a_kept_frame_commits_nothing`, and `an_idle_window_drops_its_free_buffer`, which fails with `IDLE` at 1,000 s. The existing scenarios (50 resizes, held buffers never written) pass.
+
+Results (arjun-e16, `cage` headless with pixman, base origin/main `6d57db6` from `base-build`, interleaved runs, medians):
+
+| Run | main | this change |
+| --- | ---: | ---: |
+| Fixture journey x50, peak PSS, THP off, 8 runs each | 28.02 MiB | 26.19 MiB |
+| Fixture journey x50, peak PSS, THP `always`, 5 runs each, two rounds | 30.30, 27.78 MiB | 26.83, 28.71 MiB |
+| Heavy page, peak PSS, THP off, 10 runs each | 64.59 MiB | 64.51 MiB |
+| Heavy page, peak PSS, THP `always`, two rounds (8 and 6 runs) | 68.12, 64.00 MiB | 66.31, 65.24 MiB |
+| Heavy page, `bare --window`, idle at 3.5 s, 3 runs each | 63.6 to 63.9 MiB | 54.4 to 54.6 MiB |
+| Heavy page, frame time (median, p90), 4 runs of 27 to 29 frames | 0.61-0.64, 1.36-1.43 ms | 0.41-0.43, 1.13-1.19 ms |
+
+- Frame time is from the entry of `Hosted::frame` to the next `poll` of the window thread (a uprobe and the `sys_enter_ppoll` tracepoint): the paint, the copy on main, and the commit.
+- Heavy page peak: the canvas left `[heap]`, but the allocator took most of it back. At the peak, `[heap]` fell from 46.9 to 39.4 MiB and `[anon]` rose from 3.9 to 9.2 MiB. On main the canvas was an mmap chunk, and the free of the first canvas at the resize raised the dynamic mmap threshold of glibc. Without it, later blocks of 128 KiB to 3.5 MiB are mapped on their own. Net heap and anonymous memory: about -2.3 MiB. Peak PSS: no change within the noise.
+- Idle: the shm mapping goes from 7.03 MiB to 3.52 MiB after the idle second, and the canvas is gone.
+
+Checks (arjun-e16):
+- `tools/js/cost_matrix.sh`, base `6d57db6`: 805 rows in 77 s. Mean change: glibc -0.001%, jemalloc +0.000% (0 rows measured). Over under one allocator: 0. Over under both: 0. Failed: 0.
+- `cargo test --release --workspace --no-fail-fast`: 58 binaries, 2,989 passed, 0 failed.
+
+Next, not done here: the heavy page peak. A fixed glibc mmap threshold costs time (#268). Paint of only the damaged rectangles would need the buffer age (a copy of the damage of the last frame into the free buffer).
+
+Not tested: a real Hyprland window (only `cage`); a compositor that holds both buffers while idle (then nothing is dropped); HiDPI; live staging (no credentials on this machine); the look of a window during a load (no screenshot: the kept frame rests on the commit that is not made); the cost of the first frame after an idle second (a new buffer and its page faults) in time.

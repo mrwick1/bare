@@ -34,7 +34,7 @@ fn page(html: &str, vp: (f32, f32)) -> Page {
     Page { doc, styles, layout, areas }
 }
 
-fn draw(p: &Page, scroll: &Scroll, bars: (bool, bool)) -> Canvas {
+fn draw(p: &Page, scroll: &Scroll, bars: (bool, bool)) -> Canvas<'static> {
     let mut painter = Painter::new();
     painter.build(&p.doc, &p.styles, &p.layout, &p.areas, (W, H));
     let mut canvas = Canvas::new(W, H);

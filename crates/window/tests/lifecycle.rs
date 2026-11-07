@@ -288,8 +288,9 @@ impl Compositor {
 
 struct TestApp {
     size: (u32, u32),
-    pixels: Vec<u32>,
     frames: Arc<AtomicU64>,
+    /// Frames after this one keep the frame on screen (`App::frame` gives `false`).
+    keep_after: Arc<AtomicU64>,
     close_after: u64,
     sizes: Arc<Mutex<Vec<(u32, u32)>>>,
     /// Timers: the times of the work that `tick` gives, and when each one ran.
@@ -299,24 +300,28 @@ struct TestApp {
 
 impl TestApp {
     fn new(frames: &Arc<AtomicU64>, sizes: &Arc<Mutex<Vec<(u32, u32)>>>) -> TestApp {
-        TestApp { size: (0, 0), pixels: vec![], frames: frames.clone(), close_after: u64::MAX, sizes: sizes.clone(), due: vec![], ran: Arc::default() }
+        TestApp { size: (0, 0), frames: frames.clone(), keep_after: Arc::new(AtomicU64::new(u64::MAX)), close_after: u64::MAX, sizes: sizes.clone(), due: vec![], ran: Arc::default() }
     }
 }
 
 impl App for TestApp {
     fn resize(&mut self, w: u32, h: u32) {
         self.size = (w, h);
-        self.pixels = vec![0xff20_4060; w as usize * h as usize];
         self.sizes.lock().unwrap().push((w, h));
     }
-    fn frame(&mut self, ctl: &mut Control) -> &[u32] {
+    fn frame(&mut self, ctl: &mut Control, out: &mut [u32]) -> bool {
         let n = self.frames.fetch_add(1, Ordering::SeqCst) + 1;
-        // The number of the frame goes in the first pixel, so that the compositor can tell which frame it holds.
-        self.pixels[0] = 0xff00_0000 | n as u32;
+        assert_eq!(out.len(), self.size.0 as usize * self.size.1 as usize);
         if n >= self.close_after {
             ctl.close();
         }
-        &self.pixels
+        if n > self.keep_after.load(Ordering::SeqCst) {
+            return false;
+        }
+        // The number of the frame goes in the first pixel, so that the compositor can tell which frame it holds.
+        out.fill(0xff20_4060);
+        out[0] = 0xff00_0000 | n as u32;
+        true
     }
     fn tick(&mut self, ctl: &mut Control) -> Option<Instant> {
         let now = Instant::now();
@@ -332,6 +337,7 @@ struct Run {
     handle: std::thread::JoinHandle<Result<Stats, bare_window::Error>>,
     waker: Waker,
     frames: Arc<AtomicU64>,
+    keep_after: Arc<AtomicU64>,
     sizes: Arc<Mutex<Vec<(u32, u32)>>>,
     ran: Arc<Mutex<Vec<(Instant, Instant)>>>,
 }
@@ -345,7 +351,8 @@ fn start_with(comp: &mut Compositor, socket: UnixStream, close_after: u64, timer
     let frames = Arc::new(AtomicU64::new(0));
     let sizes = Arc::new(Mutex::new(vec![]));
     let ran = Arc::new(Mutex::new(vec![]));
-    let (f, s, r) = (frames.clone(), sizes.clone(), ran.clone());
+    let keep_after = Arc::new(AtomicU64::new(u64::MAX));
+    let (f, s, r, k) = (frames.clone(), sizes.clone(), ran.clone(), keep_after.clone());
     let (tx, rx) = std::sync::mpsc::channel();
     let handle = std::thread::spawn(move || {
         let config = Config { title: "test".into(), app_id: "bare-test".into(), size: (320, 240) };
@@ -356,6 +363,7 @@ fn start_with(comp: &mut Compositor, socket: UnixStream, close_after: u64, timer
         let now = Instant::now();
         app.due = timers.iter().map(|&d| now + d).collect();
         app.ran = r;
+        app.keep_after = k;
         window.run(&mut app)
     });
     // Opening the window asks the compositor some questions: serve them while we wait.
@@ -367,7 +375,7 @@ fn start_with(comp: &mut Compositor, socket: UnixStream, close_after: u64, timer
             Err(_) => assert!(Instant::now() < end, "the window did not open"),
         }
     };
-    Run { handle, waker, frames, sizes, ran }
+    Run { handle, waker, frames, keep_after, sizes, ran }
 }
 
 fn open_fds() -> usize {
@@ -391,6 +399,8 @@ fn window_lifecycle() {
     the_program_closes_the_window();
     the_compositor_closes_the_window();
     work_of_the_app_wakes_the_loop();
+    a_kept_frame_commits_nothing();
+    an_idle_window_drops_its_free_buffer();
     assert_eq!(open_fds(), fds, "file descriptors were left open");
 }
 
@@ -434,6 +444,54 @@ fn work_of_the_app_wakes_the_loop() {
     let stats = finish(&mut comp, run);
     // The first frame, three timers, and the close: a loop that polled would count hundreds in these 500 ms.
     assert!(stats.wakeups < 20, "{stats:?}");
+}
+
+/// An idle window keeps only the buffer that the compositor shows: the free one goes after `IDLE` with no frame. The next frame makes it again.
+fn an_idle_window_drops_its_free_buffer() {
+    let (mut comp, socket) = Compositor::new();
+    let run = start(&mut comp, socket, u64::MAX);
+    comp.pump_until("first frame", |s| s.commits.len() == 1);
+    run.waker.wake();
+    comp.pump_until("second frame", |s| s.commits.len() == 2);
+    assert_eq!(comp.server.live_buffers, 2);
+    comp.pump_for(Duration::from_millis(300));
+    assert_eq!(comp.server.live_buffers, 2, "a short pause keeps both buffers");
+    comp.pump_until("the free buffer is dropped", |s| s.live_buffers == 1);
+    assert!(comp.server.current.is_some(), "the buffer on screen stays");
+    run.waker.wake();
+    comp.pump_until("a frame after the pause", |s| s.commits.len() == 3);
+    assert_eq!(comp.server.commits[2].first_pixel, 0xff00_0003);
+    comp.server.toplevel.as_ref().unwrap().close();
+    let stats = finish(&mut comp, run);
+    assert_eq!(stats.buffers_made, 3);
+    // Two frames, one drop, one frame and the close: the drop is one timer, not a poll.
+    assert!(stats.wakeups < 20, "{stats:?}");
+}
+
+/// A program that keeps its frame (a page that waits for its next document) commits nothing: the compositor shows the last frame. With
+/// nothing of this size on screen, the window shows white.
+fn a_kept_frame_commits_nothing() {
+    let (mut comp, socket) = Compositor::new();
+    let run = start(&mut comp, socket, u64::MAX);
+    run.keep_after.store(0, Ordering::SeqCst);
+    comp.pump_until("a first frame, white", |s| s.commits.len() == 1);
+    assert_eq!(comp.server.commits[0].first_pixel, 0xffff_ffff);
+    run.keep_after.store(u64::MAX, Ordering::SeqCst);
+    run.waker.wake();
+    comp.pump_until("a drawn frame", |s| s.commits.len() == 2);
+    assert_eq!(comp.server.commits[1].first_pixel, 0xff00_0002);
+    run.keep_after.store(2, Ordering::SeqCst);
+    run.waker.wake();
+    comp.pump_until("the program was asked", |_| run.frames.load(Ordering::SeqCst) == 3);
+    comp.pump_for(Duration::from_millis(100));
+    assert_eq!(comp.server.commits.len(), 2, "a kept frame commits nothing");
+    run.keep_after.store(u64::MAX, Ordering::SeqCst);
+    run.waker.wake();
+    comp.pump_until("the next drawn frame", |s| s.commits.len() == 3);
+    assert_eq!(comp.server.commits[2].first_pixel, 0xff00_0004);
+    comp.server.toplevel.as_ref().unwrap().close();
+    let stats = finish(&mut comp, run);
+    assert_eq!(stats.frames, 3);
 }
 
 fn a_frame_waits_for_the_frame_callback() {

@@ -1,7 +1,7 @@
 //! The window: a small interface that shows a pixel buffer. `decisions.md` ("Platforms") asks for this.
 //!
-//! The program implements `App`. It says what size the picture has (`resize`) and gives the picture (`frame`: one
-//! `u32` per pixel, `0xAARRGGBB`, the alpha is ignored). The window decides *when* to ask for it: once after the first
+//! The program implements `App`. It says what size the picture has (`resize`) and draws the picture into the free buffer
+//! of the window (`frame`: one `u32` per pixel, `0xAARRGGBB`, the alpha is ignored). No copy of the picture is made. The window decides *when* to ask for it: once after the first
 //! size, once after each new size, and once after each `Control::redraw` or `Waker::wake`. It never asks twice for the
 //! same change, and it asks at most once for each frame that the compositor shows.
 //!
@@ -58,8 +58,10 @@ pub trait App {
     /// The window is `width` by `height` pixels now. Called before `frame`, once for each new size (and for the first).
     fn resize(&mut self, width: u32, height: u32);
 
-    /// The picture at the size of the last `resize`: exactly `width * height` pixels, row by row from the top.
-    fn frame(&mut self, ctl: &mut Control) -> &[u32];
+    /// Draw the picture at the size of the last `resize` into `out`: `width * height` pixels, row by row from the top. `out` is the
+    /// free buffer of the window. It holds an older frame or nothing, so draw all of it. Give `false` to keep the frame on screen
+    /// (a page that waits for its next document): the window shows `out` then only if no frame of this size is on screen, filled white.
+    fn frame(&mut self, ctl: &mut Control, out: &mut [u32]) -> bool;
 
     /// A pointer or keyboard event. All the events of one round of the loop come before the next `frame`, so a burst of
     /// events makes one frame. Ask for one with `ctl.redraw()` when the event changed what the picture shows.

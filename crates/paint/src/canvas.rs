@@ -100,11 +100,68 @@ impl Shape {
     }
 }
 
-pub struct Canvas {
+pub struct Canvas<'a> {
     pub width: u32,
     pub height: u32,
     /// `width * height` pixels, row by row from the top.
-    pub pixels: Vec<u32>,
+    pub pixels: Pixels<'a>,
+}
+
+/// The memory of a canvas: its own buffer (a capture, a headless page), or a buffer of the window that paint draws into directly.
+pub enum Pixels<'a> {
+    Own(Vec<u32>),
+    Lent(&'a mut [u32]),
+}
+
+impl Pixels<'_> {
+    /// The pixels as a buffer of their own (a copy if they are lent).
+    pub fn into_vec(self) -> Vec<u32> {
+        match self {
+            Pixels::Own(v) => v,
+            Pixels::Lent(s) => s.to_vec(),
+        }
+    }
+}
+
+impl std::fmt::Debug for Pixels<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        (**self).fmt(f)
+    }
+}
+
+impl PartialEq for Pixels<'_> {
+    fn eq(&self, o: &Self) -> bool {
+        **self == **o
+    }
+}
+
+impl<'b> IntoIterator for &'b Pixels<'_> {
+    type Item = &'b u32;
+    type IntoIter = std::slice::Iter<'b, u32>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
+    }
+}
+
+impl std::ops::Deref for Pixels<'_> {
+    type Target = [u32];
+    #[inline]
+    fn deref(&self) -> &[u32] {
+        match self {
+            Pixels::Own(v) => v,
+            Pixels::Lent(s) => s,
+        }
+    }
+}
+
+impl std::ops::DerefMut for Pixels<'_> {
+    #[inline]
+    fn deref_mut(&mut self) -> &mut [u32] {
+        match self {
+            Pixels::Own(v) => v,
+            Pixels::Lent(s) => s,
+        }
+    }
 }
 
 /// `x / 255`, rounded, for `x` up to 255 * 255. It is exact: a test checks all the values.
@@ -128,10 +185,24 @@ pub fn blend(color: u32, d: u32, a: u32) -> u32 {
     0xff00_0000 | r << 16 | g << 8 | b
 }
 
-impl Canvas {
+impl Canvas<'static> {
     /// A white canvas, the color of a page with no background.
-    pub fn new(width: u32, height: u32) -> Canvas {
-        Canvas { width, height, pixels: vec![0xffff_ffff; width as usize * height as usize] }
+    pub fn new(width: u32, height: u32) -> Canvas<'static> {
+        Canvas { width, height, pixels: Pixels::Own(vec![0xffff_ffff; width as usize * height as usize]) }
+    }
+
+    /// A canvas that owns `pixels` (`width * height` of them).
+    pub fn from_vec(width: u32, height: u32, pixels: Vec<u32>) -> Canvas<'static> {
+        assert_eq!(pixels.len(), width as usize * height as usize, "a canvas of {width}x{height}");
+        Canvas { width, height, pixels: Pixels::Own(pixels) }
+    }
+}
+
+impl<'a> Canvas<'a> {
+    /// A canvas that draws into `pixels` (`width * height` of them), the buffer of a window: no copy of the frame is made.
+    pub fn over(width: u32, height: u32, pixels: &'a mut [u32]) -> Canvas<'a> {
+        assert_eq!(pixels.len(), width as usize * height as usize, "a canvas of {width}x{height}");
+        Canvas { width, height, pixels: Pixels::Lent(pixels) }
     }
 
     pub fn bounds(&self) -> IRect {
@@ -140,10 +211,18 @@ impl Canvas {
 
     /// Set the size and fill with `color`. The buffer is kept when the size does not change: no new allocation for a frame.
     pub fn reset(&mut self, width: u32, height: u32, color: u32) {
+        match &mut self.pixels {
+            Pixels::Own(v) => {
+                v.clear();
+                v.resize(width as usize * height as usize, color);
+            }
+            Pixels::Lent(s) => {
+                assert_eq!(s.len(), width as usize * height as usize, "a lent canvas keeps its size");
+                s.fill(color);
+            }
+        }
         self.width = width;
         self.height = height;
-        self.pixels.clear();
-        self.pixels.resize(width as usize * height as usize, color);
     }
 
     pub fn pixel(&self, x: u32, y: u32) -> u32 {

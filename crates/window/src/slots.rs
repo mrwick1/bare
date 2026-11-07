@@ -2,7 +2,8 @@
 //!
 //! A buffer is *busy* from the commit that attaches it until the compositor sends `release`. The program never draws
 //! into a busy buffer. A free buffer of the right size is used again. A free buffer of another size is made again, and
-//! only then, so a window that keeps its size allocates nothing after its first two frames.
+//! only then, so a window that keeps its size allocates nothing after its first two frames. An idle window drops the free
+//! buffer (`free_made`, `dropped`): the next frame makes it again.
 
 pub const COUNT: usize = 2;
 
@@ -53,6 +54,17 @@ impl Slots {
     /// The compositor sent `release` for slot `i`.
     pub fn released(&mut self, i: usize) {
         self.busy[i] = false;
+    }
+
+    /// A slot that has a buffer the compositor does not hold: the one an idle window can drop.
+    pub fn free_made(&self) -> Option<usize> {
+        (0..COUNT).find(|&i| !self.busy[i] && self.size[i].is_some())
+    }
+
+    /// The buffer of slot `i` was dropped.
+    pub fn dropped(&mut self, i: usize) {
+        debug_assert!(!self.busy[i], "a busy buffer is never dropped");
+        self.size[i] = None;
     }
 
     /// The number of buffers that exist (made and not dropped).

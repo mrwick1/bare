@@ -169,3 +169,33 @@ fn the_old_document_and_its_frame_are_gone_when_the_next_one_is_requested() {
         assert!(left < PIXELS + (3 << 19), "{left} B are alive when the next document is requested; the canvas is {PIXELS} B");
     });
 }
+
+/// The peak of the heap from the open of `/light` to its first frame: in a window (`resize`, then `frame` into a buffer of the window,
+/// made before) or headless (`paint`, into the canvas of the page).
+fn first_frame_peak(window: bool) -> usize {
+    let base = serve();
+    on_big_stack(move || {
+        // The first run makes the tables that stay for the whole process.
+        drop(open(&format!("{base}/light")));
+        let mut out = vec![0u32; PIXELS / 4];
+        let before = LIVE.load(Relaxed);
+        PEAK.store(before, Relaxed);
+        let mut p = open(&format!("{base}/light"));
+        if window {
+            bare_window::App::resize(&mut p, SIZE.0, SIZE.1);
+            assert!(bare_window::App::frame(&mut p, &mut Default::default(), &mut out));
+        } else {
+            p.paint();
+        }
+        assert!(p.errors.is_empty(), "{:?}", p.errors);
+        PEAK.load(Relaxed) - before
+    })
+}
+
+/// A window paints into its own shared-memory buffer: the page holds no canvas of its own, so a window frame peaks a canvas lower than
+/// a headless one.
+#[test]
+fn a_window_frame_paints_into_the_buffer_of_the_window() {
+    let (headless, window) = (first_frame_peak(false), first_frame_peak(true));
+    assert!(window + PIXELS * 3 / 4 < headless, "first frame peak: {headless} B headless, {window} B in a window; the canvas is {PIXELS} B");
+}

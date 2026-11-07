@@ -77,7 +77,7 @@ fn static_paint(html: &str, w: u32, h: u32) -> Vec<u32> {
     }
     let styles = rules.compute(&doc);
     let layout = bare_layout::layout(&doc, &styles, vp);
-    bare_paint::capture(&doc, &styles, &layout, w, h).pixels
+    bare_paint::capture(&doc, &styles, &layout, w, h).pixels.into_vec()
 }
 
 /// Hover, focus by a press and by Tab, a held press, script changes, a blur and two resizes: each frame has the pixels of headless
@@ -327,5 +327,47 @@ fn random_changes_draw_the_frame_made_from_nothing() {
             frame(&mut p, &format!("step {step}"));
         }
         assert!(p.kept - k0 > 100, "{} of the frames styled and laid out only what changed", p.kept - k0);
+    });
+}
+
+/// The window paints each frame straight into the free one of its two buffers, which holds the frame of two commits ago (or nothing,
+/// after a resize). After a series of small changes each shown buffer must equal the canvas of a headless page that got the same changes.
+#[test]
+fn frames_in_two_window_buffers_equal_the_headless_canvas() {
+    big(|| {
+        let html = "<!doctype html><style>body{margin:0}.l{height:20px}.l:hover{background:#cde}.on{background:#0a0}input{width:120px}\
+            .box{overflow:auto;height:50px}</style><div class=l id=a>first</div><input id=f><div class=box><div class=l>in</div><div class=l>in</div>\
+            <div class=l>in</div><div class=l>in</div></div><div class=l id=z>last</div>";
+        let (mut win, mut head) = (page(html, 300, 200), page(html, 300, 200));
+        let mut size = (300u32, 200u32);
+        win.resize(size.0, size.1);
+        // Two buffers that the window takes in turn. A new buffer holds no frame: its pixels are garbage.
+        let mut bufs = [vec![0xdead_beef_u32; 300 * 200], vec![0xdead_beef_u32; 300 * 200]];
+        let steps: [&dyn Fn(&mut Page); 10] = [
+            &|p| mv(p, 50.0, 10.0),
+            &|p| click(p, 60.0, 30.0),
+            &|p| key(p, "x", Some("x")),
+            &|p| key(p, "y", Some("y")),
+            &|p| drop(js(p, "document.getElementById('a').textContent = 'changed'; 0")),
+            &|p| mv(p, 50.0, 140.0),
+            &|p| { p.handle(Event::Wheel { x: 50.0, y: 70.0, dx: 0.0, dy: 20.0, mods: NO }); },
+            &|p| drop(js(p, "document.getElementById('z').classList.toggle('on'); 0")),
+            &|p| p.resize(260, 180),
+            &|p| key(p, "Backspace", None),
+        ];
+        for (i, step) in steps.iter().enumerate() {
+            step(&mut win);
+            step(&mut head);
+            let now = win.viewport();
+            if now != size {
+                size = now;
+                bufs = [vec![0xdead_beef; (now.0 * now.1) as usize], vec![0xdead_beef; (now.0 * now.1) as usize]];
+            }
+            let out = &mut bufs[i % 2];
+            assert!(App::frame(&mut win, &mut Default::default(), out), "step {i}: the window kept its old frame");
+            let want = head.paint();
+            let diff = out.iter().zip(want).filter(|(a, b)| a != b).count();
+            assert_eq!(diff, 0, "step {i}: the window buffer and the headless canvas differ in {diff} pixels");
+        }
     });
 }

@@ -3,7 +3,7 @@
 //! The way in is `Painter::paint` (or `capture` for one picture). It makes a display list from the fragments
 //! (`display.rs`), then draws the list into a `Canvas` (`canvas.rs`): solid rectangles for backgrounds and borders, and
 //! glyphs from Noto Sans Mono (`glyphs.rs`) for text, at the places and with the widths that layout used. The picture is
-//! a plain `Vec<u32>`, so a window (S4 topic 2) only has to show it. `png.rs` is the capture for tests and for
+//! a plain `[u32]`: a `Vec<u32>` of its own, or the buffer of a window, which paint draws into directly. `png.rs` is the capture for tests and for
 //! `bare --paint`.
 //!
 //! The design, the measurements behind the crates, and the gaps are in `docs/resources.md`, "Paint and pixel capture".
@@ -287,8 +287,8 @@ fn letters<const SPACED: bool>(canvas: &mut Canvas, glyphs: &mut Glyphs, clip: I
 }
 
 /// Paint a page into a new canvas of `width` by `height` pixels, with a new `Painter`. For one picture: a test, a
-/// capture. A window keeps its `Painter` and its `Canvas`.
-pub fn capture(doc: &Document, styles: &Styles, layout: &Layout, width: u32, height: u32) -> Canvas {
+/// capture. A window keeps its `Painter` and draws into its own buffer (`Canvas::over`).
+pub fn capture(doc: &Document, styles: &Styles, layout: &Layout, width: u32, height: u32) -> Canvas<'static> {
     let mut canvas = Canvas::new(width, height);
     Painter::new().paint(doc, styles, layout, &mut canvas);
     canvas
