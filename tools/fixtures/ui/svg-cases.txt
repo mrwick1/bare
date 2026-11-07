@@ -1,0 +1,24 @@
+var st = document.createElement('style'); st.textContent = "html{overflow:hidden}*{font-family:'Noto Sans Mono' !important}body{margin:0}.s{width:16px;height:16px}.w{width:30px}.h{height:30px}"; document.head.appendChild(st);
+var $ = function (i) { return document.getElementById(i) };
+var S = function (ids) { return ids.split(' ').map(function (id) { var r = $(id).getBoundingClientRect(); return [r.x, r.y, r.width, r.height].map(function (v) { return Math.round(v * 10) / 10 }).join(',') }).join(' ') };
+=== sizes-from-attributes
+@html <svg id=a width="24" height="24" viewBox="0 0 24 24"></svg><svg id=b width=40 height=10></svg><svg id=c></svg>
+(function () { return S('a b c') })
+=== size-from-the-view-box
+@html <svg id=a viewBox="0 0 20 10" width=40></svg><svg id=b viewBox="0 0 20 10" height=40></svg><svg id=c viewBox="0,0,30,10" width=60></svg><svg id=d viewBox="0 0 0 10" width=60></svg><svg id=e viewBox="0 0 x 10" width=60></svg>
+(function () { return S('a b c d e') })
+=== css-beats-the-attributes
+@html <svg id=a class=s width=40 height=40 viewBox="0 0 10 10"></svg><svg id=b class=w width=40 viewBox="0 0 20 10"></svg><svg id=c class=h width=40 viewBox="0 0 20 10"></svg><svg id=d class=h viewBox="0 0 20 10" width=20></svg>
+(function () { return S('a b c d') })
+=== view-box-only
+@html <svg id=a viewBox="0 0 20 10"></svg><div style="width:100px"><svg id=b viewBox="0 0 20 40"></svg></div><span><svg id=c viewBox="0 0 20 10"></svg></span>
+(function () { return S('a b c') })
+=== svg-in-a-line
+@html <p style="margin:0">ab<svg id=a width=16 height=16></svg>cd<svg id=b width=10 height=30></svg></p><div style="display:flex;align-items:center;height:40px"><svg id=c width=8 height=8></svg><svg id=d class=s></svg></div>
+(function () { return S('a b c d') })
+=== children-have-no-box
+@html <p style="margin:0">x<svg id=a width=10 height=10><text x=0 y=8>hello</text><g><path d="M0 0L5 5"/><g><text>deep</text></g></g></svg>y</p>
+(function () { return S('a') })
+=== inline-size-in-a-container
+@html <div style="width:200px"><svg id=a width="50%" height=20></svg></div><div style="width:200px"><svg id=b viewBox="0 0 4 1" width="50%"></svg></div>
+(function () { return S('a b') })

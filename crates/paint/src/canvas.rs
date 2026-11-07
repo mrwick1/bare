@@ -257,6 +257,78 @@ impl Canvas {
         }
     }
 
+    /// `fill_poly` of the points moved by `(tx, ty)`. Not inline: the loop that draws a display list is hot, and a page with no `<svg>` never gets here.
+    #[inline(never)]
+    pub fn fill_poly_at(&mut self, pts: &[(f32, f32)], (tx, ty): (i32, i32), color: u32, clip: IRect) {
+        let pts: Vec<(f32, f32)> = pts.iter().map(|&(x, y)| (x + tx as f32, y + ty as f32)).collect();
+        self.fill_poly(&pts, color, clip);
+    }
+
+    /// Fill polygons, anti-aliased, with the non-zero rule. `pts` has the contours apart by a NaN point; each is closed. Each row is
+    /// looked at on `SUB` lines: a line gives exact horizontal coverage, so the coverage of a pixel is exact to 1/`SUB` high.
+    pub fn fill_poly(&mut self, pts: &[(f32, f32)], color: u32, clip: IRect) {
+        const SUB: usize = 8;
+        // The edges (top to bottom) with their direction, and the box of the polygons.
+        let mut edges: Vec<(f32, f32, f32, f32, i32)> = Vec::new();
+        let (mut x0, mut y0, mut x1, mut y1) = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
+        for c in pts.split(|p| p.0.is_nan()) {
+            for (i, &(ax, ay)) in c.iter().enumerate() {
+                let (bx, by) = c[(i + 1) % c.len()];
+                (x0, y0, x1, y1) = (x0.min(ax), y0.min(ay), x1.max(ax), y1.max(ay));
+                if ay != by {
+                    edges.push(if ay < by { (ax, ay, bx, by, 1) } else { (bx, by, ax, ay, -1) });
+                }
+            }
+        }
+        let vis = IRect { x0: x0.floor() as i32, y0: y0.floor() as i32, x1: x1.ceil() as i32, y1: y1.ceil() as i32 }.intersect(clip).intersect(self.bounds());
+        if vis.is_empty() || color >> 24 == 0 {
+            return;
+        }
+        let mut cov = vec![0.0f32; (vis.x1 - vis.x0) as usize];
+        let (mut cross, mut near): (Vec<(f32, i32)>, Vec<&(f32, f32, f32, f32, i32)>) = (Vec::new(), Vec::new());
+        for y in vis.y0..vis.y1 {
+            near.clear();
+            near.extend(edges.iter().filter(|e| e.1 < (y + 1) as f32 && e.3 > y as f32));
+            if near.is_empty() {
+                continue;
+            }
+            cov.fill(0.0);
+            for k in 0..SUB {
+                let sy = y as f32 + (k as f32 + 0.5) / SUB as f32;
+                cross.clear();
+                cross.extend(near.iter().filter(|e| e.1 <= sy && sy < e.3).map(|e| (e.0 + (sy - e.1) * (e.2 - e.0) / (e.3 - e.1), e.4)));
+                cross.sort_by(|a, b| a.0.total_cmp(&b.0));
+                let mut wind = 0;
+                for w in 0..cross.len() {
+                    wind += cross[w].1;
+                    if wind == 0 || w + 1 == cross.len() {
+                        continue;
+                    }
+                    // The span from this crossing to the next is inside.
+                    let (a, b) = ((cross[w].0 - vis.x0 as f32).clamp(0.0, cov.len() as f32), (cross[w + 1].0 - vis.x0 as f32).clamp(0.0, cov.len() as f32));
+                    let (ia, ib) = (a as usize, b as usize);
+                    if ia == ib {
+                        let last = cov.len() - 1;
+                        cov[ia.min(last)] += (b - a) / SUB as f32;
+                    } else {
+                        cov[ia] += ((ia + 1) as f32 - a) / SUB as f32;
+                        for c in &mut cov[ia + 1..ib] {
+                            *c += 1.0 / SUB as f32;
+                        }
+                        if ib < cov.len() {
+                            cov[ib] += (b - ib as f32) / SUB as f32;
+                        }
+                    }
+                }
+            }
+            for (i, &c) in cov.iter().enumerate() {
+                if c > 0.0 {
+                    self.plot(vis.x0 + i as i32, y, color, c.min(1.0));
+                }
+            }
+        }
+    }
+
     /// Add the pixels of `r` (already inside the canvas) to `into`, row by row: the backdrop of a layer.
     pub fn save(&self, r: IRect, into: &mut Vec<u32>) {
         let w = self.width as usize;

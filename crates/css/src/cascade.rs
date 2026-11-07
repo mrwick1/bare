@@ -969,7 +969,7 @@ fn initial(p: Property) -> Value {
         FontSize => px(16.0),
         FontWeight => Value::Number(400.0),
         // `min-width: auto` is 0, except on a flex item: there it is the "automatic minimum size" (`flex.rs`).
-        Width | Height | MinWidth | MinHeight | Top | Right | Bottom | Left => Value::Keyword(K::Auto),
+        Width | Height | MinWidth | MinHeight | Top | Right | Bottom | Left | AspectRatio => Value::Keyword(K::Auto),
         Position => Value::Keyword(K::Static),
         FlexDirection => Value::Keyword(K::Row),
         FlexWrap => Value::Keyword(K::Nowrap),
@@ -985,6 +985,8 @@ fn initial(p: Property) -> Value {
         VerticalAlign => Value::Keyword(K::Baseline),
         Direction => Value::Keyword(K::Ltr),
         ZIndex => Value::Keyword(K::Auto),
+        Fill => Value::Color(Color::BLACK),
+        Stroke => Value::Keyword(K::None),
         Opacity => Value::Number(1.0),
         Appearance => Value::Keyword(K::None),
         PointerEvents => Value::Keyword(K::Auto),
@@ -998,9 +1000,33 @@ fn initial(p: Property) -> Value {
 }
 
 /// Does a child take the value of the parent when it has no value of its own?
-fn inherited(p: Property) -> bool {
+const fn inherited(p: Property) -> bool {
     use Property::*;
-    matches!(p, TextColor | FontSize | FontWeight | FontStyle | LineHeight | TextAlign | TextTransform | WhiteSpace | ListStyleType | Visibility | PointerEvents | BorderCollapse | BorderSpacingH | BorderSpacingV | CaptionSide | Direction)
+    matches!(p, TextColor | FontSize | FontWeight | FontStyle | LineHeight | TextAlign | TextTransform | WhiteSpace | ListStyleType | Visibility | PointerEvents | Fill | Stroke | BorderCollapse | BorderSpacingH | BorderSpacingV | CaptionSide | Direction)
+}
+
+/// The properties that `inherited` names, as bits.
+const INHERITED: u128 = {
+    let (mut bits, mut i) = (0, 0);
+    while i < Property::COUNT {
+        if inherited(Property::ALL[i]) {
+            bits |= 1 << i;
+        }
+        i += 1;
+    }
+    bits
+};
+
+/// The initial value of each property.
+fn start() -> &'static [Value; Property::COUNT] {
+    static START: std::sync::LazyLock<[Value; Property::COUNT]> = std::sync::LazyLock::new(|| {
+        let mut values = [Value::Initial; Property::COUNT];
+        for &p in Property::ALL {
+            values[p as usize] = initial(p);
+        }
+        values
+    });
+    &START
 }
 
 /// The font size of the element, in pixels. It is first, because `em` in the other properties needs it.
@@ -1043,26 +1069,39 @@ fn length_to_px(l: Length, font_size: f32, cx: &Cx<'_>) -> f32 {
 fn compute(winners: &[Option<Value>; Property::COUNT], parent: &ComputedStyle, cx: &Cx<'_>) -> ComputedStyle {
     use Property::*;
     let fs = font_size(winners[FontSize as usize], parent.px(FontSize), cx);
-    let mut out = [Value::Initial; Property::COUNT];
+    // A property with no winner keeps the initial value, or the one of the parent: only the others need a look.
+    let mut out = *start();
+    let mut inherit = INHERITED;
+    while inherit != 0 {
+        let i = inherit.trailing_zeros() as usize;
+        inherit &= inherit - 1;
+        out[i] = parent.0[i];
+    }
     out[FontSize as usize] = Value::Length(Length::Px(fs));
-    for &p in Property::ALL {
+    for (i, &winner) in winners.iter().enumerate() {
+        let (p, Some(v)) = (Property::ALL[i], winner) else { continue };
         if p == FontSize {
             continue;
         }
-        let i = p as usize;
-        let raw = match winners[i] {
+        let raw = match v {
             // A grid list of the parent is computed already: its number is from `Styles::grids`, not from the style sheet.
-            Some(Value::Inherit) if matches!(parent.0[i], Value::Grid(_)) => {
+            Value::Inherit if matches!(parent.0[i], Value::Grid(_)) => {
                 out[i] = parent.0[i];
                 continue;
             }
-            Some(Value::Inherit) => parent.0[i],
-            Some(Value::Initial) => initial(p),
-            None | Some(Value::Unset) if inherited(p) => parent.0[i],
-            None | Some(Value::Unset) => initial(p),
-            Some(v) => v,
+            Value::Inherit => parent.0[i],
+            Value::Initial => initial(p),
+            Value::Unset if inherited(p) => parent.0[i],
+            Value::Unset => initial(p),
+            v => v,
         };
         out[i] = resolve(p, raw, &out, parent, fs, cx);
+    }
+    // The initial border color is `currentcolor`: the color of the element.
+    for p in [BorderTopColor, BorderRightColor, BorderBottomColor, BorderLeftColor] {
+        if winners[p as usize].is_none() {
+            out[p as usize] = Value::Color(as_color(out[TextColor as usize]));
+        }
     }
     // A border with no style has no width. Chrome gives the others a whole number of pixels: under 1 px is 1 px, and
     // above goes down (`StyleBuilderConverter::ConvertBorderWidth`). The computed value has that width, so layout and
