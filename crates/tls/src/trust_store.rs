@@ -28,9 +28,9 @@ pub const MAX_CERT_DER_BYTES: usize = 16 << 10;
 
 /// Checked in this order. A missing path is skipped. The first existing path is the only
 /// one used. (Only `/etc/ssl/certs/ca-certificates.crt` and `/etc/ssl/cert.pem` were seen
-/// on the Arch machine of 2026-11-04. The Red Hat path is the documented location.)
-pub const SYSTEM_PATHS: [&str; 3] =
-    ["/etc/ssl/certs/ca-certificates.crt", "/etc/pki/tls/certs/ca-bundle.crt", "/etc/ssl/cert.pem"];
+/// on the Arch machine of 2026-11-04. The Red Hat path is the documented location. openSUSE has only `/etc/ssl/ca-bundle.pem`.)
+pub const SYSTEM_PATHS: [&str; 4] =
+    ["/etc/ssl/certs/ca-certificates.crt", "/etc/pki/tls/certs/ca-bundle.crt", "/etc/ssl/cert.pem", "/etc/ssl/ca-bundle.pem"];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Error {

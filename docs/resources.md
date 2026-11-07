@@ -4327,9 +4327,13 @@ A first comparison used a newer base than the branch and showed +750 KiB. That c
 - `hpack.rs` (10): the examples of RFC 7541 appendix C, the table size, and limits. `hello.rs`, `client.rs`, `client_openssl.rs`: the ALPN offer and choice (an `h2` pick that was not offered is an error).
 - `cargo test --workspace`: 36 suites, 2,639 tests, 0 failed. `cargo clippy` on `bare-net`, `bare-tls` and `bare`: no warning in the new code. The warnings in `dns.rs`, `http.rs` (`Default for Response`, `from_buf`) and `close_pool.rs` were there before.
 
+- 2026-11-07, hardening: `crates/net/tests/h2_nginx.rs` (8 tests; a user-mode nginx on a high port with a private certificate in a temp dir; it skips when `nginx` or its `echo` module is missing), `h2_node_edge.rs` (14 tests; `tools/net/h2_node_edge.mjs`, a Node `http2` server that controls every frame) and `h2_edge.rs` (28 tests; raw frames from a test peer). They cover padding, `PRIORITY`, `100` and `103`, trailers, gzip/br/deflate, `CONTINUATION`, stream limits of 1 and 2, `SETTINGS` and `WINDOW_UPDATE` edge cases, push refused, `GOAWAY` and idle close. Four faults were fixed (see [progress.md](progress.md#hardening-2026-11-07)). `cargo test --release -p bare-net -p bare-tls`: 0 failed.
+- `BARE_NET_H1` (any value) offers `http/1.1` only. It exists to compare one server over both protocols.
+- Public pages, a long page on loopback, and 56 cost rows: see [progress.md](progress.md#hardening-2026-11-07). The worst row is +0.304%.
+
 ### Not tested
 
-Staging over HTTP/2 (it offers none). A real server other than nghttp2 and OpenSSL (for example nginx, or a CDN with its own limits). Padded `DATA` and `HEADERS`, `PRIORITY` frames, an interim `100` reply and trailers (the code reads them by the RFC; no test sends them). A gzip reply over HTTP/2 (the decoders are the same as for HTTP/1.1; no HTTP/2 test). A server that never answers a `PING` (the client sends none; a dead session is found when a request fails, and a GET runs again). A server that sets `SETTINGS_MAX_CONCURRENT_STREAMS` below 100 (the first 100 streams are allowed until its SETTINGS frame arrives; a refused stream runs again). Peak RSS and speed of the `h2` crate. A real network round trip (the proxy is a fixed delay on loopback: no loss, no jitter). The RSS of a long page over HTTP/2. Windows and macOS.
+Staging over HTTP/2 (it offers none). A CDN other than Cloudflare, Google and GitHub. A server that never answers a `PING` (the client sends none; a dead session is found when a request fails, and a GET runs again). Peak RSS and speed of the `h2` crate. A real network with loss and jitter (the proxy is a fixed delay on loopback). A page of more than 128 files (the loader limit). The stall of github.com (1 run in 30 to 90; it happens over HTTP/1.1 and `curl --http2` too). Windows and macOS.
 
 ## Dense host tables and cached option names
 
