@@ -1134,7 +1134,32 @@ Tests: 19 against `openssl s_server -alpn h2` driven frame by frame (GOAWAY, RST
 
 Details: [resources.md](resources.md#http2), [decisions.md](decisions.md#http2-is-our-own-code-one-reader-thread-for-each-connection).
 
-Not tested: a real server other than nghttp2 and OpenSSL; staging over HTTP/2; padded frames, `PRIORITY`, an interim `100` reply, trailers and a gzip reply over HTTP/2; a server that sets few concurrent streams; a real network (the proxy is a fixed delay); the `h2` crate's RSS and speed.
+### Hardening (2026-11-07)
+
+Tests came first. 50 new tests run against three peers: nginx 1.31.8 (`h2_nginx.rs`, 8 tests: gzip, stream limits 1 and 2 with 20 requests, a header block over 16 KiB, small `DATA` frames, an idle close, trailers), Node `http2` (`h2_node_edge.rs`, 14 tests: padded `DATA` and `HEADERS`, `PRIORITY`, `100` and `103`, trailers, gzip, br and deflate, `CONTINUATION`, `SETTINGS` in the middle of a session, `GOAWAY` with a last stream id, an idle close) and a frame-level peer (`h2_edge.rs`, 28 tests: `WINDOW_UPDATE` edge cases, push refused, protocol errors). Four faults were found. Each one has a test that failed before the fix:
+
+- Padding alone could fill the stream window, and nothing gave it back. The stream stalled. Padding is now credited when it passes half a window.
+- A fault on a stream with both ends done threw away the whole body. A closed stream keeps its body now.
+- Trailers with a pseudo header were accepted. They are a stream error now.
+- A `PRIORITY` frame of the wrong size ended the connection. It is a stream error now (RFC 9113 section 6.3).
+
+All other cases in the list work. Two findings are not bugs in `h2.rs`. `bare-tls` offers only `ecdsa_secp256r1_sha256`, so a host with an RSA certificate (`github.githubassets.com`) fails with `UnexpectedRecord(23)` on HTTP/1.1 and HTTP/2 alike. `bare` found no trust store on openSUSE; `/etc/ssl/ca-bundle.pem` is in the path list now. `BARE_NET_H1=1` offers `http/1.1` only, to compare one server over both protocols.
+
+Public servers (arjun-e16, 2026-11-07; the same `Client`; `GET /` of the front page; 6 runs for each protocol, in turn, twice): the status was 200 and the body size was the same over both protocols (cloudflare.com 1,334,883 bytes; github.com 525,798 or 525,803; google.com changes with each answer).
+
+| Page | h2 total | h1 total | `--resources` wall, h2 / h1 |
+| --- | --- | --- | --- |
+| google.com | 315 to 363 ms | 305 to 351 ms | 0.41 to 0.43 s / 0.43 s |
+| cloudflare.com | 331 to 409 ms | 345 to 740 ms | 0.72 to 0.80 s / 0.82 to 0.88 s |
+| github.com | 250 to 414 ms | 265 to 532 ms | 0.84 s / 0.81 to 0.82 s |
+
+On google.com the two protocols differ by less than the spread of the runs. On cloudflare.com and github.com the h1 runs had the longer tail. `--resources` gave the same count of failed files over both protocols (cloudflare.com: 2, a certificate of `cloudflareinsights`; github.com: 33, the RSA certificate of `githubassets.com`). About 1 run in 30 to 90 against github.com stalls: a part of the body arrives and then nothing. The same stall happens over HTTP/1.1 (7 of 200 runs) and with `curl --http2` (4 of 200 runs), so it is not in `h2.rs` (hypothesis: the origin or the path; not verified).
+
+A long page on loopback (`/login?assets=120`; the loader limit is 128 URLs; 10 runs for each protocol): peak RSS 12,284 to 12,828 KiB over h2 and 12,220 to 12,764 KiB over h1, so no difference. Wall time is 173 to 183 ms over h2 and 161 to 177 ms over h1 at 0 ms of delay. A loopback link has no round trip for HTTP/2 to save.
+
+Cost: 56 `instr.sh` rows (`loader_load`, `resources_load`, `preload_load`, `sheets_load`, `fetch_load`, `streams_load`, `session_load`, `https_load`; scale 1 and 10; `instructions:u`, minimum of 3) against origin/main e65e58c. The worst row is `fetch_load bytes 10` at +0.304%, then `https_load hs 1` at +0.289%. No row is over +0.5%.
+
+Not tested: staging over HTTP/2 (it offers none); a CDN other than Cloudflare, Google and GitHub; a server that never answers a `PING` (the client sends none); a real network with loss and jitter; the `h2` crate's RSS and speed; a page of more than 128 files; Windows and macOS; the cause of the github.com stall.
 
 ## `class X extends <built-in>`
 
