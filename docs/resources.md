@@ -4618,3 +4618,25 @@ Cost (`tools/js/instr.sh`, minimum of 3, instructions:u, main before this change
 Cost rule: 494 rows at scale 1 and 10, median -2.38%, 335 below -0.5%. Five rows are above +0.5% with glibc: `session_load heavy 10` +0.54%, `iterator_load generic 1` +0.54%, `iterator_load generic 10` +0.61%, `gen_load iterobj 10` +0.96% and `date_load parse 10` +1.27%. With `LD_PRELOAD=libjemalloc.so.2` they are +0.36%, +0.22%, +0.21%, +0.29% and -0.09%. They come from the state of the glibc heap, not from the change. The first version of the property room (also for arrays and for empty literals) cost +1.2% to +1.7% on `builtins_load scan` and `weak_load churn` under jemalloc. It was removed.
 
 Peak RSS of the `*_load` rows (one run each, scale 10): 22 of 494 rows grow by more than 0.5% and 33 shrink by more than 0.5%. The largest drops: `binary_load scanarr` 51.4 to 37.1 MiB, `iterator_load generic` 32.9 to 23.8, `gen_load iterobj` 33.1 to 24.2, `arrobj_load lastindexof` 27.1 to 19.9. The largest rise: `sc_load next_loop` 12.4 to 12.8 MiB (+0.4 MiB, the work lists of the collect).
+
+## Test driver
+
+S5 topics 1 to 3: `bare::control` and `bare-drive` (`crates/drive`). Measured with `cargo run --release -p bare-drive --example drive_cost window` on archMachine, inside a hyprcage screen, on 2026-11-07. The page has N buttons; the target is the middle one. Each number is the median of 200 steps.
+
+| Buttons | Driver click, CSS locator (us) | Same events to `Page::handle` (us) | Driver overhead (us) | Driver click, role locator (us) |
+| --- | --- | --- | --- | --- |
+| 1 | 20 | 16 | 4 | 21 |
+| 100 | 48 | 40 | 8 | 76 |
+| 1,000 | 303 | 223 | 81 | 546 |
+
+- The overhead is the locator, the checks (connected, rendered, enabled, the hit test of the target point) and the step bookkeeping. The run without a window gave the same numbers (3, 8 and 75 us).
+- A role, label or text locator reads every element of the document: on 1,000 buttons it costs about 0.3 ms more than a CSS locator.
+- A step that waits for a timer 2 s away took 2,000 ms, 3 tries and 0 to 10 ms of CPU, the page load included (the clock tick is 10 ms). The driver sleeps until the next task.
+- A window with no work used 0 ms of CPU in 5 s. A driver call to the window (a job in `App::tick` and its reply) takes 29 us.
+- The fixture journey (33 steps, `crates/drive/tests/fixture_app.rs`) takes 670 ms in a window. 600 ms of it is the two 300 ms timers of the overview page.
+- A failure capture is one PNG of the window: 16.7 KB at 400 x 300 for the kinds page.
+
+### Not tested
+
+- The live staging site. The orchestrator runs `tools/drive/staging-journey.steps`.
+- RSS over repeated journeys (S5 topic 6).

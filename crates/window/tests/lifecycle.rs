@@ -292,11 +292,14 @@ struct TestApp {
     frames: Arc<AtomicU64>,
     close_after: u64,
     sizes: Arc<Mutex<Vec<(u32, u32)>>>,
+    /// Timers: the times of the work that `tick` gives, and when each one ran.
+    due: Vec<Instant>,
+    ran: Arc<Mutex<Vec<(Instant, Instant)>>>,
 }
 
 impl TestApp {
     fn new(frames: &Arc<AtomicU64>, sizes: &Arc<Mutex<Vec<(u32, u32)>>>) -> TestApp {
-        TestApp { size: (0, 0), pixels: vec![], frames: frames.clone(), close_after: u64::MAX, sizes: sizes.clone() }
+        TestApp { size: (0, 0), pixels: vec![], frames: frames.clone(), close_after: u64::MAX, sizes: sizes.clone(), due: vec![], ran: Arc::default() }
     }
 }
 
@@ -315,6 +318,14 @@ impl App for TestApp {
         }
         &self.pixels
     }
+    fn tick(&mut self, ctl: &mut Control) -> Option<Instant> {
+        let now = Instant::now();
+        while self.due.first().is_some_and(|&t| t <= now) {
+            self.ran.lock().unwrap().push((self.due.remove(0), now));
+            ctl.redraw();
+        }
+        self.due.first().copied()
+    }
 }
 
 struct Run {
@@ -322,12 +333,19 @@ struct Run {
     waker: Waker,
     frames: Arc<AtomicU64>,
     sizes: Arc<Mutex<Vec<(u32, u32)>>>,
+    ran: Arc<Mutex<Vec<(Instant, Instant)>>>,
 }
 
 fn start(comp: &mut Compositor, socket: UnixStream, close_after: u64) -> Run {
+    start_with(comp, socket, close_after, vec![])
+}
+
+/// Start the program with timers at these times from now.
+fn start_with(comp: &mut Compositor, socket: UnixStream, close_after: u64, timers: Vec<Duration>) -> Run {
     let frames = Arc::new(AtomicU64::new(0));
     let sizes = Arc::new(Mutex::new(vec![]));
-    let (f, s) = (frames.clone(), sizes.clone());
+    let ran = Arc::new(Mutex::new(vec![]));
+    let (f, s, r) = (frames.clone(), sizes.clone(), ran.clone());
     let (tx, rx) = std::sync::mpsc::channel();
     let handle = std::thread::spawn(move || {
         let config = Config { title: "test".into(), app_id: "bare-test".into(), size: (320, 240) };
@@ -335,6 +353,9 @@ fn start(comp: &mut Compositor, socket: UnixStream, close_after: u64) -> Run {
         tx.send(window.waker()).unwrap();
         let mut app = TestApp::new(&f, &s);
         app.close_after = close_after;
+        let now = Instant::now();
+        app.due = timers.iter().map(|&d| now + d).collect();
+        app.ran = r;
         window.run(&mut app)
     });
     // Opening the window asks the compositor some questions: serve them while we wait.
@@ -346,7 +367,7 @@ fn start(comp: &mut Compositor, socket: UnixStream, close_after: u64) -> Run {
             Err(_) => assert!(Instant::now() < end, "the window did not open"),
         }
     };
-    Run { handle, waker, frames, sizes }
+    Run { handle, waker, frames, sizes, ran }
 }
 
 fn open_fds() -> usize {
@@ -369,6 +390,7 @@ fn window_lifecycle() {
     held_buffers_are_never_touched();
     the_program_closes_the_window();
     the_compositor_closes_the_window();
+    work_of_the_app_wakes_the_loop();
     assert_eq!(open_fds(), fds, "file descriptors were left open");
 }
 
@@ -390,6 +412,28 @@ fn first_frame_and_idle() {
     assert_eq!(stats.configures, 2);
     // A busy loop would count thousands in these 300 ms.
     assert!(stats.wakeups < 10, "{stats:?}");
+}
+
+/// The loop wakes for the work that `App::tick` gives (page timers between input events), on time, and only then: after the last
+/// timer it sleeps with no timeout again.
+fn work_of_the_app_wakes_the_loop() {
+    let (mut comp, socket) = Compositor::new();
+    let ms = Duration::from_millis;
+    let run = start_with(&mut comp, socket, u64::MAX, vec![ms(60), ms(120), ms(180)]);
+    comp.pump_until("first frame", |s| !s.commits.is_empty());
+    comp.pump_until("a frame for each timer", |s| s.commits.len() == 4);
+    comp.pump_for(ms(300));
+    assert_eq!(comp.server.commits.len(), 4, "no frame after the last timer");
+    let ran = run.ran.lock().unwrap().clone();
+    assert_eq!(ran.len(), 3);
+    for (due, at) in &ran {
+        // On time: not early, and late only by the time of a scheduler turn.
+        assert!(at >= due && *at - *due < ms(40), "a timer ran {:?} late", *at - *due);
+    }
+    comp.server.toplevel.as_ref().unwrap().close();
+    let stats = finish(&mut comp, run);
+    // The first frame, three timers, and the close: a loop that polled would count hundreds in these 500 ms.
+    assert!(stats.wakeups < 20, "{stats:?}");
 }
 
 fn a_frame_waits_for_the_frame_callback() {

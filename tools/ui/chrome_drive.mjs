@@ -1,5 +1,6 @@
 // Record what headless Chrome logs for the driver scenarios of tools/fixtures/ui/drive-steps.txt on tools/fixtures/ui/drive.html.
 // Usage: node tools/ui/chrome_drive.mjs OUT [STEPS PAGE]  (defaults: drive-steps.txt on drive.html; `react-steps.txt react.html` is the React field page; `modal-steps.txt modal.html` the Radix-like modal)
+// `fill SEL TEXT` is the type of the control interface (`control-steps.txt`): a real click, Control+A, then the keys.
 // Mouse steps on a text control: `clickat SEL K` (the boundary K of its text), `dblclick SEL K` and `tripleclick SEL K` (the boundary K, two and three presses), `drag SEL A B` (boundary A to boundary B).
 // A step is what `Input::Click`, `Input::Key` and `Input::Type` do in bare, sent through the input pipeline of a device
 // (`Input.dispatchMouseEvent`, `Input.dispatchKeyEvent`). The bare test is `crates/bare/src/browser_drive_tests.rs`.
@@ -109,6 +110,15 @@ const run = async (step) => {
     await c.eval(`(function () { var e = document.querySelector(${JSON.stringify(sel)}); e.focus(); if (e.value) e.select() })()`);
     const t = text.replace(/\\n/g, '\n');
     if (t === '' && await c.eval(`document.querySelector(${JSON.stringify(sel)}).value !== ''`)) await press('Backspace');
+    for (const ch of t) await press(ch === '\n' ? 'Enter' : ch);
+  } else if (verb === 'fill') {
+    // What `Page::type_text` (bare::control) does: a click, Control+A when the field has text (and Backspace for empty text), then the keys.
+    await click(sel);
+    const t = text.replace(/\\n/g, '\n');
+    if (await c.eval(`document.querySelector(${JSON.stringify(sel)}).value !== ''`)) {
+      await press('Control+a');
+      if (t === '') await press('Backspace');
+    }
     for (const ch of t) await press(ch === '\n' ? 'Enter' : ch);
   } else throw new Error('bad step ' + step);
 };

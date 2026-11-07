@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html>
+<head>
+<title>Sign in - Fixture</title>
+<style>
+body { margin: 20px; font: 16px sans-serif; }
+label { display: block; margin: 8px 0 2px; }
+#err { color: #b00; min-height: 20px; }
+</style>
+</head>
+<body>
+<!-- A synthetic login page for the driver tests (crates/drive/tests). The server (crates/drive/tests/common) knows one fixture user. -->
+<main>
+<h1>Sign in</h1>
+<form id="f">
+  <label for="email">Email</label>
+  <input id="email" name="email" type="email" autocomplete="username">
+  <label for="pw">Password</label>
+  <input id="pw" name="password" type="password" autocomplete="current-password">
+  <p id="err" role="alert"></p>
+  <button type="submit">Sign in</button>
+</form>
+</main>
+<script>
+document.getElementById('f').addEventListener('submit', function (e) {
+  e.preventDefault();
+  var email = document.getElementById('email').value;
+  var body = JSON.stringify({ email: email, password: document.getElementById('pw').value });
+  fetch('/api/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: body }).then(function (r) {
+    if (!r.ok) {
+      document.getElementById('err').textContent = 'Wrong email or password';
+      return;
+    }
+    return r.json().then(function (d) {
+      sessionStorage.setItem('token', d.token);
+      sessionStorage.setItem('email', email);
+      location.href = '/overview';
+    });
+  });
+});
+</script>
+</body>
+</html>

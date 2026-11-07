@@ -1,0 +1,323 @@
+== click_plain_button
+pointermove @plain x=110 y=165 button=-1 buttons=0 detail=0 related=null ptype=mouse pid=1 primary=true w=1 h=1 pressure=0 bubbles=true cancelable=true trusted=true ctor=PointerEvent
+mousemove @plain x=110 y=165 button=0 buttons=0 detail=0 related=null bubbles=true cancelable=true trusted=true ctor=MouseEvent
+pointerdown @plain x=110 y=165 button=0 buttons=1 detail=0 related=null ptype=mouse pid=1 primary=true w=1 h=1 pressure=0.5 bubbles=true cancelable=true trusted=true ctor=PointerEvent
+mousedown @plain x=110 y=165 button=0 buttons=1 detail=1 related=null bubbles=true cancelable=true trusted=true ctor=MouseEvent
+pointerup @plain x=110 y=165 button=0 buttons=0 detail=0 related=null ptype=mouse pid=1 primary=true w=1 h=1 pressure=0 bubbles=true cancelable=true trusted=true ctor=PointerEvent
+mouseup @plain x=110 y=165 button=0 buttons=0 detail=1 related=null bubbles=true cancelable=true trusted=true ctor=MouseEvent
+click @plain x=110 y=165 button=0 buttons=0 detail=1 related=null bubbles=true cancelable=true trusted=true ctor=PointerEvent
+== click_text_input
+pointerout @blank x=110 y=245 button=-1 buttons=0 detail=0 related=user ptype=mouse pid=1 primary=true w=1 h=1 pressure=0 bubbles=true cancelable=true trusted=true ctor=PointerEvent
+pointerleave @blank x=110 y=245 button=-1 buttons=0 detail=0 related=user ptype=mouse pid=1 primary=true w=1 h=1 pressure=0 bubbles=false cancelable=false trusted=true ctor=PointerEvent
+pointerover @user x=110 y=245 button=-1 buttons=0 detail=0 related=blank ptype=mouse pid=1 primary=true w=1 h=1 pressure=0 bubbles=true cancelable=true trusted=true ctor=PointerEvent
+pointerenter @user x=110 y=245 button=-1 buttons=0 detail=0 related=blank ptype=mouse pid=1 primary=true w=1 h=1 pressure=0 bubbles=false cancelable=false trusted=true ctor=PointerEvent
+mouseout @blank x=110 y=245 button=0 buttons=0 detail=0 related=user bubbles=true cancelable=true trusted=true ctor=MouseEvent
+mouseleave @blank x=110 y=245 button=0 buttons=0 detail=0 related=user bubbles=false cancelable=false trusted=true ctor=MouseEvent
+mouseover @user x=110 y=245 button=0 buttons=0 detail=0 related=blank bubbles=true cancelable=true trusted=true ctor=MouseEvent
+mouseenter @user x=110 y=245 button=0 buttons=0 detail=0 related=blank bubbles=false cancelable=false trusted=true ctor=MouseEvent
+pointermove @user x=110 y=245 button=-1 buttons=0 detail=0 related=null ptype=mouse pid=1 primary=true w=1 h=1 pressure=0 bubbles=true cancelable=true trusted=true ctor=PointerEvent
+mousemove @user x=110 y=245 button=0 buttons=0 detail=0 related=null bubbles=true cancelable=true trusted=true ctor=MouseEvent
+pointerdown @user x=110 y=245 button=0 buttons=1 detail=0 related=null ptype=mouse pid=1 primary=true w=1 h=1 pressure=0.5 bubbles=true cancelable=true trusted=true ctor=PointerEvent
+mousedown @user x=110 y=245 button=0 buttons=1 detail=1 related=null bubbles=true cancelable=true trusted=true ctor=MouseEvent
+focus @user related=null bubbles=false cancelable=false trusted=true ctor=FocusEvent
+focusin @user related=null bubbles=true cancelable=false trusted=true ctor=FocusEvent
+pointerup @user x=110 y=245 button=0 buttons=0 detail=0 related=null ptype=mouse pid=1 primary=true w=1 h=1 pressure=0 bubbles=true cancelable=true trusted=true ctor=PointerEvent
+mouseup @user x=110 y=245 button=0 buttons=0 detail=1 related=null bubbles=true cancelable=true trusted=true ctor=MouseEvent
+click @user x=110 y=245 button=0 buttons=0 detail=1 related=null bubbles=true cancelable=true trusted=true ctor=PointerEvent
+== click_between_elements
+pointerout @plain x=110 y=245 button=-1 buttons=0 detail=0 related=user ptype=mouse pid=1 primary=true w=1 h=1 pressure=0 bubbles=true cancelable=true trusted=true ctor=PointerEvent
+pointerleave @plain x=110 y=245 button=-1 buttons=0 detail=0 related=user ptype=mouse pid=1 primary=true w=1 h=1 pressure=0 bubbles=false cancelable=false trusted=true ctor=PointerEvent
+pointerover @user x=110 y=245 button=-1 buttons=0 detail=0 related=plain ptype=mouse pid=1 primary=true w=1 h=1 pressure=0 bubbles=true cancelable=true trusted=true ctor=PointerEvent
+pointerenter @user x=110 y=245 button=-1 buttons=0 detail=0 related=plain ptype=mouse pid=1 primary=true w=1 h=1 pressure=0 bubbles=false cancelable=false trusted=true ctor=PointerEvent
+mouseout @plain x=110 y=245 button=0 buttons=0 detail=0 related=user bubbles=true cancelable=true trusted=true ctor=MouseEvent
+mouseleave @plain x=110 y=245 button=0 buttons=0 detail=0 related=user bubbles=false cancelable=false trusted=true ctor=MouseEvent
+mouseover @user x=110 y=245 button=0 buttons=0 detail=0 related=plain bubbles=true cancelable=true trusted=true ctor=MouseEvent
+mouseenter @user x=110 y=245 button=0 buttons=0 detail=0 related=plain bubbles=false cancelable=false trusted=true ctor=MouseEvent
+pointermove @user x=110 y=245 button=-1 buttons=0 detail=0 related=null ptype=mouse pid=1 primary=true w=1 h=1 pressure=0 bubbles=true cancelable=true trusted=true ctor=PointerEvent
+mousemove @user x=110 y=245 button=0 buttons=0 detail=0 related=null bubbles=true cancelable=true trusted=true ctor=MouseEvent
+pointerdown @user x=110 y=245 button=0 buttons=1 detail=0 related=null ptype=mouse pid=1 primary=true w=1 h=1 pressure=0.5 bubbles=true cancelable=true trusted=true ctor=PointerEvent
+mousedown @user x=110 y=245 button=0 buttons=1 detail=1 related=null bubbles=true cancelable=true trusted=true ctor=MouseEvent
+blur @plain related=user bubbles=false cancelable=false trusted=true ctor=FocusEvent
+focusout @plain related=user bubbles=true cancelable=false trusted=true ctor=FocusEvent
+focus @user related=plain bubbles=false cancelable=false trusted=true ctor=FocusEvent
+focusin @user related=plain bubbles=true cancelable=false trusted=true ctor=FocusEvent
+pointerup @user x=110 y=245 button=0 buttons=0 detail=0 related=null ptype=mouse pid=1 primary=true w=1 h=1 pressure=0 bubbles=true cancelable=true trusted=true ctor=PointerEvent
+mouseup @user x=110 y=245 button=0 buttons=0 detail=1 related=null bubbles=true cancelable=true trusted=true ctor=MouseEvent
+click @user x=110 y=245 button=0 buttons=0 detail=1 related=null bubbles=true cancelable=true trusted=true ctor=PointerEvent
+== mousedown_canceled_keeps_focus
+pointerout @user x=110 y=445 button=-1 buttons=0 detail=0 related=nofocus ptype=mouse pid=1 primary=true w=1 h=1 pressure=0 bubbles=true cancelable=true trusted=true ctor=PointerEvent
+pointerleave @user x=110 y=445 button=-1 buttons=0 detail=0 related=nofocus ptype=mouse pid=1 primary=true w=1 h=1 pressure=0 bubbles=false cancelable=false trusted=true ctor=PointerEvent
+pointerover @nofocus x=110 y=445 button=-1 buttons=0 detail=0 related=user ptype=mouse pid=1 primary=true w=1 h=1 pressure=0 bubbles=true cancelable=true trusted=true ctor=PointerEvent
+pointerenter @nofocus x=110 y=445 button=-1 buttons=0 detail=0 related=user ptype=mouse pid=1 primary=true w=1 h=1 pressure=0 bubbles=false cancelable=false trusted=true ctor=PointerEvent
+mouseout @user x=110 y=445 button=0 buttons=0 detail=0 related=nofocus bubbles=true cancelable=true trusted=true ctor=MouseEvent
+mouseleave @user x=110 y=445 button=0 buttons=0 detail=0 related=nofocus bubbles=false cancelable=false trusted=true ctor=MouseEvent
+mouseover @nofocus x=110 y=445 button=0 buttons=0 detail=0 related=user bubbles=true cancelable=true trusted=true ctor=MouseEvent
+mouseenter @nofocus x=110 y=445 button=0 buttons=0 detail=0 related=user bubbles=false cancelable=false trusted=true ctor=MouseEvent
+pointermove @nofocus x=110 y=445 button=-1 buttons=0 detail=0 related=null ptype=mouse pid=1 primary=true w=1 h=1 pressure=0 bubbles=true cancelable=true trusted=true ctor=PointerEvent
+mousemove @nofocus x=110 y=445 button=0 buttons=0 detail=0 related=null bubbles=true cancelable=true trusted=true ctor=MouseEvent
+pointerdown @nofocus x=110 y=445 button=0 buttons=1 detail=0 related=null ptype=mouse pid=1 primary=true w=1 h=1 pressure=0.5 bubbles=true cancelable=true trusted=true ctor=PointerEvent
+mousedown @nofocus x=110 y=445 button=0 buttons=1 detail=1 related=null bubbles=true cancelable=true trusted=true ctor=MouseEvent
+pointerup @nofocus x=110 y=445 button=0 buttons=0 detail=0 related=null ptype=mouse pid=1 primary=true w=1 h=1 pressure=0 bubbles=true cancelable=true trusted=true ctor=PointerEvent
+mouseup @nofocus x=110 y=445 button=0 buttons=0 detail=1 related=null bubbles=true cancelable=true trusted=true ctor=MouseEvent
+click @nofocus x=110 y=445 button=0 buttons=0 detail=1 related=null bubbles=true cancelable=true trusted=true ctor=PointerEvent
+== select_opens_on_pointerdown_and_chooses_on_pointerup
+pointerout @blank x=110 y=25 button=-1 buttons=0 detail=0 related=trigger ptype=mouse pid=1 primary=true w=1 h=1 pressure=0 bubbles=true cancelable=true trusted=true ctor=PointerEvent
+pointerleave @blank x=110 y=25 button=-1 buttons=0 detail=0 related=trigger ptype=mouse pid=1 primary=true w=1 h=1 pressure=0 bubbles=false cancelable=false trusted=true ctor=PointerEvent
+pointerover @trigger x=110 y=25 button=-1 buttons=0 detail=0 related=blank ptype=mouse pid=1 primary=true w=1 h=1 pressure=0 bubbles=true cancelable=true trusted=true ctor=PointerEvent
+pointerenter @trigger x=110 y=25 button=-1 buttons=0 detail=0 related=blank ptype=mouse pid=1 primary=true w=1 h=1 pressure=0 bubbles=false cancelable=false trusted=true ctor=PointerEvent
+mouseout @blank x=110 y=25 button=0 buttons=0 detail=0 related=trigger bubbles=true cancelable=true trusted=true ctor=MouseEvent
+mouseleave @blank x=110 y=25 button=0 buttons=0 detail=0 related=trigger bubbles=false cancelable=false trusted=true ctor=MouseEvent
+mouseover @trigger x=110 y=25 button=0 buttons=0 detail=0 related=blank bubbles=true cancelable=true trusted=true ctor=MouseEvent
+mouseenter @trigger x=110 y=25 button=0 buttons=0 detail=0 related=blank bubbles=false cancelable=false trusted=true ctor=MouseEvent
+pointermove @trigger x=110 y=25 button=-1 buttons=0 detail=0 related=null ptype=mouse pid=1 primary=true w=1 h=1 pressure=0 bubbles=true cancelable=true trusted=true ctor=PointerEvent
+mousemove @trigger x=110 y=25 button=0 buttons=0 detail=0 related=null bubbles=true cancelable=true trusted=true ctor=MouseEvent
+pointerdown @trigger x=110 y=25 button=0 buttons=1 detail=0 related=null ptype=mouse pid=1 primary=true w=1 h=1 pressure=0.5 bubbles=true cancelable=true trusted=true ctor=PointerEvent
+app open
+focus @i1 related=null bubbles=false cancelable=false trusted=true ctor=FocusEvent
+focusin @i1 related=null bubbles=true cancelable=false trusted=true ctor=FocusEvent
+pointerup @trigger x=110 y=25 button=0 buttons=0 detail=0 related=null ptype=mouse pid=1 primary=true w=1 h=1 pressure=0 bubbles=true cancelable=true trusted=true ctor=PointerEvent
+click @trigger x=110 y=25 button=0 buttons=0 detail=1 related=null bubbles=true cancelable=true trusted=true ctor=PointerEvent
+pointerout @trigger x=110 y=95 button=-1 buttons=0 detail=0 related=i2 ptype=mouse pid=1 primary=true w=1 h=1 pressure=0 bubbles=true cancelable=true trusted=true ctor=PointerEvent
+pointerleave @trigger x=110 y=95 button=-1 buttons=0 detail=0 related=i2 ptype=mouse pid=1 primary=true w=1 h=1 pressure=0 bubbles=false cancelable=false trusted=true ctor=PointerEvent
+pointerover @i2 x=110 y=95 button=-1 buttons=0 detail=0 related=trigger ptype=mouse pid=1 primary=true w=1 h=1 pressure=0 bubbles=true cancelable=true trusted=true ctor=PointerEvent
+pointerenter @content x=110 y=95 button=-1 buttons=0 detail=0 related=trigger ptype=mouse pid=1 primary=true w=1 h=1 pressure=0 bubbles=false cancelable=false trusted=true ctor=PointerEvent
+pointerenter @i2 x=110 y=95 button=-1 buttons=0 detail=0 related=trigger ptype=mouse pid=1 primary=true w=1 h=1 pressure=0 bubbles=false cancelable=false trusted=true ctor=PointerEvent
+mouseout @trigger x=110 y=95 button=0 buttons=0 detail=0 related=i2 bubbles=true cancelable=true trusted=true ctor=MouseEvent
+mouseleave @trigger x=110 y=95 button=0 buttons=0 detail=0 related=i2 bubbles=false cancelable=false trusted=true ctor=MouseEvent
+mouseover @i2 x=110 y=95 button=0 buttons=0 detail=0 related=trigger bubbles=true cancelable=true trusted=true ctor=MouseEvent
+mouseenter @content x=110 y=95 button=0 buttons=0 detail=0 related=trigger bubbles=false cancelable=false trusted=true ctor=MouseEvent
+mouseenter @i2 x=110 y=95 button=0 buttons=0 detail=0 related=trigger bubbles=false cancelable=false trusted=true ctor=MouseEvent
+pointermove @i2 x=110 y=95 button=-1 buttons=0 detail=0 related=null ptype=mouse pid=1 primary=true w=1 h=1 pressure=0 bubbles=true cancelable=true trusted=true ctor=PointerEvent
+mousemove @i2 x=110 y=95 button=0 buttons=0 detail=0 related=null bubbles=true cancelable=true trusted=true ctor=MouseEvent
+pointerdown @i2 x=110 y=95 button=0 buttons=1 detail=0 related=null ptype=mouse pid=1 primary=true w=1 h=1 pressure=0.5 bubbles=true cancelable=true trusted=true ctor=PointerEvent
+mousedown @i2 x=110 y=95 button=0 buttons=1 detail=1 related=null bubbles=true cancelable=true trusted=true ctor=MouseEvent
+blur @i1 related=i2 bubbles=false cancelable=false trusted=true ctor=FocusEvent
+focusout @i1 related=i2 bubbles=true cancelable=false trusted=true ctor=FocusEvent
+focus @i2 related=i1 bubbles=false cancelable=false trusted=true ctor=FocusEvent
+focusin @i2 related=i1 bubbles=true cancelable=false trusted=true ctor=FocusEvent
+pointerup @i2 x=110 y=95 button=0 buttons=0 detail=0 related=null ptype=mouse pid=1 primary=true w=1 h=1 pressure=0 bubbles=true cancelable=true trusted=true ctor=PointerEvent
+app choose banana
+blur @i2 related=trigger bubbles=false cancelable=false trusted=true ctor=FocusEvent
+focusout @i2 related=trigger bubbles=true cancelable=false trusted=true ctor=FocusEvent
+focus @trigger related=i2 bubbles=false cancelable=false trusted=true ctor=FocusEvent
+focusin @trigger related=i2 bubbles=true cancelable=false trusted=true ctor=FocusEvent
+mouseup @i2 x=110 y=95 button=0 buttons=0 detail=1 related=null bubbles=true cancelable=true trusted=true ctor=MouseEvent
+click @i2 x=110 y=95 button=0 buttons=0 detail=1 related=null bubbles=true cancelable=true trusted=true ctor=PointerEvent
+pointerout @i2 x=110 y=95 button=-1 buttons=0 detail=0 related=html ptype=mouse pid=1 primary=true w=1 h=1 pressure=0 bubbles=true cancelable=true trusted=true ctor=PointerEvent
+pointerleave @i2 x=110 y=95 button=-1 buttons=0 detail=0 related=html ptype=mouse pid=1 primary=true w=1 h=1 pressure=0 bubbles=false cancelable=false trusted=true ctor=PointerEvent
+pointerleave @content x=110 y=95 button=-1 buttons=0 detail=0 related=html ptype=mouse pid=1 primary=true w=1 h=1 pressure=0 bubbles=false cancelable=false trusted=true ctor=PointerEvent
+pointerleave @body x=110 y=95 button=-1 buttons=0 detail=0 related=html ptype=mouse pid=1 primary=true w=1 h=1 pressure=0 bubbles=false cancelable=false trusted=true ctor=PointerEvent
+pointerover @html x=110 y=95 button=-1 buttons=0 detail=0 related=i2 ptype=mouse pid=1 primary=true w=1 h=1 pressure=0 bubbles=true cancelable=true trusted=true ctor=PointerEvent
+mouseout @i2 x=110 y=95 button=0 buttons=0 detail=0 related=html bubbles=true cancelable=true trusted=true ctor=MouseEvent
+mouseleave @i2 x=110 y=95 button=0 buttons=0 detail=0 related=html bubbles=false cancelable=false trusted=true ctor=MouseEvent
+mouseleave @content x=110 y=95 button=0 buttons=0 detail=0 related=html bubbles=false cancelable=false trusted=true ctor=MouseEvent
+mouseleave @body x=110 y=95 button=0 buttons=0 detail=0 related=html bubbles=false cancelable=false trusted=true ctor=MouseEvent
+mouseover @html x=110 y=95 button=0 buttons=0 detail=0 related=i2 bubbles=true cancelable=true trusted=true ctor=MouseEvent
+== pointer_capture_in_pointerdown
+pointerout @blank x=110 y=485 button=-1 buttons=0 detail=0 related=cap ptype=mouse pid=1 primary=true w=1 h=1 pressure=0 bubbles=true cancelable=true trusted=true ctor=PointerEvent
+pointerleave @blank x=110 y=485 button=-1 buttons=0 detail=0 related=cap ptype=mouse pid=1 primary=true w=1 h=1 pressure=0 bubbles=false cancelable=false trusted=true ctor=PointerEvent
+pointerover @cap x=110 y=485 button=-1 buttons=0 detail=0 related=blank ptype=mouse pid=1 primary=true w=1 h=1 pressure=0 bubbles=true cancelable=true trusted=true ctor=PointerEvent
+pointerenter @cap x=110 y=485 button=-1 buttons=0 detail=0 related=blank ptype=mouse pid=1 primary=true w=1 h=1 pressure=0 bubbles=false cancelable=false trusted=true ctor=PointerEvent
+mouseout @blank x=110 y=485 button=0 buttons=0 detail=0 related=cap bubbles=true cancelable=true trusted=true ctor=MouseEvent
+mouseleave @blank x=110 y=485 button=0 buttons=0 detail=0 related=cap bubbles=false cancelable=false trusted=true ctor=MouseEvent
+mouseover @cap x=110 y=485 button=0 buttons=0 detail=0 related=blank bubbles=true cancelable=true trusted=true ctor=MouseEvent
+mouseenter @cap x=110 y=485 button=0 buttons=0 detail=0 related=blank bubbles=false cancelable=false trusted=true ctor=MouseEvent
+pointermove @cap x=110 y=485 button=-1 buttons=0 detail=0 related=null ptype=mouse pid=1 primary=true w=1 h=1 pressure=0 bubbles=true cancelable=true trusted=true ctor=PointerEvent
+mousemove @cap x=110 y=485 button=0 buttons=0 detail=0 related=null bubbles=true cancelable=true trusted=true ctor=MouseEvent
+pointerdown @cap x=110 y=485 button=0 buttons=1 detail=0 related=null ptype=mouse pid=1 primary=true w=1 h=1 pressure=0.5 bubbles=true cancelable=true trusted=true ctor=PointerEvent
+app has true
+mousedown @cap x=110 y=485 button=0 buttons=1 detail=1 related=null bubbles=true cancelable=true trusted=true ctor=MouseEvent
+gotpointercapture @cap x=110 y=485 button=0 buttons=0 detail=0 related=null ptype=mouse pid=1 primary=true w=1 h=1 pressure=0 bubbles=true cancelable=false trusted=true ctor=PointerEvent
+pointerup @cap x=110 y=485 button=0 buttons=0 detail=0 related=null ptype=mouse pid=1 primary=true w=1 h=1 pressure=0 bubbles=true cancelable=true trusted=true ctor=PointerEvent
+app up has true
+mouseup @cap x=110 y=485 button=0 buttons=0 detail=1 related=null bubbles=true cancelable=true trusted=true ctor=MouseEvent
+lostpointercapture @cap x=110 y=485 button=0 buttons=0 detail=0 related=null ptype=mouse pid=1 primary=true w=1 h=1 pressure=0 bubbles=true cancelable=false trusted=true ctor=PointerEvent
+click @cap x=110 y=485 button=0 buttons=0 detail=1 related=null bubbles=true cancelable=true trusted=true ctor=PointerEvent
+== click_fractional_center
+pointerout @blank x=110.5 y=656 button=-1 buttons=0 detail=0 related=half ptype=mouse pid=1 primary=true w=1 h=1 pressure=0 bubbles=true cancelable=true trusted=true ctor=PointerEvent
+pointerleave @blank x=110.5 y=656 button=-1 buttons=0 detail=0 related=half ptype=mouse pid=1 primary=true w=1 h=1 pressure=0 bubbles=false cancelable=false trusted=true ctor=PointerEvent
+pointerover @half x=110.5 y=656 button=-1 buttons=0 detail=0 related=blank ptype=mouse pid=1 primary=true w=1 h=1 pressure=0 bubbles=true cancelable=true trusted=true ctor=PointerEvent
+pointerenter @half x=110.5 y=656 button=-1 buttons=0 detail=0 related=blank ptype=mouse pid=1 primary=true w=1 h=1 pressure=0 bubbles=false cancelable=false trusted=true ctor=PointerEvent
+mouseout @blank x=110 y=656 button=0 buttons=0 detail=0 related=half bubbles=true cancelable=true trusted=true ctor=MouseEvent
+mouseleave @blank x=110 y=656 button=0 buttons=0 detail=0 related=half bubbles=false cancelable=false trusted=true ctor=MouseEvent
+mouseover @half x=110 y=656 button=0 buttons=0 detail=0 related=blank bubbles=true cancelable=true trusted=true ctor=MouseEvent
+mouseenter @half x=110 y=656 button=0 buttons=0 detail=0 related=blank bubbles=false cancelable=false trusted=true ctor=MouseEvent
+pointermove @half x=110.5 y=656 button=-1 buttons=0 detail=0 related=null ptype=mouse pid=1 primary=true w=1 h=1 pressure=0 bubbles=true cancelable=true trusted=true ctor=PointerEvent
+mousemove @half x=110 y=656 button=0 buttons=0 detail=0 related=null bubbles=true cancelable=true trusted=true ctor=MouseEvent
+pointerdown @half x=110.5 y=656 button=0 buttons=1 detail=0 related=null ptype=mouse pid=1 primary=true w=1 h=1 pressure=0.5 bubbles=true cancelable=true trusted=true ctor=PointerEvent
+mousedown @half x=110 y=656 button=0 buttons=1 detail=1 related=null bubbles=true cancelable=true trusted=true ctor=MouseEvent
+focus @half related=null bubbles=false cancelable=false trusted=true ctor=FocusEvent
+focusin @half related=null bubbles=true cancelable=false trusted=true ctor=FocusEvent
+pointerup @half x=110.5 y=656 button=0 buttons=0 detail=0 related=null ptype=mouse pid=1 primary=true w=1 h=1 pressure=0 bubbles=true cancelable=true trusted=true ctor=PointerEvent
+mouseup @half x=110 y=656 button=0 buttons=0 detail=1 related=null bubbles=true cancelable=true trusted=true ctor=MouseEvent
+click @half x=110 y=656 button=0 buttons=0 detail=1 related=null bubbles=true cancelable=true trusted=true ctor=PointerEvent
+== fill_replaces_text
+pointerout @blank x=110 y=245 button=-1 buttons=0 detail=0 related=user ptype=mouse pid=1 primary=true w=1 h=1 pressure=0 bubbles=true cancelable=true trusted=true ctor=PointerEvent
+pointerleave @blank x=110 y=245 button=-1 buttons=0 detail=0 related=user ptype=mouse pid=1 primary=true w=1 h=1 pressure=0 bubbles=false cancelable=false trusted=true ctor=PointerEvent
+pointerover @user x=110 y=245 button=-1 buttons=0 detail=0 related=blank ptype=mouse pid=1 primary=true w=1 h=1 pressure=0 bubbles=true cancelable=true trusted=true ctor=PointerEvent
+pointerenter @user x=110 y=245 button=-1 buttons=0 detail=0 related=blank ptype=mouse pid=1 primary=true w=1 h=1 pressure=0 bubbles=false cancelable=false trusted=true ctor=PointerEvent
+mouseout @blank x=110 y=245 button=0 buttons=0 detail=0 related=user bubbles=true cancelable=true trusted=true ctor=MouseEvent
+mouseleave @blank x=110 y=245 button=0 buttons=0 detail=0 related=user bubbles=false cancelable=false trusted=true ctor=MouseEvent
+mouseover @user x=110 y=245 button=0 buttons=0 detail=0 related=blank bubbles=true cancelable=true trusted=true ctor=MouseEvent
+mouseenter @user x=110 y=245 button=0 buttons=0 detail=0 related=blank bubbles=false cancelable=false trusted=true ctor=MouseEvent
+pointermove @user x=110 y=245 button=-1 buttons=0 detail=0 related=null ptype=mouse pid=1 primary=true w=1 h=1 pressure=0 bubbles=true cancelable=true trusted=true ctor=PointerEvent
+mousemove @user x=110 y=245 button=0 buttons=0 detail=0 related=null bubbles=true cancelable=true trusted=true ctor=MouseEvent
+pointerdown @user x=110 y=245 button=0 buttons=1 detail=0 related=null ptype=mouse pid=1 primary=true w=1 h=1 pressure=0.5 bubbles=true cancelable=true trusted=true ctor=PointerEvent
+mousedown @user x=110 y=245 button=0 buttons=1 detail=1 related=null bubbles=true cancelable=true trusted=true ctor=MouseEvent
+focus @user related=null bubbles=false cancelable=false trusted=true ctor=FocusEvent
+focusin @user related=null bubbles=true cancelable=false trusted=true ctor=FocusEvent
+pointerup @user x=110 y=245 button=0 buttons=0 detail=0 related=null ptype=mouse pid=1 primary=true w=1 h=1 pressure=0 bubbles=true cancelable=true trusted=true ctor=PointerEvent
+mouseup @user x=110 y=245 button=0 buttons=0 detail=1 related=null bubbles=true cancelable=true trusted=true ctor=MouseEvent
+click @user x=110 y=245 button=0 buttons=0 detail=1 related=null bubbles=true cancelable=true trusted=true ctor=PointerEvent
+keydown @user key="Control" code=ControlLeft repeat=false shift=false ctrl=true keyCode=17 charCode=0 location=1 bubbles=true cancelable=true trusted=true ctor=KeyboardEvent
+keydown @user key="a" code=KeyA repeat=false shift=false ctrl=true keyCode=65 charCode=0 location=0 bubbles=true cancelable=true trusted=true ctor=KeyboardEvent
+keyup @user key="a" code=KeyA repeat=false shift=false ctrl=true keyCode=65 charCode=0 location=0 bubbles=true cancelable=true trusted=true ctor=KeyboardEvent
+keyup @user key="Control" code=ControlLeft repeat=false shift=false ctrl=false keyCode=17 charCode=0 location=1 bubbles=true cancelable=true trusted=true ctor=KeyboardEvent
+keydown @user key="a" code=KeyA repeat=false shift=false ctrl=false keyCode=65 charCode=0 location=0 bubbles=true cancelable=true trusted=true ctor=KeyboardEvent
+keypress @user key="a" code=KeyA repeat=false shift=false ctrl=false keyCode=97 charCode=97 location=0 bubbles=true cancelable=true trusted=true ctor=KeyboardEvent
+beforeinput @user data="a" inputType=insertText composing=false bubbles=true cancelable=true trusted=true ctor=InputEvent
+input @user data="a" inputType=insertText composing=false bubbles=true cancelable=false trusted=true ctor=InputEvent
+keyup @user key="a" code=KeyA repeat=false shift=false ctrl=false keyCode=65 charCode=0 location=0 bubbles=true cancelable=true trusted=true ctor=KeyboardEvent
+keydown @user key="b" code=KeyB repeat=false shift=false ctrl=false keyCode=66 charCode=0 location=0 bubbles=true cancelable=true trusted=true ctor=KeyboardEvent
+keypress @user key="b" code=KeyB repeat=false shift=false ctrl=false keyCode=98 charCode=98 location=0 bubbles=true cancelable=true trusted=true ctor=KeyboardEvent
+beforeinput @user data="b" inputType=insertText composing=false bubbles=true cancelable=true trusted=true ctor=InputEvent
+input @user data="b" inputType=insertText composing=false bubbles=true cancelable=false trusted=true ctor=InputEvent
+keyup @user key="b" code=KeyB repeat=false shift=false ctrl=false keyCode=66 charCode=0 location=0 bubbles=true cancelable=true trusted=true ctor=KeyboardEvent
+== fill_empty_input
+pointerout @blank x=110 y=355 button=-1 buttons=0 detail=0 related=q ptype=mouse pid=1 primary=true w=1 h=1 pressure=0 bubbles=true cancelable=true trusted=true ctor=PointerEvent
+pointerleave @blank x=110 y=355 button=-1 buttons=0 detail=0 related=q ptype=mouse pid=1 primary=true w=1 h=1 pressure=0 bubbles=false cancelable=false trusted=true ctor=PointerEvent
+pointerover @q x=110 y=355 button=-1 buttons=0 detail=0 related=blank ptype=mouse pid=1 primary=true w=1 h=1 pressure=0 bubbles=true cancelable=true trusted=true ctor=PointerEvent
+pointerenter @f x=110 y=355 button=-1 buttons=0 detail=0 related=blank ptype=mouse pid=1 primary=true w=1 h=1 pressure=0 bubbles=false cancelable=false trusted=true ctor=PointerEvent
+pointerenter @q x=110 y=355 button=-1 buttons=0 detail=0 related=blank ptype=mouse pid=1 primary=true w=1 h=1 pressure=0 bubbles=false cancelable=false trusted=true ctor=PointerEvent
+mouseout @blank x=110 y=355 button=0 buttons=0 detail=0 related=q bubbles=true cancelable=true trusted=true ctor=MouseEvent
+mouseleave @blank x=110 y=355 button=0 buttons=0 detail=0 related=q bubbles=false cancelable=false trusted=true ctor=MouseEvent
+mouseover @q x=110 y=355 button=0 buttons=0 detail=0 related=blank bubbles=true cancelable=true trusted=true ctor=MouseEvent
+mouseenter @f x=110 y=355 button=0 buttons=0 detail=0 related=blank bubbles=false cancelable=false trusted=true ctor=MouseEvent
+mouseenter @q x=110 y=355 button=0 buttons=0 detail=0 related=blank bubbles=false cancelable=false trusted=true ctor=MouseEvent
+pointermove @q x=110 y=355 button=-1 buttons=0 detail=0 related=null ptype=mouse pid=1 primary=true w=1 h=1 pressure=0 bubbles=true cancelable=true trusted=true ctor=PointerEvent
+mousemove @q x=110 y=355 button=0 buttons=0 detail=0 related=null bubbles=true cancelable=true trusted=true ctor=MouseEvent
+pointerdown @q x=110 y=355 button=0 buttons=1 detail=0 related=null ptype=mouse pid=1 primary=true w=1 h=1 pressure=0.5 bubbles=true cancelable=true trusted=true ctor=PointerEvent
+mousedown @q x=110 y=355 button=0 buttons=1 detail=1 related=null bubbles=true cancelable=true trusted=true ctor=MouseEvent
+focus @q related=null bubbles=false cancelable=false trusted=true ctor=FocusEvent
+focusin @q related=null bubbles=true cancelable=false trusted=true ctor=FocusEvent
+pointerup @q x=110 y=355 button=0 buttons=0 detail=0 related=null ptype=mouse pid=1 primary=true w=1 h=1 pressure=0 bubbles=true cancelable=true trusted=true ctor=PointerEvent
+mouseup @q x=110 y=355 button=0 buttons=0 detail=1 related=null bubbles=true cancelable=true trusted=true ctor=MouseEvent
+click @q x=110 y=355 button=0 buttons=0 detail=1 related=null bubbles=true cancelable=true trusted=true ctor=PointerEvent
+keydown @q key="h" code=KeyH repeat=false shift=false ctrl=false keyCode=72 charCode=0 location=0 bubbles=true cancelable=true trusted=true ctor=KeyboardEvent
+keypress @q key="h" code=KeyH repeat=false shift=false ctrl=false keyCode=104 charCode=104 location=0 bubbles=true cancelable=true trusted=true ctor=KeyboardEvent
+beforeinput @q data="h" inputType=insertText composing=false bubbles=true cancelable=true trusted=true ctor=InputEvent
+input @q data="h" inputType=insertText composing=false bubbles=true cancelable=false trusted=true ctor=InputEvent
+keyup @q key="h" code=KeyH repeat=false shift=false ctrl=false keyCode=72 charCode=0 location=0 bubbles=true cancelable=true trusted=true ctor=KeyboardEvent
+keydown @q key="i" code=KeyI repeat=false shift=false ctrl=false keyCode=73 charCode=0 location=0 bubbles=true cancelable=true trusted=true ctor=KeyboardEvent
+keypress @q key="i" code=KeyI repeat=false shift=false ctrl=false keyCode=105 charCode=105 location=0 bubbles=true cancelable=true trusted=true ctor=KeyboardEvent
+beforeinput @q data="i" inputType=insertText composing=false bubbles=true cancelable=true trusted=true ctor=InputEvent
+input @q data="i" inputType=insertText composing=false bubbles=true cancelable=false trusted=true ctor=InputEvent
+keyup @q key="i" code=KeyI repeat=false shift=false ctrl=false keyCode=73 charCode=0 location=0 bubbles=true cancelable=true trusted=true ctor=KeyboardEvent
+== fill_textarea_with_a_line_feed
+pointerout @blank x=110 y=300 button=-1 buttons=0 detail=0 related=ta ptype=mouse pid=1 primary=true w=1 h=1 pressure=0 bubbles=true cancelable=true trusted=true ctor=PointerEvent
+pointerleave @blank x=110 y=300 button=-1 buttons=0 detail=0 related=ta ptype=mouse pid=1 primary=true w=1 h=1 pressure=0 bubbles=false cancelable=false trusted=true ctor=PointerEvent
+pointerover @ta x=110 y=300 button=-1 buttons=0 detail=0 related=blank ptype=mouse pid=1 primary=true w=1 h=1 pressure=0 bubbles=true cancelable=true trusted=true ctor=PointerEvent
+pointerenter @ta x=110 y=300 button=-1 buttons=0 detail=0 related=blank ptype=mouse pid=1 primary=true w=1 h=1 pressure=0 bubbles=false cancelable=false trusted=true ctor=PointerEvent
+mouseout @blank x=110 y=300 button=0 buttons=0 detail=0 related=ta bubbles=true cancelable=true trusted=true ctor=MouseEvent
+mouseleave @blank x=110 y=300 button=0 buttons=0 detail=0 related=ta bubbles=false cancelable=false trusted=true ctor=MouseEvent
+mouseover @ta x=110 y=300 button=0 buttons=0 detail=0 related=blank bubbles=true cancelable=true trusted=true ctor=MouseEvent
+mouseenter @ta x=110 y=300 button=0 buttons=0 detail=0 related=blank bubbles=false cancelable=false trusted=true ctor=MouseEvent
+pointermove @ta x=110 y=300 button=-1 buttons=0 detail=0 related=null ptype=mouse pid=1 primary=true w=1 h=1 pressure=0 bubbles=true cancelable=true trusted=true ctor=PointerEvent
+mousemove @ta x=110 y=300 button=0 buttons=0 detail=0 related=null bubbles=true cancelable=true trusted=true ctor=MouseEvent
+pointerdown @ta x=110 y=300 button=0 buttons=1 detail=0 related=null ptype=mouse pid=1 primary=true w=1 h=1 pressure=0.5 bubbles=true cancelable=true trusted=true ctor=PointerEvent
+mousedown @ta x=110 y=300 button=0 buttons=1 detail=1 related=null bubbles=true cancelable=true trusted=true ctor=MouseEvent
+focus @ta related=null bubbles=false cancelable=false trusted=true ctor=FocusEvent
+focusin @ta related=null bubbles=true cancelable=false trusted=true ctor=FocusEvent
+pointerup @ta x=110 y=300 button=0 buttons=0 detail=0 related=null ptype=mouse pid=1 primary=true w=1 h=1 pressure=0 bubbles=true cancelable=true trusted=true ctor=PointerEvent
+mouseup @ta x=110 y=300 button=0 buttons=0 detail=1 related=null bubbles=true cancelable=true trusted=true ctor=MouseEvent
+click @ta x=110 y=300 button=0 buttons=0 detail=1 related=null bubbles=true cancelable=true trusted=true ctor=PointerEvent
+keydown @ta key="a" code=KeyA repeat=false shift=false ctrl=false keyCode=65 charCode=0 location=0 bubbles=true cancelable=true trusted=true ctor=KeyboardEvent
+keypress @ta key="a" code=KeyA repeat=false shift=false ctrl=false keyCode=97 charCode=97 location=0 bubbles=true cancelable=true trusted=true ctor=KeyboardEvent
+beforeinput @ta data="a" inputType=insertText composing=false bubbles=true cancelable=true trusted=true ctor=InputEvent
+input @ta data="a" inputType=insertText composing=false bubbles=true cancelable=false trusted=true ctor=InputEvent
+keyup @ta key="a" code=KeyA repeat=false shift=false ctrl=false keyCode=65 charCode=0 location=0 bubbles=true cancelable=true trusted=true ctor=KeyboardEvent
+keydown @ta key="Enter" code=Enter repeat=false shift=false ctrl=false keyCode=13 charCode=0 location=0 bubbles=true cancelable=true trusted=true ctor=KeyboardEvent
+keypress @ta key="Enter" code=Enter repeat=false shift=false ctrl=false keyCode=13 charCode=13 location=0 bubbles=true cancelable=true trusted=true ctor=KeyboardEvent
+beforeinput @ta data=null inputType=insertLineBreak composing=false bubbles=true cancelable=true trusted=true ctor=InputEvent
+input @ta data=null inputType=insertLineBreak composing=false bubbles=true cancelable=false trusted=true ctor=InputEvent
+keyup @ta key="Enter" code=Enter repeat=false shift=false ctrl=false keyCode=13 charCode=0 location=0 bubbles=true cancelable=true trusted=true ctor=KeyboardEvent
+keydown @ta key="b" code=KeyB repeat=false shift=false ctrl=false keyCode=66 charCode=0 location=0 bubbles=true cancelable=true trusted=true ctor=KeyboardEvent
+keypress @ta key="b" code=KeyB repeat=false shift=false ctrl=false keyCode=98 charCode=98 location=0 bubbles=true cancelable=true trusted=true ctor=KeyboardEvent
+beforeinput @ta data="b" inputType=insertText composing=false bubbles=true cancelable=true trusted=true ctor=InputEvent
+input @ta data="b" inputType=insertText composing=false bubbles=true cancelable=false trusted=true ctor=InputEvent
+keyup @ta key="b" code=KeyB repeat=false shift=false ctrl=false keyCode=66 charCode=0 location=0 bubbles=true cancelable=true trusted=true ctor=KeyboardEvent
+== fill_empty_clears
+pointerout @blank x=110 y=245 button=-1 buttons=0 detail=0 related=user ptype=mouse pid=1 primary=true w=1 h=1 pressure=0 bubbles=true cancelable=true trusted=true ctor=PointerEvent
+pointerleave @blank x=110 y=245 button=-1 buttons=0 detail=0 related=user ptype=mouse pid=1 primary=true w=1 h=1 pressure=0 bubbles=false cancelable=false trusted=true ctor=PointerEvent
+pointerover @user x=110 y=245 button=-1 buttons=0 detail=0 related=blank ptype=mouse pid=1 primary=true w=1 h=1 pressure=0 bubbles=true cancelable=true trusted=true ctor=PointerEvent
+pointerenter @user x=110 y=245 button=-1 buttons=0 detail=0 related=blank ptype=mouse pid=1 primary=true w=1 h=1 pressure=0 bubbles=false cancelable=false trusted=true ctor=PointerEvent
+mouseout @blank x=110 y=245 button=0 buttons=0 detail=0 related=user bubbles=true cancelable=true trusted=true ctor=MouseEvent
+mouseleave @blank x=110 y=245 button=0 buttons=0 detail=0 related=user bubbles=false cancelable=false trusted=true ctor=MouseEvent
+mouseover @user x=110 y=245 button=0 buttons=0 detail=0 related=blank bubbles=true cancelable=true trusted=true ctor=MouseEvent
+mouseenter @user x=110 y=245 button=0 buttons=0 detail=0 related=blank bubbles=false cancelable=false trusted=true ctor=MouseEvent
+pointermove @user x=110 y=245 button=-1 buttons=0 detail=0 related=null ptype=mouse pid=1 primary=true w=1 h=1 pressure=0 bubbles=true cancelable=true trusted=true ctor=PointerEvent
+mousemove @user x=110 y=245 button=0 buttons=0 detail=0 related=null bubbles=true cancelable=true trusted=true ctor=MouseEvent
+pointerdown @user x=110 y=245 button=0 buttons=1 detail=0 related=null ptype=mouse pid=1 primary=true w=1 h=1 pressure=0.5 bubbles=true cancelable=true trusted=true ctor=PointerEvent
+mousedown @user x=110 y=245 button=0 buttons=1 detail=1 related=null bubbles=true cancelable=true trusted=true ctor=MouseEvent
+focus @user related=null bubbles=false cancelable=false trusted=true ctor=FocusEvent
+focusin @user related=null bubbles=true cancelable=false trusted=true ctor=FocusEvent
+pointerup @user x=110 y=245 button=0 buttons=0 detail=0 related=null ptype=mouse pid=1 primary=true w=1 h=1 pressure=0 bubbles=true cancelable=true trusted=true ctor=PointerEvent
+mouseup @user x=110 y=245 button=0 buttons=0 detail=1 related=null bubbles=true cancelable=true trusted=true ctor=MouseEvent
+click @user x=110 y=245 button=0 buttons=0 detail=1 related=null bubbles=true cancelable=true trusted=true ctor=PointerEvent
+keydown @user key="Control" code=ControlLeft repeat=false shift=false ctrl=true keyCode=17 charCode=0 location=1 bubbles=true cancelable=true trusted=true ctor=KeyboardEvent
+keydown @user key="a" code=KeyA repeat=false shift=false ctrl=true keyCode=65 charCode=0 location=0 bubbles=true cancelable=true trusted=true ctor=KeyboardEvent
+keyup @user key="a" code=KeyA repeat=false shift=false ctrl=true keyCode=65 charCode=0 location=0 bubbles=true cancelable=true trusted=true ctor=KeyboardEvent
+keyup @user key="Control" code=ControlLeft repeat=false shift=false ctrl=false keyCode=17 charCode=0 location=1 bubbles=true cancelable=true trusted=true ctor=KeyboardEvent
+keydown @user key="Backspace" code=Backspace repeat=false shift=false ctrl=false keyCode=8 charCode=0 location=0 bubbles=true cancelable=true trusted=true ctor=KeyboardEvent
+beforeinput @user data=null inputType=deleteContentBackward composing=false bubbles=true cancelable=true trusted=true ctor=InputEvent
+input @user data=null inputType=deleteContentBackward composing=false bubbles=true cancelable=false trusted=true ctor=InputEvent
+keyup @user key="Backspace" code=Backspace repeat=false shift=false ctrl=false keyCode=8 charCode=0 location=0 bubbles=true cancelable=true trusted=true ctor=KeyboardEvent
+== tab_and_shift_tab
+keydown @user key="Tab" code=Tab repeat=false shift=false ctrl=false keyCode=9 charCode=0 location=0 bubbles=true cancelable=true trusted=true ctor=KeyboardEvent
+blur @user related=ta bubbles=false cancelable=false trusted=true ctor=FocusEvent
+focusout @user related=ta bubbles=true cancelable=false trusted=true ctor=FocusEvent
+focus @ta related=user bubbles=false cancelable=false trusted=true ctor=FocusEvent
+focusin @ta related=user bubbles=true cancelable=false trusted=true ctor=FocusEvent
+keyup @ta key="Tab" code=Tab repeat=false shift=false ctrl=false keyCode=9 charCode=0 location=0 bubbles=true cancelable=true trusted=true ctor=KeyboardEvent
+keydown @ta key="Shift" code=ShiftLeft repeat=false shift=true ctrl=false keyCode=16 charCode=0 location=1 bubbles=true cancelable=true trusted=true ctor=KeyboardEvent
+keydown @ta key="Tab" code=Tab repeat=false shift=true ctrl=false keyCode=9 charCode=0 location=0 bubbles=true cancelable=true trusted=true ctor=KeyboardEvent
+blur @ta related=user bubbles=false cancelable=false trusted=true ctor=FocusEvent
+focusout @ta related=user bubbles=true cancelable=false trusted=true ctor=FocusEvent
+focus @user related=ta bubbles=false cancelable=false trusted=true ctor=FocusEvent
+focusin @user related=ta bubbles=true cancelable=false trusted=true ctor=FocusEvent
+keyup @user key="Tab" code=Tab repeat=false shift=true ctrl=false keyCode=9 charCode=0 location=0 bubbles=true cancelable=true trusted=true ctor=KeyboardEvent
+keyup @user key="Shift" code=ShiftLeft repeat=false shift=false ctrl=false keyCode=16 charCode=0 location=1 bubbles=true cancelable=true trusted=true ctor=KeyboardEvent
+== enter_in_input_submits_form
+keydown @q key="Enter" code=Enter repeat=false shift=false ctrl=false keyCode=13 charCode=0 location=0 bubbles=true cancelable=true trusted=true ctor=KeyboardEvent
+keypress @q key="Enter" code=Enter repeat=false shift=false ctrl=false keyCode=13 charCode=13 location=0 bubbles=true cancelable=true trusted=true ctor=KeyboardEvent
+beforeinput @q data=null inputType=insertLineBreak composing=false bubbles=true cancelable=true trusted=true ctor=InputEvent
+click @go x=0 y=0 button=0 buttons=0 detail=0 related=null bubbles=true cancelable=true trusted=true ctor=PointerEvent
+submit @f bubbles=true cancelable=true trusted=true ctor=SubmitEvent
+app submit
+keyup @q key="Enter" code=Enter repeat=false shift=false ctrl=false keyCode=13 charCode=0 location=0 bubbles=true cancelable=true trusted=true ctor=KeyboardEvent
+== space_on_focused_button_clicks
+keydown @plain key=" " code=Space repeat=false shift=false ctrl=false keyCode=32 charCode=0 location=0 bubbles=true cancelable=true trusted=true ctor=KeyboardEvent
+keypress @plain key=" " code=Space repeat=false shift=false ctrl=false keyCode=32 charCode=32 location=0 bubbles=true cancelable=true trusted=true ctor=KeyboardEvent
+keyup @plain key=" " code=Space repeat=false shift=false ctrl=false keyCode=32 charCode=0 location=0 bubbles=true cancelable=true trusted=true ctor=KeyboardEvent
+click @plain x=0 y=0 button=0 buttons=0 detail=0 related=null bubbles=true cancelable=true trusted=true ctor=PointerEvent
+== keys_open_and_choose_in_the_list
+keydown @trigger key="ArrowDown" code=ArrowDown repeat=false shift=false ctrl=false keyCode=40 charCode=0 location=0 bubbles=true cancelable=true trusted=true ctor=KeyboardEvent
+app open
+blur @trigger related=i1 bubbles=false cancelable=false trusted=true ctor=FocusEvent
+focusout @trigger related=i1 bubbles=true cancelable=false trusted=true ctor=FocusEvent
+focus @i1 related=trigger bubbles=false cancelable=false trusted=true ctor=FocusEvent
+focusin @i1 related=trigger bubbles=true cancelable=false trusted=true ctor=FocusEvent
+keyup @i1 key="ArrowDown" code=ArrowDown repeat=false shift=false ctrl=false keyCode=40 charCode=0 location=0 bubbles=true cancelable=true trusted=true ctor=KeyboardEvent
+keydown @i1 key="ArrowDown" code=ArrowDown repeat=false shift=false ctrl=false keyCode=40 charCode=0 location=0 bubbles=true cancelable=true trusted=true ctor=KeyboardEvent
+blur @i1 related=i2 bubbles=false cancelable=false trusted=true ctor=FocusEvent
+focusout @i1 related=i2 bubbles=true cancelable=false trusted=true ctor=FocusEvent
+focus @i2 related=i1 bubbles=false cancelable=false trusted=true ctor=FocusEvent
+focusin @i2 related=i1 bubbles=true cancelable=false trusted=true ctor=FocusEvent
+keyup @i2 key="ArrowDown" code=ArrowDown repeat=false shift=false ctrl=false keyCode=40 charCode=0 location=0 bubbles=true cancelable=true trusted=true ctor=KeyboardEvent
+keydown @i2 key="Enter" code=Enter repeat=false shift=false ctrl=false keyCode=13 charCode=0 location=0 bubbles=true cancelable=true trusted=true ctor=KeyboardEvent
+app choose banana
+blur @i2 related=trigger bubbles=false cancelable=false trusted=true ctor=FocusEvent
+focusout @i2 related=trigger bubbles=true cancelable=false trusted=true ctor=FocusEvent
+focus @trigger related=i2 bubbles=false cancelable=false trusted=true ctor=FocusEvent
+focusin @trigger related=i2 bubbles=true cancelable=false trusted=true ctor=FocusEvent
+keyup @trigger key="Enter" code=Enter repeat=false shift=false ctrl=false keyCode=13 charCode=0 location=0 bubbles=true cancelable=true trusted=true ctor=KeyboardEvent

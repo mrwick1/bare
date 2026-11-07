@@ -81,6 +81,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "bare-drive"
+version = "0.1.0"
+dependencies = [
+ "bare",
+ "bare-css",
+ "bare-html",
+ "bare-js",
+ "bare-net",
+ "bare-paint",
+ "bare-window",
+]
+
+[[package]]
 name = "bare-html"
 version = "0.1.0"
 

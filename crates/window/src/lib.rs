@@ -14,6 +14,9 @@
 //! window repeats a held key by itself. An event can ask for a new frame (`Control::redraw`) and for a cursor shape
 //! (`Control::set_cursor`).
 //!
+//! Timers (S5): `App::tick` runs the work that is due and gives the time of the next work. The loop sleeps in `poll` until that
+//! time at the latest, so page timers and `fetch` tasks run between input events. With no work due, the timeout is none.
+//!
 //! Not here yet: a fractional or integer HiDPI scale (paint draws one pixel for each CSS pixel, see `docs/resources.md`,
 //! "Wayland window"), scroll events, touch, a text input method (IME) and the clipboard.
 
@@ -62,6 +65,14 @@ pub trait App {
     /// events makes one frame. Ask for one with `ctl.redraw()` when the event changed what the picture shows.
     fn event(&mut self, event: Event, ctl: &mut Control) {
         let _ = (event, ctl);
+    }
+
+    /// Run the work that is due now: the timers of a page, the jobs of a test driver. Gives when work is due next; `None` means only
+    /// after an event or a wake. The loop calls it once in each round, after the events and before the draw, and sleeps until that
+    /// time at the latest. Ask for a frame with `ctl.redraw()` when the work changed the picture.
+    fn tick(&mut self, ctl: &mut Control) -> Option<std::time::Instant> {
+        let _ = ctl;
+        None
     }
 }
 

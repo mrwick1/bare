@@ -13,8 +13,10 @@
 //!
 //! The caret is steady (no blink), so an idle window wakes for nothing. Password text is shown as bullets.
 //!
-//! Gaps: timers and animations that are not due at an input event do not wake the window (the window loop has no timer
-//! yet); a file path has no session, so only a URL window is interactive; checkbox and radio boxes and `<input>` button
+//! Timers (S5): `tick` runs the tasks that are due between input events (timers, animation frames, and the `fetch` calls and
+//! navigations that they start), and the window sleeps until the next one (`App::tick`). A page with no queued task wakes for nothing.
+//!
+//! Gaps: a file path has no session, so only a URL window is interactive; checkbox and radio boxes and `<input>` button
 //! labels are not drawn (the paint crate draws controls, S4 topic 3); a textarea draws the lines that end with a line feed (no wrap, no scroll,
 //! and a click maps to the line under the pointer); a long value scrolls to keep the caret in view but a
 //! click is mapped with the same scroll, so a click right after a scroll can be off by a few pixels at the field edge.
@@ -42,7 +44,7 @@ pub enum Source {
 }
 
 impl Source {
-    fn browser(&mut self) -> Option<&mut Browser> {
+    pub(crate) fn browser(&mut self) -> Option<&mut Browser> {
         match self {
             Source::Session(s) => s.browser(),
             Source::Browser(b) => Some(b),
@@ -58,10 +60,10 @@ pub struct Handled {
 }
 
 pub struct Page {
-    source: Source,
-    frame: Option<Frame>,
+    pub(crate) source: Source,
+    pub(crate) frame: Option<Frame>,
     painter: Painter,
-    canvas: Canvas,
+    pub(crate) canvas: Canvas,
     pointer: Pointer,
     /// Is the pointer in the window, and did the boxes move under it since it last moved?
     inside: bool,
@@ -81,8 +83,10 @@ pub struct Page {
     controls: Vec<NodeId>,
     /// The text fields of `frame`, found when its display list was built (a pass over all the fragments).
     inputs: Vec<NodeId>,
-    /// Listener errors and render errors, kept for tests. The first of each also goes to stderr.
+    /// Listener errors and render errors, kept for tests. The first of each also goes to stderr, unless `quiet`.
     pub errors: Vec<String>,
+    /// Print nothing (a test driver: it reports the errors itself, through its redacting filter).
+    pub quiet: bool,
     started: Instant,
     pub first_frame: Option<Duration>,
 }
@@ -250,6 +254,7 @@ impl Page {
             controls: Vec::new(),
             inputs: Vec::new(),
             errors: Vec::new(),
+            quiet: false,
             started: Instant::now(),
             first_frame: None,
         }
@@ -257,7 +262,13 @@ impl Page {
 
     /// Load `url` in a session (it runs the scripts and settles). Run it on a thread with a big stack: the VM recurses.
     pub fn open(url: &str, viewport: (u32, u32)) -> Result<Page, String> {
+        Page::open_with(url, viewport, None)
+    }
+
+    /// `open` with the storage of an earlier session (`None`: empty storage, a new profile).
+    pub fn open_with(url: &str, viewport: (u32, u32), storage: Option<crate::browser_navigation::WebStorage>) -> Result<Page, String> {
         let mut cfg = SessionConfig::new(url);
+        cfg.storage = storage;
         cfg.viewport = Some((viewport.0 as f32, viewport.1 as f32));
         // A window runs for hours, not for one load: an input event adds a little time and a few tasks each.
         cfg.limits.max_time = Duration::from_secs(7 * 24 * 3600);
@@ -346,14 +357,31 @@ impl Page {
         self.frame.as_ref()
     }
 
+    /// Run the tasks that are due now (timers, animation frames, and the `fetch` calls and navigations that they start), as a browser
+    /// does between input events. Gives whether a task ran (the next frame checks the render key then) and when the next task is due.
+    /// `None`: no task is queued, or the page stopped for good (a fatal error), so only an input event can change it.
+    pub fn tick(&mut self) -> (bool, Option<Instant>) {
+        let stopped = match &self.source {
+            Source::Session(s) => s.ended().is_some(),
+            Source::Browser(b) => b.sched_stats().halted,
+        };
+        let Some(b) = self.browser().filter(|_| !stopped) else { return (false, None) };
+        let ran = b.next_scheduled_due().is_some_and(|d| d <= b.now()) || b.pending_fetches() > 0;
+        if ran {
+            self.settle();
+        }
+        let wait = self.browser().and_then(|b| b.next_scheduled_due().map(|d| (d - b.now()).max(0.0)));
+        (ran, wait.map(|ms| Instant::now() + Duration::from_secs_f64(ms / 1000.0)))
+    }
+
     fn note(&mut self, text: String) {
-        if self.errors.is_empty() {
+        if self.errors.is_empty() && !self.quiet {
             eprintln!("bare: {text}");
         }
         self.errors.push(text);
     }
 
-    fn hit(&mut self, x: f64, y: f64) -> Option<NodeId> {
+    pub(crate) fn hit(&mut self, x: f64, y: f64) -> Option<NodeId> {
         self.frame_now()?;
         let doc = self.browser()?.document();
         let doc = doc.borrow();
@@ -364,7 +392,7 @@ impl Page {
 
     /// After the boxes moved under a still pointer, Chrome sends a "fake mouse move": `:hover` and the boundary events follow the new
     /// layout. Once for each frame, so a listener that changes the page again cannot loop.
-    fn rehover(&mut self) {
+    pub(crate) fn rehover(&mut self) {
         self.frame_now();
         if !(self.inside && self.moved) {
             return;
@@ -385,7 +413,7 @@ impl Page {
     }
 
     /// Which document is the page now? A node of an old one means nothing after a navigation.
-    fn doc_id(&mut self) -> usize {
+    pub(crate) fn doc_id(&mut self) -> usize {
         match &self.source {
             Source::Session(s) => s.documents(),
             Source::Browser(_) => 0,
@@ -414,7 +442,7 @@ impl Page {
     }
 
     /// Run what a listener queued, then forget the layout. A link click ends the document: the session loads the next.
-    fn settle(&mut self) {
+    pub(crate) fn settle(&mut self) {
         let fatal = match &mut self.source {
             Source::Session(s) => match s.resume(&[]).stop {
                 SessionStop::Page(crate::Stop::Fatal(f)) => Some(format!("{f:?}")),
@@ -589,7 +617,7 @@ impl Page {
     }
 
     /// Run `f` on the page geometry and a copy of the offsets; keep the offsets when it says that it moved something.
-    fn scroll_with(&mut self, f: impl FnOnce(&Geo, &mut Scroll) -> bool) -> bool {
+    pub(crate) fn scroll_with(&mut self, f: impl FnOnce(&Geo, &mut Scroll) -> bool) -> bool {
         self.frame_now();
         let Page { source, frame, canvas, .. } = self;
         let (Some(b), Some(fr)) = (source.browser(), frame.as_ref()) else { return false };
@@ -618,7 +646,7 @@ impl Page {
     }
 
     /// Send the `scroll` events that a scroll queued, now (one for each target), instead of at the next task.
-    fn send_scroll_events(&mut self) {
+    pub(crate) fn send_scroll_events(&mut self) {
         if self.browser().is_some_and(|b| b.scroll_pending()) {
             let r = self.browser().map(|b| b.ui_scroll_events());
             if let Some(r) = r {
@@ -680,6 +708,14 @@ impl App for Page {
 
     fn frame(&mut self, _: &mut Control) -> &[u32] {
         self.paint()
+    }
+
+    fn tick(&mut self, ctl: &mut Control) -> Option<Instant> {
+        let (ran, next) = Page::tick(self);
+        if ran {
+            ctl.redraw();
+        }
+        next
     }
 
     fn event(&mut self, event: Event, ctl: &mut Control) {

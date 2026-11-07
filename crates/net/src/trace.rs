@@ -10,9 +10,24 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
+static ON: OnceLock<bool> = OnceLock::new();
+
 pub fn on() -> bool {
-    static ON: OnceLock<bool> = OnceLock::new();
     *ON.get_or_init(|| std::env::var_os("BARE_NET_TRACE").is_some())
+}
+
+/// Turn tracing on for this process (a test driver reads the records with `take`). Call it before the first request: after the first
+/// `on`, it changes nothing. Gives whether tracing is on.
+pub fn enable() -> bool {
+    let _ = ON.set(true);
+    on()
+}
+
+/// The records so far, oldest first. Clears them.
+pub fn take() -> Vec<Rec> {
+    let mut recs = std::mem::take(&mut *RECS.lock().unwrap());
+    recs.sort_by_key(|r| r.at);
+    recs
 }
 
 fn epoch() -> Instant {

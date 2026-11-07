@@ -1,0 +1,51 @@
+<!DOCTYPE html>
+<html>
+<head>
+<title>Overview - Fixture</title>
+<style>
+body { margin: 0; font: 16px sans-serif; }
+header { display: flex; gap: 16px; padding: 10px 20px; background: #eee; }
+#menu { position: absolute; right: 20px; top: 48px; background: #fff; border: 1px solid #999; }
+#menu [role=menuitem] { padding: 6px 12px; }
+main { padding: 0 20px; }
+</style>
+</head>
+<body>
+<header>
+  <a href="/agents">Agents</a>
+  <button id="acct" aria-label="Account, Fixture User" aria-haspopup="menu" aria-expanded="false">FU</button>
+  <div id="menu" role="menu" hidden>
+    <div role="menuitem" tabindex="-1">Settings</div>
+    <div role="menuitem" tabindex="-1" id="out">Sign out</div>
+  </div>
+</header>
+<main>
+  <h1>Overview</h1>
+  <p id="who"></p>
+  <p id="status">Loading</p>
+  <ul id="stats"></ul>
+</main>
+<script>
+var token = sessionStorage.getItem('token');
+if (!token) location.replace('/login');
+document.getElementById('who').textContent = 'Signed in as ' + sessionStorage.getItem('email');
+// The data comes after a timer and a fetch: a driver must run the tasks between its steps to see it.
+setTimeout(function () {
+  fetch('/api/stats', { headers: { Authorization: 'Bearer ' + token } }).then(function (r) { return r.json(); }).then(function (d) {
+    var ul = document.getElementById('stats');
+    d.items.forEach(function (x) { var li = document.createElement('li'); li.textContent = x; ul.appendChild(li); });
+    document.getElementById('status').textContent = 'Loaded';
+  });
+}, 300);
+var acct = document.getElementById('acct'), menu = document.getElementById('menu');
+acct.addEventListener('click', function () {
+  menu.hidden = !menu.hidden;
+  acct.setAttribute('aria-expanded', String(!menu.hidden));
+});
+document.getElementById('out').addEventListener('click', function () {
+  sessionStorage.clear();
+  location.href = '/login';
+});
+</script>
+</body>
+</html>

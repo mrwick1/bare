@@ -183,7 +183,7 @@ impl Browser {
     }
 
     /// `tag#id.class.class` of an element, at most 80 characters.
-    fn describe(&self, n: NodeId) -> String {
+    pub(crate) fn describe(&self, n: NodeId) -> String {
         let doc = self.document();
         let doc = doc.borrow();
         let mut out = doc.element_name(n).to_ascii_lowercase();

@@ -1,0 +1,51 @@
+<!DOCTYPE html>
+<html>
+<head>
+<title>Kinds - Fixture</title>
+<style>
+body { margin: 0; font: 16px sans-serif; }
+#under { position: absolute; left: 10px; top: 10px; }
+#veil { position: fixed; left: 0; top: 0; width: 300px; height: 50px; background: rgba(0, 0, 0, 0.2); }
+#rest { position: absolute; left: 10px; top: 60px; width: 380px; }
+#rest > * { display: block; margin: 4px 0; }
+#bottom { position: absolute; left: 10px; top: 2000px; }
+</style>
+</head>
+<body>
+<!-- One element for each failure kind of the driver, and timers that change the page. Synthetic: no real data. -->
+<button id="under">Under</button>
+<div id="veil"></div>
+<div id="rest">
+  <button class="dup">Save</button>
+  <button class="dup">Save</button>
+  <button id="ghost" style="display: none">Ghost</button>
+  <span style="visibility: hidden"><button id="ghost2">Ghost two</button></span>
+  <button id="off" disabled>Off</button>
+  <button id="soon" disabled>Soon</button>
+  <div id="slot"></div>
+  <button id="vanish">Vanish</button>
+  <button id="remove">Remove</button>
+  <div id="plain">Plain text</div>
+  <label>Guarded <input id="guarded"></label>
+  <p id="log">-</p>
+</div>
+<button id="bottom">Bottom</button>
+<script>
+console.error('fixture console error');
+console.log('fixture log', 42);
+fetch('/missing.json').then(function (r) { document.getElementById('log').textContent = 'missing ' + r.status; });
+setTimeout(function () { document.getElementById('soon').disabled = false; }, 300);
+setTimeout(function () {
+  var b = document.createElement('button');
+  b.id = 'later';
+  b.textContent = 'Later';
+  b.addEventListener('click', function () { document.getElementById('log').textContent = 'later clicked'; });
+  document.getElementById('slot').appendChild(b);
+}, 400);
+document.getElementById('remove').addEventListener('click', function () { document.getElementById('vanish').remove(); });
+document.getElementById('guarded').addEventListener('mousedown', function (e) { e.preventDefault(); });
+var clicks = 0;
+document.getElementById('bottom').addEventListener('click', function () { document.getElementById('log').textContent = 'bottom ' + (++clicks); });
+</script>
+</body>
+</html>

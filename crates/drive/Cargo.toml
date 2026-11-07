@@ -1,0 +1,17 @@
+# The test driver (S5): runs a journey of user steps against a page through `bare::control`. It is not part of the browser.
+[package]
+name = "bare-drive"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+bare = { path = "../bare" }
+bare-css = { path = "../css" }
+bare-html = { path = "../html" }
+bare-js = { path = "../js" }
+bare-net = { path = "../net" }
+bare-paint = { path = "../paint" }
+
+[dev-dependencies]
+bare-window = { path = "../window" }
