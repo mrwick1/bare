@@ -46,8 +46,8 @@ fn serve() -> String {
     format!("http://127.0.0.1:{port}")
 }
 
-/// The peak of the live heap above the heap before the run, for a journey of `opens` open steps.
-fn peak_of(base: &str, opens: usize) -> usize {
+/// The peak of the live heap above the heap before the run, for a journey of `opens` open steps (`window`: in a window).
+fn peak_of(base: &str, opens: usize, window: bool) -> usize {
     let text = format!(
         "{}expect css=\"#done\" visible\n",
         "open ${BASE}/\n".repeat(opens)
@@ -58,13 +58,13 @@ fn peak_of(base: &str, opens: usize) -> usize {
         size: (800, 600),
         timeout: std::time::Duration::from_secs(20),
         out: None,
-        window: false,
+        window,
         progress: false,
     };
     let before = LIVE.load(Relaxed);
     PEAK.store(before, Relaxed);
     let rep = bare_drive::run::run(&steps, &opt, &mut bare_drive::run::Redactor::default());
-    assert!(rep.ok, "the journey failed");
+    assert!(rep.ok, "the journey failed: {:?}", rep.failure);
     PEAK.load(Relaxed) - before
 }
 
@@ -73,8 +73,8 @@ fn a_second_open_does_not_hold_two_pages_at_once() {
     let base = serve();
     // The page thread has a large stack in `bare-drive`; the test thread runs the page the same way.
     let run = move || {
-        let one = peak_of(&base, 1);
-        let two = peak_of(&base, 2);
+        let one = peak_of(&base, 1, false);
+        let two = peak_of(&base, 2, false);
         assert!(
             two < one + one / 4,
             "peak with one open {one} B, with two {two} B"
@@ -86,4 +86,43 @@ fn a_second_open_does_not_hold_two_pages_at_once() {
         .unwrap()
         .join()
         .unwrap();
+}
+
+/// The same in a window (`bare-drive --window`): an `open` replaces the page of the window thread, and the old document ends before the
+/// new one loads. A window needs a Wayland compositor: the test runs itself again inside `cage` with the headless backend (it never
+/// touches the desktop of a person), and the inner run writes `ok` to the file that the outer run names.
+#[test]
+fn a_second_window_open_does_not_hold_two_pages_at_once() {
+    let name = "a_second_window_open_does_not_hold_two_pages_at_once";
+    if let Some(done) = std::env::var_os("BARE_CAGE_DONE") {
+        let base = serve();
+        // Open once to make the tables that stay for the whole process (the window, the fonts), then measure.
+        peak_of(&base, 1, true);
+        let one = peak_of(&base, 1, true);
+        let two = peak_of(&base, 2, true);
+        assert!(two < one + one / 4, "peak with one open {one} B, with two {two} B");
+        std::fs::write(done, "ok").unwrap();
+        return;
+    }
+    let done = std::env::temp_dir().join(format!("bare-cage-mem-{}", std::process::id()));
+    let _ = std::fs::remove_file(&done);
+    let runtime = std::env::var_os("XDG_RUNTIME_DIR").unwrap_or_else(|| std::env::temp_dir().into_os_string());
+    let status = std::process::Command::new("cage")
+        .arg("--")
+        .arg(std::env::current_exe().unwrap())
+        .args(["--exact", name, "--nocapture"])
+        .env_remove("WAYLAND_DISPLAY")
+        .env("XDG_RUNTIME_DIR", runtime)
+        .env("WLR_BACKENDS", "headless")
+        .env("WLR_LIBINPUT_NO_DEVICES", "1")
+        .env("WLR_RENDERER", "pixman")
+        .env("BARE_CAGE_DONE", &done)
+        .status();
+    let Ok(status) = status else {
+        eprintln!("cage is not installed: the window test did not run");
+        return;
+    };
+    let result = std::fs::read_to_string(&done).ok();
+    let _ = std::fs::remove_file(&done);
+    assert!(result.as_deref() == Some("ok"), "the run in cage failed ({status})");
 }

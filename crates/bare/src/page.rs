@@ -604,8 +604,33 @@ impl Page {
         Cursor::Default
     }
 
+    /// The document is about to end. Drop the frame (styles, layout, display list) that was made for it. Keep the pixels of the
+    /// canvas: they show the old page until the new one has its first paint. Then the old document and the new one never share the heap.
+    pub(crate) fn release_frame(&mut self) {
+        self.frame = None;
+        self.painter.list = Default::default();
+        (self.built, self.listed, self.controls, self.inputs, self.ext, self.last_hit, self.key) = (false, false, Vec::new(), Vec::new(), (false, Vec::new()), None, (0, [0; 8]));
+    }
+
+    /// Replace this page by the page that `make` builds (a new tab in the window). The old document ends first. If `make` fails, no document
+    /// is left.
+    pub fn replace(&mut self, make: impl FnOnce() -> Result<Page, String>) -> Result<(), String> {
+        self.release_frame();
+        if let Source::Session(s) = &mut self.source {
+            s.end_document();
+        }
+        // The window thread runs this job: no frame is drawn before the new page is in. The window holds its last frame in its own buffers.
+        self.canvas = Canvas::new(0, 0);
+        *self = make()?;
+        Ok(())
+    }
+
     /// Run what a listener queued, then forget the layout. A link click ends the document: the session loads the next.
     pub(crate) fn settle(&mut self) {
+        // A next document that is in replaces the old one in this call: the frame of the old one goes first.
+        if matches!(&self.source, Source::Session(s) if s.loading() == Some(true)) {
+            self.release_frame();
+        }
         let fatal = match &mut self.source {
             Source::Session(s) => match s.resume(&[]).stop {
                 SessionStop::Page(crate::Stop::Fatal(f)) => Some(format!("{f:?}")),
