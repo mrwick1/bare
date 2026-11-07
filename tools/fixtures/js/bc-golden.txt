@@ -1,0 +1,1238 @@
+=== literals
+function f() { return [1, -2, 3.5, 70000, 's', true, false, null, undefined] }
+---
+fn0 f
+code nregs=2 words=22 consts=4 ics=0
+0000  NewArray      r0, 9
+0001  LoadI         r1, 1
+0002  ArrayPush     r0, r1
+0003  LoadI         r1, 2
+0004  Neg           r1, r1
+0005  ArrayPush     r0, r1
+0006  LoadK         r1, k0  ; 3.5
+0007  ArrayPush     r0, r1
+0008  LoadK         r1, k1  ; 70000
+0009  ArrayPush     r0, r1
+0010  LoadK         r1, k2  ; "s"
+0011  ArrayPush     r0, r1
+0012  LoadTrue      r1
+0013  ArrayPush     r0, r1
+0014  LoadFalse     r1
+0015  ArrayPush     r0, r1
+0016  LoadNull      r1
+0017  ArrayPush     r0, r1
+0018  GetGlobal     r1, k3  ; name:undefined
+0019  ArrayPush     r0, r1
+0020  Ret           r0
+0021  RetUndef      
+=== parameter and var
+function f(a, b) { var c = a + b; return c }
+---
+fn0 f
+code nregs=2 words=7 consts=0 ics=0
+0000  GetEnv        r0, 0, 0
+0001  GetEnv        r1, 0, 1
+0002  Add           r0, r0, r1
+0003  SetEnv        r0, 0, 2
+0004  GetEnv        r0, 0, 2
+0005  Ret           r0
+0006  RetUndef      
+=== global names
+function f() { return Math.max(x, 1) }
+---
+fn0 f
+code nregs=5 words=8 consts=3 ics=1
+0000  GetGlobal     r2, k0  ; name:Math
+0001  GetField      r1, r2, ic0, k1  ; name:max
+0003  GetGlobal     r3, k2  ; name:x
+0004  LoadI         r4, 1
+0005  Call          r0, r1, 2
+0006  Ret           r0
+0007  RetUndef      
+=== outer function name
+function f(a) { return function () { return a } }
+---
+fn1 f
+code nregs=1 words=3 consts=0 ics=0
+0000  Closure       r0, fn0
+0001  Ret           r0
+0002  RetUndef      
+fn0 (anonymous)
+code nregs=1 words=3 consts=0 ics=0
+0000  GetEnv        r0, 1, 0
+0001  Ret           r0
+0002  RetUndef      
+=== let, const and TDZ
+function f() { let a = 1; const b = 2; let c; return a + b + c }
+---
+fn0 f
+code nregs=2 words=14 consts=0 ics=0
+0000  DeclEnv       s1
+0001  LoadI         r0, 1
+0002  InitEnv       r0, 0, 0
+0003  LoadI         r0, 2
+0004  InitEnv       r0, 0, 1
+0005  LoadUndef     r0
+0006  InitEnv       r0, 0, 2
+0007  GetEnv        r0, 0, 0
+0008  GetEnv        r1, 0, 1
+0009  Add           r0, r0, r1
+0010  GetEnv        r1, 0, 2
+0011  Add           r0, r0, r1
+0012  Ret           r0
+0013  RetUndef      
+=== block scope
+function f(x) { { let y = x; x = y + 1 } return x }
+---
+fn0 f
+code nregs=2 words=11 consts=0 ics=0
+0000  PushEnv       s2
+0001  GetEnv        r0, 1, 0
+0002  InitEnv       r0, 0, 0
+0003  GetEnv        r0, 0, 0
+0004  LoadI         r1, 1
+0005  Add           r0, r0, r1
+0006  SetEnv        r0, 1, 0
+0007  PopEnv        
+0008  GetEnv        r0, 0, 0
+0009  Ret           r0
+0010  RetUndef      
+=== strict block function
+function f() { 'use strict'; { function g() { return 1 } return g() } }
+---
+fn1 f
+code nregs=3 words=9 consts=0 ics=0
+0000  PushEnv       s2
+0001  Closure       r0, fn0
+0002  InitEnv       r0, 0, 0
+0003  GetEnv        r1, 0, 0
+0004  LoadUndef     r2
+0005  Call          r0, r1, 0
+0006  Ret           r0
+0007  PopEnv        
+0008  RetUndef      
+fn0 g
+code nregs=1 words=3 consts=0 ics=0
+0000  LoadI         r0, 1
+0001  Ret           r0
+0002  RetUndef      
+=== sloppy block function (Annex B)
+function f() { { function g() { return 1 } return g() } }
+---
+fn1 f
+unsupported: a function declaration in a block (Annex B)
+fn0 g
+code nregs=1 words=3 consts=0 ics=0
+0000  LoadI         r0, 1
+0001  Ret           r0
+0002  RetUndef      
+=== hoisted function declaration
+function f() { return g(); function g() { return 2 } }
+---
+fn1 f
+code nregs=3 words=8 consts=0 ics=0
+0000  DeclEnv       s1
+0001  Closure       r0, fn0
+0002  InitEnv       r0, 0, 0
+0003  GetEnv        r1, 0, 0
+0004  LoadUndef     r2
+0005  Call          r0, r1, 0
+0006  Ret           r0
+0007  RetUndef      
+fn0 g
+code nregs=1 words=3 consts=0 ics=0
+0000  LoadI         r0, 2
+0001  Ret           r0
+0002  RetUndef      
+=== member get and set
+function f(o) { o.x = o.y + 1; return o.x }
+---
+fn0 f
+code nregs=3 words=13 consts=2 ics=3
+0000  GetEnv        r1, 0, 0
+0001  GetEnv        r0, 0, 0
+0002  GetField      r0, r0, ic0, k0  ; name:y
+0004  LoadI         r2, 1
+0005  Add           r0, r0, r2
+0006  SetField      r1, r0, ic1, k1  ; name:x
+0008  GetEnv        r0, 0, 0
+0009  GetField      r0, r0, ic2, k1  ; name:x
+0011  Ret           r0
+0012  RetUndef      
+=== index get and set
+function f(o, k) { o[k] = o[k + 1]; return o[0] }
+---
+fn0 f
+code nregs=5 words=14 consts=0 ics=0
+0000  GetEnv        r1, 0, 0
+0001  GetEnv        r2, 0, 1
+0002  ToKey         r2, r1, r2
+0003  GetEnv        r0, 0, 0
+0004  GetEnv        r3, 0, 1
+0005  LoadI         r4, 1
+0006  Add           r3, r3, r4
+0007  GetElem       r0, r0, r3
+0008  SetElem       r1, r2, r0
+0009  GetEnv        r0, 0, 0
+0010  LoadI         r1, 0
+0011  GetElem       r0, r0, r1
+0012  Ret           r0
+0013  RetUndef      
+=== plain call
+function f(g) { return g(1, 2) }
+---
+fn0 f
+code nregs=5 words=7 consts=0 ics=0
+0000  GetEnv        r1, 0, 0
+0001  LoadUndef     r2
+0002  LoadI         r3, 1
+0003  LoadI         r4, 2
+0004  Call          r0, r1, 2
+0005  Ret           r0
+0006  RetUndef      
+=== method call
+function f(o) { return o.m(1) }
+---
+fn0 f
+code nregs=4 words=7 consts=1 ics=1
+0000  GetEnv        r2, 0, 0
+0001  GetField      r1, r2, ic0, k0  ; name:m
+0003  LoadI         r3, 1
+0004  Call          r0, r1, 1
+0005  Ret           r0
+0006  RetUndef      
+=== index call
+function f(o, k) { return o[k](2) }
+---
+fn0 f
+code nregs=4 words=7 consts=0 ics=0
+0000  GetEnv        r2, 0, 0
+0001  GetEnv        r3, 0, 1
+0002  GetElem       r1, r2, r3
+0003  LoadI         r3, 2
+0004  Call          r0, r1, 1
+0005  Ret           r0
+0006  RetUndef      
+=== member call in parentheses
+function f(o) { return (o.m)() }
+---
+fn0 f
+code nregs=3 words=6 consts=1 ics=1
+0000  GetEnv        r2, 0, 0
+0001  GetField      r1, r2, ic0, k0  ; name:m
+0003  Call          r0, r1, 0
+0004  Ret           r0
+0005  RetUndef      
+=== new
+function f(C) { return new C(1, 2) }
+---
+fn0 f
+code nregs=4 words=6 consts=0 ics=0
+0000  GetEnv        r1, 0, 0
+0001  LoadI         r2, 1
+0002  LoadI         r3, 2
+0003  New           r0, r1, 2
+0004  Ret           r0
+0005  RetUndef      
+=== unary operators
+function f(a) { return [-a, +a, !a, ~a, typeof a, void a] }
+---
+fn0 f
+code nregs=2 words=21 consts=0 ics=0
+0000  NewArray      r0, 6
+0001  GetEnv        r1, 0, 0
+0002  Neg           r1, r1
+0003  ArrayPush     r0, r1
+0004  GetEnv        r1, 0, 0
+0005  Plus          r1, r1
+0006  ArrayPush     r0, r1
+0007  GetEnv        r1, 0, 0
+0008  Not           r1, r1
+0009  ArrayPush     r0, r1
+0010  GetEnv        r1, 0, 0
+0011  BitNot        r1, r1
+0012  ArrayPush     r0, r1
+0013  GetEnv        r1, 0, 0
+0014  Typeof        r1, r1
+0015  ArrayPush     r0, r1
+0016  GetEnv        r1, 0, 0
+0017  LoadUndef     r1
+0018  ArrayPush     r0, r1
+0019  Ret           r0
+0020  RetUndef      
+=== typeof of a global
+function f() { return typeof nothere }
+---
+fn0 f
+code nregs=1 words=3 consts=1 ics=0
+0000  TypeofGlobal  r0, k0  ; name:nothere
+0001  Ret           r0
+0002  RetUndef      
+=== arithmetic and bit operators
+function f(a, b) { return [a - b, a * b, a / b, a % b, a ** b, a << b, a >> b, a >>> b, a & b, a | b, a ^ b] }
+---
+fn0 f
+code nregs=3 words=47 consts=0 ics=0
+0000  NewArray      r0, 11
+0001  GetEnv        r1, 0, 0
+0002  GetEnv        r2, 0, 1
+0003  Sub           r1, r1, r2
+0004  ArrayPush     r0, r1
+0005  GetEnv        r1, 0, 0
+0006  GetEnv        r2, 0, 1
+0007  Mul           r1, r1, r2
+0008  ArrayPush     r0, r1
+0009  GetEnv        r1, 0, 0
+0010  GetEnv        r2, 0, 1
+0011  Div           r1, r1, r2
+0012  ArrayPush     r0, r1
+0013  GetEnv        r1, 0, 0
+0014  GetEnv        r2, 0, 1
+0015  Mod           r1, r1, r2
+0016  ArrayPush     r0, r1
+0017  GetEnv        r1, 0, 0
+0018  GetEnv        r2, 0, 1
+0019  Exp           r1, r1, r2
+0020  ArrayPush     r0, r1
+0021  GetEnv        r1, 0, 0
+0022  GetEnv        r2, 0, 1
+0023  Shl           r1, r1, r2
+0024  ArrayPush     r0, r1
+0025  GetEnv        r1, 0, 0
+0026  GetEnv        r2, 0, 1
+0027  Shr           r1, r1, r2
+0028  ArrayPush     r0, r1
+0029  GetEnv        r1, 0, 0
+0030  GetEnv        r2, 0, 1
+0031  UShr          r1, r1, r2
+0032  ArrayPush     r0, r1
+0033  GetEnv        r1, 0, 0
+0034  GetEnv        r2, 0, 1
+0035  BitAnd        r1, r1, r2
+0036  ArrayPush     r0, r1
+0037  GetEnv        r1, 0, 0
+0038  GetEnv        r2, 0, 1
+0039  BitOr         r1, r1, r2
+0040  ArrayPush     r0, r1
+0041  GetEnv        r1, 0, 0
+0042  GetEnv        r2, 0, 1
+0043  BitXor        r1, r1, r2
+0044  ArrayPush     r0, r1
+0045  Ret           r0
+0046  RetUndef      
+=== comparisons
+function f(a, b) { return [a == b, a != b, a === b, a !== b, a < b, a <= b, a > b, a >= b, a in b, a instanceof b] }
+---
+fn0 f
+code nregs=3 words=43 consts=0 ics=0
+0000  NewArray      r0, 10
+0001  GetEnv        r1, 0, 0
+0002  GetEnv        r2, 0, 1
+0003  Eq            r1, r1, r2
+0004  ArrayPush     r0, r1
+0005  GetEnv        r1, 0, 0
+0006  GetEnv        r2, 0, 1
+0007  Ne            r1, r1, r2
+0008  ArrayPush     r0, r1
+0009  GetEnv        r1, 0, 0
+0010  GetEnv        r2, 0, 1
+0011  StrictEq      r1, r1, r2
+0012  ArrayPush     r0, r1
+0013  GetEnv        r1, 0, 0
+0014  GetEnv        r2, 0, 1
+0015  StrictNe      r1, r1, r2
+0016  ArrayPush     r0, r1
+0017  GetEnv        r1, 0, 0
+0018  GetEnv        r2, 0, 1
+0019  Lt            r1, r1, r2
+0020  ArrayPush     r0, r1
+0021  GetEnv        r1, 0, 0
+0022  GetEnv        r2, 0, 1
+0023  Le            r1, r1, r2
+0024  ArrayPush     r0, r1
+0025  GetEnv        r1, 0, 0
+0026  GetEnv        r2, 0, 1
+0027  Gt            r1, r1, r2
+0028  ArrayPush     r0, r1
+0029  GetEnv        r1, 0, 0
+0030  GetEnv        r2, 0, 1
+0031  Ge            r1, r1, r2
+0032  ArrayPush     r0, r1
+0033  GetEnv        r1, 0, 0
+0034  GetEnv        r2, 0, 1
+0035  In            r1, r1, r2
+0036  ArrayPush     r0, r1
+0037  GetEnv        r1, 0, 0
+0038  GetEnv        r2, 0, 1
+0039  InstanceOf    r1, r1, r2
+0040  ArrayPush     r0, r1
+0041  Ret           r0
+0042  RetUndef      
+=== logical operators
+function f(a, b) { return (a && b) || (a ?? b) }
+---
+fn0 f
+code nregs=1 words=9 consts=0 ics=0
+0000  GetEnv        r0, 0, 0
+0001  JmpIfNot      r0, -> 0003
+0002  GetEnv        r0, 0, 1
+0003  JmpIf         r0, -> 0007
+0004  GetEnv        r0, 0, 0
+0005  JmpNotNullish r0, -> 0007
+0006  GetEnv        r0, 0, 1
+0007  Ret           r0
+0008  RetUndef      
+=== conditional
+function f(a) { return a ? 1 : 2 }
+---
+fn0 f
+code nregs=1 words=7 consts=0 ics=0
+0000  GetEnv        r0, 0, 0
+0001  JmpIfNot      r0, -> 0004
+0002  LoadI         r0, 1
+0003  Jmp           -> 0005
+0004  LoadI         r0, 2
+0005  Ret           r0
+0006  RetUndef      
+=== compound assignment
+function f(a, o) { a += 2; o.x *= a; o[a] -= 1; return a }
+---
+fn0 f
+code nregs=4 words=21 consts=1 ics=2
+0000  GetEnv        r0, 0, 0
+0001  LoadI         r1, 2
+0002  Add           r0, r0, r1
+0003  SetEnv        r0, 0, 0
+0004  GetEnv        r1, 0, 1
+0005  GetField      r0, r1, ic0, k0  ; name:x
+0007  GetEnv        r2, 0, 0
+0008  Mul           r0, r0, r2
+0009  SetField      r1, r0, ic1, k0  ; name:x
+0011  GetEnv        r1, 0, 1
+0012  GetEnv        r2, 0, 0
+0013  ToKey         r2, r1, r2
+0014  GetElem       r0, r1, r2
+0015  LoadI         r3, 1
+0016  Sub           r0, r0, r3
+0017  SetElem       r1, r2, r0
+0018  GetEnv        r0, 0, 0
+0019  Ret           r0
+0020  RetUndef      
+=== logical assignment
+function f(a, o) { a ||= 1; o.x &&= a; o.y ??= 2; return a }
+---
+fn0 f
+code nregs=2 words=21 consts=2 ics=4
+0000  GetEnv        r0, 0, 0
+0001  JmpIf         r0, -> 0004
+0002  LoadI         r0, 1
+0003  SetEnv        r0, 0, 0
+0004  GetEnv        r1, 0, 1
+0005  GetField      r0, r1, ic0, k0  ; name:x
+0007  JmpIfNot      r0, -> 0011
+0008  GetEnv        r0, 0, 0
+0009  SetField      r1, r0, ic1, k0  ; name:x
+0011  GetEnv        r1, 0, 1
+0012  GetField      r0, r1, ic2, k1  ; name:y
+0014  JmpNotNullish r0, -> 0018
+0015  LoadI         r0, 2
+0016  SetField      r1, r0, ic3, k1  ; name:y
+0018  GetEnv        r0, 0, 0
+0019  Ret           r0
+0020  RetUndef      
+=== update of a name
+function f(a) { var b = a++; ++a; return a + b }
+---
+fn0 f
+code nregs=2 words=13 consts=0 ics=0
+0000  GetEnv        r0, 0, 0
+0001  ToNumeric     r0, r0
+0002  Inc           r1, r0
+0003  SetEnv        r1, 0, 0
+0004  SetEnv        r0, 0, 1
+0005  GetEnv        r0, 0, 0
+0006  Inc           r0, r0
+0007  SetEnv        r0, 0, 0
+0008  GetEnv        r0, 0, 0
+0009  GetEnv        r1, 0, 1
+0010  Add           r0, r0, r1
+0011  Ret           r0
+0012  RetUndef      
+=== update of a member
+function f(o, k) { o.x++; --o[k]; return o.x }
+---
+fn0 f
+code nregs=3 words=18 consts=1 ics=3
+0000  GetEnv        r1, 0, 0
+0001  GetField      r0, r1, ic0, k0  ; name:x
+0003  ToNumeric     r0, r0
+0004  Inc           r2, r0
+0005  SetField      r1, r2, ic1, k0  ; name:x
+0007  GetEnv        r1, 0, 0
+0008  GetEnv        r2, 0, 1
+0009  ToKey         r2, r1, r2
+0010  GetElem       r0, r1, r2
+0011  Dec           r0, r0
+0012  SetElem       r1, r2, r0
+0013  GetEnv        r0, 0, 0
+0014  GetField      r0, r0, ic2, k0  ; name:x
+0016  Ret           r0
+0017  RetUndef      
+=== object literal
+function f(a) { return { a, b: 1, 'c d': 2, 3: a, m() { return 1 } } }
+---
+fn1 f
+code nregs=2 words=14 consts=5 ics=0
+0000  NewObject     r0
+0001  GetEnv        r1, 0, 0
+0002  DefField      r0, r1, k0  ; name:a
+0003  LoadI         r1, 1
+0004  DefField      r0, r1, k1  ; name:b
+0005  LoadI         r1, 2
+0006  DefField      r0, r1, k2  ; name:c d
+0007  GetEnv        r1, 0, 0
+0008  DefField      r0, r1, k3  ; name:3
+0009  ClosureName   r1, k4, fn0  ; name:m
+0011  DefField      r0, r1, k4  ; name:m
+0012  Ret           r0
+0013  RetUndef      
+fn0 (anonymous)
+code nregs=1 words=3 consts=0 ics=0
+0000  LoadI         r0, 1
+0001  Ret           r0
+0002  RetUndef      
+=== named functions in an object
+function f() { return { g: function () {}, h: () => 1 } }
+---
+fn2 f
+code nregs=2 words=9 consts=2 ics=0
+0000  NewObject     r0
+0001  ClosureName   r1, k0, fn0  ; name:g
+0003  DefField      r0, r1, k0  ; name:g
+0004  ClosureName   r1, k1, fn1  ; name:h
+0006  DefField      r0, r1, k1  ; name:h
+0007  Ret           r0
+0008  RetUndef      
+fn0 (anonymous)
+code nregs=0 words=1 consts=0 ics=0
+0000  RetUndef      
+fn1 (anonymous)
+code nregs=1 words=2 consts=0 ics=0
+0000  LoadI         r0, 1
+0001  Ret           r0
+=== array literal
+function f(a) { return [a, a + 1, [a]] }
+---
+fn0 f
+code nregs=3 words=13 consts=0 ics=0
+0000  NewArray      r0, 3
+0001  GetEnv        r1, 0, 0
+0002  ArrayPush     r0, r1
+0003  GetEnv        r1, 0, 0
+0004  LoadI         r2, 1
+0005  Add           r1, r1, r2
+0006  ArrayPush     r0, r1
+0007  NewArray      r1, 1
+0008  GetEnv        r2, 0, 0
+0009  ArrayPush     r1, r2
+0010  ArrayPush     r0, r1
+0011  Ret           r0
+0012  RetUndef      
+=== function expressions and names
+function f() { var g = function () {}; let h = () => g; return function k() { return k } }
+---
+fn3 f
+code nregs=1 words=10 consts=2 ics=0
+0000  DeclEnv       s1
+0001  ClosureName   r0, k0, fn0  ; name:g
+0003  SetEnv        r0, 0, 0
+0004  ClosureName   r0, k1, fn1  ; name:h
+0006  InitEnv       r0, 0, 1
+0007  Closure       r0, fn2
+0008  Ret           r0
+0009  RetUndef      
+fn0 (anonymous)
+code nregs=0 words=1 consts=0 ics=0
+0000  RetUndef      
+fn1 (anonymous)
+code nregs=1 words=2 consts=0 ics=0
+0000  GetEnv        r0, 1, 0
+0001  Ret           r0
+fn2 k
+code nregs=1 words=3 consts=0 ics=0
+0000  GetEnv        r0, 0, 0
+0001  Ret           r0
+0002  RetUndef      
+=== template literal
+function f(a, b) { return `x${a}y${b}` }
+---
+fn0 f
+code nregs=5 words=9 consts=2 ics=0
+0000  LoadK         r1, k0  ; "x"
+0001  GetEnv        r2, 0, 0
+0002  ToStr         r2, r2
+0003  LoadK         r3, k1  ; "y"
+0004  GetEnv        r4, 0, 1
+0005  ToStr         r4, r4
+0006  Concat        r0, r1, 4
+0007  Ret           r0
+0008  RetUndef      
+=== plain template
+function f() { return `plain` }
+---
+fn0 f
+code nregs=1 words=3 consts=1 ics=0
+0000  LoadK         r0, k0  ; "plain"
+0001  Ret           r0
+0002  RetUndef      
+=== sequence
+function f(a) { return (a = 1, a + 1) }
+---
+fn0 f
+code nregs=2 words=7 consts=0 ics=0
+0000  LoadI         r0, 1
+0001  SetEnv        r0, 0, 0
+0002  GetEnv        r0, 0, 0
+0003  LoadI         r1, 1
+0004  Add           r0, r0, r1
+0005  Ret           r0
+0006  RetUndef      
+=== if and else
+function f(a) { if (a) return 1; else if (a > 2) return 2; return 3 }
+---
+fn0 f
+code nregs=2 words=14 consts=0 ics=0
+0000  GetEnv        r0, 0, 0
+0001  JmpIfNot      r0, -> 0005
+0002  LoadI         r0, 1
+0003  Ret           r0
+0004  Jmp           -> 0011
+0005  GetEnv        r0, 0, 0
+0006  LoadI         r1, 2
+0007  Gt            r0, r0, r1
+0008  JmpIfNot      r0, -> 0011
+0009  LoadI         r0, 2
+0010  Ret           r0
+0011  LoadI         r0, 3
+0012  Ret           r0
+0013  RetUndef      
+=== while
+function f(n) { var s = 0; while (n > 0) { s += n; n-- } return s }
+---
+fn0 f
+code nregs=2 words=18 consts=0 ics=0
+0000  LoadI         r0, 0
+0001  SetEnv        r0, 0, 1
+0002  GetEnv        r0, 0, 0
+0003  LoadI         r1, 0
+0004  Gt            r0, r0, r1
+0005  JmpIfNot      r0, -> 0015
+0006  GetEnv        r0, 0, 1
+0007  GetEnv        r1, 0, 0
+0008  Add           r0, r0, r1
+0009  SetEnv        r0, 0, 1
+0010  GetEnv        r0, 0, 0
+0011  ToNumeric     r0, r0
+0012  Dec           r1, r0
+0013  SetEnv        r1, 0, 0
+0014  Jmp           -> 0002
+0015  GetEnv        r0, 0, 1
+0016  Ret           r0
+0017  RetUndef      
+=== do while
+function f(n) { do { n-- } while (n > 0); return n }
+---
+fn0 f
+code nregs=2 words=11 consts=0 ics=0
+0000  GetEnv        r0, 0, 0
+0001  ToNumeric     r0, r0
+0002  Dec           r1, r0
+0003  SetEnv        r1, 0, 0
+0004  GetEnv        r0, 0, 0
+0005  LoadI         r1, 0
+0006  Gt            r0, r0, r1
+0007  JmpIf         r0, -> 0000
+0008  GetEnv        r0, 0, 0
+0009  Ret           r0
+0010  RetUndef      
+=== for with var
+function f(n) { var s = 0; for (var i = 0; i < n; i++) s += i; return s }
+---
+fn0 f
+code nregs=2 words=20 consts=0 ics=0
+0000  LoadI         r0, 0
+0001  SetEnv        r0, 0, 1
+0002  LoadI         r0, 0
+0003  SetEnv        r0, 0, 2
+0004  GetEnv        r0, 0, 2
+0005  GetEnv        r1, 0, 0
+0006  Lt            r0, r0, r1
+0007  JmpIfNot      r0, -> 0017
+0008  GetEnv        r0, 0, 1
+0009  GetEnv        r1, 0, 2
+0010  Add           r0, r0, r1
+0011  SetEnv        r0, 0, 1
+0012  GetEnv        r0, 0, 2
+0013  ToNumeric     r0, r0
+0014  Inc           r1, r0
+0015  SetEnv        r1, 0, 2
+0016  Jmp           -> 0004
+0017  GetEnv        r0, 0, 1
+0018  Ret           r0
+0019  RetUndef      
+=== for with let and a closure
+function f(n) { var a = []; for (let i = 0; i < n; i++) a.push(() => i); return a }
+---
+fn1 f
+code nregs=4 words=25 consts=1 ics=1
+0000  NewArray      r0, 0
+0001  SetEnv        r0, 0, 1
+0002  PushEnv       s2
+0003  LoadI         r0, 0
+0004  InitEnv       r0, 0, 0
+0005  CopyEnv       
+0006  GetEnv        r0, 0, 0
+0007  GetEnv        r1, 1, 0
+0008  Lt            r0, r0, r1
+0009  JmpIfNot      r0, -> 0021
+0010  GetEnv        r2, 1, 1
+0011  GetField      r1, r2, ic0, k0  ; name:push
+0013  Closure       r3, fn0
+0014  Call          r0, r1, 1
+0015  CopyEnv       
+0016  GetEnv        r0, 0, 0
+0017  ToNumeric     r0, r0
+0018  Inc           r1, r0
+0019  SetEnv        r1, 0, 0
+0020  Jmp           -> 0005
+0021  PopEnv        
+0022  GetEnv        r0, 0, 1
+0023  Ret           r0
+0024  RetUndef      
+fn0 (anonymous)
+code nregs=1 words=2 consts=0 ics=0
+0000  GetEnv        r0, 1, 0
+0001  Ret           r0
+=== for with no parts
+function f() { for (;;) { break } }
+---
+fn0 f
+code nregs=0 words=3 consts=0 ics=0
+0000  Jmp           -> 0002
+0001  Jmp           -> 0000
+0002  RetUndef      
+=== break and continue
+function f(n) { var s = 0; for (var i = 0; i < n; i++) { if (i % 2) continue; if (i > 8) break; s += i } return s }
+---
+fn0 f
+code nregs=2 words=30 consts=0 ics=0
+0000  LoadI         r0, 0
+0001  SetEnv        r0, 0, 1
+0002  LoadI         r0, 0
+0003  SetEnv        r0, 0, 2
+0004  GetEnv        r0, 0, 2
+0005  GetEnv        r1, 0, 0
+0006  Lt            r0, r0, r1
+0007  JmpIfNot      r0, -> 0027
+0008  GetEnv        r0, 0, 2
+0009  LoadI         r1, 2
+0010  Mod           r0, r0, r1
+0011  JmpIfNot      r0, -> 0013
+0012  Jmp           -> 0022
+0013  GetEnv        r0, 0, 2
+0014  LoadI         r1, 8
+0015  Gt            r0, r0, r1
+0016  JmpIfNot      r0, -> 0018
+0017  Jmp           -> 0027
+0018  GetEnv        r0, 0, 1
+0019  GetEnv        r1, 0, 2
+0020  Add           r0, r0, r1
+0021  SetEnv        r0, 0, 1
+0022  GetEnv        r0, 0, 2
+0023  ToNumeric     r0, r0
+0024  Inc           r1, r0
+0025  SetEnv        r1, 0, 2
+0026  Jmp           -> 0004
+0027  GetEnv        r0, 0, 1
+0028  Ret           r0
+0029  RetUndef      
+=== continue in while
+function f(n) { while (n--) { if (n == 3) continue; } return n }
+---
+fn0 f
+code nregs=2 words=14 consts=0 ics=0
+0000  GetEnv        r0, 0, 0
+0001  ToNumeric     r0, r0
+0002  Dec           r1, r0
+0003  SetEnv        r1, 0, 0
+0004  JmpIfNot      r0, -> 0011
+0005  GetEnv        r0, 0, 0
+0006  LoadI         r1, 3
+0007  Eq            r0, r0, r1
+0008  JmpIfNot      r0, -> 0010
+0009  Jmp           -> 0000
+0010  Jmp           -> 0000
+0011  GetEnv        r0, 0, 0
+0012  Ret           r0
+0013  RetUndef      
+=== break out of a block scope
+function f(a) { for (;;) { let x = a; if (x) break; a = () => x } return a }
+---
+fn1 f
+code nregs=1 words=15 consts=1 ics=0
+0000  PushEnv       s2
+0001  GetEnv        r0, 1, 0
+0002  InitEnv       r0, 0, 0
+0003  GetEnv        r0, 0, 0
+0004  JmpIfNot      r0, -> 0007
+0005  PopEnv        
+0006  Jmp           -> 0012
+0007  ClosureName   r0, k0, fn0  ; name:a
+0009  SetEnv        r0, 1, 0
+0010  PopEnv        
+0011  Jmp           -> 0000
+0012  GetEnv        r0, 0, 0
+0013  Ret           r0
+0014  RetUndef      
+fn0 (anonymous)
+code nregs=1 words=2 consts=0 ics=0
+0000  GetEnv        r0, 1, 0
+0001  Ret           r0
+=== switch
+function f(x) { switch (x) { case 1: return 'one'; case 2: x = 3; break; default: x = 0 } return x }
+---
+fn0 f
+code nregs=2 words=18 consts=1 ics=0
+0000  GetEnv        r0, 0, 0
+0001  LoadI         r1, 1
+0002  StrictEq      r1, r0, r1
+0003  JmpIf         r1, -> 0008
+0004  LoadI         r1, 2
+0005  StrictEq      r1, r0, r1
+0006  JmpIf         r1, -> 0010
+0007  Jmp           -> 0013
+0008  LoadK         r1, k0  ; "one"
+0009  Ret           r1
+0010  LoadI         r1, 3
+0011  SetEnv        r1, 0, 0
+0012  Jmp           -> 0015
+0013  LoadI         r1, 0
+0014  SetEnv        r1, 0, 0
+0015  GetEnv        r0, 0, 0
+0016  Ret           r0
+0017  RetUndef      
+=== switch with lexical names
+function f(x) { switch (x) { case 1: let a = 1; return () => a; default: const b = 2; return b } }
+---
+fn1 f
+code nregs=2 words=16 consts=0 ics=0
+0000  GetEnv        r0, 0, 0
+0001  PushEnv       s2
+0002  LoadI         r1, 1
+0003  StrictEq      r1, r0, r1
+0004  JmpIf         r1, -> 0006
+0005  Jmp           -> 0010
+0006  LoadI         r1, 1
+0007  InitEnv       r1, 0, 0
+0008  Closure       r1, fn0
+0009  Ret           r1
+0010  LoadI         r1, 2
+0011  InitEnv       r1, 0, 1
+0012  GetEnv        r1, 0, 1
+0013  Ret           r1
+0014  PopEnv        
+0015  RetUndef      
+fn0 (anonymous)
+code nregs=1 words=2 consts=0 ics=0
+0000  GetEnv        r0, 1, 0
+0001  Ret           r0
+=== switch with fallthrough and no default
+function f(x) { var r = 0; switch (x) { case 1: r++; case 2: r++ } return r }
+---
+fn0 f
+code nregs=3 words=21 consts=0 ics=0
+0000  LoadI         r0, 0
+0001  SetEnv        r0, 0, 1
+0002  GetEnv        r0, 0, 0
+0003  LoadI         r1, 1
+0004  StrictEq      r1, r0, r1
+0005  JmpIf         r1, -> 0010
+0006  LoadI         r1, 2
+0007  StrictEq      r1, r0, r1
+0008  JmpIf         r1, -> 0014
+0009  Jmp           -> 0018
+0010  GetEnv        r1, 0, 1
+0011  ToNumeric     r1, r1
+0012  Inc           r2, r1
+0013  SetEnv        r2, 0, 1
+0014  GetEnv        r1, 0, 1
+0015  ToNumeric     r1, r1
+0016  Inc           r2, r1
+0017  SetEnv        r2, 0, 1
+0018  GetEnv        r0, 0, 1
+0019  Ret           r0
+0020  RetUndef      
+=== throw
+function f(e) { throw new Error(e) }
+---
+fn0 f
+code nregs=3 words=5 consts=1 ics=0
+0000  GetGlobal     r1, k0  ; name:Error
+0001  GetEnv        r2, 0, 0
+0002  New           r0, r1, 1
+0003  Throw         r0
+0004  RetUndef      
+=== try and catch
+function f(g) { try { return g() } catch (e) { return e } }
+---
+fn0 f
+code nregs=3 words=11 consts=0 ics=0
+0000  GetEnv        r1, 0, 0
+0001  LoadUndef     r2
+0002  Call          r0, r1, 0
+0003  Ret           r0
+0004  Jmp           -> 0010
+0005  PushEnv       s2
+0006  InitEnv       r0, 0, 0
+0007  GetEnv        r0, 0, 0
+0008  Ret           r0
+0009  PopEnv        
+0010  RetUndef      
+handler 0000..0005 -> 0005 r0 depth 0
+=== catch with no parameter
+function f(g) { try { g() } catch { return 1 } return 0 }
+---
+fn0 f
+code nregs=3 words=11 consts=0 ics=0
+0000  GetEnv        r1, 0, 0
+0001  LoadUndef     r2
+0002  Call          r0, r1, 0
+0003  Jmp           -> 0008
+0004  PushEnv       s2
+0005  LoadI         r0, 1
+0006  Ret           r0
+0007  PopEnv        
+0008  LoadI         r0, 0
+0009  Ret           r0
+0010  RetUndef      
+handler 0000..0004 -> 0004 r0 depth 0
+=== try and finally
+function f(g) { try { g() } finally { g = 0 } return g }
+---
+fn0 f
+code nregs=5 words=15 consts=0 ics=0
+0000  GetEnv        r3, 0, 0
+0001  LoadUndef     r4
+0002  Call          r2, r3, 0
+0003  LoadI         r0, 0
+0004  Jmp           -> 0006
+0005  LoadI         r0, 1
+0006  LoadI         r2, 0
+0007  SetEnv        r2, 0, 0
+0008  LoadI         r2, 1
+0009  StrictEq      r2, r0, r2
+0010  JmpIfNot      r2, -> 0012
+0011  Throw         r1
+0012  GetEnv        r0, 0, 0
+0013  Ret           r0
+0014  RetUndef      
+handler 0000..0003 -> 0005 r1 depth 0
+=== try, catch and finally
+function f(g) { var r; try { r = g() } catch (e) { r = e } finally { r = r + 1 } return r }
+---
+fn0 f
+code nregs=5 words=24 consts=0 ics=0
+0000  GetEnv        r3, 0, 0
+0001  LoadUndef     r4
+0002  Call          r2, r3, 0
+0003  SetEnv        r2, 0, 1
+0004  Jmp           -> 0010
+0005  PushEnv       s2
+0006  InitEnv       r2, 0, 0
+0007  GetEnv        r2, 0, 0
+0008  SetEnv        r2, 1, 1
+0009  PopEnv        
+0010  LoadI         r0, 0
+0011  Jmp           -> 0013
+0012  LoadI         r0, 1
+0013  GetEnv        r2, 0, 1
+0014  LoadI         r3, 1
+0015  Add           r2, r2, r3
+0016  SetEnv        r2, 0, 1
+0017  LoadI         r2, 1
+0018  StrictEq      r2, r0, r2
+0019  JmpIfNot      r2, -> 0021
+0020  Throw         r1
+0021  GetEnv        r0, 0, 1
+0022  Ret           r0
+0023  RetUndef      
+handler 0000..0005 -> 0005 r2 depth 0
+handler 0000..0010 -> 0012 r1 depth 0
+=== return through finally
+function f(g) { try { return g() } finally { g() } }
+---
+fn0 f
+code nregs=5 words=21 consts=0 ics=0
+0000  GetEnv        r3, 0, 0
+0001  LoadUndef     r4
+0002  Call          r2, r3, 0
+0003  Mov           r1, r2
+0004  LoadI         r0, 2
+0005  Jmp           -> 0009
+0006  LoadI         r0, 0
+0007  Jmp           -> 0009
+0008  LoadI         r0, 1
+0009  GetEnv        r3, 0, 0
+0010  LoadUndef     r4
+0011  Call          r2, r3, 0
+0012  LoadI         r2, 2
+0013  StrictEq      r2, r0, r2
+0014  JmpIfNot      r2, -> 0016
+0015  Ret           r1
+0016  LoadI         r2, 1
+0017  StrictEq      r2, r0, r2
+0018  JmpIfNot      r2, -> 0020
+0019  Throw         r1
+0020  RetUndef      
+handler 0000..0006 -> 0008 r1 depth 0
+=== break and continue through finally
+function f(n) { for (;;) { try { if (n) break; continue } finally { n++ } } return n }
+---
+fn0 f
+code nregs=4 words=29 consts=0 ics=0
+0000  GetEnv        r2, 0, 0
+0001  JmpIfNot      r2, -> 0004
+0002  LoadI         r0, 2
+0003  Jmp           -> 0009
+0004  LoadI         r0, 3
+0005  Jmp           -> 0009
+0006  LoadI         r0, 0
+0007  Jmp           -> 0009
+0008  LoadI         r0, 1
+0009  GetEnv        r2, 0, 0
+0010  ToNumeric     r2, r2
+0011  Inc           r3, r2
+0012  SetEnv        r3, 0, 0
+0013  LoadI         r2, 2
+0014  StrictEq      r2, r0, r2
+0015  JmpIfNot      r2, -> 0017
+0016  Jmp           -> 0026
+0017  LoadI         r2, 3
+0018  StrictEq      r2, r0, r2
+0019  JmpIfNot      r2, -> 0021
+0020  Jmp           -> 0025
+0021  LoadI         r2, 1
+0022  StrictEq      r2, r0, r2
+0023  JmpIfNot      r2, -> 0025
+0024  Throw         r1
+0025  Jmp           -> 0000
+0026  GetEnv        r0, 0, 0
+0027  Ret           r0
+0028  RetUndef      
+handler 0000..0006 -> 0008 r1 depth 0
+=== nested finally
+function f(g) { try { try { return 1 } finally { g(1) } } finally { g(2) } }
+---
+fn0 f
+code nregs=8 words=37 consts=0 ics=0
+0000  LoadI         r4, 1
+0001  Mov           r3, r4
+0002  LoadI         r2, 2
+0003  Jmp           -> 0007
+0004  LoadI         r2, 0
+0005  Jmp           -> 0007
+0006  LoadI         r2, 1
+0007  GetEnv        r5, 0, 0
+0008  LoadUndef     r6
+0009  LoadI         r7, 1
+0010  Call          r4, r5, 1
+0011  LoadI         r4, 2
+0012  StrictEq      r4, r2, r4
+0013  JmpIfNot      r4, -> 0017
+0014  Mov           r1, r3
+0015  LoadI         r0, 2
+0016  Jmp           -> 0024
+0017  LoadI         r4, 1
+0018  StrictEq      r4, r2, r4
+0019  JmpIfNot      r4, -> 0021
+0020  Throw         r3
+0021  LoadI         r0, 0
+0022  Jmp           -> 0024
+0023  LoadI         r0, 1
+0024  GetEnv        r3, 0, 0
+0025  LoadUndef     r4
+0026  LoadI         r5, 2
+0027  Call          r2, r3, 1
+0028  LoadI         r2, 2
+0029  StrictEq      r2, r0, r2
+0030  JmpIfNot      r2, -> 0032
+0031  Ret           r1
+0032  LoadI         r2, 1
+0033  StrictEq      r2, r0, r2
+0034  JmpIfNot      r2, -> 0036
+0035  Throw         r1
+0036  RetUndef      
+handler 0000..0004 -> 0006 r3 depth 0
+handler 0000..0021 -> 0023 r1 depth 0
+=== finally and block environments
+function f(g) { for (;;) { let x = 1; try { { let y = x; if (y) break } } finally { g(x) } } }
+---
+fn0 f
+code nregs=6 words=31 consts=0 ics=0
+0000  PushEnv       s2
+0001  LoadI         r0, 1
+0002  InitEnv       r0, 0, 0
+0003  PushEnv       s3
+0004  GetEnv        r2, 1, 0
+0005  InitEnv       r2, 0, 0
+0006  GetEnv        r2, 0, 0
+0007  JmpIfNot      r2, -> 0011
+0008  PopEnv        
+0009  LoadI         r0, 2
+0010  Jmp           -> 0015
+0011  PopEnv        
+0012  LoadI         r0, 0
+0013  Jmp           -> 0015
+0014  LoadI         r0, 1
+0015  GetEnv        r3, 1, 0
+0016  LoadUndef     r4
+0017  GetEnv        r5, 0, 0
+0018  Call          r2, r3, 1
+0019  LoadI         r2, 2
+0020  StrictEq      r2, r0, r2
+0021  JmpIfNot      r2, -> 0024
+0022  PopEnv        
+0023  Jmp           -> 0030
+0024  LoadI         r2, 1
+0025  StrictEq      r2, r0, r2
+0026  JmpIfNot      r2, -> 0028
+0027  Throw         r1
+0028  PopEnv        
+0029  Jmp           -> 0000
+0030  RetUndef      
+handler 0003..0012 -> 0014 r1 depth 1
+=== arrow with an expression body
+var f = (a, b) => a * b;
+---
+fn0 (anonymous)
+code nregs=2 words=4 consts=0 ics=0
+0000  GetEnv        r0, 0, 0
+0001  GetEnv        r1, 0, 1
+0002  Mul           r0, r0, r1
+0003  Ret           r0
+=== arguments
+function f() { return arguments.length }
+---
+fn0 f
+code nregs=1 words=5 consts=2 ics=1
+0000  GetName       r0, k0  ; name:arguments
+0001  GetField      r0, r0, ic0, k1  ; name:length
+0003  Ret           r0
+0004  RetUndef      
+=== this in a method
+var o = { m() { return this.x } };
+---
+fn0 (anonymous)
+code nregs=1 words=5 consts=1 ics=1
+0000  LoadThis      r0
+0001  GetField      r0, r0, ic0, k0  ; name:x
+0003  Ret           r0
+0004  RetUndef      
+=== a name behind a class
+class A { m() { return A } }
+---
+fn0 (anonymous)
+code nregs=1 words=3 consts=1 ics=0
+0000  GetName       r0, k0  ; name:A
+0001  Ret           r0
+0002  RetUndef      
+=== own name of a function expression
+var g = function h(n) { return n ? h(n - 1) : 0 };
+---
+fn0 h
+code nregs=5 words=12 consts=0 ics=0
+0000  GetEnv        r0, 0, 1
+0001  JmpIfNot      r0, -> 0009
+0002  GetEnv        r1, 0, 0
+0003  LoadUndef     r2
+0004  GetEnv        r3, 0, 1
+0005  LoadI         r4, 1
+0006  Sub           r3, r3, r4
+0007  Call          r0, r1, 1
+0008  Jmp           -> 0010
+0009  LoadI         r0, 0
+0010  Ret           r0
+0011  RetUndef      
+=== a var and a function on a parameter
+function f(a) { var a; function a() {} return a }
+---
+fn1 f
+code nregs=1 words=6 consts=0 ics=0
+0000  DeclEnv       s1
+0001  Closure       r0, fn0
+0002  InitEnv       r0, 0, 0
+0003  GetEnv        r0, 0, 0
+0004  Ret           r0
+0005  RetUndef      
+fn0 a
+code nregs=0 words=1 consts=0 ics=0
+0000  RetUndef      
+=== hops through scopes
+function f(a) { return function (b) { { let c = 1; return function () { return a + b + c } } } }
+---
+fn2 f
+code nregs=1 words=3 consts=0 ics=0
+0000  Closure       r0, fn1
+0001  Ret           r0
+0002  RetUndef      
+fn1 (anonymous)
+code nregs=1 words=7 consts=0 ics=0
+0000  PushEnv       s3
+0001  LoadI         r0, 1
+0002  InitEnv       r0, 0, 0
+0003  Closure       r0, fn0
+0004  Ret           r0
+0005  PopEnv        
+0006  RetUndef      
+fn0 (anonymous)
+code nregs=2 words=7 consts=0 ics=0
+0000  GetEnv        r0, 3, 0
+0001  GetEnv        r1, 2, 0
+0002  Add           r0, r0, r1
+0003  GetEnv        r1, 1, 0
+0004  Add           r0, r0, r1
+0005  Ret           r0
+0006  RetUndef      
+=== a script name from a function
+let top = 1; function f() { return top }
+---
+fn0 f
+code nregs=1 words=3 consts=0 ics=0
+0000  GetEnv        r0, 1, 0
+0001  Ret           r0
+0002  RetUndef      
+=== unsupported: destructuring
+function f(o) { var {a} = o; return a }
+---
+fn0 f
+unsupported: destructuring
+=== unsupported: for-of
+function f(a) { for (const x of a) {} }
+---
+fn0 f
+unsupported: for-in or for-of
+=== unsupported: spread
+function f(a) { return g(...a) }
+---
+fn0 f
+unsupported: spread
+=== unsupported: generator
+function* f() { yield 1 }
+---
+fn0 f
+unsupported: generator or async function
+=== unsupported: label
+function f() { l: for (;;) break l }
+---
+fn0 f
+unsupported: label

@@ -162,4 +162,14 @@ fn run(dir: &str, sel: &str, n: usize, virt: bool) {
             die(c.mismatches.join("\n"));
         }
     }
+    // `BC_GEN_CHECK=1`: compile every function of the page to bytecode and verify the code (the coverage number of step B2).
+    if std::env::var_os("BC_GEN_CHECK").is_some()
+        && let Some(b) = s.browser()
+    {
+        let c = b.it.bc_gen_check();
+        println!("bytecode: {} functions, {} compile ({:.1}%), {} words; unsupported: {:?}", c.functions, c.compiled, 100.0 * c.compiled as f64 / c.functions.max(1) as f64, c.words, c.unsupported);
+        if !c.bad.is_empty() {
+            die(c.bad.join("\n"));
+        }
+    }
 }

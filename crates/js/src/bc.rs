@@ -30,7 +30,8 @@ pub enum Form {
 /// `ops!` makes the opcode enum and its tables from one list, so the name, the form and the operand letters cannot drift apart.
 /// The letters say what each operand is, in the order a, b, c, x (for `Abx` and `AsBx`: a, then the wide operand):
 /// `r` register, `k` constant number, `c` inline cache number, `f` function number, `n` plain number, `i` signed number,
-/// `j` jump offset. A letter list shorter than the form means the operands that are left are 0.
+/// `j` jump offset, `s` scope number (an index of the scope table of the tree walker), `-` an operand that is not used (always 0).
+/// A letter list shorter than the form means the operands that are left are 0.
 macro_rules! ops {
     ($($name:ident $form:ident $spec:literal $doc:literal,)*) => {
         /// The opcodes. The numbers are not stable until the loop (step B3) ships. Step B2 may add ops.
@@ -70,18 +71,27 @@ ops! {
     GetEnv Abc "r n n" "`a` = the binding `c` of the environment `b` levels up. A TDZ binding throws.",
     SetEnv Abc "r n n" "The binding `c` of the environment `b` levels up = `a`. Checks TDZ and `const`.",
     InitEnv Abc "r n n" "Initialize that binding with `a`. No TDZ check.",
+    PushEnv Abx "- s" "Push a new environment with the bindings of scope `bx`, in the order and with the flags of `bc_binds`. A `let`, `const` or class binding starts in its TDZ.",
+    DeclEnv Abx "- s" "Add to the current environment the bindings of scope `bx` from its current count on (the `let`, `const` and function names of a function body, after `bind_call`).",
+    PopEnv Abc "" "Go back to the parent environment.",
+    CopyEnv Abc "" "Replace the current environment with a copy of it if a closure captured it (one iteration of a `for` with `let`, as `copy_env`).",
     GetGlobal Abx "r k" "`a` = the global named by constant `bx`. A missing name throws a ReferenceError.",
     SetGlobal Abx "r k" "The global named by constant `bx` = `a`.",
     TypeofGlobal Abx "r k" "`a` = `typeof` the global named by constant `bx`. A missing name gives `\"undefined\"`.",
+    GetName Abx "r k" "`a` = the name of constant `bx`, by the full search of the tree walker (environments, then globals). A missing name throws a ReferenceError.",
+    SetName Abx "r k" "The name of constant `bx` = `a`, by the full search.",
+    TypeofName Abx "r k" "`a` = `typeof` the name of constant `bx`, by the full search. A missing name gives `\"undefined\"`.",
     GetField AbcX "r r c k" "`a = b.name`. `c` is the inline cache, `x` the constant of the name.",
     SetField AbcX "r r c k" "`a.name = b`. `c` is the inline cache, `x` the constant of the name.",
     GetElem Abc "r r r" "`a = b[c]`.",
     SetElem Abc "r r r" "`a[b] = c`.",
+    ToKey Abc "r r r" "`a` = the property key of `c` (ToPropertyKey). A `null` or `undefined` `b` throws first, as `b[c]` does.",
     DefField Abc "r r k" "Define the own data property named by constant `c` on `a` with the value `b` (an object literal).",
     ArrayPush Abc "r r" "Append `b` to the array `a` (an array literal).",
     NewObject Abc "r" "`a = {}`.",
     NewArray Abc "r n" "`a = []`. `b` is the expected length.",
     Closure Abx "r f" "`a` = a new function for the function number `bx` of the script, in the current environment.",
+    ClosureName AbcX "r k - f" "`a` = a new function for the function number `x`, named by constant `b` (an anonymous function that takes the name of its binding or key).",
     Call Abc "r r n" "`a = b(...)`. The callee is in `b`, `this` in `b+1`, the `c` arguments in `b+2` and after.",
     New Abc "r r n" "`a = new b(...)`. The constructor is in `b` and the `c` arguments in `b+1` and after.",
     Add Abc "r r r" "`a = b + c`.",
@@ -259,13 +269,15 @@ pub enum Const {
 
 /// A range of words with a handler. When an exception is thrown at a word in `start..end`, the exception goes into register `reg`
 /// and the run continues at `target`. A `finally` block uses a completion register and ordinary jumps. The first handler in the
-/// table whose range holds the word is the innermost, so the code generator writes inner ranges first.
+/// table whose range holds the word is the innermost, so the code generator writes inner ranges first. `depth` is the number of
+/// environments that the code of the function pushed (`PushEnv`) at the handler: the loop pops the environments above it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Handler {
     pub start: u32,
     pub end: u32,
     pub target: u32,
     pub reg: u16,
+    pub depth: u16,
 }
 
 /// The code of one function (or of a script body).
@@ -331,10 +343,12 @@ impl Code {
                 .chars()
                 .filter(|l| *l != ' ')
                 .zip(vals)
+                .filter(|(l, _)| *l != '-')
                 .map(|(l, v)| match l {
                     'r' => format!("r{v}"),
                     'c' => format!("ic{v}"),
                     'f' => format!("fn{v}"),
+                    's' => format!("s{v}"),
                     'i' => format!("{}", v as i32),
                     'j' => {
                         let t = (pc + n) as i64 + v as i32 as i64;
@@ -351,7 +365,7 @@ impl Code {
             pc += n;
         }
         for h in &self.handlers {
-            let _ = writeln!(s, "handler {:04}..{:04} -> {:04} r{}", h.start, h.end, h.target, h.reg);
+            let _ = writeln!(s, "handler {:04}..{:04} -> {:04} r{} depth {}", h.start, h.end, h.target, h.reg, h.depth);
         }
         s
     }

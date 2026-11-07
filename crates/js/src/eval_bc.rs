@@ -13,3 +13,10 @@ struct BcState {
 #[path = "bc_scope.rs"]
 mod bc_scope;
 pub use bc_scope::ScopeCheck;
+
+/// The code generator (step B2) and the verifier of its code.
+#[path = "bc_gen.rs"]
+mod bc_gen;
+#[path = "bc_verify.rs"]
+mod bc_verify;
+pub use bc_gen::GenCheck;

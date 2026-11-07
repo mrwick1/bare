@@ -145,7 +145,7 @@ fn same_kind(a: RKind, b: RKind) -> bool {
 impl<'p> Interp<'p> {
     /// The index in `sc_all` of the root scope of the current script, or `None` for a script that was never walked (the empty script
     /// of [`Interp::realm`]). Every walked script opens one root scope, in the order of the scripts.
-    fn bc_root(&self) -> Option<u32> {
+    pub(super) fn bc_root(&self) -> Option<u32> {
         let roots: Vec<u32> = (0..self.sc_all.len() as u32).filter(|&i| matches!(self.sc_all[i as usize].kind, RKind::Root)).collect();
         let unwalked = self.scripts.len() - roots.len();
         self.cur.checked_sub(unwalked).map(|k| roots[k])
