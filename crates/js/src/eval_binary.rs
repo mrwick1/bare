@@ -200,6 +200,14 @@ impl<'p> Interp<'p> {
         Ok(Value::Object(h!(self, self.heap.new_view(Some(u8p), buf, 0, len))))
     }
 
+    /// A new typed array of type `ty` over a new buffer that owns `bytes` (no copy). `bytes.len()` is a multiple of the element size.
+    pub fn new_typed_array(&mut self, ty: Elem, bytes: Vec<u8>) -> Result<Value, Error> {
+        let (ab, p) = (self.bp().ab, self.bin_proto(ty));
+        let len = bytes.len() / ty.size();
+        let buf = h!(self, self.heap.new_buffer_from(Some(ab), bytes));
+        Ok(Value::Object(h!(self, self.heap.new_typed_view(Some(p), buf, 0, len, ty))))
+    }
+
     /// The bytes of an `ArrayBuffer`, a typed array or a `DataView` value, borrowed with no copy. `None` for any other value.
     pub fn bytes_of(&self, v: Value) -> Option<&[u8]> {
         let Value::Object(o) = v else { return None };

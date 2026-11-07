@@ -1,6 +1,6 @@
 //! Load test for geometry reads (`offsetWidth` over native layout, `browser_geometry.rs`).
 //!
-//!   geometry_load CASE SCALE      CASE: dashboard | stretch | scroll      SCALE: 1, 10, 100
+//!   geometry_load CASE SCALE      CASE: dashboard | stretch | scroll | rects      SCALE: 1, 10, 100
 //!
 //! dashboard: the page of `tools/fixtures/ui/geometry-dashboard.html` (207 elements and texts, 9 levels of boxes that layout can lay out
 //! more than once, 17 levels deep), with its `<main>` repeated SCALE times. stretch: SCALE copies of 40 flex rows inside one another, each
@@ -8,6 +8,7 @@
 //! map of `layout/src/memo.rs`). Both are read through `offsetWidth` with raised limits, so the numbers are of the work and not of a cap.
 //! scroll: SCALE copies of 30 scroll containers that need a bar, each inside a stretched flex row (2^30 layouts, the map does not help).
 //! It is read with the default limits, and the read must stop with `geometry-work`; the time that it took is printed.
+//! rects: 10 x SCALE boxes, each read twice through `getBoundingClientRect` and `getClientRects` (one rectangle object for each read; every read lays out the page again).
 //! Prints the cascade, layout and read times, the work of layout in units, the fragments, the peak RSS and the allocations.
 
 use bare::browser::*;
@@ -101,7 +102,8 @@ fn page(name: &str, scale: usize) -> String {
             }
             format!("<body style='margin:0'>{}<div id=t>end</div>", one.repeat(scale))
         }
-        _ => die("usage: geometry_load dashboard|stretch|scroll 1|10|100".into()),
+        "rects" => format!("<body style='margin:0'>{}", "<div class=r style='width:30px;height:10px'></div>".repeat(10 * scale)),
+        _ => die("usage: geometry_load dashboard|stretch|scroll|rects 1|10|100".into()),
     }
 }
 
@@ -115,6 +117,15 @@ fn exec(name: &str, scale: usize) {
         let t = Instant::now();
         let r = b.run_script("document.getElementById('t').offsetWidth");
         println!("scroll x{scale}: read stopped after {:.1} ms with {r:?}; peak RSS {} MiB", t.elapsed().as_secs_f64() * 1e3, status_kib("VmHWM:") / 1024);
+        return;
+    }
+    if name == "rects" {
+        let eval = EvalLimits { max_steps: u64::MAX / 2, ..Default::default() };
+        let mut b = Browser::new(tree::parse(&html), BrowserLimits::default(), eval, HeapLimits::default()).unwrap_or_else(|e| die(format!("browser: {e:?}")));
+        let t = Instant::now();
+        let r = b.run_script("var l = document.querySelectorAll('.r'), s = 0; for (var k = 0; k < 2; k++) for (var i = 0; i < l.length; i++) { var r = l[i].getBoundingClientRect(); s += r.width + r.top + l[i].getClientRects().length; } s");
+        let r = r.unwrap_or_else(|e| die(format!("read: {e:?}")));
+        println!("rects x{scale}: sum {} in {:.1} ms; peak RSS {} MiB", b.it.display(r), t.elapsed().as_secs_f64() * 1e3, status_kib("VmHWM:") / 1024);
         return;
     }
     // The same page by hand, to time the cascade and layout alone.
@@ -159,7 +170,7 @@ fn exec(name: &str, scale: usize) {
 fn main() {
     let a: Vec<String> = std::env::args().collect();
     if a.len() != 3 {
-        die("usage: geometry_load dashboard|stretch|scroll 1|10|100".into());
+        die("usage: geometry_load dashboard|stretch|scroll|rects 1|10|100".into());
     }
     let scale: usize = a[2].parse().unwrap_or_else(|_| die("scale".into()));
     let name = a[1].clone();

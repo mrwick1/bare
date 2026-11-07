@@ -63,8 +63,6 @@ struct Rng {
 pub(crate) struct State {
     /// Range, Selection and AbstractRange: prototype and constructor of each, once made.
     made: Option<[ObjId; 6]>,
-    /// The method `item` that each list of rectangles holds (`browser_rects.rs`), once made.
-    rect_item: Option<ObjId>,
     ranges: HashMap<ObjId, Rng>,
     /// The selection object and its range.
     sel: Option<(ObjId, Option<ObjId>)>,
@@ -1264,19 +1262,10 @@ pub(crate) fn bounds(d: &Dom, it: &mut Interp<'_>, this: Value) -> R<(NodeId, u3
 }
 
 impl Dom {
-    pub(crate) fn range_rect_item(&self) -> Option<ObjId> {
-        self.range.st.get().and_then(|s| s.borrow().rect_item)
-    }
-
-    pub(crate) fn set_range_rect_item(&self, f: ObjId) {
-        state(self).borrow_mut().rect_item = Some(f);
-    }
-
     pub(crate) fn range_roots(&self, out: &mut Vec<Value>) {
         if let Some(st) = self.range.st.get() {
             let s = st.borrow();
             out.extend(s.made.iter().flatten().copied().map(Value::Object));
-            out.extend(s.rect_item.map(Value::Object));
             out.extend(s.sel.map(|(o, _)| Value::Object(o)));
         }
     }

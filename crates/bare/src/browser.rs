@@ -522,6 +522,8 @@ pub struct Dom {
     pub(crate) ctl: crate::browser_controls::CtlHost,
     /// Custom elements (`browser_custom.rs`).
     pub(crate) ce: crate::browser_custom::Ce,
+    /// Rectangles, points, quads and matrices (`browser_geom.rs`, `browser_matrix.rs`).
+    pub(crate) geom: crate::browser_geom::Geom,
 }
 
 impl Host for Dom {
@@ -569,6 +571,7 @@ impl Host for Dom {
         self.walk_roots(out);
         self.range_roots(out);
         self.ce_roots(out);
+        crate::browser_geom::roots(self, out);
     }
 
     fn trace(&self, owner: ObjId, out: &mut Vec<Value>) {
@@ -621,6 +624,7 @@ impl Host for Dom {
     fn prune(&self, live: &dyn Fn(ObjId) -> bool) {
         crate::browser_navigation::prune(self, live);
         crate::browser_platform::prune(self, live);
+        crate::browser_geom::prune(self, live);
         crate::browser_style::prune(self, live);
         crate::browser_computed::prune(self, live);
         self.resize_prune(live);
@@ -1118,7 +1122,8 @@ impl Dom {
         nd::install_late(self, it)?;
         crate::browser_controls::install(self, it)?;
         crate::browser_media::install(self, it)?;
-        crate::browser_custom::install(self, it)
+        crate::browser_custom::install(self, it)?;
+        crate::browser_geom::install(self, it)
     }
 
     pub(crate) fn define_accessor(&self, it: &mut Interp<'_>, o: ObjId, key: PropertyKey, get: ObjId, set: Option<ObjId>) -> R<()> {
@@ -1411,6 +1416,7 @@ impl Browser {
             hh: Default::default(),
             ctl: Default::default(),
             ce: Default::default(),
+            geom: Default::default(),
         });
         it.set_host(dom.clone())?;
         it.heap.set_indexed_source(dom.clone());

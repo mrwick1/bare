@@ -132,6 +132,8 @@ mod browser_lazy;
 mod browser_mutation;
 mod browser_custom;
 mod browser_face;
+mod browser_geom;
+mod browser_matrix;
 #[cfg(test)]
 mod browser_custom_tests;
 #[cfg(test)]
@@ -176,6 +178,8 @@ mod browser_range_tests;
 mod browser_resize_tests;
 #[cfg(test)]
 mod browser_geometry_tests;
+#[cfg(test)]
+mod browser_geom_tests;
 #[cfg(test)]
 mod browser_computed_tests;
 #[cfg(test)]

@@ -645,7 +645,7 @@ fn bounding_rect(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
         Some(r) => r,
         None => crate::browser_rects::element_bounding(d, it, el)?,
     };
-    crate::browser_rects::rect_object(d, it, r)
+    crate::browser_geom::layout_rect(d, it, r)
 }
 
 fn align_word(it: &mut Interp<'_>, o: Value, name: &str, default: Align) -> Align {

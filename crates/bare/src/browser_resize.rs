@@ -369,17 +369,12 @@ impl Dom {
     fn entry(&self, it: &mut Interp<'_>, p: Protos, wrapper: ObjId, z: Sizes) -> R<Value> {
         it.charge(1)?;
         let e = self.obj(it, p.entry)?;
-        let rect = self.obj(it, it.object_prototype())?;
-        let (x, y, w, h) = (z.at.0 as f64, z.at.1 as f64, z.content.0 as f64, z.content.1 as f64);
-        for (name, v) in [("x", x), ("y", y), ("width", w), ("height", h), ("top", y), ("right", x + w), ("bottom", y + h), ("left", x)] {
-            let k = self.key(it, name)?;
-            it.define_data(rect, k, Value::Number(v), false, true, true)?;
-        }
+        let rect = crate::browser_geom::rect_object(self, it, [z.at.0 as f64, z.at.1 as f64, z.content.0 as f64, z.content.1 as f64], false)?;
         let border = self.size_obj(it, p.size, z.border)?;
         let border = it.array_from(&[border])?;
         let content = self.size_obj(it, p.size, z.content)?;
         let content = it.array_from(&[content])?;
-        for (name, v) in [("target", Value::Object(wrapper)), ("contentRect", Value::Object(rect)), ("borderBoxSize", border), ("contentBoxSize", content)] {
+        for (name, v) in [("target", Value::Object(wrapper)), ("contentRect", rect), ("borderBoxSize", border), ("contentBoxSize", content)] {
             let k = self.key(it, name)?;
             it.define_data(e, k, v, false, true, true)?;
         }

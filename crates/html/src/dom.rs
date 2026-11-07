@@ -551,7 +551,7 @@ impl Document {
     /// Does the element `el` have `class` in its `class` attribute? A short attribute is read word by word.
     /// A long one (128 bytes or more) becomes a set the first time,
     /// so that 5,000 rules on one element do not read the 5,000 words 5,000 times.
-    #[inline]
+    #[inline(always)]
     pub fn has_class(&self, el: NodeId, class: &str) -> bool {
         let Some(value) = self.attr(el, Atom::CLASS) else { return false };
         if value.len() < 128 {

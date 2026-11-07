@@ -1,0 +1,457 @@
+var E = function (f) { try { return String(f()) } catch (e) { return e.name + ':' + e.message } };
+var J = function (v) { return JSON.stringify(v, function (k, x) { return typeof x === 'number' && !isFinite(x) ? String(x) : Object.is(x, -0) ? '-0' : x }) };
+var R = function (r) { return [r.x, r.y, r.width, r.height, r.top, r.right, r.bottom, r.left].map(function (v) { return Object.is(v, -0) ? '-0' : v }).join() };
+var P = function (p) { return [p.x, p.y, p.z, p.w].join() };
+var Q = function (q) { return [q.p1, q.p2, q.p3, q.p4].map(P).join(' ') };
+var X = function (m) { return Array.prototype.slice.call(m.toFloat64Array()).join() };
+var Z = function (v) { return Math.round(v * 1e9) / 1e9 };
+var W = function (m) { return Array.prototype.slice.call(m.toFloat64Array()).map(Z).join() + ' ' + m.is2D };
+var D = function (o, k) { var d = Object.getOwnPropertyDescriptor(o, k); if (!d) return String(k) + ':none'; return String(k) + ':' + ('value' in d ? 'v' + (d.writable ? 'w' : '') : (d.get ? 'g' : '') + (d.set ? 's' : '')) + (d.enumerable ? 'e' : '') + (d.configurable ? 'c' : '') };
+var N = function (f) { try { f(); return 'ok' } catch (e) { return e.name } };
+var st = document.createElement('style'); st.textContent = "html{overflow:hidden}*{font-family:'Noto Sans Mono' !important}body{margin:0}.n{width:100px}"; document.head.appendChild(st);
+var K = function (o) { return Reflect.ownKeys(o).map(function (k) { return D(o, k) }).join(' ') };
+=== rect-ctor
+(function () { return function () {
+  return [R(new DOMRect()), R(new DOMRect(1)), R(new DOMRect(1, 2)), R(new DOMRect(1, 2, 3)), R(new DOMRect(1, 2, 3, 4)), R(new DOMRect(1, 2, 3, 4, 5, 6)),
+    R(new DOMRect('1', '2', '3', '4')), R(new DOMRect(null, true, [], {})), R(new DOMRect(undefined, undefined)), R(new DOMRectReadOnly(1, 2, 3, 4)),
+    R(new DOMRect(-0, -0, -0, -0)), R(new DOMRect(0.1, 0.2, 0.3, 0.4)), R(new DOMRect(1e308, 1e308, 1e308, 1e308))].join('\n')
+} })()
+=== rect-negative
+(function () { return function () {
+  var a = new DOMRect(10, 20, -3, -4), b = new DOMRect(10, 20, -3, 4), c = new DOMRect(10, 20, 3, -4), d = new DOMRect(-10, -20, 30, 40);
+  return [a, b, c, d].map(R).join('\n')
+} })()
+=== rect-nan-infinity
+(function () { return function () {
+  var v = [NaN, Infinity, -Infinity, 1, -1, 0];
+  var out = [];
+  for (var i = 0; i < v.length; i++) for (var j = 0; j < v.length; j++) out.push(R(new DOMRect(v[i], 2, v[j], 4)) + ' / ' + R(new DOMRect(1, v[i], 3, v[j])));
+  return out.join('\n')
+} })()
+=== rect-setters
+(function () { return function () {
+  var r = new DOMRect(1, 2, 3, 4), out = [];
+  r.x = 10; out.push(R(r)); r.y = '20'; out.push(R(r)); r.width = -5; out.push(R(r)); r.height = NaN; out.push(R(r));
+  r.top = 99; r.left = 99; r.right = 99; r.bottom = 99; out.push(R(r));
+  out.push(E(function () { r.x = Symbol() }), E(function () { r.x = { valueOf: function () { throw new RangeError('boom') } } }));
+  var ro = new DOMRectReadOnly(1, 2, 3, 4); ro.x = 5; out.push(R(ro));
+  out.push(N(function () { 'use strict'; ro.x = 5 }), N(function () { 'use strict'; r.top = 5 }));
+  out.push(E(function () { Object.getOwnPropertyDescriptor(DOMRect.prototype, 'x').set.call(ro, 1) }));
+  out.push(E(function () { Object.getOwnPropertyDescriptor(DOMRect.prototype, 'x').set.call({}, 1) }));
+  out.push(E(function () { Object.getOwnPropertyDescriptor(DOMRect.prototype, 'x').set.call(r) }));
+  out.push(R(r));
+  return out.join('\n')
+} })()
+=== rect-fromrect
+(function () { return function () {
+  return [R(DOMRect.fromRect()), R(DOMRect.fromRect(null)), R(DOMRect.fromRect(undefined)), R(DOMRect.fromRect({})), R(DOMRect.fromRect({ x: 1, width: '5' })),
+    R(DOMRect.fromRect({ x: 1, y: 2, width: 3, height: 4, top: 99 })), R(DOMRectReadOnly.fromRect({ y: -1, height: -2 })), R(DOMRect.fromRect(new DOMRect(5, 6, 7, 8))),
+    R(DOMRect.fromRect({ x: NaN, y: Infinity })), R(DOMRect.fromRect(function () { })), R(DOMRect.fromRect([])),
+    E(function () { return DOMRect.fromRect(1) }), E(function () { return DOMRect.fromRect('a') }), E(function () { return DOMRectReadOnly.fromRect(true) }),
+    E(function () { return DOMRect.fromRect({ x: { valueOf: function () { throw new Error('v') } } }) }),
+    E(function () { return DOMRect.fromRect({ x: Symbol() }) }),
+    (DOMRect.fromRect() instanceof DOMRect) + ',' + (DOMRectReadOnly.fromRect() instanceof DOMRect) + ',' + (DOMRectReadOnly.fromRect() instanceof DOMRectReadOnly),
+    E(function () { return DOMRect.fromRect.call(undefined, {}).width }), E(function () { return DOMRect.fromRect.call({}, { width: 3 }).width })].join('\n')
+} })()
+=== rect-fromrect-order
+(function () { return function () {
+  var log = [], o = {};
+  ['x', 'y', 'width', 'height'].forEach(function (k) { Object.defineProperty(o, k, { get: function () { log.push(k); return 1 } }) });
+  DOMRect.fromRect(o);
+  var log2 = [], o2 = {};
+  ['height', 'width', 'y', 'x'].forEach(function (k) { Object.defineProperty(o2, k, { get: function () { log2.push(k); return 1 } }) });
+  DOMRect.fromRect(o2);
+  return log.join() + ' ' + log2.join()
+} })()
+=== rect-json
+(function () { return function () {
+  var r = new DOMRect(1, 2, -3, -4);
+  return [JSON.stringify(r), JSON.stringify(r.toJSON()), Object.keys(r.toJSON()).join(), Object.keys(r).length, Object.getPrototypeOf(r.toJSON()) === Object.prototype,
+    JSON.stringify(new DOMRect(NaN, Infinity, 0, 0)), E(function () { return DOMRectReadOnly.prototype.toJSON.call({}) }), E(function () { return JSON.stringify(new DOMRectReadOnly(1, 2, 3, 4)) }),
+    Object.keys(new DOMRect(1, 2, 3, 4)).length, 'x' in r, r.hasOwnProperty('x'), JSON.stringify(Object.assign({}, r)), (function () { var s = []; for (var k in r) s.push(k); return s.join() })()].join('\n')
+} })()
+=== rect-shape
+(function () { return function () {
+  var out = [];
+  [DOMRectReadOnly, DOMRect].forEach(function (c) {
+    out.push(c.name + ' ' + c.length + ' ' + K(c) + ' | ' + K(c.prototype));
+    out.push(Object.getPrototypeOf(c) === Function.prototype ? 'fn' : Object.getPrototypeOf(c) === DOMRectReadOnly ? 'ro' : 'other');
+    out.push(Object.getPrototypeOf(c.prototype) === Object.prototype ? 'object' : Object.getPrototypeOf(c.prototype) === DOMRectReadOnly.prototype ? 'roproto' : 'other');
+    out.push(c.fromRect.length + ' ' + c.fromRect.name + ' ' + (c.fromRect === DOMRectReadOnly.fromRect));
+    out.push(Object.prototype.toString.call(new c) + ' ' + Object.prototype.toString.call(c.prototype));
+  });
+  var g = Object.getOwnPropertyDescriptor(DOMRect.prototype, 'x'), g2 = Object.getOwnPropertyDescriptor(DOMRectReadOnly.prototype, 'top');
+  out.push(g.get.name + '|' + g.set.name + '|' + g.get.length + g.set.length + '|' + g2.get.name + '|' + (g2.set === undefined) + '|' + DOMRectReadOnly.prototype.toJSON.name + DOMRectReadOnly.prototype.toJSON.length);
+  out.push(E(function () { return DOMRect() }), E(function () { return DOMRectReadOnly() }), E(function () { return DOMRect.prototype.x }), E(function () { return DOMRectReadOnly.prototype.top }), E(function () { return DOMRect.prototype.toJSON() }));
+  out.push(N(function () { return new (DOMRect.fromRect)() }), N(function () { return new DOMRect.prototype.toJSON() }));
+  out.push(typeof DOMRect + ' ' + (typeof window.DOMRect) + ' ' + ('DOMRect' in window) + ' ' + Object.getOwnPropertyDescriptor(window, 'DOMRect').enumerable + Object.getOwnPropertyDescriptor(window, 'DOMRect').writable + Object.getOwnPropertyDescriptor(window, 'DOMRect').configurable);
+  return out.join('\n')
+} })()
+=== rect-subclass
+(function () { return function () {
+  class A extends DOMRect { constructor() { super(1, 2, 3, 4); this.extra = 5 } get area() { return this.width * this.height } }
+  class B extends DOMRectReadOnly { }
+  var a = new A, b = new B(1, 2, 3, 4);
+  var o = Reflect.construct(DOMRect, [1, 2, 3, 4], Object), f = function () { };
+  f.prototype = DOMRect.prototype;
+  var o2 = Reflect.construct(DOMRect, [5, 6, 7, 8], f);
+  return [a instanceof A, a instanceof DOMRect, a.area, a.extra, R(a), Object.prototype.toString.call(a), b instanceof B, R(b), A.fromRect({ x: 1 }) instanceof A, Object.getPrototypeOf(o) === Object.prototype, o.x, Object.getPrototypeOf(o2) === DOMRect.prototype, o2.x,
+    Object.keys(a).join(), E(function () { a.right = 1; return R(a) })].join('\n')
+} })()
+=== rect-brand
+(function () { return function () {
+  var g = function (k) { return Object.getOwnPropertyDescriptor(DOMRectReadOnly.prototype, k).get };
+  return ['x', 'y', 'width', 'height', 'top', 'right', 'bottom', 'left'].map(function (k) { return E(function () { return g(k).call({}) }) + '/' + E(function () { return g(k).call(new DOMPoint) }) + '/' + E(function () { return g(k).call(1) }) + '/' + E(function () { return g(k).call(null) }) + '/' + E(function () { return g(k).call(new DOMRect(1, 2, 3, 4)) }) }).join('\n')
+} })()
+=== rect-element
+@html <div id=a style="margin:5px;padding:3px;border:2px solid;width:100px;height:20px"></div><span id=s>x</span>
+(function () { return function () {
+  var a = document.getElementById('a'), r = a.getBoundingClientRect(), l = a.getClientRects(), q = document.createRange(); q.selectNode(a);
+  var s = document.getElementById('s'), sl = s.getClientRects();
+  var out = [r instanceof DOMRect, r instanceof DOMRectReadOnly, Object.prototype.toString.call(r), R(r), Object.keys(r).length, r.hasOwnProperty('x'), r === a.getBoundingClientRect(), JSON.stringify(r)];
+  out.push(l instanceof DOMRectList, Array.isArray(l), Object.prototype.toString.call(l), l.length, l[0] instanceof DOMRect, R(l[0]), l.item(0) === l[0], l[0] === l.item(0), l.item(1), l[1], l[-1], l.item(-1), l.item(4294967296), l.item('0') === l[0], l.item(0.9) === l[0]);
+  out.push(q.getBoundingClientRect() instanceof DOMRect, q.getClientRects() instanceof DOMRectList, q.getClientRects().length, R(q.getClientRects()[0]), R(q.getBoundingClientRect()));
+  out.push(document.createElement('div').getBoundingClientRect() instanceof DOMRect, R(document.createElement('div').getBoundingClientRect()), document.createElement('div').getClientRects().length, document.createElement('div').getClientRects() instanceof DOMRectList);
+  out.push(sl.length, E(function () { return l.item() }), E(function () { return l.length = 5 }), l.length);
+  r.x = 50; out.push(R(r), R(a.getBoundingClientRect()), (a.getBoundingClientRect() === r));
+  return out.join('\n')
+} })()
+=== rectlist-shape
+(function () { return function () {
+  var l = document.body.getClientRects(), out = [];
+  out.push(DOMRectList.name, DOMRectList.length, K(DOMRectList), K(DOMRectList.prototype), Object.getPrototypeOf(DOMRectList.prototype) === Object.prototype);
+  out.push(typeof l[Symbol.iterator], typeof l.forEach, typeof l.keys, typeof l.entries, typeof l.values, typeof l.map, typeof l.indexOf, l[Symbol.iterator] === Array.prototype.values, l[Symbol.iterator] === DOMRectList.prototype[Symbol.iterator]);
+  out.push([].slice.call(l).length, Array.from(l).length, Array.from(l)[0] instanceof DOMRect, [].map.call(l, R).join(), E(function () { var n = 0; for (var x of l) n += x instanceof DOMRect ? 1 : 100; return n }), E(function () { return [...l].length }));
+  out.push(Object.keys(l).join() + '|' + Object.getOwnPropertyNames(l).join(), l.hasOwnProperty('length'), l.hasOwnProperty('0'), l.hasOwnProperty('1'), '0' in l, '1' in l, 'item' in l);
+  out.push(E(function () { return DOMRectList() }), E(function () { return new DOMRectList() }), E(function () { return DOMRectList.prototype.length }), E(function () { return DOMRectList.prototype.item.call({}, 0) }), E(function () { return DOMRectList.prototype.item.call(l, 0) instanceof DOMRect }));
+  var d = Object.getOwnPropertyDescriptor(DOMRectList.prototype, 'length');
+  out.push(d.get.name, DOMRectList.prototype.item.length, DOMRectList.prototype.item.name);
+  l[0] = 5; out.push(l[0] instanceof DOMRect); l.foo = 1; out.push(l.foo, delete l[0], Object.isFrozen(l), Object.isExtensible(l));
+  return out.join('\n')
+} })()
+=== rectlist-inline
+@html <div class=n>aaa bbb ccc ddd eee <span id=i style="background:#ccc">fff ggg hhh iii jjj kkk lll mmm nnn ooo</span> ppp</div>
+(function () { return function () {
+  var i = document.getElementById('i'), l = i.getClientRects(), out = [l.length];
+  for (var k = 0; k < l.length; k++) out.push([l[k].x, l[k].y, l[k].width, l[k].height, l[k].top, l[k].right, l[k].bottom, l[k].left].map(Math.round).join());
+  out.push(l[0] === l[0], l.item(0) === l[0], l[0] !== i.getClientRects()[0]);
+  return out.join('\n')
+} })()
+=== point-ctor
+(function () { return function () {
+  return [P(new DOMPoint()), P(new DOMPoint(1)), P(new DOMPoint(1, 2)), P(new DOMPoint(1, 2, 3)), P(new DOMPoint(1, 2, 3, 4)), P(new DOMPoint(1, 2, 3, 4, 5)), P(new DOMPoint('1', null, true, undefined)), P(new DOMPoint({}, [], NaN, -Infinity)),
+    P(new DOMPointReadOnly(1, 2, 3, 4)), P(new DOMPoint(-0, -0, -0, -0)), (new DOMPoint(-0)).x === 0 && 1 / (new DOMPoint(-0)).x, E(function () { return new DOMPoint(Symbol()) }), E(function () { return DOMPoint() }), E(function () { return DOMPointReadOnly() })].join('\n')
+} })()
+=== point-frompoint
+(function () { return function () {
+  return [P(DOMPoint.fromPoint()), P(DOMPoint.fromPoint(null)), P(DOMPoint.fromPoint({})), P(DOMPoint.fromPoint({ x: 1, w: '3' })), P(DOMPointReadOnly.fromPoint({ y: 2, z: NaN })), P(DOMPoint.fromPoint(new DOMPoint(1, 2, 3, 4))),
+    P(DOMPoint.fromPoint({ x: undefined, w: undefined })), P(DOMPoint.fromPoint({ x: null, w: null })),
+    E(function () { return DOMPoint.fromPoint(3) }), E(function () { return DOMPoint.fromPoint('a') }), E(function () { return DOMPointReadOnly.fromPoint(true) }),
+    (DOMPoint.fromPoint() instanceof DOMPoint) + ',' + (DOMPointReadOnly.fromPoint() instanceof DOMPoint) + ',' + (DOMPointReadOnly.fromPoint() instanceof DOMPointReadOnly)].join('\n')
+} })()
+=== point-setters
+(function () { return function () {
+  var p = new DOMPoint(1, 2, 3, 4), ro = new DOMPointReadOnly(1, 2, 3, 4), out = [];
+  p.x = 10; p.y = '20'; p.z = NaN; p.w = -Infinity; out.push(P(p)); ro.x = 5; out.push(P(ro));
+  out.push(N(function () { 'use strict'; ro.x = 5 }), E(function () { p.x = Symbol() }), E(function () { Object.getOwnPropertyDescriptor(DOMPoint.prototype, 'x').set.call(ro, 1) }), E(function () { Object.getOwnPropertyDescriptor(DOMPoint.prototype, 'x').set.call({}, 1) }));
+  out.push(JSON.stringify(p) + JSON.stringify(ro), Object.keys(p).length, JSON.stringify(p.toJSON()), E(function () { return DOMPointReadOnly.prototype.toJSON.call({}) }));
+  return out.join('\n')
+} })()
+=== point-shape
+(function () { return function () {
+  var out = [];
+  [DOMPointReadOnly, DOMPoint].forEach(function (c) {
+    out.push(c.name + ' ' + c.length + ' ' + K(c) + ' | ' + K(c.prototype) + ' | ' + Object.prototype.toString.call(new c) + ' ' + (Object.getPrototypeOf(c.prototype) === Object.prototype) + ' ' + c.fromPoint.length);
+  });
+  out.push(DOMPointReadOnly.prototype.matrixTransform.length + DOMPointReadOnly.prototype.matrixTransform.name + ' ' + E(function () { return DOMPoint.prototype.x }) + ' ' + E(function () { return DOMPoint.prototype.matrixTransform() }) + ' ' + E(function () { return DOMPointReadOnly.prototype.matrixTransform.call({}) }));
+  class A extends DOMPoint { }
+  out.push(new A(1, 2) instanceof A, P(new A(1, 2)), A.fromPoint({ x: 1 }) instanceof A);
+  return out.join('\n')
+} })()
+=== point-matrix-transform
+(function () { return function () {
+  var p = new DOMPoint(1, 2, 3, 4), out = [];
+  out.push(P(p.matrixTransform(new DOMMatrix([2, 0, 0, 2, 10, 20]))), P(p.matrixTransform({ a: 2, d: 2, e: 10, f: 20 })), P(p.matrixTransform()), P(p.matrixTransform(null)), P(p.matrixTransform({})), P(p.matrixTransform(undefined)));
+  out.push(E(function () { return p.matrixTransform(5) }), E(function () { return p.matrixTransform('a') }), E(function () { return p.matrixTransform({ a: 1, m11: 2 }) }), E(function () { return p.matrixTransform({ m22: 1, d: 3 }) }));
+  out.push(P(new DOMPoint(1, 2).matrixTransform({ m13: 1 })), P(new DOMPoint(1, 2).matrixTransform({ m13: 1, is2D: false })), E(function () { return new DOMPoint(1, 2).matrixTransform({ m13: 1, is2D: true }) }), P(new DOMPoint(1, 2).matrixTransform({ a: 1, b: NaN })));
+  out.push(P(new DOMPoint(1, 2, 3).matrixTransform(new DOMMatrix().rotateAxisAngle(0, 1, 0, 90))), P(new DOMPoint(1, 2).matrixTransform(new DOMMatrix().rotate(90))), P(new DOMPoint(10, 10, 10).matrixTransform(new DOMMatrix('perspective(100px)'))));
+  out.push(new DOMPoint(1, 2).matrixTransform(new DOMMatrix()) instanceof DOMPoint, new DOMPointReadOnly(1, 2).matrixTransform() instanceof DOMPoint, new DOMPointReadOnly(1, 2).matrixTransform() === new DOMPointReadOnly(1, 2).matrixTransform());
+  out.push(P(new DOMPoint(1, 2, 3, 4).matrixTransform(new DOMMatrix([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]))), P(new DOMPoint(Infinity, 1).matrixTransform(new DOMMatrix([1, 0, 0, 1, 0, 0]))), P(new DOMPoint(NaN, 1).matrixTransform(new DOMMatrix([2, 0, 0, 2, 0, 0]))));
+  return out.join('\n')
+} })()
+=== quad-ctor
+(function () { return function () {
+  var p = { x: 1 }, q = new DOMQuad(p);
+  p.x = 5;
+  return [Q(new DOMQuad()), Q(new DOMQuad({ x: 1 }, { y: 2 }, { z: 3 }, { w: 4 })), Q(new DOMQuad(null, undefined, {}, new DOMPoint(7, 8, 9, 10))), Q(q), Q(new DOMQuad({ x: 1 }, { x: 2 }, { x: 3 }, { x: 4 }, { x: 5 })),
+    E(function () { return new DOMQuad(1) }), E(function () { return new DOMQuad({}, 'a') }), E(function () { return DOMQuad() }), E(function () { return new DOMQuad({ x: Symbol() }) }),
+    (q.p1 === q.p1) + ',' + (q.p1 instanceof DOMPoint) + ',' + (q.p1 instanceof DOMPointReadOnly) + ',' + (q.p1 !== q.p2) + ',' + Object.prototype.toString.call(q)].join('\n')
+} })()
+=== quad-points
+(function () { return function () {
+  var q = new DOMQuad(), a = q.p1, out = [];
+  q.p1.x = 7; q.p2.w = 9; out.push(Q(q), JSON.stringify(q), Object.keys(q).length);
+  q.p1 = 1; out.push(q.p1 === a, N(function () { 'use strict'; q.p1 = 1 }));
+  var pt = new DOMPoint(1, 2); var q2 = new DOMQuad(pt); out.push(q2.p1 === pt, q2.p1.x); pt.x = 9; out.push(q2.p1.x);
+  out.push(E(function () { return DOMQuad.prototype.p1 }), E(function () { return Object.getOwnPropertyDescriptor(DOMQuad.prototype, 'p1').get.call({}) }), E(function () { return DOMQuad.prototype.getBounds.call({}) }), E(function () { return DOMQuad.prototype.toJSON.call({}) }));
+  out.push(JSON.stringify(q.toJSON()), Object.keys(q.toJSON()).join(), q.toJSON().p1 === q.p1, JSON.stringify(q.toJSON().p1));
+  return out.join('\n')
+} })()
+=== quad-from
+(function () { return function () {
+  return [Q(DOMQuad.fromRect({ x: 1, y: 2, width: 3, height: 4 })), Q(DOMQuad.fromRect()), Q(DOMQuad.fromRect(null)), Q(DOMQuad.fromRect({ x: 1, width: -2, height: -3 })), Q(DOMQuad.fromRect(new DOMRect(5, 6, 7, 8))), Q(DOMQuad.fromRect({ x: NaN })),
+    Q(DOMQuad.fromQuad({ p1: { x: 1 }, p3: { x: 2, y: 2 } })), Q(DOMQuad.fromQuad()), Q(DOMQuad.fromQuad(null)), Q(DOMQuad.fromQuad({})), Q(DOMQuad.fromQuad(new DOMQuad({ x: 1 }, { x: 2 }, { x: 3 }, { x: 4 }))), Q(DOMQuad.fromQuad({ p1: null })),
+    E(function () { return DOMQuad.fromQuad(1) }), E(function () { return DOMQuad.fromRect(1) }), E(function () { return DOMQuad.fromQuad({ p1: 1 }) }), E(function () { return DOMQuad.fromRect('a') }),
+    (DOMQuad.fromRect() instanceof DOMQuad) + ',' + DOMQuad.fromRect.length + DOMQuad.fromQuad.length].join('\n')
+} })()
+=== quad-bounds
+(function () { return function () {
+  var b = function (a, b, c, d) { return R(new DOMQuad(a, b, c, d).getBounds()) };
+  var q = new DOMQuad({ x: 1, y: 5 }, { x: 9, y: 2 }, { x: 4, y: 3 }, { x: 2, y: 8 }), r = q.getBounds();
+  return [R(r), r instanceof DOMRect, r === q.getBounds(), b({ x: NaN, y: 5 }, { x: 9, y: 2 }, { x: 4, y: 3 }, { x: 2, y: 8 }), b({ x: 1, y: Infinity }, { x: 9, y: 2 }, { x: 4, y: 3 }, { x: 2, y: 8 }), b({ x: -Infinity }, { x: Infinity }),
+    b({ x: 1, y: 1 }, { x: 1, y: 1 }, { x: 1, y: 1 }, { x: 1, y: 1 }), b({ x: -0 }, { x: 0 }), b({ y: NaN }, { y: 1 }, { y: 2 }, { y: 3 }), b({ x: 5 }, { x: 4 }, { x: NaN }, { x: 3 }), R(new DOMQuad().getBounds()), R(DOMQuad.fromRect({ x: 1, y: 2, width: -3, height: 4 }).getBounds())].join('\n')
+} })()
+=== quad-shape
+(function () { return function () {
+  return [DOMQuad.name, DOMQuad.length, K(DOMQuad), K(DOMQuad.prototype), DOMQuad.prototype.getBounds.length, Object.getOwnPropertyDescriptor(DOMQuad.prototype, 'p1').get.name, Object.prototype.toString.call(DOMQuad.prototype),
+    Object.getOwnPropertyDescriptor(DOMQuad.prototype, 'p1').set === undefined, E(function () { class A extends DOMQuad { }; return new A instanceof A })].join('\n')
+} })()
+=== matrix-shape
+(function () { return function () {
+  var out = [];
+  [DOMMatrixReadOnly, DOMMatrix].forEach(function (c) {
+    out.push(c.name + ' ' + c.length + ' ' + K(c));
+    out.push(K(c.prototype));
+    out.push(Object.getPrototypeOf(c) === Function.prototype ? 'fn' : Object.getPrototypeOf(c) === DOMMatrixReadOnly ? 'ro' : 'other', Object.getPrototypeOf(c.prototype) === Object.prototype ? 'object' : Object.getPrototypeOf(c.prototype) === DOMMatrixReadOnly.prototype ? 'roproto' : 'other', Object.prototype.toString.call(new c), Object.prototype.toString.call(c.prototype));
+  });
+  var lens = [];
+  for (var k of Object.getOwnPropertyNames(DOMMatrix.prototype)) { var d = Object.getOwnPropertyDescriptor(DOMMatrix.prototype, k); if (typeof d.value === 'function' && k !== 'constructor') lens.push(k + d.value.length) }
+  for (var k of Object.getOwnPropertyNames(DOMMatrixReadOnly.prototype)) { var d = Object.getOwnPropertyDescriptor(DOMMatrixReadOnly.prototype, k); if (typeof d.value === 'function' && k !== 'constructor') lens.push(k + d.value.length) }
+  out.push(lens.join(' '));
+  out.push(DOMMatrix.fromMatrix.length + ' ' + DOMMatrix.fromFloat32Array.length + ' ' + DOMMatrix.fromFloat64Array.length + ' ' + (DOMMatrix.fromMatrix === DOMMatrixReadOnly.fromMatrix));
+  var a = Object.getOwnPropertyDescriptor(DOMMatrix.prototype, 'a'), b = Object.getOwnPropertyDescriptor(DOMMatrixReadOnly.prototype, 'a'), i = Object.getOwnPropertyDescriptor(DOMMatrixReadOnly.prototype, 'is2D');
+  out.push(a.get.name + '|' + a.set.name + '|' + b.get.name + '|' + (b.set === undefined) + '|' + i.get.name + '|' + (a.get === b.get) + '|' + (i.set === undefined));
+  var m = new DOMMatrix(); out.push(m.hasOwnProperty('a'), Object.keys(m).length, 'is2D' in m, Object.keys(DOMMatrix).length);
+  return out.join('\n')
+} })()
+=== matrix-ctor
+(function () { return function () {
+  var s = function (v) { return E(function () { return new DOMMatrix(v).toString() }) };
+  return [s(), s(undefined), s([1, 2, 3, 4, 5, 6]), s([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]), s([1, 2, 3]), s([]), s([1, 2, 3, 4, 5, 6, 7]), s(['1', 2, 3, 4, 5, 6]), s([NaN, 2, 3, 4, 5, 6]), s([Infinity, 2, 3, 4, 5, 6]),
+    s(new Set([1, 2, 3, 4, 5, 6])), s(new Float32Array([1, 2, 3, 4, 5, 6])), s(new Float64Array(16)), s({ length: 6 }), s({}), s(5), s(null), s(true), s([null, undefined, [], {}, '', 0]), s([1, 2, 3, 4, 5, Symbol()]),
+    s({ a: 2 }), s('none'), s(''), s(' '), s(new String('scale(2)')),
+    E(function () { return new DOMMatrix([1, 2, 3, 4, 5, 6], 7).toString() }), E(function () { return DOMMatrix().toString() }), E(function () { return DOMMatrixReadOnly() }),
+    E(function () { return new DOMMatrixReadOnly([1, 2, 3, 4, 5, 6]).toString() }), E(function () { return new DOMMatrixReadOnly().is2D }),
+    E(function () { var o = { }; o[Symbol.iterator] = function () { var i = 0; return { next: function () { return i++ < 6 ? { value: i, done: false } : { done: true } } } }; return new DOMMatrix(o).toString() }),
+    E(function () { var n = 0; var o = { }; o[Symbol.iterator] = function () { return { next: function () { return n++ < 100 ? { value: 1, done: false } : { done: true } } } }; return new DOMMatrix(o).toString() })].join('\n')
+} })()
+=== matrix-attrs
+(function () { return function () {
+  var m = new DOMMatrix([1, 2, 3, 4, 5, 6]), out = [];
+  out.push([m.a, m.b, m.c, m.d, m.e, m.f, m.m11, m.m12, m.m13, m.m14, m.m21, m.m22, m.m23, m.m24, m.m31, m.m32, m.m33, m.m34, m.m41, m.m42, m.m43, m.m44, m.is2D, m.isIdentity].join());
+  var n = new DOMMatrix([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]);
+  out.push([n.a, n.b, n.c, n.d, n.e, n.f, n.m11, n.m12, n.m13, n.m14, n.m21, n.m22, n.m23, n.m24, n.m31, n.m32, n.m33, n.m34, n.m41, n.m42, n.m43, n.m44, n.is2D, n.isIdentity].join());
+  m.a = 9; m.m41 = 7; m.m13 = 0; out.push(m.toString(), m.is2D); m.f = 11; m.m12 = -0; out.push(m.toString(), m.is2D);
+  var set = function (k, v) { var x = new DOMMatrix(); x[k] = v; return k + '=' + v + ':' + x.is2D };
+  out.push(['m13', 'm14', 'm23', 'm24', 'm31', 'm32', 'm34', 'm43'].map(function (k) { return set(k, 1) + ' ' + set(k, 0) + ' ' + set(k, -0) + ' ' + set(k, NaN) + ' ' + set(k, Infinity) }).join('\n'));
+  out.push(['m33', 'm44'].map(function (k) { return set(k, 1) + ' ' + set(k, 0) + ' ' + set(k, 2) + ' ' + set(k, NaN) }).join('\n'));
+  out.push(['a', 'b', 'c', 'd', 'e', 'f', 'm11', 'm12', 'm21', 'm22', 'm41', 'm42'].map(function (k) { return set(k, 5) + ' ' + set(k, NaN) }).join(' '));
+  var t = new DOMMatrix([1, 2, 3, 4, 5, 6]); t.m33 = 2; t.m33 = 1; out.push(t.is2D, t.toString());
+  var u = new DOMMatrix(); u.is2D = false; out.push(u.is2D, N(function () { 'use strict'; u.is2D = false }), N(function () { 'use strict'; new DOMMatrixReadOnly().a = 1 }));
+  var v = new DOMMatrix(); v.a = '3'; v.b = { valueOf: function () { return 4 } }; out.push(v.toString(), E(function () { v.a = Symbol() }), E(function () { v.a = { valueOf: function () { throw new RangeError('boom') } } }));
+  var ro = new DOMMatrixReadOnly([1, 2, 3, 4, 5, 6]); out.push(E(function () { Object.getOwnPropertyDescriptor(DOMMatrix.prototype, 'a').set.call(ro, 1) }), E(function () { Object.getOwnPropertyDescriptor(DOMMatrix.prototype, 'a').set.call({}, 1) }), E(function () { DOMMatrix.prototype.a = 1 }), E(function () { return DOMMatrix.prototype.a }), E(function () { return DOMMatrixReadOnly.prototype.is2D }), E(function () { return Object.getOwnPropertyDescriptor(DOMMatrixReadOnly.prototype, 'a').get.call({}) }));
+  return out.join('\n')
+} })()
+=== matrix-identity
+(function () { return function () {
+  var i = function (a) { return new DOMMatrix(a).isIdentity };
+  return [i([1, 0, 0, 1, 0, 0]), i([1, 0, 0, 1, 0, 0.0001]), i([1, 0, 0, 1, -0, 0]), i([1, 0, 0, 1, 0, NaN]), i([2, 0, 0, 1, 0, 0]), i(), i([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]), i([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 2]), new DOMMatrix([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]).is2D,
+    new DOMMatrix().translate(0, 0, 0).isIdentity, new DOMMatrix().scale(1).isIdentity, new DOMMatrix().rotate(360).isIdentity, new DOMMatrix().rotate(0).isIdentity, new DOMMatrix().flipX().flipX().isIdentity].join()
+} })()
+=== matrix-tostring
+(function () { return function () {
+  var s = function (a) { return E(function () { return new DOMMatrix(a).toString() }) };
+  return [s([1e21, 0, 0, 1, 1e-7, 0.1 + 0.2]), s([-0, 0, 0, 1, 0, 0]), s([1.5e-10, 123456789012345680000, 1e-6, 1e-7, 1e20, 1e21]), s([0.1, 0.25, 100, 1 / 3, 2 / 3, 5e-324]), s([1.7976931348623157e308, -1.7976931348623157e308, 0, 1, 0, 0]),
+    s([NaN, 0, 0, 1, 0, 0]), s([0, Infinity, 0, 1, 0, 0]), s([0, 0, -Infinity, 1, 0, 0]), s([0, 0, 0, 1, 0, NaN]), s([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, NaN]), s([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, Infinity, 1]), s([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]),
+    E(function () { return String(new DOMMatrixReadOnly([NaN, 0, 0, 1, 0, 0])) }), E(function () { return DOMMatrix.prototype.toString.call({}) }), E(function () { return DOMMatrixReadOnly.prototype.toString.call(new DOMPoint) }), E(function () { return '' + new DOMMatrix() }), E(function () { return `${new DOMMatrix([1, 2, 3, 4, 5, 6])}` }),
+    E(function () { return new DOMMatrix([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]).toString() }), E(function () { return new DOMMatrix([1, 0, 0, 1, 0, 0]).toString.name + new DOMMatrix().toString.length })].join('\n')
+} })()
+=== matrix-json
+(function () { return function () {
+  var m = new DOMMatrix().translate(1, 2);
+  return [JSON.stringify(m), JSON.stringify(m.toJSON()) === JSON.stringify(m), Object.keys(m.toJSON()).join(), JSON.stringify(new DOMMatrix([NaN, Infinity, -Infinity, 0, 0, 0])), JSON.stringify(new DOMMatrix().rotate(30)), JSON.stringify(new DOMMatrix([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16])),
+    E(function () { return DOMMatrixReadOnly.prototype.toJSON.call({}) }), Object.getPrototypeOf(m.toJSON()) === Object.prototype, JSON.stringify(new DOMMatrixReadOnly([1, 2, 3, 4, 5, 6]))].join('\n')
+} })()
+=== matrix-parse-ok
+(function () { return function () {
+  var s = function (v) { return v + ' => ' + E(function () { return new DOMMatrix(v).toString() }) };
+  return ['translate(10px,20px)', 'translate(10px)', 'translate(0)', 'translate(1in, 1cm)', 'translate(1pt,1pc)', 'translate(1Q)', 'translate(1mm,2px)', 'translateX(5px) translateY(6px) translateZ(7px)', 'translate3d(1px,2px,3px)', 'translate3d(0,0,0)', 'scale(2,3)', 'scale(2)', 'scale(0.1)', 'scaleX(2) scaleY(3) scaleZ(4)', 'scale3d(1,2,3)', 'scale3d(0.1,0.2,0.3)',
+    'rotate(45deg)', 'rotate(1turn)', 'rotate(100grad)', 'rotate(1rad)', 'rotate(0)', 'rotate(0.1deg)', 'rotate(-30deg)', 'rotateX(30deg)', 'rotateY(30deg)', 'rotateZ(30deg)', 'rotate3d(1,1,0,30deg)', 'rotate3d(0,0,1,45deg)', 'rotate3d(0,0,0,45deg)', 'skew(10deg,20deg)', 'skew(10deg)', 'skewX(10deg)', 'skewY(10deg)', 'perspective(100px)',
+    'matrix(1,2,3,4,5,6)', 'matrix(0.1,0.2,0.3,0.4,0.5,0.6)', 'matrix3d(1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1)', 'matrix3d(1,0,0,0,0,1,0,0,0,0,1,0,5,6,0,1)', 'matrix3d(1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16)', 'none', 'None', 'NONE', '', '  ', 'translate(1px,2px) scale(2) rotate(10deg)', 'scale(2) rotate(45deg)', 'rotate(45deg) scale(2)',
+    'TRANSLATE(1PX,2PX)', '  translate( 1px , 2px )  ', 'translate(1px,2px)translate(1px,1px)', 'translate(1px,2px) /* c */ scale(2)', 'translate(1e1px,.5px)', 'translate(+1px,-.5px)', 'matrix(1e-7,0,0,1,0,0)', 'translate(1e30px)', 'translate(-1e30px,1px)', 'scale(1e400)', 'scale(-1e400)', 'matrix(1,2,3,4,5,1e999)', 'matrix(1,2,3,4,5,-1e999)', 'matrix(1e30,0,0,1,0,0)', 'rotate(1DEG)', 'rotate(1e400deg)', 'rotate(720deg)',
+    'translate(1.1in)', 'translate(.1px)', 'translate(1px, 2px)', 'translate(1px ,2px)', 'translate(1px,\n2px)', 'translate(1px,\t2px)', 'translate( 1px )', 'scale(1.5,)', 'scale(,1)', 'rotate(1deg 2deg)', 'matrix(1 2 3 4 5 6)', 'translate(1px 2px)', 'scale(1 2)'].map(s).join('\n')
+} })()
+=== matrix-parse-error
+(function () { return function () {
+  var s = function (v) { return v + ' => ' + E(function () { return new DOMMatrix(v).toString() }) };
+  return ['foo', 'translate(10)', 'rotate(45)', 'translate(1em)', 'translate(50%)', 'translate(1vw)', 'translate(1rem,1ex)', 'translate(1ch)', 'translate(1px,2px) foo', 'translate(1px,2px)foo', 'translate(1px,2px),translate(1px,1px)', 'translate(1px,2px) !important', 'rotate(45deg);', 'inherit', 'initial', 'unset', 'var(--x)', 'none none', 'none translate(1px)', 'translate(1px) none',
+    'translate(1px,2px,3px)', 'scale(1,2,3)', 'rotate(45deg,1deg)', 'matrix(1,2,3,4,5)', 'matrix(1,2,3,4,5,6,7)', 'matrix3d(1,2,3)', 'translate()', 'scale()', 'rotate()', 'translate3d(1px,2px)', 'translate3d(1px,2px,3%)', 'translateZ(1%)', 'rotate3d(1,2,3)', 'rotate3d(1,2,3,4)', 'skew(1,2)', 'skewX(1)', 'perspective(1)', 'perspective(-1px)', 'perspective(1%)', 'perspective()', 'perspective(1px,2px)', 'translate(', 'translate(1px', ')', 'translate(1px))', 'scale(a)', 'scale(1px)', 'rotate(1px)', 'rotate(1s)', 'translate(1deg)', 'foo(1)', 'translatex(1px)', 'translate (1px)', 'translate(1px,)', 'url(x)', '"translate(1px)"', 'translate(1px) , scale(1)', '#fff', '1', '1px', 'scale(1) scale', 'scale(NaN)', 'scale(infinity)', 'rotate(infinitydeg)', 'translate(1px,calc(1px + 2px))x'].map(s).join('\n')
+} })()
+=== matrix-setmatrixvalue
+(function () { return function () {
+  var out = [];
+  var m = new DOMMatrix([1, 2, 3, 4, 5, 6]);
+  out.push(m.setMatrixValue('scale(2)') === m, m.toString());
+  out.push(E(function () { return m.setMatrixValue('foo') }), m.toString(), E(function () { return m.setMatrixValue() }), m.toString(), E(function () { return m.setMatrixValue(null) }), E(function () { return m.setMatrixValue('translate(1em)') }), m.toString());
+  m.setMatrixValue('translate3d(1px,2px,3px)'); out.push(m.is2D, m.toString());
+  m.setMatrixValue('scale(3)'); out.push(m.is2D, m.toString()); m.setMatrixValue(''); out.push(m.toString(), m.isIdentity);
+  m.setMatrixValue(5 === 5 ? 'rotate(90deg)' : ''); out.push(m.toString());
+  out.push(E(function () { return DOMMatrix.prototype.setMatrixValue.call({}, '') }), E(function () { return DOMMatrix.prototype.setMatrixValue.call(new DOMMatrixReadOnly, '') }), typeof new DOMMatrixReadOnly().setMatrixValue, typeof new DOMMatrixReadOnly().translateSelf);
+  return out.join('\n')
+} })()
+=== matrix-translate-scale
+(function () { return function () {
+  var s = function (f) { return E(function () { return f().toString() }) };
+  var m = function () { return new DOMMatrix() };
+  return [s(function () { return m().translate() }), s(function () { return m().translate(1) }), s(function () { return m().translate(1, 2) }), s(function () { return m().translate(1, 2, 3) }), s(function () { return m().translate(1, 2, 0) }), s(function () { return m().translate(1, 2, -0) }), s(function () { return m().translate(NaN) }), s(function () { return m().translate('5', '6') }), s(function () { return m().translate(undefined, 2) }),
+    s(function () { return m().scale(2) }), s(function () { return m().scale(2, 3) }), s(function () { return m().scale(2, undefined) }), s(function () { return m().scale(2, 3, 4) }), s(function () { return m().scale(2, 3, 1, 10, 20) }), s(function () { return m().scale(2, 3, 1, 10, 20, 5) }), s(function () { return m().scale(2, 3, 1, 0, 0, 5) }), s(function () { return m().scale(undefined) }), s(function () { return m().scale() }), s(function () { return m().scale(0) }), s(function () { return m().scale(-1) }),
+    s(function () { return m().scale(2, 3, undefined, 10) }), s(function () { return m().scale(2, undefined, 3) }), s(function () { return m().scale(NaN) }), s(function () { return m().scale(Infinity) }),
+    s(function () { return m().scale3d(2) }), s(function () { return m().scale3d(2, 10, 20, 30) }), s(function () { return m().scale3d(2, 0, 0, 0) }), s(function () { return m().scale3d() }), s(function () { return m().scale3d(undefined, 1, 2, 3) }), s(function () { return m().scale3d(3, 1, 2) }),
+    s(function () { return m().scaleNonUniform(2) }), s(function () { return m().scaleNonUniform(2, 3) }), s(function () { return m().scaleNonUniform() }),
+    s(function () { return m().translate(1, 2).scale(2).translate(3, 4) }), s(function () { return new DOMMatrix([1, 2, 3, 4, 5, 6]).translate(7, 8) }), s(function () { return new DOMMatrix([1, 2, 3, 4, 5, 6]).scale(2, 3) }), s(function () { return new DOMMatrix([1, 2, 3, 4, 5, 6]).scale(2, 3, 1, 10, 20) }),
+    s(function () { return new DOMMatrix([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]).translate(1, 2) }), s(function () { return new DOMMatrix([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]).scale(2, 3, 4) }), s(function () { return new DOMMatrix([1, 2, 3, 4, 5, 6]).scale(2, 3, 4, 5, 6, 7) }),
+    s(function () { return new DOMMatrix().flipX() }), s(function () { return new DOMMatrix().flipY() }), s(function () { return new DOMMatrix([1, 2, 3, 4, 5, 6]).flipX() }), s(function () { return new DOMMatrix([1, 2, 3, 4, 5, 6]).flipY() }), s(function () { return new DOMMatrix().flipX().flipY() }),
+    m().translate(1, 2, 0).is2D, m().translate(1, 2, 1).is2D, m().scale(2, 2, 1).is2D, m().scale(2, 2, 2).is2D, m().scale(2, 2, 1, 0, 0, 0).is2D, m().scale(2, 2, 1, 0, 0, 1).is2D, m().scale3d(1).is2D, m().scale3d(1, 1, 1, 1).is2D].join('\n')
+} })()
+=== matrix-rotate
+(function () { return function () {
+  var a = [0, 1, 2, 10, 15, 30, 45, 60, 75, 89, 90, 91, 120, 135, 150, 179, 180, 181, 225, 270, 300, 315, 359, 360, 361, 450, 720, -1, -30, -45, -90, -100, -180, -270, -360, 1e6, 0.5, 1e-10, -1e-10, 123.456, 1e10, 5e-324, 89.9999, 90.0001];
+  return a.map(function (d) { var m = new DOMMatrix().rotate(d), n = new DOMMatrix().rotateAxisAngle(0, 0, 1, d), o = new DOMMatrix().rotateAxisAngle(1, 0, 0, d), p = new DOMMatrix().rotateAxisAngle(0, 1, 0, d); return d + ': ' + [m.a, m.b, m.c, m.d].join() + ' | ' + (X(m) === X(n)) + ' | ' + [o.m22, o.m23, o.m32, o.m33].join() + ' | ' + [p.m11, p.m13, p.m31, p.m33].join() }).join('\n')
+} })()
+=== matrix-rotate-args
+(function () { return function () {
+  var s = function (f) { return E(function () { var m = f(); return m.toString() + ' ' + m.is2D }) };
+  return [s(function () { return new DOMMatrix().rotate() }), s(function () { return new DOMMatrix().rotate(undefined) }), s(function () { return new DOMMatrix().rotate(10) }), s(function () { return new DOMMatrix().rotate(10, undefined) }), s(function () { return new DOMMatrix().rotate(10, undefined, undefined) }), s(function () { return new DOMMatrix().rotate(10, 20) }), s(function () { return new DOMMatrix().rotate(10, 20, 30) }),
+    s(function () { return new DOMMatrix().rotate(0, 0, 30) }), s(function () { return new DOMMatrix().rotate(0, 0) }), s(function () { return new DOMMatrix().rotate(0, 10) }), s(function () { return new DOMMatrix().rotate(10, 0, 0) }), s(function () { return new DOMMatrix().rotate(undefined, 10) }), s(function () { return new DOMMatrix().rotate(undefined, undefined, 10) }), s(function () { return new DOMMatrix().rotate(10, undefined, 20) }),
+    s(function () { return new DOMMatrix().rotate(NaN) }), s(function () { return new DOMMatrix().rotate(Infinity) }), s(function () { return new DOMMatrix().rotate(-Infinity) }), s(function () { return new DOMMatrix().rotate('45') }), s(function () { return new DOMMatrix().rotate(0, 0, NaN) }),
+    s(function () { return new DOMMatrix().rotateAxisAngle() }), s(function () { return new DOMMatrix().rotateAxisAngle(0, 0, 0, 45) }), s(function () { return new DOMMatrix().rotateAxisAngle(0, 0, 1, 45) }), s(function () { return new DOMMatrix().rotateAxisAngle(0, 0, 2, 45) }), s(function () { return new DOMMatrix().rotateAxisAngle(0, 0, -1, 45) }), s(function () { return new DOMMatrix().rotateAxisAngle(1, 0, 0) }), s(function () { return new DOMMatrix().rotateAxisAngle(1, 0, 0, 0) }), s(function () { return new DOMMatrix().rotateAxisAngle(1, 0, 0, 360) }),
+    s(function () { return new DOMMatrix().rotateAxisAngle(0, 1, 0, 45) }), s(function () { return new DOMMatrix().rotateAxisAngle(0, 0.5, 0, 45) }), s(function () { return new DOMMatrix().rotateAxisAngle(NaN, 0, 0, 45) }), s(function () { return new DOMMatrix().rotateAxisAngle(Infinity, 0, 0, 45) }), s(function () { return new DOMMatrix().rotateAxisAngle(1, 0, 0, NaN) }), s(function () { return new DOMMatrix().rotateAxisAngle(0, 0, 1, NaN) }),
+    s(function () { return new DOMMatrix().rotateFromVector() }), s(function () { return new DOMMatrix().rotateFromVector(0, 0) }), s(function () { return new DOMMatrix().rotateFromVector(1, 0) }), s(function () { return new DOMMatrix().rotateFromVector(0, 1) }), s(function () { return new DOMMatrix().rotateFromVector(-1, 0) }), s(function () { return new DOMMatrix().rotateFromVector(0, -1) }), s(function () { return new DOMMatrix().rotateFromVector(1, 1) }), s(function () { return new DOMMatrix().rotateFromVector(3, 4) }),
+    s(function () { return new DOMMatrix().rotateFromVector(NaN, 1) }), s(function () { return new DOMMatrix().rotateFromVector(1, NaN) }), s(function () { return new DOMMatrix().rotateFromVector(Infinity, 1) }), s(function () { return new DOMMatrix().rotateFromVector(Infinity, Infinity) }), s(function () { return new DOMMatrix().rotateFromVector(-0, 0) }), s(function () { return new DOMMatrix().rotateFromVector(0, -0) }), s(function () { return new DOMMatrix().rotateFromVector(-0, -0) }), s(function () { return new DOMMatrix().rotateFromVector(1) }), s(function () { return new DOMMatrix().rotateFromVector(undefined, 1) }), s(function () { return new DOMMatrix().rotateFromVector(-5, -5) }),
+    s(function () { return new DOMMatrix([1, 2, 3, 4, 5, 6]).rotate(30) }), s(function () { return new DOMMatrix([1, 2, 3, 4, 5, 6]).rotateFromVector(3, 4) }), s(function () { return new DOMMatrix([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]).rotate(30) })].join('\n')
+} })()
+=== matrix-rotate-general
+(function () { return function () {
+  var a = [[1, 1, 1, 30], [1, 1, 1, 90], [1, 2, 3, 45], [3, 4, 5, 10], [0, 1, 1, 60], [-1, 2, 0, 100], [1, 1, 0, 30], [1, 0, 1, 180], [0.1, 0.2, 0.3, 123]];
+  return a.map(function (v) { var m = new DOMMatrix().rotateAxisAngle(v[0], v[1], v[2], v[3]); return v.join() + ': ' + W(m) }).concat([W(new DOMMatrix().rotate(10, 20, 30)), W(new DOMMatrix().rotate(10, 20)), W(new DOMMatrix().rotate(33, 44, 55)), W(new DOMMatrix([1, 2, 3, 4, 5, 6]).rotateAxisAngle(1, 1, 1, 20)), W(new DOMMatrix().rotate(90, 90, 90)), W(new DOMMatrix().rotate(45, 45, 45))]).join('\n')
+} })()
+=== matrix-skew
+(function () { return function () {
+  var s = function (f) { return E(function () { var m = f(); return m.toString() + ' ' + m.is2D }) };
+  return [s(function () { return new DOMMatrix().skewX() }), s(function () { return new DOMMatrix().skewY() }), s(function () { return new DOMMatrix().skewX(10) }), s(function () { return new DOMMatrix().skewY(10) }), s(function () { return new DOMMatrix().skewX(10).skewY(20) }), s(function () { return new DOMMatrix().skewX(45) }), s(function () { return new DOMMatrix().skewX(89) }), s(function () { return new DOMMatrix().skewX(90) }), s(function () { return new DOMMatrix().skewX(91) }), s(function () { return new DOMMatrix().skewX(180) }),
+    s(function () { return new DOMMatrix().skewX(-45) }), s(function () { return new DOMMatrix().skewY(45) }), s(function () { return new DOMMatrix().skewY(90) }), s(function () { return new DOMMatrix().skewX(NaN) }), s(function () { return new DOMMatrix().skewX(Infinity) }), s(function () { return new DOMMatrix([1, 2, 3, 4, 5, 6]).skewX(10) }), s(function () { return new DOMMatrix([1, 2, 3, 4, 5, 6]).skewY(10) }), s(function () { return new DOMMatrix([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]).skewX(10) }), s(function () { return new DOMMatrix().skewX(1e-10) }), s(function () { return new DOMMatrix().skewX(0.1) }), s(function () { return new DOMMatrix().skewX(30).skewX(30) })].join('\n')
+} })()
+=== matrix-multiply
+(function () { return function () {
+  var s = function (f) { return E(function () { var m = f(); return m.toString() + ' ' + m.is2D }) };
+  var b = function () { return new DOMMatrix([1, 2, 3, 4, 5, 6]) };
+  return [s(function () { return b().multiply(new DOMMatrix([7, 8, 9, 10, 11, 12])) }), s(function () { return b().multiply({ a: 7, b: 8, c: 9, d: 10, e: 11, f: 12 }) }), s(function () { return b().multiply() }), s(function () { return b().multiply({}) }), s(function () { return b().multiply(null) }), s(function () { return b().multiply(undefined) }), s(function () { return b().multiply(5) }), s(function () { return b().multiply('a') }), s(function () { return b().multiply(true) }),
+    s(function () { return b().multiply({ m13: 1 }) }), s(function () { return b().multiply({ is2D: false }) }), s(function () { return b().multiply({ a: 1, m11: 2 }) }), s(function () { return b().multiply({ a: 1, m11: 1, m12: 5 }) }), s(function () { return b().multiply({ a: NaN, m11: NaN }) }), s(function () { return b().multiply({ a: 0, m11: -0 }) }), s(function () { return b().multiply({ m11: 2 }) }), s(function () { return b().multiply({ m11: 2, m13: 0, is2D: true }) }),
+    s(function () { return b().multiply({ m33: 2, is2D: true }) }), s(function () { return b().multiply({ m44: 2 }) }), s(function () { return b().multiply({ m44: 1 }) }), s(function () { return b().multiply({ m44: 1, is2D: undefined }) }), s(function () { return b().multiply({ is2D: null }) }), s(function () { return b().multiply({ is2D: 0 }) }), s(function () { return b().multiply({ is2D: 1 }) }), s(function () { return b().multiply({ is2D: false, m33: 1 }) }), s(function () { return b().multiply({ a: '2' }) }), s(function () { return b().multiply({ b: 1, m12: 2 }) }), s(function () { return b().multiply({ c: 1, m21: 2 }) }), s(function () { return b().multiply({ d: 1, m22: 2 }) }), s(function () { return b().multiply({ e: 1, m41: 2 }) }), s(function () { return b().multiply({ f: 1, m42: 2 }) }),
+    s(function () { return b().multiply({ m14: 0.5 }) }), s(function () { return b().multiply({ m24: 1, is2D: undefined }) }), s(function () { return b().multiply({ m31: 1 }) }), s(function () { return b().multiply({ m32: 1 }) }), s(function () { return b().multiply({ m34: 1 }) }), s(function () { return b().multiply({ m43: 1 }) }), s(function () { return b().multiply({ m23: 1 }) }), s(function () { return b().multiply({ m13: 0 }) }), s(function () { return b().multiply({ m13: -0 }) }), s(function () { return b().multiply({ m13: NaN }) }), s(function () { return b().multiply({ m33: 1 }) }), s(function () { return b().multiply({ m33: 0 }) }),
+    s(function () { return b().multiply(new DOMMatrix([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1])) }), s(function () { return new DOMMatrix([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]).multiply(new DOMMatrix([16, 15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1])) }), s(function () { return new DOMMatrix([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]).multiply({ a: 2 }) }),
+    s(function () { return new DOMMatrix().multiplySelf({ a: 2 }) }), s(function () { return b().preMultiplySelf({ a: 7, b: 8, c: 9, d: 10, e: 11, f: 12 }) }), s(function () { return b().preMultiplySelf() }), s(function () { return b().preMultiplySelf({ m13: 1 }) }), s(function () { return b().preMultiplySelf(5) }),
+    E(function () { return b().multiply.call({}, {}) }), E(function () { return DOMMatrixReadOnly.prototype.multiply.call(new DOMPoint, {}) }), E(function () { return b().multiply({ a: Symbol() }) }), E(function () { return b().multiply({ a: { valueOf: function () { throw new RangeError('boom') } } }) })].join('\n')
+} })()
+=== matrix-dict-order
+(function () { return function () {
+  var log = [], o = {}; var names = ['a', 'b', 'c', 'd', 'e', 'f', 'm11', 'm12', 'm13', 'm14', 'm21', 'm22', 'm23', 'm24', 'm31', 'm32', 'm33', 'm34', 'm41', 'm42', 'm43', 'm44', 'is2D'];
+  names.slice().reverse().forEach(function (k) { Object.defineProperty(o, k, { get: function () { log.push(k); return undefined } }) });
+  new DOMMatrix().multiply(o);
+  return log.join()
+} })()
+=== matrix-self
+(function () { return function () {
+  var m = new DOMMatrix([1, 2, 3, 4, 5, 6]);
+  var out = [m.translateSelf(1, 1) === m, m.scaleSelf(2) === m, m.rotateSelf(1) === m, m.invertSelf() === m, m.skewXSelf(1) === m, m.skewYSelf(1) === m, m.scale3dSelf(2) === m, m.rotateAxisAngleSelf(1, 0, 0, 3) === m, m.rotateFromVectorSelf(1, 2) === m, m.setMatrixValue('scale(2)') === m, m.multiplySelf({}) === m, m.preMultiplySelf({}) === m];
+  var a = new DOMMatrix([1, 2, 3, 4, 5, 6]), b = a.translate(1, 1), c = a.multiply(); out.push(a.toString(), b !== a, c !== a, b.constructor.name, X(a) === X(c));
+  var r = new DOMMatrixReadOnly([1, 2, 3, 4, 5, 6]); out.push(r.translate(1, 1).constructor.name, r.inverse().constructor.name, r.multiply().constructor.name, r.scale(2).constructor.name, r.rotate(1).constructor.name, r.skewX(1).constructor.name, r.flipX().constructor.name, r.rotateFromVector(1, 1).constructor.name, r.rotateAxisAngle(1, 1, 1, 1).constructor.name, r.scale3d(2).constructor.name, r.scaleNonUniform(2).constructor.name);
+  out.push(typeof r.translateSelf, typeof r.invertSelf, typeof r.multiplySelf, typeof r.setMatrixValue, E(function () { return DOMMatrix.prototype.translateSelf.call(new DOMMatrixReadOnly, 1) }), E(function () { return DOMMatrix.prototype.translateSelf.call({}, 1) }), E(function () { return DOMMatrixReadOnly.prototype.translate.call(new DOMMatrix([1, 2, 3, 4, 5, 6]), 1).toString() }), DOMMatrix.prototype.translate === DOMMatrixReadOnly.prototype.translate);
+  class M extends DOMMatrix { }
+  out.push(new M instanceof M, new M([1, 2, 3, 4, 5, 6]).translate(1, 1).constructor.name, M.fromMatrix({ a: 2 }).constructor.name, new M().translateSelf(1) instanceof M, E(function () { return new M('scale(2)').toString() }));
+  class N extends DOMMatrixReadOnly { }
+  out.push(new N instanceof N, new N().translate(1).constructor.name, N.fromMatrix({}).constructor.name, E(function () { return Reflect.construct(DOMMatrix, [], Object) instanceof DOMMatrix }), Object.getPrototypeOf(Reflect.construct(DOMMatrix, [[1, 2, 3, 4, 5, 6]], Object)) === Object.prototype);
+  return out.join('\n')
+} })()
+=== matrix-inverse
+(function () { return function () {
+  var s = function (f) { return E(function () { var m = f(); return W(m) }) };
+  var nan = function (m) { return [m.a, m.m11, m.m33, m.m44, m.is2D, m.isIdentity].join() };
+  return [s(function () { return new DOMMatrix([2, 0, 0, 2, 10, 20]).inverse() }), s(function () { return new DOMMatrix([1, 2, 3, 4, 5, 6]).inverse() }), s(function () { return new DOMMatrix([1, 0, 0, 1, 0, 0]).inverse() }), s(function () { return new DOMMatrix().rotate(30).inverse() }), s(function () { return new DOMMatrix().translate(5, 6).inverse() }), s(function () { return new DOMMatrix().scale(0.5, 4).inverse() }),
+    s(function () { return new DOMMatrix([0.1, 0.2, 0.3, 0.4, 0.5, 0.6]).inverse() }), s(function () { return new DOMMatrix([3, 1, 4, 1, 5, 9]).inverse() }), s(function () { return new DOMMatrix().rotateAxisAngle(0, 1, 0, 30).inverse() }), s(function () { return new DOMMatrix().rotateAxisAngle(1, 1, 1, 30).translate(1, 2, 3).inverse() }), s(function () { return new DOMMatrix([1, 0, 0, 0, 0, 2, 0, 0, 0, 0, 4, 0, 1, 2, 3, 1]).inverse() }),
+    s(function () { return new DOMMatrix([2, 0, 0, 0, 0, 3, 0, 0, 0, 0, 5, 0, 0, 0, 0, 1]).inverse() }), s(function () { return new DOMMatrix('perspective(100px)').inverse() }), s(function () { return new DOMMatrix('perspective(100px) translate(5px, 6px)').inverse() }),
+    nan(new DOMMatrix([0, 0, 0, 0, 0, 0]).inverse()), nan(new DOMMatrix([1, 2, 2, 4, 5, 6]).inverse()), nan(new DOMMatrix([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]).inverse()), nan(new DOMMatrix([NaN, 0, 0, 1, 0, 0]).inverse()), nan(new DOMMatrix([Infinity, 0, 0, 1, 0, 0]).inverse()), nan(new DOMMatrix().scale(0).inverse()), nan(new DOMMatrix([1e-200, 0, 0, 1e-200, 0, 0]).inverse()), nan(new DOMMatrix([1e200, 0, 0, 1e200, 0, 0]).inverse()),
+    (function () { var m = new DOMMatrix([0, 0, 0, 0, 0, 0]); var r = m.invertSelf(); return (r === m) + ' ' + nan(m) })(), (function () { var m = new DOMMatrix([2, 0, 0, 2, 0, 0]); var r = m.invertSelf(); return (r === m) + ' ' + W(m) })(), (function () { var m = new DOMMatrixReadOnly([2, 0, 0, 2, 0, 0]); var r = m.inverse(); return (r === m) + ' ' + W(m) + ' ' + r.constructor.name })(),
+    E(function () { return new DOMMatrix([0, 0, 0, 0, 0, 0]).inverse().toString() }), E(function () { return DOMMatrixReadOnly.prototype.inverse.call({}) })].join('\n')
+} })()
+=== matrix-transform-point
+(function () { return function () {
+  var m = new DOMMatrix([2, 0, 0, 2, 10, 20]), out = [];
+  out.push(P(m.transformPoint()), P(m.transformPoint({})), P(m.transformPoint(null)), P(m.transformPoint({ x: 1, y: 2 })), P(m.transformPoint({ x: 1, y: 2, z: 3, w: 4 })), P(m.transformPoint(new DOMPoint(1, 2))), P(m.transformPoint({ x: '1', y: '2' })), E(function () { return m.transformPoint(5) }), E(function () { return m.transformPoint('a') }), E(function () { return m.transformPoint.call({}, {}) }));
+  out.push(P(new DOMMatrix([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]).transformPoint({ x: 1, y: 2, z: 3, w: 4 })), P(new DOMMatrix([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, -0.01, 0, 0, 0, 1]).transformPoint({ x: 10, y: 10, z: 10 })), P(new DOMMatrix().rotate(90).transformPoint({ x: 1, y: 0 })), P(new DOMMatrix().rotate(30).transformPoint({ x: 1, y: 1 })));
+  out.push(m.transformPoint({ x: 1 }) instanceof DOMPoint, new DOMMatrixReadOnly().transformPoint() instanceof DOMPoint, P(new DOMMatrix([NaN, 0, 0, 1, 0, 0]).transformPoint({ x: 1, y: 1 })), P(m.transformPoint({ x: Infinity, y: 1 })), P(m.transformPoint({ x: NaN })), P(new DOMMatrix([1, 0, 0, 1, Infinity, 0]).transformPoint({ x: 1, y: 1 })));
+  out.push(P(new DOMMatrix('perspective(100px) translate(10px,10px)').transformPoint({ x: 1, y: 1, z: 10 })), P(new DOMMatrix().translate(1, 2, 3).transformPoint({ x: 1, y: 1, z: 1 })), P(new DOMMatrix().scale(2, 3, 4).transformPoint({ x: 1, y: 1, z: 1, w: 2 })), P(new DOMMatrix().rotateAxisAngle(1, 1, 1, 45).transformPoint({ x: 1, y: 2, z: 3 })).split(',').map(Z).join());
+  return out.join('\n')
+} })()
+=== matrix-float-arrays
+(function () { return function () {
+  var s = function (f) { return E(function () { return f().toString() }) };
+  var out = [new DOMMatrix().toFloat32Array().constructor.name + new DOMMatrix().toFloat32Array().length, new DOMMatrix().toFloat64Array().constructor.name + new DOMMatrix().toFloat64Array().length, Array.prototype.slice.call(new DOMMatrix([0.1, 0.2, 0.3, 0.4, 0.5, 0.6]).toFloat32Array()).join(), Array.prototype.slice.call(new DOMMatrix([0.1, 0.2, 0.3, 0.4, 0.5, 0.6]).toFloat64Array()).join(),
+    Array.prototype.slice.call(new DOMMatrix([1e40, 1e-50, NaN, -Infinity, 0, -0]).toFloat32Array()).join(), new DOMMatrix().toFloat32Array() !== new DOMMatrix().toFloat32Array(), new DOMMatrix().toFloat64Array().buffer.byteLength + ' ' + new DOMMatrix().toFloat32Array().buffer.byteLength,
+    s(function () { return DOMMatrix.fromFloat32Array(new Float32Array([1, 2, 3, 4, 5, 6])) }), s(function () { return DOMMatrix.fromFloat64Array(new Float64Array([1, 2, 3, 4, 5, 6])) }), s(function () { return DOMMatrix.fromFloat64Array(new Float64Array(16)) }), s(function () { return DOMMatrix.fromFloat64Array(new Float64Array(5)) }), s(function () { return DOMMatrix.fromFloat64Array(new Float64Array(0)) }), s(function () { return DOMMatrix.fromFloat32Array(new Float32Array(16).fill(1)) }), s(function () { return DOMMatrix.fromFloat32Array(new Float64Array(6)) }), s(function () { return DOMMatrix.fromFloat64Array(new Float32Array(6)) }), s(function () { return DOMMatrix.fromFloat32Array([1, 2, 3, 4, 5, 6]) }), s(function () { return DOMMatrix.fromFloat32Array() }), s(function () { return DOMMatrix.fromFloat32Array(null) }), s(function () { return DOMMatrix.fromFloat32Array(new Float32Array([0.1, 0.2, 0.3, 0.4, 0.5, 0.6])) }), s(function () { return DOMMatrix.fromFloat64Array(new Float64Array([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1])) }), s(function () { return DOMMatrix.fromFloat32Array(new Float32Array([NaN, 0, 0, 1, 0, 0])) }),
+    s(function () { return DOMMatrix.fromFloat32Array(new Float32Array(new ArrayBuffer(64), 0, 6)) }), s(function () { return DOMMatrix.fromFloat32Array(new Float32Array(new ArrayBuffer(100), 4, 6)) }), s(function () { return DOMMatrix.fromFloat32Array.call({}, new Float32Array(6)) }), s(function () { return DOMMatrix.fromFloat32Array.call(undefined, new Float32Array(6)) }), DOMMatrixReadOnly.fromFloat32Array(new Float32Array(6)).constructor.name, DOMMatrix.fromFloat64Array(new Float64Array(6)).constructor.name, DOMMatrixReadOnly.fromFloat64Array(new Float64Array(16)).constructor.name,
+    E(function () { return DOMMatrixReadOnly.prototype.toFloat32Array.call({}) }), E(function () { return DOMMatrixReadOnly.prototype.toFloat64Array.call(1) })];
+  return out.join('\n')
+} })()
+=== matrix-frommatrix
+(function () { return function () {
+  var s = function (f) { return E(function () { var m = f(); return m.toString() + ' ' + m.is2D + ' ' + m.constructor.name }) };
+  return [s(function () { return DOMMatrix.fromMatrix() }), s(function () { return DOMMatrix.fromMatrix(null) }), s(function () { return DOMMatrix.fromMatrix(undefined) }), s(function () { return DOMMatrix.fromMatrix({}) }), s(function () { return DOMMatrix.fromMatrix({ a: 2, m42: 3 }) }), s(function () { return DOMMatrix.fromMatrix({ a: 1, m11: 3 }) }), s(function () { return DOMMatrix.fromMatrix({ m13: 1 }) }), s(function () { return DOMMatrix.fromMatrix({ m13: 1, is2D: true }) }), s(function () { return DOMMatrix.fromMatrix({ is2D: false }) }), s(function () { return DOMMatrix.fromMatrix({ is2D: true }) }),
+    s(function () { return DOMMatrix.fromMatrix(new DOMMatrix().scale(2, 2, 2)) }), s(function () { return DOMMatrix.fromMatrix(new DOMMatrix([1, 2, 3, 4, 5, 6])) }), s(function () { return DOMMatrix.fromMatrix(new DOMMatrixReadOnly([1, 2, 3, 4, 5, 6])) }), s(function () { return DOMMatrixReadOnly.fromMatrix({ a: 2 }) }), s(function () { return DOMMatrixReadOnly.fromMatrix() }), s(function () { return DOMMatrix.fromMatrix(5) }), s(function () { return DOMMatrix.fromMatrix('a') }), s(function () { return DOMMatrix.fromMatrix([]) }), s(function () { return DOMMatrix.fromMatrix(function () { }) }),
+    s(function () { return DOMMatrix.fromMatrix({ m44: 2 }) }), s(function () { return DOMMatrix.fromMatrix({ m33: 1, m44: 1 }) }), s(function () { return DOMMatrix.fromMatrix({ m11: NaN, m12: 3 }) }), s(function () { return DOMMatrix.fromMatrix({ a: Infinity }) }), s(function () { return DOMMatrix.fromMatrix({ e: 5, f: 6, is2D: true }) }), s(function () { return DOMMatrix.fromMatrix({ m41: 5, m42: 6, m43: 7 }) }), s(function () { return DOMMatrix.fromMatrix({ a: null }) }), s(function () { return DOMMatrix.fromMatrix({ a: undefined }) }),
+    s(function () { return DOMMatrix.fromMatrix.call({}, {}) }), s(function () { return DOMMatrix.fromMatrix.call(undefined, {}) }), s(function () { class M extends DOMMatrix { }; return M.fromMatrix({ a: 2 }) })].join('\n')
+} })()
+=== matrix-readonly-methods
+(function () { return function () {
+  var m = new DOMMatrixReadOnly([1, 2, 3, 4, 5, 6]);
+  return [m.is2D, m.isIdentity, m.toString(), m.a, m.f, m.m41, m.m42, E(function () { return m.translate(1, 2).toString() }), E(function () { return m.scale(2).toString() }), E(function () { return m.rotate(45).toString() }), E(function () { return m.inverse().toString() }),
+    E(function () { return new DOMMatrixReadOnly('scale(2)').toString() }), E(function () { return new DOMMatrixReadOnly([1, 0, 0, 1, 0, 0]).isIdentity }), E(function () { return new DOMMatrixReadOnly('foo') }), E(function () { return new DOMMatrixReadOnly([1]) }), E(function () { m.a = 5; return m.a })].join('\n')
+} })()
+=== matrix-composition
+(function () { return function () {
+  var s = function (f) { return E(function () { var m = f(); return m.toString() }) };
+  return [s(function () { return new DOMMatrix().translate(100, 50).rotate(30).scale(2).translate(-100, -50) }), s(function () { return new DOMMatrix().scale(2).rotate(45) }), s(function () { return new DOMMatrix().rotate(45).scale(2) }), s(function () { return new DOMMatrix().translate(10, 20).rotate(90).translate(5, 5) }), s(function () { return new DOMMatrix().translate(10, 20).skewX(15).scale(1.5, 0.5).rotate(-20) }),
+    s(function () { return new DOMMatrix('translate(10px, 20px) rotate(90deg) translate(5px, 5px)') }), s(function () { return new DOMMatrix('translate(100px, 50px) rotate(30deg) scale(2) translate(-100px, -50px)') }), s(function () { return new DOMMatrix('matrix(1, 0, 0, 1, 10, 20) scale(2)') }), s(function () { return new DOMMatrix('rotateX(45deg) rotateY(45deg)') }), s(function () { return new DOMMatrix('perspective(500px) rotateY(30deg) translateZ(50px)') }),
+    s(function () { return new DOMMatrix('translate3d(10px,20px,30px) scale3d(2,2,2) rotate3d(1,0,0,45deg)') }), s(function () { return new DOMMatrix().translate(1, 2).multiply(new DOMMatrix().scale(3)).inverse() })].join('\n')
+} })()
+=== observer-rects
+@html <div id=t style="width:100px;height:50px;margin:10px"></div>
+(function () {
+  var out = [];
+  var io = new IntersectionObserver(function (es) { var e = es[0]; out.push('io', e.boundingClientRect instanceof DOMRectReadOnly, e.boundingClientRect instanceof DOMRect, e.intersectionRect instanceof DOMRectReadOnly, e.rootBounds === null ? 'null' : (e.rootBounds instanceof DOMRectReadOnly), Object.prototype.toString.call(e.boundingClientRect), R(e.boundingClientRect), R(e.intersectionRect), e.rootBounds && R(e.rootBounds), E(function () { return JSON.stringify(e.boundingClientRect) })) });
+  io.observe(document.getElementById('t'));
+  var ro = new ResizeObserver(function (es) { var e = es[0]; out.push('ro', e.contentRect instanceof DOMRectReadOnly, e.contentRect instanceof DOMRect, Object.prototype.toString.call(e.contentRect), R(e.contentRect), Object.keys(e.contentRect).length) });
+  ro.observe(document.getElementById('t'));
+  return function () { return out.join('\n') }
+})()
+=== rects-element-methods
+@html <div id=a style="width:100px;height:20px"></div>
+(function () { return function () {
+  var a = document.getElementById('a'), r = a.getBoundingClientRect(), l = a.getClientRects();
+  var out = [];
+  out.push(DOMRect.fromRect(r).width, DOMRectReadOnly.fromRect(l[0]).height, DOMQuad.fromRect(r).getBounds().width, new DOMPoint(r.x, r.y).x, r.toJSON().width);
+  out.push(JSON.stringify(Object.assign({}, r.toJSON())), JSON.stringify(Object.getOwnPropertyNames(r)), r.constructor === DOMRect, Object.getPrototypeOf(r) === DOMRect.prototype, Object.getPrototypeOf(l) === DOMRectList.prototype);
+  r.width = 7; r.x = 3; out.push(R(r), R(a.getBoundingClientRect()));
+  var m = new DOMMatrix(); out.push(P(DOMQuad.fromRect(r).p3.matrixTransform(m.translate(10, 10))));
+  return out.join('\n')
+} })()
