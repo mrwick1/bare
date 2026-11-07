@@ -937,7 +937,7 @@ On main 6bc973c, bare ran the first live create and delete flow on staging, with
 Gaps that this flow found:
 - `/agents/<id>/configure` shows the app error screen: `TypeError: t.compareDocumentPosition is not a function`. The host has no `Node.compareDocumentPosition`.
 - Typing is slow: about 90 to 190 ms for each key on this form. Chrome takes a few ms. The cause is not known yet (to verify).
-- The driver click does not hit-test. A click reached the Next button while the modal voice dialog was still open. Chrome sends that click to the top element at the point.
+- The driver click did not hit-test. Fixed in the section "Hit testing: elementFromPoint and the driver click" below.
 
 ## Cost of one typed key on a React form
 
@@ -1040,3 +1040,34 @@ Cost (`tools/js/instr.sh`, minimum of 3, main c66c8a5 against this change, relea
 Known deviations (Chrome differs): a `type` change keeps the stored selection (Chrome resets it); `setAttribute('value')` clamps the selection when it is read (Chrome keeps it); no document-level `selectionchange`; script `focus()` events are untrusted; the `value` of `date`, `color` and `file` is not sanitized as in Chrome; the methods of the prototypes are not enumerable in the same way. A drag after a double or triple click does not go by word or line.
 
 Not tested: a drag that leaves the window; a drag in a textarea that scrolls; a triple click in a textarea with several lines (only a double click is recorded); the distance of 5px for a double click (a guess, not recorded from Chrome); right-to-left text; IME; touch; `setRangeText` on `date`, `color` and `file`; the `selection_load` instruction cost against main; the live pages.
+
+## Hit testing: elementFromPoint and the driver click
+
+On a live React 19 and Radix page, `Input::Click("#next")` reached a button that a modal dialog covered (a fixed overlay, and `pointer-events: none` on `body`). Chrome sends such a click to the top element at the point. Now `Input::Click` does the same.
+
+What changed:
+- `crates/paint/src/hit.rs` is the same walk as `display.rs` (CSS 2.1 Appendix E) with a point in place of pixels. It now follows `z-index`, stacking contexts (also `opacity` under 1, sticky and flex items), floats, positioned boxes, fixed boxes (hit with the window point, not cut by a clip around them), `overflow` clips with scroll offsets, scrollbars, `visibility`, `display: none` and `pointer-events`. `hits_scrolled` gives all elements at a point, the topmost first.
+- `pointer-events` is a new inherited CSS property. Only `none` blocks a hit. `auto` on a child turns it on again. The SVG words act as `auto`.
+- `layout::scroll::Areas::fixed` lists the fixed boxes, so a walk that is outside a clip still finds a fixed box inside it.
+- `document.elementFromPoint(x, y)` and `elementsFromPoint(x, y)` are on `Document` and `ShadowRoot` (`browser_point.rs`). They use the bounded layout of `getBoundingClientRect` (same limits and gates). Chrome 155 facts that they copy: a `TypeError` for fewer than 2 arguments or a non-finite value; a point outside the window gives `null` and `[]` (checked on the rounded point; the page bars are outside); the point is cut to 1/64 px toward zero (`-0.01` is `0`); the root element is always the last of the list; results are retargeted against the context object and have no duplicates.
+- `Input::Click(sel)` scrolls the element into view if needed (as `DOM.scrollIntoViewIfNeeded`), aims at the center of the part of the border box that is in the window, hit-tests, and sends the pointer, mouse and click events to the hit element. Hover events (`over`, `enter`, `out`, `leave`) follow the hit element.
+- The result says when a click was intercepted: `PageResult::intercepted` is a list of `Intercept { step, target, hit, at }`. `hit` is `tag#id.class` of the element that got the click (at most 80 characters). A click that reaches the element or a child of it is not listed.
+- `Input::Key` focuses with `focus()`, not with a click, so it is unchanged. There is no drag input.
+
+Tests (written first; they failed before the change):
+- `tools/fixtures/ui/point-cases.txt`: 39 cases at more than 150 points (blocks, window edges, overlays, z-index stacks, floats, grid and flex items, inline-blocks, tables, `pointer-events` nesting, `visibility`, scroll containers with clipped content and bars, a scrolled window, fixed and sticky boxes, shadow roots, changes by script). `BARE_BARS=1 node tools/ui/chrome_topic.mjs point` records Chrome 155. All 39 match.
+- `tools/fixtures/ui/modal.html` and `modal-steps.txt`: a Radix-like modal (fixed overlay, `pointer-events: none` on `body`, dialog content with `pointer-events: auto`). 9 scenarios compare the event log of `Input::Click` with Chrome 155 (`chrome_drive.mjs modal-steps.txt modal.html`). All 9 match.
+- `browser_drive_tests`: a click that an overlay covers goes to the overlay and is listed in `intercepted`; a click on a child of the target is not listed; a target with no box is not hit-tested.
+- `hit.rs` has unit tests, and the test that paints each box in its own color still agrees with the hit test.
+- `cargo test --workspace`: 34 suites, 2,574 tests, 0 failed.
+
+Cost: `tools/js/instr.sh` (`instructions:u`, minimum of 3, large malloc cache), origin/main 71b5a0a against this change, release, each in its own `CARGO_TARGET_DIR` under `/data/bare-tmp`. 35 rows: `browser_load` (mutation, event, lookup), `style_load`, `focus_load`, `form_load` and `geometry_load` at 1 and 10, `scroll_load 10000 2000` and `browser_load event 0`. No row is over +0.5%. The worst is the start of a page (`browser_load event 0`, +0.416%: 7,231,422 to 7,261,492; the new property and the two methods). Then `focus_load dispatch 1` +0.288%, `scroll_load 10000 2000` +0.257%. A first version of the hit test made `scroll_load` +2.0% (identical with jemalloc, so it was not the allocator). The fix: one pass over the styles before the walk (as `display.rs` does) tells whether the page has any `z-index`, `opacity` under 1, sticky box or flex container, and the walk skips those checks for each box when it has none; and `inside` runs before the style checks.
+
+Deviations from Chrome:
+- A click on an element whose hit is inside a shadow tree goes to the outermost shadow host (events do not cross a shadow root here). `intercepted` names that host.
+- The engine has no transforms, so a transformed box is not hit where it is drawn. There is no `border-radius` or `clip-path` hit shape.
+- An element with no box, or a page that cannot be laid out (a gate such as an unsupplied style sheet), keeps the old behavior: the events go to the selected element at (0, 0), and nothing is listed.
+- The `scroll` events of the scroll into view come with the next scheduler turn, not inside the click.
+- DOM methods are not enumerable in this engine, so `Object.getOwnPropertyDescriptor(Document.prototype, 'elementFromPoint').enumerable` is `false` (`true` in Chrome). `document.implementation.createHTMLDocument` does not exist yet, so the case for a document that is not the window's was left out. An inline-block with a block child sits lower than in Chrome when it shares a line with a `vertical-align: top` box (layout gap, found by a case; not changed here).
+
+Not tested: a live Radix page on staging (no run against the real server); real wheel or touch scrolling before a click; `elementFromPoint` on a page with a shadow tree that has a slot or its own style sheet (that is a gate); fonts (all fixtures use boxes with a size); the `bare-stress` layout rows (only `geometry_load` rows measure the layout change); clippy.

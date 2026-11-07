@@ -1004,6 +1004,8 @@ pub struct UiOutcome {
     pub reports: Vec<Report>,
     /// A listener ran or the default action of an event may have changed the page. Draw a new frame.
     pub changed: bool,
+    /// A driver click that went to another element than the one it aimed at: what it hit and the point.
+    pub intercepted: Option<(String, (i32, i32))>,
 }
 
 /// The style and the layout of the page at one time: what a frame paints and what hit testing reads.
@@ -1044,7 +1046,7 @@ impl Browser {
         if self.dom.st.borrow().events.len() > self.dom.lim.max_events / 2 {
             self.collect(&[])?;
         }
-        Ok(UiOutcome { reports, changed: self.dom.st.borrow().ui.epoch != before })
+        Ok(UiOutcome { reports, changed: self.dom.st.borrow().ui.epoch != before, intercepted: None })
     }
 
     /// The pointer moved over `target` (the element under it, from hit testing). `None`: no element.

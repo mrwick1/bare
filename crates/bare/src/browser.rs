@@ -1208,6 +1208,8 @@ pub(crate) static DEFS: &[Def] = &[
     Def { on: &[Document], name: "createTextNode", len: 1, kind: M(nd::create_text_node) },
     Def { on: &[Document], name: "createComment", len: 1, kind: M(nd::create_comment) },
     Def { on: &[Document, Fragment], name: "getElementById", len: 1, kind: M(nd::get_element_by_id) },
+    Def { on: &[Document, Shadow], name: "elementFromPoint", len: 2, kind: M(crate::browser_point::element_from_point) },
+    Def { on: &[Document, Shadow], name: "elementsFromPoint", len: 2, kind: M(crate::browser_point::elements_from_point) },
     Def { on: &[Document], name: "documentElement", len: 0, kind: G(nd::document_element) },
     Def { on: &[Document], name: "head", len: 0, kind: G(nd::head) },
     Def { on: &[Document], name: "body", len: 0, kind: G(nd::body) },

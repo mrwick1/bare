@@ -987,6 +987,7 @@ fn initial(p: Property) -> Value {
         ZIndex => Value::Keyword(K::Auto),
         Opacity => Value::Number(1.0),
         Appearance => Value::Keyword(K::None),
+        PointerEvents => Value::Keyword(K::Auto),
         BorderTopLeftRadius | BorderTopRightRadius | BorderBottomRightRadius | BorderBottomLeftRadius => px(0.0),
         BorderSpacingH | BorderSpacingV => px(0.0),
         MarginTop | MarginRight | MarginBottom | MarginLeft | PaddingTop | PaddingRight | PaddingBottom | PaddingLeft => px(0.0),
@@ -999,7 +1000,7 @@ fn initial(p: Property) -> Value {
 /// Does a child take the value of the parent when it has no value of its own?
 fn inherited(p: Property) -> bool {
     use Property::*;
-    matches!(p, TextColor | FontSize | FontWeight | FontStyle | LineHeight | TextAlign | TextTransform | WhiteSpace | ListStyleType | Visibility | BorderCollapse | BorderSpacingH | BorderSpacingV | CaptionSide | Direction)
+    matches!(p, TextColor | FontSize | FontWeight | FontStyle | LineHeight | TextAlign | TextTransform | WhiteSpace | ListStyleType | Visibility | PointerEvents | BorderCollapse | BorderSpacingH | BorderSpacingV | CaptionSide | Direction)
 }
 
 /// The font size of the element, in pixels. It is first, because `em` in the other properties needs it.
@@ -1468,6 +1469,19 @@ mod tests {
         assert_eq!(get(html, &["div { overflow: clip scroll }"], "d", Property::OverflowX), k(Keyword::Hidden));
         assert_eq!(get(html, &["div { overflow: clip visible }"], "d", Property::OverflowX), k(Keyword::Clip));
         assert_eq!(get(html, &["div { overflow: clip visible }"], "d", Property::OverflowY), k(Keyword::Visible));
+    }
+
+    #[test]
+    fn pointer_events_is_inherited_and_a_child_can_turn_it_on_again() {
+        let k = Value::Keyword;
+        let html = "<div id=p><div id=c><i id=g></i></div></div>";
+        assert_eq!(get(html, &[], "p", Property::PointerEvents), k(Keyword::Auto));
+        let sheet = ["#p { pointer-events: none } #c { pointer-events: all }"];
+        assert_eq!(get(html, &sheet, "p", Property::PointerEvents), k(Keyword::None));
+        assert_eq!(get(html, &sheet, "c", Property::PointerEvents), k(Keyword::All));
+        assert_eq!(get(html, &sheet, "g", Property::PointerEvents), k(Keyword::All), "inherited");
+        assert_eq!(get(html, &["#p { pointer-events: none } #c { pointer-events: bogus }"], "g", Property::PointerEvents), k(Keyword::None), "a bad value is dropped");
+        assert_eq!(get(html, &["#p { pointer-events: none } #c { pointer-events: visiblePainted }"], "c", Property::PointerEvents), k(Keyword::VisiblePainted));
     }
 
     #[test]

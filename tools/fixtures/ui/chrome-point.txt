@@ -1,0 +1,39 @@
+shape	function 2 elementFromPoint function 2 elementsFromPoint true
+arguments	TypeError:Failed to execute 'elementFromPoint' on 'Document': 2 arguments required, but only 0 present. / TypeError:Failed to execute 'elementFromPoint' on 'Document': 2 arguments required, but only 1 present. / TypeError:Failed to execute 'elementFromPoint' on 'Document': The provided double value is non-finite. / TypeError:Failed to execute 'elementFromPoint' on 'Document': The provided double value is non-finite. / a / a / a / a / TypeError:Failed to execute 'elementsFromPoint' on 'Document': 2 arguments required, but only 0 present.
+blocks-and-root	a a body body body b b body c body body html html
+window-edges	a a null null null null null a a null null a
+outside-the-body	html html a a body html html html
+list-all	b>a>body>html | a>body>html | body>html | html | html
+z-index-stack	a a c a a a c c html f d html
+z-index-stack-all	a>b>html | c>b>e>html | a>b>d>e>html | a>d>html | html
+nested-contexts	c2 p2 p2 c1 html c1
+auto-z-hoists	a1 a1 b a b
+negative-z-behind-parent-block	p p p>body>n>html
+negative-z-in-context	n p n>p>body>html
+layers	fl blk ib blk blk blk blk fl>blk>body>html | ib>blk>body>html
+flex-items	a c a f body
+opacity	a b c c html
+visibility	v body body body html v>body>html | body>html
+display-none	a body b
+pointer-events-none	a html html a>html | html
+pointer-events-nesting	g r s s body body body k body g>k>body>html | r>k>body>html | s>body>html | body>html
+pointer-events-values	a b html d html visiblepainted,none,auto,none,none
+pointer-events-root	html html / html html / html / a html / a>html
+radix-modal	overlay overlay dlg ok overlay overlay title overlay>html | ok>dlg>overlay>html
+radix-modal-body-hidden	overlay ok overlay overlay overlay
+overlay-without-pointer-events-reset	btn html btn>html
+overflow-clip	big big body big html body html o
+overflow-abs-in-relative-clip	c in html html html
+overflow-z-child-clip	z z b b b
+scroll-container	i1 i2 i3 html html s i2 / i3 i4 foot html html i3 / foot foot html
+scroll-container-bars	in in s s s in s html
+scroll-container-nested	pad in html / pad in in pad2 / in in
+window-scrolled	b1 b3 b3 body null / b3 b3 b4 b6 b6 / b7 end / 600
+fixed-when-scrolled	f body t / f body t t
+fixed-in-clip	f c body
+sticky	s t u / s u u u
+inline-and-text	in2 ib ib p p p p
+table-cells	c1 c2 c3 c4 body html
+shadow-root	h h h o / deep / in / h / o / h>body>html | h>body>html / deep>in>h>body>html / h>body>html
+after-script-change	a b a b html
+grid-items	a a b c body

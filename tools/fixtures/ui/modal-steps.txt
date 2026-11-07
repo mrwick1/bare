@@ -1,0 +1,48 @@
+# Scenarios of tools/fixtures/ui/modal.html for Input::Click through a hit test. Same format as drive-steps.txt.
+# The page opens with a modal dialog: a fixed overlay and a fixed dialog over the page, and `pointer-events: none` on body (as Radix sets).
+# A click goes to the top element at the center of the element, which may not be the element. Every scenario first clicks `#ok`, so that the pointer has a place.
+== covered_by_overlay
+click #ok
+reset
+click #next
+== covered_then_dismissed
+click #ok
+click #next
+reset
+click #next
+== dialog_button
+click #ok
+reset
+click #cancel
+== page_button_under_dialog
+click #ok
+reset
+click #other
+== pointer_events_none_target
+eval - document.getElementById('overlay').hidden = true; document.getElementById('dlg').hidden = true; document.body.style.pointerEvents = '';
+click #blank
+reset
+click #nonep
+== visibility_hidden_target
+eval - document.getElementById('overlay').hidden = true; document.getElementById('dlg').hidden = true; document.body.style.pointerEvents = '';
+click #blank
+reset
+click #hid
+== page_buttons_without_modal
+eval - document.getElementById('overlay').hidden = true; document.getElementById('dlg').hidden = true; document.body.style.pointerEvents = '';
+click #blank
+reset
+click #next
+click #other
+== z_index_stack
+eval - document.getElementById('overlay').hidden = true; document.getElementById('dlg').hidden = true; document.body.style.pointerEvents = '';
+click #blank
+reset
+click #z1
+click #z2
+click #z3
+== scroll_into_view_then_click
+eval - document.getElementById('overlay').hidden = true; document.getElementById('dlg').hidden = true; document.body.style.pointerEvents = '';
+click #blank
+reset
+click #far

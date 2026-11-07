@@ -340,7 +340,7 @@ impl Page {
             Err(e) => {
                 self.note(format!("input: {e:?}"));
                 // The call may have changed the page before it stopped.
-                UiOutcome { reports: Vec::new(), changed: true }
+                UiOutcome { reports: Vec::new(), changed: true, intercepted: None }
             }
         };
         for Report { event_type, message, .. } in out.reports {
