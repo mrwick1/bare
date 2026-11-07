@@ -121,7 +121,10 @@ pub struct RuleSet {
     by_id: Buckets<Box<str>>,
     by_class: Buckets<Box<str>>,
     by_tag: Buckets<Atom>,
-    /// The rules that have no id, no class and no tag in the last part: `*`, `[href]`, `:first-child`.
+    /// The rules with an attribute test and no id or class in the last part, by the name of the attribute: `[data-state=open]`.
+    /// An element looks up the names of its own attributes, so a rule for an attribute that it does not have costs nothing.
+    by_attr: Buckets<Atom>,
+    /// The rules that have no id, no class, no attribute and no tag in the last part: `*`, `:first-child`.
     other: Vec<u32>,
     /// The user action state that some selector reads (`selector::USES_*`).
     user: u8,
@@ -267,7 +270,7 @@ impl RuleSet {
     }
 
     pub fn new(viewport: (f32, f32)) -> RuleSet {
-        RuleSet { viewport, entries: Vec::new(), decls: Vec::new(), side: Side::default(), layers: vec![Layer { parent: 0 }], layer_by_name: HashMap::new(), customs: Vec::new(), by_id: Buckets::default(), by_class: Buckets::default(), by_tag: Buckets::default(), other: Vec::new(), user: 0, scopes: Scopes::default() }
+        RuleSet { viewport, entries: Vec::new(), decls: Vec::new(), side: Side::default(), layers: vec![Layer { parent: 0 }], layer_by_name: HashMap::new(), customs: Vec::new(), by_id: Buckets::default(), by_class: Buckets::default(), by_tag: Buckets::default(), by_attr: Buckets::default(), other: Vec::new(), user: 0, scopes: Scopes::default() }
     }
 
     /// Which user action state (`:hover`, `:active`, the focus pseudo-classes) some rule reads: the bits `selector::USES_*`.
@@ -424,12 +427,16 @@ impl RuleSet {
         self.user |= crate::selector::user_flags(&selector);
         self.scopes.add(&selector);
         let index = self.entries.len() as u32;
-        // The bucket: an id is the most specific, then a class, then a tag.
+        // The bucket: an id is the most specific, then a class, then an attribute, then a tag. An attribute comes before a tag:
+        // `input[type=checkbox]` is in the list of `type`, and few elements have a `type`; most elements are a `div`.
         let last = &selector.compounds[0].simples;
         if let Some(Simple::Id(id)) = last.iter().find(|s| matches!(s, Simple::Id(_))) {
             self.by_id.entry(id.clone()).or_default().push(index);
         } else if let Some(Simple::Class(class)) = last.iter().find(|s| matches!(s, Simple::Class(_))) {
             self.by_class.entry(class.clone()).or_default().push(index);
+        } else if let Some(&Simple::Attr { name, .. }) = last.iter().find(|s| matches!(s, Simple::Attr { .. })) {
+            // Every attribute test needs the attribute: an element without it never matches.
+            self.by_attr.entry(name).or_default().push(index);
         } else if let Some(&Simple::Tag(tag)) = last.iter().find(|s| matches!(s, Simple::Tag(_))) {
             self.by_tag.entry(tag).or_default().push(index);
         } else {
@@ -464,7 +471,7 @@ impl RuleSet {
         let mut way = Way { want, path: Vec::new(), sorted: Vec::new(), on: false, at: 0 };
         let mut styles = Styles { styles: vec![ComputedStyle::initial()], of_node: vec![NONE; doc.len()], calcs: Vec::new(), grids: Vec::new(), customs: Vec::new(), spaced: false, kept: None };
         // Style 0 is the starting style. It is the parent style of the `html` element.
-        let mut cx = Cx { viewport: self.viewport, root_font_size: 16.0, layer_order: self.layer_order(), declared: &self.side, inline: RefCell::default(), computed: RefCell::default(), grids: RefCell::default(), customs: RefCell::default() };
+        let mut cx = Cx { viewport: self.viewport, root_font_size: 16.0, layer_order: self.layer_order(), declared: &self.side, inline: RefCell::default(), computed: RefCell::default(), grids: RefCell::default(), customs: RefCell::default(), merges: RefCell::default() };
         let style_atom = doc.find_atom("style");
         let hints = crate::hints::Hints::new(doc);
         let mut filter = AncestorFilter::new();
@@ -573,6 +580,7 @@ impl RuleSet {
                 g
             }),
             customs: RefCell::new(Customs { list: std::mem::take(&mut styles.customs), index: std::mem::take(&mut k.customs) }),
+            merges: RefCell::default(),
         };
         let style_atom = doc.find_atom("style");
         let hints = crate::hints::Hints::new(doc);
@@ -672,15 +680,22 @@ impl RuleSet {
         ok
     }
 
-    /// The rules that may match the element: the ones in the lists for its id, its classes and its tag, and the "other" list.
+    /// The rules that may match the element: the ones in the lists for its id, its classes, its attributes and its tag, and the "other" list.
     #[inline(always)]
     fn candidates(&self, doc: &Document, el: NodeId, out: &mut Vec<u32>) {
         out.clear();
         out.extend_from_slice(&self.other);
-        if let NodeData::Element { name, .. } = *doc.data(el)
-            && let Some(list) = self.by_tag.get(&name)
-        {
-            out.extend_from_slice(list);
+        if let NodeData::Element { name, attrs } = *doc.data(el) {
+            if let Some(list) = self.by_tag.get(&name) {
+                out.extend_from_slice(list);
+            }
+            if !self.by_attr.is_empty() {
+                for a in doc.attrs(attrs) {
+                    if let Some(list) = self.by_attr.get(&a.name) {
+                        out.extend_from_slice(list);
+                    }
+                }
+            }
         }
         if let Some(id) = doc.attr(el, Atom::ID)
             && let Some(list) = self.by_id.get(id)
@@ -773,11 +788,17 @@ impl RuleSet {
                 set |= 1 << p;
             }
         };
+        // The custom properties depend only on the set of the parent and on the rules that have some. Most elements of a page
+        // share both (Tailwind puts 40 of them on `*`), so the set is made once for each pair. A `style=""` attribute may add some: no cache.
+        let merge_key = inline.is_none().then(|| (parent.1, matched.iter().copied().filter(|&i| self.entries[i as usize].customs.0 != self.entries[i as usize].customs.1).collect::<Vec<u32>>()));
+        let merged = merge_key.as_ref().and_then(|k| cx.merges.borrow().get(k).copied());
         // The custom properties of the `style=""` attribute. They live until the end of the function, because `own` points into them.
         let mut inline_customs = Vec::new();
         // The custom properties that win: name, key, text. `own_at` says where a name is in the list: a scan is slow for 20,000 names.
-        let mut own: Vec<(&str, u128, &str)> = Vec::new();
-        let mut own_at: HashMap<&str, usize, BuildHasherDefault<Fnv>> = HashMap::default();
+        // Sized once: a map that grows from empty to the 40 names of Tailwind's `*` rule moves its table 4 times.
+        let n_custom = if merged.is_none() { matched.iter().map(|&i| (self.entries[i as usize].customs.1 - self.entries[i as usize].customs.0) as usize).sum() } else { 0 };
+        let mut own: Vec<(&str, u128, &str)> = Vec::with_capacity(n_custom);
+        let mut own_at: HashMap<&str, usize, BuildHasherDefault<Fnv>> = HashMap::with_capacity_and_hasher(n_custom, BuildHasherDefault::default());
         fn apply_custom<'a>(own: &mut Vec<(&'a str, u128, &'a str)>, own_at: &mut HashMap<&'a str, usize, BuildHasherDefault<Fnv>>, d: &'a CustomDecl, key: u128) {
             match own_at.get(&*d.name) {
                 Some(&i) if key >= own[i].1 => own[i] = (&d.name, key, &d.text),
@@ -793,8 +814,10 @@ impl RuleSet {
             for d in &self.decls[e.decls.0 as usize..e.decls.1 as usize] {
                 apply(d, e.origin, Some(e.layer), e.selector.specificity, i);
             }
-            for d in &self.customs[e.customs.0 as usize..e.customs.1 as usize] {
-                apply_custom(&mut own, &mut own_at, d, key(d.important, e.origin, Some(e.layer), e.selector.specificity, i));
+            if merged.is_none() {
+                for d in &self.customs[e.customs.0 as usize..e.customs.1 as usize] {
+                    apply_custom(&mut own, &mut own_at, d, key(d.important, e.origin, Some(e.layer), e.selector.specificity, i));
+                }
             }
         }
         // What the `style=""` attribute gives.
@@ -834,7 +857,9 @@ impl RuleSet {
             }
         }
         // The custom properties: the ones of the parent, and the ones of this element. Most elements set none, and share the set of the parent.
-        let custom = if own.is_empty() {
+        let custom = if let Some(m) = merged {
+            m
+        } else if own.is_empty() {
             parent.1
         } else {
             let merged = {
@@ -844,6 +869,11 @@ impl RuleSet {
             };
             cx.customs.borrow_mut().keep(merged)
         };
+        if let Some(k) = merge_key
+            && merged.is_none()
+        {
+            cx.merges.borrow_mut().insert(k, custom);
+        }
         // A value with `var()` is read now, with the custom properties of this element.
         let mut rest = set;
         while rest != 0 {
@@ -950,6 +980,8 @@ struct Cx<'a> {
     grids: RefCell<grid::Kept>,
     /// The sets of custom properties, each one once.
     customs: RefCell<Customs>,
+    /// The set of custom properties for a parent set and the rules with custom properties that an element matched.
+    merges: RefCell<HashMap<(u32, Vec<u32>), u32, BuildHasherDefault<Fnv>>>,
 }
 
 /// The sets of custom properties. Set 0 is the empty one. Elements with the same set have the same number, so that their styles can be shared.
@@ -1663,15 +1695,17 @@ fn element_hashes(doc: &Document, el: NodeId, f: &mut dyn FnMut(u32)) {
     }
 }
 
-/// The hashes that the ancestors of a matching element must have: from each compound that is an ancestor of the element
-/// (joined by a space or `>`, all the way from the right), one tag, id or class. The compounds after a `+` or `~` are not
-/// ancestors: they are siblings of an ancestor or of the element.
+/// The hashes that the ancestors of a matching element must have: from each compound that is an ancestor of the element,
+/// one tag, id or class. A compound is an ancestor when a space or `>` comes anywhere on its right. In `.list > :not([hidden]) ~
+/// :not([hidden])` the middle compound is a sibling, and `.list` is the parent of both, so an ancestor.
 fn ancestor_hashes(selector: &Selector) -> [u32; 4] {
     let mut out = [0; 4];
     let mut n = 0;
+    let mut up = false;
     for pair in selector.compounds.windows(2) {
-        if !matches!(pair[0].combinator, Combinator::Descendant | Combinator::Child) {
-            break;
+        up |= matches!(pair[0].combinator, Combinator::Descendant | Combinator::Child);
+        if !up {
+            continue;
         }
         let hash = pair[1].simples.iter().find_map(|s| match s {
             Simple::Tag(t) => Some(tag_hash(*t)),
@@ -2631,5 +2665,37 @@ mod tests {
             }
         }
         assert!(restyled > 1000 && full_runs < 200, "restyled {restyled}, full {full_runs}");
+    }
+
+    #[test]
+    fn attribute_rules_match_from_their_bucket() {
+        let html = "<div id=a data-state=open></div><input id=b type=checkbox><input id=c type=text><span id=d dir=rtl data-state=closed></span><p id=e hidden></p>";
+        let css = "[data-state=open] { width: 1px } input[type=checkbox] { width: 2px } [type] { height: 3px } [dir=rtl][data-state] { width: 4px } [hidden] { width: 5px; display: block }";
+        let w = |id: &str| get(html, &[css], id, Property::Width);
+        let h = |id: &str| get(html, &[css], id, Property::Height);
+        assert_eq!((w("a"), w("b"), w("c"), w("d"), w("e")), (px(1.0), px(2.0), Value::Keyword(Keyword::Auto), px(4.0), px(5.0)));
+        assert_eq!((h("a"), h("b"), h("c")), (Value::Keyword(Keyword::Auto), px(3.0), px(3.0)));
+    }
+
+    #[test]
+    fn an_ancestor_after_a_sibling_combinator_still_filters() {
+        let mut doc = parse("");
+        let list = crate::selector::parse_selector_list(".list > :not([hidden]) ~ :not([hidden])", &mut doc).expect("a selector");
+        assert_eq!(ancestor_hashes(&list[0]), [name_hash(2, "list"), 0, 0, 0]);
+        let html = "<div class=list><b id=a></b><b id=b></b><b id=c hidden></b><b id=d></b></div><div><b id=x></b><b id=y></b></div>";
+        let css = ".list > :not([hidden]) ~ :not([hidden]) { margin-top: 7px }";
+        let m = |id: &str| get(html, &[css], id, Property::MarginTop);
+        assert_eq!((m("a"), m("b"), m("d"), m("y")), (px(0.0), px(7.0), px(7.0), px(0.0)));
+    }
+
+    #[test]
+    fn custom_property_sets_are_shared_and_stay_right() {
+        // The same rules under parents with different sets, and a `style=""` that adds one.
+        let html = "<div id=p1 style='--c: 1px'><i id=a></i></div><div id=p2 style='--c: 2px'><i id=b></i></div><div id=p3><i id=c style='--d: 6px'></i></div>";
+        let css = "* { --a: 3px; --b: var(--c, 5px) } i { width: var(--b); height: var(--d, 9px) }";
+        let w = |id: &str| get(html, &[css], id, Property::Width);
+        let h = |id: &str| get(html, &[css], id, Property::Height);
+        assert_eq!((w("a"), w("b"), w("c")), (px(1.0), px(2.0), px(5.0)));
+        assert_eq!((h("a"), h("c")), (px(9.0), px(6.0)));
     }
 }

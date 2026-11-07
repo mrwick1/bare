@@ -154,6 +154,9 @@ fn substitute_at(text: &str, lookup: &mut dyn FnMut(&str) -> Option<String>, dep
 /// A set of custom properties, sorted by name. The text of each is final: no `var()` is left in it.
 pub type Set = Vec<(Box<str>, Box<str>)>;
 
+/// Where each name is in the list of `merge`. The fast hasher of the DOM: the names are short, and SipHash cost 4% of a cascade.
+type Index<'a> = std::collections::HashMap<&'a str, usize, std::hash::BuildHasherDefault<bare_html::dom::Fnv>>;
+
 /// The set of an element: the set of the parent, with the custom properties that the element sets (`own`, the winners of the cascade).
 /// Each one that has `var()` is replaced with the others of the new set. One that cannot be (a circle, a name with no value)
 /// is not in the set, and the one of the parent goes too.
@@ -166,12 +169,12 @@ pub fn merge(parent: &[(Box<str>, Box<str>)], own: &[(&str, &str)]) -> Set {
     }
     let mut slots: Vec<(&str, Slot)> = own.iter().map(|&(n, t)| (n, Slot::Raw(t))).collect();
     // Where each name is in `slots`: the first one, if a name is there twice. A scan of `slots` for each lookup is slow for 20,000 properties.
-    let mut index = std::collections::HashMap::new();
+    let mut index = Index::with_capacity_and_hasher(slots.len(), Default::default());
     for (i, (n, _)) in slots.iter().enumerate() {
         index.entry(*n).or_insert(i);
     }
 
-    fn get(name: &str, slots: &mut Vec<(&str, Slot)>, index: &std::collections::HashMap<&str, usize>, parent: &[(Box<str>, Box<str>)], depth: usize) -> Option<String> {
+    fn get(name: &str, slots: &mut Vec<(&str, Slot)>, index: &Index, parent: &[(Box<str>, Box<str>)], depth: usize) -> Option<String> {
         let Some(&i) = index.get(name) else {
             return parent.binary_search_by(|(n, _)| (**n).cmp(name)).ok().map(|i| parent[i].1.to_string());
         };

@@ -160,7 +160,9 @@ pub(crate) struct Built {
     rules: RuleSet,
     /// The last cascade of these rules, and its key: `revision`, `text_revision`, length and user state revisions of the
     /// document, and `want`. The flag tells that it keeps what `restyle_frame` needs (`RuleSet::compute_kept`).
-    last: Option<(LastKey, bool, Rc<Styles>)>,
+    /// Two places: `[0]` for no `want`, `[1]` for a `want`. A read of a hidden element asks for both (`snapshot`), and one
+    /// place made each such read throw away the other cascade: a poll of a hidden element did two full cascades for each read.
+    last: [Option<(LastKey, bool, Rc<Styles>)>; 2],
     /// Does a sheet use what the engine does not model (`content-visibility`, `display: contents`)? Read by `checkVisibility` only.
     pub(crate) odd: OnceCell<bool>,
 }
@@ -446,7 +448,7 @@ impl Dom {
                 if doc.name_count() > self.lim.max_names {
                     return Err(self.lim("dom-names"));
                 }
-                *cache = Some(Built { vp, key: plan.parts, rules, last: None, odd: OnceCell::new() });
+                *cache = Some(Built { vp, key: plan.parts, rules, last: [None, None], odd: OnceCell::new() });
             }
         }
         let mut cache = self.computed.cache.borrow_mut();
@@ -461,7 +463,8 @@ impl Dom {
         // adds a node, so the length moves. A custom element state change moves no counter, so the cascade is kept and used
         // only while no element has custom element state.
         let key = (doc.revision(), doc.text_revision(), doc.len(), doc.user().revision, want);
-        if let Some((k, kept, styles)) = &built.last
+        let slot = usize::from(want.is_some());
+        if let Some((k, kept, styles)) = &built.last[slot]
             && *k == key
             && (*kept || !keep)
             && !doc.has_custom()
@@ -472,7 +475,7 @@ impl Dom {
         let doc = self.doc.borrow();
         self.computed.computes.set(self.computed.computes.get() + 1);
         let styles = Rc::new(if keep { built.rules.compute_kept(&doc) } else { built.rules.compute_for(&doc, want) });
-        built.last = (!doc.has_custom()).then(|| (key, keep, styles.clone()));
+        built.last[slot] = (!doc.has_custom()).then(|| (key, keep, styles.clone()));
         Ok(styles)
     }
 
@@ -491,8 +494,10 @@ impl Dom {
         let mut cache = self.computed.cache.borrow_mut();
         let Some(built) = cache.as_mut().filter(|b| b.vp == vp && self.computed.builds.get() == builds) else { return Ok(None) };
         // The kept last cascade is this one, from before the changes: it does not match the document now.
-        if built.last.as_ref().is_some_and(|l| Rc::ptr_eq(&l.2, styles)) {
-            built.last = None;
+        for last in &mut built.last {
+            if last.as_ref().is_some_and(|l| Rc::ptr_eq(&l.2, styles)) {
+                *last = None;
+            }
         }
         let Some(styles) = Rc::get_mut(styles) else { return Ok(None) };
         let doc = self.doc.borrow();

@@ -2566,3 +2566,52 @@ Checks:
 - All 43 `tools/js/*_check.sh` scripts pass (`parse_check.sh` with `ACORN=` set).
 
 Not tested: a machine other than archMachine; wall time; scale 100 of the load rows; a live page other than the typing page; the bytecode paths (not changed); the debug build (the `debug_assert` in `new_object_with_shape`).
+
+## The cost of the cascade on the staging journey (S5)
+
+PR #251 found that the cascade and selector matching took 10% of the page thread on the read-only staging journey. The journey ran 352 full cascades and 0 incremental restyles. Its sheet is a Tailwind 3 build of 1,354 selectors.
+
+Causes (measured, archMachine, on a page and sheet saved from the journey; the files are not in the repository):
+- 79 of the 87 candidate rules of each element came from the "other" list: the last compound had an attribute test and no id or class (`[data-state=open]`, `[dir=rtl]`, `[hidden]`). Every element tested all of them.
+- Tailwind puts 40 custom properties on `*`. Each element that missed the style cache built a map of them, merged them with the set of its parent (SipHash), and hashed the whole set to find it again.
+- `getComputedStyle` of an element inside `display: none` (the `expect ... hidden` step polls one) needs two cascades: one with no `want`, then one with it. The cache of `Built` had one place, so each read threw the other away: 2 full cascades for each read. Step 2 did 99 + 97 of them.
+
+Changes:
+- `crates/css/src/cascade.rs`: a bucket for each attribute name (`by_attr`). A rule whose last compound has an attribute test and no id or class goes there; an element looks up the names of its own attributes. The order is id, class, attribute, tag. Stylo has an attribute bucket too.
+- `ancestor_hashes` also takes the compounds after a `+` or `~` when a space or `>` comes on their right: `.space-y-4 > :not([hidden]) ~ :not([hidden])` now needs `.space-y-4` in the ancestor filter.
+- `cascade`: the set of custom properties is kept for each pair (parent set, rules with custom properties that matched), in `Cx::merges`, for one walk or one restyle. An element with a `style=""` attribute does not use it. The map of the winners is sized once.
+- `crates/css/src/var.rs`: `merge` uses the DOM hasher (`Fnv`), not SipHash.
+- `crates/bare/src/browser_computed.rs`: `Built::last` has two places, one for no `want` and one for a `want`. Memory: one more `Styles` for a page that reads a hidden element.
+- `crates/css/examples/cascade_load.rs`: a load test with a synthetic sheet in the style of Tailwind 3 (`full`, `read`, `restyle`), and a `file` case for a saved page and sheet. `CASCADE_DUMP=1` prints every computed value and custom property, to compare two builds.
+
+Results:
+- Saved journey pages (one `compute`, setup taken off): 683 elements 49.0 M to 10.2 M instructions (-79%); 455 nodes 11.6 M to 2.6 M (-78%); 139 nodes 9.5 M to 3.3 M (-65%). The dumps of all 20 saved pages and of the 3 synthetic cases are byte for byte the same as on main.
+- `cascade_load` against main: `full 1` -34.3%, `read 1` -35.4%, `restyle 1` -26.9%.
+- The whole journey, `perf stat -e instructions:u`, 2 runs each: main 19.28 G and 19.04 G, this change 13.95 G and 14.06 G (-27%).
+- Share of the cascade (`bare_css::` symbols, self), `perf record -e instructions:u -c 1000000`, 3 runs each: 13.2% to 13.4% on main, 5.8% to 6.0% now. In cycles (one run each): 10.6% to 5.5%. JS instructions stay at about 9.9 G; the rest of the drop is the malloc, free and hashing that the cascade called.
+
+Journey per step, 3 runs of each build one after the other, load average about 7. CPU is the page thread (`cpu_ms`), in ms:
+
+| Step | CPU main | CPU now | time main | time now |
+| --- | --- | --- | --- | --- |
+| 1 open | 123-125 | 119-124 | 663-758 | 664-769 |
+| 2 login | 423-601 | 341-349 | 820-980 | 718-1059 |
+| 3 overview | 144-297 | 147-167 | 145-300 | 172-190 |
+| 4 agents | 625-669 | 429-502 | 714-765 | 598-632 |
+| 5 search | 468-511 | 332-435 | 627-917 | 587-765 |
+| 6 reload | 438-462 | 356-389 | 778-924 | 613-843 |
+| 7 sign out | 363-397 | 261-286 | 401-443 | 333-348 |
+| 8 agents, no session | 97-102 | 93-97 | 176-192 | 175-189 |
+| total | 2796-2992 | 2152-2324 | 4627-5071 | 4318-4362 |
+
+Still open (measured, not changed here):
+- The window frame path (`restyle_frame`) never restyled a part of the page on this journey. Any attribute change restyles all, because the sheet has form pseudo-classes (`disabled:`, `checked:`), so `Scopes::form` is set (`Scopes::roots`). `RuleSet::restyle` also gave `false` 14 times; the cause was not found.
+- `getComputedStyle` and the geometry reads always run a full cascade after a change of the tree. They do not use `restyle`.
+
+Checks (archMachine, base origin/main `5dbaabda3f` from `base-build`):
+- New tests: `attribute_rules_match_from_their_bucket`, `an_ancestor_after_a_sibling_combinator_still_filters`, `custom_property_sets_are_shared_and_stay_right` (bare-css), `reads_of_a_hidden_element_keep_both_cascades` (bare; on main it counts 6 cascades, not 2).
+- `cargo test --release --workspace`: 49 test binaries, 2,952 passed, 0 failed.
+- `tools/js/cost_matrix.sh`: 805 rows. Mean change: glibc -0.762%, jemalloc +0.000% (0 rows measured). Over under one allocator: 0. Over under both: 0. Failed: 0. The `bare-stress` layout rows drop up to 14%.
+- Live staging, read only: 18 runs of the two final builds and 4 runs of instrumented builds, all passed. A scan of the output files and the saved pages found neither the email nor the password.
+
+Not tested: a machine other than archMachine; the window (`--window`); a sheet with `@layer` or `!important` custom properties on the live journey (the unit tests of the cascade cover them); memory of the second `Styles` of `Built`.
