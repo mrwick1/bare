@@ -242,7 +242,7 @@ impl St {
                     self.make_transient(doc, parent, node);
                 }
             }
-            Change::Attr { el, name, old } => {
+            Change::Attr { el, name, old, .. } => {
                 for (o, want_old) in self.interested(doc, el, Ty::Attrs, Some(name)) {
                     let ns = doc.attr_ns(name).map(|n| n.uri());
                     let rec = Rec {
@@ -524,7 +524,8 @@ impl Dom {
         let mo = self.mo.st.get().filter(|s| s.borrow().watching).cloned();
         let rg = self.range.live();
         let ni = self.walk.live();
-        let w: Option<Watcher> = (mo.is_some() || rg.is_some() || ni.is_some()).then(|| -> Watcher {
+        let ce = self.ce.watching();
+        let w: Option<Watcher> = (mo.is_some() || rg.is_some() || ni.is_some() || ce.is_some()).then(|| -> Watcher {
             Box::new(move |doc, ch| {
                 if let Some(m) = &mo {
                     m.borrow_mut().on_change(doc, ch);
@@ -534,6 +535,9 @@ impl Dom {
                 }
                 if let Some(i) = &ni {
                     i.borrow_mut().on_change(doc, ch);
+                }
+                if let Some(c) = &ce {
+                    c.borrow_mut().on_change(doc, ch);
                 }
             })
         });

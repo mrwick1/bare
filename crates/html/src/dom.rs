@@ -232,6 +232,8 @@ pub struct Document {
     // The contents of each HTML `template` that has any, by `NodeId::index` of the template: a fragment node that is not a child of the template.
     watcher: Option<Watcher>,
     // The host function that is told of each change (see `set_watcher`). A page with no watcher pays one `Option` check at a change.
+    custom: HashMap<u32, u32, BuildHasherDefault<Fnv>>,
+    // The custom element state of the elements that have one, by `NodeId::index`: the number of the definition, or `PRECUSTOMIZED`, or `FAILED`. See `is_defined`.
 }
 
 /// A change of the tree that `Document::set_watcher` reports, before the document answers a later read. `prev` and `next` are the
@@ -242,9 +244,9 @@ pub enum Change {
     Link { parent: NodeId, node: NodeId, prev: Option<NodeId>, next: Option<NodeId> },
     /// `node` is about to leave the children of `parent`.
     Unlink { parent: NodeId, node: NodeId, prev: Option<NodeId>, next: Option<NodeId> },
-    /// The attribute `name` of `el` is set or removed. `old` is the value before, `None` when there was none. The watcher runs
-    /// while the change is in progress: it must not read the attribute, only use `old`.
-    Attr { el: NodeId, name: Atom, old: Option<Span> },
+    /// The attribute `name` of `el` is set or removed. `old` is the value before, `None` when there was none. `new` is the value
+    /// after, `None` for a removal. The watcher runs while the change is in progress: it must not read the attribute, only use `old` and `new`.
+    Attr { el: NodeId, name: Atom, old: Option<Span>, new: Option<Span> },
     /// The text of `node` changes. `old` is the value it had.
     Text { node: NodeId, old: Span },
 }
@@ -322,6 +324,7 @@ impl Document {
             shadow_host: HashMap::default(),
             template_content: HashMap::default(),
             watcher: None,
+            custom: HashMap::default(),
         };
         // The order matters: it must match `Atom::ID` and `Atom::CLASS`.
         doc.intern("id");
@@ -374,6 +377,34 @@ impl Document {
             return None;
         }
         self.shadow_of.get(&(host.index() as u32)).copied()
+    }
+
+    /// Set the custom element state of `el` (`None`: no state, the "undefined" state of an element with a valid name). The value is a
+    /// definition number (the state "custom"), `PRECUSTOMIZED` or `FAILED`. The host numbers the definitions.
+    pub fn set_custom_state(&mut self, el: NodeId, state: Option<u32>) {
+        match state {
+            Some(s) => self.custom.insert(el.index() as u32, s),
+            None => self.custom.remove(&(el.index() as u32)),
+        };
+    }
+
+    /// The custom element state of `el`, see `set_custom_state`.
+    pub fn custom_state(&self, el: NodeId) -> Option<u32> {
+        // A page with no custom element pays one `is_empty` check.
+        if self.custom.is_empty() {
+            return None;
+        }
+        self.custom.get(&(el.index() as u32)).copied()
+    }
+
+    /// Does any element have a custom element state?
+    pub fn has_custom(&self) -> bool {
+        !self.custom.is_empty()
+    }
+
+    /// The `:defined` pseudo-class: every element, except an HTML element with a valid custom element name that no constructor has run for.
+    pub fn is_defined(&self, el: NodeId) -> bool {
+        !(self.element_ns(el) == Ns::Html && valid_custom_name(self.element_name(el))) || self.custom_state(el).is_some_and(|s| s < PRECUSTOMIZED)
     }
 
     /// The host of the shadow root `root`. `None` for any other node.
@@ -920,12 +951,12 @@ impl Document {
         if let Some(a) = self.attrs[start..start + len].iter_mut().find(|a| a.name == name) {
             let old = std::mem::replace(&mut a.value, span);
             if self.watcher.is_some() {
-                self.notify(Change::Attr { el, name, old: Some(old) });
+                self.notify(Change::Attr { el, name, old: Some(old), new: Some(span) });
             }
             return;
         }
         if self.watcher.is_some() {
-            self.notify(Change::Attr { el, name, old: None });
+            self.notify(Change::Attr { el, name, old: None, new: Some(span) });
         }
         let new_start = if start + len == self.attrs.len() {
             start
@@ -956,7 +987,7 @@ impl Document {
         self.class_sets.get_mut().remove(&el.index());
         let value = self.attrs[start + at].value;
         if self.watcher.is_some() {
-            self.notify(Change::Attr { el, name, old: Some(value) });
+            self.notify(Change::Attr { el, name, old: Some(value), new: None });
         }
         // A watched attribute is logged once: it leaves the watch set here, so the log cannot grow without a new `watch_attr`.
         if !self.watched.is_empty() && self.watched.remove(&(el.index() as u32, name.0)) {
@@ -1762,4 +1793,20 @@ mod tests {
         other.move_to(imported, root, None);
         assert!(other.revision() != r);
     }
+}
+
+/// The custom element state "precustomized": a constructor is running for the element.
+pub const PRECUSTOMIZED: u32 = u32::MAX - 1;
+/// The custom element state "failed".
+pub const FAILED: u32 = u32::MAX;
+
+/// `PCENChar` of the HTML Standard (valid custom element name), after the first character.
+fn pcen(c: char) -> bool {
+    matches!(c, '-' | '.' | '0'..='9' | '_' | 'a'..='z' | '\u{b7}' | '\u{c0}'..='\u{d6}' | '\u{d8}'..='\u{f6}' | '\u{f8}'..='\u{37d}' | '\u{37f}'..='\u{1fff}' | '\u{200c}'..='\u{200d}' | '\u{203f}'..='\u{2040}' | '\u{2070}'..='\u{218f}' | '\u{2c00}'..='\u{2fef}' | '\u{3001}'..='\u{d7ff}' | '\u{f900}'..='\u{fdcf}' | '\u{fdf0}'..='\u{fffd}' | '\u{10000}'..='\u{effff}')
+}
+
+/// HTML Standard "valid custom element name".
+pub fn valid_custom_name(name: &str) -> bool {
+    const RESERVED: [&str; 8] = ["annotation-xml", "color-profile", "font-face", "font-face-src", "font-face-uri", "font-face-format", "font-face-name", "missing-glyph"];
+    name.starts_with(|c: char| c.is_ascii_lowercase()) && name.contains('-') && name.chars().all(pcen) && !RESERVED.contains(&name)
 }

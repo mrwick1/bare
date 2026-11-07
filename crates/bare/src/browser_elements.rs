@@ -93,7 +93,7 @@ fn make(d: &Dom, it: &mut Interp<'_>) -> R<[ObjId; 6]> {
     let mut o = [d.p().html; 6];
     for (i, name) in ["HTMLAnchorElement", "HTMLAreaElement", "HTMLTemplateElement"].into_iter().enumerate() {
         let proto = d.obj(it, d.p().html)?;
-        let f = d.add_fn(it, illegal_constructor, name, 0, false)?;
+        let f = crate::browser_custom::interface_ctor(d, it, name, false)?;
         it.define_data(f, kp, Value::Object(proto), false, false, false)?;
         it.define_data(proto, kc, Value::Object(f), true, false, true)?;
         crate::browser_lazy::tag(d, it, proto, name)?;

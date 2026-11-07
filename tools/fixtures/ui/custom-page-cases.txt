@@ -1,0 +1,13 @@
+var out = function () { return log.join(' | ') };
+=== define-then-parse
+@html <script>var log = [], L = function (s) { log.push(s) }; customElements.define('x-a', class extends HTMLElement { constructor() { super(); L('ctor') } connectedCallback() { L('connected ' + this.id) } disconnectedCallback() { L('disconnected ' + this.id) } attributeChangedCallback(n, o, v) { L('attr ' + this.id + ' ' + n + ' ' + v) } static get observedAttributes() { return ['a', 'b'] } }); L('defined')</script><x-a id=a1 a=1><x-a id=a2 b=2></x-a></x-a><p><x-a id=a3></x-a></p>
+(function () { return out() })
+=== parse-then-define-inline
+@html <script>var log = [], L = function (s) { log.push(s) }</script><x-a id=a1 a=1></x-a><x-a id=a2></x-a><script>customElements.define('x-a', class extends HTMLElement { constructor() { super(); L('ctor') } connectedCallback() { L('connected ' + this.id) } attributeChangedCallback(n, o, v) { L('attr ' + this.id + ' ' + n + ' ' + v) } static get observedAttributes() { return ['a'] } }); L('defined')</script>
+(function () { return out() })
+=== define-between-elements
+@html <script>var log = [], L = function (s) { log.push(s) }</script><x-a id=a1></x-a><script>customElements.define('x-a', class extends HTMLElement { constructor() { super(); L('ctor') } connectedCallback() { L('connected ' + this.id) } }); L('defined')</script><x-a id=a2></x-a><script>L('second script')</script><x-a id=a3></x-a>
+(function () { return out() })
+=== when-defined-in-script
+@html <script>var log = [], L = function (s) { log.push(s) }; customElements.whenDefined('x-a').then(function () { L('when ' + document.readyState) }); document.addEventListener('DOMContentLoaded', function () { L('dcl') })</script><x-a id=a1></x-a><script>customElements.define('x-a', class extends HTMLElement { constructor() { super(); L('ctor') } }); L('defined')</script>
+(function () { return out() })

@@ -1,0 +1,645 @@
+var log = [];
+var L = function (s) { log.push(s) };
+var out = function () { return log.join(' | ') };
+var $ = function (i) { return document.getElementById(i) };
+var nm = function (e) { return e.localName + (e.id ? '#' + e.id : '') };
+var def = function (name, ext, obs) {
+  var C = class extends HTMLElement {
+    constructor() { super(); L('ctor ' + name) }
+    connectedCallback() { L('connected ' + nm(this)) }
+    disconnectedCallback() { L('disconnected ' + nm(this)) }
+    adoptedCallback() { L('adopted ' + nm(this)) }
+    attributeChangedCallback(n, o, v) { L('attr ' + nm(this) + ' ' + n + ' ' + o + '->' + v) }
+    static get observedAttributes() { return obs || ['a', 'b', 'id', 'class'] }
+  };
+  customElements.define(name, C, ext);
+  return C;
+};
+var err = function (f) { try { return String(f()) } catch (e) { return e.name + ': ' + e.message } };
+=== shape
+(function () { return [typeof customElements, typeof CustomElementRegistry, Object.prototype.toString.call(customElements), customElements instanceof CustomElementRegistry, customElements.constructor === CustomElementRegistry, customElements.define.length, customElements.get.length, customElements.getName.length, customElements.whenDefined.length, customElements.upgrade.length, HTMLElement.length, HTMLElement.name, customElements === window.customElements, typeof Object.getOwnPropertyDescriptor(window, 'customElements').get, Object.getOwnPropertyDescriptor(CustomElementRegistry.prototype, 'define').enumerable].join(' ') })
+=== define-errors
+(function () {
+  var A = class extends HTMLElement {};
+  var r = [];
+  r.push(err(function () { customElements.define('foo', A) }));
+  r.push(err(function () { customElements.define('annotation-xml', A) }));
+  r.push(err(function () { customElements.define('X-a', A) }));
+  r.push(err(function () { customElements.define('x-a', 5) }));
+  r.push(err(function () { customElements.define('x-a', function () {}) }));
+  r.push(err(function () { customElements.define('x-b', () => {}) }));
+  r.push(err(function () { customElements.define() }));
+  r.push(err(function () { customElements.define('x-c') }));
+  r.push(err(function () { customElements.define('x-d', A) }));
+  r.push(err(function () { customElements.define('x-d', A) }));
+  r.push(err(function () { customElements.define('x-e', A) }));
+  r.push(err(function () { customElements.define('x-d', class extends HTMLElement {}) }));
+  r.push(err(function () { customElements.define('x-f', class extends HTMLElement {}, { extends: 'x-d' }) }));
+  r.push(err(function () { customElements.define('x-f', class extends HTMLElement {}, { extends: 'foo' }) }));
+  r.push(err(function () { customElements.define('x-f', class extends HTMLElement {}, 5) }));
+  r.push(err(function () { customElements.define('x-f', class extends HTMLElement {}, null) }));
+  r.push(err(function () { customElements.define('x-g', class extends HTMLElement {}, { extends: undefined }) }));
+  return r.join('\n');
+})
+=== define-prototype-errors
+(function () {
+  var r = [];
+  var A = function () {}; A.prototype = 5;
+  r.push(err(function () { customElements.define('x-a', A) }));
+  A = function () {}; A.prototype = null;
+  r.push(err(function () { customElements.define('x-b', A) }));
+  A = class extends HTMLElement {}; A.prototype.connectedCallback = 5;
+  r.push(err(function () { customElements.define('x-c', A) }));
+  r.push(String(customElements.get('x-c')));
+  A = class extends HTMLElement {}; A.prototype.disconnectedCallback = {};
+  r.push(err(function () { customElements.define('x-d', A) }));
+  A = class extends HTMLElement {}; A.prototype.adoptedCallback = 'x';
+  r.push(err(function () { customElements.define('x-e', A) }));
+  A = class extends HTMLElement {}; A.observedAttributes = ['a']; A.prototype.attributeChangedCallback = 5;
+  r.push(err(function () { customElements.define('x-f', A) }));
+  A = class extends HTMLElement {}; A.observedAttributes = 5; A.prototype.attributeChangedCallback = function () {};
+  r.push(err(function () { customElements.define('x-g', A) }));
+  A = class extends HTMLElement {}; A.observedAttributes = 5;
+  r.push(err(function () { customElements.define('x-h', A); return 'ok' }));
+  A = class extends HTMLElement {}; Object.defineProperty(A, 'observedAttributes', { get: function () { throw new Error('boom') } });
+  r.push(err(function () { customElements.define('x-i', A); return 'ok' }));
+  A = class extends HTMLElement {}; A.prototype.attributeChangedCallback = function () {}; Object.defineProperty(A, 'observedAttributes', { get: function () { throw new Error('boom') } });
+  r.push(err(function () { customElements.define('x-j', A); return 'ok' }));
+  return r.join('\n');
+})
+=== define-read-order
+var seen = [];
+var P = new Proxy(HTMLElement.prototype, { get: function (t, k, rc) { seen.push(String(k)); return Reflect.get(t, k, rc) } });
+var A = function () { return Reflect.construct(HTMLElement, [], A) };
+A.prototype = P;
+Object.setPrototypeOf(A, HTMLElement);
+Object.defineProperty(A, 'observedAttributes', { get: function () { seen.push('observedAttributes'); return ['a'] } });
+(function () { customElements.define('x-a', A); return seen.join(',') })
+=== get-getname
+(function () {
+  var A = def('x-a'), B = def('x-b');
+  return [customElements.get('x-a') === A, customElements.get('x-b') === B, customElements.get('x-c'), customElements.get('X-A'), customElements.get('nope'), customElements.getName(A), customElements.getName(B), customElements.getName(class {}), err(function () { return customElements.getName(5) }), err(function () { return customElements.get() }), customElements.get(5), customElements.get('')].join(' | ');
+})
+=== when-defined
+var res = [];
+(function () {
+  var p1 = customElements.whenDefined('x-a');
+  var p2 = customElements.whenDefined('x-a');
+  p1.then(function (c) { L('p1 ' + (c === A)) });
+  p2.then(function (c) { L('p2 ' + (c === A)) });
+  L('same ' + (p1 === p2) + ' ' + (p1 instanceof Promise));
+  customElements.whenDefined('Bad').then(function () { L('bad ok') }, function (e) { L('bad ' + e.name + ': ' + e.message) });
+  customElements.whenDefined('x-a').then(function () { L('after') });
+  var A = def('x-a');
+  L('defined');
+  customElements.whenDefined('x-a').then(function (c) { L('late ' + (c === A)) });
+  L('sync end');
+  return out;
+})()
+=== when-defined-vs-upgrade
+@html <x-a id=e></x-a>
+(function () {
+  customElements.whenDefined('x-a').then(function () { L('when ' + $('e').constructor.name) });
+  def('x-a');
+  L('def done');
+  return out;
+})()
+=== parse-then-define
+@html <x-a id=a1 a=1><x-a id=a2 b=2 c=3></x-a></x-a><p><x-a id=a3 class=k></x-a></p><x-b id=b1></x-b>
+(function () {
+  L('before ' + ($('a1') instanceof HTMLElement) + ' ' + $('a1').constructor.name);
+  var A = def('x-a');
+  L('after ' + ($('a1') instanceof A) + ' ' + ($('b1') instanceof A));
+  def('x-b');
+  return out;
+})()
+=== parse-then-define-detached
+(function () {
+  var host = document.createElement('div');
+  host.innerHTML = '<x-a id=a1 a=1></x-a>';
+  def('x-a');
+  L('defined');
+  document.body.appendChild(host);
+  L('appended');
+  return out;
+})()
+=== define-order-document
+@html <x-b id=b1></x-b><x-a id=a1></x-a><x-b id=b2></x-b>
+(function () {
+  def('x-a'); L('--');
+  def('x-b');
+  return out;
+})()
+=== upgrade-method
+(function () {
+  var h = document.createElement('div');
+  h.innerHTML = '<x-a id=a1 a=1><x-a id=a2></x-a></x-a><x-b id=b></x-b>';
+  def('x-a'); def('x-b');
+  L('defined');
+  customElements.upgrade(h);
+  L('upgraded');
+  customElements.upgrade(h);
+  L('again');
+  document.body.appendChild(h);
+  L('appended');
+  return out;
+})()
+=== upgrade-method-self
+(function () {
+  var e = document.createElement('div');
+  e.innerHTML = '<x-a id=a1 a=1></x-a>';
+  var x = e.firstChild;
+  def('x-a');
+  customElements.upgrade(x);
+  L('done ' + x.constructor.name);
+  return out;
+})()
+=== create-element
+(function () {
+  var A = def('x-a');
+  var e = document.createElement('x-a');
+  L('created ' + (e instanceof A) + ' ' + e.isConnected + ' ' + e.attributes.length);
+  e.setAttribute('a', '1');
+  document.body.appendChild(e);
+  e.remove();
+  var f = document.createElement('X-A');
+  L('upper ' + (f instanceof A) + ' ' + f.localName);
+  var g = document.createElementNS('http://www.w3.org/1999/xhtml', 'x-a');
+  L('ns ' + (g instanceof A));
+  var h = document.createElementNS('http://www.w3.org/2000/svg', 'x-a');
+  L('svg ' + (h instanceof A));
+  return out;
+})()
+=== new-constructor
+(function () {
+  var A = def('x-a');
+  var e = new A();
+  L('new ' + e.localName + ' ' + e.tagName + ' ' + e.namespaceURI + ' ' + e.isConnected + ' ' + e.parentNode + ' ' + e.attributes.length + ' ' + (e instanceof A) + ' ' + (e.constructor === A) + ' ' + Object.getPrototypeOf(e).constructor.name);
+  document.body.appendChild(e);
+  e.setAttribute('a', 'x');
+  e.setAttribute('z', 'x');
+  e.remove();
+  L(Object.prototype.toString.call(e));
+  return out;
+})()
+=== illegal-constructors
+(function () {
+  var r = [];
+  r.push(err(function () { new HTMLElement() }));
+  r.push(err(function () { HTMLElement() }));
+  r.push(err(function () { new (class extends HTMLElement {})() }));
+  r.push(err(function () { return Reflect.construct(HTMLElement, [], class extends HTMLElement {}) }));
+  var A = class extends HTMLElement {};
+  customElements.define('x-a', A);
+  r.push(err(function () { return new A() instanceof A }));
+  r.push(err(function () { return Reflect.construct(HTMLElement, [], A) instanceof A }));
+  r.push(err(function () { return new (class extends A {})() }));
+  r.push(err(function () { return Reflect.construct(A, [], Object) }));
+  r.push(err(function () { return Reflect.construct(HTMLElement, [], Object) }));
+  r.push(err(function () { return Reflect.construct(HTMLElement, [], function () {}) }));
+  return r.join('\n');
+})
+=== constructor-variants
+(function () {
+  var r = [];
+  var A = function () { return Reflect.construct(HTMLElement, [], A) };
+  A.prototype = Object.create(HTMLElement.prototype); A.prototype.constructor = A;
+  Object.setPrototypeOf(A, HTMLElement);
+  customElements.define('x-a', A);
+  r.push(new A() instanceof A);
+  var B = function () { return Reflect.construct(HTMLElement, [], new.target) };
+  B.prototype = Object.create(HTMLElement.prototype);
+  Object.setPrototypeOf(B, HTMLElement);
+  customElements.define('x-b', B);
+  r.push(new B() instanceof B);
+  class C extends HTMLElement { constructor() { return {} } }
+  customElements.define('x-c', C);
+  r.push(Object.prototype.toString.call(new C()));
+  class D extends HTMLElement { constructor() { } }
+  customElements.define('x-d', D);
+  r.push(err(function () { return new D() }));
+  class E extends HTMLElement { constructor() { super(); return 5 } }
+  customElements.define('x-e', E);
+  r.push(err(function () { return new E() instanceof E }));
+  class F extends HTMLElement { constructor() { super(); super() } }
+  customElements.define('x-f', F);
+  r.push(err(function () { return new F() }));
+  class G extends HTMLElement { constructor(a, b) { super(); this.v = a + b } }
+  customElements.define('x-g', G);
+  r.push(new G(1, 2).v);
+  r.push(document.createElement('x-g').v);
+  return r.join('\n');
+})
+=== subclass-of-defined
+(function () {
+  var A = def('x-a');
+  var B = class extends A { constructor() { super(); L('B ctor') } };
+  def.B = B;
+  customElements.define('x-b', B);
+  var b = new B();
+  L(b.localName + ' ' + (b instanceof A) + ' ' + (b instanceof B));
+  var a = new A();
+  L(a.localName + ' ' + (a instanceof B));
+  L(customElements.getName(B) + ' ' + customElements.getName(A));
+  return out;
+})()
+=== innerhtml
+@html <div id=h></div><div id=d></div>
+(function () {
+  def('x-a'); def('x-b');
+  $('h').innerHTML = '<x-a id=a1 a=1><x-b id=b1></x-b></x-a><x-a id=a2></x-a>';
+  L('--');
+  $('h').innerHTML = '';
+  L('--');
+  var d = document.createElement('div');
+  d.innerHTML = '<x-a id=a3></x-a>';
+  L('detached ' + (d.firstChild instanceof HTMLElement) + ' ' + d.firstChild.constructor.name);
+  $('d').appendChild(d);
+  L('--');
+  $('h').insertAdjacentHTML('beforeend', '<x-b id=b2></x-b>');
+  L('--');
+  $('h').outerHTML = '<div id=h2><x-a id=a4></x-a></div>';
+  L('--');
+  $('d').textContent = 'gone';
+  return out;
+})()
+=== clone-node
+@html <div id=h><x-a id=a1 a=1><x-b id=b1 b=2></x-b></x-a></div>
+(function () {
+  def('x-a'); def('x-b');
+  L('--');
+  var c = $('a1').cloneNode(false);
+  L('shallow ' + (c instanceof HTMLElement) + ' ' + c.constructor.name + ' ' + c.getAttribute('a'));
+  var d = $('a1').cloneNode(true);
+  L('deep ' + d.firstChild.constructor.name + ' ' + d.firstChild.getAttribute('b'));
+  document.body.appendChild(d);
+  L('--');
+  var t = document.createElement('template');
+  t.innerHTML = '<x-a id=ta></x-a>';
+  L('template ' + t.content.firstChild.constructor.name);
+  var tc = t.content.cloneNode(true);
+  L('tclone ' + tc.firstChild.constructor.name);
+  document.body.appendChild(tc);
+  L('inserted ' + $('ta').constructor.name);
+  return out;
+})()
+=== append-remove-move
+@html <div id=p></div><div id=q></div>
+(function () {
+  def('x-a');
+  var e = document.createElement('x-a');
+  e.id = 'e';
+  L('--');
+  $('p').appendChild(e);
+  L('--');
+  $('q').appendChild(e);
+  L('--');
+  $('q').removeChild(e);
+  L('--');
+  $('p').insertBefore(e, null);
+  e.remove();
+  L('--');
+  $('p').append(e);
+  $('p').replaceChild(document.createElement('i'), e);
+  L('--');
+  $('q').prepend(e);
+  $('q').replaceChildren();
+  L('--');
+  $('p').append(e);
+  e.replaceWith('text');
+  L('--');
+  $('p').append(e);
+  e.before('b');
+  e.after('a');
+  e.remove();
+  L('--');
+  $('p').append(e);
+  $('p').textContent = '';
+  return out;
+})()
+=== fragment-insert
+@html <div id=p></div>
+(function () {
+  def('x-a'); def('x-b');
+  var f = document.createDocumentFragment();
+  var a = document.createElement('x-a'); a.id = 'a';
+  var b = document.createElement('x-b'); b.id = 'b';
+  f.append(a, b);
+  L('--');
+  $('p').appendChild(f);
+  L('--');
+  $('p').replaceChildren(b, a);
+  L('--');
+  $('p').append('t', a);
+  return out;
+})()
+=== nested-subtree
+@html <div id=p></div>
+(function () {
+  def('x-a'); def('x-b');
+  var d = document.createElement('div');
+  d.innerHTML = '<x-a id=a><x-b id=b><x-a id=c></x-a></x-b></x-a>';
+  L('built');
+  $('p').appendChild(d);
+  L('--');
+  d.remove();
+  L('--');
+  document.body.appendChild(d);
+  return out;
+})()
+=== attribute-changes
+@html <x-a id=e a=0 z=0></x-a>
+(function () {
+  def('x-a');
+  L('--');
+  var e = $('e');
+  e.setAttribute('a', '1');
+  e.setAttribute('a', '1');
+  e.setAttribute('z', '1');
+  e.setAttribute('b', '2');
+  e.removeAttribute('a');
+  e.removeAttribute('a');
+  e.removeAttribute('nope');
+  e.id = 'f';
+  e.className = 'k';
+  L('--');
+  e.toggleAttribute('a');
+  e.toggleAttribute('a');
+  e.toggleAttribute('a', true);
+  e.toggleAttribute('a', true);
+  e.toggleAttribute('a', false);
+  e.toggleAttribute('a', false);
+  e.toggleAttribute('z');
+  L('--');
+  e.setAttributeNS(null, 'a', '3');
+  e.setAttributeNS('http://www.w3.org/1999/xlink', 'xlink:b', '4');
+  e.removeAttributeNS('http://www.w3.org/1999/xlink', 'b');
+  L('--');
+  e.attributes.setNamedItem(document.createAttribute('a'));
+  e.attributes.removeNamedItem('a');
+  e.setAttributeNode(document.createAttribute('b'));
+  e.getAttributeNode('b').value = 'v';
+  e.removeAttributeNode(e.getAttributeNode('b'));
+  L('--');
+  e.classList.add('c1');
+  e.classList.toggle('c1');
+  e.dataset.x = '1';
+  return out;
+})()
+=== attribute-callback-detached-and-unobserved
+(function () {
+  def('x-a', undefined, ['a']);
+  var e = document.createElement('x-a');
+  e.setAttribute('a', '1');
+  e.setAttribute('b', '1');
+  e.setAttribute('A', '2');
+  var h = document.createElement('div');
+  h.innerHTML = '<x-a a=5 b=6></x-a>';
+  L('--');
+  document.body.appendChild(h);
+  return out;
+})()
+=== attribute-case-and-html-element
+(function () {
+  customElements.define('x-a', class extends HTMLElement { static get observedAttributes() { return ['data-q', 'Mixed'] } attributeChangedCallback(n, o, v) { L(n + ' ' + o + ' ' + v) } });
+  var e = document.createElement('x-a');
+  e.setAttribute('data-q', '1');
+  e.setAttribute('Mixed', '2');
+  e.setAttribute('mixed', '3');
+  return out;
+})()
+=== callback-this-and-args
+(function () {
+  var seen;
+  customElements.define('x-a', class extends HTMLElement {
+    connectedCallback() { L('c ' + arguments.length + ' ' + (this === seen)) }
+    disconnectedCallback() { L('d ' + arguments.length) }
+    attributeChangedCallback() { L('a ' + arguments.length + ' ' + Array.prototype.join.call(arguments, ',')) }
+    static get observedAttributes() { return ['a'] }
+  });
+  seen = document.createElement('x-a');
+  document.body.appendChild(seen);
+  seen.setAttribute('a', 'v');
+  seen.remove();
+  return out;
+})()
+=== callbacks-read-at-define
+(function () {
+  var A = class extends HTMLElement {
+    connectedCallback() { L('orig') }
+  };
+  customElements.define('x-a', A);
+  A.prototype.connectedCallback = function () { L('replaced') };
+  var e = document.createElement('x-a');
+  document.body.appendChild(e);
+  e.remove();
+  A.prototype.disconnectedCallback = function () { L('late disconnected') };
+  document.body.appendChild(e);
+  e.remove();
+  return out;
+})()
+=== reentrancy-attr-in-connected
+(function () {
+  customElements.define('x-a', class extends HTMLElement {
+    constructor() { super(); L('ctor') }
+    connectedCallback() { L('connected'); this.setAttribute('a', '1'); L('connected end') }
+    attributeChangedCallback(n, o, v) { L('attr ' + n + ' ' + v) }
+    static get observedAttributes() { return ['a'] }
+  });
+  var e = document.createElement('x-a');
+  document.body.appendChild(e);
+  L('after append');
+  return out;
+})()
+=== reentrancy-dom-in-callbacks
+@html <div id=p></div>
+(function () {
+  customElements.define('x-a', class extends HTMLElement {
+    connectedCallback() { L('c a'); if (!this.hasAttribute('once')) { this.setAttribute('once', ''); var b = document.createElement('x-b'); b.id = 'b'; this.parentNode.appendChild(b); L('a appended b') } }
+    disconnectedCallback() { L('d a') }
+  });
+  customElements.define('x-b', class extends HTMLElement {
+    connectedCallback() { L('c b'); $('a').remove(); L('b removed a') }
+    disconnectedCallback() { L('d b') }
+  });
+  var a = document.createElement('x-a'); a.id = 'a';
+  $('p').appendChild(a);
+  L('end');
+  return out;
+})()
+=== constructor-sets-attributes
+(function () {
+  customElements.define('x-a', class extends HTMLElement {
+    constructor() { super(); L('ctor ' + this.attributes.length + ' ' + this.childNodes.length); this.setAttribute('made', '1'); L('ctor end') }
+    attributeChangedCallback(n, o, v) { L('attr ' + n + ' ' + v) }
+    static get observedAttributes() { return ['made', 'x'] }
+  });
+  var a = new (customElements.get('x-a'))();
+  L('new ' + a.getAttribute('made'));
+  var b = document.createElement('div');
+  b.innerHTML = '<x-a x=1></x-a>';
+  L('--');
+  document.body.appendChild(b);
+  return out;
+})()
+=== document-tree-order-with-shadow
+@html <div id=p><x-a id=h></x-a></div>
+(function () {
+  def('x-a'); def('x-b');
+  var h = $('h');
+  var s = h.attachShadow({ mode: 'open' });
+  s.appendChild(document.createElement('x-b'));
+  L('--');
+  var d = document.createElement('div');
+  var hh = document.createElement('x-a'); hh.id = 'hh';
+  d.appendChild(hh);
+  var s2 = hh.attachShadow({ mode: 'open' });
+  var b = document.createElement('x-b'); b.id = 'sb';
+  s2.appendChild(b);
+  L('--');
+  $('p').appendChild(d);
+  L('--');
+  d.remove();
+  return out;
+})()
+=== customized-builtin
+@html <button id=b1 is=x-btn a=1></button><button id=b2></button><div id=h></div>
+(function () {
+  var B = class extends HTMLButtonElement {
+    constructor() { super(); L('ctor btn') }
+    connectedCallback() { L('connected ' + nm(this)) }
+    attributeChangedCallback(n, o, v) { L('attr ' + nm(this) + ' ' + n + ' ' + v) }
+    static get observedAttributes() { return ['a'] }
+  };
+  customElements.define('x-btn', B, { extends: 'button' });
+  L('defined ' + ($('b1') instanceof B) + ' ' + ($('b2') instanceof B) + ' ' + $('b1').constructor.name);
+  var c = document.createElement('button', { is: 'x-btn' });
+  L('created ' + (c instanceof B) + ' ' + c.getAttribute('is') + ' ' + (c instanceof HTMLButtonElement));
+  var d = document.createElement('button');
+  d.setAttribute('is', 'x-btn');
+  L('is attr ' + (d instanceof B));
+  $('h').innerHTML = '<button id=b3 is=x-btn></button><button id=b4></button>';
+  L('inner ' + ($('b3') instanceof B) + ' ' + ($('b4') instanceof B));
+  var n = new B();
+  L('new ' + n.localName + ' ' + (n instanceof B) + ' ' + n.type);
+  L(customElements.get('x-btn') === B ? 'get ok' : 'get bad');
+  L(String(customElements.get('button')));
+  var x = document.createElement('x-btn');
+  L('autonomous ' + (x instanceof B) + ' ' + x.constructor.name);
+  return out;
+})()
+=== customized-builtin-errors
+(function () {
+  var r = [];
+  customElements.define('x-s', class extends HTMLElement { constructor() { super(); } }, { extends: 'section' });
+  r.push(err(function () { return new (customElements.get('x-s'))().localName }));
+  customElements.define('x-b1', class extends HTMLButtonElement {});
+  r.push(err(function () { return new (customElements.get('x-b1'))() }));
+  customElements.define('x-b2', class extends HTMLButtonElement {}, { extends: 'input' });
+  r.push(err(function () { return new (customElements.get('x-b2'))() }));
+  customElements.define('x-b3', class extends HTMLElement {}, { extends: 'button' });
+  r.push(err(function () { return new (customElements.get('x-b3'))() }));
+  customElements.define('x-i', class extends HTMLInputElement {}, { extends: 'input' });
+  r.push(err(function () { var i = new (customElements.get('x-i'))(); i.value = 'v'; return i.localName + ' ' + i.value + ' ' + i.type }));
+  return r.join('\n');
+})
+=== customized-builtin-interfaces
+(function () {
+  var r = [];
+  [['a', 'HTMLAnchorElement'], ['area', 'HTMLAreaElement'], ['button', 'HTMLButtonElement'], ['form', 'HTMLFormElement'], ['iframe', 'HTMLIFrameElement'], ['input', 'HTMLInputElement'], ['link', 'HTMLLinkElement'], ['option', 'HTMLOptionElement'], ['optgroup', 'HTMLOptGroupElement'], ['script', 'HTMLScriptElement'], ['select', 'HTMLSelectElement'], ['template', 'HTMLTemplateElement'], ['textarea', 'HTMLTextAreaElement'], ['label', 'HTMLLabelElement']].forEach(function (p, i) {
+    var I = window[p[1]];
+    r.push(p[1] + ' ' + typeof I + ' ' + err(function () { new I() }));
+    var C = class extends I { constructor() { super(); L(p[0]) } };
+    customElements.define('x-t' + i, C, { extends: p[0] });
+    var e = new C();
+    r.push(e.localName + ' ' + (e instanceof I) + ' ' + Object.prototype.toString.call(e));
+  });
+  return r.join('\n');
+})
+=== defined-pseudo
+@html <x-a id=a1></x-a><x-b id=b1></x-b><div id=d1></div><x-c id=c1></x-c>
+(function () {
+  var q = function () { return Array.prototype.map.call(document.querySelectorAll(':defined'), function (e) { return e.localName }).filter(function (n) { return n.indexOf('x-') == 0 || n == 'div' }).join(',') };
+  var u = function () { return Array.prototype.map.call(document.querySelectorAll(':not(:defined)'), function (e) { return e.localName }).join(',') };
+  L('before ' + q() + ' / ' + u());
+  def('x-a');
+  L('after ' + q() + ' / ' + u());
+  L('matches ' + $('a1').matches(':defined') + ' ' + $('b1').matches(':defined') + ' ' + $('d1').matches(':defined') + ' ' + document.createElement('x-b').matches(':defined') + ' ' + new (customElements.get('x-a'))().matches(':defined'));
+  return out;
+})()
+=== define-inside-callback
+@html <x-a id=a1></x-a><x-b id=b1></x-b>
+(function () {
+  customElements.define('x-a', class extends HTMLElement {
+    constructor() { super(); L('ctor a'); if (!customElements.get('x-b')) def('x-b') }
+    connectedCallback() { L('c a') }
+  });
+  L('--');
+  return out;
+})()
+=== define-then-whendefined-order
+@html <x-a id=e></x-a>
+(function () {
+  customElements.whenDefined('x-a').then(function () { L('resolved') });
+  Promise.resolve().then(function () { L('micro before') });
+  def('x-a');
+  Promise.resolve().then(function () { L('micro after') });
+  L('sync');
+  return out;
+})()
+=== queue-microtask-order
+@html <div id=p></div>
+(function () {
+  def('x-a');
+  queueMicrotask(function () { L('micro') });
+  var e = document.createElement('x-a');
+  $('p').appendChild(e);
+  L('sync');
+  return out;
+})()
+=== ids-in-constructor-of-upgrade
+@html <x-a id=a1 a=1>text<b></b></x-a>
+(function () {
+  customElements.define('x-a', class extends HTMLElement {
+    constructor() { super(); L('ctor ' + this.isConnected + ' ' + this.getAttribute('a') + ' ' + this.childNodes.length) }
+  });
+  return out;
+})()
+=== disconnected-in-removal-of-ancestor
+@html <div id=p><div id=m><x-a id=a1></x-a></div></div>
+(function () {
+  def('x-a');
+  L('--');
+  var m = $('m');
+  m.remove();
+  L('--');
+  $('p').appendChild(m);
+  $('p').innerHTML = '';
+  return out;
+})()
+=== insert-already-connected
+@html <div id=p><x-a id=a1></x-a><i id=i></i></div>
+(function () {
+  def('x-a');
+  L('--');
+  $('p').insertBefore($('a1'), null);
+  L('--');
+  $('p').insertBefore($('a1'), $('i'));
+  L('--');
+  $('p').appendChild($('a1'));
+  return out;
+})()
+=== set-text-and-value-paths
+@html <x-a id=a1><b id=k></b></x-a>
+(function () {
+  def('x-a');
+  L('--');
+  $('a1').textContent = 'x';
+  L('--');
+  $('a1').innerHTML = '<x-a id=n></x-a>';
+  L('--');
+  $('a1').innerHTML = '';
+  L('--');
+  document.body.innerHTML = '';
+  return out;
+})()

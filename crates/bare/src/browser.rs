@@ -83,6 +83,7 @@ use crate::browser_form as fm;
 use crate::browser_ui as ui;
 use crate::browser_selection as sel;
 use crate::browser_shadow as sh;
+use crate::browser_custom as ce;
 pub use crate::browser_scheduler::{Pump, SchedLimits, SchedStats};
 use bare_css::selector::{Selector, parse_selector_list};
 use bare_html::dom::{Document, NodeData, NodeId, Ns};
@@ -513,6 +514,8 @@ pub struct Dom {
     pub(crate) media: crate::browser_media::Media,
     /// Constraint validation, `labels` and `form.reset()` (`browser_controls.rs`).
     pub(crate) ctl: crate::browser_controls::CtlHost,
+    /// Custom elements (`browser_custom.rs`).
+    pub(crate) ce: crate::browser_custom::Ce,
 }
 
 impl Host for Dom {
@@ -520,9 +523,9 @@ impl Host for Dom {
         let (h, needs_new) = self.handlers.borrow()[id as usize];
         self.style.cur.set(id);
         if needs_new && !is_new {
-            return Err(it.type_error("Failed to construct: please use the 'new' operator"));
+            return Err(crate::browser_custom::needs_new(it, h));
         }
-        let r = h(self, it, this, args);
+        let r = if self.ce.on.get() { self.call_ce(it, h, this, args) } else { h(self, it, this, args) };
         if self.mo.armed() {
             self.mo_after(it)?;
         }
@@ -558,6 +561,7 @@ impl Host for Dom {
         self.io_roots(out);
         self.walk_roots(out);
         self.range_roots(out);
+        self.ce_roots(out);
     }
 
     fn trace(&self, owner: ObjId, out: &mut Vec<Value>) {
@@ -781,7 +785,7 @@ impl Dom {
         for &n in chain.iter() {
             let proto = {
                 let doc = self.doc.borrow();
-                match *doc.data(n) {
+                let proto = match *doc.data(n) {
                     // The brand follows the namespace of the native node, not its name: an SVG `input` is not an `<input>`.
                     NodeData::Element { name, .. } => match doc.element_ns(n) {
                         Ns::Svg => p.svg,
@@ -803,7 +807,9 @@ impl Dom {
                     NodeData::ShadowRoot if doc.shadow_host(n).is_some() => p.shadow,
                     NodeData::ShadowRoot => p.fragment,
                     NodeData::Doctype(_) => p.node,
-                }
+                };
+                // A custom element whose wrapper was collected gets the prototype of its definition again.
+                if self.ce.on.get() { self.ce_proto(&doc, n, proto) } else { proto }
             };
             let o = self.obj(it, proto)?;
             let mut st = self.st.borrow_mut();
@@ -1007,13 +1013,13 @@ impl Dom {
             ("EventTarget", et, Some(ev::event_target_ctor as H)),
             ("Node", node, None),
             ("Element", element, None),
-            ("HTMLElement", html, None),
+            ("HTMLElement", html, Some(ce::HANDLERS[0])),
             ("SVGElement", svg, None),
-            ("HTMLInputElement", input, None),
-            ("HTMLIFrameElement", iframe, None),
-            ("HTMLLinkElement", link, None),
-            ("HTMLFormElement", form, None),
-            ("HTMLButtonElement", button, None),
+            ("HTMLInputElement", input, Some(ce::HANDLERS[6])),
+            ("HTMLIFrameElement", iframe, Some(ce::HANDLERS[5])),
+            ("HTMLLinkElement", link, Some(ce::HANDLERS[7])),
+            ("HTMLFormElement", form, Some(ce::HANDLERS[4])),
+            ("HTMLButtonElement", button, Some(ce::HANDLERS[3])),
             ("CharacterData", chardata, None),
             ("Text", text, None),
             ("Comment", comment, None),
@@ -1034,7 +1040,7 @@ impl Dom {
         let mut ctors = Vec::new();
         for (name, proto, ctor) in ifaces {
             let f = match if name == "DocumentFragment" { Some(nd::fragment_ctor as H) } else { ctor } {
-                Some(h) => self.add_ctor_nt(it, h, name, u32::from(name != "EventTarget" && name != "DocumentFragment"))?,
+                Some(h) => self.add_ctor_nt(it, h, name, u32::from(name != "EventTarget" && name != "DocumentFragment" && !name.starts_with("HTML")))?,
                 None => self.add_fn(it, illegal_constructor, name, 0, false)?,
             };
             it.define_data(f, kp, Value::Object(proto), false, false, false)?;
@@ -1097,7 +1103,8 @@ impl Dom {
         crate::browser_elements::install(self, it)?;
         nd::install_late(self, it)?;
         crate::browser_controls::install(self, it)?;
-        crate::browser_media::install(self, it)
+        crate::browser_media::install(self, it)?;
+        crate::browser_custom::install(self, it)
     }
 
     pub(crate) fn define_accessor(&self, it: &mut Interp<'_>, o: ObjId, key: PropertyKey, get: ObjId, set: Option<ObjId>) -> R<()> {
@@ -1388,6 +1395,7 @@ impl Browser {
             els: Default::default(),
             media: Default::default(),
             ctl: Default::default(),
+            ce: Default::default(),
         });
         it.set_host(dom.clone())?;
         it.heap.set_indexed_source(dom.clone());

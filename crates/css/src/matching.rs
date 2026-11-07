@@ -121,6 +121,7 @@ fn simple_matches(doc: &Document, el: NodeId, simple: &Simple) -> bool {
             // A comment does not count.
         }),
         Simple::Link => matches!(doc.atom_str(name), "a" | "area") && doc.attrs(attrs).iter().any(|a| doc.atom_str(a.name) == "href"),
+        Simple::Defined => doc.is_defined(el),
         Simple::Never => false,
         Simple::Is(args) => args.iter().any(|simples| compound_matches(doc, el, simples)),
         Simple::Not(args) => !args.iter().any(|simples| compound_matches(doc, el, simples)),

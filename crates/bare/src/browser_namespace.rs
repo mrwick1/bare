@@ -131,7 +131,7 @@ pub(crate) fn create_element_ns(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[
             if prefix.is_some() || qname.bytes().any(|b| b.is_ascii_uppercase()) {
                 return Err(Error::Unsupported(unsupported("createElementNS in the HTML namespace with a prefix or capital letters (names are lowercase in the native document)")));
             }
-            crate::browser_dom::make_element(d, it, &qname)
+            if d.ce.on.get() || a.len() > 2 { crate::browser_custom::create(d, it, &qname, arg(a, 2)) } else { crate::browser_dom::make_element(d, it, &qname) }
         }
         Some(Some(ns @ (Ns::Svg | Ns::MathMl))) => {
             let node = {

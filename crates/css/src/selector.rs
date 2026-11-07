@@ -106,6 +106,8 @@ pub enum Simple {
     Empty,
     /// `:link`: an `a` or `area` with an `href`. (We have no history, so every link is "not visited".)
     Link,
+    /// `:defined`: every element, except a custom element that no constructor has run for (`Document::is_defined`).
+    Defined,
     /// `:hover` and friends. Never true.
     Never,
     /// `:not(.a, b)`: true when none of the compounds match. Each one is a list of simple selectors.
@@ -380,6 +382,7 @@ impl Parser<'_, '_> {
                     "root" => Simple::Root,
                     "empty" => Simple::Empty,
                     "link" | "any-link" => Simple::Link,
+                    "defined" => Simple::Defined,
                     "first-of-type" => Simple::Nth(Nth { a: 0, b: 1, from_end: false, of_type: true }),
                     "last-of-type" => Simple::Nth(Nth { a: 0, b: 1, from_end: true, of_type: true }),
                     "hover" | "active" | "focus" | "focus-within" | "focus-visible" | "visited" | "target" | "invalid" | "valid" => Simple::Never,

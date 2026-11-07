@@ -977,7 +977,7 @@ fn ensure(d: &Dom, it: &mut Interp<'_>) -> R<Made> {
     let (kp, kc) = (d.key(it, "prototype")?, d.key(it, "constructor")?);
     let mut ctors = [collection; 7];
     for (i, (name, proto)) in [("HTMLSelectElement", select), ("HTMLOptionElement", option), ("HTMLOptGroupElement", optgroup), ("HTMLOptionsCollection", options), ("HTMLCollection", collection), ("HTMLTextAreaElement", textarea)].into_iter().enumerate() {
-        let f = d.add_fn(it, illegal_constructor, name, 0, true)?;
+        let f = crate::browser_custom::interface_ctor(d, it, name, true)?;
         it.define_data(f, kp, Value::Object(proto), false, false, false)?;
         it.define_data(proto, kc, Value::Object(f), true, false, true)?;
         crate::browser_lazy::tag(d, it, proto, name)?;

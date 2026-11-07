@@ -1,0 +1,4 @@
+define-then-parse	defined | ctor | attr a1 a 1 | connected a1 | ctor | attr a2 b 2 | connected a2 | ctor | connected a3
+parse-then-define-inline	ctor | attr a1 a 1 | connected a1 | ctor | connected a2 | defined
+define-between-elements	ctor | connected a1 | defined | ctor | connected a2 | second script | ctor | connected a3
+when-defined-in-script	ctor | defined | when loading | dcl

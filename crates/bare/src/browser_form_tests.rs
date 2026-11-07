@@ -326,8 +326,8 @@ fn brands_and_receivers_are_checked() {
             // The prototype itself is not an instance.
             assert_eq!(js(&mut b, &format!("try {{ {proto}.prototype.{prop}; 'no throw' }} catch (e) {{ e.name }}")), "TypeError", "{proto}.prototype.{prop}");
         }
-        assert_eq!(js(&mut b, "try { new HTMLButtonElement() } catch (e) { e.name + ':' + e.message }"), "TypeError:HTMLButtonElement is not a constructor");
-        assert_eq!(js(&mut b, "try { HTMLButtonElement() } catch (e) { e.name + ':' + e.message }"), "TypeError:Illegal constructor");
+        assert_eq!(js(&mut b, "try { new HTMLButtonElement() } catch (e) { e.name + ':' + e.message }"), "TypeError:Failed to construct 'HTMLButtonElement': Illegal constructor");
+        assert_eq!(js(&mut b, "try { HTMLButtonElement() } catch (e) { e.name + ':' + e.message }"), "TypeError:Failed to construct 'HTMLButtonElement': Please use the 'new' operator, this DOM object constructor cannot be called as a function.");
         assert_eq!(js(&mut b, "try { new HTMLFormElement() } catch (e) { e.name }"), "TypeError");
         // A symbol cannot become a string: the property is not touched.
         assert_eq!(js(&mut b, "bt.name = 'keep'; try { bt.name = Symbol('s') } catch (e) { var tn = e.name } [tn, bt.name].join()"), "TypeError,keep");

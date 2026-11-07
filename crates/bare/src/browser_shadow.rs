@@ -43,16 +43,7 @@ use bare_js::value::Value;
 
 type V = R<Value>;
 
-/// `PCENChar` of the HTML Standard (valid custom element name), after the first character.
-fn pcen(c: char) -> bool {
-    matches!(c, '-' | '.' | '0'..='9' | '_' | 'a'..='z' | '\u{b7}' | '\u{c0}'..='\u{d6}' | '\u{d8}'..='\u{f6}' | '\u{f8}'..='\u{37d}' | '\u{37f}'..='\u{1fff}' | '\u{200c}'..='\u{200d}' | '\u{203f}'..='\u{2040}' | '\u{2070}'..='\u{218f}' | '\u{2c00}'..='\u{2fef}' | '\u{3001}'..='\u{d7ff}' | '\u{f900}'..='\u{fdcf}' | '\u{fdf0}'..='\u{fffd}' | '\u{10000}'..='\u{effff}')
-}
-
-/// HTML Standard "valid custom element name".
-pub(crate) fn valid_custom_name(name: &str) -> bool {
-    const RESERVED: [&str; 8] = ["annotation-xml", "color-profile", "font-face", "font-face-src", "font-face-uri", "font-face-format", "font-face-name", "missing-glyph"];
-    name.starts_with(|c: char| c.is_ascii_lowercase()) && name.contains('-') && name.chars().all(pcen) && !RESERVED.contains(&name)
-}
+pub(crate) use bare_html::dom::valid_custom_name;
 
 /// DOM Standard "attach a shadow root", steps 1 and 2: an HTML element with a valid shadow host name.
 fn valid_host(doc: &Document, host: NodeId) -> bool {
