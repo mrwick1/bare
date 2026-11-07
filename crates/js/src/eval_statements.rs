@@ -157,8 +157,7 @@ impl<'p> Interp<'p> {
     /// Start a statement. A `?` after a frame was pushed is safe: the error goes to that frame, which cleans up.
     fn enter(&mut self, st: &mut Vec<SFrame>, s: StmtId) -> Result<SGo, Ctl> {
         self.tick()?;
-        let prog = self.prog.clone();
-        let stmt = *prog.stmt(s);
+        let stmt = *self.prog.stmt(s);
         let top = self.depth == 0;
         // Only a label directly on a loop or switch is its own. Any other statement ends the label list.
         if !matches!(stmt.kind, StmtKind::Labeled { .. } | StmtKind::While { .. } | StmtKind::DoWhile { .. } | StmtKind::For { .. } | StmtKind::ForIn { .. } | StmtKind::ForOf { .. } | StmtKind::Switch { .. }) {
@@ -339,7 +338,6 @@ impl<'p> Interp<'p> {
 
     /// A statement with no nested statement. It cannot recurse, so it needs no frame and no `descend`.
     fn exec_simple(&mut self, s: StmtId, st: &Stmt, top: bool) -> Ex {
-        let prog = self.prog.clone();
         match st.kind {
             StmtKind::Expr(e) | StmtKind::Directive(e) => {
                 let v = self.eval_expr(e)?;
@@ -348,6 +346,7 @@ impl<'p> Interp<'p> {
                 }
             }
             StmtKind::Var { kind, decls } => {
+                let prog = self.prog.clone();
                 for d in prog.list(decls) {
                     let d = *prog.decl(d);
                     let name = if let PatKind::Ident = prog.pat(d.target).kind { Some(self.name_str(self.pat_name[d.target.index()])?) } else { None };
@@ -401,9 +400,8 @@ impl<'p> Interp<'p> {
             *i += 1;
             return SGo::Stmt(s);
         }
-        let Some(mut f) = st.pop() else { return SGo::Done(r) };
-        let a = self.step_frame(&mut f, r);
-        st.push(f);
+        let Some(f) = st.last_mut() else { return SGo::Done(r) };
+        let a = self.step_frame(f, r);
         self.act(st, a)
     }
 

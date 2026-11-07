@@ -3165,3 +3165,47 @@ Checks (archMachine):
 - `tools/js/cost_matrix.sh`, base origin/main `f92f517` from `base-build`: 805 rows in 99 s. Mean change: glibc -0.012%, jemalloc +0.000% (0 rows measured). Over under one allocator: 0. Over under both: 0. Failed: 0.
 
 Not tested: arjun-e16; a real Hyprland window (only `cage` headless); a resize of the window while a document loads; `reload` while the first document is still on its way (it fails with "there is no document to reload"); `bare --window` with a URL that fails to load (by reading the code, it leaves a white window); `keycost.sh` (`Page::type_text` did not change; the driver path did); HiDPI.
+
+## A cheaper tree walker on hot nodes (2026-11-08)
+
+The bytecode lane stopped at the R1 gate, so the tree walker stays the only executor. This pass follows a profile of it.
+
+Profile: `perf record -e instructions:u -c 200000 --call-graph fp` over the read-only staging journey (`drive-journey.steps`), `bare-drive` built with `-C force-frame-pointers=yes`, one run each. Base origin/main `59fd099`: 11.56 G instructions. This change: 11.22 G (-2.9%; the live server makes the count move a little from run to run). Self instructions:
+
+| Function | main | now |
+| --- | --- | --- |
+| `eval_expr_inner` | 1,455 M | 1,365 M |
+| `link_inner` | 948 M | 857 M |
+| `machine` | 920 M | 861 M |
+| libc (malloc, free and the rest) | 896 M | not split |
+| `eval_assign` | 353 M | 344 M |
+| `get_name` | 351 M | 355 M |
+| `exec_simple` | 231 M | 222 M |
+| `enter_rare` | 223 M | 213 M |
+| `call_fn_inner` | 136 M | 127 M |
+
+What the candidates were:
+- malloc and free: no single source. By the first `bare_` frame of each libc sample: `Interp::collect` 82 M, `Heap::collect` 51 M, CSS variables and cascade about 110 M, `env_declare` 50 M (binding vectors of captured environments, which go back to no pool), `call_script` 43 M, `Dom::call` 41 M. Frames, argument vectors and statement stacks are already pooled. Not changed.
+- `get_name`: the sites already use the resolved slots of B1 (`find_name_fast`). The rest is the hop loop over the parent chain and its bounds checks. Not changed.
+- `machine`: the statement loop. `enter`, `resume`, `step_frame` and `act` are inlined into it.
+- `enter_rare`: the entry of a loop, `try`, `switch` or label. Not changed.
+
+Changes (`crates/js/src/eval.rs`, `eval_statements.rs`):
+- No `Rc` clone of the program for each node. `eval_expr_inner`, `link_inner`, `enter`, `exec_simple`, `eval_assign`, `bind_pattern_inner` and `bind_call` read the node with `*self.prog.expr(e)` and keep no handle. `eval_args`, `eval_seq` and the simple parameters of `bind_call` walk their list by index (`list_at`). A clone stays where a loop holds a reference into the program while it calls code.
+- A number literal keeps its value in its site word (`slots.sites`) after its first run, as the value + 1, when it is a whole number below `u32::MAX`. Before, each run read the source text and parsed the digits again.
+- `resume` steps the top statement frame in place (`last_mut`). Before, it popped the frame, stepped it and pushed it back: two copies of an `SFrame` for each loop turn.
+- `truthy` returns a boolean at once, without the out-of-line heap check.
+
+Results (archMachine, base origin/main `59fd099` from `base-build`):
+- `tools/js/instr.sh`, `eval_load` scale 1: `loop` 637.1 M to 518.5 M (-18.6%), `calls` 459.6 M to 396.9 M (-13.6%), `fib` 22.6 M to 20.3 M (-10.1%), `closures` -6.8%, `objects` -6.4%, `webpack` -1.6%.
+- Typing page (`type_load`, the method of `keycost.sh`): `#a1` 332.9 M to 310.0 M for each key (-6.9%); `#f0` 339.6 M to 315.0 M (-7.2%). Load and mount 648.8 M to 613.9 M.
+- Journey, 3 runs of each build one after the other, all passed. CPU of the page thread (sum of `cpu_ms`): main 1,769, 1,690, 1,715 ms; now 1,629, 1,598, 1,620 ms (about -6%). Wall time: main 4,110, 3,918, 4,008 ms; now 3,634, 4,025, 3,918 ms (the network sets most of it). A scan of all output files found neither the email nor the password.
+
+Checks (archMachine):
+- `cargo test --release --workspace --no-fail-fast` on `59fd099`: 56 test binaries, 2,981 passed, 0 failed. After the rebase on `6ad178e` (no change in `crates/js`): `cargo test --release -p bare-js`, 803 passed, 0 failed.
+- `tools/js/cost_matrix.sh`, base `59fd099` from `base-build`: 805 rows (629 rows, then the 176 `bare-stress` rows again after `base-build -p bare-stress`). Mean change: glibc -3.650% (629 rows) and -0.012% (176 rows), jemalloc +0.000% (0 rows measured). Over under one allocator: 0. Over under both: 0. Failed: 0.
+- `tools/js/test262_check.sh`: gate ok. `tools/js/exec_diff.sh`: 79 runs, 0 differences. All 42 other `tools/js/*_check.sh` scripts pass. `intl_check.sh` failed once under load: the Node oracle hit its 2 s timeout on `matrix_en-IN_w3_y1`. It passed when run alone. `parse_check.sh` ran with `ACORN` set to Acorn 8.15.
+
+Next, not done here: a fused compare-and-branch for the test of a `for` loop, and a cheaper hop loop in `find_name_fast`.
+
+Not tested: arjun-e16; the window (`--window`); the journey after the rebase; a split of the libc cost in the new profile; peak RSS of the typing page.
