@@ -5,20 +5,18 @@
 use bare_window::{App, Config, Control, Window};
 
 struct Count {
-    pixels: Vec<u32>,
     frames: u32,
 }
 
 impl App for Count {
-    fn resize(&mut self, w: u32, h: u32) {
-        self.pixels = vec![0xff30_6090; w as usize * h as usize];
-    }
-    fn frame(&mut self, ctl: &mut Control) -> &[u32] {
+    fn resize(&mut self, _: u32, _: u32) {}
+    fn frame(&mut self, ctl: &mut Control, out: &mut [u32]) -> bool {
         self.frames += 1;
         if self.frames == 3 {
             ctl.close();
         }
-        &self.pixels
+        out.fill(0xff30_6090);
+        true
     }
 }
 
@@ -38,7 +36,7 @@ fn opens_draws_three_frames_and_closes() {
             waker.wake();
         }
     });
-    let mut app = Count { pixels: vec![], frames: 0 };
+    let mut app = Count { frames: 0 };
     let stats = window.run(&mut app).expect("the window runs and closes");
     assert_eq!(stats.frames, 3);
     assert_eq!(app.frames, 3);

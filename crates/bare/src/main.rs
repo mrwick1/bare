@@ -278,7 +278,7 @@ fn paint_file(path: &str, out: &str, viewport: (f32, f32)) -> i32 {
 }
 
 /// The page in the window. A new size computes the style again (`@media`, `vw`, `vh`), lays the page out at that size and
-/// makes a new canvas. A frame paints the layout of the last size.
+/// draws into the buffer of the window. A frame paints the layout of the last size.
 struct Page {
     doc: bare_html::dom::Document,
     styles: cascade::Styles,
@@ -286,7 +286,7 @@ struct Page {
     styled: (f32, f32),
     layout: Option<bare_layout::fragment::Layout>,
     painter: bare_paint::Painter,
-    canvas: bare_paint::canvas::Canvas,
+    size: (u32, u32),
     /// For `BARE_WINDOW_STATS`: when the program started, and the time that the first frame was made.
     started: std::time::Instant,
     first_frame: Option<std::time::Duration>,
@@ -300,14 +300,14 @@ impl bare_window::App for Page {
             self.styled = vp;
         }
         self.layout = Some(bare_layout::layout(&self.doc, &self.styles, vp));
-        self.canvas = bare_paint::canvas::Canvas::new(width, height);
+        self.size = (width, height);
     }
 
-    fn frame(&mut self, _: &mut bare_window::Control) -> &[u32] {
+    fn frame(&mut self, _: &mut bare_window::Control, out: &mut [u32]) -> bool {
         let layout = self.layout.as_ref().expect("the window calls `resize` before `frame`");
-        self.painter.paint(&self.doc, &self.styles, layout, &mut self.canvas);
+        self.painter.paint(&self.doc, &self.styles, layout, &mut bare_paint::canvas::Canvas::over(self.size.0, self.size.1, out));
         self.first_frame.get_or_insert_with(|| self.started.elapsed());
-        &self.canvas.pixels
+        true
     }
 }
 
@@ -326,7 +326,7 @@ fn show_window(arg: &str, viewport: (f32, f32)) -> i32 {
         }
     };
     let config = bare_window::Config { title: format!("bare: {arg}"), app_id: "bare".into(), size: (viewport.0 as u32, viewport.1 as u32) };
-    let mut page = Page { doc, styles, styled: viewport, layout: None, painter: bare_paint::Painter::new(), canvas: bare_paint::canvas::Canvas::new(1, 1), started, first_frame: None };
+    let mut page = Page { doc, styles, styled: viewport, layout: None, painter: bare_paint::Painter::new(), size: (1, 1), started, first_frame: None };
     let result = bare_window::Window::open(&config).and_then(|w| w.run(&mut page));
     match result {
         Ok(stats) => {

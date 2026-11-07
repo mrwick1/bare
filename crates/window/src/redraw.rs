@@ -40,6 +40,11 @@ impl Redraw {
         self.configured && self.dirty && !self.frame_pending && buffer_free
     }
 
+    /// The program kept the frame on screen: nothing was committed, and nothing waits for the compositor.
+    pub fn kept(&mut self) {
+        self.dirty = false;
+    }
+
     /// A frame was committed with a frame callback.
     pub fn drawn(&mut self) {
         self.dirty = false;

@@ -167,7 +167,7 @@ impl Browser {
 impl Page {
     /// The size of the window in pixels.
     pub fn size(&self) -> (u32, u32) {
-        (self.canvas.width, self.canvas.height)
+        self.viewport()
     }
 
     /// The number of the document of now. A handle of another number is detached.
@@ -452,10 +452,14 @@ impl Page {
     }
 
     /// The pixels of the frame that the window shows now.
-    pub fn capture(&mut self) -> Canvas {
+    pub fn capture(&mut self) -> Canvas<'static> {
         let (w, h) = self.size();
         let pixels = self.paint().to_vec();
-        Canvas { width: w, height: h, pixels }
+        if self.windowed {
+            // A window page draws into the buffers of the window: it keeps no canvas of its own after the capture.
+            self.canvas = Canvas::new(0, 0);
+        }
+        Canvas::from_vec(w, h, pixels)
     }
 
     /// The console calls, listener errors, page errors and failed requests since the last call. The engine prints none of them.
@@ -536,11 +540,11 @@ impl App for Hosted {
     fn resize(&mut self, w: u32, h: u32) {
         self.page.resize(w, h);
     }
-    fn frame(&mut self, ctl: &mut Control) -> &[u32] {
+    fn frame(&mut self, ctl: &mut Control, out: &mut [u32]) -> bool {
         if let (Some(r), Some(j)) = (self.ready.take(), self.jobs.take()) {
             let _ = r.send(Ok(j));
         }
-        self.page.frame(ctl)
+        self.page.frame(ctl, out)
     }
     fn event(&mut self, event: Event, ctl: &mut Control) {
         self.page.event(event, ctl);

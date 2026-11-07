@@ -4,12 +4,13 @@
 //!
 //! 1. `configure` gives a size. The program draws only after it, and only if the size is new.
 //! 2. A frame is drawn when something changed, the last frame is shown (the `wl_surface.frame` callback came), and a
-//!    buffer is free. The pixels are copied into the free buffer, which is attached, damaged and committed with a new
-//!    frame callback.
+//!    buffer is free. The program draws into the free buffer, which is attached, damaged and committed with a new frame
+//!    callback. A program that keeps its frame (`App::frame` gives `false`) commits nothing.
 //! 3. The buffer stays busy until `wl_buffer.release`. A buffer of a size that is no longer wanted is destroyed only
 //!    when it is free and a new frame needs its slot. Until the new frame is ready, the old one stays on screen.
 //! 4. The loop sleeps in `poll` on the Wayland socket and on the wake pipe. The timeout is the next work of `App::tick` (a page
-//!    timer) or of a key repeat, and none when neither waits. An idle window uses no CPU.
+//!    timer), a key repeat, or the drop of the free buffer `IDLE` after the last frame, and none when none waits. An idle
+//!    window uses no CPU, and holds one buffer: the one that the compositor shows.
 //!
 //! Input: the seat gives a pointer and a keyboard (smithay-client-toolkit, with xkbcommon for the layout). Their handlers
 //! only queue `Event`s in `State::pending`. The loop hands the queue to `App::event` after the Wayland events of the round
@@ -51,7 +52,10 @@ use smithay_client_toolkit::{
 use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
+
+/// An idle window drops its free buffer after this time with no frame. The compositor holds the other one, the frame on screen.
+const IDLE: Duration = Duration::from_secs(1);
 
 /// Counts for a test or a measurement. Nothing here costs time in the loop.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -124,6 +128,10 @@ struct State {
     redraw: Redraw,
     /// The size of the last frame that the program was asked for.
     drawn: (u32, u32),
+    /// The size of the frame that the last commit showed.
+    shown: Option<(u32, u32)>,
+    /// When the last frame was committed, until the free buffer is dropped (`IDLE`).
+    drawn_at: Option<Instant>,
     /// The size the compositor wants now.
     want: (u32, u32),
     exit: bool,
@@ -177,6 +185,8 @@ impl Window {
             bufs: [None, None],
             redraw: Redraw::default(),
             drawn: (0, 0),
+            shown: None,
+            drawn_at: None,
             want: config.size,
             exit: false,
             error: None,
@@ -197,6 +207,7 @@ impl Window {
         while !self.state.exit {
             self.queue.dispatch_pending(&mut self.state).map_err(|e| Error(format!("wayland: {e}")))?;
             self.state.repeat_due();
+            self.state.drop_idle(Instant::now());
             self.state.deliver(app);
             let mut ctl = Control::default();
             let next = app.tick(&mut ctl);
@@ -225,10 +236,8 @@ impl Window {
             // Sleep until an event, the next key repeat when a key is held, or the next work of the app.
             let now = Instant::now();
             app.round(now - woke);
-            let wait = match (self.state.repeat.wait(now), next.map(|t| t.saturating_duration_since(now))) {
-                (Some(a), Some(b)) => Some(a.min(b)),
-                (a, b) => a.or(b),
-            };
+            let idle = self.state.idle_at().map(|t| t.saturating_duration_since(now));
+            let wait = [self.state.repeat.wait(now), next.map(|t| t.saturating_duration_since(now)), idle].into_iter().flatten().min();
             let timeout = wait.map(|d| Timespec { tv_sec: d.as_secs() as _, tv_nsec: d.subsec_nanos() as _ });
             let polled = poll(&mut fds, timeout.as_ref());
             woke = Instant::now();
@@ -293,6 +302,22 @@ impl State {
         }
     }
 
+    /// When the free buffer goes, if one exists and no frame came since the last one.
+    fn idle_at(&self) -> Option<Instant> {
+        self.drawn_at.filter(|_| self.slots.free_made().is_some()).map(|t| t + IDLE)
+    }
+
+    /// Drop the free buffer of an idle window. The memory of the pool goes back to the system; the next frame makes a new one.
+    fn drop_idle(&mut self, now: Instant) {
+        if self.idle_at().is_some_and(|t| t <= now) {
+            while let Some(i) = self.slots.free_made() {
+                self.bufs[i] = None;
+                self.slots.dropped(i);
+            }
+            self.drawn_at = None;
+        }
+    }
+
     /// Do what the app asked for in a call.
     fn obey(&mut self, ctl: Control) {
         if ctl.redraw {
@@ -326,12 +351,6 @@ impl State {
             app.resize(size.0, size.1);
             self.drawn = size;
         }
-        let mut ctl = Control::default();
-        let pixels = app.frame(&mut ctl);
-        if pixels.len() != size.0 as usize * size.1 as usize {
-            self.error = Some(format!("the frame has {} pixels, the window needs {}x{}", pixels.len(), size.0, size.1));
-            return;
-        }
         let i = match self.slots.pick(size) {
             Pick::Reuse(i) => i,
             Pick::Recreate(i) => {
@@ -351,9 +370,18 @@ impl State {
             Pick::Wait => unreachable!("`should_draw` checked that a slot is free"),
         };
         let buf = self.bufs[i].as_mut().expect("the slot has a buffer");
-        // Little-endian `0xAARRGGBB` is the memory order of `wl_shm` XRGB8888.
-        for (dst, px) in buf.pool.mmap().chunks_exact_mut(4).zip(pixels) {
-            dst.copy_from_slice(&px.to_le_bytes());
+        // The program draws straight into the shared memory. The map starts on a page, so it holds whole `u32`s; a little-endian
+        // `0xAARRGGBB` is the memory order of `wl_shm` XRGB8888.
+        let n = size.0 as usize * size.1 as usize;
+        let out = &mut as_pixels(buf.pool.mmap())[..n];
+        let mut ctl = Control::default();
+        if !app.frame(&mut ctl, out) {
+            if self.shown == Some(size) {
+                self.redraw.kept();
+                self.exit |= ctl.close;
+                return;
+            }
+            out.fill(0xffff_ffff);
         }
         let surface = self.window.wl_surface();
         surface.frame(qh, FrameCallbackData(surface.clone()));
@@ -361,6 +389,8 @@ impl State {
         surface.damage_buffer(0, 0, size.0 as i32, size.1 as i32);
         surface.commit();
         self.slots.attached(i);
+        self.shown = Some(size);
+        self.drawn_at = Some(Instant::now());
         self.redraw.drawn();
         self.stats.frames += 1;
         if ctl.redraw {
@@ -372,6 +402,16 @@ impl State {
 
 fn err(what: &str, e: impl std::fmt::Display) -> Error {
     Error(format!("wayland: {what}: {e}"))
+}
+
+const _: () = assert!(cfg!(target_endian = "little"), "the pixels are written as native `u32`s into an XRGB8888 buffer");
+
+/// The bytes of a shared-memory map as pixels.
+fn as_pixels(map: &mut [u8]) -> &mut [u32] {
+    // SAFETY: any 4 bytes are a valid `u32`, and `align_to_mut` gives only aligned whole values in the middle part.
+    let (head, px, _) = unsafe { map.align_to_mut::<u32>() };
+    assert!(head.is_empty(), "a shared-memory map starts on a page");
+    px
 }
 
 fn make_buf(shm: &Shm, (w, h): (u32, u32), slot: usize, qh: &QueueHandle<State>) -> Result<Buf, Box<dyn std::error::Error>> {

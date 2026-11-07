@@ -40,7 +40,7 @@ fn page(html: &str) -> Page {
     Page { doc, styles, layout }
 }
 
-fn render(html: &str) -> Canvas {
+fn render(html: &str) -> Canvas<'static> {
     let p = page(html);
     capture(&p.doc, &p.styles, &p.layout, W, H)
 }
@@ -318,7 +318,7 @@ fn positioned_boxes_and_floats_paint_over_block_backgrounds() {
 }
 
 /// A page with no margin, so that a box is at (0, 0).
-fn bare(body: &str) -> Canvas {
+fn bare(body: &str) -> Canvas<'static> {
     render(&format!("<!doctype html><style>body{{margin:0}}</style>{body}"))
 }
 
