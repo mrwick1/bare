@@ -24,6 +24,7 @@ export CARGO_TARGET_DIR=${1:-${CARGO_TARGET_DIR:-target}}
 fix=$here/../fixtures/js
 pairs='async_check adapter-async-cases.txt
 async_check async-cases.txt
+async_check asyncgen-cases.txt
 async_check interact-cases.txt
 browser_check browser-event-cases.txt
 dom_check dom-cases.txt

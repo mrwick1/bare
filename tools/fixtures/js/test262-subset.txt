@@ -11,3 +11,7 @@ built-ins/Promise
 built-ins/Map
 built-ins/Set
 built-ins/Symbol
+built-ins/AsyncGeneratorFunction
+built-ins/AsyncGeneratorPrototype
+built-ins/AsyncFromSyncIteratorPrototype
+built-ins/AsyncIteratorPrototype

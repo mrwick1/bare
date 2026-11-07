@@ -370,6 +370,7 @@ fn is_reserved_word(n: &str) -> bool {
 
 fn func_mode(is_async: bool, is_gen: bool) -> FuncMode {
     match (is_async, is_gen) {
+        (true, true) => FuncMode::AsyncGen,
         (true, _) => FuncMode::Async,
         (_, true) => FuncMode::Generator,
         _ => FuncMode::Plain,
@@ -2416,9 +2417,6 @@ impl<'a> Parser<'a> {
         }
         let is_gen = self.is(P::Star);
         if is_gen {
-            if is_async {
-                return Err(self.unsupported("async generators are not supported", self.tok.start, self.tok.end));
-            }
             self.advance()?;
         }
         if !is_async && !is_gen && (self.is_word("get") || self.is_word("set")) {
@@ -2553,9 +2551,6 @@ impl<'a> Parser<'a> {
         self.advance()?; // `function`
         let is_gen = self.is(P::Star);
         if is_gen {
-            if is_async {
-                return Err(self.unsupported("async generators are not supported", self.tok.start, self.tok.end));
-            }
             if hanging {
                 return Err(self.syntax("generator declaration is not allowed here", self.tspan()));
             }
@@ -2584,9 +2579,6 @@ impl<'a> Parser<'a> {
     fn parse_function_expr(&mut self, start: u32, is_async: bool) -> R<ExprId> {
         let is_gen = self.is(P::Star);
         if is_gen {
-            if is_async {
-                return Err(self.unsupported("async generators are not supported", self.tok.start, self.tok.end));
-            }
             self.advance()?;
         }
         let mut name = None;
@@ -2876,9 +2868,6 @@ impl<'a> Parser<'a> {
         }
         let is_gen = self.is(P::Star);
         if is_gen {
-            if is_async {
-                return Err(self.unsupported("async generators are not supported", self.tok.start, self.tok.end));
-            }
             self.advance()?;
         }
         let mut accessor = None;

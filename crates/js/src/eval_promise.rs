@@ -70,6 +70,12 @@ enum PFn {
     /// An element function of one combinator call: the record key (never reused) and the item index.
     AggElem { agg: u64, index: u32, reject: bool },
     AggErrCtor,
+    /// A reaction of AsyncGeneratorAwaitReturn for the async generator `g` (`eval_asyncgen.rs`).
+    AgRet { g: ObjId, reject: bool },
+    /// The `unwrap` reaction of the async-from-sync iterator: the iterator result of the awaited value.
+    AfsUnwrap { done: bool },
+    /// The `closeIterator` reaction of the async-from-sync iterator: close the sync iterator and throw again.
+    AfsClose { iter: Value, next: Value },
 }
 
 impl PFn {
@@ -80,6 +86,8 @@ impl PFn {
             PFn::FinallyStepC { holder, .. } => work.push(Value::Object(holder)),
             PFn::CapExec { holder } => work.push(Value::Object(holder)),
             PFn::Thunk { value, .. } => work.push(value),
+            PFn::AgRet { g, .. } => work.push(Value::Object(g)),
+            PFn::AfsClose { iter, next } => work.extend([iter, next]),
             _ => {}
         }
     }
@@ -437,6 +445,9 @@ impl<'p> Interp<'p> {
             PFn::Comb(k) => self.promise_combinator(k, this, args),
             PFn::AggElem { agg, index, reject } => self.agg_elem(agg, index, reject, a0),
             PFn::AggErrCtor => self.agg_error_ctor(args),
+            PFn::AgRet { g, reject } => self.ag_ret_settled(g, reject, a0),
+            PFn::AfsUnwrap { done } => self.sc_iter_result(a0, done),
+            PFn::AfsClose { iter, next } => Err(self.iter_close_throw(&mut it_direct(iter, next), Error::Throw(a0))),
         }
     }
 

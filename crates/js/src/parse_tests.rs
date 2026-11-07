@@ -285,6 +285,7 @@ fn contexts() {
     ok("a: ; a: ;");
     ok("class A { get #a(){} set #a(v){} }");
     ok("async function f(){ await 1; for await (a of b); }");
+    ok("async function* g(){ yield* x; for await (a of b); } x = async function*(){}; ({ async *g(){} }); class A { async *g(){} static async *[k](){} }");
     ok("var await; var yield; var let; var async; var of; var get; var set; var static");
 }
 
@@ -398,8 +399,7 @@ fn regexp_pattern_gate() {
 #[test]
 fn unsupported_syntax_is_a_precise_error() {
     for (s, what) in [
-        ("async function* g(){}", "async generators"), ("x = async function*(){}", "async generators"),
-        ("({ async *g(){} })", "async generators"), ("class A { async *g(){} }", "async generators"), ("class A { static { } }", "static blocks"), ("import a from 'b'", "import"),
+        ("class A { static { } }", "static blocks"), ("import a from 'b'", "import"),
         ("export default 1", "export"), ("import('x')", "import"), ("import.meta", "import"),
     ] {
         let e = err(s);

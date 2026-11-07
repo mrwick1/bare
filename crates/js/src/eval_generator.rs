@@ -88,9 +88,10 @@ impl<'p> Interp<'p> {
         Ok(p)
     }
 
-    /// The constructor `GeneratorFunction` (kind 1) or `AsyncFunction` (kind 2) for the prototype `proto`.
+    /// The constructor `GeneratorFunction` (kind 1), `AsyncFunction` (kind 2) or `AsyncGeneratorFunction` (kind 3) for
+    /// the prototype `proto`.
     fn fn_ctor_of(&mut self, kind: u8, proto: ObjId) -> Res<()> {
-        let c = self.native(Nat::FnCtor(kind), if kind == 1 { "GeneratorFunction" } else { "AsyncFunction" }, 1)?;
+        let c = self.native(Nat::FnCtor(kind), ["", "GeneratorFunction", "AsyncFunction", "AsyncGeneratorFunction"][kind as usize], 1)?;
         h!(self, self.heap.set_prototype_of(c, self.aw.fn_ctor));
         self.def(c, self.k_prototype, Value::Object(proto), false, false, false)?;
         self.def(proto, self.k_constructor, Value::Object(c), false, false, true)
@@ -121,7 +122,7 @@ impl<'p> Interp<'p> {
                 _ => it.gen_intr()?.proto,
             };
             let g = h!(it, it.heap.new_object(Some(proto)));
-            let run = Run { script, fid, strict: it.strict, result: g, call_env: env, cur_env: env, awaiting: None, stack: Vec::new(), slots: Vec::new() };
+            let run = Run { script, fid, strict: it.strict, agen: false, result: g, call_env: env, cur_env: env, awaiting: None, stack: Vec::new(), slots: Vec::new() };
             it.aw.gens.insert(g, Gen::Start(Box::new(run)));
             Ok(Value::Object(g))
         });
@@ -315,10 +316,16 @@ impl<'p> Interp<'p> {
             work.extend([g.fn_proto, g.proto, g.next].map(Value::Object));
         }
         work.extend(self.aw.fn_ctor.into_iter().chain(self.aw.afn_proto).map(Value::Object));
+        if let Some(g) = self.aw.ag_intr {
+            work.extend([g.fn_proto, g.proto, g.aiter].map(Value::Object));
+        }
     }
 
     /// A reached generator object keeps its suspended run.
     fn gen_trace(&self, o: ObjId, work: &mut Vec<Value>, env_work: &mut Vec<u32>) {
+        if !self.aw.agens.is_empty() {
+            self.ag_trace(o, work, env_work);
+        }
         if self.aw.gens.is_empty() {
             return;
         }
@@ -338,6 +345,14 @@ impl<'p> Interp<'p> {
             }
             keep
         });
+        self.aw.agens.retain(|o, g| {
+            let keep = seen.contains(o);
+            if let (false, AgSt::Start(run) | AgSt::Yield(run)) = (keep, &g.st) {
+                frames += run.stack.len();
+                slots += run.slots.len();
+            }
+            keep
+        });
         self.aw.frames -= frames;
         self.aw.slots -= slots;
     }
@@ -350,6 +365,9 @@ impl<'p> Interp<'p> {
             if let Gen::Start(run) | Gen::Yield(run) = g {
                 run_trace(run, out, &mut scratch);
             }
+        }
+        for &o in self.aw.agens.keys() {
+            self.ag_trace(o, out, &mut scratch);
         }
     }
 }

@@ -16,7 +16,8 @@
 //   (`install_boolean`, `install_error_extras`; the stack code is in `eval_stack.rs`). WeakRef and FinalizationRegistry
 //   are in `eval_weak.rs`. `Promise.withResolvers` is in `eval_promise.rs`.
 // - Read by other modules: species (Array, Promise; Map and Set have the getter only), isConcatSpreadable (`concat`),
-//   match, replace, split (String methods, see `eval_builtins.rs`). Identity only: asyncIterator, matchAll, search, unscopables.
+//   match, replace, split (String methods, see `eval_builtins.rs`), asyncIterator (`for await`,
+//   see `eval_asyncgen.rs`). Identity only: matchAll, search, unscopables.
 //
 // Gates and deviations (never silent)
 // - `String.prototype[@@iterator]` and the string iterator are here (by code point). `Array.prototype.values`,
@@ -182,6 +183,9 @@ enum ScFn {
     GenNext,
     GenReturn,
     GenThrow,
+    AgNext,
+    AgReturn,
+    AgThrow,
     BoolToString,
     BoolValueOf,
     ErrCapture,
@@ -685,6 +689,9 @@ impl<'p> Interp<'p> {
             ScFn::GenNext => self.gen_method(this, GenHow::Next(a0)),
             ScFn::GenReturn => self.gen_method(this, GenHow::Return(a0)),
             ScFn::GenThrow => self.gen_method(this, GenHow::Throw(a0)),
+            ScFn::AgNext => self.ag_method(this, GenHow::Next(a0)),
+            ScFn::AgReturn => self.ag_method(this, GenHow::Return(a0)),
+            ScFn::AgThrow => self.ag_method(this, GenHow::Throw(a0)),
             ScFn::ArrayValues | ScFn::ArrayKeys | ScFn::ArrayEntries => {
                 if is_nullish(this) {
                     return Err(self.type_err("Array.prototype.values called on null or undefined"));

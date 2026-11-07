@@ -33,10 +33,11 @@
 //   Async methods of classes, static ones included, keep `this`, the class scope and `%home` in their environments.
 // - Not supported (Unsupported at preflight): `await` in a parameter, a binding pattern, a computed object key, a
 //   `for-in`, an optional chain, `delete`, `++`/`--`, a tagged template (tag or substitutions), the heritage or a computed key
-//   of a class, `super(...)` with an await in its arguments, or `super[await k]`. `for await`,
-//   generators, top-level await and modules stay unsupported as before.
+//   of a class, `super(...)` with an await in its arguments, or `super[await k]`. Top-level
+//   await and modules stay unsupported as before. Generators, async generators and `for await` run here too: see
+//   `eval_generator.rs` and `eval_asyncgen.rs`.
 // - Known deviations (the same as the ordinary evaluator): environments, `arguments` and `this` as in `eval.rs`;
-//   `await` of a thenable whose `then` is read twice is as in `Promise`; there is no `Symbol.asyncIterator`.
+//   `await` of a thenable whose `then` is read twice is as in `Promise`.
 //
 // Budget and caps (all checked BEFORE the thing grows, each with a distinct `LimitKind`)
 // - `AsyncLimits::max_activations` suspended activations, `max_frames` and `max_slots` summed over every
@@ -185,6 +186,20 @@ enum Fr {
     Fin { kind: u8, label: u32, base: u32 },
     /// A `yield*` waits for the next resume. Slot `base` is the inner `Slot::It`.
     Deleg { base: u32 },
+    /// Async generators (`eval_asyncgen.rs`): yield the awaited value.
+    AYield,
+    /// Return the awaited value (`return x`, a `return()` resume, the end of a `yield*` by `return`).
+    ARet,
+    /// An async `yield*` waits for the awaited result of `next` or `throw` (`ret` false) or of `return` (`ret` true).
+    ADeleg { base: u32, ret: bool },
+    /// An async `yield*` closed an inner iterator that has no `throw`: the awaited result of `return`.
+    ADelegClose { base: u32 },
+    /// A `for await` waits for the awaited result of `next`. Slot `base` is the `Slot::It`.
+    AOfN { s: StmtId, lb: Lbl, base: u32 },
+    /// The body of a `for await` runs.
+    AOfB { s: StmtId, lb: Lbl, base: u32 },
+    /// A `for await` left early and waits for the result of `return`. The completion is kept as in `Fin`.
+    AClose { kind: u8, label: u32, base: u32 },
 }
 
 /// The whole state of one running or suspended async function call.
@@ -193,6 +208,8 @@ struct Run {
     script: u32,
     fid: FuncId,
     strict: bool,
+    /// An async generator: `result` is the generator object, not a promise.
+    agen: bool,
     result: ObjId,
     call_env: u32,
     /// The environment at the suspension.
@@ -225,6 +242,11 @@ struct AsyncState {
     fn_ctor: Option<ObjId>,
     /// `%AsyncFunction.prototype%`, made by the first async function.
     afn_proto: Option<ObjId>,
+    /// Async generator objects (`eval_asyncgen.rs`).
+    agens: FxMap<ObjId, AGen>,
+    ag_intr: Option<AgIntr>,
+    /// The preflight scans an async generator: a `return` with a value awaits it.
+    scan_ag: bool,
 }
 
 fn nx(n: Next) -> Res<Step> {
@@ -329,6 +351,7 @@ impl<'p> Interp<'p> {
     fn async_preflight(&mut self, fid: FuncId) -> Res<()> {
         let prog = self.prog.clone();
         let f = *prog.func(fid);
+        self.aw.scan_ag = f.mode == FuncMode::AsyncGen;
         for p in prog.list(f.params) {
             if self.scan_pat(p)? {
                 return Err(unsupported("await in a parameter", f.span));
@@ -570,7 +593,8 @@ impl<'p> Interp<'p> {
         let st = *prog.stmt(s);
         let no = |what: &'static str| Err(unsupported(what, st.span));
         let aw = match st.kind {
-            StmtKind::Expr(e) | StmtKind::Throw(e) | StmtKind::Return(Some(e)) => self.scan_expr(e)?,
+            StmtKind::Expr(e) | StmtKind::Throw(e) => self.scan_expr(e)?,
+            StmtKind::Return(Some(e)) => self.scan_expr(e)? | self.aw.scan_ag,
             StmtKind::Var { decls, .. } => {
                 let mut any = false;
                 for d in prog.list(decls) {
@@ -618,7 +642,7 @@ impl<'p> Interp<'p> {
                 }
                 false
             }
-            StmtKind::ForOf { left, right, body, is_await: false } => {
+            StmtKind::ForOf { left, right, body, is_await } => {
                 let l = match left {
                     ForLeft::Var(v) => self.scan_stmt(v)?,
                     ForLeft::Pat(p) => self.scan_pat(p)?,
@@ -627,7 +651,7 @@ impl<'p> Interp<'p> {
                     return no("await in a for-of binding");
                 }
                 let r = self.scan_expr(right)?;
-                self.scan_stmt(body)? | r
+                self.scan_stmt(body)? | r | is_await
             }
             StmtKind::Try { block, handler, finalizer } => {
                 let mut any = self.scan_stmt(block)?;
@@ -917,7 +941,7 @@ impl<'p> Interp<'p> {
                 return Err(e);
             }
         }
-        let mut run = Run { script, fid, strict: self.strict, result, call_env: env, cur_env: env, awaiting: None, stack: Vec::new(), slots: Vec::new() };
+        let mut run = Run { script, fid, strict: self.strict, agen: false, result, call_env: env, cur_env: env, awaiting: None, stack: Vec::new(), slots: Vec::new() };
         let first = match f.body {
             Body::Expr(e) => self.fpush(&mut run, Fr::BodyExpr).map(|()| Next::Eval(e)),
             Body::Block(l) => self.fpush(&mut run, Fr::Body).and_then(|()| self.list_from(&mut run, l, 0)).map(|s| match s {
@@ -957,6 +981,9 @@ impl<'p> Interp<'p> {
 
     /// What the end of a machine run does: settle the result promise, store the activation or give the error.
     fn async_finish(&mut self, run: Run, r: Res<Out>) -> Res<()> {
+        if run.agen {
+            return self.ag_after(run, r);
+        }
         let result = run.result;
         match r {
             Ok(Out::Done(v)) => {
@@ -1038,6 +1065,10 @@ impl<'p> Interp<'p> {
         match ex.kind {
             ExprKind::Paren(i) => nx(Next::Eval(i)),
             ExprKind::Await(a) | ExprKind::Unary { arg: a, .. } | ExprKind::Yield { arg: Some(a), .. } => self.ask(run, e, 0, base, a),
+            ExprKind::Yield { arg: None, .. } if run.agen => {
+                self.fpush(run, Fr::AYield)?;
+                Ok(Step::Out(Out::Ready(Value::Undefined)))
+            }
             ExprKind::Yield { arg: None, .. } => Ok(Step::Out(Out::Yield(Value::Undefined, false))),
             ExprKind::Binary { left, .. } | ExprKind::Logical { left, .. } => self.ask(run, e, 0, base, left),
             ExprKind::Cond { test, .. } => self.ask(run, e, 0, base, test),
@@ -1260,7 +1291,16 @@ impl<'p> Interp<'p> {
         let b = base as usize;
         match ex.kind {
             ExprKind::Await(_) => self.await_value(v),
+            ExprKind::Yield { delegate: false, .. } if run.agen => {
+                self.fpush(run, Fr::AYield)?;
+                self.await_value(v)
+            }
             ExprKind::Yield { delegate: false, .. } => Ok(Step::Out(Out::Yield(v, false))),
+            ExprKind::Yield { delegate: true, .. } if run.agen => {
+                let it = self.aiter_open(v)?;
+                self.spush(run, Slot::It(it))?;
+                self.adeleg_send(run, base, GenHow::Next(Value::Undefined))
+            }
             ExprKind::Yield { delegate: true, .. } => {
                 let it = self.iter_start_val(v)?;
                 self.spush(run, Slot::It(it))?;
@@ -1755,13 +1795,19 @@ impl<'p> Interp<'p> {
     }
 
     fn of_iter(&mut self, run: &mut Run, s: StmtId, lb: Lbl, base: u32) -> Res<Step> {
-        let StmtKind::ForOf { body, .. } = self.prog.stmt(s).kind else { return Err(unsupported("for-of", Span::default())) };
-        let (target, lexical, _) = self.of_target(s)?;
         let Slot::It(mut it) = run.slots[base as usize] else { return Err(unsupported("for-of", Span::default())) };
         // `iter_next` marks the iteration done after the end or an error, so a throw from here is never closed.
         let step = self.iter_next(&mut it);
         run.slots[base as usize] = Slot::It(it);
         let Some(v) = step? else { return val(Value::Undefined) };
+        self.of_body(run, s, v, Fr::OfB { s, lb, base }, false)
+    }
+
+    /// Bind the value `v` of a for-of iteration and run the body under the frame `fr`. `early`: push `fr` before the
+    /// binding, so a binding error leaves the loop through it.
+    fn of_body(&mut self, run: &mut Run, s: StmtId, v: Value, fr: Fr, early: bool) -> Res<Step> {
+        let StmtKind::ForOf { body, .. } = self.prog.stmt(s).kind else { return Err(unsupported("for-of", Span::default())) };
+        let (target, lexical, _) = self.of_target(s)?;
         let Some(&Fr::OfScope { outer, cur, .. }) = run.stack.last() else { return Err(unsupported("for-of", Span::default())) };
         if let Some(kind) = lexical {
             if cur != NONE {
@@ -1777,11 +1823,14 @@ impl<'p> Interp<'p> {
             }
             self.env = e;
             self.declare_pat_lexical(target, if kind == VarKind::Let { MUT } else { 0 });
-            self.bind_pattern(target, v, Bind::Init)?;
-        } else {
-            self.bind_pattern(target, v, Bind::Assign)?;
         }
-        self.fpush(run, Fr::OfB { s, lb, base })?;
+        if early {
+            self.fpush(run, fr)?;
+        }
+        self.bind_pattern(target, v, if lexical.is_some() { Bind::Init } else { Bind::Assign })?;
+        if !early {
+            self.fpush(run, fr)?;
+        }
         nx(Next::Exec(body))
     }
 
@@ -1821,8 +1870,43 @@ impl<'p> Interp<'p> {
                 r => r,
             },
             Fr::Discard => val(Value::Undefined),
+            Fr::Deleg { base } if run.agen => self.adeleg_send(run, base, GenHow::Next(v)),
             Fr::Deleg { base } => self.deleg_step(run, base, GenHow::Next(v)),
+            Fr::Ret if run.agen => {
+                self.fpush(run, Fr::ARet)?;
+                self.await_value(v)
+            }
             Fr::Ret => nx(Next::Abr(Abr::Return(v))),
+            Fr::AYield => Ok(Step::Out(Out::Yield(v, false))),
+            Fr::ARet => nx(Next::Abr(Abr::Return(v))),
+            Fr::ADeleg { base, ret } => self.adeleg_result(run, base, ret, v),
+            Fr::ADelegClose { base } => {
+                self.strunc(run, base as usize);
+                if !matches!(v, Value::Object(_)) {
+                    let t = self.display(v);
+                    return Err(self.type_err(&format!("Iterator result {t} is not an object")));
+                }
+                Err(self.type_err("The iterator does not provide a 'throw' method"))
+            }
+            Fr::AOfN { s, lb, base } => self.aof_result(run, s, lb, base, v),
+            Fr::AOfB { s, lb, base } => self.aof_next(run, s, lb, base),
+            Fr::AClose { kind, label, base } => {
+                let held = if kind >= 3 { sval(run, base as usize) } else { Value::Undefined };
+                self.strunc(run, base as usize);
+                if kind == 4 {
+                    return nx(Next::Abr(Abr::Throw(held)));
+                }
+                if !matches!(v, Value::Object(_)) {
+                    let t = self.display(v);
+                    return Err(self.type_err(&format!("Iterator result {t} is not an object")));
+                }
+                match kind {
+                    0 => val(Value::Undefined),
+                    1 => nx(Next::Abr(Abr::Break(label))),
+                    2 => nx(Next::Abr(Abr::Continue(label))),
+                    _ => nx(Next::Abr(Abr::Return(held))),
+                }
+            }
             Fr::Thr => nx(Next::Abr(Abr::Throw(v))),
             Fr::List { l, i } => self.list_from(run, l, i as usize),
             Fr::Scope { saved, env } => {
@@ -1886,10 +1970,11 @@ impl<'p> Interp<'p> {
                 let (_, _, right) = self.of_target(s)?;
                 let outer = self.env;
                 let base = run.slots.len() as u32;
-                let it = self.iter_start(v, right)?;
+                let is_await = matches!(self.prog.stmt(s).kind, StmtKind::ForOf { is_await: true, .. });
+                let it = if is_await { self.aiter_open(v)? } else { self.iter_start(v, right)? };
                 self.spush(run, Slot::It(it))?;
                 self.fpush(run, Fr::OfScope { outer, cur: NONE, base })?;
-                self.of_iter(run, s, lb, base)
+                if is_await { self.aof_next(run, s, lb, base) } else { self.of_iter(run, s, lb, base) }
             }
             Fr::OfScope { outer, cur, base } => {
                 self.env = outer;
@@ -2051,6 +2136,31 @@ impl<'p> Interp<'p> {
                     }
                 }
                 Fr::Fin { base, .. } => self.strunc(run, base as usize),
+                Fr::Deleg { base } if run.agen => match abr {
+                    Abr::Throw(v) => return self.adeleg_send(run, base, GenHow::Throw(v)),
+                    Abr::Return(v) => return self.adeleg_send(run, base, GenHow::Return(v)),
+                    _ => self.strunc(run, base as usize),
+                },
+                Fr::ADeleg { base, .. } | Fr::ADelegClose { base } => self.strunc(run, base as usize),
+                Fr::AOfB { s, lb, base } => {
+                    if matches!(abr, Abr::Continue(l) if lb.has(l)) {
+                        return self.aof_next(run, s, lb, base);
+                    }
+                    if let Some(step) = self.aof_close(run, lb, base, abr)? {
+                        return Ok(step);
+                    }
+                    if matches!(abr, Abr::Break(l) if lb.has(l)) {
+                        return val(Value::Undefined);
+                    }
+                }
+                Fr::AClose { kind, base, .. } => {
+                    // The await of the result of `return` failed: a throw that closed the loop wins.
+                    let held = if kind >= 3 { sval(run, base as usize) } else { Value::Undefined };
+                    self.strunc(run, base as usize);
+                    if kind == 4 {
+                        return nx(Next::Abr(Abr::Throw(held)));
+                    }
+                }
                 Fr::Deleg { base } => match abr {
                     Abr::Throw(v) => return self.deleg_step(run, base, GenHow::Throw(v)),
                     Abr::Return(v) => return self.deleg_step(run, base, GenHow::Return(v)),

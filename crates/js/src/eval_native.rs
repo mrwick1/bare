@@ -178,6 +178,7 @@ impl<'p> Interp<'p> {
                 let default = match kind {
                     1 => self.gen_intr()?.fn_proto,
                     2 => self.async_fn_proto()?,
+                    3 => self.ag_intr()?.fn_proto,
                     _ => self.function_proto,
                 };
                 let f = self.dynamic_function(kind, args)?;

@@ -5,8 +5,8 @@
 //   ACORN=file:///path/to/acorn.mjs node tools/js/parse_oracle.mjs dump FILE
 //   ACORN=... node tools/js/parse_oracle.mjs cases FILE      (cases separated by lines `%%`)
 //
-// A case whose first line is `//! unsupported` is valid ES2022 that bare-js reports as unsupported (async
-// generators, modules, static blocks). The oracle prints `unsupported` for it (Acorn rejects module syntax in a script, so the mark is the claim).
+// A case whose first line is `//! unsupported` is valid ES2022 that bare-js reports as unsupported (modules,
+// static blocks). The oracle prints `unsupported` for it (Acorn rejects module syntax in a script, so the mark is the claim).
 import { readFileSync } from 'node:fs';
 
 const acorn = await (process.env.ACORN ? import(process.env.ACORN) : import('acorn'));

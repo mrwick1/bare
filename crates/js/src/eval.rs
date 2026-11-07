@@ -14,7 +14,7 @@
 //!
 //! Unsupported is found BEFORE anything runs. `Interp::new` walks every reachable node. Syntax that is not
 //! implemented gives [`Error::Unsupported`] with its span: async functions and `await`, tagged
-//! templates, `super` outside a class element, `new.target` in a field initializer, `with`, `for await`, and `await` in `switch`, `for-in`, optional chains, `delete`, `++`/`--`, computed keys and binding patterns.
+//! templates, `super` outside a class element, `new.target` in a field initializer, `with`, and `await` in `switch`, `for-in`, optional chains, `delete`, `++`/`--`, computed keys and binding patterns.
 //! Async functions and arrows run in a bounded continuation machine: see `eval_async.rs`. A regexp literal is compiled by `Interp::new`;
 //! an invalid pattern, lookbehind, named groups or the flags `u`, `v`, `d` are `Unsupported` there (see `eval_builtins.rs`).
 //! A missing builtin (`WeakRef`, ...) is an ordinary `ReferenceError` at run time, as in a bare engine.
@@ -1436,7 +1436,7 @@ impl<'p> Interp<'p> {
                 self.w_stmt(body, fs, ac, true)?;
                 self.sc_end(sc);
             }
-            StmtKind::ForIn { left, right, body } | StmtKind::ForOf { left, right, body, is_await: false } => {
+            StmtKind::ForIn { left, right, body } | StmtKind::ForOf { left, right, body, .. } => {
                 // The right side runs before the iteration environment exists.
                 self.fl |= FL_EAGER;
                 self.w_expr(right, fs, ac)?;
@@ -1448,7 +1448,6 @@ impl<'p> Interp<'p> {
                 self.w_stmt(body, fs, ac, true)?;
                 self.sc_end(sc);
             }
-            StmtKind::ForOf { .. } => return Err(unsupported("for await", st.span)),
             StmtKind::While { test, body } | StmtKind::DoWhile { body, test } => {
                 self.fl |= FL_EAGER;
                 self.w_expr(test, fs, ac)?;
@@ -1942,7 +1941,9 @@ impl<'p> Interp<'p> {
             h!(self, self.heap.reserve_props(o, 3));
         }
         h!(self, self.heap.init_function(o, (self.k_length, len as f64), (self.k_name, nstr)));
-        if f.is_generator() {
+        if f.mode == FuncMode::AsyncGen {
+            self.ag_function(o)?;
+        } else if f.is_generator() {
             self.gen_function(o)?;
         } else if f.kind == FuncKind::Normal && !f.is_async() {
             // Most functions never use their prototype (98.6% on the staging login), so the object waits.
@@ -2149,6 +2150,7 @@ impl<'p> Interp<'p> {
             FuncMode::Plain | FuncMode::Env => {}
             FuncMode::Async => return self.call_async((script, fid), fobj, cenv, self_binding, this, args),
             FuncMode::Generator => return self.call_generator((script, fid), fobj, cenv, self_binding, this, args),
+            FuncMode::AsyncGen => return self.call_agen((script, fid), fobj, cenv, self_binding, this, args),
         }
         let (saved_env, saved_strict) = (self.env, self.strict);
         // The callee runs on its own script code. The caller's code comes back on every exit.
@@ -3646,6 +3648,7 @@ include!("eval_classes.rs");
 include!("eval_wrapper.rs");
 include!("eval_async.rs");
 include!("eval_generator.rs");
+include!("eval_asyncgen.rs");
 include!("eval_clone.rs");
 include!("eval_ic.rs");
 include!("eval_bc.rs");
