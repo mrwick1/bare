@@ -413,6 +413,12 @@ pub(crate) fn sized_with(cx: &mut Cx, node: NodeId, space: Space, forced: Option
     if matches!(control, Some(crate::controls::Control::Field | crate::controls::Control::Label | crate::controls::Control::Select)) {
         done.baseline = Some(bp.top + crate::controls::baseline(&cx.tree, node, content_height));
     }
+    // A checkbox or a radio sits on its bottom border edge; a button with no line in it, on the bottom of its content box.
+    match control {
+        Some(crate::controls::Control::Check { .. }) => done.baseline = Some(bp.top + content_height + bp.bottom),
+        Some(crate::controls::Control::Button) if done.baseline.is_none() => done.baseline = Some(bp.top + content_height),
+        _ => {}
+    }
     done.through = kids.open && bottom_open && content_height == 0.0 && bp.vertical() == 0.0;
     if kids.open && !done.through {
         // The margins inside reached the top, but the block has a height: they stay at the top, and the bottom is closed.

@@ -340,7 +340,8 @@ pub(crate) fn layout(cx: &mut Cx, node: NodeId, space: Space, bp: Sides) -> Kids
     for (i, it) in items.iter_mut().enumerate() {
         let (x, y) = if row { (it.at.0 + it.margin(0), it.at.1 + it.margin(2)) } else { (it.at.1 + it.margin(2), it.at.0 + it.margin(0)) };
         if first.contains(&i) && (by_baseline.is_none() && i == first.start || by_baseline == Some(i - first.start)) {
-            baseline = it.baseline.map(|b| y + b);
+            // An item with no baseline gives its bottom border edge (CSS Flexbox 1, section 8.5).
+            baseline = Some(y + it.baseline.unwrap_or(if row { it.cross } else { it.main + it.bp_main }));
         }
         let base = if in_place { it.from } else { cx.out.len() };
         if !in_place {

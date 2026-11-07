@@ -1137,12 +1137,10 @@ fn layout_inner(cx: &mut Cx, node: NodeId, space: Space, bp: Sides, plan: &Plan)
                 } else {
                     fragment::shift(&mut cx.out[..l.end], l.from, cx0, cy0 + dy);
                 }
-                if r0 == 0 && table_baseline.is_none() && cell.col == 0 {
-                    table_baseline = Some(match (baseline_of[ci as usize], l.base) {
-                        (Some(_), _) => y[0] + above[0],
-                        (None, Some(b)) => y[r0] + dy + b,
-                        (None, None) => y[r0] + dy + natural,
-                    });
+                // The baseline of the table is that of the first row with a cell on a baseline (Chrome). With none, the
+                // table has no baseline, and an inline table sits on its bottom edge.
+                if table_baseline.is_none() && baseline_of[ci as usize].is_some() {
+                    table_baseline = Some(y[r0] + above[r0]);
                 }
             }
         }

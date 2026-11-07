@@ -1,0 +1,175 @@
+var st = document.createElement('style'); st.textContent = "html{overflow:hidden}*{font-family:'Noto Sans Mono' !important}body{margin:0}.b{display:inline-block;width:20px;background:#ccc}span[id],b[id]{background:#eee}"; document.head.appendChild(st);
+var $ = function (i) { return document.getElementById(i) };
+var Y = function (ids) { return ids.split(' ').map(function (id) { var r = $(id).getBoundingClientRect(); return [r.y, r.height].map(function (v) { return Math.round(v * 100) / 100 }).join(',') }).join(' ') };
+=== keywords-same-font
+@html <div id=d>a<span id=sub style="vertical-align:sub">b</span><span id=sup style="vertical-align:super">c</span><span id=mid style="vertical-align:middle">d</span><span id=tt style="vertical-align:text-top">e</span><span id=tb style="vertical-align:text-bottom">f</span><span id=l5 style="vertical-align:5px">g</span><span id=p50 style="vertical-align:50%">h</span><span id=base>i</span></div>
+(function () { return Y('d sub sup mid tt tb l5 p50 base') })
+=== keywords-small-children-in-a-big-parent
+@html <div id=d style="font-size:32px">a<span id=s2 style="font-size:10px;vertical-align:sub">b</span><span id=u2 style="font-size:10px;vertical-align:super">c</span><span id=m2 style="font-size:10px;vertical-align:middle">d</span><span id=t2 style="font-size:10px;vertical-align:text-top">e</span><span id=b2 style="font-size:10px;vertical-align:text-bottom">f</span></div>
+(function () { return Y('d s2 u2 m2 t2 b2') })
+=== keywords-big-children-in-a-small-parent
+@html <div id=d style="font-size:15px">a<span id=s style="font-size:25px;vertical-align:sub">b</span></div><div id=e style="font-size:15px">a<span id=u style="font-size:25px;vertical-align:super">b</span></div><div id=f style="font-size:15px">a<span id=m style="font-size:25px;vertical-align:middle">b</span></div><div id=g style="font-size:15px">a<span id=t style="font-size:25px;vertical-align:text-top">b</span></div><div id=h style="font-size:15px">a<span id=x style="font-size:25px;vertical-align:text-bottom">b</span></div>
+(function () { return Y('d s e u f m g t h x') })
+=== text-top-and-line-height-of-the-parent
+@html <div id=a style="line-height:40px">a<span id=at style="vertical-align:text-top">b</span></div><div id=b style="line-height:40px">a<span id=bb style="vertical-align:text-bottom">b</span></div>
+(function () { return Y('a at b bb') })
+=== text-top-and-line-height-of-the-child
+@html <div id=a>a<span id=at style="vertical-align:text-top;line-height:40px">b</span></div><div id=b>a<span id=bb style="vertical-align:text-bottom;line-height:40px">b</span></div>
+(function () { return Y('a at b bb') })
+=== middle-and-line-height
+@html <div id=a>a<span id=am style="vertical-align:middle;line-height:40px">b</span></div><div id=b style="line-height:40px">a<span id=bm style="vertical-align:middle">b</span></div>
+(function () { return Y('a am b bm') })
+=== percent-of-the-line-height
+@html <div id=a style="line-height:33px">a<span id=ap style="vertical-align:50%">b</span></div><div id=b>a<span id=bp style="vertical-align:50%;line-height:60px">b</span></div><div id=c>a<span id=cp style="vertical-align:-100%">b</span></div>
+(function () { return Y('a ap b bp c cp') })
+=== sub-with-its-own-font-and-line-height
+@html <div id=a>a<span id=as style="vertical-align:sub;line-height:60px;font-size:30px">b</span></div>
+(function () { return Y('a as') })
+=== numeric-line-height-with-a-fraction
+@html <div id=a style="font-size:13.3333px;line-height:1.5">a<span id=as style="vertical-align:super">b</span></div><div id=b style="font-size:13px;line-height:21px">a</div><div id=c style="line-height:25px">a</div><div id=e style="font-size:11px;line-height:normal">a<span id=eb style="vertical-align:3em">b</span></div>
+(function () { return Y('a as b c e eb') })
+=== lengths-up-and-down
+@html <div id=a>x<span id=ap style="vertical-align:5px">b</span></div><div id=b>x<span id=bp style="vertical-align:-10px">b</span></div><div id=c>x<span id=cp style="vertical-align:2em">b</span></div><div id=e>x<span id=ep style="vertical-align:0">b</span></div><div id=f>x<span id=fp style="vertical-align:1.5em;font-size:20px">b</span></div>
+(function () { return Y('a ap b bp c cp e ep f fp') })
+=== line-height-one-strut
+@html <div id=a style="line-height:1">a<span id=as style="vertical-align:super;line-height:1">b</span></div><div id=b style="line-height:1">a<span id=bb style="font-size:30px;line-height:1">b</span></div><div id=c style="line-height:0">a<span id=cb style="font-size:30px">b</span></div>
+(function () { return Y('a as b bb c cb') })
+=== top-and-bottom-big-font
+@html <div id=a><span id=aa>a</span><span id=at style="vertical-align:top;font-size:30px">b</span></div><div id=b><span id=ba>a</span><span id=bb style="vertical-align:bottom;font-size:30px">b</span></div>
+(function () { return Y('a aa at b ba bb') })
+=== top-and-bottom-big-line-height
+@html <div id=a><span id=aa>a</span><span id=at style="vertical-align:top;line-height:80px">b</span>c</div><div id=b><span id=ba>a</span><span id=bt style="vertical-align:top;line-height:80px">b</span><span id=bb style="vertical-align:bottom;line-height:60px">b</span>c</div>
+(function () { return Y('a aa at b ba bt bb') })
+=== top-and-bottom-small-in-a-tall-line
+@html <div id=a style="line-height:50px"><span id=aa>a</span><span id=at style="vertical-align:top;font-size:10px;line-height:normal">b</span><span id=ab style="vertical-align:bottom;font-size:10px;line-height:normal">c</span></div>
+(function () { return Y('a aa at ab') })
+=== two-tops-and-a-bottom
+@html <div id=a><span id=aa>a</span><span id=t1 style="vertical-align:top;line-height:60px">b</span><span id=t2 style="vertical-align:top;line-height:30px">b</span><span id=bt style="vertical-align:bottom;line-height:70px">c</span></div><div id=b><span id=ba>a</span><span id=b1 style="vertical-align:bottom;line-height:70px">c</span><span id=b2 style="vertical-align:top;line-height:60px">b</span></div>
+(function () { return Y('a aa t1 t2 bt b ba b1 b2') })
+=== top-box-with-a-bottom-child
+@html <div id=a><span id=aa>a</span><span id=as style="vertical-align:top;line-height:50px"><span id=ac style="font-size:30px;vertical-align:bottom">b</span></span></div>
+(function () { return Y('a aa as ac') })
+=== top-and-bottom-with-padding-and-border
+@html <div id=a><span id=aa>a</span><span id=at style="vertical-align:top;padding:7px 0 3px;border-top:2px solid;background:#ccc">b</span></div><div id=b><span id=ba>a</span><span id=bb style="vertical-align:bottom;padding:7px 0 3px;border-bottom:2px solid;background:#ccc">b</span></div>
+(function () { return Y('a aa at b ba bb') })
+=== nested-shifts
+@html <div id=a>a<span id=as style="vertical-align:super"><span id=ac style="font-size:30px;vertical-align:sub">b</span></span></div><div id=b>a<span id=bs style="vertical-align:5px;font-size:30px"><span id=bc style="vertical-align:5px;font-size:10px">b</span></span></div>
+(function () { return Y('a as ac b bs bc') })
+=== three-levels-of-shifts
+@html <div id=a>a<span id=s1 style="vertical-align:super;font-size:20px"><span id=s2 style="vertical-align:super;font-size:14px"><span id=s3 style="vertical-align:sub;font-size:10px">b</span></span></span></div>
+(function () { return Y('a s1 s2 s3') })
+=== shifted-box-with-text-around-it
+@html <div id=a>aa<span id=s1 style="vertical-align:super;font-size:10px">bb</span>cc<span id=s2 style="vertical-align:sub;font-size:10px">dd</span>ee</div>
+(function () { return Y('a s1 s2') })
+=== shifted-box-over-two-lines
+@html <div id=a style="width:100px">aaaa <span id=s style="vertical-align:super;font-size:20px;background:#ccc">bbbb cccc dddd</span> <span id=e>e</span></div>
+(function () { return Y('a s e') })
+=== shifted-box-over-two-lines-with-a-bottom-box
+@html <div id=a style="width:100px">aaaa <span id=s style="vertical-align:bottom;line-height:40px;background:#ccc">bbbb cccc dddd</span> <span id=e>e</span></div>
+(function () { return Y('a s e') })
+=== shifted-text-moves-the-line-height-of-each-line
+@html <div id=a style="width:100px">aaaa <span id=s style="vertical-align:20px">bbbb</span> cccc <span id=t style="vertical-align:-20px">dddd</span> eeee</div>
+(function () { return Y('a s t') })
+=== image-heights-on-the-baseline
+@html <div id=a>a<img id=i1 style="width:20px;height:10px">b<img id=i2 style="width:20px;height:30px">c<img id=i3 style="width:20px;height:80px"></div>
+(function () { return Y('a i1 i2 i3') })
+=== image-keywords
+@html <div id=a>a<img id=i style="width:20px;height:50px;vertical-align:top"></div><div id=b>a<img id=j style="width:20px;height:50px;vertical-align:bottom"></div><div id=c>a<img id=k style="width:20px;height:50px;vertical-align:middle"></div><div id=e>a<img id=l style="width:20px;height:50px;vertical-align:text-top"></div><div id=f>a<img id=m style="width:20px;height:50px;vertical-align:text-bottom"></div><div id=g>a<img id=n style="width:20px;height:50px;vertical-align:sub"></div><div id=h>a<img id=o style="width:20px;height:50px;vertical-align:super"></div><div id=p>a<img id=q style="width:20px;height:50px;vertical-align:50%"></div><div id=r>a<img id=s style="width:20px;height:50px;vertical-align:-10px"></div><div id=t>a<img id=u style="width:20px;height:50px;vertical-align:20px"></div>
+(function () { return Y('a i b j c k e l f m g n h o p q r s t u') })
+=== image-with-margins
+@html <div id=a>a<img id=i style="width:20px;height:30px;margin:7px 0 11px"></div><div id=b>a<img id=j style="width:20px;height:30px;margin:7px 0 11px;vertical-align:middle"></div><div id=c>a<img id=k style="width:20px;height:30px;margin:7px 0 11px;vertical-align:top"></div>
+(function () { return Y('a i b j c k') })
+=== image-in-a-small-font
+@html <div id=a style="font-size:10px">a<img id=i style="width:20px;height:5px"></div><div id=b style="font-size:40px;line-height:1">a<img id=j style="width:20px;height:5px"></div>
+(function () { return Y('a i b j') })
+=== image-and-text-in-a-bigger-span
+@html <div id=a>a<span id=s style="font-size:30px">b<img id=i style="width:20px;height:10px">c</span></div>
+(function () { return Y('a s i') })
+=== inline-block-with-text
+@html <div id=a>a<span id=i class=b style="height:50px">x</span></div><div id=b>a<span id=j class=b style="height:50px">x<br>y</span></div><div id=c>a<span id=k class=b style="height:30px">x<br>y</span></div>
+(function () { return Y('a i b j c k') })
+=== inline-block-without-text
+@html <div id=a>a<span id=i class=b style="height:50px"></span></div><div id=b>a<span id=j class=b style="height:50px;margin-bottom:9px"></span></div><div id=c>a<span id=k class=b style="height:50px;padding:3px 0 4px;border-bottom:2px solid"></span></div>
+(function () { return Y('a i b j c k') })
+=== inline-block-overflow-hidden
+@html <div id=a>a<span id=i class=b style="height:30px;overflow:hidden">x<br>y</span></div><div id=b>a<span id=j class=b style="height:30px;overflow:auto">x<br>y</span></div><div id=c>a<span id=k class=b style="height:30px;overflow:scroll">x</span></div><div id=e>a<span id=l class=b style="height:30px;overflow:clip">x<br>y</span></div><div id=f>a<span id=m class=b style="height:30px;overflow-x:hidden">x<br>y</span></div>
+(function () { return Y('a i b j c k e l f m') })
+=== inline-block-with-padding-and-border
+@html <div id=a>a<span id=i class=b style="padding:5px 0 8px;border:3px solid">x</span></div><div id=b>a<span id=j class=b style="padding:5px 0 8px;border:3px solid;margin:4px 0 6px">x<br>y</span></div>
+(function () { return Y('a i b j') })
+=== inline-block-with-own-line-height-and-font
+@html <div id=a>a<span id=i class=b style="font-size:30px;line-height:50px">x</span></div><div id=b>a<span id=j class=b style="font-size:10px">x</span></div><div id=c style="line-height:40px">a<span id=k class=b style="line-height:normal">x</span></div>
+(function () { return Y('a i b j c k') })
+=== inline-block-keywords
+@html <div id=a>a<span id=i class=b style="height:40px;vertical-align:top">x</span></div><div id=b>a<span id=j class=b style="height:40px;vertical-align:bottom">x</span></div><div id=c>a<span id=k class=b style="height:40px;vertical-align:middle">x</span></div><div id=e>a<span id=l class=b style="height:40px;vertical-align:text-top">x</span></div><div id=f>a<span id=m class=b style="height:40px;vertical-align:text-bottom">x</span></div><div id=g>a<span id=n class=b style="height:40px;vertical-align:sub">x</span></div><div id=h>a<span id=o class=b style="height:40px;vertical-align:super">x</span></div>
+(function () { return Y('a i b j c k e l f m g n h o') })
+=== inline-block-percent-uses-its-own-line-height
+@html <div id=a>a<span id=i class=b style="height:40px;vertical-align:50%;line-height:60px">x</span></div><div id=b style="line-height:60px">a<span id=j class=b style="height:40px;vertical-align:50%;line-height:20px">x</span></div>
+(function () { return Y('a i b j') })
+=== inline-block-in-a-shifted-span
+@html <div id=a>a<span id=s style="vertical-align:super;font-size:10px"><span id=i class=b style="height:20px">x</span></span></div><div id=b>a<span id=t style="vertical-align:top"><span id=j class=b style="height:60px"></span></span></div>
+(function () { return Y('a s i b t j') })
+=== nested-inline-blocks
+@html <div id=a>a<span id=i class=b style="width:60px;height:60px"><span id=j class=b style="height:20px">y</span>z</span></div>
+(function () { return Y('a i j') })
+=== empty-inline-block-in-an-empty-line
+@html <div id=a><span id=i class=b style="height:20px"></span></div><div id=b><span id=j class=b style="height:0"></span></div>
+(function () { return Y('a i b j') })
+=== inline-block-with-a-float-and-text-inside
+@html <div id=a>a<span id=i class=b style="width:80px;height:50px"><span id=f style="float:left;width:10px;height:10px"></span>x</span></div>
+(function () { return Y('a i f') })
+=== inline-block-with-block-children
+@html <div id=a>a<span id=i class=b style="width:60px"><div id=p>x</div><div id=q style="height:15px"></div></span></div><div id=b>a<span id=j class=b style="width:60px"><div id=r style="height:15px"></div><div id=s>x</div></span></div>
+(function () { return Y('a i p q b j r s') })
+=== inline-flex-baseline
+@html <div id=a>a<span id=i class=b style="display:inline-flex;height:50px">x</span></div><div id=b>a<span id=j class=b style="display:inline-flex;height:50px;align-items:flex-end">x</span></div><div id=c>a<span id=k class=b style="display:inline-flex;height:50px"></span></div><div id=e>a<span id=l class=b style="display:inline-flex;height:50px;flex-direction:column"><b id=m style="height:10px"></b><b id=n>x</b></span></div>
+(function () { return Y('a i b j c k e l m n') })
+=== inline-flex-items-with-different-baselines
+@html <div id=a>a<span id=i class=b style="display:inline-flex;width:80px;align-items:baseline"><b id=p style="font-size:30px">x</b><b id=q>y</b></span></div><div id=b>a<span id=j class=b style="display:inline-flex;width:80px"><b id=r style="font-size:30px">x</b><b id=s>y</b></span></div><div id=c>a<span id=k class=b style="display:inline-flex;width:80px;align-items:center"><b id=t style="font-size:30px">x</b><b id=u>y</b></span></div>
+(function () { return Y('a i p q b j r s c k t u') })
+=== inline-flex-with-an-image-and-overflow
+@html <div id=a>a<span id=i class=b style="display:inline-flex;height:50px;overflow:hidden">x</span></div><div id=b>a<span id=j class=b style="display:inline-flex;height:50px"><img id=k style="width:10px;height:40px"></span></div>
+(function () { return Y('a i b j k') })
+=== inline-grid-baseline
+@html <div id=a>a<span id=i class=b style="display:inline-grid;height:50px">x</span></div><div id=b>a<span id=j class=b style="display:inline-grid;height:50px;align-items:end">x</span></div><div id=c>a<span id=k class=b style="display:inline-grid;height:50px"></span></div><div id=e>a<span id=l class=b style="display:inline-grid;grid-template-columns:10px 10px;width:20px"><b id=m style="font-size:30px">x</b><b id=n>y</b></span></div><div id=f>a<span id=o class=b style="display:inline-grid;height:50px;overflow:hidden">x</span></div>
+(function () { return Y('a i b j c k e l m n f o') })
+=== inline-table-baseline
+@css table{display:inline-table;border-spacing:0}td{padding:0;height:40px}
+@html <div id=a>a<table><tr><td id=c style="vertical-align:top">x</td></tr></table></div><div id=b>a<table><tr><td style="vertical-align:middle">x</td></tr></table></div><div id=d>a<table><tr><td style="vertical-align:baseline">x</td></tr></table></div><div id=e>a<table><tr><td style="vertical-align:top">x</td><td style="vertical-align:baseline">y</td></tr></table></div><div id=f>a<table><tr><td style="vertical-align:middle">x</td><td style="vertical-align:baseline">y</td></tr></table></div><div id=g>a<table><tr><td style="vertical-align:top;height:10px">x</td></tr><tr><td style="vertical-align:baseline">y</td></tr></table></div><div id=h>a<table><tr><td style="vertical-align:top"></td></tr></table></div><div id=i>a<table><tr><td style="vertical-align:baseline"></td></tr></table></div>
+(function () { return Y('a b d e f g h i') })
+=== button-and-text
+@html <div id=a>a<button id=i>Go</button>b</div><div id=b style="font-size:30px">a<button id=j>Go</button>b</div><div id=c>a<button id=k style="height:60px">Go</button></div><div id=e>a<button id=l style="font-size:30px">Go</button></div>
+(function () { return Y('a i b j c k e l') })
+=== button-with-content
+@html <div id=a>a<button id=i><span id=s style="font-size:30px">x</span></button></div><div id=b>a<button id=j style="line-height:40px">x</button></div><div id=c>a<button id=k><div id=m style="height:30px"></div></button></div><div id=e>a<button id=l>x<br>y</button></div>
+(function () { return Y('a i s b j c k m e l') })
+=== input-and-text
+@html <div id=a>a<input id=i>b</div><div id=b style="font-size:30px">a<input id=j>b</div><div id=c>a<input id=k style="height:50px">b</div><div id=e>a<input id=l type=submit>b</div><div id=f style="font-size:30px">a<input id=m style="font-size:10px">b</div>
+(function () { return Y('a i b j c k e l f m') })
+=== select-textarea-checkbox-radio
+@html <div id=a>a<select id=i><option>x</option></select>b</div><div id=b>a<textarea id=j></textarea>b</div><div id=c>a<input id=k type=checkbox>b</div><div id=e>a<input id=l type=radio>b</div><div id=f>a<input id=m type=checkbox style="vertical-align:middle">b</div><div id=g>a<input id=n type=radio style="vertical-align:text-bottom">b</div>
+(function () { return Y('a i b j c k e l f m g n') })
+=== controls-with-vertical-align
+@html <div id=a>a<input id=i style="vertical-align:middle">b</div><div id=b>a<button id=j style="vertical-align:top">Go</button>b</div><div id=c>a<input id=k style="vertical-align:bottom;height:50px">b</div><div id=e>a<button id=l style="vertical-align:super">Go</button></div><div id=f>a<select id=m style="vertical-align:text-top"><option>x</option></select></div>
+(function () { return Y('a i b j c k e l f m') })
+=== controls-in-a-big-line
+@html <div id=a style="line-height:40px">a<input id=i>b<button id=j>Go</button></div><div id=b style="line-height:2">a<input id=k>b</div>
+(function () { return Y('a i j b k') })
+=== line-height-normal-and-numeric-lines
+@html <div id=a style="line-height:normal">a<span id=s style="line-height:2;font-size:20px">b</span></div><div id=b style="line-height:2">a<span id=t style="line-height:normal;font-size:20px">b</span></div><div id=c style="line-height:1.2">a<span id=u style="font-size:30px">b</span></div>
+(function () { return Y('a s b t c u') })
+=== two-lines-with-different-shifts
+@html <div id=a style="width:60px">aaaa<br><span id=s style="vertical-align:30px">b</span><br>cccc<span id=t style="vertical-align:-30px">d</span></div>
+(function () { return Y('a s t') })
+=== atomic-after-a-break-in-a-shifted-box
+@html <div id=a style="width:100px">aaaa <span id=s style="vertical-align:10px;font-size:20px;background:#ccc">bb <img id=i style="width:20px;height:30px"> cc</span></div>
+(function () { return Y('a s i') })
+=== image-in-a-paragraph-of-lines
+@html <div id=a style="width:100px">aaaa <img id=i style="width:20px;height:40px"> bbbb <img id=j style="width:20px;height:10px"> cccc</div>
+(function () { return Y('a i j') })
+=== list-item-with-an-image
+@html <ul style="margin:0;padding:0;list-style:none"><li id=a><img id=i style="width:20px;height:40px">x</li></ul>
+(function () { return Y('a i') })
+=== table-cell-baseline-with-shifted-text
+@html <table style="border-spacing:0"><tr><td id=a style="padding:0">a<span style="vertical-align:20px">b</span></td><td id=b style="padding:0;vertical-align:baseline">x<span style="font-size:30px">y</span></td></tr></table>
+(function () { return Y('a b') })

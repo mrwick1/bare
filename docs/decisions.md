@@ -84,6 +84,9 @@ Chrome, Firefox, WebKit, Servo and Ladybird all store a box tree (Chrome: `Layou
 - No copy of the text: a text fragment is a byte range in the DOM text (`crates/layout/src/text.rs`). Chrome and Firefox keep a second copy of each paragraph, with the spaces collapsed.
 - Culled inline boxes: an inline box with nothing to paint, no margin, border or padding, and the font of its parent makes no fragment, as in Chrome. Without this, 10,000 nested `<span>` over 10,000 lines made 100,000,000 fragments.
 - The open inline boxes are a stack, and each entry keeps the most that it and the boxes around it reach above and below the baseline. A new line gets the height of the boxes that it carries over in one step, not one step for each box.
+- `vertical-align` costs nothing on a line that does not use it. A box keeps its shift and the `top` or `bottom` box that it is in (`root`), and a line gets an `Item::Place` where the text changes place. A line with no change has no item, so the fast path stores nothing, and the `Item` stays 20 bytes. The `top` and `bottom` boxes are placed once, when the line is written, so nothing is laid out twice.
+- Lengths use the rounding of Chrome (1/64 px for the line height, a whole pixel for the half-leading above) so the lines are as tall as in Chrome. `round` and `floor` of `f32` are casts (`font::round`, `font::floor`): the methods call the C library on a build without SSE4.1.
+- A culled inline box does not work out its reach. It compares its font and line height with its parent: the same inputs give the same reach.
 
 ## Floats
 
