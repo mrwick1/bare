@@ -1,0 +1,24 @@
+grid-place-items-center	95.2,39,9.6,22
+grid-align-items-end	0,78,9.6,22
+grid-justify-items-end	190.4,0,9.6,22
+grid-justify-items-center	95.2,0,9.6,22
+grid-justify-items-start	0,0,9.6,22
+grid-stretch-text-align-center	95.2,0,9.6,22
+grid-center-with-text-align-end	76,39,48,22
+grid-center-wraps-when-too-wide	0,17,28.8,66
+grid-center-mixed-inline	90.4,5.7,19.2,88.7
+grid-tracks-bigger-than-text	100.8,19,19.2,22
+grid-run-between-items	45.2,14,114.4,72 45.2,14,9.6,22 45.2,64,9.6,22
+grid-center-with-padding	95.2,39,9.6,22
+grid-baseline-and-center	41,0,113.8,41 41,0,18,41
+grid-self-center-does-not-apply-to-run	0,0,200,100 0,0,9.6,22
+flex-align-items-center	0,39,9.6,22
+flex-align-items-end	0,78,9.6,22
+flex-column-align-items-center	95.2,0,9.6,22
+flex-column-align-items-end	190.4,0,9.6,22
+flex-center-all	90.4,39,19.2,22
+flex-column-center-wraps	0,0,28.8,66
+flex-column-center-text-align-end	76,0,48,22
+flex-run-between-items	0,20,38.4,60 0,20,9.6,22 28.8,39,9.6,22
+flex-column-stretch	95.2,0,9.6,22
+inline-grid-baseline-of-an-aligned-text-item	0,50 0,50 50,50 50,50 100,50 100,50 128,22

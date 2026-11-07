@@ -248,16 +248,25 @@ impl<'a> Pass<'a> {
     /// The x of byte `o` of `text` on the line of `f`, whose text starts at byte `s`: the widths of the letters that are shown, a run
     /// of collapsing spaces being one letter.
     fn x_at(&self, t: NodeId, text: &str, f: &Fragment, s: usize, o: usize, m: Metrics) -> f32 {
-        let collapse = self.doc().flat_parent(t).and_then(|p| self.g.styles.style(p)).is_some_and(|st| WhiteSpace::of(st).collapse);
-        let (mut units, mut prev) = (0, false);
+        let style = self.doc().flat_parent(t).and_then(|p| self.g.styles.style(p));
+        let collapse = style.is_some_and(|st| WhiteSpace::of(st).collapse);
+        let spacing = style.map_or((0.0, 0.0), |s| font::spacing(true, s));
+        let (mut units, mut prev, mut extra) = (0, false, 0.0);
         for c in text[s..o].chars() {
             let sp = is_space(c);
             if !(collapse && sp && prev) {
-                units += font::width_of(c);
+                let w = font::width_of(c);
+                units += w;
+                if w != 0 {
+                    extra += spacing.0;
+                }
+                if c == ' ' || c == '\u{a0}' {
+                    extra += spacing.1;
+                }
             }
             prev = sp;
         }
-        f.rect.x + self.g.shift(self.s, t).0 + m.px(units)
+        f.rect.x + self.g.shift(self.s, t).0 + m.px(units) + extra
     }
 
     /// The rectangles of a part of a Text node: bytes `a..b` of its text.

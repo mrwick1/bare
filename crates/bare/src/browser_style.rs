@@ -488,11 +488,17 @@ pub(crate) fn install(d: &Dom, it: &mut Interp<'_>) -> R<()> {
 
     let mut props: Vec<&'static str> = Property::ALL.iter().map(|p| p.name()).collect();
     props.extend(SHORTHANDS);
+    let mut nm = String::new();
     for (i, css) in props.iter().enumerate() {
         let keys = keys_of(css);
         let (gid, sid) = (d.handlers.borrow().len() as u32, d.handlers.borrow().len() as u32 + 1);
-        let gf = d.add_fn(it, named_get, &format!("get {}", keys[0]), 0, false)?;
-        let sf = d.add_fn(it, named_set, &format!("set {}", keys[0]), 1, false)?;
+        // One buffer for both names (a `format!` for each of the 250 names cost more than the functions).
+        nm.clear();
+        nm.push_str("get ");
+        nm.push_str(&keys[0]);
+        let gf = d.add_fn(it, named_get, &nm, 0, false)?;
+        nm.replace_range(..3, "set");
+        let sf = d.add_fn(it, named_set, &nm, 1, false)?;
         d.style.fns.borrow_mut().extend([(gid, i), (sid, i)]);
         for k in &keys {
             let key = d.key(it, k)?;

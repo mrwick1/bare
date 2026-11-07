@@ -360,6 +360,8 @@ pub(crate) struct Input {
     pub edited: Option<String>,
     /// A user typed in it (the dirty value flag of the standard, for `minlength`).
     pub typed: bool,
+    /// The `indeterminate` property of a checkbox.
+    pub indeterminate: bool,
 }
 
 #[derive(Default)]
@@ -1252,6 +1254,7 @@ pub(crate) static DEFS: &[Def] = &[
     Def { on: &[Document], name: "defaultView", len: 0, kind: G(nd::default_view) },
     Def { on: &[Input], name: "value", len: 0, kind: A(nd::input_value, nd::set_input_value) },
     Def { on: &[Input], name: "checked", len: 0, kind: A(nd::input_checked, nd::set_input_checked) },
+    Def { on: &[Input], name: "indeterminate", len: 0, kind: A(nd::input_indeterminate, nd::set_input_indeterminate) },
     Def { on: &[Input], name: "selectionStart", len: 0, kind: A(sel::selection_start, sel::set_selection_start) },
     Def { on: &[Input], name: "selectionEnd", len: 0, kind: A(sel::selection_end, sel::set_selection_end) },
     Def { on: &[Input], name: "selectionDirection", len: 0, kind: A(sel::selection_direction, sel::set_selection_direction) },
@@ -1268,6 +1271,7 @@ pub(crate) static DEFS: &[Def] = &[
     Def { on: &[Document], name: "scripts", len: 0, kind: G(crate::browser_platform_query::scripts) },
     Def { on: &[Input], name: "name", len: 0, kind: A(fm::input_name, fm::set_input_name) },
     Def { on: &[Input], name: "disabled", len: 0, kind: A(fm::input_disabled, fm::set_input_disabled) },
+    Def { on: &[Input], name: "readOnly", len: 0, kind: A(fm::input_read_only, fm::set_input_read_only) },
     Def { on: &[Input], name: "form", len: 0, kind: G(fm::input_form) },
     Def { on: &[Input], name: "formNoValidate", len: 0, kind: A(fm::input_form_no_validate, fm::set_input_form_no_validate) },
     Def { on: &[Button], name: "name", len: 0, kind: A(fm::button_name, fm::set_button_name) },

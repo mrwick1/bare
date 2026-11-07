@@ -602,7 +602,20 @@ impl Dom {
         if reset_caret {
             i.sel = Some(crate::browser_selection::END);
         }
+        drop(st);
+        self.sync_ui(n);
         Ok(())
+    }
+
+    /// Give the document the state of the control `n` that selectors read (`Document::ui`).
+    pub(crate) fn sync_ui(&self, n: NodeId) {
+        use bare_html::dom::{UI_CHECKED, UI_CHECKED_DIRTY, UI_INDETERMINATE, UI_VALUE_DIRTY, UI_VALUE_SET};
+        let bits = self.st.borrow().inputs.get(&n).map_or(0, |i| {
+            i.checked.map_or(0, |c| UI_CHECKED_DIRTY | if c { UI_CHECKED } else { 0 })
+                | i.value.as_ref().map_or(0, |v| UI_VALUE_DIRTY | if v.is_empty() { 0 } else { UI_VALUE_SET })
+                | if i.indeterminate { UI_INDETERMINATE } else { 0 }
+        });
+        self.doc.borrow_mut().set_ui(n, bits);
     }
 
     /// The test driver sets native input state (no event). `text` for text-like inputs, `checked` for checkbox and radio.
@@ -629,6 +642,7 @@ impl Dom {
                 return Err(Error::Unsupported(unsupported("test driver: set_checked needs a checkbox or radio")));
             }
             self.st.borrow_mut().inputs.entry(n).or_default().checked = Some(c);
+            self.sync_ui(n);
         }
         Ok(())
     }
@@ -1299,6 +1313,8 @@ pub(crate) fn clone_tree(d: &Dom, it: &mut Interp<'_>, n: NodeId, deep: bool, im
                 i.sel = None; // the cloning steps copy value and checkedness, not the selection
                 i.sc_pending = false; // the clone has no task of its own
                 st.input_bytes += i.value.as_ref().map_or(0, String::len);
+                let u = doc.ui(src);
+                doc.set_ui(c, u);
                 st.inputs.insert(c, i);
             }
             match new_parent {
@@ -1723,9 +1739,24 @@ pub(crate) fn set_input_checked(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[
     if b && input_kind(&d.doc.borrow(), n) == "radio" {
         for o in d.radio_group(it, n)? {
             d.st.borrow_mut().inputs.entry(o).or_default().checked = Some(false);
+            d.sync_ui(o);
         }
     }
     d.st.borrow_mut().inputs.entry(n).or_default().checked = Some(b);
+    d.sync_ui(n);
+    Ok(Value::Undefined)
+}
+
+pub(crate) fn input_indeterminate(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
+    let n = input_el(d, it, this)?;
+    Ok(Value::Bool(d.st.borrow().inputs.get(&n).is_some_and(|i| i.indeterminate)))
+}
+
+pub(crate) fn set_input_indeterminate(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
+    let n = input_el(d, it, this)?;
+    let b = it.to_js_bool(arg(a, 0))?;
+    d.st.borrow_mut().inputs.entry(n).or_default().indeterminate = b;
+    d.sync_ui(n);
     Ok(Value::Undefined)
 }
 

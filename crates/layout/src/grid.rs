@@ -1263,7 +1263,14 @@ pub(crate) fn layout(cx: &mut Cx, node: NodeId, space: Space, bp: Sides) -> Kids
         l.frag = cx.out.len();
         let style = tree.style(it.node);
         if let Some((first, last)) = it.run {
-            let lines = inline::lines(cx, node, first, last, area_w, (0.0, 0.0));
+            // An anonymous item aligns like an element: a `justify-items` that is not `stretch` gives it the width that fits.
+            let mut w = area_w;
+            if justify_items != Align::Stretch {
+                let (min, max) = intrinsic::lines(cx, first, last);
+                w = max.min(min.max(area_w));
+                l.x += (area_w - w) * shift_of(justify_items);
+            }
+            let lines = inline::lines(cx, node, first, last, w, (0.0, 0.0));
             l.h = lines.height;
             l.base = lines.baseline.filter(|_| lines.any);
         } else {
@@ -1387,7 +1394,7 @@ pub(crate) fn layout(cx: &mut Cx, node: NodeId, space: Space, bp: Sides) -> Kids
             cx.out[l.frag].rect.x = bp.left + l.x;
             cx.out[l.frag].rect.y = bp.top + y;
         } else {
-            y += off;
+            y += off + if l.kind == 0 { (area_h - l.h) * shift_of(l.how) } else { 0.0 };
             shift_range(&mut cx.out, l.frag, l.end as usize, bp.left + l.x, bp.top + y);
         }
         let key = (r0 as u32, l.kind == 0);
@@ -1398,7 +1405,9 @@ pub(crate) fn layout(cx: &mut Cx, node: NodeId, space: Space, bp: Sides) -> Kids
     // The shared baseline of the item, else its first baseline, read from a few fragments.
     let baseline = best.map(|(_, _, i, y)| {
         let (it, l) = (&g.items[i], &lays[i]);
-        y + if l.kind != 0 { l.asc - l.mt } else { block::first_baseline(cx, it.node, it.run.is_none(), &cx.out, l.frag, l.end as usize, l.base, l.h, block::PEEK).unwrap_or(0.0) }
+        let first = block::first_baseline(cx, it.node, it.run.is_none(), &cx.out, l.frag, l.end as usize, l.base, l.h, block::PEEK).unwrap_or(0.0);
+        // The fragments of a run are at their place already, with `y`.
+        if l.kind != 0 { y + l.asc - l.mt } else if it.run.is_some() { first } else { y + first }
     });
 
     // 5. The live fragments go to the page, in the order of the items. The first layout of an item that was laid out again is left.
@@ -1612,6 +1621,21 @@ mod tests {
         // The spaces between items are not items.
         let html = "<div id=a></div> <div id=b></div>";
         assert_eq!(grid(css, html, "b").x, 108.0);
+    }
+
+    #[test]
+    fn a_run_of_text_takes_the_alignment_of_the_container() {
+        // Chrome 155 (`tools/fixtures/ui/anonalign-cases.txt`): the letter (9.6 by 22) of a 200 by 100 grid at 8, 8.
+        let at = |css: &str, text: &str| {
+            let out = dump(&format!("<div id=g>{text}</div>"), &format!("#g {{ display: grid; width: 200px; height: 100px; {css} }}"));
+            out.lines().find(|l| l.contains('"')).unwrap().trim().to_string()
+        };
+        assert_eq!(at("place-items: center", "S"), "\"S\" 103.2,47 9.6x22");
+        assert_eq!(at("align-items: end", "S"), "\"S\" 8,86 9.6x22");
+        assert_eq!(at("justify-items: end", "S"), "\"S\" 198.4,8 9.6x22");
+        assert_eq!(at("justify-items: start", "S"), "\"S\" 8,8 9.6x22");
+        // The width that fits is 48 here, so `text-align: right` has no room to move the text.
+        assert_eq!(at("place-items: center; text-align: right", "Sx yz"), "\"Sx yz\" 84,47 48x22");
     }
 
     #[test]

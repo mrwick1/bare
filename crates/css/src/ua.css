@@ -65,7 +65,7 @@ mark { background-color: yellow; color: black }
    draws (an author border or background makes paint draw the box from CSS instead). The sizes of the text lines are in
    `layout/src/controls.rs`. */
 button, input, select, textarea {
-  margin: 0; font-size: 13.3333px; font-weight: 400; font-style: normal; line-height: normal; text-transform: none;
+  margin: 0; font-size: 13.3333px; font-weight: 400; font-style: normal; line-height: normal; text-transform: none; letter-spacing: normal; word-spacing: normal;
   text-align: start; color: black; white-space: normal; box-sizing: content-box; vertical-align: baseline;
 }
 input { padding: 1px 2px; border: 2px inset #767676; background-color: white; appearance: textfield }

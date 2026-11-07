@@ -95,6 +95,8 @@ properties! {
     FontWeight => "font-weight",
     FontStyle => "font-style",
     LineHeight => "line-height",
+    LetterSpacing => "letter-spacing",
+    WordSpacing => "word-spacing",
     Width => "width",
     Height => "height",
     MinWidth => "min-width",
@@ -1012,6 +1014,12 @@ fn longhand(property: Property, part: Part) -> Option<Value> {
             Part::Keyword(K::Normal) => Some(Value::Keyword(K::Normal)),
             Part::Number { value, .. } if value >= 0.0 => Some(Value::Number(value)),
             _ => positive(part).map(Value::Length),
+        },
+        // `normal` is no extra space. A length may be negative. A percent is not valid.
+        LetterSpacing | WordSpacing => match part {
+            Part::Keyword(K::Normal) => Some(Value::Keyword(K::Normal)),
+            Part::Percent(_) => Option::None,
+            _ => length(part).map(Value::Length),
         },
         Width | Height => match part {
             Part::Keyword(K::Auto) => Some(Value::Keyword(K::Auto)),

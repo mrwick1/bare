@@ -216,6 +216,34 @@ struct Aligned {
     shift: f32,
 }
 
+/// The pieces of text that has `letter-spacing` or `word-spacing`, given to the breaker (the loop of `lines`, with the spacing added to
+/// the widths). Not inline: it is for the rare page, and the loop of `lines` must stay as small as it is.
+#[cold]
+#[inline(never)]
+fn spaced_pieces(b: &mut Breaker, node: NodeId, text: &str, (ws, transform, metrics): (WhiteSpace, Transform, Metrics), sp: (f32, f32), flow: &mut Flow) {
+    for piece in text::pieces(text, ws, transform, flow) {
+        match piece {
+            Piece::Word { start, end, width } => b.add_text(node, start, end, metrics.px(width) + font::extra(&text[start as usize..end as usize], sp)),
+            Piece::Space { start, end, width } if ws.wrap => {
+                b.commit();
+                b.add_space(node, start, end, metrics.px(width) + font::extra_spaces(width, sp));
+            }
+            Piece::Space { start, end, width } => b.add_text(node, start, end, metrics.px(width) + font::extra_spaces(width, sp)),
+            Piece::Tab { at } => {
+                let stop = metrics.px(8 * LETTER) + 8.0 * (sp.0 + sp.1);
+                let x = b.x + b.pending_w;
+                b.add_text(node, at, at + 1, if stop > 0.0 { ((x / stop).floor() + 1.0) * stop - x } else { 0.0 });
+            }
+            Piece::Newline { at } => {
+                b.add_text(node, at, at, 0.0);
+                b.commit();
+                b.content = true;
+                b.finish();
+            }
+        }
+    }
+}
+
 /// The line breaker. JS: an object with the state of the line that is being filled.
 struct Breaker<'c, 'a> {
     cx: &'c mut Cx<'a>,
@@ -386,6 +414,13 @@ pub fn lines(cx: &mut Cx, block: NodeId, first: NodeId, last: NodeId, width: f32
                 let style = tree.style(node);
                 let (ws, transform, metrics) = (WhiteSpace::of(style), Transform::of(style), Metrics::of(style));
                 let text = tree.doc.text(span);
+                if tree.styles.spaced() {
+                    let sp = font::spacing(true, style);
+                    if sp != (0.0, 0.0) {
+                        spaced_pieces(&mut b, node, text, (ws, transform, metrics), sp, &mut flow);
+                        continue;
+                    }
+                }
                 for piece in text::pieces(text, ws, transform, &mut flow) {
                     match piece {
                         Piece::Word { start, end, width } => b.add_text(node, start, end, metrics.px(width)),
@@ -492,6 +527,7 @@ pub fn lines(cx: &mut Cx, block: NodeId, first: NodeId, last: NodeId, width: f32
 
 impl Breaker<'_, '_> {
     /// Add text to the unit that waits. Text of the same node right after it joins the same item.
+    #[inline(always)]
     fn add_text(&mut self, node: NodeId, start: u32, end: u32, w: f32) {
         self.pending_content = true;
         if let Some(Item::Text { node: n, end: e, w: pw, .. }) = self.pending.last_mut()
@@ -508,6 +544,7 @@ impl Breaker<'_, '_> {
 
     /// A space that wraps: it goes on the line right away (the unit before it is already there), and a line may break
     /// after it. If the line ends here, the space hangs: it does not count.
+    #[inline(always)]
     fn add_space(&mut self, node: NodeId, start: u32, end: u32, w: f32) {
         if let Some(Item::Text { node: n, end: e, w: pw, .. }) = self.line.last_mut()
             && *n == node
@@ -985,6 +1022,19 @@ mod tests {
         // A letter is 9.6px. "aaa bbb" is 67.2px, and " ccc" does not fit in 100px.
         let out = inside("<div style='width:100px'>aaa bbb ccc</div>", "");
         assert_eq!(out, "div 8,8 100x44\n\"aaa bbb\" 8,8 67.2x22\n\"ccc\" 8,30 28.8x22\n");
+    }
+
+    #[test]
+    fn letter_spacing_comes_after_each_letter_and_word_spacing_after_each_space() {
+        // Chrome 155 (`tools/fixtures/ui/letterspace-cases.txt`): "abcd" at 2px is 4 * 11.6 = 46.4 wide, the last letter included.
+        let width = |css: &str, text: &str| rect(&format!("<span id=s style='display:inline-block;{css}'>{text}</span>"), "", "s").w;
+        assert!((width("letter-spacing:2px", "abcd") - 46.4).abs() < 0.01);
+        assert!((width("letter-spacing:-1px", "abcd") - 34.4).abs() < 0.01);
+        assert!((width("word-spacing:10px", "a b  c") - 68.0).abs() < 0.01);
+        assert!((width("letter-spacing:1px;word-spacing:5px", "ab cd ef") - 94.8).abs() < 0.01);
+        // An accent that sits on a letter is no letter, and a no-break space is a space.
+        assert!((width("letter-spacing:2px", "e\u{301}e") - 23.2).abs() < 0.01);
+        assert!((width("letter-spacing:2px;word-spacing:3px", "a\u{a0}b") - 37.8).abs() < 0.01);
     }
 
     #[test]

@@ -539,6 +539,20 @@ fn svg_shapes_have_chromes_pixels() {
     assert_eq!(c.pixel(10, 20), WHITE);
 }
 
+/// `letter-spacing` and `word-spacing` move the letters as in Chrome 155 (`fixtures/spacing.html` differs from Chrome only in glyph shading).
+#[test]
+fn spacing_moves_the_letters() {
+    // "II" at 16px: the second letter is 9.6 px after the first. With 10px of spacing it is 19.6 px after it.
+    let right = |css: &str, text: &str| ink(&bare(&format!("<p style='margin:0;{css}'>{text}</p>")), 0, 0, 300, 22, WHITE).expect("ink").2 as i32;
+    let plain = right("", "II");
+    assert_eq!(right("letter-spacing:10px", "II") - plain, 10);
+    assert_eq!(right("letter-spacing:-3px", "II") - plain, -3);
+    // The spacing after the last letter is room, not ink.
+    assert_eq!(right("letter-spacing:10px", "I") - right("", "I"), 0);
+    assert_eq!(right("word-spacing:20px", "I I") - right("", "I I"), 20);
+    assert_eq!(right("letter-spacing:5px;word-spacing:20px", "I I") - right("", "I I"), 5 + 5 + 20 + 0);
+}
+
 #[test]
 fn an_svg_draws_only_inside_its_box_and_hidden_ones_draw_nothing() {
     let c = bare("<svg width=10 height=10><rect x=-5 y=-5 width=30 height=30 fill=red /></svg><svg width=10 height=10 style='visibility:hidden'><rect width=10 height=10 fill=red /></svg><svg width=10 height=10 style='display:none'><rect width=10 height=10 fill=red /></svg>");
@@ -555,4 +569,36 @@ fn the_svg_fixture() {
     assert!(ink(&c, 8, 8, 32, 32, WHITE).is_some());
     // Against Chrome 155 at the same font: 1,010 of 320,000 pixels differ, 2 by more than 64 levels (the edge of a curve).
     assert_eq!(c.hash(), 0x733e_1aff_a0f8_b851);
+}
+
+#[test]
+fn a_rounded_dashed_or_dotted_border_follows_the_curve_in_dashes() {
+    // The dashes of a round border, counted along the middle line of the border. Chrome 155 draws 13 dashes on a circle of 80 px with a
+    // 6 px border, 14 round dots on a 8 px one, and the same on the corners of a rounded rectangle.
+    let runs = |style: &str, border: u32| {
+        let c = bare(&format!("<div style='width:80px;height:80px;box-sizing:border-box;border:{border}px {style} #000;border-radius:50%'></div>"));
+        let r = 40.0 - border as f32 / 2.0;
+        let on: Vec<bool> = (0..720).map(|k| {
+            let a = k as f32 * std::f32::consts::PI / 360.0;
+            c.pixel((40.0 + r * a.cos()) as u32, (40.0 + r * a.sin()) as u32) != WHITE
+        }).collect();
+        (on.iter().filter(|&&p| p).count(), (0..720).filter(|&k| on[k] && !on[(k + 719) % 720]).count())
+    };
+    let (ink, dashes) = runs("dashed", 6);
+    assert_eq!(dashes, 13);
+    assert!(ink > 720 / 2 && ink < 720 * 3 / 4, "two thirds of the line has ink: {ink}");
+    assert_eq!(runs("dotted", 8).1, 14);
+    assert_eq!(runs("solid", 6), (720, 0), "a solid border has no gap");
+    // A rounded rectangle: the straight sides have dashes too, and a corner is not a straight cut.
+    let c = bare("<div style='width:120px;height:80px;box-sizing:border-box;border:4px dashed #000;border-radius:30px'></div>");
+    let top: Vec<bool> = (30..90).map(|x| c.pixel(x, 2) != WHITE).collect();
+    assert!(top.contains(&true) && top.contains(&false), "dashes along the top");
+}
+
+#[test]
+fn the_round_borders_fixture() {
+    let c = render(fixture!("roundborders"));
+    // Against Chrome 155 (a picture of 400 by 800): 4,694 of 320,000 pixels differ, 1,239 by more than 64 levels (the ends of the dashes). Before the
+    // dashes followed the curve: 8,042 and 5,752.
+    assert_eq!(c.hash(), 0x84b5_d476_67ed_0167);
 }

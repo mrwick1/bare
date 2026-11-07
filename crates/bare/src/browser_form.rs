@@ -326,6 +326,7 @@ macro_rules! bool_attr {
 }
 
 bool_attr!(input_disabled, set_input_disabled, "input", "disabled");
+bool_attr!(input_read_only, set_input_read_only, "input", "readonly");
 bool_attr!(button_disabled, set_button_disabled, "button", "disabled");
 bool_attr!(input_form_no_validate, set_input_form_no_validate, "input", "formnovalidate");
 bool_attr!(button_form_no_validate, set_button_form_no_validate, "button", "formnovalidate");

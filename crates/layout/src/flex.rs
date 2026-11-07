@@ -418,21 +418,22 @@ fn flex(items: &mut [Item], size: f32, gap: f32) {
     let mut violations = vec![0.0f32; items.len()];
     while items.iter().any(|it| !it.frozen) {
         let mut rest = free(items);
-        let factors: f32 = items.iter().filter(|it| !it.frozen).map(|it| if grow { it.grow } else { it.shrink }).sum();
+        // The sum is an f64: factors near the range of f32 (`flex: 1e39` is 3.4e38) add up past it, as in Chrome.
+        let factors: f64 = items.iter().filter(|it| !it.frozen).map(|it| f64::from(if grow { it.grow } else { it.shrink })).sum();
         // Factors that sum to less than 1 take only that part of the space.
-        if factors < 1.0 && (initial * factors).abs() < rest.abs() {
-            rest = initial * factors;
+        if factors < 1.0 && (f64::from(initial) * factors).abs() < f64::from(rest.abs()) {
+            rest = (f64::from(initial) * factors) as f32;
         }
-        let scaled: f32 = items.iter().filter(|it| !it.frozen).map(|it| it.shrink * it.base).sum();
+        let scaled: f64 = items.iter().filter(|it| !it.frozen).map(|it| f64::from(it.shrink) * f64::from(it.base)).sum();
         let mut total = 0.0;
         for (it, v) in items.iter_mut().zip(&mut violations) {
             if it.frozen {
                 continue;
             }
             let target = if grow {
-                it.base + rest * it.grow / factors
+                it.base + (f64::from(rest) * f64::from(it.grow) / factors) as f32
             } else if scaled > 0.0 {
-                it.base - rest.abs() * it.shrink * it.base / scaled
+                it.base - (f64::from(rest.abs()) * f64::from(it.shrink) * f64::from(it.base) / scaled) as f32
             } else {
                 it.base
             };
@@ -442,7 +443,7 @@ fn flex(items: &mut [Item], size: f32, gap: f32) {
             it.main = clamped;
         }
         for (it, &v) in items.iter_mut().zip(&violations) {
-            if !it.frozen && (total.abs() < 0.001 || (total > 0.0 && v > 0.0) || (total < 0.0 && v < 0.0)) {
+            if !it.frozen && (total.abs() < 0.001 || total.is_nan() || (total > 0.0 && v > 0.0) || (total < 0.0 && v < 0.0)) {
                 it.frozen = true;
             }
         }
@@ -501,7 +502,12 @@ fn item(cx: &mut Cx, container: NodeId, node: NodeId, last: Option<NodeId>, spac
         if row {
             (it.base, it.min) = (max, min);
         } else {
-            lay(cx, container, &mut it, space, space.width, None);
+            // A column item that is not stretched is as wide as its text, as for an element.
+            if it.align != K::Stretch {
+                it.width = max.min(min.max(space.width));
+            }
+            let w = it.width;
+            lay(cx, container, &mut it, space, w, None);
             (it.base, it.min) = (it.content, it.content);
         }
         it.hypo = it.base.max(it.min);
@@ -682,7 +688,7 @@ pub(crate) fn sizes(cx: &mut Cx, node: NodeId) -> (f32, f32) {
 
 #[cfg(test)]
 mod tests {
-    use crate::block::tests::rect;
+    use crate::block::tests::{dump, rect};
 
     const CSS: &str = "body { line-height: 20px } .f { display: flex; width: 400px }";
 
@@ -724,6 +730,38 @@ mod tests {
         assert!(close(rect(html, CSS, "a").w, 350.0 / 3.0));
         assert!(close(rect(html, CSS, "b").x, 8.0 + 350.0 / 3.0));
         assert_eq!(rect(html, CSS, "c").x, 8.0 + 350.0);
+    }
+
+    #[test]
+    fn a_flex_factor_over_the_range_of_f32_ends_and_shares_as_chrome() {
+        // `1e39` is 3.4e38 (the largest f32). Their sum is over the range: the shares must still be exact, and the loop must end.
+        // Chrome 155 (`tools/fixtures/ui/flexhuge-cases.txt`): 150 and 150; 280.8 and 19.2 (the minimum width of "bb"); 100 each.
+        let run = |html: &'static str, id: &'static str| {
+            let (tx, rx) = std::sync::mpsc::channel();
+            std::thread::spawn(move || tx.send(rect(html, CSS, id)).ok());
+            rx.recv_timeout(std::time::Duration::from_secs(5)).expect("layout did not end")
+        };
+        let shrink = "<div class=f style='width:300px'><p id=a style='flex:0 1e39 100px;margin:0'>aa</p><p id=b style='flex:0 1e39 400px;margin:0'>bb</p></div>";
+        assert!(close(run(shrink, "a").w, 60.0) && close(run(shrink, "b").w, 240.0));
+        let two = "<div class=f style='width:300px'><p id=a style='flex:1e39 0 0;margin:0'>aa</p><p id=b style='flex:1e39 0 0;margin:0'>bb</p></div>";
+        assert!(close(run(two, "a").w, 150.0) && close(run(two, "b").w, 150.0));
+        let one = "<div class=f style='width:300px'><p id=a style='flex:1e39 0 0;margin:0'>aa</p><p id=b style='flex:1 0 0;margin:0'>bb</p></div>";
+        assert!(close(run(one, "b").w, 19.2) && close(run(one, "a").w, 300.0 - 19.2));
+        let three = "<div class=f style='width:300px'><p id=a style='flex:3.4e38 0 0;margin:0'>a</p><p id=b style='flex:3.4e38 0 0;margin:0'>b</p><p id=c style='flex:3.4e38 0 0;margin:0'>c</p></div>";
+        assert!(close(run(three, "a").w, 100.0) && close(run(three, "c").x, 8.0 + 200.0));
+    }
+
+    #[test]
+    fn a_column_run_of_text_is_as_wide_as_its_text_unless_it_stretches() {
+        // Chrome 155 (`tools/fixtures/ui/anonalign-cases.txt`): the letter (9.6 wide) of a 200 wide column is centered, or at the end.
+        let at = |css: &str| {
+            let out = dump("<div id=g>S</div>", &format!("#g {{ display: flex; flex-direction: column; width: 200px; height: 100px; {css} }}"));
+            out.lines().find(|l| l.contains('"')).unwrap().trim().to_string()
+        };
+        assert_eq!(at("align-items: center"), "\"S\" 103.2,8 9.6x22");
+        assert_eq!(at("align-items: flex-end"), "\"S\" 198.4,8 9.6x22");
+        assert_eq!(at("align-items: flex-start; text-align: right"), "\"S\" 8,8 9.6x22");
+        assert_eq!(at("text-align: right"), "\"S\" 198.4,8 9.6x22");
     }
 
     #[test]

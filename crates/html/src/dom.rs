@@ -242,6 +242,8 @@ pub struct Document {
     // The custom element state of the elements that have one, by `NodeId::index`: the number of the definition, or `PRECUSTOMIZED`, or `FAILED`. See `is_defined`.
     states: HashMap<u32, Vec<Box<str>>, BuildHasherDefault<Fnv>>,
     // The custom states (`ElementInternals.states`) of the elements that have any, in the order they were added. See `has_state`.
+    ui: HashMap<u32, u8, BuildHasherDefault<Fnv>>,
+    // The form state of the controls that a host keeps outside the tree, by `NodeId::index`: `UI_*` bits. See `set_ui`.
 }
 
 /// A change of the tree that `Document::set_watcher` reports, before the document answers a later read. `prev` and `next` are the
@@ -344,6 +346,7 @@ impl Document {
             watcher: None,
             custom: HashMap::default(),
             states: HashMap::default(),
+            ui: HashMap::default(),
             on_name: false,
         };
         // The order matters: it must match `Atom::ID` and `Atom::CLASS`.
@@ -433,6 +436,24 @@ impl Document {
             self.states.insert(el.index() as u32, states);
         }
         self.revision += 1;
+    }
+
+    /// Set the form state of `el` that the host keeps outside the tree (`UI_*` bits; 0 clears it). Selectors read it for `:checked`,
+    /// `:placeholder-shown` and `:indeterminate`. It moves `revision`, as a change of the tree would, when the bits change.
+    pub fn set_ui(&mut self, el: NodeId, bits: u8) {
+        let old = if bits == 0 { self.ui.remove(&(el.index() as u32)) } else { self.ui.insert(el.index() as u32, bits) };
+        if old.unwrap_or(0) != bits {
+            self.revision += 1;
+        }
+    }
+
+    /// The `UI_*` bits of `el`, see `set_ui`.
+    pub fn ui(&self, el: NodeId) -> u8 {
+        // A page with no form state pays one `is_empty` check.
+        if self.ui.is_empty() {
+            return 0;
+        }
+        self.ui.get(&(el.index() as u32)).copied().unwrap_or(0)
     }
 
     /// Does any element have a custom element state?
@@ -1938,6 +1959,17 @@ mod tests {
         assert!(other.revision() != r);
     }
 }
+
+/// `Document::ui`: the checkedness is set by script or the user, so it no longer follows the `checked` attribute.
+pub const UI_CHECKED_DIRTY: u8 = 1;
+/// `Document::ui`: the checkedness, when `UI_CHECKED_DIRTY` is set.
+pub const UI_CHECKED: u8 = 2;
+/// `Document::ui`: the value is set by script or the user, so it no longer follows the `value` attribute or the text of a `textarea`.
+pub const UI_VALUE_DIRTY: u8 = 4;
+/// `Document::ui`: the value is not empty, when `UI_VALUE_DIRTY` is set.
+pub const UI_VALUE_SET: u8 = 8;
+/// `Document::ui`: the `indeterminate` property.
+pub const UI_INDETERMINATE: u8 = 16;
 
 /// The custom element state "precustomized": a constructor is running for the element.
 pub const PRECUSTOMIZED: u32 = u32::MAX - 1;

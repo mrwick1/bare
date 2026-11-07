@@ -1,0 +1,92 @@
+var $ = function (i) { return document.getElementById(i) };
+var PS = ['disabled', 'enabled', 'checked', 'required', 'optional', 'read-only', 'read-write', 'placeholder-shown', 'default', 'indeterminate'];
+var P = function (ids) { return ids.split(' ').map(function (id) { var e = $(id); return id + ':' + PS.filter(function (p) { return e.matches(':' + p) }).join(',') }).join(' ') };
+var Q = function (sel) { return Array.prototype.map.call(document.querySelectorAll(sel), function (e) { return e.id }).join(',') };
+=== disabled-basic
+@html <button id=a disabled></button><input id=b disabled><select id=c disabled></select><textarea id=d disabled></textarea><fieldset id=e disabled></fieldset><div id=f disabled></div><a id=g disabled></a><input id=h type=hidden disabled><button id=i></button><input id=j><select id=k></select><textarea id=l></textarea><fieldset id=m></fieldset><span id=n></span>
+(function () { return P('a b c d e f g h i j k l m n') })
+=== disabled-optgroup-option
+@html <select><optgroup id=a disabled><option id=b>x</option></optgroup><optgroup id=c><option id=d disabled>y</option><option id=e>z</option></optgroup><option id=f>w</option></select>
+(function () { return P('a b c d e f') })
+=== disabled-fieldset-descendants
+@html <fieldset id=a disabled><legend><input id=b></legend><legend><input id=c></legend><div><input id=d><button id=e></button><fieldset id=f><input id=g></fieldset></div><label id=h></label><select id=i></select></fieldset><input id=j>
+(function () { return P('a b c d e f g h i j') })
+=== disabled-fieldset-legend-not-first-child
+@html <fieldset id=a disabled><div></div><legend><input id=b></legend></fieldset><fieldset id=c disabled><legend><div><input id=d></div></legend></fieldset>
+(function () { return P('a b c d') })
+=== disabled-changes
+@html <fieldset id=a><input id=b><button id=c></button></fieldset><input id=d>
+(function () { var r = [P('b c d')]; $('a').setAttribute('disabled', ''); r.push(P('a b c d')); $('d').disabled = true; r.push(P('d')); $('a').removeAttribute('disabled'); $('d').disabled = false; r.push(P('a b c d')); $('c').setAttribute('disabled', 'disabled'); r.push(P('c')); return r.join(' | ') })
+=== enabled-set-of-elements
+@html <button id=a></button><input id=b type=hidden><input id=c type=checkbox><select id=d></select><textarea id=e></textarea><fieldset id=f></fieldset><optgroup id=g></optgroup><option id=h></option><object id=i></object><output id=j></output><label id=k></label><img id=l><form id=m></form>
+(function () { return Q(':enabled') + ' ' + Q(':disabled') })
+=== required-and-optional-by-type
+@html <input id=a required><input id=b type=email required><input id=c type=hidden required><input id=d type=range required><input id=e type=color required><input id=f type=checkbox required><input id=g type=radio required><input id=h type=file required><input id=i type=submit required><input id=j type=number required><input id=k type=date required><input id=l type=button required><input id=m type=image required><input id=n type=reset required><input id=o type=password required><input id=p type=text><input id=q type=range><input id=r type=hidden><input id=s type=submit><input id=t type=checkbox>
+(function () { return Q(':required') + ' / ' + Q(':optional') })
+=== required-select-textarea-others
+@html <select id=a required></select><select id=b></select><textarea id=c required></textarea><textarea id=d></textarea><button id=e required></button><fieldset id=f required></fieldset><div id=g required></div><output id=h></output>
+(function () { return Q(':required') + ' / ' + Q(':optional') })
+=== required-changes
+@html <input id=a><input id=b required>
+(function () { var r = [P('a b')]; $('a').required = true; $('b').removeAttribute('required'); r.push(P('a b')); $('a').type = 'hidden'; r.push(P('a')); return r.join(' | ') })
+=== read-write-inputs
+@html <input id=a><input id=b readonly><input id=c disabled><input id=d type=checkbox><input id=e type=button><input id=f type=number><input id=g type=range><input id=h type=hidden><input id=i type=date><input id=j type=password><input id=k type=file><input id=l type=color><input id=m type=submit><input id=n type=search readonly disabled>
+(function () { return Q(':read-write') + ' / ' + Q(':read-only') })
+=== read-write-textarea-select
+@html <textarea id=a></textarea><textarea id=b readonly></textarea><textarea id=c disabled></textarea><select id=d></select><button id=e></button><div id=f></div>
+(function () { return P('a b c d e f') })
+=== read-write-contenteditable
+@html <div id=a contenteditable></div><div id=b contenteditable=true><span id=c></span><p id=d contenteditable=false><i id=e></i></p></div><div id=f contenteditable=plaintext-only></div><div id=g contenteditable=bogus></div><div id=h contenteditable=false></div><input id=i readonly contenteditable=true>
+(function () { return P('a b c d e f g h i') })
+=== read-write-changes
+@html <input id=a><div id=b></div>
+(function () { var r = [P('a b')]; $('a').setAttribute('readonly', ''); $('b').setAttribute('contenteditable', 'true'); r.push(P('a b')); $('a').removeAttribute('readonly'); $('b').removeAttribute('contenteditable'); r.push(P('a b')); return r.join(' | ') })
+=== placeholder-shown-basic
+@html <input id=a placeholder=x><input id=b placeholder=x value=v><input id=c placeholder=""><input id=d><textarea id=e placeholder=x></textarea><textarea id=f placeholder=x>t</textarea><input id=g type=checkbox placeholder=x><input id=h type=number placeholder=x><input id=i type=password placeholder=x><input id=j type=hidden placeholder=x><input id=k type=range placeholder=x><input id=l type=email placeholder=x><input id=m type=date placeholder=x><input id=n type=file placeholder=x><input id=o type=submit placeholder=x><textarea id=p placeholder=""></textarea>
+(function () { return Q(':placeholder-shown') })
+=== placeholder-shown-value-changes
+@html <input id=a placeholder=x><textarea id=b placeholder=x></textarea><input id=c placeholder=x value=v>
+(function () { var r = [Q(':placeholder-shown')]; $('a').value = 'q'; $('b').value = 'q'; $('c').value = ''; r.push(Q(':placeholder-shown')); $('a').value = ''; $('b').value = ''; $('c').setAttribute('value', 'z'); r.push(Q(':placeholder-shown')); $('a').removeAttribute('placeholder'); $('b').setAttribute('placeholder', ''); r.push(Q(':placeholder-shown')); return r.join(' | ') })
+=== checked-basic
+@html <input id=a type=checkbox checked><input id=b type=checkbox><input id=c type=radio checked><input id=d type=radio><input id=e checked><input id=f type=hidden checked><input id=g type=submit checked><select><option id=h selected>a</option><option id=i>b</option></select>
+(function () { return Q(':checked') })
+=== checked-property-changes
+@html <input id=a type=checkbox><input id=b type=checkbox checked><input id=c type=checkbox checked>
+(function () { var r = [Q(':checked')]; $('a').checked = true; $('b').checked = false; r.push(Q(':checked')); $('c').removeAttribute('checked'); $('c').setAttribute('checked', ''); r.push(Q(':checked')); $('b').setAttribute('checked', ''); r.push(Q(':checked')); return r.join(' | ') })
+=== checked-clean-follows-attribute
+@html <input id=a type=checkbox checked><input id=b type=checkbox>
+(function () { var r = [Q(':checked')]; $('a').removeAttribute('checked'); $('b').setAttribute('checked', ''); r.push(Q(':checked')); return r.join(' | ') })
+=== checked-radio-group
+@html <form><input id=a type=radio name=g><input id=b type=radio name=g checked><input id=c type=radio name=g></form>
+(function () { var r = [Q(':checked')]; $('c').checked = true; r.push(Q(':checked')); $('a').checked = true; r.push(Q(':checked')); return r.join(' | ') })
+=== checked-reset
+@html <form id=f><input id=a type=checkbox checked><input id=b type=checkbox></form>
+(function () { $('a').checked = false; $('b').checked = true; var r = [Q(':checked')]; $('f').reset(); r.push(Q(':checked')); return r.join(' | ') })
+=== checked-clone
+@html <div id=d><input id=a type=checkbox></div>
+(function () { $('a').checked = true; var c = $('d').cloneNode(true); document.body.appendChild(c); return Q(':checked') + ' ' + document.querySelectorAll('input:checked').length })
+=== default-basic
+@html <form><input id=a type=checkbox checked><input id=b type=checkbox><input id=c type=radio checked><button id=d></button><button id=e></button><input id=f type=submit><button id=g type=button></button><select><option id=h selected>a</option><option id=i>b</option></select></form>
+(function () { return Q(':default') })
+=== default-submit-button
+@html <form id=f1><input id=a type=text><button id=b type=button></button><input id=c type=submit><button id=d></button></form><form id=f2><input id=e type=image><button id=f></button></form><button id=g></button><form id=f3><button id=h type=reset></button></form>
+(function () { return Q(':default') })
+=== default-property-changes
+@html <input id=a type=checkbox><input id=b type=checkbox checked>
+(function () { var r = [Q(':default')]; $('a').checked = true; $('b').checked = false; r.push(Q(':default')); $('a').setAttribute('checked', ''); r.push(Q(':default')); return r.join(' | ') })
+=== indeterminate-progress-radio
+@html <progress id=a></progress><progress id=b value=1></progress><progress id=c value=x></progress><form><input id=d type=radio name=g><input id=e type=radio name=g></form><form><input id=f type=radio name=h checked><input id=g type=radio name=h></form><input id=h type=radio><input id=i type=radio name=""><input id=j type=checkbox><input id=k type=checkbox checked>
+(function () { return Q(':indeterminate') })
+=== indeterminate-radio-group-changes
+@html <form><input id=a type=radio name=g><input id=b type=radio name=g></form>
+(function () { var r = [Q(':indeterminate')]; $('a').checked = true; r.push(Q(':indeterminate')); $('a').checked = false; $('b').checked = true; r.push(Q(':indeterminate')); return r.join(' | ') })
+=== indeterminate-property
+@html <input id=a type=checkbox><input id=b type=checkbox><input id=c type=radio><input id=d type=text>
+(function () { var r = [Q(':indeterminate')]; $('a').indeterminate = true; $('c').indeterminate = true; $('d').indeterminate = true; r.push(Q(':indeterminate') + ' ' + $('a').indeterminate + $('b').indeterminate + $('d').indeterminate); $('a').indeterminate = false; r.push(Q(':indeterminate')); return r.join(' | ') })
+=== combined-selectors
+@html <form><input id=a type=text required><input id=b type=text><input id=c type=checkbox checked disabled></form>
+(function () { return Q('input:required:enabled') + ' ' + Q('input:not(:disabled):not(:required)') + ' ' + Q('input:is(:checked, :required)') + ' ' + Q(':is(:disabled)') })
+=== style-follows-state
+@css input:disabled { color: rgb(255, 0, 0); } input:checked { margin-left: 7px; } input:placeholder-shown { margin-top: 9px; } fieldset:disabled input { margin-right: 5px; } input:required { margin-bottom: 3px; } input:read-only { word-spacing: 4px; }
+@html <fieldset id=f><input id=a placeholder=p><input id=b type=checkbox></fieldset>
+(function () { var g = function (id) { var c = getComputedStyle($(id)); return [c.color, c.marginLeft, c.marginTop, c.marginRight, c.marginBottom, c.wordSpacing].join('/') }; var r = [g('a'), g('b')]; $('f').setAttribute('disabled', ''); $('a').required = true; $('a').readOnly = true; $('b').checked = true; $('a').value = 'x'; r.push(g('a'), g('b')); $('f').removeAttribute('disabled'); $('a').value = ''; $('a').removeAttribute('readonly'); $('b').checked = false; r.push(g('a'), g('b')); return r.join(' ') })
