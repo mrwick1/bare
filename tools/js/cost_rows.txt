@@ -1,0 +1,811 @@
+# The rows of tools/js/cost_matrix.sh. One row for each line: [VAR=value ...] PROGRAM ARGS, where PROGRAM is a path under
+# CARGO_TARGET_DIR/release. Lines that start with # are comments.
+# Rows: every `*_load` example of bare-js and bare at scale 1 and 10 (the same cases as the tools/js/*_load.sh scripts; the
+# `numeric_load` and `wrapper_load` rows use 1,000 and 10,000 and the Node checksums of their scripts), and the 88 layout
+# cases of `bare-stress run` at the default size and at 10 times that size. Each row finishes in 6 s or less.
+# Left out: 5 rows whose count moves by more than 0.25% between two runs of one binary (loopback server threads):
+# `scheduler_load timers 1`, `preload_load font 10`, `preload_load dups 10`, `resources_load largechunk 1` and `10`.
+# Not here: `type_load` (tools/js/typing/keycost.sh), `https_load` and the other network examples.
+examples/adapter_load u8iter 1
+examples/adapter_load u8iter 10
+examples/adapter_load u8steps 1
+examples/adapter_load u8steps 10
+examples/adapter_load asynciter 1
+examples/adapter_load asynciter 10
+examples/adapter_load suspiter 1
+examples/adapter_load suspiter 10
+examples/adapter_load codec 1
+examples/adapter_load codec 10
+examples/arrobj_load mapfilter 1
+examples/arrobj_load mapfilter 10
+examples/arrobj_load sort 1
+examples/arrobj_load sort 10
+examples/arrobj_load queue 1
+examples/arrobj_load queue 10
+examples/arrobj_load objects 1
+examples/arrobj_load objects 10
+examples/arrobj_load arrays 1
+examples/arrobj_load arrays 10
+examples/arrobj_load fill 1
+examples/arrobj_load fill 10
+examples/arrobj_load reverse 1
+examples/arrobj_load reverse 10
+examples/arrobj_load flat 1
+examples/arrobj_load flat 10
+examples/arrobj_load tosorted 1
+examples/arrobj_load tosorted 10
+examples/arrobj_load lastindexof 1
+examples/arrobj_load lastindexof 10
+examples/arrobj_load pad 1
+examples/arrobj_load pad 10
+examples/arrobj_load repeat 1
+examples/arrobj_load repeat 10
+examples/arrobj_load replaceall 1
+examples/arrobj_load replaceall 10
+examples/arrobj_load freeze 1
+examples/arrobj_load freeze 10
+examples/arrobj_load descriptors 1
+examples/arrobj_load descriptors 10
+examples/async_load seq 1
+examples/async_load seq 10
+examples/async_load fanout 1
+examples/async_load fanout 10
+examples/async_load nested 1
+examples/async_load nested 10
+examples/async_load trycatch 1
+examples/async_load trycatch 10
+examples/async_load pending 1
+examples/async_load pending 10
+examples/async_load closures 1
+examples/async_load closures 10
+examples/async_load switch 1
+examples/async_load switch 10
+examples/async_load ifchain 1
+examples/async_load ifchain 10
+examples/attr_load react 1
+examples/attr_load react 10
+examples/attr_load live 1
+examples/attr_load live 10
+examples/attr_load churn 1
+examples/attr_load churn 10
+examples/bigint_load small 1
+examples/bigint_load small 10
+examples/bigint_load heapmix 1
+examples/bigint_load heapmix 10
+examples/bigint_load mul 1
+examples/bigint_load mul 10
+examples/bigint_load divmod 1
+examples/bigint_load divmod 10
+examples/bigint_load tostring 1
+examples/bigint_load tostring 10
+examples/bigint_load i64sort 1
+examples/bigint_load i64sort 10
+examples/bigint_load u64sort 1
+examples/bigint_load u64sort 10
+examples/binary_load copy 1
+examples/binary_load copy 10
+examples/binary_load scan 1
+examples/binary_load scan 10
+examples/binary_load scanarr 1
+examples/binary_load scanarr 10
+examples/binary_load codec 1
+examples/binary_load codec 10
+examples/binary_load stream 1
+examples/binary_load stream 10
+examples/binary_load indexof 1
+examples/binary_load indexof 10
+examples/binary_load f64from 1
+examples/binary_load f64from 10
+examples/binary_load i32sort 1
+examples/binary_load i32sort 10
+examples/binary_load dataview 1
+examples/binary_load dataview 10
+examples/browser_load mutation 1
+examples/browser_load mutation 10
+examples/browser_load event 1
+examples/browser_load event 10
+examples/browser_load lookup 1
+examples/browser_load lookup 10
+examples/browser_load svg 1
+examples/browser_load svg 10
+examples/browser_load svgparse 1
+examples/browser_load svgparse 10
+examples/browser_load rel 1
+examples/browser_load rel 10
+examples/builtins_load json 1
+examples/builtins_load json 10
+examples/builtins_load scan 1
+examples/builtins_load scan 10
+examples/builtins_load replace 1
+examples/builtins_load replace 10
+examples/builtins_load split 1
+examples/builtins_load split 10
+examples/builtins_load strings 1
+examples/builtins_load strings 10
+examples/builtins_load routes 1
+examples/builtins_load routes 10
+examples/builtins_load zero 1
+examples/builtins_load zero 10
+examples/builtins_load gc 1
+examples/builtins_load gc 10
+examples/class_load construct 1
+examples/class_load construct 10
+examples/class_load derived 1
+examples/class_load derived 10
+examples/class_load private 1
+examples/class_load private 10
+examples/class_load accessors 1
+examples/class_load accessors 10
+examples/class_load super 1
+examples/class_load super 10
+examples/class_load churn 1
+examples/class_load churn 10
+examples/console_load flood 1
+examples/console_load flood 10
+examples/console_load retain 1
+examples/console_load retain 10
+examples/console_load format 1
+examples/console_load format 10
+examples/console_load patch 1
+examples/console_load patch 10
+examples/date_load utc 1
+examples/date_load utc 10
+examples/date_load iso 1
+examples/date_load iso 10
+examples/date_load parse 1
+examples/date_load parse 10
+examples/date_load gc 1
+examples/date_load gc 10
+examples/date_load clock 1
+examples/date_load clock 10
+examples/date_load cap 1
+examples/date_load cap 10
+examples/date_load longstr 1
+examples/date_load longstr 10
+examples/eval_load loop 1
+examples/eval_load loop 10
+examples/eval_load calls 1
+examples/eval_load calls 10
+examples/eval_load fib 1
+examples/eval_load fib 10
+examples/eval_load closures 1
+examples/eval_load closures 10
+examples/eval_load objects 1
+examples/eval_load objects 10
+examples/eval_load webpack 1
+examples/eval_load webpack 10
+examples/eval_load throws 1
+examples/eval_load throws 10
+examples/eval_load concat 1
+examples/eval_load concat 10
+examples/fetch_load post 1
+examples/fetch_load post 10
+examples/fetch_load bytes 1
+examples/fetch_load bytes 10
+examples/fetch_load objects 1
+examples/fetch_load objects 10
+examples/fetch_load iterate 1
+examples/fetch_load iterate 10
+examples/focus_load focus 1
+examples/focus_load focus 10
+examples/focus_load dispatch 1
+examples/focus_load dispatch 10
+examples/focus_load gc 1
+examples/focus_load gc 10
+examples/fragment_load parse 1
+examples/fragment_load parse 10
+examples/fragment_load replace 1
+examples/fragment_load replace 10
+examples/fragment_load deep 1
+examples/fragment_load deep 10
+examples/gen_load next 1
+examples/gen_load next 10
+examples/gen_load forof 1
+examples/gen_load forof 10
+examples/gen_load iterobj 1
+examples/gen_load iterobj 10
+examples/gen_load spread 1
+examples/gen_load spread 10
+examples/gen_load spawn 1
+examples/gen_load spawn 10
+examples/gen_load suspended 1
+examples/gen_load suspended 10
+examples/gen_load delegate 1
+examples/gen_load delegate 10
+examples/gen_load finally 1
+examples/gen_load finally 10
+examples/interact_load asyncpriv 1
+examples/interact_load asyncpriv 10
+examples/interact_load fanpriv 1
+examples/interact_load fanpriv 10
+examples/interact_load supercalls 1
+examples/interact_load supercalls 10
+examples/interact_load suspended 1
+examples/interact_load suspended 10
+examples/interact_load churn 1
+examples/interact_load churn 10
+examples/intl_load make 1
+examples/intl_load make 10
+examples/intl_load format 1
+examples/intl_load format 10
+examples/intl_load parts 1
+examples/intl_load parts 10
+examples/intl_load locale 1
+examples/intl_load locale 10
+examples/intl_load plain 1
+examples/intl_load plain 10
+examples/intl_load nf_format 1
+examples/intl_load nf_format 10
+examples/intl_load nf_locale 1
+examples/intl_load nf_locale 10
+examples/intl_load nf_locale_opts 1
+examples/intl_load nf_locale_opts 10
+examples/intl_load cmp 1
+examples/intl_load cmp 10
+examples/intl_load cmp_opts 1
+examples/intl_load cmp_opts 10
+examples/iterator_load chain 1
+examples/iterator_load chain 10
+examples/iterator_load chain_forof 1
+examples/iterator_load chain_forof 10
+examples/iterator_load flatmap 1
+examples/iterator_load flatmap 10
+examples/iterator_load generic 1
+examples/iterator_load generic 10
+examples/iterator_load array_chain 1
+examples/iterator_load array_chain 10
+examples/iterator_load set_union 1
+examples/iterator_load set_union 10
+examples/iterator_load set_inter 1
+examples/iterator_load set_inter 10
+examples/iterator_load set_diff 1
+examples/iterator_load set_diff 10
+examples/iterator_load set_sym 1
+examples/iterator_load set_sym 10
+examples/iterator_load set_like 1
+examples/iterator_load set_like 10
+examples/iterator_load set_union_like 1
+examples/iterator_load set_union_like 10
+examples/iterator_load resolvers 1
+examples/iterator_load resolvers 10
+examples/iterator_load promise_new 1
+examples/iterator_load promise_new 10
+examples/loader_load blocking 1
+examples/loader_load blocking 10
+examples/loader_load dynamic 1
+examples/loader_load dynamic 10
+examples/loader_load mixed 1
+examples/loader_load mixed 10
+examples/navigation_load url 1
+examples/navigation_load url 10
+examples/navigation_load iterate 1
+examples/navigation_load iterate 10
+examples/navigation_load subclass 1
+examples/navigation_load subclass 10
+examples/navigation_load history 1
+examples/navigation_load history 10
+examples/navigation_load storage 1
+examples/navigation_load storage 10
+examples/navigation_load route 1
+examples/navigation_load route 10
+examples/nodelist_load live 1
+examples/nodelist_load live 10
+examples/nodelist_load churn 1
+examples/nodelist_load churn 10
+examples/nodelist_load scan 1
+examples/nodelist_load scan 10
+examples/observer_load mo 1
+examples/observer_load mo 10
+examples/observer_load raf 1
+examples/observer_load raf 10
+examples/parse_load stmts 1
+examples/parse_load stmts 10
+examples/parse_load chain 1
+examples/parse_load chain 10
+examples/parse_load bodies 1
+examples/parse_load bodies 10
+examples/parse_load malformed 1
+examples/parse_load malformed 10
+examples/parse_load deep 1
+examples/parse_load deep 10
+examples/platform_load media 1
+examples/platform_load media 10
+examples/platform_load class 1
+examples/platform_load class 10
+examples/platform_load query 1
+examples/platform_load query 10
+examples/promise_load chain 1
+examples/promise_load chain 10
+examples/promise_load fanout 1
+examples/promise_load fanout 10
+examples/promise_load thenable 1
+examples/promise_load thenable 10
+examples/promise_load finally 1
+examples/promise_load finally 10
+examples/promise_load reject 1
+examples/promise_load reject 10
+examples/promise_load ctor 1
+examples/promise_load ctor 10
+examples/promise_load closures 1
+examples/promise_load closures 10
+examples/proxy_load get_trap 1
+examples/proxy_load get_trap 10
+examples/proxy_load set_trap 1
+examples/proxy_load set_trap 10
+examples/proxy_load noop 1
+examples/proxy_load noop 10
+examples/proxy_load forward 1
+examples/proxy_load forward 10
+examples/proxy_load array_mapfilter 1
+examples/proxy_load array_mapfilter 10
+examples/proxy_load reactive 1
+examples/proxy_load reactive 10
+examples/proxy_load chain 1
+examples/proxy_load chain 10
+examples/proxy_load keys 1
+examples/proxy_load keys 10
+examples/range_load live 1
+examples/range_load live 10
+examples/range_load iter 1
+examples/range_load iter 10
+examples/reflect_load construct_fn 1
+examples/reflect_load construct_fn 10
+examples/reflect_load construct_class 1
+examples/reflect_load construct_class 10
+examples/reflect_load construct_args 1
+examples/reflect_load construct_args 10
+examples/reflect_load keys 1
+examples/reflect_load keys 10
+examples/reflect_load views 1
+examples/reflect_load views 10
+examples/reflect_load nested 1
+examples/reflect_load nested 10
+examples/reflect_load cross_script 1
+examples/reflect_load cross_script 10
+examples/revive_load shallow 1
+examples/revive_load shallow 10
+examples/revive_load deep 1
+examples/revive_load deep 10
+examples/revive_load holes 1
+examples/revive_load holes 10
+examples/revive_load gc 1
+examples/revive_load gc 10
+examples/revive_load cycle 1
+examples/revive_load cycle 10
+examples/sc_load map_num 1
+examples/sc_load map_num 10
+examples/sc_load map_str 1
+examples/sc_load map_str 10
+examples/sc_load map_obj 1
+examples/sc_load map_obj 10
+examples/sc_load set_dedupe 1
+examples/sc_load set_dedupe 10
+examples/sc_load churn 1
+examples/sc_load churn 10
+examples/sc_load forof 1
+examples/sc_load forof 10
+examples/sc_load next_loop 1
+examples/sc_load next_loop 10
+examples/sc_load custom_iter 1
+examples/sc_load custom_iter 10
+examples/sc_load symbol_for 1
+examples/sc_load symbol_for 10
+examples/sc_load symbol_keys 1
+examples/sc_load symbol_keys 10
+examples/sc_load toprim 1
+examples/sc_load toprim 10
+examples/sc_load foreach_grow 1
+examples/sc_load foreach_grow 10
+examples/scheduler_load timers 10
+examples/scheduler_load messages 1
+examples/scheduler_load messages 10
+examples/scheduler_load mixed 1
+examples/scheduler_load mixed 10
+examples/scripts_load many 1
+examples/scripts_load many 10
+examples/scripts_load few 1
+examples/scripts_load few 10
+examples/scripts_load cross 1
+examples/scripts_load cross 10
+examples/scripts_load host 1
+examples/scripts_load host 10
+examples/scripts_load reject 1
+examples/scripts_load reject 10
+examples/seam_load from_set 1
+examples/seam_load from_set 10
+examples/seam_load from_map_entries 1
+examples/seam_load from_map_entries 10
+examples/seam_load concat_flag 1
+examples/seam_load concat_flag 10
+examples/seam_load iter_methods 1
+examples/seam_load iter_methods 10
+examples/seam_load forof_break 1
+examples/seam_load forof_break 10
+examples/seam_load string_hooks 1
+examples/seam_load string_hooks 10
+examples/seam_load species_map 1
+examples/seam_load species_map 10
+examples/selection_load short 1
+examples/selection_load short 10
+examples/selection_load long 1
+examples/selection_load long 10
+examples/session_load chain 1
+examples/session_load chain 10
+examples/session_load heavy 1
+examples/session_load heavy 10
+examples/streams_load flow 1
+examples/streams_load flow 10
+examples/streams_load many 1
+examples/streams_load many 10
+examples/streams_load pending 1
+examples/streams_load pending 10
+examples/streams_load churn 1
+examples/streams_load churn 10
+examples/stringify_load shallow 1
+examples/stringify_load shallow 10
+examples/stringify_load deep 1
+examples/stringify_load deep 10
+examples/stringify_load callback 1
+examples/stringify_load callback 10
+examples/stringify_load escape 1
+examples/stringify_load escape 10
+examples/stringify_load gc 1
+examples/stringify_load gc 10
+examples/stringify_load dag 1
+examples/stringify_load dag 10
+examples/style_load setget 1
+examples/style_load setget 10
+examples/style_load churn 1
+examples/style_load churn 10
+examples/style_load attrs 1
+examples/style_load attrs 10
+examples/style_load shorthand 1
+examples/style_load shorthand 10
+examples/tagged_load call 1
+examples/tagged_load call 10
+examples/tagged_load plain 1
+examples/tagged_load plain 10
+examples/tagged_load sites 1
+examples/tagged_load sites 10
+examples/tagged_load css 1
+examples/tagged_load css 10
+examples/weak_load map_obj 1
+examples/weak_load map_obj 10
+examples/weak_load set_obj 1
+examples/weak_load set_obj 10
+examples/weak_load churn 1
+examples/weak_load churn 10
+examples/weak_load dead_cycles 1
+examples/weak_load dead_cycles 10
+examples/weak_load chain_fwd 1
+examples/weak_load chain_fwd 10
+examples/weak_load chain_rev 1
+examples/weak_load chain_rev 10
+examples/weak_load closures 1
+examples/weak_load closures 10
+examples/web_apis_load abort 1
+examples/web_apis_load abort 10
+examples/web_apis_load clone 1
+examples/web_apis_load clone 10
+examples/web_apis_load base64 1
+examples/web_apis_load base64 10
+examples/web_apis_load segmenter 1
+examples/web_apis_load segmenter 10
+examples/web_apis_load matchall 1
+examples/web_apis_load matchall 10
+examples/promise_all_load all 1
+examples/promise_all_load all 10
+examples/promise_all_load settled 1
+examples/promise_all_load settled 10
+examples/promise_all_load race 1
+examples/promise_all_load race 10
+examples/promise_all_load any 1
+examples/promise_all_load any 10
+examples/promise_all_load anyerr 1
+examples/promise_all_load anyerr 10
+examples/promise_all_load many 1
+examples/promise_all_load many 10
+examples/promise_all_load thenable 1
+examples/promise_all_load thenable 10
+examples/geometry_load dashboard 1
+examples/geometry_load dashboard 10
+examples/geometry_load stretch 1
+examples/geometry_load stretch 10
+examples/preload_load font 1
+examples/preload_load style 1
+examples/preload_load style 10
+examples/preload_load script 1
+examples/preload_load script 10
+examples/preload_load dups 1
+examples/sheets_load linked 1
+examples/sheets_load linked 10
+examples/sheets_load imports 1
+examples/sheets_load imports 10
+examples/sheets_load dynamic 1
+examples/sheets_load dynamic 10
+examples/resources_load small 1
+examples/resources_load small 10
+examples/resources_load large 1
+examples/resources_load large 10
+examples/resources_load dups 1
+examples/resources_load dups 10
+examples/recursion_load plain 100
+examples/recursion_load plain 1000
+examples/recursion_load react 100
+examples/recursion_load react 1000
+examples/recursion_load runaway 1
+examples/handler_load 1
+examples/handler_load 10
+examples/scroll_load 1000 300
+examples/scroll_load 10000 300
+examples/stack_load 10
+examples/stack_load 100
+examples/lex_load small 1
+examples/lex_load small 10
+examples/lex_load repeat 1
+examples/lex_load repeat 10
+examples/lex_load comments 1
+examples/lex_load comments 10
+examples/lex_load strings 1
+examples/lex_load strings 10
+examples/lex_load malformed 1
+examples/lex_load malformed 10
+SELECT_LOAD_STACK_MIB=8 examples/select_load value 10
+SELECT_LOAD_STACK_MIB=8 examples/select_load react 10
+SELECT_LOAD_STACK_MIB=8 examples/select_load churn 10
+SELECT_LOAD_STACK_MIB=8 examples/select_load value 1000
+SELECT_LOAD_STACK_MIB=8 examples/select_load react 1000
+SELECT_LOAD_STACK_MIB=8 examples/select_load churn 1000
+FORM_LOAD_STACK_MIB=8 examples/form_load submit 1
+FORM_LOAD_STACK_MIB=8 examples/form_load gc 1
+FORM_LOAD_STACK_MIB=8 examples/form_load gates 1
+FORM_LOAD_STACK_MIB=8 examples/form_load submit 10
+FORM_LOAD_STACK_MIB=8 examples/form_load gc 10
+FORM_LOAD_STACK_MIB=8 examples/form_load gates 10
+examples/dataset_load read 1000 1
+examples/dataset_load write 1000 1
+examples/dataset_load keys 1000 1
+examples/dataset_load read 1000 50
+examples/dataset_load write 1000 50
+examples/dataset_load keys 1000 50
+examples/dataset_load read 10000 1
+examples/dataset_load write 10000 1
+examples/dataset_load keys 10000 1
+examples/dataset_load read 10000 50
+examples/dataset_load write 10000 50
+examples/dataset_load keys 10000 50
+examples/xhr_load 1
+examples/xhr_load 100
+examples/sticky_load 100 100
+examples/numeric_load empty 1000 0
+examples/numeric_load random 1000 0
+examples/numeric_load clz32 1000 23023
+examples/numeric_load log 1000 5912.128178488171
+examples/numeric_load radix16 1000 10550
+examples/numeric_load radix36frac 1000 12029
+examples/numeric_load radix2sub 1000 1075006
+examples/numeric_load pow 1000 395012.24515318964
+examples/numeric_load sin 1000 999.9870900935418
+examples/numeric_load atan2 1000 3528.2695431739785
+examples/numeric_load tofixed 1000 5230
+examples/numeric_load toprecision 1000 7000
+examples/numeric_load toexp 1000 15916
+examples/numeric_load parsefloat 1000 71357.14285714286
+examples/numeric_load encodeuri 1000 14890
+examples/numeric_load escape 1000 15890
+examples/numeric_load empty 10000 0
+examples/numeric_load random 10000 0
+examples/numeric_load clz32 10000 196383
+examples/numeric_load log 10000 82108.92783681415
+examples/numeric_load radix16 10000 112922
+examples/numeric_load radix36frac 10000 118679
+examples/numeric_load radix2sub 10000 10750005
+examples/numeric_load pow 10000 3950122.4515318926
+examples/numeric_load sin 10000 10001.939505410717
+examples/numeric_load atan2 10000 35649.31529475077
+examples/numeric_load tofixed 10000 62230
+examples/numeric_load toprecision 10000 70000
+examples/numeric_load toexp 10000 163574
+examples/numeric_load parsefloat 10000 7142142.857142856
+examples/numeric_load encodeuri 10000 158890
+examples/numeric_load escape 10000 168890
+examples/wrapper_load empty 1000 0
+examples/wrapper_load primcall 1000 5890
+examples/wrapper_load newstring 1000 3890
+examples/wrapper_load newnumber 1000 499500
+examples/wrapper_load newbool 1000 500
+examples/wrapper_load objectprim 1000 1000
+examples/wrapper_load strindex 1000 1000
+examples/wrapper_load strkeys 1000 6000
+examples/wrapper_load wrapcall 1000 4890
+examples/wrapper_load looseeq 1000 1000
+examples/wrapper_load json 1000 3000
+examples/wrapper_load forin 1000 3000
+examples/wrapper_load empty 10000 0
+examples/wrapper_load primcall 10000 68890
+examples/wrapper_load newstring 10000 48890
+examples/wrapper_load newnumber 10000 49995000
+examples/wrapper_load newbool 10000 5000
+examples/wrapper_load objectprim 10000 10000
+examples/wrapper_load strindex 10000 10000
+examples/wrapper_load strkeys 10000 60000
+examples/wrapper_load wrapcall 10000 58890
+examples/wrapper_load looseeq 10000 10000
+examples/wrapper_load json 10000 30000
+examples/wrapper_load forin 10000 30000
+bare-stress run boxes-wide-blocks 20000
+bare-stress run boxes-deep-blocks 2000
+bare-stress run boxes-deep-inline 2000
+bare-stress run boxes-spaces-between 20000
+bare-stress run boxes-one-long-run 20000
+bare-stress run boxes-mixed-runs 20000
+bare-stress run boxes-display-none 20000
+bare-stress run boxes-list-items 20000
+bare-stress run boxes-inline-blocks 20000
+bare-stress run text-words 100000
+bare-stress run text-one-long-word 1000000
+bare-stress run text-only-spaces 1000000
+bare-stress run text-pre-spaces 1000000
+bare-stress run text-pre-tabs 1000000
+bare-stress run text-one-letter-words 1000000
+bare-stress run text-accents 100000
+bare-stress run text-chinese 100000
+bare-stress run block-wide 20000
+bare-stress run block-deep 40
+bare-stress run block-deep-over-limit 2000
+bare-stress run block-collapse-through 20000
+bare-stress run block-nested-collapse 20
+bare-stress run block-percent-calc 20000
+bare-stress run block-list-items 20000
+bare-stress run inline-paragraph 20000
+bare-stress run inline-one-line-nowrap 20000
+bare-stress run inline-long-word 200000
+bare-stress run inline-many-spans 20000
+bare-stress run inline-span-unit 20000
+bare-stress run inline-deep-spans 2000
+bare-stress run inline-deep-spans-many-lines 100
+bare-stress run inline-breaks 20000
+bare-stress run inline-pre-lines 20000
+bare-stress run inline-blocks-many 20000
+bare-stress run inline-blocks-nested 40
+bare-stress run inline-block-in-inline 20000
+bare-stress run inline-list 20000
+bare-stress run floats-stack 2000
+bare-stress run floats-one-tall 20000
+bare-stress run floats-with-paragraphs 2000
+bare-stress run floats-alternate-clear 2000
+bare-stress run floats-in-a-line 2000
+bare-stress run floats-new-contexts 2000
+bare-stress run overflow-many-auto 2000
+bare-stress run overflow-nested-auto 20
+bare-stress run overflow-auto-fits 2000
+bare-stress run overflow-long-log 20000
+bare-stress run overflow-wide-content 2000
+bare-stress run position-many-absolute 2000
+bare-stress run position-absolute-in-each-relative 2000
+bare-stress run position-nested-relative 300
+bare-stress run position-fixed-deep 300
+bare-stress run position-relative-spans 2000
+bare-stress run position-shrink-to-fit 2000
+bare-stress run grid-equal-columns 5000
+bare-stress run grid-auto-fill 5000
+bare-stress run grid-auto-columns-content 5000
+bare-stress run grid-dense 5000
+bare-stress run grid-sparse-spans 5000
+bare-stress run grid-column-flow 5000
+bare-stress run grid-explicit-rows 5000
+bare-stress run grid-spanning-items 5000
+bare-stress run grid-many-grids 2000
+bare-stress run grid-nested 2000
+bare-stress run grid-stretch-boxes 5000
+bare-stress run grid-inline-grids 2000
+bare-stress run grid-absolute-children 2000
+bare-stress run flex-row-many-items 2000
+bare-stress run flex-wrap-many-items 2000
+bare-stress run flex-cards-stretch 2000
+bare-stress run flex-cards-percent-height 2000
+bare-stress run flex-column-many-items 2000
+bare-stress run flex-nested-rows 200
+bare-stress run flex-nested-columns 200
+bare-stress run flex-nested-rows-text 2000
+bare-stress run flex-ref-block-nested-text 2000
+bare-stress run flex-ref-block-items 2000
+bare-stress run flex-freeze-many 2000
+bare-stress run table-many-rows 20000
+bare-stress run table-many-columns 5000
+bare-stress run table-many-tables 2000
+bare-stress run table-fixed-layout 20000
+bare-stress run table-colspan-chain 1000
+bare-stress run table-rowspan-grid 5000
+bare-stress run table-nested 150
+bare-stress run table-collapse 10000
+bare-stress run table-percent-columns 10000
+bare-stress run text-uppercase 100000
+bare-stress run boxes-wide-blocks 200000
+bare-stress run boxes-deep-blocks 20000
+bare-stress run boxes-deep-inline 20000
+bare-stress run boxes-spaces-between 200000
+bare-stress run boxes-one-long-run 200000
+bare-stress run boxes-mixed-runs 200000
+bare-stress run boxes-display-none 200000
+bare-stress run boxes-list-items 200000
+bare-stress run boxes-inline-blocks 200000
+bare-stress run text-words 1000000
+bare-stress run text-one-long-word 10000000
+bare-stress run text-only-spaces 10000000
+bare-stress run text-pre-spaces 10000000
+bare-stress run text-pre-tabs 10000000
+bare-stress run text-one-letter-words 10000000
+bare-stress run text-accents 1000000
+bare-stress run text-chinese 1000000
+bare-stress run block-wide 200000
+bare-stress run block-deep 400
+bare-stress run block-deep-over-limit 20000
+bare-stress run block-collapse-through 200000
+bare-stress run block-nested-collapse 200
+bare-stress run block-percent-calc 200000
+bare-stress run block-list-items 200000
+bare-stress run inline-paragraph 200000
+bare-stress run inline-one-line-nowrap 200000
+bare-stress run inline-long-word 2000000
+bare-stress run inline-many-spans 200000
+bare-stress run inline-span-unit 200000
+bare-stress run inline-deep-spans 20000
+bare-stress run inline-deep-spans-many-lines 1000
+bare-stress run inline-breaks 200000
+bare-stress run inline-pre-lines 200000
+bare-stress run inline-blocks-many 200000
+bare-stress run inline-blocks-nested 400
+bare-stress run inline-block-in-inline 200000
+bare-stress run inline-list 200000
+bare-stress run floats-stack 20000
+bare-stress run floats-one-tall 200000
+bare-stress run floats-with-paragraphs 20000
+bare-stress run floats-alternate-clear 20000
+bare-stress run floats-in-a-line 20000
+bare-stress run floats-new-contexts 20000
+bare-stress run overflow-many-auto 20000
+bare-stress run overflow-nested-auto 200
+bare-stress run overflow-auto-fits 20000
+bare-stress run overflow-long-log 200000
+bare-stress run overflow-wide-content 20000
+bare-stress run position-many-absolute 20000
+bare-stress run position-absolute-in-each-relative 20000
+bare-stress run position-nested-relative 3000
+bare-stress run position-fixed-deep 3000
+bare-stress run position-relative-spans 20000
+bare-stress run position-shrink-to-fit 20000
+bare-stress run grid-equal-columns 50000
+bare-stress run grid-auto-fill 50000
+bare-stress run grid-auto-columns-content 50000
+bare-stress run grid-dense 50000
+bare-stress run grid-sparse-spans 50000
+bare-stress run grid-column-flow 50000
+bare-stress run grid-explicit-rows 50000
+bare-stress run grid-spanning-items 50000
+bare-stress run grid-many-grids 20000
+bare-stress run grid-nested 20000
+bare-stress run grid-stretch-boxes 50000
+bare-stress run grid-inline-grids 20000
+bare-stress run grid-absolute-children 20000
+bare-stress run flex-row-many-items 20000
+bare-stress run flex-wrap-many-items 20000
+bare-stress run flex-cards-stretch 20000
+bare-stress run flex-cards-percent-height 20000
+bare-stress run flex-column-many-items 20000
+bare-stress run flex-nested-rows 2000
+bare-stress run flex-nested-columns 2000
+bare-stress run flex-nested-rows-text 20000
+bare-stress run flex-ref-block-nested-text 20000
+bare-stress run flex-ref-block-items 20000
+bare-stress run flex-freeze-many 20000
+bare-stress run table-many-rows 200000
+bare-stress run table-many-columns 50000
+bare-stress run table-many-tables 20000
+bare-stress run table-fixed-layout 200000
+bare-stress run table-colspan-chain 10000
+bare-stress run table-rowspan-grid 50000
+bare-stress run table-nested 1500
+bare-stress run table-collapse 100000
+bare-stress run table-percent-columns 100000
+bare-stress run text-uppercase 1000000
