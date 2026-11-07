@@ -188,9 +188,8 @@ impl<'p> Interp<'p> {
     // ------------------------------------------------------------ the combinators
 
     fn promise_combinator(&mut self, kind: Comb, this: Value, args: &[Value]) -> Res<Value> {
-        self.intrinsic_this(this)?;
-        let p = self.new_promise()?;
-        let (res, rej, pair) = self.resolving_functions(p)?;
+        self.object_this(this)?;
+        let (p, res, rej, pair) = self.new_capability(this)?;
         match self.comb_run(kind, this, arg(args, 0), p, (res, rej, pair)) {
             Ok(()) => Ok(Value::Object(p)),
             Err(Error::Throw(v)) => {
@@ -328,11 +327,17 @@ impl<'p> Interp<'p> {
 
     /// Call the result promise's resolve function: a no-op if its pair was already used.
     fn cap_resolve(&mut self, p: ObjId, pair: u64, v: Value) -> Res<()> {
-        if self.pair_done(pair) { Ok(()) } else { self.resolve_promise(p, v) }
+        if pair == u64::MAX { self.call_cap(p, v, false) } else if self.pair_done(pair) { Ok(()) } else { self.resolve_promise(p, v) }
     }
 
     fn cap_reject(&mut self, p: ObjId, pair: u64, v: Value) -> Res<()> {
-        if self.pair_done(pair) { Ok(()) } else { self.reject_promise(p, v) }
+        if pair == u64::MAX { self.call_cap(p, v, true) } else if self.pair_done(pair) { Ok(()) } else { self.reject_promise(p, v) }
+    }
+
+    /// Call the resolve or reject function of the capability of `p` (made by a constructor other than `Promise`).
+    fn call_cap(&mut self, p: ObjId, v: Value, reject: bool) -> Res<()> {
+        let (res, rej) = self.promise.caps[&p];
+        self.call_fn(if reject { rej } else { res }, Value::Undefined, &[v]).map(drop)
     }
 
     // ------------------------------------------------------------ AggregateError
@@ -355,7 +360,8 @@ impl<'p> Interp<'p> {
 
     /// `AggregateError(errors, message)`, with or without `new`.
     fn agg_error_ctor(&mut self, args: &[Value]) -> Res<Value> {
-        let proto = self.promise.agg.err_proto.expect("installed");
+        let nt = self.cls.native_nt.take();
+        let proto = self.nt_proto(nt, self.promise.agg.err_proto.expect("installed"))?;
         let o = h!(self, self.heap.new_object(Some(proto)));
         let msg = arg(args, 1);
         if !matches!(msg, Value::Undefined) {

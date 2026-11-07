@@ -103,17 +103,18 @@ fn settle(it: &mut Interp, src: &str, expr: &str) -> String {
 // ------------------------------------------------------------------ gates
 
 #[test]
-fn another_this_is_an_explicit_gate_and_a_primitive_this_is_a_type_error() {
+fn another_this_is_a_capability_and_a_primitive_this_is_a_type_error() {
     big(|| {
         for f in ["all", "allSettled", "race", "any"] {
             let mut it = realm(lim());
-            assert_eq!(out(&mut it, &format!("Promise.{f}.call(function () {{}}, [])")), "unsupported:Promise static method on a constructor other than Promise", "{f}");
+            assert_eq!(out(&mut it, &format!("Promise.{f}.call(function () {{}}, [])")), "throw:TypeError:Promise resolve or reject function is not callable", "{f}");
+            assert_eq!(out(&mut it, &format!("function T(ex) {{ ex(function () {{}}, function () {{}}); }} Promise.{f}.call(T, [1]) instanceof T")), "true", "{f}");
             assert_eq!(out(&mut it, &format!("Promise.{f}.call(1, [])")), "throw:TypeError:PromiseResolve called on non-object", "{f}");
             assert_eq!(it.pending_jobs(), 0);
             assert_eq!(it.agg_stats(), AggStats::default());
         }
         let mut it = realm(lim());
-        assert!(out(&mut it, "class E extends AggregateError {}; new E([])").starts_with("unsupported:subclassing AggregateError"));
+        assert_eq!(out(&mut it, "class E extends AggregateError {}; var e = new E([1], 'm'); [e instanceof E, e.errors.length, e.message, e.name].join()"), "true,1,m,AggregateError");
     });
 }
 
@@ -233,9 +234,9 @@ fn a_limit_or_unsupported_in_resolve_or_next_closes_nothing_and_rejects_nothing(
             assert!(matches!(it.drain_microtasks(), Ok(0)), "{f}: nothing was queued");
             // `next` of the iterator reaches a gate
             let mut it = realm(lim());
-            out(&mut it, "var closed = 0, handled = 0; var iter = { [Symbol.iterator]: function () { return { next: function () { return Promise.resolve.call(function () {}, 1); }, return: function () { closed++; return {}; } }; } };");
+            out(&mut it, "var closed = 0, handled = 0; var iter = { [Symbol.iterator]: function () { return { next: function () { var r = /a/; r.exec = function () { return null; }; 'a'.match(r); return { done: true }; }, return: function () { closed++; return {}; } }; } };");
             let r = out(&mut it, &format!("Promise.{f}(iter).catch(function () {{ handled++; }}); 1"));
-            assert_eq!(r, "unsupported:Promise static method on a constructor other than Promise", "{f}");
+            assert_eq!(r, "unsupported:RegExp with a replaced exec method", "{f}");
             assert_eq!(out(&mut it, "closed + ',' + handled"), "0,0", "{f}");
         }
     });

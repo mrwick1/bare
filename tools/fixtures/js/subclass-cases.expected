@@ -1,0 +1,128 @@
+map_basic	string:true,true,true,2,2,4,true,true,1,[object Map],3,4
+map_no_new	string:TypeError: Class constructor M cannot be invoked without 'new'
+map_ctor_calls_set	string:1,2,2,4
+map_fields_after_super	string:5,1/5
+map_radix_ordered_dict	string:3,x,9|b,5|c,2,9,2,b,true,true
+map_species_free	string:true,true,constructor,M,0,true
+map_tostringtag_override	string:[object Mine]
+map_brand_check	string:TypeError
+map_iter	string:7/1,2/1
+map_grouping_entries_from	string:2,2
+map_bad_adder	string:TypeError
+map_empty_iterable_no_adder	string:0,0
+map_extends_null_proto_default	string:true,0
+reflect_construct_map	string:true,2,true
+reflect_construct_map_class	string:true,false,true,2
+reflect_construct_nt_not_ctor	string:TypeError
+set_basic	string:true,true,4,true,true,2|3|4,[object Set]
+set_add_override	string:1,2,2
+set_methods_return_plain	string:true,false,4
+weakmap_basic	string:true,true,1,true,true,false,[object WeakMap]
+weakset_basic	string:true,true,true,false,[object WeakSet]
+weakmap_adder	number:2
+weakref_basic	string:true,true,true,[object WeakRef]
+finreg_basic	string:true,true,function,[object FinalizationRegistry]
+array_basic	string:true,true,true,3,1,2,3,[object Array],true
+array_length_exotic	string:6,2,false,[null,null]
+array_ctor_args	string:3,1,2,3,RangeError
+array_species_map	string:true,2,4,6,true,true,true,true,true,true
+array_from_of	string:true,2,true,7,8,true
+array_species_override	string:false,true,true
+array_species_undefined	string:true
+array_species_calls_ctor_with_length	string:1,2,3|3|0|2|1
+array_default_derived_push_len	string:2,0,1,1
+array_iter_spread	string:1,2,3,true,0,1,[1,2,3]
+array_custom_ctor	string:2,2,s,1
+array_sort_reverse_keep_type	string:true,1,2,3,true
+array_concat_spreadable	string:2,false,true
+array_length_is_own	string:2,true,false,false
+array_reflect_construct	string:true,3,true,true
+error_basic	string:true,true,boom,Error,Error: boom,[object Error],Error: boom,true,true
+error_name_override	string:MyErr: x,MyErr,true
+error_name_on_proto	string:MyErr: x,MyErr: x
+error_cause	string:true,false,false,false
+error_no_args	string:,false,Error,Error
+error_called_as_function	string:TypeError: Class constructor E cannot be invoked without 'new'
+error_extra_props	string:404,nf,true,{"status":404},status
+error_throw_catch	string:true,E,t
+error_stack_has_message	string:true,true
+error_native_subclasses	string:true:true:true:TypeError:m:TypeError: m:true:TypeError: m|true:true:true:RangeError:m:RangeError: m:true:RangeError: m|true:true:true:SyntaxError:m:SyntaxError: m:true:SyntaxError: m|true:true:true:ReferenceError:m:ReferenceError: m:true:ReferenceError: m|true:true:true:EvalError:m:EvalError: m:true:EvalError: m|true:true:true:URIError:m:URIError: m:true:URIError: m
+error_native_cause	string:7,false
+error_aggregate	string:true,true,true,1,2,m,AggregateError,3,[object Error]
+error_in_promise_reject	undefined
+error_reflect_construct	string:true,m,true,[object Error]
+error_capture_stack	string:string,m
+error_prototype_is_error_like	string:true,true,false,false,E
+promise_basic	string:true,true,[object Promise],true
+promise_then_species	string:true,true,true,true,true
+promise_ctor_args	string:t,t,true
+promise_species_override	string:false,true
+promise_static_methods	string:true,true,true,true,true,true,true
+promise_resolve_same_ctor	string:true,false,true,false
+promise_executor_ctor_arg	string:function
+promise_not_ctor_this	string:TypeError
+promise_non_promise_ctor	string:TypeError
+promise_plain_thenable_ctor	string:1,true,true
+promise_async_returns_plain	string:false,true
+promise_reflect_construct	string:true,true,[object Promise]
+promise_called_as_function	string:TypeError
+promise_then_on_non_promise	string:TypeError
+promise_constructor_getter_species_order	string:species
+regexp_basic	string:true,true,a(b),gi,true,3,[object RegExp],x[b][B],aB
+regexp_species_split	string:a|c
+regexp_matchall	number:2
+regexp_symbol_replace	string:custom
+date_basic	string:true,true,0,1970-01-01T00:00:00.000Z,[object Date],"1970-01-01T00:00:00.000Z",true
+date_methods_subclass	string:15,2020,true,true,946684800000
+date_iso_string_arg	number:1577923200000
+date_tojson_ordering	string:{"d":"custom"}
+date_reflect_construct	string:true,5,[object Date]
+typedarray_basic	string:true,true,4,44,4,true,[object Uint8Array],true,Uint8Array
+typedarray_from_array	string:1,2,3,true,true,true,true
+typedarray_buffer	string:2,2,true,2,2
+typedarray_static	string:true,1,2,true,3,4
+typedarray_all_kinds	string:true,true,true,true,true,true,true,true,true,true,true
+typedarray_called_as_function	string:TypeError
+typedarray_set_iter	string:0,1,2,0,1,2,0,1,2
+typedarray_abstract_super	string:TypeError: Abstract class TypedArray not directly constructable
+typedarray_species_slice	string:false,true
+arraybuffer_basic	string:true,true,8,[object ArrayBuffer],true,6,8
+arraybuffer_called_as_function	string:TypeError
+arraybuffer_species	boolean:false
+dataview_basic	string:true,true,4,1,9,[object DataView],9
+wrapper_boolean	string:true,true,true,object,[object Boolean],true,true
+wrapper_number	string:true,21,42,object,22,[object Number],21.0
+wrapper_string	string:true,2,HI!,h,object,hix,[object String],0,1,hi
+wrapper_called_as_function	string:TypeError
+object_basic	string:true,true,false
+iterator_basic	string:true,true,function,0
+class_extends_native_chain	string:true,true,true,2,true
+class_extends_native_chain_array	string:6,true,3
+class_extends_native_mixin	string:hi 2,true
+class_extends_native_static_inherit	string:true,2,true,function
+class_extends_map_groupby	string:true,2
+class_return_override	string:true,false
+class_super_not_called	string:ReferenceError
+class_super_twice	string:ReferenceError
+class_this_before_super	string:ReferenceError
+class_super_method_call	string:g2,false,true
+class_new_target_in_native_super	boolean:true
+class_extends_bound_native	throw:TypeError:Class extends value does not have valid prototype property undefined
+class_extends_native_getter_proto	throw:TypeError:Cannot redefine property: prototype
+class_extends_native_with_static_block	number:2
+class_extends_native_private_methods	number:1
+class_extends_native_private_brand_on_native	string:true,false
+class_extends_array_private	string:t,1
+class_extends_native_json	string:[[1,2]]
+class_extends_native_object_assign	string:extra,{"extra":1},0
+class_extends_native_structured	string:0,0
+class_extends_native_symbol_species_static	string:true
+class_extends_native_toString_tag_inherited	string:[object Map],[object Set],[object WeakMap]
+class_extends_native_instanceof_hasinstance	string:true,false
+class_extends_native_prototype_writable_false	string:false,false,false
+class_extends_native_proto_nt_proxy	string:true,true
+class_extends_native_nt_prototype_getter_once	number:7
+class_extends_native_extends_in_expr	number:2
+class_extends_native_arguments_spread	number:2
+class_extends_native_instances_independent	string:1,0
+class_extends_native_gc_pressure	number:1999000

@@ -91,9 +91,10 @@ fn only_the_opted_in_host_constructor_takes_a_different_new_target() {
         assert_eq!(out(&mut it, "function G() {} var P = {}; G.prototype = P; Object.getPrototypeOf(Reflect.construct(NtCtor, [], G)) === P"), "true");
         assert_eq!(out(&mut it, "class D extends NtCtor {}; var d = new D(); Object.getPrototypeOf(d) === D.prototype && d instanceof D"), "true");
         assert_eq!(out(&mut it, "class E extends D { constructor() { super(); this.x = 1; } }; var e = new E(); [e.x, e instanceof D, Object.getPrototypeOf(e) === E.prototype].join()"), "1,true,true");
-        // plain construction, and a construction whose new.target is the function itself
-        assert_eq!(out(&mut it, "Object.getPrototypeOf(new NtCtor()) === NtCtor.prototype"), "true");
-        assert_eq!(out(&mut it, "Object.getPrototypeOf(Reflect.construct(NtCtor, [], NtCtor)) === NtCtor.prototype"), "true");
+        // plain construction, and a construction whose new.target is the function itself: no `prototype` read, the default
+        // (a real host constructor passes its own read-only `prototype` as the default)
+        assert_eq!(out(&mut it, "Object.getPrototypeOf(new NtCtor()) === Array.prototype"), "true");
+        assert_eq!(out(&mut it, "Object.getPrototypeOf(Reflect.construct(NtCtor, [], NtCtor)) === Array.prototype"), "true");
         // the generic gate is unchanged for every other host constructor
         assert_eq!(out(&mut it, "class Q extends Plain {}; new Q()"), GATE);
         assert_eq!(out(&mut it, "function G2() {} Reflect.construct(Plain, [], G2)"), GATE);
@@ -125,7 +126,7 @@ fn the_target_lives_only_for_its_own_call() {
         assert_eq!(out(&mut it, "Reflect.construct(NtCtor, [function () { Reflect.construct(Plain, [], A); }], A)"), GATE);
         assert_eq!(out(&mut it, "probe() === Array.prototype"), "true");
         assert_eq!(out(&mut it, "Reflect.construct(Heavy, [1e9], A)"), "limit:Steps");
-        assert_eq!(out(&mut it, "probe() === Array.prototype && Object.getPrototypeOf(new Heavy(1)) === Heavy.prototype"), "true");
+        assert_eq!(out(&mut it, "probe() === Array.prototype && Object.getPrototypeOf(new Heavy(1)) === Array.prototype"), "true");
         // the target is not a root once the call ends, and a collection between calls is fine
         it.collect(&[]).unwrap();
         assert_eq!(out(&mut it, "Object.getPrototypeOf(Reflect.construct(NtCtor, [], A)).tag + probe().length"), "A0");

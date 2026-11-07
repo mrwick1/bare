@@ -297,6 +297,18 @@ fn stop_propagation_prevent_default_and_passive() {
 }
 
 #[test]
+fn host_constructors_can_be_extended_by_a_class() {
+    big(|| {
+        let mut b = browser();
+        let src = "class E extends Event { k() { return 1 } } class C extends CustomEvent {} class T extends EventTarget {} class A extends AbortController {} \
+            var e = new E('x'), c = new C('y', { detail: 7 }), t = new T(), a = new A(); var seen = 0; t.addEventListener('x', function () { seen++ }); t.dispatchEvent(e); \
+            [e instanceof E, e instanceof Event, e.type, e.k(), c instanceof C, c instanceof CustomEvent, c.detail, t instanceof T, t instanceof EventTarget, seen, a instanceof A, a.signal instanceof AbortSignal, \
+            Object.getPrototypeOf(Reflect.construct(Event, ['z'], T)) === T.prototype].join()";
+        assert_eq!(js(&mut b, src), "true,true,x,1,true,true,7,true,true,1,true,true,true");
+    });
+}
+
+#[test]
 fn listener_exceptions_are_reported_and_dispatch_continues() {
     big(|| {
         let mut b = browser();
@@ -796,12 +808,10 @@ fn a_suspended_listener_activation_keeps_its_class_state_through_collect() {
 }
 
 #[test]
-fn subclassing_a_host_event_is_refused_instead_of_returning_the_wrong_brand() {
+fn a_host_event_subclass_gets_its_own_prototype_and_a_held_event_still_works() {
     big(|| {
         let mut b = browser();
-        assert_eq!(js(&mut b, "class MyEvent extends Event { get kind() { return 'my'; } } var made = 0; typeof MyEvent"), "function");
-        assert_eq!(js(&mut b, "var e = new MyEvent('x'); made = 1; e"), "unsupported:subclassing a host constructor (new.target is not passed to the constructor)");
-        assert_eq!(js(&mut b, "made + ',' + (new Event('x') instanceof Event) + ',' + typeof new CustomEvent('y').type"), "0,true,string");
+        assert_eq!(js(&mut b, "class MyEvent extends Event { get kind() { return 'my'; } } var e = new MyEvent('x'); [e.kind, e.type, e instanceof MyEvent, new Event('x') instanceof MyEvent].join()"), "my,x,true,false");
         // a class that merely holds an event is fine
         assert_eq!(js(&mut b, "class H { #e = new Event('z'); get t() { return this.#e.type; } } new H().t"), "z");
     });

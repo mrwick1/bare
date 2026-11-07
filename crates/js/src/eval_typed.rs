@@ -16,7 +16,8 @@
 //   entry), a write converts with ToBigInt (`ta_conv`) and wraps to 64 bits. Number and BigInt arrays never mix (a TypeError).
 // - Errors and their messages follow V8 (Node 22): the receiver wording of each method is in `TA_METHODS`.
 // - `from`, `of`, `map`, `filter`, `slice` and `subarray` make an instance of the intrinsic class of the receiver. A
-//   constructor that is not one of the ten intrinsics (a subclass, or a `@@species` other than the default) is `Unsupported`.
+//   constructor that is not one of the ten intrinsics (a subclass, or a `@@species` other than the default) is called
+//   (`ta_create`, as TypedArrayCreate checks the result).
 
 /// A typed array as the methods see it: the object, its buffer, the byte offset, the element count and the type.
 #[derive(Clone, Copy)]
@@ -275,27 +276,62 @@ impl<'p> Interp<'p> {
         }
     }
 
-    /// The element type of the constructor `this` of `from` and `of`. `%TypedArray%` itself cannot be constructed; any other
-    /// constructor would need `Construct` and its result checks.
-    fn ta_receiver(&mut self, this: Value) -> Res<Elem> {
+    /// The element type of the constructor `this` of `from` and `of`, and the constructor if it is not one of the ten classes.
+    /// `%TypedArray%` itself cannot be constructed.
+    fn ta_receiver(&mut self, this: Value) -> Res<(Elem, Option<ObjId>)> {
         if let Value::Object(c) = this
             && self.is_constructor(c)
         {
             if let Some(ty) = TYPED.into_iter().find(|&t| self.bin_class(t) == c) {
-                return Ok(ty);
+                return Ok((ty, None));
             }
             if c == self.bp().ta_c {
                 return Err(self.type_err("Abstract class TypedArray not directly constructable"));
             }
-            return Err(unsupported("%TypedArray%.from and %TypedArray%.of on a constructor that is not a typed-array class", Span::default()));
+            // A subclass or another constructor: the result comes from `new c(len)` (`ta_alloc`). `U8` only sizes the caps.
+            return Ok((Elem::U8, Some(c)));
         }
         let t = self.recv_text(this);
         Err(self.type_err(&format!("{t} is not a constructor")))
     }
 
+    /// TypedArrayCreate: `new c(...args)` must give a typed array that is not detached, of the content type of `like` (if given),
+    /// with at least `min` elements. The result and its element type.
+    fn ta_create(&mut self, c: ObjId, args: &[Value], min: Option<usize>, like: Option<Elem>) -> Res<(ObjId, Elem)> {
+        let r = self.ao_construct(Value::Object(c), args)?;
+        let Some(ty) = self.heap.view_type(r).filter(|&t| t != Elem::Data) else { return Err(self.type_err("this is not a typed array.")) };
+        if self.heap.view_detached(r) {
+            return Err(self.detached_err("Construct"));
+        }
+        if like.is_some_and(|l| l.is_big() != ty.is_big()) {
+            return Err(self.type_err("Cannot mix BigInt and other types, use explicit conversions"));
+        }
+        if min.is_some_and(|n| self.heap.virtual_len(r).unwrap_or(0) < n) {
+            return Err(self.type_err("Derived TypedArray constructor created an array which was too small"));
+        }
+        Ok((r, ty))
+    }
+
+    /// The result of `from` and `of`: a new typed array of `len` elements of `ty`, or `new custom(len)`.
+    fn ta_alloc(&mut self, ty: Elem, custom: Option<ObjId>, len: usize) -> Res<(ObjId, Elem)> {
+        match custom {
+            None => Ok((self.new_typed(ty, len)?, ty)),
+            Some(c) => self.ta_create(c, &[Value::Number(len as f64)], Some(len), None),
+        }
+    }
+
+    /// The result of `map`, `filter` and `slice`: TypedArraySpeciesCreate(t, [len]).
+    fn ta_species_new(&mut self, t: &Ta, len: usize) -> Res<(ObjId, Elem)> {
+        let class = self.bin_class(t.ty);
+        match self.bin_species(t.o, class)? {
+            None => Ok((self.new_typed(t.ty, len)?, t.ty)),
+            Some(c) => self.ta_create(c, &[Value::Number(len as f64)], Some(len), Some(t.ty)),
+        }
+    }
+
     /// `%TypedArray%.from(source, mapfn, thisArg)`.
     fn ta_from(&mut self, this: Value, source: Value, mapfn: Value, this_arg: Value) -> Res<Value> {
-        let ty = self.ta_receiver(this)?;
+        let (ty, custom) = self.ta_receiver(this)?;
         let mapping = !matches!(mapfn, Value::Undefined);
         if mapping {
             self.ta_callable(mapfn, false)?;
@@ -330,7 +366,7 @@ impl<'p> Interp<'p> {
         } else {
             vals.len()
         };
-        let out = self.new_typed(ty, len)?;
+        let (out, ty) = self.ta_alloc(ty, custom, len)?;
         for k in 0..len {
             self.tick()?;
             let v = if array_like { self.get_prop(source, PropertyKey::Index(k as u32))? } else { vals.get(k).copied().unwrap_or(Value::Undefined) };
@@ -342,8 +378,8 @@ impl<'p> Interp<'p> {
 
     /// `%TypedArray%.of(...items)`.
     fn ta_of(&mut self, this: Value, items: &[Value]) -> Res<Value> {
-        let ty = self.ta_receiver(this)?;
-        let out = self.new_typed(ty, items.len())?;
+        let (ty, custom) = self.ta_receiver(this)?;
+        let (out, ty) = self.ta_alloc(ty, custom, items.len())?;
         for (k, &v) in items.iter().enumerate() {
             self.tick()?;
             self.ta_put(out, ty, k, v)?;
@@ -415,12 +451,15 @@ impl<'p> Interp<'p> {
         let len = if self.heap.view_detached(t.o) { 0 } else { t.len };
         let (first, last) = self.ta_range(len, a0, a1)?;
         let class = self.bin_class(t.ty);
-        self.bin_species(t.o, class, "typed array species constructor other than the intrinsic class")?;
+        let species = self.bin_species(t.o, class)?;
         if self.heap.view_detached(t.o) {
             return Err(self.detached_err("Construct"));
         }
         let n = last.saturating_sub(first);
-        Ok(Value::Object(h!(self, self.heap.new_typed_view(Some(self.bin_proto(t.ty)), t.buf, t.off + first * t.ty.size(), n, t.ty))))
+        let off = t.off + first * t.ty.size();
+        let Some(c) = species else { return Ok(Value::Object(h!(self, self.heap.new_typed_view(Some(self.bin_proto(t.ty)), t.buf, off, n, t.ty)))) };
+        let args = [Value::Object(t.buf), Value::Number(off as f64), Value::Number(n as f64)];
+        Ok(Value::Object(self.ta_create(c, &args, None, Some(t.ty))?.0))
     }
 
     fn ta_slice(&mut self, this: Value, a0: Value, a1: Value) -> Res<Value> {
@@ -428,12 +467,21 @@ impl<'p> Interp<'p> {
         let t = self.this_ta(this, what, false)?;
         let (first, last) = self.ta_range(t.len, a0, a1)?;
         let class = self.bin_class(t.ty);
-        self.bin_species(t.o, class, "typed array species constructor other than the intrinsic class")?;
+        let species = self.bin_species(t.o, class)?;
         let last = last.max(first);
         let size = t.ty.size();
         self.work((last - first) * size, 6)?;
         if last > first && self.heap.view_detached(t.o) {
             return Err(self.detached_err(what));
+        }
+        if let Some(c) = species {
+            let (n, args) = (last - first, [Value::Number((last - first) as f64)]);
+            let (out, _) = self.ta_create(c, &args, Some(n), Some(t.ty))?;
+            for i in 0..n {
+                let v = self.ta_get(&t, first + i)?;
+                self.ta_write(out, i, v);
+            }
+            return Ok(Value::Object(out));
         }
         // A buffer that was detached while `last == first` still gives an empty result.
         let ab = self.bp().ab;
@@ -763,12 +811,10 @@ impl<'p> Interp<'p> {
                 Ok(if m == FindLast { Value::Undefined } else { Value::Number(-1.0) })
             }
             Map => {
-                let class = self.bin_class(t.ty);
-                self.bin_species(t.o, class, "typed array species constructor other than the intrinsic class")?;
-                let out = self.new_typed(t.ty, len)?;
+                let (out, oty) = self.ta_species_new(&t, len)?;
                 for i in 0..len {
                     let (_, r) = call3(self, i)?;
-                    self.ta_put(out, t.ty, i, r)?;
+                    self.ta_put(out, oty, i, r)?;
                 }
                 Ok(Value::Object(out))
             }
@@ -781,9 +827,7 @@ impl<'p> Interp<'p> {
                         kept.push(v);
                     }
                 }
-                let class = self.bin_class(t.ty);
-                self.bin_species(t.o, class, "typed array species constructor other than the intrinsic class")?;
-                let out = self.new_typed(t.ty, kept.len())?;
+                let (out, _) = self.ta_species_new(&t, kept.len())?;
                 for (i, x) in kept.into_iter().enumerate() {
                     self.ta_write(out, i, x);
                 }

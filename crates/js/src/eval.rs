@@ -901,7 +901,12 @@ impl<'p> Interp<'p> {
                 env_work.push(env.parent);
                 continue;
             }
-            let Some(v) = work.pop() else { break };
+            let Some(v) = work.pop() else {
+                if !self.promise.caps.is_empty() && self.caps_trace(&seen, &mut work) {
+                    continue;
+                }
+                break;
+            };
             let Value::Object(o) = v else { continue };
             if !seen.insert(o) {
                 continue;
@@ -1966,14 +1971,14 @@ impl<'p> Interp<'p> {
             N(Nat),
             B(ObjId, Vec<Value>),
             P(PFn),
-            H(u32, bool),
+            H(u32),
             C,
             X,
         }
         let d = match self.funcs.get(&o) {
             Some(Callee::Class) => D::C,
             Some(&Callee::Proxy { ctor: true }) => D::X,
-            Some(&Callee::Host { id, ctor: true, nt }) => D::H(id, nt),
+            Some(&Callee::Host { id, ctor: true, .. }) => D::H(id),
             Some(&Callee::Script { script, fid, env, self_binding }) if self.func_of(script, fid).is_plain_ctor() => D::S(script, fid, env, self_binding),
             Some(&Callee::Native(n)) if matches!(n, Nat::ObjectCtor | Nat::FnCtor | Nat::ArrayCtor | Nat::ErrorCtor(_) | Nat::StringFn | Nat::NumberFn | Nat::BooleanFn | Nat::Ext(Bi::RegExpCtor) | Nat::Sc(ScFn::IterCtor) | Nat::Px(PxFn::Ctor)) || matches!(n, Nat::Bin(b) if b.ctor_name().is_some() || b == BinFn::TaCtor) || matches!(n, Nat::Sc(f) if f.is_ctor()) || n == Nat::Date(DateFn::Ctor) || matches!(n, Nat::Intl(f) if f.is_ctor()) => D::N(n),
             Some(Callee::Bound { target, args, .. }) => D::B(*target, args.clone()),
@@ -1997,7 +2002,8 @@ impl<'p> Interp<'p> {
             D::X => it.px_construct(o, args, o, callee),
             D::N(n) => it.call_native(n, Value::Undefined, args, true),
             D::P(pf) => it.call_promise(pf, Value::Undefined, args, true),
-            D::H(id, nt) => it.call_host(id, Value::Undefined, args, true, nt.then_some(o)),
+            // A plain `new F` has no different `new.target`: the `prototype` of a host constructor is read-only, so it is the default.
+            D::H(id) => it.call_host(id, Value::Undefined, args, true, None),
             D::B(t, mut bargs) => {
                 bargs.extend_from_slice(args);
                 it.construct(Value::Object(t), &bargs, callee)

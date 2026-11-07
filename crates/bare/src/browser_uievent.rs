@@ -175,7 +175,7 @@ pub(crate) fn ctor<const K: u8>(d: &Dom, it: &mut Interp<'_>, _: Value, a: &[Val
         ui.page = (ui.x + off.0, ui.y + off.1);
     }
     let p = d.p();
-    let proto = [p.mouse, p.pointer, p.keyboard, p.inputev][K as usize];
+    let proto = it.host_proto_from_new_target([p.mouse, p.pointer, p.keyboard, p.inputev][K as usize])?;
     let e = d.new_event_proto(it, &ty, bubbles, cancelable, composed, proto)?;
     let mut st = d.st.borrow_mut();
     let ev = st.events.get_mut(&e).expect("just made");

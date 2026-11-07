@@ -92,12 +92,12 @@ fn symbol_keys_are_gated_not_faked() {
 }
 
 #[test]
-fn native_subclass_is_a_gate_and_reflect_free_construct_works() {
+fn native_subclass_gives_a_branded_instance() {
     big(|| {
         let mut it = realm();
-        assert!(out(&mut it, "class W extends WeakMap {} try { new W(); } catch (e) { 'caught' }").starts_with("unsupported:"));
+        assert_eq!(out(&mut it, "class W extends WeakMap {} var k = {}; var w = new W([[k, 1]]); [w instanceof W, w.get(k)].join()"), "true,1");
         let mut it = realm();
-        assert!(out(&mut it, "class W extends WeakSet {} try { new W(); } catch (e) { 'caught' }").starts_with("unsupported:"));
+        assert_eq!(out(&mut it, "class W extends WeakSet {} var k = {}; var w = new W([k]); [w instanceof W, w.has(k)].join()"), "true,true");
         assert_eq!(out(&mut it, "WeakMap.prototype.constructor === WeakMap"), "true");
     });
 }

@@ -127,6 +127,7 @@ impl<'p> Interp<'p> {
                         Some(Value::Bool(_)) => "Boolean",
                         Some(Value::Number(_)) => "Number",
                         Some(Value::String(_)) => "String",
+                        _ if self.is_error_obj(o) => "Error",
                         _ => "Object",
                     },
                 };
@@ -252,7 +253,7 @@ impl<'p> Interp<'p> {
                 }
                 Ok(Value::String(h!(self, self.heap.intern_vec(out))))
             }
-            Nat::ErrorCtor(k) => self.error_ctor(a0, self.error_protos[k as usize]),
+            Nat::ErrorCtor(k) => self.error_ctor(args, self.error_protos[k as usize]),
             Nat::ErrToString => {
                 if !matches!(this, Value::Object(_)) {
                     return Err(self.type_err("Error.prototype.toString requires that 'this' be an Object"));
@@ -366,11 +367,36 @@ impl<'p> Interp<'p> {
         self.new_array_from_proto(args, proto)
     }
 
-    fn error_ctor(&mut self, message: Value, proto: ObjId) -> Res<Value> {
+    /// An error object has no brand here. It is one the constructors made: an own `stack` and `Error.prototype` in its chain.
+    fn is_error_obj(&self, o: ObjId) -> bool {
+        if !self.heap.has_own_property(o, self.k_stack).unwrap_or(false) {
+            return false;
+        }
+        let mut p = self.heap.get_prototype_of(o).ok().flatten();
+        for _ in 0..64 {
+            let Some(q) = p else { return false };
+            if q == self.error_protos[0] {
+                return true;
+            }
+            p = self.heap.get_prototype_of(q).ok().flatten();
+        }
+        false
+    }
+
+    fn error_ctor(&mut self, args: &[Value], proto: ObjId) -> Res<Value> {
         let o = h!(self, self.heap.new_object(Some(proto)));
+        let message = arg(args, 0);
         if !matches!(message, Value::Undefined) {
             let m = self.coerce_string(message)?;
             self.def(o, self.k_message, Value::String(m), true, false, true)?;
+        }
+        // InstallErrorCause.
+        if let options @ Value::Object(oo) = arg(args, 1) {
+            let cause = h!(self, self.heap.key_from_str("cause"));
+            if self.o_has_property(oo, cause)? {
+                let v = self.get_prop(options, cause)?;
+                self.def(o, cause, v, true, false, true)?;
+            }
         }
         self.capture_stack(o)?;
         Ok(Value::Object(o))

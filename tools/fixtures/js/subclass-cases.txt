@@ -1,0 +1,289 @@
+# bare-js native-subclass cases. A case starts with `=== name`. Same format and oracle as class-cases.txt.
+# Every case is a tiny independent program; Node (vm, empty context) is the oracle.
+=== map_basic
+class M extends Map {} var m = new M([[1, 2]]); m.set(3, 4); [m instanceof M, m instanceof Map, Object.getPrototypeOf(m) === M.prototype, m.size, m.get(1), m.get(3), m.has(3), m.delete(1), m.size, Object.prototype.toString.call(m), [...m].join("|")].join()
+=== map_no_new
+class M extends Map {} try { M() } catch (e) { e.name + ": " + e.message }
+=== map_ctor_calls_set
+var log = []; class M extends Map { set(k, v) { log.push(k); return super.set(k, v * 2); } } var m = new M([[1, 1], [2, 2]]); [log.join(), m.get(1), m.get(2)].join()
+=== map_fields_after_super
+var seen = []; class M extends Map { f = 5; constructor(e) { super(e); seen.push(this.f, this.size); } } var m = new M([[1, 2]]); seen.join() + "/" + m.f
+=== map_radix_ordered_dict
+var __instances = new WeakMap();
+class OrderedDict extends Map {
+  #keys;
+  constructor(entries) { super(entries); this.#keys = [...super.keys()]; __instances.set(this, true); }
+  set(key, value) {
+    if (__instances.get(this)) { if (this.has(key)) { this.#keys[this.#keys.indexOf(key)] = key; } else { this.#keys.push(key); } }
+    super.set(key, value);
+    return this;
+  }
+  insert(index, key, value) {
+    const has = this.has(key); const length = this.#keys.length; const relativeIndex = toSafeInteger(index);
+    let actualIndex = relativeIndex >= 0 ? relativeIndex : length + relativeIndex;
+    const safeIndex = actualIndex < 0 || actualIndex >= length ? -1 : actualIndex;
+    if (safeIndex === this.size || (has && safeIndex === this.size - 1) || safeIndex === -1) { this.set(key, value); return this; }
+    const size = this.size + (has ? 0 : 1);
+    if (relativeIndex < 0) actualIndex++;
+    const keys = [...this.#keys]; let nextValue; let shouldSkip = false;
+    for (let i = actualIndex; i < size; i++) {
+      if (actualIndex === i) { let nextKey = keys[i]; if (keys[i] === key) nextKey = keys[i + 1]; if (has) this.delete(key); nextValue = this.get(nextKey); this.set(key, value); }
+      else { if (!shouldSkip && keys[i - 1] === key) shouldSkip = true; const currentKey = keys[shouldSkip ? i : i - 1]; const currentValue = nextValue; nextValue = this.get(currentKey); this.delete(currentKey); this.set(currentKey, currentValue); }
+    }
+    return this;
+  }
+  delete(key) { const deleted = super.delete(key); if (deleted) this.#keys.splice(this.#keys.indexOf(key), 1); return deleted; }
+  clear() { super.clear(); this.#keys = []; }
+  at(index) { const key = this.keyAt(index); if (key !== undefined) return this.get(key); }
+  keyAt(index) { const length = this.#keys.length; const actualIndex = toSafeInteger(index) >= 0 ? toSafeInteger(index) : length + toSafeInteger(index); if (actualIndex < 0 || actualIndex >= length) return undefined; return this.#keys[actualIndex]; }
+  entries() { return this.#keys.map((k) => [k, this.get(k)])[Symbol.iterator](); }
+}
+function toSafeInteger(n) { n = Math.trunc(n) || 0; return n; }
+var d = new OrderedDict([["a", 1], ["b", 2]]); d.set("c", 3); d.insert(1, "x", 9); d.delete("a"); d.set("b", 5);
+[d.size, [...d.entries()].join("|"), d.at(0), d.at(-1), d.keyAt(1), d instanceof Map, d instanceof OrderedDict].join()
+=== map_species_free
+class M extends Map {} var m = new M([[1, 1]]); [m.constructor === M, M[Symbol.species] === M, Object.getOwnPropertyNames(M.prototype).join(), M.name, M.length, Object.getPrototypeOf(M) === Map].join()
+=== map_tostringtag_override
+class M extends Map { get [Symbol.toStringTag]() { return "Mine"; } } String(new M())
+=== map_brand_check
+class M extends Map {} try { Map.prototype.get.call(Object.create(M.prototype), 1) } catch (e) { e.name }
+=== map_iter
+class M extends Map { *[Symbol.iterator]() { yield 7; } } var m = new M([[1, 2]]); [...m].join() + "/" + [...m.entries()].join() + "/" + m.forEach.length
+=== map_grouping_entries_from
+class M extends Map {} var m = new M(Object.entries({a: 1, b: 2})); [m.size, m.get("b")].join()
+=== map_bad_adder
+class M extends Map {} M.prototype.set = 5; try { new M([[1, 2]]) } catch (e) { e.name }
+=== map_empty_iterable_no_adder
+class M extends Map {} M.prototype.set = 5; new M().size + "," + new M(null).size
+=== map_extends_null_proto_default
+function F() {} F.prototype = 5; var m = Reflect.construct(Map, [], F); [Object.getPrototypeOf(m) === Map.prototype, m.size].join()
+=== reflect_construct_map
+function F() {} F.prototype = Object.create(Map.prototype); var m = Reflect.construct(Map, [[[1, 2]]], F); [m instanceof F, m.get(1), Object.getPrototypeOf(m) === F.prototype].join()
+=== reflect_construct_map_class
+class A {} var m = Reflect.construct(Map, [], A); [m instanceof A, m instanceof Map, Map.prototype.set.call(m, 1, 2) === m, Map.prototype.get.call(m, 1)].join()
+=== reflect_construct_nt_not_ctor
+try { Reflect.construct(Map, [], () => {}) } catch (e) { e.name }
+=== set_basic
+class S extends Set {} var s = new S([1, 2, 2, 3]); s.add(4); [s instanceof S, s instanceof Set, s.size, s.has(2), s.delete(1), [...s].join("|"), Object.prototype.toString.call(s)].join()
+=== set_add_override
+var log = []; class S extends Set { add(v) { log.push(v); return super.add(v); } } var s = new S([1, 2]); [log.join(), s.size].join()
+=== set_methods_return_plain
+class S extends Set {} var a = new S([1, 2, 3]); var u = a.union(new Set([4])); [u.constructor === Set, u instanceof S, u.size].join()
+=== weakmap_basic
+class W extends WeakMap {} var k = {}; var w = new W([[k, 1]]); w.set({}, 2); [w instanceof W, w instanceof WeakMap, w.get(k), w.has(k), w.delete(k), w.has(k), Object.prototype.toString.call(w)].join()
+=== weakset_basic
+class W extends WeakSet {} var k = {}; var w = new W([k]); [w instanceof W, w.has(k), w.delete(k), w.has(k), Object.prototype.toString.call(w)].join()
+=== weakmap_adder
+var n = 0; class W extends WeakMap { set(k, v) { n++; return super.set(k, v); } } new W([[{}, 1], [{}, 2]]); n
+=== weakref_basic
+class R extends WeakRef {} var o = {}; var r = new R(o); [r instanceof R, r instanceof WeakRef, r.deref() === o, Object.prototype.toString.call(r)].join()
+=== finreg_basic
+class F extends FinalizationRegistry {} var f = new F(() => {}); [f instanceof F, f instanceof FinalizationRegistry, typeof f.register, Object.prototype.toString.call(f)].join()
+=== array_basic
+class A extends Array {} var a = new A(); a.push(1, 2, 3); [a instanceof A, a instanceof Array, Array.isArray(a), a.length, a.join(), Object.prototype.toString.call(a), Object.getPrototypeOf(a) === A.prototype].join()
+=== array_length_exotic
+class A extends Array {} var a = new A(3); a[5] = 1; var l1 = a.length; a.length = 2; [l1, a.length, 4 in a, JSON.stringify(a)].join()
+=== array_ctor_args
+class A extends Array {} [new A(3).length, new A(1, 2).join(), new A("3").join(), (() => { try { new A(-1) } catch (e) { return e.name } })()].join()
+=== array_species_map
+class A extends Array {} var a = A.from([1, 2, 3]); var m = a.map((x) => x * 2); [m instanceof A, m.join(), a.filter((x) => x > 1) instanceof A, a.slice(1) instanceof A, a.concat([4]) instanceof A, a.splice(0, 1) instanceof A, a.flat() instanceof A, a.flatMap((x) => [x]) instanceof A].join()
+=== array_from_of
+class A extends Array {} var f = A.from([1, 2]); var o = A.of(7, 8); [f instanceof A, f.length, o instanceof A, o.join(), A.from({length: 2, 0: "a", 1: "b"}) instanceof A].join()
+=== array_species_override
+class A extends Array { static get [Symbol.species]() { return Array; } } var a = new A(1, 2, 3); var m = a.map((x) => x); [m instanceof A, m instanceof Array, m.constructor === Array].join()
+=== array_species_undefined
+class A extends Array { static get [Symbol.species]() { return undefined; } } var a = new A(1, 2, 3); [a.map((x) => x).constructor === Array].join()
+=== array_species_calls_ctor_with_length
+var args = []; class A extends Array { constructor(...a) { super(...a); args.push(a.join()); } } var a = new A(1, 2, 3); a.map((x) => x); a.filter(() => true); a.slice(1); a.splice(0, 1); args.join("|")
+=== array_default_derived_push_len
+class A extends Array {} var a = new A(); a.push(1); a.push(2); a.pop(); a.unshift(0); [a.length, a.join(), a.indexOf(1)].join()
+=== array_iter_spread
+class A extends Array {} var a = A.of(1, 2, 3); [[...a].join(), Array.from(a).constructor === Array, a.entries().next().value.join(), JSON.stringify(a)].join()
+=== array_custom_ctor
+class Stack extends Array { constructor() { super(); this.name = "s"; } top() { return this[this.length - 1]; } } var s = new Stack(); s.push(1, 2); [s.top(), s.length, s.name, s.reverse().top()].join()
+=== array_sort_reverse_keep_type
+class A extends Array {} var a = A.of(3, 1, 2); a.sort(); [a instanceof A, a.join(), a.reverse() === a].join()
+=== array_concat_spreadable
+class A extends Array {} var a = A.of(1); var c = [0].concat(a); [c.length, c instanceof A, c.constructor === Array].join()
+=== array_length_is_own
+class A extends Array {} var d = Object.getOwnPropertyDescriptor(new A(2), "length"); [d.value, d.writable, d.enumerable, d.configurable].join()
+=== array_reflect_construct
+function F() {} F.prototype = Object.create(Array.prototype); var a = Reflect.construct(Array, [3], F); [Array.isArray(a), a.length, a instanceof F, Object.getPrototypeOf(a) === F.prototype].join()
+=== error_basic
+class E extends Error {} var e = new E("boom"); [e instanceof E, e instanceof Error, e.message, e.name, String(e), Object.prototype.toString.call(e), e.stack.split("\n")[0], Object.prototype.hasOwnProperty.call(e, "message"), Object.prototype.hasOwnProperty.call(e, "stack")].join()
+=== error_name_override
+class MyErr extends Error { constructor(m) { super(m); this.name = "MyErr"; } } var e = new MyErr("x"); [String(e), e.name, e instanceof MyErr].join()
+=== error_name_on_proto
+class MyErr extends Error {} MyErr.prototype.name = "MyErr"; var e = new MyErr("x"); [String(e), e.stack.split("\n")[0]].join()
+=== error_cause
+class E extends Error {} var c = new Error("c"); var e = new E("m", { cause: c }); [e.cause === c, Object.getOwnPropertyDescriptor(e, "cause").enumerable, "cause" in new E("m"), new E("m", {}).hasOwnProperty("cause")].join()
+=== error_no_args
+class E extends Error {} var e = new E(); [e.message, e.hasOwnProperty("message"), String(e), e.stack.split("\n")[0]].join()
+=== error_called_as_function
+class E extends Error {} try { E("x") } catch (e) { e.name + ": " + e.message }
+=== error_extra_props
+class HttpError extends Error { constructor(status, msg) { super(msg); this.status = status; } } var e = new HttpError(404, "nf"); [e.status, e.message, e instanceof HttpError, JSON.stringify(e), Object.keys(e).join()].join()
+=== error_throw_catch
+class E extends Error { constructor(m) { super(m); this.name = "E"; } } try { throw new E("t"); } catch (e) { [e instanceof E, e.name, e.message].join() }
+=== error_stack_has_message
+class E extends Error {} var s = new E("hello").stack; [s.includes("hello"), s.startsWith("Error: hello")].join()
+=== error_native_subclasses
+var out = []; for (var N of [TypeError, RangeError, SyntaxError, ReferenceError, EvalError, URIError]) { var C = class extends N {}; var e = new C("m"); out.push([e instanceof C, e instanceof N, e instanceof Error, e.name, e.message, String(e), Object.getPrototypeOf(Object.getPrototypeOf(e)) === N.prototype, e.stack.split("\n")[0]].join(":")); } out.join("|")
+=== error_native_cause
+class T extends TypeError {} var e = new T("m", { cause: 7 }); [e.cause, Object.getOwnPropertyDescriptor(e, "cause").enumerable].join()
+=== error_aggregate
+class A extends AggregateError {} var e = new A([1, 2], "m", { cause: 3 }); [e instanceof A, e instanceof AggregateError, e instanceof Error, e.errors.join(), e.message, e.name, e.cause, Object.prototype.toString.call(e)].join()
+=== error_in_promise_reject
+class E extends Error {} var r; Promise.reject(new E("x")).catch((e) => { r = e instanceof E; }); r
+=== error_reflect_construct
+function F() {} F.prototype = Object.create(Error.prototype); var e = Reflect.construct(Error, ["m"], F); [e instanceof F, e.message, Object.getPrototypeOf(e) === F.prototype, Object.prototype.toString.call(e)].join()
+=== error_capture_stack
+class E extends Error { constructor(m) { super(m); if (Error.captureStackTrace) Error.captureStackTrace(this, E); } } var e = new E("m"); [typeof e.stack, e.message].join()
+=== error_prototype_is_error_like
+class E extends Error {} [Object.getPrototypeOf(E) === Error, Object.getPrototypeOf(E.prototype) === Error.prototype, E.prototype.hasOwnProperty("message"), E.prototype.hasOwnProperty("name"), E.name].join()
+=== promise_basic
+class P extends Promise {} var p = new P((r) => r(1)); [p instanceof P, p instanceof Promise, Object.prototype.toString.call(p), Object.getPrototypeOf(p) === P.prototype].join()
+=== promise_then_species
+class P extends Promise {} var p = P.resolve(1); var t = p.then((x) => x); var c = p.catch(() => {}); var f = p.finally(() => {}); [p instanceof P, t instanceof P, c instanceof P, f instanceof P, t.constructor === P].join()
+=== promise_ctor_args
+class P extends Promise { constructor(ex) { super(ex); this.tag = "t"; } } var p = new P((r) => r(5)); var q = p.then((x) => x); [p.tag, q.tag, q instanceof P].join()
+=== promise_species_override
+class P extends Promise { static get [Symbol.species]() { return Promise; } } var t = P.resolve(1).then(() => 1); [t instanceof P, t.constructor === Promise].join()
+=== promise_static_methods
+class P extends Promise {} var a = P.resolve(1), b = P.reject(new Error("x")), c = P.all([1]), d = P.allSettled([1]), e = P.race([1]), f = P.any([1]), w = P.withResolvers(); b.catch(() => {}); [a instanceof P, b instanceof P, c instanceof P, d instanceof P, e instanceof P, f instanceof P, w.promise instanceof P].join()
+=== promise_resolve_same_ctor
+class P extends Promise {} var p = P.resolve(1); [P.resolve(p) === p, Promise.resolve(p) === p, Promise.resolve(p) instanceof Promise, Promise.resolve(p) instanceof P].join()
+=== promise_executor_ctor_arg
+var seen; class P extends Promise { constructor(ex) { seen = typeof ex; super(ex); } } P.resolve(1).then(() => {}); seen
+=== promise_not_ctor_this
+try { Promise.resolve.call(undefined, 1) } catch (e) { e.name }
+=== promise_non_promise_ctor
+try { Promise.resolve.call(function () {}, 1) } catch (e) { e.name }
+=== promise_plain_thenable_ctor
+var made = []; function C(ex) { made.push(1); ex(() => {}, () => {}); } C.resolve = Promise.resolve; var r = C.resolve(1); [made.length, r instanceof C, Object.getPrototypeOf(r) === C.prototype].join()
+=== promise_async_returns_plain
+class P extends Promise {} async function f() {} var r = f.call(new P(() => {})); [r instanceof P, r.constructor === Promise].join()
+=== promise_reflect_construct
+function F() {} F.prototype = Object.create(Promise.prototype); var p = Reflect.construct(Promise, [(r) => r(1)], F); [p instanceof F, p instanceof Promise, Object.prototype.toString.call(p)].join()
+=== promise_called_as_function
+class P extends Promise {} try { P(() => {}) } catch (e) { e.name }
+=== promise_then_on_non_promise
+class P extends Promise {} try { P.prototype.then.call({}, () => {}) } catch (e) { e.name }
+=== promise_constructor_getter_species_order
+var log = []; class P extends Promise { static get [Symbol.species]() { log.push("species"); return P; } } P.resolve(1).then(() => {}); log.join()
+=== regexp_basic
+class R extends RegExp {} var r = new R("a(b)", "gi"); [r instanceof R, r instanceof RegExp, r.source, r.flags, r.test("xAB"), r.lastIndex, Object.prototype.toString.call(r), "xAbAB".replace(r, "[$1]"), "aB".match(r).join()].join()
+=== regexp_species_split
+class R extends RegExp {} var r = new R("b"); var parts = "abc".split(r); parts.join("|")
+=== regexp_matchall
+class R extends RegExp {} var r = new R("a", "g"); [..."aXa".matchAll(r)].length
+=== regexp_symbol_replace
+class R extends RegExp { [Symbol.replace](s, r) { return "custom"; } } "abc".replace(new R("b"), "x")
+=== date_basic
+class D extends Date {} var d = new D(0); [d instanceof D, d instanceof Date, d.getTime(), d.toISOString(), Object.prototype.toString.call(d), JSON.stringify(d), Object.getPrototypeOf(d) === D.prototype].join()
+=== date_methods_subclass
+class D extends Date { day() { return this.getUTCDate(); } } var d = new D(Date.UTC(2020, 0, 15)); [d.day(), d.getUTCFullYear(), new D(d).getTime() === d.getTime(), D.now() > 0, D.UTC(2000, 0)].join()
+=== date_iso_string_arg
+class D extends Date {} new D("2020-01-02T00:00:00Z").getTime()
+=== date_tojson_ordering
+class D extends Date { toJSON() { return "custom"; } } JSON.stringify({ d: new D(0) })
+=== date_reflect_construct
+function F() {} F.prototype = Object.create(Date.prototype); var d = Reflect.construct(Date, [5], F); [d instanceof F, d.getTime(), Object.prototype.toString.call(d)].join()
+=== typedarray_basic
+class U extends Uint8Array {} var u = new U(4); u[0] = 300; [u instanceof U, u instanceof Uint8Array, u.length, u[0], u.byteLength, ArrayBuffer.isView(u), Object.prototype.toString.call(u), Object.getPrototypeOf(u) === U.prototype, u[Symbol.toStringTag]].join()
+=== typedarray_from_array
+class U extends Uint8Array {} var u = new U([1, 2, 3]); [u.join(), u.map((x) => x * 2) instanceof U, u.slice(1) instanceof U, u.subarray(1) instanceof U, u.filter(() => true) instanceof U].join()
+=== typedarray_buffer
+class U extends Uint16Array {} var b = new ArrayBuffer(8); var u = new U(b, 2, 2); [u.length, u.byteOffset, u.buffer === b, u.BYTES_PER_ELEMENT, U.BYTES_PER_ELEMENT].join()
+=== typedarray_static
+class U extends Uint8Array {} var f = U.from([1, 2]); var o = U.of(3, 4); [f instanceof U, f.join(), o instanceof U, o.join()].join()
+=== typedarray_all_kinds
+var out = []; for (var N of [Int8Array, Uint8Array, Uint8ClampedArray, Int16Array, Uint16Array, Int32Array, Uint32Array, Float32Array, Float64Array, BigInt64Array, BigUint64Array]) { var C = class extends N {}; var a = new C(2); out.push(a instanceof C && a instanceof N && a.length === 2 && Object.prototype.toString.call(a) === "[object " + N.name + "]"); } out.join()
+=== typedarray_called_as_function
+class U extends Uint8Array {} try { U(2) } catch (e) { e.name }
+=== typedarray_set_iter
+class U extends Uint8Array {} var u = new U(3); u.set([1, 2], 1); [u.join(), [...u].join(), Array.from(u).join()].join()
+=== typedarray_abstract_super
+var T = Object.getPrototypeOf(Uint8Array); class A extends T {} try { new A() } catch (e) { e.name + ": " + e.message }
+=== typedarray_species_slice
+class U extends Uint8Array { static get [Symbol.species]() { return Uint8Array; } } var u = new U(3); [u.slice() instanceof U, u.slice() instanceof Uint8Array].join()
+=== arraybuffer_basic
+class B extends ArrayBuffer {} var b = new B(8); [b instanceof B, b instanceof ArrayBuffer, b.byteLength, Object.prototype.toString.call(b), b.slice(2) instanceof B, b.slice(2).byteLength, new Uint8Array(b).length].join()
+=== arraybuffer_called_as_function
+class B extends ArrayBuffer {} try { B(4) } catch (e) { e.name }
+=== arraybuffer_species
+class B extends ArrayBuffer { static get [Symbol.species]() { return ArrayBuffer; } } var b = new B(8); b.slice(1) instanceof B
+=== dataview_basic
+class V extends DataView {} var b = new ArrayBuffer(8); var v = new V(b, 1, 4); v.setUint8(0, 9); [v instanceof V, v instanceof DataView, v.byteLength, v.byteOffset, v.getUint8(0), Object.prototype.toString.call(v), new Uint8Array(b)[1]].join()
+=== wrapper_boolean
+class B extends Boolean {} var b = new B(true); [b instanceof B, b instanceof Boolean, b.valueOf(), typeof b, Object.prototype.toString.call(b), b.toString(), Object.getPrototypeOf(b) === B.prototype].join()
+=== wrapper_number
+class N extends Number { twice() { return this * 2; } } var n = new N(21); [n instanceof N, n.valueOf(), n.twice(), typeof n, n + 1, Object.prototype.toString.call(n), n.toFixed(1)].join()
+=== wrapper_string
+class S extends String { shout() { return this.toUpperCase() + "!"; } } var s = new S("hi"); [s instanceof S, s.length, s.shout(), s[0], typeof s, s + "x", Object.prototype.toString.call(s), Object.keys(s).join(), s.valueOf()].join()
+=== wrapper_called_as_function
+class N extends Number {} try { N(5) } catch (e) { e.name }
+=== object_basic
+class O extends Object {} var o = new O(); [o instanceof O, Object.getPrototypeOf(o) === O.prototype, new O(1) instanceof Number].join()
+=== iterator_basic
+class I extends Iterator { next() { return { done: true }; } } var i = new I(); [i instanceof I, i instanceof Iterator, typeof i.map, [...i].length].join()
+=== class_extends_native_chain
+class A extends Map {} class B extends A {} var b = new B([[1, 2]]); [b instanceof A, b instanceof B, b instanceof Map, b.get(1), Object.getPrototypeOf(B.prototype) === A.prototype].join()
+=== class_extends_native_chain_array
+class A extends Array {} class B extends A { sum() { return this.reduce((a, b) => a + b, 0); } } var b = B.of(1, 2, 3); [b.sum(), b.map((x) => x) instanceof B, b.length].join()
+=== class_extends_native_mixin
+var M = (Base) => class extends Base { hello() { return "hi " + this.size; } }; class C extends M(Set) {} var c = new C([1, 2]); [c.hello(), c instanceof Set].join()
+=== class_extends_native_static_inherit
+class M extends Map { static make() { return new this([[1, 2]]); } } var m = M.make(); [m instanceof M, m.get(1), M.groupBy === Map.groupBy, typeof M.groupBy].join()
+=== class_extends_map_groupby
+class M extends Map {} var g = M.groupBy([1, 2, 3], (x) => x % 2); [g instanceof Map, g.size].join()
+=== class_return_override
+class M extends Map { constructor() { super(); return new Set([1]); } } var r = new M(); [r instanceof Set, r instanceof M].join()
+=== class_super_not_called
+class M extends Map { constructor() { } } try { new M() } catch (e) { e.name }
+=== class_super_twice
+class M extends Map { constructor() { super(); super(); } } try { new M() } catch (e) { e.name }
+=== class_this_before_super
+class M extends Map { constructor() { this.x = 1; super(); } } try { new M() } catch (e) { e.name }
+=== class_super_method_call
+class M extends Map { get(k) { return "g" + super.get(k); } has(k) { return !super.has(k); } } var m = new M([[1, 2]]); [m.get(1), m.has(1), m.has(5)].join()
+=== class_new_target_in_native_super
+var nt; class M extends Map { constructor() { super(); nt = new.target === M; } } new M(); nt
+=== class_extends_bound_native
+var B = Map.bind(null); class M extends B {} var m = new M([[1, 2]]); [m instanceof M, m instanceof Map, m.get(1)].join()
+=== class_extends_native_getter_proto
+class M extends Map {} Object.defineProperty(M, "prototype", { value: {}, writable: false }); 1
+=== class_extends_native_with_static_block
+class M extends Map { static #n = 0; static inc() { return ++M.#n; } } M.inc(); M.inc()
+=== class_extends_native_private_methods
+class M extends Map { #p() { return this.size; } q() { return this.#p(); } } new M([[1, 1]]).q()
+=== class_extends_native_private_brand_on_native
+class M extends Map { #x = 1; static has(o) { return #x in o; } } [M.has(new M()), M.has(new Map())].join()
+=== class_extends_array_private
+class A extends Array { #t = "t"; get t() { return this.#t; } } var a = new A(); a.push(1); [a.t, a.length].join()
+=== class_extends_native_json
+class M extends Map { toJSON() { return [...this]; } } JSON.stringify(new M([[1, 2]]))
+=== class_extends_native_object_assign
+class M extends Map {} var m = new M(); m.extra = 1; [Object.keys(m).join(), JSON.stringify(m), m.size].join()
+=== class_extends_native_structured
+class M extends Set {} var s = new M([1]); [Object.getOwnPropertyNames(s).length, Reflect.ownKeys(s).length].join()
+=== class_extends_native_symbol_species_static
+class M extends Map {} [Object.getOwnPropertyDescriptor(Map, Symbol.species).get.call(M) === M].join()
+=== class_extends_native_toString_tag_inherited
+class M extends Map {} class S extends Set {} class W extends WeakMap {} [String(new M()), String(new S()), String(new W())].join()
+=== class_extends_native_instanceof_hasinstance
+class M extends Map {} [Map[Symbol.hasInstance](new M()), M[Symbol.hasInstance](new Map())].join()
+=== class_extends_native_prototype_writable_false
+class M extends Map {} var d = Object.getOwnPropertyDescriptor(M, "prototype"); [d.writable, d.enumerable, d.configurable].join()
+=== class_extends_native_proto_nt_proxy
+class M extends Map {} var P = new Proxy(M, {}); var m = Reflect.construct(Map, [], P); [m instanceof M, Object.getPrototypeOf(m) === M.prototype].join()
+=== class_extends_native_nt_prototype_getter_once
+var n = 0; var F = new Proxy(function () {}, { get(t, k) { if (k === "prototype") n++; return Reflect.get(t, k); } }); Reflect.construct(Map, [], F); Reflect.construct(Set, [], F); Reflect.construct(Date, [], F); Reflect.construct(Uint8Array, [1], F); Reflect.construct(ArrayBuffer, [1], F); Reflect.construct(WeakMap, [], F); Reflect.construct(Promise, [() => {}], F); n
+=== class_extends_native_extends_in_expr
+var C = class extends (0, Map) {}; new C([[1, 2]]).get(1)
+=== class_extends_native_arguments_spread
+class M extends Map { constructor(...a) { super(...a); } } new M([[1, 2], [3, 4]]).size
+=== class_extends_native_instances_independent
+class M extends Map {} var a = new M(), b = new M(); a.set(1, 1); [a.size, b.size].join()
+=== class_extends_native_gc_pressure
+class M extends Map {} var n = 0; for (var i = 0; i < 2000; i++) { var m = new M([[i, i]]); n += m.get(i); } n

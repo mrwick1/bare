@@ -247,7 +247,7 @@ fn global_encode_uri_component() {
         ("encodeURIComponent(12.5)", "string:12.5"), ("encodeURIComponent({toString(){return 'x y'}})", "string:x%20y"),
         ("var m; try{ encodeURIComponent('\\ud800') }catch(e){ m = e.name + ':' + e.message + ':' + (e instanceof URIError) + ':' + (e instanceof Error) } m", "string:URIError:URI malformed:true:true"),
         ("var m; try{ encodeURIComponent('\\udc00x') }catch(e){ m = e.name } m", "string:URIError"),
-        ("new URIError('q').message + Object.prototype.toString.call(new URIError('q'))", "string:q[object Object]"),
+        ("new URIError('q').message + Object.prototype.toString.call(new URIError('q'))", "string:q[object Error]"),
     ] {
         assert_eq!(run(src), want, "{src}");
     }

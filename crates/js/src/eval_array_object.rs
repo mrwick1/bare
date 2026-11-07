@@ -19,10 +19,10 @@
 //   iterator machinery (`iter_open`, `iter_next`, `iter_close_throw`): the iterator is closed when the map function
 //   or the element creation throws. `Object.assign` copies enumerable symbol keys; `values` and `entries` skip them.
 //
-// Gates (explicit `Unsupported`, never silent)
-// - Species: the intrinsic `Array`, `undefined` and `null` give a plain array. Any other callable is a gate (a subclass
-//   or a custom `constructor`, or a custom `@@species`). A non-callable object or primitive is a `TypeError`.
-// - `Array.from` / `Array.of` with a `this` that is a callable other than `Array`.
+// Species: the intrinsic `Array`, `undefined` and `null` give a plain array. Any other constructor (a subclass, a custom
+// `constructor` or `@@species`) is called with the length. `flat` and `flatMap` need an array from it (else `Unsupported`).
+// A value that is not a constructor is a `TypeError`. `Array.from` and `Array.of` build their result with `new this(...)`
+// when `this` is a constructor other than `Array`.
 // A primitive receiver is made a wrapper object first (`ao_recv`, ToObject): `Array.prototype.map.call("ab", f)` passes a String
 // wrapper as the third argument, `Array.prototype.fill.call(1, 0)` returns a Number object and `Object.assign(1, {a: 2})` too.
 // `concat` throws its RangeError (result longer than 2^32-1) before it reads the elements, not after.
@@ -186,8 +186,16 @@ impl<'p> Interp<'p> {
             ObjFromEntries => self.ao_from_entries(a0),
             ArrFrom => self.ao_array_from(this, a0, a1, arg(args, 2)),
             ArrOf => {
-                self.ao_plain_ctor(this, "Array.of with a non-Array this")?;
-                self.new_array_from(args)
+                let (a, custom) = self.ao_from_target(this, &[Value::Number(args.len() as f64)], 0)?;
+                if !custom {
+                    return self.new_array_from(args);
+                }
+                for (i, &v) in args.iter().enumerate() {
+                    let k = self.index_key(i as u64)?;
+                    self.ao_create(a, k, v)?;
+                }
+                self.ao_set_len(Value::Object(a), args.len() as u64)?;
+                Ok(Value::Object(a))
             }
             MathAbs | MathFloor | MathRound | MathTrunc => {
                 let x = self.coerce_number(a0)?;
@@ -327,7 +335,7 @@ impl<'p> Interp<'p> {
     }
 
     /// ArraySpeciesCreate. `constructor` and then `constructor[@@species]` are read, so getters run in order.
-    /// The intrinsic `Array` and an `undefined` or `null` species give a plain array. Any other callable is a gate.
+    /// The intrinsic `Array` and an `undefined` or `null` species give a plain array. Any other constructor is called with `len`.
     fn ao_species(&mut self, this: Value, len: u64) -> Res<ObjId> {
         if let Value::Object(o) = this
             && self.o_is_array(o)?
@@ -341,7 +349,7 @@ impl<'p> Interp<'p> {
             }
             match c {
                 Value::Object(co) if Some(co) == self.ao.array_ctor => {}
-                Value::Object(_) if self.is_callable(c) => return Err(unsupported("Array species constructor (subclass or custom constructor)", Span::default())),
+                Value::Object(co) if self.is_constructor(co) => return self.ao_construct(c, &[Value::Number(len as f64)]),
                 Value::Undefined => {}
                 _ => return Err(self.type_err("object.constructor[Symbol.species] is not a constructor")),
             }
@@ -349,11 +357,19 @@ impl<'p> Interp<'p> {
         self.ao_new_array(len)
     }
 
-    /// `Array.from` and `Array.of` make a plain array when `this` is `Array` or not callable.
-    fn ao_plain_ctor(&mut self, this: Value, what: &'static str) -> Res<()> {
+    fn ao_construct(&mut self, c: Value, args: &[Value]) -> Res<ObjId> {
+        match self.construct(c, args, ExprId::from_index(0))? {
+            Value::Object(o) => Ok(o),
+            _ => unreachable!("construct gives an object"),
+        }
+    }
+
+    /// The object `Array.from` and `Array.of` fill: `new this(...args)` when `this` is a constructor other than `Array`
+    /// (then `true`: the caller sets `length`), else a plain array of `len` holes.
+    fn ao_from_target(&mut self, this: Value, args: &[Value], len: u64) -> Res<(ObjId, bool)> {
         match this {
-            Value::Object(o) if self.is_callable(this) && Some(o) != self.ao.array_ctor => Err(unsupported(what, Span::default())),
-            _ => Ok(()),
+            Value::Object(o) if Some(o) != self.ao.array_ctor && self.is_constructor(o) => Ok((self.ao_construct(this, args)?, true)),
+            _ => Ok((self.ao_new_array(len)?, false)),
         }
     }
 
@@ -912,7 +928,6 @@ impl<'p> Interp<'p> {
     }
 
     fn ao_array_from(&mut self, this: Value, items: Value, mapfn: Value, this_arg: Value) -> Res<Value> {
-        self.ao_plain_ctor(this, "Array.from with a non-Array this")?;
         let mapping = !matches!(mapfn, Value::Undefined);
         if mapping {
             self.ao_callable(mapfn)?;
@@ -924,7 +939,7 @@ impl<'p> Interp<'p> {
         // An iterable goes through the shared iterator machinery (`iter_open`: `@@iterator` is read once). A throw
         // from the map function or from creating the element closes the iterator.
         if let Some(mut it) = self.iter_open(items)? {
-            let a = self.ao_new_array(0)?;
+            let (a, custom) = self.ao_from_target(this, &[], 0)?;
             let mut k = 0u64;
             while let Some(v) = self.iter_next(&mut it)? {
                 if let Err(e) = self.ao_from_item(a, k, mapping.then_some(mapfn), this_arg, v) {
@@ -932,10 +947,13 @@ impl<'p> Interp<'p> {
                 }
                 k += 1;
             }
+            if custom {
+                self.ao_set_len(Value::Object(a), k)?;
+            }
             return Ok(Value::Object(a));
         }
         let len = self.length_of(items)?;
-        let a = self.ao_new_array(len)?;
+        let (a, custom) = self.ao_from_target(this, &[Value::Number(len as f64)], len)?;
         self.ao_reserve(len)?;
         for i in 0..len {
             self.tick()?;
@@ -943,6 +961,9 @@ impl<'p> Interp<'p> {
             let v = self.get_prop(items, key)?;
             let v = if mapping { self.call_fn(mapfn, this_arg, &[v, Value::Number(i as f64)])? } else { v };
             self.ao_create(a, key, v)?;
+        }
+        if custom {
+            self.ao_set_len(Value::Object(a), len)?;
         }
         Ok(Value::Object(a))
     }

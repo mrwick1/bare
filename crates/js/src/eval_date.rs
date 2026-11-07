@@ -222,11 +222,11 @@ impl<'p> Interp<'p> {
     }
 
     /// A new Date with time value `t` (already clipped). Checks the cap before the object is made.
-    fn date_new(&mut self, t: f64) -> Res<Value> {
+    fn date_new(&mut self, t: f64, proto: ObjId) -> Res<Value> {
         if self.date.times.len() >= self.sc.limits.max_dates {
             return Err(Error::Limit(LimitKind::Sc(ScLimit::Dates)));
         }
-        let o = h!(self, self.heap.new_object(Some(self.date.proto)));
+        let o = h!(self, self.heap.new_object(Some(proto)));
         self.date.times.insert(o, t);
         Ok(Value::Object(o))
     }
@@ -258,6 +258,7 @@ impl<'p> Interp<'p> {
                 if !is_new {
                     return Err(unsupported("Date() called as a function (a local time string)", Span::default()));
                 }
+                let nt = self.cls.native_nt.take();
                 let t = match args.len() {
                     0 => date::time_clip(self.wall_now_ms()),
                     1 => match a0 {
@@ -269,7 +270,8 @@ impl<'p> Interp<'p> {
                     },
                     _ => return Err(unsupported("new Date(year, month, ...) is local time (bare has no time zone); use Date.UTC", Span::default())),
                 };
-                self.date_new(t)
+                let proto = self.nt_proto(nt, self.date.proto)?;
+                self.date_new(t, proto)
             }
             DateFn::Now => Ok(Value::Number(date::time_clip(self.wall_now_ms()))),
             DateFn::Parse => {

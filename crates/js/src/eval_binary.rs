@@ -419,18 +419,18 @@ impl<'p> Interp<'p> {
     }
 
     /// `SpeciesConstructor(o, default)`: reads `constructor`, then `constructor[@@species]` (each once). `undefined`, `null`
-    /// and the intrinsic `default` give the default. Another constructor is `Unsupported` (`what`): it would need
-    /// `Construct` with result checks. A value that is not a constructor is a `TypeError`.
-    fn bin_species(&mut self, o: ObjId, default: ObjId, what: &'static str) -> Res<()> {
+    /// and the intrinsic `default` give `None`. Another constructor is given back for the caller to call. A value that is
+    /// not a constructor is a `TypeError`.
+    fn bin_species(&mut self, o: ObjId, default: ObjId) -> Res<Option<ObjId>> {
         let c = match self.get_prop(Value::Object(o), self.k_constructor)? {
-            Value::Undefined => return Ok(()),
+            Value::Undefined => return Ok(None),
             c @ Value::Object(_) => c,
             _ => return Err(self.type_err("The .constructor property is not an object")),
         };
         match self.get_prop(c, self.wk_key(WK_SPECIES))? {
-            Value::Undefined | Value::Null => Ok(()),
-            Value::Object(s) if s == default => Ok(()),
-            Value::Object(s) if self.is_constructor(s) => Err(unsupported(what, Span::default())),
+            Value::Undefined | Value::Null => Ok(None),
+            Value::Object(s) if s == default => Ok(None),
+            Value::Object(s) if self.is_constructor(s) => Ok(Some(s)),
             _ => Err(self.type_err("object.constructor[Symbol.species] is not a constructor")),
         }
     }
@@ -472,6 +472,7 @@ impl<'p> Interp<'p> {
         match f {
             Gate(what) => Err(unsupported(what, Span::default())),
             AbCtor => {
+                let nt = self.cls.native_nt.take();
                 let len = self.num_index(a0, "Invalid array buffer length")?;
                 if let Value::Object(_) = a1 {
                     let k = h!(self, self.heap.key_from_str("maxByteLength"));
@@ -479,7 +480,8 @@ impl<'p> Interp<'p> {
                         return Err(unsupported("resizable ArrayBuffer", Span::default()));
                     }
                 }
-                Ok(Value::Object(h!(self, self.heap.new_buffer(Some(self.bp().ab), len))))
+                let proto = self.nt_proto(nt, self.bp().ab)?;
+                Ok(Value::Object(h!(self, self.heap.new_buffer(Some(proto), len))))
             }
             AbIsView => Ok(Value::Bool(matches!(a0, Value::Object(o) if self.heap.exotic_kind(o) == Some(ExoticKind::View)))),
             AbByteLength | AbMaxByteLength => {
@@ -506,13 +508,31 @@ impl<'p> Interp<'p> {
                 let first = Self::rel_index(first, len);
                 let last = if matches!(a1, Value::Undefined) { len } else { let e = self.num_integer(a1)?; Self::rel_index(e, len) };
                 let ab = self.bp();
-                self.bin_species(o, ab.ab_c, "ArrayBuffer species constructor other than ArrayBuffer")?;
+                let species = self.bin_species(o, ab.ab_c)?;
                 if self.heap.buffer_detached(o) {
                     return Err(self.type_err("Cannot perform ArrayBuffer.prototype.slice on a detached ArrayBuffer"));
                 }
                 let last = last.max(first);
                 self.work(last - first, 6)?;
-                Ok(Value::Object(h!(self, self.heap.new_buffer_copy(Some(ab.ab), o, first, last))))
+                let Some(c) = species else { return Ok(Value::Object(h!(self, self.heap.new_buffer_copy(Some(ab.ab), o, first, last)))) };
+                let n = self.ao_construct(Value::Object(c), &[Value::Number((last - first) as f64)])?;
+                if self.heap.exotic_kind(n) != Some(ExoticKind::Buffer) {
+                    return Err(self.incompatible("ArrayBuffer.prototype.slice", Value::Object(n)));
+                }
+                if self.heap.buffer_detached(n) {
+                    return Err(self.type_err("Cannot perform ArrayBuffer.prototype.slice on a detached ArrayBuffer"));
+                }
+                if n == o {
+                    return Err(self.type_err("ArrayBuffer subclass returned this from species constructor"));
+                }
+                if self.heap.buffer_len(n).is_none_or(|l| l < last - first) {
+                    return Err(self.type_err("Derived ArrayBuffer constructor created a buffer which was too small"));
+                }
+                let bytes = self.heap.bytes(o).and_then(|b| b.get(first..last)).map(<[u8]>::to_vec).unwrap_or_default();
+                if let Some(dst) = self.heap.bytes_mut(n) {
+                    dst[..bytes.len()].copy_from_slice(&bytes);
+                }
+                Ok(Value::Object(n))
             }
             AbTransfer(fixed) => self.ab_transfer(this, a0, fixed),
             TaCtor => Err(self.type_err("Abstract class TypedArray not directly constructable")),
@@ -533,11 +553,19 @@ impl<'p> Interp<'p> {
                 let (o, _, off, _) = self.this_view(this, "get TypedArray.prototype.byteOffset")?;
                 Ok(Value::Number(if self.heap.view_detached(o) { 0.0 } else { off as f64 }))
             }
-            TyCtor(ty) => self.ty_construct(ty, a0, a1, a2),
+            TyCtor(ty) => {
+                let nt = self.cls.native_nt.take();
+                let v = self.ty_construct(ty, a0, a1, a2)?;
+                self.nt_patch(nt, self.bin_proto(ty), v)
+            }
             TaFrom => self.ta_from(this, a0, a1, a2),
             TaOf => self.ta_of(this, args),
             Ta(m) => self.ta_method(m, this, args),
-            DvCtor => self.dv_construct(a0, a1, a2),
+            DvCtor => {
+                let nt = self.cls.native_nt.take();
+                let v = self.dv_construct(a0, a1, a2)?;
+                self.nt_patch(nt, self.bp().dv, v)
+            }
             DvBuffer | DvByteLength | DvByteOffset => self.dv_getter(f, this),
             DvGet(ty) => self.dv_get(ty, this, a0, a1),
             DvSet(ty) => self.dv_set(ty, this, a0, a1, a2),
@@ -561,7 +589,11 @@ impl<'p> Interp<'p> {
             TaIndexOf => self.ta_search(Search::IndexOf, this, args),
             TaSubarray => self.ta_subarray(this, a0, a1),
             TaSlice => self.ta_slice(this, a0, a1),
-            EncCtor => Ok(Value::Object(h!(self, self.heap.new_encoder(Some(self.bp().enc))))),
+            EncCtor => {
+                let nt = self.cls.native_nt.take();
+                let proto = self.nt_proto(nt, self.bp().enc)?;
+                Ok(Value::Object(h!(self, self.heap.new_encoder(Some(proto)))))
+            }
             EncEncoding => self.brand(this, ExoticKind::Encoder, "TextEncoder").and_then(|_| self.str_value("utf-8")),
             EncEncode => {
                 self.brand(this, ExoticKind::Encoder, "TextEncoder")?;
@@ -600,7 +632,11 @@ impl<'p> Interp<'p> {
                 }
                 Ok(Value::Object(r))
             }
-            DecCtor => self.decoder_construct(a0, a1),
+            DecCtor => {
+                let nt = self.cls.native_nt.take();
+                let v = self.decoder_construct(a0, a1)?;
+                self.nt_patch(nt, self.bp().dec, v)
+            }
             DecEncoding => self.brand(this, ExoticKind::Decoder, "TextDecoder").and_then(|_| self.str_value("utf-8")),
             DecFatal | DecIgnoreBom => {
                 self.brand(this, ExoticKind::Decoder, "TextDecoder")?;

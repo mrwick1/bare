@@ -326,12 +326,12 @@ fn legacy_string_formats_are_gated_not_guessed() {
 }
 
 #[test]
-fn subclass_and_reflect_construct_are_gated_like_other_native_constructors() {
+fn subclass_and_reflect_construct_take_the_new_target_prototype() {
     big(|| {
         let mut it = realm();
-        assert!(out(&mut it, "class D extends Date {} try { new D(0); } catch (e) { 'caught' }").starts_with("unsupported:"));
+        assert_eq!(out(&mut it, "class D extends Date {} var d = new D(0); [d instanceof D, d.getTime(), Object.prototype.toString.call(d)].join()"), "string:true,0,[object Date]");
         let mut it = realm();
-        assert!(out(&mut it, "function F() {} try { Reflect.construct(Date, [0], F); } catch (e) { 'caught' }").starts_with("unsupported:"));
+        assert_eq!(out(&mut it, "function F() {} F.prototype = Object.create(Date.prototype); var d = Reflect.construct(Date, [5], F); [d instanceof F, d.getTime()].join()"), "string:true,5");
         // the same new.target is a plain construction
         let mut it = realm();
         assert_eq!(out(&mut it, "Reflect.construct(Date, [5], Date).getTime()"), "number:5");

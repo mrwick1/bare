@@ -1,0 +1,11 @@
+then_runs	sync ## sync|1|2
+executor_throws	 ## e
+await_subclass	sync ## sync|3|after
+resolve_with_subclass	 ## a|b|4|c
+subclass_then_order	 ## 1|a|2|b
+subclass_all	 ## 1,2|3|5|rejected
+subclass_finally	 ## f|g|1|2
+subclass_constructor_calls	new|new|new|new|new|new ## new|new|new|new|new|new
+species_override_then	false|true ## false|true|x
+custom_then_in_subclass	then ## then|1|then|awaited
+unhandled_ordering_non_promise_ctor	C|res ## C|res

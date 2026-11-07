@@ -306,7 +306,9 @@ impl<'p> Interp<'p> {
                 if !is_new {
                     return Err(self.type_err(&format!("Constructor {} requires 'new'", if is_map { "WeakMap" } else { "WeakSet" })));
                 }
-                let o = self.weak_new(is_map, if is_map { self.weak.map_proto } else { self.weak.set_proto })?;
+                let nt = self.cls.native_nt.take();
+                let proto = self.nt_proto(nt, if is_map { self.weak.map_proto } else { self.weak.set_proto })?;
+                let o = self.weak_new(is_map, proto)?;
                 if !is_nullish(a0) {
                     self.weak_fill(o, is_map, a0)?;
                 }
@@ -418,9 +420,11 @@ impl<'p> Interp<'p> {
                 if !is_new {
                     return Err(self.type_err("Constructor WeakRef requires 'new'"));
                 }
+                let nt = self.cls.native_nt.take();
                 let Some(t) = self.weak_target(a0)? else { return Err(self.type_err("WeakRef: invalid target")) };
                 self.weak_room(0)?;
-                let o = h!(self, self.heap.new_object(Some(self.weak.ref_proto)));
+                let proto = self.nt_proto(nt, self.weak.ref_proto)?;
+                let o = h!(self, self.heap.new_object(Some(proto)));
                 self.weak.refs.insert(o, Some(t));
                 Ok(Value::Object(o))
             }
@@ -437,11 +441,13 @@ impl<'p> Interp<'p> {
                 if !is_new {
                     return Err(self.type_err("Constructor FinalizationRegistry requires 'new'"));
                 }
+                let nt = self.cls.native_nt.take();
                 if !self.is_callable(a0) {
                     return Err(self.type_err("FinalizationRegistry: cleanup must be callable"));
                 }
                 self.weak_room(0)?;
-                let o = h!(self, self.heap.new_object(Some(self.weak.reg_proto)));
+                let proto = self.nt_proto(nt, self.weak.reg_proto)?;
+                let o = h!(self, self.heap.new_object(Some(proto)));
                 self.weak.regs.insert(o, Registry { cleanup: a0, cells: Vec::new() });
                 Ok(Value::Object(o))
             }

@@ -84,7 +84,7 @@ impl Interp<'_> {
     }
 
     pub fn clone_new_date(&mut self, t: f64) -> Result<ObjId, Error> {
-        match self.date_new(t)? {
+        match self.date_new(t, self.date.proto)? {
             Value::Object(o) => Ok(o),
             _ => unreachable!(),
         }

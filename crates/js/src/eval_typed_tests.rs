@@ -98,15 +98,11 @@ fn gates_are_explicit() {
     assert_eq!(run("new Int8Array([1]).toLocaleString()"), "string:1");
     assert_eq!(run("new Float64Array([1234.5, -2]).toLocaleString()"), "string:1,234.5,-2");
     assert_eq!(run("new Int8Array(0).toLocaleString()"), "string:");
-    // A species or `from` receiver that is not one of the ten intrinsic classes is a gate, never a wrong type.
-    let sp = "unsupported:typed array species constructor other than the intrinsic class";
-    assert_eq!(run("var u = new Uint8Array(2); u.constructor = {[Symbol.species]: Int8Array}; u.slice(0)"), sp);
-    assert_eq!(run("var u = new Uint8Array(2); u.constructor = {[Symbol.species]: Int8Array}; u.subarray(0)"), sp);
-    assert_eq!(run("var u = new Uint8Array(2); u.constructor = {[Symbol.species]: Int8Array}; u.map(function (x) { return x })"), sp);
-    assert_eq!(run("var u = new Uint8Array(2); u.constructor = {[Symbol.species]: Int8Array}; u.filter(function () { return true })"), sp);
-    assert!(run("Uint8Array.from.call(Object, [])").starts_with("unsupported:%TypedArray%.from"));
-    assert!(run("Uint8Array.of.call(function () {}, 1)").starts_with("unsupported:%TypedArray%.from"));
-    assert!(run("class X extends Uint8Array {}; new X(2)").starts_with("unsupported:subclassing a native constructor"));
+    // A species or `from` receiver that is not one of the ten intrinsic classes is constructed, and its result is checked.
+    assert_eq!(run("var u = new Uint8Array(2); u.constructor = {[Symbol.species]: Int8Array}; [u.slice(0), u.subarray(0), u.map(function (x) { return x }), u.filter(function () { return true })].every(function (r) { return r instanceof Int8Array; })"), "boolean:true");
+    assert_eq!(run("class X extends Uint8Array {}; var x = X.from([1, 2]); [x instanceof X, x.join(), X.of(3) instanceof X].join()"), "string:true,1,2,true");
+    assert_eq!(run("class X extends Uint8Array {}; var x = new X(2); [x instanceof X, x.length, x.map(function (v) { return 1 }) instanceof X].join()"), "string:true,2,true");
+    assert_eq!(run("Uint8Array.from.call(Object, [])"), "throw:TypeError:this is not a typed array.");
     assert_eq!(run("typeof SharedArrayBuffer"), "string:undefined");
 }
 

@@ -58,7 +58,12 @@ enum PFn {
     /// The resolve or reject function of one resolving pair. `pair` is never reused (a counter), so the
     /// "already resolved" flag cannot attach to a recycled slot.
     Settle { promise: ObjId, pair: u64, reject: bool },
+    /// `thenFinally` and `catchFinally`.
     FinallyStep { on_finally: Value, reject: bool },
+    /// The same with a species constructor other than `Promise`: `holder` keeps `onFinally` (index 0) and the constructor (index 1).
+    FinallyStepC { holder: ObjId, reject: bool },
+    /// The executor of `NewPromiseCapability`: it keeps its two arguments in `holder` (index 0 and 1).
+    CapExec { holder: ObjId },
     Thunk { value: Value, throw: bool },
     /// `Promise.all`, `allSettled`, `race` and `any` (see `eval_promise_combinators.rs`).
     Comb(Comb),
@@ -72,6 +77,8 @@ impl PFn {
         match *self {
             PFn::Settle { promise, .. } => work.push(Value::Object(promise)),
             PFn::FinallyStep { on_finally, .. } => work.push(on_finally),
+            PFn::FinallyStepC { holder, .. } => work.push(Value::Object(holder)),
+            PFn::CapExec { holder } => work.push(Value::Object(holder)),
             PFn::Thunk { value, .. } => work.push(value),
             _ => {}
         }
@@ -122,6 +129,8 @@ struct PromiseState {
     next_seq: u64,
     next_pair: u64,
     done_pairs: FxSet<u64>,
+    /// The resolve and reject functions of a promise that a constructor other than `Promise` made (`new_capability`).
+    caps: FxMap<ObjId, (Value, Value)>,
     failed_job: Option<Error>,
     agg: AggState,
 }
@@ -277,6 +286,18 @@ impl<'p> Interp<'p> {
         }
     }
 
+    /// When the mark work is empty: queue the resolve and reject functions of every reached capability promise that are not reached yet.
+    /// `true` if it queued any, so the mark must go on. Done here, not for each object, so a realm without capabilities pays nothing.
+    fn caps_trace(&self, seen: &FxSet<ObjId>, work: &mut Vec<Value>) -> bool {
+        let n = work.len();
+        for (&o, &(res, rej)) in &self.promise.caps {
+            if seen.contains(&o) {
+                work.extend([res, rej].into_iter().filter(|v| matches!(v, Value::Object(x) if !seen.contains(x))));
+            }
+        }
+        work.len() > n
+    }
+
     /// Everything `Heap::collect` must see, for every tracked promise (call after `promise_prune`).
     fn promise_all_values(&self, out: &mut Vec<Value>) {
         for &o in self.promise.map.keys() {
@@ -284,11 +305,15 @@ impl<'p> Interp<'p> {
             self.promise_trace(o, out);
         }
         self.agg_all_values(out);
+        for (&o, &(res, rej)) in &self.promise.caps {
+            out.extend([Value::Object(o), res, rej]);
+        }
     }
 
     /// Drop the metadata of promises that `collect` did not reach, and of finished resolving pairs.
     fn promise_prune(&mut self, seen: &FxSet<ObjId>) {
         self.promise.map.retain(|o, _| seen.contains(o));
+        self.promise.caps.retain(|o, _| seen.contains(o));
         self.promise.reactions = self.promise.map.values().map(|d| d.reactions.len()).sum();
         let agg_pairs = self.agg_prune();
         let mut live: FxSet<u64> = self.funcs.values().filter_map(|c| if let Callee::Promise(PFn::Settle { pair, .. }) = c { Some(*pair) } else { None }).collect();
@@ -305,11 +330,13 @@ impl<'p> Interp<'p> {
                 if !is_new {
                     return Err(self.type_err("Promise constructor cannot be invoked without 'new'"));
                 }
+                let nt = self.cls.native_nt.take();
                 if !self.is_callable(a0) {
                     let t = self.display(a0);
                     return Err(self.type_err(&format!("Promise resolver {t} is not a function")));
                 }
                 let p = self.new_promise()?;
+                self.nt_patch(nt, self.promise.proto.expect("installed"), Value::Object(p))?;
                 let (res, rej, pair) = self.resolving_functions(p)?;
                 if let Err(e) = self.call_fn(a0, Value::Undefined, &[res, rej]) {
                     let v = thrown(e)?;
@@ -320,22 +347,25 @@ impl<'p> Interp<'p> {
                 Ok(Value::Object(p))
             }
             PFn::StaticResolve => {
-                self.intrinsic_this(this)?;
-                self.promise_resolve(a0)
+                self.object_this(this)?;
+                self.promise_resolve_c(this, a0)
             }
             PFn::StaticReject => {
-                self.intrinsic_this(this)?;
-                let p = self.new_promise()?;
-                self.reject_promise(p, a0)?;
+                self.object_this(this)?;
+                if matches!(this, Value::Object(c) if Some(c) == self.promise.ctor) {
+                    let p = self.new_promise()?;
+                    self.reject_promise(p, a0)?;
+                    return Ok(Value::Object(p));
+                }
+                let (p, _, rej, _) = self.new_capability(this)?;
+                self.call_fn(rej, Value::Undefined, &[a0])?;
                 Ok(Value::Object(p))
             }
             PFn::StaticWithResolvers => {
                 if !matches!(this, Value::Object(_)) {
                     return Err(self.type_err("Promise.withResolvers called on non-object"));
                 }
-                self.intrinsic_this(this)?;
-                let p = self.new_promise()?;
-                let (res, rej, _) = self.resolving_functions(p)?;
+                let (p, res, rej, _) = self.new_capability(this)?;
                 let r = h!(self, self.heap.new_object(Some(self.object_proto)));
                 for (name, v) in [("promise", Value::Object(p)), ("resolve", res), ("reject", rej)] {
                     let k = h!(self, self.heap.key_from_str(name));
@@ -351,8 +381,10 @@ impl<'p> Interp<'p> {
                         return Err(self.type_err(&format!("Method Promise.prototype.then called on incompatible receiver {t}")));
                     }
                 };
-                self.species_check(this)?;
-                let derived = self.new_promise()?;
+                let derived = match self.species_ctor(this)? {
+                    None => self.new_promise()?,
+                    Some(c) => self.new_capability(c)?.0,
+                };
                 self.perform_then(p, a0, arg(args, 1), derived)?;
                 Ok(Value::Object(derived))
             }
@@ -361,11 +393,18 @@ impl<'p> Interp<'p> {
                 if !matches!(this, Value::Object(_)) {
                     return Err(self.type_err("Promise.prototype.finally called on non-object"));
                 }
-                self.species_check(this)?;
+                let c = self.species_ctor(this)?;
                 let (on_ok, on_err) = if self.is_callable(a0) {
-                    let ok = self.pfn(PFn::FinallyStep { on_finally: a0, reject: false }, "", 1)?;
-                    let err = self.pfn(PFn::FinallyStep { on_finally: a0, reject: true }, "", 1)?;
-                    (Value::Object(ok), Value::Object(err))
+                    let (ok, err) = match c {
+                        None => (PFn::FinallyStep { on_finally: a0, reject: false }, PFn::FinallyStep { on_finally: a0, reject: true }),
+                        Some(c) => {
+                            let holder = h!(self, self.heap.new_object(None));
+                            self.def(holder, PropertyKey::Index(0), a0, true, true, true)?;
+                            self.def(holder, PropertyKey::Index(1), c, true, true, true)?;
+                            (PFn::FinallyStepC { holder, reject: false }, PFn::FinallyStepC { holder, reject: true })
+                        }
+                    };
+                    (Value::Object(self.pfn(ok, "", 1)?), Value::Object(self.pfn(err, "", 1)?))
                 } else {
                     (a0, a0)
                 };
@@ -377,11 +416,22 @@ impl<'p> Interp<'p> {
                 }
                 Ok(Value::Undefined)
             }
-            PFn::FinallyStep { on_finally, reject } => {
-                let result = self.call_fn(on_finally, Value::Undefined, &[])?;
-                let p = self.promise_resolve(result)?;
-                let thunk = self.pfn(PFn::Thunk { value: a0, throw: reject }, "", 0)?;
-                self.invoke_then(p, &[Value::Object(thunk)])
+            PFn::CapExec { holder } => {
+                let h = Value::Object(holder);
+                for i in 0..2 {
+                    if !matches!(self.get_prop(h, PropertyKey::Index(i))?, Value::Undefined) {
+                        return Err(self.type_err("Promise executor has already been invoked with non-undefined arguments"));
+                    }
+                }
+                self.def(holder, PropertyKey::Index(0), a0, true, true, true)?;
+                self.def(holder, PropertyKey::Index(1), arg(args, 1), true, true, true)?;
+                Ok(Value::Undefined)
+            }
+            PFn::FinallyStep { on_finally, reject } => self.finally_step(on_finally, Value::Object(self.promise.ctor.expect("installed")), reject, a0),
+            PFn::FinallyStepC { holder, reject } => {
+                let h = Value::Object(holder);
+                let (on_finally, c) = (self.get_prop(h, PropertyKey::Index(0))?, self.get_prop(h, PropertyKey::Index(1))?);
+                self.finally_step(on_finally, c, reject, a0)
             }
             PFn::Thunk { value, throw } => if throw { Err(Error::Throw(value)) } else { Ok(value) },
             PFn::Comb(k) => self.promise_combinator(k, this, args),
@@ -401,44 +451,98 @@ impl<'p> Interp<'p> {
         self.call_fn(then, this, args)
     }
 
-    /// Static methods are exact only on the intrinsic `Promise`. Another constructor needs `NewPromiseCapability`.
-    fn intrinsic_this(&mut self, this: Value) -> Res<()> {
-        match this {
-            Value::Object(o) if Some(o) == self.promise.ctor => Ok(()),
-            Value::Object(_) => Err(unsupported("Promise static method on a constructor other than Promise", Span::default())),
-            _ => Err(self.type_err("PromiseResolve called on non-object")),
-        }
+    /// `thenFinally` / `catchFinally`: run `onFinally`, then give back the original value or throw the original reason.
+    #[inline]
+    fn finally_step(&mut self, on_finally: Value, c: Value, reject: bool, v: Value) -> Res<Value> {
+        let result = self.call_fn(on_finally, Value::Undefined, &[])?;
+        let p = self.promise_resolve_c(c, result)?;
+        let thunk = self.pfn(PFn::Thunk { value: v, throw: reject }, "", 0)?;
+        self.invoke_then(p, &[Value::Object(thunk)])
     }
 
-    /// `SpeciesConstructor(this, %Promise%)`. `constructor` must be undefined or an object. Its `@@species`
-    /// is read; `undefined`, `null` and the intrinsic `Promise` give the default. Another callable would need
-    /// `NewPromiseCapability`, so it is a gate. A value that is not callable is a `TypeError`.
-    fn species_check(&mut self, this: Value) -> Res<()> {
+    fn object_this(&mut self, this: Value) -> Res<()> {
+        if matches!(this, Value::Object(_)) { Ok(()) } else { Err(self.type_err("PromiseResolve called on non-object")) }
+    }
+
+    /// `SpeciesConstructor(this, %Promise%)`: `None` for the default (the intrinsic `Promise`).
+    /// `constructor` must be undefined or an object. Its `@@species` must be undefined, null or a constructor.
+    fn species_ctor(&mut self, this: Value) -> Res<Option<Value>> {
         let c = self.get_prop(this, self.k_constructor)?;
         match c {
-            Value::Undefined => Ok(()),
+            Value::Undefined => Ok(None),
             Value::Object(_) => match self.get_prop(c, self.wk_key(WK_SPECIES))? {
-                Value::Undefined | Value::Null => Ok(()),
-                Value::Object(s) if Some(s) == self.promise.ctor => Ok(()),
-                s @ Value::Object(_) if self.is_callable(s) => Err(unsupported("Promise species constructor other than Promise", Span::default())),
+                Value::Undefined | Value::Null => Ok(None),
+                Value::Object(s) if Some(s) == self.promise.ctor => Ok(None),
+                s @ Value::Object(so) if self.is_constructor(so) => Ok(Some(s)),
                 _ => Err(self.type_err("object.constructor[Symbol.species] is not a constructor")),
             },
             _ => Err(self.type_err("The .constructor property is not an object")),
         }
     }
 
-    /// `PromiseResolve(%Promise%, x)`.
-    fn promise_resolve(&mut self, x: Value) -> Res<Value> {
+    /// `NewPromiseCapability(c)`: the promise, its resolve and reject functions, and the id of the resolving pair.
+    /// Any other constructor than `Promise` runs with an executor that keeps the two functions. The pair id is then
+    /// `u64::MAX` (the functions keep the "already resolved" flag) and `caps` maps the promise to the functions.
+    fn new_capability(&mut self, c: Value) -> Res<(ObjId, Value, Value, u64)> {
+        let Value::Object(co) = c else { return Err(self.type_err("PromiseResolve called on non-object")) };
+        if Some(co) == self.promise.ctor {
+            let p = self.new_promise()?;
+            let (res, rej, pair) = self.resolving_functions(p)?;
+            return Ok((p, res, rej, pair));
+        }
+        if !self.is_constructor(co) {
+            let t = self.display(c);
+            return Err(self.type_err(&format!("{t} is not a constructor")));
+        }
+        let holder = h!(self, self.heap.new_object(None));
+        let exec = self.pfn(PFn::CapExec { holder }, "", 2)?;
+        let Value::Object(p) = self.construct(c, &[Value::Object(exec)], ExprId::from_index(0))? else { unreachable!("construct gives an object") };
+        let (res, rej) = (self.get_prop(Value::Object(holder), PropertyKey::Index(0))?, self.get_prop(Value::Object(holder), PropertyKey::Index(1))?);
+        if !self.is_callable(res) || !self.is_callable(rej) {
+            return Err(self.type_err("Promise resolve or reject function is not callable"));
+        }
+        self.promise.caps.insert(p, (res, rej));
+        Ok((p, res, rej, u64::MAX))
+    }
+
+    /// `PromiseResolve(c, x)`.
+    fn promise_resolve_c(&mut self, c: Value, x: Value) -> Res<Value> {
         if let Value::Object(o) = x
             && self.promise.map.contains_key(&o)
-            && let Value::Object(c) = self.get_prop(x, self.k_constructor)?
-            && Some(c) == self.promise.ctor
+            && matches!((self.get_prop(x, self.k_constructor)?, c), (Value::Object(a), Value::Object(b)) if a == b)
         {
             return Ok(x);
         }
-        let p = self.new_promise()?;
-        self.resolve_promise(p, x)?;
+        if matches!(c, Value::Object(co) if Some(co) == self.promise.ctor) {
+            let p = self.new_promise()?;
+            self.resolve_promise(p, x)?;
+            return Ok(Value::Object(p));
+        }
+        let (p, res, _, _) = self.new_capability(c)?;
+        self.call_fn(res, Value::Undefined, &[x])?;
         Ok(Value::Object(p))
+    }
+
+    /// `PromiseResolve(%Promise%, x)`.
+    fn promise_resolve(&mut self, x: Value) -> Res<Value> {
+        self.promise_resolve_c(Value::Object(self.promise.ctor.expect("installed")), x)
+    }
+
+    /// Settle the promise `derived` of a reaction: through the functions of its capability if it has them.
+    #[inline(always)]
+    fn react_settle(&mut self, derived: ObjId, v: Value, reject: bool) -> Res<()> {
+        if !self.promise.caps.is_empty()
+            && let Some(&(res, rej)) = self.promise.caps.get(&derived)
+        {
+            return self.react_cap(res, rej, v, reject);
+        }
+        if reject { self.reject_promise(derived, v) } else { self.resolve_promise(derived, v) }
+    }
+
+    /// A throw of a user resolve function has no promise to reject: it is dropped, as a failed job is.
+    #[cold]
+    fn react_cap(&mut self, res: Value, rej: Value, v: Value, reject: bool) -> Res<()> {
+        self.call_fn(if reject { rej } else { res }, Value::Undefined, &[v]).map(drop).or_else(|e| thrown(e).map(drop))
     }
 
     // ------------------------------------------------------------ promise operations
@@ -563,13 +667,13 @@ impl<'p> Interp<'p> {
         match job {
             Job::React { handler, arg, derived, rejected } => {
                 if matches!(handler, Value::Undefined) {
-                    return if rejected { self.reject_promise(derived, arg) } else { self.resolve_promise(derived, arg) };
+                    return self.react_settle(derived, arg, rejected);
                 }
                 match self.call_fn(handler, Value::Undefined, &[arg]) {
-                    Ok(v) => self.resolve_promise(derived, v),
+                    Ok(v) => self.react_settle(derived, v, false),
                     Err(e) => {
                         let v = thrown(e)?;
-                        self.reject_promise(derived, v)
+                        self.react_settle(derived, v, true)
                     }
                 }
             }

@@ -163,7 +163,7 @@ fn other_host_constructors_stay_gated() {
     big(|| {
         let mut b = at();
         let gate = "unsupported:subclassing a host constructor (new.target is not passed to the constructor)";
-        for (name, args) in [("URL", "'http://a.test/'"), ("Event", "'x'"), ("FocusEvent", "'x'"), ("Headers", ""), ("Request", "'http://a.test/'"), ("Response", "")] {
+        for (name, args) in [("URL", "'http://a.test/'"), ("Headers", ""), ("Request", "'http://a.test/'"), ("Response", "")] {
             assert_eq!(js(&mut b, &format!("class X extends {name} {{}}; new X({args})")), gate, "{name}");
             assert_eq!(js(&mut b, &format!("function G() {{}} Reflect.construct({name}, [{args}], G)")), gate, "Reflect {name}");
         }
@@ -182,7 +182,7 @@ fn limits_and_failures_leave_no_new_target_behind() {
         assert_eq!(js(&mut b, "try { Reflect.construct(URLSearchParams, [], ntD) } catch (e) { 'caught' }"), format!("limit:{:?}", LimitKind::CallDepth));
         assert_eq!(js(&mut b, "var p = new L('a=1'); [Object.getPrototypeOf(p) === L.prototype, Object.getPrototypeOf(new URLSearchParams()) === URLSearchParams.prototype].join()"), "true,true");
         // an Unsupported gate inside the getter, then a clean construction
-        assert_eq!(js(&mut b, "class E extends Event {}; var ntU = mkNt(function () { new E('x'); return {}; }); Reflect.construct(URLSearchParams, [], ntU)"), "unsupported:subclassing a host constructor (new.target is not passed to the constructor)");
+        assert_eq!(js(&mut b, "class E extends URL {}; var ntU = mkNt(function () { new E('http://a.test/'); return {}; }); Reflect.construct(URLSearchParams, [], ntU)"), "unsupported:subclassing a host constructor (new.target is not passed to the constructor)");
         assert_eq!(js(&mut b, "Object.getPrototypeOf(new L()) === L.prototype && Object.getPrototypeOf(new URLSearchParams()) === URLSearchParams.prototype"), "true");
         // a step limit inside the getter
         let mut s = mk(EvalLimits { max_steps: 3_000, ..Default::default() });

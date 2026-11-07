@@ -104,6 +104,8 @@ struct ClassState {
     max_slots: usize,
     /// The `new.target` for the next `call_body` of a flagged function.
     pending_nt: Option<ObjId>,
+    /// The `new.target` of the native constructor that runs next. A native constructor takes it first, with `nt_proto`.
+    native_nt: Option<ObjId>,
     /// First walk: the class element (class, is_static) the code belongs to. `elem_ctx` is for the next function.
     cur: Option<(ClassId, bool)>,
     elem_ctx: Option<(ClassId, bool)>,
@@ -297,10 +299,39 @@ impl<'p> Interp<'p> {
     }
 
     /// Keep in sync with the cases of `construct_inner`.
-    /// A native constructor that builds a branded object and cannot take another `new.target` (the byte classes, Map, Set).
-    /// A prototype patch after the call would give the wrong brand, so a subclass of one is refused when it is constructed.
+    /// A native constructor that builds a branded object (the byte classes, Map, Set, Date, Intl).
     fn native_no_nt(n: Nat) -> bool {
         matches!(n, Nat::Bin(b) if b.ctor_name().is_some() || b == BinFn::TaCtor) || matches!(n, Nat::Sc(f) if f.is_ctor()) || n == Nat::Date(DateFn::Ctor) || matches!(n, Nat::Intl(f) if f.is_ctor())
+    }
+
+    /// A branded native constructor that reads `native_nt` (all of them except Intl).
+    fn native_takes_nt(n: Nat) -> bool {
+        Self::native_no_nt(n) && !matches!(n, Nat::Intl(_))
+    }
+
+    /// GetPrototypeFromConstructor for a native constructor. `nt` is `native_nt.take()`, read first in the constructor.
+    #[inline(always)]
+    fn nt_proto(&mut self, nt: Option<ObjId>, default: ObjId) -> Res<ObjId> {
+        match nt {
+            Some(nt) => self.proto_from_ctor_or(nt, default),
+            None => Ok(default),
+        }
+    }
+
+    /// Give the object `v` that a native constructor made the prototype of `nt`. It does nothing without `nt`.
+    #[inline(always)]
+    fn nt_patch(&mut self, nt: Option<ObjId>, default: ObjId, v: Value) -> Res<Value> {
+        if let (Some(nt), Value::Object(o)) = (nt, v) {
+            self.nt_set_proto(nt, default, o)?;
+        }
+        Ok(v)
+    }
+
+    #[cold]
+    fn nt_set_proto(&mut self, nt: ObjId, default: ObjId, o: ObjId) -> Res<()> {
+        let proto = self.proto_from_ctor_or(nt, default)?;
+        h!(self, self.heap.set_prototype_of(o, Some(proto)));
+        Ok(())
     }
 
     fn is_constructor(&self, mut o: ObjId) -> bool {
@@ -352,9 +383,10 @@ impl<'p> Interp<'p> {
             Class,
             Host(u32),
             Script(u32, FuncId, u32, bool),
-            /// A constructor that cannot take a different `new.target` yet (Promise, a host constructor).
+            /// A constructor that cannot take a different `new.target` yet (an Intl or a host constructor).
             NoNt(&'static str),
             Native(Nat),
+            Promise(PFn),
             Bound(ObjId, Vec<Value>),
             Proxy,
         }
@@ -362,10 +394,9 @@ impl<'p> Interp<'p> {
             Some(Callee::Class) => D::Class,
             Some(&Callee::Host { id, ctor: true, nt: true }) => D::Host(id),
             Some(&Callee::Script { script, fid, env, self_binding }) if self.func_of(script, fid).is_plain_ctor() => D::Script(script, fid, env, self_binding),
-            Some(&Callee::Native(n)) if matches!(n, Nat::ObjectCtor | Nat::FnCtor | Nat::ArrayCtor | Nat::ErrorCtor(_) | Nat::StringFn | Nat::NumberFn | Nat::BooleanFn | Nat::Ext(Bi::RegExpCtor) | Nat::Sc(ScFn::IterCtor) | Nat::Px(PxFn::Ctor)) => D::Native(n),
-            Some(&Callee::Native(n)) if Self::native_no_nt(n) => D::NoNt("subclassing a native constructor (new.target is not passed to the constructor)"),
-            Some(&Callee::Promise(PFn::Ctor)) => D::NoNt("subclassing Promise (new.target is not passed to the constructor)"),
-            Some(&Callee::Promise(PFn::AggErrCtor)) => D::NoNt("subclassing AggregateError (new.target is not passed to the constructor)"),
+            Some(&Callee::Native(n)) if matches!(n, Nat::ObjectCtor | Nat::FnCtor | Nat::ArrayCtor | Nat::ErrorCtor(_) | Nat::StringFn | Nat::NumberFn | Nat::BooleanFn | Nat::Ext(Bi::RegExpCtor) | Nat::Sc(ScFn::IterCtor) | Nat::Px(PxFn::Ctor)) || Self::native_takes_nt(n) => D::Native(n),
+            Some(&Callee::Native(n)) if Self::native_no_nt(n) => D::NoNt("subclassing an Intl constructor (new.target is not passed to the constructor)"),
+            Some(&Callee::Promise(pf @ (PFn::Ctor | PFn::AggErrCtor))) => D::Promise(pf),
             Some(&Callee::Host { ctor: true, nt: false, .. }) => D::NoNt("subclassing a host constructor (new.target is not passed to the constructor)"),
             Some(Callee::Bound { target, args, .. }) => D::Bound(*target, args.clone()),
             Some(&Callee::Proxy { ctor: true }) => D::Proxy,
@@ -440,7 +471,7 @@ impl<'p> Interp<'p> {
                     }
                     Nat::ErrorCtor(k) => {
                         let proto = self.proto_from_ctor_or(nt, self.error_protos[k as usize])?;
-                        self.error_ctor(arg(args, 0), proto)
+                        self.error_ctor(args, proto)
                     }
                     Nat::StringFn | Nat::NumberFn | Nat::BooleanFn => self.wrapper_ctor(n, args, Some(nt)),
                     Nat::Ext(Bi::RegExpCtor) => self.regexp_ctor_nt(arg(args, 0), arg(args, 1), true, Some(nt)),
@@ -448,8 +479,23 @@ impl<'p> Interp<'p> {
                         let proto = self.proto_from_ctor_or(nt, self.sc.iter_proto)?;
                         Ok(Value::Object(h!(self, self.heap.new_object(Some(proto)))))
                     }
-                    _ => self.call_native(n, Value::Undefined, args, true),
+                    _ => {
+                        self.cls.native_nt = Some(nt);
+                        let r = self.call_native(n, Value::Undefined, args, true);
+                        self.cls.native_nt = None;
+                        r
+                    }
                 })();
+                self.depth -= 1;
+                r
+            }
+            D::Promise(pf) => {
+                if self.depth >= self.limits.max_call_depth { return Err(Error::Limit(LimitKind::CallDepth)); }
+                self.tick()?;
+                self.depth += 1;
+                self.cls.native_nt = Some(nt);
+                let r = self.call_promise(pf, Value::Undefined, args, true);
+                self.cls.native_nt = None;
                 self.depth -= 1;
                 r
             }

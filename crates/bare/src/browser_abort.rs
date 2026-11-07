@@ -338,7 +338,8 @@ impl Dom {
 }
 
 fn controller_ctor(d: &Dom, it: &mut Interp<'_>, _: Value, _: &[Value]) -> V {
-    let proto = d.abort.objs.borrow().expect("made")[1];
+    let default = d.abort.objs.borrow().expect("made")[1];
+    let proto = it.host_proto_from_new_target(default)?;
     let sig = d.new_signal(it)?;
     let c = d.obj(it, proto)?;
     d.abort.s.borrow_mut().ctls.insert(c, sig);
@@ -389,7 +390,7 @@ fn make(d: &Dom, it: &mut Interp<'_>) -> R<()> {
     let (sp, cp) = (d.obj(it, et)?, d.obj(it, op)?);
     let (kp, kc) = (d.key(it, "prototype")?, d.key(it, "constructor")?);
     let sc = d.add_fn(it, illegal, "AbortSignal", 0, true)?;
-    let cc = d.add_fn(it, controller_ctor, "AbortController", 0, true)?;
+    let cc = d.add_ctor_nt(it, controller_ctor, "AbortController", 0)?;
     for (f, proto, tag) in [(sc, sp, "AbortSignal"), (cc, cp, "AbortController")] {
         it.define_data(f, kp, Value::Object(proto), false, false, false)?;
         it.define_data(proto, kc, Value::Object(f), true, false, true)?;

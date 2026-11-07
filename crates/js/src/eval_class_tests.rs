@@ -84,7 +84,16 @@ fn limit_of(src: &str, limits: EvalLimits, heap: HeapLimits) -> LimitKind {
 
 #[test]
 fn corpus_matches_node() {
-    let (cases, expected) = (include_str!("../../../tools/fixtures/js/class-cases.txt"), include_str!("../../../tools/fixtures/js/class-cases.expected"));
+    check_corpus(include_str!("../../../tools/fixtures/js/class-cases.txt"), include_str!("../../../tools/fixtures/js/class-cases.expected"));
+}
+
+/// `class X extends <builtin>` (`tools/js/subclass_check.sh`).
+#[test]
+fn subclass_corpus_matches_node() {
+    check_corpus(include_str!("../../../tools/fixtures/js/subclass-cases.txt"), include_str!("../../../tools/fixtures/js/subclass-cases.expected"));
+}
+
+fn check_corpus(cases: &'static str, expected: &'static str) {
     big(move || {
         let mut list: Vec<(&str, Vec<&str>)> = Vec::new();
         for line in cases.lines() {

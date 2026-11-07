@@ -338,7 +338,11 @@ fn make_event(d: &Dom, it: &mut Interp<'_>, a: &[Value], custom: bool) -> V {
         _ => return Err(it.type_error("The event initializer is not an object.")),
     }
     // A custom event passes its detail (`null` at least); a plain one passes `undefined`.
-    let e = d.new_event(it, &ty, bubbles, cancelable, composed, if custom { Some(detail) } else { None })?;
+    let proto = it.host_proto_from_new_target(if custom { d.p().custom } else { d.p().event })?;
+    let e = d.new_event_proto(it, &ty, bubbles, cancelable, composed, proto)?;
+    if custom {
+        d.st.borrow_mut().events.get_mut(&e).expect("just made").detail = detail;
+    }
     Ok(Value::Object(e))
 }
 
@@ -354,7 +358,8 @@ pub(crate) fn event_target_ctor(d: &Dom, it: &mut Interp<'_>, _: Value, _: &[Val
     if d.st.borrow().by_obj.len() >= d.lim.max_wrappers {
         return Err(d.lim("dom-wrappers"));
     }
-    let o = d.obj(it, d.p().et)?;
+    let proto = it.host_proto_from_new_target(d.p().et)?;
+    let o = d.obj(it, proto)?;
     d.st.borrow_mut().by_obj.insert(o, Target::Obj(o));
     Ok(Value::Object(o))
 }
