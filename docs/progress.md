@@ -2459,3 +2459,20 @@ Checks:
 - All 43 `tools/js/*_check.sh` scripts pass (`parse_check.sh` with `ACORN=` set).
 
 Not tested: a machine other than archMachine; wall time; scale 100 of the load rows; a live page other than the typing page; the bytecode interpreter (it keeps its own entries); the full debug test suite.
+
+## A window with a request in flight sleeps (S5)
+
+PR #243 and #247 left `Page::tick` asking for a call in 4 ms while a reply or a next document was on its way. A long poll woke the window 250 times a second for its whole life. A worker that ends a job now wakes the loop: `bare_net::parallel::on_end` runs a hook when a task ends, and `Page::wake_on_done` sets it to the window `Waker`. `bare --window` and the control interface (`Remote::open`) call it. With the hook, the tick asks for a call each second only, as a backstop for a lost wake. Without it (headless tests) the 4 ms poll stays. The hook is one for the process: the last call wins.
+
+Tests (`crates/drive/tests/idle.rs`; they run the loop of the window on a channel, one test at a time). The first two failed before the change:
+- A request in flight for 1 s: 246 ticks before, under 5 now.
+- A 10 s request in flight, CPU of the process (`/proc/self/stat`, utime+stime): 0.060 s (0.60%) before, 0.000 s (0.00%) now; 11 ticks.
+- A reply that comes at 600 ms reaches the page in 900 ms (the wake works).
+
+Real window: `tools/window/idle_cpu.sh BARE_BINARY [SECONDS]` runs `bare --window` in a headless `cage` (wlroots headless backend, not the desktop) on a page with a fetch that hangs, and prints CPU and RSS over 10 s after the first 2 s. Before (same code, hook off): 0.080 s (0.80%), RSS 19.4 to 17.6 MiB. After: 0.000 s (0.00%), RSS 19.2 to 19.2 MiB. The window starts and draws under the glibc arena limit of #245 (`limit_malloc_arenas` runs in `main`).
+
+Checks (arjun-e16):
+- `cargo test --release --workspace`: 47 test binaries, 2,934 passed, 0 failed.
+- `tools/js/cost_matrix.sh`, base origin/main `eedd0aa` from `base-build`: 805 rows. Mean change: glibc +0.001%, jemalloc +0.000%. Over under one allocator: 0. Over under both: 0. Failed: 0.
+
+Not tested: a long run (hours) of RSS in the window; a request that streams a body in many parts; a wake that is lost (only the 1 s backstop covers it); two windows in one process (the hook is global); HiDPI; the staging journey in the window.

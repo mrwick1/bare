@@ -132,6 +132,24 @@ impl<R> Finish<R> {
     fn set(&self, to: Slot<R>) {
         *self.0.0.lock().unwrap() = to;
         self.0.1.notify_all();
+        ended();
+    }
+}
+
+type Hook = Arc<dyn Fn() + Send + Sync>;
+
+static ON_END: Mutex<Option<Hook>> = Mutex::new(None);
+
+/// Call `f` from the worker thread each time a task ends (with a result, or lost). A window uses it to wake its loop, so that it
+/// need not poll `Task::done`. It replaces the hook of an earlier call. `f` must not block.
+pub fn on_end(f: impl Fn() + Send + Sync + 'static) {
+    *ON_END.lock().unwrap() = Some(Arc::new(f));
+}
+
+fn ended() {
+    let hook = ON_END.lock().unwrap().clone();
+    if let Some(f) = hook {
+        f();
     }
 }
 
@@ -141,6 +159,8 @@ impl<R> Drop for Finish<R> {
         if matches!(*slot, Slot::Waiting) {
             *slot = Slot::Lost;
             self.0.1.notify_all();
+            drop(slot);
+            ended();
         }
     }
 }

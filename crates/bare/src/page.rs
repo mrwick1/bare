@@ -107,6 +107,8 @@ pub struct Page {
     pub errors: Vec<String>,
     /// Print nothing (a test driver: it reports the errors itself, through its redacting filter).
     pub quiet: bool,
+    /// Does a wake (`wake_on_done`) tell the loop that a job ended?
+    woken: bool,
     started: Instant,
     pub first_frame: Option<Duration>,
 }
@@ -286,6 +288,7 @@ impl Page {
             inputs: Vec::new(),
             errors: Vec::new(),
             quiet: false,
+            woken: false,
             started: Instant::now(),
             first_frame: None,
         }
@@ -415,11 +418,19 @@ impl Page {
         self.frame.as_ref()
     }
 
+    /// The loop of this page sleeps until `wake` is called from another thread. Then a reply or a next document in flight does not make
+    /// `tick` ask for a call every 4 ms: the worker that ends the job calls `wake` (`bare_net::parallel::on_end`). `tick` then asks
+    /// for a call each second only, in case a wake was lost. One hook for the process: the last call wins.
+    pub fn wake_on_done(&mut self, wake: impl Fn() + Send + Sync + 'static) {
+        bare_net::parallel::on_end(wake);
+        self.woken = true;
+    }
+
     /// Run the tasks that are due now (timers, animation frames, and the `fetch` calls and navigations that they start), as a browser
     /// does between input events. Gives whether a task ran (the next frame checks the render key then) and when the next task is due.
     /// `None`: no task is queued, or the page stopped for good (a fatal error), so only an input event can change it.
     /// A live page (a session) runs one slice of work in a tick, and a reply or a next document that is on its way is queued work: the
-    /// tick asks to be called again in `POLL`.
+    /// tick asks to be called again in 4 ms (1 s when `wake_on_done` was called).
     pub fn tick(&mut self) -> (bool, Option<Instant>) {
         let ran = self.work().0;
         if ran {
@@ -431,19 +442,19 @@ impl Page {
 
     /// Can a tick do something now, and when is the next task due (or the next look at the network)?
     fn work(&mut self) -> (bool, Option<Instant>) {
-        const POLL: Duration = Duration::from_millis(4);
+        let poll = if self.woken { Duration::from_secs(1) } else { Duration::from_millis(4) };
         let (stopped, loading) = match &self.source {
             Source::Session(s) => (s.ended().is_some(), s.loading()),
             Source::Browser(b) => (b.sched_stats().halted, None),
         };
         if let Some(done) = loading {
-            return (done, Some(Instant::now() + POLL));
+            return (done, Some(Instant::now() + poll));
         }
         let Some(b) = self.browser().filter(|_| !stopped) else { return (false, None) };
         let (due, now) = (b.next_scheduled_due(), b.now());
         let net = if b.live() { b.live_work() } else { (b.pending_fetches() > 0).then_some(true) };
         let at = due.map(|d| Instant::now() + Duration::from_secs_f64((d - now).max(0.0) / 1000.0));
-        let at = if net == Some(false) { Some(at.map_or(Instant::now() + POLL, |a| a.min(Instant::now() + POLL))) } else { at };
+        let at = if net == Some(false) { Some(at.map_or(Instant::now() + poll, |a| a.min(Instant::now() + poll))) } else { at };
         (due.is_some_and(|d| d <= now) || net == Some(true), at)
     }
 
