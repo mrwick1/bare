@@ -449,16 +449,16 @@ impl<'p> Interp<'p> {
                 let prog = self.prog.clone();
                 for d in prog.list(decls) {
                     let d = *prog.decl(d);
-                    let name = if let PatKind::Ident = prog.pat(d.target).kind { Some(self.name_str(self.pat_name[d.target.index()])?) } else { None };
+                    let name = if let PatKind::Ident = prog.pat(d.target).kind { Some(self.pat_name[d.target.index()]) } else { None };
                     match (kind, d.init) {
                         (VarKind::Var, None) => {}
                         (VarKind::Var, Some(i)) => {
-                            let v = self.eval_named(i, name)?;
+                            let v = self.eval_named_n(i, name)?;
                             self.bind_pattern(d.target, v, Bind::Assign)?;
                         }
                         (_, init) => {
                             let v = match init {
-                                Some(i) => self.eval_named(i, name)?,
+                                Some(i) => self.eval_named_n(i, name)?,
                                 None => Value::Undefined,
                             };
                             self.bind_pattern(d.target, v, Bind::Init)?;
