@@ -1137,12 +1137,21 @@ impl Document {
     pub fn dump(&self) -> String {
         let mut out = String::new();
         for child in self.children(self.root()) {
-            self.dump_node(child, 0, &mut out);
+            self.dump_node(child, 0, false, &mut out);
         }
         out
     }
 
-    fn dump_node(&self, id: NodeId, depth: usize, out: &mut String) {
+    /// The same, and the contents of each HTML `template` show as a `content` line under it, as the html5lib tests write them.
+    pub fn dump_with_contents(&self) -> String {
+        let mut out = String::new();
+        for child in self.children(self.root()) {
+            self.dump_node(child, 0, true, &mut out);
+        }
+        out
+    }
+
+    fn dump_node(&self, id: NodeId, depth: usize, contents: bool, out: &mut String) {
         // `&mut String` means we borrow the string and may add to it. JS: pass an array and `push`.
         let indent = "  ".repeat(depth);
         match self.data(id) {
@@ -1172,8 +1181,14 @@ impl Document {
                 }
             }
         }
+        if contents && matches!(self.data(id), NodeData::Element { name, .. } if self.atom_str(*name) == "template") && self.element_ns(id) == Ns::Html {
+            out.push_str(&format!("| {indent}  content\n"));
+            for child in self.template_content(id).into_iter().flat_map(|c| self.children(c)) {
+                self.dump_node(child, depth + 2, contents, out);
+            }
+        }
         for child in self.children(id) {
-            self.dump_node(child, depth + 1, out);
+            self.dump_node(child, depth + 1, contents, out);
             // A function that calls itself. It walks down the tree: one call for each level.
         }
     }

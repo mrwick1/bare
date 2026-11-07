@@ -316,6 +316,15 @@ Cost: one key into the page costs +3.6% instructions (443.5 M to 459.4 M; the sa
 
 Not collected inside a call: the collect needs depth 0 and no statement frames, so a long synchronous script still keeps its garbage until it returns. The event cap and the loader rounds are its collect points.
 
+## Template parsing follows Chrome 155 where it differs from the standard
+
+The tree builder has the "in template" insertion mode. Chrome 155 differs from the standard in two cases, found with headless Chrome (`tools/fixtures/ui/tplmodes-cases.txt`). The builder follows Chrome, because a page is written against Chrome. No html5lib test covers these cases.
+
+- The standard keeps a template "in template" after `base`, `basefont`, `bgsound`, `noframes` and `title`. Chrome does not: `<template><title>t</title><td>x` drops the `td`. The standard and Chrome agree for `link`, `meta`, `script`, `style` and `template`.
+- In a table mode inside a template, the standard ignores a `<form>` start tag. Chrome inserts an empty `form` and does not set the form element pointer.
+
+To follow the standard, add the five names to the first arm of `Builder::in_template` and ignore the form tag in the arm for `form` in `in_body`.
+
 ## Open questions
 
 - A separate process for sensitive sites, for example banking.

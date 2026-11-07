@@ -1,0 +1,112 @@
+tm-tr-direct	tr(td("a"))
+tm-td-direct	td("a"),td("b")
+tm-th-direct	th("a")
+tm-tr-then-td	tr,tr(td("x"))
+tm-tr-then-tr	tr(td("a")),tr(td("b"))
+tm-tbody-tr	tbody(tr(td("x")))
+tm-thead-tfoot	thead(tr(th("h"))),tfoot(tr(td("f")))
+tm-caption-then-tr	caption("c"),tbody(tr(td("x")))
+tm-colgroup-then-tr	colgroup(col),tbody(tr(td("x")))
+tm-col-direct	col,col
+tm-col-then-div	col
+tm-col-text	col
+tm-col-spaces	col," ",col," "
+tm-col-then-colgroup	col
+tm-div-then-tr	div("x")
+tm-td-then-tr	td("a"),td("b")
+tm-td-then-td	td("a"),td("b")
+tm-td-open-then-tr	td("a"),td("b")
+tm-tr-then-caption	tr,"c",tr
+tm-tr-then-tbody	tr,tr
+tm-tbody-then-caption	thead,caption,tbody
+tm-td-then-end-tr	td,td
+tm-td-then-end-table	td,td
+tm-tr-then-div-then-td	tr(td("x")),div
+tm-tr-div-inside	tr,div("a")
+tm-tr-text	tr(td("y")),"x"
+tm-text-then-tr	"x",tr(td("y"))
+tm-comment-then-tr	<!--c-->,tr(td("y"))
+tm-table-first	table(tbody(tr(td("x"))))
+tm-table-after-tr	tr,tr(td("x"))
+tm-table-after-caption	caption,tbody(tr(td("x")))
+tm-table-after-td	td("a"),td("x")
+tm-tr-then-tr-in-cell-table	tr(td(table(tbody(tr(td("x"))))))
+tm-script-then-td	script("1"),td("y")
+tm-style-meta-link	style("a{}"),meta,link,td("1")
+tm-title-base	title("t"),base
+tm-nested-then-td	template{tr},td("y")
+tm-nested-then-tr-after-tr	tr,template{},tr(td)
+tm-nested-deep	template{template{tr(td("x"))}}
+tm-nested-b-template	template{b(template{})},"text"
+tm-form-after-tr	tr,form,div("x")
+tm-form-body	form(input,div("a"))
+tm-form-then-div	form,div("after")
+tm-form-in-form	form(form(p("x")))
+tm-hidden-input-in-tr	tr(input,td("x"))
+tm-end-p-first	div("x")
+tm-end-p-in-body	div(p)
+tm-end-br	
+tm-html-tag	span("x")|null
+tm-body-tag	span("x")|null
+tm-head-tag	span("x")
+tm-frame-tag	b("x")
+tm-option-select	select(option("a"),option("b"))
+tm-select-then-tr	select(option("a")),"x"
+tm-svg	svg(template),i
+tm-svg-td	svg(td),"x"
+tm-plaintext	plaintext("a</template>b</template></body></html>")
+tm-textarea-title	textarea("a<b>"),title("x<b>")
+tm-eof	div("x",b("y"))
+tm-eof-in-tr	tr(td("a",b("b")))
+tm-eof-script	script("x</body></html>")
+tm-eof-nested	template{td("a")}
+tm-afe-marker	<template id="t"><i>1</i></template>2
+tm-afe-after	<template id="t"><a>1</a></template>2|2
+tm-afe-reopen	<b>x<template id="t"><td>y</td></template>z</b>|54
+tm-afe-no-reopen-inside	<p><b><template id="t">q<td>y</td></template>z</b></p>
+tm-in-table-text	tr(td("y")),"x"
+tm-in-table-parent	<table id="tb"><template id="t"><tr><td>a</td></tr></template><tbody><tr><td>b</td></tr></tbody></table>
+tm-in-table-div	<table id="tb"><template id="t"><tr></tr><div>d</div></template></table>
+tm-in-thead-template	<table><thead><template id="t"><td>x</td></template></thead></table>
+tm-in-tr-template	<table><tbody><tr><template id="t"><td>x</td></template></tr></tbody></table>
+tm-in-colgroup-template	<table><colgroup><template id="t"><col></template></colgroup></table>
+tm-in-div-template-tr	<div><template id="t"><tr><td>Foo</td></tr></template></div>
+tm-in-cell-template	<table><tbody><tr><td><template id="t"><tr><td>q</td></tr></template></td></tr></tbody></table>
+tm-after-template-table-part	<template id="t"></template>z
+tm-in-select-template	<select><template id="t"><option>a</option></template><option>b</option></select>
+tm-two-templates	<template id="t"><tr></tr></template><template><td></td></template>
+tm-in-p	<p>a<template id="t"><div>x</div></template>b</p>
+tm-in-button-heading	<h1>a<template id="t"><h2>x</h2></template></h1><h3>b</h3>
+tm-li-in-template	<ul><li>a<template id="t"><li>b</li></template></li><li>c</li></ul>
+tm-dd-in-template	<dl><dt>a<template id="t"><dd>b</dd></template></dt><dd>c</dd></dl>
+tm-scope-p	<p><template id="t"></template>x</p>
+tm-end-in-cell-template	<table><tbody><tr><td><template id="t"></template>y</td></tr></tbody></table>
+fr-tr	tr(td("a"))
+fr-td	td("a"),td("b")
+fr-tr-td-mixed	tr,tr(td("x"))
+fr-td-then-tr	td("x"),td("y")
+fr-caption-tr	caption("c"),tbody(tr(td("x")))
+fr-colgroup-tr	colgroup(col),tbody(tr(td("x")))
+fr-col	col,col
+fr-col-div	col
+fr-col-text	col
+fr-tbody	tbody(tr(td("a")))
+fr-div-tr	div("x")
+fr-text-tr	"x",tr,"y"
+fr-nested	template{tr},td("x")
+fr-nested-end	tr,template{},tr(td("x"))
+fr-form	form(div("a")),p("b")
+fr-form-after-tr	tr,form,div("a")
+fr-table-after-tr	tr,tr(td("x"))
+fr-table-first	table(tbody(tr(td("x"))))
+fr-end-template	tr(td("a")),tr(td("b"))
+fr-end-p	b("x")
+fr-script-td	script("1"),td("x")
+fr-p-end-td	p("a"),"x"
+fr-select	select(option("a")),"x"
+fr-div-control	"a"
+fr-insert-adjacent	tr(td("a"))|
+fr-outer-html-in-div	tr(td("q"))
+fr-get-inner-html	<tr><td>a</td></tr><tr><td>b</td></tr>
+fr-form-pointer	form#one(1),form#two(0)
+fr-form-end-in-template	form("a"),"b"

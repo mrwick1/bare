@@ -403,7 +403,7 @@ Known gaps of module 4:
 - Tokenizer: it switches to raw text by itself. In a real browser the tree builder does it.
 - DOM: a node can be moved (`move_to`, `move_children`), taken out (`detach`) and copied (`clone_element`), but not deleted: the memory of a detached node stays. A `NodeId` from another document is not detected.
 - Tree builder: the adoption agency algorithm and the list of active formatting elements work, with Noah's Ark and markers for cells, `applet`, `marquee` and `object`. 28 misnested pages give the same tree as Chrome. The tree builder is about 5% slower on a page with no formatting tags. Not done: foreign content (SVG, MathML) in these rules, and the table insertion modes (a table is read from the stack, so some foster parenting cases differ).
-- Tree builder: no `<select>` modes, framesets, the "in head noscript" and "in template" modes, quirks mode, and no merge of the attributes of a second `<html>` or `<body>` tag.
+- Tree builder: no `<select>` modes, framesets (no frameset-ok flag), the "in head noscript" mode, quirks mode, and no merge of the attributes of a second `<html>` or `<body>` tag. The "in template" mode exists (see the section "HTML tree builder: the in template insertion mode").
 - CSS parser: no CSS nesting (a rule inside a style rule is skipped). At-rules inside a style rule are skipped. Nothing checks that a property or an at-rule name is known: that is for the later topics. The style rule count is a little higher than Chrome's (1335 against 1326 on bootstrap) because Chrome also drops rules with a selector that it does not know. Topic 3 should close this gap.
 - Selectors: `:is()` and `:where()` take compounds only (no `:is(.a .b)`), and one bad argument drops the rule. No `:has()`, `:only-of-type`, `:checked`, `:disabled` and the other state pseudo-classes. No namespaces. Pseudo-elements (`::before`, `::after`, `::placeholder`) never match, so there is no generated content. The matcher has no ancestor filter yet (topic 5 adds it with the rule index), so a long descendant selector walks all the ancestors. `:nth-child` counts the siblings for each element: a parent with thousands of children and an `:nth-child` rule is slow.
 - Tree builder: a stray end tag (like `</div>` with no `div` open) still walks the whole stack of open elements, so a page with a very deep stack and many stray end tags is slow. Chrome stops this by a depth limit of 512. Only `<p>` has a counter now.
@@ -1096,7 +1096,7 @@ Check: `selchange` (61 cases), `noscript` (38) and `tplctx` (37) match Chrome. R
 Cost (`tools/js/instr.sh`, `instructions:u`, minimum of 3, origin/main 6e66238 against this change, release, 78 rows of `fragment_load`, `selection_load`, `range_load`, `focus_load`, `select_load`, `form_load`, `browser_load`, `style_load`, `attr_load`, `observer_load`, `nodelist_load` and `loader_load` at scales 1 and 10): the worst row is `fragment_load replace 10` at +0.32% (`replace 1` +0.11%). A first version with two document borrows and an `is_html` call in `replace` gave +0.63%. The context name that `replace` already holds now gives the template test. No other row is above +0.01%. `nodelist_load churn 1` and the `select_load` rows are -0.27% to -0.28%. The jemalloc check was not needed because no row passed the limit.
 
 Gaps (Chrome differs):
-- The builder has no "in template" insertion mode. `template.innerHTML = '<tr><td>a</td></tr>'` and `<td>` drop the table tags (a page does the same). Chrome keeps `tr` and `td`.
+- (Closed: the builder has the "in template" insertion mode now, so `template.innerHTML = '<tr><td>a</td></tr>'` keeps `tr` and `td`. See the section "HTML tree builder: the in template insertion mode".)
 - The nodes in template contents have `ownerDocument` equal to `document` (Chrome: the inert document).
 - The selection of a text control is not linked with `getSelection()`. In Chrome `addRange` is ignored while a focused control holds a selection, and `getSelection().type` is `Range` then.
 - A selection made by the mouse in page text (there is no caret model) sends no `selectionchange`. The "in head noscript" mode with scripting off is not built (`noscript` is an element there). An SVG `template` context is still `Unsupported`. `onselectionchange` and the other handler properties are absent.
@@ -1184,3 +1184,41 @@ Changes: `Interp::gc_due` (collect at the end of a driver call and in each loade
 Tests: `gc_is_due_when_the_heap_has_grown_by_half_since_the_last_collect`, `typing_collects_the_garbage_of_its_own_keys`, `stored_edges_lists_every_value_a_property_holds` and `reserved_property_room_leaves_no_slack`. `cargo test --workspace` passes.
 
 Not tested: a page where one synchronous script makes the garbage (the collect waits for depth 0); a machine other than this one; scale 100; the floor of 8 MiB (no sweep); the `type_load` rows of the cost matrix (they need a directory argument, so the matrix cannot run them; the cost of a key was measured by hand); the effect on RSS of a real browser window (paint buffers, fonts).
+
+## HTML tree builder: the in template insertion mode
+
+Problem: the builder had no "in template" mode and no stack of template insertion modes. `<template><tr><td>` lost its `tr` and `td`, a `<template>` in `<head>` ended the head and went into the body, `</template>` did not clear the list of active formatting elements, and a `template` context for `innerHTML` read like a `div`.
+
+Change (`crates/html/src/tree.rs`, `tree/fragment.rs`):
+- `Mode::InTemplate`, `Mode::InTemplateColGroup` and `Builder::tmpl`, the stack of template insertion modes (`Tm`: template, table, column group, table body, row, body). `<template>` is read in the head rules from every mode (before head, in head, after head, in body, in table): it inserts the element and a marker, pushes "in template" and sets the mode. `</template>` pops to the template, clears the list up to the last marker, pops the mode and resets the mode (`reset_mode`). End of input closes the open templates first, then reads the end in the mode that is left.
+- The first content tag in a template sets its template insertion mode (`tr` gives table body, `td` row, `caption` table, `col` column group, other tags body). The table modes still read the stack instead of keeping modes. The only new rule: when the nearest table or template is a template, the table part tags read the top of `tmpl` (`table_rules`, `table_start`: the template acts as the `table`, `tbody` or `tr` that its mode names, and is never closed).
+- Foster parenting stops at a template that is nearer than the table, and a fragment with no table puts the node in the root (`place`, `foster_place`).
+- `parse_fragment` with the context `template` starts in "in template", so `template.innerHTML = '<tr><td>a</td></tr>'` keeps `tr` and `td`.
+- Also fixed: `</form>` with a template open closes a form that is in scope (the form pointer is not used), and `<frame>` in the body is ignored.
+- Chrome 155 differs from the standard in two places, and the builder follows Chrome: (1) after `base`, `basefont`, `bgsound`, `noframes` or `title` a template is no longer "in template" (`<template><title>t</title><td>x` drops the `td`); (2) in a table mode inside a template a `<form>` start tag inserts an empty `form` (the standard ignores it when a template is open). See [decisions.md](decisions.md#template-parsing-follows-chrome-155-where-it-differs-from-the-standard).
+- `Document::dump_with_contents` writes the contents of each template under a `content` line (the html5lib format). `dump` is as before.
+
+Check:
+- html5lib `tree-construction/template.dat` (112 tests, `tools/fixtures/html/template.dat`, run by `tree/html5lib_tests.rs`): all pass except 3 that need frameset support (40, 42, 43). 82 of 112 failed before the change. The html5lib project moved these files to web-platform-tests in June 2026 and removed them from its repository, so the file is the last copy there (commit 224991e^). It is the only `.dat` file with a `template` start tag, apart from one case in `tests18.dat` (a unit test).
+- `tools/fixtures/ui/tplmodes-cases.txt`: 112 cases (page markup, and `template.innerHTML`, `insertAdjacentHTML` and `innerHTML` contexts) recorded in headless Chrome 155 (`chrome-tplmodes.txt`, `tools/ui/chrome_topic.mjs tplmodes`), run by `topic_test!(tplmodes_cases)` in `browser_elements_tests.rs`. All 112 match. Chrome found the two differences above. An existing test expected that `<form id=one><template><form></form></template></form><form id=two>` gives one body child. Chrome gives two (`form#one(1),form#two(0)`), so the test was wrong and now follows Chrome.
+- 10 new html-crate unit tests. The junk test has template, column and foreign pieces. It found one endless loop (`<template><thead><tbody><table>`: a table start tag in a table part with no table); fixed.
+
+Gaps (Chrome or the standard differs):
+- No framesets: no "in frameset" modes and no frameset-ok flag. The 3 html5lib tests that fail on purpose (`FRAMESET` in `html5lib_tests.rs`) are the proof. A `<frameset>` start tag in a template is not ignored.
+- A form start tag in a plain table part (`<table><form>`) is ignored. Chrome inserts an empty `form`. Not changed.
+- The children of a template stay in the template element until the parse ends, then move into its contents (`fill_templates`). A script that runs in the middle of a streamed parse sees them in the template element.
+- The "in select" modes do not exist: `<select><template>` reads by the body rules.
+- The nodes in template contents still have `ownerDocument` equal to `document`.
+
+
+Cost (`tools/js/instr.sh`, minimum of 3 runs of `instructions:u`, origin/main against this change, each in its own `CARGO_TARGET_DIR` under `/data/bare-tmp`): 91 rows, that is `bare-bench parse`, the `*_load` examples of the `bare` crate at scale 1 and 10 (`browser_load`, `form_load`, `select_load`, `range_load`, `resources_load`, `loader_load`, `nodelist_load`, `attr_load` and more) and `dataset_load` (10 and 50 attributes). No row is worse than +0.5%. The worst is `resources_load largechunk 1` at +0.136%. `bare-bench parse` (the 5.2 MB page, 40 builds) is -0.41% (-0.47% with jemalloc).
+- A first build made `bare-bench parse` +0.78% (+0.72% with jemalloc, so not heap noise). The cause was one new arm, `"template" => self.template_end()`, in the `match` on the end tag name of `in_body`. One more name in that `match` changed the code for every end tag. Without the arm the row was -0.5%. The `template` end tag now has a guard in the last arm (`_ if name == "template"`), and the row stays at -0.41%.
+- A page with no `template` pays two things: `tmpl.is_empty()` checks in the arms that need them, and the new mode names in `process`. The code that runs only for templates is `#[cold]` and not inlined (`in_template_modes`, `template_table_tag`, `foster_target`, `template_start`, `template_end`, `reset_mode`).
+- Tests: `cargo test -p bare -p bare-html -p bare-layout -p bare-css` passes. `bare-stress fuzz html 200000 7`: 0 failures, slowest input 53 ms.
+
+Not tested:
+- The frameset modes and the frameset-ok flag (not built). Pages from the real web with `<template>` (only the html5lib file and the 112 Chrome cases).
+- Chrome cases for streamed parsing (a chunk that ends in the middle of a template). The `Document` API on template contents (`ownerDocument`, `importNode`, `cloneNode` of a template with table parts).
+- Memory (RSS) of pages with templates, and the cost rows of pages with many templates. The perf rows above have no `<template>` in their pages.
+- `bare-stress fuzz` with other seeds, and the css and url fuzzers (no change there).
+- Timing on other machines, and the rows at scale 100.
