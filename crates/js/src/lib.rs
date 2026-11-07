@@ -18,5 +18,6 @@ pub mod text;
 pub mod eval;
 
 mod number;
+mod obj_tab;
 mod bigint;
 mod ieee754;

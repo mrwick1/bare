@@ -74,6 +74,7 @@ use crate::ast::*;
 use crate::date;
 use crate::{ieee754, number};
 use crate::heap::*;
+use crate::obj_tab::ObjTab;
 use crate::value::*;
 use std::collections::{HashMap, HashSet};
 use std::hash::{BuildHasherDefault, Hasher};
@@ -590,7 +591,7 @@ pub struct Interp<'p> {
     /// Accounted heap bytes at the end of the previous `collect` (see `gc_due`).
     gc_live: usize,
     live_envs: usize,
-    funcs: FxMap<ObjId, Callee>,
+    funcs: ObjTab<Callee>,
     // run state
     env: u32,
     strict: bool,
@@ -766,7 +767,7 @@ impl<'p> Interp<'p> {
             gc_allocs: 0,
             gc_live: 0,
             live_envs: 0,
-            funcs: FxMap::default(),
+            funcs: ObjTab::default(),
             env: 0,
             ret: Value::Undefined,
             completion: Value::Undefined,
@@ -836,7 +837,7 @@ impl<'p> Interp<'p> {
         let ast_bytes = self.scripts.iter().map(|c| c.prog.stats().bytes + c.prog.source.len()).sum();
         let script_cache_bytes = self.scripts.iter().map(|c| c.cache_bytes()).sum();
         let env_bytes = self.envs.capacity() * size_of::<Env>() + self.envs.iter().map(|e| e.bindings.capacity() * size_of::<Binding>() + e.index.as_ref().map_or(0, |m| m.capacity() * 9)).sum::<usize>();
-        let func_bytes = self.funcs.capacity() * (size_of::<(ObjId, Callee)>() + 1);
+        let func_bytes = self.funcs.bytes();
         EvalStats { steps: self.steps, live_envs: self.live_envs, env_slots: self.envs.len(), functions: self.funcs.len(), scripts: self.scripts.len(), script_source: self.script_source, script_nodes: self.script_nodes, ast_bytes, script_cache_bytes, env_bytes, func_bytes }
     }
 
@@ -905,7 +906,7 @@ impl<'p> Interp<'p> {
         self.intl_all_values(&mut v);
         self.async_all_values(&mut v);
         self.gen_all_values(&mut v);
-        for (&o, c) in &self.funcs {
+        for (&o, c) in self.funcs.iter() {
             v.push(Value::Object(o));
             if let Callee::Promise(pf) = c {
                 pf.trace(&mut v);
