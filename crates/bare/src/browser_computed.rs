@@ -42,12 +42,19 @@
 //!
 //! Gates (on purpose, none is silently faked; each is `Error::Unsupported`)
 //! - A pseudo-element argument (`::before`, anything that starts with `:`): the engine has no pseudo-element styles.
-//! - Resolved values that are used values (CSSOM "resolved value"): `width`, `height`, `margin-*` of an element that is rendered; `top`,
-//!   `right`, `bottom`, `left` of a positioned one; a percent `padding-*`; a numeric `line-height`. They need layout. For an element that
-//!   is not rendered (it or an ancestor is `display:none`) they are the computed values and are read. Not used for layout here, so they are not computed from it.
+//! - Resolved values that are used values (CSSOM "resolved value") come from layout (`browser_used.rs`): `width` and `height` of a box,
+//!   `auto` and percent `margin-*`, percent `padding-*`, the offsets of a positioned box, grid track lists, a numeric `line-height`
+//!   (in px). The read runs the geometry layout, so `GeometryLimits` apply (`geometry-*`, never catchable). A value that needs no
+//!   layout (a px length, an element that is not rendered, a non-atomic inline box) is the computed value and costs no layout. Gated:
+//!   a percent padding or margin of a grid item, an auto margin of a flex or grid item, and a box whose containing block is an inline box.
+//! - Page-level or per-read? A gate stays a page-level `Unsupported` (fatal), not an empty string or a throw: this module and the other
+//!   host modules say that a gate is never faked, and an empty string or a throw would let a script go on with a value that Chrome
+//!   does not give. `docs/decisions.md` has no rule that says otherwise.
 //! - A light child of a shadow host has no style (the flat tree has no slots, `RuleSet::compute_for` does not reach it).
-//! - Values that the engine keeps only loosely (`align-*`, `justify-*` lose `safe`/`unsafe`, `text-decoration-line` keeps one line, grid
-//!   lists, `calc()` with a percent): no text. A shorthand that cannot be built from its longhands (`border` with different sides, `font`): the same gate.
+//! - Values that the engine keeps only loosely: `align-*` and `justify-*` lose `safe`/`unsafe`, and `text-decoration` keeps only the line
+//!   (the style, the color and the thickness are dropped, so `underline dotted` reads as `underline`). Those read as the text that the
+//!   engine has, not a fake. A value with no text (an unresolved `var()`) and a shorthand that cannot be built from its longhands
+//!   (`border` with different sides, `font`): gated.
 //! - `direction` of an element whose `dir` chain reaches `dir=auto` or a `<bdi>` with no `ltr/rtl` before an explicit one: it depends on
 //!   the text (not read). This is conservative: a rule of the page that sets `direction` in between does not lift it.
 //! - `cssText` of a computed declaration. External sheets that are not supplied, unless the driver loads them later (see above).
@@ -68,6 +75,7 @@ use crate::browser::*;
 use crate::browser_platform::{V, arg};
 use crate::browser_style::{current, keys_of};
 use crate::browser_style_block::{self as blk, Fail, Lim, custom};
+use crate::browser_used::{Ctx, calc_text, flow_text, grid_text};
 use bare_css::cascade::{self, ComputedStyle, Origin, RuleSet, Source, Styles, UA_CSS};
 use bare_css::values::{Keyword, Length, Property, SHORTHANDS, Value as Cv, shorthand_longhands};
 use bare_html::dom::{NodeData, NodeId};
@@ -172,9 +180,7 @@ const PSEUDO: &str = "getComputedStyle of a pseudo-element (the engine has no ps
 const NO_STYLE: &str = "an element that the style walk does not reach has no computed style in the engine (a light child of a shadow host: no slots)";
 const AUTO_DIR: &str = "direction depends on dir=auto or bdi (the text decides it)";
 const CSS_TEXT: &str = "computed cssText (CSSOM and browsers differ; not faked)";
-const APPROX: &str = "this property is read only approximately by the engine (no faithful computed text)";
-const USED: &str = "the resolved value is the used value, which needs layout";
-const NO_TEXT: &str = "this computed value has no text yet (calc, grid or an unresolved value)";
+const NO_TEXT: &str = "this computed value has no text (an unresolved value)";
 const NO_SHORT: &str = "this shorthand has no single computed text (sides differ, or it needs more than the engine keeps)";
 
 struct Plan {
@@ -203,40 +209,50 @@ pub(crate) struct Snap {
     pub(crate) hidden: bool,
 }
 
-/// A float as CSS prints it (no `-0`).
-fn num(n: f32) -> String {
-    if n == 0.0 { "0".into() } else { format!("{n}") }
+/// A number as Chrome prints it: 6 significant digits, no trailing zeros, no `-0`.
+pub(crate) fn num(n: f32) -> String {
+    let v = n as f64;
+    if v == 0.0 {
+        return "0".into();
+    }
+    let s = format!("{v:.*}", (5 - v.abs().log10().floor() as i32).clamp(0, 30) as usize);
+    if s.contains('.') { s.trim_end_matches('0').trim_end_matches('.').into() } else { s }
 }
 
 impl Snap {
-    /// The computed text of a longhand, or the reason that there is none.
-    fn text(&self, p: Property) -> Result<String, &'static str> {
-        use Property::*;
-        if matches!(
-            p,
-            GridTemplateColumns | GridTemplateRows | GridTemplateAreas | GridAutoColumns | GridAutoRows | GridAutoFlow | GridRowStart | GridRowEnd
-                | GridColumnStart | GridColumnEnd | JustifyContent | AlignContent | AlignItems | AlignSelf | JustifyItems | JustifySelf | TextDecoration
-        ) {
-            return Err(APPROX);
+    /// The computed text of a longhand, or the reason that there is none. `used` is the layout for the values that CSSOM
+    /// resolves to the used value (`browser_used.rs`).
+    fn text(&self, p: Property, used: Option<&Ctx>) -> Result<String, &'static str> {
+        if let Some(t) = used.map(|c| c.text(self, p)).transpose()?.flatten() {
+            return Ok(t);
         }
         let v = self.style.get(p);
-        let hidden = self.hidden;
-        let positioned = self.style.get(Position) != Cv::Keyword(Keyword::Static);
-        let used = match p {
-            Width | Height | MarginTop | MarginRight | MarginBottom | MarginLeft => !hidden,
-            Top | Right | Bottom | Left => !hidden && positioned,
-            PaddingTop | PaddingRight | PaddingBottom | PaddingLeft => !hidden && matches!(v, Cv::Length(Length::Percent(_) | Length::Calc(_))),
-            LineHeight => matches!(v, Cv::Number(_)),
-            _ => false,
-        };
-        if used {
-            return Err(USED);
+        // A relative box with an `auto` offset moves by the opposite offset, backwards. The layout gives it when that offset is a percent.
+        if !self.hidden && v == Cv::Keyword(Keyword::Auto) && self.style.get(Property::Position) == Cv::Keyword(Keyword::Relative) {
+            let opposite = match p {
+                Property::Top => Some(Property::Bottom),
+                Property::Bottom => Some(Property::Top),
+                Property::Left => Some(Property::Right),
+                Property::Right => Some(Property::Left),
+                _ => None,
+            };
+            if let Some(o) = opposite {
+                return Ok(match self.style.get(o) {
+                    Cv::Length(Length::Px(x)) => format!("{}px", num(-x)),
+                    _ => "0px".to_string(),
+                });
+            }
         }
         Ok(match v {
             Cv::Keyword(k) => k.name().to_string(),
+            // A number `line-height` is times the font size of the element, in pixels.
+            Cv::Number(n) if p == Property::LineHeight => format!("{}px", num(n * self.style.px(Property::FontSize))),
+            Cv::Number(n) if p == Property::GridAutoFlow => flow_text(n).to_string(),
             Cv::Number(n) => num(n),
             Cv::Length(Length::Px(x)) => format!("{}px", num(x)),
             Cv::Length(Length::Percent(x)) => format!("{}%", num(x)),
+            Cv::Length(Length::Calc(i)) => calc_text(&self.styles, i),
+            Cv::Grid(i) => grid_text(&self.styles, self.styles.grid(i)),
             Cv::Color(c) if c.a == 255 => format!("rgb({}, {}, {})", c.r, c.g, c.b),
             Cv::Color(c) => format!("rgba({}, {}, {}, {})", c.r, c.g, c.b, num((c.a as f32 / 255.0 * 1000.0).round() / 1000.0)),
             _ => return Err(NO_TEXT),
@@ -507,14 +523,26 @@ impl Dom {
         if is_custom {
             return Ok(s.styles.custom_properties(&s.style).iter().find(|(n, _)| **n == *key).map(|(_, t)| t.to_string()).unwrap_or_default());
         }
-        if let Some(p) = long {
-            return s.text(p).map_err(Self::gate);
+        let longs = long.as_ref().map(std::slice::from_ref).or_else(|| shorthand_longhands(&key)).expect("a longhand or a shorthand");
+        let used = self.used_for(it, &s, el, longs)?;
+        let doc = self.doc.borrow();
+        let ctx = used.as_ref().map(|u| Ctx::new(&doc, &s.styles, u, el));
+        // The engine keeps only the line of `text-decoration`; Chrome writes the shorthand as that line when the style and the color are the defaults.
+        if long.is_some() || key == "text-decoration" {
+            return s.text(longs[0], ctx.as_ref()).map_err(Self::gate);
         }
-        let Some(longs) = shorthand_longhands(&key) else { return Err(Self::gate(APPROX)) };
+        if key == "grid-row" || key == "grid-column" {
+            let (a, b) = (s.text(longs[0], ctx.as_ref()).map_err(Self::gate)?, s.text(longs[1], ctx.as_ref()).map_err(Self::gate)?);
+            // `start / end`: an `auto` end is left out, and so is an end that repeats a name.
+            let name = a.starts_with(|c: char| c.is_alphabetic() || c == '_') && !a.starts_with("span ") && a != "auto";
+            return Ok(if b == "auto" || (name && a == b) { a } else { format!("{a} / {b}") });
+        }
         let mut text = String::new();
         for &p in longs {
-            text.push_str(&format!("{}:{};", p.name(), s.text(p).map_err(Self::gate)?));
+            text.push_str(&format!("{}:{};", p.name(), s.text(p, ctx.as_ref()).map_err(Self::gate)?));
         }
+        drop(ctx);
+        drop(doc);
         let lim = Lim { bytes: 64 << 10, decls: 256 };
         let fail = |f: Fail| match f {
             Fail::Err(e) => e,

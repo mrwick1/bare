@@ -875,6 +875,9 @@ struct Setup {
     lead: [Vec<f32>; 2],
     /// A track of `auto-fit` that holds no item. It has no size and no gutter.
     collapsed: [Vec<bool>; 2],
+    /// The names of the explicit lines and the implicit tracks before the explicit ones. Kept only for the probed container.
+    names: [Vec<(String, i32)>; 2],
+    before: [usize; 2],
 }
 
 static AUTO_LINE: Line = Line::Auto;
@@ -981,7 +984,10 @@ fn setup(cx: &mut Cx, node: NodeId, avail: [Option<f32>; 2]) -> Setup {
             })
             .collect();
     }
-    Setup { items, statics, defs, lead, collapsed }
+    let probed = cx.probe == Some(node);
+    let before = [(1 - lo[0]) as usize, (1 - lo[1]) as usize];
+    let names = if probed { [0, 1].map(|a| templates[a].names.iter().map(|&(n, l)| (n.to_string(), l)).collect()) } else { Default::default() };
+    Setup { items, statics, defs, lead, collapsed, names, before }
 }
 
 /// The items of the container, in the order of the document, and the absolute children that are not in a run of text.
@@ -1232,6 +1238,9 @@ pub(crate) fn layout(cx: &mut Cx, node: NodeId, space: Space, bp: Sides) -> Kids
         }
     }
     let total = run_height(&rows) + gutters;
+    if cx.probe == Some(node) {
+        cx.tracks = Some(crate::fragment::Tracks { sizes: [rows.clone(), cols.clone()], before: g.before, names: std::mem::take(&mut g.names) });
+    }
     let free = room.map_or(0.0, |h| h - total);
     let row_at = positions(&rows, &g.lead[0], &g.collapsed[0], free, align_content);
 

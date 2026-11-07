@@ -75,6 +75,9 @@ pub struct Cx<'a> {
     /// What layout wrote by node (`rel`, `bars`), in order, and the results kept for boxes that run again (`memo.rs`).
     pub(crate) fx: Vec<memo::Effect>,
     pub(crate) memo: memo::Memo,
+    /// The grid container whose track sizes the caller wants (`layout_probing`), and what its last layout found.
+    pub(crate) probe: Option<NodeId>,
+    pub(crate) tracks: Option<fragment::Tracks>,
 }
 
 /// A table by `NodeId::index`. The page picks the keys, and it can only slow down its own layout, so the fast hash of `Document` is enough.
@@ -89,7 +92,13 @@ pub fn layout(doc: &Document, styles: &Styles, viewport: (f32, f32)) -> Layout {
 /// incomplete: the caller must look at `Layout::work` and throw the result away when it is more than `budget`. Layout
 /// cannot be interrupted, so this is how a caller bounds the time of a page that it does not trust.
 pub fn layout_within(doc: &Document, styles: &Styles, viewport: (f32, f32), budget: u64) -> Layout {
-    let mut cx = Cx { tree: boxes::Tree::new(doc, styles), out: Vec::with_capacity(doc.len()), depth: 0, marker: None, number: 0, sizes: Fast::default(), measuring: 0, spare: Vec::new(), floats: Default::default(), bars: Fast::default(), again: 0, rel: Fast::default(), fixed: false, waiting: 0, unknown: Default::default(), work: 0, budget, scrolls: 0, items: 0, memo_from: memo::start().min(budget), open: 0, fx: Vec::new(), memo: Default::default() };
+    layout_probing(doc, styles, viewport, budget, None)
+}
+
+/// `layout_within`, and the used track sizes of the grid container `probe` go in `Layout::tracks` (for the resolved value of
+/// `grid-template-columns`). The kept results of `memo.rs` are off then, so the sizes are those of the last real layout of the container.
+pub fn layout_probing(doc: &Document, styles: &Styles, viewport: (f32, f32), budget: u64, probe: Option<NodeId>) -> Layout {
+    let mut cx = Cx { tree: boxes::Tree::new(doc, styles), out: Vec::with_capacity(doc.len()), depth: 0, marker: None, number: 0, sizes: Fast::default(), measuring: 0, spare: Vec::new(), floats: Default::default(), bars: Fast::default(), again: 0, rel: Fast::default(), fixed: false, waiting: 0, unknown: Default::default(), work: 0, budget, scrolls: 0, items: 0, memo_from: if probe.is_some() { u64::MAX } else { memo::start().min(budget) }, open: 0, fx: Vec::new(), memo: Default::default(), probe, tracks: None };
     // Most pages make about one fragment for each DOM node: one for each element and each text on one line, none for
     // the `head` and for the spaces between blocks. Room for that many at once saves the copies of a `Vec` that grows.
     let mut height = 0.0;
@@ -123,7 +132,7 @@ pub fn layout_within(doc: &Document, styles: &Styles, viewport: (f32, f32), budg
         }
     }
     fragment::absolute(&mut cx.out);
-    Layout { fragments: cx.out, width: viewport.0, height, view: viewport, bars: cx.bars, work: cx.work }
+    Layout { fragments: cx.out, width: viewport.0, height, view: viewport, bars: cx.bars, work: cx.work, tracks: cx.tracks }
 }
 
 /// The fragments as text, one on each line, for tests and for `bare --layout`: the name (with `#id` if the element has
