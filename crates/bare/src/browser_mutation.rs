@@ -101,7 +101,7 @@ struct St {
     /// The document has our watcher (a registration exists).
     watching: bool,
     notify: Option<ObjId>,
-    obs: HashMap<ObjId, Obs>,
+    obs: IdMap<ObjId, Obs>,
     order: Vec<ObjId>,
     regs: HashMap<NodeId, Vec<Reg>>,
     n_regs: usize,

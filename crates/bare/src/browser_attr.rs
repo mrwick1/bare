@@ -65,10 +65,10 @@ pub(crate) struct AttrObj {
 
 #[derive(Default)]
 pub(crate) struct Tables {
-    pub attrs: HashMap<ObjId, AttrObj>,
+    pub attrs: IdMap<ObjId, AttrObj>,
     /// The attached `Attr`s of an element, by name atom. A short list: an element has few attributes.
     pub by_el: HashMap<NodeId, Vec<(Atom, ObjId)>>,
-    pub maps: HashMap<ObjId, NodeId>,
+    pub maps: IdMap<ObjId, NodeId>,
     pub map_of: HashMap<NodeId, ObjId>,
 }
 

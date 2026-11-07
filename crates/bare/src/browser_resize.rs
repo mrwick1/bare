@@ -94,7 +94,7 @@ struct State {
     protos: Option<Protos>,
     /// Live observers in creation order (the order of delivery).
     order: Vec<ObjId>,
-    observers: HashMap<ObjId, Observer>,
+    observers: IdMap<ObjId, Observer>,
     observations: usize,
     pending: bool,
     last_key: Option<Key>,

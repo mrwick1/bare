@@ -61,7 +61,7 @@
 //!
 //! Not browser-verified except against Node for the pure parts (`tools/js/fetch_oracle.mjs`).
 
-use crate::browser::{Browser, Dom, Kind, R, unsupported};
+use crate::browser::{Browser, Dom, IdMap, Kind, R, unsupported};
 use crate::browser_navigation_url::form_serialize;
 use crate::browser_streams as streams;
 use bare_js::eval::{Error, Interp};
@@ -71,7 +71,7 @@ use bare_net::parallel::Task;
 use bare_url::{Scheme, Url};
 use std::cell::{Cell, OnceCell, RefCell};
 use std::borrow::Cow;
-use std::collections::{HashMap, VecDeque};
+use std::collections::VecDeque;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -391,7 +391,7 @@ impl Pending {
 
 #[derive(Default)]
 struct FetchState {
-    objs: HashMap<ObjId, F>,
+    objs: IdMap<ObjId, F>,
     queue: VecDeque<Pending>,
     base: Option<Url>,
     retained: usize,

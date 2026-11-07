@@ -2686,3 +2686,70 @@ Checks:
 - `cargo test --release --workspace --no-fail-fast`: 49 binaries, 2,959 passed, 0 failed.
 
 Not tested: a machine other than archMachine; the window (`--window`) path; wall time; rustfmt (the files are not rustfmt-clean on main).
+
+## Where the JS time of the staging journey goes, and a cheaper host trace (S5)
+
+Method: `perf record -e instructions:u -c 500000 --call-graph fp` over the whole read-only journey (`drive-journey.steps`), with `bare-drive` of main `cc944bb` built with `-C force-frame-pointers=yes`. 2 runs: 14.20 G instructions each. A sample counts as JS when the first `bare_` frame from the leaf is in `bare_js`. JS is 11.87 G. The 9.9 G of the #254 section counted only `bare_js` symbols; this count also has the libc, hashing and host trace work that JS frames call.
+
+Split of all instructions by cause (one run): tree walker frames (`eval_expr_inner`, `machine`, `link_inner` and their helpers) 61.8%; CSS 11.3%; garbage collection 7.8% (1.29 G); JS parse and lex 7.2% (all from `add_script` of page scripts); builtins and host calls 5.4%; other 6.5%.
+
+Top 15 Rust functions of the JS part, self instructions:
+
+| # | Function | Instructions | Share of JS |
+| --- | --- | --- | --- |
+| 1 | `Interp::eval_expr_inner` | 1,594 M | 13.4% |
+| 2 | `Interp::link_inner` | 1,028 M | 8.7% |
+| 3 | `Interp::machine` | 992 M | 8.4% |
+| 4 | libc, no symbol (malloc and free internals) | 640 M | 5.4% |
+| 5 | `Interp::eval_assign` | 381 M | 3.2% |
+| 6 | `Interp::get_name` | 360 M | 3.0% |
+| 7 | `Interp::exec_simple` | 250 M | 2.1% |
+| 8 | `Interp::enter_rare` | 221 M | 1.9% |
+| 9 | `Interp::collect` | 215 M | 1.8% |
+| 10 | `BuildHasher::hash_one` (SipHash) | 192 M | 1.6% |
+| 11 | `Interp::link_base` | 190 M | 1.6% |
+| 12 | `Interp::eval_seq` | 180 M | 1.5% |
+| 13 | `Lexer::scan_at` | 174 M | 1.5% |
+| 14 | `Interp::call_fn_inner` | 144 M | 1.2% |
+| 15 | `Heap::intern` | 131 M | 1.1% |
+
+Builtins and host calls, inclusive, with no script frame below them: `Response.json` (`body_json`) 86 M, `JSON.parse` 62 M, the reviver 17 M, `getComputedStyle` reads 26 M before the cascade, `getBoundingClientRect` 14 M, `AbortController.abort` 14 M, `querySelectorAll` 8 M, `setAttribute` 8 M, regexp `exec` 8 M. `createElement`, `appendChild`, `getAttribute` and `fetch` are 4 M to 5 M each. No builtin dominates. String methods, `Map` and `Set`, event dispatch and microtasks are under these numbers.
+
+Largest cause outside the tree walker: the collect. The journey runs 9 collects (a uprobe count), about 140 M instructions each. `Interp::collect` calls `Host::trace` for each reached object that is not a host function. `Dom::trace` asks about 15 tables of the modules for each object. The navigation (`urls`, `params`, `iters`), platform, streams, fetch, resize, mutation, intersection, walker, attribute, XHR and web tables were std `HashMap`s with SipHash. The host trace was 520 M of the 1.29 G; SipHash in the collect was 306 M. The tree walker itself belongs to the bytecode work, so it is not changed here.
+
+Change: these tables use `IdMap` (the multiply hash of `browser.rs`, already used for `events`, the scheduler and the abort tables). The `by_el` table of `classList` (`NodeId` keys) too. Only the types change.
+
+Results (archMachine, frame pointer builds, 2 runs each, main `cc944bb` against this change):
+- Collect: 1,294 M and 1,292 M to 698 M and 710 M (-46%). Host trace: 528 M and 518 M to 120 M. SipHash in the collect: 306 M to 6 M.
+- Whole journey: 14.20 G to 13.69 G and 13.63 G (-3.8%).
+
+Journey per step, 3 runs of each build one after the other, load average 1.3 to 1.5. CPU is the page thread (`cpu_ms`), in ms. The step groups are the comment blocks of the steps file.
+
+| Step | CPU main | CPU now | time main | time now |
+| --- | --- | --- | --- | --- |
+| 1 open | 101-121 | 103-119 | 655-741 | 689-779 |
+| 2 login | 287-299 | 268-287 | 998-1020 | 626-750 |
+| 3 overview | 134-143 | 133-142 | 164-169 | 159-175 |
+| 4 agents | 358-364 | 350-384 | 507-542 | 528-546 |
+| 5 search | 291-300 | 279-288 | 554-574 | 520-561 |
+| 6 reload | 312-326 | 288-301 | 586-718 | 545-675 |
+| 7 sign out | 224-231 | 225-240 | 293-304 | 292-315 |
+| 8 agents, no session | 79-83 | 84-90 | 161-170 | 161-178 |
+| total | 1817-1831 | 1767-1812 | 4001-4187 | 3540-3826 |
+
+The collects run in steps 2 and 6, where the CPU drops by 20 to 25 ms. The other steps are inside the spread of 3 runs. The step times depend on the network.
+
+Still open (measured, not changed here):
+- The tree walker is about 62% of all instructions. The bytecode work takes it.
+- JS parse is 7.2%. Each document parses its scripts again, also the immutable `/_next/static` chunks that come from the cache. A parse cache across documents was not tried.
+- The collect still costs about 75 M each: the mark loop (138 M self in 2 runs), `Heap::collect` (175 M), the host trace (120 M) and the libc work.
+
+Checks (archMachine, base origin/main `c4e38c2` from `base-build`):
+- `cargo test --release --workspace --no-fail-fast`: 49 test binaries, 2,957 passed, 2 failed. Both failures are `a_window_open_keeps_the_connections_and_the_cache` (the known timing test, in 2 binaries). It passes when run alone.
+- `tools/js/cost_matrix.sh`: 805 rows. Mean change: glibc -0.369%, jemalloc +0.000% (0 rows measured). Over under one allocator: 0. Over under both: 0. Failed: 0.
+- `tools/js/test262_check.sh`: gate ok, 27,182 pass.
+- `tools/js/exec_diff.sh`: 79 runs, 0 differences.
+- All 42 other `tools/js/*_check.sh` scripts pass (`parse_check.sh` with `ACORN=` set).
+- Live staging, read only: 11 runs of the journey (4 frame pointer, 3 of main, 3 of this change, 1 with uprobes), all passed.
+
+Not tested: a machine other than archMachine; the window (`--window`); a page with many streams, `URL` or `classList` objects (the tables are larger there, but the change only alters the hash).
