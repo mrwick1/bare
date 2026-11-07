@@ -2383,3 +2383,25 @@ Checks:
 - `tools/js/cost_matrix.sh`, 805 rows, base origin/main 16b5c83. Mean change: glibc -0.002%. Two rows are over +0.5% under both allocators: `dataset_load keys 10000 50` (+0.55%, +0.53%) and `dataset_load keys 1000 50` (+0.52%, +0.51%). The counts are the same on each run (4 runs: 395.47 M base, 397.47 M new). The example runs only `run_script` on one `Browser`. It does not run the loader, `fetch` or the session. The machine code of its hot functions (`browser_dataset::matches`, `named_has`, `fill`) is the same in both binaries, but `matches` runs more often. Hypothesis: a cache in the JS engine whose hits depend on the code addresses of the binary. Boxing the kept downloads (`Box<Net>`) did not change the counts. After two attempts the rows still failed. Arjun approved the merge on 2026-11-07 with both rows listed here as a code-layout effect, not as a cost of this change.
 
 Not tested: a page that adds style sheets or preloads after `load` (they still load inside the turn); a slow document with many classic scripts (they run in one turn); HiDPI; arjun-e16; idle CPU of the window measured with a clock (only `tick` giving `None` is tested); a long-poll or streaming request (the window wakes every 4 ms while it is in flight).
+
+## Sheets, preloads and new documents that do not block a turn (S5)
+
+PR #243 left two waits inside one live turn: a sheet or preload that a script adds after `load`, and the classic scripts of a new document up to `load`. Both are now spread over turns in a live session. The choices are in [decisions.md](decisions.md#input-that-does-not-wait).
+
+Changes:
+- `crates/bare/src/browser_loader.rs`: `Run::on_the_way` starts a download on a worker and says whether it is still on its way. `Net::waits` holds the keys that a turn did not wait for; `live_work` reads them. A split document (`Scripts::split`) keeps its place (`Parse`) between turns. `go_inner` goes on from `Run::step`.
+- `crates/bare/src/browser_loader/sheets.rs` and `preload.rs`: a sheet, an `@import` or a preload that is on its way is not supplied, not cached and not counted. A later pass takes it and fires its event.
+- `crates/bare/src/browser_session.rs`: a document that a page navigation loaded in the background is split. `Page::navigate` and `Session::run` still run to `load`.
+
+Tests (`crates/drive/tests/nonblocking.rs`, loopback server, 500 ms for each slow file). The first two failed on main (a click of 500.6 ms; the log was complete before the click):
+- `a_style_sheet_added_after_load_does_not_block_the_turn`: the click is under 50 ms, a second click is handled, the computed color is the old one until the sheet is in, then the link `load` fires and the color applies.
+- `a_new_document_runs_its_slow_scripts_across_ticks_and_takes_input_between_them`: after a link to a document with 4 slow scripts (blocking, defer, async), a click is handled before the scripts run. No tick takes 50 ms or more. The order is `1,2,i,3,dcl,a,load`.
+- `a_headless_run_keeps_the_script_order`: `Session::run` without `live` gives the same order.
+- `a_preload_added_after_load_does_not_block_the_turn`: the click is under 50 ms, and the preload `load` fires later. Not run against main.
+
+Checks (archMachine):
+- `cargo test --release --workspace`: 46 test binaries, 2,927 passed, 0 failed.
+- `tools/js/cost_matrix.sh`, base origin/main `fd12c1c` from `base-build`: 805 rows in 74 s. Mean change: glibc -0.003%, jemalloc -0.093% (2 rows measured). Over under both allocators: 0. Over under glibc only: `resources_load small 1` (+1.04%, jemalloc -0.005%) and `resources_load small 10` (+1.49%, jemalloc -0.18%).
+- Live staging, `bare-drive` with the masked runner, read only, `drive-journey.steps`, 1 run: exit 0, 5,289 ms for the whole journey (#243: 5,301 to 7,134 ms in 3 runs). A scan of all output files found neither the email nor the password.
+
+Not tested: the window (`--window`); arjun-e16; a split document with module scripts (they stop the page, as before); a sheet with a slow `@import` chain; HiDPI. Not changed: the HTML parse of a new document is one step, and a document that is not split (`Page::navigate`, `Session::run`) loads the sheets that a script adds before `load` inside the turn.

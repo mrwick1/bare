@@ -14,7 +14,8 @@ const SLOW: Duration = Duration::from_millis(500);
 
 const INDEX: &str = r#"<!doctype html><html><body>
 <button id="load">Load</button> <button id="count">Count</button> <a id="go" href="/next" style="display:inline-block">Next</a>
-<input id="q"> <p id="out">none</p> <p id="n">0</p> <p id="got">0</p>
+<button id="sheet">Sheet</button> <button id="pre">Preload</button> <a id="scripts" href="/scripts" style="display:inline-block">Scripts</a>
+<input id="q"> <p id="out">none</p> <p id="n">0</p> <p id="got">0</p> <p id="css">none</p>
 <script>
 document.getElementById('load').addEventListener('click', function () {
   fetch('/slow').then(function (r) { return r.text() }).then(function (t) { document.getElementById('out').textContent = t })
@@ -22,12 +23,35 @@ document.getElementById('load').addEventListener('click', function () {
 document.getElementById('count').addEventListener('click', function () {
   var n = document.getElementById('n'); n.textContent = String(Number(n.textContent) + 1)
 })
+document.getElementById('sheet').addEventListener('click', function () {
+  var l = document.createElement('link'); l.rel = 'stylesheet'; l.href = '/slow.css'
+  l.onload = function () { document.getElementById('css').textContent = 'loaded' }
+  document.head.appendChild(l)
+})
+document.getElementById('pre').addEventListener('click', function () {
+  var l = document.createElement('link'); l.rel = 'preload'; l.as = 'script'; l.href = '/js?p'
+  l.onload = function () { document.getElementById('out').textContent = 'preloaded' }
+  document.head.appendChild(l)
+})
 document.getElementById('q').addEventListener('input', function (e) {
   fetch('/slow?q=' + encodeURIComponent(e.target.value)).then(function (r) { return r.text() }).then(function () {
     var g = document.getElementById('got'); g.textContent = String(Number(g.textContent) + 1)
   })
 })
 </script></body></html>"#;
+
+/// A document with a fast inline script, then slow classic scripts (blocking, defer, async). Each one logs its name.
+const SCRIPTS: &str = r#"<!doctype html><html><body><button id="b">B</button> <p id="n">0</p> <p id="log"></p>
+<script>var log = []
+document.getElementById('b').addEventListener('click', function () { document.getElementById('n').textContent = 'clicked' })
+document.addEventListener('DOMContentLoaded', function () { log.push('dcl') })
+addEventListener('load', function () { log.push('load'); document.getElementById('log').textContent = log.join(',') })</script>
+<script src="/js?1"></script><script defer src="/js?3"></script><script src="/js?2"></script><script async src="/js?a"></script><script>log.push('i')</script>
+</body></html>"#;
+
+/// The order of `SCRIPTS`: the blocking and inline scripts in document order, then the defer script, `DOMContentLoaded`, the async
+/// script and `load`.
+const ORDER: &str = "1,2,i,3,dcl,a,load";
 
 const NEXT: &str = "<!doctype html><html><body><p id=done>next page</p></body></html>";
 
@@ -58,8 +82,19 @@ fn connection(mut s: TcpStream) {
         let head = String::from_utf8_lossy(&seen[..end]).to_string();
         seen.drain(..end);
         let path = head.split(' ').nth(1).unwrap_or("/").to_string();
+        let js;
         let (ty, body) = match path.split('?').next().unwrap() {
             "/" => ("text/html", INDEX),
+            "/scripts" => ("text/html", SCRIPTS),
+            "/slow.css" => {
+                std::thread::sleep(SLOW);
+                ("text/css", "#css { color: rgb(255, 0, 0) }")
+            }
+            "/js" => {
+                std::thread::sleep(SLOW);
+                js = format!("log.push('{}')", path.split('?').nth(1).unwrap_or(""));
+                ("text/javascript", js.as_str())
+            }
             "/next" => {
                 std::thread::sleep(SLOW);
                 ("text/html", NEXT)
@@ -175,4 +210,97 @@ fn a_driver_click_step_returns_and_the_expect_waits_for_the_reply() {
     let ms: Vec<f64> = rep.steps.iter().map(|s| s.ms).collect();
     assert!(ms[1] < 50.0 && ms[2] < 50.0 && ms[3] < 50.0, "step times {ms:?}");
     assert!(ms[4] >= 400.0, "the expect waited for the reply: {ms:?}");
+}
+
+fn color(p: &mut Page, id: &str) -> String {
+    let b = p.browser().unwrap();
+    let v = b.run_script(&format!("getComputedStyle(document.getElementById('{id}')).color")).unwrap();
+    b.it.display(v)
+}
+
+#[test]
+fn a_style_sheet_added_after_load_does_not_block_the_turn() {
+    let origin = serve();
+    big(move || {
+        let mut p = Page::open(&format!("{origin}/"), (800, 600)).unwrap();
+        p.quiet = true;
+        let (sheet, count) = (one(&mut p, "#sheet"), one(&mut p, "#count"));
+        let before = color(&mut p, "css");
+        let t = Instant::now();
+        p.click(sheet).unwrap();
+        let click = t.elapsed();
+        assert!(click < Duration::from_millis(50), "the click took {click:?}");
+        // The page takes input while the sheet is on its way, and shows the page without it.
+        p.click(count).unwrap();
+        assert_eq!(text(&mut p, "n"), "1");
+        assert_eq!(text(&mut p, "css"), "none");
+        assert_eq!(color(&mut p, "css"), before);
+        until(&mut p, |p| text(p, "css") == "loaded");
+        assert!(t.elapsed() >= SLOW);
+        assert_eq!(color(&mut p, "css"), "rgb(255, 0, 0)");
+        assert_eq!(p.tick().1, None);
+    });
+}
+
+#[test]
+fn a_new_document_runs_its_slow_scripts_across_ticks_and_takes_input_between_them() {
+    let origin = serve();
+    big(move || {
+        let mut p = Page::open(&format!("{origin}/"), (800, 600)).unwrap();
+        p.quiet = true;
+        let (go, doc) = (one(&mut p, "#scripts"), p.generation());
+        p.click(go).unwrap();
+        until(&mut p, |p| p.generation() != doc);
+        // The new document is up and its first inline script ran; the slow scripts are on their way.
+        let t = Instant::now();
+        let b = one(&mut p, "#b");
+        p.click(b).unwrap();
+        assert!(t.elapsed() < Duration::from_millis(50), "the click took {:?}", t.elapsed());
+        assert_eq!(text(&mut p, "n"), "clicked");
+        assert_eq!(text(&mut p, "log"), "", "the scripts were done before the click");
+        // No tick blocks on a script download.
+        let mut worst = Duration::ZERO;
+        until(&mut p, |p| {
+            let t = Instant::now();
+            let done = text(p, "log") == ORDER;
+            worst = worst.max(t.elapsed());
+            done
+        });
+        let t = Instant::now();
+        while p.tick().0 {}
+        worst = worst.max(t.elapsed());
+        assert!(worst < Duration::from_millis(50), "a tick took {worst:?}");
+        assert_eq!(text(&mut p, "log"), ORDER);
+    });
+}
+
+#[test]
+fn a_headless_run_keeps_the_script_order() {
+    let origin = serve();
+    big(move || {
+        let mut s = bare::browser_session::Session::new(bare::browser_session::SessionConfig::new(&format!("{origin}/scripts")));
+        let r = s.run();
+        assert!(matches!(r.stop, bare::browser_session::SessionStop::Page(bare::Stop::Settled)), "{:?}", r.stop);
+        let b = s.browser().unwrap();
+        let v = b.run_script("document.getElementById('log').textContent").unwrap();
+        assert_eq!(b.it.display(v), ORDER);
+    });
+}
+
+#[test]
+fn a_preload_added_after_load_does_not_block_the_turn() {
+    let origin = serve();
+    big(move || {
+        let mut p = Page::open(&format!("{origin}/"), (800, 600)).unwrap();
+        p.quiet = true;
+        let pre = one(&mut p, "#pre");
+        let t = Instant::now();
+        p.click(pre).unwrap();
+        let click = t.elapsed();
+        assert!(click < Duration::from_millis(50), "the click took {click:?}");
+        assert_eq!(text(&mut p, "out"), "none");
+        until(&mut p, |p| text(p, "out") == "preloaded");
+        assert!(t.elapsed() >= SLOW);
+        assert_eq!(p.tick().1, None);
+    });
 }

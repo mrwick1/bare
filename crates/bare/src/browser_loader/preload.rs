@@ -191,6 +191,7 @@ impl Run<'_> {
             }
             let text = raw.trim_matches(WS);
             let Some(url) = Some(text).filter(|t| !t.is_empty()).and_then(|t| base.join(t).ok()) else { continue };
+            let waits = self.net.waits.len();
             let ok = match kind {
                 Kind::Style => {
                     let before = self.dom.scripts.sheets.borrow().stats.fetches;
@@ -206,6 +207,13 @@ impl Run<'_> {
                 }
                 Kind::Script | Kind::Opaque => self.fetch_preload(&url, kind),
             };
+            if self.net.waits.len() != waits {
+                // Live: on its way. A later pass looks at this link again, and its event fires when the download is in.
+                let mut p = self.dom.scripts.preloads.borrow_mut();
+                p.done.remove(&n);
+                p.rev = None;
+                continue;
+            }
             {
                 let mut p = self.dom.scripts.preloads.borrow_mut();
                 if ok { p.stats.loaded += 1 } else { p.stats.failed += 1 }
@@ -229,6 +237,9 @@ impl Run<'_> {
             }
         }
         let expect = if kind == Kind::Script { Expect::Script } else { Expect::Opaque };
+        if self.on_the_way(expect, url, usize::MAX) {
+            return false;
+        }
         let target = Target { expect, url: Url { scheme: url.scheme, host: url.host.clone(), port: url.port, path: url.path.clone() } };
         let kept = self.kept();
         let sent = self.res.fetches;
