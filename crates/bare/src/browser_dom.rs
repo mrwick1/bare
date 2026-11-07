@@ -643,7 +643,7 @@ pub(crate) fn get_root_node(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Valu
             let v = it.get_value(opts, k)?;
             composed = it.to_js_bool(v)?;
         }
-        _ => return Err(it.type_error("Failed to execute 'getRootNode' on 'Node': parameter 1 is not of type 'GetRootNodeOptions'.")),
+        _ => return Err(it.type_error("Failed to execute 'getRootNode' on 'Node': The provided value is not of type 'GetRootNodeOptions'.")),
     }
     // Attr nodes have no parent, including when attached to an element.
     let Some(n) = n else { return Ok(this) };
@@ -722,21 +722,6 @@ pub(crate) fn has_child_nodes(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Va
     let n = d.nd(it, this)?;
     let has = d.doc.borrow().children(n).next().is_some();
     Ok(Value::Bool(has))
-}
-
-pub(crate) fn contains(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
-    let n = d.nd(it, this)?;
-    let Some(other) = d.opt_node(it, a, 0)? else { return Ok(Value::Bool(false)) };
-    let doc = d.doc.borrow();
-    let mut cur = Some(other);
-    while let Some(c) = cur {
-        it.charge(1)?;
-        if c == n {
-            return Ok(Value::Bool(true));
-        }
-        cur = doc.parent(c);
-    }
-    Ok(Value::Bool(false))
 }
 
 pub(crate) fn text_content(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {

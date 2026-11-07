@@ -31,6 +31,7 @@ mod browser_form_tests;
 mod browser_focus_tests;
 mod browser_namespace;
 mod browser_attr;
+mod browser_nodecmp;
 mod browser_nodelist;
 mod browser_select;
 #[cfg(test)]

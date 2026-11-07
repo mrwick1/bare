@@ -25,7 +25,8 @@
 //! - `HTMLAnchorElement`, `HTMLAreaElement` and `HTMLTemplateElement` (lazy, `browser_elements.rs`): `href` and the URL parts, `template.content`. `new FormData(form)` reads the form data set.
 //! - Node: `nodeType nodeName nodeValue parentNode parentElement childNodes firstChild lastChild previousSibling
 //!   nextSibling ownerDocument isConnected textContent appendChild insertBefore removeChild replaceChild cloneNode
-//!   contains hasChildNodes getRootNode`.
+//!   contains hasChildNodes getRootNode compareDocumentPosition isSameNode isEqualNode lookupNamespaceURI lookupPrefix isDefaultNamespace` and the
+//!   `DOCUMENT_POSITION_*` constants (`browser_nodecmp.rs`).
 //! - Element: `tagName localName namespaceURI prefix getAttributeNS setAttributeNS hasAttributeNS removeAttributeNS id className getAttribute setAttribute removeAttribute hasAttribute getAttributeNames
 //!   children firstElementChild lastElementChild previousElementSibling nextElementSibling childElementCount append
 //!   prepend remove matches closest querySelector querySelectorAll` (selectors from `bare_css`).
@@ -970,7 +971,12 @@ impl Dom {
         for d in DEFS {
             let key = self.key(it, d.name)?;
             let (f, s) = match d.kind {
-                Kind::Method(h) => (self.add_fn(it, h, d.name, d.len, false)?, None),
+                Kind::Method(h) => {
+                    let id = self.handlers.borrow().len() as u32;
+                    self.handlers.borrow_mut().push((h, false));
+                    let PropertyKey::String(name) = key else { unreachable!("a method name is not an index") };
+                    (it.host_function_interned(id, name, d.len, false)?, None)
+                }
                 Kind::Get(h) => {
                     named(&mut nm, "get ", d.name);
                     (self.add_fn(it, h, &nm, 0, false)?, None)
@@ -1032,7 +1038,7 @@ impl Dom {
         }
         // constants
         for (iface, consts) in [
-            ("Node", &[("ELEMENT_NODE", 1.0), ("TEXT_NODE", 3.0), ("COMMENT_NODE", 8.0), ("DOCUMENT_NODE", 9.0), ("DOCUMENT_TYPE_NODE", 10.0), ("DOCUMENT_FRAGMENT_NODE", 11.0)][..]),
+            ("Node", &[("ELEMENT_NODE", 1.0), ("TEXT_NODE", 3.0), ("COMMENT_NODE", 8.0), ("DOCUMENT_NODE", 9.0), ("DOCUMENT_TYPE_NODE", 10.0), ("DOCUMENT_FRAGMENT_NODE", 11.0), ("DOCUMENT_POSITION_DISCONNECTED", 1.0), ("DOCUMENT_POSITION_PRECEDING", 2.0), ("DOCUMENT_POSITION_FOLLOWING", 4.0), ("DOCUMENT_POSITION_CONTAINS", 8.0), ("DOCUMENT_POSITION_CONTAINED_BY", 16.0), ("DOCUMENT_POSITION_IMPLEMENTATION_SPECIFIC", 32.0)][..]),
             ("Event", &[("NONE", 0.0), ("CAPTURING_PHASE", 1.0), ("AT_TARGET", 2.0), ("BUBBLING_PHASE", 3.0)][..]),
         ] {
             let f = ctors.iter().find(|c| c.0 == iface).expect("interface").1;
@@ -1131,7 +1137,13 @@ pub(crate) static DEFS: &[Def] = &[
     Def { on: &[Node], name: "removeChild", len: 1, kind: M(nd::remove_child) },
     Def { on: &[Node], name: "replaceChild", len: 2, kind: M(nd::replace_child) },
     Def { on: &[Node], name: "cloneNode", len: 0, kind: M(nd::clone_node) },
-    Def { on: &[Node], name: "contains", len: 1, kind: M(nd::contains) },
+    Def { on: &[Node], name: "contains", len: 1, kind: M(crate::browser_nodecmp::contains) },
+    Def { on: &[Node], name: "compareDocumentPosition", len: 1, kind: M(crate::browser_nodecmp::compare_document_position) },
+    Def { on: &[Node], name: "isSameNode", len: 1, kind: M(crate::browser_nodecmp::is_same_node) },
+    Def { on: &[Node], name: "isEqualNode", len: 1, kind: M(crate::browser_nodecmp::is_equal_node) },
+    Def { on: &[Node], name: "lookupNamespaceURI", len: 1, kind: M(crate::browser_nodecmp::lookup_namespace_uri) },
+    Def { on: &[Node], name: "lookupPrefix", len: 1, kind: M(crate::browser_nodecmp::lookup_prefix) },
+    Def { on: &[Node], name: "isDefaultNamespace", len: 1, kind: M(crate::browser_nodecmp::is_default_namespace) },
     Def { on: &[Node], name: "getRootNode", len: 0, kind: M(nd::get_root_node) },
     Def { on: &[Node], name: "hasChildNodes", len: 0, kind: M(nd::has_child_nodes) },
     Def { on: PARENT, name: "children", len: 0, kind: G(nd::children) },

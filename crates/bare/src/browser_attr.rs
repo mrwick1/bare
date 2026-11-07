@@ -34,7 +34,7 @@
 //! - Named properties of the map (`map.id`) are absent: use `getNamedItem`. Indices are real.
 //! - `setAttributeNode` of an `Attr` that has the namespace and local name of an existing attribute but another prefix is
 //!   `Unsupported`: the native list would move the attribute to the end instead of replacing it in place.
-//! - The other `Node` methods on an `Attr` (`cloneNode`, `isEqualNode`, `appendChild`, events) throw `TypeError: Illegal
+//! - The other `Node` methods on an `Attr` (`cloneNode`, `appendChild`, events) throw `TypeError: Illegal
 //!   invocation`. `new Attr()` and `new NamedNodeMap()` are illegal constructors. There is no `toggleAttribute`.
 //! - A JS string with a lone surrogate cannot be stored: `Unsupported` (the shared rule of the DOM host).
 //!
@@ -252,6 +252,13 @@ fn attr_of(d: &Dom, it: &mut Interp<'_>, this: Value) -> R<ObjId> {
     Err(it.type_error("Illegal invocation"))
 }
 
+/// `v` as an `Attr` of this host, with the log of removed attributes applied first (so `state` is current).
+pub(crate) fn probe(d: &Dom, v: Value) -> Option<ObjId> {
+    let Value::Object(o) = v else { return None };
+    drain(d);
+    d.attr.s.borrow().attrs.contains_key(&o).then_some(o)
+}
+
 /// An argument that must be an `Attr` of this host.
 fn attr_arg(d: &Dom, it: &mut Interp<'_>, a: &[Value], i: usize) -> R<ObjId> {
     if let Value::Object(o) = arg(a, i) {
@@ -263,14 +270,14 @@ fn attr_arg(d: &Dom, it: &mut Interp<'_>, a: &[Value], i: usize) -> R<ObjId> {
     Err(it.type_error(&format!("parameter {} is not of type 'Attr'", i + 1)))
 }
 
-fn state(d: &Dom, o: ObjId) -> (Atom, Option<NodeId>, Option<Span>) {
+pub(crate) fn state(d: &Dom, o: ObjId) -> (Atom, Option<NodeId>, Option<Span>) {
     let t = d.attr.s.borrow();
     let a = &t.attrs[&o];
     (a.atom, a.owner, a.value)
 }
 
 /// The value of the `Attr` `o` now.
-fn value_of(d: &Dom, o: ObjId) -> String {
+pub(crate) fn value_of(d: &Dom, o: ObjId) -> String {
     let (atom, owner, span) = state(d, o);
     let doc = d.doc.borrow();
     match (owner, span) {

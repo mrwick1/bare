@@ -76,6 +76,13 @@ impl<'p> Interp<'p> {
         self.host_function_with(id, name, len, true, true)
     }
 
+    /// Like `host_function` for a name that the caller has interned already (the same string as the property key): no second lookup.
+    pub fn host_function_interned(&mut self, id: u32, name: crate::value::StrId, len: u32, ctor: bool) -> Result<ObjId, Error> {
+        let o = self.new_func_object(Callee::Host { id, ctor, nt: false })?;
+        h!(self, self.heap.init_function(o, (self.k_length, len as f64), (self.k_name, name)));
+        Ok(o)
+    }
+
     fn host_function_with(&mut self, id: u32, name: &str, len: u32, ctor: bool, nt: bool) -> Result<ObjId, Error> {
         let o = self.new_func_object(Callee::Host { id, ctor, nt })?;
         let s = h!(self, self.heap.intern_str(name));
