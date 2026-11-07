@@ -2677,6 +2677,7 @@ Results (archMachine, against `cc944bb` from `base-build`):
 
 Gate failure (not merged):
 - Over under both allocators: `bare-stress run block-deep-over-limit 20000` +0.688%, +0.601%; `boxes-deep-blocks 20000` +0.568%, +0.506%; `boxes-deep-inline 20000` +0.688%, +0.545%. Over under glibc only: `position-fixed-deep 3000`, `position-nested-relative 3000` (+0.6%).
+- Arjun approved the merge on 2026-11-07 with the three rows above listed as known regressions. Each element costs 15 to 18 more instructions in `RuleSet::compute`, whose source did not change. Hypothesis: the compiler inlines it in a different way.
 - All `bare-stress` rows rise by about 15 to 18 instructions for each element. `bare-stress` calls `RuleSet::compute`, and this change does not edit its source. Main's `cascade.rs` with this `dom.rs` gives the base count, so the cost comes from the code generation of `cascade.rs` (hypothesis: inlining changes in `compute` and `cascade`; `nm` shows other sizes for both).
 - Fix attempts that failed: `Document::notify` cold and out of line (no change); `Reach` in a `Box` (53,289,288 against 53,231,208, worse). The lazy `Reach` fixed `sheets_load dynamic 10` (+1.1% to +0.405%).
 
