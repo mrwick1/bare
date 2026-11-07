@@ -329,7 +329,16 @@ mod tests {
     #[test]
     fn jobs_that_come_one_by_one_run_on_one_parked_thread() {
         let client = Client::new();
-        let ids: std::collections::HashSet<_> = (0..5).map(|_| client.spawn(|_| std::thread::current().id()).wait().unwrap()).collect();
+        // A job reports its result before its worker parks again. A job that comes in that gap starts a second thread, so wait for the park.
+        let ids: std::collections::HashSet<_> = (0..5)
+            .map(|_| {
+                let id = client.spawn(|_| std::thread::current().id()).wait().unwrap();
+                while client.workers.state.lock().unwrap().parked == 0 {
+                    std::thread::yield_now();
+                }
+                id
+            })
+            .collect();
         assert_eq!(ids.len(), 1);
     }
 
