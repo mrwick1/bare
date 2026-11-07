@@ -3209,3 +3209,43 @@ Checks (archMachine):
 Next, not done here: a fused compare-and-branch for the test of a `for` loop, and a cheaper hop loop in `find_name_fast`.
 
 Not tested: arjun-e16; the window (`--window`); the journey after the rebase; a split of the libc cost in the new profile; peak RSS of the typing page.
+
+## Window memory: one malloc arena (S5)
+
+#266 raised the window peak PSS by about 1.5 MiB, and a window peaks about 8 MiB above headless. The question: where does it go? The no-staging check ran on arjun-e16 with `bare-drive --window` in `cage` (headless wlroots backend, pixman), against two local fixtures: the login journey on the fixture app (`tools/fixtures/drive`, small page), and a heavy page of about 1 MB of scripts (6 files of 1,000 functions, an app script that builds 30,000 objects and 300 rows, served by a local file server) with 12 `type` plus `reload` pairs. Peak PSS is the largest `Pss` of `/proc/PID/smaps_rollup`, sampled each 10 ms; the split is `/proc/PID/smaps` at that peak. THP is `always` on this machine.
+
+Where the memory goes (heavy page, peak, MiB):
+
+| Owner | Headless | Window |
+| --- | ---: | ---: |
+| Anonymous memory and `[heap]` | 54.5 | 51.9 |
+| `wl_shm` pools (`/memfd:smithay-client-toolkit`, two buffers of 1280x720x4) | 0 | 7.0 |
+| `bare-drive` file pages | 8.5 | 8.7 |
+| Peak PSS | 62 to 64 | 68 to 69 |
+
+- The window itself is the two shm buffers (7.0 MiB) and the canvas (3.7 MiB, also in headless). Two buffers are made because the compositor holds the buffer that it shows until the next commit: `release` of buffer 0 came after the commit of buffer 1, and from then on the two took turns. `Slots` already makes the second buffer only when the first is busy, so a compositor that releases at once would need one. A real Hyprland window was not tested.
+- Frames do not hold memory. Counting allocator, heavy page, on a loaded page: 10 repaints with no change allocate 0 B; 10 typed keys with a paint each allocate 179 KiB in all, none of 128 KiB or more. A load draws 2 to 3 frames. The load itself allocates 66 MiB in 305,000 calls (141 blocks of 128 KiB or more). So the guess of #266, that the frames of a load and of each key leave memory in the allocator, is not supported.
+- The rest is free memory in arenas. A window runs three groups of threads: the window thread (the page), the driver thread and the network workers. With two arenas the memory that one group frees stays unused by the others. On the small fixture, 50 runs of the journey in one process: peak RSS 37 to 40 MiB in a window, 17 to 18 MiB headless. With `MALLOC_ARENA_MAX=1` the window peaks at 28 to 32 MiB.
+- Tried, no gain: `malloc_trim(0)` after the old document ends (heavy page, window, 6 runs each: 69.6 MiB against 68.9 MiB, and 934 ms against 758 ms for the journey). A fixed glibc mmap or trim threshold (`MALLOC_TRIM_THRESHOLD_`, `MALLOC_TOP_PAD_`, `MALLOC_MMAP_THRESHOLD_`) lowered the peak by 1.7 to 2.2 MiB but cost 5 to 8% more time and CPU: not taken.
+
+Change: `bare_net::parallel::limit_malloc_arenas(window)` sets `M_ARENA_MAX` to 1 for `--window` in `bare` and `bare-drive`, and keeps 2 otherwise (#245). Headless is unchanged. A set `MALLOC_ARENA_MAX` still wins.
+
+Test (written first): `crates/drive/tests/window_arenas.rs`, `a_window_run_holds_the_window_and_little_more_than_a_headless_run`. It runs 50 journeys in one `bare-drive` process, headless and in `cage`, and asserts window peak RSS under headless peak plus 16 MiB. Before: 18.9 MiB headless, 41.1 MiB in a window, failed. After: it passes, 6 runs in a row. It returns at once if `cage` is not installed.
+
+Results (arjun-e16, `main` is 6ad178e, both binaries built in the same way in a checkout of their own; interleaved runs):
+
+| Run | Peak PSS main (MiB) | Peak PSS this change (MiB) |
+| --- | ---: | ---: |
+| Heavy page, window, 8 runs, median (min-max) | 69.3 (68.4-70.8) | 67.2 (66.9-68.4) |
+| Heavy page, headless, 5 runs, median | 61.9 | 62.0 |
+| Fixture, window, 50 journeys, 5 runs, median (min-max) | 38.7 (38.3-40.8) | 30.2 (29.5-30.4) |
+
+The time of the heavy journey and its CPU did not change (773 ms and 718 ms CPU against 771 ms and 718 ms). The 12 reloads add nothing to the peak of a window with 1 reload (68.1 MiB), so the peak does not grow with the number of reloads at this size.
+
+Left, not done: the 7.0 MiB of the shm pools and the canvas of 3.7 MiB. Painting into the shm buffer, with a copy of the last buffer for the part that does not change, would remove the canvas, about 5% of the window peak. It changes the `Canvas` type of `bare-paint` and the `App::frame` interface: not a PR-sized change. The staging peak (84 MiB) was not reproduced here: the local scripts are smaller, so the arena gain on staging is hypothesis (about 2 MiB, the size on the heavy page).
+
+Checks (arjun-e16, base origin/main `fe196d1` from `base-build`):
+- `tools/js/cost_matrix.sh`: 805 rows in 80 s. Mean change: glibc -0.000%, jemalloc +0.000% (0 rows measured). Over under one allocator: 0. Over under both: 0. Failed: 0. The change is in the start of two binaries; no row runs them.
+- `cargo test --release --workspace --no-fail-fast`: 2,987 passed, 0 failed.
+
+Not tested: live staging (no credentials on this machine); a real Hyprland window (only `cage`); HiDPI; a long run of hours; `bare --window URL` (only `bare-drive --window`, which shares the window code); a compositor that releases a buffer at once; a page whose scripts and objects are as large as the staging app.
