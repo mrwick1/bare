@@ -1,0 +1,108 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Fixture App</title>
+<style>
+body { margin: 0; font: 16px sans-serif; }
+header { display: flex; gap: 16px; padding: 10px 20px; background: #eee; }
+#menu { position: absolute; right: 20px; top: 48px; background: #fff; border: 1px solid #999; }
+#menu button { display: block; padding: 6px 12px; border: 0; background: #fff; }
+main { padding: 0 20px; }
+label { display: block; margin: 8px 0 2px; }
+#err { color: #b00; }
+</style>
+</head>
+<body>
+<!-- A synthetic app with the login model of the staging app, for the driver tests (crates/drive/tests/fixture_journey.rs). One page
+     serves each path; a script draws the route (client-side navigation, history.pushState). The login API gives a token, the app keeps
+     it in sessionStorage and sends it to the data API. A 401 from the data API ends the session. No path but /login opens without a token. -->
+<div id="app"></div>
+<script>
+var app = document.getElementById('app');
+var notice = '';
+function esc(s) { return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/"/g, '&quot;'); }
+function go(path, replace) {
+  if (replace) history.replaceState(null, '', path); else history.pushState(null, '', path);
+  render();
+}
+function header(title) {
+  return '<header><a href="/">Overview</a><a href="/agents">Agents</a>' +
+    '<button id="acct" aria-label="Open account menu" aria-haspopup="menu" aria-expanded="false">FU</button>' +
+    '<div id="menu" role="menu" hidden><button role="menuitem" id="out">Sign out</button></div></header>' +
+    '<main><h1>' + title + '</h1>';
+}
+function render() {
+  var path = location.pathname, token = sessionStorage.getItem('token');
+  if (path !== '/login' && !token) return go('/login', true);
+  if (path === '/login' && token) return go('/', true);
+  if (path === '/login') return login();
+  if (path === '/agents') return agents(token);
+  app.innerHTML = header('Overview') + '<p>Welcome back.</p></main>';
+  document.title = 'Overview - Fixture App';
+}
+function login() {
+  document.title = 'Sign in - Fixture App';
+  app.innerHTML = '<main><h1>Sign in</h1><p id="note" role="status">' + esc(notice) + '</p><form id="f">' +
+    '<label for="email">Email</label><input id="email" name="email" type="email" autocomplete="username">' +
+    '<label for="pw">Password</label><input id="pw" name="password" type="password" autocomplete="current-password">' +
+    '<p id="err" role="alert"></p><button type="submit">Sign in</button></form></main>';
+  notice = '';
+  document.getElementById('f').addEventListener('submit', function (e) {
+    e.preventDefault();
+    var body = JSON.stringify({ email: document.getElementById('email').value, password: document.getElementById('pw').value });
+    fetch('/api/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: body }).then(function (r) {
+      if (!r.ok) {
+        document.getElementById('err').textContent = 'Wrong email or password';
+        return;
+      }
+      return r.json().then(function (d) {
+        sessionStorage.setItem('token', d.token);
+        go('/');
+      });
+    });
+  });
+}
+function agents(token) {
+  var q = new URLSearchParams(location.search).get('q') || '';
+  document.title = 'Agents - Fixture App';
+  app.innerHTML = header('Agents') + '<input type="search" aria-label="Search agents" value="' + esc(q) + '">' +
+    '<p id="count">Loading</p><ul id="list"></ul></main>';
+  var box = app.querySelector('input[type=search]');
+  box.addEventListener('keydown', function (e) {
+    if (e.key === 'Enter') go('/agents?q=' + encodeURIComponent(box.value));
+  });
+  fetch('/api/agents?q=' + encodeURIComponent(q), { headers: { Authorization: 'Bearer ' + token } }).then(function (r) {
+    if (r.status === 401) {
+      sessionStorage.clear();
+      notice = 'Your session expired. Sign in again.';
+      return go('/login', true);
+    }
+    return r.json().then(function (d) {
+      var list = document.getElementById('list');
+      if (!list) return;
+      list.innerHTML = d.agents.map(function (a) { return '<li><a href="/agents/' + a.id + '">' + esc(a.name) + '</a></li>'; }).join('');
+      document.getElementById('count').textContent = d.agents.length + ' results';
+    });
+  });
+}
+document.addEventListener('click', function (e) {
+  var a = e.target.closest('a[href^="/"]');
+  if (a) {
+    e.preventDefault();
+    return go(a.getAttribute('href'));
+  }
+  var menu = document.getElementById('menu');
+  if (e.target.id === 'acct') {
+    menu.hidden = !menu.hidden;
+    e.target.setAttribute('aria-expanded', String(!menu.hidden));
+  } else if (e.target.id === 'out') {
+    sessionStorage.clear();
+    go('/login');
+  }
+});
+window.addEventListener('popstate', render);
+render();
+</script>
+</body>
+</html>
