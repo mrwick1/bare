@@ -921,3 +921,20 @@ Not tested: the live staging pages `/disputes?id=<id>` and `/agents/new` (no run
 ## Tests with servers that close connections
 
 Tests for the worker pool and the import warming against servers that close the connection: `Connection: close`, HTTP/1.0 with a body that ends at the close, a close with no header (a GET is retried once; a POST is never sent twice), a cap of 2 connections, and a slow server that mixes closes. 7 pool tests (`crates/net/tests/close_pool.rs`) and 10 page tests (`close_tests.rs`) check script order, the import cascade, one request for each URL, and that no worker hangs. The tests found one bug: the first file that the page thread fetched was fetched again by `prefetch` once a reply was slow (an extra request for the first sheet and the first script, with any server). Fixed with a tag set in `Net`. 48 cost rows are within -0.55% and +0.26%. Details, stress run and what is not tested: [resources.md](resources.md#servers-that-close-connections).
+
+On main 6bc973c, bare ran the first live create and delete flow on staging, with real pointer, mouse and key input (#194) and no local change to the engine. `/disputes?id=<id>` now renders its dialog, because `getComputedStyle` gives used values (#198).
+
+| Step | Result | Time |
+| --- | --- | --- |
+| `/agents/new`, open the Radix client select | listbox with 5 clients | 1.3 s |
+| Pick a test client | step 1 shows its options; Next is enabled | 0.4 s |
+| Type purpose (54 characters, textarea) and goal (11, input) | values and the 54/500 counter are right | 5.2 s, 1.0 s |
+| Next, type the name (22) and the backstory (55, textarea) | values are right | 4.0 s, 10.2 s |
+| Open the voice dialog, pick a voice, Next | Review lists every value as typed | 0.8 s, 0.4 s, 0.2 s |
+| Create agent | the agent is created; the app moves to `/agents/<id>/configure` | 1.3 s |
+| Open the agent, More actions, Delete, type the name, Delete agent | the agent is gone; `/agents` shows 33 agents again | 2.6 s |
+
+Gaps that this flow found:
+- `/agents/<id>/configure` shows the app error screen: `TypeError: t.compareDocumentPosition is not a function`. The host has no `Node.compareDocumentPosition`.
+- Typing is slow: about 90 to 190 ms for each key on this form. Chrome takes a few ms. The cause is not known yet (to verify).
+- The driver click does not hit-test. A click reached the Next button while the modal voice dialog was still open. Chrome sends that click to the top element at the point.
