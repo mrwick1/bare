@@ -371,7 +371,7 @@ mod tests {
         assert_eq!(get(&mut j), "w=7; ok=1; l=1; l2=1; m=1; __Secure-o=1; __Host-p=1; v; q=\"x y\"");
         // a prefix needs `https`, and a `Secure` cookie needs it too
         j.set(false, "a.test", "/", "__Secure-z=1; Secure", NOW);
-        assert_eq!(j.get(true, "a.test", "/", NOW).contains("__Secure-z"), false);
+        assert!(!j.get(true, "a.test", "/", NOW).contains("__Secure-z"));
     }
 
     #[test]

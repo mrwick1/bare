@@ -16,8 +16,9 @@
 //! Named properties (WebIDL `getter`, `setter`, `deleter` of `Storage`; checked against Chrome 155 in
 //! `tools/fixtures/ui/storage-cases.txt`): `localStorage.token` is `getItem('token')`, `localStorage.token = v` is `setItem`, `delete`
 //! is `removeItem`, `Object.keys`, `in`, `for in`, `JSON.stringify` and `Object.getOwnPropertyDescriptor` see the items (a writable,
-//! enumerable, configurable data property). The two objects are host named objects (`Heap::new_named`, `heap_named.rs`), and the
-//! heap asks `Dom` (`NamedSource`) on every read, so nothing is cached. A name does not hide the prototype chain (there is no
+//! enumerable, configurable data property). The two objects are host named objects (`Heap::new_named_open`, `heap_named.rs`), and the
+//! heap asks `Dom` (`NamedSource`) on every read, so nothing is cached. Each object is made on the first read of `window.localStorage`
+//! or `window.sessionStorage` (`area_get`): a named object makes `Heap::has_exotics` true, and that costs every property write. A name does not hide the prototype chain (there is no
 //! `[LegacyOverrideBuiltIns]`): `getItem`, `length` and the like stay the methods, and a write to such a name makes an ordinary
 //! property on the object, as in Chrome. `Object.defineProperty` with a data descriptor is a `setItem` (the flags are ignored); an
 //! accessor descriptor is a `TypeError`. `preventExtensions`, `seal` and `freeze` are refused.

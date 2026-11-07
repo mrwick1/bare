@@ -12,7 +12,7 @@
 //!
 //! `navigator`: getters on `Navigator.prototype` with fixed values (`USER_AGENT` is the one place of the string).
 //! `userAgentData` has `brands` (a frozen array), `mobile` and `platform`. It has no `getHighEntropyValues` or `toJSON`.
-//! `cookieEnabled` is true, as asked. This browser has no cookie jar yet. There is no `mediaDevices`.
+//! `cookieEnabled` is true, as asked. `document.cookie` has a jar for scripts only (`browser_cookie.rs`); no HTTP request sends it. There is no `mediaDevices`.
 //!
 //! `Blob`: `new Blob(parts, {type})` with strings, `ArrayBuffer`s, views and Blobs, `size`, `type`, `text()`,
 //! `arrayBuffer()`, `slice()`. `File extends Blob` adds `name` and `lastModified`. A Blob keeps its bytes in a side table
