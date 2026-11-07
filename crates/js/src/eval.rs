@@ -470,11 +470,12 @@ struct FScope {
     fl: u8,
     /// The state of the function for frame slots: `FR_ENV` and the others (see `eval_scope.rs`).
     fr: u8,
-    /// The first of the scopes of this function in `Interp::sc_all`. They follow each other: a frame function has no inner function.
-    sc_lo: u32,
-    /// The template of the frame, as a call starts: `Interp::fr_pool[fr_off..fr_off + fr_len]` (see `fr_layout`). Valid in `FR_ON`.
-    fr_off: u32,
-    fr_len: u32,
+    /// Until the function is decided (`FR_ON` or `FR_ENV` by `fr_layout`): the first of its scopes in `Interp::sc_all`. They follow each
+    /// other: a frame function has no inner function. In `FR_ON`: the start of the template of the frame in `Interp::fr_pool`, which is
+    /// `fr_pool[lo..lo + fr_len]` as a call starts (see `fr_layout`). One field for both keeps the table of functions small.
+    lo: u32,
+    /// The number of slots of the frame (at most `FR_MAX`). Valid in `FR_ON`.
+    fr_len: u8,
 }
 
 const TYPE_ERROR: usize = 1;
@@ -1288,7 +1289,7 @@ impl<'p> Interp<'p> {
         self.sc_end(sc);
         self.sc_fn = parent;
         let fsd = &mut self.scopes[me];
-        fsd.sc_lo = lo;
+        fsd.lo = lo;
         // The function is an inner function of the one that holds it: that one has no frame slots.
         let fl = std::mem::replace(&mut self.fl, outer_fl | FL_NOFR);
         fsd.fl = fl;
@@ -1452,7 +1453,7 @@ impl<'p> Interp<'p> {
                 self.w_stmt(block, fs, ac, true)?;
                 if let Some(c) = handler {
                     let c = *prog.catch(c);
-                    let sc = self.sc_begin(RKind::Catch(c.param, s));
+                    let sc = self.sc_begin(RKind::Catch(s));
                     if let Some(p) = c.param {
                         self.w_pat(p, fs, ac)?;
                     }

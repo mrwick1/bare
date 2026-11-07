@@ -249,7 +249,8 @@ pub fn encode_uri_component(units: &[u16], extra: &str) -> Option<String> {
     let mut out = String::with_capacity(units.len());
     for c in char::decode_utf16(units.iter().copied()) {
         let c = c.ok()?;
-        if c.is_ascii_alphanumeric() || "-_.!~*'()".contains(c) || extra.contains(c) {
+        // Both sets are ASCII. A non-ASCII `contains` compares each window of the set through libc `bcmp`.
+        if c.is_ascii_alphanumeric() || c.is_ascii() && ("-_.!~*'()".contains(c) || extra.contains(c)) {
             out.push(c);
         } else {
             for b in c.encode_utf8(&mut [0; 4]).bytes() {
