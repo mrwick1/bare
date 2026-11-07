@@ -4227,7 +4227,7 @@ A flaky test of #186 also failed in the workspace run: `jobs_that_come_one_by_on
 
 Cost: `tools/js/instr.sh` (min of 3, pinned to one core), origin/main 9bb8a04 against this change, 48 rows: `loader_load` (blocking, dynamic, mixed), `preload_load` (font, style, script, dups), `sheets_load` (linked, imports), `resources_load` (small, dups), `fetch_load` (post, bytes), `xhr_load` and `session_load` (chain, heavy), at 1x, 10x and 100x (`sheets_load linked 100` failed once under `perf` and passed alone). Range -0.55% (`resources_load small 1`) to +0.26% (`preload_load font 100`). The first version was over the limit: `loader_load dynamic 100` +2.7%, `preload_load font 100` +4.3%. Cross-check with jemalloc (`LD_PRELOAD`) of the four worst rows: +0.13%, +0.11%, +0.28%, +0.10%.
 
-Stress: the 17 new tests ran 50 times (net and page binaries one after the other) under `stress-ng --cpu 2`, with the tests and the 2 stress workers pinned to one core (`taskset -c 5`), debug build. 50 of 50 runs passed, none hung. `cargo test --workspace` (after the rebase on #194): 2543 passed, 0 failed.
+Stress: the 17 new tests ran 50 times (net and page binaries one after the other) under `stress-ng --cpu 2`, with the tests and the 2 stress workers pinned to one core (`taskset -c 5`), debug build. 50 of 50 runs passed, none hung. `cargo test --workspace` (after the rebase on #196): 2562 passed, 0 failed.
 
 Not tested: a real connection refusal (RST) at connect (a parallel change adds a connect retry); HTTP/2; `https` (loopback only); a live server that closes; a server that closes in the middle of a body with workers on; a cap lower than 2.
 
