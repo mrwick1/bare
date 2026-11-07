@@ -97,15 +97,17 @@ enum Host {
 impl Host {
     /// An `open` is a new tab of one browser, in a window too: empty storage, and the connections and the HTTP cache of `net`.
     fn open(&mut self, url: &str, size: (u32, u32), window: bool, net: &bare_net::http::Client) -> Result<(), String> {
-        let new = move |url: &str, net: &bare_net::http::Client| {
+        let new = |url: &str, size: (u32, u32), net: &bare_net::http::Client| {
             let mut p = Page::open_in(url, size, net)?;
             p.quiet = true;
             Ok::<_, String>(p)
         };
         match self {
+            // The new page takes the size of the window, not `size`: the compositor can have resized the window, and the window loop
+            // calls `resize` only when the window size changes.
             Host::Window(r) => {
                 let (url, net) = (url.to_string(), net.fork());
-                r.call(move |p| new(&url, &net).map(|n| *p = n))?
+                r.call(move |p| new(&url, p.viewport(), &net).map(|n| *p = n))?
             }
             _ if window => {
                 *self = Host::Window(Remote::open(url, size, net)?);
@@ -114,7 +116,7 @@ impl Host {
             _ => {
                 // The old page ends first, so the two pages do not share the peak of memory. A failed open leaves no page.
                 *self = Host::None;
-                *self = Host::Local(Box::new(new(url, net)?));
+                *self = Host::Local(Box::new(new(url, size, net)?));
                 Ok(())
             }
         }

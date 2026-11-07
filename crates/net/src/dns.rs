@@ -450,9 +450,15 @@ mod tests {
     fn falls_back_to_tcp() {
         // A fake DNS server on this machine. Over UDP it says "truncated".
         // Over TCP, on the same port, it gives the real answer.
-        let udp = UdpSocket::bind("127.0.0.1:0").unwrap();
-        let addr = udp.local_addr().unwrap();
-        let tcp = TcpListener::bind(addr).unwrap();
+        // The kernel gives a free UDP port. The same TCP port can belong to another socket, for example the client side of a
+        // connection of a parallel test. So look for a port that is free for both.
+        let (udp, tcp, addr) = (0..100)
+            .find_map(|_| {
+                let udp = UdpSocket::bind("127.0.0.1:0").unwrap();
+                let addr = udp.local_addr().unwrap();
+                TcpListener::bind(addr).ok().map(|tcp| (udp, tcp, addr))
+            })
+            .expect("a port that is free for UDP and TCP");
         let server = std::thread::spawn(move || {
             // `thread::spawn` runs this function at the same time as the rest of the test.
             // `move` gives the function its own `udp` and `tcp`.

@@ -516,8 +516,8 @@ impl App for Hosted {
 
 impl Remote {
     /// Load `url` in a new session with empty storage and show it in a window of `size`. The session shares the connections and the HTTP
-    /// cache of `net` (`Page::open_in`): a job that opens another page with `Page::open_in(url, size, &net)` on the window thread keeps
-    /// them. Returns when the first frame is drawn. The storage is not `Send`: a job opens a page of the same profile with
+    /// cache of `net` (`Page::open_in`): a job that opens another page with `Page::open_in(url, page.viewport(), &net)` on the window
+    /// thread keeps them. Returns when the first frame is drawn. The storage is not `Send`: a job opens a page of the same profile with
     /// `Page::open_with(url, size, page.storage())` on the window thread.
     pub fn open(url: &str, size: (u32, u32), net: &bare_net::http::Client) -> Result<Remote, String> {
         let (ready_tx, ready_rx) = mpsc::channel();
