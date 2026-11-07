@@ -960,7 +960,7 @@ fn initial(p: Property) -> Value {
         Display => Value::Keyword(K::Inline),
         Float | Clear | MaxWidth | MaxHeight | BorderTopStyle | BorderRightStyle | BorderBottomStyle | BorderLeftStyle | TextDecoration | TextTransform => Value::Keyword(K::None),
         Visibility | OverflowX | OverflowY => Value::Keyword(K::Visible),
-        WhiteSpace | FontStyle | LineHeight => Value::Keyword(K::Normal),
+        WhiteSpace | FontStyle | LineHeight | LetterSpacing | WordSpacing => Value::Keyword(K::Normal),
         TextAlign => Value::Keyword(K::Start),
         ListStyleType => Value::Keyword(K::Disc),
         BoxSizing => Value::Keyword(K::ContentBox),
@@ -1002,7 +1002,7 @@ fn initial(p: Property) -> Value {
 /// Does a child take the value of the parent when it has no value of its own?
 const fn inherited(p: Property) -> bool {
     use Property::*;
-    matches!(p, TextColor | FontSize | FontWeight | FontStyle | LineHeight | TextAlign | TextTransform | WhiteSpace | ListStyleType | Visibility | PointerEvents | Fill | Stroke | BorderCollapse | BorderSpacingH | BorderSpacingV | CaptionSide | Direction)
+    matches!(p, TextColor | FontSize | FontWeight | FontStyle | LineHeight | LetterSpacing | WordSpacing | TextAlign | TextTransform | WhiteSpace | ListStyleType | Visibility | PointerEvents | Fill | Stroke | BorderCollapse | BorderSpacingH | BorderSpacingV | CaptionSide | Direction)
 }
 
 /// The properties that `inherited` names, as bits.
@@ -1624,6 +1624,17 @@ mod tests {
         assert_eq!(s("div { font-size: 10px } p { font-size: larger }", Property::FontSize), px(12.0));
         assert_eq!(s("div { font-size: 12px } p { font-size: smaller }", Property::FontSize), px(10.0));
         assert_eq!(s("p { font-size: 1.5em }", Property::FontSize), px(24.0));
+    }
+
+    #[test]
+    fn letter_and_word_spacing_inherit_as_pixels() {
+        let html = "<div id=d><p id=p>x</p></div>";
+        let s = |css: &str, p| get(html, &[css], "p", p);
+        assert_eq!(s("div { letter-spacing: 0.5em; font-size: 10px } p { font-size: 40px }", Property::LetterSpacing), px(5.0));
+        assert_eq!(s("div { word-spacing: -2px }", Property::WordSpacing), px(-2.0));
+        assert_eq!(s("div { letter-spacing: 2px } p { letter-spacing: normal }", Property::LetterSpacing), Value::Keyword(Keyword::Normal));
+        assert_eq!(s("p { color: red }", Property::LetterSpacing), Value::Keyword(Keyword::Normal));
+        assert_eq!(s("div { letter-spacing: 5% }", Property::LetterSpacing), Value::Keyword(Keyword::Normal), "a percent is not valid");
     }
 
     #[test]

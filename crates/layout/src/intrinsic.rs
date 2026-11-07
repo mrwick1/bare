@@ -12,7 +12,7 @@
 use crate::Cx;
 use crate::block::{Context, MAX_DEPTH, border_padding, resolve};
 use crate::boxes::Child;
-use crate::font::{LETTER, Metrics};
+use crate::font::{self, LETTER, Metrics};
 use crate::inline::{Event, Events};
 use crate::text::{self, Flow, Piece, Transform, WhiteSpace};
 use bare_css::values::{Keyword, Property, Value};
@@ -109,26 +109,33 @@ pub(crate) fn lines(cx: &mut Cx, first: NodeId, last: NodeId) -> (f32, f32) {
                 let NodeData::Text(span) = *tree.doc.data(node) else { continue };
                 let style = tree.style(node);
                 let (ws, transform, m) = (WhiteSpace::of(style), Transform::of(style), Metrics::of(style));
-                for piece in text::pieces(tree.doc.text(span), ws, transform, &mut flow) {
+                let text = tree.doc.text(span);
+                let sp = font::spacing(style);
+                let spaced = sp != (0.0, 0.0);
+                for piece in text::pieces(text, ws, transform, &mut flow) {
                     match piece {
-                        Piece::Word { width, .. } => {
-                            unit += m.px(width);
-                            line += m.px(width);
+                        Piece::Word { start, end, width } => {
+                            let w = m.px(width) + if spaced { font::extra(&text[start as usize..end as usize], sp) } else { 0.0 };
+                            unit += w;
+                            line += w;
                             hang = 0.0;
                         }
                         Piece::Space { width, .. } if ws.wrap => {
+                            let w = m.px(width) + if spaced { font::extra_spaces(width, sp) } else { 0.0 };
                             min = min.max(unit);
                             unit = 0.0;
-                            line += m.px(width);
-                            hang = m.px(width);
+                            line += w;
+                            hang = w;
                         }
                         Piece::Space { width, .. } => {
-                            unit += m.px(width);
-                            line += m.px(width);
+                            let w = m.px(width) + if spaced { font::extra_spaces(width, sp) } else { 0.0 };
+                            unit += w;
+                            line += w;
                         }
                         Piece::Tab { .. } => {
-                            unit += m.px(8 * LETTER);
-                            line += m.px(8 * LETTER);
+                            let w = m.px(8 * LETTER) + 8.0 * (sp.0 + sp.1);
+                            unit += w;
+                            line += w;
                         }
                         Piece::Newline { .. } => {
                             min = min.max(unit);

@@ -40,7 +40,7 @@ use bare_layout::boxes::{self, Kind, Tree};
 use bare_layout::controls::{self, Control};
 use bare_layout::fragment::{Fragment, Kind as FragmentKind, Layout};
 use bare_layout::scroll::Areas;
-use bare_layout::font::Metrics;
+use bare_layout::font::{self, Metrics};
 use bare_layout::text::{self, Transform, WhiteSpace};
 
 /// One thing to draw.
@@ -51,6 +51,8 @@ pub enum Item {
     /// A run of text: `len` bytes at `at` in `DisplayList::text`. `x` is the left edge of the first letter, in pixels, and
     /// `baseline` is a whole pixel row.
     Text { x: f32, baseline: i32, size: f32, color: u32, at: u32, len: u32, bold: bool },
+    /// The `letter-spacing` and the `word-spacing`, in pixels, of the `Text` that comes next. Only a run that has spacing has this item.
+    Spacing { letter: f32, word: f32 },
     /// A rectangle with round corners: `DisplayList::shapes[shape]`.
     Fill { shape: u32, color: u32 },
     /// What is in `shapes[shape]` and not in `shapes[shape + 1]`: a round border.
@@ -894,6 +896,10 @@ impl Builder<'_> {
             return;
         }
         let bold = matches!(style.get(Property::FontWeight), Value::Number(w) if w >= 600.0);
+        let (letter, word) = font::spacing(style);
+        if (letter, word) != (0.0, 0.0) {
+            self.list.lines.push(Item::Spacing { letter, word });
+        }
         self.list.lines.push(Item::Text { x: x0, baseline, size: m.size, color, at: at as u32, len: len as u32, bold });
         // Lines, drawn after the text, with the font's numbers (Noto Sans Mono: the underline is 0.1 em below the
         // baseline and 0.05 em thick, the strike-through is 0.322 em above it).

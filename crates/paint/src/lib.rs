@@ -107,6 +107,7 @@ impl Painter {
         clips.push(bounds);
         // The translation of what is drawn now: the scroll offsets of the page and of the containers around it.
         let mut off = view.map_or((0, 0), |v| (-(v.scroll.x.round() as i32), -(v.scroll.y.round() as i32)));
+        let mut spacing = (0.0, 0.0);
         for &item in &list.items {
             let clip = *clips.last().expect("the first clip is the canvas");
             let (tx, ty) = off;
@@ -142,8 +143,9 @@ impl Painter {
                 Item::PopClip => {
                     clips.pop();
                 }
+                Item::Spacing { letter, word } => spacing = (letter, word),
                 Item::Text { x, baseline, size, color, at: from, len, bold } => {
-                    text(canvas, glyphs, clip, x + tx as f32, baseline + ty, size, color, bold, &list.text[from as usize..(from + len) as usize]);
+                    text(canvas, glyphs, clip, x + tx as f32, baseline + ty, size, color, bold, std::mem::take(&mut spacing), &list.text[from as usize..(from + len) as usize]);
                 }
                 Item::PushScroll(node) => {
                     offsets.push(off);
@@ -219,20 +221,28 @@ fn moved(s: &canvas::Shape, (dx, dy): (i32, i32)) -> canvas::Shape {
 /// Draw one run of text. The letters are `font::width_of` apart, as layout placed them: whole units of a tenth of an
 /// em, added up, so a line of 1,000 letters ends where layout says.
 #[allow(clippy::too_many_arguments)]
-pub fn text(canvas: &mut Canvas, glyphs: &mut Glyphs, clip: IRect, x: f32, baseline: i32, size: f32, color: u32, bold: bool, run: &str) {
+pub fn text(canvas: &mut Canvas, glyphs: &mut Glyphs, clip: IRect, x: f32, baseline: i32, size: f32, color: u32, bold: bool, (letter, word): (f32, f32), run: &str) {
     // Not even the tallest letter reaches the clip: skip the run.
     if (baseline as f32 + size * 0.4) < clip.y0 as f32 || (baseline as f32 - size * 1.2) > clip.y1 as f32 {
         return;
     }
     let px = size / 10.0;
-    let mut units: Units = 0;
+    let (mut units, mut extra): (Units, f32) = (0, 0.0);
     for c in run.chars() {
         // A newline or a tab that was kept (`white-space: pre`) is not a letter, and has no width here.
         if c < ' ' {
             continue;
         }
-        let at = x + units as f32 * px;
-        units += font::width_of(c);
+        let at = x + units as f32 * px + extra;
+        let w = font::width_of(c);
+        units += w;
+        // `letter-spacing` comes after each letter, and `word-spacing` after each space (`font::extra`).
+        if w != 0 {
+            extra += letter;
+        }
+        if c == ' ' || c == '\u{a0}' {
+            extra += word;
+        }
         if at > clip.x1 as f32 {
             break;
         }

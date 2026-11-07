@@ -539,6 +539,20 @@ fn svg_shapes_have_chromes_pixels() {
     assert_eq!(c.pixel(10, 20), WHITE);
 }
 
+/// `letter-spacing` and `word-spacing` move the letters as in Chrome 155 (`fixtures/spacing.html` differs from Chrome only in glyph shading).
+#[test]
+fn spacing_moves_the_letters() {
+    // "II" at 16px: the second letter is 9.6 px after the first. With 10px of spacing it is 19.6 px after it.
+    let right = |css: &str, text: &str| ink(&bare(&format!("<p style='margin:0;{css}'>{text}</p>")), 0, 0, 300, 22, WHITE).expect("ink").2 as i32;
+    let plain = right("", "II");
+    assert_eq!(right("letter-spacing:10px", "II") - plain, 10);
+    assert_eq!(right("letter-spacing:-3px", "II") - plain, -3);
+    // The spacing after the last letter is room, not ink.
+    assert_eq!(right("letter-spacing:10px", "I") - right("", "I"), 0);
+    assert_eq!(right("word-spacing:20px", "I I") - right("", "I I"), 20);
+    assert_eq!(right("letter-spacing:5px;word-spacing:20px", "I I") - right("", "I I"), 5 + 5 + 20 + 0);
+}
+
 #[test]
 fn an_svg_draws_only_inside_its_box_and_hidden_ones_draw_nothing() {
     let c = bare("<svg width=10 height=10><rect x=-5 y=-5 width=30 height=30 fill=red /></svg><svg width=10 height=10 style='visibility:hidden'><rect width=10 height=10 fill=red /></svg><svg width=10 height=10 style='display:none'><rect width=10 height=10 fill=red /></svg>");

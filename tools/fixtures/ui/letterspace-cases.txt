@@ -1,0 +1,59 @@
+var st = document.createElement('style'); st.textContent = "html{overflow:hidden}*{font-family:'Noto Sans Mono' !important}body{margin:0;font-size:16px}.ib{display:inline-block}"; document.head.appendChild(st);
+var $ = function (i) { return document.getElementById(i) };
+var R1 = function (v) { return Math.round(v * 10) / 10 };
+var W = function (ids) { return ids.split(' ').map(function (id) { var r = $(id).getBoundingClientRect(); return [r.x, r.y, r.width, r.height].map(R1).join(',') }).join(' ') };
+var T = function (ids) { return ids.split(' ').map(function (id) { var g = document.createRange(); g.selectNodeContents($(id)); return g.getClientRects().length + ':' + Array.prototype.map.call(g.getClientRects(), function (r) { return [r.x, r.y, r.width].map(R1).join(',') }).join('|') }).join(' ') };
+=== letter-spacing-width
+@html <span id=a class=ib style="letter-spacing:2px">abcd</span><span id=b class=ib style="letter-spacing:-1px">abcd</span><span id=c class=ib style="letter-spacing:0.25em">abcd</span><span id=d class=ib style="letter-spacing:normal">abcd</span>
+(function () { return W('a b c d') })
+=== word-spacing-width
+@html <span id=a class=ib style="word-spacing:10px">a b  c</span><span id=b class=ib style="word-spacing:-2px">a b c</span><span id=c class=ib style="word-spacing:1em;white-space:pre">a  b</span>
+(function () { return W('a b c') })
+=== both-spacings
+@html <span id=a class=ib style="letter-spacing:1px;word-spacing:5px">ab cd ef</span>
+(function () { return W('a') })
+=== inherits
+@html <div style="letter-spacing:3px;word-spacing:4px"><span id=a class=ib>ab cd</span><span id=b class=ib style="letter-spacing:normal">ab cd</span><span id=c class=ib style="letter-spacing:inherit;font-size:32px">ab</span></div>
+(function () { return W('a b c') })
+=== em-is-of-the-element
+@html <div style="font-size:10px;letter-spacing:0.5em"><span id=a class=ib>abc</span><span id=b class=ib style="font-size:20px">abc</span></div>
+(function () { return W('a b') })
+=== wraps-with-spacing
+@html <div id=a style="width:100px;letter-spacing:4px">aaa bbb ccc ddd</div>
+(function () { return W('a') + ' ' + T('a') })
+=== min-content-and-float
+@html <div id=a style="float:left;letter-spacing:3px">abc defgh</div><div style="display:flex;width:10px"><div id=b style="letter-spacing:3px">abc defgh</div></div>
+(function () { return W('a b') })
+=== text-align-center
+@html <div id=a style="width:200px;text-align:center;letter-spacing:5px">ab</div>
+(function () { return T('a') })
+=== text-align-right
+@html <div id=a style="width:200px;text-align:right;letter-spacing:5px">ab cd</div>
+(function () { return T('a') })
+=== nested-spans
+@html <div id=a>x<span id=b style="letter-spacing:4px">yy</span>z<span id=c style="word-spacing:9px">p q</span></div>
+(function () { return W('a b c') + ' ' + T('b c') })
+=== nbsp-and-marks
+@html <span id=a class=ib style="letter-spacing:2px;word-spacing:3px">a&nbsp;b</span><span id=b class=ib style="letter-spacing:2px">e&#769;e</span>
+(function () { return W('a b') })
+=== inline-block-in-flex-shrinks
+@html <div id=f style="display:flex"><div id=a style="letter-spacing:2px">abc</div><div id=b style="letter-spacing:2px">abc def</div></div>
+(function () { return W('a b') })
+=== range-rects-of-part
+@html <div id=a style="letter-spacing:3px">abcdef</div>
+(function () { var t = $('a').firstChild; var g = document.createRange(); g.setStart(t, 2); g.setEnd(t, 4); var r = g.getBoundingClientRect(); return [r.x, r.width].map(R1).join(',') })
+=== line-height-and-height-unchanged
+@html <div id=a style="letter-spacing:5px;width:50px">aa bb cc</div>
+(function () { return W('a') })
+=== text-transform-and-spacing
+@html <span id=a class=ib style="letter-spacing:2px;text-transform:uppercase">abc</span><span id=b class=ib style="letter-spacing:2px;text-transform:capitalize">ab cd</span>
+(function () { return W('a b') })
+=== pre-and-tab
+@html <div style="white-space:pre;letter-spacing:2px;width:400px">a&#9;<b id=a>b</b>  <b id=b>c</b></div>
+(function () { return W('a b') })
+=== tab-stop-with-spacing
+@html <div style="white-space:pre;letter-spacing:2px;word-spacing:7px;width:400px">a&#9;<b id=a>b</b> c<b id=b>d</b></div><div style="white-space:pre;word-spacing:7px;width:400px">a&#9;<b id=c>b</b></div>
+(function () { return W('a b c') })
+=== button-and-input-inherit
+@html <div style="letter-spacing:2px"><button id=a style="letter-spacing:inherit">abc</button><button id=b>abc</button></div>
+(function () { return W('a b') })

@@ -129,3 +129,24 @@ pub fn width(text: &str) -> Units {
     text.chars().fold(0, |sum: Units, c| sum.saturating_add(width_of(c)))
     // `saturating_add`: a sum that is too big stops at the largest `u32`, and does not wrap round to a small number.
 }
+
+/// `letter-spacing` and `word-spacing` of a style, in pixels.
+pub fn spacing(style: &ComputedStyle) -> (f32, f32) {
+    (style.px(Property::LetterSpacing), style.px(Property::WordSpacing))
+}
+
+/// The width that `letter-spacing` and `word-spacing` add to a piece of text: `letter` after each letter (also the last one,
+/// as in Chrome), and `word` more after each space. An accent that sits on a letter is no letter of its own.
+pub fn extra(text: &str, (letter, word): (f32, f32)) -> f32 {
+    let (mut letters, mut spaces) = (0u32, 0u32);
+    for c in text.chars() {
+        letters += (width_of(c) != 0) as u32;
+        spaces += (c == ' ' || c == '\u{a0}') as u32;
+    }
+    letters as f32 * letter + spaces as f32 * word
+}
+
+/// The same for a run of spaces of this width (a run of collapsing spaces is one space).
+pub fn extra_spaces(width: Units, (letter, word): (f32, f32)) -> f32 {
+    (width / LETTER) as f32 * (letter + word)
+}
