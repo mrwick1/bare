@@ -271,6 +271,7 @@ Skip as separate work, because B replaces the code: `num_lit` caching (4.9 M), t
 - Subset: literals, names (environment slot, global), member get and set with `ic` operands, calls (with `this`), `new`, unary, binary, logical, conditional, assignment, update, object and array literals, function expressions, template literals, `if`, `for`, `while`, `do`, `switch`, `break`, `continue`, `return`, `throw`, `try`, `catch`, `finally`. Any other node returns `Unsupported` and the function stays on the tree walker.
 - Check: golden disassembly of 60 small programs. The verifier runs on the whole `eval-cases` corpus and on the typing bundle and reports the share of functions that compile (the coverage number). Code is dead until B3.
 - Parallel: yes with A steps (new files only).
+- Done: `bc_gen.rs`, `bc_gen_expr.rs`, `bc_gen_stmt.rs`, `bc_verify.rs`. The golden tests are in `bc_gen_tests.rs` (67 programs), because they run scripts. 80.5% of the corpus functions and 86.9% of the typing page functions compile, and all of them verify. See docs/progress.md, "Code generator and verifier".
 
 **B3. The VM loop and the switch (core subset, no JS to JS calls yet).** Size L. Depends on B2 and A0.
 - Files: `crates/js/src/bc_vm.rs` (new: the loop, the register stack, the handler search), `eval.rs` (`Interp.exec`, `BcState`, one check in `call_script`, `set_exec`), `eval_scripts.rs` (script body policy), `crates/js/examples/*.rs` (read `BARE_JS_EXEC`: `eval_load`, `type_load`, and the other load examples through one helper).
