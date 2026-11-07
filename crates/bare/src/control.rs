@@ -476,6 +476,35 @@ pub struct Remote {
     tx: Option<mpsc::Sender<Job>>,
     waker: bare_window::Waker,
     thread: Option<std::thread::JoinHandle<()>>,
+    ran: Ran,
+}
+
+/// How many rounds of the window loop ran a task of the page (`Page::tick`), and a signal for each.
+type Ran = std::sync::Arc<(std::sync::Mutex<u64>, std::sync::Condvar)>;
+
+/// The long rounds of a loop: how many, the longest, and how many took more than 16 ms (a missed frame at 60 Hz) and 50 ms (a long task).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Ticks {
+    pub n: u32,
+    pub max: std::time::Duration,
+    pub over_16: u32,
+    pub over_50: u32,
+}
+
+impl Ticks {
+    pub fn add(&mut self, d: std::time::Duration) {
+        self.n += 1;
+        self.max = self.max.max(d);
+        self.over_16 += (d.as_micros() > 16_000) as u32;
+        self.over_50 += (d.as_micros() > 50_000) as u32;
+    }
+
+    pub fn merge(&mut self, o: Ticks) {
+        self.n += o.n;
+        self.max = self.max.max(o.max);
+        self.over_16 += o.over_16;
+        self.over_50 += o.over_50;
+    }
 }
 
 struct Hosted {
@@ -484,6 +513,7 @@ struct Hosted {
     /// Told once, when the first frame is drawn.
     ready: Option<mpsc::Sender<Result<Jobs, String>>>,
     jobs: Option<Jobs>,
+    ran: Ran,
 }
 
 impl App for Hosted {
@@ -500,22 +530,34 @@ impl App for Hosted {
         self.page.event(event, ctl);
     }
     fn tick(&mut self, ctl: &mut Control) -> Option<Instant> {
+        // One job in a round, so that each job, with its draw, is one tick (`round`). A job ran: the next round comes at once, for the
+        // next job.
+        let mut ran = false;
         if self.ready.is_none() {
-            loop {
-                match self.rx.try_recv() {
-                    Ok(job) => {
-                        job(&mut self.page);
-                        ctl.redraw();
-                    }
-                    Err(mpsc::TryRecvError::Empty) => break,
-                    Err(mpsc::TryRecvError::Disconnected) => {
-                        ctl.close();
-                        return None;
-                    }
+            match self.rx.try_recv() {
+                Ok(job) => {
+                    job(&mut self.page);
+                    ctl.redraw();
+                    ran = true;
+                }
+                Err(mpsc::TryRecvError::Empty) => {}
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    ctl.close();
+                    return None;
                 }
             }
         }
-        App::tick(&mut self.page, ctl)
+        let (work, next) = self.page.tick();
+        if work {
+            ctl.redraw();
+            *self.ran.0.lock().unwrap() += 1;
+            self.ran.1.notify_all();
+        }
+        if ran { Some(Instant::now()) } else { next }
+    }
+    /// Each round of the window loop is one tick of `page.ticks`; a job takes them with `std::mem::take`.
+    fn round(&mut self, busy: std::time::Duration) {
+        self.page.ticks.add(busy);
     }
 }
 
@@ -527,15 +569,20 @@ impl Remote {
     pub fn open(url: &str, size: (u32, u32), net: &bare_net::http::Client) -> Result<Remote, String> {
         let (ready_tx, ready_rx) = mpsc::channel();
         let (url, net) = (url.to_string(), net.fork());
+        let ran = Ran::default();
+        let ran2 = ran.clone();
         let stack = if cfg!(debug_assertions) { 64 << 20 } else { 8 << 20 };
         let thread = std::thread::Builder::new()
             .stack_size(stack)
             .spawn(move || {
                 let fail = |e: String, r: &mpsc::Sender<Result<_, String>>| drop(r.send(Err(e)));
+                let t = Instant::now();
                 let mut page = match Page::open_in(&url, size, &net) {
                     Ok(p) => p,
                     Err(e) => return fail(e, &ready_tx),
                 };
+                // The load runs on the window thread before the loop: the first tick.
+                page.ticks.add(t.elapsed());
                 page.quiet = true;
                 let config = bare_window::Config { title: "bare (driven)".into(), app_id: "bare".into(), size };
                 let window = match bare_window::Window::open(&config) {
@@ -545,16 +592,35 @@ impl Remote {
                 let (tx, rx) = mpsc::channel();
                 let waker = window.waker();
                 page.wake_on_done(move || waker.wake());
-                let mut host = Hosted { page, rx, ready: Some(ready_tx.clone()), jobs: Some((tx, window.waker())) };
+                let mut host = Hosted { page, rx, ready: Some(ready_tx.clone()), jobs: Some((tx, window.waker())), ran: ran2 };
                 if let Err(e) = window.run(&mut host) {
                     fail(format!("window: {e}"), &ready_tx);
                 }
             })
             .map_err(|e| format!("thread: {e}"))?;
         match ready_rx.recv() {
-            Ok(Ok((tx, waker))) => Ok(Remote { tx: Some(tx), waker, thread: Some(thread) }),
+            Ok(Ok((tx, waker))) => Ok(Remote { tx: Some(tx), waker, thread: Some(thread), ran }),
             Ok(Err(e)) => Err(e),
             Err(_) => Err("the window thread ended".into()),
+        }
+    }
+
+    /// How many rounds of the window loop have run a task of the page.
+    pub fn work_count(&self) -> u64 {
+        *self.ran.0.lock().unwrap()
+    }
+
+    /// Sleep until `until`, or until the window loop runs a task of the page after `seen` (a value of `work_count`). The loop runs a
+    /// reply as soon as it is in (`Page::wake_on_done`), so a driver that waits here sees it at once: `Page::tick` then asks for a
+    /// call only each second.
+    pub fn wait_work(&self, seen: u64, until: Instant) {
+        let mut n = self.ran.0.lock().unwrap();
+        while *n == seen {
+            let left = until.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                return;
+            }
+            n = self.ran.1.wait_timeout(n, left).unwrap().0;
         }
     }
 

@@ -74,6 +74,11 @@ pub trait App {
         let _ = ctl;
         None
     }
+
+    /// The loop ends a round and goes to sleep. `busy` is the time since it woke: the events, `tick` and the draw of the round.
+    fn round(&mut self, busy: std::time::Duration) {
+        let _ = busy;
+    }
 }
 
 /// What a window needs to open.

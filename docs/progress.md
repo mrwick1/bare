@@ -2925,3 +2925,60 @@ Checks (archMachine):
 A scan of all output files found neither the email nor the password. The staging documents are small, so their parse was already short. The driver does not record the time of each tick, so the longest tick of the journey was not measured.
 
 Not tested: the window (`--window`); arjun-e16; the longest tick of the staging journey; a document with a `<base href>` after its scripts (their early downloads are not used); a single token larger than a slice (a 4 MB inline script is fed in one step); HiDPI.
+
+## Tick times of the staging journey, headless and in a window
+
+The driver did not record tick times, and most reports of 2026-11-08 left `--window` untested. `bare-drive` now gives `ticks`, `tick_max_ms`, `ticks_over_16` and `ticks_over_50` for each step and for the whole run. Headless, a tick is one call of the driver on the page (a try and `Page::tick`, or an `open`). In a window, a tick is one round of the window loop: the events, the driver job, `Page::tick` and the draw. The cost is one `Instant` for each round (`App::round` in `crates/window`); headless, the driver reuses the `Instant` it already took.
+
+Changes:
+- `crates/window`: `App::round(busy)`, called at the end of each round of the loop.
+- `crates/bare/src/control.rs`: `Ticks`. The window host runs one driver job in each round, so that each job and its draw are one tick. Before, a job sent right after a reply ran in the same round, and the ticks of a step went to the next step.
+- Window-only fix: a window step that waited for a reply slept up to 1 s. The page of a window asks for `Page::tick` only each second (its loop is woken when a job ends), and the driver slept until that time. The driver now also wakes when the window loop runs a task of the page (`Remote::wait_work`). Staging, `expect url~"/login"` after the first `open`: 1,000 ms before, 98 ms after.
+- CPU per step in a window is now the CPU of the window thread (before: the driver thread, which does almost nothing).
+
+Test (written first): `crates/drive/tests/window_wait.rs`. A page fetches a reply of 150 ms after `load`; the step that waits for it must take under 600 ms, headless and in `cage`. On the old sleep the window step took 1,001 ms and failed; now both pass. It also checks that each step has ticks, that the longest tick is not longer than its step, and that the totals hold all the steps.
+
+Live staging, read only, `drive-journey.steps` with the masked runner, archMachine, 5 runs in each mode (interleaved), all passed. The window ran in `cage` with the headless wlroots backend. Times are the sum of the steps of each group, in ms. The tick columns give the median and the maximum of the longest tick, and the counts over 16 ms and over 50 ms summed over the 5 runs.
+
+Headless. Peak PSS: 75.1 to 76.4 MiB.
+
+| Step | ms, median (min-max) | CPU ms, median | longest tick ms, median (max) | ticks > 16 ms | ticks > 50 ms |
+| --- | --- | --- | --- | --- | --- |
+| 1 open | 771 (725-856) | 111 | 649 (709) | 10 | 5 |
+| 2-3 login, overview | 1048 (897-1385) | 526 | 174 (246) | 31 | 17 |
+| 4 agents | 572 (516-899) | 387 | 77 (159) | 33 | 13 |
+| 5 search | 816 (607-887) | 362 | 87 (223) | 31 | 14 |
+| 6 reload | 654 (628-940) | 289 | 105 (149) | 40 | 12 |
+| 7 sign out | 309 (289-513) | 226 | 105 (200) | 15 | 11 |
+| 8 agents, no session | 158 (153-252) | 66 | 82 (140) | 10 | 5 |
+| total | 4388 (4061-5358) | 2086 | 649 (709) | 170 | 77 |
+
+Window. Peak PSS: 83.2 to 84.2 MiB (the window buffers; `cage` is not counted).
+
+| Step | ms, median (min-max) | CPU ms, median | longest tick ms, median (max) | ticks > 16 ms | ticks > 50 ms |
+| --- | --- | --- | --- | --- | --- |
+| 1 open | 772 (705-824) | 119 | 657 (706) | 10 | 5 |
+| 2-3 login, overview | 1102 (791-1606) | 467 | 139 (295) | 35 | 21 |
+| 4 agents | 566 (561-873) | 447 | 79 (164) | 53 | 14 |
+| 5 search | 656 (616-1147) | 416 | 100 (250) | 38 | 16 |
+| 6 reload | 590 (554-1046) | 352 | 107 (186) | 38 | 18 |
+| 7 sign out | 298 (290-535) | 228 | 96 (199) | 16 | 11 |
+| 8 agents, no session | 151 (147-240) | 74 | 89 (142) | 9 | 5 |
+| total | 4116 (3730-5779) | 2095 | 657 (706) | 199 | 90 |
+
+The ticks over 50 ms, by step (the same steps in both modes):
+- `open ${BASE}/`: one tick of 590 to 710 ms in every run. It is the worst tick.
+- The two `type` steps of the login (100 to 175 ms) and `type` of the search with Enter (80 to 250 ms). The driver types the whole text in one call, so each key event and its listeners run in one tick. A person types one key in each round.
+- `click` of the account menu (65 to 200 ms) and of sign out (65 to 145 ms), `reload` (95 to 185 ms) and `open ${BASE}/agents` (78 to 143 ms).
+- The waits after a navigation (`expect url~"/agents"`, the `expect js` of the search, 50 to 295 ms): turns that run the scripts of the next document.
+
+The worst tick, split. `perf record` (4 kHz, 8 runs in one process, `--repeat 8`) of a step file with only `open ${BASE}/` and `expect url~"/login"`: the tick took 593 ms with 56 ms of CPU on the page thread. So about 90% of the tick is a wait: `Session::navigate` and `run` wait for `load` inside the call (`wait_load`, a 1 ms sleep while only downloads are left). The page loads 39 files over HTTP/1.1 (the server offers no h2) with 6 connections and about 40 ms for each request. The CPU of the page thread in the run: JS run 54%, JS link 6%, JS parse 5%, CSS 3%, TLS 2%, malloc and free 2%, unresolved 16%.
+
+Not fixed: this cause is not PR-sized. `open`, `goto` and `reload` would need to return before `load` and let the ticks load the document, as a link click already does. That touches `Session::run` and `navigate`, `Page` without a document, the first frame of `Remote::open`, and every caller that expects a loaded page. Headless, nothing waits on this tick. In a window, the first `open` runs before the window exists; a later `open` or `reload` blocks the window for 80 to 190 ms.
+
+Checks (archMachine):
+- `cargo test --release --workspace --no-fail-fast` on `be29f39`: 56 test binaries, 2,980 passed, 0 failed.
+- `tools/js/cost_matrix.sh`, base origin/main `3313480` from `base-build`: 805 rows in 50 s. Mean change: glibc -0.001%, jemalloc -0.013% (2 rows measured). Over under one allocator: 2 (`form_load gates 1` and `10`, glibc +0.65% and +0.69%, jemalloc -0.01%). Over under both: 0. Failed: 0.
+- A scan of all 86 output files of the runs found neither the email nor the password. The driver captured `overview` and `search` only after its check that no secret is on the page.
+
+Not tested: arjun-e16; a real Hyprland window (only `cage` headless); HiDPI; a page with a long tick from a timer alone in a window (none on staging); `keycost.sh` (no change on the typing path).

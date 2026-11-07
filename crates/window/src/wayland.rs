@@ -193,6 +193,7 @@ impl Window {
     pub fn run(mut self, app: &mut dyn App) -> Result<Stats, Error> {
         let qh = self.queue.handle();
         let fail = |e: WaylandError| Error(format!("wayland: {e}"));
+        let mut woke = Instant::now();
         while !self.state.exit {
             self.queue.dispatch_pending(&mut self.state).map_err(|e| Error(format!("wayland: {e}")))?;
             self.state.repeat_due();
@@ -223,12 +224,15 @@ impl Window {
             ];
             // Sleep until an event, the next key repeat when a key is held, or the next work of the app.
             let now = Instant::now();
+            app.round(now - woke);
             let wait = match (self.state.repeat.wait(now), next.map(|t| t.saturating_duration_since(now))) {
                 (Some(a), Some(b)) => Some(a.min(b)),
                 (a, b) => a.or(b),
             };
             let timeout = wait.map(|d| Timespec { tv_sec: d.as_secs() as _, tv_nsec: d.subsec_nanos() as _ });
-            match poll(&mut fds, timeout.as_ref()) {
+            let polled = poll(&mut fds, timeout.as_ref());
+            woke = Instant::now();
+            match polled {
                 Ok(_) => {}
                 Err(rustix::io::Errno::INTR) => continue,
                 Err(e) => return Err(Error(format!("poll: {e}"))),
