@@ -205,7 +205,7 @@ Follow-ups of [Parallel downloads](#parallel-downloads). The numbers are in [res
 - A custom capability in the combinators uses the pair id `u64::MAX`. The "already resolved" flag then lives in the user functions, not in `done_pairs`.
 - `species_ctor` replaces the old gate for `then` and `finally`. The species constructor of an array, a typed array, an `ArrayBuffer` and a `Promise` is read once, with the V8 messages. A species that is the intrinsic constructor takes the old fast path.
 - The brand of an error object is not stored. `Object.prototype.toString` tests an own `stack` and `Error.prototype` in the chain. Reason: no extra field for each error, and the tag matches V8 for the cases of the corpus. It is a heuristic, listed in progress.md.
-- Not done: custom elements (no `customElements` yet); `Request`, `Response`, `Headers` and `URL` (each constructor must read `new.target`, one change for each); `extends Function` and `extends Symbol`. No target page needs them yet.
+- Not done: `Request`, `Response`, `Headers` and `URL` (each constructor must read `new.target`, one change for each); `extends Function` and `extends Symbol`. No target page needs them yet.
 - Cost rule for this change: no `instructions:u` row worse than +0.5% against c66c8a5. The worst row is +0.41%. See [progress.md](progress.md#class-x-extends-built-in).
 
 ## Frame slots
@@ -339,6 +339,13 @@ The tree builder has the "in template" insertion mode. Chrome 155 differs from t
 - In a table mode inside a template, the standard ignores a `<form>` start tag. Chrome inserts an empty `form` and does not set the form element pointer.
 
 To follow the standard, add the five names to the first arm of `Builder::in_template` and ignore the form tag in the arm for `form` in `in_body`.
+
+## Custom elements run reactions at the end of each host call
+
+- The native tree watcher cannot run script, so it only queues reactions. `Host::call` runs the queue when the call ends, as `[CEReactions]` does. Reason: one place for all DOM calls, and no change to each DOM function.
+- The state of an element is a number in the native document, not a flag on the wrapper. Reason: the wrapper can be collected, and the state must survive that.
+- Nothing runs before the first `define`: lazy globals, one `Cell` read per host call, no watcher work. Reason: the cost rule (no row over +0.5%). Result: worst row +0.542% on a row that is noise, all others under +0.45%. See [progress.md](progress.md#custom-elements).
+- The page is parsed before its scripts run. A definition upgrades the elements that exist, with a parse-progress emulation for the elements after a blocking script. Reason: an incremental parser is a larger change and no target page needs it. The constructor of a parser-created element sees its children (Chrome: it does not).
 
 ## Open questions
 

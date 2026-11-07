@@ -17,14 +17,14 @@
 //!
 //! Valid shadow host names (HTML Standard): `article aside blockquote body div footer h1-h6 header main nav p section span`, and a valid custom
 //! element name (lowercase start, a hyphen, only `PCENChar`, not one of the eight reserved names). Names are exact: `DIV` made with
-//! `createElementNS` is not a host. There is no custom element registry, so no definition can disable shadow roots.
+//! `createElementNS` is not a host. A definition can disable shadow roots (`static disabledFeatures`); this is not built.
 //!
 //! Gates (`Error::Unsupported`, before anything changes): `clonable: true`, `serializable: true`, `delegatesFocus: true`,
 //! `slotAssignment: "manual"`. Their getters on `ShadowRoot` are fixed at `false`, `false`, `false` and `"named"`. Inserting a root as a node
 //! (`appendChild(root)` and so on) is `Unsupported` after the other insertion checks (the standard moves the children of a fragment).
 //!
 //! What a shadow tree is NOT here (none of this is faked): no slotting (`slot` elements and `assignedNodes` do nothing and are absent),
-//! no custom elements, no `adoptedStyleSheets`, no `innerHTML`, `getHTML`, `activeElement` or `styleSheets` on `ShadowRoot`, no declarative
+//! no `adoptedStyleSheets`, no `innerHTML`, `getHTML`, `activeElement` or `styleSheets` on `ShadowRoot`, no declarative
 //! shadow DOM, no style, layout or paint for a shadow tree (the cascade and layout start at the document and never reach it; `getComputedStyle` of
 //! a connected shadow element is Unsupported), no `:host`, `:host()` or `::slotted()` selectors (they are a `SyntaxError`),
 //! no focus in a shadow tree (its elements are not focusable areas) and no script run from a shadow tree (the loader prepares only scripts
@@ -43,16 +43,7 @@ use bare_js::value::Value;
 
 type V = R<Value>;
 
-/// `PCENChar` of the HTML Standard (valid custom element name), after the first character.
-fn pcen(c: char) -> bool {
-    matches!(c, '-' | '.' | '0'..='9' | '_' | 'a'..='z' | '\u{b7}' | '\u{c0}'..='\u{d6}' | '\u{d8}'..='\u{f6}' | '\u{f8}'..='\u{37d}' | '\u{37f}'..='\u{1fff}' | '\u{200c}'..='\u{200d}' | '\u{203f}'..='\u{2040}' | '\u{2070}'..='\u{218f}' | '\u{2c00}'..='\u{2fef}' | '\u{3001}'..='\u{d7ff}' | '\u{f900}'..='\u{fdcf}' | '\u{fdf0}'..='\u{fffd}' | '\u{10000}'..='\u{effff}')
-}
-
-/// HTML Standard "valid custom element name".
-pub(crate) fn valid_custom_name(name: &str) -> bool {
-    const RESERVED: [&str; 8] = ["annotation-xml", "color-profile", "font-face", "font-face-src", "font-face-uri", "font-face-format", "font-face-name", "missing-glyph"];
-    name.starts_with(|c: char| c.is_ascii_lowercase()) && name.contains('-') && name.chars().all(pcen) && !RESERVED.contains(&name)
-}
+pub(crate) use bare_html::dom::valid_custom_name;
 
 /// DOM Standard "attach a shadow root", steps 1 and 2: an HTML element with a valid shadow host name.
 fn valid_host(doc: &Document, host: NodeId) -> bool {

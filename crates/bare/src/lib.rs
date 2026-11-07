@@ -128,6 +128,9 @@ mod browser_range;
 mod browser_chardata;
 mod browser_lazy;
 mod browser_mutation;
+mod browser_custom;
+#[cfg(test)]
+mod browser_custom_tests;
 #[cfg(test)]
 mod browser_topic_tests;
 #[cfg(test)]

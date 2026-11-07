@@ -383,6 +383,9 @@ fn replace(d: &Dom, it: &mut Interp<'_>, html: &str, n: NodeId, in_frag: bool, p
 
     // Commit. Nothing below runs page code or can fail.
     let group = if all && tpl_ctx { d.doc.borrow().template_content(n) } else { all.then_some(n) };
+    // Chrome upgrades the elements of the new nodes before it removes the old ones: the mark says where they go in the queue of reactions.
+    let ce = d.ce.on.get() && scripting;
+    let (mark, mut made) = (if ce { d.ce_mark() } else { 0 }, Vec::new());
     d.mo_group(group, || {
     let mut doc = d.doc.borrow_mut();
     let n = if all && tpl_ctx { doc.make_template_content(n) } else { n };
@@ -411,6 +414,9 @@ fn replace(d: &Dom, it: &mut Interp<'_>, html: &str, n: NodeId, in_frag: bool, p
             (cur, depth) = (c, cd);
             let t = doc.import_node(&frag.doc, c).expect("a node of the fragment");
             doc.move_to(t, path[cd - 1], if cd == 1 { first } else { None });
+            if ce && src == frag.root && matches!(*doc.data(t), NodeData::Element { .. }) {
+                made.push(t);
+            }
             path.truncate(cd);
             path.push(t);
             if doc.is_html(t, "script") {
@@ -422,6 +428,9 @@ fn replace(d: &Dom, it: &mut Interp<'_>, html: &str, n: NodeId, in_frag: bool, p
         }
         let Some(j) = jobs.pop() else { break };
         (src, dst, first) = (j.0, j.1, None);
+    }
+    if ce {
+        d.fragment_upgrades(&doc, mark, &made);
     }
     // As in Chrome, the text before and after the new nodes joins them. The DOM Parsing standard does not say it.
     if this.is_some() {

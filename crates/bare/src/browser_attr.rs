@@ -35,7 +35,7 @@
 //! - `setAttributeNode` of an `Attr` that has the namespace and local name of an existing attribute but another prefix is
 //!   `Unsupported`: the native list would move the attribute to the end instead of replacing it in place.
 //! - The other `Node` methods on an `Attr` (`cloneNode`, `appendChild`, events) throw `TypeError: Illegal
-//!   invocation`. `new Attr()` and `new NamedNodeMap()` are illegal constructors. There is no `toggleAttribute`.
+//!   invocation`. `new Attr()` and `new NamedNodeMap()` are illegal constructors. `toggleAttribute` is in `browser_custom.rs`.
 //! - A JS string with a lone surrogate cannot be stored: `Unsupported` (the shared rule of the DOM host).
 //!
 //! Caps: `Attr` and map objects count with `max_wrappers` (checked before anything is made, `dom-wrappers`); values and new

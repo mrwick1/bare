@@ -66,8 +66,8 @@ fn other_elements_and_foreign_namespaces_are_not_iframes() {
 fn the_constructor_is_illegal_and_methods_are_branded() {
     big(|| {
         let mut b = browser(PAGE);
-        assert_eq!(js(&mut b, "new HTMLIFrameElement()"), "throw:TypeError:HTMLIFrameElement is not a constructor");
-        assert_eq!(js(&mut b, "HTMLIFrameElement()"), "throw:TypeError:Illegal constructor");
+        assert_eq!(js(&mut b, "new HTMLIFrameElement()"), "throw:TypeError:Failed to construct 'HTMLIFrameElement': Illegal constructor");
+        assert_eq!(js(&mut b, "HTMLIFrameElement()"), "throw:TypeError:Failed to construct 'HTMLIFrameElement': Please use the 'new' operator, this DOM object constructor cannot be called as a function.");
         // a borrowed HTMLElement method works on an iframe and still rejects an SVG receiver
         js(&mut b, &format!("var c = document.createElement('iframe'), s = document.createElementNS('{SVG}', 'iframe'); var focus = HTMLElement.prototype.focus;"));
         assert_eq!(js(&mut b, "focus.call(c); 'ok'"), "ok");

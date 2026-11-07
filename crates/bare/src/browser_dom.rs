@@ -45,7 +45,7 @@ pub(crate) fn next_in(doc: &Document, root: NodeId, cur: NodeId, depth: usize) -
 
 /// Like `next_in`, but a host's shadow tree is walked too: its root comes right after the host (one level down), then the light children of the host.
 /// This is for bounds only (the depth of a subtree): a query or `textContent` must use `next_in`, which never enters a shadow tree.
-fn next_composed(doc: &Document, root: NodeId, cur: NodeId, depth: usize) -> Option<(NodeId, usize)> {
+pub(crate) fn next_composed(doc: &Document, root: NodeId, cur: NodeId, depth: usize) -> Option<(NodeId, usize)> {
     if let Some(r) = doc.shadow_root(cur) {
         return Some((r, depth + 1));
     }
@@ -1056,6 +1056,12 @@ fn replace_children(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V
     let r = d.mo_group(Some(parent), || {
         let mut doc = d.doc.borrow_mut();
         d.iter_told_all(&doc, parent);
+        // With more than one node the standard first puts them in a fragment, which takes each out of its parent, in argument order.
+        if nodes.len() > 1 {
+            for &n in &nodes {
+                doc.detach(n);
+            }
+        }
         while let Some(c) = doc.children(parent).next() {
             it.charge(1)?;
             doc.detach(c);
@@ -1243,12 +1249,21 @@ pub(crate) fn clone_node(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value])
     let root_clone = {
         let mut doc = d.doc.borrow_mut();
         let mut root_clone = None;
+        // The clone of an element that has a definition is upgraded, unless the source is in the inert tree of a template.
+        let ce = d.ce.on.get() && !doc.in_template_content(n);
+        let mut elements = Vec::new();
         let mut stack: Vec<(NodeId, Option<NodeId>)> = vec![(n, None)];
         let mut st = d.st.borrow_mut();
         while let Some((src, new_parent)) = stack.pop() {
             it.charge(1)?;
             let c = match *doc.data(src) {
-                NodeData::Element { .. } => doc.clone_element(src),
+                NodeData::Element { .. } => {
+                    let c = doc.clone_element(src);
+                    if ce {
+                        elements.push((src, c));
+                    }
+                    c
+                }
                 NodeData::Text(sp) => {
                     let t = doc.text(sp).to_string();
                     doc.create_text(&t)
@@ -1285,6 +1300,7 @@ pub(crate) fn clone_node(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value])
                 }
             }
         }
+        d.clone_upgrades(&doc, &elements);
         root_clone.expect("one clone")
     };
     d.wrap(it, root_clone)
@@ -1417,6 +1433,42 @@ pub(crate) fn remove_attribute(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[V
     Ok(Value::Undefined)
 }
 
+/// `Element.toggleAttribute(name, force)`.
+pub(crate) fn toggle_attribute(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
+    let n = d.el(it, this)?;
+    let name = d.string_arg(it, arg(a, 0))?;
+    let force = match arg(a, 1) {
+        Value::Undefined => None,
+        v => Some(it.to_js_bool(v)?),
+    };
+    let (name, existing) = {
+        let doc = d.doc.borrow();
+        let name = crate::browser_namespace::attr_key(&doc, n, &name);
+        let existing = doc.find_attr_qname(n, &name);
+        (name, existing)
+    };
+    if !valid_name(&name) {
+        return Err(d.dom_err(it, "InvalidCharacterError", &format!("'{name}' is not a valid attribute name.")));
+    }
+    match existing {
+        Some(_) if force == Some(true) => Ok(Value::Bool(true)),
+        Some(at) => {
+            let mut doc = d.doc.borrow_mut();
+            it.charge(doc.attr_count(n) as u64 + 1)?;
+            doc.remove_attr_atom(n, at);
+            Ok(Value::Bool(false))
+        }
+        None if force == Some(false) => Ok(Value::Bool(false)),
+        None => {
+            attr_set(d, it, n, &name, "")?;
+            if name == "src" {
+                d.script_src_changed(it, n)?;
+            }
+            Ok(Value::Bool(true))
+        }
+    }
+}
+
 pub(crate) fn get_attribute_names(d: &Dom, it: &mut Interp<'_>, this: Value, _: &[Value]) -> V {
     let n = d.el(it, this)?;
     let names: Vec<String> = {
@@ -1507,6 +1559,9 @@ pub(crate) fn make_element(d: &Dom, it: &mut Interp<'_>, name: &str) -> V {
 pub(crate) fn create_element(d: &Dom, it: &mut Interp<'_>, this: Value, a: &[Value]) -> V {
     d.nd(it, this)?;
     let name = new_name(d, it, arg(a, 0))?;
+    if d.ce.on.get() || a.len() > 1 {
+        return crate::browser_custom::create(d, it, &name, arg(a, 1));
+    }
     make_element(d, it, &name)
 }
 

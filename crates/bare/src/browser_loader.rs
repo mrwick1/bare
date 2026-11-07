@@ -69,7 +69,7 @@
 //! Not here: `window.onload`, `DOMContentLoaded` for scripts that were added late, `defer` on dynamic scripts,
 //! `integrity`, `crossorigin`, `nonce`, CSP, `<noscript>`, a service worker.
 
-use crate::browser::{Browser, Dom, IdHash, H, Listener, R, Target as EvTarget, illegal_constructor, unsupported};
+use crate::browser::{Browser, Dom, IdHash, H, Listener, R, Target as EvTarget, unsupported};
 use crate::browser_dom as nd;
 use crate::browser_fetch::{FetchConfig, FetchLimits};
 use crate::browser_navigation::NavigationRequest;
@@ -630,7 +630,7 @@ pub(crate) fn install(d: &Dom, it: &mut Interp<'_>) -> R<()> {
     let document = d.p().document;
     acc(it, document, "readyState", doc_ready_state, None)?;
     acc(it, document, "currentScript", doc_current_script, None)?;
-    let f = d.add_fn(it, illegal_constructor, "HTMLScriptElement", 0, false)?;
+    let f = crate::browser_custom::interface_ctor(d, it, "HTMLScriptElement", false)?;
     let (kp, kc) = (d.key(it, "prototype")?, d.key(it, "constructor")?);
     it.define_data(f, kp, Value::Object(proto), false, false, false)?;
     it.define_data(proto, kc, Value::Object(f), true, false, true)?;
@@ -1073,6 +1073,14 @@ impl Run<'_> {
         self.after_js()
     }
 
+    /// The parser reaches the script `upto` (`None`: its end): upgrade the custom elements that wait for it (`Dom::ce_release`).
+    fn release_elements(&mut self, upto: Option<NodeId>) -> Flow {
+        match self.dom.ce_release(&mut self.b.it, upto) {
+            Ok(()) => Ok(()),
+            Err(e) => Err(self.fatal(e, "custom element upgrade")),
+        }
+    }
+
     /// Run one script element that was in the page when it was parsed.
     fn run_parsed(&mut self, p: Parsed) -> Flow {
         self.budget()?;
@@ -1254,8 +1262,13 @@ impl Run<'_> {
         self.feed_styles()?;
         let items = self.items.clone();
         for p in items.iter().filter(|p| p.timing == Timing::Blocking) {
+            // The page is pre-parsed. A custom element after the script that defined it is upgraded when the parser would reach it.
+            self.release_elements(Some(p.node))?;
+            self.dom.ce.parsing.set(Some(p.node));
             self.run_parsed(*p)?;
         }
+        self.dom.ce.parsing.set(None);
+        self.release_elements(None)?;
         self.set_ready(1)?;
         for p in items.iter().filter(|p| p.timing == Timing::Defer) {
             self.run_parsed(*p)?;

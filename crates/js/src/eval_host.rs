@@ -132,6 +132,32 @@ impl<'p> Interp<'p> {
         }
     }
 
+    /// The `new.target` of the host constructor that is running, when it is not the callee itself (a `class extends` or
+    /// `Reflect.construct` gave a different one). `None` for a plain `new F` and for a plain call.
+    pub fn host_new_target(&self) -> Option<ObjId> {
+        self.host_nt
+    }
+
+    /// `Construct(f, args, nt)` for the host (`nt` `None`: `f`). A value that is not a constructor is a `TypeError`.
+    pub fn host_construct(&mut self, f: Value, args: &[Value], nt: Option<ObjId>) -> Result<Value, Error> {
+        if self.depth == 0 {
+            self.begin();
+        }
+        let Value::Object(o) = f else { return Err(self.type_err("value is not a constructor")) };
+        if !self.is_constructor_spending(o)? {
+            return Err(self.type_err("value is not a constructor"));
+        }
+        self.construct_nt(o, args, nt.unwrap_or(o), ExprId::from_index(0))
+    }
+
+    /// Is `v` a constructor (a class, a plain function, a bound or host constructor)?
+    pub fn is_constructor_value(&mut self, v: Value) -> Result<bool, Error> {
+        match v {
+            Value::Object(o) => self.is_constructor_spending(o),
+            _ => Ok(false),
+        }
+    }
+
     /// Charge `n` steps of work (a traversal the host does for JavaScript). `Limit(Steps)` when the budget ends.
     /// Outside a call it uses the budget of the next `run`, so call it only while a host method runs.
     pub fn charge(&mut self, n: u64) -> Result<(), Error> {
