@@ -69,7 +69,7 @@
 //! Not here: `window.onload`, `DOMContentLoaded` for scripts that were added late, `defer` on dynamic scripts,
 //! `integrity`, `crossorigin`, `nonce`, CSP, `<noscript>`, a service worker.
 
-use crate::browser::{Browser, Dom, H, Listener, R, Target as EvTarget, illegal_constructor, unsupported};
+use crate::browser::{Browser, Dom, IdHash, H, Listener, R, Target as EvTarget, illegal_constructor, unsupported};
 use crate::browser_dom as nd;
 use crate::browser_fetch::{FetchConfig, FetchLimits};
 use crate::browser_navigation::NavigationRequest;
@@ -90,6 +90,8 @@ mod preload;
 mod preload_tests;
 #[cfg(test)]
 mod parallel_tests;
+#[cfg(test)]
+mod close_tests;
 mod sheets;
 #[cfg(test)]
 mod sheets_tests;
@@ -814,6 +816,9 @@ struct Net {
     client: Client,
     /// By the kind and the URL of the target. A download that finished waits here, with its text, until it is taken.
     started: HashMap<String, Task<Result<resources::Resource, LoadError>>>,
+    /// Targets that the page thread fetched itself. `prefetch` does not start them again.
+    /// By `Net::tag`. A clash only skips one early start.
+    direct: HashSet<u64, std::hash::BuildHasherDefault<IdHash>>,
 }
 
 /// Downloads that are started and not taken at once: the connections that a server gets (Chrome opens 6 for HTTP/1.1). It also bounds
@@ -822,7 +827,18 @@ const WINDOW: usize = MAX_WORKERS;
 
 impl Net {
     fn new(client: Client) -> Net {
-        Net { client, started: HashMap::new() }
+        Net { client, started: HashMap::new(), direct: HashSet::default() }
+    }
+
+    fn tag(expect: Expect, url: &Url) -> u64 {
+        // A multiply hash over the path, 8 bytes at a time. The host is not in it: it costs more than it tells, and a clash only skips one early start.
+        let mut h = (expect as u64) << 32 ^ u64::from(url.port) ^ url.host.len() as u64;
+        for c in url.path.as_bytes().chunks(8) {
+            let mut w = [0u8; 8];
+            w[..c.len()].copy_from_slice(c);
+            h = (h.rotate_left(5) ^ u64::from_le_bytes(w)).wrapping_mul(0x517c_c1b7_2722_0a95);
+        }
+        h
     }
 
     fn key(expect: Expect, url: &Url) -> String {
@@ -842,6 +858,7 @@ impl Net {
 
     /// The result for `target`: the download that was started, or a new one that this thread waits for.
     fn fetch(&mut self, target: &resources::Target, lim: &Limits, deadline: Instant, retained: usize) -> Result<resources::Resource, LoadError> {
+        self.direct.insert(Net::tag(target.expect, &target.url));
         if self.started.is_empty() {
             return resources::fetch(&mut self.client, target, lim, deadline, retained);
         }
@@ -1182,7 +1199,7 @@ impl Run<'_> {
         let mut todo: Vec<(Expect, &Url)> = Vec::new();
         while cursor < self.disc.targets.len() && todo.len() < room {
             let t = &self.disc.targets[cursor];
-            if allowed(self.https_only, &t.url) {
+            if allowed(self.https_only, &t.url) && !self.net.direct.contains(&Net::tag(t.expect, &t.url)) {
                 todo.push((t.expect, &t.url));
             }
             cursor += 1;
